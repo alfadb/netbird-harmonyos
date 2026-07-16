@@ -15,6 +15,7 @@
 ## 文档
 
 - [文档索引](docs/README.md)
+- [双目标实施路线图](docs/roadmap.md)
 - [开发环境与 HarmonyOS Linux Emulator](docs/development-environment.md)
 - [HarmonyOS 工具链运行手册](docs/toolchain-runbook.md)
 - [HarmonyOS CLI 登录、工具链与依赖下载](docs/toolchain-bootstrap.md)

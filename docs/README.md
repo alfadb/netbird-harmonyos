@@ -7,6 +7,10 @@
 
 ## 文档索引
 
+- [双目标实施路线图](roadmap.md)
+  - 从当前研究阶段到两个具名目标发布及持续运维的证据门
+  - `R0` 至 `R10` 的目标、验证、退出标准、依赖和停止条件
+  - 版本门、阶段依赖、受控并行工作和完整完成定义
 - [开发环境与 Linux Emulator](development-environment.md)
   - 当前 Pod 的操作系统、持久化边界和已安装工具链
   - HarmonyOS 官方 Linux 支持边界及 2026-07-16 Emulator 启动实测
