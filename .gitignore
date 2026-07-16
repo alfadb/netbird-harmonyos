@@ -1,0 +1,3 @@
+# pi-astack runtime state (audit logs, checkpoints, search metrics)
+.pi-astack/
+.abrain-project.json
