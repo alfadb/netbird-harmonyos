@@ -12,6 +12,14 @@
 
 项目处于早期开发阶段，接口与实现可能发生较大变化。现阶段不应将其用于生产环境。
 
+## 文档
+
+- [文档索引](docs/README.md)
+- [开发环境与 HarmonyOS Linux Emulator](docs/development-environment.md)
+- [HarmonyOS 工具链运行手册](docs/toolchain-runbook.md)
+- [HarmonyOS CLI 登录、工具链与依赖下载](docs/toolchain-bootstrap.md)
+- [OpenHarmony/HarmonyOS 平台与发行策略](docs/platform-strategy.md)
+
 ## 上游资源
 
 - [NetBird 官网](https://netbird.io/)
