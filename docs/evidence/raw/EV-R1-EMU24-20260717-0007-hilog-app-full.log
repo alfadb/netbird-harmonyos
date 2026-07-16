@@ -1,0 +1,57 @@
+evidence_id=EV-R1-EMU24-20260717-0007
+capture_scope=complete app buffer after hilog -r and the measured aa test; no tag, PID, or bundle filter
+CST 2026-07-17 03:07:29.941  3037  3037 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 03:07:29.941  3037  3037 I A02900/R1Api24ProbeTest: TestRunner onPrepare
+CST 2026-07-17 03:07:29.953  3037  3037 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 03:07:29.953  3037  3037 I A02900/R1Api24ProbeTest: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+CST 2026-07-17 03:07:29.954  3037  3037 I A02900/R1Api24Probe: E1 TLS probe stage=start detail=dlopen libtlsprobe.so and resolve GetTLS
+CST 2026-07-17 03:07:29.954  3037  3037 E A02900/R1Api24Probe: E1 TLS probe stage=dlopen detail=dlopen libtlsprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so; errno=2 (No such file or directory)
+CST 2026-07-17 03:07:29.954  3037  3037 I A02900/R1Api24ProbeTest: E1_RESULT|functional=BLOCKED|ok=false|expectedBlock=true|stage=dlopen|tlsValue=-1|loaderErrno=2|loaderError=Error relocating /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so|detail=dlopen libtlsprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libtlsprobe.so; errno=2 (No such file or directory)
+CST 2026-07-17 03:07:29.954  3037  3037 I A02900/R1Api24Probe: E4 DT_NEEDED probe stage=start detail=dlopen libneededprobe.so with direct uncalled Hello and RuntimeProbe references
+CST 2026-07-17 03:07:29.955  3037  3037 E A02900/R1Api24Probe: E4 DT_NEEDED probe stage=dlopen detail=dlopen libneededprobe.so dependency chain failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=22 (Invalid argument)
+CST 2026-07-17 03:07:29.955  3037  3037 I A02900/R1Api24ProbeTest: E4_RESULT|functional=BLOCKED|ok=false|expectedBlock=true|stage=dlopen|dependencyChainLoaded=false|dependencyChain=libneededprobe.so -> libgoprobe.so|helloCalled=false|runtimeProbeCalled=false|loaderErrno=22|loaderError=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so|detail=dlopen libneededprobe.so dependency chain failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=22 (Invalid argument)
+CST 2026-07-17 03:07:29.955  3037  3037 I A02900/R1Api24ProbeTest: Experiment assertions passed; E1 functional=BLOCKED; E4 functional=BLOCKED
+CST 2026-07-17 03:07:29.972  2146  2146 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020062, bundleName: cn.alfadb.netbird.r1probe, pid: 3037
+CST 2026-07-17 03:07:30.071  2781  2781 I A00000/moduleframework: save module cache:userInfo
+CST 2026-07-17 03:07:30.253  2146  2146 W A01b06/KG: CoverViewController: cover_enabled register success
+CST 2026-07-17 03:07:30.551  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:30.558  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:31.558  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:31.565  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:32.565  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:32.581  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:33.581  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:33.586  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:34.591  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:34.642  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:35.643  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:35.650  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:36.678  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:36.687  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:37.688  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:37.697  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:37.821  2146  2146 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020010, bundleName: com.huawei.hmsapp.appgallery, pid: 2781
+CST 2026-07-17 03:07:38.696  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:38.705  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:39.706  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:39.730  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:40.745  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:40.754  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:41.754  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:41.763  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:42.764  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:42.772  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:43.772  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:43.782  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:44.796  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:44.803  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:45.804  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:45.812  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:46.812  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:46.821  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:47.822  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:47.830  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:48.830  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:48.839  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-07-17 03:07:49.839  2146  2146 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-07-17 03:07:49.859  2146  2146 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.

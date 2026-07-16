@@ -1,0 +1,15 @@
+{
+  module: {
+    name: 'entry_test',
+    type: 'feature',
+    deviceTypes: [
+      'phone'
+    ],
+    deliveryWithInstall: true,
+    installationFree: false,
+    testRunner: {
+      name: 'OpenHarmonyTestRunner',
+      srcPath: './ets/testrunner/OpenHarmonyTestRunner.ets'
+    }
+  }
+}

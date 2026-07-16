@@ -1,12 +1,24 @@
 # 项目文档
 
-最后核验：2026-07-16
+最后核验：2026-07-17
 
-本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。
-项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
+本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
 ## 文档索引
 
+- [R0 任务章程](r0-charter.md)
+  - R0 唯一决策源、当前“进行中/未退出”状态和研究期执行例外
+  - 固定技术基线、功能范围、补丁预算、初始 SLO、责任矩阵和退出 checklist
+- [证据与脱敏 Schema](evidence-schema.md)
+  - 信息状态、证据 ID、必填字段、状态枚举、脱敏规则和记录模板
+  - 支持矩阵、动态调整、补丁记录和证据保留期
+- [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
+  - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
+  - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
+  - x86_64 Go 1.25.12 c-shared同一性打包、0006直接loader失败、0007普通TLS与`DT_NEEDED`传递late-load阻断、未执行runtime/netpoll及T0待讨论边界
+- [安全与合规基线](security-and-compliance.md)
+  - 初始威胁模型、资产、信任边界、攻击者及待验证缓解措施
+  - NetBird、服务端、工具链、依赖、商标和 Huawei 工具的初始许可证边界
 - [双目标实施路线图](roadmap.md)
   - 从当前研究阶段到两个具名目标发布及持续运维的证据门
   - `R0` 至 `R10` 的目标、验证、退出标准、依赖和停止条件
@@ -42,6 +54,10 @@
 
 当前文档已经覆盖：
 
+- R0 唯一决策源、当前未退出状态、研究期执行例外、固定基线、范围、补丁预算、初始 SLO 和角色责任。
+- 证据 ID、必填字段、状态枚举、脱敏规则、支持矩阵、动态调整、补丁记录和保留期。
+- R1固定NetBird/Go/SDK预探针、独立审查修正、unsigned API 24应用/测试HAP、普通Node-API双ABI构建、可见Emulator、最小`aa test`和x86_64 Go c-shared `STATIC_TLS` loader负面运行证据。
+- 初始威胁模型，以及 NetBird 客户端/服务端、未来依赖、商标和 Huawei 工具的许可证基线。
 - Debian Pod 内的工具链与持久化条件。
 - HarmonyOS Command Line Tools 和 Linux Emulator 的官方支持信息。
 - 稳定与 Beta Command Line Tools 的本地制品指纹、独立安装及 HOME 恢复入口。
@@ -55,8 +71,10 @@
 
 当前文档不表示以下事项已经完成：
 
+- R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
+- 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。
-- OpenHarmony 或 HarmonyOS 应用工程已经建立。
+- 面向产品的 OpenHarmony 或 HarmonyOS 应用工程已经建立；当前只有不得演化为产品壳的短生命周期 R1 API 24 构建探针。
 - NetBird Go 核心、NAPI/native fd 或 VPN 能力已经完成集成验证。
 - VPN Extension 已经在模拟器或真机建立隧道，或真机行为已经验证。
 - 任一市场的正式签名、审核、上架或更新流程已经跑通。
@@ -64,6 +82,4 @@
 
 ## 维护约定
 
-新增调查结果时，应保留来源 URL，并把结果归入上述四种信息状态之一。
-环境现场发生变化时，优先更新“当前实测”和“尚未验证”；SDK 或官方文档发生变化时，同时更新核验日期。
-平台方案变更时，应分别说明 OpenHarmony 与 HarmonyOS 的影响，避免把一侧的测试结果直接推广到另一侧。
+新增调查结果时，应保留来源 URL，并把结果归入上述四种信息状态之一。环境现场发生变化时，优先更新“当前实测”和“尚未验证”；SDK 或官方文档发生变化时，同时更新核验日期。平台方案变更时，应分别说明 OpenHarmony 与 HarmonyOS 的影响，避免把一侧的测试结果直接推广到另一侧。

@@ -1,6 +1,6 @@
 # 双目标实施路线图
 
-最后核验：2026-07-16
+最后核验：2026-07-17
 
 本文定义 `netbird-harmonyos` 从当前研究阶段到两个具名平台目标发布及持续运维的证据门路线图。路线图中的平台能力、接口、性能和发行路径均须由对应阶段的 SDK、代码、制品、渠道和具名真机证据确认；在证据形成前，只作为待验证假设。
 
@@ -8,7 +8,7 @@
 
 ### 当前实测
 
-- 仓库当前只有研究文档，尚无应用工程、应用源码、自动化测试或持续集成配置。
+- 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建unsigned API 24应用/测试HAP和双ABI普通Node-API库；API 24 Emulator上的最小`aa test`已执行通过，但它不是产品应用工程、产品测试套件或持续集成配置。
 - HarmonyOS 命令行工具链、SDK、Linux Emulator、镜像和基础恢复入口已经准备完成。
 - Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化。因此 Emulator 只承担短时 smoke，不承担长稳、VPN、性能或产品支持证据。
 
@@ -18,9 +18,15 @@
 - 普通第三方应用在任一具名量产设备上的 VPN 授权、虚拟接口、socket 保护和真实业务流量。
 - 任一渠道的正式签名、审核、重签、安装、升级、发布和回滚闭环。
 
+### R1研究进度
+
+2026-07-17，[R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)已记录固定 NetBird/Go/SDK 的编译和静态风险，并用 CLI 6.1.1.290、API 24、Hvigor 6.24.3 实际构建 unsigned Stage 应用/测试 HAP 及 arm64-v8a/x86_64 `libprobe.so`；后续 API 24 Emulator 研究确认可见 pixelMap、普通 `EntryAbility` 仍被 `10106102` 阻塞，而短生命周期 TestRunner 可直接完成 Node-API 初始化、`ping=pong` 和版本断言。0006 的 Go 1.25.12 Linux/amd64 c-shared 直接 `dlopen` 在 initial-exec TLS 处受控失败；0007 进一步证明无 Go、无 `res_search`、无 `NODELETE`/`SYMBOLIC` 的普通 initial-exec TLS so 同样被拒绝，且正确 `DT_NEEDED` wrapper 的 runtime 传递加载也在依赖 Go so 处被拒绝。`ADJ-20260717-0001` 后的 0008 确认公开 Native Child API 对 API 14 及以后只支持 PC/2in1、Tablet，因而在实现前暂停 API 24 phone B 族。第二个六席 T0 共识 `ADJ-20260717-0002` 随后批准单次 Tier1 纯 C 动态 TLS loader 探针；0009 用最终 ELF 实证确认 IE 为 `PT_TLS+TPOFF64+STATIC_TLS`、classic GD 为 `DTPMOD64+DTPOFF64+__tls_get_addr`、TLSDESC gnu2 为 `R_X86_64_TLSDESC`，并附加 local-dynamic，所有 link 均禁用 relax。API 24 x86_64 TestRunner baseline 先通过，IE 按 0007 类别拒绝且无环境漂移，classic GD、TLSDESC 和 local-dynamic 均成功加载；每个动态模型的主线程、加载前等待线程和加载后新线程分别以不同值完成初值42、100轮 set/read、reset42，0 错误、0 crash，Tier1 为 `PASS`，不触发停止该 x86_64 元组。该正面只证明精确 C loader 模型，不证明 Go 1.25.12 会生成或支持这些模型；Go `#71953`、CL `644975`、CL `696635`、PR `75048` 均未合并、未发布，只作下一道独立 Tier2 门参考。arm64、华为商用 HarmonyOS 具名真机和其他设备/loader/toolchain 保持 provisional，补丁数仍为 0；R0、R1、R2 均未退出，也没有新增产品证据。
+
 ## T0 共识记录
 
 2026-07-16，OpenAI、Anthropic、DeepSeek、Moonshot、MiniMax、Zhipu 六个厂商参与了四轮 T0 讨论，并最终形成一致结论：采用单一主执行者，以证据门串行推进首目标，再独立验证和发布第二目标；模拟器不作为产品证据，支持范围必须绑定具名发行版、设备、完整系统版本、架构和渠道。
+
+2026-07-17，第二次路线级 T0 也取得同一六个厂商席位一致批准：在不修改 Go、NetBird 或 SDK 的前提下，以一个工作日、一次实现完成 Tier1 纯 C 动态 TLS loader 门；只有验明的 classic GD 或 TLSDESC 至少一个通过加载前/加载后线程隔离测试才可进入下一道独立决策门，两者都失败时只停止 API 24 x86_64 元组，不外推 arm64 或真机。
 
 本文只记录参与厂商和最终共识，不记录讨论过程或模型商业信息。
 
@@ -35,6 +41,37 @@
 - 局部且可逆的实现调整可按本机制正常修订；涉及首目标、核心数据面、跨语言边界、VPN 能力门、发布门、支持声明，或放宽 R0 已锁定的质量、安全、性能、隐私 SLO 或错误预算阈值的重大调整，须重新进行 T0 讨论。
 - 不得为维持原路线而忽略反证，也不得因轻微实现差异频繁重排全局路线图。
 - 调整后须更新阶段依赖摘要、版本映射和完成定义，确保本文仍然自洽。
+
+### 2026-07-16 研究期执行调整
+
+因用户当前无法提供可连接真机，允许在 R0 未退出期间提前开展 R1 ABI 预探针和 Emulator HAP smoke，结果只作为研究证据。该调整不构成 R1 退出，不改变 R0 的未退出状态，不改变 R2 的 arm64 具名真机退出要求，也不改变 R3 及以后阶段、支持声明和发布声明的真机证据门；完整边界以 [R0 任务章程](r0-charter.md)为准。
+
+### ADJ-20260717-0001：Go 跨语言替代路线 T0 一致结论
+
+`EV-R1-EMU24-20260717-0007` 触发的 T0 路线讨论已达成一致，`EV-R1-EMU24-20260717-0008` 已执行其首个公开能力门；本调整只决定研究顺序、停止条件和证据边界，不改变首目标候选、R0 SLO、补丁预算或阶段退出标准。
+
+- **C1 启动边界**：普通 HAP 没有应用可控制的进程启动期 `DT_NEEDED` 注入点，因此不再把 runtime wrapper、加载顺序或其他进程内 late-load 变体描述成 startup linkage。
+- **C2 公开能力门**：B 族只能使用普通第三方应用公开 SDK；必须先由公开文档与目标 SDK 共同确认 Native Child Process 的目标设备支持，且不依赖 debug、system、企业权限或系统策略修改，头文件存在本身不等于 phone 可用。
+- **C3 B0/B1 串行门**：公开能力门通过后才构建 API 24 x86_64 Emulator 的 B0 无 TLS C child baseline；B0 通过后才运行含真实 initial-exec TLS 且预期 `GetTLS=42` 的 B1 C child，B0 失败则不运行 B1，B1 失败则不运行 child Go `dlopen`。
+- **C4 回传与失败纪律**：B0/B1 必须通过真实公开入口、签名一致的 HAP、可收集 PID/entry/result、异步等待和完整 HiLog 得出结论；平台或设备形态不支持时记录精确错误码与枚举，不使用 fork/exec、debug/system 能力、设备类型伪装或策略开关规避。
+- **C5 负面范围**：所有当前负面只绑定已记录的 API 24 x86_64 phone Emulator、进程模型和 ELF 输入；arm64、具名真机、PC/2in1、Tablet、其他 loader 与工具链在各自证据形成前保持 provisional，不从 x86_64 外推。
+- **C6 B 族后继**：只有 B0 可用且通过、B1 失败时，下一步才是验证普通应用公开 exec/PIE 能力并运行固定 Go executable；该条件未成立时不得跳到 executable、Go runtime、netpoll 或 NetBird。
+- **C7 A 族门**：A 工具链 spike 只能在无补丁 B 族按上述门关闭后，由另一次 T0 先确定 timebox、固定输入、退出标准、补丁预算与长期维护阈值；不得把 toolchain/runtime fork 当成默认后继。
+- **C8 非产品承诺**：B 族或 A 族任一路线成功都只允许进入下一研究证据门，不自动形成产品架构承诺、平台支持声明、VPN 可行性、发布承诺或阶段退出。
+- **C9 当前状态**：0008 已确认公开 API 对 API 14 及以后仅支持 PC/2in1、Tablet，phone 作为非 PC/2in1/Tablet 的其他设备类型映射 `NCP_ERR_NOT_SUPPORTED(801)`，故 API 24 phone B0/B1 在实现前暂停，补丁数为 0；该暂停可由华为商用 HarmonyOS 具名真机行为或公开 SDK 设备范围变化重开，并非全局永久关闭。Tablet/2in1 仍为公开文档支持范围，但不属于当前 phone 目标；R0、R1、R2 均保持未退出，A 工具链 spike 仍须新 T0 决定 timebox。
+
+### ADJ-20260717-0002：动态 TLS loader Tier1 六席一致结论
+
+`EV-R1-EMU24-20260717-0008` 关闭公开 phone Native Child 入口后，第二次六席 T0 一致批准先把 loader 是否支持动态 TLS 与 Go 是否能生成该模型拆成两个串行门；本调整只授权 Tier1 纯 C 探针，不授权 Go/runtime/toolchain patch，不改变 R0 SLO、阶段退出标准或补丁预算。
+
+- **D1 timebox 与实现次数**：Tier1 限 1 工作日/8 工程小时/1 次实现，使用现有 `native-probes`、Node-API 和 TestRunner，0 Go/NetBird/SDK patch，且不提交。
+- **D2 最小输入**：必须实际生成可独立命名的 IE 对照、classic GD 和 TLSDESC gnu2；local-dynamic 只有在同一实现自然可得时附加且不改变 PASS 门，每份库都导出确定的 `GetTLS`、`SetTLS`、`ResetTLS` C ABI。
+- **D3 最终验模**：模型身份只接受最终 `readelf`/`objdump`；IE 必须有 `PT_TLS`、`TPOFF`、`STATIC_TLS`，classic GD 必须有 `DTPMOD64/DTPOFF64` 或明确 classic `__tls_get_addr` 重定位且无 `TPOFF/STATIC_TLS`，TLSDESC 必须有 `R_X86_64_TLSDESC` 且无 `TPOFF/STATIC_TLS`；允许用标准 linker `--no-relax` 防止模型塌缩，不修改 SDK。
+- **D4 IE 漂移门**：普通 Node-API baseline 必须先 PASS；IE 必须在 0007 同一 TestRunner 和 `RTLD_NOW|RTLD_LOCAL` late-load 边界复现 initial-exec 拒绝，若意外加载则标环境漂移并立即停止。
+- **D5 动态线程门**：classic GD 与 TLSDESC 各自在 `dlopen` 前建立等待线程，加载后让它解析并调用 ABI 100 轮，再建立加载后新线程调用 100 轮；主线程与两线程必须用不同值并分别验证初值42、set/read 不串扰和 reset42，任何错误或 crash 都使该模型 FAIL。
+- **D6 判定范围**：Tier1 `PASS` 等于 classic GD 或 TLSDESC 至少一个全过；两者都失败只 `STOP` API 24 x86_64 元组，arm64 与具名真机保持 provisional；任何结果都不退出或回退 R0、R1、R2，也不自动形成 Go、NetBird、VPN 或产品结论。
+- **D7 Tier1 实测**：0009 最终验明 IE、classic GD、TLSDESC 和附加 local-dynamic 均未塌缩；IE 对照按预期拒绝，GD、TLSDESC、LD 的主线程/加载前线程/加载后线程各 100 轮全部通过，无串扰或 crash，因此 Tier1 `PASS`，该 x86_64 元组不停止，补丁数为 0。
+- **D8 下一门**：Go issue `#71953`、Go CL `644975`、Go CL `696635`、Go PR `75048` 当前均 open 或 `NEW`、未合并、未发布，只能作为下一道独立授权 Tier2 Go/toolchain 可行性门参考；Tier2 必须另行固定已发布输入、timebox、退出标准、维护阈值和补丁预算，0009 不自动授权实现。
 
 ## 实施原则
 

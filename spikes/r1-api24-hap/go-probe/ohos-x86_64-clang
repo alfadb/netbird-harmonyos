@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${HARMONYOS_NATIVE_HOME:?set HARMONYOS_NATIVE_HOME to the fixed SDK native directory}"
+compiler="$HARMONYOS_NATIVE_HOME/llvm/bin/x86_64-unknown-linux-ohos-clang"
+if [[ ! -x "$compiler" ]]; then
+  printf 'OHOS x86_64 clang is not executable: %s\n' "$compiler" >&2
+  exit 1
+fi
+
+exec "$compiler" "$@"

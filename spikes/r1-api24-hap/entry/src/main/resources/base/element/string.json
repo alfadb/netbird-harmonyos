@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "Short-lived R1 API 24 research probe"
+    },
+    {
+      "name": "ability_description",
+      "value": "R1 API 24 probe ability"
+    },
+    {
+      "name": "ability_name",
+      "value": "R1 API 24 Probe"
+    }
+  ]
+}

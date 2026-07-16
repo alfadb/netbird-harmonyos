@@ -1,0 +1,191 @@
+evidence_id=EV-R1-EMU24-20260717-0006
+record_scope=x86_64 Go 1.25.12 c-shared loader and runtime probe in API 24 ohosTest process
+workspace_alias=[WORKSPACE]
+harmony_home_alias=[HARMONY_HOME]
+stable_tools_alias=[STABLE_TOOLS]=[HARMONY_HOME]/command-line-tools/6.1.1.290
+native_home_alias=[NATIVE_HOME]=[STABLE_TOOLS]/sdk/default/openharmony/native
+emulator_tools_alias=[EMULATOR_TOOLS]=[HARMONY_HOME]/command-line-tools/26.0.0.461
+beta_hdc_alias=[BETA_HDC]=[EMULATOR_TOOLS]/sdk/default/openharmony/toolchains/hdc
+emulator_alias=[EMULATOR]=[EMULATOR_TOOLS]/emulator/Emulator
+instance_alias=[INSTANCE]=[HARMONY_HOME]/emulator-instances/netbird_api24_phone
+image_root_alias=[IMAGE_ROOT]=[HARMONY_HOME]/emulator-images
+app_hap_alias=[APP_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+test_hap_alias=[TEST_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+go_so_alias=[GO_SO]=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+target=127.0.0.1:10000
+runtime_tmux_session=harmonyos-api24-go-probe-0006
+netbird_dependency=absent
+tun_probe=absent
+dns_probe=absent
+internet_permission=ohos.permission.INTERNET normal permission for loopback TCP only
+upstream_adaptation_patch_count=0
+
+--- implementation and fixed Go build ---
+Go source exports Hello()=42, RuntimeProbe(allocBytes), and NetDialProbe(host,port).
+RuntimeProbe creates a buffered channel, starts a goroutine, waits on a 1 ms timer, allocates and writes allocBytes bytes, sends len(buffer), and returns the received length.
+NetDialProbe calls net.DialTimeout("tcp", net.JoinHostPort(host,port), 2 seconds), closes a successful connection, and does not perform a DNS lookup for the measured numeric 127.0.0.1 input.
+C++ runGoProbe uses dlopen("libgoprobe.so", RTLD_NOW|RTLD_LOCAL), intentionally never calls dlclose, copies dlerror and errno immediately after dlopen and each individual dlsym, invokes the exports in order, and creates a temporary 127.0.0.1 listener for NetDialProbe.
+$ HARMONYOS_NATIVE_HOME=[NATIVE_HOME] GO_BIN=[HOME]/.local/go/bin/go GO_PROBE_OUTPUT_DIR=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64 [WORKSPACE]/spikes/r1-api24-hap/go-probe/build.sh
+built [GO_SO] with go version go1.25.12 linux/amd64
+The tracked wrapper resolved [NATIVE_HOME]/llvm/bin/x86_64-unknown-linux-ohos-clang; no current or emulator-current native compiler path was used.
+OHOS clang version=15.0.4 target=x86_64-unknown-linux-ohos
+Go launcher selected GOTOOLCHAIN=go1.25.12 and rejected any other resulting version.
+GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=1 build flags=-trimpath -buildmode=c-shared
+[GO_SO] size=3136128 mtime=2026-07-17T02:20:30.064265763+08:00 SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9
+Generated libgoprobe.h size=2112 mtime=2026-07-17T02:20:30.061265722+08:00 SHA-256=3ece605e4d96e747a35511ab5cb3bd1f3f5f6fb2b32ecbe92db3682d1f5a7680
+Generated so and header are under ignored entry/libs/x86_64 and are not repository source objects.
+
+--- Go ELF and build-info verification ---
+file: ELF 64-bit LSB shared object, x86-64, version 1 SYSV, dynamically linked, Go BuildID present, with debug_info, not stripped
+ELF header: ELF64 little endian ET_DYN Advanced Micro Devices X86-64 OS/ABI UNIX System V
+NEEDED: libc.so only
+FLAGS: SYMBOLIC BIND_NOW STATIC_TLS
+FLAGS_1: NOW NODELETE
+exports: Hello, RuntimeProbe, NetDialProbe
+$ go version -m [GO_SO]
+[GO_SO]: go1.25.12
+path cn.alfadb.netbird/r1-api24-go-probe
+build -buildmode=c-shared
+build -compiler=gc
+build -trimpath=true
+build CGO_ENABLED=1
+build GOARCH=amd64
+build GOOS=linux
+build GOAMD64=v1
+STATIC_TLS=present
+NODELETE=present
+STATIC_TLS_INTERPRETATION=high-risk initial-exec TLS requirement; static presence is not loader acceptance
+NODELETE_INTERPRETATION=the ELF requests no unload; C++ independently retains the handle and never calls dlclose
+
+--- cold HAP build ---
+An initial ohpm install command was accidentally issued from [WORKSPACE] and failed with 00608002 Missing file oh-package.json5; it did not clean, build, or alter the spike and is retained as an operator working-directory error.
+$ cd [WORKSPACE]/spikes/r1-api24-hap && [STABLE_TOOLS]/bin/ohpm install --all
+install completed in 0s 79ms
+$ [STABLE_TOOLS]/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BUILD SUCCESSFUL in 2 s 122 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BuildNativeWithCmake, BuildNativeWithNinja, ProcessLibs, DoNativeStrip, CompileArkTS, PackageHap, and PackingCheck all finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 11 s 789 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+ProcessLibs, DoNativeStrip, OhosTestCompileArkTS, PackageHap, and PackingCheck all finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 11 s 233 ms
+C++ and ArkTS compilation passed through the actual API 24 Hvigor build.
+Both output_metadata.json files report isSigned:false; their stable content hashes remain 5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c and 76f9e1d064062a6e7d9a59adb4cbda96fb3ab4c710d9b6b016e9659e9941013a.
+
+--- HAP member identity correction and final objects ---
+The first packaging check found Hvigor had stripped [GO_SO] from SHA-256 236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9 and 3136128 bytes to member SHA-256 6d3122a0cb074dca30eddf0d672675c0697c631359a0264425472d7865448837 and 2160240 bytes.
+That intermediate build was rejected for the measured input/member identity criterion and was not installed.
+The local Hvigor 6.24.3 schema defines buildOption.nativeLib.debugSymbol.exclude as glob patterns excluded from strip when strip=true.
+entry/build-profile.json5 was changed to strip=true with exclude=[**/libgoprobe.so], leaving the existing strip behavior enabled for all other native libraries.
+A new clean and both HAP builds produced the final objects below.
+[APP_HAP] size=5843130 mtime=2026-07-17T02:23:43.336886705+08:00 SHA-256=37a42fd905a9f1675e943d55361ecafac75acef70d40d6ffac7e467533544a0f
+[TEST_HAP] size=3149616 mtime=2026-07-17T02:24:00.326122659+08:00 SHA-256=9218a8d51b0ca3588c4bb31e6a35f109d86b2b5a48ce128f6158cd8abec04c2a
+[APP_HAP] libs/x86_64/libgoprobe.so SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9
+[TEST_HAP] libs/x86_64/libgoprobe.so SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9
+input/HAP member hash match=yes for both final HAPs
+Final non-generated, non-Markdown spike source/config canonical sorted SHA-256 manifest digest=f5c2cab083c5a1d5c40379b2cfcb17020410073cf11366c75ee7f09800655d0c
+The two HAP paths remain ignored mutable outputs and were not copied or represented as immutable archives; object IDs in the evidence record bind only these measured sizes, mtimes, and hashes.
+
+--- runtime preflight and launch ---
+RUNTIME_PRECHECK_AT=2026-07-17T02:24:30+08:00
+KVM_FD_OPENED
+DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority dimensions=1920x1080
+No initial Emulator, qemu, listener on 10000/5555/8710, or harmonyos-api24-go-probe-0006 tmux session was present.
+[BETA_HDC] version=3.2.0e
+Hvigor=6.24.3
+ohpm=6.1.2.285
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [EMULATOR] -start netbird_api24_phone -instancePath [HARMONY_HOME]/emulator-instances -imageRoot [IMAGE_ROOT] -hdcport 10000
+EMULATOR_LAUNCHED_AT=2026-07-17T02:24:39+08:00
+runtime_tmux_session=harmonyos-api24-go-probe-0006
+Attempts 1-8 from elapsed 0 through 37 seconds reported no matching target.
+Attempt 9 at elapsed 42 seconds reported target Unknown and E001005 Device not found or connected.
+Attempt 10 at elapsed 47 seconds reported 127.0.0.1:10000 TCP Connected localhost.
+ECHO=r1-go-probe-readiness
+UNAME=Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+DIST=HarmonyOS
+BOOT_COMPLETED=true
+SHELL_READINESS=PASS AT=2026-07-17T02:25:41+08:00
+uitest screenCap created /data/local/tmp/screenCap_74513335.png at 2026-07-17T02:25:55+08:00.
+This run used the same DISPLAY=:1 visible path previously measured as llvmpipe in EV-R1-EMU24-20260717-0004, but current cumulative Emulator.log did not add a new renderer identity line; no new llvmpipe-version claim is made.
+Preinstall bm dump reported the bundle absent.
+
+--- install and bundle verification ---
+INSTALL_STARTED_AT=2026-07-17T02:26:06+08:00
+Host HAP hashes immediately before send were 37a42fd905a9f1675e943d55361ecafac75acef70d40d6ffac7e467533544a0f and 9218a8d51b0ca3588c4bb31e6a35f109d86b2b5a48ce128f6158cd8abec04c2a.
+$ [BETA_HDC] file send [APP_HAP] /data/local/tmp/r1-go-probe-0006
+FileTransfer finish, Size:5843130, File count=1
+$ [BETA_HDC] file send [TEST_HAP] /data/local/tmp/r1-go-probe-0006
+FileTransfer finish, Size:3149616, File count=1
+$ [BETA_HDC] shell bm install -p /data/local/tmp/r1-go-probe-0006
+install bundle successfully.
+INSTALL_ENDED_AT=2026-07-17T02:26:07+08:00
+Post-install host hashes remained unchanged.
+bm dump selected fields: appSignType=none; cpuAbi=x86_64; nativeLibraryPath=libs/x86_64; moduleName=entry and entry_test; hapPath entry.hap and entry_test.hap; requested permission ohos.permission.INTERNET.
+
+--- measured aa test ---
+HILOG_CLEAR_AT=2026-07-17T02:26:29+08:00
+Log type core,app,only_prerelease buffer clear successfully
+AA_TEST_STARTED_AT=2026-07-17T02:26:29+08:00
+$ [BETA_HDC] shell aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+Node-API result ping=pong version=r1-api24-probe/0.0.1
+Go probe ok=false stage=dlopen detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory) hello=-1 runtimeBytes=-1 netDialCode=-1
+TestFinished-ResultCode: 1
+TestFinished-ResultMsg: Go probe assertion failed: Go probe ok=false stage=dlopen detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory) hello=-1 runtimeBytes=-1 netDialCode=-1
+user test finished.
+AA_TEST_HOST_RC=0
+AA_TEST_ENDED_AT=2026-07-17T02:26:31+08:00
+The HDC command exit code is not the test verdict; TestFinished-ResultCode=1 and ok=false are the measured failure.
+last_go_probe_stage=dlopen
+process_crash=no; the failure returned through Node-API and finishTest
+hello=not executed
+runtime_probe=not executed
+goroutine_channel_timer_allocation=not executed
+net_dial_probe=not executed
+runtime_netpoll=not executed
+
+--- HiLog and health capture ---
+Complete app-buffer capture is docs/evidence/raw/EV-R1-EMU24-20260717-0006-hilog-app-full.log SHA-256 18a5585ad50591da0bbeeab2d4c0c7e9e1ff43413b108cfdf692ed99fcdf7755, 112 lines and 16807 bytes, repository access.
+Filtered two-tag capture is docs/evidence/raw/EV-R1-EMU24-20260717-0006-hilog-filtered.log SHA-256 b9c2f67010a0efc15857b49769d5a24024187faaa06065fd2877b492ee4f62e1, 10 lines and 1947 bytes, repository access.
+An additional all-buffer hilog -x capture was executed and inspected; it contained 4028 lines and 551316 bytes with SHA-256 03001ff1f39637c3924033566a25d8579fd39cf7df52bcabe6fbf17d4109e8f1 in the harness temporary output, but that temporary object is not claimed as a retained repository artifact and is not needed for the verdict.
+Filtered HiLog records module initialization, TestRunner prepare, ping, stage=start, stage=dlopen, the exact loader rejection, returned fields, and the failed assertion in PID 3191.
+The complete app buffer records AppLifeCycleManager onProcessDied for PID 3191 after finishTest; no probe crash line or native signal appears.
+Post-test shell echo, HarmonyOS distribution, and boot.completed=true passed.
+No PID 3191 or probe Runner process remained.
+[INSTANCE]/Log/crash_server.log received only its launch TraceTool initialization line for this run and no probe crash entry.
+Current mutable instance log hashes after normal stop: Emulator.log 0f7cb8450dd61a4331c2415f99c0f0afb5bc3ddaa7867713c8ff081743fc7140; qemu.log 52990218c4ce1aca027c39a922d34ef58842ba28f2a3fb283b9c945fda59d2c9; kernel.log ccfc1526226162dcfba36c2859ba5ecf0b654113b687a93b3b4b8c4a544443; crash_server.log 17a2be547f4f7df6d360d53e321a23215362b21251da6fb690a60cba25b03e7e.
+The HOME instance logs are cumulative mutable files and are observational references only, not immutable archives.
+
+--- cleanup and normal stop ---
+CLEANUP_STARTED_AT=2026-07-17T02:27:58+08:00
+Guest staging directory and screenCap_74513335.png removed.
+aa force-stop reported success.
+Beta HDC uninstall reported uninstall bundle successfully.
+Post-uninstall bm dump reported the bundle absent.
+CLEANUP_ENDED_AT=2026-07-17T02:28:01+08:00
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-stop
+Stop emulator netbird_api24_phone successfully
+EMULATOR_STOP_ENDED_AT=2026-07-17T02:28:01+08:00
+Emulator.log records quit emulator, crash-service normal quit, StopCheckGuestMem, and StopCheckGuestStatus at 2026-07-17T02:28:01-02+08:00.
+The runtime tmux session exited with Emulator; Beta HDC server was stopped with [BETA_HDC] kill after the first residue check found its 8710 listener.
+FINAL_RESIDUE_CHECK_AT=2026-07-17T02:29:24+08:00
+No Emulator, qemu, Beta HDC server, listener on ports 10000/5555/8710, or harmonyos-api24-go-probe-0006 tmux session remained.
+Pre-existing netbird, pi, and pi-router tmux sessions were preserved.
+
+--- measured result and boundary ---
+node_api_prelude=pass
+hap_member_identity=pass
+elf_static_tls=present
+elf_nodelete=present
+dlopen=fail
+loader_error=Error relocating [BUNDLE_LIBS]/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libgoprobe.so
+runtime=not executed
+netpoll=not executed
+verdict=fail
+r1_exit=no
+patch_budget_count=0
+The tracked Go probe, wrapper, C++ loader code, type declaration, test assertion, permission, and build configuration are project-local probe code, not an adaptation patch against NetBird, WireGuard, Go, or another fixed upstream; the upstream adaptation patch count remains 0.
+This result directly confirms that the measured API 24 x86_64 application loader rejects this exact Go 1.25.12 Linux c-shared ELF at initial-exec TLS relocation. It does not establish that every HarmonyOS loader, arm64 device, Go version, alternate link strategy, or native process model has the same behavior.
+No NetBird, TUN, VPN, DNS, public network, UIAbility, physical-device, signing, channel, or product-support path was exercised.
+The next gate is an explicit architecture decision: either produce a separately justified loader/process/link strategy that removes the initial-exec TLS conflict and rerun this same incremental probe, or treat the in-process x86_64 Linux Go c-shared route as blocked; no runtime, netpoll, NetBird, or VPN stage may be credited before loader acceptance.

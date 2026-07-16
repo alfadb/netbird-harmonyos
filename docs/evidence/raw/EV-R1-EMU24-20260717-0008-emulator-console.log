@@ -1,0 +1,28 @@
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+[WARNING]Hot boot is not enable, the bootmode "snapshot" invalid. now start with cold boot.
+audio: Could not init `pa' audio driver
+audio: warning: Using timer based audio emulation
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+
+Pane is dead (status 0, Fri Jul 17 04:04:07 2026)

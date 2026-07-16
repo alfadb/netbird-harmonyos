@@ -1,3 +1,20 @@
 # pi-astack runtime state (audit logs, checkpoints, search metrics)
 .pi-astack/
 .abrain-project.json
+
+# HarmonyOS, Hvigor, Node.js, and ohpm generated state
+**/.hvigor/
+**/build/
+**/oh_modules/
+**/node_modules/
+**/.cxx/
+**/.idea/
+**/.deveco/
+**/local.properties
+**/*.hap
+**/*.app
+**/*.hsp
+**/*.har
+
+# Generated Go and native probe shared libraries and headers
+/spikes/r1-api24-hap/entry/libs/

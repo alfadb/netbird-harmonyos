@@ -1,0 +1,290 @@
+EV-R1-EMU24-20260717-0008 raw transcript
+All times Asia/Shanghai (+08:00). Paths use stable placeholders only in this persisted transcript.
+
+$ date --iso-8601=seconds
+2026-07-17T03:58:01+08:00
+
+$ git rev-parse HEAD
+3f47a140be8b27d6361b3f19abc04d45730ad714
+
+$ git ls-remote https://gitee.com/openharmony/docs.git HEAD
+b84779874332bd7c2afee0ca3875494fa4793f1f	HEAD
+
+Public documentation objects fetched read-only from the OpenHarmony docs repository at HEAD b84779874332bd7c2afee0ca3875494fa4793f1f:
+- zh-cn/application-dev/reference/apis-ability-kit/capi-native-child-process-h.md, Gitee content blob SHA 2eb9308e9b4d043a9d1dca44738212edc768db9d.
+- zh-cn/application-dev/application-models/capi-nativechildprocess-development-guideline.md, Gitee content blob SHA 5719a9112e1797d5ec8e7e188c6ef89018473b0c.
+- Public API reference device behavior for OH_Ability_StartNativeChildProcess: API 13 and earlier support PC/2in1; API 14 and later support PC/2in1 and Tablet; other device types return NCP_ERR_NOT_SUPPORTED.
+- Public API reference device behavior for OH_Ability_CreateNativeChildProcess: API 13 and earlier support PC/2in1; API 14 and later support PC/2in1 and Tablet; other device types return NCP_ERR_NOT_SUPPORTED.
+- Public API reference enum mapping: NCP_ERR_NOT_SUPPORTED = 801, meaning Native child-process creation is unsupported.
+- The public application-development procedure requires AbilityKit/native_child_process.h and libchild_process.so. It declares no application permission, debug mode, system-app privilege, enterprise ACL, or module/app manifest switch that can add phone support.
+- The public documentation is the gate authority here. Header presence and successful linking alone are not treated as phone support.
+
+$ sha256sum [SDK_API24]/native/sysroot/usr/include/AbilityKit/native_child_process.h [SDK_API24]/toolchains/lib/PermissionDefinitions.json
+cc686fe9a38a0b71411a6ce33ab3e1420c9c32c7d6ca89dcd4dee91cedca7c62  [SDK_API24]/native/sysroot/usr/include/AbilityKit/native_child_process.h
+73b8cb0010fcc6e8c8fb825434c671cfc2ebe04892419f56c445aa66e505d47d  [SDK_API24]/toolchains/lib/PermissionDefinitions.json
+
+$ rg -n '@syscap|@since 13|NCP_ERR_NOT_SUPPORTED|OH_Ability_StartNativeChildProcess\(' [SDK_API24]/native/sysroot/usr/include/AbilityKit/native_child_process.h
+22: * @syscap SystemCapability.Ability.AbilityRuntime.Core
+34: * @syscap SystemCapability.Ability.AbilityRuntime.Core
+66:    NCP_ERR_NOT_SUPPORTED = 801,
+132: * @since 13
+270: * Returns NCP_ERR_NOT_SUPPORTED if the device does not support the creation of native child processes.
+313: * Returns NCP_ERR_NOT_SUPPORTED if the device does not support the creation of native child processes.
+327: * @since 13
+342: * @since 13
+353: * @since 13
+367: * @since 13
+388: *     1. OH_Ability_StartNativeChildProcess(entryPoint, args, options)
+404: * Returns NCP_ERR_NOT_SUPPORTED if the device does not support the creation of native child processes.
+409: * @since 13
+411:Ability_NativeChildProcess_ErrCode OH_Ability_StartNativeChildProcess(
+441: * Returns NCP_ERR_NOT_SUPPORTED if the device does not support the creation of native child processes.
+
+$ rg -n -i 'native.*child|child.*process' [SDK_API24]/toolchains/lib/PermissionDefinitions.json
+[no output]
+
+$ rg -n 'multiProcess|allowMultiProcess' [SDK_API24]/toolchains/modulecheck/module.json [CLI_6_1_1]/hvigor/hvigor-ohos-plugin/res/schemas/*.json
+[no output]
+
+Static public-SDK gate verdict:
+PUBLIC_NATIVE_CHILD_API=YES
+ORDINARY_THIRD_PARTY_API=YES_WITH_DOCUMENTED_DEVICE_LIMIT
+PHONE_DEVICE_SUPPORT=NO
+REQUIRED_SPECIAL_PERMISSION=NONE_DOCUMENTED
+REQUIRED_DEBUG_SYSTEM_ENTERPRISE_PRIVILEGE=NONE_DOCUMENTED
+PHONE_RUNTIME_ERROR_MAPPING=NCP_ERR_NOT_SUPPORTED(801)
+B0=NOT_ENTERED
+B1=NOT_ENTERED
+GO_CHILD=NOT_ENTERED
+
+$ [CLI_6_1_1]/bin/hvigorw --version
+6.24.3
+
+$ [CLI_6_1_1]/bin/ohpm --version
+6.1.2.285
+
+$ [BETA_HDC] -v
+Ver: 3.2.0e
+
+$ [BETA_EMULATOR] -version
+HarmonyOS Emulator :26.0.0.200
+
+$ cd [WORKSPACE]/spikes/r1-api24-hap
+$ [CLI_6_1_1]/bin/ohpm install --all
+install completed in 0s 78ms
+
+$ [CLI_6_1_1]/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BUILD SUCCESSFUL in 2 s 128 ms
+
+$ [CLI_6_1_1]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 11 s 806 ms
+
+$ [CLI_6_1_1]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 10 s 388 ms
+
+$ sha256sum entry/build/default/outputs/default/entry-default-unsigned.hap entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+701c892ee14642c9fc219fc720b7c74f3fc011fccdea0998902396349f3567c5  entry/build/default/outputs/default/entry-default-unsigned.hap
+257c4ad70a805e41d36f35ad442c876dafb561ac380e1dc6ff19a8c83b12ed7c  entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+
+$ stat --printf='%n|size=%s|mtime=%y\n' entry/build/default/outputs/default/entry-default-unsigned.hap entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+entry/build/default/outputs/default/entry-default-unsigned.hap|size=5888248|mtime=2026-07-17 04:00:09.297390490 +0800
+entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap|size=3168217|mtime=2026-07-17 04:00:26.533629838 +0800
+
+$ sha256sum entry/build/default/intermediates/hap_metadata/default/output_metadata.json entry/build/default/intermediates/hap_metadata/ohosTest/output_metadata.json entry/oh-package-lock.json5
+5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c  entry/build/default/intermediates/hap_metadata/default/output_metadata.json
+76f9e1d064062a6e7d9a59adb4cbda96fb3ab4c710d9b6b016e9659e9941013a  entry/build/default/intermediates/hap_metadata/ohosTest/output_metadata.json
+f201c717ddeb6fedbbc57414a57534427fa5f7efa940c495660b516871d82544  entry/oh-package-lock.json5
+
+$ grep -n 'isSigned' entry/build/default/intermediates/hap_metadata/default/output_metadata.json entry/build/default/intermediates/hap_metadata/ohosTest/output_metadata.json
+entry/build/default/intermediates/hap_metadata/default/output_metadata.json:1:[{"hapName":"entry-default-unsigned.hap","deviceTypes":["phone"],"isSigned":false}]
+entry/build/default/intermediates/hap_metadata/ohosTest/output_metadata.json:1:[{"hapName":"entry-ohosTest-unsigned.hap","deviceTypes":["phone"],"isSigned":false}]
+
+$ find entry/build -type f \( -name 'libchild*.so' -o -name '*child*b0*.so' -o -name '*child*b1*.so' \) -print
+[no output]
+
+$ unzip -Z1 entry/build/default/outputs/default/entry-default-unsigned.hap | rg -i 'child|b0|b1'
+[no output]
+
+$ unzip -Z1 entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap | rg -i 'child|b0|b1'
+[no output]
+
+$ unzip -p entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap ets/modules.abc | strings | rg 'NATIVE_CHILD_GATE|PUBLIC_DEVICE_SCOPE_EXCLUDES_PHONE|B0_RESULT|B1_RESULT|runTlsProbe|runNeededProbe'
+NATIVE_CHILD_GATE|functional=BLOCKED|reason=PUBLIC_DEVICE_SCOPE_EXCLUDES_PHONE|b0=NOT_RUN|b1=NOT_RUN|go=NOT_RUN
+
+HAP member note: the existing ignored libgoprobe.so, libtlsprobe.so, and libneededprobe.so objects from EV-R1-EMU24-20260717-0006/0007 remain packaged by the unchanged spike configuration. The 0008 Runner ABC has no call to them, full HiLog has no loader line for them, and their presence is not a B0, B1, or Go-child execution.
+
+$ date --iso-8601=seconds
+2026-07-17T04:01:22+08:00
+
+$ test -r /dev/kvm && test -w /dev/kvm && echo KVM_ACCESS=PASS
+KVM_ACCESS=PASS
+
+$ env DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [BETA_EMULATOR] -start netbird_api24_phone -instancePath [EMULATOR_INSTANCES] -imageRoot [EMULATOR_IMAGES] -hdcport 10000
+[launched in an isolated tmux session; complete output is in EV-R1-EMU24-20260717-0008-emulator-console.log]
+
+$ [BETA_HDC] tconn 127.0.0.1:10000
+[Fail]Connect failed
+
+$ [BETA_HDC] list targets -v
+127.0.0.1:10000		TCP	Offline	unknown...
+
+The first connection attempt at 12 seconds was not a run verdict. The Emulator process remained alive and subsequently exposed the target.
+
+$ date --iso-8601=seconds
+2026-07-17T04:02:43+08:00
+
+$ [BETA_HDC] list targets -v
+127.0.0.1:10000		TCP	Connected	localhost
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell echo R1_0008_READINESS
+R1_0008_READINESS
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell uname -a
+Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell param get const.product.software.version
+emulator 6.1.0.125(SP9DEVC00E120R4P11)
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell param get const.ohos.fullname
+OpenHarmony-6.1.1.125
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.boot.completed
+true
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell uitest screenCap /data/local/tmp/EV-R1-EMU24-20260717-0008-screen.png
+ScreenCap saved to /data/local/tmp/screenCap_64223523.png
+
+The screenCap command succeeded but generated a system-selected file name. Both requested and actual guest paths were removed during cleanup.
+
+$ date --iso-8601=seconds
+2026-07-17T04:02:58+08:00
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell bm dump -n cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+PREINSTALL_BM_RC=0
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell rm -rf /data/local/tmp/r1-native-child-gate-0008
+$ [BETA_HDC] -t 127.0.0.1:10000 shell mkdir /data/local/tmp/r1-native-child-gate-0008
+$ [BETA_HDC] -t 127.0.0.1:10000 file send [APP_HAP] /data/local/tmp/r1-native-child-gate-0008
+FileTransfer finish, Size:5888248, File count = 1, time:24ms rate:245343.67kB/s
+
+$ [BETA_HDC] -t 127.0.0.1:10000 file send [TEST_HAP] /data/local/tmp/r1-native-child-gate-0008
+FileTransfer finish, Size:3168217, File count = 1, time:14ms rate:226301.21kB/s
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell bm install -p /data/local/tmp/r1-native-child-gate-0008
+install bundle successfully.
+INSTALL_RC=0
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell bm dump -n cn.alfadb.netbird.r1probe
+[access-token identifiers omitted under evidence redaction policy]
+applicationInfo.allowMultiProcess: false
+applicationInfo.appPrivilegeLevel: normal
+applicationInfo.appProvisionType: debug
+applicationInfo.appSignType: none
+applicationInfo.cpuAbi: x86_64
+applicationInfo.debug: true
+applicationInfo.deviceId: PHONE-001
+applicationInfo.isSystemApp: false
+applicationInfo.maxChildProcess: 512
+applicationInfo.permissions: []
+hapModuleInfos[entry].deviceTypes: [phone]
+hapModuleInfos[entry_test].deviceTypes: [phone]
+reqPermissions: [ohos.permission.INTERNET]
+
+Runtime manifest observation verdict:
+ORDINARY_APP=YES
+PHONE=YES
+SYSTEM_APP=NO
+SPECIAL_APP_PERMISSION=NO
+ALLOW_MULTI_PROCESS=FALSE
+No device setting, manifest extension, debug/system privilege, enterprise ACL, fork, exec, or other workaround was attempted.
+
+$ date --iso-8601=seconds
+2026-07-17T04:03:22+08:00
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell hilog -r
+Log type core,app,only_prerelease buffer clear successfully
+HILOG_CLEAR_RC=0
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+NATIVE_CHILD_GATE|functional=BLOCKED|reason=PUBLIC_DEVICE_SCOPE_EXCLUDES_PHONE|b0=NOT_RUN|b1=NOT_RUN|go=NOT_RUN
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; NATIVE_CHILD_GATE|functional=BLOCKED|reason=PUBLIC_DEVICE_SCOPE_EXCLUDES_PHONE|b0=NOT_RUN|b1=NOT_RUN|go=NOT_RUN
+user test finished.
+AA_TEST_HOST_RC=0
+
+$ date --iso-8601=seconds
+2026-07-17T04:03:23+08:00
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell hilog -x -t app -v year -v zone
+[complete output persisted in EV-R1-EMU24-20260717-0008-hilog-app-full.log]
+Key experiment lines:
+CST 2026-07-17 04:03:22.756 3128 3128 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 04:03:22.756 3128 3128 I A02900/R1Api24ProbeTest: TestRunner onPrepare
+CST 2026-07-17 04:03:22.767 3128 3128 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 04:03:22.767 3128 3128 I A02900/R1Api24ProbeTest: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+CST 2026-07-17 04:03:22.767 3128 3128 I A02900/R1Api24ProbeTest: NATIVE_CHILD_GATE|functional=BLOCKED|reason=PUBLIC_DEVICE_SCOPE_EXCLUDES_PHONE|b0=NOT_RUN|b1=NOT_RUN|go=NOT_RUN
+CST 2026-07-17 04:03:22.782 2134 2134 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020062, bundleName: cn.alfadb.netbird.r1probe, pid: 3128
+
+Functional result:
+NODE_API_BASELINE=PASS
+PUBLIC_PHONE_NATIVE_CHILD_GATE=BLOCKED
+B0=NOT_RUN
+B1=NOT_RUN
+GO_CHILD_DLOPEN=NOT_RUN
+GO_EXECUTABLE=NOT_RUN
+A_TOOLCHAIN_SPIKE=NOT_STARTED
+R0_EXIT=NO
+R1_EXIT=NO
+R2_EXIT=NO
+UPSTREAM_PATCH_COUNT=0
+
+$ date --iso-8601=seconds
+2026-07-17T04:03:58+08:00
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell rm -rf /data/local/tmp/r1-native-child-gate-0008 /data/local/tmp/screenCap_64223523.png /data/local/tmp/EV-R1-EMU24-20260717-0008-screen.png
+$ [BETA_HDC] -t 127.0.0.1:10000 shell aa force-stop cn.alfadb.netbird.r1probe
+force stop process successfully.
+
+$ [BETA_HDC] uninstall cn.alfadb.netbird.r1probe
+[Info]App uninstall path: msg:uninstall bundle successfully.
+AppMod finish
+UNINSTALL_RC=0
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell bm dump -n cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+POSTUNINSTALL_BM_RC=0
+
+$ [BETA_HDC] -t 127.0.0.1:10000 shell ps -ef | grep cn.alfadb.netbird.r1probe
+[no output]
+POSTSTOP_PS_RC=1
+
+$ HARMONYOS_EMULATOR_INSTANCE=netbird_api24_phone [HARMONY_HOME]/bin/emulator-stop
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+EMU_STOP_RC=0
+
+$ date --iso-8601=seconds
+2026-07-17T04:04:07+08:00
+
+$ [BETA_HDC] tconn 127.0.0.1:10000 -remove
+[Fail]No target available
+
+$ [BETA_HDC] kill
+$ tmux kill-session -t r1-0008-emulator
+FINAL_CLEANUP_RC=0
+
+$ ps -u worker -o pid,args | rg '[E]mulator|[q]emu-system|[h]dc -m'
+[no output]
+
+$ ss -ltnp | rg ':10000\b|:8710\b'
+[no output]
+
+$ tmux list-sessions -F '#{session_name}' | rg '^r1-0008-emulator$'
+[no output]
+
+$ date --iso-8601=seconds
+2026-07-17T04:04:44+08:00

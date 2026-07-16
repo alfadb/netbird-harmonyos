@@ -1,0 +1,10 @@
+command=[BETA_HDC] -t 127.0.0.1:10000 shell hilog -x -T R1Api24Probe,R1Api24ProbeTest -v year -v zone
+CST 2026-07-17 02:26:30.124  3191  3191 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 02:26:30.125  3191  3191 I A02900/R1Api24ProbeTest: TestRunner onPrepare
+CST 2026-07-17 02:26:30.137  3191  3191 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 02:26:30.137  3191  3191 I A02900/R1Api24ProbeTest: Node-API result ping=pong version=r1-api24-probe/0.0.1
+CST 2026-07-17 02:26:30.138  3191  3191 I A02900/R1Api24Probe: Go probe stage=start detail=begin x86_64 Go c-shared runtime probe
+CST 2026-07-17 02:26:30.138  3191  3191 I A02900/R1Api24Probe: Go probe stage=dlopen detail=calling dlopen RTLD_NOW|RTLD_LOCAL for libgoprobe.so
+CST 2026-07-17 02:26:30.139  3191  3191 E A02900/R1Api24Probe: Go probe stage=dlopen failed detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory)
+CST 2026-07-17 02:26:30.140  3191  3191 I A02900/R1Api24ProbeTest: Go probe ok=false stage=dlopen detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory) hello=-1 runtimeBytes=-1 netDialCode=-1
+CST 2026-07-17 02:26:30.140  3191  3191 E A02900/R1Api24ProbeTest: Go probe assertion failed: Go probe ok=false stage=dlopen detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory) hello=-1 runtimeBytes=-1 netDialCode=-1

@@ -1,0 +1,180 @@
+evidence_id=EV-R1-EMU24-20260717-0002
+information_status=current-measured
+record_status=blocked
+stage=R1
+purpose=API 24 Emulator readiness and existing unsigned HAP install/start/HiLog/stop/uninstall smoke
+started_at=2026-07-17T00:53:52+08:00
+ended_at=2026-07-17T01:06:26+08:00
+clock_source=host CLOCK_REALTIME via date --iso-8601=seconds, ps lstart/etime, and Emulator logs
+timezone=Asia/Shanghai (+08:00)
+working_directory=[WORKSPACE]
+original_tmux_pane=netbird:0.0 %45
+runtime_tmux_session=harmonyos-emulator-run
+target=127.0.0.1:10000
+instance=netbird_api24_phone
+distribution=HarmonyOS 6.1.1(24)
+software_version=6.1.0.125
+guest_architecture=x86_64
+image_path=[HARMONY_HOME]/emulator-images/system-image/HarmonyOS-6.1.1/phone_all_x86/
+instance_path=[HARMONY_HOME]/emulator-instances/netbird_api24_phone
+emulator=[HARMONY_HOME]/command-line-tools/26.0.0.461/emulator/Emulator
+emulator_version=26.0.0.200
+beta_hdc=[HARMONY_HOME]/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc
+beta_hdc_version=3.2.0e
+stable_hdc_target_operations=none
+hap=spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+hap_size_bytes=2585745
+hap_sha256=c3b86df72039684bd70bb5424eb79492369705f7b8bc4edd62e4f1d1957a264f
+bundle=cn.alfadb.netbird.r1probe
+ability=EntryAbility
+expected_tag=R1Api24Probe
+expected_ping=pong
+expected_version=r1-api24-probe/0.0.1
+
+[preconditions]
+$ ls -l /dev/kvm
+crw-rw---- 1 root rdma 10, 232 Jul 16 15:42 /dev/kvm
+$ exec 9<>/dev/kvm && printf 'KVM fd opened\n' && exec 9>&-
+KVM fd opened
+$ readlink -f "$HOME/harmonyos/command-line-tools/current"
+[HARMONY_HOME]/command-line-tools/6.1.1.290
+$ readlink -f "$HOME/harmonyos/emulator-current"
+[HARMONY_HOME]/command-line-tools/26.0.0.461
+$ "$HARMONYOS_EMULATOR_HDC" -v
+Ver: 3.2.0e
+$ "$HARMONYOS_STABLE_HDC" -v
+Ver: 3.2.0d
+Note: the stable HDC command was a host-only version query; every target operation below used Beta HDC 3.2.0e.
+Initial Beta target state:
+127.0.0.1:10000 TCP Offline localhost
+127.0.0.1:5555 TCP Offline unknown...
+No Emulator process and no listener on ports 10000 or 5555 were present.
+The ignored repository-root .hvigor contained only .hvigor/outputs/build-logs/build.log, a 0-byte generated file timestamped 2026-07-17T00:29:04+08:00. It was removed without touching spikes/r1-api24-hap/.hvigor; final check reported ROOT_HVIGOR_ABSENT.
+
+[host_read_only_signature_check]
+$ sha256sum "$HAP"
+c3b86df72039684bd70bb5424eb79492369705f7b8bc4edd62e4f1d1957a264f  spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+$ unzip -l "$HAP" | rg 'META-INF|module.json|libprobe.so'
+1310 module.json
+6176 libs/x86_64/libprobe.so
+6408 libs/arm64-v8a/libprobe.so
+No META-INF entry was present.
+$ read output_metadata.json
+[{"hapName":"entry-default-unsigned.hap","deviceTypes":["phone"],"isSigned":false}]
+output_metadata_sha256=5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c
+No signing material was read or generated and no trust bypass was attempted.
+
+[run1_start_and_connect]
+$ tmux new-session -d -s harmonyos-emulator-run "HDC_PORT=10000 $HOME/harmonyos/bin/emulator-start"
+[emulator-start] starting netbird_api24_phone on HDC port 10000
+The emulator used a cold boot because hot boot was not enabled. It ran in a separate tmux pane; all tmux checks returned to netbird:0.0 %45.
+$ HDC_PORT=10000 "$HOME/harmonyos/bin/emulator-connect"
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+Connect OK
+127.0.0.1:10000 TCP Connected localhost
+127.0.0.1:5555 TCP Offline unknown...
+
+[run1_readiness]
+Attempts 1 through 12 ran from 2026-07-17T00:54:36+08:00 through 2026-07-17T00:56:32+08:00 using the following required commands:
+$ "$HDC" list targets -v
+$ timeout 20 "$HDC" -t 127.0.0.1:10000 shell echo netbird-hdc-smoke
+$ timeout 20 "$HDC" -t 127.0.0.1:10000 shell uname -a
+$ timeout 20 "$HDC" -t 127.0.0.1:10000 shell param get bootevent.boot.completed
+$ timeout 20 "$HDC" -t 127.0.0.1:10000 shell param get const.product.os.dist.name
+Every attempt returned Connected, echo netbird-hdc-smoke, uname "Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox", and OS distribution "HarmonyOS".
+Every boot.completed query returned: Get parameter "bootevent.boot.completed" fail! errNum is:106!
+A full param listing contained service boot-time values but no bootevent.boot.completed key. Kernel logs showed the boot.completed watcher was registered, but no completed value was observed. Readiness verdict: FAIL because boot.completed was not true; Connected was not treated as sufficient.
+
+[run1_install]
+Final pre-install readiness sample time: 2026-07-17T00:57:25+08:00. Echo, uname, and OS distribution still passed; boot.completed still returned errNum 106.
+$ timeout 180 "$HDC" -t 127.0.0.1:10000 install -r "$HAP"
+[Info]App install path:[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap msg:install bundle successfully.
+AppMod finish
+INSTALL_EXIT=0
+INSTALL_STARTED=2026-07-17T00:57:25+08:00
+INSTALL_ENDED=2026-07-17T00:57:27+08:00
+The unsigned HAP was accepted by this Emulator. A post-install bm dump reported appSignType "none", appProvisionType "debug", cpuAbi "x86_64", compileSdkVersion "6.1.1.125", debug true, and bundleName "cn.alfadb.netbird.r1probe".
+
+[run1_hdc_degradation]
+An attempted direct `hdc hilog -r` was interpreted as a continuous HiLog stream and was terminated by timeout before the scripted Ability start ran. A retry using guest shell commands did not return: hilog clear timed out at 2026-07-17T00:59:39+08:00 and the subsequent aa start timed out without a success response. At 2026-07-17T01:01:08+08:00, list targets still showed Connected but `timeout 20 hdc ... shell echo diagnostic-smoke` exited 124. This was recorded as an HDC shell RPC failure and not hidden by target status. Kernel logs concurrently contained watchdog_service restarts and `teleport_express release when wait ... timeout`; they are accompanying observations, not a proven cause.
+$ "$HOME/harmonyos/bin/emulator-stop"
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+Run 1 stopped normally at 2026-07-17T01:01:48+08:00 and was archived after process exit.
+run1_archive=[HARMONY_HOME]/emulator-log-archive/20260716T170248Z-r1-smoke-run1-degraded
+run1_Emulator.log_sha256=ca843ed6702b3dc0b85520ee7ad7d7cc5192d7c08bfae91309af3168059c0ed3
+run1_qemu.log_sha256=8d393a4d457a6cbda9572dcd78034921c430615efa262b0a30ac652df13a96af
+run1_kernel.log_sha256=b84dae6d03489ae9f4e55a14375bede0e1ae1093a624cef2e66f704a4ef4e387
+run1_crash_server.log_sha256=b6ff481254c61c4e023ff48c19c8f8364935303ecebb749189557fd238ac20be
+
+[run2_start_and_readiness]
+Run 2 cold-started in a new harmonyos-emulator-run tmux session at 2026-07-17T01:02:59+08:00 on explicit HDC port 10000. Beta HDC connected at 2026-07-17T01:03:49+08:00.
+$ "$HDC" list targets -v
+127.0.0.1:10000 TCP Connected localhost
+127.0.0.1:5555 TCP Offline unknown...
+$ timeout 15 "$HDC" -t 127.0.0.1:10000 shell echo run2-smoke
+run2-smoke
+$ timeout 15 "$HDC" -t 127.0.0.1:10000 shell uname -a
+Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+$ timeout 15 "$HDC" -t 127.0.0.1:10000 shell param get bootevent.boot.completed
+Get parameter "bootevent.boot.completed" fail! errNum is:106!
+$ timeout 15 "$HDC" -t 127.0.0.1:10000 shell param get const.product.os.dist.name
+HarmonyOS
+Run 2 readiness verdict: FAIL because boot.completed was not true.
+
+[run2_ability_start_and_hilog]
+$ timeout 30 "$HDC" -t 127.0.0.1:10000 shell "aa start -a EntryAbility -b cn.alfadb.netbird.r1probe"
+error: failed to start ability.
+Error Code:10106102  Error Message:The device screen is locked during the application launch, unlock screen failed.
+Error cause: The current mode is developer mode, and the screen cannot be unlocked automatically
+Try the following: Check in the settings whether the current device is in developer mode, and turn off developer mode
+The hdc process returned exit 0 despite the semantic aa error; success was judged from message content, not process status.
+A non-blocking `hilog -x -T R1Api24Probe` capture returned no matching lines.
+Standard no-credential UI actions were attempted without changing security settings:
+$ power-shell wakeup
+WakeupDevice is called
+$ uitest uiInput swipe 660 2400 660 600 1000
+No Error
+The same aa start command returned the same Error Code 10106102. A second non-blocking tag capture again returned no matching lines. `uitest screenCap` then returned `ScreenCap failed: Failed to get display pixelMap`; no usable screenshot was produced. Developer mode was not disabled and no lock-screen policy, password, signature trust, or security configuration was changed.
+Ability start verdict: BLOCKED by Emulator screen/display state.
+R1Api24Probe initialized log: NOT OBSERVED.
+ping=pong: NOT VERIFIED.
+version=r1-api24-probe/0.0.1: NOT VERIFIED.
+No crash was reported by crash_server.log; the file contains only TraceTool initialization lines for the observed runs.
+
+[cleanup]
+CLEANUP_STARTED=2026-07-17T01:05:39+08:00
+$ timeout 30 "$HDC" -t 127.0.0.1:10000 shell "aa force-stop cn.alfadb.netbird.r1probe"
+force stop process successfully.
+FORCE_STOP_EXIT=0
+$ timeout 120 "$HDC" -t 127.0.0.1:10000 uninstall cn.alfadb.netbird.r1probe
+[Info]App uninstall path: msg:uninstall bundle successfully.
+AppMod finish
+UNINSTALL_EXIT=0
+A post-uninstall `bm dump -n cn.alfadb.netbird.r1probe` returned `error: failed to get information and the parameters may be wrong.` A post-cleanup shell echo returned post-cleanup-smoke.
+CLEANUP_ENDED=2026-07-17T01:05:40+08:00
+$ "$HOME/harmonyos/bin/emulator-stop"
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+STOP_HELPER_EXIT=0
+PROCESS_EXIT_CONFIRMED=2026-07-17T01:05:55+08:00
+run2_archive=[HARMONY_HOME]/emulator-log-archive/20260716T170555Z-r1-smoke-run2-lock-blocked
+run2_Emulator.log_size=33541
+run2_Emulator.log_sha256=29c60e56c46be0e76b80b2c9c201907da4ac265c772c68bcd4269c2450390385
+run2_qemu.log_size=29641
+run2_qemu.log_sha256=099a2e26f95b0df0ceed9f7f93d8fabb61d66c1a1236348b0c14daae1fe38b6d
+run2_kernel.log_size=7036244
+run2_kernel.log_sha256=55a1ab12eb855d6067ba130f7bba52d55fb3eeecc4f171d5912296fb9904dd4d
+run2_crash_server.log_size=440
+run2_crash_server.log_sha256=f898f770f8d0a3a2c46de2f789e5f75fa80bf5fb1a5633d9a30384555ee59aec
+The Emulator logs show normal quit and crash-service normal quit. Final Beta target state at 2026-07-17T01:06:26+08:00 was 127.0.0.1:10000 Offline and 127.0.0.1:5555 Offline. No Emulator process, port 10000 listener, or harmonyos-emulator-run tmux session remained. The active caller pane was netbird:0.0 %45.
+
+[result]
+Overall verdict=blocked
+Readiness=failed because bootevent.boot.completed never returned true in either cold run; echo, uname, and HarmonyOS distribution passed while HDC was healthy.
+Unsigned HAP installation=passed on the API 24 Emulator; this is only current-measured behavior of this research image and does not establish production signing or distribution behavior.
+Ability launch=blocked with Error Code 10106102 because the Emulator screen was locked/unavailable; the standard wake and swipe attempt did not change the result.
+HiLog ping/version=not verified because EntryAbility did not launch and no R1Api24Probe lines were observed.
+Stop/uninstall=passed; the bundle was force-stopped, uninstalled, and absent on post-uninstall query before normal Emulator shutdown.
+Research boundary=This Emulator result cannot be used for R1 exit, named-device support, NetBird feasibility, VPN feasibility, product support, signing acceptance, channel acceptance, or release evidence. R0 remains in progress and not exited.
+Next blocker=restore an API 24 Emulator instance/display state that reaches bootevent.boot.completed=true and allows a normal EntryAbility launch, then rerun the same fixed HAP smoke; named arm64 device evidence remains mandatory for R0/R1 exit when hardware is available.

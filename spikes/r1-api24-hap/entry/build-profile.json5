@@ -1,0 +1,46 @@
+{
+  apiType: 'stageMode',
+  buildOption: {
+    externalNativeOptions: {
+      path: './src/main/cpp/CMakeLists.txt',
+      abiFilters: [
+        'arm64-v8a',
+        'x86_64'
+      ],
+      targets: [
+        'probe'
+      ]
+    },
+    nativeLib: {
+      debugSymbol: {
+        strip: true,
+        exclude: [
+          '**/libtls-ie.so',
+          '**/libtls-gd.so',
+          '**/libtls-desc.so',
+          '**/libtls-ld.so'
+        ]
+      }
+    }
+  },
+  targets: [
+    {
+      name: 'default',
+      runtimeOS: 'HarmonyOS',
+      config: {
+        deviceType: [
+          'phone'
+        ]
+      }
+    },
+    {
+      name: 'ohosTest',
+      runtimeOS: 'HarmonyOS',
+      config: {
+        deviceType: [
+          'phone'
+        ]
+      }
+    }
+  ]
+}

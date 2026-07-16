@@ -1,0 +1,2 @@
+# Preserve raw evidence bytes; disable Git whitespace checks and text normalization.
+docs/evidence/raw/** -whitespace -text

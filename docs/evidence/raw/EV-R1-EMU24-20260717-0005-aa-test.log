@@ -1,0 +1,318 @@
+evidence_id=EV-R1-EMU24-20260717-0005
+record_scope=API 24 ohosTest TestRunner Node-API probe only
+workspace_alias=[WORKSPACE]
+harmony_home_alias=[HARMONY_HOME]
+stable_tools_alias=[STABLE_TOOLS]=[HARMONY_HOME]/command-line-tools/6.1.1.290
+emulator_tools_alias=[EMULATOR_TOOLS]=[HARMONY_HOME]/command-line-tools/26.0.0.461
+beta_hdc_alias=[BETA_HDC]=[EMULATOR_TOOLS]/sdk/default/openharmony/toolchains/hdc
+emulator_alias=[EMULATOR]=[EMULATOR_TOOLS]/emulator/Emulator
+instance_alias=[INSTANCE]=[HARMONY_HOME]/emulator-instances/netbird_api24_phone
+image_root_alias=[IMAGE_ROOT]=[HARMONY_HOME]/emulator-images
+app_hap_alias=[APP_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+test_hap_alias=[TEST_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+target=127.0.0.1:10000
+runtime_tmux_session=harmonyos-api24-aa-test-0005
+hypium_dependency=absent
+service_extension=absent
+app_service=absent
+enterprise_acl=absent
+
+--- local API 24 and Hvigor 6.24.3 discovery ---
+[STABLE_TOOLS]/sdk/default/openharmony/ets/api/@ohos.application.testRunner.d.ts defines TestRunner.onPrepare(): void and TestRunner.onRun(): void.
+[STABLE_TOOLS]/sdk/default/openharmony/toolchains/configcheck/configSchema_rich.json requires module.testRunner.name and module.testRunner.srcPath.
+[STABLE_TOOLS]/hvigor/hvigor-ohos-plugin/src/utils/ohos-test-util.js recognizes src/ohosTest/ets/testrunner/OpenHarmonyTestRunner.ets and otherwise generates a TestAbility template.
+[STABLE_TOOLS]/hvigor/hvigor-ohos-plugin/node_modules/@ohos/coverage/lib/src/commandLine/ohosTest/executeOhosTest.js runs aa test with module name and /ets/testrunner/OpenHarmonyTestRunner.
+[STABLE_TOOLS]/sdk/default/openharmony/ets/api/application/AbilityDelegator.d.ts provides printSync and finishTest, so this probe does not require @ohos/hypium.
+
+Exploratory cold start was used only to read device-side help before source finalization and was normally stopped before the measured build and run.
+$ [BETA_HDC] shell aa test --help
+usage: aa test <options>
+options list:
+  -h, --help                                             list available commands
+  -b <bundle-name> -s unittest <test-runner>             start the test framework with options
+                  [-p <package-name>]                    the name of package with test-runner, required for the FA model
+                  [-m <module-name>]                     the name of module with test-runner, required for the STAGE model
+                  [-s class <test-class>]
+                  [-s level <test-level>]
+                  [-s size <test-size>]
+                  [-s testType <test-testType>]
+                  [-s timeout <test-timeout>]
+                  [-s <any-key> <any-value>]
+                  [-w <wait-time>]
+                  [-D]
+
+--- schema-negative build retained ---
+The first test module draft used testRunner.srcEntry. The local API 24 schema rejected it before compilation.
+> hvigor ERROR: Failed :entry:ohosTest@PreBuild
+00303038 Configuration Error
+Schema validate failed at [WORKSPACE]/spikes/r1-api24-hap/entry/src/ohosTest/module.json5
+instancePath: module.testRunner
+missingProperty: srcPath
+propertyName: srcEntry
+message: property name must be valid
+BUILD FAILED in 2 s 250 ms
+The source was changed to the locally required srcPath field. No compatibility shim or policy workaround was added.
+
+--- final cold build ---
+BUILD_STARTED_AT=2026-07-17T01:54:43+08:00
+$ [STABLE_TOOLS]/bin/ohpm install --all
+install completed in 0s 78ms
+$ [STABLE_TOOLS]/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor Finished :entry:clean... after 62 ms
+> hvigor BUILD SUCCESSFUL in 2 s 87 ms
+APP_BUILD_STARTED_AT=2026-07-17T01:54:48+08:00
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor UP-TO-DATE :entry:default@PreBuild
+> hvigor Finished :entry:default@CreateModuleInfo... after 2 ms
+> hvigor Finished :entry:default@GenerateMetadata... after 4 ms
+> hvigor Finished :entry:default@ConfigureCmake... after 39 ms
+> hvigor Finished :entry:default@MergeProfile... after 6 ms
+> hvigor Finished :entry:default@CreateBuildProfile... after 3 ms
+> hvigor Finished :entry:default@PreCheckSyscap... after 1 ms
+> hvigor Finished :entry:default@GeneratePkgContextInfo... after 6 ms
+> hvigor Finished :entry:default@GeneratePkgSdkInfo... after 3 ms
+> hvigor Finished :entry:default@ProcessIntegratedHsp... after 1 ms
+> hvigor Finished :entry:default@MakePackInfo... after 4 ms
+> hvigor Finished :entry:default@SyscapTransform... after 14 ms
+> hvigor Finished :entry:default@ProcessProfile... after 69 ms
+> hvigor Finished :entry:default@ProcessRouterMap... after 5 ms
+> hvigor Finished :entry:default@ProcessShareConfig... after 4 ms
+> hvigor Finished :entry:default@ProcessStartupConfig... after 3 ms
+> hvigor Finished :entry:default@ProcessResource... after 5 ms
+> hvigor Finished :entry:default@GenerateLoaderJson... after 13 ms
+> hvigor Finished :entry:default@CompileResource... after 127 ms
+> hvigor Finished :entry:default@BuildJS... after 3 ms
+> hvigor Finished :entry:default@BuildNativeWithCmake... after 5 s 418 ms
+> hvigor Finished :entry:default@BuildNativeWithNinja... after 115 ms
+> hvigor Finished :entry:default@ProcessLibs... after 309 ms
+> hvigor Finished :entry:default@DoNativeStrip... after 97 ms
+> hvigor Finished :entry:default@CacheNativeLibs... after 8 ms
+> hvigor Finished :entry:default@CompileArkTS... after 6 s 546 ms
+> hvigor Finished :entry:default@GeneratePkgModuleJson... after 3 ms
+> hvigor Finished :entry:default@ProcessCompiledResources... after 1 ms
+> hvigor Finished :entry:default@PackageHap... after 451 ms
+> hvigor Finished :entry:default@PackingCheck... after 5 ms
+> hvigor WARN: No signingConfig found for product default
+> hvigor Finished :entry:default@SignHap... after 3 ms
+> hvigor Finished :entry:default@CollectDebugSymbol... after 2 ms
+> hvigor Finished :entry:assembleHap... after 1 ms
+> hvigor BUILD SUCCESSFUL in 11 s 392 ms
+APP_BUILD_ENDED_AT=2026-07-17T01:55:01+08:00
+TEST_BUILD_STARTED_AT=2026-07-17T01:55:01+08:00
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+> hvigor UP-TO-DATE :entry:ohosTest@PreBuild
+> hvigor Finished :entry:ohosTest@CreateModuleInfo... after 2 ms
+> hvigor Finished :entry:ohosTest@GenerateMetadata... after 4 ms
+> hvigor Finished :entry:ohosTest@ConfigureCmake... after 1 ms
+> hvigor Finished :entry:ohosTest@MergeProfile... after 9 ms
+> hvigor Finished :entry:ohosTest@CreateBuildProfile... after 3 ms
+> hvigor Finished :entry:ohosTest@PreCheckSyscap... after 1 ms
+> hvigor Finished :entry:ohosTest@GeneratePkgContextInfo... after 9 ms
+> hvigor Finished :entry:ohosTest@GeneratePkgSdkInfo... after 4 ms
+> hvigor Finished :entry:ohosTest@ProcessIntegratedHsp... after 1 ms
+> hvigor Finished :entry:ohosTest@BuildNativeWithCmake... after 1 ms
+> hvigor Finished :entry:ohosTest@MakePackInfo... after 4 ms
+> hvigor Finished :entry:ohosTest@SyscapTransform... after 14 ms
+> hvigor Finished :entry:ohosTest@ProcessProfile... after 62 ms
+> hvigor Finished :entry:ohosTest@ProcessRouterMap... after 3 ms
+> hvigor Finished :entry:ohosTest@ProcessShareConfig... after 3 ms
+> hvigor Finished :entry:ohosTest@ProcessStartupConfig... after 2 ms
+> hvigor Finished :entry:ohosTest@BuildNativeWithNinja... after 1 ms
+> hvigor Finished :entry:ohosTest@ProcessResource... after 7 ms
+> hvigor Finished :entry:ohosTest@GenerateLoaderJson... after 8 ms
+> hvigor Finished :entry:ohosTest@ProcessLibs... after 7 ms
+> hvigor Finished :entry:ohosTest@CompileResource... after 137 ms
+> hvigor Finished :entry:ohosTest@DoNativeStrip... after 3 ms
+> hvigor Finished :entry:ohosTest@OhosTestBuildJS... after 2 ms
+> hvigor Finished :entry:ohosTest@CacheNativeLibs... after 8 ms
+> hvigor Finished :entry:ohosTest@OhosTestCompileArkTS... after 6 s 250 ms
+> hvigor Finished :entry:ohosTest@OhosTestCopyMockConfigJson... after 2 ms
+> hvigor Finished :entry:ohosTest@GeneratePkgModuleJson... after 3 ms
+> hvigor Finished :entry:ohosTest@ProcessCompiledResources... after 1 ms
+> hvigor Finished :entry:ohosTest@PackageHap... after 485 ms
+> hvigor Finished :entry:ohosTest@PackingCheck... after 4 ms
+> hvigor WARN: No signingConfig found for product default
+> hvigor Finished :entry:ohosTest@SignHap... after 3 ms
+> hvigor Finished :entry:ohosTest@CollectDebugSymbol... after 2 ms
+> hvigor Finished :entry:assembleHap... after 1 ms
+> hvigor BUILD SUCCESSFUL in 11 s 198 ms
+TEST_BUILD_ENDED_AT=2026-07-17T01:55:13+08:00
+BUILD_ENDED_AT=2026-07-17T01:55:13+08:00
+
+--- final build objects ---
+953b4333db8cce882f67e2197a871a5092eb3927f05c5278dd03f0b27b439418  [APP_HAP]
+9158ae10925b23c9b58984ffea3341a1f2c613897f9bec5b068e4bf94b8e30b9  [TEST_HAP]
+5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c  [WORKSPACE]/spikes/r1-api24-hap/entry/build/default/intermediates/hap_metadata/default/output_metadata.json
+76f9e1d064062a6e7d9a59adb4cbda96fb3ab4c710d9b6b016e9659e9941013a  [WORKSPACE]/spikes/r1-api24-hap/entry/build/default/intermediates/hap_metadata/ohosTest/output_metadata.json
+f201c717ddeb6fedbbc57414a57534427fa5f7efa940c495660b516871d82544  [WORKSPACE]/spikes/r1-api24-hap/entry/oh-package-lock.json5
+9516415543861be9e01ab01078499f7daa2ef69b40cbb2cf781eafd8a921876f  canonical sorted SHA-256 manifest of non-generated probe code and configuration, excluding Markdown
+[APP_HAP] size=2585745 mtime=2026-07-17T01:55:01.156499587+08:00
+[TEST_HAP] size=11110 mtime=2026-07-17T01:55:13.514669468+08:00
+Both output_metadata.json files report isSigned:false.
+[APP_HAP] contains libs/x86_64/libprobe.so and libs/arm64-v8a/libprobe.so.
+[TEST_HAP] contains the entry_test Runner ABC and does not duplicate native libraries; its pkgSdkInfo.json records libprobe.so as a direct dependency and entry as a dependency.
+[TEST_HAP] ABC strings include @app:cn.alfadb.netbird.r1probe/entry_test/probe, pong, r1-api24-probe/0.0.1, and OpenHarmonyTestRunner.
+
+--- measured runtime preflight ---
+PRECHECK_AT=2026-07-17T01:56:06+08:00
+No Emulator/qemu process, experiment tmux session, or listener on ports 10000, 5555, or 8710 was present.
+KVM_FD_OPENED
+DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority xdpyinfo: name of display :1, dimensions 1920x1080 pixels.
+glxinfo was not present in this shell, so no new renderer claim is made; EV-R1-EMU24-20260717-0004 already established pixelMap on this same visible path.
+stable_tools=[STABLE_TOOLS]
+emulator_tools=[EMULATOR_TOOLS]
+[BETA_HDC] version=3.2.0e
+Hvigor=6.24.3
+ohpm=6.1.2.285
+
+EMULATOR_LAUNCH_AT=2026-07-17T01:56:21+08:00
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [EMULATOR] -start netbird_api24_phone -instancePath [HARMONY_HOME]/emulator-instances -imageRoot [IMAGE_ROOT] -hdcport 10000
+runtime_tmux_session=harmonyos-api24-aa-test-0005
+
+READINESS_ATTEMPT=1 ELAPSED_SECONDS=0 AT=2026-07-17T01:56:34+08:00
+[BETA_HDC] target=127.0.0.1:10000 TCP Offline unknown
+READINESS_ATTEMPT=2 ELAPSED_SECONDS=6 AT=2026-07-17T01:56:40+08:00
+[BETA_HDC] target=127.0.0.1:10000 TCP Offline unknown
+READINESS_ATTEMPT=3 ELAPSED_SECONDS=11 AT=2026-07-17T01:56:45+08:00
+[BETA_HDC] target=127.0.0.1:10000 TCP Connected localhost
+ECHO=r1-aa-test-readiness
+UNAME=Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+DIST=HarmonyOS
+BOOT_COMPLETED=Get parameter "bootevent.boot.completed" fail! errNum is:106!
+SHELL_READINESS=1 ENDED_AT=2026-07-17T01:56:47+08:00
+
+SCREENCAP_AT=2026-07-17T01:57:02+08:00
+$ [BETA_HDC] shell uitest screenCap
+ScreenCap saved to /data/local/tmp/screenCap_39067406.png
+bootevent.bootanimation.finished=errNum 1002
+bootevent.launcher.ready=errNum 1002
+bootevent.lockscreen.ready=errNum 1002
+
+AA_TEST_HELP_AT=2026-07-17T01:57:02+08:00
+$ [BETA_HDC] shell aa test --help
+usage: aa test <options>
+options list:
+  -h, --help                                             list available commands
+  -b <bundle-name> -s unittest <test-runner>             start the test framework with options
+                  [-p <package-name>]                    the name of package with test-runner, required for the FA model
+                  [-m <module-name>]                     the name of module with test-runner, required for the STAGE model
+                  [-s class <test-class>]
+                  [-s level <test-level>]
+                  [-s size <test-size>]
+                  [-s testType <test-testType>]
+                  [-s timeout <test-timeout>]
+                  [-s <any-key> <any-value>]
+                  [-w <wait-time>]
+                  [-D]
+
+BUNDLE_PREINSTALL_AT=2026-07-17T01:57:02+08:00
+$ [BETA_HDC] shell bm dump -n cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+
+--- application and test HAP installation ---
+INSTALL_STARTED_AT=2026-07-17T01:57:22+08:00
+953b4333db8cce882f67e2197a871a5092eb3927f05c5278dd03f0b27b439418  [APP_HAP]
+9158ae10925b23c9b58984ffea3341a1f2c613897f9bec5b068e4bf94b8e30b9  [TEST_HAP]
+$ [BETA_HDC] shell rm -rf /data/local/tmp/r1-aa-test-0005
+$ [BETA_HDC] shell mkdir /data/local/tmp/r1-aa-test-0005
+$ [BETA_HDC] file send [APP_HAP] /data/local/tmp/r1-aa-test-0005
+FileTransfer finish, Size:2585745, File count = 1, time:17ms rate:152102.65kB/s
+$ [BETA_HDC] file send [TEST_HAP] /data/local/tmp/r1-aa-test-0005
+FileTransfer finish, Size:11110, File count = 1, time:4ms rate:2777.50kB/s
+$ [BETA_HDC] shell ls -l /data/local/tmp/r1-aa-test-0005
+-rw-r--r-- 1 shell shell 2585745 2026-07-17 01:57 entry-default-unsigned.hap
+-rw-r--r-- 1 shell shell   11110 2026-07-17 01:57 entry-ohosTest-unsigned.hap
+$ [BETA_HDC] shell bm install -p /data/local/tmp/r1-aa-test-0005
+install bundle successfully.
+INSTALL_ENDED_AT=2026-07-17T01:57:23+08:00
+Post-install host HAP hashes remained unchanged.
+
+BUNDLE_VERIFY_AT=2026-07-17T01:57:32+08:00
+bm dump selected fields:
+appSignType=none
+cpuAbi=x86_64
+nativeLibraryPath=libs/x86_64
+moduleName=entry
+moduleName=entry_test
+hapPath=/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap
+hapPath=/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry_test.hap
+
+--- aa test execution ---
+HILOG_CLEAR_AT=2026-07-17T01:58:07+08:00
+$ [BETA_HDC] shell hilog -r
+Log type core,app,only_prerelease buffer clear successfully
+AA_TEST_STARTED_AT=2026-07-17T01:58:07+08:00
+$ [BETA_HDC] shell aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+Node-API result ping=pong version=r1-api24-probe/0.0.1
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: Node-API result ping=pong version=r1-api24-probe/0.0.1; Node-API assertions passed
+user test finished.
+AA_TEST_HOST_RC=0
+AA_TEST_ENDED_AT=2026-07-17T01:58:08+08:00
+
+HILOG_PROBE_CAPTURE_AT=2026-07-17T01:58:30+08:00
+$ [BETA_HDC] shell hilog -x -T R1Api24Probe,R1Api24ProbeTest -v year -v zone
+CST 2026-07-17 01:58:07.764  2964  2964 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 01:58:07.764  2964  2964 I A02900/R1Api24ProbeTest: TestRunner onPrepare
+CST 2026-07-17 01:58:07.774  2964  2964 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 01:58:07.774  2964  2964 I A02900/R1Api24ProbeTest: Node-API result ping=pong version=r1-api24-probe/0.0.1
+CST 2026-07-17 01:58:07.775  2964  2964 I A02900/R1Api24ProbeTest: Node-API assertions passed
+
+A supplementary regex query with unescaped pipe characters was tokenized by the guest shell and returned inaccessible-command errors. A retry combining -e and -z returned hilog CODE -31. Neither query is used for the verdict; the dedicated-tag non-blocking capture above was successful and complete.
+
+POST_TEST_HEALTH_AT=2026-07-17T01:58:30+08:00
+127.0.0.1:10000 TCP Connected localhost
+post-aa-test-smoke
+HarmonyOS
+true
+The boot.completed parameter changed from absent before the test to true after the test; no causal claim is made.
+GUEST_PROCESS_POST_TEST_AT=2026-07-17T01:59:03+08:00
+No cn.alfadb.netbird.r1probe, OpenHarmonyTestRunner, or PID 2964 line remained in guest ps or aa process dump.
+
+--- cleanup and normal stop ---
+CLEANUP_STARTED_AT=2026-07-17T01:59:25+08:00
+$ [BETA_HDC] shell rm -rf /data/local/tmp/r1-aa-test-0005 /data/local/tmp/screenCap_39067406.png
+$ [BETA_HDC] shell aa force-stop cn.alfadb.netbird.r1probe
+force stop process successfully.
+$ [BETA_HDC] uninstall cn.alfadb.netbird.r1probe
+[Info]App uninstall path: msg:uninstall bundle successfully.
+AppMod finish
+$ [BETA_HDC] shell bm dump -n cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+POST_UNINSTALL_DUMP_RC=0
+CLEANUP_ENDED_AT=2026-07-17T01:59:28+08:00
+
+EMULATOR_STOP_STARTED_AT=2026-07-17T01:59:41+08:00
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-stop
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+EMULATOR_STOP_ENDED_AT=2026-07-17T01:59:42+08:00
+127.0.0.1:10000 TCP Offline localhost
+
+Mutable [INSTANCE]/Log hashes immediately after normal stop:
+42ee8d95b3e10e50441dc0afd0b8b977fe495b8234da92883788ebd8c614893c  [INSTANCE]/Log/Emulator.log
+a1eba76a14fe964d8d10fc67990096b867276b0fd5e026273b42a402fa7a7cda  [INSTANCE]/Log/qemu.log
+b96f235f7469ac764bb50432b3d808c09a0b9b8d4464d15e339d5fda672fc4a2  [INSTANCE]/Log/kernel.log
+f87090fb2ee9662fdaaf0b23dc735f1d0c207a33d2875384042afb42742055e3  [INSTANCE]/Log/crash_server.log
+These HOME logs are cumulative mutable instance files and were not copied into an immutable artifact archive; their hashes are observational references only.
+Emulator.log tail records quit emulator, stop crash log dumper, close hdc connection, crash-service normal quit, StopCheckGuestMem, and StopCheckGuestStatus at 2026-07-17T01:59:42+08:00.
+crash_server.log has only TraceTool initialization lines for this run and no probe crash record.
+
+FINAL_RUNTIME_RESIDUE_CHECK_AT=2026-07-17T02:00:14+08:00
+ROOT_HVIGOR_ABSENT
+No Emulator, qemu, Beta HDC server, listener on ports 10000/5555/8710, or harmonyos-api24-aa-test-0005/harmonyos-api24-aa-help tmux session remained.
+Pre-existing harness tmux sessions netbird, pi, and pi-router were preserved.
+
+--- measured result and boundary ---
+aa_test_executed=yes
+aa_test_result_code=0
+node_api_initialized=yes
+ping=pong
+version=r1-api24-probe/0.0.1
+runner_assertions=passed
+test_runner_process_short_lived=yes
+uiability_started=no
+ordinary_uiability_10106102_retested=no
+r1_exit=no
+The successful aa test isolates the prior missing Node-API log from an inherent x86_64 loader or probe-function failure in this API 24 test process. It does not explain or clear the ordinary EntryAbility 10106102 result from EV-R1-EMU24-20260717-0004, does not validate a UIAbility lifecycle, and is not NetBird, Go, VPN, physical-device, signing, channel, product-support, or R1-exit evidence.
+The HAP objects were installed from ignored mutable Hvigor output paths. Their object IDs are bound only to the recorded sizes, mtimes, and SHA-256 values for this run; later builds may overwrite the paths, and no immutable HAP archive was created.

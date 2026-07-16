@@ -1,0 +1,710 @@
+PRELAUNCH_ATTEMPT_NOTE=The first parent launch guard exited before tmux creation because pgrep matched its own command line; no Emulator or experiment process was started.
+
+[metadata]
+evidence_id=EV-R1-EMU24-20260717-0003
+hap_object_id=EO-R1-EMU24-20260717-0003-HAP-01
+information_status=current-measured
+record_status=draft
+stage=R1
+purpose=API 24 visible Emulator root-cause experiment and existing unsigned HAP smoke
+started_at=2026-07-17T01:34:50+08:00
+clock_source=host CLOCK_REALTIME via date --iso-8601=seconds and Emulator logs
+timezone=Asia/Shanghai (+08:00)
+working_directory=[WORKSPACE]
+original_tmux_pane=netbird:0.0 %45
+runtime_tmux_session=harmonyos-api24-display-exp1
+instance=netbird_api24_phone
+target=127.0.0.1:10000
+display_in_caller_environment=unset
+selected_display=:1
+selected_xauthority=[HOME]/.Xauthority
+launch_delta_from_helper=removed trailing -noWindow only; DISPLAY and XAUTHORITY supplied to the process environment
+software_gpu_experiment_policy=only if experiment 1 fails for X/renderer and Emulator --help explicitly supports a software renderer
+software_gpu_help_support=no
+stable_hdc_target_operations=none
+hap_path=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+hap_audit_boundary=mutable ignored build output; not copied to an immutable artifact archive; this evidence binds only the pre-install SHA-256, size, mtime, and object ID
+
+[preconditions_and_no_residuals]
+Parent preflight removed the prior Beta HDC server and found no Emulator/qemu process, port 10000/5555/8710 listener, experiment tmux session, or repository-root .hvigor. Harness sessions netbird, pi, and pi-router were intentionally preserved.
+$ tmux list-panes -a -F session=#\{session_name\}\ window=#\{window_index\}\ pane=#\{pane_index\}\ pane_id=#\{pane_id\}\ pid=#\{pane_pid\}\ dead=#\{pane_dead\}\ command=#\{pane_current_command\}
+session=harmonyos-api24-display-exp1 window=0 pane=0 pane_id=%49 pid=525985 dead=0 command=bash
+session=netbird window=0 pane=0 pane_id=%45 pid=4156983 dead=0 command=pi
+session=pi window=0 pane=0 pane_id=%30 pid=3496939 dead=0 command=pi
+session=pi-router window=0 pane=0 pane_id=%29 pid=3490996 dead=0 command=pi
+EXIT=0
+$ ps -u "$USER" -o pid,args | search exact Emulator/qemu/HDC server processes
+ 525973 /bin/bash -c printf '%s\n' 'PRELAUNCH_ATTEMPT_NOTE=The first parent launch guard exited before tmux creation because pgrep matched its own command line; no Emulator or experiment process was started.' >> docs/evidence/raw/EV-R1-EMU24-20260717-0003-display-hap-smoke.log; HAS_EMU=$(ps -u "$USER" -o args= | awk '$0 ~ /\/Emulator .* -start netbird_api24_phone/ {n++} END {print n+0}'); HAS_HDC=$(ps -u "$USER" -o args= | awk '$0 ~ /^hdc -m -s / {n++} END {print n+0}'); HAS_PORT=$(ss -ltn | awk '$4 ~ /:(10000|5555|8710)$/ {n++} END {print n+0}'); printf 'HAS_EMU=%s HAS_HDC=%s HAS_PORT=%s\n' "$HAS_EMU" "$HAS_HDC" "$HAS_PORT"; test "$HAS_EMU" -eq 0; test "$HAS_HDC" -eq 0; test "$HAS_PORT" -eq 0; test ! -e .hvigor; ! tmux has-session -t harmonyos-api24-display-exp1 2>/dev/null; tmux new-session -d -s harmonyos-api24-display-exp1 -n runner "exec env ORIGINAL_TMUX_PANE='netbird:0.0 %45' EXPERIMENT_TMUX_SESSION='harmonyos-api24-display-exp1' bash /tmp/run-ev-r1-emu24-20260717-0003.sh"; sleep 5; tmux list-panes -t harmonyos-api24-display-exp1 -F 'window=#{window_name} pane=#{pane_id} pid=#{pane_pid} dead=#{pane_dead} command=#{pane_current_command}'; printf '%s\n' '--- raw log tail ---'; tail -100 docs/evidence/raw/EV-R1-EMU24-20260717-0003-display-hap-smoke.log
+ 525994 awk $0 ~ /\/Emulator( |$)|qemu-system|hdc -m -s/ {print}
+$ ss -ltnp | search ports 10000, 5555, and 8710
+$ find [WORKSPACE] -maxdepth 1 -name .hvigor -print
+EXIT=0
+$ ls -l /dev/kvm
+crw-rw---- 1 root rdma 10, 232 Jul 17 01:05 /dev/kvm
+EXIT=0
+$ exec 9<>/dev/kvm && printf KVM-fd-opened && exec 9>&-
+KVM_FD_OPENED=true
+$ readlink -f [HARMONY_HOME]/emulator-current
+[HARMONY_HOME]/command-line-tools/26.0.0.461
+EXIT=0
+$ [HARMONY_HOME]/emulator-current/bin/Emulator -version
+HarmonyOS Emulator :26.0.0.200
+EXIT=0
+$ [HARMONY_HOME]/emulator-current/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+EXIT=0
+$ test no Beta HDC server remains after parent cleanup
+RESIDUAL_HDC_SERVER=false
+
+[display_and_renderer_preflight]
+$ env | search DISPLAY/WAYLAND/XAUTHORITY in caller context
+No DISPLAY, WAYLAND_DISPLAY, or XAUTHORITY variable was inherited by the caller.
+$ ls -l /tmp/.X11-unix/X1
+srwxrwxrwx 1 worker worker 0 Jul 11 15:05 /tmp/.X11-unix/X1
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority xdpyinfo (selected fields)
+name of display:    :1
+vendor string:    The X.Org Foundation
+vendor release number:    12101016
+    GLX
+    RENDER
+    XTEST
+  dimensions:    1920x1080 pixels (509x286 millimeters)
+  depth of root window:    24 planes
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority glxinfo -B
+glxinfo unavailable on host; no package was installed.
+$ ls -l /dev/dri
+total 0
+crw-rw---- 1 root video 226,   1 Jul 11 15:05 card1
+crw-rw---- 1 root video 226,   2 Jul 11 15:05 card2
+crw-rw---- 1 root kvm   226, 128 Jul 11 15:05 renderD128
+$ [EMULATOR] --help
+These are common Emulator commands used in various situations: 
+Emulator [-start <name> [-instancePath <path> -imageRoot <path> -bootMode <mode> -noWindow
+            -grpcServer -grpcPort <port> -noAuth -pem_cert_chain <path>
+            -pem_private_key <path> -pem_root_certs <path>]] 
+         [-create <name> -deviceType <type> -osVersion <version> [-instancePath <path> -imageRoot <path>
+            -screenProfile <model> -screen <config> -storage <size> -memory <size> -hotBoot <true/false>]]
+         [-delete <name> [-instancePath <path> -force]] 
+         [-imageList [-deviceType <type> -downloaded <true/false> -http_proxy <url>]]
+         [-install -deviceType <type> -osVersion <version> [-imageRoot <path> -http_proxy <url> -force]] 
+         [-uninstall -deviceType <type> -osVersion <version> [-imageRoot <path> -force]] 
+         [-logZip <name> -logPath <path>] 
+         [-stop <name>] 
+         [-version] 
+         [-list [-details]] 
+         [-screenProfileList [-deviceType <type> -details -update -http_proxy <url>]] 
+         [-license [accept]] 
+         [-config [-instancePath <path> -imageRoot <path> -http_proxy <url>]] 
+         [-unset <instancePath/imageRoot/http_proxy>] 
+         [-instance <name> [-shake|-foldedState <foldstate>|-rotation <left/right>|-power|-volume <up/down>|
+            -screenshot [-screenshotPath <path>]|-battery <level>|-batteryStatus <status>|
+            -gps -latitude <latitude>/-longitude <longitude>/-altitude <altitude>/-city <city>/-bearing <bearing>|
+            -outdoorRunning|-outdoorCycling|-drivingNavigation|-sensor -light <light>/-steps <steps>/
+            -heartrate <heartrate>]]
+
+-license:              Display all license agreements, use "accept" to auto-accept
+-start/-hvd:           Start the emulator (HarmonyOS software service agreement must be accepted)
+-noWindow:             Start the emulator without GUI window
+-stop:                 Stop the emulator
+-instancePath/-path:   Emulator instance directory
+-imageRoot:            Emulator image root directory
+-list:                 List all emulator instances
+-version:              Show emulator version
+-hdcPort:              Specify hdc port (10000~16555)
+-logZip:               Collect the emulator logs
+-logPath:              Directory for collected logs
+-create:               Create a new emulator instance
+-delete:               Delete the specified emulator instance
+-deviceType:           Specify emulator device type
+-osVersion:            Specify HarmonyOS image version
+-screenProfile:        Specify screen profile model
+-screen:               Specify screen configuration
+-storage               Virtual storage size in GBs (2~1023, default: 6)
+-memory:               Virtual memory size in GBs (2~32, default: 4)
+-hotBoot:              Enable or disable emulator Quick Boot feature
+-details:              Display detailed information
+-imageList:            List available emulator images
+-screenProfileList:    List all device types and models that support custom screen profiles
+-downloaded:           List downloaded emulator image versions
+-install:              Download emulator image for specified [deviceType] and [osVersion]
+-uninstall:            Remove emulator image for specified [deviceType] and [osVersion]
+-config:               Set default config (instancePath, imageRoot, http_proxy)
+-unset:                Remove default config
+-http_proxy:           Network proxy configuration
+-force:                Skip interaction and forcibly execute the command
+-bootMode:             Boot mode:coldboot(boot with data) reset(boot with data reset) snapshot(quick boot)
+-grpcServer:           Enable gRPC server for external control with TLS + Token authentication
+-grpcPort:             gRPC server port (1~65535)
+-noAuth:               Disable authentication for gRPC server (not recommended)
+-pem_cert_chain:       Path to server certificate chain file (PEM format)
+-pem_private_key:      Path to server private key file (PEM format)
+-pem_root_certs:       Path to CA root certificate file (PEM format)
+-instance:             Specify an instance for scenario simulation
+-shake:                Scenario-based simulated shake
+-volume:               Controlling the volume up and down.
+-power:                Simulates the power button.
+-rotation:             Control rotation left and right.
+-screenshot:           Capturing emulator screenshots.
+-screenshotPath:       Specify a screenshot path.
+-foldedState:          Switch the folded product's folding state
+-battery:              Change battery level
+-batteryStatus:        Change battery status
+-gps:                  Change the gps parameters, it must be followed by one of the parameters: -city,
+                           -latitude, -longitude, -altitude, -bearing.
+-latitude:             Change the gps latitude parameter, float in [-90.0, 90.0] (inclusive)
+-longitude:            Change the gps longitude parameter, float in [-180.0, 180.0] (inclusive)
+-altitude:             Change the gps altitude parameter, float in [-10000.0, 10000.0] meters
+-city:                 Modify GPS parameters based on the city name, string (e.g., "Beijing")
+-bearing:              Change the gps bearing parameter, float in [0.00, 359.99] degrees, with 2 decimal
+                           precision. 0=North, clockwise
+-outdoorRunning:       Change the gps parameters to perform a running scenario simulation
+-outdoorCycling:       Change the gps parameters to perform a cycling scenario simulation
+-drivingNavigation:    Change the gps parameters to perform a driving scenario simulation
+-sensor:               Controls the emulator to change the sensor parameters, it must be followed by one
+                           of the parameters: -light, -steps, -heartrate.
+-light                 Change the sensor light parameter, float in [0.0, 100000.0] (inclusive).
+-steps                 Change the sensor steps parameter, integer in [0, 100000] (inclusive).
+-heartrate             Change the sensor heartrate parameter, integer in [0, 255] (inclusive).
+
+========= help for create
+-deviceType:
+    Specify the emulator device type.
+    Supported values:
+      Phone | Foldable | WideFold | TripleFold | Tablet | 2in1 | 2in1 Foldable | Wearable | WearableKid | TV | Car
+
+-osVersion:
+    Specify the HarmonyOS image version for the emulator.
+    Format: HarmonyOS <version>(<api_version>) [BetaX]
+    Examples:
+      "HarmonyOS 6.0.0(20)"
+      "HarmonyOS 6.0.1(21) Beta1"
+
+-screenProfile:
+    Specify a predefined screen model (e.g. "Mate 70 Pro").
+    If both -screenProfile and -screen are specified, -screen takes precedence.
+    If neither is specified, a default model is selected based on -deviceType.
+
+-screen:
+    Specify a custom screen configuration.
+    Parameter order: width height dpi size
+      Phone / Tablet / 2in1:
+        "width height dpi size"
+        Example: "1080 2340 480 6.5"
+      Foldable devices:
+        "unfolded_width unfolded_height unfolded_dpi unfolded_size" "folded_width folded_height folded_dpi folded_size"
+        Example: "2200 2480 480 7.8" "1080 2480 480 6.4"
+    Notes:
+      - Width, height and DPI must be integers.
+      - Size (diagonal) is a floating-point number with up to 2 decimal places.
+
+
+========= help for Scenario
+-instance:
+    Specifies an emulator for scenario-based simulation
+    Examples:
+      "Emulator -instance <Emulator Name> -shake"
+-shake:
+    Specify the emulator to shake.
+-rotation:
+    Specify the emulator to rotate.
+    Examples:
+      "Emulator -instance <Emulator Name> -rotation left/right"
+-power:
+    Specify the emulator to simulate screen on/off
+-volume:
+    Specify the emulator to control the volume level
+    Examples:
+      "Emulator -instance <Emulator Name> -volume up/down"
+-screenshot:
+    Specify the emulator to screenshot.
+-screenshotPath:
+    Specify the path for saving the screenshot.(Optional)
+    Examples:
+      "Emulator -instance <Emulator Name> -screenshot -screenshotPath <Path>"
+-foldedState:
+    Controlling different folding forms of the foldable device
+    Examples:
+      "Emulator -instance <Emulator Name> -foldedState left-folded-right-half-folded"
+    Parameter Description:
+     FoldableFold:
+       open:                                      Fully expanded state
+       half-open:                                 Semi-Folded State
+       close:                                     Fully folded State
+     WideFold:
+       open:                                      Fully expanded state
+       half-open:                                 Semi-Folded State
+       close:                                     Fully folded State
+     2in1FoldableFold:
+       open:                                      Landscape unfolded state
+       vertical-open:                             Portrait unfolded state
+       half-open:                                 Semi-Folded State
+       close:                                     Magnetic Attachment
+     TripleFold:
+       single:                                    Single-screen state
+       double:                                    Double-screen state
+       triple:                                    Triple-screen state
+       left-folded-right-half-folded
+       left-half-folded-right-expanded
+       left-expanded-right-folded
+       left-half-folded-right-folded
+       left-expanded-right-half-folded
+       left-half-folded-right-half-folded
+-battery:
+    Specify the emulator to change battery level. Accepts an integer value between 0 and 100.
+    Examples:
+      "Emulator -instance <Emulator Name> -battery 90"
+-batteryStatus:
+    Specify the emulator to change battery charge status. Valid values: 0 (no charge), 1 (charging).
+    Examples:
+      "Emulator -instance <Emulator Name> -batteryStatus 1"
+-gps:
+    Controls the emulator to change the gps parameters: latitude, longitude, altitude, city and bearing,
+    it must be followed by one of the parameters: -latitude, -longitude, -altitude, -city, -bearing.
+    These parameters can be combined, but city takes the highest priority. If city is specified alongside
+    longitude, latitude, or altitude, the latter three parameters will be ignored.
+-latitude:
+    Change the gps latitude parameter, float in [-90.0, 90.0] (inclusive).
+    Examples:
+       "Emulator -instance <Emulator Name> -gps -latitude 39.915599"
+-longitude:
+    Change the gps longitude parameter, float in [-180.0, 180.0] (inclusive).
+    Examples:
+       "Emulator -instance <Emulator Name> -gps -longitude 116.400244"
+-altitude:
+    Change the gps altitude parameter, float in [-10000.0, 10000.0] meters.
+    Examples:
+       "Emulator -instance <Emulator Name> -gps -altitude 45.49"
+-city:
+    Modify GPS parameters based on the city name, string (e.g., Beijing). In Mainland China, 
+    the supported cities are: Beijing, Tianjin, Shanghai, Chongqing, Zhengzhou, Shijiazhuang, Taiyuan, 
+    Jinan, Changsha, Wuhan, Harbin, Changchun, Shenyang, Nanjing, Hangzhou, Fuzhou, Hefei, Nanchang, 
+    Xian, Guangzhou, Chengdu, Guiyang, Haikou, Taipei, Kunming, Lanzhou, Xining, Hohhot, Urumqi, 
+    Lhasa, Yinchuan, Nanning, Hong Kong and Macao; input is case-insensitive. For overseas locations,
+    the supported cities are: Beijing, Shanghai, New York, London, Paris, Moscow; input is also
+    case-insensitive for these locations.
+    Examples:
+       "Emulator -instance <Emulator Name> -gps -city Beijing"
+-bearing:
+    Change the gps bearing parameter, float in [0.0, 359.99] degrees with 2 decimal precision. 0=North,
+    clockwise.
+    Examples:
+       "Emulator -instance <Emulator Name> -gps -bearing 4.24"
+-outdoorRunning:
+    Running scenario simulation. Control the simulator to update GPS parameters (latitude, longitude, 
+    altitude, bearing) according to the timeline of a completed outdoor running scenario.
+    Examples:
+        "Emulator -instance <Emulator Name> -outdoorRunning"
+-outdoorCycling:
+    Cycling scenario simulation. Control the simulator to update GPS parameters (latitude, longitude, 
+    altitude, bearing) according to the timeline of a completed outdoor cycling scenario.
+    Examples:
+        "Emulator -instance <Emulator Name> -outdoorCycling"
+-drivingNavigation:
+    Driving scenario simulation. Control the simulator to update GPS parameters (latitude, longitude, 
+    altitude, bearing) according to the timeline of a completed outdoor driving scenario.
+    Examples:
+        "Emulator -instance <Emulator Name> -drivingNavigation"
+-sensor:
+    Controls the emulator to change the sensor parameters: light, steps and heartrate, it must be
+    followed by one of the parameters: -light, -steps, -heartrate.
+-light: 
+    Change the sensor light parameter, float in [0.0, 100000.0] (inclusive).
+    Examples:
+        "Emulator -instance <Emulator Name> -sensor -light 20.3"
+-steps: 
+    Change the sensor steps parameter, integer in [0, 100000] (inclusive).
+    Examples:
+        "Emulator -instance <Emulator Name> -sensor -steps 23000"
+-heartrate: 
+    Change the sensor heartrate parameter, integer in [0, 255] (inclusive).
+    Examples:
+        "Emulator -instance <Emulator Name> -sensor -heartrate 75"
+HELP_SOFTWARE_GPU_MATCHES=0
+Help exposes -noWindow but no software GPU or renderer selection parameter; experiment 2 must not guess one.
+
+[hap_object_before_any_install]
+hap_object_id=EO-R1-EMU24-20260717-0003-HAP-01
+hap_sha256=f1e00ec5534951137d7149b3d5001e99622aa1daacd1e31618d57699e2a1cd69
+hap_size_bytes=2585745
+hap_mtime=2026-07-17 01:13:25.536839347 +0800
+hap_storage_boundary=The file remains at a mutable ignored Hvigor build path and is not an immutable archive; later byte-for-byte audit requires this exact path to remain unchanged, so conclusions are bounded to the recorded hash and run.
+$ unzip listing for signature and native probe entries
+     1310  2026-07-17 01:13   module.json
+     6176  2026-07-17 01:13   libs/x86_64/libprobe.so
+     6408  2026-07-17 01:13   libs/arm64-v8a/libprobe.so
+No build, rebuild, signing, service, AppService, enterprise ACL, or trust bypass command is executed by this experiment.
+
+[experiment1_visible_start]
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [EMULATOR] -start netbird_api24_phone -instancePath [HARMONY_HOME]/emulator-instances -imageRoot [HARMONY_HOME]/emulator-images -hdcport 10000
+VISIBLE_START_WINDOW_EXIT=0
+$ tmux list-panes for experiment session
+window=runner pane=%49 pid=525985 dead=0 command=bash
+$ Emulator process after launch
+ 525973 Fri Jul 17 01:34:49 2026       00:03 /bin/bash -c printf '%s\n' 'PRELAUNCH_ATTEMPT_NOTE=The first parent launch guard exited before tmux creation because pgrep matched its own command line; no Emulator or experiment process was started.' >> docs/evidence/raw/EV-R1-EMU24-20260717-0003-display-hap-smoke.log; HAS_EMU=$(ps -u "$USER" -o args= | awk '$0 ~ /\/Emulator .* -start netbird_api24_phone/ {n++} END {print n+0}'); HAS_HDC=$(ps -u "$USER" -o args= | awk '$0 ~ /^hdc -m -s / {n++} END {print n+0}'); HAS_PORT=$(ss -ltn | awk '$4 ~ /:(10000|5555|8710)$/ {n++} END {print n+0}'); printf 'HAS_EMU=%s HAS_HDC=%s HAS_PORT=%s\n' "$HAS_EMU" "$HAS_HDC" "$HAS_PORT"; test "$HAS_EMU" -eq 0; test "$HAS_HDC" -eq 0; test "$HAS_PORT" -eq 0; test ! -e .hvigor; ! tmux has-session -t harmonyos-api24-display-exp1 2>/dev/null; tmux new-session -d -s harmonyos-api24-display-exp1 -n runner "exec env ORIGINAL_TMUX_PANE='netbird:0.0 %45' EXPERIMENT_TMUX_SESSION='harmonyos-api24-display-exp1' bash /tmp/run-ev-r1-emu24-20260717-0003.sh"; sleep 5; tmux list-panes -t harmonyos-api24-display-exp1 -F 'window=#{window_name} pane=#{pane_id} pid=#{pane_pid} dead=#{pane_dead} command=#{pane_current_command}'; printf '%s\n' '--- raw log tail ---'; tail -100 docs/evidence/raw/EV-R1-EMU24-20260717-0003-display-hap-smoke.log
+ 526216 Fri Jul 17 01:34:53 2026       00:00 awk $0 ~ /\/Emulator .* -start netbird_api24_phone/ {print}
+$ initial Emulator console
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+[WARNING]Hot boot is not enable, the bootmode "snapshot" invalid. now start with cold boot.
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+audio: Could not init `pa' audio driver
+audio: warning: Using timer based audio emulation
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+
+[experiment1_readiness_up_to_180_seconds]
+
+READINESS_ATTEMPT=1 time=2026-07-17T01:34:53+08:00 elapsed_seconds=3
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECT_EXIT=0
+
+READINESS_ATTEMPT=2 time=2026-07-17T01:35:00+08:00 elapsed_seconds=10
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECT_EXIT=0
+
+READINESS_ATTEMPT=3 time=2026-07-17T01:35:05+08:00 elapsed_seconds=15
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECT_EXIT=0
+
+READINESS_ATTEMPT=4 time=2026-07-17T01:35:10+08:00 elapsed_seconds=20
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECT_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell echo display-exp1-smoke-4
+display-exp1-smoke-4
+ECHO_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell uname -a
+Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+UNAME_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.boot.completed
+Get parameter "bootevent.boot.completed" fail! errNum is:106!
+BOOT_COMPLETED_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get const.product.os.dist.name
+HarmonyOS 
+DISTRIBUTION_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param dump | filter boot/lock/launcher/screen parameters
+NO_MATCHING_PARAMETERS_OBSERVED
+PARAM_DUMP_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.bootanimation.started
+Get parameter "bootevent.bootanimation.started" fail! errNum is:1002!
+BOOTANIMATION_STARTED_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.bootanimation.finished
+Get parameter "bootevent.bootanimation.finished" fail! errNum is:1002!
+BOOTANIMATION_FINISHED_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.launcher.ready
+Get parameter "bootevent.launcher.ready" fail! errNum is:1002!
+LAUNCHER_READY_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get bootevent.lockscreen.ready
+Get parameter "bootevent.lockscreen.ready" fail! errNum is:1002!
+LOCKSCREEN_READY_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell uitest screenCap
+ScreenCap saved to /data/local/tmp/screenCap_19821654.png
+SCREEN_CAP_EXIT=0
+$ [EMULATOR] -instance netbird_api24_phone -screenshot -screenshotPath [TEMP]/host-screenshot.png
+Scenario simulation success.
+Warning: The screenshot path does not exist. It has been saved to the default path.
+Screenshot saved to: [HOME]/Desktop
+HOST_SCREENSHOT_EXIT=0
+HOST_SCREENSHOT_USABLE=false
+READINESS_EARLY_CONDITION_REACHED=true
+
+READINESS_ENDED_AT=2026-07-17T01:35:13+08:00
+READINESS_ELAPSED_SECONDS=23
+CONNECTED=1 SHELL_OK=1 DIST_OK=0 BOOT_TRUE=0 PIXELMAP_OK=1 FIRST_SHELL_AT=2026-07-17T01:35:10+08:00
+LAST_SCREEN_CAP=ScreenCap saved to /data/local/tmp/screenCap_19821654.png
+STANDARD_RUNBOOK_READINESS=fail
+
+[renderer_and_egl_observations_while_running]
+$ renderer/EGL-related Emulator console lines
+NO_RENDERER_OR_EGL_CONSOLE_MATCHES
+$ renderer/EGL-related instance log lines
+Emulator.log:
+7:2026-07-16 14:37:57.335 136238269426688 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+13:2026-07-16 14:37:57.339 136238269426688 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M517 45 L802 45 v 103 h -285 Z"
+23:2026-07-16 14:37:57.701 136238269426688 [Warning] [WidgetDisplays.cpp(void extractJson:133)]无法打开文件: "No such file or directory"
+24:2026-07-16 14:37:57.701 136238269426688 [Warning] [WidgetDisplays.cpp(void extractJson:134)]请检查路径: "[HARMONY_HOME]/emulator-images/productConfig.json"
+27:2026-07-16 14:37:57.761 136238269426688 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+29:2026-07-16 14:37:57.857 136238269426688 [Warning] [(:0)]This plugin does not support setting window masks
+30:2026-07-16 14:37:57.857 136238269426688 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+85:2026-07-16 15:11:30.178 127404289272832 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+91:2026-07-16 15:11:30.179 127404289272832 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M517 45 L802 45 v 103 h -285 Z"
+101:2026-07-16 15:11:30.473 127404289272832 [Warning] [WidgetDisplays.cpp(void extractJson:133)]无法打开文件: "No such file or directory"
+102:2026-07-16 15:11:30.473 127404289272832 [Warning] [WidgetDisplays.cpp(void extractJson:134)]请检查路径: "[HARMONY_HOME]/emulator-images/productConfig.json"
+105:2026-07-16 15:11:30.529 127404289272832 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+107:2026-07-16 15:11:30.629 127404289272832 [Warning] [(:0)]This plugin does not support setting window masks
+108:2026-07-16 15:11:30.630 127404289272832 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+156:2026-07-17 00:53:53.622 132989076376576 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+162:2026-07-17 00:53:53.625 132989076376576 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M517 45 L802 45 v 103 h -285 Z"
+172:2026-07-17 00:53:54.024 132989076376576 [Warning] [WidgetDisplays.cpp(void extractJson:133)]无法打开文件: "No such file or directory"
+173:2026-07-17 00:53:54.024 132989076376576 [Warning] [WidgetDisplays.cpp(void extractJson:134)]请检查路径: "[HARMONY_HOME]/emulator-images/productConfig.json"
+176:2026-07-17 00:53:54.084 132989076376576 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+178:2026-07-17 00:53:54.182 132989076376576 [Warning] [(:0)]This plugin does not support setting window masks
+179:2026-07-17 00:53:54.182 132989076376576 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+215:2026-07-17 01:02:59.906 132364464663552 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+221:2026-07-17 01:02:59.908 132364464663552 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M517 45 L802 45 v 103 h -285 Z"
+231:2026-07-17 01:03:00.193 132364464663552 [Warning] [WidgetDisplays.cpp(void extractJson:133)]无法打开文件: "No such file or directory"
+232:2026-07-17 01:03:00.193 132364464663552 [Warning] [WidgetDisplays.cpp(void extractJson:134)]请检查路径: "[HARMONY_HOME]/emulator-images/productConfig.json"
+235:2026-07-17 01:03:00.249 132364464663552 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+237:2026-07-17 01:03:00.344 132364464663552 [Warning] [(:0)]This plugin does not support setting window masks
+238:2026-07-17 01:03:00.344 132364464663552 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+272:2026-07-17 01:34:51.036 137628263926784 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+278:2026-07-17 01:34:51.037 137628263926784 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M517 45 L802 45 v 103 h -285 Z"
+288:2026-07-17 01:34:51.330 137628263926784 [Warning] [WidgetDisplays.cpp(void extractJson:133)]无法打开文件: "No such file or directory"
+289:2026-07-17 01:34:51.330 137628263926784 [Warning] [WidgetDisplays.cpp(void extractJson:134)]请检查路径: "[HARMONY_HOME]/emulator-images/productConfig.json"
+292:2026-07-17 01:34:51.386 137628263926784 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+293:2026-07-17 01:34:51.482 137628263926784 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+304:2026-07-17 01:35:13.343 137607497250496 [Critical] [InputModule.cpp(TakeScreenshot:175)]Emulator display is not ready.
+qemu.log:
+16:2026-07-16 14:37:57.995136232579352256 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+18:2026-07-16 14:37:57.995136232579352256 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+20:2026-07-16 14:37:57.995136232579352256 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+23:2026-07-16 14:37:58.078136231811806912 I [egl_window_linux.c(try_egl_init_headless:188)] surfaceless EGL initialized: 1.5
+24:2026-07-16 14:37:58.078136231811806912 E [egl_window_linux.c(egl_choose_config:208)] Failed to choose EGL config: 0x3000
+40:2026-07-16 14:38:26.587136237771912896 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+49:2026-07-16 15:04:56.326136238269426688 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+73:2026-07-16 15:11:30.718127398393673408 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+75:2026-07-16 15:11:30.718127393329051328 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+76:2026-07-16 15:11:30.718127393329051328 I [egl_window_linux.c(egl_init:245)] trying GBM DRM mode...
+77:2026-07-16 15:11:30.718127393329051328 W [egl_window_linux.c(try_egl_init_gbm:159)] no GBM device available
+78:2026-07-16 15:11:30.718127393329051328 I [egl_window_linux.c(egl_init:258)] trying headless surfaceless mode...
+81:2026-07-16 15:11:30.733127398393673408 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+83:2026-07-16 15:11:30.733127398393673408 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+85:2026-07-16 15:11:30.733127398393673408 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+88:2026-07-16 15:11:30.794127393329051328 I [egl_window_linux.c(try_egl_init_headless:188)] surfaceless EGL initialized: 1.5
+89:2026-07-16 15:11:30.794127393329051328 E [egl_window_linux.c(egl_choose_config:208)] Failed to choose EGL config: 0x3000
+105:2026-07-16 15:11:53.469127390964655808 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+108:2026-07-16 15:42:48.198127404289272832 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+132:2026-07-17 00:53:54.290132983310767808 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+134:2026-07-17 00:53:54.291132978111936192 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+135:2026-07-17 00:53:54.291132978111936192 I [egl_window_linux.c(egl_init:245)] trying GBM DRM mode...
+136:2026-07-17 00:53:54.291132978111936192 W [egl_window_linux.c(try_egl_init_gbm:159)] no GBM device available
+137:2026-07-17 00:53:54.291132978111936192 I [egl_window_linux.c(egl_init:258)] trying headless surfaceless mode...
+140:2026-07-17 00:53:54.334132983310767808 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+142:2026-07-17 00:53:54.334132983310767808 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+144:2026-07-17 00:53:54.334132983310767808 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+147:2026-07-17 00:53:54.593132978111936192 I [egl_window_linux.c(try_egl_init_headless:188)] surfaceless EGL initialized: 1.5
+148:2026-07-17 00:53:54.593132978111936192 E [egl_window_linux.c(egl_choose_config:208)] Failed to choose EGL config: 0x3000
+164:2026-07-17 00:54:16.333132975102461632 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+167:2026-07-17 01:01:48.149132989076376576 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+191:2026-07-17 01:03:00.433132358759868096 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+193:2026-07-17 01:03:00.434132357889693376 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+194:2026-07-17 01:03:00.434132357889693376 I [egl_window_linux.c(egl_init:245)] trying GBM DRM mode...
+195:2026-07-17 01:03:00.434132357889693376 W [egl_window_linux.c(try_egl_init_gbm:159)] no GBM device available
+196:2026-07-17 01:03:00.434132357889693376 I [egl_window_linux.c(egl_init:258)] trying headless surfaceless mode...
+199:2026-07-17 01:03:00.470132358759868096 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+201:2026-07-17 01:03:00.470132358759868096 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+203:2026-07-17 01:03:00.470132358759868096 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+206:2026-07-17 01:03:00.489132357889693376 I [egl_window_linux.c(try_egl_init_headless:188)] surfaceless EGL initialized: 1.5
+207:2026-07-17 01:03:00.489132357889693376 E [egl_window_linux.c(egl_choose_config:208)] Failed to choose EGL config: 0x3000
+223:2026-07-17 01:03:23.783132349894092480 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+226:2026-07-17 01:05:53.836132364464663552 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+251:2026-07-17 01:34:51.579137622412318400 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+253:2026-07-17 01:34:51.580137621527328448 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+256:2026-07-17 01:34:51.595137622412318400 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+258:2026-07-17 01:34:51.595137622412318400 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+260:2026-07-17 01:34:51.595137622412318400 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+263:2026-07-17 01:34:51.688137621527328448 E [express_gpu_render.c(glfw_error_callback:1002)] GLFW Error (65543): EGL: Failed to create context: Arguments are inconsistent
+264:2026-07-17 01:34:51.725137621527328448 I [express_gpu_render.c(native_window_create_full:804)] native create window Trinity 0x7d29680a9bf0
+265:2026-07-17 01:34:51.725137621527328448 I [express_gpu_render.c(native_window_thread:1090)] Create glfw main windows.
+266:2026-07-17 01:34:51.725137621527328448 I [express_gpu_render.c(native_window_thread:1120)] window_width:716, window_height:1548, index:0
+267:2026-07-17 01:34:51.726137621527328448 I [egl_window_linux.c(egl_init:228)] EGL initialized with provided display: 1.5
+268:2026-07-17 01:34:51.729137621527328448 I [express_gpu_render.c(init_global_gbuffer_data:859)] register shutdown_notify_callback.
+271:2026-07-17 01:34:51.757137621527328448 I [express_gpu_render.c(static_value_prepare:588)] gl vendor:Mesa
+272:2026-07-17 01:34:51.757137621527328448 I [express_gpu_render.c(static_value_prepare:615)] gl version:OpenGL ES 3.0 (4.5 (Core Profile) Mesa 25.0.7-2)
+273:2026-07-17 01:34:51.757137621527328448 I [express_gpu_render.c(static_value_prepare:625)] gl renderer:llvmpipe (LLVM 19.1.7, 256 bits)
+274:2026-07-17 01:34:51.757137621527328448 I [express_gpu_render.c(static_value_prepare:645)] gl shading_language_version:OpenGL ES GLSL ES 3.0
+275:2026-07-17 01:34:51.757137621527328448 I [express_gpu_render.c(static_value_prepare:662)] host gl 45 DSA_enable 0
+276:2026-07-17 01:34:51.762137621527328448 I [express_gpu_render.c(native_window_thread:1192)] native windows inited!
+277:2026-07-17 01:34:51.770137621527328448 I [express_gpu_render.c(native_window_thread:1225)] window render start 0
+290:2026-07-17 01:35:09.767137627529377472 E [egl_context.c(d_eglCreateContext:50)] real share context is NULL
+291:2026-07-17 01:35:09.768137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+292:2026-07-17 01:35:09.785137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+294:2026-07-17 01:35:09.836137608707057344 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+295:2026-07-17 01:35:09.836137608707057344 I [express_display.c(display_context_init:508)] send_message_to_main_window(MAIN_CREATE_CHILD_WINDOW),index:0
+296:2026-07-17 01:35:09.837137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+297:2026-07-17 01:35:09.877137608707057344 I [express_display.c(display_decode_invoke:361)] screen num: 1
+298:2026-07-17 01:35:09.894137608707057344 I [express_display.c(display_decode_invoke:311)] FUNID_Get_Display_Mods return display[index = 0, screen_id = 0, device_id = 10,                 pixel_width = 1320, pixel_height = 2856]
+299:2026-07-17 01:35:09.911137608707057344 I [express_display.c(display_decode_invoke:347)] Get Display id : 0, power state :0
+300:2026-07-17 01:35:09.933137608707057344 I [express_display.c(display_decode_invoke:370)] device type: 0
+302:2026-07-17 01:35:09.988137608445195968 E [egl_context.c(d_eglCreateContext:50)] real share context is NULL
+303:2026-07-17 01:35:09.989137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+304:2026-07-17 01:35:10.053137608707057344 I [express_display.c(display_decode_invoke:347)] Get Display id : 0, power state :0
+306:2026-07-17 01:35:10.107137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+308:2026-07-17 01:35:10.187137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+312:2026-07-17 01:35:10.368137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+314:2026-07-17 01:35:10.402137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+316:2026-07-17 01:35:10.457137621527328448 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(681dd860), EGLConfig(681e2900), EGLContext(681f5720)
+319:2026-07-17 01:35:10.705137608707057344 E [express_display.c(opengl_paint_composer_layers:703)] not support transform_type 8
+kernel.log:
+68557:2026-07-17 01:34:52.863[    0.783924] pci_bus 0000:00: root bus resource [mem 0x80000000-0xafffffff window]
+68558:2026-07-17 01:34:52.866[    0.784924] pci_bus 0000:00: root bus resource [mem 0xc0000000-0xfebfffff window]
+68559:2026-07-17 01:34:52.869[    0.785924] pci_bus 0000:00: root bus resource [mem 0x180000000-0x97fffffff window]
+68672:2026-07-17 01:34:53.625[    1.349111] system 00:05: [mem 0xb0000000-0xbfffffff window] has been reserved
+68688:2026-07-17 01:34:53.679[    1.403697] pci_bus 0000:00: resource 4 [io  0x0000-0x0cf7 window]
+68689:2026-07-17 01:34:53.682[    1.406326] pci_bus 0000:00: resource 5 [io  0x0d00-0xffff window]
+68690:2026-07-17 01:34:53.685[    1.408928] pci_bus 0000:00: resource 6 [mem 0x000a0000-0x000bffff window]
+68691:2026-07-17 01:34:53.687[    1.411804] pci_bus 0000:00: resource 7 [mem 0x80000000-0xafffffff window]
+68692:2026-07-17 01:34:53.690[    1.414684] pci_bus 0000:00: resource 8 [mem 0xc0000000-0xfebfffff window]
+68693:2026-07-17 01:34:53.693[    1.417570] pci_bus 0000:00: resource 9 [mem 0x180000000-0x97fffffff window]
+68805:2026-07-17 01:34:54.111[    1.870986] express_gpu create express chardev
+68806:2026-07-17 01:34:54.149[    1.870990] express_gpu alloc_chrdev_region ret 0
+68807:2026-07-17 01:34:54.151[    1.873009] express_gpu cdev_add ret 0 0 major 247 0
+69016:2026-07-17 01:34:55.082[    2.802049] [pid=1][BEGET][WARNING][dm_verity.c:106]device /sys_prod/variant/hw_oem/PHEMU-FD00/etc/window not need hvb
+69018:2026-07-17 01:34:55.094[    2.813811] [pid=1][BEGET][INFO][fstab_mount.c:654]Mount device /sys_prod/variant/hw_oem/PHEMU-FD00/etc/window to /sys_prod/etc/window
+69019:2026-07-17 01:34:55.101[    2.818146] [pid=1][BEGET][INFO][fstab_mount.c:811]Mount /sys_prod/variant/hw_oem/PHEMU-FD00/etc/window to /sys_prod/etc/window successful
+69246:2026-07-17 01:34:56.270[    3.988980] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'const.meetcall.float.window' error:107 with only add mode
+69259:2026-07-17 01:34:56.340[    4.058828] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'const.window.multiWindowUIType' error:107 with only add mode
+69260:2026-07-17 01:34:56.345[    4.064580] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'const.window.need_avoid_window' error:107 with only add mode
+69269:2026-07-17 01:34:56.394[    4.114434] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'persist.sys.abilityms.inherit_window_split_screen_mode' error:107 with only add mode
+69282:2026-07-17 01:34:56.470[    4.189021] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'persist.sys.abilityms.restart_app_with_window' error:107 with only add mode
+69283:2026-07-17 01:34:56.476[    4.194653] [pid=1][PARAM][WARNING][param_server.c:408]Set param 'persist.sys.abilityms.restart_app_with_window' error:107 with only add mode
+69331:2026-07-17 01:34:56.758[    4.477302] [pid=1][PARAM][INFO][param_dac.c:207]Load parameter label total 14 success /system/etc/param/display.para.dac
+69748:2026-07-17 01:34:58.858[    6.582241] [pid=1][Init][ERROR][init_common_cmds.c:409]Failed to change mode " /sys/kernel/debug/tracing/events/power/gpu_frequency/ " to 0755, err=2
+69752:2026-07-17 01:34:58.884[    6.608798] [pid=1][Init][ERROR][init_common_cmds.c:409]Failed to change mode " /sys/kernel/debug/tracing/events/power/gpu_frequency/enable " to 0666, err=2
+69949:2026-07-17 01:35:00.042[    7.759797] [pid=1][Init][ERROR][init_common_cmds.c:409]Failed to change mode " /sys/kernel/tracing/events/power/gpu_frequency/ " to 0755, err=2
+69953:2026-07-17 01:35:00.066[    7.790417] [pid=1][Init][ERROR][init_common_cmds.c:409]Failed to change mode " /sys/kernel/tracing/events/power/gpu_frequency/enable " to 0666, err=2
+70568:2026-07-17 01:35:03.084[   10.798407] express_gpu file ffffafd5400de000 open by 163 163 unique_id: ffff9f68815b1600
+70571:2026-07-17 01:35:03.097[   10.804885] express_gpu gbuffer_id 0 release data size 0
+70573:2026-07-17 01:35:03.103[   10.811978] express_gpu release gbuffer 0 ptr ffffafd5400de000 has_sent 0 device_id 0 tid 163 pid 163 check host_has_data 0 unique_id: ffff9f68815b1600
+70574:2026-07-17 01:35:03.110[   10.811987] express_gpu release ok ffffafd5400de000 unique_id: ffff9f68815b1600
+71269:2026-07-17 01:35:06.209[   13.928029] [pid=1][PARAM][INFO][param_service.c:319]HandleParamWatcherAdd name startup.service.ctl.display_engine_service.pid watcher: 37
+71404:2026-07-17 01:35:06.772[   14.314781] express_gpu file ffffafd5401cb000 open by 524 524 unique_id: ffff9f6885425c00
+71406:2026-07-17 01:35:06.780[   14.320030] express_gpu gbuffer_id 0 release data size 0
+71411:2026-07-17 01:35:06.799[   14.328361] express_gpu release gbuffer 0 ptr ffffafd5401cb000 has_sent 0 device_id 0 tid 524 pid 524 check host_has_data 0 unique_id: ffff9f6885425c00
+71413:2026-07-17 01:35:06.809[   14.334294] express_gpu release ok ffffafd5401cb000 unique_id: ffff9f6885425c00
+71746:2026-07-17 01:35:09.061[   16.782470] express_gpu file ffffafd5405d9000 open by 868 816 unique_id: ffff9f68afc0d800
+71748:2026-07-17 01:35:09.070[   16.785789] express_gpu gbuffer_id 0 release data size 0
+71751:2026-07-17 01:35:09.083[   16.793998] express_gpu release gbuffer 0 ptr ffffafd5405d9000 has_sent 0 device_id 0 tid 868 pid 816 check host_has_data 0 unique_id: ffff9f68afc0d800
+71753:2026-07-17 01:35:09.096[   16.804036] express_gpu release ok ffffafd5405d9000 unique_id: ffff9f68afc0d800
+71755:2026-07-17 01:35:09.105[   16.816756] express_gpu file ffffafd5405e1000 open by 868 816 unique_id: ffff9f68afc0d100
+71886:2026-07-17 01:35:09.823[   17.540877] express_gpu file ffffafd540739000 open by 666 604 unique_id: ffff9f68b5574d00
+71889:2026-07-17 01:35:09.831[   17.546972] express_gpu invoke_id a01000010 
+71891:2026-07-17 01:35:09.836[   17.560045] express_gpu device id 10, func id 16
+71923:2026-07-17 01:35:09.972[   17.602389] express_gpu invoke_id a0100000c 
+71925:2026-07-17 01:35:09.980[   17.605345] express_gpu device id 10, func id 12
+71934:2026-07-17 01:35:10.000[   17.618018] express_gpu invoke_id a0100000e 
+71936:2026-07-17 01:35:10.009[   17.627777] express_gpu device id 10, func id 14
+71938:2026-07-17 01:35:10.015[   17.635425] express_gpu invoke_id a01000011 
+71940:2026-07-17 01:35:10.022[   17.644959] express_gpu device id 10, func id 17
+71943:2026-07-17 01:35:10.035[   17.659254] express_gpu invoke_id a0000000a 
+71946:2026-07-17 01:35:10.048[   17.665043] express_gpu device id 10, func id 10
+71953:2026-07-17 01:35:10.066[   17.681983] express_gpu file ffffafd540741000 open by 1036 816 unique_id: ffff9f68afca4e00
+71964:2026-07-17 01:35:10.098[   17.762319] express_gpu invoke_id a0100000e 
+71966:2026-07-17 01:35:10.107[   17.772364] express_gpu device id 10, func id 14
+71979:2026-07-17 01:35:10.151[   17.799466] express_gpu file ffffafd540749000 open by 1054 816 unique_id: ffff9f68857e2f00
+71987:2026-07-17 01:35:10.173[   17.865713] express_gpu file ffffafd540751000 open by 1055 816 unique_id: ffff9f68afbf7300
+72026:2026-07-17 01:35:10.322[   18.027275] express_gpu file ffffafd540759000 open by 1073 816 unique_id: ffff9f68b56df600
+72035:2026-07-17 01:35:10.371[   18.095208] express_gpu file ffffafd540761000 open by 1071 816 unique_id: ffff9f68afcae600
+72051:2026-07-17 01:35:10.419[   18.140984] [pid=1][PARAM][INFO][param_service.c:195]Handle set param msgId 2 pid 817 key: persist.window.screen.width
+72052:2026-07-17 01:35:10.425[   18.143733] express_gpu file ffffafd540769000 open by 1072 816 unique_id: ffff9f68b5554a00
+72053:2026-07-17 01:35:10.429[   18.143842] [pid=1][PARAM][INFO][param_service.c:195]Handle set param msgId 3 pid 817 key: persist.window.screen.height
+72229:2026-07-17 01:35:11.005[   18.206926] [pid=1][PARAM][INFO][param_service.c:195]Handle set param msgId 4 pid 817 key: persist.window.screen.dpi
+72264:2026-07-17 01:35:11.124[   18.227546] [pid=1][PARAM][INFO][param_service.c:195]Handle set param msgId 5 pid 817 key: persist.window.screen.isSupportRog
+72439:2026-07-17 01:35:11.687[   18.328312] express_gpu file ffffafd540771000 open by 868 816 unique_id: ffff9f68a791a500
+72442:2026-07-17 01:35:11.701[   18.335479] express_gpu gbuffer_id 0 create_gbuffer_vmem 28672
+72462:2026-07-17 01:35:11.774[   18.357148] express_gpu file ffffafd540779000 open by 618 603 unique_id: ffff9f68afec9500
+72463:2026-07-17 01:35:11.778[   18.357161] express_gpu put gbuffer info id 26a00000002 w 1320 h 2856 pixel 4 size 15079680
+72464:2026-07-17 01:35:11.781[   18.357161] express_gpu IOC_PUT_GBUFFER_INFO ok
+72465:2026-07-17 01:35:11.783[   18.357215] [express_gpu_ioctl] command type [b] error!
+72466:2026-07-17 01:35:11.786[   18.357627] express_gpu gbuffer_id 26a00000002 create_gbuffer_vmem 15081472
+72471:2026-07-17 01:35:11.799[   18.362026] [express_gpu_ioctl] command type [b] error!
+72483:2026-07-17 01:35:11.846[   18.386588] express_gpu file ffffafd540781000 open by 1126 603 unique_id: ffff9f68afec9300
+72486:2026-07-17 01:35:11.858[   18.392741] express_gpu put gbuffer info id 46600000003 w 1320 h 2856 pixel 4 size 15079680
+72487:2026-07-17 01:35:11.862[   18.392742] express_gpu IOC_PUT_GBUFFER_INFO ok
+72488:2026-07-17 01:35:11.864[   18.392763] [express_gpu_ioctl] command type [b] error!
+72489:2026-07-17 01:35:11.867[   18.392897] express_gpu gbuffer_id 46600000003 create_gbuffer_vmem 15081472
+72491:2026-07-17 01:35:11.875[   18.397146] [express_gpu_ioctl] command type [b] error!
+72493:2026-07-17 01:35:11.882[   18.402145] express_gpu invoke_id a0000000b 
+72494:2026-07-17 01:35:11.884[   18.402147] express_gpu device id 10, func id 11
+crash_server.log:
+NO_MATCHES
+
+[installability_recheck]
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell echo preinstall-display-exp1
+preinstall-display-exp1
+PREINSTALL_ECHO_EXIT=0
+$ timeout 12 [BETA_HDC] -t 127.0.0.1:10000 shell param get const.product.os.dist.name
+HarmonyOS 
+PREINSTALL_DIST_EXIT=0
+INSTALLABLE_STATE=0
+Experiment 1 never reached a healthy shell plus HarmonyOS distribution state; HAP install and Ability start were not attempted.
+
+[hap_smoke_result]
+INSTALL_SUCCESS=0
+ABILITY_SUCCESS=0
+PIXELMAP_OK=1
+NODE_API_INITIALIZED=0
+PING_PONG=0
+VERSION_OK=0
+ALTERNATE_DISPLAY_READINESS=fail
+HAP_RUNTIME_SMOKE=fail
+
+[force_stop_and_uninstall]
+No successful install occurred; force-stop and uninstall were not required.
+
+[normal_stop_and_four_log_archive]
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-stop
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+STOP_HELPER_EXIT=0
+PROCESS_EXIT_CONFIRMED=false
+archive_Emulator.log=[HARMONY_HOME]/emulator-log-archive/20260716T173545Z-r1-api24-display-exp1/Emulator.log size=40386 sha256=e74c96d53e6e8c40e13e0cfc98785d3ddfc32a8eaf540ad9b9c235c1e9ee26df
+archive_qemu.log=[HARMONY_HOME]/emulator-log-archive/20260716T173545Z-r1-api24-display-exp1/qemu.log size=42823 sha256=b738606042662767786cfcdbb101656c0c3b5b495ead3781c42e0b53a8fd6b3d
+archive_kernel.log=[HARMONY_HOME]/emulator-log-archive/20260716T173545Z-r1-api24-display-exp1/kernel.log size=7593990 sha256=225070dee22e606d882e141fa41b26ef73cd258c52ca82d0d7ab8d93a46c33d3
+archive_crash_server.log=[HARMONY_HOME]/emulator-log-archive/20260716T173545Z-r1-api24-display-exp1/crash_server.log size=550 sha256=fe8f3fb61acb944ac32888de3b558b913d6197d738376b8582cd272c9fd004bf
+emulator_console_log=docs/evidence/raw/EV-R1-EMU24-20260717-0003-emulator-console.log size=2133 sha256=6ee2d8cd6e97a07465ae87a9a9a68656dad6ca9f4dba7746bbd9343e2b20d3b5
+
+[final_cleanup_and_residual_check]
+$ [BETA_HDC] list targets -v
+127.0.0.1:10000		TCP	Offline	localhost
+$ [BETA_HDC] kill
+$ exact Emulator/qemu/HDC process check
+ 526696 awk $0 ~ /\/Emulator( |$)|qemu-system|hdc -m -s/ {print}
+$ ports 10000/5555/8710 check
+$ repository root .hvigor check
+ROOT_HVIGOR_ABSENT=true
+$ runtime tmux panes before runner exits
+window=runner pane=%49 pid=525985 dead=0 command=bash
+ORIGINAL_PANE_NEVER_LEFT=netbird:0.0 %45
+
+[final_verdict_inputs]
+EXPERIMENT1_VISIBLE_PROCESS_STARTED=true
+EXPERIMENT1_STANDARD_READINESS=fail
+EXPERIMENT1_ALTERNATE_READINESS=fail
+EXPERIMENT1_HAP_SMOKE=fail
+EXPERIMENT2_SOFTWARE_GPU=not-attempted; Emulator --help exposes no software GPU parameter
+ended_at=2026-07-17T01:35:47+08:00
+record_status=collected-pending-document-update-and-independent-review

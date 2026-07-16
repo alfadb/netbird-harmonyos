@@ -1,0 +1,203 @@
+evidence_id=EV-R1-EMU24-20260717-0007
+record_scope=E1 ordinary initial-exec TLS late-load and E4 transitive DT_NEEDED late-load in the API 24 x86_64 TestRunner process
+workspace_alias=[WORKSPACE]
+harmony_home_alias=[HARMONY_HOME]
+stable_tools_alias=[STABLE_TOOLS]=[HARMONY_HOME]/command-line-tools/6.1.1.290
+native_home_alias=[NATIVE_HOME]=[STABLE_TOOLS]/sdk/default/openharmony/native
+emulator_tools_alias=[EMULATOR_TOOLS]=[HARMONY_HOME]/command-line-tools/26.0.0.461
+beta_hdc_alias=[BETA_HDC]=[EMULATOR_TOOLS]/sdk/default/openharmony/toolchains/hdc
+emulator_alias=[EMULATOR]=[EMULATOR_TOOLS]/emulator/Emulator
+instance_alias=[INSTANCE]=[HARMONY_HOME]/emulator-instances/netbird_api24_phone
+image_root_alias=[IMAGE_ROOT]=[HARMONY_HOME]/emulator-images
+app_hap_alias=[APP_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+test_hap_alias=[TEST_HAP]=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+go_so_alias=[GO_SO]=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+tls_so_alias=[TLS_SO]=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libtlsprobe.so
+needed_so_alias=[NEEDED_SO]=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libneededprobe.so
+target=127.0.0.1:10000
+runtime_tmux_session=harmonyos-api24-loader-probes-0007
+netbird_dependency=absent
+tun_probe=absent
+dns_probe=absent
+public_network_probe=absent
+upstream_adaptation_patch_count=0
+
+--- implementation boundary ---
+E1 source is ordinary C with one hidden __thread integer initialized to 42, tls_model(initial-exec), and one exported GetTLS function that returns the variable.
+E1 was built with fixed OHOS x86_64 clang, -fno-emulated-tls, and -ftls-model=initial-exec so the final object contains real ELF TLS rather than compiler-emulated TLS.
+E1 contains no Go source or runtime, no res_search reference, no NODELETE flag, and no SYMBOLIC flag.
+E4 source directly references Hello and RuntimeProbe in an exported function, but runNeededProbe only calls dlopen on libneededprobe.so and never resolves or calls that function.
+E4 links against the existing ignored libgoprobe.so so libneededprobe.so records DT_NEEDED libgoprobe.so and RUNPATH $ORIGIN.
+C++ runTlsProbe and runNeededProbe call dlopen with RTLD_NOW|RTLD_LOCAL, capture errno before dlerror, preserve the original dlerror string, retain successful handles, and return structured loader observations through Node-API.
+The TestRunner first verifies ping=pong and the fixed version, then runs E1 and E4 in that order; an exact expected loader rejection satisfies the experiment observation assertion but remains functional=BLOCKED.
+No runGoProbe call, Go build, c-archive build, netgo build, Go export call, DNS lookup, socket probe, or NetBird operation was executed.
+
+--- native probe build and correction ---
+The first build attempt was preceded by shellcheck, which is unavailable on this host; the chained command stopped before any build and no shellcheck result is claimed.
+A subsequent initial native build showed OHOS clang had emitted __emutls_get_address and no real TLS relocation despite the variable attribute; that invalid intermediate was not packaged or run.
+The build script was corrected before cold HAP build to add -fno-emulated-tls and -ftls-model=initial-exec.
+$ HARMONYOS_NATIVE_HOME=[NATIVE_HOME] NATIVE_PROBE_OUTPUT_DIR=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64 [WORKSPACE]/spikes/r1-api24-hap/native-probes/build.sh
+built [TLS_SO] and [NEEDED_SO] without rebuilding [GO_SO]
+OHOS clang version=15.0.4 target=x86_64-unknown-linux-ohos
+[TLS_SO] size=10040 mtime=2026-07-17T03:03:43.996292270+08:00 SHA-256=1cc79f8620c8dc0de713bb425904b3e779e7184dc1a0d675b7009fb953f69a6f
+[NEEDED_SO] size=10192 mtime=2026-07-17T03:03:44.050293027+08:00 SHA-256=b6b721663a7f71305b03d6595c4089bc4788e6b578e5111234e8241cbfc68e4a
+[GO_SO] size=3136128 mtime=2026-07-17T02:20:30.064265763+08:00 SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9
+The Go object mtime and hash are unchanged from EV-R1-EMU24-20260717-0006.
+Final non-generated non-Markdown spike source/config canonical sorted SHA-256 manifest digest=027a03e0fb0c13c67128b683cd48cea0d349262499b63c887c74e7819f92bca3
+
+--- E1 ELF verification ---
+file: ELF 64-bit LSB shared object, x86-64, SYSV, dynamically linked, with debug_info, not stripped
+ELF: ELF64 little endian ET_DYN Advanced Micro Devices X86-64
+SONAME: libtlsprobe.so
+NEEDED: libc.so only
+PT_TLS: filesz=4 memsz=4 align=4
+TLS relocation: R_X86_64_TPOFF64
+export: GetTLS
+FLAGS: BIND_NOW STATIC_TLS
+FLAGS_1: NOW
+NODELETE=absent
+SYMBOLIC=absent
+res_search dynamic symbol or relocation=absent
+STATIC_TLS_INTERPRETATION=real initial-exec TLS requirement; static presence is not loader acceptance
+
+--- E4 ELF verification ---
+file: ELF 64-bit LSB shared object, x86-64, SYSV, dynamically linked, with debug_info, not stripped
+ELF: ELF64 little endian ET_DYN Advanced Micro Devices X86-64
+SONAME: libneededprobe.so
+NEEDED in order: libgoprobe.so, libc.so
+RUNPATH: $ORIGIN
+FLAGS: BIND_NOW
+FLAGS_1: NOW
+undefined direct symbols: Hello, RuntimeProbe
+export: CallNeededProbeExports
+Runtime test contract: dlopen libneededprobe.so only; CallNeededProbeExports, Hello, and RuntimeProbe are not called.
+This is a runtime dlopen dependency chain test, not a process-startup DT_NEEDED or startup static-TLS test.
+
+--- cold HAP build ---
+$ cd [WORKSPACE]/spikes/r1-api24-hap && [STABLE_TOOLS]/bin/ohpm install --all
+install completed in 0s 79ms
+$ [STABLE_TOOLS]/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BUILD SUCCESSFUL in 2 s 33 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BuildNativeWithCmake, BuildNativeWithNinja, ProcessLibs, DoNativeStrip, CompileArkTS, PackageHap, and PackingCheck finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 12 s 968 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+ProcessLibs, DoNativeStrip, OhosTestCompileArkTS, PackageHap, and PackingCheck finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 10 s 702 ms
+Application output metadata isSigned=false SHA-256=5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c
+Test output metadata isSigned=false SHA-256=76f9e1d064062a6e7d9a59adb4cbda96fb3ab4c710d9b6b016e9659e9941013a
+[APP_HAP] size=5888248 mtime=2026-07-17T03:04:26.547888714+08:00 SHA-256=6294bf70584ae4429e5618eb1e3d632eea14142b3409d8cdf3899b9d5f0e14db
+[TEST_HAP] size=3175007 mtime=2026-07-17T03:04:38.440055407+08:00 SHA-256=bb561e6baa801ccb3c7081901a5c726a9a65dc80a6a3973eb7baa53b23b30990
+Both unzip integrity checks reported no errors.
+
+--- HAP x86_64 members ---
+[APP_HAP] libprobe.so SHA-256=b1a343491e07546f2fa8b824e6e211ad30916128e98094cbdff0828f7b59a9f1 equals final Hvigor stripped libprobe.so.
+[APP_HAP] libtlsprobe.so SHA-256=1cc79f8620c8dc0de713bb425904b3e779e7184dc1a0d675b7009fb953f69a6f equals [TLS_SO].
+[APP_HAP] libneededprobe.so SHA-256=b6b721663a7f71305b03d6595c4089bc4788e6b578e5111234e8241cbfc68e4a equals [NEEDED_SO].
+[APP_HAP] libgoprobe.so SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9 equals [GO_SO].
+[TEST_HAP] libtlsprobe.so SHA-256=1cc79f8620c8dc0de713bb425904b3e779e7184dc1a0d675b7009fb953f69a6f equals [TLS_SO].
+[TEST_HAP] libneededprobe.so SHA-256=b6b721663a7f71305b03d6595c4089bc4788e6b578e5111234e8241cbfc68e4a equals [NEEDED_SO].
+[TEST_HAP] libgoprobe.so SHA-256=236db2d637b18a9fcb08bf44150152c2975274eaf7934853295420b9d4c980d9 equals [GO_SO].
+The test feature HAP does not duplicate libprobe.so; the installed application HAP supplies libprobe.so under the existing two-HAP bundle model.
+Hash identity binds the packaged E1 and E4 members to the verified input ELF properties above.
+
+--- runtime preflight and launch ---
+RUNTIME_PRECHECK_AT=2026-07-17T03:05:24+08:00
+No initial Emulator, qemu, Beta HDC server, listener on 10000/5555/8710, or experiment tmux session was present.
+KVM_FD_ACCESS=PASS
+DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority dimensions=1920x1080
+[BETA_HDC] version=3.2.0e
+$ DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [EMULATOR] -start netbird_api24_phone -instancePath [HARMONY_HOME]/emulator-instances -imageRoot [IMAGE_ROOT] -hdcport 10000
+EMULATOR_LAUNCHED_AT=2026-07-17T03:05:57+08:00
+Attempts 1-10 from elapsed 0 through 45 seconds reported no target.
+Attempt 11 at elapsed 50 seconds reported 127.0.0.1:10000 TCP Connected localhost.
+ECHO=r1-loader-probes-readiness
+UNAME=Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+DIST=HarmonyOS
+BOOT_COMPLETED=true
+SHELL_READINESS=PASS AT=2026-07-17T03:07:05+08:00
+
+--- install and bundle verification ---
+INSTALL_STARTED_AT=2026-07-17T03:07:19+08:00
+Preinstall bm dump reported the bundle absent.
+Host HAP hashes immediately before send were 6294bf70584ae4429e5618eb1e3d632eea14142b3409d8cdf3899b9d5f0e14db and bb561e6baa801ccb3c7081901a5c726a9a65dc80a6a3973eb7baa53b23b30990.
+$ [BETA_HDC] file send [APP_HAP] /data/local/tmp/r1-loader-probes-0007
+FileTransfer finish, Size:5888248, File count=1
+$ [BETA_HDC] file send [TEST_HAP] /data/local/tmp/r1-loader-probes-0007
+FileTransfer finish, Size:3175007, File count=1
+$ [BETA_HDC] shell bm install -p /data/local/tmp/r1-loader-probes-0007
+install bundle successfully.
+INSTALL_ENDED_AT=2026-07-17T03:07:20+08:00
+Post-install host hashes remained unchanged.
+bm dump selected fields: appSignType=none; cpuAbi=x86_64; nativeLibraryPath=libs/x86_64; moduleName=entry and entry_test; hapPath entry.hap and entry_test.hap.
+
+--- measured aa test ---
+HILOG_CLEAR_AT=2026-07-17T03:07:29+08:00
+Log type core,app,only_prerelease buffer clear successfully
+AA_TEST_STARTED_AT=2026-07-17T03:07:29+08:00
+$ [BETA_HDC] shell aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+E1_RESULT|functional=BLOCKED|ok=false|expectedBlock=true|stage=dlopen|tlsValue=-1|loaderErrno=2|loaderError=Error relocating [BUNDLE_LIBS]/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libtlsprobe.so|detail=dlopen libtlsprobe.so failed dlerror=Error relocating [BUNDLE_LIBS]/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libtlsprobe.so; errno=2 (No such file or directory)
+E4_RESULT|functional=BLOCKED|ok=false|expectedBlock=true|stage=dlopen|dependencyChainLoaded=false|dependencyChain=libneededprobe.so -> libgoprobe.so|helloCalled=false|runtimeProbeCalled=false|loaderErrno=22|loaderError=Error relocating [BUNDLE_LIBS]/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libgoprobe.so|detail=dlopen libneededprobe.so dependency chain failed dlerror=Error relocating [BUNDLE_LIBS]/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libgoprobe.so; errno=22 (Invalid argument)
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; Experiment assertions passed; E1 functional=BLOCKED; E4 functional=BLOCKED
+user test finished.
+AA_TEST_HOST_RC=0
+AA_TEST_ENDED_AT=2026-07-17T03:07:30+08:00
+TestFinished-ResultCode=0 means only that the baseline and expected-loader-observation assertions completed without crash; it does not change E1 or E4 from functional=BLOCKED to PASS.
+
+--- exact measured functional results ---
+node_api_baseline=PASS
+E1_dlopen=BLOCKED
+E1_loader_error=Error relocating [BUNDLE_LIBS]/libtlsprobe.so: __deregister_frame_info: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libtlsprobe.so
+E1_GetTLS=NOT_EXECUTED
+E1_tls_value=-1
+E4_dlopen_dependency_chain=BLOCKED
+E4_loader_error=Error relocating [BUNDLE_LIBS]/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libgoprobe.so
+E4_dependency_chain_loaded=false
+E4_Hello=NOT_CALLED
+E4_RuntimeProbe=NOT_CALLED
+process_crash=no
+Go_runtime=NOT_EXECUTED
+Go_netpoll=NOT_EXECUTED
+
+--- HiLog and process health ---
+The complete unfiltered app-buffer capture after hilog -r and the measured test is docs/evidence/raw/EV-R1-EMU24-20260717-0007-hilog-app-full.log.
+The app-buffer capture records Node-API initialization, TestRunner preparation, baseline, both exact loader errors, structured BLOCKED results, the successful observation assertion, and AppLifeCycleManager onProcessDied for PID 3037 after finishTest.
+A separate two-tag query reproduced the same probe lines but was not retained as a distinct artifact because the complete app-buffer object is the verdict source.
+Post-test shell echo, HarmonyOS distribution, and boot.completed=true passed.
+No PID 3037 or probe Runner process remained after finishTest.
+[INSTANCE]/Log/crash_server.log added only its launch TraceTool initialization line for this run and no probe crash entry.
+Final cumulative mutable instance log hashes: Emulator.log 0c4b8e4c936580a346bc4d62a49283d4faaf5b91875cc6dab51be28018d77b2b; qemu.log 1f187a33098ece680ac3797c02f7957182aa8d770c8def90d424a5574d53025d; kernel.log d25426c39446abdfaf236696560bec0b62f3b814371c1bcea0544012e05a9640; crash_server.log 7554cd4223e52c8e4c0f175719292c8670c9f238bb85a9ad3cb267e7fe2b1834.
+The HOME instance logs are cumulative mutable observational references, not repository evidence objects.
+
+--- cleanup and normal stop ---
+CLEANUP_STARTED_AT=2026-07-17T03:08:09+08:00
+Guest staging directory removed.
+aa force-stop reported success.
+Beta HDC uninstall reported uninstall bundle successfully.
+Post-uninstall bm dump reported the bundle absent.
+CLEANUP_ENDED_AT=2026-07-17T03:08:10+08:00
+$ HDC_PORT=10000 [HARMONY_HOME]/bin/emulator-stop
+Stop emulator netbird_api24_phone successfully.
+EMULATOR_STOP_ENDED_AT=2026-07-17T03:08:10+08:00
+The Emulator pane exited normally with status 0 at 2026-07-17T03:08:11+08:00.
+The Beta HDC server was stopped after the first residue check found only its 8710 listener.
+FINAL_RESIDUE_CHECK_AT=2026-07-17T03:08:59+08:00
+No Emulator, qemu, Beta HDC server, listener on 10000/5555/8710, bundle, guest staging directory, Runner process, or experiment tmux session remained.
+
+--- interpretation and boundary ---
+E1 removes Go, res_search, NODELETE, SYMBOLIC, and dependency-chain variables while retaining a real initial-exec TLS relocation; the same measured loader rejects this ordinary late-loaded shared object before GetTLS.
+E4 removes direct libgoprobe dlopen as the entry operation and instead uses a correctly linked $ORIGIN DT_NEEDED wrapper; the runtime dlopen chain still reaches libgoprobe.so late and fails before either direct reference is called.
+Together E1 and E4 close the direct and transitive no-fork late-load variants for this exact API 24 x86_64 TestRunner process and these verified ELF inputs.
+E4 is not process-startup linkage, does not establish startup static-TLS behavior, and does not test an executable with libgoprobe.so loaded before process initialization.
+The result does not generalize to arm64, named physical devices, a separate process, a patched Go runtime/toolchain, another system image, another loader, or product support.
+No NetBird, WireGuard, VPN, TUN, DNS, public network, UIAbility, physical-device, signing, channel, or product-support path was exercised.
+verdict=blocked
+r1_exit=no
+patch_budget_count=0
+T0_ROUTE_DISCUSSION=REQUIRED_BEFORE_ALTERNATIVE_IMPLEMENTATION
+The experiments are project-local probes and do not modify NetBird, WireGuard, Go runtime, or another fixed upstream, so the upstream adaptation patch count remains 0 and no existing patch-budget threshold was exceeded.
+The measured no-fork in-process late-load route is now blocked; selecting a separate-process boundary or a patched Go runtime/toolchain would materially change the cross-language architecture or introduce a potential high-maintenance fork, so roadmap and evidence-schema T0 rules require route discussion before either implementation begins.

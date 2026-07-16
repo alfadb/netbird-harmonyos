@@ -1,0 +1,10 @@
+{
+  modelVersion: '6.0.0',
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Entry module for the short-lived R1 API 24 probe.',
+  license: 'MIT',
+  dependencies: {
+    'libprobe.so': 'file:./src/main/cpp/types/libprobe'
+  }
+}

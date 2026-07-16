@@ -1,0 +1,7 @@
+{
+  name: 'libprobe.so',
+  version: '1.0.0',
+  description: 'Type declarations for the R1 Node-API probe.',
+  types: './index.d.ts',
+  license: 'MIT'
+}

@@ -1,0 +1,249 @@
+EV-R1-EMU24-20260717-0009 raw transcript
+All times Asia/Shanghai (+08:00). Stable aliases are used for long paths.
+
+EVIDENCE_ID=EV-R1-EMU24-20260717-0009
+WORKSPACE=[WORKSPACE]=/home/worker/work/base/netbird-harmonyos
+STABLE_TOOLS=[STABLE_TOOLS]=/home/worker/harmonyos/command-line-tools/6.1.1.290
+NATIVE_HOME=[NATIVE_HOME]=[STABLE_TOOLS]/sdk/default/openharmony/native
+EMULATOR_TOOLS=[EMULATOR_TOOLS]=/home/worker/harmonyos/command-line-tools/26.0.0.461
+BETA_HDC=[BETA_HDC]=[EMULATOR_TOOLS]/sdk/default/openharmony/toolchains/hdc
+EMULATOR=[EMULATOR]=[EMULATOR_TOOLS]/emulator/Emulator
+INSTANCE=[INSTANCE]=/home/worker/harmonyos/emulator-instances/netbird_api24_phone
+IMAGE_ROOT=[IMAGE_ROOT]=/home/worker/harmonyos/emulator-images
+TARGET=127.0.0.1:10000
+APP_HAP=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+TEST_HAP=[WORKSPACE]/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+REMOTE=/data/local/tmp/r1-dynamic-tls-0009
+RUNTIME_TMUX=r1-0009-emulator
+UPSTREAM_PATCH_COUNT=0
+NETBIRD_PATCH=NONE
+GO_PATCH=NONE
+SDK_PATCH=NONE
+
+--- fixed implementation boundary ---
+The input libraries are pure C and export GetTLS, SetTLS, and ResetTLS over a common C ABI.
+The four actual inputs are libtls-ie.so, libtls-gd.so, libtls-desc.so, and the naturally available non-gating libtls-ld.so.
+Host GCC 14.2.0 only compiles freestanding x86_64 PIC objects so the classic gnu and gnu2 TLS dialects are explicit; fixed API 24 OHOS clang/lld links every final shared object.
+Every final link uses --no-relax; final readelf and llvm-objdump results below, rather than compiler flags, determine the measured TLS model.
+No Go command, Go source, NetBird source, WireGuard source, SDK source, patched toolchain, Native Child API, fork, exec, TUN, DNS, public network, or product path is used.
+The pure-C build removes historical ignored libgoprobe.so, libneededprobe.so, and libtlsprobe.so from the HAP input directory before producing the four current inputs.
+The Node-API harness creates and confirms a waiting pthread before each dlopen; after successful dlopen it releases that thread to resolve GetTLS/SetTLS/ResetTLS and creates a second pthread after dlopen to resolve the same ABI.
+For every dynamic model, main, pre-dlopen, and post-dlopen threads must each observe initial 42, use distinct values for 100 SetTLS/GetTLS cycles, and ResetTLS back to 42.
+The initial-exec control must reproduce the EV-R1-EMU24-20260717-0007 late RTLD_NOW|RTLD_LOCAL loader rejection before any dynamic model runs; an unexpected IE load is environment drift and stops the suite.
+Tier1 PASS requires classic GD or TLSDESC to pass; local-dynamic is measured but non-gating.
+
+--- versions ---
+$ git rev-parse HEAD
+3f47a140be8b27d6361b3f19abc04d45730ad714
+$ /usr/bin/gcc --version | head -1
+gcc (Debian 14.2.0-19) 14.2.0
+$ [NATIVE_HOME]/llvm/bin/x86_64-unknown-linux-ohos-clang --version | head -1
+OHOS (dev) clang version 15.0.4 (llvm-project 99548401bd80576251755b185ab95945e5fe7884)
+$ [NATIVE_HOME]/llvm/bin/ld.lld --version
+LLD 15.0.4 (compatible with GNU linkers)
+$ [BETA_HDC] -v
+Ver: 3.2.0e
+$ [EMULATOR] -version
+HarmonyOS Emulator :26.0.0.200
+
+--- pure-C input build ---
+$ HARMONYOS_NATIVE_HOME=[NATIVE_HOME] NATIVE_PROBE_OUTPUT_DIR=[WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64 [WORKSPACE]/spikes/r1-api24-hap/native-probes/build.sh
+built pure-C TLS inputs with linker relaxation disabled:
+  [WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libtls-ie.so
+  [WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libtls-gd.so
+  [WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libtls-desc.so
+  [WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64/libtls-ld.so
+$ find [WORKSPACE]/spikes/r1-api24-hap/entry/libs/x86_64 -maxdepth 1 -type f -printf '%f\n' | sort
+libtls-desc.so
+libtls-gd.so
+libtls-ie.so
+libtls-ld.so
+Executable input manifest SHA-256=be1c25398fb12d1ac3613247953a65b61b7f7062168964bbb13cc309bb496d9d.
+
+--- final ELF hashes and sizes ---
+libtls-ie.so size=2704 SHA-256=b8dee0046cc580339b8a09a79673c81bc75218f90819fdd9069b6b82fb08a674
+libtls-gd.so size=3144 SHA-256=c00f4b8861f8c7598f76851cf6d4b90d95a0b03e6e51f58da5213586f1480946
+libtls-desc.so size=2752 SHA-256=336357920dd412db0613d88d223229751f31f3e34cd2b85f051162f75e614834
+libtls-ld.so size=3112 SHA-256=093fa560431152d21a0323fe9f96bc49edfec7a9983e69cc19e95461f54bec54
+Earliest final input mtime=2026-07-17T04:56:49.911675563+08:00.
+
+--- final readelf and objdump model proof ---
+$ readelf -lWrdsW libtls-ie.so; llvm-objdump -dr --no-show-raw-insn libtls-ie.so
+ELF64 x86-64 ET_DYN; SONAME libtls-ie.so; PT_TLS filesz=4 memsz=4 align=4; FLAGS BIND_NOW STATIC_TLS; FLAGS_1 NOW.
+.rela.dyn contains R_X86_64_TPOFF64 for tls_probe_value; no DTPMOD64, DTPOFF64, TLSDESC, or __tls_get_addr.
+Dynamic exports are GetTLS, SetTLS, ResetTLS, and tls_probe_value.
+GetTLS loads a relocated offset then executes movl %fs:(%rax), %eax; SetTLS and ResetTLS use the same direct %fs model.
+IE_MODEL=INITIAL_EXEC_CONFIRMED
+
+$ readelf -lWrdsW libtls-gd.so; llvm-objdump -dr --no-show-raw-insn libtls-gd.so
+ELF64 x86-64 ET_DYN; SONAME libtls-gd.so; PT_TLS filesz=4 memsz=4 align=4; FLAGS BIND_NOW; FLAGS_1 NOW; STATIC_TLS absent.
+.rela.dyn contains R_X86_64_DTPMOD64 and R_X86_64_DTPOFF64 for tls_probe_value; .rela.plt contains R_X86_64_JUMP_SLOT for undefined __tls_get_addr; TPOFF and TLSDESC are absent.
+GetTLS, SetTLS, and ResetTLS each load the GD descriptor address and call __tls_get_addr@plt before accessing the returned address.
+CLASSIC_GD_MODEL=GLOBAL_DYNAMIC_GNU_CONFIRMED
+
+$ readelf -lWrdsW libtls-desc.so; llvm-objdump -dr --no-show-raw-insn libtls-desc.so
+ELF64 x86-64 ET_DYN; SONAME libtls-desc.so; PT_TLS filesz=4 memsz=4 align=4; FLAGS BIND_NOW; FLAGS_1 NOW; STATIC_TLS absent.
+.rela.dyn contains one R_X86_64_TLSDESC for tls_probe_value; TPOFF, DTPMOD64, DTPOFF64, and undefined __tls_get_addr are absent.
+GetTLS, SetTLS, and ResetTLS each load the descriptor, execute callq *(%rax), and access the returned offset through %fs.
+TLSDESC_MODEL=GNU2_TLSDESC_CONFIRMED
+
+$ readelf -lWrdsW libtls-ld.so; llvm-objdump -dr --no-show-raw-insn libtls-ld.so
+ELF64 x86-64 ET_DYN; SONAME libtls-ld.so; PT_TLS filesz=4 memsz=4 align=4; FLAGS BIND_NOW; FLAGS_1 NOW; STATIC_TLS absent.
+.rela.dyn contains symbol-index-zero R_X86_64_DTPMOD64; .rela.plt contains R_X86_64_JUMP_SLOT for undefined __tls_get_addr; TPOFF and TLSDESC are absent.
+GetTLS, SetTLS, and ResetTLS each use the module descriptor and __tls_get_addr@plt.
+LOCAL_DYNAMIC_MODEL=LOCAL_DYNAMIC_CONFIRMED_NON_GATING
+LINKER_RELAXATION_COLLAPSE=NO
+
+--- cold dual-HAP build ---
+The first ohpm invocation from [WORKSPACE] failed with 00608002 because oh-package.json5 is under the spike directory; no source or generated output changed in that failed command.
+$ cd [WORKSPACE]/spikes/r1-api24-hap
+$ [STABLE_TOOLS]/bin/ohpm install --all
+install completed in 0s 81ms
+$ [STABLE_TOOLS]/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BUILD SUCCESSFUL in 2 s 75 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+BuildNativeWithCmake, BuildNativeWithNinja, CompileArkTS, ProcessLibs, DoNativeStrip, PackageHap, and PackingCheck finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 13 s 101 ms
+$ [STABLE_TOOLS]/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+OhosTestCompileArkTS, ProcessLibs, DoNativeStrip, PackageHap, and PackingCheck finished.
+WARN: No signingConfig found for product default
+BUILD SUCCESSFUL in 11 s 860 ms
+APP_HAP size=2740592 mtime=2026-07-17T04:58:11.309805824+08:00 SHA-256=368bdfcde54a35867c5acc3cc5f5a0c2c6a5f865b585176831eba71a16842ada
+TEST_HAP size=28974 mtime=2026-07-17T04:58:30.216067732+08:00 SHA-256=054b94fe0c3c3b58bc45682f944dc9d77211b856636519beb08e7e55f89a62eb
+Application metadata isSigned=false SHA-256=5562527cccb04f130a9b04efb3083e3f9211f3c8517fcdccfc7e32a3b472e76c
+Test metadata isSigned=false SHA-256=76f9e1d064062a6e7d9a59adb4cbda96fb3ab4c710d9b6b016e9659e9941013a
+Final stripped x86_64 libprobe.so SHA-256=d12de38d254ea8b0be5254df2e8570f721ebc0c172c3a63b1269fe7fa48fca68
+Both unzip integrity checks reported no errors.
+Neither HAP contains libgoprobe.so, libneededprobe.so, or historical libtlsprobe.so.
+
+--- HAP member byte identity ---
+APP_HAP libs/x86_64/libtls-ie.so SHA-256=b8dee0046cc580339b8a09a79673c81bc75218f90819fdd9069b6b82fb08a674 equals input.
+APP_HAP libs/x86_64/libtls-gd.so SHA-256=c00f4b8861f8c7598f76851cf6d4b90d95a0b03e6e51f58da5213586f1480946 equals input.
+APP_HAP libs/x86_64/libtls-desc.so SHA-256=336357920dd412db0613d88d223229751f31f3e34cd2b85f051162f75e614834 equals input.
+APP_HAP libs/x86_64/libtls-ld.so SHA-256=093fa560431152d21a0323fe9f96bc49edfec7a9983e69cc19e95461f54bec54 equals input.
+TEST_HAP libs/x86_64/libtls-ie.so SHA-256=b8dee0046cc580339b8a09a79673c81bc75218f90819fdd9069b6b82fb08a674 equals input.
+TEST_HAP libs/x86_64/libtls-gd.so SHA-256=c00f4b8861f8c7598f76851cf6d4b90d95a0b03e6e51f58da5213586f1480946 equals input.
+TEST_HAP libs/x86_64/libtls-desc.so SHA-256=336357920dd412db0613d88d223229751f31f3e34cd2b85f051162f75e614834 equals input.
+TEST_HAP libs/x86_64/libtls-ld.so SHA-256=093fa560431152d21a0323fe9f96bc49edfec7a9983e69cc19e95461f54bec54 equals input.
+APP_HAP libs/x86_64/libprobe.so SHA-256=d12de38d254ea8b0be5254df2e8570f721ebc0c172c3a63b1269fe7fa48fca68 equals final stripped output.
+HAP_MEMBER_IDENTITY=PASS
+
+--- runtime preflight and launch ---
+$ date --iso-8601=seconds
+2026-07-17T04:59:08+08:00
+No initial Emulator, qemu, Beta HDC server, listener on 10000/5555/8710, or r1-0009-emulator tmux session was present after the parallel Emulator version query exited.
+KVM_ACCESS=PASS
+X11_ACCESS=PASS DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority
+$ env DISPLAY=:1 XAUTHORITY=[HOME]/.Xauthority [EMULATOR] -start netbird_api24_phone -instancePath [HARMONY_HOME]/emulator-instances -imageRoot [IMAGE_ROOT] -hdcport 10000
+The Emulator ran in isolated tmux session r1-0009-emulator; complete captured console is EV-R1-EMU24-20260717-0009-emulator-console.log.
+Readiness attempts 1 through 7 from 2026-07-17T04:59:28+08:00 through 2026-07-17T04:59:59+08:00 reported no target.
+Readiness attempt 8 at 2026-07-17T05:00:04+08:00 reported 127.0.0.1:10000 TCP Connected localhost.
+SHELL_CONNECTED=PASS
+uname=Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+software_version=emulator 6.1.0.125(SP9DEVC00E120R4P11)
+full_system_version=OpenHarmony-6.1.1.125
+bootevent.boot.completed=true
+
+--- install ---
+INSTALL_STARTED_AT=2026-07-17T05:00:17+08:00
+Preinstall bm dump reported the bundle absent.
+Host HAP hashes immediately before send were APP_HAP 368bdfcde54a35867c5acc3cc5f5a0c2c6a5f865b585176831eba71a16842ada and TEST_HAP 054b94fe0c3c3b58bc45682f944dc9d77211b856636519beb08e7e55f89a62eb.
+$ [BETA_HDC] -t 127.0.0.1:10000 file send [APP_HAP] /data/local/tmp/r1-dynamic-tls-0009
+FileTransfer finish, Size:2740592, File count=1
+$ [BETA_HDC] -t 127.0.0.1:10000 file send [TEST_HAP] /data/local/tmp/r1-dynamic-tls-0009
+FileTransfer finish, Size:28974, File count=1
+$ [BETA_HDC] -t 127.0.0.1:10000 shell bm install -p /data/local/tmp/r1-dynamic-tls-0009
+install bundle successfully.
+Installed fields include appPrivilegeLevel=normal, appSignType=none, cpuAbi=x86_64, deviceId=PHONE-001, isSystemApp=false, nativeLibraryPath=libs/x86_64, moduleName entry and entry_test, and entry.hap plus entry_test.hap.
+Post-install host HAP hashes remained unchanged.
+INSTALL_ENDED_AT=2026-07-17T05:00:19+08:00
+
+--- measured aa test ---
+AA_TEST_STARTED_AT=2026-07-17T05:00:36+08:00
+$ [BETA_HDC] -t 127.0.0.1:10000 shell hilog -r
+Log type core,app,only_prerelease buffer clear successfully
+$ [BETA_HDC] -t 127.0.0.1:10000 shell aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+TLS_MODEL_RESULT|model=initial-exec|library=libtls-ie.so|functional=BLOCKED|attempted=true|required=true|ok=false|expectedBlock=true|environmentDrift=false|preCreatedBeforeDlopen=true|postCreatedAfterDlopen=false|mainValue=1001|preValue=1002|postValue=1003|mainInitial=-1|preInitial=-1|postInitial=-1|mainIterations=0|preIterations=0|postIterations=0|mainReset=-1|preReset=-1|postReset=-1|stage=dlopen|loaderErrno=2|loaderError=Error relocating [BUNDLE_LIBS]/libtls-ie.so: tls_probe_value: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libtls-ie.so|detail=dlopen failed dlerror=Error relocating [BUNDLE_LIBS]/libtls-ie.so: tls_probe_value: initial-exec TLS resolves to dynamic definition in [BUNDLE_LIBS]/libtls-ie.so; errno=2 (No such file or directory)
+TLS_MODEL_RESULT|model=classic-global-dynamic|library=libtls-gd.so|functional=PASS|attempted=true|required=true|ok=true|expectedBlock=false|environmentDrift=false|preCreatedBeforeDlopen=true|postCreatedAfterDlopen=true|mainValue=2001|preValue=2002|postValue=2003|mainInitial=42|preInitial=42|postInitial=42|mainIterations=100|preIterations=100|postIterations=100|mainReset=42|preReset=42|postReset=42|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen, post-dlopen, and main threads each passed initial=42, 100 distinct set/read cycles, and reset=42
+TLS_MODEL_RESULT|model=tlsdesc-gnu2|library=libtls-desc.so|functional=PASS|attempted=true|required=true|ok=true|expectedBlock=false|environmentDrift=false|preCreatedBeforeDlopen=true|postCreatedAfterDlopen=true|mainValue=3001|preValue=3002|postValue=3003|mainInitial=42|preInitial=42|postInitial=42|mainIterations=100|preIterations=100|postIterations=100|mainReset=42|preReset=42|postReset=42|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen, post-dlopen, and main threads each passed initial=42, 100 distinct set/read cycles, and reset=42
+TLS_MODEL_RESULT|model=local-dynamic|library=libtls-ld.so|functional=PASS|attempted=true|required=false|ok=true|expectedBlock=false|environmentDrift=false|preCreatedBeforeDlopen=true|postCreatedAfterDlopen=true|mainValue=4001|preValue=4002|postValue=4003|mainInitial=42|preInitial=42|postInitial=42|mainIterations=100|preIterations=100|postIterations=100|mainReset=42|preReset=42|postReset=42|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen, post-dlopen, and main threads each passed initial=42, 100 distinct set/read cycles, and reset=42
+TLS_SUITE_RESULT|verdict=PASS|ok=true|ieBlocked=true|environmentDrift=false|classicGD=PASS|tlsdesc=PASS|localDynamic=PASS|tier1Pass=true|reason=classic GD or TLSDESC passed the Tier1 gate
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; TLS_SUITE_RESULT|verdict=PASS|ok=true|ieBlocked=true|environmentDrift=false|classicGD=PASS|tlsdesc=PASS|localDynamic=PASS|tier1Pass=true|reason=classic GD or TLSDESC passed the Tier1 gate
+user test finished.
+AA_TEST_HOST_RC=0
+AA_TEST_ENDED_AT=2026-07-17T05:00:37+08:00
+For successful dlopen calls, loaderError is empty and loaderErrno=22 is an ambient errno observation after success; POSIX does not define errno on successful dlopen, so it is not a failure field or verdict input. The IE failure has both a nonempty loaderError and meaningful loaderErrno=2.
+
+--- exact measured result ---
+NODE_API_BASELINE=PASS
+IE_DLOPEN=EXPECTED_BLOCK
+IE_ENVIRONMENT_DRIFT=NO
+IE_GET_SET_RESET=NOT_EXECUTED
+CLASSIC_GD_DLOPEN=PASS
+CLASSIC_GD_MAIN=initial42,value2001,iterations100,reset42
+CLASSIC_GD_PRE_THREAD=created-before-dlopen,resolve-after-dlopen,initial42,value2002,iterations100,reset42
+CLASSIC_GD_POST_THREAD=created-after-dlopen,initial42,value2003,iterations100,reset42
+TLSDESC_DLOPEN=PASS
+TLSDESC_MAIN=initial42,value3001,iterations100,reset42
+TLSDESC_PRE_THREAD=created-before-dlopen,resolve-after-dlopen,initial42,value3002,iterations100,reset42
+TLSDESC_POST_THREAD=created-after-dlopen,initial42,value3003,iterations100,reset42
+LOCAL_DYNAMIC_DLOPEN=PASS_NON_GATING
+LOCAL_DYNAMIC_MAIN=initial42,value4001,iterations100,reset42
+LOCAL_DYNAMIC_PRE_THREAD=created-before-dlopen,resolve-after-dlopen,initial42,value4002,iterations100,reset42
+LOCAL_DYNAMIC_POST_THREAD=created-after-dlopen,initial42,value4003,iterations100,reset42
+THREAD_ISOLATION_ERRORS=0
+PROCESS_CRASH=NO
+TIER1_VERDICT=PASS
+API24_X86_64_TUPLE_STOP=NO
+ARM64_STATUS=PROVISIONAL_UNCHANGED
+NAMED_PHYSICAL_DEVICE_STATUS=PROVISIONAL_UNCHANGED
+R0_EXIT=NO
+R1_EXIT=NO
+R2_EXIT=NO
+UPSTREAM_PATCH_COUNT=0
+
+--- full HiLog and process health ---
+The unfiltered app-buffer output contains 338 lines and 113049 bytes with decoded SHA-256=010db21b82de5e0bcc8e4722c2d94f96c2ed0638068b813c8a977b2b7d1522b1.
+It is persisted losslessly as deterministic gzip then Base64 in EV-R1-EMU24-20260717-0009-hilog-app-full.log.gz.base64; decode with: base64 -d EV-R1-EMU24-20260717-0009-hilog-app-full.log.gz.base64 | gzip -dc.
+The full app buffer records Node-API initialization, baseline PASS, the exact IE loader rejection, all three dynamic-model PASS lines, aggregate Tier1 PASS, and AppLifeCycleManager onProcessDied for PID 2950 after finishTest.
+Post-test shell, OpenHarmony-6.1.1.125, and boot.completed=true checks passed; no Runner process remained.
+[INSTANCE]/Log/crash_server.log contains no bundle, TLS library, fatal signal, or probe crash line; final SHA-256=504361fd0a14e3ca73cccaa145d8220bc412cbca098d672b94bba608ebb721aa.
+Final cumulative mutable HOME log hashes after normal stop: Emulator.log d076f184720357b11a3246ce6151c83ef72265e6b0b25afe8a86bb48413dfc36; qemu.log e5c4b805293f6c5ade73eef83a9a292fea3e48e2b968e72f87461c224bd55ccd; kernel.log c5aa9e3515b095132eb9869d817d0577fb21fadf7371022fd1e2b211c77bca5d; crash_server.log 504361fd0a14e3ca73cccaa145d8220bc412cbca098d672b94bba608ebb721aa.
+The HOME logs are cumulative mutable observations and are not represented as repository evidence objects.
+
+--- cleanup ---
+CLEANUP_STARTED_AT=2026-07-17T05:06:33+08:00
+Guest staging directory removed.
+aa force-stop reported force stop process successfully.
+Beta HDC uninstall reported uninstall bundle successfully.
+Post-uninstall bm dump reported the bundle absent; no bundle or Runner process remained.
+$ HARMONYOS_EMULATOR_INSTANCE=netbird_api24_phone [HARMONY_HOME]/bin/emulator-stop
+Stop emulator netbird_api24_phone successfully.
+EMULATOR_STOPPED_AT=2026-07-17T05:06:40+08:00
+Beta HDC target removal reported no target available after stop; HDC server was killed and the experiment tmux session was removed.
+FINAL_RESIDUE_CHECK_AT=2026-07-17T05:07:01+08:00
+No Emulator, qemu, Beta HDC server, listener on 10000/5555/8710, bundle, guest staging directory, Runner process, temporary object directory, or experiment tmux session remained.
+Only the four expected ignored TLS input shared objects remain under entry/libs/x86_64 for reproducible HAP input inspection.
+
+--- upstream reference status checked read-only after the run ---
+https://github.com/golang/go/issues/71953 is OPEN with title "proposal: runtime: support general dynamic thread local storage model" and no pull request.
+https://go-review.googlesource.com/c/go/+/644975 has Gerrit status NEW, submitted=null, subject "cmd/asm,cmd/link,cmd/go: Add dynamic TLS model for ARM64".
+https://go-review.googlesource.com/c/go/+/696635 has Gerrit status NEW, submitted=null, subject "cmd/link,runtime: fix c-shared dlopen on non-glibc systems (#13492)".
+https://github.com/golang/go/pull/75048 is OPEN, merged=false, merged_at=null, title "cmd/link,runtime: fix c-shared dlopen on non-glibc systems (#13492)".
+UPSTREAM_71953_MERGED_OR_RELEASED=NO
+UPSTREAM_CL644975_MERGED_OR_RELEASED=NO
+UPSTREAM_CL696635_MERGED_OR_RELEASED=NO
+UPSTREAM_PR75048_MERGED_OR_RELEASED=NO
+These four items are references for the next separately authorized gate only; none is an input, patch, merged baseline, or released capability in EV-R1-EMU24-20260717-0009.
+
+--- interpretation boundary ---
+The exact API 24 x86_64 TestRunner loader rejects a real initial-exec TLS late load but accepts verified classic GD, TLSDESC gnu2, and local-dynamic inputs while preserving per-thread initializers and isolation for threads created both before and after dlopen.
+Tier1 therefore passes because both gating dynamic models pass; the API24 x86_64 tuple is not stopped by this gate.
+This does not show that Go 1.25.12 emits or supports either accepted model, does not validate an unmerged upstream change, and does not authorize or implement a Go/runtime/toolchain patch.
+The next gate is a separately bounded Tier2 Go/toolchain feasibility decision using the still-unmerged upstream work only as reference; no Tier2 implementation starts from this record alone.
+The result does not generalize to arm64, a named physical device, commercial Huawei HarmonyOS, another loader or image, Go runtime, NetBird, VPN, product support, signing, channel acceptance, or stage exit.
+The result does not reverse or exit R0, R1, or R2; upstream patch count remains zero.
+VERDICT=PASS
