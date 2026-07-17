@@ -651,3 +651,46 @@ Node-API baseline 在任何 TLS `dlopen` 前得到 `ping=pong` 和固定版本�
 - 0004 的普通 `EntryAbility` 在可见路径下仍返回 `10106102`，TestRunner 成功只隔离测试框架进程路径；不得用 `aa test` 覆盖 UIAbility 阻塞或宣称 R1 退出。
 - 本次 unsigned 接受只说明该研究 Emulator 的当前行为，不能替代开发、测试、发布签名或渠道最终制品闭环；签名材料仍只能由责任人通过仓库外受控路径提供，不得把私钥、口令、profile 或证书秘密写入仓库或普通构建日志。
 - R0、R1、R2 均保持未退出，R1 仍缺 R0 具名 arm64 真机 HDC 闭环；NetBird、WireGuard、VPN、产品支持和发布主张仍无新增证据，R2 前及全项目累计上游适配补丁数保持 0。
+
+## API 24 x86_64 Tier2 PS4 isolated compatibility experiment
+
+```yaml
+evidence_id: EV-R1-EMU24-20260717-0010
+information_status: current-measured
+record_status: reviewed-pass
+stage: R1
+related_stages: [R0, R2]
+approval: recorded T0 Tier2 approval and operator approval in the 2026-07-17 execution request
+timebox: 16h/2d, at most two immutable inputs, no third iteration
+target_tuple:
+  distribution: OpenHarmony-6.1.1.125 API 24 Emulator
+  device: netbird_api24_phone phone Emulator; not a named physical device
+  full_system_version: OpenHarmony-6.1.1.125; software emulator 6.1.0.125(SP9DEVC00E120R4P11)
+  architecture: x86_64 guest on x86_64 host
+  sdk_api_syscap: Command Line Tools 26.0.0.461; OpenHarmony SDK/API 24
+  channel: N/A; unsigned research HAPs only
+code_sha: e7cd00b4fd9d8db6ca3d61bf3cb081bee56ca88d; the replay consumed ignored prebuilt HAPs, bound by the artifact hashes below
+upstream_sha: PS4 5f5911fabb3af7b5662ebc17ff7fa4f881df903a, parent ed3ec75df47ab8e7d6e4a30c445a8ef771382584; official Go 1.25.12 d80d9a98f7e3a8f9b3a82d2c6079f84eb1101d46 for the separate mechanical carry check
+toolchain: host Debian GNU/Linux 13 repository Pod; Command Line Tools 26.0.0.461 and OpenHarmony SDK/API 24; Emulator 26.0.0.200; fixed Beta HDC /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc reports Ver: 3.2.0e with -v; guest Toybox Linux 5.10.210; Go, Hvigor, Node.js, ohpm, NetBird, SDK build tools, patches, and probe source were not run or edited during this replay because it consumed prebuilt HAP inputs
+working_directory: /home/worker/work/base/netbird-harmonyos
+command: exact non-secret commands, X11 direct Emulator start, HDC target 127.0.0.1:10000, one hilog -r, ten consecutive aa test invocations, full app-buffer capture, fault/crash enumeration, and cleanup are in the retained transcript
+input: same immutable candidate HAP pair as the first 0010 execution: APP 6084014 bytes SHA-256 493d791b4e4325e9202e224194108bc9def9f03b7b6b283b5f3e5c6f0324cd20; TEST 3345961 bytes SHA-256 dec6b635e8664069ba03268f563044c0f20916d9a899c98de10343c6c20021a9; each packaged libs/x86_64/libgoprobe.so member SHA-256 aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2
+expected: after HAP/member identity verification and install, one clear followed by ten consecutive TestRunner processes must each report host RC 0, TestFinished-ResultCode 0, GO_SPIKE_RESULT PASS, and PASS pre/post thread records; PIDs must be distinct and absent before teardown; unfiltered app buffer plus fault/crash list must be retained before teardown
+actual: identity, target readiness, install, and post-send host identity passed. Runs 1-10 returned host RC 0 and TestFinished-ResultCode 0. The full buffer has one C++ space log and one TestRunner pipeline structured log per PID, therefore 20 GO_SPIKE_RESULT texts represent 10 runs, not 20 runs; judgment uses 10 distinct-PID structured suite records. Retained app buffer has ten structured suite PASS records, ten pre-dlopen thread PASS records, and ten post-dlopen thread PASS records for distinct exited PIDs 2799, 2844, 2911, 2956, 2988, 3042, 3074, 3108, 3156, and 3203. Each structured functional record reports Hello=42, RuntimeProbe=4194304, NetDialProbe=0, and stage=complete. The final ps check found none of those PIDs. The fault/crash listing contains only pre-run historical appspawn/sceneboard entries dated 2026-07-16 14:39 through 2026-07-17 04:02; no entry is named for the probe or bundle. The decoded unfiltered app buffer has no SIGSEGV, SIGABRT, fatal-signal, or probe-crash match.
+started_at: 2026-07-17T14:11:35+08:00
+ended_at: 2026-07-17T14:12:44+08:00
+clock_source: host CLOCK_REALTIME via date --iso-8601=seconds; guest HiLog timestamps are retained as observations
+artifact_sha256: APP-HAP 493d791b4e4325e9202e224194108bc9def9f03b7b6b283b5f3e5c6f0324cd20 (6084014 bytes); TEST-HAP dec6b635e8664069ba03268f563044c0f20916d9a899c98de10343c6c20021a9 (3345961 bytes); APP-and-TEST libgoprobe.so member aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2; replay transcript 3ee4e12ba95e3d173a8a26e68a778c68d2d8932cbe29c9d44535fd0591ff1206 (57139 bytes); replay console 6d617414579f01f5a0d0697b875ec56904063f5d09e5704a98a849ae8d8cf500 (2192 bytes); gzip-Base64 app buffer 44f74631410732a5a79b90b46a85a1c80661fdfce65b857e962a1a0f07b152cd (20859 bytes), decoding to 23a910d5f57a564636289cadbbf8ffd3f9a4589b8a16b90394799df33470f910 (120909 bytes, 787 lines)
+raw_log_reference: docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay.log SHA-256 3ee4e12ba95e3d173a8a26e68a778c68d2d8932cbe29c9d44535fd0591ff1206, repository access; docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay-emulator-console.log SHA-256 6d617414579f01f5a0d0697b875ec56904063f5d09e5704a98a849ae8d8cf500, repository access; docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay-hilog-app-full.log.gz.base64 SHA-256 44f74631410732a5a79b90b46a85a1c80661fdfce65b857e962a1a0f07b152cd, complete unfiltered app buffer after the sole clear and all ten runs, repository access
+verdict: pass
+verdict_scope: this is a same-artifact API 24 x86_64 Emulator TestRunner replay only. It makes no R0/R1/R2 exit, device-support, Go-toolchain adoption, NetBird, VPN, signing, or product claim; Tier2 iteration 2 remains the separately predeclared high-maintenance stop.
+patch_count: 0
+stage_exit: R0=NO, R1=NO, R2=NO
+reviewer: anthropic/claude-opus-4-8 independent evidence review
+reviewed_at: 2026-07-17T14:19:00+08:00
+review_record: Reviewed-pass: all 7 artifact hashes match (APP HAP, TEST HAP, packaged libgoprobe.so member, replay transcript, replay console, gzip-Base64 app buffer, and decoded app buffer); 10 distinct exited PIDs each have host RC 0, TestFinished-ResultCode 0, structured suite PASS, and functional pre/post PASS with Hello=42, RuntimeProbe=4194304, NetDialProbe=0; the fault window has no probe or bundle entry; the old missing buffer is excluded; verdict scope, patch_count=0, and R0/R1/R2 gates remain unchanged.
+```
+
+The old 0010 `hilog-app-full` and `emulator-console` files are retained first-run summaries, not evidence; their reported checksums and retained summary content are not replayable repository evidence and are not inputs to this record, its verdict, or review. `raw_log_reference` uses only the same-artifact replay files above; that replay is the sole retained recalculable runtime evidence: `base64 -d docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay-hilog-app-full.log.gz.base64 | gzip -dc | sha256sum` returns `23a910d5f57a564636289cadbbf8ffd3f9a4589b8a16b90394799df33470f910`.
+
+The historical iteration-1/iteration-2 boundary remains unchanged. The stock control had `R_X86_64_TPOFF64` plus `STATIC_TLS` and was blocked before `dlsym`; the direct PS4 candidate emitted `R_X86_64_TLSDESC` without `TPOFF` or `STATIC_TLS`. Only after the original iteration-1 gate was satisfied was the unmodified PS4 binary diff mechanically applied to official Go 1.25.12. That apply stopped with conflicts in `src/cmd/internal/obj/link.go`, `src/cmd/internal/objabi/reloctype.go`, `src/cmd/internal/objabi/reloctype_string.go`, `src/runtime/cgo/callbacks.go`, and `src/runtime/tls_s390x.s`, plus missing `src/runtime/cgo/gcc_unix.c`. No conflict was resolved, no Go source was semantically edited, and no official-Go build or target run followed. This remains the predeclared high-maintenance STOP, not a replay failure; patch count remains 0 and R0/R1/R2 remain unexited.

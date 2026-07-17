@@ -1,8 +1,11 @@
+#include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <hilog/log.h>
 #include <napi/native_api.h>
@@ -14,6 +17,7 @@ constexpr const char *kProbeVersion = "r1-api24-probe/0.0.1";
 constexpr const char *kInitialExecTlsRejection = "initial-exec TLS resolves to dynamic definition";
 constexpr int kInitialValue = 42;
 constexpr int kIterations = 100;
+constexpr long long kGoAllocationBytes = 4LL * 1024 * 1024;
 
 using GetTlsFunction = int (*)();
 using SetTlsFunction = void (*)(int);
@@ -102,8 +106,66 @@ struct SuiteResult {
     ModelResult localDynamic;
 };
 
+using HelloFunction = int (*)();
+using RuntimeProbeFunction = long long (*)(long long);
+using NetDialProbeFunction = int (*)(char *, int);
+
+struct GoApi {
+    HelloFunction hello = nullptr;
+    RuntimeProbeFunction runtimeProbe = nullptr;
+    NetDialProbeFunction netDialProbe = nullptr;
+    std::string error;
+};
+
+struct GoThreadResult {
+    bool started = false;
+    bool resolved = false;
+    bool helloOk = false;
+    bool runtimeOk = false;
+    bool netDialOk = false;
+    bool ok = false;
+    std::string role;
+    std::string stage = "not-started";
+    std::string detail = "thread not started";
+    int hello = -1;
+    int runtimeBytes = -1;
+    int netDialCode = -1;
+};
+
+struct GoThreadGate {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    void *handle = nullptr;
+    bool handleReady = false;
+    bool abort = false;
+    int waitingWorkers = 0;
+};
+
+struct GoThreadContext {
+    GoThreadGate *gate = nullptr;
+    const char *role = nullptr;
+    GoThreadResult result;
+};
+
+struct GoProbeResult {
+    bool ok = false;
+    bool preThreadCreatedBeforeDlopen = false;
+    bool dlopenLoaded = false;
+    bool postThreadCreatedAfterDlopen = false;
+    std::string verdict = "FAIL";
+    std::string stage = "not-started";
+    std::string detail = "Go probe not run";
+    std::string loaderError;
+    int loaderErrno = 0;
+    int processId = -1;
+    GoThreadResult preThread;
+    GoThreadResult postThread;
+};
+
 void *g_retainedHandles[4] = {nullptr, nullptr, nullptr, nullptr};
+void *g_retainedGoHandle = nullptr;
 bool g_suiteInvoked = false;
+bool g_goProbeInvoked = false;
 
 std::string LoaderDetail(const char *operation, const std::string &loaderError, int savedErrno) {
     std::string detail(operation);
@@ -428,6 +490,224 @@ SuiteResult ExecuteTlsSuite() {
     return result;
 }
 
+GoApi ResolveGoApi(void *handle) {
+    GoApi api;
+    dlerror();
+    api.hello = reinterpret_cast<HelloFunction>(dlsym(handle, "Hello"));
+    const char *errorPointer = dlerror();
+    if (api.hello == nullptr || errorPointer != nullptr) {
+        api.error = errorPointer == nullptr ? "Hello resolved to null" : errorPointer;
+        return api;
+    }
+    dlerror();
+    api.runtimeProbe = reinterpret_cast<RuntimeProbeFunction>(dlsym(handle, "RuntimeProbe"));
+    errorPointer = dlerror();
+    if (api.runtimeProbe == nullptr || errorPointer != nullptr) {
+        api.error = errorPointer == nullptr ? "RuntimeProbe resolved to null" : errorPointer;
+        return api;
+    }
+    dlerror();
+    api.netDialProbe = reinterpret_cast<NetDialProbeFunction>(dlsym(handle, "NetDialProbe"));
+    errorPointer = dlerror();
+    if (api.netDialProbe == nullptr || errorPointer != nullptr) {
+        api.error = errorPointer == nullptr ? "NetDialProbe resolved to null" : errorPointer;
+    }
+    return api;
+}
+
+int CreateLoopbackListener(int &port, std::string &error) {
+    const int listener = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listener < 0) {
+        error = "socket failed: " + std::string(std::strerror(errno));
+        return -1;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (bind(listener, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) != 0 ||
+        listen(listener, 1) != 0) {
+        error = "bind/listen failed: " + std::string(std::strerror(errno));
+        close(listener);
+        return -1;
+    }
+    socklen_t addressLength = sizeof(address);
+    if (getsockname(listener, reinterpret_cast<sockaddr *>(&address), &addressLength) != 0) {
+        error = "getsockname failed: " + std::string(std::strerror(errno));
+        close(listener);
+        return -1;
+    }
+    port = ntohs(address.sin_port);
+    return listener;
+}
+
+void RunGoCalls(GoThreadResult &result, const GoApi &api) {
+    result.stage = "hello";
+    result.hello = api.hello();
+    result.helloOk = result.hello == 42;
+    if (!result.helloOk) {
+        result.detail = "Hello expected 42, got " + std::to_string(result.hello);
+        return;
+    }
+
+    result.stage = "runtime";
+    result.runtimeBytes = static_cast<int>(api.runtimeProbe(kGoAllocationBytes));
+    result.runtimeOk = result.runtimeBytes == kGoAllocationBytes;
+    if (!result.runtimeOk) {
+        result.detail = "RuntimeProbe expected " + std::to_string(kGoAllocationBytes) + ", got " +
+                        std::to_string(result.runtimeBytes);
+        return;
+    }
+
+    result.stage = "loopback-dial";
+    int port = 0;
+    std::string listenerError;
+    const int listener = CreateLoopbackListener(port, listenerError);
+    if (listener < 0) {
+        result.detail = listenerError;
+        return;
+    }
+    char host[] = "127.0.0.1";
+    result.netDialCode = api.netDialProbe(host, port);
+    close(listener);
+    result.netDialOk = result.netDialCode == 0;
+    if (!result.netDialOk) {
+        result.detail = "NetDialProbe returned " + std::to_string(result.netDialCode);
+        return;
+    }
+
+    result.ok = true;
+    result.stage = "complete";
+    result.detail = "Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0";
+}
+
+void *RunGoWorker(void *opaque) {
+    auto *context = static_cast<GoThreadContext *>(opaque);
+    GoThreadGate &gate = *context->gate;
+    context->result.started = true;
+    context->result.role = context->role;
+    context->result.stage = "wait-for-dlopen";
+    context->result.detail = "waiting for Go library handle";
+
+    pthread_mutex_lock(&gate.mutex);
+    ++gate.waitingWorkers;
+    pthread_cond_broadcast(&gate.condition);
+    while (!gate.handleReady && !gate.abort) {
+        pthread_cond_wait(&gate.condition, &gate.mutex);
+    }
+    if (gate.abort) {
+        context->result.stage = "aborted";
+        context->result.detail = std::string(context->role) + " aborted before dlsym";
+        pthread_mutex_unlock(&gate.mutex);
+        return nullptr;
+    }
+    void *handle = gate.handle;
+    pthread_mutex_unlock(&gate.mutex);
+
+    context->result.stage = "dlsym";
+    const GoApi api = ResolveGoApi(handle);
+    context->result.resolved = api.hello != nullptr && api.runtimeProbe != nullptr && api.netDialProbe != nullptr &&
+                              api.error.empty();
+    if (!context->result.resolved) {
+        context->result.detail = std::string(context->role) + " dlsym failed: " + api.error;
+        return nullptr;
+    }
+    RunGoCalls(context->result, api);
+    return nullptr;
+}
+
+GoProbeResult ExecuteGoProbe() {
+    GoProbeResult result;
+    result.processId = getpid();
+    result.stage = "pre-thread-create";
+
+    GoThreadGate gate{};
+    if (pthread_mutex_init(&gate.mutex, nullptr) != 0) {
+        result.detail = "failed to initialize Go probe mutex";
+        return result;
+    }
+    if (pthread_cond_init(&gate.condition, nullptr) != 0) {
+        result.detail = "failed to initialize Go probe condition";
+        pthread_mutex_destroy(&gate.mutex);
+        return result;
+    }
+
+    GoThreadContext preThread{&gate, "pre-dlopen thread", {}};
+    GoThreadContext postThread{&gate, "post-dlopen thread", {}};
+    pthread_t preThreadId{};
+    pthread_t postThreadId{};
+    int threadError = pthread_create(&preThreadId, nullptr, RunGoWorker, &preThread);
+    if (threadError != 0) {
+        result.detail = "pthread_create failed for pre-dlopen thread: " + std::string(std::strerror(threadError));
+        pthread_cond_destroy(&gate.condition);
+        pthread_mutex_destroy(&gate.mutex);
+        return result;
+    }
+    result.preThreadCreatedBeforeDlopen = true;
+    pthread_mutex_lock(&gate.mutex);
+    while (gate.waitingWorkers < 1) {
+        pthread_cond_wait(&gate.condition, &gate.mutex);
+    }
+    pthread_mutex_unlock(&gate.mutex);
+
+    result.stage = "dlopen";
+    const LoaderObservation open = ObserveDlopen("libgoprobe.so");
+    result.loaderError = open.error;
+    result.loaderErrno = open.savedErrno;
+    if (open.address == nullptr || !open.error.empty()) {
+        result.detail = LoaderDetail("dlopen libgoprobe.so failed", open.error, open.savedErrno);
+        pthread_mutex_lock(&gate.mutex);
+        gate.abort = true;
+        pthread_cond_broadcast(&gate.condition);
+        pthread_mutex_unlock(&gate.mutex);
+        pthread_join(preThreadId, nullptr);
+        result.preThread = preThread.result;
+        pthread_cond_destroy(&gate.condition);
+        pthread_mutex_destroy(&gate.mutex);
+        return result;
+    }
+    result.dlopenLoaded = true;
+    g_retainedGoHandle = open.address;
+    pthread_mutex_lock(&gate.mutex);
+    gate.handle = open.address;
+    gate.handleReady = true;
+    pthread_cond_broadcast(&gate.condition);
+    pthread_mutex_unlock(&gate.mutex);
+    pthread_join(preThreadId, nullptr);
+    result.preThread = preThread.result;
+
+    result.stage = "post-thread-create";
+    threadError = pthread_create(&postThreadId, nullptr, RunGoWorker, &postThread);
+    if (threadError != 0) {
+        result.detail = "pthread_create failed for post-dlopen thread: " + std::string(std::strerror(threadError));
+        pthread_cond_destroy(&gate.condition);
+        pthread_mutex_destroy(&gate.mutex);
+        return result;
+    }
+    result.postThreadCreatedAfterDlopen = true;
+    pthread_join(postThreadId, nullptr);
+    result.postThread = postThread.result;
+
+    result.ok = result.preThread.ok && result.postThread.ok;
+    result.verdict = result.ok ? "PASS" : "FAIL";
+    result.stage = result.ok ? "complete" : "callback";
+    if (result.ok) {
+        result.detail = "pre-dlopen and post-dlopen threads passed all Go callbacks";
+    } else if (!result.preThread.ok) {
+        result.detail = result.preThread.detail;
+    } else {
+        result.detail = result.postThread.detail;
+    }
+    pthread_cond_destroy(&gate.condition);
+    pthread_mutex_destroy(&gate.mutex);
+    OH_LOG_Print(LOG_APP, result.ok ? LOG_INFO : LOG_ERROR, kLogDomain, kLogTag,
+                 "GO_SPIKE_RESULT verdict=%{public}s pid=%{public}d dlopen=%{public}d pre=%{public}d post=%{public}d "
+                 "stage=%{public}s detail=%{public}s loaderError=%{public}s",
+                 result.verdict.c_str(), result.processId, result.dlopenLoaded, result.preThread.ok,
+                 result.postThread.ok, result.stage.c_str(), result.detail.c_str(), result.loaderError.c_str());
+    return result;
+}
+
 napi_value MakeString(napi_env env, const char *value) {
     napi_value result = nullptr;
     if (napi_create_string_utf8(env, value, NAPI_AUTO_LENGTH, &result) != napi_ok) {
@@ -504,6 +784,45 @@ napi_value MakeSuiteResult(napi_env env, const SuiteResult &result) {
     return success ? object : nullptr;
 }
 
+napi_value MakeGoThreadResult(napi_env env, const GoThreadResult &result) {
+    napi_value object = nullptr;
+    if (napi_create_object(env, &object) != napi_ok) {
+        return nullptr;
+    }
+    const bool success = SetBoolean(env, object, "started", result.started) &&
+                         SetBoolean(env, object, "resolved", result.resolved) &&
+                         SetBoolean(env, object, "helloOk", result.helloOk) &&
+                         SetBoolean(env, object, "runtimeOk", result.runtimeOk) &&
+                         SetBoolean(env, object, "netDialOk", result.netDialOk) &&
+                         SetBoolean(env, object, "ok", result.ok) && SetString(env, object, "role", result.role) &&
+                         SetString(env, object, "stage", result.stage) && SetString(env, object, "detail", result.detail) &&
+                         SetInteger(env, object, "hello", result.hello) &&
+                         SetInteger(env, object, "runtimeBytes", result.runtimeBytes) &&
+                         SetInteger(env, object, "netDialCode", result.netDialCode);
+    return success ? object : nullptr;
+}
+
+napi_value MakeGoProbeResult(napi_env env, const GoProbeResult &result) {
+    napi_value object = nullptr;
+    if (napi_create_object(env, &object) != napi_ok) {
+        return nullptr;
+    }
+    const bool success = SetBoolean(env, object, "ok", result.ok) &&
+                         SetBoolean(env, object, "preThreadCreatedBeforeDlopen",
+                                    result.preThreadCreatedBeforeDlopen) &&
+                         SetBoolean(env, object, "dlopenLoaded", result.dlopenLoaded) &&
+                         SetBoolean(env, object, "postThreadCreatedAfterDlopen",
+                                    result.postThreadCreatedAfterDlopen) &&
+                         SetString(env, object, "verdict", result.verdict) &&
+                         SetString(env, object, "stage", result.stage) && SetString(env, object, "detail", result.detail) &&
+                         SetString(env, object, "loaderError", result.loaderError) &&
+                         SetInteger(env, object, "loaderErrno", result.loaderErrno) &&
+                         SetInteger(env, object, "processId", result.processId) &&
+                         SetNamedValue(env, object, "preThread", MakeGoThreadResult(env, result.preThread)) &&
+                         SetNamedValue(env, object, "postThread", MakeGoThreadResult(env, result.postThread));
+    return success ? object : nullptr;
+}
+
 napi_value Ping(napi_env env, napi_callback_info info) {
     (void)info;
     OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag, "Node-API ping invoked");
@@ -527,11 +846,23 @@ napi_value RunDynamicTlsProbe(napi_env env, napi_callback_info info) {
     return MakeSuiteResult(env, ExecuteTlsSuite());
 }
 
+napi_value RunGoProbe(napi_env env, napi_callback_info info) {
+    (void)info;
+    if (g_goProbeInvoked) {
+        GoProbeResult repeated;
+        repeated.detail = "Go probe may run only once per TestRunner process";
+        return MakeGoProbeResult(env, repeated);
+    }
+    g_goProbeInvoked = true;
+    return MakeGoProbeResult(env, ExecuteGoProbe());
+}
+
 napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor properties[] = {
         {"ping", nullptr, Ping, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"version", nullptr, Version, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"runDynamicTlsProbe", nullptr, RunDynamicTlsProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"runGoProbe", nullptr, RunGoProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) {
         return nullptr;

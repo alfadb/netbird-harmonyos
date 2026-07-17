@@ -1,0 +1,18 @@
+EV-R1-EMU24-20260717-0010 Emulator console
+
+Dedicated sessions: r1-tier2-0010-control and r1-tier2-0010-ps4.
+Both starts used DISPLAY=:1, XAUTHORITY=/home/worker/.Xauthority, the netbird_api24_phone instance, image root /home/worker/harmonyos/emulator-images, and HDC port 10000.
+
+Observed candidate-session console:
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+[WARNING]Hot boot is not enable, the bootmode "snapshot" invalid. now start with cold boot.
+audio: Could not init `pa' audio driver
+audio: warning: Using timer based audio emulation
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+error: XDG_RUNTIME_DIR is invalid or not set in the environment.
+
+The same host capability warnings occurred in the stock-control session. No console SIGSEGV, SIGABRT, fatal signal, qemu abort, or probe crash was observed. Both sessions were stopped with /home/worker/harmonyos/bin/emulator-stop after bundle cleanup.

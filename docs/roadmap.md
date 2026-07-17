@@ -72,6 +72,8 @@
 - **D6 判定范围**：Tier1 `PASS` 等于 classic GD 或 TLSDESC 至少一个全过；两者都失败只 `STOP` API 24 x86_64 元组，arm64 与具名真机保持 provisional；任何结果都不退出或回退 R0、R1、R2，也不自动形成 Go、NetBird、VPN 或产品结论。
 - **D7 Tier1 实测**：0009 最终验明 IE、classic GD、TLSDESC 和附加 local-dynamic 均未塌缩；IE 对照按预期拒绝，GD、TLSDESC、LD 的主线程/加载前线程/加载后线程各 100 轮全部通过，无串扰或 crash，因此 Tier1 `PASS`，该 x86_64 元组不停止，补丁数为 0。
 - **D8 下一门**：Go issue `#71953`、Go CL `644975`、Go CL `696635`、Go PR `75048` 当前均 open 或 `NEW`、未合并、未发布，只能作为下一道独立授权 Tier2 Go/toolchain 可行性门参考；Tier2 必须另行固定已发布输入、timebox、退出标准、维护阈值和补丁预算，0009 不自动授权实现。
+- **D9 预定门**：在记录的 T0 和人工批准下，Tier2 限 `16h/2d`、最多两个不可变输入和两次迭代。迭代1只允许直接重建干净 PS4 `5f5911fabb3af7b5662ebc17ff7fa4f881df903a`，不改 Go 源码；候选必须先以 x86_64 c-shared 最终 ELF 的 `TLSDESC`、无 `TPOFF`/`STATIC_TLS` 通过身份门，再在 API 24 x86_64 TestRunner 中十个不同且退出的 PID 上完成 late `dlopen`、加载前/后 C 线程 `dlsym`、`Hello=42`、goroutine/channel/timer/allocation 和 loopback `net.Dial`，每次 `ResultCode 0`、无 crash/hang。迭代2只允许把原始 PS4 binary diff 对官方 Go 1.25.12 执行一次机械 `git apply --3way`；任一冲突、缺失路径或需要语义解决即为预定 `STOP: high-maintenance`，禁止第三次迭代。
+- **D9 事后结果**：原始第一次全量 app buffer 未在停机前持久化，故不作为证据。`EV-R1-EMU24-20260717-0010` 的同制品可复算重放已用同一 APP/TEST/member 哈希完成上述十次运行：十个新 PID 的框架结果均为 0，完整无筛选 app buffer 保留了十条 suite PASS、十条 pre PASS 和十条 post PASS，并在停机前记录 fault/crash 清单及进程退出。迭代2随后在五个文件冲突和缺少 `runtime/cgo/gcc_unix.c` 时达到预定 high-maintenance STOP；没有语义解决、官方 Go 构建或 target run。补丁数仍为 0，CL696635 仍为 `NEW`、未发布，R0/R1/R2 不退出。
 
 ## 实施原则
 

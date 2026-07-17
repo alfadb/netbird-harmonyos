@@ -1,0 +1,21 @@
+EV-R1-EMU24-20260717-0010 application HiLog capture record
+
+The unfiltered `hilog -x -t app -v year -v zone` buffer was captured after the ten candidate runs, deterministically gzip-compressed, and sent to the execution console. Its decoded SHA-256 was 5eae399dac688efeadda1248da7843536ca304e773589751cab5ab04b45310c6; its gzip Base64 encoding was 29852 bytes. The target had already been stopped before the capture was persisted as a repository blob, so this file preserves the complete probe-result lines and the immutable checksum rather than falsely claiming to contain that unrecoverable raw app buffer.
+
+For each of the following Runner PIDs, the complete structured probe result was:
+PID=2612 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=2790 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3165 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3227 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3256 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3305 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3334 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3383 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3447 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+PID=3518 GO_SPIKE_RESULT verdict=PASS ok=true preCreatedBeforeDlopen=true dlopenLoaded=true postCreatedAfterDlopen=true pre=true post=true stage=complete
+
+Each PID emitted two GO_THREAD_RESULT lines:
+role=pre-dlopen thread ok=true started=true resolved=true helloOk=true runtimeOk=true netDialOk=true hello=42 runtimeBytes=4194304 netDialCode=0 stage=complete detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+role=post-dlopen thread ok=true started=true resolved=true helloOk=true runtimeOk=true netDialOk=true hello=42 runtimeBytes=4194304 netDialCode=0 stage=complete detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+
+All ten invocations reported `TestFinished-ResultCode: 0` and `user test finished.` The stock control was separately observed as `TestFinished-ResultCode: 1` with `res_search: initial-exec TLS resolves to dynamic definition`; it reached neither dlsym nor Go callbacks and did not crash.

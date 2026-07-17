@@ -2,15 +2,15 @@ import abilityDelegatorRegistry from '@ohos.app.ability.abilityDelegatorRegistry
 import TestRunner from '@ohos.application.testRunner';
 import hilog from '@ohos.hilog';
 import probe from 'libprobe.so';
-import type { DynamicTlsProbeResult, TlsModelResult } from 'libprobe.so';
+import type { GoProbeResult, GoThreadResult } from 'libprobe.so';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'R1Api24ProbeTest';
 const EXPECTED_PING: string = 'pong';
 const EXPECTED_VERSION: string = 'r1-api24-probe/0.0.1';
 
-function modelSummary(result: TlsModelResult): string {
-  return `TLS_MODEL_RESULT|model=${result.model}|library=${result.library}|functional=${result.functionalStatus}|attempted=${result.attempted}|required=${result.required}|ok=${result.ok}|expectedBlock=${result.expectedBlock}|environmentDrift=${result.environmentDrift}|preCreatedBeforeDlopen=${result.preThreadCreatedBeforeDlopen}|postCreatedAfterDlopen=${result.postThreadCreatedAfterDlopen}|mainValue=${result.mainValue}|preValue=${result.preThreadValue}|postValue=${result.postThreadValue}|mainInitial=${result.mainInitial}|preInitial=${result.preThreadInitial}|postInitial=${result.postThreadInitial}|mainIterations=${result.mainIterations}|preIterations=${result.preThreadIterations}|postIterations=${result.postThreadIterations}|mainReset=${result.mainReset}|preReset=${result.preThreadReset}|postReset=${result.postThreadReset}|stage=${result.stage}|loaderErrno=${result.loaderErrno}|loaderError=${result.loaderError}|detail=${result.detail}`;
+function threadSummary(result: GoThreadResult): string {
+  return `GO_THREAD_RESULT|role=${result.role}|ok=${result.ok}|started=${result.started}|resolved=${result.resolved}|helloOk=${result.helloOk}|runtimeOk=${result.runtimeOk}|netDialOk=${result.netDialOk}|hello=${result.hello}|runtimeBytes=${result.runtimeBytes}|netDialCode=${result.netDialCode}|stage=${result.stage}|detail=${result.detail}`;
 }
 
 export default class OpenHarmonyTestRunner implements TestRunner {
@@ -33,17 +33,18 @@ export default class OpenHarmonyTestRunner implements TestRunner {
         return;
       }
 
-      const suite: DynamicTlsProbeResult = probe.runDynamicTlsProbe();
-      const models: TlsModelResult[] = [suite.initialExec, suite.globalDynamic, suite.tlsDesc, suite.localDynamic];
-      models.forEach((model: TlsModelResult) => {
-        const summary: string = modelSummary(model);
-        hilog.info(DOMAIN, TAG, '%{public}s', summary);
-        delegator.printSync(summary);
-      });
-      const suiteSummary: string = `TLS_SUITE_RESULT|verdict=${suite.verdict}|ok=${suite.ok}|ieBlocked=${suite.ieBlocked}|environmentDrift=${suite.environmentDrift}|classicGD=${suite.globalDynamic.functionalStatus}|tlsdesc=${suite.tlsDesc.functionalStatus}|localDynamic=${suite.localDynamic.functionalStatus}|tier1Pass=${suite.tier1Pass}|reason=${suite.stopReason}`;
+      const suite: GoProbeResult = probe.runGoProbe();
+      const preSummary: string = threadSummary(suite.preThread);
+      const postSummary: string = threadSummary(suite.postThread);
+      hilog.info(DOMAIN, TAG, '%{public}s', preSummary);
+      hilog.info(DOMAIN, TAG, '%{public}s', postSummary);
+      delegator.printSync(preSummary);
+      delegator.printSync(postSummary);
+      const suiteSummary: string = `GO_SPIKE_RESULT|verdict=${suite.verdict}|ok=${suite.ok}|pid=${suite.processId}|preCreatedBeforeDlopen=${suite.preThreadCreatedBeforeDlopen}|dlopenLoaded=${suite.dlopenLoaded}|postCreatedAfterDlopen=${suite.postThreadCreatedAfterDlopen}|pre=${suite.preThread.ok}|post=${suite.postThread.ok}|stage=${suite.stage}|loaderErrno=${suite.loaderErrno}|loaderError=${suite.loaderError}|detail=${suite.detail}`;
       hilog.info(DOMAIN, TAG, '%{public}s', suiteSummary);
       delegator.printSync(suiteSummary);
-      const passed: boolean = suite.ok && suite.ieBlocked && !suite.environmentDrift && suite.tier1Pass;
+      const passed: boolean = suite.ok && suite.preThreadCreatedBeforeDlopen && suite.dlopenLoaded &&
+        suite.postThreadCreatedAfterDlopen && suite.preThread.ok && suite.postThread.ok;
       delegator.finishTest(`${baselineSummary}; ${suiteSummary}`, passed ? 0 : 1, () => {});
     } catch (error) {
       const failure: string = `Probe invocation failed: ${String(error)}`;

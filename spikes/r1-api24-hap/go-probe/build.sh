@@ -5,6 +5,9 @@ set -euo pipefail
 : "${GO_BIN:?set GO_BIN to the Go launcher path}"
 : "${GO_PROBE_OUTPUT_DIR:?set GO_PROBE_OUTPUT_DIR to the generated x86_64 library directory}"
 
+GO_TOOLCHAIN_MODE="${GO_TOOLCHAIN_MODE:-local}"
+GO_EXPECTED_VERSION_PREFIX="${GO_EXPECTED_VERSION_PREFIX:-go version go1.25.12 }"
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 compiler="$HARMONYOS_NATIVE_HOME/llvm/bin/x86_64-unknown-linux-ohos-clang"
 if [[ ! -x "$GO_BIN" ]]; then
@@ -20,11 +23,11 @@ if [[ "$GO_PROBE_OUTPUT_DIR" != /* ]]; then
   exit 1
 fi
 
-go_version="$(GOTOOLCHAIN=go1.25.12 "$GO_BIN" version)"
+go_version="$(GOTOOLCHAIN="$GO_TOOLCHAIN_MODE" "$GO_BIN" version)"
 case "$go_version" in
-  "go version go1.25.12 "*) ;;
+  "$GO_EXPECTED_VERSION_PREFIX"*) ;;
   *)
-    printf 'expected Go 1.25.12, got: %s\n' "$go_version" >&2
+    printf 'expected Go version prefix %s, got: %s\n' "$GO_EXPECTED_VERSION_PREFIX" "$go_version" >&2
     exit 1
     ;;
 esac
@@ -32,7 +35,7 @@ esac
 mkdir -p "$GO_PROBE_OUTPUT_DIR"
 rm -f "$GO_PROBE_OUTPUT_DIR/libgoprobe.so" "$GO_PROBE_OUTPUT_DIR/libgoprobe.h"
 
-GOTOOLCHAIN=go1.25.12 \
+GOTOOLCHAIN="$GO_TOOLCHAIN_MODE" \
 GOOS=linux \
 GOARCH=amd64 \
 GOAMD64=v1 \

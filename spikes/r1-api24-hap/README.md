@@ -1,23 +1,18 @@
 # R1 API 24 HAP Probe
 
-This directory contains a short-lived HarmonyOS R1 research probe for the API 24 x86_64 dynamic TLS loader gate. It must not evolve into a product shell.
+This directory contains short-lived HarmonyOS R1 research probes for the API 24 x86_64 TLS loader boundary. It must not evolve into a product shell.
 
 ## Current Scope
 
 - Builds one API 24 Stage application HAP and one `entry_test` HAP with bundle name `cn.alfadb.netbird.r1probe`.
-- Builds the ordinary Node-API `libprobe.so` for `arm64-v8a` and `x86_64`, but executes the TLS suite only on the recorded API 24 x86_64 Emulator tuple.
-- Builds four separately named pure-C x86_64 inputs: `libtls-ie.so`, `libtls-gd.so`, `libtls-desc.so`, and the non-gating `libtls-ld.so`.
-- Exports the same deterministic C ABI from every TLS input: `GetTLS`, `SetTLS`, and `ResetTLS`; every TLS integer starts at 42.
-- Uses host GCC 14.2.0 only to compile freestanding x86_64 PIC objects with explicit `gnu` or `gnu2` TLS dialects, then uses fixed API 24 OHOS clang/lld to link every final shared object.
-- Passes `--no-relax` to every final link and verifies the final ELF with `readelf` and `llvm-objdump`; compiler flags alone are not accepted as model identity.
-- Runs the normal Node-API `ping` and `version` baseline before any TLS load.
-- Creates and confirms a waiting pthread before every `dlopen`; after a successful load, that thread resolves and calls the C ABI while a second pthread is created after `dlopen` and does the same.
-- Requires the main thread, pre-`dlopen` thread, and post-`dlopen` thread to observe initial 42, use different values for 100 `SetTLS`/`GetTLS` cycles, and return to 42 through `ResetTLS` without cross-thread leakage.
-- Runs the IE control first with `RTLD_NOW | RTLD_LOCAL`; an unexpected load is environment drift and stops the suite before GD or TLSDESC.
-- Defines Tier1 `PASS` as classic GD or TLSDESC passing all load and thread checks; local-dynamic is included because the same implementation naturally supports it, but it does not change the gate.
-- Contains no NetBird, TUN, VPN, DNS lookup, public-network operation, Native Child invocation, Hypium, signing material, Go patch, NetBird patch, or SDK patch.
+- Retains the Tier1 pure-C TLS sources and records as immutable 0009 evidence; `runDynamicTlsProbe` remains available for that scope.
+- The current Tier2 Runner calls `runGoProbe`, which creates one waiting C pthread before `dlopen("libgoprobe.so", RTLD_NOW | RTLD_LOCAL)` and one C pthread after a successful load. Each thread performs its own `dlsym` and requires `Hello=42`, goroutine/channel/timer/allocation `RuntimeProbe=4194304`, and loopback `NetDialProbe=0`.
+- `go-probe/build.sh` requires an explicit Go launcher and checks the reported version prefix. Its default `GOTOOLCHAIN=local` prevents a supplied candidate launcher from silently selecting a cached stock toolchain.
+- The measured 0010 stock control uses Go 1.25.12 and retains `TPOFF64` plus `STATIC_TLS`; direct PS4 `5f5911fabb3af7b5662ebc17ff7fa4f881df903a` emits TLSDESC with no `TPOFF` or `STATIC_TLS` and passed ten fresh TestRunner processes.
+- The only approved official-Go follow-up was a mechanical `git apply --3way` of the unmodified PS4 diff to Go 1.25.12. It produced conflicts and is stopped as high-maintenance; no semantic Go edit, extra runtime or argv repair, third iteration, NetBird patch, SDK patch, or product conclusion is authorized.
+- Contains no NetBird, TUN, VPN, DNS lookup, public-network operation, Native Child invocation, Hypium, signing material, or committed Go source patch.
 
-The historical `go-probe` and `neededprobe.c` sources remain for the immutable 0006/0007 record, but the current build script neither invokes nor packages them. Before creating the current inputs, it removes historical ignored `libgoprobe.so`, `libneededprobe.so`, and `libtlsprobe.so` from `entry/libs/x86_64`.
+Generated Go libraries, headers, HAPs, and native inputs are ignored. The evidence record for the completed Tier2 stop is `EV-R1-EMU24-20260717-0010`.
 
 ## Native Probe Build
 

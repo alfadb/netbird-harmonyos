@@ -40,6 +40,37 @@ export interface DynamicTlsProbeResult {
   localDynamic: TlsModelResult;
 }
 
+export interface GoThreadResult {
+  started: boolean;
+  resolved: boolean;
+  helloOk: boolean;
+  runtimeOk: boolean;
+  netDialOk: boolean;
+  ok: boolean;
+  role: string;
+  stage: string;
+  detail: string;
+  hello: number;
+  runtimeBytes: number;
+  netDialCode: number;
+}
+
+export interface GoProbeResult {
+  ok: boolean;
+  preThreadCreatedBeforeDlopen: boolean;
+  dlopenLoaded: boolean;
+  postThreadCreatedAfterDlopen: boolean;
+  verdict: string;
+  stage: string;
+  detail: string;
+  loaderError: string;
+  loaderErrno: number;
+  processId: number;
+  preThread: GoThreadResult;
+  postThread: GoThreadResult;
+}
+
 export const ping: () => string;
 export const version: () => string;
 export const runDynamicTlsProbe: () => DynamicTlsProbeResult;
+export const runGoProbe: () => GoProbeResult;

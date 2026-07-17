@@ -1,0 +1,1031 @@
+EV_R1_EMU24_20260717_0010_SAME_ARTIFACT_REPLAY
+STARTED_AT=2026-07-17T14:11:35+08:00
+WORKSPACE=/home/worker/work/base/netbird-harmonyos
+TARGET=127.0.0.1:10000
+HDC=/home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc
+EMULATOR=/home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+
+--- immutable HAP identity before target startup ---
+/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap size=6084014 mtime=2026-07-17 13:32:51.349529289 +0800
+493d791b4e4325e9202e224194108bc9def9f03b7b6b283b5f3e5c6f0324cd20  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap size=3345961 mtime=2026-07-17 13:33:03.190719207 +0800
+dec6b635e8664069ba03268f563044c0f20916d9a899c98de10343c6c20021a9  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+APP_HAP_MEMBER_SHA256=aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2
+TEST_HAP_MEMBER_SHA256=aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2
+IDENTITY_GATE=PASS
+
+--- emulator launch and readiness ---
+EMULATOR_COMMAND=DISPLAY=:1 XAUTHORITY=/home/worker/.Xauthority /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -hdcport 10000
+READINESS_ATTEMPT=1 AT=2026-07-17T14:11:36+08:00
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+READINESS_ATTEMPT=2 AT=2026-07-17T14:11:41+08:00
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+READINESS_ATTEMPT=3 AT=2026-07-17T14:11:46+08:00
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+READINESS_ATTEMPT=4 AT=2026-07-17T14:11:51+08:00
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+READINESS_ATTEMPT=5 AT=2026-07-17T14:11:56+08:00
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+Linux localhost 5.10.210 #1 SMP Mon May 18 09:32:07 CST 2026 x86_64 Toybox
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell param\ get\ const.ohos.fullname
+OpenHarmony-6.1.1.125 
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell param\ get\ const.product.software.version
+emulator 6.1.0.125(SP9DEVC00E120R4P11) 
+POST_CONNECT_SETTLE_SECONDS=30
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell param\ get\ bootevent.boot.completed
+true 
+
+--- install immutable HAP pair ---
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell bm\ dump\ -n\ cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell mkdir\ -p\ /data/local/tmp/r1-tier2-0010-replay
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 file send /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /data/local/tmp/r1-tier2-0010-replay
+FileTransfer finish, Size:6084014, File count = 1, time:23ms rate:264522.35kB/s
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 file send /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap /data/local/tmp/r1-tier2-0010-replay
+FileTransfer finish, Size:3345961, File count = 1, time:16ms rate:209122.56kB/s
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell bm\ install\ -p\ /data/local/tmp/r1-tier2-0010-replay
+install bundle successfully.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell bm\ dump\ -n\ cn.alfadb.netbird.r1probe
+cn.alfadb.netbird.r1probe:
+{
+    "appId": "cn.alfadb.netbird.r1probe_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": 537385135,
+        "accessTokenIdEx": 34897123503,
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.r1probe",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.r1probe",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777222,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777222,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            },
+            {
+                "moduleName": "entry_test",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.r1probe",
+        "nativeLibraryPath": "libs/x86_64",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.r1probe",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020062,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784221045861,
+    "gid": 20020062,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.r1probe",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.r1probe",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+                    "iconId": 16777222,
+                    "iconPath": "$media:start_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:start_icon",
+                    "startWindowIconId": 16777222,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777222,
+            "iconPath": "$media:start_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.r1probe",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        },
+        {
+            "abilityInfos": [],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "",
+            "descriptionId": 0,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry_test.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 0,
+            "iconPath": "",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "",
+            "labelId": 0,
+            "mainAbility": "",
+            "mainElementName": "",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry_test",
+            "moduleSourceDir": "",
+            "moduleType": 2,
+            "name": "entry_test",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry_test",
+            "packageName": "entry",
+            "pages": "",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.r1probe",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry_test/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry",
+        "entry_test"
+    ],
+    "installTime": 1784268748157,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry",
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry_test"
+    ],
+    "moduleNames": [
+        "entry",
+        "entry_test"
+    ],
+    "modulePublicDirs": [
+        "",
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry_test/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.r1probe",
+    "oldAppIds": [
+        "cn.alfadb.netbird.r1probe_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020062,
+    "updateTime": 1784268748181,
+    "userInfo": [
+        {
+            "accessTokenId": 537385135,
+            "accessTokenIdEx": 34897123503,
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784221045861,
+            "gids": [
+                20020062
+            ],
+            "installTime": 1784268748157,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020062,
+            "updateTime": 1784268748181
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+POST_SEND_HOST_IDENTITY_GATE=PASS
+
+--- measured ten-run sequence; HiLog clear occurs exactly once ---
+HILOG_CLEAR_COUNT=1
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell hilog -r
+Log type core,app,only_prerelease buffer clear successfully
+AA_TEST_01_STARTED_AT=2026-07-17T14:12:29+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2799|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2799|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_01_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_01_ENDED_AT=2026-07-17T14:12:30+08:00
+AA_TEST_02_STARTED_AT=2026-07-17T14:12:30+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2844|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2844|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_02_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_02_ENDED_AT=2026-07-17T14:12:32+08:00
+AA_TEST_03_STARTED_AT=2026-07-17T14:12:32+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2911|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2911|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_03_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_03_ENDED_AT=2026-07-17T14:12:33+08:00
+AA_TEST_04_STARTED_AT=2026-07-17T14:12:33+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2956|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2956|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_04_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_04_ENDED_AT=2026-07-17T14:12:34+08:00
+AA_TEST_05_STARTED_AT=2026-07-17T14:12:34+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2988|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2988|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_05_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_05_ENDED_AT=2026-07-17T14:12:36+08:00
+AA_TEST_06_STARTED_AT=2026-07-17T14:12:36+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3042|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3042|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_06_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_06_ENDED_AT=2026-07-17T14:12:37+08:00
+AA_TEST_07_STARTED_AT=2026-07-17T14:12:37+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3074|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3074|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_07_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_07_ENDED_AT=2026-07-17T14:12:38+08:00
+AA_TEST_08_STARTED_AT=2026-07-17T14:12:38+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3108|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3108|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_08_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_08_ENDED_AT=2026-07-17T14:12:39+08:00
+AA_TEST_09_STARTED_AT=2026-07-17T14:12:39+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3156|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3156|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_09_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_09_ENDED_AT=2026-07-17T14:12:40+08:00
+AA_TEST_10_STARTED_AT=2026-07-17T14:12:40+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ test\ -b\ cn.alfadb.netbird.r1probe\ -m\ entry_test\ -s\ unittest\ /ets/testrunner/OpenHarmonyTestRunner\ -s\ timeout\ 15000
+BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_THREAD_RESULT|role=pre-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_THREAD_RESULT|role=post-dlopen thread|ok=true|started=true|resolved=true|helloOk=true|runtimeOk=true|netDialOk=true|hello=42|runtimeBytes=4194304|netDialCode=0|stage=complete|detail=Hello=42, RuntimeProbe=4194304, loopback NetDialProbe=0
+GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3203|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3203|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+user test finished.
+AA_TEST_10_HOST_RC=0
+TestFinished-ResultCode: 0
+AA_TEST_10_ENDED_AT=2026-07-17T14:12:41+08:00
+
+--- unfiltered full app-buffer capture before target teardown ---
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell hilog\ -x\ -t\ app\ -v\ year\ -v\ zone > /tmp/ev-r1-emu24-0010-replay.YOvyhE/hilog-app-full.log
+HILOG_FULL_LINES=787
+HILOG_FULL_BYTES=120909
+HILOG_FULL_DECODED_SHA256=23a910d5f57a564636289cadbbf8ffd3f9a4589b8a16b90394799df33470f910
+HILOG_GZIP_BASE64_PATH=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay-hilog-app-full.log.gz.base64
+HILOG_GZIP_BASE64_BYTES=20859
+HILOG_GZIP_BASE64_SHA256=44f74631410732a5a79b90b46a85a1c80661fdfce65b857e962a1a0f07b152cd
+HILOG_GZIP_BASE64_RECOMPUTE=base64 -d /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-R1-EMU24-20260717-0010-same-artifact-replay-hilog-app-full.log.gz.base64 | gzip -dc | sha256sum
+
+--- structured ten-run assertions from retained full app buffer ---
+RUNNER_PIDS=2799 2844 2911 2956 2988 3042 3074 3108 3156 3203
+CST 2026-07-17 14:12:29.983  2799  2799 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2799|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:31.610  2844  2844 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2844|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:32.442  2911  2911 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2911|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:33.511  2956  2956 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2956|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:35.422  2988  2988 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=2988|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:36.498  3042  3042 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3042|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:37.639  3074  3074 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3074|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:38.824  3108  3108 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3108|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:39.960  3156  3156 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3156|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+CST 2026-07-17 14:12:41.062  3203  3203 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=PASS|ok=true|pid=3203|preCreatedBeforeDlopen=true|dlopenLoaded=true|postCreatedAfterDlopen=true|pre=true|post=true|stage=complete|loaderErrno=22|loaderError=|detail=pre-dlopen and post-dlopen threads passed all Go callbacks
+STRUCTURED_PRE_POST_GATE=PASS
+RUNNER_PID_UNIQUENESS_GATE=PASS
+
+--- target health and fault/crash listing before target teardown ---
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell param\ get\ const.ohos.fullname
+OpenHarmony-6.1.1.125 
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell param\ get\ bootevent.boot.completed
+true 
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell ps\ -A
+   PID TTY          TIME CMD            
+     1 ?        00:00:17 init
+     2 ?        00:00:00 kthreadd
+     3 ?        00:00:00 rcu_gp
+     4 ?        00:00:00 rcu_par_gp
+     5 ?        00:00:00 kworker/0:0-events
+     6 ?        00:00:00 kworker/0:0H-kblockd
+     7 ?        00:00:00 kworker/u8:0-events_unbound
+     8 ?        00:00:00 mm_percpu_wq
+     9 ?        00:00:00 ksoftirqd/0
+    10 ?        00:00:00 rcu_sched
+    11 ?        00:00:00 migration/0
+    12 ?        00:00:00 cpuhp/0
+    13 ?        00:00:00 cpuhp/1
+    14 ?        00:00:00 migration/1
+    15 ?        00:00:00 ksoftirqd/1
+    16 ?        00:00:00 kworker/1:0-mm_percpu_wq
+    17 ?        00:00:00 kworker/1:0H-events_highpri
+    18 ?        00:00:00 cpuhp/2
+    19 ?        00:00:00 migration/2
+    20 ?        00:00:00 ksoftirqd/2
+    21 ?        00:00:00 kworker/2:0-events
+    22 ?        00:00:00 kworker/2:0H-kblockd
+    23 ?        00:00:00 cpuhp/3
+    24 ?        00:00:00 migration/3
+    25 ?        00:00:00 ksoftirqd/3
+    26 ?        00:00:00 kworker/3:0-events
+    27 ?        00:00:00 kworker/3:0H-events_highpri
+    28 ?        00:00:00 kdevtmpfs
+    29 ?        00:00:00 netns
+    30 ?        00:00:01 kauditd
+    31 ?        00:00:00 kworker/0:1-events
+    32 ?        00:00:00 kworker/1:1-mm_percpu_wq
+    33 ?        00:00:00 oom_reaper
+    34 ?        00:00:00 writeback
+    35 ?        00:00:00 kcompactd0
+    43 ?        00:00:00 kworker/2:1+events
+    60 ?        00:00:00 kblockd
+    61 ?        00:00:00 ata_sff
+    62 ?        00:00:00 kworker/1:1H-kblockd
+    63 ?        00:00:00 rpciod
+    64 ?        00:00:00 kworker/u9:0
+    65 ?        00:00:00 xprtiod
+    66 ?        00:00:00 cfg80211
+    67 ?        00:00:00 kswapd0
+    68 ?        00:00:00 snapshotd
+    69 ?        00:00:00 zswapd0
+    70 ?        00:00:00 nfsiod
+    72 ?        00:00:00 scsi_eh_0
+    73 ?        00:00:00 scsi_tmf_0
+    74 ?        00:00:00 scsi_eh_1
+    75 ?        00:00:00 scsi_tmf_1
+    76 ?        00:00:00 scsi_eh_2
+    77 ?        00:00:00 scsi_tmf_2
+    78 ?        00:00:00 scsi_eh_3
+    79 ?        00:00:00 scsi_tmf_3
+    80 ?        00:00:00 scsi_eh_4
+    81 ?        00:00:00 scsi_tmf_4
+    82 ?        00:00:00 scsi_eh_5
+    83 ?        00:00:00 scsi_tmf_5
+    84 ?        00:00:00 kworker/u8:1-scsi_tmf_2
+    85 ?        00:00:00 kworker/u8:2-events_unbound
+    86 ?        00:00:00 kworker/u8:3-ext4-rsv-conversion
+    87 ?        00:00:00 kworker/u8:4-ext4-rsv-conversion
+    88 ?        00:00:02 kworker/u8:5-ext4-rsv-conversion
+    89 ?        00:00:00 kworker/u8:6-events_unbound
+    90 ?        00:00:00 ion_system_heap
+    91 ?        00:00:00 kworker/3:1-events
+    92 ?        00:00:00 kworker/1:2-events
+    93 ?        00:00:00 kworker/2:2-events
+    94 ?        00:00:00 kworker/3:1H-kblockd
+    95 ?        00:00:00 ipv6_addrconf
+    96 ?        00:00:00 cache_freed
+    97 ?        00:00:00 kworker/u8:7
+   102 ?        00:00:02 kworker/2:1H-kblockd
+   103 ?        00:00:00 kworker/1:3-events
+   104 ?        00:00:00 ext4-rsv-conver
+   105 ?        00:00:00 ext4-rsv-conver
+   106 ?        00:00:00 ext4-rsv-conver
+   107 ?        00:00:02 kworker/0:1H-kblockd
+   111 ?        00:00:00 jbd2/vdd-8
+   112 ?        00:00:00 ext4-rsv-conver
+   114 ?        00:00:00 ueventd
+   122 ?        00:00:00 faultloggerd
+   126 ?        00:00:02 hilogd
+   137 ?        00:00:00 storage_manager
+   138 ?        00:00:02 storage_daemon
+   142 ?        00:00:02 samgr
+   145 ?        00:00:00 param_watcher
+   150 ?        00:00:03 hiview
+   151 ?        00:00:00 hdf_devmgr
+   153 ?        00:00:00 QemuParams
+   203 ?        00:00:00 accessibility
+   211 ?        00:00:00 audio_server
+   212 ?        00:00:00 concurrent_task
+   215 ?        00:00:00 deviceauth_serv
+   216 ?        00:00:00 dlp_credential_
+   245 ?        00:00:01 huks_service
+   253 ?        00:00:00 memmgrservice
+   256 ?        00:00:00 multimodalinput
+   282 ?        00:00:00 resource_schedu
+   309 ?        00:00:02 resource_schedu
+   317 ?        00:00:00 accesstoken_ser
+   322 ?        00:00:00 netmanager
+   330 ?        00:00:01 telephony
+   339 ?        00:00:00 wallpaper_servi
+   412 ?        00:00:00 file_monitor_se
+   425 ?        00:00:00 msdp
+   434 ?        00:00:00 push_manager_se
+   436 ?        00:00:00 quickfix_engine
+   452 ?        00:00:00 time_service
+   477 ?        00:00:01 locationhub
+   486 ?        00:00:23 distributeddata
+   493 ?        00:00:03 appspawn
+   503 ?        00:00:00 device_manager
+   544 ?        00:00:00 fingerprint_aut
+   548 ?        00:00:00 user_auth_host
+   552 ?        00:00:00 face_auth_host
+   556 ?        00:00:00 codec_host
+   566 ?        00:00:00 light_host
+   567 ?        00:00:00 vibrator_host
+   572 ?        00:00:00 sensor_host
+   575 ?        00:00:00 input_user_host
+   582 ?        00:00:00 camera_host
+   585 ?        00:00:00 audio_host
+   589 ?        00:00:00 wifi_host
+   594 ?        00:00:00 power_host
+   600 ?        00:00:00 usb_host
+   604 ?        00:00:00 blue_host
+   607 ?        00:00:04 allocator_host
+   614 ?        00:00:00 composer_host
+   627 ?        00:00:00 useriam
+   638 ?        00:00:00 ui_service
+   673 ?        00:00:01 softbus_server
+   675 ?        00:00:00 sensors
+   689 ?        00:00:01 security_guard
+   691 ?        00:00:00 pin_auth_host
+   700 ?        00:00:00 av_codec_servic
+   702 ?        00:00:00 privacy_service
+   704 ?        00:00:00 powermgr
+   719 ?        00:00:00 netsysnative
+   743 ?        00:00:00 media_service
+   760 ?        00:00:00 media_monitor
+   787 ?        00:00:01 inputmethod_ser
+   809 ?        00:00:00 huawei_id_svc
+   810 ?        00:00:00 location_host
+   811 ?        00:00:00 hianalytics
+   812 ?        00:00:02 render_service
+   813 ?        00:00:12 foundation
+   814 ?        00:00:00 drm_service
+   848 ?        00:00:00 data_monitor_se
+   849 ?        00:00:00 client_cloud_ca
+   871 ?        00:00:00 wifi_manager_se
+   908 ?        00:00:00 camera_service
+   912 ?        00:00:00 av_session
+   918 ?        00:00:01 aps_manager
+   937 ?        00:00:00 accountmgr
+   954 ?        00:00:01 CollaborationFw
+   963 ?        00:00:00 installs
+  1003 ?        00:00:00 hdcd
+  1102 ?        00:00:00 deviceprofile
+  1166 ?        00:00:00 share_item_time
+  1167 ?        00:00:00 dfs_ino_wb1
+  1168 ?        00:00:00 dfs_sb_wb1
+  1169 ?        00:00:00 dfs_srv_wb1
+  1170 ?        00:00:00 share_item_time
+  1172 ?        00:00:00 dfs_ino_wb2
+  1173 ?        00:00:00 dfs_sb_wb2
+  1174 ?        00:00:00 dfs_srv_wb2
+  1180 ?        00:00:00 share_item_time
+  1181 ?        00:00:00 dfs_ino_wb3
+  1193 ?        00:00:00 dfs_sb_wb3
+  1195 ?        00:00:00 dfs_srv_wb3
+  1214 ?        00:00:00 wpa_host
+  1434 ?        00:00:00 app_fwk_update_
+  1459 ?        00:00:00 nwebspawn
+  1460 ?        00:00:00 atormultiscreen
+  1468 ?        00:00:22 ohos.sceneboard
+  1475 ?        00:00:00 i.hmos.location
+  1516 ?        00:00:00 amplemanagement
+  1538 ?        00:00:00 asset_service
+  1543 ?        00:00:00 .hms.adsservice
+  1547 ?        00:00:00 dlp_permission_
+  1559 ?        00:00:01 app.intelligent
+  1596 ?        00:00:00 edialibrarydata
+  1597 ?        00:00:00 cloudkit_servic
+  1724 ?        00:00:00 file_manager_se
+  1750 ?        00:00:00 index_insert_se
+  1764 ?        00:00:00 dcm_service
+  1824 ?        00:00:00 security_privac
+  1877 ?        00:00:00 hidumper_servic
+  1908 ?        00:00:00 actsdataability
+  1916 ?        00:00:00 kworker/0:2-events
+  1921 ?        00:00:00 psimon
+  2010 ?        00:00:00 usb_service
+  2192 ?        00:00:01 hms.pushservice
+  2218 ?        00:00:01 erviceAbility:1
+  2294 ?        00:00:00 appgallery_serv
+  2339 ?        00:00:00 QemuParams
+  2341 ?        00:00:00 QemuParams
+  2342 ?        00:00:00 QemuParams
+  2373 ?        00:00:00 pasteboard_serv
+  2388 ?        00:00:00 security_compon
+  2399 ?        00:00:00 app_domain_veri
+  2416 ?        00:00:00 device_activate
+  2423 ?        00:00:00 file_system_ser
+  2466 ?        00:00:00 parent_control_
+  2467 ?        00:00:00 sandbox_manager
+  2476 ?        00:00:00 skytone_service
+  2486 ?        00:00:00 super_privacy_s
+  2487 ?        00:00:00 updater_sa
+  2648 ?        00:00:02 pGalleryService
+  2746 ?        00:00:00 clouddeveloppro
+  2779 ?        00:00:00 security_detect
+  2838 ?        00:00:00 atomicservice_e
+  3187 ?        00:00:00 security_collec
+  3231 ?        00:00:00 apppool
+  3283 ?        00:00:00 ps
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell for\ d\ in\ /data/log/faultlog/faultlogger\ /data/log/faultlog\ /data/log/crash\;\ do\ echo\ \"FAULT_CRASH_LIST_DIR=\$d\"\;\ if\ \[\ -d\ \"\$d\"\ \]\;\ then\ find\ \"\$d\"\ -maxdepth\ 3\ -type\ f\ -exec\ ls\ -ln\ \{\}\ \\\;\ 2\>/dev/null\;\ else\ echo\ ABSENT\;\ fi\;\ done
+FAULT_CRASH_LIST_DIR=/data/log/faultlog/faultlogger
+-rw-rw-r-- 1 1201 1000 247568 2026-07-17 01:57 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717013502669.log
+-rw-rw-r-- 1 1201 1000 141791 2026-07-17 02:25 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717022514696.log
+-rw-rw-r-- 1 1201 1000 248125 2026-07-17 01:56 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717015638868.log
+-rw-rw-r-- 1 1201 1000 123828 2026-07-17 04:02 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717040212219.log
+-rw-rw-r-- 1 1201 1000 134349 2026-07-17 03:06 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717030642744.log
+-rw-rw-r-- 1 1201 1000 247648 2026-07-16 14:39 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260716143811751.log
+-rw-rw-r-- 1 1201 1000 93809 2026-07-17 01:00 /data/log/faultlog/faultlogger/appfreeze-com.ohos.sceneboard-20020011-20260717010042819.log
+-rw-rw-r-- 1 1201 1000 247415 2026-07-17 01:57 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717015633479.log
+-rw-rw-r-- 1 1201 1000 136614 2026-07-17 01:38 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717013834629.log
+FAULT_CRASH_LIST_DIR=/data/log/faultlog
+-rw-rw-r-- 1 1201 1000 247568 2026-07-17 01:57 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717013502669.log
+-rw-rw-r-- 1 1201 1000 141791 2026-07-17 02:25 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717022514696.log
+-rw-rw-r-- 1 1201 1000 248125 2026-07-17 01:56 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717015638868.log
+-rw-rw-r-- 1 1201 1000 123828 2026-07-17 04:02 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717040212219.log
+-rw-rw-r-- 1 1201 1000 134349 2026-07-17 03:06 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717030642744.log
+-rw-rw-r-- 1 1201 1000 247648 2026-07-16 14:39 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260716143811751.log
+-rw-rw-r-- 1 1201 1000 93809 2026-07-17 01:00 /data/log/faultlog/faultlogger/appfreeze-com.ohos.sceneboard-20020011-20260717010042819.log
+-rw-rw-r-- 1 1201 1000 247415 2026-07-17 01:57 /data/log/faultlog/faultlogger/cppcrash-appspawn-0-20260717015633479.log
+-rw-rw-r-- 1 1201 1000 136614 2026-07-17 01:38 /data/log/faultlog/faultlogger/sysfreeze-com.ohos.sceneboard-20020011-20260717013834629.log
+FAULT_CRASH_LIST_DIR=/data/log/crash
+ABSENT
+RUNNER_EXIT_GATE=PASS
+ENDED_AT=2026-07-17T14:12:44+08:00
+
+--- cleanup ---
+CLEANUP_STARTED_AT=2026-07-17T14:12:44+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell rm\ -rf\ /data/local/tmp/r1-tier2-0010-replay
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell aa\ force-stop\ cn.alfadb.netbird.r1probe
+force stop process successfully.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell bm\ uninstall\ -n\ cn.alfadb.netbird.r1probe
+uninstall bundle successfully.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10000 shell bm\ dump\ -n\ cn.alfadb.netbird.r1probe
+error: failed to get information and the parameters may be wrong.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -stop netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+EMULATOR_STOP_REQUESTED_AT=2026-07-17T14:12:44+08:00
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill -r
+CLEANUP_ENDED_AT=2026-07-17T14:12:45+08:00

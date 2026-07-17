@@ -1,0 +1,110 @@
+EV-R1-EMU24-20260717-0010 raw transcript
+Times Asia/Shanghai (+08:00).
+
+EVIDENCE_ID=EV-R1-EMU24-20260717-0010
+WORKSPACE=/home/worker/work/base/netbird-harmonyos
+CANDIDATE_TREE=/tmp/netbird-harmonyos-tier2-20260717/go-ps4
+CANDIDATE_COMMIT=5f5911fabb3af7b5662ebc17ff7fa4f881df903a
+CANDIDATE_PARENT=ed3ec75df47ab8e7d6e4a30c445a8ef771382584
+OFFICIAL_GO12512=d80d9a98f7e3a8f9b3a82d2c6079f84eb1101d46
+UPSTREAM_PATCH_COUNT=0
+NETBIRD_PATCH=NONE
+SDK_PATCH=NONE
+GO_SOURCE_EDIT=NONE
+
+--- approval and bounds ---
+T0_APPROVAL=Tier2 isolated compatibility experiment approved by the recorded execution specification.
+HUMAN_APPROVAL=operator approval in the 2026-07-17 execution request.
+TIMEBOX=16h/2d
+IMMUTABLE_INPUT_LIMIT=2
+ITERATION1=direct PS4 result without Go source edits
+ITERATION2=one mechanical original-diff attempt only
+NO_THIRD_ITERATION=YES
+
+--- object and candidate verification ---
+$ git -C [CANDIDATE_TREE] rev-parse HEAD HEAD^
+5f5911fabb3af7b5662ebc17ff7fa4f881df903a
+ed3ec75df47ab8e7d6e4a30c445a8ef771382584
+$ git -C [CANDIDATE_TREE] status --short
+<empty>
+$ [CANDIDATE_TREE]/bin/go version
+go version go1.27-devel_5f5911fabb Wed Apr 8 07:37:40 2026 +0000 linux/amd64
+$ [CANDIDATE_TREE]/src/make.bash
+PASS; rebuilt with the stock go1.25.12 bootstrap and an isolated /tmp cache.
+$ git -C [CANDIDATE_TREE] status --short
+<empty>
+
+--- stock control ---
+GO_BIN=/home/worker/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.12.linux-amd64/bin/go
+GO_VERSION=go1.25.12 linux/amd64
+STOCK_SO_SHA256=c642b92d273dadda924e604172abb8ae5de2f7cf03d4ba8b8fde63b5eb9b62d0
+STOCK_ELF=R_X86_64_TPOFF64 plus STATIC_TLS
+STOCK_HAP_TEST=BASELINE PASS; dlopen blocked before dlsym at res_search: initial-exec TLS resolves to dynamic definition; TestFinished-ResultCode: 1; Runner PID 2663 exited; no crash.
+
+--- iteration 1 PS4 candidate build and ELF gate ---
+GO_BIN=[CANDIDATE_TREE]/bin/go
+GOOS=linux
+GOARCH=amd64
+GOAMD64=v1
+CGO_ENABLED=1
+BUILD_MODE=c-shared
+CANDIDATE_SO_SHA256=aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2
+CANDIDATE_HEADER_SHA256=3ece605e4d96e747a35511ab5cb3bd1f3f5f6fb2b32ecbe92db3682d1f5a7680
+CANDIDATE_ELF=PT_TLS present; R_X86_64_TLSDESC present; TPOFF absent; STATIC_TLS absent
+APP_HAP_SHA256=493d791b4e4325e9202e224194108bc9def9f03b7b6b283b5f3e5c6f0324cd20
+TEST_HAP_SHA256=dec6b635e8664069ba03268f563044c0f20916d9a899c98de10343c6c20021a9
+HAP_MEMBER_IDENTITY=both application and test HAP libgoprobe.so members equal aa1ff164830dd9b203aa379151e43074a522cb3523f802b73c2da0702bfb80d2
+
+--- target tuple ---
+TARGET=127.0.0.1:10000
+DISTRIBUTION=OpenHarmony-6.1.1.125 API 24 Emulator
+ARCHITECTURE=x86_64 guest on x86_64 host
+HDC=3.2.0e
+EMULATOR=26.0.0.200
+RUNNER=aa test -b cn.alfadb.netbird.r1probe -m entry_test -s unittest /ets/testrunner/OpenHarmonyTestRunner -s timeout 15000
+
+--- iteration 1 target result ---
+BASELINE_RESULT=functional PASS, ping=pong, version=r1-api24-probe/0.0.1
+COLD_RUNNER_01=pid 2612 PASS
+COLD_RUNNER_02=pid 2790 PASS
+COLD_RUNNER_03=pid 3165 PASS
+COLD_RUNNER_04=pid 3227 PASS
+COLD_RUNNER_05=pid 3256 PASS
+COLD_RUNNER_06=pid 3305 PASS
+COLD_RUNNER_07=pid 3334 PASS
+COLD_RUNNER_08=pid 3383 PASS
+COLD_RUNNER_09=pid 3447 PASS
+COLD_RUNNER_10=pid 3518 PASS
+COLD_RUNNER_10_OF_10=PASS
+ALL_PIDS_UNIQUE=YES
+EACH_RUN=TestFinished-ResultCode 0; dlopenLoaded=true; preCreatedBeforeDlopen=true; postCreatedAfterDlopen=true; pre=true; post=true; stage=complete
+EACH_THREAD=Hello=42; RuntimeProbe=4194304; loopback NetDialProbe=0
+PROCESS_CRASH=NO
+PROCESS_HANG=NO
+POST_RUN_TARGET_HEALTH=OpenHarmony-6.1.1.125 and bootevent.boot.completed=true
+CRASH_LOG_SCAN=no SIGSEGV, SIGABRT, fatal signal, libgoprobe, or probe crash finding
+ITERATION1_VERDICT=PASS
+
+--- iteration 2 mechanical Go 1.25.12 attempt ---
+PATCH_SHA256=52bd6bd8391efeeade3d41ded581e66357178edd0e7b43c4253d4fe1a22ed7be
+$ git -C [CANDIDATE_TREE] diff --binary [CANDIDATE_PARENT] [CANDIDATE_COMMIT] | git -C /tmp/netbird-harmonyos-tier2-20260717/go1.25.12-mechanical apply --3way
+GIT_APPLY_3WAY_RC=1
+CONFLICT=src/cmd/internal/obj/link.go
+CONFLICT=src/cmd/internal/objabi/reloctype.go
+CONFLICT=src/cmd/internal/objabi/reloctype_string.go
+CONFLICT=src/runtime/cgo/callbacks.go
+CONFLICT=src/runtime/tls_s390x.s
+MISSING_PATH=src/runtime/cgo/gcc_unix.c does not exist in the Go 1.25.12 index
+ITERATION2_VERDICT=STOP_HIGH_MAINTENANCE
+SEMANTIC_RESOLUTION=NOT_ATTEMPTED
+ITERATION2_BUILD_AND_TARGET_RUN=NOT_RUN
+THIRD_ITERATION=NOT_RUN
+
+--- final scope ---
+UPSTREAM_CL696635_STATUS=NEW, unmerged, unreleased reference only
+R0_EXIT=NO
+R1_EXIT=NO
+R2_EXIT=NO
+ARM64_STATUS=PROVISIONAL_UNCHANGED
+NAMED_PHYSICAL_DEVICE_STATUS=PROVISIONAL_UNCHANGED
+VERDICT=STOP: iteration 1 PASS; iteration 2 mechanical application cannot be auto-resolved.
