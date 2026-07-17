@@ -1,0 +1,2 @@
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell bm\ dump\ -n\ com.huawei.hmos.vpndialog\ -u\ 0
+error: failed to get information and the parameters may be wrong.

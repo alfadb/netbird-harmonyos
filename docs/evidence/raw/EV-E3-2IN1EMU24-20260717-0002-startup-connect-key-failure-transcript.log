@@ -1,0 +1,111 @@
+EVIDENCE_ID=EV-E3-2IN1EMU24-20260717-0002
+RECORD_SCOPE=official_API24_2in1_user0_read_only_VPN_authorization_prerequisite_supplement
+STARTED_AT=2026-07-17T22:04:04+08:00
+TARGET=127.0.0.1:10001
+PHYSICAL_DEVICE_USED=false
+HAP_SENT=false
+HAP_INSTALLED=false
+CREATE_PROTECT_USED=false
+TOOLCHAIN_HDC_VERSION=Ver: 3.2.0e
+GIT_HEAD=cd6f71c7ecc71e878c5fddea793d65de5b68f31d
+Stop emulator  "netbird_api24_2in1"  failed, emulator is not exists.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -start netbird_api24_2in1 -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -noWindow -hdcPort 10001
+EMULATOR_PID=1399688
+CONNECTIVITY attempt=1 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=2 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=3 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=4 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=5 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=6 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=7 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=8 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=9 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=10 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=11 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=12 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=13 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=14 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=15 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=16 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=17 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=18 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=19 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=20 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=21 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=22 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=23 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=24 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=25 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=26 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=27 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=28 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=29 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=30 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=31 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=32 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=33 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=34 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=35 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=36 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=37 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=38 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=39 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=40 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=41 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=42 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=43 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=44 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=45 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=46 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=47 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=48 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=49 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=50 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=51 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=52 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=53 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=54 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=55 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=56 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=57 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=58 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=59 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=60 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=61 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=62 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=63 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=64 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=65 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=66 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=67 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=68 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=69 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=70 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=71 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=72 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=73 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=74 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=75 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=76 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=77 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=78 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=79 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+CONNECTIVITY attempt=80 shell=$'[Fail]Not match target founded, check connect-key please\r' distribution=\[Fail\]Not\ match\ target\ founded\,\ check\ connect-key\ please
+FAIL_REASON=HDC_connectivity_blocked
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+$ ss -ltnp | rg :\(10001\|8710\)\\\\b || true
+FINAL_RESIDUAL_PORTS_10001_8710=none
+$ pgrep -af /\[e\]mulator/Emulator.\*netbird_api24_2in1\|\[q\]emu-system.\*netbird_api24_2in1\|\[h\]dc\ -m\ -s || true
+FINAL_RESIDUAL_PROCESSES=none
+$ rg -n \^isRunning= /home/worker/harmonyos/emulator-instances/netbird_api24_2in1/config.ini
+INSTANCE_RUNNING_STATE=not-recorded
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+HAP_SENT=false
+HAP_INSTALLED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+CLEANUP_END

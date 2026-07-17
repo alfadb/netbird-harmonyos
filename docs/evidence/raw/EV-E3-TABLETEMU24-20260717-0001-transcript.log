@@ -1,0 +1,123 @@
+EVIDENCE_ID=EV-E3-TABLETEMU24-20260717-0001
+RECORD_SCOPE=official_API24_Tablet_read_only_VPN_authorization_prerequisite
+STARTED_AT=2026-07-17T21:32:44+08:00
+TARGET=127.0.0.1:10002
+PHYSICAL_DEVICE_USED=false
+SYSTEM_IMAGE_MODIFIED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+HAP_SENT=false
+HAP_INSTALLED=false
+CREATE_PROTECT_USED=false
+
+PREPARATION_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -screenProfileList -deviceType Tablet -details
+Tablet  - MatePad Pro 13
+       density: 320
+       screen: 2880 x 1920
+       diagonal: 13.2 inch
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -imageList -deviceType Tablet -downloaded true -imageRoot /home/worker/harmonyos/emulator-images
+No images matching the criteria were found.
+TMUX_SESSION=netbird-api24-tablet-install
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -install -deviceType Tablet -osVersion 'HarmonyOS 6.1.1(24)' -imageRoot /home/worker/harmonyos/emulator-images
+the image will be download to /home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/tablet_x86/
+100.0% (2002569925/2002569925 bytes)
+The image is downloaded successfully.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -create netbird_api24_tablet -deviceType Tablet -osVersion 'HarmonyOS 6.1.1(24)' -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -screenProfile 'MatePad Pro 13' -hotBoot false
+Device create success. You can use the '-start' command to start it.
+INSTANCE_METADATA=deviceType=tablet,deviceModel=PADEMU-FD00,productModel=MatePad_Pro_13,screen=2880x1920,density=320,arch=x86_64,api=24,os=HarmonyOS_6.1.1(24),software=6.1.0.125,isHotBoot=false
+$ sha256sum docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-a-hap.bin docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-b-hap.bin
+6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c  docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-a-hap.bin
+c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e  docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-b-hap.bin
+PREPARATION_END
+
+EMULATOR_START_BEGIN
+TMUX_SESSION=netbird-api24-tablet-run
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -start netbird_api24_tablet -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -noWindow -hdcPort 10002
+EMULATOR_LOG_KVM=2026-07-17_21:35:57.009_KVM_is_supported_and_accessible
+HDC_VERSION=Ver:_3.2.0e
+HDC_CONNECT_FULL_OUTPUT=docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-hdc-connect.log
+FIRST_CONNECT_RESULT=127.0.0.1:10002_TCP_Offline_unknown
+SECOND_CONNECT_RESULT=127.0.0.1:10002_TCP_Connected_localhost
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10002 shell 'echo netbird-tablet-ready'
+netbird-tablet-ready
+EMULATOR_START_END
+
+GUEST_IDENTITY_BEGIN
+FULL_OUTPUT=docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-guest-identity.log
+GUEST_DIST_NAME=HarmonyOS
+GUEST_API_VERSION=24
+GUEST_ARCH=x86_64
+GUEST_ABILIST=x86_64
+GUEST_DEVICE_TYPE=tablet
+GUEST_MODEL=emulator
+GUEST_SOFTWARE_BUILD=emulator_6.1.0.125(SP9DEVC00E16R1P1)
+GUEST_BUILD_VERSION_PARAMETER=not_registered_errNum_106
+GUEST_BUILD_FINGERPRINT_PARAMETER=not_registered_errNum_106
+GUEST_IDENTITY_END
+
+READ_ONLY_PREREQUISITE_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10002 shell 'bm dump -h'
+FULL_OUTPUT=docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-bm-help.log
+BM_HELP_USER_RULE=only_supports_current_user_or_userId_0
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10002 shell 'bm dump -a -u 100'
+FULL_OUTPUT=docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-bms-all-user100.log
+OUTPUT_COUNTS=59_lines,1680_bytes,58_bundles
+$ rg -in 'vpn|vpndialog' docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-bms-all-user100.log
+NO_VPN_OR_VPNDIALOG_MATCH
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10002 shell 'bm dump -a -u 0'
+FULL_OUTPUT=docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-bms-all-user0.log
+OUTPUT_COUNTS=9_lines,241_bytes,8_bundles
+$ rg -in 'vpn|vpndialog' docs/evidence/raw/EV-E3-TABLETEMU24-20260717-0001-bms-all-user0.log
+NO_VPN_OR_VPNDIALOG_MATCH
+$ bm dump -n com.huawei.hmos.vpndialog
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n com.huawei.hmos.vpndialog -u 100
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n com.huawei.hmos.vpndialog -u 0
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n com.huawei.hmos.settings | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+SETTINGS_DEFAULT_MATCHES=2_MANAGE_VPN_permission_texts_only
+$ bm dump -n com.huawei.hmos.settings -u 100 | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+SETTINGS_USER100_MATCHES=2_MANAGE_VPN_permission_texts_only
+$ bm dump -n com.huawei.hmos.settings -u 0 | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+NO_SETTINGS_VPN_MATCH
+VPNDIALOG_BUNDLE_PRESENT=false
+VPN_SERVICE_EXT_ABILITY_PRESENT=false
+SETTINGS_VPN_REGISTRATION_PRESENT=false
+SETTINGS_MANAGE_VPN_PERMISSION_TEXT_PRESENT=true
+READ_ONLY_PREREQUISITE_END
+
+HAP_NONINSTALL_CONFIRMATION_BEGIN
+ARCHIVED_A_BYTES=34574
+ARCHIVED_A_SHA256=6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c
+ARCHIVED_B_BYTES=34564
+ARCHIVED_B_SHA256=c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e
+A_DEFAULT_USER_PRESENT=false
+A_CURRENT_USER100_PRESENT=false
+A_USER0_PRESENT=false
+B_DEFAULT_USER_PRESENT=false
+B_CURRENT_USER100_PRESENT=false
+B_USER0_PRESENT=false
+HAP_SENT=false
+HAP_INSTALLED=false
+E3_REPLAY_EXECUTED=false
+STOP_REASON=com.huawei.hmos.vpndialog_absent_and_VpnServiceExtAbility_absent
+HAP_NONINSTALL_CONFIRMATION_END
+
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_tablet
+Stop emulator netbird_api24_tablet successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+FINAL_RESIDUAL_PROCESSES=none
+FINAL_RESIDUAL_PORTS_10002_8710=none
+INSTANCE_RUNNING=false
+TMUX_SESSIONS_REMOVED=netbird-api24-tablet-run,netbird-api24-tablet-install
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/tablet_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_tablet
+CLEANUP_END
+
+RECORD_STATUS=collected
+VERDICT=blocked
+REVIEWER=pending_independent_review
+ENDED_AT=2026-07-17T21:45:06+08:00

@@ -1,0 +1,142 @@
+EVIDENCE_ID=EV-E3-2IN1EMU24-20260717-0001
+RECORD_SCOPE=official_API24_2in1_read_only_VPN_authorization_prerequisite
+STARTED_AT=2026-07-17T21:04:47+08:00
+TARGET=127.0.0.1:10001
+PHYSICAL_DEVICE_USED=false
+SYSTEM_IMAGE_MODIFIED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+HAP_SENT=false
+HAP_INSTALLED=false
+CREATE_PROTECT_USED=false
+
+PREPARATION_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -screenProfileList -deviceType 2in1 -details
+2in1  - MateBook Pro
+       density: 304
+       screen: 3120 x 2080
+       diagonal: 14.2 inch
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -imageList -deviceType 2in1 -downloaded true -imageRoot /home/worker/harmonyos/emulator-images
+No images matching the criteria were found.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -install -deviceType 2in1 -osVersion 'HarmonyOS 6.1.1(24)' -imageRoot /home/worker/harmonyos/emulator-images
+the image will be download to /home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+100.0% (2352917078/2352917078 bytes)
+The image is downloaded successfully.
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -create netbird_api24_2in1 -deviceType 2in1 -osVersion 'HarmonyOS 6.1.1(24)' -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -screenProfile 'MateBook Pro' -hotBoot false
+Device create success. You can use the '-start' command to start it.
+INSTANCE_METADATA=deviceType=2in1,deviceModel=PCEMU-FD00,productModel=MateBook_Pro,screen=3120x2080,density=304,arch=x86_64,api=24,os=HarmonyOS_6.1.1(24),software=6.1.0.125,isHotBoot=false
+$ sha256sum docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-a-hap.bin docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-b-hap.bin
+6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c  docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-a-hap.bin
+c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e  docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-b-hap.bin
+PREPARATION_END
+
+EMULATOR_START_BEGIN
+TMUX_SESSION=netbird-api24-2in1-run
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -start netbird_api24_2in1 -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -noWindow -hdcPort 10001
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+QStandardPaths: XDG_RUNTIME_DIR not set, defaulting to '/tmp/runtime-worker'
+audio: Could not init `pa' audio driver
+audio: warning: Using timer based audio emulation
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+EMULATOR_LOG_KVM=2026-07-17 21:12:30.483 [Info] [QemuParameters.cpp(CheckKvmStatus:140)]KVM is supported and accessible
+HDC_LISTENER=127.0.0.1:10001 owned_by_Emulator
+$ HDC_PORT=10001 timeout 60 /home/worker/harmonyos/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+Connect OK
+127.0.0.1:10001		TCP	Connected	localhost
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'echo netbird-2in1-ready'
+netbird-2in1-ready
+EMULATOR_START_END
+
+GUEST_IDENTITY_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.os.dist.name'
+HarmonyOS
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.software.version'
+emulator 6.1.0.125(SP12DEVC00E47R1P3)
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.os.version'
+Get parameter "const.product.os.version" fail! errNum is:106!
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.ohos.apiversion'
+24
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.devicetype'
+2in1
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.model'
+emulator
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'uname -m'
+x86_64
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'param get const.product.cpu.abilist'
+x86_64
+GUEST_IDENTITY_END
+
+READ_ONLY_PREREQUISITE_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -a'
+error: failed to get information and the parameters may be wrong.
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -h'
+usage: bm dump <options>
+options list:
+  -h, --help                           list available commands
+  -a, --all                            list all bundles in system
+  -g, --debug-bundle                   list debug bundles in system
+  -n, --bundle-name <bundle-name>      list the bundle info by a bundle name
+  -s, --shortcut-info                  list the shortcut info
+  -d, --device-id <device-id>          specify a device id
+  -u, --user-id <user-id>              specify a user id,only supports current user or userId is 0
+  -l, --label                          list the label info
+PARAMETER_ADJUSTMENT=added_explicit_current_user_100_after_help
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -a -u 100'
+FULL_OUTPUT=docs/evidence/raw/EV-E3-2IN1EMU24-20260717-0001-bms-all-user100.log
+OUTPUT_COUNTS=50_lines,1400_bytes,49_bundles
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -a -u 100' | rg -in 'vpn|vpndialog' || printf 'NO_VPN_OR_VPNDIALOG_MATCH\n'
+NO_VPN_OR_VPNDIALOG_MATCH
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.vpndialog'
+error: failed to get information and the parameters may be wrong.
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.vpndialog -u 100'
+error: failed to get information and the parameters may be wrong.
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.settings' | rg -in 'vpn|vpndialog'
+4052:            "name": "ohos.permission.MANAGE_VPN",
+4657:        "ohos.permission.MANAGE_VPN",
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.settings' | rg -in -C 2 'VpnServiceExtAbility|extensionTypeName.*vpn|name.*vpn'
+4050-        {
+4051-            "moduleName": "pc_settings",
+4052:            "name": "ohos.permission.MANAGE_VPN",
+4053-            "reason": "",
+4054-            "reasonId": 0,
+VPNDIALOG_BUNDLE_PRESENT=false
+VPN_SERVICE_EXT_ABILITY_PRESENT=false
+SETTINGS_VPN_REGISTRATION_PRESENT=false
+SETTINGS_MANAGE_VPN_PERMISSION_TEXT_PRESENT=true
+READ_ONLY_PREREQUISITE_END
+
+HAP_NONINSTALL_CONFIRMATION_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n cn.alfadb.netbird.e3vpna'
+error: failed to get information and the parameters may be wrong.
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n cn.alfadb.netbird.e3vpnb'
+error: failed to get information and the parameters may be wrong.
+HAP_SENT=false
+HAP_INSTALLED=false
+E3_REPLAY_EXECUTED=false
+STOP_REASON=com.huawei.hmos.vpndialog_absent_and_VpnServiceExtAbility_absent
+HAP_NONINSTALL_CONFIRMATION_END
+
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+$ ss -ltnp | rg ':(10001|8710)\b' || true
+$ pgrep -af '/[e]mulator/Emulator.*netbird_api24_2in1|[q]emu-system.*netbird_api24_2in1|[h]dc -m -s' || true
+FINAL_RESIDUAL_PROCESSES=none
+FINAL_RESIDUAL_PORTS_10001_8710=none
+INSTANCE_RUNNING=false
+TMUX_SESSIONS_REMOVED=netbird-api24-2in1-run,netbird-api24-2in1-install
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+CLEANUP_END
+
+RECORD_STATUS=collected
+VERDICT=blocked
+REVIEWER=pending_independent_review
+ENDED_AT=2026-07-17T21:15:33+08:00

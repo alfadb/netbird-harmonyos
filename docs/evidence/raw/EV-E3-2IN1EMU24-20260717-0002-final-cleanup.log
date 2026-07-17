@@ -1,0 +1,13 @@
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+FINAL_RESIDUAL_PORTS_10001_8710=none
+FINAL_RESIDUAL_PROCESSES=none
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+HAP_SENT=false
+HAP_INSTALLED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+CLEANUP_END

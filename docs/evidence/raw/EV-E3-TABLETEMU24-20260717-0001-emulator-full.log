@@ -1,0 +1,59 @@
+2026-07-17 21:35:56.281 125706810588160 [Info] [TraceTool.cpp(InitPipe:27)][TraceTool] trace pipe name is: ""
+2026-07-17 21:35:56.314 125706810588160 [Warning] [LogUtil.cpp(OutputPath:260)]can not find file :  "/tmp/9a09845f-e12f-479c-bfb1-35e28a3225a0"
+2026-07-17 21:35:56.314 125706810588160 [Critical] [TraceTool.cpp(HandleTrace:59)][TraceTool] Trace pipe is not prepared
+2026-07-17 21:35:56.314 125706600167104 [Info] [HiviewxClient.cpp(GetPortFromConfig:128)]HiviewxClient read port:  0
+2026-07-17 21:35:56.314 125706600167104 [Info] [HiviewxClient.cpp(JudgePort:115)]HiviewxClient link failed, port should be  1  ~  65535 , your port is  0
+2026-07-17 21:35:56.315 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:88)]Enable Camera.
+2026-07-17 21:35:56.315 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:92)]Enable front and back cameras.
+2026-07-17 21:35:56.316 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+2026-07-17 21:35:56.316 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:101)]Support MultiDisplay.
+2026-07-17 21:35:56.316 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:106)]Enable Express Multi Touch.
+2026-07-17 21:35:56.316 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:111)]Enable Sensor Configuration.
+2026-07-17 21:35:56.316 125706810588160 [Info] [UiMain.cpp(void InitFeatureConfig:116)]Enable Bgra Configuration.
+2026-07-17 21:35:56.316 125706810588160 [Info] [CheckImage.cpp(CheckAllSign:88)]start check image
+2026-07-17 21:35:56.319 125706810588160 [Info] [Skin.cpp(InitByDeviceType:631)]Emulator screen  "notCustomize"
+2026-07-17 21:35:56.319 125706810588160 [Info] [Skin.cpp(SetDefaultDisplayCutoutPath:1170)]DefaultDisplayCutoutPath =  "M1308 0 L 1572 0 V 36 h -264 Z"
+2026-07-17 21:35:56.319 125706810588160 [Info] [Skin.cpp(InitTablet:810)]Init Tablet dpi =  320
+2026-07-17 21:35:56.320 125706810588160 [Warning] [LogUtil.cpp(OutputPath:260)]can not open file :  "$USER_HOME$/harmonyos/emulator-instances/netbird_api24_tablet/Camera.properties"
+2026-07-17 21:35:56.320 125706810588160 [Warning] [Skin.cpp(InitConfig:579)]Camera config parse failed
+2026-07-17 21:35:56.344 125706600167104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "ramdisk.img"  result  0  cost  28
+2026-07-17 21:35:56.420 125706600167104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "bzImage"  result  0  cost  76
+2026-07-17 21:35:56.761 125706810588160 [Info] [WidgetSettings.cpp(InitImageLanguageComboBox:251)]Init imge language to Index  1
+2026-07-17 21:35:56.810 125706810588160 [Warning] [(:0)]Cannot open file ':/light/charging-off.svg', because: No such file or directory
+2026-07-17 21:35:56.810 125706810588160 [Warning] [(:0)]Cannot open file ':/light/charging-off.svg', because: No such file or directory
+2026-07-17 21:35:56.810 125706810588160 [Warning] [(:0)]Cannot open file ':/light/charging-on.svg', because: No such file or directory
+2026-07-17 21:35:56.810 125706810588160 [Warning] [(:0)]Cannot open file ':/light/charging-on.svg', because: No such file or directory
+2026-07-17 21:35:56.862 125706810588160 [Warning] [LogUtil.cpp(OutputPath:260)]can not find file :  "$USER_HOME$/Library/Application Support/Huawei/DevEcoStudio26.0/emulator/proxy.settings.pwd"
+2026-07-17 21:35:56.872 125706810588160 [Info] [PlayerApiToolBar.cpp(UpdateOverflowButtonIcon:110)]":/light/overflow-default"
+2026-07-17 21:35:56.874 125706810588160 [Info] [PlayerApiToolBar.cpp(UpdateOverflowButtonIcon:110)]":/light/overflow-hover"
+2026-07-17 21:35:56.876 125706810588160 [Warning] [ToolBarController.cpp(ToolbarInit:73)]toolbar json file does not exist: ":/action/tablet_action.json"  use default toolbar json file
+2026-07-17 21:35:56.919 125706810588160 [Info] [ToolBarController.cpp(StackedActionAdder:231)]enable multi display
+2026-07-17 21:35:57.009 125706810588160 [Warning] [(:0)]This plugin does not support propagateSizeHints()
+2026-07-17 21:35:57.009 125706810588160 [Warning] [(:0)]This plugin does not support setting window masks
+2026-07-17 21:35:57.009 125706810588160 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+2026-07-17 21:35:57.009 125706810588160 [Info] [QemuParameters.cpp(CheckKvmStatus:140)]KVM is supported and accessible
+2026-07-17 21:35:57.010 125706810588160 [Info] [CrashClient.cpp(StartCrashDetect:151)]StartCrash Detect.
+2026-07-17 21:35:57.010 125706810588160 [Info] [CrashClient.cpp(StartCrashServer:413)]start crash server.
+2026-07-17 21:35:57.030 125706810588160 [Warning] [QemuManager.cpp(HostFreeMemMonitor:823)]The host computer's memory is ： 0  ,which is less than  3
+2026-07-17 21:35:57.111 125700992390848 [Info] [QemuManager.cpp(OnSystemReset:660)]System is reset
+2026-07-17 21:35:57.112 125700992390848 [Info] [HdcClient.cpp(HdcDisConnect:558)]dicconnect hdc server
+2026-07-17 21:35:57.149 125706591774400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "vendor.img"  result  0  cost  833
+2026-07-17 21:35:57.974 125706591774400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "userdata.img"  result  0  cost  825
+2026-07-17 21:36:02.429 125706591774400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "sys_prod.img"  result  0  cost  4455
+2026-07-17 21:36:22.910 125706600167104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "system.img"  result  0  cost  26490
+2026-07-17 21:37:56.878 125700975605440 [Warning] [QemuManager.cpp(HostFreeMemMonitor:823)]The host computer's memory is ： 0  ,which is less than  3
+2026-07-17 21:39:56.827 125700975605440 [Warning] [QemuManager.cpp(HostFreeMemMonitor:823)]The host computer's memory is ： 0  ,which is less than  3
+2026-07-17 21:41:29.882 125706810588160 [Info] [EmulatorManager.cpp(void StopMultiScreen:159)]Stop multiscreen before quit
+2026-07-17 21:41:29.882 125706810588160 [Info] [EmulatorManager.cpp(void RecordHardwareInfo:126)]record hardware info
+2026-07-17 21:41:29.882 125706810588160 [Info] [HdcClient.cpp(IsHdcConnected:103)]wait for guest os boot completed
+2026-07-17 21:41:29.882 125706810588160 [Critical] [EmulatorManager.cpp(void RecordHardwareInfo:132)]df command return error data.
+2026-07-17 21:41:29.883 125706810588160 [Info] [EmulatorManager.cpp(void QuitEmulator:64)]quit emulator
+2026-07-17 21:41:29.883 125706810588160 [Info] [CrashClient.cpp(StopCrashLog:534)]stop crash log dumper
+2026-07-17 21:41:29.883 125706810588160 [Info] [CrashClient.cpp(DeleteDirectoryIfUnoccupied:709)]Directory deleted successfully: "/home/worker/harmonyos/emulator-instances/netbird_api24_tablet/Log/hilog_tmp_2026-07-17T213557"
+2026-07-17 21:41:29.883 125706810588160 [Info] [HdcClient.cpp(StopKeepHdcAlive:76)]stop hdc keep-alive thread
+2026-07-17 21:41:29.883 125706810588160 [Info] [HdcClient.cpp(HdcDisConnect:558)]dicconnect hdc server
+2026-07-17 21:41:29.883 125706810588160 [Info] [CheckImage.cpp(StopAllCheckThread:153)]stop all image check thread
+2026-07-17 21:41:31.002 125706810588160 [Info] [CrashClient.cpp(~CrashClient:65)]delete pCrashHandel,crash-service normal quit
+2026-07-17 21:41:31.002 125706810588160 [Info] [HdcClient.cpp(StopKeepHdcAlive:76)]stop hdc keep-alive thread
+2026-07-17 21:41:31.002 125706810588160 [Info] [QemuManager.cpp(StopCheckGuestMem:430)]StopCheckGuestMem
+2026-07-17 21:41:31.002 125706810588160 [Info] [QemuManager.cpp(StopCheckGuestStatus:582)]StopCheckGuestStatus

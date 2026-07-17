@@ -1,0 +1,20 @@
+TARGET=127.0.0.1:10002
+HDC_VERSION=Ver: 3.2.0e
+$ param get const.product.os.dist.name
+HarmonyOS
+$ param get const.ohos.apiversion
+24
+$ uname -m
+x86_64
+$ param get const.product.cpu.abilist
+x86_64
+$ param get const.product.devicetype
+tablet
+$ param get const.product.model
+emulator
+$ param get const.product.software.version
+emulator 6.1.0.125(SP9DEVC00E16R1P1)
+$ param get const.product.build.version
+Get parameter "const.product.build.version" fail! errNum is:106!
+$ param get const.product.build.fingerprint
+Get parameter "const.product.build.fingerprint" fail! errNum is:106!

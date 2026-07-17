@@ -29,6 +29,10 @@ API 24 x86_64 phone Emulator 是任何真机执行前的投入总门：其上所
 
 arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`：所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已以 `reviewed-pass/pass` 完成；官方 E1 Go loader initial-exec TLS 仍失败，故 E1 overall Go blocked；E3 的 0003/0004 均为 `reviewed-pass/blocked`，精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`、普通公开 API 无旁路且 Settings 无普通 VPN 管理入口，E3 不关闭，E4-E7 为 dependency blocked、不开始。E8 仍 `CLOSED`，真机禁令不变；该模拟器缺项不外推到其他架构、具名真机或华为商用 HarmonyOS。
 
+[E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已穷尽官方 API 24 x86_64 的 phone、2in1 与 Tablet 替代 Emulator 形态。phone 0003/0004、2in1 0001/0002 和 Tablet 0001 均为 `reviewed-pass/blocked`：三种独立 image/instance 的 BMS/Settings 注册层均无 `vpndialog`/`VpnServiceExtAbility`；phone 的普通公开 API runtime 还记录 pending/`onCreate=0`；Tablet/2in1 按注册层停止条件未发送或安装 HAP。phone、2in1 与 Tablet 的证据、设备形态和系统 build string 完全独立，任一侧结论都不得替代或外推到另一侧。
+
+E3 仍 blocked，E4-E7 仍 dependency blocked 且不开始，E8 仍 `CLOSED`。当前动作是等待包含组件的官方 image 发布，以及正式 NetBird/Go 输入变化，再重跑对应门；不建议私有 Go 或 system/debug/enterprise 绕过。
+
 ### 不作出的承诺
 
 当前不能承诺：
@@ -173,6 +177,8 @@ API 出现在 SDK 中只代表可以编译，设备能否运行还取决于 SysC
 
 ### 设备能力尚未验证
 
+2026-07-17 当前实测已穷尽三个彼此独立的 API 24 x86_64 官方 Emulator image：phone `phone_all_x86` 的 E3 0003/0004、2in1 `pc_all_x86` 的 0001/0002，以及 Tablet `tablet_x86` 的 0001。五个最终记录均为 `reviewed-pass/blocked`，并在各自 BMS/Settings 注册层观察到授权组件缺失；phone 还记录 public API pending/`onCreate=0`，Tablet/2in1 未安装 HAP。这只是各自精确 image 的负面证据，不形成 API、设备类型、架构、真机或发行版级结论。
+
 - 目标 OpenHarmony 产品是否包含 VPN Extension 所需组件和 SysCap。
 - 目标产品是否允许普通第三方应用声明并启动 VPN Extension。
 - 模拟器是否完整实现虚拟网卡 fd、路由、DNS、IPv6 和 `protect` 行为。
@@ -194,6 +200,8 @@ API 出现在 SDK 中只代表可以编译，设备能否运行还取决于 SysC
 - **E6 C native 双向泵**：TUN 与真实业务端点间的纯 C 双向流量、背压、部分读写和清理。
 - **E7 lifecycle/故障短循环**：在 Emulator 可靠窗口内覆盖重复启停、撤权、断网、进程退出和故障清理；不要求 25 分钟以上长稳。
 - **E8 聚合**：E0-E7 每项都必须为 `record_status: reviewed-pass`、`verdict: pass`，目标元组、代码/上游 SHA 和制品 SHA-256 与聚合记录一致，并确认最新正式 NetBird 声明基线的官方 Go loader/runtime 已通过；C-only 项可先行，但不能独立满足 E1、打开 E8 或退出正式 R 阶段。
+
+补充 Emulator 设备形态必须使用独立 image、实例、HDC target、输入哈希和 evidence ID；除非路线图另行调整 phone 聚合定义，否则 2in1、Tablet 等补充记录不进入 phone E8。phone 0003/0004、2in1 0001/0002 和 Tablet 0001 均为 `reviewed-pass/blocked`；三者不能相互替代、不能关闭 phone E3，也不能授权真机。等待官方 image/正式 NetBird-Go 输入变化后的对应门重跑，不以私有 Go 或 system/debug/enterprise 路径绕过。
 
 ### E8 通过后的真机与发行验证
 

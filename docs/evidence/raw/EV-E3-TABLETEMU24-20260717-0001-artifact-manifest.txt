@@ -1,0 +1,22 @@
+artifact	size_bytes	sha256	role
+EV-E3-TABLETEMU24-20260717-0001-bm-dump-vpndialog.log	327	d5b4a1924228a1e99be32419075c501f0d34baa8e17fc51e7e0f5873072b7c6e	read-only direct bundle queries for default, current user 100, and user 0
+EV-E3-TABLETEMU24-20260717-0001-bm-help.log	592	5b62f7f943414a02b26c35195f3ac0fdd1eafcc47452a4784db10f941de22c46	complete bm dump help used to select legal user parameters
+EV-E3-TABLETEMU24-20260717-0001-bms-all-user0.log	241	b28bf61bba663c102c32c03a668f9a4fa8f8d8e60c2737ac9628e0c276eb7817	read-only complete user-0 bundle list
+EV-E3-TABLETEMU24-20260717-0001-bms-all-user100.log	1680	03dafac5361b3f7a376f72846a82692e5f3d7149b167c1e932bac2c8f80e3f2c	read-only complete current-user-100 bundle list
+EV-E3-TABLETEMU24-20260717-0001-bms-vpn-search.log	249	5d6674b1cfd1cfd003bc09ea164735dea850e32e328685fa3d6dcabfbb223047	vpn/vpndialog searches over both complete bundle lists
+EV-E3-TABLETEMU24-20260717-0001-emulator-console.log	2026	e4f0d2fef035ccc6d9217087295e6aad1f0266ea6476ac733d0ad5b65d8c9734	complete noWindow tmux Emulator console
+EV-E3-TABLETEMU24-20260717-0001-emulator-full.log	7411	47f6d220b362c15ae2c0f515a1306f18daf950c0b2d2e1ae192c5feb7c6f6a6e	complete instance Emulator.log, byte-identical to preserved instance copy
+EV-E3-TABLETEMU24-20260717-0001-final-cleanup.log	913	73e5524a4295580c9e65e22a349d49b3b59cd07bc6164eef6db071e926776e75	cleanup and image/instance preservation record
+EV-E3-TABLETEMU24-20260717-0001-guest-identity.log	579	b535146323b282614f185babc8a9481d0e088b528c880fdd51ce4a4042e4b2cb	guest identity, API, arch, device type, and build strings
+EV-E3-TABLETEMU24-20260717-0001-hdc-connect.log	716	6fd37fb3f6fc86ac3efdfbd2eae427c0edf84101fa63bad75156ac82acdbf8f9	complete first-offline and second-connected Beta HDC output plus readiness result
+EV-E3-TABLETEMU24-20260717-0001-hap-noninstallation.log	1187	9e7372ed754b7dd58cef2c5a00900b054a0b52c86f8b1689950bed90d9340967	archived HAP hashes and read-only absence/noninstallation confirmation
+EV-E3-TABLETEMU24-20260717-0001-image-install.log	185	fd8261ec145a8cf2322056d970eedd24faa8d865a43e0bc5113719ad9b788817	complete official image installer result
+EV-E3-TABLETEMU24-20260717-0001-instance-metadata.log	1082	a6531b4d5af7fcfab7d98518e296f55f0cca5e4e35a50040b60699955abc3105	measured Tablet instance metadata
+EV-E3-TABLETEMU24-20260717-0001-qemu-full.log	7314	40837c324116383d6b0889b7d303f68247a20a478df8586b8f4e2241ebdd1251	complete instance qemu.log, byte-identical to preserved instance copy
+EV-E3-TABLETEMU24-20260717-0001-settings-vpn-search.log	1236	1a579e8f0380b6143f139e745e336feff10c2eb10a7f28456d1a02a98c6e4ab0	read-only Settings registration searches for default, current user 100, and user 0
+EV-E3-TABLETEMU24-20260717-0001-transcript.log	6855	66f312c845b976bb861fbc88f5ac1929fe3865a7f38ac57486204d8d15ba43c2	complete command transcript and stopped-path decisions
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/tablet_x86/info.json	82	fc98e75b35585ab06c268d263e33ac6c6f4435293f8ff2e405cde5430810492e	official image metadata; preserved outside repository
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/tablet_x86/sdk-pkg.json	359	99b8904200953662a26ebfc87c8c4c0bd021b6fd092998b783ef1b9f34c795a5	official image package metadata; preserved outside repository
+/home/worker/harmonyos/emulator-instances/netbird_api24_tablet/config.ini	965	9be1008582f732457d91cdcaf8c43356a5288ee622faf558802f579734c36ffe	preserved Tablet instance configuration
+EV-E3-EMU24-20260717-0003-application-a-hap.bin	34574	6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c	archived candidate A; hash checked but not sent or installed
+EV-E3-EMU24-20260717-0003-application-b-hap.bin	34564	c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e	archived candidate B; hash checked but not sent or installed

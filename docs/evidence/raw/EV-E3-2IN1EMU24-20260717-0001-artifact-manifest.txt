@@ -1,0 +1,13 @@
+artifact	size_bytes	sha256	role
+EV-E3-2IN1EMU24-20260717-0001-bm-dump-vpndialog.log	477	891a293aea4210c64736dade60000faa0ceab395cada52e2552cdacd96ea7107	read-only direct bundle query
+EV-E3-2IN1EMU24-20260717-0001-bms-all-user100.log	1400	d39a1ed8414c7f7e0cb120ed245a3ebe257a89d88f2aef63697baa6df3a7c7e7	read-only complete user-100 bundle list
+EV-E3-2IN1EMU24-20260717-0001-emulator-console.log	2220	7cc2fd970523c0ff353fc29a17ab5af8dc3dc589929c8631fe6e5547d457ba0b	noWindow Emulator console
+EV-E3-2IN1EMU24-20260717-0001-final-cleanup.log	946	5c0b373dcc7bff9826ad1b72ebb636ee11b9f98cb9b18ba2462cfa8d6326131f	cleanup and preservation record
+EV-E3-2IN1EMU24-20260717-0001-guest-identity.log	1452	e4675f8c7f56861c75b850b67c3890413bacf55934af6ae809fcbd3b3a65bde4	guest identity/API/arch/device type
+EV-E3-2IN1EMU24-20260717-0001-settings-vpn-search.log	1200	4d63afb2b2228be4323b97be3fd5cc21c15228ccf71a0cbf80957cee8c7334f5	read-only Settings registration search
+EV-E3-2IN1EMU24-20260717-0001-transcript.log	9632	5e3c8eea9be1a8248153a74a4104fc7480d44f23e6e06a79ebc4908e277729c7	complete command transcript
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/info.json	82	fc98e75b35585ab06c268d263e33ac6c6f4435293f8ff2e405cde5430810492e	official image metadata; preserved outside repository
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/sdk-pkg.json	360	07f1fa601a7eb9df012fc01ca1e06ccb9337975bbf8686c1af59a16eca1c2785	official image package metadata; preserved outside repository
+/home/worker/harmonyos/emulator-instances/netbird_api24_2in1/config.ini	900	517b79e4035c8c15479bbad59b1a5294fd4c7f81d3de77c11be06a3d85902eea	preserved instance configuration
+EV-E3-EMU24-20260717-0003-application-a-hap.bin	34574	6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c	archived candidate A; hash checked but not sent or installed
+EV-E3-EMU24-20260717-0003-application-b-hap.bin	34564	c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e	archived candidate B; hash checked but not sent or installed

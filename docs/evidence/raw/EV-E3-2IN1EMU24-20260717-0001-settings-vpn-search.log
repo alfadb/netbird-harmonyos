@@ -1,0 +1,22 @@
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.settings' | rg -in -C 3 'vpn|vpndialog'
+4049-        },
+4050-        {
+4051-            "moduleName": "pc_settings",
+4052:            "name": "ohos.permission.MANAGE_VPN",
+4053-            "reason": "",
+4054-            "reasonId": 0,
+4055-            "usedScene": {
+--
+4654-        "ohos.permission.MANAGE_SYSTEM_AUDIO_EFFECTS",
+4655-        "ohos.permission.MANAGE_USB_CONFIG",
+4656-        "ohos.permission.MANAGE_USER_IDM",
+4657:        "ohos.permission.MANAGE_VPN",
+4658-        "ohos.permission.MANAGE_WIFI_CONNECTION",
+4659-        "ohos.permission.MICROPHONE",
+4660-        "ohos.permission.NOTIFICATION_CONTROLLER",
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell 'bm dump -n com.huawei.hmos.settings' | rg -in -C 2 'VpnServiceExtAbility|extensionTypeName.*vpn|name.*vpn'
+4050-        {
+4051-            "moduleName": "pc_settings",
+4052:            "name": "ohos.permission.MANAGE_VPN",
+4053-            "reason": "",
+4054-            "reasonId": 0,

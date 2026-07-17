@@ -10,6 +10,7 @@
 
 - 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建 unsigned API 24 HAP 和双 ABI 普通 Node-API 库；`EV-E0-EMU24-20260717-0001` 已以 `reviewed-pass/pass` 关闭 E0。`EV-E1-EMU24-20260717-0005` 又在三个不同普通 `EntryAbility` PID 中各完成 10 轮 C-only ArkTS/native/fd probe，现为 `reviewed-pass/pass`；独立审查确认 0 blocker/major、5 minor，且不改变 measured artifact。`EV-E2-EMU24-20260717-0002` 随后在三个新 PID 中各完成 E1 完整回归和 10 轮纯 C TCP/UDP loopback、Pod 本机受控 endpoint、确定性 DNS/错误及资源恢复，并保留三张可见 E2 PASS 页面；该 E2 记录现为 `record_status: reviewed-pass`、`verdict: pass`，E2 已关闭。研究探针不是产品应用工程、产品测试套件或持续集成配置。
 - 独立 `spikes/e3-vpn-extension-hap` 已 clean-build 两个普通 bundle，并由正常 Entry UI 实测公开 VPN Extension start/stop。`EV-E3-EMU24-20260717-0003` 及补充 `0004` 均为 `reviewed-pass/blocked`：在精确 API 24 x86_64 phone Emulator image 上确认 `com.huawei.hmos.vpndialog` 缺失、普通公开 API 无旁路且 promise pending、Settings 无普通 VPN 管理入口；因此授权、拒绝、active stop、撤权和 active 冲突均不可达，E3 不关闭，E4-E7 为 dependency blocked 且不开始。
+- [E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已统一登记官方 API 24 x86_64 phone、2in1 与 Tablet：phone 0003/0004、2in1 0001/0002 和 Tablet 0001 均为 `reviewed-pass/blocked`。三种独立 image/instance 的 BMS/Settings 注册层均无 `vpndialog`/`VpnServiceExtAbility`；phone 另有 public start pending/`onCreate=0`，2in1/Tablet 按停止条件未发送或安装 A/B HAP。该矩阵不属于 phone E0-E8 聚合输入，任一形态都不替代另一形态。
 - HarmonyOS 命令行工具链、SDK、Linux Emulator、镜像和基础恢复入口已经准备完成。
 - Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化；该观测要求 E7 使用有界短循环并保留故障证据，不把 25 分钟以上长稳列为 Emulator 总门必过项，也不缩减 E0-E8 中可在 Emulator 客观执行的 VPN 验证。
 
@@ -28,6 +29,10 @@
 NetBird 基线跟随最新正式 release，不采用未发布分支、patch set 或提案作为当前门输入。2026-07-17 核对时最新正式 release 仍为 `v0.74.6`、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`，其 `go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`，官方 release run `29415596187` 成功；Go 1.26.5 不是 NetBird 声明基线，PS4 尚未发布，二者均不得作为当前门输入。
 
 API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：`EV-E0-EMU24-20260717-0001` 已以 `reviewed-pass/pass` 关闭 E0。`EV-E1-EMU24-20260717-0005` 的 C-only ArkTS/native/fd 子证据也为 `reviewed-pass/pass`，但 NetBird 官方 Go 基线制品的 loader initial-exec TLS 路径仍失败，因此 E1 overall Go blocked。E2 记录 `EV-E2-EMU24-20260717-0002` 已为 `reviewed-pass/pass` 并关闭。E3 记录 `EV-E3-EMU24-20260717-0003` 及补充 `0004` 均为 `reviewed-pass/blocked`：精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`，普通公开 API 无旁路且 promise pending，Settings 主页面无普通 VPN 管理入口；E3 不关闭，E4-E7 为 dependency blocked 且不开始。所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已完成，但 E1 官方 Go 仍 blocked。E8 仍为 `CLOSED`，真机执行禁令不变；不得写成 E3 通过或作跨架构结论，也不退出任何正式 R 阶段。
+
+官方替代 Emulator 矩阵已穷尽 API 24 x86_64 的 phone、2in1、Tablet 三种独立形态，所有最终记录均为 `reviewed-pass/blocked`。2in1 的 user-100/user-0 完整 lists 为 49/7 bundles，phone 的 runtime 仍 pending/`onCreate=0`，Tablet/2in1 在注册层缺项后未安装 HAP。phone、2in1 与 Tablet 的 image、实例、device type、screen profile、HDC port、guest build string、运行输入和 evidence ID 均独立；任一侧 PASS、FAIL 或 blocked 都不能替代、聚合或外推到另一侧。
+
+E3、E4-E7 和 E8 的状态不变：E3 blocked、E4-E7 dependency blocked 且不开始、E8 `CLOSED`。当前动作是等待含所需组件的官方 image 发布，以及正式 NetBird/Go 输入变化，再对相应门重跑；不建议私有 Go 或 system/debug/enterprise 绕过。
 
 ## T0 共识记录
 
@@ -107,6 +112,7 @@ E0-E8 是任何真机执行前必须串行关闭的投入总门；每一项都�
 - **支持声明有界**：每项支持声明必须同时绑定发行版、具名设备、完整系统版本、架构和分发渠道；缺少任一维度时不得扩展为平台级支持。
 - **真机作为后续产品证据**：E8 通过后，具名量产设备上的最终渠道制品才用于 arm64、硬件、渠道、能耗、长稳和发布支持证据；禁止真机是投入顺序，不是 arm64 或真机负面结论。
 - **双向不外推**：API 24 x86_64 phone Emulator 的 PASS 与 FAIL 都只覆盖该目标元组，不外推 arm64、具名真机或华为商用 HarmonyOS。
+- **设备形态独立**：phone、2in1、Tablet 及其他 Emulator 形态分别使用独立 image、实例、端口、输入和证据记录；补充形态记录不进入 phone E8 聚合，也不能替代任一其他形态或真机证据。
 - **API 主张待验证**：未经目标 SDK 声明与头文件、最小样例编译、项目代码和具名真机共同证明的 API 或桥接主张，只作为待验证假设。
 - **失败范围明确**：失败结论只覆盖其证据所绑定的目标、版本、设备、架构、渠道和实现路径，不无依据推广到其他目标。
 
@@ -425,8 +431,10 @@ RC 和渠道最终制品在支持矩阵内的具名真机通过回归，分批�
 主依赖链如下：
 
 ```text
-投入总门：E0 -> E1 -> E2 -> E3 (reviewed-pass/blocked) -> STOP: E4-E7 dependency blocked, 不开始 -> E8 CLOSED
-真机执行：仅 E8 OPEN 后允许
+投入总门（phone）：E0 -> E1 -> E2 -> E3 (reviewed-pass/blocked) -> STOP: E4-E7 dependency blocked, 不开始 -> E8 CLOSED
+官方替代矩阵：phone 0003/0004、2in1 0001/0002、Tablet 0001 均为独立 `reviewed-pass/blocked`；不进入或改变 phone 聚合
+后续动作：等待含组件的官方 image 与正式 NetBird/Go 输入变化后重跑相应门；不使用私有 Go 或 system/debug/enterprise 绕过
+真机执行：仅 phone E8 OPEN 后允许
 首目标正式门：R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6 -> R7 -> R8
 第二目标：首目标 GA + 第二目标启动条件 -> 独立重跑 R0 -> ... -> R8 -> R9 退出
 运维：R0 起准备，随每个目标 GA 进入持续 R10 闭环

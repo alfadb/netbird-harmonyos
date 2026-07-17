@@ -13,7 +13,9 @@
 | 首目标 | 候选为 HarmonyOS API 24，尚未因真机缺失而完成目标元组锁定 |
 | 普通第三方 VPN 路径 | 尚未验证 |
 | API 24 x86_64 phone Emulator 总门 | `CLOSED`；所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已完成；官方 E1 Go 仍 blocked；E3 的 0003/0004 为 `reviewed-pass/blocked`，精确镜像缺 `com.huawei.hmos.vpndialog`、普通公开 API 无旁路、Settings 无普通 VPN 管理入口，E3 不关闭，E4-E7 dependency blocked、不开始；E8 仍 `CLOSED`，真机禁令不变 |
-| 真机执行 | 禁止；仅 E8 `OPEN` 后允许 |
+| API 24 x86_64 2in1 Emulator 矩阵记录 | `0001` 与 user-0 supplemental `0002` 均为 `reviewed-pass/blocked`；完整 user-100/user-0 lists 为 49/7 bundles，三范围 direct 与 Settings 注册查询均无组件，未安装 HAP；不进入 phone 总门 |
+| API 24 x86_64 Tablet Emulator 矩阵记录 | `EV-E3-TABLETEMU24-20260717-0001` 为 `reviewed-pass/blocked`；独立 `tablet_x86` image/实例/端口在 current user 100、user 0 与 default direct query 范围内确认缺失组件，未安装 HAP；不进入 phone 总门或 2in1 记录 |
+| 真机执行 | 禁止；仅 phone E8 `OPEN` 后允许 |
 
 R0 未退出意味着任何研究结果都不能表述为产品可行性、真机支持或发布承诺，也不能据此跳过后续证据门。
 
@@ -26,7 +28,7 @@ R0 未退出意味着任何研究结果都不能表述为产品可行性、真�
 | 首目标候选 | HarmonyOS API 24 | 方案建议；待具名真机确认 |
 | 稳定构建链路 | Command Line Tools 6.1.1.290，HDC 3.2.0d | 当前实测 |
 | Emulator 链路 | Beta Command Line Tools 26.0.0.461，HDC 3.2.0e | 当前实测 |
-| Emulator 镜像 | `HarmonyOS 6.1.1(24)`，API 24 | 当前实测 |
+| Emulator 镜像 | `HarmonyOS 6.1.1(24)`，API 24；phone `phone_all_x86`、独立 2in1 `pc_all_x86` 与独立 Tablet `tablet_x86` image | 当前实测；三种设备形态不互相替代 |
 | NetBird | 跟随最新正式 release；2026-07-17 仍为 v0.74.6，commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` | 当前核对；工程集成尚未验证 |
 | NetBird Go 声明 | `go 1.25.5`，`toolchain go1.25.12`；官方 release run `29415596187` 成功 | 当前核对 |
 | 当前 Go 工具链 | 1.25.12 | 与 NetBird 声明一致；目标 ABI 构建尚未验证 |
@@ -45,6 +47,8 @@ Go 1.26.5 不是当前 NetBird 声明基线，PS4 尚未发布；未发布的 Go
 Emulator 上的 PASS 与 FAIL 都只覆盖记录的 x86_64 目标元组，不得外推到 arm64 或真机。arm64 ABI，以及 Emulator 客观不能执行的真实硬件、设备型号、物理蜂窝/Wi-Fi 切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性项目，不属于 Emulator 总门，登记为 E8 `OPEN` 后的真机专属项；不得以其无法在 Emulator 执行为理由提前真机。
 
 E0-E8 的定义与顺序以路线图为准。每项必须同时具备 `record_status: reviewed-pass`、`verdict: pass`，并与 E8 所聚合的目标元组、代码/上游 SHA 和输入/被测制品 SHA-256 一致；C-only 工作可以先行形成局部证据，但不打开 E8、不退出 R0/R1/R2，也不形成 NetBird、VPN、产品支持或发布结论。
+
+[E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)统一登记三个独立官方 x86_64 image/instance 形态。2in1 `0001`/`0002` 为 `reviewed-pass/blocked`：`pc_all_x86`/`netbird_api24_2in1` 的完整 user-100/user-0 lists 为 49/7 bundles，direct vpndialog 覆盖 default/user 100/user 0，Settings 无注册匹配，HAP 未安装。Tablet `0001` 同为 `reviewed-pass/blocked`：`tablet_x86`/`netbird_api24_tablet` 在合法 user 范围内未注册组件，HAP 未安装。三者均不与 phone E0-E8 合并或互相替代，也不能改变 E3、E8 或真机禁令。
 
 ## 必选功能
 
@@ -115,6 +119,8 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 
 - 尚未具名量产设备、完整系统版本、架构细节和最终支持目标元组。
 - API 24 x86_64 phone Emulator 总门为 `CLOSED`：所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已为 `reviewed-pass/pass` 并完成；NetBird 官方 E1 Go loader initial-exec TLS 路径仍失败，E1 overall Go blocked。E3 的 `0003`/`0004` 均为 `reviewed-pass/blocked`，精确镜像缺少 `com.huawei.hmos.vpndialog`、普通公开 API 无旁路且 Settings 无普通 VPN 管理入口，E3 不关闭；E4-E7 为 dependency blocked、不开始。E8 仍 `CLOSED`，真机禁令不变。
+- 官方 API 24 x86_64 phone、2in1、Tablet 矩阵均为 `reviewed-pass/blocked`；三者均在各自 BMS/Settings 注册层缺少 `vpndialog`/`VpnServiceExtAbility`。phone 的 public runtime 还为 pending/`onCreate=0`；2in1/Tablet 按停止条件未发送或安装 HAP。该结果只覆盖各自 image，不形成跨设备形态、arm64 或真机结论。
+- 当前等待包含组件的官方 image，以及正式 NetBird/Go 输入变化后重跑对应门；不采用私有 Go 或 system/debug/enterprise 绕过。
 - E0-E8 尚未全部形成 `reviewed-pass`、`verdict: pass` 且目标元组/哈希一致的证据；因此当前禁止任何真机执行。
 - 真机 HDC 安装、启动、日志、卸载闭环尚未建立，且只能在 E8 `OPEN` 后执行。
 - 普通第三方 VPN、SysCap、虚拟接口 fd、`protect`、后台生命周期和真实流量尚无合格的 Emulator 总门证据，也无后续真机证据。
@@ -134,6 +140,7 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 - [x] 建立初始且待真机确认的 R3、R6、R8 SLO。
 - [x] 建立证据 schema、初始威胁模型、许可证基线和角色责任矩阵。
 - [x] 记录 E0-E8 Emulator 投入总门、双向不外推纪律和 E8 未开时的真机执行禁令。
+- [x] 把 API 24 x86_64 2in1 与 Tablet 补充探测分别作为独立 image/实例/端口/evidence 记录，不互相替代且不并入 phone E8 聚合。
 - [ ] 以最新正式 NetBird release 的声明基线关闭 E0-E8，并取得逐项 `reviewed-pass`、`verdict: pass` 与一致目标元组/哈希。
 - [ ] 锁定具名量产设备、完整系统版本、架构、SDK/SysCap 依据和完整支持目标元组；信息准备不授权设备执行。
 - [ ] 仅在 E8 `OPEN` 后于具名真机完成 HDC 安装、启动、日志与卸载闭环。

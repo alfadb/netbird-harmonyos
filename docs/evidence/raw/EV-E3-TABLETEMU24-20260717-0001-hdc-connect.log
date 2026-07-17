@@ -1,0 +1,20 @@
+FIRST_CONNECT_BEGIN
+$ HDC_PORT=10002 timeout 90 /home/worker/harmonyos/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10002		TCP	Offline	unknown...
+CONNECT_EXIT=0
+FIRST_CONNECT_END
+
+SECOND_CONNECT_BEGIN
+$ HDC_PORT=10002 timeout 90 /home/worker/harmonyos/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10002		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10002		TCP	Connected	localhost
+CONNECT_EXIT=0
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10002 shell 'echo netbird-tablet-ready'
+netbird-tablet-ready
+SHELL_EXIT=0
+SECOND_CONNECT_END

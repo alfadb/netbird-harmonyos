@@ -1,0 +1,79 @@
+EVIDENCE_ID=EV-E3-2IN1EMU24-20260717-0002
+RECORD_SCOPE=official_API24_2in1_user0_read_only_VPN_authorization_prerequisite_supplement
+STARTED_AT=2026-07-17T22:14:35+08:00
+TARGET=127.0.0.1:10001
+PHYSICAL_DEVICE_USED=false
+HAP_SENT=false
+HAP_INSTALLED=false
+CREATE_PROTECT_USED=false
+TOOLCHAIN_HDC_VERSION=Ver: 3.2.0e
+GIT_HEAD=cd6f71c7ecc71e878c5fddea793d65de5b68f31d
+PREVIOUS_STARTUP_ATTEMPTS=connect-key-unmapped,offline; preserved_raw_logs=EV-E3-2IN1EMU24-20260717-0002-startup-*-failure-*
+Stop emulator  "netbird_api24_2in1"  failed, emulator is not exists.
+EMULATOR_LOG_CURRENT_BOOT_START_LINE=206
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -start netbird_api24_2in1 -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -noWindow -hdcPort 10001
+EMULATOR_PID=1409313
+HDC_CONNECT_ATTEMPT=1
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+Connect OK
+127.0.0.1:10001		TCP	Connected	localhost
+CONNECTIVITY attempt=1 shell=netbird-2in1-user0-1 distribution=HarmonyOS\ 
+EMULATOR_LOG_KVM=2026-07-17 22:14:38.278 129074488265728 [Info] [QemuParameters.cpp(CheckKvmStatus:140)]KVM is supported and accessible
+READ_ONLY_GUEST_IDENTITY_RECHECK_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell param\ get\ const.product.os.dist.name
+HarmonyOS 
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell param\ get\ const.product.software.version
+emulator 6.1.0.125(SP12DEVC00E47R1P3) 
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell param\ get\ const.ohos.apiversion
+24 
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell param\ get\ const.product.devicetype
+2in1 
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell uname\ -m
+x86_64
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell param\ get\ const.product.cpu.abilist
+x86_64 
+READ_ONLY_GUEST_IDENTITY_RECHECK_END
+READ_ONLY_USER0_BMS_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell bm\ dump\ -a\ -u\ 0
+ID: 0:
+	com.huawei.hmos.arkwebcore
+	com.huawei.hmos.location
+	com.huawei.hms.pushservice
+	com.huawei.hmsapp.samplemanagement
+	com.ohos.backgroundtaskmgr.resources
+	com.ohos.settingsdata
+	ohos.global.systemres
+FULL_OUTPUT=docs/evidence/raw/EV-E3-2IN1EMU24-20260717-0002-bms-all-user0.log
+OUTPUT_COUNTS=8_lines,209_bytes,0_bundles
+$ rg -in vpn\|vpndialog docs/evidence/raw/EV-E3-2IN1EMU24-20260717-0002-bms-all-user0.log
+NO_VPN_OR_VPNDIALOG_MATCH
+READ_ONLY_USER0_BMS_END
+READ_ONLY_DIRECT_VPNDIALOG_USER0_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell bm\ dump\ -n\ com.huawei.hmos.vpndialog\ -u\ 0
+error: failed to get information and the parameters may be wrong.
+READ_ONLY_DIRECT_VPNDIALOG_USER0_END
+READ_ONLY_SETTINGS_USER0_REGISTRATION_BEGIN
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell bm\ dump\ -n\ com.huawei.hmos.settings\ -u\ 0 | rg -in -C 2 vpn\|vpndialog\|VpnServiceExtAbility\|extensionTypeName.\*vpn\|name.\*vpn
+NO_SETTINGS_VPN_OR_EXTENSION_REGISTRATION_MATCH
+READ_ONLY_SETTINGS_USER0_REGISTRATION_END
+VPNDIALOG_BUNDLE_PRESENT_USER0=false
+VPN_SERVICE_EXT_ABILITY_PRESENT_USER0=false
+SETTINGS_VPN_REGISTRATION_PRESENT_USER0=false
+STOP_REASON=user0_supplement_complete__vpndialog_absent_and_VpnServiceExtAbility_absent
+RECORD_STATUS=collected
+VERDICT=blocked
+ENDED_AT=2026-07-17T22:15:14+08:00
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+FINAL_RESIDUAL_PORTS_10001_8710=none
+FINAL_RESIDUAL_PROCESSES=none
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+HAP_SENT=false
+HAP_INSTALLED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+CLEANUP_END

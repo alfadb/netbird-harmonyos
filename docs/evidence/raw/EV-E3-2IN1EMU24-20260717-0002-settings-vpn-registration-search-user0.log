@@ -1,0 +1,2 @@
+$ timeout 30 /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -t 127.0.0.1:10001 shell bm\ dump\ -n\ com.huawei.hmos.settings\ -u\ 0 | rg -in -C 2 vpn\|vpndialog\|VpnServiceExtAbility\|extensionTypeName.\*vpn\|name.\*vpn
+NO_SETTINGS_VPN_OR_EXTENSION_REGISTRATION_MATCH

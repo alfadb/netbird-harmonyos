@@ -1,0 +1,14 @@
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+$ ss -ltnp | rg ':(10001|8710)\b' || true
+$ pgrep -af '/[e]mulator/Emulator.*netbird_api24_2in1|[q]emu-system.*netbird_api24_2in1|[h]dc -m -s' || true
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -list -details -instancePath /home/worker/harmonyos/emulator-instances
+netbird_api24_2in1 isRunning=false
+$ tmux kill-session -t netbird-api24-2in1-run
+$ tmux kill-session -t netbird-api24-2in1-install
+FINAL_RESIDUAL_PROCESSES=none
+FINAL_RESIDUAL_PORTS_10001_8710=none
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+ENDED_AT=2026-07-17T21:15:33+08:00

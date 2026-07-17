@@ -1,0 +1,6 @@
+$ bm dump -n com.huawei.hmos.vpndialog
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n com.huawei.hmos.vpndialog -u 100
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n com.huawei.hmos.vpndialog -u 0
+error: failed to get information and the parameters may be wrong.

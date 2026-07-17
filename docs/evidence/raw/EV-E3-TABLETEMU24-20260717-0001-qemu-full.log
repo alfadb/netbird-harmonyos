@@ -1,0 +1,60 @@
+2026-07-17 21:35:57.032125700992390848 E [vl.c(delete_snapshot_bin_file:2416)] error file /home/worker/harmonyos/emulator-instances/netbird_api24_tablet/ram.bin not exist or permission denied
+2026-07-17 21:35:57.094125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:3200 height:2400 resolution:30 touchscreen:0 screenId:0
+2026-07-17 21:35:57.095125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:2880 height:1920 resolution:10 touchscreen:1 screenId:0
+2026-07-17 21:35:57.095125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:2880 height:1920 resolution:10 touchscreen:1 screenId:1
+2026-07-17 21:35:57.096125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:2880 height:1920 resolution:10 touchscreen:1 screenId:2
+2026-07-17 21:35:57.097125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:2880 height:1920 resolution:10 touchscreen:1 screenId:3
+2026-07-17 21:35:57.098125700992390848 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:2880 height:1920 resolution:10 touchscreen:1 screenId:4
+2026-07-17 21:35:57.099125700992390848 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+2026-07-17 21:35:57.100125700992390848 I [express_touchscreen.c(update_touchscreen_prop:313)] express multi touch disabled
+2026-07-17 21:35:57.100125700287731392 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+2026-07-17 21:35:57.100125700287731392 I [egl_window_linux.c(egl_init:245)] trying GBM DRM mode...
+2026-07-17 21:35:57.100125700287731392 W [egl_window_linux.c(try_egl_init_gbm:159)] no GBM device available
+2026-07-17 21:35:57.100125700287731392 I [egl_window_linux.c(egl_init:258)] trying headless surfaceless mode...
+2026-07-17 21:35:57.116125700992390848 E [HvdInfo.c(GetLayoutConfig:98)] Get layoutConfig before initialization.
+2026-07-17 21:35:57.116125700992390848 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-07-17 21:35:57.116125700992390848 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+2026-07-17 21:35:57.116125700992390848 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-07-17 21:35:57.116125700992390848 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+2026-07-17 21:35:57.116125700992390848 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-07-17 21:35:57.116125700992390848 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+2026-07-17 21:35:57.116125700992390848 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-07-17 21:35:57.116125700992390848 I [vl.c(RunQemuMain:4080)] Qemu Init end
+2026-07-17 21:35:57.177125700287731392 I [egl_window_linux.c(try_egl_init_headless:188)] surfaceless EGL initialized: 1.5
+2026-07-17 21:35:57.177125700287731392 E [egl_window_linux.c(egl_choose_config:208)] Failed to choose EGL config: 0x3000
+2026-07-17 21:35:59.669125700312909504 I [express_pipe.c(dev_read:751)] Clean up all existing stale pipes.
+2026-07-17 21:35:59.733125700312909504 I [teleport_express_call.c(guest_null_ptr_init:678)] null ptr 125699153931192
+2026-07-17 21:35:59.758125700312909504 I [teleport_express.c(teleport_express_output_handle:54)] start handle thread
+2026-07-17 21:35:59.770125700296124096 I [express_touchscreen.c(touchscreen_buffer_register:365)] touch register buffer
+2026-07-17 21:35:59.777125700304516800 I [express_keyboard.c(keyboard_buffer_register:210)] keyboard register buffer
+2026-07-17 21:35:59.785125700304516800 I [express_battery.c(battery_buffer_register:210)] battery register buffer
+2026-07-17 21:35:59.785125700304516800 I [express_sync.c(sync_buffer_register:207)] sync register buffer
+2026-07-17 21:35:59.787125700304516800 I [express_camera.c(load_camera_device_props:760)] list_cameras: found 0 cameras.
+2026-07-17 21:35:59.788125700304516800 E [express_camera.c(load_camera_device_props:769)] load camera thread context not ok
+2026-07-17 21:35:59.788125700304516800 I [express_camera.c(get_camera_thread_context:969)] context is null, before thread_context create
+2026-07-17 21:35:59.788125700304516800 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 80
+2026-07-17 21:36:19.635125700312909504 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 40
+2026-07-17 21:36:19.636125693345081024 I [express_bridge.c(bridge_socket_listen:117)] listen bridge socket port 10002
+2026-07-17 21:36:19.829125700312909504 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-07-17 21:36:24.065125700296124096 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 10
+2026-07-17 21:36:24.065125706600167104 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+2026-07-17 21:36:50.521125693336688320 I [express_bridge.c(accept_data_to_guest:244)] input one connect fd 5.
+2026-07-17 21:36:50.527125700304516800 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 40
+2026-07-17 21:41:29.882125706810588160 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+2026-07-17 21:41:29.883125700304516800 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7252f8a367a0 0
+2026-07-17 21:41:29.883125700287731392 I [express_event.c(delete_event:184)] DeleteB Event
+2026-07-17 21:41:29.883125700321302208 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7252f89f1740 0
+2026-07-17 21:41:29.883125700296124096 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7252f8a46420 0
+2026-07-17 21:41:29.883125700312909504 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7252f8a26890 0
+2026-07-17 21:41:29.883125700958820032 I [teleport_express.c(WaitExpressStop:289)] wait distribute thread stop
+2026-07-17 21:41:29.883125700958820032 I [teleport_express.c(WaitExpressStop:297)] wait input thread stop
+2026-07-17 21:41:29.883125700958820032 I [teleport_express.c(WaitExpressStop:302)] wait thread list call empty
+2026-07-17 21:41:30.558125702057739968 E [express_event.c(set_event:118)] Set Event: Failed to lock
+2026-07-17 21:41:30.937125700958820032 I [teleport_express.c(clear_ouput_call_recycle_queue:275)] recycle ouput call queue
+2026-07-17 21:41:30.937125700958820032 I [teleport_express.c(WaitExpressStop:315)] wait express stop done 0
+2026-07-17 21:41:30.937125700958820032 I [vl.c(WaitConvertUserDataFinished:2634)] wait convert userdata img stop
+2026-07-17 21:41:30.937125700958820032 I [vl.c(WaitConvertUserDataFinished:2642)] wait convert userdata img done 499
+2026-07-17 21:41:30.937125700958820032 I [QemuRequestAgent.c(QuitQemu:29)] quit qemu.
+2026-07-17 21:41:30.938125700992390848 I [vl.c(RunQemuMain:4082)] Qemu Main Loop end
+2026-07-17 21:41:30.939125700992390848 I [vl.c(RunQemuMain:4084)] Qemu Cleanup end
+2026-07-17 21:41:30.939125700992390848 I [vl.c(cleanup_userdata_img:2523)] cleanup_userdata_img

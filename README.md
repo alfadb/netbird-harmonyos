@@ -6,7 +6,7 @@
 
 项目目标是在 HarmonyOS 与具名 OpenHarmony 发行版上探索并实现可用的 NetBird 客户端，共享协议与网络核心，并为两个目标分别维护应用壳、构建签名、制品、测试和分发流程。当前优先推进首目标候选 HarmonyOS API 24 的研究与证据门，不表示首目标已锁定，也不表示任一目标已具备产品支持或发布条件。
 
-当前仓库尚未提供可用发行版本，功能范围、技术方案和平台能力适配仍在验证中。API 24 x86_64 phone Emulator 的 E0 已以 `record_status: reviewed-pass`、`verdict: pass` 关闭；E1 C-only 子门证据 `EV-E1-EMU24-20260717-0005` 已为 `reviewed-pass/pass`，但官方 NetBird 基线 Go 1.25.12 loader 仍失败，因此 E1 overall Go blocked。E2 C 网络证据 `EV-E2-EMU24-20260717-0002` 已为 `reviewed-pass/pass` 并关闭。E3 记录 `EV-E3-EMU24-20260717-0003` 与补充 `0004` 均为 `record_status: reviewed-pass`、`verdict: blocked`：独立审查确认精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`，普通公开 API 无旁路且请求 pending，Settings 无普通 VPN 管理入口；E3 不关闭，E4-E7 为 dependency blocked 且不开始。当前所有不依赖 Go 且合法可达的 E0、E1-C、E2 已完成，但 E1 官方 Go 仍 blocked；模拟器总门 E8 仍为 `CLOSED`，真机执行禁令不变。该模拟器缺项不外推到其他架构、具名真机或华为商用 HarmonyOS。
+当前仓库尚未提供可用发行版本，功能范围、技术方案和平台能力适配仍在验证中。官方 API 24 x86_64 Emulator 矩阵已穷尽 phone、Tablet 与 2in1 三种独立 image/instance 形态，五个最终 E3 记录均为 `reviewed-pass/blocked`：三者的 BMS/Settings 注册层均缺少 `com.huawei.hmos.vpndialog`/`VpnServiceExtAbility`；phone 的公开 API runtime 还记录了 promise pending 与 `onCreate=0`，Tablet/2in1 则按预定停止条件未安装 HAP。E3 不关闭，E4-E7 为 dependency blocked 且不开始；E1 官方 NetBird 基线 Go 1.25.12 loader 仍 blocked；E8 仍为 `CLOSED`，真机执行禁令不变。当前动作是等待包含所需组件的官方 image，以及正式 NetBird/Go 输入变化后重跑对应门；不建议私有 Go 或 system/debug/enterprise 绕过。该矩阵不外推到 arm64、具名真机、其他 image 或华为商用 HarmonyOS。
 
 ## 开发状态
 
@@ -21,6 +21,7 @@
 - [E1 C-only ArkTS/native/fd Emulator 子证据](docs/evidence/e1-c-bridge-api24-emulator-2026-07-17.md)
 - [E2 C 网络 API 24 Emulator 证据](docs/evidence/e2-c-network-api24-emulator-2026-07-17.md)
 - [E3 VPN Extension API 24 Emulator 证据](docs/evidence/e3-vpn-extension-api24-emulator-2026-07-17.md)
+- [E3 VPN Extension API 24 Emulator 矩阵审查](docs/evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)
 - [安全与合规基线](docs/security-and-compliance.md)
 - [双目标实施路线图](docs/roadmap.md)
 - [开发环境与 HarmonyOS Linux Emulator](docs/development-environment.md)

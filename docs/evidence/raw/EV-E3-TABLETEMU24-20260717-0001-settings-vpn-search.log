@@ -1,0 +1,26 @@
+$ bm dump -n com.huawei.hmos.settings | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+4553-        {
+4554-            "moduleName": "phone_settings",
+4555:            "name": "ohos.permission.MANAGE_VPN",
+4556-            "reason": "",
+4557-            "reasonId": 0,
+--
+5260-        "ohos.permission.MANAGE_USB_CONFIG",
+5261-        "ohos.permission.MANAGE_USER_IDM",
+5262:        "ohos.permission.MANAGE_VPN",
+5263-        "ohos.permission.MANAGE_WIFI_CONNECTION",
+5264-        "ohos.permission.MANAGE_WIFI_HOTSPOT",
+$ bm dump -n com.huawei.hmos.settings -u 100 | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+4553-        {
+4554-            "moduleName": "phone_settings",
+4555:            "name": "ohos.permission.MANAGE_VPN",
+4556-            "reason": "",
+4557-            "reasonId": 0,
+--
+5260-        "ohos.permission.MANAGE_USB_CONFIG",
+5261-        "ohos.permission.MANAGE_USER_IDM",
+5262:        "ohos.permission.MANAGE_VPN",
+5263-        "ohos.permission.MANAGE_WIFI_CONNECTION",
+5264-        "ohos.permission.MANAGE_WIFI_HOTSPOT",
+$ bm dump -n com.huawei.hmos.settings -u 0 | rg -in -C 2 'vpn|vpndialog|VpnServiceExtAbility|extensionTypeName.*vpn'
+NO_SETTINGS_VPN_MATCH

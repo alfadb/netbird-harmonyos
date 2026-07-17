@@ -1,0 +1,116 @@
+EVIDENCE_ID=EV-E3-2IN1EMU24-20260717-0002
+RECORD_SCOPE=official_API24_2in1_user0_read_only_VPN_authorization_prerequisite_supplement
+STARTED_AT=2026-07-17T22:09:32+08:00
+TARGET=127.0.0.1:10001
+PHYSICAL_DEVICE_USED=false
+HAP_SENT=false
+HAP_INSTALLED=false
+CREATE_PROTECT_USED=false
+TOOLCHAIN_HDC_VERSION=Ver: 3.2.0e
+GIT_HEAD=cd6f71c7ecc71e878c5fddea793d65de5b68f31d
+PREVIOUS_STARTUP_ATTEMPT=connect-key-unmapped; preserved_raw_logs=EV-E3-2IN1EMU24-20260717-0002-startup-connect-key-failure-*
+Stop emulator  "netbird_api24_2in1"  failed, emulator is not exists.
+EMULATOR_LOG_CURRENT_BOOT_START_LINE=137
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -start netbird_api24_2in1 -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -noWindow -hdcPort 10001
+EMULATOR_PID=1404985
+HDC_CONNECT_BEGIN
+$ HDC_PORT=10001 timeout 60 /home/worker/harmonyos/bin/emulator-connect
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10001		TCP	Offline	unknown...
+HDC_CONNECT_END
+CONNECTIVITY attempt=1 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=2 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=3 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=4 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=5 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=6 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=7 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=8 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=9 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=10 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=11 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=12 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=13 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=14 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=15 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=16 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=17 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=18 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=19 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=20 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=21 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=22 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=23 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=24 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=25 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=26 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=27 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=28 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=29 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=30 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=31 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=32 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=33 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=34 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=35 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=36 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=37 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=38 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=39 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=40 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=41 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=42 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=43 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=44 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=45 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=46 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=47 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=48 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=49 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=50 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=51 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=52 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=53 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=54 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=55 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=56 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=57 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=58 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=59 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=60 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=61 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=62 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=63 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=64 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=65 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=66 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=67 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=68 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=69 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=70 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=71 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=72 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=73 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=74 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=75 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=76 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=77 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=78 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=79 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=80 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+FAIL_REASON=HDC_connectivity_blocked_after_tconn
+CLEANUP_BEGIN
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/bin/Emulator -stop netbird_api24_2in1
+Stop emulator netbird_api24_2in1 successfully
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc kill
+FINAL_RESIDUAL_PORTS_10001_8710=none
+FINAL_RESIDUAL_PROCESSES=none
+OFFICIAL_IMAGE_PRESERVED=/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/
+INSTANCE_PRESERVED=/home/worker/harmonyos/emulator-instances/netbird_api24_2in1
+HAP_SENT=false
+HAP_INSTALLED=false
+SYSTEM_PERMISSION_MODIFIED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+CLEANUP_END

@@ -1,0 +1,10 @@
+usage: bm dump <options>
+options list:
+  -h, --help                           list available commands
+  -a, --all                            list all bundles in system
+  -g, --debug-bundle                   list debug bundles in system
+  -n, --bundle-name <bundle-name>      list the bundle info by a bundle name
+  -s, --shortcut-info                  list the shortcut info
+  -d, --device-id <device-id>          specify a device id
+  -u, --user-id <user-id>              specify a user id,only supports current user or userId is 0
+  -l, --label                          list the label info

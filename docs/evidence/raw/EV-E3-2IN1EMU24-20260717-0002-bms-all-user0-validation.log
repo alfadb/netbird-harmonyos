@@ -1,0 +1,5 @@
+source_file=docs/evidence/raw/EV-E3-2IN1EMU24-20260717-0002-bms-all-user0.log
+counting_rule=non-empty_lines_excluding_the_ID_header
+bundle_count=7
+vpn_or_vpndialog_matches=0
+result=seven_user0_bundles_and_zero_vpn_or_vpndialog_matches

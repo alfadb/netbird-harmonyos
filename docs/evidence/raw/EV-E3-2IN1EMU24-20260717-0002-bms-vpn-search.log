@@ -1,0 +1,2 @@
+$ rg -in vpn\|vpndialog docs/evidence/raw/EV-E3-2IN1EMU24-20260717-0002-bms-all-user0.log
+NO_VPN_OR_VPNDIALOG_MATCH

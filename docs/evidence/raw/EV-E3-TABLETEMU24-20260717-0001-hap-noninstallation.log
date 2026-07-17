@@ -1,0 +1,23 @@
+ARCHIVED_A_PATH=docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-a-hap.bin
+ARCHIVED_A_BYTES=34574
+ARCHIVED_A_SHA256=6b3cb636238188ebf9ebd767f2f0fa0c7beab2bdde6028fa6e4bc2da42084d6c
+ARCHIVED_B_PATH=docs/evidence/raw/EV-E3-EMU24-20260717-0003-application-b-hap.bin
+ARCHIVED_B_BYTES=34564
+ARCHIVED_B_SHA256=c1d57d2544a93e4c4f172ee3ecb6ff2659adb7650558957e5b0cfb7aa69ae21e
+$ bm dump -n cn.alfadb.netbird.e3vpna
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n cn.alfadb.netbird.e3vpna -u 100
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n cn.alfadb.netbird.e3vpna -u 0
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n cn.alfadb.netbird.e3vpnb
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n cn.alfadb.netbird.e3vpnb -u 100
+error: failed to get information and the parameters may be wrong.
+$ bm dump -n cn.alfadb.netbird.e3vpnb -u 0
+error: failed to get information and the parameters may be wrong.
+HAP_SENT=false
+HAP_INSTALLED=false
+E3_REPLAY_EXECUTED=false
+CREATE_PROTECT_USED=false
+STOP_REASON=com.huawei.hmos.vpndialog_absent_and_VpnServiceExtAbility_absent

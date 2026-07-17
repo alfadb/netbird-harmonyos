@@ -1,0 +1,54 @@
+EMULATOR_CURRENT_BOOT_LOG_BEGIN_LINE=206
+2026-07-17 22:14:37.856 129074488265728 [Info] [TraceTool.cpp(InitPipe:27)][TraceTool] trace pipe name is: ""
+2026-07-17 22:14:37.887 129074488265728 [Warning] [LogUtil.cpp(OutputPath:260)]can not find file :  "/tmp/92d407ee-de3d-4bbf-b2c6-8a5863b16e94"
+2026-07-17 22:14:37.887 129074488265728 [Critical] [TraceTool.cpp(HandleTrace:59)][TraceTool] Trace pipe is not prepared
+2026-07-17 22:14:37.887 129074211047104 [Info] [HiviewxClient.cpp(GetPortFromConfig:128)]HiviewxClient read port:  0
+2026-07-17 22:14:37.888 129074211047104 [Info] [HiviewxClient.cpp(JudgePort:115)]HiviewxClient link failed, port should be  1  ~  65535 , your port is  0
+2026-07-17 22:14:37.888 129074488265728 [Warning] [CheckRuntimeEnv.cpp(CheckFreeDisk:534)]no 'freedisk' in config.
+2026-07-17 22:14:37.888 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:88)]Enable Camera.
+2026-07-17 22:14:37.888 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:92)]Enable front and back cameras.
+2026-07-17 22:14:37.888 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:97)]Enable MultiDisplay Kernel Feature.
+2026-07-17 22:14:37.888 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:106)]Enable Express Multi Touch.
+2026-07-17 22:14:37.888 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:111)]Enable Sensor Configuration.
+2026-07-17 22:14:37.889 129074488265728 [Info] [UiMain.cpp(void InitFeatureConfig:116)]Enable Bgra Configuration.
+2026-07-17 22:14:37.889 129074488265728 [Info] [CheckImage.cpp(CheckAllSign:88)]start check image
+2026-07-17 22:14:37.889 129074488265728 [Info] [Skin.cpp(InitByDeviceType:631)]Emulator screen  "notCustomize"
+2026-07-17 22:14:37.890 129074488265728 [Info] [Skin.cpp(Init2In1:771)]Init 2In1 dpi =  304
+2026-07-17 22:14:37.890 129074488265728 [Warning] [LogUtil.cpp(OutputPath:260)]can not open file :  "$USER_HOME$/harmonyos/emulator-instances/netbird_api24_2in1/Camera.properties"
+2026-07-17 22:14:37.890 129074488265728 [Warning] [Skin.cpp(InitConfig:579)]Camera config parse failed
+2026-07-17 22:14:37.916 129074211047104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "ramdisk.img"  result  0  cost  27
+2026-07-17 22:14:37.993 129074211047104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "bzImage"  result  0  cost  76
+2026-07-17 22:14:38.048 129074488265728 [Info] [WidgetSettings.cpp(InitImageLanguageComboBox:251)]Init imge language to Index  1
+2026-07-17 22:14:38.104 129074488265728 [Warning] [(:0)]Cannot open file ':/light/charging-off.svg', because: No such file or directory
+2026-07-17 22:14:38.105 129074488265728 [Warning] [(:0)]Cannot open file ':/light/charging-off.svg', because: No such file or directory
+2026-07-17 22:14:38.105 129074488265728 [Warning] [(:0)]Cannot open file ':/light/charging-on.svg', because: No such file or directory
+2026-07-17 22:14:38.105 129074488265728 [Warning] [(:0)]Cannot open file ':/light/charging-on.svg', because: No such file or directory
+2026-07-17 22:14:38.160 129074488265728 [Warning] [LogUtil.cpp(OutputPath:260)]can not find file :  "$USER_HOME$/Library/Application Support/Huawei/DevEcoStudio26.0/emulator/proxy.settings.pwd"
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Alt+A")   QKeySequence("Meta+A")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Alt+Shift+")   QKeySequence("Meta+Tab")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+Backspace")   QKeySequence("Meta+Backspace")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+D")   QKeySequence("Meta+D")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+F")   QKeySequence("Meta+F")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+F4")   QKeySequence("Alt+F4")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+L")   QKeySequence("Meta+L")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+M")   QKeySequence("Meta+M")
+2026-07-17 22:14:38.171 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+N")   QKeySequence("Meta+N")
+2026-07-17 22:14:38.172 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+S")   QKeySequence("")
+2026-07-17 22:14:38.172 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+Shift+S")   QKeySequence("Meta+Shift+S")
+2026-07-17 22:14:38.172 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Ctrl+Tab")   QKeySequence("Alt+Tab")
+2026-07-17 22:14:38.172 129074488265728 [Info] [KeyboardShortcut.cpp(AddShortcutMap:25)]add shortcut  QKeySequence("Meta+")   QKeySequence("")
+2026-07-17 22:14:38.173 129074488265728 [Info] [PlayerApiToolBar.cpp(UpdateOverflowButtonIcon:110)]":/light/overflow-default"
+2026-07-17 22:14:38.174 129074488265728 [Info] [PlayerApiToolBar.cpp(UpdateOverflowButtonIcon:110)]":/light/overflow-hover"
+2026-07-17 22:14:38.278 129074488265728 [Warning] [(:0)]This plugin does not support propagateSizeHints()
+2026-07-17 22:14:38.278 129074488265728 [Warning] [(:0)]This plugin does not support setting window masks
+2026-07-17 22:14:38.278 129074488265728 [Info] [EmulatorWindowEvent.cpp(ShowBootAnimation:1327)]ShowBootAnimation.
+2026-07-17 22:14:38.278 129074488265728 [Info] [QemuParameters.cpp(CheckKvmStatus:140)]KVM is supported and accessible
+2026-07-17 22:14:38.279 129074488265728 [Info] [CrashClient.cpp(StartCrashDetect:151)]StartCrash Detect.
+2026-07-17 22:14:38.279 129074488265728 [Info] [CrashClient.cpp(StartCrashServer:413)]start crash server.
+2026-07-17 22:14:38.290 129074488265728 [Warning] [QemuManager.cpp(HostFreeMemMonitor:823)]The host computer's memory is ： 0  ,which is less than  3
+2026-07-17 22:14:38.369 129069018486464 [Info] [QemuManager.cpp(OnSystemReset:660)]System is reset
+2026-07-17 22:14:38.369 129069018486464 [Info] [HdcClient.cpp(HdcDisConnect:558)]dicconnect hdc server
+2026-07-17 22:14:38.696 129074202654400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "vendor.img"  result  0  cost  807
+2026-07-17 22:14:39.511 129074202654400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "userdata.img"  result  0  cost  815
+2026-07-17 22:14:46.991 129074202654400 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "sys_prod.img"  result  0  cost  7480
+2026-07-17 22:15:01.749 129074211047104 [Info] [CheckImage.cpp(CheckSign:127)]finish check image  "system.img"  result  0  cost  23756

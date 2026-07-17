@@ -1,0 +1,20 @@
+artifact	size_bytes	sha256	role
+EV-E3-2IN1EMU24-20260717-0002-bm-dump-vpndialog-user0.log	243	72480072effd48b858e3163d3a7b16f0cdb1f624f4cf62032ac3891fcb45c87a	read-only direct vpndialog bundle query in user 0
+EV-E3-2IN1EMU24-20260717-0002-bms-all-user0.log	209	91dc0a1b8613e2b60f3b54b860a4ca9366e538c01aaedb9865c942d22a4724dd	read-only complete user-0 bundle list
+EV-E3-2IN1EMU24-20260717-0002-bms-all-user0-validation.log	235	e2fd48915abf769b3e2d6ba550ae539ebb3e739cc099c95f8810dc39cab3ec2d	host-only count validation for complete user-0 bundle list
+EV-E3-2IN1EMU24-20260717-0002-bms-vpn-search.log	116	1c8e4613213bf7aa21a898686c18e2341485f79a5d2994a3fda920ce979ddbd7	host-side vpn/vpndialog search over complete user-0 bundle list
+EV-E3-2IN1EMU24-20260717-0002-emulator-console.log	1822	dfb2fcd27a74f4fb4590b8eca6a368ebe50edbaf31a76c7bbcb8f1c8b7199d7e	noWindow Emulator console for cold boot attempt
+EV-E3-2IN1EMU24-20260717-0002-emulator-current-boot.log	6971	9518e13bd825ab07d0756068c054d382cb964f215a5ae5d0a1a3a98ed8b870ec	current cold-boot Emulator.log segment including KVM observation
+EV-E3-2IN1EMU24-20260717-0002-final-cleanup.log	626	6692b1b0dcaf8171977296bac2b6e8e91da0a70395196c595547a28976ba1bfc	cleanup and image/instance preservation record
+EV-E3-2IN1EMU24-20260717-0002-guest-identity.log	1056	876b55f81c4c382996274973549f255cc165e7122d2db5510c5960aff01a03f5	guest identity/API/architecture/device type recheck
+EV-E3-2IN1EMU24-20260717-0002-settings-vpn-registration-search-user0.log	312	705449361bea5d4d08bec1d8a5b99e65b61d7d9e4fa06b13e7c6030a3c068e85	read-only Settings user-0 registration search
+EV-E3-2IN1EMU24-20260717-0002-startup-connect-key-failure-emulator-console.log	1822	dfb2fcd27a74f4fb4590b8eca6a368ebe50edbaf31a76c7bbcb8f1c8b7199d7e	noWindow Emulator console for cold boot attempt
+EV-E3-2IN1EMU24-20260717-0002-startup-connect-key-failure-final-cleanup.log	920	237351af4b34592a7a41b4d2756e7c81bb4e07f7ea0bd666744336e3f718a5f9	cleanup and image/instance preservation record
+EV-E3-2IN1EMU24-20260717-0002-startup-connect-key-failure-transcript.log	15327	8df1ce08d46e26d865007caca036ddf25e8c915bde82b970c65d04fa4b89483f	complete first startup transcript: explicit target lacked connect-key mapping
+EV-E3-2IN1EMU24-20260717-0002-startup-offline-failure-emulator-console.log	1822	dfb2fcd27a74f4fb4590b8eca6a368ebe50edbaf31a76c7bbcb8f1c8b7199d7e	noWindow Emulator console for cold boot attempt
+EV-E3-2IN1EMU24-20260717-0002-startup-offline-failure-final-cleanup.log	626	6692b1b0dcaf8171977296bac2b6e8e91da0a70395196c595547a28976ba1bfc	cleanup and image/instance preservation record
+EV-E3-2IN1EMU24-20260717-0002-startup-offline-failure-transcript.log	13684	bb44a624210bdbe899514d505870f7c5e281e512606a193c80c4ea24faf8ac4c	complete second startup transcript: target was Offline before guest readiness
+EV-E3-2IN1EMU24-20260717-0002-transcript.log	4625	c40b6283c7e88086a9f8b5fe1b9d227cc00614e9146f001b0956e0f46f587815	complete successful command transcript and stopped-path decision
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/info.json	82	fc98e75b35585ab06c268d263e33ac6c6f4435293f8ff2e405cde5430810492e	official image metadata; preserved outside repository
+/home/worker/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1/pc_all_x86/sdk-pkg.json	360	07f1fa601a7eb9df012fc01ca1e06ccb9337975bbf8686c1af59a16eca1c2785	official image package metadata; preserved outside repository
+/home/worker/harmonyos/emulator-instances/netbird_api24_2in1/config.ini	900	517b79e4035c8c15479bbad59b1a5294fd4c7f81d3de77c11be06a3d85902eea	preserved 2in1 instance configuration; outside repository
