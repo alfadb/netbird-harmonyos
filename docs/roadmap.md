@@ -10,7 +10,7 @@
 
 - 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建unsigned API 24应用/测试HAP和双ABI普通Node-API库；API 24 Emulator上的最小`aa test`已执行通过，但它不是产品应用工程、产品测试套件或持续集成配置。
 - HarmonyOS 命令行工具链、SDK、Linux Emulator、镜像和基础恢复入口已经准备完成。
-- Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化。因此 Emulator 只承担短时 smoke，不承担长稳、VPN、性能或产品支持证据。
+- Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化；该观测要求 E7 使用有界短循环并保留故障证据，不把 25 分钟以上长稳列为 Emulator 总门必过项，也不缩减 E0-E8 中可在 Emulator 客观执行的 VPN 验证。
 
 ### 尚未验证
 
@@ -21,6 +21,12 @@
 ### R1研究进度
 
 2026-07-17，[R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)已记录固定 NetBird/Go/SDK 的编译和静态风险，并用 CLI 6.1.1.290、API 24、Hvigor 6.24.3 实际构建 unsigned Stage 应用/测试 HAP 及 arm64-v8a/x86_64 `libprobe.so`；后续 API 24 Emulator 研究确认可见 pixelMap、普通 `EntryAbility` 仍被 `10106102` 阻塞，而短生命周期 TestRunner 可直接完成 Node-API 初始化、`ping=pong` 和版本断言。0006 的 Go 1.25.12 Linux/amd64 c-shared 直接 `dlopen` 在 initial-exec TLS 处受控失败；0007 进一步证明无 Go、无 `res_search`、无 `NODELETE`/`SYMBOLIC` 的普通 initial-exec TLS so 同样被拒绝，且正确 `DT_NEEDED` wrapper 的 runtime 传递加载也在依赖 Go so 处被拒绝。`ADJ-20260717-0001` 后的 0008 确认公开 Native Child API 对 API 14 及以后只支持 PC/2in1、Tablet，因而在实现前暂停 API 24 phone B 族。第二个六席 T0 共识 `ADJ-20260717-0002` 随后批准单次 Tier1 纯 C 动态 TLS loader 探针；0009 用最终 ELF 实证确认 IE 为 `PT_TLS+TPOFF64+STATIC_TLS`、classic GD 为 `DTPMOD64+DTPOFF64+__tls_get_addr`、TLSDESC gnu2 为 `R_X86_64_TLSDESC`，并附加 local-dynamic，所有 link 均禁用 relax。API 24 x86_64 TestRunner baseline 先通过，IE 按 0007 类别拒绝且无环境漂移，classic GD、TLSDESC 和 local-dynamic 均成功加载；每个动态模型的主线程、加载前等待线程和加载后新线程分别以不同值完成初值42、100轮 set/read、reset42，0 错误、0 crash，Tier1 为 `PASS`，不触发停止该 x86_64 元组。该正面只证明精确 C loader 模型，不证明 Go 1.25.12 会生成或支持这些模型；Go `#71953`、CL `644975`、CL `696635`、PR `75048` 均未合并、未发布，只作下一道独立 Tier2 门参考。arm64、华为商用 HarmonyOS 具名真机和其他设备/loader/toolchain 保持 provisional，补丁数仍为 0；R0、R1、R2 均未退出，也没有新增产品证据。
+
+## 当前基线与总门状态
+
+NetBird 基线跟随最新正式 release，不采用未发布分支、patch set 或提案作为当前门输入。2026-07-17 核对时最新正式 release 仍为 `v0.74.6`、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`，其 `go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`，官方 release run `29415596187` 成功；Go 1.26.5 不是 NetBird 声明基线，PS4 尚未发布，二者均不得作为当前门输入。
+
+API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：普通 `EntryAbility` 仍被 `10106102` 阻塞，NetBird 官方 Go 基线制品的 loader initial-exec TLS 路径失败，VPN Extension 授权、TUN 配置、真实 `protect` 绕行和双向数据泵等 VPN runtime 尚未验证。既有 C-only 正面可以作为后续 E 项输入，但不关闭总门、不退出任何正式 R 阶段，也不授权真机执行。
 
 ## T0 共识记录
 
@@ -42,9 +48,11 @@
 - 不得为维持原路线而忽略反证，也不得因轻微实现差异频繁重排全局路线图。
 - 调整后须更新阶段依赖摘要、版本映射和完成定义，确保本文仍然自洽。
 
-### 2026-07-16 研究期执行调整
+### 2026-07-17 人类投入顺序决定
 
-因用户当前无法提供可连接真机，允许在 R0 未退出期间提前开展 R1 ABI 预探针和 Emulator HAP smoke，结果只作为研究证据。该调整不构成 R1 退出，不改变 R0 的未退出状态，不改变 R2 的 arm64 具名真机退出要求，也不改变 R3 及以后阶段、支持声明和发布声明的真机证据门；完整边界以 [R0 任务章程](r0-charter.md)为准。
+项目投入顺序改为先关闭 API 24 x86_64 phone Emulator 总门：所有在该 Emulator 上客观可执行的项目必须先完成并通过，E0-E8 聚合总门未通过时禁止任何真机执行。该禁止是真机资源的投入顺序，不是 arm64、具名真机或华为商用 HarmonyOS 的负面技术结论；Emulator 的 PASS 与 FAIL 均不得外推到 arm64 或真机。
+
+arm64 ABI，以及依赖真实硬件、设备型号、蜂窝/Wi-Fi 物理切换、硬件密钥、能耗、渠道签名/重签/审核/最终制品和长时间稳定性的项目，若在 Emulator 上客观不能执行，则不属于 Emulator 总门，登记为总门通过后的真机专属项；这种归类不得用于提前真机。R0、R1、R2 仍保持未退出，完整边界以 [R0 任务章程](r0-charter.md)为准。
 
 ### ADJ-20260717-0001：Go 跨语言替代路线 T0 一致结论
 
@@ -75,13 +83,29 @@
 - **D9 预定门**：在记录的 T0 和人工批准下，Tier2 限 `16h/2d`、最多两个不可变输入和两次迭代。迭代1只允许直接重建干净 PS4 `5f5911fabb3af7b5662ebc17ff7fa4f881df903a`，不改 Go 源码；候选必须先以 x86_64 c-shared 最终 ELF 的 `TLSDESC`、无 `TPOFF`/`STATIC_TLS` 通过身份门，再在 API 24 x86_64 TestRunner 中十个不同且退出的 PID 上完成 late `dlopen`、加载前/后 C 线程 `dlsym`、`Hello=42`、goroutine/channel/timer/allocation 和 loopback `net.Dial`，每次 `ResultCode 0`、无 crash/hang。迭代2只允许把原始 PS4 binary diff 对官方 Go 1.25.12 执行一次机械 `git apply --3way`；任一冲突、缺失路径或需要语义解决即为预定 `STOP: high-maintenance`，禁止第三次迭代。
 - **D9 事后结果**：原始第一次全量 app buffer 未在停机前持久化，故不作为证据。`EV-R1-EMU24-20260717-0010` 的同制品可复算重放已用同一 APP/TEST/member 哈希完成上述十次运行：十个新 PID 的框架结果均为 0，完整无筛选 app buffer 保留了十条 suite PASS、十条 pre PASS 和十条 post PASS，并在停机前记录 fault/crash 清单及进程退出。迭代2随后在五个文件冲突和缺少 `runtime/cgo/gcc_unix.c` 时达到预定 high-maintenance STOP；没有语义解决、官方 Go 构建或 target run。补丁数仍为 0，CL696635 仍为 `NEW`、未发布，R0/R1/R2 不退出。
 
+### ADJ-20260717-0003：API 24 x86_64 phone Emulator 投入总门
+
+E0-E8 是任何真机执行前必须串行关闭的投入总门；每一项都必须形成 `record_status: reviewed-pass`、`verdict: pass` 的记录，并与该次聚合声明的目标元组、代码 SHA、上游 SHA 及所有输入/被测制品 SHA-256 一致，任一记录缺失、判定不符或哈希不一致都使 E8 保持 `CLOSED`。
+
+- **E0 普通应用**：普通第三方 phone 应用完成构建、安装、普通 `EntryAbility` 启动、可观察运行、停止、卸载和清理；`10106102` 未解决时本项失败。
+- **E1 ArkTS/native/fd ownership**：验证 ArkTS 与 native 双向调用、异步线程回调，以及 fd 的创建、复制、移交、关闭、重复关闭防护和异常清理所有权；还必须使用最新正式 NetBird release 声明的 Go/toolchain 输入验证官方 Go 制品可加载并运行该边界，C-only 结果只能作为子证据。
+- **E2 C 网络**：以不依赖 Go 的 C native 路径验证 TCP/UDP、DNS、loopback 与外部测试端点的可判定网络收发和错误传播。
+- **E3 VPN Extension 授权**：普通第三方应用通过公开 VPN Extension 路径验证授权、拒绝、撤销和冲突状态，不使用 system/debug/enterprise 绕过。
+- **E4 `setUp`/TUN 配置**：实际调用 `setUp` 建立虚拟接口并核验 fd、地址、路由、DNS、MTU、IPv4 及声明范围内 IPv6 的配置与清理。
+- **E5 `protect` 真实绕行**：对真实外层 TCP/UDP socket 在正确时点调用 `protect`，以可观察流量证明绕过隧道而非仅验证 API 返回值。
+- **E6 C native 双向泵**：用纯 C native 数据泵在 TUN 与真实业务端点之间传输双向流量，验证背压、部分读写、fd 关闭和异常清理。
+- **E7 lifecycle/故障短循环**：在 Emulator 的可靠时间窗内执行有界短循环，覆盖重复启停、撤权、断网、进程退出和故障清理；25 分钟以上 soak、能耗和硬件相关长稳不列为本总门必过项。
+- **E8 聚合**：逐项核验 E0-E7 的 `reviewed-pass`、`verdict: pass`、目标元组和哈希一致性，并确认最新正式 NetBird 声明基线的官方 Go loader/runtime 已通过后，才可把总门置为 `OPEN`；C-only 工作可以先行积累 E1、E2、E6 的局部证据，但不能独立满足 E1、跳过前置依赖、单独打开 E8 或退出正式 R 阶段。
+
 ## 实施原则
 
+- **投入总门优先**：所有 API 24 x86_64 phone Emulator 上客观可执行项先按 E0-E8 完成；E8 未通过时禁止任何真机执行。
 - **单一主执行者**：任何时点只有一个主执行者负责当前首目标实现流、集成决策、证据归档和阶段退出判断。
 - **串行风险门**：首目标的 `R0` 至 `R8` 按顺序推进。前一阶段未满足退出标准时，不以日历进度替代证据进入下一阶段。
 - **受控并行**：许可证、威胁模型、目标设备与渠道调查、测试设计和构建自动化等横切研究可以提前，但不得形成竞争实现流，也不得绕过当前风险门合并产品实现。
 - **支持声明有界**：每项支持声明必须同时绑定发行版、具名设备、完整系统版本、架构和分发渠道；缺少任一维度时不得扩展为平台级支持。
-- **真机作为产品证据**：具名量产设备上的最终渠道制品是 VPN、生命周期、性能、能耗、稳定性和发布支持的产品证据。Emulator 仅用于短时 smoke。
+- **真机作为后续产品证据**：E8 通过后，具名量产设备上的最终渠道制品才用于 arm64、硬件、渠道、能耗、长稳和发布支持证据；禁止真机是投入顺序，不是 arm64 或真机负面结论。
+- **双向不外推**：API 24 x86_64 phone Emulator 的 PASS 与 FAIL 都只覆盖该目标元组，不外推 arm64、具名真机或华为商用 HarmonyOS。
 - **API 主张待验证**：未经目标 SDK 声明与头文件、最小样例编译、项目代码和具名真机共同证明的 API 或桥接主张，只作为待验证假设。
 - **失败范围明确**：失败结论只覆盖其证据所绑定的目标、版本、设备、架构、渠道和实现路径，不无依据推广到其他目标。
 
@@ -144,12 +168,12 @@
 
 - 针对目标 ABI/libc 执行 Go 工具链、关键 syscall、链接方式和固定依赖子集的最小预探针，保留成功与失败日志及可复现命令。
 - 构建短生命周期测试 HAP，验证 CLI 构建、debug 签名、安装、Ability 启动、普通 native 库加载、日志采集和卸载。
-- Emulator 只执行短时构建安装 smoke；至少一台 R0 具名真机须可通过 HDC 执行安装、启动、日志和卸载闭环。
+- 在 API 24 x86_64 phone Emulator 上执行并关闭 E0-E8 中全部客观可执行项；E8 未通过时不得执行具名真机 HDC 操作，Emulator 客观不能执行的 arm64、硬件、渠道、能耗与长稳项目留作后续真机专属证据。
 - 将预探针失败分为工具链、ABI/libc、syscall、依赖、签名、安装或设备连接问题。
 
 ### R1 退出标准
 
-两工作日内形成可重复的预探针结论，并在具名真机完成最小 HAP 闭环。正面预探针只允许进入 `R2`，不构成 NetBird、VPN 或产品可行性证据。
+E8 已先通过并允许真机投入，两工作日内形成可重复的预探针结论，随后在具名真机完成最小 HAP 闭环。正面预探针只允许进入 `R2`，不构成 NetBird、VPN 或产品可行性证据。
 
 ### R1 依赖
 
@@ -400,7 +424,9 @@ RC 和渠道最终制品在支持矩阵内的具名真机通过回归，分批�
 主依赖链如下：
 
 ```text
-首目标：R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6 -> R7 -> R8
+投入总门：E0 -> E1 -> E2 -> E3 -> E4 -> E5 -> E6 -> E7 -> E8 OPEN
+真机执行：仅 E8 OPEN 后允许
+首目标正式门：R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6 -> R7 -> R8
 第二目标：首目标 GA + 第二目标启动条件 -> 独立重跑 R0 -> ... -> R8 -> R9 退出
 运维：R0 起准备，随每个目标 GA 进入持续 R10 闭环
 ```

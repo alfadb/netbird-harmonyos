@@ -1,6 +1,6 @@
 # 证据与脱敏 Schema
 
-最后核验：2026-07-16
+最后核验：2026-07-17
 
 本文定义 `netbird-harmonyos` 各证据门共同使用的记录、脱敏、审查和保留基线。该 schema 已建立，但当前没有因此自动获得任何阶段通过结论；每条结论仍须绑定具体证据。
 
@@ -19,11 +19,11 @@
 
 ## 证据 ID
 
-证据 ID 格式为 `EV-R<阶段>-<目标代码>-<YYYYMMDD>-<四位序号>`，例如格式样例 `EV-R3-HMOS24-20260716-0001`。样例只说明格式，不代表存在对应证据或阶段已通过。
+证据 ID 格式为 `EV-<门>-<目标代码>-<YYYYMMDD>-<四位序号>`；正式路线门示例为 `EV-R3-HMOS24-20260716-0001`，Emulator 投入门示例为 `EV-E0-EMU24-20260717-0001`。样例只说明格式，不代表存在对应证据或门已通过；既有 `EV-R1-EMU24-*` 历史 ID 保持不变，不重编号。
 
-- `<阶段>` 使用 `0` 至 `10`；跨阶段记录使用产生该证据的最早阶段，并在“关联阶段”字段补充其他阶段。
+- `<门>` 使用 `R0` 至 `R10` 或 `E0` 至 `E8`；跨门记录使用产生该证据的最早门，并在“关联阶段/门”字段补充其他门。
 - `<目标代码>` 使用经 R0 登记的短代码；研究期 Emulator 记录使用 `EMU24`，不得使用可能暗示真机支持的代码。
-- 日期按证据开始时间所在时区转换为 `YYYYMMDD`；序号在同一阶段、目标代码和日期内唯一且递增。
+- 日期按证据开始时间所在时区转换为 `YYYYMMDD`；序号在同一门、目标代码和日期内唯一且递增。
 - 证据 ID 一经分配不得复用或改写；作废、替代和重跑通过状态与关联 ID 表达。
 
 ## 必填字段
@@ -35,7 +35,7 @@
 | 证据 ID | 符合固定格式且全局可追踪 |
 | 信息状态 | 当前实测、官方确认、方案建议或尚未验证之一 |
 | 记录状态 | 使用本文定义的状态枚举 |
-| 阶段 | 产生证据的 R 阶段及所有关联阶段 |
+| 阶段/门 | 产生证据的 R 阶段或 E 投入门及所有关联阶段/门 |
 | 目标元组 | 发行版、具名设备、完整系统版本、架构、SDK/API/SysCap 和渠道；研究证据须明确 Emulator 或宿主范围 |
 | 代码 SHA | 本项目被测代码的完整 Git commit SHA；未提交研究代码须记录不可变归档哈希和原因 |
 | 上游 SHA | NetBird 及直接参与被测路径的上游源码完整 commit SHA；纯工具链测试可填写 `N/A` 并说明 |
@@ -62,7 +62,17 @@
 | `invalidated` | 发现污染、范围错误、哈希不一致、秘密泄露或方法缺陷，记录保留但不得继续引用 |
 | `superseded` | 已由新证据替代，旧记录继续保留并双向引用；不等同于旧结果被删除 |
 
-只有 `reviewed-pass` 可用于阶段退出；研究期 Emulator 证据即使为 `reviewed-pass`，也只表示其研究预期通过，不得替代路线图要求的真机证据。
+只有 `reviewed-pass` 可用于阶段退出。E0-E8 还必须同时满足 `verdict: pass`；`reviewed-pass` 只说明记录经审查合格，不能把 `blocked`、预期失败对照或范围外子项改写为功能通过。历史研究期 Emulator 证据即使为 `reviewed-pass`，也不会自动取得 E 门资格，更不得替代后续路线图要求的真机证据。
+
+## Emulator 投入总门证据纪律
+
+API 24 x86_64 phone Emulator 的 PASS 与 FAIL 均只适用于记录的目标元组、进程模型、输入和制品，不得外推 arm64、具名真机或华为商用 HarmonyOS；“E8 未通过时禁止真机”只规定投入顺序，不是 arm64 或真机的负面技术判定。
+
+E0-E7 每项必须有独立记录，且 `record_status: reviewed-pass`、`verdict: pass` 同时成立。E8 聚合记录必须重核 E0-E7 的目标元组、代码 SHA、相关上游 SHA、APP/TEST HAP、native/Go 库、配置和其他被测输入 SHA-256，并确认最新正式 NetBird 声明基线的官方 Go loader/runtime 已通过；缺失哈希、目标元组漂移、APP/TEST member 不一致、引用被替代/失效记录或任何非 pass verdict 都使 E8 保持 `CLOSED`。
+
+arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，应在记录中标为 `N/A` 并给出客观原因，列入 E8 `OPEN` 后的真机专属待办；这些 `N/A` 不阻塞 E8，但不得作为提前真机或形成支持结论的依据。E7 只要求 Emulator 可靠窗口内的 lifecycle/故障短循环，不把 25 分钟以上 soak 列为 Emulator 总门必过项。
+
+C-only 证据可以先行并在范围匹配时作为 E1、E2 或 E6 的子证据，但不能独立满足含官方 Go loader/runtime 的 E1，也不能据此跳过 E0/E3-E5/E7、打开 E8 或退出正式 R 阶段。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保留为历史研究证据；PS4 未发布且不是当前门输入，该记录不合格用于当前 E0-E8，不能满足 NetBird 官方 Go loader 或 VPN runtime 门。
 
 ## 脱敏规则
 
@@ -77,11 +87,11 @@
 ## 单条证据模板
 
 ```yaml
-evidence_id: EV-R<stage>-<target>-<YYYYMMDD>-<sequence>
+evidence_id: EV-<R-stage-or-E-gate>-<target>-<YYYYMMDD>-<sequence>
 information_status: current-measured | official-confirmed | proposal | unverified
 record_status: draft | collected | reviewed-pass | reviewed-fail | blocked | invalidated | superseded
-stage: R<stage>
-related_stages: []
+stage_or_gate: R<stage> | E<gate>
+related_stages_or_gates: []
 target_tuple:
   distribution: <value>
   device: <value-or-emulator>
@@ -162,7 +172,7 @@ review_record: <id-or-pending>
 | --- | --- |
 | 阶段门退出证据与每个候选/发布制品的 SBOM | 对应目标 EOL 后 2 年 |
 | 原始日志、抓包和原始性能数据 | 至少 90 天；若被事故、漏洞、审计或未关闭争议引用，则保留至事项关闭且满足更长期限 |
-| Emulator 原始日志 | 30 天；若升级为阶段问题、事故或动态调整触发证据，则适用原始日志至少 90 天规则 |
+| Emulator 原始日志 | 30 天；若被 E0-E8 聚合、升级为阶段问题、事故或动态调整触发证据，则适用原始日志至少 90 天规则 |
 | 脱敏后的证据结果、审查记录、支持矩阵和动态调整记录 | 项目生命周期 |
 | 秘密 | 不进入证据体系，不定义证据保留期 |
 

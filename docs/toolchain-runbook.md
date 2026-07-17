@@ -1,11 +1,8 @@
 # HarmonyOS 工具链运行手册
 
-最后核验：2026-07-16
+最后核验：2026-07-17
 
-本文是当前 Pod 中 HarmonyOS 稳定构建工具链和 Beta Linux Emulator 的日常运行手册，适用于 Pod 重建、新终端恢复、Emulator 启停、HDC 验收、故障取证和版本切换。
-工具制品来源、许可边界、文件大小和 SHA-256 详见
-[HarmonyOS CLI 登录、工具链与依赖下载](toolchain-bootstrap.md)；宿主、持久化和实测能力详见
-[开发环境与 HarmonyOS Linux Emulator](development-environment.md)。本文不重复完整下载或许可研究。
+本文是当前 Pod 中 HarmonyOS 稳定构建工具链和 Beta Linux Emulator 的日常运行手册，适用于 Pod 重建、新终端恢复、Emulator 启停、HDC 验收、故障取证和版本切换。工具制品来源、许可边界、文件大小和 SHA-256 详见[HarmonyOS CLI 登录、工具链与依赖下载](toolchain-bootstrap.md)；宿主、持久化和实测能力详见[开发环境与 HarmonyOS Linux Emulator](development-environment.md)。本文不重复完整下载或许可研究。
 
 ## 固定矩阵
 
@@ -35,7 +32,7 @@
 "$HOME/.init/harmonyos-check.sh"
 ```
 
-2. 验证登录式 zsh 自动加载和 Node 隔离：
+1. 验证登录式 zsh 自动加载和 Node 隔离：
 
 ```bash
 zsh -lic 'node --version; printf "%s\n" "$HARMONYOS_HOME" "$HARMONYOS_EMULATOR_HOME"'
@@ -45,7 +42,7 @@ zsh -lic 'command -v node; command -v hvigorw; command -v ohpm; command -v emula
 
 预期 Node 为 `v24.15.0`，第二条无输出；构建 wrapper 解析到稳定 `current/bin`，连接 helper 解析到 `$HOME/harmonyos/bin`。
 
-3. 核对软链接和持久目录：
+1. 核对软链接和持久目录：
 
 ```bash
 readlink -f "$HOME/harmonyos/command-line-tools/current"
@@ -57,7 +54,7 @@ test -f "$HOME/harmonyos/emulator-instances/netbird_api24_phone.ini"
 两个链接应分别落到 `6.1.1.290` 和 `26.0.0.461`。
 HOME 中的版本、镜像、实例和日志可持久化；根文件系统是易失 overlay。
 
-4. 核对 KVM 文件描述符可打开：
+1. 核对 KVM 文件描述符可打开：
 
 ```bash
 ls -l /dev/kvm
@@ -66,7 +63,7 @@ exec 9<>/dev/kvm && printf 'KVM fd opened\n' && exec 9>&-
 
 仅看到 `/dev/kvm` 路径不够；当前 worker 必须实际成功打开读写 fd。
 
-5. 必要时复核动态库，不修改系统：
+1. 必要时复核动态库，不修改系统：
 
 ```bash
 source "$HOME/harmonyos/env.sh"
@@ -89,9 +86,9 @@ tmux new-session -d -s harmonyos-emulator-run \
   "HDC_PORT=10000 $HOME/harmonyos/bin/emulator-start"
 ```
 
-2. 用 `tmux capture-pane -pt harmonyos-emulator-run` 查看启动输出；不要立即反复重启。
+1. 用 `tmux capture-pane -pt harmonyos-emulator-run` 查看启动输出；不要立即反复重启。
 
-3. 使用 Beta Emulator HDC helper 显式连接 `127.0.0.1:10000`：
+1. 使用 Beta Emulator HDC helper 显式连接 `127.0.0.1:10000`：
 
 ```bash
 HDC_PORT=10000 "$HOME/harmonyos/bin/emulator-connect"
@@ -99,7 +96,7 @@ HDC_PORT=10000 "$HOME/harmonyos/bin/emulator-connect"
 
 连接 helper 固定使用 Beta HDC 3.2.0e；稳定 HDC 3.2.0d 只服务稳定 SDK，不得用于 Beta Emulator。
 
-4. 执行最小 shell smoke：
+1. 执行最小 shell smoke：
 
 ```bash
 source "$HOME/harmonyos/env.sh"
@@ -125,7 +122,7 @@ TARGET=127.0.0.1:10000
 - `const.product.os.dist.name` 返回 `HarmonyOS`。
 
 `boot.completed` 和 target `Connected` 都不是充分条件；TCP、heartbeat 或状态行仍在时，shell RPC 可能已经退化。
-时长验收必须超过已观察到的约 25 分钟窗口，建议持续 30-40 分钟周期探测。
+超过已观察到的约 25 分钟窗口的 30-40 分钟周期探测只用于 HDC 退化诊断和工具链维护，不是 E7 或 API 24 x86_64 phone Emulator 总门必过项；E7 使用可靠窗口内的有界 lifecycle/故障短循环。
 例如每两分钟执行一次，共约 38 分钟覆盖首末样本：
 
 ```bash
