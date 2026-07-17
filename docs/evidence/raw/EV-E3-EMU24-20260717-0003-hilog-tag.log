@@ -1,0 +1,35 @@
+===== a-allow-attempt1 TAG HILOG =====
+CST 2026-07-17 20:04:51.953  3148  3148 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:04:52.201  3148  3148 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:04:52.289  3148  3148 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:04:55.408  3148  3148 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpna|requestId=cn.alfadb.netbird.e3vpna-1784289895408-1
+===== a-allow-attempt2 TAG HILOG =====
+CST 2026-07-17 20:05:13.314  3322  3322 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:13.415  3322  3322 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:13.468  3322  3322 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:16.629  3322  3322 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpna|requestId=cn.alfadb.netbird.e3vpna-1784289916628-1
+===== a-allow-attempt3 TAG HILOG =====
+CST 2026-07-17 20:05:33.806  3605  3605 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:33.910  3605  3605 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:33.975  3605  3605 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:05:37.187  3605  3605 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpna|requestId=cn.alfadb.netbird.e3vpna-1784289937186-1
+===== b-deny TAG HILOG =====
+CST 2026-07-17 20:05:54.228  3857  3857 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:05:54.478  3857  3857 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:05:54.528  3857  3857 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:05:58.266  3857  3857 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpnb|requestId=cn.alfadb.netbird.e3vpnb-1784289958266-1
+===== stop-without-active TAG HILOG =====
+CST 2026-07-17 20:06:15.238  4307  4307 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:15.562  4307  4307 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:15.621  4307  4307 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:18.493  4307  4307 I A02900/E3VpnGate: UI_STOP|bundle=cn.alfadb.netbird.e3vpna|requestId=cn.alfadb.netbird.e3vpna-stop-1784289978492-1
+===== conflict-no-active TAG HILOG =====
+CST 2026-07-17 20:06:29.982  4826  4826 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:30.332  4826  4826 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:30.380  4826  4826 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpna
+CST 2026-07-17 20:06:33.249  4826  4826 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpna|requestId=cn.alfadb.netbird.e3vpna-1784289993248-1
+CST 2026-07-17 20:06:38.801  5206  5206 I A02900/E3VpnGate: ENTRY_ONCREATE|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:06:39.174  5206  5206 I A02900/E3VpnGate: ENTRY_FOREGROUND|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:06:39.229  5206  5206 I A02900/E3VpnGate: ENTRY_PAGE_READY|bundle=cn.alfadb.netbird.e3vpnb
+CST 2026-07-17 20:06:42.008  5206  5206 I A02900/E3VpnGate: UI_START|bundle=cn.alfadb.netbird.e3vpnb|requestId=cn.alfadb.netbird.e3vpnb-1784290002007-1
+===== settings-main TAG HILOG =====

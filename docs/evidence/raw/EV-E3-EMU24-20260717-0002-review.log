@@ -1,0 +1,9 @@
+EVIDENCE_ID=EV-E3-EMU24-20260717-0002
+REVIEWED_AT=2026-07-17T20:00:00+08:00
+RECORD_STATUS=invalidated
+VERDICT=fail
+REASON=The runner clicked the non-clickable desktop Settings text label rather than the clickable Settings icon container. The files named settings-home and settings-main have identical layout and screenshot SHA-256 values, and the purported settings-main layout still belongs only to com.ohos.sceneboard. Therefore the claim that the Settings main page lacked a VPN management entry was not measured. The raw record remains unchanged and cannot be used for E3. The next attempt is EV-E3-EMU24-20260717-0003 with a clickable-container selector plus bundle/title/layout-change assertions.
+HOME_LAYOUT_SHA256=bcd02dd46e9bc24c232a416bb0964977dbcf1b3b0b1e04291fd04c7efd269d93
+PURPORTED_SETTINGS_LAYOUT_SHA256=bcd02dd46e9bc24c232a416bb0964977dbcf1b3b0b1e04291fd04c7efd269d93
+HOME_SCREENSHOT_SHA256=be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487
+PURPORTED_SETTINGS_SCREENSHOT_SHA256=be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487

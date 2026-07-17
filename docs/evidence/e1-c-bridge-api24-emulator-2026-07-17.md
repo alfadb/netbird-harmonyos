@@ -43,7 +43,7 @@ reviewed_at: 2026-07-17T18:06:00+08:00
 review_record: Independent review verified the recorded hashes and measured HAP identity, TSFN warm-up and callback ordering, pthread join/identity, guarded buffer assertions, fd ownership/dup/write/read/close/EBADF checks, three distinct PIDs, and cleanup; 0 blocker/major findings and 5 minor findings.
 ```
 
-本记录是 E1 的 C-only 子证据，现已取得 `reviewed-pass`。它没有运行最新正式 NetBird release 声明的官方 Go 1.25.12 制品；该官方制品的已知 initial-exec TLS loader 路径仍失败。因此 E1 overall Go blocked，E8 保持 `CLOSED`，真机执行仍被禁止。后续 E2 C 网络记录 `EV-E2-EMU24-20260717-0002` 已为 `reviewed-pass/pass` 并关闭，下一门为 E3；R0/R1/R2 均未退出。
+本记录是 E1 的 C-only 子证据，现已取得 `reviewed-pass`。它没有运行最新正式 NetBird release 声明的官方 Go 1.25.12 制品；该官方制品的已知 initial-exec TLS loader 路径仍失败。因此 E1 overall Go blocked，E8 保持 `CLOSED`，真机执行仍被禁止。后续 E2 C 网络记录 `EV-E2-EMU24-20260717-0002` 已为 `reviewed-pass/pass` 并关闭；E3 的 `0003`/`0004` 均为 `reviewed-pass/blocked`，E3 不关闭；E4-E7 为 dependency blocked、不开始。R0/R1/R2 均未退出。
 
 ## 审查附录
 

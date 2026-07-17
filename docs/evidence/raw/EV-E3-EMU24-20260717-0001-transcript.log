@@ -1,0 +1,30 @@
+EVIDENCE_ID=EV-E3-EMU24-20260717-0001
+RECORD_STATUS=blocked
+VERDICT=blocked
+STARTED_AT=2026-07-17T19:40:26+08:00
+ENDED_AT=2026-07-17T19:44:42+08:00
+SCOPE=exploratory first ordinary UI start request; no physical device; no Go/NetBird/PS4; no VpnConnection; no permission grant or policy bypass
+TARGET=HarmonyOS 6.1.1(24) API 24 x86_64 phone Emulator, software 6.1.0.125
+BUNDLE=cn.alfadb.netbird.e3vpna
+APP_PID=3343
+COMMANDS:
+  hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+  hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+  hdc -t 127.0.0.1:10000 shell bm install -p /data/local/tmp/e3-explore/a
+  hdc -t 127.0.0.1:10000 shell aa start -a EntryAbility -b cn.alfadb.netbird.e3vpna -m entry
+  hdc -t 127.0.0.1:10000 shell uitest uiInput click 370 1720
+  hdc -t 127.0.0.1:10000 shell uitest dumpLayout -p /data/local/tmp/e3-auth-a.json -i
+  hdc -t 127.0.0.1:10000 shell uitest screenCap -p /data/local/tmp/e3-auth-a.png
+OBSERVED:
+  ENTRY_ONCREATE and ENTRY_PAGE_READY were emitted by PID 3343.
+  The normal ArkUI button click emitted one UI_START at 2026-07-17 19:43:12.314 CST.
+  NetworkVpnManager resolved the app label, then the system attempted com.huawei.hmos.vpndialog/VpnServiceExtAbility.
+  BMS and AMS reported that com.huawei.hmos.vpndialog does not exist and ExplicitQueryExtension returned size 0.
+  No authorization window was present in the layout or screenshot.
+  START_PROMISE did not settle in the observation window; VPN_ONCREATE count was zero.
+  No allow or deny input was possible, so this attempt cannot satisfy any E3 scenario.
+CLEANUP=the app was force-stopped only as failed-attempt cleanup; this was not treated as VPN revocation
+HAP_SHA256=95ba2ee39d441a8c6dd9e97e1780b420fe5a4286884850b1ba095ade33a65e9b
+LAYOUT_SHA256=5a7fd47b67c98260ab048a9072a431f68d6da76db406384e31f901d1f6a04970
+SCREENSHOT_SHA256=d599f0b001b36f21cbc442eb98d6877ca2f076b26f512def889ec73174ccafe0
+FULL_HILOG_SHA256=30073ff11d46d8b7503cfa4b1ba583e1563c4f349fee9467693aa980cd56490a

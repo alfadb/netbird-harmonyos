@@ -1,0 +1,24 @@
+audio: Could not init `pa' audio driver
+audio: warning: Using timer based audio emulation
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.hle [bit 4]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rtm [bit 11]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.rdseed [bit 18]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.adx [bit 19]
+Emulator: warning: host doesn't support requested feature: CPUID.07H:EBX.smap [bit 20]
+Resetting rate control (331971 samples)
+Resetting rate control (67237 samples)

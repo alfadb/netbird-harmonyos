@@ -1,0 +1,18 @@
+===== /system =====
+ls: /system: Permission denied
+find: bad arg '-ls'
+===== /system/app =====
+ls: /system/app: Permission denied
+find: bad arg '-ls'
+===== /system/priv-app =====
+ls: /system/priv-app: No such file or directory
+find: bad arg '-ls'
+===== /system/etc =====
+ls: /system/etc: Permission denied
+find: bad arg '-ls'
+===== /system/haps =====
+ls: /system/haps: No such file or directory
+find: bad arg '-ls'
+===== /system/app/ohos =====
+ls: /system/app/ohos: No such file or directory
+find: bad arg '-ls'

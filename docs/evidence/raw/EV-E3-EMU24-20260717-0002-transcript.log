@@ -1,0 +1,1439 @@
+EVIDENCE_ID=EV-E3-EMU24-20260717-0002
+STARTED_AT=2026-07-17T19:55:17+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds_and_guest_HiLog
+TIMEZONE=CST+08:00
+GIT_HEAD=09fd047cf70f3ecbbb7941f3a2560b025574f799
+RECORD_SCOPE=E3_public_ordinary_third_party_VPN_Extension_authorization_gate
+TARGET_TUPLE=HarmonyOS_6.1.1(24),software_6.1.0.125,phone_Emulator,x86_64,SDK_API24,unsigned_debug_normal_apps
+PHYSICAL_DEVICE_USED=false
+GO_NETBIRD_PS4_TOUCHED=false
+MANAGE_VPN_USED=false
+SYSTEM_DEBUG_ENTERPRISE_BYPASS_USED=false
+PERMISSION_GRANT_COMMAND_USED=false
+VPN_CONNECTION_API_USED=false
+API24_VPN_OBSERVER_CLAIMED=false
+> hvigor [32mFinished :entry:clean... after 20 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 131 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 7 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 6 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 3 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 12 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 15 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 64 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 4 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 9 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 135 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 3 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 10 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 978 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 485 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 7 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 962 ms [39m
+$ install -m 0644 /home/worker/work/base/netbird-harmonyos/spikes/e3-vpn-extension-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-a-hap.bin
+CLEAN_BUILD_A=pass
+> hvigor [32mFinished :entry:clean... after 20 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 51 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 6 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 3 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 11 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 15 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 65 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 4 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 141 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 3 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 902 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 455 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 7 ms [39m
+> hvigor [33mWARN: No signingConfig found for product vpnB[39m
+> hvigor [32mFinished :entry:default@SignHap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 724 ms [39m
+$ install -m 0644 /home/worker/work/base/netbird-harmonyos/spikes/e3-vpn-extension-hap/entry/build/vpnB/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-b-hap.bin
+CLEAN_BUILD_B=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-a-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-b-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-build-a.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-build-b.log
+c6251b430a60cccfd74e9ff6902608499b43111eeeb9cc6c2f0ff33677b98ad3  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-a-hap.bin
+4c59cd15158473e52ce7af72949d7dace62d4566f544b1aede27d0be75d8d948  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-b-hap.bin
+1c753b2d99b9afcaf04b8672507aef4813b46b808414a0adfa1d5414eeaa8a2c  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-build-a.log
+d274ca7ad805c7157b5f615a55ffee9ff7bda93b1143b419b29d84014422dbdf  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-build-b.log
+$ unzip -Z1 /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-a-hap.bin
+module.json
+resources.index
+resources/base/media/app_icon.svg
+resources/base/profile/main_pages.json
+ets/modules.abc
+ets/sourceMaps.map
+pack.info
+pkgSdkInfo.json
+PACKAGED_MODULE_JSON={"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":60101024,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"0.0.1","versionCode":1,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":60101024,"vendor":"alfadb","bundleName":"cn.alfadb.netbird.e3vpna","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"virtualMachine":"ark24.0.0.0","mainElement":"EntryAbility","installationFree":false,"deliveryWithInstall":true,"requestPermissions":[{"name":"ohos.permission.INTERNET"}],"description":"$string:module_description","extensionAbilities":[{"exported":false,"srcEntry":"./ets/vpnextensionability/E3VpnExtensionAbility.ets","name":"E3VpnExtensionAbility","type":"vpn"}],"compileMode":"esmodule","type":"entry","dependencies":[],"abilities":[{"exported":true,"iconId":16777217,"startWindowIconId":16777217,"icon":"$media:app_icon","startWindowIcon":"$media:app_icon","startWindowBackgroundId":16777221,"description":"$string:ability_description","label":"$string:ability_name","skills":[{"entities":["entity.system.home"],"actions":["ohos.want.action.home"]}],"srcEntry":"./ets/entryability/EntryAbility.ets","descriptionId":16777218,"labelId":16777219,"startWindowBackground":"$color:start_window_background","name":"EntryAbility"}],"deviceTypes":["phone"],"pages":"$profile:main_pages","descriptionId":16777220,"name":"entry","packageName":"entry"}}
+$ unzip -Z1 /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-application-b-hap.bin
+module.json
+resources.index
+resources/base/profile/main_pages.json
+resources/base/media/app_icon.svg
+ets/sourceMaps.map
+ets/modules.abc
+pack.info
+pkgSdkInfo.json
+PACKAGED_MODULE_JSON={"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":60101024,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"0.0.1","versionCode":1,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":60101024,"vendor":"alfadb","bundleName":"cn.alfadb.netbird.e3vpnb","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"virtualMachine":"ark24.0.0.0","mainElement":"EntryAbility","installationFree":false,"deliveryWithInstall":true,"requestPermissions":[{"name":"ohos.permission.INTERNET"}],"description":"$string:module_description","extensionAbilities":[{"exported":false,"srcEntry":"./ets/vpnextensionability/E3VpnExtensionAbility.ets","name":"E3VpnExtensionAbility","type":"vpn"}],"compileMode":"esmodule","type":"entry","dependencies":[],"abilities":[{"exported":true,"iconId":16777217,"startWindowIconId":16777217,"icon":"$media:app_icon","startWindowIcon":"$media:app_icon","startWindowBackgroundId":16777221,"description":"$string:ability_description","label":"$string:ability_name","skills":[{"entities":["entity.system.home"],"actions":["ohos.want.action.home"]}],"srcEntry":"./ets/entryability/EntryAbility.ets","descriptionId":16777218,"labelId":16777219,"startWindowBackground":"$color:start_window_background","name":"EntryAbility"}],"deviceTypes":["phone"],"pages":"$profile:main_pages","descriptionId":16777220,"name":"entry","packageName":"entry"}}
+PACKAGED_SCOPE_AUDIT=pass twoNormalBundlesVpnTypeInternetOnlyNoNativeMembers
+FORBIDDEN_API_SOURCE_SCAN=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-source-manifest.txt /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-source.tar
+f3e94f430dc78b9eef9bb6c0fa78fa260c6832bdbe1f4be54a9d74444dd76c72  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-source-manifest.txt
+a9dbd62eddc5729b198b56c3de9880944bda166ea0be92e8ead41e6da921badc  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-source.tar
+SOURCE_INPUT_COUNT=18
+TOOLCHAIN_HOST=Linux\ host-dev-alfadb-full\ 7.0.14-4-pve\ #1\ SMP\ PREEMPT_DYNAMIC\ PMX\ 7.0.14-4\ \(2026-07-07T07:27Z\)\ x86_64\ GNU/Linux
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw --version
+6.24.3
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+$ node --version
+v24.15.0
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm --version
+6.1.2.285
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+QEMU_CURRENT_BOOT_START_LINE=33306
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=1204952
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=1 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=2 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=3 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=4 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=5 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=6 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECTIVITY attempt=7 shell=e3-connect-7 distribution=HarmonyOS\ 
+BOOT_READINESS attempt=1 qemu='' shell=e3-ready-1
+BOOT_READINESS attempt=2 qemu='' shell=e3-ready-2
+BOOT_READINESS attempt=3 qemu='' shell=e3-ready-3
+BOOT_READINESS attempt=4 qemu='' shell=e3-ready-4
+BOOT_READINESS attempt=5 qemu='' shell=e3-ready-5
+BOOT_READINESS attempt=6 qemu='' shell=e3-ready-6
+BOOT_READINESS attempt=7 qemu='' shell=e3-ready-7
+BOOT_READINESS attempt=8 qemu='' shell=e3-ready-8
+BOOT_READINESS attempt=9 qemu='' shell=e3-ready-9
+BOOT_READINESS attempt=10 qemu='' shell=e3-ready-10
+BOOT_READINESS attempt=11 qemu='' shell=e3-ready-11
+BOOT_READINESS attempt=12 qemu='' shell=e3-ready-12
+BOOT_READINESS attempt=13 qemu='' shell=e3-ready-13
+BOOT_READINESS attempt=14 qemu='' shell=e3-ready-14
+BOOT_READINESS attempt=15 qemu='' shell=e3-ready-15
+BOOT_READINESS attempt=16 qemu='' shell=e3-ready-16
+BOOT_READINESS attempt=17 qemu='' shell=e3-ready-17
+BOOT_READINESS attempt=18 qemu='' shell=e3-ready-18
+BOOT_READINESS attempt=19 qemu=2026-07-17\ 19:56:36.520139955418404544\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=e3-ready-19
+READINESS_VERDICT=pass
+PREINSTALL bundle=cn.alfadb.netbird.e3vpna result=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+PREINSTALL bundle=cn.alfadb.netbird.e3vpnb result=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+FileTransfer finish, Size:34574, File count = 1, time:53ms rate:652.34kB/s
+FileTransfer finish, Size:34564, File count = 1, time:49ms rate:705.39kB/s
+INSTALL_A=install\ bundle\ successfully.
+INSTALL_B=install\ bundle\ successfully.
+UNLOCK_SEQUENCE wakeup=WakeupDevice\ is\ called home=No\ Error swipe=No\ Error
+BUNDLE_AUDIT_BEGIN bundle=cn.alfadb.netbird.e3vpna
+cn.alfadb.netbird.e3vpna:
+{
+    "appId": "cn.alfadb.netbird.e3vpna_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+        "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.e3vpna",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.e3vpna",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpna",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777217,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpna",
+            "id": 16777217,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpna",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.e3vpna",
+        "nativeLibraryPath": "",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.e3vpna",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020062,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784288531510,
+    "gid": 20020062,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.e3vpna",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.e3vpna",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry.hap",
+                    "iconId": 16777217,
+                    "iconPath": "$media:app_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:app_icon",
+                    "startWindowIconId": 16777217,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.e3vpna",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [
+                {
+                    "appIdentifierAllowList": [],
+                    "appIndex": 0,
+                    "arkTSMode": "dynamic",
+                    "bundleName": "cn.alfadb.netbird.e3vpna",
+                    "compileMode": 1,
+                    "customProcess": "",
+                    "dataGroupIds": [],
+                    "description": "",
+                    "descriptionId": 0,
+                    "enabled": true,
+                    "extensionProcessMode": -1,
+                    "extensionTypeName": "vpn",
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry.hap",
+                    "icon": "",
+                    "iconId": 0,
+                    "isolationProcess": false,
+                    "label": "",
+                    "labelId": 0,
+                    "metadata": [],
+                    "moduleName": "entry",
+                    "name": "E3VpnExtensionAbility",
+                    "needCreateSandbox": false,
+                    "permissions": [],
+                    "priority": 0,
+                    "process": "cn.alfadb.netbird.e3vpna:vpn",
+                    "readPermission": "",
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry/resources.index",
+                    "skills": [],
+                    "srcEntrance": "./ets/vpnextensionability/E3VpnExtensionAbility.ets",
+                    "type": 502,
+                    "uid": -1,
+                    "uri": "",
+                    "validDataGroupIds": [],
+                    "visible": false,
+                    "writePermission": ""
+                }
+            ],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777217,
+            "iconPath": "$media:app_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.e3vpna",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry"
+    ],
+    "installTime": 1784289399905,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry"
+    ],
+    "moduleNames": [
+        "entry"
+    ],
+    "modulePublicDirs": [
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpna/entry/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.e3vpna",
+    "oldAppIds": [
+        "cn.alfadb.netbird.e3vpna_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020062,
+    "updateTime": 1784289399905,
+    "userInfo": [
+        {
+            "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+            "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+            "bundleName": "cn.alfadb.netbird.e3vpna",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784288531510,
+            "gids": [
+                20020062
+            ],
+            "installTime": 1784289399905,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020062,
+            "updateTime": 1784289399905
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+BUNDLE_AUDIT_END
+BUNDLE_AUDIT_BEGIN bundle=cn.alfadb.netbird.e3vpnb
+cn.alfadb.netbird.e3vpnb:
+{
+    "appId": "cn.alfadb.netbird.e3vpnb_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+        "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.e3vpnb",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.e3vpnb",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpnb",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777217,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpnb",
+            "id": 16777217,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.e3vpnb",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.e3vpnb",
+        "nativeLibraryPath": "",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.e3vpnb",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020063,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784288531959,
+    "gid": 20020063,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.e3vpnb",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.e3vpnb",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry.hap",
+                    "iconId": 16777217,
+                    "iconPath": "$media:app_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:app_icon",
+                    "startWindowIconId": 16777217,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.e3vpnb",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [
+                {
+                    "appIdentifierAllowList": [],
+                    "appIndex": 0,
+                    "arkTSMode": "dynamic",
+                    "bundleName": "cn.alfadb.netbird.e3vpnb",
+                    "compileMode": 1,
+                    "customProcess": "",
+                    "dataGroupIds": [],
+                    "description": "",
+                    "descriptionId": 0,
+                    "enabled": true,
+                    "extensionProcessMode": -1,
+                    "extensionTypeName": "vpn",
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry.hap",
+                    "icon": "",
+                    "iconId": 0,
+                    "isolationProcess": false,
+                    "label": "",
+                    "labelId": 0,
+                    "metadata": [],
+                    "moduleName": "entry",
+                    "name": "E3VpnExtensionAbility",
+                    "needCreateSandbox": false,
+                    "permissions": [],
+                    "priority": 0,
+                    "process": "cn.alfadb.netbird.e3vpnb:vpn",
+                    "readPermission": "",
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry/resources.index",
+                    "skills": [],
+                    "srcEntrance": "./ets/vpnextensionability/E3VpnExtensionAbility.ets",
+                    "type": 502,
+                    "uid": -1,
+                    "uri": "",
+                    "validDataGroupIds": [],
+                    "visible": false,
+                    "writePermission": ""
+                }
+            ],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777217,
+            "iconPath": "$media:app_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.e3vpnb",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry"
+    ],
+    "installTime": 1784289400890,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry"
+    ],
+    "moduleNames": [
+        "entry"
+    ],
+    "modulePublicDirs": [
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.e3vpnb/entry/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.e3vpnb",
+    "oldAppIds": [
+        "cn.alfadb.netbird.e3vpnb_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020063,
+    "updateTime": 1784289400890,
+    "userInfo": [
+        {
+            "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+            "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+            "bundleName": "cn.alfadb.netbird.e3vpnb",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784288531959,
+            "gids": [
+                20020063
+            ],
+            "installTime": 1784289400890,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020063,
+            "updateTime": 1784289400890
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+BUNDLE_AUDIT_END
+INSTALLED_NORMAL_APP_AUDIT=pass
+VPN_DIALOG_BUNDLE_PRECHECK=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+Set log type app buffer size to 16.0M successfully
+Set log type init buffer size to 16.0M successfully
+Set log type core buffer size to 16.0M successfully
+Set log type only_prerelease buffer size to 16.0M successfully
+HILOG_BUFFER_QUERY=$'Log type app buffer size is 16.0M\nLog type init buffer size is 16.0M\nLog type core buffer size is 16.0M\nLog type only_prerelease buffer size is 16.0M'
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpna output=start\ ability\ successfully.
+A_ALLOW_ATTEMPT_1_PID=2934
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt1-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:44ms rate:780.20kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt1-authorization-absent-layout.json
+FileTransfer finish, Size:34353, File count = 1, time:45ms rate:763.40kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt1-authorization-absent.png
+FileTransfer finish, Size:175105, File count = 1, time:46ms rate:3806.63kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png
+13e93b42adfe62bd446c18e60ec6844d8360add666e264f20f3e8e67bec381f6  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-hilog-full.log
+f5d7b543e03234d0f9535eb6dc536a076bc67749112a39c913cc5c19dd347036  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-hilog-full.log
+A_ALLOW_ATTEMPT_1_COUNTS uiStart=1 promiseSettled=0 onCreate=0 onDestroy=0 missingDialogComponent=5
+A_ALLOW_ATTEMPT_1_VERDICT=blocked systemAuthorizationDialogAbsent=true promiseObserved=pending noOnCreate=true
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpna reason=blocked-authorization-attempt-1 notUsedAsRevoke=true
+force stop process successfully.
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpna output=start\ ability\ successfully.
+A_ALLOW_ATTEMPT_2_PID=3089
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt2-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:44ms rate:780.20kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt2-authorization-absent-layout.json
+FileTransfer finish, Size:34353, File count = 1, time:44ms rate:780.75kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt2-authorization-absent.png
+FileTransfer finish, Size:175921, File count = 1, time:4ms rate:43980.25kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png
+1dabd3a527a94b60ab9eb48d3ef2aa4fa655f1a00862299e245d6d0a135e96ce  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-hilog-full.log
+cc4ee74f3c5469c09ec03f0af4419c3ff99fa1026efa754733b5208ed38fe475  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-hilog-full.log
+A_ALLOW_ATTEMPT_2_COUNTS uiStart=1 promiseSettled=0 onCreate=0 onDestroy=0 missingDialogComponent=5
+A_ALLOW_ATTEMPT_2_VERDICT=blocked systemAuthorizationDialogAbsent=true promiseObserved=pending noOnCreate=true
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpna reason=blocked-authorization-attempt-2 notUsedAsRevoke=true
+force stop process successfully.
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpna output=start\ ability\ successfully.
+A_ALLOW_ATTEMPT_3_PID=3355
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt3-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:45ms rate:762.87kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt3-authorization-absent-layout.json
+FileTransfer finish, Size:34353, File count = 1, time:62ms rate:554.08kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/a-allow-attempt3-authorization-absent.png
+FileTransfer finish, Size:175624, File count = 1, time:4ms rate:43906.00kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png
+ce0a62140fe144dc6d203c71f21d891bd97e2cdbc6026087f0430e717f7bf5d9  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-hilog-full.log
+f1db1777fa470de34b09fe61d91df2be646d6b6db1f4ceed7ee7210fc6a15757  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-hilog-full.log
+A_ALLOW_ATTEMPT_3_COUNTS uiStart=1 promiseSettled=0 onCreate=0 onDestroy=0 missingDialogComponent=5
+A_ALLOW_ATTEMPT_3_VERDICT=blocked systemAuthorizationDialogAbsent=true promiseObserved=pending noOnCreate=true
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpna reason=blocked-authorization-attempt-3 notUsedAsRevoke=true
+force stop process successfully.
+A_BLOCKED_PATH_PIDS=2934,3089,3355
+ALLOW_REPEAT_REQUIREMENT=blocked no_first_allow_possible; missing_system_dialog_reproduced_three_distinct_PIDs
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpnb output=start\ ability\ successfully.
+B_DENY_ATTEMPT_PID=3626 freshIdentity=true
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/b-deny-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:45ms rate:762.87kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/b-deny-authorization-absent-layout.json
+FileTransfer finish, Size:34353, File count = 1, time:47ms rate:730.91kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/b-deny-authorization-absent.png
+FileTransfer finish, Size:175518, File count = 1, time:46ms rate:3815.61kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png
+6f07cf610d2877174fe39c31c7b0303eecc5e19e1aa3d18b778e7ee7fe347dde  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-hilog-full.log
+01bc52f63db3d6609e3dd9734854626981fc748e8589b525ff79538d47b43c88  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-hilog-full.log
+B_DENY_COUNTS uiStart=1 promiseSettled=0 onCreate=0 onDestroy=0 missingDialogComponent=5
+B_DENY_VERDICT=blocked systemAuthorizationDialogAbsent=true promiseObserved=pending noOnCreate=true
+B_DENY_CLICK=blocked no authorization dialog button existed; no refusal fabricated
+B_PROMISE_ACTUAL=pending_within_10_seconds; API24_observer_not_available_or_claimed
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpnb reason=blocked-denial-attempt notUsedAsRevoke=true
+force stop process successfully.
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpna output=start\ ability\ successfully.
+STOP_OBSERVATION_PID=4125 activeVpn=false
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/stop-without-active-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:47ms rate:730.40kB/s
+UI_CLICK_NODE id=stop-vpn bounds=[688,1630][1213,1812] center=950,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/stop-without-active-result-layout.json
+FileTransfer finish, Size:34361, File count = 1, time:85ms rate:404.25kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/stop-without-active-result.png
+FileTransfer finish, Size:177234, File count = 1, time:119ms rate:1489.36kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png
+fc06dbbba52db046df683b7cef4d3e79137f250d99e7c4f76ff55d330d8bb899  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-hilog-full.log
+970259c710d5610981cf78bf532cc79b88b76383159def755c9d9f40eb672660  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-hilog-full.log
+STOP_OBSERVATION_COUNTS uiStop=1 promiseSettled=0 onCreate=0 onDestroy=0
+NORMAL_ACTIVE_STOP_VERDICT=blocked A could not become active; no onDestroy fabricated
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpna reason=post-stop-observation notUsedAsRevoke=true
+force stop process successfully.
+Log type core,app,only_prerelease buffer clear successfully
+ENTRY_START bundle=cn.alfadb.netbird.e3vpna output=start\ ability\ successfully.
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/conflict-a-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:67ms rate:512.37kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+ENTRY_START bundle=cn.alfadb.netbird.e3vpnb output=start\ ability\ successfully.
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/conflict-b-entry-layout.json
+FileTransfer finish, Size:34329, File count = 1, time:86ms rate:399.17kB/s
+UI_CLICK_NODE id=start-vpn bounds=[107,1630][632,1812] center=369,1721
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/conflict-result-no-active-vpn-layout.json
+FileTransfer finish, Size:34353, File count = 1, time:45ms rate:763.40kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/conflict-result-no-active-vpn.png
+FileTransfer finish, Size:175347, File count = 1, time:47ms rate:3730.79kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png
+e27add6cb555fd84eaabf1171314a84b471888267c1c3e0d25c6c1ddf4468a22  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-no-active-hilog-full.log
+b5dc529cf15d24f768145684cf021e51e5b375f5e85af6cfde91404c3acb80b3  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-no-active-hilog-full.log
+CONFLICT_OBSERVATION aPid=4645 bPid=5048 uiA=1 uiB=1 promisesSettled=0 onCreate=0
+SINGLE_INSTANCE_CONFLICT_VERDICT=blocked A never became active; E3 does not call create to force a create-level conflict
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpna reason=post-conflict-observation notUsedAsRevoke=true
+force stop process successfully.
+FORCE_STOP_CLEANUP bundle=cn.alfadb.netbird.e3vpnb reason=post-conflict-observation notUsedAsRevoke=true
+force stop process successfully.
+Log type core,app,only_prerelease buffer clear successfully
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/settings-home-layout.json
+FileTransfer finish, Size:63699, File count = 1, time:93ms rate:684.94kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/settings-home.png
+FileTransfer finish, Size:1061438, File count = 1, time:85ms rate:12487.51kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png
+be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png
+UI_CLICK_TEXT text=Settings bounds=[93,463][279,513] center=186,488
+No Error
+DumpLayout saved to:/data/local/tmp/e3-vpn-extension-20260717-0002/settings-main-layout.json
+FileTransfer finish, Size:63699, File count = 1, time:86ms rate:740.69kB/s
+ScreenCap saved to /data/local/tmp/e3-vpn-extension-20260717-0002/settings-main.png
+FileTransfer finish, Size:1061438, File count = 1, time:7ms rate:151634.00kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png
+be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-text.tsv
+8bb4a92b5a09a2bfb4d496768ae73562da33019f996552b3585a991e25b8e85a  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-text.tsv
+SETTINGS_MAIN_TEXT_BEGIN
+$ grep -E \^\(Settings\|WLAN\|System\|Apps\ \&\ services\|Accessibility\|Storage\|Battery\) /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-text.tsv
+Settings	[93,463][279,513]	AppNameLite_text_com.huawei.hmos.settings_mrovu5defluj46b2yjl
+SETTINGS_MAIN_TEXT_END
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log
+9036e519b3d7bf7bc7a24d44d66298f6217c6cb31add76ded155b1916efd5693  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log
+SETTINGS_UI_PATH=Home_icon_click_then_Settings_main ordinaryUserUi=true
+SETTINGS_VPN_MANAGEMENT_ENTRY=absent in complete Settings main layout
+USER_REVOKE_VERDICT=blocked no active A and no VPN management entry; no force-stop/uninstall used as revoke
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-layout.json
+9036e519b3d7bf7bc7a24d44d66298f6217c6cb31add76ded155b1916efd5693  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log
+bcd02dd46e9bc24c232a416bb0964977dbcf1b3b0b1e04291fd04c7efd269d93  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-layout.json
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-hilog-tag.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-fault-list.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-emulator-console.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-a-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-b-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-entry-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result-layout.json /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-no-active-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-hilog-full.log
+e1e87758de677fb0ee39c5af2fd699afdf1145dd3ea1fdd1adf4a4111e7eb96b  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-hilog-tag.log
+9fa085cb0b27667b32b9c0d8c0a5b2c4534443cbc8ebe8b0c3576346d0f66185  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-fault-list.log
+ab953e1aa0e8402b4f5d53f61dd3b9e935f3fb3c797e0de3b50010f4ab79d602  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-emulator-console.log
+13e93b42adfe62bd446c18e60ec6844d8360add666e264f20f3e8e67bec381f6  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent.png
+1dabd3a527a94b60ab9eb48d3ef2aa4fa655f1a00862299e245d6d0a135e96ce  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent.png
+ce0a62140fe144dc6d203c71f21d891bd97e2cdbc6026087f0430e717f7bf5d9  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent.png
+6f07cf610d2877174fe39c31c7b0303eecc5e19e1aa3d18b778e7ee7fe347dde  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent.png
+e27add6cb555fd84eaabf1171314a84b471888267c1c3e0d25c6c1ddf4468a22  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn.png
+be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home.png
+be95385f18fd3b0bf93b8f5de33f69884913fd43cc2afdc02de00d859004a487  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main.png
+fc06dbbba52db046df683b7cef4d3e79137f250d99e7c4f76ff55d330d8bb899  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result.png
+b7276ba2f3bf2d6aec2acdfc521d96889c41f4e2a2389a47393a9e989cc46a5c  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-authorization-absent-layout.json
+36652dc22a659d89f65222ae4532cfb5f4d12dda1e95ef7f85245feaaee3cc20  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-entry-layout.json
+f9e91634d1394d18010f204a4a9fb120aca3e7c277f4b6f06a5645058e93834f  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-authorization-absent-layout.json
+5f33d89220570cacd841cf5354690743b6a76996dc5a1909052aa2e7680ab64a  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-entry-layout.json
+b2ba9d9e3b99cfac32a7d0723c55135f0fab8124ca27a3cb5ec9637114e323ba  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-authorization-absent-layout.json
+5f33d89220570cacd841cf5354690743b6a76996dc5a1909052aa2e7680ab64a  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-entry-layout.json
+0368551a6e77c59f437a96f6db3c23c6dd6dc36d764d0d1155188d11d47aa5bb  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-authorization-absent-layout.json
+c98fa67cfd0c9dc0279c055d4036673f1c14e79fa81c17a39da44a0e4a077f25  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-entry-layout.json
+5a87874ba3220babf230059ab4a27ca212584b7bcd7cb0addaf60f8ab7d5e634  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-a-entry-layout.json
+a4e6fb4630aea63e23c2791c50cf70ad61217573273a0a6e178c809d6cdaf1aa  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-b-entry-layout.json
+1803ff38b6fdfab7de1d437c35425f10060d55d1ad3be792aea9fe409f054157  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-result-no-active-vpn-layout.json
+bcd02dd46e9bc24c232a416bb0964977dbcf1b3b0b1e04291fd04c7efd269d93  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-home-layout.json
+bcd02dd46e9bc24c232a416bb0964977dbcf1b3b0b1e04291fd04c7efd269d93  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-layout.json
+5a87874ba3220babf230059ab4a27ca212584b7bcd7cb0addaf60f8ab7d5e634  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-entry-layout.json
+6086c3365eeb44b45b7f5ef36efd3770809f8360057a110ce84f53050a69ffe2  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-result-layout.json
+f5d7b543e03234d0f9535eb6dc536a076bc67749112a39c913cc5c19dd347036  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt1-hilog-full.log
+cc4ee74f3c5469c09ec03f0af4419c3ff99fa1026efa754733b5208ed38fe475  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt2-hilog-full.log
+f1db1777fa470de34b09fe61d91df2be646d6b6db1f4ceed7ee7210fc6a15757  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-a-allow-attempt3-hilog-full.log
+01bc52f63db3d6609e3dd9734854626981fc748e8589b525ff79538d47b43c88  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-b-deny-hilog-full.log
+b5dc529cf15d24f768145684cf021e51e5b375f5e85af6cfde91404c3acb80b3  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-conflict-no-active-hilog-full.log
+9036e519b3d7bf7bc7a24d44d66298f6217c6cb31add76ded155b1916efd5693  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-settings-main-hilog-full.log
+970259c710d5610981cf78bf532cc79b88b76383159def755c9d9f40eb672660  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E3-EMU24-20260717-0002-stop-without-active-hilog-full.log
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+POST_UNINSTALL bundle=cn.alfadb.netbird.e3vpna result=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+POST_UNINSTALL bundle=cn.alfadb.netbird.e3vpnb result=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+UNINSTALL_ABSENCE=pass
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+FINAL_RESIDUAL_PROCESSES=''
+FINAL_RESIDUAL_PORTS=''
+$ bash -n /home/worker/work/base/netbird-harmonyos/spikes/e3-vpn-extension-hap/e3-vpn-extension-emulator-run.sh
+$ git -C /home/worker/work/base/netbird-harmonyos diff --check
+$ markdownlint-cli2 /home/worker/work/base/netbird-harmonyos/README.md /home/worker/work/base/netbird-harmonyos/docs/\*\*/\*.md /home/worker/work/base/netbird-harmonyos/spikes/e3-vpn-extension-hap/README.md
+markdownlint-cli2 v0.22.1 (markdownlint v0.40.0)
+Finding: /home/worker/work/base/netbird-harmonyos/README.md /home/worker/work/base/netbird-harmonyos/docs/**/*.md /home/worker/work/base/netbird-harmonyos/spikes/e3-vpn-extension-hap/README.md
+Linting: 15 file(s)
+Summary: 0 error(s)
+SENSITIVE_SCAN=pass_high_confidence_patterns
+POST_RUN_FORBIDDEN_API_SCAN=pass
+ENDED_AT=2026-07-17T19:59:26+08:00
+AUTHORIZATION=blocked missing_system_authorization_component
+DENIAL=blocked no_system_dialog_or_deny_button
+STOP=blocked no_active_A_so_no_onDestroy
+REVOKE=blocked no_active_A_and_no_Settings_VPN_management_entry
+CONFLICT=blocked no_active_A_and_no_VpnConnection_create_in_E3
+RECORD_STATUS=collected
+VERDICT=blocked
+TRAP_EXIT_CODE=0 RESULT=blocked

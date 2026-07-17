@@ -1,0 +1,9 @@
+{
+  modelVersion: '6.0.0',
+  name: 'e3-vpn-extension-hap',
+  version: '1.0.0',
+  description: 'Short-lived E3 VPN Extension authorization probe.',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}

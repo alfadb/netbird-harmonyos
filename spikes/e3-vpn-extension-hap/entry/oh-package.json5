@@ -1,0 +1,8 @@
+{
+  modelVersion: '6.0.0',
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Entry module for the short-lived E3 VPN authorization probe.',
+  license: 'MIT',
+  dependencies: {}
+}

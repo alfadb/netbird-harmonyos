@@ -1,0 +1,11 @@
+FINAL_CLEANUP_STARTED_AT=2026-07-17T20:34:08+08:00
+PRE_CLEANUP_PORTS_BEGIN
+LISTEN 0      128    [::ffff:127.0.0.1]:8710             *:*    users:(("hdc",pid=1269587,fd=16))          
+PRE_CLEANUP_PORTS_END
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+POST_CLEANUP_PROCESSES_BEGIN
+POST_CLEANUP_PROCESSES_END
+POST_CLEANUP_PORTS_BEGIN
+POST_CLEANUP_PORTS_END
+FINAL_CLEANUP_ENDED_AT=2026-07-17T20:34:10+08:00

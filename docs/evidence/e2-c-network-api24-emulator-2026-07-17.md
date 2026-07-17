@@ -45,7 +45,7 @@ reviewed_at: 2026-07-17T19:02:00+08:00
 review_record: Reviewed hashes HAP=76004031e937604b878049728569d0163b4a2e2e987ceb61eba4de86969baf4f, source-manifest=08729c8cd1e75e26e603ca35863b4d55fe682992b4d9221714b0042aab48a8db, source-archive=dfa7e5a99f07cbc551a564c54cb32bbc6304b94996a2bb508418f98750f70cad; 30 TCP/180 UDP loopback; 30 host TCP/90 host UDP; loopback-only/no-public; forced partial reads/chunked writes; 3 PID/E1 regression/resources/fault/cleanup; 0001 EACCES non-contamination; 0B/0M/1minor.
 ```
 
-本记录现为 `record_status: reviewed-pass`，`verdict: pass`；E2 已关闭，下一门为 E3。E1 整体仍因最新正式 NetBird 声明基线的官方 Go 1.25.12 loader 路径失败而 blocked；E8 仍为 `CLOSED`，真机执行禁令不变，R0/R1/R2 均未退出。
+本记录现为 `record_status: reviewed-pass`，`verdict: pass`，E2 已关闭。后续 E3 的 `0003`/`0004` 均为 `reviewed-pass/blocked`，E3 不关闭；E4-E7 为 dependency blocked、不开始。E1 整体仍因最新正式 NetBird 声明基线的官方 Go 1.25.12 loader 路径失败而 blocked；E8 仍为 `CLOSED`，真机执行禁令不变，R0/R1/R2 均未退出。
 
 ## 判定明细
 

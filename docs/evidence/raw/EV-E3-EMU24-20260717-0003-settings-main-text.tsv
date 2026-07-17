@@ -1,0 +1,22 @@
+Settings	[56,180][416,287]	
+‪Log in to HUAWEI ID‬	[378,470][1001,544]	
+Access Cloud, AppGallery, and more	[378,565][1074,614]	
+emulator	[266,803][500,869]	
+WLAN	[266,1041][489,1107]	wifi_entry.title
+On	[1099,1046][1165,1103]	wifi_entry.result
+Home screen & style	[266,1279][797,1345]	theme_settings.title
+Display & brightness	[266,1449][801,1515]	display_settings.title
+Sounds & vibration	[266,1619][759,1685]	volume_settings.title
+Notifications & status bar	[266,1789][927,1855]	systemui_notification_settings.title
+System	[266,2027][454,2093]	system_and_updates.title
+Apps & services	[266,2197][676,2263]	application_and_service_settings.title
+Accessibility	[266,2367][585,2433]	accessibility_feature.title
+Storage	[266,2537][469,2603]	storage_settings.title
+Battery	[266,2707][459,2773]	battery.title
+Biometrics & screen lock	[266,2877][900,2943]	biometrics_and_password_settings.title
+No service	[49,71][272,124]	SignalComponent-SignalOperatorInfo_Text_operator
+08, :, 07	[49,55][188,139]	ClockStatusView
+08	[49,66][111,128]	
+:	[111,71][126,124]	TimeView_Text_timeText
+07	[126,66][188,128]	
+100	[1182,75][1252,120]	BatteryComponent-batteryIcon_Text_batterySoc

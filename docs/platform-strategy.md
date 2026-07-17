@@ -27,7 +27,7 @@ HarmonyOS 包模型资料：
 
 API 24 x86_64 phone Emulator 是任何真机执行前的投入总门：其上所有客观可执行项必须按 E0-E8 先完成并通过，E8 未 `OPEN` 时禁止任何真机执行。该顺序不把 Emulator 提升为 arm64 或产品支持替代物；x86_64 Emulator 的 PASS 与 FAIL 均不得外推到 arm64、具名真机或华为商用 HarmonyOS，禁止真机也不是对这些目标的负面技术结论。
 
-arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`：E0 已以 `reviewed-pass/pass` 关闭；E1 C-only 子证据虽为 `reviewed-pass/pass`，官方 Go loader initial-exec TLS 仍失败，故 E1 overall Go blocked；E2 C 网络记录已为 `reviewed-pass/pass` 并关闭，下一门为 E3；E8 仍 `CLOSED`，真机禁令不变；E3-E7 与 VPN runtime 仍未验证。
+arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`：所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已以 `reviewed-pass/pass` 完成；官方 E1 Go loader initial-exec TLS 仍失败，故 E1 overall Go blocked；E3 的 0003/0004 均为 `reviewed-pass/blocked`，精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`、普通公开 API 无旁路且 Settings 无普通 VPN 管理入口，E3 不关闭，E4-E7 为 dependency blocked、不开始。E8 仍 `CLOSED`，真机禁令不变；该模拟器缺项不外推到其他架构、具名真机或华为商用 HarmonyOS。
 
 ### 不作出的承诺
 

@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "Short-lived E3 VPN Extension authorization probe"
+    },
+    {
+      "name": "ability_description",
+      "value": "Ordinary UI entry for the E3 VPN authorization probe"
+    },
+    {
+      "name": "ability_name",
+      "value": "E3 VPN Gate"
+    }
+  ]
+}

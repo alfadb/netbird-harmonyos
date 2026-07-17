@@ -20,7 +20,10 @@
   - `record_status: reviewed-pass`、`verdict: pass`；只关闭 E1 C-only 子门，不改变 measured artifact；E1 整体仍因官方 Go 1.25.12 loader 失败而 blocked
 - [E2 C 网络 API 24 Emulator 证据](evidence/e2-c-network-api24-emulator-2026-07-17.md)
   - 三个不同普通 `EntryAbility` PID 各完成 10 轮 TCP/UDP loopback、Pod 本机受控 endpoint、DNS、事件/错误和资源恢复验证，并显示可见 E2 PASS 页面
-  - `record_status: reviewed-pass`、`verdict: pass`；E2 已关闭，下一门为 E3；E1 overall Go blocked，E8 仍 `CLOSED`，真机禁令不变
+  - `record_status: reviewed-pass`、`verdict: pass`；E2 已关闭；E1 overall Go blocked，E8 仍 `CLOSED`，真机禁令不变
+- [E3 VPN Extension API 24 Emulator 证据](evidence/e3-vpn-extension-api24-emulator-2026-07-17.md)
+  - A 三个 PID 与新鲜 B 均由正常 UI 触发公开 start；系统授权组件缺失，promise pending 且 Extension 无 `onCreate`
+  - 0003/0004 均为 `reviewed-pass/blocked`；精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`，普通公开 API 无旁路，Settings 无普通 VPN 管理入口；E3 不关闭，E4-E7 dependency blocked 且不开始
 - [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
   - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
   - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
@@ -67,7 +70,8 @@
 - 证据 ID、必填字段、状态枚举、脱敏规则、支持矩阵、动态调整、补丁记录和保留期。
 - E0 普通应用已在 API 24 x86_64 Emulator 完成三次独立 PID 冷启动、可见 UI、生命周期/Node-API marker、停止、sidecar、卸载和残留清理，独立审查结果为 `reviewed-pass`、`verdict: pass`；E0 已关闭。
 - E1 C-only 子门已由普通 `EntryAbility` 在三个不同 PID 各完成 10 轮：每 PID 1000 个同步 guarded buffer、1000 个 C pthread 到主 ArkTS 上下文的公开 threadsafe callback、10 次真实 fd ownership，以及逐轮 `/proc/self/fd`/线程快照；记录为 `reviewed-pass/pass`。独立审查确认 0 blocker/major、5 minor，且不改变 measured artifact；官方 Go 1.25.12 loader 仍失败，故 E1 整体仍 blocked。
-- E2 C 网络记录 `EV-E2-EMU24-20260717-0002` 已由三个不同普通 `EntryAbility` PID 各完成 10 轮 TCP/UDP loopback、route-derived Pod 本机 endpoint、确定性 DNS/错误和 fd/thread 恢复，并归档 host 双侧原始日志与三张可见 PASS 页面；现为 `reviewed-pass/pass`，E2 已关闭，下一门为 E3。E1 overall Go blocked，E8 仍 `CLOSED`，真机禁令不变。
+- E2 C 网络记录 `EV-E2-EMU24-20260717-0002` 已由三个不同普通 `EntryAbility` PID 各完成 10 轮 TCP/UDP loopback、route-derived Pod 本机 endpoint、确定性 DNS/错误和 fd/thread 恢复，并归档 host 双侧原始日志与三张可见 PASS 页面；现为 `reviewed-pass/pass`，E2 已关闭。
+- E3 记录 `EV-E3-EMU24-20260717-0003` 及补充 `0004` 均为 `reviewed-pass/blocked`：在精确 API 24 x86_64 phone Emulator image 上，`com.huawei.hmos.vpndialog` 缺失、普通公开 API 无旁路且 promise pending、Settings 无普通 VPN 管理入口，三类根因共同使授权链不可达；E3 不关闭，E4-E7 为 dependency blocked 且不开始。所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已完成，E1 官方 Go 仍 blocked；E8 仍 `CLOSED`，真机禁令不变。
 - R1固定NetBird/Go/SDK预探针、独立审查修正、unsigned API 24应用/测试HAP、普通Node-API双ABI构建、可见Emulator、最小`aa test`、x86_64 Go c-shared `STATIC_TLS` loader负面证据，以及0010 的隔离 PS4 TLSDESC 历史候选十次运行通过和官方 Go 1.25.12 机械应用停止记录；PS4 未发布，0010 不作为当前门输入。
 - 初始威胁模型，以及 NetBird 客户端/服务端、未来依赖、商标和 Huawei 工具的许可证基线。
 - Debian Pod 内的工具链与持久化条件。
@@ -83,13 +87,13 @@
 
 当前文档不表示以下事项已经完成：
 
-- API 24 x86_64 phone Emulator E0-E8 总门已建立但尚未通过；当前总门为 `CLOSED`，禁止任何真机执行。
+- API 24 x86_64 phone Emulator E0-E8 总门已建立但尚未通过；当前总门为 `CLOSED`，禁止任何真机执行；E3 为 `reviewed-pass/blocked` 且不关闭，E4-E7 dependency blocked、不开始。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。
-- 面向产品的 OpenHarmony 或 HarmonyOS 应用工程已经建立；当前只有不得演化为产品壳的短生命周期 E0/R1 API 24 探针。
+- 面向产品的 OpenHarmony 或 HarmonyOS 应用工程已经建立；当前只有不得演化为产品壳的短生命周期 E0/R1 API 24 探针和独立 E3 A/B 授权探针。
 - NetBird Go 核心、官方 Go 1.25.12 loader、完整 E1 或 VPN 能力已经完成集成验证；现有 ArkTS/native/fd 正面只限 C-only 子证据。
-- VPN Extension 已经在模拟器或真机建立隧道，或真机行为已经验证。
+- VPN Extension 授权门已经通过，或已在模拟器/真机建立隧道；当前 E3 仅形成 API 24 Emulator `collected/blocked` 记录，真机行为仍未验证。
 - 任一市场的正式签名、审核、上架或更新流程已经跑通。
 - Debian 13 已成为官方支持的 Emulator 宿主。
 
