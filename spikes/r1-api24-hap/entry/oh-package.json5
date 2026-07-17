@@ -5,6 +5,7 @@
   description: 'Entry module for the short-lived R1 API 24 probe.',
   license: 'MIT',
   dependencies: {
-    'libprobe.so': 'file:./src/main/cpp/types/libprobe'
+    'libprobe.so': 'file:./src/main/cpp/types/libprobe',
+    'libe2network.so': 'file:./src/main/cpp/types/libe2network'
   }
 }

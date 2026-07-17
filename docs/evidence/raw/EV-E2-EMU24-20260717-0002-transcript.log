@@ -1,0 +1,794 @@
+EVIDENCE_ID=EV-E2-EMU24-20260717-0002
+STARTED_AT=2026-07-17T18:47:14+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+GIT_HEAD=46ee4e12d91ca01a4eb6684392297844a9e013bf
+RECORD_SCOPE=E2_C-network_ordinary_EntryAbility_with_E1_regression_no_TestRunner_no_Go_no_NetBird_no_PS4
+TARGET_TUPLE=HarmonyOS_6.1.1(24),software_6.1.0.125,phone_Emulator,x86_64,SDK_API24,Beta_HDC_3.2.0e,unsigned_debug_normal_app
+HOST_SCOPE=Pod_local_temporary_C_server_loopback_bind_only_via_Emulator_NAT
+TEST_RUNNER_USED=false
+PHYSICAL_DEVICE_USED=false
+GO_NETBIRD_PS4_TOUCHED=false
+PUBLIC_NETWORK_ALLOWED=false
+$ cc -std=c17 -O2 -Wall -Wextra -Werror /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/e2-host-server.c -o /tmp/EV-E2-EMU24-20260717-0002-host-server
+$ install -m 0755 /tmp/EV-E2-EMU24-20260717-0002-host-server /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, BuildID[sha1]=d4a330bae265b3c8ee43c69ab330cdaf142de75e, for GNU/Linux 3.2.0, not stripped
+$ sha256sum /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/e2-host-server.c /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin
+b5903f4e90f54bd05678f9515693decc2e3b91d75c77fc4d2d67b59295e595c4  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/e2-host-server.c
+3930f257eb1f084fa7ba51e0ef362117c5c1ab3d6e4c5273a0490f4768f26d72  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin
+HOST_SERVER_PID=1132237
+HOST_TCP_LISTEN=LISTEN\ 0\ \ \ \ \ \ 8\ \ \ \ \ \ \ \ \ \ 127.0.0.1:39021\ \ \ \ \ \ 0.0.0.0:\*\ \ \ \ users:\(\(\"EV-E2-EMU24-202\"\,pid=1132237\,fd=3\)\)
+HOST_UDP_LISTEN=UNCONN\ 0\ \ \ \ \ \ 0\ \ \ \ \ \ \ \ \ \ 127.0.0.1:39022\ \ \ \ \ \ 0.0.0.0:\*\ \ \ \ users:\(\(\"EV-E2-EMU24-202\"\,pid=1132237\,fd=4\)\)
+HOST_LOOPBACK_BIND_AUDIT=pass
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:clean... after 51 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 188 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 42 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 6 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 3 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 7 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 15 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 66 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 4 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 9 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 126 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 3 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 6 s 236 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 228 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 425 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 116 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 7 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 8 s 362 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 490 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 13 s 459 ms [39m
+CLEAN_BUILD_VERDICT=pass
+$ install -m 0644 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-application-hap.bin
+$ sha256sum /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-build.log /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+76004031e937604b878049728569d0163b4a2e2e987ceb61eba4de86969baf4f  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+76004031e937604b878049728569d0163b4a2e2e987ceb61eba4de86969baf4f  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-application-hap.bin
+caed38130bef9987fff2f5c7be9281675aeeb52d2a3fef7c402d4b6a70c69fca  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin
+7e14cfafc6fad8234be193c6787929c4042eb7d8822a9c2fee5804e67e26151a  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin
+3930f257eb1f084fa7ba51e0ef362117c5c1ab3d6e4c5273a0490f4768f26d72  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin
+ca4512199739d1f88a2302a1f8d2de7be1d40d1adb47a03995eb7c39977f52b5  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-build.log
+c7d241f14ecd4d3e7c9b9ae34eff1f5da40bec53686717870227285b2e97f56a  /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+$ stat -c %n\ size=%s\ mtime=%y /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-build.log
+/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap size=2745827 mtime=2026-07-17 18:47:32.332376048 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-application-hap.bin size=2745827 mtime=2026-07-17 18:47:33.388391126 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin size=21904 mtime=2026-07-17 18:47:33.391391169 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin size=35672 mtime=2026-07-17 18:47:33.394391212 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.bin size=21432 mtime=2026-07-17 18:47:14.509121545 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-build.log size=3012 mtime=2026-07-17 18:47:32.392376904 +0800
+$ unzip -Z1 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+module.json
+resources.index
+libs/arm64-v8a/libc++_shared.so
+libs/arm64-v8a/libe2network.so
+libs/arm64-v8a/libprobe.so
+libs/x86_64/libe2network.so
+libs/x86_64/libprobe.so
+libs/x86_64/libc++_shared.so
+resources/base/profile/main_pages.json
+resources/base/media/start_icon.svg
+resources/base/media/app_icon.svg
+ets/modules.abc
+ets/sourceMaps.map
+pack.info
+pkgSdkInfo.json
+FORBIDDEN_HISTORICAL_MEMBER=false
+{"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":60101024,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"0.0.1","versionCode":1,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":60101024,"vendor":"alfadb","bundleName":"cn.alfadb.netbird.r1probe","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"virtualMachine":"ark24.0.0.0","mainElement":"EntryAbility","installationFree":false,"deliveryWithInstall":true,"requestPermissions":[{"name":"ohos.permission.INTERNET"}],"description":"$string:module_description","compileMode":"esmodule","type":"entry","dependencies":[],"abilities":[{"exported":true,"iconId":16777222,"startWindowIconId":16777222,"icon":"$media:start_icon","startWindowIcon":"$media:start_icon","startWindowBackgroundId":16777221,"description":"$string:ability_description","label":"$string:ability_name","skills":[{"entities":["entity.system.home"],"actions":["ohos.want.action.home"]}],"srcEntry":"./ets/entryability/EntryAbility.ets","descriptionId":16777218,"labelId":16777219,"startWindowBackground":"$color:start_window_background","name":"EntryAbility"}],"deviceTypes":["phone"],"pages":"$profile:main_pages","descriptionId":16777220,"name":"entry","packageName":"entry"}}$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libprobe-x86_64.bin:     ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=35c8e23c3c29ab7328ba264997b15296c297bb4a, stripped
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=d356c290565fbd0caf89dac5695c6a738e1d7ad1, stripped
+$ readelf -d /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-libe2network-x86_64.bin
+
+Dynamic section at offset 0x8030 contains 28 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libace_napi.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libhilog_ndk.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc++_shared.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000000e (SONAME)             Library soname: [libe2network.so]
+ 0x000000000000001e (FLAGS)              BIND_NOW
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW
+ 0x0000000000000007 (RELA)               0xdb8
+ 0x0000000000000008 (RELASZ)             360 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffff9 (RELACOUNT)          10
+ 0x0000000000000017 (JMPREL)             0xf20
+ 0x0000000000000002 (PLTRELSZ)           1368 (bytes)
+ 0x0000000000000003 (PLTGOT)             0xa210
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000006 (SYMTAB)             0x2e8
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000005 (STRTAB)             0xab8
+ 0x000000000000000a (STRSZ)              767 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0x8a0
+ 0x0000000000000004 (HASH)               0x8c8
+ 0x0000000000000019 (INIT_ARRAY)         0x9f90
+ 0x000000000000001b (INIT_ARRAYSZ)       16 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x9fa0
+ 0x000000000000001c (FINI_ARRAYSZ)       16 (bytes)
+ 0x000000000000000c (INIT)               0x8bdb
+ 0x000000000000000d (FINI)               0x8bde
+ 0x0000000000000000 (NULL)               0x0
+PUBLIC_C_NETWORK_SYMBOL_AUDIT=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-source-manifest.txt /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-source.tar
+08729c8cd1e75e26e603ca35863b4d55fe682992b4d9221714b0042aab48a8db  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-source-manifest.txt
+dfa7e5a99f07cbc551a564c54cb32bbc6304b94996a2bb508418f98750f70cad  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-source.tar
+SOURCE_INPUT_COUNT=15
+TOOLCHAIN host=Linux\ host-dev-alfadb-full\ 7.0.14-4-pve\ #1\ SMP\ PREEMPT_DYNAMIC\ PMX\ 7.0.14-4\ \(2026-07-07T07:27Z\)\ x86_64\ GNU/Linux
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw --version
+6.24.3
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+$ node --version
+v24.15.0
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm --version
+6.1.2.285
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+QEMU_CURRENT_BOOT_START_LINE=32934
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=1133413
+EMULATOR_START_VERDICT=pass
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=1 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=2 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=3 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=4 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=5 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=6 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECTIVITY attempt=7 targets=$'127.0.0.1:10000\t\tTCP\tConnected\tlocalhost' shell=e2-c-connect-7 distribution=HarmonyOS\ 
+CONNECTIVITY_VERDICT=pass
+BOOT_READINESS attempt=1 qemu.boot='' shell=e2-c-readiness-1
+BOOT_READINESS attempt=2 qemu.boot='' shell=e2-c-readiness-2
+BOOT_READINESS attempt=3 qemu.boot='' shell=e2-c-readiness-3
+BOOT_READINESS attempt=4 qemu.boot='' shell=e2-c-readiness-4
+BOOT_READINESS attempt=5 qemu.boot='' shell=e2-c-readiness-5
+BOOT_READINESS attempt=6 qemu.boot='' shell=e2-c-readiness-6
+BOOT_READINESS attempt=7 qemu.boot='' shell=e2-c-readiness-7
+BOOT_READINESS attempt=8 qemu.boot='' shell=e2-c-readiness-8
+BOOT_READINESS attempt=9 qemu.boot='' shell=e2-c-readiness-9
+BOOT_READINESS attempt=10 qemu.boot='' shell=e2-c-readiness-10
+BOOT_READINESS attempt=11 qemu.boot='' shell=e2-c-readiness-11
+BOOT_READINESS attempt=12 qemu.boot='' shell=e2-c-readiness-12
+BOOT_READINESS attempt=13 qemu.boot='' shell=e2-c-readiness-13
+BOOT_READINESS attempt=14 qemu.boot='' shell=e2-c-readiness-14
+BOOT_READINESS attempt=15 qemu.boot='' shell=e2-c-readiness-15
+BOOT_READINESS attempt=16 qemu.boot='' shell=e2-c-readiness-16
+BOOT_READINESS attempt=17 qemu.boot='' shell=e2-c-readiness-17
+BOOT_READINESS attempt=18 qemu.boot='' shell=e2-c-readiness-18
+BOOT_READINESS attempt=19 qemu.boot='' shell=e2-c-readiness-19
+BOOT_READINESS attempt=20 qemu.boot=2026-07-17\ 18:48:19.216136225717462720\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=e2-c-readiness-20
+READINESS boot.completed=Get\ parameter\ \"boot.completed\"\ fail\!\ errNum\ is:1002\! wms.ready=Get\ parameter\ \"bootevent.wms.ready\"\ fail\!\ errNum\ is:1002\! lockscreen.ready=Get\ parameter\ \"bootevent.lockscreen.ready\"\ fail\!\ errNum\ is:1002\! qemu.boot=2026-07-17\ 18:48:19.216136225717462720\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed.
+READINESS_VERDICT=pass
+PREINSTALL_BUNDLE_QUERY=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+GUEST_PROC_NET_ROUTE_BEGIN
+Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT                                                       
+eth0	00000000	0202000A	0003	0	0	0	00000000	0	0	0                                                                               
+eth0	0002000A	00000000	0001	0	0	0	00FFFFFF	0	0	0                                                                               
+GUEST_PROC_NET_ROUTE_END
+GUEST_ROUTE_DISCOVERY=pass_source_proc_net_route_no_ip_command_dependency
+FileTransfer finish, Size:2745827, File count = 1, time:82ms rate:33485.70kB/s
+INSTALL_ATTEMPT=1 OUTPUT=install\ bundle\ successfully.
+INSTALL_VERDICT=pass
+UNLOCK_SEQUENCE wakeup=WakeupDevice\ is\ called home=No\ Error swipe=No\ Error
+cn.alfadb.netbird.r1probe:
+{
+    "appId": "cn.alfadb.netbird.r1probe_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+        "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.r1probe",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.r1probe",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777222,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777222,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.r1probe",
+        "nativeLibraryPath": "libs/x86_64",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.r1probe",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020062,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784221045861,
+    "gid": 20020062,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.r1probe",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.r1probe",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+                    "iconId": 16777222,
+                    "iconPath": "$media:start_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:start_icon",
+                    "startWindowIconId": 16777222,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777222,
+            "iconPath": "$media:start_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.r1probe",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry"
+    ],
+    "installTime": 1784285301463,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry"
+    ],
+    "moduleNames": [
+        "entry"
+    ],
+    "modulePublicDirs": [
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.r1probe",
+    "oldAppIds": [
+        "cn.alfadb.netbird.r1probe_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020062,
+    "updateTime": 1784285301463,
+    "userInfo": [
+        {
+            "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+            "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784221045861,
+            "gids": [
+                20020062
+            ],
+            "installTime": 1784285301463,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020062,
+            "updateTime": 1784285301463
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+NORMAL_ENTRY_ABILITY_AUDIT=pass
+HILOG_BUFFER_SET=$'Set log type app buffer size to 16.0M successfully\nSet log type init buffer size to 16.0M successfully\nSet log type core buffer size to 16.0M successfully\nSet log type only_prerelease buffer size to 16.0M successfully'
+HILOG_BUFFER_QUERY=$'Log type app buffer size is 16.0M\nLog type init buffer size is 16.0M\nLog type core buffer size is 16.0M\nLog type only_prerelease buffer size is 16.0M'
+HILOG_BUFFER_VERDICT=pass
+COLD_START_1_BEFORE_PID=''
+Log type core,app,only_prerelease buffer clear successfully
+COLD_START_1_AA_OUTPUT=start\ ability\ successfully.
+COLD_START_1_AA_SEMANTIC=pass
+COLD_START_1_PID=2992
+COLD_START_1_MARKER_ATTEMPT=1 PID=2992 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_1_MARKER_ATTEMPT=2 PID=2992 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_1_MARKER_ATTEMPT=3 PID=2992 E2_PASS=1 E2_FAIL=0 E1_FAIL=0
+COLD_START_1_COUNTS e1Pass=1 e1Rounds=10 e1Buffers=1000 e1Callbacks=1000 e1Fd=10 e2Rounds=10 tcpLoop=10 udpLoop=10 udpDatagrams=60 hostRoutes=10 hostTcp=10 hostUdp=10 hostUdpDatagrams=30 dns=10 events=10
+COLD_START_1_E1_REGRESSION=pass
+COLD_START_1_E2_COUNTS=pass
+COLD_START_1_HOST_COUNTS totalTcp=10 pidTcp=10 pidUdp=30
+COLD_START_1_FULL_HILOG_LINES=6394
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1-hilog-full.log
+8c777cc413030273cb8922b28cbee3d89aef66be2160603bf3c3d883ffd56d67  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1-hilog-full.log
+COLD_START_1_SCREEN_OUTPUT=ScreenCap\ saved\ to\ /data/local/tmp/screenCap_65300949.png
+FileTransfer finish, Size:145804, File count = 1, time:45ms rate:3240.09kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png
+9e04e75357dd28f98d299282c92c8748a791e04191f85072ccc3128613a02e95  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png
+COLD_START_1_PIXEL_RGB_100_1000=242 246 248
+COLD_START_1_YAVG=224.624
+COLD_START_1_VISIBLE_E2_PASS_PAGE=pass_marker_bound_screenshot
+force stop process successfully.
+COLD_START_2_BEFORE_PID=''
+Log type core,app,only_prerelease buffer clear successfully
+COLD_START_2_AA_OUTPUT=start\ ability\ successfully.
+COLD_START_2_AA_SEMANTIC=pass
+COLD_START_2_PID=3155
+COLD_START_2_MARKER_ATTEMPT=1 PID=3155 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_2_MARKER_ATTEMPT=2 PID=3155 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_2_MARKER_ATTEMPT=3 PID=3155 E2_PASS=1 E2_FAIL=0 E1_FAIL=0
+COLD_START_2_COUNTS e1Pass=1 e1Rounds=10 e1Buffers=1000 e1Callbacks=1000 e1Fd=10 e2Rounds=10 tcpLoop=10 udpLoop=10 udpDatagrams=60 hostRoutes=10 hostTcp=10 hostUdp=10 hostUdpDatagrams=30 dns=10 events=10
+COLD_START_2_E1_REGRESSION=pass
+COLD_START_2_E2_COUNTS=pass
+COLD_START_2_HOST_COUNTS totalTcp=20 pidTcp=10 pidUdp=30
+COLD_START_2_FULL_HILOG_LINES=4947
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2-hilog-full.log
+5b79ccb19f4d5fd2eda1d74ee35e6085e964fc49df9cd4cf8321b8cafb8d0fdd  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2-hilog-full.log
+COLD_START_2_SCREEN_OUTPUT=ScreenCap\ saved\ to\ /data/local/tmp/screenCap_78733719.png
+FileTransfer finish, Size:145272, File count = 1, time:45ms rate:3228.27kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png
+bcc44a329d8421520dff011714028aa2f81ad25b1fbb7ecd0a1ee3b856016322  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png
+COLD_START_2_PIXEL_RGB_100_1000=242 246 248
+COLD_START_2_YAVG=224.629
+COLD_START_2_VISIBLE_E2_PASS_PAGE=pass_marker_bound_screenshot
+force stop process successfully.
+COLD_START_3_BEFORE_PID=''
+Log type core,app,only_prerelease buffer clear successfully
+COLD_START_3_AA_OUTPUT=start\ ability\ successfully.
+COLD_START_3_AA_SEMANTIC=pass
+COLD_START_3_PID=3351
+COLD_START_3_MARKER_ATTEMPT=1 PID=3351 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_3_MARKER_ATTEMPT=2 PID=3351 E2_PASS=0 E2_FAIL=0 E1_FAIL=0
+COLD_START_3_MARKER_ATTEMPT=3 PID=3351 E2_PASS=1 E2_FAIL=0 E1_FAIL=0
+COLD_START_3_COUNTS e1Pass=1 e1Rounds=10 e1Buffers=1000 e1Callbacks=1000 e1Fd=10 e2Rounds=10 tcpLoop=10 udpLoop=10 udpDatagrams=60 hostRoutes=10 hostTcp=10 hostUdp=10 hostUdpDatagrams=30 dns=10 events=10
+COLD_START_3_E1_REGRESSION=pass
+COLD_START_3_E2_COUNTS=pass
+COLD_START_3_HOST_COUNTS totalTcp=30 pidTcp=10 pidUdp=30
+COLD_START_3_FULL_HILOG_LINES=4837
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3-hilog-full.log
+e01b5c9a826ca84be963c14aaa68563fe3b03756a574d420eada7eb7f99f44eb  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3-hilog-full.log
+COLD_START_3_SCREEN_OUTPUT=ScreenCap\ saved\ to\ /data/local/tmp/screenCap_91833025.png
+FileTransfer finish, Size:145928, File count = 1, time:46ms rate:3172.35kB/s
+$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png: PNG image data, 1320 x 2856, 8-bit/color RGBA, non-interlaced
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png
+791f81639b2f1dd415ff73b618a981f33abacad632520d8c9aa8bdf811499968  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png
+COLD_START_3_PIXEL_RGB_100_1000=242 246 248
+COLD_START_3_YAVG=224.635
+COLD_START_3_VISIBLE_E2_PASS_PAGE=pass_marker_bound_screenshot
+COLD_START_PIDS=2992,3155,3351
+HOST_SERVER_EXIT=0
+HOST_SERVER_COUNTS result=1 pidSummaries=3 errors=0 tcp=30 udp=90
+HOST_SERVER_VERDICT=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-hilog-tag.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-fault-list.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-emulator-console.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png
+a68993e760af52051acbea2d2a401ade8b32153e69c8d0fc43327fa068739c31  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-hilog-tag.log
+fe53ac625ec765f7bd8b2cd7c33162c892002cd95ffd5cd2e1dd3871684c98e6  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-host-server.log
+9682018900554902a8b75b60404b40f76d424324b5d37b19937c9475a629038c  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-fault-list.log
+dfb2fcd27a74f4fb4590b8eca6a368ebe50edbaf31a76c7bbcb8f1c8b7199d7e  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-emulator-console.log
+9e04e75357dd28f98d299282c92c8748a791e04191f85072ccc3128613a02e95  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run1.png
+bcc44a329d8421520dff011714028aa2f81ad25b1fbb7ecd0a1ee3b856016322  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run2.png
+791f81639b2f1dd415ff73b618a981f33abacad632520d8c9aa8bdf811499968  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E2-EMU24-20260717-0002-run3.png
+force stop process successfully.
+POST_FORCE_STOP_PID=''
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+POST_UNINSTALL_BM=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+UNINSTALL_ABSENCE=pass
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+FINAL_CLEANUP_ATTEMPT=1 processes='' ports=''
+FINAL_RESIDUAL_PROCESS=false
+FINAL_RESIDUAL_PORT=false
+$ bash -n /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/e2-c-emulator-run.sh
+$ git -C /home/worker/work/base/netbird-harmonyos diff --check
+$ markdownlint-cli2 /home/worker/work/base/netbird-harmonyos/README.md /home/worker/work/base/netbird-harmonyos/docs/\*\*/\*.md /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/README.md
+markdownlint-cli2 v0.22.1 (markdownlint v0.40.0)
+Finding: /home/worker/work/base/netbird-harmonyos/README.md /home/worker/work/base/netbird-harmonyos/docs/**/*.md /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/README.md
+Linting: 14 file(s)
+Summary: 0 error(s)
+SENSITIVE_SCAN=pass_high_confidence_patterns
+PUBLIC_ENDPOINT_SOURCE_SCAN=pass
+ENDED_AT=2026-07-17T18:49:13+08:00
+VERDICT=pass
+RECORD_STATUS=collected
+TRAP_EXIT_CODE=0 RESULT=pass

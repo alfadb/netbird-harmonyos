@@ -1,0 +1,7 @@
+{
+  name: 'libe2network.so',
+  version: '1.0.0',
+  description: 'Type declarations for the E2 C network probe.',
+  types: './index.d.ts',
+  license: 'MIT'
+}

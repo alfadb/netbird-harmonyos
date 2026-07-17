@@ -3,6 +3,8 @@ import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import window from '@ohos.window';
+import e2network from 'libe2network.so';
+import { E2NetworkRoundResult } from 'libe2network.so';
 import probe from 'libprobe.so';
 import { AsyncRoundResult, BufferHashResult, FdPair, FdTransferResult, ResourceSnapshot } from 'libprobe.so';
 
@@ -11,6 +13,7 @@ const TAG: string = 'R1Api24Probe';
 const FULL_ROUNDS: number = 10;
 const SAMPLES_PER_ROUND: number = 100;
 const EBADF: number = 9;
+const ECONNREFUSED: number = 111;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise<void>((resolve: () => void) => {
@@ -48,7 +51,7 @@ function cleanDetail(error: Error): string {
   return error.message.replace(/\|/g, '/').replace(/\r/g, ' ').replace(/\n/g, ' ');
 }
 
-// This ordinary EntryAbility is a bounded E1 C-only evidence probe, not a product shell.
+// This ordinary EntryAbility is a bounded E1 regression plus E2 C-network evidence probe.
 export default class EntryAbility extends UIAbility {
   private onCreateObserved: boolean = false;
   private mainTid: number = -1;
@@ -64,6 +67,8 @@ export default class EntryAbility extends UIAbility {
     this.onCreateObserved = true;
     AppStorage.setOrCreate<string>('e1Status', 'E1 C-only RUNNING');
     AppStorage.setOrCreate<string>('e1Detail', 'Initializing ordinary EntryAbility probe');
+    AppStorage.setOrCreate<string>('e2Status', 'E2 C network RUNNING');
+    AppStorage.setOrCreate<string>('e2Detail', 'E1 regression running before E2');
     hilog.info(DOMAIN, TAG, 'EntryAbility onCreate');
   }
 
@@ -74,17 +79,19 @@ export default class EntryAbility extends UIAbility {
         const detail: string = JSON.stringify(error);
         AppStorage.set<string>('e1Status', 'E1 C-only FAIL');
         AppStorage.set<string>('e1Detail', detail);
+        AppStorage.set<string>('e2Status', 'E2 C network FAIL');
+        AppStorage.set<string>('e2Detail', detail);
         hilog.error(DOMAIN, TAG, 'ArkUI load failed: %{public}s', detail);
         return;
       }
 
       hilog.info(DOMAIN, TAG, 'EntryAbility onCreate observed=%{public}s',
         this.onCreateObserved ? 'true' : 'false');
-      this.runE1Probe().catch((error: Error) => {
+      this.runIntegratedProbe().catch((error: Error) => {
         const detail: string = cleanDetail(error);
-        AppStorage.set<string>('e1Status', 'E1 C-only FAIL');
-        AppStorage.set<string>('e1Detail', detail);
-        hilog.error(DOMAIN, TAG, 'E1_C_PROBE_RESULT|verdict=FAIL|detail=%{public}s', detail);
+        AppStorage.set<string>('e2Status', 'E2 C network FAIL');
+        AppStorage.set<string>('e2Detail', detail);
+        hilog.error(DOMAIN, TAG, 'E2_C_PROBE_RESULT|verdict=FAIL|detail=%{public}s', detail);
       });
     });
   }
@@ -211,6 +218,118 @@ export default class EntryAbility extends UIAbility {
       await delay(25);
     }
     throw new Error(`async callback timeout round=${round} received=${this.callbackCount}`);
+  }
+
+  private async runIntegratedProbe(): Promise<void> {
+    try {
+      await this.runE1Probe();
+    } catch (error) {
+      const detail: string = cleanDetail(error as Error);
+      AppStorage.set<string>('e1Status', 'E1 C-only FAIL');
+      AppStorage.set<string>('e1Detail', detail);
+      hilog.error(DOMAIN, TAG, 'E1_C_PROBE_RESULT|verdict=FAIL|detail=%{public}s', detail);
+      throw new Error(detail);
+    }
+    AppStorage.set<string>('e2Status', 'E2 C network RUNNING');
+    AppStorage.set<string>('e2Detail', 'E1 regression PASS; starting E2 network rounds');
+    await delay(50);
+    this.runE2Probe();
+  }
+
+  private runE2Probe(): void {
+    const versionResult: string = e2network.version();
+    if (versionResult !== 'e2-c-network-api24-probe/0.0.1') {
+      throw new Error(`E2 native version mismatch actual=${versionResult}`);
+    }
+
+    const baseline: ResourceSnapshot = probe.resourceSnapshot();
+    if (baseline.pid <= 0 || baseline.tid !== this.mainTid || baseline.fdCount <= 0 || baseline.threadCount <= 0) {
+      throw new Error(`invalid E2 resource baseline pid=${baseline.pid} tid=${baseline.tid}`);
+    }
+    let expectedHostAddress: string = '';
+    let expectedHostRoute: string = '';
+    let tcpHashAggregate: number = 2166136261;
+    let udpHashAggregate: number = 2166136261;
+    let hostHashAggregate: number = 2166136261;
+
+    hilog.info(DOMAIN, TAG,
+      'E2_INITIAL_RESOURCE|pid=%{public}d|mainTid=%{public}d|fd=%{public}d|threads=%{public}d|' +
+      'testRunner=false|scope=C-only',
+      baseline.pid, baseline.tid, baseline.fdCount, baseline.threadCount);
+
+    for (let round: number = 1; round <= FULL_ROUNDS; round++) {
+      AppStorage.set<string>('e2Detail',
+        `PID ${baseline.pid} | round ${round}/${FULL_ROUNDS} | TCP UDP DNS host endpoint`);
+      const before: ResourceSnapshot = probe.resourceSnapshot();
+      const result: E2NetworkRoundResult = e2network.runNetworkRound(round);
+      const after: ResourceSnapshot = probe.resourceSnapshot();
+
+      if (result.pid !== baseline.pid || result.tid !== this.mainTid || result.round !== round ||
+        result.tcpLoopBytes !== 4096 || result.tcpLoopHash === 0 || result.tcpLoopEpollEvents <= 0 ||
+        result.tcpLoopTimeoutMs < 15 || result.tcpLoopPeerClose !== 1 ||
+        result.tcpLoopRefusedErrno !== ECONNREFUSED || result.tcpLoopListenerCloseErrno !== EBADF ||
+        result.tcpLoopServerReads <= 1 || result.tcpLoopClientReads <= 1 ||
+        result.udpLoopClientToServer !== 3 || result.udpLoopServerToClient !== 3 ||
+        result.udpLoopClientAggregate === 0 || result.udpLoopServerAggregate === 0 ||
+        result.hostRoute.length === 0 || result.hostAddress.length === 0 || result.hostAddress.startsWith('127.') ||
+        result.hostTcpBytes !== 2048 || result.hostTcpHash === 0 ||
+        result.hostUdpDatagrams !== 3 || result.hostUdpAggregate === 0 ||
+        result.localhostCount <= 0 || result.invalidDnsCode === 0) {
+        throw new Error(`E2 native result assertion failed round=${round}`);
+      }
+      if (round === 1) {
+        expectedHostAddress = result.hostAddress;
+        expectedHostRoute = result.hostRoute;
+      } else if (result.hostAddress !== expectedHostAddress || result.hostRoute !== expectedHostRoute) {
+        throw new Error(`route-derived host endpoint drift round=${round} ` +
+          `expected=${expectedHostRoute}/${expectedHostAddress} actual=${result.hostRoute}/${result.hostAddress}`);
+      }
+      if (before.pid !== baseline.pid || after.pid !== baseline.pid ||
+        before.tid !== this.mainTid || after.tid !== this.mainTid ||
+        before.fdCount !== after.fdCount || before.threadCount !== after.threadCount ||
+        after.fdCount !== baseline.fdCount || after.threadCount !== baseline.threadCount) {
+        throw new Error(`E2 resource leak round=${round} fd=${before.fdCount}->${after.fdCount} ` +
+          `threads=${before.threadCount}->${after.threadCount} baseline=${baseline.fdCount}/${baseline.threadCount}`);
+      }
+
+      tcpHashAggregate = Math.imul((tcpHashAggregate ^ result.tcpLoopHash ^ round) >>> 0, 16777619) >>> 0;
+      udpHashAggregate = Math.imul((udpHashAggregate ^ result.udpLoopClientAggregate ^
+        result.udpLoopServerAggregate ^ round) >>> 0, 16777619) >>> 0;
+      hostHashAggregate = Math.imul((hostHashAggregate ^ result.hostTcpHash ^
+        result.hostUdpAggregate ^ round) >>> 0, 16777619) >>> 0;
+      hilog.info(DOMAIN, TAG,
+        'E2_ROUND_RESULT|verdict=PASS|round=%{public}d|pid=%{public}d|mainTid=%{public}d|' +
+        'tcpLoop=PASS|udpLoop=PASS|hostTcp=PASS|hostUdp=PASS|dns=PASS|events=PASS|' +
+        'hostAddress=%{public}s|tcpHash=%{public}s|udpClientAggregate=%{public}s|' +
+        'udpServerAggregate=%{public}s|hostTcpHash=%{public}s|hostUdpAggregate=%{public}s|' +
+        'beforeFd=%{public}d|afterFd=%{public}d|beforeThreads=%{public}d|afterThreads=%{public}d|' +
+        'fdLeak=false|threadLeak=false',
+        round, baseline.pid, this.mainTid, result.hostAddress, result.tcpLoopHash.toString(),
+        result.udpLoopClientAggregate.toString(), result.udpLoopServerAggregate.toString(),
+        result.hostTcpHash.toString(), result.hostUdpAggregate.toString(),
+        before.fdCount, after.fdCount, before.threadCount, after.threadCount);
+    }
+
+    const finalSnapshot: ResourceSnapshot = probe.resourceSnapshot();
+    if (finalSnapshot.pid !== baseline.pid || finalSnapshot.tid !== this.mainTid ||
+      finalSnapshot.fdCount !== baseline.fdCount || finalSnapshot.threadCount !== baseline.threadCount) {
+      throw new Error(`E2 final resource drift fd=${baseline.fdCount}->${finalSnapshot.fdCount} ` +
+        `threads=${baseline.threadCount}->${finalSnapshot.threadCount}`);
+    }
+    AppStorage.set<string>('e2Status', 'E2 C network PASS');
+    AppStorage.set<string>('e2Detail',
+      `PID ${baseline.pid} | 10 rounds | TCP/UDP loopback + host | DNS/error paths`);
+    hilog.info(DOMAIN, TAG,
+      'E2_C_PROBE_RESULT|verdict=PASS|pid=%{public}d|mainTid=%{public}d|rounds=10|' +
+      'tcpLoopback=10|udpLoopback=10|hostTcp=10|hostUdpDatagrams=30|dnsLocalhost=10|' +
+      'dnsInvalid=10|pollTimeout=10|peerClose=10|refused=10|listenerRecreated=10|' +
+      'hostRoute=%{public}s|hostAddress=%{public}s|tcpHashAggregate=%{public}s|' +
+      'udpHashAggregate=%{public}s|hostHashAggregate=%{public}s|' +
+      'baselineFd=%{public}d|finalFd=%{public}d|baselineThreads=%{public}d|finalThreads=%{public}d|' +
+      'fdLeak=false|threadLeak=false|testRunner=false|scope=C-only',
+      baseline.pid, this.mainTid, expectedHostRoute, expectedHostAddress,
+      tcpHashAggregate.toString(), udpHashAggregate.toString(), hostHashAggregate.toString(),
+      baseline.fdCount, finalSnapshot.fdCount, baseline.threadCount, finalSnapshot.threadCount);
   }
 
   private async runE1Probe(): Promise<void> {
