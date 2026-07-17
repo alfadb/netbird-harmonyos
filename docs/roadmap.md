@@ -8,7 +8,7 @@
 
 ### 当前实测
 
-- 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建unsigned API 24应用/测试HAP和双ABI普通Node-API库；API 24 Emulator上的最小`aa test`已执行通过，但它不是产品应用工程、产品测试套件或持续集成配置。
+- 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建 unsigned API 24 应用/测试 HAP 和双 ABI 普通 Node-API 库；`EV-E0-EMU24-20260717-0001` 已在 API 24 x86_64 Emulator 上完成三次普通 `EntryAbility` 冷启动、可见 UI、停止、sidecar、卸载和清理，并已取得 `record_status: reviewed-pass`、`verdict: pass`，E0 已关闭；下一执行门为 E1，且它不是产品应用工程、产品测试套件或持续集成配置。
 - HarmonyOS 命令行工具链、SDK、Linux Emulator、镜像和基础恢复入口已经准备完成。
 - Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化；该观测要求 E7 使用有界短循环并保留故障证据，不把 25 分钟以上长稳列为 Emulator 总门必过项，也不缩减 E0-E8 中可在 Emulator 客观执行的 VPN 验证。
 
@@ -20,13 +20,13 @@
 
 ### R1研究进度
 
-2026-07-17，[R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)已记录固定 NetBird/Go/SDK 的编译和静态风险，并用 CLI 6.1.1.290、API 24、Hvigor 6.24.3 实际构建 unsigned Stage 应用/测试 HAP 及 arm64-v8a/x86_64 `libprobe.so`；后续 API 24 Emulator 研究确认可见 pixelMap、普通 `EntryAbility` 仍被 `10106102` 阻塞，而短生命周期 TestRunner 可直接完成 Node-API 初始化、`ping=pong` 和版本断言。0006 的 Go 1.25.12 Linux/amd64 c-shared 直接 `dlopen` 在 initial-exec TLS 处受控失败；0007 进一步证明无 Go、无 `res_search`、无 `NODELETE`/`SYMBOLIC` 的普通 initial-exec TLS so 同样被拒绝，且正确 `DT_NEEDED` wrapper 的 runtime 传递加载也在依赖 Go so 处被拒绝。`ADJ-20260717-0001` 后的 0008 确认公开 Native Child API 对 API 14 及以后只支持 PC/2in1、Tablet，因而在实现前暂停 API 24 phone B 族。第二个六席 T0 共识 `ADJ-20260717-0002` 随后批准单次 Tier1 纯 C 动态 TLS loader 探针；0009 用最终 ELF 实证确认 IE 为 `PT_TLS+TPOFF64+STATIC_TLS`、classic GD 为 `DTPMOD64+DTPOFF64+__tls_get_addr`、TLSDESC gnu2 为 `R_X86_64_TLSDESC`，并附加 local-dynamic，所有 link 均禁用 relax。API 24 x86_64 TestRunner baseline 先通过，IE 按 0007 类别拒绝且无环境漂移，classic GD、TLSDESC 和 local-dynamic 均成功加载；每个动态模型的主线程、加载前等待线程和加载后新线程分别以不同值完成初值42、100轮 set/read、reset42，0 错误、0 crash，Tier1 为 `PASS`，不触发停止该 x86_64 元组。该正面只证明精确 C loader 模型，不证明 Go 1.25.12 会生成或支持这些模型；Go `#71953`、CL `644975`、CL `696635`、PR `75048` 均未合并、未发布，只作下一道独立 Tier2 门参考。arm64、华为商用 HarmonyOS 具名真机和其他设备/loader/toolchain 保持 provisional，补丁数仍为 0；R0、R1、R2 均未退出，也没有新增产品证据。
+2026-07-17，[R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)已记录固定 NetBird/Go/SDK 的编译和静态风险，并用 CLI 6.1.1.290、API 24、Hvigor 6.24.3 实际构建 unsigned Stage 应用/测试 HAP 及 arm64-v8a/x86_64 `libprobe.so`；后续 API 24 Emulator 研究当时确认可见 pixelMap、普通 `EntryAbility` 被 `10106102` 阻塞，而短生命周期 TestRunner 可直接完成 Node-API 初始化、`ping=pong` 和版本断言；后来的 `EV-E0-EMU24-20260717-0001` 已用正确解锁序列消除该运行阻塞，并已作为 E0 `reviewed-pass` 关闭。0006 的 Go 1.25.12 Linux/amd64 c-shared 直接 `dlopen` 在 initial-exec TLS 处受控失败；0007 进一步证明无 Go、无 `res_search`、无 `NODELETE`/`SYMBOLIC` 的普通 initial-exec TLS so 同样被拒绝，且正确 `DT_NEEDED` wrapper 的 runtime 传递加载也在依赖 Go so 处被拒绝。`ADJ-20260717-0001` 后的 0008 确认公开 Native Child API 对 API 14 及以后只支持 PC/2in1、Tablet，因而在实现前暂停 API 24 phone B 族。第二个六席 T0 共识 `ADJ-20260717-0002` 随后批准单次 Tier1 纯 C 动态 TLS loader 探针；0009 用最终 ELF 实证确认 IE 为 `PT_TLS+TPOFF64+STATIC_TLS`、classic GD 为 `DTPMOD64+DTPOFF64+__tls_get_addr`、TLSDESC gnu2 为 `R_X86_64_TLSDESC`，并附加 local-dynamic，所有 link 均禁用 relax。API 24 x86_64 TestRunner baseline 先通过，IE 按 0007 类别拒绝且无环境漂移，classic GD、TLSDESC 和 local-dynamic 均成功加载；每个动态模型的主线程、加载前等待线程和加载后新线程分别以不同值完成初值42、100轮 set/read、reset42，0 错误、0 crash，Tier1 为 `PASS`，不触发停止该 x86_64 元组。该正面只证明精确 C loader 模型，不证明 Go 1.25.12 会生成或支持这些模型；Go `#71953`、CL `644975`、CL `696635`、PR `75048` 均未合并、未发布，只作下一道独立 Tier2 门参考。arm64、华为商用 HarmonyOS 具名真机和其他设备/loader/toolchain 保持 provisional，补丁数仍为 0；R0、R1、R2 均未退出，也没有新增产品证据。
 
 ## 当前基线与总门状态
 
 NetBird 基线跟随最新正式 release，不采用未发布分支、patch set 或提案作为当前门输入。2026-07-17 核对时最新正式 release 仍为 `v0.74.6`、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`，其 `go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`，官方 release run `29415596187` 成功；Go 1.26.5 不是 NetBird 声明基线，PS4 尚未发布，二者均不得作为当前门输入。
 
-API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：普通 `EntryAbility` 仍被 `10106102` 阻塞，NetBird 官方 Go 基线制品的 loader initial-exec TLS 路径失败，VPN Extension 授权、TUN 配置、真实 `protect` 绕行和双向数据泵等 VPN runtime 尚未验证。既有 C-only 正面可以作为后续 E 项输入，但不关闭总门、不退出任何正式 R 阶段，也不授权真机执行。
+API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：`EV-E0-EMU24-20260717-0001` 已消除普通 `EntryAbility` 的 `10106102` 运行阻塞，并以 `record_status: reviewed-pass`、`verdict: pass` 关闭 E0；下一执行门为 E1。NetBird 官方 Go 基线制品的 loader initial-exec TLS 路径仍失败，E1-E7 及 VPN Extension 授权、TUN 配置、真实 `protect` 绕行和双向数据泵等 VPN runtime 尚未验证。既有 C-only 正面可以作为后续 E 项输入，但不关闭总门、不退出任何正式 R 阶段，也不授权真机执行。
 
 ## T0 共识记录
 

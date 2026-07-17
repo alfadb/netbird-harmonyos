@@ -10,18 +10,6 @@
       targets: [
         'probe'
       ]
-    },
-    nativeLib: {
-      debugSymbol: {
-        strip: true,
-        exclude: [
-          '**/libtls-ie.so',
-          '**/libtls-gd.so',
-          '**/libtls-desc.so',
-          '**/libtls-ld.so',
-          '**/libgoprobe.so'
-        ]
-      }
     }
   },
   targets: [

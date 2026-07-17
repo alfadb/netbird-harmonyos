@@ -1,0 +1,27 @@
+CST 2026-07-17 16:54:59.770  2907  2907 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 16:54:59.815  2907  2907 I A02900/R1Api24Probe: EntryAbility onCreate
+CST 2026-07-17 16:54:59.990  2907  2907 I A02900/R1Api24Probe: EntryAbility windowStage onWindowStageCreate
+CST 2026-07-17 16:55:00.029  2907  2907 I A02900/R1Api24Probe: EntryAbility foreground onForeground
+CST 2026-07-17 16:55:00.163  2907  2907 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 16:55:00.163  2907  2907 I A02900/R1Api24Probe: Node-API version invoked
+CST 2026-07-17 16:55:00.163  2907  2907 I A02900/R1Api24Probe: Node-API result ping=pong version=r1-api24-probe/0.0.1
+CST 2026-07-17 16:55:00.163  2907  2907 I A02900/R1Api24Probe: EntryAbility onCreate observed=true
+CST 2026-07-17 16:55:05.746  2966  2966 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 16:55:05.775  2966  2966 I A02900/R1Api24Probe: EntryAbility onCreate
+CST 2026-07-17 16:55:05.866  2966  2966 I A02900/R1Api24Probe: EntryAbility windowStage onWindowStageCreate
+CST 2026-07-17 16:55:05.883  2966  2966 I A02900/R1Api24Probe: EntryAbility foreground onForeground
+CST 2026-07-17 16:55:05.947  2966  2966 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 16:55:05.947  2966  2966 I A02900/R1Api24Probe: Node-API version invoked
+CST 2026-07-17 16:55:05.947  2966  2966 I A02900/R1Api24Probe: Node-API result ping=pong version=r1-api24-probe/0.0.1
+CST 2026-07-17 16:55:05.947  2966  2966 I A02900/R1Api24Probe: EntryAbility onCreate observed=true
+CST 2026-07-17 16:55:11.892  3123  3123 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 16:55:11.923  3123  3123 I A02900/R1Api24Probe: EntryAbility onCreate
+CST 2026-07-17 16:55:12.005  3123  3123 I A02900/R1Api24Probe: EntryAbility windowStage onWindowStageCreate
+CST 2026-07-17 16:55:12.026  3123  3123 I A02900/R1Api24Probe: EntryAbility foreground onForeground
+CST 2026-07-17 16:55:12.087  3123  3123 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 16:55:12.087  3123  3123 I A02900/R1Api24Probe: Node-API version invoked
+CST 2026-07-17 16:55:12.087  3123  3123 I A02900/R1Api24Probe: Node-API result ping=pong version=r1-api24-probe/0.0.1
+CST 2026-07-17 16:55:12.087  3123  3123 I A02900/R1Api24Probe: EntryAbility onCreate observed=true
+CST 2026-07-17 16:55:18.214  3242  3242 I A02900/R1Api24Probe: Node-API module initialized
+CST 2026-07-17 16:55:18.229  3242  3242 I A02900/R1Api24Probe: Node-API ping invoked
+CST 2026-07-17 16:55:18.229  3242  3242 I A02900/R1Api24Probe: Node-API version invoked

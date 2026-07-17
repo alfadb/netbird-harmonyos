@@ -27,7 +27,7 @@ HarmonyOS 包模型资料：
 
 API 24 x86_64 phone Emulator 是任何真机执行前的投入总门：其上所有客观可执行项必须按 E0-E8 先完成并通过，E8 未 `OPEN` 时禁止任何真机执行。该顺序不把 Emulator 提升为 arm64 或产品支持替代物；x86_64 Emulator 的 PASS 与 FAIL 均不得外推到 arm64、具名真机或华为商用 HarmonyOS，禁止真机也不是对这些目标的负面技术结论。
 
-arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`，已知阻塞是普通 `EntryAbility` 的 `10106102`、NetBird 官方 Go loader initial-exec TLS 失败和 VPN runtime 未验证。
+arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`：E0 普通 `EntryAbility` 已为 `record_status: reviewed-pass`、`verdict: pass` 并已关闭，下一执行门为 E1；NetBird 官方 Go loader initial-exec TLS 仍失败，E1-E7 与 VPN runtime 仍未验证。
 
 ### 不作出的承诺
 

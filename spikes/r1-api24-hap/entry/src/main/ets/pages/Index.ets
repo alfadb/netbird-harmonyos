@@ -3,11 +3,11 @@
 struct Index {
   build() {
     Column({ space: 12 }) {
-      Text('R1 API 24')
+      Text('E0 API 24')
         .fontSize(28)
         .fontWeight(FontWeight.Bold)
         .fontColor('#17324D')
-      Text('Ready')
+      Text('EntryAbility running')
         .fontSize(16)
         .fontColor('#3D4A55')
     }

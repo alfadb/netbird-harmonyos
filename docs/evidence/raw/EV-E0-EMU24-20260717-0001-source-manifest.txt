@@ -1,0 +1,14 @@
+29b24c3c5123decccaaf8b8fd77f735a8e88bf00ea286621dfed5150def35fb9  spikes/r1-api24-hap/build-profile.json5
+561d3af07f6c82dbb7bb20bc1b6f719d0d83d0ca6b0131657b8fab55e255b7b4  spikes/r1-api24-hap/hvigorfile.ts
+d87996e1fcdbd5cf760fab61fedb04384b8c602def0322d4615eed2c59f2e659  spikes/r1-api24-hap/oh-package.json5
+ad4a06d241c6568ab97edc2204854d1fff16ab4e96c0336db775d55823f14f2d  spikes/r1-api24-hap/entry/build-profile.json5
+a19e62f3f825b2c092ef50388f719be474da515ff362a7b1e22fcb9b5993b882  spikes/r1-api24-hap/entry/oh-package.json5
+6a688cb49dd465e9fad4be471b7f7f6f78c2d9085f63db9ef8ab3a6ef1e9d63b  spikes/r1-api24-hap/entry/src/main/module.json5
+e3556cdad42d927d5e884c6d16dea4315a1bba59dae2c2d631db55c1f4047a96  spikes/r1-api24-hap/entry/src/main/cpp/CMakeLists.txt
+29588f196a67fcca12ff4c765365cd2b40448258996414bcfb32e68529521d2c  spikes/r1-api24-hap/entry/src/main/cpp/e0_probe.cpp
+0f58f411b9b63524555afcd35b9d8aa8cb5e7e3c6ae038646418b7b311571064  spikes/r1-api24-hap/entry/src/main/cpp/types/libprobe/index.d.ts
+e53d4d74e6a99ae3e7a46a97a87017b55cad8baa91b8a73a16cf1e92e6bc1812  spikes/r1-api24-hap/entry/src/main/ets/entryability/EntryAbility.ets
+b3fa37ab99c4be48a36b8282cd687517542335422d429efe9156a56466caf136  spikes/r1-api24-hap/entry/src/main/ets/pages/Index.ets
+1ba6a8eb982795c050ba39a99e8e0c88a7796f4b9ce5bd477e26dcb2d0a96222  spikes/r1-api24-hap/entry/src/ohosTest/module.json5
+dd516d649972d9313f32bfcd7f7021572af6ad12c3fbe0defde746eeb6a5af36  spikes/r1-api24-hap/entry/src/ohosTest/ets/testrunner/OpenHarmonyTestRunner.ets
+20a6a113a97cc16404c89ed3f3a4427188cc5d25d313e814278b7d41bd73cd39  spikes/r1-api24-hap/e0-emulator-run.sh
