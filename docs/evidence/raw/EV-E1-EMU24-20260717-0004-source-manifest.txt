@@ -1,0 +1,9 @@
+121d9ef59e8268c02be03270e46f7ef8c7038d84a95408230a118059e3b8d6f5  spikes/r1-api24-hap/e1-c-emulator-run.sh
+c0e44b6d282e9da65b5503c07e4a4e723549faa518ee8fd290b95ee201631707  spikes/r1-api24-hap/entry/src/main/cpp/CMakeLists.txt
+42ef6e426010c78ce68ad2eaba6a2f5abc435ea03ee68d21df1b5a633c3461c6  spikes/r1-api24-hap/entry/src/main/cpp/e1_c_probe.cpp
+1a3c7d9331ffc3afaabaca5b2351730dbce469d15b9e34a8b51e164f89467fd6  spikes/r1-api24-hap/entry/src/main/cpp/types/libprobe/index.d.ts
+dce17521994f149c30cc5d779bcc0d02e45f6db233c0ffdb75bcedc357ba81fb  spikes/r1-api24-hap/entry/src/main/ets/entryability/EntryAbility.ets
+dea63b113706e3e5c5814509f17f3c8135638cddad315f8af6ce42ff8c3eec9b  spikes/r1-api24-hap/entry/src/main/ets/pages/Index.ets
+6a688cb49dd465e9fad4be471b7f7f6f78c2d9085f63db9ef8ab3a6ef1e9d63b  spikes/r1-api24-hap/entry/src/main/module.json5
+ad4a06d241c6568ab97edc2204854d1fff16ab4e96c0336db775d55823f14f2d  spikes/r1-api24-hap/entry/build-profile.json5
+29b24c3c5123decccaaf8b8fd77f735a8e88bf00ea286621dfed5150def35fb9  spikes/r1-api24-hap/build-profile.json5

@@ -1,0 +1,671 @@
+EVIDENCE_ID=EV-E1-EMU24-20260717-0003
+STARTED_AT=2026-07-17T17:50:04+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+GIT_HEAD=470fc466192759f8cb51efe955e2293db93addf5
+RECORD_SCOPE=E1_C-only_ordinary_EntryAbility_no_TestRunner_no_Go_no_NetBird_no_PS4
+TARGET_TUPLE=HarmonyOS_6.1.1(24),software_6.1.0.125,phone_Emulator,x86_64,SDK_API24,Beta_HDC_3.2.0e,unsigned_debug_normal_app
+TEST_RUNNER_USED=false
+PHYSICAL_DEVICE_USED=false
+GO_NETBIRD_PS4_TOUCHED=false
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:clean... after 53 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 261 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 5 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 50 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 6 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 3 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 6 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 14 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 78 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 3 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 9 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 123 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 3 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 6 s 446 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 179 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 357 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 109 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 814 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 468 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 841 ms [39m
+CLEAN_BUILD_VERDICT=pass
+$ install -m 0644 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-application-hap.bin
+$ sha256sum /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-build.log /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+dfc102cd513ae15d4340977d1d37a8932568db5a8842c42274093dc819c16288  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+dfc102cd513ae15d4340977d1d37a8932568db5a8842c42274093dc819c16288  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-application-hap.bin
+caed38130bef9987fff2f5c7be9281675aeeb52d2a3fef7c402d4b6a70c69fca  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin
+2af163236846a761685d83bbd308fae595762a197d4199cd1459dcf87afa820f  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-build.log
+c7d241f14ecd4d3e7c9b9ae34eff1f5da40bec53686717870227285b2e97f56a  /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+$ stat -c %n\ size=%s\ mtime=%y /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-build.log
+/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap size=2658993 mtime=2026-07-17 17:50:21.014010860 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-application-hap.bin size=2658993 mtime=2026-07-17 17:50:22.508032641 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin size=21904 mtime=2026-07-17 17:50:22.511032685 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-build.log size=3012 mtime=2026-07-17 17:50:21.062011560 +0800
+$ unzip -Z1 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+module.json
+resources.index
+libs/x86_64/libc++_shared.so
+libs/x86_64/libprobe.so
+libs/arm64-v8a/libc++_shared.so
+libs/arm64-v8a/libprobe.so
+resources/base/media/start_icon.svg
+resources/base/media/app_icon.svg
+resources/base/profile/main_pages.json
+ets/modules.abc
+ets/sourceMaps.map
+pack.info
+pkgSdkInfo.json
+FORBIDDEN_HISTORICAL_MEMBER=false
+{"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":60101024,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"0.0.1","versionCode":1,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":60101024,"vendor":"alfadb","bundleName":"cn.alfadb.netbird.r1probe","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"virtualMachine":"ark24.0.0.0","mainElement":"EntryAbility","installationFree":false,"deliveryWithInstall":true,"requestPermissions":[{"name":"ohos.permission.INTERNET"}],"description":"$string:module_description","compileMode":"esmodule","type":"entry","dependencies":[],"abilities":[{"exported":true,"iconId":16777222,"startWindowIconId":16777222,"icon":"$media:start_icon","startWindowIcon":"$media:start_icon","startWindowBackgroundId":16777221,"description":"$string:ability_description","label":"$string:ability_name","skills":[{"entities":["entity.system.home"],"actions":["ohos.want.action.home"]}],"srcEntry":"./ets/entryability/EntryAbility.ets","descriptionId":16777218,"labelId":16777219,"startWindowBackground":"$color:start_window_background","name":"EntryAbility"}],"deviceTypes":["phone"],"pages":"$profile:main_pages","descriptionId":16777220,"name":"entry","packageName":"entry"}}$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=35c8e23c3c29ab7328ba264997b15296c297bb4a, stripped
+$ readelf -d /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-libprobe-x86_64.bin
+
+Dynamic section at offset 0x4ab0 contains 28 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libace_napi.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libhilog_ndk.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc++_shared.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000000e (SONAME)             Library soname: [libprobe.so]
+ 0x000000000000001e (FLAGS)              BIND_NOW
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW
+ 0x0000000000000007 (RELA)               0xcd0
+ 0x0000000000000008 (RELASZ)             744 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffff9 (RELACOUNT)          26
+ 0x0000000000000017 (JMPREL)             0xfb8
+ 0x0000000000000002 (PLTRELSZ)           1152 (bytes)
+ 0x0000000000000003 (PLTGOT)             0x6c90
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000006 (SYMTAB)             0x2e8
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000005 (STRTAB)             0x998
+ 0x000000000000000a (STRSZ)              824 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0x7c8
+ 0x0000000000000004 (HASH)               0x7f0
+ 0x0000000000000019 (INIT_ARRAY)         0x6810
+ 0x000000000000001b (INIT_ARRAYSZ)       16 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x6820
+ 0x000000000000001c (FINI_ARRAYSZ)       16 (bytes)
+ 0x000000000000000c (INIT)               0x54eb
+ 0x000000000000000d (FINI)               0x54ee
+ 0x0000000000000000 (NULL)               0x0
+PUBLIC_THREADSAFE_SYMBOL_AUDIT=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-source-manifest.txt /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-source.tar
+12b9cefc886db9bb53bdac4494092376afc7c364b552800077b04d90c062562c  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-source-manifest.txt
+37cb2c120e36158092e7005f25bc6edeceedb8770933c6c1454f476231e46b37  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0003-source.tar
+SOURCE_INPUT_COUNT=9
+TOOLCHAIN host=Linux\ host-dev-alfadb-full\ 7.0.14-4-pve\ #1\ SMP\ PREEMPT_DYNAMIC\ PMX\ 7.0.14-4\ \(2026-07-07T07:27Z\)\ x86_64\ GNU/Linux
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw --version
+6.24.3
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+$ node --version
+v24.15.0
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm --version
+6.1.2.285
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+QEMU_CURRENT_BOOT_START_LINE=32052
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=1089323
+EMULATOR_START_VERDICT=pass
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=1 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=2 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=3 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=4 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=5 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=6 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECTIVITY attempt=7 targets=$'127.0.0.1:10000\t\tTCP\tConnected\tlocalhost' shell=e1-c-connect-7 distribution=HarmonyOS\ 
+CONNECTIVITY_VERDICT=pass
+BOOT_READINESS attempt=1 qemu.boot='' shell=e1-c-readiness-1
+BOOT_READINESS attempt=2 qemu.boot='' shell=e1-c-readiness-2
+BOOT_READINESS attempt=3 qemu.boot='' shell=e1-c-readiness-3
+BOOT_READINESS attempt=4 qemu.boot='' shell=e1-c-readiness-4
+BOOT_READINESS attempt=5 qemu.boot='' shell=e1-c-readiness-5
+BOOT_READINESS attempt=6 qemu.boot='' shell=e1-c-readiness-6
+BOOT_READINESS attempt=7 qemu.boot='' shell=e1-c-readiness-7
+BOOT_READINESS attempt=8 qemu.boot='' shell=e1-c-readiness-8
+BOOT_READINESS attempt=9 qemu.boot='' shell=e1-c-readiness-9
+BOOT_READINESS attempt=10 qemu.boot='' shell=e1-c-readiness-10
+BOOT_READINESS attempt=11 qemu.boot='' shell=e1-c-readiness-11
+BOOT_READINESS attempt=12 qemu.boot='' shell=e1-c-readiness-12
+BOOT_READINESS attempt=13 qemu.boot='' shell=e1-c-readiness-13
+BOOT_READINESS attempt=14 qemu.boot='' shell=e1-c-readiness-14
+BOOT_READINESS attempt=15 qemu.boot='' shell=e1-c-readiness-15
+BOOT_READINESS attempt=16 qemu.boot='' shell=e1-c-readiness-16
+BOOT_READINESS attempt=17 qemu.boot='' shell=e1-c-readiness-17
+BOOT_READINESS attempt=18 qemu.boot='' shell=e1-c-readiness-18
+BOOT_READINESS attempt=19 qemu.boot='' shell=e1-c-readiness-19
+BOOT_READINESS attempt=20 qemu.boot='' shell=e1-c-readiness-20
+BOOT_READINESS attempt=21 qemu.boot='' shell=e1-c-readiness-21
+BOOT_READINESS attempt=22 qemu.boot=2026-07-17\ 17:51:13.335132963528341184\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=e1-c-readiness-22
+READINESS boot.completed=Get\ parameter\ \"boot.completed\"\ fail\!\ errNum\ is:1002\! wms.ready=Get\ parameter\ \"bootevent.wms.ready\"\ fail\!\ errNum\ is:1002\! lockscreen.ready=Get\ parameter\ \"bootevent.lockscreen.ready\"\ fail\!\ errNum\ is:1002\! qemu.boot=2026-07-17\ 17:51:13.335132963528341184\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed.
+READINESS_VERDICT=pass
+FileTransfer finish, Size:2658993, File count = 1, time:22ms rate:120863.32kB/s
+INSTALL_ATTEMPT=1 OUTPUT=install\ bundle\ successfully.
+INSTALL_VERDICT=pass
+UNLOCK_SEQUENCE wakeup=WakeupDevice\ is\ called home=No\ Error swipe=No\ Error
+cn.alfadb.netbird.r1probe:
+{
+    "appId": "cn.alfadb.netbird.r1probe_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+        "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.r1probe",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.r1probe",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777222,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777222,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.r1probe",
+        "nativeLibraryPath": "libs/x86_64",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.r1probe",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020062,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784221045861,
+    "gid": 20020062,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.r1probe",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.r1probe",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+                    "iconId": 16777222,
+                    "iconPath": "$media:start_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:start_icon",
+                    "startWindowIconId": 16777222,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777222,
+            "iconPath": "$media:start_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.r1probe",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry"
+    ],
+    "installTime": 1784281876448,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry"
+    ],
+    "moduleNames": [
+        "entry"
+    ],
+    "modulePublicDirs": [
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.r1probe",
+    "oldAppIds": [
+        "cn.alfadb.netbird.r1probe_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020062,
+    "updateTime": 1784281876448,
+    "userInfo": [
+        {
+            "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+            "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784221045861,
+            "gids": [
+                20020062
+            ],
+            "installTime": 1784281876448,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020062,
+            "updateTime": 1784281876448
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+NORMAL_ENTRY_ABILITY_AUDIT=pass
+COLD_START_1_BEFORE_PID=''
+Log type core,app,only_prerelease buffer clear successfully
+COLD_START_1_AA_OUTPUT=start\ ability\ successfully.
+COLD_START_1_AA_SEMANTIC=pass
+COLD_START_1_PID=2982
+COLD_START_1_MARKER_ATTEMPT=1 PID=2982 PASS=0 FAIL=0
+COLD_START_1_MARKER_ATTEMPT=2 PID=2982 PASS=1 FAIL=0
+COLD_START_1_COUNTS warmup=1 warmupCallbacks=19 rounds=10 buffers=1000 callbacks=1000 invalidCallbacks=0 fd=10 pthreadStart=10 pthreadFinish=10
+FAIL_REASON=per-PID E1 evidence count mismatch on run 1
+force stop process successfully.
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+TRAP_EXIT_CODE=1 RESULT=fail

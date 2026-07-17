@@ -1,0 +1,19 @@
+EVIDENCE_ID=EV-E1-EMU24-20260717-0001
+STARTED_AT=2026-07-17T17:44:31+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+GIT_HEAD=470fc466192759f8cb51efe955e2293db93addf5
+RECORD_SCOPE=E1_C-only_ordinary_EntryAbility_no_TestRunner_no_Go_no_NetBird_no_PS4
+TARGET_TUPLE=HarmonyOS_6.1.1(24),software_6.1.0.125,phone_Emulator,x86_64,SDK_API24,Beta_HDC_3.2.0e,unsigned_debug_normal_app
+TEST_RUNNER_USED=false
+PHYSICAL_DEVICE_USED=false
+GO_NETBIRD_PS4_TOUCHED=false
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [31mERROR: 00304004 Not Found[31m
+Error Message: Hvigor config file /home/worker/work/base/netbird-harmonyos/hvigor/hvigor-config.json5 does not exist.[31m
+
+* Try the following: [31m
+  > Check whether the hvigor-config.json5 file exists.[39m
+[Fail]Not match target founded, check connect-key please
+[Fail]Not match target founded, check connect-key please
+TRAP_EXIT_CODE=255 RESULT=blocked

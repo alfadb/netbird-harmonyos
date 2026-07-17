@@ -12,7 +12,7 @@
 | R0 退出 | 未退出 |
 | 首目标 | 候选为 HarmonyOS API 24，尚未因真机缺失而完成目标元组锁定 |
 | 普通第三方 VPN 路径 | 尚未验证 |
-| API 24 x86_64 phone Emulator 总门 | `CLOSED`；E0 已 `reviewed-pass` 并关闭，下一执行门为 E1，E1-E8 未全部通过 |
+| API 24 x86_64 phone Emulator 总门 | `CLOSED`；E0 已 `reviewed-pass` 并关闭；E1 C-only 子证据已 `reviewed-pass/pass`，但官方 Go loader 仍失败，E1 整体仍 blocked、E1-E8 未全部通过；下一可执行门为 E2 C 网络 |
 | 真机执行 | 禁止；仅 E8 `OPEN` 后允许 |
 
 R0 未退出意味着任何研究结果都不能表述为产品可行性、真机支持或发布承诺，也不能据此跳过后续证据门。
@@ -114,7 +114,7 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 ## 当前未满足项
 
 - 尚未具名量产设备、完整系统版本、架构细节和最终支持目标元组。
-- API 24 x86_64 phone Emulator 总门为 `CLOSED`：E0 普通 `EntryAbility` 记录已为 `record_status: reviewed-pass`、`verdict: pass` 并已关闭，下一执行门为 E1；NetBird 官方 Go loader initial-exec TLS 路径失败，E1-E7 与 VPN runtime 尚未验证。
+- API 24 x86_64 phone Emulator 总门为 `CLOSED`：E0 普通 `EntryAbility` 记录已为 `record_status: reviewed-pass`、`verdict: pass` 并已关闭；E1 C-only ArkTS/native/fd 子证据 `EV-E1-EMU24-20260717-0005` 已为 `record_status: reviewed-pass`、`verdict: pass`，独立审查为 0 blocker/major、5 minor，且不改变 measured artifact。NetBird 官方 Go loader initial-exec TLS 路径仍失败，E1 整体仍 blocked，E2-E7 与 VPN runtime 尚未验证；下一可执行门为 E2 C 网络。
 - E0-E8 尚未全部形成 `reviewed-pass`、`verdict: pass` 且目标元组/哈希一致的证据；因此当前禁止任何真机执行。
 - 真机 HDC 安装、启动、日志、卸载闭环尚未建立，且只能在 E8 `OPEN` 后执行。
 - 普通第三方 VPN、SysCap、虚拟接口 fd、`protect`、后台生命周期和真实流量尚无合格的 Emulator 总门证据，也无后续真机证据。

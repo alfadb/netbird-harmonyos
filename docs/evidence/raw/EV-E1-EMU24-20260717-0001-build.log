@@ -1,0 +1,6 @@
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [31mERROR: 00304004 Not Found[31m
+Error Message: Hvigor config file /home/worker/work/base/netbird-harmonyos/hvigor/hvigor-config.json5 does not exist.[31m
+
+* Try the following: [31m
+  > Check whether the hvigor-config.json5 file exists.[39m

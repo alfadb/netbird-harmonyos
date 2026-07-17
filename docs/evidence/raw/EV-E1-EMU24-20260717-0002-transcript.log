@@ -1,0 +1,879 @@
+EVIDENCE_ID=EV-E1-EMU24-20260717-0002
+STARTED_AT=2026-07-17T17:45:35+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+GIT_HEAD=470fc466192759f8cb51efe955e2293db93addf5
+RECORD_SCOPE=E1_C-only_ordinary_EntryAbility_no_TestRunner_no_Go_no_NetBird_no_PS4
+TARGET_TUPLE=HarmonyOS_6.1.1(24),software_6.1.0.125,phone_Emulator,x86_64,SDK_API24,Beta_HDC_3.2.0e,unsigned_debug_normal_app
+TEST_RUNNER_USED=false
+PHYSICAL_DEVICE_USED=false
+GO_NETBIRD_PS4_TOUCHED=false
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:clean... after 45 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 205 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 5 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 58 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 9 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 4 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 9 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 5 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 2 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 15 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 65 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 3 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 121 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 6 s 846 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 167 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 669 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 87 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 7 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 878 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 452 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 783 ms [39m
+CLEAN_BUILD_VERDICT=pass
+$ install -m 0644 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-application-hap.bin
+$ sha256sum /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-build.log /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+255a918f83659afc28ea7b31be2fc840151754df4628a7c519710e2a9463b185  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+255a918f83659afc28ea7b31be2fc840151754df4628a7c519710e2a9463b185  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-application-hap.bin
+7e7d72a431ce1a24af9a3593b13e37c89d91ad86c23577ebc656e5205f55b3b5  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin
+4df608bfd1bdcb621530b0edc48f654459d63a3be0698d69b3a1fa177c86c04c  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-build.log
+c7d241f14ecd4d3e7c9b9ae34eff1f5da40bec53686717870227285b2e97f56a  /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+$ stat -c %n\ size=%s\ mtime=%y /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-application-hap.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-build.log
+/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap size=2654152 mtime=2026-07-17 17:45:51.811086165 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-application-hap.bin size=2654152 mtime=2026-07-17 17:45:52.966103004 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin size=21616 mtime=2026-07-17 17:45:52.969103047 +0800
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-build.log size=3011 mtime=2026-07-17 17:45:51.853086777 +0800
+$ unzip -Z1 /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+module.json
+resources.index
+libs/x86_64/libprobe.so
+libs/x86_64/libc++_shared.so
+libs/arm64-v8a/libc++_shared.so
+libs/arm64-v8a/libprobe.so
+resources/base/media/start_icon.svg
+resources/base/media/app_icon.svg
+resources/base/profile/main_pages.json
+ets/sourceMaps.map
+ets/modules.abc
+pack.info
+pkgSdkInfo.json
+FORBIDDEN_HISTORICAL_MEMBER=false
+{"app":{"iconId":16777217,"debug":true,"targetPatchAPIVersion":0,"minAPIVersion":60101024,"icon":"$media:app_icon","buildMode":"debug","label":"$string:app_name","bundleType":"app","versionName":"0.0.1","versionCode":1,"appEnvironments":[],"compileSdkType":"HarmonyOS","labelId":16777216,"compileSdkVersion":"6.1.1.125","targetAPIVersion":60101024,"vendor":"alfadb","bundleName":"cn.alfadb.netbird.r1probe","apiReleaseType":"Release","targetMinorAPIVersion":0},"module":{"virtualMachine":"ark24.0.0.0","mainElement":"EntryAbility","installationFree":false,"deliveryWithInstall":true,"requestPermissions":[{"name":"ohos.permission.INTERNET"}],"description":"$string:module_description","compileMode":"esmodule","type":"entry","dependencies":[],"abilities":[{"exported":true,"iconId":16777222,"startWindowIconId":16777222,"icon":"$media:start_icon","startWindowIcon":"$media:start_icon","startWindowBackgroundId":16777221,"description":"$string:ability_description","label":"$string:ability_name","skills":[{"entities":["entity.system.home"],"actions":["ohos.want.action.home"]}],"srcEntry":"./ets/entryability/EntryAbility.ets","descriptionId":16777218,"labelId":16777219,"startWindowBackground":"$color:start_window_background","name":"EntryAbility"}],"deviceTypes":["phone"],"pages":"$profile:main_pages","descriptionId":16777220,"name":"entry","packageName":"entry"}}$ file /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin
+/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=c7e11b5769acaa5b59f6bf75b2fc39b20ffcce4f, stripped
+$ readelf -d /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-libprobe-x86_64.bin
+
+Dynamic section at offset 0x4990 contains 28 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libace_napi.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libhilog_ndk.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc++_shared.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000000e (SONAME)             Library soname: [libprobe.so]
+ 0x000000000000001e (FLAGS)              BIND_NOW
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW
+ 0x0000000000000007 (RELA)               0xcd0
+ 0x0000000000000008 (RELASZ)             744 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffff9 (RELACOUNT)          26
+ 0x0000000000000017 (JMPREL)             0xfb8
+ 0x0000000000000002 (PLTRELSZ)           1152 (bytes)
+ 0x0000000000000003 (PLTGOT)             0x6b70
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000006 (SYMTAB)             0x2e8
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000005 (STRTAB)             0x998
+ 0x000000000000000a (STRSZ)              824 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0x7c8
+ 0x0000000000000004 (HASH)               0x7f0
+ 0x0000000000000019 (INIT_ARRAY)         0x66f0
+ 0x000000000000001b (INIT_ARRAYSZ)       16 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x6700
+ 0x000000000000001c (FINI_ARRAYSZ)       16 (bytes)
+ 0x000000000000000c (INIT)               0x53cb
+ 0x000000000000000d (FINI)               0x53ce
+ 0x0000000000000000 (NULL)               0x0
+PUBLIC_THREADSAFE_SYMBOL_AUDIT=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-source-manifest.txt /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-source.tar
+ddb244c2ce12aa17a3ad5f4f21ff1b9a525bccb5bb48903433c99ed7ccbea9a0  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-source-manifest.txt
+2fae32d402e97bce784ad4f890c1c4f55d35e51588638d333da6d53b970185ad  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260717-0002-source.tar
+SOURCE_INPUT_COUNT=9
+TOOLCHAIN host=Linux\ host-dev-alfadb-full\ 7.0.14-4-pve\ #1\ SMP\ PREEMPT_DYNAMIC\ PMX\ 7.0.14-4\ \(2026-07-07T07:27Z\)\ x86_64\ GNU/Linux
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw --version
+6.24.3
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+$ node --version
+v24.15.0
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm --version
+6.1.2.285
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+QEMU_CURRENT_BOOT_START_LINE=31935
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=1083392
+EMULATOR_START_VERDICT=pass
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=1 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=2 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=3 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=4 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=5 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=6 targets=$'127.0.0.1:10000\t\tTCP\tOffline\tunknown...' shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECTIVITY attempt=7 targets=$'127.0.0.1:10000\t\tTCP\tConnected\tlocalhost' shell=e1-c-connect-7 distribution=HarmonyOS\ 
+CONNECTIVITY_VERDICT=pass
+BOOT_READINESS attempt=1 qemu.boot='' shell=e1-c-readiness-1
+BOOT_READINESS attempt=2 qemu.boot='' shell=e1-c-readiness-2
+BOOT_READINESS attempt=3 qemu.boot='' shell=e1-c-readiness-3
+BOOT_READINESS attempt=4 qemu.boot='' shell=e1-c-readiness-4
+BOOT_READINESS attempt=5 qemu.boot='' shell=e1-c-readiness-5
+BOOT_READINESS attempt=6 qemu.boot='' shell=e1-c-readiness-6
+BOOT_READINESS attempt=7 qemu.boot='' shell=e1-c-readiness-7
+BOOT_READINESS attempt=8 qemu.boot='' shell=e1-c-readiness-8
+BOOT_READINESS attempt=9 qemu.boot='' shell=e1-c-readiness-9
+BOOT_READINESS attempt=10 qemu.boot='' shell=e1-c-readiness-10
+BOOT_READINESS attempt=11 qemu.boot='' shell=e1-c-readiness-11
+BOOT_READINESS attempt=12 qemu.boot='' shell=e1-c-readiness-12
+BOOT_READINESS attempt=13 qemu.boot='' shell=e1-c-readiness-13
+BOOT_READINESS attempt=14 qemu.boot='' shell=e1-c-readiness-14
+BOOT_READINESS attempt=15 qemu.boot='' shell=e1-c-readiness-15
+BOOT_READINESS attempt=16 qemu.boot='' shell=e1-c-readiness-16
+BOOT_READINESS attempt=17 qemu.boot='' shell=e1-c-readiness-17
+BOOT_READINESS attempt=18 qemu.boot='' shell=e1-c-readiness-18
+BOOT_READINESS attempt=19 qemu.boot='' shell=e1-c-readiness-19
+BOOT_READINESS attempt=20 qemu.boot=2026-07-17\ 17:46:42.693135674390902464\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=e1-c-readiness-20
+READINESS boot.completed=Get\ parameter\ \"boot.completed\"\ fail\!\ errNum\ is:1002\! wms.ready=Get\ parameter\ \"bootevent.wms.ready\"\ fail\!\ errNum\ is:1002\! lockscreen.ready=Get\ parameter\ \"bootevent.lockscreen.ready\"\ fail\!\ errNum\ is:1002\! qemu.boot=2026-07-17\ 17:46:42.693135674390902464\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed.
+READINESS_VERDICT=pass
+FileTransfer finish, Size:2654152, File count = 1, time:50ms rate:53083.04kB/s
+INSTALL_ATTEMPT=1 OUTPUT=install\ bundle\ successfully.
+INSTALL_VERDICT=pass
+UNLOCK_SEQUENCE wakeup=WakeupDevice\ is\ called home=No\ Error swipe=No\ Error
+cn.alfadb.netbird.r1probe:
+{
+    "appId": "cn.alfadb.netbird.r1probe_",
+    "appIdentifier": "",
+    "appIndex": 0,
+    "applicationInfo": {
+        "GWPAsanEnabled": false,
+        "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+        "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+        "accessible": false,
+        "allowAppRunWhenDeviceFirstLocked": false,
+        "allowArkTsLargeHeap": false,
+        "allowCommonEvent": [],
+        "allowEnableNotification": false,
+        "allowMultiProcess": false,
+        "apiCompatibleVersion": 60101024,
+        "apiReleaseType": "Release",
+        "apiTargetVersion": 60101024,
+        "appDetailAbilityLibraryPath": "",
+        "appDistributionType": "none",
+        "appEnvironments": [],
+        "appIndex": 0,
+        "appPreloadPhase": 0,
+        "appPrivilegeLevel": "normal",
+        "appProvisionType": "debug",
+        "appQuickFix": {
+            "bundleName": "",
+            "deployedAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "deployingAppqfInfo": {
+                "cpuAbi": "",
+                "hqfInfos": [],
+                "nativeLibraryPath": "",
+                "type": 0,
+                "versionCode": 0,
+                "versionName": ""
+            },
+            "versionCode": 0,
+            "versionName": ""
+        },
+        "appSignType": "none",
+        "applicationFlags": 1,
+        "applicationReservedFlag": 0,
+        "arkNativeFileAbi": "",
+        "arkNativeFilePath": "",
+        "arkTSMode": "dynamic",
+        "asanEnabled": false,
+        "asanLogPath": "",
+        "assetAccessGroups": [],
+        "associatedWakeUp": false,
+        "bundleName": "cn.alfadb.netbird.r1probe",
+        "bundleType": 0,
+        "cacheDir": "",
+        "cloudFileSyncEnabled": false,
+        "cloudStructuredDataSyncEnabled": false,
+        "codePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe",
+        "compileSdkType": "HarmonyOS",
+        "compileSdkVersion": "6.1.1.125",
+        "configuration": "",
+        "cpuAbi": "x86_64",
+        "crowdtestDeadline": -1,
+        "dataBaseDir": "/data/app/el2/database/cn.alfadb.netbird.r1probe",
+        "dataDir": "",
+        "debug": true,
+        "description": "",
+        "descriptionId": 0,
+        "descriptionResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 0,
+            "moduleName": "entry"
+        },
+        "deviceId": "PHONE-001",
+        "distributedNotificationEnabled": true,
+        "enabled": true,
+        "entityType": "unspecified",
+        "entryDir": "",
+        "entryModuleName": "",
+        "fingerprint": "",
+        "flags": 0,
+        "formVisibleNotify": false,
+        "hasPlugin": false,
+        "hideDesktopIcon": false,
+        "hnpPackages": {},
+        "hwasanEnabled": false,
+        "icon": "",
+        "iconId": 16777222,
+        "iconPath": "$media:app_icon",
+        "iconResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777222,
+            "moduleName": "entry"
+        },
+        "installSource": "unknown",
+        "installedForAllUser": false,
+        "isCompressNativeLibs": true,
+        "isForceRotate": false,
+        "isFreeInstallApp": false,
+        "isLauncherApp": false,
+        "isSystemApp": false,
+        "keepAlive": false,
+        "label": "$string:app_name",
+        "labelId": 16777219,
+        "labelResource": {
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "id": 16777219,
+            "moduleName": "entry"
+        },
+        "maxChildProcess": 512,
+        "metaData": {},
+        "metadata": {},
+        "minCompatibleVersionCode": 1,
+        "moduleInfos": [
+            {
+                "moduleName": "entry",
+                "moduleSourceDir": "",
+                "preloads": []
+            }
+        ],
+        "moduleSourceDirs": [],
+        "multiAppMode": {
+            "maxCount": 0,
+            "multiAppModeType": 0
+        },
+        "multiProjects": false,
+        "name": "cn.alfadb.netbird.r1probe",
+        "nativeLibraryPath": "libs/x86_64",
+        "needAppDetail": false,
+        "organization": "",
+        "overlayState": 0,
+        "permissions": [],
+        "process": "cn.alfadb.netbird.r1probe",
+        "profileable": false,
+        "removable": true,
+        "resourcesApply": [],
+        "runningResourcesApply": false,
+        "signatureKey": "",
+        "singleton": false,
+        "startMode": 1,
+        "supportedModes": 0,
+        "targetBundleList": [],
+        "targetBundleName": "",
+        "targetMinorApiVersion": 0,
+        "targetPatchApiVersion": 0,
+        "targetPriority": 0,
+        "tsanEnabled": false,
+        "ubsanEnabled": false,
+        "uid": 20020062,
+        "userDataClearable": true,
+        "vendor": "alfadb",
+        "versionCode": 1,
+        "versionName": "0.0.1"
+    },
+    "buildVersion": "",
+    "compatibleVersion": 60101024,
+    "cpuAbi": "",
+    "defPermissions": [],
+    "description": "",
+    "entryInstallationFree": false,
+    "entryModuleName": "entry",
+    "firstInstallTime": 1784221045861,
+    "gid": 20020062,
+    "hapModuleInfos": [
+        {
+            "abilityInfos": [
+                {
+                    "allowSelfRedirect": true,
+                    "appIndex": 0,
+                    "applicationName": "cn.alfadb.netbird.r1probe",
+                    "arkTSMode": "dynamic",
+                    "backgroundModes": 0,
+                    "bundleName": "cn.alfadb.netbird.r1probe",
+                    "codePath": "",
+                    "compileMode": 1,
+                    "configChanges": [],
+                    "continuable": false,
+                    "continueBundleName": [],
+                    "continueType": [
+                        "EntryAbility"
+                    ],
+                    "defaultFormHeight": 0,
+                    "defaultFormWidth": 0,
+                    "description": "$string:ability_description",
+                    "descriptionId": 16777218,
+                    "deviceCapabilities": [],
+                    "deviceTypes": [
+                        "phone"
+                    ],
+                    "enabled": true,
+                    "excludeFromDock": false,
+                    "excludeFromMissions": false,
+                    "extensionAbilityType": 255,
+                    "formEnabled": false,
+                    "formEntity": 0,
+                    "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+                    "iconId": 16777222,
+                    "iconPath": "$media:start_icon",
+                    "isLauncherAbility": false,
+                    "isModuleJson": true,
+                    "isNativeAbility": false,
+                    "isStageBasedModel": true,
+                    "isolationProcess": false,
+                    "kind": "",
+                    "label": "$string:ability_name",
+                    "labelId": 16777219,
+                    "launchMode": 0,
+                    "maxWindowHeight": 0,
+                    "maxWindowRatio": 0,
+                    "maxWindowWidth": 0,
+                    "metaData": {
+                        "customizeData": []
+                    },
+                    "metadata": [],
+                    "minFormHeight": 0,
+                    "minFormWidth": 0,
+                    "minWindowHeight": 0,
+                    "minWindowRatio": 0,
+                    "minWindowWidth": 0,
+                    "moduleName": "entry",
+                    "name": "EntryAbility",
+                    "orientation": 0,
+                    "orientationId": 0,
+                    "package": "entry",
+                    "permissions": [],
+                    "preferMultiWindowOrientation": "default",
+                    "priority": 0,
+                    "process": "",
+                    "readPermission": "",
+                    "recoverable": false,
+                    "removeMissionAfterTerminate": false,
+                    "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+                    "skills": [
+                        {
+                            "actions": [
+                                "ohos.want.action.home"
+                            ],
+                            "domainVerify": false,
+                            "entities": [
+                                "entity.system.home"
+                            ],
+                            "permissions": [],
+                            "uris": []
+                        }
+                    ],
+                    "srcEntrance": "./ets/entryability/EntryAbility.ets",
+                    "srcLanguage": "js",
+                    "srcPath": "",
+                    "startWindow": "",
+                    "startWindowBackground": "$color:start_window_background",
+                    "startWindowBackgroundId": 16777221,
+                    "startWindowIcon": "$media:start_icon",
+                    "startWindowIconId": 16777222,
+                    "startWindowId": 0,
+                    "startWindowResource": {
+                        "startWindowAppIconId": 0,
+                        "startWindowBackgroundColorId": 0,
+                        "startWindowBackgroundImageFit": "Cover",
+                        "startWindowBackgroundImageId": 0,
+                        "startWindowBrandingImageId": 0,
+                        "startWindowIllustrationId": 0
+                    },
+                    "supportExtNames": [],
+                    "supportMimeTypes": [],
+                    "supportPipMode": false,
+                    "supportWindowMode": [
+                        0,
+                        1,
+                        2
+                    ],
+                    "targetAbility": "",
+                    "theme": "",
+                    "type": 1,
+                    "uid": -1,
+                    "unclearableMission": false,
+                    "uri": "",
+                    "visible": true,
+                    "writePermission": ""
+                }
+            ],
+            "abilitySrcEntryDelegator": "",
+            "abilityStageSrcEntryDelegator": "",
+            "aotCompileStatus": 0,
+            "appEnvironments": [],
+            "appStartup": "",
+            "arkTSMode": "dynamic",
+            "backgroundImg": "",
+            "buildHash": "",
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "colorMode": -1,
+            "compileMode": 1,
+            "compressNativeLibs": true,
+            "cpuAbi": "",
+            "crossAppSharedConfig": "",
+            "deduplicateHar": false,
+            "deliveryWithInstall": true,
+            "dependencies": [],
+            "description": "$string:module_description",
+            "descriptionId": 16777220,
+            "deviceTypes": [
+                "phone"
+            ],
+            "easyGo": "",
+            "executableBinaryPaths": [],
+            "extensionInfos": [],
+            "fileContextMenu": "",
+            "formExtensionModule": "",
+            "formWidgetModule": "",
+            "hapPath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry.hap",
+            "hasIntent": false,
+            "hashValue": "",
+            "hqfInfo": {
+                "cpuAbi": "",
+                "hapSha256": "",
+                "hqfFilePath": "",
+                "moduleName": "",
+                "nativeLibraryPath": "",
+                "type": 0
+            },
+            "iconId": 16777222,
+            "iconPath": "$media:start_icon",
+            "installationFree": false,
+            "isLibIsolated": false,
+            "isModuleJson": true,
+            "isRemovable": {},
+            "isRemovableSet": [],
+            "isStageBasedModel": true,
+            "isolationMode": 0,
+            "label": "$string:ability_name",
+            "labelId": 16777219,
+            "mainAbility": "EntryAbility",
+            "mainElementName": "EntryAbility",
+            "metadata": [],
+            "moduleArkTSMode": "dynamic",
+            "moduleName": "entry",
+            "moduleSourceDir": "",
+            "moduleType": 1,
+            "name": "entry",
+            "nativeLibraryFileNames": [],
+            "nativeLibraryPath": "",
+            "overlayModuleInfos": [],
+            "package": "entry",
+            "packageName": "entry",
+            "pages": "$profile:main_pages",
+            "preloads": [],
+            "process": "cn.alfadb.netbird.r1probe",
+            "proxyDatas": [],
+            "reqCapabilities": [],
+            "requiredDeviceFeatures": {},
+            "resizeable": false,
+            "resourcePath": "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index",
+            "routerArray": [],
+            "routerMap": "",
+            "shareFiles": "",
+            "srcEntrance": "",
+            "srcPath": "",
+            "supportedModes": 0,
+            "systemTheme": "",
+            "uiSyntax": "hml",
+            "upgradeFlag": 0,
+            "versionCode": 1,
+            "virtualMachine": ""
+        }
+    ],
+    "hapModuleNames": [
+        "entry"
+    ],
+    "installTime": 1784281606358,
+    "isDifferentName": false,
+    "isKeepAlive": false,
+    "isNativeApp": false,
+    "isNewVersion": true,
+    "isPreInstallApp": false,
+    "jointUserId": "",
+    "label": "",
+    "mainEntry": "entry",
+    "maxSdkVersion": -1,
+    "minCompatibleVersionCode": 1,
+    "minSdkVersion": -1,
+    "moduleDirs": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry"
+    ],
+    "moduleNames": [
+        "entry"
+    ],
+    "modulePublicDirs": [
+        ""
+    ],
+    "moduleResPaths": [
+        "/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe/entry/resources.index"
+    ],
+    "name": "cn.alfadb.netbird.r1probe",
+    "oldAppIds": [
+        "cn.alfadb.netbird.r1probe_"
+    ],
+    "overlayBundleInfos": [],
+    "overlayType": 3,
+    "pluginBundleInfos": {},
+    "releaseType": "Release",
+    "reqPermissionDetails": [
+        {
+            "moduleName": "entry",
+            "name": "ohos.permission.INTERNET",
+            "reason": "",
+            "reasonId": 0,
+            "usedScene": {
+                "abilities": [],
+                "when": ""
+            }
+        }
+    ],
+    "reqPermissionStates": [
+        0
+    ],
+    "reqPermissions": [
+        "ohos.permission.INTERNET"
+    ],
+    "routerArray": [],
+    "seInfo": "",
+    "singleton": false,
+    "targetMinorApiVersion": 0,
+    "targetPatchApiVersion": 0,
+    "targetVersion": 60101024,
+    "uid": 20020062,
+    "updateTime": 1784281606358,
+    "userInfo": [
+        {
+            "accessTokenId": [RUNTIME_ACCESS_TOKEN_ID_REDACTED],
+            "accessTokenIdEx": [RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED],
+            "bundleName": "cn.alfadb.netbird.r1probe",
+            "bundleUserInfo": {
+                "disabledAbilities": [],
+                "enabled": true,
+                "overlayState": [],
+                "setEnabledCaller": "",
+                "userId": 100
+            },
+            "canUninstall": true,
+            "cloneInfos": {},
+            "curDynamicIconModule": "",
+            "firstInstallTime": 1784221045861,
+            "gids": [
+                20020062
+            ],
+            "installTime": 1784281606358,
+            "installedPluginSet": [],
+            "isBundleFirstLaunched": false,
+            "isRemovable": true,
+            "uid": 20020062,
+            "updateTime": 1784281606358
+        }
+    ],
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1"
+}
+NORMAL_ENTRY_ABILITY_AUDIT=pass
+COLD_START_1_BEFORE_PID=''
+Log type core,app,only_prerelease buffer clear successfully
+COLD_START_1_AA_OUTPUT=start\ ability\ successfully.
+COLD_START_1_AA_SEMANTIC=pass
+COLD_START_1_PID=2957
+COLD_START_1_MARKER_ATTEMPT=1 PID=2957 PASS=0 FAIL=1
+CST 2026-07-17 17:46:56.958  2957  2957 I A02900/R1Api24Probe: Node-API E1 C module initialized version=e1-c-api24-probe/0.0.1
+CST 2026-07-17 17:46:57.001  2957  2957 I A02900/R1Api24Probe: EntryAbility onCreate
+CST 2026-07-17 17:46:57.218  2957  2957 I A02900/R1Api24Probe: EntryAbility windowStage onWindowStageCreate
+CST 2026-07-17 17:46:57.246  2957  2957 I A02900/R1Api24Probe: EntryAbility foreground onForeground
+CST 2026-07-17 17:46:57.337  2957  2957 I A02900/R1Api24Probe: EntryAbility onCreate observed=true
+CST 2026-07-17 17:46:57.337  2957  2957 I A02900/R1Api24Probe: E1_TSFN_INITIALIZED|mainTid=2957|mechanism=napi_threadsafe_function
+CST 2026-07-17 17:46:57.338  2957  2957 I A02900/R1Api24Probe: E1_INITIAL_RESOURCE|pid=2957|mainTid=2957|fd=37|threads=27|mechanism=napi_threadsafe_function
+CST 2026-07-17 17:46:57.338  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=1|length=0|leftSentinel=41|rightSentinel=214|hash=2166136261|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=2|length=1|leftSentinel=42|rightSentinel=213|hash=789356349|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=3|length=2|leftSentinel=43|rightSentinel=212|hash=2447758296|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=4|length=3|leftSentinel=44|rightSentinel=211|hash=638900014|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=5|length=4|leftSentinel=45|rightSentinel=210|hash=1149293757|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=6|length=5|leftSentinel=46|rightSentinel=209|hash=1871015433|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=7|length=6|leftSentinel=47|rightSentinel=208|hash=2824416860|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=8|length=7|leftSentinel=48|rightSentinel=207|hash=3791206910|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=9|length=8|leftSentinel=49|rightSentinel=206|hash=1678132149|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=10|length=9|leftSentinel=50|rightSentinel=205|hash=384415237|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.339  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=11|length=10|leftSentinel=51|rightSentinel=204|hash=3894617496|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=12|length=11|leftSentinel=52|rightSentinel=203|hash=1652375358|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=13|length=12|leftSentinel=53|rightSentinel=202|hash=2977148941|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=14|length=13|leftSentinel=54|rightSentinel=201|hash=938916129|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=15|length=14|leftSentinel=55|rightSentinel=200|hash=2140236044|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=16|length=15|leftSentinel=56|rightSentinel=199|hash=4161338126|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=17|length=16|leftSentinel=57|rightSentinel=198|hash=2570811941|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=18|length=17|leftSentinel=58|rightSentinel=197|hash=1281986125|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=19|length=18|leftSentinel=59|rightSentinel=196|hash=3503394136|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=20|length=19|leftSentinel=60|rightSentinel=195|hash=827513358|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=21|length=20|leftSentinel=61|rightSentinel=194|hash=3222019197|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.340  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=22|length=21|leftSentinel=62|rightSentinel=193|hash=3932132345|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.341  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=23|length=22|leftSentinel=63|rightSentinel=192|hash=3460681596|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.341  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=24|length=23|leftSentinel=64|rightSentinel=191|hash=2900183486|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.341  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=25|length=24|leftSentinel=65|rightSentinel=190|hash=3256198741|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.341  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=26|length=25|leftSentinel=66|rightSentinel=189|hash=1527382997|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.341  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=27|length=26|leftSentinel=67|rightSentinel=188|hash=2580325080|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=28|length=27|leftSentinel=68|rightSentinel=187|hash=1006177566|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=29|length=28|leftSentinel=69|rightSentinel=186|hash=2022833997|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=30|length=29|leftSentinel=70|rightSentinel=185|hash=2809291185|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=31|length=30|leftSentinel=71|rightSentinel=184|hash=2829547916|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=32|length=31|leftSentinel=72|rightSentinel=183|hash=2375212174|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=33|length=32|leftSentinel=73|rightSentinel=182|hash=3098176389|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=34|length=33|leftSentinel=74|rightSentinel=181|hash=3408153181|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=35|length=34|leftSentinel=75|rightSentinel=180|hash=2859039704|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=36|length=35|leftSentinel=76|rightSentinel=179|hash=1545920622|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=37|length=36|leftSentinel=77|rightSentinel=178|hash=872636605|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.342  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=38|length=37|leftSentinel=78|rightSentinel=177|hash=979923177|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=39|length=38|leftSentinel=79|rightSentinel=176|hash=3071619420|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=40|length=39|leftSentinel=80|rightSentinel=175|hash=3964753854|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=41|length=40|leftSentinel=81|rightSentinel=174|hash=1227541493|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=42|length=41|leftSentinel=82|rightSentinel=173|hash=3954418213|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=43|length=42|leftSentinel=83|rightSentinel=172|hash=2673847128|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=44|length=43|leftSentinel=84|rightSentinel=171|hash=3726126462|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=45|length=44|leftSentinel=85|rightSentinel=170|hash=2930649485|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.343  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=46|length=45|leftSentinel=86|rightSentinel=169|hash=1238554177|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=47|length=46|leftSentinel=87|rightSentinel=168|hash=3561559500|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=48|length=47|leftSentinel=88|rightSentinel=167|hash=1230829646|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=49|length=48|leftSentinel=89|rightSentinel=166|hash=467099301|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=50|length=49|leftSentinel=90|rightSentinel=165|hash=85719981|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=51|length=50|leftSentinel=91|rightSentinel=164|hash=1988797336|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=52|length=51|leftSentinel=92|rightSentinel=163|hash=4286704462|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=53|length=52|leftSentinel=93|rightSentinel=162|hash=2996210173|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.344  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=54|length=53|leftSentinel=94|rightSentinel=161|hash=3293542297|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=55|length=54|leftSentinel=95|rightSentinel=160|hash=3602158780|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=56|length=55|leftSentinel=96|rightSentinel=159|hash=2466805758|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=57|length=56|leftSentinel=97|rightSentinel=158|hash=1814283861|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=58|length=57|leftSentinel=98|rightSentinel=157|hash=3422088629|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=59|length=58|leftSentinel=99|rightSentinel=156|hash=1774455896|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=60|length=59|leftSentinel=100|rightSentinel=155|hash=2068178910|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=61|length=60|leftSentinel=101|rightSentinel=154|hash=2428630733|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.345  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=62|length=61|leftSentinel=102|rightSentinel=153|hash=1112120017|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=63|length=62|leftSentinel=103|rightSentinel=152|hash=1070775244|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=64|length=63|leftSentinel=104|rightSentinel=151|hash=3128877646|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=65|length=64|leftSentinel=105|rightSentinel=150|hash=2837281605|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=66|length=65|leftSentinel=106|rightSentinel=149|hash=2832483965|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=67|length=66|leftSentinel=107|rightSentinel=148|hash=4106759768|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=68|length=67|leftSentinel=108|rightSentinel=147|hash=607940910|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.346  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=69|length=68|leftSentinel=109|rightSentinel=146|hash=4090614461|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=70|length=69|leftSentinel=110|rightSentinel=145|hash=3187191369|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=71|length=70|leftSentinel=111|rightSentinel=144|hash=4184378844|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=72|length=71|leftSentinel=112|rightSentinel=143|hash=3480364798|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=73|length=72|leftSentinel=113|rightSentinel=142|hash=1603915957|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=74|length=73|leftSentinel=114|rightSentinel=141|hash=2438831429|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=75|length=74|leftSentinel=115|rightSentinel=140|hash=2528501784|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.347  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=76|length=75|leftSentinel=116|rightSentinel=139|hash=1657900478|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=77|length=76|leftSentinel=117|rightSentinel=138|hash=3226517901|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=78|length=77|leftSentinel=118|rightSentinel=137|hash=502507873|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=79|length=78|leftSentinel=119|rightSentinel=136|hash=622508556|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=80|length=79|leftSentinel=120|rightSentinel=135|hash=4070986638|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=81|length=80|leftSentinel=121|rightSentinel=134|hash=2483118117|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=82|length=81|leftSentinel=122|rightSentinel=133|hash=4280716685|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=83|length=82|leftSentinel=123|rightSentinel=132|hash=4199260760|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.348  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=84|length=83|leftSentinel=124|rightSentinel=131|hash=704299150|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=85|length=84|leftSentinel=125|rightSentinel=130|hash=2681694717|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=86|length=85|leftSentinel=126|rightSentinel=129|hash=3213455417|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=87|length=86|leftSentinel=127|rightSentinel=128|hash=1396798332|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=88|length=87|leftSentinel=128|rightSentinel=127|hash=3086689598|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=89|length=88|leftSentinel=129|rightSentinel=126|hash=1139210069|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=90|length=89|leftSentinel=130|rightSentinel=125|hash=2350605333|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=91|length=90|leftSentinel=131|rightSentinel=124|hash=3121639384|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=92|length=91|leftSentinel=132|rightSentinel=123|hash=584184734|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=93|length=92|leftSentinel=133|rightSentinel=122|hash=4012258509|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=94|length=93|leftSentinel=134|rightSentinel=121|hash=1933062769|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.349  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=95|length=94|leftSentinel=135|rightSentinel=120|hash=259510028|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=96|length=95|leftSentinel=136|rightSentinel=119|hash=2278123790|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=97|length=96|leftSentinel=137|rightSentinel=118|hash=2481992709|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=98|length=97|leftSentinel=138|rightSentinel=117|hash=1898329245|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=99|length=98|leftSentinel=139|rightSentinel=116|hash=3491461592|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_BUFFER_SAMPLE|round=1|sample=100|length=99|leftSentinel=140|rightSentinel=115|hash=3317817582|guards=true|nativeTid=2957
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_FD_CREATED|fdA=36|fdB=37|creatorTid=2957|owner=ArkTS
+CST 2026-07-17 17:46:57.350  2957  2957 I A02900/R1Api24Probe: E1_FD_RESULT|round=1|fdA=36|fdB=37|duplicateFd=38|written=23|read=23|payload=fd-round-01-sentinel-25|payloadHash=1745844509|closeA=0|closeDuplicate=0|closeB=0|duplicateCloseA=-1|errnoA=9|duplicateCloseB=-1|errnoB=9|owner=closed-by-native|nativeTid=2957
+CST 2026-07-17 17:46:57.351  2957  3101 I A02900/R1Api24Probe: E1_PTHREAD_START|round=1|producerTid=3101
+CST 2026-07-17 17:46:57.351  2957  3101 I A02900/R1Api24Probe: E1_PTHREAD_FINISH|round=1|producerTid=3101|queued=100|status=0
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=1|producerTid=3101|consumerTid=2957|payload=r01-s001-x30|hash=3809237319|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=2|producerTid=3101|consumerTid=2957|payload=r01-s002-x4f|hash=3078139351|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=3|producerTid=3101|consumerTid=2957|payload=r01-s003-x6e|hash=850314447|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=4|producerTid=3101|consumerTid=2957|payload=r01-s004-x8d|hash=2278282083|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=5|producerTid=3101|consumerTid=2957|payload=r01-s005-xac|hash=1949351376|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=6|producerTid=3101|consumerTid=2957|payload=r01-s006-xcb|hash=546538972|valid=true
+CST 2026-07-17 17:46:57.384  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=7|producerTid=3101|consumerTid=2957|payload=r01-s007-xea|hash=1821597364|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=8|producerTid=3101|consumerTid=2957|payload=r01-s008-x09|hash=308567152|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=9|producerTid=3101|consumerTid=2957|payload=r01-s009-x28|hash=3562785486|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=10|producerTid=3101|consumerTid=2957|payload=r01-s010-x47|hash=710722471|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=11|producerTid=3101|consumerTid=2957|payload=r01-s011-x66|hash=3753091897|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=12|producerTid=3101|consumerTid=2957|payload=r01-s012-x85|hash=3349438519|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=13|producerTid=3101|consumerTid=2957|payload=r01-s013-xa4|hash=1091497482|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=14|producerTid=3101|consumerTid=2957|payload=r01-s014-xc3|hash=143088148|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=15|producerTid=3101|consumerTid=2957|payload=r01-s015-xe2|hash=2458512574|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=16|producerTid=3101|consumerTid=2957|payload=r01-s016-x01|hash=3404442543|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=17|producerTid=3101|consumerTid=2957|payload=r01-s017-x20|hash=2563246689|valid=true
+CST 2026-07-17 17:46:57.385  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=18|producerTid=3101|consumerTid=2957|payload=r01-s018-x3f|hash=45248047|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=19|producerTid=3101|consumerTid=2957|payload=r01-s019-x5e|hash=3128747475|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=20|producerTid=3101|consumerTid=2957|payload=r01-s020-x7d|hash=4136879786|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=21|producerTid=3101|consumerTid=2957|payload=r01-s021-x9c|hash=651997430|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=22|producerTid=3101|consumerTid=2957|payload=r01-s022-xbb|hash=3042146327|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=23|producerTid=3101|consumerTid=2957|payload=r01-s023-xda|hash=2849188543|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=24|producerTid=3101|consumerTid=2957|payload=r01-s024-xf9|hash=3338932192|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=25|producerTid=3101|consumerTid=2957|payload=r01-s025-x18|hash=638503311|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=26|producerTid=3101|consumerTid=2957|payload=r01-s026-x37|hash=2991932085|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=27|producerTid=3101|consumerTid=2957|payload=r01-s027-x56|hash=120175423|valid=true
+CST 2026-07-17 17:46:57.386  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=28|producerTid=3101|consumerTid=2957|payload=r01-s028-x75|hash=2311250549|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=29|producerTid=3101|consumerTid=2957|payload=r01-s029-x94|hash=1381183831|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=30|producerTid=3101|consumerTid=2957|payload=r01-s030-xb3|hash=461194087|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=31|producerTid=3101|consumerTid=2957|payload=r01-s031-xd2|hash=2349113937|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=32|producerTid=3101|consumerTid=2957|payload=r01-s032-xf1|hash=4259241735|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=33|producerTid=3101|consumerTid=2957|payload=r01-s033-x10|hash=929781352|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=34|producerTid=3101|consumerTid=2957|payload=r01-s034-x2f|hash=1595867852|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=35|producerTid=3101|consumerTid=2957|payload=r01-s035-x4e|hash=285480912|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=36|producerTid=3101|consumerTid=2957|payload=r01-s036-x6d|hash=2297670388|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=37|producerTid=3101|consumerTid=2957|payload=r01-s037-x8c|hash=692250044|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=38|producerTid=3101|consumerTid=2957|payload=r01-s038-xab|hash=3185849539|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=39|producerTid=3101|consumerTid=2957|payload=r01-s039-xca|hash=2607331039|valid=true
+CST 2026-07-17 17:46:57.387  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=40|producerTid=3101|consumerTid=2957|payload=r01-s040-xe9|hash=1187060629|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=41|producerTid=3101|consumerTid=2957|payload=r01-s041-x08|hash=1087525160|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=42|producerTid=3101|consumerTid=2957|payload=r01-s042-x27|hash=4129863834|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=43|producerTid=3101|consumerTid=2957|payload=r01-s043-x46|hash=2575222452|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=44|producerTid=3101|consumerTid=2957|payload=r01-s044-x65|hash=4227003622|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=45|producerTid=3101|consumerTid=2957|payload=r01-s045-x84|hash=3692624104|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=46|producerTid=3101|consumerTid=2957|payload=r01-s046-xa3|hash=2446668469|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=47|producerTid=3101|consumerTid=2957|payload=r01-s047-xc2|hash=2041143367|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=48|producerTid=3101|consumerTid=2957|payload=r01-s048-xe1|hash=1421347717|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=49|producerTid=3101|consumerTid=2957|payload=r01-s049-x00|hash=3365937640|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=50|producerTid=3101|consumerTid=2957|payload=r01-s050-x1f|hash=1802649537|valid=true
+CST 2026-07-17 17:46:57.388  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=51|producerTid=3101|consumerTid=2957|payload=r01-s051-x3e|hash=4018099797|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=52|producerTid=3101|consumerTid=2957|payload=r01-s052-x5d|hash=727710213|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=53|producerTid=3101|consumerTid=2957|payload=r01-s053-x7c|hash=69991565|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=54|producerTid=3101|consumerTid=2957|payload=r01-s054-x9b|hash=4142220217|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=55|producerTid=3101|consumerTid=2957|payload=r01-s055-xba|hash=3612718512|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=56|producerTid=3101|consumerTid=2957|payload=r01-s056-xd9|hash=3654249911|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=57|producerTid=3101|consumerTid=2957|payload=r01-s057-xf8|hash=3461156625|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=58|producerTid=3101|consumerTid=2957|payload=r01-s058-x17|hash=1954830950|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=59|producerTid=3101|consumerTid=2957|payload=r01-s059-x36|hash=781625172|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=60|producerTid=3101|consumerTid=2957|payload=r01-s060-x55|hash=268291879|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=61|producerTid=3101|consumerTid=2957|payload=r01-s061-x74|hash=4053903173|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=62|producerTid=3101|consumerTid=2957|payload=r01-s062-x93|hash=144789231|valid=true
+CST 2026-07-17 17:46:57.389  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=63|producerTid=3101|consumerTid=2957|payload=r01-s063-xb2|hash=1335970104|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=64|producerTid=3101|consumerTid=2957|payload=r01-s064-xd1|hash=1880139626|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=65|producerTid=3101|consumerTid=2957|payload=r01-s065-xf0|hash=365642508|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=66|producerTid=3101|consumerTid=2957|payload=r01-s066-x0f|hash=208866017|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=67|producerTid=3101|consumerTid=2957|payload=r01-s067-x2e|hash=3867211481|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=68|producerTid=3101|consumerTid=2957|payload=r01-s068-x4d|hash=1676370245|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=69|producerTid=3101|consumerTid=2957|payload=r01-s069-x6c|hash=3257064401|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=70|producerTid=3101|consumerTid=2957|payload=r01-s070-x8b|hash=1353472090|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=71|producerTid=3101|consumerTid=2957|payload=r01-s071-xaa|hash=2103382061|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=72|producerTid=3101|consumerTid=2957|payload=r01-s072-xc9|hash=2357336690|valid=true
+CST 2026-07-17 17:46:57.390  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=73|producerTid=3101|consumerTid=2957|payload=r01-s073-xe8|hash=2845635792|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=74|producerTid=3101|consumerTid=2957|payload=r01-s074-x07|hash=3704525157|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=75|producerTid=3101|consumerTid=2957|payload=r01-s075-x26|hash=3171616707|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=76|producerTid=3101|consumerTid=2957|payload=r01-s076-x45|hash=3509660669|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=77|producerTid=3101|consumerTid=2957|payload=r01-s077-x64|hash=15822595|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=78|producerTid=3101|consumerTid=2957|payload=r01-s078-x83|hash=2248652261|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=79|producerTid=3101|consumerTid=2957|payload=r01-s079-xa2|hash=811008988|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=80|producerTid=3101|consumerTid=2957|payload=r01-s080-xc1|hash=2725004851|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=81|producerTid=3101|consumerTid=2957|payload=r01-s081-xe0|hash=4194537609|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=82|producerTid=3101|consumerTid=2957|payload=r01-s082-xff|hash=2626791981|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=83|producerTid=3101|consumerTid=2957|payload=r01-s083-x1e|hash=3462326808|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=84|producerTid=3101|consumerTid=2957|payload=r01-s084-x3d|hash=164301176|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=85|producerTid=3101|consumerTid=2957|payload=r01-s085-x5c|hash=144739820|valid=true
+CST 2026-07-17 17:46:57.391  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=86|producerTid=3101|consumerTid=2957|payload=r01-s086-x7b|hash=1284954232|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=87|producerTid=3101|consumerTid=2957|payload=r01-s087-x9a|hash=2162149648|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=88|producerTid=3101|consumerTid=2957|payload=r01-s088-xb9|hash=2510489318|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=89|producerTid=3101|consumerTid=2957|payload=r01-s089-xd8|hash=1337782512|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=90|producerTid=3101|consumerTid=2957|payload=r01-s090-xf7|hash=3601173537|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=91|producerTid=3101|consumerTid=2957|payload=r01-s091-x16|hash=851179930|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=92|producerTid=3101|consumerTid=2957|payload=r01-s092-x35|hash=1643826924|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=93|producerTid=3101|consumerTid=2957|payload=r01-s093-x54|hash=1981373894|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=94|producerTid=3101|consumerTid=2957|payload=r01-s094-x73|hash=2907098440|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=95|producerTid=3101|consumerTid=2957|payload=r01-s095-x92|hash=3448815970|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=96|producerTid=3101|consumerTid=2957|payload=r01-s096-xb1|hash=2325357881|valid=true
+CST 2026-07-17 17:46:57.392  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=97|producerTid=3101|consumerTid=2957|payload=r01-s097-xd0|hash=3129854031|valid=true
+CST 2026-07-17 17:46:57.393  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=98|producerTid=3101|consumerTid=2957|payload=r01-s098-xef|hash=718629441|valid=true
+CST 2026-07-17 17:46:57.393  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=99|producerTid=3101|consumerTid=2957|payload=r01-s099-x0e|hash=3725385634|valid=true
+CST 2026-07-17 17:46:57.393  2957  2957 I A02900/R1Api24Probe: E1_CALLBACK_SAMPLE|round=1|sequence=100|producerTid=3101|consumerTid=2957|payload=r01-s100-x2d|hash=772859922|valid=true
+CST 2026-07-17 17:46:57.449  2957  2957 E A02900/R1Api24Probe: E1_C_PROBE_RESULT|verdict=FAIL|detail=resource growth round=1 fd=37->38 threads=27->28 prior=37/27
+FAIL_REASON=application reported E1 FAIL on run 1
+force stop process successfully.
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+TRAP_EXIT_CODE=1 RESULT=fail
