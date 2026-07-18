@@ -28,6 +28,7 @@
 - [HarmonyOS 工具链运行手册](docs/toolchain-runbook.md)
 - [HarmonyOS CLI 登录、工具链与依赖下载](docs/toolchain-bootstrap.md)
 - [OpenHarmony/HarmonyOS 平台与发行策略](docs/platform-strategy.md)
+- [Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](docs/tailscale-ohos-netbird-port-audit.md)
 
 ## 上游资源
 

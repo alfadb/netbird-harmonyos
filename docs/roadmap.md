@@ -26,7 +26,9 @@
 
 ## 当前基线与总门状态
 
-NetBird 基线跟随最新正式 release，不采用未发布分支、patch set 或提案作为当前门输入。2026-07-17 核对时最新正式 release 仍为 `v0.74.6`、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`，其 `go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`，官方 release run `29415596187` 成功；Go 1.26.5 不是 NetBird 声明基线，PS4 尚未发布，二者均不得作为当前门输入。
+NetBird 基线跟随最新正式 release，不采用未发布分支、patch set 或提案作为当前门输入。2026-07-17 较早核对时最新正式 release 为 `v0.74.6`、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`，其 `go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`，官方 release run `29415596187` 成功；Go 1.26.5 不是 NetBird 声明基线，PS4 尚未发布，二者均不得作为当前门输入。
+
+2026-07-17T14:19:58Z，GitHub 又发布正式 `v0.74.7`，tag commit 为 `a1c9427d8004576e2cbb9e546d409847fa9df318`。固定源码研究见[Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)：Go directive/toolchain 与 Android mobile TUN/protect/route/DNS 入口未变，直接相关输入差异是 `netbirdio/wireguard-go` 从 `2834bebf6c1aea76bd217f31ea91c99f75e4a20a` 更新到 `8ec1ad32882fab0432317d027b0189371782ad01`。本行只登记正式 release 差异，不把 `v0.74.7` 静默替换进既有 E 门证据或改写 R0 决策；采用前仍须按动态调整机制固定输入并重跑受影响门。
 
 API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：`EV-E0-EMU24-20260717-0001` 已以 `reviewed-pass/pass` 关闭 E0。`EV-E1-EMU24-20260717-0005` 的 C-only ArkTS/native/fd 子证据也为 `reviewed-pass/pass`，但 NetBird 官方 Go 基线制品的 loader initial-exec TLS 路径仍失败，因此 E1 overall Go blocked。E2 记录 `EV-E2-EMU24-20260717-0002` 已为 `reviewed-pass/pass` 并关闭。E3 记录 `EV-E3-EMU24-20260717-0003` 及补充 `0004` 均为 `reviewed-pass/blocked`：精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`，普通公开 API 无旁路且 promise pending，Settings 主页面无普通 VPN 管理入口；E3 不关闭，E4-E7 为 dependency blocked 且不开始。所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已完成，但 E1 官方 Go 仍 blocked。E8 仍为 `CLOSED`，真机执行禁令不变；不得写成 E3 通过或作跨架构结论，也不退出任何正式 R 阶段。
 

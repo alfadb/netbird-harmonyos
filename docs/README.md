@@ -61,6 +61,11 @@
   - 共享核心和两个应用壳的建议结构
   - 第三方 VPN API、系统权限边界及 native fd 桥接
   - HAP、App Pack、签名、测试和分发策略
+- [Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)
+  - 固定 Tailscale-OHOS SHA 与 NetBird v0.74.7 release/commit 源码映射
+  - Go/OpenHarmony 构建缺口、NAPI 线程/内存、TUN fd 所有权和 `tun.Device` 注入
+  - 实际 bundle 级绕行与 NetBird socket protect、独立进程恢复、路由/DNS 和许可证边界
+  - 外部真机自报不进入本仓 evidence，且不改变 E3/E8 状态
 
 ## 信息状态
 

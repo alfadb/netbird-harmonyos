@@ -29,12 +29,18 @@ R0 未退出意味着任何研究结果都不能表述为产品可行性、真�
 | 稳定构建链路 | Command Line Tools 6.1.1.290，HDC 3.2.0d | 当前实测 |
 | Emulator 链路 | Beta Command Line Tools 26.0.0.461，HDC 3.2.0e | 当前实测 |
 | Emulator 镜像 | `HarmonyOS 6.1.1(24)`，API 24；phone `phone_all_x86`、独立 2in1 `pc_all_x86` 与独立 Tablet `tablet_x86` image | 当前实测；三种设备形态不互相替代 |
-| NetBird | 跟随最新正式 release；2026-07-17 仍为 v0.74.6，commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` | 当前核对；工程集成尚未验证 |
-| NetBird Go 声明 | `go 1.25.5`，`toolchain go1.25.12`；官方 release run `29415596187` 成功 | 当前核对 |
+| NetBird | 跟随最新正式 release；2026-07-17 较早核对时点为 v0.74.6，commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08`；同日稍后发布 v0.74.7，commit `a1c9427d8004576e2cbb9e546d409847fa9df318` | v0.74.7 差异已登记，待动态调整决定采用；既有门仍绑定 v0.74.6 |
+| NetBird Go 声明 | v0.74.6 为 `go 1.25.5`、`toolchain go1.25.12`，官方 release run `29415596187` 成功；v0.74.7 声明未变 | 当前核对；v0.74.7 release run 尚待采用前核对 |
 | 当前 Go 工具链 | 1.25.12 | 与 NetBird 声明一致；目标 ABI 构建尚未验证 |
 | 测试服务端 | 自托管 management、signal、relay，均与 NetBird v0.74.6 同版本 | 方案建议；部署与兼容性尚未验证 |
 | 初始认证 | 测试网络专用 setup key | 方案建议；不得在仓库或证据中记录 key 值 |
 | GA 渠道 | 华为应用市场 | R0 固定；账号、签名、审核、市场重签和最终制品闭环尚未验证 |
+
+2026-07-17 较早核对与既有 E0-E8 记录使用 `v0.74.6`。同日 `22:19:58 +08:00`
+发布的正式非 prerelease `v0.74.7` 前进 7 个 commit，Go/toolchain 声明未变，
+wireguard-go replace 从 `2834bebf...` 更新到 `8ec1ad32...`。`v0.74.7` 目前只登记为
+新输入差异；采用前仍须按动态调整机制核对 tag、commit、官方 release run、依赖和
+受影响门，并重跑相应证据。该登记不静默替换任何绑定 `v0.74.6` 的既有门证据。
 
 设备、华为账号、签名材料、渠道权限和测试网络等外部资源由用户本人负责准备和控制。仓库文档、源码、测试数据、日志和证据体系不得记录任何账号凭据、setup key、token、私钥、Cookie、恢复码或可复用临时下载地址。
 
@@ -124,7 +130,7 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 - E0-E8 尚未全部形成 `reviewed-pass`、`verdict: pass` 且目标元组/哈希一致的证据；因此当前禁止任何真机执行。
 - 真机 HDC 安装、启动、日志、卸载闭环尚未建立，且只能在 E8 `OPEN` 后执行。
 - 普通第三方 VPN、SysCap、虚拟接口 fd、`protect`、后台生命周期和真实流量尚无合格的 Emulator 总门证据，也无后续真机证据。
-- NetBird v0.74.6、Go 1.25.12、固定依赖和跨语言边界尚未通过当前 E0-E8 与后续目标 ABI/真机门。
+- 既有门输入 NetBird v0.74.6、Go 1.25.12、固定依赖和跨语言边界尚未通过当前 E0-E8 与后续目标 ABI/真机门；v0.74.7 差异已登记但尚未按动态调整采用或重跑。
 - 自托管同版本 management、signal、relay 及专用 setup key 流程尚未形成可重放证据。
 - 开发、测试、发布签名及华为应用市场审核、重签、最终制品获取与回归闭环尚未跑通。
 - 时延、CPU、能耗及完整错误预算阈值尚未由具名真机基线锁定。

@@ -150,6 +150,10 @@ NetBird 核心可优先评估 Go 交叉编译为目标架构 native 库，再通
 - `protect` 对 Go runtime 创建的 TCP/UDP socket 应在哪一层、哪个时机调用。
 - 后台运行、休眠、网络切换和进程回收时的隧道保持能力。
 
+### 外部实现研究边界
+
+[Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)已按固定外部 SHA 和 NetBird v0.74.7 正式 release/commit 检查独立 VPN Extension、NAPI、Go 与外部 `tun.Device` 路径。可独立重写借鉴的部分包括 fd duplicate/单一关闭责任、平台配置路由/DNS、独立进程持久状态 handoff 和异步 NAPI 边界；该外部仓的 Go/Tailscale 补丁未入库、根 LICENSE 缺失，实际绕行是 bundle 级应用排除而非逐 socket `protect`，真机脚本和结果也只属于外部维护者自报。因此该研究不构成 E1、E3-E8 或产品支持证据，不改变当前总门和真机禁令。
+
 ## HAP、App Pack 与签名
 
 ### 签名流程官方确认
