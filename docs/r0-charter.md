@@ -1,6 +1,6 @@
 # R0 任务章程
 
-最后核验：2026-07-18
+最后核验：2026-08-05（仅表示文档状态核验）
 
 本文是 `netbird-harmonyos` 的 R0 唯一决策源。路线图继续定义阶段顺序和门语义；涉及 R0 状态、首目标候选、版本、范围、阈值、责任、例外和未满足项时，以本文为准。
 
@@ -15,7 +15,7 @@
 | API 24 x86_64 phone Emulator 总门 | `CLOSED`；E0、E1-C、E2 已完成；E1 loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.74.7）尚未重跑且无 pass；E3 0003/0004 证明授权前置组件缺失，精确 phone 目标不可执行/`blocked`；E4-E7 为 reviewed dependency-blocked aggregation exception |
 | API 24 x86_64 2in1 Emulator 矩阵记录 | 0001/0002 保持 `reviewed-pass/blocked`；只在 registration-layer 前置边界确认授权组件缺失并停止，未安装 HAP，不形成完整 runtime 不可执行结论，也不替代其他形态 |
 | API 24 x86_64 Tablet Emulator 矩阵记录 | 0001 保持 `reviewed-pass/blocked`；只在 registration-layer 前置边界确认授权组件缺失并停止，未安装 HAP，不形成完整 runtime 不可执行结论，也不替代其他形态 |
-| 物理设备执行 | E8 前只允许一个 `E3-PHYS-PREFLIGHT` campaign；唯一一次六条白名单只读设备 `shell` 已成功并冻结设备、系统、API 与架构、仓外 `PHYS-1` 映射；隔离目录已完成 API 23 纯 ArkTS/C A/B 适配和 unsigned 本地构建，历史树与 raw 未改。除该六项外未执行其他设备 `shell`、`install`、`send`、`start`、`stop`，campaign 未开始；签名/profile、已签名 HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺，计划保持 `blocked`、无 evidence ID 或 verdict，因此 E8 必须保持 `CLOSED` |
+| 物理设备执行 | E8 前只允许一个 `E3-PHYS-PREFLIGHT` campaign；唯一一次六条白名单只读设备 `shell` 已成功并冻结设备、系统、API 与架构、仓外 `PHYS-1` 映射；隔离目录已完成 API 23 纯 ArkTS/C A/B 适配和 unsigned 本地构建，历史树与 raw 未改。唯一 signing enrollment 命令已获授权但截至 `2026-08-05` 尚未执行；只有 DevEco Studio 未自动安全采集 UDID 时，Windows 授权人员才可为普通开发 profile 输入执行一次。这是已批准的最小实施边界，不扩展 campaign/evidence，也不是新的动态调整记录。除此之外，未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign；签名/profile、已签名 HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺，计划保持 `blocked`、无 evidence ID 或 verdict，因此 E8 必须保持 `CLOSED` |
 
 R0 未退出意味着任何研究结果都不能表述为产品可行性、真机支持或发布承诺，也不能据此跳过后续证据门。
 
@@ -66,7 +66,7 @@ E8 `OPEN` 的必要条件必须全部满足：所有客观可执行 Emulator 项
 
 E8 前只定义这一个物理设备 campaign。它只准在输入冻结后的一台具名 HarmonyOS 6.1 arm64 设备上，复用或最小适配现有普通第三方纯 ArkTS/C 公共 VPN Extension A/B 探针，验证 allow、deny、`onCreate`、`VpnConnection.create` fd、active stop、Settings revoke、第二 VPN 冲突和清理。禁止 Go、NetBird、WireGuard、私有 fork、产品代码、`MANAGE_VPN`、system/debug/enterprise、root、隐藏服务、权限授予或策略绕过。
 
-设备型号 `PLA-AL10`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel `aarch64`、app ABI `arm64-v8a` 与唯一 HDC target 的仓外 `PHYS-1` 映射已冻结；任一漂移必须停止。隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 适配和 unsigned A/B 本地构建：仅 `INTERNET`、非导出 `type: vpn`、无 Go/NetBird/WireGuard/`protect`/特权/外部 endpoint；唯一 arm64-v8a 纯 C `libfdprobe.so` 只用 `fcntl(F_GETFD)` 读取 fd，平台 `VpnConnection.destroy` 为唯一 close 责任。历史探针和 raw 未修改。执行前仍必须齐备普通开发签名且设备纳入 profile、已签名 A/B HAP、冻结源码/SDK/final hash、清理基线、采集与独立审查准备、campaign ID、逐场景 60 秒窗口和 Settings re-allow 预期。unsigned HAP 只为本地准备快照，不是 campaign 制品；后续重建或签名必会改变其 hash。必须保留原始未筛选 HiLog、完整 transcript、截图、状态/布局、fault list 和 hash manifest，并完成独立审查；HDC target、设备序列号和签名秘密不得入库。唯一一次最小只读发现的六条白名单设备 `shell` 已成功；除该六项外，尚未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign。预检计划仍为 `blocked`，尚未分配 evidence ID、形成证据记录或 verdict。完整计划与专用证据模板见 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md)。
+设备型号 `PLA-AL10`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel `aarch64`、app ABI `arm64-v8a` 与唯一 HDC target 的仓外 `PHYS-1` 映射已冻结；任一漂移必须停止。隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 适配和 unsigned A/B 本地构建：仅 `INTERNET`、非导出 `type: vpn`、无 Go/NetBird/WireGuard/`protect`/特权/外部 endpoint；唯一 arm64-v8a 纯 C `libfdprobe.so` 只用 `fcntl(F_GETFD)` 读取 fd，平台 `VpnConnection.destroy` 为唯一 close 责任。历史探针和 raw 未修改。执行前仍必须齐备普通开发签名且设备纳入 profile、已签名 A/B HAP、冻结源码/SDK/final hash、清理基线、采集与独立审查准备、campaign ID、逐场景 60 秒窗口和 Settings re-allow 预期。unsigned HAP 只为本地准备快照，不是 campaign 制品；后续重建或签名必会改变其 hash。必须保留原始未筛选 HiLog、完整 transcript、截图、状态/布局、fault list 和 hash manifest，并完成独立审查；HDC target、设备序列号和签名秘密不得入库。唯一一次最小只读发现的六条白名单设备 `shell` 已成功。唯一 signing enrollment 命令已获授权但截至 `2026-08-05` 尚未执行；只有 DevEco Studio 未自动安全采集 UDID 时，Windows 授权人员才可为普通开发 profile 输入执行一次。这是已批准的最小实施边界，不扩展 campaign/evidence，也不是新的动态调整记录。除此之外，尚未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign。预检计划仍为 `blocked`，尚未分配 evidence ID、形成证据记录或 verdict。完整计划与专用证据模板见 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md)，Windows 签名边界见 [Windows + DevEco Studio 开发交接](windows-development-handoff.md)。
 
 只有预检同时达到 `record_status: reviewed-pass`、`verdict: pass`，才满足 E8 `OPEN` 的预检必要条件，但仍不充分且不自动开放 E8。预检 `fail`、`blocked` 或 `invalid` 均使 E8 保持 `CLOSED`；结果只决定该精确物理目标上的 E3 可达性，失败范围不得外推。一次 campaign 及唯一基础设施性 blocked 重试的纪律以专用计划为准；功能 fail、输入变化、第二台设备或其他越界继续执行都必须先取得新的路线决策。
 
@@ -141,7 +141,7 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 - API 24 x86_64 phone Emulator 总门为 `CLOSED`：E0、E1-C、E2 已为 `reviewed-pass/pass`；现有官方 Go 1.25.12 loader 负面绑定 v0.74.6，当前R0正式基线（现v0.74.7）尚未重跑且没有 pass，E1 overall Go 未关闭。
 - 官方 API 24 x86_64 phone、2in1、Tablet 的历史矩阵记录均保持 `reviewed-pass/blocked`。phone 的 blocked 覆盖所记录公开 runtime；2in1、Tablet 的“不可继续执行”只限 registration-layer 前置边界，未安装 HAP，不能扩写为完整 runtime 结论。历史 evidence 和 raw 判定不改写，范围不外推。
 - E3-E7 在当前聚合中为 reviewed dependency-blocked aggregation exception，不是 `N/A` 或 pass；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。当前仍因 E1、预检和完整独立聚合审查均未满足而 `CLOSED`。
-- 唯一 `E3-PHYS-PREFLIGHT` 的设备型号 `PLA-AL10`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel `aarch64`、app ABI `arm64-v8a` 和仓外 `PHYS-1` 映射已冻结；任一漂移必须停止。隔离目录已完成 API 23 A/B 适配和 unsigned 本地快照，历史树和 raw 不变；仍缺普通开发签名/profile、已签名 A/B HAP、冻结源码/SDK/final hash、清理基线、采集/审查准备和 campaign 输入，因此计划状态为 `blocked`；除已完成的六条白名单设备 `shell` 外，尚未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign，也未分配 evidence ID 或 verdict。
+- 唯一 `E3-PHYS-PREFLIGHT` 的设备型号 `PLA-AL10`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel `aarch64`、app ABI `arm64-v8a` 和仓外 `PHYS-1` 映射已冻结；任一漂移必须停止。隔离目录已完成 API 23 A/B 适配和 unsigned 本地快照，历史树和 raw 不变；仍缺普通开发签名/profile、已签名 A/B HAP、冻结源码/SDK/final hash、清理基线、采集/审查准备和 campaign 输入，因此计划状态为 `blocked`。六条白名单设备 `shell` 已执行；唯一 signing enrollment 命令已获授权但截至 `2026-08-05` 尚未执行，仅在 DevEco Studio 未自动安全采集 UDID 时由 Windows 授权人员为普通开发 profile 输入执行一次。它不扩展 campaign/evidence，也不是新的动态调整记录。除此之外，尚未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign，也未分配 evidence ID 或 verdict。
 - 除该唯一受限预检外，E8 `OPEN` 前仍禁止物理设备执行；真机 HDC 安装、启动、日志、卸载的完整闭环尚未建立。
 - 普通第三方 VPN、SysCap、虚拟接口 fd、`protect`、后台生命周期和真实流量尚无产品或阶段门证据；预检即使通过也只证明精确物理目标上的 E3 可达。
 - 当前R0正式基线（现v0.74.7）已固定；所有 v0.74.6 历史 evidence 保持原版本、commit、输入 hash 和判定，后续受影响门尚未基于 v0.74.7 重跑。

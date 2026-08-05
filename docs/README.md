@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-07-18
+最后核验：2026-08-05
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -38,6 +38,8 @@
   - 隔离目录已完成 API 23 纯 ArkTS/C A/B 适配和 unsigned 本地快照；签名/profile、signed HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺，campaign 未开始且只有 `reviewed-pass/pass` 才满足 E8 必要条件
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
   - API 23 本地 unsigned 物理预检准备；历史 E3 不改，禁止直接安装
+- [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
+  - `main` / `d5a4771` 的 Windows 签名与构建交接；限定普通开发签名、A/B 独立 profile、唯一 enrollment 边界、最小回传和签名完成即停止
 - [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
   - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
   - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
@@ -108,7 +110,7 @@
 
 当前文档不表示以下事项已经完成：
 
-- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass；唯一 `E3-PHYS-PREFLIGHT` 的一次六条白名单只读设备 `shell` 已冻结 `HarmonyOS`、`PLA-AL10`、完整 build、API `23`、`aarch64`、`arm64-v8a` 和仓外 `PHYS-1` 映射。隔离目录中的 API 23 适配和 unsigned A/B 本地快照已完成，但签名/profile、已签名 HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺。除该发现外未执行其他设备 `shell`、`install`、`send`、`start`、`stop`，campaign 未开始，计划仍为 `blocked`、无 evidence ID 或 verdict。除该受限发现外，仍禁止任何物理设备执行。
+- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass；唯一 `E3-PHYS-PREFLIGHT` 的一次六条白名单只读设备 `shell` 已冻结 `HarmonyOS`、`PLA-AL10`、完整 build、API `23`、`aarch64`、`arm64-v8a` 和仓外 `PHYS-1` 映射。隔离目录中的 API 23 适配和 unsigned A/B 本地快照已完成，但签名/profile、已签名 HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺。唯一 signing enrollment 命令已获授权但截至 `2026-08-05` 尚未执行，仅在 DevEco Studio 未自动安全采集 UDID 时由 Windows 授权人员为普通开发 profile 输入执行一次；它不扩展 campaign/evidence，也不是新的动态调整记录。除此之外未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign，计划仍为 `blocked`、无 evidence ID 或 verdict。除受限预检及该未执行 enrollment 边界外，仍禁止任何物理设备执行。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。

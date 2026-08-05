@@ -1,6 +1,6 @@
 # E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板
 
-最后核验：2026-07-18
+最后核验：2026-08-05
 
 本文定义 `E3-PHYS-PREFLIGHT`，即 E8 `OPEN` 前唯一允许的物理设备执行例外。它只验证一个冻结的 HarmonyOS 6.1 arm64 具名设备目标上的 E3 可达性，不是产品测试、R 阶段退出或 E4-E7 完整验证。预检记录同时达到 `record_status: reviewed-pass` 和 `verdict: pass` 是 E8 `OPEN` 的必要但非充分条件；预检为 `blocked`、`fail` 或 `invalid` 时 E8 必须保持 `CLOSED`，预检通过也不自动开放 E8。
 
@@ -12,7 +12,7 @@
 
 当前 unsigned HAP SHA-256 只记录本地准备快照，非 campaign 冻结制品：A 为 `5712541de9095e6eb99cfd2d72582b150adf2d78a14cc23375d887b298ece7ed`，B 为 `9c4ae9206b8ac6843f4317645a2ebdb656610575c0220c58c6091a23e16687c0`。unsigned 是预期构建警告；Stable SDK 当前不验证 NAPI 模块声明，虽已提供 `.d.ts` 且编译通过，真机 native 加载尚未验证。后续重建或签名必会改变 HAP，因此这些 SHA-256 不得用于签名制品、campaign 输入或最终 hash 的冻结。
 
-设备、系统、API 与架构、HDC 映射输入现已冻结并满足；任一已冻结输入漂移必须停止，不得继续或重新冻结后继续。除这六条白名单发现外，未执行其他设备 `shell`、`install`、`send`、`start` 或 `stop`，campaign 未开始。当前仍缺普通开发签名与设备 profile、已签名 A/B HAP、冻结的源码/SDK/final hash、清理基线、采集准备、独立审查准备及 campaign 输入。任一项缺失时，本预检计划保持 `blocked`；只有全部剩余输入门满足、正式证据 ID 分配并开始 campaign 后，才使用证据 schema 的记录状态与判定。
+设备、系统、API 与架构、HDC 映射输入现已冻结并满足；任一已冻结输入漂移必须停止，不得继续或重新冻结后继续。六条白名单设备 discovery 已执行。唯一 signing enrollment 命令已获授权，但截至 `2026-08-05` 尚未执行；只有 DevEco Studio 未自动安全采集 UDID 时，Windows 授权人员才可为普通开发 profile 输入执行一次。它是已批准普通开发 profile 输入的最小实施边界，不扩展 campaign 或 evidence，也不是新的动态调整记录。除此之外，未执行其他设备 `shell`、`install`、`send`、`start` 或 `stop`，campaign 未开始。当前仍缺普通开发签名与设备 profile、已签名 A/B HAP、冻结的源码/SDK/final hash、清理基线、采集准备、独立审查准备及 campaign 输入。任一项缺失时，本预检计划保持 `blocked`；只有全部剩余输入门满足、正式证据 ID 分配并开始 campaign 后，才使用证据 schema 的记录状态与判定。
 
 ## 唯一例外边界
 
@@ -37,7 +37,17 @@ $HDC -t "$PHYS_1_TARGET" shell uname -m
 $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 ```
 
-这六项只用于冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。除已完成的上述六项外，不得执行任何其他设备 `shell` 命令。
+这六项只用于冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。在设备元组 discovery 内，禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。设备元组 discovery 不得重跑；仅下节列出的单次长选项 enrollment 例外可读取 UDID，其他设备 `shell` 命令仍不得执行。
+
+### Signing enrollment 唯一例外
+
+此例外只用于为 `PHYS-1` 注册普通开发签名 profile，不是 campaign、不是 evidence，且不改变 `plan_status: blocked`。它是已批准普通开发 profile 输入的最小实施边界，不扩展 campaign，亦不新增动态调整记录。仅 Windows 授权人员可在 DevEco Studio 未自动安全采集 UDID 时执行一次；无线连接与本机验签步骤见 [Windows + DevEco Studio 开发交接](windows-development-handoff.md)：
+
+```text
+hdc shell bm get --udid
+```
+
+长选项 `--udid` 是唯一允许的 UDID 读取，短选项 `bm get -u` 仍禁止。真实 endpoint 与 UDID 仍必须仓外保存。stdout 只准人工录入 AGC，禁止粘贴到聊天、issue、日志或仓库，禁止重定向到文件。若 DevEco Studio 自动安全采集 UDID，不再手工执行该命令。这个唯一例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
 
 设备、系统、API 与架构、HDC 已冻结；其余输入必须在安装前一次性冻结。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
 
@@ -56,7 +66,7 @@ $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 | Campaign | campaign ID、初次执行与唯一允许重试的编号规则、场景顺序，以及每场景固定 60 秒窗口的决定性起点已冻结 |
 | Settings re-allow | 执行前冻结预期路径：系统直接激活 A，或再次出现普通系统授权 UI；现场不得在两者间事后改判 |
 
-输入门只允许做必要的本地构建和签名验证；最小设备发现已完成，不得重复。任一已冻结的设备、系统、API 与架构、HDC 映射，或后续冻结的源码、SDK、签名 profile 或 HAP hash 发生变化都必须停止，且须取得新的路线决策；不能在运行中替换或仅重新冻结后继续。
+输入门只允许做必要的本地构建和签名验证；最小设备发现已完成，不得重复。上节严格限定的单次 signing enrollment 只为 AGC profile 注册提供 UDID，既不是输入发现也不是 campaign/evidence，且不授权任何其他设备命令。任一已冻结的设备、系统、API 与架构、HDC 映射，或后续冻结的源码、SDK、签名 profile 或 HAP hash 发生变化都必须停止，且须取得新的路线决策；不能在运行中替换或仅重新冻结后继续。
 
 ## Campaign 与重试纪律
 
@@ -103,7 +113,7 @@ $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 
 每个场景必须保留未筛选原始 HiLog、完整命令 transcript、系统授权/Settings/冲突/结果截图、必要布局或状态快照、fault list、开始/结束时间和 SHA-256 manifest。证据还必须绑定完整目标元组、稳定设备别名、源码归档、source manifest、SDK、签名验证结果、A/B HAP 和 runner hash。
 
-日志进入仓库或普通证据存储前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库。独立审查必须核对原始材料完整性、场景顺序、hash、普通权限边界、最终清理和失败范围后，才能把记录从 `collected` 改为 `reviewed-pass` 或 `reviewed-fail`。
+日志进入仓库或普通证据存储前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、UDID、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库；含 UDID 的 profile 验证原始输出也不得归档。独立审查必须核对原始材料完整性、场景顺序、hash、普通权限边界、最终清理和失败范围后，才能把记录从 `collected` 改为 `reviewed-pass` 或 `reviewed-fail`。
 
 ## 专用证据模板
 
