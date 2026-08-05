@@ -27,8 +27,8 @@
 ## Windows 前置条件
 
 - Windows 授权人员须拥有华为开发者账号和对应 AGC 项目的普通开发签名权限，足以管理两个 App ID、Debug 证书、设备与 profile；权限不足时停止并由账号所有者处理。
-- 安装 Git 和当前 DevEco Studio；在回传中记录 DevEco Studio 精确版本。
-- 在 DevEco Studio 安装 HarmonyOS SDK `6.1.1` / API `24`，用于 compile；项目 target 与 compatible 必须继续为 API `23`。
+- 安装 Git，以及 **Windows 64 位正式版** `DevEco Studio 6.1.1 Release`（本次冻结输入；禁止 Beta / Preview / Canary，也禁止旧版 `6.0.x` / `6.1.0`）。官方下载：<https://developer.huawei.com/consumer/cn/download/deveco-studio>。
+- 安装后在 `Help > About DevEco Studio` 记录完整 IDE 版本串 `6.1.1.xxx`（含 Build）；在 `Help > About HarmonyOS SDK` 或 SDK Manager 确认已安装 HarmonyOS SDK `6.1.1` / API `24`，用于 compile。项目 CLI 中的 `6.1.1.290` 是 Command Line Tools 包版本，**不要求** IDE Build 尾号等于 `.290`。项目 `targetSdkVersion` 与 `compatibleSdkVersion` 必须继续为 API `23`。
 - 安装可用的 HDC，并记录精确 HDC 版本。不要把 HDC target 或设备标识写入版本控制、构建日志或回传。
 - `PHYS-1` 使用同一 LAN 的无线调试。仅从设备 UI 人工读取当前动态 IP:port，并且只在本机执行以下最短连接流程；不运行 shell discovery 或主机侧设备扫描，不记录、截图或回传 endpoint：
 
