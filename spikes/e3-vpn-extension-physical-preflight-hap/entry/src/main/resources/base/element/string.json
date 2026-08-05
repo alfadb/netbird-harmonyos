@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "Isolated E3 physical-device VPN preflight"
+    },
+    {
+      "name": "ability_description",
+      "value": "Ordinary UI entry for local VPN lifecycle preflight"
+    },
+    {
+      "name": "ability_name",
+      "value": "E3 Physical VPN Preflight"
+    }
+  ]
+}

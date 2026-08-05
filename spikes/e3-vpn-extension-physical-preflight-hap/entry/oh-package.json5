@@ -1,0 +1,10 @@
+{
+  modelVersion: '6.0.0',
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Entry module for the isolated E3 physical preflight.',
+  license: 'MIT',
+  dependencies: {
+    'libfdprobe.so': 'file:./src/main/cpp/types/libfdprobe'
+  }
+}

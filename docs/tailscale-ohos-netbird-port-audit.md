@@ -1,11 +1,11 @@
 # Tailscale-OHOS VPN 数据通路审计与 NetBird 映射
 
-最后核验：2026-07-17
+最后核验：2026-07-18
 
 本文审计 `flypigJ/Tailscale-OHOS` 固定 commit
 `fbd14c5207e746389e54ff9f8f8593c46942adac` 中的
 HarmonyOS `VpnExtensionAbility -> NAPI -> Go -> wireguard-go` 路径，并映射到
-NetBird 最新正式 GitHub release `v0.74.7` 的固定 commit
+当前R0正式基线（现v0.74.7）的固定 commit
 `a1c9427d8004576e2cbb9e546d409847fa9df318`。本文是源码研究，不是本仓库的
 Emulator 或真机 evidence，不构成产品实现、许可证完成结论或阶段门通过。
 
@@ -44,7 +44,8 @@ Emulator 或真机 evidence，不构成产品实现、许可证完成结论或�
   不会自动给该仓 ArkTS/C++/Go glue 代码授予许可，因此当前不得复制其代码。
 - 外部 README 的真机结果和 PowerShell 探针只属于外部维护者自报。本仓没有取得
   对应原始日志、固定目标元组、签名后 HAP、哈希或独立审查记录；没有运行这些
-  真机脚本，也不改变 E3 `blocked`、E4-E7 dependency blocked 或 E8 `CLOSED`。
+  真机脚本，也不改变 E3-E7 的 reviewed dependency-blocked aggregation exception、
+  `E3-PHYS-PREFLIGHT` 尚无证据 ID 的 `blocked` 计划状态或 E8 `CLOSED`。
 
 ## 固定基线
 
@@ -76,8 +77,8 @@ NetBird `v0.74.7` 的 GitHub release 页面为
 更新为
 [`8ec1ad32...`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/go.mod#L345-L351)。
 其他变更集中在 relay QUIC 并发、认证和输入校验、netstack SOCKS5 监听默认值、
-Windows gVisor RACK 以及用户态防火墙分片处理。本文只记录差异；是否采用新输入、
-重跑哪些门及如何更新 R0 authoritative baseline 仍适用现有动态调整机制。
+Windows gVisor RACK 以及用户态防火墙分片处理。本文只记录差异；R0 已于
+2026-07-18 正式采用该输入，受影响门仍须按动态调整机制用新记录重跑。
 
 审计使用 `gh repo clone`、`gh api repos/.../releases/latest`、tag/ref/commit 查询及
 本地只读 `git`/`rg`。临时 clone 位于 `/tmp`，没有进入本仓 evidence。
@@ -141,10 +142,11 @@ README 所称的“小补丁”不能计数、复现或评估维护风险；见
 [README 自述](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/README.md#L74-L85)。
 这些缺失不允许作为本项目 Go/NetBird patch budget 的输入。
 
-NetBird `v0.74.7` 使用 Go 1.25.12，并把 WireGuard 替换到
-`netbirdio/wireguard-go@8ec1ad32...`。本仓已有证据表明官方 Go 1.25.12 制品在
-API 24 x86_64 应用 late-load 路径仍受 initial-exec TLS 阻断；外部项目使用另一套
-Go 1.24.5 arm64 OpenHarmony fork，不反驳该结果，也不授权引入私有 Go fork。
+当前R0正式基线（现v0.74.7）使用 Go 1.25.12，并把 WireGuard 替换到
+`netbirdio/wireguard-go@8ec1ad32...`。本仓 v0.74.6 历史证据表明其官方 Go 1.25.12
+制品在 API 24 x86_64 应用 late-load 路径受 initial-exec TLS 阻断；v0.74.7 尚未重跑
+且没有 E1 pass。外部项目使用另一套 Go 1.24.5 arm64 OpenHarmony fork，不反驳该
+历史结果，也不能替代 v0.74.7 重验或授权引入私有 Go fork。
 
 ## NAPI 导出、线程与内存
 
@@ -492,7 +494,10 @@ fd duplicate、自定义 `tun.Device` 和独立进程 handoff 可用于测试设
 形成可计数 patch、固定 Go/NetBird/wireguard-go 输入、NAPI ABI、fd 所有权表和目标
 SDK/Emulator evidence。
 
-当前状态不变：官方 NetBird Go 1.25.12 loader 仍 blocked；E3 仍为
-`reviewed-pass/blocked`；E4-E7 dependency blocked 且不开始；E8 保持 `CLOSED`，
-禁止真机执行。外部 HarmonyOS 6.1 phone 自报不属于本仓目标元组，也不能成为绕过
-API 24 x86_64 phone Emulator 总门的依据。
+本审计不改变门状态：loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.74.7）
+尚未重跑且没有 E1 pass。Emulator E3-E7 保持 reviewed dependency-blocked aggregation
+exception，不是 `pass` 或 `N/A`；2in1、Tablet 的 blocked 只覆盖 registration-layer
+前置边界。`E3-PHYS-PREFLIGHT` 当前计划状态为 `blocked` 且尚无证据 ID，故 E8 保持 `CLOSED`。
+只有预检 `reviewed-pass/pass` 才满足 E8 的预检必要条件，还必须取得当前R0正式基线（现v0.74.7）的 E1 pass、
+哈希一致和独立聚合批准。外部 HarmonyOS 6.1 phone 自报不属于本仓目标元组，不能授权
+或替代该预检；E8 `OPEN` 后仍须在具名物理设备 R2/R3 完成 E4-E7 VPN/数据面义务。

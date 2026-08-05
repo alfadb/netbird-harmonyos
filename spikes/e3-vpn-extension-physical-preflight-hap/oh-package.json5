@@ -1,0 +1,9 @@
+{
+  modelVersion: '6.0.0',
+  name: 'e3-vpn-extension-physical-preflight-hap',
+  version: '1.0.0',
+  description: 'Isolated E3 physical-device preflight build for API 23.',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}

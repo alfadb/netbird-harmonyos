@@ -1,0 +1,26 @@
+{
+  apiType: 'stageMode',
+  buildOption: {
+    externalNativeOptions: {
+      path: './src/main/cpp/CMakeLists.txt',
+      arguments: '-DOHOS_STL=none',
+      abiFilters: [
+        'arm64-v8a'
+      ],
+      targets: [
+        'fdprobe'
+      ]
+    }
+  },
+  targets: [
+    {
+      name: 'default',
+      runtimeOS: 'HarmonyOS',
+      config: {
+        deviceType: [
+          'phone'
+        ]
+      }
+    }
+  ]
+}

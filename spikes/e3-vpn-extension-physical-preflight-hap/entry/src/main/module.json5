@@ -1,0 +1,49 @@
+{
+  module: {
+    name: 'entry',
+    type: 'entry',
+    description: '$string:module_description',
+    mainElement: 'EntryAbility',
+    deviceTypes: [
+      'phone'
+    ],
+    deliveryWithInstall: true,
+    installationFree: false,
+    pages: '$profile:main_pages',
+    abilities: [
+      {
+        name: 'EntryAbility',
+        srcEntry: './ets/entryability/EntryAbility.ets',
+        description: '$string:ability_description',
+        icon: '$media:app_icon',
+        label: '$string:ability_name',
+        startWindowIcon: '$media:app_icon',
+        startWindowBackground: '$color:start_window_background',
+        exported: true,
+        skills: [
+          {
+            entities: [
+              'entity.system.home'
+            ],
+            actions: [
+              'ohos.want.action.home'
+            ]
+          }
+        ]
+      }
+    ],
+    extensionAbilities: [
+      {
+        name: 'E3PhysicalVpnExtensionAbility',
+        srcEntry: './ets/vpnextensionability/E3PhysicalVpnExtensionAbility.ets',
+        type: 'vpn',
+        exported: false
+      }
+    ],
+    requestPermissions: [
+      {
+        name: 'ohos.permission.INTERNET'
+      }
+    ]
+  }
+}

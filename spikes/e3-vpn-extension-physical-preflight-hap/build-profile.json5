@@ -1,0 +1,48 @@
+{
+  app: {
+    products: [
+      {
+        name: 'default',
+        bundleName: 'cn.alfadb.netbird.e3physvpna',
+        runtimeOS: 'HarmonyOS',
+        compileSdkVersion: '6.1.1(24)',
+        compatibleSdkVersion: '6.1.0(23)',
+        targetSdkVersion: '6.1.0(23)',
+        bundleType: 'app',
+        versionCode: 1,
+        versionName: '0.0.1'
+      },
+      {
+        name: 'vpnB',
+        bundleName: 'cn.alfadb.netbird.e3physvpnb',
+        runtimeOS: 'HarmonyOS',
+        compileSdkVersion: '6.1.1(24)',
+        compatibleSdkVersion: '6.1.0(23)',
+        targetSdkVersion: '6.1.0(23)',
+        bundleType: 'app',
+        versionCode: 1,
+        versionName: '0.0.1'
+      }
+    ],
+    buildModeSet: [
+      {
+        name: 'debug'
+      }
+    ]
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+            'vpnB'
+          ]
+        }
+      ]
+    }
+  ]
+}

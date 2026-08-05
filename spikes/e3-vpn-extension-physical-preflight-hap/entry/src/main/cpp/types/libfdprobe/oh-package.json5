@@ -1,0 +1,7 @@
+{
+  name: 'libfdprobe.so',
+  version: '1.0.0',
+  description: 'Type declarations for the read-only E3 fd probe.',
+  types: './index.d.ts',
+  license: 'MIT'
+}

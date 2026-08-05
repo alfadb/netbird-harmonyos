@@ -1,6 +1,6 @@
 # OpenHarmony/HarmonyOS 平台与发行策略
 
-最后核验：2026-07-17
+最后核验：2026-07-18
 
 本文给出 `netbird-harmonyos` 面向 OpenHarmony 与 HarmonyOS 的双目标策略。核心结论是：以 OpenHarmony 公共 API 为可移植基线，共享协议与网络核心，同时为两个平台维护独立应用壳、构建签名、制品、测试和分发流程。该结论是方案建议，不表示双目标应用已经实现。
 
@@ -25,13 +25,15 @@ HarmonyOS 包模型资料：
 
 ### 投入顺序与证据边界
 
-API 24 x86_64 phone Emulator 是任何真机执行前的投入总门：其上所有客观可执行项必须按 E0-E8 先完成并通过，E8 未 `OPEN` 时禁止任何真机执行。该顺序不把 Emulator 提升为 arm64 或产品支持替代物；x86_64 Emulator 的 PASS 与 FAIL 均不得外推到 arm64、具名真机或华为商用 HarmonyOS，禁止真机也不是对这些目标的负面技术结论。
+API 24 x86_64 phone Emulator 仍是物理设备产品投入前的优先总门：所有客观可执行项必须先完成并通过。x86_64 Emulator 的 PASS、FAIL 与 blocked 均不得外推到 arm64、具名物理设备或华为商用 HarmonyOS。
 
-arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，属于 E8 通过后的真机专属验证，不计入 Emulator 总门；这种范围划分不得用于提前真机。当前总门为 `CLOSED`：所有当前不依赖 Go 且合法可达的 E0、E1-C、E2 已以 `reviewed-pass/pass` 完成；官方 E1 Go loader initial-exec TLS 仍失败，故 E1 overall Go blocked；E3 的 0003/0004 均为 `reviewed-pass/blocked`，精确 API 24 x86_64 phone Emulator image 缺少 `com.huawei.hmos.vpndialog`、普通公开 API 无旁路且 Settings 无普通 VPN 管理入口，E3 不关闭，E4-E7 为 dependency blocked、不开始。E8 仍 `CLOSED`，真机禁令不变；该模拟器缺项不外推到其他架构、具名真机或华为商用 HarmonyOS。
+[E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已穷尽当时官方 API 24 x86_64 phone、2in1 与 Tablet image。五个历史记录保持 `reviewed-pass/blocked` 且 raw evidence 不改写。phone 记录覆盖公开 runtime 与注册前置边界；2in1、Tablet 只在 registration-layer 前置边界确认组件缺失并按停止条件未安装 HAP，不能扩写为完整 runtime 不可执行结论。E3-E7 在当前 E8 聚合中统一记为 reviewed dependency-blocked aggregation exception，不是 `pass` 或 `N/A`。
 
-[E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已穷尽官方 API 24 x86_64 的 phone、2in1 与 Tablet 替代 Emulator 形态。phone 0003/0004、2in1 0001/0002 和 Tablet 0001 均为 `reviewed-pass/blocked`：三种独立 image/instance 的 BMS/Settings 注册层均无 `vpndialog`/`VpnServiceExtAbility`；phone 的普通公开 API runtime 还记录 pending/`onCreate=0`；Tablet/2in1 按注册层停止条件未发送或安装 HAP。phone、2in1 与 Tablet 的证据、设备形态和系统 build string 完全独立，任一侧结论都不得替代或外推到另一侧。
+现有 loader 负面证据只绑定 v0.74.6；当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass。E8 前还只允许一个 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md) campaign：输入冻结后，在一台具名 HarmonyOS 6.1 arm64 物理设备上使用普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针，判断该精确目标的 E3 可达性。唯一 `PLA-AL10`/API `23` 设备元组与仓外 `PHYS-1` 映射已冻结，API 23 隔离 unsigned A/B 本地准备已完成，但签名/profile、signed HAP、final hashes、清理和 campaign 等仍缺；预检计划状态为 `blocked`，无真实 endpoint，尚未分配证据 ID；因此 E8 必须保持 `CLOSED`。
 
-E3 仍 blocked，E4-E7 仍 dependency blocked 且不开始，E8 仍 `CLOSED`。当前动作是等待包含组件的官方 image 发布，以及正式 NetBird/Go 输入变化，再重跑对应门；不建议私有 Go 或 system/debug/enterprise 绕过。
+只有预检同时为 `record_status: reviewed-pass`、`verdict: pass` 才满足 E8 `OPEN` 的预检必要条件，但仍不充分且不自动开放。E8 还必须取得当前R0正式基线（现v0.74.7）的 E1 `reviewed-pass/pass`、全部目标元组/哈希一致和独立聚合审查显式批准。预检 `blocked`、`fail` 或 `invalid` 均保持 `CLOSED`；除该例外外，物理设备上的 ABI、Go、NetBird、E4-E7、网络、性能、能耗、长稳、渠道和产品测试仍须等待 E8 显式 `OPEN`。
+
+预检只覆盖 allow、deny、`onCreate`、`VpnConnection.create` fd、active stop、Settings revoke、第二 VPN 冲突和清理；禁止 Go、NetBird、WireGuard、私有 fork、产品代码、`MANAGE_VPN`、system/debug/enterprise/root 或其他特权绕过。E4-E7 完整义务没有免除，须在 E8 `OPEN` 后移交同一具名物理设备的 R2/R3 门；`OPEN` 只是物理投入许可，不表示 VPN 或数据面通过。若新官方 image/build 含所需组件，旧 blocked-exception 对新元组失效，必须从 E3 重验。
 
 ### 不作出的承诺
 
@@ -152,7 +154,7 @@ NetBird 核心可优先评估 Go 交叉编译为目标架构 native 库，再通
 
 ### 外部实现研究边界
 
-[Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)已按固定外部 SHA 和 NetBird v0.74.7 正式 release/commit 检查独立 VPN Extension、NAPI、Go 与外部 `tun.Device` 路径。可独立重写借鉴的部分包括 fd duplicate/单一关闭责任、平台配置路由/DNS、独立进程持久状态 handoff 和异步 NAPI 边界；该外部仓的 Go/Tailscale 补丁未入库、根 LICENSE 缺失，实际绕行是 bundle 级应用排除而非逐 socket `protect`，真机脚本和结果也只属于外部维护者自报。因此该研究不构成 E1、E3-E8 或产品支持证据，不改变当前总门和真机禁令。
+[Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)已按固定外部 SHA 和 NetBird v0.74.7 正式 release/commit 检查独立 VPN Extension、NAPI、Go 与外部 `tun.Device` 路径。可独立重写借鉴的部分包括 fd duplicate/单一关闭责任、平台配置路由/DNS、独立进程持久状态 handoff 和异步 NAPI 边界；该外部仓的 Go/Tailscale 补丁未入库、根 LICENSE 缺失，实际绕行是 bundle 级应用排除而非逐 socket `protect`，真机脚本和结果也只属于外部维护者自报。因此该研究不构成 E1、E3-E8 或产品支持证据，不改变当前总门，也不授权 `E3-PHYS-PREFLIGHT` 或其他设备执行。
 
 ## HAP、App Pack 与签名
 
@@ -181,7 +183,7 @@ API 出现在 SDK 中只代表可以编译，设备能否运行还取决于 SysC
 
 ### 设备能力尚未验证
 
-2026-07-17 当前实测已穷尽三个彼此独立的 API 24 x86_64 官方 Emulator image：phone `phone_all_x86` 的 E3 0003/0004、2in1 `pc_all_x86` 的 0001/0002，以及 Tablet `tablet_x86` 的 0001。五个最终记录均为 `reviewed-pass/blocked`，并在各自 BMS/Settings 注册层观察到授权组件缺失；phone 还记录 public API pending/`onCreate=0`，Tablet/2in1 未安装 HAP。这只是各自精确 image 的负面证据，不形成 API、设备类型、架构、真机或发行版级结论。
+2026-07-17 当前实测覆盖三个彼此独立的 API 24 x86_64 官方 Emulator image：phone `phone_all_x86` 的 E3 0003/0004、2in1 `pc_all_x86` 的 0001/0002，以及 Tablet `tablet_x86` 的 0001。五个最终记录均保持 `reviewed-pass/blocked`；phone 的结论覆盖所记录公开 runtime，2in1、Tablet 只覆盖 registration-layer 前置边界且未安装 HAP。该边界不形成 API、设备类型、架构、物理设备或发行版级结论，也不适用于以后增加所需组件的新 image/build。
 
 - 目标 OpenHarmony 产品是否包含 VPN Extension 所需组件和 SysCap。
 - 目标产品是否允许普通第三方应用声明并启动 VPN Extension。
@@ -196,19 +198,19 @@ API 出现在 SDK 中只代表可以编译，设备能否运行还取决于 SysC
 ### Emulator E0-E8 投入总门
 
 - **E0 普通应用**：普通第三方 phone 应用的构建、安装、`EntryAbility` 启动、可观察运行、停止、卸载和清理。
-- **E1 ArkTS/native/fd ownership**：双向调用、异步回调，以及 fd 创建、复制、移交、关闭和异常清理契约；最新正式 NetBird 声明工具链构建的官方 Go 制品还必须实际加载并运行该边界，C-only 只算子证据。
+- **E1 ArkTS/native/fd ownership**：双向调用、异步回调，以及 fd 创建、复制、移交、关闭和异常清理契约；当前R0正式基线（现v0.74.7）声明工具链构建的官方 Go 制品还必须实际加载并运行该边界，C-only 只算子证据。v0.74.6 loader 负面不得改写成 v0.74.7 结果。
 - **E2 C 网络**：纯 C native 的 TCP/UDP、DNS、loopback、外部端点收发与错误传播。
-- **E3 VPN Extension 授权**：公开普通第三方应用路径的授权、拒绝、撤销和冲突状态。
+- **E3 VPN Extension 授权**：公开普通第三方应用路径的授权、拒绝、撤销和冲突状态；phone 公开 runtime blocked，2in1/Tablet 只在 registration-layer 前置边界 blocked。E8 前只允许 `E3-PHYS-PREFLIGHT` 判断一个冻结物理目标的可达性。
 - **E4 `setUp`/TUN 配置**：真实建立虚拟接口并核验 fd、地址、路由、DNS、MTU 和协议范围。
 - **E5 `protect` 真实绕行**：真实外层 TCP/UDP socket 的调用时机和不进入隧道的可观察流量证据。
 - **E6 C native 双向泵**：TUN 与真实业务端点间的纯 C 双向流量、背压、部分读写和清理。
 - **E7 lifecycle/故障短循环**：在 Emulator 可靠窗口内覆盖重复启停、撤权、断网、进程退出和故障清理；不要求 25 分钟以上长稳。
-- **E8 聚合**：E0-E7 每项都必须为 `record_status: reviewed-pass`、`verdict: pass`，目标元组、代码/上游 SHA 和制品 SHA-256 与聚合记录一致，并确认最新正式 NetBird 声明基线的官方 Go loader/runtime 已通过；C-only 项可先行，但不能独立满足 E1、打开 E8 或退出正式 R 阶段。
+- **E8 聚合**：客观可执行项必须为 `reviewed-pass/pass`；E3-E7 必须登记为 reviewed dependency-blocked aggregation exception，而非 `N/A`。目标元组和全部 hash 必须一致，当前R0正式基线（现v0.74.7）的官方 Go loader/runtime 与 `E3-PHYS-PREFLIGHT` 都必须为 `reviewed-pass/pass`，最后由独立聚合审查显式决定是否 `OPEN`。预检其他结果均保持 `CLOSED`。
 
-补充 Emulator 设备形态必须使用独立 image、实例、HDC target、输入哈希和 evidence ID；除非路线图另行调整 phone 聚合定义，否则 2in1、Tablet 等补充记录不进入 phone E8。phone 0003/0004、2in1 0001/0002 和 Tablet 0001 均为 `reviewed-pass/blocked`；三者不能相互替代、不能关闭 phone E3，也不能授权真机。等待官方 image/正式 NetBird-Go 输入变化后的对应门重跑，不以私有 Go 或 system/debug/enterprise 路径绕过。
+补充 Emulator 形态继续使用独立 image、实例、HDC target、输入 hash 和 evidence ID。phone、2in1、Tablet 的记录不互相替代、不外推，历史判定不改写。`E3-PHYS-PREFLIGHT` 也不替代 Emulator 记录或 E8 聚合；其 `reviewed-pass/pass` 只是必要而非充分的精确物理目标 E3 输入。
 
-### E8 通过后的真机与发行验证
+### 物理预检与 E8 后验证
 
-E8 `OPEN` 后才可在具名真机执行 arm64 ABI、真实硬件、物理网络切换、能耗、长稳和产品生命周期验证，并分别完成 HarmonyOS 与选定 OpenHarmony 产品的 SDK/SysCap、签名、渠道、市场重签和最终制品回归。每个平台继续使用独立应用壳、制品、目标元组、证据和支持矩阵，Emulator 结果不替代任何真机或渠道结论。
+E8 前只允许专用计划定义的一个物理 E3 campaign；其目标型号、完整 build、API、arm64、HDC、普通开发签名/profile、A/B HAP、源码/SDK/hash、每场景 60 秒窗口、Settings re-allow 预期和清理基线必须先冻结，并保留原始 HiLog/transcript/screenshots/hash 供独立审查。同一冻结元组只有纯基础设施性 overall blocked 可记录一次完整重试；fail 或输入变化必须取得新路线决策。
 
-每一项的命令、SDK 版本、目标元组、输入和制品哈希、预期/实际结果及审查结论必须写入可重复执行的证据记录；任一 E 项未通过时总门保持 `CLOSED`，不得转入真机执行。
+E8 显式 `OPEN` 后，才可在具名物理设备执行预检范围外工作；首先在 R2/R3 完成 E4-E7 的 TUN 配置、`protect`、C 双向泵与 lifecycle/故障完整义务，再分别验证 arm64 ABI、真实硬件、物理网络切换、能耗、长稳和产品生命周期，并完成 HarmonyOS 与选定 OpenHarmony 产品的 SDK/SysCap、签名、渠道、市场重签和最终制品回归。每个平台继续使用独立应用壳、制品、目标元组、证据和支持矩阵；E8 `OPEN` 本身不是 VPN 或数据面通过结论。

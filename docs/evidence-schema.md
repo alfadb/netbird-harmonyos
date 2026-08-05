@@ -1,6 +1,6 @@
 # 证据与脱敏 Schema
 
-最后核验：2026-07-17
+最后核验：2026-07-18
 
 本文定义 `netbird-harmonyos` 各证据门共同使用的记录、脱敏、审查和保留基线。该 schema 已建立，但当前没有因此自动获得任何阶段通过结论；每条结论仍须绑定具体证据。
 
@@ -28,7 +28,7 @@
 
 ## 必填字段
 
-每条证据记录必须包含下列字段；不适用的字段填写 `N/A` 并说明原因，不得留空。
+每条证据记录必须包含下列字段；只有对记录声明范围客观不适用的字段才填写 `N/A` 并说明原因，不得留空。依赖缺失、未执行、暂不可达或证据不足均不是 `N/A`，必须记录为对应的 `blocked` 或未完成状态。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -59,20 +59,39 @@
 | `reviewed-pass` | 独立审查确认范围、完整性和判定满足引用标准 |
 | `reviewed-fail` | 独立审查确认证据有效，但结果不满足引用标准 |
 | `blocked` | 因外部资源、工具或前置门缺失而无法形成有效判定 |
-| `invalidated` | 发现污染、范围错误、哈希不一致、秘密泄露或方法缺陷，记录保留但不得继续引用 |
-| `superseded` | 已由新证据替代，旧记录继续保留并双向引用；不等同于旧结果被删除 |
+| `invalidated` | 发现污染、范围错误、哈希不一致、秘密泄露或方法缺陷，记录保留但不得继续引用，也不得作为 E8 当前成员 |
+| `superseded` | 已由新证据替代，旧记录继续保留并双向引用；不等同于旧结果被删除，但不得作为 E8 当前成员 |
 
-只有 `reviewed-pass` 可用于阶段退出。E0-E8 还必须同时满足 `verdict: pass`；`reviewed-pass` 只说明记录经审查合格，不能把 `blocked`、预期失败对照或范围外子项改写为功能通过。历史研究期 Emulator 证据即使为 `reviewed-pass`，也不会自动取得 E 门资格，更不得替代后续路线图要求的真机证据。
+只有 `reviewed-pass` 可用于证明被测功能通过和阶段退出。E 项还必须同时满足 `verdict: pass`；`reviewed-pass` 只说明记录经审查合格，不能把 `blocked`、预期失败对照或范围外子项改写为功能通过。经审查的 blocked 记录只能证明其精确目标上的不可执行边界，不能当作 E3 pass，也不能登记为 `N/A`；E8 只能按下述规则把它登记为 reviewed dependency-blocked 聚合例外。
 
 ## Emulator 投入总门证据纪律
 
-API 24 x86_64 phone Emulator 的 PASS 与 FAIL 均只适用于记录的目标元组、进程模型、输入和制品，不得外推 arm64、具名真机或华为商用 HarmonyOS；“E8 未通过时禁止真机”只规定投入顺序，不是 arm64 或真机的负面技术判定。
+API 24 x86_64 Emulator 的 PASS、FAIL 与 blocked 均只适用于记录的目标元组、进程模型、输入和制品，不得外推 arm64、具名物理设备或华为商用 HarmonyOS。
 
-E0-E7 每项必须有独立记录，且 `record_status: reviewed-pass`、`verdict: pass` 同时成立。E8 聚合记录必须重核 E0-E7 的目标元组、代码 SHA、相关上游 SHA、APP/TEST HAP、native/Go 库、配置和其他被测输入 SHA-256，并确认最新正式 NetBird 声明基线的官方 Go loader/runtime 已通过；缺失哈希、目标元组漂移、APP/TEST member 不一致、引用被替代/失效记录或任何非 pass verdict 都使 E8 保持 `CLOSED`。
+所有客观可执行 E 项必须有独立记录，且 `record_status: reviewed-pass`、`verdict: pass` 同时成立。官方 API 24 x86_64 phone E3 记录证明其授权前置组件缺失且公开 runtime 路径不可继续；Tablet、2in1 记录只证明各自 registration-layer 前置边界缺少所需注册组件，按停止条件未安装 HAP，不能扩写为完整 runtime 不可执行结论。历史 evidence 和 raw 判定保持原样。
 
-arm64 ABI，以及真实硬件、设备型号、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等 Emulator 客观不能执行的项目，应在记录中标为 `N/A` 并给出客观原因，列入 E8 `OPEN` 后的真机专属待办；这些 `N/A` 不阻塞 E8，但不得作为提前真机或形成支持结论的依据。E7 只要求 Emulator 可靠窗口内的 lifecycle/故障短循环，不把 25 分钟以上 soak 列为 Emulator 总门必过项。
+E3 在记录边界内为 reviewed blocked；E4-E7 因依赖 E3 授权前置而未启动，统一登记为 **reviewed dependency-blocked aggregation exception**。这一分类既不是 `pass`，也不是 `N/A`，不免除 E4-E7 的完整义务。E8 `OPEN` 后，E4-E7 必须移交到同一具名物理设备的 R2/R3 门完整执行；E8 `OPEN` 只许可物理设备投入，不表示 VPN、TUN、`protect`、双向数据面或 lifecycle 已通过。
 
-C-only 证据可以先行并在范围匹配时作为 E1、E2 或 E6 的子证据，但不能独立满足含官方 Go loader/runtime 的 E1，也不能据此跳过 E0/E3-E5/E7、打开 E8 或退出正式 R 阶段。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保留为历史研究证据；PS4 未发布且不是当前门输入，该记录不合格用于当前 E0-E8，不能满足 NetBird 官方 Go loader 或 VPN runtime 门。
+若新的官方 Emulator image/build 增加了授权或注册组件，既有 blocked 边界对该新目标元组的聚合适用性立即失效。旧记录继续保留且不改写，但不得继续作为当前 E3-E7 blocked-exception；必须在新 image/build 上从 E3 开始重验，并按实际可达性执行后继项。
+
+E8 聚合表必须为每个成员使用以下三种分类之一：
+
+| 聚合分类 | 使用条件 | 对 E8 的含义 |
+| --- | --- | --- |
+| `pass` | 独立记录同时为 `record_status: reviewed-pass`、`verdict: pass`，且目标元组与哈希一致 | 满足该成员的正面条件 |
+| `blocked-exception` | 经审查记录证明精确依赖边界 `blocked`，聚合记录明确写为 reviewed dependency-blocked aggregation exception | 只豁免在 Emulator 上伪造不可产生的 pass，不免除后续完整义务 |
+| `N/A` | 该成员对聚合声明范围客观不适用，并有可审查理由 | 不得用于依赖缺失、未执行、暂不可达或证据不足 |
+
+E8 `OPEN` 至少同时满足以下必要条件，缺一即保持 `CLOSED`：
+
+- `E3-PHYS-PREFLIGHT` 同时为 `record_status: reviewed-pass`、`verdict: pass`；`blocked`、`fail` 或 `invalid` 均不满足。
+- 所有客观可执行项均为 `pass`，并确认当前R0正式基线（现v0.74.7）的官方 Go loader/runtime 已形成 E1 `reviewed-pass/pass`。当前 loader 负面证据绑定 v0.74.6；v0.74.7 尚未重跑且没有 pass。
+- 聚合记录重核目标元组、代码 SHA、相关上游 SHA、APP/TEST HAP、native/Go 库、配置和其他输入 SHA-256；不得存在目标漂移、member 不一致或缺失 hash。任何 `record_status: invalidated` 或 `record_status: superseded` 的引用都只能保留在历史追溯链中，均不得进入 E8 当前成员集合。
+- 独立聚合审查核对每个 `pass`、`blocked-exception` 与客观 `N/A`，并显式作出 `OPEN` 决定。
+
+预检通过只是上述必要条件之一，不是充分条件，也不自动 `OPEN` E8。E8 前唯一物理设备例外是 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md)：一个冻结 campaign 在一台具名 HarmonyOS 6.1 arm64 设备上，用普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针判断 E3 可达性。证据必须绑定设备型号、完整 build、API、arm64、稳定设备别名、签名/profile、A/B HAP、源码/SDK/hash 和清理基线，并保留原始 HiLog、transcript、screenshots、状态/布局、fault list、hash manifest 和独立审查。HDC target、序列号及签名秘密不得入库；其重试、60 秒场景窗口、deny、Settings 和清理判据以专用计划为准。除该例外外，E8 前仍禁止物理设备执行。
+
+arm64 ABI、其他真实硬件、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等项目仍列入 E8 `OPEN` 后的具名物理设备义务。C-only 证据不能独立满足含官方 Go loader/runtime 的 E1。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保持历史研究证据；PS4 未发布且不是当前门输入，不能满足当前R0正式基线（现v0.74.7）的官方 Go loader 或 VPN runtime 门。
 
 ## 脱敏规则
 
@@ -133,17 +152,20 @@ review_record: <id-or-pending>
 | 调整 ID | `ADJ-<YYYYMMDD>-<四位序号>` |
 | 日期与时区 | `<ISO 8601>` |
 | 提出角色 | `<角色>` |
-| 触发证据 | `<证据 ID 或官方资料引用>` |
+| 触发证据 | `<证据 ID 或官方资料引用；官方 URL 须含访问日期>` |
 | 调整原因 | `<反证、不确定性或新条件>` |
 | 调整内容 | `<范围、顺序、实现路线、退出标准或版本映射变化>` |
-| 受影响阶段 | `<R 阶段列表>` |
+| 受影响阶段 | `<E 门与 R 阶段列表>` |
+| 版本与依赖核对 | `<适用时记录 tag、commit、声明工具链、release run URL/结果/访问日和关键依赖差异>` |
 | 已评估替代方案 | `<方案及未选择原因>` |
 | R0/SLO/补丁预算影响 | `<无，或明确说明>` |
-| T0 判定 | `<不触发、待讨论、已讨论及记录引用>` |
-| 生效条件与回退条件 | `<条件>` |
-| 审查状态 | `<角色、时间、结论>` |
+| 重跑范围 | `<须重开或重新验证的门、阶段与横切审查>` |
+| T0 判定与决策依据 | `<不触发、待讨论、已讨论及记录引用，或明确人类直接决定及其一次性替代范围>` |
+| 生效条件 | `<何时开始约束后续输入与执行>` |
+| 回退条件 | `<停止、回退或重新决策条件>` |
+| 审查状态 | `<角色、时间、结论及尚未完成的证据审查>` |
 
-调整记录不得改写或删除既有证据。触及首目标、核心数据面、跨语言边界、VPN 能力门、发布门、支持声明，或放宽 R0 阈值与补丁预算时，必须按章程和路线图触发 T0。
+调整记录不得改写或删除既有证据。人类直接决策者对重大技术方向具有优先权；明确的人类直接决定可以只对该次内部 T0 触发进行替代，但必须记录决定范围、替代方案、生效条件、回退条件和审查状态，且不得虚构 T0。没有明确人类决定时，触及首目标、核心数据面、跨语言边界、VPN 能力门、发布门、支持声明，或放宽 R0 阈值与补丁预算的重大调整，仍须按章程和路线图触发 T0；用户明确要求 T0 时始终按 T0 协议执行。
 
 ## 补丁记录模板
 
