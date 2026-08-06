@@ -6,15 +6,15 @@
 
 ## 当前状态
 
-`plan_status: ready`。这只表示唯一 campaign 的治理输入已经就绪，不表示 campaign 已开始，也不形成 `record_status` 或 `verdict`。截至 2026-08-06，设备端从未执行本 campaign 的 install/run/start/stop；E8 仍为 `CLOSED`，Go、NetBird、WireGuard、E4-E7、数据面和产品验证仍禁止。目标 code 冻结为 `PHYS1API23`，campaign ID 冻结为 `E3-PHYS-PREFLIGHT-20260806-0001`；计划 evidence ID 为 `EV-E3-PHYS1API23-20260806-0001`，只在首次设备端 campaign 动作发生时正式占用。若跨日期仍未启动，必须重新作出路线决定并更新 ID，不得静默改号。
+`plan_status: blocked`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行，E3 未关闭，E8 仍为 `CLOSED`。
 
-唯一允许的一次最小只读设备元组发现已于 2026-07-18 完成，六条白名单设备 `shell` 均成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。campaign 仍尚未开始。
+唯一允许的一次最小只读设备元组发现已于 2026-07-18 完成，六条白名单设备 `shell` 均成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。live model 复核匹配 `PLA-AL10`；live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，只据可见 suffix 确认 build drift，不猜完整版本或漂移原因。
 
 隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
 
 FINAL signed HAP A SHA-256 为 `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244`、size `106210`；B 为 `1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26`、size `106212`。A/B profile SHA-256 分别为 `a3abfc6ac351cf06f5639b31f108c80edcdcd96080f43ccfd48ce12a07325b05` 与 `f09af0f314773c53d61d90804332605317ec6a61316add0df3672067da99a16e`；公开证书文件 SHA-256 为 `c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`。四项 `verify-profile`/`verify-app` 均 exit `0`、人工核对 `pass`，且 HAP 内嵌 profile 与对应外部 profile byte-equal。signed 内容审计确认：仅 `ohos.permission.INTERNET`；VPN Extension `exported=false`；API `23`；debug 普通开发签名；唯一 native payload 为 arm64-v8a 纯 C `libfdprobe.so`，它只用 `fcntl(F_GETFD)` 读取 fd 快照，平台 `VpnConnection.destroy` 是唯一关闭责任。A/B signed member-list SHA-256 分别为 `216acabcd1f1c0efdc2ed6fbf89b4d88a1dd064bf5d508d4f692447a9b0f0166` 与 `4177f5c11d291bb20730ff45543b2ed5fcda9b8a349dbbe568ee01c89cdc82c2`。
 
-冻结 build-source archive SHA-256 为 `e9aa2360df2027bfbd0a84f89a926439cf7bcfb50ddbb0c4977804373fb5da36`，source manifest 为 `e5ca08160003aeb621220bf0666a7cc8f20ab2cef3241d692814798c758e1b50`，SDK map 为 `f3ed4f374f1c877c14fdce99adf6f601595de4cc9d531bded7cc111fb14130b3`。唯一 runner SHA-256 为 `749be7f8dd7c561f0728e90220fa703f12ccc33e7eb7a22e30af482511e4a770`，host-only selftest SHA-256 为 `42f433bb698dfb9eec7a3bca2ea50630f0d58b4f92b04342e5d5e32e7dfe8cf3`；selftest 与 Live simulation 均通过且 HDC process count 为 `0`。当前仓库基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`；这是准备基线，不是未来 live 的 `code_sha`。最终提交 SHA 只能在仓外 freeze manifest 于 live 前由 runner 对当前 clean HEAD 绑定，不得在本文虚构未来 SHA。signed HAP/profile/certificate 须保留至 E8 审查结束。
+冻结 build-source archive SHA-256 为 `e9aa2360df2027bfbd0a84f89a926439cf7bcfb50ddbb0c4977804373fb5da36`，source manifest 为 `e5ca08160003aeb621220bf0666a7cc8f20ab2cef3241d692814798c758e1b50`，SDK map 为 `f3ed4f374f1c877c14fdce99adf6f601595de4cc9d531bded7cc111fb14130b3`。唯一 runner SHA-256 为 `749be7f8dd7c561f0728e90220fa703f12ccc33e7eb7a22e30af482511e4a770`，host-only selftest SHA-256 为 `42f433bb698dfb9eec7a3bca2ea50630f0d58b4f92b04342e5d5e32e7dfe8cf3`；selftest 与 Live simulation 均通过且 HDC process count 为 `0`。Windows 准备基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`；initial live freeze 已绑定 `code_sha: 82ebc400de89a9de691a8c9d1bd629c9845999e8`。signed HAP/profile/certificate 须保留至 E8 审查结束。
 
 旧 physical-preflight unsigned HAP hash 继续作为历史准备阶段记录保留：A `5712541de9095e6eb99cfd2d72582b150adf2d78a14cc23375d887b298ece7ed`，B `9c4ae9206b8ac6843f4317645a2ebdb656610575c0220c58c6091a23e16687c0`。它们不是当前签名制品、campaign 输入或最终 hash，不得与上述 FINAL signed HAP 混用。
 
@@ -64,19 +64,19 @@ hdc shell bm get --udid
 | 签名 | 已冻结为普通 debug 开发签名，设备已纳入 A/B 对应 profile；四项验签 exit `0`、人工核对 `pass`、内嵌 profile byte-equal；profile/certificate hash 见“当前状态” |
 | A/B 制品 | FINAL signed HAP A/B、size、SHA-256 与 member-list 已冻结；旧 unsigned hash 只绑定历史准备阶段，不是当前输入 |
 | 源码与 SDK | build-source archive、source manifest、SDK map 及其 SHA-256 已冻结；SDK `6.1.1.125` / API `24`，target/compatible API `23` |
-| 清理基线 | 已冻结为 campaign 首场景必须确认：A/B 未安装、无 A/B 进程、无活动 VPN、无暂存文件，其他 VPN 不参与冲突场景；campaign 尚未 install/run |
-| 采集准备 | `EvidenceRoot` parent `D:/HarmonyEvidence/netbird-e3` 与独立 `RawRoot` parent `D:/HarmonyEvidenceRaw/netbird-e3` 已就绪；仓内只接收脱敏 manifest/projection/判定 |
-| 审查 | operator=`authorized user`；orchestrator=`main agent`；reviewer=`独立 deepseek/deepseek-v4-pro 隔离会话`；角色已分离 |
-| Campaign | target code `PHYS1API23`；ID `E3-PHYS-PREFLIGHT-20260806-0001`；planned evidence ID `EV-E3-PHYS1API23-20260806-0001`；固定顺序与每场景 60 秒窗口已冻结 |
+| 清理基线 | initial live 在安装前停止；A/B 从未安装或运行，finally 定向 A/B bundle/PID/staging probe 已确认 `verified-clean` |
+| 采集准备 | `controlled external EvidenceRoot/RawRoot`；仓内只接收脱敏 manifest/projection/判定 |
+| 审查 | operator=`authorized user`；orchestrator=`main agent`；reviewer=`isolated deepseek/deepseek-v4-pro`；独立审查完成，0 blocker/0 major |
+| Campaign | target code `PHYS1API23`；ID `E3-PHYS-PREFLIGHT-20260806-0001`；evidence ID `EV-E3-PHYS1API23-20260806-0001` 已占用；initial 已消费且 blocked |
 | Settings re-allow | 预测路径冻结为 `direct-system-activation`；路径偏差只作预注册观测，不因偏差本身 blocked；无 Settings 入口或无法重新激活仍 blocked |
 
-全部复合输入门现已冻结，因此 `plan_status: ready`；这只授权唯一 campaign 按专用 runner 接收这组输入，不创建证据记录或判定。最小设备发现不得重复，单次 signing enrollment 已消耗且不得重跑。任一设备、系统、API、架构、HDC 映射、源码、SDK、签名 profile、HAP hash、runner 或角色输入发生变化都必须停止并取得新的路线决策；不能在运行中替换或仅重新冻结后继续。
+原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权。live build 投影与冻结 build 发生可见 drift 后，当前 `plan_status: blocked`。最小设备发现不得重复，单次 signing enrollment 已消耗且不得重跑；本 campaign/evidence ID 不得复用。任何继续都必须先取得新的路线决策，冻结完整的新 build，并分配新的 campaign ID 与 evidence ID。
 
 ## Campaign 与重试纪律
 
-一次 campaign 是在同一冻结输入元组和一个 campaign ID 下，从清理基线开始、按固定顺序执行全部场景、完成最终清理并提交独立审查的完整活动。首次安装是 campaign 的设备端执行起点，也是 planned evidence ID 正式占用点；截至 2026-08-06 尚未发生。若跨日期仍未启动，必须重新决策 campaign/evidence ID，不得静默改号。预检授权不允许拆成多次选择性运行，也不允许把不同尝试的正面子结果拼接成 `pass`。
+一次 campaign 是在同一冻结输入元组和一个 campaign ID 下，从清理基线开始、按固定顺序执行全部场景、完成最终清理并提交独立审查的完整活动。首次安装原定为场景执行起点；本次 runner 在更早的目标绑定预检即停止，`campaign_started=false`，但 live initial 记录已经形成并占用 evidence ID，不能把“未安装”解释为 initial 未消费。预检授权不允许拆成多次选择性运行，也不允许把不同尝试的正面子结果拼接成 `pass`。
 
-只有初次执行因纯基础设施原因得到 overall `blocked` 时，才可在相同冻结元组下进行一次记录在案的完整重试。基础设施原因仅包括 HDC/USB 中断、采集存储故障或与被测 VPN 行为无关的 runner/宿主故障；重试必须使用同一 campaign ID、独立 attempt 编号、重新确认清理基线，并保留首次 blocked 材料。功能 `fail`、`invalid`、非基础设施 blocked、任一输入或预期变化，以及唯一重试仍 blocked 时，都不得再次执行；继续工作必须先取得新的路线决策。
+只有初次执行因纯基础设施原因得到 overall `blocked` 时，才可在相同冻结元组下进行一次记录在案的完整重试。基础设施原因仅包括 HDC/USB 中断、采集存储故障或与被测 VPN 行为无关的 runner/宿主故障。本次记录没有 `infrastructure_reason`，build drift 不属于允许原因，因此 `infrastructure-blocked-retry-1` 不获授权。任何继续都必须先取得新的路线决策、冻结完整新 build，并使用新的 campaign/evidence ID。
 
 ## 现有探针适用性与 API 23 隔离适配
 
@@ -118,14 +118,14 @@ hdc shell bm get --udid
 
 每个场景必须保留未筛选原始 HiLog、脱敏结构化 transcript projection、系统授权/Settings/冲突/结果截图、必要布局或状态快照、定向 A/B fault list、开始/结束时间和 SHA-256 manifest。证据还必须绑定完整目标元组、稳定设备别名、源码归档、source manifest、SDK、签名验证结果、A/B HAP 和 runner hash。
 
-`EvidenceRoot` parent 固定为 `D:/HarmonyEvidence/netbird-e3`，只存脱敏 structured projection、manifest 与判定；`RawRoot` parent 固定为独立的 `D:/HarmonyEvidenceRaw/netbird-e3`，保存未筛选 HiLog、截图、布局和定向 fault 原始材料。raw 仓外受控保留至少 90 天；存在争议时保留至争议关闭。日志进入仓库前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、UDID、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库；含 UDID 的 profile 验证原始输出不得归档。signed HAP/profile/certificate 保留至 E8 审查结束。独立 reviewer 必须核对原始材料完整性、场景顺序、hash、普通权限边界、最终清理和失败范围后，才能把记录从 `collected` 改为 `reviewed-pass` 或 `reviewed-fail`。
+证据只引用抽象的 `controlled external EvidenceRoot/RawRoot`。EvidenceRoot 保存脱敏 structured projection、manifest 与判定；独立 RawRoot 仅在实际产生时保存未筛选 HiLog、截图、布局和定向 fault 原始材料。raw 仓外受控保留至少 90 天；存在争议时保留至争议关闭。日志进入仓库前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、UDID、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库；含 UDID 的 profile 验证原始输出不得归档。signed HAP/profile/certificate 保留至 E8 审查结束。本次在连续采集前预定停止，故 raw HiLog、截图、布局与 fault 未产生；这不是缺失或篡改。独立 reviewer 已核对脱敏记录、哈希、停止边界与最终清理，并将记录审查为 `reviewed-pass/blocked`。
 
 ## 专用证据模板
 
-target code 已冻结为 `PHYS1API23`。planned evidence ID `EV-E3-PHYS1API23-20260806-0001` 只在首次设备端 campaign 动作时正式占用；当前仅为计划值，没有证据记录。
+target code 为 `PHYS1API23`。evidence ID `EV-E3-PHYS1API23-20260806-0001` 已由 initial live preflight 占用；当前事实以[已审查证据记录](evidence/e3-physical-preflight-2026-08-06.md)为准。以下模板保留为本次执行所依据的历史结构，不授权复用 ID 或再次执行。
 
 ```yaml
-evidence_id: EV-E3-PHYS1API23-20260806-0001 # planned; first device-side campaign action formally occupies it
+evidence_id: EV-E3-PHYS1API23-20260806-0001 # consumed by the reviewed initial live record
 exception: E3-PHYS-PREFLIGHT
 information_status: current-measured
 record_status: draft | collected | reviewed-pass | reviewed-fail | blocked | invalidated | superseded

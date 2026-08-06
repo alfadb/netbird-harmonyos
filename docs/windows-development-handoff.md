@@ -7,7 +7,7 @@
 ## 交接基线
 
 - Windows 完成回传所绑定的仓库准备基线为 commit `f44be17331e5bc67a5eff702badba41cbd7a195f`。最终 live 提交 SHA 不在本文预写，须由专用 runner 在仓外 freeze manifest 中绑定当时的 clean HEAD。
-- 当前 `R0` 尚未退出；`E8` 必须保持 `CLOSED`；`E3-PHYS-PREFLIGHT` 的 `plan_status` 为 `ready`，仅表示唯一 campaign 输入就绪。campaign 尚未开始且从未 install/run，没有 `record_status` 或 `verdict`。
+- 当前 `R0` 尚未退出；`E8` 必须保持 `CLOSED`。交接完成时 `E3-PHYS-PREFLIGHT` 曾为 `plan_status: ready`；后续唯一 initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`），因 build drift 在 continuous capture/install 前停止，当前 `plan_status: blocked`。
 - 已冻结的稳定设备别名为 `PHYS-1`。仅可在仓内记录其非敏感元组：`PLA-AL10`、distribution `HarmonyOS`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel arch `aarch64`、app ABI `arm64-v8a`。
 - 真实无线 HDC endpoint、target、IP:port、UDID、序列号和其他可识别设备值始终在仓库外受控保存；不得写入仓库、聊天、issue、日志、截图或普通证据。
 
@@ -149,9 +149,9 @@ Get-FileHash -Algorithm SHA256 '<debug-certificate-cer>'
 
 ## 完成即停止
 
-签名 build 与验证完成即停止的要求已经履行：没有安装 HAP、没有运行或启动 VPN，campaign 从未开始。后续设备动作不再由本交接授权，只能由 [E3-PHYS-PREFLIGHT 专用计划](e3-physical-preflight.md)及其唯一 runner 在冻结输入下授权。
+签名 build 与验证阶段的完成即停止要求按当时事实履行：该交接本身没有安装 HAP、运行或启动 VPN。后续专用 runner 的唯一 initial live 已形成独立证据，但在 continuous capture、staging 与 install 前即因 build drift 停止，`campaign_started=false`，A/B 仍未安装或运行。
 
-源码/SDK/final HAP hash、清理基线、受控采集根、独立 review 角色、campaign ID、固定 60 秒窗口和 Settings 预测路径现已冻结，故计划状态为 `ready`；该状态不形成 evidence、record status 或 verdict。任一 bundle、profile、设备、完整 build、API、架构、hash、runner 或角色发生漂移，立即停止，不得替换后继续。
+源码/SDK/final HAP hash、清理基线、受控采集根、独立 review 角色、campaign ID、固定 60 秒窗口和 Settings 预测路径曾冻结并使计划进入 `ready`。live model 匹配 `PLA-AL10`，live build 脱敏投影的可见 suffix 与冻结 build 不同，故当前计划为 `blocked`。initial 与原 campaign/evidence ID 已消费；无基础设施 retry 授权，任何继续必须取得新路线决策、冻结完整新 build 并使用新 ID。当前证据见 [E3 物理预检记录](evidence/e3-physical-preflight-2026-08-06.md)。
 
 ## 故障分流
 

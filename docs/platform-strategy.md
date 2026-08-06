@@ -1,6 +1,6 @@
 # OpenHarmony/HarmonyOS 平台与发行策略
 
-最后核验：2026-07-18
+最后核验：2026-08-06
 
 本文给出 `netbird-harmonyos` 面向 OpenHarmony 与 HarmonyOS 的双目标策略。核心结论是：以 OpenHarmony 公共 API 为可移植基线，共享协议与网络核心，同时为两个平台维护独立应用壳、构建签名、制品、测试和分发流程。该结论是方案建议，不表示双目标应用已经实现。
 
@@ -29,7 +29,7 @@ API 24 x86_64 phone Emulator 仍是物理设备产品投入前的优先总门：
 
 [E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已穷尽当时官方 API 24 x86_64 phone、2in1 与 Tablet image。五个历史记录保持 `reviewed-pass/blocked` 且 raw evidence 不改写。phone 记录覆盖公开 runtime 与注册前置边界；2in1、Tablet 只在 registration-layer 前置边界确认组件缺失并按停止条件未安装 HAP，不能扩写为完整 runtime 不可执行结论。E3-E7 在当前 E8 聚合中统一记为 reviewed dependency-blocked aggregation exception，不是 `pass` 或 `N/A`。
 
-现有 loader 负面证据只绑定 v0.74.6；当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass。E8 前还只允许一个 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md) campaign：输入冻结后，在一台具名 HarmonyOS 6.1 arm64 物理设备上使用普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针，判断该精确目标的 E3 可达性。唯一 `PLA-AL10`/API `23` 设备元组与仓外 `PHYS-1` 映射已冻结，API 23 隔离 unsigned A/B 本地准备已完成，但签名/profile、signed HAP、final hashes、清理和 campaign 等仍缺；预检计划状态为 `blocked`，无真实 endpoint，尚未分配证据 ID；因此 E8 必须保持 `CLOSED`。
+现有 loader 负面证据只绑定 v0.74.6；当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass。E8 前唯一 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md) initial live 已登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：live model 匹配冻结的 `PLA-AL10`，但 live build 脱敏投影的可见 suffix 与冻结 build 不同，runner 在 continuous capture/install 前预定停止。记录为 `reviewed-pass/blocked`，`campaign_started=false`，A/B 未安装或运行，cleanup `verified-clean`；这不是 E3 pass。当前计划为 `blocked`，无基础设施重试授权，因此 E8 必须保持 `CLOSED`。
 
 只有预检同时为 `record_status: reviewed-pass`、`verdict: pass` 才满足 E8 `OPEN` 的预检必要条件，但仍不充分且不自动开放。E8 还必须取得当前R0正式基线（现v0.74.7）的 E1 `reviewed-pass/pass`、全部目标元组/哈希一致和独立聚合审查显式批准。预检 `blocked`、`fail` 或 `invalid` 均保持 `CLOSED`；除该例外外，物理设备上的 ABI、Go、NetBird、E4-E7、网络、性能、能耗、长稳、渠道和产品测试仍须等待 E8 显式 `OPEN`。
 
@@ -211,6 +211,6 @@ API 出现在 SDK 中只代表可以编译，设备能否运行还取决于 SysC
 
 ### 物理预检与 E8 后验证
 
-E8 前只允许专用计划定义的一个物理 E3 campaign；其目标型号、完整 build、API、arm64、HDC、普通开发签名/profile、A/B HAP、源码/SDK/hash、每场景 60 秒窗口、Settings re-allow 预期和清理基线必须先冻结，并保留原始 HiLog/transcript/screenshots/hash 供独立审查。同一冻结元组只有纯基础设施性 overall blocked 可记录一次完整重试；fail 或输入变化必须取得新路线决策。
+E8 前只允许专用计划定义的一个物理 E3 campaign；其目标型号、完整 build、API、arm64、HDC、普通开发签名/profile、A/B HAP、源码/SDK/hash、每场景 60 秒窗口、Settings re-allow 预期和清理基线必须先冻结，并保留实际产生的 HiLog/transcript/screenshots/hash 供独立审查。本次 initial live 的 build drift 属于输入变化而非基础设施原因，已停止且不授权重试；任何继续必须取得新路线决策、冻结完整新 build 并分配新 campaign/evidence ID。
 
 E8 显式 `OPEN` 后，才可在具名物理设备执行预检范围外工作；首先在 R2/R3 完成 E4-E7 的 TUN 配置、`protect`、C 双向泵与 lifecycle/故障完整义务，再分别验证 arm64 ABI、真实硬件、物理网络切换、能耗、长稳和产品生命周期，并完成 HarmonyOS 与选定 OpenHarmony 产品的 SDK/SysCap、签名、渠道、市场重签和最终制品回归。每个平台继续使用独立应用壳、制品、目标元组、证据和支持矩阵；E8 `OPEN` 本身不是 VPN 或数据面通过结论。

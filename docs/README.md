@@ -34,8 +34,11 @@
   - 聚合 phone 0003/0004、Tablet 0001 和 2in1 0001/0002 的 authoritative manifest、hash、target tuple 与独立审查结论
   - phone 记录覆盖公开 runtime blocked；Tablet/2in1 只覆盖 registration-layer 前置 blocked 且未安装 HAP；三者只覆盖各自 image
 - [E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板](e3-physical-preflight.md)
-  - E8 前唯一物理 campaign；唯一一次最小只读发现已冻结 `HarmonyOS`、`PLA-AL10`、完整 build、API `23`、`aarch64` 和 `arm64-v8a`，真实 HDC endpoint/target 仅仓外映射为 `PHYS-1`
-  - 普通开发签名、FINAL A/B HAP、源码/SDK/hash、runner、角色、采集与 campaign 输入已冻结，`plan_status: ready`；campaign 从未 install/run，planned evidence ID 尚未正式占用，无 record/verdict，只有后续 `reviewed-pass/pass` 才满足 E8 必要条件
+  - E8 前唯一物理 campaign 的治理边界、冻结输入、停止规则与历史证据模板
+  - initial live 已消费并因 build drift 在 continuous capture/install 前停止；当前 `plan_status: blocked`，任何继续须新路线、完整新 build 与新 ID
+- [E3-PHYS-PREFLIGHT 物理设备 live 预检证据](evidence/e3-physical-preflight-2026-08-06.md)
+  - `EV-E3-PHYS1API23-20260806-0001`：`execution: live`、`attempt: initial`、`record_status: reviewed-pass`、`verdict: blocked`
+  - live model 匹配而 build 可见 suffix drift；`campaign_started=false`，A/B 未安装/运行，cleanup `verified-clean`，0 blocker/0 major；E3 未关闭、E8 `CLOSED`
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
   - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
 - [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
@@ -110,13 +113,13 @@
 
 当前文档不表示以下事项已经完成：
 
-- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass。唯一 `E3-PHYS-PREFLIGHT` 的精确设备元组、普通开发 signed A/B/profile/certificate、源码/SDK/hash、runner、清理/采集/审查、角色和 campaign 输入已冻结，计划为 `ready`。唯一 enrollment 由授权用户执行一次且例外已消耗，UDID 未留存/回传。target code 为 `PHYS1API23`，campaign ID 为 `E3-PHYS-PREFLIGHT-20260806-0001`，planned evidence ID 为 `EV-E3-PHYS1API23-20260806-0001`；后者只在首次设备端动作时正式占用。campaign 从未 install/run/start/stop，没有 record status 或 verdict。`ready` 不改变 E8 `CLOSED`，也不授权 NetBird 或其他物理设备执行。
+- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass。唯一 `E3-PHYS-PREFLIGHT` initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`：live model 匹配，build 投影可见 suffix drift，runner 在 continuous capture/install 前停止；`campaign_started=false`，A/B 未安装/运行。独立审查为 0 blocker/0 major，记录 `reviewed-pass/blocked`；这不是 E3 pass。当前 `plan_status: blocked`，无 retry 授权，E8 仍 `CLOSED`。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。
 - 面向产品的 OpenHarmony 或 HarmonyOS 应用工程已经建立；当前只有不得演化为产品壳的短生命周期 E0/R1 API 24 探针和独立 E3 A/B 授权探针。
 - NetBird Go 核心、当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader、完整 E1 或 VPN 能力已经完成集成验证；现有 ArkTS/native/fd 正面只限 C-only 子证据。
-- VPN Extension 授权门已经通过，或已在 Emulator/物理设备建立隧道；phone 公开 runtime blocked，Tablet/2in1 只在 registration-layer 前置边界 blocked。唯一物理预检输入虽已 ready，campaign 尚未执行；后续只能由专用 runner 使用普通开发签名的纯 ArkTS/C 公共 API 探针判断冻结精确目标上的 E3 可达性；禁止私有 Go、NetBird、`MANAGE_VPN` 或 system/debug/enterprise/root 绕过。
+- VPN Extension 授权门已经通过，或已在 Emulator/物理设备建立隧道；phone 公开 runtime blocked，Tablet/2in1 只在 registration-layer 前置边界 blocked。唯一物理预检 initial 也为 `reviewed-pass/blocked`，且在安装前停止，没有隧道或功能场景结果。任何继续须先作新路线决策并冻结完整新 build、新 campaign/evidence ID；禁止私有 Go、NetBird、`MANAGE_VPN` 或 system/debug/enterprise/root 绕过。
 - 任一市场的正式签名、审核、上架或更新流程已经跑通。
 - Debian 13 已成为官方支持的 Emulator 宿主。
 

@@ -1,9 +1,11 @@
 # E3 Physical VPN Extension Preflight
 
-This is an isolated local-preparation project for the frozen HarmonyOS 6.1.0
-API 23 PLA-AL10 E3-PHYS-PREFLIGHT. It does not replace or modify the historical
-API 24 Emulator probe in `../e3-vpn-extension-hap/`, does not modify historical
-raw evidence, and does not create physical-device evidence.
+This is the isolated probe and governed runner for the HarmonyOS 6.1.0 API 23
+PLA-AL10 E3-PHYS-PREFLIGHT. It does not replace or modify the historical API 24
+Emulator probe in `../e3-vpn-extension-hap/` or modify historical raw evidence.
+The only initial live record is `EV-E3-PHYS1API23-20260806-0001`; its reviewed
+verdict is blocked before continuous capture or installation because the live
+build projection drifted from the frozen build.
 
 ## Boundary
 
@@ -272,9 +274,17 @@ input, and the frozen target mapping. Normal revoke evidence comes only from the
 planned visible UI/Settings actions. Any exception/finally `force-stop` is
 `notUsedAsRevoke`: it is residual cleanup only, followed by targeted BundleDump
 and PidOf verification. Unknown residual state remains blocked and is never
-reported clean. The governance plan is now `ready`, which means only that the
-single campaign input is ready; no campaign install/run has occurred and no
-record status or verdict exists. This README does not independently authorize a
-Live invocation: use the dedicated governance plan and out-of-repository freeze.
-E8 remains `CLOSED`, and NetBird or any broader physical-device work remains
-forbidden.
+reported clean. The one initial Live invocation has been consumed. It started eight whitelisted
+HDC processes for version/model/build preflight plus finally-targeted A/B
+bundle, PID, and fixed staging probes. Model matched, but the visible live build
+suffix drifted from the frozen build, so the runner stopped before continuous
+capture, staging, installation, or any scenario; `campaign_started=false`, A/B
+were never installed or run, and cleanup was verified clean. The independently
+reviewed record is `reviewed-pass/blocked` with 0 blocker/0 major; reviewed-pass
+means evidence review completion, not E3 pass.
+
+The governance plan is now `blocked`. There is no `infrastructure_reason`, so
+`infrastructure-blocked-retry-1` is not authorized. Any further Live work needs
+a new route decision, a fully frozen new build, and new campaign/evidence IDs;
+the prior IDs must not be reused. E3 remains open, E8 remains `CLOSED`, and
+NetBird or any broader physical-device work remains forbidden.

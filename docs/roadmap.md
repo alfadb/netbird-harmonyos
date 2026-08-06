@@ -10,7 +10,7 @@
 
 - 仓库已增加短生命周期 `spikes/r1-api24-hap` 研究探针并实际构建 unsigned API 24 HAP 和双 ABI 普通 Node-API 库；`EV-E0-EMU24-20260717-0001` 已以 `reviewed-pass/pass` 关闭 E0。`EV-E1-EMU24-20260717-0005` 又在三个不同普通 `EntryAbility` PID 中各完成 10 轮 C-only ArkTS/native/fd probe，现为 `reviewed-pass/pass`；独立审查确认 0 blocker/major、5 minor，且不改变 measured artifact。`EV-E2-EMU24-20260717-0002` 随后在三个新 PID 中各完成 E1 完整回归和 10 轮纯 C TCP/UDP loopback、Pod 本机受控 endpoint、确定性 DNS/错误及资源恢复，并保留三张可见 E2 PASS 页面；该 E2 记录现为 `record_status: reviewed-pass`、`verdict: pass`，E2 已关闭。研究探针不是产品应用工程、产品测试套件或持续集成配置。
 - 独立 `spikes/e3-vpn-extension-hap` 已 clean-build 两个普通 bundle，并由正常 Entry UI 实测公开 VPN Extension start/stop。`EV-E3-EMU24-20260717-0003` 及补充 `0004` 均保持 `reviewed-pass/blocked`，历史 evidence 与 raw 判定不改写。精确 API 24 x86_64 phone image 缺少授权前置组件，记录的公开 runtime 路径不可继续，不能产生 `pass`；E4-E7 因此前置依赖未启动。
-- 新隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限 A/B 适配、普通 debug 开发签名、四项验签与 signed 内容审计，未修改历史 E3 树或 raw。FINAL A/B HAP、profile/certificate、源码/SDK map、runner 与 campaign 复合输入已冻结；A/B 仅 `INTERNET`、VPN `exported=false`、唯一 arm64 native 成员为纯 C `libfdprobe.so`。计划现为 `ready`，但 campaign 从未 install/run，尚无 evidence record 或 verdict；旧 unsigned hash 只绑定历史准备阶段。
+- 新隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限 A/B 适配、普通 debug 开发签名、四项验签与 signed 内容审计，未修改历史 E3 树或 raw。FINAL A/B HAP、profile/certificate、源码/SDK map、runner 与 campaign 复合输入已冻结；A/B 仅 `INTERNET`、VPN `exported=false`、唯一 arm64 native 成员为纯 C `libfdprobe.so`。唯一 initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`），因 build drift 在 continuous capture/install 前停止，当前 `plan_status: blocked`；旧 unsigned hash 只绑定历史准备阶段。
 - [E3 API 24 Emulator 矩阵审查](evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)已统一登记官方 API 24 x86_64 phone、2in1 与 Tablet。phone 记录覆盖公开 runtime 与注册前置边界；2in1、Tablet 记录只覆盖 registration-layer 前置核查，按停止条件未安装 HAP，不能扩写为完整 runtime 不可执行结论。记录不互相替代、不外推，也不要求为 E8 伪造 pass。
 - HarmonyOS 命令行工具链、SDK、Linux Emulator、镜像和基础恢复入口已经准备完成。
 - Emulator 曾在运行约 25 分钟后出现 HDC target 仍显示 `Connected`、但 shell RPC 连续超时的退化；该观测要求 E7 使用有界短循环并保留故障证据，不把 25 分钟以上长稳列为 Emulator 总门必过项，也不缩减 E0-E8 中可在 Emulator 客观执行的 VPN 验证。
@@ -33,9 +33,9 @@ v0.74.6、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` 继续作为所有�
 
 API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：E0、E1-C 和 E2 为 `reviewed-pass/pass`。现有 loader 负面证据绑定 v0.74.6；当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass，E1 overall Go 未关闭。E3-E7 以 reviewed dependency-blocked aggregation exception 进入后续聚合，不是 `pass` 或 `N/A`；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。
 
-E8 前只有一个 `E3-PHYS-PREFLIGHT` campaign。它只绑定已冻结的一台具名 HarmonyOS `PLA-AL10` 设备，以普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针验证 E3 可达性。六条 discovery 已成功；唯一 signing enrollment 由授权用户在边界内执行一次且例外已消耗，UDID 未留存/回传。设备元组、FINAL signed HAP/profile/certificate、源码/SDK、runner、清理/采集/审查与角色输入均已冻结，计划状态为 `ready`。target code 为 `PHYS1API23`，campaign ID 为 `E3-PHYS-PREFLIGHT-20260806-0001`，planned evidence ID 为 `EV-E3-PHYS1API23-20260806-0001`；后者只在首次设备端动作时正式占用，跨日期未启动必须重新决策。当前仓库准备基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`，最终 live SHA 只由 runner 在仓外 freeze manifest 绑定。
+E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结目标为 `PLA-AL10` / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` / API `23` / arm64；live model 匹配，但 live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，可见 suffix 发生 drift。runner 在 continuous capture、staging 与 install 前停止，`campaign_started=false`，A/B 未安装或运行，finally 清理为 `verified-clean`，integrity violations 为空。
 
-截至 2026-08-06 campaign 从未 install/run/start/stop，没有 evidence record 或 verdict。`ready` 不打开 E8，也不授权 NetBird、WireGuard、E4-E7 或产品执行；E8 必须保持 `CLOSED`。完整冻结值、命令白名单和证据保留边界见 [专用计划与证据模板](e3-physical-preflight.md)，已完成 Windows 回传见 [Windows + DevEco Studio 开发交接](windows-development-handoff.md)。
+证据 `EV-E3-PHYS1API23-20260806-0001` 为 `record_status: reviewed-pass`、`verdict: blocked`；独立审查 0 blocker/0 major。`reviewed-pass` 不是 E3 pass。记录无 `infrastructure_reason`，build drift 不授权 `infrastructure-blocked-retry-1`；当前 `plan_status: blocked`，任何继续须新路线决策、完整新 build 与新 campaign/evidence ID。E3 未关闭，E8 保持 `CLOSED`。完整记录见 [物理预检证据](evidence/e3-physical-preflight-2026-08-06.md)。
 
 ## T0 共识记录
 
@@ -72,14 +72,14 @@ E8 前只有一个 `E3-PHYS-PREFLIGHT` campaign。它只绑定已冻结的一台
 - **功能判据**：场景 5 仍必须重新激活 A 并取得有效 fd、从普通 Settings 入口撤销、观察匹配的 destroy terminal 与 post-destroy fd cleanup。无 Settings 入口、无法重新激活、缺 destroy terminal 或缺 post snapshot 仍为 blocked。场景 3/6/7 同样按适用分支要求 destroy terminal 与 post-destroy snapshot。
 - **已评估替代方案**：继续严格路径相等会把 UI 表现差异混入功能结论；把预测路径删除会失去预注册观测；允许 force-stop/uninstall 替代 Settings 会破坏普通用户路径证据。采用“保留预测并观测偏差、功能判据不变”。
 - **R0/SLO/补丁预算影响**：不改变首目标候选、必选功能、任何质量/安全/性能/隐私 SLO、错误预算或补丁上限，不授权代码、SDK、Go、NetBird 或 WireGuard 补丁；当前补丁计数不变。
-- **重跑范围**：campaign 尚未开始，无既有设备证据需要重写或重跑；首次且唯一执行直接使用本记录。若已开始后发生输入漂移，则按回退条件停止，不能局部重跑场景 5。
-- **冻结身份**：target code `PHYS1API23`；campaign ID `E3-PHYS-PREFLIGHT-20260806-0001`；planned evidence ID `EV-E3-PHYS1API23-20260806-0001`，仅首次设备端动作时正式占用。跨日期未启动必须重新决策并更新 ID，不得静默变更。
+- **重跑范围（批准时事实）**：本调整批准时 campaign 尚未开始，无既有设备证据需要重写或重跑；首次且唯一执行使用本记录。后续 initial live 已因输入漂移按回退条件停止，不能局部重跑场景 5。
+- **冻结身份**：target code `PHYS1API23`；campaign ID `E3-PHYS-PREFLIGHT-20260806-0001`；evidence ID `EV-E3-PHYS1API23-20260806-0001`。该组 ID 已由 initial live 消费，不得复用。
 - **执行与审查角色**：operator=`authorized user`；orchestrator=`main agent`；reviewer=`独立 deepseek/deepseek-v4-pro 隔离会话`。
-- **证据存储**：`EvidenceRoot` parent 为 `D:/HarmonyEvidence/netbird-e3`，只存脱敏 manifest/projection/判定；独立 `RawRoot` parent 为 `D:/HarmonyEvidenceRaw/netbird-e3`，raw 仓外受控保存至少 90 天，争议时保存至争议关闭。signed HAP/profile/certificate 保留至 E8 审查结束。
+- **证据存储**：只引用 `controlled external EvidenceRoot/RawRoot`；EvidenceRoot 存脱敏 manifest/projection/判定，RawRoot 仅在实际产生时保存 raw，仓外受控保存至少 90 天，争议时保存至争议关闭。signed HAP/profile/certificate 保留至 E8 审查结束。
 - **命令白名单**：唯一 runner 为 `spikes/e3-vpn-extension-physical-preflight-hap/e3-phys-preflight-campaign.ps1`。只准两条 model/build target-binding 复核（零新增身份信息）、定向 A/B bundle/PID/install/start/cleanup、单一连续 `E3PhysVpn` HiLog、A/B fault、screen/layout；禁止全量、UDID、serial、`hidumper`、`uiInput` 与特权命令。
-- **生效与状态**：设备、签名、FINAL A/B、源码/SDK、runner、清理、采集、角色与 60 秒固定顺序输入均已冻结，`plan_status: ready`。它只表示唯一 campaign 输入 ready；campaign 尚未开始且从未 install/run，没有 record status 或 verdict，E8 保持 `CLOSED`，NetBird 禁止。
-- **回退条件**：用户撤销批准、任一冻结输入或 runner 漂移、命令/能力越界、证据污染、角色不再分离、跨日期未启动却未重新决策 ID、campaign/重试纪律破坏，或 Settings 功能判据无法满足时，立即停止并回到物理设备禁止状态；不得通过把路径偏差改回功能 pass/fail 依据来绕过新决策。
-- **审查状态**：路线调整已由用户直接批准；campaign 证据审查与 E8 聚合审查均未开始。
+- **生效与状态**：initial live 已执行并形成 `EV-E3-PHYS1API23-20260806-0001`。live build 投影与冻结 build 可见 suffix drift，runner 在 continuous capture/install 前停止；`campaign_started=false`、cleanup `verified-clean`、`plan_status: blocked`。记录为 `reviewed-pass/blocked`，E3 未关闭，E8 保持 `CLOSED`。
+- **回退条件**：本次冻结输入已发生 build drift并触发停止。没有 `infrastructure_reason`，initial 已消费且不授权 retry；任何继续必须先取得新路线决策、冻结完整新 build、分配新 campaign/evidence ID，不得通过复用旧 ID 或改写路径判据绕过。
+- **审查状态**：路线调整已由用户直接批准；campaign 证据已由 isolated `deepseek/deepseek-v4-pro` 审查为 0 blocker/0 major，`reviewed-pass/blocked`；E8 聚合审查未通过，E8 `CLOSED`。
 
 ### ADJ-20260718-0001：E3 不可执行边界与唯一物理预检
 
@@ -98,8 +98,8 @@ E8 前只有一个 `E3-PHYS-PREFLIGHT` campaign。它只绑定已冻结的一台
 - **T0 状态**：本记录适用本节“人类直接决策者优先”规则，只替代这一次内部 T0 触发；它不是 T0 结论，未执行或声称新的 T0 共识。若用户明确要求 T0，仍须按 T0 协议执行。
 - **生效条件**：路线规则立即生效；设备端 campaign 仅在全部输入冻结、执行/独立审查角色分离且专用计划可执行时生效。E8 状态只有在预检 `reviewed-pass/pass`、当前R0正式基线（现v0.74.7）的 E1 `reviewed-pass/pass`、全部目标元组/哈希一致及独立聚合审查显式批准后才可改为 `OPEN`。
 - **回退条件**：用户撤销授权、范围越界、禁止能力出现、输入漂移、证据污染、campaign/重试纪律破坏，或新官方 image/build 含所需组件时，停止例外并回到物理设备禁止状态；新 image/build 必须从 E3 重验。功能 fail、invalid 或非允许重试的 blocked 继续保持 E8 `CLOSED`，后续须新路线决策。
-- **审查状态**：路线授权由用户于 `2026-07-18T10:31:00+08:00` 批准；预检证据尚未采集，独立证据审查与 E8 聚合审查均未开始。本文不把路线批准写成证据 `reviewed-pass`。
-- **当前状态**：六条只读 discovery 已成功并冻结精确设备元组；唯一 signing enrollment 已由授权用户执行一次且例外消耗，UDID 未留存/回传。API 23 纯 ArkTS/C A/B、普通开发签名、FINAL HAP/profile/certificate、源码/SDK/hash、runner、清理/采集/审查和 campaign 输入已冻结，旧 unsigned hash 只绑定历史准备阶段。`ADJ-20260806-0001` 另行替代了 Settings 严格路径相等规则。计划现为 `ready`，但 campaign 从未 install/run，planned evidence ID 尚未正式占用，没有 evidence record 或 verdict。
+- **审查状态**：路线授权由用户于 `2026-07-18T10:31:00+08:00` 批准；initial live 证据现已完成独立审查并为 `reviewed-pass/blocked`，E8 聚合审查仍未通过。本文不把路线批准或 `reviewed-pass` 写成 E3 pass。
+- **当前状态**：六条只读 discovery 与唯一 signing enrollment 均已消费。API 23 纯 ArkTS/C A/B、普通开发签名、FINAL HAP/profile/certificate、源码/SDK/hash、runner 与角色输入曾完整冻结；initial live 发现 build drift 后在 continuous capture/install 前停止，`campaign_started=false`。evidence ID 已占用，当前 `plan_status: blocked`，无基础设施 retry 授权；继续须新路线、完整新 build 与新 campaign/evidence ID。
 
 ### ADJ-20260718-0002：正式采用 NetBird v0.74.7
 
@@ -493,8 +493,8 @@ RC 和渠道最终制品在支持矩阵内的具名真机通过回归，分批�
 Emulator 客观可执行项：E0 pass -> E1 C-only pass/official Go blocked -> E2 pass
 Emulator E3：phone 公开 runtime blocked；2in1/Tablet 只在 registration-layer 前置边界 blocked
 Emulator E3-E7：reviewed dependency-blocked aggregation exception，不是 pass/N/A；完整义务未免除
-唯一物理例外：E3-PHYS-PREFLIGHT（计划状态 ready；planned evidence ID 尚未正式占用，无 record/verdict）；只有后续证据 reviewed-pass/pass 才满足 E8 必要条件
-E8：当前 CLOSED；还须当前R0正式基线（现v0.74.7）E1 pass、哈希一致及独立聚合审查
+唯一物理例外：E3-PHYS-PREFLIGHT initial 已消费；EV-E3-PHYS1API23-20260806-0001 为 reviewed-pass/blocked，build drift 后 pre-install stop，E3 未关闭且无 retry 授权
+E8：当前 CLOSED；物理预检缺 reviewed-pass/pass，且还须当前R0正式基线（现v0.74.7）E1 pass、哈希一致及独立聚合审查
 E8 OPEN 后：只许可具名物理投入；R2/R3 承接 E4-E7 完整 VPN/数据面义务
 首目标正式门：R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6 -> R7 -> R8
 第二目标：首目标 GA + 第二目标启动条件 -> 独立重跑 R0 -> ... -> R8 -> R9 退出
