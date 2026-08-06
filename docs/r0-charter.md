@@ -15,7 +15,7 @@
 | API 24 x86_64 phone Emulator 总门 | `CLOSED`；E0、E1-C、E2 已完成；E1 loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.74.7）尚未重跑且无 pass；E3 0003/0004 证明授权前置组件缺失，精确 phone 目标不可执行/`blocked`；E4-E7 为 reviewed dependency-blocked aggregation exception |
 | API 24 x86_64 2in1 Emulator 矩阵记录 | 0001/0002 保持 `reviewed-pass/blocked`；只在 registration-layer 前置边界确认授权组件缺失并停止，未安装 HAP，不形成完整 runtime 不可执行结论，也不替代其他形态 |
 | API 24 x86_64 Tablet Emulator 矩阵记录 | 0001 保持 `reviewed-pass/blocked`；只在 registration-layer 前置边界确认授权组件缺失并停止，未安装 HAP，不形成完整 runtime 不可执行结论，也不替代其他形态 |
-| 物理设备执行 | E8 前唯一 `E3-PHYS-PREFLIGHT` initial 已消费。live model 匹配 `PLA-AL10`，live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，与冻结 build 可见 suffix 不同；runner 在 continuous capture/install 前停止，`campaign_started=false`，A/B 未安装/运行，cleanup `verified-clean`。记录为 `reviewed-pass/blocked`，E3 未关闭、E8 `CLOSED`；无 `infrastructure_reason`，不授权 retry，任何继续须新路线、新完整 build、新 campaign/evidence ID |
+| 物理设备执行 | E8 前唯一 `E3-PHYS-PREFLIGHT` initial 已消费。live model 匹配 `PLA-AL10`，live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，与冻结 build 可见 suffix 不同；runner 在 continuous capture/install 前停止，`campaign_started=false`，A/B 未安装/运行，cleanup `verified-clean`。记录为 `reviewed-pass/blocked`，E3 未关闭、E8 `CLOSED`；无 `infrastructure_reason`，不授权 retry，旧 campaign/evidence 不可复用。`ADJ-20260806-0002` 已授权 HarmonyOS 7 最小只读 rebind discovery（`EV-E3-PHYS1REBIND7-20260806-0001`，无新 campaign ID；仅 apiversion/`uname -m`/abilist），候选 binding `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 在 rebind 前未冻结；rebind 仍 pending，plan 仍 `blocked` |
 
 R0 未退出意味着任何研究结果都不能表述为产品可行性、真机支持或发布承诺，也不能据此跳过后续证据门。
 
@@ -139,11 +139,11 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 
 ## 当前未满足项
 
-- `E3-PHYS-PREFLIGHT` 的复合输入冻结已完成，故 R0 checklist 对应输入项仍为 `[x]`；但 initial live 因 build drift 为 `reviewed-pass/blocked`，当前 `plan_status: blocked`。R0 的渠道及其他完整支持维度仍未锁定，不能从输入冻结或证据审查通过推导 R0 退出。
+- `E3-PHYS-PREFLIGHT` 的复合输入冻结已完成，故 R0 checklist 对应历史输入项仍为 `[x]`；但 initial live 因 build drift 为 `reviewed-pass/blocked`，当前 `plan_status: blocked`。`ADJ-20260806-0002` 新增的 HarmonyOS 7 最小只读 tuple rebind（`EV-E3-PHYS1REBIND7-20260806-0001`）为 pending。R0 的渠道及其他完整支持维度仍未锁定，不能从输入冻结或证据审查通过推导 R0 退出。
 - API 24 x86_64 phone Emulator 总门为 `CLOSED`：E0、E1-C、E2 已为 `reviewed-pass/pass`；现有官方 Go 1.25.12 loader 负面绑定 v0.74.6，当前R0正式基线（现v0.74.7）尚未重跑且没有 pass，E1 overall Go 未关闭。
 - 官方 API 24 x86_64 phone、2in1、Tablet 的历史矩阵记录均保持 `reviewed-pass/blocked`。phone 的 blocked 覆盖所记录公开 runtime；2in1、Tablet 的“不可继续执行”只限 registration-layer 前置边界，未安装 HAP，不能扩写为完整 runtime 结论。历史 evidence 和 raw 判定不改写，范围不外推。
 - E3-E7 在当前聚合中为 reviewed dependency-blocked aggregation exception，不是 `N/A` 或 pass；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。当前仍因 E1、预检和完整独立聚合审查均未满足而 `CLOSED`。
-- 唯一 `E3-PHYS-PREFLIGHT` initial live 已消费并登记为 `EV-E3-PHYS1API23-20260806-0001`。冻结 build 与 live build 投影的可见 suffix 不同，runner 在 continuous capture/install 前预定停止；`campaign_started=false`，A/B 未安装/运行，raw HiLog/capture/fault 未产生，cleanup `verified-clean`，integrity violations 为空。记录为 `reviewed-pass/blocked`，不是 E3 pass；无基础设施重试授权，继续须新路线、完整新 build 与新 campaign/evidence ID。
+- 唯一 `E3-PHYS-PREFLIGHT` initial live 已消费并登记为 `EV-E3-PHYS1API23-20260806-0001`。冻结 build 与 live build 投影的可见 suffix 不同，runner 在 continuous capture/install 前预定停止；`campaign_started=false`，A/B 未安装/运行，raw HiLog/capture/fault 未产生，cleanup `verified-clean`，integrity violations 为空。记录为 `reviewed-pass/blocked`，不是 E3 pass；无基础设施重试授权，旧 ID 不可复用。用户 Settings 报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；`ADJ-20260806-0002` 仅授权三条只读 rebind（evidence `EV-E3-PHYS1REBIND7-20260806-0001`），候选 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 未冻结；三条结果齐备前不得决定 HAP 复用/重建或新 campaign。
 - 除该唯一受限预检外，E8 `OPEN` 前仍禁止物理设备执行；真机 HDC 安装、启动、日志、卸载的完整闭环尚未建立。
 - 普通第三方 VPN、SysCap、虚拟接口 fd、`protect`、后台生命周期和真实流量尚无产品或阶段门证据；预检即使通过也只证明精确物理目标上的 E3 可达。
 - 当前R0正式基线（现v0.74.7）已固定；所有 v0.74.6 历史 evidence 保持原版本、commit、输入 hash 和判定，后续受影响门尚未基于 v0.74.7 重跑。
@@ -165,7 +165,8 @@ IPv6 在首轮实现中必须探测并记录能力与失败边界，但不作为
 - [x] 把 API 24 x86_64 2in1 与 Tablet 补充探测分别作为独立 image/实例/端口/evidence 记录，不互相替代。
 - [x] 正式采用 NetBird v0.74.7 基线，并保留所有 v0.74.6 历史 evidence 的原绑定和判定。
 - [ ] 以当前R0正式基线（现v0.74.7）关闭全部客观可执行 Emulator 项，并对 E3-E7 的 reviewed dependency-blocked aggregation exception 完成 E8 独立聚合审查。
-- [x] 以唯一一次最小只读发现冻结预检设备的型号、完整 build、API、kernel arch、app ABI 和仓外 HDC `PHYS-1` 映射；任一漂移停止。
+- [x] 以唯一一次最小只读发现冻结预检设备的型号、完整 build、API、kernel arch、app ABI 和仓外 HDC `PHYS-1` 映射；任一漂移停止。该历史完成保留，不因后续 build drift 回退。
+- [ ] 按 `ADJ-20260806-0002` 完成 HarmonyOS 7 最小只读元组重绑定（`EV-E3-PHYS1REBIND7-20260806-0001`：仅 apiversion/`uname -m`/abilist）；三条结果齐备前不得冻结候选 build，也不得决定 HAP 复用/重建或新 campaign。
 - [x] 锁定普通开发签名/profile、FINAL signed A/B HAP、冻结源码/SDK/final hash、runner、清理基线、采集/审查准备、角色、campaign ID、60 秒窗口和 Settings 预测路径；该输入冻结事实不因后续 `plan_status: blocked` 回退。
 - [ ] 仅按 `E3-PHYS-PREFLIGHT` 在该具名设备执行一个 campaign，并取得 `reviewed-pass/pass`；其他结果保持 E8 `CLOSED`。
 - [ ] 仅在 E1、预检、哈希一致性及独立聚合审查等全部必要条件满足并由 E8 显式 `OPEN` 后，于具名物理设备完成预检范围外的 HDC 闭环和 R2/R3 E4-E7 完整义务。

@@ -6,9 +6,11 @@
 
 ## 当前状态
 
-`plan_status: blocked`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行，E3 未关闭，E8 仍为 `CLOSED`。
+`plan_status: blocked`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行，E3 未关闭，E8 仍为 `CLOSED`。旧 campaign/evidence 不可复用，无 `infrastructure_reason`，不授权 infra retry。
 
-唯一允许的一次最小只读设备元组发现已于 2026-07-18 完成，六条白名单设备 `shell` 均成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。live model 复核匹配 `PLA-AL10`；live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，只据可见 suffix 确认 build drift，不猜完整版本或漂移原因。
+2026-07-18 的一次最小只读设备元组发现仍保留为历史完成记录，六条白名单设备 `shell` 均曾成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。live model 复核匹配 `PLA-AL10`；live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，只据可见 suffix 确认 build drift，不猜完整版本或漂移原因。
+
+`ADJ-20260806-0002` 另授权一次 HarmonyOS 7 最小只读元组重绑定 discovery（非 campaign）：evidence ID `EV-E3-PHYS1REBIND7-20260806-0001`，不分配新 campaign ID。Settings 页人工报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；只据该人工值与旧 live 投影将 HDC binding 候选记为 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`，在 rebind 完成前不得作为已冻结结论。仅授权三条只读：`param get const.ohos.apiversion`、`uname -m`、`param get const.product.cpu.abilist`；禁止重查 dist/model/build，禁止序列/UDID/app list/install/start/VPN。raw 输出仅仓外保存，仓内只登记脱敏 projection/hash。三条结果齐备前不得决定 HAP 复用/重建或新 campaign 路线；当前 rebind 为 pending，尚未执行。
 
 隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
 
@@ -30,7 +32,7 @@ FINAL signed HAP A SHA-256 为 `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8
 
 ### 最小只读设备元组发现边界
 
-最小只读发现已完成一次，已确定并冻结发行版、型号、完整 build、API、kernel arch 和 ABI；不得重复或扩展。发现不是 campaign，也未形成证据记录或判定。真实 endpoint 和 HDC target 仅在仓外受控映射；仓内只可使用 `PHYS-1`。以下六项保留为已执行白名单的可审计记录，设备端命令只能通过仓外变量 `PHYS_1_TARGET` 使用：
+2026-07-18 最小只读发现已完成一次并冻结当时的发行版、型号、完整 build、API、kernel arch 和 ABI；该六条历史白名单不得作为当前元组原样重跑或扩展。发现不是 campaign。真实 endpoint 和 HDC target 仅在仓外受控映射；仓内只可使用 `PHYS-1`。以下六项保留为已执行白名单的可审计记录；除 `ADJ-20260806-0002` 另授的三条 rebind 外，设备端命令只能通过仓外变量 `PHYS_1_TARGET` 使用：
 
 ```sh
 $HDC -t "$PHYS_1_TARGET" shell param get const.product.os.dist.name
@@ -41,7 +43,7 @@ $HDC -t "$PHYS_1_TARGET" shell uname -m
 $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 ```
 
-这六项只用于冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。在设备元组 discovery 内，禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。设备元组 discovery 不得重跑；仅下节列出的单次长选项 enrollment 例外可读取 UDID，其他设备 `shell` 命令仍不得执行。
+这六项只用于当时冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。在设备元组 discovery 内，禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。六条历史 discovery 不得重跑；`ADJ-20260806-0002` 仅额外授权一次三条只读 rebind（`const.ohos.apiversion`、`uname -m`、`const.product.cpu.abilist`，evidence `EV-E3-PHYS1REBIND7-20260806-0001`），禁止 dist/model/build 重查与任何 campaign 动作。仅下节列出的单次长选项 enrollment 例外曾可读取 UDID（已消耗），其他设备 `shell` 命令仍不得执行。
 
 ### Signing enrollment 唯一例外
 
@@ -53,7 +55,7 @@ hdc shell bm get --udid
 
 长选项 `--udid` 是唯一获批过的 UDID 读取，短选项 `bm get -u` 仍禁止。命令 stdout 已仅用于人工录入 AGC，未重定向、留存或回传。这个已消耗例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
 
-设备、系统、API 与架构、HDC 已冻结；其余输入必须在安装前一次性冻结。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
+历史 campaign 输入中设备、系统、API 与架构、HDC 曾冻结，但 initial live 已因 build drift 停止；当前不得把该历史冻结当作可执行 campaign 输入，也不得把 Settings/旧 live 合成的 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 候选当作已冻结。任何新 campaign 的其余输入必须在安装前一次性冻结。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
 
 | 输入 | 必须值与证据 |
 | --- | --- |
@@ -70,7 +72,7 @@ hdc shell bm get --udid
 | Campaign | target code `PHYS1API23`；ID `E3-PHYS-PREFLIGHT-20260806-0001`；evidence ID `EV-E3-PHYS1API23-20260806-0001` 已占用；initial 已消费且 blocked |
 | Settings re-allow | 预测路径冻结为 `direct-system-activation`；路径偏差只作预注册观测，不因偏差本身 blocked；无 Settings 入口或无法重新激活仍 blocked |
 
-原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权。live build 投影与冻结 build 发生可见 drift 后，当前 `plan_status: blocked`。最小设备发现不得重复，单次 signing enrollment 已消耗且不得重跑；本 campaign/evidence ID 不得复用。任何继续都必须先取得新的路线决策，冻结完整的新 build，并分配新的 campaign ID 与 evidence ID。
+原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权。live build 投影与冻结 build 发生可见 drift 后，当前 `plan_status: blocked`。2026-07-18 六条最小设备发现不得作为当前元组重跑；单次 signing enrollment 已消耗且不得重跑；本 campaign/evidence ID 不得复用，亦不授权 infra retry。`ADJ-20260806-0002` 仅额外授权一次三条只读 rebind discovery（`EV-E3-PHYS1REBIND7-20260806-0001`），不是新 campaign。任何 campaign 继续仍须在 rebind 三条结果齐备后，先取得新的路线决策，冻结完整的新 build，并分配新的 campaign ID 与 evidence ID。
 
 ## Campaign 与重试纪律
 
