@@ -1,6 +1,6 @@
 # netbird-harmonyos
 
-`netbird-harmonyos` 是一个独立开发、非官方维护的 NetBird 客户端项目。长期目标覆盖 HarmonyOS 与具名 OpenHarmony 发行版双目标；当前首目标仍候选为 HarmonyOS API 24。唯一 `E3-PHYS-PREFLIGHT` initial live 已因冻结 build drift 在 continuous capture/install 前停止并登记为 `reviewed-pass/blocked`；E3 未关闭，R0 尚未完成目标锁定。项目目前处于早期研究与 R0 进行中阶段。
+`netbird-harmonyos` 是一个独立开发、非官方维护的 NetBird 客户端项目。长期目标覆盖 HarmonyOS 与具名 OpenHarmony 发行版双目标；当前首目标仍候选为 HarmonyOS API 24。唯一 `E3-PHYS-PREFLIGHT` initial live 已因冻结 build drift 在 continuous capture/install 前停止并登记为 `reviewed-pass/blocked`；HarmonyOS 7 只读 rebind 已完成，新元组已冻结，host reverify 已 PASS，`plan_status: ready`（仅 host 输入 ready）；E3 未关闭，R0 尚未完成目标锁定。项目目前处于早期研究与 R0 进行中阶段。
 
 ## 项目状态与目标
 
@@ -8,7 +8,7 @@
 
 当前仓库尚未提供可用发行版本，功能范围、技术方案和平台能力适配仍在验证中。当前R0正式基线（现v0.74.7）固定为 commit `a1c9427d8004576e2cbb9e546d409847fa9df318`；所有绑定 v0.74.6 的历史 evidence 保持原输入和原判定。现有 Go loader 负面只绑定 v0.74.6，v0.74.7 尚未重跑且没有 E1 pass。官方 API 24 x86_64 phone 记录的公开 VPN runtime 路径 blocked；Tablet 与 2in1 只在 registration-layer 前置边界 blocked，未形成完整 runtime 结论。E3-E7 在 E8 中为 reviewed dependency-blocked aggregation exception，不是 `pass` 或 `N/A`。
 
-E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结目标为 `PLA-AL10` / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` / API `23` / arm64；live model 匹配，但 live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，可见 suffix drift。runner 在 continuous capture、staging 和 install 前停止，`campaign_started=false`，A/B 未安装或运行，cleanup `verified-clean`。证据 `EV-E3-PHYS1API23-20260806-0001` 经 isolated `deepseek/deepseek-v4-pro` 审查为 0 blocker/0 major，记录状态 `reviewed-pass`、verdict `blocked`；`reviewed-pass` 只表示证据审查完成，不是 E3 pass。记录没有 `infrastructure_reason`，因此不授权 retry；任何继续须新路线决策、完整新 build 与新 campaign/evidence ID。E3 未关闭，E8 保持 `CLOSED`。完整记录见 [E3 物理预检证据](docs/evidence/e3-physical-preflight-2026-08-06.md)。
+E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费并登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`）。rebind `EV-E3-PHYS1REBIND7-20260806-0001` 已完成三条只读（`reviewed-pass/pass`，严格只表示 rebind，不是 E3/campaign pass）：API `26` / `aarch64` / `arm64-v8a`。`ADJ-20260806-0003` 冻结 `HarmonyOS` / `PLA-AL10` / HDC build `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / Settings `7.0.0.100 (SP8C00E32R7P2patch09)` / API `26` / `aarch64` / `arm64-v8a`，批准复用原 FINAL HAP hashes（兼容性实测、不证明成功），并准备新 campaign `E3-PHYS-PREFLIGHT-20260806-0002` / evidence `EV-E3-PHYS1API26-20260806-0001`。host reverify 已 PASS（public manifest `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；HAP/signature/profile/member hashes 未变；不主张安装兼容性）；当前 `plan_status: ready` 仅表示新 campaign host 输入 ready，仓外 commit-bound freeze 在提交后生成，设备执行仍须明确再确认。E3 未关闭，E8 保持 `CLOSED`。完整记录见 [E3 物理预检证据](docs/evidence/e3-physical-preflight-2026-08-06.md) 与 [rebind 证据](docs/evidence/e3-physical-rebind7-2026-08-06.md)。
 
 ## 开发状态
 
@@ -26,6 +26,7 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 - [E3 VPN Extension API 24 Emulator 矩阵审查](docs/evidence/e3-vpn-extension-api24-emulator-matrix-2026-07-17.md)
 - [E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板](docs/e3-physical-preflight.md)
 - [E3-PHYS-PREFLIGHT 物理设备 live 预检证据](docs/evidence/e3-physical-preflight-2026-08-06.md)
+- [E3-PHYS-PREFLIGHT HarmonyOS 7 最小只读 rebind 证据](docs/evidence/e3-physical-rebind7-2026-08-06.md)
 - [Windows + DevEco Studio 开发交接](docs/windows-development-handoff.md)
 - [安全与合规基线](docs/security-and-compliance.md)
 - [双目标实施路线图](docs/roadmap.md)

@@ -2,27 +2,27 @@
 
 最后核验：2026-08-06
 
-本文定义 `E3-PHYS-PREFLIGHT`，即 E8 `OPEN` 前唯一允许的物理设备执行例外。它只验证一个冻结的 HarmonyOS 6.1 arm64 具名设备目标上的 E3 可达性，不是产品测试、R 阶段退出或 E4-E7 完整验证。预检记录同时达到 `record_status: reviewed-pass` 和 `verdict: pass` 是 E8 `OPEN` 的必要但非充分条件；预检为 `blocked`、`fail` 或 `invalid` 时 E8 必须保持 `CLOSED`，预检通过也不自动开放 E8。
+本文定义 `E3-PHYS-PREFLIGHT`，即 E8 `OPEN` 前唯一允许的物理设备执行例外。它只验证一个冻结的 HarmonyOS 7 / API 26 arm64 具名设备目标上的 E3 可达性，不是产品测试、R 阶段退出或 E4-E7 完整验证。历史 initial live 曾以 HarmonyOS 6.1 / API 23 元组执行并因 build drift 停止，见 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)；当前可执行目标元组以 `ADJ-20260806-0003` 冻结的 HarmonyOS 7 / API 26 为准。预检记录同时达到 `record_status: reviewed-pass` 和 `verdict: pass` 是 E8 `OPEN` 的必要但非充分条件；预检为 `blocked`、`fail` 或 `invalid` 时 E8 必须保持 `CLOSED`，预检通过也不自动开放 E8。
 
 ## 当前状态
 
-`plan_status: blocked`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行，E3 未关闭，E8 仍为 `CLOSED`。旧 campaign/evidence 不可复用，无 `infrastructure_reason`，不授权 infra retry。
+`plan_status: ready`。此处 `ready` **只表示**新 campaign（`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`）的 host 侧输入已准备完成；仓外 commit-bound freeze 须在提交后生成，设备执行仍须明确再确认；E3 未关闭，E8 仍为 `CLOSED`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行。旧 campaign/evidence 不可复用，无 `infrastructure_reason`，不授权 infra retry。
 
 2026-07-18 的一次最小只读设备元组发现仍保留为历史完成记录，六条白名单设备 `shell` 均曾成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。live model 复核匹配 `PLA-AL10`；live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，只据可见 suffix 确认 build drift，不猜完整版本或漂移原因。
 
-`ADJ-20260806-0002` 另授权一次 HarmonyOS 7 最小只读元组重绑定 discovery（非 campaign）：evidence ID `EV-E3-PHYS1REBIND7-20260806-0001`，不分配新 campaign ID。Settings 页人工报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；只据该人工值与旧 live 投影将 HDC binding 候选记为 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`，在 rebind 完成前不得作为已冻结结论。仅授权三条只读：`param get const.ohos.apiversion`、`uname -m`、`param get const.product.cpu.abilist`；禁止重查 dist/model/build，禁止序列/UDID/app list/install/start/VPN。raw 输出仅仓外保存，仓内只登记脱敏 projection/hash。三条结果齐备前不得决定 HAP 复用/重建或新 campaign 路线；当前 rebind 为 pending，尚未执行。
+`ADJ-20260806-0002` 授权的 HarmonyOS 7 最小只读 rebind discovery 已执行并登记为 [`EV-E3-PHYS1REBIND7-20260806-0001`](evidence/e3-physical-rebind7-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: pass`（**严格只表示**三条 rebind 完成，不是 E3/campaign pass）；投影结果 API `26` / `aarch64` / `arm64-v8a`；Settings 人工报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；HDC binding 候选 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（旧 live 投影 + 人工值，未重查 dist/model/build）。`ADJ-20260806-0003` 已冻结该新元组，批准复用原 FINAL HAP hashes（兼容性仅作实测、不证明成功），并分配新 campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001`。host reverify 已 PASS：public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；FINAL HAP / signature / profile / member-list hashes 与历史登记一致、未变；**不**主张设备安装兼容性。设备执行仍须明确再确认后才可 Live。
 
-隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
+隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。登记 HAP 仍为 compile API `24`、target/compatible API `23`；设备冻结 API 为 `26`，安装/运行兼容性仅以实测为准，不得由 compile/target 值推导。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
 
 FINAL signed HAP A SHA-256 为 `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244`、size `106210`；B 为 `1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26`、size `106212`。A/B profile SHA-256 分别为 `a3abfc6ac351cf06f5639b31f108c80edcdcd96080f43ccfd48ce12a07325b05` 与 `f09af0f314773c53d61d90804332605317ec6a61316add0df3672067da99a16e`；公开证书文件 SHA-256 为 `c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`。四项 `verify-profile`/`verify-app` 均 exit `0`、人工核对 `pass`，且 HAP 内嵌 profile 与对应外部 profile byte-equal。signed 内容审计确认：仅 `ohos.permission.INTERNET`；VPN Extension `exported=false`；API `23`；debug 普通开发签名；唯一 native payload 为 arm64-v8a 纯 C `libfdprobe.so`，它只用 `fcntl(F_GETFD)` 读取 fd 快照，平台 `VpnConnection.destroy` 是唯一关闭责任。A/B signed member-list SHA-256 分别为 `216acabcd1f1c0efdc2ed6fbf89b4d88a1dd064bf5d508d4f692447a9b0f0166` 与 `4177f5c11d291bb20730ff45543b2ed5fcda9b8a349dbbe568ee01c89cdc82c2`。
 
-冻结 build-source archive SHA-256 为 `e9aa2360df2027bfbd0a84f89a926439cf7bcfb50ddbb0c4977804373fb5da36`，source manifest 为 `e5ca08160003aeb621220bf0666a7cc8f20ab2cef3241d692814798c758e1b50`，SDK map 为 `f3ed4f374f1c877c14fdce99adf6f601595de4cc9d531bded7cc111fb14130b3`。唯一 runner SHA-256 为 `749be7f8dd7c561f0728e90220fa703f12ccc33e7eb7a22e30af482511e4a770`，host-only selftest SHA-256 为 `42f433bb698dfb9eec7a3bca2ea50630f0d58b4f92b04342e5d5e32e7dfe8cf3`；selftest 与 Live simulation 均通过且 HDC process count 为 `0`。Windows 准备基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`；initial live freeze 已绑定 `code_sha: 82ebc400de89a9de691a8c9d1bd629c9845999e8`。signed HAP/profile/certificate 须保留至 E8 审查结束。
+冻结 build-source archive SHA-256 为 `e9aa2360df2027bfbd0a84f89a926439cf7bcfb50ddbb0c4977804373fb5da36`，source manifest 为 `e5ca08160003aeb621220bf0666a7cc8f20ab2cef3241d692814798c758e1b50`，SDK map 为 `f3ed4f374f1c877c14fdce99adf6f601595de4cc9d531bded7cc111fb14130b3`。当前唯一 runner SHA-256 为 `19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`，host-only selftest SHA-256 为 `f7156314031eaf3649dfc6e5e245b9fbba75944724ed03fa62b87a465188b39d`；selftest / dry-run / Live simulation 均通过且 HDC process count 为 `0`。历史 initial live 所用 runner `749be7f8dd7c561f0728e90220fa703f12ccc33e7eb7a22e30af482511e4a770` 仅保留在旧 evidence 中，不作为当前 host 输入。Windows 准备基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`；initial live freeze 已绑定 `code_sha: 82ebc400de89a9de691a8c9d1bd629c9845999e8`。signed HAP/profile/certificate 须保留至 E8 审查结束。
 
 旧 physical-preflight unsigned HAP hash 继续作为历史准备阶段记录保留：A `5712541de9095e6eb99cfd2d72582b150adf2d78a14cc23375d887b298ece7ed`，B `9c4ae9206b8ac6843f4317645a2ebdb656610575c0220c58c6091a23e16687c0`。它们不是当前签名制品、campaign 输入或最终 hash，不得与上述 FINAL signed HAP 混用。
 
 ## 唯一例外边界
 
-- 例外名只有 `E3-PHYS-PREFLIGHT`，只准进行一个 campaign，并绑定一台在执行前具名且冻结目标元组的 HarmonyOS 6.1 arm64 物理设备。相近型号、第二台设备、其他 build、API、架构或签名 profile 不得复用本例外。
+- 例外名只有 `E3-PHYS-PREFLIGHT`，只准进行一个 campaign，并绑定一台在执行前具名且冻结目标元组的 HarmonyOS 7 / API 26 arm64 物理设备。历史 initial 曾绑定 HarmonyOS 6.1 / API 23 元组且已消费，不得复用。相近型号、第二台设备、其他 build、API、架构或签名 profile 不得复用本例外。
 - 只准复用或最小适配 `spikes/e3-vpn-extension-hap` 的普通第三方 A/B 公共 `VpnExtension` 探针。实现只能使用 ArkTS 和必要的纯 C；不得加入 Go、NetBird、WireGuard、私有 fork 或产品代码。
 - 只准使用公开 `vpnExtension`、`VpnExtensionAbility` 和 `VpnConnection` API，以及普通开发签名。禁止 `MANAGE_VPN`、system/debug/enterprise 权限、root、隐藏服务、权限授予命令、策略修改或设备类型伪装。
 - 只验证 allow、deny、`onCreate`、`VpnConnection.create` 返回 fd、active stop、Settings revoke、第二 VPN 冲突和最终清理。不验证 `protect`、流量、路由/DNS 正确性、Go/NetBird 数据面、产品生命周期或发布能力。
@@ -55,24 +55,24 @@ hdc shell bm get --udid
 
 长选项 `--udid` 是唯一获批过的 UDID 读取，短选项 `bm get -u` 仍禁止。命令 stdout 已仅用于人工录入 AGC，未重定向、留存或回传。这个已消耗例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
 
-历史 campaign 输入中设备、系统、API 与架构、HDC 曾冻结，但 initial live 已因 build drift 停止；当前不得把该历史冻结当作可执行 campaign 输入，也不得把 Settings/旧 live 合成的 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 候选当作已冻结。任何新 campaign 的其余输入必须在安装前一次性冻结。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
+历史 campaign 输入中设备、系统、API 与架构、HDC 曾按 API 23 / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` 冻结，但 initial live 已因 build drift 停止；该历史冻结与 ID 不得再作为可执行 campaign 输入。`ADJ-20260806-0003` 已冻结新元组；host reverify 已 PASS，当前 `plan_status: ready`（仅 host 输入 ready）。设备执行须再次确认；仓外 commit-bound freeze 在提交后生成；其余 Live 输入仍须在安装前一次性核验。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
 
 | 输入 | 必须值与证据 |
 | --- | --- |
-| 设备 | 已冻结：`PLA-AL10` |
-| 系统 | 已冻结：distribution `HarmonyOS`；完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` |
-| API 与架构 | 已冻结：API `23`；kernel arch `aarch64`；app ABI `arm64-v8a` |
-| HDC | 已冻结：唯一 target 在仓外受控映射中绑定为 `PHYS-1`；真实 endpoint、序列号、USB 标识或网络地址不得入库 |
-| 签名 | 已冻结为普通 debug 开发签名，设备已纳入 A/B 对应 profile；四项验签 exit `0`、人工核对 `pass`、内嵌 profile byte-equal；profile/certificate hash 见“当前状态” |
-| A/B 制品 | FINAL signed HAP A/B、size、SHA-256 与 member-list 已冻结；旧 unsigned hash 只绑定历史准备阶段，不是当前输入 |
-| 源码与 SDK | build-source archive、source manifest、SDK map 及其 SHA-256 已冻结；SDK `6.1.1.125` / API `24`，target/compatible API `23` |
-| 清理基线 | initial live 在安装前停止；A/B 从未安装或运行，finally 定向 A/B bundle/PID/staging probe 已确认 `verified-clean` |
+| 设备 | 新冻结：`PLA-AL10`（`ADJ-20260806-0003`）；历史 API23 冻结记录保留不改写 |
+| 系统 | 新冻结：distribution `HarmonyOS`；HDC binding build `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`；Settings 人工观测 `7.0.0.100 (SP8C00E32R7P2patch09)` |
+| API 与架构 | 新冻结：API `26`；kernel arch `aarch64`；app ABI `arm64-v8a`（rebind `EV-E3-PHYS1REBIND7-20260806-0001`） |
+| HDC | 唯一 target 在仓外受控映射中绑定为 `PHYS-1`；真实 endpoint、序列号、USB 标识或网络地址不得入库 |
+| 签名 | 普通 debug 开发签名与 profile/certificate hash 经 host reverify 确认与历史登记一致、未变 |
+| A/B 制品 | `ADJ-20260806-0003` 批准复用原 FINAL signed HAP A/B hashes；host reverify PASS（HAP/signature/profile/member hashes 未变）；兼容性仅作实测、**不**证明 API 26 安装/运行成功。旧 unsigned hash 只绑定历史准备阶段 |
+| 源码与 SDK | build-source archive、source manifest、SDK map 及其 SHA-256 经 host reverify 确认；public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；Live 前按仓外 commit-bound freeze 重核 |
+| 清理基线 | initial live 与 rebind 均未安装 A/B；Live 前须重新确认清理基线 |
 | 采集准备 | `controlled external EvidenceRoot/RawRoot`；仓内只接收脱敏 manifest/projection/判定 |
-| 审查 | operator=`authorized user`；orchestrator=`main agent`；reviewer=`isolated deepseek/deepseek-v4-pro`；独立审查完成，0 blocker/0 major |
-| Campaign | target code `PHYS1API23`；ID `E3-PHYS-PREFLIGHT-20260806-0001`；evidence ID `EV-E3-PHYS1API23-20260806-0001` 已占用；initial 已消费且 blocked |
+| 审查 | rebind reviewer=`isolated kimi-coding/k3`（0 blocker/0 major）；新 campaign Live 审查角色须在 freeze 中重新绑定 |
+| Campaign | 历史：`PHYS1API23` / `E3-PHYS-PREFLIGHT-20260806-0001` / `EV-E3-PHYS1API23-20260806-0001` 已消费且 blocked，不可复用。新：`PHYS1API26` / `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`（host 输入 ready；设备执行须再确认） |
 | Settings re-allow | 预测路径冻结为 `direct-system-activation`；路径偏差只作预注册观测，不因偏差本身 blocked；无 Settings 入口或无法重新激活仍 blocked |
 
-原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权。live build 投影与冻结 build 发生可见 drift 后，当前 `plan_status: blocked`。2026-07-18 六条最小设备发现不得作为当前元组重跑；单次 signing enrollment 已消耗且不得重跑；本 campaign/evidence ID 不得复用，亦不授权 infra retry。`ADJ-20260806-0002` 仅额外授权一次三条只读 rebind discovery（`EV-E3-PHYS1REBIND7-20260806-0001`），不是新 campaign。任何 campaign 继续仍须在 rebind 三条结果齐备后，先取得新的路线决策，冻结完整的新 build，并分配新的 campaign ID 与 evidence ID。
+原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权并因 drift 变为 `blocked`。rebind、`ADJ-20260806-0003` 与 host reverify 完成后，当前 `plan_status: ready`（仅表示新 campaign host 输入 ready；仓外 commit-bound freeze 在提交后生成；设备执行仍须明确再确认；E8 `CLOSED`）。2026-07-18 六条最小设备发现不得作为当前元组重跑；单次 signing enrollment 已消耗且不得重跑；旧 campaign/evidence ID 不得复用，亦不授权 infra retry。Live 仍须 clean worktree、仓外完整 freeze 与设备再确认。
 
 ## Campaign 与重试纪律
 
@@ -124,23 +124,25 @@ hdc shell bm get --udid
 
 ## 专用证据模板
 
-target code 为 `PHYS1API23`。evidence ID `EV-E3-PHYS1API23-20260806-0001` 已由 initial live preflight 占用；当前事实以[已审查证据记录](evidence/e3-physical-preflight-2026-08-06.md)为准。以下模板保留为本次执行所依据的历史结构，不授权复用 ID 或再次执行。
+target code 为 `PHYS1API26`。campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001` 为 `ADJ-20260806-0003` 分配的当前准备身份；host 输入 ready，**设备执行仍须明确再确认**，仓外 commit-bound freeze 在提交后生成。本模板不授权 Live。历史 initial live（`PHYS1API23` / `E3-PHYS-PREFLIGHT-20260806-0001` / `EV-E3-PHYS1API23-20260806-0001`，`reviewed-pass/blocked`）见[已审查证据记录](evidence/e3-physical-preflight-2026-08-06.md)，旧 ID 不进入本模板且不可复用。登记 HAP 仍 compile API `24`、target/compatible API `23`；设备冻结 API 为 `26`，兼容性仅实测。
 
 ```yaml
-evidence_id: EV-E3-PHYS1API23-20260806-0001 # consumed by the reviewed initial live record
+evidence_id: EV-E3-PHYS1API26-20260806-0001 # prepared; live requires explicit device-execution reconfirmation
 exception: E3-PHYS-PREFLIGHT
 information_status: current-measured
 record_status: draft | collected | reviewed-pass | reviewed-fail | blocked | invalidated | superseded
 stage_or_gate: E3
 related_stages_or_gates: [E8]
 target_tuple:
-  distribution: HarmonyOS 6.1
-  device_model: <exact-model>
+  distribution: HarmonyOS
+  device_model: PLA-AL10
   device_alias: PHYS-1
-  full_system_build: <exact-build>
-  api: <exact-api>
+  full_system_build: PLA-AL10 7.0.0.100(SP8C00E32R7P2) # HDC binding; Settings manual 7.0.0.100 (SP8C00E32R7P2patch09)
+  api: "26" # device freeze API; HAP remains compile 24 / target+compatible 23
   architecture: arm64
-  sdk_api_syscap: <sdk-version-and-public-vpn-syscap-basis>
+  kernel_arch: aarch64
+  app_abi: arm64-v8a
+  sdk_api_syscap: HarmonyOS SDK 6.1.1.125 / compile API 24; target and compatible API 23; public VPN Extension API only
   channel: ordinary-development-signing-only
 hdc_target_reference: <out-of-repo-controlled-reference>
 signing:
@@ -157,7 +159,7 @@ artifact_sha256:
   hap_a: <sha256>
   hap_b: <sha256>
 preflight_inputs_frozen_at: <ISO-8601-with-zone>
-campaign_id: E3-PHYS-PREFLIGHT-20260806-0001
+campaign_id: E3-PHYS-PREFLIGHT-20260806-0002
 attempt: initial | infrastructure-blocked-retry-1
 retry_basis: <N/A-for-initial-or-prior-blocked-record-and-infrastructure-reason>
 scenario_window_seconds: 60
@@ -204,7 +206,7 @@ actual: <bounded-observation-summary>
 verdict: pass | fail | blocked | invalid
 scope_statement: <exact-target-only-no-extrapolation>
 cleanup_result: <pre-uninstall-in-process-fd-snapshot-and-post-uninstall-no-bundle-process-active-VPN-result>
-reviewer: independent deepseek/deepseek-v4-pro isolated session | pending
+reviewer: <independent-isolated-session-bound-at-freeze> | pending
 reviewed_at: <ISO-8601-with-zone-or-pending>
 review_record: <id-or-pending>
 ```

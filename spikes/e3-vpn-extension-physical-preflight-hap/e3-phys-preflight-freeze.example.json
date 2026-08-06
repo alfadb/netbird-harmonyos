@@ -16,8 +16,8 @@
   "target_tuple": {
     "distribution": "HarmonyOS",
     "device_model": "PLA-AL10",
-    "full_system_build": "PLA-AL10 6.1.0.117(SP6C00E115R7P7)",
-    "api": "23",
+    "full_system_build": "PLA-AL10 7.0.0.100(SP8C00E32R7P2)",
+    "api": "26",
     "kernel_arch": "aarch64",
     "app_abi": "arm64-v8a"
   },

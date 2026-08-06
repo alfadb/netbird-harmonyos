@@ -102,8 +102,8 @@ function New-Freeze {
         target_tuple = [ordered]@{
             distribution = 'HarmonyOS'
             device_model = 'PLA-AL10'
-            full_system_build = 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)'
-            api = '23'
+            full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            api = '26'
             kernel_arch = 'aarch64'
             app_abi = 'arm64-v8a'
         }
@@ -324,6 +324,7 @@ try {
     Assert-True (@($layoutRefs | Where-Object { $_.status -eq 'collected' -and $null -ne $_.layout }).Count -gt 0) 'layout_state_reference missing layout artifacts'
     Assert-True ([int]$liveRecord.clock_source.device_clock_skew_tolerance_seconds -eq 3) 'device clock skew tolerance not frozen at 3 seconds'
     Assert-True ([string]$liveRecord.target_tuple.distribution -eq [string]$liveFreeze.target_tuple.distribution) 'record distribution does not match freeze target_tuple.distribution'
+    Assert-True ([string]$liveRecord.target_tuple.full_system_build -eq 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' -and [string]$liveRecord.target_tuple.api -eq '26' -and [string]$liveRecord.target_tuple.device_model -eq 'PLA-AL10' -and [string]$liveRecord.target_tuple.kernel_arch -eq 'aarch64' -and [string]$liveRecord.target_tuple.app_abi -eq 'arm64-v8a') 'new frozen target tuple did not pass through live simulation'
 
     $requiredFields = @(
         'information_status', 'stage_or_gate', 'related_stages_or_gates', 'target_tuple', 'signing', 'code_sha', 'source_archive_sha256',
@@ -342,6 +343,7 @@ try {
     Assert-True ($rawText -match 'target-canary\.example\.test:8710' -and $rawText -match '10\.23\.45\.67:8710' -and $rawText -match '2001:db8::1234' -and $rawText -match '00:11:22:33:44:55' -and $rawText -match 'SN-CANARY12345678') 'raw HiLog did not preserve sensitive canaries'
     $evidenceText = (Get-ChildItem -LiteralPath $livePaths.Evidence -File -Recurse | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
     Assert-True ($evidenceText -notmatch 'target-canary|10\.23\.45\.67|2001:db8|device-canary|00:11:22:33:44:55|SN-CANARY|HDC-MUST-NOT-START') 'sensitive target or host canary leaked into projected evidence'
+    Assert-True ($evidenceText -match [regex]::Escape('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $evidenceText -match '"api"\s*:\s*"26"' -and $evidenceText -notmatch '192\.0\.2\.') 'public API26 build IP-like literal was redacted or real IPs leaked into evidence'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $livePaths.Evidence 'raw\transcript.jsonl'))) 'raw transcript was incorrectly created in evidence root'
     Assert-True ($liveRecord.transcript_reference.projection_only -and -not $liveRecord.transcript_reference.raw_transcript_exists) 'projection/raw transcript contract mismatch'
     Assert-True (@($liveRecord.raw_hilog_reference).Count -eq 2 -and @($liveRecord.raw_hilog_reference | Where-Object { $_.reference -eq 'RAW-HILOG-CAMPAIGN' }).Count -eq 1) 'campaign did not produce one continuous HiLog stream'
@@ -365,6 +367,26 @@ try {
     $blockedLivePaths = New-CasePaths 'blocked-live'
     $blockedLive = Invoke-Runner $dryFreezePath $blockedLivePaths.Evidence $blockedLivePaths.Raw -FixturePath $baseFixturePath
     Assert-True ($blockedLive.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $blockedLivePaths.Evidence)) 'LiveSimulation accepted blocked plan'
+    $oldApiBuildFreeze = Copy-JsonObject $liveFreeze
+    $oldApiBuildFreeze.target_tuple.full_system_build = 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)'
+    $oldApiBuildFreeze.target_tuple.api = '23'
+    $oldApiBuildPath = Write-JsonFixture 'freeze-old-api23-build.json' $oldApiBuildFreeze
+    $oldApiBuildPaths = New-CasePaths 'old-api23-build'
+    $oldApiBuild = Invoke-Runner $oldApiBuildPath $oldApiBuildPaths.Evidence $oldApiBuildPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($oldApiBuild.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $oldApiBuildPaths.Evidence)) 'old API23/build freeze was accepted'
+    Assert-True ($oldApiBuild.Text -match 'frozen target tuple mismatch') 'old API23/build freeze rejection message missing'
+    $oldApiOnlyFreeze = Copy-JsonObject $liveFreeze
+    $oldApiOnlyFreeze.target_tuple.api = '23'
+    $oldApiOnlyPath = Write-JsonFixture 'freeze-old-api23-only.json' $oldApiOnlyFreeze
+    $oldApiOnlyPaths = New-CasePaths 'old-api23-only'
+    $oldApiOnly = Invoke-Runner $oldApiOnlyPath $oldApiOnlyPaths.Evidence $oldApiOnlyPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($oldApiOnly.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $oldApiOnlyPaths.Evidence) -and $oldApiOnly.Text -match 'frozen target tuple mismatch: api') 'old API23-only freeze was accepted'
+    $oldBuildOnlyFreeze = Copy-JsonObject $liveFreeze
+    $oldBuildOnlyFreeze.target_tuple.full_system_build = 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)'
+    $oldBuildOnlyPath = Write-JsonFixture 'freeze-old-build-only.json' $oldBuildOnlyFreeze
+    $oldBuildOnlyPaths = New-CasePaths 'old-build-only'
+    $oldBuildOnly = Invoke-Runner $oldBuildOnlyPath $oldBuildOnlyPaths.Evidence $oldBuildOnlyPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($oldBuildOnly.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $oldBuildOnlyPaths.Evidence) -and $oldBuildOnly.Text -match 'frozen target tuple mismatch: full_system_build') 'old build-only freeze was accepted'
     $badCodeFreeze = Copy-JsonObject $liveFreeze
     $badCodeFreeze.code_sha = ('0' * 40)
     $badCodePath = Write-JsonFixture 'freeze-bad-code.json' $badCodeFreeze

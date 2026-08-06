@@ -1,11 +1,33 @@
 # E3 Physical VPN Extension Preflight
 
-This is the isolated probe and governed runner for the HarmonyOS 6.1.0 API 23
-PLA-AL10 E3-PHYS-PREFLIGHT. It does not replace or modify the historical API 24
-Emulator probe in `../e3-vpn-extension-hap/` or modify historical raw evidence.
-The only initial live record is `EV-E3-PHYS1API23-20260806-0001`; its reviewed
+This is the isolated probe and governed runner for the PLA-AL10 E3-PHYS-PREFLIGHT
+on the current frozen device tuple: distribution `HarmonyOS`, model `PLA-AL10`,
+full system build `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`, device API `26`, kernel
+`aarch64`, app ABI `arm64-v8a`. Settings-page text such as
+`7.0.0.100 (SP8C00E32R7P2patch09)` is a manual operator supplement only; the
+runner HDC precheck compares the HDC build string to the frozen
+`full_system_build` verbatim and never expands or compares `patch09`. It does
+not replace or modify the historical API 24 Emulator probe in
+`../e3-vpn-extension-hap/` or modify historical raw evidence. The consumed
+API 23 initial live record is `EV-E3-PHYS1API23-20260806-0001`; its reviewed
 verdict is blocked before continuous capture or installation because the live
-build projection drifted from the frozen build.
+build projection drifted from the then-frozen build. Readonly rebind
+`EV-E3-PHYS1REBIND7-20260806-0001` is `reviewed-pass/pass` for the three rebind
+probes only, not an E3 or campaign pass. `ADJ-20260806-0003` freezes the tuple
+above and prepares campaign `E3-PHYS-PREFLIGHT-20260806-0002` / evidence
+`EV-E3-PHYS1API26-20260806-0001`. Host reverify PASS: public manifest SHA-256
+`66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`; FINAL HAP /
+signature / profile / member-list hashes unchanged; device install compatibility
+is not claimed. Registered HAP artifacts remain compile API `24` with
+target/compatible API `23`; device freeze API is `26` and compatibility is
+measurement-only. Current runner SHA-256
+`19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`, selftest
+`f7156314031eaf3649dfc6e5e245b9fbba75944724ed03fa62b87a465188b39d`; selftest /
+dry-run / LiveSimulation keep HDC process count `0`. Current `plan_status` is
+`ready` only for new-campaign host inputs; the external commit-bound freeze is
+generated after commit; device execution still requires explicit reconfirmation;
+E8 remains CLOSED. Prior campaign/evidence IDs must not be reused. The checked-in
+freeze example remains intentionally `blocked`.
 
 ## Boundary
 
@@ -107,9 +129,11 @@ terminal marker and post-destroy fd snapshot are still required.
 ## API Mapping
 
 The Stable Command Line Tools 6.1.1.290 SDK declares HarmonyOS 6.1.1/API 24.
-Both products compile against `6.1.1(24)` while declaring target and compatible
-SDK `6.1.0(23)` for the frozen device contract. Stable Hvigor 6.24.3 requires
-one product literally named `default`, so logical `vpnA` uses that name.
+HAP artifact manifests still compile against `6.1.1(24)` and declare target and
+compatible SDK `6.1.0(23)`; those HAP compile/target/compatible values are not
+the device freeze API. Do not rewrite the HAP contract to device API `26`.
+Stable Hvigor 6.24.3 requires one product literally named `default`, so logical
+`vpnA` uses that name.
 
 The public API used here is available from API 11:
 
@@ -175,7 +199,12 @@ executable SHA-256 must match `HdcPath`. Every bounded HDC call has a timeout.
 
 The checked-in `e3-phys-preflight-freeze.example.json` is intentionally blocked
 and contains placeholders rather than campaign hashes, local paths, signing
-material, endpoint data, or current secret values. Its required field groups
+material, endpoint data, or current secret values. Its example target tuple is
+the current freeze (`HarmonyOS` / `PLA-AL10` /
+`PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a`);
+campaign and evidence IDs remain generic blocked placeholders
+(`E3-PHYS-PREFLIGHT-<CAMPAIGN-CODE>`,
+`EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>`). Its required field groups
 are campaign identity/status/retry, the exact target tuple and 60-second window,
 settings re-allow expected path defaulting to `direct-system-activation` with
 required `settings_reallow_path_policy: observation-only`, ordinary-development
@@ -283,8 +312,12 @@ were never installed or run, and cleanup was verified clean. The independently
 reviewed record is `reviewed-pass/blocked` with 0 blocker/0 major; reviewed-pass
 means evidence review completion, not E3 pass.
 
-The governance plan is now `blocked`. There is no `infrastructure_reason`, so
-`infrastructure-blocked-retry-1` is not authorized. Any further Live work needs
-a new route decision, a fully frozen new build, and new campaign/evidence IDs;
-the prior IDs must not be reused. E3 remains open, E8 remains `CLOSED`, and
-NetBird or any broader physical-device work remains forbidden.
+The historical initial-live plan became `blocked` with no `infrastructure_reason`,
+so `infrastructure-blocked-retry-1` is not authorized and prior campaign/evidence
+IDs must not be reused. After rebind, `ADJ-20260806-0003`, and host reverify PASS,
+the current governance `plan_status` is `ready` only for the new-campaign host
+inputs (`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`).
+Live still requires a clean worktree, the external commit-bound freeze generated
+after commit, and explicit device-execution reconfirmation. E3 remains open, E8
+remains `CLOSED`, and NetBird or any broader physical-device work remains
+forbidden.

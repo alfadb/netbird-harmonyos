@@ -50,7 +50,7 @@ $script:RawHilogArtifacts = [Collections.Generic.List[object]]::new()
 $script:FaultArtifacts = [Collections.Generic.List[object]]::new()
 $script:CleanupActions = [Collections.Generic.List[object]]::new()
 $script:CleanupVerification = [ordered]@{ status = 'not-run'; verified_absent = $false; bundles = @() }
-$script:PublicVersionLiterals = @('PLA-AL10 6.1.0.117(SP6C00E115R7P7)')
+$script:PublicVersionLiterals = @('PLA-AL10 7.0.0.100(SP8C00E32R7P2)')
 $script:Simulation = $null
 $script:VirtualSeconds = 0.0
 $script:VirtualBase = [DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')
@@ -402,8 +402,8 @@ function Assert-FreezeManifest {
     $expectedTuple = [ordered]@{
         distribution = 'HarmonyOS'
         device_model = 'PLA-AL10'
-        full_system_build = 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)'
-        api = '23'
+        full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        api = '26'
         kernel_arch = 'aarch64'
         app_abi = 'arm64-v8a'
     }
@@ -575,7 +575,7 @@ function Get-SimulationHdcResult {
     $stdout = switch ($Operation) {
         'Version' { [string](Get-OptionalProperty $script:Simulation 'hdc_version' 'SELFTEST-HDC-1.0') }
         'TupleModel' { 'PLA-AL10' }
-        'TupleBuild' { 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)' }
+        'TupleBuild' { 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' }
         'BundleDump' {
             $bundle = [string]$Parameters.Bundle
             $installed = ($bundle -eq $script:BundleA -and $script:SimulationInstalledA) -or ($bundle -eq $script:BundleB -and $script:SimulationInstalledB)
@@ -2112,15 +2112,17 @@ function Invoke-RunnerSelfTest {
     $protectedText = $protected | ConvertTo-Json -Depth 10
     Check ($roundTrip.boolean.GetType() -eq [bool] -and $roundTrip.boolean) 'structured-redaction-preserves-Boolean'
     Check ($protectedText -notmatch '10\.23\.45\.67|2001:db8|2001:4860|device-canary|00:11:22:33:44:55|CANARY12345678|target-canary') 'structured-redaction-canaries'
-    $script:PublicVersionLiterals = @('PLA-AL10 6.1.0.117(SP6C00E115R7P7)')
-    $versionRedaction = Protect-SensitiveText 'build=PLA-AL10 6.1.0.117(SP6C00E115R7P7)|api=23|peer=192.0.2.44|port=8710'
-    Check ($versionRedaction.Contains('PLA-AL10 6.1.0.117(SP6C00E115R7P7)') -and $versionRedaction.Contains('api=23') -and $versionRedaction -notmatch '192\.0\.2\.44|8710') 'redaction-preserves-build-api-and-removes-ip-port'
+    $script:PublicVersionLiterals = @('PLA-AL10 7.0.0.100(SP8C00E32R7P2)')
+    $versionRedaction = Protect-SensitiveText 'build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=192.0.2.44|port=8710'
+    Check ($versionRedaction.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $versionRedaction.Contains('api=26') -and $versionRedaction -notmatch '192\.0\.2\.44|8710') 'redaction-preserves-build-api-and-removes-ip-port'
+    $api26IpLike = Protect-SensitiveText 'full_system_build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=198.51.100.77|port=8710|bare=7.0.0.100'
+    Check ($api26IpLike.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $api26IpLike.Contains('api=26') -and $api26IpLike -match 'bare=<REDACTED_IPV4>' -and $api26IpLike -notmatch '198\.51\.100\.77|8710') 'api26-build-ip-like-literal-preserved-real-ip-redacted'
     $arrayInput = [object[]]@('alpha', [object[]]@('beta', 'gamma'))
     $arrayJson = (Protect-SensitiveData $arrayInput) | ConvertTo-Json -Depth 10 -Compress
     Check ($arrayJson -eq '["alpha",["beta","gamma"]]') 'structured-redaction-array-shape'
-    $endpointShape = Protect-SensitiveData ([ordered]@{ host = 'device-canary.example.test'; port = 8710; build = 'PLA-AL10 6.1.0.117(SP6C00E115R7P7)' })
+    $endpointShape = Protect-SensitiveData ([ordered]@{ host = 'device-canary.example.test'; port = 8710; build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' })
     $endpointShapeJson = $endpointShape | ConvertTo-Json -Compress
-    Check ($endpointShapeJson -notmatch 'device-canary|8710' -and $endpointShapeJson.Contains('PLA-AL10 6.1.0.117(SP6C00E115R7P7)')) 'structured-host-port-redaction'
+    Check ($endpointShapeJson -notmatch 'device-canary|8710' -and $endpointShapeJson.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)')) 'structured-host-port-redaction'
     try { [void](Get-OptionalJsonBoolean ([pscustomobject]@{ hook = 'true' }) 'hook' $false); Check $false 'strict-simulation-Boolean' } catch { Check ($_.Exception.Message -match 'JSON Boolean') 'strict-simulation-Boolean' }
     Check ((Test-PhysicalTargetToken 'usb-target:8710') -and -not (Test-PhysicalTargetToken 'PHYS-1') -and -not (Test-PhysicalTargetToken 'two targets')) 'physical-target-validation'
     $script:ActualTarget = 'usb-target:8710'
@@ -2168,8 +2170,8 @@ function Invoke-RunnerSelfTest {
     Check ($offsetParse.Ok -and $offsetParse.DeviceObservedAt -match '2026-07-17') 'offset-zone-parse'
     $unknownZone = Parse-HilogDeviceTime 'XYZ 2026-07-17 16:54:59.204 sample'
     Check ((-not $unknownZone.Ok) -and $unknownZone.Reason -match 'unknown-device-time-zone') 'unknown-zone-blocked'
-    $jsonRedacted = Protect-SensitiveText '{"udid":"ABCDEF1234567890","deviceIds":["DEV-1"],"endpoint":"10.1.2.3:8710","build":"PLA-AL10 6.1.0.117(SP6C00E115R7P7)"}'
-    Check ($jsonRedacted -match '"udid":"<REDACTED>"' -and $jsonRedacted -match 'deviceIds' -and $jsonRedacted -match '<REDACTED>' -and $jsonRedacted.Contains('PLA-AL10 6.1.0.117(SP6C00E115R7P7)') -and $jsonRedacted -notmatch 'ABCDEF1234567890|10\.1\.2\.3') 'quoted-json-udid-deviceids-redaction'
+    $jsonRedacted = Protect-SensitiveText '{"udid":"ABCDEF1234567890","deviceIds":["DEV-1"],"endpoint":"10.1.2.3:8710","build":"PLA-AL10 7.0.0.100(SP8C00E32R7P2)"}'
+    Check ($jsonRedacted -match '"udid":"<REDACTED>"' -and $jsonRedacted -match 'deviceIds' -and $jsonRedacted -match '<REDACTED>' -and $jsonRedacted.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $jsonRedacted -notmatch 'ABCDEF1234567890|10\.1\.2\.3') 'quoted-json-udid-deviceids-redaction'
 
     $captureTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-capture-selftest-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($captureTemp) | Out-Null
