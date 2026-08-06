@@ -1978,15 +1978,38 @@ function Test-TranscriptIntegrity {
     $previousHash = ('0' * 64)
     $expectedIndex = 1
     foreach ($line in (Get-Content -LiteralPath $Path)) {
-        try { $entry = $line | ConvertFrom-Json -Depth 40 } catch { $violations.Add('transcript-json-invalid'); continue }
-        if ([int]$entry.payload.index -ne $expectedIndex) { $violations.Add('transcript-order-invalid') }
-        if ([string]$entry.payload.previous_hash -ne $previousHash) { $violations.Add('transcript-previous-hash-invalid') }
-        $recanonicalizedPayload = $entry.payload | ConvertTo-Json -Depth 30 -Compress
-        if ($recanonicalizedPayload -ne [string]$entry.payload_canonical) { $violations.Add('transcript-payload-canonical-mismatch') }
-        $entryHash = Get-TextSha256 $recanonicalizedPayload
-        if ($entryHash -ne [string]$entry.entry_hash) { $violations.Add('transcript-entry-hash-invalid') }
-        $previousHash = $entryHash
-        $expectedIndex++
+        $doc = $null
+        try {
+            try {
+                $doc = [System.Text.Json.JsonDocument]::Parse($line)
+            } catch {
+                $violations.Add('transcript-json-invalid')
+                continue
+            }
+            try {
+                $root = $doc.RootElement
+                $payloadElement = $root.GetProperty('payload')
+                $payloadRaw = $payloadElement.GetRawText()
+                $payloadCanonical = $root.GetProperty('payload_canonical').GetString()
+                $storedEntryHash = $root.GetProperty('entry_hash').GetString()
+                $index = $payloadElement.GetProperty('index').GetInt32()
+                $entryPreviousHash = $payloadElement.GetProperty('previous_hash').GetString()
+            } catch {
+                $violations.Add('transcript-json-invalid')
+                continue
+            }
+            if ($index -ne $expectedIndex) { $violations.Add('transcript-order-invalid') }
+            if ([string]$entryPreviousHash -ne $previousHash) { $violations.Add('transcript-previous-hash-invalid') }
+            # Compare payload raw JSON text to stored payload_canonical without ConvertFrom-Json object roundtrip
+            # (ISO date / single-element array type drift would otherwise false-positive).
+            if ($payloadRaw -ne [string]$payloadCanonical) { $violations.Add('transcript-payload-canonical-mismatch') }
+            $entryHash = Get-TextSha256 ([string]$payloadCanonical)
+            if ($entryHash -ne [string]$storedEntryHash) { $violations.Add('transcript-entry-hash-invalid') }
+            $previousHash = $entryHash
+            $expectedIndex++
+        } finally {
+            if ($null -ne $doc) { $doc.Dispose() }
+        }
     }
     if ($previousHash -ne $script:TranscriptPreviousHash) { $violations.Add('transcript-chain-head-invalid') }
     return @($violations | Select-Object -Unique)

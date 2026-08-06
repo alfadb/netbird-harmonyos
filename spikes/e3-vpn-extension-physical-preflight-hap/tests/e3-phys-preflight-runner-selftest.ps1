@@ -283,7 +283,9 @@ try {
     Assert-True ($dryResult.ExitCode -eq 0) "dry-run failed: $($dryResult.Text)"
     $dryRecord = Get-Content -LiteralPath (Join-Path $dryPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($dryRecord.plan_status -eq 'blocked' -and -not $dryRecord.is_evidence -and $dryRecord.record_status -eq 'blocked' -and $dryRecord.hdc_processes_started -eq 0) 'dry-run non-evidence contract mismatch'
+    Assert-True (@($dryRecord.integrity_violations).Count -eq 0) 'normal dry-run produced false transcript integrity violations'
     Assert-ManifestAndSeal $dryPaths.Evidence
+    Assert-ProjectionChain $dryPaths.Evidence
 
     Write-Host 'SELFTEST_PHASE=complete-live-simulation-seven-scenarios'
     $liveFreeze = New-Freeze 'ready' 'EV-E3-SELFTEST-20990101-0002'
@@ -295,6 +297,7 @@ try {
     $liveRecordPath = Join-Path $livePaths.Evidence 'scenario-results.json'
     $liveRecord = Get-Content -LiteralPath $liveRecordPath -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($liveRecord.execution_mode -eq 'live-simulation' -and -not $liveRecord.is_evidence -and $liveRecord.record_status -eq 'blocked' -and $liveRecord.verdict -eq 'blocked' -and $liveRecord.scenario_aggregation.measured_scenario_overall -eq 'pass') 'live simulation top-level contract mismatch'
+    Assert-True (@($liveRecord.integrity_violations).Count -eq 0) 'normal live simulation produced false transcript integrity violations (must not treat blocked mode as a free pass)'
     Assert-True (@($liveRecord.scenarios).Count -eq 7 -and (@($liveRecord.scenarios | Where-Object { $_.result -ne 'pass' }).Count -eq 0)) 'not all seven simulated scenarios passed'
     Assert-True ($liveRecord.scenarios[1].assertions.allow -eq 'pass' -and $liveRecord.scenarios[1].assertions.vpn_on_create -eq 'pass' -and $liveRecord.scenarios[1].assertions.vpn_connection_create_fd -eq 'pass') 'scenario 2 three assertions mismatch'
     Assert-True ($liveRecord.scenarios[1].authorization_capture.status -eq 'collected' -and $liveRecord.scenarios[1].authorization_capture.result -eq 'pass' -and $liveRecord.scenarios[1].authorization_capture.name -eq 'scenario-2-authorization') 'scenario 2 authorization capture missing or failed'
@@ -697,6 +700,7 @@ try {
     Assert-True ($tamperRun.ExitCode -eq 0) 'simulation transcript tamper escaped the blocked-only contract'
     $tamperRecord = Get-Content -LiteralPath (Join-Path $tamperPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($tamperRecord.record_status -eq 'blocked' -and $tamperRecord.verdict -eq 'blocked' -and 'transcript-json-invalid' -in @($tamperRecord.integrity_violations)) 'hash-chain tamper was not detected'
+    Assert-True (@($liveRecord.integrity_violations).Count -eq 0) 'baseline live simulation integrity must remain empty after tamper isolation'
 
     $payloadTamperFixturePath = Write-JsonFixture 'simulation-payload-tamper.json' (New-SimulationFixture -TamperPayload $true)
     $payloadTamperPaths = New-CasePaths 'payload-tamper'
@@ -704,6 +708,7 @@ try {
     Assert-True ($payloadTamperRun.ExitCode -eq 0) 'simulation payload tamper escaped the blocked-only contract'
     $payloadTamperRecord = Get-Content -LiteralPath (Join-Path $payloadTamperPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ('transcript-payload-canonical-mismatch' -in @($payloadTamperRecord.integrity_violations) -and $payloadTamperRecord.record_status -eq 'blocked') 'human-readable payload tamper was not detected'
+    Assert-True (@($tamperRecord.integrity_violations).Count -gt 0 -and @($payloadTamperRecord.integrity_violations).Count -gt 0) 'tamper cases must still surface integrity_violations'
 
     Assert-True (-not (Test-Path -LiteralPath $script:HdcLaunchMarker)) 'host-only suite launched the HDC sentinel process'
     $allRecords = Get-ChildItem -LiteralPath $tempRoot -Filter 'scenario-results.json' -File -Recurse

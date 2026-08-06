@@ -226,8 +226,13 @@ screenshots, layouts, and targeted A/B fault outputs go to an independent
 out-of-repository `RawRoot` sibling (by default `<EvidenceRoot>.raw`), never to
 `EvidenceRoot` or this repository. There is no raw transcript:
 `projection/transcript.redacted.jsonl` is the only transcript. Recursive leaf
-redaction occurs before JSON serialization, and every transcript hash binds the
-re-canonicalized human-readable payload. Live runner records may be `collected`,
+redaction occurs before JSON serialization, and every transcript `entry_hash`
+binds the stored `payload_canonical` string (`SHA256(payload_canonical)`).
+Integrity verification parses each JSONL line with `System.Text.Json.JsonDocument`,
+compares `payload` raw text to `payload_canonical` verbatim (no
+`ConvertFrom-Json` object roundtrip, which would drift ISO dates / single-element
+arrays), checks `previous_hash` against the prior recalculated entry hash, and
+verifies index order. Live runner records may be `collected`,
 `blocked`, or `invalidated`; reviewed states remain exclusive to the independent
 review step.
 
