@@ -1,18 +1,22 @@
 # E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板
 
-最后核验：2026-08-05
+最后核验：2026-08-06
 
 本文定义 `E3-PHYS-PREFLIGHT`，即 E8 `OPEN` 前唯一允许的物理设备执行例外。它只验证一个冻结的 HarmonyOS 6.1 arm64 具名设备目标上的 E3 可达性，不是产品测试、R 阶段退出或 E4-E7 完整验证。预检记录同时达到 `record_status: reviewed-pass` 和 `verdict: pass` 是 E8 `OPEN` 的必要但非充分条件；预检为 `blocked`、`fail` 或 `invalid` 时 E8 必须保持 `CLOSED`，预检通过也不自动开放 E8。
 
 ## 当前状态
 
-`plan_status: blocked`，不得执行 campaign；尚未分配证据 ID，也没有形成 `record_status` 或 `verdict`。2026-07-18，唯一允许的一次最小只读设备元组发现已执行且六条白名单设备 `shell` 均成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。
+`plan_status: ready`。这只表示唯一 campaign 的治理输入已经就绪，不表示 campaign 已开始，也不形成 `record_status` 或 `verdict`。截至 2026-08-06，设备端从未执行本 campaign 的 install/run/start/stop；E8 仍为 `CLOSED`，Go、NetBird、WireGuard、E4-E7、数据面和产品验证仍禁止。目标 code 冻结为 `PHYS1API23`，campaign ID 冻结为 `E3-PHYS-PREFLIGHT-20260806-0001`；计划 evidence ID 为 `EV-E3-PHYS1API23-20260806-0001`，只在首次设备端 campaign 动作发生时正式占用。若跨日期仍未启动，必须重新作出路线决定并更新 ID，不得静默改号。
 
-已在新隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 完成 API 23 受限适配并本地构建 unsigned A/B HAP；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`；构建使用 `6.1.1(24)`，`targetSdkVersion` 和 `compatibleSdkVersion` 均为 `6.1.0(23)`。完整本地审计已通过：仅请求 `ohos.permission.INTERNET`，VPN Extension 为非导出 `type: vpn`，没有 Go、NetBird、WireGuard、`protect`、特权能力或外部 endpoint。唯一 native payload 是 arm64-v8a 纯 C `libfdprobe.so`，只以 `fcntl(F_GETFD)` 对 fd 进行只读快照检查，不执行 `close`、`dup`、`read` 或 `write`；平台 `VpnConnection.destroy` 是唯一关闭责任。
+唯一允许的一次最小只读设备元组发现已于 2026-07-18 完成，六条白名单设备 `shell` 均成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。campaign 仍尚未开始。
 
-当前 unsigned HAP SHA-256 只记录本地准备快照，非 campaign 冻结制品：A 为 `5712541de9095e6eb99cfd2d72582b150adf2d78a14cc23375d887b298ece7ed`，B 为 `9c4ae9206b8ac6843f4317645a2ebdb656610575c0220c58c6091a23e16687c0`。unsigned 是预期构建警告；Stable SDK 当前不验证 NAPI 模块声明，虽已提供 `.d.ts` 且编译通过，真机 native 加载尚未验证。后续重建或签名必会改变 HAP，因此这些 SHA-256 不得用于签名制品、campaign 输入或最终 hash 的冻结。
+隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
 
-设备、系统、API 与架构、HDC 映射输入现已冻结并满足；任一已冻结输入漂移必须停止，不得继续或重新冻结后继续。六条白名单设备 discovery 已执行。唯一 signing enrollment 命令已获授权，但截至 `2026-08-05` 尚未执行；只有 DevEco Studio 未自动安全采集 UDID 时，Windows 授权人员才可为普通开发 profile 输入执行一次。它是已批准普通开发 profile 输入的最小实施边界，不扩展 campaign 或 evidence，也不是新的动态调整记录。除此之外，未执行其他设备 `shell`、`install`、`send`、`start` 或 `stop`，campaign 未开始。当前仍缺普通开发签名与设备 profile、已签名 A/B HAP、冻结的源码/SDK/final hash、清理基线、采集准备、独立审查准备及 campaign 输入。任一项缺失时，本预检计划保持 `blocked`；只有全部剩余输入门满足、正式证据 ID 分配并开始 campaign 后，才使用证据 schema 的记录状态与判定。
+FINAL signed HAP A SHA-256 为 `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244`、size `106210`；B 为 `1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26`、size `106212`。A/B profile SHA-256 分别为 `a3abfc6ac351cf06f5639b31f108c80edcdcd96080f43ccfd48ce12a07325b05` 与 `f09af0f314773c53d61d90804332605317ec6a61316add0df3672067da99a16e`；公开证书文件 SHA-256 为 `c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`。四项 `verify-profile`/`verify-app` 均 exit `0`、人工核对 `pass`，且 HAP 内嵌 profile 与对应外部 profile byte-equal。signed 内容审计确认：仅 `ohos.permission.INTERNET`；VPN Extension `exported=false`；API `23`；debug 普通开发签名；唯一 native payload 为 arm64-v8a 纯 C `libfdprobe.so`，它只用 `fcntl(F_GETFD)` 读取 fd 快照，平台 `VpnConnection.destroy` 是唯一关闭责任。A/B signed member-list SHA-256 分别为 `216acabcd1f1c0efdc2ed6fbf89b4d88a1dd064bf5d508d4f692447a9b0f0166` 与 `4177f5c11d291bb20730ff45543b2ed5fcda9b8a349dbbe568ee01c89cdc82c2`。
+
+冻结 build-source archive SHA-256 为 `e9aa2360df2027bfbd0a84f89a926439cf7bcfb50ddbb0c4977804373fb5da36`，source manifest 为 `e5ca08160003aeb621220bf0666a7cc8f20ab2cef3241d692814798c758e1b50`，SDK map 为 `f3ed4f374f1c877c14fdce99adf6f601595de4cc9d531bded7cc111fb14130b3`。唯一 runner SHA-256 为 `163a8c261d895706adac1b30a309071461ebc01675f06289b32bd28ceb4730e5`，host-only selftest SHA-256 为 `83d5f7192520fc8a4facfedc2fed78313159711e9c890b9ad7321e5307b524ee`；selftest 与 Live simulation 均通过且 HDC process count 为 `0`。当前仓库基线为 `f44be17331e5bc67a5eff702badba41cbd7a195f`；这是准备基线，不是未来 live 的 `code_sha`。最终提交 SHA 只能在仓外 freeze manifest 于 live 前由 runner 对当前 clean HEAD 绑定，不得在本文虚构未来 SHA。signed HAP/profile/certificate 须保留至 E8 审查结束。
+
+旧 physical-preflight unsigned HAP hash 继续作为历史准备阶段记录保留：A `5712541de9095e6eb99cfd2d72582b150adf2d78a14cc23375d887b298ece7ed`，B `9c4ae9206b8ac6843f4317645a2ebdb656610575c0220c58c6091a23e16687c0`。它们不是当前签名制品、campaign 输入或最终 hash，不得与上述 FINAL signed HAP 混用。
 
 ## 唯一例外边界
 
@@ -26,7 +30,7 @@
 
 ### 最小只读设备元组发现边界
 
-最小只读发现已完成一次，已确定并冻结发行版、型号、完整 build、API、kernel arch 和 ABI；不得重复或扩展。发现不是 campaign，不得分配 evidence ID、形成证据记录或改变 `plan_status: blocked`。真实 endpoint 和 HDC target 仅在仓外受控映射；仓内只可使用 `PHYS-1`。以下六项保留为已执行白名单的可审计记录，设备端命令只能通过仓外变量 `PHYS_1_TARGET` 使用：
+最小只读发现已完成一次，已确定并冻结发行版、型号、完整 build、API、kernel arch 和 ABI；不得重复或扩展。发现不是 campaign，也未形成证据记录或判定。真实 endpoint 和 HDC target 仅在仓外受控映射；仓内只可使用 `PHYS-1`。以下六项保留为已执行白名单的可审计记录，设备端命令只能通过仓外变量 `PHYS_1_TARGET` 使用：
 
 ```sh
 $HDC -t "$PHYS_1_TARGET" shell param get const.product.os.dist.name
@@ -41,13 +45,13 @@ $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 
 ### Signing enrollment 唯一例外
 
-此例外只用于为 `PHYS-1` 注册普通开发签名 profile，不是 campaign、不是 evidence，且不改变 `plan_status: blocked`。它是已批准普通开发 profile 输入的最小实施边界，不扩展 campaign，亦不新增动态调整记录。仅 Windows 授权人员可在 DevEco Studio 未自动安全采集 UDID 时执行一次；无线连接与本机验签步骤见 [Windows + DevEco Studio 开发交接](windows-development-handoff.md)：
+此例外只用于为 `PHYS-1` 注册普通开发签名 profile，不是 campaign、不是 evidence。它已由授权用户在批准边界内执行一次并消耗，不扩展 campaign，亦不新增动态调整记录。以下命令只作为已履行边界的审计记录，禁止重跑；无线连接与本机验签记录见 [Windows + DevEco Studio 开发交接](windows-development-handoff.md)：
 
 ```text
 hdc shell bm get --udid
 ```
 
-长选项 `--udid` 是唯一允许的 UDID 读取，短选项 `bm get -u` 仍禁止。真实 endpoint 与 UDID 仍必须仓外保存。stdout 只准人工录入 AGC，禁止粘贴到聊天、issue、日志或仓库，禁止重定向到文件。若 DevEco Studio 自动安全采集 UDID，不再手工执行该命令。这个唯一例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
+长选项 `--udid` 是唯一获批过的 UDID 读取，短选项 `bm get -u` 仍禁止。命令 stdout 已仅用于人工录入 AGC，未重定向、留存或回传。这个已消耗例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
 
 设备、系统、API 与架构、HDC 已冻结；其余输入必须在安装前一次性冻结。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
 
@@ -57,20 +61,20 @@ hdc shell bm get --udid
 | 系统 | 已冻结：distribution `HarmonyOS`；完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` |
 | API 与架构 | 已冻结：API `23`；kernel arch `aarch64`；app ABI `arm64-v8a` |
 | HDC | 已冻结：唯一 target 在仓外受控映射中绑定为 `PHYS-1`；真实 endpoint、序列号、USB 标识或网络地址不得入库 |
-| 签名 | 普通开发签名；设备已纳入对应 profile；只记录非秘密的签名类型和必要公开指纹 |
-| A/B 制品 | 已签名的两个独立普通 bundle HAP、最终 SHA-256、签名验证结果和包内容清单；现有 unsigned 快照不是冻结制品 |
-| 源码与 SDK | 冻结的适配源码归档、source manifest、SDK/API 输入及其版本和 SHA-256；当前本地源码/SDK/final hash 尚未冻结 |
-| 清理基线 | A/B 均未安装、无 A/B 进程、无任何活动 VPN、无暂存文件；记录其他已安装 VPN，确保其不参与 A/B 冲突场景 |
-| 采集准备 | 原始 HiLog、完整 transcript、截图、布局/状态记录、fault list 和 hash manifest 的受控存储已就绪 |
-| 审查 | 执行人与独立审查角色已分离，判定标准在执行前冻结 |
-| Campaign | campaign ID、初次执行与唯一允许重试的编号规则、场景顺序，以及每场景固定 60 秒窗口的决定性起点已冻结 |
-| Settings re-allow | 执行前冻结预期路径：系统直接激活 A，或再次出现普通系统授权 UI；现场不得在两者间事后改判 |
+| 签名 | 已冻结为普通 debug 开发签名，设备已纳入 A/B 对应 profile；四项验签 exit `0`、人工核对 `pass`、内嵌 profile byte-equal；profile/certificate hash 见“当前状态” |
+| A/B 制品 | FINAL signed HAP A/B、size、SHA-256 与 member-list 已冻结；旧 unsigned hash 只绑定历史准备阶段，不是当前输入 |
+| 源码与 SDK | build-source archive、source manifest、SDK map 及其 SHA-256 已冻结；SDK `6.1.1.125` / API `24`，target/compatible API `23` |
+| 清理基线 | 已冻结为 campaign 首场景必须确认：A/B 未安装、无 A/B 进程、无活动 VPN、无暂存文件，其他 VPN 不参与冲突场景；campaign 尚未 install/run |
+| 采集准备 | `EvidenceRoot` parent `D:/HarmonyEvidence/netbird-e3` 与独立 `RawRoot` parent `D:/HarmonyEvidenceRaw/netbird-e3` 已就绪；仓内只接收脱敏 manifest/projection/判定 |
+| 审查 | operator=`authorized user`；orchestrator=`main agent`；reviewer=`独立 deepseek/deepseek-v4-pro 隔离会话`；角色已分离 |
+| Campaign | target code `PHYS1API23`；ID `E3-PHYS-PREFLIGHT-20260806-0001`；planned evidence ID `EV-E3-PHYS1API23-20260806-0001`；固定顺序与每场景 60 秒窗口已冻结 |
+| Settings re-allow | 预测路径冻结为 `direct-system-activation`；路径偏差只作预注册观测，不因偏差本身 blocked；无 Settings 入口或无法重新激活仍 blocked |
 
-输入门只允许做必要的本地构建和签名验证；最小设备发现已完成，不得重复。上节严格限定的单次 signing enrollment 只为 AGC profile 注册提供 UDID，既不是输入发现也不是 campaign/evidence，且不授权任何其他设备命令。任一已冻结的设备、系统、API 与架构、HDC 映射，或后续冻结的源码、SDK、签名 profile 或 HAP hash 发生变化都必须停止，且须取得新的路线决策；不能在运行中替换或仅重新冻结后继续。
+全部复合输入门现已冻结，因此 `plan_status: ready`；这只授权唯一 campaign 按专用 runner 接收这组输入，不创建证据记录或判定。最小设备发现不得重复，单次 signing enrollment 已消耗且不得重跑。任一设备、系统、API、架构、HDC 映射、源码、SDK、签名 profile、HAP hash、runner 或角色输入发生变化都必须停止并取得新的路线决策；不能在运行中替换或仅重新冻结后继续。
 
 ## Campaign 与重试纪律
 
-一次 campaign 是在同一冻结输入元组和一个 campaign ID 下，从清理基线开始、按固定顺序执行全部场景、完成最终清理并提交独立审查的完整活动。首次安装是 campaign 的设备端执行起点；预检授权不允许拆成多次选择性运行，也不允许把不同尝试的正面子结果拼接成 `pass`。
+一次 campaign 是在同一冻结输入元组和一个 campaign ID 下，从清理基线开始、按固定顺序执行全部场景、完成最终清理并提交独立审查的完整活动。首次安装是 campaign 的设备端执行起点，也是 planned evidence ID 正式占用点；截至 2026-08-06 尚未发生。若跨日期仍未启动，必须重新决策 campaign/evidence ID，不得静默改号。预检授权不允许拆成多次选择性运行，也不允许把不同尝试的正面子结果拼接成 `pass`。
 
 只有初次执行因纯基础设施原因得到 overall `blocked` 时，才可在相同冻结元组下进行一次记录在案的完整重试。基础设施原因仅包括 HDC/USB 中断、采集存储故障或与被测 VPN 行为无关的 runner/宿主故障；重试必须使用同一 campaign ID、独立 attempt 编号、重新确认清理基线，并保留首次 blocked 材料。功能 `fail`、`invalid`、非基础设施 blocked、任一输入或预期变化，以及唯一重试仍 blocked 时，都不得再次执行；继续工作必须先取得新的路线决策。
 
@@ -86,7 +90,8 @@ hdc shell bm get --udid
 - fd 只用于证明公开 API 返回了有效描述符；不得交给 Go、NetBird、WireGuard 或产品模块。唯一 native `libfdprobe.so` 只能以 `fcntl(F_GETFD)` 采集只读快照，严禁 `close`、`dup`、`read` 或 `write`；`VpnConnection.destroy` 是唯一关闭责任，必须防止重复关闭并记录异常清理。
 - start、stop、create、destroy、`onCreate` 和 `onDestroy` 都使用可关联 request ID 的 HiLog marker。A/B 保持独立普通 bundle，禁止共享身份制造冲突结果。
 - 不加入 `protect`、外部 endpoint、数据泵、后台服务、TestRunner 或自动授权。系统授权、Settings 撤销和冲突操作必须由普通用户可见 UI 完成并截图。
-- 物理设备 runner 必须新建且与 Emulator 历史 runner 分离；不得修改历史 raw evidence 或把 Emulator 判定重写为真机结果。
+- 唯一物理设备 runner 为 `spikes/e3-vpn-extension-physical-preflight-hap/e3-phys-preflight-campaign.ps1`，与 Emulator 历史 runner 分离；不得修改历史 raw evidence 或把 Emulator 判定重写为真机结果。
+- runner 是设备命令唯一白名单：只允许两条 model/build target-binding 复核（零新增身份信息），定向 A/B bundle/PID/install/start/cleanup、单一连续 `E3PhysVpn` HiLog、A/B fault，以及 screen/layout 采集。禁止全量查询、UDID、serial、`hidumper`、`uiInput` 与任何特权命令；真实 target 只从仓外 `PHYS_1_TARGET` 注入。
 
 ## 场景与通过条件
 
@@ -94,11 +99,11 @@ hdc shell bm get --udid
 
 1. **清理基线**：确认 A/B 未安装、无 A/B 进程、无任何活动 VPN 或暂存文件，且其他 VPN 不参与场景，然后安装冻结的已签名 A/B HAP；全部确认和安装结果须在该场景 60 秒窗口内完成。
 2. **Allow 与 fd**：从 A 的普通 Entry UI 发起 start，在系统授权 UI 选择 allow；窗口内必须观察授权 UI、A 的 `onCreate`、`VpnConnection.create` resolve 和有效 fd。
-3. **Active stop**：A 保持活动时从普通 UI stop；窗口内必须观察 stop settlement、连接/fd 清理和 `onDestroy`，且系统不再显示 A 为活动 VPN。
+3. **Active stop**：A 保持活动时从普通 UI stop；窗口内必须观察 stop settlement、`onDestroy`、对应 `VPN_DESTROY_RESOLVED` 或 `VPN_DESTROY_REJECTED` terminal，以及匹配的 post-destroy fd snapshot；fd 必须明确为 cleanup，且系统不再显示 A 为活动 VPN。
 4. **Deny**：以新鲜 B 授权请求在系统 UI 选择 deny。只有以下任一结果可判为 `pass`：窗口内出现可观察的 reject/error；或保留明确的系统拒绝截图，并且从拒绝动作开始的完整 60 秒窗口内 B 没有 `onCreate`、没有 `VpnConnection.create`。若 B 成功 create 或成为活动 VPN，则为 `fail`；缺拒绝截图、观察窗口不完整或既无可观察 reject/error 又不能满足“拒绝截图 + 60 秒无 onCreate/create”时为 `blocked`。
-5. **Settings revoke**：按冻结的 re-allow 预期重新激活 A 并取得 fd；系统可直接激活 A，也可再次显示普通系统授权 UI，但实际路径必须与执行前冻结值一致，不一致时本场景为 `blocked`。随后从普通 Settings VPN 管理入口撤销，并在窗口内观察 A 的撤销/销毁结果和资源清理；Settings 中无普通 VPN 管理入口时本场景为 `blocked`，不能用 force-stop 或 uninstall 冒充撤权。
-6. **第二 VPN 冲突**：再次激活 A，再从 B 发起 start；窗口内记录系统可见冲突、拒绝或替换语义，必须证明系统没有同时保留两个活动 VPN，并分别关联 A/B 生命周期与 create 结果。
-7. **最终清理**：先通过普通 stop/destroy 清除活动连接；卸载前在仍存活的探针进程内采集 fd 快照，证明探针所拥有的 VPN fd 已关闭。随后卸载 A/B、删除暂存材料，并在窗口内确认无 A/B bundle、无 A/B 进程、无活动 VPN 和无测试配置残留。不得声称在进程已随卸载消失后直接查询其 fd。
+5. **Settings revoke**：预测路径为 `direct-system-activation`，但路径偏差只记录为预注册观测，不因偏差本身 blocked。功能通过仍要求重新激活 A、取得有效 fd、从普通 Settings VPN 管理入口撤销，并在窗口内观察对应 destroy terminal 与 post-destroy fd cleanup。Settings 中无普通 VPN 管理入口、无法重新激活 A，或缺少 destroy terminal/post snapshot 时均为 `blocked`；不能用 force-stop 或 uninstall 冒充撤权。
+6. **第二 VPN 冲突**：再次激活 A，再从 B 发起 start；窗口内记录系统可见冲突、拒绝或替换语义，必须证明系统没有同时保留两个活动 VPN，并分别关联 A/B 生命周期与 create 结果。若 B 替换 A，还必须观察 A 对应 destroy terminal 与 post-destroy fd cleanup；缺任一项为 `blocked`。
+7. **最终清理**：先通过普通 stop/destroy 清除活动连接；必须观察活动 bundle 对应 destroy terminal 与 post-destroy fd snapshot，明确证明 fd cleanup。随后卸载 A/B、删除暂存材料，并在窗口内采集 post-cleanup snapshot，确认无 A/B bundle、无 A/B 进程、无活动 VPN 和无测试配置残留。不得声称在进程已随卸载消失后直接查询其 fd。
 
 逐场景聚合规则固定为：任一场景 `fail`，overall 为 `fail`；无 `fail` 但至少一个场景 `blocked`，overall 为 `blocked`；所有场景均为 `pass`，overall 才为 `pass`。证据污染、hash 不一致、场景顺序破坏或跨 attempt 拼接使 overall 为 `invalid`。逐场景结果和 overall 结果都可供独立审查引用，但逐场景 `pass`、overall `pass` 或 `reviewed-pass` 均不得升格为 E4-E7、R 阶段、VPN 数据面或产品通过结论。
 
@@ -111,16 +116,16 @@ hdc shell bm get --udid
 
 ## 原始证据要求
 
-每个场景必须保留未筛选原始 HiLog、完整命令 transcript、系统授权/Settings/冲突/结果截图、必要布局或状态快照、fault list、开始/结束时间和 SHA-256 manifest。证据还必须绑定完整目标元组、稳定设备别名、源码归档、source manifest、SDK、签名验证结果、A/B HAP 和 runner hash。
+每个场景必须保留未筛选原始 HiLog、脱敏结构化 transcript projection、系统授权/Settings/冲突/结果截图、必要布局或状态快照、定向 A/B fault list、开始/结束时间和 SHA-256 manifest。证据还必须绑定完整目标元组、稳定设备别名、源码归档、source manifest、SDK、签名验证结果、A/B HAP 和 runner hash。
 
-日志进入仓库或普通证据存储前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、UDID、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库；含 UDID 的 profile 验证原始输出也不得归档。独立审查必须核对原始材料完整性、场景顺序、hash、普通权限边界、最终清理和失败范围后，才能把记录从 `collected` 改为 `reviewed-pass` 或 `reviewed-fail`。
+`EvidenceRoot` parent 固定为 `D:/HarmonyEvidence/netbird-e3`，只存脱敏 structured projection、manifest 与判定；`RawRoot` parent 固定为独立的 `D:/HarmonyEvidenceRaw/netbird-e3`，保存未筛选 HiLog、截图、布局和定向 fault 原始材料。raw 仓外受控保留至少 90 天；存在争议时保留至争议关闭。日志进入仓库前必须扫描秘密。HDC target、序列号、USB 标识、网络地址、UDID、签名私钥、证书口令、profile 内部设备标识、账号和 token 不得入库；含 UDID 的 profile 验证原始输出不得归档。signed HAP/profile/certificate 保留至 E8 审查结束。独立 reviewer 必须核对原始材料完整性、场景顺序、hash、普通权限边界、最终清理和失败范围后，才能把记录从 `collected` 改为 `reviewed-pass` 或 `reviewed-fail`。
 
 ## 专用证据模板
 
-设备元组虽已冻结，仍不得在签名、制品、源码/SDK/hash、清理、采集、审查和 campaign 输入齐备前分配正式 target code 或证据 ID。
+target code 已冻结为 `PHYS1API23`。planned evidence ID `EV-E3-PHYS1API23-20260806-0001` 只在首次设备端 campaign 动作时正式占用；当前仅为计划值，没有证据记录。
 
 ```yaml
-evidence_id: EV-E3-<R0_NAMED_TARGET_CODE>-<YYYYMMDD>-<sequence>
+evidence_id: EV-E3-PHYS1API23-20260806-0001 # planned; first device-side campaign action formally occupies it
 exception: E3-PHYS-PREFLIGHT
 information_status: current-measured
 record_status: draft | collected | reviewed-pass | reviewed-fail | blocked | invalidated | superseded
@@ -140,7 +145,7 @@ signing:
   type: ordinary-development
   device_in_profile: true
   public_fingerprint: <non-secret-value-or-N/A-with-reason>
-code_sha: <full-repository-sha>
+code_sha: <runner-binds-current-clean-HEAD-out-of-repository-immediately-before-live>
 upstream_sha: N/A - no Go, NetBird, WireGuard, or other upstream runtime allowed
 source_archive_sha256: <sha256>
 source_manifest_sha256: <sha256>
@@ -150,11 +155,14 @@ artifact_sha256:
   hap_a: <sha256>
   hap_b: <sha256>
 preflight_inputs_frozen_at: <ISO-8601-with-zone>
-campaign_id: <single-authorized-campaign-id>
+campaign_id: E3-PHYS-PREFLIGHT-20260806-0001
 attempt: initial | infrastructure-blocked-retry-1
 retry_basis: <N/A-for-initial-or-prior-blocked-record-and-infrastructure-reason>
 scenario_window_seconds: 60
-settings_reallow_expected_path: direct-system-activation | system-reauthorization-UI
+settings_reallow_expected_path: direct-system-activation
+settings_reallow_path_policy: observation-only
+operator: authorized user
+orchestrator: main agent
 cleanup_baseline: <A/B-absent-no-A/B-process-no-active-VPN-other-VPN-isolated-and-staging-state>
 scenarios:
   scenario_1_cleanup_and_install:
@@ -194,7 +202,7 @@ actual: <bounded-observation-summary>
 verdict: pass | fail | blocked | invalid
 scope_statement: <exact-target-only-no-extrapolation>
 cleanup_result: <pre-uninstall-in-process-fd-snapshot-and-post-uninstall-no-bundle-process-active-VPN-result>
-reviewer: <independent-role-or-pending>
+reviewer: independent deepseek/deepseek-v4-pro isolated session | pending
 reviewed_at: <ISO-8601-with-zone-or-pending>
 review_record: <id-or-pending>
 ```

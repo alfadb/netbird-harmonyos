@@ -1,13 +1,13 @@
 # Windows + DevEco Studio 开发交接
 
-最后核验：2026-08-05
+最后核验：2026-08-06
 
 本文只交接 `E3-PHYS-PREFLIGHT` 的 Windows 本地签名与构建准备；它不授权物理设备 campaign，也不改变 `R0`、`E8` 或预检计划状态。完整物理预检边界、场景与证据要求见 [E3-PHYS-PREFLIGHT 物理设备预检计划](e3-physical-preflight.md)。
 
 ## 交接基线
 
-- Windows 接手代码基线为 `main` 的 commit `d5a4771ef655e562eb14d9478f09d54283c0460a`。这是本次交接的代码基线，不改变 [R0 任务章程](r0-charter.md)中正式 R0 基线和门状态的定义。
-- 当前 `R0` 尚未目标锁定；`E8` 必须保持 `CLOSED`；`E3-PHYS-PREFLIGHT` 的 `plan_status` 为 `blocked`，未分配 evidence ID 或 verdict。
+- Windows 完成回传所绑定的仓库准备基线为 commit `f44be17331e5bc67a5eff702badba41cbd7a195f`。最终 live 提交 SHA 不在本文预写，须由专用 runner 在仓外 freeze manifest 中绑定当时的 clean HEAD。
+- 当前 `R0` 尚未退出；`E8` 必须保持 `CLOSED`；`E3-PHYS-PREFLIGHT` 的 `plan_status` 为 `ready`，仅表示唯一 campaign 输入就绪。campaign 尚未开始且从未 install/run，没有 `record_status` 或 `verdict`。
 - 已冻结的稳定设备别名为 `PHYS-1`。仅可在仓内记录其非敏感元组：`PLA-AL10`、distribution `HarmonyOS`、完整 build `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`、API `23`、kernel arch `aarch64`、app ABI `arm64-v8a`。
 - 真实无线 HDC endpoint、target、IP:port、UDID、序列号和其他可识别设备值始终在仓库外受控保存；不得写入仓库、聊天、issue、日志、截图或普通证据。
 
@@ -22,7 +22,7 @@
 
 两者均以 `compileSdkVersion: 6.1.1(24)` 编译，`targetSdkVersion` 与 `compatibleSdkVersion` 均为 `6.1.0(23)`。唯一 native payload 是 `arm64-v8a` 的纯 C `libfdprobe.so`，仅用 `fcntl(F_GETFD)` 对 fd 做只读状态检查；平台 `VpnConnection.destroy()` 是唯一关闭责任。
 
-受限能力审计已通过：仅有 `ohos.permission.INTERNET`、非导出的 `type: vpn` Extension；没有 Go、NetBird、WireGuard、`protect`、特权能力或外部 endpoint。历史 `spikes/e3-vpn-extension-hap/` 和历史 raw evidence 不得修改。现有 unsigned HAP hash 只表示本地准备快照，重建或签名后必然改变，绝不是 Windows 签名输入、campaign 输入或最终 hash。
+受限能力审计已通过：signed A/B 均仅有 `ohos.permission.INTERNET`、非导出的 `type: vpn` Extension、API `23`、debug 普通开发签名，唯一 arm64 native 成员为 `libfdprobe.so`；没有 Go、NetBird、WireGuard、`protect`、特权能力或外部 endpoint。历史 `spikes/e3-vpn-extension-hap/` 和历史 raw evidence 不得修改。旧 unsigned hash 只绑定历史本地准备阶段，不是当前 campaign 输入。
 
 ## Windows 前置条件
 
@@ -51,29 +51,27 @@ git switch main
 git pull --ff-only
 
 git fetch origin
-git merge-base --is-ancestor d5a4771ef655e562eb14d9478f09d54283c0460a HEAD
-if ($LASTEXITCODE -ne 0) { throw '交接基线不是当前 HEAD 的祖先；停止并联系主会话。' }
+git merge-base --is-ancestor f44be17331e5bc67a5eff702badba41cbd7a195f HEAD
+if ($LASTEXITCODE -ne 0) { throw 'Windows 完成回传基线不是当前 HEAD 的祖先；停止并联系主会话。' }
 git rev-parse HEAD
 git status --short --branch
 ```
 
 `git status` 必须在签名、构建前后检查。不要通过提交 `.p12`、`.p7b`、`.cer`、`.csr`、material、密码或签名配置来“保存进度”。
 
-## 签名 Enrollment 的唯一边界
+## 签名 Enrollment 的已履行边界
 
-设备元组 discovery 已完成，绝不重跑。该 discovery 之外，唯一被允许的设备 `shell` 操作只服务于 profile enrollment，且不是 campaign、不是 evidence，也不改变 `plan_status: blocked`。
-
-仅 Windows 授权人员可在为 `PHYS-1` 注册 AGC profile 时执行一次下列命令；只有在 DevEco Studio 没有自动安全采集 UDID 时才可执行：
+设备元组 discovery 已完成，绝不重跑。该 discovery 之外，唯一获批的设备 `shell` 操作只服务于 profile enrollment，不是 campaign 或 evidence。授权用户已在边界内执行一次，例外已经消耗；UDID 未留存、未回传。下列命令只作为审计记录，禁止重跑：
 
 ```text
 hdc shell bm get --udid
 ```
 
-仅在已按上节最短无线流程连接且只连接 `PHYS-1` 后执行。此命令的长选项 `--udid` 是唯一允许的 UDID 读取；短选项 `bm get -u` 仍禁止。命令 stdout 只允许人工录入 AGC；不得粘贴到聊天、issue、日志或仓库，不得重定向到文件。若 DevEco Studio 自动安全采集 UDID，则不再手工执行该命令。此例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign。真实 endpoint 与 UDID 继续仓外保存。
+此命令的长选项 `--udid` 是唯一获批过的 UDID 读取；短选项 `bm get -u` 仍禁止。stdout 已仅人工用于 AGC，未粘贴、重定向、留存或回传。已消耗的例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign。
 
-## 推荐的普通开发签名流程
+## 已履行的普通开发签名流程
 
-默认采用手工、可审计的普通开发签名路线；DevEco Studio 自动签名只作为备选。自动签名也必须对每个 bundle 独立确认 profile 归属。
+以下流程已按手工、可审计的普通开发签名路线履行，保留作审计与未来漂移后的重建模板；它不是再次 enrollment 或设备执行授权。
 
 1. 在 DevEco Studio 顶部菜单选择 `Build > Generate Key and CSR`（若当前版本文字略有差异，搜索同名动作），生成仓外受控的 `.p12` 与 `.csr`；密码和 alias 只保存在本机安全位置，不得进入仓库。
 2. 在 AGC 创建两个 App ID，精确对应 `cn.alfadb.netbird.e3physvpna` 和 `cn.alfadb.netbird.e3physvpnb`。
@@ -151,17 +149,9 @@ Get-FileHash -Algorithm SHA256 '<debug-certificate-cer>'
 
 ## 完成即停止
 
-签名 build 与验证均完成后立即停止。此时不得 `install`、`run`、`start` VPN 或开始 campaign，直到主会话更新计划并在执行前冻结以下所有输入：
+签名 build 与验证完成即停止的要求已经履行：没有安装 HAP、没有运行或启动 VPN，campaign 从未开始。后续设备动作不再由本交接授权，只能由 [E3-PHYS-PREFLIGHT 专用计划](e3-physical-preflight.md)及其唯一 runner 在冻结输入下授权。
 
-- 源码、SDK 与最终 A/B HAP hash；
-- 清理基线；
-- raw HiLog、完整 transcript 与 screenshots 的受控存储；
-- 独立 review 角色；
-- campaign ID；
-- 每场景固定 60 秒窗口；
-- Settings re-allow 的预期路径。
-
-任一 bundle、profile、设备、完整 build、API 或架构发生漂移，立即停止，不得替换后继续。
+源码/SDK/final HAP hash、清理基线、受控采集根、独立 review 角色、campaign ID、固定 60 秒窗口和 Settings 预测路径现已冻结，故计划状态为 `ready`；该状态不形成 evidence、record status 或 verdict。任一 bundle、profile、设备、完整 build、API、架构、hash、runner 或角色发生漂移，立即停止，不得替换后继续。
 
 ## 故障分流
 
@@ -176,33 +166,45 @@ Get-FileHash -Algorithm SHA256 '<debug-certificate-cer>'
 
 所有故障都不得用 system/debug/enterprise/root、`MANAGE_VPN`、隐藏服务或权限授予命令绕过。
 
-## Windows 完成后的交接模板
+## 已完成回传
+
+2026-08-06 已按下列模板完成最小回传；不含真实路径、UDID、alias、password 或 signing material。四项验证均同时满足 exit `0` 与人工核对 `pass`，HAP 内嵌 profile 与对应外部 profile byte-equal。
 
 ```markdown
-- [ ] Git branch: `main`
-- [ ] Git SHA: `<full-sha>`
-- [ ] `d5a4771ef655e562eb14d9478f09d54283c0460a` is an ancestor of HEAD
-- [ ] DevEco Studio version: `<version>`
-- [ ] HarmonyOS SDK version / compile API: `6.1.1 / 24`
-- [ ] target / compatible API: `23 / 23`
-- [ ] HDC version: `<version>`
-- [ ] Product A / bundle: `default` / `cn.alfadb.netbird.e3physvpna`
-- [ ] Product B / bundle: `vpnB` / `cn.alfadb.netbird.e3physvpnb`
-- [ ] A signed HAP SHA-256: `<sha256>`
-- [ ] B signed HAP SHA-256: `<sha256>`
-- [ ] A profile SHA-256: `<sha256>`
-- [ ] B profile SHA-256: `<sha256>`
-- [ ] Certificate public SHA-256 or fingerprint: `<public-value>`
-- [ ] A `verify-profile`: pass
-- [ ] A `verify-app`: pass
-- [ ] B `verify-profile`: pass
-- [ ] B `verify-app`: pass
-- [ ] A/B output path aliases: `<stable-aliases>`
-- [ ] `git status` confirms no signing config or material is staged
-- [ ] `verify-temp` JSON, command logs, exported profile, and cert-chain artifacts were deleted after manual review
-- [ ] No HAP installed, no VPN run, no campaign started
-- [ ] No endpoint, UDID, password, private key, raw profile verification output, or signing material returned
-- [ ] Any drift or failure reported; otherwise stop pending main-session plan update
+- [x] Git branch: `main`
+- [x] Git preparation baseline: `f44be17331e5bc67a5eff702badba41cbd7a195f`
+- [x] DevEco Studio: `6.1.1.290` / Build `243.24978.46.36.611290`
+- [x] HarmonyOS SDK / compile API: `6.1.1.125 / 24`
+- [x] target / compatible API: `23 / 23`
+- [x] HDC: `3.2.0d`; SHA-256 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`
+- [x] Product A / bundle: `default` / `cn.alfadb.netbird.e3physvpna`
+- [x] Product B / bundle: `vpnB` / `cn.alfadb.netbird.e3physvpnb`
+- [x] A signed HAP: SHA-256 `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244`; size `106210`
+- [x] B signed HAP: SHA-256 `1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26`; size `106212`
+- [x] A profile SHA-256: `a3abfc6ac351cf06f5639b31f108c80edcdcd96080f43ccfd48ce12a07325b05`
+- [x] B profile SHA-256: `f09af0f314773c53d61d90804332605317ec6a61316add0df3672067da99a16e`
+- [x] Certificate file SHA-256: `c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`
+- [x] A/B `verify-profile` and `verify-app`: exit `0` + manual content review `pass`
+- [x] Embedded A/B profiles are byte-equal to their corresponding external profiles
+- [x] Signed audit: only `INTERNET`; VPN `exported=false`; API `23`; debug; sole arm64 `libfdprobe.so`
+- [x] A/B member-list SHA-256: `216acabcd1f1c0efdc2ed6fbf89b4d88a1dd064bf5d508d4f692447a9b0f0166` / `4177f5c11d291bb20730ff45543b2ed5fcda9b8a349dbbe568ee01c89cdc82c2`
+- [x] No signing config or material staged; temporary verification outputs removed after manual review
+- [x] No HAP installed, no VPN run, no campaign started
+- [x] Enrollment exception consumed once; no endpoint, UDID, password, private key, raw profile output, or signing material returned
+- [x] Completion-stop requirement fulfilled; subsequent device action requires the dedicated plan
+```
+
+上述值是已完成回传。以下空白模板保留供未来发生经批准漂移后的重新回传，不授权自行重建、enrollment 或设备执行：
+
+```markdown
+- [ ] Git branch / SHA: `<branch>` / `<full-sha>`
+- [ ] DevEco Studio / SDK / HDC: `<versions-and-public-hashes>`
+- [ ] Product A/B bundle and FINAL HAP SHA-256/size: `<values>`
+- [ ] A/B profile and certificate public SHA-256: `<values>`
+- [ ] Four verification commands: exit `0` + manual review `pass`
+- [ ] Embedded profiles byte-equal; signed content/member-list audit passed
+- [ ] No install/run/campaign and no sensitive value returned
+- [ ] Drift decision reference: `<required-before-any-repeat>`
 ```
 
 ## 是否需要重启

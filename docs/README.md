@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-08-05
+最后核验：2026-08-06
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -35,11 +35,11 @@
   - phone 记录覆盖公开 runtime blocked；Tablet/2in1 只覆盖 registration-layer 前置 blocked 且未安装 HAP；三者只覆盖各自 image
 - [E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板](e3-physical-preflight.md)
   - E8 前唯一物理 campaign；唯一一次最小只读发现已冻结 `HarmonyOS`、`PLA-AL10`、完整 build、API `23`、`aarch64` 和 `arm64-v8a`，真实 HDC endpoint/target 仅仓外映射为 `PHYS-1`
-  - 隔离目录已完成 API 23 纯 ArkTS/C A/B 适配和 unsigned 本地快照；签名/profile、signed HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺，campaign 未开始且只有 `reviewed-pass/pass` 才满足 E8 必要条件
+  - 普通开发签名、FINAL A/B HAP、源码/SDK/hash、runner、角色、采集与 campaign 输入已冻结，`plan_status: ready`；campaign 从未 install/run，planned evidence ID 尚未正式占用，无 record/verdict，只有后续 `reviewed-pass/pass` 才满足 E8 必要条件
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
-  - API 23 本地 unsigned 物理预检准备；历史 E3 不改，禁止直接安装
+  - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
 - [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
-  - `main` / `d5a4771` 的 Windows 签名与构建交接；限定普通开发签名、A/B 独立 profile、唯一 enrollment 边界、最小回传和签名完成即停止
+  - `f44be17` 准备基线的 Windows 已完成回传；普通开发签名、A/B 独立 profile、已消耗 enrollment 边界、最终 hash 与完成即停止记录
 - [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
   - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
   - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
@@ -110,13 +110,13 @@
 
 当前文档不表示以下事项已经完成：
 
-- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass；唯一 `E3-PHYS-PREFLIGHT` 的一次六条白名单只读设备 `shell` 已冻结 `HarmonyOS`、`PLA-AL10`、完整 build、API `23`、`aarch64`、`arm64-v8a` 和仓外 `PHYS-1` 映射。隔离目录中的 API 23 适配和 unsigned A/B 本地快照已完成，但签名/profile、已签名 HAP、冻结源码/SDK/final hash、清理、采集/审查和 campaign 输入仍缺。唯一 signing enrollment 命令已获授权但截至 `2026-08-05` 尚未执行，仅在 DevEco Studio 未自动安全采集 UDID 时由 Windows 授权人员为普通开发 profile 输入执行一次；它不扩展 campaign/evidence，也不是新的动态调整记录。除此之外未执行其他设备 `shell`、`install`、`send`、`start`、`stop` 或 campaign，计划仍为 `blocked`、无 evidence ID 或 verdict。除受限预检及该未执行 enrollment 边界外，仍禁止任何物理设备执行。
+- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass。唯一 `E3-PHYS-PREFLIGHT` 的精确设备元组、普通开发 signed A/B/profile/certificate、源码/SDK/hash、runner、清理/采集/审查、角色和 campaign 输入已冻结，计划为 `ready`。唯一 enrollment 由授权用户执行一次且例外已消耗，UDID 未留存/回传。target code 为 `PHYS1API23`，campaign ID 为 `E3-PHYS-PREFLIGHT-20260806-0001`，planned evidence ID 为 `EV-E3-PHYS1API23-20260806-0001`；后者只在首次设备端动作时正式占用。campaign 从未 install/run/start/stop，没有 record status 或 verdict。`ready` 不改变 E8 `CLOSED`，也不授权 NetBird 或其他物理设备执行。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。
 - 面向产品的 OpenHarmony 或 HarmonyOS 应用工程已经建立；当前只有不得演化为产品壳的短生命周期 E0/R1 API 24 探针和独立 E3 A/B 授权探针。
 - NetBird Go 核心、当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader、完整 E1 或 VPN 能力已经完成集成验证；现有 ArkTS/native/fd 正面只限 C-only 子证据。
-- VPN Extension 授权门已经通过，或已在 Emulator/物理设备建立隧道；phone 公开 runtime blocked，Tablet/2in1 只在 registration-layer 前置边界 blocked。唯一物理预检的最小只读发现已完成，但 campaign 尚未执行；后续只能用普通开发签名的纯 ArkTS/C 公共 API 探针判断已冻结精确目标上的 E3 可达性；禁止私有 Go、NetBird、`MANAGE_VPN` 或 system/debug/enterprise/root 绕过。
+- VPN Extension 授权门已经通过，或已在 Emulator/物理设备建立隧道；phone 公开 runtime blocked，Tablet/2in1 只在 registration-layer 前置边界 blocked。唯一物理预检输入虽已 ready，campaign 尚未执行；后续只能由专用 runner 使用普通开发签名的纯 ArkTS/C 公共 API 探针判断冻结精确目标上的 E3 可达性；禁止私有 Go、NetBird、`MANAGE_VPN` 或 system/debug/enterprise/root 绕过。
 - 任一市场的正式签名、审核、上架或更新流程已经跑通。
 - Debian 13 已成为官方支持的 Emulator 宿主。
 

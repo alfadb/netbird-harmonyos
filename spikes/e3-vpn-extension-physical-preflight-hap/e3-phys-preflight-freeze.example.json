@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "plan_status": "blocked",
+  "exception": "E3-PHYS-PREFLIGHT",
+  "evidence_id": "EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>",
+  "campaign_id": "E3-PHYS-PREFLIGHT-<CAMPAIGN-CODE>",
+  "attempt": "initial",
+  "retry": {
+    "basis": "N/A",
+    "infrastructure_reason": "N/A",
+    "prior_record_path": "N/A",
+    "prior_record_sha256": "N/A"
+  },
+  "scenario_window_seconds": 60,
+  "device_alias": "PHYS-1",
+  "target_tuple": {
+    "distribution": "HarmonyOS",
+    "device_model": "PLA-AL10",
+    "full_system_build": "PLA-AL10 6.1.0.117(SP6C00E115R7P7)",
+    "api": "23",
+    "kernel_arch": "aarch64",
+    "app_abi": "arm64-v8a"
+  },
+  "settings_reallow_expected_path": "direct-system-activation",
+  "settings_reallow_path_policy": "observation-only",
+  "signing": {
+    "type": "ordinary-development",
+    "device_in_profile": true,
+    "device_in_profile_basis": "<REPLACE-WITH-NON-SECRET-VERIFICATION-BASIS; true IS A TYPE EXAMPLE, NOT A CLAIM>",
+    "public_fingerprint": "<NON-SECRET-PUBLIC-FINGERPRINT-OR-N-A-WITH-REASON>",
+    "verification_result": "<LOCAL-SIGNATURE-VERIFICATION-SUMMARY>"
+  },
+  "artifact_sha256": {
+    "hap_a": "<FINAL-SIGNED-HAP-A-SHA256>",
+    "hap_b": "<FINAL-SIGNED-HAP-B-SHA256>"
+  },
+  "source": {
+    "archive_path": "<OUT-OF-REPO-FROZEN-SOURCE-ARCHIVE-PATH>",
+    "archive_sha256": "<SOURCE-ARCHIVE-SHA256>",
+    "manifest_path": "<OUT-OF-REPO-SOURCE-MANIFEST-PATH>",
+    "manifest_sha256": "<SOURCE-MANIFEST-SHA256>"
+  },
+  "sdk": {
+    "version": "<FROZEN-SDK-VERSION>",
+    "api": "<FROZEN-SDK-API>",
+    "syscap_basis": "<PUBLIC-VPN-SYSCAP-BASIS>",
+    "files": [
+      {
+        "path": "<OUT-OF-REPO-SDK-INPUT-PATH>",
+        "sha256": "<SDK-INPUT-SHA256>"
+      }
+    ]
+  },
+  "hdc": {
+    "version": "<FROZEN-HDC-VERSION-OUTPUT>",
+    "sha256": "<HDC-EXECUTABLE-SHA256; host binary hash only; never a device serial/target>"
+  },
+  "runner_sha256": "<THIS-RUNNER-SHA256>",
+  "code_sha": "<FULL-REPOSITORY-COMMIT-SHA>",
+  "preflight_inputs_frozen_at": "<ISO-8601-WITH-ZONE>",
+  "cleanup_baseline_frozen": false,
+  "collection_ready": false,
+  "independent_review_ready": false,
+  "operator_role": "<AUTHORIZED-OPERATOR-ROLE>",
+  "independent_reviewer_role": "<SEPARATE-REVIEWER-ROLE>"
+}

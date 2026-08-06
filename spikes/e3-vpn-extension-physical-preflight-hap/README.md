@@ -152,9 +152,124 @@ member, AArch64 ELF identity, allowed dependencies, and artifact hashes:
 bash ./audit-physical-preflight.sh
 ```
 
-The HAPs are unsigned local preflight artifacts. Do not sign or install them.
-A later governed physical-device procedure must separately review the source,
-unsigned artifacts, hashes, signing boundary, operator steps, and evidence plan
-before any installation can be considered. This audit does not invoke HDC,
-sign, install, start an Emulator, contact a physical device, log in, download
-dependencies, or write evidence/governance files.
+The Linux audit covers only unsigned local-preparation artifacts. It does not
+approve a signing profile, produce the final signed A/B campaign HAPs, or make
+them installable campaign inputs. The signing/profile and final-HAP freeze gates
+remain external to this audit. The audit does not invoke HDC, sign, install,
+start an Emulator, contact a physical device, log in, download dependencies, or
+write evidence/governance files.
+
+## Windows Campaign Runner
+
+`e3-phys-preflight-campaign.ps1` is the only runner for the single governed
+`E3-PHYS-PREFLIGHT` campaign. It requires PowerShell 7 or later. Live mode is
+refused unless the git worktree is clean, an out-of-repository freeze manifest
+has `plan_status: ready`, and all campaign, attempt, target tuple, signing,
+final HAP, source, SDK, HDC, runner, collection, cleanup, and independent-review
+inputs pass before-install validation. The real HDC target is accepted only
+from the process environment variable `PHYS_1_TARGET`; projected transcripts
+use only `PHYS-1` and redacted values. The frozen HDC version output and
+executable SHA-256 must match `HdcPath`. Every bounded HDC call has a timeout.
+
+The checked-in `e3-phys-preflight-freeze.example.json` is intentionally blocked
+and contains placeholders rather than campaign hashes, local paths, signing
+material, endpoint data, or current secret values. Its required field groups
+are campaign identity/status/retry, the exact target tuple and 60-second window,
+settings re-allow expected path defaulting to `direct-system-activation` with
+required `settings_reallow_path_policy: observation-only`, ordinary-development
+signing, final A/B artifact hashes, frozen source archive/manifest, SDK input
+map, HDC version/hash, runner/code hashes, freeze time, cleanup/collection/review
+Boolean gates, and distinct operator and reviewer roles. The path policy is part
+of the freeze contract hash; any value other than `observation-only` is rejected.
+Scenario 5 records `settings_reallow_path` expected/actual/match/observation and
+never blocks solely because actual path differs from the predicted path; pass
+still requires A re-activation with `VPN_ONCREATE`/create-fd markers, ordinary
+Settings revoke, destroy terminal, and post-destroy fd cleanup.
+`signing.device_in_profile` is JSON Boolean `true` in the example to show the
+required type; the adjacent placeholder basis explicitly means it is not a
+checked-in device-profile claim. Device HiLog zone mapping (`CST=>+08:00`) and
+the 3-second device-clock skew tolerance are runner constants, not
+freeze-manifest fields; they appear only on the emitted record's `clock_source`.
+
+After HDC/device precheck, Live starts one continuous campaign HiLog process and
+records an initial complete-line/byte anchor. Scenarios never restart that
+stream. Each scenario waits for operator READY first (READY latency is excluded
+from the measured window), then records a fresh byte anchor after READY and
+before the action prompt, filters only new complete lines by parsed
+`device_observed_at` from action prompt through the actual observation end,
+retains `host_observed_at`, and requires measured healthy coverage through at
+least 60 seconds after ACK. Install is three-state: only explicit rejection
+evidence (install failed / error code / signature or profile reject, and similar)
+is `FUNCTIONAL_FAIL`; clear success string plus BundleDump presence is pass;
+success with unrelated warnings, dump unavailable/permission, or uncertain output
+is non-infrastructure blocked (no fail, no retry authorization). Exit 0 alone
+never marks Installed. Staging sets `StagingMayExist` before `MkdirStaging` so
+any later failure still runs fixed staging cleanup and StagingProbe in finally;
+removal clears flags only after a fixed-path probe shows clear path absence
+(`no such file` / `not found` / `path does not exist`). `cannot access` and
+`permission denied` are residual/unknown, not absence. Continuous capture
+degradation entries carry `category` and `infrastructure_reason`. Only real
+capture process exit, stderr growth, start failure, or HDC timeout/offline is
+`hdc-usb-interruption`; time-parse, format, missing screenshot/layout, and
+permission/unsupported fault artifacts are non-infrastructure blocked. Generic
+`capture_degraded` never maps to USB. Targeted fault artifact failure records
+FaultArtifacts/CaptureDegraded and can block scenario 7 only; it must not mark
+continuous `Capture.Degraded` or shorten the 60-second window. Record
+`target_tuple.distribution` is taken from the freeze, not hard-coded. Scenario 2
+captures the visible system authorization UI (screenshot + layout) after the
+operator confirms it is visible and before Allow; capture failure blocks
+scenario 2 and keeps the artifact reference.
+
+`EvidenceRoot` contains only the redacted structured projection, record,
+operator attestation, collection manifest, lock, and seal. Unfiltered HiLog,
+screenshots, layouts, and targeted A/B fault outputs go to an independent
+out-of-repository `RawRoot` sibling (by default `<EvidenceRoot>.raw`), never to
+`EvidenceRoot` or this repository. There is no raw transcript:
+`projection/transcript.redacted.jsonl` is the only transcript. Recursive leaf
+redaction occurs before JSON serialization, and every transcript hash binds the
+re-canonicalized human-readable payload. Live runner records may be `collected`,
+`blocked`, or `invalidated`; reviewed states remain exclusive to the independent
+review step.
+
+Run the host-only fixture suite. It parses both scripts and exercises a blocked
+plan dry-run plus injected seven-scenario `LiveSimulation`, repository gates,
+retry authorization, continuous capture anchors, partial lines, capture death,
+cleanup verification, redaction/JSON shape, fault hashes, lock, junction,
+timing, argv substitution, and integrity cases. Its HDC path is an executable
+sentinel, and the suite fails if that process starts:
+
+```powershell
+pwsh -NoProfile -File .\tests\e3-phys-preflight-runner-selftest.ps1
+```
+
+Run a governed host-only dry-run after preparing an out-of-repository freeze
+manifest and final input files:
+
+```powershell
+pwsh -NoProfile -File .\e3-phys-preflight-campaign.ps1 `
+  -FreezeManifest C:\outside-repo\freeze.json `
+  -EvidenceRoot C:\outside-repo\evidence-dry-run `
+  -RawRoot C:\outside-repo\evidence-dry-run.raw `
+  -HapA C:\outside-repo\final-a.hap `
+  -HapB C:\outside-repo\final-b.hap `
+  -HdcPath C:\tools\hdc.exe -DryRun
+```
+
+`-DryRun` accepts `plan_status: blocked` or `ready` but always emits an explicit
+non-evidence blocked record. `-DryRun`, `-SelfTest`, and injected
+`-LiveSimulation` mechanically keep the HDC process count at zero.
+`LiveSimulation` always records `is_evidence: false`, `record_status: blocked`,
+and `verdict: blocked`, including functional-error and integrity-tamper paths.
+A retry prior must instead be a frozen matching Live blocked evidence record.
+
+Real Live requires `plan_status: ready`, a clean repository, manual operator
+input, and the frozen target mapping. Normal revoke evidence comes only from the
+planned visible UI/Settings actions. Any exception/finally `force-stop` is
+`notUsedAsRevoke`: it is residual cleanup only, followed by targeted BundleDump
+and PidOf verification. Unknown residual state remains blocked and is never
+reported clean. The governance plan is now `ready`, which means only that the
+single campaign input is ready; no campaign install/run has occurred and no
+record status or verdict exists. This README does not independently authorize a
+Live invocation: use the dedicated governance plan and out-of-repository freeze.
+E8 remains `CLOSED`, and NetBird or any broader physical-device work remains
+forbidden.
