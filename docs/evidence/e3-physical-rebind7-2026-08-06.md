@@ -107,5 +107,6 @@ raw 输出仅仓外受控保存；仓内只登记脱敏 projection 与 hash。`p
 
 - `ADJ-20260806-0003` 随后冻结 HarmonyOS 7 / API 26 元组，并分配准备用 campaign/evidence `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`。
 - host reverify 随后 PASS：public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；FINAL HAP / signature / profile / member-list hashes 与历史登记一致、未变；**不**主张设备安装兼容性。
-- 当前治理 `plan_status: ready` 只表示新 campaign host 输入 ready；仓外 commit-bound freeze 在提交后生成；设备执行仍须明确再确认；E8 保持 `CLOSED`。
+- 当前治理 `plan_status: ready` 只表示新 campaign host 输入 ready；最终 commit-bound freeze 须基于含 build 确认的提交重生；设备执行仍须明确再确认；E8 保持 `CLOSED`。
+- `ADJ-20260806-0004` / `EV-E3-PHYS1BUILD7-20260806-0001` 随后以单条 `software.version` 实测确认 HDC build 与冻结 binding 逐字匹配（`reviewed-pass/pass`，仅 build-confirm）；API `26`/`aarch64`/`arm64-v8a` 仍以本 rebind 实测为准，不从 build 推断。
 - 本后续注记不修改上方 rebind measured 字段、hash 或 `verdict: pass` 的范围（仍仅三条只读 rebind）。

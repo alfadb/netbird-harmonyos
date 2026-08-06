@@ -35,13 +35,16 @@
   - phone 记录覆盖公开 runtime blocked；Tablet/2in1 只覆盖 registration-layer 前置 blocked 且未安装 HAP；三者只覆盖各自 image
 - [E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板](e3-physical-preflight.md)
   - E8 前唯一物理 campaign 的治理边界、冻结输入、停止规则与历史证据模板
-  - initial live 已消费；rebind 已完成；`ADJ-20260806-0003` 冻结 HarmonyOS 7/API 26 元组并准备新 campaign；host reverify PASS；当前 `plan_status: ready`（仅 host 输入 ready；设备执行须再确认；E8 `CLOSED`）
+  - initial live 已消费；rebind 已完成；`ADJ-20260806-0003` 冻结 HarmonyOS 7/API 26 元组并准备新 campaign；host reverify PASS；`ADJ-20260806-0004` 单条 build 确认 PASS；当前 `plan_status: ready`（仅 host 输入 ready；最终 freeze 须基于含 build 确认的提交重生；设备执行须再确认；E8 `CLOSED`）
 - [E3-PHYS-PREFLIGHT 物理设备 live 预检证据](evidence/e3-physical-preflight-2026-08-06.md)
   - `EV-E3-PHYS1API23-20260806-0001`：`execution: live`、`attempt: initial`、`record_status: reviewed-pass`、`verdict: blocked`
   - live model 匹配而 build 可见 suffix drift；`campaign_started=false`，A/B 未安装/运行，cleanup `verified-clean`，0 blocker/0 major；E3 未关闭、E8 `CLOSED`；旧 ID 不可复用，无 infra retry
 - [E3-PHYS-PREFLIGHT HarmonyOS 7 最小只读 rebind 证据](evidence/e3-physical-rebind7-2026-08-06.md)
   - `EV-E3-PHYS1REBIND7-20260806-0001`：`reviewed-pass/pass` **严格只表示** ADJ-0002 三条 rebind 完成（API `26`/`aarch64`/`arm64-v8a`），不是 E3/campaign pass
   - `ADJ-20260806-0003` 已冻结新元组并准备 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`；host reverify PASS（HAP/signature/profile/member hashes 未变；不主张安装兼容性）；设备执行须再确认；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT HarmonyOS 7 单条 software.version build 确认证据](evidence/e3-physical-build7-confirm-2026-08-06.md)
+  - `EV-E3-PHYS1BUILD7-20260806-0001`：`reviewed-pass/pass` **严格只表示** ADJ-0004 单条 build 确认（精确 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 逐字匹配），不是 E3/campaign pass
+  - 消除合成 build 风险；API `26` 仍由前一 rebind 实测、不从 build 推断；不新增 campaign/不改 IDs；最终 freeze 须基于含本记录的提交重生
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
   - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
 - [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
@@ -116,7 +119,7 @@
 
 当前文档不表示以下事项已经完成：
 
-- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass。唯一 `E3-PHYS-PREFLIGHT` initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`）。rebind `EV-E3-PHYS1REBIND7-20260806-0001` 已完成（`reviewed-pass/pass`，仅 rebind；API `26`/`aarch64`/`arm64-v8a`）。`ADJ-20260806-0003` 冻结 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / Settings `7.0.0.100 (SP8C00E32R7P2patch09)` / API `26` 元组，批准复用原 FINAL HAP hashes（兼容性实测、不证明成功），并准备 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`；host reverify 已 PASS（public manifest `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；HAP/signature/profile/member hashes 未变）；当前 `plan_status: ready` 仅表示新 campaign host 输入 ready，仓外 commit-bound freeze 在提交后生成，设备执行仍须明确再确认；E8 仍 `CLOSED`。
+- API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.74.7）的 E1 未重跑且无 pass。唯一 `E3-PHYS-PREFLIGHT` initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`）。rebind `EV-E3-PHYS1REBIND7-20260806-0001` 已完成（`reviewed-pass/pass`，仅 rebind；API `26`/`aarch64`/`arm64-v8a`）。`ADJ-20260806-0003` 冻结 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / Settings `7.0.0.100 (SP8C00E32R7P2patch09)` / API `26` 元组，批准复用原 FINAL HAP hashes（兼容性实测、不证明成功），并准备 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`；host reverify 已 PASS（public manifest `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；HAP/signature/profile/member hashes 未变）。`ADJ-20260806-0004` / `EV-E3-PHYS1BUILD7-20260806-0001` 单条 `software.version` 实测确认 HDC build 逐字匹配（`reviewed-pass/pass`，仅 build-confirm）；API `26` 仍 rebind 实测、不从 build 推断。当前 `plan_status: ready` 仅表示新 campaign host 输入 ready，最终 commit-bound freeze 须基于含 build 确认的提交重生，设备执行仍须明确再确认；E8 仍 `CLOSED`。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
 - `/dev/dri`/图形模式或 Emulator gRPC 已经验证。

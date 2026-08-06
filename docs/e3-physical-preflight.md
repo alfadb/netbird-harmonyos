@@ -6,11 +6,11 @@
 
 ## 当前状态
 
-`plan_status: ready`。此处 `ready` **只表示**新 campaign（`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`）的 host 侧输入已准备完成；仓外 commit-bound freeze 须在提交后生成，设备执行仍须明确再确认；E3 未关闭，E8 仍为 `CLOSED`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行。旧 campaign/evidence 不可复用，无 `infrastructure_reason`，不授权 infra retry。
+`plan_status: ready`。此处 `ready` **只表示**新 campaign（`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`）的 host 侧输入已准备完成；最终 commit-bound freeze 须基于包含 `EV-E3-PHYS1BUILD7-20260806-0001` 的提交重生，设备执行仍须明确再确认；E3 未关闭，E8 仍为 `CLOSED`。唯一 initial live preflight 已于 2026-08-06 执行并登记为 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: blocked`、`execution: live`、`attempt: initial`。`reviewed-pass` 只表示独立证据审查完成且为 0 blocker/0 major，不是 E3 pass。runner 在连续 capture、staging 与 install 前发现 live build 脱敏投影的可见 suffix 与冻结 build 不同，按预定输入漂移停止；`campaign_started=false`，A/B 未安装、未运行。旧 campaign/evidence 不可复用，无 `infrastructure_reason`，不授权 infra retry。
 
 2026-07-18 的一次最小只读设备元组发现仍保留为历史完成记录，六条白名单设备 `shell` 均曾成功：distribution 为 `HarmonyOS`；model 为 `PLA-AL10`；完整 software/build string 为 `PLA-AL10 6.1.0.117(SP6C00E115R7P7)`；API 为 `23`；kernel arch 为 `aarch64`；app ABI 为 `arm64-v8a`。真实 HDC endpoint/target 继续只在仓外受控映射为 `PHYS-1`，不得写入仓库、普通证据或日志。唯一 signing enrollment 命令随后由授权用户在批准边界内执行一次，例外已经消耗；UDID 未留存、未回传，命令不得重跑。live model 复核匹配 `PLA-AL10`；live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，只据可见 suffix 确认 build drift，不猜完整版本或漂移原因。
 
-`ADJ-20260806-0002` 授权的 HarmonyOS 7 最小只读 rebind discovery 已执行并登记为 [`EV-E3-PHYS1REBIND7-20260806-0001`](evidence/e3-physical-rebind7-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: pass`（**严格只表示**三条 rebind 完成，不是 E3/campaign pass）；投影结果 API `26` / `aarch64` / `arm64-v8a`；Settings 人工报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；HDC binding 候选 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（旧 live 投影 + 人工值，未重查 dist/model/build）。`ADJ-20260806-0003` 已冻结该新元组，批准复用原 FINAL HAP hashes（兼容性仅作实测、不证明成功），并分配新 campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001`。host reverify 已 PASS：public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；FINAL HAP / signature / profile / member-list hashes 与历史登记一致、未变；**不**主张设备安装兼容性。设备执行仍须明确再确认后才可 Live。
+`ADJ-20260806-0002` 授权的 HarmonyOS 7 最小只读 rebind discovery 已执行并登记为 [`EV-E3-PHYS1REBIND7-20260806-0001`](evidence/e3-physical-rebind7-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: pass`（**严格只表示**三条 rebind 完成，不是 E3/campaign pass）；投影结果 API `26` / `aarch64` / `arm64-v8a`；Settings 人工报告 `7.0.0.100 (SP8C00E32R7P2patch09)`；HDC binding 候选 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（旧 live 投影 + 人工值，未重查 dist/model/build）。`ADJ-20260806-0003` 已冻结该新元组，批准复用原 FINAL HAP hashes（兼容性仅作实测、不证明成功），并分配新 campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001`。host reverify 已 PASS：public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；FINAL HAP / signature / profile / member-list hashes 与历史登记一致、未变；**不**主张设备安装兼容性。`ADJ-20260806-0004` 授权的单条 build 确认已登记为 [`EV-E3-PHYS1BUILD7-20260806-0001`](evidence/e3-physical-build7-confirm-2026-08-06.md)：`record_status: reviewed-pass`、`verdict: pass`（**严格只表示** build-confirm，不是 E3/campaign pass）；`const.product.software.version` 精确投影 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` 与冻结 HDC binding 逐字匹配，消除合成 build 风险；API `26` 仍由前一 rebind 实测，**不**从 build 推断。设备执行仍须明确再确认后才可 Live；最终 commit-bound freeze 须基于包含 build 确认的提交重生。
 
 隔离目录 `spikes/e3-vpn-extension-physical-preflight-hap/` 已完成 API 23 受限适配、签名和最终输入审计；历史 `spikes/e3-vpn-extension-hap`、其现有 HAP 和 raw evidence 均未修改。A/B bundle 分别为 `cn.alfadb.netbird.e3physvpna` 与 `cn.alfadb.netbird.e3physvpnb`。登记 HAP 仍为 compile API `24`、target/compatible API `23`；设备冻结 API 为 `26`，安装/运行兼容性仅以实测为准，不得由 compile/target 值推导。冻结构建链为 DevEco Studio `6.1.1.290`（Build `243.24978.46.36.611290`）、SDK `6.1.1.125` / API `24`，target/compatible 均为 API `23`；HDC `3.2.0d`，可执行文件 SHA-256 为 `fff02abf2e61603e491e896aa6195e78db0c1779a6d7b992b89757a9a3c72116`。
 
@@ -43,7 +43,7 @@ $HDC -t "$PHYS_1_TARGET" shell uname -m
 $HDC -t "$PHYS_1_TARGET" shell param get const.product.cpu.abilist
 ```
 
-这六项只用于当时冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。在设备元组 discovery 内，禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。六条历史 discovery 不得重跑；`ADJ-20260806-0002` 仅额外授权一次三条只读 rebind（`const.ohos.apiversion`、`uname -m`、`const.product.cpu.abilist`，evidence `EV-E3-PHYS1REBIND7-20260806-0001`），禁止 dist/model/build 重查与任何 campaign 动作。仅下节列出的单次长选项 enrollment 例外曾可读取 UDID（已消耗），其他设备 `shell` 命令仍不得执行。
+这六项只用于当时冻结发行版、型号、build、API、kernel arch 和 ABI，不能用于识别个人、扩展 campaign 或替代任何其他输入门。在设备元组 discovery 内，禁止 `param dump`、`uname -a`、`ohos.boot.sn`、`const.ohos.serial`、`bm get -u`、`bm dump -a`、`bm dump -d`、`hidumper`，以及任何序列号、UDID、应用清单或全量状态读取。六条历史 discovery 不得重跑；`ADJ-20260806-0002` 仅额外授权一次三条只读 rebind（`const.ohos.apiversion`、`uname -m`、`const.product.cpu.abilist`，evidence `EV-E3-PHYS1REBIND7-20260806-0001`）；`ADJ-20260806-0004` 另授一次单条只读 build 确认（`const.product.software.version`，evidence `EV-E3-PHYS1BUILD7-20260806-0001`，精确 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`）。上述额外授权均已消费，禁止再查 dist/model/build/API/arch/ABI 与任何 campaign 动作。仅下节列出的单次长选项 enrollment 例外曾可读取 UDID（已消耗），其他设备 `shell` 命令仍不得执行。
 
 ### Signing enrollment 唯一例外
 
@@ -55,24 +55,24 @@ hdc shell bm get --udid
 
 长选项 `--udid` 是唯一获批过的 UDID 读取，短选项 `bm get -u` 仍禁止。命令 stdout 已仅用于人工录入 AGC，未重定向、留存或回传。这个已消耗例外不授权任何其他 `shell`，也不授权 `install`、`send`、`start`、`stop`、运行 VPN 或 campaign；所有其他禁止保持不变。
 
-历史 campaign 输入中设备、系统、API 与架构、HDC 曾按 API 23 / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` 冻结，但 initial live 已因 build drift 停止；该历史冻结与 ID 不得再作为可执行 campaign 输入。`ADJ-20260806-0003` 已冻结新元组；host reverify 已 PASS，当前 `plan_status: ready`（仅 host 输入 ready）。设备执行须再次确认；仓外 commit-bound freeze 在提交后生成；其余 Live 输入仍须在安装前一次性核验。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
+历史 campaign 输入中设备、系统、API 与架构、HDC 曾按 API 23 / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` 冻结，但 initial live 已因 build drift 停止；该历史冻结与 ID 不得再作为可执行 campaign 输入。`ADJ-20260806-0003` 已冻结新元组；host reverify 已 PASS；`ADJ-20260806-0004` 已以单条 `software.version` 实测确认 HDC build 逐字匹配；当前 `plan_status: ready`（仅 host 输入 ready）。设备执行须再次确认；最终 commit-bound freeze 须基于包含 build 确认的提交重生；其余 Live 输入仍须在安装前一次性核验。秘密和本机 HDC 标识保存在仓库外，只在仓库证据中使用稳定别名。
 
 | 输入 | 必须值与证据 |
 | --- | --- |
 | 设备 | 新冻结：`PLA-AL10`（`ADJ-20260806-0003`）；历史 API23 冻结记录保留不改写 |
-| 系统 | 新冻结：distribution `HarmonyOS`；HDC binding build `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`；Settings 人工观测 `7.0.0.100 (SP8C00E32R7P2patch09)` |
-| API 与架构 | 新冻结：API `26`；kernel arch `aarch64`；app ABI `arm64-v8a`（rebind `EV-E3-PHYS1REBIND7-20260806-0001`） |
+| 系统 | 新冻结：distribution `HarmonyOS`；HDC binding build `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（`EV-E3-PHYS1BUILD7-20260806-0001` 单条 `software.version` 实测确认，逐字匹配；非合成候选）；Settings 人工观测 `7.0.0.100 (SP8C00E32R7P2patch09)` |
+| API 与架构 | 新冻结：API `26`；kernel arch `aarch64`；app ABI `arm64-v8a`（均由 rebind `EV-E3-PHYS1REBIND7-20260806-0001` 实测；**不**从 build 字符串推断） |
 | HDC | 唯一 target 在仓外受控映射中绑定为 `PHYS-1`；真实 endpoint、序列号、USB 标识或网络地址不得入库 |
 | 签名 | 普通 debug 开发签名与 profile/certificate hash 经 host reverify 确认与历史登记一致、未变 |
 | A/B 制品 | `ADJ-20260806-0003` 批准复用原 FINAL signed HAP A/B hashes；host reverify PASS（HAP/signature/profile/member hashes 未变）；兼容性仅作实测、**不**证明 API 26 安装/运行成功。旧 unsigned hash 只绑定历史准备阶段 |
 | 源码与 SDK | build-source archive、source manifest、SDK map 及其 SHA-256 经 host reverify 确认；public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；Live 前按仓外 commit-bound freeze 重核 |
 | 清理基线 | initial live 与 rebind 均未安装 A/B；Live 前须重新确认清理基线 |
 | 采集准备 | `controlled external EvidenceRoot/RawRoot`；仓内只接收脱敏 manifest/projection/判定 |
-| 审查 | rebind reviewer=`isolated kimi-coding/k3`（0 blocker/0 major）；新 campaign Live 审查角色须在 freeze 中重新绑定 |
+| 审查 | rebind reviewer=`isolated kimi-coding/k3`（0 blocker/0 major）；build-confirm reviewer=`isolated kimi-coding/k3`（0 blocker/0 major，`EV-E3-PHYS1BUILD7-20260806-0001`）；新 campaign Live 审查角色须在 freeze 中重新绑定 |
 | Campaign | 历史：`PHYS1API23` / `E3-PHYS-PREFLIGHT-20260806-0001` / `EV-E3-PHYS1API23-20260806-0001` 已消费且 blocked，不可复用。新：`PHYS1API26` / `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`（host 输入 ready；设备执行须再确认） |
 | Settings re-allow | 预测路径冻结为 `direct-system-activation`；路径偏差只作预注册观测，不因偏差本身 blocked；无 Settings 入口或无法重新激活仍 blocked |
 
-原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权并因 drift 变为 `blocked`。rebind、`ADJ-20260806-0003` 与 host reverify 完成后，当前 `plan_status: ready`（仅表示新 campaign host 输入 ready；仓外 commit-bound freeze 在提交后生成；设备执行仍须明确再确认；E8 `CLOSED`）。2026-07-18 六条最小设备发现不得作为当前元组重跑；单次 signing enrollment 已消耗且不得重跑；旧 campaign/evidence ID 不得复用，亦不授权 infra retry。Live 仍须 clean worktree、仓外完整 freeze 与设备再确认。
+原复合输入门曾冻结为 `plan_status: ready`；initial live 已实际消费该授权并因 drift 变为 `blocked`。rebind、`ADJ-20260806-0003`、host reverify 与 `ADJ-20260806-0004` build 确认完成后，当前 `plan_status: ready`（仅表示新 campaign host 输入 ready；最终 commit-bound freeze 须基于包含 build 确认的提交重生；设备执行仍须明确再确认；E8 `CLOSED`）。2026-07-18 六条最小设备发现不得作为当前元组重跑；rebind 与 build 确认授权均已消耗且不得重跑；单次 signing enrollment 已消耗且不得重跑；旧 campaign/evidence ID 不得复用，亦不授权 infra retry。Live 仍须 clean worktree、仓外完整 freeze 与设备再确认。
 
 ## Campaign 与重试纪律
 
@@ -124,7 +124,7 @@ hdc shell bm get --udid
 
 ## 专用证据模板
 
-target code 为 `PHYS1API26`。campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001` 为 `ADJ-20260806-0003` 分配的当前准备身份；host 输入 ready，**设备执行仍须明确再确认**，仓外 commit-bound freeze 在提交后生成。本模板不授权 Live。历史 initial live（`PHYS1API23` / `E3-PHYS-PREFLIGHT-20260806-0001` / `EV-E3-PHYS1API23-20260806-0001`，`reviewed-pass/blocked`）见[已审查证据记录](evidence/e3-physical-preflight-2026-08-06.md)，旧 ID 不进入本模板且不可复用。登记 HAP 仍 compile API `24`、target/compatible API `23`；设备冻结 API 为 `26`，兼容性仅实测。
+target code 为 `PHYS1API26`。campaign ID `E3-PHYS-PREFLIGHT-20260806-0002` / evidence ID `EV-E3-PHYS1API26-20260806-0001` 为 `ADJ-20260806-0003` 分配的当前准备身份；host 输入 ready，**设备执行仍须明确再确认**，最终 commit-bound freeze 须基于包含 build 确认的提交重生。HDC binding 已由 `EV-E3-PHYS1BUILD7-20260806-0001` 实测确认；API `26` 仍由 rebind 实测、不从 build 推断。本模板不授权 Live。历史 initial live（`PHYS1API23` / `E3-PHYS-PREFLIGHT-20260806-0001` / `EV-E3-PHYS1API23-20260806-0001`，`reviewed-pass/blocked`）见[已审查证据记录](evidence/e3-physical-preflight-2026-08-06.md)，旧 ID 不进入本模板且不可复用。登记 HAP 仍 compile API `24`、target/compatible API `23`；设备冻结 API 为 `26`，兼容性仅实测。
 
 ```yaml
 evidence_id: EV-E3-PHYS1API26-20260806-0001 # prepared; live requires explicit device-execution reconfirmation
