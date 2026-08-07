@@ -24,6 +24,11 @@
   },
   "settings_reallow_expected_path": "direct-system-activation",
   "settings_reallow_path_policy": "observation-only",
+  "settings_revoke_mechanism": "settings-app-info-force-stop",
+  "settings_vpn_page_policy": "observation-only",
+  "destroy_terminal_policy": "callback-or-strict-process-boundary",
+  "process_absent_required_count": 2,
+  "process_absent_probe_spacing_seconds": 3,
   "signing": {
     "type": "ordinary-development",
     "device_in_profile": true,

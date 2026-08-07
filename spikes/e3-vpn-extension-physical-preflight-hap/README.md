@@ -35,18 +35,34 @@ correction (not device-behavior retry). That campaign
 `E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` went Live
 and is now `consumed-blocked` (`reviewed-pass/blocked`; S1/S4 pass,
 S2/S3/S5/S6/S7 blocked; cleanup verified-clean; dual independent review 0 B/5 M;
-opus timeout attempt-not-counted; prior 0001 retained). Registered HAP artifacts
-remain compile API `24` with target/compatible API `23`; device freeze API is
-`26` and compatibility is measurement-only. API26 0001 used runner SHA-256
+opus timeout attempt-not-counted; prior 0001 retained). `ADJ-20260807-0003`
+(user direct decision) then approved a host process terminal probe and the
+Settings app-info force-stop revoke path: scenario 3/7 prefer the callback
+destroy terminal + post-destroy fd snapshot, otherwise fall back to a strict
+process-boundary route (unique stop + onDestroy + destroy-begin/pre snapshot +
+consecutive absent host `PidOf`/`BundleDump` probes, >=2 probes >=3s apart,
+bundle present for scenario 3; `FD_STILL_OPEN` is never overridden; scenario 3
+strict pass additionally needs a scenario 5 fresh create as clean reactivation
+proof or overall stays blocked); scenario 5 revokes via manual Settings > app
+info > A > force stop with a separate screenshot and
+`SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation, while the Settings VPN
+page is observation-only and the runner never issues HDC force-stop (HDC
+force-stop is explicitly cleanup-only, restricted to exception/final cleanup).
+Registered HAP artifacts remain compile API `24` with target/compatible API
+`23`; device freeze API is `26` and compatibility is measurement-only. API26
+0001 used runner SHA-256
 `19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`; API26 0002
 used runner SHA-256
 `2fb2d3e99585a53adec82ea3b51ae2ea29c8f021d46e24b0828faa5415d38194` and code
 `e8eb1b67a48603c55d3f55d2be686bae0dbd15e1` (freeze
 `d6334c2d8d0d1bf11a2a9e26f65039ee0a1a98e377fbf644cef557ff02c55a1a`, now
-`CONSUMED-BLOCKED`). Current `plan_status` is `blocked-awaiting-adjudication`;
-no auto retry, no new ID, and no device-command authorization. This registration
-bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not be reused. The
-checked-in freeze example remains intentionally `blocked`.
+`CONSUMED-BLOCKED`); the runner has since changed under `ADJ-20260807-0003`, so
+a new live freeze must bind a fresh commit and runner SHA-256. Current
+`plan_status` is `blocked-awaiting-host-rebuild`; the Windows signing/build host
+must rebuild the runner, freeze, and selftest snapshots before any new live; no
+auto retry, no new ID, and no device-command authorization until then. This
+registration bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not
+be reused. The checked-in freeze example remains intentionally `blocked`.
 
 ## Boundary
 
@@ -153,8 +169,8 @@ A/B 指两个测试 App。令牌 `READY` / `ACK` / 确认名必须**逐字**输�
 2. 场景2：A 点 Start → 授权界面出现后先按 runner 提示输入 AUTH-UI-VISIBLE 完整令牌 → 等 runner 截取完成 / 下一 ACTION → 再点 Allow → ACK。
 3. 场景3：已激活的 A 点 Stop → ACK。
 4. 场景4：B 点 Start → Deny → 保持拒绝画面 → ACK。
-5. 场景5：先 A 点 Start 重新激活；再打开**手机系统设置 App（齿轮）→ 更多连接 → VPN**，断开/删除测试 VPN → ACK。
-6. 场景6：先 A 点 Start 激活；再 B 点 Start，保留冲突/替换画面 → ACK。
+5. 场景5：先 A 点 Start 重新激活；再打开**手机系统设置 App（齿轮）→ 更多连接 → VPN** 页并保持可见，等 runner 截取（仅观察）；随后进入 **设置 → 应用 → 测试 App A 的应用信息页** 执行**强制停止**并保持画面，等 runner 截取并确认（`SETTINGS-APP-INFO-FORCE-STOP-CAPTURED`）→ ACK。
+6. 场景6：先 A 点 Start 激活；再 B 点 Start，保留冲突/替换画面 → ACK。随后按 runner 提示确认 `NO-DUAL-ACTIVE-CAPTURED`（未同时出现 A/B 两个 active VPN 为真）；若为假，再独立确认 `DUAL-ACTIVE-CAPTURED`（只在明确看到 A/B 同时 active 时为真）。
 7. 场景7：当前 active 的 App 点 Stop；**不要**手工强停或卸载；runner 负责卸载清理。
 
 ## API Mapping
@@ -238,15 +254,28 @@ campaign and evidence IDs remain generic blocked placeholders
 `EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>`). Its required field groups
 are campaign identity/status/retry, the exact target tuple and 60-second window,
 settings re-allow expected path defaulting to `direct-system-activation` with
-required `settings_reallow_path_policy: observation-only`, ordinary-development
+required `settings_reallow_path_policy: observation-only`, the
+`ADJ-20260807-0003` decision fields `settings_revoke_mechanism`
+(`settings-app-info-force-stop`), `settings_vpn_page_policy`
+(`observation-only`), `destroy_terminal_policy`
+(`callback-or-strict-process-boundary`), `process_absent_required_count` (`2`)
+and `process_absent_probe_spacing_seconds` (`3`), ordinary-development
 signing, final A/B artifact hashes, frozen source archive/manifest, SDK input
 map, HDC version/hash, runner/code hashes, freeze time, cleanup/collection/review
-Boolean gates, and distinct operator and reviewer roles. The path policy is part
-of the freeze contract hash; any value other than `observation-only` is rejected.
+Boolean gates, and distinct operator and reviewer roles. The path policy and the
+five decision fields are part of the freeze contract hash; old freezes without
+these fields are historical only and are rejected for every mode (DryRun
+included), never usable for a new live.
 Scenario 5 records `settings_reallow_path` expected/actual/match/observation and
-never blocks solely because actual path differs from the predicted path; pass
-still requires A re-activation with `VPN_ONCREATE`/create-fd markers, ordinary
-Settings revoke, destroy terminal, and post-destroy fd cleanup.
+never blocks solely because actual path differs from the predicted path; the
+revoke mechanism is now `settings-app-info-force-stop`: a fresh A
+start/create-accepted/post-create-open first, the Settings VPN page is
+observation-only screenshot/fields, then manual Settings > app info > A > force
+stop with a separate screenshot and `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED`
+confirmation. Pass requires the manual confirmation, fresh create/open, bundle
+still present, and consecutive absent bundle-process probes (>=2 probes >=3s
+apart); no `UI_STOP` is required or expected on this path. HDC never issues
+force-stop for the revoke.
 `signing.device_in_profile` is JSON Boolean `true` in the example to show the
 required type; the adjacent placeholder basis explicitly means it is not a
 checked-in device-profile claim. Device HiLog zone mapping (`CST=>+08:00`) and
@@ -281,6 +310,55 @@ continuous `Capture.Degraded` or shorten the 60-second window. Record
 captures the visible system authorization UI (screenshot + layout) after the
 operator confirms it is visible and before Allow; capture failure blocks
 scenario 2 and keeps the artifact reference.
+
+Under `ADJ-20260807-0003`, scenarios 3/5/7 run host process terminal probes
+using only the allowlisted `PidOf` (bundle process) and `BundleDump` (bundle
+presence) observations. `Get-VpnFinalState` prefers the callback destroy
+terminal + post-destroy fd snapshot (`terminal_mode=callback-post-fd`);
+`FD_STILL_OPEN` is a hard fail that never falls back. Otherwise the strict
+process-boundary route requires a unique current-window stop for the same
+bundle/request, `UI_STOP` or `STOP_PROMISE_RESOLVED`, `VPN_ONDESTROY`,
+`VPN_DESTROY_BEGIN` or a pre-destroy fd snapshot, and at least
+`process_absent_required_count` consecutive absent probes spaced
+`process_absent_probe_spacing_seconds` seconds apart; scenario 3 additionally requires the bundle present
+during the probes, and `VPN_DESTROY_ISSUED` never counts. Every probe (time,
+status, consecutive-absent count, bundle present) is recorded into the scenario
+entry and transcript; present/unknown/error resets the counter, unknown/error
+aborts the series, and finally/uninstall-absent never backfills. Scenario 3
+strict-fallback pass also requires a scenario 5 same-bundle fresh
+`CREATE_ACCEPTED` + post-create open as clean reactivation proof or the overall
+aggregation stays blocked. Scenario 5 revokes via manual Settings app-info
+force-stop (fresh create first, Settings VPN page observation-only, separate
+force-stop screenshot + `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation,
+consecutive absent bundle-process probes, bundle still present); no `UI_STOP`
+is expected. Scenario 7 runs pre-uninstall probes and allows the existing
+uninstall cleanup only after the terminal assessment completes.
+`ADJ-20260807-0003` adds no new exit criteria: it only corrects the S3/S5/S7
+terminal-state priority (callback terminal + post-destroy fd snapshot first,
+`FD_STILL_OPEN` hard fail, then the strict process-boundary fallback) and the
+S5 revoke mechanism. S2/S4/S6 keep their existing rules unchanged: an explicit
+functional fail (create rejected/invalid fd, deny-then-create, replacement
+destroy fail, operator-confirmed dual-active visible) always outranks
+capture/window/operator degradation and is never downgraded to blocked, while
+missing evidence under degradation stays blocked and is never promoted to fail.
+S6 dual-active is an operator three-state confirmation: `NO-DUAL-ACTIVE-CAPTURED`
+is asked first, and only when it is false is the independent
+`DUAL-ACTIVE-CAPTURED` confirmation asked (true only when A and B are clearly
+both active on screen). Only `dual_active_confirmed=true` &&
+`no_dual_active_confirmed=false` fails (`dual-active-observed`);
+`noDual=true` && `dual=false` is normal; both false is blocked
+`dual-active-observation-unresolved`; both true is blocked
+`inconsistent-operator-confirmation`; an empty/false answer alone never fails.
+The scenario record projects `no_dual_active_confirmed`,
+`dual_active_confirmed`, and `operator_state`. The Settings>VPN page capture in
+scenario 5 is observation-only: its failure still writes a degraded
+`CaptureArtifacts` entry and an independent `observation_only_degraded`
+diagnostic, but never calls `Add-CaptureDegradation`, never enters the global
+`capture_degraded` list, and never blocks scenario 5 or the final overall; the
+decisive `scenario-5-app-info-force-stop` capture failure stays blocking. The
+freeze decision field is `process_absent_probe_spacing_seconds`; the legacy
+`spacing` name is rejected as unknown/missing for every mode and never reused
+compatibly.
 
 `EvidenceRoot` contains only the redacted structured projection, record,
 operator attestation, collection manifest, lock, and seal. Unfiltered HiLog,
@@ -325,15 +403,21 @@ pwsh -NoProfile -File .\e3-phys-preflight-campaign.ps1 `
 `-DryRun` accepts `plan_status: blocked` or `ready` but always emits an explicit
 non-evidence blocked record. `-DryRun`, `-SelfTest`, and injected
 `-LiveSimulation` mechanically keep the HDC process count at zero.
-`LiveSimulation` always records `is_evidence: false`, `record_status: blocked`,
-and `verdict: blocked`, including functional-error and integrity-tamper paths.
+`LiveSimulation` always records `is_evidence: false` and `record_status: blocked`;
+`verdict`/`overall` stay `blocked` unless a scenario measured an explicit fail
+(e.g. post-destroy `FD_STILL_OPEN`), which must survive capture degradation as
+`fail` and is never downgraded to blocked.
 A retry prior must instead be a frozen matching Live blocked evidence record.
 
 Real Live requires `plan_status: ready`, a clean repository, manual operator
 input, and the frozen target mapping. Normal revoke evidence comes only from the
-planned visible UI/Settings actions. Any exception/finally `force-stop` is
-`notUsedAsRevoke`: it is residual cleanup only, followed by targeted BundleDump
-and PidOf verification. Unknown residual state remains blocked and is never
+planned visible UI/Settings actions; under `ADJ-20260807-0003` scenario 5 uses
+manual Settings app-info force-stop with confirmation and screenshot, and the
+runner never issues HDC force-stop for it. Any exception/finally `force-stop`
+is `notUsedAsRevoke`: it is residual cleanup only, followed by targeted
+BundleDump and PidOf verification; HDC force-stop is restricted to the
+`exception-cleanup` / `final-cleanup` reasons in the allowlist. Unknown
+residual state remains blocked and is never
 reported clean. The one initial Live invocation has been consumed. It started eight whitelisted
 HDC processes for version/model/build preflight plus finally-targeted A/B
 bundle, PID, and fixed staging probes. Model matched, but the visible live build
@@ -354,7 +438,11 @@ scenario-5 replay; retained), and API26 0002 live `consumed-blocked`
 (`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`;
 `reviewed-pass/blocked`; dual review 0 B/5 M; historical prepared
 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` remain
-`superseded-unexecuted`), the current governance `plan_status` is
-`blocked-awaiting-adjudication`. No auto retry, no new ID, and no device-command
-authorization. This registration bans HDC. E3 remains open, E8 remains
-`CLOSED`, and NetBird or any broader physical-device work remains forbidden.
+`superseded-unexecuted`), and `ADJ-20260807-0003` (host process terminal
+probe + Settings app-info force-stop revoke path; runner/freeze example/selftest
+updated with this commit), the current governance `plan_status` is
+`blocked-awaiting-host-rebuild`. The Windows signing/build host must rebuild the
+runner, freeze, and selftest snapshots before any new live; no auto retry, no
+new ID, and no device-command authorization until then. This registration bans
+HDC. E3 remains open, E8 remains `CLOSED`, and NetBird or any broader
+physical-device work remains forbidden.

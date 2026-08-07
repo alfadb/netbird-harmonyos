@@ -110,6 +110,11 @@ function New-Freeze {
         }
         settings_reallow_expected_path = 'direct-system-activation'
         settings_reallow_path_policy = 'observation-only'
+        settings_revoke_mechanism = 'settings-app-info-force-stop'
+        settings_vpn_page_policy = 'observation-only'
+        destroy_terminal_policy = 'callback-or-strict-process-boundary'
+        process_absent_required_count = 2
+        process_absent_probe_spacing_seconds = 3
         signing = [ordered]@{ type = 'ordinary-development'; device_in_profile = $true; device_in_profile_basis = 'selftest public verification basis'; public_fingerprint = 'SELFTEST-NON-SECRET'; verification_result = 'pass' }
         artifact_sha256 = [ordered]@{ hap_a = Get-Sha256 $script:HapA; hap_b = Get-Sha256 $script:HapB }
         source = [ordered]@{
@@ -164,8 +169,10 @@ function New-SimulationFixture {
                 'DENY-SCREEN-CAPTURED' = $true
                 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' = $true
                 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' = $false
-                'SETTINGS-REVOKE-CAPTURED' = $true
+                'SETTINGS-VPN-PAGE-VISIBLE' = $true
+                'SETTINGS-APP-INFO-FORCE-STOP-CAPTURED' = $true
                 'NO-DUAL-ACTIVE-CAPTURED' = $true
+                'DUAL-ACTIVE-CAPTURED' = $false # only asked when NO-DUAL-ACTIVE-CAPTURED is false
                 'FINAL-CLEANUP-CAPTURED' = $true
             }
         }
@@ -411,8 +418,28 @@ try {
     Assert-True ([string]$liveRecord.freeze_manifest_sha256 -eq (Get-Sha256 $liveFreezePath)) 'freeze self hash missing or wrong'
     Assert-True ([string]$liveRecord.prior_blocked_binding -eq 'N/A') 'unbound record must project prior_blocked_binding N/A'
     Assert-True ($liveRecord.scenarios[5].a_accepted -eq $true -and $liveRecord.scenarios[5].reason -eq 'B-rejected-no-replacement-destroy-required') 'scenario 6 a_accepted or reason mismatch'
+    Assert-True ($liveRecord.scenarios[5].no_dual_active_confirmed -eq $true -and $liveRecord.scenarios[5].dual_active_confirmed -eq $false -and [string]$liveRecord.scenarios[5].operator_state -eq 'normal') 'scenario 6 three-state operator fields mismatch on normal state'
     Assert-True ($liveRecord.scenarios[6].post_cleanup_capture -eq $true -and $liveRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'scenario 7 post-cleanup screenshot naming mismatch'
     Assert-True ($liveRecord.reviewer -eq 'pending' -and $liveRecord.reviewed_at -eq 'pending' -and $liveRecord.record_status -notmatch '^reviewed') 'runner wrote reviewed state'
+    Assert-True ([string]$liveRecord.settings_revoke_mechanism -eq 'settings-app-info-force-stop' -and [string]$liveRecord.settings_vpn_page_policy -eq 'observation-only' -and [string]$liveRecord.destroy_terminal_policy -eq 'callback-or-strict-process-boundary') 'record did not project ADJ-20260807-0003 decision fields'
+    Assert-True ([int]$liveRecord.process_absent_required_count -eq 2 -and [double]$liveRecord.process_absent_probe_spacing_seconds -eq 3) 'record did not project probe count/spacing'
+    Assert-True ($liveRecord.scenarios[2].terminal_mode -eq 'callback-post-fd' -and $liveRecord.scenarios[6].terminal_mode -eq 'callback-post-fd') 'base S3/S7 did not prefer callback terminal mode'
+    Assert-True ($liveRecord.scenarios[4].terminal_mode -eq 'settings-app-info-force-stop' -and $liveRecord.scenarios[4].force_stop_confirmed -and $liveRecord.scenarios[4].settings_vpn_page_observation_only -and $liveRecord.scenarios[4].bundle_present_during_probe) 'base S5 force-stop flow fields mismatch'
+    Assert-True (@($liveRecord.scenarios[4].process_final_state_probes).Count -ge 2) 'base S5 did not record consecutive absent probes'
+    Assert-True ($liveRecord.scenarios[2].clean_reactivation_proof -eq $true) 'base S3 clean reactivation proof not recorded from S5 fresh create'
+    Assert-True ($null -ne $liveRecord.scenario_aggregation.scenario_2_assertions -and [string]$liveRecord.scenario_aggregation.scenario_2_assertions.allow -eq 'pass') 'scenario_2_assertions missing or not restored'
+    Assert-True ([string]$liveRecord.scenarios[2].request_id -eq 'a2' -and [string]$liveRecord.scenarios[6].request_id -eq 'a6') 'S3/S7 request ids not bound to active create requests'
+    $liveTranscriptLines = @(Get-Content -LiteralPath (Join-Path $livePaths.Evidence 'projection\transcript.redacted.jsonl'))
+    $liveTranscriptEntries = @($liveTranscriptLines | ForEach-Object { $_ | ConvertFrom-Json -Depth 20 })
+    $liveHdcLogicalTranscript = @($liveTranscriptEntries | Where-Object { [string]$_.payload.kind -in @('hdc-command', 'hdc-capture-start') })
+    Assert-True ([int]$liveRecord.hdc_logical_calls -eq $liveHdcLogicalTranscript.Count) 'hdc_logical_calls does not match transcript hdc-command/hdc-capture-start count'
+    $liveProbePairs = @($liveRecord.scenarios[4].process_final_state_probes).Count
+    Assert-True ($liveProbePairs -ge 2) 'base S5 probe pair count below required consecutive absent'
+    $liveProbeHdcCommands = @($liveTranscriptEntries | Where-Object {
+        [string]$_.payload.kind -eq 'hdc-command' -and [string]$_.payload.data.operation -in @('PidOf', 'BundleDump')
+    })
+    # Each probe pair is PidOf+BundleDump (+2). Baseline/install/cleanup also use the same ops; probe pairs alone must contribute even counts.
+    Assert-True (($liveProbeHdcCommands.Count % 2) -eq 0 -and $liveProbeHdcCommands.Count -ge (2 * $liveProbePairs)) 'PidOf+BundleDump transcript count not aligned with probe pairs (+2 each)'
     Assert-ManifestAndSeal $livePaths.Evidence
     Assert-ProjectionChain $livePaths.Evidence
 
@@ -476,36 +503,42 @@ try {
     Assert-True ($m3NoNewStartRecord.scenarios[5].result -eq 'blocked' -and $m3NoNewStartRecord.scenarios[5].reason -eq 'no-new-B-UI_START') 'M3 scenario 6 without new B UI_START reason mismatch'
     Assert-True ($m3NoNewStartRecord.scenarios[5].a_accepted -eq $true -and $m3NoNewStartRecord.scenarios[5].b_accepted -eq $false) 'M3 scenario 6 a_accepted/b_accepted mismatch'
 
-    Write-Host 'SELFTEST_PHASE=m4-inferred-s7-request-and-screenshot-naming'
-    $m4InferredFixture = New-SimulationFixture
-    $m4InferredFixture.scenario_events.'5' = @(
-        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
-        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
-        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
-        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
-        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpna|reason=operation-pending" }
-    )
-    $m4InferredFixture.scenario_events.'6' = @(
+    Write-Host 'SELFTEST_PHASE=m4-s7-active-request-binding-and-screenshot-naming'
+    # Under ADJ-20260807-0003 B3, S7 binds the calculated active A/B request only. Null activeRequest
+    # (S6 produced no UI_START) must not fall back to window-event inference, even if a complete
+    # foreign stop chain is present.
+    $m4NullActiveFixture = New-SimulationFixture
+    $m4NullActiveFixture.scenario_events.'6' = @(
         [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpna|reason=operation-pending" },
         [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpnb|reason=operation-pending" }
     )
-    $m4InferredFixture.scenario_events.'7' = @(
+    $m4NullActiveFixture.scenario_events.'7' = @(
         [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
         [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') STOP_PROMISE_RESOLVED|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
         [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a5" },
         [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a5|fdMarker=FD_CLOSED_CONFIRMED" },
         [ordered]@{ offset_seconds = 5; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-destroy-resolved|open=false|marker=FD_CLOSED_CONFIRMED" }
     )
-    $m4InferredPath = Write-JsonFixture 'simulation-m4-inferred-s7.json' $m4InferredFixture
-    $m4InferredPaths = New-CasePaths 'm4-inferred-s7'
-    $m4InferredRun = Invoke-Runner $liveFreezePath $m4InferredPaths.Evidence $m4InferredPaths.Raw -FixturePath $m4InferredPath
-    Assert-True ($m4InferredRun.ExitCode -eq 0) "M4 inferred S7 simulation crashed: $($m4InferredRun.Text)"
-    $m4InferredRecord = Get-Content -LiteralPath (Join-Path $m4InferredPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
-    Assert-True ($m4InferredRecord.scenarios[6].request_id -eq 'a5' -and $m4InferredRecord.scenarios[6].reason -eq 'terminal-and-post-destroy-snapshot-confirmed') 'M4 scenario 7 did not infer requestId from real window events'
-    Assert-True ($m4InferredRecord.scenarios[6].result -eq 'pass' -and $m4InferredRecord.scenarios[6].reason -notmatch 'requestId-missing') 'M4 inferred scenario 7 must not report requestId-missing'
-    Assert-True ($m4InferredRecord.scenarios[6].post_cleanup_capture -eq $true -and $m4InferredRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'M4 post-cleanup screenshot naming mismatch'
-    $m4InferredScreens = @($m4InferredRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-post-cleanup' })
-    Assert-True ($m4InferredScreens.Count -ge 1) 'M4 post-cleanup screenshot reference missing'
+    $m4NullActivePath = Write-JsonFixture 'simulation-m4-null-active-s7.json' $m4NullActiveFixture
+    $m4NullActivePaths = New-CasePaths 'm4-null-active-s7'
+    $m4NullActiveRun = Invoke-Runner $liveFreezePath $m4NullActivePaths.Evidence $m4NullActivePaths.Raw -FixturePath $m4NullActivePath
+    Assert-True ($m4NullActiveRun.ExitCode -eq 0) "M4 null-active S7 simulation crashed: $($m4NullActiveRun.Text)"
+    $m4NullActiveRecord = Get-Content -LiteralPath (Join-Path $m4NullActivePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m4NullActiveRecord.scenarios[6].result -eq 'blocked' -and [string]::IsNullOrWhiteSpace([string]$m4NullActiveRecord.scenarios[6].request_id)) 'M4 null activeRequest still inferred a stop requestId'
+    Assert-True (-not $m4NullActiveRecord.scenarios[6].post_cleanup_capture -and -not $m4NullActiveRecord.scenarios[6].terminal_assessed) 'M4 null activeRequest still uninstalled during scenario'
+
+    # Positive binding: S6 keeps A active as a6; S7 stop chain must use the same bound id.
+    $m4BoundFixture = New-SimulationFixture
+    $m4BoundPath = Write-JsonFixture 'simulation-m4-bound-s7.json' $m4BoundFixture
+    $m4BoundPaths = New-CasePaths 'm4-bound-s7'
+    $m4BoundRun = Invoke-Runner $liveFreezePath $m4BoundPaths.Evidence $m4BoundPaths.Raw -FixturePath $m4BoundPath
+    Assert-True ($m4BoundRun.ExitCode -eq 0) "M4 bound S7 simulation crashed: $($m4BoundRun.Text)"
+    $m4BoundRecord = Get-Content -LiteralPath (Join-Path $m4BoundPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m4BoundRecord.scenarios[6].request_id -eq 'a6' -and $m4BoundRecord.scenarios[6].reason -eq 'terminal-and-post-destroy-snapshot-confirmed') 'M4 scenario 7 did not bind active S6 request a6'
+    Assert-True ($m4BoundRecord.scenarios[6].result -eq 'pass' -and $m4BoundRecord.scenarios[6].reason -notmatch 'requestId-missing') 'M4 bound scenario 7 must not report requestId-missing'
+    Assert-True ($m4BoundRecord.scenarios[6].post_cleanup_capture -eq $true -and $m4BoundRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'M4 post-cleanup screenshot naming mismatch'
+    $m4BoundScreens = @($m4BoundRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-post-cleanup' })
+    Assert-True ($m4BoundScreens.Count -ge 1) 'M4 post-cleanup screenshot reference missing'
 
     $m4NoCleanupFixture = New-SimulationFixture
     $m4NoCleanupFixture.scenario_events.'7' = @(
@@ -517,11 +550,641 @@ try {
     $m4NoCleanupRun = Invoke-Runner $liveFreezePath $m4NoCleanupPaths.Evidence $m4NoCleanupPaths.Raw -FixturePath $m4NoCleanupPath
     Assert-True ($m4NoCleanupRun.ExitCode -eq 0) "M4 no-cleanup S7 simulation crashed: $($m4NoCleanupRun.Text)"
     $m4NoCleanupRecord = Get-Content -LiteralPath (Join-Path $m4NoCleanupPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
-    Assert-True ($m4NoCleanupRecord.scenarios[6].result -eq 'blocked' -and $m4NoCleanupRecord.scenarios[6].reason -eq 'destroy-terminal-or-post-snapshot-missing') 'M4 scenario 7 without destroy terminal classified reason mismatch'
+    Assert-True ($m4NoCleanupRecord.scenarios[6].result -eq 'blocked' -and $m4NoCleanupRecord.scenarios[6].reason -eq 'strict-fallback-ondestroy-missing') 'M4 scenario 7 without destroy terminal classified reason mismatch'
     Assert-True ($m4NoCleanupRecord.scenarios[6].post_cleanup_capture -eq $false -and $m4NoCleanupRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-final-state') 'M4 final-state screenshot naming mismatch'
     $m4NoCleanupScreens = @($m4NoCleanupRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-final-state' })
     $m4NoCleanupPostScreens = @($m4NoCleanupRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-post-cleanup' })
     Assert-True ($m4NoCleanupScreens.Count -ge 1 -and $m4NoCleanupPostScreens.Count -eq 0) 'M4 final-state screenshot naming contract mismatch'
+
+    Write-Host 'SELFTEST_PHASE=adj-s3-strict-process-boundary-fallback-and-reactivation'
+    $s3FallbackFixture = New-SimulationFixture
+    $s3FallbackFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a2" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a2|trigger=onDestroy|createAccepted=true" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" }
+    )
+    $s3FallbackPath = Write-JsonFixture 'simulation-adj-s3-fallback.json' $s3FallbackFixture
+    $s3FallbackPaths = New-CasePaths 'adj-s3-fallback'
+    $s3FallbackRun = Invoke-Runner $liveFreezePath $s3FallbackPaths.Evidence $s3FallbackPaths.Raw -FixturePath $s3FallbackPath
+    Assert-True ($s3FallbackRun.ExitCode -eq 0) "S3 strict fallback simulation crashed: $($s3FallbackRun.Text)"
+    $s3FallbackRecord = Get-Content -LiteralPath (Join-Path $s3FallbackPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3FallbackRecord.scenarios[2].result -eq 'pass' -and $s3FallbackRecord.scenarios[2].terminal_mode -eq 'strict-process-boundary' -and $s3FallbackRecord.scenarios[2].reason -eq 'strict-process-boundary-terminal') 'S3 strict-process-boundary fallback did not pass'
+    Assert-True (@($s3FallbackRecord.scenarios[2].process_final_state_probes).Count -ge 2) 'S3 fallback probes missing'
+    Assert-True ($s3FallbackRecord.scenarios[2].bundle_present_during_probe -eq $true) 'S3 fallback bundle was not present during probes'
+    Assert-True ($s3FallbackRecord.scenarios[2].clean_reactivation_proof -eq $true) 'S3 fallback clean reactivation proof missing'
+    Assert-True ($s3FallbackRecord.scenario_aggregation.measured_scenario_overall -eq 'pass') 'S3 fallback with S5 reactivation did not aggregate pass'
+
+    Write-Host 'SELFTEST_PHASE=adj-s3-fallback-without-s5-reactivation-blocked'
+    # Full combination: S3 passes via strict-process-boundary, but the same-bundle S5 fresh
+    # start/create lacks a post-create open snapshot. S3 must record clean_reactivation_proof=false,
+    # S5 stays blocked, and aggregation/overall stays blocked despite every scenario result.
+    $s3NoReactivationFixture = New-SimulationFixture
+    $s3NoReactivationFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a2" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a2|trigger=onDestroy|createAccepted=true" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" }
+    )
+    $s3NoReactivationFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" }
+    )
+    $s3NoReactivationPath = Write-JsonFixture 'simulation-adj-s3-no-reactivation.json' $s3NoReactivationFixture
+    $s3NoReactivationPaths = New-CasePaths 'adj-s3-no-reactivation'
+    $s3NoReactivationRun = Invoke-Runner $liveFreezePath $s3NoReactivationPaths.Evidence $s3NoReactivationPaths.Raw -FixturePath $s3NoReactivationPath
+    Assert-True ($s3NoReactivationRun.ExitCode -eq 0) "S3 fallback without reactivation simulation crashed: $($s3NoReactivationRun.Text)"
+    $s3NoReactivationRecord = Get-Content -LiteralPath (Join-Path $s3NoReactivationPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3NoReactivationRecord.scenarios[2].result -eq 'pass' -and $s3NoReactivationRecord.scenarios[2].terminal_mode -eq 'strict-process-boundary') 'S3 strict fallback without reactivation did not pass individually'
+    Assert-True ($s3NoReactivationRecord.scenarios[2].clean_reactivation_proof -eq $false) 'S3 clean_reactivation_proof not false without S5 post-create open'
+    Assert-True ($s3NoReactivationRecord.scenarios[4].result -eq 'blocked' -and $s3NoReactivationRecord.scenarios[4].reason -eq 'fresh-create-proof-missing') 'S5 fresh create without post-create open did not stay blocked'
+    Assert-True ([string]$s3NoReactivationRecord.scenario_aggregation.measured_scenario_overall -eq 'blocked' -and [string]$s3NoReactivationRecord.scenario_aggregation.overall -eq 'blocked') 'S3 strict fallback without reactivation proof did not block aggregation/overall'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-fd-still-open-not-overridable'
+    # S5 current request shows a post-destroy FD_STILL_OPEN marker; consecutive-absent probes must
+    # never override the fail verdict.
+    $s5FdStillOpenFixture = New-SimulationFixture
+    $s5FdStillOpenFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a5|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s5FdStillOpenPath = Write-JsonFixture 'simulation-adj-s5-fd-still-open.json' $s5FdStillOpenFixture
+    $s5FdStillOpenPaths = New-CasePaths 'adj-s5-fd-still-open'
+    $s5FdStillOpenRun = Invoke-Runner $liveFreezePath $s5FdStillOpenPaths.Evidence $s5FdStillOpenPaths.Raw -FixturePath $s5FdStillOpenPath
+    Assert-True ($s5FdStillOpenRun.ExitCode -eq 0) "S5 FD_STILL_OPEN simulation crashed: $($s5FdStillOpenRun.Text)"
+    $s5FdStillOpenRecord = Get-Content -LiteralPath (Join-Path $s5FdStillOpenPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5FdStillOpenRecord.scenarios[4].result -eq 'fail' -and $s5FdStillOpenRecord.scenarios[4].reason -eq 'FD_STILL_OPEN' -and $s5FdStillOpenRecord.scenarios[4].fd_still_open -eq $true) 'S5 post-destroy FD_STILL_OPEN did not fail'
+    Assert-True (@($s5FdStillOpenRecord.scenarios[4].process_final_state_probes | Where-Object { $_.status -eq 'absent' }).Count -ge 2 -and $s5FdStillOpenRecord.scenarios[4].process_absent_evidence.met -eq $true) 'S5 FD_STILL_OPEN case had no absent probe evidence that would have been overridden'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-pre-destroy-open-not-fail'
+    # A pre-destroy open snapshot is expected mid-destroy and must never fail S5.
+    $s5PreDestroyOpenFixture = New-SimulationFixture
+    $s5PreDestroyOpenFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a5|trigger=onDestroy" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" }
+    )
+    $s5PreDestroyOpenPath = Write-JsonFixture 'simulation-adj-s5-pre-destroy-open.json' $s5PreDestroyOpenFixture
+    $s5PreDestroyOpenPaths = New-CasePaths 'adj-s5-pre-destroy-open'
+    $s5PreDestroyOpenRun = Invoke-Runner $liveFreezePath $s5PreDestroyOpenPaths.Evidence $s5PreDestroyOpenPaths.Raw -FixturePath $s5PreDestroyOpenPath
+    Assert-True ($s5PreDestroyOpenRun.ExitCode -eq 0) "S5 pre-destroy open simulation crashed: $($s5PreDestroyOpenRun.Text)"
+    $s5PreDestroyOpenRecord = Get-Content -LiteralPath (Join-Path $s5PreDestroyOpenPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5PreDestroyOpenRecord.scenarios[4].result -eq 'pass' -and $s5PreDestroyOpenRecord.scenarios[4].reason -eq 'settings-app-info-force-stop-terminal') 'S5 pre-destroy open snapshot wrongly failed'
+    Assert-True ($s5PreDestroyOpenRecord.scenarios[4].fd_still_open -eq $false) 'S5 pre-destroy open recorded as fd_still_open'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-probe-spacing-recheck-blocked'
+    # Force-stop assessment must re-check recorded probe timestamps instead of trusting execution
+    # Wait: a probe_spacing_override below the freeze 3s spacing stays blocked.
+    $s5SpacingOverrideFixture = New-SimulationFixture
+    $s5SpacingOverrideFixture.probe_spacing_override_seconds = 1
+    $s5SpacingOverridePath = Write-JsonFixture 'simulation-adj-s5-spacing-override.json' $s5SpacingOverrideFixture
+    $s5SpacingOverridePaths = New-CasePaths 'adj-s5-spacing-override'
+    $s5SpacingOverrideRun = Invoke-Runner $liveFreezePath $s5SpacingOverridePaths.Evidence $s5SpacingOverridePaths.Raw -FixturePath $s5SpacingOverridePath
+    Assert-True ($s5SpacingOverrideRun.ExitCode -eq 0) "S5 spacing override simulation crashed: $($s5SpacingOverrideRun.Text)"
+    $s5SpacingOverrideRecord = Get-Content -LiteralPath (Join-Path $s5SpacingOverridePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5SpacingOverrideRecord.scenarios[4].result -eq 'blocked' -and $s5SpacingOverrideRecord.scenarios[4].reason -eq 'probe-spacing-insufficient') 'S5 probe spacing override below freeze spacing did not stay blocked'
+    Assert-True (-not $s5SpacingOverrideRecord.scenarios[4].process_absent_evidence.met -and [double]$s5SpacingOverrideRecord.scenarios[4].process_absent_evidence.measured_spacing_seconds -lt 3) 'S5 probe spacing re-check did not measure recorded timestamps'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-probe-infrastructure-reason'
+    # Simulation probe 124/125 must classify as infrastructure exactly like live HDC: campaign
+    # infrastructure_reason becomes hdc-usb-interruption and the probe aborts as unknown/error.
+    $s5ProbeInfraFixture = New-SimulationFixture
+    # Baseline A/B dumps (1-2) + install A/B dumps (3-4); first S5 probe dump is occurrence 5.
+    $s5ProbeInfraFixture.hdc_failures = @(
+        [ordered]@{ operation = 'BundleDump'; occurrence = 5; exit_code = 124; stdout = ''; stderr = 'timeout' }
+    )
+    $s5ProbeInfraPath = Write-JsonFixture 'simulation-adj-s5-probe-infra.json' $s5ProbeInfraFixture
+    $s5ProbeInfraPaths = New-CasePaths 'adj-s5-probe-infra'
+    $s5ProbeInfraRun = Invoke-Runner $liveFreezePath $s5ProbeInfraPaths.Evidence $s5ProbeInfraPaths.Raw -FixturePath $s5ProbeInfraPath
+    Assert-True ($s5ProbeInfraRun.ExitCode -eq 0) "S5 probe infra simulation crashed: $($s5ProbeInfraRun.Text)"
+    $s5ProbeInfraRecord = Get-Content -LiteralPath (Join-Path $s5ProbeInfraPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5ProbeInfraRecord.scenarios[4].result -eq 'blocked' -and $s5ProbeInfraRecord.scenarios[4].reason -eq 'probe-unknown-or-error') 'S5 probe 124/125 did not abort as unknown/error'
+    Assert-True ([string]$s5ProbeInfraRecord.infrastructure_reason -eq 'hdc-usb-interruption') 'S5 probe 124/125 did not set infrastructure reason like live'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-reopen-not-open'
+    # Test-PostCreateOpen matches the open=true field boundary only: a post-create reopen=true
+    # snapshot never counts as the clean reactivation proof.
+    $s5ReopenFixture = New-SimulationFixture
+    $s5ReopenFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|reopen=true|marker=CREATE_ACCEPTED" }
+    )
+    $s5ReopenPath = Write-JsonFixture 'simulation-adj-s5-reopen-not-open.json' $s5ReopenFixture
+    $s5ReopenPaths = New-CasePaths 'adj-s5-reopen-not-open'
+    $s5ReopenRun = Invoke-Runner $liveFreezePath $s5ReopenPaths.Evidence $s5ReopenPaths.Raw -FixturePath $s5ReopenPath
+    Assert-True ($s5ReopenRun.ExitCode -eq 0) "S5 reopen simulation crashed: $($s5ReopenRun.Text)"
+    $s5ReopenRecord = Get-Content -LiteralPath (Join-Path $s5ReopenPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5ReopenRecord.scenarios[4].result -eq 'blocked' -and $s5ReopenRecord.scenarios[4].reason -eq 'fresh-create-proof-missing') 'S5 reopen=true snapshot counted as open=true proof'
+
+    Write-Host 'SELFTEST_PHASE=adj-s3-fd-still-open-not-overridable'
+    $s3FdOpenFixture = New-SimulationFixture
+    $s3FdOpenFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a2" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a2|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s3FdOpenPath = Write-JsonFixture 'simulation-adj-s3-fd-still-open.json' $s3FdOpenFixture
+    $s3FdOpenPaths = New-CasePaths 'adj-s3-fd-still-open'
+    $s3FdOpenRun = Invoke-Runner $liveFreezePath $s3FdOpenPaths.Evidence $s3FdOpenPaths.Raw -FixturePath $s3FdOpenPath
+    Assert-True ($s3FdOpenRun.ExitCode -eq 0) "S3 FD_STILL_OPEN simulation crashed: $($s3FdOpenRun.Text)"
+    $s3FdOpenRecord = Get-Content -LiteralPath (Join-Path $s3FdOpenPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3FdOpenRecord.scenarios[2].result -eq 'fail' -and $s3FdOpenRecord.scenarios[2].reason -eq 'fd-still-open-after-destroy' -and $s3FdOpenRecord.scenarios[2].terminal_mode -eq 'callback-post-fd') 'S3 FD_STILL_OPEN was overridden by the process fallback'
+
+    Write-Host 'SELFTEST_PHASE=adj-s3-s7-terminal-missing-post-destroy-fd-still-open-fail'
+    # Destroy terminal is missing (no VPN_DESTROY_RESOLVED/REJECTED) but a post-destroy-phase
+    # FD_STILL_OPEN snapshot is present and the strict-process-boundary prerequisites are complete
+    # with consecutive absent probes: the leaked fd must still fail and the fallback must not pass.
+    $s3TermMissingFdFixture = New-SimulationFixture
+    $s3TermMissingFdFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a2" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a2|trigger=onDestroy|createAccepted=true" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" },
+        [ordered]@{ offset_seconds = 5; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s3TermMissingFdFixture.process_probe_override = [ordered]@{ '3' = @(
+        [ordered]@{ pid = 'absent'; dump = 'present' },
+        [ordered]@{ pid = 'absent'; dump = 'present' }
+    ) }
+    $s3TermMissingFdPath = Write-JsonFixture 'simulation-adj-s3-terminal-missing-fd-still-open.json' $s3TermMissingFdFixture
+    $s3TermMissingFdPaths = New-CasePaths 'adj-s3-terminal-missing-fd-still-open'
+    $s3TermMissingFdRun = Invoke-Runner $liveFreezePath $s3TermMissingFdPaths.Evidence $s3TermMissingFdPaths.Raw -FixturePath $s3TermMissingFdPath
+    Assert-True ($s3TermMissingFdRun.ExitCode -eq 0) "S3 terminal-missing FD_STILL_OPEN simulation crashed: $($s3TermMissingFdRun.Text)"
+    $s3TermMissingFdRecord = Get-Content -LiteralPath (Join-Path $s3TermMissingFdPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3TermMissingFdRecord.scenarios[2].result -eq 'fail' -and $s3TermMissingFdRecord.scenarios[2].reason -eq 'fd-still-open-after-destroy' -and $s3TermMissingFdRecord.scenarios[2].terminal_mode -eq 'callback-post-fd') 'S3 terminal-missing post-destroy FD_STILL_OPEN did not fail'
+    Assert-True (@($s3TermMissingFdRecord.scenarios[2].process_final_state_probes | Where-Object { $_.status -eq 'absent' }).Count -ge 2) 'S3 terminal-missing case absent probes were not recorded (fallback evidence absent)'
+
+    $s7TermMissingFdFixture = New-SimulationFixture
+    $s7TermMissingFdFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a6|trigger=onDestroy|createAccepted=true" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" },
+        [ordered]@{ offset_seconds = 5; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s7TermMissingFdFixture.process_probe_override = [ordered]@{ '7' = @(
+        [ordered]@{ pid = 'absent'; dump = 'present' },
+        [ordered]@{ pid = 'absent'; dump = 'present' }
+    ) }
+    $s7TermMissingFdPath = Write-JsonFixture 'simulation-adj-s7-terminal-missing-fd-still-open.json' $s7TermMissingFdFixture
+    $s7TermMissingFdPaths = New-CasePaths 'adj-s7-terminal-missing-fd-still-open'
+    $s7TermMissingFdRun = Invoke-Runner $liveFreezePath $s7TermMissingFdPaths.Evidence $s7TermMissingFdPaths.Raw -FixturePath $s7TermMissingFdPath
+    Assert-True ($s7TermMissingFdRun.ExitCode -eq 0) "S7 terminal-missing FD_STILL_OPEN simulation crashed: $($s7TermMissingFdRun.Text)"
+    $s7TermMissingFdRecord = Get-Content -LiteralPath (Join-Path $s7TermMissingFdPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s7TermMissingFdRecord.scenarios[6].result -eq 'fail' -and $s7TermMissingFdRecord.scenarios[6].reason -eq 'fd-still-open-after-destroy' -and $s7TermMissingFdRecord.scenarios[6].terminal_mode -eq 'callback-post-fd') 'S7 terminal-missing post-destroy FD_STILL_OPEN did not fail'
+    Assert-True (-not $s7TermMissingFdRecord.scenarios[6].post_cleanup_capture -and -not $s7TermMissingFdRecord.scenarios[6].terminal_assessed) 'S7 FD_STILL_OPEN case still ran uninstall cleanup during scenario'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-fd-still-open-with-capture-degraded-fail'
+    # S5 hard FD_STILL_OPEN fail must outrank capture degradation: the force-stop screenshot
+    # capture fails (capture degraded) in the same window that shows a post-destroy FD_STILL_OPEN.
+    # The scenario verdict stays fail instead of falling to force-stop-capture-degraded/blocked, and
+    # the final record overall/verdict must stay fail too (never downgraded to blocked by degradation).
+    $s5FdDegradedFixture = New-SimulationFixture
+    $s5FdDegradedFixture.capture_failures = @('scenario-5-app-info-force-stop')
+    $s5FdDegradedFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a5|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s5FdDegradedPath = Write-JsonFixture 'simulation-adj-s5-fd-still-open-degraded.json' $s5FdDegradedFixture
+    $s5FdDegradedPaths = New-CasePaths 'adj-s5-fd-still-open-degraded'
+    $s5FdDegradedRun = Invoke-Runner $liveFreezePath $s5FdDegradedPaths.Evidence $s5FdDegradedPaths.Raw -FixturePath $s5FdDegradedPath
+    Assert-True ($s5FdDegradedRun.ExitCode -eq 0) "S5 FD_STILL_OPEN degraded simulation crashed: $($s5FdDegradedRun.Text)"
+    $s5FdDegradedRecord = Get-Content -LiteralPath (Join-Path $s5FdDegradedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5FdDegradedRecord.scenarios[4].result -eq 'fail' -and $s5FdDegradedRecord.scenarios[4].reason -eq 'FD_STILL_OPEN' -and $s5FdDegradedRecord.scenarios[4].fd_still_open -eq $true) 'S5 FD_STILL_OPEN with capture degraded was downgraded to blocked'
+    Assert-True ($s5FdDegradedRecord.scenarios[4].app_info_force_stop_capture.status -eq 'degraded' -and $s5FdDegradedRecord.scenarios[4].force_stop_confirmed -eq $true) 'S5 degraded fixture did not actually degrade the force-stop capture'
+    # The explicit fail must survive all the way to the final record: measured aggregation, final
+    # overall, and verdict all fail even though capture was degraded.
+    Assert-True ([string]$s5FdDegradedRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S5 FD_STILL_OPEN degraded measured aggregation not fail'
+    Assert-True ([string]$s5FdDegradedRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s5FdDegradedRecord.overall -eq 'fail' -and [string]$s5FdDegradedRecord.verdict -eq 'fail') 'S5 FD_STILL_OPEN degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s2-create-rejected-with-capture-degraded-fail'
+    # S2 explicit create rejection on the S2-bound request must outrank the degraded scenario-2-allow
+    # capture: scenario verdict, measured aggregation, final overall, and verdict all stay fail;
+    # Set-CaptureDegradedScenarios/finally never downgrade the fail.
+    $s2RejectedFixture = New-SimulationFixture
+    $s2RejectedFixture.capture_failures = @('scenario-2-allow')
+    $s2RejectedFixture.scenario_events.'2' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_REJECTED|requestId=a2|phase=create|summary=create-rejected" }
+    )
+    $s2RejectedPath = Write-JsonFixture 'simulation-adj-s2-create-rejected-degraded.json' $s2RejectedFixture
+    $s2RejectedPaths = New-CasePaths 'adj-s2-create-rejected-degraded'
+    $s2RejectedRun = Invoke-Runner $liveFreezePath $s2RejectedPaths.Evidence $s2RejectedPaths.Raw -FixturePath $s2RejectedPath
+    Assert-True ($s2RejectedRun.ExitCode -eq 0) "S2 create-rejected degraded simulation crashed: $($s2RejectedRun.Text)"
+    $s2RejectedRecord = Get-Content -LiteralPath (Join-Path $s2RejectedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s2RejectedRecord.scenarios[1].result -eq 'fail' -and $s2RejectedRecord.scenarios[1].reason -eq 'create-rejected-after-allow') 'S2 create rejection with capture degraded was downgraded to blocked'
+    Assert-True (@($s2RejectedRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-2-allow' -and $_.status -eq 'degraded' }).Count -ge 1) 'S2 degraded fixture did not actually degrade the scenario-2-allow capture'
+    Assert-True ([string]$s2RejectedRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S2 create-rejected degraded measured aggregation not fail'
+    Assert-True ([string]$s2RejectedRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s2RejectedRecord.overall -eq 'fail' -and [string]$s2RejectedRecord.verdict -eq 'fail') 'S2 create-rejected degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s4-deny-created-with-capture-degraded-fail'
+    # S4 explicit B create after deny must outrank the degraded scenario-4-deny capture.
+    $s4DenyCreatedFixture = New-SimulationFixture
+    $s4DenyCreatedFixture.capture_failures = @('scenario-4-deny')
+    $s4DenyCreatedFixture.scenario_events.'4' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4" }
+    )
+    $s4DenyCreatedPath = Write-JsonFixture 'simulation-adj-s4-deny-created-degraded.json' $s4DenyCreatedFixture
+    $s4DenyCreatedPaths = New-CasePaths 'adj-s4-deny-created-degraded'
+    $s4DenyCreatedRun = Invoke-Runner $liveFreezePath $s4DenyCreatedPaths.Evidence $s4DenyCreatedPaths.Raw -FixturePath $s4DenyCreatedPath
+    Assert-True ($s4DenyCreatedRun.ExitCode -eq 0) "S4 deny-created degraded simulation crashed: $($s4DenyCreatedRun.Text)"
+    $s4DenyCreatedRecord = Get-Content -LiteralPath (Join-Path $s4DenyCreatedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s4DenyCreatedRecord.scenarios[3].result -eq 'fail' -and $s4DenyCreatedRecord.scenarios[3].reason -eq 'deny-created-B-vpn') 'S4 deny-created with capture degraded was downgraded to blocked'
+    Assert-True (@($s4DenyCreatedRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-4-deny' -and $_.status -eq 'degraded' }).Count -ge 1) 'S4 degraded fixture did not actually degrade the scenario-4-deny capture'
+    Assert-True ([string]$s4DenyCreatedRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S4 deny-created degraded measured aggregation not fail'
+    Assert-True ([string]$s4DenyCreatedRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s4DenyCreatedRecord.overall -eq 'fail' -and [string]$s4DenyCreatedRecord.verdict -eq 'fail') 'S4 deny-created degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-replacement-destroy-fail-with-capture-degraded-fail'
+    # S6 B is accepted and the replacement destroy of A leaks its fd (FD_STILL_OPEN): the dual-active
+    # fail must outrank the degraded scenario-6-conflict capture.
+    $s6ReplaceFailFixture = New-SimulationFixture
+    $s6ReplaceFailFixture.capture_failures = @('scenario-6-conflict')
+    $s6ReplaceFailFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 10; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a6|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 11; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s6ReplaceFailPath = Write-JsonFixture 'simulation-adj-s6-replacement-destroy-fail-degraded.json' $s6ReplaceFailFixture
+    $s6ReplaceFailPaths = New-CasePaths 'adj-s6-replacement-destroy-fail-degraded'
+    $s6ReplaceFailRun = Invoke-Runner $liveFreezePath $s6ReplaceFailPaths.Evidence $s6ReplaceFailPaths.Raw -FixturePath $s6ReplaceFailPath
+    Assert-True ($s6ReplaceFailRun.ExitCode -eq 0) "S6 replacement destroy fail degraded simulation crashed: $($s6ReplaceFailRun.Text)"
+    $s6ReplaceFailRecord = Get-Content -LiteralPath (Join-Path $s6ReplaceFailPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6ReplaceFailRecord.scenarios[5].result -eq 'fail' -and $s6ReplaceFailRecord.scenarios[5].reason -eq 'fd-still-open-after-destroy') 'S6 replacement destroy fail with capture degraded was downgraded to blocked'
+    Assert-True (@($s6ReplaceFailRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-6-conflict' -and $_.status -eq 'degraded' }).Count -ge 1) 'S6 degraded fixture did not actually degrade the scenario-6-conflict capture'
+    Assert-True ([string]$s6ReplaceFailRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S6 replacement destroy fail degraded measured aggregation not fail'
+    Assert-True ([string]$s6ReplaceFailRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s6ReplaceFailRecord.overall -eq 'fail' -and [string]$s6ReplaceFailRecord.verdict -eq 'fail') 'S6 replacement destroy fail degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-replacement-destroy-fail-with-dual-false-unresolved-fail'
+    # replacementDestroy.fail must outrank operator dual-false (unresolved): scenario, measured,
+    # final overall, and verdict all stay fail; operator_state remains dual-active-observation-unresolved.
+    $s6ReplaceFailUnresolvedFixture = New-SimulationFixture
+    $s6ReplaceFailUnresolvedFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $false
+    $s6ReplaceFailUnresolvedFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $false
+    $s6ReplaceFailUnresolvedFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 10; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a6|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 11; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s6ReplaceFailUnresolvedPath = Write-JsonFixture 'simulation-adj-s6-replacement-fail-dual-false.json' $s6ReplaceFailUnresolvedFixture
+    $s6ReplaceFailUnresolvedPaths = New-CasePaths 'adj-s6-replacement-fail-dual-false'
+    $s6ReplaceFailUnresolvedRun = Invoke-Runner $liveFreezePath $s6ReplaceFailUnresolvedPaths.Evidence $s6ReplaceFailUnresolvedPaths.Raw -FixturePath $s6ReplaceFailUnresolvedPath
+    Assert-True ($s6ReplaceFailUnresolvedRun.ExitCode -eq 0) "S6 replacement fail + dual-false simulation crashed: $($s6ReplaceFailUnresolvedRun.Text)"
+    $s6ReplaceFailUnresolvedRecord = Get-Content -LiteralPath (Join-Path $s6ReplaceFailUnresolvedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6ReplaceFailUnresolvedRecord.scenarios[5].result -eq 'fail' -and $s6ReplaceFailUnresolvedRecord.scenarios[5].reason -eq 'fd-still-open-after-destroy') 'S6 replacement destroy fail was overridden by dual-false unresolved'
+    Assert-True ($s6ReplaceFailUnresolvedRecord.scenarios[5].no_dual_active_confirmed -eq $false -and $s6ReplaceFailUnresolvedRecord.scenarios[5].dual_active_confirmed -eq $false -and [string]$s6ReplaceFailUnresolvedRecord.scenarios[5].operator_state -eq 'dual-active-observation-unresolved') 'S6 replacement fail + dual-false operator fields mismatch'
+    Assert-True ([string]$s6ReplaceFailUnresolvedRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S6 replacement fail + dual-false measured aggregation not fail'
+    Assert-True ([string]$s6ReplaceFailUnresolvedRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s6ReplaceFailUnresolvedRecord.overall -eq 'fail' -and [string]$s6ReplaceFailUnresolvedRecord.verdict -eq 'fail') 'S6 replacement fail + dual-false final overall/verdict not fail'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-replacement-destroy-fail-with-dual-true-inconsistent-fail'
+    # replacementDestroy.fail must also outrank operator dual-true (inconsistent): scenario, measured,
+    # final overall, and verdict all stay fail; operator_state remains inconsistent-operator-confirmation.
+    $s6ReplaceFailInconsistentFixture = New-SimulationFixture
+    $s6ReplaceFailInconsistentFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $true
+    $s6ReplaceFailInconsistentFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $true
+    $s6ReplaceFailInconsistentFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 10; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a6|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 11; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s6ReplaceFailInconsistentPath = Write-JsonFixture 'simulation-adj-s6-replacement-fail-dual-true.json' $s6ReplaceFailInconsistentFixture
+    $s6ReplaceFailInconsistentPaths = New-CasePaths 'adj-s6-replacement-fail-dual-true'
+    $s6ReplaceFailInconsistentRun = Invoke-Runner $liveFreezePath $s6ReplaceFailInconsistentPaths.Evidence $s6ReplaceFailInconsistentPaths.Raw -FixturePath $s6ReplaceFailInconsistentPath
+    Assert-True ($s6ReplaceFailInconsistentRun.ExitCode -eq 0) "S6 replacement fail + dual-true simulation crashed: $($s6ReplaceFailInconsistentRun.Text)"
+    $s6ReplaceFailInconsistentRecord = Get-Content -LiteralPath (Join-Path $s6ReplaceFailInconsistentPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6ReplaceFailInconsistentRecord.scenarios[5].result -eq 'fail' -and $s6ReplaceFailInconsistentRecord.scenarios[5].reason -eq 'fd-still-open-after-destroy') 'S6 replacement destroy fail was overridden by dual-true inconsistent'
+    Assert-True ($s6ReplaceFailInconsistentRecord.scenarios[5].no_dual_active_confirmed -eq $true -and $s6ReplaceFailInconsistentRecord.scenarios[5].dual_active_confirmed -eq $true -and [string]$s6ReplaceFailInconsistentRecord.scenarios[5].operator_state -eq 'inconsistent-operator-confirmation') 'S6 replacement fail + dual-true operator fields mismatch'
+    Assert-True ([string]$s6ReplaceFailInconsistentRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S6 replacement fail + dual-true measured aggregation not fail'
+    Assert-True ([string]$s6ReplaceFailInconsistentRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s6ReplaceFailInconsistentRecord.overall -eq 'fail' -and [string]$s6ReplaceFailInconsistentRecord.verdict -eq 'fail') 'S6 replacement fail + dual-true final overall/verdict not fail'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-dual-active-observed-fail'
+    # S6 operator three-state: NO-DUAL-ACTIVE-CAPTURED=false and the independent
+    # DUAL-ACTIVE-CAPTURED=true (A and B clearly both active on screen) is the only operator fail.
+    $s6DualActiveFixture = New-SimulationFixture
+    $s6DualActiveFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $false
+    $s6DualActiveFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $true
+    $s6DualActivePath = Write-JsonFixture 'simulation-adj-s6-dual-active-observed.json' $s6DualActiveFixture
+    $s6DualActivePaths = New-CasePaths 'adj-s6-dual-active-observed'
+    $s6DualActiveRun = Invoke-Runner $liveFreezePath $s6DualActivePaths.Evidence $s6DualActivePaths.Raw -FixturePath $s6DualActivePath
+    Assert-True ($s6DualActiveRun.ExitCode -eq 0) "S6 dual-active-observed simulation crashed: $($s6DualActiveRun.Text)"
+    $s6DualActiveRecord = Get-Content -LiteralPath (Join-Path $s6DualActivePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6DualActiveRecord.scenarios[5].result -eq 'fail' -and $s6DualActiveRecord.scenarios[5].reason -eq 'dual-active-observed') 'S6 dual-active-observed did not fail'
+    Assert-True ($s6DualActiveRecord.scenarios[5].no_dual_active_confirmed -eq $false -and $s6DualActiveRecord.scenarios[5].dual_active_confirmed -eq $true -and [string]$s6DualActiveRecord.scenarios[5].operator_state -eq 'dual-active-observed') 'S6 dual-active-observed operator fields mismatch'
+    Assert-True ([string]$s6DualActiveRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S6 dual-active-observed measured aggregation not fail'
+    # Explicit dual-active fail must also surface as final overall/verdict fail (never collapsed to blocked).
+    Assert-True ([string]$s6DualActiveRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s6DualActiveRecord.overall -eq 'fail' -and [string]$s6DualActiveRecord.verdict -eq 'fail') 'S6 dual-active-observed final overall/verdict not fail'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-dual-active-observation-unresolved-blocked'
+    # Both confirmations false (operator left both empty) and no functional fail: blocked
+    # dual-active-observation-unresolved, never a fail from an empty/false answer alone.
+    $s6UnresolvedFixture = New-SimulationFixture
+    $s6UnresolvedFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $false
+    $s6UnresolvedFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $false
+    $s6UnresolvedPath = Write-JsonFixture 'simulation-adj-s6-dual-active-unresolved.json' $s6UnresolvedFixture
+    $s6UnresolvedPaths = New-CasePaths 'adj-s6-dual-active-unresolved'
+    $s6UnresolvedRun = Invoke-Runner $liveFreezePath $s6UnresolvedPaths.Evidence $s6UnresolvedPaths.Raw -FixturePath $s6UnresolvedPath
+    Assert-True ($s6UnresolvedRun.ExitCode -eq 0) "S6 dual-active-unresolved simulation crashed: $($s6UnresolvedRun.Text)"
+    $s6UnresolvedRecord = Get-Content -LiteralPath (Join-Path $s6UnresolvedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6UnresolvedRecord.scenarios[5].result -eq 'blocked' -and $s6UnresolvedRecord.scenarios[5].reason -eq 'dual-active-observation-unresolved') 'S6 both-false operator confirmation did not stay blocked unresolved'
+    Assert-True ($s6UnresolvedRecord.scenarios[5].no_dual_active_confirmed -eq $false -and $s6UnresolvedRecord.scenarios[5].dual_active_confirmed -eq $false -and [string]$s6UnresolvedRecord.scenarios[5].operator_state -eq 'dual-active-observation-unresolved') 'S6 unresolved operator fields mismatch'
+    Assert-True ([string]$s6UnresolvedRecord.scenario_aggregation.measured_scenario_overall -eq 'blocked' -and [string]$s6UnresolvedRecord.overall -eq 'blocked') 'S6 unresolved did not block aggregation/overall'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-inconsistent-operator-confirmation-blocked'
+    # Both confirmations true is contradictory and no functional fail: blocked
+    # inconsistent-operator-confirmation, never fail.
+    $s6InconsistentFixture = New-SimulationFixture
+    $s6InconsistentFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $true
+    $s6InconsistentFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $true
+    $s6InconsistentPath = Write-JsonFixture 'simulation-adj-s6-inconsistent-confirmation.json' $s6InconsistentFixture
+    $s6InconsistentPaths = New-CasePaths 'adj-s6-inconsistent-confirmation'
+    $s6InconsistentRun = Invoke-Runner $liveFreezePath $s6InconsistentPaths.Evidence $s6InconsistentPaths.Raw -FixturePath $s6InconsistentPath
+    Assert-True ($s6InconsistentRun.ExitCode -eq 0) "S6 inconsistent confirmation simulation crashed: $($s6InconsistentRun.Text)"
+    $s6InconsistentRecord = Get-Content -LiteralPath (Join-Path $s6InconsistentPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6InconsistentRecord.scenarios[5].result -eq 'blocked' -and $s6InconsistentRecord.scenarios[5].reason -eq 'inconsistent-operator-confirmation') 'S6 both-true operator confirmation did not stay blocked inconsistent'
+    Assert-True ($s6InconsistentRecord.scenarios[5].no_dual_active_confirmed -eq $true -and $s6InconsistentRecord.scenarios[5].dual_active_confirmed -eq $true -and [string]$s6InconsistentRecord.scenarios[5].operator_state -eq 'inconsistent-operator-confirmation') 'S6 inconsistent operator fields mismatch'
+    Assert-True ([string]$s6InconsistentRecord.scenario_aggregation.measured_scenario_overall -eq 'blocked' -and [string]$s6InconsistentRecord.overall -eq 'blocked') 'S6 inconsistent did not block aggregation/overall'
+
+    Write-Host 'SELFTEST_PHASE=adj-s6-dual-active-observed-with-capture-degraded-fail'
+    # The operator-confirmed dual-active fail must outrank the degraded scenario-6-conflict capture:
+    # scenario verdict, measured aggregation, final overall, and verdict all stay fail.
+    $s6DualDegradedFixture = New-SimulationFixture
+    $s6DualDegradedFixture.capture_failures = @('scenario-6-conflict')
+    $s6DualDegradedFixture.operator.confirmations.'NO-DUAL-ACTIVE-CAPTURED' = $false
+    $s6DualDegradedFixture.operator.confirmations.'DUAL-ACTIVE-CAPTURED' = $true
+    $s6DualDegradedPath = Write-JsonFixture 'simulation-adj-s6-dual-active-observed-degraded.json' $s6DualDegradedFixture
+    $s6DualDegradedPaths = New-CasePaths 'adj-s6-dual-active-observed-degraded'
+    $s6DualDegradedRun = Invoke-Runner $liveFreezePath $s6DualDegradedPaths.Evidence $s6DualDegradedPaths.Raw -FixturePath $s6DualDegradedPath
+    Assert-True ($s6DualDegradedRun.ExitCode -eq 0) "S6 dual-active-observed degraded simulation crashed: $($s6DualDegradedRun.Text)"
+    $s6DualDegradedRecord = Get-Content -LiteralPath (Join-Path $s6DualDegradedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6DualDegradedRecord.scenarios[5].result -eq 'fail' -and $s6DualDegradedRecord.scenarios[5].reason -eq 'dual-active-observed') 'S6 dual-active-observed with capture degraded was downgraded to blocked'
+    Assert-True (@($s6DualDegradedRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-6-conflict' -and $_.status -eq 'degraded' }).Count -ge 1) 'S6 dual-active degraded fixture did not actually degrade the scenario-6-conflict capture'
+    Assert-True ([string]$s6DualDegradedRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S6 dual-active-observed degraded measured aggregation not fail'
+    Assert-True ([string]$s6DualDegradedRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s6DualDegradedRecord.overall -eq 'fail' -and [string]$s6DualDegradedRecord.verdict -eq 'fail') 'S6 dual-active-observed degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-observation-only-vpn-page-capture-degraded-non-blocking'
+    # The Settings>VPN page capture is observation-only: its failure still writes a degraded
+    # CaptureArtifacts entry and an independent observation_only_degraded diagnostic, but never enters
+    # the global capture_degraded list and never blocks scenario 5 or the final overall. The decisive
+    # app-info force-stop capture failure stays blocking (covered by adj-s5-fd-still-open-degraded and
+    # the force-stop-capture-degraded path).
+    $s5ObsOnlyFixture = New-SimulationFixture
+    $s5ObsOnlyFixture.capture_failures = @('scenario-5-settings-vpn-page')
+    $s5ObsOnlyPath = Write-JsonFixture 'simulation-adj-s5-observation-only-vpn-page-degraded.json' $s5ObsOnlyFixture
+    $s5ObsOnlyPaths = New-CasePaths 'adj-s5-observation-only-vpn-page-degraded'
+    $s5ObsOnlyRun = Invoke-Runner $liveFreezePath $s5ObsOnlyPaths.Evidence $s5ObsOnlyPaths.Raw -FixturePath $s5ObsOnlyPath
+    Assert-True ($s5ObsOnlyRun.ExitCode -eq 0) "S5 observation-only VPN page degraded simulation crashed: $($s5ObsOnlyRun.Text)"
+    $s5ObsOnlyRecord = Get-Content -LiteralPath (Join-Path $s5ObsOnlyPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5ObsOnlyRecord.scenarios[4].result -eq 'pass' -and $s5ObsOnlyRecord.scenarios[4].reason -eq 'settings-app-info-force-stop-terminal') 'S5 observation-only VPN page capture degradation blocked pass'
+    Assert-True ($s5ObsOnlyRecord.scenarios[4].settings_vpn_page_capture.status -eq 'degraded' -and $s5ObsOnlyRecord.scenarios[4].settings_vpn_page_capture.visible -eq $true) 'S5 observation-only VPN page capture degradation not recorded as degraded artifact'
+    Assert-True (@($s5ObsOnlyRecord.observation_only_degraded | Where-Object { $_.name -eq 'scenario-5-settings-vpn-page' -and $_.status -eq 'degraded' }).Count -eq 1) 'S5 observation-only degradation missing from observation_only_degraded diagnostic'
+    Assert-True (@($s5ObsOnlyRecord.capture_degraded | Where-Object { [int]$_.scenario -eq 5 -and [string]$_.component -eq 'screen-layout-capture' }).Count -eq 0) 'S5 observation-only degradation entered global capture_degraded'
+    Assert-True (@($s5ObsOnlyRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-5-settings-vpn-page' -and $_.status -eq 'degraded' }).Count -ge 1) 'S5 observation-only degraded capture missing from screenshot_reference'
+    Assert-True ([string]$s5ObsOnlyRecord.scenario_aggregation.measured_scenario_overall -eq 'pass') 'S5 observation-only VPN page degradation blocked measured aggregation'
+    # LiveSimulation final overall/verdict stays blocked by contract; the non-blocking proof is that
+    # the observation-only degradation never entered capture_degraded (asserted above) and never
+    # triggered the degradation path, so a real live run would aggregate pass.
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-decisive-force-stop-capture-degraded-blocked'
+    # The decisive app-info-force-stop capture is NOT observation-only: its failure enters the
+    # global capture_degraded list and blocks scenario 5 (force-stop-capture-degraded), unlike the
+    # observation-only Settings>VPN page capture above.
+    $s5DecisiveFixture = New-SimulationFixture
+    $s5DecisiveFixture.capture_failures = @('scenario-5-app-info-force-stop')
+    $s5DecisivePath = Write-JsonFixture 'simulation-adj-s5-decisive-force-stop-degraded.json' $s5DecisiveFixture
+    $s5DecisivePaths = New-CasePaths 'adj-s5-decisive-force-stop-degraded'
+    $s5DecisiveRun = Invoke-Runner $liveFreezePath $s5DecisivePaths.Evidence $s5DecisivePaths.Raw -FixturePath $s5DecisivePath
+    Assert-True ($s5DecisiveRun.ExitCode -eq 0) "S5 decisive force-stop capture degraded simulation crashed: $($s5DecisiveRun.Text)"
+    $s5DecisiveRecord = Get-Content -LiteralPath (Join-Path $s5DecisivePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5DecisiveRecord.scenarios[4].result -eq 'blocked') 'S5 decisive app-info-force-stop capture degradation did not block'
+    Assert-True ($s5DecisiveRecord.scenarios[4].app_info_force_stop_capture.status -eq 'degraded' -and $s5DecisiveRecord.scenarios[4].force_stop_confirmed -eq $true) 'S5 decisive degraded fixture did not actually degrade the force-stop capture'
+    Assert-True (@($s5DecisiveRecord.capture_degraded | Where-Object { [int]$_.scenario -eq 5 -and [string]$_.component -eq 'screen-layout-capture' }).Count -ge 1) 'S5 decisive force-stop degradation missing from global capture_degraded'
+    Assert-True (@($s5DecisiveRecord.observation_only_degraded | Where-Object { $_.name -eq 'scenario-5-app-info-force-stop' }).Count -eq 0) 'S5 decisive force-stop degradation wrongly recorded as observation-only'
+    Assert-True ([string]$s5DecisiveRecord.scenario_aggregation.measured_scenario_overall -eq 'blocked') 'S5 decisive force-stop degradation did not block measured aggregation'
+
+    Write-Host 'SELFTEST_PHASE=adj-s7-final-destroy-fail-with-capture-degraded-fail'
+    # S7 final destroy leaks the fd (FD_STILL_OPEN): fail must outrank the degraded final-state capture.
+    $s7FdFailFixture = New-SimulationFixture
+    $s7FdFailFixture.capture_failures = @('scenario-7-final-state')
+    $s7FdFailFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a6|fdMarker=FD_STILL_OPEN" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    $s7FdFailPath = Write-JsonFixture 'simulation-adj-s7-final-destroy-fail-degraded.json' $s7FdFailFixture
+    $s7FdFailPaths = New-CasePaths 'adj-s7-final-destroy-fail-degraded'
+    $s7FdFailRun = Invoke-Runner $liveFreezePath $s7FdFailPaths.Evidence $s7FdFailPaths.Raw -FixturePath $s7FdFailPath
+    Assert-True ($s7FdFailRun.ExitCode -eq 0) "S7 final destroy fail degraded simulation crashed: $($s7FdFailRun.Text)"
+    $s7FdFailRecord = Get-Content -LiteralPath (Join-Path $s7FdFailPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s7FdFailRecord.scenarios[6].result -eq 'fail' -and $s7FdFailRecord.scenarios[6].reason -eq 'fd-still-open-after-destroy') 'S7 final destroy fail with capture degraded was downgraded to blocked'
+    Assert-True (-not $s7FdFailRecord.scenarios[6].post_cleanup_capture -and -not $s7FdFailRecord.scenarios[6].terminal_assessed) 'S7 final destroy fail still ran in-window cleanup'
+    Assert-True (@($s7FdFailRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-final-state' -and $_.status -eq 'degraded' }).Count -ge 1) 'S7 degraded fixture did not actually degrade the final-state capture'
+    Assert-True ([string]$s7FdFailRecord.scenario_aggregation.measured_scenario_overall -eq 'fail') 'S7 final destroy fail degraded measured aggregation not fail'
+    Assert-True ([string]$s7FdFailRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s7FdFailRecord.overall -eq 'fail' -and [string]$s7FdFailRecord.verdict -eq 'fail') 'S7 final destroy fail degraded final overall/verdict downgraded to blocked'
+
+    Write-Host 'SELFTEST_PHASE=adj-s5-force-stop-flow'
+    $s5MissingConfirmFixture = New-SimulationFixture
+    $s5MissingConfirmFixture.operator.confirmations.'SETTINGS-APP-INFO-FORCE-STOP-CAPTURED' = $false
+    $s5MissingConfirmPath = Write-JsonFixture 'simulation-adj-s5-missing-confirm.json' $s5MissingConfirmFixture
+    $s5MissingConfirmPaths = New-CasePaths 'adj-s5-missing-confirm'
+    $s5MissingConfirmRun = Invoke-Runner $liveFreezePath $s5MissingConfirmPaths.Evidence $s5MissingConfirmPaths.Raw -FixturePath $s5MissingConfirmPath
+    Assert-True ($s5MissingConfirmRun.ExitCode -eq 0) "S5 missing confirmation simulation crashed: $($s5MissingConfirmRun.Text)"
+    $s5MissingConfirmRecord = Get-Content -LiteralPath (Join-Path $s5MissingConfirmPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5MissingConfirmRecord.scenarios[4].result -eq 'blocked' -and -not $s5MissingConfirmRecord.scenarios[4].force_stop_confirmed) 'S5 without force-stop confirmation passed'
+    Assert-True ($s5MissingConfirmRecord.scenarios[4].reason -eq 'force-stop-not-confirmed') 'S5 missing confirmation reason mismatch'
+
+    $s5BundleAbsentFixture = New-SimulationFixture
+    $s5BundleAbsentFixture.process_probe_override = [ordered]@{ '5' = @([ordered]@{ pid = 'absent'; dump = 'absent' }) }
+    $s5BundleAbsentPath = Write-JsonFixture 'simulation-adj-s5-bundle-absent.json' $s5BundleAbsentFixture
+    $s5BundleAbsentPaths = New-CasePaths 'adj-s5-bundle-absent'
+    $s5BundleAbsentRun = Invoke-Runner $liveFreezePath $s5BundleAbsentPaths.Evidence $s5BundleAbsentPaths.Raw -FixturePath $s5BundleAbsentPath
+    Assert-True ($s5BundleAbsentRun.ExitCode -eq 0) "S5 bundle absent simulation crashed: $($s5BundleAbsentRun.Text)"
+    $s5BundleAbsentRecord = Get-Content -LiteralPath (Join-Path $s5BundleAbsentPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5BundleAbsentRecord.scenarios[4].result -eq 'blocked' -and -not $s5BundleAbsentRecord.scenarios[4].bundle_present_during_probe) 'S5 with non-pass BundleDump during probes passed'
+    Assert-True ($s5BundleAbsentRecord.scenarios[4].reason -eq 'probe-unknown-or-error') 'S5 non-pass BundleDump must abort as unknown/error, not accumulate absent'
+
+    $s5NoFreshFixture = New-SimulationFixture
+    $s5NoFreshFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP_SKIPPED|bundle=cn.alfadb.netbird.e3physvpna|reason=no-active-request" }
+    )
+    $s5NoFreshPath = Write-JsonFixture 'simulation-adj-s5-no-fresh-create.json' $s5NoFreshFixture
+    $s5NoFreshPaths = New-CasePaths 'adj-s5-no-fresh-create'
+    $s5NoFreshRun = Invoke-Runner $liveFreezePath $s5NoFreshPaths.Evidence $s5NoFreshPaths.Raw -FixturePath $s5NoFreshPath
+    Assert-True ($s5NoFreshRun.ExitCode -eq 0) "S5 no fresh create simulation crashed: $($s5NoFreshRun.Text)"
+    $s5NoFreshRecord = Get-Content -LiteralPath (Join-Path $s5NoFreshPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5NoFreshRecord.scenarios[4].result -eq 'blocked' -and $s5NoFreshRecord.scenarios[4].reason -match 'vpn-on-create-missing|vpn-create-fd-missing|fresh-create-proof-missing') 'S5 without fresh create passed'
+
+    $s5NoOpenFixture = New-SimulationFixture
+    $s5NoOpenFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" }
+    )
+    $s5NoOpenPath = Write-JsonFixture 'simulation-adj-s5-no-post-create-open.json' $s5NoOpenFixture
+    $s5NoOpenPaths = New-CasePaths 'adj-s5-no-post-create-open'
+    $s5NoOpenRun = Invoke-Runner $liveFreezePath $s5NoOpenPaths.Evidence $s5NoOpenPaths.Raw -FixturePath $s5NoOpenPath
+    Assert-True ($s5NoOpenRun.ExitCode -eq 0) "S5 no post-create open simulation crashed: $($s5NoOpenRun.Text)"
+    $s5NoOpenRecord = Get-Content -LiteralPath (Join-Path $s5NoOpenPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5NoOpenRecord.scenarios[4].result -eq 'blocked' -and $s5NoOpenRecord.scenarios[4].reason -eq 'fresh-create-proof-missing') 'S5 without post-create open=true passed'
+    Assert-True ([string]$s5NoOpenRecord.scenarios[4].assertions.fresh_create_proof -eq 'blocked') 'S5 fresh_create_proof assertion not blocked without open snapshot'
+
+    $s5OverrideGarbageFixture = New-SimulationFixture
+    $s5OverrideGarbageFixture.process_probe_override = [ordered]@{ '5' = @([ordered]@{ pid = 'not-a-status'; dump = 'present' }) }
+    $s5OverrideGarbagePath = Write-JsonFixture 'simulation-adj-s5-override-garbage.json' $s5OverrideGarbageFixture
+    $s5OverrideGarbagePaths = New-CasePaths 'adj-s5-override-garbage'
+    $s5OverrideGarbageRun = Invoke-Runner $liveFreezePath $s5OverrideGarbagePaths.Evidence $s5OverrideGarbagePaths.Raw -FixturePath $s5OverrideGarbagePath
+    Assert-True ($s5OverrideGarbageRun.ExitCode -eq 0) "S5 garbage override simulation crashed: $($s5OverrideGarbageRun.Text)"
+    $s5OverrideGarbageRecord = Get-Content -LiteralPath (Join-Path $s5OverrideGarbagePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5OverrideGarbageRecord.scenarios[4].result -eq 'blocked' -and $s5OverrideGarbageRecord.scenarios[4].reason -eq 'probe-unknown-or-error') 'S5 unknown process_probe_override enum did not abort as unknown'
+
+    $s5OverrideFailureFixture = New-SimulationFixture
+    $s5OverrideFailureFixture.process_probe_override = [ordered]@{ '5' = @([ordered]@{ pid = 'absent'; dump = 'present' }) }
+    # Baseline A/B dumps (1-2) + install A/B dumps (3-4); first S5 probe dump is occurrence 5. Failure must beat override.
+    $s5OverrideFailureFixture.hdc_failures = @(
+        [ordered]@{ operation = 'BundleDump'; occurrence = 5; exit_code = 1; stdout = ''; stderr = 'forced-failure-over-override' }
+    )
+    $s5OverrideFailurePath = Write-JsonFixture 'simulation-adj-s5-override-failure.json' $s5OverrideFailureFixture
+    $s5OverrideFailurePaths = New-CasePaths 'adj-s5-override-failure'
+    $s5OverrideFailureRun = Invoke-Runner $liveFreezePath $s5OverrideFailurePaths.Evidence $s5OverrideFailurePaths.Raw -FixturePath $s5OverrideFailurePath
+    Assert-True ($s5OverrideFailureRun.ExitCode -eq 0) "S5 override+failure simulation crashed: $($s5OverrideFailureRun.Text)"
+    $s5OverrideFailureRecord = Get-Content -LiteralPath (Join-Path $s5OverrideFailurePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5OverrideFailureRecord.scenarios[4].result -eq 'blocked' -and $s5OverrideFailureRecord.scenarios[4].reason -eq 'probe-unknown-or-error') 'S5 hdc_failures did not take priority over process_probe_override'
+
+    $s5VpnPageFalseFixture = New-SimulationFixture
+    $s5VpnPageFalseFixture.operator.confirmations.'SETTINGS-VPN-PAGE-VISIBLE' = $false
+    $s5VpnPageFalsePath = Write-JsonFixture 'simulation-adj-s5-vpn-page-false.json' $s5VpnPageFalseFixture
+    $s5VpnPageFalsePaths = New-CasePaths 'adj-s5-vpn-page-false'
+    $s5VpnPageFalseRun = Invoke-Runner $liveFreezePath $s5VpnPageFalsePaths.Evidence $s5VpnPageFalsePaths.Raw -FixturePath $s5VpnPageFalsePath
+    Assert-True ($s5VpnPageFalseRun.ExitCode -eq 0) "S5 VPN page false simulation crashed: $($s5VpnPageFalseRun.Text)"
+    $s5VpnPageFalseRecord = Get-Content -LiteralPath (Join-Path $s5VpnPageFalsePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5VpnPageFalseRecord.scenarios[4].result -eq 'pass' -and $s5VpnPageFalseRecord.scenarios[4].settings_vpn_page_observation_only -eq $true) 'S5 VPN page observation still blocked pass'
+    Assert-True ($s5VpnPageFalseRecord.scenarios[4].settings_vpn_page_capture.status -eq 'degraded' -and -not $s5VpnPageFalseRecord.scenarios[4].settings_vpn_page_capture.visible) 'S5 VPN page capture degraded state not recorded'
+
+    Write-Host 'SELFTEST_PHASE=adj-s3-s7-request-binding-and-future-events'
+    $s3WrongIdFixture = New-SimulationFixture
+    $s3WrongIdFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a-wrong" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a-wrong" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a-wrong|trigger=onDestroy" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a-wrong|fdMarker=FD_CLOSED_CONFIRMED" },
+        [ordered]@{ offset_seconds = 5; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a-wrong|phase=post-destroy-resolved|open=false|marker=FD_CLOSED_CONFIRMED" }
+    )
+    $s3WrongIdPath = Write-JsonFixture 'simulation-adj-s3-wrong-request.json' $s3WrongIdFixture
+    $s3WrongIdPaths = New-CasePaths 'adj-s3-wrong-request'
+    $s3WrongIdRun = Invoke-Runner $liveFreezePath $s3WrongIdPaths.Evidence $s3WrongIdPaths.Raw -FixturePath $s3WrongIdPath
+    Assert-True ($s3WrongIdRun.ExitCode -eq 0) "S3 wrong requestId simulation crashed: $($s3WrongIdRun.Text)"
+    $s3WrongIdRecord = Get-Content -LiteralPath (Join-Path $s3WrongIdPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3WrongIdRecord.scenarios[2].result -eq 'blocked' -and [string]$s3WrongIdRecord.scenarios[2].request_id -eq 'a2') 'S3 accepted wrong-bundle-correct stop id instead of S2-bound a2'
+    Assert-True ($s3WrongIdRecord.scenarios[2].reason -match 'strict-fallback-stop-unique-missing|destroy-requestId-unresolved|destroy-terminal|destroy-ondestroy|strict-fallback') 'S3 wrong requestId reason mismatch'
+
+    $s7WrongIdFixture = New-SimulationFixture
+    $s7WrongIdFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a-wrong7" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a-wrong7" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a-wrong7|fdMarker=FD_CLOSED_CONFIRMED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a-wrong7|phase=post-destroy-resolved|open=false|marker=FD_CLOSED_CONFIRMED" }
+    )
+    $s7WrongIdPath = Write-JsonFixture 'simulation-adj-s7-wrong-request.json' $s7WrongIdFixture
+    $s7WrongIdPaths = New-CasePaths 'adj-s7-wrong-request'
+    $s7WrongIdRun = Invoke-Runner $liveFreezePath $s7WrongIdPaths.Evidence $s7WrongIdPaths.Raw -FixturePath $s7WrongIdPath
+    Assert-True ($s7WrongIdRun.ExitCode -eq 0) "S7 wrong requestId simulation crashed: $($s7WrongIdRun.Text)"
+    $s7WrongIdRecord = Get-Content -LiteralPath (Join-Path $s7WrongIdPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s7WrongIdRecord.scenarios[6].result -eq 'blocked' -and [string]$s7WrongIdRecord.scenarios[6].request_id -eq 'a6') 'S7 did not stay bound to active a6 request'
+    Assert-True (-not $s7WrongIdRecord.scenarios[6].post_cleanup_capture -and -not $s7WrongIdRecord.scenarios[6].terminal_assessed) 'S7 wrong requestId still uninstalled during scenario'
+    Assert-True (@($s7WrongIdRecord.cleanup_result.actions | Where-Object { [string]$_.operation -eq 'Uninstall' }).Count -eq 0) 'S7 wrong-id fixture performed in-window uninstall'
+
+    $s3FutureDestroyFixture = New-SimulationFixture
+    $s3FutureDestroyFixture.scenario_events.'3' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a2" },
+        [ordered]@{ offset_seconds = 45; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a2" },
+        [ordered]@{ offset_seconds = 46; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a2|trigger=onDestroy|createAccepted=true" },
+        [ordered]@{ offset_seconds = 47; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a2|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN" }
+    )
+    $s3FutureDestroyPath = Write-JsonFixture 'simulation-adj-s3-future-destroy.json' $s3FutureDestroyFixture
+    $s3FutureDestroyPaths = New-CasePaths 'adj-s3-future-destroy'
+    $s3FutureDestroyRun = Invoke-Runner $liveFreezePath $s3FutureDestroyPaths.Evidence $s3FutureDestroyPaths.Raw -FixturePath $s3FutureDestroyPath
+    Assert-True ($s3FutureDestroyRun.ExitCode -eq 0) "S3 future destroy simulation crashed: $($s3FutureDestroyRun.Text)"
+    $s3FutureDestroyRecord = Get-Content -LiteralPath (Join-Path $s3FutureDestroyPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s3FutureDestroyRecord.scenarios[2].result -eq 'pass' -and $s3FutureDestroyRecord.scenarios[2].terminal_mode -eq 'strict-process-boundary') 'S3 future destroy did not pass via in-window progressive probes'
+    $s3FutureProbes = @($s3FutureDestroyRecord.scenarios[2].process_final_state_probes)
+    Assert-True ($s3FutureProbes.Count -ge 2) 'S3 future destroy probes missing'
+    $s3ActionPrompt = [DateTimeOffset]::Parse([string]$s3FutureDestroyRecord.scenarios[2].observation.action_prompt_at)
+    $s3FirstProbeAt = [DateTimeOffset]::Parse([string]$s3FutureProbes[0].time)
+    Assert-True (($s3FirstProbeAt - $s3ActionPrompt).TotalSeconds -ge 45) 'S3 probes armed from future destroy markers before virtual elapsed time'
+
+    Write-Host 'SELFTEST_PHASE=adj-s7-post-uninstall-backfeed-blocked'
+    $s7BackfeedFixture = New-SimulationFixture
+    $s7BackfeedFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_BEGIN|requestId=a6|trigger=onDestroy" }
+    )
+    $s7BackfeedFixture.process_probe_override = [ordered]@{ '7' = @([ordered]@{ pid = 'present'; dump = 'present' }) }
+    $s7BackfeedPath = Write-JsonFixture 'simulation-adj-s7-backfeed.json' $s7BackfeedFixture
+    $s7BackfeedPaths = New-CasePaths 'adj-s7-backfeed'
+    $s7BackfeedRun = Invoke-Runner $liveFreezePath $s7BackfeedPaths.Evidence $s7BackfeedPaths.Raw -FixturePath $s7BackfeedPath
+    Assert-True ($s7BackfeedRun.ExitCode -eq 0) "S7 backfeed simulation crashed: $($s7BackfeedRun.Text)"
+    $s7BackfeedRecord = Get-Content -LiteralPath (Join-Path $s7BackfeedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s7BackfeedRecord.scenarios[6].result -eq 'blocked' -and -not $s7BackfeedRecord.scenarios[6].post_cleanup_capture) 'S7 post-uninstall state backfilled a terminal pass'
+    $s7BackfeedProbes = @($s7BackfeedRecord.scenarios[6].process_final_state_probes)
+    Assert-True ($s7BackfeedProbes.Count -ge 2 -and @($s7BackfeedProbes | Where-Object { $_.status -ne 'present' }).Count -eq 0) 'S7 pre-uninstall probes were backfilled with post-uninstall absent'
+    Assert-True ($s7BackfeedRecord.cleanup_result.verified_absent -eq $true) 'S7 backfeed case finally cleanup was not verified'
+
+    Write-Host 'SELFTEST_PHASE=adj-legacy-freeze-decision-fields-rejected'
+    $legacyDecisionFreeze = Copy-JsonObject $liveFreeze
+    foreach ($field in @('settings_revoke_mechanism', 'settings_vpn_page_policy', 'destroy_terminal_policy', 'process_absent_required_count', 'process_absent_probe_spacing_seconds')) {
+        if ($null -ne $legacyDecisionFreeze.PSObject.Properties[$field]) { $legacyDecisionFreeze.PSObject.Properties.Remove($field) }
+    }
+    $legacyDecisionPath = Write-JsonFixture 'freeze-legacy-decisions.json' $legacyDecisionFreeze
+    $legacyDecisionPaths = New-CasePaths 'legacy-decisions'
+    $legacyDecisionRun = Invoke-Runner $legacyDecisionPath $legacyDecisionPaths.Evidence $legacyDecisionPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($legacyDecisionRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $legacyDecisionPaths.Evidence) -and $legacyDecisionRun.Text -match 'settings_revoke_mechanism') 'old freeze without ADJ-20260807-0003 decision fields was accepted for live simulation'
+    $legacyDecisionDryPaths = New-CasePaths 'legacy-decisions-dry'
+    $legacyDecisionDryRun = Invoke-Runner $legacyDecisionPath $legacyDecisionDryPaths.Evidence $legacyDecisionDryPaths.Raw -AsDryRun
+    Assert-True ($legacyDecisionDryRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $legacyDecisionDryPaths.Evidence) -and $legacyDecisionDryRun.Text -match 'settings_revoke_mechanism') 'old freeze dry-run was not explicitly blocked'
+
+    Write-Host 'SELFTEST_PHASE=legacy-spacing-field-rejected'
+    $legacySpacingFreeze = Copy-JsonObject $liveFreeze
+    $legacySpacingFreeze.PSObject.Properties.Remove('process_absent_probe_spacing_seconds')
+    $legacySpacingFreeze | Add-Member -NotePropertyName 'spacing' -NotePropertyValue 3
+    $legacySpacingPath = Write-JsonFixture 'freeze-legacy-spacing.json' $legacySpacingFreeze
+    $legacySpacingPaths = New-CasePaths 'legacy-spacing'
+    $legacySpacingRun = Invoke-Runner $legacySpacingPath $legacySpacingPaths.Evidence $legacySpacingPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($legacySpacingRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $legacySpacingPaths.Evidence) -and $legacySpacingRun.Text -match 'legacy spacing field') 'old freeze with legacy spacing field was accepted or compatibly reused'
+    $legacySpacingDryPaths = New-CasePaths 'legacy-spacing-dry'
+    $legacySpacingDryRun = Invoke-Runner $legacySpacingPath $legacySpacingDryPaths.Evidence $legacySpacingDryPaths.Raw -AsDryRun
+    Assert-True ($legacySpacingDryRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $legacySpacingDryPaths.Evidence) -and $legacySpacingDryRun.Text -match 'legacy spacing field') 'legacy spacing field dry-run was not explicitly rejected'
 
     Write-Host 'SELFTEST_PHASE=duplicate-lock-no-truncation'
     $transcriptBefore = Get-Sha256 (Join-Path $livePaths.Evidence 'projection\transcript.redacted.jsonl')

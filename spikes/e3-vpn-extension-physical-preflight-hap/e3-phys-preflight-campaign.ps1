@@ -45,6 +45,7 @@ $script:CampaignStarted = $false
 $script:CampaignCapture = $null
 $script:PartialScenarios = @()
 $script:CaptureDegraded = [Collections.Generic.List[object]]::new()
+$script:ObservationOnlyDegraded = [Collections.Generic.List[object]]::new()
 $script:CaptureArtifacts = [Collections.Generic.List[object]]::new()
 $script:RawHilogArtifacts = [Collections.Generic.List[object]]::new()
 $script:FaultArtifacts = [Collections.Generic.List[object]]::new()
@@ -61,6 +62,8 @@ $script:SimulationInstalledA = $false
 $script:SimulationInstalledB = $false
 $script:SimulationStagingPresent = $false
 $script:PriorBlockedBinding = $null
+$script:ProbeContexts = @{}
+$script:CurrentWindowEnd = $null
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string]$Text)
@@ -329,6 +332,11 @@ function Get-FreezeContract {
         target_tuple = $Freeze.target_tuple
         settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
         settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
+        settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
+        settings_vpn_page_policy = $Freeze.settings_vpn_page_policy
+        destroy_terminal_policy = $Freeze.destroy_terminal_policy
+        process_absent_required_count = $Freeze.process_absent_required_count
+        process_absent_probe_spacing_seconds = $Freeze.process_absent_probe_spacing_seconds
         signing = $Freeze.signing
         artifact_sha256 = $Freeze.artifact_sha256
         source = $Freeze.source
@@ -416,6 +424,28 @@ function Assert-FreezeManifest {
     }
     if ([string](Get-RequiredProperty $Freeze 'settings_reallow_path_policy') -ne 'observation-only') {
         throw 'settings_reallow_path_policy must be observation-only'
+    }
+    # ADJ-20260807-0003 decision fields: strict, fixed values. Old freezes without these fields are
+    # historical only and are rejected for every mode (DryRun included), never usable for a new live.
+    if ([string](Get-RequiredProperty $Freeze 'settings_revoke_mechanism') -ne 'settings-app-info-force-stop') {
+        throw 'settings_revoke_mechanism must be settings-app-info-force-stop'
+    }
+    if ([string](Get-RequiredProperty $Freeze 'settings_vpn_page_policy') -ne 'observation-only') {
+        throw 'settings_vpn_page_policy must be observation-only'
+    }
+    if ([string](Get-RequiredProperty $Freeze 'destroy_terminal_policy') -ne 'callback-or-strict-process-boundary') {
+        throw 'destroy_terminal_policy must be callback-or-strict-process-boundary'
+    }
+    if ([int](Get-RequiredProperty $Freeze 'process_absent_required_count') -ne 2) {
+        throw 'process_absent_required_count must be 2'
+    }
+    # Legacy `spacing` is an unknown field and is never compatibly reused. A freeze carrying only
+    # the old `spacing` is rejected as missing the required new field by Get-RequiredProperty below.
+    if ($null -ne $Freeze.PSObject.Properties['spacing']) {
+        throw 'legacy spacing field is not part of the freeze schema; use process_absent_probe_spacing_seconds'
+    }
+    if ([double](Get-RequiredProperty $Freeze 'process_absent_probe_spacing_seconds') -ne 3) {
+        throw 'process_absent_probe_spacing_seconds must be 3 seconds'
     }
     $signing = Get-RequiredProperty $Freeze 'signing'
     if ([string](Get-RequiredProperty $signing 'type') -ne 'ordinary-development') { throw 'signing type must be ordinary-development' }
@@ -1260,12 +1290,33 @@ function Invoke-ScenarioObservation {
         $ack = [pscustomobject]@{ Valid = $false; AnsweredAt = Get-Now; TimedOut = $false; DelaySeconds = 0.0 }
     }
     $requiredObservationEnd = $ack.AnsweredAt.AddSeconds($script:WindowSeconds)
+    $script:CurrentWindowEnd = $requiredObservationEnd
     if ($LiveSimulation) {
+        # Append the full scenario event stream once, then reveal only offset<=elapsed events to
+        # DuringWait as the virtual clock advances. Future destroy/stop markers must not arm probes early.
         Add-SimulationScenarioOutput $capture $Scenario $actionPromptAt
         Update-CampaignCapture $capture
-        $currentEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt $requiredObservationEnd)
-        if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $currentEvents }
-        if (-not $capture.Degraded) { Wait-Until $requiredObservationEnd }
+        while ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) {
+            $currentEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt (Get-Now))
+            if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $currentEvents }
+            if ((Get-Now) -ge $requiredObservationEnd -or $capture.Degraded) { break }
+            $now = Get-Now
+            $nextAt = $requiredObservationEnd
+            foreach ($ev in @($capture.Events)) {
+                if ([long]$ev.raw_byte_start -lt $anchorByte) { continue }
+                if ([string]::IsNullOrWhiteSpace([string]$ev.device_observed_at)) { continue }
+                $dt = [DateTimeOffset]::MinValue
+                if (-not [DateTimeOffset]::TryParse([string]$ev.device_observed_at, [ref]$dt)) { continue }
+                if ($dt -gt $now -and $dt -lt $nextAt) { $nextAt = $dt }
+            }
+            if ((Get-Now) -ge $requiredObservationEnd) { break }
+            if ($nextAt -le (Get-Now)) {
+                Wait-Until $requiredObservationEnd
+                break
+            }
+            Wait-Until $nextAt
+        }
+        if ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) { Wait-Until $requiredObservationEnd }
         Update-CampaignCapture $capture
     } else {
         while ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) {
@@ -1279,6 +1330,7 @@ function Invoke-ScenarioObservation {
     $observedThrough = Get-Now
     $windowEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt $observedThrough)
     if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $windowEvents }
+    $script:CurrentWindowEnd = $null
     [void](Test-CampaignCaptureHealth $capture)
     # Continuous HiLog health only. Screen/layout/fault artifact degradation is tracked on
     # CaptureDegraded/CaptureArtifacts and must not collapse the observation window or abort later scenarios.
@@ -1399,6 +1451,13 @@ function Get-DestroyAssessment {
         $reason = if ($hasStopOrDestroyEvidence) { 'destroy-requestId-unresolved' } else { 'no-destroy-or-stop-marker-observed' }
         return [pscustomobject]@{ result = 'blocked'; reason = $reason }
     }
+    # Hard fail before any terminal/snapshot early-return: an explicit post-destroy-phase
+    # FD_STILL_OPEN marker on the same bundle/request is a leaked fd no matter whether the destroy
+    # terminal or post-destroy snapshot are present. It must never be downgraded to blocked or
+    # overridden by the strict-process-boundary fallback.
+    if (Test-S5PostDestroyStillOpen -Events $Events -Bundle $Bundle -RequestId $effectiveRequestId) {
+        return [pscustomobject]@{ result = 'fail'; reason = 'fd-still-open-after-destroy' }
+    }
     $terminal = (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_DESTROY_RESOLVED') -or (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_DESTROY_REJECTED')
     $snapshot = (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_FD_SNAPSHOT') -and @($Events | Where-Object {
         [string]$_.text -match "requestId=$([regex]::Escape($effectiveRequestId))(\||\s|$)" -and [string]$_.text -match 'phase=post-destroy-(resolved|rejected)'
@@ -1411,6 +1470,10 @@ function Get-DestroyAssessment {
     if ($combined.Contains('FD_STILL_OPEN')) { return [pscustomobject]@{ result = 'fail'; reason = 'FD_STILL_OPEN' } }
     if ($combined.Contains('FD_STATE_UNCONFIRMED')) { return [pscustomobject]@{ result = 'blocked'; reason = 'FD_STATE_UNCONFIRMED' } }
     if ($combined -notmatch 'FD_CLOSED_CONFIRMED|FD_NOT_OPEN_AFTER_DESTROY') { return [pscustomobject]@{ result = 'blocked'; reason = 'destroy-fd-decision-missing' } }
+    # Callback terminal pass requires the same-request onDestroy marker; missing it cannot pass.
+    if (-not (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_ONDESTROY')) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'destroy-ondestroy-missing' }
+    }
     return [pscustomobject]@{ result = 'pass'; reason = 'terminal-and-post-destroy-snapshot-confirmed' }
 }
 
@@ -1451,6 +1514,417 @@ function Get-DenyAssessment {
     return [pscustomobject]@{ result = 'blocked'; reason = 'deny-proof-incomplete' }
 }
 
+function Get-ProcessProbeStatus {
+    param([Parameter(Mandatory)]$PidResult, [Parameter(Mandatory)]$DumpResult, [Parameter(Mandatory)][string]$Bundle)
+    # Single-probe classification:
+    # - PidOf decides process state only: blank stdout + exit 0/1 + no stderr => absent candidate;
+    #   non-blank PID stdout + exit 0 + no stderr => present; anything else => unknown/error.
+    # - BundleDump decides bundle_present only via Get-BundleDumpAssessment: exit 0 AND Status=pass
+    #   => bundle_present=true. Non-zero exit, stderr, permission, absent text, garbage, or any
+    #   non-pass assessment => unknown/error and aborts the series (never accumulates as absent).
+    $pidExit = [int]$PidResult.ExitCode
+    if ($pidExit -in @(124, 125)) { return [pscustomobject]@{ status = 'error'; bundle_present = $false; detail = 'pid-exit-infrastructure' } }
+    if (-not [string]::IsNullOrWhiteSpace([string]$PidResult.Stderr)) { return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = 'pid-stderr' } }
+    $pidOut = [string]$PidResult.Stdout
+    $pidBlank = [string]::IsNullOrWhiteSpace($pidOut)
+    $processStatus = $null
+    if (-not $pidBlank) {
+        if ($pidExit -eq 0) { $processStatus = 'present' }
+        else { return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = "pid-exit-$pidExit-with-output" } }
+    } else {
+        if ($pidExit -in @(0, 1)) { $processStatus = 'absent' }
+        else { return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = "pid-exit-$pidExit" } }
+    }
+    $dumpExit = [int]$DumpResult.ExitCode
+    if ($dumpExit -in @(124, 125)) { return [pscustomobject]@{ status = 'error'; bundle_present = $false; detail = 'dump-infrastructure' } }
+    if (-not [string]::IsNullOrWhiteSpace([string]$DumpResult.Stderr)) {
+        return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = 'dump-stderr' }
+    }
+    if ($dumpExit -ne 0) {
+        return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = "dump-exit-$dumpExit" }
+    }
+    $dumpAssessment = Get-BundleDumpAssessment $DumpResult $Bundle
+    if ($dumpAssessment.Status -eq 'infrastructure') {
+        return [pscustomobject]@{ status = 'error'; bundle_present = $false; detail = [string]$dumpAssessment.Reason }
+    }
+    if ($dumpAssessment.Status -ne 'pass') {
+        return [pscustomobject]@{ status = 'unknown'; bundle_present = $false; detail = [string]$dumpAssessment.Reason }
+    }
+    return [pscustomobject]@{ status = $processStatus; bundle_present = $true; detail = $null }
+}
+
+function New-ProcessProbeContext {
+    param(
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][string]$Bundle,
+        [bool]$RequireBundlePresent = $false,
+        [int]$RequiredCount = 2,
+        [double]$SpacingSeconds = 3.0
+    )
+    return [pscustomobject]@{
+        Scenario = $Scenario
+        Bundle = $Bundle
+        RequireBundlePresent = [bool]$RequireBundlePresent
+        RequiredCount = [int]$RequiredCount
+        SpacingSeconds = [double]$SpacingSeconds
+        Started = $false
+        Finished = $false
+        Aborted = $false
+        Terminal = $false
+        ConsecutiveAbsent = 0
+        BundlePresent = $false
+        Probes = [Collections.Generic.List[object]]::new()
+        LastProbeAt = $null
+        OverrideProbeIndex = 0
+    }
+}
+
+function Get-SimulationFailureMatch {
+    param([Parameter(Mandatory)][string]$Operation, [Parameter(Mandatory)][int]$Occurrence)
+    foreach ($failure in @(Get-OptionalProperty $script:Simulation 'hdc_failures' @())) {
+        if ([string](Get-OptionalProperty $failure 'operation' '') -eq $Operation -and [int](Get-OptionalProperty $failure 'occurrence' 1) -eq $Occurrence) {
+            return [pscustomobject]@{
+                ExitCode = [int](Get-OptionalProperty $failure 'exit_code' 1)
+                Stdout = [string](Get-OptionalProperty $failure 'stdout' '')
+                Stderr = [string](Get-OptionalProperty $failure 'stderr' 'simulated command failure')
+                Simulated = $true
+                FromFailure = $true
+            }
+        }
+    }
+    return $null
+}
+
+function Get-ProcessProbeOverrideResult {
+    param(
+        [Parameter(Mandatory)][ValidateSet('PidOf', 'BundleDump')][string]$Operation,
+        [Parameter(Mandatory)][string]$Bundle,
+        [AllowNull()]$Entry
+    )
+    # Strict enum only. Unknown values deliberately produce an unknown classification, never a default absent/present pass.
+    if ($Operation -eq 'PidOf') {
+        $pidStatus = if ($null -eq $Entry) { 'absent' } else { [string](Get-OptionalProperty $Entry 'pid' '') }
+        switch ($pidStatus) {
+            'present' { return [pscustomobject]@{ ExitCode = 0; Stdout = '12345'; Stderr = ''; Simulated = $true } }
+            'absent' { return [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = ''; Simulated = $true } }
+            'error' { return [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = 'simulated pidof error'; Simulated = $true } }
+            'unknown' { return [pscustomobject]@{ ExitCode = 2; Stdout = ''; Stderr = ''; Simulated = $true } }
+            default { return [pscustomobject]@{ ExitCode = 3; Stdout = 'garbage-override'; Stderr = 'invalid-pid-override'; Simulated = $true } }
+        }
+    }
+    $dumpStatus = if ($null -eq $Entry) { 'present' } else { [string](Get-OptionalProperty $Entry 'dump' '') }
+    switch ($dumpStatus) {
+        'present' { return [pscustomobject]@{ ExitCode = 0; Stdout = '{ "app": { "bundleName": "' + $Bundle + '" } }'; Stderr = ''; Simulated = $true } }
+        'absent' { return [pscustomobject]@{ ExitCode = 0; Stdout = 'error: failed to get information and the parameters may be wrong.'; Stderr = ''; Simulated = $true } }
+        'error' { return [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = 'simulated dump error'; Simulated = $true } }
+        'unknown' { return [pscustomobject]@{ ExitCode = 0; Stdout = 'Permission denied'; Stderr = ''; Simulated = $true } }
+        default { return [pscustomobject]@{ ExitCode = 3; Stdout = 'garbage-override'; Stderr = 'invalid-dump-override'; Simulated = $true } }
+    }
+}
+
+function Invoke-SimulationProbePair {
+    param([Parameter(Mandatory)]$Context)
+    $bundle = [string]$Context.Bundle
+    $scenario = [int]$Context.Scenario
+    # Each probe pair is two logical HDC operations (PidOf + BundleDump), matching two transcript commands.
+    $script:HdcLogicalCallCount += 2
+    $pidAudit = Get-HdcInvocation 'PidOf' @{ Bundle = $bundle }
+    $dumpAudit = Get-HdcInvocation 'BundleDump' @{ Bundle = $bundle }
+    Add-TranscriptRecord 'hdc-command' ([ordered]@{ operation = 'PidOf'; executable = '<HDC_PATH>'; arguments = $pidAudit; timeout_seconds = $HdcTimeoutSeconds; simulated = $true })
+    Add-TranscriptRecord 'hdc-command' ([ordered]@{ operation = 'BundleDump'; executable = '<HDC_PATH>'; arguments = $dumpAudit; timeout_seconds = $HdcTimeoutSeconds; simulated = $true })
+    $scenarioOverride = Get-OptionalProperty (Get-OptionalProperty $script:Simulation 'process_probe_override' @{}) ([string]$scenario) $null
+    $entry = $null
+    if ($null -ne $scenarioOverride) {
+        $entries = @($scenarioOverride)
+        $index = [int]$Context.OverrideProbeIndex
+        $entry = if ($entries.Count -gt 0) { if ($index -lt $entries.Count) { $entries[$index] } else { $entries[$entries.Count - 1] } } else { $null }
+        $Context.OverrideProbeIndex = $index + 1
+    }
+    # Occurrence counters advance for every probe so hdc_failures stay aligned with later live ops.
+    if (-not $script:HdcOperationCounts.ContainsKey('PidOf')) { $script:HdcOperationCounts['PidOf'] = 0 }
+    if (-not $script:HdcOperationCounts.ContainsKey('BundleDump')) { $script:HdcOperationCounts['BundleDump'] = 0 }
+    $script:HdcOperationCounts['PidOf']++
+    $script:HdcOperationCounts['BundleDump']++
+    $pidOccurrence = [int]$script:HdcOperationCounts['PidOf']
+    $dumpOccurrence = [int]$script:HdcOperationCounts['BundleDump']
+    # hdc_failures always win over process_probe_override; override cannot bypass injected failures.
+    $pidFailure = Get-SimulationFailureMatch 'PidOf' $pidOccurrence
+    $dumpFailure = Get-SimulationFailureMatch 'BundleDump' $dumpOccurrence
+    $pidResult = if ($null -ne $pidFailure) {
+        $pidFailure
+    } elseif ($null -ne $scenarioOverride) {
+        Get-ProcessProbeOverrideResult 'PidOf' $bundle $entry
+    } else {
+        [pscustomobject]@{ ExitCode = 0; Stdout = ''; Stderr = ''; Simulated = $true }
+    }
+    $dumpResult = if ($null -ne $dumpFailure) {
+        $dumpFailure
+    } elseif ($null -ne $scenarioOverride) {
+        Get-ProcessProbeOverrideResult 'BundleDump' $bundle $entry
+    } else {
+        $installed = ($bundle -eq $script:BundleA -and $script:SimulationInstalledA) -or ($bundle -eq $script:BundleB -and $script:SimulationInstalledB)
+        if ($installed) {
+            [pscustomobject]@{ ExitCode = 0; Stdout = '{ "app": { "bundleName": "' + $bundle + '" } }'; Stderr = ''; Simulated = $true }
+        } else {
+            [pscustomobject]@{ ExitCode = 0; Stdout = 'error: failed to get information and the parameters may be wrong.'; Stderr = ''; Simulated = $true }
+        }
+    }
+    foreach ($pair in @(@{ op = 'PidOf'; result = $pidResult }, @{ op = 'BundleDump'; result = $dumpResult })) {
+        Add-TranscriptRecord 'hdc-result' ([ordered]@{
+            operation = $pair.op
+            exit_code = [int]$pair.result.ExitCode
+            stdout = [string]$pair.result.Stdout
+            stderr = [string]$pair.result.Stderr
+            simulated = $true
+        })
+    }
+    # Keep infrastructure classification identical to live Invoke-HdcOperation: 124/125 (or a
+    # timeout stderr) marks the campaign as hdc-usb-interruption, not a functional result.
+    foreach ($probeResult in @($pidResult, $dumpResult)) {
+        if ([int]$probeResult.ExitCode -in @(124, 125) -or [string]$probeResult.Stderr -match '(?i)\btimeout\b') {
+            $script:InfrastructureReasonObserved = 'hdc-usb-interruption'
+        }
+    }
+    return [pscustomobject]@{ PidResult = $pidResult; DumpResult = $dumpResult }
+}
+
+function Invoke-ProcessProbePair {
+    param([Parameter(Mandatory)]$Context)
+    $bundle = [string]$Context.Bundle
+    if ($LiveSimulation) { return Invoke-SimulationProbePair $Context }
+    $pidResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $bundle } -AllowFailure
+    $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $bundle } -AllowFailure
+    return [pscustomobject]@{ PidResult = $pidResult; DumpResult = $dumpResult }
+}
+
+function Invoke-ProcessFinalStateProbeSeries {
+    param([Parameter(Mandatory)]$Context, [AllowNull()][DateTimeOffset]$Deadline = $null)
+    if ([bool]$Context.Finished) { return $Context }
+    # Probes are window-bound only. Never open a fresh post-window 60s series; late stop stays blocked.
+    if ($null -eq $Deadline) {
+        if ($null -ne $script:CurrentWindowEnd) { $Deadline = [DateTimeOffset]$script:CurrentWindowEnd }
+        else { return $Context }
+    }
+    if ((Get-Now) -ge $Deadline) { return $Context }
+    $Context.Started = $true
+    $spacingSeconds = [double]$Context.SpacingSeconds
+    if ($LiveSimulation) {
+        $overrideSpacing = Get-OptionalProperty $script:Simulation 'probe_spacing_override_seconds' $null
+        if ($null -ne $overrideSpacing) { $spacingSeconds = [double]$overrideSpacing }
+    }
+    while (-not [bool]$Context.Finished -and -not [bool]$Context.Aborted) {
+        if ($null -ne $Context.LastProbeAt) {
+            $nextProbeAt = ([DateTimeOffset]::Parse([string]$Context.LastProbeAt)).AddSeconds($spacingSeconds)
+            if ((Get-Now) -lt $nextProbeAt) { Wait-Until $nextProbeAt }
+        }
+        if ((Get-Now) -ge $Deadline) { break }
+        $probeAt = Get-Now
+        $pair = Invoke-ProcessProbePair $Context
+        $classification = Get-ProcessProbeStatus $pair.PidResult $pair.DumpResult $Context.Bundle
+        $status = [string]$classification.status
+        if ($status -eq 'present') {
+            $Context.ConsecutiveAbsent = 0
+        } elseif ($status -eq 'absent') {
+            $Context.ConsecutiveAbsent++
+            $Context.BundlePresent = [bool]$classification.bundle_present
+        } elseif ($status -eq 'error' -or $status -eq 'unknown') {
+            $Context.Aborted = $true
+            $Context.Finished = $true
+        }
+        $previous = if ($Context.Probes.Count -gt 0) { $Context.Probes[$Context.Probes.Count - 1] } else { $null }
+        $spacingSincePrevious = if ($null -ne $previous) { ($probeAt - [DateTimeOffset]::Parse([string]$previous.time)).TotalSeconds } else { 0.0 }
+        $probeRecord = [ordered]@{
+            time = $probeAt.ToString('o')
+            status = $status
+            detail = $classification.detail
+            bundle_present = [bool]$classification.bundle_present
+            consecutive_absent = [int]$Context.ConsecutiveAbsent
+            spacing_seconds_since_previous = [double]$spacingSincePrevious
+        }
+        $Context.Probes.Add($probeRecord)
+        Add-TranscriptRecord 'process-final-state-probe' ([ordered]@{
+            scenario = [int]$Context.Scenario
+            bundle = [string]$Context.Bundle
+            probe = $probeRecord
+        })
+        if ([int]$Context.ConsecutiveAbsent -ge [int]$Context.RequiredCount -and -not [bool]$Context.Aborted) {
+            $Context.Terminal = $true
+            $Context.Finished = $true
+        }
+        $Context.LastProbeAt = $probeAt
+    }
+    return $Context
+}
+
+function Test-StrictFallbackPrerequisites {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Bundle,
+        [AllowNull()][string]$RequestId = $null
+    )
+    # Strict-process-boundary fallback marker gate for S3/S7: a unique legal stop for the same
+    # bundle in the current window plus onDestroy plus destroy-begin (or pre-destroy snapshot).
+    # VPN_DESTROY_ISSUED never counts as begin/terminal and is ignored everywhere.
+    $stop = $null
+    if (-not [string]::IsNullOrWhiteSpace($RequestId)) {
+        $candidate = Get-StopRequestFromEvents -Events $Events -ExpectedBundle $Bundle
+        if ($null -eq $candidate -or [string]$candidate.RequestId -ne [string]$RequestId) {
+            return [pscustomobject]@{ Met = $false; Stop = $null; RequestId = [string]$RequestId; Reason = 'strict-fallback-stop-unique-missing' }
+        }
+        if (-not ((Test-CorrelatedMarker $Events $Bundle $RequestId 'UI_STOP') -or (Test-CorrelatedMarker $Events $Bundle $RequestId 'STOP_PROMISE_RESOLVED'))) {
+            return [pscustomobject]@{ Met = $false; Stop = $candidate; RequestId = [string]$RequestId; Reason = 'strict-fallback-stop-marker-missing' }
+        }
+        $stop = $candidate
+    } else {
+        $stop = Get-StopRequestFromEvents -Events $Events -ExpectedBundle $Bundle
+        if ($null -eq $stop) { return [pscustomobject]@{ Met = $false; Stop = $null; RequestId = $null; Reason = 'strict-fallback-stop-unique-missing' } }
+        $rid = [string]$stop.RequestId
+        if (-not ((Test-CorrelatedMarker $Events $Bundle $rid 'UI_STOP') -or (Test-CorrelatedMarker $Events $Bundle $rid 'STOP_PROMISE_RESOLVED'))) {
+            return [pscustomobject]@{ Met = $false; Stop = $stop; RequestId = $rid; Reason = 'strict-fallback-stop-marker-missing' }
+        }
+    }
+    $rid = [string]$stop.RequestId
+    if (-not (Test-CorrelatedMarker $Events $Bundle $rid 'VPN_ONDESTROY')) {
+        return [pscustomobject]@{ Met = $false; Stop = $stop; RequestId = $rid; Reason = 'strict-fallback-ondestroy-missing' }
+    }
+    $preSnapshot = @($Events | Where-Object {
+        [string]$_.text -match "requestId=$([regex]::Escape($rid))(\||\s|$)" -and
+        [string]$_.text -match 'VPN_FD_SNAPSHOT' -and
+        [string]$_.text -match 'phase=pre-destroy'
+    }).Count -gt 0
+    $begin = (Test-CorrelatedMarker $Events $Bundle $rid 'VPN_DESTROY_BEGIN') -or $preSnapshot
+    if (-not $begin) {
+        return [pscustomobject]@{ Met = $false; Stop = $stop; RequestId = $rid; Reason = 'strict-fallback-destroy-begin-missing' }
+    }
+    return [pscustomobject]@{ Met = $true; Stop = $stop; RequestId = $rid; Reason = $null }
+}
+
+function Get-VpnFinalState {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Bundle,
+        [AllowNull()][string]$RequestId = $null,
+        [AllowNull()]$ProbeState = $null,
+        [bool]$RequireBundlePresent = $false,
+        [int]$RequiredCount = 2,
+        [double]$SpacingSeconds = 3.0
+    )
+    # Priority 1: existing callback terminal + post-destroy fd snapshot. FD_STILL_OPEN is a hard
+    # fail and can never fall back to the process-boundary route.
+    $callback = Get-DestroyAssessment -Events $Events -Bundle $Bundle -RequestId $RequestId
+    if ($callback.result -eq 'fail' -and $callback.reason -in @('FD_STILL_OPEN', 'fd-still-open-after-destroy')) {
+        return [pscustomobject]@{ result = 'fail'; reason = $callback.reason; terminal_mode = 'callback-post-fd'; callback = $callback; strict = $null }
+    }
+    if ($callback.result -eq 'pass') {
+        return [pscustomobject]@{ result = 'pass'; reason = 'terminal-and-post-destroy-snapshot-confirmed'; terminal_mode = 'callback-post-fd'; callback = $callback; strict = $null }
+    }
+    # Priority 2: strict-process-boundary fallback (S3/S7 only). Every missing or uncertain piece is blocked.
+    $strict = Test-StrictFallbackPrerequisites -Events $Events -Bundle $Bundle -RequestId $RequestId
+    if (-not $strict.Met) {
+        return [pscustomobject]@{ result = 'blocked'; reason = $strict.Reason; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    if ($null -eq $ProbeState -or -not [bool]$ProbeState.Started) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-probes-not-started'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    if ([bool]$ProbeState.Aborted) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-probe-unknown-or-error'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    if (-not [bool]$ProbeState.Terminal) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-process-absent-insufficient'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    $absentProbes = @($ProbeState.Probes | Where-Object { [string]$_.status -eq 'absent' })
+    if ($absentProbes.Count -lt $RequiredCount) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-process-absent-insufficient'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    $lastAbsent = $absentProbes[$absentProbes.Count - 1]
+    $previousAbsent = $absentProbes[$absentProbes.Count - 2]
+    $spacing = ([DateTimeOffset]::Parse([string]$lastAbsent.time) - [DateTimeOffset]::Parse([string]$previousAbsent.time)).TotalSeconds
+    if ($spacing -lt ($SpacingSeconds - 0.001)) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-probe-spacing-insufficient'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    if ($RequireBundlePresent -and -not [bool]$ProbeState.BundlePresent) {
+        return [pscustomobject]@{ result = 'blocked'; reason = 'strict-fallback-bundle-absent'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+    }
+    return [pscustomobject]@{ result = 'pass'; reason = 'strict-process-boundary-terminal'; terminal_mode = 'strict-process-boundary'; callback = $callback; strict = $strict }
+}
+
+function Test-S5PostDestroyStillOpen {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Bundle,
+        [AllowNull()][string]$RequestId
+    )
+    # S5 hard-fail detection on the current request: an explicit FD_STILL_OPEN marker on a
+    # post-destroy-phase snapshot or on a destroy terminal is a leaked fd and fails, and can never
+    # be overridden by consecutive-absent process probes. Pre-destroy open snapshots never count.
+    # Same-bundle/request marker only: an explicit bundle field must equal the target bundle.
+    if ([string]::IsNullOrWhiteSpace($RequestId) -or $RequestId -eq 'missing') { return $false }
+    foreach ($event in @($Events)) {
+        $text = [string]$event.text
+        if (-not $text.Contains('FD_STILL_OPEN')) { continue }
+        if ($text -notmatch "requestId=$([regex]::Escape([string]$RequestId))(\||\s|$)") { continue }
+        if ($text -match 'bundle=([^|\s]+)' -and $Matches[1] -ne $Bundle) { continue }
+        if ($text -match 'VPN_DESTROY_RESOLVED|VPN_DESTROY_REJECTED|phase=post-destroy') { return $true }
+    }
+    return $false
+}
+
+function Test-ProcessAbsentEvidence {
+    param(
+        [Parameter(Mandatory)]$ProbeState,
+        [int]$RequiredCount = 2,
+        [double]$SpacingSeconds = 3.0
+    )
+    # Timestamp-based re-check of the recorded probe series. The runner never trusts execution-time
+    # Wait/Terminal flags alone: the last RequiredCount probes must be consecutive absent and the
+    # first-to-last spacing must be >= SpacingSeconds. A probe_spacing_override below the freeze
+    # spacing therefore stays blocked.
+    if ($null -eq $ProbeState -or -not [bool]$ProbeState.Started) {
+        return [pscustomobject]@{ Met = $false; Reason = 'probes-not-started'; SpacingSeconds = $null }
+    }
+    if ([bool]$ProbeState.Aborted) {
+        return [pscustomobject]@{ Met = $false; Reason = 'probe-unknown-or-error'; SpacingSeconds = $null }
+    }
+    $probes = @($ProbeState.Probes)
+    if ($probes.Count -lt $RequiredCount) {
+        return [pscustomobject]@{ Met = $false; Reason = 'process-absent-probes-insufficient'; SpacingSeconds = $null }
+    }
+    $tail = @($probes | Select-Object -Last $RequiredCount)
+    foreach ($probe in $tail) {
+        if ([string]$probe.status -ne 'absent') {
+            return [pscustomobject]@{ Met = $false; Reason = 'process-absent-probes-insufficient'; SpacingSeconds = $null }
+        }
+    }
+    $firstAt = [DateTimeOffset]::Parse([string]$tail[0].time)
+    $lastAt = [DateTimeOffset]::Parse([string]$tail[$tail.Count - 1].time)
+    $measured = ($lastAt - $firstAt).TotalSeconds
+    if ($measured -lt ($SpacingSeconds - 0.001)) {
+        return [pscustomobject]@{ Met = $false; Reason = 'probe-spacing-insufficient'; SpacingSeconds = $measured }
+    }
+    return [pscustomobject]@{ Met = $true; Reason = $null; SpacingSeconds = $measured }
+}
+
+function Test-PostCreateOpen {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][string]$Bundle,
+        [Parameter(Mandatory)][string]$RequestId
+    )
+    # Clean reactivation proof: the fresh request shows CREATE_ACCEPTED plus a post-create fd snapshot
+    # with open=true. Exact field-boundary match only: `|open=true|` counts, `reopen=true` never does.
+    # Same-bundle/request marker only: an explicit bundle field must equal the target bundle.
+    foreach ($event in @($Events)) {
+        $text = [string]$event.text
+        if ($text -notmatch "requestId=$([regex]::Escape($RequestId))(\||\s|$)") { continue }
+        if ($text -notmatch 'VPN_FD_SNAPSHOT') { continue }
+        if ($text -notmatch 'phase=post-create') { continue }
+        if ($text -notmatch '(?:^|\|)open=true(?:\||$)') { continue }
+        if ($text -match 'bundle=([^|\s]+)' -and $Matches[1] -ne $Bundle) { continue }
+        return $true
+    }
+    return $false
+}
+
 function Get-ScenarioAggregation {
     param([Parameter(Mandatory)][object[]]$Scenarios, [bool]$IntegrityViolation = $false)
     if ($IntegrityViolation) { return 'invalid' }
@@ -1458,6 +1932,14 @@ function Get-ScenarioAggregation {
     if ($results -contains 'fail') { return 'fail' }
     if ($results -contains 'blocked') { return 'blocked' }
     if ($results.Count -ne 7 -or @($results | Where-Object { $_ -ne 'pass' }).Count -gt 0) { return 'invalid' }
+    # S3 strict-process-boundary fallback pass additionally requires a clean reactivation proof:
+    # the same bundle must show a subsequent fresh request CREATE_ACCEPTED plus post-create open
+    # (scenario 5). Without it the fallback process-absent observation could be an uninstall/death,
+    # so overall must stay blocked even though every individual scenario passed.
+    $s3 = @($Scenarios | Where-Object { [int]$_.scenario -eq 3 })[0]
+    if ($null -ne $s3 -and [string]$s3.terminal_mode -eq 'strict-process-boundary' -and -not [bool]$s3.clean_reactivation_proof) {
+        return 'blocked'
+    }
     return 'pass'
 }
 
@@ -1494,7 +1976,7 @@ function Assert-ScenarioCaptureCanContinue {
 }
 
 function Invoke-Capture {
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Scenario)
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Scenario, [switch]$ObservationOnly)
     $operations = @('ScreenCap', 'DumpLayout', 'ReceiveScreen', 'ReceiveLayout')
     $failures = [Collections.Generic.List[string]]::new()
     if ($null -ne $script:CampaignCapture -and $script:CampaignCapture.Degraded) {
@@ -1516,8 +1998,16 @@ function Invoke-Capture {
     $artifact = [ordered]@{ scenario = $Scenario; name = $Name; status = $status; failures = @($failures); screen_path = $screenPath; layout_path = $layoutPath }
     $script:CaptureArtifacts.Add($artifact)
     if ($status -eq 'degraded') {
-        # Screen/layout degradation is non-infrastructure evidence loss; do not mark continuous Capture.Degraded.
-        Add-CaptureDegradation $script:CampaignCapture 'screen-layout-capture' ($failures -join ',') -Scenario $Scenario -Category 'non-infrastructure' -MarkContinuousDegraded $false
+        if ($ObservationOnly) {
+            # Observation-only captures (e.g. the Settings>VPN page in scenario 5) never enter the
+            # global CaptureDegraded list: their loss is recorded as an independent diagnostic and
+            # must not block the scenario or the final overall aggregation. The failure is still
+            # visible in CaptureArtifacts (status=degraded) and in observation_only_degraded.
+            $script:ObservationOnlyDegraded.Add([ordered]@{ scenario = $Scenario; name = $Name; status = 'degraded'; failures = @($failures); screen_path = $screenPath; layout_path = $layoutPath })
+        } else {
+            # Screen/layout degradation is non-infrastructure evidence loss; do not mark continuous Capture.Degraded.
+            Add-CaptureDegradation $script:CampaignCapture 'screen-layout-capture' ($failures -join ',') -Scenario $Scenario -Category 'non-infrastructure' -MarkContinuousDegraded $false
+        }
     }
     return $status
 }
@@ -1658,22 +2148,51 @@ function Invoke-LiveCampaign {
     $fdAssertion = if ($request2 -and (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_RESOLVED') -and
         (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'CREATE_ACCEPTED') -and
         (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_FD_SNAPSHOT')) { 'pass' } else { 'blocked' }
-    $scenario2Result = if ($observation2.CaptureDegraded -or -not $observation2.CompleteWindowObserved -or $capture2 -ne 'collected' -or $authCaptureAssertion -eq 'blocked') { 'blocked' } elseif ('fail' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'fail' } elseif ('blocked' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'blocked' } else { 'pass' }
+    # An observed create rejection/invalid-fd on the S2-bound request is an explicit functional fail
+    # (create invalid) and outranks capture/window/operator degradation; it is never downgraded to
+    # blocked. Missing evidence stays blocked and is never promoted to fail.
+    $createRejected2 = $request2 -and ((Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_REJECTED') -or
+        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_INVALID_FD') -or
+        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'START_PROMISE_REJECTED'))
+    $scenario2Result = if ($createRejected2 -or 'fail' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'fail' } elseif ($observation2.CaptureDegraded -or -not $observation2.CompleteWindowObserved -or $capture2 -ne 'collected' -or $authCaptureAssertion -eq 'blocked') { 'blocked' } elseif ('blocked' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'blocked' } else { 'pass' }
+    $s2Reason = if ($createRejected2) { 'create-rejected-after-allow' } elseif ('fail' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'allow-onCreate-create-fd-fail' } else { 'allow-onCreate-create-fd' }
     $results.Add([ordered]@{
-        sequence_index = 2; scenario = 2; result = $scenario2Result; reason = 'allow-onCreate-create-fd'; bundle = $script:BundleA; request_id = $request2
+        sequence_index = 2; scenario = 2; result = $scenario2Result; reason = $s2Reason; bundle = $script:BundleA; request_id = $request2
         assertions = [ordered]@{ allow = $allowAssertion; vpn_on_create = $onCreateAssertion; vpn_connection_create_fd = $fdAssertion }
         authorization_capture = [ordered]@{ name = $authCaptureState.Name; status = $authCaptureState.Status; auth_ui_visible = [bool]$authCaptureState.AuthUiVisible; result = $authCaptureAssertion }
         observation = $observation2.Observation
     })
     Assert-ScenarioCaptureCanContinue $results $observation2
 
-    $observation3 = Invoke-ScenarioObservation 3 '场景3：在当前已激活的测试 App A 的 Entry 界面点 Stop，然后 ACK'
+    $script:ProbeContexts[3] = New-ProcessProbeContext -Scenario 3 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+    $duringScenario3 = {
+        param([object[]]$CurrentEvents)
+        # Start the strict-process-boundary probe series only when the fallback marker prerequisites
+        # are already visible for the S2-bound request (unique stop + onDestroy + destroy-begin/pre snapshot).
+        $probeCtx = $script:ProbeContexts[3]
+        if ([bool]$probeCtx.Finished -or [bool]$probeCtx.Aborted) { return }
+        if ([string]::IsNullOrWhiteSpace([string]$request2)) { return }
+        $prereq = Test-StrictFallbackPrerequisites -Events $CurrentEvents -Bundle $script:BundleA -RequestId $request2
+        if (-not $prereq.Met) { return }
+        [void](Invoke-ProcessFinalStateProbeSeries $probeCtx $script:CurrentWindowEnd)
+    }
+    $observation3 = Invoke-ScenarioObservation 3 '场景3：在当前已激活的测试 App A 的 Entry 界面点 Stop，然后 ACK' $null $duringScenario3
     $capture3 = Invoke-Capture 'scenario-3-stop' 3
-    $destroy3 = Get-DestroyAssessment $observation3.Events $script:BundleA $request2
-    $stop3 = $request2 -and (Test-CorrelatedMarker $observation3.Events $script:BundleA $request2 'STOP_PROMISE_RESOLVED')
-    $onDestroy3 = $request2 -and (Test-CorrelatedMarker $observation3.Events $script:BundleA $request2 'VPN_ONDESTROY')
-    $scenario3Result = if ($observation3.CaptureDegraded -or -not $observation3.CompleteWindowObserved -or $capture3 -ne 'collected') { 'blocked' } elseif ($destroy3.result -eq 'fail') { 'fail' } elseif (-not $observation3.AckValid -or -not $stop3 -or -not $onDestroy3 -or $destroy3.result -ne 'pass') { 'blocked' } else { 'pass' }
-    $results.Add([ordered]@{ sequence_index = 3; scenario = 3; result = $scenario3Result; reason = $destroy3.reason; bundle = $script:BundleA; request_id = $request2; observation = $observation3.Observation })
+    # S3 is hard-bound to S2 request2; missing binding is blocked (no window-event inference substitute).
+    $final3 = if ([string]::IsNullOrWhiteSpace([string]$request2)) {
+        [pscustomobject]@{ result = 'blocked'; reason = 'active-request-unresolved'; terminal_mode = $null; callback = $null; strict = $null }
+    } else {
+        Get-VpnFinalState -Events $observation3.Events -Bundle $script:BundleA -RequestId $request2 -ProbeState $script:ProbeContexts[3] -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+    }
+    $scenario3Result = if ($final3.result -eq 'fail') { 'fail' } elseif ($observation3.CaptureDegraded -or -not $observation3.CompleteWindowObserved -or $capture3 -ne 'collected') { 'blocked' } elseif (-not $observation3.AckValid -or $final3.result -ne 'pass') { 'blocked' } else { 'pass' }
+    $results.Add([ordered]@{
+        sequence_index = 3; scenario = 3; result = $scenario3Result; reason = $final3.reason; bundle = $script:BundleA; request_id = $request2
+        terminal_mode = $final3.terminal_mode
+        process_final_state_probes = @($script:ProbeContexts[3].Probes)
+        bundle_present_during_probe = [bool]$script:ProbeContexts[3].BundlePresent
+        clean_reactivation_proof = $false
+        observation = $observation3.Observation
+    })
     Assert-ScenarioCaptureCanContinue $results $observation3
 
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleB })
@@ -1683,20 +2202,45 @@ function Invoke-LiveCampaign {
     $request4 = Get-RequestIdFromEvents $observation4.Events $script:BundleB
     $fullDenyWindow = [bool]$observation4.CompleteWindowObserved
     $deny4 = Get-DenyAssessment $observation4.Events $script:BundleB $request4 $denyScreen $fullDenyWindow
-    $scenario4Result = if ($observation4.CaptureDegraded -or -not $fullDenyWindow -or $capture4 -ne 'collected') { 'blocked' } elseif ($deny4.result -eq 'fail') { 'fail' } elseif (-not $observation4.AckValid) { 'blocked' } else { $deny4.result }
+    # An observed B create after deny is an explicit functional fail (deny-then-create / dual-active
+    # class) and outranks capture/window/operator degradation; it is never downgraded to blocked.
+    $scenario4Result = if ($deny4.result -eq 'fail') { 'fail' } elseif ($observation4.CaptureDegraded -or -not $fullDenyWindow -or $capture4 -ne 'collected') { 'blocked' } elseif (-not $observation4.AckValid) { 'blocked' } else { $deny4.result }
     $results.Add([ordered]@{ sequence_index = 4; scenario = 4; result = $scenario4Result; reason = $deny4.reason; bundle = $script:BundleB; request_id = $request4; deny_screen = [bool]$denyScreen; full_window_after_ack = [bool]$fullDenyWindow; observation = $observation4.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation4
 
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
-    $observation5 = Invoke-ScenarioObservation 5 "场景5：先在测试 App A 点 Start 重新激活（预测 re-allow 路径 '$($Freeze.settings_reallow_expected_path)'，路径偏差仅观察、不改判定）；再打开手机系统设置 App（齿轮）→ 更多连接 → VPN，在其中断开/删除测试 VPN；连续采集保持至 ACK 后再 60 秒"
-    $capture5 = Invoke-Capture 'scenario-5-settings' 5
-    $pathActualDirect = Confirm-VisibleFact 5 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' '仅当实际 re-allow 路径为 direct-system-activation 时确认为真。'
-    $pathActualReauth = Confirm-VisibleFact 5 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' '仅当实际 re-allow 路径为 system-reauthorization-UI 时确认为真。'
-    $actualReallowPath = if ($pathActualDirect -and -not $pathActualReauth) {
+    $s5State = [pscustomobject]@{
+        PathActualDirect = $false
+        PathActualReauth = $false
+        VpnPageVisible = $false
+        VpnPageCaptureStatus = 'not-run'
+        ForceStopConfirmed = $false
+        ForceStopCaptureStatus = 'not-run'
+    }
+    $scenario5Action = {
+        $s5State.PathActualDirect = Confirm-VisibleFact 5 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' '仅当实际 re-allow 路径为 direct-system-activation 时确认为真。'
+        $s5State.PathActualReauth = Confirm-VisibleFact 5 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' '仅当实际 re-allow 路径为 system-reauthorization-UI 时确认为真。'
+        # Settings>VPN page is observation-only: screenshot + fields, never a pass/blocked gate.
+        $s5State.VpnPageVisible = Confirm-VisibleFact 5 'SETTINGS-VPN-PAGE-VISIBLE' '仅当手机系统设置 → 更多连接 → VPN 页面已可见时确认为真（仅观察，不影响结果）。'
+        if ($s5State.VpnPageVisible) { $s5State.VpnPageCaptureStatus = Invoke-Capture 'scenario-5-settings-vpn-page' 5 -ObservationOnly } else { $s5State.VpnPageCaptureStatus = 'degraded' }
+        # Manual Settings>app info>A>force stop is the revoke mechanism; separate screenshot + confirmation.
+        $s5State.ForceStopConfirmed = Confirm-VisibleFact 5 'SETTINGS-APP-INFO-FORCE-STOP-CAPTURED' '仅当已在系统设置 → 应用 → 测试 App A 的应用信息页执行强制停止且画面可见时确认为真。'
+        if ($s5State.ForceStopConfirmed) { $s5State.ForceStopCaptureStatus = Invoke-Capture 'scenario-5-app-info-force-stop' 5 } else { $s5State.ForceStopCaptureStatus = 'degraded' }
+    }
+    $script:ProbeContexts[5] = New-ProcessProbeContext -Scenario 5 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+    $duringScenario5 = {
+        param([object[]]$CurrentEvents)
+        # After the manual force-stop is confirmed, probe the bundle: pidof/bundledump observation only,
+        # never HDC force-stop. No UI_STOP is expected or required on the settings-app-info-force-stop path.
+        if (-not $s5State.ForceStopConfirmed) { return }
+        [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[5] $script:CurrentWindowEnd)
+    }
+    $observation5 = Invoke-ScenarioObservation 5 "场景5：先在测试 App A 点 Start 重新激活（预测 re-allow 路径 '$($Freeze.settings_reallow_expected_path)'，路径偏差仅观察、不改判定）；随后打开手机系统设置 App（齿轮）→ 更多连接 → VPN 页并保持可见，等 runner 截取；再进入 设置 → 应用 → 测试 App A 的应用信息页执行强制停止并保持画面，等 runner 截取；连续采集保持至 ACK 后再 60 秒" $scenario5Action $duringScenario5
+    $actualReallowPath = if ($s5State.PathActualDirect -and -not $s5State.PathActualReauth) {
         'direct-system-activation'
-    } elseif ($pathActualReauth -and -not $pathActualDirect) {
+    } elseif ($s5State.PathActualReauth -and -not $s5State.PathActualDirect) {
         'system-reauthorization-UI'
-    } elseif ($pathActualDirect -and $pathActualReauth) {
+    } elseif ($s5State.PathActualDirect -and $s5State.PathActualReauth) {
         'ambiguous'
     } else {
         'unobserved'
@@ -1716,27 +2260,78 @@ function Invoke-LiveCampaign {
         observation = $pathObservation
         policy = [string]$Freeze.settings_reallow_path_policy
     }
-    $settingsConfirmed = Confirm-VisibleFact 5 'SETTINGS-REVOKE-CAPTURED' '仅当已在普通系统设置中可见地完成 VPN 断开/删除时确认为真。'
     $request5 = Get-RequestIdFromEvents $observation5.Events $script:BundleA
     $onCreate5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_ONCREATE')
     $create5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_CREATE_RESOLVED') -and
-        (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED') -and
-        (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_FD_SNAPSHOT')
-    $destroy5 = Get-DestroyAssessment $observation5.Events $script:BundleA $request5
-    # Path match/mismatch is observation-only under settings_reallow_path_policy=observation-only; functional gates alone decide pass/blocked/fail.
-    $scenario5Result = if ($observation5.CaptureDegraded -or -not $observation5.CompleteWindowObserved -or $capture5 -ne 'collected') { 'blocked' } elseif ($destroy5.result -eq 'fail') { 'fail' } elseif (-not $observation5.AckValid -or -not $settingsConfirmed -or -not $onCreate5 -or -not $create5 -or $destroy5.result -ne 'pass') { 'blocked' } else { 'pass' }
+        (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED')
+    $freshCreateProof = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED') -and
+        (Test-PostCreateOpen $observation5.Events $script:BundleA $request5)
+    $s5ProbeCtx = $script:ProbeContexts[5]
+    $bundlePresentDuringProbe = [bool]$s5ProbeCtx.BundlePresent
+    # Post-destroy FD_STILL_OPEN on the current request is a hard fail and can never be overridden
+    # by consecutive-absent process probes; pre-destroy open snapshots never count as fail.
+    $s5FdStillOpen = Test-S5PostDestroyStillOpen $observation5.Events $script:BundleA $request5
+    # Force-stop assessment re-checks recorded probe timestamps (>=2 consecutive absent, first-to-last
+    # spacing >= freeze spacing); execution-time Wait/Terminal flags alone are never trusted, so a
+    # probe_spacing_override below the freeze spacing stays blocked.
+    $absentEvidence = Test-ProcessAbsentEvidence $s5ProbeCtx ([int]$freeze.process_absent_required_count) ([double]$freeze.process_absent_probe_spacing_seconds)
+    $s5Reason = 'settings-app-info-force-stop'
+    $scenario5Result = 'blocked'
+    # A hard FD_STILL_OPEN fail outranks capture/window/operator degradation and is never downgraded.
+    if ($s5FdStillOpen) { $scenario5Result = 'fail'; $s5Reason = 'FD_STILL_OPEN' }
+    elseif ($observation5.CaptureDegraded -or -not $observation5.CompleteWindowObserved) { $s5Reason = 'observation-incomplete' }
+    elseif ($s5ProbeCtx.Aborted) { $s5Reason = 'probe-unknown-or-error' }
+    elseif (-not $observation5.AckValid) { $s5Reason = 'ack-invalid' }
+    elseif (-not $s5State.ForceStopConfirmed) { $s5Reason = 'force-stop-not-confirmed' }
+    elseif ($s5State.ForceStopCaptureStatus -ne 'collected') { $s5Reason = 'force-stop-capture-degraded' }
+    elseif (-not $onCreate5) { $s5Reason = 'vpn-on-create-missing' }
+    elseif (-not $create5) { $s5Reason = 'vpn-create-fd-missing' }
+    elseif (-not $freshCreateProof) { $s5Reason = 'fresh-create-proof-missing' }
+    elseif (-not $absentEvidence.Met) { $s5Reason = $absentEvidence.Reason }
+    elseif (-not $bundlePresentDuringProbe) { $s5Reason = 'bundle-absent-during-probe' }
+    else { $scenario5Result = 'pass'; $s5Reason = 'settings-app-info-force-stop-terminal' }
     $results.Add([ordered]@{
-        sequence_index = 5; scenario = 5; result = $scenario5Result; reason = $destroy5.reason; bundle = $script:BundleA; request_id = $request5
+        sequence_index = 5; scenario = 5; result = $scenario5Result; reason = $s5Reason; bundle = $script:BundleA; request_id = $request5
+        settings_revoke_mechanism = [string]$Freeze.settings_revoke_mechanism
+        settings_vpn_page_policy = [string]$Freeze.settings_vpn_page_policy
+        settings_vpn_page_observation_only = $true
+        settings_vpn_page_capture = [ordered]@{ name = 'scenario-5-settings-vpn-page'; status = $s5State.VpnPageCaptureStatus; visible = [bool]$s5State.VpnPageVisible }
+        app_info_force_stop_capture = [ordered]@{ name = 'scenario-5-app-info-force-stop'; status = $s5State.ForceStopCaptureStatus; confirmed = [bool]$s5State.ForceStopConfirmed }
+        force_stop_confirmed = [bool]$s5State.ForceStopConfirmed
+        terminal_mode = 'settings-app-info-force-stop'
+        fd_still_open = [bool]$s5FdStillOpen
+        process_final_state_probes = @($s5ProbeCtx.Probes)
+        process_absent_evidence = [ordered]@{ met = [bool]$absentEvidence.Met; reason = $absentEvidence.Reason; required_count = [int]$freeze.process_absent_required_count; required_spacing_seconds = [double]$freeze.process_absent_probe_spacing_seconds; measured_spacing_seconds = $absentEvidence.SpacingSeconds }
+        bundle_present_during_probe = [bool]$bundlePresentDuringProbe
         settings_reallow_path = $settingsReallowPath
-        settings_revoke_captured = [bool]$settingsConfirmed
-        assertions = [ordered]@{ vpn_on_create = $(if ($onCreate5) { 'pass' } else { 'blocked' }); vpn_connection_create_fd = $(if ($create5) { 'pass' } else { 'blocked' }); settings_revoke = $(if ($settingsConfirmed) { 'pass' } else { 'blocked' }); destroy_cleanup = $destroy5.result }
+        assertions = [ordered]@{ vpn_on_create = $(if ($onCreate5) { 'pass' } else { 'blocked' }); vpn_connection_create_fd = $(if ($create5) { 'pass' } else { 'blocked' }); fresh_create_proof = $(if ($freshCreateProof) { 'pass' } else { 'blocked' }); force_stop = $(if ($s5State.ForceStopConfirmed) { 'pass' } else { 'blocked' }) }
         observation = $observation5.Observation
     })
+    $s3Entry = @($results | Where-Object { [int]$_.scenario -eq 3 })[0]
+    if ($null -ne $s3Entry) { $s3Entry.clean_reactivation_proof = [bool]$freshCreateProof }
     Assert-ScenarioCaptureCanContinue $results $observation5
 
     $observation6 = Invoke-ScenarioObservation 6 '场景6：先在测试 App A 点 Start 激活；再在测试 App B 点 Start；若系统画面出现替换/取消等选择，不要提前点选，先保留当前画面并按 runner 推进；连续采集保持至 ACK 后再 60 秒'
     $capture6 = Invoke-Capture 'scenario-6-conflict' 6
+    # S6 operator three-state: NO-DUAL-ACTIVE-CAPTURED is asked first; only when it is false is the
+    # independent DUAL-ACTIVE-CAPTURED confirmation asked (true only when A and B are clearly both
+    # active on screen). dual=true && noDual=false is the only operator fail; noDual=true &&
+    # dual=false is normal; both false is blocked dual-active-observation-unresolved; both true is
+    # blocked inconsistent-operator-confirmation. An empty/false answer alone never fails S6.
     $noDual = Confirm-VisibleFact 6 'NO-DUAL-ACTIVE-CAPTURED' '仅当最终可见状态为画面上未同时出现 A 与 B 两个 active VPN 时确认为真。'
+    $dualActive = $false
+    if ($LiveSimulation) {
+        # Simulation fixtures may pre-set both confirmations so the full four-state matrix is
+        # exercised (including the defensive both-true inconsistent state). Live only asks
+        # DUAL-ACTIVE-CAPTURED when NO-DUAL-ACTIVE-CAPTURED is false.
+        $dualActive = Get-SimulationConfirmation 'DUAL-ACTIVE-CAPTURED'
+    } elseif (-not $noDual) {
+        $dualActive = Confirm-VisibleFact 6 'DUAL-ACTIVE-CAPTURED' '仅当明确看到 A 与 B 两个 active VPN 同时出现在画面上时确认为真。'
+    }
+    $operatorState = if ($noDual -and -not $dualActive) { 'normal' }
+        elseif (-not $noDual -and $dualActive) { 'dual-active-observed' }
+        elseif (-not $noDual -and -not $dualActive) { 'dual-active-observation-unresolved' }
+        else { 'inconsistent-operator-confirmation' }
     $request6A = Get-RequestIdFromEvents $observation6.Events $script:BundleA
     $request6B = Get-RequestIdFromEvents $observation6.Events $script:BundleB
     $bUiStartObserved = $null -ne $request6B
@@ -1744,29 +2339,75 @@ function Invoke-LiveCampaign {
     $bRejected = $request6B -and ((Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'START_PROMISE_REJECTED') -or (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'VPN_CREATE_REJECTED'))
     $bAccepted = $request6B -and (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'CREATE_ACCEPTED')
     $replacementDestroy = if ($bAccepted) { Get-DestroyAssessment $observation6.Events $script:BundleA $request6A } else { [pscustomobject]@{ result = 'pass'; reason = 'B-rejected-no-replacement-destroy-required' } }
-    if (-not $bUiStartObserved) {
-        $scenario6Result = 'blocked'
+    # Explicit functional fails outrank capture/window/operator degradation and are never downgraded
+    # to blocked: a failed replacement destroy (A still holds an open fd after B was accepted) and an
+    # operator-confirmed dual-active visible state (dual=true && noDual=false) are both observed
+    # fails. They must be evaluated before operator unresolved/inconsistent and capture/window blocked
+    # reasons (including no-new-B-UI_START / observation-incomplete). Missing evidence stays blocked
+    # and is never promoted to fail; an unresolved or inconsistent operator confirmation without a
+    # functional fail is its own blocked reason, never a fail.
+    $scenario6Result = 'blocked'
+    $s6Reason = 'scenario-6-evidence-incomplete'
+    if ($replacementDestroy.result -eq 'fail' -or $operatorState -eq 'dual-active-observed') {
+        $scenario6Result = 'fail'
+        $s6Reason = if ($replacementDestroy.result -eq 'fail') { [string]$replacementDestroy.reason } else { 'dual-active-observed' }
+    } elseif ($operatorState -eq 'dual-active-observation-unresolved') {
+        $s6Reason = 'dual-active-observation-unresolved'
+    } elseif ($operatorState -eq 'inconsistent-operator-confirmation') {
+        $s6Reason = 'inconsistent-operator-confirmation'
+    } elseif (-not $bUiStartObserved) {
         $s6Reason = 'no-new-B-UI_START'
+    } elseif ($observation6.CaptureDegraded -or -not $observation6.CompleteWindowObserved -or $capture6 -ne 'collected') {
+        $s6Reason = 'observation-incomplete'
+    } elseif (-not $observation6.AckValid -or -not $aAccepted -or -not $request6B -or (-not $bRejected -and -not $bAccepted) -or $replacementDestroy.result -ne 'pass') {
+        $s6Reason = [string]$replacementDestroy.reason
     } else {
-        $scenario6Result = if ($observation6.CaptureDegraded -or -not $observation6.CompleteWindowObserved -or $capture6 -ne 'collected') { 'blocked' } elseif ($replacementDestroy.result -eq 'fail') { 'fail' } elseif (-not $observation6.AckValid -or -not $noDual -or -not $aAccepted -or -not $request6B -or (-not $bRejected -and -not $bAccepted) -or $replacementDestroy.result -ne 'pass') { 'blocked' } else { 'pass' }
-        $s6Reason = $replacementDestroy.reason
+        $scenario6Result = 'pass'
+        $s6Reason = [string]$replacementDestroy.reason
     }
-    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted; b_rejected = [bool]$bRejected; b_accepted = [bool]$bAccepted; no_dual_active = [bool]$noDual; observation = $observation6.Observation })
+    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted; b_rejected = [bool]$bRejected; b_accepted = [bool]$bAccepted; no_dual_active_confirmed = [bool]$noDual; dual_active_confirmed = [bool]$dualActive; operator_state = $operatorState; observation = $observation6.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation6
 
     $activeBundle = if ($bAccepted) { $script:BundleB } else { $script:BundleA }
     $activeRequest = if ($bAccepted) { $request6B } else { $request6A }
-    $cleanupState = [pscustomobject]@{ Done = $false; Verified = $false; CompletedAt = $null; FaultDegraded = $false }
+    $script:ProbeContexts[7] = New-ProcessProbeContext -Scenario 7 -Bundle $activeBundle -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+    $cleanupState = [pscustomobject]@{ Done = $false; Verified = $false; CompletedAt = $null; FaultDegraded = $false; TerminalAssessed = $false; TerminalMode = $null }
     $duringScenario7 = {
         param([object[]]$CurrentEvents)
         if ($cleanupState.Done) { return }
-        # Require a unique current-window stop marker for the expected bundle consistent with active request.
-        # Old destroy-only chains must not start cleanup; multi-id conflict falls through to finally.
+        $probeCtx = $script:ProbeContexts[7]
+        # Terminal assessment completes before any uninstall cleanup is allowed. Get-VpnFinalState is
+        # the single terminal evaluator: callback terminal + post-destroy fd snapshot first,
+        # FD_STILL_OPEN is a hard fail that never falls back, otherwise the strict-process-boundary
+        # route (unique stop + onDestroy + begin/pre snapshot + consecutive absent pre-uninstall
+        # probes). The callback/FD/fallback ladder is never re-implemented here;
+        # Test-StrictFallbackPrerequisites only gates whether to adopt the probe series.
+        # Finally-absent must never backfill these probes.
+        # RequestId is bound to the actual active A/B request from S6; null inference is forbidden.
+        if ([string]::IsNullOrWhiteSpace([string]$activeRequest)) { return }
         $stopCandidate = Get-StopRequestFromEvents -Events $CurrentEvents -ExpectedBundle $activeBundle
-        if ($null -eq $stopCandidate) { return }
-        if (-not [string]::IsNullOrWhiteSpace([string]$activeRequest) -and [string]$stopCandidate.RequestId -ne [string]$activeRequest) { return }
-        $assessment = Get-DestroyAssessment $CurrentEvents $activeBundle ([string]$stopCandidate.RequestId)
-        if ($assessment.result -ne 'pass') { return }
+        if ($null -eq $stopCandidate -or [string]$stopCandidate.RequestId -ne [string]$activeRequest) { return }
+        $rid = [string]$activeRequest
+        $final = Get-VpnFinalState -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid -ProbeState $probeCtx -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+        if ($final.result -eq 'pass') {
+            $cleanupState.TerminalMode = [string]$final.terminal_mode
+        } elseif ($final.result -eq 'fail') {
+            # FD_STILL_OPEN is a hard fail: never uninstall over a leaked fd; bundles stay untouched.
+            return
+        } elseif (-not [bool]$probeCtx.Started -and (Test-StrictFallbackPrerequisites -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid).Met) {
+            # Strict fallback eligible: adopt the window-bound probe series, then re-evaluate with
+            # the same unique evaluator. Only a pass authorizes uninstall; fail/blocked leave
+            # everything untouched.
+            [void](Invoke-ProcessFinalStateProbeSeries $probeCtx $script:CurrentWindowEnd)
+            $final = Get-VpnFinalState -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid -ProbeState $probeCtx -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+            if ($final.result -ne 'pass') { return }
+            $cleanupState.TerminalMode = [string]$final.terminal_mode
+        } else {
+            # blocked: prerequisites missing, or probes already run but insufficient/aborted. Terminal
+            # assessment is not complete; leave bundles untouched and keep waiting for later events.
+            return
+        }
+        $cleanupState.TerminalAssessed = $true
         $preStatus = Invoke-Capture 'scenario-7-pre-uninstall' 7
         foreach ($faultOperation in @('FaultA', 'FaultB')) {
             if ((Invoke-FaultArtifact $faultOperation 7) -ne 'collected') { $cleanupState.FaultDegraded = $true }
@@ -1795,19 +2436,32 @@ function Invoke-LiveCampaign {
         $cleanupState.CompletedAt = (Get-Now).ToString('o')
     }
     $observation7 = Invoke-ScenarioObservation 7 '场景7：在当前仍 active 的测试 App（A 或 B）界面点 Stop；不要手工强停或卸载；runner 负责后续清理' $null $duringScenario7
-    if (-not $cleanupState.Done) { & $duringScenario7 -CurrentEvents $observation7.Events }
-    $stopInfo = Get-StopRequestFromEvents -Events $observation7.Events -ExpectedBundle $activeBundle
-    if ($null -ne $stopInfo -and -not [string]::IsNullOrWhiteSpace([string]$activeRequest) -and [string]$stopInfo.RequestId -ne [string]$activeRequest) {
-        $stopInfo = $null
+    # No post-window DuringWait/probe rerun: late stop is conservatively blocked; probes stay inside the window only.
+    # S7 is hard-bound to the calculated active A/B request; null must not fall back to window-event inference.
+    $final7 = if ([string]::IsNullOrWhiteSpace([string]$activeRequest)) {
+        [pscustomobject]@{ result = 'blocked'; reason = 'active-request-unresolved'; terminal_mode = $null; callback = $null; strict = $null }
+    } else {
+        Get-VpnFinalState -Events $observation7.Events -Bundle $activeBundle -RequestId $activeRequest -ProbeState $script:ProbeContexts[7] -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
     }
-    $s7Request = if ($null -ne $stopInfo) { [string]$stopInfo.RequestId } else { $null }
-    $s7Bundle = if ($null -ne $stopInfo -and -not [string]::IsNullOrWhiteSpace([string]$stopInfo.Bundle)) { [string]$stopInfo.Bundle } else { $activeBundle }
     $capture7Name = if ($cleanupState.Done) { 'scenario-7-post-cleanup' } else { 'scenario-7-final-state' }
     $capture7 = Invoke-Capture $capture7Name 7
     $cleanupVisible = Confirm-VisibleFact 7 'FINAL-CLEANUP-CAPTURED' '仅当已无 active VPN 或测试配置残留时确认为真。'
-    $destroy7 = Get-DestroyAssessment $observation7.Events $s7Bundle $s7Request
-    $scenario7Result = if ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif ($destroy7.result -eq 'fail') { 'fail' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded -or $destroy7.result -ne 'pass') { 'blocked' } else { 'pass' }
-    $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $destroy7.reason; active_bundle = $s7Bundle; request_id = $s7Request; cleanup_completed_at = $cleanupState.CompletedAt; post_cleanup_capture = [bool]$cleanupState.Done; post_cleanup_capture_name = $capture7Name; bundle_process_cleanup_verified = [bool]$cleanupState.Verified; visible_cleanup_confirmed = [bool]$cleanupVisible; fault_capture_degraded = [bool]$cleanupState.FaultDegraded; observation = $observation7.Observation })
+    $scenario7Result = if ($final7.result -eq 'fail') { 'fail' } elseif ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded -or $final7.result -ne 'pass') { 'blocked' } else { 'pass' }
+    $results.Add([ordered]@{
+        sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $final7.reason; active_bundle = $activeBundle; request_id = $activeRequest
+        terminal_mode = $final7.terminal_mode
+        terminal_assessed = [bool]$cleanupState.TerminalAssessed
+        terminal_mode_at_cleanup = $cleanupState.TerminalMode
+        process_final_state_probes = @($script:ProbeContexts[7].Probes)
+        bundle_present_during_probe = [bool]$script:ProbeContexts[7].BundlePresent
+        cleanup_completed_at = $cleanupState.CompletedAt
+        post_cleanup_capture = [bool]$cleanupState.Done
+        post_cleanup_capture_name = $capture7Name
+        bundle_process_cleanup_verified = [bool]$cleanupState.Verified
+        visible_cleanup_confirmed = [bool]$cleanupVisible
+        fault_capture_degraded = [bool]$cleanupState.FaultDegraded
+        observation = $observation7.Observation
+    })
     $script:PartialScenarios = @($results)
     return @($results)
 }
@@ -1932,8 +2586,11 @@ function New-CompleteRecord {
         [Parameter(Mandatory)][string]$ManifestSha256
     )
     $scenario2 = @($Scenarios | Where-Object { [int]$_.scenario -eq 2 })[0]
+    $s3Record = @($Scenarios | Where-Object { [int]$_.scenario -eq 3 })[0]
     $isEvidence = $script:ExecutionMode -eq 'live'
-    if (-not $isEvidence) { $Overall = 'blocked'; $RecordStatus = 'blocked' }
+    # Non-evidence modes (dry-run/live-simulation) stay blocked unless the measured aggregation is an
+    # explicit fail: a hard fail (e.g. post-destroy FD_STILL_OPEN) must never be downgraded to blocked.
+    if (-not $isEvidence -and $Overall -ne 'fail') { $Overall = 'blocked'; $RecordStatus = 'blocked' }
     $record = [ordered]@{
         schema_version = 1
         evidence_id = $Freeze.evidence_id
@@ -1992,16 +2649,27 @@ function New-CompleteRecord {
         freeze_contract_sha256 = $FreezeContractSha256
         preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
         scenario_window_seconds = 60
-        observation_semantics = 'one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds action prompt through measured ACK plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; READY latency excluded from scenario-1 60s install window'
+        observation_semantics = 'one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds action prompt through measured ACK plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; READY latency excluded from scenario-1 60s install window; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); scenario 5 revokes via manual Settings app-info force-stop with confirmation and consecutive absent probes; scenario 5 Settings>VPN page capture is observation-only (its degradation is recorded in observation_only_degraded and never blocks the scenario or overall); scenario 6 operator dual-active confirmation is three-state (no_dual_active_confirmed/dual_active_confirmed: only dual=true && noDual=false fails, both false is blocked dual-active-observation-unresolved, both true is blocked inconsistent-operator-confirmation, empty/false alone never fails); probe results are recorded before any cleanup and never backfilled from finally'
         settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
         settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
+        settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
+        settings_vpn_page_policy = $Freeze.settings_vpn_page_policy
+        settings_vpn_page_observation_only = $true
+        destroy_terminal_policy = $Freeze.destroy_terminal_policy
+        process_absent_required_count = [int]$Freeze.process_absent_required_count
+        process_absent_probe_spacing_seconds = [double]$Freeze.process_absent_probe_spacing_seconds
         cleanup_baseline = 'A/B absent; no A/B process; no active VPN; unrelated VPN isolated; staging removed before send'
         scenarios = @($Scenarios)
         scenario_aggregation = [ordered]@{
             mapping = '1=cleanup_and_install; 2=allow_and_fd; 3=active_stop; 4=deny; 5=settings_revoke; 6=second_vpn_conflict; 7=final_cleanup'
             scenario_2_rule = 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked'
-            scenario_2_assertions = $scenario2.assertions
-            overall_rule = 'any scenario fail => fail; else any scenario blocked => blocked; all seven scenarios pass => pass; evidence integrity violation => invalid'
+            scenario_2_assertions = $(if ($null -ne $scenario2) { $scenario2.assertions } else { $null })
+            scenario_5_rule = 'settings-app-info-force-stop revoke: fresh create/open plus manual force-stop confirmation plus bundle present plus consecutive absent probes; Settings VPN page is observation-only and never blocks'
+            scenario_6_rule = 'explicit functional fails first: replacementDestroy fail or dual-active-observed outrank operator unresolved/inconsistent and capture/window blocked; operator dual-active confirmation is three-state: only dual_active_confirmed=true && no_dual_active_confirmed=false fails (dual-active-observed); noDual=true && dual=false is normal; both false is blocked dual-active-observation-unresolved; both true is blocked inconsistent-operator-confirmation; empty/false alone never fails'
+            scenario_7_rule = 'uninstall cleanup is allowed only after the scenario terminal assessment completes (callback or strict-process-boundary with pre-uninstall probes); finally-absent never backfills terminal probes'
+            s3_strict_process_boundary_gate = 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked'
+            s3_clean_reactivation_proof = $(if ($null -ne $s3Record) { [bool](Get-OptionalProperty $s3Record 'clean_reactivation_proof' $false) } else { $false })
+            overall_rule = 'any scenario fail => fail; else any scenario blocked => blocked; all seven scenarios pass => pass; scenario 3 strict-process-boundary without clean reactivation proof => blocked; evidence integrity violation => invalid'
             measured_scenario_overall = Get-ScenarioAggregation $Scenarios
             overall = $Overall
         }
@@ -2043,6 +2711,7 @@ function New-CompleteRecord {
             force_stop_role = 'notUsedAsRevoke residual cleanup only'
         }
         capture_degraded = @($script:CaptureDegraded)
+        observation_only_degraded = @($script:ObservationOnlyDegraded)
         integrity_violations = @()
         repository_before = $RepositoryBefore.Fingerprint
         hdc_logical_calls = $script:HdcLogicalCallCount
@@ -2206,8 +2875,10 @@ function Set-CaptureDegradedScenarios {
     if ($script:CaptureDegraded.Count -eq 0) { return }
     $globalDegradation = @($script:CaptureDegraded | Where-Object { [int]$_.scenario -eq 0 }).Count -gt 0
     $affected = @($script:CaptureDegraded | Where-Object { [int]$_.scenario -in 1..7 } | ForEach-Object { [int]$_.scenario } | Select-Object -Unique)
+    # Degradation never overrides an explicit fail: a hard fail (e.g. post-destroy FD_STILL_OPEN)
+    # outranks capture degradation, so only non-fail results are downgraded to blocked here.
     foreach ($scenario in $Scenarios) {
-        if ($globalDegradation -or [int]$scenario.scenario -in $affected) {
+        if (($globalDegradation -or [int]$scenario.scenario -in $affected) -and [string]$scenario.result -ne 'fail') {
             $scenario.result = 'blocked'
             $scenario.reason = 'capture-degraded'
             if ([int]$scenario.scenario -eq 2) {
@@ -2373,6 +3044,231 @@ function Invoke-RunnerSelfTest {
     Check ((-not $unknownZone.Ok) -and $unknownZone.Reason -match 'unknown-device-time-zone') 'unknown-zone-blocked'
     $jsonRedacted = Protect-SensitiveText '{"udid":"ABCDEF1234567890","deviceIds":["DEV-1"],"endpoint":"10.1.2.3:8710","build":"PLA-AL10 7.0.0.100(SP8C00E32R7P2)"}'
     Check ($jsonRedacted -match '"udid":"<REDACTED>"' -and $jsonRedacted -match 'deviceIds' -and $jsonRedacted -match '<REDACTED>' -and $jsonRedacted.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $jsonRedacted -notmatch 'ABCDEF1234567890|10\.1\.2\.3') 'quoted-json-udid-deviceids-redaction'
+
+    # --- ADJ-20260807-0003 host process terminal probe unit checks ---
+    $absentPidResult = [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = '' }
+    $absentPidExit0 = [pscustomobject]@{ ExitCode = 0; Stdout = ''; Stderr = '' }
+    $presentPidResult = [pscustomobject]@{ ExitCode = 0; Stdout = '12345'; Stderr = '' }
+    $errorPidResult = [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = 'timeout' }
+    $unknownPidResult = [pscustomobject]@{ ExitCode = 2; Stdout = ''; Stderr = '' }
+    $pidExit1WithStderrBundle = [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = "pidof: $($script:BundleA): Permission denied" }
+    $pidExit2 = [pscustomobject]@{ ExitCode = 2; Stdout = ''; Stderr = '' }
+    $pidGarbage = [pscustomobject]@{ ExitCode = 0; Stdout = 'not-a-pid-line garbage'; Stderr = 'warn' }
+    $probeDumpPass = [pscustomobject]@{ ExitCode = 0; Stdout = '{ "app": { "bundleName": "' + $script:BundleA + '" } }'; Stderr = '' }
+    $probeDumpAbsentExit0 = [pscustomobject]@{ ExitCode = 0; Stdout = 'error: failed to get information and the parameters may be wrong.'; Stderr = '' }
+    $probeDumpAbsentExit1 = [pscustomobject]@{ ExitCode = 1; Stdout = 'error: failed to get information and the parameters may be wrong.'; Stderr = '' }
+    $probeDumpPermission = [pscustomobject]@{ ExitCode = 0; Stdout = 'Permission denied'; Stderr = '' }
+    $probeDumpStderr = [pscustomobject]@{ ExitCode = 0; Stdout = '{ "app": { "bundleName": "' + $script:BundleA + '" } }'; Stderr = 'Permission denied' }
+    $probeDumpExit2 = [pscustomobject]@{ ExitCode = 2; Stdout = 'garbage'; Stderr = '' }
+    $probeDumpGarbage = [pscustomobject]@{ ExitCode = 0; Stdout = 'totally-unrelated-output'; Stderr = '' }
+    $probeDumpInfra = [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = 'timeout' }
+    $probeAbsentWithBundle = Get-ProcessProbeStatus $absentPidResult $probeDumpPass $script:BundleA
+    Check ($probeAbsentWithBundle.status -eq 'absent' -and $probeAbsentWithBundle.bundle_present) 'probe-absent-with-bundle-present'
+    Check ((Get-ProcessProbeStatus $absentPidExit0 $probeDumpPass $script:BundleA).status -eq 'absent') 'probe-absent-pid-exit0-blank'
+    # Non-pass BundleDump never accumulates as absent, even with clear "not found" text.
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpAbsentExit0 $script:BundleA).status -eq 'unknown') 'probe-dump-absent-exit0-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpAbsentExit1 $script:BundleA).status -eq 'unknown') 'probe-dump-absent-exit1-unknown'
+    Check ((Get-ProcessProbeStatus $presentPidResult $probeDumpPass $script:BundleA).status -eq 'present') 'probe-present-classified'
+    Check ((Get-ProcessProbeStatus $errorPidResult $probeDumpPass $script:BundleA).status -eq 'error') 'probe-pid-error-classified'
+    Check ((Get-ProcessProbeStatus $unknownPidResult $probeDumpPass $script:BundleA).status -eq 'unknown') 'probe-pid-unknown-classified'
+    Check ((Get-ProcessProbeStatus $pidExit1WithStderrBundle $probeDumpPass $script:BundleA).status -eq 'unknown') 'probe-pid-exit1-stderr-bundle-unknown'
+    Check ((Get-ProcessProbeStatus $pidExit2 $probeDumpPass $script:BundleA).status -eq 'unknown') 'probe-pid-exit2-unknown'
+    Check ((Get-ProcessProbeStatus $pidGarbage $probeDumpPass $script:BundleA).status -eq 'unknown') 'probe-pid-garbage-stderr-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpPermission $script:BundleA).status -eq 'unknown') 'probe-dump-permission-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpStderr $script:BundleA).status -eq 'unknown') 'probe-dump-stderr-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpExit2 $script:BundleA).status -eq 'unknown') 'probe-dump-exit2-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpGarbage $script:BundleA).status -eq 'unknown') 'probe-dump-garbage-unknown'
+    Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpInfra $script:BundleA).status -eq 'error') 'probe-dump-error-classified'
+
+    function New-TestProbeState {
+        param([object[]]$Probes = @(), [bool]$Started = $true, [bool]$Aborted = $false, [bool]$Terminal = $false, [int]$ConsecutiveAbsent = 0, [bool]$BundlePresent = $true)
+        $list = [Collections.Generic.List[object]]::new()
+        foreach ($p in @($Probes)) { $list.Add($p) }
+        return [pscustomobject]@{
+            Scenario = 0; Bundle = $script:BundleA; RequireBundlePresent = $false
+            RequiredCount = 2; SpacingSeconds = 3.0
+            Started = $Started; Finished = ($Terminal -or $Aborted); Aborted = $Aborted; Terminal = $Terminal
+            ConsecutiveAbsent = $ConsecutiveAbsent; BundlePresent = $BundlePresent
+            Probes = $list; LastProbeAt = $null; OverrideProbeIndex = 0
+        }
+    }
+    $probeT0 = '2099-01-01T00:00:00+00:00'
+    $probeT1 = '2099-01-01T00:00:03+00:00'
+    $fallbackEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-fb" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-fb' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_BEGIN|requestId=a-fb|trigger=onDestroy' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-fb|phase=pre-destroy|marker=PRE_DESTROY_OPEN' }
+    )
+    $goodProbes = New-TestProbeState -Probes @(
+        [ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 },
+        [ordered]@{ time = $probeT1; status = 'absent'; bundle_present = $true; consecutive_absent = 2 }
+    ) -Terminal $true -ConsecutiveAbsent 2 -BundlePresent $true
+    $fallbackPass = Get-VpnFinalState -Events $fallbackEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($fallbackPass.result -eq 'pass' -and $fallbackPass.terminal_mode -eq 'strict-process-boundary' -and $fallbackPass.reason -eq 'strict-process-boundary-terminal') 'strict-fallback-pass-with-probes'
+    $callbackFirstEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-cb" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-cb' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a-cb|fdMarker=FD_CLOSED_CONFIRMED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-cb|phase=post-destroy-resolved|marker=FD_CLOSED_CONFIRMED' }
+    )
+    $callbackFirst = Get-VpnFinalState -Events $callbackFirstEvents -Bundle $script:BundleA -RequestId $null -ProbeState $null
+    Check ($callbackFirst.result -eq 'pass' -and $callbackFirst.terminal_mode -eq 'callback-post-fd') 'callback-terminal-preferred-over-fallback'
+    $callbackNoOnDestroyEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-no-od" },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a-no-od|fdMarker=FD_CLOSED_CONFIRMED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-no-od|phase=post-destroy-resolved|marker=FD_CLOSED_CONFIRMED' }
+    )
+    Check ((Get-DestroyAssessment $callbackNoOnDestroyEvents $script:BundleA 'a-no-od').reason -eq 'destroy-ondestroy-missing') 'destroy-assessment-requires-same-request-ondestroy'
+    $callbackNoOnDestroy = Get-VpnFinalState -Events $callbackNoOnDestroyEvents -Bundle $script:BundleA -RequestId 'a-no-od' -ProbeState $null
+    Check ($callbackNoOnDestroy.result -eq 'blocked' -and $callbackNoOnDestroy.result -ne 'pass') 'callback-without-ondestroy-cannot-pass'
+    $fdStillOpenEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-fd" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-fd' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a-fd|fdMarker=FD_STILL_OPEN' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-fd|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN' }
+    )
+    $fdStillOpen = Get-VpnFinalState -Events $fdStillOpenEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($fdStillOpen.result -eq 'fail' -and $fdStillOpen.reason -eq 'fd-still-open-after-destroy' -and $fdStillOpen.terminal_mode -eq 'callback-post-fd') 'fd-still-open-fail-not-overridable-by-probes'
+    $oneAbsentProbes = New-TestProbeState -Probes @([ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 }) -ConsecutiveAbsent 1
+    $oneAbsent = Get-VpnFinalState -Events $fallbackEvents -Bundle $script:BundleA -RequestId $null -ProbeState $oneAbsentProbes -RequireBundlePresent $true
+    Check ($oneAbsent.result -eq 'blocked' -and $oneAbsent.reason -eq 'strict-fallback-process-absent-insufficient') 'strict-fallback-one-absent-blocked'
+    $closeProbes = New-TestProbeState -Probes @(
+        [ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 },
+        [ordered]@{ time = '2099-01-01T00:00:01+00:00'; status = 'absent'; bundle_present = $true; consecutive_absent = 2 }
+    ) -Terminal $true -ConsecutiveAbsent 2
+    $closeSpacing = Get-VpnFinalState -Events $fallbackEvents -Bundle $script:BundleA -RequestId $null -ProbeState $closeProbes -RequireBundlePresent $true
+    Check ($closeSpacing.result -eq 'blocked' -and $closeSpacing.reason -eq 'strict-fallback-probe-spacing-insufficient') 'strict-fallback-spacing-insufficient-blocked'
+    $presentMidProbes = New-TestProbeState -Probes @(
+        [ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 },
+        [ordered]@{ time = $probeT1; status = 'present'; bundle_present = $false; consecutive_absent = 0 },
+        [ordered]@{ time = '2099-01-01T00:00:06+00:00'; status = 'absent'; bundle_present = $true; consecutive_absent = 1 }
+    ) -ConsecutiveAbsent 1
+    $presentMid = Get-VpnFinalState -Events $fallbackEvents -Bundle $script:BundleA -RequestId $null -ProbeState $presentMidProbes -RequireBundlePresent $true
+    Check ($presentMid.result -eq 'blocked' -and $presentMid.reason -eq 'strict-fallback-process-absent-insufficient') 'strict-fallback-present-interspersed-blocked'
+    $errorProbes = New-TestProbeState -Probes @([ordered]@{ time = $probeT0; status = 'error'; bundle_present = $false; consecutive_absent = 0 }) -Aborted $true
+    $probeError = Get-VpnFinalState -Events $fallbackEvents -Bundle $script:BundleA -RequestId $null -ProbeState $errorProbes -RequireBundlePresent $true
+    Check ($probeError.result -eq 'blocked' -and $probeError.reason -eq 'strict-fallback-probe-unknown-or-error') 'strict-fallback-probe-error-blocked'
+    $wrongRequestEvents = @([pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleB)|requestId=b-wrong-fb" })
+    $wrongRequest = Get-VpnFinalState -Events $wrongRequestEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($wrongRequest.result -eq 'blocked' -and $wrongRequest.reason -eq 'strict-fallback-stop-unique-missing') 'strict-fallback-wrong-request-blocked'
+    $noOnDestroyEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-nod" },
+        [pscustomobject]@{ text = 'VPN_DESTROY_BEGIN|requestId=a-nod|trigger=onDestroy' }
+    )
+    $noOnDestroy = Get-VpnFinalState -Events $noOnDestroyEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($noOnDestroy.result -eq 'blocked' -and $noOnDestroy.reason -eq 'strict-fallback-ondestroy-missing') 'strict-fallback-no-ondestroy-blocked'
+    $noBeginEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-nob" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-nob' }
+    )
+    $noBegin = Get-VpnFinalState -Events $noBeginEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($noBegin.result -eq 'blocked' -and $noBegin.reason -eq 'strict-fallback-destroy-begin-missing') 'strict-fallback-no-begin-blocked'
+    $issuedOnlyFinalEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-iss" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-iss' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_ISSUED|requestId=a-iss' }
+    )
+    $issuedOnlyFinal = Get-VpnFinalState -Events $issuedOnlyFinalEvents -Bundle $script:BundleA -RequestId $null -ProbeState $goodProbes -RequireBundlePresent $true
+    Check ($issuedOnlyFinal.result -eq 'blocked' -and $issuedOnlyFinal.reason -eq 'strict-fallback-destroy-begin-missing') 'issued-never-counts-as-begin'
+    $strictNoProof = @(
+        [ordered]@{ scenario = 1; result = 'pass' }, [ordered]@{ scenario = 2; result = 'pass' },
+        [ordered]@{ scenario = 3; result = 'pass'; terminal_mode = 'strict-process-boundary'; clean_reactivation_proof = $false },
+        [ordered]@{ scenario = 4; result = 'pass' }, [ordered]@{ scenario = 5; result = 'pass' },
+        [ordered]@{ scenario = 6; result = 'pass' }, [ordered]@{ scenario = 7; result = 'pass' }
+    )
+    Check ((Get-ScenarioAggregation $strictNoProof) -eq 'blocked') 's3-strict-fallback-without-reactivation-blocks-aggregation'
+    $strictWithProof = @(
+        [ordered]@{ scenario = 1; result = 'pass' }, [ordered]@{ scenario = 2; result = 'pass' },
+        [ordered]@{ scenario = 3; result = 'pass'; terminal_mode = 'strict-process-boundary'; clean_reactivation_proof = $true },
+        [ordered]@{ scenario = 4; result = 'pass' }, [ordered]@{ scenario = 5; result = 'pass' },
+        [ordered]@{ scenario = 6; result = 'pass' }, [ordered]@{ scenario = 7; result = 'pass' }
+    )
+    Check ((Get-ScenarioAggregation $strictWithProof) -eq 'pass') 's3-strict-fallback-with-reactivation-passes-aggregation'
+
+    # Capture degradation must never downgrade an explicit fail; aggregation keeps any fail first.
+    $script:CaptureDegraded.Clear()
+    $script:CaptureDegraded.Add([ordered]@{ scenario = 0; component = 'raw-hilog-process'; reason = 'simulated death'; category = 'non-infrastructure'; infrastructure_reason = $null })
+    $degradeScenarios = @(
+        [ordered]@{ scenario = 2; result = 'blocked'; reason = 'pre-existing-block' },
+        [ordered]@{ scenario = 3; result = 'fail'; reason = 'fd-still-open-after-destroy' },
+        [ordered]@{ scenario = 4; result = 'pass'; reason = 'clean-pass' }
+    )
+    Set-CaptureDegradedScenarios $degradeScenarios
+    Check (([string]$degradeScenarios[1].result -eq 'fail' -and [string]$degradeScenarios[1].reason -eq 'fd-still-open-after-destroy') -and [string]$degradeScenarios[0].result -eq 'blocked' -and [string]$degradeScenarios[0].reason -eq 'capture-degraded' -and [string]$degradeScenarios[2].result -eq 'blocked') 'capture-degraded-never-overrides-fail'
+    $script:CaptureDegraded.Clear()
+    $aggFailFirst = @(
+        [ordered]@{ scenario = 1; result = 'blocked' }, [ordered]@{ scenario = 2; result = 'blocked' },
+        [ordered]@{ scenario = 3; result = 'fail'; terminal_mode = 'callback-post-fd' },
+        [ordered]@{ scenario = 4; result = 'blocked' }, [ordered]@{ scenario = 5; result = 'blocked' },
+        [ordered]@{ scenario = 6; result = 'blocked' }, [ordered]@{ scenario = 7; result = 'blocked' }
+    )
+    Check ((Get-ScenarioAggregation $aggFailFirst) -eq 'fail') 'aggregation-any-fail-priority-over-blocked'
+
+    # S5 post-destroy FD_STILL_OPEN is a hard fail; pre-destroy open never fails.
+    $s5PostDestroyOpenEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a5-fd" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a5-fd' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a5-fd|fdMarker=FD_STILL_OPEN' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a5-fd|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN' }
+    )
+    Check (Test-S5PostDestroyStillOpen $s5PostDestroyOpenEvents $script:BundleA 'a5-fd') 's5-post-destroy-fd-still-open-fail'
+    $s5PreDestroyOpenEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a5-pre" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a5-pre' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_BEGIN|requestId=a5-pre|trigger=onDestroy' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a5-pre|phase=pre-destroy|open=true|marker=PRE_DESTROY_OPEN' }
+    )
+    Check (-not (Test-S5PostDestroyStillOpen $s5PreDestroyOpenEvents $script:BundleA 'a5-pre')) 's5-pre-destroy-open-not-fail'
+    Check (-not (Test-S5PostDestroyStillOpen $s5PreDestroyOpenEvents $script:BundleA 'a-other-request')) 's5-fd-still-open-request-correlated'
+    Check (-not (Test-S5PostDestroyStillOpen @() $script:BundleA $null)) 's5-fd-still-open-null-request-not-fail'
+    # Same-bundle/request marker only: correct request on the wrong bundle must never hit, and an
+    # explicit matching bundle field must still hit.
+    $s5WrongBundleOpenEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a5-wb" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a5-wb' },
+        [pscustomobject]@{ text = "VPN_DESTROY_RESOLVED|bundle=$($script:BundleB)|requestId=a5-wb|fdMarker=FD_STILL_OPEN" },
+        [pscustomobject]@{ text = "VPN_FD_SNAPSHOT|bundle=$($script:BundleB)|requestId=a5-wb|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN" }
+    )
+    Check (-not (Test-S5PostDestroyStillOpen $s5WrongBundleOpenEvents $script:BundleA 'a5-wb')) 's5-fd-still-open-wrong-bundle-not-hit'
+    Check (Test-S5PostDestroyStillOpen $s5WrongBundleOpenEvents $script:BundleB 'a5-wb') 's5-fd-still-open-explicit-bundle-must-equal'
+
+    # Test-ProcessAbsentEvidence re-checks recorded probe timestamps; execution Wait is never trusted.
+    Check ((Test-ProcessAbsentEvidence $goodProbes 2 3.0).Met) 'probe-evidence-two-absent-spaced-met'
+    $evidenceOneAbsent = New-TestProbeState -Probes @([ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 }) -ConsecutiveAbsent 1
+    Check ((Test-ProcessAbsentEvidence $evidenceOneAbsent 2 3.0).Reason -eq 'process-absent-probes-insufficient') 'probe-evidence-one-absent-insufficient'
+    $evidenceCloseSpaced = New-TestProbeState -Probes @(
+        [ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 },
+        [ordered]@{ time = '2099-01-01T00:00:01+00:00'; status = 'absent'; bundle_present = $true; consecutive_absent = 2 }
+    ) -Terminal $true -ConsecutiveAbsent 2
+    Check ((Test-ProcessAbsentEvidence $evidenceCloseSpaced 2 3.0).Reason -eq 'probe-spacing-insufficient') 'probe-evidence-spacing-insufficient'
+    $evidencePresentIntruder = New-TestProbeState -Probes @(
+        [ordered]@{ time = $probeT0; status = 'absent'; bundle_present = $true; consecutive_absent = 1 },
+        [ordered]@{ time = $probeT1; status = 'present'; bundle_present = $false; consecutive_absent = 0 },
+        [ordered]@{ time = '2099-01-01T00:00:06+00:00'; status = 'absent'; bundle_present = $true; consecutive_absent = 1 }
+    ) -ConsecutiveAbsent 1
+    Check ((Test-ProcessAbsentEvidence $evidencePresentIntruder 2 3.0).Reason -eq 'process-absent-probes-insufficient') 'probe-evidence-present-interspersed-insufficient'
+    $evidenceAborted = New-TestProbeState -Probes @([ordered]@{ time = $probeT0; status = 'error'; bundle_present = $false; consecutive_absent = 0 }) -Aborted $true
+    Check ((Test-ProcessAbsentEvidence $evidenceAborted 2 3.0).Reason -eq 'probe-unknown-or-error') 'probe-evidence-aborted-blocked'
+    $evidenceUnstarted = New-TestProbeState -Probes @() -Started $false
+    Check ((Test-ProcessAbsentEvidence $evidenceUnstarted 2 3.0).Reason -eq 'probes-not-started') 'probe-evidence-not-started-blocked'
+
+    # Test-PostCreateOpen matches the open=true field boundary only; reopen=true never hits.
+    $postCreateOpenEvents = @(
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|reopen=true|marker=CREATE_ACCEPTED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a7|phase=post-create|open=truex|marker=CREATE_ACCEPTED' }
+    )
+    Check (Test-PostCreateOpen $postCreateOpenEvents $script:BundleA 'a5') 'post-create-open-exact-field'
+    Check (-not (Test-PostCreateOpen $postCreateOpenEvents $script:BundleA 'a6')) 'post-create-reopen-not-open'
+    Check (-not (Test-PostCreateOpen $postCreateOpenEvents $script:BundleA 'a7')) 'post-create-open-prefix-not-open'
+    # Same-bundle/request marker only: correct request on the wrong bundle must never hit, and an
+    # explicit matching bundle field must still hit.
+    $postCreateWrongBundleEvents = @(
+        [pscustomobject]@{ text = "VPN_FD_SNAPSHOT|bundle=$($script:BundleB)|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" }
+    )
+    Check (-not (Test-PostCreateOpen $postCreateWrongBundleEvents $script:BundleA 'a5')) 'post-create-open-wrong-bundle-not-hit'
+    Check (Test-PostCreateOpen $postCreateWrongBundleEvents $script:BundleB 'a5') 'post-create-open-explicit-bundle-must-equal'
 
     $captureTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-capture-selftest-' + [guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($captureTemp) | Out-Null
@@ -2620,14 +3516,19 @@ try {
     }
     Set-CaptureDegradedScenarios $scenarios
     if ([string]::IsNullOrEmpty($infrastructureReason) -and -not [string]::IsNullOrEmpty($script:InfrastructureReasonObserved)) { $infrastructureReason = $script:InfrastructureReasonObserved }
+    $measuredOverall = Get-ScenarioAggregation $scenarios
     if ($script:CaptureDegraded.Count -gt 0 -or (-not $DryRun -and -not [bool]$script:CleanupVerification.verified_absent)) {
-        $overall = 'blocked'
+        # Capture degradation / cleanup uncertainty never downgrades an explicit scenario fail: only
+        # non-fail aggregation collapses to blocked, so a leaked fd (FD_STILL_OPEN) still fails overall.
+        $overall = if ($measuredOverall -eq 'fail') { 'fail' } else { 'blocked' }
         $recordStatus = 'blocked'
     } elseif ($script:ExecutionMode -eq 'live') {
-        $overall = Get-ScenarioAggregation $scenarios
+        $overall = $measuredOverall
         $recordStatus = 'collected'
     } else {
-        $overall = 'blocked'
+        # DryRun / LiveSimulation are non-evidence (record_status stays blocked). An explicit measured
+        # fail still surfaces as overall/verdict fail and is never collapsed to blocked; non-fail stays blocked.
+        $overall = if ($measuredOverall -eq 'fail') { 'fail' } else { 'blocked' }
         $recordStatus = 'blocked'
     }
     if ($script:HdcProcessStartCount -ne 0 -and $script:NoDeviceMode) {
