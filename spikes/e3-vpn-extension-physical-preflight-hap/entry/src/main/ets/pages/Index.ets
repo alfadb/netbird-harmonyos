@@ -1,10 +1,15 @@
 import Want from '@ohos.app.ability.Want';
+import common from '@ohos.app.ability.common';
+import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'E3PhysVpn';
 const EXTENSION_ABILITY: string = 'E3PhysicalVpnExtensionAbility';
+const LEDGER_FILE: string = 'e3-phys-request-ledger.txt';
+const MAX_REQUEST_ID_LENGTH: number = 96;
+const PENDING_RELEASE_TIMEOUT_MS: number = 65000;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -21,6 +26,17 @@ function safeError(error: Error): string {
   return `code=${code},name=${name},message=${message}`;
 }
 
+function isValidRequestId(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_REQUEST_ID_LENGTH) { return false; }
+  for (let i = 0; i < value.length; i++) {
+    const ch: string = value.charAt(i);
+    const code: number = ch.charCodeAt(0);
+    const alnum: boolean = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (!alnum && ch !== '.' && ch !== '_' && ch !== '-') { return false; }
+  }
+  return true;
+}
+
 @Entry
 @Component
 struct Index {
@@ -30,10 +46,17 @@ struct Index {
   @State private operationPending: boolean = false;
   @State private activeRequestId: string = '';
   private requestSequence: number = 0;
+  private startGeneration: number = 0;
+  private pendingReleaseTimer: number = -1;
+
+  aboutToDisappear(): void {
+    this.clearPendingRelease();
+  }
 
   private nextRequestId(): string {
     this.requestSequence++;
-    return `${this.bundleName}-${Date.now()}-${this.requestSequence}`;
+    const requestId: string = `${this.bundleName}-${Date.now()}-${this.requestSequence}`;
+    return isValidRequestId(requestId) ? requestId : `${this.bundleName}-${Date.now()}`;
   }
 
   private want(requestId: string): Want {
@@ -45,6 +68,34 @@ struct Index {
         requestId: requestId
       }
     };
+  }
+
+  private writeRequestLedger(requestId: string): void {
+    const context = getContext(this) as common.UIAbilityContext;
+    const ledgerPath: string = `${context.filesDir}/${LEDGER_FILE}`;
+    const payload: string = `${requestId}\n${Date.now()}\n`;
+    let fd: number = -1;
+    try {
+      const opened = fs.openSync(ledgerPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fd = opened.fd;
+      fs.writeSync(fd, payload);
+      hilog.info(DOMAIN, TAG,
+        'LEDGER_PERSISTED|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'LEDGER_WRITE_REJECTED|bundle=%{public}s|requestId=%{public}s|summary=%{public}s',
+        this.bundleName, requestId, safeError(error as Error));
+    } finally {
+      if (fd >= 0) {
+        try {
+          fs.closeSync(fd);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG,
+            'LEDGER_WRITE_REJECTED|bundle=%{public}s|requestId=%{public}s|summary=%{public}s',
+            this.bundleName, requestId, safeError(closeError as Error));
+        }
+      }
+    }
   }
 
   private startVpn(): void {
@@ -61,13 +112,23 @@ struct Index {
     }
 
     const requestId: string = this.nextRequestId();
+    this.startGeneration++;
+    const generation: number = this.startGeneration;
     this.activeRequestId = requestId;
     this.operationPending = true;
     this.operationStatus = 'Start pending';
     this.operationDetail = requestId;
+    this.writeRequestLedger(requestId);
     hilog.info(DOMAIN, TAG, 'UI_START|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
+    this.schedulePendingRelease(requestId, generation);
 
     vpnExtension.startVpnExtensionAbility(this.want(requestId)).then(() => {
+      if (this.startGeneration !== generation) {
+        hilog.info(DOMAIN, TAG,
+          'START_PROMISE_LATE_RESOLVED|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
+        return;
+      }
+      this.clearPendingRelease();
       this.operationPending = false;
       this.operationStatus = 'Start resolved';
       this.operationDetail = requestId;
@@ -75,6 +136,13 @@ struct Index {
         'START_PROMISE_RESOLVED|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
     }).catch((error: Error) => {
       const summary: string = safeError(error);
+      if (this.startGeneration !== generation) {
+        hilog.error(DOMAIN, TAG,
+          'START_PROMISE_LATE_REJECTED|bundle=%{public}s|requestId=%{public}s|summary=%{public}s',
+          this.bundleName, requestId, summary);
+        return;
+      }
+      this.clearPendingRelease();
       if (this.activeRequestId === requestId) {
         this.activeRequestId = '';
       }
@@ -85,6 +153,31 @@ struct Index {
         'START_PROMISE_REJECTED|bundle=%{public}s|requestId=%{public}s|summary=%{public}s',
         this.bundleName, requestId, summary);
     });
+  }
+
+  private schedulePendingRelease(requestId: string, generation: number): void {
+    this.clearPendingRelease();
+    this.pendingReleaseTimer = setTimeout(() => {
+      this.pendingReleaseTimer = -1;
+      if (this.startGeneration !== generation) { return; }
+      if (this.activeRequestId !== requestId) { return; }
+      // Advance generation so any late then/catch for this start can only emit LATE markers.
+      this.startGeneration++;
+      this.activeRequestId = '';
+      this.operationPending = false;
+      this.operationStatus = 'Start available';
+      this.operationDetail = 'Pending start released after bounded timeout';
+      hilog.info(DOMAIN, TAG,
+        'START_PENDING_RELEASED|bundle=%{public}s|requestId=%{public}s|reason=bounded-timeout|thresholdMs=%{public}d',
+        this.bundleName, requestId, PENDING_RELEASE_TIMEOUT_MS);
+    }, PENDING_RELEASE_TIMEOUT_MS);
+  }
+
+  private clearPendingRelease(): void {
+    if (this.pendingReleaseTimer !== -1) {
+      clearTimeout(this.pendingReleaseTimer);
+      this.pendingReleaseTimer = -1;
+    }
   }
 
   private stopVpn(): void {

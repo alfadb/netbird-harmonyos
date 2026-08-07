@@ -154,8 +154,24 @@ assert_arkts_source() {
   if rg -n '\.(close|dup|read|write)[[:space:]]*\(' "$ETS_ROOT"; then
     fail 'fd ownership or I/O call found in ArkTS'
   fi
-  if rg -n 'while[[:space:]]*\(|for[[:space:]]*\([[:space:]]*;|Atomics\.wait|Promise\.race|setTimeout' "$ETS_ROOT"; then
-    fail 'busy-wait or timeout race found in ArkTS lifecycle'
+  if rg -n 'Atomics\.wait|Promise\.race|while[[:space:]]*\(|for[[:space:]]*\([[:space:]]*;|setInterval' "$ETS_ROOT"; then
+    fail 'busy-wait or race found in ArkTS lifecycle'
+  fi
+  if rg -n 'setTimeout|clearTimeout' "$EXTENSION"; then
+    fail 'timer found outside the UI bounded-release guard'
+  fi
+  require_count 'setTimeout(' 1 "$UI"
+  require_count 'clearTimeout(' 1 "$UI"
+  local timer_api
+  timer_api="$(rg --no-filename -o 'setTimeout|clearTimeout|setInterval|clearInterval' "$ETS_ROOT" | LC_ALL=C sort -u | paste -sd, -)"
+  [[ "$timer_api" == 'clearTimeout,setTimeout' ]] ||
+    fail "non-minimal timer API set in ArkTS: $timer_api"
+  local fs_api
+  fs_api="$(rg --no-filename -o 'fs\.[A-Za-z]+' "$ETS_ROOT" | LC_ALL=C sort -u | paste -sd, -)"
+  [[ "$fs_api" == 'fs.OpenMode,fs.closeSync,fs.openSync,fs.readSync,fs.unlinkSync,fs.writeSync' ]] ||
+    fail "non-minimal fs API set in ArkTS: $fs_api"
+  if rg -n 'VPN_DESTROY_ISSUED' "$ETS_ROOT"; then
+    fail 'VPN_DESTROY_ISSUED terminal marker must not appear in ArkTS'
   fi
   if rg -n '\.destroy[[:space:]]*\([^[:space:])]' "$ETS_ROOT"; then
     fail 'argument-bearing destroy call found'
@@ -186,7 +202,7 @@ assert_arkts_source() {
   require_count 'if (this.activeRequestId.length > 0) {' 1 "$UI"
   require_count 'UI_START_SKIPPED|bundle=%{public}s|requestId=%{public}s|reason=active-request' 1 "$UI"
   require_count 'this.activeRequestId = requestId;' 1 "$UI"
-  require_count "this.activeRequestId = '';" 3 "$UI"
+  require_count "this.activeRequestId = '';" 4 "$UI"
   require_count 'const code: number | undefined = (error as BusinessFailure).code;' 1 "$UI"
   require_count 'if (code === 16000001 && this.activeRequestId === requestId) {' 1 "$UI"
   require_count 'STOP_SESSION_RELEASED|bundle=%{public}s|requestId=%{public}s|reason=ability-not-found' 1 "$UI"
@@ -196,11 +212,18 @@ assert_arkts_source() {
 
   local marker
   for marker in \
-    UI_START UI_START_SKIPPED START_PROMISE_RESOLVED START_PROMISE_REJECTED \
+    UI_START UI_START_SKIPPED START_PROMISE_RESOLVED START_PROMISE_REJECTED START_PROMISE_LATE_RESOLVED \
+    START_PROMISE_LATE_REJECTED START_PENDING_RELEASED LEDGER_PERSISTED LEDGER_WRITE_REJECTED \
     UI_STOP UI_STOP_SKIPPED STOP_PROMISE_RESOLVED STOP_PROMISE_REJECTED \
     STOP_SESSION_RELEASED; do
     require_marker "$marker" "$UI"
   done
+  require_count 'START_PENDING_RELEASED|bundle=%{public}s|requestId=%{public}s|reason=bounded-timeout' 1 "$UI"
+  require_count 'this.writeRequestLedger(requestId);' 1 "$UI"
+  require_count 'fs.openSync(ledgerPath,' 1 "$UI"
+  require_count 'fs.writeSync(fd, payload);' 1 "$UI"
+  require_count 'fs.closeSync(fd);' 1 "$UI"
+  require_count 'this.startGeneration++;' 2 "$UI"
   for marker in \
     VPN_ONCREATE VPN_CONNECTION_CREATED VPN_CREATE_BEGIN VPN_CREATE_RESOLVED VPN_CREATE_REJECTED \
     VPN_CREATE_INVALID_FD VPN_FD_SNAPSHOT VPN_FD_PROBE_REJECTED \
@@ -209,10 +232,21 @@ assert_arkts_source() {
     VPN_DESTROY_REJECTED VPN_DESTROY_SKIPPED VPN_DESTROY_ALREADY \
     PRE_DESTROY_OPEN PRE_DESTROY_NOT_OPEN FD_CLOSED_CONFIRMED FD_STILL_OPEN \
     FD_NOT_OPEN_AFTER_DESTROY FD_STATE_UNCONFIRMED \
+    LEDGER_READ_RESOLVED LEDGER_READ_REJECTED LEDGER_CONSUME_RESOLVED LEDGER_CONSUME_REJECTED \
+    LEDGER_MISSING LEDGER_REQUESTID_MISMATCH LEDGER_AGE_REJECTED \
+    VPN_REQUESTID_INVALID \
     post-create pre-destroy post-destroy-resolved post-destroy-rejected; do
     require_marker "$marker" "$EXTENSION"
   done
-  printf 'ARKTS_SOURCE_AUDIT=pass config=minimal ownership=platform_destroy singleFlight=true markers=complete uiSerialized=true\n'
+  require_count 'requestSource=%{public}s' 1 "$EXTENSION"
+  require_count 'fs.openSync(ledgerPath,' 1 "$EXTENSION"
+  require_count 'fs.readSync(fd, buffer);' 1 "$EXTENSION"
+  require_count 'fs.closeSync(fd);' 1 "$EXTENSION"
+  require_count 'fs.unlinkSync(ledgerPath);' 1 "$EXTENSION"
+  require_count 'this.consumeRequestLedger();' 1 "$EXTENSION"
+  require_count 'LEDGER_MAX_FUTURE_MS' 1 "$EXTENSION"
+  require_count 'LEDGER_MAX_AGE_MS' 1 "$EXTENSION"
+  printf 'ARKTS_SOURCE_AUDIT=pass config=minimal ownership=platform_destroy singleFlight=true markers=complete uiSerialized=true ledger=sandbox timer=bounded-single fs=open-write-read-close\n'
 }
 
 clean_build() {

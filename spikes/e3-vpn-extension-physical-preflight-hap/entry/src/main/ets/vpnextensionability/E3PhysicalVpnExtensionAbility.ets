@@ -1,5 +1,6 @@
 import VpnExtensionAbility from '@ohos.app.ability.VpnExtensionAbility';
 import Want from '@ohos.app.ability.Want';
+import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import fdprobe from 'libfdprobe.so';
@@ -8,6 +9,11 @@ import { FdStatus } from 'libfdprobe.so';
 const DOMAIN: number = 0x2900;
 const TAG: string = 'E3PhysVpn';
 const MAX_NATIVE_FD: number = 2147483647;
+const LEDGER_FILE: string = 'e3-phys-request-ledger.txt';
+const MAX_REQUEST_ID_LENGTH: number = 96;
+const LEDGER_MAX_FUTURE_MS: number = 30000;
+const LEDGER_MAX_AGE_MS: number = 300000;
+const LEDGER_READ_BUFFER_BYTES: number = 512;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -40,8 +46,34 @@ function safeError(error: Error): string {
   return `code=${code},name=${name},message=${message}`;
 }
 
+function isValidRequestId(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_REQUEST_ID_LENGTH) { return false; }
+  for (let i = 0; i < value.length; i++) {
+    const ch: string = value.charAt(i);
+    const code: number = ch.charCodeAt(0);
+    const alnum: boolean = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+    if (!alnum && ch !== '.' && ch !== '_' && ch !== '-') { return false; }
+  }
+  return true;
+}
+
+function bytesToAscii(buffer: ArrayBuffer, length: number): string {
+  const view: Uint8Array = new Uint8Array(buffer, 0, length);
+  let out: string = '';
+  for (let i = 0; i < length; i++) {
+    out += String.fromCharCode(view[i]);
+  }
+  return out;
+}
+
+interface LedgerConsumeResult {
+  requestId: string;
+  usable: boolean;
+}
+
 export default class E3PhysicalVpnExtensionAbility extends VpnExtensionAbility {
   private requestId: string = 'missing';
+  private requestSource: string = 'missing';
   private connectionCreationAttempted: boolean = false;
   private connection?: vpnExtension.VpnConnection;
   private createPromise?: Promise<CreateOutcome>;
@@ -52,9 +84,36 @@ export default class E3PhysicalVpnExtensionAbility extends VpnExtensionAbility {
   private fdConfirmedOpenAfterCreate: boolean = false;
 
   onCreate(want: Want): void {
-    this.requestId = String(want.parameters?.['requestId'] ?? 'missing');
-    hilog.info(DOMAIN, TAG, 'VPN_ONCREATE|bundle=%{public}s|requestId=%{public}s',
-      want.bundleName ?? 'unknown', this.requestId);
+    const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
+    // Always read+consume the sandbox ledger, even when Want already carries a requestId.
+    const ledger: LedgerConsumeResult = this.consumeRequestLedger();
+    let requestSource: string = 'missing';
+    if (wantRequestId.length > 0 && !isValidRequestId(wantRequestId)) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_REQUESTID_INVALID|requestId=%{public}s|reason=want-format-or-length', clean(wantRequestId));
+    }
+    if (isValidRequestId(wantRequestId)) {
+      this.requestId = wantRequestId;
+      requestSource = 'want';
+      if (ledger.usable && ledger.requestId !== wantRequestId) {
+        hilog.error(DOMAIN, TAG,
+          'LEDGER_REQUESTID_MISMATCH|want=%{public}s|ledger=%{public}s',
+          clean(wantRequestId), clean(ledger.requestId));
+      }
+    } else if (ledger.usable) {
+      this.requestId = ledger.requestId;
+      requestSource = 'sandbox';
+    } else {
+      this.requestId = 'missing';
+      requestSource = 'missing';
+      if (ledger.requestId.length > 0 && !isValidRequestId(ledger.requestId)) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_REQUESTID_INVALID|requestId=%{public}s|reason=ledger-format-or-length', clean(ledger.requestId));
+      }
+    }
+    this.requestSource = requestSource;
+    hilog.info(DOMAIN, TAG, 'VPN_ONCREATE|bundle=%{public}s|requestId=%{public}s|requestSource=%{public}s',
+      want.bundleName ?? 'unknown', this.requestId, requestSource);
 
     if (this.connectionCreationAttempted) {
       hilog.error(DOMAIN, TAG,
@@ -151,6 +210,72 @@ export default class E3PhysicalVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=unexpected|summary=%{public}s',
         this.requestId, safeError(error));
     });
+  }
+
+  private consumeRequestLedger(): LedgerConsumeResult {
+    const empty: LedgerConsumeResult = { requestId: '', usable: false };
+    const ledgerPath: string = `${this.context.filesDir}/${LEDGER_FILE}`;
+    let content: string = '';
+    let fd: number = -1;
+    try {
+      const opened = fs.openSync(ledgerPath, fs.OpenMode.READ_ONLY);
+      fd = opened.fd;
+      const buffer: ArrayBuffer = new ArrayBuffer(LEDGER_READ_BUFFER_BYTES);
+      const readLen: number = fs.readSync(fd, buffer);
+      content = bytesToAscii(buffer, readLen);
+    } catch (error) {
+      const summary: string = safeError(error as Error);
+      const code: number | undefined = (error as BusinessFailure).code;
+      if (code === 13900002 || summary.indexOf('No such file') >= 0 || summary.indexOf('no such file') >= 0) {
+        hilog.info(DOMAIN, TAG,
+          'LEDGER_MISSING|requestId=%{public}s|summary=%{public}s', this.requestId, summary);
+      } else {
+        hilog.error(DOMAIN, TAG,
+          'LEDGER_READ_REJECTED|requestId=%{public}s|summary=%{public}s', this.requestId, summary);
+      }
+      return empty;
+    } finally {
+      if (fd >= 0) {
+        try {
+          fs.closeSync(fd);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG,
+            'LEDGER_READ_REJECTED|requestId=%{public}s|summary=%{public}s',
+            this.requestId, safeError(closeError as Error));
+        }
+      }
+    }
+
+    const lines: string[] = content.split('\n');
+    const candidate: string = lines.length > 0 ? lines[0].trim() : '';
+    const timestampText: string = lines.length > 1 ? lines[1].trim() : '';
+    hilog.info(DOMAIN, TAG, 'LEDGER_READ_RESOLVED|requestId=%{public}s', clean(candidate));
+    try {
+      fs.unlinkSync(ledgerPath);
+      hilog.info(DOMAIN, TAG, 'LEDGER_CONSUME_RESOLVED|requestId=%{public}s', clean(candidate));
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'LEDGER_CONSUME_REJECTED|requestId=%{public}s|summary=%{public}s',
+        clean(candidate), safeError(error as Error));
+    }
+
+    if (!isValidRequestId(candidate)) {
+      return { requestId: candidate, usable: false };
+    }
+    if (timestampText.length === 0 || !/^[0-9]+$/.test(timestampText)) {
+      hilog.error(DOMAIN, TAG,
+        'LEDGER_AGE_REJECTED|requestId=%{public}s|reason=timestamp-missing-or-invalid', clean(candidate));
+      return { requestId: candidate, usable: false };
+    }
+    const stampedAt: number = Number(timestampText);
+    const ageMs: number = Date.now() - stampedAt;
+    if (ageMs < -LEDGER_MAX_FUTURE_MS || ageMs > LEDGER_MAX_AGE_MS) {
+      hilog.error(DOMAIN, TAG,
+        'LEDGER_AGE_REJECTED|requestId=%{public}s|ageMs=%{public}s',
+        clean(candidate), String(ageMs));
+      return { requestId: candidate, usable: false };
+    }
+    return { requestId: candidate, usable: true };
   }
 
   private captureFdStatus(): FdSnapshot {

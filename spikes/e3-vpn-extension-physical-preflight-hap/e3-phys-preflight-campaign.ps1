@@ -60,6 +60,7 @@ $script:CampaignPhase = 'preflight'
 $script:SimulationInstalledA = $false
 $script:SimulationInstalledB = $false
 $script:SimulationStagingPresent = $false
+$script:PriorBlockedBinding = $null
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string]$Text)
@@ -463,6 +464,66 @@ function Assert-FreezeManifest {
     Assert-JsonBoolean $Freeze 'collection_ready' $true
     Assert-JsonBoolean $Freeze 'independent_review_ready' $true
     if (-not (Test-Path -LiteralPath $FreezePath -PathType Leaf)) { throw 'FreezeManifest file missing' }
+    [void](Get-PriorBlockedBinding $Freeze)
+}
+
+function Test-Sha256Hex {
+    param([AllowNull()][string]$Value)
+    return (-not [string]::IsNullOrWhiteSpace($Value)) -and $Value -match '^[0-9a-f]{64}$'
+}
+
+function Get-PriorBlockedBinding {
+    param([Parameter(Mandatory)]$Freeze)
+    # Optional governance projection only: N/A / missing, or pure hash object. No path/raw copy or re-verification.
+    $prior = Get-OptionalProperty $Freeze 'prior_blocked_binding' $null
+    if ($null -eq $prior) { return $null }
+    if ($prior -is [string]) {
+        if ([string]$prior -eq 'N/A' -or [string]::IsNullOrWhiteSpace([string]$prior)) { return $null }
+        throw "prior_blocked_binding must be N/A or an object with source='consumed-blocked', evidence_id, and three SHA-256 hashes"
+    }
+    $source = [string](Get-OptionalProperty $prior 'source' '')
+    $evidenceId = [string](Get-OptionalProperty $prior 'evidence_id' '')
+    $scenarioResultsSha = [string](Get-OptionalProperty $prior 'scenario_results_sha256' '')
+    $hashManifestSha = [string](Get-OptionalProperty $prior 'hash_manifest_sha256' '')
+    $campaignSealSha = [string](Get-OptionalProperty $prior 'campaign_seal_sha256' '')
+    $provided = @(@($source, $evidenceId, $scenarioResultsSha, $hashManifestSha, $campaignSealSha) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) -and [string]$_ -ne 'N/A' })
+    if ($provided.Count -eq 0) { return $null }
+    if ($source -ne 'consumed-blocked') {
+        throw "prior_blocked_binding.source must be 'consumed-blocked'"
+    }
+    if ([string]::IsNullOrWhiteSpace($evidenceId) -or $evidenceId -eq 'N/A') {
+        throw 'prior_blocked_binding.evidence_id must be non-empty'
+    }
+    foreach ($pair in @(
+        @{ Key = 'scenario_results_sha256'; Value = $scenarioResultsSha },
+        @{ Key = 'hash_manifest_sha256'; Value = $hashManifestSha },
+        @{ Key = 'campaign_seal_sha256'; Value = $campaignSealSha }
+    )) {
+        if (-not (Test-Sha256Hex ([string]$pair.Value))) {
+            throw "prior_blocked_binding.$($pair.Key) must be a final SHA-256"
+        }
+    }
+    return [ordered]@{
+        source = 'consumed-blocked'
+        evidence_id = $evidenceId
+        scenario_results_sha256 = $scenarioResultsSha.ToLowerInvariant()
+        hash_manifest_sha256 = $hashManifestSha.ToLowerInvariant()
+        campaign_seal_sha256 = $campaignSealSha.ToLowerInvariant()
+    }
+}
+
+function Initialize-PriorBlockedBinding {
+    param([Parameter(Mandatory)]$Freeze)
+    $script:PriorBlockedBinding = Get-PriorBlockedBinding $Freeze
+    if ($null -eq $script:PriorBlockedBinding) { return }
+    Add-TranscriptRecord 'prior-blocked-binding' ([ordered]@{
+        source = [string]$script:PriorBlockedBinding.source
+        evidence_id = [string]$script:PriorBlockedBinding.evidence_id
+        scenario_results_sha256 = [string]$script:PriorBlockedBinding.scenario_results_sha256
+        hash_manifest_sha256 = [string]$script:PriorBlockedBinding.hash_manifest_sha256
+        campaign_seal_sha256 = [string]$script:PriorBlockedBinding.campaign_seal_sha256
+        binding_source = 'freeze-manifest'
+    })
 }
 
 function Test-PhysicalTargetToken {
@@ -726,16 +787,6 @@ function Get-BundleDumpAssessment {
         return [pscustomobject]@{ Status = 'blocked'; Reason = 'bundle-dump-bundle-not-listed' }
     }
     return [pscustomobject]@{ Status = 'pass'; Reason = 'bundle-dump-present' }
-}
-
-function Test-HdcInstallSuccess {
-    param([Parameter(Mandatory)]$Result)
-    return ((Get-HdcInstallAssessment $Result).Status -eq 'pass')
-}
-
-function Test-BundleDumpPresent {
-    param([Parameter(Mandatory)]$Result, [Parameter(Mandatory)][string]$Bundle)
-    return ((Get-BundleDumpAssessment $Result $Bundle).Status -eq 'pass')
 }
 
 function Test-StagingAbsent {
@@ -1295,15 +1346,67 @@ function Test-CorrelatedMarker {
     return $false
 }
 
+function Get-StopRequestFromEvents {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [AllowNull()][string]$ExpectedBundle = $null
+    )
+    # Strict whole-marker tokens only: UI_STOP | STOP_PROMISE_RESOLVED | STOP_PROMISE_REJECTED.
+    # Real token boundaries on both sides: timestamp prefix allowed, but UI_STOP_SKIPPED / LATE /
+    # SESSION_RELEASED / destroy-only ignored, and requestId must end at a field boundary (|) or EOL,
+    # so markers quoted inside prose/summary text are never treated as stop requests.
+    # Collect all candidates; return only when exactly one unique requestId remains.
+    $candidates = [ordered]@{}
+    foreach ($event in @($Events)) {
+        $text = [string]$event.text
+        $requestId = $null
+        $bundle = $null
+        if ($text -match '(?:^|\s)UI_STOP\|bundle=([^|\s]+)\|requestId=([^|\s]+)(?:\||\s*$)') {
+            $bundle = [string]$Matches[1]
+            $requestId = [string]$Matches[2]
+        } elseif ($text -match '(?:^|\s)STOP_PROMISE_RESOLVED\|bundle=([^|\s]+)\|requestId=([^|\s]+)(?:\||\s*$)') {
+            $bundle = [string]$Matches[1]
+            $requestId = [string]$Matches[2]
+        } elseif ($text -match '(?:^|\s)STOP_PROMISE_REJECTED\|bundle=([^|\s]+)\|requestId=([^|\s]+)(?:\||\s*$)') {
+            $bundle = [string]$Matches[1]
+            $requestId = [string]$Matches[2]
+        } else {
+            continue
+        }
+        if ($requestId -eq 'missing') { continue }
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedBundle)) {
+            if ([string]::IsNullOrWhiteSpace([string]$bundle) -or [string]$bundle -ne [string]$ExpectedBundle) { continue }
+        }
+        if (-not $candidates.Contains($requestId)) { $candidates[$requestId] = $bundle }
+    }
+    if ($candidates.Count -ne 1) { return $null }
+    $onlyKey = @($candidates.Keys)[0]
+    return [pscustomobject]@{ RequestId = $onlyKey; Bundle = $candidates[$onlyKey] }
+}
+
 function Get-DestroyAssessment {
     param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events, [Parameter(Mandatory)][string]$Bundle, [AllowNull()][string]$RequestId)
-    if ([string]::IsNullOrWhiteSpace($RequestId) -or $RequestId -eq 'missing') { return [pscustomobject]@{ result = 'blocked'; reason = 'requestId-missing' } }
-    $terminal = (Test-CorrelatedMarker $Events $Bundle $RequestId 'VPN_DESTROY_RESOLVED') -or (Test-CorrelatedMarker $Events $Bundle $RequestId 'VPN_DESTROY_REJECTED')
-    $snapshot = (Test-CorrelatedMarker $Events $Bundle $RequestId 'VPN_FD_SNAPSHOT') -and @($Events | Where-Object {
-        [string]$_.text -match "requestId=$([regex]::Escape($RequestId))(\||\s|$)" -and [string]$_.text -match 'phase=post-destroy-(resolved|rejected)'
+    $effectiveRequestId = [string]$RequestId
+    if ([string]::IsNullOrWhiteSpace($effectiveRequestId) -or $effectiveRequestId -eq 'missing') {
+        $inferred = Get-StopRequestFromEvents -Events $Events -ExpectedBundle $Bundle
+        if ($null -ne $inferred) {
+            $effectiveRequestId = [string]$inferred.RequestId
+            if (-not [string]::IsNullOrWhiteSpace([string]$inferred.Bundle)) { $Bundle = [string]$inferred.Bundle }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($effectiveRequestId) -or $effectiveRequestId -eq 'missing') {
+        $hasStopOrDestroyEvidence = @($Events | Where-Object { [string]$_.text -match 'UI_STOP|STOP_PROMISE_|STOP_SESSION_RELEASED|VPN_ONDESTROY|VPN_DESTROY_|VPN_FD_SNAPSHOT' }).Count -gt 0
+        $reason = if ($hasStopOrDestroyEvidence) { 'destroy-requestId-unresolved' } else { 'no-destroy-or-stop-marker-observed' }
+        return [pscustomobject]@{ result = 'blocked'; reason = $reason }
+    }
+    $terminal = (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_DESTROY_RESOLVED') -or (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_DESTROY_REJECTED')
+    $snapshot = (Test-CorrelatedMarker $Events $Bundle $effectiveRequestId 'VPN_FD_SNAPSHOT') -and @($Events | Where-Object {
+        [string]$_.text -match "requestId=$([regex]::Escape($effectiveRequestId))(\||\s|$)" -and [string]$_.text -match 'phase=post-destroy-(resolved|rejected)'
     }).Count -gt 0
-    if (-not $terminal -or -not $snapshot) { return [pscustomobject]@{ result = 'blocked'; reason = 'destroy-terminal-or-post-snapshot-missing' } }
-    $correlated = @($Events | Where-Object { [string]$_.text -match "requestId=$([regex]::Escape($RequestId))(\||\s|$)" })
+    if (-not $terminal -and -not $snapshot) { return [pscustomobject]@{ result = 'blocked'; reason = 'destroy-terminal-or-post-snapshot-missing' } }
+    if (-not $terminal) { return [pscustomobject]@{ result = 'blocked'; reason = 'destroy-terminal-missing' } }
+    if (-not $snapshot) { return [pscustomobject]@{ result = 'blocked'; reason = 'post-destroy-snapshot-missing' } }
+    $correlated = @($Events | Where-Object { [string]$_.text -match "requestId=$([regex]::Escape($effectiveRequestId))(\||\s|$)" })
     $combined = ($correlated.text -join "`n")
     if ($combined.Contains('FD_STILL_OPEN')) { return [pscustomobject]@{ result = 'fail'; reason = 'FD_STILL_OPEN' } }
     if ($combined.Contains('FD_STATE_UNCONFIRMED')) { return [pscustomobject]@{ result = 'blocked'; reason = 'FD_STATE_UNCONFIRMED' } }
@@ -1636,12 +1739,19 @@ function Invoke-LiveCampaign {
     $noDual = Confirm-VisibleFact 6 'NO-DUAL-ACTIVE-CAPTURED' '仅当最终可见状态为画面上未同时出现 A 与 B 两个 active VPN 时确认为真。'
     $request6A = Get-RequestIdFromEvents $observation6.Events $script:BundleA
     $request6B = Get-RequestIdFromEvents $observation6.Events $script:BundleB
+    $bUiStartObserved = $null -ne $request6B
     $aAccepted = $request6A -and (Test-CorrelatedMarker $observation6.Events $script:BundleA $request6A 'CREATE_ACCEPTED')
     $bRejected = $request6B -and ((Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'START_PROMISE_REJECTED') -or (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'VPN_CREATE_REJECTED'))
     $bAccepted = $request6B -and (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'CREATE_ACCEPTED')
     $replacementDestroy = if ($bAccepted) { Get-DestroyAssessment $observation6.Events $script:BundleA $request6A } else { [pscustomobject]@{ result = 'pass'; reason = 'B-rejected-no-replacement-destroy-required' } }
-    $scenario6Result = if ($observation6.CaptureDegraded -or -not $observation6.CompleteWindowObserved -or $capture6 -ne 'collected') { 'blocked' } elseif ($replacementDestroy.result -eq 'fail') { 'fail' } elseif (-not $observation6.AckValid -or -not $noDual -or -not $aAccepted -or -not $request6B -or (-not $bRejected -and -not $bAccepted) -or $replacementDestroy.result -ne 'pass') { 'blocked' } else { 'pass' }
-    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $replacementDestroy.reason; request_id_a = $request6A; request_id_b = $request6B; b_rejected = [bool]$bRejected; b_accepted = [bool]$bAccepted; no_dual_active = [bool]$noDual; observation = $observation6.Observation })
+    if (-not $bUiStartObserved) {
+        $scenario6Result = 'blocked'
+        $s6Reason = 'no-new-B-UI_START'
+    } else {
+        $scenario6Result = if ($observation6.CaptureDegraded -or -not $observation6.CompleteWindowObserved -or $capture6 -ne 'collected') { 'blocked' } elseif ($replacementDestroy.result -eq 'fail') { 'fail' } elseif (-not $observation6.AckValid -or -not $noDual -or -not $aAccepted -or -not $request6B -or (-not $bRejected -and -not $bAccepted) -or $replacementDestroy.result -ne 'pass') { 'blocked' } else { 'pass' }
+        $s6Reason = $replacementDestroy.reason
+    }
+    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted; b_rejected = [bool]$bRejected; b_accepted = [bool]$bAccepted; no_dual_active = [bool]$noDual; observation = $observation6.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation6
 
     $activeBundle = if ($bAccepted) { $script:BundleB } else { $script:BundleA }
@@ -1650,7 +1760,12 @@ function Invoke-LiveCampaign {
     $duringScenario7 = {
         param([object[]]$CurrentEvents)
         if ($cleanupState.Done) { return }
-        $assessment = Get-DestroyAssessment $CurrentEvents $activeBundle $activeRequest
+        # Require a unique current-window stop marker for the expected bundle consistent with active request.
+        # Old destroy-only chains must not start cleanup; multi-id conflict falls through to finally.
+        $stopCandidate = Get-StopRequestFromEvents -Events $CurrentEvents -ExpectedBundle $activeBundle
+        if ($null -eq $stopCandidate) { return }
+        if (-not [string]::IsNullOrWhiteSpace([string]$activeRequest) -and [string]$stopCandidate.RequestId -ne [string]$activeRequest) { return }
+        $assessment = Get-DestroyAssessment $CurrentEvents $activeBundle ([string]$stopCandidate.RequestId)
         if ($assessment.result -ne 'pass') { return }
         $preStatus = Invoke-Capture 'scenario-7-pre-uninstall' 7
         foreach ($faultOperation in @('FaultA', 'FaultB')) {
@@ -1681,11 +1796,18 @@ function Invoke-LiveCampaign {
     }
     $observation7 = Invoke-ScenarioObservation 7 '场景7：在当前仍 active 的测试 App（A 或 B）界面点 Stop；不要手工强停或卸载；runner 负责后续清理' $null $duringScenario7
     if (-not $cleanupState.Done) { & $duringScenario7 -CurrentEvents $observation7.Events }
-    $capture7 = Invoke-Capture 'scenario-7-post-cleanup' 7
+    $stopInfo = Get-StopRequestFromEvents -Events $observation7.Events -ExpectedBundle $activeBundle
+    if ($null -ne $stopInfo -and -not [string]::IsNullOrWhiteSpace([string]$activeRequest) -and [string]$stopInfo.RequestId -ne [string]$activeRequest) {
+        $stopInfo = $null
+    }
+    $s7Request = if ($null -ne $stopInfo) { [string]$stopInfo.RequestId } else { $null }
+    $s7Bundle = if ($null -ne $stopInfo -and -not [string]::IsNullOrWhiteSpace([string]$stopInfo.Bundle)) { [string]$stopInfo.Bundle } else { $activeBundle }
+    $capture7Name = if ($cleanupState.Done) { 'scenario-7-post-cleanup' } else { 'scenario-7-final-state' }
+    $capture7 = Invoke-Capture $capture7Name 7
     $cleanupVisible = Confirm-VisibleFact 7 'FINAL-CLEANUP-CAPTURED' '仅当已无 active VPN 或测试配置残留时确认为真。'
-    $destroy7 = Get-DestroyAssessment $observation7.Events $activeBundle $activeRequest
-    $scenario7Result = if ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif ($destroy7.result -eq 'fail') { 'fail' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded) { 'blocked' } else { 'pass' }
-    $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $destroy7.reason; active_bundle = $activeBundle; request_id = $activeRequest; cleanup_completed_at = $cleanupState.CompletedAt; bundle_process_cleanup_verified = [bool]$cleanupState.Verified; visible_cleanup_confirmed = [bool]$cleanupVisible; fault_capture_degraded = [bool]$cleanupState.FaultDegraded; observation = $observation7.Observation })
+    $destroy7 = Get-DestroyAssessment $observation7.Events $s7Bundle $s7Request
+    $scenario7Result = if ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif ($destroy7.result -eq 'fail') { 'fail' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded -or $destroy7.result -ne 'pass') { 'blocked' } else { 'pass' }
+    $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $destroy7.reason; active_bundle = $s7Bundle; request_id = $s7Request; cleanup_completed_at = $cleanupState.CompletedAt; post_cleanup_capture = [bool]$cleanupState.Done; post_cleanup_capture_name = $capture7Name; bundle_process_cleanup_verified = [bool]$cleanupState.Verified; visible_cleanup_confirmed = [bool]$cleanupVisible; fault_capture_degraded = [bool]$cleanupState.FaultDegraded; observation = $observation7.Observation })
     $script:PartialScenarios = @($results)
     return @($results)
 }
@@ -1830,6 +1952,16 @@ function New-CompleteRecord {
             prior_record_path_sha256 = $(if ([string]$Freeze.retry.prior_record_path -eq 'N/A') { 'N/A' } else { Get-TextSha256 ([string]$Freeze.retry.prior_record_path) })
             prior_record_sha256 = $Freeze.retry.prior_record_sha256
         }
+        prior_blocked_binding = $(if ($null -ne $script:PriorBlockedBinding) {
+            [ordered]@{
+                source = [string]$script:PriorBlockedBinding.source
+                evidence_id = [string]$script:PriorBlockedBinding.evidence_id
+                scenario_results_sha256 = [string]$script:PriorBlockedBinding.scenario_results_sha256
+                hash_manifest_sha256 = [string]$script:PriorBlockedBinding.hash_manifest_sha256
+                campaign_seal_sha256 = [string]$script:PriorBlockedBinding.campaign_seal_sha256
+                binding_source = 'freeze-manifest'
+            }
+        } else { 'N/A' })
         execution_mode = $script:ExecutionMode
         simulation = [bool]$LiveSimulation
         is_evidence = [bool]$isEvidence
@@ -2164,6 +2296,75 @@ function Invoke-RunnerSelfTest {
     Check ((Get-RequestIdFromEvents @() $script:BundleA) -eq $null) 'empty-events-requestid-legal'
     Check ((Get-DenyAssessment @() $script:BundleB $null $false $false).result -eq 'blocked') 'empty-events-deny-blocked'
     Check ((Get-DestroyAssessment @() $script:BundleA $null).result -eq 'blocked') 'empty-events-destroy-blocked'
+    $issuedOnlyEvents = @(
+        [pscustomobject]@{ text = "VPN_DESTROY_ISSUED|requestId=x-issued" },
+        [pscustomobject]@{ text = "VPN_DESTROY_BEGIN|requestId=x-issued|trigger=onDestroy" },
+        [pscustomobject]@{ text = "VPN_FD_SNAPSHOT|requestId=x-issued|phase=pre-destroy|marker=PRE_DESTROY_OPEN" }
+    )
+    $issuedOnlyAssessment = Get-DestroyAssessment $issuedOnlyEvents $script:BundleA 'x-issued'
+    Check ($issuedOnlyAssessment.result -eq 'blocked' -and $issuedOnlyAssessment.reason -eq 'destroy-terminal-or-post-snapshot-missing') 'destroy-issued-or-pre-only-not-pass'
+    $terminalOnlyEvents = @(
+        [pscustomobject]@{ text = "VPN_DESTROY_RESOLVED|requestId=x-term|fdMarker=FD_CLOSED_CONFIRMED" },
+        [pscustomobject]@{ text = "VPN_FD_SNAPSHOT|requestId=x-term|phase=pre-destroy|marker=PRE_DESTROY_OPEN" }
+    )
+    Check ((Get-DestroyAssessment $terminalOnlyEvents $script:BundleA 'x-term').reason -eq 'post-destroy-snapshot-missing') 'destroy-terminal-without-post-snapshot-classified'
+    $snapshotOnlyEvents = @(
+        [pscustomobject]@{ text = "VPN_FD_SNAPSHOT|requestId=x-snap|phase=post-destroy-resolved|marker=FD_CLOSED_CONFIRMED" }
+    )
+    Check ((Get-DestroyAssessment $snapshotOnlyEvents $script:BundleA 'x-snap').reason -eq 'destroy-terminal-missing') 'post-snapshot-without-terminal-classified'
+    $inferredStopEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-infer" },
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-infer' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a-infer|fdMarker=FD_CLOSED_CONFIRMED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-infer|phase=post-destroy-resolved|marker=FD_CLOSED_CONFIRMED' }
+    )
+    $inferredStopInfo = Get-StopRequestFromEvents -Events $inferredStopEvents -ExpectedBundle $script:BundleA
+    $inferredAssessment = Get-DestroyAssessment $inferredStopEvents $script:BundleA $null
+    Check ($null -ne $inferredStopInfo -and $inferredStopInfo.RequestId -eq 'a-infer' -and $inferredStopInfo.Bundle -eq $script:BundleA) 'stop-request-inferred-from-events'
+    Check ($inferredAssessment.result -eq 'pass' -and $inferredAssessment.reason -eq 'terminal-and-post-destroy-snapshot-confirmed') 'destroy-assessment-infers-requestId-instead-of-missing'
+    $stopOnlyEvents = @([pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-stop-only" })
+    Check ((Get-DestroyAssessment $stopOnlyEvents $script:BundleA $null).reason -eq 'destroy-terminal-or-post-snapshot-missing') 'stop-without-destroy-classified-not-requestId-missing'
+    $destroyOnlyEvents = @(
+        [pscustomobject]@{ text = 'VPN_ONDESTROY|requestId=a-destroy-only' },
+        [pscustomobject]@{ text = 'VPN_DESTROY_RESOLVED|requestId=a-destroy-only|fdMarker=FD_CLOSED_CONFIRMED' },
+        [pscustomobject]@{ text = 'VPN_FD_SNAPSHOT|requestId=a-destroy-only|phase=post-destroy-resolved|marker=FD_CLOSED_CONFIRMED' }
+    )
+    Check ((Get-StopRequestFromEvents -Events $destroyOnlyEvents -ExpectedBundle $script:BundleA) -eq $null) 'destroy-only-not-a-stop-request'
+    Check ((Get-DestroyAssessment $destroyOnlyEvents $script:BundleA $null).reason -eq 'destroy-requestId-unresolved') 'destroy-only-without-stop-unresolved'
+    $wrongBundleEvents = @([pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleB)|requestId=b-wrong" })
+    Check ((Get-StopRequestFromEvents -Events $wrongBundleEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-wrong-bundle-rejected'
+    $multiCandidateEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-one" },
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-two" }
+    )
+    Check ((Get-StopRequestFromEvents -Events $multiCandidateEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-multi-candidate-rejected'
+    $crossIdConflictEvents = @(
+        [pscustomobject]@{ text = "STOP_PROMISE_RESOLVED|bundle=$($script:BundleA)|requestId=a-promise" },
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-ui" }
+    )
+    Check ((Get-StopRequestFromEvents -Events $crossIdConflictEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-ui-promise-cross-id-conflict-null'
+    $sameIdUiPromiseEvents = @(
+        [pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-same" },
+        [pscustomobject]@{ text = "STOP_PROMISE_RESOLVED|bundle=$($script:BundleA)|requestId=a-same" }
+    )
+    $sameIdUiPromise = Get-StopRequestFromEvents -Events $sameIdUiPromiseEvents -ExpectedBundle $script:BundleA
+    Check ($null -ne $sameIdUiPromise -and $sameIdUiPromise.RequestId -eq 'a-same') 'stop-request-same-id-ui-and-promise-allowed'
+    $sessionReleasedOnly = @([pscustomobject]@{ text = "STOP_SESSION_RELEASED|bundle=$($script:BundleA)|requestId=a-session|reason=ability-not-found" })
+    Check ((Get-StopRequestFromEvents -Events $sessionReleasedOnly -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-session-released-not-stop'
+    $latePromiseOnly = @([pscustomobject]@{ text = "STOP_PROMISE_LATE_RESOLVED|bundle=$($script:BundleA)|requestId=a-late" })
+    Check ((Get-StopRequestFromEvents -Events $latePromiseOnly -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-late-promise-not-stop'
+    $timestampPrefixed = @([pscustomobject]@{ text = "CST 2026-07-17 16:54:59.204 UI_STOP|bundle=$($script:BundleA)|requestId=a-ts" })
+    $timestampPrefixedStop = Get-StopRequestFromEvents -Events $timestampPrefixed -ExpectedBundle $script:BundleA
+    Check ($null -ne $timestampPrefixedStop -and $timestampPrefixedStop.RequestId -eq 'a-ts') 'stop-request-timestamp-prefix-allowed'
+    $skippedOnlyEvents = @([pscustomobject]@{ text = "UI_STOP_SKIPPED|bundle=$($script:BundleA)|reason=no-active-request" })
+    Check ((Get-StopRequestFromEvents -Events $skippedOnlyEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-ui-stop-skipped-not-stop'
+    $summaryMentionEvents = @([pscustomobject]@{ text = "W A01b00/SCB: summary UI_STOP|bundle=$($script:BundleA)|requestId=a-summary was observed" })
+    Check ((Get-StopRequestFromEvents -Events $summaryMentionEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-summary-text-mention-rejected'
+    $trailingProseEvents = @([pscustomobject]@{ text = "expected UI_STOP|bundle=$($script:BundleA)|requestId=a-err but got UI_STOP_SKIPPED" })
+    Check ((Get-StopRequestFromEvents -Events $trailingProseEvents -ExpectedBundle $script:BundleA) -eq $null) 'stop-request-trailing-prose-rejected'
+    $trailingFieldEvents = @([pscustomobject]@{ text = "UI_STOP|bundle=$($script:BundleA)|requestId=a-extra|extra=1" })
+    $trailingFieldStop = Get-StopRequestFromEvents -Events $trailingFieldEvents -ExpectedBundle $script:BundleA
+    Check ($null -ne $trailingFieldStop -and $trailingFieldStop.RequestId -eq 'a-extra') 'stop-request-trailing-field-allowed'
     $cstParse = Parse-HilogDeviceTime 'CST 2026-07-17 16:54:59.204  1604  1660 W A01b00/SCB: sample'
     Check ($cstParse.Ok -and $cstParse.DeviceTimeZone -eq 'CST' -and $cstParse.DeviceObservedAt -match '\+08:00') 'CST-zone-parse'
     $offsetParse = Parse-HilogDeviceTime '2026-07-17 16:54:59.204+08:00 UI_START|bundle=x|requestId=y'
@@ -2351,6 +2552,7 @@ try {
         repository = $repositoryBefore.Fingerprint
         freeze_manifest_sha256 = $freezeSha256
     })
+    Initialize-PriorBlockedBinding $freeze
     if ($DryRun) {
         $scenarios = Invoke-DryRunCampaign
         $overall = 'blocked'

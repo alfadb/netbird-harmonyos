@@ -5,6 +5,7 @@
   "evidence_id": "EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>",
   "campaign_id": "E3-PHYS-PREFLIGHT-<CAMPAIGN-CODE>",
   "attempt": "initial",
+  "prior_blocked_binding": "N/A",
   "retry": {
     "basis": "N/A",
     "infrastructure_reason": "N/A",

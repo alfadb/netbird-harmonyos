@@ -96,6 +96,7 @@ function New-Freeze {
         evidence_id = $EvidenceId
         campaign_id = 'E3-PHYS-PREFLIGHT-SELFTEST'
         attempt = 'initial'
+        prior_blocked_binding = 'N/A'
         retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A'; prior_record_path = 'N/A'; prior_record_sha256 = 'N/A' }
         scenario_window_seconds = 60
         device_alias = 'PHYS-1'
@@ -272,6 +273,78 @@ try {
     $pureOutput = & pwsh -NoProfile -File $runner -SelfTest 2>&1
     Assert-True ($LASTEXITCODE -eq 0 -and ($pureOutput -join "`n") -match 'SELFTEST_RESULT=pass HDC_PROCESSES=0') 'runner pure selftest failed'
 
+    Write-Host 'SELFTEST_PHASE=source-marker-fixture-m1-m3'
+    $uiSourcePath = Join-Path $project 'entry/src/main/ets/pages/Index.ets'
+    $extensionSourcePath = Join-Path $project 'entry/src/main/ets/vpnextensionability/E3PhysicalVpnExtensionAbility.ets'
+    Assert-True (Test-Path -LiteralPath $uiSourcePath -PathType Leaf) "Index.ets source missing: $uiSourcePath"
+    Assert-True (Test-Path -LiteralPath $extensionSourcePath -PathType Leaf) "extension source missing: $extensionSourcePath"
+    $uiSource = Get-Content -LiteralPath $uiSourcePath -Raw
+    $extensionSource = Get-Content -LiteralPath $extensionSourcePath -Raw
+    function Assert-SourceMarker {
+        param([string]$Text, [string]$Marker, [string]$Message)
+        Assert-True ($Text.Contains($Marker, [StringComparison]::Ordinal)) "$Message (missing marker: $Marker)"
+    }
+    # M1 UI ledger: API24 openSync+writeSync+closeSync before startVpnExtensionAbility; explicit error markers.
+    Assert-SourceMarker $uiSource "import fs from '@ohos.file.fs';" 'UI lacks @ohos.file.fs import'
+    Assert-SourceMarker $uiSource 'writeRequestLedger' 'UI lacks ledger writer'
+    Assert-SourceMarker $uiSource 'LEDGER_PERSISTED' 'UI lacks LEDGER_PERSISTED marker'
+    Assert-SourceMarker $uiSource 'LEDGER_WRITE_REJECTED' 'UI lacks LEDGER_WRITE_REJECTED marker'
+    Assert-SourceMarker $uiSource 'isValidRequestId' 'UI lacks requestId validation'
+    Assert-SourceMarker $uiSource 'MAX_REQUEST_ID_LENGTH' 'UI lacks requestId length cap'
+    Assert-SourceMarker $uiSource 'fs.openSync' 'UI lacks fs.openSync'
+    Assert-SourceMarker $uiSource 'fs.writeSync' 'UI lacks fs.writeSync'
+    Assert-SourceMarker $uiSource 'fs.closeSync' 'UI lacks fs.closeSync'
+    Assert-SourceMarker $uiSource 'finally' 'UI ledger write lacks finally close'
+    $uiLedgerIndex = $uiSource.IndexOf('writeRequestLedger', [StringComparison]::Ordinal)
+    $uiStartIndex = $uiSource.IndexOf('startVpnExtensionAbility', [StringComparison]::Ordinal)
+    Assert-True ($uiLedgerIndex -ge 0 -and $uiStartIndex -ge 0 -and $uiLedgerIndex -lt $uiStartIndex) 'ledger write must precede startVpnExtensionAbility in source order'
+    # M1 extension: always consume, want-first, age window, mismatch marker, missing-file info.
+    Assert-SourceMarker $extensionSource "import fs from '@ohos.file.fs';" 'extension lacks @ohos.file.fs import'
+    Assert-SourceMarker $extensionSource 'consumeRequestLedger' 'extension lacks ledger consumer'
+    Assert-SourceMarker $extensionSource 'requestSource' 'extension lacks requestSource field'
+    Assert-SourceMarker $extensionSource 'LEDGER_READ_RESOLVED' 'extension lacks LEDGER_READ_RESOLVED marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_READ_REJECTED' 'extension lacks LEDGER_READ_REJECTED marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_CONSUME_RESOLVED' 'extension lacks LEDGER_CONSUME_RESOLVED marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_CONSUME_REJECTED' 'extension lacks LEDGER_CONSUME_REJECTED marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_MISSING' 'extension lacks LEDGER_MISSING info marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_REQUESTID_MISMATCH' 'extension lacks LEDGER_REQUESTID_MISMATCH marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_AGE_REJECTED' 'extension lacks LEDGER_AGE_REJECTED marker'
+    Assert-SourceMarker $extensionSource 'LEDGER_MAX_FUTURE_MS' 'extension lacks future skew bound'
+    Assert-SourceMarker $extensionSource 'LEDGER_MAX_AGE_MS' 'extension lacks max age bound'
+    Assert-SourceMarker $extensionSource 'VPN_REQUESTID_INVALID' 'extension lacks VPN_REQUESTID_INVALID marker'
+    Assert-SourceMarker $extensionSource 'fs.openSync' 'extension lacks fs.openSync'
+    Assert-SourceMarker $extensionSource 'fs.readSync' 'extension lacks fs.readSync'
+    Assert-SourceMarker $extensionSource 'fs.closeSync' 'extension lacks fs.closeSync'
+    Assert-SourceMarker $extensionSource 'fs.unlinkSync' 'extension lacks fs.unlinkSync'
+    Assert-True (($extensionSource.Split('consumeRequestLedger').Count - 1) -eq 2) 'consumeRequestLedger must be defined and called exactly once'
+    Assert-True ($extensionSource -notmatch 'setTimeout|clearTimeout') 'extension must not contain a timer'
+    Assert-True ($extensionSource.Contains('Always read+consume', [StringComparison]::Ordinal)) 'onCreate must always consume ledger'
+    $consumeCallIndex = $extensionSource.IndexOf('this.consumeRequestLedger()', [StringComparison]::Ordinal)
+    $wantAssignIndex = $extensionSource.IndexOf("requestSource = 'want'", [StringComparison]::Ordinal)
+    Assert-True ($consumeCallIndex -ge 0 -and $wantAssignIndex -ge 0 -and $consumeCallIndex -lt $wantAssignIndex) 'ledger consume must precede want-priority assignment'
+    # M1 negative: persist/consume markers must not be used as create-success markers.
+    Assert-True ($uiSource -notmatch 'CREATE_ACCEPTED') 'UI must never emit a create-accepted marker'
+    Assert-True ($extensionSource -notmatch 'LEDGER.*CREATE_ACCEPTED|CREATE_ACCEPTED.*LEDGER') 'ledger markers must not gate create acceptance'
+    # M3 UI: exactly one bounded setTimeout release, late then/catch markers, generation advanced on timeout.
+    Assert-SourceMarker $uiSource 'setTimeout(' 'UI lacks pending release timer'
+    Assert-SourceMarker $uiSource 'clearTimeout(' 'UI lacks timer clear'
+    Assert-SourceMarker $uiSource 'START_PENDING_RELEASED' 'UI lacks START_PENDING_RELEASED marker'
+    Assert-SourceMarker $uiSource 'reason=bounded-timeout' 'UI lacks bounded-timeout reason'
+    Assert-SourceMarker $uiSource 'START_PROMISE_LATE_RESOLVED' 'UI lacks late resolved marker'
+    Assert-SourceMarker $uiSource 'START_PROMISE_LATE_REJECTED' 'UI lacks late rejected marker'
+    Assert-SourceMarker $uiSource 'startGeneration' 'UI lacks generation guard'
+    Assert-SourceMarker $uiSource 'aboutToDisappear' 'UI lacks timer cleanup lifecycle'
+    Assert-SourceMarker $uiSource '65000' 'UI lacks 65000ms bounded release threshold'
+    Assert-True (($uiSource.Split('setTimeout(').Count - 1) -eq 1) 'UI must contain exactly one setTimeout bounded release'
+    Assert-True (($uiSource.Split('clearTimeout(').Count - 1) -eq 1) 'UI must contain exactly one clearTimeout'
+    Assert-True (($uiSource.Split('this.startGeneration++').Count - 1) -eq 2) 'timeout release must advance generation so late only goes LATE'
+    Assert-True ($uiSource -notmatch 'Promise\.race|Atomics\.wait|while\s*\(|for\s*\(\s*;|setInterval') 'UI contains forbidden race or busy-wait'
+    # M2 negative: no active tun-fd close/dup/read/write and no destroy-issued terminal marker anywhere.
+    Assert-True ($uiSource -notmatch '\.close\(|\.dup\(|\.write\(|\.read\(') 'UI must not actively close/dup/read/write an fd'
+    Assert-True ($extensionSource -notmatch '\.close\(|\.dup\(|\.write\(|\.read\(') 'extension must not actively close/dup/read/write an fd'
+    Assert-True ($extensionSource -notmatch 'VPN_DESTROY_ISSUED') 'extension must not emit a destroy-issued terminal marker'
+    Assert-True ($uiSource -notmatch 'VPN_DESTROY_ISSUED') 'UI must not emit a destroy-issued terminal marker'
+
     $baseFixture = New-SimulationFixture
     $baseFixturePath = Write-JsonFixture 'simulation-base.json' $baseFixture
 
@@ -330,11 +403,15 @@ try {
         'information_status', 'stage_or_gate', 'related_stages_or_gates', 'target_tuple', 'signing', 'code_sha', 'source_archive_sha256',
         'source_manifest_sha256', 'sdk_sha256', 'runner_sha256', 'artifact_sha256', 'freeze_manifest_sha256', 'started_at', 'ended_at',
         'clock_source', 'cleanup_result', 'raw_hilog_reference', 'transcript_reference', 'screenshot_reference', 'layout_state_reference',
-        'fault_reference', 'hash_manifest_reference', 'forbidden_capabilities_audit', 'operator', 'reviewer', 'reviewed_at', 'review_record'
+        'fault_reference', 'hash_manifest_reference', 'forbidden_capabilities_audit', 'operator', 'reviewer', 'reviewed_at', 'review_record',
+        'prior_blocked_binding'
     )
     foreach ($field in $requiredFields) { Assert-True ($null -ne $liveRecord.PSObject.Properties[$field]) "schema field missing: $field" }
     Assert-True ($liveRecord.clock_source.host_observed_time_recorded.GetType() -eq [bool] -and $liveRecord.forbidden_capabilities_audit.no_go.GetType() -eq [bool]) 'JSON Boolean fields were stringified'
     Assert-True ([string]$liveRecord.freeze_manifest_sha256 -eq (Get-Sha256 $liveFreezePath)) 'freeze self hash missing or wrong'
+    Assert-True ([string]$liveRecord.prior_blocked_binding -eq 'N/A') 'unbound record must project prior_blocked_binding N/A'
+    Assert-True ($liveRecord.scenarios[5].a_accepted -eq $true -and $liveRecord.scenarios[5].reason -eq 'B-rejected-no-replacement-destroy-required') 'scenario 6 a_accepted or reason mismatch'
+    Assert-True ($liveRecord.scenarios[6].post_cleanup_capture -eq $true -and $liveRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'scenario 7 post-cleanup screenshot naming mismatch'
     Assert-True ($liveRecord.reviewer -eq 'pending' -and $liveRecord.reviewed_at -eq 'pending' -and $liveRecord.record_status -notmatch '^reviewed') 'runner wrote reviewed state'
     Assert-ManifestAndSeal $livePaths.Evidence
     Assert-ProjectionChain $livePaths.Evidence
@@ -355,6 +432,96 @@ try {
         Assert-True (Test-Path -LiteralPath $faultPath -PathType Leaf) "fault artifact missing: $suffix"
         Assert-True ((Get-Sha256 $faultPath) -eq [string]$faultArtifact.sha256) "fault artifact hash mismatch: $suffix"
     }
+
+    Write-Host 'SELFTEST_PHASE=m3-scenario6-new-b-ui-start'
+    $m3NewStartFixture = New-SimulationFixture
+    $m3NewStartFixture.scenario_events.'4' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4" }
+    )
+    $m3NewStartFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" },
+        [ordered]@{ offset_seconds = 9; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_REJECTED|requestId=b6|phase=conflict|summary=active-A" },
+        [ordered]@{ offset_seconds = 10; text = "$('<DEVICE_OBSERVED_AT>') START_PROMISE_LATE_REJECTED|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4|summary=released-request" }
+    )
+    $m3NewStartPath = Write-JsonFixture 'simulation-m3-new-b-start.json' $m3NewStartFixture
+    $m3NewStartPaths = New-CasePaths 'm3-new-b-start'
+    $m3NewStartRun = Invoke-Runner $liveFreezePath $m3NewStartPaths.Evidence $m3NewStartPaths.Raw -FixturePath $m3NewStartPath
+    Assert-True ($m3NewStartRun.ExitCode -eq 0) "M3 new B UI_START simulation crashed: $($m3NewStartRun.Text)"
+    $m3NewStartRecord = Get-Content -LiteralPath (Join-Path $m3NewStartPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m3NewStartRecord.scenarios[5].result -eq 'pass' -and $m3NewStartRecord.scenarios[5].reason -eq 'B-rejected-no-replacement-destroy-required') 'M3 scenario 6 with new B UI_START did not pass with expected reason'
+    Assert-True ($m3NewStartRecord.scenarios[5].a_accepted -eq $true -and $m3NewStartRecord.scenarios[5].request_id_b -eq 'b6') 'M3 scenario 6 a_accepted or request_id_b mismatch'
+    Assert-True (($m3NewStartRecord.scenarios[5].observation.events.text -join "`n") -notmatch 'UI_START\|bundle=cn\.alfadb\.netbird\.e3physvpnb\|requestId=b4') 'released S4 request polluted scenario 6 new B UI_START correlation'
+
+    Write-Host 'SELFTEST_PHASE=m3-scenario6-no-new-b-ui-start'
+    $m3NoNewStartFixture = New-SimulationFixture
+    $m3NoNewStartFixture.scenario_events.'4' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4" }
+    )
+    $m3NoNewStartFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpnb|reason=operation-pending" }
+    )
+    $m3NoNewStartPath = Write-JsonFixture 'simulation-m3-no-new-b-start.json' $m3NoNewStartFixture
+    $m3NoNewStartPaths = New-CasePaths 'm3-no-new-b-start'
+    $m3NoNewStartRun = Invoke-Runner $liveFreezePath $m3NoNewStartPaths.Evidence $m3NoNewStartPaths.Raw -FixturePath $m3NoNewStartPath
+    Assert-True ($m3NoNewStartRun.ExitCode -eq 0) "M3 no new B UI_START simulation crashed: $($m3NoNewStartRun.Text)"
+    $m3NoNewStartRecord = Get-Content -LiteralPath (Join-Path $m3NoNewStartPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m3NoNewStartRecord.scenarios[5].result -eq 'blocked' -and $m3NoNewStartRecord.scenarios[5].reason -eq 'no-new-B-UI_START') 'M3 scenario 6 without new B UI_START reason mismatch'
+    Assert-True ($m3NoNewStartRecord.scenarios[5].a_accepted -eq $true -and $m3NoNewStartRecord.scenarios[5].b_accepted -eq $false) 'M3 scenario 6 a_accepted/b_accepted mismatch'
+
+    Write-Host 'SELFTEST_PHASE=m4-inferred-s7-request-and-screenshot-naming'
+    $m4InferredFixture = New-SimulationFixture
+    $m4InferredFixture.scenario_events.'5' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a5|accepted=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-create|open=true|marker=CREATE_ACCEPTED" },
+        [ordered]@{ offset_seconds = 8; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpna|reason=operation-pending" }
+    )
+    $m4InferredFixture.scenario_events.'6' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpna|reason=operation-pending" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') UI_START_SKIPPED|bundle=cn.alfadb.netbird.e3physvpnb|reason=operation-pending" }
+    )
+    $m4InferredFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') STOP_PROMISE_RESOLVED|bundle=cn.alfadb.netbird.e3physvpna|requestId=a5" },
+        [ordered]@{ offset_seconds = 3; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONDESTROY|requestId=a5" },
+        [ordered]@{ offset_seconds = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_DESTROY_RESOLVED|requestId=a5|fdMarker=FD_CLOSED_CONFIRMED" },
+        [ordered]@{ offset_seconds = 5; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a5|phase=post-destroy-resolved|open=false|marker=FD_CLOSED_CONFIRMED" }
+    )
+    $m4InferredPath = Write-JsonFixture 'simulation-m4-inferred-s7.json' $m4InferredFixture
+    $m4InferredPaths = New-CasePaths 'm4-inferred-s7'
+    $m4InferredRun = Invoke-Runner $liveFreezePath $m4InferredPaths.Evidence $m4InferredPaths.Raw -FixturePath $m4InferredPath
+    Assert-True ($m4InferredRun.ExitCode -eq 0) "M4 inferred S7 simulation crashed: $($m4InferredRun.Text)"
+    $m4InferredRecord = Get-Content -LiteralPath (Join-Path $m4InferredPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m4InferredRecord.scenarios[6].request_id -eq 'a5' -and $m4InferredRecord.scenarios[6].reason -eq 'terminal-and-post-destroy-snapshot-confirmed') 'M4 scenario 7 did not infer requestId from real window events'
+    Assert-True ($m4InferredRecord.scenarios[6].result -eq 'pass' -and $m4InferredRecord.scenarios[6].reason -notmatch 'requestId-missing') 'M4 inferred scenario 7 must not report requestId-missing'
+    Assert-True ($m4InferredRecord.scenarios[6].post_cleanup_capture -eq $true -and $m4InferredRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'M4 post-cleanup screenshot naming mismatch'
+    $m4InferredScreens = @($m4InferredRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-post-cleanup' })
+    Assert-True ($m4InferredScreens.Count -ge 1) 'M4 post-cleanup screenshot reference missing'
+
+    $m4NoCleanupFixture = New-SimulationFixture
+    $m4NoCleanupFixture.scenario_events.'7' = @(
+        [ordered]@{ offset_seconds = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" },
+        [ordered]@{ offset_seconds = 2; text = "$('<DEVICE_OBSERVED_AT>') STOP_PROMISE_RESOLVED|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" }
+    )
+    $m4NoCleanupPath = Write-JsonFixture 'simulation-m4-no-cleanup-s7.json' $m4NoCleanupFixture
+    $m4NoCleanupPaths = New-CasePaths 'm4-no-cleanup-s7'
+    $m4NoCleanupRun = Invoke-Runner $liveFreezePath $m4NoCleanupPaths.Evidence $m4NoCleanupPaths.Raw -FixturePath $m4NoCleanupPath
+    Assert-True ($m4NoCleanupRun.ExitCode -eq 0) "M4 no-cleanup S7 simulation crashed: $($m4NoCleanupRun.Text)"
+    $m4NoCleanupRecord = Get-Content -LiteralPath (Join-Path $m4NoCleanupPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($m4NoCleanupRecord.scenarios[6].result -eq 'blocked' -and $m4NoCleanupRecord.scenarios[6].reason -eq 'destroy-terminal-or-post-snapshot-missing') 'M4 scenario 7 without destroy terminal classified reason mismatch'
+    Assert-True ($m4NoCleanupRecord.scenarios[6].post_cleanup_capture -eq $false -and $m4NoCleanupRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-final-state') 'M4 final-state screenshot naming mismatch'
+    $m4NoCleanupScreens = @($m4NoCleanupRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-final-state' })
+    $m4NoCleanupPostScreens = @($m4NoCleanupRecord.screenshot_reference | Where-Object { $_.name -eq 'scenario-7-post-cleanup' })
+    Assert-True ($m4NoCleanupScreens.Count -ge 1 -and $m4NoCleanupPostScreens.Count -eq 0) 'M4 final-state screenshot naming contract mismatch'
 
     Write-Host 'SELFTEST_PHASE=duplicate-lock-no-truncation'
     $transcriptBefore = Get-Sha256 (Join-Path $livePaths.Evidence 'projection\transcript.redacted.jsonl')
@@ -467,6 +634,100 @@ try {
     $retryRecord = $retryRecordText | ConvertFrom-Json -Depth 60
     Assert-True ($retryRecord.attempt -eq 'infrastructure-blocked-retry-1' -and $retryRecord.record_status -eq 'blocked' -and $retryRecord.scenario_aggregation.measured_scenario_overall -eq 'pass') 'legal retry record mismatch'
     Assert-True (-not $retryRecordText.Contains($syntheticLivePriorPath) -and $retryRecord.retry.prior_record_reference -eq 'PRIOR-BLOCKED-RECORD') 'retry record leaked the prior host path'
+    Assert-True ([string]$retryRecord.prior_blocked_binding -eq 'N/A') 'retry without prior_blocked_binding freeze field must project N/A'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $retryPaths.Raw 'prior-blocked-record.json') -PathType Leaf)) 'retry must not copy prior blocked record into RawRoot'
+
+    Write-Host 'SELFTEST_PHASE=prior-blocked-binding-projection'
+    $priorScenarioSha = 'a' * 64
+    $priorManifestSha = 'b' * 64
+    $priorSealSha = 'c' * 64
+    $bindingFreeze = Copy-JsonObject $liveFreeze
+    $bindingFreeze.evidence_id = 'EV-E3-SELFTEST-20990101-0010'
+    $bindingFreeze.prior_blocked_binding = [ordered]@{
+        source = 'consumed-blocked'
+        evidence_id = 'EV-E3-SELFTEST-20990101-0009'
+        scenario_results_sha256 = $priorScenarioSha
+        hash_manifest_sha256 = $priorManifestSha
+        campaign_seal_sha256 = $priorSealSha
+    }
+    $bindingFreezePath = Write-JsonFixture 'freeze-prior-binding.json' $bindingFreeze
+    $bindingPaths = New-CasePaths 'prior-binding'
+    $bindingRun = Invoke-Runner $bindingFreezePath $bindingPaths.Evidence $bindingPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($bindingRun.ExitCode -eq 0) "prior blocked binding simulation failed: $($bindingRun.Text)"
+    $bindingRecordPath = Join-Path $bindingPaths.Evidence 'scenario-results.json'
+    $bindingRecord = Get-Content -LiteralPath $bindingRecordPath -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.source -eq 'consumed-blocked') 'record prior_blocked_binding.source mismatch'
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.evidence_id -eq 'EV-E3-SELFTEST-20990101-0009') 'record did not project prior_blocked_binding.evidence_id'
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.scenario_results_sha256 -eq $priorScenarioSha) 'record prior_blocked_binding.scenario_results_sha256 mismatch'
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.hash_manifest_sha256 -eq $priorManifestSha) 'record prior_blocked_binding.hash_manifest_sha256 mismatch'
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.campaign_seal_sha256 -eq $priorSealSha) 'record prior_blocked_binding.campaign_seal_sha256 mismatch'
+    Assert-True ([string]$bindingRecord.prior_blocked_binding.binding_source -eq 'freeze-manifest') 'record prior_blocked_binding.binding_source must be freeze-manifest'
+    Assert-True ($null -eq $bindingRecord.prior_blocked_binding.PSObject.Properties['verified'] -and $null -eq $bindingRecord.prior_blocked_binding.PSObject.Properties['reverified'] -and $null -eq $bindingRecord.prior_blocked_binding.PSObject.Properties['record_path']) 'prior binding must not declare re-verification or host paths'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bindingPaths.Raw 'prior-blocked-record.json') -PathType Leaf)) 'prior binding must not copy raw prior record'
+    $bindingManifest = Get-Content -LiteralPath (Join-Path $bindingPaths.Evidence 'hash-manifest.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True (@($bindingManifest.external_raw_files | Where-Object { [string]$_.reference -match 'PRIOR-BLOCKED' }).Count -eq 0) 'manifest must not seal prior raw copies'
+    $bindingRecordSha = Get-Sha256 $bindingRecordPath
+    $bindingManifestSha = Get-Sha256 (Join-Path $bindingPaths.Evidence 'hash-manifest.json')
+    $bindingSeal = Get-Content -LiteralPath (Join-Path $bindingPaths.Evidence 'campaign-seal.json') -Raw | ConvertFrom-Json -Depth 20
+    Assert-True ([string]$bindingSeal.record.sha256 -eq $bindingRecordSha) 'campaign seal must bind projected scenario-results containing prior_blocked_binding'
+    Assert-True ([string]$bindingSeal.manifest.sha256 -eq $bindingManifestSha) 'campaign seal must bind final manifest'
+    Assert-ManifestAndSeal $bindingPaths.Evidence
+    Assert-True (@($bindingRecord.integrity_violations).Count -eq 0) 'prior binding run must pass integrity'
+
+    $bindingHashFlipFreeze = Copy-JsonObject $bindingFreeze
+    $bindingHashFlipFreeze.prior_blocked_binding.scenario_results_sha256 = 'd' * 64
+    $bindingHashFlipFreezePath = Write-JsonFixture 'freeze-prior-binding-hash-flip.json' $bindingHashFlipFreeze
+    $bindingHashFlipPaths = New-CasePaths 'prior-binding-hash-flip'
+    $bindingHashFlipRun = Invoke-Runner $bindingHashFlipFreezePath $bindingHashFlipPaths.Evidence $bindingHashFlipPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($bindingHashFlipRun.ExitCode -eq 0) "hash-flip prior binding simulation failed: $($bindingHashFlipRun.Text)"
+    $flipRecordPath = Join-Path $bindingHashFlipPaths.Evidence 'scenario-results.json'
+    $flipRecordSha = Get-Sha256 $flipRecordPath
+    $flipSeal = Get-Content -LiteralPath (Join-Path $bindingHashFlipPaths.Evidence 'campaign-seal.json') -Raw | ConvertFrom-Json -Depth 20
+    Assert-True ($flipRecordSha -ne $bindingRecordSha) 'changing a projected prior hash must change scenario-results sha256'
+    Assert-True ([string]$flipSeal.record.sha256 -ne [string]$bindingSeal.record.sha256) 'changing a projected prior hash must change campaign seal record binding'
+
+    Write-Host 'SELFTEST_PHASE=prior-blocked-binding-negatives-and-legacy'
+    $badHashFreeze = Copy-JsonObject $bindingFreeze
+    $badHashFreeze.evidence_id = 'EV-E3-SELFTEST-20990101-0011'
+    $badHashFreeze.prior_blocked_binding.scenario_results_sha256 = 'not-a-sha'
+    $badHashFreezePath = Write-JsonFixture 'freeze-prior-binding-bad-hash.json' $badHashFreeze
+    $badHashPaths = New-CasePaths 'prior-binding-bad-hash'
+    $badHashRun = Invoke-Runner $badHashFreezePath $badHashPaths.Evidence $badHashPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($badHashRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $badHashPaths.Evidence)) 'bad prior hash was accepted'
+    Assert-True ($badHashRun.Text -match 'scenario_results_sha256|final SHA-256') 'bad prior hash rejection message missing'
+
+    $incompleteFreeze = Copy-JsonObject $liveFreeze
+    $incompleteFreeze.evidence_id = 'EV-E3-SELFTEST-20990101-0013'
+    $incompleteFreeze.prior_blocked_binding = [ordered]@{
+        source = 'consumed-blocked'
+        evidence_id = 'EV-E3-SELFTEST-20990101-0009'
+        scenario_results_sha256 = $priorScenarioSha
+    }
+    $incompleteFreezePath = Write-JsonFixture 'freeze-prior-binding-incomplete.json' $incompleteFreeze
+    $incompletePaths = New-CasePaths 'prior-binding-incomplete'
+    $incompleteRun = Invoke-Runner $incompleteFreezePath $incompletePaths.Evidence $incompletePaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($incompleteRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $incompletePaths.Evidence)) 'incomplete prior binding object was accepted'
+    Assert-True ($incompleteRun.Text -match 'hash_manifest_sha256|campaign_seal_sha256|final SHA-256') 'incomplete prior binding rejection message missing'
+
+    $badSourceFreeze = Copy-JsonObject $bindingFreeze
+    $badSourceFreeze.evidence_id = 'EV-E3-SELFTEST-20990101-0015'
+    $badSourceFreeze.prior_blocked_binding.source = 'retry'
+    $badSourceFreezePath = Write-JsonFixture 'freeze-prior-binding-bad-source.json' $badSourceFreeze
+    $badSourcePaths = New-CasePaths 'prior-binding-bad-source'
+    $badSourceRun = Invoke-Runner $badSourceFreezePath $badSourcePaths.Evidence $badSourcePaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($badSourceRun.ExitCode -ne 0 -and -not (Test-Path -LiteralPath $badSourcePaths.Evidence)) 'non-consumed-blocked source was accepted'
+
+    $legacyFreeze = Copy-JsonObject $liveFreeze
+    $legacyFreeze.evidence_id = 'EV-E3-SELFTEST-20990101-0014'
+    if ($null -ne $legacyFreeze.PSObject.Properties['prior_blocked_binding']) {
+        $legacyFreeze.PSObject.Properties.Remove('prior_blocked_binding')
+    }
+    $legacyFreezePath = Write-JsonFixture 'freeze-legacy-no-prior-binding.json' $legacyFreeze
+    $legacyPaths = New-CasePaths 'legacy-no-prior-binding'
+    $legacyRun = Invoke-Runner $legacyFreezePath $legacyPaths.Evidence $legacyPaths.Raw -FixturePath $baseFixturePath
+    Assert-True ($legacyRun.ExitCode -eq 0) "legacy freeze without prior_blocked_binding failed: $($legacyRun.Text)"
+    $legacyRecord = Get-Content -LiteralPath (Join-Path $legacyPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ([string]$legacyRecord.prior_blocked_binding -eq 'N/A') 'legacy freeze must project prior_blocked_binding N/A'
 
     Write-Host 'SELFTEST_PHASE=finally-installation-flags'
     $installBFailure = [ordered]@{ operation = 'InstallB'; occurrence = 1; exit_code = 1; stderr = 'signature rejected' }
