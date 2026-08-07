@@ -108,6 +108,7 @@ raw 输出仅仓外受控保存；仓内只登记脱敏 projection 与 hash。`p
 - `ADJ-20260806-0003` 随后冻结 HarmonyOS 7 / API 26 元组，并分配准备用 campaign/evidence `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`（历史原始分配；该组 ID 从未 Live、未占用）。
 - host reverify 随后 PASS：public manifest SHA-256 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`；FINAL HAP / signature / profile / member-list hashes 与历史登记一致、未变；**不**主张设备安装兼容性。
 - `ADJ-20260806-0004` / `EV-E3-PHYS1BUILD7-20260806-0001` 随后以单条 `software.version` 实测确认 HDC build 与冻结 binding 逐字匹配（`reviewed-pass/pass`，仅 build-confirm）；API `26`/`aarch64`/`arm64-v8a` 仍以本 rebind 实测为准，不从 build 推断。
-- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当前准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。
-- 当前治理 `plan_status: ready` 只表示新编号 campaign host 输入 ready；最终 commit-bound freeze 须基于含本登记的提交重生；设备执行仍须明确再确认；E8 保持 `CLOSED`。
+- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当时准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。
+- 该 0001 身份随后 Live 并 operator-aborted 为 `consumed-blocked`（见 [`EV-E3-PHYS1API26-20260807-0001`](e3-physical-preflight-api26-2026-08-07.md)）；`ADJ-20260807-0002` 批准中文完整 1–7 重跑，当前准备 `E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`（同 tuple/HAP；runner 中文变更；prior blocked 显式绑定）。
+- 当前治理 `plan_status: pending-commit-freeze`（需新 commit/freeze/dryrun/device-ready；本登记禁 HDC）；E8 保持 `CLOSED`。
 - 本后续注记不修改上方 rebind measured 字段、hash 或 `verdict: pass` 的范围（仍仅三条只读 rebind）。

@@ -103,9 +103,9 @@ raw 输出仅仓外受控保存；仓内只登记脱敏 projection 与 hash。`p
 - 旧 initial live `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`）历史判定不改写，旧 campaign/evidence ID 仍不可复用。
 - rebind `EV-E3-PHYS1REBIND7-20260806-0001` 历史 measured 字段不改写。
 - 本 build-confirm 记录形成时不新增 campaign、不改变当时准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`（历史原始边界；该组 ID 从未 Live、未占用）。
-- 当前 `plan_status: ready` 仍只表示新 campaign host 输入 ready；最终 commit-bound freeze 须基于含本登记的提交重生；设备执行仍须明确再确认。
+- 本记录形成时治理 `plan_status: ready` 只表示当时新 campaign host 输入 ready；后续状态演变见 Subsequent note。
 
 ## Subsequent note（非本记录 measured 值；不改写上方 YAML）
 
-- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当前准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。
+- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当时准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。该 0001 身份随后 Live 并 `consumed-blocked`；`ADJ-20260807-0002` 将当前准备更新为 `E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`（同 tuple/HAP；runner 中文变更；`pending-commit-freeze`）。
 - 本后续注记不修改上方 build-confirm measured 字段、hash 或 `verdict: pass` 的范围（仍仅单条 software.version）。

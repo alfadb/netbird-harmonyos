@@ -844,7 +844,7 @@ function Confirm-VisibleFact {
         return [bool]$valid
     }
     $nonce = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $response = Read-OperatorResponse $Scenario 'confirmation' "$Name $nonce" "$Prompt Enter $Name $nonce"
+    $response = Read-OperatorResponse $Scenario 'confirmation' "$Name $nonce" "$Prompt 若为真：逐字输入完整令牌 $Name $nonce ；若为假：直接按回车留空。"
     Add-TranscriptRecord 'operator-confirmation' ([ordered]@{ scenario = $Scenario; name = $Name; confirmed = [bool]$response.Valid; timed_out = [bool]$response.TimedOut; simulated = $false })
     return [bool]$response.Valid
 }
@@ -1193,7 +1193,7 @@ function Invoke-ScenarioObservation {
     $prepareNonce = [guid]::NewGuid().ToString('N').Substring(0, 12)
     $readyPromptAt = Get-Now
     Write-Host "PREPARE scenario=$Scenario nonce=$prepareNonce"
-    $ready = Read-OperatorResponse $Scenario 'ready' "READY $prepareNonce" "Prepare the visible UI for scenario $Scenario, then enter READY $prepareNonce"
+    $ready = Read-OperatorResponse $Scenario 'ready' "READY $prepareNonce" "请准备场景 $Scenario 的可见界面，然后逐字输入 READY $prepareNonce"
     Update-CampaignCapture $capture
     $anchorByte = [long]$capture.ReadOffset
     $windowStartedAt = Get-Now
@@ -1203,7 +1203,7 @@ function Invoke-ScenarioObservation {
     $actionError = $null
     try {
         if ($null -ne $OnAction) { & $OnAction }
-        $ack = Read-OperatorResponse $Scenario 'action' "ACK $actionNonce" "Perform the action, then enter ACK $actionNonce"
+        $ack = Read-OperatorResponse $Scenario 'action' "ACK $actionNonce" "完成上述 ACTION 后，逐字输入 ACK $actionNonce"
     } catch {
         $actionError = $_
         $ack = [pscustomobject]@{ Valid = $false; AnsweredAt = Get-Now; TimedOut = $false; DelaySeconds = 0.0 }
@@ -1526,7 +1526,7 @@ function Invoke-LiveCampaign {
         $script:InstalledB = $true
         $scenario1State.InstallCompletedAt = Get-Now
     }
-    $observation1 = Invoke-ScenarioObservation 1 'Confirm the frozen cleanup baseline while the runner queries, stages, and installs A/B' $scenario1Action
+    $observation1 = Invoke-ScenarioObservation 1 '场景1：确认冻结清理基线；runner 将自动查询/暂存并安装测试 App A 与 B（A/B 为两个测试 App），你无需在手机上手动安装；完成后 ACK' $scenario1Action
     $capture1 = Invoke-Capture 'scenario-1-baseline' 1
     $window1StartedAt = [DateTimeOffset]::Parse([string]$observation1.Observation.window_started_at)
     $queryCovered = $null -ne $scenario1State.FirstBaselineQueryAt -and $window1StartedAt -le $scenario1State.FirstBaselineQueryAt
@@ -1539,14 +1539,14 @@ function Invoke-LiveCampaign {
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
     $authCaptureState = [pscustomobject]@{ AuthUiVisible = $false; Status = 'not-run'; Name = 'scenario-2-authorization' }
     $scenario2Action = {
-        $authCaptureState.AuthUiVisible = Confirm-VisibleFact 2 'AUTH-UI-VISIBLE' 'Confirm only if the system authorization UI is visible before choosing Allow.'
+        $authCaptureState.AuthUiVisible = Confirm-VisibleFact 2 'AUTH-UI-VISIBLE' '仅当系统授权界面在选择 Allow 前已可见时确认为真。'
         if ($authCaptureState.AuthUiVisible) {
             $authCaptureState.Status = Invoke-Capture $authCaptureState.Name 2
         } else {
             $authCaptureState.Status = 'degraded'
         }
     }
-    $observation2 = Invoke-ScenarioObservation 2 'On A tap Start; after the runner captures the visible authorization UI, choose Allow, then ACK' $scenario2Action
+    $observation2 = Invoke-ScenarioObservation 2 '场景2：在测试 App A 点 Start；出现系统授权界面后，先按 runner 提示完成 AUTH-UI-VISIBLE 事实确认并等待 runner 截取完成，再点 Allow，然后 ACK' $scenario2Action
     $capture2 = Invoke-Capture 'scenario-2-allow' 2
     $request2 = Get-RequestIdFromEvents $observation2.Events $script:BundleA
     $authCaptureAssertion = if ($authCaptureState.AuthUiVisible -and $authCaptureState.Status -eq 'collected') { 'pass' } else { 'blocked' }
@@ -1564,7 +1564,7 @@ function Invoke-LiveCampaign {
     })
     Assert-ScenarioCaptureCanContinue $results $observation2
 
-    $observation3 = Invoke-ScenarioObservation 3 'On active A tap Stop in the visible Entry UI, then ACK'
+    $observation3 = Invoke-ScenarioObservation 3 '场景3：在当前已激活的测试 App A 的 Entry 界面点 Stop，然后 ACK'
     $capture3 = Invoke-Capture 'scenario-3-stop' 3
     $destroy3 = Get-DestroyAssessment $observation3.Events $script:BundleA $request2
     $stop3 = $request2 -and (Test-CorrelatedMarker $observation3.Events $script:BundleA $request2 'STOP_PROMISE_RESOLVED')
@@ -1574,9 +1574,9 @@ function Invoke-LiveCampaign {
     Assert-ScenarioCaptureCanContinue $results $observation3
 
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleB })
-    $observation4 = Invoke-ScenarioObservation 4 'On B tap Start, choose Deny in the visible system UI, preserve the denial view, then ACK'
+    $observation4 = Invoke-ScenarioObservation 4 '场景4：在测试 App B 点 Start，在可见的系统授权界面选择 Deny，保持拒绝画面不要关闭，然后 ACK'
     $capture4 = Invoke-Capture 'scenario-4-deny' 4
-    $denyScreen = Confirm-VisibleFact 4 'DENY-SCREEN-CAPTURED' 'Confirm only if the denial screenshot is clear.'
+    $denyScreen = Confirm-VisibleFact 4 'DENY-SCREEN-CAPTURED' '仅当拒绝画面截图清晰可见时确认为真。'
     $request4 = Get-RequestIdFromEvents $observation4.Events $script:BundleB
     $fullDenyWindow = [bool]$observation4.CompleteWindowObserved
     $deny4 = Get-DenyAssessment $observation4.Events $script:BundleB $request4 $denyScreen $fullDenyWindow
@@ -1585,10 +1585,10 @@ function Invoke-LiveCampaign {
     Assert-ScenarioCaptureCanContinue $results $observation4
 
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
-    $observation5 = Invoke-ScenarioObservation 5 "Re-allow A (predicted '$($Freeze.settings_reallow_expected_path)'; path deviation is observation-only), then revoke A in ordinary Settings; continuous capture remains active until ACK plus 60 seconds"
+    $observation5 = Invoke-ScenarioObservation 5 "场景5：先在测试 App A 点 Start 重新激活（预测 re-allow 路径 '$($Freeze.settings_reallow_expected_path)'，路径偏差仅观察、不改判定）；再打开手机系统设置 App（齿轮）→ 更多连接 → VPN，在其中断开/删除测试 VPN；连续采集保持至 ACK 后再 60 秒"
     $capture5 = Invoke-Capture 'scenario-5-settings' 5
-    $pathActualDirect = Confirm-VisibleFact 5 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' 'Confirm only if the actual re-allow path was direct-system-activation.'
-    $pathActualReauth = Confirm-VisibleFact 5 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' 'Confirm only if the actual re-allow path was system-reauthorization-UI.'
+    $pathActualDirect = Confirm-VisibleFact 5 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' '仅当实际 re-allow 路径为 direct-system-activation 时确认为真。'
+    $pathActualReauth = Confirm-VisibleFact 5 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' '仅当实际 re-allow 路径为 system-reauthorization-UI 时确认为真。'
     $actualReallowPath = if ($pathActualDirect -and -not $pathActualReauth) {
         'direct-system-activation'
     } elseif ($pathActualReauth -and -not $pathActualDirect) {
@@ -1613,7 +1613,7 @@ function Invoke-LiveCampaign {
         observation = $pathObservation
         policy = [string]$Freeze.settings_reallow_path_policy
     }
-    $settingsConfirmed = Confirm-VisibleFact 5 'SETTINGS-REVOKE-CAPTURED' 'Confirm only if ordinary Settings VPN revoke was visibly captured.'
+    $settingsConfirmed = Confirm-VisibleFact 5 'SETTINGS-REVOKE-CAPTURED' '仅当已在普通系统设置中可见地完成 VPN 断开/删除时确认为真。'
     $request5 = Get-RequestIdFromEvents $observation5.Events $script:BundleA
     $onCreate5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_ONCREATE')
     $create5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_CREATE_RESOLVED') -and
@@ -1631,9 +1631,9 @@ function Invoke-LiveCampaign {
     })
     Assert-ScenarioCaptureCanContinue $results $observation5
 
-    $observation6 = Invoke-ScenarioObservation 6 'Activate A, then from B tap Start and preserve the visible conflict/replacement result; continuous capture remains active until ACK plus 60 seconds'
+    $observation6 = Invoke-ScenarioObservation 6 '场景6：先在测试 App A 点 Start 激活；再在测试 App B 点 Start；若系统画面出现替换/取消等选择，不要提前点选，先保留当前画面并按 runner 推进；连续采集保持至 ACK 后再 60 秒'
     $capture6 = Invoke-Capture 'scenario-6-conflict' 6
-    $noDual = Confirm-VisibleFact 6 'NO-DUAL-ACTIVE-CAPTURED' 'Confirm only if no simultaneous active A and B VPN is visible.'
+    $noDual = Confirm-VisibleFact 6 'NO-DUAL-ACTIVE-CAPTURED' '仅当最终可见状态为画面上未同时出现 A 与 B 两个 active VPN 时确认为真。'
     $request6A = Get-RequestIdFromEvents $observation6.Events $script:BundleA
     $request6B = Get-RequestIdFromEvents $observation6.Events $script:BundleB
     $aAccepted = $request6A -and (Test-CorrelatedMarker $observation6.Events $script:BundleA $request6A 'CREATE_ACCEPTED')
@@ -1679,10 +1679,10 @@ function Invoke-LiveCampaign {
         $cleanupState.Verified = $verified
         $cleanupState.CompletedAt = (Get-Now).ToString('o')
     }
-    $observation7 = Invoke-ScenarioObservation 7 'From the active A/B probe UI tap Stop; do not force-stop or uninstall manually' $null $duringScenario7
+    $observation7 = Invoke-ScenarioObservation 7 '场景7：在当前仍 active 的测试 App（A 或 B）界面点 Stop；不要手工强停或卸载；runner 负责后续清理' $null $duringScenario7
     if (-not $cleanupState.Done) { & $duringScenario7 -CurrentEvents $observation7.Events }
     $capture7 = Invoke-Capture 'scenario-7-post-cleanup' 7
-    $cleanupVisible = Confirm-VisibleFact 7 'FINAL-CLEANUP-CAPTURED' 'Confirm only if no active VPN or test configuration remains.'
+    $cleanupVisible = Confirm-VisibleFact 7 'FINAL-CLEANUP-CAPTURED' '仅当已无 active VPN 或测试配置残留时确认为真。'
     $destroy7 = Get-DestroyAssessment $observation7.Events $activeBundle $activeRequest
     $scenario7Result = if ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif ($destroy7.result -eq 'fail') { 'fail' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded) { 'blocked' } else { 'pass' }
     $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $destroy7.reason; active_bundle = $activeBundle; request_id = $activeRequest; cleanup_completed_at = $cleanupState.CompletedAt; bundle_process_cleanup_verified = [bool]$cleanupState.Verified; visible_cleanup_confirmed = [bool]$cleanupVisible; fault_capture_degraded = [bool]$cleanupState.FaultDegraded; observation = $observation7.Observation })

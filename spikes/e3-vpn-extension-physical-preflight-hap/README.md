@@ -25,18 +25,22 @@ the HDC build string with one authorized `software.version` probe
 (`reviewed-pass/pass`, build-confirm only): exact
 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` matches the frozen binding and removes the
 synthetic-build residual. API `26` / `aarch64` / `arm64-v8a` remain prior rebind
-measurements and are not inferred from the build string. `ADJ-20260807-0001`
-renumbers the unexecuted API26 campaign to current prepared IDs
-`E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`
-(tuple/HAP/runner/rules unchanged). Registered HAP artifacts remain compile API
-`24` with target/compatible API `23`; device freeze API is `26` and compatibility
-is measurement-only. Current runner SHA-256
-`19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`, selftest
-`f7156314031eaf3649dfc6e5e245b9fbba75944724ed03fa62b87a465188b39d`; selftest /
-dry-run / LiveSimulation keep HDC process count `0`. Current `plan_status` is
-`ready` only for new-campaign host inputs; the final external commit-bound freeze
-must be regenerated from the commit that includes this renumber registration;
-device execution still requires explicit reconfirmation; E8 remains CLOSED.
+measurements and are not inferred from the build string. `ADJ-20260807-0001` renumbered the then-unexecuted API26 campaign to
+`E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`; that pair
+later went Live and is now `consumed-blocked` (operator-aborted procedural seal;
+scenario-5 Settings misconfirmation and direct window close; recovery cleanup
+`verified_absent`; independent seal review 0 B/M; no partial scenario-5 replay).
+`ADJ-20260807-0002` authorizes a Chinese full 1-7 rerun as protocol usability
+correction (not device-behavior retry): current prepared IDs
+`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` (same
+tuple/HAP; runner Chinese operator prompts changed; prior blocked explicitly
+bound). Registered HAP artifacts remain compile API `24` with target/compatible
+API `23`; device freeze API is `26` and compatibility is measurement-only. The
+API26 blocked campaign used runner SHA-256
+`19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`; the worktree
+now carries uncommitted Chinese usability prompt edits that must be committed,
+rehashed, frozen, dry-run, and device-ready before Live. Current `plan_status`
+is `pending-commit-freeze`; this registration bans HDC; E8 remains CLOSED.
 Prior campaign/evidence IDs must not be reused. The checked-in freeze example
 remains intentionally `blocked`.
 
@@ -136,6 +140,18 @@ which is emitted only when Stop rejects with BusinessFailure code `16000001`
 blocked and retains the active request id. `STOP_PROMISE_RESOLVED` is never
 cleanup evidence: even when it releases the UI lock, the matching Extension
 terminal marker and post-destroy fd snapshot are still required.
+
+### Live 人工操作（中文）
+
+A/B 指两个测试 App。令牌 `READY` / `ACK` / 确认名必须**逐字**输入（ASCII 原样）；可见事实确认：真=逐字输入完整 `NAME nonce`，假=直接空回车。
+
+1. 场景1：runner 自动查询/暂存/安装 A 与 B，观察后 ACK。
+2. 场景2：A 点 Start → 授权界面出现后先按 runner 提示输入 AUTH-UI-VISIBLE 完整令牌 → 等 runner 截取完成 / 下一 ACTION → 再点 Allow → ACK。
+3. 场景3：已激活的 A 点 Stop → ACK。
+4. 场景4：B 点 Start → Deny → 保持拒绝画面 → ACK。
+5. 场景5：先 A 点 Start 重新激活；再打开**手机系统设置 App（齿轮）→ 更多连接 → VPN**，断开/删除测试 VPN → ACK。
+6. 场景6：先 A 点 Start 激活；再 B 点 Start，保留冲突/替换画面 → ACK。
+7. 场景7：当前 active 的 App 点 Stop；**不要**手工强停或卸载；runner 负责卸载清理。
 
 ## API Mapping
 
@@ -323,17 +339,21 @@ were never installed or run, and cleanup was verified clean. The independently
 reviewed record is `reviewed-pass/blocked` with 0 blocker/0 major; reviewed-pass
 means evidence review completion, not E3 pass.
 
-The historical initial-live plan became `blocked` with no `infrastructure_reason`,
-so `infrastructure-blocked-retry-1` is not authorized and prior campaign/evidence
-IDs must not be reused. After rebind, `ADJ-20260806-0003`, host reverify PASS,
-`ADJ-20260806-0004` build confirmation (`EV-E3-PHYS1BUILD7-20260806-0001`,
-build-confirm only), and `ADJ-20260807-0001` cross-day renumber of the never-Live
-prepared IDs, the current governance `plan_status` is `ready` only for the
-new-campaign host inputs (`E3-PHYS-PREFLIGHT-20260807-0001` /
-`EV-E3-PHYS1API26-20260807-0001`; historical prepared
-`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` are
-`superseded-unexecuted`). Live still requires a clean worktree, the final
-external commit-bound freeze regenerated from the commit that includes this
-renumber registration, and explicit device-execution reconfirmation. E3 remains
-open, E8 remains `CLOSED`, and NetBird or any broader physical-device work
-remains forbidden.
+The historical API23 initial-live plan became `blocked` with no
+`infrastructure_reason`, so `infrastructure-blocked-retry-1` is not authorized
+and prior campaign/evidence IDs must not be reused. After rebind,
+`ADJ-20260806-0003`, host reverify PASS, `ADJ-20260806-0004` build confirmation
+(`EV-E3-PHYS1BUILD7-20260806-0001`, build-confirm only), `ADJ-20260807-0001`
+cross-day renumber, API26 live `consumed-blocked`
+(`E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`; no partial
+scenario-5 replay), and `ADJ-20260807-0002` Chinese full-rerun authorization, the
+current governance `plan_status` is `pending-commit-freeze` for prepared IDs
+`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` (same
+tuple/HAP; runner Chinese prompts changed; prior blocked explicitly bound;
+historical prepared `E3-PHYS-PREFLIGHT-20260806-0002` /
+`EV-E3-PHYS1API26-20260806-0001` remain `superseded-unexecuted`). Live still
+requires a clean worktree, commit of the Chinese runner edits, the final
+external commit-bound freeze, dry-run, device-ready, and explicit
+device-execution reconfirmation. This registration bans HDC. E3 remains open,
+E8 remains `CLOSED`, and NetBird or any broader physical-device work remains
+forbidden.
