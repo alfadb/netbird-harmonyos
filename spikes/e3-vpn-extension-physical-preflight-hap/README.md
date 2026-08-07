@@ -30,19 +30,23 @@ measurements and are not inferred from the build string. `ADJ-20260807-0001` ren
 later went Live and is now `consumed-blocked` (operator-aborted procedural seal;
 scenario-5 Settings misconfirmation and direct window close; recovery cleanup
 `verified_absent`; independent seal review 0 B/M; no partial scenario-5 replay).
-`ADJ-20260807-0002` authorizes a Chinese full 1-7 rerun as protocol usability
-correction (not device-behavior retry): current prepared IDs
-`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` (same
-tuple/HAP; runner Chinese operator prompts changed; prior blocked explicitly
-bound). Registered HAP artifacts remain compile API `24` with target/compatible
-API `23`; device freeze API is `26` and compatibility is measurement-only. The
-API26 blocked campaign used runner SHA-256
-`19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`; the worktree
-now carries uncommitted Chinese usability prompt edits that must be committed,
-rehashed, frozen, dry-run, and device-ready before Live. Current `plan_status`
-is `pending-commit-freeze`; this registration bans HDC; E8 remains CLOSED.
-Prior campaign/evidence IDs must not be reused. The checked-in freeze example
-remains intentionally `blocked`.
+`ADJ-20260807-0002` authorized a Chinese full 1-7 rerun as protocol usability
+correction (not device-behavior retry). That campaign
+`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` went Live
+and is now `consumed-blocked` (`reviewed-pass/blocked`; S1/S4 pass,
+S2/S3/S5/S6/S7 blocked; cleanup verified-clean; dual independent review 0 B/5 M;
+opus timeout attempt-not-counted; prior 0001 retained). Registered HAP artifacts
+remain compile API `24` with target/compatible API `23`; device freeze API is
+`26` and compatibility is measurement-only. API26 0001 used runner SHA-256
+`19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`; API26 0002
+used runner SHA-256
+`2fb2d3e99585a53adec82ea3b51ae2ea29c8f021d46e24b0828faa5415d38194` and code
+`e8eb1b67a48603c55d3f55d2be686bae0dbd15e1` (freeze
+`d6334c2d8d0d1bf11a2a9e26f65039ee0a1a98e377fbf644cef557ff02c55a1a`, now
+`CONSUMED-BLOCKED`). Current `plan_status` is `blocked-awaiting-adjudication`;
+no auto retry, no new ID, and no device-command authorization. This registration
+bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not be reused. The
+checked-in freeze example remains intentionally `blocked`.
 
 ## Boundary
 
@@ -344,16 +348,13 @@ The historical API23 initial-live plan became `blocked` with no
 and prior campaign/evidence IDs must not be reused. After rebind,
 `ADJ-20260806-0003`, host reverify PASS, `ADJ-20260806-0004` build confirmation
 (`EV-E3-PHYS1BUILD7-20260806-0001`, build-confirm only), `ADJ-20260807-0001`
-cross-day renumber, API26 live `consumed-blocked`
+cross-day renumber, API26 0001 live `consumed-blocked`
 (`E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`; no partial
-scenario-5 replay), and `ADJ-20260807-0002` Chinese full-rerun authorization, the
-current governance `plan_status` is `pending-commit-freeze` for prepared IDs
-`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` (same
-tuple/HAP; runner Chinese prompts changed; prior blocked explicitly bound;
-historical prepared `E3-PHYS-PREFLIGHT-20260806-0002` /
-`EV-E3-PHYS1API26-20260806-0001` remain `superseded-unexecuted`). Live still
-requires a clean worktree, commit of the Chinese runner edits, the final
-external commit-bound freeze, dry-run, device-ready, and explicit
-device-execution reconfirmation. This registration bans HDC. E3 remains open,
-E8 remains `CLOSED`, and NetBird or any broader physical-device work remains
-forbidden.
+scenario-5 replay; retained), and API26 0002 live `consumed-blocked`
+(`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`;
+`reviewed-pass/blocked`; dual review 0 B/5 M; historical prepared
+`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` remain
+`superseded-unexecuted`), the current governance `plan_status` is
+`blocked-awaiting-adjudication`. No auto retry, no new ID, and no device-command
+authorization. This registration bans HDC. E3 remains open, E8 remains
+`CLOSED`, and NetBird or any broader physical-device work remains forbidden.

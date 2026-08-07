@@ -107,5 +107,5 @@ raw 输出仅仓外受控保存；仓内只登记脱敏 projection 与 hash。`p
 
 ## Subsequent note（非本记录 measured 值；不改写上方 YAML）
 
-- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当时准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。该 0001 身份随后 Live 并 `consumed-blocked`；`ADJ-20260807-0002` 将当前准备更新为 `E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`（同 tuple/HAP；runner 中文变更；`pending-commit-freeze`）。
+- `ADJ-20260807-0001` 随后将未执行 API26 campaign 跨日重新编号：历史准备 ID `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` 标 `superseded-unexecuted`；当时准备身份为 `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`（tuple/HAP/runner/rules 未变）。该 0001 身份随后 Live 并 `consumed-blocked`（保留）；`ADJ-20260807-0002` 的 `E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` 随后 Live 并 `consumed-blocked`；当前 `plan_status: blocked-awaiting-adjudication`。
 - 本后续注记不修改上方 build-confirm measured 字段、hash 或 `verdict: pass` 的范围（仍仅单条 software.version）。

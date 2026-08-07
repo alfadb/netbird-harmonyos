@@ -179,5 +179,6 @@ recovery cleanup 在窗口关闭后执行 force-stop/uninstall A/B 与 staging �
 - E8 保持 `CLOSED`。
 - `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001` 状态：`consumed-blocked`，不可复用。
 - 禁止局部 scenario5 重放；禁止把本 blocked 写成设备行为 retry 依据。
-- 后续完整中文人工提示重跑与新 ID 见 `ADJ-20260807-0002`（`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`）；原因是 protocol usability correction，不是设备行为 retry。
+- 后续完整中文人工提示重跑与新 ID 见 `ADJ-20260807-0002`（`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002`）；原因是 protocol usability correction，不是设备行为 retry。该 0002 身份随后 Live 并 `consumed-blocked`（见 [`EV-E3-PHYS1API26-20260807-0002`](e3-physical-preflight-api26-0002-2026-08-07.md)）；本 0001 记录保留不改写。
+- 当前治理 `plan_status: blocked-awaiting-adjudication`（无 auto retry/新 ID/设备命令授权）。
 - 本登记期间禁止 HDC/设备命令。
