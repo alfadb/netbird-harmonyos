@@ -58,10 +58,17 @@ used runner SHA-256
 `d6334c2d8d0d1bf11a2a9e26f65039ee0a1a98e377fbf644cef557ff02c55a1a`, now
 `CONSUMED-BLOCKED`); the runner has since changed under `ADJ-20260807-0003`, so
 a new live freeze must bind a fresh commit and runner SHA-256. Current
-`plan_status` is `blocked-awaiting-host-rebuild`; the Windows signing/build host
-must rebuild the runner, freeze, and selftest snapshots before any new live; no
-auto retry, no new ID, and no device-command authorization until then. This
-registration bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not
+`plan_status` is `blocked-awaiting-device-authorization`; the Windows signing/build host
+has rebuilt the runner, freeze, and selftest snapshots and registered them as
+[`EV-E3-PHYS1HOST-20260808-0001`](../../docs/evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
+(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; candidate
+`E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` prepared
+with freeze `plan_status: blocked`; DryRun `is_evidence: false`/HDC0/integrity
+empty; old 20260807 candidate `INVALID-TIMELINE` unusable). No auto retry, no
+new ID, and no device-command authorization until explicit user device
+authorization plus fresh device confirmation; a ready freeze may bind the same
+candidate identity only after that explicit authorization per governance
+decision. This registration bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not
 be reused. The checked-in freeze example remains intentionally `blocked`.
 
 ## Boundary
@@ -441,8 +448,14 @@ scenario-5 replay; retained), and API26 0002 live `consumed-blocked`
 `superseded-unexecuted`), and `ADJ-20260807-0003` (host process terminal
 probe + Settings app-info force-stop revoke path; runner/freeze example/selftest
 updated with this commit), the current governance `plan_status` is
-`blocked-awaiting-host-rebuild`. The Windows signing/build host must rebuild the
-runner, freeze, and selftest snapshots before any new live; no auto retry, no
-new ID, and no device-command authorization until then. This registration bans
-HDC. E3 remains open, E8 remains `CLOSED`, and NetBird or any broader
-physical-device work remains forbidden.
+`blocked-awaiting-device-authorization`. The Windows signing/build host has
+rebuilt the runner, freeze, and selftest snapshots and registered them as
+[`EV-E3-PHYS1HOST-20260808-0001`](../../docs/evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
+(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; candidate
+`E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` prepared
+with freeze `plan_status: blocked`; DryRun `is_evidence: false`/HDC0/integrity
+empty; old 20260807 candidate `INVALID-TIMELINE` unusable). No auto retry, no
+new ID, and no device-command authorization until explicit user device
+authorization plus fresh device confirmation; a ready freeze may bind the same
+candidate identity only after that explicit authorization per governance
+decision. This registration bans HDC. E3 remains open, E8 remains `CLOSED`, and NetBird or any broader physical-device work remains forbidden.
