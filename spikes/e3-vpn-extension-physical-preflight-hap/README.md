@@ -14,8 +14,10 @@ verdict is blocked before continuous capture or installation because the live
 build projection drifted from the then-frozen build. Readonly rebind
 `EV-E3-PHYS1REBIND7-20260806-0001` is `reviewed-pass/pass` for the three rebind
 probes only, not an E3 or campaign pass. `ADJ-20260806-0003` freezes the tuple
-above and prepares campaign `E3-PHYS-PREFLIGHT-20260806-0002` / evidence
-`EV-E3-PHYS1API26-20260806-0001`. Host reverify PASS: public manifest SHA-256
+above and historically prepared campaign `E3-PHYS-PREFLIGHT-20260806-0002` /
+evidence `EV-E3-PHYS1API26-20260806-0001` (never Live, never occupied;
+`ADJ-20260807-0001` marks them `superseded-unexecuted`). Host reverify PASS:
+public manifest SHA-256
 `66a70a52c92b927d4b23e528ae6eaf1b52169e504291c6ff0e7efa4c7ffee010`; FINAL HAP /
 signature / profile / member-list hashes unchanged; device install compatibility
 is not claimed. `ADJ-20260806-0004` / `EV-E3-PHYS1BUILD7-20260806-0001` confirms
@@ -23,17 +25,20 @@ the HDC build string with one authorized `software.version` probe
 (`reviewed-pass/pass`, build-confirm only): exact
 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` matches the frozen binding and removes the
 synthetic-build residual. API `26` / `aarch64` / `arm64-v8a` remain prior rebind
-measurements and are not inferred from the build string. Registered HAP
-artifacts remain compile API `24` with target/compatible API `23`; device freeze
-API is `26` and compatibility is measurement-only. Current runner SHA-256
+measurements and are not inferred from the build string. `ADJ-20260807-0001`
+renumbers the unexecuted API26 campaign to current prepared IDs
+`E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001`
+(tuple/HAP/runner/rules unchanged). Registered HAP artifacts remain compile API
+`24` with target/compatible API `23`; device freeze API is `26` and compatibility
+is measurement-only. Current runner SHA-256
 `19fc1a76e49b9dca66a8a0352cc6bc8291f2888e66b3ad72cdc8a91ed97312e7`, selftest
 `f7156314031eaf3649dfc6e5e245b9fbba75944724ed03fa62b87a465188b39d`; selftest /
 dry-run / LiveSimulation keep HDC process count `0`. Current `plan_status` is
 `ready` only for new-campaign host inputs; the final external commit-bound freeze
-must be regenerated from the commit that includes this build confirmation;
+must be regenerated from the commit that includes this renumber registration;
 device execution still requires explicit reconfirmation; E8 remains CLOSED.
-Prior campaign/evidence IDs must not be reused. No new campaign IDs were
-allocated. The checked-in freeze example remains intentionally `blocked`.
+Prior campaign/evidence IDs must not be reused. The checked-in freeze example
+remains intentionally `blocked`.
 
 ## Boundary
 
@@ -320,12 +325,15 @@ means evidence review completion, not E3 pass.
 
 The historical initial-live plan became `blocked` with no `infrastructure_reason`,
 so `infrastructure-blocked-retry-1` is not authorized and prior campaign/evidence
-IDs must not be reused. After rebind, `ADJ-20260806-0003`, host reverify PASS, and
+IDs must not be reused. After rebind, `ADJ-20260806-0003`, host reverify PASS,
 `ADJ-20260806-0004` build confirmation (`EV-E3-PHYS1BUILD7-20260806-0001`,
-build-confirm only), the current governance `plan_status` is `ready` only for the
-new-campaign host inputs (`E3-PHYS-PREFLIGHT-20260806-0002` /
-`EV-E3-PHYS1API26-20260806-0001`). Live still requires a clean worktree, the
-final external commit-bound freeze regenerated from the commit that includes the
-build confirmation, and explicit device-execution reconfirmation. E3 remains
+build-confirm only), and `ADJ-20260807-0001` cross-day renumber of the never-Live
+prepared IDs, the current governance `plan_status` is `ready` only for the
+new-campaign host inputs (`E3-PHYS-PREFLIGHT-20260807-0001` /
+`EV-E3-PHYS1API26-20260807-0001`; historical prepared
+`E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` are
+`superseded-unexecuted`). Live still requires a clean worktree, the final
+external commit-bound freeze regenerated from the commit that includes this
+renumber registration, and explicit device-execution reconfirmation. E3 remains
 open, E8 remains `CLOSED`, and NetBird or any broader physical-device work
 remains forbidden.
