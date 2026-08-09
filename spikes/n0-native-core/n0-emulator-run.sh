@@ -70,7 +70,7 @@ readonly PROJECT_DIR="$SCRIPT_DIR"
 readonly DEFAULT_WORKSPACE="$(cd -- "$PROJECT_DIR/../.." && pwd -P)"
 
 # --- fixed baseline constants ----------------------------------------------
-readonly DEFAULT_EVIDENCE_ID="EV-N0-EMU24-20260810-0001"
+readonly DEFAULT_EVIDENCE_ID="EV-N0-EMU24-20260810-0002"
 readonly SNAPSHOT_HEAD="2c567dc721c6582f93a15b241e843e3bbff3f7f3"
 readonly BORINGTUN_VERSION="0.7.1"
 readonly BORINGTUN_CRATE_SHA256="15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939"
@@ -205,7 +205,11 @@ run() {
 }
 
 hdc() {
-  timeout 30 "$HDC" -t "$EMULATOR_TARGET" "$@"
+  # stdin from /dev/null: the hdc client can spawn a daemon, and the daemon
+  # must never inherit the runner's stdin or depend on the runner's stdout
+  # (the transcript). Callers that need output capture it via $(...) or a
+  # file, never via the inherited transcript stream.
+  timeout 30 "$HDC" -t "$EMULATOR_TARGET" "$@" </dev/null
 }
 
 fail() {
@@ -248,20 +252,20 @@ teardown() {
   #    EVIDENCE_ID is format-validated (EV-<gate>-<target>-<YYYYMMDD>-<NNNN>)
   #    and the path is single-quoted inside the guest shell command.
   if (( emulator_started == 1 )); then
-    hdc shell "rm -rf '$STAGING'" >/dev/null 2>&1 || true
+    hdc shell "rm -rf '$STAGING'" >/dev/null 2>&1 </dev/null || true
     printf 'CLEANUP_STAGING=cleared\n'
   else
     printf 'CLEANUP_STAGING=skipped-emulator-not-started\n'
   fi
   # 2. Uninstall the bundle while the Emulator is still online.
   if (( installed == 1 )); then
-    timeout 120 "$HDC" -t "$EMULATOR_TARGET" uninstall "$BUNDLE" >/dev/null 2>&1 || true
+    timeout 120 "$HDC" -t "$EMULATOR_TARGET" uninstall "$BUNDLE" >/dev/null 2>&1 </dev/null || true
     installed=0
     printf 'CLEANUP_UNINSTALL=done\n'
   fi
   # 3. Stop the Emulator.
   if (( emulator_started == 1 )); then
-    HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" >/dev/null 2>&1 || true
+    HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" >/dev/null 2>&1 </dev/null || true
     for _ in $(seq 1 30); do
       if ! pgrep -f '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" >/dev/null 2>&1; then
         break
@@ -274,16 +278,21 @@ teardown() {
   # 4. Kill the host hdc daemon (device phase only: a precondition failure
   #    never touches hdc).
   if (( device_phase_started == 1 )); then
-    "$HDC" kill >/dev/null 2>&1 || true
+    "$HDC" kill >/dev/null 2>&1 </dev/null || true
     printf 'CLEANUP_HDC=kill-issued\n'
   else
     printf 'CLEANUP_HDC=skipped-no-device-phase\n'
   fi
-  # 5. Record residual process/port state (device phase only).
+  # 5. Record residual process/port state (device phase only). The Emulator
+  #    processes are matched by their fixed command line; the hdc daemon is
+  #    matched by its exact process name (pgrep -ax hdc), never by a loose
+  #    pattern.
   if (( device_phase_started == 1 )); then
-    residual_processes="$(pgrep -af '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE"'|hdc -m -s' || true)"
+    residual_emulator="$(pgrep -af '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" || true)"
+    residual_hdc="$(pgrep -ax hdc || true)"
     residual_ports="$(ss -ltnp | grep -E ":($EMULATOR_HDC_PORT|5555|8710)[[:space:]]" || true)"
-    printf 'RESIDUAL_PROCESS=%q\n' "$residual_processes"
+    printf 'RESIDUAL_EMULATOR_PROCESS=%q\n' "$residual_emulator"
+    printf 'RESIDUAL_HDC_PROCESS=%q\n' "$residual_hdc"
     printf 'RESIDUAL_PORT=%q\n' "$residual_ports"
   else
     printf 'RESIDUAL_STATE=skipped-no-device-phase\n'
@@ -292,7 +301,7 @@ teardown() {
   printf 'CLEANUP_TEMP=removed\n'
   printf 'CLEANUP_END=teardown-complete\n'
   # TRAP_EXIT/RESULT must be inside the transcript BEFORE the stream is sealed
-  # (seal_transcript switches stdout back to fd 3, so anything printed after
+  # (seal_transcript switches stdout to /dev/null, so anything printed after
   # the seal would not be part of the transcript hash).
   printf 'TRAP_EXIT_CODE=%s RESULT=%s\n' "$exit_code" "$result"
   seal_and_finalize "$exit_code"
@@ -301,31 +310,27 @@ teardown() {
 }
 trap teardown EXIT
 
-# Close the transcript log stream and wait for tee so the transcript file is
-# final before any seal hash is computed. The fd switch back to the original
-# stdout (fd 3) is UNCONDITIONAL; the wait only happens when a tee process
-# exists (dry-run/selftest never open fd 3 and never set TEE_PID). When fd 3
-# was never opened (a precondition failure before evidence setup), the switch
-# is a tolerated no-op: there is no transcript to seal.
+# Close the transcript log stream: switch the runner's stdout/stderr to
+# /dev/null so nothing after this point can append to the transcript, then
+# hash the now-final transcript. There is no tee process and no fd 3: the
+# transcript is appended directly with O_APPEND, so the seal never waits on
+# a child holding the stream open and always completes in bounded time.
 seal_transcript() {
-  if ! { exec 1>&3 2>&3; } 2>/dev/null; then
-    :
-  fi
-  if [[ -n "${TEE_PID:-}" ]]; then
-    wait "$TEE_PID" 2>/dev/null || true
-  fi
+  exec >/dev/null 2>&1
 }
 
 # Called at the end of teardown, after all teardown output has been flushed
-# into the transcript: seal the stream, then append the final transcript hash
-# and a self-hash of the manifest so no mid-stream hash is ever presented as
-# final and the teardown log is inside the sealed hash. Runs whenever the
-# manifest exists, so any later fail (cleanup/residual/sensitive) still seals.
+# into the transcript: seal the stream, then append the final exit code, run
+# status, fail reason, the final transcript size and its sha256 (over the
+# first transcript_final_bytes bytes, recomputed with head -c N) and a
+# self-hash of the manifest so no mid-stream hash is ever presented as final
+# and the teardown log is inside the sealed hash. Runs whenever the manifest
+# exists, so any later fail (cleanup/residual/sensitive) still seals.
 seal_and_finalize() {
   local exit_code="${1:-0}"
   seal_transcript
   if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-    local transcript_hash manifest_hash
+    local transcript_bytes transcript_hash manifest_hash
     # A failure after the verdict (cleanup/residual/sensitive) must be
     # recorded in the manifest, not only in the transcript: append the final
     # exit code, the run status and the fail reason BEFORE the hashes so they
@@ -333,7 +338,13 @@ seal_and_finalize() {
     printf 'final_exit_code=%s\n' "$exit_code" >>"$MANIFEST"
     printf 'run_status=%s\n' "$result" >>"$MANIFEST"
     printf 'fail_reason=%s\n' "${fail_reason:-}" >>"$MANIFEST"
-    transcript_hash="$(sha256sum "$TRANSCRIPT" | awk '{print $1}')" || true
+    # The transcript is final (stdout is /dev/null): record its size and the
+    # sha256 of the first transcript_final_bytes bytes, recomputed with
+    # head -c N so a transcript that grows after the stat can never be
+    # silently re-hashed.
+    transcript_bytes="$(stat -c %s "$TRANSCRIPT" 2>/dev/null || true)"
+    printf 'transcript_final_bytes=%s\n' "$transcript_bytes" >>"$MANIFEST"
+    transcript_hash="$(head -c "${transcript_bytes:-0}" "$TRANSCRIPT" 2>/dev/null | sha256sum | awk '{print $1}')" || true
     printf 'transcript_final_sha256=%s\n' "$transcript_hash" >>"$MANIFEST"
     manifest_hash="$(sha256sum "$MANIFEST" | awk '{print $1}')" || true
     printf 'manifest_sha256=%s\n' "$manifest_hash" >>"$MANIFEST"
@@ -539,6 +550,7 @@ selftest_run() {
   local teardown_output
   local existing newfile
   local seal_tmp expected_manifest_hash actual_manifest_hash
+  local seal_pid seal_done seal_bytes seal_hash recomputed_hash
   local src_a src_b src_c n1 n2 n0
   local napi_line napi_smoke napi_x25519 napi_tunnel napi_tickop napi_ticksize
   local guest_log guest_code
@@ -879,23 +891,56 @@ selftest_run() {
   fi
   printf 'SELFTEST no-clobber=pass\n'
 
-  # --- manifest seal --------------------------------------------------------
-  # seal_and_finalize appends transcript_final_sha256 then manifest_sha256;
-  # manifest_sha256 must equal the hash of the manifest content up to and
-  # including the transcript_final_sha256 line (the self-hash line itself is
-  # not part of its own hash).
+  # --- manifest seal (real coverage: live child holding the transcript fd) --
+  # The transcript is appended with O_APPEND; a child process that inherits
+  # the transcript fd and stays alive must NOT block the seal (there is no tee
+  # to wait for). The seal must complete in bounded time, record all six seal
+  # fields (final_exit_code / run_status / fail_reason / transcript_final_bytes
+  # / transcript_final_sha256 / manifest_sha256), and the transcript hash must
+  # be recomputable from the first transcript_final_bytes bytes. The holder
+  # sleep is killed in every path: no sleep is left behind.
   seal_tmp="$tmpdir/seal"
   mkdir -p "$seal_tmp"
   : >"$seal_tmp/transcript.log"
-  printf 'evidence_id=EV-N0-EMU24-20260810-0001\n' >"$seal_tmp/manifest.txt"
+  printf 'evidence_id=EV-N0-EMU24-20260810-0002\n' >"$seal_tmp/manifest.txt"
   printf 'verdict=pass\n' >>"$seal_tmp/manifest.txt"
   (
-    exec 3>&1
+    exec >>"$seal_tmp/transcript.log" 2>&1
+    printf 'SELFTEST_SEAL_TRANSCRIPT_LINE=1\n'
+    sleep 30 &
+    printf '%s\n' "$!" >"$seal_tmp/holder.pid"
     TRANSCRIPT="$seal_tmp/transcript.log"
     MANIFEST="$seal_tmp/manifest.txt"
-    TEE_PID=""
     seal_and_finalize
-  )
+    seal_rc=$?
+    # Simulate a post-seal append to the transcript (a stray child writing
+    # after the seal): the recorded first-N-bytes hash must still recompute,
+    # while the whole-file hash must differ.
+    printf 'SELFTEST_POST_SEAL_APPEND=1\n' >>"$seal_tmp/transcript.log"
+    holder_pid="$(cat "$seal_tmp/holder.pid")"
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+    printf '%s\n' "$seal_rc" >"$seal_tmp/seal.done"
+    exit "$seal_rc"
+  ) &
+  seal_pid=$!
+  seal_done=0
+  for _ in $(seq 1 100); do
+    if [[ -f "$seal_tmp/seal.done" ]]; then
+      seal_done=1
+      break
+    fi
+    sleep 0.1
+  done
+  if (( seal_done != 1 )); then
+    kill "$seal_pid" 2>/dev/null || true
+    if [[ -f "$seal_tmp/holder.pid" ]]; then
+      kill "$(cat "$seal_tmp/holder.pid")" 2>/dev/null || true
+    fi
+    printf 'SELFTEST FAIL seal must complete in bounded time with a live child holding the transcript fd\n'
+    rc=1
+  fi
+  wait "$seal_pid" 2>/dev/null || true
   if ! grep -q '^transcript_final_sha256=' "$seal_tmp/manifest.txt"; then
     printf 'SELFTEST FAIL seal transcript hash\n'
     rc=1
@@ -914,6 +959,27 @@ selftest_run() {
   fi
   if ! grep -q '^fail_reason=' "$seal_tmp/manifest.txt"; then
     printf 'SELFTEST FAIL seal fail_reason\n'
+    rc=1
+  fi
+  if ! grep -q '^transcript_final_bytes=' "$seal_tmp/manifest.txt"; then
+    printf 'SELFTEST FAIL seal transcript_final_bytes\n'
+    rc=1
+  fi
+  # transcript_final_sha256 must equal the sha256 of the first
+  # transcript_final_bytes bytes (head -c N recompute) even after the
+  # simulated post-seal append; the whole-file hash must differ (the append
+  # is real and the recorded first-N-bytes hash stays valid).
+  seal_bytes="$(grep '^transcript_final_bytes=' "$seal_tmp/manifest.txt" | cut -d= -f2)"
+  seal_hash="$(grep '^transcript_final_sha256=' "$seal_tmp/manifest.txt" | cut -d= -f2)"
+  recomputed_hash="$(head -c "$seal_bytes" "$seal_tmp/transcript.log" | sha256sum | awk '{print $1}')"
+  if [[ "$recomputed_hash" != "$seal_hash" ]]; then
+    printf 'SELFTEST FAIL seal transcript hash recompute mismatch: expected %s got %s\n' \
+      "$seal_hash" "$recomputed_hash"
+    rc=1
+  fi
+  whole_hash="$(sha256sum "$seal_tmp/transcript.log" | awk '{print $1}')"
+  if [[ "$whole_hash" == "$seal_hash" ]]; then
+    printf 'SELFTEST FAIL post-seal append must change the whole-file hash\n'
     rc=1
   fi
   expected_manifest_hash="$(grep -v '^manifest_sha256=' "$seal_tmp/manifest.txt" | sha256sum | awk '{print $1}')"
@@ -939,7 +1005,7 @@ selftest_run() {
   # or scan residual ports; only the formal device phase performs the full
   # cleanup.
   teardown_output="$(SELFTEST=0 DRY_RUN=0 device_phase_started=0 emulator_started=0 installed=0 \
-    MANIFEST= TRANSCRIPT= TEE_PID= teardown 2>&1 || true)"
+    MANIFEST= TRANSCRIPT= teardown 2>&1 || true)"
   if [[ "$teardown_output" != *'CLEANUP_HDC=skipped-no-device-phase'* ]]; then
     printf 'SELFTEST FAIL teardown no-device-phase must skip hdc kill\n'
     rc=1
@@ -1045,9 +1111,13 @@ else
     CONSOLE=""
     SCREENSHOT=""
   else
-    exec 3>&1
-    exec > >(tee "$TRANSCRIPT") 2>&1
-    TEE_PID=$!
+    # Formal run: create the empty transcript (no-clobber already verified)
+    # and append the whole run to it with O_APPEND. There is no tee process
+    # and no fd 3: the transcript is written directly, so the seal never
+    # waits on a child holding the stream open and always completes in
+    # bounded time.
+    : >"$TRANSCRIPT"
+    exec >>"$TRANSCRIPT" 2>&1
   fi
 fi
 
@@ -1403,8 +1473,8 @@ fi
 # First Emulator/HDC action: from here on the device phase is active and the
 # EXIT-trap teardown performs the full hdc kill / residual port cleanup.
 device_phase_started=1
-"$HDC" kill || true
-HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" || true
+"$HDC" kill >/dev/null 2>&1 </dev/null || true
+HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" >/dev/null 2>&1 </dev/null || true
 if pgrep -f '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" >/dev/null; then
   fail "residual Emulator exists before cold boot"
 fi
@@ -1425,7 +1495,7 @@ DISPLAY="$EMULATOR_DISPLAY" XAUTHORITY="$EMULATOR_XAUTHORITY" XDG_RUNTIME_DIR="$
   "$EMULATOR" -start "$EMULATOR_INSTANCE" \
   -instancePath "$EMULATOR_INSTANCE_PATH" \
   -imageRoot "$EMULATOR_IMAGE_ROOT" \
-  -bootMode coldboot -hdcport "$EMULATOR_HDC_PORT" >"$CONSOLE" 2>&1 &
+  -bootMode coldboot -hdcport "$EMULATOR_HDC_PORT" >"$CONSOLE" 2>&1 </dev/null &
 emulator_pid=$!
 emulator_started=1
 printf 'EMULATOR_PID=%s\n' "$emulator_pid"
@@ -1437,7 +1507,7 @@ printf 'EMULATOR_START_VERDICT=pass\n'
 
 connected=0
 for attempt in $(seq 1 80); do
-  HDC_PORT="$EMULATOR_HDC_PORT" timeout 30 "$CONNECT_HELPER" || true
+  HDC_PORT="$EMULATOR_HDC_PORT" timeout 30 "$CONNECT_HELPER" >/dev/null 2>&1 </dev/null || true
   shell_probe="$(hdc shell "echo n0-emu24-connect-$attempt" 2>&1 || true)"
   distribution="$(hdc shell 'param get const.product.os.dist.name' 2>&1 | tr -d '\r' || true)"
   printf 'CONNECTIVITY attempt=%s shell=%q distribution=%q\n' \
@@ -1484,13 +1554,13 @@ if [[ "$preexisting_bundle" != *'failed to get information'* ]]; then
 fi
 
 # --- 8. install app + test HAPs ---------------------------------------------
-hdc shell "rm -rf '$STAGING'" || fail "guest staging rm failed"
-hdc shell "mkdir -p '$STAGING'" || fail "guest staging mkdir failed"
-timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$app_hap" "$STAGING/entry-default-unsigned.hap" || fail "app HAP file send failed"
-timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$test_hap" "$STAGING/entry-ohosTest-unsigned.hap" || fail "test HAP file send failed"
+hdc shell "rm -rf '$STAGING'" >/dev/null 2>&1 || fail "guest staging rm failed"
+hdc shell "mkdir -p '$STAGING'" >/dev/null 2>&1 || fail "guest staging mkdir failed"
+timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$app_hap" "$STAGING/entry-default-unsigned.hap" </dev/null || fail "app HAP file send failed"
+timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$test_hap" "$STAGING/entry-ohosTest-unsigned.hap" </dev/null || fail "test HAP file send failed"
 install_output=''
 for install_attempt in $(seq 1 30); do
-  install_output="$(timeout 180 "$HDC" -t "$EMULATOR_TARGET" shell "bm install -p '$STAGING'" 2>&1 || true)"
+  install_output="$(timeout 180 "$HDC" -t "$EMULATOR_TARGET" shell "bm install -p '$STAGING'" 2>&1 </dev/null || true)"
   printf 'INSTALL_ATTEMPT=%s OUTPUT=%q\n' "$install_attempt" "$install_output"
   if [[ "$install_output" == *"install bundle successfully"* ]]; then
     installed=1
@@ -1524,12 +1594,12 @@ if [[ "$hilog_buffer_query" != *"16.0M"* && "$hilog_buffer_query" != *"16M"* &&
   fail "HiLog buffer did not report the required 16 MiB capacity"
 fi
 printf 'HILOG_BUFFER_VERDICT=pass\n'
-hdc shell 'hilog -r' || fail "hilog clear failed"
+hdc shell 'hilog -r' >/dev/null 2>&1 || fail "hilog clear failed"
 # aa RC is NOT a gate here: a static-import loader rejection makes the test
 # runner crash (aa RC != 0, no marker). The aa RC check is deferred until
 # after the marker/loader-rejection classification in the judgment section.
 set +e
-aa_output="$(timeout 60 "$HDC" -t "$EMULATOR_TARGET" shell "aa test -b $BUNDLE -m $TEST_MODULE -s unittest $TEST_RUNNER -s timeout 15000" 2>&1)"
+aa_output="$(timeout 60 "$HDC" -t "$EMULATOR_TARGET" shell "aa test -b $BUNDLE -m $TEST_MODULE -s unittest $TEST_RUNNER -s timeout 15000" 2>&1 </dev/null)"
 aa_rc=$?
 set -e
 printf 'AA_TEST_RC=%s\n' "$aa_rc"
@@ -1628,8 +1698,9 @@ fi
 # ANY later fail (screenshot/cleanup/residual/sensitive) can still seal the
 # manifest and transcript via the EXIT trap. Subsequent results are appended
 # below. The transcript hash is intentionally NOT written here: the transcript
-# is still being appended to by tee (and later by teardown output); the final
-# transcript hash is appended by seal_and_finalize after the stream is closed.
+# is still being appended to by the runner's stdout (O_APPEND) and later by
+# teardown output; the final transcript size/hash is appended by
+# seal_and_finalize after the stream is closed.
 ended_at="$(date --iso-8601=seconds)"
 {
   printf '=== N0 Emulator evidence manifest ===\n'
@@ -1675,7 +1746,7 @@ ended_at="$(date --iso-8601=seconds)"
   printf 'app_hilog_sha256=%s\n' "$(sha256sum "$APP_HILOG" | awk '{print $1}')"
   printf 'console_sha256=%s\n' "$(sha256sum "$CONSOLE" | awk '{print $1}')"
   printf 'reviewer=pending-independent-review\n'
-  printf 'manifest_self_hash_semantics=manifest_sha256 is the sha256 of this file up to and including the transcript_final_sha256 line; the manifest_sha256 line itself is appended after hashing and is not part of its own hash\n'
+  printf 'manifest_self_hash_semantics=manifest_sha256 is the sha256 of this file up to and including the transcript_final_sha256 line; the manifest_sha256 line itself is appended after hashing and is not part of its own hash; transcript_final_sha256 is the sha256 of the first transcript_final_bytes bytes of the transcript (recomputed with head -c transcript_final_bytes)\n'
 } >"$MANIFEST"
 printf 'ENDED_AT=%s\n' "$ended_at"
 printf 'RECORD_STATUS=collected\n'
@@ -1686,8 +1757,8 @@ screen_output="$(hdc shell 'uitest screenCap' 2>&1 | tr -d '\r' || true)"
 printf 'SCREEN_OUTPUT=%q\n' "$screen_output"
 remote_screen="$(printf '%s\n' "$screen_output" | sed -n 's/^ScreenCap saved to //p' | tail -1)"
 if [[ -n "$remote_screen" ]]; then
-  if timeout 30 "$HDC" -t "$EMULATOR_TARGET" file recv "$remote_screen" "$SCREENSHOT" && [[ -s "$SCREENSHOT" ]]; then
-    hdc shell "rm -f '$remote_screen'" || true
+  if timeout 30 "$HDC" -t "$EMULATOR_TARGET" file recv "$remote_screen" "$SCREENSHOT" </dev/null && [[ -s "$SCREENSHOT" ]]; then
+    hdc shell "rm -f '$remote_screen'" >/dev/null 2>&1 || true
     run file "$SCREENSHOT"
     run sha256sum "$SCREENSHOT"
     printf 'SCREENSHOT=collected\n'
@@ -1703,14 +1774,14 @@ else
 fi
 
 # --- 14. cleanup -------------------------------------------------------------
-hdc shell "aa force-stop $BUNDLE" || true
-hdc shell "rm -rf '$STAGING'" || true
+hdc shell "aa force-stop $BUNDLE" >/dev/null 2>&1 || true
+hdc shell "rm -rf '$STAGING'" >/dev/null 2>&1 || true
 if (( installed == 1 )); then
-  timeout 120 "$HDC" -t "$EMULATOR_TARGET" uninstall "$BUNDLE" || true
+  timeout 120 "$HDC" -t "$EMULATOR_TARGET" uninstall "$BUNDLE" >/dev/null 2>&1 </dev/null || true
   installed=0
 fi
 if (( emulator_started == 1 )); then
-  HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" || true
+  HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" >/dev/null 2>&1 </dev/null || true
   for _ in $(seq 1 30); do
     if ! pgrep -f '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" >/dev/null; then
       break
@@ -1719,18 +1790,22 @@ if (( emulator_started == 1 )); then
   done
   emulator_started=0
 fi
-"$HDC" kill || true
+"$HDC" kill >/dev/null 2>&1 </dev/null || true
 residual_cleared=0
 for cleanup_attempt in $(seq 1 10); do
-  residual_processes="$(pgrep -af '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE"'|hdc -m -s' || true)"
+  # Emulator processes are matched by their fixed command line; the hdc
+  # daemon is matched by its exact process name (pgrep -ax hdc), never by a
+  # loose pattern.
+  residual_emulator="$(pgrep -af '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" || true)"
+  residual_hdc="$(pgrep -ax hdc || true)"
   residual_ports="$(ss -ltnp | grep -E ":($EMULATOR_HDC_PORT|5555|8710)[[:space:]]" || true)"
-  printf 'FINAL_CLEANUP_ATTEMPT=%s processes=%q ports=%q\n' \
-    "$cleanup_attempt" "$residual_processes" "$residual_ports"
-  if [[ -z "$residual_processes" && -z "$residual_ports" ]]; then
+  printf 'FINAL_CLEANUP_ATTEMPT=%s emulator=%q hdc=%q ports=%q\n' \
+    "$cleanup_attempt" "$residual_emulator" "$residual_hdc" "$residual_ports"
+  if [[ -z "$residual_emulator" && -z "$residual_hdc" && -z "$residual_ports" ]]; then
     residual_cleared=1
     break
   fi
-  "$HDC" kill || true
+  "$HDC" kill >/dev/null 2>&1 </dev/null || true
   sleep 1
 done
 if (( residual_cleared != 1 )); then

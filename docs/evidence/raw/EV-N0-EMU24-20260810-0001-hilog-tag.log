@@ -1,0 +1,6 @@
+===== TAG HILOG N0NativeCoreTest =====
+CST 2026-08-10 00:56:38.945  2786  2786 I A02900/N0NativeCoreTest: TestRunner onPrepare
+CST 2026-08-10 00:56:38.949  2786  2786 I A02900/N0NativeCoreTest: N0_CORE_PROBE_RESULT|verdict=PASS|N0 runProbe PASS version=n0-native-core/0.1.0+boringtun-0.7.1 keyLen=44 tickOp=0 tickSize=0
+===== TAG HILOG N0NativeCore =====
+CST 2026-08-10 00:56:38.944  2786  2786 I A02900/N0NativeCore: N0 overlay module initialized
+CST 2026-08-10 00:56:38.949  2786  2786 I A02900/N0NativeCore: N0_RUNPROBE|version=n0-native-core/0.1.0+boringtun-0.7.1|smokeOk=1|x25519Ok=1|tunnelOk=1|tickOp=0|tickSize=0

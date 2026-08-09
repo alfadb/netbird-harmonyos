@@ -136,7 +136,7 @@ reported as its length (44 chars), never its value.
 ```bash
 bash spikes/n0-native-core/n0-emulator-run.sh --selftest  # pure host checks
 bash spikes/n0-native-core/n0-emulator-run.sh --dry-run   # full pipeline rehearsal, no device, no evidence
-bash spikes/n0-native-core/n0-emulator-run.sh             # formal run (evidence ID EV-N0-EMU24-20260810-0001)
+bash spikes/n0-native-core/n0-emulator-run.sh             # formal run (evidence ID EV-N0-EMU24-20260810-0002)
 ```
 
 Formal run pipeline (all fail-closed):
@@ -192,11 +192,17 @@ Formal run pipeline (all fail-closed):
    and the dual axis; screenshot / cleanup / residual / sensitive results are
    appended; any later fail still seals the manifest and transcript via the
    EXIT trap, and the seal appends `final_exit_code` / `run_status` /
-   `fail_reason` to the manifest so a post-verdict failure is never only in
-   the transcript;
+   `fail_reason` / `transcript_final_bytes` / `transcript_final_sha256` /
+   `manifest_sha256` to the manifest so a post-verdict failure is never only
+   in the transcript. The transcript is appended directly with O_APPEND (no
+   tee process, no fd 3), so the seal never waits on a child holding the
+   stream open and always completes in bounded time;
 7. **cleanup**: main path and EXIT trap both force-stop / uninstall / stop
    the Emulator / `hdc kill`, and record residual process/port state
-   (double cleanup in the formal device phase); before the device phase (a
+   (double cleanup in the formal device phase); the hdc daemon is matched by
+   its exact process name (`pgrep -ax hdc`), never by a loose pattern;
+   daemonizable helper/HDC calls run with `</dev/null` and never depend on
+   the runner's stdout (the transcript); before the device phase (a
    precondition failure) the teardown performs NO hdc kill / residual port
    cleanup — `device_phase_started` is set to 1 at the first Emulator/HDC
    action; `E8_STATUS=CLOSED`, `PHYSICAL_DEVICE_USED=false`.
@@ -225,7 +231,7 @@ Verdict dual-axis (machine-parseable):
   verdict, guest code != 0 on PASS) exits non-zero and is never recorded as
   measured blocked.
 
-Evidence (raw under `docs/evidence/raw/EV-N0-EMU24-20260810-0001-*`):
+Evidence (raw under `docs/evidence/raw/EV-N0-EMU24-20260810-0002-*`):
 `-transcript.log`, `-n0-build.log`, `-snapshot-prep.log`, `-build.log`,
 `-aa-test.log`, `-hilog-tag.log`, `-hilog-app-full.log`,
 `-emulator-console.log`, `-source-manifest.txt`, `-run1.png` (best-effort)
@@ -233,7 +239,9 @@ and `-manifest.txt` (base manifest written immediately after the verdict;
 `manifest_sha256` is the sha256 of the manifest up to and including the
 `transcript_final_sha256` line; the self-hash line itself is appended after
 hashing; the seal also appends `final_exit_code` / `run_status` /
-`fail_reason` before the hashes).
+`fail_reason` / `transcript_final_bytes` before the hashes, and
+`transcript_final_sha256` is the sha256 of the first `transcript_final_bytes`
+bytes of the transcript, recomputed with `head -c N`).
 
 ## Acceptance
 
@@ -255,8 +263,15 @@ hashing; the seal also appends `final_exit_code` / `run_status` /
   result-code extraction, no-marker loader-rejection classification (exact
   rejection → yes; not-found / not-found-with-dlopen / Error relocating
   symbol-not-found / symbol-wrapping / non-libentry / empty / missing file →
-  no), target guards, no-clobber, manifest seal self-hash + `final_exit_code`
-  / `run_status` / `fail_reason`, teardown no-op and teardown no-device-phase
+  no), target guards, no-clobber, manifest seal with a live child holding
+  the transcript fd (seal completes in bounded time, records all six seal
+  fields `final_exit_code` / `run_status` / `fail_reason` /
+  `transcript_final_bytes` / `transcript_final_sha256` / `manifest_sha256`,
+  the transcript hash recomputes from the first `transcript_final_bytes`
+  bytes via `head -c N` even after a simulated post-seal append to the
+  transcript — the whole-file hash must differ while the recorded
+  first-N-bytes hash stays identical — the manifest self-hash recomputes,
+  and no sleep is left behind), teardown no-op and teardown no-device-phase
   (no hdc kill / no residual scan);
 - `bash spikes/n0-native-core/n0-emulator-run.sh --dry-run` exits 0 with no
   device action and no evidence file; a formal run from a dirty tree or with

@@ -1,0 +1,11 @@
+$ bash /home/worker/work/base/netbird-harmonyos/spikes/n0-native-core/prepare-hap-snapshot.sh /tmp/n0-emu24-snapshot.Hpx2OC
+[n0-prep] snapshot staged from pinned commit 2c567dc721c6582f93a15b241e843e3bbff3f7f3 -> /tmp/n0-emu24-snapshot.Hpx2OC
+[n0-prep] ohosTest testrunner: N0 runner calls runN0ProbeTest()
+[n0-prep] entry/oh-package.json5: added libentry.so types dependency
+[n0-prep] entry/oh-package-lock.json5: added libentry.so lock entry
+[n0-prep] entry/build-profile.json5: abiFilters restricted to x86_64 (no arm64 in HAP)
+[n0-prep] staged. Next task (runner) builds the HAP from /tmp/n0-emu24-snapshot.Hpx2OC, e.g.:
+[n0-prep]   cd /tmp/n0-emu24-snapshot.Hpx2OC
+[n0-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n0-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n0-prep]   # expected: /tmp/n0-emu24-snapshot.Hpx2OC/entry/build/default/outputs/default/entry-default-unsigned.hap
