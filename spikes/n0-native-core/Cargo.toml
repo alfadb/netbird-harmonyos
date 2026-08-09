@@ -1,0 +1,24 @@
+# N0 native core — narrow C ABI smoke over BoringTun 0.7.1 ffi-bindings.
+#
+# Scope (docs/n0-native-client-feasibility.md, N0(b)):
+#   - fixed BoringTun 0.7.1, default-features = false, features = ["ffi-bindings"];
+#   - NO `device` feature (socket2 0.4.10 `IovLen` is undefined on OHOS targets;
+#     not patched, per N0 stop condition 1);
+#   - NO management/ICE/relay/UI/VPN/TUN/protect surface;
+#   - arm64 is cross-compile only; no load claim.
+#
+# This crate is a research spike, not a product artifact.
+
+[package]
+name = "n0-native-core"
+version = "0.1.0"
+edition = "2021"
+description = "N0 native core: narrow C ABI smoke over BoringTun 0.7.1 ffi-bindings (OHOS host build spike)"
+license = "MIT"
+
+[lib]
+name = "n0core"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+boringtun = { version = "0.7.1", default-features = false, features = ["ffi-bindings"] }

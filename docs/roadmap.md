@@ -45,6 +45,8 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 
 本文只记录参与厂商和最终共识，不记录讨论过程或模型商业信息。
 
+2026-08-09，第三次路线级 T0（T0+/T0 五席：`anthropic/claude-fable-5`、`openai/gpt-5.6-sol`、`kimi-coding/k3`、`minimax/MiniMax-M3`、`xai/grok-4.5`）经三轮讨论，Round 3 十条决议逐条 `SIGNED`、最终 `ROUND3 FINAL BALLOT: UNANIMOUS-SIGN`，用户批准后形成 **N0 现行研究门**：当前立即且唯一无物理设备门，固定 NetBird v0.76.3 协议/行为/许可清单与 compat oracle，只选一个许可清晰的 native WireGuard core 完成 OHOS x86_64 Emulator 加载与 arm64 交叉构建最小 compile-only 证据（arm64 不声称加载）；不实现 management/ICE/relay/UI，不授权物理设备 HDC，不给工期。完整决议、A-E 处置、双轴验收、停止条件与后续 ADJ 条件见 [N0 原生客户端可行性门](n0-native-client-feasibility.md)。**E8 保持 `CLOSED` 不变**：N0 与物理 E3 都 pass 后须先提交新 ADJ/T0 治理定义 native N1-Nx 门并处理 E8 的 Go 专属前提，治理生效前不得以 native 静默替代 Go E1 或开启产品实现；既有 E 门与历史 ADJ 记录不改写。
+
 ## 动态调整机制
 
 本项目为研究型项目，持续存在不确定性。路线图是基于当前证据的 living plan，不是冻结计划；执行中新证据可以调整尚未开始阶段的范围、顺序、实现路线、退出标准和版本映射。

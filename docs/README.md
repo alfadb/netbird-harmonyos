@@ -80,6 +80,11 @@
   - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
 - [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
   - `f44be17` 准备基线的 Windows 已完成回传；普通开发签名、A/B 独立 profile、已消耗 enrollment 边界、最终 hash 与完成即停止记录
+- [N0 原生客户端可行性门：决议、范围与兼容 Oracle](n0-native-client-feasibility.md)
+  - 2026-08-09 T0+/T0 五席（fable-5、gpt-5.6-sol、kimi-coding/k3、MiniMax-M3、grok-4.5）Round 3 十条 `UNANIMOUS-SIGN`、用户批准的 N0 决议：方向 B「NetBird 行为兼容原生客户端的分阶段可行性验证」、A-E 处置、N0 范围/非范围、双轴验收、停止条件、E8 `CLOSED` 与后续 ADJ 条件、物理 E3 第一动作纪律
+  - 固定 NetBird v0.76.3/f65f7b34 协议/行为/许可矩阵与 compat oracle：management/signal protobuf+gRPC、自定义 relay、NetBird ICE fork/conn state、WireGuard fork、routes/DNS/ACL/state；每项权威源码路径与许可边界（根 BSD-3，management/signal/relay/combined 目录 AGPLv3，法律效果待专业评估）；N0 全部不实现，只有单一 native WG core 的 C ABI
+- [N0 native core host-preflight 记录](evidence/n0-native-core-host-preflight-2026-08-09.md)
+  - `EV-N0-N0HOST-20260809-0001`：host-only 前置记录，`execution: not-run-host-preflight`、`record_status: collected`、`verdict: pass`（严格只表示 host-preflight，不是 N0 pass）；仓库 HEAD `2c567dc`、rustc 1.92.0/cargo 1.92.0/rustup 1.28.2、OHOS clang 15.0.4/SDK 6.1.1.125、BoringTun 0.7.1 crate checksum `15dd6a8a…`、发布包缺 LICENSE 文件注意、ffi-bindings 双 ABI 构建成功（NEEDED 仅 libc.so、14 个 C ABI）、device feature 因 socket2 0.4.10 IovLen blocked 且不 patch/不进入 N0
 - [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
   - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
   - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
