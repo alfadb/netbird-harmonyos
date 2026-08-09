@@ -1,0 +1,324 @@
+RS-E1-GO126ELF-20260809-0001 raw log
+scope: research-only stock Go 1.26.0 c-shared ELF comparison vs 0003 formal Go 1.25.12
+generated: 2026-08-09 (host CLOCK_REALTIME)
+boundaries: no Emulator start/stop, no hdc, no spike source/runner/formal-evidence modification,
+            no E1 pass claim, E8 unchanged; build confined to /tmp
+
+=== 1. metadata ===
+DATE=2026-08-09T18:46:54+08:00
+CWD=/home/worker/work/base/netbird-harmonyos
+REPO_HEAD=d2ff07e537be8f96be5f5940a65edf0874be279d
+SOURCE_COMMIT=34d512541ca8047f8e3796abd6d85ef94cc13559
+SOURCE_COMMIT_NOTE=0003 formal snapshot (runGoProbe HAP probe source snapshot, git archive verified);
+  task-provided hash 34d51252d370e2358535665604554762bdf0e3b6 does NOT exist in this repository
+  (git cat-file: bad object); the 0003 runner constant SNAPSHOT_COMMIT=34d512541ca8047f8e3796abd6d85ef94cc13559
+  is the same frozen snapshot actually used by formal 0003, so it was used here.
+SOURCE_EXTRACT=git archive 34d512541ca8047f8e3796abd6d85ef94cc13559 spikes/r1-api24-hap/go-probe | tar -x -C /tmp/rs-e1-go126-20260809.TyZ91K
+BUILD_DIR=/tmp/rs-e1-go126-20260809.TyZ91K/spikes/r1-api24-hap/go-probe
+OUTPUT_DIR=/tmp/rs-e1-go126-20260809.TyZ91K/out
+
+=== 2. toolchain ===
+GO_BIN=/home/worker/.local/go/bin/go
+GO_VERSION=go version go1.26.0 linux/amd64
+GO_ENV (go env GOOS GOARCH GOAMD64 CGO_ENABLED CC GOTOOLCHAIN GOROOT GOVERSION)=
+linux
+amd64
+v1
+1
+gcc
+auto
+/home/worker/.local/go
+go1.26.0
+HARMONYOS_NATIVE_HOME=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native
+CC_WRAPPER=go-probe/ohos-x86_64-clang -> $HARMONYOS_NATIVE_HOME/llvm/bin/x86_64-unknown-linux-ohos-clang
+GO_TOOLCHAIN_MODE=local
+GO_EXPECTED_VERSION_PREFIX=go version go1.26.0  (overridden from build.sh default go1.25.12; env-var adaptation only, no source change)
+
+=== 3. source files sha256 (extracted from frozen snapshot) ===
+fa882ffc5819ea362d7f2aba9a3de4f5b9ac2c70a27b01089e69e5e9c53e45c9  build.sh
+04ef68dad11bfb12214596e31e64671bb0de19cab1d67d779d286acf6c3e712e  go.mod
+6c81ae1e052479d1189a5293917b3861640a755319f4412a249e7af6567fa6f6  ohos-x86_64-clang
+55dd7bc85b445713998f7af3d3fdd3be425f797353585fa5728a558d73825aac  probe.go
+SOURCE_TREE_AGGREGATE_SHA256=daff7d0ff314df17662033b24d19cbe60e0643eef2b1c17160518d2448fd13a3
+
+=== 4. build command and result ===
+BUILD_COMMAND (replicating 0003 runner env; GO_BIN=Go1.26.0, output in /tmp):
+  env HARMONYOS_NATIVE_HOME=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native \
+      GO_BIN=/home/worker/.local/go/bin/go \
+      GO_PROBE_OUTPUT_DIR=/tmp/rs-e1-go126-20260809.TyZ91K/out \
+      GO_TOOLCHAIN_MODE=local \
+      GO_EXPECTED_VERSION_PREFIX="go version go1.26.0 " \
+      bash /tmp/rs-e1-go126-20260809.TyZ91K/spikes/r1-api24-hap/go-probe/build.sh
+BUILD_OUTPUT=built /tmp/rs-e1-go126-20260809.TyZ91K/out/libgoprobe.so with go version go1.26.0 linux/amd64
+BUILD_RC=0
+BUILD_VERDICT=pass
+(build.sh internal env: GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 GOAMD64=v1 CGO_ENABLED=1
+ CC=$script_dir/ohos-x86_64-clang $GO_BIN -C $script_dir build -trimpath -buildmode=c-shared
+ -o $GO_PROBE_OUTPUT_DIR/libgoprobe.so .)
+
+=== 5. artifact (Go 1.26.0) ===
+ARTIFACT=/tmp/rs-e1-go126-20260809.TyZ91K/out/libgoprobe.so
+ARTIFACT_SHA256=732fd6c6bdeaa8d5622879576f2a8863db962f1c04435bdba8d3881977097c15
+FILE_OUTPUT=/tmp/rs-e1-go126-20260809.TyZ91K/out/libgoprobe.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, Go BuildID=Sh6RjIKbtw81JIU0_X0o/Ejcdu-fY8KHnWkQ_Htco/8JuY3WY1GKDBVTIaUajl/r7GQP8DfOkfZGVKP-j43, BuildID[sha1]=2e2f44591ec7812d904779582407cd97a71ce799, with debug_info, not stripped
+
+=== 6. readelf -lW (program headers; PT_TLS present) ===
+Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 12 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0002a0 0x0002a0 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x118f04 0x118f04 R   0x1000
+  LOAD           0x118f40 0x0000000000119f40 0x0000000000119f40 0x0d3180 0x0d3180 R E 0x1000
+  LOAD           0x1ec0c0 0x00000000001ee0c0 0x00000000001ee0c0 0x03c168 0x03c168 RW  0x1000
+  LOAD           0x228240 0x000000000022b240 0x000000000022b240 0x00aa02 0x040960 RW  0x1000
+  TLS            0x1ec0c0 0x00000000001ed0c0 0x00000000001ed0c0 0x000000 0x000008 R   0x8
+  DYNAMIC        0x227ed0 0x0000000000229ed0 0x0000000000229ed0 0x000180 0x000180 RW  0x8
+  GNU_RELRO      0x1ec0c0 0x00000000001ee0c0 0x00000000001ee0c0 0x03c168 0x03cf40 R   0x1
+  GNU_EH_FRAME   0x118e88 0x0000000000118e88 0x0000000000118e88 0x00001c 0x00001c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0
+  NOTE           0x0002e0 0x00000000000002e0 0x00000000000002e0 0x00001c 0x00001c R   0x8
+  NOTE           0x0002fc 0x00000000000002fc 0x00000000000002fc 0x000088 0x000088 R   0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00     
+   01     .note.ohos.ident .note.go.buildid .note.gnu.build-id .dynsym .gnu.hash .hash .dynstr .rela.dyn .rela.plt .rodata .gopclntab .eh_frame_hdr .eh_frame 
+   02     .text .init .fini .plt 
+   03     .init_array .fini_array .data.rel.ro .dynamic .got .got.plt 
+   04     .data .go.buildinfo .go.fipsinfo .go.module .noptrdata .bss .noptrbss 
+   05     .tbss 
+   06     .dynamic 
+   07     .init_array .fini_array .data.rel.ro .dynamic .got .got.plt 
+   08     .eh_frame_hdr 
+   09     
+   10     .note.ohos.ident 
+   11     .note.go.buildid .note.gnu.build-id 
+PT_TLS_VERIFY=pass (TLS program header present; .tbss segment 05)
+
+=== 7. readelf -dW (STATIC_TLS present) ===
+Dynamic section at offset 0x227ed0 contains 24 entries:
+  Tag        Type                         Name/Value
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000001e (FLAGS)              SYMBOLIC BIND_NOW STATIC_TLS
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW NODELETE
+ 0x0000000000000007 (RELA)               0x1a90
+ 0x0000000000000008 (RELASZ)             244272 (bytes)
+ 0x0000000000000009 (RELAENT)            24 (bytes)
+ 0x000000006ffffff9 (RELACOUNT)          10172
+ 0x0000000000000017 (JMPREL)             0x3d4c0
+ 0x0000000000000002 (PLTRELSZ)           1200 (bytes)
+ 0x0000000000000003 (PLTGOT)             0x22a080
+ 0x0000000000000014 (PLTREL)             RELA
+ 0x0000000000000006 (SYMTAB)             0x388
+ 0x000000000000000b (SYMENT)             24 (bytes)
+ 0x0000000000000005 (STRTAB)             0x1324
+ 0x000000000000000a (STRSZ)              1894 (bytes)
+ 0x000000006ffffef5 (GNU_HASH)           0xdf0
+ 0x0000000000000004 (HASH)               0xfa4
+ 0x0000000000000019 (INIT_ARRAY)         0x1ee0c0
+ 0x000000000000001b (INIT_ARRAYSZ)       16 (bytes)
+ 0x000000000000001a (FINI_ARRAY)         0x1ee0d0
+ 0x000000000000001c (FINI_ARRAYSZ)       16 (bytes)
+ 0x000000000000000c (INIT)               0x1ecd7b
+ 0x000000000000000d (FINI)               0x1ecd7e
+ 0x0000000000000000 (NULL)               0x0
+STATIC_TLS_VERIFY=pass (FLAGS: SYMBOLIC BIND_NOW STATIC_TLS)
+
+=== 8. readelf -rW (TPOFF64 count and full matching lines; res_search/pthread_create) ===
+TPOFF64_COUNT=1
+TPOFF64_LINE=000000000022a078  0000000000000012 R_X86_64_TPOFF64                          0
+RES_SEARCH_RELOC=000000000022a220  0000003300000007 R_X86_64_JUMP_SLOT     0000000000000000 res_search + 0
+PTHREAD_CREATE_RELOC=000000000022a0f0  0000000d00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_create + 0
+RELA_PLT_ENTRIES=50
+RELA_PLT_FULL:
+Relocation section '.rela.plt' at offset 0x3d4c0 contains 50 entries:
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+000000000022a098  0000000100000007 R_X86_64_JUMP_SLOT     0000000000000000 __register_frame_info + 0
+000000000022a0a0  0000000200000007 R_X86_64_JUMP_SLOT     0000000000000000 __at_fini + 0
+000000000022a0a8  0000000300000007 R_X86_64_JUMP_SLOT     0000000000000000 __cxa_finalize + 0
+000000000022a0b0  0000000400000007 R_X86_64_JUMP_SLOT     0000000000000000 __deregister_frame_info + 0
+000000000022a0b8  0000000500000007 R_X86_64_JUMP_SLOT     0000000000000000 clearenv + 0
+000000000022a0c0  0000000700000007 R_X86_64_JUMP_SLOT     0000000000000000 fwrite + 0
+000000000022a0c8  0000000800000007 R_X86_64_JUMP_SLOT     0000000000000000 vfprintf + 0
+000000000022a0d0  0000000900000007 R_X86_64_JUMP_SLOT     0000000000000000 fputc + 0
+000000000022a0d8  0000000a00000007 R_X86_64_JUMP_SLOT     0000000000000000 abort + 0
+000000000022a0e0  0000000b00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_init + 0
+000000000022a0e8  0000000c00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_setdetachstate + 0
+000000000022a0f0  0000000d00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_create + 0
+000000000022a0f8  0000000e00000007 R_X86_64_JUMP_SLOT     0000000000000000 nanosleep + 0
+000000000022a100  0000000f00000007 R_X86_64_JUMP_SLOT     0000000000000000 strerror + 0
+000000000022a108  0000001000000007 R_X86_64_JUMP_SLOT     0000000000000000 fprintf + 0
+000000000022a110  0000001100000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_mutex_lock + 0
+000000000022a118  0000001200000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_cond_wait + 0
+000000000022a120  0000001300000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_key_create + 0
+000000000022a128  0000001400000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_mutex_unlock + 0
+000000000022a130  0000001500000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_setspecific + 0
+000000000022a138  0000001600000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_cond_broadcast + 0
+000000000022a140  0000001700000007 R_X86_64_JUMP_SLOT     0000000000000000 malloc + 0
+000000000022a148  0000001800000007 R_X86_64_JUMP_SLOT     0000000000000000 free + 0
+000000000022a150  0000001900000007 R_X86_64_JUMP_SLOT     0000000000000000 __errno_location + 0
+000000000022a158  0000001a00000007 R_X86_64_JUMP_SLOT     0000000000000000 sigfillset + 0
+000000000022a160  0000001b00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_sigmask + 0
+000000000022a168  0000001c00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_getstacksize + 0
+000000000022a170  0000001d00000007 R_X86_64_JUMP_SLOT     0000000000000000 mmap + 0
+000000000022a178  0000001e00000007 R_X86_64_JUMP_SLOT     0000000000000000 munmap + 0
+000000000022a180  0000001f00000007 R_X86_64_JUMP_SLOT     0000000000000000 setenv + 0
+000000000022a188  0000002000000007 R_X86_64_JUMP_SLOT     0000000000000000 unsetenv + 0
+000000000022a190  0000002100000007 R_X86_64_JUMP_SLOT     0000000000000000 sigemptyset + 0
+000000000022a198  0000002200000007 R_X86_64_JUMP_SLOT     0000000000000000 sigaddset + 0
+000000000022a1a0  0000002300000007 R_X86_64_JUMP_SLOT     0000000000000000 sigaction + 0
+000000000022a1a8  0000002400000007 R_X86_64_JUMP_SLOT     0000000000000000 sigismember + 0
+000000000022a1b0  0000002500000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_destroy + 0
+000000000022a1b8  0000002600000007 R_X86_64_JUMP_SLOT     0000000000000000 setegid + 0
+000000000022a1c0  0000002700000007 R_X86_64_JUMP_SLOT     0000000000000000 seteuid + 0
+000000000022a1c8  0000002800000007 R_X86_64_JUMP_SLOT     0000000000000000 setgid + 0
+000000000022a1d0  0000002900000007 R_X86_64_JUMP_SLOT     0000000000000000 setgroups + 0
+000000000022a1d8  0000002a00000007 R_X86_64_JUMP_SLOT     0000000000000000 setregid + 0
+000000000022a1e0  0000002b00000007 R_X86_64_JUMP_SLOT     0000000000000000 setresgid + 0
+000000000022a1e8  0000002c00000007 R_X86_64_JUMP_SLOT     0000000000000000 setresuid + 0
+000000000022a1f0  0000002d00000007 R_X86_64_JUMP_SLOT     0000000000000000 setreuid + 0
+000000000022a1f8  0000002e00000007 R_X86_64_JUMP_SLOT     0000000000000000 setuid + 0
+000000000022a200  0000002f00000007 R_X86_64_JUMP_SLOT     0000000000000000 getnameinfo + 0
+000000000022a208  0000003000000007 R_X86_64_JUMP_SLOT     0000000000000000 getaddrinfo + 0
+000000000022a210  0000003100000007 R_X86_64_JUMP_SLOT     0000000000000000 freeaddrinfo + 0
+000000000022a218  0000003200000007 R_X86_64_JUMP_SLOT     0000000000000000 gai_strerror + 0
+000000000022a220  0000003300000007 R_X86_64_JUMP_SLOT     0000000000000000 res_search + 0
+
+=== 9. readelf -sW (Go exported symbols and key libc symbols) ===
+GO_EXPORTED (GLOBAL DEFAULT FUNC):
+    68: 00000000001ec050    84 FUNC    GLOBAL DEFAULT   14 NetDialProbe
+    72: 00000000001ec000    78 FUNC    GLOBAL DEFAULT   14 RuntimeProbe
+    84: 00000000001ebfc0    64 FUNC    GLOBAL DEFAULT   14 Hello
+    52: 00000000001ebee0    59 FUNC    GLOBAL DEFAULT   14 _cgoexp_24769533286e_RuntimeProbe
+    94: 00000000001ebf20    68 FUNC    GLOBAL DEFAULT   14 _cgoexp_24769533286e_NetDialProbe
+   106: 00000000001ebec0     7 FUNC    GLOBAL DEFAULT   14 _cgoexp_24769533286e_Hello
+EXPORT_VERIFY=pass (Hello/RuntimeProbe/NetDialProbe present)
+RES_SEARCH_SYMTAB:
+    51: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND res_search
+    70: 00000000001ecd20    56 FUNC    GLOBAL DEFAULT   14 _cgo_77133bf98b3a_Cfunc_res_search
+PTHREAD_CREATE_SYMTAB:
+    13: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_create
+    96: 00000000001ec2a0   115 FUNC    GLOBAL DEFAULT   14 _cgo_try_pthread_create
+
+=== 10. 0003 formal Go 1.25.12 comparison baseline (read-only recheck of local artifact) ===
+0003_ARTIFACT=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+0003_ARTIFACT_SHA256=64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3
+0003_ARTIFACT_SHA_MATCHES_FORMAL_RECORD=yes (0003 record artifact_sha256.libgoprobe.so identical)
+0003_FILE_OUTPUT=ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, Go BuildID=sPHadNzItVcWqoVo81Ly/BxDGo9HuLk4KPCVmZkTm/dEio-Z044XACcC8X-V8n/v0l5brp0-szEqhDaz1Cz, BuildID[sha1]=8193c9e5f90d41e671907e1b2d7767aee28ca6d0, with debug_info, not stripped
+0003_PT_TLS=present (TLS 0x132480 0x0000000000133480 0x0000000000133480 0x000000 0x000008 R 0x8)
+0003_STATIC_TLS=present (FLAGS: SYMBOLIC BIND_NOW STATIC_TLS)
+0003_TPOFF64_COUNT=1
+0003_TPOFF64_LINE=00000000002096d8  0000000000000012 R_X86_64_TPOFF64                          0
+0003_RES_SEARCH_RELOC=0000000000209878  0000003200000007 R_X86_64_JUMP_SLOT     0000000000000000 res_search + 0
+0003_PTHREAD_CREATE_RELOC=0000000000209748  0000000c00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_create + 0
+0003_RELA_PLT_ENTRIES=49
+0003_EXPORT_VERIFY=pass (Hello/RuntimeProbe/NetDialProbe present)
+0003_TRANSCRIPT_NOTE=formal 0003 transcript contains only verification pass lines (GO_SO_PT_TLS_VERIFY=pass,
+  GO_SO_STATIC_TLS_VERIFY=pass, GO_SO_TPOFF64_VERIFY=pass, GO_SO_EXPORT_VERIFY=pass) and the TLS program-header
+  row plus FLAGS row; it does NOT contain a full readelf -rW dump. The TPOFF64/res_search lines above are a
+  read-only recheck of the local 0003 artifact whose sha256 exactly matches the formal record.
+TASK_PROVIDED_HASH_NOTE=task brief cited 0003 artifact sha 64e0872b8b19d2918310560a18c0c64c078e58cfc3e1f0cbdc75215b7a6cd529;
+  this does NOT match the 0003 formal record (64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3).
+  Per brief rule, the formal transcript value is authoritative; the task-provided hash is not used as a formal fact.
+TASK_RES_SEARCH_NOTE=task brief described the 0003 fact as "exact res_search TPOFF64 line"; the read-only recheck
+  shows res_search is a R_X86_64_JUMP_SLOT relocation (not TPOFF64) in the 0003 artifact, and the single
+  R_X86_64_TPOFF64 relocation is an unnamed symbol-index-0 relocation. Recorded as measured, not as briefed.
+
+=== 11. comparison result (Go 1.26.0 research vs Go 1.25.12 formal 0003) ===
+ARTIFACT_SHA256: changed (732fd6c6... vs 64e0872b...; expected, different Go versions)
+FILE_BUILDID: changed (expected)
+PT_TLS: same (present in both)
+STATIC_TLS: same (present in both)
+NEEDED: same (libc.so)
+FLAGS_1: same (NOW NODELETE)
+TPOFF64_COUNT: same (1 in both)
+TPOFF64_LINE: same structure (unnamed symbol-index-0 R_X86_64_TPOFF64; offset differs 0x2096d8 vs 0x22a078)
+RES_SEARCH_RELOC_TYPE: same (R_X86_64_JUMP_SLOT in both; symbol index 0x32 vs 0x33, offset differs)
+PTHREAD_CREATE_RELOC_TYPE: same (R_X86_64_JUMP_SLOT in both)
+RELA_PLT_ENTRIES: 49 vs 50 (Go 1.26.0 adds clearenv)
+GO_EXPORTED_SYMBOLS: same (Hello/RuntimeProbe/NetDialProbe present in both)
+OVERALL: ELF structural facts same; artifact bytes changed (expected)
+RESEARCH_ONLY_NOTE=this is a host-only research comparison; no Emulator, no hdc, no guest loader run;
+  it does NOT constitute E1 pass and does not change E8 (E8 remains CLOSED)
+
+=== 12. post-run cleanup verification ===
+POST_RUN_CHECK_TIME=2026-08-09T18:52:13+08:00
+POST_RUN_CHECK_COMMAND=date --iso-8601=seconds; test -e /tmp/rs-e1-go126-20260809.TyZ91K
+POST_RUN_CHECK_RESULT=absent (expected; directory does not exist)
+POST_RUN_CHECK_NOTE=this section is a post-run re-check performed after the main run finished, NOT
+  part of the original run's immediate output; it independently confirms the /tmp build directory
+  was fully cleaned up with no residue.
+
+=== 13. post-run M1 remediation: full 0003 .rela.plt diff ===
+M1_REMEDIATION_NOTE=this section is a post-run review remediation appended during M1 final review, NOT
+  part of the original run's immediate output; it records the complete 0003 Go 1.25.12 .rela.plt
+  (49 entries) and the set/order diff vs the Go 1.26.0 .rela.plt (50 entries) captured in section 8,
+  to substantiate the section 11 attribution "Go 1.26.0 adds clearenv".
+M1_REMEDIATION_TIME=2026-08-09T18:59:11+08:00
+M1_REMEDIATION_ARTIFACT=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+M1_REMEDIATION_ARTIFACT_SHA256=64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3
+M1_REMEDIATION_SHA_MATCH=yes (exactly equals formal 0003 record; remediation proceeded)
+M1_REMEDIATION_COMMAND_1=readelf -rW spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so | awk '/Relocation section .\.rela\.plt./{p=1; next} p && /^$/{p=0} p && NF>=5 && $3=="R_X86_64_JUMP_SLOT" {print $5}' > go125.syms
+M1_REMEDIATION_COMMAND_2=awk '/^RELA_PLT_FULL:/{p=1; next} p && /^$/{p=0} p && $3=="R_X86_64_JUMP_SLOT" {print $5}' docs/evidence/raw/RS-E1-GO126ELF-20260809-0001.log > go126.syms
+M1_REMEDIATION_COMMAND_3=comm -23 <(sort go126.syms) <(sort go125.syms)   # only-in-Go1.26
+M1_REMEDIATION_COMMAND_4=comm -13 <(sort go126.syms) <(sort go125.syms)   # only-in-Go1.25
+M1_REMEDIATION_COMMAND_5=diff <(grep -v '^clearenv$' go126.syms) go125.syms   # relative order of common 49
+0003_RELA_PLT_ENTRIES=49
+0003_RELA_PLT_FULL (readelf -rW, complete; Go 1.25.12):
+Relocation section '.rela.plt' at offset 0x3a148 contains 49 entries:
+    Offset             Info             Type               Symbol's Value  Symbol's Name + Addend
+00000000002096f8  0000000100000007 R_X86_64_JUMP_SLOT     0000000000000000 __register_frame_info + 0
+0000000000209700  0000000200000007 R_X86_64_JUMP_SLOT     0000000000000000 __at_fini + 0
+0000000000209708  0000000300000007 R_X86_64_JUMP_SLOT     0000000000000000 __cxa_finalize + 0
+0000000000209710  0000000400000007 R_X86_64_JUMP_SLOT     0000000000000000 __deregister_frame_info + 0
+0000000000209718  0000000600000007 R_X86_64_JUMP_SLOT     0000000000000000 fwrite + 0
+0000000000209720  0000000700000007 R_X86_64_JUMP_SLOT     0000000000000000 vfprintf + 0
+0000000000209728  0000000800000007 R_X86_64_JUMP_SLOT     0000000000000000 fputc + 0
+0000000000209730  0000000900000007 R_X86_64_JUMP_SLOT     0000000000000000 abort + 0
+0000000000209738  0000000a00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_init + 0
+0000000000209740  0000000b00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_setdetachstate + 0
+0000000000209748  0000000c00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_create + 0
+0000000000209750  0000000d00000007 R_X86_64_JUMP_SLOT     0000000000000000 nanosleep + 0
+0000000000209758  0000000e00000007 R_X86_64_JUMP_SLOT     0000000000000000 strerror + 0
+0000000000209760  0000000f00000007 R_X86_64_JUMP_SLOT     0000000000000000 fprintf + 0
+0000000000209768  0000001000000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_mutex_lock + 0
+0000000000209770  0000001100000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_cond_wait + 0
+0000000000209778  0000001200000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_key_create + 0
+0000000000209780  0000001300000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_mutex_unlock + 0
+0000000000209788  0000001400000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_setspecific + 0
+0000000000209790  0000001500000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_cond_broadcast + 0
+0000000000209798  0000001600000007 R_X86_64_JUMP_SLOT     0000000000000000 malloc + 0
+00000000002097a0  0000001700000007 R_X86_64_JUMP_SLOT     0000000000000000 free + 0
+00000000002097a8  0000001800000007 R_X86_64_JUMP_SLOT     0000000000000000 __errno_location + 0
+00000000002097b0  0000001900000007 R_X86_64_JUMP_SLOT     0000000000000000 sigfillset + 0
+00000000002097b8  0000001a00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_sigmask + 0
+00000000002097c0  0000001b00000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_getstacksize + 0
+00000000002097c8  0000001c00000007 R_X86_64_JUMP_SLOT     0000000000000000 mmap + 0
+00000000002097d0  0000001d00000007 R_X86_64_JUMP_SLOT     0000000000000000 munmap + 0
+00000000002097d8  0000001e00000007 R_X86_64_JUMP_SLOT     0000000000000000 setenv + 0
+00000000002097e0  0000001f00000007 R_X86_64_JUMP_SLOT     0000000000000000 unsetenv + 0
+00000000002097e8  0000002000000007 R_X86_64_JUMP_SLOT     0000000000000000 sigemptyset + 0
+00000000002097f0  0000002100000007 R_X86_64_JUMP_SLOT     0000000000000000 sigaddset + 0
+00000000002097f8  0000002200000007 R_X86_64_JUMP_SLOT     0000000000000000 sigaction + 0
+0000000000209800  0000002300000007 R_X86_64_JUMP_SLOT     0000000000000000 sigismember + 0
+0000000000209808  0000002400000007 R_X86_64_JUMP_SLOT     0000000000000000 pthread_attr_destroy + 0
+0000000000209810  0000002500000007 R_X86_64_JUMP_SLOT     0000000000000000 setegid + 0
+0000000000209818  0000002600000007 R_X86_64_JUMP_SLOT     0000000000000000 seteuid + 0
+0000000000209820  0000002700000007 R_X86_64_JUMP_SLOT     0000000000000000 setgid + 0
+0000000000209828  0000002800000007 R_X86_64_JUMP_SLOT     0000000000000000 setgroups + 0
+0000000000209830  0000002900000007 R_X86_64_JUMP_SLOT     0000000000000000 setregid + 0
+0000000000209838  0000002a00000007 R_X86_64_JUMP_SLOT     0000000000000000 setresgid + 0
+0000000000209840  0000002b00000007 R_X86_64_JUMP_SLOT     0000000000000000 setresuid + 0
+0000000000209848  0000002c00000007 R_X86_64_JUMP_SLOT     0000000000000000 setreuid + 0
+0000000000209850  0000002d00000007 R_X86_64_JUMP_SLOT     0000000000000000 setuid + 0
+0000000000209858  0000002e00000007 R_X86_64_JUMP_SLOT     0000000000000000 getnameinfo + 0
+0000000000209860  0000002f00000007 R_X86_64_JUMP_SLOT     0000000000000000 getaddrinfo + 0
+0000000000209868  0000003000000007 R_X86_64_JUMP_SLOT     0000000000000000 freeaddrinfo + 0
+0000000000209870  0000003100000007 R_X86_64_JUMP_SLOT     0000000000000000 gai_strerror + 0
+0000000000209878  0000003200000007 R_X86_64_JUMP_SLOT     0000000000000000 res_search + 0
+SET_DIFF_ONLY_IN_GO126=clearenv
+SET_DIFF_ONLY_IN_GO125=(empty)
+ORDER_DIFF_COMMON_49=identical relative order (clearenv inserted at position 5, after __deregister_frame_info, before fwrite)
+M1_REMEDIATION_VERDICT=diff exactly matches section 11 attribution "Go 1.26.0 adds clearenv"; attribution retained and now substantiated by the full 49-entry dump plus set/order diff
