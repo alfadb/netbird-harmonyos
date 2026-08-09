@@ -45,6 +45,7 @@ struct Index {
   @StorageLink('operationDetail') operationDetail: string = 'No request';
   @State private operationPending: boolean = false;
   @State private activeRequestId: string = '';
+  private lastRequestId: string = '';
   private requestSequence: number = 0;
   private startGeneration: number = 0;
   private pendingReleaseTimer: number = -1;
@@ -115,6 +116,9 @@ struct Index {
     this.startGeneration++;
     const generation: number = this.startGeneration;
     this.activeRequestId = requestId;
+    // A new Start overwrites the last-known request id so a later Stop always targets the
+    // most recent request; the bounded pending release never clears this field.
+    this.lastRequestId = requestId;
     this.operationPending = true;
     this.operationStatus = 'Start pending';
     this.operationDetail = requestId;
@@ -130,8 +134,10 @@ struct Index {
       }
       this.clearPendingRelease();
       this.operationPending = false;
-      this.operationStatus = 'Start resolved';
-      this.operationDetail = requestId;
+      // Accurate copy: the start request/ability settled, but VPN create is still governed by
+      // the Extension lifecycle events, so this never implies an active VPN.
+      this.operationStatus = 'Start request resolved';
+      this.operationDetail = `${requestId} | VPN create follows extension events`;
       hilog.info(DOMAIN, TAG,
         'START_PROMISE_RESOLVED|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
     }).catch((error: Error) => {
@@ -145,6 +151,10 @@ struct Index {
       this.clearPendingRelease();
       if (this.activeRequestId === requestId) {
         this.activeRequestId = '';
+      }
+      // A terminal start rejection leaves no session to stop; clean the last-known id as well.
+      if (this.lastRequestId === requestId) {
+        this.lastRequestId = '';
       }
       this.operationPending = false;
       this.operationStatus = 'Start rejected';
@@ -186,23 +196,31 @@ struct Index {
         'UI_STOP_SKIPPED|bundle=%{public}s|reason=operation-pending', this.bundleName);
       return;
     }
-    if (this.activeRequestId.length === 0) {
+    if (this.activeRequestId.length === 0 && this.lastRequestId.length === 0) {
       this.operationStatus = 'Stop skipped';
-      this.operationDetail = 'No active request';
+      this.operationDetail = 'No active or last-known request';
       hilog.info(DOMAIN, TAG,
         'UI_STOP_SKIPPED|bundle=%{public}s|reason=no-active-request', this.bundleName);
       return;
     }
 
-    const requestId: string = this.activeRequestId;
+    // Stop prefers the active request; when the bounded pending release already cleared it
+    // (e.g. the first S3 Stop after a long gap), fall back to the last-known request id so the
+    // first Stop is not skipped and no manual second Start is needed.
+    const requestId: string = this.activeRequestId.length > 0 ? this.activeRequestId : this.lastRequestId;
+    const basis: string = this.activeRequestId.length > 0 ? 'active-request' : 'last-known-request';
     this.operationPending = true;
     this.operationStatus = 'Stop pending';
     this.operationDetail = requestId;
-    hilog.info(DOMAIN, TAG, 'UI_STOP|bundle=%{public}s|requestId=%{public}s', this.bundleName, requestId);
+    hilog.info(DOMAIN, TAG, 'UI_STOP|bundle=%{public}s|requestId=%{public}s|basis=%{public}s',
+      this.bundleName, requestId, basis);
 
     vpnExtension.stopVpnExtensionAbility(this.want(requestId)).then(() => {
       if (this.activeRequestId === requestId) {
         this.activeRequestId = '';
+      }
+      if (this.lastRequestId === requestId) {
+        this.lastRequestId = '';
       }
       this.operationPending = false;
       this.operationStatus = 'Stop resolved';
@@ -218,6 +236,16 @@ struct Index {
         this.operationDetail = 'Extension no longer exists; Start is available';
         hilog.info(DOMAIN, TAG,
           'STOP_SESSION_RELEASED|bundle=%{public}s|requestId=%{public}s|reason=ability-not-found',
+          this.bundleName, requestId);
+      } else if (code === 16000001) {
+        // Terminal rejection on the last-known request: the session no longer exists.
+        if (this.lastRequestId === requestId) {
+          this.lastRequestId = '';
+        }
+        this.operationStatus = 'External teardown reconciled';
+        this.operationDetail = 'Extension no longer exists; Start is available';
+        hilog.info(DOMAIN, TAG,
+          'STOP_SESSION_RELEASED_LAST_KNOWN|bundle=%{public}s|requestId=%{public}s|reason=ability-not-found',
           this.bundleName, requestId);
       } else {
         this.operationStatus = 'Stop rejected';

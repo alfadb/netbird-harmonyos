@@ -47,6 +47,7 @@ $script:PartialScenarios = @()
 $script:CaptureDegraded = [Collections.Generic.List[object]]::new()
 $script:ObservationOnlyDegraded = [Collections.Generic.List[object]]::new()
 $script:CaptureArtifacts = [Collections.Generic.List[object]]::new()
+$script:SimulationLayoutFirstAttempt = [Collections.Generic.Dictionary[string, DateTimeOffset]]::new()
 $script:RawHilogArtifacts = [Collections.Generic.List[object]]::new()
 $script:FaultArtifacts = [Collections.Generic.List[object]]::new()
 $script:CleanupActions = [Collections.Generic.List[object]]::new()
@@ -62,8 +63,22 @@ $script:SimulationInstalledA = $false
 $script:SimulationInstalledB = $false
 $script:SimulationStagingPresent = $false
 $script:PriorBlockedBinding = $null
+$script:Freeze = $null
 $script:ProbeContexts = @{}
 $script:CurrentWindowEnd = $null
+$script:OperatorWaitHistory = [Collections.Generic.List[object]]::new()
+$script:OperatorActions = [Collections.Generic.List[object]]::new()
+$script:OperatorWaitCurrent = $null
+$script:ScenarioInvalid = $null
+$script:VerifiedRequests = @{}
+# ADJ-20260808-0003: cross-step / cross-scenario operator action guard checkpoint. Any
+# UI_START / UI_STOP / UI_STOP_SKIPPED event observed after the last verified point but not
+# owned by the current mechanical step makes the scenario invalid immediately, before the
+# next prompt. Auto StartEntry ENTRY events are not UI actions and never trigger the guard.
+$script:OperatorActionGuardFrom = $null
+$script:LastCaptureInfrastructure = $false
+$script:SimulationActiveBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:SimulationScenarioStepsWritten = @{}
 
 function Get-TextSha256 {
     param([Parameter(Mandatory)][string]$Text)
@@ -90,6 +105,10 @@ function Test-IsUnderPath {
 function Get-OptionalProperty {
     param($Object, [Parameter(Mandatory)][string]$Name, $Default = $null)
     if ($null -eq $Object) { return $Default }
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $Default
+    }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $Default }
     return $property.Value
@@ -228,6 +247,77 @@ function Write-JsonFile {
     [IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 }
 
+function Write-OperatorWaitState {
+    param(
+        [Parameter(Mandatory)][ValidateSet('waiting', 'operator-complete', 'verifying', 'captured', 'invalid', 'complete')][string]$Phase,
+        [AllowNull()][int]$Scenario = $null,
+        [AllowNull()][int]$StepIndex = $null,
+        [AllowNull()][string]$StepId = $null,
+        [AllowNull()][string]$ExpectedAction = $null,
+        [AllowNull()]$CaptureBefore = $null,
+        [AllowNull()]$CaptureAfter = $null,
+        [AllowNull()]$MachinePrecondition = $null,
+        [AllowNull()]$MachinePostcondition = $null
+    )
+    if ($null -eq $script:EvidencePath) { return }
+    $updatedAt = (Get-Now).ToString('o')
+    $current = [ordered]@{
+        scenario = $Scenario
+        step_index = $StepIndex
+        step_id = $StepId
+        expected_action = $ExpectedAction
+        phase = $Phase
+        capture_before = $(if ($null -eq $CaptureBefore) { [ordered]@{ status = 'not-required' } } else { $CaptureBefore })
+        capture_after = $(if ($null -eq $CaptureAfter) { [ordered]@{ status = 'not-required' } } else { $CaptureAfter })
+        machine_precondition = $(if ($null -eq $MachinePrecondition) { [ordered]@{ status = 'not-evaluated' } } else { $MachinePrecondition })
+        machine_postcondition = $(if ($null -eq $MachinePostcondition) { [ordered]@{ status = 'not-evaluated' } } else { $MachinePostcondition })
+        updated_at = $updatedAt
+    }
+    $script:OperatorWaitCurrent = $current
+    $script:OperatorWaitHistory.Add($current)
+    $payload = [ordered]@{
+        schema_version = 2
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $(if ($null -ne $script:Freeze) { [string]$script:Freeze.campaign_id } else { $null })
+        evidence_id = $(if ($null -ne $script:Freeze) { [string]$script:Freeze.evidence_id } else { $null })
+        execution_mode = $script:ExecutionMode
+        trust_model = 'mechanical-action-only-machine-verified-v1'
+        scenario = $current.scenario
+        step_index = $current.step_index
+        step_id = $current.step_id
+        expected_action = $current.expected_action
+        phase = $current.phase
+        capture_before = $current.capture_before
+        capture_after = $current.capture_after
+        machine_precondition = $current.machine_precondition
+        machine_postcondition = $current.machine_postcondition
+        updated_at = $current.updated_at
+        complete = ($Phase -eq 'complete')
+        completed_at = $(if ($Phase -eq 'complete') { $updatedAt } else { $null })
+        history = @($script:OperatorWaitHistory)
+    }
+    Write-JsonFile (Join-Path $script:EvidencePath 'operator-wait-state.json') $payload
+}
+
+function Throw-ScenarioInvalid {
+    param(
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][string]$Reason,
+        [AllowNull()][int]$StepIndex = $null,
+        [AllowNull()][string]$StepId = $null,
+        [AllowNull()][string]$ExpectedAction = $null,
+        [AllowNull()]$MachinePrecondition = $null,
+        [AllowNull()]$MachinePostcondition = $null,
+        [AllowNull()]$CaptureBefore = $null,
+        [AllowNull()]$CaptureAfter = $null
+    )
+    $safeReason = Protect-SensitiveText $Reason
+    $script:ScenarioInvalid = [ordered]@{ scenario = $Scenario; step_index = $StepIndex; step_id = $StepId; reason = $safeReason; detected_at = (Get-Now).ToString('o') }
+    Write-OperatorWaitState 'invalid' -Scenario $Scenario -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -CaptureAfter $CaptureAfter -MachinePrecondition $MachinePrecondition -MachinePostcondition $(if ($null -eq $MachinePostcondition) { [ordered]@{ status = 'invalid'; reason = $safeReason } } else { $MachinePostcondition })
+    Add-TranscriptRecord 'scenario-invalid' $script:ScenarioInvalid
+    throw "SCENARIO_INVALID scenario=$Scenario reason=$safeReason"
+}
+
 function Get-GitRepositoryRoot {
     $rootText = (& git -C $PSScriptRoot rev-parse --show-toplevel 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($rootText)) { throw 'unable to resolve repository root with git rev-parse' }
@@ -337,6 +427,11 @@ function Get-FreezeContract {
         destroy_terminal_policy = $Freeze.destroy_terminal_policy
         process_absent_required_count = $Freeze.process_absent_required_count
         process_absent_probe_spacing_seconds = $Freeze.process_absent_probe_spacing_seconds
+        process_probe_target = $Freeze.process_probe_target
+        operator_trust_model = $Freeze.operator_trust_model
+        scenario_invalid_policy = $Freeze.scenario_invalid_policy
+        layout_verification_profile = $Freeze.layout_verification_profile
+        vpn_conflict_rejection_codes = $Freeze.vpn_conflict_rejection_codes
         signing = $Freeze.signing
         artifact_sha256 = $Freeze.artifact_sha256
         source = $Freeze.source
@@ -360,7 +455,7 @@ function Get-FreezeContractSha256 {
 
 function Assert-FreezeManifest {
     param([Parameter(Mandatory)]$Freeze, [Parameter(Mandatory)][string]$FreezePath)
-    if ((Get-RequiredProperty $Freeze 'schema_version') -ne 1) { throw 'unsupported freeze schema_version' }
+    if ((Get-RequiredProperty $Freeze 'schema_version') -ne 2) { throw 'unsupported freeze schema_version; strong operator state machine requires schema_version 2' }
     $planStatus = [string](Get-RequiredProperty $Freeze 'plan_status')
     if ($DryRun) {
         if ($planStatus -notin @('blocked', 'ready')) { throw 'DryRun plan_status must be blocked or ready' }
@@ -446,6 +541,24 @@ function Assert-FreezeManifest {
     }
     if ([double](Get-RequiredProperty $Freeze 'process_absent_probe_spacing_seconds') -ne 3) {
         throw 'process_absent_probe_spacing_seconds must be 3 seconds'
+    }
+    # ADJ-20260808-0001 decision field: pidof targets the <bundle>:vpn Extension ability process,
+    # never the bundle UI process. Old freezes without this field are rejected for every mode.
+    if ([string](Get-RequiredProperty $Freeze 'process_probe_target') -ne '<bundle>:vpn') {
+        throw 'process_probe_target must be <bundle>:vpn (ADJ-20260808-0001 extension-process probe target)'
+    }
+    if ([string](Get-RequiredProperty $Freeze 'operator_trust_model') -ne 'mechanical-action-only-machine-verified-v1') {
+        throw 'operator_trust_model must be mechanical-action-only-machine-verified-v1'
+    }
+    if ([string](Get-RequiredProperty $Freeze 'scenario_invalid_policy') -ne 'stop-and-finally-cleanup-seal') {
+        throw 'scenario_invalid_policy must be stop-and-finally-cleanup-seal'
+    }
+    if ([string](Get-RequiredProperty $Freeze 'layout_verification_profile') -ne 'deterministic-layout-v1') {
+        throw 'layout_verification_profile must be deterministic-layout-v1'
+    }
+    $conflictCodes = @((Get-RequiredProperty $Freeze 'vpn_conflict_rejection_codes') | ForEach-Object { [int]$_ })
+    if ($conflictCodes.Count -lt 1 -or ($conflictCodes -join ',') -ne '2203002') {
+        throw 'vpn_conflict_rejection_codes must freeze the explicit supported list [2203002]'
     }
     $signing = Get-RequiredProperty $Freeze 'signing'
     if ([string](Get-RequiredProperty $signing 'type') -ne 'ordinary-development') { throw 'signing type must be ordinary-development' }
@@ -603,7 +716,13 @@ function Get-HdcInvocation {
         'TupleModel' { return $common + @('shell', 'param', 'get', 'const.product.model') }
         'TupleBuild' { return $common + @('shell', 'param', 'get', 'const.product.software.version') }
         'BundleDump' { return $common + @('shell', 'bm', 'dump', '-n', $bundle) }
-        'PidOf' { return $common + @('shell', 'pidof', $bundle) }
+        # ADJ-20260808-0001: pidof targets the <bundle>:vpn Extension ability process, never the
+        # bundle UI process. Under a normal Stop with the app UI still visible, bundle-level pidof is
+        # physically unsatisfiable (the Entry UI process keeps running), so the strict process-boundary
+        # fallback probes the Extension process that actually terminates on stop. BundleDump still
+        # proves the bundle/main App remains installed. Directed exact-name pidof only; no broad
+        # process list. The freeze field process_probe_target ('<bundle>:vpn') freezes this semantics.
+        'PidOf' { return $common + @('shell', 'pidof', "${bundle}:vpn") }
         'MkdirStaging' { return $common + @('shell', 'mkdir', '-p', "$($script:Staging)/a", "$($script:Staging)/b", "$($script:Staging)/capture") }
         'RemoveStaging' { return $common + @('shell', 'rm', '-rf', $script:Staging) }
         'StagingProbe' { return $common + @('shell', 'ls', '-ld', $script:Staging) }
@@ -644,6 +763,118 @@ function Get-LiveHdcArguments {
     return [string[]]$liveArguments
 }
 
+function New-SimulatedUiNode {
+    param([hashtable]$Attributes, [object[]]$Children = @())
+    # ADJ-20260808-0003 (C6): real layout facts are a top-level array; every node is
+    # { attributes: { bundleName, type, id, key, text, ... }, children: [...] }. Build one such
+    # node for the simulated (and future direct-field tolerant) layout fixture.
+    return [ordered]@{ attributes = $Attributes; children = @($Children) }
+}
+
+function Get-SimulatedLayoutDocument {
+    param([Parameter(Mandatory)][string]$Name)
+    $profiles = Get-OptionalProperty $script:Simulation 'layout_profiles' $null
+    $override = if ($null -ne $profiles) { Get-OptionalProperty $profiles $Name $null } else { $null }
+    if ($null -ne $override -and $override -isnot [string]) { return $override }
+    $profile = if ($null -ne $override) { [string]$override } elseif ($Name -match 'authorization') { 'authorization' }
+        elseif ($Name -match 'settings-vpn-page') { 'settings-vpn' }
+        elseif ($Name -match 'app-info') { 'settings-app-info-a' }
+        elseif ($Name -match '(?:entry-a|after-allow|reactivation|scenario-3-|scenario-7-)') { 'entry-a' }
+        elseif ($Name -match '(?:entry-b|after-deny|scenario-4-|scenario-6-conflict)') { 'entry-b' }
+        else { 'generic' }
+    # ADJ-20260808-0002 (C6): layout-ready-delay simulation knob. A capture name listed in
+    # `layout_ready_delays` stays "not ready" (a generic layout that fails every profile) until
+    # the given number of (virtual) seconds have elapsed since its FIRST capture attempt. This
+    # models a fast operator whose platform popup/dialog renders a few seconds later, and lets
+    # the bounded same-name layout resample verify it converges to the real layout in time.
+    $readyDelays = Get-OptionalProperty $script:Simulation 'layout_ready_delays' $null
+    if ($null -ne $readyDelays -and $null -ne (Get-OptionalProperty $readyDelays $Name $null)) {
+        $delay = [double](Get-OptionalProperty $readyDelays $Name 0.0)
+        if (-not $script:SimulationLayoutFirstAttempt.ContainsKey($Name)) {
+            $script:SimulationLayoutFirstAttempt[$Name] = Get-Now
+        }
+        $elapsed = ((Get-Now) - [DateTimeOffset]$script:SimulationLayoutFirstAttempt[$Name]).TotalSeconds
+        if ($elapsed -lt $delay) {
+            return @(New-SimulatedUiNode @{ bundleName = 'generic'; type = 'root'; id = ''; key = ''; text = '' })
+        }
+    }
+    switch ($profile) {
+        # ADJ-20260808-0003 (C6): simulated layouts are sanitized STRUCTURE fixtures that mirror
+        # the real attributes/children array shape (top-level array, every node carries an
+        # `attributes` object plus `children`). They are NOT byte copies of any sealed raw; the
+        # authorization/settings facts below are the minimal documented surface for each profile.
+        'authorization' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.vpndialog'; type = 'Dialog'; id = ''; key = ''; text = 'E3 Physical VPN Preflight' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = ''; key = ''; text = '是否允许使用 VPN？' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'permission_cancel_button'; key = 'permission_cancel_button'; text = '取消' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'permission_allow_button'; key = 'permission_allow_button'; text = '允许' })
+                )
+            )
+        }
+        'entry-a' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = $script:BundleA; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'start-vpn'; key = 'start-vpn'; text = 'Start VPN' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'stop-vpn'; key = 'stop-vpn'; text = 'Stop VPN' })
+                )
+            )
+        }
+        'entry-b' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = $script:BundleB; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'start-vpn'; key = 'start-vpn'; text = 'Start VPN' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'stop-vpn'; key = 'stop-vpn'; text = 'Stop VPN' })
+                )
+            )
+        }
+        'settings-vpn' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.settings'; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = 'Setting.MobileNetwork.vpn_group_group.vpn_settings.title'; key = 'Setting.MobileNetwork.vpn_group_group.vpn_settings.title'; text = 'VPN' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = 'Setting.MobileNetwork.vpn_group_group.vpn_settings'; key = 'Setting.MobileNetwork.vpn_group_group.vpn_settings'; text = '没有 VPN' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = ''; key = ''; text = '添加 VPN 网络' })
+                )
+            )
+        }
+        'settings-vpn-fake-app' {
+            # ADJ-20260808-0003: an ordinary app page that merely contains the word VPN must not
+            # match the settings profiles (owner bundle + stable resource id are required).
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'cn.alfadb.netbird.e3physvpna'; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = ''; key = ''; text = 'VPN settings' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = ''; key = ''; text = 'VPN connection' })
+                )
+            )
+        }
+        'settings-app-info-a' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.settings'; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = 'app_name_text'; key = 'app_name_text'; text = 'E3 Physical VPN Preflight' }),
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'force_stop_button'; key = 'force_stop_button'; text = '强制停止' })
+                )
+            )
+        }
+        'wrong-page' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'com.example.unrelated'; type = 'root'; id = ''; key = ''; text = '' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = ''; key = ''; text = 'Unrelated page' })
+                )
+            )
+        }
+        'authorization-missing-controls' {
+            return @(
+                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.vpndialog'; type = 'Dialog'; id = ''; key = ''; text = 'E3 Physical VPN Preflight' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = ''; key = ''; text = '是否允许使用 VPN？' })
+                )
+            )
+        }
+        default {
+            return @(New-SimulatedUiNode @{ bundleName = 'generic'; type = 'root'; id = ''; key = ''; text = '' })
+        }
+    }
+}
+
 function Get-SimulationHdcResult {
     param([Parameter(Mandatory)][string]$Operation, [Parameter(Mandatory)][hashtable]$Parameters)
     if (-not $script:HdcOperationCounts.ContainsKey($Operation)) { $script:HdcOperationCounts[$Operation] = 0 }
@@ -672,7 +903,7 @@ function Get-SimulationHdcResult {
             $installed = ($bundle -eq $script:BundleA -and $script:SimulationInstalledA) -or ($bundle -eq $script:BundleB -and $script:SimulationInstalledB)
             if ($installed) { '{ "app": { "bundleName": "' + $bundle + '" } }' } else { 'error: failed to get information and the parameters may be wrong.' }
         }
-        'PidOf' { '' }
+        'PidOf' { if ($script:SimulationActiveBundles.Contains([string]$Parameters.Bundle)) { '4242' } else { '' } }
         'InstallA' { 'install bundle successfully.' }
         'InstallB' { 'install bundle successfully.' }
         'StagingProbe' {
@@ -686,7 +917,9 @@ function Get-SimulationHdcResult {
     if ($Operation -eq 'RemoveStaging') { $script:SimulationStagingPresent = $false }
     if ($Operation -eq 'InstallA') { $script:SimulationInstalledA = $true }
     if ($Operation -eq 'InstallB') { $script:SimulationInstalledB = $true }
+    if ($Operation -eq 'ForceStop') { [void]$script:SimulationActiveBundles.Remove([string]$Parameters.Bundle) }
     if ($Operation -eq 'Uninstall') {
+        [void]$script:SimulationActiveBundles.Remove([string]$Parameters.Bundle)
         if ([string]$Parameters.Bundle -eq $script:BundleA) { $script:SimulationInstalledA = $false }
         if ([string]$Parameters.Bundle -eq $script:BundleB) { $script:SimulationInstalledB = $false }
     }
@@ -696,7 +929,7 @@ function Get-SimulationHdcResult {
         if ($Operation -eq 'ReceiveScreen') {
             [IO.File]::WriteAllBytes($destination, [byte[]](1, 2, 3, 4))
         } else {
-            Write-JsonFile $destination ([ordered]@{ simulated = $true; capture = [string]$Parameters.Name })
+            Write-JsonFile $destination (Get-SimulatedLayoutDocument ([string]$Parameters.Name))
         }
     }
     return [pscustomobject]@{ ExitCode = $exitCode; Stdout = $stdout; Stderr = ''; Simulated = $true }
@@ -877,57 +1110,62 @@ function Invoke-RemoveStagingVerified {
     return $false
 }
 
-function Read-OperatorResponse {
+function Read-OperatorEnter {
     param(
         [Parameter(Mandatory)][int]$Scenario,
-        [Parameter(Mandatory)][ValidateSet('ready', 'action', 'confirmation')][string]$Kind,
-        [Parameter(Mandatory)][string]$Expected,
-        [Parameter(Mandatory)][string]$Prompt
+        [Parameter(Mandatory)][int]$StepIndex,
+        [Parameter(Mandatory)][string]$StepId,
+        [Parameter(Mandatory)][string]$ExpectedAction,
+        [Parameter(Mandatory)]$MachinePrecondition,
+        [AllowNull()]$CaptureBefore = $null
     )
+    Write-OperatorWaitState 'waiting' -Scenario $Scenario -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -MachinePrecondition $MachinePrecondition
+    Write-Host "现在只做：$ExpectedAction。完成后按回车。"
+    $completedAt = $null
+    $timedOut = $false
     if ($LiveSimulation) {
         $operatorFixture = Get-OptionalProperty $script:Simulation 'operator'
-        $delayName = if ($Kind -eq 'ready') { 'ready_delay_seconds' } else { 'action_ack_delay_seconds' }
-        $delay = [double](Get-OptionalProperty $operatorFixture $delayName $(if ($Kind -eq 'ready') { 1.0 } else { 5.0 }))
+        $delay = [double](Get-OptionalProperty $operatorFixture 'action_delay_seconds' 1.0)
+        $stepDelays = Get-OptionalProperty $operatorFixture 'step_delay_seconds' $null
+        if ($null -ne $stepDelays) {
+            $stepDelay = Get-OptionalProperty $stepDelays "$Scenario.$StepIndex" $null
+            if ($null -ne $stepDelay) { $delay = [double]$stepDelay }
+        }
         if ($null -ne $script:CampaignCapture) { Update-CampaignCapture $script:CampaignCapture }
         $script:VirtualSeconds += $delay
-        if ($null -ne $script:CampaignCapture) { Update-CampaignCapture $script:CampaignCapture }
-        $failScenarios = @(Get-OptionalProperty $operatorFixture 'fail_scenarios' @())
-        $valid = $Scenario -notin @($failScenarios | ForEach-Object { [int]$_ })
-        return [pscustomobject]@{ Valid = $valid; AnsweredAt = Get-Now; TimedOut = $false; DelaySeconds = $delay }
+        $completedAt = Get-Now
+    } else {
+        $readTask = [Console]::In.ReadLineAsync()
+        $deadline = (Get-Now).AddSeconds($OperatorTimeoutSeconds)
+        while (-not $readTask.IsCompleted -and (Get-Now) -lt $deadline) {
+            $remainingMilliseconds = [int][Math]::Max(1, [Math]::Min(250, ($deadline - (Get-Now)).TotalMilliseconds))
+            [void]$readTask.Wait($remainingMilliseconds)
+            if ($null -ne $script:CampaignCapture) { Update-CampaignCapture $script:CampaignCapture }
+        }
+        if (-not $readTask.IsCompleted) {
+            $timedOut = $true
+            $completedAt = Get-Now
+        } else {
+            [void]$readTask.GetAwaiter().GetResult()
+            $completedAt = Get-Now
+        }
     }
-    Write-Host $Prompt
-    $readTask = [Console]::In.ReadLineAsync()
-    $deadline = (Get-Now).AddSeconds($OperatorTimeoutSeconds)
-    while (-not $readTask.IsCompleted -and (Get-Now) -lt $deadline) {
-        $remainingMilliseconds = [int][Math]::Max(1, [Math]::Min(250, ($deadline - (Get-Now)).TotalMilliseconds))
-        [void]$readTask.Wait($remainingMilliseconds)
-        if ($null -ne $script:CampaignCapture) { Update-CampaignCapture $script:CampaignCapture }
+    $actionRecord = [ordered]@{
+        scenario = $Scenario
+        step_index = $StepIndex
+        step_id = $StepId
+        expected_action = $ExpectedAction
+        completed_at = $completedAt.ToString('o')
+        input = 'enter'
+        timed_out = [bool]$timedOut
     }
-    if (-not $readTask.IsCompleted) {
-        return [pscustomobject]@{ Valid = $false; AnsweredAt = Get-Now; TimedOut = $true; DelaySeconds = $OperatorTimeoutSeconds }
+    $script:OperatorActions.Add($actionRecord)
+    Add-TranscriptRecord 'operator-mechanical-action' $actionRecord
+    Write-OperatorWaitState 'operator-complete' -Scenario $Scenario -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -MachinePrecondition $MachinePrecondition -MachinePostcondition ([ordered]@{ status = 'pending-verification' })
+    if ($timedOut) {
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason "step-$StepIndex operator-timeout" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -MachinePrecondition $MachinePrecondition
     }
-    $answer = $readTask.GetAwaiter().GetResult()
-    return [pscustomobject]@{ Valid = $answer -eq $Expected; AnsweredAt = Get-Now; TimedOut = $false; DelaySeconds = $null }
-}
-
-function Get-SimulationConfirmation {
-    param([Parameter(Mandatory)][string]$Name)
-    if (-not $LiveSimulation) { return $false }
-    $confirmations = Get-OptionalProperty (Get-OptionalProperty $script:Simulation 'operator') 'confirmations'
-    return Get-OptionalJsonBoolean $confirmations $Name $false
-}
-
-function Confirm-VisibleFact {
-    param([Parameter(Mandatory)][int]$Scenario, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Prompt)
-    if ($LiveSimulation) {
-        $valid = Get-SimulationConfirmation $Name
-        Add-TranscriptRecord 'operator-confirmation' ([ordered]@{ scenario = $Scenario; name = $Name; confirmed = [bool]$valid; simulated = $true })
-        return [bool]$valid
-    }
-    $nonce = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $response = Read-OperatorResponse $Scenario 'confirmation' "$Name $nonce" "$Prompt 若为真：逐字输入完整令牌 $Name $nonce ；若为假：直接按回车留空。"
-    Add-TranscriptRecord 'operator-confirmation' ([ordered]@{ scenario = $Scenario; name = $Name; confirmed = [bool]$response.Valid; timed_out = [bool]$response.TimedOut; simulated = $false })
-    return [bool]$response.Valid
+    return $completedAt
 }
 
 function Parse-HilogDeviceTime {
@@ -1185,19 +1423,63 @@ function Initialize-CampaignCaptureAnchor {
     Add-TranscriptRecord 'hilog-initial-anchor' $Capture.InitialAnchor
 }
 
-function Add-SimulationScenarioOutput {
-    param([Parameter(Mandatory)]$Capture, [Parameter(Mandatory)][int]$Scenario, [Parameter(Mandatory)][DateTimeOffset]$ActionPromptAt)
+function Get-SimulationEventStepIndex {
+    param([Parameter(Mandatory)][int]$Scenario, [Parameter(Mandatory)]$Item)
+    $explicit = Get-OptionalProperty $Item 'step_index' $null
+    if ($null -ne $explicit) { return [int]$explicit }
+    $text = [string](Get-OptionalProperty $Item 'text' '')
+    switch ($Scenario) {
+        2 { if ($text -match 'UI_START\|') { return 1 }; return 2 }
+        4 { if ($text -match 'UI_START\|') { return 1 }; return 2 }
+        # ADJ-20260808-0003: S5 no longer asks the operator to open Settings>VPN; the only
+        # mechanical steps are app-info (3) and force-stop (4). Destroy-side events belong to 4.
+        5 { if ($text -match 'VPN_DESTROY_|VPN_ONDESTROY') { return 4 }; return 1 }
+        # ADJ-20260808-0003: S6 mechanical steps are A Start (1), optional Allow reauth (2), B
+        # Start (3). B-side events belong to the B Start step (3); A-side events to the A Start
+        # step (1). Fixtures may still pin an explicit step_index per event.
+        6 { if ($text -match "bundle=$([regex]::Escape($script:BundleB))|requestId=b") { return 3 }; return 1 }
+        default { return 1 }
+    }
+}
+
+function Test-SimulationStepHasEffect {
+    param([Parameter(Mandatory)][int]$Scenario, [Parameter(Mandatory)][int]$StepIndex)
+    if (-not $LiveSimulation) { return $true }
+    $noEffect = @((Get-OptionalProperty (Get-OptionalProperty $script:Simulation 'operator') 'no_effect_steps' @()) | ForEach-Object { [string]$_ })
+    return "$Scenario.$StepIndex" -notin $noEffect
+}
+
+function Add-SimulationScenarioStepOutput {
+    param(
+        [Parameter(Mandatory)]$Capture,
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][int]$StepIndex,
+        [Parameter(Mandatory)][DateTimeOffset]$ActionPromptAt,
+        [Parameter(Mandatory)][DateTimeOffset]$ActionCompletedAt
+    )
+    if (-not $LiveSimulation) { return }
+    $key = "$Scenario.$StepIndex"
+    if ($script:SimulationScenarioStepsWritten.ContainsKey($key)) { return }
+    $script:SimulationScenarioStepsWritten[$key] = $true
     $scenarioEvents = Get-OptionalProperty $script:Simulation 'scenario_events'
-    $items = @(Get-OptionalProperty $scenarioEvents ([string]$Scenario) @()) | Sort-Object { [double](Get-OptionalProperty $_ 'offset_seconds' 0.0) }
+    $items = @(Get-OptionalProperty $scenarioEvents ([string]$Scenario) @() | Where-Object { (Get-SimulationEventStepIndex $Scenario $_) -eq $StepIndex }) | Sort-Object { [double](Get-OptionalProperty $_ 'offset_seconds' 0.0) }
+    $minimumOffset = if (@($items).Count -gt 0) { [double](Get-OptionalProperty @($items)[0] 'offset_seconds' 0.0) } else { 0.0 }
     foreach ($item in $items) {
         $offset = [double](Get-OptionalProperty $item 'offset_seconds' 0.0)
-        $deviceStamp = $ActionPromptAt.AddSeconds($offset).ToString('yyyy-MM-dd HH:mm:ss.fffzzz', [Globalization.CultureInfo]::InvariantCulture)
+        # ADJ-20260808-0003: pre-enter events (relative_to_prompt=true) are stamped against the
+        # prompt time, so a slow operator (action_delay_seconds >= 8) cannot push events past the
+        # enter; the device timestamp lands shortly after the prompt and well before the enter.
+        # All other events keep their completed-at base (post-enter) semantics.
+        $relativeToPrompt = Get-OptionalJsonBoolean $item 'relative_to_prompt' $false
+        $base = if ($relativeToPrompt) { $ActionPromptAt } else { $ActionCompletedAt }
+        $relativeOffset = if ($relativeToPrompt) { 0.2 + [Math]::Max(0.0, $offset) } else { 0.2 + [Math]::Max(0.0, $offset - $minimumOffset) }
+        $deviceStamp = $base.AddSeconds($relativeOffset).ToString('yyyy-MM-dd HH:mm:ss.fffzzz', [Globalization.CultureInfo]::InvariantCulture)
         $text = ([string](Get-OptionalProperty $item 'text' '')).Replace('<DEVICE_OBSERVED_AT>', $deviceStamp, [StringComparison]::Ordinal)
         $withoutNewline = Get-OptionalJsonBoolean $item 'append_without_newline' $false
         [IO.File]::AppendAllText($Capture.StdoutPath, $text + $(if ($withoutNewline) { '' } else { [Environment]::NewLine }), [Text.UTF8Encoding]::new($false))
     }
     $dieScenario = [int](Get-OptionalProperty $script:Simulation 'capture_die_scenario' 0)
-    if ($dieScenario -eq $Scenario) { $Capture.SimulatedDead = $true }
+    if ($dieScenario -eq $Scenario -and $StepIndex -eq 1) { $Capture.SimulatedDead = $true }
 }
 
 function Get-ScenarioWindowEvents {
@@ -1257,104 +1539,401 @@ function Stop-CampaignHilogCapture {
     }
 }
 
-function Invoke-ScenarioObservation {
-    param(
-        [Parameter(Mandatory)][int]$Scenario,
-        [Parameter(Mandatory)][string]$Instruction,
-        [scriptblock]$OnAction,
-        [scriptblock]$DuringWait
-    )
+function New-ScenarioContext {
+    param([Parameter(Mandatory)][int]$Scenario)
     $capture = $script:CampaignCapture
     if ($null -eq $capture) { throw "scenario-$Scenario continuous capture is not initialized" }
     Update-CampaignCapture $capture
+    # Cross-scenario operator action guard: any UI action event that arrived after the previous
+    # scenario's window (and was not consumed by any mechanical step) invalidates the scenario
+    # before any prompt of this one. Auto StartEntry ENTRY events are never UI actions.
+    Assert-NoStrayOperatorActions ([pscustomobject]@{ Scenario = $Scenario; Capture = $capture; StartedAt = (Get-Now) })
     $capture.ActiveScenario = $Scenario
     $script:CampaignPhase = "scenario-$Scenario"
     [void](Test-CampaignCaptureHealth $capture)
-    # Wait for operator READY first; READY latency must not count toward the 60s window.
-    $prepareNonce = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $readyPromptAt = Get-Now
-    Write-Host "PREPARE scenario=$Scenario nonce=$prepareNonce"
-    $ready = Read-OperatorResponse $Scenario 'ready' "READY $prepareNonce" "请准备场景 $Scenario 的可见界面，然后逐字输入 READY $prepareNonce"
-    Update-CampaignCapture $capture
-    $anchorByte = [long]$capture.ReadOffset
-    $windowStartedAt = Get-Now
-    $actionNonce = [guid]::NewGuid().ToString('N').Substring(0, 12)
-    $actionPromptAt = Get-Now
-    Write-Host "ACTION scenario=$Scenario nonce=$actionNonce action=$Instruction"
-    $actionError = $null
-    try {
-        if ($null -ne $OnAction) { & $OnAction }
-        $ack = Read-OperatorResponse $Scenario 'action' "ACK $actionNonce" "完成上述 ACTION 后，逐字输入 ACK $actionNonce"
-    } catch {
-        $actionError = $_
-        $ack = [pscustomobject]@{ Valid = $false; AnsweredAt = Get-Now; TimedOut = $false; DelaySeconds = 0.0 }
+    return [pscustomobject]@{
+        Scenario = $Scenario
+        Capture = $capture
+        AnchorByte = [long]$capture.ReadOffset
+        StartedAt = Get-Now
+        FirstActionAt = $null
+        LastActionCompletedAt = $null
+        Actions = [Collections.Generic.List[object]]::new()
     }
-    $requiredObservationEnd = $ack.AnsweredAt.AddSeconds($script:WindowSeconds)
-    $script:CurrentWindowEnd = $requiredObservationEnd
-    if ($LiveSimulation) {
-        # Append the full scenario event stream once, then reveal only offset<=elapsed events to
-        # DuringWait as the virtual clock advances. Future destroy/stop markers must not arm probes early.
-        Add-SimulationScenarioOutput $capture $Scenario $actionPromptAt
-        Update-CampaignCapture $capture
-        while ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) {
-            $currentEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt (Get-Now))
-            if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $currentEvents }
-            if ((Get-Now) -ge $requiredObservationEnd -or $capture.Degraded) { break }
-            $now = Get-Now
-            $nextAt = $requiredObservationEnd
-            foreach ($ev in @($capture.Events)) {
-                if ([long]$ev.raw_byte_start -lt $anchorByte) { continue }
-                if ([string]::IsNullOrWhiteSpace([string]$ev.device_observed_at)) { continue }
-                $dt = [DateTimeOffset]::MinValue
-                if (-not [DateTimeOffset]::TryParse([string]$ev.device_observed_at, [ref]$dt)) { continue }
-                if ($dt -gt $now -and $dt -lt $nextAt) { $nextAt = $dt }
+}
+
+function Get-ScenarioContextEvents {
+    param([Parameter(Mandatory)]$Context, [AllowNull()]$ObservedThrough = $null, [AllowNull()]$AnchorByte = $null, [AllowNull()]$ActionAt = $null)
+    Update-CampaignCapture $Context.Capture
+    if ($null -eq $ObservedThrough) { $ObservedThrough = Get-Now }
+    if ($null -eq $AnchorByte) { $AnchorByte = [long]$Context.AnchorByte }
+    if ($null -eq $ActionAt) { $ActionAt = [DateTimeOffset]$Context.StartedAt }
+    return @(Get-ScenarioWindowEvents $Context.Capture $AnchorByte $ActionAt $ObservedThrough)
+}
+
+function Get-CaptureDegradedInfra {
+    param([Parameter(Mandatory)][int]$Scenario)
+    # ADJ-20260808-0003 (C6): classify a continuous raw-hilog degradation affecting this scenario
+    # (or the global scenario 0) as infrastructure (capture process exit / stderr growth / HDC
+    # transport) vs non-infrastructure (host read/parse/storage). Returns $null when no
+    # continuous raw-hilog degradation applies, $true for infrastructure, $false otherwise.
+    $entries = @($script:CaptureDegraded | Where-Object {
+        [int]$_.scenario -in @($Scenario, 0) -and [string]$_.component -match 'raw-hilog'
+    })
+    if ($entries.Count -eq 0) { return $null }
+    $infra = @($entries | Where-Object {
+        [string]$_.category -eq 'infrastructure' -or [string]$_.infrastructure_reason -eq 'hdc-usb-interruption'
+    })
+    return ($infra.Count -gt 0)
+}
+
+function Wait-MachineCondition {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][long]$AnchorByte,
+        [Parameter(Mandatory)][DateTimeOffset]$ActionAt,
+        [Parameter(Mandatory)][scriptblock]$Condition,
+        [double]$TimeoutSeconds = 12.0
+    )
+    $deadline = (Get-Now).AddSeconds($TimeoutSeconds)
+    $last = [pscustomobject]@{ status = 'pending'; reason = 'event-postcondition-pending' }
+    $iterations = 0
+    while ((Get-Now) -lt $deadline) {
+        $iterations++
+        if ($iterations -gt 5000) { break }
+        $events = @(Get-ScenarioContextEvents $Context (Get-Now) $AnchorByte $ActionAt)
+        $last = & $Condition $events
+        if ($null -ne $last -and [string]$last.status -ne 'pending') { return $last }
+        if ((Get-Now) -ge $deadline -or $Context.Capture.Degraded) {
+            # ADJ-20260808-0002 (C6): continuous capture degradation is never a status invalid.
+            # The unified classifier throws the classified blocked (infra authorizes the USB
+            # retry; non-infra stays a plain blocked), so the caller can never turn it into
+            # ScenarioInvalid.
+            if ($Context.Capture.Degraded) {
+                Assert-CampaignCaptureHealthy $Context.Capture ([int]$Context.Scenario) -Origin 'Wait-MachineCondition'
             }
-            if ((Get-Now) -ge $requiredObservationEnd) { break }
-            if ($nextAt -le (Get-Now)) {
-                Wait-Until $requiredObservationEnd
-                break
-            }
-            Wait-Until $nextAt
+            break
         }
-        if ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) { Wait-Until $requiredObservationEnd }
-        Update-CampaignCapture $capture
-    } else {
-        while ((Get-Now) -lt $requiredObservationEnd -and -not $capture.Degraded) {
-            Update-CampaignCapture $capture
-            $currentEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt (Get-Now))
-            if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $currentEvents }
+        if ($LiveSimulation) {
+            $now = Get-Now
+            $nextAt = $deadline
+            foreach ($event in @($Context.Capture.Events)) {
+                if ([long]$event.raw_byte_start -lt $AnchorByte -or [string]::IsNullOrWhiteSpace([string]$event.device_observed_at)) { continue }
+                $eventAt = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse([string]$event.device_observed_at, [ref]$eventAt) -and $eventAt -gt $now -and $eventAt -lt $nextAt) { $nextAt = $eventAt }
+            }
+            if ($nextAt -le $now) { $nextAt = $now.AddMilliseconds(1) }
+            Wait-Until $nextAt
+        } else {
             Start-Sleep -Milliseconds 250
         }
-        Update-CampaignCapture $capture
     }
+    $pendingReason = [string](Get-OptionalProperty $last 'reason' 'event-postcondition-missing')
+    # ADJ-20260808-0002 (C6): a pending-postcondition timeout is classified by whether the
+    # mechanical UI action itself appeared. If the expected UI_START / UI_STOP never arrived,
+    # the operator action did not register: invalid `mechanical-action-missing`. If the UI action
+    # appeared but the platform's subsequent marker (create/destroy terminal) did not arrive, the
+    # outcome is a platform/runner uncertainty: blocked, never invalid.
+    if ($pendingReason -in @('UI_START-missing', 'UI_STOP-missing')) {
+        return [pscustomobject]@{ status = 'invalid'; reason = 'mechanical-action-missing:' + $pendingReason }
+    }
+    return [pscustomobject]@{ status = 'blocked'; reason = 'platform-marker-missing:' + $pendingReason }
+}
+
+function Get-E3EventInfo {
+    param([Parameter(Mandatory)]$Event)
+    $text = [string]$Event.text
+    $marker = $null
+    if ($text -match '(?:^|\s)([A-Z][A-Z0-9_]+)\|') { $marker = [string]$Matches[1] }
+    $bundle = $null
+    if ($text -match '(?:^|\|)bundle=([^|\s]+)') { $bundle = [string]$Matches[1] }
+    $requestId = $null
+    if ($text -match '(?:^|\|)requestId=([^|\s]+)') { $requestId = [string]$Matches[1] }
+    return [pscustomobject]@{ Marker = $marker; Bundle = $bundle; RequestId = $requestId; Text = $text; Event = $Event }
+}
+
+function Get-RejectionErrorCode {
+    param([Parameter(Mandatory)][string]$Text)
+    # ADJ-20260808-0002 (C6): extract a numeric BusinessError code from a rejection event text,
+    # supporting the real Extension safeError comma-field shape (`summary=code=2203002,name=...,
+    # message=...`) and the historical top-level `|code=123|` field. Boundary-rigorous: a code
+    # must be a standalone `code=` name=value pair whose numeric value ends at a field boundary
+    # (`|`, `,`, `;`, whitespace, or EOL) so prose quoted inside `message=...` is never mis-parsed,
+    # and a standalone `code=` key must be preceded by start / `|` / `,` / `;` / `=`. Returns $null
+    # when no such code is present.
+    # 1) Historical top-level field: |code=123| or code=123 at EOL/whitespace.
+    if ($Text -match '(?:^|\|)code=(\d+)(?=\||\s|$)') { return [int]$Matches[1] }
+    # 2) safeError comma-field payload: summary=code=2203002,name=...,message=... and any
+    #    comma/semicolon-separated name=value list (including the first field right after `=`).
+    if ($Text -match '(?:^|[|,;=])\s*code=(\d+)\s*(?=,|;|$|\s)') { return [int]$Matches[1] }
+    return $null
+}
+
+function Test-UniqueStartCondition {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events, [Parameter(Mandatory)][string]$Bundle)
+    $infos = @($Events | ForEach-Object { Get-E3EventInfo $_ })
+    $forbidden = @($infos | Where-Object { $_.Marker -in @('UI_STOP', 'UI_STOP_SKIPPED') })
+    if ($forbidden.Count -gt 0) { return [pscustomobject]@{ status = 'invalid'; reason = "unexpected-$($forbidden[0].Marker)-during-start-step" } }
+    $skipped = @($infos | Where-Object { $_.Marker -eq 'UI_START_SKIPPED' })
+    if ($skipped.Count -gt 0) { return [pscustomobject]@{ status = 'invalid'; reason = 'UI_START_SKIPPED' } }
+    $starts = @($infos | Where-Object { $_.Marker -eq 'UI_START' })
+    if ($starts.Count -eq 0) { return [pscustomobject]@{ status = 'pending'; reason = 'UI_START-missing' } }
+    if ($starts.Count -ne 1) { return [pscustomobject]@{ status = 'invalid'; reason = "expected-one-UI_START-observed-$($starts.Count)" } }
+    if ([string]$starts[0].Bundle -ne $Bundle) { return [pscustomobject]@{ status = 'invalid'; reason = "UI_START-wrong-bundle:$($starts[0].Bundle)" } }
+    if ([string]::IsNullOrWhiteSpace([string]$starts[0].RequestId) -or [string]$starts[0].RequestId -eq 'missing') { return [pscustomobject]@{ status = 'invalid'; reason = 'UI_START-requestId-missing' } }
+    return [pscustomobject]@{ status = 'pass'; reason = 'unique-UI_START'; request_id = [string]$starts[0].RequestId; bundle = $Bundle }
+}
+
+function Test-UniqueStopCondition {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events, [Parameter(Mandatory)][string]$Bundle, [Parameter(Mandatory)][string]$RequestId)
+    $infos = @($Events | ForEach-Object { Get-E3EventInfo $_ })
+    $starts = @($infos | Where-Object { $_.Marker -in @('UI_START', 'UI_START_SKIPPED') })
+    if ($starts.Count -gt 0) { return [pscustomobject]@{ status = 'invalid'; reason = "unexpected-$($starts[0].Marker)-during-stop-step" } }
+    $skipped = @($infos | Where-Object { $_.Marker -eq 'UI_STOP_SKIPPED' })
+    if ($skipped.Count -gt 0) { return [pscustomobject]@{ status = 'invalid'; reason = 'UI_STOP_SKIPPED' } }
+    $stops = @($infos | Where-Object { $_.Marker -eq 'UI_STOP' })
+    if ($stops.Count -eq 0) { return [pscustomobject]@{ status = 'pending'; reason = 'UI_STOP-missing' } }
+    if ($stops.Count -ne 1) { return [pscustomobject]@{ status = 'invalid'; reason = "expected-one-UI_STOP-observed-$($stops.Count)" } }
+    if ([string]$stops[0].Bundle -ne $Bundle) { return [pscustomobject]@{ status = 'invalid'; reason = "UI_STOP-wrong-bundle:$($stops[0].Bundle)" } }
+    if ([string]$stops[0].RequestId -ne $RequestId) { return [pscustomobject]@{ status = 'invalid'; reason = "UI_STOP-wrong-requestId:$($stops[0].RequestId)" } }
+    return [pscustomobject]@{ status = 'pass'; reason = 'unique-UI_STOP'; request_id = $RequestId; bundle = $Bundle }
+}
+
+function Test-NoOperatorAction {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events)
+    # ADJ-20260808-0003: Allow/Deny/Settings navigation steps allow zero extra UI actions:
+    # any UI_START / UI_STOP / UI_STOP_SKIPPED in the step window is invalid. Auto StartEntry
+    # ENTRY events are not UI actions and stay allowed.
+    $infos = @($Events | ForEach-Object { Get-E3EventInfo $_ })
+    $actions = @($infos | Where-Object { $_.Marker -in @('UI_START', 'UI_STOP', 'UI_STOP_SKIPPED') })
+    if ($actions.Count -gt 0) {
+        return [pscustomobject]@{ status = 'invalid'; reason = "unexpected-$($actions[0].Marker):bundle=$($actions[0].Bundle):requestId=$($actions[0].RequestId)" }
+    }
+    return [pscustomobject]@{ status = 'pass'; reason = 'no-extra-ui-action' }
+}
+
+function Flush-SimulationGapActions {
+    param([Parameter(Mandatory)][int]$Scenario, [Parameter(Mandatory)][int]$StepIndex)
+    # ADJ-20260808-0003: simulation-only injection of a stray operator UI action that arrives in
+    # the gap between verified checkpoints (after the previous step/scenario, before the next
+    # prompt). The line is appended to the capture now (host time = now), so the operator action
+    # guard scanning by host_observed_at sees it as an unowned UI action and invalidates.
+    if (-not $LiveSimulation) { return }
+    $gapActions = @(Get-OptionalProperty $script:Simulation 'gap_actions' @())
+    $newList = [Collections.Generic.List[object]]::new()
+    $flushed = $false
+    foreach ($gap in $gapActions) {
+        if ([int](Get-OptionalProperty $gap 'scenario' -1) -ne $Scenario) { $newList.Add($gap); continue }
+        $afterStep = [int](Get-OptionalProperty $gap 'after_step_index' 0)
+        if ($StepIndex -le $afterStep) { $newList.Add($gap); continue }
+        $text = [string](Get-OptionalProperty $gap 'text' '')
+        $delay = [double](Get-OptionalProperty $gap 'delay_seconds' 0.2)
+        # ADJ-20260808-0003: advance the virtual clock so the appended line is observed strictly
+        # after the previous guard checkpoint (host time now > guard-from), otherwise the guard
+        # would treat the injected gap action as already-owned and skip it.
+        $script:VirtualSeconds += $delay
+        $stamp = (Get-Now).ToString('yyyy-MM-dd HH:mm:ss.fffzzz', [Globalization.CultureInfo]::InvariantCulture)
+        $line = $text.Replace('<DEVICE_OBSERVED_AT>', $stamp, [StringComparison]::Ordinal)
+        [IO.File]::AppendAllText($script:CampaignCapture.StdoutPath, $line + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $flushed = $true
+    }
+    if ($flushed) { $script:Simulation.gap_actions = @($newList) }
+    if ($flushed -and $null -ne $script:CampaignCapture) { Update-CampaignCapture $script:CampaignCapture }
+}
+
+function Assert-NoStrayOperatorActions {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [AllowNull()][int]$StepIndex = $null,
+        [AllowNull()][string]$StepId = $null,
+        [AllowNull()][string]$ExpectedAction = $null
+    )
+    # ADJ-20260808-0003 global operator action guard: any UI_START / UI_STOP / UI_STOP_SKIPPED
+    # (wrong bundle/request/order included) observed after the last verified checkpoint but not
+    # owned by the current mechanical step invalidates the scenario immediately, before the next
+    # prompt / scenario. Ownership is decided by host observation time: events consumed by a
+    # step's verification loop were already read before the guard advanced, so only events that
+    # arrived during a gap are scanned. Auto StartEntry ENTRY events are never UI actions.
+    if ($null -ne $Context -and $null -ne $Context.PSObject.Properties['Capture']) {
+        Flush-SimulationGapActions ([int]$Context.Scenario) $([int]$StepIndex)
+    }
+    Update-CampaignCapture $Context.Capture
+    $from = if ($null -ne $script:OperatorActionGuardFrom) { [DateTimeOffset]$script:OperatorActionGuardFrom } else { [DateTimeOffset]$Context.StartedAt }
+    foreach ($event in @($Context.Capture.Events)) {
+        $hostAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse([string]$event.host_observed_at, [ref]$hostAt)) { continue }
+        if ($hostAt -le $from) { continue }
+        $info = Get-E3EventInfo $event
+        if ($info.Marker -in @('UI_START', 'UI_STOP', 'UI_STOP_SKIPPED')) {
+            Throw-ScenarioInvalid -Scenario ([int]$Context.Scenario) -Reason "stray-operator-action:$($info.Marker):bundle=$($info.Bundle):requestId=$($info.RequestId)" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction
+        }
+    }
+    $script:OperatorActionGuardFrom = Get-Now
+}
+
+function Register-VerifiedRequest {
+    param([Parameter(Mandatory)][string]$RequestId, [Parameter(Mandatory)][string]$Bundle, [Parameter(Mandatory)][int]$Scenario)
+    # ADJ-20260808-0003: VerifiedRequests is a live global uniqueness / ownership register for
+    # UI_START request ids. A repeated requestId (same or different bundle) across scenarios
+    # makes attribution ambiguous and is invalid immediately.
+    if ([string]::IsNullOrWhiteSpace($RequestId) -or $RequestId -eq 'missing') {
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason 'requestId-missing-cannot-register'
+    }
+    if ($script:VerifiedRequests.ContainsKey($RequestId)) {
+        $previousBundle = [string]$script:VerifiedRequests[$RequestId]
+        $reason = if ($previousBundle -eq $Bundle) { "requestId-reused:$RequestId" } else { "requestId-reused-with-different-bundle:$RequestId" }
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason $reason
+    }
+    $script:VerifiedRequests[$RequestId] = $Bundle
+}
+
+function Invoke-MechanicalStep {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][int]$StepIndex,
+        [Parameter(Mandatory)][string]$ExpectedAction,
+        [Parameter(Mandatory)]$MachinePrecondition,
+        [Parameter(Mandatory)][scriptblock]$Postcondition,
+        [AllowNull()]$CaptureBefore = $null,
+        [AllowNull()][string]$CaptureAfterName = $null,
+        [AllowNull()][string]$CaptureAfterProfile = $null,
+        [AllowNull()][string]$CaptureAfterExpectedBundle = $null,
+        [switch]$CaptureAfterReviewOnly,
+        [switch]$CaptureAfterObservationOnly,
+        [double]$VerifyTimeoutSeconds = 12.0
+    )
+    $scenario = [int]$Context.Scenario
+    $stepId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+    # Global operator action guard runs before the prompt: any UI action observed in the gap
+    # since the last verified checkpoint invalidates the scenario before the next step is asked.
+    Assert-NoStrayOperatorActions $Context -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction
+    # ADJ-20260808-0003: only an explicit machine-precondition status=invalid is operator/protocol
+    # invalid. status=blocked (process mismatch, HDC infra, unknown probe) is a plain runner blocked
+    # so process residue / transport loss is never misclassified as operator invalid.
+    $preStatus = [string](Get-OptionalProperty $MachinePrecondition 'status' '')
+    if ($preStatus -ne 'pass') {
+        $preReason = [string](Get-OptionalProperty $MachinePrecondition 'reason' 'unknown')
+        if ($preStatus -eq 'invalid') {
+            Throw-ScenarioInvalid -Scenario $scenario -Reason "step-$StepIndex machine-precondition-not-pass:$preReason" -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -MachinePrecondition $MachinePrecondition -CaptureBefore $CaptureBefore
+        }
+        throw "scenario-$scenario machine-precondition-blocked step=$StepIndex reason=$preReason"
+    }
+    Update-CampaignCapture $Context.Capture
+    $stepAnchor = [long]$Context.Capture.ReadOffset
+    $promptAt = Get-Now
+    if ($null -eq $Context.FirstActionAt) { $Context.FirstActionAt = $promptAt }
+    $completedAt = Read-OperatorEnter $scenario $StepIndex $stepId $ExpectedAction $MachinePrecondition $CaptureBefore
+    $Context.LastActionCompletedAt = $completedAt
+    # ADJ-20260808-0003: fixture events marked relative_to_prompt are stamped against the prompt
+    # time, so a slow operator cannot shift device timestamps past the enter; the verification
+    # window lower bound is the prompt (minus frozen skew), never the operator completedAt.
+    Add-SimulationScenarioStepOutput $Context.Capture $scenario $StepIndex $promptAt $completedAt
+    Update-CampaignCapture $Context.Capture
+    $captureAfter = [ordered]@{ status = 'not-required' }
+    if (-not [string]::IsNullOrWhiteSpace($CaptureAfterName)) {
+        if ($CaptureAfterReviewOnly) {
+            # A truly review-only capture is always ObservationOnly: it never enters the global
+            # CaptureDegraded list and can never block or pass the scenario result.
+            $captureStatus = Invoke-Capture $CaptureAfterName $scenario -ObservationOnly
+            $captureAfter = [ordered]@{ status = $captureStatus; name = $CaptureAfterName; review_only = $true; note = 'review-only capture; never a semantic operator verdict' }
+            Add-TranscriptRecord 'review-only-layout-artifact' ([ordered]@{ scenario = $scenario; checkpoint = $captureAfter })
+        } elseif (-not [string]::IsNullOrWhiteSpace($CaptureAfterProfile)) {
+            $captureAfter = Invoke-LayoutCheckpoint $scenario $CaptureAfterName $CaptureAfterProfile $CaptureAfterExpectedBundle -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -ObservationOnly:$CaptureAfterObservationOnly
+        } else {
+            $captureStatus = Invoke-Capture $CaptureAfterName $scenario -ObservationOnly:$CaptureAfterObservationOnly
+            if ($captureStatus -ne 'collected') {
+                # ADJ-20260808-0003: infrastructure capture failure (exit 124/125 / timeout / HDC
+                # transport) must propagate as infrastructure blocked with retry, never as a
+                # scenario invalid; only non-infrastructure capture loss stays invalid here.
+                if ($script:LastCaptureInfrastructure) {
+                    throw "HDC infrastructure interruption capture-after=$CaptureAfterName scenario=$scenario"
+                }
+                Throw-ScenarioInvalid -Scenario $scenario -Reason "step-$StepIndex capture-after-not-collected:$CaptureAfterName" -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -MachinePrecondition $MachinePrecondition -CaptureBefore $CaptureBefore -CaptureAfter ([ordered]@{ status = $captureStatus; name = $CaptureAfterName })
+            }
+            $captureAfter = [ordered]@{ status = $captureStatus; name = $CaptureAfterName }
+        }
+    }
+    Write-OperatorWaitState 'verifying' -Scenario $scenario -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -CaptureAfter $captureAfter -MachinePrecondition $MachinePrecondition -MachinePostcondition ([ordered]@{ status = 'verifying' })
+    # ADJ-20260808-0003: the event time lower bound for verification is the prompt (with frozen
+    # device clock skew tolerance), never the operator completedAt. completedAt is recorded only
+    # for mechanical attestation; events that land between prompt and enter (slow operator) must
+    # still be captured by the machine condition.
+    $outcome = Wait-MachineCondition $Context $stepAnchor $promptAt $Postcondition $VerifyTimeoutSeconds
+    if ([string]$outcome.status -eq 'blocked') {
+        $reason = [string](Get-OptionalProperty $outcome 'reason' 'machine-verification-blocked')
+        throw "scenario-$scenario machine-verification-blocked step=$StepIndex reason=$reason"
+    }
+    if ([string]$outcome.status -ne 'pass') {
+        $reason = [string](Get-OptionalProperty $outcome 'reason' 'event-postcondition-missing')
+        Throw-ScenarioInvalid -Scenario $scenario -Reason "step-$StepIndex $reason" -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -MachinePrecondition $MachinePrecondition -MachinePostcondition $outcome -CaptureBefore $CaptureBefore -CaptureAfter $captureAfter
+    }
+    Write-OperatorWaitState 'captured' -Scenario $scenario -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -CaptureBefore $CaptureBefore -CaptureAfter $captureAfter -MachinePrecondition $MachinePrecondition -MachinePostcondition $outcome
+    Write-Host "机器采集/判定完成：scenario=$scenario step=$StepIndex。"
+    $step = [pscustomobject]@{ StepIndex = $StepIndex; StepId = $stepId; ExpectedAction = $ExpectedAction; PromptAt = $promptAt; CompletedAt = $completedAt; AnchorByte = $stepAnchor; Outcome = $outcome; CaptureBefore = $CaptureBefore; CaptureAfter = $captureAfter }
+    $Context.Actions.Add($step)
+    # Advance the operator action guard past this step's verified window so the next step only
+    # scans events that arrived during the gap, never events already consumed by this step.
+    $script:OperatorActionGuardFrom = Get-Now
+    return $step
+}
+
+function Complete-ScenarioContext {
+    param([Parameter(Mandatory)]$Context, [scriptblock]$DuringWait)
+    $capture = $Context.Capture
+    $actionCompletedAt = if ($null -ne $Context.LastActionCompletedAt) { [DateTimeOffset]$Context.LastActionCompletedAt } else { [DateTimeOffset]$Context.StartedAt }
+    $requiredEnd = $actionCompletedAt.AddSeconds($script:WindowSeconds)
+    $script:CurrentWindowEnd = $requiredEnd
+    $windowIterations = 0
+    while ((Get-Now) -lt $requiredEnd -and -not $capture.Degraded) {
+        $windowIterations++
+        if ($windowIterations -gt 5000) { break }
+        $events = @(Get-ScenarioContextEvents $Context)
+        if ($null -ne $DuringWait) { & $DuringWait $events }
+        if ((Get-Now) -ge $requiredEnd -or $capture.Degraded) { break }
+        if ($LiveSimulation) {
+            $now = Get-Now
+            $nextAt = $requiredEnd
+            foreach ($event in @($capture.Events)) {
+                if ([long]$event.raw_byte_start -lt [long]$Context.AnchorByte -or [string]::IsNullOrWhiteSpace([string]$event.device_observed_at)) { continue }
+                $eventAt = [DateTimeOffset]::MinValue
+                if ([DateTimeOffset]::TryParse([string]$event.device_observed_at, [ref]$eventAt) -and $eventAt -gt $now -and $eventAt -lt $nextAt) { $nextAt = $eventAt }
+            }
+            if ($nextAt -le $now) { $nextAt = $now.AddMilliseconds(1) }
+            Wait-Until $nextAt
+        } else {
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    Update-CampaignCapture $capture
     $observedThrough = Get-Now
-    $windowEvents = @(Get-ScenarioWindowEvents $capture $anchorByte $actionPromptAt $observedThrough)
-    if ($null -ne $DuringWait) { & $DuringWait -CurrentEvents $windowEvents }
+    $events = @(Get-ScenarioContextEvents $Context $observedThrough)
+    if ($null -ne $DuringWait) { & $DuringWait $events }
     $script:CurrentWindowEnd = $null
+    # Advance the operator action guard to the end of the window so the next scenario only scans
+    # events that arrive after this scenario's window (cross-scenario gap), never events that
+    # Assert-ScenarioEventContract already consumed.
+    $script:OperatorActionGuardFrom = Get-Now
     [void](Test-CampaignCaptureHealth $capture)
-    # Continuous HiLog health only. Screen/layout/fault artifact degradation is tracked on
-    # CaptureDegraded/CaptureArtifacts and must not collapse the observation window or abort later scenarios.
     $windowDegraded = [bool]$capture.Degraded
-    $coverageAfterAck = if ($null -ne $capture.LastHealthyAt) { [Math]::Max(0.0, ($capture.LastHealthyAt - $ack.AnsweredAt).TotalSeconds) } else { 0.0 }
-    $completeWindowObserved = -not $windowDegraded -and $coverageAfterAck -ge $script:WindowSeconds -and $observedThrough -ge $requiredObservationEnd
+    $coverageAfterAction = if ($null -ne $capture.LastHealthyAt) { [Math]::Max(0.0, ($capture.LastHealthyAt - $actionCompletedAt).TotalSeconds) } else { 0.0 }
+    $completeWindowObserved = -not $windowDegraded -and $coverageAfterAction -ge $script:WindowSeconds -and $observedThrough -ge $requiredEnd
+    $firstActionAt = if ($null -ne $Context.FirstActionAt) { [DateTimeOffset]$Context.FirstActionAt } else { [DateTimeOffset]$Context.StartedAt }
     $observation = [ordered]@{
-        scenario = $Scenario
+        scenario = [int]$Context.Scenario
+        protocol = 'mechanical-action-only-machine-verified-v1'
         campaign_capture_started_at = $capture.StartedAt.ToString('o')
         initial_anchor = $capture.InitialAnchor
-        scenario_anchor_byte = $anchorByte
-        window_started_at = $windowStartedAt.ToString('o')
-        ready_prompt_at = $readyPromptAt.ToString('o')
-        ready_ack_at = $ready.AnsweredAt.ToString('o')
-        action_prompt_at = $actionPromptAt.ToString('o')
-        action_ack_at = $ack.AnsweredAt.ToString('o')
-        required_observation_end_at = $requiredObservationEnd.ToString('o')
+        scenario_anchor_byte = [long]$Context.AnchorByte
+        window_started_at = ([DateTimeOffset]$Context.StartedAt).ToString('o')
+        action_prompt_at = $firstActionAt.ToString('o')
+        action_completed_at = $actionCompletedAt.ToString('o')
+        required_observation_end_at = $requiredEnd.ToString('o')
         observation_ended_at = $observedThrough.ToString('o')
-        action_interval_seconds = ($ack.AnsweredAt - $actionPromptAt).TotalSeconds
-        measured_coverage_before_action_prompt_seconds = ($actionPromptAt - $windowStartedAt).TotalSeconds
-        measured_coverage_after_ack_seconds = $coverageAfterAck
+        action_interval_seconds = ($actionCompletedAt - $firstActionAt).TotalSeconds
+        measured_coverage_before_action_prompt_seconds = ($firstActionAt - [DateTimeOffset]$Context.StartedAt).TotalSeconds
+        measured_coverage_after_action_seconds = $coverageAfterAction
         complete_window_observed = [bool]$completeWindowObserved
-        ready_valid = [bool]$ready.Valid
-        action_ack_valid = [bool]$ack.Valid
+        operator_steps = @($Context.Actions | ForEach-Object { [ordered]@{ step_index = $_.StepIndex; step_id = $_.StepId; expected_action = $_.ExpectedAction; completed_at = $_.CompletedAt.ToString('o'); machine_postcondition = $_.Outcome } })
         capture_degraded = [bool]$windowDegraded
         capture_health = [ordered]@{
             process_present = [bool]($null -ne $capture.Process)
@@ -1364,12 +1943,48 @@ function Invoke-ScenarioObservation {
             measured = $true
         }
         device_clock_skew_tolerance_seconds = [double]$script:DeviceClockSkewToleranceSeconds
-        events = Protect-SensitiveData $windowEvents
+        events = Protect-SensitiveData $events
     }
     Add-TranscriptRecord 'scenario-observation' $observation
     $capture.ActiveScenario = 0
-    if ($null -ne $actionError) { throw $actionError }
-    return [pscustomobject]@{ Observation = $observation; Events = $windowEvents; ReadyValid = [bool]$ready.Valid; AckValid = [bool]$ack.Valid; CaptureDegraded = [bool]$windowDegraded; CompleteWindowObserved = [bool]$completeWindowObserved }
+    return [pscustomobject]@{ Observation = $observation; Events = $events; CaptureDegraded = $windowDegraded; CompleteWindowObserved = $completeWindowObserved }
+}
+
+function Assert-ScenarioEventContract {
+    param(
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [object[]]$ExpectedStarts = @(),
+        [object[]]$ExpectedStops = @()
+    )
+    $infos = @($Events | ForEach-Object { Get-E3EventInfo $_ })
+    $skipped = @($infos | Where-Object { $_.Marker -in @('UI_START_SKIPPED', 'UI_STOP_SKIPPED') })
+    if ($skipped.Count -gt 0) { Throw-ScenarioInvalid $Scenario "unexpected-$($skipped[0].Marker)" }
+    $starts = @($infos | Where-Object { $_.Marker -eq 'UI_START' })
+    if ($starts.Count -ne $ExpectedStarts.Count) { Throw-ScenarioInvalid $Scenario "UI_START-count expected=$($ExpectedStarts.Count) actual=$($starts.Count)" }
+    for ($index = 0; $index -lt $ExpectedStarts.Count; $index++) {
+        $expected = $ExpectedStarts[$index]
+        if ([string]$starts[$index].Bundle -ne [string]$expected.Bundle) { Throw-ScenarioInvalid $Scenario "UI_START-order-or-bundle expected=$([string]$expected.Bundle) actual=$([string]$starts[$index].Bundle)" }
+        if ([string]$starts[$index].RequestId -ne [string]$expected.RequestId) { Throw-ScenarioInvalid $Scenario "UI_START-requestId expected=$([string]$expected.RequestId) actual=$([string]$starts[$index].RequestId)" }
+    }
+    $stops = @($infos | Where-Object { $_.Marker -eq 'UI_STOP' })
+    if ($stops.Count -ne $ExpectedStops.Count) { Throw-ScenarioInvalid $Scenario "UI_STOP-count expected=$($ExpectedStops.Count) actual=$($stops.Count)" }
+    for ($index = 0; $index -lt $ExpectedStops.Count; $index++) {
+        $expected = $ExpectedStops[$index]
+        if ([string]$stops[$index].Bundle -ne [string]$expected.Bundle) { Throw-ScenarioInvalid $Scenario "UI_STOP-bundle expected=$([string]$expected.Bundle) actual=$([string]$stops[$index].Bundle)" }
+        if ([string]$stops[$index].RequestId -ne [string]$expected.RequestId) { Throw-ScenarioInvalid $Scenario "UI_STOP-requestId expected=$([string]$expected.RequestId) actual=$([string]$stops[$index].RequestId)" }
+    }
+    $allowed = @{}
+    foreach ($expected in @($ExpectedStarts + $ExpectedStops)) { $allowed[[string]$expected.RequestId] = [string]$expected.Bundle }
+    foreach ($info in $infos) {
+        if ([string]::IsNullOrWhiteSpace([string]$info.Marker) -or $info.Marker -notmatch '^(UI|VPN|CREATE|START|STOP|DESTROY|FD|SESSION|PROMISE|ENTRY|LATE)_') { continue }
+        if (-not [string]::IsNullOrWhiteSpace([string]$info.RequestId) -and [string]$info.RequestId -ne 'missing') {
+            if (-not $allowed.ContainsKey([string]$info.RequestId)) { Throw-ScenarioInvalid $Scenario "unexpected-requestId:$([string]$info.RequestId) marker=$([string]$info.Marker)" }
+            $expectedBundle = [string]$allowed[[string]$info.RequestId]
+            if (-not [string]::IsNullOrWhiteSpace([string]$info.Bundle) -and [string]$info.Bundle -ne $expectedBundle) { Throw-ScenarioInvalid $Scenario "wrong-bundle-for-requestId:$([string]$info.RequestId)" }
+        }
+    }
+    return $true
 }
 
 function Get-RequestIdFromEvents {
@@ -1510,7 +2125,7 @@ function Get-DenyAssessment {
     $reject = (Test-CorrelatedMarker $Events $Bundle $RequestId 'START_PROMISE_REJECTED') -or
         (Test-CorrelatedMarker $Events $Bundle $RequestId 'VPN_CREATE_REJECTED')
     if ($reject) { return [pscustomobject]@{ result = 'pass'; reason = 'observable-B-request-rejection' } }
-    if ($DenyScreenshot -and $FullWindowObserved) { return [pscustomobject]@{ result = 'pass'; reason = 'deny-screenshot-and-ACK-plus-60-without-B-create' } }
+    if ($DenyScreenshot -and $FullWindowObserved) { return [pscustomobject]@{ result = 'pass'; reason = 'deny-layout-and-full-window-without-B-create' } }
     return [pscustomobject]@{ result = 'blocked'; reason = 'deny-proof-incomplete' }
 }
 
@@ -1564,6 +2179,8 @@ function New-ProcessProbeContext {
     return [pscustomobject]@{
         Scenario = $Scenario
         Bundle = $Bundle
+        # ADJ-20260808-0001: probe target is the <bundle>:vpn Extension ability process.
+        ProcessTarget = "${Bundle}:vpn"
         RequireBundlePresent = [bool]$RequireBundlePresent
         RequiredCount = [int]$RequiredCount
         SpacingSeconds = [double]$SpacingSeconds
@@ -1714,7 +2331,11 @@ function Invoke-ProcessFinalStateProbeSeries {
     }
     while (-not [bool]$Context.Finished -and -not [bool]$Context.Aborted) {
         if ($null -ne $Context.LastProbeAt) {
-            $nextProbeAt = ([DateTimeOffset]::Parse([string]$Context.LastProbeAt)).AddSeconds($spacingSeconds)
+            # Round-trip the exact DateTimeOffset (never [string], which drops sub-second precision)
+            # and add a small scheduling margin so the recorded spacing actually reaches the frozen
+            # 3.0s rule on the device clock; the rule threshold itself is never lowered and the
+            # assessment still re-checks recorded timestamps (no post-hoc tolerance override).
+            $nextProbeAt = ([DateTimeOffset]$Context.LastProbeAt).AddSeconds($spacingSeconds + 0.1)
             if ((Get-Now) -lt $nextProbeAt) { Wait-Until $nextProbeAt }
         }
         if ((Get-Now) -ge $Deadline) { break }
@@ -1737,6 +2358,7 @@ function Invoke-ProcessFinalStateProbeSeries {
             time = $probeAt.ToString('o')
             status = $status
             detail = $classification.detail
+            process_target = [string]$Context.ProcessTarget
             bundle_present = [bool]$classification.bundle_present
             consecutive_absent = [int]$Context.ConsecutiveAbsent
             spacing_seconds_since_previous = [double]$spacingSincePrevious
@@ -1748,8 +2370,19 @@ function Invoke-ProcessFinalStateProbeSeries {
             probe = $probeRecord
         })
         if ([int]$Context.ConsecutiveAbsent -ge [int]$Context.RequiredCount -and -not [bool]$Context.Aborted) {
-            $Context.Terminal = $true
-            $Context.Finished = $true
+            # Reaching the consecutive-absent count alone is not enough: the tail must actually be
+            # spaced >= the frozen spacing. Otherwise keep probing inside the window instead of
+            # finishing early; Test-ProcessAbsentEvidence re-checks recorded timestamps and would
+            # stay blocked if we stopped here.
+            $absentTail = @($Context.Probes | Where-Object { [string]$_.status -eq 'absent' } | Select-Object -Last ([int]$Context.RequiredCount))
+            if ($absentTail.Count -ge [int]$Context.RequiredCount) {
+                $firstAbsentAt = [DateTimeOffset]::Parse([string]$absentTail[0].time)
+                $lastAbsentAt = [DateTimeOffset]::Parse([string]$absentTail[$absentTail.Count - 1].time)
+                if (($lastAbsentAt - $firstAbsentAt).TotalSeconds -ge ([double]$Context.SpacingSeconds - 0.001)) {
+                    $Context.Terminal = $true
+                    $Context.Finished = $true
+                }
+            }
         }
         $Context.LastProbeAt = $probeAt
     }
@@ -1929,6 +2562,7 @@ function Get-ScenarioAggregation {
     param([Parameter(Mandatory)][object[]]$Scenarios, [bool]$IntegrityViolation = $false)
     if ($IntegrityViolation) { return 'invalid' }
     $results = @($Scenarios | ForEach-Object { [string]$_.result })
+    if ($results -contains 'invalid') { return 'invalid' }
     if ($results -contains 'fail') { return 'fail' }
     if ($results -contains 'blocked') { return 'blocked' }
     if ($results.Count -ne 7 -or @($results | Where-Object { $_ -ne 'pass' }).Count -gt 0) { return 'invalid' }
@@ -1955,36 +2589,69 @@ function New-BlockedScenarios {
     return @($items)
 }
 
+function Assert-CampaignCaptureHealthy {
+    param(
+        [Parameter(Mandatory)]$Capture,
+        [AllowNull()][int]$Scenario = $null,
+        [AllowNull()][string]$Origin = $null
+    )
+    # ADJ-20260808-0002 (C6): a continuously degraded CampaignCapture (raw-hilog) is NEVER a
+    # scenario-invalid input on any path (Invoke-Capture, Wait-MachineCondition, S5 direct
+    # capture, post-observation). Both infrastructure and non-infrastructure continuous
+    # degradation throw blocked with the recorded raw-hilog category; only the infrastructure
+    # category authorizes the USB retry. No-op when the capture is healthy.
+    if ($null -eq $Capture -or -not [bool]$Capture.Degraded) { return }
+    $scenarioNumber = if ($null -eq $Scenario) { 0 } else { [int]$Scenario }
+    $continuousInfra = Get-CaptureDegradedInfra $scenarioNumber
+    if ($true -eq $continuousInfra) {
+        $infraEntry = @($script:CaptureDegraded | Where-Object { [string]$_.category -eq 'infrastructure' } | Select-Object -First 1)
+        $detail = Protect-SensitiveText ([string](Get-OptionalProperty $infraEntry 'reason' 'capture process degraded'))
+        $script:InfrastructureReasonObserved = 'hdc-usb-interruption'
+        throw "scenario-$scenarioNumber continuous capture infrastructure failure: $detail"
+    }
+    $entry = @($script:CaptureDegraded | Where-Object { [string]$_.component -match 'raw-hilog' } | Select-Object -First 1)
+    $detail = Protect-SensitiveText ([string](Get-OptionalProperty $entry 'reason' 'continuous capture degraded'))
+    throw "scenario-$scenarioNumber continuous capture non-infrastructure blocked: $detail"
+}
+
 function Assert-ScenarioCaptureCanContinue {
     param([Parameter(Mandatory)]$Results, [Parameter(Mandatory)]$Observation)
     $script:PartialScenarios = @($Results)
     if (-not $Observation.CaptureDegraded) { return }
     $scenarioNumber = [int]$Observation.Observation.scenario
-    $entries = @($script:CaptureDegraded | Where-Object {
-        [int]$_.scenario -in @($scenarioNumber, 0) -and [string]$_.component -match 'raw-hilog'
-    })
-    $infraEntries = @($entries | Where-Object {
-        [string]$_.category -eq 'infrastructure' -or [string]$_.infrastructure_reason -eq 'hdc-usb-interruption'
-    })
-    if ($infraEntries.Count -gt 0) {
-        $detail = Protect-SensitiveText ([string]$infraEntries[0].reason)
-        $script:InfrastructureReasonObserved = 'hdc-usb-interruption'
-        throw "scenario-$scenarioNumber continuous capture infrastructure failure: $detail"
-    }
-    $detail = if ($entries.Count -gt 0) { Protect-SensitiveText ([string]$entries[0].reason) } else { 'continuous capture degraded' }
-    throw "scenario-$scenarioNumber continuous capture non-infrastructure blocked: $detail"
+    # ADJ-20260808-0002 (C6): a scenario whose observation window was shortened by continuous
+    # raw-hilog degradation is a runner blocked (infra or non-infra), never a scenario invalid.
+    # Delegates to the unified classifier used by Invoke-Capture / Wait-MachineCondition.
+    Assert-CampaignCaptureHealthy $script:CampaignCapture $scenarioNumber -Origin 'Assert-ScenarioCaptureCanContinue'
 }
 
 function Invoke-Capture {
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Scenario, [switch]$ObservationOnly)
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Scenario, [switch]$ObservationOnly, [switch]$Replace)
+    # ADJ-20260808-0003: ScreenCap/DumpLayout/Receive exit 124/125 / timeout / HDC transport
+    # failures are infrastructure, not scenario evidence loss. They must propagate the
+    # infrastructure category/blocked path (global CaptureDegraded + infrastructure_reason +
+    # authorized retry) and must never be turned into a ScenarioInvalid verdict.
+    # ADJ-20260808-0002 (C6): `-Replace` drops any previous same-name CaptureArtifacts record so
+    # a bounded same-name layout resample never leaves the collection manifest pointing at an
+    # overwritten capture file.
+    $script:LastCaptureInfrastructure = $false
     $operations = @('ScreenCap', 'DumpLayout', 'ReceiveScreen', 'ReceiveLayout')
     $failures = [Collections.Generic.List[string]]::new()
+    $infrastructureFailures = [Collections.Generic.List[string]]::new()
     if ($null -ne $script:CampaignCapture -and $script:CampaignCapture.Degraded) {
-        $failures.Add('continuous-hilog-capture-degraded')
+        # ADJ-20260808-0002 (C6): a continuously degraded raw-hilog stream is NEVER a scenario
+        # invalid input on any capture path. Throw the classified blocked (infra or non-infra)
+        # immediately so Invoke-LayoutCheckpoint / Invoke-MechanicalStep / S5 direct capture
+        # cannot convert it into ScenarioInvalid. Infrastructure continuous degradation authorizes
+        # the USB retry; non-infrastructure stays a plain blocked.
+        Assert-CampaignCaptureHealthy $script:CampaignCapture $Scenario -Origin 'Invoke-Capture'
     } else {
         foreach ($operation in $operations) {
             $result = Invoke-HdcOperation $operation @{ Name = $Name } -AllowFailure
             if ($result.ExitCode -ne 0) { $failures.Add("$operation-exit-$($result.ExitCode)") }
+            if ($result.ExitCode -in @(124, 125) -or [string]$result.Stderr -match '(?i)\btimeout\b|\boffline\b|\bUSB\b|\bdisconnect(?:ed)?\b|transport (?:offline|error|fail)|HDC Process\.Start') {
+                $infrastructureFailures.Add("$operation-exit-$($result.ExitCode)")
+            }
         }
     }
     $screenPath = Join-Path $script:RawPath "capture-$Name.png"
@@ -1996,20 +2663,395 @@ function Invoke-Capture {
     }
     $status = if ($failures.Count -eq 0) { 'collected' } else { 'degraded' }
     $artifact = [ordered]@{ scenario = $Scenario; name = $Name; status = $status; failures = @($failures); screen_path = $screenPath; layout_path = $layoutPath }
+    if ($Replace) {
+        $stale = @($script:CaptureArtifacts | Where-Object { [string]$_.name -eq $Name })
+        foreach ($old in $stale) { [void]$script:CaptureArtifacts.Remove($old) }
+    }
     $script:CaptureArtifacts.Add($artifact)
     if ($status -eq 'degraded') {
+        $isInfrastructure = $infrastructureFailures.Count -gt 0
+        $script:LastCaptureInfrastructure = $isInfrastructure
         if ($ObservationOnly) {
-            # Observation-only captures (e.g. the Settings>VPN page in scenario 5) never enter the
-            # global CaptureDegraded list: their loss is recorded as an independent diagnostic and
-            # must not block the scenario or the final overall aggregation. The failure is still
-            # visible in CaptureArtifacts (status=degraded) and in observation_only_degraded.
-            $script:ObservationOnlyDegraded.Add([ordered]@{ scenario = $Scenario; name = $Name; status = 'degraded'; failures = @($failures); screen_path = $screenPath; layout_path = $layoutPath })
+            # Observation-only captures never enter the global CaptureDegraded list: their loss
+            # is an independent diagnostic and must not block the scenario or overall. An
+            # infrastructure failure inside an observation-only capture still records its
+            # category so the reviewer sees the transport reason without blocking anything.
+            $script:ObservationOnlyDegraded.Add([ordered]@{ scenario = $Scenario; name = $Name; status = 'degraded'; category = $(if ($isInfrastructure) { 'infrastructure' } else { 'non-infrastructure' }); infrastructure_reason = $(if ($isInfrastructure) { 'hdc-usb-interruption' } else { $null }); failures = @($failures); screen_path = $screenPath; layout_path = $layoutPath })
         } else {
-            # Screen/layout degradation is non-infrastructure evidence loss; do not mark continuous Capture.Degraded.
-            Add-CaptureDegradation $script:CampaignCapture 'screen-layout-capture' ($failures -join ',') -Scenario $Scenario -Category 'non-infrastructure' -MarkContinuousDegraded $false
+            if ($isInfrastructure) {
+                $script:InfrastructureReasonObserved = 'hdc-usb-interruption'
+                Add-CaptureDegradation $script:CampaignCapture 'screen-layout-capture' ($failures -join ',') -Scenario $Scenario -Category 'infrastructure' -InfrastructureReason 'hdc-usb-interruption' -MarkContinuousDegraded $false
+            } else {
+                # Non-infrastructure screen/layout evidence loss; do not mark continuous Capture.Degraded.
+                Add-CaptureDegradation $script:CampaignCapture 'screen-layout-capture' ($failures -join ',') -Scenario $Scenario -Category 'non-infrastructure' -MarkContinuousDegraded $false
+            }
         }
     }
     return $status
+}
+
+function Get-LayoutFacts {
+    param([Parameter(Mandatory)]$Value)
+    $facts = [Collections.Generic.List[string]]::new()
+    function Visit-LayoutValue {
+        param($Current, [string]$Path)
+        if ($null -eq $Current) { return }
+        if ($Current -is [string] -or $Current -is [ValueType]) {
+            $facts.Add("$Path=$([string]$Current)")
+            return
+        }
+        if ($Current -is [Collections.IDictionary]) {
+            foreach ($key in $Current.Keys) { Visit-LayoutValue $Current[$key] "$Path.$([string]$key)" }
+            return
+        }
+        if ($Current -is [pscustomobject]) {
+            foreach ($property in $Current.PSObject.Properties) { Visit-LayoutValue $property.Value "$Path.$($property.Name)" }
+            return
+        }
+        if ($Current -is [Collections.IEnumerable]) {
+            $index = 0
+            foreach ($item in $Current) { Visit-LayoutValue $item "$Path[$index]"; $index++ }
+        }
+    }
+    Visit-LayoutValue $Value '$'
+    return @($facts)
+}
+
+function Test-CapturedLayoutProfile {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('entry', 'authorization', 'authorization-dismissed', 'settings-vpn', 'settings-app-info')][string]$Profile,
+        [AllowNull()][string]$ExpectedBundle = $null
+    )
+    $artifact = @($script:CaptureArtifacts | Where-Object { [string]$_.name -eq $Name } | Select-Object -Last 1)
+    if ($artifact.Count -ne 1 -or [string]$artifact[0].status -ne 'collected') {
+        return [pscustomobject]@{ status = 'unverifiable'; reason = 'capture-not-collected'; profile = $Profile; matched = @() }
+    }
+    $layout = $null
+    try { $layout = Get-Content -LiteralPath ([string]$artifact[0].layout_path) -Raw | ConvertFrom-Json -Depth 80 } catch {
+        return [pscustomobject]@{ status = 'unverifiable'; reason = 'layout-json-invalid'; profile = $Profile; matched = @() }
+    }
+    $facts = @(Get-LayoutFacts $layout)
+    $joined = ($facts -join "`n").ToLowerInvariant()
+    $checks = [ordered]@{}
+    # ADJ-20260808-0003 (C6): real layout facts are a top-level array with `attributes` +
+    # `children` on every node (`$[n][.children[m]...].attributes.<field>=<value>`). A single-
+    # element top-level array round-trips through JSON to a bare root (`$.attributes.<field>` /
+    # `$.children[m].attributes.<field>`), which this generic matcher also tolerates. It never
+    # depends on any self-made `window`/`resourceId` structure. `attributes.id`/`key` carry
+    # stable control ids; `attributes.text` carries visible text; `attributes.bundleName`/`type`
+    # carry the window owner/type on whichever node actually owns them.
+    $attrField = '[^=\n]*?\.attributes\.'
+    $textNode = $attrField + 'text='
+    function Get-AttrValuePattern([string]$Field, [string]$Value) {
+        return '(?:^|\n)' + $attrField + $Field + '=' + [regex]::Escape($Value) + '(?=\n|$)'
+    }
+    # ADJ-20260808-0003: expected-bundle is only required where the profile structurally embeds
+    # the inspected bundle (the entry app page). The authorization dialog owner/type/text/buttons
+    # prove the system dialog; request ownership is proven by the UI_START/event gate, never by
+    # requiring the request bundle in the authorization page. settings-app-info does NOT require
+    # the expected bundle either: A correctness is proven by the A process effect gate (force
+    # stop makes `<bundle>:vpn` absent while bundle stays present), not by a bundle field on the
+    # Settings page.
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedBundle) -and $Profile -eq 'entry') { $checks['expected-bundle'] = $joined -match (Get-AttrValuePattern 'bundlename' $ExpectedBundle.ToLowerInvariant()) }
+    switch ($Profile) {
+        # ADJ-20260808-0003 (C6): entry profile keeps ExpectedBundle + button id/key start-vpn /
+        # stop-vpn. The real EMU entry layout carries id/key `start-vpn`/`stop-vpn` on Button
+        # nodes; fullscreen text alone is not sufficient.
+        'entry' {
+            $checks['start-control'] = $joined -match ($attrField + '(?:id|key)=start-vpn(?=\n|$)')
+            $checks['stop-control'] = $joined -match ($attrField + '(?:id|key)=stop-vpn(?=\n|$)')
+        }
+        # ADJ-20260808-0003 (C6): calibrated against the real attributes/children authorization
+        # layout facts (read-only): any node owns bundleName=com.huawei.hmos.vpndialog and any
+        # node owns type=Dialog (API26 puts the Dialog on a child), plus a dialog text that
+        # contains both 允许 and VPN (whitespace/app-name tolerant, never the exact app label),
+        # plus Allow/允许 and Cancel/Deny/取消/拒绝 controls. The request bundle is never required
+        # here: request ownership is proven by the UI_START/event gate, not by the page.
+        'authorization' {
+            $checks['dialog-owner'] = $joined -match (Get-AttrValuePattern 'bundlename' 'com.huawei.hmos.vpndialog')
+            $checks['dialog-type'] = $joined -match (Get-AttrValuePattern 'type' 'dialog')
+            $checks['dialog-text'] = ($joined -match ($textNode + '[^\n]*允许[^\n]*vpn[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*vpn[^\n]*允许[^\n]*(?=\n|$)'))
+            $checks['allow-control'] = ($joined -match ($textNode + '[^\n]*\ballow\b[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*允许[^\n]*(?=\n|$)'))
+            $checks['cancel-control'] = ($joined -match ($textNode + '[^\n]*(?:cancel|deny)[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*取消[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*拒绝[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*不允许[^\n]*(?=\n|$)'))
+        }
+        'authorization-dismissed' {
+            $checks['authorization-controls-absent'] = $joined -notmatch ($textNode + '[^\n]*(?:允许|取消|拒绝|不允许)[^\n]*(?=\n|$)')
+            $checks['entry-start-control'] = $joined -match ($attrField + '(?:id|key)=start-vpn(?=\n|$)')
+        }
+        # ADJ-20260808-0003 (C6): settings owner matches any node's attributes.bundleName=
+        # com.huawei.hmos.settings; the VPN group resource matches attributes.id/key =
+        # Setting.MobileNetwork.vpn_group_group.vpn_settings. The page is no longer decisive
+        # (Settings>VPN is observation-only), but plain text "VPN" alone must never match.
+        'settings-vpn' {
+            $checks['settings-owner'] = $joined -match (Get-AttrValuePattern 'bundlename' 'com.huawei.hmos.settings')
+            $checks['vpn-group-resource'] = $joined -match ($attrField + '(?:id|key)=setting\.mobilenetwork\.vpn_group_group\.vpn_settings(?=\n|$)')
+            $checks['vpn-page-text'] = $joined -match ($textNode + '[^\n]*vpn[^\n]*(?=\n|$)') -and $joined -match ($textNode + '[^\n]*没有 vpn[^\n]*(?=\n|$)')
+            $checks['add-vpn-button'] = $joined -match ($textNode + '[^\n]*添加 vpn 网络[^\n]*(?=\n|$)')
+        }
+        # ADJ-20260808-0003 (C6): no trusted device sample for the Settings app-info page (the
+        # last capture-scenario-5-app-info-force-stop was actually App B's page), so the profile
+        # stays conservative and ONLY requires: any node owns attributes.bundleName=
+        # com.huawei.hmos.settings + the exact app label "E3 Physical VPN Preflight" + a
+        # Force Stop / 强制停止 control. The un-sampled app-info-structure id/key requirement is
+        # REMOVED so the profile never systematically fails on an un-sampled structure. No
+        # ExpectedBundle either: A correctness is proven by the A process effect gate (force stop
+        # makes `<bundle>:vpn` absent while the bundle stays present), never by a bundle field on
+        # the Settings page. A/B same-name cannot manufacture a false pass: the wrong-B effect
+        # fixture stays invalid through the process effect gate. No match => invalid; the residual
+        # risk is registered in ADJ-20260808-0003 pending a trusted device sample.
+        'settings-app-info' {
+            $checks['settings-owner'] = $joined -match (Get-AttrValuePattern 'bundlename' 'com.huawei.hmos.settings')
+            $checks['app-label'] = $joined -match ($textNode + '[^\n]*e3 physical vpn preflight[^\n]*(?=\n|$)')
+            $checks['force-stop-control'] = ($joined -match ($textNode + '[^\n]*force stop[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*强制停止[^\n]*(?=\n|$)')) -or ($joined -match ($attrField + '(?:id|key)=[^\n]*force[_-]?stop[^\n]*(?=\n|$)'))
+        }
+    }
+    $failed = @($checks.Keys | Where-Object { -not [bool]$checks[$_] })
+    return [pscustomobject]@{
+        status = $(if ($failed.Count -eq 0) { 'pass' } else { 'mismatch' })
+        reason = $(if ($failed.Count -eq 0) { 'deterministic-layout-match' } else { 'layout-fields-missing:' + ($failed -join ',') })
+        profile = $Profile
+        matched = @($checks.Keys | Where-Object { [bool]$checks[$_] })
+        required = @($checks.Keys)
+    }
+}
+
+function Invoke-LayoutCheckpoint {
+    param(
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet('entry', 'authorization', 'authorization-dismissed', 'settings-vpn', 'settings-app-info')][string]$Profile,
+        [AllowNull()][string]$ExpectedBundle = $null,
+        [AllowNull()][int]$StepIndex = $null,
+        [AllowNull()][string]$StepId = $null,
+        [AllowNull()][string]$ExpectedAction = $null,
+        [switch]$ObservationOnly
+    )
+    # Machine-only deterministic layout gate. The operator never judges the screen: wrong/unexpected
+    # UI is protocol invalid; uncollected capture is also invalid at a decisive gate. Platform "no
+    # authorization UI at all" remains a documented blocked path only when a scenario explicitly
+    # classifies that outcome outside this checkpoint (this gate itself never asks the operator).
+    $captureStatus = Invoke-Capture $Name $Scenario -ObservationOnly:$ObservationOnly
+    if ($captureStatus -ne 'collected') {
+        $checkpoint = [ordered]@{ status = 'unverifiable'; name = $Name; capture_status = $captureStatus; profile = $Profile; matching = $false; note = 'screenshot-or-layout-not-collected'; reason = 'capture-not-collected' }
+        Add-TranscriptRecord 'machine-layout-checkpoint' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
+        # ADJ-20260808-0003: an infrastructure capture failure (exit 124/125 / timeout / HDC
+        # transport) propagates as infrastructure blocked with retry authorization, never as a
+        # scenario invalid; only non-infrastructure capture loss invalidates here.
+        if ($script:LastCaptureInfrastructure) {
+            throw "HDC infrastructure interruption layout-checkpoint=$Name scenario=$Scenario"
+        }
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason "layout-checkpoint-$Name-capture-not-collected" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -MachinePostcondition $checkpoint -CaptureAfter ([ordered]@{ status = $captureStatus; name = $Name })
+    }
+    $assessment = Test-CapturedLayoutProfile $Name $Profile $ExpectedBundle
+    # ADJ-20260808-0002 (C6): bounded same-name resample for a collected-but-mismatched layout.
+    # A fast operator can act before the platform renders the expected UI (e.g. the authorization
+    # dialog appears a few seconds later), so a mismatch on a collected capture is re-captured
+    # under the SAME name at ~1s intervals for at most 8 seconds total and re-evaluated. Every
+    # retry REPLACES the previous same-name CaptureArtifacts record so the collection manifest
+    # never points at an overwritten file; transcript records each attempt and the missing
+    # fields. Infrastructure / continuous capture degradation aborts immediately with blocked
+    # (never ScenarioInvalid). A final mismatch / unverifiable stays ScenarioInvalid; the
+    # operator is never re-asked to confirm the screen.
+    $attempts = 0
+    $resampleDeadline = (Get-Now).AddSeconds(8)
+    while ([string]$assessment.status -eq 'mismatch' -and (Get-Now) -lt $resampleDeadline) {
+        $attempts++
+        Wait-Until (Get-Now).AddSeconds(1)
+        $retryStatus = Invoke-Capture $Name $Scenario -ObservationOnly:$ObservationOnly -Replace
+        if ($retryStatus -ne 'collected') {
+            # Infrastructure / continuous degradation aborts the resample immediately with blocked.
+            if ($script:LastCaptureInfrastructure) {
+                throw "HDC infrastructure interruption layout-checkpoint=$Name scenario=$Scenario (resample attempt $attempts)"
+            }
+            # A non-infrastructure capture loss during resample keeps the last collected mismatch
+            # assessment and falls through to the final mismatch handling below.
+            break
+        }
+        $assessment = Test-CapturedLayoutProfile $Name $Profile $ExpectedBundle
+        Add-TranscriptRecord 'machine-layout-resample' ([ordered]@{
+            scenario = $Scenario
+            name = $Name
+            profile = $Profile
+            attempt = $attempts
+            matching = ([string]$assessment.status -eq 'pass')
+            reason = [string]$assessment.reason
+            missing = @($assessment.required | Where-Object { $_ -notin @($assessment.matched) })
+        })
+    }
+    $matching = [string]$assessment.status -eq 'pass'
+    $checkpoint = [ordered]@{
+        status = [string]$assessment.status
+        name = $Name
+        capture_status = $captureStatus
+        profile = $Profile
+        expected_bundle = $ExpectedBundle
+        matching = [bool]$matching
+        reason = [string]$assessment.reason
+        matched = @($assessment.matched)
+        required = @($assessment.required)
+        attempts = $attempts
+        note = 'machine-deterministic-layout-v1'
+    }
+    Add-TranscriptRecord 'machine-layout-checkpoint' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
+    if (-not $matching) {
+        $suffix = if ([string]$assessment.status -eq 'unverifiable') { 'layout-unverifiable' } else { 'layout-mismatch' }
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason "layout-checkpoint-$Name-$suffix" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -MachinePostcondition $checkpoint -CaptureAfter ([ordered]@{ status = $captureStatus; name = $Name })
+    }
+    return $checkpoint
+}
+
+function Invoke-LayoutChoiceCheckpoint {
+    param(
+        [Parameter(Mandatory)][int]$Scenario,
+        [Parameter(Mandatory)][string]$Name,
+        [AllowNull()][string]$ExpectedBundle = $null,
+        [AllowNull()][int]$StepIndex = $null,
+        [AllowNull()][string]$StepId = $null,
+        [AllowNull()][string]$ExpectedAction = $null,
+        [switch]$ObservationOnly
+    )
+    # ADJ-20260808-0003: dual-profile machine layout gate for optional reauthorization (S5/S6 A).
+    # Capture once under $Name, then classify as entry OR authorization. A fast operator can act
+    # before the platform renders either UI, so a dual-mismatch on a collected capture is re-
+    # captured under the SAME name (-Replace) at ~1s intervals for at most 8 seconds total and
+    # re-evaluated against both profiles. Any profile pass returns selected_profile + attempts.
+    # Infrastructure / continuous capture degradation aborts immediately as blocked (never
+    # ScenarioInvalid). A final dual mismatch stays ScenarioInvalid; the operator is never re-
+    # asked to confirm the screen.
+    $captureStatus = Invoke-Capture $Name $Scenario -ObservationOnly:$ObservationOnly
+    if ($captureStatus -ne 'collected') {
+        $checkpoint = [ordered]@{ status = 'unverifiable'; name = $Name; capture_status = $captureStatus; selected_profile = $null; matching = $false; note = 'screenshot-or-layout-not-collected'; reason = 'capture-not-collected'; attempts = 0 }
+        Add-TranscriptRecord 'machine-layout-choice-checkpoint' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
+        if ($script:LastCaptureInfrastructure) {
+            throw "HDC infrastructure interruption layout-choice-checkpoint=$Name scenario=$Scenario"
+        }
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason "layout-choice-checkpoint-$Name-capture-not-collected" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -MachinePostcondition $checkpoint -CaptureAfter ([ordered]@{ status = $captureStatus; name = $Name })
+    }
+    $entryAssessment = Test-CapturedLayoutProfile $Name 'entry' $ExpectedBundle
+    $authAssessment = Test-CapturedLayoutProfile $Name 'authorization' $ExpectedBundle
+    $selectedProfile = $null
+    if ([string]$authAssessment.status -eq 'pass') { $selectedProfile = 'authorization' }
+    elseif ([string]$entryAssessment.status -eq 'pass') { $selectedProfile = 'entry' }
+    $attempts = 0
+    $resampleDeadline = (Get-Now).AddSeconds(8)
+    while ($null -eq $selectedProfile -and (Get-Now) -lt $resampleDeadline) {
+        $attempts++
+        Wait-Until (Get-Now).AddSeconds(1)
+        $retryStatus = Invoke-Capture $Name $Scenario -ObservationOnly:$ObservationOnly -Replace
+        if ($retryStatus -ne 'collected') {
+            if ($script:LastCaptureInfrastructure) {
+                throw "HDC infrastructure interruption layout-choice-checkpoint=$Name scenario=$Scenario (resample attempt $attempts)"
+            }
+            break
+        }
+        $entryAssessment = Test-CapturedLayoutProfile $Name 'entry' $ExpectedBundle
+        $authAssessment = Test-CapturedLayoutProfile $Name 'authorization' $ExpectedBundle
+        if ([string]$authAssessment.status -eq 'pass') { $selectedProfile = 'authorization' }
+        elseif ([string]$entryAssessment.status -eq 'pass') { $selectedProfile = 'entry' }
+        Add-TranscriptRecord 'machine-layout-choice-resample' ([ordered]@{
+            scenario = $Scenario
+            name = $Name
+            attempt = $attempts
+            matching = ($null -ne $selectedProfile)
+            selected_profile = $selectedProfile
+            entry_reason = [string]$entryAssessment.reason
+            authorization_reason = [string]$authAssessment.reason
+        })
+    }
+    $matching = $null -ne $selectedProfile
+    $checkpoint = [ordered]@{
+        status = $(if ($matching) { 'pass' } else { 'mismatch' })
+        name = $Name
+        capture_status = $captureStatus
+        selected_profile = $selectedProfile
+        expected_bundle = $ExpectedBundle
+        matching = [bool]$matching
+        reason = $(if ($matching) { "layout-choice-$selectedProfile" } else { "entry:$([string]$entryAssessment.reason);authorization:$([string]$authAssessment.reason)" })
+        attempts = $attempts
+        note = 'machine-deterministic-layout-choice-v1'
+    }
+    Add-TranscriptRecord 'machine-layout-choice-checkpoint' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
+    if (-not $matching) {
+        Throw-ScenarioInvalid -Scenario $Scenario -Reason "layout-choice-checkpoint-$Name-layout-mismatch" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -MachinePostcondition $checkpoint -CaptureAfter ([ordered]@{ status = $captureStatus; name = $Name })
+    }
+    return $checkpoint
+}
+
+function Invoke-ReviewOnlyCapture {
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][int]$Scenario)
+    $captureStatus = Invoke-Capture $Name $Scenario -ObservationOnly
+    $checkpoint = [ordered]@{ status = 'review-only'; name = $Name; capture_status = $captureStatus; matching = $null; note = 'final evidence only; not used as a semantic verdict input' }
+    Add-TranscriptRecord 'review-only-layout-artifact' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
+    return $captureStatus
+}
+
+function Get-ExactProcessCheckpoint {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ExpectedActiveBundles,
+        [AllowEmptyCollection()][string[]]$ObservedBundles = @()
+    )
+    # ADJ-20260808-0003: every non-pass process checkpoint is status=blocked (never invalid).
+    # HDC transport/timeout/offline on PidOf/BundleDump records hdc-usb-interruption and sets the
+    # global InfrastructureReasonObserved. Present/absent mismatch or unknown probe state is also
+    # blocked — process residue is platform/infra uncertainty, not an operator protocol error.
+    $states = [Collections.Generic.List[object]]::new()
+    $valid = $true
+    $reason = $null
+    $infraHit = $false
+    foreach ($bundle in @($script:BundleA, $script:BundleB)) {
+        $pidResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $bundle } -AllowFailure
+        $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $bundle } -AllowFailure
+        $dump = Get-BundleDumpAssessment $dumpResult $bundle
+        $pidIsInfra = Test-FaultInfrastructureFailure $pidResult
+        $dumpIsInfra = (Test-FaultInfrastructureFailure $dumpResult) -or ([string]$dump.Status -eq 'infrastructure')
+        $pidKnown = [int]$pidResult.ExitCode -in @(0, 1) -and [string]::IsNullOrWhiteSpace([string]$pidResult.Stderr)
+        $present = $pidKnown -and -not [string]::IsNullOrWhiteSpace([string]$pidResult.Stdout)
+        $expectedPresent = $bundle -in $ExpectedActiveBundles
+        # ADJ-20260808-0003: observed-only bundles (e.g. B after a rejected create in S6) are
+        # recorded but never required absent/present; their state cannot gate the checkpoint.
+        $observedOnly = $bundle -in $ObservedBundles
+        if ($observedOnly) {
+            $states.Add([ordered]@{ bundle = $bundle; bundle_present = ($dump.Status -eq 'pass'); process_target = "${bundle}:vpn"; process_present = [bool]$present; expected_present = $null; observed_only = $true })
+            continue
+        }
+        if ($pidIsInfra -or $dumpIsInfra) {
+            $valid = $false
+            $infraHit = $true
+            if ($null -eq $reason) { $reason = "hdc-usb-interruption:process-check:$bundle" }
+        } elseif ($dump.Status -ne 'pass') {
+            $valid = $false
+            if ($null -eq $reason) { $reason = "bundle-check-unavailable:$bundle" }
+        } elseif (-not $pidKnown) {
+            $valid = $false
+            if ($null -eq $reason) { $reason = "process-check-unavailable:$bundle" }
+        } elseif ($present -ne $expectedPresent) {
+            $valid = $false
+            if ($null -eq $reason) { $reason = "process-state-mismatch:$bundle expected-active=$expectedPresent actual-active=$present" }
+        }
+        $states.Add([ordered]@{ bundle = $bundle; bundle_present = ($dump.Status -eq 'pass'); process_target = "${bundle}:vpn"; process_present = [bool]$present; expected_present = [bool]$expectedPresent; observed_only = $false })
+    }
+    if ($infraHit) { $script:InfrastructureReasonObserved = 'hdc-usb-interruption' }
+    return [ordered]@{ status = $(if ($valid) { 'pass' } else { 'blocked' }); reason = $(if ($valid) { 'exact-process-checkpoint' } else { $reason }); states = @($states) }
+}
+
+function Get-ProcessTargetCheckpoint {
+    param([Parameter(Mandatory)][string]$Bundle)
+    # ADJ-20260808-0003: after a machine-verified CREATE_ACCEPTED, a precise `pidof <bundle>:vpn`
+    # present checkpoint proves the naming tuple actually resolves to a live Extension process.
+    # Absent / unknown / error means the naming is unverified: blocked with an explicit
+    # process-target-unverified reason, never pass. S3/S5/S7 consume this verified checkpoint.
+    $pidResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $Bundle } -AllowFailure
+    $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $Bundle } -AllowFailure
+    $assessment = Get-ProcessProbeStatus $pidResult $dumpResult $Bundle
+    $verified = [string]$assessment.status -eq 'present'
+    $reason = if ($verified) { 'process-target-present' } elseif ([string]$assessment.status -eq 'absent') { 'process-target-unverified:absent' } else { 'process-target-unverified:' + [string]$assessment.detail }
+    return [ordered]@{
+        status = $(if ($verified) { 'pass' } else { 'blocked' })
+        reason = $reason
+        process_target = "${Bundle}:vpn"
+        probe = [ordered]@{ pid_status = [string]$assessment.status; detail = $assessment.detail; bundle_present = [bool]$assessment.bundle_present }
+    }
 }
 
 function Test-FaultInfrastructureFailure {
@@ -2073,7 +3115,7 @@ function Invoke-DryRunCampaign {
     return New-BlockedScenarios 'dry-run-no-device-non-evidence'
 }
 
-function Invoke-LiveCampaign {
+function Invoke-StrongLiveCampaign {
     param([Parameter(Mandatory)]$Freeze)
     $results = [Collections.Generic.List[object]]::new()
     $script:CampaignPhase = 'preflight'
@@ -2086,381 +3128,475 @@ function Invoke-LiveCampaign {
     }
     $campaignCapture = Start-CampaignHilogCapture
     Initialize-CampaignCaptureAnchor $campaignCapture
-    if ($campaignCapture.Degraded) {
-        $infraPrep = @($script:CaptureDegraded | Where-Object {
-            [string]$_.category -eq 'infrastructure' -or [string]$_.infrastructure_reason -eq 'hdc-usb-interruption'
-        }).Count -gt 0
-        if ($infraPrep) { $script:InfrastructureReasonObserved = 'hdc-usb-interruption' }
-        throw 'collection preparation blocked: continuous capture unavailable before scenario-1 installation'
+    if ($campaignCapture.Degraded) { throw 'collection preparation blocked: continuous capture unavailable before scenario-1 installation' }
+
+    # S1 is fully machine-operated. The operator is not asked to attest an installation fact.
+    $context1 = New-ScenarioContext 1
+    $firstBaselineQueryAt = Get-Now
+    foreach ($bundle in @($script:BundleA, $script:BundleB)) {
+        $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $bundle } -AllowFailure
+        if ((Get-HdcCombinedText $dumpResult) -notmatch 'failed to get information|not exist|not found') { throw "cleanup baseline failed: bundle already installed or query unavailable: $bundle" }
+        $processResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $bundle } -AllowFailure
+        if ($processResult.ExitCode -notin @(0, 1) -or -not [string]::IsNullOrWhiteSpace([string]$processResult.Stderr) -or -not [string]::IsNullOrWhiteSpace([string]$processResult.Stdout)) { throw "cleanup baseline failed: extension process state is not absent: $bundle" }
     }
-    $scenario1State = [pscustomobject]@{ FirstBaselineQueryAt = $null; InstallCompletedAt = $null }
-    $scenario1Action = {
-        $scenario1State.FirstBaselineQueryAt = Get-Now
-        foreach ($bundle in @($script:BundleA, $script:BundleB)) {
-            $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $bundle } -AllowFailure
-            if ((Get-HdcCombinedText $dumpResult) -notmatch 'failed to get information|not exist|not found') { throw "cleanup baseline failed: bundle already installed or query unavailable: $bundle" }
-            $processResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $bundle } -AllowFailure
-            if ($processResult.ExitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($processResult.Stderr)) { throw "cleanup baseline pid query failed: $bundle" }
-            if (-not [string]::IsNullOrWhiteSpace($processResult.Stdout)) { throw "cleanup baseline failed: process exists: $bundle" }
-        }
-        [void](Invoke-HdcOperation 'RemoveStaging' -AllowFailure)
-        $baselineProbe = Invoke-HdcOperation 'StagingProbe' -AllowFailure
-        if (-not (Test-StagingAbsent $baselineProbe)) { throw 'cleanup baseline failed: staging residual still present after RemoveStaging' }
-        # Set before MkdirStaging so any later failure still runs fixed staging cleanup + probe in finally.
-        $script:StagingMayExist = $true
-        [void](Invoke-HdcOperation 'MkdirStaging')
-        $script:StagingSent = $true
-        [void](Invoke-HdcOperation 'SendA')
-        [void](Invoke-HdcOperation 'SendB')
-        $script:CampaignStarted = $true
-        Confirm-BundleInstalled 'InstallA' $script:BundleA 'A'
-        $script:InstalledA = $true
-        Confirm-BundleInstalled 'InstallB' $script:BundleB 'B'
-        $script:InstalledB = $true
-        $scenario1State.InstallCompletedAt = Get-Now
-    }
-    $observation1 = Invoke-ScenarioObservation 1 '场景1：确认冻结清理基线；runner 将自动查询/暂存并安装测试 App A 与 B（A/B 为两个测试 App），你无需在手机上手动安装；完成后 ACK' $scenario1Action
+    [void](Invoke-HdcOperation 'RemoveStaging' -AllowFailure)
+    if (-not (Test-StagingAbsent (Invoke-HdcOperation 'StagingProbe' -AllowFailure))) { throw 'cleanup baseline failed: staging residual still present after RemoveStaging' }
+    $script:StagingMayExist = $true
+    [void](Invoke-HdcOperation 'MkdirStaging')
+    $script:StagingSent = $true
+    [void](Invoke-HdcOperation 'SendA')
+    [void](Invoke-HdcOperation 'SendB')
+    $script:CampaignStarted = $true
+    Confirm-BundleInstalled 'InstallA' $script:BundleA 'A'
+    $script:InstalledA = $true
+    Confirm-BundleInstalled 'InstallB' $script:BundleB 'B'
+    $script:InstalledB = $true
+    $installCompletedAt = Get-Now
+    $observation1 = Complete-ScenarioContext $context1
+    [void](Assert-ScenarioEventContract 1 $observation1.Events)
     $capture1 = Invoke-Capture 'scenario-1-baseline' 1
-    $window1StartedAt = [DateTimeOffset]::Parse([string]$observation1.Observation.window_started_at)
-    $queryCovered = $null -ne $scenario1State.FirstBaselineQueryAt -and $window1StartedAt -le $scenario1State.FirstBaselineQueryAt
-    $installSeconds = if ($null -ne $scenario1State.InstallCompletedAt) { ($scenario1State.InstallCompletedAt - $window1StartedAt).TotalSeconds } else { [double]::PositiveInfinity }
-    $installWithin60 = $installSeconds -le 60.0
-    $scenario1Result = if ($observation1.ReadyValid -and $observation1.AckValid -and $observation1.CompleteWindowObserved -and -not $observation1.CaptureDegraded -and $queryCovered -and $installWithin60 -and $script:InstalledA -and $script:InstalledB -and $capture1 -eq 'collected') { 'pass' } else { 'blocked' }
-    $results.Add([ordered]@{ sequence_index = 1; scenario = 1; result = $scenario1Result; reason = 'cleanup-baseline-and-install'; first_baseline_query_covered = [bool]$queryCovered; install_elapsed_seconds = $installSeconds; install_completed_within_60_seconds = [bool]$installWithin60; observation = $observation1.Observation })
+    $installSeconds = ($installCompletedAt - [DateTimeOffset]$context1.StartedAt).TotalSeconds
+    $scenario1Result = if ($observation1.CompleteWindowObserved -and -not $observation1.CaptureDegraded -and $capture1 -eq 'collected' -and $installSeconds -le 60 -and $script:InstalledA -and $script:InstalledB) { 'pass' } else { 'blocked' }
+    $results.Add([ordered]@{ sequence_index = 1; scenario = 1; result = $scenario1Result; reason = 'machine-cleanup-baseline-and-install'; first_baseline_query_covered = ($firstBaselineQueryAt -ge [DateTimeOffset]$context1.StartedAt); install_elapsed_seconds = $installSeconds; install_completed_within_60_seconds = ($installSeconds -le 60); observation = $observation1.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation1
 
+    # S2: runner opens A, verifies the Entry layout, then allows exactly Start and Allow.
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
-    $authCaptureState = [pscustomobject]@{ AuthUiVisible = $false; Status = 'not-run'; Name = 'scenario-2-authorization' }
-    $scenario2Action = {
-        $authCaptureState.AuthUiVisible = Confirm-VisibleFact 2 'AUTH-UI-VISIBLE' '仅当系统授权界面在选择 Allow 前已可见时确认为真。'
-        if ($authCaptureState.AuthUiVisible) {
-            $authCaptureState.Status = Invoke-Capture $authCaptureState.Name 2
-        } else {
-            $authCaptureState.Status = 'degraded'
+    $entry2 = Invoke-LayoutCheckpoint 2 'scenario-2-entry-a' 'entry' $script:BundleA
+    $pre2 = Get-ExactProcessCheckpoint @()
+    $context2 = New-ScenarioContext 2
+    $step2Start = Invoke-MechanicalStep $context2 1 '点击测试 App A 的 Start' $pre2 { param($events) Test-UniqueStartCondition $events $script:BundleA } -CaptureBefore $entry2
+    $request2 = [string]$step2Start.Outcome.request_id
+    Register-VerifiedRequest $request2 $script:BundleA 2
+    $auth2 = Invoke-LayoutCheckpoint 2 'scenario-2-authorization' 'authorization' $script:BundleA -StepIndex 2 -StepId $step2Start.StepId -ExpectedAction '点击 Allow'
+    $step2Allow = Invoke-MechanicalStep $context2 2 '点击 Allow' ([ordered]@{ status = 'pass'; reason = 'authorization-layout-verified'; request_id = $request2 }) {
+        param($events)
+        $extra = Test-UniqueStartCondition $events $script:BundleA
+        if ([string]$extra.status -eq 'pass' -or [string]$extra.reason -notin @('UI_START-missing')) { return [pscustomobject]@{ status = 'invalid'; reason = 'unexpected-Start-or-Stop-after-Allow' } }
+        $terminal = (Test-CorrelatedMarker $events $script:BundleA $request2 'CREATE_ACCEPTED') -or (Test-CorrelatedMarker $events $script:BundleA $request2 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $events $script:BundleA $request2 'VPN_CREATE_INVALID_FD') -or (Test-CorrelatedMarker $events $script:BundleA $request2 'START_PROMISE_REJECTED')
+        if ($terminal) { return [pscustomobject]@{ status = 'pass'; reason = 'create-terminal-observed'; request_id = $request2 } }
+        return [pscustomobject]@{ status = 'pending'; reason = 'create-terminal-missing-after-Allow' }
+    } -CaptureBefore $auth2 -CaptureAfterName 'scenario-2-after-allow' -CaptureAfterProfile 'authorization-dismissed' -CaptureAfterExpectedBundle $script:BundleA
+    $afterAllow = Test-CapturedLayoutProfile 'scenario-2-after-allow' 'authorization-dismissed' $script:BundleA
+    if ([string]$afterAllow.status -ne 'pass') { Throw-ScenarioInvalid 2 "authorization-not-dismissed-after-Allow:$([string]$afterAllow.reason)" -StepIndex 2 -StepId $step2Allow.StepId -ExpectedAction $step2Allow.ExpectedAction -MachinePostcondition $afterAllow }
+    $observation2 = Complete-ScenarioContext $context2
+    [void](Assert-ScenarioEventContract 2 $observation2.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request2 }))
+    $onCreate2 = Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_ONCREATE'
+    $accepted2 = (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_RESOLVED') -and (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'CREATE_ACCEPTED') -and (Test-PostCreateOpen $observation2.Events $script:BundleA $request2)
+    # ADJ-20260808-0002 (C6): the S2 authorization button outcome is NOT a product negative fact
+    # source. A START_PROMISE_REJECTED (or any authorization-layer rejection) cannot prove a
+    # platform feature failure: it is blocked `authorization-outcome-unclassified`. Only an
+    # Extension VPN_CREATE_REJECTED / INVALID_FD AFTER a VPN_ONCREATE was observed is a
+    # functional fail (the platform demonstrably engaged the create). This also prevents a
+    # mis-click on Allow from manufacturing a product fail.
+    $extensionReject2 = ((Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_INVALID_FD')) -and $onCreate2
+    $authUnclassified2 = ((Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_INVALID_FD') -or (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'START_PROMISE_REJECTED')) -and -not $extensionReject2
+    $scenario2Result = if ($extensionReject2) { 'fail' } elseif ($authUnclassified2) { 'blocked' } elseif (-not $observation2.CompleteWindowObserved -or $observation2.CaptureDegraded) { 'blocked' } elseif ($onCreate2 -and $accepted2) { 'pass' } else { 'blocked' }
+    # ADJ-20260808-0003: after CREATE_ACCEPTED, a precise `<bundle>:vpn` present checkpoint
+    # proves the naming tuple resolves to a live Extension process. Absent / unverifiable is
+    # blocked with an explicit process-target-unverified reason; it can never pass. S3/S5/S7
+    # consume this verified checkpoint.
+    $processTarget2 = $null
+    if ($scenario2Result -eq 'pass') {
+        # ADJ-20260808-0003: the Extension must already be registered as active before the
+        # precise `:vpn` present checkpoint so the simulated (and live) pidof sees it.
+        [void]$script:SimulationActiveBundles.Add($script:BundleA)
+        $processTarget2 = Get-ProcessTargetCheckpoint $script:BundleA
+        if ([string]$processTarget2.status -ne 'pass') {
+            $scenario2Result = 'blocked'
         }
     }
-    $observation2 = Invoke-ScenarioObservation 2 '场景2：在测试 App A 点 Start；出现系统授权界面后，先按 runner 提示完成 AUTH-UI-VISIBLE 事实确认并等待 runner 截取完成，再点 Allow，然后 ACK' $scenario2Action
-    $capture2 = Invoke-Capture 'scenario-2-allow' 2
-    $request2 = Get-RequestIdFromEvents $observation2.Events $script:BundleA
-    $authCaptureAssertion = if ($authCaptureState.AuthUiVisible -and $authCaptureState.Status -eq 'collected') { 'pass' } else { 'blocked' }
-    $allowAssertion = if ($observation2.AckValid) { 'pass' } else { 'blocked' }
-    $onCreateAssertion = if ($request2 -and (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_ONCREATE')) { 'pass' } else { 'blocked' }
-    $fdAssertion = if ($request2 -and (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_RESOLVED') -and
-        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'CREATE_ACCEPTED') -and
-        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_FD_SNAPSHOT')) { 'pass' } else { 'blocked' }
-    # An observed create rejection/invalid-fd on the S2-bound request is an explicit functional fail
-    # (create invalid) and outranks capture/window/operator degradation; it is never downgraded to
-    # blocked. Missing evidence stays blocked and is never promoted to fail.
-    $createRejected2 = $request2 -and ((Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_REJECTED') -or
-        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'VPN_CREATE_INVALID_FD') -or
-        (Test-CorrelatedMarker $observation2.Events $script:BundleA $request2 'START_PROMISE_REJECTED'))
-    $scenario2Result = if ($createRejected2 -or 'fail' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'fail' } elseif ($observation2.CaptureDegraded -or -not $observation2.CompleteWindowObserved -or $capture2 -ne 'collected' -or $authCaptureAssertion -eq 'blocked') { 'blocked' } elseif ('blocked' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'blocked' } else { 'pass' }
-    $s2Reason = if ($createRejected2) { 'create-rejected-after-allow' } elseif ('fail' -in @($allowAssertion, $onCreateAssertion, $fdAssertion)) { 'allow-onCreate-create-fd-fail' } else { 'allow-onCreate-create-fd' }
     $results.Add([ordered]@{
-        sequence_index = 2; scenario = 2; result = $scenario2Result; reason = $s2Reason; bundle = $script:BundleA; request_id = $request2
-        assertions = [ordered]@{ allow = $allowAssertion; vpn_on_create = $onCreateAssertion; vpn_connection_create_fd = $fdAssertion }
-        authorization_capture = [ordered]@{ name = $authCaptureState.Name; status = $authCaptureState.Status; auth_ui_visible = [bool]$authCaptureState.AuthUiVisible; result = $authCaptureAssertion }
+        sequence_index = 2; scenario = 2; result = $scenario2Result; reason = $(if ($extensionReject2) { 'create-rejected-after-Allow' } elseif ($authUnclassified2) { 'authorization-outcome-unclassified' } elseif ($null -ne $processTarget2 -and [string]$processTarget2.status -ne 'pass') { [string]$processTarget2.reason } else { 'machine-verified-Allow-onCreate-create-fd' }); bundle = $script:BundleA; request_id = $request2
+        process_target_verified = $(if ($null -ne $processTarget2) { [string]$processTarget2.status -eq 'pass' } else { $null })
+        process_target_checkpoint = $processTarget2
+        assertions = [ordered]@{ allow = $(if ($authUnclassified2) { 'blocked' } else { 'pass' }); vpn_on_create = $(if ($onCreate2) { 'pass' } else { 'blocked' }); vpn_connection_create_fd = $(if ($accepted2) { 'pass' } elseif ($extensionReject2) { 'fail' } else { 'blocked' }) }
+        authorization_capture = [ordered]@{ name = 'scenario-2-authorization'; status = 'collected'; result = 'pass'; layout_checkpoint = $auth2 }
         observation = $observation2.Observation
     })
     Assert-ScenarioCaptureCanContinue $results $observation2
 
-    $script:ProbeContexts[3] = New-ProcessProbeContext -Scenario 3 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
-    $duringScenario3 = {
-        param([object[]]$CurrentEvents)
-        # Start the strict-process-boundary probe series only when the fallback marker prerequisites
-        # are already visible for the S2-bound request (unique stop + onDestroy + destroy-begin/pre snapshot).
-        $probeCtx = $script:ProbeContexts[3]
-        if ([bool]$probeCtx.Finished -or [bool]$probeCtx.Aborted) { return }
-        if ([string]::IsNullOrWhiteSpace([string]$request2)) { return }
-        $prereq = Test-StrictFallbackPrerequisites -Events $CurrentEvents -Bundle $script:BundleA -RequestId $request2
-        if (-not $prereq.Met) { return }
-        [void](Invoke-ProcessFinalStateProbeSeries $probeCtx $script:CurrentWindowEnd)
-    }
-    $observation3 = Invoke-ScenarioObservation 3 '场景3：在当前已激活的测试 App A 的 Entry 界面点 Stop，然后 ACK' $null $duringScenario3
-    $capture3 = Invoke-Capture 'scenario-3-stop' 3
-    # S3 is hard-bound to S2 request2; missing binding is blocked (no window-event inference substitute).
-    $final3 = if ([string]::IsNullOrWhiteSpace([string]$request2)) {
-        [pscustomobject]@{ result = 'blocked'; reason = 'active-request-unresolved'; terminal_mode = $null; callback = $null; strict = $null }
+    # S3 consumes only the machine-verified S2 request and active bundle. No second Start is legal.
+    if ($scenario2Result -ne 'pass') {
+        $results.Add([ordered]@{ sequence_index = 3; scenario = 3; result = 'blocked'; reason = 'S2-machine-active-checkpoint-unavailable'; bundle = $script:BundleA; request_id = $request2; clean_reactivation_proof = $null; process_target_verified = $null })
     } else {
-        Get-VpnFinalState -Events $observation3.Events -Bundle $script:BundleA -RequestId $request2 -ProbeState $script:ProbeContexts[3] -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+        [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
+        $entry3 = Invoke-LayoutCheckpoint 3 'scenario-3-entry-a' 'entry' $script:BundleA
+        $pre3 = Get-ExactProcessCheckpoint @($script:BundleA)
+        $context3 = New-ScenarioContext 3
+        $step3Stop = Invoke-MechanicalStep $context3 1 '点击测试 App A 的 Stop' $pre3 { param($events) Test-UniqueStopCondition $events $script:BundleA $request2 } -CaptureBefore $entry3 -CaptureAfterName 'scenario-3-after-stop' -CaptureAfterReviewOnly
+        if (Test-SimulationStepHasEffect 3 1) { [void]$script:SimulationActiveBundles.Remove($script:BundleA) }
+        $script:ProbeContexts[3] = New-ProcessProbeContext -Scenario 3 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$Freeze.process_absent_required_count) -SpacingSeconds ([double]$Freeze.process_absent_probe_spacing_seconds)
+        $during3 = {
+            param($events)
+            if ((Test-StrictFallbackPrerequisites $events $script:BundleA $request2).Met) { [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[3] $script:CurrentWindowEnd) }
+        }
+        $observation3 = Complete-ScenarioContext $context3 $during3
+        [void](Assert-ScenarioEventContract 3 $observation3.Events @() @([ordered]@{ Bundle = $script:BundleA; RequestId = $request2 }))
+        $hasDestroyBegin3 = (Test-CorrelatedMarker $observation3.Events $script:BundleA $request2 'VPN_DESTROY_BEGIN') -or @($observation3.Events | Where-Object { [string]$_.text -match 'VPN_FD_SNAPSHOT' -and [string]$_.text -match 'phase=pre-destroy' -and [string]$_.text -match "requestId=$([regex]::Escape($request2))(\||\s|$)" }).Count -gt 0
+        if (-not (Test-CorrelatedMarker $observation3.Events $script:BundleA $request2 'VPN_ONDESTROY') -or -not $hasDestroyBegin3) { Throw-ScenarioInvalid 3 'Stop-postcondition-missing-onDestroy-or-destroy-begin' -StepIndex 1 -StepId $step3Stop.StepId -ExpectedAction $step3Stop.ExpectedAction }
+        $final3 = Get-VpnFinalState $observation3.Events $script:BundleA $request2 $script:ProbeContexts[3] $true ([int]$Freeze.process_absent_required_count) ([double]$Freeze.process_absent_probe_spacing_seconds)
+        $scenario3Result = if ($final3.result -eq 'fail') { 'fail' } elseif (-not $observation3.CompleteWindowObserved -or $observation3.CaptureDegraded -or $final3.result -ne 'pass') { 'blocked' } else { 'pass' }
+        $results.Add([ordered]@{ sequence_index = 3; scenario = 3; result = $scenario3Result; reason = $final3.reason; bundle = $script:BundleA; request_id = $request2; terminal_mode = $final3.terminal_mode; process_target = [string]$script:ProbeContexts[3].ProcessTarget; process_target_verified = [bool]($scenario2Result -eq 'pass'); process_final_state_probes = @($script:ProbeContexts[3].Probes); bundle_present_during_probe = [bool]$script:ProbeContexts[3].BundlePresent; clean_reactivation_proof = $false; observation = $observation3.Observation })
+        Assert-ScenarioCaptureCanContinue $results $observation3
     }
-    $scenario3Result = if ($final3.result -eq 'fail') { 'fail' } elseif ($observation3.CaptureDegraded -or -not $observation3.CompleteWindowObserved -or $capture3 -ne 'collected') { 'blocked' } elseif (-not $observation3.AckValid -or $final3.result -ne 'pass') { 'blocked' } else { 'pass' }
-    $results.Add([ordered]@{
-        sequence_index = 3; scenario = 3; result = $scenario3Result; reason = $final3.reason; bundle = $script:BundleA; request_id = $request2
-        terminal_mode = $final3.terminal_mode
-        process_final_state_probes = @($script:ProbeContexts[3].Probes)
-        bundle_present_during_probe = [bool]$script:ProbeContexts[3].BundlePresent
-        clean_reactivation_proof = $false
-        observation = $observation3.Observation
-    })
-    Assert-ScenarioCaptureCanContinue $results $observation3
 
+    # S4 mirrors S2, but the authorization layout is captured and verified before Deny.
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleB })
-    $observation4 = Invoke-ScenarioObservation 4 '场景4：在测试 App B 点 Start，在可见的系统授权界面选择 Deny，保持拒绝画面不要关闭，然后 ACK'
-    $capture4 = Invoke-Capture 'scenario-4-deny' 4
-    $denyScreen = Confirm-VisibleFact 4 'DENY-SCREEN-CAPTURED' '仅当拒绝画面截图清晰可见时确认为真。'
-    $request4 = Get-RequestIdFromEvents $observation4.Events $script:BundleB
-    $fullDenyWindow = [bool]$observation4.CompleteWindowObserved
-    $deny4 = Get-DenyAssessment $observation4.Events $script:BundleB $request4 $denyScreen $fullDenyWindow
-    # An observed B create after deny is an explicit functional fail (deny-then-create / dual-active
-    # class) and outranks capture/window/operator degradation; it is never downgraded to blocked.
-    $scenario4Result = if ($deny4.result -eq 'fail') { 'fail' } elseif ($observation4.CaptureDegraded -or -not $fullDenyWindow -or $capture4 -ne 'collected') { 'blocked' } elseif (-not $observation4.AckValid) { 'blocked' } else { $deny4.result }
-    $results.Add([ordered]@{ sequence_index = 4; scenario = 4; result = $scenario4Result; reason = $deny4.reason; bundle = $script:BundleB; request_id = $request4; deny_screen = [bool]$denyScreen; full_window_after_ack = [bool]$fullDenyWindow; observation = $observation4.Observation })
+    $entry4 = Invoke-LayoutCheckpoint 4 'scenario-4-entry-b' 'entry' $script:BundleB
+    $context4 = New-ScenarioContext 4
+    $step4Start = Invoke-MechanicalStep $context4 1 '点击测试 App B 的 Start' ([ordered]@{ status = 'pass'; reason = 'B-entry-layout-verified' }) { param($events) Test-UniqueStartCondition $events $script:BundleB } -CaptureBefore $entry4
+    $request4 = [string]$step4Start.Outcome.request_id
+    Register-VerifiedRequest $request4 $script:BundleB 4
+    $auth4 = Invoke-LayoutCheckpoint 4 'scenario-4-authorization' 'authorization' $script:BundleB -StepIndex 2 -StepId $step4Start.StepId -ExpectedAction '点击 Deny'
+    $step4Deny = Invoke-MechanicalStep $context4 2 '点击 Deny' ([ordered]@{ status = 'pass'; reason = 'authorization-layout-verified'; request_id = $request4 }) {
+        param($events)
+        $layout = Test-CapturedLayoutProfile 'scenario-4-after-deny' 'authorization-dismissed' $script:BundleB
+        if ([string]$layout.status -eq 'pass') { return [pscustomobject]@{ status = 'pass'; reason = 'authorization-dismissed-after-Deny' } }
+        return [pscustomobject]@{ status = 'invalid'; reason = "Deny-layout-postcondition:$([string]$layout.reason)" }
+    } -CaptureBefore $auth4 -CaptureAfterName 'scenario-4-after-deny' -CaptureAfterProfile 'authorization-dismissed' -CaptureAfterExpectedBundle $script:BundleB
+    $observation4 = Complete-ScenarioContext $context4
+    [void](Assert-ScenarioEventContract 4 $observation4.Events @([ordered]@{ Bundle = $script:BundleB; RequestId = $request4 }))
+    $deny4 = Get-DenyAssessment $observation4.Events $script:BundleB $request4 $true ([bool]$observation4.CompleteWindowObserved)
+    # ADJ-20260808-0002 (C6): if B's create/onCreate appears after the Deny click, the machine
+    # cannot distinguish a mis-click on Allow from a system deny defect. Under the strong-reliable
+    # trust model the manual click is NOT a product negative fact source, so this is scenario
+    # invalid `deny-action-produced-create-untrusted` (never a product fail); a no-create full
+    # window still passes below.
+    if ([string]$deny4.result -eq 'fail' -and [string]$deny4.reason -eq 'deny-created-B-vpn') {
+        Throw-ScenarioInvalid 4 'deny-action-produced-create-untrusted' -StepIndex 2 -StepId $step4Deny.StepId -ExpectedAction $step4Deny.ExpectedAction -MachinePostcondition $deny4
+    }
+    $scenario4Result = if ($deny4.result -eq 'fail') { 'fail' } elseif (-not $observation4.CompleteWindowObserved -or $observation4.CaptureDegraded) { 'blocked' } else { [string]$deny4.result }
+    $results.Add([ordered]@{ sequence_index = 4; scenario = 4; result = $scenario4Result; reason = $deny4.reason; bundle = $script:BundleB; request_id = $request4; deny_screen = $true; deny_screen_capture = [ordered]@{ name = 'scenario-4-authorization'; status = 'collected'; visible = $true; result = 'pass'; layout_checkpoint = $auth4 }; full_window_after_action = [bool]$observation4.CompleteWindowObserved; observation = $observation4.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation4
 
+    # S5: fresh A activation, then directly the A app-info machine gate and one force-stop action.
+    # ADJ-20260808-0003: the Settings>VPN page is no longer a decisive step and is not asked of
+    # the operator; it is only a not-required observation (never invalid/block/pass input).
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
-    $s5State = [pscustomobject]@{
-        PathActualDirect = $false
-        PathActualReauth = $false
-        VpnPageVisible = $false
-        VpnPageCaptureStatus = 'not-run'
-        ForceStopConfirmed = $false
-        ForceStopCaptureStatus = 'not-run'
+    $entry5 = Invoke-LayoutCheckpoint 5 'scenario-5-entry-a' 'entry' $script:BundleA
+    $context5 = New-ScenarioContext 5
+    $step5Start = Invoke-MechanicalStep $context5 1 '点击测试 App A 的 Start' ([ordered]@{ status = 'pass'; reason = 'A-entry-layout-verified' }) { param($events) Test-UniqueStartCondition $events $script:BundleA } -CaptureBefore $entry5
+    $request5 = [string]$step5Start.Outcome.request_id
+    Register-VerifiedRequest $request5 $script:BundleA 5
+    # ADJ-20260808-0003: dual-profile 8s same-name resample (entry OR authorization). selected_profile
+    # decides direct activation vs reauthorization UI; infra/continuous capture is blocked, final
+    # dual mismatch is scenario invalid.
+    $reactivation = Invoke-LayoutChoiceCheckpoint 5 'scenario-5-reactivation' $script:BundleA -StepIndex 1 -StepId $step5Start.StepId -ExpectedAction $step5Start.ExpectedAction
+    $actualReallowPath = if ([string]$reactivation.selected_profile -eq 'authorization') { 'system-reauthorization-UI' } else { 'direct-system-activation' }
+    if ($actualReallowPath -eq 'system-reauthorization-UI') {
+        [void](Invoke-MechanicalStep $context5 2 '点击 Allow' ([ordered]@{ status = 'pass'; reason = 'reauthorization-layout-verified' }) {
+            param($events)
+            $extra = Test-NoOperatorAction $events
+            if ([string]$extra.status -ne 'pass') { return $extra }
+            if ((Test-CorrelatedMarker $events $script:BundleA $request5 'CREATE_ACCEPTED') -or (Test-CorrelatedMarker $events $script:BundleA $request5 'VPN_CREATE_REJECTED')) { return [pscustomobject]@{ status = 'pass'; reason = 'reactivation-create-terminal'; request_id = $request5 } }
+            return [pscustomobject]@{ status = 'pending'; reason = 'reactivation-create-terminal-missing' }
+        } -CaptureBefore $reactivation -CaptureAfterName 'scenario-5-after-allow' -CaptureAfterProfile 'authorization-dismissed' -CaptureAfterExpectedBundle $script:BundleA)
     }
-    $scenario5Action = {
-        $s5State.PathActualDirect = Confirm-VisibleFact 5 'PATH-ACTUAL-DIRECT-SYSTEM-ACTIVATION' '仅当实际 re-allow 路径为 direct-system-activation 时确认为真。'
-        $s5State.PathActualReauth = Confirm-VisibleFact 5 'PATH-ACTUAL-SYSTEM-REAUTHORIZATION-UI' '仅当实际 re-allow 路径为 system-reauthorization-UI 时确认为真。'
-        # Settings>VPN page is observation-only: screenshot + fields, never a pass/blocked gate.
-        $s5State.VpnPageVisible = Confirm-VisibleFact 5 'SETTINGS-VPN-PAGE-VISIBLE' '仅当手机系统设置 → 更多连接 → VPN 页面已可见时确认为真（仅观察，不影响结果）。'
-        if ($s5State.VpnPageVisible) { $s5State.VpnPageCaptureStatus = Invoke-Capture 'scenario-5-settings-vpn-page' 5 -ObservationOnly } else { $s5State.VpnPageCaptureStatus = 'degraded' }
-        # Manual Settings>app info>A>force stop is the revoke mechanism; separate screenshot + confirmation.
-        $s5State.ForceStopConfirmed = Confirm-VisibleFact 5 'SETTINGS-APP-INFO-FORCE-STOP-CAPTURED' '仅当已在系统设置 → 应用 → 测试 App A 的应用信息页执行强制停止且画面可见时确认为真。'
-        if ($s5State.ForceStopConfirmed) { $s5State.ForceStopCaptureStatus = Invoke-Capture 'scenario-5-app-info-force-stop' 5 } else { $s5State.ForceStopCaptureStatus = 'degraded' }
+    $createTerminal5 = Wait-MachineCondition $context5 ([long]$step5Start.AnchorByte) ([DateTimeOffset]$step5Start.PromptAt) {
+        param($events)
+        # ADJ-20260808-0003 (C6): re-assert the verified Start window before judging the platform
+        # create terminal. Extra operator UI actions (UI_STOP / UI_STOP_SKIPPED / duplicated Start /
+        # wrong bundle / requestId) observed while waiting for the platform marker must invalidate
+        # on the spot, never be masked as a platform marker-missing blocked.
+        $uniqueStart = Test-UniqueStartCondition $events $script:BundleA
+        if ([string]$uniqueStart.status -eq 'invalid') { return $uniqueStart }
+        if ([string]$uniqueStart.status -eq 'pending') { return $uniqueStart }
+        if ((Test-CorrelatedMarker $events $script:BundleA $request5 'CREATE_ACCEPTED') -or (Test-CorrelatedMarker $events $script:BundleA $request5 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $events $script:BundleA $request5 'START_PROMISE_REJECTED')) { return [pscustomobject]@{ status = 'pass'; reason = 'fresh-create-terminal'; request_id = $request5 } }
+        return [pscustomobject]@{ status = 'pending'; reason = 'fresh-create-terminal-missing' }
     }
-    $script:ProbeContexts[5] = New-ProcessProbeContext -Scenario 5 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
-    $duringScenario5 = {
-        param([object[]]$CurrentEvents)
-        # After the manual force-stop is confirmed, probe the bundle: pidof/bundledump observation only,
-        # never HDC force-stop. No UI_STOP is expected or required on the settings-app-info-force-stop path.
-        if (-not $s5State.ForceStopConfirmed) { return }
-        [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[5] $script:CurrentWindowEnd)
+    # ADJ-20260808-0003 (C6): capture degradation (infra or non-infra) surfaces as status blocked
+    # from Wait-MachineCondition; that is a plain runner blocked, never a scenario invalid.
+    if ([string]$createTerminal5.status -eq 'blocked') {
+        throw "scenario-5 machine-verification-blocked step=1 reason=$([string](Get-OptionalProperty $createTerminal5 'reason' 'machine-verification-blocked'))"
     }
-    $observation5 = Invoke-ScenarioObservation 5 "场景5：先在测试 App A 点 Start 重新激活（预测 re-allow 路径 '$($Freeze.settings_reallow_expected_path)'，路径偏差仅观察、不改判定）；随后打开手机系统设置 App（齿轮）→ 更多连接 → VPN 页并保持可见，等 runner 截取；再进入 设置 → 应用 → 测试 App A 的应用信息页执行强制停止并保持画面，等 runner 截取；连续采集保持至 ACK 后再 60 秒" $scenario5Action $duringScenario5
-    $actualReallowPath = if ($s5State.PathActualDirect -and -not $s5State.PathActualReauth) {
-        'direct-system-activation'
-    } elseif ($s5State.PathActualReauth -and -not $s5State.PathActualDirect) {
-        'system-reauthorization-UI'
-    } elseif ($s5State.PathActualDirect -and $s5State.PathActualReauth) {
-        'ambiguous'
-    } else {
-        'unobserved'
+    if ([string]$createTerminal5.status -ne 'pass') { Throw-ScenarioInvalid 5 ([string]$createTerminal5.reason) -StepIndex 1 -StepId $step5Start.StepId -ExpectedAction $step5Start.ExpectedAction }
+    [void]$script:SimulationActiveBundles.Add($script:BundleA)
+    $step5Info = Invoke-MechanicalStep $context5 3 '打开测试 App A 的应用信息页' ([ordered]@{ status = 'pass'; reason = 'fresh-A-request-bound'; request_id = $request5 }) {
+        param($events)
+        $extra = Test-NoOperatorAction $events
+        if ([string]$extra.status -ne 'pass') { return $extra }
+        $layout = Test-CapturedLayoutProfile 'scenario-5-app-info' 'settings-app-info' $script:BundleA
+        if ([string]$layout.status -eq 'pass') { return [pscustomobject]@{ status = 'pass'; reason = 'A-app-info-layout-match' } }
+        return [pscustomobject]@{ status = 'invalid'; reason = [string]$layout.reason }
+    } -CaptureAfterName 'scenario-5-app-info' -CaptureAfterProfile 'settings-app-info' -CaptureAfterExpectedBundle $script:BundleA
+    $preForce5 = Get-ExactProcessCheckpoint @($script:BundleA)
+    # ADJ-20260808-0002 (C6): the S5 force-stop pre-checkpoint expects A active. A mismatch here
+    # comes from platform residue / an indeterminable process state, not from an extra operator
+    # event (operator mis-action is enforced by the global action guard as invalid). Classify
+    # blocked, never a precondition scenario invalid.
+    if ([string]$preForce5.status -ne 'pass') {
+        throw "scenario-5 machine-verification-blocked step=4 reason=exact-process-precondition:$([string]$preForce5.reason)"
     }
-    $pathMatch = $actualReallowPath -eq [string]$Freeze.settings_reallow_expected_path
-    $pathObservation = if ($pathMatch) {
-        'actual-path-matched-expected'
-    } elseif ($actualReallowPath -in @('direct-system-activation', 'system-reauthorization-UI')) {
-        'actual-path-deviated-from-expected-observation-only'
-    } else {
-        'actual-path-not-confirmed'
-    }
-    $settingsReallowPath = [ordered]@{
-        expected = [string]$Freeze.settings_reallow_expected_path
-        actual = $actualReallowPath
-        match = [bool]$pathMatch
-        observation = $pathObservation
-        policy = [string]$Freeze.settings_reallow_path_policy
-    }
-    $request5 = Get-RequestIdFromEvents $observation5.Events $script:BundleA
-    $onCreate5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_ONCREATE')
-    $create5 = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_CREATE_RESOLVED') -and
-        (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED')
-    $freshCreateProof = $request5 -and (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED') -and
-        (Test-PostCreateOpen $observation5.Events $script:BundleA $request5)
-    $s5ProbeCtx = $script:ProbeContexts[5]
-    $bundlePresentDuringProbe = [bool]$s5ProbeCtx.BundlePresent
-    # Post-destroy FD_STILL_OPEN on the current request is a hard fail and can never be overridden
-    # by consecutive-absent process probes; pre-destroy open snapshots never count as fail.
+    $script:ProbeContexts[5] = New-ProcessProbeContext -Scenario 5 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$Freeze.process_absent_required_count) -SpacingSeconds ([double]$Freeze.process_absent_probe_spacing_seconds)
+    $forceEffectApplied = $false
+    $step5Force = Invoke-MechanicalStep $context5 4 '点击强制停止' $preForce5 {
+        param($events)
+        if (-not $forceEffectApplied) {
+            if (Test-SimulationStepHasEffect 5 4) { [void]$script:SimulationActiveBundles.Remove($script:BundleA) }
+            $forceEffectApplied = $true
+        }
+        $extra = Test-NoOperatorAction $events
+        if ([string]$extra.status -ne 'pass') { return $extra }
+        $layout = Test-CapturedLayoutProfile 'scenario-5-app-info-force-stop' 'settings-app-info' $script:BundleA
+        if ([string]$layout.status -ne 'pass') { return [pscustomobject]@{ status = 'invalid'; reason = [string]$layout.reason } }
+        [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[5] ((Get-Now).AddSeconds(20)))
+        $absent = Test-ProcessAbsentEvidence $script:ProbeContexts[5] ([int]$Freeze.process_absent_required_count) ([double]$Freeze.process_absent_probe_spacing_seconds)
+        if ($absent.Met -and $script:ProbeContexts[5].BundlePresent) { return [pscustomobject]@{ status = 'pass'; reason = 'fresh-request-extension-process-absent-bundle-present' } }
+        if ($script:ProbeContexts[5].Aborted) { return [pscustomobject]@{ status = 'blocked'; reason = 'force-stop-process-check-unverifiable' } }
+        return [pscustomobject]@{ status = 'invalid'; reason = [string]$absent.Reason }
+    } -CaptureBefore ([ordered]@{ status = 'pass'; name = 'scenario-5-app-info'; profile = 'settings-app-info' }) -CaptureAfterName 'scenario-5-app-info-force-stop' -CaptureAfterProfile 'settings-app-info' -CaptureAfterExpectedBundle $script:BundleA -VerifyTimeoutSeconds 25
+    $observation5 = Complete-ScenarioContext $context5
+    [void](Assert-ScenarioEventContract 5 $observation5.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request5 }))
+    $onCreate5 = Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_ONCREATE'
+    $create5 = (Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'CREATE_ACCEPTED')
+    $freshCreateProof = $create5 -and (Test-PostCreateOpen $observation5.Events $script:BundleA $request5)
+    $absentEvidence5 = Test-ProcessAbsentEvidence $script:ProbeContexts[5] ([int]$Freeze.process_absent_required_count) ([double]$Freeze.process_absent_probe_spacing_seconds)
     $s5FdStillOpen = Test-S5PostDestroyStillOpen $observation5.Events $script:BundleA $request5
-    # Force-stop assessment re-checks recorded probe timestamps (>=2 consecutive absent, first-to-last
-    # spacing >= freeze spacing); execution-time Wait/Terminal flags alone are never trusted, so a
-    # probe_spacing_override below the freeze spacing stays blocked.
-    $absentEvidence = Test-ProcessAbsentEvidence $s5ProbeCtx ([int]$freeze.process_absent_required_count) ([double]$freeze.process_absent_probe_spacing_seconds)
-    $s5Reason = 'settings-app-info-force-stop'
-    $scenario5Result = 'blocked'
-    # A hard FD_STILL_OPEN fail outranks capture/window/operator degradation and is never downgraded.
-    if ($s5FdStillOpen) { $scenario5Result = 'fail'; $s5Reason = 'FD_STILL_OPEN' }
-    elseif ($observation5.CaptureDegraded -or -not $observation5.CompleteWindowObserved) { $s5Reason = 'observation-incomplete' }
-    elseif ($s5ProbeCtx.Aborted) { $s5Reason = 'probe-unknown-or-error' }
-    elseif (-not $observation5.AckValid) { $s5Reason = 'ack-invalid' }
-    elseif (-not $s5State.ForceStopConfirmed) { $s5Reason = 'force-stop-not-confirmed' }
-    elseif ($s5State.ForceStopCaptureStatus -ne 'collected') { $s5Reason = 'force-stop-capture-degraded' }
-    elseif (-not $onCreate5) { $s5Reason = 'vpn-on-create-missing' }
-    elseif (-not $create5) { $s5Reason = 'vpn-create-fd-missing' }
-    elseif (-not $freshCreateProof) { $s5Reason = 'fresh-create-proof-missing' }
-    elseif (-not $absentEvidence.Met) { $s5Reason = $absentEvidence.Reason }
-    elseif (-not $bundlePresentDuringProbe) { $s5Reason = 'bundle-absent-during-probe' }
-    else { $scenario5Result = 'pass'; $s5Reason = 'settings-app-info-force-stop-terminal' }
+    $scenario5Result = if ($s5FdStillOpen) { 'fail' } elseif (-not $observation5.CompleteWindowObserved -or $observation5.CaptureDegraded -or -not $onCreate5 -or -not $freshCreateProof -or -not $absentEvidence5.Met -or -not $script:ProbeContexts[5].BundlePresent) { 'blocked' } else { 'pass' }
+    $s5Reason = if ($s5FdStillOpen) { 'FD_STILL_OPEN' } elseif (-not $freshCreateProof) { 'fresh-create-proof-missing' } elseif (-not $absentEvidence5.Met) { [string]$absentEvidence5.Reason } else { 'settings-app-info-force-stop-terminal' }
     $results.Add([ordered]@{
         sequence_index = 5; scenario = 5; result = $scenario5Result; reason = $s5Reason; bundle = $script:BundleA; request_id = $request5
-        settings_revoke_mechanism = [string]$Freeze.settings_revoke_mechanism
-        settings_vpn_page_policy = [string]$Freeze.settings_vpn_page_policy
-        settings_vpn_page_observation_only = $true
-        settings_vpn_page_capture = [ordered]@{ name = 'scenario-5-settings-vpn-page'; status = $s5State.VpnPageCaptureStatus; visible = [bool]$s5State.VpnPageVisible }
-        app_info_force_stop_capture = [ordered]@{ name = 'scenario-5-app-info-force-stop'; status = $s5State.ForceStopCaptureStatus; confirmed = [bool]$s5State.ForceStopConfirmed }
-        force_stop_confirmed = [bool]$s5State.ForceStopConfirmed
-        terminal_mode = 'settings-app-info-force-stop'
-        fd_still_open = [bool]$s5FdStillOpen
-        process_final_state_probes = @($s5ProbeCtx.Probes)
-        process_absent_evidence = [ordered]@{ met = [bool]$absentEvidence.Met; reason = $absentEvidence.Reason; required_count = [int]$freeze.process_absent_required_count; required_spacing_seconds = [double]$freeze.process_absent_probe_spacing_seconds; measured_spacing_seconds = $absentEvidence.SpacingSeconds }
-        bundle_present_during_probe = [bool]$bundlePresentDuringProbe
-        settings_reallow_path = $settingsReallowPath
-        assertions = [ordered]@{ vpn_on_create = $(if ($onCreate5) { 'pass' } else { 'blocked' }); vpn_connection_create_fd = $(if ($create5) { 'pass' } else { 'blocked' }); fresh_create_proof = $(if ($freshCreateProof) { 'pass' } else { 'blocked' }); force_stop = $(if ($s5State.ForceStopConfirmed) { 'pass' } else { 'blocked' }) }
+        settings_revoke_mechanism = [string]$Freeze.settings_revoke_mechanism; settings_vpn_page_policy = [string]$Freeze.settings_vpn_page_policy; settings_vpn_page_observation_only = $true
+        # ADJ-20260808-0003: Settings>VPN page is not a decisive step and is not asked of the
+        # operator; the capture is not-required and never invalid/block/pass input.
+        settings_vpn_page_capture = [ordered]@{ name = 'scenario-5-settings-vpn-page'; status = 'not-required'; machine_verified = $false; note = 'observation-only optional; not asked of the operator' }
+        app_info_force_stop_capture = [ordered]@{ name = 'scenario-5-app-info-force-stop'; status = 'collected'; machine_verified = $true }
+        terminal_mode = 'settings-app-info-force-stop'; fd_still_open = [bool]$s5FdStillOpen; process_target = [string]$script:ProbeContexts[5].ProcessTarget; process_target_verified = [bool]($scenario2Result -eq 'pass')
+        process_final_state_probes = @($script:ProbeContexts[5].Probes); process_absent_evidence = [ordered]@{ met = [bool]$absentEvidence5.Met; reason = $absentEvidence5.Reason; required_count = [int]$Freeze.process_absent_required_count; required_spacing_seconds = [double]$Freeze.process_absent_probe_spacing_seconds; measured_spacing_seconds = $absentEvidence5.SpacingSeconds }; bundle_present_during_probe = [bool]$script:ProbeContexts[5].BundlePresent
+        settings_reallow_path = [ordered]@{ expected = [string]$Freeze.settings_reallow_expected_path; actual = $actualReallowPath; match = ($actualReallowPath -eq [string]$Freeze.settings_reallow_expected_path); observation = 'machine-layout-and-event-classified'; policy = [string]$Freeze.settings_reallow_path_policy }
+        assertions = [ordered]@{ vpn_on_create = $(if ($onCreate5) { 'pass' } else { 'blocked' }); vpn_connection_create_fd = $(if ($create5) { 'pass' } else { 'blocked' }); fresh_create_proof = $(if ($freshCreateProof) { 'pass' } else { 'blocked' }); force_stop = $(if ($absentEvidence5.Met) { 'pass' } else { 'blocked' }) }
         observation = $observation5.Observation
     })
     $s3Entry = @($results | Where-Object { [int]$_.scenario -eq 3 })[0]
-    if ($null -ne $s3Entry) { $s3Entry.clean_reactivation_proof = [bool]$freshCreateProof }
+    if ($null -ne $s3Entry -and $s3Entry -is [Collections.IDictionary] -and $s3Entry.Contains('clean_reactivation_proof') -and $null -ne $s3Entry.clean_reactivation_proof) { $s3Entry.clean_reactivation_proof = [bool]$freshCreateProof }
     Assert-ScenarioCaptureCanContinue $results $observation5
 
-    $observation6 = Invoke-ScenarioObservation 6 '场景6：先在测试 App A 点 Start 激活；再在测试 App B 点 Start；若系统画面出现替换/取消等选择，不要提前点选，先保留当前画面并按 runner 推进；连续采集保持至 ACK 后再 60 秒'
-    $capture6 = Invoke-Capture 'scenario-6-conflict' 6
-    # S6 operator three-state: NO-DUAL-ACTIVE-CAPTURED is asked first; only when it is false is the
-    # independent DUAL-ACTIVE-CAPTURED confirmation asked (true only when A and B are clearly both
-    # active on screen). dual=true && noDual=false is the only operator fail; noDual=true &&
-    # dual=false is normal; both false is blocked dual-active-observation-unresolved; both true is
-    # blocked inconsistent-operator-confirmation. An empty/false answer alone never fails S6.
-    $noDual = Confirm-VisibleFact 6 'NO-DUAL-ACTIVE-CAPTURED' '仅当最终可见状态为画面上未同时出现 A 与 B 两个 active VPN 时确认为真。'
-    $dualActive = $false
-    if ($LiveSimulation) {
-        # Simulation fixtures may pre-set both confirmations so the full four-state matrix is
-        # exercised (including the defensive both-true inconsistent state). Live only asks
-        # DUAL-ACTIVE-CAPTURED when NO-DUAL-ACTIVE-CAPTURED is false.
-        $dualActive = Get-SimulationConfirmation 'DUAL-ACTIVE-CAPTURED'
-    } elseif (-not $noDual) {
-        $dualActive = Confirm-VisibleFact 6 'DUAL-ACTIVE-CAPTURED' '仅当明确看到 A 与 B 两个 active VPN 同时出现在画面上时确认为真。'
+    # S6: exactly A Start then B Start. Only a frozen explicit B conflict code is a passing conflict result.
+    [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
+    $entry6A = Invoke-LayoutCheckpoint 6 'scenario-6-entry-a' 'entry' $script:BundleA
+    $context6 = New-ScenarioContext 6
+    $step6A = Invoke-MechanicalStep $context6 1 '点击测试 App A 的 Start' ([ordered]@{ status = 'pass'; reason = 'A-entry-layout-verified' }) { param($events) Test-UniqueStartCondition $events $script:BundleA } -CaptureBefore $entry6A
+    $request6A = [string]$step6A.Outcome.request_id
+    Register-VerifiedRequest $request6A $script:BundleA 6
+    # ADJ-20260808-0003: S6 A optional reauthorization uses dual-profile 8s same-name resample
+    # (entry OR authorization). When authorization is selected, the operator is asked one mechanical
+    # Allow step (after capture, NO extra UI-action guard: A create terminal is platform markers
+    # only). Infra/continuous capture is blocked; final dual mismatch is scenario invalid.
+    $reauth6 = Invoke-LayoutChoiceCheckpoint 6 'scenario-6-reactivation-a' $script:BundleA -StepIndex 1 -StepId $step6A.StepId -ExpectedAction $step6A.ExpectedAction
+    $s6AReauthPath = if ([string]$reauth6.selected_profile -eq 'authorization') { 'system-reauthorization-UI' } else { 'direct-system-activation' }
+    if ($s6AReauthPath -eq 'system-reauthorization-UI') {
+        [void](Invoke-MechanicalStep $context6 2 '点击 Allow' ([ordered]@{ status = 'pass'; reason = 'reauthorization-layout-verified'; request_id = $request6A }) {
+            param($events)
+            # ADJ-20260808-0003: no extra UI-action guard here (unlike S5's Test-NoOperatorAction).
+            # The A create terminal is judged by the platform markers alone; an authorization-layer
+            # or Extension outcome is classified (blocked/fail) after the window, never invalidated
+            # by an extra operator action during the Allow step.
+            if ((Test-CorrelatedMarker $events $script:BundleA $request6A 'CREATE_ACCEPTED') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'VPN_CREATE_INVALID_FD') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'START_PROMISE_REJECTED')) { return [pscustomobject]@{ status = 'pass'; reason = 'reauth-A-create-terminal'; request_id = $request6A } }
+            return [pscustomobject]@{ status = 'pending'; reason = 'reauth-A-create-terminal-missing' }
+        } -CaptureBefore $reauth6 -CaptureAfterName 'scenario-6-after-allow-a' -CaptureAfterProfile 'authorization-dismissed' -CaptureAfterExpectedBundle $script:BundleA)
     }
-    $operatorState = if ($noDual -and -not $dualActive) { 'normal' }
-        elseif (-not $noDual -and $dualActive) { 'dual-active-observed' }
-        elseif (-not $noDual -and -not $dualActive) { 'dual-active-observation-unresolved' }
-        else { 'inconsistent-operator-confirmation' }
-    $request6A = Get-RequestIdFromEvents $observation6.Events $script:BundleA
-    $request6B = Get-RequestIdFromEvents $observation6.Events $script:BundleB
-    $bUiStartObserved = $null -ne $request6B
-    $aAccepted = $request6A -and (Test-CorrelatedMarker $observation6.Events $script:BundleA $request6A 'CREATE_ACCEPTED')
-    $bRejected = $request6B -and ((Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'START_PROMISE_REJECTED') -or (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'VPN_CREATE_REJECTED'))
-    $bAccepted = $request6B -and (Test-CorrelatedMarker $observation6.Events $script:BundleB $request6B 'CREATE_ACCEPTED')
-    $replacementDestroy = if ($bAccepted) { Get-DestroyAssessment $observation6.Events $script:BundleA $request6A } else { [pscustomobject]@{ result = 'pass'; reason = 'B-rejected-no-replacement-destroy-required' } }
-    # Explicit functional fails outrank capture/window/operator degradation and are never downgraded
-    # to blocked: a failed replacement destroy (A still holds an open fd after B was accepted) and an
-    # operator-confirmed dual-active visible state (dual=true && noDual=false) are both observed
-    # fails. They must be evaluated before operator unresolved/inconsistent and capture/window blocked
-    # reasons (including no-new-B-UI_START / observation-incomplete). Missing evidence stays blocked
-    # and is never promoted to fail; an unresolved or inconsistent operator confirmation without a
-    # functional fail is its own blocked reason, never a fail.
-    $scenario6Result = 'blocked'
-    $s6Reason = 'scenario-6-evidence-incomplete'
-    if ($replacementDestroy.result -eq 'fail' -or $operatorState -eq 'dual-active-observed') {
-        $scenario6Result = 'fail'
-        $s6Reason = if ($replacementDestroy.result -eq 'fail') { [string]$replacementDestroy.reason } else { 'dual-active-observed' }
-    } elseif ($operatorState -eq 'dual-active-observation-unresolved') {
-        $s6Reason = 'dual-active-observation-unresolved'
-    } elseif ($operatorState -eq 'inconsistent-operator-confirmation') {
-        $s6Reason = 'inconsistent-operator-confirmation'
-    } elseif (-not $bUiStartObserved) {
-        $s6Reason = 'no-new-B-UI_START'
-    } elseif ($observation6.CaptureDegraded -or -not $observation6.CompleteWindowObserved -or $capture6 -ne 'collected') {
-        $s6Reason = 'observation-incomplete'
-    } elseif (-not $observation6.AckValid -or -not $aAccepted -or -not $request6B -or (-not $bRejected -and -not $bAccepted) -or $replacementDestroy.result -ne 'pass') {
-        $s6Reason = [string]$replacementDestroy.reason
-    } else {
-        $scenario6Result = 'pass'
-        $s6Reason = [string]$replacementDestroy.reason
+    $aTerminal6 = Wait-MachineCondition $context6 ([long]$step6A.AnchorByte) ([DateTimeOffset]$step6A.PromptAt) {
+        param($events)
+        # ADJ-20260808-0003 (C6): re-assert the verified A Start window before judging the platform
+        # A create terminal. Extra operator UI actions observed while waiting for the platform
+        # marker invalidate on the spot, never a platform marker-missing blocked.
+        $uniqueStart = Test-UniqueStartCondition $events $script:BundleA
+        if ([string]$uniqueStart.status -eq 'invalid') { return $uniqueStart }
+        if ([string]$uniqueStart.status -eq 'pending') { return $uniqueStart }
+        if ((Test-CorrelatedMarker $events $script:BundleA $request6A 'CREATE_ACCEPTED') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'VPN_CREATE_INVALID_FD') -or (Test-CorrelatedMarker $events $script:BundleA $request6A 'START_PROMISE_REJECTED')) { return [pscustomobject]@{ status = 'pass'; reason = 'A-create-terminal'; request_id = $request6A } }
+        return [pscustomobject]@{ status = 'pending'; reason = 'A-create-terminal-missing' }
     }
-    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted; b_rejected = [bool]$bRejected; b_accepted = [bool]$bAccepted; no_dual_active_confirmed = [bool]$noDual; dual_active_confirmed = [bool]$dualActive; operator_state = $operatorState; observation = $observation6.Observation })
+    # ADJ-20260808-0003 (C6): capture degradation surfaces as blocked (infra or non-infra); a
+    # plain runner blocked is never a scenario invalid.
+    if ([string]$aTerminal6.status -eq 'blocked') {
+        throw "scenario-6 machine-verification-blocked step=1 reason=$([string](Get-OptionalProperty $aTerminal6 'reason' 'machine-verification-blocked'))"
+    }
+    if ([string]$aTerminal6.status -ne 'pass') { Throw-ScenarioInvalid 6 ([string]$aTerminal6.reason) -StepIndex 1 -StepId $step6A.StepId -ExpectedAction $step6A.ExpectedAction }
+    $aAccepted6 = Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'CREATE_ACCEPTED'
+    if ($aAccepted6) { [void]$script:SimulationActiveBundles.Add($script:BundleA) }
+    # ADJ-20260808-0003 (C6): S6 A outcomes follow S2's classification. A START_PROMISE_REJECTED (or
+    # any reject/invalid-fd marker WITHOUT a preceding VPN_ONCREATE) is an authorization-layer outcome
+    # with an unclassified product meaning: S6 blocked `authorization-outcome-unclassified` and S7
+    # not-run-after-platform-blocked (never a fail, never a scenario invalid). Only a
+    # VPN_CREATE_REJECTED / VPN_CREATE_INVALID_FD observed AFTER VPN_ONCREATE is a functional fail of
+    # the conflict scenario (the platform demonstrably engaged the Extension create).
+    $onCreate6A = Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'VPN_ONCREATE'
+    $extensionReject6A = ((Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'VPN_CREATE_INVALID_FD')) -and $onCreate6A
+    $authUnclassified6A = ((Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'VPN_CREATE_REJECTED') -or (Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'VPN_CREATE_INVALID_FD') -or (Test-CorrelatedMarker (Get-ScenarioContextEvents $context6) $script:BundleA $request6A 'START_PROMISE_REJECTED')) -and -not $extensionReject6A
+    if (-not $aAccepted6) {
+        # ADJ-20260808-0003: an Extension create rejected / invalid fd (VPN_ONCREATE observed) is a
+        # functional fail of the S6 conflict scenario, never an operator invalid. A pure
+        # authorization-layer outcome (START_PROMISE_REJECTED or a reject with no VPN_ONCREATE) is a
+        # platform result with an unclassified product meaning: blocked, never a fail, never a
+        # scenario invalid. B Start is not asked; S7 is not-run after the fail/blocked and finally
+        # cleanup still runs.
+        $observation6 = Complete-ScenarioContext $context6
+        [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }))
+        $s6AResult = if ($extensionReject6A) { 'fail' } else { 'blocked' }
+        $s6AReason = if ($extensionReject6A) { 'A-create-rejected-or-invalid-fd' } else { 'authorization-outcome-unclassified' }
+        $s7AReason = if ($extensionReject6A) { 'not-run-after-functional-fail' } else { 'not-run-after-platform-blocked' }
+        $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $s6AResult; reason = $s6AReason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $null; a_accepted = $false; a_on_create = [bool]$onCreate6A; a_extension_rejected = [bool]$extensionReject6A; a_auth_unclassified = [bool]$authUnclassified6A; b_rejected = $null; b_rejection_code = $null; b_accepted = $false; accepted_session_count_in_window = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' }).Count; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'not-required'; review_only = $false }; observation = $observation6.Observation })
+        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = $s7AReason; active_bundle = $null; request_id = $null })
+        $script:PartialScenarios = @($results)
+        return @($results)
+    }
+    $pre6B = Get-ExactProcessCheckpoint @($script:BundleA)
+    # ADJ-20260808-0002 (C6): the S6 B pre-checkpoint expects A active. A mismatch here comes
+    # from platform residue / an indeterminable process state, not from an extra operator event
+    # (operator mis-action is enforced by the global action guard as invalid). Classify blocked,
+    # never a precondition scenario invalid.
+    if ([string]$pre6B.status -ne 'pass') {
+        throw "scenario-6 machine-verification-blocked step=3 reason=exact-process-precondition:$([string]$pre6B.reason)"
+    }
+    [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleB })
+    $entry6B = Invoke-LayoutCheckpoint 6 'scenario-6-entry-b' 'entry' $script:BundleB
+    $step6B = Invoke-MechanicalStep $context6 3 '点击测试 App B 的 Start' $pre6B { param($events) Test-UniqueStartCondition $events $script:BundleB } -CaptureBefore $entry6B -CaptureAfterName 'scenario-6-conflict'
+    $request6B = [string]$step6B.Outcome.request_id
+    Register-VerifiedRequest $request6B $script:BundleB 6
+    $bTerminal6 = Wait-MachineCondition $context6 ([long]$step6B.AnchorByte) ([DateTimeOffset]$step6B.PromptAt) {
+        param($events)
+        # ADJ-20260808-0003 (C6): re-assert the verified B Start window before judging the B
+        # create/rejection terminal. Extra operator UI actions observed while waiting for the
+        # platform marker invalidate on the spot, never a platform marker-missing blocked.
+        $uniqueStart = Test-UniqueStartCondition $events $script:BundleB
+        if ([string]$uniqueStart.status -eq 'invalid') { return $uniqueStart }
+        if ([string]$uniqueStart.status -eq 'pending') { return $uniqueStart }
+        if (Test-CorrelatedMarker $events $script:BundleB $request6B 'CREATE_ACCEPTED') { return [pscustomobject]@{ status = 'pass'; reason = 'B-create-accepted'; request_id = $request6B } }
+        # ADJ-20260808-0002 (C6): both the Extension create rejection and the UI promise rejection
+        # are terminal for B. The code is extracted from the real Extension safeError comma-field
+        # shape (`summary=code=<digits>,name=...,message=...`) or the historical top-level
+        # `|code=<digits>|` field. When multiple rejected events exist, every one is checked and
+        # any frozen code wins (never just the first).
+        $rejected = @($events | Where-Object {
+            ([string]$_.text -match 'VPN_CREATE_REJECTED\|' -or [string]$_.text -match 'START_PROMISE_REJECTED\|') -and
+            [string]$_.text -match "requestId=$([regex]::Escape($request6B))(\||\s|$)"
+        })
+        if ($rejected.Count -gt 0) {
+            $frozenCodes = @($Freeze.vpn_conflict_rejection_codes | ForEach-Object { [int]$_ })
+            $frozenHit = $null
+            $firstCode = $null
+            foreach ($rej in $rejected) {
+                $code = Get-RejectionErrorCode ([string]$rej.text)
+                if ($null -eq $firstCode -and $null -ne $code) { $firstCode = $code }
+                if ($null -ne $code -and $code -in $frozenCodes) { $frozenHit = $code; break }
+            }
+            if ($null -ne $frozenHit) { return [pscustomobject]@{ status = 'pass'; reason = 'B-frozen-conflict-code'; request_id = $request6B; code = $frozenHit } }
+            # ADJ-20260808-0002 (C6): a rejection with no extractable code, or a non-frozen code,
+            # is a platform result with an uncertain outcome: blocked (never scenario invalid).
+            return [pscustomobject]@{ status = 'blocked'; reason = "B-conflict-code-not-frozen:$firstCode"; request_id = $request6B; code = $firstCode }
+        }
+        return [pscustomobject]@{ status = 'pending'; reason = 'B-create-terminal-missing' }
+    }
+    # ADJ-20260808-0003 (C6): a non-frozen B rejection code is a platform result with an
+    # uncertain outcome: block the scenario (never scenario invalid), complete the current
+    # observation, record S6 blocked `B-conflict-code-not-frozen:<code>`, and leave S7 as
+    # not-run-after-platform-blocked. Only extra operations / wrong request / wrong order are
+    # scenario invalid (already enforced by the mechanical step conditions above). Finally
+    # cleanup + seal still run for the blocked S6/S7 pair.
+    if ([string]$bTerminal6.status -eq 'blocked' -and [string]$bTerminal6.reason -match '^B-conflict-code-not-frozen') {
+        $observation6 = Complete-ScenarioContext $context6
+        [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }, [ordered]@{ Bundle = $script:BundleB; RequestId = $request6B }))
+        $bCode6 = Get-OptionalProperty $bTerminal6 'code' $null
+        $results.Add([ordered]@{
+            sequence_index = 6; scenario = 6; result = 'blocked'; reason = "B-conflict-code-not-frozen:$bCode6"
+            a_reauth_path = $s6AReauthPath
+            request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted6; b_rejected = $true; b_rejection_code = $bCode6; b_accepted = $false
+            accepted_session_count_in_window = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' }).Count
+            conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'collected'; review_only = $false }
+            observation = $observation6.Observation
+        })
+        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = 'not-run-after-platform-blocked'; active_bundle = $null; request_id = $null })
+        $script:PartialScenarios = @($results)
+        return @($results)
+    }
+    # ADJ-20260808-0003 (C6): capture degradation surfaces as blocked (infra or non-infra); a
+    # plain runner blocked is never a scenario invalid.
+    if ([string]$bTerminal6.status -eq 'blocked') {
+        throw "scenario-6 machine-verification-blocked step=3 reason=$([string](Get-OptionalProperty $bTerminal6 'reason' 'machine-verification-blocked'))"
+    }
+    if ([string]$bTerminal6.status -ne 'pass') { Throw-ScenarioInvalid 6 ([string]$bTerminal6.reason) -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
+    $bAccepted6 = [string]$bTerminal6.reason -eq 'B-create-accepted'
+    if ($bAccepted6) { [void]$script:SimulationActiveBundles.Add($script:BundleB) }
+    $observation6 = Complete-ScenarioContext $context6
+    [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }, [ordered]@{ Bundle = $script:BundleB; RequestId = $request6B }))
+    # ADJ-20260808-0003: scan the complete window for any accepted request outside the two
+    # registered ids (CREATE_ACCEPTED markers are now inside the allowed requestId range).
+    $unexpectedAccepted6 = @($observation6.Events | Where-Object {
+        [string]$_.text -match 'CREATE_ACCEPTED' -and
+        [string]$_.text -notmatch "requestId=$([regex]::Escape($request6A))(\||\s|$)" -and
+        [string]$_.text -notmatch "requestId=$([regex]::Escape($request6B))(\||\s|$)"
+    })
+    if ($unexpectedAccepted6.Count -gt 0) { Throw-ScenarioInvalid 6 'unexpected-accepted-request-in-window' -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
+    $aAcceptedCount6 = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' -and [string]$_.text -match "requestId=$([regex]::Escape($request6A))(\||\s|$)" }).Count
+    $bAcceptedCount6 = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' -and [string]$_.text -match "requestId=$([regex]::Escape($request6B))(\||\s|$)" }).Count
+    $dualAccepted6 = $aAcceptedCount6 -gt 0 -and $bAcceptedCount6 -gt 0
+    # ADJ-20260808-0003: when B was rejected, the B Extension process may still be alive (the
+    # platform may spawn the Extension before rejecting the create); B process state is observed
+    # but never required absent. A `:vpn` present remains the required A-side window-end check.
+    $process6 = if ($bAccepted6) { Get-ExactProcessCheckpoint @($script:BundleA, $script:BundleB) } else { Get-ExactProcessCheckpoint @($script:BundleA) -ObservedBundles @($script:BundleB) }
+    $scenario6Result = if ($dualAccepted6 -or $bAccepted6) { 'fail' } elseif (-not $observation6.CompleteWindowObserved -or $observation6.CaptureDegraded -or [string]$process6.status -ne 'pass') { 'blocked' } elseif ([string]$bTerminal6.reason -eq 'B-frozen-conflict-code') { 'pass' } else { 'blocked' }
+    $s6Reason = if ($dualAccepted6) { 'two-accepted-sessions-observed' } elseif ($bAccepted6) { 'B-create-accepted-instead-of-conflict-rejection' } else { 'B-explicit-conflict-rejection' }
+    # ADJ-20260808-0003: the scenario-6-conflict capture is a required decisive capture, never
+    # review-only; the record must not claim review_only semantics for a required capture.
+    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted6; b_rejected = (-not $bAccepted6); b_rejection_code = Get-OptionalProperty $bTerminal6 'code' $null; b_accepted = [bool]$bAccepted6; accepted_session_count_in_window = $aAcceptedCount6 + $bAcceptedCount6; machine_process_checkpoint = $process6; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'collected'; review_only = $false }; observation = $observation6.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation6
 
-    $activeBundle = if ($bAccepted) { $script:BundleB } else { $script:BundleA }
-    $activeRequest = if ($bAccepted) { $request6B } else { $request6A }
-    $script:ProbeContexts[7] = New-ProcessProbeContext -Scenario 7 -Bundle $activeBundle -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
-    $cleanupState = [pscustomobject]@{ Done = $false; Verified = $false; CompletedAt = $null; FaultDegraded = $false; TerminalAssessed = $false; TerminalMode = $null }
-    $duringScenario7 = {
-        param([object[]]$CurrentEvents)
-        if ($cleanupState.Done) { return }
-        $probeCtx = $script:ProbeContexts[7]
-        # Terminal assessment completes before any uninstall cleanup is allowed. Get-VpnFinalState is
-        # the single terminal evaluator: callback terminal + post-destroy fd snapshot first,
-        # FD_STILL_OPEN is a hard fail that never falls back, otherwise the strict-process-boundary
-        # route (unique stop + onDestroy + begin/pre snapshot + consecutive absent pre-uninstall
-        # probes). The callback/FD/fallback ladder is never re-implemented here;
-        # Test-StrictFallbackPrerequisites only gates whether to adopt the probe series.
-        # Finally-absent must never backfill these probes.
-        # RequestId is bound to the actual active A/B request from S6; null inference is forbidden.
-        if ([string]::IsNullOrWhiteSpace([string]$activeRequest)) { return }
-        $stopCandidate = Get-StopRequestFromEvents -Events $CurrentEvents -ExpectedBundle $activeBundle
-        if ($null -eq $stopCandidate -or [string]$stopCandidate.RequestId -ne [string]$activeRequest) { return }
-        $rid = [string]$activeRequest
-        $final = Get-VpnFinalState -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid -ProbeState $probeCtx -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
-        if ($final.result -eq 'pass') {
-            $cleanupState.TerminalMode = [string]$final.terminal_mode
-        } elseif ($final.result -eq 'fail') {
-            # FD_STILL_OPEN is a hard fail: never uninstall over a leaked fd; bundles stay untouched.
-            return
-        } elseif (-not [bool]$probeCtx.Started -and (Test-StrictFallbackPrerequisites -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid).Met) {
-            # Strict fallback eligible: adopt the window-bound probe series, then re-evaluate with
-            # the same unique evaluator. Only a pass authorizes uninstall; fail/blocked leave
-            # everything untouched.
-            [void](Invoke-ProcessFinalStateProbeSeries $probeCtx $script:CurrentWindowEnd)
-            $final = Get-VpnFinalState -Events $CurrentEvents -Bundle $activeBundle -RequestId $rid -ProbeState $probeCtx -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
-            if ($final.result -ne 'pass') { return }
-            $cleanupState.TerminalMode = [string]$final.terminal_mode
-        } else {
-            # blocked: prerequisites missing, or probes already run but insufficient/aborted. Terminal
-            # assessment is not complete; leave bundles untouched and keep waiting for later events.
-            return
-        }
-        $cleanupState.TerminalAssessed = $true
-        $preStatus = Invoke-Capture 'scenario-7-pre-uninstall' 7
-        foreach ($faultOperation in @('FaultA', 'FaultB')) {
-            if ((Invoke-FaultArtifact $faultOperation 7) -ne 'collected') { $cleanupState.FaultDegraded = $true }
-        }
-        $verified = $preStatus -eq 'collected'
+    # S7 consumes only S6's verified active A request. No final semantic confirmation is requested.
+    if ($scenario6Result -ne 'pass') {
+        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = 'S6-active-checkpoint-unavailable'; active_bundle = $null; request_id = $null })
+        $script:PartialScenarios = @($results)
+        return @($results)
+    }
+    $activeBundle = $script:BundleA
+    $activeRequest = $request6A
+    [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $activeBundle })
+    $entry7 = Invoke-LayoutCheckpoint 7 'scenario-7-entry-a' 'entry' $activeBundle
+    $pre7 = Get-ExactProcessCheckpoint @($activeBundle)
+    $context7 = New-ScenarioContext 7
+    $step7Stop = Invoke-MechanicalStep $context7 1 '点击测试 App A 的 Stop' $pre7 { param($events) Test-UniqueStopCondition $events $activeBundle $activeRequest } -CaptureBefore $entry7 -CaptureAfterName 'scenario-7-after-stop' -CaptureAfterReviewOnly
+    if (Test-SimulationStepHasEffect 7 1) { [void]$script:SimulationActiveBundles.Remove($activeBundle) }
+    $script:ProbeContexts[7] = New-ProcessProbeContext -Scenario 7 -Bundle $activeBundle -RequireBundlePresent $false -RequiredCount ([int]$Freeze.process_absent_required_count) -SpacingSeconds ([double]$Freeze.process_absent_probe_spacing_seconds)
+    $during7 = {
+        param($events)
+        if ((Test-StrictFallbackPrerequisites $events $activeBundle $activeRequest).Met) { [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[7] $script:CurrentWindowEnd) }
+    }
+    $observation7 = Complete-ScenarioContext $context7 $during7
+    [void](Assert-ScenarioEventContract 7 $observation7.Events @() @([ordered]@{ Bundle = $activeBundle; RequestId = $activeRequest }))
+    $hasDestroyBegin7 = (Test-CorrelatedMarker $observation7.Events $activeBundle $activeRequest 'VPN_DESTROY_BEGIN') -or @($observation7.Events | Where-Object { [string]$_.text -match 'VPN_FD_SNAPSHOT' -and [string]$_.text -match 'phase=pre-destroy' -and [string]$_.text -match "requestId=$([regex]::Escape($activeRequest))(\||\s|$)" }).Count -gt 0
+    if (-not (Test-CorrelatedMarker $observation7.Events $activeBundle $activeRequest 'VPN_ONDESTROY') -or -not $hasDestroyBegin7) { Throw-ScenarioInvalid 7 'Stop-postcondition-missing-onDestroy-or-destroy-begin' -StepIndex 1 -StepId $step7Stop.StepId -ExpectedAction $step7Stop.ExpectedAction }
+    $final7 = Get-VpnFinalState $observation7.Events $activeBundle $activeRequest $script:ProbeContexts[7] $false ([int]$Freeze.process_absent_required_count) ([double]$Freeze.process_absent_probe_spacing_seconds)
+    $terminalAssessed7 = $final7.result -eq 'pass'
+    $faultDegraded7 = $false
+    $cleanupDone7 = $false
+    $cleanupVerified7 = $false
+    $cleanupCompletedAt7 = $null
+    if ($terminalAssessed7) {
+        $preUninstall = Invoke-ReviewOnlyCapture 'scenario-7-pre-uninstall' 7
+        foreach ($faultOperation in @('FaultA', 'FaultB')) { if ((Invoke-FaultArtifact $faultOperation 7) -ne 'collected') { $faultDegraded7 = $true } }
         if ($script:InstalledB) {
-            $uninstallBResult = Invoke-HdcOperation 'Uninstall' @{ Bundle = $script:BundleB } -AllowFailure
-            $script:CleanupActions.Add([ordered]@{ operation = 'Uninstall'; bundle = $script:BundleB; exit_code = $uninstallBResult.ExitCode })
-            if ($uninstallBResult.ExitCode -eq 0) { $script:InstalledB = $false } else { $verified = $false }
+            $uninstallB = Invoke-HdcOperation 'Uninstall' @{ Bundle = $script:BundleB } -AllowFailure
+            $script:CleanupActions.Add([ordered]@{ operation = 'Uninstall'; bundle = $script:BundleB; exit_code = $uninstallB.ExitCode })
+            if ($uninstallB.ExitCode -eq 0) { $script:InstalledB = $false }
         }
         if ($script:InstalledA) {
-            $uninstallAResult = Invoke-HdcOperation 'Uninstall' @{ Bundle = $script:BundleA } -AllowFailure
-            $script:CleanupActions.Add([ordered]@{ operation = 'Uninstall'; bundle = $script:BundleA; exit_code = $uninstallAResult.ExitCode })
-            if ($uninstallAResult.ExitCode -eq 0) { $script:InstalledA = $false } else { $verified = $false }
+            $uninstallA = Invoke-HdcOperation 'Uninstall' @{ Bundle = $script:BundleA } -AllowFailure
+            $script:CleanupActions.Add([ordered]@{ operation = 'Uninstall'; bundle = $script:BundleA; exit_code = $uninstallA.ExitCode })
+            if ($uninstallA.ExitCode -eq 0) { $script:InstalledA = $false }
         }
-        if ($script:StagingSent -or $script:StagingMayExist) {
-            if (-not (Invoke-RemoveStagingVerified 'RemoveStaging')) { $verified = $false }
-        }
-        foreach ($bundle in @($script:BundleA, $script:BundleB)) {
-            $dumpResult = Invoke-HdcOperation 'BundleDump' @{ Bundle = $bundle } -AllowFailure
-            $processResult = Invoke-HdcOperation 'PidOf' @{ Bundle = $bundle } -AllowFailure
-            if ((Get-HdcCombinedText $dumpResult) -notmatch 'failed to get information|not exist|not found' -or -not [string]::IsNullOrWhiteSpace($processResult.Stdout)) { $verified = $false }
-        }
-        $cleanupState.Done = $true
-        $cleanupState.Verified = $verified
-        $cleanupState.CompletedAt = (Get-Now).ToString('o')
-    }
-    $observation7 = Invoke-ScenarioObservation 7 '场景7：在当前仍 active 的测试 App（A 或 B）界面点 Stop；不要手工强停或卸载；runner 负责后续清理' $null $duringScenario7
-    # No post-window DuringWait/probe rerun: late stop is conservatively blocked; probes stay inside the window only.
-    # S7 is hard-bound to the calculated active A/B request; null must not fall back to window-event inference.
-    $final7 = if ([string]::IsNullOrWhiteSpace([string]$activeRequest)) {
-        [pscustomobject]@{ result = 'blocked'; reason = 'active-request-unresolved'; terminal_mode = $null; callback = $null; strict = $null }
+        if ($script:StagingSent -or $script:StagingMayExist) { [void](Invoke-RemoveStagingVerified 'RemoveStaging') }
+        $cleanupVerified7 = Test-TargetedCleanupState
+        $cleanupDone7 = $true
+        $cleanupCompletedAt7 = (Get-Now).ToString('o')
+        $postCleanup = Invoke-ReviewOnlyCapture 'scenario-7-post-cleanup' 7
     } else {
-        Get-VpnFinalState -Events $observation7.Events -Bundle $activeBundle -RequestId $activeRequest -ProbeState $script:ProbeContexts[7] -RequireBundlePresent $false -RequiredCount ([int]$freeze.process_absent_required_count) -SpacingSeconds ([double]$freeze.process_absent_probe_spacing_seconds)
+        [void](Invoke-ReviewOnlyCapture 'scenario-7-final-state' 7)
     }
-    $capture7Name = if ($cleanupState.Done) { 'scenario-7-post-cleanup' } else { 'scenario-7-final-state' }
-    $capture7 = Invoke-Capture $capture7Name 7
-    $cleanupVisible = Confirm-VisibleFact 7 'FINAL-CLEANUP-CAPTURED' '仅当已无 active VPN 或测试配置残留时确认为真。'
-    $scenario7Result = if ($final7.result -eq 'fail') { 'fail' } elseif ($observation7.CaptureDegraded -or -not $observation7.CompleteWindowObserved -or $capture7 -ne 'collected') { 'blocked' } elseif (-not $observation7.AckValid -or -not $cleanupState.Done -or -not $cleanupState.Verified -or -not $cleanupVisible -or $cleanupState.FaultDegraded -or $final7.result -ne 'pass') { 'blocked' } else { 'pass' }
+    $scenario7Result = if ($final7.result -eq 'fail') { 'fail' } elseif (-not $observation7.CompleteWindowObserved -or $observation7.CaptureDegraded -or $final7.result -ne 'pass' -or -not $cleanupVerified7 -or $faultDegraded7) { 'blocked' } else { 'pass' }
     $results.Add([ordered]@{
-        sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $final7.reason; active_bundle = $activeBundle; request_id = $activeRequest
-        terminal_mode = $final7.terminal_mode
-        terminal_assessed = [bool]$cleanupState.TerminalAssessed
-        terminal_mode_at_cleanup = $cleanupState.TerminalMode
-        process_final_state_probes = @($script:ProbeContexts[7].Probes)
-        bundle_present_during_probe = [bool]$script:ProbeContexts[7].BundlePresent
-        cleanup_completed_at = $cleanupState.CompletedAt
-        post_cleanup_capture = [bool]$cleanupState.Done
-        post_cleanup_capture_name = $capture7Name
-        bundle_process_cleanup_verified = [bool]$cleanupState.Verified
-        visible_cleanup_confirmed = [bool]$cleanupVisible
-        fault_capture_degraded = [bool]$cleanupState.FaultDegraded
-        observation = $observation7.Observation
+        sequence_index = 7; scenario = 7; result = $scenario7Result; reason = $final7.reason; active_bundle = $activeBundle; request_id = $activeRequest; terminal_mode = $final7.terminal_mode
+        terminal_assessed = [bool]$terminalAssessed7; terminal_mode_at_cleanup = $(if ($terminalAssessed7) { $final7.terminal_mode } else { $null }); process_target = [string]$script:ProbeContexts[7].ProcessTarget; process_target_verified = [bool]($scenario2Result -eq 'pass'); process_final_state_probes = @($script:ProbeContexts[7].Probes); bundle_present_during_probe = [bool]$script:ProbeContexts[7].BundlePresent
+        cleanup_completed_at = $cleanupCompletedAt7; post_cleanup_capture = [bool]$cleanupDone7; post_cleanup_capture_name = $(if ($cleanupDone7) { 'scenario-7-post-cleanup' } else { 'scenario-7-final-state' }); bundle_process_cleanup_verified = [bool]$cleanupVerified7; fault_capture_degraded = [bool]$faultDegraded7; observation = $observation7.Observation
     })
     $script:PartialScenarios = @($results)
     return @($results)
@@ -2587,10 +3723,28 @@ function New-CompleteRecord {
     )
     $scenario2 = @($Scenarios | Where-Object { [int]$_.scenario -eq 2 })[0]
     $s3Record = @($Scenarios | Where-Object { [int]$_.scenario -eq 3 })[0]
+    # Tri-state clean-reactivation proof: true/false only when scenario 3 was actually measured with
+    # a terminal evaluation; $null when scenario 3 was never probed/measured (e.g. blocked early), so
+    # "not probed" is never masqueraded as a false proof. Scenario entries are ordered dictionaries,
+    # so PSObject property lookup cannot see their keys; use IDictionary index access.
+    $s3ProofValue = $null
+    if ($null -ne $s3Record) {
+        # ADJ-20260808-0003: a present key with a null value must stay null (S3 was never
+        # probed/measured); casting null to [bool] would masquerade "not probed" as false.
+        if ($s3Record -is [Collections.IDictionary]) {
+            if ($s3Record.Contains('clean_reactivation_proof')) {
+                $rawProof = $s3Record['clean_reactivation_proof']
+                $s3ProofValue = if ($null -eq $rawProof) { $null } else { [bool]$rawProof }
+            }
+        } elseif ($null -ne $s3Record.PSObject.Properties['clean_reactivation_proof']) {
+            $rawProof = $s3Record.PSObject.Properties['clean_reactivation_proof'].Value
+            $s3ProofValue = if ($null -eq $rawProof) { $null } else { [bool]$rawProof }
+        }
+    }
     $isEvidence = $script:ExecutionMode -eq 'live'
     # Non-evidence modes (dry-run/live-simulation) stay blocked unless the measured aggregation is an
     # explicit fail: a hard fail (e.g. post-destroy FD_STILL_OPEN) must never be downgraded to blocked.
-    if (-not $isEvidence -and $Overall -ne 'fail') { $Overall = 'blocked'; $RecordStatus = 'blocked' }
+    if (-not $isEvidence -and $Overall -notin @('fail', 'invalid')) { $Overall = 'blocked'; $RecordStatus = 'blocked' }
     $record = [ordered]@{
         schema_version = 1
         evidence_id = $Freeze.evidence_id
@@ -2649,7 +3803,7 @@ function New-CompleteRecord {
         freeze_contract_sha256 = $FreezeContractSha256
         preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
         scenario_window_seconds = 60
-        observation_semantics = 'one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds action prompt through measured ACK plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; READY latency excluded from scenario-1 60s install window; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); scenario 5 revokes via manual Settings app-info force-stop with confirmation and consecutive absent probes; scenario 5 Settings>VPN page capture is observation-only (its degradation is recorded in observation_only_degraded and never blocks the scenario or overall); scenario 6 operator dual-active confirmation is three-state (no_dual_active_confirmed/dual_active_confirmed: only dual=true && noDual=false fails, both false is blocked dual-active-observation-unresolved, both true is blocked inconsistent-operator-confirmation, empty/false alone never fails); probe results are recorded before any cleanup and never backfilled from finally'
+        observation_semantics = 'ADJ-20260808-0002 strong-reliable protocol (mechanical-action-only-machine-verified-v1): one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds first mechanical action prompt through last action plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; operator sees only single-step "现在只做X，完成后按回车" and Read-Host is mechanical enter only (no READY/ACK/token/y-n semantic gates); machine layout gates (deterministic-layout-v1) before Allow/Deny and after decisive captures; scenario 1 is fully machine-operated install; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); process probes pidof only the <bundle>:vpn Extension ability process (ADJ-20260808-0001) while BundleDump proves the bundle/main App stays installed; any extra Start/Stop/UI_STOP_SKIPPED/wrong requestId/order is scenario invalid and stops later scenarios as not-run-due-to-invalid; scenario 5 revokes via atomic Settings navigation steps with machine layout gates plus force-stop then :vpn absent + bundle present; scenario 6 is fully machine: unique A CREATE_ACCEPTED, unique B CREATE_REJECTED with frozen code 2203002, no dual accepted and no operator dual-active fields; scenario 7 binds S6 verified A request only and never asks FINAL-CLEANUP; overall priority integrity invalid > scenario invalid > fail > blocked > pass; probe results are recorded before any cleanup and never backfilled from finally'
         settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
         settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
         settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
@@ -2658,18 +3812,21 @@ function New-CompleteRecord {
         destroy_terminal_policy = $Freeze.destroy_terminal_policy
         process_absent_required_count = [int]$Freeze.process_absent_required_count
         process_absent_probe_spacing_seconds = [double]$Freeze.process_absent_probe_spacing_seconds
+        process_probe_target = [string]$Freeze.process_probe_target # ADJ-20260808-0001: pidof targets <bundle>:vpn Extension process, not bundle UI process
         cleanup_baseline = 'A/B absent; no A/B process; no active VPN; unrelated VPN isolated; staging removed before send'
         scenarios = @($Scenarios)
         scenario_aggregation = [ordered]@{
             mapping = '1=cleanup_and_install; 2=allow_and_fd; 3=active_stop; 4=deny; 5=settings_revoke; 6=second_vpn_conflict; 7=final_cleanup'
             scenario_2_rule = 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked'
             scenario_2_assertions = $(if ($null -ne $scenario2) { $scenario2.assertions } else { $null })
-            scenario_5_rule = 'settings-app-info-force-stop revoke: fresh create/open plus manual force-stop confirmation plus bundle present plus consecutive absent probes; Settings VPN page is observation-only and never blocks'
-            scenario_6_rule = 'explicit functional fails first: replacementDestroy fail or dual-active-observed outrank operator unresolved/inconsistent and capture/window blocked; operator dual-active confirmation is three-state: only dual_active_confirmed=true && no_dual_active_confirmed=false fails (dual-active-observed); noDual=true && dual=false is normal; both false is blocked dual-active-observation-unresolved; both true is blocked inconsistent-operator-confirmation; empty/false alone never fails'
-            scenario_7_rule = 'uninstall cleanup is allowed only after the scenario terminal assessment completes (callback or strict-process-boundary with pre-uninstall probes); finally-absent never backfills terminal probes'
+            scenario_5_rule = 'settings-app-info-force-stop revoke under strong protocol: atomic mechanical Settings steps with machine layout gates; fresh create/open plus force-stop then :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation'
+            scenario_6_rule = 'machine-only conflict: unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002; dual accepted or B accepted is fail; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null'
+            scenario_7_rule = 'binds only S6 machine-verified active A request/bundle; expects UI_STOP/onDestroy/pre-destroy/destroy-begin and :vpn final state; wrong bundle stop or extra start is invalid; no FINAL-CLEANUP operator confirmation; uninstall cleanup only after terminal assessment; finally-absent never backfills'
             s3_strict_process_boundary_gate = 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked'
-            s3_clean_reactivation_proof = $(if ($null -ne $s3Record) { [bool](Get-OptionalProperty $s3Record 'clean_reactivation_proof' $false) } else { $false })
-            overall_rule = 'any scenario fail => fail; else any scenario blocked => blocked; all seven scenarios pass => pass; scenario 3 strict-process-boundary without clean reactivation proof => blocked; evidence integrity violation => invalid'
+            # Tri-state mirror of the scenario-3 entry: true/false when S3 was measured with a
+            # terminal evaluation; null when S3 was never probed/measured (never a disguised false).
+            s3_clean_reactivation_proof = $s3ProofValue
+            overall_rule = 'integrity invalid > scenario invalid > fail > blocked > pass; first scenario invalid stops later scenarios as not-run-due-to-invalid; scenario 3 strict-process-boundary without clean reactivation proof => blocked; finally cleanup/seal never changes overall'
             measured_scenario_overall = Get-ScenarioAggregation $Scenarios
             overall = $Overall
         }
@@ -2684,6 +3841,7 @@ function New-CompleteRecord {
             virtual_clock = [bool]$LiveSimulation
         }
         raw_hilog_reference = Get-PublicRawReferences
+        operator_wait_state_reference = [ordered]@{ path = 'operator-wait-state.json'; sha256 = Get-FileSha256 (Join-Path $script:EvidencePath 'operator-wait-state.json'); sealed_by = 'hash-manifest.json'; pollable_without_device_commands = $true }
         transcript_reference = [ordered]@{ path = 'projection/transcript.redacted.jsonl'; sha256 = Get-FileSha256 $script:ProjectionTranscript; projection_only = $true; raw_transcript_exists = $false; chain_head = $script:TranscriptPreviousHash }
         screenshot_reference = Get-PublicScreenshotReferences
         layout_state_reference = Get-PublicLayoutReferences
@@ -2724,6 +3882,16 @@ function New-CompleteRecord {
     }
     if (-not [string]::IsNullOrEmpty($Failure)) { $record['failure'] = $Failure }
     if (-not [string]::IsNullOrEmpty($InfrastructureReason)) { $record['infrastructure_reason'] = $InfrastructureReason }
+    if ($null -ne $script:ScenarioInvalid) {
+        $record['invalidated_step'] = [ordered]@{
+            scenario = [int]$script:ScenarioInvalid.scenario
+            step_index = $script:ScenarioInvalid.step_index
+            step_id = $script:ScenarioInvalid.step_id
+            reason = [string]$script:ScenarioInvalid.reason
+            detected_at = [string]$script:ScenarioInvalid.detected_at
+        }
+        $record['scenario_invalid'] = $script:ScenarioInvalid
+    }
     return $record
 }
 
@@ -2838,6 +4006,20 @@ function Test-EvidenceIntegrity {
     }
     $sequence = @($Scenarios | ForEach-Object { [int]$_.scenario })
     if (($sequence -join ',') -ne '1,2,3,4,5,6,7') { $violations.Add('scenario-order-invalid') }
+    # ADJ-20260808-0003: the sealed operator-wait state must end complete. A crash/invalid still
+    # seals via finally, so a non-complete sealed wait state means the state file was tampered or
+    # the seal ran before completion: evidence integrity invalid.
+    $waitStatePath = Join-Path $Root 'operator-wait-state.json'
+    if (-not (Test-Path -LiteralPath $waitStatePath -PathType Leaf)) {
+        $violations.Add('operator-wait-state-missing')
+    } else {
+        try {
+            $waitState = Get-Content -LiteralPath $waitStatePath -Raw | ConvertFrom-Json -Depth 20
+            if ([string]$waitState.phase -ne 'complete' -or -not [bool]$waitState.complete -or [string]::IsNullOrWhiteSpace([string]$waitState.completed_at)) {
+                $violations.Add('operator-wait-state-not-complete')
+            }
+        } catch { $violations.Add('operator-wait-state-invalid') }
+    }
     foreach ($artifact in $script:CaptureArtifacts) {
         if ($artifact.status -eq 'collected' -and (-not (Test-Path -LiteralPath $artifact.screen_path -PathType Leaf) -or -not (Test-Path -LiteralPath $artifact.layout_path -PathType Leaf))) {
             $violations.Add("capture-reference-missing:$($artifact.name)")
@@ -2848,6 +4030,9 @@ function Test-EvidenceIntegrity {
 
 function Get-FailureClassification {
     param([Parameter(Mandatory)][string]$Message)
+    if ($Message.StartsWith('SCENARIO_INVALID', [StringComparison]::Ordinal) -or $Message -match '^scenario-[1-7] SCENARIO_INVALID') {
+        return [pscustomobject]@{ Overall = 'invalid'; RecordStatus = 'invalidated'; InfrastructureReason = $null; RetryAuthorized = $false }
+    }
     if ($Message.StartsWith('FUNCTIONAL_FAIL', [StringComparison]::Ordinal)) {
         return [pscustomobject]@{ Overall = 'fail'; RecordStatus = 'collected'; InfrastructureReason = $null; RetryAuthorized = $false }
     }
@@ -2856,7 +4041,7 @@ function Get-FailureClassification {
     }
     # Generic capture_degraded / time-parse / missing artifacts are non-infrastructure. Only real capture
     # process exit/stderr/start/timeout and HDC transport failures authorize USB retry.
-    if ($Message -match '(?i)exit\s*=\s*(124|125)|\bHDC(?:\s+operation)?\s+timeout\b|HDC infrastructure interruption|HDC Process\.Start|\bUSB\b|\boffline\b|\bdisconnect(?:ed)?\b|transport (?:offline|error|fail)|target.+not found|connect(?:ion)?.+fail|channel.+fail|continuous capture infrastructure failure|raw-hilog-(?:start|process|stderr)|capture process exited|unable to start continuous campaign capture') {
+    if ($Message -match '(?i)exit\s*=\s*(124|125)|\bHDC(?:\s+operation)?\s+timeout\b|HDC infrastructure interruption|hdc-usb-interruption|HDC Process\.Start|\bUSB\b|\boffline\b|\bdisconnect(?:ed)?\b|transport (?:offline|error|fail)|target.+not found|connect(?:ion)?.+fail|channel.+fail|continuous capture infrastructure failure|raw-hilog-(?:start|process|stderr)|capture process exited|unable to start continuous campaign capture') {
         return [pscustomobject]@{ Overall = 'blocked'; RecordStatus = 'blocked'; InfrastructureReason = 'hdc-usb-interruption'; RetryAuthorized = $true }
     }
     if ($Message -match '(?i)System\.IO\.IOException|disk full|not enough space|collection-storage-failure') {
@@ -2878,7 +4063,7 @@ function Set-CaptureDegradedScenarios {
     # Degradation never overrides an explicit fail: a hard fail (e.g. post-destroy FD_STILL_OPEN)
     # outranks capture degradation, so only non-fail results are downgraded to blocked here.
     foreach ($scenario in $Scenarios) {
-        if (($globalDegradation -or [int]$scenario.scenario -in $affected) -and [string]$scenario.result -ne 'fail') {
+        if (($globalDegradation -or [int]$scenario.scenario -in $affected) -and [string]$scenario.result -notin @('fail', 'invalid')) {
             $scenario.result = 'blocked'
             $scenario.reason = 'capture-degraded'
             if ([int]$scenario.scenario -eq 2) {
@@ -2941,6 +4126,9 @@ function Invoke-RunnerSelfTest {
     $timeParseClass = Get-FailureClassification 'scenario-4 continuous capture non-infrastructure blocked: device-time-parse-failed'
     Check ([string]::IsNullOrEmpty([string]$timeParseClass.InfrastructureReason) -and -not $timeParseClass.RetryAuthorized) 'capture-timeparse-not-usb'
     Check ((Get-FailureClassification 'unable to start continuous campaign capture').InfrastructureReason -eq 'hdc-usb-interruption') 'capture-start-infrastructure-classification'
+    Check ((Get-FailureClassification 'scenario-2 machine-precondition-blocked step=1 reason=hdc-usb-interruption:process-check:cn.alfadb.netbird.e3physvpna').InfrastructureReason -eq 'hdc-usb-interruption') 'machine-precondition-blocked-infra-classification'
+    $preMismatchClass = Get-FailureClassification 'scenario-2 machine-precondition-blocked step=1 reason=process-state-mismatch:cn.alfadb.netbird.e3physvpna expected-active=False actual-active=True'
+    Check ($preMismatchClass.Overall -eq 'blocked' -and [string]::IsNullOrEmpty([string]$preMismatchClass.InfrastructureReason) -and -not $preMismatchClass.RetryAuthorized) 'machine-precondition-blocked-mismatch-no-infra'
     Check ((Get-FailureClassification 'System.IO.IOException: disk full while writing capture').InfrastructureReason -eq 'collection-storage-failure') 'storage-ioexception-classification'
     Check ((Get-FailureClassification 'access denied writing evidence manifest').InfrastructureReason -eq 'collection-storage-failure') 'storage-access-denied-classification'
     Check ((Get-FailureClassification 'RUNNER_HOST_FAILURE cleanup threw').InfrastructureReason -eq 'runner-host-failure') 'runner-host-prefix-classification'
@@ -3079,6 +4267,39 @@ function Invoke-RunnerSelfTest {
     Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpExit2 $script:BundleA).status -eq 'unknown') 'probe-dump-exit2-unknown'
     Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpGarbage $script:BundleA).status -eq 'unknown') 'probe-dump-garbage-unknown'
     Check ((Get-ProcessProbeStatus $absentPidResult $probeDumpInfra $script:BundleA).status -eq 'error') 'probe-dump-error-classified'
+
+    # --- C7/ADJ-20260808-0001 process probe target and scheduling checks ---
+    # pidof must target the <bundle>:vpn Extension ability process exactly; no broad process query.
+    $pidAudit = Get-HdcInvocation 'PidOf' @{ Bundle = $script:BundleA }
+    $pidJoined = $pidAudit -join ' '
+    Check ($pidAudit[-1] -eq "$($script:BundleA):vpn" -and $pidJoined -match ' pidof [^ ]+:vpn$' -and $pidJoined -notmatch '(^|\s)(ps|pgrep|process|proc)(\s|$)') 'pidof-targets-bundle-vpn-extension-process'
+    Check ((Get-HdcInvocation 'PidOf' @{ Bundle = $script:BundleB })[-1] -eq "$($script:BundleB):vpn") 'pidof-b-target-extension-process'
+    # Scheduling must round-trip the exact DateTimeOffset (never [string], which drops sub-second)
+    # and add a small margin so the recorded spacing actually reaches the frozen 3.0s rule.
+    $lastProbeExact = [DateTimeOffset]::Parse('2099-01-01T00:00:03.900+00:00')
+    $nextProbeExact = ([DateTimeOffset]$lastProbeExact).AddSeconds(3.0 + 0.1)
+    Check (($nextProbeExact - $lastProbeExact).TotalSeconds -ge 3.0 -and $nextProbeExact.Millisecond -eq 0) 'probe-scheduling-keeps-subsecond-and-margin'
+    # Operator wait state carries only mechanical action and machine-verification fields.
+    $waitStateTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-waitstate-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($waitStateTemp) | Out-Null
+    $savedEvidencePath = $script:EvidencePath
+    try {
+        $script:EvidencePath = $waitStateTemp
+        Write-OperatorWaitState 'waiting' -Scenario 4 -StepIndex 2 -StepId 'abc123' -ExpectedAction '点击 Deny' -CaptureBefore ([ordered]@{ status = 'collected' }) -MachinePrecondition ([ordered]@{ status = 'pass' })
+        $waitingJson = Get-Content -LiteralPath (Join-Path $waitStateTemp 'operator-wait-state.json') -Raw
+        Check ($waitingJson -match '"phase"\s*:\s*"waiting"' -and $waitingJson -match '"scenario"\s*:\s*4' -and $waitingJson -match '"step_index"\s*:\s*2' -and $waitingJson -match '"step_id"\s*:\s*"abc123"' -and $waitingJson -match '"expected_action"' -and $waitingJson -match '"capture_before"' -and $waitingJson -match '"machine_precondition"' -and $waitingJson -match '"updated_at"') 'wait-state-waiting-shape'
+        Write-OperatorWaitState 'complete'
+        $completeJson = Get-Content -LiteralPath (Join-Path $waitStateTemp 'operator-wait-state.json') -Raw
+        Check ($completeJson -match '"phase"\s*:\s*"complete"' -and $completeJson -match '"complete"\s*:\s*true' -and $completeJson -match '"completed_at"' -and $completeJson -match '"history"') 'wait-state-complete-shape'
+        Check ($completeJson -notmatch '(?i)udid|\bserial\b|target|hap[_-]?[ab]|endpoint|secret|token|password') 'wait-state-no-sensitive-keys'
+    } finally {
+        $script:EvidencePath = $savedEvidencePath
+        Remove-Item -LiteralPath $waitStateTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # Aggregation s3_clean_reactivation_proof is tri-state: true/false only when S3 was measured;
+    # null (not false) when S3 was never probed/measured (blocked scenarios carry no proof key).
+    $aggBlockedScenarios = New-BlockedScenarios 'fixture'
+    Check (-not $aggBlockedScenarios[2].Contains('clean_reactivation_proof')) 'blocked-s3-entry-has-no-proof-key'
 
     function New-TestProbeState {
         param([object[]]$Probes = @(), [bool]$Started = $true, [bool]$Aborted = $false, [bool]$Terminal = $false, [int]$ConsecutiveAbsent = 0, [bool]$BundlePresent = $true)
@@ -3374,6 +4595,19 @@ function Invoke-RunnerSelfTest {
     $lateBCreate = $pollutionEvents + [pscustomobject]@{ offset_seconds = 62; text = 'VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b4' }
     $coveredEvents = @($lateBCreate | Where-Object { $_.offset_seconds -le 65 })
     Check ((Get-DenyAssessment $coveredEvents $script:BundleB 'b4' $true $true).result -eq 'fail') 'ACK-plus-60-catches-late-B-create'
+    # --- ADJ-20260808-0002 Get-RejectionErrorCode unit checks ---
+    # Real Extension safeError comma-field shape: summary=code=<digits>,name=...,message=...
+    Check ((Get-RejectionErrorCode 'VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=code=2203002,name=BusinessError,message=conflict with active VPN') -eq 2203002) 'rejection-code-real-summary-shape'
+    # Historical top-level |code=<digits>| field.
+    Check ((Get-RejectionErrorCode 'VPN_CREATE_REJECTED|requestId=b6|phase=conflict|code=2203001|summary=active-A') -eq 2203001) 'rejection-code-top-level-field'
+    # safeError payload with the code not in the first comma field.
+    Check ((Get-RejectionErrorCode 'VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=name=BusinessError,code=2203002,message=x') -eq 2203002) 'rejection-code-summary-mid-field'
+    # A code quoted inside message=... prose must never be mis-parsed.
+    Check ($null -eq (Get-RejectionErrorCode 'VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=name=BusinessError,message=look for code=2203002 in the log')) 'rejection-code-message-prose-ignored'
+    # No code at all.
+    Check ($null -eq (Get-RejectionErrorCode 'START_PROMISE_REJECTED|bundle=b|requestId=b6|summary=denied')) 'rejection-code-missing-null'
+    # A standalone numeric key with a non-boundary suffix is not a code.
+    Check ($null -eq (Get-RejectionErrorCode 'VPN_CREATE_REJECTED|requestId=b6|code=2203002x|summary=x')) 'rejection-code-prefix-suffix-ignored'
     $scenarioSet = New-BlockedScenarios 'fixture'
     Check ($scenarioSet.Count -eq 7 -and $scenarioSet[1].assertions.Count -eq 3) 'complete-seven-scenario-template'
     $integrityTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-integrity-selftest-' + [guid]::NewGuid().ToString('N'))
@@ -3421,6 +4655,7 @@ $script:RepoRoot = Get-GitRepositoryRoot
 $freezePath = Get-NormalizedPath $FreezeManifest
 if (-not (Test-Path -LiteralPath $freezePath -PathType Leaf)) { throw 'FreezeManifest file missing' }
 $freeze = Get-Content -LiteralPath $freezePath -Raw | ConvertFrom-Json -Depth 50
+$script:Freeze = $freeze
 $freezeSha256 = Get-FileSha256 $freezePath
 $script:PublicVersionLiterals = @([string]$freeze.target_tuple.full_system_build, [string]$freeze.sdk.version)
 Assert-FreezeManifest $freeze $freezePath
@@ -3454,18 +4689,19 @@ try {
         $overall = 'blocked'
         $recordStatus = 'blocked'
     } else {
-        $scenarios = Invoke-LiveCampaign $freeze
+        $scenarios = Invoke-StrongLiveCampaign $freeze
         $measuredOverall = Get-ScenarioAggregation $scenarios
-        if ($LiveSimulation) {
+        if ($LiveSimulation -and $measuredOverall -ne 'invalid') {
             $overall = 'blocked'
             $recordStatus = 'blocked'
         } else {
             $overall = $measuredOverall
-            $recordStatus = 'collected'
+            $recordStatus = $(if ($measuredOverall -eq 'invalid') { 'invalidated' } else { 'collected' })
         }
     }
 } catch {
     $rawException = [string]$_.Exception.Message
+    if ($_.InvocationInfo.ScriptLineNumber -gt 0) { $rawException += " (runner-line=$($_.InvocationInfo.ScriptLineNumber))" }
     $phase = [string]$script:CampaignPhase
     if ($phase -match '^scenario-([1-7])$' -and $rawException -notmatch 'scenario-[1-7]') {
         $rawException = "scenario-$($Matches[1]) $rawException"
@@ -3474,16 +4710,36 @@ try {
     }
     $fatalMessage = Protect-SensitiveText $rawException
     $classification = Get-FailureClassification $fatalMessage
-    $overall = if ($script:ExecutionMode -eq 'live') { $classification.Overall } else { 'blocked' }
-    $recordStatus = if ($script:ExecutionMode -eq 'live') { $classification.RecordStatus } else { 'blocked' }
+    $isScenarioInvalid = $null -ne $script:ScenarioInvalid -or [string]$classification.Overall -eq 'invalid'
+    $overall = if ($isScenarioInvalid) { 'invalid' } elseif ($script:ExecutionMode -eq 'live') { $classification.Overall } else { 'blocked' }
+    $recordStatus = if ($isScenarioInvalid) { 'invalidated' } elseif ($script:ExecutionMode -eq 'live') { $classification.RecordStatus } else { 'blocked' }
     $infrastructureReason = $classification.InfrastructureReason
-    $failedScenario = if ($fatalMessage -match 'scenario-([1-7])') { [int]$Matches[1] } else { $null }
-    $scenarios = New-BlockedScenarios $(if ($phase -eq 'preflight' -or $fatalMessage -match '(?i)^preflight\b|collection preparation blocked') { 'preflight-or-collection-preparation-blocked' } else { 'not-run-after-runner-failure' })
+    $failedScenario = if ($null -ne $script:ScenarioInvalid) { [int]$script:ScenarioInvalid.scenario } elseif ($fatalMessage -match 'scenario-([1-7])') { [int]$Matches[1] } else { $null }
+    $defaultReason = if ($phase -eq 'preflight' -or $fatalMessage -match '(?i)^preflight\b|collection preparation blocked') { 'preflight-or-collection-preparation-blocked' } elseif ($isScenarioInvalid) { 'not-run-due-to-invalid' } else { 'not-run-after-runner-failure' }
+    $scenarios = New-BlockedScenarios $defaultReason
     foreach ($partialScenario in @($script:PartialScenarios)) {
         # Preserve already-measured scenario results; preflight/exception must not overwrite them.
         $scenarios[[int]$partialScenario.scenario - 1] = $partialScenario
     }
-    if ($null -ne $failedScenario) {
+    if ($isScenarioInvalid) {
+        $invalidScenarioNumber = if ($null -ne $failedScenario) { [int]$failedScenario } else { 0 }
+        for ($index = 0; $index -lt 7; $index++) {
+            $scenarioNumber = $index + 1
+            $alreadyMeasured = @($script:PartialScenarios | Where-Object { [int]$_.scenario -eq $scenarioNumber }).Count -gt 0
+            if ($alreadyMeasured) { continue }
+            $entry = $scenarios[$index]
+            if ($scenarioNumber -eq $invalidScenarioNumber) {
+                $entry.result = 'invalid'
+                $entry.reason = if ($null -ne $script:ScenarioInvalid) { [string]$script:ScenarioInvalid.reason } else { $fatalMessage }
+            } else {
+                $entry.result = 'invalid'
+                $entry.reason = 'not-run-due-to-invalid'
+            }
+            if ($scenarioNumber -eq 2 -and $null -eq $entry.assertions) {
+                $entry.assertions = [ordered]@{ allow = 'invalid'; vpn_on_create = 'invalid'; vpn_connection_create_fd = 'invalid' }
+            }
+        }
+    } elseif ($null -ne $failedScenario) {
         $alreadyMeasured = @($script:PartialScenarios | Where-Object { [int]$_.scenario -eq $failedScenario }).Count -gt 0
         if (-not $alreadyMeasured) {
             $scenarioEntry = $scenarios[$failedScenario - 1]
@@ -3517,9 +4773,11 @@ try {
     Set-CaptureDegradedScenarios $scenarios
     if ([string]::IsNullOrEmpty($infrastructureReason) -and -not [string]::IsNullOrEmpty($script:InfrastructureReasonObserved)) { $infrastructureReason = $script:InfrastructureReasonObserved }
     $measuredOverall = Get-ScenarioAggregation $scenarios
-    if ($script:CaptureDegraded.Count -gt 0 -or (-not $DryRun -and -not [bool]$script:CleanupVerification.verified_absent)) {
-        # Capture degradation / cleanup uncertainty never downgrades an explicit scenario fail: only
-        # non-fail aggregation collapses to blocked, so a leaked fd (FD_STILL_OPEN) still fails overall.
+    if ($measuredOverall -eq 'invalid' -or $null -ne $script:ScenarioInvalid) {
+        $overall = 'invalid'
+        $recordStatus = 'invalidated'
+    } elseif ($script:CaptureDegraded.Count -gt 0 -or (-not $DryRun -and -not [bool]$script:CleanupVerification.verified_absent)) {
+        # Capture degradation / cleanup uncertainty never downgrades an explicit scenario fail.
         $overall = if ($measuredOverall -eq 'fail') { 'fail' } else { 'blocked' }
         $recordStatus = 'blocked'
     } elseif ($script:ExecutionMode -eq 'live') {
@@ -3545,19 +4803,34 @@ try {
     })
     $endedAt = Get-Now
     $attestation = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         evidence_id = $freeze.evidence_id
         campaign_id = $freeze.campaign_id
         attempt = $freeze.attempt
         execution_mode = $script:ExecutionMode
         operator_role = $freeze.operator_role
+        trust_model = 'mechanical-action-only-machine-verified-v1'
         attested = [bool]($script:ExecutionMode -eq 'live' -and $null -eq $fatalMessage)
-        statement = 'All device UI actions were manual and visible; no automated device input or privileged bypass was used.'
+        statement = 'Operator performed only the single-step mechanical actions prompted by the runner and pressed Enter after each action. Operator attestation records mechanical step completion times only and does not contribute semantic verdicts; all scenario results are machine-verified.'
+        mechanical_actions = @($script:OperatorActions)
         record_status = $(if ($script:ExecutionMode -eq 'live') { 'collected' } else { 'blocked' })
         reviewer = 'pending'
         reviewed_at = 'pending'
     }
     Write-JsonFile (Join-Path $script:EvidencePath 'operator-attestation.json') $attestation
+    # Seal the final (complete) operator-wait state via the collection manifest so no dynamic
+    # state is left unbound; the pollable path itself is inside EvidenceRoot.
+    Write-OperatorWaitState 'complete'
+    if ($LiveSimulation -and (Get-OptionalJsonBoolean $script:Simulation 'tamper_wait_state_after_complete' $false)) {
+        # ADJ-20260808-0003 adversarial fixture: rewrite the sealed wait state to a non-complete
+        # phase; Test-EvidenceIntegrity must flag operator-wait-state-not-complete.
+        $waitPath = Join-Path $script:EvidencePath 'operator-wait-state.json'
+        $waitDoc = Get-Content -LiteralPath $waitPath -Raw | ConvertFrom-Json -Depth 20
+        $waitDoc.phase = 'waiting'
+        $waitDoc.complete = $false
+        $waitDoc.completed_at = $null
+        Write-JsonFile $waitPath $waitDoc
+    }
     $manifestPath = Write-CollectionManifest $script:EvidencePath
     $manifestSha256 = Get-FileSha256 $manifestPath
     $record = New-CompleteRecord $freeze $scenarios $overall $recordStatus $startedAt $endedAt $fatalMessage $infrastructureReason $repositoryBefore $freezeSha256 $freezeContractSha256 $manifestSha256
@@ -3586,27 +4859,19 @@ try {
     foreach ($violation in @(Test-EvidenceIntegrity $script:EvidencePath $scenarios)) { $integrityViolations.Add($violation) }
     if ($integrityViolations.Count -gt 0) {
         $record.integrity_violations = @($integrityViolations | Select-Object -Unique)
-        if ($script:ExecutionMode -eq 'live') {
-            $record.record_status = 'invalidated'
-            $record.overall = 'invalid'
-            $record.verdict = 'invalid'
-            $record.scenario_aggregation.overall = 'invalid'
-            $overall = 'invalid'
-            $recordStatus = 'invalidated'
-        } else {
-            $record.record_status = 'blocked'
-            $record.overall = 'blocked'
-            $record.verdict = 'blocked'
-            $record.scenario_aggregation.overall = 'blocked'
-            $overall = 'blocked'
-            $recordStatus = 'blocked'
-        }
+        $record.record_status = 'invalidated'
+        $record.overall = 'invalid'
+        $record.verdict = 'invalid'
+        $record.scenario_aggregation.overall = 'invalid'
+        $overall = 'invalid'
+        $recordStatus = 'invalidated'
         Write-JsonFile $recordPath $record
         Write-CampaignSeal $script:EvidencePath
     }
 }
 
 if ($script:NoDeviceMode -and $script:HdcProcessStartCount -ne 0) { throw 'host-only safety invariant violated: HDC process count is nonzero' }
+if ($null -ne $fatalMessage) { Write-Host "RUNNER_FAILURE=$fatalMessage" }
 Write-Host "RUNNER_RESULT=$overall RECORD_STATUS=$recordStatus MODE=$($script:ExecutionMode) EVIDENCE_ROOT=$($script:EvidencePath) RAW_ROOT_HASH=$(Get-TextSha256 $script:RawPath) HDC_PROCESSES=$($script:HdcProcessStartCount)"
 if ($null -ne $fatalMessage -or $overall -eq 'invalid') { exit 2 }
 exit 0

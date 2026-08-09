@@ -48,6 +48,24 @@ info > A > force stop with a separate screenshot and
 `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation, while the Settings VPN
 page is observation-only and the runner never issues HDC force-stop (HDC
 force-stop is explicitly cleanup-only, restricted to exception/final cleanup).
+(**历史**：`ADJ-20260808-0002`/`0003` 强可靠模式前瞻取代该人工确认——S5 改为机器化
+Settings 应用信息强制停止，`SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` 与 Settings>VPN
+observation 均不再询问，仅 historical。)
+`ADJ-20260808-0001` (prospective minimal fix for the sealed blocked record)
+then registered the process-boundary semantic change: `PidOf` targets the exact
+`<bundle>:vpn` Extension ability process instead of the bundle UI process (the
+UI process keeps running under a normal Stop, so bundle-level pidof is
+physically unsatisfiable), `BundleDump` still proves the bundle stays
+installed, every probe and the S3/S5/S7 records carry `process_target`, and the
+freeze adds the required `process_probe_target` field; the same execution also
+adds UI last-known request id (no first-stop skip, no manual second Start),
+S4 deny pre-capture before the Deny click, S5 probe scheduling that actually
+reaches >=3.0s (exact DateTimeOffset + margin, keeps probing on insufficient
+spacing), the pollable `operator-wait-state.json` (EvidenceRoot, manifest
+sealed, no target/UDID/HAP-path/endpoint/secret), and the tri-state
+`scenario_aggregation.s3_clean_reactivation_proof`. That semantic change
+applies only to the next new campaign/evidence and never rewrites any sealed or
+historical record.
 Registered HAP artifacts remain compile API `24` with target/compatible API
 `23`; device freeze API is `26` and compatibility is measurement-only. API26
 0001 used runner SHA-256
@@ -145,9 +163,14 @@ inconclusive; `FD_STILL_OPEN` is a cleanup failure signal requiring review.
 
 The UI disables both commands while a Start or Stop promise is pending and
 disables Start while an active request id exists. Start rejection clears only
-its matching id. Stop without an active id emits `UI_STOP_SKIPPED` and does not
-invent an id. A successful Stop may clear the matching id; that does not
-itself permit the next scenario to begin.
+its matching id. The UI keeps a last-known request id (`lastRequestId`): a new
+Start overwrites it, the bounded pending release never clears it, and Stop with
+an empty active id falls back to it with an explicit `basis=last-known-request`
+marker so the first S3 Stop is never skipped and no manual second Start is
+needed (which would otherwise mismap request ids). Stop without any active or
+last-known id emits `UI_STOP_SKIPPED` and does not invent an id. A successful
+Stop, or a terminal rejection (BusinessFailure code `16000001`), clears the
+matching ids; that does not itself permit the next scenario to begin.
 
 For every scenario, wait for the matching Extension create result before
 issuing Stop. After Stop settles, wait for the matching Extension destroy
@@ -168,17 +191,17 @@ blocked and retains the active request id. `STOP_PROMISE_RESOLVED` is never
 cleanup evidence: even when it releases the UI lock, the matching Extension
 terminal marker and post-destroy fd snapshot are still required.
 
-### Live 人工操作（中文）
+### Live 人工操作（中文，`ADJ-20260808-0002` 强可靠模式）
 
-A/B 指两个测试 App。令牌 `READY` / `ACK` / 确认名必须**逐字**输入（ASCII 原样）；可见事实确认：真=逐字输入完整 `NAME nonce`，假=直接空回车。
+A/B 指两个测试 App。**当前规则**（`mechanical-action-only-machine-verified-v1`）：操作员每步只看到“现在只做：X。完成后按回车。”；按回车仅表示机械完成，**不**解析 y/n/token/READY/ACK。机器负责 layout/事件/进程判定。旧 READY/ACK nonce 与 operator 三态确认仅为 **historical**。
 
-1. 场景1：runner 自动查询/暂存/安装 A 与 B，观察后 ACK。
-2. 场景2：A 点 Start → 授权界面出现后先按 runner 提示输入 AUTH-UI-VISIBLE 完整令牌 → 等 runner 截取完成 / 下一 ACTION → 再点 Allow → ACK。
-3. 场景3：已激活的 A 点 Stop → ACK。
-4. 场景4：B 点 Start → Deny → 保持拒绝画面 → ACK。
-5. 场景5：先 A 点 Start 重新激活；再打开**手机系统设置 App（齿轮）→ 更多连接 → VPN** 页并保持可见，等 runner 截取（仅观察）；随后进入 **设置 → 应用 → 测试 App A 的应用信息页** 执行**强制停止**并保持画面，等 runner 截取并确认（`SETTINGS-APP-INFO-FORCE-STOP-CAPTURED`）→ ACK。
-6. 场景6：先 A 点 Start 激活；再 B 点 Start，保留冲突/替换画面 → ACK。随后按 runner 提示确认 `NO-DUAL-ACTIVE-CAPTURED`（未同时出现 A/B 两个 active VPN 为真）；若为假，再独立确认 `DUAL-ACTIVE-CAPTURED`（只在明确看到 A/B 同时 active 时为真）。
-7. 场景7：当前 active 的 App 点 Stop；**不要**手工强停或卸载；runner 负责卸载清理。
+1. 场景1：runner 自动查询/暂存/安装 A 与 B（无操作员语义门）。
+2. 场景2：按提示点 A Start → 等机器确认授权页 → 按提示点 Allow → 等机器判定。
+3. 场景3：按提示点已激活 A 的 Stop → 等机器判定（额外 Start / `UI_STOP_SKIPPED` / 错误 requestId → invalid）。
+4. 场景4：按提示点 B Start → 等机器确认授权页 → 按提示点 Deny → 等完整窗口机器判定（无人工 DENY-SCREEN）。
+5. 场景5：按原子步骤依次：A Start（可选 Allow）→ 打开 A 应用信息页 → 点强制停止；每步回车后机器 capture/layout/`:vpn` 判定（Settings>VPN 页不再询问，`not-required`）。
+6. 场景6：按提示点 A Start（可选 reauthorization Allow），再点 B Start；机器判定唯一 A `CREATE_ACCEPTED` + 唯一 B `CREATE_REJECTED(2203002)`（无人工双 active 三态；A 纯授权层拒绝 `authorization-outcome-unclassified` blocked）。
+7. 场景7：按提示点 S6 绑定的 active A 的 Stop；**不要**手工强停或卸载；无 FINAL-CLEANUP 确认；runner 负责清理。
 
 ## API Mapping
 
@@ -266,22 +289,26 @@ required `settings_reallow_path_policy: observation-only`, the
 (`settings-app-info-force-stop`), `settings_vpn_page_policy`
 (`observation-only`), `destroy_terminal_policy`
 (`callback-or-strict-process-boundary`), `process_absent_required_count` (`2`)
-and `process_absent_probe_spacing_seconds` (`3`), ordinary-development
+and `process_absent_probe_spacing_seconds` (`3`), the `ADJ-20260808-0001`
+decision field `process_probe_target` (`<bundle>:vpn`), ordinary-development
 signing, final A/B artifact hashes, frozen source archive/manifest, SDK input
 map, HDC version/hash, runner/code hashes, freeze time, cleanup/collection/review
 Boolean gates, and distinct operator and reviewer roles. The path policy and the
-five decision fields are part of the freeze contract hash; old freezes without
+six decision fields are part of the freeze contract hash; old freezes without
 these fields are historical only and are rejected for every mode (DryRun
 included), never usable for a new live.
 Scenario 5 records `settings_reallow_path` expected/actual/match/observation and
 never blocks solely because actual path differs from the predicted path; the
 revoke mechanism is now `settings-app-info-force-stop`: a fresh A
-start/create-accepted/post-create-open first, the Settings VPN page is
-observation-only screenshot/fields, then manual Settings > app info > A > force
-stop with a separate screenshot and `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED`
-confirmation. Pass requires the manual confirmation, fresh create/open, bundle
-still present, and consecutive absent bundle-process probes (>=2 probes >=3s
-apart); no `UI_STOP` is required or expected on this path. HDC never issues
+start/create-accepted/post-create-open first (with optional reauthorization
+Allow, like S2), then machine-verified Settings > app info > A > force-stop
+steps with deterministic layout gates. Pass requires the machine
+settings-app-info layout gate, fresh create/open, bundle still present, and
+consecutive absent `<bundle>:vpn` Extension-process probes
+(>=2 probes >=3s apart, `process_target` recorded; scheduling actually reaches
+the frozen 3.0s via exact DateTimeOffset round-trip plus a small margin, and
+insufficient spacing keeps probing instead of finishing early); no `UI_STOP` is
+required or expected on this path. HDC never issues
 force-stop for the revoke.
 `signing.device_in_profile` is JSON Boolean `true` in the example to show the
 required type; the adjacent placeholder basis explicitly means it is not a
@@ -291,12 +318,16 @@ freeze-manifest fields; they appear only on the emitted record's `clock_source`.
 
 After HDC/device precheck, Live starts one continuous campaign HiLog process and
 records an initial complete-line/byte anchor. Scenarios never restart that
-stream. Each scenario waits for operator READY first (READY latency is excluded
-from the measured window), then records a fresh byte anchor after READY and
-before the action prompt, filters only new complete lines by parsed
-`device_observed_at` from action prompt through the actual observation end,
-retains `host_observed_at`, and requires measured healthy coverage through at
-least 60 seconds after ACK. Install is three-state: only explicit rejection
+stream. Each scenario records a fresh byte anchor before the mechanical action
+prompt, filters only new complete lines by parsed `device_observed_at` from the
+action prompt through the actual observation end (pre-enter
+`relative_to_prompt` events are stamped against the prompt time so a slow
+operator never pushes device events past the enter), retains `host_observed_at`,
+and requires measured healthy coverage through at least 60 seconds after the
+action. The operator only sees “现在只做：X。完成后按回车。” and Enter is a
+mechanical completion — there is no READY/ACK/token/y-n semantic gate (old
+READY/ACK nonce is historical only). Install
+is three-state: only explicit rejection
 evidence (install failed / error code / signature or profile reject, and similar)
 is `FUNCTIONAL_FAIL`; clear success string plus BundleDump presence is pass;
 success with unrelated warnings, dump unavailable/permission, or uncertain output
@@ -314,13 +345,19 @@ permission/unsupported fault artifacts are non-infrastructure blocked. Generic
 FaultArtifacts/CaptureDegraded and can block scenario 7 only; it must not mark
 continuous `Capture.Degraded` or shorten the 60-second window. Record
 `target_tuple.distribution` is taken from the freeze, not hard-coded. Scenario 2
-captures the visible system authorization UI (screenshot + layout) after the
-operator confirms it is visible and before Allow; capture failure blocks
-scenario 2 and keeps the artifact reference.
+captures the visible system authorization UI (screenshot + layout) with a
+machine deterministic layout gate before Allow (no operator visibility
+confirmation — that manual confirmation is historical only); capture failure at
+a decisive gate blocks scenario 2 and keeps the artifact reference.
 
 Under `ADJ-20260807-0003`, scenarios 3/5/7 run host process terminal probes
-using only the allowlisted `PidOf` (bundle process) and `BundleDump` (bundle
-presence) observations. `Get-VpnFinalState` prefers the callback destroy
+using only the allowlisted `PidOf` and `BundleDump` (bundle presence)
+observations. Under `ADJ-20260808-0001`, `PidOf` targets the exact
+`<bundle>:vpn` Extension ability process (never the bundle UI process, which
+keeps running under a normal Stop with the UI visible and makes bundle-level
+pidof physically unsatisfiable), and `BundleDump` continues to prove the
+bundle/main App stays installed; every probe and the S3/S5/S7 scenario records
+carry `process_target`. `Get-VpnFinalState` prefers the callback destroy
 terminal + post-destroy fd snapshot (`terminal_mode=callback-post-fd`);
 `FD_STILL_OPEN` is a hard fail that never falls back. Otherwise the strict
 process-boundary route requires a unique current-window stop for the same
@@ -334,35 +371,38 @@ entry and transcript; present/unknown/error resets the counter, unknown/error
 aborts the series, and finally/uninstall-absent never backfills. Scenario 3
 strict-fallback pass also requires a scenario 5 same-bundle fresh
 `CREATE_ACCEPTED` + post-create open as clean reactivation proof or the overall
-aggregation stays blocked. Scenario 5 revokes via manual Settings app-info
-force-stop (fresh create first, Settings VPN page observation-only, separate
-force-stop screenshot + `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation,
-consecutive absent bundle-process probes, bundle still present); no `UI_STOP`
-is expected. Scenario 7 runs pre-uninstall probes and allows the existing
-uninstall cleanup only after the terminal assessment completes.
+aggregation stays blocked. Scenario 5 revokes via machine-verified Settings app-info force-stop (fresh A
+create first, machine settings-app-info layout gates for the app-info page and
+the force-stop action, consecutive absent `<bundle>:vpn` probes, bundle still
+present); no `UI_STOP` is expected and no manual
+`SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation is asked (historical under
+`ADJ-20260808-0002`/`0003`). Scenario 7 runs pre-uninstall probes and allows
+the existing uninstall cleanup only after the terminal assessment completes.
 `ADJ-20260807-0003` adds no new exit criteria: it only corrects the S3/S5/S7
 terminal-state priority (callback terminal + post-destroy fd snapshot first,
 `FD_STILL_OPEN` hard fail, then the strict process-boundary fallback) and the
-S5 revoke mechanism. S2/S4/S6 keep their existing rules unchanged: an explicit
-functional fail (create rejected/invalid fd, deny-then-create, replacement
-destroy fail, operator-confirmed dual-active visible) always outranks
-capture/window/operator degradation and is never downgraded to blocked, while
-missing evidence under degradation stays blocked and is never promoted to fail.
-S6 dual-active is an operator three-state confirmation: `NO-DUAL-ACTIVE-CAPTURED`
-is asked first, and only when it is false is the independent
-`DUAL-ACTIVE-CAPTURED` confirmation asked (true only when A and B are clearly
-both active on screen). Only `dual_active_confirmed=true` &&
-`no_dual_active_confirmed=false` fails (`dual-active-observed`);
-`noDual=true` && `dual=false` is normal; both false is blocked
-`dual-active-observation-unresolved`; both true is blocked
-`inconsistent-operator-confirmation`; an empty/false answer alone never fails.
-The scenario record projects `no_dual_active_confirmed`,
-`dual_active_confirmed`, and `operator_state`. The Settings>VPN page capture in
-scenario 5 is observation-only: its failure still writes a degraded
-`CaptureArtifacts` entry and an independent `observation_only_degraded`
-diagnostic, but never calls `Add-CaptureDegradation`, never enters the global
-`capture_degraded` list, and never blocks scenario 5 or the final overall; the
-decisive `scenario-5-app-info-force-stop` capture failure stays blocking. The
+S5 revoke mechanism. Under `ADJ-20260808-0002`/`0003` the strong-reliable mode
+runs every scenario machine-verified; an explicit functional fail (extension
+create rejected/invalid fd after `VPN_ONCREATE`, deny-then-create, replacement
+destroy fail) always outranks capture/window degradation and is never
+downgraded to blocked, while missing evidence under degradation stays blocked
+and is never promoted to fail. S6 is fully machine: unique A `CREATE_ACCEPTED`
+plus unique B `CREATE_REJECTED` with the frozen conflict code `2203002`; a pure
+authorization-layer A outcome (`START_PROMISE_REJECTED` or a reject with no
+`VPN_ONCREATE`) is blocked `authorization-outcome-unclassified` (not fail, not
+invalid), a non-frozen B rejection code is blocked
+`B-conflict-code-not-frozen:<code>`, and S7 stays
+`not-run-after-platform-blocked` after a platform block. **Historical** (not the
+current rule): the operator dual-active three-state confirmation
+(`NO-DUAL-ACTIVE-CAPTURED` / `DUAL-ACTIVE-CAPTURED`) and the
+`no_dual_active_confirmed` / `dual_active_confirmed` / `operator_state` record
+fields were deprecated and removed under `ADJ-20260808-0002`/`0003`. The
+Settings>VPN page capture in scenario 5 is `not-required` under
+`ADJ-20260808-0003` (never asked, never invalid/block/pass input); its failure
+still writes an independent `observation_only_degraded` diagnostic, but never
+calls `Add-CaptureDegradation`, never enters the global `capture_degraded`
+list, and never blocks scenario 5 or the final overall; the decisive
+`scenario-5-app-info-force-stop` capture failure stays blocking. The
 freeze decision field is `process_absent_probe_spacing_seconds`; the legacy
 `spacing` name is rejected as unknown/missing for every mode and never reused
 compatibly.
@@ -418,9 +458,10 @@ A retry prior must instead be a frozen matching Live blocked evidence record.
 
 Real Live requires `plan_status: ready`, a clean repository, manual operator
 input, and the frozen target mapping. Normal revoke evidence comes only from the
-planned visible UI/Settings actions; under `ADJ-20260807-0003` scenario 5 uses
-manual Settings app-info force-stop with confirmation and screenshot, and the
-runner never issues HDC force-stop for it. Any exception/finally `force-stop`
+planned visible UI/Settings actions; under `ADJ-20260808-0002`/`0003` scenario 5
+uses machine-verified Settings app-info force-stop (deterministic layout gates;
+no manual confirmation — the old manual force-stop confirmation is historical
+only), and the runner never issues HDC force-stop for it. Any exception/finally `force-stop`
 is `notUsedAsRevoke`: it is residual cleanup only, followed by targeted
 BundleDump and PidOf verification; HDC force-stop is restricted to the
 `exception-cleanup` / `final-cleanup` reasons in the allowlist. Unknown

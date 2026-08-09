@@ -202,6 +202,17 @@ assert_arkts_source() {
   require_count 'if (this.activeRequestId.length > 0) {' 1 "$UI"
   require_count 'UI_START_SKIPPED|bundle=%{public}s|requestId=%{public}s|reason=active-request' 1 "$UI"
   require_count 'this.activeRequestId = requestId;' 1 "$UI"
+  # C7 last-known request: new Start overwrites it exactly once; Stop falls back to it with an
+  # explicit basis marker; the start-resolve copy never implies an active VPN.
+  require_count 'this.lastRequestId = requestId;' 1 "$UI"
+  require_count 'lastRequestId.length === 0' 1 "$UI"
+  require_count '|basis=%{public}s' 1 "$UI"
+  require_count "'last-known-request'" 1 "$UI"
+  require_count 'STOP_SESSION_RELEASED_LAST_KNOWN|bundle=%{public}s|requestId=%{public}s|reason=ability-not-found' 1 "$UI"
+  require_count "this.operationStatus = 'Start request resolved';" 1 "$UI"
+  if rg -F -q "'Start resolved'" "$UI"; then
+    fail "UI must not display the misleading 'Start resolved' copy"
+  fi
   require_count "this.activeRequestId = '';" 4 "$UI"
   require_count 'const code: number | undefined = (error as BusinessFailure).code;' 1 "$UI"
   require_count 'if (code === 16000001 && this.activeRequestId === requestId) {' 1 "$UI"
@@ -215,7 +226,7 @@ assert_arkts_source() {
     UI_START UI_START_SKIPPED START_PROMISE_RESOLVED START_PROMISE_REJECTED START_PROMISE_LATE_RESOLVED \
     START_PROMISE_LATE_REJECTED START_PENDING_RELEASED LEDGER_PERSISTED LEDGER_WRITE_REJECTED \
     UI_STOP UI_STOP_SKIPPED STOP_PROMISE_RESOLVED STOP_PROMISE_REJECTED \
-    STOP_SESSION_RELEASED; do
+    STOP_SESSION_RELEASED STOP_SESSION_RELEASED_LAST_KNOWN; do
     require_marker "$marker" "$UI"
   done
   require_count 'START_PENDING_RELEASED|bundle=%{public}s|requestId=%{public}s|reason=bounded-timeout' 1 "$UI"

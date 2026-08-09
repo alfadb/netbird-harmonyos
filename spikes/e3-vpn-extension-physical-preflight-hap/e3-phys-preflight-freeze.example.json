@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plan_status": "blocked",
   "exception": "E3-PHYS-PREFLIGHT",
   "evidence_id": "EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>",
@@ -29,6 +29,13 @@
   "destroy_terminal_policy": "callback-or-strict-process-boundary",
   "process_absent_required_count": 2,
   "process_absent_probe_spacing_seconds": 3,
+  "process_probe_target": "<bundle>:vpn",
+  "operator_trust_model": "mechanical-action-only-machine-verified-v1",
+  "scenario_invalid_policy": "stop-and-finally-cleanup-seal",
+  "layout_verification_profile": "deterministic-layout-v1",
+  "vpn_conflict_rejection_codes": [
+    2203002
+  ],
   "signing": {
     "type": "ordinary-development",
     "device_in_profile": true,
@@ -64,9 +71,9 @@
   "runner_sha256": "<THIS-RUNNER-SHA256>",
   "code_sha": "<FULL-REPOSITORY-COMMIT-SHA>",
   "preflight_inputs_frozen_at": "<ISO-8601-WITH-ZONE>",
-  "cleanup_baseline_frozen": false,
-  "collection_ready": false,
-  "independent_review_ready": false,
+  "cleanup_baseline_frozen": true,
+  "collection_ready": true,
+  "independent_review_ready": true,
   "operator_role": "<AUTHORIZED-OPERATOR-ROLE>",
   "independent_reviewer_role": "<SEPARATE-REVIEWER-ROLE>"
 }
