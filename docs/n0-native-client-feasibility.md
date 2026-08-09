@@ -1,8 +1,17 @@
 # N0 原生客户端可行性门：决议、范围与兼容 Oracle
 
-最后核验：2026-08-09
+最后核验：2026-08-10
 
 本文持久化 2026-08-09 由 T0+/T0 五席三轮一致签署、用户批准的 N0 决议，以及 N0 的协议/行为/许可矩阵与 compat oracle。N0 是当前立即且唯一无物理设备门；本文不改变 E0-E8 既有门状态，E8 保持 `CLOSED`。
+
+## 当前状态（2026-08-10）
+
+- **N0 overall `reviewed-pass/pass`（双轴验收完成）**：N0(a) 固定 NetBird v0.76.3/f65f7b34 协议/行为/许可 inventory 与 compat oracle 已定义（见下文矩阵）；N0(b) 由 [`EV-N0-EMU24-20260810-0002`](evidence/n0-native-core-emulator-reviewed-pass-2026-08-10.md) 实测 `record_status: reviewed-pass`、`verdict: pass`（终审 `REV-N0-EMU24-20260810-0002`：`openai/gpt-5.6-sol` + `xai/grok-4.5` 双路只读独立复算 0 blocker/0 major，分别 2/6 minor，均为非阻塞记录改进建议、不扩范围修）。
+- **能力接受范围**：接受使用固定正式发布（NetBird v0.76.3/f65f7b34、BoringTun 0.7.1）与真实 official Emulator runtime 数据的单一 native WG core C ABI 加载/冒烟，**不是合成 fixture**。
+- **不证明**：N0 pass 不证明 VPN fd/TUN/protect/management/ICE/relay/UI/arm64 load/physical/product；这些能力仍为未验证。
+- **下一步不是继续实现**：N0 pass 后不自动进入实现；仅未来用户显式授权 + fresh confirmation 后，既有 `E3-PHYS-PREFLIGHT` 仍是第一物理动作；N0 与物理 E3 **都 pass 后**才提交新 ADJ/T0 治理定义 native N1-Nx 门；治理生效前 E8 保持 `CLOSED`，不得以 native 静默替代 Go E1，不得开启产品实现。
+- **E8 仍 `CLOSED`**：`EV-N0-EMU24-20260810-0002` 的 `e8_status=CLOSED`、`PHYSICAL_DEVICE_USED=false`；本状态不改变 E0-E8 既有门状态。
+- **host-preflight**：`EV-N0-N0HOST-20260809-0001` 的 pending 状态由正式 0002 sealed evidence 覆盖其作为 N0(b) 证据的角色；其独立 review 字段保持 `pending`，不伪造。
 
 ## 决议元数据
 
@@ -64,6 +73,8 @@ N0 是当前立即且唯一无物理设备门，不改变产品架构：
 
 `reviewed-pass` 只说明记录经独立审查合格，不自动等于功能通过；`verdict: pass` 与 `reviewed-pass` 必须同时成立才可继续。
 
+**实际结果（2026-08-10）**：N0(b) 由 `EV-N0-EMU24-20260810-0002` 实测 `reviewed-pass/pass`（终审 `REV-N0-EMU24-20260810-0002`，0 blocker/0 major），N0 overall 双轴验收通过。按 N0 决议，`reviewed-pass/pass` 满足继续条件；但「继续 N0 后续步骤」不是继续实现——下一步仅限未来用户显式授权后的 `E3-PHYS-PREFLIGHT` 第一物理动作，N0+E3 都 pass 后才提交新 ADJ/T0 治理（见下文「E8 CLOSED 与后续 ADJ 条件」）。
+
 ## 停止条件（第 9 条）
 
 出现以下任一情况，**立即停止并返回 T0**：
@@ -79,11 +90,12 @@ N0 是当前立即且唯一无物理设备门，不改变产品架构：
 - N0 与物理 E3 **都 pass 后**，先提交新 ADJ/T0 治理，定义 native N1-Nx 门并处理 E8 的 Go 专属前提。
 - 治理生效前 E8 保持 `CLOSED`；不得以 native 静默替代 Go E1，不得开启产品实现。
 - 本决议不改变 E0-E8 既有门状态；E1 overall Go 仍无 `reviewed-pass/pass`（v0.76.3 官方 Go 1.25.12 loader 由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`）。
+- **当前状态（2026-08-10）**：N0 已 `reviewed-pass/pass`（`EV-N0-EMU24-20260810-0002`）；物理 E3 尚未 pass（`plan_status: blocked-awaiting-device-authorization`）。因此新 ADJ/T0 治理**尚未触发**；下一步不是继续实现，仅未来用户显式授权 + fresh confirmation 后执行既有 `E3-PHYS-PREFLIGHT` 第一物理动作。
 
 ## 物理 E3 第一动作纪律（第 4、7 条）
 
 - 当前**不授权任何物理设备 HDC**；Emulator HDC 仅限既有 E-campaign 与 N0(b) 证据 runner。
-- 用户未来显式授权 + fresh confirmation 后，**既有 `E3-PHYS-PREFLIGHT` 仍是第一物理动作**。
+- 用户未来显式授权 + fresh confirmation 后，**既有 `E3-PHYS-PREFLIGHT` 仍是第一物理动作**（N0 pass 不改变该纪律）。
 - 历史 fd=32/33 **不是 pass**。
 - 用户授权后，在独立证据 ID 下、优先于任何 Go1.26 research，测 NetBird 正式工具链 Go1.25.12 arm64 c-shared 最小探针；结果可触发路线重议，但不是 E1 pass 的自动替代；Go1.26 只作可选研究（第 7 条）。
 - Go 观察触发只限正式 Go release 相关修复或 NetBird 正式采用新工具链，然后重跑对应 E1；不维护 fork（第 8 条）。

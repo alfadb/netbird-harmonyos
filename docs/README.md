@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-08-09
+最后核验：2026-08-10
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -86,7 +86,9 @@
 - [N0 native core host-preflight 记录](evidence/n0-native-core-host-preflight-2026-08-09.md)
   - `EV-N0-N0HOST-20260809-0001`：host-only 前置记录，`execution: not-run-host-preflight`、`record_status: collected`、`verdict: pass`（严格只表示 host-preflight，不是 N0 pass）；仓库 HEAD `2c567dc`、rustc 1.92.0/cargo 1.92.0/rustup 1.28.2、OHOS clang 15.0.4/SDK 6.1.1.125、BoringTun 0.7.1 crate checksum `15dd6a8a…`、发布包缺 LICENSE 文件注意、ffi-bindings 双 ABI 构建成功（NEEDED 仅 libc.so、14 个 C ABI）、device feature 因 socket2 0.4.10 IovLen blocked 且不 patch/不进入 N0
 - [N0 native core Emulator 0001 consumed-failure 记录](evidence/n0-native-core-emulator-0001-consumed-failure-2026-08-10.md)
-  - `EV-N0-EMU24-20260810-0001`：完整模式首次真实执行，guest 测量面 PASS（唯一 marker、NAPI 三项 1、aa host/guest0、HAP member 一致、arm64 compile-only；cleanup 旧检查只观察到 Emulator/qemu 与 10000/5555/8710 端口为空，旧 `hdc -m -s` matcher 不足以证明 hdc daemon 无残留，seal 卡住反证有设备阶段子进程持有 pipe 写端），但 runner 在 seal 的 `wait TEE_PID` 卡住并由执行会话 30min 终止；manifest 缺 final/seal 字段；`record_status: collected`、`verdict: fail`（runner defect after measurement）、ID 已消耗、绝非 N0 pass/reviewed-pass；unsealed raw 支持 positive guest observation 但不构成 accepted N0 pass；11 份 raw 哈希为提交时带外锚点、raw 未封印；双路只读独立审查（`anthropic/claude-opus-5` + `moonshotai/kimi-k2.7-code`）一致；E8 `CLOSED`/physical false；runner 已修复（O_APPEND transcript、seal 不等待、`pgrep -ax hdc`、daemonize 硬化、selftest 真实覆盖），不改变测量/判定/guard 语义、cleanup 残留检测按 fail-closed 收紧，下一 ID `EV-N0-EMU24-20260810-0002`
+  - `EV-N0-EMU24-20260810-0001`：完整模式首次真实执行，guest 测量面 PASS（唯一 marker、NAPI 三项 1、aa host/guest0、HAP member 一致、arm64 compile-only；cleanup 旧检查只观察到 Emulator/qemu 与 10000/5555/8710 端口为空，旧 `hdc -m -s` matcher 不足以证明 hdc daemon 无残留，seal 卡住反证有设备阶段子进程持有 pipe 写端），但 runner 在 seal 的 `wait TEE_PID` 卡住并由执行会话 30min 终止；manifest 缺 final/seal 字段；`record_status: collected`、`verdict: fail`（runner defect after measurement）、ID 已消耗、绝非 N0 pass/reviewed-pass；unsealed raw 支持 positive guest observation 但不构成 accepted N0 pass；11 份 raw 哈希为提交时带外锚点、raw 未封印；双路只读独立审查（`anthropic/claude-opus-5` + `moonshotai/kimi-k2.7-code`）一致；E8 `CLOSED`/physical false；runner 已修复（O_APPEND transcript、seal 不等待、`pgrep -ax hdc`、daemonize 硬化、selftest 真实覆盖），不改变测量/判定/guard 语义、cleanup 残留检测按 fail-closed 收紧，下一 ID `EV-N0-EMU24-20260810-0002`；0001 不参与 0002 判定
+- [N0 native core Emulator 0002 reviewed-pass 记录](evidence/n0-native-core-emulator-reviewed-pass-2026-08-10.md)
+  - `EV-N0-EMU24-20260810-0002`：完整模式正式执行，全流程跑通、exit 0、seal 完整（六字段 `final_exit_code`/`run_status`/`fail_reason`/`transcript_final_bytes`/`transcript_final_sha256`/`manifest_sha256` 齐备且复算一致）；真实官方 API 24 x86_64 phone Emulator（非物理设备）；唯一 PASS marker（`keyLen=44`/`tickOp=0`/`tickSize=0`）、NAPI 三项 1、aa host/guest 0、HAP member 一致、arm64 compile-only；`record_status: reviewed-pass`、`verdict: pass`（终审 `REV-N0-EMU24-20260810-0002`：`openai/gpt-5.6-sol` + `xai/grok-4.5` 双路只读独立复算 0 blocker/0 major，分别 2/6 minor，均为非阻塞记录改进建议、不扩范围修）；**N0 overall `reviewed-pass/pass`**；能力接受使用固定正式发布（NetBird v0.76.3/f65f7b34、BoringTun 0.7.1）与真实 official Emulator runtime 数据，不是合成 fixture；不证明 VPN fd/TUN/protect/management/ICE/relay/UI/arm64 load/physical/product；下一步不是继续实现（仅未来用户显式授权后 `E3-PHYS-PREFLIGHT` 第一物理动作，N0+E3 pass 后才新 ADJ/T0）；E8 `CLOSED`/physical false；ID 已消耗、禁止同 ID 重跑；11 份 raw 哈希与 seal 复算已核对
 - [R1 Go ABI 预探针与 API 24 HAP 构建证据](evidence/r1-go-abi-preflight-2026-07-16.md)
   - 固定NetBird、Go和SDK的编译、链接、DCE、`STATIC_TLS`、syscall及补丁预算边界
   - API 24短生命周期Stage HAP、unsigned产物、双ABI `libprobe.so`、哈希和内容清单
@@ -136,6 +138,7 @@
 
 - R0 唯一决策源、当前未退出状态、Emulator 客观可执行项总门、唯一 `E3-PHYS-PREFLIGHT` 例外、当前R0正式基线（现v0.76.3）、v0.74.6/v0.74.7 历史 evidence 绑定、范围、补丁预算、初始 SLO 和角色责任。
 - 证据 ID、必填字段、状态枚举、脱敏规则、支持矩阵、动态调整、补丁记录和保留期。
+- N0 原生客户端可行性门已双轴验收：N0(a) 固定 NetBird v0.76.3/f65f7b34 协议/行为/许可 inventory 与 compat oracle 已定义；N0(b) 由 `EV-N0-EMU24-20260810-0002` 实测 `reviewed-pass/pass`（终审 `REV-N0-EMU24-20260810-0002`，0 blocker/0 major）；N0 overall `reviewed-pass/pass`。能力接受使用固定正式发布与真实 official Emulator runtime 数据，不是合成 fixture；不证明 VPN fd/TUN/protect/management/ICE/relay/UI/arm64 load/physical/product；下一步不是继续实现（仅未来用户显式授权后 `E3-PHYS-PREFLIGHT` 第一物理动作，N0+E3 pass 后才新 ADJ/T0）；E8 仍 `CLOSED`。
 - E0 普通应用已在 API 24 x86_64 Emulator 完成三次独立 PID 冷启动、可见 UI、生命周期/Node-API marker、停止、sidecar、卸载和残留清理，独立审查结果为 `reviewed-pass`、`verdict: pass`；E0 已关闭。
 - E1 C-only 子门已由普通 `EntryAbility` 在三个不同 PID 各完成 10 轮：每 PID 1000 个同步 guarded buffer、1000 个 C pthread 到主 ArkTS 上下文的公开 threadsafe callback、10 次真实 fd ownership，以及逐轮 `/proc/self/fd`/线程快照；记录为 `reviewed-pass/pass`。独立审查确认 0 blocker/major、5 minor，且不改变 measured artifact。v0.74.6 历史官方 Go 1.25.12 loader 负面保持原绑定；当前R0正式基线（现v0.76.3）由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked` 且没有 E1 pass。
 - E2 C 网络记录 `EV-E2-EMU24-20260717-0002` 已由三个不同普通 `EntryAbility` PID 各完成 10 轮 TCP/UDP loopback、route-derived Pod 本机 endpoint、确定性 DNS/错误和 fd/thread 恢复，并归档 host 双侧原始日志与三张可见 PASS 页面；现为 `reviewed-pass/pass`，E2 已关闭。
@@ -157,6 +160,7 @@
 
 当前文档不表示以下事项已经完成：
 
+- N0 pass 不改变以下未完成事项：N0 只接受固定正式发布（NetBird v0.76.3/f65f7b34、BoringTun 0.7.1）与真实 official Emulator runtime 数据的单一 native WG core C ABI 加载/冒烟，不证明 VPN fd/TUN/protect/management/ICE/relay/UI/arm64 load/physical/product，也不改变 E8 `CLOSED` 与下述未完成项。
 - API 24 x86_64 Emulator 客观可执行项总门已建立但尚未通过；当前总门为 `CLOSED`。当前R0正式基线（现v0.76.3）的 E1 已重跑 0003 为 `reviewed-pass/blocked`（`EV-E1-EMU24-20260809-0003`）且无 pass。API23 initial live 已登记为 `EV-E3-PHYS1API23-20260806-0001`（`reviewed-pass/blocked`）。rebind `EV-E3-PHYS1REBIND7-20260806-0001` 已完成（`reviewed-pass/pass`，仅 rebind；API `26`/`aarch64`/`arm64-v8a`）。`ADJ-20260806-0003` 冻结 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / Settings `7.0.0.100 (SP8C00E32R7P2patch09)` / API `26` 元组，批准复用原 FINAL HAP hashes（兼容性实测、不证明成功），并曾准备 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001`（`superseded-unexecuted`）；host reverify 已 PASS。`ADJ-20260806-0004` / `EV-E3-PHYS1BUILD7-20260806-0001` 单条 `software.version` 实测确认 HDC build 逐字匹配（`reviewed-pass/pass`，仅 build-confirm）；API `26` 仍 rebind 实测、不从 build 推断。API26 live `E3-PHYS-PREFLIGHT-20260807-0001` / `EV-E3-PHYS1API26-20260807-0001` 已 `consumed-blocked`（operator-aborted；禁局部 scenario5 重放；保留）。`E3-PHYS-PREFLIGHT-20260807-0002` / `EV-E3-PHYS1API26-20260807-0002` 已 Live 并 `consumed-blocked`（`reviewed-pass/blocked`；完整 1–7；双审查 0 B/5 M）。当前 `plan_status: blocked-awaiting-device-authorization`（无 auto retry/新 ID/设备命令授权；本登记禁 HDC；`ADJ-20260807-0003` runner 变更完成，host 侧已重建并登记 [`EV-E3-PHYS1HOST-20260808-0001`](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)；candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；下一步须用户显式设备授权 + fresh device confirmation 后重生 `ready` freeze，可绑定同候选身份但仅在明确授权后按治理决定；目前不可执行）；E8 仍 `CLOSED`。
 - R0 已退出，或具名真机、完整目标元组、签名和华为应用市场闭环已经就绪。
 - 威胁缓解已经实现，或依赖锁定、SBOM、漏洞审查和最终许可证合规已经完成。
