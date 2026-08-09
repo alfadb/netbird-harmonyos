@@ -1,6 +1,6 @@
 # 证据与脱敏 Schema
 
-最后核验：2026-07-18
+最后核验：2026-08-09
 
 本文定义 `netbird-harmonyos` 各证据门共同使用的记录、脱敏、审查和保留基线。该 schema 已建立，但当前没有因此自动获得任何阶段通过结论；每条结论仍须绑定具体证据。
 
@@ -85,13 +85,13 @@ E8 聚合表必须为每个成员使用以下三种分类之一：
 E8 `OPEN` 至少同时满足以下必要条件，缺一即保持 `CLOSED`：
 
 - `E3-PHYS-PREFLIGHT` 同时为 `record_status: reviewed-pass`、`verdict: pass`；`blocked`、`fail` 或 `invalid` 均不满足。
-- 所有客观可执行项均为 `pass`，并确认当前R0正式基线（现v0.74.7）的官方 Go loader/runtime 已形成 E1 `reviewed-pass/pass`。当前 loader 负面证据绑定 v0.74.6；v0.74.7 尚未重跑且没有 pass。
+- 所有客观可执行项均为 `pass`，并确认当前R0正式基线（现v0.76.3）的官方 Go loader/runtime 已形成 E1 `reviewed-pass/pass`。当前 loader 负面证据绑定 v0.74.6；v0.76.3 尚未重跑且没有 pass。
 - 聚合记录重核目标元组、代码 SHA、相关上游 SHA、APP/TEST HAP、native/Go 库、配置和其他输入 SHA-256；不得存在目标漂移、member 不一致或缺失 hash。任何 `record_status: invalidated` 或 `record_status: superseded` 的引用都只能保留在历史追溯链中，均不得进入 E8 当前成员集合。
 - 独立聚合审查核对每个 `pass`、`blocked-exception` 与客观 `N/A`，并显式作出 `OPEN` 决定。
 
 预检通过只是上述必要条件之一，不是充分条件，也不自动 `OPEN` E8。E8 前唯一物理设备例外是 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md)：一个冻结 campaign 在一台具名 HarmonyOS 6.1 arm64 设备上，用普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针判断 E3 可达性。证据必须绑定设备型号、完整 build、API、arm64、稳定设备别名、签名/profile、A/B HAP、源码/SDK/hash 和清理基线，并保留原始 HiLog、transcript、screenshots、状态/布局、fault list、hash manifest 和独立审查。HDC target、序列号及签名秘密不得入库；其重试、60 秒场景窗口、deny、Settings 和清理判据以专用计划为准。除该例外外，E8 前仍禁止物理设备执行。
 
-arm64 ABI、其他真实硬件、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等项目仍列入 E8 `OPEN` 后的具名物理设备义务。C-only 证据不能独立满足含官方 Go loader/runtime 的 E1。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保持历史研究证据；PS4 未发布且不是当前门输入，不能满足当前R0正式基线（现v0.74.7）的官方 Go loader 或 VPN runtime 门。
+arm64 ABI、其他真实硬件、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等项目仍列入 E8 `OPEN` 后的具名物理设备义务。C-only 证据不能独立满足含官方 Go loader/runtime 的 E1。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保持历史研究证据；PS4 未发布且不是当前门输入，不能满足当前R0正式基线（现v0.76.3）的官方 Go loader 或 VPN runtime 门。
 
 ## 脱敏规则
 

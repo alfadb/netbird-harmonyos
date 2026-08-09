@@ -1,6 +1,6 @@
 # 双目标实施路线图
 
-最后核验：2026-08-07（仅表示文档状态核验）
+最后核验：2026-08-09（仅表示文档状态核验）
 
 本文定义 `netbird-harmonyos` 从当前研究阶段到两个具名平台目标发布及持续运维的证据门路线图。路线图中的平台能力、接口、性能和发行路径均须由对应阶段的 SDK、代码、制品、渠道和具名真机证据确认；在证据形成前，只作为待验证假设。
 
@@ -27,11 +27,11 @@
 
 ## 当前基线与总门状态
 
-当前R0正式基线（现v0.74.7）固定为 commit `a1c9427d8004576e2cbb9e546d409847fa9df318`，`go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`；官方 Release run [`29587548629`](https://github.com/netbirdio/netbird/actions/runs/29587548629) 成功，固定 URL 的访问日期为 2026-07-18。固定源码研究见 [Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)：Android mobile TUN/protect/route/DNS 入口未变，直接相关输入差异是 `netbirdio/wireguard-go` 从 `2834bebf6c1aea76bd217f31ea91c99f75e4a20a` 更新到 `8ec1ad32882fab0432317d027b0189371782ad01`。未发布分支、patch set、PS4 和 Go 1.26.5 均不是当前门输入。
+当前R0正式基线（现v0.76.3）固定为 commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6`，`go.mod` 声明 `go 1.25.5` 与 `toolchain go1.25.12`；官方 Release run [`31256677326`](https://github.com/netbirdio/netbird/actions/runs/31256677326) 成功，固定 URL 的访问日期为 2026-08-09。相对 v0.74.7 前进 140 个 commit；`netbirdio/wireguard-go` replace 回到 `2834bebf6c1aea76bd217f31ea91c99f75e4a20a`（与 v0.74.6 相同）。安全公告 GHSA-qcpp-8vwj-hhwr（high，影响 `>=0.5.0,<0.76.0`，`0.76.0` patched）为本次升级动因之一。固定源码研究见 [Tailscale-OHOS VPN 数据通路审计与 NetBird 映射](tailscale-ohos-netbird-port-audit.md)（已同步 v0.76.3）。未发布分支、patch set、PS4 和 Go 1.26.5 均不是当前门输入。
 
-v0.74.6、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` 继续作为所有既有 E/R evidence 的历史实际输入。采用 v0.74.7 不静默替换历史版本、源码、制品 hash 或判定；后续受影响门必须用 v0.74.7 新记录重跑。
+v0.74.6、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` 与 v0.74.7、commit `a1c9427d8004576e2cbb9e546d409847fa9df318` 继续作为所有既有 E/R evidence 的历史实际输入。采用 v0.76.3 不静默替换历史版本、源码、制品 hash 或判定；后续受影响门必须用 v0.76.3 新记录重跑。
 
-API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：E0、E1-C 和 E2 为 `reviewed-pass/pass`。现有 loader 负面证据绑定 v0.74.6；当前R0正式基线（现v0.74.7）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass，E1 overall Go 未关闭。E3-E7 以 reviewed dependency-blocked aggregation exception 进入后续聚合，不是 `pass` 或 `N/A`；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。
+API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：E0、E1-C 和 E2 为 `reviewed-pass/pass`。现有 loader 负面证据绑定 v0.74.6；当前R0正式基线（现v0.76.3）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass，E1 overall Go 未关闭。E3-E7 以 reviewed dependency-blocked aggregation exception 进入后续聚合，不是 `pass` 或 `N/A`；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。
 
 E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结目标为 `PLA-AL10` / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` / API `23` / arm64；live model 匹配，但 live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，可见 suffix 发生 drift。runner 在 continuous capture、staging 与 install 前停止，`campaign_started=false`，A/B 未安装或运行，finally 清理为 `verified-clean`，integrity violations 为空。
 
@@ -209,6 +209,25 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 - **回退条件**：用户撤销授权、回调 terminal 在新运行中可用且判定与 probe fallback 冲突、probe 观察到与回调矛盾的结果、禁止能力出现（如 HDC force-stop 被用于 S5 撤销而非 cleanup-only）、旧 freeze 被用于新 Live、改写历史 measured，或把本裁决写成 E3 pass / 设备行为 retry 时，立即停止并以新的动态调整记录重新界定。
 - **审查状态**：路线授权由用户于 2026-08-07 直接批准；runner 变更后 host-only selftest（`-SelfTest` + 完整 selftest，`HDC_PROCESSES=0`）、bash -n/PS parser、JSON 与 diffcheck 均通过；本提交追加 S7 cleanup readiness 单一 `Get-VpnFinalState` evaluator 重构与冻结字段 `process_absent_probe_spacing_seconds` 重命名（旧 `spacing` 拒绝）后复跑同样全部通过；host 侧已重建并登记 [`EV-E3-PHYS1HOST-20260808-0001`](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)（host selftest `HDC_PROCESSES=0`、独立审查 0 B/0 M；candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；DryRun `is_evidence: false`/HDC0/integrity empty；旧 20260807 candidate `INVALID-TIMELINE` 不可用）；当前 `plan_status: blocked-awaiting-device-authorization`（禁 HDC/设备命令；用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权），E3 未关闭，E8 保持 `CLOSED`。
 
+### ADJ-20260809-0001：正式采用 NetBird v0.76.3
+
+- **提出与批准角色**：用户（直接人类决策者）；于 2026-08-09 直接批准。本记录按“人类直接决策者优先”规则替代这一次内部 T0 触发，不声称执行了 T0。
+- **日期与时区**：`2026-08-09`，`Asia/Shanghai (+08:00)`；未虚构未提供的秒级批准时间。
+- **触发证据**：NetBird 正式非 prerelease tag `v0.76.3`（published `2026-08-08T12:11:41Z`）、固定 tag commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6`、官方 Release run [`31256677326`](https://github.com/netbirdio/netbird/actions/runs/31256677326) 成功（固定 URL 访问日期 2026-08-09），以及安全公告 GHSA-qcpp-8vwj-hhwr（high；影响 `>=0.5.0,<0.76.0`，`0.76.0` patched）。
+- **调整原因**：R0 规则要求后续门跟随并显式固定最新正式 NetBird release；v0.76.3 已发布且版本输入可复核；同时 GHSA-qcpp-8vwj-hhwr（high）影响 `>=0.5.0,<0.76.0`，v0.74.7 在受影响范围内，升级到 v0.76.3 可消除该公告影响。继续仅登记而不作采用决定会使后续门的正式基线不明确且保留已知 high 漏洞输入。
+- **调整内容**：自本记录生效起，当前R0正式基线采用 NetBird `v0.76.3`。后续新运行使用该版本；所有实际使用 v0.74.6/v0.74.7 的历史 evidence 继续绑定原 tag、commit、制品 hash 和判定，不改写、不重判，也不因新基线自动失效或通过。
+- **受影响阶段**：R0 版本锁定、E1 官方 Go loader/runtime、E8 聚合输入，以及后续实际消费 NetBird 客户端或服务端基线的 R2-R8 与 R10 依赖维护；不改变任何阶段当前退出状态，不改变 E3 的 HDC/设备授权状态（`plan_status: blocked-awaiting-device-authorization` 保持，禁 HDC）。
+- **版本与发布核对**：tag `v0.76.3`；commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6`；published `2026-08-08T12:11:41Z`；`go 1.25.5`；`toolchain go1.25.12`；官方 Release run [`31256677326`](https://github.com/netbirdio/netbird/actions/runs/31256677326) 成功；固定 run URL 访问日期 `2026-08-09`；相对 v0.74.7 前进 140 个 commit。
+- **wireguard-go 差异**：NetBird `go.mod` 的 `netbirdio/wireguard-go` replace 从 v0.74.7 的 `8ec1ad32882fab0432317d027b0189371782ad01` 回到 `2834bebf6c1aea76bd217f31ea91c99f75e4a20a`（与 v0.74.6 相同）；该变化须进入新基线依赖、SBOM、许可证和功能回归输入，不能复用 v0.74.7 的完成结论。
+- **安全动因**：GHSA-qcpp-8vwj-hhwr 严重级别 high，影响 `>=0.5.0,<0.76.0`，`0.76.0` patched；v0.74.7 在受影响范围内，v0.76.3 已包含修复。本记录只登记影响范围与升级动因，不展开漏洞细节。
+- **已评估替代方案**：继续以 v0.74.7 作为新运行基线会偏离“最新正式 release”规则且保留已知 high 漏洞输入；只登记 v0.76.3 而延后采用会让 E1 和后续门输入悬而未决；静默替换历史 evidence 会破坏可追溯性。故采用 v0.76.3 作为后续基线，同时完整保留 v0.74.6/v0.74.7 历史绑定。
+- **R0/SLO/补丁预算影响**：更新 R0 的 NetBird client/server 版本输入，不改变首目标候选、功能范围、任何质量、安全、性能、隐私 SLO、错误预算阈值或分阶段补丁预算；不授权任何 Go、NetBird、wireguard-go 或 SDK 补丁，当前补丁计数仍为 0。
+- **重跑范围**：首先以 v0.76.3 重跑 E1 官方 Go loader/runtime；在 E8 聚合前重核相关上游 SHA 和全部输入 hash。进入相应阶段前，重新生成或复核 v0.76.3 客户端/服务端及 wireguard-go 变化涉及的依赖清单、SBOM、许可证与 AGPL 分析，并对 R2-R8/R10 中实际消费该基线的门执行风险对应回归。v0.76.3 的 E1 当前尚未重跑，未达到 `reviewed-pass/pass`；SBOM/许可证重核亦未完成。
+- **T0 判定与决策依据**：版本采用属于重大技术输入调整，本记录按本节“人类直接决策者优先”规则，以用户明确决定替代这一次内部 T0 触发；未执行或虚构 T0。若用户明确要求 T0，仍按 T0 协议执行。
+- **生效条件**：上述 tag、commit、published 时间、Go/toolchain、成功 Release run 和固定访问日均可复核，且文档同步保留 v0.74.6/v0.74.7 历史边界后立即生效；生效只改变后续正式输入，不赋予任何 E/R 门通过状态。
+- **回退条件**：tag/commit 或 Release run 核对被推翻、v0.76.3 被上游撤回、出现阻断级安全/许可证问题，或重跑证明其无法在既有 R0 预算内继续时，停止新基线运行并由新的动态调整记录决定回退或前进版本；不得通过改写 v0.74.6/v0.74.7 历史 evidence 实施回退。
+- **审查状态**：用户于 2026-08-09 明确批准正式采用；文档层调整已进入当前未提交 diff。E1、SBOM、依赖、许可证和 AGPL 的新基线证据审查尚未完成，本记录不把这些事项写成通过。E3 未关闭，E8 保持 `CLOSED`。
+
 ### ADJ-20260808-0003：强可靠执行细化（真实 layout 校准 / prompt-time 事件窗口 / 空档 UI action guard / infra capture 分类 / S5 去除非决定性 VPN 页步骤 / process-target verify / C6 真实 shape 与连续 capture infra 传播）
 
 - **提出角色**：主会话编排 + 执行子代理（`ADJ-20260808-0002` 强可靠模式的执行细化；runner/selftest 已落地）。完整登记见 [`e3-physical-preflight-operator-trust-2026-08-08`](evidence/e3-physical-preflight-operator-trust-2026-08-08.md)。
@@ -254,7 +273,7 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 - **已评估替代方案**：继续等待含组件的官方 image，风险最低但无法判断已具名物理目标的 E3 可达性；把 E3-E7 记为 `N/A` 会错误免除义务；扩大到多设备、Go/NetBird 或特权探针会突破投入与权限边界；私有 image 或私有 API 无法形成普通第三方公共路径证据。因此只采用一次受限预检。
 - **R0/SLO/补丁预算影响**：修改 R0 的物理投入顺序和 E8 必要条件，不改变首目标候选、功能范围、任何 R0 SLO、统计口径或分阶段补丁上限；不授权上游补丁，当前补丁计数仍为 0。
 - **T0 状态**：本记录适用本节“人类直接决策者优先”规则，只替代这一次内部 T0 触发；它不是 T0 结论，未执行或声称新的 T0 共识。若用户明确要求 T0，仍须按 T0 协议执行。
-- **生效条件**：路线规则立即生效；设备端 campaign 仅在全部输入冻结、执行/独立审查角色分离且专用计划可执行时生效。E8 状态只有在预检 `reviewed-pass/pass`、当前R0正式基线（现v0.74.7）的 E1 `reviewed-pass/pass`、全部目标元组/哈希一致及独立聚合审查显式批准后才可改为 `OPEN`。
+- **生效条件**：路线规则立即生效；设备端 campaign 仅在全部输入冻结、执行/独立审查角色分离且专用计划可执行时生效。E8 状态只有在预检 `reviewed-pass/pass`、当前R0正式基线（现v0.74.7）的 E1 `reviewed-pass/pass`、全部目标元组/哈希一致及独立聚合审查显式批准后才可改为 `OPEN`。（**历史条件标注**：本记录生效时（2026-07-18）的 E1 基线条件为 v0.74.7；该历史条件已被 `ADJ-20260809-0001` 正式采用 v0.76.3 取代，当前 E1 基线条件为 v0.76.3，见下文 ADJ-20260809-0001。）
 - **回退条件**：用户撤销授权、范围越界、禁止能力出现、输入漂移、证据污染、campaign/重试纪律破坏，或新官方 image/build 含所需组件时，停止例外并回到物理设备禁止状态；新 image/build 必须从 E3 重验。功能 fail、invalid 或非允许重试的 blocked 继续保持 E8 `CLOSED`，后续须新路线决策。
 - **审查状态**：路线授权由用户于 `2026-07-18T10:31:00+08:00` 批准；initial live 证据现已完成独立审查并为 `reviewed-pass/blocked`，E8 聚合审查仍未通过。本文不把路线批准或 `reviewed-pass` 写成 E3 pass。
 - **当前状态**：六条只读 discovery 与唯一 signing enrollment 均已消费。API 23 纯 ArkTS/C A/B、普通开发签名、FINAL HAP/profile/certificate、源码/SDK/hash、runner 与角色输入曾完整冻结；API23 initial live 发现 build drift 后在 continuous capture/install 前停止，`campaign_started=false`。旧 evidence ID 已占用且不可复用，无基础设施 retry 授权。后续 rebind / `ADJ-20260806-0003` / host reverify / `ADJ-20260806-0004` build 确认 / `ADJ-20260807-0001` 跨日重新编号 / API26 live `EV-E3-PHYS1API26-20260807-0001`（`consumed-blocked`，保留）/ `ADJ-20260807-0002` 中文完整重跑与 `EV-E3-PHYS1API26-20260807-0002`（`consumed-blocked`）/ `ADJ-20260807-0003`（host process terminal probe 与 Settings 应用信息强制停止撤销路径，runner 变更完成，host 侧已重建并登记 [`EV-E3-PHYS1HOST-20260808-0001`](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)）见对应记录；现治理 `plan_status: blocked-awaiting-device-authorization`（candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权）。
@@ -311,14 +330,14 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 E0-E8 是物理设备产品投入前的聚合总门。所有客观可执行 Emulator 项必须形成 `record_status: reviewed-pass`、`verdict: pass` 并保持目标元组和 hash 一致；经审查证明因平台前置组件缺失而 blocked 的 E3-E7 必须保留原判定，并显式登记为 reviewed dependency-blocked aggregation exception，不能伪造 pass 或写成 `N/A`。E8 的任何状态变化都须独立聚合审查；新官方 image/build 若含所需组件，旧 blocked-exception 不再适用，必须重验。
 
 - **E0 普通应用**：普通第三方 phone 应用完成构建、安装、普通 `EntryAbility` 启动、可观察运行、停止、卸载和清理；`10106102` 未解决时本项失败。
-- **E1 ArkTS/native/fd ownership**：验证 ArkTS 与 native 双向调用、异步线程回调，以及 fd 的创建、复制、移交、关闭、重复关闭防护和异常清理所有权；还必须使用当前R0正式基线（现v0.74.7）声明的 Go/toolchain 输入验证官方 Go 制品可加载并运行该边界，C-only 结果只能作为子证据。现有 loader 负面绑定 v0.74.6，v0.74.7 未重跑且无 pass。
+- **E1 ArkTS/native/fd ownership**：验证 ArkTS 与 native 双向调用、异步线程回调，以及 fd 的创建、复制、移交、关闭、重复关闭防护和异常清理所有权；还必须使用当前R0正式基线（现v0.76.3）声明的 Go/toolchain 输入验证官方 Go 制品可加载并运行该边界，C-only 结果只能作为子证据。现有 loader 负面绑定 v0.74.6，v0.76.3 未重跑且无 pass。
 - **E2 C 网络**：以不依赖 Go 的 C native 路径验证 TCP/UDP、DNS、loopback 与外部测试端点的可判定网络收发和错误传播。
 - **E3 VPN Extension 授权**：普通第三方应用通过公开 VPN Extension 路径验证授权、拒绝、撤销和冲突状态，不使用特权绕过。phone 记录的公开 runtime 路径 blocked；2in1、Tablet 只在 registration-layer 前置边界 blocked，未形成完整 runtime 结论。E8 前只允许按 `E3-PHYS-PREFLIGHT` 判断一个精确物理目标的 E3 可达性。
 - **E4 `setUp`/TUN 配置**：实际调用 `setUp` 建立虚拟接口并核验 fd、地址、路由、DNS、MTU、IPv4 及声明范围内 IPv6 的配置与清理。
 - **E5 `protect` 真实绕行**：对真实外层 TCP/UDP socket 在正确时点调用 `protect`，以可观察流量证明绕过隧道而非仅验证 API 返回值。
 - **E6 C native 双向泵**：用纯 C native 数据泵在 TUN 与真实业务端点之间传输双向流量，验证背压、部分读写、fd 关闭和异常清理。
 - **E7 lifecycle/故障短循环**：在 Emulator 的可靠时间窗内执行有界短循环，覆盖重复启停、撤权、断网、进程退出和故障清理；25 分钟以上 soak、能耗和硬件相关长稳不列为本总门必过项。
-- **E8 聚合**：核验所有客观可执行项的 `reviewed-pass/pass`、E3-E7 的 reviewed dependency-blocked aggregation exception、目标元组和全部 hash；当前R0正式基线（现v0.74.7）的官方 Go loader/runtime 必须形成 E1 `reviewed-pass/pass`，`E3-PHYS-PREFLIGHT` 也必须同时为 `reviewed-pass/pass`，最后由独立聚合审查显式决定是否 `OPEN`。任一条件缺失或预检为 `blocked/fail/invalid` 都保持 `CLOSED`；`OPEN` 只是物理投入许可，不是 VPN/数据面通过。
+- **E8 聚合**：核验所有客观可执行项的 `reviewed-pass/pass`、E3-E7 的 reviewed dependency-blocked aggregation exception、目标元组和全部 hash；当前R0正式基线（现v0.76.3）的官方 Go loader/runtime 必须形成 E1 `reviewed-pass/pass`，`E3-PHYS-PREFLIGHT` 也必须同时为 `reviewed-pass/pass`，最后由独立聚合审查显式决定是否 `OPEN`。任一条件缺失或预检为 `blocked/fail/invalid` 都保持 `CLOSED`；`OPEN` 只是物理投入许可，不是 VPN/数据面通过。
 
 ## 实施原则
 
@@ -652,7 +671,7 @@ Emulator 客观可执行项：E0 pass -> E1 C-only pass/official Go blocked -> E
 Emulator E3：phone 公开 runtime blocked；2in1/Tablet 只在 registration-layer 前置边界 blocked
 Emulator E3-E7：reviewed dependency-blocked aggregation exception，不是 pass/N/A；完整义务未免除
 唯一物理例外：E3-PHYS-PREFLIGHT API23 initial 已消费；EV-E3-PHYS1API23-20260806-0001 为 reviewed-pass/blocked，build drift 后 pre-install stop，E3 未关闭且无 retry 授权；EV-E3-PHYS1REBIND7-20260806-0001 已完成三条 rebind（reviewed-pass/pass，仅 rebind）；ADJ-20260806-0003 冻结 HarmonyOS7/API26 元组并曾准备 E3-PHYS-PREFLIGHT-20260806-0002 / EV-E3-PHYS1API26-20260806-0001（never Live/unoccupied；ADJ-20260807-0001 标 superseded-unexecuted）；host reverify PASS；ADJ-20260806-0004 / EV-E3-PHYS1BUILD7-20260806-0001 单条 software.version 实测确认 HDC build 逐字匹配（reviewed-pass/pass，仅 build-confirm；API26 仍 rebind 实测）；ADJ-20260807-0001 曾编号 E3-PHYS-PREFLIGHT-20260807-0001 / EV-E3-PHYS1API26-20260807-0001，现已 Live 并 consumed-blocked（operator-aborted；禁止局部 scenario5 重放；保留）；ADJ-20260807-0002 中文完整重跑 ID E3-PHYS-PREFLIGHT-20260807-0002 / EV-E3-PHYS1API26-20260807-0002 已 Live 并 consumed-blocked（reviewed-pass/blocked；S1/S4 pass，S2/S3/S5/S6/S7 blocked；双审查 0 B/5 M）；ADJ-20260807-0003 后 host 侧已重建并登记 EV-E3-PHYS1HOST-20260808-0001（host selftest HDC_PROCESSES=0、独立审查 0 B/0 M；candidate E3-PHYS-PREFLIGHT-20260808-0001 / EV-E3-PHYS1API26-20260808-0001 已准备、freeze plan_status blocked；DryRun is_evidence=false/HDC0/integrity empty；旧 20260807 candidate INVALID-TIMELINE 不可用）；plan_status=blocked-awaiting-device-authorization（用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权；本登记禁 HDC），E8 CLOSED
-E8：当前 CLOSED；物理预检缺 reviewed-pass/pass，且还须当前R0正式基线（现v0.74.7）E1 pass、哈希一致及独立聚合审查
+E8：当前 CLOSED；物理预检缺 reviewed-pass/pass，且还须当前R0正式基线（现v0.76.3）E1 pass、哈希一致及独立聚合审查
 E8 OPEN 后：只许可具名物理投入；R2/R3 承接 E4-E7 完整 VPN/数据面义务
 首目标正式门：R0 -> R1 -> R2 -> R3 -> R4 -> R5 -> R6 -> R7 -> R8
 第二目标：首目标 GA + 第二目标启动条件 -> 独立重跑 R0 -> ... -> R8 -> R9 退出

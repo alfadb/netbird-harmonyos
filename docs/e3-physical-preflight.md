@@ -1,6 +1,6 @@
 # E3-PHYS-PREFLIGHT 物理设备预检计划与证据模板
 
-最后核验：2026-08-08
+最后核验：2026-08-09
 
 本文定义 `E3-PHYS-PREFLIGHT`，即 E8 `OPEN` 前唯一允许的物理设备执行例外。它只验证一个冻结的 HarmonyOS 7 / API 26 arm64 具名设备目标上的 E3 可达性，不是产品测试、R 阶段退出或 E4-E7 完整验证。历史 initial live 曾以 HarmonyOS 6.1 / API 23 元组执行并因 build drift 停止，见 [`EV-E3-PHYS1API23-20260806-0001`](evidence/e3-physical-preflight-2026-08-06.md)；当前可执行目标元组以 `ADJ-20260806-0003` 冻结的 HarmonyOS 7 / API 26 为准。预检记录同时达到 `record_status: reviewed-pass` 和 `verdict: pass` 是 E8 `OPEN` 的必要但非充分条件；预检为 `blocked`、`fail` 或 `invalid` 时 E8 必须保持 `CLOSED`，预检通过也不自动开放 E8。
 
@@ -124,7 +124,7 @@ hdc shell bm get --udid
 - 只有 `record_status: reviewed-pass` 与 `verdict: pass` 同时成立，才满足 E8 `OPEN` 的预检必要条件；它只表示冻结的 `PHYS-1` 目标元组上 E3 可达，不关闭 E1，不启动或完成 E4-E7，不证明 `protect`、流量、Go、NetBird、产品或发布能力，也不自动把 E8 置为 `OPEN`。
 - `fail` 只否定该具名设备、完整 build、API、arm64、签名 profile、A/B 源码/SDK/HAP 组合上的预检路径，不得外推其他设备、build、API、架构、发行版或 Emulator；E8 必须保持 `CLOSED`，继续执行须先取得新路线决策。
 - `blocked` 和 `invalid` 不形成正面或负面平台结论，均使 E8 保持 `CLOSED`，也不得用第二台设备绕过；除同一冻结元组上的一次基础设施性 blocked 重试外，继续执行必须先取得新的路线决策。
-- 后续 E8 独立聚合审查只能引用本记录的精确 E3 可达性结论；还必须单独核验当前R0正式基线（现v0.74.7）的 E1 官方 Go loader/runtime、全部目标元组与哈希、Emulator blocked-exception 成员及其他聚合条件，再显式决定是否 `OPEN`。E8 `OPEN` 只许可后续具名物理设备投入，不表示 VPN 或数据面已通过。
+- 后续 E8 独立聚合审查只能引用本记录的精确 E3 可达性结论；还必须单独核验当前R0正式基线（现v0.76.3）的 E1 官方 Go loader/runtime、全部目标元组与哈希、Emulator blocked-exception 成员及其他聚合条件，再显式决定是否 `OPEN`。E8 `OPEN` 只许可后续具名物理设备投入，不表示 VPN 或数据面已通过。
 
 ## 原始证据要求
 

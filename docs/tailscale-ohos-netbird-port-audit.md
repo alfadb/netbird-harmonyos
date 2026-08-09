@@ -1,12 +1,12 @@
 # Tailscale-OHOS VPN 数据通路审计与 NetBird 映射
 
-最后核验：2026-07-18
+最后核验：2026-08-09
 
 本文审计 `flypigJ/Tailscale-OHOS` 固定 commit
 `fbd14c5207e746389e54ff9f8f8593c46942adac` 中的
 HarmonyOS `VpnExtensionAbility -> NAPI -> Go -> wireguard-go` 路径，并映射到
-当前R0正式基线（现v0.74.7）的固定 commit
-`a1c9427d8004576e2cbb9e546d409847fa9df318`。本文是源码研究，不是本仓库的
+当前R0正式基线（现v0.76.3）的固定 commit
+`f65f7b347ee4e7de6d98c488d3d894cd018b02b6`。本文是源码研究，不是本仓库的
 Emulator 或真机 evidence，不构成产品实现、许可证完成结论或阶段门通过。
 
 ## 结论
@@ -30,13 +30,16 @@ Emulator 或真机 evidence，不构成产品实现、许可证完成结论或�
   [VPN 应用排除](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/entry/src/main/ets/vpnextensionability/TailscaleVpnExtensionAbility.ets#L123-L136)。
   这不是本项目 E5 要求的 management、signal、relay、peer TCP/UDP socket 逐一
   `protect` 证据。
-- NetBird `v0.74.7` 已有可映射的 Android 移动端契约：`TunAdapter` 同时提供
+- NetBird `v0.76.3` 已有可映射的 Android 移动端契约：`TunAdapter` 同时提供
   `ConfigureInterface` 和同步 `ProtectSocket`，Go 的 dialer/listener 在 socket
   `RawConn.Control` 阶段调用保护函数，Android 数据面再把平台 fd 包装成
   wireguard-go TUN。见
-  [`TunAdapter`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/device/adapter.go#L3-L8)、
-  [保护函数注册](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/android/client.go#L100-L108)和
-  [fd 到 WireGuard](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/device/device_android.go#L57-L91)。
+  [`TunAdapter`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/device/adapter.go#L3-L8)、
+  [保护函数注册](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/android/client.go#L139-L142)和
+  [fd 到 WireGuard](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/device/device_android.go#L57-L91)。
+  `v0.74.7` 的同一契约见
+  [v0.74.7 保护函数注册](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/android/client.go#L100-L108)，
+  作为历史基线保留。
 - Tailscale-OHOS 固定树根部及全部 tracked tree 中没有 `LICENSE`、`COPYING` 或
   `NOTICE`。固定树可在
   [commit tree](https://github.com/flypigJ/Tailscale-OHOS/tree/fbd14c5207e746389e54ff9f8f8593c46942adac)
@@ -54,8 +57,9 @@ Emulator 或真机 evidence，不构成产品实现、许可证完成结论或�
 | Tailscale-OHOS | 正式非 prerelease `v0.3.19-release`，annotated tag `ae8f121e265eb519c122d7f2264db96275ffa8aa` 指向 commit `fbd14c5207e746389e54ff9f8f8593c46942adac` | 固定源码树仍没有仓内 release manifest、制品哈希或可复现构建输入 |
 | Tailscale | tag `v1.86.5`，commit `db392aed39630023f969e1961fcbced785d09358` | 用于对照未打本地补丁的上游源码 |
 | Tailscale wireguard-go | pseudo-version commit `1d0488a3d7da6b6ed79202519f30e7a286e0d4e6` | `go.mod` 固定依赖；外部适配器实现 `tun.Device` |
-| NetBird | 正式 release `v0.74.7`，commit `a1c9427d8004576e2cbb9e546d409847fa9df318` | 本文的 NetBird 映射基线 |
-| NetBird wireguard-go | pseudo-version commit `8ec1ad32882fab0432317d027b0189371782ad01` | `v0.74.7` 的 replace 后实际 WireGuard 源码 |
+| NetBird | 正式 release `v0.76.3`，commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6` | 本文的 NetBird 映射基线 |
+| NetBird wireguard-go | pseudo-version commit `2834bebf6c1aea76bd217f31ea91c99f75e4a20a` | `v0.76.3` 的 replace 后实际 WireGuard 源码 |
+| NetBird 历史基线 | 正式 release `v0.74.7`，commit `a1c9427d8004576e2cbb9e546d409847fa9df318` | 保留为既有审计历史事实，不静默改写 |
 | 本仓原记录 | `v0.74.6`，commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` | 保留为既有 R0/E 门记录，不静默改写历史输入 |
 
 Tailscale-OHOS 的 GitHub release 页面将 `v0.3.19-release` 标为正式非 prerelease；其
@@ -64,21 +68,46 @@ annotated tag `ae8f121e265eb519c122d7f2264db96275ffa8aa` 指向本文固定 comm
 错误，但固定源码树仍没有仓内 release manifest、制品哈希或可复现构建输入，不能
 据此复现本文审计的 Go/Tailscale patched 构建。
 
-NetBird `v0.74.7` 的 GitHub release 页面为
-[`v0.74.7`](https://github.com/netbirdio/netbird/releases/tag/v0.74.7)，发布时间为
-`2026-07-17T14:19:58Z`，tag 直接指向上述 commit。源码仍声明
-[`go 1.25.5` 和 `toolchain go1.25.12`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/go.mod#L1-L6)。
+NetBird `v0.76.3` 的 GitHub release 页面为
+[`v0.76.3`](https://github.com/netbirdio/netbird/releases/tag/v0.76.3)，发布时间为
+`2026-08-08T12:11:41Z`，tag 直接指向上述 commit。源码仍声明
+[`go 1.25.5` 和 `toolchain go1.25.12`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/go.mod#L1-L6)，
+与 `v0.74.7` 相同，Go/toolchain 不变。
 
-相对 `v0.74.6`，`v0.74.7` 前进 7 个 commit；固定
-[compare](https://github.com/netbirdio/netbird/compare/v0.74.6...v0.74.7)
-显示 Android mobile、`TunAdapter`、socket-protect、route 和 DNS 文件没有变化。
-与本研究直接相关的依赖差异是 wireguard-go replace 从
-[`2834bebf...`](https://github.com/netbirdio/netbird/blob/3a2f773d655d88d16ed953fc2a114a4e690a1b08/go.mod#L345-L351)
-更新为
-[`8ec1ad32...`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/go.mod#L345-L351)。
-其他变更集中在 relay QUIC 并发、认证和输入校验、netstack SOCKS5 监听默认值、
-Windows gVisor RACK 以及用户态防火墙分片处理。本文只记录差异；R0 已于
-2026-07-18 正式采用该输入，受影响门仍须按动态调整机制用新记录重跑。
+相对 `v0.74.7`，`v0.76.3` 前进 140 个 commit；固定
+[compare](https://github.com/netbirdio/netbird/compare/v0.74.7...v0.76.3)
+包含安全相关修复（management 拒绝 pending/blocked 用户访问 reverse proxy、
+debug bundle 路径与上传目标收紧、daemon IPC 按本地身份授权、relay 只信任配置的
+trusted proxy 的 `X-Real-Ip`、移除 deprecated Hello handshake/gob token decode、
+删除用户时显式 accountID 校验等），以及 relay 早期消息缓冲上限提升、stale routing
+peer 修复、nftables route 规则修复、eBPF XDP UDP checksum 修复和 WireGuard
+watcher 重启修复。与本研究直接相关的依赖差异是 wireguard-go replace 从
+[`8ec1ad32...`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/go.mod#L349-L351)
+回退为
+[`2834bebf...`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/go.mod#L331-L333)，
+即 `v0.74.6` 时代使用的同一 commit（回退发生在 0.74.7-branch-sync 合并
+`be677742`，main 侧版本胜出）；`2834bebf` 比 `v0.74.7` 的 `8ec1ad32` 少一个
+Windows gVisor RACK 禁用 commit，`tun/tun_linux.go` 两版本逐字节一致。
+Android mobile 入口有实质变化（见下文逐文件比较）。本文只记录差异；R0 已正式
+采用该输入，受影响门仍须按动态调整机制用新记录重跑。
+
+历史事实：`v0.74.7` 相对 `v0.74.6` 前进 7 个 commit，Android mobile、
+`TunAdapter`、socket-protect、route 和 DNS 文件没有变化，wireguard-go replace
+从 `2834bebf...` 更新为 `8ec1ad32...`；R0 已于 2026-07-18 正式采用该输入。
+
+本次逐文件比较（`v0.74.7` a1c9427d → `v0.76.3` f65f7b34）覆盖 17 个对象：
+`client/iface/device/adapter.go`、`client/android/client.go`、
+`client/iface/device/device_android.go`、`client/internal/connect.go`、
+`client/embed/embed.go`、`client/iface/iface_new_android.go`、
+`client/iface/iface_create_android.go`、`client/net/protectsocket_android.go`、
+`client/net/dialer_init_android.go`、`client/net/listener_init_android.go`、
+`client/iface/bind/control.go`、`client/grpc/dialer_generic.go`、
+`client/internal/relay/relay.go`、`client/internal/dns/host_android.go`、
+`client/internal/routemanager/systemops/systemops_android.go`、`LICENSE`、
+`LICENSES/REUSE.toml`。其中仅 3 个文件有变化：`client/android/client.go`
+（+134/-19）、`client/internal/connect.go`（+37）、`client/embed/embed.go`
+（+1/-1）；其余 14 个对象逐字节一致。另核验了 `client/internal/engine.go`
+（+170/-58）与新增 `client/internal/engine_tunsettings.go`。
 
 审计使用 `gh repo clone`、`gh api repos/.../releases/latest`、tag/ref/commit 查询及
 本地只读 `git`/`rg`。临时 clone 位于 `/tmp`，没有进入本仓 evidence。
@@ -142,11 +171,11 @@ README 所称的“小补丁”不能计数、复现或评估维护风险；见
 [README 自述](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/README.md#L74-L85)。
 这些缺失不允许作为本项目 Go/NetBird patch budget 的输入。
 
-当前R0正式基线（现v0.74.7）使用 Go 1.25.12，并把 WireGuard 替换到
-`netbirdio/wireguard-go@8ec1ad32...`。本仓 v0.74.6 历史证据表明其官方 Go 1.25.12
-制品在 API 24 x86_64 应用 late-load 路径受 initial-exec TLS 阻断；v0.74.7 尚未重跑
+当前R0正式基线（现v0.76.3）使用 Go 1.25.12，并把 WireGuard 替换到
+`netbirdio/wireguard-go@2834bebf...`。本仓 v0.74.6 历史证据表明其官方 Go 1.25.12
+制品在 API 24 x86_64 应用 late-load 路径受 initial-exec TLS 阻断；v0.76.3 尚未重跑
 且没有 E1 pass。外部项目使用另一套 Go 1.24.5 arm64 OpenHarmony fork，不反驳该
-历史结果，也不能替代 v0.74.7 重验或授权引入私有 Go fork。
+历史结果，也不能替代 v0.76.3 重验或授权引入私有 Go fork。
 
 ## NAPI 导出、线程与内存
 
@@ -229,10 +258,10 @@ C++ 同步路径在创建 ArkTS string 后释放 C string；异步路径先复�
 NetBird Android 路径的契约不同：`TunAdapter.ConfigureInterface` 返回 fd 后，
 `CreateUnmonitoredTUNFromFD` 直接对这个 fd 设 nonblock 并用 `os.NewFile` 接管，不先
 `dup`；固定实现见
-[NetBird Android device](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/device/device_android.go#L57-L80)和
-[wireguard-go fd wrapper](https://github.com/netbirdio/wireguard-go/blob/8ec1ad32882fab0432317d027b0189371782ad01/tun/tun_linux.go#L635-L657)。
+[NetBird Android device](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/device/device_android.go#L57-L80)和
+[wireguard-go fd wrapper](https://github.com/netbirdio/wireguard-go/blob/2834bebf6c1aea76bd217f31ea91c99f75e4a20a/tun/tun_linux.go#L637-L657)。
 `NativeTun.Close()` 最终关闭包装的 file；见
-[wireguard-go close](https://github.com/netbirdio/wireguard-go/blob/8ec1ad32882fab0432317d027b0189371782ad01/tun/tun_linux.go#L482-L498)。
+[wireguard-go close](https://github.com/netbirdio/wireguard-go/blob/2834bebf6c1aea76bd217f31ea91c99f75e4a20a/tun/tun_linux.go#L482-L498)。
 因此 HarmonyOS 适配不能把平台仍拥有的原始 fd 直接交给该函数；应先固定
 “platform original + Go duplicate”契约，或实现独立 `tun.Device`，并对每条失败路径
 执行 EBADF、泄漏和 fd 复用测试。
@@ -243,29 +272,34 @@ Tailscale-OHOS 实现完整 `tailscale/wireguard-go/tun.Device` 并通过本地
 `tsnet.Server.Tun` patch 注入。这一模式的可迁移点是“平台创建 TUN，Go 只消费
 明确所有权的 fd”；具体 `tsnet` patch 与 NetBird 无关，不能复制。
 
-NetBird `v0.74.7` 已经有两条入口：
+NetBird `v0.76.3` 已经有两条入口：
 
 - `client/android.NewClient` 接收 `TunAdapter`、外部接口发现和网络变化 listener，
   `Run`/`RunWithoutLogin` 最终进入 `ConnectClient.RunOnAndroid`；见
-  [Android Client](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/android/client.go#L100-L191)和
-  [`RunOnAndroid`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/internal/connect.go#L105-L126)。
+  [Android Client](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/android/client.go#L139-L155)和
+  [`RunOnAndroid`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/connect.go#L107-L130)。
+  `v0.76.3` 新增 `GetTunSettings`/`TunSettings`（routes 与 search domains 快照，
+  供 TUN 重建时拉取最新设置，见
+  [engine_tunsettings.go](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/engine_tunsettings.go#L1-L20)），
+  且 `RunOnAndroid` 把网络变化 listener 包进 `tunnelnotifier` 再注入
+  `MobileDependency`。
 - `client/embed` 默认启用 userspace netstack，并默认禁用 server routes；client
   routes 仅在调用方设置 `DisableClientRoutes` 时禁用。见
-  [embed options](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/embed/embed.go#L150-L205)。
+  [embed options](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/embed/embed.go#L168-L206)。
   它适合无系统 TUN 的嵌入用途，不满足本项目必须覆盖 NetBird routes、DNS 和真实
   系统 VPN 流量的首个 0.x 范围。
 
 Android 非 netstack 路径由 `NewWGIFace` 选择 `device.NewTunDevice`，再由
 `CreateOnAndroid` 调 `TunAdapter.ConfigureInterface`；见
-[`NewWGIFace`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/iface_new_android.go#L11-L29)和
-[`CreateOnAndroid`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/iface_create_android.go#L7-L19)。但其 fd wrapper 在 `os.NewFile` 后仍调用 Linux TUN `Name()` 和 flag 初始化；见
-[`CreateUnmonitoredTUNFromFD`](https://github.com/netbirdio/wireguard-go/blob/8ec1ad32882fab0432317d027b0189371782ad01/tun/tun_linux.go#L635-L657)。HarmonyOS `vpn-tun` fd 是否支持这些 ioctl 未知；Tailscale-OHOS 的自定义 device 则直接返回静态名称而不调用 ioctl，见
+[`NewWGIFace`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/iface_new_android.go#L11-L29)和
+[`CreateOnAndroid`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/iface_create_android.go#L7-L19)。但其 fd wrapper 在 `os.NewFile` 后仍调用 Linux TUN `Name()` 和 flag 初始化；见
+[`CreateUnmonitoredTUNFromFD`](https://github.com/netbirdio/wireguard-go/blob/2834bebf6c1aea76bd217f31ea91c99f75e4a20a/tun/tun_linux.go#L637-L657)。HarmonyOS `vpn-tun` fd 是否支持这些 ioctl 未知；Tailscale-OHOS 的自定义 device 则直接返回静态名称而不调用 ioctl，见
 [`Name()`](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/native/go_bridge/harmony_tun.go#L99-L113)。因此 Android `TunAdapter` 是控制流参考，不是已验证可直接复用的 HarmonyOS fd wrapper；若改为注入自定义 `tun.Device`，NetBird 当前接口还需要一个可计数平台补丁。
 
 `RenewTun` 与 `RenewableTUN` 已提供进程内 fd 替换；新 device 加入后旧 device 被关闭，
 见
-[`RenewTun`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/device/device_android.go#L114-L128)和
-[`RenewableTUN.AddDevice`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/device/renewable_tun.go#L262-L287)。
+[`RenewTun`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/device/device_android.go#L114-L128)和
+[`RenewableTUN.AddDevice`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/device/renewable_tun.go#L262-L287)。
 
 主要缺口是这些文件带 Android build tag 或按 `runtime.GOOS == "android"` 分派。
 OpenHarmony Go fork的 `GOOS=openharmony` 不会天然进入该路径；若继续选择
@@ -300,17 +334,17 @@ NetBird Android 在 `NewClient` 时把平台 `ProtectSocket(fd int32) bool` 注�
 `client/net`。`ControlProtectSocket` 在标准库提供的 `syscall.RawConn.Control`
 回调内、socket connect/bind 之前同步调用平台函数；未设置或返回 false 都返回错误，
 见
-[`protectsocket_android.go`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/net/protectsocket_android.go#L11-L47)。
+[`protectsocket_android.go`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/net/protectsocket_android.go#L11-L47)。
 Android dialer 和 listener 都安装该 control，见
-[dialer init](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/net/dialer_init_android.go#L1-L5)和
-[listener init](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/net/listener_init_android.go#L1-L6)。
+[dialer init](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/net/dialer_init_android.go#L1-L5)和
+[listener init](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/net/listener_init_android.go#L1-L6)。
 WireGuard bind 也把 listener control 加入 wireguard-go `ControlFns`；见
-[bind control](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/iface/bind/control.go#L1-L15)。
+[bind control](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/iface/bind/control.go#L1-L15)。
 
 management gRPC 代表路径使用 `nbnet.NewDialer`，relay TURN TCP/UDP probe 使用
 `nbnet.NewDialer/NewListener`；见
-[gRPC dialer](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/grpc/dialer_generic.go#L17-L43)和
-[TURN probe](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/internal/relay/relay.go#L259-L290)。
+[gRPC dialer](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/grpc/dialer_generic.go#L17-L43)和
+[TURN probe](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/relay/relay.go#L259-L290)。
 这给 HarmonyOS 适配提供了集中 hook 点，但不能直接断言所有当前和未来 socket 已覆盖；
 R3 仍须枚举实际 management、signal、relay、ICE、WireGuard 和 DNS 路径，并验证每次
 重连。尤其是 HarmonyOS `protect` 的线程、同步/异步和 Extension object 生命周期
@@ -341,8 +375,9 @@ R3 仍须枚举实际 management、signal、relay、ICE、WireGuard 和 DNS 路�
 可复用的是“单一活动后端 + 持久 state + generation/cancel + 心跳过期”的状态机思想。
 仅可借鉴的是明文 status file polling：它没有原子 rename、schema/version、文件锁或
 进程身份 token，且状态和心跳来自同一进程自报。NetBird Android Go 层已有 blocking
-`Run`、reboot 场景 `RunWithoutLogin`、context cancel `Stop` 和 `RenewTun`；见
-[生命周期 API](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/android/client.go#L117-L216)。
+`Run`、reboot 场景 `RunWithoutLogin`、context cancel `Stop` 和 `RenewTun`，并新增
+`GetTunSettings`；见
+[生命周期 API](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/android/client.go#L155-L275)。
 但 NetBird release 仓只提供 Go binding，不提供 HarmonyOS UI/Extension 恢复壳；
 状态持久化并发、Extension 被 kill、授权撤销、网络切换和 crash 后清理都必须由本项目
 独立设计和验证。
@@ -361,15 +396,18 @@ Extension 始终加入 Tailscale IPv4 `100.64.0.0/10`，存在 IPv6 地址时加
 [preference persistence](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/native/go_bridge/backend.go#L783-L840)和
 [restore](https://github.com/flypigJ/Tailscale-OHOS/blob/fbd14c5207e746389e54ff9f8f8593c46942adac/native/go_bridge/backend.go#L904-L940)。
 
-NetBird Android 的对应边界更适合直接映射：engine 把 initial route range、NetBird
+NetBird Android 的对应边界更适合直接映射：engine 把 route range、NetBird
 DNS IP 和 search domains 传入 `CreateOnAndroid`，平台 `TunAdapter` 负责创建系统
 VPN；见
-[engine create](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/internal/engine.go#L2048-L2061)。
+[engine create](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/engine.go#L2129-L2134)。
+`v0.76.3` 把 `v0.74.7` 的 `InitialRouteRange()` 改为 `CurrentRouteRange()`，配合新增
+`GetTunSettings`/`TunSettings` 在 TUN 重建时拉取最新 route/search domains（见
+[`engine_tunsettings.go`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/engine_tunsettings.go#L1-L20)）。
 Android host DNS manager 明确不改 OS DNS，因为 VPN service 负责；见
-[`host_android.go`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/internal/dns/host_android.go#L8-L24)。
+[`host_android.go`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/dns/host_android.go#L8-L24)。
 Android route system operations也是 no-op，说明 route 安装属于平台 VPN 配置而非
 Go netlink；见
-[`systemops_android.go`](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/client/internal/routemanager/systemops/systemops_android.go#L12-L31)。
+[`systemops_android.go`](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/client/internal/routemanager/systemops/systemops_android.go#L12-L31)。
 
 仍未知的关键项包括：network map 后续 route/DNS 更新是否必须 destroy/recreate TUN、
 route selection 与 fd renew 的原子顺序、split DNS/search domain 在目标 API 的表达、
@@ -419,27 +457,27 @@ subnet route、exit node、reboot 后恢复、screen-off 和 Wi-Fi reassociation
   [wireguard-go LICENSE](https://github.com/tailscale/wireguard-go/blob/1d0488a3d7da6b6ed79202519f30e7a286e0d4e6/LICENSE#L1-L17)。
   这些许可证只覆盖各自上游内容，不补足 Tailscale-OHOS glue 的缺失许可，也不能
   识别未提交 `third_party/tailscale` patch 的作者和许可边界。
-- NetBird `v0.74.7` 根 LICENSE 明确除 `management/`、`signal/`、`relay/`、
+- NetBird `v0.76.3` 根 LICENSE 明确除 `management/`、`signal/`、`relay/`、
   `combined/` 外使用 BSD-3-Clause，列出的服务端目录使用 AGPLv3；见
-  [NetBird LICENSE](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/LICENSE#L1-L16)和
-  [REUSE mapping](https://github.com/netbirdio/netbird/blob/a1c9427d8004576e2cbb9e546d409847fa9df318/LICENSES/REUSE.toml#L1-L6)。
-- `netbirdio/wireguard-go@8ec1ad32...` 是 MIT，见
-  [NetBird fork LICENSE](https://github.com/netbirdio/wireguard-go/blob/8ec1ad32882fab0432317d027b0189371782ad01/LICENSE#L1-L17)。
+  [NetBird LICENSE](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/LICENSE#L1-L16)和
+  [REUSE mapping](https://github.com/netbirdio/netbird/blob/f65f7b347ee4e7de6d98c488d3d894cd018b02b6/LICENSES/REUSE.toml#L1-L6)。
+- `netbirdio/wireguard-go@2834bebf...` 是 MIT，见
+  [NetBird fork LICENSE](https://github.com/netbirdio/wireguard-go/blob/2834bebf6c1aea76bd217f31ea91c99f75e4a20a/LICENSE#L1-L17)。
   后续若修改其 fd wrapper、增加 OpenHarmony 文件或复制上游文件，仍须保留版权和
   许可证文本，并进入本项目 patch/SBOM/NOTICE 审查。
 
 ## NetBird 映射表
 
-| 关注点 | Tailscale-OHOS 固定实现 | NetBird `v0.74.7` 固定入口 | 本项目判断 |
+| 关注点 | Tailscale-OHOS 固定实现 | NetBird `v0.76.3` 固定入口 | 本项目判断 |
 | --- | --- | --- | --- |
-| Go 入口 | c-shared 自定义 backend，`tsnet.Server` | `client/android.NewClient` + `ConnectClient.RunOnAndroid` | Android API 是优先映射对象；需 OpenHarmony build/runtime adapter |
+| Go 入口 | c-shared 自定义 backend，`tsnet.Server` | `client/android.NewClient` + `ConnectClient.RunOnAndroid`（新增 `GetTunSettings`） | Android API 是优先映射对象；需 OpenHarmony build/runtime adapter |
 | TUN 创建 | ArkTS `VpnConnection.create` 后把 fd 注入 Go | `TunAdapter.ConfigureInterface` 由 Go 请求平台创建并同步返回 fd | 生命周期顺序相反；需两阶段状态机或安全同步 callback |
 | `tun.Device` | 自定义 `harmonyTunDevice`，先 `dup` | wireguard-go `CreateUnmonitoredTUNFromFD` + `RenewableTUN` | 可复用“先复制、Go 接管副本”契约；不能直接传原始 fd |
 | socket bypass | 禁用 netns，bundle 级 `blockedApplications` | `ProtectSocket` + dialer/listener `RawConn.Control` | NetBird hook 更符合 E5；Harmony 回调线程/同步语义待证 |
-| route | Extension 构造 overlay、subnet、exit routes | engine 传 initial routes 给 `TunAdapter`；Android systemops no-op | 平台壳负责 route；动态更新/recreate 未闭合 |
+| route | Extension 构造 overlay、subnet、exit routes | engine 传 `CurrentRouteRange()` 给 `TunAdapter`；Android systemops no-op | 平台壳负责 route；动态更新/recreate 未闭合 |
 | DNS | `CorpDNS` 时配置 `100.100.100.100` | engine 传 DNS/search domains；Android VPN service 负责 OS DNS | 复用职责边界，不复用 Tailscale 地址或配置协议 |
-| 生命周期 | UI backend 与 Extension backend handoff、文件心跳 | blocking Run、RunWithoutLogin、Stop、RenewTun | 需 Harmony 状态机；外部文本心跳仅作参考 |
-| 依赖 | Go 1.24.5 fork、Tailscale 1.86.5、本地未提交 patch | Go 1.25.12、NetBird v0.74.7、wireguard-go 8ec1ad32 | 不能用外部 Go fork替代本仓官方 Go 门 |
+| 生命周期 | UI backend 与 Extension backend handoff、文件心跳 | blocking Run、RunWithoutLogin、Stop、RenewTun、GetTunSettings | 需 Harmony 状态机；外部文本心跳仅作参考 |
+| 依赖 | Go 1.24.5 fork、Tailscale 1.86.5、本地未提交 patch | Go 1.25.12、NetBird v0.76.3、wireguard-go 2834bebf | 不能用外部 Go fork替代本仓官方 Go 门 |
 | 许可证 | 根 LICENSE 缺失 | client BSD-3-Clause，服务端目录 AGPLv3，wireguard-go MIT | 不复制外部 glue；NetBird 固定依赖继续做 SBOM/NOTICE |
 
 ## 可复用设计、仅可借鉴模式与未知项
@@ -480,6 +518,9 @@ subnet route、exit node、reboot 后恢复、screen-off 和 Wi-Fi reassociation
 - NetBird Android-tagged代码拆成 OpenHarmony 平台层所需的实际补丁数；Linux build
   tags 带入的 netlink、TUN name/flag ioctl、`SO_MARK`、DNS 和 syscall 差异，以及
   应采用 fd wrapper 还是新增外部 `tun.Device` 注入点。
+- `v0.76.3` 新增的 `GetTunSettings`/`TunSettings` 与 `tunnelnotifier` 包装是否引入
+  新的平台接口面（TUN 重建时拉取 route/search domains 的同步语义、网络变化事件
+  转发），以及 `CurrentRouteRange()` 相对 `InitialRouteRange()` 对重建原子性的影响。
 - route/DNS 动态更新、split DNS、search domains、IPv6、MTU 和 TUN recreate 的原子性。
 - UI/Extension 同时恢复、state 文件锁、crash 中断、授权撤销、其他 VPN 冲突和 reboot
   后恢复。
@@ -494,10 +535,10 @@ fd duplicate、自定义 `tun.Device` 和独立进程 handoff 可用于测试设
 形成可计数 patch、固定 Go/NetBird/wireguard-go 输入、NAPI ABI、fd 所有权表和目标
 SDK/Emulator evidence。
 
-本审计不改变门状态：loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.74.7）
+本审计不改变门状态：loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.76.3）
 尚未重跑且没有 E1 pass。Emulator E3-E7 保持 reviewed dependency-blocked aggregation
 exception，不是 `pass` 或 `N/A`；2in1、Tablet 的 blocked 只覆盖 registration-layer
 前置边界。`E3-PHYS-PREFLIGHT` 当前计划状态为 `blocked` 且尚无证据 ID，故 E8 保持 `CLOSED`。
-只有预检 `reviewed-pass/pass` 才满足 E8 的预检必要条件，还必须取得当前R0正式基线（现v0.74.7）的 E1 pass、
+只有预检 `reviewed-pass/pass` 才满足 E8 的预检必要条件，还必须取得当前R0正式基线（现v0.76.3）的 E1 pass、
 哈希一致和独立聚合批准。外部 HarmonyOS 6.1 phone 自报不属于本仓目标元组，不能授权
 或替代该预检；E8 `OPEN` 后仍须在具名物理设备 R2/R3 完成 E4-E7 VPN/数据面义务。

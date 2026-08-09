@@ -92,6 +92,9 @@ Independent review is complete: E2 is closed with `reviewed-pass/pass`, and E3 i
 
 ## Evidence
 
+- [E1 v0.76.3 stock Go loader/runtime host-preflight blocked record](../../docs/evidence/e1-stock-go-v0763-host-preflight-2026-08-09.md)
+  - `EV-E1-EMU24HOST-20260809-0001`: host-only preflight, `record_status: collected`, `verdict: blocked`; current Windows host lacks the same-tuple Emulator/Go/ffmpeg/SSH worker
+  - Resumable entry point: `bash spikes/r1-api24-hap/e1-stock-go-replay.sh [--preflight]`; full replay is one command on the historical Linux worker
 - [E2 C-network evidence record](../../docs/evidence/e2-c-network-api24-emulator-2026-07-17.md)
 - [E1 C-only evidence record](../../docs/evidence/e1-c-bridge-api24-emulator-2026-07-17.md)
 - [E0 ordinary-application evidence record](../../docs/evidence/e0-api24-emulator-2026-07-17.md)
@@ -99,3 +102,18 @@ Independent review is complete: E2 is closed with `reviewed-pass/pass`, and E3 i
 - Complete replay transcript, tag HiLog, three unfiltered HiLogs, host raw log, fault list, Emulator console, and screenshots under the same prefix
 
 `EV-E2-EMU24-20260717-0001` is retained as a failed attempt. Its ordinary process completed E1 and the first loopback operations but received `EACCES(13)` reading `/proc/net/route`; `0002` uses ordinary-process `getifaddrs` while preserving the guest route as separate runner evidence. The failed ID was not reused.
+
+## E1 v0.76.3 Stock Go Replay Entry
+
+`e1-stock-go-replay.sh` is the resumable entry point for the E1 stock Go loader/runtime replay on the fixed API 24 x86_64 Emulator target `127.0.0.1:10000`:
+
+- fixed baseline `v0.76.3` / `f65f7b347ee4e7de6d98c488d3d894cd018b02b6` / `go 1.25.5` / `toolchain go1.25.12`;
+- reuses the verified `runGoProbe` HAP probe source snapshot at commit `34d512541ca8047f8e3796abd6d85ef94cc13559` via `git archive` into a temporary directory, without touching the current C-only probe sources;
+- builds the stock Go 1.25.12 `libgoprobe.so` with the current `go-probe/build.sh` and verifies Go 1.25.12, ELF x86_64, `PT_TLS`/`R_X86_64_TPOFF64`/`STATIC_TLS` and hashes;
+- verifies the v0.76.3 tag/commit/go.mod through `gh` or an injected `NETBIRD_SOURCE_DIR`, failing closed when the network is unavailable;
+- clean-builds the app and test HAPs and requires the packaged `libgoprobe.so` members to be byte-equal to the built input;
+- installs both HAPs, runs `aa test`, captures directed HiLog, judges on `BASELINE_RESULT` + `GO_SPIKE_RESULT`, and cleans up;
+- the expected stock loader rejection (`initial-exec TLS resolves to dynamic definition`) is recorded as measured blocked, not a runner failure;
+- `--preflight` verifies only host paths, versions, the source snapshot and repository state without starting an Emulator or running HDC.
+
+On a host without the same-tuple Emulator/Go/ffmpeg/SSH worker, run `bash spikes/r1-api24-hap/e1-stock-go-replay.sh --preflight`; the full replay is a single command on the historical Linux worker.
