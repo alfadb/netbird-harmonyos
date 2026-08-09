@@ -96,7 +96,9 @@ Independent review is complete: E2 is closed with `reviewed-pass/pass`, and E3 i
   - `EV-E1-EMU24HOST-20260809-0001`: host-only preflight, `record_status: collected`, `verdict: blocked`; current Windows host lacks the same-tuple Emulator/Go/ffmpeg/SSH worker
   - Resumable entry point: `bash spikes/r1-api24-hap/e1-stock-go-replay.sh [--preflight]`; full replay is one command on the historical Linux worker
 - [E1 v0.76.3 replay 0001 consumed-failure record](../../docs/evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)
-  - `EV-E1-EMU24-20260809-0001`: first real full-mode run on 2026-08-09 aborted before any measurement by a runner defect (`exit 1`); **ID consumed, no same-ID rerun**; next formal ID is `EV-E1-EMU24-20260809-0002`
+  - `EV-E1-EMU24-20260809-0001`: first real full-mode run on 2026-08-09 aborted before any measurement by a runner defect (`exit 1`); **ID consumed, no same-ID rerun**
+- [E1 v0.76.3 replay 0002 consumed-failure record](../../docs/evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)
+  - `EV-E1-EMU24-20260809-0002`: second real full-mode run on 2026-08-09 aborted before any platform measurement by a runner defect (`exit 1`; literal `PT_TLS` grep false negative on a real TLS program header); **ID consumed, no same-ID rerun**; next formal ID is `EV-E1-EMU24-20260809-0003`
 - [E2 C-network evidence record](../../docs/evidence/e2-c-network-api24-emulator-2026-07-17.md)
 - [E1 C-only evidence record](../../docs/evidence/e1-c-bridge-api24-emulator-2026-07-17.md)
 - [E0 ordinary-application evidence record](../../docs/evidence/e0-api24-emulator-2026-07-17.md)
@@ -118,6 +120,6 @@ Independent review is complete: E2 is closed with `reviewed-pass/pass`, and E3 i
 - the expected stock loader rejection (`initial-exec TLS resolves to dynamic definition`) is recorded as measured blocked, not a runner failure;
 - `--preflight` verifies only host paths, versions, the source snapshot and repository state without starting an Emulator or running HDC.
 
-On a host without the same-tuple Emulator/Go/ffmpeg/SSH worker, run `bash spikes/r1-api24-hap/e1-stock-go-replay.sh --preflight`; the full replay is a single command on the historical Linux worker.
+On a host without the same-tuple Emulator/Go/ffmpeg/SSH worker, run `EVIDENCE_ROOT=/tmp/e1-stock-go-preflight-<unique> bash spikes/r1-api24-hap/e1-stock-go-replay.sh --preflight` with a unique temporary `EVIDENCE_ROOT` (the default in-repo root already holds the consumed host preflight transcript and would be refused by no-clobber); the full replay is a single command on the historical Linux worker.
 
-`EV-E1-EMU24-20260809-0001` was consumed by the first real full-mode run on 2026-08-09, which aborted before any measurement due to a runner defect (see the [consumed-failure record](../../docs/evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)); the next formal run uses `EV-E1-EMU24-20260809-0002` and must not reuse `0001`.
+`EV-E1-EMU24-20260809-0001` was consumed by the first real full-mode run on 2026-08-09, which aborted before any measurement due to a runner defect (see the [0001 consumed-failure record](../../docs/evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)); `EV-E1-EMU24-20260809-0002` was consumed by the second real full-mode run, which aborted before any platform measurement due to a runner defect (literal `PT_TLS` grep false negative; see the [0002 consumed-failure record](../../docs/evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)); the next formal run uses `EV-E1-EMU24-20260809-0003` and must not reuse `0001` or `0002`.

@@ -11,7 +11,7 @@
 | 项 | 状态 |
 | --- | --- |
 | NetBird 正式基线 | `v0.76.3` / commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6` / `go 1.25.5` / `toolchain go1.25.12`（runner 固定常量，启动时在线核验） |
-| E1 v0.76.3 stock Go loader/runtime | **尚未产生任何测量、无 pass**；`EV-E1-EMU24-20260809-0001` 已于 2026-08-09 首次真实执行，但因 runner defect 在测量前中止（`exit 1`，见 [consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)），**ID 已消耗、禁止同 ID 重跑**；下一次唯一正式 ID 为 `EV-E1-EMU24-20260809-0002` |
+| E1 v0.76.3 stock Go loader/runtime | **尚未产生任何测量、无 pass**；`EV-E1-EMU24-20260809-0001` 已于 2026-08-09 首次真实执行，但因 runner defect 在测量前中止（`exit 1`，见 [0001 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)），**ID 已消耗、禁止同 ID 重跑**；`EV-E1-EMU24-20260809-0002` 亦于同日第二次真实执行，因 runner defect（`readelf -lW` 字面 `PT_TLS` grep 假阴性）在平台测量前中止（`exit 1`，见 [0002 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)），**ID 已消耗、禁止同 ID 重跑**；下一次唯一正式 ID 为 `EV-E1-EMU24-20260809-0003` |
 | host-only 前置证据 | `EV-E1-EMU24HOST-20260809-0001` 已登记：`execution: not-run-host-preflight`、`record_status: collected`、`verdict: blocked`；只覆盖 host 侧核验，不形成平台结论、不占用 runtime evidence ID（见 [记录](evidence/e1-stock-go-v0763-host-preflight-2026-08-09.md)） |
 | E8 | `CLOSED` |
 | E3-PHYS-PREFLIGHT | `plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前**禁止 PHYS-1 HDC**、无 auto retry、无新 ID、无设备命令授权（见 [计划](e3-physical-preflight.md)） |
@@ -60,7 +60,7 @@ command -v ffmpeg gh bash
 
 预期：稳定 6.1.1.290、Beta 26.0.0.461、镜像 `HarmonyOS 6.1.1(24)` / software `6.1.0.125`、实例 `netbird_api24_phone`、KVM fd 可打开、ffmpeg/gh/bash 在 PATH、Go 1.25.12 在位。
 
-任何一项缺失、`WARN` 或版本漂移：**停止**，不安装、不升级、不隐式 `apt`（缺失系统库应更新 base image，见运行手册）；报告主会话后再继续。runner 完整模式自身还会再做一遍 `HOST_CHECK`（含 hvigorw/ohpm/hvigor-ohos-plugin/emulator/hdc/go/ohos-x86_64-clang/ffmpeg/gh/bash/shellcheck），任何缺失都会 fail closed。
+任何一项缺失、`WARN` 或版本漂移：**停止**，不安装、不升级、不隐式 `apt`（缺失系统库应更新 base image，见运行手册）；报告主会话后再继续。runner 完整模式自身还会再做一遍 `HOST_CHECK`（含 hvigorw/ohpm/hvigor-ohos-plugin/emulator/hdc/go/ohos-x86_64-clang/ffmpeg/gh/bash/readelf/file/unzip/ss/git/tar/base64/timeout/pgrep/mktemp/sha256sum/awk/shellcheck），任何缺失都会 fail closed。
 
 ## 4. runner 安全边界与固定输入
 
@@ -99,7 +99,7 @@ bash spikes/r1-api24-hap/e1-stock-go-replay.sh --selftest
 # 3) host-only preflight，使用临时 EVIDENCE_ROOT（不要用默认 root：仓内已有
 #    EV-E1-EMU24HOST-20260809-0001 transcript，默认 root 会被 no-clobber 拒绝，
 #    且不允许覆盖仓内 host evidence）
-EVIDENCE_ROOT=/tmp/e1-stock-go-preflight-20260809-0002 \
+EVIDENCE_ROOT=/tmp/e1-stock-go-preflight-20260809-0003 \
   bash spikes/r1-api24-hap/e1-stock-go-replay.sh --preflight
 # 期望：HOST_PREFLIGHT_MISSING_COUNT=0、HDC_RUN=false、
 #       EXECUTION=not-run-host-preflight、RECORD_STATUS=collected、VERDICT=blocked、exit 0
@@ -110,7 +110,7 @@ pgrep -af 'emulator/Emulator.*-start|qemu-system' || true
 ss -ltnp | grep -E ':(10000|5555|8710)[[:space:]]' || true
 
 # 5) 正式完整重放，仅运行一次
-EVIDENCE_ID=EV-E1-EMU24-20260809-0002 \
+EVIDENCE_ID=EV-E1-EMU24-20260809-0003 \
   bash spikes/r1-api24-hap/e1-stock-go-replay.sh
 ```
 
@@ -134,7 +134,7 @@ EVIDENCE_ID=EV-E1-EMU24-20260809-0002 \
 
 ## 7. 产物 / 证据文件与验证
 
-完整模式在默认 `EVIDENCE_ROOT`（`docs/evidence/raw/`）下生成，前缀 `EV-E1-EMU24-20260809-0002-`：
+完整模式在默认 `EVIDENCE_ROOT`（`docs/evidence/raw/`）下生成，前缀 `EV-E1-EMU24-20260809-0003-`：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -151,13 +151,13 @@ EVIDENCE_ID=EV-E1-EMU24-20260809-0002 \
 
 ```bash
 git status --short --branch
-# 期望：仅 docs/evidence/raw/EV-E1-EMU24-20260809-0002-* 为新增（构建产物 entry/libs/、build/ 等已被 .gitignore 忽略）
+# 期望：仅 docs/evidence/raw/EV-E1-EMU24-20260809-0003-* 为新增（构建产物 entry/libs/、build/ 等已被 .gitignore 忽略）
 
 grep -E '^(verdict|transcript_final_sha256|manifest_sha256|e8_status)=' \
-  docs/evidence/raw/EV-E1-EMU24-20260809-0002-manifest.txt
+  docs/evidence/raw/EV-E1-EMU24-20260809-0003-manifest.txt
 
 grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_RESIDUAL_PORT|CLEANUP_END)=' \
-  docs/evidence/raw/EV-E1-EMU24-20260809-0002-transcript.log
+  docs/evidence/raw/EV-E1-EMU24-20260809-0003-transcript.log
 # 期望：VERDICT/MEASURED_VERDICT 按第 6 节分支；RECORD_STATUS=collected；
 #       FINAL_RESIDUAL_PROCESS=false、FINAL_RESIDUAL_PORT=false、CLEANUP_END=teardown-complete
 ```
@@ -168,7 +168,7 @@ grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_R
 
 ```markdown
 - [ ] E1 v0.76.3 stock Go replay: exit `<0/1>`；`MEASURED_VERDICT=<blocked/pass>`；`VERDICT=<blocked/pass/fail>`；`RECORD_STATUS=collected`
-- [ ] evidence 前缀: `docs/evidence/raw/EV-E1-EMU24-20260809-0002-*`
+- [ ] evidence 前缀: `docs/evidence/raw/EV-E1-EMU24-20260809-0003-*`
 - [ ] manifest 最终 hash: `transcript_final_sha256=<…>` / `manifest_sha256=<…>`
 - [ ] 残留: `FINAL_RESIDUAL_PROCESS=false` / `FINAL_RESIDUAL_PORT=false`；`git status` 仅新增 evidence 文件
 - [ ] 未自行升级 reviewed-pass；未提交；未重跑同 ID
@@ -176,7 +176,7 @@ grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_R
 
 ## 9. 关键提醒
 
-- **完整模式此前从未在任何主机跑通过**。Windows 上只登记了 host-only preflight（`EV-E1-EMU24HOST-20260809-0001`），Windows DevEco Studio Emulator 与历史 Linux worker 的 Emulator 不等价，不能作为替代运行环境。Debian 上的首次真实执行 `EV-E1-EMU24-20260809-0001` 在测量前因 runner defect 中止（`exit 1`，ID 已消耗，见 [consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）；runner 已修复，本次 `EV-E1-EMU24-20260809-0002` 是修复后的完整重放。
+- **完整模式此前从未在任何主机跑通过**。Windows 上只登记了 host-only preflight（`EV-E1-EMU24HOST-20260809-0001`），Windows DevEco Studio Emulator 与历史 Linux worker 的 Emulator 不等价，不能作为替代运行环境。Debian 上的首次真实执行 `EV-E1-EMU24-20260809-0001` 在测量前因 runner defect 中止（`exit 1`，ID 已消耗，见 [0001 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）；第二次真实执行 `EV-E1-EMU24-20260809-0002` 亦在平台测量前因 runner defect（`readelf -lW` 字面 `PT_TLS` grep 假阴性）中止（`exit 1`，ID 已消耗，见 [0002 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)）；runner 已修复，本次 `EV-E1-EMU24-20260809-0003` 是修复后的完整重放。
 - 遇到脚本问题**先停**：不绕过 guard、不绕过 cleanup、不绕过 no-clobber，不手工修改/删除 evidence 文件后重跑；先保留材料并交回主会话。
 - runner 全程只操作 `127.0.0.1:10000` Emulator；不连接、不安装、不启动任何物理设备。
 

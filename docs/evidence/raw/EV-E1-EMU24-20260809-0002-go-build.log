@@ -1,0 +1,2 @@
+$ env HARMONYOS_NATIVE_HOME=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native GO_BIN=/home/worker/go/bin/go GO_PROBE_OUTPUT_DIR=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64 GO_TOOLCHAIN_MODE=local bash /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/go-probe/build.sh
+built /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so with go version go1.25.12 linux/amd64

@@ -1,0 +1,62 @@
+RUNNER=e1-stock-go-replay.sh
+BASELINE_TAG=v0.76.3
+BASELINE_COMMIT=f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+BASELINE_GO_DIRECTIVE=go 1.25.5
+BASELINE_TOOLCHAIN_DIRECTIVE=toolchain go1.25.12
+SNAPSHOT_COMMIT=34d512541ca8047f8e3796abd6d85ef94cc13559
+GO_VERSION_PREFIX=go version go1.25.12 
+TARGET_TUPLE=HarmonyOS_6.1.1(24),API24,x86_64,phone_Emulator
+EMULATOR_TARGET=127.0.0.1:10000
+BUNDLE=cn.alfadb.netbird.r1probe
+TEST_MODULE=entry_test
+TEST_RUNNER=/ets/testrunner/OpenHarmonyTestRunner
+PHYSICAL_DEVICE_USED=false
+HDC_RUN=true
+EVIDENCE_ID=EV-E1-EMU24-20260809-0002
+WORKSPACE=/home/worker/work/base/netbird-harmonyos
+EVIDENCE_ROOT=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw
+STABLE_TOOLS=/home/worker/harmonyos/command-line-tools/6.1.1.290
+BETA_TOOLS=/home/worker/harmonyos/command-line-tools/26.0.0.461
+GO_BIN=/home/worker/go/bin/go
+EMULATOR_INSTANCE=netbird_api24_phone
+GO_TOOLCHAIN_MODE=local
+NETBIRD_SOURCE_DIR=<unset>
+GH_BIN=gh
+GIT_HEAD=f8a7b211259ab292079e934e05809a80324466af
+GIT_BRANCH=main
+SNAPSHOT_COMMIT_PRESENT=pass
+SNAPSHOT_SOURCE_VERIFY=pass
+BASELINE_VERIFY=pass mode=gh tag=v0.76.3 commit=f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+HOST_CHECK hvigorw=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw
+HOST_CHECK ohpm=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm
+HOST_CHECK hvigor-ohos-plugin=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+HOST_CHECK emulator=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator
+HOST_CHECK hdc=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc
+HOST_CHECK go=pass path=/home/worker/go/bin/go
+HOST_CHECK ohos-x86_64-clang=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/x86_64-unknown-linux-ohos-clang
+HOST_CHECK ffmpeg=pass command=ffmpeg
+HOST_CHECK gh=pass command=gh
+HOST_CHECK bash=pass command=bash
+HOST_CHECK shellcheck=fail command=shellcheck (bash -n fallback will be used)
+STARTED_AT=2026-08-09T16:42:55+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+RECORD_SCOPE=E1_stock_Go_loader_runtime_replay_v0.76.3_baseline_API24_x86_64
+TEST_RUNNER_USED=true
+GO_NETBIRD_PS4_TOUCHED=false
+$ env HARMONYOS_NATIVE_HOME=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native GO_BIN=/home/worker/go/bin/go GO_PROBE_OUTPUT_DIR=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64 GO_TOOLCHAIN_MODE=local bash /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/go-probe/build.sh
+built /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so with go version go1.25.12 linux/amd64
+GO_BUILD_VERDICT=pass
+GO_VERSION_VERIFY=pass version=go version go1.25.12 linux/amd64
+GO_SO_FILE=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, Go BuildID=tn6m8hIsq40gZXfNbKPJ/VkllFqqiVWUti9PX1VCV/dEio-Z044XACcC8X-V8n/f3xjZvf7nqzlu_u72jBl, BuildID[sha1]=a7ef22b00aef6be09cff87501c026314f39b9fd3, with debug_info, not stripped
+GO_SO_ELF_VERIFY=pass
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x068f04 0x068f04 R   0x1000
+  LOAD           0x068f20 0x0000000000069f20 0x0000000000069f20 0x0c9560 0x0c9560 R E 0x1000
+  LOAD           0x132480 0x0000000000134480 0x0000000000134480 0x0d5400 0x0d5400 RW  0x1000
+  LOAD           0x207880 0x000000000020a880 0x000000000020a880 0x007512 0x03c9e0 RW  0x1000
+FAIL_REASON=libgoprobe.so has no PT_TLS segment
+CLEANUP_BEGIN=teardown
+CLEANUP_STAGING=skipped-emulator-not-started
+CLEANUP_HDC=kill-issued
+CLEANUP_TEMP=removed
+CLEANUP_END=teardown-complete

@@ -23,10 +23,13 @@
   - 可续跑入口 `spikes/r1-api24-hap/e1-stock-go-replay.sh [--preflight]`：固定 v0.76.3/f65f7b3…/go 1.25.5/toolchain go1.25.12、复用 34d5125 runGoProbe 快照、仅操作 127.0.0.1:10000；恢复历史 Linux worker 后单命令完整重放
 - [E1 v0.76.3 stock Go 重放 0001 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)
   - `EV-E1-EMU24-20260809-0001`：完整模式首次真实执行，`exit 1`、aborted-before-any-measurement；runner defect（readonly `GO_PROBE_OUTPUT_DIR` 前缀赋值中止，打印命令与真实执行不一致）；无 measured verdict/manifest/seal、Emulator 未启动；ID 已消耗、禁止同 ID 重跑；三份 raw 哈希已核对
-  - runner 已修复（build.sh 调用补 `env`，与 print_command 一致）；`DEFAULT_EVIDENCE_ID` 前移至 `EV-E1-EMU24-20260809-0002`，为下一次唯一正式 ID
+  - 历史：runner 修复（build.sh 调用补 `env`，与 print_command 一致）后 `DEFAULT_EVIDENCE_ID` 曾前移至 `EV-E1-EMU24-20260809-0002`；0002 亦已消耗（见下）
+- [E1 v0.76.3 stock Go 重放 0002 consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)
+  - `EV-E1-EMU24-20260809-0002`：完整模式第二次真实执行，`exit 1`、aborted-before-platform-measurement；runner defect（`readelf -lW` 字面 `PT_TLS` grep 假阴性——实际 ELF 有 `TLS` program header/`STATIC_TLS`/`R_X86_64_TPOFF64`，hash `84bd84…`）；无 measured verdict/manifest/seal、Emulator 未启动；ID 已消耗、禁止同 ID 重跑；三份 raw 哈希与 ELF 哈希已核对
+  - runner 已修复（新增 `pt_tls_diag` helper + selftest 正反例）；`DEFAULT_EVIDENCE_ID` 前移至 `EV-E1-EMU24-20260809-0003`，为下一次唯一正式 ID
 - [Debian 13 原 Linux worker：E1 v0.76.3 stock Go 单次重放交接](debian-e1-stock-go-handoff.md)
   - 用户在恢复的历史 Linux worker 拉取本次提交后安全继续 E1 v0.76.3 stock Go loader/runtime 单次重放；不自引用 commit，以推送 SHA 为准
-  - 顺序：unset target 变量 → `bash -n` → `--selftest` → 临时 `EVIDENCE_ROOT` 的 `--preflight`（不覆盖仓内 host evidence）→ 仅一次 `EVIDENCE_ID=EV-E1-EMU24-20260809-0002` 完整重放；预期 stock Go TLS rejection → `MEASURED_VERDICT=blocked`/exit 0；失败保留材料停止、不得同 ID 重跑；`0001` 已消耗（runner defect，exit 1，未产生测量，见[记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）
+  - 顺序：unset target 变量 → `bash -n` → `--selftest` → 临时 `EVIDENCE_ROOT` 的 `--preflight`（不覆盖仓内 host evidence）→ 仅一次 `EVIDENCE_ID=EV-E1-EMU24-20260809-0003` 完整重放；预期 stock Go TLS rejection → `MEASURED_VERDICT=blocked`/exit 0；失败保留材料停止、不得同 ID 重跑；`0001`/`0002` 均已消耗（runner defect，exit 1，未产生测量，见[0001 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)与[0002 记录](evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)）
 - [E2 C 网络 API 24 Emulator 证据](evidence/e2-c-network-api24-emulator-2026-07-17.md)
   - 三个不同普通 `EntryAbility` PID 各完成 10 轮 TCP/UDP loopback、Pod 本机受控 endpoint、DNS、事件/错误和资源恢复验证，并显示可见 E2 PASS 页面
   - `record_status: reviewed-pass`、`verdict: pass`；E2 已关闭；当前R0正式基线（现v0.76.3）的 E1 尚未重跑且无 pass，E8 仍 `CLOSED`；该历史记录不授权当前物理预检

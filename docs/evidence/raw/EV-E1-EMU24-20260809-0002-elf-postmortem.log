@@ -1,0 +1,106 @@
+================================================================================
+E1 v0.76.3 stock Go replay EV-E1-EMU24-20260809-0002 - ELF out-of-band postmortem
+================================================================================
+STATUS: OUT-OF-BAND POSTMORTEM (NOT original run output)
+This file is an out-of-band read-only postmortem of the residual stock Go
+libgoprobe.so left by the formal EV-E1-EMU24-20260809-0002 run. It was
+generated AFTER the formal run aborted and is NOT part of the original run
+transcript; the formal run's own outputs are the three raw files
+EV-E1-EMU24-20260809-0002-{transcript,go-build,baseline-verify}.log, which
+remain byte-identical to the run. This postmortem only re-inspects the
+residual artifact on disk to document the ELF facts referenced by the
+consumed-failure record; it does not re-run, re-measure, or alter anything.
+
+GENERATED_AT: 2026-08-09T17:35:38+08:00
+CLOCK_SOURCE: host_CLOCK_REALTIME_date_iso_8601_seconds
+GENERATED_BY: out-of-band read-only review (no HDC, no Emulator, no build)
+
+EVIDENCE_ID: EV-E1-EMU24-20260809-0002
+CODE_SHA (0002 run repository HEAD): f8a7b211259ab292079e934e05809a80324466af
+ARTIFACT_PATH: spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+ARTIFACT_SHA256: 84bd840bc931849295beeeba6e94f2d9bd4273ffc3e7bcd896f477ccc00ac5f9
+ARTIFACT_SIZE: 3136128 bytes
+ARTIFACT_MTIME: 2026-08-09 16:43:07 +0800 (matches the 0002 formal run window)
+
+The artifact hash above was computed out-of-band from this residual file
+left by the 0002 formal run; it matches the libgoprobe.so hash recorded in
+the 0002 consumed-failure record. The 0002 go-build raw log only proves the
+build succeeded (GO_BUILD_VERDICT=pass) and does not record any artifact
+hash; the residual file is the same artifact the formal run built and
+verified before aborting.
+
+--------------------------------------------------------------------------------
+1. file(1) output
+--------------------------------------------------------------------------------
+spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, Go BuildID=tn6m8hIsq40gZXfNbKPJ/VkllFqqiVWUti9PX1VCV/dEio-Z044XACcC8X-V8n/f3xjZvf7nqzlu_u72jBl, BuildID[sha1]=a7ef22b00aef6be09cff87501c026314f39b9fd3, with debug_info, not stripped
+
+--------------------------------------------------------------------------------
+2. readelf -lW Program Headers (full section)
+--------------------------------------------------------------------------------
+Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 12 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0002a0 0x0002a0 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x068f04 0x068f04 R   0x1000
+  LOAD           0x068f20 0x0000000000069f20 0x0000000000069f20 0x0c9560 0x0c9560 R E 0x1000
+  LOAD           0x132480 0x0000000000134480 0x0000000000134480 0x0d5400 0x0d5400 RW  0x1000
+  LOAD           0x207880 0x000000000020a880 0x000000000020a880 0x007512 0x03c9e0 RW  0x1000
+  TLS            0x132480 0x0000000000133480 0x0000000000133480 0x000000 0x000008 R   0x8
+  DYNAMIC        0x207530 0x0000000000209530 0x0000000000209530 0x000180 0x000180 RW  0x8
+  GNU_RELRO      0x132480 0x0000000000134480 0x0000000000134480 0x0d5400 0x0d5b80 R   0x1
+  GNU_EH_FRAME   0x068e88 0x0000000000068e88 0x0000000000068e88 0x00001c 0x00001c R   0x4
+  GNU_STACK      0x000000 0x0000000000000000 0x0000000000000000 0x000000 0x000000 RW  0
+  NOTE           0x0002e0 0x00000000000002e0 0x00000000000002e0 0x00001c 0x00001c R   0x8
+  NOTE           0x0002fc 0x00000000000002fc 0x00000000000002fc 0x000088 0x000088 R   0x4
+
+ Section to Segment mapping:
+  Segment Sections...
+   00
+   01     .note.ohos.ident .note.go.buildid .note.gnu.build-id .dynsym .gnu.hash .hash .dynstr .rela.dyn .rela.plt .rodata .eh_frame_hdr .eh_frame
+   02     .text .init .fini .plt
+   03     .init_array .fini_array .data.rel.ro .dynamic .got .got.plt
+   04     .data .go.buildinfo .go.fipsinfo .noptrdata .bss .noptrbss
+   05     .tbss
+   06     .dynamic
+   07     .init_array .fini_array .data.rel.ro .dynamic .got .got.plt
+   08     .eh_frame_hdr
+   09
+   10     .note.ohos.ident
+   11     .note.go.buildid .note.gnu.build-id
+
+Note: the Program Headers Type column prints "TLS" (never the literal
+"PT_TLS"); the TLS row covers segment 05, whose only section is ".tbss".
+
+--------------------------------------------------------------------------------
+3. readelf -dW NEEDED / FLAGS / FLAGS_1
+--------------------------------------------------------------------------------
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000001e (FLAGS)              SYMBOLIC BIND_NOW STATIC_TLS
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW NODELETE
+
+--------------------------------------------------------------------------------
+4. readelf -rW R_X86_64_TPOFF64 relocation rows
+--------------------------------------------------------------------------------
+00000000002096d8  0000000000000012 R_X86_64_TPOFF64                          0
+
+--------------------------------------------------------------------------------
+5. Conclusion
+--------------------------------------------------------------------------------
+The residual libgoprobe.so is an x86_64 ELF shared object with the complete
+PT_TLS semantics the 0002 formal run's ELF verification intended to check:
+
+  - a TLS program header (Type "TLS", covering segment 05 -> section .tbss);
+  - dynamic FLAGS STATIC_TLS (plus SYMBOLIC BIND_NOW) and FLAGS_1 NOW NODELETE;
+  - one R_X86_64_TPOFF64 relocation.
+
+The 0002 formal run aborted with FAIL_REASON "libgoprobe.so has no PT_TLS
+segment" because the runner grepped the readelf -lW output for the literal
+"PT_TLS", which readelf never prints (it prints "TLS"). That failure was a
+runner defect (false negative), not an ELF defect: the artifact does carry a
+TLS program header. This postmortem is out-of-band evidence only; it does
+not change the 0002 record (aborted-before-platform-measurement, runner
+defect, ID consumed) and produces no platform verdict.
+================================================================================

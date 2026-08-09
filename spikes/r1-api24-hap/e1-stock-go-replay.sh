@@ -50,7 +50,7 @@ readonly BUNDLE="cn.alfadb.netbird.r1probe"
 readonly TEST_MODULE="entry_test"
 readonly TEST_RUNNER="/ets/testrunner/OpenHarmonyTestRunner"
 readonly HOST_PREFLIGHT_EVIDENCE_ID="EV-E1-EMU24HOST-20260809-0001"
-readonly DEFAULT_EVIDENCE_ID="EV-E1-EMU24-20260809-0002"
+readonly DEFAULT_EVIDENCE_ID="EV-E1-EMU24-20260809-0003"
 readonly EXPECTED_LOADER_REJECTION="initial-exec TLS resolves to dynamic definition"
 
 # --- parameterized environment ----------------------------------------------
@@ -283,11 +283,49 @@ judge_spike_line() {
   fi
 }
 
+# --- ELF program-header PT_TLS detection -----------------------------------
+# readelf -lW prints the program-header Type column as "TLS" (never the
+# literal "PT_TLS"), so a whole-output grep for "PT_TLS" is a false negative
+# on a real TLS-bearing shared object. Only rows between "Program Headers:"
+# and "Section to Segment mapping:" are authoritative; section-level ".tbss"
+# text below the mapping line must never count. Diagnostic output prints the
+# full LOAD/TLS program-header rows; the function returns 0 iff a row's first
+# field is exactly "TLS".
+pt_tls_diag() {
+  local readelf_l="$1"
+  local in_headers=0
+  local found=1
+  local line type
+  while IFS= read -r line; do
+    if [[ "$line" == "Program Headers:" ]]; then
+      in_headers=1
+      continue
+    fi
+    # readelf prints the mapping header with a leading space
+    # (" Section to Segment mapping:"), so match it anywhere in the line.
+    if [[ "$line" == *"Section to Segment mapping:"* ]]; then
+      break
+    fi
+    if (( in_headers == 1 )); then
+      read -r type _ <<<"$line"
+      case "$type" in
+        LOAD|TLS) printf '%s\n' "$line" ;;
+      esac
+      if [[ "$type" == "TLS" ]]; then
+        found=0
+      fi
+    fi
+  done <<<"$readelf_l"
+  return $found
+}
+
 # --- selftest: pure host checks, no network/HDC/Emulator, no evidence -------
 selftest_run() {
   local rc=0
   local tmpdir
   local spike_blocked spike_pass spike_unknown spike_detail_phrase spike_detail_pass spike_detail_pipe v
+  local pt_tls_diag_out
+  local pt_tls_positive pt_tls_negative
   local existing newfile
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/e1-selftest.XXXXXX")"
   trap 'rm -rf "$tmpdir"' RETURN
@@ -338,6 +376,72 @@ selftest_run() {
     rc=1
   fi
   printf 'SELFTEST judgment=pass\n'
+
+  # PT_TLS detection: the positive case is a real readelf -lW program-header
+  # table with a TLS row; the negative case has only section-level ".tbss"
+  # text below the mapping line and must not be misjudged as PT_TLS. Both
+  # fixtures carry a fabricated "TLS"-leading line below the mapping header:
+  # if the interval cutoff at "Section to Segment mapping:" ever failed to
+  # stop the scan, the negative case would be misjudged as PT_TLS and the
+  # selftest would fail.
+  pt_tls_positive='Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 12 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0002a0 0x0002a0 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x068f04 0x068f04 R   0x1000
+  TLS            0x132480 0x0000000000133480 0x0000000000133480 0x000000 0x000008 R   0x8
+  DYNAMIC        0x207530 0x0000000000209530 0x0000000000209530 0x000180 0x000180 RW  0x8
+
+ Section to Segment mapping:
+  Segment Sections...
+   05     .tbss
+  TLS            0x999999 0x0000000000999999 0x0000000000999999 0x000000 0x000008 R   0x8
+'
+  pt_tls_negative='Elf file type is DYN (Shared object file)
+Entry point 0x0
+There are 12 program headers, starting at offset 64
+
+Program Headers:
+  Type           Offset   VirtAddr           PhysAddr           FileSiz  MemSiz   Flg Align
+  PHDR           0x000040 0x0000000000000040 0x0000000000000040 0x0002a0 0x0002a0 R   0x8
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x068f04 0x068f04 R   0x1000
+  DYNAMIC        0x207530 0x0000000000209530 0x0000000000209530 0x000180 0x000180 RW  0x8
+
+ Section to Segment mapping:
+  Segment Sections...
+   05     .tbss
+  TLS            0x999999 0x0000000000999999 0x0000000000999999 0x000000 0x000008 R   0x8
+'
+  if ! ( pt_tls_diag "$pt_tls_positive" >/dev/null 2>&1 ); then
+    printf 'SELFTEST FAIL pt_tls positive\n'
+    rc=1
+  fi
+  if ( pt_tls_diag "$pt_tls_negative" >/dev/null 2>&1 ); then
+    printf 'SELFTEST FAIL pt_tls negative\n'
+    rc=1
+  fi
+  pt_tls_diag_out="$(pt_tls_diag "$pt_tls_positive" 2>/dev/null || true)"
+  if [[ "$pt_tls_diag_out" != *"LOAD"* || "$pt_tls_diag_out" != *"TLS"* ]]; then
+    printf 'SELFTEST FAIL pt_tls positive diag output\n'
+    rc=1
+  fi
+  if [[ "$pt_tls_diag_out" != *"0x0000000000133480"* ]]; then
+    printf 'SELFTEST FAIL pt_tls positive diag full TLS row\n'
+    rc=1
+  fi
+  if [[ "$pt_tls_diag_out" == *"0x999999"* ]]; then
+    printf 'SELFTEST FAIL pt_tls positive diag below-mapping leak\n'
+    rc=1
+  fi
+  pt_tls_diag_out="$(pt_tls_diag "$pt_tls_negative" 2>/dev/null || true)"
+  if [[ "$pt_tls_diag_out" == *"TLS"* ]]; then
+    printf 'SELFTEST FAIL pt_tls negative diag output\n'
+    rc=1
+  fi
+  printf 'SELFTEST pt_tls=pass\n'
 
   if ( PHYS_1_TARGET=1; guard_physical_target ) >/dev/null 2>&1; then
     printf 'SELFTEST FAIL guard PHYS_1_TARGET\n'
@@ -502,6 +606,10 @@ verify_snapshot_in_git() {
     printf 'SNAPSHOT_SOURCE_VERIFY=fail reason=TestRunner snapshot missing runGoProbe/GO_SPIKE_RESULT/BASELINE_RESULT\n'
     return 1
   fi
+  if [[ "$test_runner" != *"R1Api24ProbeTest"* ]]; then
+    printf 'SNAPSHOT_SOURCE_VERIFY=fail reason=TestRunner snapshot missing R1Api24ProbeTest hilog tag\n'
+    return 1
+  fi
   local index_dts
   index_dts="$(git -C "$WORKSPACE" show "$SNAPSHOT_COMMIT:spikes/r1-api24-hap/entry/src/main/cpp/types/libprobe/index.d.ts" 2>/dev/null || true)"
   if [[ "$index_dts" != *"runGoProbe"* ]]; then
@@ -620,10 +728,22 @@ check_tool ohos-x86_64-clang "$NATIVE_HOME/llvm/bin/x86_64-unknown-linux-ohos-cl
 check_command ffmpeg ffmpeg || true
 check_command gh "$GH_BIN" || true
 check_command bash bash || true
+check_command readelf readelf || true
+check_command file file || true
+check_command unzip unzip || true
+check_command ss ss || true
+check_command git git || true
+check_command tar tar || true
+check_command base64 base64 || true
+check_command timeout timeout || true
+check_command pgrep pgrep || true
+check_command mktemp mktemp || true
+check_command sha256sum sha256sum || true
+check_command awk awk || true
 if command -v shellcheck >/dev/null 2>&1; then
   printf 'HOST_CHECK shellcheck=pass command=shellcheck\n'
 else
-  printf 'HOST_CHECK shellcheck=fail command=shellcheck (bash -n fallback will be used)\n'
+  printf 'HOST_CHECK shellcheck=fail command=shellcheck (external bash -n required)\n'
 fi
 
 # --- preflight mode: stop here, no emulator, no HDC -------------------------
@@ -665,7 +785,7 @@ fi
 
 # --- 1. stock Go libgoprobe.so build ----------------------------------------
 rm -f "$GO_SO" "$GO_PROBE_OUTPUT_DIR/libgoprobe.h"
-(
+if ! (
   cd "$PROJECT_DIR"
   print_command env HARMONYOS_NATIVE_HOME="$NATIVE_HOME" GO_BIN="$GO_BIN" \
     GO_PROBE_OUTPUT_DIR="$GO_PROBE_OUTPUT_DIR" GO_TOOLCHAIN_MODE="$GO_TOOLCHAIN_MODE" \
@@ -673,7 +793,9 @@ rm -f "$GO_SO" "$GO_PROBE_OUTPUT_DIR/libgoprobe.h"
   env HARMONYOS_NATIVE_HOME="$NATIVE_HOME" GO_BIN="$GO_BIN" \
     GO_PROBE_OUTPUT_DIR="$GO_PROBE_OUTPUT_DIR" GO_TOOLCHAIN_MODE="$GO_TOOLCHAIN_MODE" \
     bash "$GO_PROBE_DIR/build.sh"
-) 2>&1 | tee "$GO_BUILD_LOG"
+) 2>&1 | tee "$GO_BUILD_LOG"; then
+  fail "stock Go build failed (see $GO_BUILD_LOG)"
+fi
 [[ -f "$GO_SO" ]] || fail "stock Go build did not produce libgoprobe.so"
 printf 'GO_BUILD_VERDICT=pass\n'
 
@@ -690,13 +812,10 @@ case "$file_output" in
   *) fail "libgoprobe.so is not an x86_64 ELF: $file_output" ;;
 esac
 readelf_l="$(readelf -lW "$GO_SO")"
-printf '%s\n' "$readelf_l" | grep -E 'PT_TLS|LOAD' | head -10
-if ! printf '%s\n' "$readelf_l" | grep -q 'PT_TLS'; then
-  fail "libgoprobe.so has no PT_TLS segment"
-fi
+pt_tls_diag "$readelf_l" || fail "libgoprobe.so has no PT_TLS segment"
 printf 'GO_SO_PT_TLS_VERIFY=pass\n'
 readelf_d="$(readelf -dW "$GO_SO")"
-printf '%s\n' "$readelf_d" | grep -E 'FLAGS|FLAGS_1|NEEDED' | head -10
+printf '%s\n' "$readelf_d" | grep -E 'FLAGS|FLAGS_1|NEEDED' | head -10 || true
 if ! printf '%s\n' "$readelf_d" | grep -q 'STATIC_TLS'; then
   fail "libgoprobe.so has no STATIC_TLS flag"
 fi
@@ -718,11 +837,13 @@ printf 'GO_SO_SHA256=%s\n' "$go_so_sha"
 
 # --- 3. snapshot extraction and HAP build -----------------------------------
 snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/e1-stock-go-snapshot.XXXXXX")"
-(
+if ! (
   cd "$WORKSPACE"
   print_command git archive "$SNAPSHOT_COMMIT" spikes/r1-api24-hap
   git archive "$SNAPSHOT_COMMIT" spikes/r1-api24-hap | tar -x -C "$snapshot_dir"
-)
+); then
+  fail "snapshot git archive/tar extraction failed"
+fi
 snapshot_project="$snapshot_dir/spikes/r1-api24-hap"
 [[ -f "$snapshot_project/entry/src/main/cpp/probe.cpp" ]] || fail "snapshot extraction missing probe.cpp"
 grep -q "runGoProbe" "$snapshot_project/entry/src/main/cpp/probe.cpp" || fail "snapshot probe.cpp missing runGoProbe"
@@ -754,7 +875,7 @@ cp "$GO_SO" "$snapshot_project/entry/libs/x86_64/libgoprobe.so"
 snapshot_go_so="$snapshot_project/entry/libs/x86_64/libgoprobe.so"
 run sha256sum "$snapshot_go_so"
 
-(
+if ! (
   cd "$snapshot_project"
   print_command "$OHPM" install --all
   "$OHPM" install --all
@@ -770,7 +891,9 @@ run sha256sum "$snapshot_go_so"
     -p buildMode=debug --no-daemon
   "$HVIGOR" assembleHap --mode module -p product=default -p module=entry@ohosTest \
     -p buildMode=debug --no-daemon
-) 2>&1 | tee "$BUILD_LOG"
+) 2>&1 | tee "$BUILD_LOG"; then
+  fail "HAP build failed (see $BUILD_LOG)"
+fi
 app_hap="$snapshot_project/$APP_HAP_REL"
 test_hap="$snapshot_project/$TEST_HAP_REL"
 [[ -f "$app_hap" ]] || fail "clean build did not produce application HAP"
@@ -780,8 +903,12 @@ printf 'HAP_BUILD_VERDICT=pass\n'
 # --- 4. HAP member identity -------------------------------------------------
 app_member="$(mktemp "${TMPDIR:-/tmp}/e1-stock-go-app-member.XXXXXX")"
 test_member="$(mktemp "${TMPDIR:-/tmp}/e1-stock-go-test-member.XXXXXX")"
-unzip -p "$app_hap" libs/x86_64/libgoprobe.so >"$app_member"
-unzip -p "$test_hap" libs/x86_64/libgoprobe.so >"$test_member"
+if ! unzip -p "$app_hap" libs/x86_64/libgoprobe.so >"$app_member"; then
+  fail "unzip failed to extract libgoprobe.so from application HAP"
+fi
+if ! unzip -p "$test_hap" libs/x86_64/libgoprobe.so >"$test_member"; then
+  fail "unzip failed to extract libgoprobe.so from test HAP"
+fi
 [[ -s "$app_member" ]] || fail "application HAP has no libgoprobe.so member"
 [[ -s "$test_member" ]] || fail "test HAP has no libgoprobe.so member"
 app_member_sha="$(sha256sum "$app_member" | awk '{print $1}')"
@@ -801,7 +928,7 @@ run sha256sum "$app_hap" "$test_hap"
 
 # --- 5. Emulator boot -------------------------------------------------------
 "$HDC" kill || true
-timeout 60 "$STOP_HELPER" || true
+HDC_PORT="$EMULATOR_HDC_PORT" timeout 60 "$STOP_HELPER" || true
 if pgrep -f '/emulator/Emulator.*-start '"$EMULATOR_INSTANCE"'|qemu-system.*'"$EMULATOR_INSTANCE" >/dev/null; then
   fail "residual Emulator exists before cold boot"
 fi
@@ -814,8 +941,10 @@ else
 fi
 printf 'QEMU_CURRENT_BOOT_START_LINE=%s\n' "$qemu_start_line"
 
-print_command "$EMULATOR" -start "$EMULATOR_INSTANCE" -instancePath "$EMULATOR_INSTANCE_PATH" \
-  -imageRoot "$EMULATOR_IMAGE_ROOT" -bootMode coldboot -hdcport "$EMULATOR_HDC_PORT"
+print_command env DISPLAY="$EMULATOR_DISPLAY" XAUTHORITY="$EMULATOR_XAUTHORITY" \
+  XDG_RUNTIME_DIR="$EMULATOR_XDG_RUNTIME_DIR" "$EMULATOR" -start "$EMULATOR_INSTANCE" \
+  -instancePath "$EMULATOR_INSTANCE_PATH" -imageRoot "$EMULATOR_IMAGE_ROOT" \
+  -bootMode coldboot -hdcport "$EMULATOR_HDC_PORT"
 DISPLAY="$EMULATOR_DISPLAY" XAUTHORITY="$EMULATOR_XAUTHORITY" XDG_RUNTIME_DIR="$EMULATOR_XDG_RUNTIME_DIR" \
   "$EMULATOR" -start "$EMULATOR_INSTANCE" \
   -instancePath "$EMULATOR_INSTANCE_PATH" \
@@ -868,10 +997,10 @@ fi
 printf 'READINESS_VERDICT=pass\n'
 
 # --- 6. install and aa test -------------------------------------------------
-hdc shell "rm -rf $STAGING"
-hdc shell "mkdir -p $STAGING"
-hdc file send "$app_hap" "$STAGING/entry-default-unsigned.hap"
-hdc file send "$test_hap" "$STAGING/entry-ohosTest-unsigned.hap"
+hdc shell "rm -rf $STAGING" || fail "guest staging rm failed"
+hdc shell "mkdir -p $STAGING" || fail "guest staging mkdir failed"
+timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$app_hap" "$STAGING/entry-default-unsigned.hap" || fail "app HAP file send failed"
+timeout 180 "$HDC" -t "$EMULATOR_TARGET" file send "$test_hap" "$STAGING/entry-ohosTest-unsigned.hap" || fail "test HAP file send failed"
 install_output=''
 for install_attempt in $(seq 1 30); do
   install_output="$(timeout 180 "$HDC" -t "$EMULATOR_TARGET" shell "bm install -p $STAGING" 2>&1 || true)"
@@ -887,10 +1016,26 @@ if (( installed != 1 )); then
 fi
 printf 'INSTALL_VERDICT=pass\n'
 
-hdc shell 'hilog -r'
-aa_output="$(hdc shell "aa test -b $BUNDLE -m $TEST_MODULE -s unittest $TEST_RUNNER -s timeout 15000" 2>&1 || true)"
+hilog_buffer_output="$(hdc shell 'hilog -G 16M' 2>&1 | tr -d '\r' || true)"
+hilog_buffer_query="$(hdc shell 'hilog -g' 2>&1 | tr -d '\r' || true)"
+printf 'HILOG_BUFFER_SET=%q\n' "$hilog_buffer_output"
+printf 'HILOG_BUFFER_QUERY=%q\n' "$hilog_buffer_query"
+if [[ "$hilog_buffer_query" != *"16.0M"* && "$hilog_buffer_query" != *"16M"* &&
+      "$hilog_buffer_query" != *"16777216"* ]]; then
+  fail "HiLog buffer did not report the required 16 MiB capacity"
+fi
+printf 'HILOG_BUFFER_VERDICT=pass\n'
+hdc shell 'hilog -r' || fail "hilog clear failed"
+set +e
+aa_output="$(timeout 60 "$HDC" -t "$EMULATOR_TARGET" shell "aa test -b $BUNDLE -m $TEST_MODULE -s unittest $TEST_RUNNER -s timeout 15000" 2>&1)"
+aa_rc=$?
+set -e
+printf 'AA_TEST_RC=%s\n' "$aa_rc"
 printf 'AA_TEST_OUTPUT=%q\n' "$aa_output"
 printf '%s\n' "$aa_output" >"$AA_TEST_LOG"
+if (( aa_rc != 0 )); then
+  fail "aa test exited non-zero (rc=$aa_rc)"
+fi
 
 # --- 7. directed HiLog capture ----------------------------------------------
 : >"$TAG_HILOG"
@@ -904,19 +1049,47 @@ printf 'APP_HILOG_LINES=%s\n' "$(wc -l <"$APP_HILOG")"
 run sha256sum "$TAG_HILOG" "$APP_HILOG"
 
 # --- 8. judgment ------------------------------------------------------------
-baseline_line="$(grep -F 'BASELINE_RESULT' "$TAG_HILOG" | tail -1 || true)"
-spike_line="$(grep -F 'GO_SPIKE_RESULT' "$TAG_HILOG" | tail -1 || true)"
+# Prefer the directed TAG HiLog; fall back to the aa test output, then the
+# full app HiLog, so a missed tag capture never fabricates a verdict. The
+# source of each judged line is printed explicitly; only when all three
+# sources are empty does the runner fail.
+baseline_line=""
+baseline_source=""
+for f in "$TAG_HILOG" "$AA_TEST_LOG" "$APP_HILOG"; do
+  if [[ -n "$f" && -f "$f" ]]; then
+    candidate="$(grep -F 'BASELINE_RESULT' "$f" | tail -1 || true)"
+    if [[ -n "$candidate" ]]; then
+      baseline_line="$candidate"
+      baseline_source="$f"
+      break
+    fi
+  fi
+done
+spike_line=""
+spike_source=""
+for f in "$TAG_HILOG" "$AA_TEST_LOG" "$APP_HILOG"; do
+  if [[ -n "$f" && -f "$f" ]]; then
+    candidate="$(grep -F 'GO_SPIKE_RESULT' "$f" | tail -1 || true)"
+    if [[ -n "$candidate" ]]; then
+      spike_line="$candidate"
+      spike_source="$f"
+      break
+    fi
+  fi
+done
+printf 'BASELINE_RESULT_SOURCE=%s\n' "$baseline_source"
+printf 'GO_SPIKE_RESULT_SOURCE=%s\n' "$spike_source"
 printf 'BASELINE_RESULT_LINE=%s\n' "$baseline_line"
 printf 'GO_SPIKE_RESULT_LINE=%s\n' "$spike_line"
 if [[ -z "$baseline_line" ]]; then
-  fail "BASELINE_RESULT missing from directed HiLog"
+  fail "BASELINE_RESULT missing from all HiLog sources (tag/aa-test/app)"
 fi
 if [[ "$baseline_line" != *"functional=PASS"* ]]; then
   fail "Node-API baseline did not pass: $baseline_line"
 fi
 printf 'BASELINE_JUDGMENT=pass\n'
 if [[ -z "$spike_line" ]]; then
-  fail "GO_SPIKE_RESULT missing from directed HiLog"
+  fail "GO_SPIKE_RESULT missing from all HiLog sources (tag/aa-test/app)"
 fi
 case "$(judge_spike_line "$spike_line")" in
   pass)
