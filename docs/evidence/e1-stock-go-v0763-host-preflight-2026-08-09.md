@@ -7,7 +7,7 @@
 ## 结论边界
 
 - 本记录是 **host-only 前置记录**：`execution: not-run-host-preflight`、`record_status: collected`、`verdict: blocked`。
-- 它**不占用**后续 runtime evidence ID（`EV-E1-EMU24-20260809-0001` 及之后序号仍保留给恢复 Linux worker 后的实际重放）。
+- 它**不占用**后续 runtime evidence ID：`EV-E1-EMU24-20260809-0001` 已于 2026-08-09 被首次真实完整执行消耗（runner defect，测量前中止，见 [consumed-failure 记录](e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)），**禁止同 ID 重跑**；下一次唯一正式 ID 为 `EV-E1-EMU24-20260809-0002`。
 - 它**不形成平台结论**：不证明、也不否定 v0.76.3 官方 Go 1.25.12 loader/runtime 在 API 24 x86_64 Emulator 上的行为；E1 overall Go 仍为未重跑、无 pass。
 - 本机没有 SSH alias、没有 WSL distro、没有 Go、没有 ffmpeg、没有与历史 worker 相同的 Linux Emulator；Windows DevEco Studio 自带 Emulator 与历史 Linux worker 的 Emulator **不等价**，不得作为替代运行环境。
 - 旧 freeze 已被 `ADJ-20260809-0001`（正式采用 NetBird v0.76.3）superseded；E3 物理设备禁 HDC 的约束不变。
@@ -116,7 +116,7 @@ runner 固定输入：baseline `v0.76.3` / `f65f7b347ee4e7de6d98c488d3d894cd018b
 ## 边界与后续
 
 - 本记录不改变 E1 overall Go 状态：v0.76.3 官方 Go 1.25.12 loader/runtime 尚未重跑、无 pass；E8 保持 `CLOSED`。
-- 本记录不占用 runtime evidence ID；恢复 worker 后的实际重放使用 `EV-E1-EMU24-20260809-0001`（或按当时日期/序号重新分配）。
+- 本记录不占用 runtime evidence ID：`EV-E1-EMU24-20260809-0001` 已消耗（见 [consumed-failure 记录](e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）；恢复 worker 后的实际重放使用下一次唯一正式 ID `EV-E1-EMU24-20260809-0002`。
 - 旧 freeze（v0.74.6/v0.74.7 相关历史绑定）已被 `ADJ-20260809-0001` superseded；历史 evidence 保持原样，不改写、不重判。
 - E3 物理设备禁 HDC 约束不变；本 runner 不运行 HDC（preflight 模式 `HDC_RUN=false`），完整模式也只操作 Emulator target。
 - 本记录为 host-only，`record_status: collected`，待独立审查；`verdict: blocked` 只表示当前 host 无法产生 runtime verdict。

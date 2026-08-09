@@ -50,7 +50,7 @@ readonly BUNDLE="cn.alfadb.netbird.r1probe"
 readonly TEST_MODULE="entry_test"
 readonly TEST_RUNNER="/ets/testrunner/OpenHarmonyTestRunner"
 readonly HOST_PREFLIGHT_EVIDENCE_ID="EV-E1-EMU24HOST-20260809-0001"
-readonly DEFAULT_EVIDENCE_ID="EV-E1-EMU24-20260809-0001"
+readonly DEFAULT_EVIDENCE_ID="EV-E1-EMU24-20260809-0002"
 readonly EXPECTED_LOADER_REJECTION="initial-exec TLS resolves to dynamic definition"
 
 # --- parameterized environment ----------------------------------------------
@@ -670,7 +670,7 @@ rm -f "$GO_SO" "$GO_PROBE_OUTPUT_DIR/libgoprobe.h"
   print_command env HARMONYOS_NATIVE_HOME="$NATIVE_HOME" GO_BIN="$GO_BIN" \
     GO_PROBE_OUTPUT_DIR="$GO_PROBE_OUTPUT_DIR" GO_TOOLCHAIN_MODE="$GO_TOOLCHAIN_MODE" \
     bash "$GO_PROBE_DIR/build.sh"
-  HARMONYOS_NATIVE_HOME="$NATIVE_HOME" GO_BIN="$GO_BIN" \
+  env HARMONYOS_NATIVE_HOME="$NATIVE_HOME" GO_BIN="$GO_BIN" \
     GO_PROBE_OUTPUT_DIR="$GO_PROBE_OUTPUT_DIR" GO_TOOLCHAIN_MODE="$GO_TOOLCHAIN_MODE" \
     bash "$GO_PROBE_DIR/build.sh"
 ) 2>&1 | tee "$GO_BUILD_LOG"

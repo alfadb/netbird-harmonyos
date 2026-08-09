@@ -11,7 +11,7 @@
 | 项 | 状态 |
 | --- | --- |
 | NetBird 正式基线 | `v0.76.3` / commit `f65f7b347ee4e7de6d98c488d3d894cd018b02b6` / `go 1.25.5` / `toolchain go1.25.12`（runner 固定常量，启动时在线核验） |
-| E1 v0.76.3 stock Go loader/runtime | **尚未在 Emulator 上重跑、无 pass**；`EV-E1-EMU24-20260809-0001` 及之后序号保留给本次重放 |
+| E1 v0.76.3 stock Go loader/runtime | **尚未产生任何测量、无 pass**；`EV-E1-EMU24-20260809-0001` 已于 2026-08-09 首次真实执行，但因 runner defect 在测量前中止（`exit 1`，见 [consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)），**ID 已消耗、禁止同 ID 重跑**；下一次唯一正式 ID 为 `EV-E1-EMU24-20260809-0002` |
 | host-only 前置证据 | `EV-E1-EMU24HOST-20260809-0001` 已登记：`execution: not-run-host-preflight`、`record_status: collected`、`verdict: blocked`；只覆盖 host 侧核验，不形成平台结论、不占用 runtime evidence ID（见 [记录](evidence/e1-stock-go-v0763-host-preflight-2026-08-09.md)） |
 | E8 | `CLOSED` |
 | E3-PHYS-PREFLIGHT | `plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前**禁止 PHYS-1 HDC**、无 auto retry、无新 ID、无设备命令授权（见 [计划](e3-physical-preflight.md)） |
@@ -99,7 +99,7 @@ bash spikes/r1-api24-hap/e1-stock-go-replay.sh --selftest
 # 3) host-only preflight，使用临时 EVIDENCE_ROOT（不要用默认 root：仓内已有
 #    EV-E1-EMU24HOST-20260809-0001 transcript，默认 root 会被 no-clobber 拒绝，
 #    且不允许覆盖仓内 host evidence）
-EVIDENCE_ROOT=/tmp/e1-stock-go-preflight-20260809 \
+EVIDENCE_ROOT=/tmp/e1-stock-go-preflight-20260809-0002 \
   bash spikes/r1-api24-hap/e1-stock-go-replay.sh --preflight
 # 期望：HOST_PREFLIGHT_MISSING_COUNT=0、HDC_RUN=false、
 #       EXECUTION=not-run-host-preflight、RECORD_STATUS=collected、VERDICT=blocked、exit 0
@@ -110,7 +110,7 @@ pgrep -af 'emulator/Emulator.*-start|qemu-system' || true
 ss -ltnp | grep -E ':(10000|5555|8710)[[:space:]]' || true
 
 # 5) 正式完整重放，仅运行一次
-EVIDENCE_ID=EV-E1-EMU24-20260809-0001 \
+EVIDENCE_ID=EV-E1-EMU24-20260809-0002 \
   bash spikes/r1-api24-hap/e1-stock-go-replay.sh
 ```
 
@@ -127,13 +127,14 @@ EVIDENCE_ID=EV-E1-EMU24-20260809-0001 \
 | exit `0` 且 `MEASURED_VERDICT=blocked` | **预期**：stock Go 1.25.12 `initial-exec TLS` loader 拒绝，measured blocked（**不是 runner failure**）；`VERDICT=blocked`、`RECORD_STATUS=collected` | 保留产物，按第 7 节核对后交回主会话审查 |
 | exit `0` 且 `MEASURED_VERDICT=pass` | 意外：stock Go 加载成功 | 保留产物，**仅待独立审查**，不自行下任何结论 |
 | exit `1` 且 `FAIL_REASON=…` | runner fail（baseline 核验 / 构建 / 安装 / 判定 fail） | 保留全部材料、**停止**、不得同 ID 重跑 |
+| exit `1` 且无 `FAIL_REASON`（如 0001 的 readonly 赋值中止） | runner 脚本缺陷在测量前中止（`set -e` 直接退出，未进入 `fail()`） | 保留全部材料、**停止**、不得同 ID 重跑；交回主会话修复 runner 后由主会话分配新 ID（0001 已消耗，见 [consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)） |
 | exit `1` 且 `CONNECTIVITY_VERDICT=blocked` / `READINESS_VERDICT=blocked` | 基础设施失败（Emulator 起不来、HDC 连不上、guest 未就绪） | 保留全部材料、**停止**、不得同 ID 重跑 |
 
 同 ID 重跑会被 no-clobber 以 `REFUSE_OVERWRITE` 拒绝（exit `2`）——这是设计，不是故障；任何需要重跑的情况都先停止并交回主会话决策（新 ID 或新 `EVIDENCE_ROOT` 由主会话分配）。
 
 ## 7. 产物 / 证据文件与验证
 
-完整模式在默认 `EVIDENCE_ROOT`（`docs/evidence/raw/`）下生成，前缀 `EV-E1-EMU24-20260809-0001-`：
+完整模式在默认 `EVIDENCE_ROOT`（`docs/evidence/raw/`）下生成，前缀 `EV-E1-EMU24-20260809-0002-`：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -150,13 +151,13 @@ EVIDENCE_ID=EV-E1-EMU24-20260809-0001 \
 
 ```bash
 git status --short --branch
-# 期望：仅 docs/evidence/raw/EV-E1-EMU24-20260809-0001-* 为新增（构建产物 entry/libs/、build/ 等已被 .gitignore 忽略）
+# 期望：仅 docs/evidence/raw/EV-E1-EMU24-20260809-0002-* 为新增（构建产物 entry/libs/、build/ 等已被 .gitignore 忽略）
 
 grep -E '^(verdict|transcript_final_sha256|manifest_sha256|e8_status)=' \
-  docs/evidence/raw/EV-E1-EMU24-20260809-0001-manifest.txt
+  docs/evidence/raw/EV-E1-EMU24-20260809-0002-manifest.txt
 
 grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_RESIDUAL_PORT|CLEANUP_END)=' \
-  docs/evidence/raw/EV-E1-EMU24-20260809-0001-transcript.log
+  docs/evidence/raw/EV-E1-EMU24-20260809-0002-transcript.log
 # 期望：VERDICT/MEASURED_VERDICT 按第 6 节分支；RECORD_STATUS=collected；
 #       FINAL_RESIDUAL_PROCESS=false、FINAL_RESIDUAL_PORT=false、CLEANUP_END=teardown-complete
 ```
@@ -167,7 +168,7 @@ grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_R
 
 ```markdown
 - [ ] E1 v0.76.3 stock Go replay: exit `<0/1>`；`MEASURED_VERDICT=<blocked/pass>`；`VERDICT=<blocked/pass/fail>`；`RECORD_STATUS=collected`
-- [ ] evidence 前缀: `docs/evidence/raw/EV-E1-EMU24-20260809-0001-*`
+- [ ] evidence 前缀: `docs/evidence/raw/EV-E1-EMU24-20260809-0002-*`
 - [ ] manifest 最终 hash: `transcript_final_sha256=<…>` / `manifest_sha256=<…>`
 - [ ] 残留: `FINAL_RESIDUAL_PROCESS=false` / `FINAL_RESIDUAL_PORT=false`；`git status` 仅新增 evidence 文件
 - [ ] 未自行升级 reviewed-pass；未提交；未重跑同 ID
@@ -175,7 +176,7 @@ grep -E '^(VERDICT|MEASURED_VERDICT|RECORD_STATUS|FINAL_RESIDUAL_PROCESS|FINAL_R
 
 ## 9. 关键提醒
 
-- **完整模式从未在任何主机运行过**。Windows 上只登记了 host-only preflight（`EV-E1-EMU24HOST-20260809-0001`），Windows DevEco Studio Emulator 与历史 Linux worker 的 Emulator 不等价，不能作为替代运行环境。本次在 Debian 上的完整重放是**真实执行**。
+- **完整模式此前从未在任何主机跑通过**。Windows 上只登记了 host-only preflight（`EV-E1-EMU24HOST-20260809-0001`），Windows DevEco Studio Emulator 与历史 Linux worker 的 Emulator 不等价，不能作为替代运行环境。Debian 上的首次真实执行 `EV-E1-EMU24-20260809-0001` 在测量前因 runner defect 中止（`exit 1`，ID 已消耗，见 [consumed-failure 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）；runner 已修复，本次 `EV-E1-EMU24-20260809-0002` 是修复后的完整重放。
 - 遇到脚本问题**先停**：不绕过 guard、不绕过 cleanup、不绕过 no-clobber，不手工修改/删除 evidence 文件后重跑；先保留材料并交回主会话。
 - runner 全程只操作 `127.0.0.1:10000` Emulator；不连接、不安装、不启动任何物理设备。
 
