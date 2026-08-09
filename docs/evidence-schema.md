@@ -85,7 +85,7 @@ E8 聚合表必须为每个成员使用以下三种分类之一：
 E8 `OPEN` 至少同时满足以下必要条件，缺一即保持 `CLOSED`：
 
 - `E3-PHYS-PREFLIGHT` 同时为 `record_status: reviewed-pass`、`verdict: pass`；`blocked`、`fail` 或 `invalid` 均不满足。
-- 所有客观可执行项均为 `pass`，并确认当前R0正式基线（现v0.76.3）的官方 Go loader/runtime 已形成 E1 `reviewed-pass/pass`。当前 loader 负面证据绑定 v0.74.6；v0.76.3 尚未重跑且没有 pass。
+- 所有客观可执行项均为 `pass`，并确认当前R0正式基线（现v0.76.3）的官方 Go loader/runtime 已形成 E1 `reviewed-pass/pass`。v0.74.6 历史 loader 负面证据保持原绑定；v0.76.3 由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 `reviewed-pass/pass`。
 - 聚合记录重核目标元组、代码 SHA、相关上游 SHA、APP/TEST HAP、native/Go 库、配置和其他输入 SHA-256；不得存在目标漂移、member 不一致或缺失 hash。任何 `record_status: invalidated` 或 `record_status: superseded` 的引用都只能保留在历史追溯链中，均不得进入 E8 当前成员集合。
 - 独立聚合审查核对每个 `pass`、`blocked-exception` 与客观 `N/A`，并显式作出 `OPEN` 决定。
 

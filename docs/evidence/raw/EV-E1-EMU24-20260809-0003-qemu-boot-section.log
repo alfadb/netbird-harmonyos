@@ -1,0 +1,322 @@
+================================================================================
+E1 v0.76.3 stock Go replay EV-E1-EMU24-20260809-0003 - QEMU boot section excerpt
+================================================================================
+STATUS: OUT-OF-BAND POST-RUN EXCERPT (NOT original run output)
+This file is an out-of-band read-only excerpt of the Emulator instance QEMU
+log covering the EV-E1-EMU24-20260809-0003 formal run's Emulator boot window.
+It was extracted AFTER the formal run completed and is NOT part of the
+original run output; the formal run's own outputs are the nine raw files
+EV-E1-EMU24-20260809-0003-{transcript,manifest,aa-test,baseline-verify,
+build,go-build,hilog-tag,hilog-app-full,emulator-console}.log, which remain
+byte-identical to the run. This excerpt only re-reads the QEMU log on disk to
+document the boot window referenced by the measured blocked record; it does
+not re-run, re-measure, or alter anything.
+
+SOURCE_PATH: /home/worker/harmonyos/emulator-instances/netbird_api24_phone/Log/qemu.log
+SOURCE_SHA256: 085fe3dcea6d75814c1789e16966dedefe6bdb039dad9bf3a9880f22a35c34f6
+SOURCE_LINES_TOTAL: 33955
+EXCERPT_LINE_RANGE: 33670-33955 (inclusive; 286 lines)
+EXCERPT_START_LINE: 33670 (matches QEMU_CURRENT_BOOT_START_LINE in the 0003 transcript)
+EXCERPT_BOOT_COMPLETE_LINE: 33751 (guest os boot completed. at 2026-08-09 17:43:01)
+EXCERPT_END_LINE: 33955 (last line of the source log at extraction time; Emulator stop)
+EXTRACTED_AT: 2026-08-09T18:08:00+08:00
+CLOCK_SOURCE: host_CLOCK_REALTIME_date_iso_8601_seconds
+EXTRACTED_BY: out-of-band read-only review (no HDC, no Emulator, no build)
+
+EVIDENCE_ID: EV-E1-EMU24-20260809-0003
+CODE_SHA (0003 run repository HEAD): c6b6c12b46aa8369a4c6b8e6a55bdc5eeb4e0b4e
+RUN_WINDOW: 2026-08-09T17:41:17+08:00 .. 2026-08-09T17:43:10+08:00 (transcript STARTED_AT/ENDED_AT)
+
+The body below is a verbatim copy of source lines 33670-33955 (no additions,
+deletions, or reordering; no data from outside the range). The excerpt covers
+the 0003 cold boot from QEMU init (17:41:58) through guest boot complete
+(17:43:01, line 33751) to the Emulator stop (17:43:09, line 33955).
+================================================================================
+----- BEGIN EXCERPT (source lines 33670-33955) -----
+2026-08-09 17:41:58.146138328263341760 E [vl.c(delete_snapshot_bin_file:2416)] error file /home/worker/harmonyos/emulator-instances/netbird_api24_phone/ram.bin not exist or permission denied
+2026-08-09 17:41:58.237138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:3200 height:2400 resolution:30 touchscreen:0 screenId:0
+2026-08-09 17:41:58.238138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:1320 height:2856 resolution:20 touchscreen:1 screenId:0
+2026-08-09 17:41:58.239138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:1320 height:2856 resolution:20 touchscreen:1 screenId:1
+2026-08-09 17:41:58.240138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:1320 height:2856 resolution:20 touchscreen:1 screenId:2
+2026-08-09 17:41:58.241138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:1320 height:2856 resolution:20 touchscreen:1 screenId:3
+2026-08-09 17:41:58.242138328263341760 I [UiProxyUtil.cpp(VirtioTrackpadLoadConfig:563)] trackpad config width:1320 height:2856 resolution:20 touchscreen:1 screenId:4
+2026-08-09 17:41:58.243138328263341760 I [teleport_express_pci.c(init_express_driver_names:295)] init_express_driver_names |express_gpu express_bridge express_touchscreen express_mic express_hotplug express_sensor express_camera express_keyboard express_sync express_battery express_motion express_gps |
+2026-08-09 17:41:58.243138328263341760 I [express_touchscreen.c(update_touchscreen_prop:313)] express multi touch disabled
+2026-08-09 17:41:58.244138327827125952 I [express_gpu_render.c(native_window_thread:1013)] native_window_thread create, index: 0
+2026-08-09 17:41:58.260138328263341760 E [HvdInfo.c(GetLayoutConfig:98)] Get layoutConfig before initialization.
+2026-08-09 17:41:58.260138328263341760 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-08-09 17:41:58.260138328263341760 E [HvdInfo.c(GetQemuSubCutoutPath:143)] Get subDisplayCutoutPath before initialization.
+2026-08-09 17:41:58.260138328263341760 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-08-09 17:41:58.260138328263341760 E [HvdInfo.c(GetMainDisplayMode:152)] Get mainDisplayMode before initialization.
+2026-08-09 17:41:58.260138328263341760 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-08-09 17:41:58.260138328263341760 E [HvdInfo.c(GetFullDisplayMode:161)] Get fullDisplayMode before initialization.
+2026-08-09 17:41:58.260138328263341760 E [BootParams.cpp(QemuBootParamsAdd:89)] param value null
+2026-08-09 17:41:58.260138328263341760 I [vl.c(RunQemuMain:4080)] Qemu Init end
+2026-08-09 17:41:58.361138327827125952 E [express_gpu_render.c(glfw_error_callback:1002)] GLFW Error (65543): EGL: Failed to create context: Arguments are inconsistent
+2026-08-09 17:41:58.390138327827125952 I [express_gpu_render.c(native_window_create_full:804)] native create window Trinity 0x7dcdcc0a9bf0
+2026-08-09 17:41:58.390138327827125952 I [express_gpu_render.c(native_window_thread:1090)] Create glfw main windows.
+2026-08-09 17:41:58.390138327827125952 I [express_gpu_render.c(native_window_thread:1120)] window_width:716, window_height:1548, index:0
+2026-08-09 17:41:58.391138327827125952 I [egl_window_linux.c(egl_init:228)] EGL initialized with provided display: 1.5
+2026-08-09 17:41:58.394138327827125952 I [express_gpu_render.c(init_global_gbuffer_data:859)] register shutdown_notify_callback.
+2026-08-09 17:41:58.552138327827125952 I [texture_utils.cpp(check_texture_support_status:260)] GL_COMPRESSED_TEXTURE_FORMATS: etc2 [not all support: 7 vs 10]
+2026-08-09 17:41:58.552138327827125952 I [texture_utils.cpp(check_texture_support_status:268)] GL_COMPRESSED_TEXTURE_FORMATS: astc [not all support: 0 vs 28]
+2026-08-09 17:41:58.552138327827125952 I [express_gpu_render.c(static_value_prepare:588)] gl vendor:Mesa
+2026-08-09 17:41:58.553138327827125952 I [express_gpu_render.c(static_value_prepare:615)] gl version:OpenGL ES 3.0 (4.5 (Core Profile) Mesa 25.0.7-2+deb13u1)
+2026-08-09 17:41:58.553138327827125952 I [express_gpu_render.c(static_value_prepare:625)] gl renderer:llvmpipe (LLVM 19.1.7, 256 bits)
+2026-08-09 17:41:58.553138327827125952 I [express_gpu_render.c(static_value_prepare:645)] gl shading_language_version:OpenGL ES GLSL ES 3.0
+2026-08-09 17:41:58.553138327827125952 I [express_gpu_render.c(static_value_prepare:662)] host gl 45 DSA_enable 0
+2026-08-09 17:41:58.560138327827125952 I [express_gpu_render.c(native_window_thread:1192)] native windows inited!
+2026-08-09 17:41:58.572138327827125952 I [express_gpu_render.c(native_window_thread:1225)] window render start 0
+2026-08-09 17:42:00.857138327843911360 I [express_pipe.c(dev_read:751)] Clean up all existing stale pipes.
+2026-08-09 17:42:00.921138327843911360 I [teleport_express_call.c(guest_null_ptr_init:678)] null ptr 138323782478776
+2026-08-09 17:42:00.949138327843911360 I [teleport_express.c(teleport_express_output_handle:54)] start handle thread
+2026-08-09 17:42:00.964138327843911360 I [express_touchscreen.c(touchscreen_buffer_register:365)] touch register buffer
+2026-08-09 17:42:00.971138327843911360 I [express_keyboard.c(keyboard_buffer_register:210)] keyboard register buffer
+2026-08-09 17:42:00.978138327843911360 I [express_battery.c(battery_buffer_register:210)] battery register buffer
+2026-08-09 17:42:00.978138327843911360 I [express_sync.c(sync_buffer_register:207)] sync register buffer
+2026-08-09 17:42:01.581138327843911360 I [express_camera.c(load_camera_device_props:760)] list_cameras: found 0 cameras.
+2026-08-09 17:42:01.581138327843911360 E [express_camera.c(load_camera_device_props:769)] load camera thread context not ok
+2026-08-09 17:42:01.581138327843911360 I [express_camera.c(get_camera_thread_context:969)] context is null, before thread_context create
+2026-08-09 17:42:01.581138327843911360 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 80
+2026-08-09 17:42:22.015138327860696768 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:22.053138334009534144 E [egl_context.c(d_eglCreateContext:50)] real share context is NULL
+2026-08-09 17:42:22.055138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.072138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.275138327835518656 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 10
+2026-08-09 17:42:22.276138314482816704 I [express_display.c(display_context_init:503)] display_context_init, device_id id: 10
+2026-08-09 17:42:22.276138314482816704 I [express_display.c(display_context_init:508)] send_message_to_main_window(MAIN_CREATE_CHILD_WINDOW),index:0
+2026-08-09 17:42:22.276138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.318138314482816704 I [express_display.c(display_decode_invoke:361)] screen num: 1
+2026-08-09 17:42:22.332138314482816704 I [express_display.c(display_decode_invoke:311)] FUNID_Get_Display_Mods return display[index = 0, screen_id = 0, device_id = 10,                 pixel_width = 1320, pixel_height = 2856]
+2026-08-09 17:42:22.342138314482816704 I [express_display.c(display_decode_invoke:347)] Get Display id : 0, power state :0
+2026-08-09 17:42:22.363138314482816704 I [express_display.c(display_decode_invoke:370)] device type: 0
+2026-08-09 17:42:22.430138327860696768 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:22.430138314474424000 E [egl_context.c(d_eglCreateContext:50)] real share context is NULL
+2026-08-09 17:42:22.431138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.515138314482816704 I [express_display.c(display_decode_invoke:347)] Get Display id : 0, power state :0
+2026-08-09 17:42:22.571138327860696768 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:22.571138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.622138327843911360 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:22.623138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:22.950138327835518656 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:22.951138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:23.008138327860696768 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:23.008138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:23.077138327843911360 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 1
+2026-08-09 17:42:23.078138327827125952 I [egl_window_linux.c(egl_createContext:329)] eglCreateContext: EGLDisplay(cc0fa2c0), EGLConfig(cc0ff6d0), EGLContext(cc112d80)
+2026-08-09 17:42:23.086138327835518656 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 40
+2026-08-09 17:42:23.087138314073962176 I [express_bridge.c(bridge_socket_listen:117)] listen bridge socket port 10000
+2026-08-09 17:42:23.199138314482816704 E [express_display.c(opengl_paint_composer_layers:703)] not support transform_type 8
+2026-08-09 17:42:25.398138314065569472 I [express_bridge.c(accept_data_to_guest:244)] input one connect fd 15.
+2026-08-09 17:42:25.661138327843911360 I [teleport_express_distribute.c(thread_context_create:53)] thread_context_create device_id: 40
+2026-08-09 17:42:26.323138314482816704 I [express_display.c(display_status_change:777)] Display id: 0 power status : 0 from guest, now_display_status 0.
+2026-08-09 17:42:32.644138314482816704 I [express_display.c(display_status_change:777)] Display id: 0 power status : 0 from guest, now_display_status 0.
+2026-08-09 17:42:32.903138314482816704 I [express_display.c(display_status_change:777)] Display id: 0 power status : 0 from guest, now_display_status 0.
+2026-08-09 17:43:00.909138327852304064 I [EmuCommandClient.cpp(CommandClientPipeRecv:38)] command pipe is ready
+2026-08-09 17:43:01.095138327860696768 I [BootComplete.cpp(BootCompletePipeClientRecv:96)] The image is not build-root.
+2026-08-09 17:43:01.095138327860696768 I [BootComplete.cpp(BootCompletePipeClientRecv:82)] guest os boot completed.
+2026-08-09 17:43:01.101138334337272832 E [express_camera.c(load_camera_device_props:755)] camera inited
+2026-08-09 17:43:02.466138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.466138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.467138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.467138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.468138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.469138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.469138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.470138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.471138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.472138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.474138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.475138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.476138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.477138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.477138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.478138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.478138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.480138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.480138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.481138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.481138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.680138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.680138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.681138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.681138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.683138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.684138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.685138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.686138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.686138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.687138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.688138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.688138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.689138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.690138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.692138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.693138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.694138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.695138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.696138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.697138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.698138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.699138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.700138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.701138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.702138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.703138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.704138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.706138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.707138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.708138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.709138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.710138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.711138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.712138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.713138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.714138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.715138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.716138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.717138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.718138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.720138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.721138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.722138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.723138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.724138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.725138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.726138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.727138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.728138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.729138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.730138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.731138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.732138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.734138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.735138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.735138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.736138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:02.737138313493886656 E [express_bridge.c(fd_data_to_guest_mem:161)] max write size is 0.
+2026-08-09 17:43:03.715138327843911360 I [ClipboardContent.cpp(ClipboardContentPipeClientRecv:39)] clipboard content pipe is ready
+2026-08-09 17:43:09.360138334337272832 I [express_display.c(apply_multi_screen:1464)] No need to apply multi-screen.
+2026-08-09 17:43:09.381138328263341760 E [block-copy.c(copy_qcow2_file:1100)] Failed to open source: Failed to get "write" lock
+2026-08-09 17:43:09.381138328263341760 E [vl.c(StartConvertUserdataImg:2628)] start copy userdata.img.qcow2 failed
+2026-08-09 17:43:09.671138327827125952 I [express_gpu_render.c(native_window_thread:1329)] gpu thread close info: glfw_window flag:0, run_status:2, emualtor_quit:1
+
+2026-08-09 17:43:09.671138327852304064 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7dcf00a26590 0
+2026-08-09 17:43:09.671138318104733376 I [express_event.c(delete_event:184)] DeleteB Event
+2026-08-09 17:43:09.671138327835518656 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7dcf00a45e00 0
+2026-08-09 17:43:09.671138327843911360 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7dcf00a36290 0
+2026-08-09 17:43:09.671138327860696768 I [cpus.c(qemu_cpu_stop:400)] stop cpu done 0x7dcf009f1740 0
+2026-08-09 17:43:09.671138327827125952 I [express_gpu_render.c(native_window_thread:1351)] wait multi screen exit
+2026-08-09 17:43:09.671138327827125952 I [express_gpu_render.c(native_window_destroy:810)] native destroy window 0x7dcdcc0a9bf0
+2026-08-09 17:43:09.693138327827125952 I [express_gpu_render.c(native_window_thread:1368)] gl terminate
+2026-08-09 17:43:09.699138327827125952 I [express_gpu_render.c(native_window_thread:1391)] native window 0 closed, native_render_run = 0
+2026-08-09 17:43:09.720138327827125952 I [teleport_express.c(WaitExpressStop:289)] wait distribute thread stop
+2026-08-09 17:43:09.721138327827125952 I [teleport_express.c(WaitExpressStop:297)] wait input thread stop
+2026-08-09 17:43:09.721138327827125952 I [teleport_express.c(WaitExpressStop:302)] wait thread list call empty
+2026-08-09 17:43:09.721138327827125952 I [teleport_express.c(clear_ouput_call_recycle_queue:275)] recycle ouput call queue
+2026-08-09 17:43:09.721138327827125952 I [teleport_express.c(WaitExpressStop:315)] wait express stop done 997
+2026-08-09 17:43:09.721138327827125952 I [vl.c(WaitConvertUserDataFinished:2634)] wait convert userdata img stop
+2026-08-09 17:43:09.721138327827125952 I [vl.c(WaitConvertUserDataFinished:2642)] wait convert userdata img done 499
+2026-08-09 17:43:09.721138327827125952 I [QemuRequestAgent.c(QuitQemu:29)] quit qemu.
+2026-08-09 17:43:09.721138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.722138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.723138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.724138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.725138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.748138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.749138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.750138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.751138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.752138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.753138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.754138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.755138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.756138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.757138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.758138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.759138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.761138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.762138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.763138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.764138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.765138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.766138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.767138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.768138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.769138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.770138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.771138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.772138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.794138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.796138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.796138328263341760 I [express_gpu_render.c(shutdown_notify_callback:286)] start saving snapshot 1786268589796465
+2026-08-09 17:43:09.796138328263341760 I [express_gpu_render.c(shutdown_notify_callback:308)] notify shutdown! 1786268589796502
+2026-08-09 17:43:09.796138328263341760 I [vl.c(RunQemuMain:4082)] Qemu Main Loop end
+2026-08-09 17:43:09.797138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.798138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.799138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.799138328263341760 I [vl.c(RunQemuMain:4084)] Qemu Cleanup end
+2026-08-09 17:43:09.799138328263341760 I [vl.c(cleanup_userdata_img:2523)] cleanup_userdata_img
+2026-08-09 17:43:09.800138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.801138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.802138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.803138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.804138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.805138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.806138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.808138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.809138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.810138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.811138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.812138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.813138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.814138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.815138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.816138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.817138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.818138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.819138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.820138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.822138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.823138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.824138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.825138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.826138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.827138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.828138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.829138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.830138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.831138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.832138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.833138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.834138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.836138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.837138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.838138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.839138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.840138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.841138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.842138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.843138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.844138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.845138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.846138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.847138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.848138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.850138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.851138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.852138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.853138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.854138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.855138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.856138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.857138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.858138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.859138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.860138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.861138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.862138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.864138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.865138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+2026-08-09 17:43:09.866138313493886656 E [teleport_express_register.c(set_express_device_irq:299)] express is stopped, skip input irq express-bridge
+----- END EXCERPT -----

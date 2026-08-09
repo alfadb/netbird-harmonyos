@@ -173,8 +173,8 @@ README 所称的“小补丁”不能计数、复现或评估维护风险；见
 
 当前R0正式基线（现v0.76.3）使用 Go 1.25.12，并把 WireGuard 替换到
 `netbirdio/wireguard-go@2834bebf...`。本仓 v0.74.6 历史证据表明其官方 Go 1.25.12
-制品在 API 24 x86_64 应用 late-load 路径受 initial-exec TLS 阻断；v0.76.3 尚未重跑
-且没有 E1 pass。外部项目使用另一套 Go 1.24.5 arm64 OpenHarmony fork，不反驳该
+制品在 API 24 x86_64 应用 late-load 路径受 initial-exec TLS 阻断；v0.76.3 由
+`EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 E1 pass。外部项目使用另一套 Go 1.24.5 arm64 OpenHarmony fork，不反驳该
 历史结果，也不能替代 v0.76.3 重验或授权引入私有 Go fork。
 
 ## NAPI 导出、线程与内存
@@ -535,8 +535,8 @@ fd duplicate、自定义 `tun.Device` 和独立进程 handoff 可用于测试设
 形成可计数 patch、固定 Go/NetBird/wireguard-go 输入、NAPI ABI、fd 所有权表和目标
 SDK/Emulator evidence。
 
-本审计不改变门状态：loader 负面只绑定 v0.74.6，当前R0正式基线（现v0.76.3）
-尚未重跑且没有 E1 pass。Emulator E3-E7 保持 reviewed dependency-blocked aggregation
+本审计不改变门状态：v0.74.6 历史 loader 负面保持原绑定；当前R0正式基线（现v0.76.3）
+由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 E1 pass。Emulator E3-E7 保持 reviewed dependency-blocked aggregation
 exception，不是 `pass` 或 `N/A`；2in1、Tablet 的 blocked 只覆盖 registration-layer
 前置边界。`E3-PHYS-PREFLIGHT` 当前计划状态为 `blocked` 且尚无证据 ID，故 E8 保持 `CLOSED`。
 只有预检 `reviewed-pass/pass` 才满足 E8 的预检必要条件，还必须取得当前R0正式基线（现v0.76.3）的 E1 pass、

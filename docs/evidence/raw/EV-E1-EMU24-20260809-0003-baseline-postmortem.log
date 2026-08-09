@@ -1,0 +1,93 @@
+================================================================================
+E1 v0.76.3 stock Go replay EV-E1-EMU24-20260809-0003 - baseline postmortem
+================================================================================
+STATUS: OUT-OF-BAND POST-RUN (NOT original run output)
+This file is an out-of-band read-only postmortem that re-verifies, via the
+public GitHub API (gh), the v0.76.3 baseline facts the EV-E1-EMU24-20260809-0003
+formal run checked at run time (2026-08-09 17:41-17:43), plus the release
+published_at, the release workflow run status/conclusion, and the go.mod
+wireguard-go replace SHA. It was generated AFTER the formal run completed and
+is NOT part of the original run output; the formal run's own outputs are the
+nine raw files EV-E1-EMU24-20260809-0003-{transcript,manifest,aa-test,
+baseline-verify,build,go-build,hilog-tag,hilog-app-full,emulator-console}.log,
+which remain byte-identical to the run. This postmortem only re-reads public
+GitHub API responses; it does not re-run, re-measure, or alter anything, and
+it contains no tokens or secrets.
+
+ACCESSED_AT: 2026-08-09T18:08:00+08:00
+CLOCK_SOURCE: host_CLOCK_REALTIME_date_iso_8601_seconds
+ACCESSED_BY: out-of-band read-only review (no HDC, no Emulator, no build)
+
+EVIDENCE_ID: EV-E1-EMU24-20260809-0003
+CODE_SHA (0003 run repository HEAD): c6b6c12b46aa8369a4c6b8e6a55bdc5eeb4e0b4e
+RUN_WINDOW: 2026-08-09T17:41:17+08:00 .. 2026-08-09T17:43:10+08:00 (transcript STARTED_AT/ENDED_AT)
+RUNNER_FIXED_BASELINE: v0.76.3 / f65f7b347ee4e7de6d98c488d3d894cd018b02b6 / go 1.25.5 / toolchain go1.25.12
+FORMAL_RUN_BASELINE_VERIFY_LINE: BASELINE_VERIFY=pass mode=gh tag=v0.76.3 commit=f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+
+--------------------------------------------------------------------------------
+1. v0.76.3 tag ref
+--------------------------------------------------------------------------------
+COMMAND: gh api repos/netbirdio/netbird/git/ref/tags/v0.76.3 --jq '.object.sha'
+RESULT: f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+MEANING: the tag ref object is the commit itself -> v0.76.3 is a LIGHTWEIGHT
+tag (no annotated tag object). Matches the runner's fixed BASELINE_COMMIT.
+
+--------------------------------------------------------------------------------
+2. annotated tag peeled commit check
+--------------------------------------------------------------------------------
+COMMAND: gh api repos/netbirdio/netbird/git/tags/f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+RESULT: HTTP 404 Not Found ({"message":"Not Found", ...})
+MEANING: no annotated tag object exists for the ref SHA; the runner's
+fallback path applies (commit_sha = tag_sha). The peeled commit is the ref
+SHA itself: f65f7b347ee4e7de6d98c488d3d894cd018b02b6.
+
+--------------------------------------------------------------------------------
+3. go.mod contents at the baseline commit
+--------------------------------------------------------------------------------
+COMMAND: gh api "repos/netbirdio/netbird/contents/go.mod?ref=f65f7b347ee4e7de6d98c488d3d894cd018b02b6"
+RESULT (metadata): {"sha":"f8a1a84b055db7958b2b5e556b31fed68e9d93f9","size":16055}
+CONTENT (base64 decoded, exact lines):
+  line 3:  go 1.25.5
+  line 5:  toolchain go1.25.12
+  line 331: replace golang.zx2c4.com/wireguard => github.com/netbirdio/wireguard-go v0.0.0-20260628102922-2834bebf6c1a
+MEANING: the exact `go 1.25.5` and `toolchain go1.25.12` lines the runner
+requires are present; the wireguard-go replace resolves to pseudo-version
+v0.0.0-20260628102922-2834bebf6c1a, i.e. actual commit SHA 2834bebf6c1a.
+LOCAL_SHA256_OF_FETCHED_GO_MOD: b8001fe1e373a2e2b79ee8cbdbf800b6132d76ed52b2510c26075d1c348c89fe
+
+--------------------------------------------------------------------------------
+4. release v0.76.3 published_at
+--------------------------------------------------------------------------------
+COMMAND: gh api repos/netbirdio/netbird/releases/tags/v0.76.3 --jq '{tag_name, name, published_at}'
+RESULT: {"tag_name":"v0.76.3","name":"v0.76.3","published_at":"2026-08-08T12:11:41Z"}
+URL: https://github.com/netbirdio/netbird/releases/tag/v0.76.3
+
+--------------------------------------------------------------------------------
+5. release workflow run 31256677326 status/conclusion
+--------------------------------------------------------------------------------
+COMMAND: gh api repos/netbirdio/netbird/actions/runs/31256677326 --jq '{id, name, status, conclusion, head_sha, created_at, updated_at}'
+RESULT: {"id":31256677326,"name":"Release","status":"completed","conclusion":"success","head_sha":"f65f7b347ee4e7de6d98c488d3d894cd018b02b6","created_at":"2026-08-08T12:11:43Z","updated_at":"2026-08-08T12:33:40Z"}
+URL: https://github.com/netbirdio/netbird/actions/runs/31256677326
+
+--------------------------------------------------------------------------------
+6. Conclusion
+--------------------------------------------------------------------------------
+All re-verified facts match the runner's fixed constants and the 0003 formal
+run's baseline-verify.log line (BASELINE_VERIFY=pass mode=gh tag=v0.76.3
+commit=f65f7b347ee4e7de6d98c488d3d894cd018b02b6):
+
+  - v0.76.3 tag ref object SHA = f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+    (lightweight tag; no annotated tag object, peeled commit = ref SHA);
+  - go.mod at that commit: blob sha f8a1a84b055db7958b2b5e556b31fed68e9d93f9,
+    size 16055, exact lines `go 1.25.5` (line 3) and `toolchain go1.25.12`
+    (line 5);
+  - go.mod wireguard-go replace: github.com/netbirdio/wireguard-go
+    v0.0.0-20260628102922-2834bebf6c1a (actual SHA 2834bebf6c1a);
+  - release v0.76.3 published_at 2026-08-08T12:11:41Z;
+  - release workflow run 31256677326: status completed, conclusion success,
+    head_sha f65f7b347ee4e7de6d98c488d3d894cd018b02b6.
+
+This postmortem is out-of-band evidence only; it does not change the 0003
+record (measured blocked, record_status collected) and produces no platform
+verdict. No tokens or secrets are contained in this file.
+================================================================================

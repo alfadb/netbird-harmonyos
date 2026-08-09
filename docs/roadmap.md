@@ -31,7 +31,7 @@
 
 v0.74.6、commit `3a2f773d655d88d16ed953fc2a114a4e690a1b08` 与 v0.74.7、commit `a1c9427d8004576e2cbb9e546d409847fa9df318` 继续作为所有既有 E/R evidence 的历史实际输入。采用 v0.76.3 不静默替换历史版本、源码、制品 hash 或判定；后续受影响门必须用 v0.76.3 新记录重跑。
 
-API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：E0、E1-C 和 E2 为 `reviewed-pass/pass`。现有 loader 负面证据绑定 v0.74.6；当前R0正式基线（现v0.76.3）的官方 Go 1.25.12 loader/runtime 尚未重跑且没有 pass，E1 overall Go 未关闭。E3-E7 以 reviewed dependency-blocked aggregation exception 进入后续聚合，不是 `pass` 或 `N/A`；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。
+API 24 x86_64 phone Emulator 总门当前为 `CLOSED`：E0、E1-C 和 E2 为 `reviewed-pass/pass`。v0.74.6 历史 loader 负面证据保持原绑定；当前R0正式基线（现v0.76.3）的官方 Go 1.25.12 loader/runtime 由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 `reviewed-pass/pass`，E1 overall Go 未关闭。E3-E7 以 reviewed dependency-blocked aggregation exception 进入后续聚合，不是 `pass` 或 `N/A`；E4-E7 完整义务移交 E8 `OPEN` 后的具名物理设备 R2/R3 门。
 
 E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结目标为 `PLA-AL10` / `PLA-AL10 6.1.0.117(SP6C00E115R7P7)` / API `23` / arm64；live model 匹配，但 live build 仅投影为 `PLA-AL10 <REDACTED_IPV4>(SP8C00E32R7P2)`，可见 suffix 发生 drift。runner 在 continuous capture、staging 与 install 前停止，`campaign_started=false`，A/B 未安装或运行，finally 清理为 `verified-clean`，integrity violations 为空。
 
@@ -227,6 +227,7 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 - **生效条件**：上述 tag、commit、published 时间、Go/toolchain、成功 Release run 和固定访问日均可复核，且文档同步保留 v0.74.6/v0.74.7 历史边界后立即生效；生效只改变后续正式输入，不赋予任何 E/R 门通过状态。
 - **回退条件**：tag/commit 或 Release run 核对被推翻、v0.76.3 被上游撤回、出现阻断级安全/许可证问题，或重跑证明其无法在既有 R0 预算内继续时，停止新基线运行并由新的动态调整记录决定回退或前进版本；不得通过改写 v0.74.6/v0.74.7 历史 evidence 实施回退。
 - **审查状态**：用户于 2026-08-09 明确批准正式采用；文档层调整已进入当前未提交 diff。E1、SBOM、依赖、许可证和 AGPL 的新基线证据审查尚未完成，本记录不把这些事项写成通过。E3 未关闭，E8 保持 `CLOSED`。
+- **后续结果（2026-08-09）**：按本记录重跑范围，E1 已执行 `EV-E1-EMU24-20260809-0003`（[measured blocked 证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)）：完整模式在 API 24 x86_64 phone Emulator 上测得 stock Go 1.25.12 loader 精确拒绝（`initial-exec TLS resolves to dynamic definition`），`record_status: reviewed-pass`、`verdict: blocked`（终审 `REV-E1-EMU24-20260809-0003`，0 blocker/0 major；formal raw 内 `RECORD_STATUS=collected` 为 runner sealed 的 pre-review 不可变事实）；仍无 `reviewed-pass/pass`，E1 overall Go 未关闭，E8 保持 `CLOSED`。SBOM/许可证重核仍未完成。
 
 ### ADJ-20260808-0003：强可靠执行细化（真实 layout 校准 / prompt-time 事件窗口 / 空档 UI action guard / infra capture 分类 / S5 去除非决定性 VPN 页步骤 / process-target verify / C6 真实 shape 与连续 capture infra 传播）
 
@@ -330,7 +331,7 @@ E8 前唯一 `E3-PHYS-PREFLIGHT` initial live 已于 2026-08-06 消费。冻结�
 E0-E8 是物理设备产品投入前的聚合总门。所有客观可执行 Emulator 项必须形成 `record_status: reviewed-pass`、`verdict: pass` 并保持目标元组和 hash 一致；经审查证明因平台前置组件缺失而 blocked 的 E3-E7 必须保留原判定，并显式登记为 reviewed dependency-blocked aggregation exception，不能伪造 pass 或写成 `N/A`。E8 的任何状态变化都须独立聚合审查；新官方 image/build 若含所需组件，旧 blocked-exception 不再适用，必须重验。
 
 - **E0 普通应用**：普通第三方 phone 应用完成构建、安装、普通 `EntryAbility` 启动、可观察运行、停止、卸载和清理；`10106102` 未解决时本项失败。
-- **E1 ArkTS/native/fd ownership**：验证 ArkTS 与 native 双向调用、异步线程回调，以及 fd 的创建、复制、移交、关闭、重复关闭防护和异常清理所有权；还必须使用当前R0正式基线（现v0.76.3）声明的 Go/toolchain 输入验证官方 Go 制品可加载并运行该边界，C-only 结果只能作为子证据。现有 loader 负面绑定 v0.74.6，v0.76.3 未重跑且无 pass。
+- **E1 ArkTS/native/fd ownership**：验证 ArkTS 与 native 双向调用、异步线程回调，以及 fd 的创建、复制、移交、关闭、重复关闭防护和异常清理所有权；还必须使用当前R0正式基线（现v0.76.3）声明的 Go/toolchain 输入验证官方 Go 制品可加载并运行该边界，C-only 结果只能作为子证据。v0.74.6 历史 loader 负面保持原绑定；v0.76.3 由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 pass。
 - **E2 C 网络**：以不依赖 Go 的 C native 路径验证 TCP/UDP、DNS、loopback 与外部测试端点的可判定网络收发和错误传播。
 - **E3 VPN Extension 授权**：普通第三方应用通过公开 VPN Extension 路径验证授权、拒绝、撤销和冲突状态，不使用特权绕过。phone 记录的公开 runtime 路径 blocked；2in1、Tablet 只在 registration-layer 前置边界 blocked，未形成完整 runtime 结论。E8 前只允许按 `E3-PHYS-PREFLIGHT` 判断一个精确物理目标的 E3 可达性。
 - **E4 `setUp`/TUN 配置**：实际调用 `setUp` 建立虚拟接口并核验 fd、地址、路由、DNS、MTU、IPv4 及声明范围内 IPv6 的配置与清理。

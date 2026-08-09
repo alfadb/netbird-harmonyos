@@ -1,0 +1,297 @@
+RUNNER=e1-stock-go-replay.sh
+BASELINE_TAG=v0.76.3
+BASELINE_COMMIT=f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+BASELINE_GO_DIRECTIVE=go 1.25.5
+BASELINE_TOOLCHAIN_DIRECTIVE=toolchain go1.25.12
+SNAPSHOT_COMMIT=34d512541ca8047f8e3796abd6d85ef94cc13559
+GO_VERSION_PREFIX=go version go1.25.12 
+TARGET_TUPLE=HarmonyOS_6.1.1(24),API24,x86_64,phone_Emulator
+EMULATOR_TARGET=127.0.0.1:10000
+BUNDLE=cn.alfadb.netbird.r1probe
+TEST_MODULE=entry_test
+TEST_RUNNER=/ets/testrunner/OpenHarmonyTestRunner
+PHYSICAL_DEVICE_USED=false
+HDC_RUN=true
+EVIDENCE_ID=EV-E1-EMU24-20260809-0003
+WORKSPACE=/home/worker/work/base/netbird-harmonyos
+EVIDENCE_ROOT=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw
+STABLE_TOOLS=/home/worker/harmonyos/command-line-tools/6.1.1.290
+BETA_TOOLS=/home/worker/harmonyos/command-line-tools/26.0.0.461
+GO_BIN=/home/worker/go/bin/go
+EMULATOR_INSTANCE=netbird_api24_phone
+GO_TOOLCHAIN_MODE=local
+NETBIRD_SOURCE_DIR=<unset>
+GH_BIN=gh
+GIT_HEAD=c6b6c12b46aa8369a4c6b8e6a55bdc5eeb4e0b4e
+GIT_BRANCH=main
+SNAPSHOT_COMMIT_PRESENT=pass
+SNAPSHOT_SOURCE_VERIFY=pass
+BASELINE_VERIFY=pass mode=gh tag=v0.76.3 commit=f65f7b347ee4e7de6d98c488d3d894cd018b02b6
+HOST_CHECK hvigorw=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw
+HOST_CHECK ohpm=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm
+HOST_CHECK hvigor-ohos-plugin=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+HOST_CHECK emulator=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator
+HOST_CHECK hdc=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc
+HOST_CHECK go=pass path=/home/worker/go/bin/go
+HOST_CHECK ohos-x86_64-clang=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/x86_64-unknown-linux-ohos-clang
+HOST_CHECK ffmpeg=pass command=ffmpeg
+HOST_CHECK gh=pass command=gh
+HOST_CHECK bash=pass command=bash
+HOST_CHECK readelf=pass command=readelf
+HOST_CHECK file=pass command=file
+HOST_CHECK unzip=pass command=unzip
+HOST_CHECK ss=pass command=ss
+HOST_CHECK git=pass command=git
+HOST_CHECK tar=pass command=tar
+HOST_CHECK base64=pass command=base64
+HOST_CHECK timeout=pass command=timeout
+HOST_CHECK pgrep=pass command=pgrep
+HOST_CHECK mktemp=pass command=mktemp
+HOST_CHECK sha256sum=pass command=sha256sum
+HOST_CHECK awk=pass command=awk
+HOST_CHECK shellcheck=fail command=shellcheck (external bash -n required)
+STARTED_AT=2026-08-09T17:41:17+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+RECORD_SCOPE=E1_stock_Go_loader_runtime_replay_v0.76.3_baseline_API24_x86_64
+TEST_RUNNER_USED=true
+GO_NETBIRD_PS4_TOUCHED=false
+$ env HARMONYOS_NATIVE_HOME=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native GO_BIN=/home/worker/go/bin/go GO_PROBE_OUTPUT_DIR=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64 GO_TOOLCHAIN_MODE=local bash /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/go-probe/build.sh
+built /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so with go version go1.25.12 linux/amd64
+GO_BUILD_VERDICT=pass
+GO_VERSION_VERIFY=pass version=go version go1.25.12 linux/amd64
+GO_SO_FILE=/home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, Go BuildID=sPHadNzItVcWqoVo81Ly/BxDGo9HuLk4KPCVmZkTm/dEio-Z044XACcC8X-V8n/v0l5brp0-szEqhDaz1Cz, BuildID[sha1]=8193c9e5f90d41e671907e1b2d7767aee28ca6d0, with debug_info, not stripped
+GO_SO_ELF_VERIFY=pass
+  LOAD           0x000000 0x0000000000000000 0x0000000000000000 0x068f04 0x068f04 R   0x1000
+  LOAD           0x068f20 0x0000000000069f20 0x0000000000069f20 0x0c9560 0x0c9560 R E 0x1000
+  LOAD           0x132480 0x0000000000134480 0x0000000000134480 0x0d5400 0x0d5400 RW  0x1000
+  LOAD           0x207880 0x000000000020a880 0x000000000020a880 0x007512 0x03c9e0 RW  0x1000
+  TLS            0x132480 0x0000000000133480 0x0000000000133480 0x000000 0x000008 R   0x8
+GO_SO_PT_TLS_VERIFY=pass
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ 0x000000000000001e (FLAGS)              SYMBOLIC BIND_NOW STATIC_TLS
+ 0x000000006ffffffb (FLAGS_1)            Flags: NOW NODELETE
+GO_SO_STATIC_TLS_VERIFY=pass
+GO_SO_TPOFF64_VERIFY=pass
+GO_SO_EXPORT_VERIFY=pass
+$ sha256sum /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3  /home/worker/work/base/netbird-harmonyos/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+GO_SO_SHA256=64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3
+$ git archive 34d512541ca8047f8e3796abd6d85ef94cc13559 spikes/r1-api24-hap
+SNAPSHOT_EXTRACT_VERIFY=pass
+SNAPSHOT_DIR=/tmp/e1-stock-go-snapshot.ADPvO8
+SNAPSHOT_LOCK_VERIFY=pass
+HVIGOR_PLUGIN_VERIFY=pass
+$ sha256sum /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3  /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/libs/x86_64/libgoprobe.so
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm install --all
+[32minstall completed in 0s 125ms[39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+Installing dependencies...
+Already up to date
+
+dependencies:
++ @ohos/hvigor-ohos-plugin 6.24.3 <- ../../../../harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+
+Done in 771ms using pnpm v10.28.2
+Hvigor install success.
+> hvigor [32mFinished :entry:clean... after 3 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 926 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:default@PreBuild... after 211 ms [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 42 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 5 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 6 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 87 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 3 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 7 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 363 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 4 s 662 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 1 s 938 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 70 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 442 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 6 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 6 s 434 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 644 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 724 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:ohosTest@PreBuild... after 204 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ConfigureCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MergeProfile... after 10 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgContextInfo... after 11 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgSdkInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessProfile... after 63 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessResource... after 8 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessLibs... after 45 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CompileResource... after 115 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestBuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@DoNativeStrip... after 33 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CacheNativeLibs... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCompileArkTS... after 6 s 312 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCopyMockConfigJson... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgModuleJson... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackageHap... after 429 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackingCheck... after 4 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:ohosTest@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 11 s 237 ms [39m
+HAP_BUILD_VERDICT=pass
+APP_MEMBER_SHA256=64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3
+TEST_MEMBER_SHA256=64e0872bbad230e345f78f964af4d1ea564f468004e5f22e8ce2796cfaaccfe3
+HAP_MEMBER_IDENTITY=pass
+FORBIDDEN_HISTORICAL_MEMBER=false
+$ sha256sum /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+deb6ee622a5ec05eed86e422f1ceed2700389d345a15a835d0a1aa19bd98e9f3  /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/build/default/outputs/default/entry-default-unsigned.hap
+4df08549874e13063c2081cd9632c27a5976aad0d0b4cab36452f5faa26bf918  /tmp/e1-stock-go-snapshot.ADPvO8/spikes/r1-api24-hap/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator  "netbird_api24_phone"  failed, emulator is not exists.
+QEMU_CURRENT_BOOT_START_LINE=33670
+$ env DISPLAY=:1 XAUTHORITY=/home/worker/.Xauthority XDG_RUNTIME_DIR=/tmp/runtime-worker /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=637354
+EMULATOR_START_VERDICT=pass
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+[Empty]
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=1 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=2 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=3 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=4 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=5 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=6 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=7 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+[Fail]Connect failed
+127.0.0.1:10000		TCP	Offline	unknown...
+CONNECTIVITY attempt=8 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+Client version:Ver: 3.2.0e, server version:Ver: 3.2.0e
+127.0.0.1:10000		TCP	Offline	unknown...
+Connect OK
+127.0.0.1:10000		TCP	Connected	localhost
+CONNECTIVITY attempt=9 shell=e1-stock-go-connect-9 distribution=HarmonyOS\ 
+CONNECTIVITY_VERDICT=pass
+BOOT_READINESS attempt=1 qemu.boot='' shell=e1-stock-go-readiness-1
+BOOT_READINESS attempt=2 qemu.boot='' shell=e1-stock-go-readiness-2
+BOOT_READINESS attempt=3 qemu.boot='' shell=e1-stock-go-readiness-3
+BOOT_READINESS attempt=4 qemu.boot='' shell=e1-stock-go-readiness-4
+BOOT_READINESS attempt=5 qemu.boot='' shell=e1-stock-go-readiness-5
+BOOT_READINESS attempt=6 qemu.boot='' shell=e1-stock-go-readiness-6
+BOOT_READINESS attempt=7 qemu.boot='' shell=e1-stock-go-readiness-7
+BOOT_READINESS attempt=8 qemu.boot='' shell=e1-stock-go-readiness-8
+BOOT_READINESS attempt=9 qemu.boot='' shell=e1-stock-go-readiness-9
+BOOT_READINESS attempt=10 qemu.boot='' shell=e1-stock-go-readiness-10
+BOOT_READINESS attempt=11 qemu.boot='' shell=e1-stock-go-readiness-11
+BOOT_READINESS attempt=12 qemu.boot='' shell=e1-stock-go-readiness-12
+BOOT_READINESS attempt=13 qemu.boot='' shell=e1-stock-go-readiness-13
+BOOT_READINESS attempt=14 qemu.boot='' shell=e1-stock-go-readiness-14
+BOOT_READINESS attempt=15 qemu.boot='' shell=e1-stock-go-readiness-15
+BOOT_READINESS attempt=16 qemu.boot='' shell=e1-stock-go-readiness-16
+BOOT_READINESS attempt=17 qemu.boot='' shell=e1-stock-go-readiness-17
+BOOT_READINESS attempt=18 qemu.boot='' shell=e1-stock-go-readiness-18
+BOOT_READINESS attempt=19 qemu.boot='' shell=e1-stock-go-readiness-19
+BOOT_READINESS attempt=20 qemu.boot='' shell=e1-stock-go-readiness-20
+BOOT_READINESS attempt=21 qemu.boot='' shell=e1-stock-go-readiness-21
+BOOT_READINESS attempt=22 qemu.boot='' shell=e1-stock-go-readiness-22
+BOOT_READINESS attempt=23 qemu.boot='' shell=e1-stock-go-readiness-23
+BOOT_READINESS attempt=24 qemu.boot='' shell=e1-stock-go-readiness-24
+BOOT_READINESS attempt=25 qemu.boot='' shell=e1-stock-go-readiness-25
+BOOT_READINESS attempt=26 qemu.boot='' shell=e1-stock-go-readiness-26
+BOOT_READINESS attempt=27 qemu.boot=2026-08-09\ 17:43:01.095138327860696768\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=e1-stock-go-readiness-27
+READINESS_VERDICT=pass
+FileTransfer finish, Size:5889586, File count = 1, time:80ms rate:73619.82kB/s
+FileTransfer finish, Size:3151533, File count = 1, time:121ms rate:26045.73kB/s
+INSTALL_ATTEMPT=1 OUTPUT=install\ bundle\ successfully.
+INSTALL_VERDICT=pass
+HILOG_BUFFER_SET=$'Set log type app buffer size to 16.0M successfully\nSet log type init buffer size to 16.0M successfully\nSet log type core buffer size to 16.0M successfully\nSet log type only_prerelease buffer size to 16.0M successfully'
+HILOG_BUFFER_QUERY=$'Log type app buffer size is 16.0M\nLog type init buffer size is 16.0M\nLog type core buffer size is 16.0M\nLog type only_prerelease buffer size is 16.0M'
+HILOG_BUFFER_VERDICT=pass
+Log type core,app,only_prerelease buffer clear successfully
+AA_TEST_RC=0
+AA_TEST_OUTPUT=$'BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1\nGO_THREAD_RESULT|role=pre-dlopen thread|ok=false|started=true|resolved=false|helloOk=false|runtimeOk=false|netDialOk=false|hello=-1|runtimeBytes=-1|netDialCode=-1|stage=aborted|detail=pre-dlopen thread aborted before dlsym\nGO_THREAD_RESULT|role=|ok=false|started=false|resolved=false|helloOk=false|runtimeOk=false|netDialOk=false|hello=-1|runtimeBytes=-1|netDialCode=-1|stage=not-started|detail=thread not started\nGO_SPIKE_RESULT|verdict=FAIL|ok=false|pid=2814|preCreatedBeforeDlopen=true|dlopenLoaded=false|postCreatedAfterDlopen=false|pre=false|post=false|stage=dlopen|loaderErrno=2|loaderError=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so|detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory)\nTestFinished-ResultCode: 1\nTestFinished-ResultMsg: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1; GO_SPIKE_RESULT|verdict=FAIL|ok=false|pid=2814|preCreatedBeforeDlopen=true|dlopenLoaded=false|postCreatedAfterDlopen=false|pre=false|post=false|stage=dlopen|loaderErrno=2|loaderError=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so|detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory)\nuser test finished.'
+TAG_HILOG_LINES=6
+APP_HILOG_LINES=301
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-tag.log /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-app-full.log
+e976a3c41971204a17f7092b3b311b9c675a23bd199b4b888ad4c77454cd9a57  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-tag.log
+5f8ade6219c2a64ccbf0243aa4252411761c270888df0054846a64692aa64ef4  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-app-full.log
+BASELINE_RESULT_SOURCE=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-tag.log
+GO_SPIKE_RESULT_SOURCE=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-E1-EMU24-20260809-0003-hilog-tag.log
+BASELINE_RESULT_LINE=CST 2026-08-09 17:43:07.506  2814  2814 I A02900/R1Api24ProbeTest: BASELINE_RESULT|functional=PASS|ping=pong|version=r1-api24-probe/0.0.1
+GO_SPIKE_RESULT_LINE=CST 2026-08-09 17:43:07.509  2814  2814 I A02900/R1Api24ProbeTest: GO_SPIKE_RESULT|verdict=FAIL|ok=false|pid=2814|preCreatedBeforeDlopen=true|dlopenLoaded=false|postCreatedAfterDlopen=false|pre=false|post=false|stage=dlopen|loaderErrno=2|loaderError=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so|detail=dlopen libgoprobe.so failed dlerror=Error relocating /data/storage/el1/bundle/libs/x86_64/libgoprobe.so: res_search: initial-exec TLS resolves to dynamic definition in /data/storage/el1/bundle/libs/x86_64/libgoprobe.so; errno=2 (No such file or directory)
+BASELINE_JUDGMENT=pass
+MEASURED_VERDICT=blocked
+MEASURED_VERDICT_NOTE=expected stock Go 1.25.12 initial-exec TLS loader rejection; measured blocked, not runner failure
+[Info]App uninstall path: msg:uninstall bundle successfully. 
+AppMod finish
+[emulator-stop] stopping netbird_api24_phone
+Stop emulator netbird_api24_phone successfully
+FINAL_CLEANUP_ATTEMPT=1 processes='' ports=''
+FINAL_RESIDUAL_PROCESS=false
+FINAL_RESIDUAL_PORT=false
+ENDED_AT=2026-08-09T17:43:10+08:00
+VERDICT=blocked
+RECORD_STATUS=collected
+CLEANUP_BEGIN=teardown
+CLEANUP_STAGING=skipped-emulator-not-started
+CLEANUP_HDC=kill-issued
+CLEANUP_TEMP=removed
+CLEANUP_END=teardown-complete
