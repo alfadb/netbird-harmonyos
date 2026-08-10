@@ -75,19 +75,42 @@ used runner SHA-256
 `e8eb1b67a48603c55d3f55d2be686bae0dbd15e1` (freeze
 `d6334c2d8d0d1bf11a2a9e26f65039ee0a1a98e377fbf644cef557ff02c55a1a`, now
 `CONSUMED-BLOCKED`); the runner has since changed under `ADJ-20260807-0003`, so
-a new live freeze must bind a fresh commit and runner SHA-256. Current
-`plan_status` is `blocked-awaiting-device-authorization`; the Windows signing/build host
-has rebuilt the runner, freeze, and selftest snapshots and registered them as
+a new live freeze must bind a fresh commit and runner SHA-256. As of the
+2026-08-08 host-remediation snapshot, `plan_status` was
+`blocked-awaiting-device-authorization` and the Windows signing/build host had
+rebuilt the runner, freeze, and selftest snapshots and registered them as
 [`EV-E3-PHYS1HOST-20260808-0001`](../../docs/evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
-(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; candidate
-`E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` prepared
-with freeze `plan_status: blocked`; DryRun `is_evidence: false`/HDC0/integrity
-empty; old 20260807 candidate `INVALID-TIMELINE` unusable). No auto retry, no
-new ID, and no device-command authorization until explicit user device
-authorization plus fresh device confirmation; a ready freeze may bind the same
-candidate identity only after that explicit authorization per governance
-decision. This registration bans HDC; E8 remains CLOSED. Prior campaign/evidence IDs must not
-be reused. The checked-in freeze example remains intentionally `blocked`.
+(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; the old
+candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
+`EV-E3-PHYS1API26-20260808-0001` prepared with freeze `plan_status: blocked`;
+DryRun `is_evidence: false`/HDC0/integrity empty; old 20260807 candidate
+`INVALID-TIMELINE` unusable). That old candidate pair is now consumed (sealed
+blocked external evidence, see below) and must never be reused. **Current
+(2026-08-10 · AUTH-E3-PHYS1API26-20260810-0002)**: the user explicitly
+authorized a NEW full-whitelist campaign
+([`e3-physical-preflight-authorization-2026-08-10-0002.md`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-10-0002.md);
+supersedes the consumed
+`AUTH-E3-PHYS1API26-20260810-0001`) with the new candidate pair
+`E3-PHYS-PREFLIGHT-20260810-0001` / `EV-E3-PHYS1API26-20260810-0001`,
+`attempt=initial`/retry N/A, any gate failure stops with no retry and no ID
+switch, two new-pair consumption audits (audit-1 before any
+`-TargetBindingConfirm`, audit-2 after the final ready freeze; both hash
+recorded), and a single memory-only `hdc list targets` host-prep exception
+(exactly one token, process-scope `PHYS_1_TARGET`, no output/persistence, runner
+HDC whitelist NOT expanded). The old pair `E3-PHYS-PREFLIGHT-20260808-0001` /
+`EV-E3-PHYS1API26-20260808-0001` is consumed by the external sealed blocked
+evidence `EV-E3-PHYS1API26-20260808-0001` (record_status=collected /
+overall=blocked / verdict=blocked, execution_mode=live, is_evidence=true;
+campaign-seal SHA-256
+`ec55603a2555b967c5912e79a846262d262e53069e3f1275105af5ccf4ef245f` sealed_at
+2026-08-08T09:53:23+08:00; hash-manifest SHA-256
+`36852f6c6d9d6e27c6b5ee07bd6b6037e8aa2a22f1fdbf45591addb047f5f843`;
+legacy-pair-consumption-audit `id-consumption-audit-1.txt` SHA-256
+`b530c438769e65390ee9065f918d1ea550a8f9745c61516b6899ff90c736e9c7`,
+2026-08-10T10:43:09+08:00) and must never be reused. No auto retry, no
+ID switch; any later attempt requires new governance. This registration bans
+HDC (except the single memory-only host-prep `hdc list targets`); E8 remains
+CLOSED. Prior campaign/evidence IDs must not be reused. The checked-in freeze example remains intentionally `blocked`.
 
 ## Boundary
 
@@ -471,12 +494,17 @@ confirmation must run before a `ready` freeze exists, yet Live only accepts
   initializes campaign roots) rather than silently ignoring them. Mode
   exclusivity is enforced before the `-SelfTest` early exit, so invalid switch
   combinations are rejected even with `-SelfTest` present.
-- Fixes, under the current authorization `AUTH-E3-PHYS1API26-20260810-0001`,
-  the candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
-  `EV-E3-PHYS1API26-20260808-0001` and `attempt=initial` with
+- Fixes, under the current authorization `AUTH-E3-PHYS1API26-20260810-0002`
+  (see
+  [`e3-physical-preflight-authorization-2026-08-10-0002.md`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-10-0002.md);
+  supersedes the consumed `AUTH-E3-PHYS1API26-20260810-0001` whose old
+  candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
+  `EV-E3-PHYS1API26-20260808-0001` is sealed-blocked consumed and must never
+  be reused), the candidate pair `E3-PHYS-PREFLIGHT-20260810-0001` /
+  `EV-E3-PHYS1API26-20260810-0001` and `attempt=initial` with
   `retry.basis`/`infrastructure_reason=N/A`: the generic infrastructure retry
-  branch never applies to this path and any later retry requires new
-  governance.
+  branch never applies to this path, any gate failure stops with no retry and
+  no ID switch, and any later attempt requires new governance.
 - Accepts a freeze with `plan_status: blocked` or `ready` and still runs the
   full `Assert-FreezeManifest` structural gate, the clean-repository gate,
   `code_sha`/runner hash, HDC version + executable SHA-256, external
@@ -657,15 +685,12 @@ scenario-5 replay; retained), and API26 0002 live `consumed-blocked`
 `E3-PHYS-PREFLIGHT-20260806-0002` / `EV-E3-PHYS1API26-20260806-0001` remain
 `superseded-unexecuted`), and `ADJ-20260807-0003` (host process terminal
 probe + Settings app-info force-stop revoke path; runner/freeze example/selftest
-updated with this commit), the current governance `plan_status` is
-`blocked-awaiting-device-authorization`. The Windows signing/build host has
+updated with this commit), the governance `plan_status` at the
+2026-08-08 host-remediation snapshot was `blocked-awaiting-device-authorization`.
+The Windows signing/build host has
 rebuilt the runner, freeze, and selftest snapshots and registered them as
 [`EV-E3-PHYS1HOST-20260808-0001`](../../docs/evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
-(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; candidate
-`E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` prepared
+(host selftest `HDC_PROCESSES=0`, independent review 0 B/0 M; the old
+candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` prepared
 with freeze `plan_status: blocked`; DryRun `is_evidence: false`/HDC0/integrity
-empty; old 20260807 candidate `INVALID-TIMELINE` unusable). No auto retry, no
-new ID, and no device-command authorization until explicit user device
-authorization plus fresh device confirmation; a ready freeze may bind the same
-candidate identity only after that explicit authorization per governance
-decision. This registration bans HDC. E3 remains open, E8 remains `CLOSED`, and NetBird or any broader physical-device work remains forbidden.
+empty; old 20260807 candidate `INVALID-TIMELINE` unusable). That old candidate pair is now consumed by the external sealed blocked evidence `EV-E3-PHYS1API26-20260808-0001` (record_status=collected / overall=blocked / verdict=blocked, execution_mode=live, is_evidence=true; campaign-seal SHA-256 `ec55603a2555b967c5912e79a846262d262e53069e3f1275105af5ccf4ef245f` sealed_at 2026-08-08T09:53:23+08:00; hash-manifest SHA-256 `36852f6c6d9d6e27c6b5ee07bd6b6037e8aa2a22f1fdbf45591addb047f5f843`; legacy-pair-consumption-audit `id-consumption-audit-1.txt` SHA-256 `b530c438769e65390ee9065f918d1ea550a8f9745c61516b6899ff90c736e9c7`, 2026-08-10T10:43:09+08:00) and must never be reused. **Current (2026-08-10 · `AUTH-E3-PHYS1API26-20260810-0002`)**: the user explicitly authorized a NEW full-whitelist campaign (see [`e3-physical-preflight-authorization-2026-08-10-0002.md`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-10-0002.md); supersedes the consumed `AUTH-E3-PHYS1API26-20260810-0001`) with the new candidate pair `E3-PHYS-PREFLIGHT-20260810-0001` / `EV-E3-PHYS1API26-20260810-0001`, `attempt=initial`/retry N/A, any gate failure stops with no retry and no ID switch, two new-pair consumption audits (audit-1 before any `-TargetBindingConfirm`, audit-2 after the final ready freeze; both hash recorded), and a single memory-only `hdc list targets` host-prep exception (exactly one token, process-scope `PHYS_1_TARGET`, no output/persistence, runner HDC whitelist NOT expanded). Live requires the machine fresh confirmation (`-TargetBindingConfirm`) and the review record bindings; user readiness attestation does not replace them. This registration bans HDC (except the single memory-only host-prep `hdc list targets`). E3 remains open, E8 remains `CLOSED`, and NetBird or any broader physical-device work remains forbidden.

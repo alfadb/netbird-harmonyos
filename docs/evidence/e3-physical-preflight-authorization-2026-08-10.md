@@ -1,5 +1,7 @@
 # E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-10）
 
+> **superseded / consumed-audit note（2026-08-10，追加，不改写下文历史字节）**：本授权 `AUTH-E3-PHYS1API26-20260810-0001` 已被 [`AUTH-E3-PHYS1API26-20260810-0002`](e3-physical-preflight-authorization-2026-08-10-0002.md) 取代并 **已消耗**：其候选 pair `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已被外部 sealed blocked evidence `EV-E3-PHYS1API26-20260808-0001` 占用（scenario-results `record_status=collected`/`overall=blocked`/`verdict=blocked`、`execution_mode=live`、`is_evidence=true`、cleanup `verified-clean`；campaign-seal SHA-256 `ec55603a2555b967c5912e79a846262d262e53069e3f1275105af5ccf4ef245f`（sealed_at `2026-08-08T09:53:23+08:00`）、manifest SHA-256 `36852f6c6d9d6e27c6b5ee07bd6b6037e8aa2a22f1fdbf45591addb047f5f843`，位于仓外证据根 `D:/HarmonyEvidence/netbird-e3/EV-E3-PHYS1API26-20260808-0001/`；该 Live 发生于 08-08 host-remediation 登记（当时 candidate 未 Live）之后，与 08-08 文档时间快照不冲突），**不得复用**。legacy-pair-consumption-audit 已完成（仓外审计日志 `D:/HarmonySigning/netbird-e3/campaigns/E3-PHYS-PREFLIGHT-20260808-0001/audit/id-consumption-audit-1.txt`，SHA-256 `b530c438769e65390ee9065f918d1ea550a8f9745c61516b6899ff90c736e9c7`，2026-08-10T10:43:09+08:00）。下文全部内容为历史登记字节，仅作审计参考；当前生效授权与门顺序见 0002 登记文件。
+
 最后核验：2026-08-10
 
 本文登记用户（直接人类决策者）于 2026-08-10 显式授予的 `E3-PHYS-PREFLIGHT` 物理设备执行授权，以及 Windows signing/build host handoff 的治理前置门。用户本次选择为：「回 Windows signing/build host：用原仓外签名对象重生 ready freeze，再 selftest、DryRun、Live」，并明确「授权完整白名单 campaign，设备现在已准备好」。

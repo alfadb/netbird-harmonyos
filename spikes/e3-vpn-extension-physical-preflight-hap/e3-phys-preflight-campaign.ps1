@@ -83,9 +83,9 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260810-0001'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260808-0001'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260808-0001'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260810-0002'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260810-0001'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260810-0001'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
 $script:SimulationActiveBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -755,8 +755,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260810-0001 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260808-0001 / EV-E3-PHYS1API26-20260808-0001, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260810-0002 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260810-0001 / EV-E3-PHYS1API26-20260810-0001, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/

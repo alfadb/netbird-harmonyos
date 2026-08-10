@@ -14,7 +14,7 @@
 | E1 v0.76.3 stock Go loader/runtime | **已重跑 0003 为 `reviewed-pass/blocked`（`EV-E1-EMU24-20260809-0003`，终审 `REV-E1-EMU24-20260809-0003`），无 E1 pass**；`EV-E1-EMU24-20260809-0001`（runner defect，exit 1，见 [0001 记录](evidence/e1-stock-go-v0763-replay-0001-consumed-failure-2026-08-09.md)）与 `EV-E1-EMU24-20260809-0002`（runner defect，exit 1，见 [0002 记录](evidence/e1-stock-go-v0763-replay-0002-consumed-failure-2026-08-09.md)）均已消耗；`EV-E1-EMU24-20260809-0003` 已完整执行并消耗（measured blocked/collected 为运行期 pre-review 状态，经终审后记录级 `reviewed-pass/blocked`，见 [0003 记录](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md) 与 [0003 终审记录](evidence/e1-stock-go-v0763-replay-0003-review-2026-08-09.md)）；**禁止对 0001/0002/0003 同 ID 重跑** |
 | host-only 前置证据 | `EV-E1-EMU24HOST-20260809-0001` 已登记：`execution: not-run-host-preflight`、`record_status: collected`、`verdict: blocked`；只覆盖 host 侧核验，不形成平台结论、不占用 runtime evidence ID（见 [记录](evidence/e1-stock-go-v0763-host-preflight-2026-08-09.md)） |
 | E8 | `CLOSED`（0003 manifest `e8_status=CLOSED`；0003 是 `reviewed-pass/blocked`（measured blocked 经终审），不构成 E1 pass，不改变 E8） |
-| E3-PHYS-PREFLIGHT | `plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前**禁止 PHYS-1 HDC**、无 auto retry、无新 ID、无设备命令授权（见 [计划](e3-physical-preflight.md)） |
+| E3-PHYS-PREFLIGHT | 历史（2026-08-10 前）`plan_status: blocked-awaiting-device-authorization`；**当前（2026-08-10 · 0002）**：`AUTH-E3-PHYS1API26-20260810-0002` 已授权**新** campaign，`plan_status: authorized-awaiting-windows-ready-freeze`（新候选 pair `E3-PHYS-PREFLIGHT-20260810-0001` / `EV-E3-PHYS1API26-20260810-0001`；audit-1/audit-2 均 hash 记录；唯一例外为一次内存级 host-prep `hdc list targets`，机器 fresh confirmation（`-TargetBindingConfirm`）完成前仍**禁止 PHYS-1 HDC**、无 auto retry、无新 ID（见 [计划](e3-physical-preflight.md)）） |
 
 E3 的“禁 HDC”指物理设备 HDC。0003 runner 的 HDC 只连接固定 Emulator target `127.0.0.1:10000`，不触碰任何物理设备，与 E3 约束不冲突。
 
@@ -43,7 +43,7 @@ runner 固定常量（不可由环境覆盖，`--selftest` 会逐项验证 guard
 ## 4. 后续顺序
 
 1. E1 结果审查已完成：`EV-E1-EMU24-20260809-0003` 经终审 `REV-E1-EMU24-20260809-0003`（双路独立，`anthropic/claude-opus-5` evidence-integrity + `moonshotai/kimi-k2.7-code` status-consistency，0 blocker/0 major）为 `reviewed-pass/blocked`；stock Go loader 负面结论绑定 v0.76.3 基线；E1 overall Go 仍无 pass。
-2. **E1 结论成立后**才恢复 E3 新授权 / freeze 流程；当前 `blocked-awaiting-device-authorization` 保持不变，用户显式设备授权 + fresh device confirmation 完成前无任何设备命令授权（见 [e3-physical-preflight.md](e3-physical-preflight.md)）。
+2. E1 结论已成立（0003 `reviewed-pass/blocked` 经终审）；E3 新授权已由 `AUTH-E3-PHYS1API26-20260810-0002` 授予（取代已消耗的 0001，新候选 pair `E3-PHYS-PREFLIGHT-20260810-0001` / `EV-E3-PHYS1API26-20260810-0001`），`plan_status: authorized-awaiting-windows-ready-freeze`；顺序门须按 [授权登记 0002](evidence/e3-physical-preflight-authorization-2026-08-10-0002.md) 执行（ID 审计① → blocked confirmation freeze 静态审查 → 一次内存级 host-prep `hdc list targets` 映射 → `-TargetBindingConfirm` 机器 fresh confirmation → ready freeze 绑定 → 独立审查 → ID 审计② → selftest → DryRun → 单次 Live）；机器 fresh confirmation 完成前无任何设备命令授权（见 [e3-physical-preflight.md](e3-physical-preflight.md)）。
 
 ## 引用文档
 
@@ -56,4 +56,4 @@ runner 固定常量（不可由环境覆盖，`--selftest` 会逐项验证 guard
 - [开发环境与 Linux Emulator](development-environment.md)（HOME 布局、持久化、检查脚本）
 - [证据与脱敏 Schema](evidence-schema.md)（`record_status`/`verdict` 语义）
 - [R0 任务章程](r0-charter.md) 与 [双目标实施路线图](roadmap.md)（R0 基线、E1/E8 门）
-- [E3-PHYS-PREFLIGHT 计划](e3-physical-preflight.md)（blocked-awaiting-device-authorization、禁 PHYS-1 HDC）
+- [E3-PHYS-PREFLIGHT 计划](e3-physical-preflight.md)（当前 `AUTH-E3-PHYS1API26-20260810-0002` 授权下 `authorized-awaiting-windows-ready-freeze`；机器 fresh confirmation 完成前禁 PHYS-1 HDC，唯一例外为一次内存级 host-prep `hdc list targets`）
