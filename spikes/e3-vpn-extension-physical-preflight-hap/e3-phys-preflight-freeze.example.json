@@ -2,8 +2,8 @@
   "schema_version": 2,
   "plan_status": "blocked",
   "exception": "E3-PHYS-PREFLIGHT",
-  "evidence_id": "EV-E3-<TARGET-CODE>-<YYYYMMDD>-<SEQUENCE>",
-  "campaign_id": "E3-PHYS-PREFLIGHT-<CAMPAIGN-CODE>",
+  "evidence_id": "EV-E3-PHYS1API26-20260808-0001",
+  "campaign_id": "E3-PHYS-PREFLIGHT-20260808-0001",
   "attempt": "initial",
   "prior_blocked_binding": "N/A",
   "retry": {
@@ -74,6 +74,18 @@
   "cleanup_baseline_frozen": true,
   "collection_ready": true,
   "independent_review_ready": true,
+  "independent_review_record": {
+    "status": "pending",
+    "record_path": "<OUT-OF-REPO-READY-FREEZE-REVIEW-RECORD-PATH>",
+    "record_sha256": "<SHA256-OF-THE-READY-FREEZE-REVIEW-RECORD>",
+    "reviewer_role": "<SEPARATE-REVIEWER-ROLE>"
+  },
+  "machine_fresh_confirmation": {
+    "status": "pending",
+    "authorization_id": "AUTH-E3-PHYS1API26-20260810-0001",
+    "record_path": "<OUT-OF-REPO-TARGET-BINDING-CONFIRMATION-RECORD-PATH>",
+    "record_sha256": "<SHA256-OF-THE-CONFIRMATION-RECORD>"
+  },
   "operator_role": "<AUTHORIZED-OPERATOR-ROLE>",
   "independent_reviewer_role": "<SEPARATE-REVIEWER-ROLE>"
 }

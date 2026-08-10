@@ -12,7 +12,9 @@ param(
     [switch]$DryRun,
     [switch]$LiveSimulation,
     [string]$SimulationFixture,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$TargetBindingConfirm,
+    [string]$ConfirmationRecord
 )
 
 Set-StrictMode -Version Latest
@@ -25,7 +27,7 @@ $script:Module = 'entry'
 $script:Staging = '/data/local/tmp/e3-phys-preflight'
 $script:WindowSeconds = 60
 $script:NoDeviceMode = [bool]($DryRun -or $LiveSimulation -or $SelfTest)
-$script:ExecutionMode = if ($DryRun) { 'dry-run' } elseif ($LiveSimulation) { 'live-simulation' } else { 'live' }
+$script:ExecutionMode = if ($TargetBindingConfirm) { 'target-binding-confirm' } elseif ($DryRun) { 'dry-run' } elseif ($LiveSimulation) { 'live-simulation' } else { 'live' }
 $script:HdcProcessStartCount = 0
 $script:HdcLogicalCallCount = 0
 $script:HdcOperationCounts = @{}
@@ -77,6 +79,15 @@ $script:VerifiedRequests = @{}
 # next prompt. Auto StartEntry ENTRY events are not UI actions and never trigger the guard.
 $script:OperatorActionGuardFrom = $null
 $script:LastCaptureInfrastructure = $false
+# ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one candidate pair, and
+# attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
+# (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
+# retry requires new governance and a new authorization and can never consume this AUTH path.
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260810-0001'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260808-0001'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260808-0001'
+$script:MachineFreshConfirmation = $null
+$script:IndependentReviewRecord = $null
 $script:SimulationActiveBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $script:SimulationScenarioStepsWritten = @{}
 
@@ -135,6 +146,33 @@ function Assert-JsonBoolean {
     if ($null -eq $value -or $value.GetType() -ne [bool] -or $value -ne $Expected) {
         throw "$Name must be the JSON Boolean $($Expected.ToString().ToLowerInvariant())"
     }
+}
+
+function Test-JsonInteger {
+    param($Value)
+    # ADJ-20260810-0001 (C6): JSON integer gate. PowerShell's ConvertFrom-Json yields Int32 for
+    # small integers and Int64 for large ones, so both are accepted; strings, floats, booleans and
+    # null are rejected (a string that casts to a number must never pass an integer schema check).
+    return $null -ne $Value -and ($Value.GetType() -eq [int] -or $Value.GetType() -eq [long])
+}
+
+function Convert-ToDateTimeOffset {
+    param($Value)
+    # ADJ-20260810-0001 (C6): strict timestamp coercion for governance records (confirmation and
+    # independent review). Accepts ISO-8601 strings, [DateTime], and [DateTimeOffset] inputs and
+    # returns a DateTimeOffset, or $null when unparseable. Never round-trips through
+    # [string][datetime] (which loses subsecond precision and depends on the host locale); an
+    # already-typed DateTimeOffset passes through untouched. Both consumers use this helper so the
+    # machine confirmation and the review record parse timestamps identically.
+    if ($Value -is [DateTimeOffset]) { return $Value }
+    if ($Value -is [DateTime]) {
+        try { return [DateTimeOffset]::new([DateTime]$Value) } catch { return $null }
+    }
+    if ($Value -is [string] -and -not [string]::IsNullOrWhiteSpace($Value)) {
+        $parsed = [DateTimeOffset]::MinValue
+        if ([DateTimeOffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$parsed)) { return $parsed }
+    }
+    return $null
 }
 
 function Protect-SensitiveText {
@@ -414,37 +452,40 @@ function Assert-FileHash {
 
 function Get-FreezeContract {
     param([Parameter(Mandatory)]$Freeze)
+    # ADJ-20260810-0001 (C6): null-safe projection so minimal test freezes can be hashed without
+    # StrictMode property errors; a complete freeze yields byte-identical output to the historical
+    # direct-access form (same ordered fields, same values).
     return [ordered]@{
-        exception = $Freeze.exception
-        campaign_id = $Freeze.campaign_id
-        scenario_window_seconds = $Freeze.scenario_window_seconds
-        device_alias = $Freeze.device_alias
-        target_tuple = $Freeze.target_tuple
-        settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
-        settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
-        settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
-        settings_vpn_page_policy = $Freeze.settings_vpn_page_policy
-        destroy_terminal_policy = $Freeze.destroy_terminal_policy
-        process_absent_required_count = $Freeze.process_absent_required_count
-        process_absent_probe_spacing_seconds = $Freeze.process_absent_probe_spacing_seconds
-        process_probe_target = $Freeze.process_probe_target
-        operator_trust_model = $Freeze.operator_trust_model
-        scenario_invalid_policy = $Freeze.scenario_invalid_policy
-        layout_verification_profile = $Freeze.layout_verification_profile
-        vpn_conflict_rejection_codes = $Freeze.vpn_conflict_rejection_codes
-        signing = $Freeze.signing
-        artifact_sha256 = $Freeze.artifact_sha256
-        source = $Freeze.source
-        sdk = $Freeze.sdk
-        hdc = $Freeze.hdc
-        runner_sha256 = $Freeze.runner_sha256
-        code_sha = $Freeze.code_sha
-        preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
-        cleanup_baseline_frozen = $Freeze.cleanup_baseline_frozen
-        collection_ready = $Freeze.collection_ready
-        independent_review_ready = $Freeze.independent_review_ready
-        operator_role = $Freeze.operator_role
-        independent_reviewer_role = $Freeze.independent_reviewer_role
+        exception = Get-OptionalProperty $Freeze 'exception' $null
+        campaign_id = Get-OptionalProperty $Freeze 'campaign_id' $null
+        scenario_window_seconds = Get-OptionalProperty $Freeze 'scenario_window_seconds' $null
+        device_alias = Get-OptionalProperty $Freeze 'device_alias' $null
+        target_tuple = Get-OptionalProperty $Freeze 'target_tuple' $null
+        settings_reallow_expected_path = Get-OptionalProperty $Freeze 'settings_reallow_expected_path' $null
+        settings_reallow_path_policy = Get-OptionalProperty $Freeze 'settings_reallow_path_policy' $null
+        settings_revoke_mechanism = Get-OptionalProperty $Freeze 'settings_revoke_mechanism' $null
+        settings_vpn_page_policy = Get-OptionalProperty $Freeze 'settings_vpn_page_policy' $null
+        destroy_terminal_policy = Get-OptionalProperty $Freeze 'destroy_terminal_policy' $null
+        process_absent_required_count = Get-OptionalProperty $Freeze 'process_absent_required_count' $null
+        process_absent_probe_spacing_seconds = Get-OptionalProperty $Freeze 'process_absent_probe_spacing_seconds' $null
+        process_probe_target = Get-OptionalProperty $Freeze 'process_probe_target' $null
+        operator_trust_model = Get-OptionalProperty $Freeze 'operator_trust_model' $null
+        scenario_invalid_policy = Get-OptionalProperty $Freeze 'scenario_invalid_policy' $null
+        layout_verification_profile = Get-OptionalProperty $Freeze 'layout_verification_profile' $null
+        vpn_conflict_rejection_codes = Get-OptionalProperty $Freeze 'vpn_conflict_rejection_codes' $null
+        signing = Get-OptionalProperty $Freeze 'signing' $null
+        artifact_sha256 = Get-OptionalProperty $Freeze 'artifact_sha256' $null
+        source = Get-OptionalProperty $Freeze 'source' $null
+        sdk = Get-OptionalProperty $Freeze 'sdk' $null
+        hdc = Get-OptionalProperty $Freeze 'hdc' $null
+        runner_sha256 = Get-OptionalProperty $Freeze 'runner_sha256' $null
+        code_sha = Get-OptionalProperty $Freeze 'code_sha' $null
+        preflight_inputs_frozen_at = Get-OptionalProperty $Freeze 'preflight_inputs_frozen_at' $null
+        cleanup_baseline_frozen = Get-OptionalProperty $Freeze 'cleanup_baseline_frozen' $null
+        collection_ready = Get-OptionalProperty $Freeze 'collection_ready' $null
+        independent_review_ready = Get-OptionalProperty $Freeze 'independent_review_ready' $null
+        operator_role = Get-OptionalProperty $Freeze 'operator_role' $null
+        independent_reviewer_role = Get-OptionalProperty $Freeze 'independent_reviewer_role' $null
     }
 }
 
@@ -453,12 +494,66 @@ function Get-FreezeContractSha256 {
     return Get-TextSha256 ((Get-FreezeContract $Freeze) | ConvertTo-Json -Depth 30 -Compress)
 }
 
+function Get-ConfirmationContract {
+    param([Parameter(Mandatory)]$Freeze)
+    # ADJ-20260810-0001 (C6): stable two-phase projection. The full Get-FreezeContract includes
+    # governance/time fields that legitimately differ between the blocked confirmation freeze and
+    # the final ready freeze (preflight_inputs_frozen_at advances past the machine confirmation
+    # and independent review end times, plan_status flips blocked->ready, independent_review_ready
+    # is a phase readiness marker), so a confirmation/review record bound to the full contract
+    # would be rejected by the ready-phase consumer (contract hash changed) or by its own time
+    # gate (frozen_at not advanced). Get-ConfirmationContract covers the execution core, the exact
+    # candidate pair, external inputs, code, runner, HDC, and roles - everything that must be
+    # byte-identical across the two phases - and deliberately excludes plan_status,
+    # preflight_inputs_frozen_at, machine_fresh_confirmation, independent_review_record, and
+    # independent_review_ready. cleanup_baseline_frozen / collection_ready are static execution
+    # prerequisites (both true in every freeze) and operator/reviewer roles are confirmation-time
+    # facts, so they stay in the projection.
+    return [ordered]@{
+        exception = Get-OptionalProperty $Freeze 'exception' $null
+        campaign_id = Get-OptionalProperty $Freeze 'campaign_id' $null
+        evidence_id = Get-OptionalProperty $Freeze 'evidence_id' $null
+        scenario_window_seconds = Get-OptionalProperty $Freeze 'scenario_window_seconds' $null
+        device_alias = Get-OptionalProperty $Freeze 'device_alias' $null
+        target_tuple = Get-OptionalProperty $Freeze 'target_tuple' $null
+        settings_reallow_expected_path = Get-OptionalProperty $Freeze 'settings_reallow_expected_path' $null
+        settings_reallow_path_policy = Get-OptionalProperty $Freeze 'settings_reallow_path_policy' $null
+        settings_revoke_mechanism = Get-OptionalProperty $Freeze 'settings_revoke_mechanism' $null
+        settings_vpn_page_policy = Get-OptionalProperty $Freeze 'settings_vpn_page_policy' $null
+        destroy_terminal_policy = Get-OptionalProperty $Freeze 'destroy_terminal_policy' $null
+        process_absent_required_count = Get-OptionalProperty $Freeze 'process_absent_required_count' $null
+        process_absent_probe_spacing_seconds = Get-OptionalProperty $Freeze 'process_absent_probe_spacing_seconds' $null
+        process_probe_target = Get-OptionalProperty $Freeze 'process_probe_target' $null
+        operator_trust_model = Get-OptionalProperty $Freeze 'operator_trust_model' $null
+        scenario_invalid_policy = Get-OptionalProperty $Freeze 'scenario_invalid_policy' $null
+        layout_verification_profile = Get-OptionalProperty $Freeze 'layout_verification_profile' $null
+        vpn_conflict_rejection_codes = Get-OptionalProperty $Freeze 'vpn_conflict_rejection_codes' $null
+        signing = Get-OptionalProperty $Freeze 'signing' $null
+        artifact_sha256 = Get-OptionalProperty $Freeze 'artifact_sha256' $null
+        source = Get-OptionalProperty $Freeze 'source' $null
+        sdk = Get-OptionalProperty $Freeze 'sdk' $null
+        hdc = Get-OptionalProperty $Freeze 'hdc' $null
+        runner_sha256 = Get-OptionalProperty $Freeze 'runner_sha256' $null
+        code_sha = Get-OptionalProperty $Freeze 'code_sha' $null
+        cleanup_baseline_frozen = Get-OptionalProperty $Freeze 'cleanup_baseline_frozen' $null
+        collection_ready = Get-OptionalProperty $Freeze 'collection_ready' $null
+        operator_role = Get-OptionalProperty $Freeze 'operator_role' $null
+        independent_reviewer_role = Get-OptionalProperty $Freeze 'independent_reviewer_role' $null
+    }
+}
+
+function Get-ConfirmationContractSha256 {
+    param([Parameter(Mandatory)]$Freeze)
+    return Get-TextSha256 ((Get-ConfirmationContract $Freeze) | ConvertTo-Json -Depth 30 -Compress)
+}
+
 function Assert-FreezeManifest {
     param([Parameter(Mandatory)]$Freeze, [Parameter(Mandatory)][string]$FreezePath)
-    if ((Get-RequiredProperty $Freeze 'schema_version') -ne 2) { throw 'unsupported freeze schema_version; strong operator state machine requires schema_version 2' }
+    $schemaVersion = Get-RequiredProperty $Freeze 'schema_version'
+    if (-not (Test-JsonInteger $schemaVersion) -or [long]$schemaVersion -ne 2) { throw 'unsupported freeze schema_version; strong operator state machine requires schema_version 2 as a JSON integer' }
     $planStatus = [string](Get-RequiredProperty $Freeze 'plan_status')
-    if ($DryRun) {
-        if ($planStatus -notin @('blocked', 'ready')) { throw 'DryRun plan_status must be blocked or ready' }
+    if ($DryRun -or $TargetBindingConfirm) {
+        if ($planStatus -notin @('blocked', 'ready')) { throw 'DryRun and TargetBindingConfirm plan_status must be blocked or ready' }
     } elseif ($planStatus -ne 'ready') {
         throw 'Live and LiveSimulation require plan_status ready'
     }
@@ -498,6 +593,19 @@ function Assert-FreezeManifest {
             $priorArtifactCanonical -ne $frozenArtifactCanonical -or
             [string](Get-RequiredProperty $prior 'freeze_contract_sha256') -ne (Get-FreezeContractSha256 $Freeze)) {
             throw 'prior record does not authorize the single infrastructure-blocked retry'
+        }
+    }
+    # ADJ-20260810-0001 (C6): the current AUTH fixes one candidate pair and attempt=initial. The
+    # TargetBindingConfirm producer enforces the exact pair and initial attempt with retry N/A; the
+    # generic infrastructure retry branch never applies to this AUTH path (any retry requires new
+    # governance and a new authorization, and can never be issued under the current AUTH).
+    if ($TargetBindingConfirm) {
+        if ($campaignId -ne $script:CandidateCampaignId -or $evidenceId -ne $script:CandidateEvidenceId) {
+            throw "TargetBindingConfirm under $($script:AuthId) requires the fixed candidate pair $($script:CandidateCampaignId) / $($script:CandidateEvidenceId)"
+        }
+        if ($attempt -ne 'initial') { throw 'TargetBindingConfirm under the current AUTH fixes attempt=initial; retries require new governance and cannot enter this path' }
+        if ([string](Get-RequiredProperty $retry 'basis') -ne 'N/A' -or [string](Get-RequiredProperty $retry 'infrastructure_reason') -ne 'N/A') {
+            throw 'TargetBindingConfirm under the current AUTH fixes retry.basis/infrastructure_reason=N/A'
         }
     }
     if ([int](Get-RequiredProperty $Freeze 'scenario_window_seconds') -ne 60) { throw 'scenario window must be exactly 60 seconds' }
@@ -594,8 +702,8 @@ function Assert-FreezeManifest {
     Assert-FileHash 'HDC executable' (Get-NormalizedPath $HdcPath) ([string](Get-RequiredProperty $hdc 'sha256'))
     Assert-FileHash 'runner' $PSCommandPath ([string](Get-RequiredProperty $Freeze 'runner_sha256'))
     if ([string](Get-RequiredProperty $Freeze 'code_sha') -notmatch '^[0-9a-f]{40}$') { throw 'code_sha incomplete' }
-    $frozenAt = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse([string](Get-RequiredProperty $Freeze 'preflight_inputs_frozen_at'), [ref]$frozenAt)) {
+    $frozenAt = Convert-ToDateTimeOffset (Get-RequiredProperty $Freeze 'preflight_inputs_frozen_at')
+    if ($null -eq $frozenAt) {
         throw 'preflight_inputs_frozen_at invalid'
     }
     foreach ($role in @('operator_role', 'independent_reviewer_role')) {
@@ -606,8 +714,493 @@ function Assert-FreezeManifest {
     Assert-JsonBoolean $Freeze 'cleanup_baseline_frozen' $true
     Assert-JsonBoolean $Freeze 'collection_ready' $true
     Assert-JsonBoolean $Freeze 'independent_review_ready' $true
+    # ADJ-20260810-0001 (C6): independent review record gate. A blocked confirmation freeze keeps
+    # independent_review_ready=true as a static contract/role readiness marker and does NOT need a
+    # review record; ready Live / ready DryRun require a real pass review record with an
+    # out-of-repo JSON + matching .sha256 companion (enforced in Assert-IndependentReviewRecord).
+    $reviewRecord = Get-OptionalProperty $Freeze 'independent_review_record' $null
+    if ($null -eq $reviewRecord) {
+        if (-not $TargetBindingConfirm) { throw 'freeze manifest missing property: independent_review_record' }
+    } else {
+        $reviewStatus = [string](Get-OptionalProperty $reviewRecord 'status' '')
+        if ($reviewStatus -notin @('pending', 'pass')) { throw 'independent_review_record.status must be pending or pass' }
+        if ($reviewStatus -eq 'pass') {
+            if ([string]::IsNullOrWhiteSpace([string](Get-OptionalProperty $reviewRecord 'record_path' '')) -or [string]::IsNullOrWhiteSpace([string](Get-OptionalProperty $reviewRecord 'record_sha256' ''))) {
+                throw 'independent_review_record with status=pass requires record_path and record_sha256'
+            }
+        }
+    }
     if (-not (Test-Path -LiteralPath $FreezePath -PathType Leaf)) { throw 'FreezeManifest file missing' }
     [void](Get-PriorBlockedBinding $Freeze)
+    [void](Assert-MachineFreshConfirmation $Freeze)
+}
+
+function Assert-ModeExclusivity {
+    # ADJ-20260810-0001: TargetBindingConfirm is a host-governed, mutually exclusive single-purpose
+    # mode. It runs real HDC target-binding probes and therefore can never be combined with the
+    # host-only modes (DryRun / LiveSimulation / SelfTest); ConfirmationRecord belongs only to it;
+    # and confirm mode never initializes campaign roots, so EvidenceRoot/RawRoot are rejected
+    # explicitly rather than silently ignored. This gate runs before the SelfTest early exit so
+    # invalid switch combinations are rejected even when -SelfTest is present.
+    if ($TargetBindingConfirm -and ($DryRun -or $LiveSimulation -or $SelfTest)) { throw 'TargetBindingConfirm is mutually exclusive with DryRun, LiveSimulation, and SelfTest' }
+    if ($TargetBindingConfirm -and [string]::IsNullOrWhiteSpace($ConfirmationRecord)) { throw 'TargetBindingConfirm requires ConfirmationRecord' }
+    if (-not $TargetBindingConfirm -and -not [string]::IsNullOrWhiteSpace($ConfirmationRecord)) { throw 'ConfirmationRecord is only valid with TargetBindingConfirm' }
+    if ($TargetBindingConfirm -and -not [string]::IsNullOrWhiteSpace($EvidenceRoot)) { throw 'EvidenceRoot is not allowed with TargetBindingConfirm' }
+    if ($TargetBindingConfirm -and -not [string]::IsNullOrWhiteSpace($RawRoot)) { throw 'RawRoot is not allowed with TargetBindingConfirm' }
+    if ($DryRun -and $LiveSimulation) { throw 'DryRun and LiveSimulation are mutually exclusive' }
+}
+
+function Assert-MachineFreshConfirmation {
+    param([Parameter(Mandatory)]$Freeze)
+    # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
+    # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
+    # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260810-0001 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260808-0001 / EV-E3-PHYS1API26-20260808-0001, with a real
+    # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
+    # is never consumable) whose content agrees with the freeze on schema/record kind/
+    # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
+    # model/build and whose time anchors satisfy started_at <= ended_at <=
+    # preflight_inputs_frozen_at. No arbitrary age window is imposed: freshness is anchored only
+    # by ordering plus the freeze preflight_inputs_frozen_at, and Live independently re-executes
+    # the three target-binding probes during its own preflight (fresh double anchor). DryRun with
+    # a blocked plan_status and LiveSimulation (synthetic fixtures have no physical record) do not
+    # require it. Any retry under this AUTH is impossible: attempt is fixed to initial and the
+    # generic infrastructure retry branch never applies to this confirmation path.
+    if ($TargetBindingConfirm) { return $null }
+    $planStatus = [string]$Freeze.plan_status
+    $requirePass = ($script:ExecutionMode -eq 'live' -and -not $LiveSimulation) -or ($DryRun -and $planStatus -eq 'ready')
+    $confirmation = Get-OptionalProperty $Freeze 'machine_fresh_confirmation' $null
+    $confirmationStatus = if ($null -eq $confirmation) { '' } else { [string](Get-OptionalProperty $confirmation 'status' '') }
+    # ADJ-20260810-0001 (C6): a blocked DryRun that declares status=pass is FULLY validated too
+    # (a blocked DryRun can never hide a broken binding); status=pending or absent is allowed and
+    # skipped on a blocked DryRun.
+    $validateMachine = $requirePass -or ($DryRun -and $planStatus -eq 'blocked' -and $confirmationStatus -eq 'pass')
+    if (-not $validateMachine) {
+        # ADJ-20260810-0001 (C6): a blocked DryRun may skip a pending/absent machine confirmation,
+        # but a declared-pass independent review can never ride on it: the review record binds the
+        # machine confirmation hash, so a pending/absent machine side makes the declared pass
+        # unverifiable and is rejected outright.
+        if ($DryRun -and $planStatus -eq 'blocked') {
+            $review = Get-OptionalProperty $Freeze 'independent_review_record' $null
+            $reviewStatus = if ($null -eq $review) { '' } else { [string](Get-OptionalProperty $review 'status' '') }
+            if ($reviewStatus -eq 'pass') { throw 'independent_review_record.status=pass requires machine_fresh_confirmation.status=pass; a pending/absent machine confirmation cannot anchor a declared-pass review' }
+        }
+        return $null
+    }
+    if ($requirePass -and $null -eq $confirmation) { throw 'a ready plan_status requires machine_fresh_confirmation with status=pass and a bound target-binding confirmation record' }
+    if ($confirmationStatus -ne 'pass') { throw 'machine_fresh_confirmation.status must be pass for a ready plan_status' }
+    $authorizationId = [string](Get-OptionalProperty $confirmation 'authorization_id' '')
+    if ($authorizationId -ne $script:AuthId) { throw "machine_fresh_confirmation.authorization_id does not match $($script:AuthId)" }
+    if ([string](Get-OptionalProperty $Freeze 'campaign_id') -ne $script:CandidateCampaignId -or [string](Get-OptionalProperty $Freeze 'evidence_id') -ne $script:CandidateEvidenceId) {
+        throw "AUTH $($script:AuthId) fixes the candidate pair $($script:CandidateCampaignId) / $($script:CandidateEvidenceId); a ready freeze outside that pair cannot consume its confirmation"
+    }
+    if ([string](Get-OptionalProperty $Freeze 'attempt') -ne 'initial') { throw 'the current AUTH fixes attempt=initial; retries require new governance and can never consume this confirmation' }
+    $frozenRetry = Get-OptionalProperty $Freeze 'retry' $null
+    if ($null -ne $frozenRetry) {
+        if ([string](Get-OptionalProperty $frozenRetry 'basis' '') -ne 'N/A' -or [string](Get-OptionalProperty $frozenRetry 'infrastructure_reason' '') -ne 'N/A') {
+            throw 'the current AUTH fixes retry.basis/infrastructure_reason=N/A; the generic infrastructure retry branch never applies to this confirmation path'
+        }
+    }
+    $recordPathInput = [string](Get-OptionalProperty $confirmation 'record_path' '')
+    if ([string]::IsNullOrWhiteSpace($recordPathInput)) { throw 'machine_fresh_confirmation.record_path missing' }
+    $recordPath = Get-NormalizedPath $recordPathInput
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'confirmation record file missing' }
+    if ($null -ne $script:RepoRoot -and ($recordPath -eq $script:RepoRoot -or (Test-IsUnderPath $recordPath $script:RepoRoot))) {
+        throw 'confirmation record must be outside the git repository'
+    }
+    Assert-NoReparseAncestor $recordPath
+    $companionPath = $recordPath + '.sha256'
+    Assert-NoReparseAncestor $companionPath
+    if (-not (Test-Path -LiteralPath $companionPath -PathType Leaf)) { throw 'confirmation record .sha256 companion missing; a lone record is never consumable' }
+    $companionValue = [string](Get-Content -LiteralPath $companionPath -Raw).Trim()
+    if ($companionValue -notmatch '^[0-9a-f]{64}$') { throw 'confirmation record companion does not contain a final SHA-256' }
+    if ($companionValue -ne (Get-FileSha256 $recordPath)) { throw 'confirmation record .sha256 companion does not match the record bytes' }
+    Assert-FileHash 'confirmation record' $recordPath ([string](Get-OptionalProperty $confirmation 'record_sha256' ''))
+    $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json -Depth 40
+    # ADJ-20260810-0001 (C6): exact-schema gate - any unknown top-level field (e.g. a target/serial/
+    # secret canary smuggled into the record) makes the record un-consumable.
+    $confirmationAllowedFields = @('schema_version', 'record_kind', 'is_evidence', 'authorization_id', 'exception', 'campaign_id', 'evidence_id', 'attempt', 'retry', 'plan_status', 'device_alias', 'target_redacted', 'code_sha', 'runner_sha256', 'freeze_manifest_sha256', 'confirmation_contract_sha256', 'hdc_sha256', 'hdc_version', 'expected_model', 'expected_build', 'observed_model', 'observed_build', 'started_at', 'ended_at', 'command_attempted', 'command_completed', 'command_count', 'repository_fingerprint', 'verdict', 'reason')
+    foreach ($recordProperty in $record.PSObject.Properties) {
+        if ($recordProperty.Name -notin $confirmationAllowedFields) {
+            throw "confirmation record has an unknown top-level field: $($recordProperty.Name)"
+        }
+    }
+    function Get-ConfirmationField {
+        param($Object, [Parameter(Mandatory)][string]$Name)
+        $value = [string](Get-OptionalProperty $Object $Name '')
+        if ([string]::IsNullOrWhiteSpace($value)) { throw "confirmation record missing or empty field: $Name" }
+        return $value
+    }
+    $recordSchema = Get-OptionalProperty $record 'schema_version' $null
+    if (-not (Test-JsonInteger $recordSchema) -or [long]$recordSchema -ne 1) { throw 'confirmation record schema_version must be 1' }
+    if ((Get-ConfirmationField $record 'record_kind') -ne 'target-binding-confirmation') { throw 'confirmation record record_kind mismatch' }
+    if ((Get-ConfirmationField $record 'exception') -ne 'E3-PHYS-PREFLIGHT') { throw 'confirmation record exception mismatch' }
+    $recordIsEvidence = Get-OptionalProperty $record 'is_evidence' $null
+    if ($null -eq $recordIsEvidence -or $recordIsEvidence.GetType() -ne [bool] -or $recordIsEvidence) { throw 'confirmation record must be is_evidence=false' }
+    if ((Get-ConfirmationField $record 'verdict') -ne 'pass') { throw 'confirmation record verdict must be pass' }
+    if ((Get-ConfirmationField $record 'reason') -ne 'N/A') { throw 'confirmation record reason must be N/A for a pass verdict' }
+    if ((Get-ConfirmationField $record 'authorization_id') -ne $authorizationId) { throw 'confirmation record authorization_id mismatch' }
+    if ((Get-ConfirmationField $record 'campaign_id') -ne $script:CandidateCampaignId -or (Get-ConfirmationField $record 'evidence_id') -ne $script:CandidateEvidenceId) {
+        throw 'confirmation record candidate IDs do not match the fixed AUTH candidate pair'
+    }
+    if ((Get-ConfirmationField $record 'attempt') -ne 'initial') { throw 'confirmation record attempt must be initial under the current AUTH' }
+    $recordRetry = Get-OptionalProperty $record 'retry' $null
+    if ($null -eq $recordRetry -or [string](Get-OptionalProperty $recordRetry 'basis' '') -ne 'N/A' -or [string](Get-OptionalProperty $recordRetry 'infrastructure_reason' '') -ne 'N/A') {
+        throw 'confirmation record retry.basis/infrastructure_reason must be N/A under the current AUTH'
+    }
+    if ((Get-ConfirmationField $record 'device_alias') -ne 'PHYS-1') { throw 'confirmation record device_alias must be PHYS-1' }
+    $recordTargetRedacted = Get-OptionalProperty $record 'target_redacted' $null
+    if ($null -eq $recordTargetRedacted -or $recordTargetRedacted.GetType() -ne [bool] -or -not $recordTargetRedacted) { throw 'confirmation record target_redacted must be true' }
+    if ((Get-ConfirmationField $record 'code_sha') -ne [string]$Freeze.code_sha) { throw 'confirmation record code_sha does not match the freeze' }
+    if ((Get-ConfirmationField $record 'runner_sha256') -ne [string]$Freeze.runner_sha256) { throw 'confirmation record runner_sha256 does not match the freeze' }
+    if ((Get-ConfirmationField $record 'hdc_sha256') -ne [string]$Freeze.hdc.sha256) { throw 'confirmation record hdc_sha256 does not match the freeze' }
+    if ((Get-ConfirmationField $record 'hdc_version') -ne [string]$Freeze.hdc.version) { throw 'confirmation record hdc_version does not match the freeze' }
+    if ((Get-ConfirmationField $record 'confirmation_contract_sha256') -ne (Get-ConfirmationContractSha256 $Freeze)) { throw 'confirmation record confirmation_contract_sha256 does not match the current confirmation contract' }
+    $expectedModel = (Get-ConfirmationField $record 'expected_model')
+    $expectedBuild = (Get-ConfirmationField $record 'expected_build')
+    $observedModel = (Get-ConfirmationField $record 'observed_model')
+    $observedBuild = (Get-ConfirmationField $record 'observed_build')
+    if ($expectedModel -ne [string]$Freeze.target_tuple.device_model -or $expectedBuild -ne [string]$Freeze.target_tuple.full_system_build) { throw 'confirmation record expected model/build do not match the freeze tuple' }
+    if ($observedModel -ne $expectedModel -or $observedBuild -ne $expectedBuild) { throw 'confirmation record observed model/build do not match the expected frozen tuple' }
+    $attempted = Get-OptionalProperty $record 'command_attempted' $null
+    $completed = Get-OptionalProperty $record 'command_completed' $null
+    if (-not (Test-JsonInteger $attempted) -or [long]$attempted -ne 3 -or -not (Test-JsonInteger $completed) -or [long]$completed -ne 3) {
+        throw 'confirmation record command_attempted and command_completed must both be exactly 3 for a pass'
+    }
+    # ADJ-20260810-0001 (C6): command_count is the producer's compatibility alias of
+    # command_completed; when present it must agree (integer, equal), never drift independently.
+    $commandCount = Get-OptionalProperty $record 'command_count' $null
+    if ($null -ne $commandCount -and (-not (Test-JsonInteger $commandCount) -or [long]$commandCount -ne [long]$completed)) {
+        throw 'confirmation record command_count must equal command_completed (compatibility alias) for a pass'
+    }
+    $startedAt = Convert-ToDateTimeOffset (Get-ConfirmationField $record 'started_at')
+    $endedAt = Convert-ToDateTimeOffset (Get-ConfirmationField $record 'ended_at')
+    $frozenAt = Convert-ToDateTimeOffset (Get-OptionalProperty $Freeze 'preflight_inputs_frozen_at' $null)
+    if ($null -eq $startedAt -or $null -eq $endedAt -or $null -eq $frozenAt) {
+        throw 'confirmation record started_at/ended_at or freeze preflight_inputs_frozen_at invalid'
+    }
+    if ($startedAt -gt $endedAt) { throw 'confirmation record started_at must not be after ended_at' }
+    if ($endedAt -gt $frozenAt) { throw 'confirmation record ended_at must be no later than freeze preflight_inputs_frozen_at' }
+    # ADJ-20260810-0001 (C6): ready Live / ready DryRun additionally require the independent review
+    # record mechanical gate (out-of-repo review record + companion bound to this freeze contract).
+    [void](Assert-IndependentReviewRecord $Freeze)
+    $script:MachineFreshConfirmation = [ordered]@{
+        status = 'pass'
+        authorization_id = $authorizationId
+        record_sha256 = [string](Get-OptionalProperty $confirmation 'record_sha256' '')
+        record_path_sha256 = Get-TextSha256 $recordPath
+    }
+    return [pscustomobject]@{ RecordPath = $recordPath; RecordSha256 = [string](Get-OptionalProperty $confirmation 'record_sha256' '') }
+}
+
+function Assert-IndependentReviewRecord {
+    param([Parameter(Mandatory)]$Freeze)
+    # ADJ-20260810-0001 (C6): ready Live / ready DryRun require a mechanical independent-review
+    # record (out-of-repo JSON + matching .sha256 companion) proving the ready freeze contract was
+    # reviewed by a separate reviewer role. This replaces the self-declared
+    # independent_review_ready=true boolean as the execution gate: the boolean only represents
+    # static contract/role readiness on a blocked confirmation freeze and never gates a ready
+    # plan_status. The review record must bind the same freeze contract and the machine
+    # confirmation record hash so the three objects (confirmation record, review record, freeze)
+    # form one consistent chain. A blocked DryRun that declares review status=pass is FULLY
+    # validated too (ValidateDeclaredPass: a blocked DryRun can never hide a broken binding);
+    # status=pending or absent is allowed and skipped on a blocked DryRun, and a declared-pass
+    # review can never ride on a pending/absent machine confirmation.
+    if ($TargetBindingConfirm) { return $null }
+    $planStatus = [string]$Freeze.plan_status
+    $requirePass = ($script:ExecutionMode -eq 'live' -and -not $LiveSimulation) -or ($DryRun -and $planStatus -eq 'ready')
+    $review = Get-OptionalProperty $Freeze 'independent_review_record' $null
+    $reviewStatus = if ($null -eq $review) { '' } else { [string](Get-OptionalProperty $review 'status' '') }
+    $validateReview = $requirePass -or ($DryRun -and $planStatus -eq 'blocked' -and $reviewStatus -eq 'pass')
+    if (-not $validateReview) { return $null }
+    if ($requirePass -and $null -eq $review) { throw 'a ready plan_status requires independent_review_record.status=pass with a bound out-of-repository review record' }
+    if ($reviewStatus -ne 'pass') { throw 'independent_review_record.status must be pass for a ready plan_status; independent_review_ready=true alone is a static readiness marker and never an execution gate' }
+    $reviewerRole = [string](Get-OptionalProperty $review 'reviewer_role' '')
+    if ([string]::IsNullOrWhiteSpace($reviewerRole) -or $reviewerRole -ne [string]$Freeze.independent_reviewer_role) { throw 'independent_review_record.reviewer_role does not match the freeze independent_reviewer_role' }
+    $recordPathInput = [string](Get-OptionalProperty $review 'record_path' '')
+    if ([string]::IsNullOrWhiteSpace($recordPathInput)) { throw 'independent_review_record.record_path missing' }
+    $recordPath = Get-NormalizedPath $recordPathInput
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'independent review record file missing' }
+    if ($null -ne $script:RepoRoot -and ($recordPath -eq $script:RepoRoot -or (Test-IsUnderPath $recordPath $script:RepoRoot))) {
+        throw 'independent review record must be outside the git repository'
+    }
+    Assert-NoReparseAncestor $recordPath
+    $companionPath = $recordPath + '.sha256'
+    Assert-NoReparseAncestor $companionPath
+    if (-not (Test-Path -LiteralPath $companionPath -PathType Leaf)) { throw 'independent review record .sha256 companion missing; a lone record is never consumable' }
+    if ([string](Get-Content -LiteralPath $companionPath -Raw).Trim() -ne (Get-FileSha256 $recordPath)) { throw 'independent review record .sha256 companion does not match the record bytes' }
+    Assert-FileHash 'independent review record' $recordPath ([string](Get-OptionalProperty $review 'record_sha256' ''))
+    $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json -Depth 40
+    # ADJ-20260810-0001 (C6): exact-schema gate - any unknown top-level field (e.g. a target/serial/
+    # secret canary) makes the review record un-consumable.
+    $reviewAllowedFields = @('schema_version', 'record_kind', 'is_evidence', 'exception', 'campaign_id', 'evidence_id', 'code_sha', 'runner_sha256', 'confirmation_contract_sha256', 'machine_confirmation_sha256', 'reviewer_role', 'operator_role', 'verdict', 'blockers', 'majors', 'started_at', 'ended_at')
+    foreach ($recordProperty in $record.PSObject.Properties) {
+        if ($recordProperty.Name -notin $reviewAllowedFields) {
+            throw "independent review record has an unknown top-level field: $($recordProperty.Name)"
+        }
+    }
+    function Get-ReviewField {
+        param($Object, [Parameter(Mandatory)][string]$Name)
+        $value = [string](Get-OptionalProperty $Object $Name '')
+        if ([string]::IsNullOrWhiteSpace($value)) { throw "independent review record missing or empty field: $Name" }
+        return $value
+    }
+    $reviewSchema = Get-OptionalProperty $record 'schema_version' $null
+    if (-not (Test-JsonInteger $reviewSchema) -or [long]$reviewSchema -ne 1) { throw 'independent review record schema_version must be 1' }
+    if ((Get-ReviewField $record 'record_kind') -ne 'e3-ready-freeze-review') { throw 'independent review record record_kind mismatch' }
+    if ((Get-ReviewField $record 'exception') -ne 'E3-PHYS-PREFLIGHT') { throw 'independent review record exception mismatch' }
+    $reviewIsEvidence = Get-OptionalProperty $record 'is_evidence' $null
+    if ($null -eq $reviewIsEvidence -or $reviewIsEvidence.GetType() -ne [bool] -or $reviewIsEvidence) { throw 'independent review record must be is_evidence=false' }
+    if ((Get-ReviewField $record 'verdict') -ne 'pass') { throw 'independent review record verdict must be pass' }
+    $blockers = Get-OptionalProperty $record 'blockers' $null
+    $majors = Get-OptionalProperty $record 'majors' $null
+    if (-not (Test-JsonInteger $blockers) -or [long]$blockers -ne 0 -or -not (Test-JsonInteger $majors) -or [long]$majors -ne 0) {
+        throw 'independent review record requires blockers=0 and majors=0 for a pass verdict'
+    }
+    if ((Get-ReviewField $record 'reviewer_role') -ne $reviewerRole) { throw 'independent review record reviewer_role mismatch' }
+    if ($reviewerRole -eq [string]$Freeze.operator_role) { throw 'independent review record reviewer_role must differ from the operator role' }
+    if ((Get-ReviewField $record 'campaign_id') -ne $script:CandidateCampaignId -or (Get-ReviewField $record 'evidence_id') -ne $script:CandidateEvidenceId) {
+        throw 'independent review record candidate IDs do not match the fixed AUTH candidate pair'
+    }
+    if ((Get-ReviewField $record 'code_sha') -ne [string]$Freeze.code_sha) { throw 'independent review record code_sha does not match the freeze' }
+    if ((Get-ReviewField $record 'runner_sha256') -ne [string]$Freeze.runner_sha256) { throw 'independent review record runner_sha256 does not match the freeze' }
+    if ((Get-ReviewField $record 'confirmation_contract_sha256') -ne (Get-ConfirmationContractSha256 $Freeze)) { throw 'independent review record confirmation_contract_sha256 does not match the current confirmation contract' }
+    $machineConfirmation = Get-OptionalProperty $Freeze 'machine_fresh_confirmation' $null
+    if ($null -eq $machineConfirmation) { throw 'independent review record requires a bound machine_fresh_confirmation on the freeze' }
+    # ADJ-20260810-0001 (C6): a declared-pass review binds the machine confirmation hash, so the
+    # machine side must itself be a fully validated pass; a pending/absent machine confirmation
+    # can never anchor a declared-pass review.
+    if ([string](Get-OptionalProperty $machineConfirmation 'status' '') -ne 'pass') { throw 'independent review record requires machine_fresh_confirmation.status=pass; a pending/absent machine confirmation cannot anchor a declared-pass review' }
+    $machineSha = [string](Get-OptionalProperty $machineConfirmation 'record_sha256' '')
+    if ([string]::IsNullOrWhiteSpace($machineSha)) { throw 'independent review record requires machine_fresh_confirmation.record_sha256 on the freeze' }
+    if ((Get-ReviewField $record 'machine_confirmation_sha256') -ne $machineSha) { throw 'independent review record machine_confirmation_sha256 does not match the machine confirmation record' }
+    $reviewStarted = Convert-ToDateTimeOffset (Get-ReviewField $record 'started_at')
+    $reviewEnded = Convert-ToDateTimeOffset (Get-ReviewField $record 'ended_at')
+    $frozenAt = Convert-ToDateTimeOffset (Get-OptionalProperty $Freeze 'preflight_inputs_frozen_at' $null)
+    if ($null -eq $reviewStarted -or $null -eq $reviewEnded -or $null -eq $frozenAt) {
+        throw 'independent review record started_at/ended_at or freeze preflight_inputs_frozen_at invalid'
+    }
+    if ($reviewStarted -gt $reviewEnded) { throw 'independent review record started_at must not be after ended_at' }
+    if ($reviewEnded -gt $frozenAt) { throw 'independent review record ended_at must be no later than freeze preflight_inputs_frozen_at' }
+    # ADJ-20260810-0001 (C6): the review happens AFTER the machine confirmation: the review start is
+    # anchored to the bound machine confirmation record's ended_at, and the whole chain must fit
+    # before the FINAL ready freeze's preflight_inputs_frozen_at (machine confirmation ended_at
+    # <= review started_at <= review ended_at <= final freeze frozen_at). The blocked confirmation
+    # freeze / ready draft keep a provisional frozen_at that is excluded from this gate.
+    $machineRecordPath = Get-NormalizedPath ([string](Get-OptionalProperty $machineConfirmation 'record_path' ''))
+    if (-not (Test-Path -LiteralPath $machineRecordPath -PathType Leaf)) { throw 'independent review record requires the bound machine confirmation record file' }
+    $machineRecord = Get-Content -LiteralPath $machineRecordPath -Raw | ConvertFrom-Json -Depth 40
+    $machineEndedAt = Convert-ToDateTimeOffset (Get-OptionalProperty $machineRecord 'ended_at' $null)
+    if ($null -eq $machineEndedAt) { throw 'machine confirmation record ended_at invalid' }
+    if ($machineEndedAt -gt $reviewStarted) { throw 'independent review must start no earlier than the machine confirmation ended_at' }
+    $script:IndependentReviewRecord = [ordered]@{
+        status = 'pass'
+        reviewer_role = $reviewerRole
+        record_sha256 = [string](Get-OptionalProperty $review 'record_sha256' '')
+        record_path_sha256 = Get-TextSha256 $recordPath
+    }
+    return [pscustomobject]@{ RecordPath = $recordPath; RecordSha256 = [string](Get-OptionalProperty $review 'record_sha256' '') }
+}
+
+function Get-TargetBindingConfirmPlan {
+    # ADJ-20260810-0001: the complete host-governed confirm plan is exactly the three frozen
+    # target-binding probes already allowlisted by Get-HdcInvocation (Version / TupleModel /
+    # TupleBuild). No install, staging, capture, cleanup, bundle, or process query may ever appear.
+    return @(
+        @{ operation = 'Version'; parameters = @{} },
+        @{ operation = 'TupleModel'; parameters = @{} },
+        @{ operation = 'TupleBuild'; parameters = @{} }
+    )
+}
+
+function New-TargetBindingConfirmationRecord {
+    param(
+        [Parameter(Mandatory)]$Freeze,
+        [Parameter(Mandatory)][string]$FreezeSha256,
+        [Parameter(Mandatory)][string]$ConfirmationContractSha256,
+        [Parameter(Mandatory)]$RepositoryBefore,
+        [Parameter(Mandatory)][DateTimeOffset]$StartedAt,
+        [Parameter(Mandatory)][DateTimeOffset]$EndedAt,
+        [AllowNull()][string]$Verdict,
+        [AllowNull()][string]$Reason,
+        [AllowNull()][string]$ObservedVersion,
+        [AllowNull()][string]$ObservedModel,
+        [AllowNull()][string]$ObservedBuild,
+        [Parameter(Mandatory)][int]$CommandAttempted,
+        [Parameter(Mandatory)][int]$CommandCompleted
+    )
+    return [ordered]@{
+        schema_version = 1
+        record_kind = 'target-binding-confirmation'
+        is_evidence = $false
+        authorization_id = $script:AuthId
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = [string]$Freeze.campaign_id
+        evidence_id = [string]$Freeze.evidence_id
+        attempt = [string]$Freeze.attempt
+        retry = [ordered]@{
+            basis = [string]$Freeze.retry.basis
+            infrastructure_reason = [string]$Freeze.retry.infrastructure_reason
+        }
+        plan_status = [string]$Freeze.plan_status
+        device_alias = 'PHYS-1'
+        target_redacted = $true
+        code_sha = [string]$Freeze.code_sha
+        runner_sha256 = [string]$Freeze.runner_sha256
+        freeze_manifest_sha256 = $FreezeSha256
+        # ADJ-20260810-0001 (C6): the record binds the STABLE confirmation contract (the
+        # two-phase-invariant projection), not the full freeze contract: preflight_inputs_frozen_at
+        # and other governance/time fields legitimately advance between the blocked confirmation
+        # freeze and the final ready freeze, so the full-contract hash would never match at
+        # consumption time. The consumer and the ready review record verify this same value.
+        confirmation_contract_sha256 = $ConfirmationContractSha256
+        hdc_sha256 = [string]$Freeze.hdc.sha256
+        hdc_version = $ObservedVersion
+        expected_model = [string]$Freeze.target_tuple.device_model
+        expected_build = [string]$Freeze.target_tuple.full_system_build
+        observed_model = $ObservedModel
+        observed_build = $ObservedBuild
+        started_at = $StartedAt.ToString('o')
+        ended_at = $EndedAt.ToString('o')
+        # ADJ-20260810-0001 (C6): honest attempted/completed counts; command_count is a compatibility
+        # alias of command_completed. A pass verdict requires attempted=completed=3 (consumer-enforced).
+        command_attempted = $CommandAttempted
+        command_completed = $CommandCompleted
+        command_count = $CommandCompleted
+        repository_fingerprint = $RepositoryBefore.Fingerprint
+        verdict = $Verdict
+        reason = $(if ([string]::IsNullOrEmpty([string]$Reason)) { 'N/A' } else { [string]$Reason })
+    }
+}
+
+function Write-TargetBindingConfirmationRecordPair {
+    param([Parameter(Mandatory)][string]$RecordPath, [Parameter(Mandatory)]$Record)
+    # ADJ-20260810-0001 (C6): double-file completion marker. The JSON record and its .sha256
+    # companion are the atomic completion pair: a consumer only accepts the record when BOTH files
+    # exist and the companion matches the record bytes. The JSON tmp and the companion tmp are
+    # written first (no-clobber CreateNew) and the hash is recomputed over the tmp JSON; the JSON is
+    # atomic-moved into place, then the companion is atomic-moved LAST as the completion marker. If
+    # the companion move fails, the JSON is left as an orphan that is never consumed or overwritten.
+    $companionPath = $RecordPath + '.sha256'
+    foreach ($candidate in @($RecordPath, $companionPath)) {
+        if (Test-Path -LiteralPath $candidate) { throw "confirmation output already exists and is immutable: $candidate" }
+    }
+    $tmpJson = $RecordPath + '.tmp-' + [guid]::NewGuid().ToString('N')
+    $tmpSha = $companionPath + '.tmp-' + [guid]::NewGuid().ToString('N')
+    if (Test-Path -LiteralPath $tmpJson) { throw 'confirmation JSON temp candidate already exists' }
+    if (Test-Path -LiteralPath $tmpSha) { throw 'confirmation companion temp candidate already exists' }
+    $jsonMoved = $false
+    try {
+        $jsonBytes = [Text.Encoding]::UTF8.GetBytes(($Record | ConvertTo-Json -Depth 40) + [Environment]::NewLine)
+        $tmpStream = [IO.FileStream]::new($tmpJson, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $tmpStream.Write($jsonBytes, 0, $jsonBytes.Length); $tmpStream.Flush($true) } finally { $tmpStream.Dispose() }
+        $sha = Get-FileSha256 $tmpJson
+        $shaBytes = [Text.Encoding]::UTF8.GetBytes($sha + [Environment]::NewLine)
+        $shaStream = [IO.FileStream]::new($tmpSha, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $shaStream.Write($shaBytes, 0, $shaBytes.Length); $shaStream.Flush($true) } finally { $shaStream.Dispose() }
+        if ((Get-FileSha256 $tmpJson) -ne $sha) { throw 'confirmation record hash recompute mismatch' }
+        [IO.File]::Move($tmpJson, $RecordPath)
+        $jsonMoved = $true
+        [IO.File]::Move($tmpSha, $companionPath)
+    } finally {
+        # A moved-but-uncompanioned JSON is an orphan: never delete it (it is the only trace of the
+        # failure and the consumer requires the companion, so it can never be consumed or overwritten).
+        if (-not $jsonMoved -and (Test-Path -LiteralPath $tmpJson)) { Remove-Item -LiteralPath $tmpJson -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $tmpSha) { Remove-Item -LiteralPath $tmpSha -Force -ErrorAction SilentlyContinue }
+    }
+    return $sha
+}
+
+function Invoke-TargetBindingConfirm {
+    param(
+        [Parameter(Mandatory)]$Freeze,
+        [Parameter(Mandatory)][string]$FreezeSha256,
+        [Parameter(Mandatory)][string]$ConfirmationContractSha256,
+        [Parameter(Mandatory)]$RepositoryBefore
+    )
+    # ADJ-20260810-0001 host-governed machine fresh confirmation. The confirmation record is a
+    # single-use immutable out-of-repository double-file object (JSON + .sha256 companion); the real
+    # target never enters it. Pre-record gate failures (record path issues, a pre-existing
+    # record/companion) throw and exit 1 with NO record written. Probe/preflight failures (bad
+    # target token, environment, tuple drift) and record-write failures produce a best-effort
+    # blocked record + companion and exit 2; no campaign roots are ever created. A pass verdict
+    # requires attempted=completed=3 and a complete double-file pair.
+    $recordPath = Get-NormalizedPath $ConfirmationRecord
+    if (Test-IsUnderPath $recordPath $script:RepoRoot) { throw 'ConfirmationRecord must be outside the git repository' }
+    Assert-NoReparseAncestor $recordPath
+    $companionPath = $recordPath + '.sha256'
+    Assert-NoReparseAncestor $companionPath
+    # Single-use no-clobber gates: the record AND its companion must both be absent up front. A
+    # leftover orphan JSON from a previous companion failure is never overwritten and, because the
+    # consumer requires both files, is never consumable.
+    if (Test-Path -LiteralPath $recordPath) { throw 'ConfirmationRecord already exists; target-binding confirmation is single-use' }
+    if (Test-Path -LiteralPath $companionPath) { throw 'ConfirmationRecord .sha256 companion already exists; target-binding confirmation is single-use' }
+    $startedAt = Get-Now
+    $verdict = 'blocked'
+    $reason = $null
+    $observedVersion = $null
+    $observedModel = $null
+    $observedBuild = $null
+    $commandAttempted = 0
+    $commandCompleted = 0
+    try {
+        Assert-TargetEnvironment
+        foreach ($step in @(Get-TargetBindingConfirmPlan)) {
+            $commandAttempted++
+            $result = Invoke-HdcOperation $step.operation $step.parameters
+            $commandCompleted++
+            switch ($step.operation) {
+                'Version' { $observedVersion = $result.Stdout.Trim() }
+                'TupleModel' { $observedModel = $result.Stdout.Trim() }
+                'TupleBuild' { $observedBuild = $result.Stdout.Trim() }
+            }
+        }
+        if ($observedVersion -ne [string]$Freeze.hdc.version) { throw 'preflight: frozen HDC version mismatch' }
+        if ($observedModel -ne [string]$Freeze.target_tuple.device_model) { throw 'preflight: frozen device model mismatch' }
+        if ($observedBuild -ne [string]$Freeze.target_tuple.full_system_build) { throw 'preflight: frozen full system build mismatch' }
+        # ADJ-20260810-0001 (C6): mechanical pass exit - a pass verdict requires exactly three HDC
+        # processes started and attempted=completed=3, asserted BEFORE the record is written so a
+        # pass double-file pair is never generated and then downgraded; any mismatch stays blocked.
+        # A blocked record may carry any attempted/completed <= 3 (partial probe progress).
+        if ($commandAttempted -ne 3 -or $commandCompleted -ne 3 -or $script:HdcProcessStartCount -ne 3) {
+            throw "machine confirmation pass requires exactly 3 HDC processes started and attempted/completed=3 (hdc_processes_started=$($script:HdcProcessStartCount), attempted=$commandAttempted, completed=$commandCompleted)"
+        }
+        $verdict = 'pass'
+    } catch {
+        # Probe/tuple failure: still write a best-effort blocked record + companion (exit 2).
+        $reason = Protect-SensitiveText $_.Exception.Message
+    }
+    $endedAt = Get-Now
+    # Every device-observed value is protected before it can enter the record; the real target
+    # never appears in any field (Protect-SensitiveText also covers observed version/model/build).
+    $safeObservedVersion = Protect-SensitiveText $observedVersion
+    $safeObservedModel = Protect-SensitiveText $observedModel
+    $safeObservedBuild = Protect-SensitiveText $observedBuild
+    $record = New-TargetBindingConfirmationRecord $Freeze $FreezeSha256 $ConfirmationContractSha256 $RepositoryBefore $startedAt $endedAt $verdict $reason $safeObservedVersion $safeObservedModel $safeObservedBuild $commandAttempted $commandCompleted
+    $recordSha = $null
+    try {
+        $recordSha = Write-TargetBindingConfirmationRecordPair $recordPath $record
+        # Return and disk stay the same source: recompute over the final moved file.
+        $recordSha = Get-FileSha256 $recordPath
+    } catch {
+        # A companion failure may leave an orphan JSON. It is never deleted, never overwritten, and
+        # never consumable (the consumer requires both files); the run returns blocked with exit 2.
+        $writeFailure = Protect-SensitiveText $_.Exception.Message
+        $verdict = 'blocked'
+        $recordSha = $null
+        if ([string]::IsNullOrEmpty([string]$reason)) { $reason = "record-write-failed: $writeFailure" } else { $reason = "$reason; record-write-failed: $writeFailure" }
+    }
+    return [pscustomobject]@{
+        Verdict = $verdict
+        Reason = $reason
+        RecordPath = $recordPath
+        RecordSha256 = $recordSha
+        CommandAttempted = $commandAttempted
+        CommandCompleted = $commandCompleted
+        StartedAt = $startedAt
+        EndedAt = $endedAt
+    }
 }
 
 function Test-Sha256Hex {
@@ -3719,6 +4312,7 @@ function New-CompleteRecord {
         [Parameter(Mandatory)]$RepositoryBefore,
         [Parameter(Mandatory)][string]$FreezeSha256,
         [Parameter(Mandatory)][string]$FreezeContractSha256,
+        [Parameter(Mandatory)][string]$ConfirmationContractSha256,
         [Parameter(Mandatory)][string]$ManifestSha256
     )
     $scenario2 = @($Scenarios | Where-Object { [int]$_.scenario -eq 2 })[0]
@@ -3800,7 +4394,13 @@ function New-CompleteRecord {
         artifact_sha256 = $Freeze.artifact_sha256
         hdc = [ordered]@{ version = $Freeze.hdc.version; sha256 = $Freeze.hdc.sha256 }
         freeze_manifest_sha256 = $FreezeSha256
+        # ADJ-20260810-0001 (C6): dual contract projection - the standard final freeze contract
+        # (full projection, including the ready freeze's preflight_inputs_frozen_at) and the stable
+        # confirmation contract (two-phase-invariant projection that confirmation/review records
+        # actually bind). Both are projected with their exact names so consumers can verify either
+        # binding without re-deriving it.
         freeze_contract_sha256 = $FreezeContractSha256
+        confirmation_contract_sha256 = $ConfirmationContractSha256
         preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
         scenario_window_seconds = 60
         observation_semantics = 'ADJ-20260808-0002 strong-reliable protocol (mechanical-action-only-machine-verified-v1): one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds first mechanical action prompt through last action plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; operator sees only single-step "现在只做X，完成后按回车" and Read-Host is mechanical enter only (no READY/ACK/token/y-n semantic gates); machine layout gates (deterministic-layout-v1) before Allow/Deny and after decisive captures; scenario 1 is fully machine-operated install; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); process probes pidof only the <bundle>:vpn Extension ability process (ADJ-20260808-0001) while BundleDump proves the bundle/main App stays installed; any extra Start/Stop/UI_STOP_SKIPPED/wrong requestId/order is scenario invalid and stops later scenarios as not-run-due-to-invalid; scenario 5 revokes via atomic Settings navigation steps with machine layout gates plus force-stop then :vpn absent + bundle present; scenario 6 is fully machine: unique A CREATE_ACCEPTED, unique B CREATE_REJECTED with frozen code 2203002, no dual accepted and no operator dual-active fields; scenario 7 binds S6 verified A request only and never asks FINAL-CLEANUP; overall priority integrity invalid > scenario invalid > fail > blocked > pass; probe results are recorded before any cleanup and never backfilled from finally'
@@ -3879,6 +4479,27 @@ function New-CompleteRecord {
         reviewer_role = $Freeze.independent_reviewer_role
         reviewed_at = 'pending'
         review_record = 'pending'
+        # ADJ-20260810-0001 (C6): sealed projection of the governance bindings. Only hashes and the
+        # authorization ID are projected; real paths are never leaked (path_sha256 only), and each
+        # binding is anchored to the freeze contract.
+        machine_fresh_confirmation = $(if ($null -ne $script:MachineFreshConfirmation) {
+            [ordered]@{
+                status = 'pass'
+                authorization_id = [string]$script:MachineFreshConfirmation.authorization_id
+                record_sha256 = [string]$script:MachineFreshConfirmation.record_sha256
+                record_path_sha256 = [string]$script:MachineFreshConfirmation.record_path_sha256
+                confirmation_contract_sha256 = $ConfirmationContractSha256
+            }
+        } else { 'N/A' })
+        independent_review_record = $(if ($null -ne $script:IndependentReviewRecord) {
+            [ordered]@{
+                status = 'pass'
+                reviewer_role = [string]$script:IndependentReviewRecord.reviewer_role
+                record_sha256 = [string]$script:IndependentReviewRecord.record_sha256
+                record_path_sha256 = [string]$script:IndependentReviewRecord.record_path_sha256
+                confirmation_contract_sha256 = $ConfirmationContractSha256
+            }
+        } else { 'N/A' })
     }
     if (-not [string]::IsNullOrEmpty($Failure)) { $record['failure'] = $Failure }
     if (-not [string]::IsNullOrEmpty($InfrastructureReason)) { $record['infrastructure_reason'] = $InfrastructureReason }
@@ -4100,11 +4721,19 @@ function Invoke-RunnerSelfTest {
     $protectedText = $protected | ConvertTo-Json -Depth 10
     Check ($roundTrip.boolean.GetType() -eq [bool] -and $roundTrip.boolean) 'structured-redaction-preserves-Boolean'
     Check ($protectedText -notmatch '10\.23\.45\.67|2001:db8|2001:4860|device-canary|00:11:22:33:44:55|CANARY12345678|target-canary') 'structured-redaction-canaries'
-    $script:PublicVersionLiterals = @('PLA-AL10 7.0.0.100(SP8C00E32R7P2)')
+    $script:PublicVersionLiterals = @('PLA-AL10 7.0.0.100(SP8C00E32R7P2)', 'SELFTEST-HDC-1.0')
     $versionRedaction = Protect-SensitiveText 'build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=192.0.2.44|port=8710'
     Check ($versionRedaction.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $versionRedaction.Contains('api=26') -and $versionRedaction -notmatch '192\.0\.2\.44|8710') 'redaction-preserves-build-api-and-removes-ip-port'
     $api26IpLike = Protect-SensitiveText 'full_system_build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=198.51.100.77|port=8710|bare=7.0.0.100'
     Check ($api26IpLike.Contains('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $api26IpLike.Contains('api=26') -and $api26IpLike -match 'bare=<REDACTED_IPV4>' -and $api26IpLike -notmatch '198\.51\.100\.77|8710') 'api26-build-ip-like-literal-preserved-real-ip-redacted'
+    # ADJ-20260810-0001 (C6): the frozen HDC version is a legitimate public literal too - an
+    # IP-like HDC version (e.g. 7.0.0.100) must survive Protect-SensitiveText exactly like the
+    # build string, or the observed hdc_version in the confirmation record would be corrupted.
+    $savedVersionLiterals = $script:PublicVersionLiterals
+    $script:PublicVersionLiterals = @('HDC-7.0.0.100')
+    $hdcVersionRedaction = Protect-SensitiveText 'hdc_version=HDC-7.0.0.100|peer=192.0.2.44|port=8710'
+    Check ($hdcVersionRedaction.Contains('HDC-7.0.0.100') -and $hdcVersionRedaction -notmatch '192\.0\.2\.44|8710') 'redaction-preserves-hdc-version-literal'
+    $script:PublicVersionLiterals = $savedVersionLiterals
     $arrayInput = [object[]]@('alpha', [object[]]@('beta', 'gamma'))
     $arrayJson = (Protect-SensitiveData $arrayInput) | ConvertTo-Json -Depth 10 -Compress
     Check ($arrayJson -eq '["alpha",["beta","gamma"]]') 'structured-redaction-array-shape'
@@ -4630,19 +5259,460 @@ function Invoke-RunnerSelfTest {
         $script:ProjectionTranscript = $savedProjection
         Remove-Item -LiteralPath $integrityTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
+    # --- ADJ-20260810-0001 host-governed TargetBindingConfirm pure-function coverage ---
+    $confirmPlan = @(Get-TargetBindingConfirmPlan)
+    Check ($confirmPlan.Count -eq 3 -and (($confirmPlan | ForEach-Object { [string]$_.operation }) -join ',') -eq 'Version,TupleModel,TupleBuild') 'confirm-plan-exactly-three-whitelisted'
+    $confirmForbidden = @('MkdirStaging', 'SendA', 'SendB', 'InstallA', 'InstallB', 'StartEntry', 'Uninstall', 'RemoveStaging', 'StagingProbe', 'FaultA', 'FaultB', 'HilogStream', 'ScreenCap', 'DumpLayout', 'ReceiveScreen', 'ReceiveLayout', 'BundleDump', 'PidOf', 'ForceStop')
+    Check (@($confirmPlan | Where-Object { [string]$_.operation -in $confirmForbidden }).Count -eq 0) 'confirm-plan-no-install-cleanup-capture'
+    foreach ($confirmStep in $confirmPlan) { [void](Get-HdcInvocation $confirmStep.operation $confirmStep.parameters) }
+    Check $true 'confirm-plan-argv-allowlisted'
+    $savedModeDryRun = [bool]$script:DryRun
+    $savedModeLiveSimulation = [bool]$script:LiveSimulation
+    $savedModeSelfTest = [bool]$script:SelfTest
+    $savedModeConfirm = [bool]$script:TargetBindingConfirm
+    $savedModeRecord = [string]$script:ConfirmationRecord
+    $savedModeEvidenceRoot = [string]$script:EvidenceRoot
+    $savedModeRawRoot = [string]$script:RawRoot
+    $savedModeExecution = [string]$script:ExecutionMode
+    try {
+        $script:DryRun = $true; $script:LiveSimulation = $false; $script:SelfTest = $false; $script:TargetBindingConfirm = $true; $script:ConfirmationRecord = 'C:/outside/confirm.json'
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-exclusive-dryrun' } catch { Check ($_.Exception.Message -match 'mutually exclusive') 'confirm-mode-exclusive-dryrun' }
+        $script:DryRun = $false; $script:LiveSimulation = $true
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-exclusive-livesim' } catch { Check ($_.Exception.Message -match 'mutually exclusive') 'confirm-mode-exclusive-livesim' }
+        $script:LiveSimulation = $false; $script:SelfTest = $true
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-exclusive-selftest' } catch { Check ($_.Exception.Message -match 'mutually exclusive') 'confirm-mode-exclusive-selftest' }
+        $script:SelfTest = $false; $script:ConfirmationRecord = ''
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-requires-record' } catch { Check ($_.Exception.Message -match 'requires ConfirmationRecord') 'confirm-mode-requires-record' }
+        $script:TargetBindingConfirm = $false; $script:ConfirmationRecord = 'C:/outside/confirm.json'
+        try { Assert-ModeExclusivity; Check $false 'record-only-valid-with-confirm-mode' } catch { Check ($_.Exception.Message -match 'only valid with TargetBindingConfirm') 'record-only-valid-with-confirm-mode' }
+        # ADJ-20260810-0001 (C6): confirm mode explicitly rejects EvidenceRoot/RawRoot; it never
+        # initializes campaign roots and must fail loudly instead of silently ignoring them.
+        $script:TargetBindingConfirm = $true; $script:EvidenceRoot = 'C:/outside/evidence'
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-rejects-evidence-root' } catch { Check ($_.Exception.Message -match 'EvidenceRoot is not allowed') 'confirm-mode-rejects-evidence-root' }
+        $script:EvidenceRoot = ''; $script:RawRoot = 'C:/outside/raw'
+        try { Assert-ModeExclusivity; Check $false 'confirm-mode-rejects-raw-root' } catch { Check ($_.Exception.Message -match 'RawRoot is not allowed') 'confirm-mode-rejects-raw-root' }
+        $script:RawRoot = ''
+        $script:DryRun = $false; $script:TargetBindingConfirm = $true; $script:ConfirmationRecord = 'C:/outside/confirm.json'
+        Assert-ModeExclusivity
+        Check $true 'confirm-mode-alone-legal'
+    } finally {
+        $script:DryRun = $savedModeDryRun; $script:LiveSimulation = $savedModeLiveSimulation; $script:SelfTest = $savedModeSelfTest; $script:TargetBindingConfirm = $savedModeConfirm; $script:ConfirmationRecord = $savedModeRecord; $script:EvidenceRoot = $savedModeEvidenceRoot; $script:RawRoot = $savedModeRawRoot; $script:ExecutionMode = $savedModeExecution
+    }
+    # ADJ-20260810-0001 (C6): the consumer and producer contracts are exercised against a complete
+    # fixture freeze with the fixed candidate pair and a matching independent review record.
+    $script:RepoRoot = Get-GitRepositoryRoot
+    $confirmTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-confirm-selftest-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($confirmTemp) | Out-Null
+    $confirmRecordPath = Join-Path $confirmTemp 'target-binding-confirmation.json'
+    $confirmFreezeBase = [ordered]@{
+        schema_version = 2
+        plan_status = 'ready'
+        exception = 'E3-PHYS-PREFLIGHT'
+        evidence_id = $script:CandidateEvidenceId
+        campaign_id = $script:CandidateCampaignId
+        attempt = 'initial'
+        retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A'; prior_record_path = 'N/A'; prior_record_sha256 = 'N/A' }
+        scenario_window_seconds = 60
+        device_alias = 'PHYS-1'
+        target_tuple = [ordered]@{ distribution = 'HarmonyOS'; device_model = 'PLA-AL10'; full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'; api = '26'; kernel_arch = 'aarch64'; app_abi = 'arm64-v8a' }
+        settings_reallow_expected_path = 'direct-system-activation'
+        settings_reallow_path_policy = 'observation-only'
+        settings_revoke_mechanism = 'settings-app-info-force-stop'
+        settings_vpn_page_policy = 'observation-only'
+        destroy_terminal_policy = 'callback-or-strict-process-boundary'
+        process_absent_required_count = 2
+        process_absent_probe_spacing_seconds = 3
+        process_probe_target = '<bundle>:vpn'
+        operator_trust_model = 'mechanical-action-only-machine-verified-v1'
+        scenario_invalid_policy = 'stop-and-finally-cleanup-seal'
+        layout_verification_profile = 'deterministic-layout-v1'
+        vpn_conflict_rejection_codes = @(2203002)
+        signing = [ordered]@{ type = 'ordinary-development'; device_in_profile = $true; device_in_profile_basis = 'selftest public verification basis'; public_fingerprint = 'SELFTEST-NON-SECRET'; verification_result = 'pass' }
+        artifact_sha256 = [ordered]@{ hap_a = ('1' * 64); hap_b = ('2' * 64) }
+        source = [ordered]@{ archive_path = 'C:/selftest/source.tar'; archive_sha256 = ('3' * 64); manifest_path = 'C:/selftest/manifest.json'; manifest_sha256 = ('4' * 64) }
+        sdk = [ordered]@{ version = 'synthetic-6.1.1'; api = '24'; syscap_basis = 'synthetic public VPN SysCap basis'; files = @([ordered]@{ path = 'C:/selftest/sdk.bin'; sha256 = ('5' * 64) }) }
+        hdc = [ordered]@{ version = 'SELFTEST-HDC-1.0'; sha256 = ('c' * 64) }
+        runner_sha256 = ('b' * 64)
+        code_sha = ('a' * 40)
+        preflight_inputs_frozen_at = '2099-01-01T00:00:00+00:00'
+        cleanup_baseline_frozen = $true
+        collection_ready = $true
+        independent_review_ready = $true
+        operator_role = 'selftest-operator'
+        independent_reviewer_role = 'selftest-independent-reviewer'
+        independent_review_record = [ordered]@{ status = 'pending' }
+    }
+    # ADJ-20260810-0001 (C6): the fixture confirmation/review records bind the STABLE confirmation
+    # contract (Get-ConfirmationContractSha256), not the full freeze contract: the full contract
+    # includes preflight_inputs_frozen_at which legitimately advances between the blocked
+    # confirmation freeze and the final ready freeze.
+    $confirmationContractSha = Get-ConfirmationContractSha256 $confirmFreezeBase
+    $confirmRecordFixture = [ordered]@{
+        schema_version = 1
+        record_kind = 'target-binding-confirmation'
+        is_evidence = $false
+        authorization_id = $script:AuthId
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $script:CandidateCampaignId
+        evidence_id = $script:CandidateEvidenceId
+        attempt = 'initial'
+        retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A' }
+        plan_status = 'ready'
+        device_alias = 'PHYS-1'
+        target_redacted = $true
+        code_sha = ('a' * 40)
+        runner_sha256 = ('b' * 64)
+        freeze_manifest_sha256 = ('e' * 64)
+        confirmation_contract_sha256 = $confirmationContractSha
+        hdc_sha256 = ('c' * 64)
+        hdc_version = 'SELFTEST-HDC-1.0'
+        expected_model = 'PLA-AL10'
+        expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        observed_model = 'PLA-AL10'
+        observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        started_at = '2098-12-31T23:59:55+00:00'
+        ended_at = '2098-12-31T23:59:59+00:00'
+        command_attempted = 3
+        command_completed = 3
+        command_count = 3
+        repository_fingerprint = ('g' * 64)
+        verdict = 'pass'
+        reason = 'N/A'
+    }
+    Write-JsonFile $confirmRecordPath $confirmRecordFixture
+    $confirmRecordSha = Get-FileSha256 $confirmRecordPath
+    [IO.File]::WriteAllText($confirmRecordPath + '.sha256', $confirmRecordSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Check ((Get-Content -LiteralPath ($confirmRecordPath + '.sha256') -Raw).Trim() -eq (Get-FileSha256 $confirmRecordPath)) 'confirmation-record-sha-recompute'
+    $reviewRecordPath = Join-Path $confirmTemp 'ready-freeze-review.json'
+    $reviewFixture = [ordered]@{
+        schema_version = 1
+        record_kind = 'e3-ready-freeze-review'
+        is_evidence = $false
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $script:CandidateCampaignId
+        evidence_id = $script:CandidateEvidenceId
+        code_sha = ('a' * 40)
+        runner_sha256 = ('b' * 64)
+        confirmation_contract_sha256 = $confirmationContractSha
+        machine_confirmation_sha256 = $confirmRecordSha
+        reviewer_role = 'selftest-independent-reviewer'
+        operator_role = 'selftest-operator'
+        verdict = 'pass'
+        blockers = 0
+        majors = 0
+        started_at = '2098-12-31T23:59:59+00:00'
+        ended_at = '2098-12-31T23:59:59+00:00'
+    }
+    Write-JsonFile $reviewRecordPath $reviewFixture
+    $reviewSha = Get-FileSha256 $reviewRecordPath
+    [IO.File]::WriteAllText($reviewRecordPath + '.sha256', $reviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Check ((Get-Content -LiteralPath ($reviewRecordPath + '.sha256') -Raw).Trim() -eq (Get-FileSha256 $reviewRecordPath)) 'review-record-sha-recompute'
+    function New-ConfirmFreeze {
+        param([string]$PlanStatus, [hashtable]$WithConfirmation = $null, [hashtable]$WithReview = $null)
+        $copy = (($confirmFreezeBase | ConvertTo-Json -Depth 20) | ConvertFrom-Json -Depth 20)
+        $copy.plan_status = $PlanStatus
+        # ADJ-20260810-0001 (C6): machine_fresh_confirmation does not exist on the base freeze; under
+        # Set-StrictMode a direct assignment to the non-existent property would throw, so it must be
+        # added with Add-Member -Force (independent_review_record already exists as status=pending).
+        if ($null -ne $WithConfirmation) { Add-Member -InputObject $copy -NotePropertyName 'machine_fresh_confirmation' -NotePropertyValue $WithConfirmation -Force }
+        if ($null -ne $WithReview) { $copy.independent_review_record = $WithReview }
+        return $copy
+    }
+    $confirmOk = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
+    $confirmWrongAuth = [ordered]@{ status = 'pass'; authorization_id = 'AUTH-E3-PHYS1API26-20260810-9999'; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
+    $confirmWrongSha = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = ('d' * 64) }
+    $confirmPending = [ordered]@{ status = 'pending'; authorization_id = $script:AuthId; record_path = 'N/A'; record_sha256 = 'N/A' }
+    $reviewOk = [ordered]@{ status = 'pass'; record_path = $reviewRecordPath; record_sha256 = $reviewSha; reviewer_role = 'selftest-independent-reviewer' }
+    # ADJ-20260810-0001 (C6): JSON integer gate - Int32/Int64 positive, string/float/null negative.
+    Check ((Test-JsonInteger ([int]3)) -and (Test-JsonInteger ([long]3)) -and -not (Test-JsonInteger '3') -and -not (Test-JsonInteger 3.0) -and -not (Test-JsonInteger $null) -and -not (Test-JsonInteger $true)) 'json-integer-helper-int64-positive-string-float-negative'
+    $savedConfirmDryRun = [bool]$script:DryRun
+    $savedConfirmLiveSimulation = [bool]$script:LiveSimulation
+    $savedConfirmTargetBindingConfirm = [bool]$script:TargetBindingConfirm
+    $savedConfirmExecution = [string]$script:ExecutionMode
+    try {
+        $script:DryRun = $false; $script:LiveSimulation = $false; $script:TargetBindingConfirm = $false; $script:ExecutionMode = 'live'
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready')); Check $false 'live-ready-requires-confirmation' } catch { Check $true 'live-ready-requires-confirmation' }
+        $okResult = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk $reviewOk)
+        Check ($null -ne $okResult -and [string]$okResult.RecordSha256 -eq $confirmRecordSha) 'live-ready-accepts-bound-pass-confirmation'
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmWrongAuth $reviewOk)); Check $false 'live-ready-rejects-wrong-authorization-id' } catch { Check ($_.Exception.Message -match 'authorization_id') 'live-ready-rejects-wrong-authorization-id' }
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmWrongSha $reviewOk)); Check $false 'live-ready-rejects-wrong-record-sha' } catch { Check ($_.Exception.Message -match 'mismatch|SHA-256') 'live-ready-rejects-wrong-record-sha' }
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked')); Check $false 'live-blocked-plan-rejected' } catch { Check $true 'live-blocked-plan-rejected' }
+        $script:DryRun = $true; $script:ExecutionMode = 'dry-run'
+        $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmPending)
+        Check $true 'dryrun-blocked-allows-pending-confirmation'
+        # ADJ-20260810-0001 (C6): a blocked DryRun that declares status=pass is FULLY validated
+        # (a blocked DryRun can never hide a broken binding); pending is allowed and skipped.
+        $blockedPassResult = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk)
+        Check ($null -ne $blockedPassResult -and [string]$blockedPassResult.RecordSha256 -eq $confirmRecordSha) 'dryrun-blocked-pass-fully-validated'
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmWrongSha)); Check $false 'dryrun-blocked-pass-rejects-wrong-sha' } catch { Check ($_.Exception.Message -match 'SHA-256') 'dryrun-blocked-pass-rejects-wrong-sha' }
+        # ADJ-20260810-0001 (C6): blocked DryRun review consistency - a declared-pass review can
+        # never ride on a pending/absent machine confirmation, and a machine pass + review pass
+        # pair is fully validated (ValidateDeclaredPass) exactly like a ready one; pending review
+        # stays allowed and skipped.
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmPending $reviewOk)); Check $false 'dryrun-blocked-rejects-review-pass-on-pending-machine' } catch { Check ($_.Exception.Message -match 'machine_fresh_confirmation.status=pass') 'dryrun-blocked-rejects-review-pass-on-pending-machine' }
+        $blockedReviewPassResult = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $reviewOk)
+        Check ($null -ne $blockedReviewPassResult -and [string]$blockedReviewPassResult.RecordSha256 -eq $confirmRecordSha) 'dryrun-blocked-machine-pass-review-pass-fully-validated'
+        $pendingReviewBinding = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = 'selftest-independent-reviewer' }
+        $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $pendingReviewBinding)
+        Check $true 'dryrun-blocked-allows-pending-review'
+        $brokenReviewPath = Join-Path $confirmTemp 'neg-review-blocked-dryrun.json'
+        $brokenReview = (($reviewFixture | ConvertTo-Json -Depth 20) | ConvertFrom-Json -Depth 20)
+        $brokenReview.verdict = 'blocked'
+        Write-JsonFile $brokenReviewPath $brokenReview
+        $brokenReviewSha = Get-FileSha256 $brokenReviewPath
+        [IO.File]::WriteAllText($brokenReviewPath + '.sha256', $brokenReviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $brokenReviewBinding = [ordered]@{ status = 'pass'; record_path = $brokenReviewPath; record_sha256 = $brokenReviewSha; reviewer_role = 'selftest-independent-reviewer' }
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $brokenReviewBinding)); Check $false 'dryrun-blocked-review-pass-fully-validates-content' } catch { Check ($_.Exception.Message -match 'verdict') 'dryrun-blocked-review-pass-fully-validates-content' }
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready')); Check $false 'dryrun-ready-requires-confirmation' } catch { Check $true 'dryrun-ready-requires-confirmation' }
+        $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk $reviewOk)
+        Check $true 'dryrun-ready-accepts-bound-pass-confirmation'
+        $script:DryRun = $false; $script:LiveSimulation = $true; $script:ExecutionMode = 'live-simulation'
+        $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready')
+        Check $true 'livesim-keeps-existing-fixture-contract'
+        # ADJ-20260810-0001 (C6): freeze-level negatives - the fixed candidate pair, initial
+        # attempt, and retry N/A are enforced on the consumer side too, so the generic
+        # infrastructure retry branch can never enter this AUTH path.
+        $script:DryRun = $false; $script:LiveSimulation = $false; $script:ExecutionMode = 'live'
+        $wrongPairFreeze = New-ConfirmFreeze 'ready' $confirmOk $reviewOk
+        $wrongPairFreeze.campaign_id = 'E3-PHYS-PREFLIGHT-WRONG'
+        try { [void](Assert-MachineFreshConfirmation $wrongPairFreeze); Check $false 'ready-consumer-rejects-wrong-freeze-campaign-pair' } catch { Check ($_.Exception.Message -match 'candidate pair') 'ready-consumer-rejects-wrong-freeze-campaign-pair' }
+        $retryFreeze = New-ConfirmFreeze 'ready' $confirmOk $reviewOk
+        $retryFreeze.attempt = 'infrastructure-blocked-retry-1'
+        $retryFreeze.retry.basis = 'hdc-usb-interruption'
+        $retryFreeze.retry.infrastructure_reason = 'hdc-usb-interruption'
+        try { [void](Assert-MachineFreshConfirmation $retryFreeze); Check $false 'ready-consumer-rejects-retry-attempt' } catch { Check ($_.Exception.Message -match 'attempt|retry') 'ready-consumer-rejects-retry-attempt' }
+        # ADJ-20260810-0001 (C6): anti-replication negatives - every independently replicable field
+        # of the confirmation record is mutated and must be rejected by the consumer.
+        function New-MutantRecord {
+            param([scriptblock]$Mutate)
+            $copy = (($confirmRecordFixture | ConvertTo-Json -Depth 20) | ConvertFrom-Json -Depth 20)
+            & $Mutate $copy
+            return $copy
+        }
+        function Write-MutantCase {
+            param([string]$Name, $Record)
+            $casePath = Join-Path $confirmTemp ("neg-$Name.json")
+            Write-JsonFile $casePath $Record
+            $caseSha = Get-FileSha256 $casePath
+            [IO.File]::WriteAllText($casePath + '.sha256', $caseSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+            return [pscustomobject]@{ Path = $casePath; Sha256 = $caseSha }
+        }
+        function Test-RecordReject {
+            param([string]$Name, [scriptblock]$Mutate, [string]$MessagePattern)
+            $case = Write-MutantCase $Name (New-MutantRecord $Mutate)
+            $freeze = New-ConfirmFreeze 'ready' ([ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $case.Path; record_sha256 = $case.Sha256 }) $reviewOk
+            try { [void](Assert-MachineFreshConfirmation $freeze); Check $false $Name } catch { Check ($_.Exception.Message -match $MessagePattern) $Name }
+        }
+        Test-RecordReject 'consumer-rejects-campaign-id-mutation' { param($r) $r.campaign_id = 'E3-PHYS-PREFLIGHT-WRONG' } 'candidate IDs'
+        Test-RecordReject 'consumer-rejects-evidence-id-mutation' { param($r) $r.evidence_id = 'EV-E3-WRONG-20990101-0001' } 'candidate IDs'
+        Test-RecordReject 'consumer-rejects-code-sha-mutation' { param($r) $r.code_sha = ('f' * 40) } 'code_sha'
+        Test-RecordReject 'consumer-rejects-runner-sha-mutation' { param($r) $r.runner_sha256 = ('9' * 64) } 'runner_sha256'
+        Test-RecordReject 'consumer-rejects-hdc-sha-mutation' { param($r) $r.hdc_sha256 = ('8' * 64) } 'hdc_sha256'
+        Test-RecordReject 'consumer-rejects-hdc-version-mutation' { param($r) $r.hdc_version = 'WRONG-HDC-9.9' } 'hdc_version'
+        Test-RecordReject 'consumer-rejects-verdict-mutation' { param($r) $r.verdict = 'blocked' } 'verdict'
+        Test-RecordReject 'consumer-rejects-is-evidence-mutation' { param($r) $r.is_evidence = $true } 'is_evidence'
+        Test-RecordReject 'consumer-rejects-attempted-mutation' { param($r) $r.command_attempted = 2 } 'command_attempted'
+        Test-RecordReject 'consumer-rejects-completed-mutation' { param($r) $r.command_completed = 2 } 'command_completed'
+        Test-RecordReject 'consumer-rejects-attempted-string' { param($r) $r.command_attempted = '3' } 'command_attempted'
+        Test-RecordReject 'consumer-rejects-completed-string' { param($r) $r.command_completed = '3' } 'command_completed'
+        Test-RecordReject 'consumer-rejects-command-count-alias-mismatch' { param($r) $r.command_count = 2 } 'command_count'
+        Test-RecordReject 'consumer-rejects-command-count-string' { param($r) $r.command_count = '3' } 'command_count'
+        Test-RecordReject 'consumer-rejects-unknown-top-level-field' { param($r) Add-Member -InputObject $r -NotePropertyName 'canary_target' -NotePropertyValue 'usb-target:8710' } 'unknown top-level field'
+        Test-RecordReject 'consumer-rejects-observed-build-mutation' { param($r) $r.observed_build = 'PLA-AL10 7.0.0.999(SP8C00E32R7P2)' } 'observed model/build'
+        Test-RecordReject 'consumer-rejects-schema-mutation' { param($r) $r.schema_version = 2 } 'schema_version'
+        Test-RecordReject 'consumer-rejects-reason-mutation' { param($r) $r.reason = 'drifted' } 'reason'
+        Test-RecordReject 'consumer-rejects-attempt-field-mutation' { param($r) $r.attempt = 'infrastructure-blocked-retry-1' } 'attempt'
+        Test-RecordReject 'consumer-rejects-retry-basis-mutation' { param($r) $r.retry.basis = 'hdc-usb-interruption' } 'retry'
+        Test-RecordReject 'consumer-rejects-target-redacted-mutation' { param($r) $r.target_redacted = $false } 'target_redacted'
+        Test-RecordReject 'consumer-rejects-device-alias-mutation' { param($r) $r.device_alias = 'PHYS-2' } 'device_alias'
+        Test-RecordReject 'consumer-rejects-exception-mutation' { param($r) $r.exception = 'OTHER-EXCEPTION' } 'exception'
+        Test-RecordReject 'consumer-rejects-contract-mutation' { param($r) $r.confirmation_contract_sha256 = ('0' * 64) } 'confirmation_contract_sha256'
+        Test-RecordReject 'consumer-rejects-start-after-end' { param($r) $r.started_at = '2099-01-01T00:00:10+00:00' } 'started_at'
+        Test-RecordReject 'consumer-rejects-ended-after-frozen' { param($r) $r.ended_at = '2099-01-01T00:00:30+00:00' } 'no later than freeze'
+        # companion negatives: a lone record is never consumable, a wrong or non-hex companion is rejected.
+        $loneRecordPath = Join-Path $confirmTemp 'neg-lone-record.json'
+        Write-JsonFile $loneRecordPath $confirmRecordFixture
+        $loneFreeze = New-ConfirmFreeze 'ready' ([ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $loneRecordPath; record_sha256 = (Get-FileSha256 $loneRecordPath) }) $reviewOk
+        try { [void](Assert-MachineFreshConfirmation $loneFreeze); Check $false 'consumer-rejects-missing-companion' } catch { Check ($_.Exception.Message -match 'companion missing') 'consumer-rejects-missing-companion' }
+        $badCompanionPath = Join-Path $confirmTemp 'neg-bad-companion.json'
+        Write-JsonFile $badCompanionPath $confirmRecordFixture
+        $badCompanionSha = Get-FileSha256 $badCompanionPath
+        [IO.File]::WriteAllText($badCompanionPath + '.sha256', ('a' * 64) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $badCompanionFreeze = New-ConfirmFreeze 'ready' ([ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $badCompanionPath; record_sha256 = $badCompanionSha }) $reviewOk
+        try { [void](Assert-MachineFreshConfirmation $badCompanionFreeze); Check $false 'consumer-rejects-wrong-companion' } catch { Check ($_.Exception.Message -match 'does not match the record bytes') 'consumer-rejects-wrong-companion' }
+        $nonHexCompanionPath = Join-Path $confirmTemp 'neg-nonhex-companion.json'
+        Write-JsonFile $nonHexCompanionPath $confirmRecordFixture
+        $nonHexSha = Get-FileSha256 $nonHexCompanionPath
+        [IO.File]::WriteAllText($nonHexCompanionPath + '.sha256', 'not-a-sha' + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $nonHexFreeze = New-ConfirmFreeze 'ready' ([ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $nonHexCompanionPath; record_sha256 = $nonHexSha }) $reviewOk
+        try { [void](Assert-MachineFreshConfirmation $nonHexFreeze); Check $false 'consumer-rejects-nonhex-companion' } catch { Check ($_.Exception.Message -match 'final SHA-256') 'consumer-rejects-nonhex-companion' }
+        # path negatives: a missing record file is rejected before any content is read.
+        $missingPath = Join-Path $confirmTemp 'neg-missing.json'
+        $missingFreeze = New-ConfirmFreeze 'ready' ([ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $missingPath; record_sha256 = ('b' * 64) }) $reviewOk
+        try { [void](Assert-MachineFreshConfirmation $missingFreeze); Check $false 'consumer-rejects-missing-record-file' } catch { Check ($_.Exception.Message -match 'file missing') 'consumer-rejects-missing-record-file' }
+        # ADJ-20260810-0001 (C6): independent review record negatives (mechanical gate, not the
+        # self-declared independent_review_ready boolean).
+        function Test-ReviewReject {
+            param([string]$Name, [scriptblock]$Mutate, [string]$MessagePattern)
+            $copy = (($reviewFixture | ConvertTo-Json -Depth 20) | ConvertFrom-Json -Depth 20)
+            & $Mutate $copy
+            $casePath = Join-Path $confirmTemp ("neg-review-$Name.json")
+            Write-JsonFile $casePath $copy
+            $caseSha = Get-FileSha256 $casePath
+            [IO.File]::WriteAllText($casePath + '.sha256', $caseSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+            $binding = [ordered]@{ status = 'pass'; record_path = $casePath; record_sha256 = $caseSha; reviewer_role = 'selftest-independent-reviewer' }
+            $freeze = New-ConfirmFreeze 'ready' $confirmOk $binding
+            try { [void](Assert-MachineFreshConfirmation $freeze); Check $false $Name } catch { Check ($_.Exception.Message -match $MessagePattern) $Name }
+        }
+        Test-ReviewReject 'consumer-rejects-review-verdict' { param($r) $r.verdict = 'blocked' } 'verdict'
+        Test-ReviewReject 'consumer-rejects-review-blockers' { param($r) $r.blockers = 1 } 'blockers'
+        Test-ReviewReject 'consumer-rejects-review-majors' { param($r) $r.majors = 1 } 'blockers'
+        Test-ReviewReject 'consumer-rejects-review-blockers-string' { param($r) $r.blockers = '0' } 'blockers'
+        Test-ReviewReject 'consumer-rejects-review-majors-string' { param($r) $r.majors = '0' } 'blockers'
+        Test-ReviewReject 'consumer-rejects-review-exception' { param($r) $r.exception = 'OTHER-EXCEPTION' } 'exception'
+        Test-ReviewReject 'consumer-rejects-review-unknown-field' { param($r) Add-Member -InputObject $r -NotePropertyName 'secret_target' -NotePropertyValue 'usb-target:8710' } 'unknown top-level field'
+        Test-ReviewReject 'consumer-rejects-review-start-before-machine-end' { param($r) $r.started_at = '2098-12-31T23:59:30+00:00' } 'machine confirmation ended_at'
+        Test-ReviewReject 'consumer-rejects-review-role' { param($r) $r.reviewer_role = 'some-other-reviewer' } 'reviewer_role'
+        Test-ReviewReject 'consumer-rejects-review-machine-sha' { param($r) $r.machine_confirmation_sha256 = ('0' * 64) } 'machine_confirmation_sha256'
+        Test-ReviewReject 'consumer-rejects-review-kind' { param($r) $r.record_kind = 'e3-ready-freeze-review-x' } 'record_kind'
+        Test-ReviewReject 'consumer-rejects-review-is-evidence' { param($r) $r.is_evidence = $true } 'is_evidence'
+        Test-ReviewReject 'consumer-rejects-review-contract' { param($r) $r.confirmation_contract_sha256 = ('0' * 64) } 'confirmation_contract_sha256'
+        Test-ReviewReject 'consumer-rejects-review-code' { param($r) $r.code_sha = ('0' * 40) } 'code_sha'
+        Test-ReviewReject 'consumer-rejects-review-runner' { param($r) $r.runner_sha256 = ('0' * 64) } 'runner_sha256'
+        Test-ReviewReject 'consumer-rejects-review-campaign' { param($r) $r.campaign_id = 'E3-PHYS-PREFLIGHT-WRONG' } 'candidate IDs'
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk)); Check $false 'ready-requires-review-record' } catch { Check ($_.Exception.Message -match 'independent_review_record') 'ready-requires-review-record' }
+        $pendingReview = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = 'selftest-independent-reviewer' }
+        try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk $pendingReview)); Check $false 'ready-requires-pass-review-record' } catch { Check ($_.Exception.Message -match 'status must be pass') 'ready-requires-pass-review-record' }
+        $loneReviewPath = Join-Path $confirmTemp 'neg-review-lone.json'
+        Write-JsonFile $loneReviewPath $reviewFixture
+        $loneReviewFreeze = New-ConfirmFreeze 'ready' $confirmOk ([ordered]@{ status = 'pass'; record_path = $loneReviewPath; record_sha256 = (Get-FileSha256 $loneReviewPath); reviewer_role = 'selftest-independent-reviewer' })
+        try { [void](Assert-MachineFreshConfirmation $loneReviewFreeze); Check $false 'consumer-rejects-review-missing-companion' } catch { Check ($_.Exception.Message -match 'companion missing') 'consumer-rejects-review-missing-companion' }
+        # ADJ-20260810-0001 (C6): two-phase positive - the blocked confirmation freeze freezes at
+        # T1 BEFORE the machine confirmation runs, and the final ready freeze freezes at T2 AFTER
+        # the confirmation and review end times. The full Get-FreezeContract hashes differ (the
+        # governance/time field preflight_inputs_frozen_at advanced), but the stable confirmation
+        # contract is byte-identical, so the confirmation/review records bound on the blocked
+        # phase are consumable by the ready phase; the time gate (started<=ended<=frozen_at) is
+        # checked against the FINAL ready freeze's preflight_inputs_frozen_at.
+        $twoPhaseBlocked = New-ConfirmFreeze 'blocked'
+        $twoPhaseBlocked.preflight_inputs_frozen_at = '2099-01-01T00:00:00+00:00'
+        $twoPhaseReady = New-ConfirmFreeze 'ready'
+        $twoPhaseReady.preflight_inputs_frozen_at = '2099-01-01T00:00:10+00:00'
+        Check ((Get-FreezeContractSha256 $twoPhaseBlocked) -ne (Get-FreezeContractSha256 $twoPhaseReady)) 'two-phase-full-contract-hashes-differ'
+        Check ((Get-ConfirmationContractSha256 $twoPhaseBlocked) -eq (Get-ConfirmationContractSha256 $twoPhaseReady)) 'two-phase-confirmation-contract-hash-identical'
+        $twoPhaseRecord = New-TargetBindingConfirmationRecord $twoPhaseBlocked ('e' * 64) (Get-ConfirmationContractSha256 $twoPhaseBlocked) ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:01+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' 3 3
+        $twoPhaseRecordPath = Join-Path $confirmTemp 'two-phase-confirmation.json'
+        Write-JsonFile $twoPhaseRecordPath $twoPhaseRecord
+        $twoPhaseRecordSha = Get-FileSha256 $twoPhaseRecordPath
+        [IO.File]::WriteAllText($twoPhaseRecordPath + '.sha256', $twoPhaseRecordSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $twoPhaseReview = [ordered]@{
+            schema_version = 1
+            record_kind = 'e3-ready-freeze-review'
+            is_evidence = $false
+            exception = 'E3-PHYS-PREFLIGHT'
+            campaign_id = $script:CandidateCampaignId
+            evidence_id = $script:CandidateEvidenceId
+            code_sha = ('a' * 40)
+            runner_sha256 = ('b' * 64)
+            confirmation_contract_sha256 = (Get-ConfirmationContractSha256 $twoPhaseBlocked)
+            machine_confirmation_sha256 = $twoPhaseRecordSha
+            reviewer_role = 'selftest-independent-reviewer'
+            operator_role = 'selftest-operator'
+            verdict = 'pass'
+            blockers = 0
+            majors = 0
+            started_at = '2099-01-01T00:00:06+00:00'
+            ended_at = '2099-01-01T00:00:09+00:00'
+        }
+        $twoPhaseReviewPath = Join-Path $confirmTemp 'two-phase-review.json'
+        Write-JsonFile $twoPhaseReviewPath $twoPhaseReview
+        $twoPhaseReviewSha = Get-FileSha256 $twoPhaseReviewPath
+        [IO.File]::WriteAllText($twoPhaseReviewPath + '.sha256', $twoPhaseReviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $twoPhaseBinding = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $twoPhaseRecordPath; record_sha256 = $twoPhaseRecordSha }
+        $twoPhaseReviewBinding = [ordered]@{ status = 'pass'; record_path = $twoPhaseReviewPath; record_sha256 = $twoPhaseReviewSha; reviewer_role = 'selftest-independent-reviewer' }
+        # ADJ-20260810-0001 (C6): the two-phase positive consumes the T2-advanced ready freeze
+        # ($twoPhaseReady, frozen at 00:00:10 past the confirmation end 00:00:05 and the review end
+        # 00:00:09) - never a fresh T1 clone - while keeping the review binding. The full contract
+        # hash differs from the blocked phase, but the stable confirmation contract is identical, so
+        # the blocked-phase records are consumable by the ready-phase freeze.
+        Add-Member -InputObject $twoPhaseReady -NotePropertyName 'machine_fresh_confirmation' -NotePropertyValue $twoPhaseBinding -Force
+        Add-Member -InputObject $twoPhaseReady -NotePropertyName 'independent_review_record' -NotePropertyValue $twoPhaseReviewBinding -Force
+        $twoPhaseResult = Assert-MachineFreshConfirmation $twoPhaseReady
+        Check ($null -ne $twoPhaseResult -and [string]$twoPhaseResult.RecordSha256 -eq $twoPhaseRecordSha) 'two-phase-ready-consumes-blocked-phase-records'
+        # negative: mutating a stable contract core field that passes the freeze static value gate
+        # (operator_role) changes the confirmation contract hash, so the records bound on the
+        # blocked phase must be rejected by the ready-phase consumer. settings_revoke_mechanism is
+        # NOT used here: it has a dedicated static freeze gate, so it would be rejected before the
+        # contract check ever runs.
+        $twoPhaseMutated = New-ConfirmFreeze 'ready' $twoPhaseBinding $twoPhaseReviewBinding
+        $twoPhaseMutated.operator_role = 'some-other-operator'
+        try { [void](Assert-MachineFreshConfirmation $twoPhaseMutated); Check $false 'two-phase-rejects-stable-contract-mutation' } catch { Check ($_.Exception.Message -match 'confirmation_contract_sha256') 'two-phase-rejects-stable-contract-mutation' }
+    } finally {
+        $script:DryRun = $savedConfirmDryRun; $script:LiveSimulation = $savedConfirmLiveSimulation; $script:TargetBindingConfirm = $savedConfirmTargetBindingConfirm; $script:ExecutionMode = $savedConfirmExecution
+        Remove-Item -LiteralPath $confirmTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Check (-not (Test-Path -LiteralPath $confirmTemp)) 'confirm-consumer-selftest-leaves-no-files'
+    # ADJ-20260810-0001 (C6): record write function tests. A host-only run with no PHYS target
+    # yields a blocked record with attempted=0/completed=0 and a matching companion, with zero HDC
+    # processes; pre-existing record/companion outputs are rejected without changing bytes; and the
+    # selftest leaves no files behind.
+    $writeTemp = Join-Path ([IO.Path]::GetTempPath()) ('e3-confirm-write-selftest-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($writeTemp) | Out-Null
+    try {
+        $blockedRecordPath = Join-Path $writeTemp 'target-binding-confirmation.json'
+        $blockedDraft = New-TargetBindingConfirmationRecord $confirmFreezeBase ('e' * 64) $confirmationContractSha ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) 'blocked' 'preflight: PHYS_1_TARGET must contain exactly one real target token' 'SELFTEST-HDC-1.0' $null $null 0 0
+        $blockedSha = Write-TargetBindingConfirmationRecordPair $blockedRecordPath $blockedDraft
+        Check (Test-Path -LiteralPath ($blockedRecordPath + '.sha256')) 'blocked-record-write-companion-exists'
+        Check ((Get-Content -LiteralPath ($blockedRecordPath + '.sha256') -Raw).Trim() -eq $blockedSha -and $blockedSha -eq (Get-FileSha256 $blockedRecordPath)) 'blocked-record-write-companion-matches'
+        $blockedJson = Get-Content -LiteralPath $blockedRecordPath -Raw | ConvertFrom-Json -Depth 20
+        Check ([string]$blockedJson.verdict -eq 'blocked' -and [int]$blockedJson.command_attempted -eq 0 -and [int]$blockedJson.command_completed -eq 0 -and [string]$blockedJson.reason -match 'PHYS_1_TARGET') 'blocked-record-attempted0-completed0'
+        Check ($script:HdcProcessStartCount -eq 0) 'blocked-record-write-zero-hdc'
+        # ADJ-20260810-0001 (C6): a blocked record may carry any attempted/completed <= 3 (partial
+        # probe progress); only a pass exit requires exactly 3 (producer- and consumer-enforced).
+        $blockedPartialDraft = New-TargetBindingConfirmationRecord $confirmFreezeBase ('e' * 64) $confirmationContractSha ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:03+00:00')) 'blocked' 'probe-2-tuple-model-mismatch' 'SELFTEST-HDC-1.0' 'PLA-AL10' $null 2 2
+        $blockedPartialPath = Join-Path $writeTemp 'target-binding-confirmation-partial.json'
+        [void](Write-TargetBindingConfirmationRecordPair $blockedPartialPath $blockedPartialDraft)
+        $blockedPartialJson = Get-Content -LiteralPath $blockedPartialPath -Raw | ConvertFrom-Json -Depth 20
+        Check ([string]$blockedPartialJson.verdict -eq 'blocked' -and [int]$blockedPartialJson.command_attempted -eq 2 -and [int]$blockedPartialJson.command_completed -eq 2 -and [int]$blockedPartialJson.command_count -eq 2) 'blocked-record-allows-attempted-completed-le-3'
+        $recordBytes = [IO.File]::ReadAllBytes($blockedRecordPath)
+        $companionBytes = [IO.File]::ReadAllBytes($blockedRecordPath + '.sha256')
+        try { [void](Write-TargetBindingConfirmationRecordPair $blockedRecordPath $blockedDraft); Check $false 'preexisting-record-rejected' } catch { Check ($_.Exception.Message -match 'already exists') 'preexisting-record-rejected' }
+        Check ([Convert]::ToBase64String([IO.File]::ReadAllBytes($blockedRecordPath)) -eq [Convert]::ToBase64String($recordBytes)) 'preexisting-record-bytes-unchanged'
+        Check ([Convert]::ToBase64String([IO.File]::ReadAllBytes($blockedRecordPath + '.sha256')) -eq [Convert]::ToBase64String($companionBytes)) 'preexisting-record-companion-unchanged'
+        $companionOnlyPath = Join-Path $writeTemp 'companion-only.json'
+        [IO.File]::WriteAllText($companionOnlyPath + '.sha256', ('1' * 64) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        try { [void](Write-TargetBindingConfirmationRecordPair $companionOnlyPath $blockedDraft); Check $false 'preexisting-companion-rejected' } catch { Check ($_.Exception.Message -match 'already exists') 'preexisting-companion-rejected' }
+        Check (-not (Test-Path -LiteralPath $companionOnlyPath)) 'preexisting-companion-no-record-written'
+        Check ((Get-Content -LiteralPath ($companionOnlyPath + '.sha256') -Raw).Trim() -eq ('1' * 64)) 'preexisting-companion-bytes-unchanged'
+    } finally {
+        Remove-Item -LiteralPath $writeTemp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Check (-not (Test-Path -LiteralPath $writeTemp)) 'confirm-write-selftest-leaves-no-files'
+    $recordDraft = New-TargetBindingConfirmationRecord $confirmFreezeBase ('e' * 64) $confirmationContractSha ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' 3 3
+    $recordDraftJson = $recordDraft | ConvertTo-Json -Depth 20
+    Check ($recordDraftJson -match '"record_kind"\s*:\s*"target-binding-confirmation"' -and $recordDraftJson -match '"is_evidence"\s*:\s*false' -and $recordDraftJson -match '"verdict"\s*:\s*"pass"' -and $recordDraftJson -match '"command_attempted"\s*:\s*3' -and $recordDraftJson -match '"command_completed"\s*:\s*3' -and $recordDraftJson -match '"target_redacted"\s*:\s*true' -and $recordDraftJson -match '"device_alias"\s*:\s*"PHYS-1"' -and $recordDraftJson -match '"attempt"\s*:\s*"initial"') 'confirmation-record-required-fields'
+    Check ($recordDraftJson -notmatch '(?i)(udid|serial|"target"\s*:|token|password|secret|endpoint|device-canary)') 'confirmation-record-no-target-or-secret'
+
     Check ($script:HdcProcessStartCount -eq 0) 'SelfTest-zero-HDC-processes'
     if ($failures.Count -gt 0) { throw "self-test failures: $($failures -join ', ')" }
     Write-Host 'SELFTEST_RESULT=pass HDC_PROCESSES=0'
 }
+
+# ADJ-20260810-0001 (C6): mode exclusivity is enforced BEFORE the SelfTest early exit so invalid
+# switch combinations (e.g. -SelfTest -TargetBindingConfirm, or confirm mode combined with
+# EvidenceRoot/RawRoot) are rejected without running anything.
+Assert-ModeExclusivity
 
 if ($SelfTest) {
     Invoke-RunnerSelfTest
     exit 0
 }
 
-if ($DryRun -and $LiveSimulation) { throw 'DryRun and LiveSimulation are mutually exclusive' }
-if ([string]::IsNullOrWhiteSpace($FreezeManifest) -or [string]::IsNullOrWhiteSpace($EvidenceRoot) -or [string]::IsNullOrWhiteSpace($HapA) -or [string]::IsNullOrWhiteSpace($HapB) -or [string]::IsNullOrWhiteSpace($HdcPath)) {
-    throw 'FreezeManifest, EvidenceRoot, HapA, HapB, and HdcPath are required unless SelfTest is used'
+if ([string]::IsNullOrWhiteSpace($FreezeManifest) -or [string]::IsNullOrWhiteSpace($HapA) -or [string]::IsNullOrWhiteSpace($HapB) -or [string]::IsNullOrWhiteSpace($HdcPath)) {
+    throw 'FreezeManifest, HapA, HapB, and HdcPath are required unless SelfTest is used'
+}
+if (-not $TargetBindingConfirm -and [string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+    throw 'EvidenceRoot is required unless SelfTest or TargetBindingConfirm is used'
 }
 if ($HdcTimeoutSeconds -lt 1 -or $HdcTimeoutSeconds -gt 120) { throw 'HdcTimeoutSeconds must be between 1 and 120' }
 if ($OperatorTimeoutSeconds -lt 1 -or $OperatorTimeoutSeconds -gt 900) { throw 'OperatorTimeoutSeconds must be between 1 and 900' }
@@ -4657,13 +5727,30 @@ if (-not (Test-Path -LiteralPath $freezePath -PathType Leaf)) { throw 'FreezeMan
 $freeze = Get-Content -LiteralPath $freezePath -Raw | ConvertFrom-Json -Depth 50
 $script:Freeze = $freeze
 $freezeSha256 = Get-FileSha256 $freezePath
-$script:PublicVersionLiterals = @([string]$freeze.target_tuple.full_system_build, [string]$freeze.sdk.version)
+$script:PublicVersionLiterals = @([string]$freeze.target_tuple.full_system_build, [string]$freeze.sdk.version, [string]$freeze.hdc.version)
+# ADJ-20260810-0001 (C6): the frozen HDC version is a legitimate public literal too - without it,
+# an IP-like HDC version (e.g. 7.0.0.100) would be redacted by Protect-SensitiveText before it
+# enters the confirmation record, corrupting the observed hdc_version field.
 Assert-FreezeManifest $freeze $freezePath
 $freezeContractSha256 = Get-FreezeContractSha256 $freeze
+# ADJ-20260810-0001 (C6): the stable two-phase projection that confirmation/review records bind.
+# The full freeze contract hash (above) is the final ready freeze's own identity; the confirmation
+# contract is the phase-invariant projection that must survive the blocked -> ready transition.
+$confirmationContractSha256 = Get-ConfirmationContractSha256 $freeze
 $repositoryBefore = Get-RepositoryState
 if ([string]$freeze.code_sha -ne $repositoryBefore.Head) { throw 'freeze code_sha does not match repository HEAD' }
-if (-not $DryRun -and -not $repositoryBefore.Clean) { throw 'Live and LiveSimulation require a clean repository state' }
-if (-not $script:NoDeviceMode) { Assert-TargetEnvironment }
+if (-not $DryRun -and -not $repositoryBefore.Clean) { throw 'Live, LiveSimulation, and TargetBindingConfirm require a clean repository state' }
+if (-not $script:NoDeviceMode -and -not $TargetBindingConfirm) { Assert-TargetEnvironment }
+if ($TargetBindingConfirm) {
+    # ADJ-20260810-0001 host-governed fresh confirmation: three whitelisted target-binding probes
+    # only; no campaign roots, no is_evidence, no campaign/evidence consumption, no capture, no
+    # install/start, and no final-campaign cleanup queries. Blocked output exits nonzero.
+    $confirmationResult = Invoke-TargetBindingConfirm $freeze $freezeSha256 $confirmationContractSha256 $repositoryBefore
+    $resultSuffix = if ($confirmationResult.Verdict -eq 'pass') { " RECORD_SHA256=$($confirmationResult.RecordSha256)" } else { '' }
+    Write-Host "RUNNER_RESULT=$($confirmationResult.Verdict) MODE=target-binding-confirm RECORD_KIND=target-binding-confirmation IS_EVIDENCE=false COMMAND_ATTEMPTED=$($confirmationResult.CommandAttempted) COMMAND_COMPLETED=$($confirmationResult.CommandCompleted) RECORD=$($confirmationResult.RecordPath)$resultSuffix"
+    if ($confirmationResult.Verdict -eq 'pass') { exit 0 }
+    exit 2
+}
 [void](Initialize-OutputRoots)
 $startedAt = Get-Now
 $scenarios = New-BlockedScenarios 'not-run'
@@ -4682,6 +5769,27 @@ try {
         execution_mode = $script:ExecutionMode
         repository = $repositoryBefore.Fingerprint
         freeze_manifest_sha256 = $freezeSha256
+    })
+    # ADJ-20260810-0001 (C6): the preflight transcript projects the governance bindings without
+    # leaking real paths (path_sha256 only), anchored to the STABLE confirmation contract (the
+    # contract the confirmation record actually binds), not the full freeze contract.
+    Add-TranscriptRecord 'machine-fresh-confirmation' ([ordered]@{
+        status = $(if ($null -ne $script:MachineFreshConfirmation) { 'pass' } else { 'not-required' })
+        authorization_id = $(if ($null -ne $script:MachineFreshConfirmation) { [string]$script:MachineFreshConfirmation.authorization_id } else { 'N/A' })
+        record_sha256 = $(if ($null -ne $script:MachineFreshConfirmation) { [string]$script:MachineFreshConfirmation.record_sha256 } else { 'N/A' })
+        record_path_sha256 = $(if ($null -ne $script:MachineFreshConfirmation) { [string]$script:MachineFreshConfirmation.record_path_sha256 } else { 'N/A' })
+        confirmation_contract_sha256 = $confirmationContractSha256
+    })
+    # ADJ-20260810-0001 (C6): symmetric independent-review-record projection into the preflight
+    # transcript (status/reviewer_role/record_sha256/record_path_sha256 only, never the real path),
+    # mirroring machine-fresh-confirmation and anchored to the stable confirmation contract, so both
+    # governance bindings are visible in the transcript without leaking host paths.
+    Add-TranscriptRecord 'independent-review-record' ([ordered]@{
+        status = $(if ($null -ne $script:IndependentReviewRecord) { 'pass' } else { 'not-required' })
+        reviewer_role = $(if ($null -ne $script:IndependentReviewRecord) { [string]$script:IndependentReviewRecord.reviewer_role } else { 'N/A' })
+        record_sha256 = $(if ($null -ne $script:IndependentReviewRecord) { [string]$script:IndependentReviewRecord.record_sha256 } else { 'N/A' })
+        record_path_sha256 = $(if ($null -ne $script:IndependentReviewRecord) { [string]$script:IndependentReviewRecord.record_path_sha256 } else { 'N/A' })
+        confirmation_contract_sha256 = $confirmationContractSha256
     })
     Initialize-PriorBlockedBinding $freeze
     if ($DryRun) {
@@ -4833,7 +5941,7 @@ try {
     }
     $manifestPath = Write-CollectionManifest $script:EvidencePath
     $manifestSha256 = Get-FileSha256 $manifestPath
-    $record = New-CompleteRecord $freeze $scenarios $overall $recordStatus $startedAt $endedAt $fatalMessage $infrastructureReason $repositoryBefore $freezeSha256 $freezeContractSha256 $manifestSha256
+    $record = New-CompleteRecord $freeze $scenarios $overall $recordStatus $startedAt $endedAt $fatalMessage $infrastructureReason $repositoryBefore $freezeSha256 $freezeContractSha256 $confirmationContractSha256 $manifestSha256
     $recordPath = Join-Path $script:EvidencePath 'scenario-results.json'
     Write-JsonFile $recordPath $record
     Write-CampaignSeal $script:EvidencePath

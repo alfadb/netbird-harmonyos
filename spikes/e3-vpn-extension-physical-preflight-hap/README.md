@@ -456,6 +456,175 @@ non-evidence blocked record. `-DryRun`, `-SelfTest`, and injected
 `fail` and is never downgraded to blocked.
 A retry prior must instead be a frozen matching Live blocked evidence record.
 
+### TargetBindingConfirm (host-governed machine fresh confirmation)
+
+`ADJ-20260810-0001` adds the mutually exclusive `-TargetBindingConfirm` mode,
+which resolves the ready-before-fresh catch-22: a real-device fresh
+confirmation must run before a `ready` freeze exists, yet Live only accepts
+`ready`. The mode is a host-governed single-purpose probe, **not** a campaign:
+
+- Requires `-ConfirmationRecord <out-of-repo-path>` (only in this mode); the
+  path must be outside the git repository and neither the record nor its
+  `.sha256` companion may already exist (single-use immutable double file). It
+  is mutually exclusive with `-DryRun`, `-LiveSimulation`, and `-SelfTest`,
+  and it **explicitly rejects** `-EvidenceRoot`/`-RawRoot` (it never
+  initializes campaign roots) rather than silently ignoring them. Mode
+  exclusivity is enforced before the `-SelfTest` early exit, so invalid switch
+  combinations are rejected even with `-SelfTest` present.
+- Fixes, under the current authorization `AUTH-E3-PHYS1API26-20260810-0001`,
+  the candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
+  `EV-E3-PHYS1API26-20260808-0001` and `attempt=initial` with
+  `retry.basis`/`infrastructure_reason=N/A`: the generic infrastructure retry
+  branch never applies to this path and any later retry requires new
+  governance.
+- Accepts a freeze with `plan_status: blocked` or `ready` and still runs the
+  full `Assert-FreezeManifest` structural gate, the clean-repository gate,
+  `code_sha`/runner hash, HDC version + executable SHA-256, external
+  HAP/source/SDK input hashes, and the controlled `PHYS_1_TARGET` single-token
+  check. It does **not** require campaign readiness, never initializes
+  `EvidenceRoot`/`RawRoot`, never sets `is_evidence`, and never consumes
+  campaign/evidence IDs.
+- Executes real HDC exactly three times, strictly via the existing allowlisted
+  argv (`Version`, `TupleModel`, `TupleBuild`); the existing redacted command
+  projection is reused and the real target never enters any projection or
+  record. It never enters continuous capture, install, start, or final
+  campaign cleanup queries (drift therefore needs no device-side cleanup
+  here; the Live precheck that follows is a normal campaign flow with targeted
+  cleanup verification). Model/build must match the freeze verbatim.
+- Writes the confirmation record as a **double-file completion pair**: JSON
+  tmp + `.sha256` tmp are written first (no-clobber), the hash is recomputed
+  over the tmp JSON, the JSON is atomic-moved into place, and the companion is
+  atomic-moved LAST as the completion marker. A consumer only accepts the
+  record when both files exist and the companion matches the record bytes; a
+  companion failure may leave an orphan JSON that is never consumed, never
+  overwritten, and the run returns `blocked` (exit 2). The JSON carries
+  `schema_version=1`, `record_kind=target-binding-confirmation`,
+  `is_evidence=false`, `authorization_id`, `exception`, the exact candidate
+  pair, `attempt=initial`/retry N/A, `code_sha`, runner/freeze/HDC hashes,
+  `confirmation_contract_sha256` (the **stable** two-phase contract, see
+  below; never the full freeze contract), alias `PHYS-1`, `target_redacted=true`,
+  expected/observed model+build, started/ended,
+  `command_attempted`/`command_completed` (both 3 on pass; `command_count` is
+  a compatibility alias the consumer requires to equal `command_completed`),
+  and verdict `pass|blocked` plus reason. Every
+  device-observed value (version/model/build) and the reason go through
+  `Protect-SensitiveText` before they enter the record; no target/serial/UDID/
+  secret ever appears. The pass exit is mechanical: the verdict is only
+  produced when exactly three HDC processes were started
+  (`HdcProcessStartCount=3`) and attempted=completed=3, asserted BEFORE the
+  record is written (a pass double-file pair is never generated and then
+  downgraded); any mismatch stays blocked, and a blocked record may carry any
+  attempted/completed <= 3 (partial probe progress). Pre-record gate failures (record/companion already
+  exist, in-repo path, reparse ancestor) throw and exit 1 with no record
+  written; probe/tuple or record-write failures write a best-effort blocked
+  record + companion and exit 2. Returned SHA-256 is recomputed from the final
+  moved file (return/disk same source).
+
+Run it from the spike directory (the runner resolves the repository root from
+`$PSScriptRoot`, so the repo root is independent of the current directory; the
+cwd only matters for the example's relative parameters such as
+`\e3-phys-preflight-campaign.ps1`) with a blocked confirmation freeze that
+carries `machine_fresh_confirmation.pending`:
+
+```powershell
+pwsh -NoProfile -File .\e3-phys-preflight-campaign.ps1 `
+  -FreezeManifest C:\outside-repo\freeze-blocked-confirm.json `
+  -ConfirmationRecord C:\outside-repo\target-binding-confirmation-20260810-0001.json `
+  -HapA C:\outside-repo\final-a.hap `
+  -HapB C:\outside-repo\final-b.hap `
+  -HdcPath C:\tools\hdc.exe -TargetBindingConfirm
+```
+
+Pass (`exit 0`) prints `RUNNER_RESULT=pass MODE=target-binding-confirm
+RECORD_KIND=target-binding-confirmation IS_EVIDENCE=false
+COMMAND_ATTEMPTED=3 COMMAND_COMPLETED=3 RECORD=<path> RECORD_SHA256=<sha>`;
+any failure prints `RUNNER_RESULT=blocked` and exits 2 (probe/tuple/write
+failure) or 1 (pre-record gate failure with no record). Confirm mode has no
+EvidenceRoot, so no transcript projection exists in this mode (the no-op
+`target-binding-confirm-record` transcript entry was removed); the campaign
+path projects `machine_fresh_confirmation` and the symmetric
+`independent-review-record` projection (status/authorization_id/reviewer_role/
+record_sha256/record_path_sha256, never the real path) into the preflight
+transcript and the sealed complete record, anchored to the stable confirmation
+contract. The sealed complete record also projects the standard final
+`freeze_contract_sha256` (full contract of the final ready freeze) alongside
+the stable `confirmation_contract_sha256`, so either binding can be verified
+without re-derivation.
+
+The `ready` freeze that follows must bind the record via
+`machine_fresh_confirmation` (`status=pass`, matching `authorization_id`,
+`record_path`, `record_sha256`): Live and a DryRun of a `ready` freeze fully
+validate the out-of-repo record + matching companion and every content field
+(schema/kind/is_evidence=false/exception/exact candidate pair/attempt
+initial/retry N/A/device_alias/target_redacted/verdict pass/reason
+N/A/code/runner/HDC SHA + version/confirmation_contract_sha256/expected+observed
+model+build/command_attempted=3/command_completed=3/command_count alias
+match/started<=ended<=`preflight_inputs_frozen_at`). The consumer also
+rejects any unknown top-level field (exact schema), so a target/serial/
+secret canary smuggled into the record makes it un-consumable. No arbitrary age window is imposed: freshness
+is anchored only by ordering against `preflight_inputs_frozen_at` plus the
+Live precheck re-execution of the three probes (fresh double anchor). A
+blocked DryRun may keep `status=pending` (skipped), and a blocked DryRun that
+declares `status=pass` is fully validated exactly like a ready one (a blocked
+DryRun can never hide a broken binding). The same ValidateDeclaredPass rule
+applies to the independent review record on a blocked DryRun: a declared
+`independent_review_record.status=pass` is fully validated (machine pass +
+review pass runs the complete review mechanical gate), `status=pending` stays
+allowed and skipped, and a declared-pass review on a pending/absent machine
+confirmation is rejected outright (the review record binds the machine
+confirmation hash, so a pending/absent machine side can never anchor it).
+`TargetBindingConfirm` itself may consume a pending/absent object on a blocked
+freeze.
+
+Since `ADJ-20260810-0001` (C6), ready Live and ready DryRun additionally
+require the **independent review record mechanical gate**: the freeze must
+carry `independent_review_record.status=pass` bound to an out-of-repo review
+record (`record_kind=e3-ready-freeze-review`, `is_evidence=false`,
+`schema_version=1`, `exception=E3-PHYS-PREFLIGHT`, verdict `pass`, `blockers=0`,
+`majors=0`, `reviewer_role`
+matching `independent_reviewer_role` and differing from the operator role,
+exact candidate pair/code/runner/`confirmation_contract_sha256` consistent,
+and `machine_confirmation_sha256` equal to the machine confirmation record
+SHA-256) plus a matching `.sha256` companion, and the review record must
+satisfy the full time chain `machine confirmation ended_at <= review
+started_at <= review ended_at <= final ready freeze
+preflight_inputs_frozen_at` (the blocked confirmation freeze and the ready
+draft keep a provisional/excluded `preflight_inputs_frozen_at`; the final
+freeze is advanced after the review completes, and a review can never be
+pre-filled before the machine confirmation completes). The review consumer
+rejects unknown top-level fields (exact schema) like the confirmation
+consumer. The self-declared
+`independent_review_ready=true` boolean is only a static contract/role
+readiness marker on a blocked confirmation freeze and never gates a ready
+plan_status (a blocked confirmation freeze needs no review record). The sealed
+complete record projects both bindings (status/roles/record_sha256/
+record_path_sha256, anchored to the stable confirmation contract).
+
+#### Two-phase confirmation contract (why records bind a stable projection)
+
+`Get-FreezeContract` includes the governance/time field
+`preflight_inputs_frozen_at`. The blocked confirmation freeze is frozen before
+the machine confirmation runs (say `T1`), and the final ready freeze must be
+frozen after the confirmation and review end times to satisfy the freshness
+time gate (say `T2 > T1`). A confirmation/review record bound to the full
+freeze contract would therefore be rejected by the ready-phase consumer: if
+the ready freeze advances `preflight_inputs_frozen_at`, the full-contract hash
+changes; if it does not, the time gate (`ended_at <= frozen_at`) fails.
+`Get-ConfirmationContract` / `Get-ConfirmationContractSha256` resolve this by
+projecting the phase-invariant core only: the execution core, the **exact
+candidate pair** (`campaign_id` + `evidence_id`), external input hashes,
+`code_sha`, runner, HDC, and roles, with `cleanup_baseline_frozen` /
+`collection_ready` kept as static execution prerequisites. It excludes
+`plan_status`, `preflight_inputs_frozen_at`, `machine_fresh_confirmation`,
+`independent_review_record`, and `independent_review_ready` - the governance/
+time fields that legitimately differ between the blocked and ready phases.
+Workflow rule: the blocked freeze, the ready draft, and the final ready freeze
+may each have a different **full** freeze contract hash (governance/time
+fields differ), but their **confirmation contract hash must be byte-identical**
+(otherwise the confirmation/review records cannot bind and the consumer
+rejects). The producer (`-TargetBindingConfirm`), the ready consumer, and the
+ready review record all verify the same `confirmation_contract_sha256` value.
+
 Real Live requires `plan_status: ready`, a clean repository, manual operator
 input, and the frozen target mapping. Normal revoke evidence comes only from the
 planned visible UI/Settings actions; under `ADJ-20260808-0002`/`0003` scenario 5

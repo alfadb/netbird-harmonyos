@@ -65,28 +65,38 @@ function Invoke-Runner {
         [string]$EvidencePath,
         [string]$RawPath,
         [switch]$AsDryRun,
-        [string]$FixturePath
+        [string]$FixturePath,
+        [switch]$AsConfirm,
+        [string]$ConfirmationRecordPath,
+        [switch]$AsSelfTest,
+        [switch]$IncludeRoots
     )
     $arguments = @(
         '-NoProfile', '-File', $runner,
         '-FreezeManifest', $FreezePath,
-        '-EvidenceRoot', $EvidencePath,
-        '-RawRoot', $RawPath,
         '-HapA', $script:HapA,
         '-HapB', $script:HapB,
         '-HdcPath', $script:SentinelHdc
     )
-    if ($AsDryRun) {
-        $arguments += '-DryRun'
-    } else {
-        $arguments += @('-LiveSimulation', '-SimulationFixture', $FixturePath)
+    if ($AsSelfTest) { $arguments += '-SelfTest' }
+    if ($AsConfirm) {
+        $arguments += '-TargetBindingConfirm'
+        if (-not [string]::IsNullOrWhiteSpace($ConfirmationRecordPath)) { $arguments += @('-ConfirmationRecord', $ConfirmationRecordPath) }
+    }
+    if ($AsDryRun) { $arguments += '-DryRun' }
+    if (-not $AsSelfTest -and -not $AsDryRun) {
+        if (-not [string]::IsNullOrWhiteSpace($FixturePath)) { $arguments += @('-LiveSimulation', '-SimulationFixture', $FixturePath) }
+    }
+    if (-not $AsSelfTest -and ($IncludeRoots -or -not $AsConfirm)) {
+        if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) { $arguments += @('-EvidenceRoot', $EvidencePath) }
+        if (-not [string]::IsNullOrWhiteSpace($RawPath)) { $arguments += @('-RawRoot', $RawPath) }
     }
     $output = & pwsh @arguments 2>&1
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Text = ($output -join "`n"); Lines = @($output) }
 }
 
 function New-Freeze {
-    param([string]$PlanStatus = 'ready', [string]$EvidenceId = 'EV-E3-SELFTEST-20990101-0001')
+    param([string]$PlanStatus = 'ready', [string]$EvidenceId = 'EV-E3-SELFTEST-20990101-0001', [string]$CampaignId = 'E3-PHYS-PREFLIGHT-SELFTEST')
     $head = (& git -C $repo rev-parse HEAD 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') { throw 'unable to get repository HEAD' }
     return [ordered]@{
@@ -94,7 +104,7 @@ function New-Freeze {
         plan_status = $PlanStatus
         exception = 'E3-PHYS-PREFLIGHT'
         evidence_id = $EvidenceId
-        campaign_id = 'E3-PHYS-PREFLIGHT-SELFTEST'
+        campaign_id = $CampaignId
         attempt = 'initial'
         prior_blocked_binding = 'N/A'
         retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A'; prior_record_path = 'N/A'; prior_record_sha256 = 'N/A' }
@@ -141,6 +151,7 @@ function New-Freeze {
         cleanup_baseline_frozen = $true
         collection_ready = $true
         independent_review_ready = $true
+        independent_review_record = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = 'selftest-independent-reviewer' }
         operator_role = 'selftest-operator'
         independent_reviewer_role = 'selftest-independent-reviewer'
     }
@@ -374,6 +385,465 @@ try {
     Assert-True ($null -eq $dryRecord.scenario_aggregation.s3_clean_reactivation_proof) 'aggregation s3_clean_reactivation_proof masqueraded not-probed as false'
     Assert-ManifestAndSeal $dryPaths.Evidence
     Assert-ProjectionChain $dryPaths.Evidence
+
+    Write-Host 'SELFTEST_PHASE=target-binding-confirm-mode-gates'
+    # ADJ-20260810-0001 host-governed TargetBindingConfirm: mode exclusivity (specific messages),
+    # required ConfirmationRecord, out-of-repository record path, and explicit EvidenceRoot/RawRoot
+    # rejection are all enforced before any HDC call. The runner also enforces mode exclusivity
+    # before the SelfTest early exit, so combined switches are rejected even with -SelfTest.
+    $confirmConflictRun = Invoke-Runner $dryFreezePath '' '' -AsDryRun -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
+    Assert-True ($confirmConflictRun.ExitCode -ne 0 -and $confirmConflictRun.Text -match 'mutually exclusive') 'TargetBindingConfirm+DryRun was not rejected as mutually exclusive'
+    $confirmLivesimRun = Invoke-Runner $dryFreezePath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json' -FixturePath $baseFixturePath
+    Assert-True ($confirmLivesimRun.ExitCode -ne 0 -and $confirmLivesimRun.Text -match 'mutually exclusive') 'TargetBindingConfirm+LiveSimulation was not rejected as mutually exclusive'
+    $confirmSelfTestRun = Invoke-Runner $dryFreezePath '' '' -AsSelfTest -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
+    Assert-True ($confirmSelfTestRun.ExitCode -ne 0 -and $confirmSelfTestRun.Text -match 'mutually exclusive') 'TargetBindingConfirm+SelfTest was not rejected as mutually exclusive'
+    $confirmNoRecordRun = Invoke-Runner $dryFreezePath '' '' -AsConfirm
+    Assert-True ($confirmNoRecordRun.ExitCode -ne 0 -and $confirmNoRecordRun.Text -match 'requires ConfirmationRecord') 'TargetBindingConfirm without ConfirmationRecord was not rejected'
+    $confirmInRepoPath = Join-Path $repo 'in-repo-confirmation.json'
+    # ADJ-20260810-0001 (C6): the in-repo ConfirmationRecord negative must use a FIXED-candidate
+    # blocked confirmation freeze so the failure is the out-of-repo path gate, never the earlier
+    # candidate-pair gate (a wrong-pair freeze would be rejected before the path is even checked).
+    $confirmBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $confirmBlockedPath = Write-JsonFixture 'freeze-confirm-blocked-candidate.json' $confirmBlockedFreeze
+    $confirmInRepoRun = Invoke-Runner $confirmBlockedPath '' '' -AsConfirm -ConfirmationRecordPath $confirmInRepoPath
+    Assert-True ($confirmInRepoRun.ExitCode -ne 0 -and $confirmInRepoRun.Text -match 'outside the git repository') 'in-repo ConfirmationRecord was not rejected'
+    Assert-True (-not (Test-Path -LiteralPath $confirmInRepoPath)) 'in-repo ConfirmationRecord was written despite rejection'
+    $confirmRootsRun = Invoke-Runner $dryFreezePath $dryPaths.Evidence $dryPaths.Raw -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json' -IncludeRoots
+    Assert-True ($confirmRootsRun.ExitCode -ne 0 -and $confirmRootsRun.Text -match 'EvidenceRoot is not allowed') 'confirm mode did not explicitly reject EvidenceRoot/RawRoot'
+    # ADJ-20260810-0001 (C6): TargetBindingConfirm freeze-level negatives - the fixed candidate
+    # pair and attempt=initial are enforced before any HDC call, so a wrong-pair or retry-attempt
+    # freeze is rejected with the specific gate message and the HDC sentinel never starts.
+    $confirmWrongPairFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-WRONG'
+    $confirmWrongPairPath = Write-JsonFixture 'freeze-confirm-wrong-pair.json' $confirmWrongPairFreeze
+    $confirmWrongPairRun = Invoke-Runner $confirmWrongPairPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
+    Assert-True ($confirmWrongPairRun.ExitCode -ne 0 -and $confirmWrongPairRun.Text -match 'fixed candidate pair') 'TargetBindingConfirm with wrong candidate pair was not rejected'
+    $confirmRetryFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $confirmRetryFreeze.attempt = 'infrastructure-blocked-retry-1'
+    $confirmRetryPath = Write-JsonFixture 'freeze-confirm-retry-attempt.json' $confirmRetryFreeze
+    $confirmRetryRun = Invoke-Runner $confirmRetryPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
+    Assert-True ($confirmRetryRun.ExitCode -ne 0 -and $confirmRetryRun.Text -match 'attempt|retry') 'TargetBindingConfirm with retry attempt was not rejected'
+    Assert-True (-not (Test-Path -LiteralPath $script:HdcLaunchMarker)) 'confirm mode gate cases launched the HDC sentinel'
+
+    Write-Host 'SELFTEST_PHASE=target-binding-confirm-ready-freeze-binding'
+    function Get-ContractSha256 {
+        param($Freeze)
+        # ADJ-20260810-0001 (C6): mirrors the runner's Get-FreezeContract field list (full contract,
+        # including preflight_inputs_frozen_at). Used only to assert that the blocked and ready
+        # phase full-contract hashes DIFFER when frozen_at advances; confirmation/review fixtures
+        # bind Get-ConfirmationContractSha256 instead.
+        $contract = [ordered]@{
+            exception = $Freeze.exception
+            campaign_id = $Freeze.campaign_id
+            scenario_window_seconds = $Freeze.scenario_window_seconds
+            device_alias = $Freeze.device_alias
+            target_tuple = $Freeze.target_tuple
+            settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
+            settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
+            settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
+            settings_vpn_page_policy = $Freeze.settings_vpn_page_policy
+            destroy_terminal_policy = $Freeze.destroy_terminal_policy
+            process_absent_required_count = $Freeze.process_absent_required_count
+            process_absent_probe_spacing_seconds = $Freeze.process_absent_probe_spacing_seconds
+            process_probe_target = $Freeze.process_probe_target
+            operator_trust_model = $Freeze.operator_trust_model
+            scenario_invalid_policy = $Freeze.scenario_invalid_policy
+            layout_verification_profile = $Freeze.layout_verification_profile
+            vpn_conflict_rejection_codes = $Freeze.vpn_conflict_rejection_codes
+            signing = $Freeze.signing
+            artifact_sha256 = $Freeze.artifact_sha256
+            source = $Freeze.source
+            sdk = $Freeze.sdk
+            hdc = $Freeze.hdc
+            runner_sha256 = $Freeze.runner_sha256
+            code_sha = $Freeze.code_sha
+            preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
+            cleanup_baseline_frozen = $Freeze.cleanup_baseline_frozen
+            collection_ready = $Freeze.collection_ready
+            independent_review_ready = $Freeze.independent_review_ready
+            operator_role = $Freeze.operator_role
+            independent_reviewer_role = $Freeze.independent_reviewer_role
+        }
+        $json = $contract | ConvertTo-Json -Depth 30 -Compress
+        return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))).ToLowerInvariant()
+    }
+    function Get-ConfirmationContractSha256 {
+        param($Freeze)
+        # ADJ-20260810-0001 (C6): mirrors the runner's Get-ConfirmationContract stable two-phase
+        # projection (execution core + exact candidate pair + external inputs + code/runner/HDC +
+        # roles; excludes plan_status / preflight_inputs_frozen_at / machine_fresh_confirmation /
+        # independent_review_record / independent_review_ready). Confirmation/review records bind
+        # THIS hash so they survive the blocked -> ready transition; if the runner's projection
+        # ever drifts, the bound-pass cases fail and catch it.
+        $contract = [ordered]@{
+            exception = $Freeze.exception
+            campaign_id = $Freeze.campaign_id
+            evidence_id = $Freeze.evidence_id
+            scenario_window_seconds = $Freeze.scenario_window_seconds
+            device_alias = $Freeze.device_alias
+            target_tuple = $Freeze.target_tuple
+            settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
+            settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
+            settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
+            settings_vpn_page_policy = $Freeze.settings_vpn_page_policy
+            destroy_terminal_policy = $Freeze.destroy_terminal_policy
+            process_absent_required_count = $Freeze.process_absent_required_count
+            process_absent_probe_spacing_seconds = $Freeze.process_absent_probe_spacing_seconds
+            process_probe_target = $Freeze.process_probe_target
+            operator_trust_model = $Freeze.operator_trust_model
+            scenario_invalid_policy = $Freeze.scenario_invalid_policy
+            layout_verification_profile = $Freeze.layout_verification_profile
+            vpn_conflict_rejection_codes = $Freeze.vpn_conflict_rejection_codes
+            signing = $Freeze.signing
+            artifact_sha256 = $Freeze.artifact_sha256
+            source = $Freeze.source
+            sdk = $Freeze.sdk
+            hdc = $Freeze.hdc
+            runner_sha256 = $Freeze.runner_sha256
+            code_sha = $Freeze.code_sha
+            cleanup_baseline_frozen = $Freeze.cleanup_baseline_frozen
+            collection_ready = $Freeze.collection_ready
+            operator_role = $Freeze.operator_role
+            independent_reviewer_role = $Freeze.independent_reviewer_role
+        }
+        $json = $contract | ConvertTo-Json -Depth 30 -Compress
+        return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))).ToLowerInvariant()
+    }
+    function Write-ConfirmationRecordFixture {
+        param([string]$Name, $Freeze, [string]$OverrideAuthId = 'AUTH-E3-PHYS1API26-20260810-0001', [string]$OverrideVerdict = 'pass')
+        $record = [ordered]@{
+            schema_version = 1
+            record_kind = 'target-binding-confirmation'
+            is_evidence = $false
+            authorization_id = $OverrideAuthId
+            exception = 'E3-PHYS-PREFLIGHT'
+            campaign_id = $Freeze.campaign_id
+            evidence_id = $Freeze.evidence_id
+            attempt = 'initial'
+            retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A' }
+            plan_status = 'ready'
+            device_alias = 'PHYS-1'
+            target_redacted = $true
+            code_sha = $Freeze.code_sha
+            runner_sha256 = $Freeze.runner_sha256
+            freeze_manifest_sha256 = ('e' * 64)
+            confirmation_contract_sha256 = Get-ConfirmationContractSha256 $Freeze
+            hdc_sha256 = $Freeze.hdc.sha256
+            hdc_version = $Freeze.hdc.version
+            expected_model = 'PLA-AL10'
+            expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            observed_model = 'PLA-AL10'
+            observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            started_at = '2098-12-31T23:59:55+00:00'
+            ended_at = '2098-12-31T23:59:59+00:00'
+            command_attempted = 3
+            command_completed = 3
+            command_count = 3
+            repository_fingerprint = ('g' * 64)
+            verdict = $OverrideVerdict
+            reason = 'N/A'
+        }
+        $path = Write-JsonFixture $Name $record
+        $sha = Get-Sha256 $path
+        [IO.File]::WriteAllText($path + '.sha256', $sha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        return [pscustomobject]@{ Path = $path; Sha256 = $sha }
+    }
+    function Add-ConfirmationBinding {
+        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$AuthId = 'AUTH-E3-PHYS1API26-20260810-0001')
+        $copy = Copy-JsonObject $Freeze
+        # ADJ-20260810-0001 (C6): machine_fresh_confirmation does not exist on a New-Freeze object;
+        # under Set-StrictMode a direct assignment to the non-existent property would throw, so it
+        # must be added with Add-Member -Force.
+        Add-Member -InputObject $copy -NotePropertyName 'machine_fresh_confirmation' -NotePropertyValue ([ordered]@{ status = $Status; authorization_id = $AuthId; record_path = $RecordPath; record_sha256 = $RecordSha256 }) -Force
+        return $copy
+    }
+    function Write-ReviewRecordFixture {
+        param([string]$Name, $Freeze, [string]$MachineSha, [string]$ReviewerRole = 'selftest-independent-reviewer', [string]$StartedAt = '2098-12-31T23:59:59+00:00', [string]$EndedAt = '2098-12-31T23:59:59+00:00')
+        # ADJ-20260810-0001 (C6): default review times are anchored AFTER the machine confirmation
+        # ended_at (23:59:59) and at/before the final freeze preflight_inputs_frozen_at
+        # (2099-01-01T00:00:00); the consumer enforces machine ended <= review started <= review
+        # ended <= final freeze frozen_at, so a review can never be pre-filled before the machine
+        # confirmation completes.
+        $record = [ordered]@{
+            schema_version = 1
+            record_kind = 'e3-ready-freeze-review'
+            is_evidence = $false
+            exception = 'E3-PHYS-PREFLIGHT'
+            campaign_id = $Freeze.campaign_id
+            evidence_id = $Freeze.evidence_id
+            code_sha = $Freeze.code_sha
+            runner_sha256 = $Freeze.runner_sha256
+            confirmation_contract_sha256 = Get-ConfirmationContractSha256 $Freeze
+            machine_confirmation_sha256 = $MachineSha
+            reviewer_role = $ReviewerRole
+            operator_role = $Freeze.operator_role
+            verdict = 'pass'
+            blockers = 0
+            majors = 0
+            started_at = $StartedAt
+            ended_at = $EndedAt
+        }
+        $path = Write-JsonFixture $Name $record
+        $sha = Get-Sha256 $path
+        [IO.File]::WriteAllText($path + '.sha256', $sha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        return [pscustomobject]@{ Path = $path; Sha256 = $sha }
+    }
+    function Add-ReviewBinding {
+        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$ReviewerRole = 'selftest-independent-reviewer')
+        $copy = Copy-JsonObject $Freeze
+        $copy.independent_review_record = [ordered]@{ status = $Status; record_path = $RecordPath; record_sha256 = $RecordSha256; reviewer_role = $ReviewerRole }
+        return $copy
+    }
+    # The ready freeze consumed by this AUTH path fixes the candidate pair and attempt=initial; the
+    # generic infrastructure retry branch never applies.
+    $readyNoConfirmFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $readyNoConfirmPath = Write-JsonFixture 'freeze-ready-no-confirm.json' $readyNoConfirmFreeze
+    $readyNoConfirmPaths = New-CasePaths 'ready-no-confirm-dryrun'
+    $readyNoConfirmRun = Invoke-Runner $readyNoConfirmPath $readyNoConfirmPaths.Evidence $readyNoConfirmPaths.Raw -AsDryRun
+    Assert-True ($readyNoConfirmRun.ExitCode -ne 0 -and $readyNoConfirmRun.Text -match 'machine_fresh_confirmation') 'DryRun ready freeze without confirmation was not rejected'
+    Assert-True (-not (Test-Path -LiteralPath $readyNoConfirmPaths.Evidence)) 'rejected ready freeze still created an evidence root'
+    $readyConfirmRecord = Write-ConfirmationRecordFixture 'confirmation-record-pass.json' $readyNoConfirmFreeze
+    $readyReviewRecord = Write-ReviewRecordFixture 'ready-freeze-review-pass.json' $readyNoConfirmFreeze $readyConfirmRecord.Sha256
+    $readyWrongAuthFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256 -AuthId 'AUTH-E3-PHYS1API26-20260810-9999') $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $readyWrongAuthPath = Write-JsonFixture 'freeze-ready-wrong-auth.json' $readyWrongAuthFreeze
+    $readyWrongAuthPaths = New-CasePaths 'ready-wrong-auth-dryrun'
+    $readyWrongAuthRun = Invoke-Runner $readyWrongAuthPath $readyWrongAuthPaths.Evidence $readyWrongAuthPaths.Raw -AsDryRun
+    Assert-True ($readyWrongAuthRun.ExitCode -ne 0 -and $readyWrongAuthRun.Text -match 'authorization_id') 'DryRun ready freeze with wrong authorization_id was not rejected'
+    $readyWrongShaFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path ('d' * 64)) $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $readyWrongShaPath = Write-JsonFixture 'freeze-ready-wrong-sha.json' $readyWrongShaFreeze
+    $readyWrongShaPaths = New-CasePaths 'ready-wrong-sha-dryrun'
+    $readyWrongShaRun = Invoke-Runner $readyWrongShaPath $readyWrongShaPaths.Evidence $readyWrongShaPaths.Raw -AsDryRun
+    Assert-True ($readyWrongShaRun.ExitCode -ne 0 -and $readyWrongShaRun.Text -match 'SHA-256') 'DryRun ready freeze with wrong record sha was not rejected'
+    $readyBoundFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $readyBoundPath = Write-JsonFixture 'freeze-ready-bound.json' $readyBoundFreeze
+    $readyBoundPaths = New-CasePaths 'ready-bound-dryrun'
+    $readyBoundRun = Invoke-Runner $readyBoundPath $readyBoundPaths.Evidence $readyBoundPaths.Raw -AsDryRun
+    Assert-True ($readyBoundRun.ExitCode -eq 0) "DryRun ready freeze with bound confirmation failed: $($readyBoundRun.Text)"
+    $readyBoundRecord = Get-Content -LiteralPath (Join-Path $readyBoundPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True (-not $readyBoundRecord.is_evidence -and $readyBoundRecord.record_status -eq 'blocked' -and $readyBoundRecord.hdc_processes_started -eq 0) 'ready-bound DryRun non-evidence contract mismatch'
+    Assert-True ([string]$readyBoundRecord.machine_fresh_confirmation.status -eq 'pass' -and [string]$readyBoundRecord.machine_fresh_confirmation.authorization_id -eq 'AUTH-E3-PHYS1API26-20260810-0001' -and [string]$readyBoundRecord.machine_fresh_confirmation.record_sha256 -eq $readyConfirmRecord.Sha256 -and $null -eq $readyBoundRecord.machine_fresh_confirmation.PSObject.Properties['record_path']) 'sealed record machine_fresh_confirmation projection mismatch or leaked path'
+    Assert-True ([string]$readyBoundRecord.independent_review_record.status -eq 'pass' -and [string]$readyBoundRecord.independent_review_record.record_sha256 -eq $readyReviewRecord.Sha256 -and $null -eq $readyBoundRecord.independent_review_record.PSObject.Properties['record_path']) 'sealed record independent_review_record projection mismatch or leaked path'
+    Assert-ManifestAndSeal $readyBoundPaths.Evidence
+    Assert-ProjectionChain $readyBoundPaths.Evidence
+    $pendingBoundFreeze = Add-ConfirmationBinding $dryFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256 -Status 'pending'
+    $pendingBoundPath = Write-JsonFixture 'freeze-blocked-pending-confirmation.json' $pendingBoundFreeze
+    $pendingBoundPaths = New-CasePaths 'blocked-pending-dryrun'
+    $pendingBoundRun = Invoke-Runner $pendingBoundPath $pendingBoundPaths.Evidence $pendingBoundPaths.Raw -AsDryRun
+    Assert-True ($pendingBoundRun.ExitCode -eq 0) "blocked DryRun with pending confirmation was rejected: $($pendingBoundRun.Text)"
+    # ADJ-20260810-0001 (C6): a blocked DryRun that declares status=pass is FULLY validated too;
+    # pending is allowed and skipped, but a broken pass binding is never hidden by plan_status.
+    $blockedPassFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $blockedPassBound = Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256
+    $blockedPassPath = Write-JsonFixture 'freeze-blocked-machine-pass.json' $blockedPassBound
+    $blockedPassPaths = New-CasePaths 'blocked-machine-pass-dryrun'
+    $blockedPassRun = Invoke-Runner $blockedPassPath $blockedPassPaths.Evidence $blockedPassPaths.Raw -AsDryRun
+    Assert-True ($blockedPassRun.ExitCode -eq 0) "blocked DryRun with status=pass was not fully validated: $($blockedPassRun.Text)"
+    $brokenConfirmRecord = Write-ConfirmationRecordFixture 'confirmation-record-broken.json' $readyNoConfirmFreeze -OverrideVerdict 'blocked'
+    $blockedBrokenBound = Add-ConfirmationBinding $blockedPassFreeze $brokenConfirmRecord.Path $brokenConfirmRecord.Sha256
+    $blockedBrokenPath = Write-JsonFixture 'freeze-blocked-machine-broken.json' $blockedBrokenBound
+    $blockedBrokenPaths = New-CasePaths 'blocked-machine-broken-dryrun'
+    $blockedBrokenRun = Invoke-Runner $blockedBrokenPath $blockedBrokenPaths.Evidence $blockedBrokenPaths.Raw -AsDryRun
+    Assert-True ($blockedBrokenRun.ExitCode -ne 0 -and $blockedBrokenRun.Text -match 'verdict') 'blocked DryRun with status=pass did not fully validate the record content'
+    # ADJ-20260810-0001 (C6): blocked DryRun review consistency - a declared-pass review can never
+    # ride on a pending/absent machine confirmation, and a machine pass + review pass pair is fully
+    # validated (ValidateDeclaredPass) exactly like a ready one; pending review stays allowed.
+    $blockedPendingMachineReviewPassFreeze = Add-ReviewBinding (Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256 -Status 'pending') $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $blockedPendingMachineReviewPassPath = Write-JsonFixture 'freeze-blocked-pending-machine-review-pass.json' $blockedPendingMachineReviewPassFreeze
+    $blockedPendingMachineReviewPassPaths = New-CasePaths 'blocked-pending-machine-review-pass-dryrun'
+    $blockedPendingMachineReviewPassRun = Invoke-Runner $blockedPendingMachineReviewPassPath $blockedPendingMachineReviewPassPaths.Evidence $blockedPendingMachineReviewPassPaths.Raw -AsDryRun
+    Assert-True ($blockedPendingMachineReviewPassRun.ExitCode -ne 0 -and $blockedPendingMachineReviewPassRun.Text -match 'machine_fresh_confirmation.status=pass') 'blocked DryRun with pending machine confirmation and declared-pass review was not rejected'
+    $blockedMachineReviewPassBound = Add-ReviewBinding (Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $blockedMachineReviewPassPath = Write-JsonFixture 'freeze-blocked-machine-review-pass.json' $blockedMachineReviewPassBound
+    $blockedMachineReviewPassPaths = New-CasePaths 'blocked-machine-review-pass-dryrun'
+    $blockedMachineReviewPassRun = Invoke-Runner $blockedMachineReviewPassPath $blockedMachineReviewPassPaths.Evidence $blockedMachineReviewPassPaths.Raw -AsDryRun
+    Assert-True ($blockedMachineReviewPassRun.ExitCode -eq 0) "blocked DryRun with machine pass + review pass was not fully validated: $($blockedMachineReviewPassRun.Text)"
+    $blockedPendingReviewBound = Add-ReviewBinding (Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $readyReviewRecord.Path $readyReviewRecord.Sha256 -Status 'pending'
+    $blockedPendingReviewPath = Write-JsonFixture 'freeze-blocked-pending-review.json' $blockedPendingReviewBound
+    $blockedPendingReviewPaths = New-CasePaths 'blocked-pending-review-dryrun'
+    $blockedPendingReviewRun = Invoke-Runner $blockedPendingReviewPath $blockedPendingReviewPaths.Evidence $blockedPendingReviewPaths.Raw -AsDryRun
+    Assert-True ($blockedPendingReviewRun.ExitCode -eq 0) "blocked DryRun with pending review was rejected: $($blockedPendingReviewRun.Text)"
+    $brokenReviewRecordPath = Write-JsonFixture 'ready-freeze-review-broken-verdict.json' ([ordered]@{
+        schema_version = 1
+        record_kind = 'e3-ready-freeze-review'
+        is_evidence = $false
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $readyNoConfirmFreeze.campaign_id
+        evidence_id = $readyNoConfirmFreeze.evidence_id
+        code_sha = $readyNoConfirmFreeze.code_sha
+        runner_sha256 = $readyNoConfirmFreeze.runner_sha256
+        confirmation_contract_sha256 = Get-ConfirmationContractSha256 $readyNoConfirmFreeze
+        machine_confirmation_sha256 = $readyConfirmRecord.Sha256
+        reviewer_role = 'selftest-independent-reviewer'
+        operator_role = 'selftest-operator'
+        verdict = 'blocked'
+        blockers = 0
+        majors = 0
+        started_at = '2098-12-31T23:59:59+00:00'
+        ended_at = '2098-12-31T23:59:59+00:00'
+    })
+    $brokenReviewRecordSha = Get-Sha256 $brokenReviewRecordPath
+    [IO.File]::WriteAllText($brokenReviewRecordPath + '.sha256', $brokenReviewRecordSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $blockedBrokenReviewBound = Add-ReviewBinding (Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $brokenReviewRecordPath $brokenReviewRecordSha
+    $blockedBrokenReviewPath = Write-JsonFixture 'freeze-blocked-machine-review-broken.json' $blockedBrokenReviewBound
+    $blockedBrokenReviewPaths = New-CasePaths 'blocked-machine-review-broken-dryrun'
+    $blockedBrokenReviewRun = Invoke-Runner $blockedBrokenReviewPath $blockedBrokenReviewPaths.Evidence $blockedBrokenReviewPaths.Raw -AsDryRun
+    Assert-True ($blockedBrokenReviewRun.ExitCode -ne 0 -and $blockedBrokenReviewRun.Text -match 'verdict') 'blocked DryRun with machine pass + broken review record was not fully validated'
+    # ADJ-20260810-0001 (C6): independent review record mechanical gate negatives. The self-declared
+    # independent_review_ready=true boolean is never an execution gate for a ready plan_status.
+    $readyNoReviewFreeze = Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256
+    $readyNoReviewPath = Write-JsonFixture 'freeze-ready-no-review.json' $readyNoReviewFreeze
+    $readyNoReviewPaths = New-CasePaths 'ready-no-review-dryrun'
+    $readyNoReviewRun = Invoke-Runner $readyNoReviewPath $readyNoReviewPaths.Evidence $readyNoReviewPaths.Raw -AsDryRun
+    Assert-True ($readyNoReviewRun.ExitCode -ne 0 -and $readyNoReviewRun.Text -match 'independent_review_record') 'DryRun ready freeze without pass review record was not rejected'
+    $readyPendingReviewFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $readyReviewRecord.Path $readyReviewRecord.Sha256 -Status 'pending'
+    $readyPendingReviewPath = Write-JsonFixture 'freeze-ready-pending-review.json' $readyPendingReviewFreeze
+    $readyPendingReviewPaths = New-CasePaths 'ready-pending-review-dryrun'
+    $readyPendingReviewRun = Invoke-Runner $readyPendingReviewPath $readyPendingReviewPaths.Evidence $readyPendingReviewPaths.Raw -AsDryRun
+    Assert-True ($readyPendingReviewRun.ExitCode -ne 0 -and $readyPendingReviewRun.Text -match 'status must be pass') 'DryRun ready freeze with pending review record was not rejected'
+    $wrongReviewRecord = Write-ReviewRecordFixture 'ready-freeze-review-wrong-machine.json' $readyNoConfirmFreeze ('0' * 64)
+    $wrongReviewFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $wrongReviewRecord.Path $wrongReviewRecord.Sha256
+    $wrongReviewPath = Write-JsonFixture 'freeze-ready-wrong-review-machine.json' $wrongReviewFreeze
+    $wrongReviewPaths = New-CasePaths 'ready-wrong-review-machine-dryrun'
+    $wrongReviewRun = Invoke-Runner $wrongReviewPath $wrongReviewPaths.Evidence $wrongReviewPaths.Raw -AsDryRun
+    Assert-True ($wrongReviewRun.ExitCode -ne 0 -and $wrongReviewRun.Text -match 'machine_confirmation_sha256') 'review record with wrong machine_confirmation_sha256 was not rejected'
+    $wrongRoleReviewRecord = Write-ReviewRecordFixture 'ready-freeze-review-wrong-role.json' $readyNoConfirmFreeze $readyConfirmRecord.Sha256 -ReviewerRole 'some-other-reviewer'
+    $wrongRoleReviewFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $wrongRoleReviewRecord.Path $wrongRoleReviewRecord.Sha256
+    $wrongRoleReviewPath = Write-JsonFixture 'freeze-ready-wrong-review-role.json' $wrongRoleReviewFreeze
+    $wrongRoleReviewPaths = New-CasePaths 'ready-wrong-review-role-dryrun'
+    $wrongRoleReviewRun = Invoke-Runner $wrongRoleReviewPath $wrongRoleReviewPaths.Evidence $wrongRoleReviewPaths.Raw -AsDryRun
+    Assert-True ($wrongRoleReviewRun.ExitCode -ne 0 -and $wrongRoleReviewRun.Text -match 'reviewer_role') 'review record with wrong reviewer_role was not rejected'
+    # ADJ-20260810-0001 (C6): the review cannot be pre-filled before the machine confirmation
+    # completes: review started_at before the machine confirmation ended_at must be rejected.
+    $earlyReviewRecord = Write-ReviewRecordFixture 'ready-freeze-review-early-start.json' $readyNoConfirmFreeze $readyConfirmRecord.Sha256 -StartedAt '2098-12-31T23:59:30+00:00' -EndedAt '2098-12-31T23:59:59+00:00'
+    $earlyReviewFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $earlyReviewRecord.Path $earlyReviewRecord.Sha256
+    $earlyReviewPath = Write-JsonFixture 'freeze-ready-early-review.json' $earlyReviewFreeze
+    $earlyReviewPaths = New-CasePaths 'ready-early-review-dryrun'
+    $earlyReviewRun = Invoke-Runner $earlyReviewPath $earlyReviewPaths.Evidence $earlyReviewPaths.Raw -AsDryRun
+    Assert-True ($earlyReviewRun.ExitCode -ne 0 -and $earlyReviewRun.Text -match 'machine confirmation ended_at') 'review record starting before the machine confirmation ended_at was not rejected'
+    $loneReviewRecordPath = Write-JsonFixture 'ready-freeze-review-lone.json' ([ordered]@{
+        schema_version = 1
+        record_kind = 'e3-ready-freeze-review'
+        is_evidence = $false
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = 'E3-PHYS-PREFLIGHT-20260808-0001'
+        evidence_id = 'EV-E3-PHYS1API26-20260808-0001'
+        code_sha = $readyNoConfirmFreeze.code_sha
+        runner_sha256 = $readyNoConfirmFreeze.runner_sha256
+        confirmation_contract_sha256 = Get-ConfirmationContractSha256 $readyNoConfirmFreeze
+        machine_confirmation_sha256 = $readyConfirmRecord.Sha256
+        reviewer_role = 'selftest-independent-reviewer'
+        operator_role = 'selftest-operator'
+        verdict = 'pass'
+        blockers = 0
+        majors = 0
+        started_at = '2098-12-31T23:59:59+00:00'
+        ended_at = '2098-12-31T23:59:59+00:00'
+    })
+    $loneReviewFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256) $loneReviewRecordPath (Get-Sha256 $loneReviewRecordPath)
+    $loneReviewPath = Write-JsonFixture 'freeze-ready-lone-review.json' $loneReviewFreeze
+    $loneReviewPaths = New-CasePaths 'ready-lone-review-dryrun'
+    $loneReviewRun = Invoke-Runner $loneReviewPath $loneReviewPaths.Evidence $loneReviewPaths.Raw -AsDryRun
+    Assert-True ($loneReviewRun.ExitCode -ne 0 -and $loneReviewRun.Text -match 'companion missing') 'review record without companion was not rejected'
+    Assert-True (-not (Test-Path -LiteralPath $script:HdcLaunchMarker)) 'ready-freeze-binding cases launched the HDC sentinel'
+
+    Write-Host 'SELFTEST_PHASE=two-phase-confirmation-contract'
+    # ADJ-20260810-0001 (C6): two-phase positive - the blocked confirmation freeze freezes at T1
+    # BEFORE the machine confirmation runs, and the final ready freeze freezes at T2 AFTER the
+    # confirmation/review end times. The full Get-FreezeContract hash differs (preflight_inputs_
+    # frozen_at advanced), but the stable confirmation contract is byte-identical, so the
+    # confirmation/review records bound on the blocked phase are consumable by the ready phase;
+    # the time gate (started<=ended<=frozen_at) is checked against the FINAL ready freeze.
+    $twoPhaseBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $twoPhaseBlockedFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:00+00:00'
+    $twoPhaseReadyFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260808-0001' 'E3-PHYS-PREFLIGHT-20260808-0001'
+    $twoPhaseReadyFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:10+00:00'
+    Assert-True ((Get-ContractSha256 $twoPhaseBlockedFreeze) -ne (Get-ContractSha256 $twoPhaseReadyFreeze)) 'two-phase full freeze contract hashes must differ'
+    Assert-True ((Get-ConfirmationContractSha256 $twoPhaseBlockedFreeze) -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze)) 'two-phase confirmation contract hashes must be identical'
+    $twoPhaseRecord = [ordered]@{
+        schema_version = 1
+        record_kind = 'target-binding-confirmation'
+        is_evidence = $false
+        authorization_id = 'AUTH-E3-PHYS1API26-20260810-0001'
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $twoPhaseBlockedFreeze.campaign_id
+        evidence_id = $twoPhaseBlockedFreeze.evidence_id
+        attempt = 'initial'
+        retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A' }
+        plan_status = 'blocked'
+        device_alias = 'PHYS-1'
+        target_redacted = $true
+        code_sha = $twoPhaseBlockedFreeze.code_sha
+        runner_sha256 = $twoPhaseBlockedFreeze.runner_sha256
+        freeze_manifest_sha256 = ('e' * 64)
+        confirmation_contract_sha256 = Get-ConfirmationContractSha256 $twoPhaseBlockedFreeze
+        hdc_sha256 = $twoPhaseBlockedFreeze.hdc.sha256
+        hdc_version = $twoPhaseBlockedFreeze.hdc.version
+        expected_model = 'PLA-AL10'
+        expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        observed_model = 'PLA-AL10'
+        observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        started_at = '2099-01-01T00:00:01+00:00'
+        ended_at = '2099-01-01T00:00:05+00:00'
+        command_attempted = 3
+        command_completed = 3
+        command_count = 3
+        repository_fingerprint = ('g' * 64)
+        verdict = 'pass'
+        reason = 'N/A'
+    }
+    $twoPhaseRecordPath = Write-JsonFixture 'two-phase-confirmation.json' $twoPhaseRecord
+    $twoPhaseRecordSha = Get-Sha256 $twoPhaseRecordPath
+    [IO.File]::WriteAllText($twoPhaseRecordPath + '.sha256', $twoPhaseRecordSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $twoPhaseReview = [ordered]@{
+        schema_version = 1
+        record_kind = 'e3-ready-freeze-review'
+        is_evidence = $false
+        exception = 'E3-PHYS-PREFLIGHT'
+        campaign_id = $twoPhaseBlockedFreeze.campaign_id
+        evidence_id = $twoPhaseBlockedFreeze.evidence_id
+        code_sha = $twoPhaseBlockedFreeze.code_sha
+        runner_sha256 = $twoPhaseBlockedFreeze.runner_sha256
+        confirmation_contract_sha256 = Get-ConfirmationContractSha256 $twoPhaseBlockedFreeze
+        machine_confirmation_sha256 = $twoPhaseRecordSha
+        reviewer_role = 'selftest-independent-reviewer'
+        operator_role = 'selftest-operator'
+        verdict = 'pass'
+        blockers = 0
+        majors = 0
+        started_at = '2099-01-01T00:00:06+00:00'
+        ended_at = '2099-01-01T00:00:09+00:00'
+    }
+    $twoPhaseReviewPath = Write-JsonFixture 'two-phase-review.json' $twoPhaseReview
+    $twoPhaseReviewSha = Get-Sha256 $twoPhaseReviewPath
+    [IO.File]::WriteAllText($twoPhaseReviewPath + '.sha256', $twoPhaseReviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $twoPhaseBoundFreeze = Add-ReviewBinding (Add-ConfirmationBinding $twoPhaseReadyFreeze $twoPhaseRecordPath $twoPhaseRecordSha) $twoPhaseReviewPath $twoPhaseReviewSha
+    $twoPhaseBoundPath = Write-JsonFixture 'freeze-two-phase-ready.json' $twoPhaseBoundFreeze
+    $twoPhaseBoundPaths = New-CasePaths 'two-phase-ready-dryrun'
+    $twoPhaseBoundRun = Invoke-Runner $twoPhaseBoundPath $twoPhaseBoundPaths.Evidence $twoPhaseBoundPaths.Raw -AsDryRun
+    Assert-True ($twoPhaseBoundRun.ExitCode -eq 0) "two-phase ready DryRun failed: $($twoPhaseBoundRun.Text)"
+    $twoPhaseBoundRecord = Get-Content -LiteralPath (Join-Path $twoPhaseBoundPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    # ADJ-20260810-0001 (C6): only assert the runner's sealed projections carry the final full
+    # freeze contract and the stable confirmation contract as final SHA-256 values, that the two
+    # are distinct from each other, and that the stable confirmation contract matches the
+    # same-side mirror. Full-contract byte-equality against a re-derivation is representation-
+    # sensitive (governance/time fields) and is never asserted across representations/timezones;
+    # the two-phase full-hash-differ / stable-identical checks above are the same-side mirror proof.
+    Assert-True ([string]$twoPhaseBoundRecord.freeze_contract_sha256 -match '^[0-9a-f]{64}$' -and [string]$twoPhaseBoundRecord.confirmation_contract_sha256 -match '^[0-9a-f]{64}$') 'sealed record dual contract projection missing final SHA-256 format'
+    Assert-True ([string]$twoPhaseBoundRecord.freeze_contract_sha256 -ne [string]$twoPhaseBoundRecord.confirmation_contract_sha256) 'sealed record full freeze contract must differ from the stable confirmation contract'
+    Assert-True ([string]$twoPhaseBoundRecord.confirmation_contract_sha256 -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze)) 'sealed record stable confirmation contract does not match the same-side mirror'
+    Assert-True ([string]$twoPhaseBoundRecord.machine_fresh_confirmation.confirmation_contract_sha256 -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze) -and [string]$twoPhaseBoundRecord.independent_review_record.confirmation_contract_sha256 -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze)) 'sealed binding projections do not anchor the confirmation contract'
+    # negative: mutating a stable contract core field that passes the freeze static value gate
+    # (operator_role is non-empty, contains no '<', and still differs from the reviewer role) but
+    # IS part of the stable confirmation contract changes the contract hash, so the records bound
+    # on the blocked phase must be rejected by the ready-phase consumer. settings_revoke_mechanism
+    # is NOT used here: it has a dedicated static freeze gate, so it would be rejected with a
+    # settings_revoke_mechanism error before the contract check ever runs.
+    $twoPhaseMutatedFreeze = Copy-JsonObject $twoPhaseBoundFreeze
+    $twoPhaseMutatedFreeze.operator_role = 'some-other-operator'
+    $twoPhaseMutatedPath = Write-JsonFixture 'freeze-two-phase-mutated.json' $twoPhaseMutatedFreeze
+    $twoPhaseMutatedPaths = New-CasePaths 'two-phase-mutated-dryrun'
+    $twoPhaseMutatedRun = Invoke-Runner $twoPhaseMutatedPath $twoPhaseMutatedPaths.Evidence $twoPhaseMutatedPaths.Raw -AsDryRun
+    Assert-True ($twoPhaseMutatedRun.ExitCode -ne 0 -and $twoPhaseMutatedRun.Text -match 'confirmation_contract_sha256') 'two-phase stable contract core mutation was not rejected'
+    Assert-True (-not (Test-Path -LiteralPath $script:HdcLaunchMarker)) 'two-phase cases launched the HDC sentinel'
 
     Write-Host 'SELFTEST_PHASE=complete-live-simulation-seven-scenarios'
     $liveFreeze = New-Freeze 'ready' 'EV-E3-SELFTEST-20990101-0002'
