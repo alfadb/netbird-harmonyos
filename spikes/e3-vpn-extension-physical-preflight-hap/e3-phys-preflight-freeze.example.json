@@ -82,7 +82,7 @@
   },
   "machine_fresh_confirmation": {
     "status": "pending",
-    "authorization_id": "AUTH-E3-PHYS1API26-20260810-0002",
+    "authorization_id": "AUTH-E3-PHYS1API26-20260813-0001",
     "record_path": "<OUT-OF-REPO-TARGET-BINDING-CONFIRMATION-RECORD-PATH>",
     "record_sha256": "<SHA256-OF-THE-CONFIRMATION-RECORD>"
   },

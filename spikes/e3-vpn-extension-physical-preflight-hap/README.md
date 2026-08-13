@@ -85,8 +85,12 @@ candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
 `EV-E3-PHYS1API26-20260808-0001` prepared with freeze `plan_status: blocked`;
 DryRun `is_evidence: false`/HDC0/integrity empty; old 20260807 candidate
 `INVALID-TIMELINE` unusable). That old candidate pair is now consumed (sealed
-blocked external evidence, see below) and must never be reused. **Current
-(2026-08-10 · AUTH-E3-PHYS1API26-20260810-0002)**: the user explicitly
+blocked external evidence, see below) and must never be reused. **Superseded
+(2026-08-10 · AUTH-E3-PHYS1API26-20260810-0002)**: replaced by
+[`AUTH-E3-PHYS1API26-20260813-0001`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-13-0001.md)
+(execution host migrated from the Windows signing/build host to the current
+Linux Pod; 0002's historical record is kept unchanged). Under 0002 the user
+explicitly
 authorized a NEW full-whitelist campaign
 ([`e3-physical-preflight-authorization-2026-08-10-0002.md`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-10-0002.md);
 supersedes the consumed
@@ -494,9 +498,11 @@ confirmation must run before a `ready` freeze exists, yet Live only accepts
   initializes campaign roots) rather than silently ignoring them. Mode
   exclusivity is enforced before the `-SelfTest` early exit, so invalid switch
   combinations are rejected even with `-SelfTest` present.
-- Fixes, under the current authorization `AUTH-E3-PHYS1API26-20260810-0002`
+- Fixes, under the authorization `AUTH-E3-PHYS1API26-20260810-0002`
   (see
   [`e3-physical-preflight-authorization-2026-08-10-0002.md`](../../docs/evidence/e3-physical-preflight-authorization-2026-08-10-0002.md);
+  **superseded by `AUTH-E3-PHYS1API26-20260813-0001`** - execution host
+  migrated to the current Linux Pod, 0002's historical record kept unchanged;
   supersedes the consumed `AUTH-E3-PHYS1API26-20260810-0001` whose old
   candidate pair `E3-PHYS-PREFLIGHT-20260808-0001` /
   `EV-E3-PHYS1API26-20260808-0001` is sealed-blocked consumed and must never
