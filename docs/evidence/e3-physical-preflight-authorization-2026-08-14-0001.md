@@ -305,3 +305,11 @@ Linux Pod 必须 **按序** 满足下列门，缺一即停止并回报主会话�
 | 批准时间 | `2026-08-14T18:45:00+08:00`（Asia/Shanghai；约值，落盘精确值以生成时刻为准） |
 | 批准方式 | 聊天确认（用户明确"继续"） |
 | 批准后 authorization_status | `granted` |
+
+## 执行注记（2026-08-14 晚）
+
+1. **常量迁移与重新冻结**：静态审查 BLOCKER-1（旧字节硬编码 20260813 AUTH/旧 pair）触发用户级治理决策——runner/selftest/freeze example 治理常量迁移至 20260814 系列，重新冻结（runner `36e8b897…`、selftest `e39f7103…`、freeze example `3ebd889b…`，commit `e8a677d`）；selftest 87/87、-SelfTest pass。
+2. **顺序门 1-12 全部完成**：audit-1/audit-2 unoccupied；blocked freeze 静态审查 approve（opus，0 B/0 M）；TargetBindingConfirm pass（record `ea3f25e1…`，model/build 逐字匹配）；ready 链三阶段 confirmation contract 一致（`f2584191…`）；opus ready review pass（record `b84a1d34…`）；selftest HDC_PROCESSES=0；DryRun 判据全过（exit 0、is_evidence=false、integrity 空、freeze 字节不变）；第 12 步审查 approve（0 B/0 M）。
+3. **第 13 步 Live 执行（2026-08-14 19:27:34–19:31:56 +08:00）**：设备连接重建成功（Connect OK、恰一 target）；operator 提示实时可见（PYTHONUNBUFFERED=1 生效）；用户完成设备机械操作（点击 Start、点击 Allow）。结果：**S1 pass**（machine-cleanup-baseline-and-install）；**S2 blocked**（`platform-marker-missing:create-terminal-missing-after-Allow`——用户点击 Allow 后机器未检测到 VPN create terminal 标记）；S3-S7 `not-run-after-runner-failure`；exit 2；cleanup `verified-clean`（A/B 无残留、staging 无残留）。
+4. **sealed blocked 证据**：证据根 `$HOME/harmonyos-signing/netbird-e3/evidence-live-20260814-0001`（is_evidence=true、overall=blocked、seal 完整），占用本 AUTH pair `E3-PHYS-PREFLIGHT-20260814-0001` / `EV-E3-PHYS1API26-20260814-0001`——**pair 已消费，不得复用**；正式 evidence 登记（reviewed）由 campaign 后独立流程处理。
+5. **按纪律停止**：blocked 后不重试、不换 ID；任何后续继续需新治理（新 AUTH/新 pair）。E3 未关闭，E8 保持 `CLOSED`。
