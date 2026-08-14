@@ -50,10 +50,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(HERE)
 RUNNER_SRC = os.path.join(PROJECT, 'e3-phys-preflight-campaign.py')
 
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260814-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260814-0002'
 OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260810-0002'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260814-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260814-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260814-0002'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260814-0002'
 BUNDLE_A = 'cn.alfadb.netbird.e3physvpna'
 BUNDLE_B = 'cn.alfadb.netbird.e3physvpnb'
 MODEL = 'PLA-AL10'
@@ -3732,6 +3732,134 @@ class TestU9bSkeletons(SelftestBase):
                     text = open(os.path.join(root, name), encoding='utf-8', errors='replace').read()
                     self.assertNotRegex(text, r'reviewed-pass|reviewed-fail',
                                         'runner emitted reviewed state in %s' % os.path.join(root, name))
+
+
+# =====================================================================
+# Group: :vpn subprocess tag forms (ADJ-20260814-0002 C6)
+# =====================================================================
+
+
+class TestVpnSubprocessTagForms(SelftestBase):
+    """ADJ-20260814-0002 C6: the :vpn Extension subprocess emits its
+    create/destroy terminal markers with requestId=missing on a hilog tag
+    whose cn. prefix is dropped (.alfadb.netbird.e3physvpna:vpn). Marker
+    detection must correlate those lines through the bundle's process tag
+    in every tag form (entry, truncated :vpn, full :vpn), never by pid.
+    Fixture lines mirror the real 2026-08-14 evidence sample shapes with
+    template timestamps."""
+
+    def _events(self, lines):
+        return [{'text': line} for line in lines]
+
+    def test_bundle_tag_extraction_all_forms(self):
+        """get_bundle_from_hilog_tag accepts the entry tag, the truncated
+        :vpn tag and the full :vpn tag; foreign tags return None."""
+        a = BUNDLE_A
+        b = BUNDLE_B
+        stamp = '<DEVICE_OBSERVED_AT>'
+        self.assertEqual(runner_mod.get_bundle_from_hilog_tag(
+            '%s A02900/cn.alfadb.netbird.e3physvpna/E3PhysVpn: UI_START|bundle=%s' % (stamp, a)), a)
+        self.assertEqual(runner_mod.get_bundle_from_hilog_tag(
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_ONCREATE|bundle=%s' % (stamp, a)), a)
+        self.assertEqual(runner_mod.get_bundle_from_hilog_tag(
+            '%s A02900/cn.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_ONCREATE|bundle=%s' % (stamp, a)), a)
+        self.assertEqual(runner_mod.get_bundle_from_hilog_tag(
+            '%s A02900/.alfadb.netbird.e3physvpnb:vpn/E3PhysVpn: VPN_ONCREATE|bundle=%s' % (stamp, b)), b)
+        self.assertIsNone(runner_mod.get_bundle_from_hilog_tag(
+            '%s A02900/com.example.other/E3PhysVpn: VPN_ONCREATE|bundle=%s' % (stamp, a)))
+
+    def test_create_terminal_markers_match_truncated_vpn_tag(self):
+        """Real evidence shape: the entry-process UI_START carries the
+        requestId; the :vpn subprocess (truncated tag
+        .alfadb.netbird.e3physvpna:vpn) emits VPN_ONCREATE / VPN_CREATE_BEGIN
+        / VPN_FD_SNAPSHOT marker=CREATE_ACCEPTED / VPN_CREATE_RESOLVED with
+        requestId=missing. Every create terminal marker must be detected."""
+        a = BUNDLE_A
+        stamp = '<DEVICE_OBSERVED_AT>'
+        events = self._events([
+            '%s A02900/cn.alfadb.netbird.e3physvpna/E3PhysVpn: UI_START|bundle=%s|requestId=req-1' % (stamp, a),
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_ONCREATE|bundle=%s|requestId=missing' % (stamp, a),
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_CREATE_BEGIN|requestId=missing|address=192.0.2.1|prefixLength=32' % stamp,
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_FD_SNAPSHOT|requestId=missing|phase=post-create|fd=31|open=true|errno=0|marker=CREATE_ACCEPTED' % stamp,
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_CREATE_RESOLVED|requestId=missing|fd=31|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-1', 'VPN_ONCREATE'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-1', 'VPN_CREATE_BEGIN'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-1', 'VPN_CREATE_RESOLVED'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-1', 'CREATE_ACCEPTED'))
+        self.assertTrue(runner_mod.test_post_create_open(events, a, 'req-1'))
+
+    def test_create_terminal_markers_match_full_vpn_tag(self):
+        """The untruncated :vpn tag form (cn.alfadb.netbird.e3physvpna:vpn)
+        is accepted too."""
+        a = BUNDLE_A
+        stamp = '<DEVICE_OBSERVED_AT>'
+        events = self._events([
+            '%s A02900/cn.alfadb.netbird.e3physvpna/E3PhysVpn: UI_START|bundle=%s|requestId=req-2' % (stamp, a),
+            '%s A02900/cn.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_ONCREATE|bundle=%s|requestId=missing' % (stamp, a),
+            '%s A02900/cn.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_FD_SNAPSHOT|requestId=missing|phase=post-create|open=true|marker=CREATE_ACCEPTED' % stamp,
+            '%s A02900/cn.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_CREATE_RESOLVED|requestId=missing|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-2', 'VPN_ONCREATE'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-2', 'VPN_CREATE_RESOLVED'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-2', 'CREATE_ACCEPTED'))
+        self.assertTrue(runner_mod.test_post_create_open(events, a, 'req-2'))
+
+    def test_destroy_terminal_markers_match_vpn_tag(self):
+        """Destroy terminal markers from the :vpn subprocess (requestId=
+        missing) are correlated through the tag too (S3/S5/S7 path)."""
+        a = BUNDLE_A
+        stamp = '<DEVICE_OBSERVED_AT>'
+        events = self._events([
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_ONDESTROY|requestId=missing' % stamp,
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_DESTROY_BEGIN|requestId=missing|trigger=onDestroy' % stamp,
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_DESTROY_RESOLVED|requestId=missing|fdMarker=FD_CLOSED_CONFIRMED' % stamp,
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_FD_SNAPSHOT|requestId=missing|phase=post-destroy-resolved|open=false|marker=FD_CLOSED_CONFIRMED' % stamp,
+        ])
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-5', 'VPN_ONDESTROY'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-5', 'VPN_DESTROY_BEGIN'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-5', 'VPN_DESTROY_RESOLVED'))
+        self.assertFalse(runner_mod.test_s5_post_destroy_still_open(events, a, 'req-5'))
+        destroy = runner_mod.get_destroy_assessment(events, a, 'req-5')
+        self.assertEqual(destroy['result'], 'pass')
+
+    def test_entry_process_positive_cases_preserved(self):
+        """Entry-process lines with a real requestId keep matching (existing
+        behavior preserved)."""
+        a = BUNDLE_A
+        stamp = '<DEVICE_OBSERVED_AT>'
+        events = self._events([
+            '%s UI_START|bundle=%s|requestId=req-3' % (stamp, a),
+            '%s VPN_ONCREATE|bundle=%s|requestId=req-3' % (stamp, a),
+            '%s VPN_CREATE_RESOLVED|requestId=req-3|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+            '%s VPN_FD_SNAPSHOT|requestId=req-3|phase=post-create|open=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-3', 'VPN_ONCREATE'))
+        self.assertTrue(runner_mod.test_correlated_marker(events, a, 'req-3', 'CREATE_ACCEPTED'))
+        self.assertTrue(runner_mod.test_post_create_open(events, a, 'req-3'))
+
+    def test_negative_cases_preserved(self):
+        """Negative cases stay negative: a B-bundle :vpn tag, a wrong
+        requestId on the A :vpn tag, a foreign tag and an absent marker are
+        never correlated to A."""
+        a = BUNDLE_A
+        stamp = '<DEVICE_OBSERVED_AT>'
+        b_events = self._events([
+            '%s A02900/.alfadb.netbird.e3physvpnb:vpn/E3PhysVpn: VPN_CREATE_RESOLVED|requestId=missing|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertFalse(runner_mod.test_correlated_marker(b_events, a, 'req-4', 'CREATE_ACCEPTED'))
+        wrong_req_events = self._events([
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_CREATE_RESOLVED|requestId=other|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertFalse(runner_mod.test_correlated_marker(wrong_req_events, a, 'req-4', 'CREATE_ACCEPTED'))
+        foreign_events = self._events([
+            '%s A02900/com.example.other/E3PhysVpn: VPN_CREATE_RESOLVED|requestId=missing|accepted=true|marker=CREATE_ACCEPTED' % stamp,
+        ])
+        self.assertFalse(runner_mod.test_correlated_marker(foreign_events, a, 'req-4', 'CREATE_ACCEPTED'))
+        no_marker_events = self._events([
+            '%s A02900/.alfadb.netbird.e3physvpna:vpn/E3PhysVpn: VPN_CREATE_BEGIN|requestId=missing' % stamp,
+        ])
+        self.assertFalse(runner_mod.test_correlated_marker(no_marker_events, a, 'req-4', 'CREATE_ACCEPTED'))
 
 
 # =====================================================================

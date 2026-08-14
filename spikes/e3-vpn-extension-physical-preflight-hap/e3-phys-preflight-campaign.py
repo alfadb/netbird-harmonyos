@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260814-0001 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260814-0002 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260814-0001 / EV-E3-PHYS1API26-20260814-0001), and
+(E3-PHYS-PREFLIGHT-20260814-0002 / EV-E3-PHYS1API26-20260814-0002), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -71,9 +71,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260814-0001'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260814-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260814-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260814-0002'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260814-0002'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260814-0002'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
 DEVICE_CLOCK_SKEW_TOLERANCE_SECONDS = 3.0
@@ -1164,7 +1164,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260814-0001 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260814-0002 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -2329,6 +2329,38 @@ def get_e3_event_info(event):
     return {'marker': marker, 'bundle': bundle, 'request_id': request_id, 'text': text, 'event': event}
 
 
+def get_bundle_from_hilog_tag(text):
+    """ADJ-20260814-0002 C6: extract the owning bundle from a hilog line's
+    tag, accepting every process tag form of the E3 bundles: the entry
+    process (cn.alfadb.netbird.e3physvpna), the :vpn Extension subprocess in
+    its truncated form (.alfadb.netbird.e3physvpna:vpn - hilog drops the cn.
+    prefix) and its full form (cn.alfadb.netbird.e3physvpna:vpn). Only the
+    tag path component is scanned, never the message body; never filters by
+    pid. Returns the bundle name or None."""
+    text = str(text)
+    m = re.search(r'(?<=/)([A-Za-z0-9_.-]*alfadb\.netbird\.e3physvpn[ab])(?::vpn)?(?=/)', text)
+    if not m:
+        return None
+    candidate = m.group(1).lstrip('.')
+    if not candidate.startswith('cn.'):
+        candidate = 'cn.' + candidate
+    return candidate
+
+
+def test_line_correlated(text, request_id, bundle):
+    """ADJ-20260814-0002 C6: True when the line's requestId field matches
+    the target request, or the line is a :vpn Extension subprocess line
+    (requestId=missing - the subprocess does not carry the UI requestId)
+    whose process tag identifies the bundle in any tag form. The :vpn
+    create/destroy terminal markers are correlated through the bundle's
+    process tag instead of the requestId field; never by pid."""
+    text = str(text)
+    if re.search(r'requestId=%s(\||\s|$)' % re.escape(str(request_id)), text):
+        return True
+    return (re.search(r'requestId=missing(\||\s|$)', text)
+            and get_bundle_from_hilog_tag(text) == bundle)
+
+
 def get_rejection_error_code(text):
     """PS L2248-2263 Get-RejectionErrorCode (ADJ-20260808-0002 C6): extracts
     a numeric BusinessError code from a rejection event. Boundary-rigorous: a
@@ -2376,12 +2408,14 @@ def test_unique_start(events, bundle, request_id=None):
 def test_correlated_marker(events, bundle, request_id, marker):
     """PS L2593-2607 Test-CorrelatedMarker: the marker text must be present,
     the requestId must end at a field boundary, and an explicit bundle field
-    must equal the target bundle."""
+    must equal the target bundle. ADJ-20260814-0002 C6: :vpn subprocess
+    lines (requestId=missing) are correlated through the bundle's process
+    tag in any tag form instead of the requestId field."""
     for event in events:
         text = str(event['text']) if isinstance(event, dict) else str(event)
         if marker not in text:
             continue
-        if not re.search(r'requestId=%s(\||\s|$)' % re.escape(request_id), text):
+        if not test_line_correlated(text, request_id, bundle):
             continue
         m = re.search(r'bundle=([^|\s]+)', text)
         if m and m.group(1) != bundle:
@@ -2446,14 +2480,15 @@ def test_s5_post_destroy_still_open(events, bundle, request_id):
     """PS L3082-3096 Test-S5PostDestroyStillOpen: an explicit FD_STILL_OPEN
     marker on a post-destroy-phase snapshot or destroy terminal is a leaked fd
     (hard fail); pre-destroy open snapshots never count. Same-bundle/request
-    marker only."""
+    marker only; ADJ-20260814-0002 C6: :vpn subprocess lines (requestId=
+    missing) are correlated through the bundle's process tag instead."""
     if request_id is None or str(request_id) == 'missing':
         return False
     for event in events:
         text = str(event['text']) if isinstance(event, dict) else str(event)
         if 'FD_STILL_OPEN' not in text:
             continue
-        if not re.search(r'requestId=%s(\||\s|$)' % re.escape(str(request_id)), text):
+        if not test_line_correlated(text, request_id, bundle):
             continue
         m = re.search(r'bundle=([^|\s]+)', text)
         if m and m.group(1) != bundle:
@@ -2487,8 +2522,8 @@ def get_destroy_assessment(events, bundle, request_id=None):
     terminal = (test_correlated_marker(events, bundle, effective_request_id, 'VPN_DESTROY_RESOLVED')
                 or test_correlated_marker(events, bundle, effective_request_id, 'VPN_DESTROY_REJECTED'))
     snapshot = (test_correlated_marker(events, bundle, effective_request_id, 'VPN_FD_SNAPSHOT')
-                and any(re.search(r'requestId=%s(\||\s|$)' % re.escape(effective_request_id),
-                                  str(e['text']) if isinstance(e, dict) else str(e))
+                and any(test_line_correlated(str(e['text']) if isinstance(e, dict) else str(e),
+                                             effective_request_id, bundle)
                         and re.search(r'phase=post-destroy-(resolved|rejected)',
                                       str(e['text']) if isinstance(e, dict) else str(e))
                         for e in events))
@@ -2499,8 +2534,8 @@ def get_destroy_assessment(events, bundle, request_id=None):
     if not snapshot:
         return {'result': 'blocked', 'reason': 'post-destroy-snapshot-missing'}
     correlated = [str(e['text']) if isinstance(e, dict) else str(e) for e in events
-                  if re.search(r'requestId=%s(\||\s|$)' % re.escape(effective_request_id),
-                               str(e['text']) if isinstance(e, dict) else str(e))]
+                  if test_line_correlated(str(e['text']) if isinstance(e, dict) else str(e),
+                                          effective_request_id, bundle)]
     combined = '\n'.join(correlated)
     if 'FD_STILL_OPEN' in combined:
         return {'result': 'fail', 'reason': 'FD_STILL_OPEN'}
@@ -2641,7 +2676,7 @@ def test_strict_fallback_prerequisites(events, bundle, request_id=None):
         return {'met': False, 'stop': stop, 'request_id': rid,
                 'reason': 'strict-fallback-ondestroy-missing'}
     pre_snapshot = any(
-        re.search(r'requestId=%s(\||\s|$)' % re.escape(rid), str(e['text']) if isinstance(e, dict) else str(e))
+        test_line_correlated(str(e['text']) if isinstance(e, dict) else str(e), rid, bundle)
         and 'VPN_FD_SNAPSHOT' in (str(e['text']) if isinstance(e, dict) else str(e))
         and 'phase=pre-destroy' in (str(e['text']) if isinstance(e, dict) else str(e))
         for e in events)
@@ -2732,10 +2767,12 @@ def test_post_create_open(events, bundle, request_id):
     """PS L3133-3152 Test-PostCreateOpen: clean reactivation proof - the fresh
     request shows CREATE_ACCEPTED plus a post-create fd snapshot with open=true.
     Exact field-boundary match only: |open=true| counts, reopen=true never does.
-    Same-bundle/request marker only."""
+    Same-bundle/request marker only; ADJ-20260814-0002 C6: :vpn subprocess
+    lines (requestId=missing) are correlated through the bundle's process tag
+    instead."""
     for event in events:
         text = str(event['text']) if isinstance(event, dict) else str(event)
-        if not re.search(r'requestId=%s(\||\s|$)' % re.escape(request_id), text):
+        if not test_line_correlated(text, request_id, bundle):
             continue
         if 'VPN_FD_SNAPSHOT' not in text:
             continue
@@ -4436,7 +4473,7 @@ def invoke_strong_live_campaign(freeze):
         has_destroy_begin3 = test_correlated_marker(observation3['events'], BUNDLE_A, request2, 'VPN_DESTROY_BEGIN') \
             or len([e for e in observation3['events'] if re.search(r'VPN_FD_SNAPSHOT', str(e['text']))
                     and re.search(r'phase=pre-destroy', str(e['text']))
-                    and re.search(r'requestId=%s(\||\s|$)' % re.escape(request2), str(e['text']))]) > 0
+                    and test_line_correlated(str(e['text']), request2, BUNDLE_A)]) > 0
         if not test_correlated_marker(observation3['events'], BUNDLE_A, request2, 'VPN_ONDESTROY') or not has_destroy_begin3:
             throw_scenario_invalid(3, 'Stop-postcondition-missing-onDestroy-or-destroy-begin',
                                    step_index=1, step_id=step3_stop['step_id'], expected_action=step3_stop['expected_action'])
@@ -4762,7 +4799,7 @@ def invoke_strong_live_campaign(freeze):
             return {'status': 'pass', 'reason': 'B-create-accepted', 'request_id': request6b}
         rejected = [e for e in events
                     if (re.search(r'VPN_CREATE_REJECTED\|', str(e['text'])) or re.search(r'START_PROMISE_REJECTED\|', str(e['text'])))
-                    and re.search(r'requestId=%s(\||\s|$)' % re.escape(request6b), str(e['text']))]
+                    and test_line_correlated(str(e['text']), request6b, BUNDLE_B)]
         if rejected:
             frozen_codes = [int(c) for c in (freeze.get('vpn_conflict_rejection_codes') or [])]
             frozen_hit = None
@@ -4813,17 +4850,17 @@ def invoke_strong_live_campaign(freeze):
                                      {'bundle': BUNDLE_B, 'request_id': request6b}])
     unexpected_accepted6 = [e for e in observation6['events']
                             if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                            and not re.search(r'requestId=%s(\||\s|$)' % re.escape(request6a), str(e['text']))
-                            and not re.search(r'requestId=%s(\||\s|$)' % re.escape(request6b), str(e['text']))]
+                            and not test_line_correlated(str(e['text']), request6a, BUNDLE_A)
+                            and not test_line_correlated(str(e['text']), request6b, BUNDLE_B)]
     if unexpected_accepted6:
         throw_scenario_invalid(6, 'unexpected-accepted-request-in-window', step_index=3,
                                step_id=step6b['step_id'], expected_action=step6b['expected_action'])
     a_accepted_count6 = len([e for e in observation6['events']
                              if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                             and re.search(r'requestId=%s(\||\s|$)' % re.escape(request6a), str(e['text']))])
+                             and test_line_correlated(str(e['text']), request6a, BUNDLE_A)])
     b_accepted_count6 = len([e for e in observation6['events']
                              if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                             and re.search(r'requestId=%s(\||\s|$)' % re.escape(request6b), str(e['text']))])
+                             and test_line_correlated(str(e['text']), request6b, BUNDLE_B)])
     dual_accepted6 = a_accepted_count6 > 0 and b_accepted_count6 > 0
     if b_accepted6:
         process6 = get_exact_process_checkpoint([BUNDLE_A, BUNDLE_B])
@@ -4886,7 +4923,7 @@ def invoke_strong_live_campaign(freeze):
     has_destroy_begin7 = test_correlated_marker(observation7['events'], active_bundle, active_request, 'VPN_DESTROY_BEGIN') \
         or len([e for e in observation7['events'] if re.search(r'VPN_FD_SNAPSHOT', str(e['text']))
                 and re.search(r'phase=pre-destroy', str(e['text']))
-                and re.search(r'requestId=%s(\||\s|$)' % re.escape(active_request), str(e['text']))]) > 0
+                and test_line_correlated(str(e['text']), active_request, active_bundle)]) > 0
     if not test_correlated_marker(observation7['events'], active_bundle, active_request, 'VPN_ONDESTROY') or not has_destroy_begin7:
         throw_scenario_invalid(7, 'Stop-postcondition-missing-onDestroy-or-destroy-begin',
                                step_index=1, step_id=step7_stop['step_id'], expected_action=step7_stop['expected_action'])
