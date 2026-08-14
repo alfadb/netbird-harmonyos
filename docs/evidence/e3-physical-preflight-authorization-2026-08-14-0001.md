@@ -11,7 +11,7 @@
 1. **新授权（因 20260813 Live 被误中断）**：2026-08-14 用户批准（"继续"）启动新 campaign，授权新 AUTH `AUTH-E3-PHYS1API26-20260814-0001` 与 **新建** 候选 pair `E3-PHYS-PREFLIGHT-20260814-0001` / `EV-E3-PHYS1API26-20260814-0001`；`attempt=initial`、retry N/A。
 2. **20260813 Live 事故定性（非设备/执行问题，为操作/观测失误）**：20260813 AUTH 的顺序门 1–12 步全部完成，Live 已启动并正常执行至 S2（S1 baseline capture pass、S2 entry-a 布局确定性匹配 pass）；主会话误判 runner 卡住——tee 管道下 Python stdout 块缓冲导致 operator 提示不可见——于 18:40:49 误发 Ctrl-C，runner 走中止路径将 Live seal 为 blocked（见「20260813 Live 事故与修复措施」节）。**该 blocked 不是设备/执行失败，不构成任何 retry 依据；新授权按 initial 全新开始**。
 3. **旧 pair 已消费、不得复用**：`E3-PHYS-PREFLIGHT-20260810-0001` / `EV-E3-PHYS1API26-20260810-0001` 被 20260813 的 sealed blocked live 证据占用（证据根 `$HOME/harmonyos-signing/netbird-e3/evidence-live`，`is_evidence=true`、`execution_mode=live`、`overall=blocked`、cleanup `verified-clean`、seal 完整），**已消费**；该证据 **保留不改写**、不作为 retry 依据，其正式 evidence 登记（reviewed 审查）由 campaign 后独立流程处理，不在本登记内。本授权 **新建** pair，不沿用、不复用任何旧 ID。
-4. **冻结值复用（不变）**：Python 三文件字节不变（runner `48a25e40…`、selftest `c70f99b5…`、freeze example `cf9080aa…`，见 `repo_bytes`）；signed A/B HAP 复用 `freeze/f44be17-final/artifacts/{a,b}/`（A `3a98ad68…` size `106210`、B `1adfa966…` size `106212`）；HDC `03123a78…` / `3.2.0d`；目标元组 `PLA-AL10` / `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a` / 别名 `PHYS-1`；freeze 决策字段与 20260813 blocked freeze 一致。**注意**：新 blocked/ready freeze 必须同步新 pair（`E3-PHYS-PREFLIGHT-20260814-0001` / `EV-E3-PHYS1API26-20260814-0001`）与新 AUTH ID（`AUTH-E3-PHYS1API26-20260814-0001`）的字段，不得复用 20260813 冻结文件。
+4. **冻结值复用与常量迁移**：signed A/B HAP 复用 `freeze/f44be17-final/artifacts/{a,b}/`（A `3a98ad68…` size `106210`、B `1adfa966…` size `106212`）；HDC `03123a78…` / `3.2.0d`；目标元组 `PLA-AL10` / `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a` / 别名 `PHYS-1`；freeze 决策字段与 20260813 blocked freeze 一致。**Python 三文件字节已因治理常量迁移（AUTH ID 与候选 pair）重新冻结**（见 `repo_bytes`；静态审查 BLOCKER-1：旧字节硬编码 20260813 AUTH/旧 pair，与本 AUTH 新建 pair 互斥，故按用户级治理决策修订为常量迁移 + 重新冻结；20260813 历史字节随 20260813 登记保留）。
 5. **修复措施（防再犯，写入本文）**：Live 执行环境设置 `PYTHONUNBUFFERED=1`（禁止 stdout 块缓冲掩盖 operator 提示）；主会话监控改用 **证据目录轮询**（`operator-wait-state.json` / `scenario-results.json` 的 `updated_at` 与产物增量）而非 pane 输出空白判断；operator 提示经 `capture-pane` 转发给用户。三项措施在执行本 AUTH 顺序门时强制生效。
 6. **设备连接纪律沿用 + 内网 endpoint 边界变更**：执行 host 仍为当前 Linux Pod；沿用「恰一次 `hdc tconn` + 恰一次内存级 `hdc list targets`」host-prep 窄例外；**变更**：20260814 会话内，endpoint 内网值允许进入聊天（用户已授权会话内可随时 `hdc list targets`），但 endpoint/token 仍 **不落盘、不写入任何记录/freeze/evidence**（详见「设备连接纪律」节）。
 7. **治理语义沿用 20260813 授权**：13 步顺序门结构原样沿用（见 `linux_gate_order`）；E8 保持 `CLOSED`；Live 前提交/推送授权沿用（runner + 治理变更审查后提交，campaign evidence 不提前提交）；blocked 后停止不重试。
@@ -57,11 +57,11 @@ host_prep_target_mapping:
   persistence: "PHYS_1_TARGET" set as process-scope environment variable only
   privacy_boundary: no endpoint/token persistence, no endpoint/token in any record/freeze/evidence; runner HDC whitelist is NOT expanded by this exception (tconn/list targets are host-prep operator steps, not runner commands)
   consumed_authorization: false # NOT yet consumed: to be consumed exactly once (future) by the operator at the mapping gate on the Linux Pod; this registration does not run it
-repo_bytes: # reused frozen values, identical to the 20260813 AUTH; the freeze example fields must be resynced to the NEW pair + NEW AUTH ID for every new freeze object
+repo_bytes: # governance-constant migration re-freeze: AUTH ID + candidate pair constants migrated in the Python trio (20260813 frozen bytes 48a25e40…/c70f99b5…/cf9080aa… remain recorded under the 20260813 AUTH, not applicable here); HAP/hdc/target-tuple/decision-field values reused from the 20260813 AUTH
   python_port: frozen # Python 3 semantic-equivalent port of the 20260813 AUTH, three-file bytes unchanged (reuse); independent review of the port: 0 blocker/0 major (dual reviewer 2026-08-13); the PowerShell trio remains in-repo unchanged as historical input
-    runner_sha256: 48a25e40442a98e985d5498b7a5c509b0ab62758c4da14b14a4866ab7916e4a3 # e3-phys-preflight-campaign.py
-    freeze_example_sha256: cf9080aa5e050897f8f9b182dfc023c9f5f69d61b9ca18e8b7af7a25ad81263d # e3-phys-preflight-freeze.example.json (authorization_id updated to this AUTH; new freeze objects must bind the NEW pair + NEW AUTH ID fields)
-    selftest_sha256: c70f99b5610dffbf6b838dbcc78b99b4deab7ddf31228f3b4a1bec4dd1d83e70 # tests/e3-phys-preflight-runner-selftest.py
+    runner_sha256: 36e8b8972fa1e14be05a36174dbbc505fc0bbe57c1b7ddcc1320c057cddcc065 # e3-phys-preflight-campaign.py (AUTH_ID/candidate pair constants migrated to this AUTH; re-frozen after opus static-review BLOCKER-1)
+    freeze_example_sha256: 3ebd889b7bf6a44df935cbfb4cad41994e33b6de6c650888bc28d931b2626205 # e3-phys-preflight-freeze.example.json (authorization_id/pair updated to this AUTH)
+    selftest_sha256: e39f710360ba1851a4d58f3174199bdc63c6ce1e15c1bd5d363179da47b9e739 # tests/e3-phys-preflight-runner-selftest.py (positive fixtures migrated; OLD_AUTH_ID negative mutants kept)
   signed_hap_frozen: # reused from f44be17-final (identical to the 20260813 AUTH); path $HOME/harmonyos-signing/netbird-e3/freeze/f44be17-final/artifacts/{a,b}/
     hap_a_sha256: 3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244 # size 106210, e3-phys-preflight-a-signed.hap
     hap_b_sha256: 1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26 # size 106212, e3-phys-preflight-b-signed.hap
@@ -109,7 +109,7 @@ reviewed_at: pending
 | machine_fresh_confirmation | `pending`（由 Linux Pod 通过 `-TargetBindingConfirm` 观测） |
 | plan_status | `authorized-awaiting-linux-ready-freeze` |
 | 执行 host | Linux Pod：`host-dev-alfadb-full` / `Debian GNU/Linux 13 (trixie)` / `x86_64` / Python `3.13.5` |
-| runner | Python 3 版（20260813 AUTH 已冻结字节，**复用不变**）：runner `48a25e40442a98e985d5498b7a5c509b0ab62758c4da14b14a4866ab7916e4a3`、freeze example `cf9080aa5e050897f8f9b182dfc023c9f5f69d61b9ca18e8b7af7a25ad81263d`（**新 freeze 须同步新 pair + 新 AUTH ID 字段**）、selftest `c70f99b5610dffbf6b838dbcc78b99b4deab7ddf31228f3b4a1bec4dd1d83e70` |
+| runner | Python 3 版（**常量迁移后重新冻结**，见 BLOCKER-1 修订）：runner `36e8b8972fa1e14be05a36174dbbc505fc0bbe57c1b7ddcc1320c057cddcc065`、freeze example `3ebd889b7bf6a44df935cbfb4cad41994e33b6de6c650888bc28d931b2626205`、selftest `e39f710360ba1851a4d58f3174199bdc63c6ce1e15c1bd5d363179da47b9e739`；20260813 AUTH 历史字节（runner `48a25e40…`、selftest `c70f99b5…`、freeze example `cf9080aa…`）随 20260813 登记保留，不再适用本 AUTH |
 | 目标元组（不变，冻结于 `ADJ-20260806-0003`） | `PLA-AL10` / `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a` / 设备别名 `PHYS-1` |
 | candidate（**新建**） | `E3-PHYS-PREFLIGHT-20260814-0001` / `EV-E3-PHYS1API26-20260814-0001`，未 Live、未消耗；`attempt=initial`、retry N/A；执行前须两次 ID 消费审计（audit-1/audit-2，均 hash 记录） |
 | signed A/B HAP（复用 `f44be17-final`） | `$HOME/harmonyos-signing/netbird-e3/freeze/f44be17-final/artifacts/{a,b}/`：A `3a98ad68bfc6253fe10b37a262e0051267b3b3083e6943f8207d68482d00c244` size `106210`（`e3-phys-preflight-a-signed.hap`）；B `1adfa9664e59e7a9dc3da6650a59972517f5262a9b8160f4b3f6416770da3c26` size `106212`（`e3-phys-preflight-b-signed.hap`） |
@@ -170,9 +170,9 @@ reviewed_at: pending
 
 **Python 移植三文件（runner / freeze example / selftest）——复用 20260813 AUTH 冻结字节，不变**：
 
-- runner：`e3-phys-preflight-campaign.py` → `48a25e40442a98e985d5498b7a5c509b0ab62758c4da14b14a4866ab7916e4a3`
-- freeze example：`e3-phys-preflight-freeze.example.json` → `cf9080aa5e050897f8f9b182dfc023c9f5f69d61b9ca18e8b7af7a25ad81263d`（**刻意保持 `plan_status: blocked`**，仅占位，不含 campaign 哈希/路径/秘密；**新 freeze 对象必须同步新 pair `E3-PHYS-PREFLIGHT-20260814-0001` / `EV-E3-PHYS1API26-20260814-0001` 与新 AUTH ID `AUTH-E3-PHYS1API26-20260814-0001` 的字段**）
-- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `c70f99b5610dffbf6b838dbcc78b99b4deab7ddf31228f3b4a1bec4dd1d83e70`
+- runner：`e3-phys-preflight-campaign.py` → `36e8b8972fa1e14be05a36174dbbc505fc0bbe57c1b7ddcc1320c057cddcc065`（AUTH_ID 与候选 pair 常量已迁移至本 AUTH）
+- freeze example：`e3-phys-preflight-freeze.example.json` → `3ebd889b7bf6a44df935cbfb4cad41994e33b6de6c650888bc28d931b2626205`（**刻意保持 `plan_status: blocked`**，仅占位，不含 campaign 哈希/路径/秘密）
+- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `e39f710360ba1851a4d58f3174199bdc63c6ce1e15c1bd5d363179da47b9e739`（正向 fixture 迁移，旧 AUTH ID 仅作负向 mutant 样本）
 
 **clean-commit requirement**：`code_sha` 以本登记文档与必要治理变更 **commit 后的最终 HEAD** 为准（本任务不 commit；文档中写 `pending-final-commit`，**在 commit 时冻结**）；后续 blocked freeze 绑定该 HEAD。提交时须重新计算最终 commit 中三文件的 SHA-256，复算结果**预期与绑定值一致**；若不一致，说明文件在登记后被改动，必须停止并重新登记，**不得** 绑定任何发散 hash。最终 bundle commit 是权威字节源。
 
