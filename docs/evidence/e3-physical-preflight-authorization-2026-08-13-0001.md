@@ -296,3 +296,12 @@ Linux Pod 必须 **按序** 满足下列门，缺一即停止并回报主会话�
 | 批准时间 | `2026-08-13T21:46:10+08:00`（Asia/Shanghai） |
 | 批准方式 | 聊天确认 |
 | 批准后 authorization_status | `granted` |
+
+## 执行注记（2026-08-14）
+
+用户（直接人类决策者）后续补充授权与第 5 步执行事实，如实记录：
+
+1. **host-prep 执行主体变更**：`hdc tconn` 由用户本人本地终端执行一次；`hdc list targets` 原定「恰一次、用户本地」改为——用户 2026-08-14 会话内授权「本会话任何时候都可以执行 hdc list targets」（内存级、不输出、不落盘原则不变）；用户另自行执行一次 `hdc list targets` 并确认输出恰一 `IP:PORT`。
+2. **第 5 步第一次尝试**（2026-08-14）：pre-record 门失败——仓库不 clean（`__pycache__/` 未跟踪垃圾）→ exit 1，无 record、无设备命令、无 ID 消费；`__pycache__` 已清理。
+3. **第 5 步第二次尝试**（2026-08-14 ~09:35）：`RUNNER_RESULT=blocked MODE=target-binding-confirm IS_EVIDENCE=false COMMAND_ATTEMPTED=3 COMMAND_COMPLETED=3`，exit 2；**record 未落盘**（约定路径 `$HOME/harmonyos-signing/netbird-e3/records/` 目录不存在，runner 尽力写失败）；blocked 真因（tuple 漂移或记录层失败）以当时证据不可区分。
+4. **按纪律停止**：blocked 后不重试、不换 ID、不自行诊断重跑；后续任何继续需用户新授权/新治理。
