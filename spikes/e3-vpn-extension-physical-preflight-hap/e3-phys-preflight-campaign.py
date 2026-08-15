@@ -3026,7 +3026,7 @@ def get_simulated_layout_document(name):
     if profile == 'settings-app-info-a':
         return [
             new_simulated_ui_node({'bundleName': 'com.huawei.hmos.settings', 'type': 'root', 'id': '', 'key': '', 'text': ''}, [
-                new_simulated_ui_node({'bundleName': '', 'type': 'Text', 'id': 'app_name_text', 'key': 'app_name_text', 'text': 'E3 Physical VPN Preflight'}),
+                new_simulated_ui_node({'bundleName': '', 'type': 'Text', 'id': 'app_name_text', 'key': 'app_name_text', 'text': 'E3 Preflight A'}),
                 new_simulated_ui_node({'bundleName': '', 'type': 'Button', 'id': 'force_stop_button', 'key': 'force_stop_button', 'text': '强制停止'}),
             ]),
         ]
@@ -3178,7 +3178,17 @@ def test_captured_layout_profile(facts, profile, expected_bundle=None):
         checks['add-vpn-button'] = re.search(text_node + '[^\n]*添加 vpn 网络[^\n]*(?=\n|$)', joined) is not None
     elif profile == 'settings-app-info':
         checks['settings-owner'] = re.search(attr_value_pattern('bundlename', 'com.huawei.hmos.settings'), joined) is not None
-        checks['app-label'] = re.search(text_node + '[^\n]*e3 physical vpn preflight[^\n]*(?=\n|$)', joined) is not None
+        # Display-name label per bundle (A="E3 Preflight A", B="E3 Preflight B");
+        # the historical "E3 Physical VPN Preflight" (no tail) stays accepted,
+        # and a wrong tail (A page showing "... B") is rejected.
+        if str(expected_bundle) == BUNDLE_A:
+            label_pattern = r'(?:(?: a)?(?! b))'
+        elif str(expected_bundle) == BUNDLE_B:
+            label_pattern = r'(?:(?: b)?(?! a))'
+        else:
+            label_pattern = r'(?:)?'
+        checks['app-label'] = re.search(
+            text_node + r'[^\n]*e3 (?:physical vpn )?preflight' + label_pattern + r'[^\n]*(?=\n|$)', joined) is not None
         checks['force-stop-control'] = (re.search(text_node + '[^\n]*force stop[^\n]*(?=\n|$)', joined) is not None) \
             or (re.search(text_node + '[^\n]*强制停止[^\n]*(?=\n|$)', joined) is not None) \
             or (re.search(attr_field + '(?:id|key)=[^\n]*force[_-]?stop[^\n]*(?=\n|$)', joined) is not None)
@@ -4604,7 +4614,7 @@ def invoke_strong_live_campaign(freeze):
             return {'status': 'pass', 'reason': 'A-app-info-layout-match'}
         return {'status': 'invalid', 'reason': str(layout['reason'])}
 
-    step5_info = invoke_mechanical_step(context5, 3, '打开测试 App A 的应用信息页',
+    step5_info = invoke_mechanical_step(context5, 3, '打开"E3 Preflight A"的应用信息页',
                                         {'status': 'pass', 'reason': 'fresh-A-request-bound', 'request_id': request5},
                                         _s5_app_info_postcondition,
                                         capture_after_name='scenario-5-app-info',

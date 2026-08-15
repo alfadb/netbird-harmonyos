@@ -3395,7 +3395,7 @@ class TestU9bSkeletons(SelftestBase):
                             'id': '', 'key': '', 'text': ''},
              'children': [
                  {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                 'text': 'E3 Physical VPN Preflight'}, 'children': []},
+                                 'text': 'E3 Preflight A'}, 'children': []},
                  {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
                                  'text': '强制停止'}, 'children': []},
              ]},

@@ -60,9 +60,9 @@ host_prep_target_mapping:
   consumed_authorization: false # NOT yet consumed: to be consumed exactly once (future) by the operator at the mapping gate on the Linux Pod; this registration does not run it
 repo_bytes: # governance-constant migration re-freeze: AUTH ID + candidate pair constants migrated in the Python trio (0002 frozen bytes 33a3b454…/3a32e171…/3d5f0194… remain recorded under the 0002 AUTH, not applicable here); HAP inputs NEW (20260815-relabeled, Linux build+re-sign); hdc/target-tuple/decision-field values reused from the 0002 AUTH
   python_port: frozen # Python 3 semantic-equivalent port of the 0002 AUTH (marker-detection fix ADJ-20260814-0002 C6 carried forward unchanged), three-file bytes re-frozen after the constant migration; the PowerShell trio remains in-repo unchanged as historical input
-    runner_sha256: 043d271fe71fe0bc5f8cd6ba63637c327e79c6e71ddf35ed9e2d0554e5026434 # e3-phys-preflight-campaign.py (AUTH_ID/candidate pair constants migrated to this AUTH; ADJ-20260814-0002 C6 marker fix retained; re-frozen)
+    runner_sha256: 9572d55afefc7455a7dc9ae2fb8c8fe56f708ec1d862173f1120996ec4d16352 # e3-phys-preflight-campaign.py (AUTH_ID/candidate pair constants migrated; settings-app-info app-label regex aligned to new display names, BLOCKER-1 fix; re-frozen)
     freeze_example_sha256: 030afd0e7adbbd4ac50f831bca412eac21c710e7cc625836f2ef8acec04b8e64 # e3-phys-preflight-freeze.example.json (authorization_id/pair updated to this AUTH)
-    selftest_sha256: 3c656ae6db3deb5df08f1e3e2b48cc224b11677fb9503f5dee0216e650555a67 # tests/e3-phys-preflight-runner-selftest.py (positive fixtures migrated; OLD_AUTH_ID negative mutants kept with historical ID semantics)
+    selftest_sha256: 89cdf3d46db6da88ff39bbf9ef1cf7007051c9d6d91ff6455c8590d02fde8c7a # tests/e3-phys-preflight-runner-selftest.py (positive fixtures migrated + label fixtures aligned; OLD_AUTH_ID negative mutants kept)
   signed_hap_frozen: # NEW Linux-built + re-signed HAPs (relabeled display names); path $HOME/harmonyos-signing/netbird-e3/freeze/20260815-relabeled/artifacts/{a,b}/; the old f44be17-final packages (A 3a98ad68…/106210, B 1adfa966…/106212) are RETAINED as historical inputs and no longer used for this AUTH
     hap_a_sha256: 828fefedba3b4ec63cb3fbe6336f4bf34266770cb29465c854f0ec94491b503d # size 133935, e3-phys-preflight-a-signed.hap
     hap_b_sha256: c9e064ed1dcf0df112c27c5f6bcc282e9a9913c63d3dfd8ce8377b1b46218a37 # size 133945, e3-phys-preflight-b-signed.hap
@@ -183,9 +183,9 @@ reviewed_at: pending
 
 **Python 移植三文件（runner / freeze example / selftest）——常量迁移后重新冻结**：
 
-- runner：`e3-phys-preflight-campaign.py` → `043d271fe71fe0bc5f8cd6ba63637c327e79c6e71ddf35ed9e2d0554e5026434`（AUTH_ID 与候选 pair 常量已迁移至本 AUTH；ADJ-20260814-0002 C6 marker 修复代码原样保留）
+- runner：`e3-phys-preflight-campaign.py` → `9572d55afefc7455a7dc9ae2fb8c8fe56f708ec1d862173f1120996ec4d16352`（AUTH_ID 与候选 pair 常量已迁移；**BLOCKER-1 修复**：settings-app-info 布局 profile 的 app-label 正则改为按 expected_bundle 匹配新显示名 `E3 Preflight A`/`E3 Preflight B`（兼容旧形态、负向拒绝错误尾标），S5 step3 提示词改带显示名，模拟 fixture 同步）
 - freeze example：`e3-phys-preflight-freeze.example.json` → `030afd0e7adbbd4ac50f831bca412eac21c710e7cc625836f2ef8acec04b8e64`（**刻意保持 `plan_status: blocked`**，仅占位，不含 campaign 哈希/路径/秘密）
-- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `3c656ae6db3deb5df08f1e3e2b48cc224b11677fb9503f5dee0216e650555a67`（正向 fixture 迁移至本 AUTH；旧 AUTH ID 仅作负向 mutant 样本保留历史语义）
+- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `89cdf3d46db6da88ff39bbf9ef1cf7007051c9d6d91ff6455c8590d02fde8c7a`（正向 fixture 迁移至本 AUTH；label fixture 同步；旧 AUTH ID 仅作负向 mutant 样本保留历史语义）
 
 **clean-commit requirement**：`code_sha` 以本登记文档与必要治理变更 **commit 后的最终 HEAD** 为准（本任务不 commit；文档中写 `pending-final-commit`，**在 commit 时冻结**）；后续 blocked freeze 绑定该 HEAD。提交时须重新计算最终 commit 中三文件的 SHA-256，复算结果**预期与绑定值一致**；若不一致，说明文件在登记后被改动，必须停止并重新登记，**不得** 绑定任何发散 hash。最终 bundle commit 是权威字节源。
 
