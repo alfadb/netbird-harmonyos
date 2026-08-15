@@ -324,5 +324,5 @@ Linux Pod 必须 **按序** 满足下列门，缺一即停止并回报主会话�
 
 1. **0002 Live 事实定性**：S1–S4 全 pass（S2 为 **API26 首次** marker 修复验证成功——`:vpn` 截断 tag / `requestId=missing` 行被 `test_line_correlated` 正确关联；S4 "取消"按钮被 cancel|deny 布局验证接受）；S5 step1 pass、S5 step3 operator-timeout（应用管理页两 APP 同名无法区分 A）→ `SCENARIO_INVALID` → seal invalid（exit 2）；cleanup `verified-clean`。**根因为应用显示名相同，非设备/runner 故障**。
 2. **本次变更**：显示名区分（`app_name_a="E3 Preflight A"` / `app_name_b="E3 Preflight B"` + build-profile label 绑定）；audit 脚本 3 处既有漂移修复（raw pin `b584bad2…` 跟进 `4d4caef`；`LEDGER_MAX_FUTURE_MS`/`LEDGER_MAX_AGE_MS` count 1→2 跟进 `c6acae7`）；新 Linux 构建+重签 HAP（`20260815-relabeled`，A `828fefed…`/`133935`、B `c9e064ed…`/`133945`，验签 4 项 exit 0、A/B 归属互不串扰、`device_id_count:1`）；旧 HAP（`f44be17-final`）保留为历史输入。
-3. **常量迁移与重新冻结**：runner/selftest/freeze example 治理常量迁移至 20260815-0001 系列，重新冻结（runner `9572d55a…`、selftest `89cdf3d4…`、freeze example `030afd0e…`）；三文件已随本登记提交（HEAD `c9d52b0`），`code_sha` 待最终 commit 后冻结。
+3. **常量迁移与重新冻结**：runner/selftest/freeze example 治理常量迁移至 20260815-0001 系列，重新冻结（runner `9572d55a…`、selftest `c0d566f3…`、freeze example `030afd0e…`）；三文件已随本登记提交，`code_sha` 以 blocked freeze 绑定的最终 commit 为准（权威值由 freeze 承载）。
 4. **按纪律停止**：0002 invalid 后不重试、不换 ID；本授权按新治理新建 pair 并以 `attempt=initial` 全新开始。E3 未关闭，E8 保持 `CLOSED`。
