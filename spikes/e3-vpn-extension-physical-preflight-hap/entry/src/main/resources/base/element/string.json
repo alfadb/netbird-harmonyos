@@ -10,7 +10,11 @@
     },
     {
       "name": "ability_name",
-      "value": "E3 Physical VPN Preflight"
+      "value": "E3 Preflight A"
+    },
+    {
+      "name": "ability_name_b",
+      "value": "E3 Preflight B"
     }
   ]
 }

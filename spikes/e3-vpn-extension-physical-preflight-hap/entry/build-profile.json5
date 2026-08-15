@@ -20,6 +20,31 @@
         deviceType: [
           'phone'
         ]
+      },
+      source: {
+        abilities: [
+          {
+            name: 'EntryAbility',
+            label: '$string:ability_name'
+          }
+        ]
+      }
+    },
+    {
+      name: 'vpnB',
+      runtimeOS: 'HarmonyOS',
+      config: {
+        deviceType: [
+          'phone'
+        ]
+      },
+      source: {
+        abilities: [
+          {
+            name: 'EntryAbility',
+            label: '$string:ability_name_b'
+          }
+        ]
       }
     }
   ]

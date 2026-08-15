@@ -19,9 +19,9 @@ readonly NATIVE_PACKAGE="$CPP_ROOT/types/libfdprobe/oh-package.json5"
 readonly HVIGOR="/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw"
 readonly SDK_PKG="/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/sdk-pkg.json"
 readonly HAP_A="$PROJECT/entry/build/default/outputs/default/entry-default-unsigned.hap"
-readonly HAP_B="$PROJECT/entry/build/vpnB/outputs/default/entry-default-unsigned.hap"
+readonly HAP_B="$PROJECT/entry/build/vpnB/outputs/vpnB/entry-vpnB-unsigned.hap"
 readonly LIB_A="$PROJECT/entry/build/default/intermediates/stripped_native_libs/default/arm64-v8a/libfdprobe.so"
-readonly LIB_B="$PROJECT/entry/build/vpnB/intermediates/stripped_native_libs/default/arm64-v8a/libfdprobe.so"
+readonly LIB_B="$PROJECT/entry/build/vpnB/intermediates/stripped_native_libs/vpnB/arm64-v8a/libfdprobe.so"
 readonly BUNDLE_A="cn.alfadb.netbird.e3physvpna"
 readonly BUNDLE_B="cn.alfadb.netbird.e3physvpnb"
 readonly HISTORICAL="spikes/e3-vpn-extension-hap"
@@ -68,7 +68,9 @@ assert_historical_unchanged() {
 
 assert_identity_and_profiles() {
   require_count "name: 'default'" 2 "$PROFILE"
-  require_count "name: 'vpnB'" 1 "$PROFILE"
+  require_count "name: 'vpnB'" 2 "$PROFILE"
+  require_count "label: '\$string:ability_name'" 1 "$MODULE_PROFILE"
+  require_count "label: '\$string:ability_name_b'" 1 "$MODULE_PROFILE"
   require_count "bundleName: '$BUNDLE_A'" 1 "$PROFILE"
   require_count "bundleName: '$BUNDLE_B'" 1 "$PROFILE"
   require_count "bundleName: '$BUNDLE_A'" 1 "$APP_SCOPE"
@@ -268,9 +270,9 @@ clean_build() {
   printf 'BUILD_BEGIN product=%s clean=true\n' "$product"
   (
     cd "$PROJECT"
-    "$HVIGOR" clean --mode module -p "product=$product" -p module=entry@default \
+    "$HVIGOR" clean --mode module -p "product=$product" -p "module=entry@$product" \
       -p buildMode=debug --no-daemon
-    "$HVIGOR" assembleHap --mode module -p "product=$product" -p module=entry@default \
+    "$HVIGOR" assembleHap --mode module -p "product=$product" -p "module=entry@$product" \
       -p buildMode=debug --no-daemon
   )
   printf 'BUILD_END product=%s result=pass\n' "$product"
@@ -281,7 +283,7 @@ assemble_without_clean() {
   printf 'FINAL_ASSEMBLE_BEGIN product=%s reason=retain-both-product-outputs\n' "$product"
   (
     cd "$PROJECT"
-    "$HVIGOR" assembleHap --mode module -p "product=$product" -p module=entry@default \
+    "$HVIGOR" assembleHap --mode module -p "product=$product" -p "module=entry@$product" \
       -p buildMode=debug --no-daemon
   )
   printf 'FINAL_ASSEMBLE_END product=%s result=pass\n' "$product"
@@ -315,9 +317,16 @@ assert_hap() {
   local hap="$2"
   local bundle="$3"
   local lib="$4"
-  local module_json pack_info members native_members archive_hash lib_hash
+  local ability_label="$5"
+  local expected_hap_name package_name module_json pack_info members native_members archive_hash lib_hash
   [[ -f "$hap" ]] || fail "missing HAP for $product: $hap"
-  [[ "$(basename "$hap")" == 'entry-default-unsigned.hap' ]] ||
+  expected_hap_name='entry-default-unsigned.hap'
+  package_name='entry-default'
+  if [[ "$product" == 'vpnB' ]]; then
+    expected_hap_name='entry-vpnB-unsigned.hap'
+    package_name='entry-vpnB'
+  fi
+  [[ "$(basename "$hap")" == "$expected_hap_name" ]] ||
     fail "unexpected signed or renamed HAP for $product"
 
   members="$(unzip -Z1 "$hap")"
@@ -344,15 +353,18 @@ assert_hap() {
     .app.targetAPIVersion == 60100023 and
     .app.minAPIVersion == 60100023 and
     .module.type == "entry" and
+    (.module.abilities | length) == 1 and
+    .module.abilities[0].name == "EntryAbility" and
+    .module.abilities[0].label == $ability_label and
     .module.requestPermissions == [{"name":"ohos.permission.INTERNET"}] and
     (.module.extensionAbilities | length) == 1 and
     .module.extensionAbilities[0].name == "E3PhysicalVpnExtensionAbility" and
     .module.extensionAbilities[0].type == "vpn" and
     .module.extensionAbilities[0].exported == false
-  ' >/dev/null || fail "packaged module metadata mismatch for $product"
+  ' --arg ability_label "$ability_label" >/dev/null || fail "packaged module metadata mismatch for $product"
 
   pack_info="$(unzip -p "$hap" pack.info)"
-  printf '%s\n' "$pack_info" | jq -e --arg bundle "$bundle" '
+  printf '%s\n' "$pack_info" | jq -e --arg bundle "$bundle" --arg package_name "$package_name" '
     .summary.app.bundleName == $bundle and
     .summary.app.bundleType == "app" and
     .summary.app.version == {"code":1,"name":"0.0.1"} and
@@ -364,7 +376,7 @@ assert_hap() {
     .summary.modules[0].apiVersion.releaseType == "Release" and
     (.summary.modules[0].extensionAbilities | length) == 1 and
     .summary.modules[0].extensionAbilities[0].name == "E3PhysicalVpnExtensionAbility" and
-    .packages == [{"deviceType":["phone"],"moduleType":"entry","deliveryWithInstall":true,"name":"entry-default"}]
+    .packages == [{"deviceType":["phone"],"moduleType":"entry","deliveryWithInstall":true,"name":$package_name}]
   ' >/dev/null || fail "pack.info metadata mismatch for $product"
 
   printf 'HAP_AUDIT product=%s bundle=%s compile=6.1.1.125 target=60100023 compatible=60100023 unsigned=true nativeMember=%s nativeSha256=%s\n' \
@@ -384,12 +396,12 @@ assert_identity_and_profiles
 assert_native_source
 assert_arkts_source
 clean_build default
-assert_hap vpnA "$HAP_A" "$BUNDLE_A" "$LIB_A"
+assert_hap vpnA "$HAP_A" "$BUNDLE_A" "$LIB_A" '$string:ability_name'
 clean_build vpnB
-assert_hap vpnB "$HAP_B" "$BUNDLE_B" "$LIB_B"
+assert_hap vpnB "$HAP_B" "$BUNDLE_B" "$LIB_B" '$string:ability_name_b'
 assemble_without_clean default
-assert_hap vpnA "$HAP_A" "$BUNDLE_A" "$LIB_A"
-assert_hap vpnB "$HAP_B" "$BUNDLE_B" "$LIB_B"
+assert_hap vpnA "$HAP_A" "$BUNDLE_A" "$LIB_A" '$string:ability_name'
+assert_hap vpnB "$HAP_B" "$BUNDLE_B" "$LIB_B" '$string:ability_name_b'
 assert_historical_unchanged
 
 printf 'HAP_A=%s\n' "$HAP_A"
