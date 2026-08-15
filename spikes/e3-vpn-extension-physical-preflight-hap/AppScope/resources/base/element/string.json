@@ -3,6 +3,14 @@
     {
       "name": "app_name",
       "value": "E3 Physical VPN Preflight"
+    },
+    {
+      "name": "app_name_a",
+      "value": "E3 Preflight A"
+    },
+    {
+      "name": "app_name_b",
+      "value": "E3 Preflight B"
     }
   ]
 }

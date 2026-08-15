@@ -27,7 +27,8 @@ readonly BUNDLE_B="cn.alfadb.netbird.e3physvpnb"
 readonly HISTORICAL="spikes/e3-vpn-extension-hap"
 readonly RAW_EVIDENCE="docs/evidence/raw"
 readonly EXPECTED_HISTORICAL_TREE="c1af639568c7bc299c3164f1bc0f56cf2c5cdeda"
-readonly EXPECTED_RAW_TREE="608d33f902b3a3f356a27d3f433aa46613df36d2"
+# 2026-08-15: follow commit 4d4caef (Record N0 0002 sealed emulator evidence, 11 files).
+readonly EXPECTED_RAW_TREE="b584bad2b877698c0daab43a3b634546fb96a220"
 readonly NATIVE_MEMBER="libs/arm64-v8a/libfdprobe.so"
 
 fail() {
@@ -255,8 +256,10 @@ assert_arkts_source() {
   require_count 'fs.closeSync(fd);' 1 "$EXTENSION"
   require_count 'fs.unlinkSync(ledgerPath);' 1 "$EXTENSION"
   require_count 'this.consumeRequestLedger();' 1 "$EXTENSION"
-  require_count 'LEDGER_MAX_FUTURE_MS' 1 "$EXTENSION"
-  require_count 'LEDGER_MAX_AGE_MS' 1 "$EXTENSION"
+  # 计数=2：L14 定义 + c6acae7（场景7 stop-request 唯一门控与 ledger 加固）在 L272 新增越界检查使用点
+  require_count 'LEDGER_MAX_FUTURE_MS' 2 "$EXTENSION"
+  # 计数=2：L15 定义 + c6acae7（场景7 stop-request 唯一门控与 ledger 加固）在 L272 新增越界检查使用点
+  require_count 'LEDGER_MAX_AGE_MS' 2 "$EXTENSION"
   printf 'ARKTS_SOURCE_AUDIT=pass config=minimal ownership=platform_destroy singleFlight=true markers=complete uiSerialized=true ledger=sandbox timer=bounded-single fs=open-write-read-close\n'
 }
 

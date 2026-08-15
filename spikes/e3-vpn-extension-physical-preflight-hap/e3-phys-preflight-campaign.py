@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260814-0002 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260815-0001 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260814-0002 / EV-E3-PHYS1API26-20260814-0002), and
+(E3-PHYS-PREFLIGHT-20260815-0001 / EV-E3-PHYS1API26-20260815-0001), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -71,9 +71,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260814-0002'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260814-0002'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260814-0002'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260815-0001'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260815-0001'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
 DEVICE_CLOCK_SKEW_TOLERANCE_SECONDS = 3.0
@@ -1164,7 +1164,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260814-0002 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260815-0001 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
