@@ -3412,6 +3412,97 @@ class TestU9bSkeletons(SelftestBase):
         self.assertNotIn('scenario_invalid', record3)
         self.assertNotEqual(record3['record_status'], 'invalidated')
 
+    def test_adj_0003_app_label_wrong_tail(self):
+        """settings-app-info app-label tail negatives: an A app-info page
+        showing the B display name is rejected as layout-fields-missing:
+        app-label; the B-bundle label profile likewise rejects an A tail."""
+        # A app-info page showing B's display name fails the S5 app-label gate.
+        fixture = make_simulation_fixture()
+        fixture['layout_profiles']['scenario-5-app-info'] = [
+            {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
+                            'id': '', 'key': '', 'text': ''},
+             'children': [
+                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                 'text': 'E3 Preflight B'}, 'children': []},
+                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                 'text': '强制停止'}, 'children': []},
+             ]},
+        ]
+        proc, ev, raw = self._run_live(fixture, 'adj-0003-app-label-a-shows-b')
+        self.assertEqual(proc.returncode, 2, 'A app-info page labelled "E3 Preflight B" passed the app-label gate:\n%s' % (
+            proc.stdout + proc.stderr))
+        record = self._record(ev)
+        self.assertEqual(record['overall'], 'invalid')
+        self.assertEqual(record['scenarios'][4]['result'], 'invalid')
+        self.assertRegex(record['scenarios'][4]['reason'],
+                         r'layout-checkpoint-scenario-5-app-info-layout-mismatch')
+        # The layout checkpoint transcript pins the failing field to app-label.
+        checkpoints = [e for e in self._transcript(ev)
+                       if e['payload']['kind'] == 'machine-layout-checkpoint'
+                       and e['payload']['data']['checkpoint'].get('name') == 'scenario-5-app-info']
+        self.assertGreaterEqual(len(checkpoints), 1)
+        self.assertIn('app-label', checkpoints[-1]['payload']['data']['checkpoint']['reason'])
+
+        def assess(text, expected_bundle):
+            layout = [
+                {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
+                                'id': '', 'key': '', 'text': ''},
+                 'children': [
+                     {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                     'text': text}, 'children': []},
+                     {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                     'text': '强制停止'}, 'children': []},
+                 ]},
+            ]
+            return runner_mod.test_captured_layout_profile(
+                runner_mod.get_layout_facts(layout), 'settings-app-info', expected_bundle)
+
+        # B app-info page showing A's display name is rejected by the B profile.
+        b_shows_a = assess('E3 Preflight A', BUNDLE_B)
+        self.assertEqual(b_shows_a['status'], 'mismatch')
+        self.assertRegex(b_shows_a['reason'], r'app-label')
+        # The correct tails stay accepted by their own profiles.
+        self.assertEqual(assess('E3 Preflight A', BUNDLE_A)['status'], 'pass')
+        self.assertEqual(assess('E3 Preflight B', BUNDLE_B)['status'], 'pass')
+
+    def test_adj_0003_app_label_historical_compat(self):
+        """settings-app-info app-label historical compatibility: the
+        undifferentiated "E3 Physical VPN Preflight" display name still
+        passes the S5 app-label gate and both bundle profiles."""
+        fixture = make_simulation_fixture()
+        fixture['layout_profiles']['scenario-5-app-info'] = [
+            {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
+                            'id': '', 'key': '', 'text': ''},
+             'children': [
+                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                 'text': 'E3 Physical VPN Preflight'}, 'children': []},
+                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                 'text': '强制停止'}, 'children': []},
+             ]},
+        ]
+        proc, ev, raw = self._run_live(fixture, 'adj-0003-app-label-historical')
+        self.assertEqual(proc.returncode, 0, 'historical "E3 Physical VPN Preflight" label failed the S5 gate:\n%s' % (
+            proc.stdout + proc.stderr))
+        record = self._record(ev)
+        self.assertEqual(record['scenarios'][4]['result'], 'pass')
+        self.assertNotIn('scenario_invalid', record)
+        self.assertNotEqual(record['record_status'], 'invalidated')
+        # Both bundle profiles accept the historical undifferentiated name.
+        facts = runner_mod.get_layout_facts([
+            {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
+                            'id': '', 'key': '', 'text': ''},
+             'children': [
+                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                 'text': 'E3 Physical VPN Preflight'}, 'children': []},
+                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                 'text': '强制停止'}, 'children': []},
+             ]},
+        ])
+        self.assertEqual(runner_mod.test_captured_layout_profile(
+            facts, 'settings-app-info', BUNDLE_A)['status'], 'pass')
+        self.assertEqual(runner_mod.test_captured_layout_profile(
+            facts, 'settings-app-info', BUNDLE_B)['status'], 'pass')
+
     def test_adj_0003_infra_capture(self):
         """PS L4700-4800 adj-0003-infra-capture-blocked /
         continuous-capture-infra-degraded: 124/125 capture propagates

@@ -62,7 +62,7 @@ repo_bytes: # governance-constant migration re-freeze: AUTH ID + candidate pair 
   python_port: frozen # Python 3 semantic-equivalent port of the 0002 AUTH (marker-detection fix ADJ-20260814-0002 C6 carried forward unchanged), three-file bytes re-frozen after the constant migration; the PowerShell trio remains in-repo unchanged as historical input
     runner_sha256: 9572d55afefc7455a7dc9ae2fb8c8fe56f708ec1d862173f1120996ec4d16352 # e3-phys-preflight-campaign.py (AUTH_ID/candidate pair constants migrated; settings-app-info app-label regex aligned to new display names, BLOCKER-1 fix; re-frozen)
     freeze_example_sha256: 030afd0e7adbbd4ac50f831bca412eac21c710e7cc625836f2ef8acec04b8e64 # e3-phys-preflight-freeze.example.json (authorization_id/pair updated to this AUTH)
-    selftest_sha256: 89cdf3d46db6da88ff39bbf9ef1cf7007051c9d6d91ff6455c8590d02fde8c7a # tests/e3-phys-preflight-runner-selftest.py (positive fixtures migrated + label fixtures aligned; OLD_AUTH_ID negative mutants kept)
+    selftest_sha256: c0d566f366922ba51855d840930dcf26e42d6075378cf5e87915aba767de3e7f # tests/e3-phys-preflight-runner-selftest.py (positive fixtures + label fixtures + label negative cases; OLD_AUTH_ID negative mutants kept)
   signed_hap_frozen: # NEW Linux-built + re-signed HAPs (relabeled display names); path $HOME/harmonyos-signing/netbird-e3/freeze/20260815-relabeled/artifacts/{a,b}/; the old f44be17-final packages (A 3a98ad68…/106210, B 1adfa966…/106212) are RETAINED as historical inputs and no longer used for this AUTH
     hap_a_sha256: 828fefedba3b4ec63cb3fbe6336f4bf34266770cb29465c854f0ec94491b503d # size 133935, e3-phys-preflight-a-signed.hap
     hap_b_sha256: c9e064ed1dcf0df112c27c5f6bcc282e9a9913c63d3dfd8ce8377b1b46218a37 # size 133945, e3-phys-preflight-b-signed.hap
@@ -110,7 +110,7 @@ reviewed_at: pending
 | machine_fresh_confirmation | `pending`（由 Linux Pod 通过 `-TargetBindingConfirm` 观测） |
 | plan_status | `authorized-awaiting-linux-ready-freeze` |
 | 执行 host | Linux Pod：`host-dev-alfadb-full` / `Debian GNU/Linux 13 (trixie)` / `x86_64` / Python `3.13.5` |
-| runner | Python 3 版（**常量迁移后重新冻结**）：runner `043d271f…`、freeze example `030afd0e…`、selftest `3c656ae6…`；0002 AUTH 历史字节（runner `33a3b454…`、selftest `3a32e171…`、freeze example `3d5f0194…`）随 0002 登记保留，不再适用本 AUTH |
+| runner | Python 3 版（**常量迁移后重新冻结**）：runner `9572d55a…`、freeze example `030afd0e…`、selftest `89cdf3d4…`；0002 AUTH 历史字节（runner `33a3b454…`、selftest `3a32e171…`、freeze example `3d5f0194…`）随 0002 登记保留，不再适用本 AUTH |
 | 目标元组（不变，冻结于 `ADJ-20260806-0003`） | `PLA-AL10` / `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a` / 设备别名 `PHYS-1` |
 | candidate（**新建**） | `E3-PHYS-PREFLIGHT-20260815-0001` / `EV-E3-PHYS1API26-20260815-0001`，未 Live、未消耗；`attempt=initial`、retry N/A；执行前须两次 ID 消费审计（audit-1/audit-2，均 hash 记录） |
 | signed A/B HAP（**新建** `20260815-relabeled`，Linux 构建+重签，显示名已区分） | `$HOME/harmonyos-signing/netbird-e3/freeze/20260815-relabeled/artifacts/{a,b}/`：A `828fefedba3b4ec63cb3fbe6336f4bf34266770cb29465c854f0ec94491b503d` size `133935`（`e3-phys-preflight-a-signed.hap`）；B `c9e064ed1dcf0df112c27c5f6bcc282e9a9913c63d3dfd8ce8377b1b46218a37` size `133945`（`e3-phys-preflight-b-signed.hap`）；与 Windows 旧包差异 ~27.7KB，audit 全过，验签 4 项 exit 0、A/B 归属互不串扰、`device_id_count:1` |
@@ -185,7 +185,7 @@ reviewed_at: pending
 
 - runner：`e3-phys-preflight-campaign.py` → `9572d55afefc7455a7dc9ae2fb8c8fe56f708ec1d862173f1120996ec4d16352`（AUTH_ID 与候选 pair 常量已迁移；**BLOCKER-1 修复**：settings-app-info 布局 profile 的 app-label 正则改为按 expected_bundle 匹配新显示名 `E3 Preflight A`/`E3 Preflight B`（兼容旧形态、负向拒绝错误尾标），S5 step3 提示词改带显示名，模拟 fixture 同步）
 - freeze example：`e3-phys-preflight-freeze.example.json` → `030afd0e7adbbd4ac50f831bca412eac21c710e7cc625836f2ef8acec04b8e64`（**刻意保持 `plan_status: blocked`**，仅占位，不含 campaign 哈希/路径/秘密）
-- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `89cdf3d46db6da88ff39bbf9ef1cf7007051c9d6d91ff6455c8590d02fde8c7a`（正向 fixture 迁移至本 AUTH；label fixture 同步；旧 AUTH ID 仅作负向 mutant 样本保留历史语义）
+- selftest：`tests/e3-phys-preflight-runner-selftest.py` → `c0d566f366922ba51855d840930dcf26e42d6075378cf5e87915aba767de3e7f`（正向 fixture 迁移；label 正/负向用例；旧 AUTH ID 仅作负向 mutant 样本保留历史语义）
 
 **clean-commit requirement**：`code_sha` 以本登记文档与必要治理变更 **commit 后的最终 HEAD** 为准（本任务不 commit；文档中写 `pending-final-commit`，**在 commit 时冻结**）；后续 blocked freeze 绑定该 HEAD。提交时须重新计算最终 commit 中三文件的 SHA-256，复算结果**预期与绑定值一致**；若不一致，说明文件在登记后被改动，必须停止并重新登记，**不得** 绑定任何发散 hash。最终 bundle commit 是权威字节源。
 
@@ -324,5 +324,5 @@ Linux Pod 必须 **按序** 满足下列门，缺一即停止并回报主会话�
 
 1. **0002 Live 事实定性**：S1–S4 全 pass（S2 为 **API26 首次** marker 修复验证成功——`:vpn` 截断 tag / `requestId=missing` 行被 `test_line_correlated` 正确关联；S4 "取消"按钮被 cancel|deny 布局验证接受）；S5 step1 pass、S5 step3 operator-timeout（应用管理页两 APP 同名无法区分 A）→ `SCENARIO_INVALID` → seal invalid（exit 2）；cleanup `verified-clean`。**根因为应用显示名相同，非设备/runner 故障**。
 2. **本次变更**：显示名区分（`app_name_a="E3 Preflight A"` / `app_name_b="E3 Preflight B"` + build-profile label 绑定）；audit 脚本 3 处既有漂移修复（raw pin `b584bad2…` 跟进 `4d4caef`；`LEDGER_MAX_FUTURE_MS`/`LEDGER_MAX_AGE_MS` count 1→2 跟进 `c6acae7`）；新 Linux 构建+重签 HAP（`20260815-relabeled`，A `828fefed…`/`133935`、B `c9e064ed…`/`133945`，验签 4 项 exit 0、A/B 归属互不串扰、`device_id_count:1`）；旧 HAP（`f44be17-final`）保留为历史输入。
-3. **常量迁移与重新冻结**：runner/selftest/freeze example 治理常量迁移至 20260815-0001 系列，重新冻结（runner `043d271f…`、selftest `3c656ae6…`、freeze example `030afd0e…`）；三文件当前为工作区未提交修改（HEAD `ddba6e7`），`code_sha` 待 commit 后冻结。
+3. **常量迁移与重新冻结**：runner/selftest/freeze example 治理常量迁移至 20260815-0001 系列，重新冻结（runner `9572d55a…`、selftest `89cdf3d4…`、freeze example `030afd0e…`）；三文件已随本登记提交（HEAD `c9d52b0`），`code_sha` 待最终 commit 后冻结。
 4. **按纪律停止**：0002 invalid 后不重试、不换 ID；本授权按新治理新建 pair 并以 `attempt=initial` 全新开始。E3 未关闭，E8 保持 `CLOSED`。
