@@ -1,0 +1,105 @@
+[
+  {
+    "attributes": {
+      "bundleName": "com.huawei.hmos.settings",
+      "type": "root",
+      "id": "",
+      "key": "",
+      "text": "",
+      "visible": "true"
+    },
+    "children": [
+      {
+        "attributes": {
+          "bundleName": "",
+          "type": "NavDestination",
+          "id": "Setting.Application",
+          "key": "Setting.Application",
+          "text": "",
+          "visible": "false"
+        },
+        "children": [
+          {
+            "attributes": {
+              "bundleName": "",
+              "type": "Text",
+              "id": "Setting.Application.ApplicationTab.ApplicationUnSystemGroup.cn.alfadb.netbird.e3physvpna,0.title",
+              "key": "Setting.Application.ApplicationTab.ApplicationUnSystemGroup.cn.alfadb.netbird.e3physvpna,0.title",
+              "text": "E3 Preflight A",
+              "visible": "true"
+            },
+            "children": []
+          },
+          {
+            "attributes": {
+              "bundleName": "",
+              "type": "Text",
+              "id": "Setting.Application.ApplicationTab.ApplicationUnSystemGroup.cn.alfadb.netbird.e3physvpnb,0.title",
+              "key": "Setting.Application.ApplicationTab.ApplicationUnSystemGroup.cn.alfadb.netbird.e3physvpnb,0.title",
+              "text": "E3 Preflight B",
+              "visible": "true"
+            },
+            "children": []
+          }
+        ]
+      },
+      {
+        "attributes": {
+          "bundleName": "",
+          "type": "NavDestination",
+          "id": "Setting.AppDetail",
+          "key": "Setting.AppDetail",
+          "text": "",
+          "visible": "true"
+        },
+        "children": [
+          {
+            "attributes": {
+              "bundleName": "",
+              "type": "Text",
+              "id": "Setting.AppDetail.title_id",
+              "key": "Setting.AppDetail.title_id",
+              "text": "E3 Preflight A",
+              "visible": "true"
+            },
+            "children": []
+          },
+          {
+            "attributes": {
+              "bundleName": "",
+              "type": "Button",
+              "id": "",
+              "key": "",
+              "text": "强行停止",
+              "visible": "true"
+            },
+            "children": []
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "attributes": {
+      "bundleName": "com.ohos.sceneboard",
+      "type": "WindowScene",
+      "id": "",
+      "key": "",
+      "text": "",
+      "visible": "true"
+    },
+    "children": [
+      {
+        "attributes": {
+          "bundleName": "",
+          "type": "Text",
+          "id": "QuickBackText",
+          "key": "QuickBackText",
+          "text": "E3 Physical VPN Preflight",
+          "visible": "true"
+        },
+        "children": []
+      }
+    ]
+  }
+]

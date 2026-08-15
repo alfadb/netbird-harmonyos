@@ -2,6 +2,10 @@
 .pi-astack/
 .abrain-project.json
 
+# Python generated state
+__pycache__/
+*.pyc
+
 # HarmonyOS, Hvigor, Node.js, and ohpm generated state
 **/.hvigor/
 **/build/

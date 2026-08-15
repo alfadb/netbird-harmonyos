@@ -2,26 +2,26 @@
 
 最后核验：2026-08-15
 
-本文登记用户（直接人类决策者）于 2026-08-15 约 14:10 +08:00 的显式批准（聊天回复“继续”，方案 A）：在彻底修复 ability label 后，以**新**候选 pair 重跑 `E3-PHYS-PREFLIGHT`。本登记授权 `AUTH-E3-PHYS1API26-20260815-0004`，取代已消费的 [`AUTH-E3-PHYS1API26-20260815-0003`](e3-physical-preflight-authorization-2026-08-15-0003.md) 的未完成 Live；0003 历史登记和 sealed invalid evidence 保留不改写。本文是当前唯一生效的授权登记。
+本文登记用户（直接人类决策者）于 2026-08-15 约 14:10 +08:00 的显式批准（聊天回复“继续”，方案 A）：在彻底修复 ability label 后，以**新**候选 pair 重跑 `E3-PHYS-PREFLIGHT`。本登记授权 `AUTH-E3-PHYS1API26-20260815-0004`，取代已消费的 [`AUTH-E3-PHYS1API26-20260815-0003`](e3-physical-preflight-authorization-2026-08-15-0003.md) 的未完成 Live；0003 历史登记和 sealed invalid evidence 保留不改写。
 
-> 状态注记：`authorization_status: granted`。本登记是授权登记，不是 Live campaign 证据，不运行 HDC 或其他设备命令，不安装工具，不生成 freeze，不提交或推送。
+> 状态注记：本登记原始授权含义不变，且其唯一获批 Live 已执行并 sealed invalid，故该 AUTH/pair 已消费，不能复用。本文件仍是授权登记，不重判 Live evidence，也不授权当前任务运行 HDC、设备命令、Live、AUTH/pair 迁移、commit 或 push。
 
 ```yaml
 authorization_id: AUTH-E3-PHYS1API26-20260815-0004
 supersedes: AUTH-E3-PHYS1API26-20260815-0003
 exception: E3-PHYS-PREFLIGHT
-information_status: current-measured
-record_status: collected
+information_status: historical-execution-input
+record_status: consumed-live-sealed-invalid
 stage_or_gate: E3
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: live-completed-historical
 is_evidence: false
-authorization_status: granted
+authorization_status: consumed
 approval: user explicit approval "继续"; plan A; 2026-08-15 approximately 14:10 +08:00
 plan_status_at_registration: authorized-awaiting-linux-ready-freeze
 campaign_status: candidate-new-created-not-live-pending-audits
 reviewer_role: isolated-anthropic-claude-opus-5-reviewer
-code_sha: pending-final-commit
+code_sha: 62409c5f966d00597b58f68ae5b927dd06e76e76 # frozen historical Live input; do not replace with the current worktree
 target_tuple:
   distribution: HarmonyOS
   device_model: PLA-AL10
@@ -37,9 +37,9 @@ candidate:
   evidence_id: EV-E3-PHYS1API26-20260815-0004
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
-  live: false
-  consumed: false
+  identity_status: consumed-sealed-invalid
+  live: true
+  consumed: true
 repo_bytes:
   runner_sha256: 05e3eff34694937a4a8ba3d937580a1353a2a693f89124d6fd1e8bd37a0644ed
   selftest_sha256: 56fdb79e00eab9fd7d62be10bbe12b209eee4366909742a81a749e3b2c576453
@@ -60,6 +60,12 @@ evidence_roots:
   dry_run: $HOME/harmonyos-signing/netbird-e3/evidence-dry-run-20260815-0004
   live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260815-0004
 ```
+
+## 0004 Live 历史执行结果
+
+0004 已执行 Live，结果为 **sealed invalid**，候选 `E3-PHYS-PREFLIGHT-20260815-0004` / `EV-E3-PHYS1API26-20260815-0004` 已 `consumed=true`。S1-S4 pass；S5 step1 pass；S5 step3 因当时 matcher 漏掉生产文案 `强行停止` 而 invalid；S6-S7 `not-run-due-to-invalid`。证据根为 `$HOME/harmonyos-signing/netbird-e3/evidence-live-20260815-0004`；生产结构修复登记见 [`2026-08-15 production layout`](e3-physical-preflight-production-layout-2026-08-15.md)。以上仅记录 sealed 执行结果，不改写、不重判其证据。
+
+本登记所冻结的 `code_sha` 是该次 Live 的历史输入，不能用当前工作区 hash 覆盖。当前工作区包含其后的 host-only 修复，已不适用于 0004；任何后续设备执行必须获得新的 AUTH 和新的 campaign/evidence pair。
 
 ## 0003 Live 事实与本次修复
 
@@ -95,4 +101,4 @@ evidence_roots:
 
 任一门失败即停止，不自动 retry、不换 ID。Live 前必须在应用管理列表确认 A/B ability label 已分别显示为 `E3 Preflight A` 与 `E3 Preflight B`；每次设置导航操作后均须重新 capture 验证页面，S5 step3 必须确认目标 app-info 页面出现 `force-stop-control`，否则停止并 seal invalid。禁止额外 discovery、UDID、serial、`hidumper`、root、privileged、Go、NetBird 或 product 动作；禁止将 endpoint、target token、密钥或其他敏感值写入仓库、freeze、record、evidence 或日志。
 
-E3 未关闭；E8 保持 `CLOSED`。用户已授权在 Live 前审查后提交并推送 runner、三项治理变更和本登记；campaign evidence 不得提前提交。
+E3 未关闭；E8 保持 `CLOSED`。上述“Live 前”顺序门和提交/推送授权只描述 0004 当时的原始授权边界，不能将已消费的 0004 AUTH/pair 延伸为当前执行许可；任何继续须新的 AUTH/pair。

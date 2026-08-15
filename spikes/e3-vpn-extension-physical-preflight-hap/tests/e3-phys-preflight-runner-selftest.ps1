@@ -403,7 +403,7 @@ try {
     # ADJ-20260810-0001 (C6): the in-repo ConfirmationRecord negative must use a FIXED-candidate
     # blocked confirmation freeze so the failure is the out-of-repo path gate, never the earlier
     # candidate-pair gate (a wrong-pair freeze would be rejected before the path is even checked).
-    $confirmBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $confirmBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $confirmBlockedPath = Write-JsonFixture 'freeze-confirm-blocked-candidate.json' $confirmBlockedFreeze
     $confirmInRepoRun = Invoke-Runner $confirmBlockedPath '' '' -AsConfirm -ConfirmationRecordPath $confirmInRepoPath
     Assert-True ($confirmInRepoRun.ExitCode -ne 0 -and $confirmInRepoRun.Text -match 'outside the git repository') 'in-repo ConfirmationRecord was not rejected'
@@ -413,11 +413,11 @@ try {
     # ADJ-20260810-0001 (C6): TargetBindingConfirm freeze-level negatives - the fixed candidate
     # pair and attempt=initial are enforced before any HDC call, so a wrong-pair or retry-attempt
     # freeze is rejected with the specific gate message and the HDC sentinel never starts.
-    $confirmWrongPairFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-WRONG'
+    $confirmWrongPairFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-WRONG'
     $confirmWrongPairPath = Write-JsonFixture 'freeze-confirm-wrong-pair.json' $confirmWrongPairFreeze
     $confirmWrongPairRun = Invoke-Runner $confirmWrongPairPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
     Assert-True ($confirmWrongPairRun.ExitCode -ne 0 -and $confirmWrongPairRun.Text -match 'fixed candidate pair') 'TargetBindingConfirm with wrong candidate pair was not rejected'
-    $confirmRetryFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $confirmRetryFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $confirmRetryFreeze.attempt = 'infrastructure-blocked-retry-1'
     $confirmRetryPath = Write-JsonFixture 'freeze-confirm-retry-attempt.json' $confirmRetryFreeze
     $confirmRetryRun = Invoke-Runner $confirmRetryPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
@@ -524,7 +524,7 @@ try {
         return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))).ToLowerInvariant()
     }
     function Write-ConfirmationRecordFixture {
-        param([string]$Name, $Freeze, [string]$OverrideAuthId = 'AUTH-E3-PHYS1API26-20260810-0002', [string]$OverrideVerdict = 'pass')
+        param([string]$Name, $Freeze, [string]$OverrideAuthId = 'AUTH-E3-PHYS1API26-20260815-0005', [string]$OverrideVerdict = 'pass')
         $record = [ordered]@{
             schema_version = 1
             record_kind = 'target-binding-confirmation'
@@ -563,7 +563,7 @@ try {
         return [pscustomobject]@{ Path = $path; Sha256 = $sha }
     }
     function Add-ConfirmationBinding {
-        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$AuthId = 'AUTH-E3-PHYS1API26-20260810-0002')
+        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$AuthId = 'AUTH-E3-PHYS1API26-20260815-0005')
         $copy = Copy-JsonObject $Freeze
         # ADJ-20260810-0001 (C6): machine_fresh_confirmation does not exist on a New-Freeze object;
         # under Set-StrictMode a direct assignment to the non-existent property would throw, so it
@@ -610,7 +610,7 @@ try {
     }
     # The ready freeze consumed by this AUTH path fixes the candidate pair and attempt=initial; the
     # generic infrastructure retry branch never applies.
-    $readyNoConfirmFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $readyNoConfirmFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $readyNoConfirmPath = Write-JsonFixture 'freeze-ready-no-confirm.json' $readyNoConfirmFreeze
     $readyNoConfirmPaths = New-CasePaths 'ready-no-confirm-dryrun'
     $readyNoConfirmRun = Invoke-Runner $readyNoConfirmPath $readyNoConfirmPaths.Evidence $readyNoConfirmPaths.Raw -AsDryRun
@@ -618,7 +618,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $readyNoConfirmPaths.Evidence)) 'rejected ready freeze still created an evidence root'
     $readyConfirmRecord = Write-ConfirmationRecordFixture 'confirmation-record-pass.json' $readyNoConfirmFreeze
     $readyReviewRecord = Write-ReviewRecordFixture 'ready-freeze-review-pass.json' $readyNoConfirmFreeze $readyConfirmRecord.Sha256
-    $readyWrongAuthFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256 -AuthId 'AUTH-E3-PHYS1API26-20260810-9999') $readyReviewRecord.Path $readyReviewRecord.Sha256
+    $readyWrongAuthFreeze = Add-ReviewBinding (Add-ConfirmationBinding $readyNoConfirmFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256 -AuthId 'AUTH-E3-PHYS1API26-20260815-9999') $readyReviewRecord.Path $readyReviewRecord.Sha256
     $readyWrongAuthPath = Write-JsonFixture 'freeze-ready-wrong-auth.json' $readyWrongAuthFreeze
     $readyWrongAuthPaths = New-CasePaths 'ready-wrong-auth-dryrun'
     $readyWrongAuthRun = Invoke-Runner $readyWrongAuthPath $readyWrongAuthPaths.Evidence $readyWrongAuthPaths.Raw -AsDryRun
@@ -635,7 +635,7 @@ try {
     Assert-True ($readyBoundRun.ExitCode -eq 0) "DryRun ready freeze with bound confirmation failed: $($readyBoundRun.Text)"
     $readyBoundRecord = Get-Content -LiteralPath (Join-Path $readyBoundPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True (-not $readyBoundRecord.is_evidence -and $readyBoundRecord.record_status -eq 'blocked' -and $readyBoundRecord.hdc_processes_started -eq 0) 'ready-bound DryRun non-evidence contract mismatch'
-    Assert-True ([string]$readyBoundRecord.machine_fresh_confirmation.status -eq 'pass' -and [string]$readyBoundRecord.machine_fresh_confirmation.authorization_id -eq 'AUTH-E3-PHYS1API26-20260810-0002' -and [string]$readyBoundRecord.machine_fresh_confirmation.record_sha256 -eq $readyConfirmRecord.Sha256 -and $null -eq $readyBoundRecord.machine_fresh_confirmation.PSObject.Properties['record_path']) 'sealed record machine_fresh_confirmation projection mismatch or leaked path'
+    Assert-True ([string]$readyBoundRecord.machine_fresh_confirmation.status -eq 'pass' -and [string]$readyBoundRecord.machine_fresh_confirmation.authorization_id -eq 'AUTH-E3-PHYS1API26-20260815-0005' -and [string]$readyBoundRecord.machine_fresh_confirmation.record_sha256 -eq $readyConfirmRecord.Sha256 -and $null -eq $readyBoundRecord.machine_fresh_confirmation.PSObject.Properties['record_path']) 'sealed record machine_fresh_confirmation projection mismatch or leaked path'
     Assert-True ([string]$readyBoundRecord.independent_review_record.status -eq 'pass' -and [string]$readyBoundRecord.independent_review_record.record_sha256 -eq $readyReviewRecord.Sha256 -and $null -eq $readyBoundRecord.independent_review_record.PSObject.Properties['record_path']) 'sealed record independent_review_record projection mismatch or leaked path'
     Assert-ManifestAndSeal $readyBoundPaths.Evidence
     Assert-ProjectionChain $readyBoundPaths.Evidence
@@ -646,7 +646,7 @@ try {
     Assert-True ($pendingBoundRun.ExitCode -eq 0) "blocked DryRun with pending confirmation was rejected: $($pendingBoundRun.Text)"
     # ADJ-20260810-0001 (C6): a blocked DryRun that declares status=pass is FULLY validated too;
     # pending is allowed and skipped, but a broken pass binding is never hidden by plan_status.
-    $blockedPassFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $blockedPassFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $blockedPassBound = Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256
     $blockedPassPath = Write-JsonFixture 'freeze-blocked-machine-pass.json' $blockedPassBound
     $blockedPassPaths = New-CasePaths 'blocked-machine-pass-dryrun'
@@ -733,14 +733,20 @@ try {
     $earlyReviewPath = Write-JsonFixture 'freeze-ready-early-review.json' $earlyReviewFreeze
     $earlyReviewPaths = New-CasePaths 'ready-early-review-dryrun'
     $earlyReviewRun = Invoke-Runner $earlyReviewPath $earlyReviewPaths.Evidence $earlyReviewPaths.Raw -AsDryRun
-    Assert-True ($earlyReviewRun.ExitCode -ne 0 -and $earlyReviewRun.Text -match 'machine confirmation ended_at') 'review record starting before the machine confirmation ended_at was not rejected'
+    # pwsh may wrap this fixed error phrase across a line boundary and insert ANSI SGR codes.
+    # Strip only bounded SGR sequences, then normalize the three newline encodings; never scan
+    # arbitrary output with an unbounded wildcard regex.
+    $earlyReviewTextPlain = [regex]::Replace($earlyReviewRun.Text, "$([char]27)\[[0-9;]*m", '')
+    $earlyReviewTextUnwrapped = $earlyReviewTextPlain.Replace("`r`n     | ", ' ').Replace("`n     | ", ' ').Replace("`r     | ", ' ')
+    $earlyReviewTextSingleLine = $earlyReviewTextUnwrapped.Replace("`r`n", ' ').Replace("`n", ' ').Replace("`r", ' ')
+    Assert-True ($earlyReviewRun.ExitCode -ne 0 -and $earlyReviewTextSingleLine -match 'machine confirmation ended_at') 'review record starting before the machine confirmation ended_at was not rejected'
     $loneReviewRecordPath = Write-JsonFixture 'ready-freeze-review-lone.json' ([ordered]@{
         schema_version = 1
         record_kind = 'e3-ready-freeze-review'
         is_evidence = $false
         exception = 'E3-PHYS-PREFLIGHT'
-        campaign_id = 'E3-PHYS-PREFLIGHT-20260810-0001'
-        evidence_id = 'EV-E3-PHYS1API26-20260810-0001'
+        campaign_id = 'E3-PHYS-PREFLIGHT-20260815-0005'
+        evidence_id = 'EV-E3-PHYS1API26-20260815-0005'
         code_sha = $readyNoConfirmFreeze.code_sha
         runner_sha256 = $readyNoConfirmFreeze.runner_sha256
         confirmation_contract_sha256 = Get-ConfirmationContractSha256 $readyNoConfirmFreeze
@@ -767,9 +773,9 @@ try {
     # frozen_at advanced), but the stable confirmation contract is byte-identical, so the
     # confirmation/review records bound on the blocked phase are consumable by the ready phase;
     # the time gate (started<=ended<=frozen_at) is checked against the FINAL ready freeze.
-    $twoPhaseBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $twoPhaseBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $twoPhaseBlockedFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:00+00:00'
-    $twoPhaseReadyFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260810-0001' 'E3-PHYS-PREFLIGHT-20260810-0001'
+    $twoPhaseReadyFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260815-0005' 'E3-PHYS-PREFLIGHT-20260815-0005'
     $twoPhaseReadyFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:10+00:00'
     Assert-True ((Get-ContractSha256 $twoPhaseBlockedFreeze) -ne (Get-ContractSha256 $twoPhaseReadyFreeze)) 'two-phase full freeze contract hashes must differ'
     Assert-True ((Get-ConfirmationContractSha256 $twoPhaseBlockedFreeze) -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze)) 'two-phase confirmation contract hashes must be identical'
@@ -777,7 +783,7 @@ try {
         schema_version = 1
         record_kind = 'target-binding-confirmation'
         is_evidence = $false
-        authorization_id = 'AUTH-E3-PHYS1API26-20260810-0002'
+        authorization_id = 'AUTH-E3-PHYS1API26-20260815-0005'
         exception = 'E3-PHYS-PREFLIGHT'
         campaign_id = $twoPhaseBlockedFreeze.campaign_id
         evidence_id = $twoPhaseBlockedFreeze.evidence_id
@@ -918,7 +924,8 @@ try {
     Assert-True ([string]$liveRecord.settings_revoke_mechanism -eq 'settings-app-info-force-stop' -and [string]$liveRecord.settings_vpn_page_policy -eq 'observation-only' -and [string]$liveRecord.destroy_terminal_policy -eq 'callback-or-strict-process-boundary') 'record did not project ADJ-20260807-0003 decision fields'
     Assert-True ([int]$liveRecord.process_absent_required_count -eq 2 -and [double]$liveRecord.process_absent_probe_spacing_seconds -eq 3) 'record did not project probe count/spacing'
     Assert-True ($liveRecord.scenarios[2].terminal_mode -eq 'callback-post-fd' -and $liveRecord.scenarios[6].terminal_mode -eq 'callback-post-fd') 'base S3/S7 did not prefer callback terminal mode'
-    Assert-True ($liveRecord.scenarios[4].terminal_mode -eq 'settings-app-info-force-stop' -and $liveRecord.scenarios[4].app_info_force_stop_capture.machine_verified -and $liveRecord.scenarios[4].settings_vpn_page_observation_only -and $liveRecord.scenarios[4].bundle_present_during_probe) 'base S5 force-stop flow fields mismatch'
+    Assert-True ($liveRecord.scenarios[4].terminal_mode -eq 'settings-app-info-force-stop' -and -not $liveRecord.scenarios[4].app_info_force_stop_capture.machine_verified -and $liveRecord.scenarios[4].app_info_force_stop_capture.observation_only -and $liveRecord.scenarios[4].settings_vpn_page_observation_only -and $liveRecord.scenarios[4].bundle_present_during_probe) 'base S5 force-stop flow fields mismatch'
+    Assert-True ([string]$liveRecord.scenarios[4].observation.operator_steps[-1].expected_action -eq '点击强行停止，并完成随后出现的确认（如有）') 'base S5 did not use the exact production force-stop operator action'
     Assert-True (@($liveRecord.scenarios[4].process_final_state_probes).Count -ge 2) 'base S5 did not record consecutive absent probes'
     Assert-True ($liveRecord.scenarios[2].clean_reactivation_proof -eq $true) 'base S3 clean reactivation proof not recorded from S5 fresh create'
     Assert-True ($liveRecord.scenario_aggregation.s3_clean_reactivation_proof -eq $true) 'aggregation s3_clean_reactivation_proof not true when S5 fresh create proves it'
@@ -1285,10 +1292,8 @@ try {
     Assert-True (-not $s7TermMissingFdRecord.scenarios[6].post_cleanup_capture -and -not $s7TermMissingFdRecord.scenarios[6].terminal_assessed) 'S7 FD_STILL_OPEN case still ran uninstall cleanup during scenario'
 
     Write-Host 'SELFTEST_PHASE=adj-s5-fd-still-open-with-capture-degraded-fail'
-    # S5 hard FD_STILL_OPEN fail must outrank capture degradation: the force-stop screenshot
-    # capture fails (capture degraded) in the same window that shows a post-destroy FD_STILL_OPEN.
-    # The scenario verdict stays fail instead of falling to force-stop-capture-degraded/blocked, and
-    # the final record overall/verdict must stay fail too (never downgraded to blocked by degradation).
+    # The S5 post-force capture is observation-only. A degraded artifact cannot override the
+    # independently decisive post-destroy FD_STILL_OPEN failure.
     $s5FdDegradedFixture = New-SimulationFixture
     $s5FdDegradedFixture.capture_failures = @('scenario-5-app-info-force-stop')
     $s5FdDegradedFixture.scenario_events.'5' = @(
@@ -1302,10 +1307,10 @@ try {
     $s5FdDegradedPath = Write-JsonFixture 'simulation-adj-s5-fd-still-open-degraded.json' $s5FdDegradedFixture
     $s5FdDegradedPaths = New-CasePaths 'adj-s5-fd-still-open-degraded'
     $s5FdDegradedRun = Invoke-Runner $liveFreezePath $s5FdDegradedPaths.Evidence $s5FdDegradedPaths.Raw -FixturePath $s5FdDegradedPath
-    Assert-True ($s5FdDegradedRun.ExitCode -eq 2) "S5 decisive capture loss did not invalidate: $($s5FdDegradedRun.Text)"
+    Assert-True ($s5FdDegradedRun.ExitCode -eq 0) "S5 observation-only capture loss crashed: $($s5FdDegradedRun.Text)"
     $s5FdDegradedRecord = Get-Content -LiteralPath (Join-Path $s5FdDegradedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
-    Assert-True ($s5FdDegradedRecord.overall -eq 'invalid' -and $s5FdDegradedRecord.scenarios[4].result -eq 'invalid' -and $s5FdDegradedRecord.scenarios[4].reason -match 'capture-not-collected') 'S5 decisive capture loss did not outrank functional evidence as protocol invalid'
-    Assert-True ($s5FdDegradedRecord.cleanup_result.verified_absent) 'S5 decisive capture invalid did not finish cleanup'
+    Assert-True ($s5FdDegradedRecord.overall -eq 'fail' -and $s5FdDegradedRecord.scenarios[4].result -eq 'fail' -and $s5FdDegradedRecord.scenarios[4].reason -eq 'FD_STILL_OPEN') 'S5 observation-only capture loss changed the functional failure'
+    Assert-True ($s5FdDegradedRecord.scenarios[4].app_info_force_stop_capture.status -eq 'degraded' -and $s5FdDegradedRecord.scenarios[4].app_info_force_stop_capture.observation_only) 'S5 degraded post-force artifact was not recorded as observation-only'
 
     Write-Host 'SELFTEST_PHASE=adj-s2-create-rejected-with-capture-degraded-fail'
     # A missing decisive after-Allow capture makes the protocol unverifiable and outranks functional evidence.
@@ -1380,8 +1385,7 @@ try {
 
     Write-Host 'SELFTEST_PHASE=adj-s5-vpn-page-not-required'
     # ADJ-20260808-0003: the Settings>VPN page is no longer a decisive step and is never asked
-    # of the operator. A capture failure there must never invalidate/block/pass S5; the decisive
-    # capture is scenario-5-app-info-force-stop, not the optional Settings>VPN observation.
+    # of the operator. A capture failure there must never invalidate/block/pass S5.
     $s5ObsOnlyFixture = New-SimulationFixture
     $s5ObsOnlyFixture.capture_failures = @('scenario-5-settings-vpn-page')
     $s5ObsOnlyPath = Write-JsonFixture 'simulation-adj-s5-vpn-page-not-required.json' $s5ObsOnlyFixture
@@ -1391,16 +1395,16 @@ try {
     $s5ObsOnlyRecord = Get-Content -LiteralPath (Join-Path $s5ObsOnlyPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($s5ObsOnlyRecord.scenarios[4].result -eq 'pass' -and $s5ObsOnlyRecord.scenarios[4].settings_vpn_page_capture.status -eq 'not-required') 'S5 optional Settings>VPN page changed the scenario result or recorded a decisive capture'
 
-    Write-Host 'SELFTEST_PHASE=adj-s5-force-stop-checkpoint-capture-required'
-    $s5DecisiveFixture = New-SimulationFixture
-    $s5DecisiveFixture.capture_failures = @('scenario-5-app-info-force-stop')
-    $s5DecisivePath = Write-JsonFixture 'simulation-adj-s5-force-stop-capture-required.json' $s5DecisiveFixture
-    $s5DecisivePaths = New-CasePaths 'adj-s5-force-stop-capture-required'
-    $s5DecisiveRun = Invoke-Runner $liveFreezePath $s5DecisivePaths.Evidence $s5DecisivePaths.Raw -FixturePath $s5DecisivePath
-    Assert-True ($s5DecisiveRun.ExitCode -eq 2) "S5 continued after its force-stop checkpoint capture failed: $($s5DecisiveRun.Text)"
-    $s5DecisiveRecord = Get-Content -LiteralPath (Join-Path $s5DecisivePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
-    Assert-True ($s5DecisiveRecord.record_status -eq 'invalidated' -and $s5DecisiveRecord.invalidated_step.step_index -eq 4) 'S5 force-stop capture failure did not invalidate at step 4'
-    Assert-True ($s5DecisiveRecord.cleanup_result.verified_absent) 'S5 force-stop checkpoint invalidation did not finish cleanup'
+    Write-Host 'SELFTEST_PHASE=adj-s5-force-stop-capture-observation-only'
+    $s5ObservationFixture = New-SimulationFixture
+    $s5ObservationFixture.capture_failures = @('scenario-5-app-info-force-stop')
+    $s5ObservationPath = Write-JsonFixture 'simulation-adj-s5-force-stop-capture-observation-only.json' $s5ObservationFixture
+    $s5ObservationPaths = New-CasePaths 'adj-s5-force-stop-capture-observation-only'
+    $s5ObservationRun = Invoke-Runner $liveFreezePath $s5ObservationPaths.Evidence $s5ObservationPaths.Raw -FixturePath $s5ObservationPath
+    Assert-True ($s5ObservationRun.ExitCode -eq 0) "S5 observation-only post-force capture changed the verdict: $($s5ObservationRun.Text)"
+    $s5ObservationRecord = Get-Content -LiteralPath (Join-Path $s5ObservationPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5ObservationRecord.scenarios[4].result -eq 'pass' -and $s5ObservationRecord.record_status -ne 'invalidated') 'S5 observation-only post-force capture invalidated the campaign'
+    Assert-True ($s5ObservationRecord.scenarios[4].app_info_force_stop_capture.status -eq 'degraded' -and $s5ObservationRecord.scenarios[4].app_info_force_stop_capture.observation_only) 'S5 observation-only degradation was not recorded'
 
     Write-Host 'SELFTEST_PHASE=adj-s7-final-destroy-fail-with-capture-degraded-fail'
     # S7 final destroy leaks the fd (FD_STILL_OPEN): fail must outrank the degraded final-state capture.
@@ -1425,12 +1429,8 @@ try {
     Assert-True ([string]$s7FdFailRecord.scenario_aggregation.overall -eq 'fail' -and [string]$s7FdFailRecord.overall -eq 'fail' -and [string]$s7FdFailRecord.verdict -eq 'fail') 'S7 final destroy fail degraded final overall/verdict downgraded to blocked'
 
     Write-Host 'SELFTEST_PHASE=adj-s5-force-stop-flow'
-    # Wrong-B / same-name effect fixture: the operator's force-stop produces NO A-side effect (A's
-    # <bundle>:vpn stays present), so the A process effect gate fails even though the layout gate
-    # matched (A/B share the same label). Under ADJ-20260808-0003 the settings-app-info profile does
-    # not carry an ExpectedBundle (A/B same name cannot manufacture a false pass): final A
-    # correctness is proven ONLY by force-stop -> A <bundle>:vpn absent while the A bundle stays
-    # present. A present-:vpn result here is scenario invalid, never a pass.
+    # The force-stop process effect remains decisive: a still-present A <bundle>:vpn is invalid
+    # even though the pre-action AppDetail gate matched.
     $s5MissingConfirmFixture = New-SimulationFixture
     $s5MissingConfirmFixture.operator.no_effect_steps = @('5.4')
     $s5MissingConfirmFixture.process_probe_override = [ordered]@{ '5' = @(
@@ -1445,6 +1445,16 @@ try {
     $s5MissingConfirmRecord = Get-Content -LiteralPath (Join-Path $s5MissingConfirmPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($s5MissingConfirmRecord.overall -eq 'invalid' -and $s5MissingConfirmRecord.scenarios[4].result -eq 'invalid') 'S5 without machine force-stop effect was not invalid'
     Assert-True ($s5MissingConfirmRecord.scenarios[4].reason -match 'process-state|absent|probe|present') 'S5 force-stop process-still-present reason mismatch'
+
+    Write-Host 'SELFTEST_PHASE=s5-post-force-page-change-observation-only'
+    $s5PageChangeFixture = New-SimulationFixture
+    $s5PageChangeFixture.layout_profiles['scenario-5-app-info-force-stop'] = 'wrong-page'
+    $s5PageChangePath = Write-JsonFixture 'simulation-s5-post-force-page-change.json' $s5PageChangeFixture
+    $s5PageChangePaths = New-CasePaths 's5-post-force-page-change'
+    $s5PageChangeRun = Invoke-Runner $liveFreezePath $s5PageChangePaths.Evidence $s5PageChangePaths.Raw -FixturePath $s5PageChangePath
+    Assert-True ($s5PageChangeRun.ExitCode -eq 0) "post-force page change invalidated S5: $($s5PageChangeRun.Text)"
+    $s5PageChangeRecord = Get-Content -LiteralPath (Join-Path $s5PageChangePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5PageChangeRecord.scenarios[4].result -eq 'pass' -and $s5PageChangeRecord.scenarios[4].process_absent_evidence.met -and $s5PageChangeRecord.scenarios[4].bundle_present_during_probe) 'post-force page shape changed the decisive process verdict'
 
     $s5BundleAbsentFixture = New-SimulationFixture
     $s5BundleAbsentFixture.process_probe_override = [ordered]@{ '5' = @([ordered]@{ pid = 'absent'; dump = 'absent' }) }
@@ -2275,29 +2285,83 @@ try {
     $fakeVpnAppRecord = Get-Content -LiteralPath (Join-Path $fakeVpnAppPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True ($fakeVpnAppRecord.overall -eq 'invalid' -and $fakeVpnAppRecord.scenarios[4].result -eq 'invalid') 'app page with only the word VPN was not invalidated'
 
-    Write-Host 'SELFTEST_PHASE=adj-0003-settings-app-info-positive-minimal'
-    # ADJ-20260808-0003 (C6): the settings-app-info profile drops the un-sampled app-info-structure
-    # id/key requirement and requires ONLY settings owner + exact app label + Force Stop control. A
-    # real attributes/children structure with GENERIC ids/keys (title/button1 — nothing containing
-    # app/application/force_stop) must therefore PASS the gate (it would have failed the old
-    # app-info-structure check). A correctness is still proven by the A process effect gate
-    # (force-stop -> A <bundle>:vpn absent + bundle present), never by a page structure field.
+    Write-Host 'SELFTEST_PHASE=s5-production-settings-app-info-positive'
+    # The committed fixture is an ancestor-preserving contraction of sealed production capture
+    # 0004. A/B remain under hidden Setting.Application; only the visible AppDetail subtree may match.
     $s5MinFixture = New-SimulationFixture
-    $s5MinFixture.layout_profiles['scenario-5-app-info'] = @(
-        [ordered]@{ attributes = [ordered]@{ bundleName = 'com.huawei.hmos.settings'; type = 'root'; id = ''; key = ''; text = '' }; children = @(
-            [ordered]@{ attributes = [ordered]@{ bundleName = ''; type = 'Text'; id = 'title'; key = 'title'; text = 'E3 Physical VPN Preflight' }; children = @() },
-            [ordered]@{ attributes = [ordered]@{ bundleName = ''; type = 'Button'; id = 'button1'; key = 'button1'; text = '强制停止' }; children = @() }
-        ) }
-    )
-    $s5MinPath = Write-JsonFixture 'simulation-adj-0003-settings-app-info-minimal.json' $s5MinFixture
-    $s5MinPaths = New-CasePaths 'adj-0003-settings-app-info-minimal'
+    $productionFixturePath = Join-Path $project 'tests\fixtures\settings-app-info-production-0004.json'
+    $s5MinFixture.layout_profiles['scenario-5-app-info'] = Get-Content -LiteralPath $productionFixturePath -Raw | ConvertFrom-Json -Depth 60
+    $hiddenApplication = @($s5MinFixture.layout_profiles['scenario-5-app-info'][0].children | Where-Object { $_.attributes.id -eq 'Setting.Application' })[0]
+    Assert-True ($null -ne $hiddenApplication -and [string]$hiddenApplication.attributes.visible -eq 'false' -and @($hiddenApplication.children).Count -eq 2) 'production fixture did not preserve the hidden Setting.Application ancestor for A/B labels'
+    $s5MinPath = Write-JsonFixture 'simulation-s5-production-settings-app-info.json' $s5MinFixture
+    $s5MinPaths = New-CasePaths 's5-production-settings-app-info'
     $s5MinRun = Invoke-Runner $liveFreezePath $s5MinPaths.Evidence $s5MinPaths.Raw -FixturePath $s5MinPath
     Assert-True ($s5MinRun.ExitCode -eq 0) "minimal settings-app-info layout failed the gate: $($s5MinRun.Text)"
     $s5MinRecord = Get-Content -LiteralPath (Join-Path $s5MinPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
-    Assert-True ($s5MinRecord.scenarios[4].result -eq 'pass' -and $s5MinRecord.scenarios[4].app_info_force_stop_capture.machine_verified) 'minimal settings-app-info layout did not pass S5'
+    Assert-True ($s5MinRecord.scenarios[4].result -eq 'pass' -and -not $s5MinRecord.scenarios[4].app_info_force_stop_capture.machine_verified -and $s5MinRecord.scenarios[4].app_info_force_stop_capture.observation_only) 'production settings-app-info layout did not pass S5 with an observation-only post-force capture'
     # A correctness is proven by the process effect gate: :vpn absent (met) while the A bundle stays present.
     Assert-True ($s5MinRecord.scenarios[4].process_absent_evidence.met -and $s5MinRecord.scenarios[4].bundle_present_during_probe) 'minimal settings-app-info A-correctness process effect gate not met'
     Assert-True ($null -eq $s5MinRecord.PSObject.Properties['scenario_invalid'] -and $s5MinRecord.record_status -ne 'invalidated') 'minimal settings-app-info layout was invalidated instead of matching'
+
+    Write-Host 'SELFTEST_PHASE=s5-production-expected-label-mismatch'
+    $s5MismatchFixture = New-SimulationFixture
+    $s5MismatchLayout = Copy-JsonObject (Get-Content -LiteralPath $productionFixturePath -Raw | ConvertFrom-Json -Depth 60)
+    $s5MismatchDetail = @($s5MismatchLayout[0].children | Where-Object { $_.attributes.id -eq 'Setting.AppDetail' })[0]
+    $s5MismatchDetail.children[0].attributes.text = 'E3 Preflight B'
+    $s5MismatchFixture.layout_profiles['scenario-5-app-info'] = $s5MismatchLayout
+    $s5MismatchPath = Write-JsonFixture 'simulation-s5-production-expected-label-mismatch.json' $s5MismatchFixture
+    $s5MismatchPaths = New-CasePaths 's5-production-expected-label-mismatch'
+    $s5MismatchRun = Invoke-Runner $liveFreezePath $s5MismatchPaths.Evidence $s5MismatchPaths.Raw -FixturePath $s5MismatchPath
+    Assert-True ($s5MismatchRun.ExitCode -eq 2) "production-shaped B detail passed the expected A gate: $($s5MismatchRun.Text)"
+    $s5MismatchRecord = Get-Content -LiteralPath (Join-Path $s5MismatchPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5MismatchRecord.overall -eq 'invalid' -and $s5MismatchRecord.scenarios[4].reason -match 'app-label|layout-mismatch') 'outside A pollution satisfied a B AppDetail mismatch'
+
+    Write-Host 'SELFTEST_PHASE=s5-production-near-text-negative'
+    $s5NearFixture = New-SimulationFixture
+    $s5NearLayout = Copy-JsonObject (Get-Content -LiteralPath $productionFixturePath -Raw | ConvertFrom-Json -Depth 60)
+    $s5NearDetail = @($s5NearLayout[0].children | Where-Object { $_.attributes.id -eq 'Setting.AppDetail' })[0]
+    $s5NearDetail.children[0].attributes.text = 'E3 Preflight A preview'
+    $s5NearDetail.children[1].attributes.text = '强行停止应用'
+    $s5NearFixture.layout_profiles['scenario-5-app-info'] = $s5NearLayout
+    $s5NearPath = Write-JsonFixture 'simulation-s5-production-near-text-negative.json' $s5NearFixture
+    $s5NearPaths = New-CasePaths 's5-production-near-text-negative'
+    $s5NearRun = Invoke-Runner $liveFreezePath $s5NearPaths.Evidence $s5NearPaths.Raw -FixturePath $s5NearPath
+    Assert-True ($s5NearRun.ExitCode -eq 2) "near-match label/control passed the strict AppDetail gate: $($s5NearRun.Text)"
+    $s5NearRecord = Get-Content -LiteralPath (Join-Path $s5NearPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5NearRecord.overall -eq 'invalid' -and $s5NearRecord.scenarios[4].reason -match 'layout-mismatch') 'near-match AppDetail text was not rejected'
+
+    Write-Host 'SELFTEST_PHASE=s5-hidden-ancestor-app-detail-filter'
+    $s5HiddenAndVisibleFixture = New-SimulationFixture
+    $s5HiddenAndVisibleLayout = Copy-JsonObject (Get-Content -LiteralPath $productionFixturePath -Raw | ConvertFrom-Json -Depth 60)
+    $s5VisibleDetail = @($s5HiddenAndVisibleLayout[0].children | Where-Object { $_.attributes.id -eq 'Setting.AppDetail' })[0]
+    $s5HiddenDuplicate = Copy-JsonObject $s5VisibleDetail
+    $s5HiddenWrapper = [pscustomobject]([ordered]@{
+        attributes = [ordered]@{ bundleName = ''; type = 'Column'; id = 'hidden-detail-ancestor'; key = 'hidden-detail-ancestor'; text = ''; visible = 'false' }
+        children = @($s5HiddenDuplicate)
+    })
+    $s5HiddenAndVisibleLayout[0].children = @($s5HiddenAndVisibleLayout[0].children) + @($s5HiddenWrapper)
+    $s5HiddenAndVisibleFixture.layout_profiles['scenario-5-app-info'] = $s5HiddenAndVisibleLayout
+    $s5HiddenAndVisiblePath = Write-JsonFixture 'simulation-s5-hidden-and-visible-app-detail.json' $s5HiddenAndVisibleFixture
+    $s5HiddenAndVisiblePaths = New-CasePaths 's5-hidden-and-visible-app-detail'
+    $s5HiddenAndVisibleRun = Invoke-Runner $liveFreezePath $s5HiddenAndVisiblePaths.Evidence $s5HiddenAndVisiblePaths.Raw -FixturePath $s5HiddenAndVisiblePath
+    Assert-True ($s5HiddenAndVisibleRun.ExitCode -eq 0) "hidden-ancestor AppDetail polluted the unique visible set: $($s5HiddenAndVisibleRun.Text)"
+
+    $s5HiddenOnlyFixture = New-SimulationFixture
+    $s5HiddenOnlyLayout = Copy-JsonObject (Get-Content -LiteralPath $productionFixturePath -Raw | ConvertFrom-Json -Depth 60)
+    $s5HiddenOnlyRoot = $s5HiddenOnlyLayout[0]
+    $s5HiddenOnlyDetail = Copy-JsonObject (@($s5HiddenOnlyRoot.children | Where-Object { $_.attributes.id -eq 'Setting.AppDetail' })[0])
+    $s5HiddenOnlyWrapper = [pscustomobject]([ordered]@{
+        attributes = [ordered]@{ bundleName = ''; type = 'Column'; id = 'hidden-detail-ancestor'; key = 'hidden-detail-ancestor'; text = ''; visible = 'false' }
+        children = @($s5HiddenOnlyDetail)
+    })
+    $s5HiddenOnlyRoot.children = @($s5HiddenOnlyRoot.children | Where-Object { $_.attributes.id -ne 'Setting.AppDetail' }) + @($s5HiddenOnlyWrapper)
+    $s5HiddenOnlyFixture.layout_profiles['scenario-5-app-info'] = $s5HiddenOnlyLayout
+    $s5HiddenOnlyPath = Write-JsonFixture 'simulation-s5-hidden-only-app-detail.json' $s5HiddenOnlyFixture
+    $s5HiddenOnlyPaths = New-CasePaths 's5-hidden-only-app-detail'
+    $s5HiddenOnlyRun = Invoke-Runner $liveFreezePath $s5HiddenOnlyPaths.Evidence $s5HiddenOnlyPaths.Raw -FixturePath $s5HiddenOnlyPath
+    Assert-True ($s5HiddenOnlyRun.ExitCode -eq 2) "hidden-only AppDetail passed the visible gate: $($s5HiddenOnlyRun.Text)"
+    $s5HiddenOnlyRecord = Get-Content -LiteralPath (Join-Path $s5HiddenOnlyPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s5HiddenOnlyRecord.overall -eq 'invalid' -and $s5HiddenOnlyRecord.scenarios[4].reason -match 'layout-mismatch') 'hidden-only AppDetail was not rejected as a layout mismatch'
 
     Write-Host 'SELFTEST_PHASE=adj-0003-infra-capture-blocked'
     # ADJ-20260808-0003 E: a ScreenCap/DumpLayout/Receive exit 124/125 / timeout must propagate

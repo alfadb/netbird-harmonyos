@@ -1,10 +1,12 @@
 # R0 任务章程
 
-最后核验：2026-08-09（仅表示文档状态核验）
+最后核验：2026-08-15（仅表示文档状态核验）
 
 本文是 `netbird-harmonyos` 的 R0 唯一决策源。路线图继续定义阶段顺序和门语义；涉及 R0 状态、首目标候选、版本、范围、阈值、责任、例外和未满足项时，以本文为准。
 
 ## 状态
+
+> **当前授权覆盖（2026-08-15 · 0005）**：本文其余标为“当前（2026-08-10 · 0002）”的内容现均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260815-0005`](evidence/e3-physical-preflight-authorization-2026-08-15-0005.md)，候选 pair `E3-PHYS-PREFLIGHT-20260815-0005` / `EV-E3-PHYS1API26-20260815-0005`，attempt initial / retry N/A，`plan_status: authorized-awaiting-linux-ready-freeze`。0004 sealed invalid 已消费且不得复用；0005 采用 production-layout S5 修复，须在 commit/push 后按 13 门冻结实际 HEAD。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |

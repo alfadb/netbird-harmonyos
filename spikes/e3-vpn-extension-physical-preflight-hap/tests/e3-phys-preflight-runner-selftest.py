@@ -49,11 +49,12 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(HERE)
 RUNNER_SRC = os.path.join(PROJECT, 'e3-phys-preflight-campaign.py')
+PRODUCTION_APP_INFO_FIXTURE = os.path.join(HERE, 'fixtures', 'settings-app-info-production-0004.json')
 
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0004'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0005'
 OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260810-0002'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260815-0004'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260815-0004'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260815-0005'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260815-0005'
 BUNDLE_A = 'cn.alfadb.netbird.e3physvpna'
 BUNDLE_B = 'cn.alfadb.netbird.e3physvpnb'
 MODEL = 'PLA-AL10'
@@ -1639,7 +1640,10 @@ class TestLiveSimulationSevenScenarios(SelftestBase):
         self.assertEqual(s5['settings_reallow_path']['actual'], 'direct-system-activation')
         self.assertEqual(s5['settings_reallow_path']['policy'], 'observation-only')
         self.assertEqual(s5['terminal_mode'], 'settings-app-info-force-stop')
-        self.assertIs(s5['app_info_force_stop_capture']['machine_verified'], True)
+        self.assertIs(s5['app_info_force_stop_capture']['machine_verified'], False)
+        self.assertIs(s5['app_info_force_stop_capture']['observation_only'], True)
+        self.assertEqual(s5['observation']['operator_steps'][-1]['expected_action'],
+                         '点击强行停止，并完成随后出现的确认（如有）')
         self.assertIs(s5['settings_vpn_page_observation_only'], True)
         self.assertIs(s5['bundle_present_during_probe'], True)
         self.assertGreaterEqual(len(s5['process_final_state_probes']), 2)
@@ -2413,11 +2417,10 @@ class TestU9bSkeletons(SelftestBase):
                 self.assertIs(s['terminal_assessed'], False)
 
     def test_capture_degraded_decisive_negatives(self):
-        """PS L1750-2200 capture-degraded decisive-capture negatives: S2
-        after-allow, S4 authorization, S5 force-stop, S6 conflict, S7
-        final-state capture loss invalidates; S7 final destroy fail outranks
-        degradation."""
-        # S5 hard FD_STILL_OPEN fail outranks capture degradation.
+        """PS L1750-2200 capture policy: S5 post-force capture is
+        observation-only; S2 after-allow, S4 authorization, S6 conflict and
+        S7 final-state retain their existing decisive semantics."""
+        # S5 hard FD_STILL_OPEN remains fail even when its evidence-only capture degrades.
         fixture = make_simulation_fixture()
         fixture['capture_failures'] = ['scenario-5-app-info-force-stop']
         fixture['scenario_events']['5'] = [
@@ -2429,13 +2432,14 @@ class TestU9bSkeletons(SelftestBase):
             {'offset_seconds': 9, 'text': '<DEVICE_OBSERVED_AT> VPN_FD_SNAPSHOT|requestId=a5|phase=post-destroy-resolved|open=true|marker=FD_STILL_OPEN'},
         ]
         proc, ev, raw = self._run_live(fixture, 'adj-s5-fd-still-open-degraded')
-        self.assertEqual(proc.returncode, 2, 'S5 decisive capture loss did not invalidate:\n%s' % (
+        self.assertEqual(proc.returncode, 0, 'S5 observation-only capture loss crashed:\n%s' % (
             proc.stdout + proc.stderr))
         record = self._record(ev)
-        self.assertEqual(record['overall'], 'invalid')
-        self.assertEqual(record['scenarios'][4]['result'], 'invalid')
-        self.assertRegex(record['scenarios'][4]['reason'], r'capture-not-collected')
-        self.assertIs(record['cleanup_result']['verified_absent'], True)
+        self.assertEqual(record['overall'], 'fail')
+        self.assertEqual(record['scenarios'][4]['result'], 'fail')
+        self.assertEqual(record['scenarios'][4]['reason'], 'FD_STILL_OPEN')
+        self.assertEqual(record['scenarios'][4]['app_info_force_stop_capture']['status'], 'degraded')
+        self.assertIs(record['scenarios'][4]['app_info_force_stop_capture']['observation_only'], True)
         # S2 missing decisive after-Allow capture outranks functional evidence.
         fixture2 = make_simulation_fixture()
         fixture2['capture_failures'] = ['scenario-2-after-allow']
@@ -2522,16 +2526,17 @@ class TestU9bSkeletons(SelftestBase):
         record7 = self._record(ev7)
         self.assertEqual(record7['scenarios'][4]['result'], 'pass')
         self.assertEqual(record7['scenarios'][4]['settings_vpn_page_capture']['status'], 'not-required')
-        # S5 force-stop checkpoint capture is required (invalidates at step 4).
+        # S5 post-force capture is observation-only and never decides the campaign.
         fixture8 = make_simulation_fixture()
         fixture8['capture_failures'] = ['scenario-5-app-info-force-stop']
-        proc8, ev8, raw8 = self._run_live(fixture8, 'adj-s5-force-stop-capture-required')
-        self.assertEqual(proc8.returncode, 2, 'S5 continued after its force-stop capture failed:\n%s' % (
+        proc8, ev8, raw8 = self._run_live(fixture8, 'adj-s5-force-stop-capture-observation-only')
+        self.assertEqual(proc8.returncode, 0, 'S5 observation-only capture loss changed the verdict:\n%s' % (
             proc8.stdout + proc8.stderr))
         record8 = self._record(ev8)
-        self.assertEqual(record8['record_status'], 'invalidated')
-        self.assertEqual(record8['invalidated_step']['step_index'], 4)
-        self.assertIs(record8['cleanup_result']['verified_absent'], True)
+        self.assertEqual(record8['scenarios'][4]['result'], 'pass')
+        self.assertEqual(record8['scenarios'][4]['app_info_force_stop_capture']['status'], 'degraded')
+        self.assertIs(record8['scenarios'][4]['app_info_force_stop_capture']['observation_only'], True)
+        self.assertNotEqual(record8['record_status'], 'invalidated')
         # S7 final destroy fail outranks the degraded final-state capture.
         fixture9 = make_simulation_fixture()
         fixture9['capture_failures'] = ['scenario-7-final-state']
@@ -2560,9 +2565,8 @@ class TestU9bSkeletons(SelftestBase):
         self.assertEqual(record9['verdict'], 'fail')
 
     def test_adj_s5_force_stop_flow(self):
-        """PS L2200-2400 adj-s5-force-stop-flow: wrong-B/same-name effect,
-        bundle-absent, no-fresh-create, pure-missing, override garbage and
-        failure, vpn-page-optional-layout-irrelevant."""
+        """PS L2200-2400 S5 force-stop flow: process effect remains
+        decisive while post-force page shape and optional VPN layout do not."""
         # Force-stop produces NO A-side effect: A <bundle>:vpn stays present.
         fixture = make_simulation_fixture()
         fixture['operator']['no_effect_steps'] = ['5.4']
@@ -2578,6 +2582,16 @@ class TestU9bSkeletons(SelftestBase):
         self.assertEqual(record['overall'], 'invalid')
         self.assertEqual(record['scenarios'][4]['result'], 'invalid')
         self.assertRegex(record['scenarios'][4]['reason'], r'process-state|absent|probe|present')
+        # A post-force page transition cannot invalidate when the process effect passes.
+        changed_page = make_simulation_fixture()
+        changed_page['layout_profiles']['scenario-5-app-info-force-stop'] = 'wrong-page'
+        changed_proc, changed_ev, changed_raw = self._run_live(changed_page, 's5-post-force-page-change')
+        self.assertEqual(changed_proc.returncode, 0, 'post-force page change invalidated S5:\n%s' % (
+            changed_proc.stdout + changed_proc.stderr))
+        changed_record = self._record(changed_ev)
+        self.assertEqual(changed_record['scenarios'][4]['result'], 'pass')
+        self.assertIs(changed_record['scenarios'][4]['process_absent_evidence']['met'], True)
+        self.assertIs(changed_record['scenarios'][4]['bundle_present_during_probe'], True)
         # Bundle absent during probes: non-pass BundleDump stays blocked.
         fixture2 = make_simulation_fixture()
         fixture2['process_probe_override'] = {'5': [{'pid': 'absent', 'dump': 'absent'}]}
@@ -3388,16 +3402,24 @@ class TestU9bSkeletons(SelftestBase):
         record2 = self._record(ev2)
         self.assertEqual(record2['overall'], 'invalid')
         self.assertEqual(record2['scenarios'][4]['result'], 'invalid')
-        # Minimal settings-app-info with generic ids/keys passes on the process effect gate.
+        # Minimal production-shaped settings-app-info passes on the process effect gate.
         fixture3 = make_simulation_fixture()
         fixture3['layout_profiles']['scenario-5-app-info'] = [
             {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
-                            'id': '', 'key': '', 'text': ''},
+                            'id': '', 'key': '', 'text': '', 'visible': 'true'},
              'children': [
-                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                 'text': 'E3 Preflight A'}, 'children': []},
-                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
-                                 'text': '强制停止'}, 'children': []},
+                 {'attributes': {'bundleName': '', 'type': 'NavDestination',
+                                 'id': 'Setting.AppDetail', 'key': 'Setting.AppDetail',
+                                 'text': '', 'visible': 'true'},
+                  'children': [
+                      {'attributes': {'bundleName': '', 'type': 'Text',
+                                      'id': 'Setting.AppDetail.title_id',
+                                      'key': 'Setting.AppDetail.title_id',
+                                      'text': 'E3 Preflight A', 'visible': 'true'}, 'children': []},
+                      {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1',
+                                      'key': 'button1', 'text': '强行停止',
+                                      'visible': 'true'}, 'children': []},
+                  ]},
              ]},
         ]
         proc3, ev3, raw3 = self._run_live(fixture3, 'adj-0003-settings-app-info-minimal')
@@ -3406,7 +3428,8 @@ class TestU9bSkeletons(SelftestBase):
         record3 = self._record(ev3)
         s5 = record3['scenarios'][4]
         self.assertEqual(s5['result'], 'pass')
-        self.assertIs(s5['app_info_force_stop_capture']['machine_verified'], True)
+        self.assertIs(s5['app_info_force_stop_capture']['machine_verified'], False)
+        self.assertIs(s5['app_info_force_stop_capture']['observation_only'], True)
         self.assertIs(s5['process_absent_evidence']['met'], True)
         self.assertIs(s5['bundle_present_during_probe'], True)
         self.assertNotIn('scenario_invalid', record3)
@@ -3420,12 +3443,17 @@ class TestU9bSkeletons(SelftestBase):
         fixture = make_simulation_fixture()
         fixture['layout_profiles']['scenario-5-app-info'] = [
             {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
-                            'id': '', 'key': '', 'text': ''},
+                            'id': '', 'key': '', 'text': '', 'visible': 'true'},
              'children': [
-                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                 'text': 'E3 Preflight B'}, 'children': []},
-                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
-                                 'text': '强制停止'}, 'children': []},
+                 {'attributes': {'bundleName': '', 'type': 'NavDestination',
+                                 'id': 'Setting.AppDetail', 'key': 'Setting.AppDetail',
+                                 'text': '', 'visible': 'true'},
+                  'children': [
+                      {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                      'text': 'E3 Preflight B', 'visible': 'true'}, 'children': []},
+                      {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                      'text': '强行停止', 'visible': 'true'}, 'children': []},
+                  ]},
              ]},
         ]
         proc, ev, raw = self._run_live(fixture, 'adj-0003-app-label-a-shows-b')
@@ -3446,12 +3474,17 @@ class TestU9bSkeletons(SelftestBase):
         def assess(text, expected_bundle):
             layout = [
                 {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
-                                'id': '', 'key': '', 'text': ''},
+                                'id': '', 'key': '', 'text': '', 'visible': 'true'},
                  'children': [
-                     {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                     'text': text}, 'children': []},
-                     {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
-                                     'text': '强制停止'}, 'children': []},
+                     {'attributes': {'bundleName': '', 'type': 'NavDestination',
+                                     'id': 'Setting.AppDetail', 'key': 'Setting.AppDetail',
+                                     'text': '', 'visible': 'true'},
+                      'children': [
+                          {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
+                                          'text': text, 'visible': 'true'}, 'children': []},
+                          {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
+                                          'text': '强制停止', 'visible': 'true'}, 'children': []},
+                      ]},
                  ]},
             ]
             return runner_mod.test_captured_layout_profile(
@@ -3465,43 +3498,154 @@ class TestU9bSkeletons(SelftestBase):
         self.assertEqual(assess('E3 Preflight A', BUNDLE_A)['status'], 'pass')
         self.assertEqual(assess('E3 Preflight B', BUNDLE_B)['status'], 'pass')
 
-    def test_adj_0003_app_label_historical_compat(self):
-        """settings-app-info app-label historical compatibility: the
-        undifferentiated "E3 Physical VPN Preflight" display name still
-        passes the S5 app-label gate and both bundle profiles."""
-        fixture = make_simulation_fixture()
-        fixture['layout_profiles']['scenario-5-app-info'] = [
-            {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
-                            'id': '', 'key': '', 'text': ''},
-             'children': [
-                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                 'text': 'E3 Physical VPN Preflight'}, 'children': []},
-                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
-                                 'text': '强制停止'}, 'children': []},
-             ]},
+    def test_s5_production_app_info_subtree_matcher(self):
+        """Production-derived S5 shape and adversarial subtree/language cases."""
+        with open(PRODUCTION_APP_INFO_FIXTURE, encoding='utf-8') as f:
+            production_layout = json.load(f)
+        hidden_application = next(
+            node for node in production_layout[0]['children']
+            if node['attributes']['id'] == 'Setting.Application'
+        )
+        self.assertEqual(hidden_application['attributes']['visible'], 'false')
+        self.assertEqual(
+            [child['attributes']['text'] for child in hidden_application['children']],
+            ['E3 Preflight A', 'E3 Preflight B'],
+        )
+        production_facts = runner_mod.get_layout_facts(production_layout)
+        production_text = '\n'.join(production_facts)
+        self.assertIn('attributes.id=Setting.Application', production_text)
+        self.assertIn('attributes.visible=false', production_text)
+        self.assertNotIn('attributes.id=Setting.Application.ApplicationTab\n', production_text + '\n')
+        self.assertEqual(runner_mod.test_captured_layout_profile(
+            production_facts, 'settings-app-info', BUNDLE_A)['status'], 'pass')
+        self.assertEqual(runner_mod.test_captured_layout_profile(
+            production_facts, 'settings-app-info', BUNDLE_B)['status'], 'mismatch')
+
+        def node(node_type, node_id='', text='', visible='true', children=None, bundle=''):
+            return {
+                'attributes': {
+                    'bundleName': bundle, 'type': node_type, 'id': node_id,
+                    'key': node_id, 'text': text, 'visible': visible,
+                },
+                'children': list(children or []),
+            }
+
+        def assess(label='E3 Preflight A', control_text='强行停止', control_id='',
+                   detail_visible='true', control_visible='true', outside=None):
+            detail = node('NavDestination', 'Setting.AppDetail', visible=detail_visible, children=[
+                node('Text', 'Setting.AppDetail.title_id', label),
+                node('Button', control_id, control_text, visible=control_visible),
+            ])
+            layout = [node('root', visible='true', bundle='com.huawei.hmos.settings',
+                           children=list(outside or []) + [detail])]
+            return runner_mod.test_captured_layout_profile(
+                runner_mod.get_layout_facts(layout), 'settings-app-info', BUNDLE_A)
+
+        for text in ('强行停止', '强制停止', 'Force Stop', '  FORCE   STOP  '):
+            with self.subTest(force_stop_text=text):
+                self.assertEqual(assess(control_text=text)['status'], 'pass')
+        self.assertEqual(assess(control_text='', control_id='force_stop_button')['status'], 'pass')
+        self.assertEqual(assess(label='E3 Physical VPN Preflight')['status'], 'mismatch')
+
+        for text in ('强行停止应用', '强制停止后', 'Force stopping', 'Force stop help', 'force-stop'):
+            with self.subTest(unrelated_text=text):
+                result = assess(control_text=text)
+                self.assertEqual(result['status'], 'mismatch')
+                self.assertIn('force-stop-control', result['reason'])
+
+        outside_pollution = [
+            node('Text', 'Setting.Application.SearchResult.title', 'E3 Preflight A'),
+            node('Button', 'search-result-action', '强行停止'),
+            node('Text', 'Setting.Application.ApplicationTab.B.title', 'E3 Preflight B'),
+            node('Text', 'QuickBackText', 'E3 Physical VPN Preflight', bundle='com.ohos.sceneboard'),
         ]
-        proc, ev, raw = self._run_live(fixture, 'adj-0003-app-label-historical')
-        self.assertEqual(proc.returncode, 0, 'historical "E3 Physical VPN Preflight" label failed the S5 gate:\n%s' % (
-            proc.stdout + proc.stderr))
-        record = self._record(ev)
-        self.assertEqual(record['scenarios'][4]['result'], 'pass')
-        self.assertNotIn('scenario_invalid', record)
-        self.assertNotEqual(record['record_status'], 'invalidated')
-        # Both bundle profiles accept the historical undifferentiated name.
-        facts = runner_mod.get_layout_facts([
-            {'attributes': {'bundleName': 'com.huawei.hmos.settings', 'type': 'root',
-                            'id': '', 'key': '', 'text': ''},
-             'children': [
-                 {'attributes': {'bundleName': '', 'type': 'Text', 'id': 'title', 'key': 'title',
-                                 'text': 'E3 Physical VPN Preflight'}, 'children': []},
-                 {'attributes': {'bundleName': '', 'type': 'Button', 'id': 'button1', 'key': 'button1',
-                                 'text': '强制停止'}, 'children': []},
-             ]},
+        polluted = assess(label='Unrelated App', control_text='', outside=outside_pollution)
+        self.assertEqual(polluted['status'], 'mismatch')
+        self.assertIn('app-label', polluted['reason'])
+        self.assertIn('force-stop-control', polluted['reason'])
+
+        force_outside = assess(control_text='', outside=[node('Button', text='强制停止')])
+        self.assertEqual(force_outside['status'], 'mismatch')
+        self.assertIn('force-stop-control', force_outside['reason'])
+
+        search_only = [node('root', bundle='com.huawei.hmos.settings', children=[
+            node('Text', 'Setting.Application.SearchResult.title', 'E3 Preflight A'),
+            node('Button', text='强行停止'),
+        ])]
+        search_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(search_only), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(search_result['status'], 'mismatch')
+        self.assertIn('app-detail-structure', search_result['reason'])
+
+        cross_root_detail = node('NavDestination', 'Setting.AppDetail', children=[
+            node('Text', 'Setting.AppDetail.title_id', 'E3 Preflight A'),
+            node('Button', text='强行停止'),
         ])
-        self.assertEqual(runner_mod.test_captured_layout_profile(
-            facts, 'settings-app-info', BUNDLE_A)['status'], 'pass')
-        self.assertEqual(runner_mod.test_captured_layout_profile(
-            facts, 'settings-app-info', BUNDLE_B)['status'], 'pass')
+        cross_root = [
+            node('root', bundle='com.huawei.hmos.settings'),
+            node('WindowScene', bundle='com.ohos.sceneboard', children=[cross_root_detail]),
+        ]
+        cross_root_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(cross_root), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(cross_root_result['status'], 'mismatch')
+        self.assertIn('app-detail-structure', cross_root_result['reason'])
+
+        duplicate_detail = [node('root', bundle='com.huawei.hmos.settings', children=[
+            node('NavDestination', 'Setting.AppDetail', children=[
+                node('Text', text='E3 Preflight A'), node('Button', text='强行停止')]),
+            node('NavDestination', 'Setting.AppDetail', children=[
+                node('Text', text='E3 Preflight A'), node('Button', text='强行停止')]),
+        ])]
+        duplicate_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(duplicate_detail), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(duplicate_result['status'], 'mismatch')
+        self.assertIn('app-detail-structure', duplicate_result['reason'])
+
+        self.assertEqual(assess(detail_visible='false')['status'], 'mismatch')
+        missing_visible_layout = [node('root', bundle='com.huawei.hmos.settings', children=[
+            node('NavDestination', 'Setting.AppDetail', children=[
+                node('Text', text='E3 Preflight A'), node('Button', text='强行停止')]),
+        ])]
+        missing_visible_layout[0]['children'][0]['attributes'].pop('visible')
+        missing_visible = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(missing_visible_layout), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(missing_visible['status'], 'mismatch')
+        self.assertIn('app-detail-structure', missing_visible['reason'])
+        hidden_control = assess(control_visible='false')
+        self.assertEqual(hidden_control['status'], 'mismatch')
+        self.assertIn('force-stop-control', hidden_control['reason'])
+        hidden_branch = [node('root', bundle='com.huawei.hmos.settings', children=[
+            node('NavDestination', 'Setting.AppDetail', children=[
+                node('Text', text='E3 Preflight A'),
+                node('Column', visible='false', children=[node('Button', text='强行停止')]),
+            ]),
+        ])]
+        hidden_branch_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(hidden_branch), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(hidden_branch_result['status'], 'mismatch')
+        self.assertIn('force-stop-control', hidden_branch_result['reason'])
+
+        hidden_detail = node('NavDestination', 'Setting.AppDetail', visible='true', children=[
+            node('Text', text='E3 Preflight A'), node('Button', text='强行停止'),
+        ])
+        visible_detail = node('NavDestination', 'Setting.AppDetail', visible='true', children=[
+            node('Text', text='E3 Preflight A'), node('Button', text='强行停止'),
+        ])
+        hidden_and_visible = [node('root', visible='true', bundle='com.huawei.hmos.settings', children=[
+            node('Column', 'hidden-detail-ancestor', visible='false', children=[hidden_detail]),
+            visible_detail,
+        ])]
+        hidden_and_visible_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(hidden_and_visible), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(hidden_and_visible_result['status'], 'pass')
+
+        hidden_only = [node('root', visible='true', bundle='com.huawei.hmos.settings', children=[
+            node('Column', 'hidden-detail-ancestor', visible='false', children=[hidden_detail]),
+        ])]
+        hidden_only_result = runner_mod.test_captured_layout_profile(
+            runner_mod.get_layout_facts(hidden_only), 'settings-app-info', BUNDLE_A)
+        self.assertEqual(hidden_only_result['status'], 'mismatch')
+        self.assertIn('app-detail-structure', hidden_only_result['reason'])
 
     def test_adj_0003_infra_capture(self):
         """PS L4700-4800 adj-0003-infra-capture-blocked /

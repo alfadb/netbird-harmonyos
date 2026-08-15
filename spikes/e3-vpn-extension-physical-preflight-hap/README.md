@@ -226,7 +226,7 @@ A/B 指两个测试 App。**当前规则**（`mechanical-action-only-machine-ver
 2. 场景2：按提示点 A Start → 等机器确认授权页 → 按提示点 Allow → 等机器判定。
 3. 场景3：按提示点已激活 A 的 Stop → 等机器判定（额外 Start / `UI_STOP_SKIPPED` / 错误 requestId → invalid）。
 4. 场景4：按提示点 B Start → 等机器确认授权页 → 按提示点 Deny → 等完整窗口机器判定（无人工 DENY-SCREEN）。
-5. 场景5：按原子步骤依次：A Start（可选 Allow）→ 打开 A 应用信息页 → 点强制停止；每步回车后机器 capture/layout/`:vpn` 判定（Settings>VPN 页不再询问，`not-required`）。
+5. 场景5：按原子步骤依次：A Start（可选 Allow）→ 打开 A 应用信息页 → `点击强行停止，并完成随后出现的确认（如有）`；每步回车后机器判定（Settings>VPN 页不再询问，`not-required`）。打开应用信息页后的 capture 是严格 `Setting.AppDetail` 结构门；点击后的 capture 仅保留为 observation-only 证据，页面形状或一般 capture 退化不独立判废；连续 HiLog stream 已 degraded 仍按全局安全规则 blocked。runner 不自动点击、不猜确认框结构；最终只由既有连续 `<bundle>:vpn` absent + bundle present 后置门确认撤销效果。
 6. 场景6：按提示点 A Start（可选 reauthorization Allow），再点 B Start；机器判定唯一 A `CREATE_ACCEPTED` + 唯一 B `CREATE_REJECTED(2203002)`（无人工双 active 三态；A 纯授权层拒绝 `authorization-outcome-unclassified` blocked）。
 7. 场景7：按提示点 S6 绑定的 active A 的 Stop；**不要**手工强停或卸载；无 FINAL-CLEANUP 确认；runner 负责清理。
 
@@ -328,9 +328,11 @@ Scenario 5 records `settings_reallow_path` expected/actual/match/observation and
 never blocks solely because actual path differs from the predicted path; the
 revoke mechanism is now `settings-app-info-force-stop`: a fresh A
 start/create-accepted/post-create-open first (with optional reauthorization
-Allow, like S2), then machine-verified Settings > app info > A > force-stop
-steps with deterministic layout gates. Pass requires the machine
-settings-app-info layout gate, fresh create/open, bundle still present, and
+Allow, like S2), then a machine-verified Settings > app info > A gate followed
+by the operator action `点击强行停止，并完成随后出现的确认（如有）`. The pre-action
+app-info capture is the strict deterministic layout gate; the post-action
+capture is observation-only and cannot independently decide the campaign, while a degraded continuous HiLog stream remains blocked by the global safety rule. Pass requires the
+machine settings-app-info layout gate, fresh create/open, bundle still present, and
 consecutive absent `<bundle>:vpn` Extension-process probes
 (>=2 probes >=3s apart, `process_target` recorded; scheduling actually reaches
 the frozen 3.0s via exact DateTimeOffset round-trip plus a small margin, and
@@ -398,10 +400,12 @@ entry and transcript; present/unknown/error resets the counter, unknown/error
 aborts the series, and finally/uninstall-absent never backfills. Scenario 3
 strict-fallback pass also requires a scenario 5 same-bundle fresh
 `CREATE_ACCEPTED` + post-create open as clean reactivation proof or the overall
-aggregation stays blocked. Scenario 5 revokes via machine-verified Settings app-info force-stop (fresh A
-create first, machine settings-app-info layout gates for the app-info page and
-the force-stop action, consecutive absent `<bundle>:vpn` probes, bundle still
-present); no `UI_STOP` is expected and no manual
+aggregation stays blocked. Scenario 5 revokes via Settings app-info force-stop (fresh A
+create first, a strict machine settings-app-info gate before the action, then
+`点击强行停止，并完成随后出现的确认（如有）`, consecutive absent `<bundle>:vpn`
+probes, bundle still present). The post-force capture is observation-only and
+may show a different page structure or ordinary capture degradation without independently changing the verdict; a degraded continuous HiLog stream remains blocked by the global safety rule; no `UI_STOP`
+is expected and no manual
 `SETTINGS-APP-INFO-FORCE-STOP-CAPTURED` confirmation is asked (historical under
 `ADJ-20260808-0002`/`0003`). Scenario 7 runs pre-uninstall probes and allows
 the existing uninstall cleanup only after the terminal assessment completes.
@@ -428,8 +432,8 @@ Settings>VPN page capture in scenario 5 is `not-required` under
 `ADJ-20260808-0003` (never asked, never invalid/block/pass input); its failure
 still writes an independent `observation_only_degraded` diagnostic, but never
 calls `Add-CaptureDegradation`, never enters the global `capture_degraded`
-list, and never blocks scenario 5 or the final overall; the decisive
-`scenario-5-app-info-force-stop` capture failure stays blocking. The
+list, and never blocks scenario 5 or the final overall; the pre-action
+`scenario-5-app-info` layout gate remains decisive, while the post-force capture is observation-only. A degraded continuous HiLog stream remains blocked by the global safety rule. The
 freeze decision field is `process_absent_probe_spacing_seconds`; the legacy
 `spacing` name is rejected as unknown/missing for every mode and never reused
 compatibly.
@@ -450,7 +454,8 @@ verifies index order. Live runner records may be `collected`,
 `blocked`, or `invalidated`; reviewed states remain exclusive to the independent
 review step.
 
-Run the host-only fixture suite. It parses both scripts and exercises a blocked
+Run the host-only fixture suite. It parses both scripts and exercises the
+sanitized production-derived S5 app-info fixture (provenance: `docs/evidence/e3-physical-preflight-production-layout-2026-08-15.md`), a blocked
 plan dry-run plus injected seven-scenario `LiveSimulation`, repository gates,
 retry authorization, continuous capture anchors, partial lines, capture death,
 cleanup verification, redaction/JSON shape, fault hashes, lock, junction,
@@ -662,8 +667,9 @@ ready review record all verify the same `confirmation_contract_sha256` value.
 Real Live requires `plan_status: ready`, a clean repository, manual operator
 input, and the frozen target mapping. Normal revoke evidence comes only from the
 planned visible UI/Settings actions; under `ADJ-20260808-0002`/`0003` scenario 5
-uses machine-verified Settings app-info force-stop (deterministic layout gates;
-no manual confirmation — the old manual force-stop confirmation is historical
+uses machine-verified Settings app-info force-stop (one deterministic pre-action
+`scenario-5-app-info` layout gate; the post-action capture is observation-only;
+no manual confirmation - the old manual force-stop confirmation is historical
 only), and the runner never issues HDC force-stop for it. Any exception/finally `force-stop`
 is `notUsedAsRevoke`: it is residual cleanup only, followed by targeted
 BundleDump and PidOf verification; HDC force-stop is restricted to the

@@ -83,9 +83,9 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260810-0002'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260810-0001'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260810-0001'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260815-0005'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260815-0005'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260815-0005'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
 $script:SimulationActiveBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -755,8 +755,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260810-0002 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260810-0001 / EV-E3-PHYS1API26-20260810-0001, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260815-0005 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260815-0005 / EV-E3-PHYS1API26-20260815-0005, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
@@ -1442,9 +1442,11 @@ function Get-SimulatedLayoutDocument {
         }
         'settings-app-info-a' {
             return @(
-                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.settings'; type = 'root'; id = ''; key = ''; text = '' } @(
-                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = 'app_name_text'; key = 'app_name_text'; text = 'E3 Physical VPN Preflight' }),
-                    (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'force_stop_button'; key = 'force_stop_button'; text = '强制停止' })
+                New-SimulatedUiNode @{ bundleName = 'com.huawei.hmos.settings'; type = 'root'; id = ''; key = ''; text = ''; visible = 'true' } @(
+                    (New-SimulatedUiNode @{ bundleName = ''; type = 'NavDestination'; id = 'Setting.AppDetail'; key = 'Setting.AppDetail'; text = ''; visible = 'true' } @(
+                        (New-SimulatedUiNode @{ bundleName = ''; type = 'Text'; id = 'Setting.AppDetail.title_id'; key = 'Setting.AppDetail.title_id'; text = 'E3 Preflight A'; visible = 'true' }),
+                        (New-SimulatedUiNode @{ bundleName = ''; type = 'Button'; id = 'force_stop_button'; key = 'force_stop_button'; text = '强行停止'; visible = 'true' })
+                    ))
                 )
             )
         }
@@ -3339,13 +3341,9 @@ function Test-CapturedLayoutProfile {
     function Get-AttrValuePattern([string]$Field, [string]$Value) {
         return '(?:^|\n)' + $attrField + $Field + '=' + [regex]::Escape($Value) + '(?=\n|$)'
     }
-    # ADJ-20260808-0003: expected-bundle is only required where the profile structurally embeds
-    # the inspected bundle (the entry app page). The authorization dialog owner/type/text/buttons
-    # prove the system dialog; request ownership is proven by the UI_START/event gate, never by
-    # requiring the request bundle in the authorization page. settings-app-info does NOT require
-    # the expected bundle either: A correctness is proven by the A process effect gate (force
-    # stop makes `<bundle>:vpn` absent while bundle stays present), not by a bundle field on the
-    # Settings page.
+    # ExpectedBundle is structurally required only by the entry profile. Authorization ownership
+    # remains event-bound; settings-app-info uses ExpectedBundle only to select the expected A/B
+    # display label inside Setting.AppDetail, while final A correctness remains process-effect-bound.
     if (-not [string]::IsNullOrWhiteSpace($ExpectedBundle) -and $Profile -eq 'entry') { $checks['expected-bundle'] = $joined -match (Get-AttrValuePattern 'bundlename' $ExpectedBundle.ToLowerInvariant()) }
     switch ($Profile) {
         # ADJ-20260808-0003 (C6): entry profile keeps ExpectedBundle + button id/key start-vpn /
@@ -3382,21 +3380,68 @@ function Test-CapturedLayoutProfile {
             $checks['vpn-page-text'] = $joined -match ($textNode + '[^\n]*vpn[^\n]*(?=\n|$)') -and $joined -match ($textNode + '[^\n]*没有 vpn[^\n]*(?=\n|$)')
             $checks['add-vpn-button'] = $joined -match ($textNode + '[^\n]*添加 vpn 网络[^\n]*(?=\n|$)')
         }
-        # ADJ-20260808-0003 (C6): no trusted device sample for the Settings app-info page (the
-        # last capture-scenario-5-app-info-force-stop was actually App B's page), so the profile
-        # stays conservative and ONLY requires: any node owns attributes.bundleName=
-        # com.huawei.hmos.settings + the exact app label "E3 Physical VPN Preflight" + a
-        # Force Stop / 强制停止 control. The un-sampled app-info-structure id/key requirement is
-        # REMOVED so the profile never systematically fails on an un-sampled structure. No
-        # ExpectedBundle either: A correctness is proven by the A process effect gate (force stop
-        # makes `<bundle>:vpn` absent while the bundle stays present), never by a bundle field on
-        # the Settings page. A/B same-name cannot manufacture a false pass: the wrong-B effect
-        # fixture stays invalid through the process effect gate. No match => invalid; the residual
-        # risk is registered in ADJ-20260808-0003 pending a trusted device sample.
+        # The production S5 sample contains app-list and sceneboard siblings in the same dump.
+        # Match the label and force-stop control only inside one current visible Setting.AppDetail
+        # NavDestination beneath the Settings owner; sibling/root facts cannot satisfy either field.
         'settings-app-info' {
-            $checks['settings-owner'] = $joined -match (Get-AttrValuePattern 'bundlename' 'com.huawei.hmos.settings')
-            $checks['app-label'] = $joined -match ($textNode + '[^\n]*e3 physical vpn preflight[^\n]*(?=\n|$)')
-            $checks['force-stop-control'] = ($joined -match ($textNode + '[^\n]*force stop[^\n]*(?=\n|$)')) -or ($joined -match ($textNode + '[^\n]*强制停止[^\n]*(?=\n|$)')) -or ($joined -match ($attrField + '(?:id|key)=[^\n]*force[_-]?stop[^\n]*(?=\n|$)'))
+            $factMap = @{}
+            foreach ($fact in $facts) {
+                $separator = ([string]$fact).IndexOf('=')
+                if ($separator -lt 0) { continue }
+                $path = ([string]$fact).Substring(0, $separator).ToLowerInvariant()
+                $factMap[$path] = ([string]$fact).Substring($separator + 1)
+            }
+            $settingsBases = @()
+            foreach ($path in @($factMap.Keys)) {
+                if ($path.EndsWith('.attributes.bundlename', [StringComparison]::Ordinal) -and ([string]$factMap[$path]).ToLowerInvariant() -eq 'com.huawei.hmos.settings') {
+                    $base = $path -replace '\.attributes\.bundlename$', ''
+                    if ($settingsBases -notcontains $base) { $settingsBases += $base }
+                }
+            }
+            $checks['settings-owner'] = $settingsBases.Count -gt 0
+            $hiddenBases = @()
+            foreach ($path in @($factMap.Keys)) {
+                if ($path.EndsWith('.attributes.visible', [StringComparison]::Ordinal) -and ([string]$factMap[$path]).ToLowerInvariant() -eq 'false') {
+                    $base = $path -replace '\.attributes\.visible$', ''
+                    if ($hiddenBases -notcontains $base) { $hiddenBases += $base }
+                }
+            }
+            $detailBases = @()
+            foreach ($path in @($factMap.Keys)) {
+                if ($path -notmatch '\.attributes\.(?:id|key)$' -or ([string]$factMap[$path]).ToLowerInvariant() -ne 'setting.appdetail') { continue }
+                $base = $path -replace '\.attributes\.(?:id|key)$', ''
+                if (@($settingsBases | Where-Object { $base.StartsWith($_ + '.', [StringComparison]::Ordinal) }).Count -eq 0) { continue }
+                if (([string](Get-OptionalProperty $factMap ($base + '.attributes.visible') '')).ToLowerInvariant() -ne 'true') { continue }
+                if (([string](Get-OptionalProperty $factMap ($base + '.attributes.type') '')).ToLowerInvariant() -ne 'navdestination') { continue }
+                if (@($hiddenBases | Where-Object { $base -eq $_ -or $base.StartsWith($_ + '.', [StringComparison]::Ordinal) }).Count -gt 0) { continue }
+                if ($detailBases -notcontains $base) { $detailBases += $base }
+            }
+            $acceptedLabels = if ([string]$ExpectedBundle -eq $script:BundleA) { @('e3 preflight a') }
+                elseif ([string]$ExpectedBundle -eq $script:BundleB) { @('e3 preflight b') }
+                else { @() }
+            $labelFound = $false
+            $forceStopFound = $false
+            foreach ($detailBase in $detailBases) {
+                $detailHasLabel = $false
+                $detailHasForceStop = $false
+                foreach ($path in @($factMap.Keys)) {
+                    if (-not $path.StartsWith($detailBase + '.', [StringComparison]::Ordinal)) { continue }
+                    $nodeBase = $path -replace '\.attributes\.[^.]+$', ''
+                    if (@($hiddenBases | Where-Object { $nodeBase -eq $_ -or $nodeBase.StartsWith($_ + '.', [StringComparison]::Ordinal) }).Count -gt 0) { continue }
+                    $normalized = [regex]::Replace(([string]$factMap[$path]).Trim().ToLowerInvariant(), '\s+', ' ')
+                    if ($path.EndsWith('.attributes.text', [StringComparison]::Ordinal)) {
+                        if ($acceptedLabels -contains $normalized) { $detailHasLabel = $true }
+                        if ($normalized -in @('强行停止', '强制停止', 'force stop')) { $detailHasForceStop = $true }
+                    } elseif ($path.EndsWith('.attributes.id', [StringComparison]::Ordinal) -or $path.EndsWith('.attributes.key', [StringComparison]::Ordinal)) {
+                        if ($normalized -match 'force[_-]?stop') { $detailHasForceStop = $true }
+                    }
+                }
+                $labelFound = $labelFound -or $detailHasLabel
+                $forceStopFound = $forceStopFound -or ($detailHasLabel -and $detailHasForceStop)
+            }
+            $checks['app-detail-structure'] = $detailBases.Count -eq 1
+            $checks['app-label'] = $labelFound
+            $checks['force-stop-control'] = $forceStopFound
         }
     }
     $failed = @($checks.Keys | Where-Object { -not [bool]$checks[$_] })
@@ -3923,7 +3968,10 @@ function Invoke-StrongLiveCampaign {
     }
     $script:ProbeContexts[5] = New-ProcessProbeContext -Scenario 5 -Bundle $script:BundleA -RequireBundlePresent $true -RequiredCount ([int]$Freeze.process_absent_required_count) -SpacingSeconds ([double]$Freeze.process_absent_probe_spacing_seconds)
     $forceEffectApplied = $false
-    $step5Force = Invoke-MechanicalStep $context5 4 '点击强制停止' $preForce5 {
+    # The operator completes the visible Settings action, including its confirmation if one
+    # appears. The post-action capture is evidence-only because Settings may leave AppDetail;
+    # only the process-absent + bundle-present postcondition decides the force-stop effect.
+    $step5Force = Invoke-MechanicalStep $context5 4 '点击强行停止，并完成随后出现的确认（如有）' $preForce5 {
         param($events)
         if (-not $forceEffectApplied) {
             if (Test-SimulationStepHasEffect 5 4) { [void]$script:SimulationActiveBundles.Remove($script:BundleA) }
@@ -3931,14 +3979,12 @@ function Invoke-StrongLiveCampaign {
         }
         $extra = Test-NoOperatorAction $events
         if ([string]$extra.status -ne 'pass') { return $extra }
-        $layout = Test-CapturedLayoutProfile 'scenario-5-app-info-force-stop' 'settings-app-info' $script:BundleA
-        if ([string]$layout.status -ne 'pass') { return [pscustomobject]@{ status = 'invalid'; reason = [string]$layout.reason } }
         [void](Invoke-ProcessFinalStateProbeSeries $script:ProbeContexts[5] ((Get-Now).AddSeconds(20)))
         $absent = Test-ProcessAbsentEvidence $script:ProbeContexts[5] ([int]$Freeze.process_absent_required_count) ([double]$Freeze.process_absent_probe_spacing_seconds)
         if ($absent.Met -and $script:ProbeContexts[5].BundlePresent) { return [pscustomobject]@{ status = 'pass'; reason = 'fresh-request-extension-process-absent-bundle-present' } }
         if ($script:ProbeContexts[5].Aborted) { return [pscustomobject]@{ status = 'blocked'; reason = 'force-stop-process-check-unverifiable' } }
         return [pscustomobject]@{ status = 'invalid'; reason = [string]$absent.Reason }
-    } -CaptureBefore ([ordered]@{ status = 'pass'; name = 'scenario-5-app-info'; profile = 'settings-app-info' }) -CaptureAfterName 'scenario-5-app-info-force-stop' -CaptureAfterProfile 'settings-app-info' -CaptureAfterExpectedBundle $script:BundleA -VerifyTimeoutSeconds 25
+    } -CaptureBefore ([ordered]@{ status = 'pass'; name = 'scenario-5-app-info'; profile = 'settings-app-info' }) -CaptureAfterName 'scenario-5-app-info-force-stop' -CaptureAfterReviewOnly -VerifyTimeoutSeconds 25
     $observation5 = Complete-ScenarioContext $context5
     [void](Assert-ScenarioEventContract 5 $observation5.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request5 }))
     $onCreate5 = Test-CorrelatedMarker $observation5.Events $script:BundleA $request5 'VPN_ONCREATE'
@@ -3954,7 +4000,7 @@ function Invoke-StrongLiveCampaign {
         # ADJ-20260808-0003: Settings>VPN page is not a decisive step and is not asked of the
         # operator; the capture is not-required and never invalid/block/pass input.
         settings_vpn_page_capture = [ordered]@{ name = 'scenario-5-settings-vpn-page'; status = 'not-required'; machine_verified = $false; note = 'observation-only optional; not asked of the operator' }
-        app_info_force_stop_capture = [ordered]@{ name = 'scenario-5-app-info-force-stop'; status = 'collected'; machine_verified = $true }
+        app_info_force_stop_capture = [ordered]@{ name = 'scenario-5-app-info-force-stop'; status = [string]$step5Force.CaptureAfter.status; machine_verified = $false; observation_only = $true }
         terminal_mode = 'settings-app-info-force-stop'; fd_still_open = [bool]$s5FdStillOpen; process_target = [string]$script:ProbeContexts[5].ProcessTarget; process_target_verified = [bool]($scenario2Result -eq 'pass')
         process_final_state_probes = @($script:ProbeContexts[5].Probes); process_absent_evidence = [ordered]@{ met = [bool]$absentEvidence5.Met; reason = $absentEvidence5.Reason; required_count = [int]$Freeze.process_absent_required_count; required_spacing_seconds = [double]$Freeze.process_absent_probe_spacing_seconds; measured_spacing_seconds = $absentEvidence5.SpacingSeconds }; bundle_present_during_probe = [bool]$script:ProbeContexts[5].BundlePresent
         settings_reallow_path = [ordered]@{ expected = [string]$Freeze.settings_reallow_expected_path; actual = $actualReallowPath; match = ($actualReallowPath -eq [string]$Freeze.settings_reallow_expected_path); observation = 'machine-layout-and-event-classified'; policy = [string]$Freeze.settings_reallow_path_policy }
@@ -4419,7 +4465,7 @@ function New-CompleteRecord {
             mapping = '1=cleanup_and_install; 2=allow_and_fd; 3=active_stop; 4=deny; 5=settings_revoke; 6=second_vpn_conflict; 7=final_cleanup'
             scenario_2_rule = 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked'
             scenario_2_assertions = $(if ($null -ne $scenario2) { $scenario2.assertions } else { $null })
-            scenario_5_rule = 'settings-app-info-force-stop revoke under strong protocol: atomic mechanical Settings steps with machine layout gates; fresh create/open plus force-stop then :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation'
+            scenario_5_rule = 'settings-app-info-force-stop revoke under strong protocol: step3 strict machine layout gate verifies the visible AppDetail subtree, expected label, and force-stop control; step4 force-stop capture is observation-only; final effect requires :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation'
             scenario_6_rule = 'machine-only conflict: unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002; dual accepted or B accepted is fail; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null'
             scenario_7_rule = 'binds only S6 machine-verified active A request/bundle; expects UI_STOP/onDestroy/pre-destroy/destroy-begin and :vpn final state; wrong bundle stop or extra start is invalid; no FINAL-CLEANUP operator confirmation; uninstall cleanup only after terminal assessment; finally-absent never backfills'
             s3_strict_process_boundary_gate = 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked'

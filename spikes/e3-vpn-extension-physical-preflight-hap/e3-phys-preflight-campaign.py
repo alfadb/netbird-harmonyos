@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260815-0004 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260815-0005 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260815-0004 / EV-E3-PHYS1API26-20260815-0004), and
+(E3-PHYS-PREFLIGHT-20260815-0005 / EV-E3-PHYS1API26-20260815-0005), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -71,9 +71,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0004'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260815-0004'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260815-0004'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0005'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260815-0005'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260815-0005'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
 DEVICE_CLOCK_SKEW_TOLERANCE_SECONDS = 3.0
@@ -1164,7 +1164,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260815-0004 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260815-0005 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -3025,9 +3025,11 @@ def get_simulated_layout_document(name):
         ]
     if profile == 'settings-app-info-a':
         return [
-            new_simulated_ui_node({'bundleName': 'com.huawei.hmos.settings', 'type': 'root', 'id': '', 'key': '', 'text': ''}, [
-                new_simulated_ui_node({'bundleName': '', 'type': 'Text', 'id': 'app_name_text', 'key': 'app_name_text', 'text': 'E3 Preflight A'}),
-                new_simulated_ui_node({'bundleName': '', 'type': 'Button', 'id': 'force_stop_button', 'key': 'force_stop_button', 'text': '强制停止'}),
+            new_simulated_ui_node({'bundleName': 'com.huawei.hmos.settings', 'type': 'root', 'id': '', 'key': '', 'text': '', 'visible': 'true'}, [
+                new_simulated_ui_node({'bundleName': '', 'type': 'NavDestination', 'id': 'Setting.AppDetail', 'key': 'Setting.AppDetail', 'text': '', 'visible': 'true'}, [
+                    new_simulated_ui_node({'bundleName': '', 'type': 'Text', 'id': 'Setting.AppDetail.title_id', 'key': 'Setting.AppDetail.title_id', 'text': 'E3 Preflight A', 'visible': 'true'}),
+                    new_simulated_ui_node({'bundleName': '', 'type': 'Button', 'id': 'force_stop_button', 'key': 'force_stop_button', 'text': '强行停止', 'visible': 'true'}),
+                ]),
             ]),
         ]
     if profile == 'wrong-page':
@@ -3177,21 +3179,73 @@ def test_captured_layout_profile(facts, profile, expected_bundle=None):
             and (re.search(text_node + '[^\n]*没有 vpn[^\n]*(?=\n|$)', joined) is not None)
         checks['add-vpn-button'] = re.search(text_node + '[^\n]*添加 vpn 网络[^\n]*(?=\n|$)', joined) is not None
     elif profile == 'settings-app-info':
-        checks['settings-owner'] = re.search(attr_value_pattern('bundlename', 'com.huawei.hmos.settings'), joined) is not None
-        # Display-name label per bundle (A="E3 Preflight A", B="E3 Preflight B");
-        # the historical "E3 Physical VPN Preflight" (no tail) stays accepted,
-        # and a wrong tail (A page showing "... B") is rejected.
+        fact_map = {}
+        for fact in facts:
+            path, separator, value = str(fact).partition('=')
+            if separator:
+                fact_map[path.lower()] = value
+
+        settings_bases = {
+            re.sub(r'\.attributes\.bundlename$', '', path)
+            for path, value in fact_map.items()
+            if path.endswith('.attributes.bundlename') and value.lower() == 'com.huawei.hmos.settings'
+        }
+        checks['settings-owner'] = bool(settings_bases)
+        hidden_bases = {
+            re.sub(r'\.attributes\.visible$', '', path)
+            for path, value in fact_map.items()
+            if path.endswith('.attributes.visible') and value.lower() == 'false'
+        }
+        detail_bases = set()
+        for path, value in fact_map.items():
+            if not re.search(r'\.attributes\.(?:id|key)$', path) or value.lower() != 'setting.appdetail':
+                continue
+            base = re.sub(r'\.attributes\.(?:id|key)$', '', path)
+            if not any(base.startswith(settings_base + '.') for settings_base in settings_bases):
+                continue
+            if str(fact_map.get(base + '.attributes.visible', '')).lower() != 'true':
+                continue
+            if str(fact_map.get(base + '.attributes.type', '')).lower() != 'navdestination':
+                continue
+            if any(base == hidden_base or base.startswith(hidden_base + '.')
+                   for hidden_base in hidden_bases):
+                continue
+            detail_bases.add(base)
+
         if str(expected_bundle) == BUNDLE_A:
-            label_pattern = r'(?:(?: a)?(?! b))'
+            accepted_labels = {'e3 preflight a'}
         elif str(expected_bundle) == BUNDLE_B:
-            label_pattern = r'(?:(?: b)?(?! a))'
+            accepted_labels = {'e3 preflight b'}
         else:
-            label_pattern = r'(?:)?'
-        checks['app-label'] = re.search(
-            text_node + r'[^\n]*e3 (?:physical vpn )?preflight' + label_pattern + r'[^\n]*(?=\n|$)', joined) is not None
-        checks['force-stop-control'] = (re.search(text_node + '[^\n]*force stop[^\n]*(?=\n|$)', joined) is not None) \
-            or (re.search(text_node + '[^\n]*强制停止[^\n]*(?=\n|$)', joined) is not None) \
-            or (re.search(attr_field + '(?:id|key)=[^\n]*force[_-]?stop[^\n]*(?=\n|$)', joined) is not None)
+            accepted_labels = set()
+
+        label_found = False
+        force_stop_found = False
+        for detail_base in detail_bases:
+            detail_has_label = False
+            detail_has_force_stop = False
+            for path, value in fact_map.items():
+                if not path.startswith(detail_base + '.'):
+                    continue
+                node_base = re.sub(r'\.attributes\.[^.]+$', '', path)
+                if any(node_base == hidden_base or node_base.startswith(hidden_base + '.')
+                       for hidden_base in hidden_bases):
+                    continue
+                normalized = re.sub(r'\s+', ' ', str(value).strip().lower())
+                if path.endswith('.attributes.text'):
+                    if normalized in accepted_labels:
+                        detail_has_label = True
+                    if normalized in {'强行停止', '强制停止', 'force stop'}:
+                        detail_has_force_stop = True
+                elif path.endswith('.attributes.id') or path.endswith('.attributes.key'):
+                    if re.search(r'force[_-]?stop', normalized):
+                        detail_has_force_stop = True
+            label_found = label_found or detail_has_label
+            force_stop_found = force_stop_found or (detail_has_label and detail_has_force_stop)
+
+        checks['app-detail-structure'] = len(detail_bases) == 1
+        checks['app-label'] = label_found
+        checks['force-stop-control'] = force_stop_found
     failed = [k for k in checks if not checks[k]]
     return {
         'status': 'pass' if not failed else 'mismatch',
@@ -4636,9 +4690,6 @@ def invoke_strong_live_campaign(freeze):
         extra = test_no_operator_action(events)
         if str(extra['status']) != 'pass':
             return extra
-        layout = _assess_layout_profile('scenario-5-app-info-force-stop', 'settings-app-info', BUNDLE_A)
-        if str(layout['status']) != 'pass':
-            return {'status': 'invalid', 'reason': str(layout['reason'])}
         invoke_process_final_state_probe_series(probe_contexts[5], get_now() + timedelta(seconds=20))
         absent = test_process_absent_evidence(probe_contexts[5], int(freeze['process_absent_required_count']),
                                               float(freeze['process_absent_probe_spacing_seconds']))
@@ -4648,12 +4699,14 @@ def invoke_strong_live_campaign(freeze):
             return {'status': 'blocked', 'reason': 'force-stop-process-check-unverifiable'}
         return {'status': 'invalid', 'reason': str(absent['reason'])}
 
-    step5_force = invoke_mechanical_step(context5, 4, '点击强制停止', pre_force5, _s5_force_postcondition,
-                                         capture_before={'status': 'pass', 'name': 'scenario-5-app-info',
-                                                         'profile': 'settings-app-info'},
-                                         capture_after_name='scenario-5-app-info-force-stop',
-                                         capture_after_profile='settings-app-info',
-                                         capture_after_expected_bundle=BUNDLE_A, verify_timeout_seconds=25)
+    # The operator completes the visible Settings action, including its confirmation if one
+    # appears. The post-action capture is evidence-only because Settings may leave AppDetail;
+    # only the process-absent + bundle-present postcondition decides the force-stop effect.
+    step5_force = invoke_mechanical_step(
+        context5, 4, '点击强行停止，并完成随后出现的确认（如有）', pre_force5, _s5_force_postcondition,
+        capture_before={'status': 'pass', 'name': 'scenario-5-app-info', 'profile': 'settings-app-info'},
+        capture_after_name='scenario-5-app-info-force-stop', capture_after_review_only=True,
+        verify_timeout_seconds=25)
     observation5 = complete_scenario_context(context5)
     assert_scenario_event_contract(5, observation5['events'], [{'bundle': BUNDLE_A, 'request_id': request5}])
     on_create5 = test_correlated_marker(observation5['events'], BUNDLE_A, request5, 'VPN_ONCREATE')
@@ -4685,8 +4738,12 @@ def invoke_strong_live_campaign(freeze):
                     'settings_vpn_page_observation_only': True,
                     'settings_vpn_page_capture': {'name': 'scenario-5-settings-vpn-page', 'status': 'not-required',
                                                   'machine_verified': False, 'note': 'observation-only optional; not asked of the operator'},
-                    'app_info_force_stop_capture': {'name': 'scenario-5-app-info-force-stop', 'status': 'collected',
-                                                    'machine_verified': True},
+                    'app_info_force_stop_capture': {
+                        'name': 'scenario-5-app-info-force-stop',
+                        'status': str(step5_force['capture_after']['status']),
+                        'machine_verified': False,
+                        'observation_only': True,
+                    },
                     'terminal_mode': 'settings-app-info-force-stop', 'fd_still_open': bool(s5_fd_still_open),
                     'process_target': probe_contexts[5]['process_target'],
                     'process_target_verified': scenario2_result == 'pass',
@@ -5324,7 +5381,7 @@ def new_complete_record(freeze, scenarios, overall, record_status, started_at, e
             'mapping': '1=cleanup_and_install; 2=allow_and_fd; 3=active_stop; 4=deny; 5=settings_revoke; 6=second_vpn_conflict; 7=final_cleanup',
             'scenario_2_rule': 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked',
             'scenario_2_assertions': scenario2.get('assertions') if scenario2 is not None else None,
-            'scenario_5_rule': 'settings-app-info-force-stop revoke under strong protocol: atomic mechanical Settings steps with machine layout gates; fresh create/open plus force-stop then :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation',
+            'scenario_5_rule': 'settings-app-info-force-stop revoke under strong protocol: step3 strict machine layout gate verifies the visible AppDetail subtree, expected label, and force-stop control; step4 force-stop capture is observation-only; final effect requires :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation',
             'scenario_6_rule': 'machine-only conflict: unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002; dual accepted or B accepted is fail; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null',
             'scenario_7_rule': 'binds only S6 machine-verified active A request/bundle; expects UI_STOP/onDestroy/pre-destroy/destroy-begin and :vpn final state; wrong bundle stop or extra start is invalid; no FINAL-CLEANUP operator confirmation; uninstall cleanup only after terminal assessment; finally-absent never backfills',
             's3_strict_process_boundary_gate': 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked',
