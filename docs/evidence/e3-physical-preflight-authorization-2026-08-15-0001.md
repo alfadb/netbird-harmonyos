@@ -110,7 +110,7 @@ reviewed_at: pending
 | machine_fresh_confirmation | `pending`（由 Linux Pod 通过 `-TargetBindingConfirm` 观测） |
 | plan_status | `authorized-awaiting-linux-ready-freeze` |
 | 执行 host | Linux Pod：`host-dev-alfadb-full` / `Debian GNU/Linux 13 (trixie)` / `x86_64` / Python `3.13.5` |
-| runner | Python 3 版（**常量迁移后重新冻结**）：runner `9572d55a…`、freeze example `030afd0e…`、selftest `89cdf3d4…`；0002 AUTH 历史字节（runner `33a3b454…`、selftest `3a32e171…`、freeze example `3d5f0194…`）随 0002 登记保留，不再适用本 AUTH |
+| runner | Python 3 版（**常量迁移后重新冻结**）：runner `9572d55a…`、freeze example `030afd0e…`、selftest `c0d566f3…`；0002 AUTH 历史字节（runner `33a3b454…`、selftest `3a32e171…`、freeze example `3d5f0194…`）随 0002 登记保留，不再适用本 AUTH |
 | 目标元组（不变，冻结于 `ADJ-20260806-0003`） | `PLA-AL10` / `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` / API `26` / `aarch64` / `arm64-v8a` / 设备别名 `PHYS-1` |
 | candidate（**新建**） | `E3-PHYS-PREFLIGHT-20260815-0001` / `EV-E3-PHYS1API26-20260815-0001`，未 Live、未消耗；`attempt=initial`、retry N/A；执行前须两次 ID 消费审计（audit-1/audit-2，均 hash 记录） |
 | signed A/B HAP（**新建** `20260815-relabeled`，Linux 构建+重签，显示名已区分） | `$HOME/harmonyos-signing/netbird-e3/freeze/20260815-relabeled/artifacts/{a,b}/`：A `828fefedba3b4ec63cb3fbe6336f4bf34266770cb29465c854f0ec94491b503d` size `133935`（`e3-phys-preflight-a-signed.hap`）；B `c9e064ed1dcf0df112c27c5f6bcc282e9a9913c63d3dfd8ce8377b1b46218a37` size `133945`（`e3-phys-preflight-b-signed.hap`）；与 Windows 旧包差异 ~27.7KB，audit 全过，验签 4 项 exit 0、A/B 归属互不串扰、`device_id_count:1` |
