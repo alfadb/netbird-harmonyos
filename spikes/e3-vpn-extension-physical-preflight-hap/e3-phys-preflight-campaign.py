@@ -2972,6 +2972,8 @@ def get_simulated_layout_document(name):
         profile = 'settings-vpn'
     elif re.search(r'app-info', name):
         profile = 'settings-app-info-a'
+    elif re.search(r'scenario-6-after-allow-b', name):
+        profile = 'entry-b'
     elif re.search(r'(?:entry-a|after-allow|reactivation|scenario-3-|scenario-7-)', name):
         profile = 'entry-a'
     elif re.search(r'(?:entry-b|after-deny|scenario-4-|scenario-6-conflict)', name):
@@ -3112,7 +3114,11 @@ def get_simulation_hdc_result(operation, parameters):
             with open(destination, 'wb') as f:
                 f.write(bytes([1, 2, 3, 4]))
         else:
-            write_text_utf8_no_bom(destination, jsoncompat_dumps(get_simulated_layout_document(str(parameters['Name'])), indent=2) + '\n')
+            invalid_layouts = get_optional_property(simulation, 'invalid_layout_json', []) or []
+            if str(parameters['Name']) in invalid_layouts:
+                write_text_utf8_no_bom(destination, '{invalid-layout-json')
+            else:
+                write_text_utf8_no_bom(destination, jsoncompat_dumps(get_simulated_layout_document(str(parameters['Name'])), indent=2) + '\n')
     return HdcResult(exit_code, stdout, '', True)
 
 
@@ -3324,7 +3330,8 @@ def invoke_capture(name, scenario, observation_only=False, replace=False):
 
 
 def invoke_layout_checkpoint(scenario, name, profile, expected_bundle=None, step_index=None,
-                             step_id=None, expected_action=None, observation_only=False):
+                             step_id=None, expected_action=None, observation_only=False,
+                             mismatch_is_blocked=False):
     """PS L3400-3465 Invoke-LayoutCheckpoint: machine-only deterministic
     layout gate. Uncollected capture is invalid at a decisive gate (or
     infrastructure blocked); a collected mismatch is re-captured under the
@@ -3365,6 +3372,12 @@ def invoke_layout_checkpoint(scenario, name, profile, expected_bundle=None, step
     add_transcript_record('machine-layout-checkpoint', {'scenario': scenario, 'checkpoint': checkpoint})
     if not matching:
         suffix = 'layout-unverifiable' if str(assessment['status']) == 'unverifiable' else 'layout-mismatch'
+        if mismatch_is_blocked:
+            # The new S6 authorization UI state is platform-uncertain after Allow, so both
+            # outcomes fail closed while preserving whether dismissal mismatched or was unverifiable.
+            blocked_reason = 'authorization-dismissal-unverifiable' if str(assessment['status']) == 'unverifiable' else 'authorization-not-dismissed'
+            raise RuntimeError('scenario-%d machine-verification-blocked step=%s reason=%s:%s' %
+                               (scenario, step_index, blocked_reason, str(assessment['reason'])))
         throw_scenario_invalid(scenario, 'layout-checkpoint-%s-%s' % (name, suffix),
                                step_index, step_id, expected_action, machine_postcondition=checkpoint,
                                capture_after={'status': capture_status, 'name': name})
@@ -3841,7 +3854,8 @@ def register_verified_request(request_id, bundle, scenario):
 def invoke_mechanical_step(context, step_index, expected_action, machine_precondition, postcondition,
                            capture_before=None, capture_after_name=None, capture_after_profile=None,
                            capture_after_expected_bundle=None, capture_after_review_only=False,
-                           capture_after_observation_only=False, verify_timeout_seconds=12.0):
+                           capture_after_observation_only=False, capture_after_mismatch_is_blocked=False,
+                           verify_timeout_seconds=12.0):
     """PS L2383-2472 Invoke-MechanicalStep: global operator action guard,
     machine-precondition gate (status=invalid is operator/protocol invalid;
     status=blocked is a plain runner blocked), operator prompt, optional
@@ -3878,7 +3892,8 @@ def invoke_mechanical_step(context, step_index, expected_action, machine_precond
         elif capture_after_profile:
             capture_after = invoke_layout_checkpoint(scenario, capture_after_name, capture_after_profile,
                                                      capture_after_expected_bundle, step_index, step_id,
-                                                     expected_action, observation_only=capture_after_observation_only)
+                                                     expected_action, observation_only=capture_after_observation_only,
+                                                     mismatch_is_blocked=capture_after_mismatch_is_blocked)
         else:
             capture_status = invoke_capture(capture_after_name, scenario, observation_only=capture_after_observation_only)
             if capture_status != 'collected':
@@ -4040,6 +4055,28 @@ def assert_scenario_event_contract(scenario, events, expected_starts=None, expec
             if info['bundle'] and str(info['bundle']) != expected_bundle:
                 throw_scenario_invalid(scenario, 'wrong-bundle-for-requestId:%s' % info['request_id'])
     return True
+
+
+def get_accepted_marker_assessment(events, verified_requests):
+    """Count CREATE_ACCEPTED markers only when their requestId exactly matches
+    a machine-verified request. Missing and foreign requestIds are unexpected;
+    they never contribute to accepted_session_count_in_window."""
+    counts = [0 for _ in verified_requests]
+    unexpected = []
+    for event in events:
+        text = str(event.get('text', '')) if isinstance(event, dict) else str(event)
+        if not re.search(r'CREATE_ACCEPTED', text):
+            continue
+        matched = False
+        for index, verified in enumerate(verified_requests):
+            request_id = str(verified['request_id'])
+            if re.search(r'requestId=%s(\||\s|$)' % re.escape(request_id), text):
+                counts[index] += 1
+                matched = True
+                break
+        if not matched:
+            unexpected.append(event)
+    return {'counts': counts, 'accepted_count': sum(counts), 'unexpected': unexpected}
 
 
 def get_request_id_from_events(events, bundle):
@@ -4768,8 +4805,8 @@ def invoke_strong_live_campaign(freeze):
         s3_entry[0]['clean_reactivation_proof'] = bool(fresh_create_proof)
     assert_scenario_capture_can_continue(results, observation5)
 
-    # S6: exactly A Start then B Start. Only a frozen explicit B conflict
-    # code is a passing conflict result.
+    # S6: A Start, B Start, and optional B Allow on first authorization.
+    # Only a frozen explicit B conflict code is a passing conflict result.
     invoke_hdc_operation('StartEntry', {'Bundle': BUNDLE_A})
     entry6a = invoke_layout_checkpoint(6, 'scenario-6-entry-a', 'entry', BUNDLE_A)
     context6 = new_scenario_context(6)
@@ -4829,6 +4866,11 @@ def invoke_strong_live_campaign(freeze):
                            or test_correlated_marker(context6_events, BUNDLE_A, request6a, 'START_PROMISE_REJECTED')) and not extension_reject6a
     if not a_accepted6:
         observation6 = complete_scenario_context(context6)
+        accepted6a = get_accepted_marker_assessment(
+            observation6['events'], [{'bundle': BUNDLE_A, 'request_id': request6a}])
+        if accepted6a['unexpected']:
+            throw_scenario_invalid(6, 'unexpected-accepted-request-in-window', step_index=1,
+                                   step_id=step6a['step_id'], expected_action=step6a['expected_action'])
         assert_scenario_event_contract(6, observation6['events'], [{'bundle': BUNDLE_A, 'request_id': request6a}])
         s6a_result = 'fail' if extension_reject6a else 'blocked'
         s6a_reason = 'A-create-rejected-or-invalid-fd' if extension_reject6a else 'authorization-outcome-unclassified'
@@ -4838,7 +4880,7 @@ def invoke_strong_live_campaign(freeze):
                         'a_accepted': False, 'a_on_create': bool(on_create6a),
                         'a_extension_rejected': bool(extension_reject6a), 'a_auth_unclassified': bool(auth_unclassified6a),
                         'b_rejected': None, 'b_rejection_code': None, 'b_accepted': False,
-                        'accepted_session_count_in_window': len([e for e in observation6['events'] if re.search(r'CREATE_ACCEPTED', str(e['text']))]),
+                        'accepted_session_count_in_window': accepted6a['accepted_count'],
                         'conflict_capture': {'name': 'scenario-6-conflict', 'status': 'not-required', 'review_only': False},
                         'observation': observation6['observation']})
         results.append({'sequence_index': 7, 'scenario': 7, 'result': 'blocked', 'reason': s7a_reason,
@@ -4852,9 +4894,21 @@ def invoke_strong_live_campaign(freeze):
     entry6b = invoke_layout_checkpoint(6, 'scenario-6-entry-b', 'entry', BUNDLE_B)
     step6b = invoke_mechanical_step(context6, 3, '点击测试 App B 的 Start', pre6b,
                                     lambda events: test_unique_start(events, BUNDLE_B),
-                                    capture_before=entry6b, capture_after_name='scenario-6-conflict')
+                                    capture_before=entry6b)
     request6b = str(step6b['outcome']['request_id'])
     register_verified_request(request6b, BUNDLE_B, 6)
+    b_transition6 = invoke_layout_choice_checkpoint(6, 'scenario-6-conflict', BUNDLE_B,
+                                                    step_index=3, step_id=step6b['step_id'],
+                                                    expected_action=step6b['expected_action'])
+    if str(b_transition6['selected_profile']) == 'authorization':
+        invoke_mechanical_step(
+            context6, 4, '点击 Allow',
+            {'status': 'pass', 'reason': 'B-authorization-layout-and-request-machine-verified', 'request_id': request6b},
+            test_no_operator_action,
+            capture_before=b_transition6, capture_after_name='scenario-6-after-allow-b',
+            capture_after_profile='authorization-dismissed',
+            capture_after_expected_bundle=BUNDLE_B,
+            capture_after_mismatch_is_blocked=True)
 
     def _s6_b_terminal(events):
         unique_start = test_unique_start(events, BUNDLE_B)
@@ -4885,84 +4939,75 @@ def invoke_strong_live_campaign(freeze):
         return {'status': 'pending', 'reason': 'B-create-terminal-missing'}
 
     b_terminal6 = wait_machine_condition(context6, int(step6b['anchor_byte']), step6b['prompt_at'], _s6_b_terminal)
-    if str(b_terminal6.get('status')) == 'blocked' and re.match(r'^B-conflict-code-not-frozen', str(b_terminal6.get('reason', ''))):
-        observation6 = complete_scenario_context(context6)
-        assert_scenario_event_contract(6, observation6['events'],
-                                        [{'bundle': BUNDLE_A, 'request_id': request6a},
-                                         {'bundle': BUNDLE_B, 'request_id': request6b}])
-        b_code6 = get_optional_property(b_terminal6, 'code', None)
-        results.append({'sequence_index': 6, 'scenario': 6, 'result': 'blocked',
-                        'reason': 'B-conflict-code-not-frozen:%s' % b_code6,
-                        'a_reauth_path': s6a_reauth_path, 'request_id_a': request6a, 'request_id_b': request6b,
-                        'a_accepted': bool(a_accepted6), 'b_rejected': True, 'b_rejection_code': b_code6,
-                        'b_accepted': False,
-                        'accepted_session_count_in_window': len([e for e in observation6['events'] if re.search(r'CREATE_ACCEPTED', str(e['text']))]),
-                        'conflict_capture': {'name': 'scenario-6-conflict', 'status': 'collected', 'review_only': False},
-                        'observation': observation6['observation']})
-        results.append({'sequence_index': 7, 'scenario': 7, 'result': 'blocked', 'reason': 'not-run-after-platform-blocked',
-                        'active_bundle': None, 'request_id': None})
-        partial_scenarios = list(results)
-        return results
-    if str(b_terminal6.get('status')) == 'blocked':
-        raise RuntimeError('scenario-6 machine-verification-blocked step=3 reason=%s' % str(get_optional_property(b_terminal6, 'reason', 'machine-verification-blocked')))
-    if str(b_terminal6.get('status')) != 'pass':
+    non_frozen_rejection6 = (str(b_terminal6.get('status')) == 'blocked' and
+                             re.match(r'^B-conflict-code-not-frozen', str(b_terminal6.get('reason', ''))))
+    if str(b_terminal6.get('status')) == 'blocked' and not non_frozen_rejection6:
+        raise RuntimeError('scenario-6 machine-verification-blocked step=%d reason=%s' %
+                           (4 if str(b_transition6['selected_profile']) == 'authorization' else 3,
+                            str(get_optional_property(b_terminal6, 'reason', 'machine-verification-blocked'))))
+    if str(b_terminal6.get('status')) not in ('pass', 'blocked'):
         throw_scenario_invalid(6, str(b_terminal6['reason']), step_index=3,
                                step_id=step6b['step_id'], expected_action=step6b['expected_action'])
-    b_accepted6 = str(b_terminal6['reason']) == 'B-create-accepted'
-    if b_accepted6:
+
+    b_accepted_terminal6 = (str(b_terminal6.get('status')) == 'pass' and
+                            str(b_terminal6.get('reason')) == 'B-create-accepted')
+    b_rejected_terminal6 = not b_accepted_terminal6
+    if b_accepted_terminal6:
         simulation_active_bundles.add(BUNDLE_B)
+    # Observe one post-terminal process checkpoint for both terminal outcomes.
+    # It gates only a rejected B; accepted evidence remains a functional fail.
+    terminal_process6 = get_exact_process_checkpoint(
+        [BUNDLE_A, BUNDLE_B] if b_accepted_terminal6 else [BUNDLE_A],
+        observed_bundles=[] if b_accepted_terminal6 else [BUNDLE_B])
     observation6 = complete_scenario_context(context6)
-    assert_scenario_event_contract(6, observation6['events'],
-                                    [{'bundle': BUNDLE_A, 'request_id': request6a},
-                                     {'bundle': BUNDLE_B, 'request_id': request6b}])
-    unexpected_accepted6 = [e for e in observation6['events']
-                            if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                            and not test_line_correlated(str(e['text']), request6a, BUNDLE_A)
-                            and not test_line_correlated(str(e['text']), request6b, BUNDLE_B)]
-    if unexpected_accepted6:
+    accepted6 = get_accepted_marker_assessment(
+        observation6['events'],
+        [{'bundle': BUNDLE_A, 'request_id': request6a},
+         {'bundle': BUNDLE_B, 'request_id': request6b}])
+    if accepted6['unexpected']:
         throw_scenario_invalid(6, 'unexpected-accepted-request-in-window', step_index=3,
                                step_id=step6b['step_id'], expected_action=step6b['expected_action'])
-    a_accepted_count6 = len([e for e in observation6['events']
-                             if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                             and test_line_correlated(str(e['text']), request6a, BUNDLE_A)])
-    b_accepted_count6 = len([e for e in observation6['events']
-                             if re.search(r'CREATE_ACCEPTED', str(e['text']))
-                             and test_line_correlated(str(e['text']), request6b, BUNDLE_B)])
+    assert_scenario_event_contract(6, observation6['events'],
+                                   [{'bundle': BUNDLE_A, 'request_id': request6a},
+                                    {'bundle': BUNDLE_B, 'request_id': request6b}])
+    a_accepted_count6, b_accepted_count6 = accepted6['counts']
+    b_accepted6 = b_accepted_count6 > 0
     dual_accepted6 = a_accepted_count6 > 0 and b_accepted_count6 > 0
+
     if b_accepted6:
-        process6 = get_exact_process_checkpoint([BUNDLE_A, BUNDLE_B])
-    else:
-        process6 = get_exact_process_checkpoint([BUNDLE_A], observed_bundles=[BUNDLE_B])
-    if dual_accepted6 or b_accepted6:
         scenario6_result = 'fail'
-    elif not observation6['complete_window_observed'] or observation6['capture_degraded'] or str(process6['status']) != 'pass':
+        s6_reason = 'two-accepted-sessions-observed' if dual_accepted6 else 'B-create-accepted-instead-of-conflict-rejection'
+    elif b_rejected_terminal6 and str(terminal_process6['status']) != 'pass':
         scenario6_result = 'blocked'
+        s6_reason = 'A-active-state-unverifiable-after-B-terminal'
+    elif non_frozen_rejection6:
+        scenario6_result = 'blocked'
+        s6_reason = 'B-conflict-code-not-frozen:%s' % get_optional_property(b_terminal6, 'code', None)
+    elif not observation6['complete_window_observed'] or observation6['capture_degraded']:
+        scenario6_result = 'blocked'
+        s6_reason = 'B-conflict-observation-incomplete'
     elif str(b_terminal6['reason']) == 'B-frozen-conflict-code':
         scenario6_result = 'pass'
+        s6_reason = 'B-explicit-conflict-rejection'
     else:
         scenario6_result = 'blocked'
-    if dual_accepted6:
-        s6_reason = 'two-accepted-sessions-observed'
-    elif b_accepted6:
-        s6_reason = 'B-create-accepted-instead-of-conflict-rejection'
-    else:
-        s6_reason = 'B-explicit-conflict-rejection'
+        s6_reason = 'B-conflict-terminal-unclassified'
     results.append({'sequence_index': 6, 'scenario': 6, 'result': scenario6_result, 'reason': s6_reason,
                     'a_reauth_path': s6a_reauth_path, 'request_id_a': request6a, 'request_id_b': request6b,
-                    'a_accepted': bool(a_accepted6), 'b_rejected': not b_accepted6,
+                    'a_accepted': bool(a_accepted_count6 > 0), 'b_rejected': bool(b_rejected_terminal6),
                     'b_rejection_code': get_optional_property(b_terminal6, 'code', None),
                     'b_accepted': bool(b_accepted6),
-                    'accepted_session_count_in_window': a_accepted_count6 + b_accepted_count6,
-                    'machine_process_checkpoint': process6,
+                    'accepted_session_count_in_window': accepted6['accepted_count'],
+                    'machine_process_checkpoint': terminal_process6,
                     'conflict_capture': {'name': 'scenario-6-conflict', 'status': 'collected', 'review_only': False},
                     'observation': observation6['observation']})
     assert_scenario_capture_can_continue(results, observation6)
 
-    # S7 consumes only S6's verified active A request. No final semantic
-    # confirmation is requested.
+    # S7 consumes only a pass whose rejected-terminal A checkpoint was verified.
     if scenario6_result != 'pass':
+        s7_reason = 'not-run-after-functional-fail' if scenario6_result == 'fail' else 'not-run-after-platform-blocked'
         results.append({'sequence_index': 7, 'scenario': 7, 'result': 'blocked',
-                        'reason': 'S6-active-checkpoint-unavailable', 'active_bundle': None, 'request_id': None})
+                        'reason': s7_reason, 'active_bundle': None, 'request_id': None})
         partial_scenarios = list(results)
         return results
     active_bundle = BUNDLE_A
@@ -5281,7 +5326,8 @@ _OBSERVATION_SEMANTICS = ('ADJ-20260808-0002 strong-reliable protocol (mechanica
                           'BundleDump proves the bundle/main App stays installed; any extra Start/Stop/UI_STOP_SKIPPED/wrong '
                           'requestId/order is scenario invalid and stops later scenarios as not-run-due-to-invalid; scenario 5 '
                           'revokes via atomic Settings navigation steps with machine layout gates plus force-stop then :vpn absent '
-                          '+ bundle present; scenario 6 is fully machine: unique A CREATE_ACCEPTED, unique B CREATE_REJECTED with '
+                          '+ bundle present; scenario 6 is fully machine: B Start step3 branches through entry-or-authorization; optional '
+                          'B Allow step4 requires dismissed UI; A exact-process before B Start is the pre-gate; one post-terminal process checkpoint is observed after accepted/rejected terminal but gates only rejected; accepted_session_count_in_window counts only CREATE_ACCEPTED markers matching the two verified requestIds; unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with '
                           'frozen code 2203002, no dual accepted and no operator dual-active fields; scenario 7 binds S6 verified A '
                           'request only and never asks FINAL-CLEANUP; overall priority integrity invalid > scenario invalid > fail > '
                           'blocked > pass; probe results are recorded before any cleanup and never backfilled from finally')
@@ -5382,7 +5428,7 @@ def new_complete_record(freeze, scenarios, overall, record_status, started_at, e
             'scenario_2_rule': 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked',
             'scenario_2_assertions': scenario2.get('assertions') if scenario2 is not None else None,
             'scenario_5_rule': 'settings-app-info-force-stop revoke under strong protocol: step3 strict machine layout gate verifies the visible AppDetail subtree, expected label, and force-stop control; step4 force-stop capture is observation-only; final effect requires :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation',
-            'scenario_6_rule': 'machine-only conflict: unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002; dual accepted or B accepted is fail; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null',
+            'scenario_6_rule': 'machine-only conflict: B Start step3 uses entry-or-authorization; optional B Allow step4 requires authorization-dismissed; A exact-process before B Start is a pre-gate; one post-terminal checkpoint is observed after accepted/rejected terminal and gates only rejected; accepted_session_count_in_window counts CREATE_ACCEPTED markers matching verified A/B requestIds only, while foreign/missing accepted is invalid; B accepted or dual accepted is fail regardless of checkpoint status; frozen rejection passes only with verified A, while nonfrozen/rejected-terminal A unverifiable is blocked; no terminal remains runner blocked; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null',
             'scenario_7_rule': 'binds only S6 machine-verified active A request/bundle; expects UI_STOP/onDestroy/pre-destroy/destroy-begin and :vpn final state; wrong bundle stop or extra start is invalid; no FINAL-CLEANUP operator confirmation; uninstall cleanup only after terminal assessment; finally-absent never backfills',
             's3_strict_process_boundary_gate': 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked',
             's3_clean_reactivation_proof': s3_proof_value,

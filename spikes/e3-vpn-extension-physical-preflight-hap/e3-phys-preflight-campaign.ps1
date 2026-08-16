@@ -1372,6 +1372,7 @@ function Get-SimulatedLayoutDocument {
     $profile = if ($null -ne $override) { [string]$override } elseif ($Name -match 'authorization') { 'authorization' }
         elseif ($Name -match 'settings-vpn-page') { 'settings-vpn' }
         elseif ($Name -match 'app-info') { 'settings-app-info-a' }
+        elseif ($Name -match 'scenario-6-after-allow-b') { 'entry-b' }
         elseif ($Name -match '(?:entry-a|after-allow|reactivation|scenario-3-|scenario-7-)') { 'entry-a' }
         elseif ($Name -match '(?:entry-b|after-deny|scenario-4-|scenario-6-conflict)') { 'entry-b' }
         else { 'generic' }
@@ -1524,7 +1525,12 @@ function Get-SimulationHdcResult {
         if ($Operation -eq 'ReceiveScreen') {
             [IO.File]::WriteAllBytes($destination, [byte[]](1, 2, 3, 4))
         } else {
-            Write-JsonFile $destination (Get-SimulatedLayoutDocument ([string]$Parameters.Name))
+            $invalidLayouts = @(Get-OptionalProperty $script:Simulation 'invalid_layout_json' @())
+            if ([string]$Parameters.Name -in $invalidLayouts) {
+                [IO.File]::WriteAllText($destination, '{invalid-layout-json', [Text.UTF8Encoding]::new($false))
+            } else {
+                Write-JsonFile $destination (Get-SimulatedLayoutDocument ([string]$Parameters.Name))
+            }
         }
     }
     return [pscustomobject]@{ ExitCode = $exitCode; Stdout = $stdout; Stderr = ''; Simulated = $true }
@@ -2395,6 +2401,7 @@ function Invoke-MechanicalStep {
         [AllowNull()][string]$CaptureAfterExpectedBundle = $null,
         [switch]$CaptureAfterReviewOnly,
         [switch]$CaptureAfterObservationOnly,
+        [switch]$CaptureAfterMismatchIsBlocked,
         [double]$VerifyTimeoutSeconds = 12.0
     )
     $scenario = [int]$Context.Scenario
@@ -2433,7 +2440,7 @@ function Invoke-MechanicalStep {
             $captureAfter = [ordered]@{ status = $captureStatus; name = $CaptureAfterName; review_only = $true; note = 'review-only capture; never a semantic operator verdict' }
             Add-TranscriptRecord 'review-only-layout-artifact' ([ordered]@{ scenario = $scenario; checkpoint = $captureAfter })
         } elseif (-not [string]::IsNullOrWhiteSpace($CaptureAfterProfile)) {
-            $captureAfter = Invoke-LayoutCheckpoint $scenario $CaptureAfterName $CaptureAfterProfile $CaptureAfterExpectedBundle -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -ObservationOnly:$CaptureAfterObservationOnly
+            $captureAfter = Invoke-LayoutCheckpoint $scenario $CaptureAfterName $CaptureAfterProfile $CaptureAfterExpectedBundle -StepIndex $StepIndex -StepId $stepId -ExpectedAction $ExpectedAction -ObservationOnly:$CaptureAfterObservationOnly -MismatchIsBlocked:$CaptureAfterMismatchIsBlocked
         } else {
             $captureStatus = Invoke-Capture $CaptureAfterName $scenario -ObservationOnly:$CaptureAfterObservationOnly
             if ($captureStatus -ne 'collected') {
@@ -2580,6 +2587,34 @@ function Assert-ScenarioEventContract {
         }
     }
     return $true
+}
+
+function Get-AcceptedMarkerAssessment {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$VerifiedRequests
+    )
+    # Count only accepted markers whose requestId exactly matches a machine-verified request.
+    # Missing and foreign requestIds remain unexpected and never contribute to the record count.
+    $counts = @($VerifiedRequests | ForEach-Object { 0 })
+    $unexpected = [Collections.Generic.List[object]]::new()
+    foreach ($event in $Events) {
+        $text = [string]$event.text
+        if ($text -notmatch 'CREATE_ACCEPTED') { continue }
+        $matched = $false
+        for ($index = 0; $index -lt $VerifiedRequests.Count; $index++) {
+            $requestId = [string]$VerifiedRequests[$index].RequestId
+            if ($text -match "requestId=$([regex]::Escape($requestId))(\||\s|$)") {
+                $counts[$index] = [int]$counts[$index] + 1
+                $matched = $true
+                break
+            }
+        }
+        if (-not $matched) { $unexpected.Add($event) }
+    }
+    $acceptedCount = 0
+    foreach ($count in $counts) { $acceptedCount += [int]$count }
+    return [pscustomobject]@{ Counts = @($counts); AcceptedCount = $acceptedCount; Unexpected = @($unexpected) }
 }
 
 function Get-RequestIdFromEvents {
@@ -3320,11 +3355,11 @@ function Test-CapturedLayoutProfile {
     )
     $artifact = @($script:CaptureArtifacts | Where-Object { [string]$_.name -eq $Name } | Select-Object -Last 1)
     if ($artifact.Count -ne 1 -or [string]$artifact[0].status -ne 'collected') {
-        return [pscustomobject]@{ status = 'unverifiable'; reason = 'capture-not-collected'; profile = $Profile; matched = @() }
+        return [pscustomobject]@{ status = 'unverifiable'; reason = 'capture-not-collected'; profile = $Profile; matched = @(); required = @() }
     }
     $layout = $null
     try { $layout = Get-Content -LiteralPath ([string]$artifact[0].layout_path) -Raw | ConvertFrom-Json -Depth 80 } catch {
-        return [pscustomobject]@{ status = 'unverifiable'; reason = 'layout-json-invalid'; profile = $Profile; matched = @() }
+        return [pscustomobject]@{ status = 'unverifiable'; reason = 'layout-json-invalid'; profile = $Profile; matched = @(); required = @() }
     }
     $facts = @(Get-LayoutFacts $layout)
     $joined = ($facts -join "`n").ToLowerInvariant()
@@ -3463,7 +3498,8 @@ function Invoke-LayoutCheckpoint {
         [AllowNull()][int]$StepIndex = $null,
         [AllowNull()][string]$StepId = $null,
         [AllowNull()][string]$ExpectedAction = $null,
-        [switch]$ObservationOnly
+        [switch]$ObservationOnly,
+        [switch]$MismatchIsBlocked
     )
     # Machine-only deterministic layout gate. The operator never judges the screen: wrong/unexpected
     # UI is protocol invalid; uncollected capture is also invalid at a decisive gate. Platform "no
@@ -3534,6 +3570,12 @@ function Invoke-LayoutCheckpoint {
     Add-TranscriptRecord 'machine-layout-checkpoint' ([ordered]@{ scenario = $Scenario; checkpoint = $checkpoint })
     if (-not $matching) {
         $suffix = if ([string]$assessment.status -eq 'unverifiable') { 'layout-unverifiable' } else { 'layout-mismatch' }
+        if ($MismatchIsBlocked) {
+            # The new S6 authorization UI state is platform-uncertain after Allow, so both
+            # outcomes fail closed while preserving whether dismissal mismatched or was unverifiable.
+            $blockedReason = if ([string]$assessment.status -eq 'unverifiable') { 'authorization-dismissal-unverifiable' } else { 'authorization-not-dismissed' }
+            throw "scenario-$Scenario machine-verification-blocked step=$StepIndex reason=${blockedReason}:$([string]$assessment.reason)"
+        }
         Throw-ScenarioInvalid -Scenario $Scenario -Reason "layout-checkpoint-$Name-$suffix" -StepIndex $StepIndex -StepId $StepId -ExpectedAction $ExpectedAction -MachinePostcondition $checkpoint -CaptureAfter ([ordered]@{ status = $captureStatus; name = $Name })
     }
     return $checkpoint
@@ -4011,7 +4053,7 @@ function Invoke-StrongLiveCampaign {
     if ($null -ne $s3Entry -and $s3Entry -is [Collections.IDictionary] -and $s3Entry.Contains('clean_reactivation_proof') -and $null -ne $s3Entry.clean_reactivation_proof) { $s3Entry.clean_reactivation_proof = [bool]$freshCreateProof }
     Assert-ScenarioCaptureCanContinue $results $observation5
 
-    # S6: exactly A Start then B Start. Only a frozen explicit B conflict code is a passing conflict result.
+    # S6: A Start, B Start, and optional B Allow on first authorization. Only a frozen explicit B conflict code passes.
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleA })
     $entry6A = Invoke-LayoutCheckpoint 6 'scenario-6-entry-a' 'entry' $script:BundleA
     $context6 = New-ScenarioContext 6
@@ -4071,11 +4113,13 @@ function Invoke-StrongLiveCampaign {
         # scenario invalid. B Start is not asked; S7 is not-run after the fail/blocked and finally
         # cleanup still runs.
         $observation6 = Complete-ScenarioContext $context6
+        $accepted6A = Get-AcceptedMarkerAssessment $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A })
+        if ($accepted6A.Unexpected.Count -gt 0) { Throw-ScenarioInvalid 6 'unexpected-accepted-request-in-window' -StepIndex 1 -StepId $step6A.StepId -ExpectedAction $step6A.ExpectedAction }
         [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }))
         $s6AResult = if ($extensionReject6A) { 'fail' } else { 'blocked' }
         $s6AReason = if ($extensionReject6A) { 'A-create-rejected-or-invalid-fd' } else { 'authorization-outcome-unclassified' }
         $s7AReason = if ($extensionReject6A) { 'not-run-after-functional-fail' } else { 'not-run-after-platform-blocked' }
-        $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $s6AResult; reason = $s6AReason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $null; a_accepted = $false; a_on_create = [bool]$onCreate6A; a_extension_rejected = [bool]$extensionReject6A; a_auth_unclassified = [bool]$authUnclassified6A; b_rejected = $null; b_rejection_code = $null; b_accepted = $false; accepted_session_count_in_window = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' }).Count; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'not-required'; review_only = $false }; observation = $observation6.Observation })
+        $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $s6AResult; reason = $s6AReason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $null; a_accepted = $false; a_on_create = [bool]$onCreate6A; a_extension_rejected = [bool]$extensionReject6A; a_auth_unclassified = [bool]$authUnclassified6A; b_rejected = $null; b_rejection_code = $null; b_accepted = $false; accepted_session_count_in_window = [int]$accepted6A.AcceptedCount; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'not-required'; review_only = $false }; observation = $observation6.Observation })
         $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = $s7AReason; active_bundle = $null; request_id = $null })
         $script:PartialScenarios = @($results)
         return @($results)
@@ -4090,9 +4134,14 @@ function Invoke-StrongLiveCampaign {
     }
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $script:BundleB })
     $entry6B = Invoke-LayoutCheckpoint 6 'scenario-6-entry-b' 'entry' $script:BundleB
-    $step6B = Invoke-MechanicalStep $context6 3 '点击测试 App B 的 Start' $pre6B { param($events) Test-UniqueStartCondition $events $script:BundleB } -CaptureBefore $entry6B -CaptureAfterName 'scenario-6-conflict'
+    $step6B = Invoke-MechanicalStep $context6 3 '点击测试 App B 的 Start' $pre6B { param($events) Test-UniqueStartCondition $events $script:BundleB } -CaptureBefore $entry6B
     $request6B = [string]$step6B.Outcome.request_id
     Register-VerifiedRequest $request6B $script:BundleB 6
+    $bTransition6 = Invoke-LayoutChoiceCheckpoint 6 'scenario-6-conflict' $script:BundleB -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction
+    if ([string]$bTransition6.selected_profile -eq 'authorization') {
+        $allowBPrecondition = [ordered]@{ status = 'pass'; reason = 'B-authorization-layout-and-request-machine-verified'; request_id = $request6B }
+        [void](Invoke-MechanicalStep $context6 4 '点击 Allow' $allowBPrecondition { param($events) Test-NoOperatorAction $events } -CaptureBefore $bTransition6 -CaptureAfterName 'scenario-6-after-allow-b' -CaptureAfterProfile 'authorization-dismissed' -CaptureAfterExpectedBundle $script:BundleB -CaptureAfterMismatchIsBlocked)
+    }
     $bTerminal6 = Wait-MachineCondition $context6 ([long]$step6B.AnchorByte) ([DateTimeOffset]$step6B.PromptAt) {
         param($events)
         # ADJ-20260808-0003 (C6): re-assert the verified B Start window before judging the B
@@ -4127,63 +4176,60 @@ function Invoke-StrongLiveCampaign {
         }
         return [pscustomobject]@{ status = 'pending'; reason = 'B-create-terminal-missing' }
     }
-    # ADJ-20260808-0003 (C6): a non-frozen B rejection code is a platform result with an
-    # uncertain outcome: block the scenario (never scenario invalid), complete the current
-    # observation, record S6 blocked `B-conflict-code-not-frozen:<code>`, and leave S7 as
-    # not-run-after-platform-blocked. Only extra operations / wrong request / wrong order are
-    # scenario invalid (already enforced by the mechanical step conditions above). Finally
-    # cleanup + seal still run for the blocked S6/S7 pair.
-    if ([string]$bTerminal6.status -eq 'blocked' -and [string]$bTerminal6.reason -match '^B-conflict-code-not-frozen') {
-        $observation6 = Complete-ScenarioContext $context6
-        [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }, [ordered]@{ Bundle = $script:BundleB; RequestId = $request6B }))
-        $bCode6 = Get-OptionalProperty $bTerminal6 'code' $null
-        $results.Add([ordered]@{
-            sequence_index = 6; scenario = 6; result = 'blocked'; reason = "B-conflict-code-not-frozen:$bCode6"
-            a_reauth_path = $s6AReauthPath
-            request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted6; b_rejected = $true; b_rejection_code = $bCode6; b_accepted = $false
-            accepted_session_count_in_window = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' }).Count
-            conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'collected'; review_only = $false }
-            observation = $observation6.Observation
-        })
-        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = 'not-run-after-platform-blocked'; active_bundle = $null; request_id = $null })
-        $script:PartialScenarios = @($results)
-        return @($results)
+    $nonFrozenRejection6 = [string]$bTerminal6.status -eq 'blocked' -and [string]$bTerminal6.reason -match '^B-conflict-code-not-frozen'
+    if ([string]$bTerminal6.status -eq 'blocked' -and -not $nonFrozenRejection6) {
+        $terminalStep6 = if ([string]$bTransition6.selected_profile -eq 'authorization') { 4 } else { 3 }
+        throw "scenario-6 machine-verification-blocked step=$terminalStep6 reason=$([string](Get-OptionalProperty $bTerminal6 'reason' 'machine-verification-blocked'))"
     }
-    # ADJ-20260808-0003 (C6): capture degradation surfaces as blocked (infra or non-infra); a
-    # plain runner blocked is never a scenario invalid.
-    if ([string]$bTerminal6.status -eq 'blocked') {
-        throw "scenario-6 machine-verification-blocked step=3 reason=$([string](Get-OptionalProperty $bTerminal6 'reason' 'machine-verification-blocked'))"
-    }
-    if ([string]$bTerminal6.status -ne 'pass') { Throw-ScenarioInvalid 6 ([string]$bTerminal6.reason) -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
-    $bAccepted6 = [string]$bTerminal6.reason -eq 'B-create-accepted'
-    if ($bAccepted6) { [void]$script:SimulationActiveBundles.Add($script:BundleB) }
+    if ([string]$bTerminal6.status -notin @('pass', 'blocked')) { Throw-ScenarioInvalid 6 ([string]$bTerminal6.reason) -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
+
+    $bAcceptedTerminal6 = [string]$bTerminal6.status -eq 'pass' -and [string]$bTerminal6.reason -eq 'B-create-accepted'
+    $bRejectedTerminal6 = -not $bAcceptedTerminal6
+    if ($bAcceptedTerminal6) { [void]$script:SimulationActiveBundles.Add($script:BundleB) }
+    # Observe one post-terminal process checkpoint for both terminal outcomes. It gates only a
+    # rejected B; accepted evidence remains a functional fail regardless of checkpoint status.
+    $terminalProcess6 = if ($bAcceptedTerminal6) { Get-ExactProcessCheckpoint @($script:BundleA, $script:BundleB) }
+        else { Get-ExactProcessCheckpoint @($script:BundleA) -ObservedBundles @($script:BundleB) }
     $observation6 = Complete-ScenarioContext $context6
+    $accepted6 = Get-AcceptedMarkerAssessment $observation6.Events @(
+        [ordered]@{ Bundle = $script:BundleA; RequestId = $request6A },
+        [ordered]@{ Bundle = $script:BundleB; RequestId = $request6B }
+    )
+    if ($accepted6.Unexpected.Count -gt 0) { Throw-ScenarioInvalid 6 'unexpected-accepted-request-in-window' -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
     [void](Assert-ScenarioEventContract 6 $observation6.Events @([ordered]@{ Bundle = $script:BundleA; RequestId = $request6A }, [ordered]@{ Bundle = $script:BundleB; RequestId = $request6B }))
-    # ADJ-20260808-0003: scan the complete window for any accepted request outside the two
-    # registered ids (CREATE_ACCEPTED markers are now inside the allowed requestId range).
-    $unexpectedAccepted6 = @($observation6.Events | Where-Object {
-        [string]$_.text -match 'CREATE_ACCEPTED' -and
-        [string]$_.text -notmatch "requestId=$([regex]::Escape($request6A))(\||\s|$)" -and
-        [string]$_.text -notmatch "requestId=$([regex]::Escape($request6B))(\||\s|$)"
-    })
-    if ($unexpectedAccepted6.Count -gt 0) { Throw-ScenarioInvalid 6 'unexpected-accepted-request-in-window' -StepIndex 3 -StepId $step6B.StepId -ExpectedAction $step6B.ExpectedAction }
-    $aAcceptedCount6 = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' -and [string]$_.text -match "requestId=$([regex]::Escape($request6A))(\||\s|$)" }).Count
-    $bAcceptedCount6 = @($observation6.Events | Where-Object { [string]$_.text -match 'CREATE_ACCEPTED' -and [string]$_.text -match "requestId=$([regex]::Escape($request6B))(\||\s|$)" }).Count
+    $aAcceptedCount6 = [int]$accepted6.Counts[0]
+    $bAcceptedCount6 = [int]$accepted6.Counts[1]
+    $bAccepted6 = $bAcceptedCount6 -gt 0
     $dualAccepted6 = $aAcceptedCount6 -gt 0 -and $bAcceptedCount6 -gt 0
-    # ADJ-20260808-0003: when B was rejected, the B Extension process may still be alive (the
-    # platform may spawn the Extension before rejecting the create); B process state is observed
-    # but never required absent. A `:vpn` present remains the required A-side window-end check.
-    $process6 = if ($bAccepted6) { Get-ExactProcessCheckpoint @($script:BundleA, $script:BundleB) } else { Get-ExactProcessCheckpoint @($script:BundleA) -ObservedBundles @($script:BundleB) }
-    $scenario6Result = if ($dualAccepted6 -or $bAccepted6) { 'fail' } elseif (-not $observation6.CompleteWindowObserved -or $observation6.CaptureDegraded -or [string]$process6.status -ne 'pass') { 'blocked' } elseif ([string]$bTerminal6.reason -eq 'B-frozen-conflict-code') { 'pass' } else { 'blocked' }
-    $s6Reason = if ($dualAccepted6) { 'two-accepted-sessions-observed' } elseif ($bAccepted6) { 'B-create-accepted-instead-of-conflict-rejection' } else { 'B-explicit-conflict-rejection' }
-    # ADJ-20260808-0003: the scenario-6-conflict capture is a required decisive capture, never
-    # review-only; the record must not claim review_only semantics for a required capture.
-    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]$aAccepted6; b_rejected = (-not $bAccepted6); b_rejection_code = Get-OptionalProperty $bTerminal6 'code' $null; b_accepted = [bool]$bAccepted6; accepted_session_count_in_window = $aAcceptedCount6 + $bAcceptedCount6; machine_process_checkpoint = $process6; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'collected'; review_only = $false }; observation = $observation6.Observation })
+
+    if ($bAccepted6) {
+        $scenario6Result = 'fail'
+        $s6Reason = if ($dualAccepted6) { 'two-accepted-sessions-observed' } else { 'B-create-accepted-instead-of-conflict-rejection' }
+    } elseif ($bRejectedTerminal6 -and [string]$terminalProcess6.status -ne 'pass') {
+        $scenario6Result = 'blocked'
+        $s6Reason = 'A-active-state-unverifiable-after-B-terminal'
+    } elseif ($nonFrozenRejection6) {
+        $scenario6Result = 'blocked'
+        $s6Reason = "B-conflict-code-not-frozen:$(Get-OptionalProperty $bTerminal6 'code' $null)"
+    } elseif (-not $observation6.CompleteWindowObserved -or $observation6.CaptureDegraded) {
+        $scenario6Result = 'blocked'
+        $s6Reason = 'B-conflict-observation-incomplete'
+    } elseif ([string]$bTerminal6.reason -eq 'B-frozen-conflict-code') {
+        $scenario6Result = 'pass'
+        $s6Reason = 'B-explicit-conflict-rejection'
+    } else {
+        $scenario6Result = 'blocked'
+        $s6Reason = 'B-conflict-terminal-unclassified'
+    }
+    # The decisive capture and the single true terminal process reading are preserved on every
+    # pass/fail/blocked terminal branch. Foreign accepted markers were rejected before this record.
+    $results.Add([ordered]@{ sequence_index = 6; scenario = 6; result = $scenario6Result; reason = $s6Reason; a_reauth_path = $s6AReauthPath; request_id_a = $request6A; request_id_b = $request6B; a_accepted = [bool]($aAcceptedCount6 -gt 0); b_rejected = [bool]$bRejectedTerminal6; b_rejection_code = Get-OptionalProperty $bTerminal6 'code' $null; b_accepted = [bool]$bAccepted6; accepted_session_count_in_window = [int]$accepted6.AcceptedCount; machine_process_checkpoint = $terminalProcess6; conflict_capture = [ordered]@{ name = 'scenario-6-conflict'; status = 'collected'; review_only = $false }; observation = $observation6.Observation })
     Assert-ScenarioCaptureCanContinue $results $observation6
 
-    # S7 consumes only S6's verified active A request. No final semantic confirmation is requested.
+    # S7 consumes only a pass whose rejected-terminal A checkpoint was verified.
     if ($scenario6Result -ne 'pass') {
-        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = 'S6-active-checkpoint-unavailable'; active_bundle = $null; request_id = $null })
+        $s7Reason = if ($scenario6Result -eq 'fail') { 'not-run-after-functional-fail' } else { 'not-run-after-platform-blocked' }
+        $results.Add([ordered]@{ sequence_index = 7; scenario = 7; result = 'blocked'; reason = $s7Reason; active_bundle = $null; request_id = $null })
         $script:PartialScenarios = @($results)
         return @($results)
     }
@@ -4449,7 +4495,7 @@ function New-CompleteRecord {
         confirmation_contract_sha256 = $ConfirmationContractSha256
         preflight_inputs_frozen_at = $Freeze.preflight_inputs_frozen_at
         scenario_window_seconds = 60
-        observation_semantics = 'ADJ-20260808-0002 strong-reliable protocol (mechanical-action-only-machine-verified-v1): one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds first mechanical action prompt through last action plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; operator sees only single-step "现在只做X，完成后按回车" and Read-Host is mechanical enter only (no READY/ACK/token/y-n semantic gates); machine layout gates (deterministic-layout-v1) before Allow/Deny and after decisive captures; scenario 1 is fully machine-operated install; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); process probes pidof only the <bundle>:vpn Extension ability process (ADJ-20260808-0001) while BundleDump proves the bundle/main App stays installed; any extra Start/Stop/UI_STOP_SKIPPED/wrong requestId/order is scenario invalid and stops later scenarios as not-run-due-to-invalid; scenario 5 revokes via atomic Settings navigation steps with machine layout gates plus force-stop then :vpn absent + bundle present; scenario 6 is fully machine: unique A CREATE_ACCEPTED, unique B CREATE_REJECTED with frozen code 2203002, no dual accepted and no operator dual-active fields; scenario 7 binds S6 verified A request only and never asks FINAL-CLEANUP; overall priority integrity invalid > scenario invalid > fail > blocked > pass; probe results are recorded before any cleanup and never backfilled from finally'
+        observation_semantics = 'ADJ-20260808-0002 strong-reliable protocol (mechanical-action-only-machine-verified-v1): one continuous campaign HiLog capture; pre-scenario byte anchors exclude prior buffer; device_observed_at bounds first mechanical action prompt through last action plus at least 60 seconds; frozen CST=>+08:00 zone map; device clock skew tolerance 3s; operator sees only single-step "现在只做X，完成后按回车" and Read-Host is mechanical enter only (no READY/ACK/token/y-n semantic gates); machine layout gates (deterministic-layout-v1) before Allow/Deny and after decisive captures; scenario 1 is fully machine-operated install; scenario 3/7 terminal prefers callback destroy terminal plus post-destroy fd snapshot, otherwise strict-process-boundary needs unique stop/onDestroy/destroy-begin plus consecutive absent host process probes (>=2, >=3s apart, bundle present for scenario 3); process probes pidof only the <bundle>:vpn Extension ability process (ADJ-20260808-0001) while BundleDump proves the bundle/main App stays installed; any extra Start/Stop/UI_STOP_SKIPPED/wrong requestId/order is scenario invalid and stops later scenarios as not-run-due-to-invalid; scenario 5 revokes via atomic Settings navigation steps with machine layout gates plus force-stop then :vpn absent + bundle present; scenario 6 is fully machine: B Start step3 branches through entry-or-authorization; optional B Allow step4 requires dismissed UI; A exact-process before B Start is the pre-gate; one post-terminal process checkpoint is observed after accepted/rejected terminal but gates only rejected; accepted_session_count_in_window counts only CREATE_ACCEPTED markers matching the two verified requestIds; unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002, no dual accepted and no operator dual-active fields; scenario 7 binds S6 verified A request only and never asks FINAL-CLEANUP; overall priority integrity invalid > scenario invalid > fail > blocked > pass; probe results are recorded before any cleanup and never backfilled from finally'
         settings_reallow_expected_path = $Freeze.settings_reallow_expected_path
         settings_reallow_path_policy = $Freeze.settings_reallow_path_policy
         settings_revoke_mechanism = $Freeze.settings_revoke_mechanism
@@ -4466,7 +4512,7 @@ function New-CompleteRecord {
             scenario_2_rule = 'overall is pass only when allow, vpn_on_create, and vpn_connection_create_fd are all pass; fail dominates blocked'
             scenario_2_assertions = $(if ($null -ne $scenario2) { $scenario2.assertions } else { $null })
             scenario_5_rule = 'settings-app-info-force-stop revoke under strong protocol: step3 strict machine layout gate verifies the visible AppDetail subtree, expected label, and force-stop control; step4 force-stop capture is observation-only; final effect requires :vpn Extension process consecutive absent plus bundle present; no operator technical-fact confirmation'
-            scenario_6_rule = 'machine-only conflict: unique A CREATE_ACCEPTED + unique B CREATE_REJECTED with frozen code 2203002; dual accepted or B accepted is fail; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null'
+            scenario_6_rule = 'machine-only conflict: B Start step3 uses entry-or-authorization; optional B Allow step4 requires authorization-dismissed; A exact-process before B Start is a pre-gate; one post-terminal checkpoint is observed after accepted/rejected terminal and gates only rejected; accepted_session_count_in_window counts CREATE_ACCEPTED markers matching verified A/B requestIds only, while foreign/missing accepted is invalid; B accepted or dual accepted is fail regardless of checkpoint status; frozen rejection passes only with verified A, while nonfrozen/rejected-terminal A unverifiable is blocked; no terminal remains runner blocked; any extra Start/Stop/order deviation is invalid; no_dual/dual operator fields are non-authoritative and must be absent/null'
             scenario_7_rule = 'binds only S6 machine-verified active A request/bundle; expects UI_STOP/onDestroy/pre-destroy/destroy-begin and :vpn final state; wrong bundle stop or extra start is invalid; no FINAL-CLEANUP operator confirmation; uninstall cleanup only after terminal assessment; finally-absent never backfills'
             s3_strict_process_boundary_gate = 'scenario 3 strict-process-boundary fallback pass additionally requires scenario 5 same-bundle fresh request CREATE_ACCEPTED plus post-create open (clean_reactivation_proof); without it overall stays blocked'
             # Tri-state mirror of the scenario-3 entry: true/false when S3 was measured with a

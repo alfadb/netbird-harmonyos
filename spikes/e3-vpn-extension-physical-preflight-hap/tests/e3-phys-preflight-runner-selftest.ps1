@@ -235,6 +235,25 @@ function New-SimulationFixture {
     }
 }
 
+function New-S6BAuthorizationFixture {
+    param([ValidateSet('frozen', 'accepted', 'none')][string]$Terminal = 'frozen')
+    $fixture = New-SimulationFixture
+    $fixture.layout_profiles['scenario-6-conflict'] = Get-Content -LiteralPath (Join-Path $project 'tests\fixtures\s6-b-authorization-production-0005.json') -Raw | ConvertFrom-Json -Depth 60
+    $events = [Collections.Generic.List[object]]::new()
+    $events.Add([ordered]@{ offset_seconds = 1; step_index = 1; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" })
+    $events.Add([ordered]@{ offset_seconds = 2; step_index = 1; text = "$('<DEVICE_OBSERVED_AT>') VPN_ONCREATE|bundle=cn.alfadb.netbird.e3physvpna|requestId=a6" })
+    $events.Add([ordered]@{ offset_seconds = 3; step_index = 1; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED" })
+    $events.Add([ordered]@{ offset_seconds = 4; step_index = 1; text = "$('<DEVICE_OBSERVED_AT>') VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED" })
+    $events.Add([ordered]@{ offset_seconds = 8; step_index = 3; text = "$('<DEVICE_OBSERVED_AT>') UI_START|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" })
+    if ($Terminal -eq 'frozen') {
+        $events.Add([ordered]@{ offset_seconds = 9; step_index = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=code=2203002,name=BusinessError,message=conflict" })
+    } elseif ($Terminal -eq 'accepted') {
+        $events.Add([ordered]@{ offset_seconds = 9; step_index = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED" })
+    }
+    $fixture.scenario_events.'6' = @($events)
+    return $fixture
+}
+
 function Assert-ManifestAndSeal {
     param([string]$EvidencePath)
     $manifestPath = Join-Path $EvidencePath 'hash-manifest.json'
@@ -918,6 +937,8 @@ try {
     Assert-True ([string]$liveRecord.freeze_manifest_sha256 -eq (Get-Sha256 $liveFreezePath)) 'freeze self hash missing or wrong'
     Assert-True ([string]$liveRecord.prior_blocked_binding -eq 'N/A') 'unbound record must project prior_blocked_binding N/A'
     Assert-True ($liveRecord.scenarios[5].a_accepted -eq $true -and $liveRecord.scenarios[5].reason -eq 'B-explicit-conflict-rejection' -and [int]$liveRecord.scenarios[5].b_rejection_code -eq 2203002) 'scenario 6 machine conflict result mismatch'
+    Assert-True ([int]$liveRecord.scenarios[5].accepted_session_count_in_window -eq 2) 'scenario 6 accepted marker count did not use verified A/B request semantics'
+    Assert-True ((@($liveRecord.scenarios[5].observation.operator_steps | ForEach-Object { [int]$_.step_index }) -join ',') -eq '1,3') 'scenario 6 direct-entry path unexpectedly added Allow or changed step numbering'
     Assert-True ($null -eq $liveRecord.scenarios[5].PSObject.Properties['no_dual_active_confirmed'] -and $null -eq $liveRecord.scenarios[5].PSObject.Properties['dual_active_confirmed'] -and $null -eq $liveRecord.scenarios[5].PSObject.Properties['operator_state']) 'scenario 6 retained semantic operator fields'
     Assert-True ($liveRecord.scenarios[6].post_cleanup_capture -eq $true -and $liveRecord.scenarios[6].post_cleanup_capture_name -eq 'scenario-7-post-cleanup') 'scenario 7 post-cleanup screenshot naming mismatch'
     Assert-True ($liveRecord.reviewer -eq 'pending' -and $liveRecord.reviewed_at -eq 'pending' -and $liveRecord.record_status -notmatch '^reviewed') 'runner wrote reviewed state'
@@ -981,6 +1002,125 @@ try {
         $faultPath = Join-Path $livePaths.Raw "fault-scenario-7-$suffix.txt"
         Assert-True (Test-Path -LiteralPath $faultPath -PathType Leaf) "fault artifact missing: $suffix"
         Assert-True ((Get-Sha256 $faultPath) -eq [string]$faultArtifact.sha256) "fault artifact hash mismatch: $suffix"
+    }
+
+    Write-Host 'SELFTEST_PHASE=s6-b-production-authorization-allow-frozen-pass'
+    $s6BProductionFixture = New-S6BAuthorizationFixture
+    $s6BProductionPath = Write-JsonFixture 'simulation-s6-b-production-authorization.json' $s6BProductionFixture
+    $s6BProductionPaths = New-CasePaths 's6-b-production-authorization'
+    $s6BProductionRun = Invoke-Runner $liveFreezePath $s6BProductionPaths.Evidence $s6BProductionPaths.Raw -FixturePath $s6BProductionPath
+    Assert-True ($s6BProductionRun.ExitCode -eq 0) "S6 B production authorization path failed: $($s6BProductionRun.Text)"
+    Assert-ManifestAndSeal $s6BProductionPaths.Evidence
+    Assert-ProjectionChain $s6BProductionPaths.Evidence
+    $s6BProductionRecord = Get-Content -LiteralPath (Join-Path $s6BProductionPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    $s6BProductionS6 = $s6BProductionRecord.scenarios[5]
+    Assert-True ($s6BProductionS6.result -eq 'pass' -and $s6BProductionS6.reason -eq 'B-explicit-conflict-rejection' -and [int]$s6BProductionS6.b_rejection_code -eq 2203002) 'S6 production authorization frozen conflict did not pass'
+    Assert-True ([int]$s6BProductionS6.accepted_session_count_in_window -eq 2) 'S6 production authorization accepted marker count mismatch'
+    $s6BLayoutRefs = @($s6BProductionRecord.layout_state_reference | ForEach-Object { [string]$_.name })
+    Assert-True ('scenario-6-conflict' -in $s6BLayoutRefs -and 'scenario-6-after-allow-b' -in $s6BLayoutRefs) 'S6 production authorization record omitted the decisive/new capture references'
+    Assert-True ((@($s6BProductionS6.observation.operator_steps | ForEach-Object { [int]$_.step_index }) -join ',') -eq '1,3,4') 'S6 authorization path step numbering is not A Start=1, B Start=3, B Allow=4'
+    $s6BProductionWait = Get-Content -LiteralPath (Join-Path $s6BProductionPaths.Evidence 'operator-wait-state.json') -Raw | ConvertFrom-Json -Depth 60
+    $s6BAllowHistory = @($s6BProductionWait.history | Where-Object { [int]$_.scenario -eq 6 -and [int]$_.step_index -eq 4 })
+    Assert-True (@($s6BAllowHistory | Where-Object { [string](Get-OptionalProperty $_.capture_before 'selected_profile' '') -eq 'authorization' }).Count -gt 0) 'S6 B Allow capture_before did not bind the authorization choice checkpoint'
+    Assert-True (@($s6BAllowHistory | Where-Object { [string](Get-OptionalProperty $_.capture_after 'profile' '') -eq 'authorization-dismissed' }).Count -gt 0) 'S6 B Allow capture_after did not bind authorization-dismissed'
+    Assert-True (@($s6BAllowHistory | Where-Object { [string](Get-OptionalProperty $_.machine_precondition 'reason' '') -eq 'B-authorization-layout-and-request-machine-verified' }).Count -gt 0) 'S6 B Allow did not use the literal layout/request machine precondition'
+    Assert-True (@($s6BAllowHistory | Where-Object { $null -ne $_.machine_precondition.PSObject.Properties['states'] }).Count -eq 0) 'S6 B Allow reused a stale process checkpoint as its precondition'
+    $s6ProductionText = Get-Content -LiteralPath (Join-Path $project 'tests\fixtures\s6-b-authorization-production-0005.json') -Raw
+    Assert-True ($s6ProductionText -match 'E3 Preflight B' -and $s6ProductionText -notmatch 'PLA-AL10|PHYS-1|192\.168\.|中国电信|中国联通|session31') 'S6 production-derived fixture lost B label or contains forbidden source fields'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-authorization-resample'
+    $s6BResampleFixture = New-S6BAuthorizationFixture
+    $s6BResampleFixture.layout_profiles['scenario-6-conflict'] = 'authorization'
+    $s6BResampleFixture | Add-Member -NotePropertyName layout_ready_delays -NotePropertyValue ([ordered]@{ 'scenario-6-conflict' = 3 }) -Force
+    $s6BResamplePath = Write-JsonFixture 'simulation-s6-b-authorization-resample.json' $s6BResampleFixture
+    $s6BResamplePaths = New-CasePaths 's6-b-authorization-resample'
+    $s6BResampleRun = Invoke-Runner $liveFreezePath $s6BResamplePaths.Evidence $s6BResamplePaths.Raw -FixturePath $s6BResamplePath
+    Assert-True ($s6BResampleRun.ExitCode -eq 0) "S6 B authorization resample failed: $($s6BResampleRun.Text)"
+    $s6BResampleTranscript = @(Get-Content -LiteralPath (Join-Path $s6BResamplePaths.Evidence 'projection\transcript.redacted.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 60 })
+    Assert-True (@($s6BResampleTranscript | Where-Object { [string]$_.payload.kind -eq 'machine-layout-choice-resample' -and [string]$_.payload.data.name -eq 'scenario-6-conflict' }).Count -gt 0) 'S6 B authorization choice did not resample'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-allow-no-terminal-blocked'
+    $s6BNoTerminalFixture = New-S6BAuthorizationFixture 'none'
+    $s6BNoTerminalPath = Write-JsonFixture 'simulation-s6-b-allow-no-terminal.json' $s6BNoTerminalFixture
+    $s6BNoTerminalPaths = New-CasePaths 's6-b-allow-no-terminal'
+    $s6BNoTerminalRun = Invoke-Runner $liveFreezePath $s6BNoTerminalPaths.Evidence $s6BNoTerminalPaths.Raw -FixturePath $s6BNoTerminalPath
+    $s6BNoTerminalRecord = Get-Content -LiteralPath (Join-Path $s6BNoTerminalPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6BNoTerminalRun.ExitCode -ne 0 -and $s6BNoTerminalRecord.overall -eq 'blocked' -and $null -eq $s6BNoTerminalRecord.PSObject.Properties['scenario_invalid'] -and $s6BNoTerminalRun.Text -match 'B-create-terminal-missing|platform-marker-missing') 'S6 B Allow without terminal was not blocked'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-authorization-not-dismissed-blocked'
+    $s6BNotDismissedFixture = New-S6BAuthorizationFixture
+    $s6BNotDismissedFixture.layout_profiles['scenario-6-after-allow-b'] = 'authorization'
+    $s6BNotDismissedPath = Write-JsonFixture 'simulation-s6-b-authorization-not-dismissed.json' $s6BNotDismissedFixture
+    $s6BNotDismissedPaths = New-CasePaths 's6-b-authorization-not-dismissed'
+    $s6BNotDismissedRun = Invoke-Runner $liveFreezePath $s6BNotDismissedPaths.Evidence $s6BNotDismissedPaths.Raw -FixturePath $s6BNotDismissedPath
+    $s6BNotDismissedRecord = Get-Content -LiteralPath (Join-Path $s6BNotDismissedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6BNotDismissedRun.ExitCode -ne 0 -and $s6BNotDismissedRecord.overall -eq 'blocked' -and $null -eq $s6BNotDismissedRecord.PSObject.Properties['scenario_invalid'] -and $s6BNotDismissedRun.Text -match 'authorization-not-dismissed:layout-fields-missing:authorization-controls-absent') 'S6 B authorization cancel/not-dismissed was not blocked with the mismatch reason'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-authorization-dismissal-unverifiable-blocked'
+    $s6BUnverifiableFixture = New-S6BAuthorizationFixture
+    $s6BUnverifiableFixture | Add-Member -NotePropertyName invalid_layout_json -NotePropertyValue @('scenario-6-after-allow-b') -Force
+    $s6BUnverifiablePath = Write-JsonFixture 'simulation-s6-b-authorization-dismissal-unverifiable.json' $s6BUnverifiableFixture
+    $s6BUnverifiablePaths = New-CasePaths 's6-b-authorization-dismissal-unverifiable'
+    $s6BUnverifiableRun = Invoke-Runner $liveFreezePath $s6BUnverifiablePaths.Evidence $s6BUnverifiablePaths.Raw -FixturePath $s6BUnverifiablePath
+    $s6BUnverifiableRecord = Get-Content -LiteralPath (Join-Path $s6BUnverifiablePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6BUnverifiableRun.ExitCode -ne 0 -and $s6BUnverifiableRecord.overall -eq 'blocked' -and $null -eq $s6BUnverifiableRecord.PSObject.Properties['scenario_invalid'] -and $s6BUnverifiableRun.Text -match 'authorization-dismissal-unverifiable:layout-json-invalid') "S6 B invalid dismissal JSON did not preserve the unverifiable reason: $($s6BUnverifiableRun.Text)"
+
+    Write-Host 'SELFTEST_PHASE=s6-b-post-terminal-a-unverifiable-blocked'
+    $s6BAUnverifiableFixture = New-S6BAuthorizationFixture
+    $s6BAUnverifiableFixture.hdc_failures = @([ordered]@{ operation = 'PidOf'; occurrence = 16; exit_code = 1; stdout = ''; stderr = '' })
+    $s6BAUnverifiablePath = Write-JsonFixture 'simulation-s6-b-post-terminal-a-unverifiable.json' $s6BAUnverifiableFixture
+    $s6BAUnverifiablePaths = New-CasePaths 's6-b-post-terminal-a-unverifiable'
+    $s6BAUnverifiableRun = Invoke-Runner $liveFreezePath $s6BAUnverifiablePaths.Evidence $s6BAUnverifiablePaths.Raw -FixturePath $s6BAUnverifiablePath
+    $s6BAUnverifiableRecord = Get-Content -LiteralPath (Join-Path $s6BAUnverifiablePaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    $s6BAUnverifiableS6 = $s6BAUnverifiableRecord.scenarios[5]
+    $s6BAUnverifiableS7 = $s6BAUnverifiableRecord.scenarios[6]
+    Assert-True ($s6BAUnverifiableRun.ExitCode -eq 0 -and $s6BAUnverifiableS6.result -eq 'blocked' -and $s6BAUnverifiableS6.reason -eq 'A-active-state-unverifiable-after-B-terminal') 'S6 rejected post-terminal A unverifiable branch did not record the exact blocked reason'
+    Assert-True ($s6BAUnverifiableS7.result -eq 'blocked' -and $s6BAUnverifiableS7.reason -eq 'not-run-after-platform-blocked') 'S7 did not stay blocked/not-run-after-platform-blocked after the terminal process block'
+    Assert-True ([int]$s6BAUnverifiableS6.accepted_session_count_in_window -eq 2) 'S6 rejected-terminal blocked branch used a different accepted marker count'
+    Assert-True ($null -ne $s6BAUnverifiableS6.PSObject.Properties['machine_process_checkpoint'] -and $s6BAUnverifiableS6.machine_process_checkpoint.status -eq 'blocked' -and [string]$s6BAUnverifiableS6.machine_process_checkpoint.reason -match 'process-state-mismatch|process-check-unavailable') 'S6 terminal process checkpoint was not recorded on the blocked branch'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-authorization-accepted-fail'
+    $s6BAcceptedFixture = New-S6BAuthorizationFixture 'accepted'
+    $s6BAcceptedFixture.hdc_failures = @([ordered]@{ operation = 'PidOf'; occurrence = 16; exit_code = 0; stdout = ''; stderr = '' })
+    $s6BAcceptedPath = Write-JsonFixture 'simulation-s6-b-authorization-accepted-a-absent.json' $s6BAcceptedFixture
+    $s6BAcceptedPaths = New-CasePaths 's6-b-authorization-accepted'
+    $s6BAcceptedRun = Invoke-Runner $liveFreezePath $s6BAcceptedPaths.Evidence $s6BAcceptedPaths.Raw -FixturePath $s6BAcceptedPath
+    $s6BAcceptedRecord = Get-Content -LiteralPath (Join-Path $s6BAcceptedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6BAcceptedRun.ExitCode -eq 0 -and $s6BAcceptedRecord.overall -eq 'fail' -and $s6BAcceptedRecord.scenarios[5].result -eq 'fail' -and $s6BAcceptedRecord.scenarios[5].reason -eq 'two-accepted-sessions-observed' -and $s6BAcceptedRecord.scenarios[5].b_accepted) 'S6 B accepted/dual accepted was not fail'
+    Assert-True ([int]$s6BAcceptedRecord.scenarios[5].accepted_session_count_in_window -eq 3) 'S6 accepted-terminal branch did not count only verified A/B accepted markers'
+    Assert-True ($s6BAcceptedRecord.scenarios[5].machine_process_checkpoint.status -eq 'blocked' -and [string]$s6BAcceptedRecord.scenarios[5].machine_process_checkpoint.reason -match 'process-state-mismatch') 'S6 B accepted with A absent did not preserve functional fail priority over process mismatch'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-authorization-stray-action-invalid'
+    $s6BStrayFixture = New-S6BAuthorizationFixture
+    $s6BStrayFixture.scenario_events.'6' += [ordered]@{ offset_seconds = 8.5; step_index = 4; text = "$('<DEVICE_OBSERVED_AT>') UI_STOP|bundle=cn.alfadb.netbird.e3physvpnb|requestId=b6" }
+    $s6BStrayPath = Write-JsonFixture 'simulation-s6-b-authorization-stray-action.json' $s6BStrayFixture
+    $s6BStrayPaths = New-CasePaths 's6-b-authorization-stray-action'
+    $s6BStrayRun = Invoke-Runner $liveFreezePath $s6BStrayPaths.Evidence $s6BStrayPaths.Raw -FixturePath $s6BStrayPath
+    $s6BStrayRecord = Get-Content -LiteralPath (Join-Path $s6BStrayPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    Assert-True ($s6BStrayRun.ExitCode -eq 2 -and $s6BStrayRecord.overall -eq 'invalid' -and [string]$s6BStrayRecord.scenario_invalid.reason -match 'unexpected-UI_STOP|stray-operator-action') 'S6 B authorization extra UI action was not invalid'
+
+    Write-Host 'SELFTEST_PHASE=s6-b-frozen-late-accepted-a-absent-fail'
+    $s6BLateAcceptedFixture = New-S6BAuthorizationFixture 'frozen'
+    $s6BLateAcceptedFixture.scenario_events.'6' += [ordered]@{ offset_seconds = 10; step_index = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED" }
+    $s6BLateAcceptedFixture.hdc_failures = @([ordered]@{ operation = 'PidOf'; occurrence = 16; exit_code = 1; stdout = ''; stderr = '' })
+    $s6BLateAcceptedPath = Write-JsonFixture 'simulation-s6-b-frozen-late-accepted-a-absent.json' $s6BLateAcceptedFixture
+    $s6BLateAcceptedPaths = New-CasePaths 's6-b-frozen-late-accepted-a-absent'
+    $s6BLateAcceptedRun = Invoke-Runner $liveFreezePath $s6BLateAcceptedPaths.Evidence $s6BLateAcceptedPaths.Raw -FixturePath $s6BLateAcceptedPath
+    $s6BLateAcceptedRecord = Get-Content -LiteralPath (Join-Path $s6BLateAcceptedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+    $s6BLateAcceptedS6 = $s6BLateAcceptedRecord.scenarios[5]
+    Assert-True ($s6BLateAcceptedRun.ExitCode -eq 0 -and $s6BLateAcceptedRecord.overall -eq 'fail' -and $s6BLateAcceptedS6.result -eq 'fail' -and $s6BLateAcceptedS6.reason -eq 'two-accepted-sessions-observed') 'S6 frozen reject plus late same-B accepted was downgraded from functional fail'
+    Assert-True ($s6BLateAcceptedS6.b_rejected -and $s6BLateAcceptedS6.b_accepted -and [int]$s6BLateAcceptedS6.accepted_session_count_in_window -eq 3 -and $s6BLateAcceptedS6.machine_process_checkpoint.status -eq 'blocked') 'S6 late accepted record lost terminal rejection, accepted count, or true terminal checkpoint'
+
+    Write-Host 'SELFTEST_PHASE=s6-nonfrozen-unexpected-accepted-invalid'
+    foreach ($unexpectedCase in @([ordered]@{ label = 'foreign'; request_id = 'foreign6' }, [ordered]@{ label = 'missing'; request_id = 'missing' })) {
+        $unexpectedFixture = New-S6BAuthorizationFixture 'frozen'
+        $unexpectedFixture.scenario_events.'6'[-1].text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=code=2203001,name=BusinessError,message=conflict"
+        $unexpectedFixture.scenario_events.'6' += [ordered]@{ offset_seconds = 10; step_index = 4; text = "$('<DEVICE_OBSERVED_AT>') VPN_CREATE_RESOLVED|requestId=$([string]$unexpectedCase.request_id)|accepted=true|marker=CREATE_ACCEPTED" }
+        $unexpectedPath = Write-JsonFixture "simulation-s6-nonfrozen-$([string]$unexpectedCase.label)-accepted.json" $unexpectedFixture
+        $unexpectedPaths = New-CasePaths "s6-nonfrozen-$([string]$unexpectedCase.label)-accepted"
+        $unexpectedRun = Invoke-Runner $liveFreezePath $unexpectedPaths.Evidence $unexpectedPaths.Raw -FixturePath $unexpectedPath
+        $unexpectedRecord = Get-Content -LiteralPath (Join-Path $unexpectedPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
+        Assert-True ($unexpectedRun.ExitCode -eq 2 -and $unexpectedRecord.overall -eq 'invalid' -and [string]$unexpectedRecord.scenario_invalid.reason -eq 'unexpected-accepted-request-in-window') "S6 nonfrozen $([string]$unexpectedCase.label) accepted marker did not take unexpected-accepted invalid priority"
     }
 
     Write-Host 'SELFTEST_PHASE=c7-s4-deny-pre-capture-proof'
@@ -2502,7 +2642,7 @@ try {
     Assert-True ($s6NonFrozenRecord.overall -eq 'blocked' -and $s6NonFrozenRecord.record_status -eq 'blocked') 'S6 non-frozen B code was not overall blocked'
     Assert-True ($null -eq $s6NonFrozenRecord.PSObject.Properties['scenario_invalid'] -and $s6NonFrozenRecord.record_status -ne 'invalidated') 'S6 non-frozen B code was misclassified as scenario invalid'
     Assert-True ($s6NonFrozenRecord.scenarios[5].result -eq 'blocked' -and $s6NonFrozenRecord.scenarios[5].reason -eq 'B-conflict-code-not-frozen:2203001') 'S6 non-frozen B code reason/result mismatch'
-    Assert-True ([int]$s6NonFrozenRecord.scenarios[5].b_rejection_code -eq 2203001 -and -not $s6NonFrozenRecord.scenarios[5].b_accepted -and $s6NonFrozenRecord.scenarios[5].a_accepted) 'S6 non-frozen B code record fields mismatch'
+    Assert-True ([int]$s6NonFrozenRecord.scenarios[5].b_rejection_code -eq 2203001 -and -not $s6NonFrozenRecord.scenarios[5].b_accepted -and $s6NonFrozenRecord.scenarios[5].a_accepted -and [int]$s6NonFrozenRecord.scenarios[5].accepted_session_count_in_window -eq 2) 'S6 non-frozen B code record fields/count mismatch'
     Assert-True ($s6NonFrozenRecord.scenarios[6].result -eq 'blocked' -and $s6NonFrozenRecord.scenarios[6].reason -eq 'not-run-after-platform-blocked') 'S7 did not stay not-run-after-platform-blocked after S6 platform blocked'
     Assert-True ($s6NonFrozenRecord.cleanup_result.verified_absent -and $s6NonFrozenRecord.cleanup_result.status -eq 'verified-clean') 'S6 platform-blocked run did not finish verified finally cleanup'
 

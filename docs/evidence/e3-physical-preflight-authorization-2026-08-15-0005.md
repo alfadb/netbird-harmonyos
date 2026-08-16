@@ -1,10 +1,10 @@
 # E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-15 · 0005）
 
-最后核验：2026-08-15
+最后核验：2026-08-16
 
-本文登记用户（直接人类决策者）于本轮明确选择继续**完整 S5 修复 + 新治理**，并批准新授权 `AUTH-E3-PHYS1API26-20260815-0005`。它取代已消费的 [`AUTH-E3-PHYS1API26-20260815-0004`](e3-physical-preflight-authorization-2026-08-15-0004.md)；0004 Live 已 sealed invalid，其 AUTH、campaign ID 与 evidence ID 均不得复用，历史登记、sealed evidence 和 fixture provenance 保留不改写。
+本文登记用户（直接人类决策者）曾明确选择继续**完整 S5 修复 + 新治理**，并批准授权 `AUTH-E3-PHYS1API26-20260815-0005`。它取代已消费的 [`AUTH-E3-PHYS1API26-20260815-0004`](e3-physical-preflight-authorization-2026-08-15-0004.md)；0004 Live 已 sealed invalid，其 AUTH、campaign ID 与 evidence ID 均不得复用，历史登记、sealed evidence 和 fixture provenance 保留不改写。
 
-> 状态注记：`authorization_status: granted`，`attempt: initial`，retry N/A，`device_readiness: user-attested-ready`。用户就绪声明不替代机器 fresh confirmation。本登记不是 Live evidence；本轮治理准备禁止 HDC、设备命令、Live、仓外 freeze/record/audit 创建、commit 和 push。E3 未关闭，E8 保持 `CLOSED`。
+> 当前状态：`authorization_status: sealed-blocked-consumed`，`attempt: initial`，retry N/A。0005 已执行并封签：S1-S5 pass，S6 `result=blocked / reason=scenario-6 machine-verification-blocked step=3 reason=platform-marker-missing:B-create-terminal-missing`，S7 `result=blocked / reason=not-run-after-runner-failure`；overall/verdict blocked。0005 AUTH、campaign ID 与 evidence ID 已消费，不得复用、重判或局部重放。当前 host-only S6 B 修复不授权 HDC、设备命令、Live、AUTH/pair 迁移、commit 或 push，也不创建新 AUTH。E3 未关闭，E8 保持 `CLOSED`。
 
 ## 授权事实与修复边界
 
@@ -29,16 +29,16 @@ stage_or_gate: E3
 related_stages_or_gates: [E8]
 execution: not-run-authorization-registration
 is_evidence: false
-authorization_status: granted
+authorization_status: sealed-blocked-consumed
 approval: user explicit choice to continue full S5 repair plus new governance; 2026-08-15
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
+machine_fresh_confirmation: historical-pass-bound-in-sealed-live
 plan_status_at_registration: authorized-awaiting-linux-ready-freeze
-campaign_status: candidate-new-created-not-live-pending-audits
-independent_review_record: pending
+campaign_status: consumed-sealed-blocked
+independent_review_record: pass
 reviewer_role: isolated-anthropic-claude-opus-5-reviewer
 s5_final_review: 0 blocker / 0 major
-code_sha: pending-final-commit
+code_sha: 38004b19fcf3d347a2cfaaa22da7396f4ff562fa
 target_tuple:
   distribution: HarmonyOS
   device_model: PLA-AL10
@@ -53,9 +53,9 @@ candidate:
   evidence_id: EV-E3-PHYS1API26-20260815-0005
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
-  live: false
-  consumed: false
+  identity_status: consumed-sealed-blocked
+  live: true
+  consumed: true
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260815-0004
   evidence_id: EV-E3-PHYS1API26-20260815-0004
@@ -94,13 +94,21 @@ evidence_roots:
   live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260815-0005
 ```
 
+## 0005 历史处置
+
+0005 sealed evidence 位于受控仓外 `evidence-live-20260815-0005` 与对应 `.raw`。冻结 hash 保持：scenario-results `a63ef1548bb11fa21795b136e3ddc992c9a7bcc45a62f66a0942ff72cb134bb9`，hash-manifest `b12f3a3f1b6b3f644030e52af3f4e5aa52ae751fd79d20ce3a379a28b381a996`，campaign-seal `2790412962a9fcdedc1a018889eb4424a7e6af9682df55279099b496528ff55c`，sealed at `2026-08-16T13:23:54.7511850+08:00`。seal 内 record/manifest hash 与现场复算一致；manifest 所列 sealed 文件及 external raw hash/size 机械核验通过。
+
+逐场景历史结果固定为 S1-S5 `result=pass`、S6 `result=blocked / reason=scenario-6 machine-verification-blocked step=3 reason=platform-marker-missing:B-create-terminal-missing`、S7 `result=blocked / reason=not-run-after-runner-failure`。S6 的唯一 B Start 后实际 decisive capture `RAW-capture-scenario-6-conflict.json`（SHA-256 `7f6e44d5eab7021d192a6a61f409af9a3e8507f16c1df6bcf84755c1130bb72c`）显示 B 首次 VPN 授权 Dialog；对应 screenshot SHA-256 `b22dbc8b31fbf40c8d4eddd4f0e3bb945d0c689cf3a14aa8c53e72ba1d5a181b`。raw event 只有该 B request 的唯一 `UI_START`，没有 B create terminal。旧 runner 把这张授权画面只作为 `scenario-6-conflict` capture 后直接等待 terminal，故 blocked；这不是操作员未点已提示的 Allow，因为旧流程根本没有 S6 B Allow step。
+
+host-only 增量已把 S6 B 改为 B Start step3 后 entry/authorization 双档案分流，authorization 才新增 Allow step4；step4 使用已机器验证 authorization layout/request 的字面 precondition，不复用旧 process 读数。B Start 前 A exact-process 是 pre-gate；accepted/rejected terminal 后都观察一次终态 checkpoint 并写入 record，但只对 rejected gate。terminal 后统一一次 complete/event-contract/unexpected-accepted/verified-request accepted-marker 计数。窗口 accepted 计数严格绑定已验证的 A/B requestId：只有这两个 requestId 的 `CREATE_ACCEPTED` marker 计入；foreign 或 `requestId=missing` accepted 不计入，且后者优先归类为 unexpected invalid。既有 terminal 识别的 tag 关联容错仅用于 terminal 识别，不放宽 accepted 计数。任何窗口内 B accepted/双 accepted 功能 fail 优先于终态 process mismatch、rejected checkpoint blocked 和 nonfrozen blocked。production-derived fixture 与完整 provenance 见 [`2026-08-15 production layout`](e3-physical-preflight-production-layout-2026-08-15.md)。该修复只适用于下一次经新治理授权的新 campaign；不回溯 0005，不创建新 AUTH。runner/PS/selftest 中 0005 pair 常量本轮暂不迁移。
+
 ## 0004 历史处置
 
 0004 sealed invalid 是已形成的历史 Live evidence：S1-S4 pass、S5 step1 pass，S5 step3 因 production 文案 `强行停止` 未被旧 matcher 接受而 invalid，S6-S7 `not-run-due-to-invalid`。其生产 dump 同时暴露旧全 dump facts 会让 AppDetail 子树外内容污染判定。0004 AUTH、pair、record、seal、evidence roots 与 `code_sha` 只绑定该历史执行，均不得改写或迁移到 0005。
 
 0005 是全新 initial，不是 0004 的 retry。`retry.basis`、`infrastructure_reason`、`prior_record_path` 与 `prior_record_sha256` 均为 N/A；任一 gate 失败立即停止，不自动 retry、不切换 ID。任何后续尝试都需要新治理与新授权。
 
-## 13 步顺序门
+## 13 步顺序门（历史，已消费，不得再执行）
 
 1. 同步 trusted refs/bundle；基于含本登记及 S5 修复的最终 commit，核对 clean worktree，并冻结实际 HEAD。此后本登记文档至 campaign 结束不得改字节。
 2. 对 0005 新 pair 执行 candidate ID consumption audit-1，仓外记录并写 `.sha256`；发现任何 live/evidence/seal 占用即停止。
@@ -122,4 +130,4 @@ evidence_roots:
 
 除 gate 4 明确列出的两条一次性 host-prep 命令外，额外 discovery 仍全部禁止，包括再次连接/列举、全量 bundle/process dump、`hidumper`、root、privileged、Go、NetBird、product 动作或局部 S5 重放。任何敏感连接值、设备身份值、凭据、账号或签名私密材料均不得写入仓库、freeze、record、evidence、日志或聊天转录。仓内只登记公开 tuple、公开 bundle/resource id、脱敏 hash 与受控仓外路径模板。
 
-本次 host-only 治理准备不创建任何仓外 freeze/record/audit，不运行 HDC/设备/Live，不 commit/push。下一步只能在 commit/push 后按上述 13 门从第 1 步开始；E8 在任何结果下仍保持 `CLOSED`，除非后续独立治理明确改变。
+本次 host-only S6 B 修复不创建任何仓外 freeze/record/audit，不运行 HDC/设备/Live，不迁移 AUTH/pair，不 commit/push。上述 13 门仅记录 0005 当时的已消费执行顺序，绝不可从第 1 步重启。任何下一次设备执行都必须先建立新的治理、AUTH、campaign ID 与 evidence ID；E8 保持 `CLOSED`，除非后续独立治理明确改变。

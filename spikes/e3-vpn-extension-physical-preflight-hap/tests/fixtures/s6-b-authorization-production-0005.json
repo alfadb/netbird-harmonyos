@@ -1,0 +1,61 @@
+[
+  {
+    "attributes": {
+      "bundleName": "com.huawei.hmos.vpndialog",
+      "type": "root",
+      "visible": "true"
+    },
+    "children": [
+      {
+        "attributes": {
+          "type": "Dialog",
+          "visible": "true"
+        },
+        "children": [
+          {
+            "attributes": {
+              "type": "Text",
+              "text": "E3 Preflight B",
+              "visible": "true"
+            },
+            "children": []
+          },
+          {
+            "attributes": {
+              "type": "Text",
+              "text": "是否允许使用 VPN？",
+              "visible": "true"
+            },
+            "children": []
+          },
+          {
+            "attributes": {
+              "type": "Flex",
+              "visible": "true"
+            },
+            "children": [
+              {
+                "attributes": {
+                  "type": "Text",
+                  "text": "取消",
+                  "visible": "true",
+                  "clickable": "true"
+                },
+                "children": []
+              },
+              {
+                "attributes": {
+                  "type": "Text",
+                  "text": "允许",
+                  "visible": "true",
+                  "clickable": "true"
+                },
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

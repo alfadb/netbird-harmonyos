@@ -1,6 +1,6 @@
-# E3 S5 production layout 派生 fixture（2026-08-15）
+# E3 S5/S6 production layout 派生 fixture（2026-08-15）
 
-本文登记 S5 host-only production-layout 修复输入；不是新 AUTH、Live 或设备证据，不授权 HDC、设备操作、局部重放、AUTH 迁移、commit 或 push。它取代 [`ADJ-20260808-0003` 的历史未采样 `settings-app-info` matcher 口径](e3-physical-preflight-operator-trust-2026-08-08.md)：历史登记保留其当时事实不改写；当前生产 layout 规则以本文为准。
+本文登记 S5 与 sealed 0005 S6 B host-only production-layout 修复输入；不是新 AUTH、Live 或设备证据，不授权 HDC、设备操作、局部重放、AUTH 迁移、commit 或 push。它取代 [`ADJ-20260808-0003` 的历史未采样 `settings-app-info` matcher 口径](e3-physical-preflight-operator-trust-2026-08-08.md)：历史登记保留其当时事实不改写；当前生产 layout 规则以本文为准。
 
 ## 来源与完整性
 
@@ -33,6 +33,21 @@ step4 操作员提示为 `点击强行停止，并完成随后出现的确认（
 
 S5 最终成功仍必须满足既有机器后置条件：连续 `<bundle>:vpn` process absent 且 bundle present。进程未退出、探针不足、bundle 不可确认或其他既有机器条件不满足时继续 fail-closed。
 
+## S6 B 首次授权来源（0005）
+
+- 来源 campaign：受控仓外 sealed production campaign `E3-PHYS-PREFLIGHT-20260815-0005`。sealed `scenario-results.json` SHA-256 `a63ef1548bb11fa21795b136e3ddc992c9a7bcc45a62f66a0942ff72cb134bb9`，`hash-manifest.json` SHA-256 `b12f3a3f1b6b3f644030e52af3f4e5aa52ae751fd79d20ce3a379a28b381a996`，`campaign-seal.json` SHA-256 `2790412962a9fcdedc1a018889eb4424a7e6af9682df55279099b496528ff55c`；seal 内冻结 record/manifest hash 与现场复算一致。
+- 实际 post-B-Start capture 是 `RAW-capture-scenario-6-conflict.json`，不是 step3 的 capture-before `scenario-6-entry-b`。raw layout SHA-256 `7f6e44d5eab7021d192a6a61f409af9a3e8507f16c1df6bcf84755c1130bb72c`、字节数 `74801`；对应 screenshot SHA-256 `b22dbc8b31fbf40c8d4eddd4f0e3bb945d0c689cf3a14aa8c53e72ba1d5a181b`、字节数 `1083162`。manifest 中两项 hash/size 与仓外 raw 文件复算一致。
+- 现场事件绑定：S6 B 的新 request 只有唯一 `UI_START`，随后没有 B `VPN_ONCREATE`、`VPN_CREATE_REJECTED`、`START_PROMISE_REJECTED` 或 `CREATE_ACCEPTED` terminal；step3 decisive capture 已显示 `com.huawei.hmos.vpndialog` 的 B 授权 Dialog。因旧 runner 采集该画面后直接等待 create terminal，0005 最终为 S6 blocked `platform-marker-missing:B-create-terminal-missing`。
+- 仓内派生 fixture：`spikes/e3-vpn-extension-physical-preflight-hap/tests/fixtures/s6-b-authorization-production-0005.json`，SHA-256 `8d99c65e6bfa0c9569848f6a482fd188c1bcb6b6837ca0e8386c052c33f376ad`。
+
+该 fixture 是最小 ancestor-preserving contraction：保留 vpndialog root、Dialog 祖先、公开 B ownership label `E3 Preflight B`、`是否允许使用 VPN？` 以及可点击 `取消`/`允许` 控件；中间 Column 层按祖先路径收缩。删除 bounds、accessibility/hash、host-window/session、状态栏、运营商、时间、电量、网速、sceneboard 和警示长文。未复制 raw layout 或 screenshot，也不含 target、endpoint、设备 model/alias、账号、地址、凭据或签名私密材料。
+
+## S6 B 当前规则
+
+下一次 **新** campaign 中，S6 保持 A Start=`1`、A optional Allow=`2`、B Start=`3`、B optional Allow=`4`。唯一 B Start 后对 `scenario-6-conflict` 执行现有 entry/authorization 双档案 checkpoint（expected B）：entry 直接进入既有 B terminal 等待；authorization 才提示单一机械动作 `点击 Allow`。step4 `capture_before` 绑定该双档案 checkpoint，其 machine precondition 只声明 authorization layout/request 已由机器验证，不伪称或复用新的 process 读数；`scenario-6-after-allow-b` 必须通过 `authorization-dismissed`。已收集但未 dismiss 的 layout mismatch 与已收集但 dismissal JSON/layout 不可验证均 fail-closed 为 blocked，reason 分别保留；capture 未收集则沿既有 decisive gate 记 invalid，若明确为 capture infrastructure 则 infrastructure blocked。step4 prompt 后到 postcondition 完成前已进入 capture 的 stray UI action 可安全归因 step4；step4 完成后才迟到进入窗口的事件无法可靠证明属于该次点击，因此不伪造 step4 归因，仍由完整 event contract 以 B terminal/window anchor 判 invalid。
+
+B Start 前的 A exact-process 是 pre-gate。B accepted/rejected terminal 后都观察且只观察一次真正的 terminal process checkpoint 并写入 `machine_process_checkpoint`，但 checkpoint 只 gate rejected 分支；不做 Allow 后或最终聚合阶段的重复探测。terminal pass 或 nonfrozen-blocked 后统一完成一次 context、扫描一次 unexpected accepted、断言一次 event contract。窗口 accepted 计数严格绑定已验证的 A/B requestId：只有这两个 requestId 的 `CREATE_ACCEPTED` marker 计入；foreign 或 `requestId=missing` accepted 不计入，且后者优先归类为 unexpected invalid。既有 terminal 识别的 tag 关联容错仅用于 terminal 识别，不放宽 accepted 计数。任何 B accepted marker 或双 accepted 先判功能 fail，包括 frozen reject 后完整窗口内迟到的同 B request accepted，即使 terminal checkpoint 显示 A 消失/blocked 也不得降级；然后才判 rejected-terminal A 不可验证 blocked、非冻结码 blocked、窗口退化 blocked；冻结冲突码且 A checkpoint pass 才为 pass。无 B terminal 保持 runner blocked，随后 S7 为 `result=blocked / reason=not-run-after-runner-failure`。只有 S6 pass 的 verified A 才绑定 S7。runner 不自动点击、不新增 UI 输入、不扩 HDC 白名单或 discovery。record 与 `operator-wait-state` schema 不升级；新增 capture 名沿既有 manifest/record/transcript 收集机制进入封签。
+
 ## 批准范围
 
-用户于当前任务明确选择完整 S5 修复并批准使用 0004 脱敏生产派生 fixture。批准范围仅限 host-only matcher、fixture、selftest 和必要文档修复；不包含 HDC/设备/Live、AUTH 迁移、commit 或 push。
+用户于对应任务明确批准使用 0004 S5 与 0005 S6 B 的最小脱敏 production-derived fixture。批准范围仅限 host-only runner/PowerShell parity、fixture、selftest 和必要文档修复；不包含 HDC/设备/Live、AUTH/pair 迁移、commit 或 push。0005 pair 常量暂不迁移；本增量只适用于下一次经新治理授权的 campaign，不创建新 AUTH。

@@ -50,6 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.path.dirname(HERE)
 RUNNER_SRC = os.path.join(PROJECT, 'e3-phys-preflight-campaign.py')
 PRODUCTION_APP_INFO_FIXTURE = os.path.join(HERE, 'fixtures', 'settings-app-info-production-0004.json')
+PRODUCTION_S6_B_AUTH_FIXTURE = os.path.join(HERE, 'fixtures', 's6-b-authorization-production-0005.json')
 
 AUTH_ID = 'AUTH-E3-PHYS1API26-20260815-0005'
 OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260810-0002'
@@ -1656,6 +1657,8 @@ class TestLiveSimulationSevenScenarios(SelftestBase):
         self.assertIs(s6['a_accepted'], True)
         self.assertEqual(s6['reason'], 'B-explicit-conflict-rejection')
         self.assertEqual(s6['b_rejection_code'], 2203002)
+        self.assertEqual(s6['accepted_session_count_in_window'], 2)
+        self.assertEqual([step['step_index'] for step in s6['observation']['operator_steps']], [1, 3])
         self.assertNotIn('no_dual_active_confirmed', s6, 'scenario 6 retained semantic operator fields')
         self.assertNotIn('dual_active_confirmed', s6, 'scenario 6 retained semantic operator fields')
         self.assertNotIn('operator_state', s6, 'scenario 6 retained semantic operator fields')
@@ -1684,6 +1687,187 @@ class TestLiveSimulationSevenScenarios(SelftestBase):
             texts = [e['text'] for e in scenario['observation']['events']]
             self.assertEqual(len(texts), len(set(texts)),
                              'scenario %d observation contains duplicate marker lines' % scenario['scenario'])
+
+    def _s6_b_authorization_fixture(self, terminal='frozen'):
+        fixture = make_simulation_fixture()
+        with open(PRODUCTION_S6_B_AUTH_FIXTURE, encoding='utf-8') as f:
+            fixture['layout_profiles']['scenario-6-conflict'] = json.load(f)
+        terminal_text = {
+            'frozen': '<DEVICE_OBSERVED_AT> VPN_CREATE_REJECTED|requestId=b6|phase=create|summary=code=2203002,name=BusinessError,message=conflict',
+            'accepted': '<DEVICE_OBSERVED_AT> VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED',
+            'none': None,
+        }[terminal]
+        events = [
+            {'offset_seconds': 1, 'step_index': 1, 'text': '<DEVICE_OBSERVED_AT> UI_START|bundle=%s|requestId=a6' % BUNDLE_A},
+            {'offset_seconds': 2, 'step_index': 1, 'text': '<DEVICE_OBSERVED_AT> VPN_ONCREATE|bundle=%s|requestId=a6' % BUNDLE_A},
+            {'offset_seconds': 3, 'step_index': 1, 'text': '<DEVICE_OBSERVED_AT> VPN_CREATE_RESOLVED|requestId=a6|accepted=true|marker=CREATE_ACCEPTED'},
+            {'offset_seconds': 4, 'step_index': 1, 'text': '<DEVICE_OBSERVED_AT> VPN_FD_SNAPSHOT|requestId=a6|phase=post-create|open=true|marker=CREATE_ACCEPTED'},
+            {'offset_seconds': 8, 'step_index': 3, 'text': '<DEVICE_OBSERVED_AT> UI_START|bundle=%s|requestId=b6' % BUNDLE_B},
+        ]
+        if terminal_text:
+            events.append({'offset_seconds': 9, 'step_index': 4, 'text': terminal_text})
+        fixture['scenario_events']['6'] = events
+        return fixture
+
+    def test_s6_b_production_authorization_allow_frozen_pass(self):
+        with open(PRODUCTION_S6_B_AUTH_FIXTURE, encoding='utf-8') as f:
+            production_layout = json.load(f)
+        facts = runner_mod.get_layout_facts(production_layout)
+        self.assertEqual(runner_mod.test_captured_layout_profile(
+            facts, 'authorization', BUNDLE_B)['status'], 'pass')
+        fixture_text = json.dumps(production_layout, ensure_ascii=False)
+        self.assertIn('E3 Preflight B', fixture_text)
+        for forbidden in ('PLA-AL10', 'PHYS-1', '192.168.', '中国电信', '中国联通', 'session31'):
+            self.assertNotIn(forbidden, fixture_text)
+
+        proc, ev, raw = self._run_live(self._s6_b_authorization_fixture(), 's6-b-production-authorization')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(assert_evidence_outputs(ev), [])
+        self.assertEqual(verify_transcript_chain(
+            os.path.join(ev, 'projection', 'transcript.redacted.jsonl')), [])
+        record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+        s6 = record['scenarios'][5]
+        self.assertEqual((s6['result'], s6['reason'], s6['b_rejection_code']),
+                         ('pass', 'B-explicit-conflict-rejection', 2203002))
+        self.assertEqual(s6['accepted_session_count_in_window'], 2)
+        steps = s6['observation']['operator_steps']
+        self.assertEqual([step['step_index'] for step in steps], [1, 3, 4])
+        allow = steps[-1]
+        self.assertEqual(allow['expected_action'], '点击 Allow')
+        wait_state = json.loads(open(os.path.join(ev, 'operator-wait-state.json'), encoding='utf-8').read())
+        allow_history = [h for h in wait_state['history'] if h.get('scenario') == 6 and h.get('step_index') == 4]
+        self.assertTrue(any(h.get('capture_before', {}).get('selected_profile') == 'authorization' for h in allow_history))
+        self.assertTrue(any(h.get('capture_after', {}).get('profile') == 'authorization-dismissed' for h in allow_history))
+        self.assertTrue(any(h.get('machine_precondition', {}).get('reason') ==
+                            'B-authorization-layout-and-request-machine-verified' for h in allow_history))
+        self.assertTrue(all('states' not in h.get('machine_precondition', {}) for h in allow_history))
+        refs = [r['name'] for r in record['layout_state_reference']]
+        self.assertIn('scenario-6-conflict', refs)
+        self.assertIn('scenario-6-after-allow-b', refs)
+
+    def test_s6_b_authorization_resample_and_no_terminal_blocked(self):
+        resample = self._s6_b_authorization_fixture()
+        resample['layout_profiles']['scenario-6-conflict'] = 'authorization'
+        resample['layout_ready_delays'] = {'scenario-6-conflict': 3}
+        proc, ev, raw = self._run_live(resample, 's6-b-authorization-resample')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        transcript = [json.loads(line) for line in open(
+            os.path.join(ev, 'projection', 'transcript.redacted.jsonl'), encoding='utf-8')]
+        attempts = [e for e in transcript if e['payload']['kind'] == 'machine-layout-choice-resample'
+                    and e['payload']['data'].get('name') == 'scenario-6-conflict']
+        self.assertGreaterEqual(len(attempts), 1)
+
+        no_terminal = self._s6_b_authorization_fixture('none')
+        proc2, ev2, raw2 = self._run_live(no_terminal, 's6-b-allow-no-terminal')
+        self.assertNotEqual(proc2.returncode, 0)
+        record2 = json.loads(open(os.path.join(ev2, 'scenario-results.json'), encoding='utf-8').read())
+        self.assertEqual(record2['overall'], 'blocked')
+        self.assertNotIn('scenario_invalid', record2)
+        self.assertRegex(proc2.stdout + proc2.stderr, r'B-create-terminal-missing|platform-marker-missing')
+
+    def test_s6_b_authorization_dismissal_blocked_reasons(self):
+        not_dismissed = self._s6_b_authorization_fixture()
+        not_dismissed['layout_profiles']['scenario-6-after-allow-b'] = 'authorization'
+        proc, ev, raw = self._run_live(not_dismissed, 's6-b-authorization-not-dismissed')
+        self.assertNotEqual(proc.returncode, 0)
+        record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+        self.assertEqual(record['overall'], 'blocked')
+        self.assertNotIn('scenario_invalid', record)
+        self.assertRegex(proc.stdout + proc.stderr,
+                         r'authorization-not-dismissed:layout-fields-missing:authorization-controls-absent')
+
+        invalid_json = self._s6_b_authorization_fixture()
+        invalid_json['invalid_layout_json'] = ['scenario-6-after-allow-b']
+        proc2, ev2, raw2 = self._run_live(invalid_json, 's6-b-authorization-dismissal-unverifiable')
+        self.assertNotEqual(proc2.returncode, 0)
+        record2 = json.loads(open(os.path.join(ev2, 'scenario-results.json'), encoding='utf-8').read())
+        self.assertEqual(record2['overall'], 'blocked')
+        self.assertNotIn('scenario_invalid', record2)
+        self.assertRegex(proc2.stdout + proc2.stderr,
+                         r'authorization-dismissal-unverifiable:layout-json-invalid')
+
+    def test_s6_b_rejected_post_terminal_a_unverifiable_blocked(self):
+        fixture = self._s6_b_authorization_fixture()
+        fixture['hdc_failures'] = [
+            {'operation': 'PidOf', 'occurrence': 16, 'exit_code': 1, 'stdout': '', 'stderr': ''},
+        ]
+        proc, ev, raw = self._run_live(fixture, 's6-b-post-terminal-a-unverifiable')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+        s6 = record['scenarios'][5]
+        s7 = record['scenarios'][6]
+        self.assertEqual((s6['result'], s6['reason']),
+                         ('blocked', 'A-active-state-unverifiable-after-B-terminal'))
+        self.assertEqual((s7['result'], s7['reason']),
+                         ('blocked', 'not-run-after-platform-blocked'))
+        self.assertIn('machine_process_checkpoint', s6)
+        self.assertEqual(s6['accepted_session_count_in_window'], 2)
+        self.assertEqual(s6['machine_process_checkpoint']['status'], 'blocked')
+        self.assertRegex(s6['machine_process_checkpoint']['reason'], r'process-state-mismatch|process-check-unavailable')
+
+    def test_s6_b_authorization_accepted_fail_and_stray_action_invalid(self):
+        accepted = self._s6_b_authorization_fixture('accepted')
+        accepted['hdc_failures'] = [
+            {'operation': 'PidOf', 'occurrence': 16, 'exit_code': 0, 'stdout': '', 'stderr': ''},
+        ]
+        proc, ev, raw = self._run_live(accepted, 's6-b-authorization-accepted-a-absent')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+        s6 = record['scenarios'][5]
+        self.assertEqual((record['overall'], s6['result'], s6['reason']),
+                         ('fail', 'fail', 'two-accepted-sessions-observed'))
+        self.assertIs(s6['b_accepted'], True)
+        self.assertEqual(s6['accepted_session_count_in_window'], 3)
+        self.assertEqual(s6['machine_process_checkpoint']['status'], 'blocked')
+        self.assertRegex(s6['machine_process_checkpoint']['reason'], r'process-state-mismatch')
+
+        stray = self._s6_b_authorization_fixture()
+        stray['scenario_events']['6'].append({
+            'offset_seconds': 8.5, 'step_index': 4,
+            'text': '<DEVICE_OBSERVED_AT> UI_STOP|bundle=%s|requestId=b6' % BUNDLE_B,
+        })
+        proc2, ev2, raw2 = self._run_live(stray, 's6-b-authorization-stray-action')
+        self.assertEqual(proc2.returncode, 2)
+        record2 = json.loads(open(os.path.join(ev2, 'scenario-results.json'), encoding='utf-8').read())
+        self.assertEqual(record2['overall'], 'invalid')
+        self.assertIn('scenario_invalid', record2)
+        self.assertRegex(record2['scenario_invalid']['reason'], r'unexpected-UI_STOP|stray-operator-action')
+
+    def test_s6_frozen_reject_late_b_accepted_a_absent_still_fail(self):
+        late = self._s6_b_authorization_fixture('frozen')
+        late['scenario_events']['6'].append({
+            'offset_seconds': 10, 'step_index': 4,
+            'text': '<DEVICE_OBSERVED_AT> VPN_CREATE_RESOLVED|requestId=b6|accepted=true|marker=CREATE_ACCEPTED',
+        })
+        late['hdc_failures'] = [
+            {'operation': 'PidOf', 'occurrence': 16, 'exit_code': 1, 'stdout': '', 'stderr': ''},
+        ]
+        proc, ev, raw = self._run_live(late, 's6-b-frozen-late-accepted-a-absent')
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+        s6 = record['scenarios'][5]
+        self.assertEqual((record['overall'], s6['result'], s6['reason']),
+                         ('fail', 'fail', 'two-accepted-sessions-observed'))
+        self.assertIs(s6['b_rejected'], True)
+        self.assertIs(s6['b_accepted'], True)
+        self.assertEqual(s6['accepted_session_count_in_window'], 3)
+        self.assertEqual(s6['machine_process_checkpoint']['status'], 'blocked')
+
+    def test_s6_nonfrozen_foreign_or_missing_accepted_is_unexpected_invalid(self):
+        for label, request_id in (('foreign', 'foreign6'), ('missing', 'missing')):
+            fixture = self._s6_b_authorization_fixture('frozen')
+            fixture['scenario_events']['6'][-1]['text'] = (
+                '<DEVICE_OBSERVED_AT> VPN_CREATE_REJECTED|requestId=b6|phase=create|'
+                'summary=code=2203001,name=BusinessError,message=conflict')
+            fixture['scenario_events']['6'].append({
+                'offset_seconds': 10, 'step_index': 4,
+                'text': '<DEVICE_OBSERVED_AT> VPN_CREATE_RESOLVED|requestId=%s|accepted=true|marker=CREATE_ACCEPTED' % request_id,
+            })
+            proc, ev, raw = self._run_live(fixture, 's6-nonfrozen-%s-accepted' % label)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            record = json.loads(open(os.path.join(ev, 'scenario-results.json'), encoding='utf-8').read())
+            self.assertEqual(record['overall'], 'invalid')
+            self.assertEqual(record['scenario_invalid']['reason'], 'unexpected-accepted-request-in-window')
 
     def test_live_simulation_s6_non_frozen_code_blocked(self):
         """PS L2419-2444 (adj-0003-s6-b-non-frozen-code-blocked): a B reject
@@ -1714,6 +1898,7 @@ class TestLiveSimulationSevenScenarios(SelftestBase):
         self.assertEqual(s6['b_rejection_code'], 2203001)
         self.assertIs(s6['b_accepted'], False)
         self.assertIs(s6['a_accepted'], True)
+        self.assertEqual(s6['accepted_session_count_in_window'], 2)
         s7 = record['scenarios'][6]
         self.assertEqual(s7['result'], 'blocked')
         self.assertEqual(s7['reason'], 'not-run-after-platform-blocked')
