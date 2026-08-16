@@ -6,7 +6,7 @@
 
 ## 状态
 
-> **当前授权覆盖（2026-08-16 · 0001）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260816-0001`](evidence/e3-physical-preflight-authorization-2026-08-16-0001.md)，候选 pair `E3-PHYS-PREFLIGHT-20260816-0001` / `EV-E3-PHYS1API26-20260816-0001`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；只适用于 S6 B 修复 commit `9c1d464f...` 之后的完整 13 门。0005 sealed blocked consumed，不得复用。E3 未关闭，E8 `CLOSED`。
+> **当前授权覆盖（2026-08-16 · 0002）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260816-0002`](evidence/e3-physical-preflight-authorization-2026-08-16-0002.md)，候选 pair `E3-PHYS-PREFLIGHT-20260816-0002` / `EV-E3-PHYS1API26-20260816-0002`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；冻结须分别绑定 HAP source basis `62409c5f...` 与最终 runner/governance `code_sha`。0001 已 gate-3 review-blocked retired、0005 已 sealed blocked consumed，均只作历史/provenance且不得复用。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |

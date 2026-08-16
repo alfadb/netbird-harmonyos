@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260816-0001 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260816-0002 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260816-0001 / EV-E3-PHYS1API26-20260816-0001), and
+(E3-PHYS-PREFLIGHT-20260816-0002 / EV-E3-PHYS1API26-20260816-0002), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -25,13 +25,11 @@ never consume this AUTH path. The runner_sha256 freeze binding is the
 SHA-256 of THIS file's bytes (single-file runner = single hash, design
 document section 1.1).
 
-Phase status
-------------
-Design units U1-U4 and U8 are implemented (infrastructure, freeze contracts,
-confirmation/review records, HDC layer, embedded pure-function selftest).
-Units U5-U7, U9-U10 (capture state machine, layout/scenarios, records/seal,
-main-flow orchestration) are explicit NotImplementedError placeholders to be
-filled in later phases.
+Implementation status
+---------------------
+Design units U1-U10 are implemented, including infrastructure, freeze and
+confirmation contracts, HDC mediation, capture/layout/scenario state machines,
+record sealing, main-flow orchestration, and embedded host-only selftests.
 
 Safety invariants
 -----------------
@@ -71,9 +69,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0001'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260816-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260816-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0002'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260816-0002'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260816-0002'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
 DEVICE_CLOCK_SKEW_TOLERANCE_SECONDS = 3.0
@@ -1164,7 +1162,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260816-0001 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260816-0002 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -6523,7 +6521,7 @@ def main(argv=None):
             if confirmation_result['verdict'] == 'pass':
                 return 0
             return 2
-        # 11. Campaign orchestration (U10 placeholder).
+        # 11. Campaign orchestration.
         return run_campaign(freeze, freeze_sha256, freeze_contract_sha256,
                             confirmation_contract_sha256, repository_before)
     except NotImplementedError:

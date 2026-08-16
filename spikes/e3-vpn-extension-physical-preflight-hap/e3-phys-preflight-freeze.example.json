@@ -2,8 +2,8 @@
   "schema_version": 2,
   "plan_status": "blocked",
   "exception": "E3-PHYS-PREFLIGHT",
-  "evidence_id": "EV-E3-PHYS1API26-20260816-0001",
-  "campaign_id": "E3-PHYS-PREFLIGHT-20260816-0001",
+  "evidence_id": "EV-E3-PHYS1API26-20260816-0002",
+  "campaign_id": "E3-PHYS-PREFLIGHT-20260816-0002",
   "attempt": "initial",
   "prior_blocked_binding": "N/A",
   "retry": {
@@ -48,10 +48,10 @@
     "hap_b": "<FINAL-SIGNED-HAP-B-SHA256>"
   },
   "source": {
-    "archive_path": "<OUT-OF-REPO-FROZEN-SOURCE-ARCHIVE-PATH>",
-    "archive_sha256": "<SOURCE-ARCHIVE-SHA256>",
-    "manifest_path": "<OUT-OF-REPO-SOURCE-MANIFEST-PATH>",
-    "manifest_sha256": "<SOURCE-MANIFEST-SHA256>"
+    "archive_path": "/home/worker/harmonyos-signing/netbird-e3/source-provenance/20260816-relabeled-62409c5/e3-phys-preflight-hap-source-62409c5.tar.gz",
+    "archive_sha256": "abecc31715585b3047c00f85609a74ab0cefab2b6d328c6810ef987b5fc76888",
+    "manifest_path": "/home/worker/harmonyos-signing/netbird-e3/source-provenance/20260816-relabeled-62409c5/source-manifest.json",
+    "manifest_sha256": "30a22dc6c3a10dd75e6f86e4b7cf06427389e318abe0cb78c72604983e302322"
   },
   "sdk": {
     "version": "<FROZEN-SDK-VERSION>",
@@ -82,7 +82,7 @@
   },
   "machine_fresh_confirmation": {
     "status": "pending",
-    "authorization_id": "AUTH-E3-PHYS1API26-20260816-0001",
+    "authorization_id": "AUTH-E3-PHYS1API26-20260816-0002",
     "record_path": "<OUT-OF-REPO-TARGET-BINDING-CONFIRMATION-RECORD-PATH>",
     "record_sha256": "<SHA256-OF-THE-CONFIRMATION-RECORD>"
   },

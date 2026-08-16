@@ -66,8 +66,10 @@
   - 双审查 isolated `kimi-coding/k3` + `anthropic/claude-sonnet-5` 均 0 B/5 M；opus timeout attempt-not-counted；`ADJ-20260807-0003` 已批准 host process terminal probe 与 Settings 应用信息强制停止撤销路径；`plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权
 - [E3-PHYS-PREFLIGHT host remediation 证据（ADJ-20260807-0003 runner）](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
   - `EV-E3-PHYS1HOST-20260808-0001`：host-only、`is_evidence: false`；执行 commit `e3fe0c642c28b8a332c0f70db2217787884334e9`（parent `c6acae7`，M1/M3 probe fixes）；host selftest `HDC_PROCESSES=0`、独立审查 0 B/0 M；candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；DryRun `is_evidence: false`/HDC0/integrity empty；旧 20260807 candidate `INVALID-TIMELINE` 不可用；host `reviewed-pass` 不等于 E3 pass，无 Live/HDC/install/device-ready 授权；E3 open、E8 `CLOSED`
-- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0001，当前）](evidence/e3-physical-preflight-authorization-2026-08-16-0001.md)
-  - `AUTH-E3-PHYS1API26-20260816-0001`：新 pair `E3-PHYS-PREFLIGHT-20260816-0001` / `EV-E3-PHYS1API26-20260816-0001`，attempt initial / retry N/A；当前 `blocked-awaiting-full-gates`、not ready，machine confirmation/review/freeze/DryRun/Live 均 pending；只适用于 S6 B 修复 commit `9c1d464f...` 之后的完整 13 门；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0002，当前）](evidence/e3-physical-preflight-authorization-2026-08-16-0002.md)
+  - `AUTH-E3-PHYS1API26-20260816-0002`：新 pair `E3-PHYS-PREFLIGHT-20260816-0002` / `EV-E3-PHYS1API26-20260816-0002`，attempt initial / retry N/A；当前 `blocked-awaiting-full-gates`、not ready，machine confirmation/review/freeze/DryRun/Live 均 pending；HAP source basis `62409c5f...` 与最终 runner/governance `code_sha` 独立冻结；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0001，gate-3 review-blocked retired）](evidence/e3-physical-preflight-authorization-2026-08-16-0001.md)
+  - 0001 audit-1 与 blocked freeze 原字节保留；旧 source mismatch 导致 0B/1M、gate 4-13 not-run、非 Live consumed；AUTH/pair 永久不复用
 - [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-15 · 0005，sealed blocked consumed）](evidence/e3-physical-preflight-authorization-2026-08-15-0005.md)
   - 0005 AUTH/pair 已消费且不得复用；其 sealed evidence 与 S6 B production fixture 只保留历史/provenance
 - [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-15 · 0004，consumed sealed invalid）](evidence/e3-physical-preflight-authorization-2026-08-15-0004.md)
