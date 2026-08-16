@@ -6,7 +6,7 @@
 
 ## 状态
 
-> **当前授权覆盖（2026-08-15 · 0005）**：本文其余标为“当前（2026-08-10 · 0002）”的内容现均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260815-0005`](evidence/e3-physical-preflight-authorization-2026-08-15-0005.md)，候选 pair `E3-PHYS-PREFLIGHT-20260815-0005` / `EV-E3-PHYS1API26-20260815-0005`，attempt initial / retry N/A，`plan_status: authorized-awaiting-linux-ready-freeze`。0004 sealed invalid 已消费且不得复用；0005 采用 production-layout S5 修复，须在 commit/push 后按 13 门冻结实际 HEAD。E3 未关闭，E8 `CLOSED`。
+> **当前授权覆盖（2026-08-16 · 0001）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260816-0001`](evidence/e3-physical-preflight-authorization-2026-08-16-0001.md)，候选 pair `E3-PHYS-PREFLIGHT-20260816-0001` / `EV-E3-PHYS1API26-20260816-0001`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；只适用于 S6 B 修复 commit `9c1d464f...` 之后的完整 13 门。0005 sealed blocked consumed，不得复用。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |
