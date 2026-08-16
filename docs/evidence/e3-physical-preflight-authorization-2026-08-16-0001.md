@@ -2,7 +2,7 @@
 
 最后核验：2026-08-16
 
-本文历史登记曾依据用户（直接人类决策者）于 2026-08-16 的决定建立 `AUTH-E3-PHYS1API26-20260816-0001`、campaign `E3-PHYS-PREFLIGHT-20260816-0001` 与 evidence `EV-E3-PHYS1API26-20260816-0001`，`attempt: initial`。该 pair 执行到 gate 3 静态独立审查时，因 blocked freeze 绑定的旧 source provenance 与冻结 HAP 的实际 source basis 不一致而停止；现由 [`AUTH-E3-PHYS1API26-20260816-0002`](e3-physical-preflight-authorization-2026-08-16-0002.md) 取代。
+本文历史登记曾依据用户（直接人类决策者）于 2026-08-16 的决定建立 `AUTH-E3-PHYS1API26-20260816-0001`、campaign `E3-PHYS-PREFLIGHT-20260816-0001` 与 evidence `EV-E3-PHYS1API26-20260816-0001`，`attempt: initial`。该 pair 执行到 gate 3 静态独立审查时，因 blocked freeze 绑定的旧 source provenance 与冻结 HAP 的实际 source basis 不一致而停止；先由 [`AUTH-E3-PHYS1API26-20260816-0002`](e3-physical-preflight-authorization-2026-08-16-0002.md) 取代，0002 随后因治理门顺序失效退役，当前由 [`AUTH-E3-PHYS1API26-20260816-0003`](e3-physical-preflight-authorization-2026-08-16-0003.md) 取代。
 
 > 最终状态：`authorization_status: governance-review-blocked-retired`，not ready，reusable false。gate 1-2 已形成治理前置与 audit-1；gate 3 blocked freeze 已形成但审查为 0 blocker / 1 major，根因是旧 source mismatch。gate 4-13 全部 `not-run`，没有执行 HDC、设备命令、TargetBindingConfirm、ready freeze、audit-2、DryRun 或 Live，因此 0001 **不是 Live consumed**；但治理失败已使该 AUTH/pair 永久退役，绝不可复用、补跑、重判或作为 retry basis。
 
@@ -83,7 +83,7 @@ protected_gate_objects:
 
 ## 0005 处置与适用边界（历史）
 
-以下条目只记录 0001 建立时对 0005 与当时新 pair 的处置规则；0001 退役后不构成当前授权或待执行指令，当前治理只以 0002 登记为准。
+以下条目只记录 0001 建立时对 0005 与当时新 pair 的处置规则；0001 退役后不构成当前授权或待执行指令，0002 亦已退役，当前治理只以 0003 登记为准。
 
 1. 0005 sealed evidence 固定为 S1-S5 pass、S6 blocked（`scenario-6 machine-verification-blocked step=3 reason=platform-marker-missing:B-create-terminal-missing`）、S7 blocked（`not-run-after-runner-failure`），overall/verdict blocked。该历史事实不因后续授权改变。
 2. 0005 AUTH/pair 当时已是 `sealed-blocked-consumed`、不可复用；20260816-0001 当时登记为全新 initial、不是 retry。0001 后来也已在 gate 3 退役；后续尝试的治理要求由取代它的授权登记另行规定。
@@ -146,4 +146,4 @@ runner HDC 白名单精确为 22 项：`Version`、`TupleModel`、`TupleBuild`�
 
 ## 当前历史边界
 
-0001 只保留为 gate-3 governance-review-blocked-retired provenance。任何活跃执行入口、runner 常量、PowerShell parity、selftests、freeze example 与 current docs 均不得再指向 0001。0001 的详细 S5/S6 和白名单段落只记录当时计划，不构成执行授权；当前完整 13 门只受 0002 登记约束。
+0001 只保留为 gate-3 governance-review-blocked-retired provenance。授权退役链固定为 0001 -> 0002（governance-order-invalid-retired）-> 0003（当前）；任何活跃执行入口、runner 常量、PowerShell parity、selftests、freeze example 与 current docs 均不得再指向 0001。0001 的详细 S5/S6 和白名单段落只记录当时计划，不构成执行授权；当前完整 13 门只受 0003 登记约束。

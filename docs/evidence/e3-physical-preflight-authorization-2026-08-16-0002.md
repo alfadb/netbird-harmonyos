@@ -1,35 +1,39 @@
-# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0002）
+# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0002，governance-order-invalid-retired）
 
 最后核验：2026-08-16
 
-本文登记用户（直接人类决策者）本轮明确批准的原意：**保留 20260816-0001 为 gate-3 review-blocked，修正 source provenance，并进入 AUTH/pair 20260816-0002 的完整 13 门**。据此建立全新授权 `AUTH-E3-PHYS1API26-20260816-0002`、campaign `E3-PHYS-PREFLIGHT-20260816-0002` 与 evidence `EV-E3-PHYS1API26-20260816-0002`，`attempt: initial`、retry N/A。本授权取代并且绝不复用已退役的 [`AUTH-E3-PHYS1API26-20260816-0001`](e3-physical-preflight-authorization-2026-08-16-0001.md)。
+本文历史登记曾建立 `AUTH-E3-PHYS1API26-20260816-0002`、campaign `E3-PHYS-PREFLIGHT-20260816-0002` 与 evidence `EV-E3-PHYS1API26-20260816-0002`，`attempt: initial`、retry N/A。该授权原计划保留 20260816-0001 的 gate-3 review-blocked 历史、采用修复后的 source provenance，并进入完整 13 门；现已由 [`AUTH-E3-PHYS1API26-20260816-0003`](e3-physical-preflight-authorization-2026-08-16-0003.md) 取代。
 
-> 当前状态：`authorization_status: blocked-awaiting-full-gates`，not ready。0002 是全新 initial，不是 0001 retry。0001 在 gate 3 因旧 source provenance 与实际 HAP source basis 不一致而 review-blocked，未进入 gate 4-13，也未执行 Live；其 AUTH/pair、audit-1 与 blocked freeze 永久不可复用。0002 的 candidate ID consumption audits、confirmation、review、blocked/ready freeze、DryRun 与 Live 均未执行，本文不预写任何 0002 pass、record、freeze 或 campaign hash。E3 未关闭，E8 保持 `CLOSED`。
+> 退役状态：`authorization_status: governance-order-invalid-retired`，`reusable: false`。gate 1 尚未完成时，agent 误触本应位于 gate 4 的 `hdc list targets`，造成 gate 4 操作提前、治理门顺序失效。该调用的 stdout/stderr 未披露、未落盘；随后 daemon 以 host process termination 清理，并仅通过进程表确认 HDC0。命令级清理审计未持久化，故该清理不计作任何合规 gate 操作；不得主张具体清理命令，也不声称已执行设备证据。gate 1 未完成，gate 2-13 全部 `not-run`；仓外不存在 0002 audit、blocked/ready freeze、confirmation/review record、evidence 或 lock。0002 未执行 Live、未 consumed，不构成设备证据，也不构成 pair consumption，但 AUTH/pair 已按治理失败永久退役。
 
-> gate 1 前置治理选择：用户本轮选择的完整治理明确包括在 0 blocker / 0 major 审查和 host-only tests 通过后，对 0002 registration、修正后的 source provenance binding 与 pair migration 执行 commit/push，以形成 gate 1 所需的 exact clean HEAD。该选择只授权届时的治理提交与推送，不授权 campaign evidence；在提交前仍不授权 HDC、设备命令、`TargetBindingConfirm`、0002 audit、任何 blocked/ready freeze、record、DryRun 或 Live。本次 minor 收拢本身也不执行 commit/push。
+> 用户已批准迁移至 0003 的完整 13 门，并批准在 0 blocker / 0 major 审查和 host-only tests 通过后对 0003 registration、source provenance binding 与 pair migration 执行 commit/push。该后续授权不复活 0002；本次 host-only 治理不执行 commit/push。
 
 ## 授权状态
 
 ```yaml
 authorization_id: AUTH-E3-PHYS1API26-20260816-0002
 supersedes: AUTH-E3-PHYS1API26-20260816-0001
+superseded_by: AUTH-E3-PHYS1API26-20260816-0003
 exception: E3-PHYS-PREFLIGHT
-information_status: current-governance-registration
+information_status: historical-governance-registration
 record_status: registered-not-run
 stage_or_gate: E3
+governance_gate_reached: gate-1-incomplete
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: host-governance-order-invalid
 is_evidence: false
-authorization_status: blocked-awaiting-full-gates
-plan_status: blocked-awaiting-full-gates
+authorization_status: governance-order-invalid-retired
+plan_status: governance-order-invalid-retired
 ready: false
+reusable: false
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
-independent_review: pending
-blocked_confirmation_freeze: pending
-ready_freeze: pending
-dry_run: pending
-live: pending
+machine_fresh_confirmation: not-run
+independent_review: not-run
+blocked_confirmation_freeze: not-run
+ready_freeze: not-run
+dry_run: not-run
+live: not-run
+live_consumed: false
 campaign_status: not-run
 hap_source_basis_commit: 62409c5f966d00597b58f68ae5b927dd06e76e76
 runner_code_basis_commit: 9c1d464fa78214dee7c1c00f4870aa26549af1a2
@@ -40,8 +44,9 @@ candidate:
   evidence_id: EV-E3-PHYS1API26-20260816-0002
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
+  identity_status: governance-order-invalid-retired
   consumed: false
+  reusable: false
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260816-0001
   evidence_id: EV-E3-PHYS1API26-20260816-0001
@@ -118,7 +123,9 @@ runner HDC 白名单仍精确为 22 项：`Version`、`TupleModel`、`TupleBuild
 
 endpoint、target、serial、UDID、设备身份值、账号、凭据、私钥与签名私密材料不得写入仓库、freeze、record、evidence、日志、命令输出或聊天转录。仓内只允许公开 tuple、公开 bundle/resource id、脱敏 hash 与受控仓外路径模板。
 
-## 完整 13 门
+## 历史计划的完整 13 门（未执行）
+
+以下是 0002 退役前的计划，实际 gate 1 未完成，gate 2-13 均未运行。
 
 1. 同步 trusted refs/bundle；核对最终 HEAD 包含 `9c1d464fa78214dee7c1c00f4870aa26549af1a2`、本登记及 0002 常量迁移，且 worktree exact clean。记录最终独立 `code_sha`；同时核对 HAP source basis 精确为 `62409c5f966d00597b58f68ae5b927dd06e76e76`。freeze 后至 campaign 结束治理字节不得改动。
 2. 对 0002 新 pair 执行 candidate ID consumption audit-1，仓外记录并写 `.sha256`；任何 Live/evidence/seal 占用立即停止。
@@ -134,8 +141,8 @@ endpoint、target、serial、UDID、设备身份值、账号、凭据、私钥�
 12. 独立审查 DryRun，并复算最终 ready freeze SHA-256，确认 freeze 字节未变化。
 13. 仅执行一次完整 Live；设置 `PYTHONUNBUFFERED=1`，仅按证据目录增量及 `operator-wait-state.json` / `scenario-results.json` 的 `updated_at` 监控。不得因终端暂时无输出擅自中断，不得 retry。
 
-任一 gate 失败立即停止，不自动 retry、不换 ID。任何后续尝试都必须重新治理并取得新 AUTH/pair；0002 不允许从中间 gate 开始或只重放 S6。即使 0002 最终通过，也不自动开放 E8。
+0002 已因治理门顺序失效停止，不允许从中间 gate 继续、只重放 S6、补跑或 retry；后续仅可按新 AUTH/pair 重新治理。
 
-## 当前 host-only 登记边界
+## 退役后的 host-only 边界
 
-本次 minor 收拢只允许修正 source provenance manifest/companion、同步本 0002 registration 与 freeze example、补强 0001 历史边界，并执行 host-only 自测、源码/归档/HAP correspondence replay、JSON/diffcheck、敏感扫描、pycache 与 HDC 进程核验。禁止执行 HDC、设备命令、`TargetBindingConfirm`、0002 audit、任何 campaign blocked/ready freeze、record、DryRun、Live、commit 或 push。0B0M 与 host-only tests 通过后的 registration/source/pair migration commit/push 是用户选择的 gate 1 前置治理后续步骤，不在本次收拢内执行；当前登记完成不等于 gate 1 完成，也不使 campaign ready。
+0002 不再允许继续任何 gate、audit、freeze、record、DryRun 或 Live，也不得创建仓外 0002 evidence/lock。后续 host-only 治理只可迁移至 0003；0002 的 HDC 误触不披露设备输出、不落盘、不登记为设备证据，并且不把 pair 标为 consumed。host process termination 后的进程表 HDC0 只确认当时无残留 daemon；命令级清理审计未持久化，因此不构成任何合规 gate 操作，也不支持对具体清理命令或设备操作作出断言。

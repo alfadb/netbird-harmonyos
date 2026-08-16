@@ -6,7 +6,7 @@
 
 ## 状态
 
-> **当前授权覆盖（2026-08-16 · 0002）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260816-0002`](evidence/e3-physical-preflight-authorization-2026-08-16-0002.md)，候选 pair `E3-PHYS-PREFLIGHT-20260816-0002` / `EV-E3-PHYS1API26-20260816-0002`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；冻结须分别绑定 HAP source basis `62409c5f...` 与最终 runner/governance `code_sha`。0001 已 gate-3 review-blocked retired、0005 已 sealed blocked consumed，均只作历史/provenance且不得复用。E3 未关闭，E8 `CLOSED`。
+> **当前授权覆盖（2026-08-16 · 0003）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260816-0003`](evidence/e3-physical-preflight-authorization-2026-08-16-0003.md)，候选 pair `E3-PHYS-PREFLIGHT-20260816-0003` / `EV-E3-PHYS1API26-20260816-0003`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；冻结须分别绑定 HAP source basis `62409c5f...` 与最终 runner/governance `code_sha`。0002 已因 gate 1 未完成时 gate 4 操作提前而 `governance-order-invalid-retired`，未 Live、未 consumed；0001/0002/0005 均只作历史/provenance且不得复用。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |
