@@ -52,10 +52,11 @@ RUNNER_SRC = os.path.join(PROJECT, 'e3-phys-preflight-campaign.py')
 PRODUCTION_APP_INFO_FIXTURE = os.path.join(HERE, 'fixtures', 'settings-app-info-production-0004.json')
 PRODUCTION_S6_B_AUTH_FIXTURE = os.path.join(HERE, 'fixtures', 's6-b-authorization-production-0005.json')
 
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0003'
-OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0002'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260816-0003'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260816-0003'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0001'
+OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0003'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0001'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0001'
+REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 BUNDLE_A = 'cn.alfadb.netbird.e3physvpna'
 BUNDLE_B = 'cn.alfadb.netbird.e3physvpnb'
 MODEL = 'PLA-AL10'
@@ -273,7 +274,7 @@ def make_freeze(ws, plan_status='blocked', evidence_id=CANDIDATE_EVIDENCE_ID,
         'independent_review_ready': True,
         'independent_review_record': {'status': 'pending'},
         'operator_role': 'selftest-operator',
-        'independent_reviewer_role': 'selftest-independent-reviewer',
+        'independent_reviewer_role': REVIEWER_ROLE,
     }
     freeze.update(overrides)
     return freeze
@@ -324,7 +325,7 @@ def make_confirmation_record(ws, freeze, path, verdict='pass', **overrides):
 
 
 def make_review_record(ws, freeze, machine_sha, path,
-                       reviewer_role='selftest-independent-reviewer', **overrides):
+                       reviewer_role=REVIEWER_ROLE, **overrides):
     """PS Write-ReviewRecordFixture (L540-570): a valid
     e3-ready-freeze-review record + .sha256 companion. Review times are
     anchored after the machine confirmation ended_at and at/before the
@@ -372,7 +373,7 @@ def bind_ready_freeze(freeze, confirm_path, confirm_sha, review_path, review_sha
         'status': 'pass',
         'record_path': review_path,
         'record_sha256': review_sha,
-        'reviewer_role': 'selftest-independent-reviewer',
+        'reviewer_role': REVIEWER_ROLE,
     }
     return bound
 
@@ -1406,6 +1407,17 @@ class TestTwoPhaseConfirmationContract(SelftestBase):
                          runner_mod.get_confirmation_contract_sha256(ready),
                          'two-phase confirmation contract hashes must be identical')
 
+    def test_wrong_reviewer_role_rejected(self):
+        wrong = make_freeze(self.ws, plan_status='blocked',
+                            independent_reviewer_role='isolated-static-reviewer')
+        wrong_path = self.write_freeze(wrong, 'freeze-wrong-reviewer-role.json')
+        ev, raw = self.case_paths('wrong-reviewer-role-dryrun')
+        proc = run_runner(self.ws, self._dryrun_args(wrong_path, ev, raw))
+        self.assert_rejected(proc, r'independent_reviewer_role must be exactly',
+                             'freeze with wrong reviewer role')
+        self.assertFalse(os.path.exists(self.ws['hdc_marker']),
+                         'wrong reviewer role case launched the HDC sentinel')
+
     def test_two_phase_ready_consumes_blocked_records(self):
         """PS L790-830: records bound on the blocked T1 phase are consumable
         by the ready T2 DryRun; the sealed record projects the final full
@@ -1435,6 +1447,8 @@ class TestTwoPhaseConfirmationContract(SelftestBase):
         self.assertEqual(record['independent_review_record']['confirmation_contract_sha256'],
                          runner_mod.get_confirmation_contract_sha256(ready),
                          'sealed review binding does not anchor the confirmation contract')
+        self.assertEqual(record['independent_review_record']['reviewer_role'], REVIEWER_ROLE,
+                         'sealed review binding does not preserve the exact reviewer role')
         self.assertFalse(os.path.exists(self.ws['hdc_marker']),
                          'two-phase case launched the HDC sentinel')
 

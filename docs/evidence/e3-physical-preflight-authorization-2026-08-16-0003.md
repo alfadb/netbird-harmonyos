@@ -1,49 +1,70 @@
-# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0003）
+# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-16 · 0003，governance-review-blocked-retired）
 
-最后核验：2026-08-16
+最后核验：2026-08-17
 
-本文登记用户（直接人类决策者）本轮明确批准的原意：**将因治理门顺序失效而退役的 20260816-0002 保留为历史，并进入 AUTH/pair 20260816-0003 的完整 13 门**。据此建立全新授权 `AUTH-E3-PHYS1API26-20260816-0003`、campaign `E3-PHYS-PREFLIGHT-20260816-0003` 与 evidence `EV-E3-PHYS1API26-20260816-0003`，`attempt: initial`、retry N/A。本授权取代并且绝不复用已退役的 [`AUTH-E3-PHYS1API26-20260816-0002`](e3-physical-preflight-authorization-2026-08-16-0002.md)。
+本文历史登记曾建立 `AUTH-E3-PHYS1API26-20260816-0003`、campaign `E3-PHYS-PREFLIGHT-20260816-0003` 与 evidence `EV-E3-PHYS1API26-20260816-0003`，`attempt: initial`、retry N/A。该 pair 完成 gate 1-6 后，在 gate 7 独立 Opus 审查发现 reviewer role contract 不匹配并停止；现由 [`AUTH-E3-PHYS1API26-20260817-0001`](e3-physical-preflight-authorization-2026-08-17-0001.md) 取代。
 
-> 当前状态：`authorization_status: blocked-awaiting-full-gates`，not ready。0003 是全新 initial，不是 0002 retry。0002 因 gate 1 未完成时 agent 误触 `hdc list targets`、使 gate 4 操作提前而 `governance-order-invalid-retired`；该输出未披露、未落盘，随后 daemon 以 host process termination 清理并由进程表确认 HDC0。命令级清理审计未持久化，因此不把该清理算作任何合规 gate 操作，也不声称已执行 device evidence 或具体清理命令；gate 2-13 均未运行，仓外不存在 0002 audit/freeze/record/evidence/lock。0002 未执行 Live、未 consumed，仍永久不可复用。0003 的 candidate ID consumption audits、confirmation、review、blocked/ready freeze、DryRun 与 Live 均未执行，本文不预写任何 0003 pass、record、freeze 或 campaign hash。E3 未关闭，E8 保持 `CLOSED`。
+> 退役状态：`authorization_status: governance-review-blocked-retired`，`reusable: false`，Live not run。gate 1-6 均 pass；gate 7 由 Opus reviewer 得出 **0 major / 1 blocker**：freeze 固定角色 `isolated-static-reviewer` 与实际 reviewer 身份不匹配。按 fail-closed 契约没有写 `e3-ready-freeze-review` record 或 companion；gate 8-13 全部 `not-run`。0003 未执行 DryRun/Live、未产生 device evidence、未 consumed，但 AUTH/pair 已按治理审查失败永久退役，不得复用、补写 review record、改写 freeze 或转作新 pair retry basis。E3 未关闭，E8 保持 `CLOSED`。
 
-> gate 1 前置治理选择：用户明确批准在 0 blocker / 0 major 审查和 host-only tests 通过后，对 0003 registration、修正后的 source provenance binding 与 pair migration 执行 commit/push，以形成 gate 1 所需的 exact clean HEAD。该选择只授权届时的治理提交与推送，不授权 campaign evidence；本次 host-only 登记不执行 commit/push。
+> 2026-08-17 退役 cleanup：本次 host-only remediation 开始时发现一个 0003 遗留 HDC daemon，仅以 host process termination 终止，并由主机进程表确认 HDC0；未调用 `hdc kill` 或任何其他 HDC 命令。该 cleanup 只清理退役 0003 的 host 残留，不计作新 AUTH 的任何 gate，也不构成设备证据。
 
 ## 授权状态
 
 ```yaml
 authorization_id: AUTH-E3-PHYS1API26-20260816-0003
 supersedes: AUTH-E3-PHYS1API26-20260816-0002
+superseded_by: AUTH-E3-PHYS1API26-20260817-0001
 exception: E3-PHYS-PREFLIGHT
-information_status: current-governance-registration
-record_status: registered-not-run
-stage_or_gate: E3
+information_status: historical-governance-registration
+record_status: governance-review-blocked-not-live
+stage_or_gate: E3/gate-7
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: governance-gates-1-through-7-review-blocked
 is_evidence: false
-authorization_status: blocked-awaiting-full-gates
-plan_status: blocked-awaiting-full-gates
+authorization_status: governance-review-blocked-retired
+plan_status: governance-review-blocked-retired
 ready: false
-reusable: true
+reusable: false
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
-independent_review: pending
-blocked_confirmation_freeze: pending
-ready_freeze: pending
-dry_run: pending
-live: pending
+machine_fresh_confirmation: pass
+independent_review: blocked-0-major-1-blocker-role-mismatch-no-record
+blocked_confirmation_freeze: pass
+ready_freeze: draft-created-not-final
+candidate_audit_1: pass
+candidate_audit_2: not-run
+dry_run: not-run
+live: not-run
 campaign_status: not-run
 live_consumed: false
 hap_source_basis_commit: 62409c5f966d00597b58f68ae5b927dd06e76e76
 runner_code_basis_commit: 9c1d464fa78214dee7c1c00f4870aa26549af1a2
-code_sha: pending-final-clean-head
-head_requirement: exact-clean-final-governance-commit-descending-from-runner-code-basis
+code_sha: 87f3600a38c3d7b22111141f59a1c6943cc73c98
+reviewer_role_frozen: isolated-static-reviewer
+reviewer_role_actual: isolated-anthropic-claude-opus-5-reviewer
+gate_artifacts:
+  audit_1_sha256: 627ae767920d2f2a9a20f5514ce10f8c27515e86049f233c56befb87755880c6
+  blocked_freeze_sha256: 878431eb5bbf18d6c8048f467ae15f85e027a3095d0a2b79d4c370680007e205
+  confirmation_contract_sha256: 8172fccee19261e07338845076dfc33b7d2c3878ed87f9d8b044a9e0b8e2ce42
+  target_binding_confirmation_sha256: 375807d2af4ff79ed0c12d9b9962d71a27c2bea48745a6533cf1953657acda89
+  ready_freeze_draft_sha256: ed709826269b7433e7144208f8e75f4c8f908b5a950009c08de0b0050e61b9d5
+  review_record_sha256: N/A-not-written
+gates:
+  gate_1: pass
+  gate_2: pass
+  gate_3: pass
+  gate_4: pass
+  gate_5: pass
+  gate_6: pass
+  gate_7: blocked-0-major-1-blocker-role-mismatch-no-record
+  gates_8_through_13: not-run
 candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260816-0003
   evidence_id: EV-E3-PHYS1API26-20260816-0003
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
+  identity_status: governance-review-blocked-retired
   consumed: false
+  reusable: false
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260816-0002
   evidence_id: EV-E3-PHYS1API26-20260816-0002
@@ -64,13 +85,16 @@ target_tuple:
   channel: ordinary-development-signing-only
 record_paths:
   target_binding_confirmation: $HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260816-0003.json
-  ready_freeze_review: $HOME/harmonyos-signing/netbird-e3/records/e3-ready-freeze-review-20260816-0003.json
+  ready_freeze_review: N/A-not-written
+freeze_paths:
+  blocked: $HOME/harmonyos-signing/netbird-e3/freeze/freeze-blocked-confirm-20260816-0003.json
+  ready_draft: $HOME/harmonyos-signing/netbird-e3/freeze/freeze-ready-draft-20260816-0003.json
 evidence_roots:
-  dry_run: $HOME/harmonyos-signing/netbird-e3/evidence-dry-run-20260816-0003
-  live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260816-0003
+  dry_run: not-created
+  live: not-created
 ```
 
-`reusable: true` 仅表示 0003 尚未被治理失败或执行消费；它不表示 ready，也不允许跳过任一 gate。任一 gate 失败后须立即停止并重新治理。
+所有列出的仓外 0003 audit、blocked freeze、confirmation 与 ready draft 对象及 companion 均为历史只读字节，本次退役登记未修改它们。
 
 ## 双 SHA 与 source provenance
 
@@ -124,7 +148,7 @@ runner HDC 白名单仍精确为 22 项：`Version`、`TupleModel`、`TupleBuild
 
 endpoint、target、serial、UDID、设备身份值、账号、凭据、私钥与签名私密材料不得写入仓库、freeze、record、evidence、日志、命令输出或聊天转录。仓内只允许公开 tuple、公开 bundle/resource id、脱敏 hash 与受控仓外路径模板。普通开发签名的 profile/certificate/keystore/password/private key 均保持仓外；仓内只登记公开验证结论、公开 fingerprint（或带理由的 N/A）和冻结 HAP hash。不得读取、复制、输出或重新生成签名私密材料，不得重建或重签 HAP。
 
-## 完整 13 门
+## 历史 13 门与实际停止点
 
 1. **host-only gate 1**：同步 trusted refs/bundle；核对最终 HEAD 包含 `9c1d464fa78214dee7c1c00f4870aa26549af1a2`、本登记及 0003 常量迁移，且 worktree exact clean。记录最终独立 `code_sha`；同时核对 HAP source basis 精确为 `62409c5f966d00597b58f68ae5b927dd06e76e76`。本门只允许读取 git、仓内/受控仓外文件和主机进程表；**绝不可调用任何 HDC 可执行文件或子命令，包括 version/list/kill**。HDC0 只可由 `ps -eo comm,args` 或 `pgrep -x hdc` 判定。freeze 后至 campaign 结束治理字节不得改动。
 2. 对 0003 新 pair 执行 candidate ID consumption audit-1，仓外记录并写 `.sha256`；任何 Live/evidence/seal 占用立即停止。
@@ -140,8 +164,8 @@ endpoint、target、serial、UDID、设备身份值、账号、凭据、私钥�
 12. 独立审查 DryRun，并复算最终 ready freeze SHA-256，确认 freeze 字节未变化。
 13. 仅执行一次完整 Live；设置 `PYTHONUNBUFFERED=1`，仅按证据目录增量及 `operator-wait-state.json` / `scenario-results.json` 的 `updated_at` 监控。不得因终端暂时无输出擅自中断，不得 retry。
 
-任一 gate 失败立即停止，不自动 retry、不换 ID。任何后续尝试都必须重新治理并取得新 AUTH/pair；0003 不允许从中间 gate 开始或只重放 S6。即使 0003 最终通过，也不自动开放 E8。
+实际执行到 gate 7 后因 reviewer role mismatch 停止。gate 8-13 未运行；不得从中间 gate 继续、补写 review record、只重放 S6、retry 或复用 0003 pair。E8 不因此开放。
 
-## 当前 host-only 登记边界
+## 退役后的 host-only 边界
 
-本次只允许建立 0003 治理、迁移 runner/selftests/freeze example 与当前文档，并执行 host-only 自测、host audit、JSON/diffcheck、敏感扫描、pycache 与 HDC 进程表核验。禁止执行任何 HDC 可执行文件或子命令、设备命令、`TargetBindingConfirm`、0003 audit、任何 campaign blocked/ready freeze、record、DryRun、Live、commit 或 push。0B0M 与 host-only tests 通过后的 registration/source/pair migration commit/push 已获用户批准，但不在本次操作内执行；当前登记完成不等于 gate 1 完成，也不使 campaign ready。
+0003 不再允许继续任何 gate、audit、freeze、record、DryRun 或 Live，也不得创建新的 0003 evidence/lock。2026-08-17 remediation 只允许更新仓内退役事实、修复 reviewer contract 并迁移到新 AUTH/pair；禁止修改任何既有仓外 0003 audit、blocked freeze、confirmation、ready draft 或 companion。

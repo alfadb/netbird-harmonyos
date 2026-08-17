@@ -83,9 +83,10 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260816-0003'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260816-0003'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260816-0003'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260817-0001'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260817-0001'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260817-0001'
+$script:ExpectedIndependentReviewerRole = 'isolated-anthropic-claude-opus-5-reviewer'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
 $script:SimulationActiveBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -710,6 +711,7 @@ function Assert-FreezeManifest {
         $roleValue = [string](Get-RequiredProperty $Freeze $role)
         if ([string]::IsNullOrWhiteSpace($roleValue) -or $roleValue.Contains('<')) { throw "$role incomplete" }
     }
+    if ([string]$Freeze.independent_reviewer_role -ne $script:ExpectedIndependentReviewerRole) { throw "independent_reviewer_role must be exactly $($script:ExpectedIndependentReviewerRole)" }
     if ([string]$Freeze.operator_role -eq [string]$Freeze.independent_reviewer_role) { throw 'operator and independent reviewer roles must differ' }
     Assert-JsonBoolean $Freeze 'cleanup_baseline_frozen' $true
     Assert-JsonBoolean $Freeze 'collection_ready' $true
@@ -755,8 +757,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260816-0003 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260816-0003 / EV-E3-PHYS1API26-20260816-0003, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260817-0001 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260817-0001 / EV-E3-PHYS1API26-20260817-0001, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
@@ -5431,7 +5433,7 @@ function Invoke-RunnerSelfTest {
         collection_ready = $true
         independent_review_ready = $true
         operator_role = 'selftest-operator'
-        independent_reviewer_role = 'selftest-independent-reviewer'
+        independent_reviewer_role = $script:ExpectedIndependentReviewerRole
         independent_review_record = [ordered]@{ status = 'pending' }
     }
     # ADJ-20260810-0001 (C6): the fixture confirmation/review records bind the STABLE confirmation
@@ -5487,7 +5489,7 @@ function Invoke-RunnerSelfTest {
         runner_sha256 = ('b' * 64)
         confirmation_contract_sha256 = $confirmationContractSha
         machine_confirmation_sha256 = $confirmRecordSha
-        reviewer_role = 'selftest-independent-reviewer'
+        reviewer_role = $script:ExpectedIndependentReviewerRole
         operator_role = 'selftest-operator'
         verdict = 'pass'
         blockers = 0
@@ -5511,10 +5513,10 @@ function Invoke-RunnerSelfTest {
         return $copy
     }
     $confirmOk = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
-    $confirmWrongAuth = [ordered]@{ status = 'pass'; authorization_id = 'AUTH-E3-PHYS1API26-20260810-9999'; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
+    $confirmWrongAuth = [ordered]@{ status = 'pass'; authorization_id = 'AUTH-E3-PHYS1API26-20260816-0003'; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
     $confirmWrongSha = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = ('d' * 64) }
     $confirmPending = [ordered]@{ status = 'pending'; authorization_id = $script:AuthId; record_path = 'N/A'; record_sha256 = 'N/A' }
-    $reviewOk = [ordered]@{ status = 'pass'; record_path = $reviewRecordPath; record_sha256 = $reviewSha; reviewer_role = 'selftest-independent-reviewer' }
+    $reviewOk = [ordered]@{ status = 'pass'; record_path = $reviewRecordPath; record_sha256 = $reviewSha; reviewer_role = $script:ExpectedIndependentReviewerRole }
     # ADJ-20260810-0001 (C6): JSON integer gate - Int32/Int64 positive, string/float/null negative.
     Check ((Test-JsonInteger ([int]3)) -and (Test-JsonInteger ([long]3)) -and -not (Test-JsonInteger '3') -and -not (Test-JsonInteger 3.0) -and -not (Test-JsonInteger $null) -and -not (Test-JsonInteger $true)) 'json-integer-helper-int64-positive-string-float-negative'
     $savedConfirmDryRun = [bool]$script:DryRun
@@ -5544,7 +5546,7 @@ function Invoke-RunnerSelfTest {
         try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmPending $reviewOk)); Check $false 'dryrun-blocked-rejects-review-pass-on-pending-machine' } catch { Check ($_.Exception.Message -match 'machine_fresh_confirmation.status=pass') 'dryrun-blocked-rejects-review-pass-on-pending-machine' }
         $blockedReviewPassResult = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $reviewOk)
         Check ($null -ne $blockedReviewPassResult -and [string]$blockedReviewPassResult.RecordSha256 -eq $confirmRecordSha) 'dryrun-blocked-machine-pass-review-pass-fully-validated'
-        $pendingReviewBinding = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = 'selftest-independent-reviewer' }
+        $pendingReviewBinding = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = $script:ExpectedIndependentReviewerRole }
         $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $pendingReviewBinding)
         Check $true 'dryrun-blocked-allows-pending-review'
         $brokenReviewPath = Join-Path $confirmTemp 'neg-review-blocked-dryrun.json'
@@ -5553,7 +5555,7 @@ function Invoke-RunnerSelfTest {
         Write-JsonFile $brokenReviewPath $brokenReview
         $brokenReviewSha = Get-FileSha256 $brokenReviewPath
         [IO.File]::WriteAllText($brokenReviewPath + '.sha256', $brokenReviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-        $brokenReviewBinding = [ordered]@{ status = 'pass'; record_path = $brokenReviewPath; record_sha256 = $brokenReviewSha; reviewer_role = 'selftest-independent-reviewer' }
+        $brokenReviewBinding = [ordered]@{ status = 'pass'; record_path = $brokenReviewPath; record_sha256 = $brokenReviewSha; reviewer_role = $script:ExpectedIndependentReviewerRole }
         try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'blocked' $confirmOk $brokenReviewBinding)); Check $false 'dryrun-blocked-review-pass-fully-validates-content' } catch { Check ($_.Exception.Message -match 'verdict') 'dryrun-blocked-review-pass-fully-validates-content' }
         try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready')); Check $false 'dryrun-ready-requires-confirmation' } catch { Check $true 'dryrun-ready-requires-confirmation' }
         $null = Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk $reviewOk)
@@ -5652,7 +5654,7 @@ function Invoke-RunnerSelfTest {
             Write-JsonFile $casePath $copy
             $caseSha = Get-FileSha256 $casePath
             [IO.File]::WriteAllText($casePath + '.sha256', $caseSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
-            $binding = [ordered]@{ status = 'pass'; record_path = $casePath; record_sha256 = $caseSha; reviewer_role = 'selftest-independent-reviewer' }
+            $binding = [ordered]@{ status = 'pass'; record_path = $casePath; record_sha256 = $caseSha; reviewer_role = $script:ExpectedIndependentReviewerRole }
             $freeze = New-ConfirmFreeze 'ready' $confirmOk $binding
             try { [void](Assert-MachineFreshConfirmation $freeze); Check $false $Name } catch { Check ($_.Exception.Message -match $MessagePattern) $Name }
         }
@@ -5673,11 +5675,11 @@ function Invoke-RunnerSelfTest {
         Test-ReviewReject 'consumer-rejects-review-runner' { param($r) $r.runner_sha256 = ('0' * 64) } 'runner_sha256'
         Test-ReviewReject 'consumer-rejects-review-campaign' { param($r) $r.campaign_id = 'E3-PHYS-PREFLIGHT-WRONG' } 'candidate IDs'
         try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk)); Check $false 'ready-requires-review-record' } catch { Check ($_.Exception.Message -match 'independent_review_record') 'ready-requires-review-record' }
-        $pendingReview = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = 'selftest-independent-reviewer' }
+        $pendingReview = [ordered]@{ status = 'pending'; record_path = 'N/A'; record_sha256 = 'N/A'; reviewer_role = $script:ExpectedIndependentReviewerRole }
         try { [void](Assert-MachineFreshConfirmation (New-ConfirmFreeze 'ready' $confirmOk $pendingReview)); Check $false 'ready-requires-pass-review-record' } catch { Check ($_.Exception.Message -match 'status must be pass') 'ready-requires-pass-review-record' }
         $loneReviewPath = Join-Path $confirmTemp 'neg-review-lone.json'
         Write-JsonFile $loneReviewPath $reviewFixture
-        $loneReviewFreeze = New-ConfirmFreeze 'ready' $confirmOk ([ordered]@{ status = 'pass'; record_path = $loneReviewPath; record_sha256 = (Get-FileSha256 $loneReviewPath); reviewer_role = 'selftest-independent-reviewer' })
+        $loneReviewFreeze = New-ConfirmFreeze 'ready' $confirmOk ([ordered]@{ status = 'pass'; record_path = $loneReviewPath; record_sha256 = (Get-FileSha256 $loneReviewPath); reviewer_role = $script:ExpectedIndependentReviewerRole })
         try { [void](Assert-MachineFreshConfirmation $loneReviewFreeze); Check $false 'consumer-rejects-review-missing-companion' } catch { Check ($_.Exception.Message -match 'companion missing') 'consumer-rejects-review-missing-companion' }
         # ADJ-20260810-0001 (C6): two-phase positive - the blocked confirmation freeze freezes at
         # T1 BEFORE the machine confirmation runs, and the final ready freeze freezes at T2 AFTER
@@ -5708,7 +5710,7 @@ function Invoke-RunnerSelfTest {
             runner_sha256 = ('b' * 64)
             confirmation_contract_sha256 = (Get-ConfirmationContractSha256 $twoPhaseBlocked)
             machine_confirmation_sha256 = $twoPhaseRecordSha
-            reviewer_role = 'selftest-independent-reviewer'
+            reviewer_role = $script:ExpectedIndependentReviewerRole
             operator_role = 'selftest-operator'
             verdict = 'pass'
             blockers = 0
@@ -5721,7 +5723,7 @@ function Invoke-RunnerSelfTest {
         $twoPhaseReviewSha = Get-FileSha256 $twoPhaseReviewPath
         [IO.File]::WriteAllText($twoPhaseReviewPath + '.sha256', $twoPhaseReviewSha + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
         $twoPhaseBinding = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $twoPhaseRecordPath; record_sha256 = $twoPhaseRecordSha }
-        $twoPhaseReviewBinding = [ordered]@{ status = 'pass'; record_path = $twoPhaseReviewPath; record_sha256 = $twoPhaseReviewSha; reviewer_role = 'selftest-independent-reviewer' }
+        $twoPhaseReviewBinding = [ordered]@{ status = 'pass'; record_path = $twoPhaseReviewPath; record_sha256 = $twoPhaseReviewSha; reviewer_role = $script:ExpectedIndependentReviewerRole }
         # ADJ-20260810-0001 (C6): the two-phase positive consumes the T2-advanced ready freeze
         # ($twoPhaseReady, frozen at 00:00:10 past the confirmation end 00:00:05 and the review end
         # 00:00:09) - never a fresh T1 clone - while keeping the review binding. The full contract

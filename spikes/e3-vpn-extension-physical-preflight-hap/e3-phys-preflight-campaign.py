@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260816-0003 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260817-0001 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260816-0003 / EV-E3-PHYS1API26-20260816-0003), and
+(E3-PHYS-PREFLIGHT-20260817-0001 / EV-E3-PHYS1API26-20260817-0001), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -69,9 +69,10 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0003'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260816-0003'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260816-0003'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0001'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0001'
+EXPECTED_INDEPENDENT_REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
 DEVICE_CLOCK_SKEW_TOLERANCE_SECONDS = 3.0
@@ -1071,6 +1072,8 @@ def assert_freeze_manifest(freeze, freeze_path):
         role_value = str(get_required_property(freeze, role))
         if not role_value.strip() or '<' in role_value:
             raise RuntimeError('%s incomplete' % role)
+    if str(freeze['independent_reviewer_role']) != EXPECTED_INDEPENDENT_REVIEWER_ROLE:
+        raise RuntimeError('independent_reviewer_role must be exactly %s' % EXPECTED_INDEPENDENT_REVIEWER_ROLE)
     if str(freeze['operator_role']) == str(freeze['independent_reviewer_role']):
         raise RuntimeError('operator and independent reviewer roles must differ')
     assert_json_boolean(freeze, 'cleanup_baseline_frozen', True)
@@ -1162,7 +1165,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260816-0003 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260817-0001 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -5843,10 +5846,12 @@ def selftest():
         # 3. Contract hash stability (two-phase projection, C5/C6).
         blocked_freeze = {'plan_status': 'blocked',
                           'preflight_inputs_frozen_at': '2099-01-01T00:00:00+00:00',
-                          'operator_role': 'selftest-operator'}
+                          'operator_role': 'selftest-operator',
+                          'independent_reviewer_role': EXPECTED_INDEPENDENT_REVIEWER_ROLE}
         ready_freeze = {'plan_status': 'ready',
                         'preflight_inputs_frozen_at': '2099-01-01T00:00:10+00:00',
-                        'operator_role': 'selftest-operator'}
+                        'operator_role': 'selftest-operator',
+                        'independent_reviewer_role': EXPECTED_INDEPENDENT_REVIEWER_ROLE}
         check('two-phase-full-contract-hashes-differ',
               get_freeze_contract_sha256(blocked_freeze) != get_freeze_contract_sha256(ready_freeze))
         check('two-phase-confirmation-contract-hash-identical',
@@ -5855,6 +5860,10 @@ def selftest():
         mutated_freeze['operator_role'] = 'some-other-operator'
         check('confirmation-contract-rejects-stable-mutation',
               get_confirmation_contract_sha256(mutated_freeze) != get_confirmation_contract_sha256(ready_freeze))
+        wrong_role_freeze = dict(ready_freeze)
+        wrong_role_freeze['independent_reviewer_role'] = 'isolated-static-reviewer'
+        check('confirmation-contract-includes-exact-reviewer-role',
+              get_confirmation_contract_sha256(wrong_role_freeze) != get_confirmation_contract_sha256(ready_freeze))
 
         # 4. Confirmation record schema round-trip (C6).
         selftest_freeze = {
