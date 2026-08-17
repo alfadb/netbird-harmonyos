@@ -6,7 +6,7 @@
 
 ## 状态
 
-> **当前授权覆盖（2026-08-17 · 0001）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260817-0001`](evidence/e3-physical-preflight-authorization-2026-08-17-0001.md)，候选 pair `E3-PHYS-PREFLIGHT-20260817-0001` / `EV-E3-PHYS1API26-20260817-0001`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；reviewer role exact 为 `isolated-anthropic-claude-opus-5-reviewer`，冻结须分别绑定 HAP source basis `62409c5f...` 与最终 runner/governance `code_sha`。0003 已在 gate 7 因 role mismatch 以 `governance-review-blocked-retired` 退役，未 Live、未 consumed；历史 AUTH/pair 均不得复用。E3 未关闭，E8 `CLOSED`。
+> **当前授权覆盖（2026-08-17 · 0002）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260817-0002`](evidence/e3-physical-preflight-authorization-2026-08-17-0002.md)，候选 pair `E3-PHYS-PREFLIGHT-20260817-0002` / `EV-E3-PHYS1API26-20260817-0002`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；reviewer role exact、HAP source basis `62409c5f...` 与独立最终 `code_sha` 逻辑不变。0001 已在 gate 9 因未经授权设备进程枚举以 `governance-operation-invalid-retired` 退役；audit-2 文件不构成有效 gate pass，gate 10-13 未运行，未 DryRun/Live、未 consumed。历史 AUTH/pair 均不得复用。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |

@@ -83,9 +83,9 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260817-0001'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260817-0001'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260817-0001'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260817-0002'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260817-0002'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260817-0002'
 $script:ExpectedIndependentReviewerRole = 'isolated-anthropic-claude-opus-5-reviewer'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
@@ -757,8 +757,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260817-0001 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260817-0001 / EV-E3-PHYS1API26-20260817-0001, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260817-0002 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260817-0002 / EV-E3-PHYS1API26-20260817-0002, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
@@ -4788,8 +4788,41 @@ function Set-CaptureDegradedScenarios {
     }
 }
 
+function Get-HostHdcProcessCount {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = '/usr/bin/ps'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    [void]$startInfo.ArgumentList.Add('-eo')
+    [void]$startInfo.ArgumentList.Add('comm=,args=')
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { return -1 }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        [void]$process.StandardError.ReadToEnd()
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill($true) } catch {}
+            return -1
+        }
+        if ($process.ExitCode -ne 0) { return -1 }
+        $count = 0
+        foreach ($line in @($stdout -split "`r?`n")) {
+            $columns = @($line.TrimStart() -split '\s+', 2)
+            if ($columns.Count -gt 0 -and $columns[0] -ceq 'hdc') { $count++ }
+        }
+        return $count
+    } catch {
+        return -1
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-RunnerSelfTest {
     $failures = [Collections.Generic.List[string]]::new()
+    $hostHdcProcessCount = Get-HostHdcProcessCount
     function Check([bool]$Condition, [string]$Name) {
         if ($Condition) { Write-Host "SELFTEST_PASS=$Name" } else { $failures.Add($Name); Write-Host "SELFTEST_FAIL=$Name" }
     }
@@ -5513,7 +5546,7 @@ function Invoke-RunnerSelfTest {
         return $copy
     }
     $confirmOk = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
-    $confirmWrongAuth = [ordered]@{ status = 'pass'; authorization_id = 'AUTH-E3-PHYS1API26-20260816-0003'; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
+    $confirmWrongAuth = [ordered]@{ status = 'pass'; authorization_id = 'AUTH-E3-PHYS1API26-20260817-0001'; record_path = $confirmRecordPath; record_sha256 = $confirmRecordSha }
     $confirmWrongSha = [ordered]@{ status = 'pass'; authorization_id = $script:AuthId; record_path = $confirmRecordPath; record_sha256 = ('d' * 64) }
     $confirmPending = [ordered]@{ status = 'pending'; authorization_id = $script:AuthId; record_path = 'N/A'; record_sha256 = 'N/A' }
     $reviewOk = [ordered]@{ status = 'pass'; record_path = $reviewRecordPath; record_sha256 = $reviewSha; reviewer_role = $script:ExpectedIndependentReviewerRole }
@@ -5788,8 +5821,9 @@ function Invoke-RunnerSelfTest {
     Check ($recordDraftJson -notmatch '(?i)(udid|serial|"target"\s*:|token|password|secret|endpoint|device-canary)') 'confirmation-record-no-target-or-secret'
 
     Check ($script:HdcProcessStartCount -eq 0) 'SelfTest-zero-HDC-processes'
+    Check ($hostHdcProcessCount -eq 0) 'host-HDC-process-count-zero'
     if ($failures.Count -gt 0) { throw "self-test failures: $($failures -join ', ')" }
-    Write-Host 'SELFTEST_RESULT=pass HDC_PROCESSES=0'
+    Write-Host "SELFTEST_RESULT=pass HDC_PROCESSES=$hostHdcProcessCount"
 }
 
 # ADJ-20260810-0001 (C6): mode exclusivity is enforced BEFORE the SelfTest early exit so invalid

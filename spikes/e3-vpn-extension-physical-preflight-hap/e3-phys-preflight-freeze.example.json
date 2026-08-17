@@ -2,8 +2,8 @@
   "schema_version": 2,
   "plan_status": "blocked",
   "exception": "E3-PHYS-PREFLIGHT",
-  "evidence_id": "EV-E3-PHYS1API26-20260817-0001",
-  "campaign_id": "E3-PHYS-PREFLIGHT-20260817-0001",
+  "evidence_id": "EV-E3-PHYS1API26-20260817-0002",
+  "campaign_id": "E3-PHYS-PREFLIGHT-20260817-0002",
   "attempt": "initial",
   "prior_blocked_binding": "N/A",
   "retry": {
@@ -82,7 +82,7 @@
   },
   "machine_fresh_confirmation": {
     "status": "pending",
-    "authorization_id": "AUTH-E3-PHYS1API26-20260817-0001",
+    "authorization_id": "AUTH-E3-PHYS1API26-20260817-0002",
     "record_path": "<OUT-OF-REPO-TARGET-BINDING-CONFIRMATION-RECORD-PATH>",
     "record_sha256": "<SHA256-OF-THE-CONFIRMATION-RECORD>"
   },

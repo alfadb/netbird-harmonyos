@@ -52,10 +52,10 @@ RUNNER_SRC = os.path.join(PROJECT, 'e3-phys-preflight-campaign.py')
 PRODUCTION_APP_INFO_FIXTURE = os.path.join(HERE, 'fixtures', 'settings-app-info-production-0004.json')
 PRODUCTION_S6_B_AUTH_FIXTURE = os.path.join(HERE, 'fixtures', 's6-b-authorization-production-0005.json')
 
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0001'
-OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260816-0003'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0002'
+OLD_AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0002'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0002'
 REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 BUNDLE_A = 'cn.alfadb.netbird.e3physvpna'
 BUNDLE_B = 'cn.alfadb.netbird.e3physvpnb'
@@ -1059,15 +1059,15 @@ class TestSelfTestAndArgparse(SelftestBase):
 
     def test_selftest_exit0(self):
         """PS L4697-5918 (Invoke-RunnerSelfTest): --SelfTest exits 0 and
-        prints SELFTEST_RESULT=pass HDC_PROCESSES=<count> (PS L5698 format,
-        lowercase pass + read-only pgrep count); the sentinel is never
+        prints SELFTEST_RESULT=pass HDC_PROCESSES=0 using the fixed absolute
+        host process-table probe; the sentinel is never
         executed (the Python runner's embedded selftest is host-only, so
         HDC_PROCESSES=0 is asserted via the marker file instead of the
         output line)."""
         proc = run_runner(self.ws, ['--SelfTest'])
         self.assertEqual(proc.returncode, 0, 'embedded selftest failed:\n%s' % proc.stdout)
-        self.assertRegex(proc.stdout, r'SELFTEST_RESULT=pass HDC_PROCESSES=\d+',
-                         'selftest result line missing or wrong format')
+        self.assertIn('SELFTEST_RESULT=pass HDC_PROCESSES=0', proc.stdout,
+                      'selftest result line missing or host process count is nonzero')
         self.assertFalse(os.path.exists(self.ws['hdc_marker']), 'selftest launched the HDC sentinel')
 
     def test_selftest_mutual_exclusion(self):

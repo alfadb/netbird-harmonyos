@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260817-0001 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260817-0002 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260817-0001 / EV-E3-PHYS1API26-20260817-0001), and
+(E3-PHYS-PREFLIGHT-20260817-0002 / EV-E3-PHYS1API26-20260817-0002), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -69,9 +69,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0001'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260817-0002'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260817-0002'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260817-0002'
 EXPECTED_INDEPENDENT_REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
@@ -1165,7 +1165,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260817-0001 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260817-0002 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -5778,21 +5778,26 @@ def set_capture_degraded_scenarios(scenarios):
 
 
 def count_hdc_processes():
-    """PS L5698 HDC_PROCESSES semantics: read-only host process count via
-    pgrep hdc - never starts hdc, never connects. Returns the number of
-    matching host processes (0 when none match). Fail-closed (M4): returns
-    -1 when pgrep itself is unavailable or errors, so a broken probe can
-    never masquerade as a clean zero count."""
+    """Read the host process table without invoking an HDC executable.
+
+    Governance fixes the probe to absolute /usr/bin/ps with exactly the
+    ``-eo comm=,args=`` arguments. Only the first output column is used for
+    the count; argv text can never make an unrelated process match. Returns
+    -1 if the fixed host probe is unavailable or fails.
+    """
     try:
-        proc = subprocess.run(['pgrep', '-x', 'hdc'], capture_output=True,
+        proc = subprocess.run(['/usr/bin/ps', '-eo', 'comm=,args='], capture_output=True,
                               text=True, encoding='utf-8', timeout=10)
     except (OSError, subprocess.SubprocessError):
         return -1
-    if proc.returncode == 1:
-        return 0
     if proc.returncode != 0:
         return -1
-    return len([line for line in proc.stdout.splitlines() if line.strip()])
+    count = 0
+    for line in proc.stdout.splitlines():
+        columns = line.split(None, 1)
+        if columns and columns[0] == 'hdc':
+            count += 1
+    return count
 
 
 def selftest():
@@ -5801,10 +5806,9 @@ def selftest():
     Emulator, no evidence files. Reuses the in-file pure functions and
     goldens; each check prints SELFTEST_PASS/FAIL=<name> and the final
     line is SELFTEST_RESULT=pass HDC_PROCESSES=<count> (all pass) or
-    SELFTEST_RESULT=fail. HDC_PROCESSES is a read-only pgrep count taken
-    before the checks run (never starts hdc, never connects). When the
-    pgrep probe itself fails, HDC_PROCESSES=unknown is printed and the
-    result is fail (M4 fail-closed).
+    SELFTEST_RESULT=fail. HDC_PROCESSES is read from the fixed absolute host
+    process-table probe before the checks run (never starts hdc or connects).
+    An unavailable probe or a nonzero daemon count makes the result fail.
     Returns 0/1 for the main() SelfTest early exit."""
     global actual_target
     failures = []
@@ -5812,6 +5816,9 @@ def selftest():
     if hdc_process_count < 0:
         failures.append('hdc-process-count-unknown')
         print('SELFTEST_FAIL=hdc-process-count-unknown')
+    elif hdc_process_count != 0:
+        failures.append('hdc-process-count-nonzero')
+        print('SELFTEST_FAIL=hdc-process-count-nonzero')
 
     def check(name, condition):
         if condition:
