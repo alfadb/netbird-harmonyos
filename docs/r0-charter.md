@@ -6,7 +6,7 @@
 
 ## 状态
 
-> **当前授权覆盖（2026-08-17 · 0002）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260817-0002`](evidence/e3-physical-preflight-authorization-2026-08-17-0002.md)，候选 pair `E3-PHYS-PREFLIGHT-20260817-0002` / `EV-E3-PHYS1API26-20260817-0002`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；reviewer role exact、HAP source basis `62409c5f...` 与独立最终 `code_sha` 逻辑不变。0001 已在 gate 9 因未经授权设备进程枚举以 `governance-operation-invalid-retired` 退役；audit-2 文件不构成有效 gate pass，gate 10-13 未运行，未 DryRun/Live、未 consumed。历史 AUTH/pair 均不得复用。E3 未关闭，E8 `CLOSED`。
+> **当前授权覆盖（2026-08-25 · 0001）**：本文其余旧“当前”内容均为历史快照。当前授权是 [`AUTH-E3-PHYS1API26-20260825-0001`](evidence/e3-physical-preflight-authorization-2026-08-25-0001.md)，候选 pair `E3-PHYS-PREFLIGHT-20260825-0001` / `EV-E3-PHYS1API26-20260825-0001`，attempt initial / retry N/A，`plan_status: blocked-awaiting-full-gates`、not ready；reviewer role exact、HAP source basis `62409c5f...` 与独立最终 `code_sha` 逻辑不变。0002 已在 gate 4（用户 host-prep）未完成时提前执行 gate 5 TargetBindingConfirm 产生 blocked confirmation record 以 `governance-order-invalid-retired` 退役，未 DryRun/Live、未 consumed；0001 已在 gate 9 因未经授权设备进程枚举以 `governance-operation-invalid-retired` 退役；audit-2 文件不构成有效 gate pass，gate 10-13 未运行，未 DryRun/Live、未 consumed。历史 AUTH/pair 均不得复用。E3 未关闭，E8 `CLOSED`。
 
 | 项目 | 当前状态 |
 | --- | --- |

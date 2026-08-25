@@ -1,55 +1,72 @@
-# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-17 · 0002）
+# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-17 · 0002，governance-order-invalid-retired）
 
-最后核验：2026-08-17
+最后核验：2026-08-25
 
-本文登记用户（直接人类决策者）于 2026-08-17 的显式治理决定：永久退役发生 gate 9 越界的 [`AUTH-E3-PHYS1API26-20260817-0001`](e3-physical-preflight-authorization-2026-08-17-0001.md)，逐字节保留其全部仓外历史对象，并建立全新 AUTH/pair 重新进入完整 13 门。
+本文历史登记曾建立 `AUTH-E3-PHYS1API26-20260817-0002`、campaign `E3-PHYS-PREFLIGHT-20260817-0002` 与 evidence `EV-E3-PHYS1API26-20260817-0002`，`attempt: initial`、retry N/A，取代 [`AUTH-E3-PHYS1API26-20260817-0001`](e3-physical-preflight-authorization-2026-08-17-0001.md)（gate 9 未授权设备进程枚举退役）。该 pair 已由用户（直接人类决策者）于 2026-08-25 决定退役，并由 [`AUTH-E3-PHYS1API26-20260825-0001`](e3-physical-preflight-authorization-2026-08-25-0001.md) 取代，以全新 AUTH/pair 重新进入完整 13 门。
 
-据此建立 `AUTH-E3-PHYS1API26-20260817-0002`、campaign `E3-PHYS-PREFLIGHT-20260817-0002` 与 evidence `EV-E3-PHYS1API26-20260817-0002`。这是全新 `attempt: initial`，不是 retry；0001 不构成 retry basis，也不得被新 pair 消费。
+> 退役状态：`authorization_status: governance-order-invalid-retired`，`reusable: false`。gate 1 隐含 pass（HEAD `2fc83160d196a10bd5d64471ef40942f386b6203`，worktree clean，`code_sha` 已绑定进 freeze）；gate 2 audit-1 PASS（unoccupied，2026-08-17T13:54，仓外 `$HOME/harmonyos-signing/netbird-e3/campaigns/E3-PHYS-PREFLIGHT-20260817-0002/audit/new-pair-id-consumption-audit-1.txt` + `.sha256`）；gate 3 blocked confirmation freeze 已创建（2026-08-17T13:58，仓外 `$HOME/harmonyos-signing/netbird-e3/freeze/freeze-blocked-confirm-20260817-0002.json` + `.sha256`，`plan_status=blocked`，全部执行门 pending）；gate 4（用户 host-prep `tconn` + `list targets`）not-run，无执行证据；gate 5 `TargetBindingConfirm` 在 gate 4 未完成时被提前执行（gate 顺序违规），产生 blocked record（2026-08-17T14:08，仓外 `$HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260817-0002.json` + `.sha256`）：verdict=blocked，reason=`PHYS_1_TARGET must contain exactly one real target token`，command_attempted=0、command_completed=0，0 次 HDC 调用、0 设备接触；gate 6-13 全部 not-run，未 DryRun、未 Live、未 consumed。0002 的全部仓外对象（audit-1、blocked freeze、blocked confirmation record 及各自 companion）逐字节保留为历史，不得删除、覆盖、补写或绑定到新 AUTH。AUTH/pair 永久不可复用，不得补跑或转作 retry basis。E3 未关闭，E8 保持 `CLOSED`。
 
-> 当前状态：`blocked-awaiting-full-gates`，not ready。0002 的 audit、freeze、confirmation、review、DryRun 与 Live 均未运行，仓外对象数为 0；本文不预写任何 gate pass 或对象 hash。E3 未关闭，E8 保持 `CLOSED`。
-
-> 提交边界：当前 host-only registration 禁止 commit/push。用户已批准完整治理链；只有 registration/runner parity/selftests/current docs 完成、host-only 验证全部通过并取得独立审查 0 blocker / 0 major 后，才允许 commit/push。registration commit/push 完成后 gate 1 才可开始。
+> 保全边界：本登记只记录既成事实；0002 的全部仓外 audit、freeze 与 record 对象及 companion 必须逐字节保留。退役不产生设备证据，也不构成 pair consumption。
 
 ## 授权状态
 
 ```yaml
 authorization_id: AUTH-E3-PHYS1API26-20260817-0002
 supersedes: AUTH-E3-PHYS1API26-20260817-0001
+superseded_by: AUTH-E3-PHYS1API26-20260825-0001
 exception: E3-PHYS-PREFLIGHT
-information_status: current-governance-registration
-record_status: registered-not-run
+information_status: historical-governance-registration
+record_status: governance-order-invalid-not-live
 stage_or_gate: E3
+governance_gate_reached: gate-5-invalid-order
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: host-governance-order-invalid
 is_evidence: false
-authorization_status: blocked-awaiting-full-gates
-plan_status: blocked-awaiting-full-gates
+authorization_status: governance-order-invalid-retired
+plan_status: governance-order-invalid-retired
 ready: false
-reusable: true
+reusable: false
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
-independent_review: pending
-blocked_confirmation_freeze: pending
-ready_freeze: pending
-candidate_audit_1: pending
-candidate_audit_2: pending
-dry_run: pending
-live: pending
+machine_fresh_confirmation: blocked-record-order-invalid
+independent_review: not-run
+blocked_confirmation_freeze: pass-created
+ready_freeze: not-run
+candidate_audit_1: pass
+candidate_audit_2: not-run
+dry_run: not-run
+live: not-run
 campaign_status: not-run
 live_consumed: false
 hap_source_basis_commit: 62409c5f966d00597b58f68ae5b927dd06e76e76
 runner_code_basis_commit: e1ec608722f920db3e43444c29d30056567d4004
-code_sha: pending-final-clean-head
+code_sha: 2fc83160d196a10bd5d64471ef40942f386b6203
 head_requirement: exact-clean-final-governance-commit-descending-from-runner-code-basis
 reviewer_role: isolated-anthropic-claude-opus-5-reviewer
+gate_artifacts:
+  audit_1_sha256: 3ea421007f4ab5164ab4f5ed4396323156814b6ba3092e2151962f2355fff772
+  audit_1_timestamp: 2026-08-17T13:54
+  blocked_freeze_sha256: 317daec1fc58494771d9369b7e5229cc8959d4400f702598951f3a77ea906183
+  blocked_freeze_timestamp: 2026-08-17T13:58
+  blocked_freeze_plan_status: blocked
+  target_binding_confirmation_sha256: ac92a93a6a5768aff988d78bda152a0b5874bd8f73562b7e131a710629c1eee8
+  target_binding_confirmation_timestamp: 2026-08-17T14:08
+  target_binding_confirmation_verdict: blocked
+  target_binding_confirmation_reason: PHYS_1_TARGET must contain exactly one real target token
+gates:
+  gate_1: pass-implicit
+  gate_2: pass
+  gate_3: pass
+  gate_4: not-run
+  gate_5: invalid-early-execution-blocked-record
+  gates_6_through_13: not-run
 candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260817-0002
   evidence_id: EV-E3-PHYS1API26-20260817-0002
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
+  identity_status: governance-order-invalid-retired
   consumed: false
-  reusable: true
+  reusable: false
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260817-0001
   evidence_id: EV-E3-PHYS1API26-20260817-0001
@@ -77,11 +94,11 @@ record_paths:
   target_binding_confirmation: $HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260817-0002.json
   ready_freeze_review: $HOME/harmonyos-signing/netbird-e3/records/e3-ready-freeze-review-20260817-0002.json
 evidence_roots:
-  dry_run: $HOME/harmonyos-signing/netbird-e3/evidence-dry-run-20260817-0002
-  live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260817-0002
+  dry_run: not-created
+  live: not-created
 ```
 
-`reusable: true` 仅表示 0002 尚未因治理失败或 Live 消费；不表示 ready。任一 gate 失败立即停止并永久退役本 pair，后续只能取得新的用户治理与新 AUTH/pair。
+`reusable: false` 是永久状态：0002 未 Live、未 consumed，但 gate 5 在 gate 4 未完成时被提前执行的顺序违规已使 AUTH/pair 按治理失败永久退役，不得复用、补跑或转作 retry basis。gate 1-3 产生的仓外对象（audit-1、blocked freeze）与 gate 5 的 blocked record 均为历史字节，保持逐字节保全。
 
 ## 继承的冻结输入
 
