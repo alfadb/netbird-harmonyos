@@ -114,7 +114,7 @@ function New-Freeze {
         target_tuple = [ordered]@{
             distribution = 'HarmonyOS'
             device_model = 'PLA-AL10'
-            full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            full_system_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
             api = '26'
             kernel_arch = 'aarch64'
             app_abi = 'arm64-v8a'
@@ -423,7 +423,7 @@ try {
     # ADJ-20260810-0001 (C6): the in-repo ConfirmationRecord negative must use a FIXED-candidate
     # blocked confirmation freeze so the failure is the out-of-repo path gate, never the earlier
     # candidate-pair gate (a wrong-pair freeze would be rejected before the path is even checked).
-    $confirmBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $confirmBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $confirmBlockedPath = Write-JsonFixture 'freeze-confirm-blocked-candidate.json' $confirmBlockedFreeze
     $confirmInRepoRun = Invoke-Runner $confirmBlockedPath '' '' -AsConfirm -ConfirmationRecordPath $confirmInRepoPath
     Assert-True ($confirmInRepoRun.ExitCode -ne 0 -and $confirmInRepoRun.Text -match 'outside the git repository') 'in-repo ConfirmationRecord was not rejected'
@@ -433,11 +433,11 @@ try {
     # ADJ-20260810-0001 (C6): TargetBindingConfirm freeze-level negatives - the fixed candidate
     # pair and attempt=initial are enforced before any HDC call, so a wrong-pair or retry-attempt
     # freeze is rejected with the specific gate message and the HDC sentinel never starts.
-    $confirmWrongPairFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-WRONG'
+    $confirmWrongPairFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-WRONG'
     $confirmWrongPairPath = Write-JsonFixture 'freeze-confirm-wrong-pair.json' $confirmWrongPairFreeze
     $confirmWrongPairRun = Invoke-Runner $confirmWrongPairPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
     Assert-True ($confirmWrongPairRun.ExitCode -ne 0 -and $confirmWrongPairRun.Text -match 'fixed candidate pair') 'TargetBindingConfirm with wrong candidate pair was not rejected'
-    $confirmRetryFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $confirmRetryFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $confirmRetryFreeze.attempt = 'infrastructure-blocked-retry-1'
     $confirmRetryPath = Write-JsonFixture 'freeze-confirm-retry-attempt.json' $confirmRetryFreeze
     $confirmRetryRun = Invoke-Runner $confirmRetryPath '' '' -AsConfirm -ConfirmationRecordPath 'C:/outside/confirm.json'
@@ -544,7 +544,7 @@ try {
         return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($json))).ToLowerInvariant()
     }
     function Write-ConfirmationRecordFixture {
-        param([string]$Name, $Freeze, [string]$OverrideAuthId = 'AUTH-E3-PHYS1API26-20260825-0001', [string]$OverrideVerdict = 'pass')
+        param([string]$Name, $Freeze, [string]$OverrideAuthId = 'AUTH-E3-PHYS1API26-20260828-0001', [string]$OverrideVerdict = 'pass')
         $record = [ordered]@{
             schema_version = 1
             record_kind = 'target-binding-confirmation'
@@ -565,9 +565,9 @@ try {
             hdc_sha256 = $Freeze.hdc.sha256
             hdc_version = $Freeze.hdc.version
             expected_model = 'PLA-AL10'
-            expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            expected_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
             observed_model = 'PLA-AL10'
-            observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+            observed_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
             started_at = '2098-12-31T23:59:55+00:00'
             ended_at = '2098-12-31T23:59:59+00:00'
             command_attempted = 3
@@ -583,7 +583,7 @@ try {
         return [pscustomobject]@{ Path = $path; Sha256 = $sha }
     }
     function Add-ConfirmationBinding {
-        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$AuthId = 'AUTH-E3-PHYS1API26-20260825-0001')
+        param($Freeze, [string]$RecordPath, [string]$RecordSha256, [string]$Status = 'pass', [string]$AuthId = 'AUTH-E3-PHYS1API26-20260828-0001')
         $copy = Copy-JsonObject $Freeze
         # ADJ-20260810-0001 (C6): machine_fresh_confirmation does not exist on a New-Freeze object;
         # under Set-StrictMode a direct assignment to the non-existent property would throw, so it
@@ -630,7 +630,7 @@ try {
     }
     # The ready freeze consumed by this AUTH path fixes the candidate pair and attempt=initial; the
     # generic infrastructure retry branch never applies.
-    $wrongReviewerRoleFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $wrongReviewerRoleFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $wrongReviewerRoleFreeze.independent_reviewer_role = 'isolated-static-reviewer'
     $wrongReviewerRoleFreeze.independent_review_record.reviewer_role = 'isolated-static-reviewer'
     $wrongReviewerRolePath = Write-JsonFixture 'freeze-wrong-reviewer-role.json' $wrongReviewerRoleFreeze
@@ -638,7 +638,7 @@ try {
     $wrongReviewerRoleRun = Invoke-Runner $wrongReviewerRolePath $wrongReviewerRolePaths.Evidence $wrongReviewerRolePaths.Raw -AsDryRun
     Assert-True ($wrongReviewerRoleRun.ExitCode -ne 0 -and $wrongReviewerRoleRun.Text -match 'independent_reviewer_role must be exactly') 'freeze with wrong reviewer role was not rejected'
     Assert-True (-not (Test-Path -LiteralPath $script:HdcLaunchMarker)) 'wrong reviewer role case launched the HDC sentinel'
-    $readyNoConfirmFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $readyNoConfirmFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $readyNoConfirmPath = Write-JsonFixture 'freeze-ready-no-confirm.json' $readyNoConfirmFreeze
     $readyNoConfirmPaths = New-CasePaths 'ready-no-confirm-dryrun'
     $readyNoConfirmRun = Invoke-Runner $readyNoConfirmPath $readyNoConfirmPaths.Evidence $readyNoConfirmPaths.Raw -AsDryRun
@@ -663,7 +663,7 @@ try {
     Assert-True ($readyBoundRun.ExitCode -eq 0) "DryRun ready freeze with bound confirmation failed: $($readyBoundRun.Text)"
     $readyBoundRecord = Get-Content -LiteralPath (Join-Path $readyBoundPaths.Evidence 'scenario-results.json') -Raw | ConvertFrom-Json -Depth 60
     Assert-True (-not $readyBoundRecord.is_evidence -and $readyBoundRecord.record_status -eq 'blocked' -and $readyBoundRecord.hdc_processes_started -eq 0) 'ready-bound DryRun non-evidence contract mismatch'
-    Assert-True ([string]$readyBoundRecord.machine_fresh_confirmation.status -eq 'pass' -and [string]$readyBoundRecord.machine_fresh_confirmation.authorization_id -eq 'AUTH-E3-PHYS1API26-20260825-0001' -and [string]$readyBoundRecord.machine_fresh_confirmation.record_sha256 -eq $readyConfirmRecord.Sha256 -and $null -eq $readyBoundRecord.machine_fresh_confirmation.PSObject.Properties['record_path']) 'sealed record machine_fresh_confirmation projection mismatch or leaked path'
+    Assert-True ([string]$readyBoundRecord.machine_fresh_confirmation.status -eq 'pass' -and [string]$readyBoundRecord.machine_fresh_confirmation.authorization_id -eq 'AUTH-E3-PHYS1API26-20260828-0001' -and [string]$readyBoundRecord.machine_fresh_confirmation.record_sha256 -eq $readyConfirmRecord.Sha256 -and $null -eq $readyBoundRecord.machine_fresh_confirmation.PSObject.Properties['record_path']) 'sealed record machine_fresh_confirmation projection mismatch or leaked path'
     Assert-True ([string]$readyBoundRecord.independent_review_record.status -eq 'pass' -and [string]$readyBoundRecord.independent_review_record.record_sha256 -eq $readyReviewRecord.Sha256 -and [string]$readyBoundRecord.independent_review_record.reviewer_role -eq $script:ReviewerRole -and $null -eq $readyBoundRecord.independent_review_record.PSObject.Properties['record_path']) 'sealed record independent_review_record projection mismatch, exact reviewer role mismatch, or leaked path'
     Assert-ManifestAndSeal $readyBoundPaths.Evidence
     Assert-ProjectionChain $readyBoundPaths.Evidence
@@ -674,7 +674,7 @@ try {
     Assert-True ($pendingBoundRun.ExitCode -eq 0) "blocked DryRun with pending confirmation was rejected: $($pendingBoundRun.Text)"
     # ADJ-20260810-0001 (C6): a blocked DryRun that declares status=pass is FULLY validated too;
     # pending is allowed and skipped, but a broken pass binding is never hidden by plan_status.
-    $blockedPassFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $blockedPassFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $blockedPassBound = Add-ConfirmationBinding $blockedPassFreeze $readyConfirmRecord.Path $readyConfirmRecord.Sha256
     $blockedPassPath = Write-JsonFixture 'freeze-blocked-machine-pass.json' $blockedPassBound
     $blockedPassPaths = New-CasePaths 'blocked-machine-pass-dryrun'
@@ -773,8 +773,8 @@ try {
         record_kind = 'e3-ready-freeze-review'
         is_evidence = $false
         exception = 'E3-PHYS-PREFLIGHT'
-        campaign_id = 'E3-PHYS-PREFLIGHT-20260825-0001'
-        evidence_id = 'EV-E3-PHYS1API26-20260825-0001'
+        campaign_id = 'E3-PHYS-PREFLIGHT-20260828-0001'
+        evidence_id = 'EV-E3-PHYS1API26-20260828-0001'
         code_sha = $readyNoConfirmFreeze.code_sha
         runner_sha256 = $readyNoConfirmFreeze.runner_sha256
         confirmation_contract_sha256 = Get-ConfirmationContractSha256 $readyNoConfirmFreeze
@@ -801,9 +801,9 @@ try {
     # frozen_at advanced), but the stable confirmation contract is byte-identical, so the
     # confirmation/review records bound on the blocked phase are consumable by the ready phase;
     # the time gate (started<=ended<=frozen_at) is checked against the FINAL ready freeze.
-    $twoPhaseBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $twoPhaseBlockedFreeze = New-Freeze 'blocked' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $twoPhaseBlockedFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:00+00:00'
-    $twoPhaseReadyFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260825-0001' 'E3-PHYS-PREFLIGHT-20260825-0001'
+    $twoPhaseReadyFreeze = New-Freeze 'ready' 'EV-E3-PHYS1API26-20260828-0001' 'E3-PHYS-PREFLIGHT-20260828-0001'
     $twoPhaseReadyFreeze.preflight_inputs_frozen_at = '2099-01-01T00:00:10+00:00'
     Assert-True ((Get-ContractSha256 $twoPhaseBlockedFreeze) -ne (Get-ContractSha256 $twoPhaseReadyFreeze)) 'two-phase full freeze contract hashes must differ'
     Assert-True ((Get-ConfirmationContractSha256 $twoPhaseBlockedFreeze) -eq (Get-ConfirmationContractSha256 $twoPhaseReadyFreeze)) 'two-phase confirmation contract hashes must be identical'
@@ -811,7 +811,7 @@ try {
         schema_version = 1
         record_kind = 'target-binding-confirmation'
         is_evidence = $false
-        authorization_id = 'AUTH-E3-PHYS1API26-20260825-0001'
+        authorization_id = 'AUTH-E3-PHYS1API26-20260828-0001'
         exception = 'E3-PHYS-PREFLIGHT'
         campaign_id = $twoPhaseBlockedFreeze.campaign_id
         evidence_id = $twoPhaseBlockedFreeze.evidence_id
@@ -827,9 +827,9 @@ try {
         hdc_sha256 = $twoPhaseBlockedFreeze.hdc.sha256
         hdc_version = $twoPhaseBlockedFreeze.hdc.version
         expected_model = 'PLA-AL10'
-        expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        expected_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
         observed_model = 'PLA-AL10'
-        observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        observed_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
         started_at = '2099-01-01T00:00:01+00:00'
         ended_at = '2099-01-01T00:00:05+00:00'
         command_attempted = 3
@@ -932,7 +932,7 @@ try {
     Assert-True (@($layoutRefs | Where-Object { $_.status -eq 'collected' -and $null -ne $_.layout }).Count -gt 0) 'layout_state_reference missing layout artifacts'
     Assert-True ([int]$liveRecord.clock_source.device_clock_skew_tolerance_seconds -eq 3) 'device clock skew tolerance not frozen at 3 seconds'
     Assert-True ([string]$liveRecord.target_tuple.distribution -eq [string]$liveFreeze.target_tuple.distribution) 'record distribution does not match freeze target_tuple.distribution'
-    Assert-True ([string]$liveRecord.target_tuple.full_system_build -eq 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' -and [string]$liveRecord.target_tuple.api -eq '26' -and [string]$liveRecord.target_tuple.device_model -eq 'PLA-AL10' -and [string]$liveRecord.target_tuple.kernel_arch -eq 'aarch64' -and [string]$liveRecord.target_tuple.app_abi -eq 'arm64-v8a') 'new frozen target tuple did not pass through live simulation'
+    Assert-True ([string]$liveRecord.target_tuple.full_system_build -eq 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' -and [string]$liveRecord.target_tuple.api -eq '26' -and [string]$liveRecord.target_tuple.device_model -eq 'PLA-AL10' -and [string]$liveRecord.target_tuple.kernel_arch -eq 'aarch64' -and [string]$liveRecord.target_tuple.app_abi -eq 'arm64-v8a') 'new frozen target tuple did not pass through live simulation'
 
     $requiredFields = @(
         'information_status', 'stage_or_gate', 'related_stages_or_gates', 'target_tuple', 'signing', 'code_sha', 'source_archive_sha256',
@@ -1000,7 +1000,7 @@ try {
     Assert-True ($rawText -match 'target-canary\.example\.test:8710' -and $rawText -match '10\.23\.45\.67:8710' -and $rawText -match '2001:db8::1234' -and $rawText -match '00:11:22:33:44:55' -and $rawText -match 'SN-CANARY12345678') 'raw HiLog did not preserve sensitive canaries'
     $evidenceText = (Get-ChildItem -LiteralPath $livePaths.Evidence -File -Recurse | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
     Assert-True ($evidenceText -notmatch 'target-canary|10\.23\.45\.67|2001:db8|device-canary|00:11:22:33:44:55|SN-CANARY|HDC-MUST-NOT-START') 'sensitive target or host canary leaked into projected evidence'
-    Assert-True ($evidenceText -match [regex]::Escape('PLA-AL10 7.0.0.100(SP8C00E32R7P2)') -and $evidenceText -match '"api"\s*:\s*"26"' -and $evidenceText -notmatch '192\.0\.2\.') 'public API26 build IP-like literal was redacted or real IPs leaked into evidence'
+    Assert-True ($evidenceText -match [regex]::Escape('PLA-AL10 7.0.0.102(SP8C00E102R7P3)') -and $evidenceText -match '"api"\s*:\s*"26"' -and $evidenceText -notmatch '192\.0\.2\.') 'public API26 build IP-like literal was redacted or real IPs leaked into evidence'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $livePaths.Evidence 'raw\transcript.jsonl'))) 'raw transcript was incorrectly created in evidence root'
     Assert-True ($liveRecord.transcript_reference.projection_only -and -not $liveRecord.transcript_reference.raw_transcript_exists) 'projection/raw transcript contract mismatch'
     Assert-True (@($liveRecord.raw_hilog_reference).Count -eq 2 -and @($liveRecord.raw_hilog_reference | Where-Object { $_.reference -eq 'RAW-HILOG-CAMPAIGN' }).Count -eq 1) 'campaign did not produce one continuous HiLog stream'

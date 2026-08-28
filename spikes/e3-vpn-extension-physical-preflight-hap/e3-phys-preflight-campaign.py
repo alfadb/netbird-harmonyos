@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260825-0001 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260828-0001 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260825-0001 / EV-E3-PHYS1API26-20260825-0001), and
+(E3-PHYS-PREFLIGHT-20260828-0001 / EV-E3-PHYS1API26-20260828-0001), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -69,9 +69,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260825-0001'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260825-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260825-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260828-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260828-0001'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260828-0001'
 EXPECTED_INDEPENDENT_REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
@@ -101,7 +101,7 @@ repo_root = None
 evidence_path = None
 raw_path = None
 actual_target = None
-public_version_literals = ['PLA-AL10 7.0.0.100(SP8C00E32R7P2)']
+public_version_literals = ['PLA-AL10 7.0.0.102(SP8C00E102R7P3)']
 hdc_process_start_count = 0
 hdc_logical_call_count = 0
 infrastructure_reason_observed = None
@@ -850,7 +850,7 @@ def get_confirmation_contract_sha256(freeze):
 EXPECTED_TUPLE = {
     'distribution': 'HarmonyOS',
     'device_model': 'PLA-AL10',
-    'full_system_build': 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)',
+    'full_system_build': 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)',
     'api': '26',
     'kernel_arch': 'aarch64',
     'app_abi': 'arm64-v8a',
@@ -1165,7 +1165,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260825-0001 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260828-0001 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -3076,7 +3076,7 @@ def get_simulation_hdc_result(operation, parameters):
     elif operation == 'TupleModel':
         stdout = 'PLA-AL10'
     elif operation == 'TupleBuild':
-        stdout = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        stdout = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
     elif operation == 'BundleDump':
         bundle = str(parameters['Bundle'])
         installed = (bundle == BUNDLE_A and simulation_installed_a) or (bundle == BUNDLE_B and simulation_installed_b)
@@ -5883,14 +5883,14 @@ def selftest():
             'runner_sha256': 'b' * 64,
             'hdc': {'sha256': 'c' * 64, 'version': 'SELFTEST-HDC-1.0'},
             'target_tuple': {'device_model': 'PLA-AL10',
-                             'full_system_build': 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'},
+                             'full_system_build': 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'},
         }
         record = new_target_binding_confirmation_record(
             selftest_freeze, 'e' * 64, 'f' * 64, {'fingerprint': 'g' * 64},
             datetime(2099, 1, 1, tzinfo=timezone.utc),
             datetime(2099, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
             'pass', 'N/A', 'SELFTEST-HDC-1.0', 'PLA-AL10',
-            'PLA-AL10 7.0.0.100(SP8C00E32R7P2)', 3, 3)
+            'PLA-AL10 7.0.0.102(SP8C00E102R7P3)', 3, 3)
         check('confirmation-record-required-fields',
               record['schema_version'] == 1
               and record['record_kind'] == 'target-binding-confirmation'
@@ -5966,13 +5966,13 @@ def selftest():
         finally:
             actual_target = saved_target
         check('redaction-preserves-build-api-and-removes-ip-port',
-              (lambda t: 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' in t and 'api=26' in t
+              (lambda t: 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' in t and 'api=26' in t
                and not re.search(r'192\.0\.2\.44|8710', t))(
-                  protect_sensitive_text('build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=192.0.2.44|port=8710')))
+                  protect_sensitive_text('build=PLA-AL10 7.0.0.102(SP8C00E102R7P3)|api=26|peer=192.0.2.44|port=8710')))
         check('redaction-api26-build-ip-like-literal',
-              (lambda t: 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' in t and 'api=26' in t
+              (lambda t: 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' in t and 'api=26' in t
                and 'bare=<REDACTED_IPV4>' in t and not re.search(r'198\.51\.100\.77|8710', t))(
-                  protect_sensitive_text('full_system_build=PLA-AL10 7.0.0.100(SP8C00E32R7P2)|api=26|peer=198.51.100.77|port=8710|bare=7.0.0.100')))
+                  protect_sensitive_text('full_system_build=PLA-AL10 7.0.0.102(SP8C00E102R7P3)|api=26|peer=198.51.100.77|port=8710|bare=7.0.0.100')))
         saved_literals = list(public_version_literals)
         try:
             public_version_literals[:] = ['HDC-7.0.0.100']
@@ -5985,10 +5985,10 @@ def selftest():
               jsoncompat_dumps(protect_sensitive_data(['alpha', ['beta', 'gamma']])) == '["alpha",["beta","gamma"]]')
         check('redaction-host-port',
               (lambda t: not re.search(r'device-canary|8710', t)
-               and 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' in t)(
+               and 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' in t)(
                   jsoncompat_dumps(protect_sensitive_data(
                       {'host': 'device-canary.example.test', 'port': 8710,
-                       'build': 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'}))))
+                       'build': 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'}))))
         check('redaction-target-case-variant',
               not re.search(r'(?i)usb-target:8710', protect_sensitive_text('target=USB-TARGET:8710')))
 

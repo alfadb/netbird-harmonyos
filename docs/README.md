@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-08-25
+最后核验：2026-08-28
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -66,8 +66,12 @@
   - 双审查 isolated `kimi-coding/k3` + `anthropic/claude-sonnet-5` 均 0 B/5 M；opus timeout attempt-not-counted；`ADJ-20260807-0003` 已批准 host process terminal probe 与 Settings 应用信息强制停止撤销路径；`plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权
 - [E3-PHYS-PREFLIGHT host remediation 证据（ADJ-20260807-0003 runner）](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
   - `EV-E3-PHYS1HOST-20260808-0001`：host-only、`is_evidence: false`；执行 commit `e3fe0c642c28b8a332c0f70db2217787884334e9`（parent `c6acae7`，M1/M3 probe fixes）；host selftest `HDC_PROCESSES=0`、独立审查 0 B/0 M；candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；DryRun `is_evidence: false`/HDC0/integrity empty；旧 20260807 candidate `INVALID-TIMELINE` 不可用；host `reviewed-pass` 不等于 E3 pass，无 Live/HDC/install/device-ready 授权；E3 open、E8 `CLOSED`
-- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-25 · 0001，当前）](evidence/e3-physical-preflight-authorization-2026-08-25-0001.md)
-  - `AUTH-E3-PHYS1API26-20260825-0001`：新 pair `E3-PHYS-PREFLIGHT-20260825-0001` / `EV-E3-PHYS1API26-20260825-0001`，attempt initial / retry N/A；当前 `blocked-awaiting-full-gates`、not ready，20260825-0001 machine confirmation/review/freeze/DryRun/Live 均 pending；reviewer/source/HAP/S6 逻辑不改，设备进程枚举与额外 discovery 永久禁令；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-28 · 0001，当前）](evidence/e3-physical-preflight-authorization-2026-08-28-0001.md)
+  - `AUTH-E3-PHYS1API26-20260828-0001`：新 pair `E3-PHYS-PREFLIGHT-20260828-0001` / `EV-E3-PHYS1API26-20260828-0001`，attempt initial / retry N/A；当前 `blocked-awaiting-full-gates`、not ready，20260828-0001 machine confirmation/review/freeze/DryRun/Live 均 pending；target tuple 已 rebind 到 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（[rebind8 证据](evidence/e3-physical-rebind8-2026-08-28.md)）；reviewer/source/HAP/S6 逻辑不改，设备进程枚举与额外 discovery 永久禁令；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT HarmonyOS 7 最小只读 rebind8 证据（2026-08-28）](evidence/e3-physical-rebind8-2026-08-28.md)
+  - `EV-E3-PHYS1REBIND8-20260828-0001`：`reviewed-pass/pass` 严格只表示新 build `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` rebind，不是 E3/campaign pass
+- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-25 · 0001，governance-tuple-drift-retired）](evidence/e3-physical-preflight-authorization-2026-08-25-0001.md)
+  - gate 1-4 pass（audit-1 unoccupied、blocked confirmation freeze 已建、gate 4 用户显式授权主会话代执行恰一次内存级 `list targets`）；gate 5 TargetBindingConfirm 实测设备 OTA build `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` 与冻结 build 漂移，产生 blocked confirmation record；`governance-tuple-drift-retired`（非流程违规），gate 6-13 not-run，未 DryRun/Live、未 consumed，仓外对象字节保留且 pair 永久不可复用
 - [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-17 · 0002，governance-order-invalid-retired）](evidence/e3-physical-preflight-authorization-2026-08-17-0002.md)
   - gate 1 隐含 pass、gate 2 audit-1 pass、gate 3 blocked confirmation freeze 已登记；gate 4 not-run；gate 5 TargetBindingConfirm 在 gate 4 未完成时提前执行，产生 blocked confirmation record（`PHYS_1_TARGET` 未设置、0 次 HDC 调用）；gate 6-13 not-run，未 DryRun/Live、未 consumed，仓外对象字节保留且 pair 永久不可复用
 - [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-17 · 0001，governance-operation-invalid-retired）](evidence/e3-physical-preflight-authorization-2026-08-17-0001.md)

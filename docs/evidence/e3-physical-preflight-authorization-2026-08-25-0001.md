@@ -1,57 +1,72 @@
-# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-25 · 0001）
+# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-25 · 0001，governance-tuple-drift-retired）
 
-最后核验：2026-08-25
+最后核验：2026-08-28
 
-本文登记用户（直接人类决策者）于 2026-08-25 的显式治理决定：永久退役 [`AUTH-E3-PHYS1API26-20260817-0002`](e3-physical-preflight-authorization-2026-08-17-0002.md)（pair `E3-PHYS-PREFLIGHT-20260817-0002` / `EV-E3-PHYS1API26-20260817-0002`），逐字节保留其全部仓外历史对象，并建立全新 AUTH/pair 重新进入完整 13 门。
+本文历史登记曾建立 `AUTH-E3-PHYS1API26-20260825-0001`、campaign `E3-PHYS-PREFLIGHT-20260825-0001` 与 evidence `EV-E3-PHYS1API26-20260825-0001`，`attempt: initial`、retry N/A，取代 [`AUTH-E3-PHYS1API26-20260817-0002`](e3-physical-preflight-authorization-2026-08-17-0002.md)（gate 顺序违规退役）。该 pair 已由用户（直接人类决策者）于 2026-08-28 决定退役，并由 [`AUTH-E3-PHYS1API26-20260828-0001`](e3-physical-preflight-authorization-2026-08-28-0001.md) 取代，以全新 AUTH/pair 重新进入完整 13 门。
 
-0002 退役事实（既成事实，写入本登记）：gate 1 隐含 pass（HEAD `2fc83160d196a10bd5d64471ef40942f386b6203`，worktree clean，`code_sha` 已绑定进 freeze）；gate 2 audit-1 PASS（unoccupied，2026-08-17T13:54，仓外 `$HOME/harmonyos-signing/netbird-e3/campaigns/E3-PHYS-PREFLIGHT-20260817-0002/audit/new-pair-id-consumption-audit-1.txt` + `.sha256`）；gate 3 blocked confirmation freeze 已创建（2026-08-17T13:58，仓外 `$HOME/harmonyos-signing/netbird-e3/freeze/freeze-blocked-confirm-20260817-0002.json` + `.sha256`，`plan_status=blocked`，全部执行门 pending）；gate 4（用户 host-prep `tconn` + `list targets`）not-run，无执行证据；gate 5 `TargetBindingConfirm` 在 gate 4 未完成时被提前执行（gate 顺序违规），产生 blocked record（2026-08-17T14:08，仓外 `$HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260817-0002.json` + `.sha256`）：verdict=blocked，reason=`PHYS_1_TARGET must contain exactly one real target token`，command_attempted=0、command_completed=0，0 次 HDC 调用、0 设备接触；gate 6-13 全部 not-run，未 DryRun、未 Live、未 consumed。退役状态标签沿用先例 `governance-order-invalid-retired`（先例：20260816-0002 因 gate 顺序违规用此标签）。0002 的全部仓外对象（audit-1、blocked freeze、blocked confirmation record 及各自 companion）逐字节保留为历史，不得删除、覆盖、补写或绑定到新 AUTH。
+> 退役状态：`authorization_status: governance-tuple-drift-retired`，`reusable: false`。gate 1-4 host-only 均 pass（gate 1：HEAD `46fb2213beb0df45169a0af54908a54598f2def1`，worktree clean，`code_sha` 已绑定进 freeze；gate 2 audit-1 PASS（unoccupied，2026-08-25T18:08，仓外 `$HOME/harmonyos-signing/netbird-e3/campaigns/E3-PHYS-PREFLIGHT-20260825-0001/audit/new-pair-id-consumption-audit-1.txt` + `.sha256`）；gate 3 blocked confirmation freeze 已创建（2026-08-25T18:10:21+08:00，仓外 `$HOME/harmonyos-signing/netbird-e3/freeze/freeze-blocked-confirm-20260825-0001.json` + `.sha256`，`plan_status=blocked`，全部执行门 pending）；gate 4 由用户显式授权主会话代执行恰一次内存级 `hdc list targets`（恰一 token，未输出未持久化），记为 `pass-user-authorized-agent-executed`）。gate 5 `TargetBindingConfirm` 于 2026-08-28T18:30:56+08:00 执行（仓外 `$HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260825-0001.json` + `.sha256`）：3/3 探针完成，model `PLA-AL10` 匹配、HDC `Ver: 3.2.0d` 匹配，但 **full system build 漂移**——冻结期望 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)` vs 实测 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（record 投影中版本段因 IPv4 形态自动脱敏显示 `<REDACTED_IPV4>`，完整值由后续授权 rebind 探针实测确认）→ verdict=blocked，reason=`preflight: frozen full system build mismatch`。设备在 2026-08-17（上次实测同冻结 build pass）与 2026-08-28 之间收到系统 OTA（E32R7P2 → E102R7P3）。gate 6-13 全部 not-run，未 DryRun、未 Live、未 consumed。退役标签 `governance-tuple-drift-retired`（非流程违规，runner 按设计 fail-closed 拦截）。本 pair 的全部仓外对象（audit-1、blocked freeze、blocked confirmation record 及各自 companion）逐字节保留为历史，不得删除、覆盖、补写或绑定到新 AUTH。AUTH/pair 永久不可复用，不得补跑或转作 retry basis。E3 未关闭，E8 保持 `CLOSED`。
 
-据此建立 `AUTH-E3-PHYS1API26-20260825-0001`、campaign `E3-PHYS-PREFLIGHT-20260825-0001` 与 evidence `EV-E3-PHYS1API26-20260825-0001`。这是全新 `attempt: initial`，不是 retry；0002 不构成 retry basis，也不得被新 pair 消费。
-
-> 当前状态：`blocked-awaiting-full-gates`，not ready。20260825-0001 的 audit、freeze、confirmation、review、DryRun 与 Live 均未运行，仓外对象数为 0；本文不预写任何 gate pass 或对象 hash。E3 未关闭，E8 保持 `CLOSED`。
-
-> 提交边界：当前 host-only registration 禁止 commit/push。用户已批准完整治理链；只有 registration/runner parity/selftests/current docs 完成、host-only 验证全部通过并取得独立审查 0 blocker / 0 major 后，才允许 commit/push。registration commit/push 完成后 gate 1 才可开始。
+> 保全边界：本登记只记录既成事实；本 pair 的全部仓外 audit、freeze 与 record 对象及 companion 必须逐字节保留。退役不产生设备证据，也不构成 pair consumption。
 
 ## 授权状态
 
 ```yaml
 authorization_id: AUTH-E3-PHYS1API26-20260825-0001
 supersedes: AUTH-E3-PHYS1API26-20260817-0002
+superseded_by: AUTH-E3-PHYS1API26-20260828-0001
 exception: E3-PHYS-PREFLIGHT
-information_status: current-governance-registration
-record_status: registered-not-run
+information_status: historical-governance-registration
+record_status: governance-tuple-drift-not-live
 stage_or_gate: E3
+governance_gate_reached: gate-5-build-mismatch
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: host-governance-tuple-drift
 is_evidence: false
-authorization_status: blocked-awaiting-full-gates
-plan_status: blocked-awaiting-full-gates
+authorization_status: governance-tuple-drift-retired
+plan_status: governance-tuple-drift-retired
 ready: false
-reusable: true
+reusable: false
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
-independent_review: pending
-blocked_confirmation_freeze: pending
-ready_freeze: pending
-candidate_audit_1: pending
-candidate_audit_2: pending
-dry_run: pending
-live: pending
+machine_fresh_confirmation: blocked-record-build-mismatch
+independent_review: not-run
+blocked_confirmation_freeze: pass-created
+ready_freeze: not-run
+candidate_audit_1: pass
+candidate_audit_2: not-run
+dry_run: not-run
+live: not-run
 campaign_status: not-run
 live_consumed: false
 hap_source_basis_commit: 62409c5f966d00597b58f68ae5b927dd06e76e76
 runner_code_basis_commit: 2fc83160d196a10bd5d64471ef40942f386b6203
-code_sha: pending-final-clean-head
+code_sha: 46fb2213beb0df45169a0af54908a54598f2def1
 head_requirement: exact-clean-final-governance-commit-descending-from-runner-code-basis
 reviewer_role: isolated-anthropic-claude-opus-5-reviewer
+gate_artifacts:
+  audit_1_sha256: 5bf01d84cfdc4cec6d74a554957960440bd68cf54b2f2282ba7f37220b8da307
+  audit_1_timestamp: 2026-08-25T18:08
+  blocked_freeze_sha256: 74c3c60414f6f38d4b05770e011639030c6a9b13244b5e6157e8bd9c1a60c3e1
+  blocked_freeze_timestamp: 2026-08-25T18:10:21+08:00
+  blocked_freeze_plan_status: blocked
+  target_binding_confirmation_sha256: 10cde7f504dbbb6b3ca86adcd8a6bd4d09466fb11b4a0cf5cf89874e93869197
+  target_binding_confirmation_timestamp: 2026-08-28T18:30:56+08:00
+  target_binding_confirmation_verdict: blocked
+  target_binding_confirmation_reason: "preflight: frozen full system build mismatch"
+gates:
+  gate_1: pass
+  gate_2: pass
+  gate_3: pass
+  gate_4: pass-user-authorized-agent-executed
+  gate_5: blocked-build-mismatch
+  gates_6_through_13: not-run
 candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260825-0001
   evidence_id: EV-E3-PHYS1API26-20260825-0001
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
+  identity_status: governance-tuple-drift-retired
   consumed: false
-  reusable: true
+  reusable: false
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260817-0002
   evidence_id: EV-E3-PHYS1API26-20260817-0002
@@ -81,11 +96,11 @@ record_paths:
   target_binding_confirmation: $HOME/harmonyos-signing/netbird-e3/records/target-binding-confirmation-20260825-0001.json
   ready_freeze_review: $HOME/harmonyos-signing/netbird-e3/records/e3-ready-freeze-review-20260825-0001.json
 evidence_roots:
-  dry_run: $HOME/harmonyos-signing/netbird-e3/evidence-dry-run-20260825-0001
-  live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260825-0001
+  dry_run: not-created
+  live: not-created
 ```
 
-`reusable: true` 仅表示本 pair 尚未因治理失败或 Live 消费；不表示 ready。任一 gate 失败立即停止并永久退役本 pair，后续只能取得新的用户治理与新 AUTH/pair。
+`reusable: false` 是永久状态：本 pair 未 Live、未 consumed，但 gate 5 实测 full system build 与冻结元组漂移（设备 OTA 所致）已使 AUTH/pair 按治理失败永久退役，不得复用、补跑或转作 retry basis。gate 1-4 产生的仓外对象（audit-1、blocked freeze）与 gate 5 的 blocked record 均为历史字节，保持逐字节保全。
 
 ## 继承的冻结输入
 
@@ -118,15 +133,6 @@ source manifest 继续绑定 22 个 git blobs。S5、S6、production fixture pro
 除 gate 4 的 exact host-prep `tconn` + `list targets` 以及 runner 22 项白名单生成的命令外，任何 HDC 子命令永久禁止；任何非白名单 `hdc shell` 永久禁止。尤其禁止设备进程列表、设备 `ps`、宽泛进程发现、额外 target/serial/UDID/endpoint discovery、`hidumper`、root 或 privileged 探针。runner 只允许 directed exact-name `pidof <bundle>:vpn`，不得扩大为进程枚举。
 
 host HDC process count 只能启动绝对 `/usr/bin/ps`，参数必须逐字为 `-eo` 与 `comm=,args=`，并且只比较输出第一列 `comm`；不得从 argv 文本匹配进程，不得以任何 HDC executable basename 做 host cleanup/count。gate 4 的 endpoint、target 和 stdout/stderr 只存在于内存，不输出、不持久化。
-
-## 新纪律：gate 4 → gate 5 顺序（0002 退役的直接教训）
-
-0002 退役的直接教训是 gate 5 `TargetBindingConfirm` 在 gate 4（用户 host-prep）未完成时被提前执行，产生 gate 顺序违规并导致 AUTH/pair 永久退役。本登记固定以下纪律：
-
-1. gate 4 必须由用户先完成：恰一次受控 `tconn <runtime-endpoint>`，随后恰一次内存级 `list targets`；两种操作各一次，不输出、不持久化 endpoint、target 或 stdout/stderr，不得额外 discovery。
-2. 只有 `PHYS_1_TARGET` 已设置为恰一个真实 target token 后，才允许运行 gate 5 `TargetBindingConfirm`。
-3. gate 5 绝不允许在 gate 4 完成前被调用；任何先于 gate 4 的 confirmation 执行立即视为 gate 顺序违规并退役本 pair。
-4. confirmation record 路径 single-use immutable：任何 blocked record 写入即占用该路径，本 pair 不得再向该路径写入或复用，后续只能取得新的用户治理与新 AUTH/pair。
 
 ## 完整 13 门
 

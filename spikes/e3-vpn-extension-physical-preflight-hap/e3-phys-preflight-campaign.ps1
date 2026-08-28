@@ -54,7 +54,7 @@ $script:RawHilogArtifacts = [Collections.Generic.List[object]]::new()
 $script:FaultArtifacts = [Collections.Generic.List[object]]::new()
 $script:CleanupActions = [Collections.Generic.List[object]]::new()
 $script:CleanupVerification = [ordered]@{ status = 'not-run'; verified_absent = $false; bundles = @() }
-$script:PublicVersionLiterals = @('PLA-AL10 7.0.0.100(SP8C00E32R7P2)')
+$script:PublicVersionLiterals = @('PLA-AL10 7.0.0.102(SP8C00E102R7P3)')
 $script:Simulation = $null
 $script:VirtualSeconds = 0.0
 $script:VirtualBase = [DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')
@@ -83,9 +83,9 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260825-0001'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260825-0001'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260825-0001'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260828-0001'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260828-0001'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260828-0001'
 $script:ExpectedIndependentReviewerRole = 'isolated-anthropic-claude-opus-5-reviewer'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
@@ -615,7 +615,7 @@ function Assert-FreezeManifest {
     $expectedTuple = [ordered]@{
         distribution = 'HarmonyOS'
         device_model = 'PLA-AL10'
-        full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        full_system_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
         api = '26'
         kernel_arch = 'aarch64'
         app_abi = 'arm64-v8a'
@@ -757,8 +757,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260825-0001 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260825-0001 / EV-E3-PHYS1API26-20260825-0001, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260828-0001 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260828-0001 / EV-E3-PHYS1API26-20260828-0001, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
@@ -1495,7 +1495,7 @@ function Get-SimulationHdcResult {
     $stdout = switch ($Operation) {
         'Version' { [string](Get-OptionalProperty $script:Simulation 'hdc_version' 'SELFTEST-HDC-1.0') }
         'TupleModel' { 'PLA-AL10' }
-        'TupleBuild' { 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' }
+        'TupleBuild' { 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' }
         'BundleDump' {
             $bundle = [string]$Parameters.Bundle
             $installed = ($bundle -eq $script:BundleA -and $script:SimulationInstalledA) -or ($bundle -eq $script:BundleB -and $script:SimulationInstalledB)
@@ -5441,7 +5441,7 @@ function Invoke-RunnerSelfTest {
         retry = [ordered]@{ basis = 'N/A'; infrastructure_reason = 'N/A'; prior_record_path = 'N/A'; prior_record_sha256 = 'N/A' }
         scenario_window_seconds = 60
         device_alias = 'PHYS-1'
-        target_tuple = [ordered]@{ distribution = 'HarmonyOS'; device_model = 'PLA-AL10'; full_system_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'; api = '26'; kernel_arch = 'aarch64'; app_abi = 'arm64-v8a' }
+        target_tuple = [ordered]@{ distribution = 'HarmonyOS'; device_model = 'PLA-AL10'; full_system_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'; api = '26'; kernel_arch = 'aarch64'; app_abi = 'arm64-v8a' }
         settings_reallow_expected_path = 'direct-system-activation'
         settings_reallow_path_policy = 'observation-only'
         settings_revoke_mechanism = 'settings-app-info-force-stop'
@@ -5494,9 +5494,9 @@ function Invoke-RunnerSelfTest {
         hdc_sha256 = ('c' * 64)
         hdc_version = 'SELFTEST-HDC-1.0'
         expected_model = 'PLA-AL10'
-        expected_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        expected_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
         observed_model = 'PLA-AL10'
-        observed_build = 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)'
+        observed_build = 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)'
         started_at = '2098-12-31T23:59:55+00:00'
         ended_at = '2098-12-31T23:59:59+00:00'
         command_attempted = 3
@@ -5727,7 +5727,7 @@ function Invoke-RunnerSelfTest {
         $twoPhaseReady.preflight_inputs_frozen_at = '2099-01-01T00:00:10+00:00'
         Check ((Get-FreezeContractSha256 $twoPhaseBlocked) -ne (Get-FreezeContractSha256 $twoPhaseReady)) 'two-phase-full-contract-hashes-differ'
         Check ((Get-ConfirmationContractSha256 $twoPhaseBlocked) -eq (Get-ConfirmationContractSha256 $twoPhaseReady)) 'two-phase-confirmation-contract-hash-identical'
-        $twoPhaseRecord = New-TargetBindingConfirmationRecord $twoPhaseBlocked ('e' * 64) (Get-ConfirmationContractSha256 $twoPhaseBlocked) ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:01+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' 3 3
+        $twoPhaseRecord = New-TargetBindingConfirmationRecord $twoPhaseBlocked ('e' * 64) (Get-ConfirmationContractSha256 $twoPhaseBlocked) ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:01+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' 3 3
         $twoPhaseRecordPath = Join-Path $confirmTemp 'two-phase-confirmation.json'
         Write-JsonFile $twoPhaseRecordPath $twoPhaseRecord
         $twoPhaseRecordSha = Get-FileSha256 $twoPhaseRecordPath
@@ -5815,7 +5815,7 @@ function Invoke-RunnerSelfTest {
         Remove-Item -LiteralPath $writeTemp -Recurse -Force -ErrorAction SilentlyContinue
     }
     Check (-not (Test-Path -LiteralPath $writeTemp)) 'confirm-write-selftest-leaves-no-files'
-    $recordDraft = New-TargetBindingConfirmationRecord $confirmFreezeBase ('e' * 64) $confirmationContractSha ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.100(SP8C00E32R7P2)' 3 3
+    $recordDraft = New-TargetBindingConfirmationRecord $confirmFreezeBase ('e' * 64) $confirmationContractSha ([pscustomobject]@{ Fingerprint = 'g' * 64 }) ([DateTimeOffset]::Parse('2099-01-01T00:00:00+00:00')) ([DateTimeOffset]::Parse('2099-01-01T00:00:05+00:00')) 'pass' 'N/A' 'SELFTEST-HDC-1.0' 'PLA-AL10' 'PLA-AL10 7.0.0.102(SP8C00E102R7P3)' 3 3
     $recordDraftJson = $recordDraft | ConvertTo-Json -Depth 20
     Check ($recordDraftJson -match '"record_kind"\s*:\s*"target-binding-confirmation"' -and $recordDraftJson -match '"is_evidence"\s*:\s*false' -and $recordDraftJson -match '"verdict"\s*:\s*"pass"' -and $recordDraftJson -match '"command_attempted"\s*:\s*3' -and $recordDraftJson -match '"command_completed"\s*:\s*3' -and $recordDraftJson -match '"target_redacted"\s*:\s*true' -and $recordDraftJson -match '"device_alias"\s*:\s*"PHYS-1"' -and $recordDraftJson -match '"attempt"\s*:\s*"initial"') 'confirmation-record-required-fields'
     Check ($recordDraftJson -notmatch '(?i)(udid|serial|"target"\s*:|token|password|secret|endpoint|device-canary)') 'confirmation-record-no-target-or-secret'
