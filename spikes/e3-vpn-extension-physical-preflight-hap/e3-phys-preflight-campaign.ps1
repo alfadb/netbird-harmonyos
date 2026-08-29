@@ -83,9 +83,9 @@ $script:LastCaptureInfrastructure = $false
 # attempt=initial. TargetBindingConfirm (producer) and every consumer of this AUTH's confirmation
 # (ready Live / ready DryRun) enforce the exact pair and initial attempt with retry N/A; any later
 # retry requires new governance and a new authorization and can never consume this AUTH path.
-$script:AuthId = 'AUTH-E3-PHYS1API26-20260828-0001'
-$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260828-0001'
-$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260828-0001'
+$script:AuthId = 'AUTH-E3-PHYS1API26-20260829-0001'
+$script:CandidateCampaignId = 'E3-PHYS-PREFLIGHT-20260829-0001'
+$script:CandidateEvidenceId = 'EV-E3-PHYS1API26-20260829-0001'
 $script:ExpectedIndependentReviewerRole = 'isolated-anthropic-claude-opus-5-reviewer'
 $script:MachineFreshConfirmation = $null
 $script:IndependentReviewRecord = $null
@@ -757,8 +757,8 @@ function Assert-MachineFreshConfirmation {
     # ADJ-20260810-0001 host-governed fresh confirmation gate. TargetBindingConfirm IS the
     # confirmation producer, so it may consume a pending/absent machine_fresh_confirmation object
     # on a blocked freeze. Live (real device) and DryRun with plan_status ready require the
-    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260828-0001 and the fixed candidate
-    # pair E3-PHYS-PREFLIGHT-20260828-0001 / EV-E3-PHYS1API26-20260828-0001, with a real
+    # object to be status=pass, bound to AUTH-E3-PHYS1API26-20260829-0001 and the fixed candidate
+    # pair E3-PHYS-PREFLIGHT-20260829-0001 / EV-E3-PHYS1API26-20260829-0001, with a real
     # out-of-repository double-file record (JSON plus a matching .sha256 companion; a lone record
     # is never consumable) whose content agrees with the freeze on schema/record kind/
     # is_evidence=false/exception/code/runner/HDC/contract/candidate-IDs/attempt=initial/
@@ -4239,7 +4239,13 @@ function Invoke-StrongLiveCampaign {
     $activeRequest = $request6A
     [void](Invoke-HdcOperation 'StartEntry' @{ Bundle = $activeBundle })
     $entry7 = Invoke-LayoutCheckpoint 7 'scenario-7-entry-a' 'entry' $activeBundle
-    $pre7 = Get-ExactProcessCheckpoint @($activeBundle)
+    # 2026-08-29 S7 precondition calibration (AUTH-E3-PHYS1API26-20260829-0001): the
+    # 20260828 live measured that B's :vpn extension process survives a conflict
+    # rejection (observed twice: S6 terminal checkpoint and the S7 precondition
+    # itself). The process lifecycle is owned by the start/stop ability pairing,
+    # independent of the create outcome, so B is recorded observed-only here and
+    # never gates the S7 precondition; only A active is required.
+    $pre7 = Get-ExactProcessCheckpoint @($activeBundle) -ObservedBundles @($script:BundleB)
     $context7 = New-ScenarioContext 7
     $step7Stop = Invoke-MechanicalStep $context7 1 '点击测试 App A 的 Stop' $pre7 { param($events) Test-UniqueStopCondition $events $activeBundle $activeRequest } -CaptureBefore $entry7 -CaptureAfterName 'scenario-7-after-stop' -CaptureAfterReviewOnly
     if (Test-SimulationStepHasEffect 7 1) { [void]$script:SimulationActiveBundles.Remove($activeBundle) }

@@ -15,9 +15,9 @@ the message substrings asserted by the PS selftest are preserved verbatim
 
 Governance / AUTH binding
 -------------------------
-The runner is bound to AUTH-E3-PHYS1API26-20260828-0001 (ADJ-20260810-0001,
+The runner is bound to AUTH-E3-PHYS1API26-20260829-0001 (ADJ-20260810-0001,
 C6): one AUTH, one fixed candidate pair
-(E3-PHYS-PREFLIGHT-20260828-0001 / EV-E3-PHYS1API26-20260828-0001), and
+(E3-PHYS-PREFLIGHT-20260829-0001 / EV-E3-PHYS1API26-20260829-0001), and
 attempt=initial with retry N/A. TargetBindingConfirm (producer) and every
 consumer of this AUTH's confirmation enforce the exact pair and the initial
 attempt; any retry requires new governance and a new authorization and can
@@ -69,9 +69,9 @@ WINDOW_SECONDS = 60
 
 # ADJ-20260810-0001 (C6): the current authorization fixes one AUTH, one
 # candidate pair, and attempt=initial.
-AUTH_ID = 'AUTH-E3-PHYS1API26-20260828-0001'
-CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260828-0001'
-CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260828-0001'
+AUTH_ID = 'AUTH-E3-PHYS1API26-20260829-0001'
+CANDIDATE_CAMPAIGN_ID = 'E3-PHYS-PREFLIGHT-20260829-0001'
+CANDIDATE_EVIDENCE_ID = 'EV-E3-PHYS1API26-20260829-0001'
 EXPECTED_INDEPENDENT_REVIEWER_ROLE = 'isolated-anthropic-claude-opus-5-reviewer'
 
 FROZEN_DEVICE_ZONE_MAP = {'CST': '+08:00'}
@@ -1165,7 +1165,7 @@ def assert_machine_fresh_confirmation(freeze):
     confirmation consumer. TargetBindingConfirm IS the producer, so it may
     consume a pending/absent machine_fresh_confirmation on a blocked freeze.
     Live (real device) and DryRun with plan_status ready require status=pass
-    bound to AUTH-E3-PHYS1API26-20260828-0001 and the fixed candidate pair,
+    bound to AUTH-E3-PHYS1API26-20260829-0001 and the fixed candidate pair,
     with a real out-of-repository double-file record (JSON + matching .sha256
     companion) whose content agrees with the freeze and whose time anchors
     satisfy started_at <= ended_at <= preflight_inputs_frozen_at. A blocked
@@ -5015,7 +5015,13 @@ def invoke_strong_live_campaign(freeze):
     active_request = request6a
     invoke_hdc_operation('StartEntry', {'Bundle': active_bundle})
     entry7 = invoke_layout_checkpoint(7, 'scenario-7-entry-a', 'entry', active_bundle)
-    pre7 = get_exact_process_checkpoint([active_bundle])
+    # 2026-08-29 S7 precondition calibration (AUTH-E3-PHYS1API26-20260829-0001): the
+    # 20260828 live measured that B's :vpn extension process survives a conflict
+    # rejection (observed twice: S6 terminal checkpoint and the S7 precondition
+    # itself). The process lifecycle is owned by the start/stop ability pairing,
+    # independent of the create outcome, so B is recorded observed-only here and
+    # never gates the S7 precondition; only A active is required.
+    pre7 = get_exact_process_checkpoint([active_bundle], observed_bundles=[BUNDLE_B])
     context7 = new_scenario_context(7)
     step7_stop = invoke_mechanical_step(context7, 1, '点击测试 App A 的 Stop', pre7,
                                         lambda events: test_unique_stop_condition(events, active_bundle, active_request),
