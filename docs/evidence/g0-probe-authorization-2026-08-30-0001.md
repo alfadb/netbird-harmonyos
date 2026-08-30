@@ -72,9 +72,21 @@ stock Go 1.25.12 arm64 c-shared（host launcher `go version go1.25.12 linux/amd6
 
 当前只允许：本登记与计划文档、spike 源码实现、runner（Python/PowerShell parity）与 selftests、freeze example、host-only 构建/ELF 断言/selftest 验证、独立审查，以及审查通过后的提交/推送。禁止：任何真实 HDC executable、设备命令、新 pair audit/freeze/record、TargetBindingConfirm、DryRun、Live（gate 4 起逐门推进且 Live 前须用户再次确认）。fake-hdc 只允许存在于 selftest 临时沙箱。
 
+## 门序列执行登记（2026-08-30）
+
+| 门 | 状态 | 事实 |
+| --- | --- | --- |
+| 1 | pass（Windows） | HEAD `df0d90c` clean、基线双祖先、四文件在位、冻结制品 hash 一致、code_sha 记录；HDC0 探针发现 `/usr/bin/ps` 硬编码不可解析（→探针 OS 自适应补丁，见变更账本），Windows 侧 `hdc kill` 后 tasklist 计数 0 |
+| 2 | pass（Windows；执行宿主重做） | audit-1：`outside-hits=0 inside-evidence-hits=0`，记录+companion `ee6f819f…`（code_sha `df0d90c`）；执行宿主迁移后在本机重做（记录 `6732c328…`，code_sha `6f82d21`，note 引用 Windows 原记录；两次审计之间无任何 ID 消费） |
+| 3 | pass（v2） | Windows 版 freeze（`3b7aa373…`）经静态审查 pass 后未消费，因执行宿主迁移标记 superseded；本机 v2 freeze（`5f7d26db…e61de` + `.sha256` 伴生）经 runner 真实 `load_freeze` dry-run ACCEPTED + 增量静态审查 pass（F1 records/ 整改、F2 差异清单口径更正：v1→v2 另含 `runner_ps1_sha256`/`selftest_ps1_sha256` 因 `01d7296` 探针补丁、F3 freeze 伴生文件补齐） |
+| 4 | pass（用户授权主会话代执行） | 恰一次 `tconn`（exit 0）+ 恰一次内存级 `list targets`（恰一 target 且匹配；token 未输出、未入库、未入任何证据对象；用户作为直接决策者将 endpoint 置于会话并显式授权代执行） |
+| 5 | pass（主会话代执行） | `-TargetBindingConfirm` 三探针 3/3：期望=实测=`PLA-AL10` / `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（逐字）；记录+companion `3a16ca1a…419`（`target_redacted=true`、`is_evidence=false`、code_sha `6f82d21`）；随后 `hdc kill` 清理 server，HDC0 确认 |
+
+**微修订（Live 前重连，2026-08-30 登记）**：gate 10 的 HDC0 selftest 要求与 gate 13 Live 的设备连接在单一 hdc server 生命周期内互斥（tconn 的连接随 server 终止而丢失）。据此修订：gate 4 的「恰一次 tconn」限定为**进入证据链前的绑定确认**；gates 6-12 在 HDC0 干净环境执行；**gate 13 Live 启动前**由用户本人（或再次显式授权主会话）从设备屏幕读取当时动态 endpoint 并执行恰一次新 `tconn`，随后的 `list targets` 校验与 Live 连续执行。该重连不产生新的元组绑定（元组已由 gate 5 封存）；若 Live 前重连时 `list targets` 元组探针显示漂移，立即停止并退役本 pair。
+
 ## 提交边界
 
-实现完成、host-only 验证全部通过并取得独立审查 0 blocker/0 major 后，方允许 commit/push（含本登记与全部实现产物）；campaign evidence 仍不提前提交。
+实现完成、host-only 验证全部通过并取得独立审查 0 blocker/0 major 后，方允许 commit/push（含本登记与全部实现产物）；campaign evidence 仍不提前提交。（该边界已履行：实现与治理登记随 `1d31835`/`bdcb7aa`/`01d7296`/`6f82d21` 提交推送。）
 
 ## 独立审查链（2026-08-30，isolated-anthropic-claude-opus-5-reviewer 三轮）
 
