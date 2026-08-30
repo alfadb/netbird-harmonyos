@@ -33,8 +33,9 @@ Coverage (spec order):
      executed, host hdc comm count stays 0.
   7. Full -DryRun (dlopen-rejected): verdict=blocked with reason
      dlopen-blocked and the loader error preserved verbatim.
-  8. Host HDC count probe: /usr/bin/ps -eo comm=,args= first-column-only
-     semantics; no process with comm 'hdc' (the fake is named fake-hdc).
+  8. Host HDC count probe: absolute, first-column-only, OS-adaptive
+     (/usr/bin/ps comm column on Linux; tasklist.exe image-name column on
+     Windows); no process with comm/image 'hdc' (the fake is fake-hdc).
 
 Run: pwsh -NoProfile -File tests/g0-runner-selftest.ps1  (exit 0 iff every
 check passes)
@@ -1315,8 +1316,21 @@ Register-StTest 'host-hdc-count-probe-first-column-only' {
     Assert-St ((Get-G0HdcCountFromPsOutput $synthetic) -eq 1) 'synthetic ps table must count exactly one hdc'
     Assert-St ((Get-G0HdcCountFromPsOutput '') -eq 0) 'empty ps table must count zero'
     Assert-St ((Get-G0HdcCountFromPsOutput "hdc`nhdc shell hilog") -eq 2) 'bare hdc lines must each count'
-    # the fixed absolute host probe is used, first column compared only
-    Assert-St ([System.IO.File]::Exists('/usr/bin/ps')) '/usr/bin/ps must exist for the host probe'
+    # Windows twin parser: `tasklist /FO CSV /NH`, first (image-name) field only
+    $csv = '"hdc.exe","4012","Console","1","5,552 K"' + "`n" +
+        '"fake-hdc.exe","4013","Console","1","4,120 K"' + "`n" +
+        '"python3.11.exe","4014","Console","1","22,016 K"' + "`n" +
+        '"HDC.EXE","4015","Console","1","6,000 K"' + "`n" +
+        '"hdcd.exe","4016","Console","1","3,000 K"'
+    Assert-St ((Get-G0HdcCountFromTasklistOutput $csv) -eq 2) 'synthetic tasklist must count hdc.exe and HDC.EXE only'
+    Assert-St ((Get-G0HdcCountFromTasklistOutput '') -eq 0) 'empty tasklist must count zero'
+    Assert-St ((Get-G0HdcCountFromTasklistOutput '"chrome.exe","1","x","1","1 K"') -eq 0) 'unrelated image must not count'
+    # the fixed absolute host probe is used (OS-adaptive), count must be 0
+    if (Test-G0WindowsHost) {
+        Assert-St ([System.IO.File]::Exists((Join-Path ([string] $env:SystemRoot) 'System32\tasklist.exe'))) 'tasklist.exe must exist for the Windows host probe'
+    } else {
+        Assert-St ([System.IO.File]::Exists('/usr/bin/ps')) '/usr/bin/ps must exist for the host probe'
+    }
     $count = Get-G0HdcProcessCount
     Assert-St ($count -eq 0) ('expected no host process with comm hdc, got ' + $count)
 }

@@ -156,7 +156,7 @@ runner 对 marker 的 campaign 判定映射（预注册，防歧义）：
    - 外加 gate 5 的 `Version`/`TupleModel`/`TupleBuild` 三项
 4. 操作名大小写不敏感；未知操作/多余参数/缺参数/bundle 不符/Reason 非法一律拒绝。
 
-永久禁止：设备进程枚举/`ps`、宽泛进程发现、UDID/serial/target discovery、`hidumper`、root/privileged、`uiInput` 自动输入、`MANAGE_VPN`、任何 VPN API 调用、外部网络 endpoint、全量查询、截图/layout 采集（G0 无 UI 采集需求）。host HDC process count 只用绝对 `/usr/bin/ps -eo comm=,args=` 比较第一列。字节相等性判定用 `/usr/bin/diff`/`cmp`/sha256 复算（本机 PATH `diff` 被 SDK 遮蔽，沿用验证纪律）。
+永久禁止：设备进程枚举/`ps`、宽泛进程发现、UDID/serial/target discovery、`hidumper`、root/privileged、`uiInput` 自动输入、`MANAGE_VPN`、任何 VPN API 调用、外部网络 endpoint、全量查询、截图/layout 采集（G0 无 UI 采集需求）。host HDC process count 只用**绝对路径探针且只比较第一列**：Linux 为 `/usr/bin/ps -eo comm=,args=`（逐字参数），Windows 为绝对 `%SystemRoot%\System32\tasklist.exe /FO CSV /NH`（只取 image-name 首列，`hdc`/`hdc.exe` 大小写不敏感计数；与 E3 探针同语义的 OS 自适应实现）。字节相等性判定用 `/usr/bin/diff`/`cmp`/sha256 复算（本机 PATH `diff` 被 SDK 遮蔽，沿用验证纪律）。
 
 ## Campaign 与重试纪律
 

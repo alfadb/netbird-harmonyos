@@ -14,8 +14,10 @@ Python runner spikes/g0-go-arm64-phys-hap/g0-phys-probe-campaign.py:
   * strict freeze manifest schema (exact key sets, no missing / extra keys),
   * single-use out-of-repository double-file confirmation record
     (JSON tmp + .sha256 tmp recomputed, atomic rename, companion last),
-  * host HDC process count via absolute /usr/bin/ps -eo comm=,args=
-    comparing the FIRST column only,
+  * host HDC process count via an absolute, first-column-only host probe
+    (OS-adaptive: /usr/bin/ps -eo comm=,args= on Linux; absolute
+    %SystemRoot%\System32\tasklist.exe /FO CSV /NH image-name column on
+    Windows),
   * evidence outputs: scenario-results.json + hash-manifest.json +
     campaign-seal.json + line-chained transcript.redacted.jsonl, raw artifacts
     under RawRoot.
@@ -1037,10 +1039,59 @@ function Get-G0HdcCountFromPsOutput {
     return $count
 }
 
+function Get-G0HdcCountFromTasklistOutput {
+    # Windows twin of Get-G0HdcCountFromPsOutput: parse `tasklist /FO CSV /NH`
+    # output and compare ONLY the first (image-name) field; argv text can
+    # never make an unrelated process match. Windows image names carry the
+    # .exe suffix, so both spellings count (case-insensitive).
+    param([string] $Text)
+    $count = 0
+    if ($null -eq $Text) { return 0 }
+    foreach ($line in [string] $Text -split "`n") {
+        $trimmed = (([string] $line).Trim())
+        if (-not $trimmed) { continue }
+        $first = ($trimmed -split '","')[0].Trim('"')
+        if ($first -ieq 'hdc' -or $first -ieq 'hdc.exe') { $count++ }
+    }
+    return $count
+}
+
+function Test-G0WindowsHost {
+    # $IsWindows exists in pwsh 6+ on all platforms; the OS env var is the
+    # legacy fallback for constrained hosts. Either misjudgment direction
+    # stays fail-closed: the other branch's absolute probe is missing and
+    # Get-G0HdcProcessCount returns -1.
+    $iw = Get-Variable -Name IsWindows -ErrorAction SilentlyContinue
+    if ($null -ne $iw) { return [bool] $iw.Value }
+    return ([string] $env:OS -ceq 'Windows_NT')
+}
+
 function Get-G0HdcProcessCount {
-    # Fixed absolute host probe: /usr/bin/ps -eo comm=,args=. Returns -1 if
-    # the probe is unavailable or fails (E3 count_hdc_processes).
+    # Fixed absolute host probe, first column compared only (E3 discipline).
+    # Linux: /usr/bin/ps -eo comm=,args=. Windows: absolute
+    # %SystemRoot%\System32\tasklist.exe /FO CSV /NH (image-name column).
+    # Returns -1 if the probe is unavailable or fails (E3 count_hdc_processes).
     try {
+        if (Test-G0WindowsHost) {
+            $tasklist = Join-Path ([string] $env:SystemRoot) 'System32\tasklist.exe'
+            if (-not [System.IO.File]::Exists($tasklist)) { return -1 }
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $tasklist
+            [void] $psi.ArgumentList.Add('/FO')
+            [void] $psi.ArgumentList.Add('CSV')
+            [void] $psi.ArgumentList.Add('/NH')
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.UseShellExecute = $false
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            if (-not $proc.WaitForExit(10000)) {
+                try { $proc.Kill() } catch { }
+                return -1
+            }
+            if ($proc.ExitCode -ne 0) { return -1 }
+            return Get-G0HdcCountFromTasklistOutput ($outTask.GetAwaiter().GetResult())
+        }
         $psi = [System.Diagnostics.ProcessStartInfo]::new()
         $psi.FileName = '/usr/bin/ps'
         [void] $psi.ArgumentList.Add('-eo')
