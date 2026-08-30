@@ -122,14 +122,15 @@ runner 对 marker 的 campaign 判定映射（预注册，防歧义）：
 - **`libgoprobe.so` 经仓库分发**：冻结制品以仓内 blob 提供（`spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/libgoprobe.so`，SHA-256 `489f1aad8bfb0ee23b5da1713781b9bd2d69851fd14dd5cff840fe930b9b5ad7`、size `2041704`）。Windows 侧 `git pull` 后原位可用（打包前须复算 hash 逐字一致）；本地重建仅用于验证可复现性，不得以重建产物替代冻结制品（cgo 交叉编译器差异会使 Windows 重建字节不同）。git blob、本登记与 freeze 三方对账同一 hash。
 - 用户在 AGC 为 `cn.alfadb.netbird.g0probe` 新建 App ID；新建 Debug profile 并勾选**已注册的 PHYS-1 设备**与该 App ID。
 - **AGC 操作事实**：2026-08-30 由主会话在用户已登录的 AGC 会话（VNC 浏览器）中执行（用户显式授权代操作）：App ID `G0 Probe`（ID `6917615052466301467`）归属项目 `NetBird HarmonyOS Preflight`（与 E3 同项目）；Debug profile `G0 Debug`（证书=**NetBird E3 Debug** 复用、设备=PHYS-1、生效至 2027-08-06）；未申请任何开放能力。平台下载每次再生成 profile 文件（字节不同、同等有效）；签名所用副本以下方 hash 为准。
-- **FINAL signed 制品（2026-08-30 Windows 构建，用户按交接模板执行，verify 脚本回传）**：
-  - signed HAP：SHA-256 `3088111654a7c5a39c790bbdbcf13e0b49c57817cea06a1b0ae45a8f86641f60`、size `2158086`
-  - 成员 `libgoprobe.so`：`489f1aad…b5ad7`（**与仓内冻结制品逐字一致**——打包未改写字节，strip 关闭生效）
-  - 成员 `libgoloader.so`：`282d76436bfb79619a5041ddf3f68716266b4bda72b8f50b9902838a3752a956`
-  - profile（.p7b，`G0 Debug`）：`beea954ec7a76e590bae7504dc819476f335e54a3fe4a5e6bf7c0a3f2f0e3337`（4117 字节）
+- **FINAL signed 制品（2026-08-30 更新：本机重签，取代 Windows 版）**：gate 4 前架构修正——确认本 Linux worker 为 E3 收官 campaign 的实际执行宿主（`/home/worker/harmonyos-signing/netbird-e3/` 全史在位；本机工具链 hdc 即 E3 证据登记的二进制 `03123a78…82c81`），gate 4-13 全部在本机执行。为此在本机以 hap-sign-tool 重签（`localSign`/`SHA256withECDSA`/`compatibleVersion 23`，材料：本机 E3 连续性 `.p12`（alias `netbird-harmonyos`）+ 同一 Debug `.cer` + **与 Windows 签名所用逐字相同的 profile** `beea954e…337`；keystore 密码经用户本机终端写入 600 权限临时文件、命令以 `$(cat)` 引用零入日志、签名后即删并核验删除）。全链机器验证 PASS（verify-profile/verify-app success；content.bundle-info.bundle-name/type=debug/devices=1/permissions=0；内嵌 profile 与外部字节一致；arm64 成员恰 `libgoprobe.so`+`libgoloader.so`；libgoprobe 为冻结原字节 `489f1aad…`；module.json 无 requestPermissions/extensionAbilities）：
+  - signed HAP：SHA-256 `f98be37f9a3b5ba6d47d262be29204cf0728a0bbb4b4e3ebf08eb268d36c72a2`、size `2157924`（路径 `/home/worker/harmonyos-signing/netbird-g0/artifacts/entry-default-signed.hap`）
+  - 成员 `libgoprobe.so`：`489f1aad…b5ad7`（**与仓内冻结制品逐字一致**）
+  - 成员 `libgoloader.so`：`9ec9785b969cbe77e44a6c66f20ab1e733a49e4adac631c1634e21e74b0711f1`（本机 CMake 编译）
+  - profile（.p7b，`G0 Debug`）：`beea954ec7a76e590bae7504dc819476f335e54a3fe4a5e6bf7c0a3f2f0e3337`（与下文 Windows 版所用同一文件，用户拷入本机）
   - Debug 证书（.cer）：`c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`（**与 E3 登记值逐字一致**——证书链复用确认）
-  - `verify-profile`/`verify-app` exit 0 + 人工核对 pass；HAP 内嵌 profile 与外部 .p7b 字节一致；内容审计：无 requestPermissions、无 extensionAbilities、arm64 成员恰为上述两个；构建时 HDC `Ver: 3.2.0d`（hdc.exe SHA-256 于 freeze 创建时捕获登记）
-  - 纪律确认：签名构建期间未安装、未运行、未发任何设备命令；签名材料与验签临时产物均未入库
+  - **Windows 版 signed HAP（`30881116…41f60`）标记 `superseded-unconsumed`**：曾在 Windows 构建并通过全链验证，但 gate 4-5 从未对其执行（无安装、无设备命令、无证据消费）；保留其登记作为审计痕迹，campaign 实际输入以上方本机版为准
+  - 本机执行环境：hdc `Ver: 3.2.0d`、SHA-256 `03123a78c6dc02870f52c416a1154dc9ad7165e6067c9cdf9e134e0578182c81`（即 E3 收官证据登记的同一二进制）；OpenJDK `21.0.12.1`；hap-sign-tool.jar SHA-256 `2b35f5ae7c64ec24ef7a3deb129c22fe7c3acc26…`
+  - 纪律确认：重签与验证期间未安装、未运行、未发任何设备命令；密码临时文件已删除并核验；验签临时产物已清理
 - **不读取设备 UDID**：2026-07-18 的单次 enrollment 例外保持已消耗；设备已在 AGC 注册，新 profile 从 AGC 控制台选择既有设备即可，不需要新的设备端命令。
 - 复用既有 `.p12`/`.csr`/Debug `.cer` 链；构建/签名/`verify-profile`/`verify-app`/hash 回传按 [Windows 开发交接](windows-development-handoff.md)模板执行；签名材料与验签临时产物全部仓外，回传仅版本/SHA-256/通过状态。
 - signed 内容审计要求：无 permission、无 Extension、debug 普通开发签名、唯一 arm64 成员为 `libgoprobe.so`+`libgoloader.so`、无 Go/NetBird/WireGuard 之外的代码面（`libgoprobe.so` 即 stock Go 最小探针）。
