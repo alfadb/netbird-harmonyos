@@ -2,7 +2,7 @@
 
 最后核验：2026-08-30
 
-> **状态：`user-authorized-2026-08-30`（实现阶段）。** 用户（直接人类决策者）于 2026-08-30 显式授权本计划按草案 ID 与规格进入实现：AUTH `AUTH-G0PHYS1API26-20260830-0001`、campaign `G0-PHYS-PROBE-20260830-0001`、evidence `EV-G0PHYS1API26-20260830-0001`、bundle `cn.alfadb.netbird.g0probe`。当前允许范围：仓内 spike 源码/runner/selftest/freeze example 实现与 host-only 验证、独立审查后的提交推送；**设备端动作（gate 4 起）逐门推进且 Live 前须再次确认**。本文不改变 E1/E8/R0 任何状态；E8 保持 `CLOSED`。
+> **状态：`user-authorized-2026-08-30`（签名链完成，进入门序列）。** 用户（直接人类决策者）于 2026-08-30 显式授权本计划按草案 ID 与规格进入实现：AUTH `AUTH-G0PHYS1API26-20260830-0001`、campaign `G0-PHYS-PROBE-20260830-0001`、evidence `EV-G0PHYS1API26-20260830-0001`、bundle `cn.alfadb.netbird.g0probe`。实现与三轮独立审查已随 `1d31835` 提交推送；冻结制品 `libgoprobe.so` 已随 `bdcb7aa` 入仓分发。签名链已于 2026-08-30 完成（见「签名链完成登记」小节）：FINAL signed HAP `30881116…41f60` 就绪，gate 1 起逐门推进，**Live 前须用户再次确认**。本文不改变 E1/E8/R0 任何状态；E8 保持 `CLOSED`。
 
 ## 定义与依据
 
@@ -117,10 +117,19 @@ runner 对 marker 的 campaign 判定映射（预注册，防歧义）：
 | `DRIFT`、marker 缺失、多义、超时 | `blocked`（按缺证据 fail-closed；分类记录原因） |
 | integrity violation / 白名单外命令 | `invalid` > 一切 |
 
-## 签名链（新 App ID；enrollment 保持已消耗）
+## 签名链（新 App ID；enrollment 保持已消耗）——已完成登记（2026-08-30）
 
 - **`libgoprobe.so` 经仓库分发**：冻结制品以仓内 blob 提供（`spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/libgoprobe.so`，SHA-256 `489f1aad8bfb0ee23b5da1713781b9bd2d69851fd14dd5cff840fe930b9b5ad7`、size `2041704`）。Windows 侧 `git pull` 后原位可用（打包前须复算 hash 逐字一致）；本地重建仅用于验证可复现性，不得以重建产物替代冻结制品（cgo 交叉编译器差异会使 Windows 重建字节不同）。git blob、本登记与 freeze 三方对账同一 hash。
 - 用户在 AGC 为 `cn.alfadb.netbird.g0probe` 新建 App ID；新建 Debug profile 并勾选**已注册的 PHYS-1 设备**与该 App ID。
+- **AGC 操作事实**：2026-08-30 由主会话在用户已登录的 AGC 会话（VNC 浏览器）中执行（用户显式授权代操作）：App ID `G0 Probe`（ID `6917615052466301467`）归属项目 `NetBird HarmonyOS Preflight`（与 E3 同项目）；Debug profile `G0 Debug`（证书=**NetBird E3 Debug** 复用、设备=PHYS-1、生效至 2027-08-06）；未申请任何开放能力。平台下载每次再生成 profile 文件（字节不同、同等有效）；签名所用副本以下方 hash 为准。
+- **FINAL signed 制品（2026-08-30 Windows 构建，用户按交接模板执行，verify 脚本回传）**：
+  - signed HAP：SHA-256 `3088111654a7c5a39c790bbdbcf13e0b49c57817cea06a1b0ae45a8f86641f60`、size `2158086`
+  - 成员 `libgoprobe.so`：`489f1aad…b5ad7`（**与仓内冻结制品逐字一致**——打包未改写字节，strip 关闭生效）
+  - 成员 `libgoloader.so`：`282d76436bfb79619a5041ddf3f68716266b4bda72b8f50b9902838a3752a956`
+  - profile（.p7b，`G0 Debug`）：`beea954ec7a76e590bae7504dc819476f335e54a3fe4a5e6bf7c0a3f2f0e3337`（4117 字节）
+  - Debug 证书（.cer）：`c13847ecd674a330acb1dfb9df027eb68b21ccadd90eca6e21ebd5a515d6d7fc`（**与 E3 登记值逐字一致**——证书链复用确认）
+  - `verify-profile`/`verify-app` exit 0 + 人工核对 pass；HAP 内嵌 profile 与外部 .p7b 字节一致；内容审计：无 requestPermissions、无 extensionAbilities、arm64 成员恰为上述两个；构建时 HDC `Ver: 3.2.0d`（hdc.exe SHA-256 于 freeze 创建时捕获登记）
+  - 纪律确认：签名构建期间未安装、未运行、未发任何设备命令；签名材料与验签临时产物均未入库
 - **不读取设备 UDID**：2026-07-18 的单次 enrollment 例外保持已消耗；设备已在 AGC 注册，新 profile 从 AGC 控制台选择既有设备即可，不需要新的设备端命令。
 - 复用既有 `.p12`/`.csr`/Debug `.cer` 链；构建/签名/`verify-profile`/`verify-app`/hash 回传按 [Windows 开发交接](windows-development-handoff.md)模板执行；签名材料与验签临时产物全部仓外，回传仅版本/SHA-256/通过状态。
 - signed 内容审计要求：无 permission、无 Extension、debug 普通开发签名、唯一 arm64 成员为 `libgoprobe.so`+`libgoloader.so`、无 Go/NetBird/WireGuard 之外的代码面（`libgoprobe.so` 即 stock Go 最小探针）。
