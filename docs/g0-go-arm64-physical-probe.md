@@ -2,7 +2,7 @@
 
 最后核验：2026-08-30
 
-> **状态：`user-authorized-2026-08-30`（签名链完成，进入门序列）。** 用户（直接人类决策者）于 2026-08-30 显式授权本计划按草案 ID 与规格进入实现：AUTH `AUTH-G0PHYS1API26-20260830-0001`、campaign `G0-PHYS-PROBE-20260830-0001`、evidence `EV-G0PHYS1API26-20260830-0001`、bundle `cn.alfadb.netbird.g0probe`。实现与三轮独立审查已随 `1d31835` 提交推送；冻结制品 `libgoprobe.so` 已随 `bdcb7aa` 入仓分发。签名链已于 2026-08-30 完成（见「签名链完成登记」小节）：FINAL signed HAP `30881116…41f60` 就绪，gate 1 起逐门推进，**Live 前须用户再次确认**。本文不改变 E1/E8/R0 任何状态；E8 保持 `CLOSED`。
+> **状态：`consumed-blocked`（G0 探针已完结，2026-08-30）。** 13 门全部执行完毕，单次 Live 实测结论：**冻结物理元组的动态 loader 拒绝 stock Go 1.25.12 arm64 c-shared**（逐字 `initial-exec TLS resolves to dynamic definition`，与 x86_64 Emulator 同错误族；两元组一致、不外推），`EV-G0PHYS1API26-20260830-0001` 经两轮记录审查定级 `reviewed-pass`、`verdict: blocked`（有效实测终态）。pair 已消费、无后继 AUTH。**不是 E1 pass、不是 E8 输入**；E8 保持 `CLOSED`。结果作为已触发的 native N1-Nx + E8 Go 前提处置 ADJ/T0 治理的双实测输入之一（N0 pass + G0 blocked）。本文其余历史叙述按时间顺序理解。
 
 ## 定义与依据
 

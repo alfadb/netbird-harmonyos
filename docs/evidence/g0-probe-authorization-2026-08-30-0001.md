@@ -16,12 +16,12 @@
 authorization_id: AUTH-G0PHYS1API26-20260830-0001
 exception: G0-GOARM64-LOADER-PROBE
 information_status: current-governance-registration
-record_status: authorized-host-implementation
+record_status: consumed-blocked-final
 stage_or_gate: G0
 related_stages_or_gates: [E1, E8, N0]
 is_evidence: false
-authorization_status: granted
-plan_status: authorized-host-implementation
+authorization_status: consumed
+plan_status: consumed-blocked
 device_readiness: not-yet-requested
 machine_fresh_confirmation: pending
 attempt: initial
@@ -29,7 +29,7 @@ retry: N/A
 candidate:
   campaign_id: G0-PHYS-PROBE-20260830-0001
   evidence_id: EV-G0PHYS1API26-20260830-0001
-  identity_status: pending-implementation
+  identity_status: consumed-blocked
   consumed: false
   reusable: false
 target_tuple: 继承 EV-E3-PHYS1REBIND8-20260828-0001 四条只读实测（2026-08-28），本 AUTH 不重测
@@ -72,6 +72,8 @@ stock Go 1.25.12 arm64 c-shared（host launcher `go version go1.25.12 linux/amd6
 
 当前只允许：本登记与计划文档、spike 源码实现、runner（Python/PowerShell parity）与 selftests、freeze example、host-only 构建/ELF 断言/selftest 验证、独立审查，以及审查通过后的提交/推送。禁止：任何真实 HDC executable、设备命令、新 pair audit/freeze/record、TargetBindingConfirm、DryRun、Live（gate 4 起逐门推进且 Live 前须用户再次确认）。fake-hdc 只允许存在于 selftest 临时沙箱。
 
+> **收官（2026-08-30）**：13 门全部执行完毕，Live 实测 `verdict: blocked`（`dlopen-blocked`，loader 拒绝逐字登记），证据 [`EV-G0PHYS1API26-20260830-0001`](g0-probe-live-2026-08-30-0001.md) `reviewed-pass`。本 AUTH `consumed-blocked`，pair 不可复用，无后继 AUTH。结果作为 native N1-Nx + E8 Go 前提处置 ADJ/T0 的实测输入（与 N0 pass 并列）。
+
 ## 门序列执行登记（2026-08-30）
 
 | 门 | 状态 | 事实 |
@@ -95,6 +97,8 @@ stock Go 1.25.12 arm64 c-shared（host launcher `go version go1.25.12 linux/amd6
 | 1 | 全变更集盲审 | **fail**：2 blocker（py `CampaignBlocked` 缺 reason 属性致 blocked 路径崩溃无 seal；ps1 marker 键大小写不敏感哈希表致 fail-open）+ 2 major（ps1 数组解包破坏证据 parity；selftest 零覆盖）+ 8 minor | 全部 blocker/major 修复；顺手修 minor 1/3/4/5（fault 状态、文档 argv 前缀、ELF hash 说明、build 断言增至 9 项）；selftest 39→41 |
 | 2 | 回归复审 | **pass**（0B/0M）：四发现独立验证全 fixed（自建 freeze 端到端、12 例大小写矩阵、跨 runner 全字段 parity、ELF 断言变异测试）；新 3 minor | NEW-MINOR-1（`runner_ps1_sha256` 空串逃生门）+ 两项文案 minor 当轮修复：两侧 runner 四实现 hash 强制重算、scenario-results 补 `runner_ps1_sha256`、selftest 42/42（含修复一个隐性 `[string]$null`→`''` 构造器 bug）；round-2 MINOR-2/6/7/8 与 round-3 MINOR-A/B 保留为记录项不阻塞 |
 | 3 | 增量审查（NEW-MINOR 修复面） | **pass**（0B/0M）：12 组 hash 变异 × 双 runner CLI 子进程全部拒绝；正确值双侧 DryRun 接受且记录双 hash；死代码 0 残留 | 达到提交门槛，按提交边界 commit/push |
+| 5-6 | freeze v2（执行宿主迁移）与 ready 链 | **pass**：v2 经 runner 真实 load_freeze ACCEPTED + 增量静态审查（F1 records/ 整改、F2 口径更正、F3 伴生补齐）；gate 7 review record 由 isolated-xai-grok-4-6-reviewer 出具（anthropic 席两次执行中断后按跨厂商换席处理，0B/0M/0m） | final ready freeze `89b5cce5…` 生效 |
+| 7 | DryRun（gate 12）与 live 证据记录审查 | **pass（两轮）**：DryRun 全链独立复算 0B/0M/0m；live 证据记录第一轮 fail（1 major：faultlogger 表述越权，已更正）→ 第二轮 pass 0B/0M，定级 `reviewed-pass`、`verdict: blocked` 维持 | 证据定级与措辞更正随 `a52723f` 提交 |
 | 4 | 增量审查（host HDC0 探针 OS 自适应补丁） | **pass**（0B/0M/4 minor）：Linux 分支字节级未变（md5 相同）；Windows tasklist 分支 9 场景进程级实测全部失败路径返回 -1、无 false-pass；15 例解析器边界通过；双侧 42/42 用例名集合一致 | minor 1/4（头注释漂移、死守卫）当轮修复；minor 2/3（本行 hash 快照更新 + 变更账本登记）随本登记落实 |
 
 **变更账本（2026-08-30 · host HDC0 探针 OS 自适应）**：gate 1 实测发现 `.ps1` runner 沿用 E3 的 `/usr/bin/ps` 硬编码探针在 Windows 执行主机不可解析。补丁将 `Get-G0HdcProcessCount` 改为 OS 分支：Linux 侧 `/usr/bin/ps -eo comm=,args=` **逐字保留**；Windows 侧新增绝对 `%SystemRoot%\System32\tasklist.exe /FO CSV /NH` 首列（image-name）计数（`hdc`/`hdc.exe` 大小写不敏感），语义与 E3 探针等价（绝对路径、只比第一列、argv 不可能误匹配——tasklist CSV 结构上无 argv 列）。**本变更只扩大 host 侧只读进程列表探针的 OS 覆盖，不新增任何设备侧能力，不触碰 15 项 HDC 操作白名单**；计划文档白名单节（本 AUTH 按引用绑定的那一节）已同步更新。经第四轮聚焦独立审查 pass 后提交。
