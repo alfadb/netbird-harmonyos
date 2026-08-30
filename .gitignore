@@ -22,7 +22,11 @@ __pycache__/
 
 # Generated Go and native probe shared libraries and headers
 /spikes/r1-api24-hap/entry/libs/
-/spikes/g0-go-arm64-phys-hap/entry/libs/
+# G0: the frozen libgoprobe.so IS committed (canonical campaign input, hash
+# pre-registered in docs/g0-go-arm64-physical-probe.md; Windows cannot
+# reproduce the Linux cgo bytes); every other generated file stays ignored.
+/spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/*
+!/spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/libgoprobe.so
 
 # N0 native core host build outputs
 /spikes/n0-native-core/target/

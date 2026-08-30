@@ -119,6 +119,7 @@ runner 对 marker 的 campaign 判定映射（预注册，防歧义）：
 
 ## 签名链（新 App ID；enrollment 保持已消耗）
 
+- **`libgoprobe.so` 经仓库分发**：冻结制品以仓内 blob 提供（`spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/libgoprobe.so`，SHA-256 `489f1aad8bfb0ee23b5da1713781b9bd2d69851fd14dd5cff840fe930b9b5ad7`、size `2041704`）。Windows 侧 `git pull` 后原位可用（打包前须复算 hash 逐字一致）；本地重建仅用于验证可复现性，不得以重建产物替代冻结制品（cgo 交叉编译器差异会使 Windows 重建字节不同）。git blob、本登记与 freeze 三方对账同一 hash。
 - 用户在 AGC 为 `cn.alfadb.netbird.g0probe` 新建 App ID；新建 Debug profile 并勾选**已注册的 PHYS-1 设备**与该 App ID。
 - **不读取设备 UDID**：2026-07-18 的单次 enrollment 例外保持已消耗；设备已在 AGC 注册，新 profile 从 AGC 控制台选择既有设备即可，不需要新的设备端命令。
 - 复用既有 `.p12`/`.csr`/Debug `.cer` 链；构建/签名/`verify-profile`/`verify-app`/hash 回传按 [Windows 开发交接](windows-development-handoff.md)模板执行；签名材料与验签临时产物全部仓外，回传仅版本/SHA-256/通过状态。

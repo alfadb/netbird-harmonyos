@@ -42,6 +42,12 @@ bash go-probe/build-arm64.sh
 `libs/arm64-v8a/libgoloader.so` 与 `libs/arm64-v8a/libgoprobe.so`。打包成员必须与构建输入逐字节一致
 （`nativeLib.debugSymbol.strip: false` 关闭 hvigor 打包前 strip；见下「与 e3 骨架的差异」）。
 
+> **`libgoprobe.so` 以仓内制品为准**：`entry/libs/arm64-v8a/libgoprobe.so` 已提交入仓（SHA-256
+> `489f1aad…b5ad7`，与 [治理计划](../../docs/g0-go-arm64-physical-probe.md) 预登记值一致），是 Windows
+> 签名构建的**冻结输入**——clone/pull 后原位使用，打包前复算 hash。`go-probe/build-arm64.sh` 的本地
+> 重建只用于可复现性验证（本 Linux 工具链下逐字节一致）；Windows 侧 cgo 交叉编译器不同会得到不同
+> 字节，**不得**以 Windows 重建产物替代仓内冻结制品。
+
 `go-probe/build-arm64.sh` 的 ELF 断言（9 项）：AArch64 ELF64 `ET_DYN`；恰 1 个 `PT_TLS`；`.rela.dyn` 中
 `R_AARCH64_TLS_TPREL64` 恰 1 条；Dynamic `FLAGS` 无 `STATIC_TLS`；`NEEDED` 恰只 `libc.so`；动态符号导出
 FUNC `Hello` 与 `RuntimeProbe`；该 TPREL64 为本地（r_info 符号索引 0、addend 0——与 x86_64 被拒剖面的
