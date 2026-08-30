@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-08-29
+最后核验：2026-08-30
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -66,8 +66,10 @@
   - 双审查 isolated `kimi-coding/k3` + `anthropic/claude-sonnet-5` 均 0 B/5 M；opus timeout attempt-not-counted；`ADJ-20260807-0003` 已批准 host process terminal probe 与 Settings 应用信息强制停止撤销路径；`plan_status: blocked-awaiting-device-authorization`；用户显式设备授权 + fresh device confirmation 完成前无 auto retry/新 ID/设备命令授权
 - [E3-PHYS-PREFLIGHT host remediation 证据（ADJ-20260807-0003 runner）](evidence/e3-physical-preflight-host-remediation-2026-08-08.md)
   - `EV-E3-PHYS1HOST-20260808-0001`：host-only、`is_evidence: false`；执行 commit `e3fe0c642c28b8a332c0f70db2217787884334e9`（parent `c6acae7`，M1/M3 probe fixes）；host selftest `HDC_PROCESSES=0`、独立审查 0 B/0 M；candidate `E3-PHYS-PREFLIGHT-20260808-0001` / `EV-E3-PHYS1API26-20260808-0001` 已准备、freeze `plan_status: blocked`；DryRun `is_evidence: false`/HDC0/integrity empty；旧 20260807 candidate `INVALID-TIMELINE` 不可用；host `reviewed-pass` 不等于 E3 pass，无 Live/HDC/install/device-ready 授权；E3 open、E8 `CLOSED`
-- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-29 · 0001，当前）](evidence/e3-physical-preflight-authorization-2026-08-29-0001.md)
-  - `AUTH-E3-PHYS1API26-20260829-0001`：新 pair `E3-PHYS-PREFLIGHT-20260829-0001` / `EV-E3-PHYS1API26-20260829-0001`，attempt initial / retry N/A；当前 `blocked-awaiting-full-gates`、not ready，20260829-0001 machine confirmation/review/freeze/DryRun/Live 均 pending；**S7 前置校准**（依据 20260828 Live 双处观察：B 的 `:vpn` 进程在冲突拒绝后存活为平台行为，S7 前置只门控 A active、B observed-only）；target tuple `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`；reviewer/source/HAP/S6 逻辑不改，设备进程枚举与额外 discovery 永久禁令；E8 `CLOSED`
+- [E3-PHYS-PREFLIGHT 物理设备 live 预检证据（API26 20260829-0001，reviewed-pass/pass，预检完结）](evidence/e3-physical-preflight-api26-20260829-0001.md)
+  - `EV-E3-PHYS1API26-20260829-0001`：`execution: live`、`record_status: reviewed-pass`、`verdict: pass`；**S1-S7 全部 pass——项目首次完整 pass**（S2 Allow/onCreate/create/fd=33、S3 严格进程边界 terminal、S4 deny 全窗口无 B create、S5 应用信息强停 terminal、S6 B 显式冲突拒绝冻结码 `2203002`、S7 收尾 terminal）；**S7 前置校准实证生效**（B 残留 `:vpn` 进程 observed-only 记录不门控、A 正常门控）；执行窗口 2026-08-30 10:14-10:31 实测；cleanup `verified-clean`、integrity 空、166 次白名单 HDC；范围仅冻结元组 E3 可达性，不等于 E4-E7/产品/数据面结论，E8 保持 `CLOSED`
+- [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-29 · 0001，consumed-pass，预检完结）](evidence/e3-physical-preflight-authorization-2026-08-29-0001.md)
+  - `AUTH-E3-PHYS1API26-20260829-0001`：完整执行 13 门，gate 13 Live 于 2026-08-30 S1-S7 全 pass（证据 `reviewed-pass/pass`）；**`consumed-pass`**、pair 已消费、**无后继 AUTH**——E3-PHYS-PREFLIGHT 预检就此完结，后续路线由用户另行治理；仓外对象逐字节保留不得复用
 - [E3-PHYS-PREFLIGHT 物理设备 live 预检证据（API26 20260828-0001，reviewed-pass/blocked）](evidence/e3-physical-preflight-api26-20260828-0001.md)
   - `EV-E3-PHYS1API26-20260828-0001`：`execution: live`、`record_status: reviewed-pass`、`verdict: blocked`；**S1-S6 首次全 pass**（S2 机器验证 Allow/onCreate/create/fd、S3 严格进程边界 terminal、S4 deny 全窗口无 B create、S5 应用信息强停 terminal、S6 B 显式冲突拒绝冻结码 `2203002`）；S7 因 B 的 `:vpn` 进程在冲突拒绝后存活（平台行为，双处观察）被前置门 blocked；cleanup `verified-clean`、integrity 空、145 次白名单 HDC；reviewed-pass 指证据审查完成，不是 E3 pass
 - [E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-28 · 0001，consumed-blocked）](evidence/e3-physical-preflight-authorization-2026-08-28-0001.md)

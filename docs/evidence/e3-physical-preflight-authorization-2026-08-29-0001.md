@@ -1,6 +1,6 @@
-# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-29 · 0001）
+# E3-PHYS-PREFLIGHT 物理设备执行授权登记（2026-08-29 · 0001，consumed-pass）
 
-最后核验：2026-08-29
+最后核验：2026-08-30
 
 本文登记用户（直接人类决策者）于 2026-08-29 的显式治理决定：`AUTH-E3-PHYS1API26-20260828-0001` 已完整执行 13 门并 Live 消费（S1-S6 首次全部 machine-verified pass、S7 因平台行为观察 blocked，证据 `reviewed-pass/blocked`，见 [`EV-E3-PHYS1API26-20260828-0001`](e3-physical-preflight-api26-20260828-0001.md)）；据此建立全新 AUTH/pair 重新进入完整 13 门，核心变更为 **S7 前置校准**。
 
@@ -8,9 +8,11 @@
 
 据此建立 `AUTH-E3-PHYS1API26-20260829-0001`、campaign `E3-PHYS-PREFLIGHT-20260829-0001` 与 evidence `EV-E3-PHYS1API26-20260829-0001`。这是全新 `attempt: initial`，不是 retry；20260828-0001 不构成 retry basis，也不得被新 pair 消费。
 
-> 当前状态：`blocked-awaiting-full-gates`，not ready。20260829-0001 的 audit、freeze、confirmation、review、DryRun 与 Live 均未运行，仓外对象数为 0；本文不预写任何 gate pass 或对象 hash。E3 未关闭，E8 保持 `CLOSED`。
+> **收官状态：`consumed-pass`，`reusable: false`。** 本 pair 完整执行全部 13 门（gate 1-12 pass），gate 13 Live 于 **2026-08-30T10:14:03+08:00** 启动、10:31:20 封签（约 17 分钟）：**S1-S7 全部 machine-verified pass——本项目历次 E3-PHYS-PREFLIGHT live 首次完整场景 1-7 通过**（fd 所有权、进程边界、deny 路径、Settings 强行停止撤销、冲突码 `2203002`、收尾清理全部机器验证）。**S7 前置校准实证生效**：pre7 checkpoint 记录 B 的 `:vpn` 残留进程 `process_present=true`/`expected_present=null`/`observed_only=true`（进程确实存活、observed-only 记录、不门控），A `expected_present=true` 正常门控——同一状态在校准前正是 blocked 掉 20260828-0001 的 `process-state-mismatch`，本 pass 是校准真实触发的结果而非平台行为偶然变化。cleanup `verified-clean`；integrity_violations 空；166 次白名单 HDC。证据 [`EV-E3-PHYS1API26-20260829-0001`](e3-physical-preflight-api26-20260829-0001.md) 经独立记录级审查（`isolated-anthropic-claude-opus-5-reviewer` 0 blocker / 0 major / 3 minor）定级 `reviewed-pass`、`verdict: pass`。**范围声明**：本 pass 仅覆盖冻结元组（HarmonyOS / PLA-AL10 / `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` / API 26 / aarch64 / arm64-v8a）的 E3 可达性，**不等于 E4-E7/产品/数据面结论；E8 保持 `CLOSED`**（开放需独立聚合审查与其余门，含当前基线 E1）。pair 已消费（Live 单次），**无后继 AUTH**——E3-PHYS-PREFLIGHT 预检就此完结，后续路线由用户另行治理。本 pair 全部仓外对象（audit-1/2、三代 freeze、双 record、DryRun/Live evidence roots 及各自 companion）逐字节保留为历史，不得删除、覆盖、补写或复用。
 
-> 提交边界：当前 host-only registration 禁止 commit/push。用户已批准完整治理链；只有 registration/runner parity/selftests/current docs 完成、host-only 验证全部通过并取得独立审查 0 blocker / 0 major 后，才允许 commit/push。registration commit/push 完成后 gate 1 才可开始。
+> 当前状态：`consumed-pass`。本 pair 已完整执行 13 门并 Live 消费（2026-08-30 实测 S1-S7 全 pass，见上方收官 blockquote 与 [`EV-E3-PHYS1API26-20260829-0001`](e3-physical-preflight-api26-20260829-0001.md)）。E3 预检已完结；E8 保持 `CLOSED`。
+
+> 提交边界（历史条款；本登记已 consumed-pass 完结，此段为原始登记时约束的保留记录）：当前 host-only registration 禁止 commit/push。用户已批准完整治理链；只有 registration/runner parity/selftests/current docs 完成、host-only 验证全部通过并取得独立审查 0 blocker / 0 major 后，才允许 commit/push。registration commit/push 完成后 gate 1 才可开始。
 
 ## 授权状态
 
@@ -18,30 +20,30 @@
 authorization_id: AUTH-E3-PHYS1API26-20260829-0001
 supersedes: AUTH-E3-PHYS1API26-20260828-0001
 exception: E3-PHYS-PREFLIGHT
-information_status: current-governance-registration
-record_status: registered-not-run
+information_status: historical-governance-registration
+record_status: live-consumed-pass
 stage_or_gate: E3
 related_stages_or_gates: [E8]
-execution: not-run-authorization-registration
+execution: completed-live-pass
 is_evidence: false
-authorization_status: blocked-awaiting-full-gates
-plan_status: blocked-awaiting-full-gates
+authorization_status: consumed-pass
+plan_status: consumed-pass
 ready: false
-reusable: true
+reusable: false
 device_readiness: user-attested-ready
-machine_fresh_confirmation: pending
-independent_review: pending
-blocked_confirmation_freeze: pending
-ready_freeze: pending
-candidate_audit_1: pending
-candidate_audit_2: pending
-dry_run: pending
-live: pending
-campaign_status: not-run
-live_consumed: false
+machine_fresh_confirmation: pass
+independent_review: pass-0-blocker-0-major
+blocked_confirmation_freeze: pass
+ready_freeze: pass-final-created
+candidate_audit_1: pass
+candidate_audit_2: pass
+dry_run: pass
+live: completed-pass-reviewed
+campaign_status: completed-pass
+live_consumed: true
 hap_source_basis_commit: 62409c5f966d00597b58f68ae5b927dd06e76e76
 runner_code_basis_commit: b24ef557a0a951a146d5ffef035541da8ae39aa9
-code_sha: pending-final-clean-head
+code_sha: b1302cb53effe727de4fa5d208259175a7e5d7d4
 head_requirement: exact-clean-final-governance-commit-descending-from-runner-code-basis
 reviewer_role: isolated-anthropic-claude-opus-5-reviewer
 candidate:
@@ -49,9 +51,20 @@ candidate:
   evidence_id: EV-E3-PHYS1API26-20260829-0001
   attempt: initial
   retry: N/A
-  identity_status: pending-two-consumption-audits
-  consumed: false
-  reusable: true
+  identity_status: consumed-pass
+  consumed: true
+  reusable: false
+gate_artifacts:
+  audit_1_sha256: 116db451cb60cc0611ba75c22cdaab5c69143159102b9a9ce4ac2a8d38bb3051
+  blocked_freeze_sha256: cbe8892fa3ebe4efd1a69bec1235742be902b1a4fa1a648dd267673ac3342b75
+  ready_freeze_draft_sha256: 177bc854923d06f5dba02ddbbf5ab3b81550e7e4e1c37a303e6e24c4c314a6ba
+  ready_freeze_final_sha256: 1de97bbc128a2e60e0ea1d56744d9a53284ae9eae5a5ebb708ec365954cce832
+  target_binding_confirmation_sha256: 93ef0b5f63788011963fbb26c1b9cf71162441c99bc3cda97c583e887bd3b811
+  ready_freeze_review_sha256: a654e5e1b738d8f45d378049251f77ee0aa7bc95ac3f117a3234c3e90f00cfb9
+  audit_2_sha256: 9eb1ed0d0e99d3d0a84e3503df05425f59471d572ef3440b50990bed6963dfe7
+gates:
+  gate_1_through_12: pass
+  gate_13: completed-pass
 prior_candidate:
   campaign_id: E3-PHYS-PREFLIGHT-20260828-0001
   evidence_id: EV-E3-PHYS1API26-20260828-0001
@@ -82,7 +95,7 @@ evidence_roots:
   live: $HOME/harmonyos-signing/netbird-e3/evidence-live-20260829-0001
 ```
 
-`reusable: true` 仅表示本 pair 尚未因治理失败或 Live 消费；不表示 ready。任一 gate 失败立即停止并永久退役本 pair，后续只能取得新的用户治理与新 AUTH/pair。
+`reusable: false` 是永久状态：本 pair 已 Live 消费（2026-08-30 实测 S1-S7 全 pass、证据 `reviewed-pass/pass`），不得复用、补跑或转作任何 retry basis。E3-PHYS-PREFLIGHT 预检就此完结，后续任何新物理 campaign 须新的用户治理与新 AUTH/pair。
 
 ## 继承的冻结输入
 
