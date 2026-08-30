@@ -114,6 +114,9 @@
   - 消除合成 build 风险；API `26` 仍由前一 rebind 实测、不从 build 推断；历史原始边界不改 IDs；后续见 `ADJ-20260807-0001`/`0002`；新 campaign 须新 commit/freeze
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
   - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
+- [G0 stock Go arm64 loader 物理探针计划与证据模板](g0-go-arm64-physical-probe.md)
+  - N0 决议第 7 条预定的 E3 预检后第一物理后续动作：冻结元组上 stock（零补丁）Go 1.25.12 arm64 c-shared 的 loader 接受性与最小 runtime 冒烟单次测量
+  - [执行授权登记（2026-08-30 · 0001，authorized-host-implementation）](evidence/g0-probe-authorization-2026-08-30-0001.md)：不是 E1 pass、不是 E8 输入；结果仅作 native N1-Nx + E8 Go 前提处置新 ADJ/T0 的实测输入；E8 保持 `CLOSED`
 - [Windows + DevEco Studio 开发交接](windows-development-handoff.md)
   - `f44be17` 准备基线的 Windows 已完成回传；普通开发签名、A/B 独立 profile、已消耗 enrollment 边界、最终 hash 与完成即停止记录
 - [N0 原生客户端可行性门：决议、范围与兼容 Oracle](n0-native-client-feasibility.md)

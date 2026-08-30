@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "authorization_id": "AUTH-G0PHYS1API26-20260830-0001",
+  "campaign_id": "G0-PHYS-PROBE-20260830-0001",
+  "evidence_id": "EV-G0PHYS1API26-20260830-0001",
+  "attempt": "initial",
+  "plan_status": "blocked",
+  "code_sha": "<FULL-REPOSITORY-COMMIT-SHA>",
+  "runner_py_sha256": "<PYTHON-RUNNER-FILE-SHA256-REQUIRED-RECOMPUTED-AT-LOAD>",
+  "runner_ps1_sha256": "<POWERSHELL-RUNNER-FILE-SHA256-REQUIRED-RECOMPUTED-AT-LOAD>",
+  "selftest_py_sha256": "<PYTHON-SELFTEST-FILE-SHA256-REQUIRED-RECOMPUTED-AT-LOAD>",
+  "selftest_ps1_sha256": "<POWERSHELL-SELFTEST-FILE-SHA256-REQUIRED-RECOMPUTED-AT-LOAD>",
+  "hdc": {
+    "path": "<OUT-OF-REPO-HDC-EXECUTABLE-ABS-PATH>",
+    "sha256": "<HDC-EXECUTABLE-SHA256; host binary hash only; never a device serial/target>",
+    "version": "<FROZEN-HDC-VERSION-OUTPUT>"
+  },
+  "bundle": "cn.alfadb.netbird.g0probe",
+  "ability": "EntryAbility",
+  "module": "entry",
+  "staging": "/data/local/tmp/netbird-g0",
+  "hilog_tag": "G0GoProbe",
+  "scenario_window_seconds": 60,
+  "target_tuple": {
+    "distribution": "HarmonyOS",
+    "device_model": "PLA-AL10",
+    "full_system_build": "PLA-AL10 7.0.0.102(SP8C00E102R7P3)",
+    "api": "26",
+    "kernel_architecture": "aarch64",
+    "app_abi": "arm64-v8a"
+  },
+  "artifacts": {
+    "hap_path": "<OUT-OF-REPO-SIGNED-HAP-ABS-PATH>",
+    "hap_sha256": "<FINAL-SIGNED-HAP-SHA256>",
+    "profile_sha256": "<DEBUG-PROFILE-P7B-SHA256>",
+    "certificate_sha256": "<DEBUG-CERT-CER-SHA256>",
+    "libgoprobe_sha256": "<SIGNED-HAP-LIBGOPROBE-MEMBER-SHA256>",
+    "libgoloader_sha256": "<SIGNED-HAP-LIBGOLOADER-MEMBER-SHA256>"
+  },
+  "elf_profile": {
+    "pt_tls": true,
+    "tprel64_count": 1,
+    "static_tls_flag": false,
+    "needed": [
+      "libc.so"
+    ]
+  },
+  "evidence_roots": {
+    "dry_run": "<OUT-OF-REPO-DRYRUN-EVIDENCE-ROOT-ABS-PATH>",
+    "live": "<OUT-OF-REPO-LIVE-EVIDENCE-ROOT-ABS-PATH>"
+  },
+  "raw_roots": {
+    "dry_run": "<OUT-OF-REPO-DRYRUN-RAW-ROOT-ABS-PATH>",
+    "live": "<OUT-OF-REPO-LIVE-RAW-ROOT-ABS-PATH>"
+  },
+  "confirmation": {
+    "status": "pending",
+    "record_path": "<OUT-OF-REPO-TARGET-BINDING-CONFIRMATION-RECORD-PATH>",
+    "record_sha256": "<SHA256-OF-THE-CONFIRMATION-RECORD>",
+    "authorization_id": "AUTH-G0PHYS1API26-20260830-0001"
+  },
+  "review": {
+    "status": "pending",
+    "record_path": "<OUT-OF-REPO-READY-FREEZE-REVIEW-RECORD-PATH>",
+    "record_sha256": "<SHA256-OF-THE-READY-FREEZE-REVIEW-RECORD>"
+  },
+  "operator": "authorized user",
+  "orchestrator": "main agent"
+}

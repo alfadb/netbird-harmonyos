@@ -1,0 +1,10 @@
+{
+  modelVersion: '6.0.0',
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Entry module for the isolated G0 stock Go arm64 loader probe.',
+  license: 'MIT',
+  dependencies: {
+    'libgoloader.so': 'file:./src/main/cpp/types/libgoloader'
+  }
+}

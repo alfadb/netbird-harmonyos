@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "Isolated G0 stock Go arm64 loader probe"
+    },
+    {
+      "name": "ability_description",
+      "value": "Ordinary UI entry that runs the G0 Go loader probe on launch"
+    },
+    {
+      "name": "ability_name",
+      "value": "G0 Probe"
+    }
+  ]
+}

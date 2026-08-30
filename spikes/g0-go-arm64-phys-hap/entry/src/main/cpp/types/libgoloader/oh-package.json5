@@ -1,0 +1,7 @@
+{
+  name: 'libgoloader.so',
+  version: '1.0.0',
+  description: 'Type declarations for the G0 stock Go arm64 loader probe.',
+  types: './index.d.ts',
+  license: 'MIT'
+}

@@ -1,0 +1,9 @@
+{
+  modelVersion: '6.0.0',
+  name: 'g0-go-arm64-phys-hap',
+  version: '1.0.0',
+  description: 'Isolated G0 stock Go arm64 c-shared loader probe build for API 23.',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}
