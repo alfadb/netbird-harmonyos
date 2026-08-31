@@ -176,6 +176,7 @@ esac
 result="defect"
 fail_reason=""
 blocked_reason=""
+sealed=0
 emulator_started=0
 installed=0
 device_phase_started=0
@@ -210,6 +211,7 @@ AA_START_LOG=""
 SOURCE_MANIFEST=""
 SCREENSHOT_A=""
 SCREENSHOT_B=""
+PROBE_DETAIL=""
 
 # --- helper functions -------------------------------------------------------
 print_command() {
@@ -324,6 +326,19 @@ teardown() {
     printf 'RESIDUAL_STATE=skipped-no-device-phase\n'
   fi
   rm -rf "$snapshot_dir" "$app_member" "$test_member" 2>/dev/null || true
+  # Defect-1 invariant (EV-N1A-EMU24-20260830-0001): raw and manifest must
+  # exist together or not at all. A runner defect that strikes BEFORE the
+  # base manifest is created (pre-measurement: build/snapshot/verify
+  # failures) is not a measurement - the partial raw files are removed.
+  if (( SELFTEST == 0 && DRY_RUN == 0 )) && [[ "$result" == "defect" ]] \
+      && { [[ -z "$MANIFEST" ]] || [[ ! -f "$MANIFEST" ]]; }; then
+    local f
+    for f in "$TRANSCRIPT" "$BUILD_LOG" "$N1A_BUILD_LOG" "$SNAPSHOT_LOG" \
+             "$SOURCE_MANIFEST" "$CONSOLE"; do
+      [[ -n "$f" && -f "$f" ]] && rm -f "$f"
+    done
+    printf 'CLEANUP_UNMEASURED_RAW=removed\n'
+  fi
   printf 'CLEANUP_TEMP=removed\n'
   printf 'CLEANUP_END=teardown-complete\n'
   printf 'TRAP_EXIT_CODE=%s RESULT=%s\n' "$exit_code" "$result"
@@ -333,6 +348,51 @@ teardown() {
 }
 trap teardown EXIT
 
+# Base manifest: all run-identity facts that exist BEFORE any measurement
+# (defect 1 of EV-N1A-EMU24-20260830-0001: measured_fail short-circuited
+# before the old post-judgment manifest block, leaving fail/blocked terminal
+# states with raw but no manifest/seal). Written once, immediately before
+# the device phase starts (all preconditions passed, builds verified); every
+# later phase APPENDS. seal_and_finalize then seals fail/blocked/pass alike.
+write_base_manifest() {
+  {
+    printf '=== N1a Emulator evidence manifest ===\n'
+    printf 'evidence_id=%s\n' "$EVIDENCE_ID"
+    printf 'information_status=current-measured\n'
+    printf 'record_status=collected\n'
+    printf 'stage_or_gate=N1a\n'
+    printf 'campaign_id=N1A-EMU24-20260830-0001\n'
+    printf 'attempt=initial\n'
+    printf 'criteria_revision=frozen-r2 (docs/n1a-gate-plan.md)\n'
+    printf 'code_sha=%s\n' "$code_sha"
+    printf 'snapshot_commit=%s\n' "$SNAPSHOT_HEAD"
+    printf 'boringtun_version=%s\n' "$BORINGTUN_VERSION"
+    printf 'boringtun_crate_sha256=%s\n' "$crate_sha"
+    printf 'target_tuple=%s\n' "$TARGET_TUPLE"
+    printf 'emulator_instance=%s\n' "$EMULATOR_INSTANCE"
+    printf 'emulator_target=%s\n' "$EMULATOR_TARGET"
+    printf 'build_toolchain=command-line-tools/6.1.1.290 (stable; hvigorw/ohpm/native SDK for build)\n'
+    printf 'emulator_runtime=command-line-tools/26.0.0.461 (beta; Emulator binary + hdc)\n'
+    printf 'native_sdk_version=%s\n' "$native_sdk_version"
+    printf 'native_sdk_api=%s\n' "$native_sdk_api"
+    printf 'native_sdk_release_type=%s\n' "$native_sdk_release"
+    printf 'started_at=%s\n' "$started_at"
+    printf 'clock_source=host_CLOCK_REALTIME_date_iso_8601_seconds\n'
+    printf 'timezone=%s\n' "$(date +%Z%:z)"
+    printf 'working_directory=%s\n' "$WORKSPACE"
+    printf 'command=bash spikes/n1a-native-dataplane/n1a-emulator-run.sh\n'
+    printf 'throughput_floor_mibps=%s\n' "$THROUGHPUT_FLOOR_MIBPS"
+    printf 'e8_status=CLOSED\n'
+    printf 'physical_device_used=false\n'
+    printf 'libentry_x86_64_sha256=%s\n' "$built_sha"
+    printf 'libentry_aarch64_sha256=%s\n' "$aarch64_sha"
+    printf 'cargo_lock_sha256=%s\n' "$(sha256sum "$PROJECT_DIR/Cargo.lock" | awk '{print $1}')"
+    printf 'two_phase_flow=phase-A aa-test judgment + phase-B C9 result page; per-window duplicate rule; C1 two-window binding; B second full probe; c5/throughput dual-recorded (criteria-holder ruling 2026-08-30)\n'
+    printf 'reviewer=pending-independent-review\n'
+    printf 'manifest_self_hash_semantics=manifest_sha256 is the sha256 of this file up to and including the transcript_final_sha256 line; the manifest_sha256 line itself is appended after hashing and is not part of its own hash; transcript_final_sha256 is the sha256 of the first transcript_final_bytes bytes of the transcript (recomputed with head -c transcript_final_bytes)\n'
+  } >>"$MANIFEST"
+}
+
 # Close the transcript log stream: switch stdout/stderr to /dev/null so
 # nothing after this point can append (O_APPEND; no tee, no fd 3; the seal
 # never waits on a child holding the stream open).
@@ -341,6 +401,12 @@ seal_transcript() {
 }
 
 seal_and_finalize() {
+  # Idempotent: the trap teardown and the explicit call sites may both fire;
+  # a second call must never append a second final block.
+  if (( sealed == 1 )); then
+    return 0
+  fi
+  sealed=1
   local exit_code="${1:-0}"
   seal_transcript
   if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
@@ -364,7 +430,7 @@ check_no_clobber() {
   local f
   for f in "$TRANSCRIPT" "$TAG_HILOG" "$APP_HILOG" "$PAGE_HILOG" "$MANIFEST" \
     "$CONSOLE" "$BUILD_LOG" "$N1A_BUILD_LOG" "$SNAPSHOT_LOG" "$AA_TEST_LOG" \
-    "$AA_START_LOG" "$SOURCE_MANIFEST" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
+    "$AA_START_LOG" "$SOURCE_MANIFEST" "$PROBE_DETAIL" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
     if [[ -n "$f" && -e "$f" ]]; then
       printf 'REFUSE_OVERWRITE=evidence file already exists: %s; refusing to overwrite fixed evidence (use a fresh EVIDENCE_ID or EVIDENCE_ROOT)\n' "$f" >&2
       return 1
@@ -462,6 +528,74 @@ collect_distinct_markers() {
 marker_field() {
   printf '%s' "$1" | awk -F'|' -v name="$2" \
     '{ for (i = 1; i <= NF; i++) if ($i ~ ("^" name "=")) { sub("^" name "=", "", $i); print $i } }'
+}
+
+# Defect 2 (EV-N1A-EMU24-20260830-0001): reassemble the chunked probe
+# detail JSON. The ohosTest entry emits
+#   N1A_JSON|part=<i>|total=<n>|sha256=<first16-of-whole-json-sha256>|data=<chunk>
+# lines (384-byte chunks; the 0001 evidence measured the hilog message
+# truncation at ~488 bytes). This function collects the lines from the
+# phase-A HiLog/aa-test capture files, deduplicates identical lines, validates
+# the part/total/sha contract, reassembles byte-exactly and verifies the
+# digest. Prints the full 64-hex sha on stdout on success; returns 1 on any
+# transport failure (caller treats it as a runner DEFECT, not a measured
+# fail). The JSON document itself is unchanged - transport only.
+N1A_JSON_CHUNK_MAX=384
+reassemble_probe_json() {
+  local out_path="$1"; shift
+  local f line m part total sha16 data
+  local declared_total="" declared_sha=""
+  local -A seen_line=() seen_part=() part_data=()
+  local -a parts=()
+  for f in "$@"; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      # Collapse identical re-emitted lines across capture sources.
+      [[ -n "${seen_line[$line]:-}" ]] && continue
+      seen_line["$line"]=1
+      if [[ "$line" =~ ^N1A_JSON\|part=([0-9]+)\|total=([0-9]+)\|sha256=([0-9a-f]{16})\|data=(.*)$ ]]; then
+        part="${BASH_REMATCH[1]}"
+        total="${BASH_REMATCH[2]}"
+        sha16="${BASH_REMATCH[3]}"
+        data="${BASH_REMATCH[4]}"
+        if [[ -z "$declared_total" ]]; then
+          declared_total="$total"
+          declared_sha="$sha16"
+        elif [[ "$total" != "$declared_total" || "$sha16" != "$declared_sha" ]]; then
+          return 1
+        fi
+        if [[ -n "${seen_part[$part]:-}" ]]; then
+          return 1
+        fi
+        seen_part["$part"]=1
+        part_data["$part"]="$data"
+        parts+=("$part")
+      else
+        # A line that greps as a chunk but does not parse is corruption.
+        return 1
+      fi
+    done < <(grep -F 'N1A_JSON|part=' "$f" || true)
+  done
+  [[ -n "$declared_total" ]] || return 1
+  (( declared_total > 0 )) || return 1
+  (( ${#parts[@]} == declared_total )) || return 1
+  local i
+  for ((i = 0; i < declared_total; i++)); do
+    [[ -n "${part_data[$i]:-}" || ${#part_data[$i]} -eq 0 ]] || return 1
+    (( ${#part_data[$i]} <= N1A_JSON_CHUNK_MAX )) || return 1
+  done
+  # Reassemble in part order and verify the whole-document digest.
+  local reassembled reasm_sha
+  reassembled=""
+  for ((i = 0; i < declared_total; i++)); do
+    reassembled+="${part_data[$i]}"
+  done
+  printf '%s' "$reassembled" >"$out_path"
+  reasm_sha="$(sha256sum "$out_path" | awk '{print $1}')"
+  [[ "${reasm_sha:0:16}" == "$declared_sha" ]] || { rm -f "$out_path"; return 1; }
+  printf '%s' "$reasm_sha"
+  return 0
 }
 
 # Extract the guest TestFinished-ResultCode from the aa-test log (last match).
@@ -844,6 +978,133 @@ selftest_run() {
   fi
   printf 'SELFTEST manifest-seal=pass\n'
 
+  # --- defect 1: fail path must seal (idempotent, fields complete) ----------
+  # Simulate: base manifest exists, result=fail; seal_and_finalize must run
+  # TWICE without duplicating the final block, and must record run_status=fail
+  # plus all six final fields. No Emulator involved.
+  local failseal_tmp failseal_manifest failseal_transcript
+  failseal_tmp="$(mktemp -d "${TMPDIR:-/tmp}/n1a-selftest-failseal.XXXXXX")"
+  failseal_manifest="$failseal_tmp/manifest.txt"
+  failseal_transcript="$failseal_tmp/transcript.log"
+  printf 'evidence_id=EV-N1A-SELFTEST-FAILSEAL\n' >"$failseal_manifest"
+  printf 'transcript-line-1\n' >"$failseal_transcript"
+  (
+    sealed=0
+    MANIFEST="$failseal_manifest"
+    TRANSCRIPT="$failseal_transcript"
+    result="fail"
+    fail_reason="selftest simulated criterion violation"
+    blocked_reason=""
+    seal_and_finalize 0
+    seal_and_finalize 0
+  )
+  local failseal_final_rows failseal_field_ok=0
+  failseal_final_rows="$(grep -c '^final_exit_code=' "$failseal_manifest")"
+  for f in final_exit_code run_status fail_reason blocked_reason \
+           transcript_final_bytes transcript_final_sha256 manifest_sha256; do
+    grep -q "^${f}=" "$failseal_manifest" || failseal_field_ok=1
+  done
+  grep -q '^run_status=fail$' "$failseal_manifest" || failseal_field_ok=1
+  grep -q '^fail_reason=selftest simulated criterion violation$' "$failseal_manifest" || failseal_field_ok=1
+  if (( failseal_final_rows != 1 || failseal_field_ok != 0 )); then
+    printf 'SELFTEST FAIL fail-path-seal: rows=%s field_ok=%s\n' \
+      "$failseal_final_rows" "$failseal_field_ok"
+    rc=1
+  fi
+  rm -rf "$failseal_tmp"
+  printf 'SELFTEST fail-path-seal=pass\n'
+
+  # --- defect 2: chunked JSON reassembly (ordered/shuffled/dup/missing/sha/oversize/total) ---
+  local rj_tmp rj_out rj_file rj_json rj_sha rj_sha16 rj_i rj_total rj_data
+  rj_tmp="$(mktemp -d "${TMPDIR:-/tmp}/n1a-selftest-reasm.XXXXXX")"
+  rj_out="$rj_tmp/detail.json"
+  # Fixture must span MULTIPLE chunks so the shuffled/dup case can build a
+  # meaningful (total-1, total-2) prefix (a single-chunk fixture degenerates
+  # to part=-1 and the reassembler rightly rejects the polluted line).
+  rj_json='{"version":"n1a-native-dataplane/0.1.0+boringtun-0.7.1","ok":false,"criteria":{"c1":"pass","c2":"pass","c3":"pass","c4":"pass","c5":"not-triggered","c6":"pass","c7":"pass","c8":"pass","c9":"pass"},"handshake":{"established":true,"elapsed_ms":1173.276,"attempts":1},"integrity":{"packets_total":4000,"verified":4000,"mismatch":0,"lost":0,"extra":0,"byte_accounting":"exact"},"throughput_mibps":93.10,"backpressure":{"induced":false,"kernel_queue_drops":43435,"delivered":512,"corrupted":0},"tick":{"gaps":3,"keepalives":6,"session_alive":true},"resources":{"process_model":"testrunner","fd_t0":11,"fd_t3":11,"task_t0":8,"task_t3":8,"rss_kb_t0":94208,"rss_kb_t3":95104}}'
+  rj_sha="$(printf '%s' "$rj_json" | sha256sum | awk '{print $1}')"
+  rj_sha16="${rj_sha:0:16}"
+  rj_total=$(( ( ${#rj_json} + N1A_JSON_CHUNK_MAX - 1 ) / N1A_JSON_CHUNK_MAX ))
+
+  emit_test_chunks() {
+    local out_file="$1" order="$2"
+    local i start data
+    : >"$out_file"
+    for i in $order; do
+      start=$(( i * N1A_JSON_CHUNK_MAX ))
+      data="${rj_json:$start:$N1A_JSON_CHUNK_MAX}"
+      printf 'N1A_JSON|part=%s|total=%s|sha256=%s|data=%s\n' \
+        "$i" "$rj_total" "$rj_sha16" "$data" >>"$out_file"
+    done
+  }
+
+  # (a) ordered -> pass, digest matches
+  emit_test_chunks "$rj_tmp/a.log" "$(seq 0 $(( rj_total - 1 )))"
+  if probe_json_sha="$(reassemble_probe_json "$rj_out" "$rj_tmp/a.log")" \
+      && [[ "$probe_json_sha" == "$rj_sha" ]] \
+      && [[ "$(cat "$rj_out")" == "$rj_json" ]]; then
+    printf 'SELFTEST reassemble-ordered=pass\n'
+  else
+    printf 'SELFTEST FAIL reassemble-ordered\n'
+    rc=1
+  fi
+
+  # (b) shuffled + identical duplicated lines across two sources -> pass
+  emit_test_chunks "$rj_tmp/b1.log" "$(( rj_total - 1 )) $(( rj_total - 2 ))"
+  emit_test_chunks "$rj_tmp/b2.log" "$(seq 0 $(( rj_total - 2 )))"
+  cat "$rj_tmp/b1.log" >>"$rj_tmp/b2.log"
+  if probe_json_sha="$(reassemble_probe_json "$rj_out" "$rj_tmp/b1.log" "$rj_tmp/b2.log")" \
+      && [[ "$probe_json_sha" == "$rj_sha" ]]; then
+    printf 'SELFTEST reassemble-shuffled-dup=pass\n'
+  else
+    printf 'SELFTEST FAIL reassemble-shuffled-dup\n'
+    rc=1
+  fi
+
+  # (c) missing part -> fail
+  emit_test_chunks "$rj_tmp/c.log" "$(seq 0 $(( rj_total - 2 )))"
+  if reassemble_probe_json "$rj_out" "$rj_tmp/c.log" >/dev/null 2>&1; then
+    printf 'SELFTEST FAIL reassemble-missing-part must fail\n'
+    rc=1
+  else
+    printf 'SELFTEST reassemble-missing-part=pass\n'
+  fi
+
+  # (d) sha16 mismatch -> fail
+  emit_test_chunks "$rj_tmp/d.log" "$(seq 0 $(( rj_total - 1 )))"
+  sed -i "1s/sha256=${rj_sha16}/sha256=0000000000000000/" "$rj_tmp/d.log"
+  if reassemble_probe_json "$rj_out" "$rj_tmp/d.log" >/dev/null 2>&1; then
+    printf 'SELFTEST FAIL reassemble-sha-mismatch must fail\n'
+    rc=1
+  else
+    printf 'SELFTEST reassemble-sha-mismatch=pass\n'
+  fi
+
+  # (e) oversize chunk data -> fail
+  emit_test_chunks "$rj_tmp/e.log" "$(seq 0 $(( rj_total - 1 )))"
+  printf 'N1A_JSON|part=0|total=%s|sha256=%s|data=%s\n' \
+    "$rj_total" "$rj_sha16" "$(head -c $(( N1A_JSON_CHUNK_MAX + 1 )) /dev/zero | tr '\0' 'x')" \
+    >>"$rj_tmp/e.log"
+  if reassemble_probe_json "$rj_out" "$rj_tmp/e.log" >/dev/null 2>&1; then
+    printf 'SELFTEST FAIL reassemble-oversize must fail\n'
+    rc=1
+  else
+    printf 'SELFTEST reassemble-oversize=pass\n'
+  fi
+
+  # (f) inconsistent total across lines -> fail
+  emit_test_chunks "$rj_tmp/f.log" "$(seq 0 $(( rj_total - 1 )))"
+  printf 'N1A_JSON|part=%s|total=999|sha256=%s|data=x\n' \
+    "$rj_total" "$rj_sha16" >>"$rj_tmp/f.log"
+  if reassemble_probe_json "$rj_out" "$rj_tmp/f.log" >/dev/null 2>&1; then
+    printf 'SELFTEST FAIL reassemble-total-inconsistent must fail\n'
+    rc=1
+  else
+    printf 'SELFTEST reassemble-total-inconsistent=pass\n'
+  fi
+
+  rm -rf "$rj_tmp"
+
   # --- teardown no-op --------------------------------------------------------
   emulator_started=0
   installed=0
@@ -935,6 +1196,7 @@ else
   AA_TEST_LOG="$EVIDENCE_ROOT/$EVIDENCE_ID-aa-test.log"
   AA_START_LOG="$EVIDENCE_ROOT/$EVIDENCE_ID-aa-start.log"
   SOURCE_MANIFEST="$EVIDENCE_ROOT/$EVIDENCE_ID-source-manifest.txt"
+  PROBE_DETAIL="$EVIDENCE_ROOT/$EVIDENCE_ID-probe-detail.json"
   SCREENSHOT_A="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-a.png"
   SCREENSHOT_B="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-b-page.png"
   check_no_clobber || exit 2
@@ -946,6 +1208,7 @@ else
     AA_TEST_LOG="$DRY_TMP/aa-test.log"
     AA_START_LOG="$DRY_TMP/aa-start.log"
     SOURCE_MANIFEST="$DRY_TMP/source-manifest.txt"
+    PROBE_DETAIL=""
     TRANSCRIPT=""
     TAG_HILOG=""
     APP_HILOG=""
@@ -1305,6 +1568,12 @@ fi
 # Formal run: device phase
 # ============================================================================
 
+# Defect 1: the base manifest exists BEFORE any measurement can happen, so
+# every terminal state (pass/blocked/fail) has raw+manifest together and
+# seal_and_finalize always has a manifest to seal.
+write_base_manifest
+printf 'BASE_MANIFEST=written\n'
+
 # --- 7. Emulator cold boot (N0 mirror) --------------------------------------
 device_phase_started=1
 "$HDC" kill >/dev/null 2>&1 </dev/null || true
@@ -1478,6 +1747,22 @@ elif (( ${#distinct_app_markers[@]} > 1 )); then
 else
   marker_line="${distinct_app_markers[0]}"
   phase_a_marker="$marker_line"
+
+  # Defect 2: with exactly one app marker the probe ran to completion, so
+  # the chunked N1A_JSON transport must reassemble byte-exactly. A transport
+  # failure here is a runner DEFECT (never a measured fail): the probe's own
+  # verdict is judged from the marker below.
+  probe_detail_sha=""
+  if ! probe_detail_sha="$(reassemble_probe_json "$PROBE_DETAIL" \
+      "$TAG_HILOG" "$APP_HILOG" "$AA_TEST_LOG")"; then
+    defect "probe detail JSON reassembly failed (chunked N1A_JSON transport): $PROBE_DETAIL"
+  fi
+  printf 'PROBE_DETAIL_JSON_SHA256=%s\n' "$probe_detail_sha"
+  printf 'PROBE_DETAIL_JSON_BYTES=%s\n' "$(stat -c %s "$PROBE_DETAIL")"
+  printf 'probe_detail_json_sha256=%s\n' "$probe_detail_sha" >>"$MANIFEST"
+  printf 'probe_detail_json_bytes=%s\n' "$(stat -c %s "$PROBE_DETAIL")" >>"$MANIFEST"
+  printf 'probe_detail_json_sha16=%s\n' "${probe_detail_sha:0:16}" >>"$MANIFEST"
+
   printf 'N1A_RESULT_LINE=%s\n' "$marker_line"
   phase_a_verdict="$(marker_field "$marker_line" verdict)"
   phase_a_c5="$(marker_field "$marker_line" c5)"
@@ -1537,35 +1822,13 @@ else
   printf 'PHASE_A_SCREENSHOT=skipped-no-capture\n'
 fi
 
-# --- 12. base manifest (created immediately after the phase-A verdict) ---------
+# --- 12. post-measurement manifest rows (APPENDED to the base manifest) -------
+# Defect 1: the base manifest already exists (written before the device
+# phase); this block now only appends the phase results and the hashes of
+# the artifacts measured so far.
 ended_at="$(date --iso-8601=seconds)"
 {
-  printf '=== N1a Emulator evidence manifest ===\n'
-  printf 'evidence_id=%s\n' "$EVIDENCE_ID"
-  printf 'information_status=current-measured\n'
-  printf 'record_status=collected\n'
-  printf 'stage_or_gate=N1a\n'
-  printf 'campaign_id=N1A-EMU24-20260830-0001\n'
-  printf 'attempt=initial\n'
-  printf 'criteria_revision=frozen-r2 (docs/n1a-gate-plan.md)\n'
-  printf 'code_sha=%s\n' "$code_sha"
-  printf 'snapshot_commit=%s\n' "$SNAPSHOT_HEAD"
-  printf 'boringtun_version=%s\n' "$BORINGTUN_VERSION"
-  printf 'boringtun_crate_sha256=%s\n' "$crate_sha"
-  printf 'target_tuple=%s\n' "$TARGET_TUPLE"
-  printf 'emulator_instance=%s\n' "$EMULATOR_INSTANCE"
-  printf 'emulator_target=%s\n' "$EMULATOR_TARGET"
-  printf 'build_toolchain=command-line-tools/6.1.1.290 (stable; hvigorw/ohpm/native SDK for build)\n'
-  printf 'emulator_runtime=command-line-tools/26.0.0.461 (beta; Emulator binary + hdc)\n'
-  printf 'native_sdk_version=%s\n' "$native_sdk_version"
-  printf 'native_sdk_api=%s\n' "$native_sdk_api"
-  printf 'native_sdk_release_type=%s\n' "$native_sdk_release"
-  printf 'started_at=%s\n' "$started_at"
   printf 'phase_a_ended_at=%s\n' "$ended_at"
-  printf 'clock_source=host_CLOCK_REALTIME_date_iso_8601_seconds\n'
-  printf 'timezone=%s\n' "$(date +%Z%:z)"
-  printf 'working_directory=%s\n' "$WORKSPACE"
-  printf 'command=bash spikes/n1a-native-dataplane/n1a-emulator-run.sh\n'
   printf 'phase_a_marker=%s\n' "$phase_a_marker"
   printf 'phase_a_verdict=%s\n' "$phase_a_verdict"
   printf 'phase_a_c5=%s\n' "$phase_a_c5"
@@ -1573,16 +1836,10 @@ ended_at="$(date --iso-8601=seconds)"
   printf 'phase_a_ohos_test_marker=%s\n' "$test_marker_line"
   printf 'phase_a_aa_rc=%s\n' "$aa_rc"
   printf 'phase_a_guest_result_code=%s\n' "$guest_code"
-  printf 'throughput_floor_mibps=%s\n' "$THROUGHPUT_FLOOR_MIBPS"
-  printf 'e8_status=CLOSED\n'
-  printf 'physical_device_used=false\n'
-  printf 'libentry_x86_64_sha256=%s\n' "$built_sha"
-  printf 'libentry_aarch64_sha256=%s\n' "$aarch64_sha"
   printf 'app_hap_sha256=%s\n' "$(sha256sum "$app_hap" | awk '{print $1}')"
   printf 'test_hap_sha256=%s\n' "$(sha256sum "$test_hap" | awk '{print $1}')"
   printf 'app_member_sha256=%s\n' "$app_member_sha"
   printf 'test_member_sha256=%s\n' "$test_member_sha"
-  printf 'cargo_lock_sha256=%s\n' "$(sha256sum "$PROJECT_DIR/Cargo.lock" | awk '{print $1}')"
   printf 'source_manifest_sha256=%s\n' "$(sha256sum "$SOURCE_MANIFEST" | awk '{print $1}')"
   printf 'n1a_build_log_sha256=%s\n' "$(sha256sum "$N1A_BUILD_LOG" | awk '{print $1}')"
   printf 'snapshot_log_sha256=%s\n' "$(sha256sum "$SNAPSHOT_LOG" | awk '{print $1}')"
@@ -1593,9 +1850,7 @@ ended_at="$(date --iso-8601=seconds)"
   printf 'app_hilog_sha256=%s\n' "$(sha256sum "$APP_HILOG" | awk '{print $1}')"
   printf 'page_hilog_sha256=%s\n' "$(sha256sum "$PAGE_HILOG" | awk '{print $1}' 2>/dev/null || printf pending)"
   printf 'console_sha256=%s\n' "$(sha256sum "$CONSOLE" | awk '{print $1}')"
-  printf 'reviewer=pending-independent-review\n'
-  printf 'manifest_self_hash_semantics=manifest_sha256 is the sha256 of this file up to and including the transcript_final_sha256 line; the manifest_sha256 line itself is appended after hashing and is not part of its own hash; transcript_final_sha256 is the sha256 of the first transcript_final_bytes bytes of the transcript (recomputed with head -c transcript_final_bytes)\n'
-} >"$MANIFEST"
+} >>"$MANIFEST"
 printf 'PHASE_A_ENDED_AT=%s\n' "$ended_at"
 printf 'RECORD_STATUS=collected\n'
 

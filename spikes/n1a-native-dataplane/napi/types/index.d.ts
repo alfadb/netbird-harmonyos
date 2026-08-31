@@ -50,6 +50,7 @@ export interface N1aProbeResult {
   fdAfter: number;
   /** Full machine-readable JSON detail document from the Rust core. */
   detailJson: string;
+  detailSha256: string;
 }
 
 export const runN1aProbe: () => N1aProbeResult;

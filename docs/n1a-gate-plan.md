@@ -1,6 +1,6 @@
 # N1a 门计划与判据预注册（native WG 数据面 × 回环数据泵，Emulator）
 
-最后核验：2026-08-30 ｜ 状态：`criteria-revised-r3-pending-re-review`（**r2 判据持有人裁决 `C7_LOCUS_RULING=criteria-defect`（2026-08-31，isolated-xai-grok-4-6-reviewer）**：campaign 0001 实测证明 C7 的进程级精确相等 locus 在 aa-test 环境对非探针框架噪声本质敏感（E2 先例为已预热 EntryAbility 进程不可外推；E1-0002 为同型误判先例；host 安静进程 4→4/2→2 只证探针在 Linux 不漏），0001 的 C7/C8 fail 不得作为探针泄漏的测量事实主张；按停止条件 5 判据缺陷 → 修订 C7/C8（本 r3，逐字采纳持有人修订文本）+ 新审查轮 + 新 evidence ID 重测。0001 consumed-failure 字面记录不改写。C5/C9 等其余判据不变）
+最后核验：2026-08-31 ｜ 状态：`criteria-frozen-r3`（r3 复审 pass（2026-08-31，同一审查席）：C7/C8 逐字采纳裁决文本、无新 freeze-blocker；**新 evidence ID 重测须用户显式授权，本冻结不构成执行授权**；0001 ID 不可复用。**r2 判据持有人裁决 `C7_LOCUS_RULING=criteria-defect`（2026-08-31，isolated-xai-grok-4-6-reviewer）**：campaign 0001 实测证明 C7 的进程级精确相等 locus 在 aa-test 环境对非探针框架噪声本质敏感（E2 先例为已预热 EntryAbility 进程不可外推；E1-0002 为同型误判先例；host 安静进程 4→4/2→2 只证探针在 Linux 不漏），0001 的 C7/C8 fail 不得作为探针泄漏的测量事实主张；按停止条件 5 判据缺陷 → 修订 C7/C8（本 r3，逐字采纳持有人修订文本）+ 新审查轮 + 新 evidence ID 重测。0001 consumed-failure 字面记录不改写。C5/C9 等其余判据不变）
 
 ## 定义与归属
 
@@ -21,7 +21,7 @@ N1a 是 [native N1-Nx 治理决议](native-nx-governance.md) N1 拆分的 Emulat
 - 握手与数据搬运全部按 ffi 合同：`wireguard_read` 返回 `op==WRITE_TO_NETWORK` 时，对同一 tunnel 以空 src 重复 `wireguard_read` 直至 `WIREGUARD_DONE`（强制 drain）。
 - NAPI 薄层沿用 N0 模式（结构化结果、fail-closed、同步导出 + 单行 marker），marker 前缀 `N1A_RESULT`、tag `N1aProbe`。
 
-## 判据（预注册 r1，全部 machine-verified；逐字采纳第一轮独立审查修正文本）
+## 判据（预注册 r3，全部 machine-verified；r0/r1 修订文本与 r3 C7/C8 裁决文本均已逐字采纳）
 
 | # | 判据 | pass 条件（fail-closed） |
 | --- | --- | --- |
@@ -63,7 +63,7 @@ N0 决议第 9 条停止条件（共 5 项，无 6-9）全文沿用如下；出�
 
 ## 流程
 
-1. 本判据文档（r2，已冻结）经同一独立审查席三轮复审 pass（2026-08-30）；测量可以开始；
-2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照冻结判据逐条核对；实现层要求（r3 裁决附注）：fd/逐 fd 核对结果必须经短 marker 或 NAPI 标量进入证据，禁止只依赖被 hilog 行长截断的单行 detailJson；runner 在任何终态（pass/blocked/fail）必须封签；探针 detailJson 分段输出；
+1. 本判据文档（r3，已冻结）经同一独立审查席复审 pass（2026-08-31，第四轮：r3 逐字采纳 C7 locus 裁决）；新 evidence ID 重测须用户显式授权后开始；
+2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照冻结判据逐条核对；实现层要求（r3 裁决附注）：fd/逐 fd 核对结果必须经短 marker 或 NAPI 标量进入证据，禁止只依赖被 hilog 行长截断的单行 detailJson；runner 在任何终态（pass/blocked/fail）必须封签；探针 detailJson 分段输出；进程级观察字段必须标注 `process_model=testrunner|entryability`（两窗不互推）；
 3. 正式 Emulator campaign（runner 产 sealed evidence：沿 N0 `--dry-run`/formal 模式）；
 4. 证据登记（双轴）→ 记录级独立审查 → 收口。

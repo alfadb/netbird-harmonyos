@@ -9,9 +9,14 @@
  * ("未触发≠失败"): only "fail" throws. Every other criterion must be
  * exactly "pass".
  *
- * The returned summary is wrapped by the ohosTest test runner
- * (napi/ohosTest/OpenHarmonyTestRunner.ets) into the machine-readable marker
- * `N1A_PROBE_TEST_RESULT|verdict=PASS|...`. The NAPI layer separately emits
+ * The returned outcome (summary + full detailJson + its SHA-256) is wrapped
+ * by the ohosTest test runner (napi/ohosTest/OpenHarmonyTestRunner.ets) into
+ * the machine-readable marker `N1A_PROBE_TEST_RESULT|verdict=PASS|...`; the
+ * full detailJson travels separately as chunked N1A_JSON hilog lines
+ * (defect 2 of EV-N1A-EMU24-20260830-0001: the single-line marker was
+ * truncated by the hilog line limit and C7/C8 numbers were unrecoverable).
+ * On any assertion failure the thrown N1aProbeError carries the same
+ * detailJson/detailSha256 pair so the FAIL path emits the chunks too. The NAPI layer separately emits
  * the per-call C9 marker with the frozen four-field set:
  * `N1A_RESULT|verdict=<PASS|FAIL>|c5=<induced|not-triggered|fail>|throughput_mibps=<x.xx>`.
  *
@@ -24,8 +29,45 @@ const EXPECTED_VERSION_PREFIX = 'n1a-native-dataplane/';
 const EXPECTED_VERIFIED_PACKETS = 2000; // 2 directions x 10 rounds x 200 packets
 const THROUGHPUT_FLOOR_MIBPS = 5;
 
-export function runN1aProbeTest(): string {
+/** Success outcome: short summary + the full machine-readable detail. */
+export interface N1aProbeTestOutcome {
+  summary: string;
+  detailJson: string;
+  detailSha256: string;
+}
+
+/**
+ * Assertion failure carrying the full probe detail so the FAIL path can emit
+ * the chunked N1A_JSON lines (the hilog-truncation fix keeps the evidence
+ * recoverable on both verdicts).
+ */
+export class N1aProbeError extends Error {
+  readonly detailJson: string;
+  readonly detailSha256: string;
+  constructor(message: string, detailJson: string, detailSha256: string) {
+    super(message);
+    this.name = 'N1aProbeError';
+    this.detailJson = detailJson;
+    this.detailSha256 = detailSha256;
+  }
+}
+
+export function runN1aProbeTest(): N1aProbeTestOutcome {
   const result: N1aProbeResult = n1a.runN1aProbe();
+  try {
+    return runAssertions(result);
+  } catch (e) {
+    // Every assertion below runs after `result` exists; attach the full
+    // detail so the ohosTest runner can chunk-emit it on the FAIL path.
+    if (e instanceof N1aProbeError) {
+      throw e;
+    }
+    const err: Error = e as Error;
+    throw new N1aProbeError(err.message, result.detailJson, result.detailSha256);
+  }
+}
+
+function runAssertions(result: N1aProbeResult): N1aProbeTestOutcome {
 
   // Assertion order (fail-closed): version -> verdict -> per-criterion ->
   // counters -> throughput -> JSON detail consistency.
@@ -91,7 +133,13 @@ export function runN1aProbeTest(): string {
     throw new Error('N1a probe detail handshake inconsistent');
   }
 
-  return `N1a probe PASS version=${result.version} verifiedPackets=${result.verifiedPacketsTotal} ` +
+  const summary: string =
+    `N1a probe PASS version=${result.version} verifiedPackets=${result.verifiedPacketsTotal} ` +
     `c5=${result.c5} throughputMiBps=${result.throughputMiBps.toFixed(3)} pumpMs=${result.pumpMs.toFixed(3)} ` +
     `fd=${result.fdBaseline}->${result.fdAfter}`;
+  return {
+    summary: summary,
+    detailJson: result.detailJson,
+    detailSha256: result.detailSha256,
+  } as N1aProbeTestOutcome;
 }

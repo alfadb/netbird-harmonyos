@@ -19,6 +19,8 @@
 //     fdBaseline: number,
 //     fdAfter: number,
 //     detailJson: string      // full machine-readable JSON from the Rust core
+//     detailSha256: string    // 64-hex SHA-256 of detailJson (transport
+//                             // integrity; defect 2 of EV-N1A-...-0001)
 //   }
 //
 // Emits exactly one single-line HiLog marker per call, with the C9-pinned
@@ -49,6 +51,8 @@ constexpr const char *kLogTag = "N1aProbe";
 // Upper bound for reading the core's JSON string (the document is ~2 KB; a
 // larger value means the terminator is missing — fail closed).
 constexpr size_t kJsonMaxLen = 64 * 1024;
+// The Rust C ABI carries the digest as [u8; 65] (64 lowercase hex + NUL).
+constexpr size_t kDetailShaHexLen = 64;
 
 // Narrow C ABI of the Rust core (spikes/n1a-native-dataplane/src/lib.rs).
 extern "C" {
@@ -65,6 +69,10 @@ extern "C" {
         int32_t fd_baseline;
         int32_t fd_after;
         char *json;                    // NUL-terminated, owned by the result
+        unsigned char detail_sha256[65]; // 64 lowercase hex chars + NUL
+                                         // (appended last: keeps earlier
+                                         // field offsets identical to the
+                                         // previous ABI revision)
     };
     N1aDataplaneResult *n1a_dataplane_probe(void);
     void n1a_result_free(N1aDataplaneResult *result);
@@ -162,6 +170,17 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     if (json_len == 0 || json_len == kJsonMaxLen) {
         return ThrowError(env, "probe json is empty or not NUL-terminated");
     }
+    // Defect 2 transport digest: NUL-terminated lowercase hex (64 chars).
+    char detail_sha[kDetailShaHexLen + 1];
+    size_t sha_len = 0;
+    while (sha_len < kDetailShaHexLen && probe->detail_sha256[sha_len] != 0) {
+        detail_sha[sha_len] = static_cast<char>(probe->detail_sha256[sha_len]);
+        sha_len++;
+    }
+    detail_sha[sha_len] = '\0';
+    if (sha_len != kDetailShaHexLen) {
+        return ThrowError(env, "probe detail_sha256 is not 64 hex chars");
+    }
 
     // Fail-closed consistency: criterion statuses must be in range, and
     // ok == 0 must hold exactly when no criterion failed.
@@ -215,7 +234,8 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
         !SetNamedDouble(env, result, "pumpMs", probe->pump_ms) ||
         !SetNamedInt32(env, result, "fdBaseline", probe->fd_baseline) ||
         !SetNamedInt32(env, result, "fdAfter", probe->fd_after) ||
-        !SetNamedStringLen(env, result, "detailJson", probe->json, json_len)) {
+        !SetNamedStringLen(env, result, "detailJson", probe->json, json_len) ||
+        !SetNamedStringLen(env, result, "detailSha256", detail_sha, sha_len)) {
         return ThrowError(env, "failed to build runN1aProbe result");
     }
 
