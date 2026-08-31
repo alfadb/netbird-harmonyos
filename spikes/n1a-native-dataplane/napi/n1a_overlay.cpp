@@ -313,7 +313,7 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
         return DiagAndThrow(env, probe, "verdict-criteria-mismatch",
             "probe verdict inconsistent with criterion statuses");
     }
-    if (probe->ok == 0 && (probe->verified_packets_total != 2000 ||
+    if (probe->ok == 0 && (probe->verified_packets_total != 4000 ||
                            probe->mismatch_count != 0 || probe->lost_count != 0)) {
         return DiagAndThrow(env, probe, "verdict-integrity-mismatch",
             "probe verdict inconsistent with integrity counters");

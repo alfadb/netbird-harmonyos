@@ -26,7 +26,7 @@ import n1a from 'libentry.so';
 import { N1aProbeResult } from 'libentry.so';
 
 const EXPECTED_VERSION_PREFIX = 'n1a-native-dataplane/';
-const EXPECTED_VERIFIED_PACKETS = 2000; // 2 directions x 10 rounds x 200 packets
+const EXPECTED_VERIFIED_PACKETS = 4000; // 2 directions x 10 rounds x 200 packets
 const THROUGHPUT_FLOOR_MIBPS = 5;
 
 /** Success outcome: short summary + the full machine-readable detail. */
