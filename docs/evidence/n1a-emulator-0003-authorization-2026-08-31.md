@@ -1,4 +1,4 @@
-# N1a Emulator campaign 0003 执行授权登记（2026-08-31 · 0002，pending-user-confirm）
+# N1a Emulator campaign 0003 执行授权登记（2026-08-31 · 0002，granted）
 
 最后核验：2026-08-31
 
@@ -7,10 +7,10 @@
 ```yaml
 authorization_id: AUTH-N1A-EMU24-20260831-0002
 exception: N1A-EMU24-DATAPLANE
-record_status: pending-user-confirm
+record_status: granted-confirmed
 is_evidence: false
-authorization_status: requested
-plan_status: awaiting-user-confirmation
+authorization_status: granted
+plan_status: granted-executing
 attempt: initial
 retry: N/A
 candidate:
@@ -28,4 +28,4 @@ implementation_basis: HEAD 478e35e (defect-3 fix: 11/11 diag snapshots,
 strategy: user-approved 修复 -> host 异常链验证 -> 新 ID 重测 (2026-08-31)
 ```
 
-本登记为**申请记录**：strategy 的 host 验证门已过（守卫复刻单测证明 overlay 逻辑 host 一致、矛盾锁定运行时 ABI/加载层；诊断通道 12 处覆盖 + 构建断言负例验证），等待用户一句确认后 `authorization_status` 升为 granted 并执行。诊断通道将捕获 0002 未解矛盾的实际字段值。
+用户于 2026-08-31 确认（"确认"），授权生效。host 验证门已过（守卫复刻单测证明 overlay 逻辑 host 一致、矛盾锁定运行时 ABI/加载层；诊断通道 12 处覆盖 + 构建断言负例验证）。诊断通道将捕获 0002 未解矛盾的实际字段值。
