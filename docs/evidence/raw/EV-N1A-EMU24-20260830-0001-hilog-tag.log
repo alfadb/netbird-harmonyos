@@ -1,0 +1,6 @@
+===== TAG HILOG N1aProbe =====
+CST 2026-08-31 11:48:30.626  3186  3186 I A02900/N1aProbe: N1a overlay module initialized
+CST 2026-08-31 11:48:36.417  3186  3186 I A02900/N1aProbe: N1A_RESULT|verdict=FAIL|c5=not-triggered|throughput_mibps=93.10
+===== TAG HILOG N1aProbeTest =====
+CST 2026-08-31 11:48:30.627  3186  3186 I A02900/N1aProbeTest: TestRunner onPrepare
+CST 2026-08-31 11:48:36.419  3186  3186 E A02900/N1aProbeTest: N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=N1a probe failed: verdict=fail detail={"version":"n1a-native-dataplane/0.1.0+boringtun-0.7.1","ok":false,"verdict":"fail","error":null,"criteria":{"c1":"pass","c2":"pass","c3":"pass","c4":"pass","c5":"not-triggered","c6":"pass","c7":"fail","c8":"fail","c9":"pass"},"boringtun":"0.7.1","boringtun_crate_sha256":"15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939","handshake":{"established":true,"elapsed_ms":1173.276,"attemp

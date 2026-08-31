@@ -1,0 +1,12 @@
+$ bash /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/prepare-hap-snapshot.sh /tmp/n1a-emu24-snapshot.MCOWVS
+[n1a-prep] snapshot staged from pinned commit 2c567dc721c6582f93a15b241e843e3bbff3f7f3 -> /tmp/n1a-emu24-snapshot.MCOWVS
+[n1a-prep] pages/Index.ets: staged the N1a C9 result page over the r1 page (stage copy only)
+[n1a-prep] ohosTest testrunner: N1a runner calls runN1aProbeTest()
+[n1a-prep] entry/oh-package.json5: added libentry.so types dependency
+[n1a-prep] entry/oh-package-lock.json5: added libentry.so lock entry
+[n1a-prep] entry/build-profile.json5: abiFilters restricted to x86_64 (no arm64 in HAP)
+[n1a-prep] staged. Next step (n1a-emulator-run.sh) builds the HAPs from /tmp/n1a-emu24-snapshot.MCOWVS, e.g.:
+[n1a-prep]   cd /tmp/n1a-emu24-snapshot.MCOWVS
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
