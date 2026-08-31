@@ -1718,7 +1718,7 @@ printf 'READINESS boot.completed=%q wms.ready=%q lockscreen.ready=%q qemu.boot=%
   "$boot_completed" "$wms_ready" "$lockscreen_ready" "$qemu_boot_complete"
 printf 'READINESS_VERDICT=pass\n'
 
-preexisting_bundle="$(hdc shell "bm dump -n $BUNDLE" 2>&1 || true)"
+preexisting_bundle="$(timeout 30 "$HDC" -t "$EMULATOR_TARGET" shell "bm dump -n $BUNDLE" 2>&1 || true)"
 printf 'PREINSTALL_BUNDLE_QUERY=%q\n' "$preexisting_bundle"
 if [[ "$preexisting_bundle" != *'failed to get information'* ]]; then
   blocked_env "bundle existed before N1a installation (environment state; not a measured N1a outcome)"
@@ -1744,7 +1744,7 @@ if (( installed != 1 )); then
 fi
 printf 'INSTALL_VERDICT=pass\n'
 
-bm_dump="$(hdc shell "bm dump -n $BUNDLE" | sed -E \
+bm_dump="$(timeout 30 "$HDC" -t "$EMULATOR_TARGET" shell "bm dump -n $BUNDLE" | sed -E \
   -e 's/("accessTokenId": )[0-9]+/\1[RUNTIME_ACCESS_TOKEN_ID_REDACTED]/g' \
   -e 's/("accessTokenIdEx": )[0-9]+/\1[RUNTIME_ACCESS_TOKEN_ID_EX_REDACTED]/g')"
 printf '%s\n' "$bm_dump"

@@ -1,0 +1,86 @@
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm install --all
+[32minstall completed in 0s 98ms[39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+Installing dependencies...
+Already up to date
+
+dependencies:
++ @ohos/hvigor-ohos-plugin 6.24.3 <- ../../../../harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+
+Done in 660ms using pnpm v10.28.2
+Hvigor install success.
+> hvigor [32mFinished :entry:clean... after 3 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 165 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:default@PreBuild... after 224 ms [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 45 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 5 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 7 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 79 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 3 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 122 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 7 s 711 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 178 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 277 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 80 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 7 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 7 s 834 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 442 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 1 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 13 s 96 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:ohosTest@PreBuild... after 207 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ConfigureCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MergeProfile... after 9 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgContextInfo... after 11 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgSdkInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessProfile... after 64 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessResource... after 8 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateLoaderJson... after 7 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessLibs... after 61 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CompileResource... after 118 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestBuildJS... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@DoNativeStrip... after 46 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CacheNativeLibs... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCompileArkTS... after 7 s 917 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCopyMockConfigJson... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessCompiledResources... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackageHap... after 444 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackingCheck... after 4 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:ohosTest@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 12 s 898 ms [39m

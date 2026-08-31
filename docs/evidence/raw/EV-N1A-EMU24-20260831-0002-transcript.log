@@ -1,0 +1,300 @@
+RUNNER=n1a-emulator-run.sh
+EVIDENCE_ID=EV-N1A-EMU24-20260831-0002
+STARTED_AT=2026-08-31T14:18:11+08:00
+CLOCK_SOURCE=host_CLOCK_REALTIME_date_iso_8601_seconds
+TIMEZONE=CST+08:00
+RECORD_SCOPE=N1a_native_WireGuard_data_plane_pump_BoringTun_0.7.1_ffi-bindings_API24_x86_64_Emulator
+CRITERIA=frozen-r2 docs/n1a-gate-plan.md criteria-frozen-r2 (not amendable after measurement)
+TARGET_TUPLE=HarmonyOS_6.1.1(24),API24,x86_64,phone_Emulator
+EMULATOR_INSTANCE=netbird_api24_phone
+EMULATOR_TARGET=127.0.0.1:10000
+BUNDLE=cn.alfadb.netbird.r1probe
+TEST_MODULE=entry_test
+TEST_RUNNER=/ets/testrunner/OpenHarmonyTestRunner
+SNAPSHOT_COMMIT=2c567dc721c6582f93a15b241e843e3bbff3f7f3
+BORINGTUN_VERSION=0.7.1
+BORINGTUN_CRATE_SHA256=15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+MARKER_FROZEN_FORM=N1A_RESULT|verdict=<PASS|FAIL>|c5=<induced|not-triggered|fail>|throughput_mibps=<x.xx>
+THROUGHPUT_FLOOR_MIBPS=5.00
+TWO_PHASE_FLOW=phase-A aa-test judgment + phase-B C9 result page (registrable interpretation, criteria-holder ruled 2026-08-30); per-window duplicate rule: A judgment window and B page window are isolated via hilog -r (isolation failure = environment blocked); C1 binding: A proves only the N0 same-path (aa test/ohosTest cross-check), B proves only the ordinary-EntryAbility dlopen - neither window substitutes for the other; overall pass iff both windows independently PASS; B is a second FULL probe run (force-stop then aa start, independent UIAbility process); c5 and throughput recorded for BOTH windows (phase_a_c5/phase_b_c5, no collapsing to the more favorable value; backpressure-verified claims allowed only for an induced execution); same-window distinct collapses identical texts only, two different texts = fail
+PHYSICAL_DEVICE_USED=false
+E8_STATUS=CLOSED
+TEST_RUNNER_USED=true
+PUBLIC_NETWORK_ALLOWED=false
+WORKSPACE=/home/worker/work/base/netbird-harmonyos
+EVIDENCE_ROOT=/home/worker/work/base/netbird-harmonyos/docs/evidence/raw
+BUILD_TOOLCHAIN=command-line-tools/6.1.1.290 (stable; hvigorw/ohpm/native SDK for build)
+EMULATOR_RUNTIME=command-line-tools/26.0.0.461 (beta; Emulator binary + hdc)
+NATIVE_SDK_VERSION=6.1.1.125
+NATIVE_SDK_API=24
+NATIVE_SDK_RELEASE_TYPE=Release
+GIT_HEAD=bc99740dfd96eabd06acd1b3d9047d6b9d6c3ba8
+GIT_BRANCH=main
+SNAPSHOT_COMMIT_PRESENT=pass
+GIT_CLEAN=yes
+RUNNER_IN_HEAD=yes
+HOST_CHECK hvigorw=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw
+HOST_CHECK ohpm=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm
+HOST_CHECK hvigor-ohos-plugin=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+HOST_CHECK emulator=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator
+HOST_CHECK hdc=pass path=/home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc
+HOST_CHECK ohos-x86_64-clang=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/x86_64-unknown-linux-ohos-clang
+HOST_CHECK napi-header=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/sysroot/usr/include/napi/native_api.h
+HOST_CHECK deveco-sdk-home=pass path=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native
+HOST_CHECK oh-uni-package=pass version=6.1.1.125 api=24 release=Release
+HOST_CHECK bash=pass command=bash
+HOST_CHECK readelf=pass command=readelf
+HOST_CHECK file=pass command=file
+HOST_CHECK unzip=pass command=unzip
+HOST_CHECK ss=pass command=ss
+HOST_CHECK git=pass command=git
+HOST_CHECK tar=pass command=tar
+HOST_CHECK timeout=pass command=timeout
+HOST_CHECK pgrep=pass command=pgrep
+HOST_CHECK mktemp=pass command=mktemp
+HOST_CHECK sha256sum=pass command=sha256sum
+HOST_CHECK awk=pass command=awk
+HOST_CHECK sed=pass command=sed
+HOST_CHECK grep=pass command=grep
+HOST_CHECK ffmpeg=pass command=ffmpeg
+HOST_CHECK cargo=pass command=cargo
+HOST_CHECK rustc=pass command=rustc
+HOST_CHECK shellcheck=fail command=shellcheck (external bash -n required)
+$ bash /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/build.sh
+[n1a-build] boringtun-0.7.1.crate sha256 OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[n1a-build] Cargo.lock boringtun checksum OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[n1a-build] STATIC_NO_PTHREAD OK: 0 forbidden threading-API occurrences in src/ + napi/
+[n1a-build] THROW_SNAPSHOT OK: 11 DiagAndThrow call sites, 1 bare ThrowError (wrapper only)
+[n1a-build] cargo build --release --target x86_64-unknown-linux-ohos (linker=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/x86_64-unknown-linux-ohos-clang, ar=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/llvm-ar)
+    Finished `release` profile [optimized] target(s) in 0.09s
+[n1a-build] cargo build --release --target aarch64-unknown-linux-ohos (linker=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang, ar=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/llvm-ar)
+    Finished `release` profile [optimized] target(s) in 0.07s
+[n1a-build] clang++ overlay -> /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (x86_64-unknown-linux-ohos)
+[n1a-build] clang++ overlay -> /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (aarch64-unknown-linux-ohos)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (x86-64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (ARM aarch64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/target/x86_64-unknown-linux-ohos/release/libn1acore.so (x86-64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/target/aarch64-unknown-linux-ohos/release/libn1acore.so (ARM aarch64, NEEDED has no libc.so.6)
+[n1a-build] symbols OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (n1a_* C ABI + full BoringTun data-plane C ABI)
+[n1a-build] symbols OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (n1a_* C ABI + full BoringTun data-plane C ABI)
+[n1a-build] artifact sha256:
+[n1a-build]   dc984480208e5107891d5c75efe9f266c55a0e350d4f0f5342c1b06d2a51ff93  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so
+[n1a-build]   cadbc279c809c8266b0f8021fc18b5e2bfa85fa14ca22dea4d925e7e7c6c0d3b  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so
+[n1a-build]   dc984480208e5107891d5c75efe9f266c55a0e350d4f0f5342c1b06d2a51ff93  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libentry.so
+[n1a-build]   f41acef7450afd74dc6f8175bcf3ca017e91c308ec201013f1ad0c0eca275041  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libn1acore.a
+[n1a-build]   c692292c133a35464c9937de8c01b8113e02c8b49a6851292aff9b86f091d21c  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libn1acore.so
+[n1a-build] hap-snapshot identity OK (byte-identical)
+[n1a-build] build OK
+[n1a-build] artifacts:
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so        (x86_64 overlay, Emulator gate ABI)
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so       (aarch64 overlay, cross-compile only)
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/      (libentry.so + libn1acore.a + libn1acore.so)
+N1A_BUILD_VERDICT=pass
+$ bash /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/prepare-hap-snapshot.sh /tmp/n1a-emu24-snapshot.52GCxw
+[n1a-prep] snapshot staged from pinned commit 2c567dc721c6582f93a15b241e843e3bbff3f7f3 -> /tmp/n1a-emu24-snapshot.52GCxw
+[n1a-prep] pages/Index.ets: staged the N1a C9 result page over the r1 page (stage copy only)
+[n1a-prep] ohosTest testrunner: N1a runner calls runN1aProbeTest()
+[n1a-prep] entry/oh-package.json5: added libentry.so types dependency
+[n1a-prep] entry/oh-package-lock.json5: added libentry.so lock entry
+[n1a-prep] entry/build-profile.json5: abiFilters restricted to x86_64 (no arm64 in HAP)
+[n1a-prep] staged. Next step (n1a-emulator-run.sh) builds the HAPs from /tmp/n1a-emu24-snapshot.52GCxw, e.g.:
+[n1a-prep]   cd /tmp/n1a-emu24-snapshot.52GCxw
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+[n1a-prep]   /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+SNAPSHOT_STAGE_VERIFY=pass
+SNAPSHOT_DIR=/tmp/n1a-emu24-snapshot.52GCxw
+HVIGOR_PLUGIN_VERIFY=pass
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm install --all
+[32minstall completed in 0s 98ms[39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw clean --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+Installing dependencies...
+Already up to date
+
+dependencies:
++ @ohos/hvigor-ohos-plugin 6.24.3 <- ../../../../harmonyos/command-line-tools/6.1.1.290/hvigor/hvigor-ohos-plugin
+
+Done in 660ms using pnpm v10.28.2
+Hvigor install success.
+> hvigor [32mFinished :entry:clean... after 3 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 2 s 165 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:default@PreBuild... after 224 ms [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:default@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 45 ms [39m
+> hvigor [32mFinished :entry:default@MergeProfile... after 5 ms [39m
+> hvigor [32mFinished :entry:default@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 7 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgSdkInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:default@MakePackInfo... after 3 ms [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessProfile... after 79 ms [39m
+> hvigor [32mFinished :entry:default@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@ProcessResource... after 3 ms [39m
+> hvigor [32mFinished :entry:default@GenerateLoaderJson... after 8 ms [39m
+> hvigor [32mFinished :entry:default@CompileResource... after 122 ms [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 7 s 711 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 178 ms [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 277 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 80 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 7 ms [39m
+> hvigor [32mFinished :entry:default@CompileArkTS... after 7 s 834 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgModuleJson... after 3 ms [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 1 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 442 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 5 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 1 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 13 s 96 ms [39m
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw assembleHap --mode module -p product=default -p module=entry@ohosTest -p buildMode=debug --no-daemon
+> hvigor [32mFinished :entry:ohosTest@PreBuild... after 207 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateMetadata... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ConfigureCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MergeProfile... after 9 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CreateBuildProfile... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgContextInfo... after 11 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgSdkInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessIntegratedHsp... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@MakePackInfo... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@SyscapTransform... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessProfile... after 64 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessRouterMap... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessShareConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessResource... after 8 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GenerateLoaderJson... after 7 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessLibs... after 61 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CompileResource... after 118 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestBuildJS... after 3 ms [39m
+> hvigor [32mFinished :entry:ohosTest@DoNativeStrip... after 46 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CacheNativeLibs... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCompileArkTS... after 7 s 917 ms [39m
+> hvigor [32mFinished :entry:ohosTest@OhosTestCopyMockConfigJson... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@GeneratePkgModuleJson... after 4 ms [39m
+> hvigor [32mFinished :entry:ohosTest@ProcessCompiledResources... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackageHap... after 444 ms [39m
+> hvigor [32mFinished :entry:ohosTest@PackingCheck... after 4 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:ohosTest@SignHap... after 2 ms [39m
+> hvigor [32mFinished :entry:ohosTest@CollectDebugSymbol... after 2 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 12 s 898 ms [39m
+HAP_BUILD_VERDICT=pass
+APP_MEMBER_SHA256=dc984480208e5107891d5c75efe9f266c55a0e350d4f0f5342c1b06d2a51ff93
+TEST_MEMBER_SHA256=dc984480208e5107891d5c75efe9f266c55a0e350d4f0f5342c1b06d2a51ff93
+HAP_MEMBER_IDENTITY=pass
+ARM64_MEMBER=false
+FORBIDDEN_HISTORICAL_MEMBER=false
+APP_HAP_MODULE_JSON=\{\"app\":\{\"iconId\":16777217\,\"debug\":true\,\"targetPatchAPIVersion\":0\,\"minAPIVersion\":60101024\,\"icon\":\"\$media:app_icon\"\,\"buildMode\":\"debug\"\,\"label\":\"\$string:app_name\"\,\"bundleType\":\"app\"\,\"versionName\":\"0.0.1\"\,\"versionCode\":1\,\"appEnvironments\":\[\]\,\"compileSdkType\":\"HarmonyOS\"\,\"labelId\":16777216\,\"compileSdkVersion\":\"6.1.1.125\"\,\"targetAPIVersion\":60101024\,\"vendor\":\"alfadb\"\,\"bundleName\":\"cn.alfadb.netbird.r1probe\"\,\"apiReleaseType\":\"Release\"\,\"targetMinorAPIVersion\":0\}\,\"module\":\{\"virtualMachine\":\"ark24.0.0.0\"\,\"mainElement\":\"EntryAbility\"\,\"installationFree\":false\,\"deliveryWithInstall\":true\,\"requestPermissions\":\[\{\"name\":\"ohos.permission.INTERNET\"\}\]\,\"description\":\"\$string:module_description\"\,\"compileMode\":\"esmodule\"\,\"type\":\"entry\"\,\"dependencies\":\[\]\,\"abilities\":\[\{\"exported\":true\,\"iconId\":16777222\,\"startWindowIconId\":16777222\,\"icon\":\"\$media:start_icon\"\,\"startWindowIcon\":\"\$media:start_icon\"\,\"startWindowBackgroundId\":16777221\,\"description\":\"\$string:ability_description\"\,\"label\":\"\$string:ability_name\"\,\"skills\":\[\{\"entities\":\[\"entity.system.home\"\]\,\"actions\":\[\"ohos.want.action.home\"\]\}\]\,\"srcEntry\":\"./ets/entryability/EntryAbility.ets\"\,\"descriptionId\":16777218\,\"labelId\":16777219\,\"startWindowBackground\":\"\$color:start_window_background\"\,\"name\":\"EntryAbility\"\}\]\,\"deviceTypes\":\[\"phone\"\]\,\"pages\":\"\$profile:main_pages\"\,\"descriptionId\":16777220\,\"name\":\"entry\"\,\"packageName\":\"entry\"\}\}
+TEST_HAP_MODULE_JSON=\{\"app\":\{\"iconId\":33554433\,\"debug\":true\,\"targetPatchAPIVersion\":0\,\"minAPIVersion\":60101024\,\"icon\":\"\$media:app_icon\"\,\"buildMode\":\"debug\"\,\"label\":\"\$string:app_name\"\,\"bundleType\":\"app\"\,\"versionName\":\"0.0.1\"\,\"versionCode\":1\,\"appEnvironments\":\[\]\,\"compileSdkType\":\"HarmonyOS\"\,\"labelId\":33554432\,\"compileSdkVersion\":\"6.1.1.125\"\,\"targetAPIVersion\":60101024\,\"vendor\":\"alfadb\"\,\"bundleName\":\"cn.alfadb.netbird.r1probe\"\,\"apiReleaseType\":\"Release\"\,\"targetMinorAPIVersion\":0\}\,\"module\":\{\"testRunner\":\{\"srcPath\":\"./ets/testrunner/OpenHarmonyTestRunner.ets\"\,\"name\":\"OpenHarmonyTestRunner\"\}\,\"virtualMachine\":\"ark24.0.0.0\"\,\"deviceTypes\":\[\"phone\"\]\,\"installationFree\":false\,\"name\":\"entry_test\"\,\"deliveryWithInstall\":true\,\"packageName\":\"entry\"\,\"compileMode\":\"esmodule\"\,\"type\":\"feature\"\,\"dependencies\":\[\]\}\}
+HAP_IDENTITY=pass
+$ sha256sum /tmp/n1a-emu24-snapshot.52GCxw/entry/build/default/outputs/default/entry-default-unsigned.hap /tmp/n1a-emu24-snapshot.52GCxw/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+4cfcbbe0bd7a5b29c059d584e309824fb31e10ae836f365b52ab46d019bd2d5b  /tmp/n1a-emu24-snapshot.52GCxw/entry/build/default/outputs/default/entry-default-unsigned.hap
+249b4b71f4b3c7385920611a7bfc30d410a25a291636c50ccb6ee8e1636fc574  /tmp/n1a-emu24-snapshot.52GCxw/entry/build/default/outputs/ohosTest/entry-ohosTest-unsigned.hap
+$ sha256sum /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-N1A-EMU24-20260831-0002-source-manifest.txt
+bcdf6cb51604b6331dcc0ce83d58a17f258788f56d9e38113799eaa6ebf96ef4  /home/worker/work/base/netbird-harmonyos/docs/evidence/raw/EV-N1A-EMU24-20260831-0002-source-manifest.txt
+SOURCE_INPUT_COUNT=24
+BORINGTUN_CRATE_SHA256_VERIFY=pass
+CARGO_LOCK_BORINGTUN_VERIFY=pass
+TOOLCHAIN host=Linux\ host-dev-alfadb-full\ 7.0.14-14-pve\ #1\ SMP\ PREEMPT_DYNAMIC\ PMX\ 7.0.14-14\ \(2026-08-22T15:01Z\)\ x86_64\ GNU/Linux
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/hvigorw --version
+6.24.3
+$ /home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/toolchains/hdc -v
+Ver: 3.2.0e
+$ node --version
+v24.20.0
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/bin/ohpm --version
+6.1.2.285
+$ rustc --version
+rustc 1.92.0 (ded5c06cf 2025-12-08)
+$ cargo --version
+cargo 1.92.0 (344c4567c 2025-10-21)
+$ /home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/clang --version
+OHOS (dev) clang version 15.0.4 (llvm-project 99548401bd80576251755b185ab95945e5fe7884)
+Target: x86_64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin
+LIBENTRY_X86_64_SHA256=dc984480208e5107891d5c75efe9f266c55a0e350d4f0f5342c1b06d2a51ff93
+LIBENTRY_AARCH64_SHA256=cadbc279c809c8266b0f8021fc18b5e2bfa85fa14ca22dea4d925e7e7c6c0d3b
+$ file /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so
+/home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, stripped
+ 0x0000000000000001 (NEEDED)             Shared library: [libace_napi.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libhilog_ndk.z.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc++_shared.so]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so]
+ARTIFACT_HASH_VERIFY=pass
+PUBLIC_ENDPOINT_SOURCE_SCAN=pass
+BASE_MANIFEST=written
+QEMU_CURRENT_BOOT_START_LINE=35727
+$ env DISPLAY=:1 XAUTHORITY=/home/worker/.Xauthority XDG_RUNTIME_DIR=/tmp/runtime-worker /home/worker/harmonyos/command-line-tools/26.0.0.461/emulator/Emulator -start netbird_api24_phone -instancePath /home/worker/harmonyos/emulator-instances -imageRoot /home/worker/harmonyos/emulator-images -bootMode coldboot -hdcport 10000
+EMULATOR_PID=1891727
+EMULATOR_START_VERDICT=pass
+CONNECTIVITY attempt=1 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=2 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=3 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=4 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=5 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=6 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=7 shell=$'[Fail][E001005] Device not found or connected\r' distribution=\[Fail\]\[E001005\]\ Device\ not\ found\ or\ connected
+CONNECTIVITY attempt=8 shell=n1a-emu24-connect-8 distribution=HarmonyOS\ 
+CONNECTIVITY_VERDICT=pass
+BOOT_READINESS attempt=1 qemu.boot='' shell=n1a-emu24-readiness-1
+BOOT_READINESS attempt=2 qemu.boot='' shell=n1a-emu24-readiness-2
+BOOT_READINESS attempt=3 qemu.boot='' shell=n1a-emu24-readiness-3
+BOOT_READINESS attempt=4 qemu.boot='' shell=n1a-emu24-readiness-4
+BOOT_READINESS attempt=5 qemu.boot='' shell=n1a-emu24-readiness-5
+BOOT_READINESS attempt=6 qemu.boot='' shell=n1a-emu24-readiness-6
+BOOT_READINESS attempt=7 qemu.boot='' shell=n1a-emu24-readiness-7
+BOOT_READINESS attempt=8 qemu.boot='' shell=n1a-emu24-readiness-8
+BOOT_READINESS attempt=9 qemu.boot='' shell=n1a-emu24-readiness-9
+BOOT_READINESS attempt=10 qemu.boot='' shell=n1a-emu24-readiness-10
+BOOT_READINESS attempt=11 qemu.boot='' shell=n1a-emu24-readiness-11
+BOOT_READINESS attempt=12 qemu.boot='' shell=''
+BOOT_READINESS attempt=13 qemu.boot='' shell=n1a-emu24-readiness-13
+BOOT_READINESS attempt=14 qemu.boot='' shell=n1a-emu24-readiness-14
+BOOT_READINESS attempt=15 qemu.boot='' shell=n1a-emu24-readiness-15
+BOOT_READINESS attempt=16 qemu.boot='' shell=n1a-emu24-readiness-16
+BOOT_READINESS attempt=17 qemu.boot='' shell=n1a-emu24-readiness-17
+BOOT_READINESS attempt=18 qemu.boot='' shell=n1a-emu24-readiness-18
+BOOT_READINESS attempt=19 qemu.boot='' shell=n1a-emu24-readiness-19
+BOOT_READINESS attempt=20 qemu.boot='' shell=n1a-emu24-readiness-20
+BOOT_READINESS attempt=21 qemu.boot='' shell=n1a-emu24-readiness-21
+BOOT_READINESS attempt=22 qemu.boot='' shell=n1a-emu24-readiness-22
+BOOT_READINESS attempt=23 qemu.boot='' shell=n1a-emu24-readiness-23
+BOOT_READINESS attempt=24 qemu.boot='' shell=n1a-emu24-readiness-24
+BOOT_READINESS attempt=25 qemu.boot='' shell=n1a-emu24-readiness-25
+BOOT_READINESS attempt=26 qemu.boot='' shell=n1a-emu24-readiness-26
+BOOT_READINESS attempt=27 qemu.boot='' shell=n1a-emu24-readiness-27
+BOOT_READINESS attempt=28 qemu.boot='' shell=n1a-emu24-readiness-28
+BOOT_READINESS attempt=29 qemu.boot='' shell=n1a-emu24-readiness-29
+BOOT_READINESS attempt=30 qemu.boot=2026-08-31\ 14:21:15.868124175020717760\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed. shell=n1a-emu24-readiness-30
+READINESS boot.completed=Get\ parameter\ \"boot.completed\"\ fail\!\ errNum\ is:1002\! wms.ready=Get\ parameter\ \"bootevent.wms.ready\"\ fail\!\ errNum\ is:1002\! lockscreen.ready=Get\ parameter\ \"bootevent.lockscreen.ready\"\ fail\!\ errNum\ is:1002\! qemu.boot=2026-08-31\ 14:21:15.868124175020717760\ I\ \[BootComplete.cpp\(BootCompletePipeClientRecv:82\)\]\ guest\ os\ boot\ completed.
+READINESS_VERDICT=pass
+PREINSTALL_BUNDLE_QUERY=error:\ failed\ to\ get\ information\ and\ the\ parameters\ may\ be\ wrong.
+FileTransfer finish, Size:4625458, File count = 1, time:1349ms rate:3428.81kB/s
+FileTransfer finish, Size:3215953, File count = 1, time:32ms rate:100498.53kB/s
+INSTALL_ATTEMPT=1 OUTPUT=install\ bundle\ successfully.
+INSTALL_VERDICT=pass
+CLEANUP_BEGIN=teardown
+CLEANUP_STAGING=cleared
+CLEANUP_UNINSTALL=done
+CLEANUP_EMULATOR=stopped
+CLEANUP_HDC=kill-issued
+RESIDUAL_EMULATOR_PROCESS=''
+RESIDUAL_HDC_PROCESS=''
+RESIDUAL_PORT=''
+CLEANUP_TEMP=removed
+CLEANUP_END=teardown-complete
+TRAP_EXIT_CODE=124 RESULT=defect
