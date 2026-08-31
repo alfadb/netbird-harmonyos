@@ -1,0 +1,7 @@
+{
+  name: 'libentry.so',
+  version: '1.0.0',
+  description: 'Type declarations for the N1a gate data-plane probe NAPI overlay (libentry.so).',
+  types: './index.d.ts',
+  license: 'MIT'
+}

@@ -1,0 +1,30 @@
+# N1a gate data-plane probe — real BoringTun 0.7.1 ffi loopback pump.
+#
+# Scope (docs/n1a-gate-plan.md, N1a; criteria C1-C9 are pre-registered there):
+#   - same fixed BoringTun 0.7.1 as N0, default-features = false,
+#     features = ["ffi-bindings"] (identical checksum, verified by build.sh);
+#   - NO `device` feature (socket2 0.4.10 `IovLen` is undefined on OHOS targets;
+#     not patched, per the inherited N0 stop condition 1);
+#   - NO management/ICE/relay/UI/VPN/TUN/protect surface; the probe's outer
+#     transport is a plain in-process 127.0.0.1 UDP loopback channel;
+#   - aarch64 is cross-compile only; no load claim (x86_64 Emulator only).
+#
+# This crate is a research spike, not a product artifact.
+
+[package]
+name = "n1a-native-dataplane"
+version = "0.1.0"
+edition = "2021"
+description = "N1a gate data-plane probe: dual BoringTun 0.7.1 tunnels + UDP loopback pump (OHOS x86_64 Emulator gate)"
+license = "MIT"
+
+[lib]
+name = "n1acore"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+boringtun = { version = "0.7.1", default-features = false, features = ["ffi-bindings"] }
+# Direct dep for SO_SNDBUF/SO_RCVBUF setsockopt/getsockopt in the C5
+# backpressure sub-item (std UdpSocket exposes no socket-buffer API).
+# Already in the lock via boringtun's own ffi bindings.
+libc = "0.2"
