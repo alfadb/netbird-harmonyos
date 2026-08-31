@@ -1,0 +1,5 @@
+CST 2026-08-31 15:54:22.965  3498  3498 I A02900/N1aProbe: N1a overlay module initialized
+CST 2026-08-31 15:54:22.968  3498  3498 I A02900/N1aProbe: N1a result page aboutToAppear
+CST 2026-08-31 15:58:09.684  3498  3498 I A02900/N1aProbe: N1A_RESULT|verdict=FAIL|c5=fail|throughput_mibps=81.43
+CST 2026-08-31 15:58:09.684  3498  3498 I A02900/N1aProbe: N1A_RES|c7=pass|c8=pass|fd2=closed|fdset=0
+CST 2026-08-31 15:58:09.685  3498  3498 I A02900/N1aProbe: N1a result page rendered from probe result

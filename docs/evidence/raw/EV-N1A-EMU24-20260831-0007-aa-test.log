@@ -1,0 +1,4 @@
+N1A_PROBE_TEST_RESULT|verdict=PASS|N1a probe PASS version=n1a-native-dataplane/0.1.0+boringtun-0.7.1 verifiedPackets=4000 c5=not-triggered throughputMiBps=99.140 pumpMs=39.401 fd2Closed=true tunnelsFreed=2 processModel=unknown
+TestFinished-ResultCode: 0
+TestFinished-ResultMsg: N1A_PROBE_TEST_RESULT|verdict=PASS|N1a probe PASS version=n1a-native-dataplane/0.1.0+boringtun-0.7.1 verifiedPackets=4000 c5=not-triggered throughputMiBps=99.140 pumpMs=39.401 fd2Closed=true tunnelsFreed=2 processModel=unknown
+user test finished.

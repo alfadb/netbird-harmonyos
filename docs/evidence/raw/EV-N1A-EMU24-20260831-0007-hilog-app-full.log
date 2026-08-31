@@ -1,0 +1,526 @@
+CST 2026-08-31 15:54:07.618  2444  2444 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:07.618  2444  2444 I A00000/moduleframework: hspInfo.name: appAssist4Developer
+CST 2026-08-31 15:54:07.644  2444  2444 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:07.644  2444  2444 I A00000/moduleframework: hspInfo.name: appInstall4Developer
+CST 2026-08-31 15:54:07.653  1606  1662 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.spooler, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:07.653  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.spooler, 64, true true
+CST 2026-08-31 15:54:07.656  1606  1606 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020020, bundleName: com.huawei.hmos.settings, pid: 2240
+CST 2026-08-31 15:54:07.657  1606  1606 I A01b00/SCB: SystemTimerUtil --> stopTimer success timerIdSet size: 0
+CST 2026-08-31 15:54:07.657  1606  1606 I A01b00/SCB: LuoShuStateFSM --> stopCloseTrayTimerTask lockAndExitLSTimer: 801080377, isStopTimer: true
+CST 2026-08-31 15:54:07.657  1606  1606 I A01a00/SYS_UI: MaintenanceRecord: Send maintenance event(2) to push success
+CST 2026-08-31 15:54:07.657  2444  2444 I A00000/moduleframework: configContent: 102#src/main/ets/impl/unifiedinstall/wifitask/particles/ImmediateRecoverTodoTask
+CST 2026-08-31 15:54:07.657  2444  2444 I A00000/moduleframework: hspInfo.name: appView4Developer
+CST 2026-08-31 15:54:07.657  1606  1606 I A01b01/HOME: SCBOobeManager: SettingsValue: 1 provisioned: 1
+CST 2026-08-31 15:54:07.661  1606  1606 I A01b06/KG: CommonEventMonitor: Receive commoneEvent: usual.event.PACKAGE_ADDED
+CST 2026-08-31 15:54:07.662  1606  1606 I A04200/WINDOW: SCBSSM: handlePackageEvent event = usual.event.PACKAGE_ADDED bundleName: cn.alfadb.netbird.r1probe userId: 100 isModuleUpdate: false bundleType: 0 atomicServiceModuleUpgrade: 0 appIndex: 0
+CST 2026-08-31 15:54:07.662  1606  1606 I A04200/WINDOW: SCBSSM: addOrModifyAbilityItemInfo : cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.671  1606  1662 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.spooler, 26398
+CST 2026-08-31 15:54:07.671  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.browser, 64, true true
+CST 2026-08-31 15:54:07.671  1606  1662 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.browser 0
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b01/HOME: AppModel: handlePackageEvent event: usual.event.PACKAGE_ADDED bundleName: cn.alfadb.netbird.r1probe isEnableDynamicIcon: undefined
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b01/HOME: AppModel: handlePackageEvent: update game engine valid status, event info: usual.event.PACKAGE_ADDED
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b00/SCB: HiSysEventUtil: updateGameEngineValidStatus, not game engine bundle: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.671  1606  1606 I A01c06/ICON: CloseAppManager --> delete icon resource, bundleName: cn.alfadb.netbird.r1probe, size: 0
+CST 2026-08-31 15:54:07.671  1606  1606 I A01a00/SYS_UI: Model.AlarmClockController --> handlePackageEvent event = usual.event.PACKAGE_ADDED bundleName: cn.alfadb.netbird.r1probe isModuleUpdate: false bundleType: 0 atomicServiceModuleUpgrade: 0 appIndex: 0
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b01/HOME: appInstall_BMSListener --> handlePackageEvent event: usual.event.PACKAGE_ADDED, bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.671  1606  1606 W A01b01/HOME: appInstall_CacheManager --> appAddedOrUpdated is not from app gallery, maybe from hdc install bundleName:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b01/HOME: appInstall_AppInstallingDataManager: removeInstallingData bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.671  1606  1606 W A01b01/HOME: appInstall_CacheManager --> appAddedOrUpdated bundleName: cn.alfadb.netbird.r1probe, appIndex: 0
+CST 2026-08-31 15:54:07.671  1606  1606 I A01b01/HOME: AppModel: updateShortcutInfoAsync eventType : usual.event.PACKAGE_ADDED
+CST 2026-08-31 15:54:07.672  1606  1606 I A01b00/SCB: LauncherAbilityManagerBasic --> getShortcutInfoASync bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.672  1606  1606 I A04200/WINDOW: SCBMultiWindowManager: Handle package event usual.event.PACKAGE_ADDED
+CST 2026-08-31 15:54:07.672  1606  1606 I A04200/WINDOW: SCBMultiWindowManager: handleOnPackageAdd cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.672  1606  1606 W A04200/WINDOW: SCBMultiWindowManager: ignore package change event, bundleName: cn.alfadb.netbird.r1probe appIndex: 0
+CST 2026-08-31 15:54:07.672  1606  1606 I A01b00/SCB: IntelligentSceneManager --> Handle package event usual.event.PACKAGE_ADDED for cn.alfadb.netbird.r1probe_20020062
+CST 2026-08-31 15:54:07.672  1606  1606 I A01b07/IMKG: ClockWidget: timeChange to 03:54, date Aug 31 or 08/31, week Mon, lunar 
+CST 2026-08-31 15:54:07.672  1606  1606 W A01b07/IMKG: ClockData: onClockDataChange time:03:54, week=Mon
+CST 2026-08-31 15:54:07.687  1606  1606 I A04200/WINDOW: SCBSSM: addOrModifyAbilityItemInfo abilityItemInfoList length: 1
+CST 2026-08-31 15:54:07.687  1606  1606 I A01b01/HOME: AppModel: getAllShortcutInfo bundleName: cn.alfadb.netbird.r1probe, shortcutInfo length: undefined
+CST 2026-08-31 15:54:07.687  1606  1606 I A01b01/HOME: AppModel: setShortcutInfo bundleName: cn.alfadb.netbird.r1probe, shortcutInfo length: 0
+CST 2026-08-31 15:54:07.687  1606  1606 I A01b01/HOME: AppModel: appInstall appAddedOrUpdated usual.event.PACKAGE_ADDED, bundleName:cn.alfadb.netbird.r1probe appIndex:0
+CST 2026-08-31 15:54:07.687  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> getDockApps appEventListener: launcher.event.EVENT_REQUEST_RECOMMEND_FORM_DELETE, params: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.687  1606  1606 I A01b00/SCB: ASCFWindowManagerListener: appEventListener: launcher.event.EVENT_REQUEST_RECOMMEND_FORM_DELETE, params: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.749  1606  1606 I A01b06/KG: CommonEventMonitor: Receive commoneEvent: usual.event.PACKAGE_ADDED
+CST 2026-08-31 15:54:07.749  1606  1606 I A01b06/KG: ScreenLockFormViewModel: package_repalced, bundlename: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.750  1606  1606 I A01b06/KG: ScreenLockFormViewModel: formConfigs []
+CST 2026-08-31 15:54:07.752  1606  1662 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.browser - getHdsIcon, size: (512, 512), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:07.760  1606  1606 I A01b05/AOD: AodDateTimeModel: time = 03:54, date = Mon, Aug 31, lunar = 
+CST 2026-08-31 15:54:07.760  1606  1606 I A01a01/NC: StatusBarSysEventUtil: onTimeChangeEvent
+CST 2026-08-31 15:54:07.760  1606  1606 W A01c06/ICON: AppIconCalendarCache --> receive date change event, nowData: 31, dateText: ,image is transparent: false, image is empty: true
+CST 2026-08-31 15:54:07.760  1606  1606 W A01c06/ICON: AppIconCalendarCache --> com.huawei.hmos.calendar is not dynamic icon, bundleName is com.huawei.hmos.calendar
+CST 2026-08-31 15:54:07.760  1606  1606 E A01c06/ICON: AppIconCalendarCache --> backgroundImage resource error
+CST 2026-08-31 15:54:07.760  1606  1606 E A01c06/ICON: AppIconCalendarCache --> calendarForegroundBuilder is null
+CST 2026-08-31 15:54:07.760  1606  1606 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020010, bundleName: com.huawei.hmsapp.appgallery, pid: 2444
+CST 2026-08-31 15:54:07.761  1606  1606 W A01b01/HOME: ResourceManager: getAppName success from resMgr, appName:R1 API 24 Probe, labelId:16777219
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b00/SCB: IconResourceManager: getAppName from resMgr params:16777219,**.netbird.r1probe,, name is R1 API 24 Probe
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b00/SCB: LauncherAbilityManagerBasic --> getLauncherAbility updateAppNameSync:R1 API 24 Probe
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b01/HOME: AppModel: launcher abilityInfos: [{"appIconId":16777222,"bundleName":"cn.alfadb.netbird.r1probe","abilityName":"EntryAbility","appIndex":0,"shortcutId":"","downloadProgress":0,"appName":"R1 API 24 Probe","oldBundleNames":[],"isAppLocked":false,"appDistributionType":"none","appInstanceKey":"","hashCode":"f4597ec0-9d61-40bc-bb6b-3dbc8d5a9f05_1788162847689","isSystemApp":false,"isUninstallAble":true,"applicationIconId":16777222,"appLabelId":16777219,"applicationLabelId":16777219,"codePath":"/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe","kindId":-1,"moduleName":"entry","installSource":"unknown","installTime":"Mon Aug 31 2026 15:52:44 GMT+0800","areaType":2,"bundleType":0,"appStatus":0,"keyName":"cn.alfadb.netbird.r1probeEntryAbilityentry0","typeId":0}]
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b01/HOME: FormModel: delete name cache, bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b01/HOME: FormModel: updateAppItemFormInfo oldOnlineCardItems.length:undefined
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b01/HOME: FormModel: getFormsInfoByBundleName, bundleName:cn.alfadb.netbird.r1probe, isNeedExpand:false
+CST 2026-08-31 15:54:07.761  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp bundle: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.781  1606  1606 I A01b01/HOME: FormManager: getAllFormsInfo length:0, isOnline:true
+CST 2026-08-31 15:54:07.781  1606  1606 I A01b01/HOME: FormModel: registerOnlineCardListener failed due to has no templateCards
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp, isOnline:false,formList.length:0, bundleName:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormModel: updateBundleFormStatus is install or update
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormModel: delete name cache, bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormModel: updateAppItemFormInfo oldOnlineCardItems.length:undefined
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormModel: getFormsInfoByBundleName, bundleName:cn.alfadb.netbird.r1probe, isNeedExpand:false
+CST 2026-08-31 15:54:07.915  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp bundle: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.916  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp bundle: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.923  1606  1606 I A01b01/HOME: FormManager: getAllFormsInfo length:0, isOnline:true
+CST 2026-08-31 15:54:07.923  1606  1606 I A01b01/HOME: FormModel: registerOnlineCardListener failed due to has no templateCards
+CST 2026-08-31 15:54:07.924  1606  1606 E A01b01/HOME: FormManager: getFormsInfoByApp error, 16500050: IPC connection error.
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp, isOnline:false,formList.length:0, bundleName:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b01/HOME: FormModel: updateSingleAppItemFormInfo
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b01/HOME: FormModel: getFormsInfoByBundleName, bundleName:cn.alfadb.netbird.r1probe, isNeedExpand:false
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp bundle: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b00/SCB: IconResourceManager: getAppNameByCache params:16777219,**.netbird.r1probe,, name is R1 API 24 Probe
+CST 2026-08-31 15:54:07.941  1606  1606 I A01b00/SCB: IconResourceManager: getCombIcon is penglai false, **.netbird.r1probe, entry, EntryAbility, 0, CombIcon_AppModel, false, false
+CST 2026-08-31 15:54:07.942  1606  1606 I A01b00/SCB: MemoryCache --> getCombIcon cacheKey cn.alfadb.netbird.r1probe#entryEntryAbility0
+CST 2026-08-31 15:54:07.942  1606  1606 I A01b00/SCB: DbCache --> getCombIconFromDb cn.alfadb.netbird.r1probe, tableName icon_info
+CST 2026-08-31 15:54:07.942  1606  1606 I A01b00/SCB: DbCache --> getIconResource cn.alfadb.netbird.r1probe entry EntryAbility, tableName: icon_info
+CST 2026-08-31 15:54:07.969  1606  1606 W A01b00/SCB: BundleManagerFwk --> getIconResourceFromFwk for cn.alfadb.netbird.r1probe entry EntryAbility 0 false undefined false begin
+CST 2026-08-31 15:54:07.969  1606  1606 I A01b00/SCB: BundleManagerFwk --> getDefaultBgImage start
+CST 2026-08-31 15:54:07.969  1606  1606 W A01b00/SCB: BundleManagerFwk --> default bg image is empty, load default image
+CST 2026-08-31 15:54:08.011  1606  1606 I A01b00/SCB: BundleManagerFwk --> getDefaultBgImage end
+CST 2026-08-31 15:54:08.011  1606  1606 I A01b01/HOME: FormManager: getFormsInfoByApp, isOnline:false,formList.length:0, bundleName:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.012  1606  1606 I A01b01/HOME: FormModel: updateSingleAppItemFormInfoInDB
+CST 2026-08-31 15:54:08.012  1606  3056 W A01b00/SCB: BundleManagerFwk --> getIconResource start
+CST 2026-08-31 15:54:08.012  1606  1606 W A01b01/HOME: FormModel: cn.alfadb.netbird.r1probe, no cards after filter form center card
+CST 2026-08-31 15:54:08.012  1606  3056 W A01b00/SCB: BundleManagerFwk --> getIconResource from bms getLauncherAbilityResourceInfo for cn.alfadb.netbird.r1probe 0
+CST 2026-08-31 15:54:08.012  1606  1662 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.browser, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.012  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.browser, 64, true true
+CST 2026-08-31 15:54:08.014  1606  3056 W A01b00/SCB: GraphicUtils --> getHdsIcon bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.014  1606  3056 W A01b00/SCB: GraphicUtils --> cn.alfadb.netbird.r1probe - getHdsIcon, size: (216, 216), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.020  1606  1662 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.browser, 41350
+CST 2026-08-31 15:54:08.020  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.ohos.commondialog, 64, true true
+CST 2026-08-31 15:54:08.020  1606  1662 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.ohos.commondialog 0
+CST 2026-08-31 15:54:08.023  1606  1662 W A01b00/SCB: GraphicUtils --> com.ohos.commondialog - getHdsIcon, size: (114, 114), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.063  3161  3161 I A02900/N1aProbe: N1a overlay module initialized
+CST 2026-08-31 15:54:08.064  3161  3161 I A02900/N1aProbeTest: TestRunner onPrepare
+CST 2026-08-31 15:54:08.092  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.ohos.commondialog, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.092  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.ohos.commondialog, 64, true true
+CST 2026-08-31 15:54:08.127  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.ohos.commondialog, 38242
+CST 2026-08-31 15:54:08.127  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.superhub, 64, true true
+CST 2026-08-31 15:54:08.127  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.superhub 0
+CST 2026-08-31 15:54:08.132  1606  3168 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: cn.alfadb.netbird.r1probe, iconSizeOfGrid: 58, hasBorder: false
+CST 2026-08-31 15:54:08.134  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.superhub - getHdsIcon, size: (192, 192), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.137  1606  1606 W A01b00/SCB: BundleManagerFwk --> getIconResourceFromFwk for cn.alfadb.netbird.r1probe entry EntryAbility  0 false  undefined false end
+CST 2026-08-31 15:54:08.138  1606  1606 I A01b00/SCB: MemoryCache --> setIconResource cacheKey cn.alfadb.netbird.r1probe#entryEntryAbility0, iconInfo.iconType normal, iconInfo.combinePicSrc 9662
+CST 2026-08-31 15:54:08.138  1606  1606 W A01b00/SCB: MemoryCache --> setCacheIconPicTypeToMemory: cacheKey cn.alfadb.netbird.r1probe#entryEntryAbility0 iconType normal, foregroundLength:undefined, backgroundLength:undefined, combinePicLength:9662
+CST 2026-08-31 15:54:08.139  1606  1606 W A01b00/SCB: IconResourceManager: combinePicSrc is empty: false, bundleName: cn.alfadb.netbird.r1probe, combinePicLength:9662, lastClearAppResourceCacheTag:None
+CST 2026-08-31 15:54:08.144  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> getDockApps appEventListener: launcher.event.EVENT_REQUEST_RECOMMEND_FORM_ADD, params: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.144  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> getRecentDockList
+CST 2026-08-31 15:54:08.144  1606  1606 I A01b01/HOME: AppModel: currentBundleInfoList length: 7
+CST 2026-08-31 15:54:08.147  1606  1606 E A01b0a/GESTURE: GestureDockActionAbilityStrategy --> expandDataByStrategy error, code: 17700003, msg: BusinessError 17700003: The specified ability is not found.
+CST 2026-08-31 15:54:08.147  1606  1606 I A01b0a/GESTURE: GestureDockActionAbilityStrategy --> expandDataByStrategy end
+CST 2026-08-31 15:54:08.147  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> recentApp length:1
+CST 2026-08-31 15:54:08.147  1606  1606 I A01b00/SCB: IconResourceManager: getAppName from cache params:50331648,**.hmos.settings,, cached name is Settings
+CST 2026-08-31 15:54:08.147  1606  1606 I A01b00/SCB: ASCFWindowManagerListener: appEventListener: launcher.event.EVENT_REQUEST_RECOMMEND_FORM_ADD, params: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.148  1606  1606 I A01b00/SCB: ASCFWindowManager: updateWindowModePreference: 3
+CST 2026-08-31 15:54:08.148  1606  1606 W A01b01/HOME: AppModel: appInstall appAddedOrUpdated end bundleType:
+CST 2026-08-31 15:54:08.148  1606  1606 I A01b00/SCB: LauncherAbilityManagerBasic --> getAppInfoByBundleName Settings
+CST 2026-08-31 15:54:08.148  1606  1606 I A01b01/HOME: appInstall_CacheManager --> updateNewInstalledApp: {"appIconId":16777222,"bundleName":"cn.alfadb.netbird.r1probe","abilityName":"EntryAbility","appIndex":0,"shortcutId":"","downloadProgress":0,"appName":"R1 API 24 Probe","oldBundleNames":[],"isAppLocked":false,"appDistributionType":"none","appInstanceKey":"","hashCode":"f4597ec0-9d61-40bc-bb6b-3dbc8d5a9f05_1788162847689","isSystemApp":false,"isUninstallAble":true,"applicationIconId":16777222,"appLabelId":16777219,"applicationLabelId":16777219,"codePath":"/data/app/el1/bundle/public/cn.alfadb.netbird.r1probe","kindId":-1,"moduleName":"entry","installSource":"unknown","installTime":"Mon Aug 31 2026 15:52:44 GMT+0800","areaType":2,"bundleType":0,"appStatus":0,"keyName":"cn.alfadb.netbird.r1probeEntryAbilityentry0","typeId":0}
+CST 2026-08-31 15:54:08.148  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 4
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: ResidentLayoutCacheMgr: getAppTypeItem::getDockItemByBundleName: not find in dock
+CST 2026-08-31 15:54:08.149  1606  1606 E A01b01/HOME: appInstall_CacheManager --> updateNewInstalledApp can not find app[cn.alfadb.netbird.r1probe] in cache
+CST 2026-08-31 15:54:08.149  1606  1606 W A01b01/HOME: PageInfoManager: getHomePageIndex dbIndex: 0
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: SCBBlankPositionUtils --> findBlankPosition from[1] -> to[18]
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: SCBBlankPositionUtils --> findBlankPositionPage page:1 row:0 column:0 result: true
+CST 2026-08-31 15:54:08.149  1606  1606 W A01b01/HOME: GridLayoutUtil: buildGridLayoutInfoFromItemInfo item cn.alfadb.netbird.r1probe infoId eaffc0c0-e51b-4f91-8cae-9d836b591a29
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b00/SCB: IconResourceManager: getAppNameWithCallback success from memoryCache, cachedAppName:R1 API 24 Probe, params:**.netbird.r1probe,entry,16777219,0
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: insertGridLayoutItemInfo item bundleName cn.alfadb.netbird.r1probe, from app_install db true
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: LauncherLayoutCacheUtil: updateRotatePosition, not lazy rotate
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: LauncherLayoutCacheUtil: updateListIfLazyRotateMode insertGridLayoutItemList
+CST 2026-08-31 15:54:08.149  1606  1606 W A01b01/HOME: LauncherLayoutCacheUtil: LazyRotateMode false or device mismatch return!
+CST 2026-08-31 15:54:08.149  1606  1606 W A01b01/HOME: DesktopLayoutCacheData: updateLayoutListCache when 300003|CACHE_UPDATE_LAYOUT_LIST_CACHE_DEFAULT, updateLength:5, showOuter:false}
+CST 2026-08-31 15:54:08.149  1606  1606 I A01b01/HOME: LauncherLayoutCacheUtil: insertGridLayoutItemCallBack isOuter:false
+CST 2026-08-31 15:54:08.150  1606  1606 W A01b01/HOME: RdbOperation_RdbStoreManager: insertGridLayoutInfo start, bundleName:cn.alfadb.netbird.r1probe, isOuter:false
+CST 2026-08-31 15:54:08.150  1606  1606 I A01b01/HOME: RdbOperation_RdbStoreManager: getLayoutInfoTableName current: gridlayout_info
+CST 2026-08-31 15:54:08.150  1606  1606 W A01b01/HOME: RdbOperation_RdbTaskPool --> execute writeTask: insertLayoutInfoNotExist with runner
+CST 2026-08-31 15:54:08.150  1606  1606 I A01b01/HOME: PageDesktopViewModel --> localEventListener receive event: EVENT_REQUEST_PAGEDESK_LIGHT_REFRESH
+CST 2026-08-31 15:54:08.150  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering start by scene: 100200|SCENE_MSG_DEFAULT_REFRESH, isSkipDuplicateCheck:null
+CST 2026-08-31 15:54:08.150  1606  1606 W A01c03/LM: HighFrequencyCallStatistics: SCENE: Initialing used-scene loadGridList is undesirable.
+CST 2026-08-31 15:54:08.150  1606  1606 I A01c03/LM: HighFrequencyCallStatistics: record scene lightPagingFiltering at 151037 as NORMAL
+CST 2026-08-31 15:54:08.150  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getAppListInfo bundlInfoListLen:5,layoutInfoLen:5
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getAppListInfo end, appListInfo length: 5, layoutInfo length: 5,needResetAppInfoList:0
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDeskTopViewModelUtils --> appListInfo exclude folder lenth: 5
+CST 2026-08-31 15:54:08.151  1606  1606 E A01b01/HOME: PageDesktopViewModel --> elementPage is not less than pageCount-->pageCount:1, elementPage:1, bundleName:cn.alfadb.netbird.r1probe, row:0, column:0
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> integrateSwiper max 2
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getMaxPage rdbPageCount: 1, isOuter: false
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> gridAppsInfos: { integrateSwiper page:0,row:0,col:0,com.huawei.hmos.settings,typeid:0. appIndex: 0,uninstallable: false,{ integrateSwiper page:0,row:0,col:1,com.huawei.hmos.photos,typeid:0. appIndex: 0,uninstallable: false,{ integrateSwiper page:0,row:0,col:2,com.huawei.hmos.files,typeid:0. appIndex: 0,uninstallable: true,{ integrateSwiper page:0,row:0,col:3,com.huawei.hmos.calendar,typeid:0. appIndex: 0,uninstallable: true,
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> gridAppsInfos: { integrateSwiper page:1,row:0,col:0,cn.alfadb.netbird.r1probe,typeid:0. appIndex: 0,uninstallable: true,
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: PageDesktopViewModel --> checkBlankPages needCheckBlankPage: false.
+CST 2026-08-31 15:54:08.151  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: updatePageCount with pageCount 2 from basic desktop , db true
+CST 2026-08-31 15:54:08.151  1606  1606 W A01b01/HOME: PageInfoManager: pageCount changed to 2 from 1 when isOut:false by: updatePageCount
+CST 2026-08-31 15:54:08.152  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering length of appListInfo:5 waterfallInfo:0 bundleInfo:5
+CST 2026-08-31 15:54:08.152  1606  1606 W A01b01/HOME: LayoutViewModel: updateDesktopLayoutData, reason: lightPagingFiltering, app length: 2
+CST 2026-08-31 15:54:08.152  1606  1606 I A01b00/SCB: LocalEventManager: sendLocalEvent, send local event with no receiver
+CST 2026-08-31 15:54:08.152  1606  1606 W A01b01/HOME: GridSwiper --> GridSwiper preload pages again. old page:1 -> newPages:2
+CST 2026-08-31 15:54:08.154  1606  1808 I A01b01/HOME: RdbOperation_taskPool appInstall --> appInstall insertLayoutInfoNotExist start, keyName:cn.alfadb.netbird.r1probeEntryAbilityentry0
+CST 2026-08-31 15:54:08.154  1606  1808 E A01b00/SCB: RdbOperation_RdbStoreHelper: createRdbStore context is undefined
+CST 2026-08-31 15:54:08.156  1606  1606 W A01b01/HOME: PageInfoManager: getHomePageIndex dbIndex: 0
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: LauncherStartup: passStep PRELOAD when 1788162848156 and valueInfo:check_appListInfoChange_100_true_2_true
+CST 2026-08-31 15:54:08.156  1606  1606 W A01b01/HOME: PageInfoManager: getHomePageIndex dbIndex: 0
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: PreLoadViewModel --> getNextPreload>>> p:0
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: LauncherStartup: passStep PRELOAD when 1788162848156 and valueInfo:begin_appListInfoChange_2_0
+CST 2026-08-31 15:54:08.156  1606  1606 W A01b01/HOME: PreLoadViewModel --> preload swiper begin with pageLength:2 and preloadPage:0 when appListInfoChange
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: PreLoadViewModel --> getNextPreload>>> p:1
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: PreLoadViewModel --> preloadNextPage begin preloadPageIndex: 0/2, tryCount: 0
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: PreLoadViewModel --> preload swiper and set this.isNeedPreload false
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: GridSwiper --> pages length: 2, pages: [1,3]
+CST 2026-08-31 15:54:08.156  1606  1606 I A01b01/HOME: SwiperIndicator --> updateValues current: 0 updateValues: 0
+CST 2026-08-31 15:54:08.157  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from editMode_pageEdit, size: 5
+CST 2026-08-31 15:54:08.157  1606  1606 I A01b01/HOME: PageEditManager: new pages 1,3
+CST 2026-08-31 15:54:08.157  1606  1606 I A01b01/HOME: PageEditManager: isSimpleLauncherMode false
+CST 2026-08-31 15:54:08.157  1606  1606 I A01b01/HOME: PageEditManager: isBlankPageChange false
+CST 2026-08-31 15:54:08.157  1606  1606 W A01b01/HOME: SwiperPageVM --> appListInfoChange and isOuter:false,pageIndex:0,size:4,pageInfo:0:4
+CST 2026-08-31 15:54:08.168  1606  2204 W A01b00/SCB: RdbOperation_RdbStoreHelper: createRdbStore -> getRdbStore with schema version 2.5 success, area=0
+CST 2026-08-31 15:54:08.169  1606  2204 I A01b00/SCB: RdbOperation_RdbStoreHelper: insertLayoutInfoNotExist_1788162848169 when 200080|RDB_DEFAULT_INSERT, executeInfo: INSERT g**ut_i*fo SET u*er_i*=100,i*fo_i*=eaffc0c0-e51b-4f91-8cae-9d836b591a29,i*fo_n*me=R1 API 24 Probe,a**on_i*=16777222,a**el_i*=16777219,t*pe_i*=0,b**le_n*me=cn.alfadb.netbird.r1probe,m**le_n*me=entry,a**ty_n*me=EntryAbility,ap*_i**ex=0,s**ut_i*=,k*nd_i*=-1,ap*_s**us=0,d**ad_p**ss=0,i*on_r**ce=undefined,c**er_n*me=undefined,ur*=undefined,e**d1=undefined,e**d2=undefined,i**nt=,c**er=-100,p*ge_i**ex=1,c**mn=0,ro*=0,w**th=1,h**ht=1,p**it_p*ge_i**ex=undefined,p**it_c**mn=undefined,p**it_ro*=unde, res = 45
+CST 2026-08-31 15:54:08.169  1606  2204 I A01b00/SCB: RdbOperation_RdbStoreHelper: insertLayoutInfoNotExist_1788162848169 when 200080|RDB_DEFAULT_INSERT, executeInfo: fined,p**it_w**th=undefined,p**it_h**ht=undefined,l**pe_p*ge_i**ex=undefined,l**pe_c**mn=undefined,l**pe_ro*=undefined,l**pe_w**th=undefined,l**pe_h**ht=undefined,t**me_i*=,t**me_f*rm_i*=,t**et_f*rm_d*ta=,s**en_i*=0,f*le_in*=undefined,f*le_t*pe=undefined,f*le_s*ze=0,f*le_c**me=0,f*le_m**me=0,, res = 45
+CST 2026-08-31 15:54:08.171  1606  2204 W A01b01/HOME: RdbOperation_taskPool appInstall --> insertLayoutInfoNotExist end insertId:45
+CST 2026-08-31 15:54:08.172  1606  2204 I A01b00/SCB: RdbOperation_RdbStoreHelper: rdbStore release
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b01/HOME: SwiperIndicator --> updateValues current: 0 updateValues: 0
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b00/SCB: LocalEventManager: sendLocalEvent, send local event with no receiver
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering end by scene: 100200|SCENE_MSG_DEFAULT_REFRESH
+CST 2026-08-31 15:54:08.175  1606  1606 W A01b01/HOME: ResidentLayoutCacheMgr: dockItem info: keyName: com.huawei.hmos.settingscom.huawei.hmos.settings.MainAbilityphone_settings0, appStatus: 0
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b01/HOME: RdbOperation_RdbStoreManager: updateSettings key:page_count value:2
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b01/HOME: PageDesktopViewModel --> localEventListener receive event: launcher.event.APP_INSTALL_BMS_CHANGE_EVENT
+CST 2026-08-31 15:54:08.175  1606  1606 I A01b01/HOME: FormRelationManager --> update the placeholder form information corresponding to the app: cn.alfadb.netbird.r1probe, isOuter: false
+CST 2026-08-31 15:54:08.176  1606  1606 W A01b01/HOME: FormRelationManager --> sceneBoardFormRelationFilePath is not exist
+CST 2026-08-31 15:54:08.176  1606  1606 W A01b01/HOME: FormRelationManager --> the bundleName not exist:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.176  1606  1606 I A01b01/HOME: PageDesktopViewModel --> forms in cache length: 0, bundleName: cn.alfadb.netbird.r1probe, isOuter: false
+CST 2026-08-31 15:54:08.176  1606  1606 E A01b01/HOME: PageDesktopViewModel --> no bundle in formModel(undefined) or appModel(false)
+CST 2026-08-31 15:54:08.176  1606  1606 I A01b01/HOME: AppModel: getAllShortcutInfo bundleName: cn.alfadb.netbird.r1probe, shortcutInfo length: 0
+CST 2026-08-31 15:54:08.176  1606  1606 W A01b01/HOME: PageDesktopViewModel --> The app cn.alfadb.netbird.r1probe does not have static shortcut.
+CST 2026-08-31 15:54:08.177  1606  1606 W A01b01/HOME: PageDesktopViewModel --> The app does not have a shortcut icon in the layout.
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: AppModel: currentBundleInfoList length: 7
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.177  1606  1606 W A01b01/HOME: PageDesktopViewModel --> app cn.alfadb.netbird.r1probe_0 have no combApp
+CST 2026-08-31 15:54:08.177  1606  1606 W A01b01/HOME: PageDesktopViewModel --> regroupDataAppListChange, usual.event.PACKAGE_ADDED, cn.alfadb.netbird.r1probe 0, false
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDeskTopViewModelUtils --> SmartDockViewModel::isBundleNameExistInDock: -1
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> updateBMSChangedApp bundle=cn.alfadb.netbird.r1probe appIndex=0
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> update pageDesktopInfo cn.alfadb.netbird.r1probeEntryAbilityentry0 cn.alfadb.netbird.r1probeEntryAbilityentry0
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering start by scene: 100031|SCENE_MSG_UPDATE_BMS_CHANGED_APP, isSkipDuplicateCheck:true
+CST 2026-08-31 15:54:08.177  1606  1606 I A01c03/LM: HighFrequencyCallStatistics: record scene lightPagingFiltering at 151064 as NORMAL
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getAppListInfo bundlInfoListLen:5,layoutInfoLen:5
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getAppListInfo end, appListInfo length: 5, layoutInfo length: 5,needResetAppInfoList:0
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDeskTopViewModelUtils --> appListInfo exclude folder lenth: 5
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> integrateSwiper max 2
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> getMaxPage rdbPageCount: 2, isOuter: false
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> gridAppsInfos: { integrateSwiper page:0,row:0,col:0,com.huawei.hmos.settings,typeid:0. appIndex: 0,uninstallable: false,{ integrateSwiper page:0,row:0,col:1,com.huawei.hmos.photos,typeid:0. appIndex: 0,uninstallable: false,{ integrateSwiper page:0,row:0,col:2,com.huawei.hmos.files,typeid:0. appIndex: 0,uninstallable: true,{ integrateSwiper page:0,row:0,col:3,com.huawei.hmos.calendar,typeid:0. appIndex: 0,uninstallable: true,
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> gridAppsInfos: { integrateSwiper page:1,row:0,col:0,cn.alfadb.netbird.r1probe,typeid:0. appIndex: 0,uninstallable: true,
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: PageDesktopViewModel --> checkBlankPages needCheckBlankPage: false.
+CST 2026-08-31 15:54:08.177  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: updatePageCount with pageCount 2 from basic desktop , db true
+CST 2026-08-31 15:54:08.177  1606  1606 W A01b01/HOME: PageInfoManager: pageCount changed to 2 from 2 when isOut:false by: updatePageCount
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering length of appListInfo:5 waterfallInfo:0 bundleInfo:5
+CST 2026-08-31 15:54:08.178  1606  1606 W A01b01/HOME: LayoutViewModel: updateDesktopLayoutData, reason: lightPagingFiltering, app length: 2
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b00/SCB: LocalEventManager: sendLocalEvent, send local event with no receiver
+CST 2026-08-31 15:54:08.178  1606  1606 W A01b01/HOME: PageInfoManager: getHomePageIndex dbIndex: 0
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b01/HOME: LauncherStartup: passStep PRELOAD when 1788162848178 and valueInfo:check_appListInfoChange_100_false_2_true
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b01/HOME: PreLoadViewModel --> not need to preload swiper with isNeedPreload is false when appListInfoChange
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b01/HOME: GridSwiper --> pages length: 2, pages: [1,3]
+CST 2026-08-31 15:54:08.178  1606  1606 I A01b01/HOME: SwiperIndicator --> updateValues current: 0 updateValues: 0
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from editMode_pageEdit, size: 5
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: PageEditManager: new pages 1,3
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: PageEditManager: isSimpleLauncherMode false
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: PageEditManager: isBlankPageChange false
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: GridLayout2ThemeManager --> REFRESH_PAGE_DESKTOP layoutChange clear REFRESH_PAGE_DESKTOP
+CST 2026-08-31 15:54:08.179  1606  1606 W A01b01/HOME: SwiperPageVM --> appListInfoChange and isOuter:false,pageIndex:0,size:4,pageInfo:0:4
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: SwiperIndicator --> updateValues current: 0 updateValues: 0
+CST 2026-08-31 15:54:08.179  1606  1606 I A01b01/HOME: PageDesktopViewModel --> lightPagingFiltering end by scene: 100031|SCENE_MSG_UPDATE_BMS_CHANGED_APP
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: FolderSnapshotManager --> onBmsChangEvent event: usual.event.PACKAGE_ADDED bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: SmartDockViewModel: localEventListener receive event: launcher.event.APP_INSTALL_BMS_CHANGE_EVENT, params: {"_eventName":"usual.event.PACKAGE_ADDED","_bundleName":"cn.alfadb.netbird.r1probe","_appIndex":0}
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: FormRelationManager --> update the placeholder form information corresponding to the app: cn.alfadb.netbird.r1probe, isOuter: false
+CST 2026-08-31 15:54:08.180  1606  1606 W A01b01/HOME: FormRelationManager --> sceneBoardFormRelationFilePath is not exist
+CST 2026-08-31 15:54:08.180  1606  1606 W A01b01/HOME: FormRelationManager --> the bundleName not exist:cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: SmartDockViewModel: regroupDataAppListChange, usual.event.PACKAGE_ADDED, cn.alfadb.netbird.r1probe, 0
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: SmartDockModel: SmartDockViewModel::getDockItemByBundleName: not find in dock
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: SmartDockViewModel: regroupDataAppListChange current app cn.alfadb.netbird.r1probe is not exist in dock
+CST 2026-08-31 15:54:08.180  1606  1606 W A01b01/HOME: appInstall_CacheManager --> appAddedOrUpdated finished bundleName: cn.alfadb.netbird.r1probe, appIndex: 0
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: BaseLayoutCacheManager: getAllGridLayoutItemList from basic desktop, size: 5
+CST 2026-08-31 15:54:08.180  1606  1606 W A01b01/HOME: appInstall_InstallEventManager --> notify event, folderId:, isUpdate:false, data:{"bundleName":"cn.alfadb.netbird.r1probe","status":0,"eventType":"com.huawei.hmsapp.appgallery.commonevent.EVENT_INSTALL_STATUS_CHANGE"}
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> getRecentDockList bundleName: com.huawei.hmos.settings,appindex 0
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> dockDataList size is 1
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b01/HOME: RdbOperation_RdbStoreManager: updateSettings key:page_count value:2
+CST 2026-08-31 15:54:08.180  1606  1606 I A01b0a/GESTURE: GestureDockPreferenceUtil --> recentList length is 1
+CST 2026-08-31 15:54:08.194  1606  1606 I A01b01/HOME: PreLoadViewModel --> preloadNextPage preload done, page: 0/2
+CST 2026-08-31 15:54:08.197  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.superhub, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.197  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.superhub, 64, true true
+CST 2026-08-31 15:54:08.206  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.superhub, 39050
+CST 2026-08-31 15:54:08.206  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.calendar, 64, true true
+CST 2026-08-31 15:54:08.206  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.calendar 0
+CST 2026-08-31 15:54:08.220  1606  1606 I A01b01/HOME: SingePage --> onDesktopModeChange index: 1, scaleCenterX: 50%
+CST 2026-08-31 15:54:08.221  1606  1606 I A01b01/HOME: SingePage --> isCurrentPageBlank false index 1
+CST 2026-08-31 15:54:08.221  1606  1606 E A01b01/HOME: DragEventManager: registerEvent callback is null, event:drop_start_SwiperPage_Grid_WorkSpace_3
+CST 2026-08-31 15:54:08.221  1606  1606 I A01b01/HOME: DragEventManager: register drag event SwiperPage_Grid_WorkSpace_3 success
+CST 2026-08-31 15:54:08.229  1606  1606 I A01b01/HOME: PreLoadViewModel --> getNextPreload>>> p:3
+CST 2026-08-31 15:54:08.229  1606  1606 I A01b01/HOME: PreLoadViewModel --> preloadNextPage begin preloadPageIndex: 1/2, tryCount: 0
+CST 2026-08-31 15:54:08.230  1606  1606 I A01b01/HOME: PageDesktopViewModel --> publish EVENT_DESKTOP_LAYOUT_REFRESH_FINISHED success, delayMs: 0
+CST 2026-08-31 15:54:08.230  1606  1606 I A01b01/HOME: PageDesktopViewModel --> publish EVENT_DESKTOP_LAYOUT_REFRESH_FINISHED success, delayMs: 0
+CST 2026-08-31 15:54:08.230  1606  1606 I A01b01/HOME: RdbOperation_RdbStoreManager: updateSettings page_count to sp successs
+CST 2026-08-31 15:54:08.231  1606  1606 I A01b01/HOME: RdbOperation_RdbStoreManager: updateSettings page_count to sp successs
+CST 2026-08-31 15:54:08.231  1606  1606 I A01b01/HOME: SwiperPage --> build item page: 1, swiperKey: 3, mMargin: 8.114285714285717, mColumnsGap: 0, mRowsGap: 0,mItemPadding: 8.620689655172415, mNameLines: 1, mMaxNameLines: 2, mWorkSpaceMarginTop: 23.47586206896551, mGridWidth: 360.9142857142857,mGridHeight: 600,mIconSize: 58, mWorkSpacePadding: 0, mWorkSpacePaddingTop: 0,mWorkSpacePaddingBottom: 0, mGridSpaceWidth: 369.02857142857147, mGridSpaceHeight: 708, isOuterDesktop:false
+CST 2026-08-31 15:54:08.231  1606  1606 W A01b01/HOME: QuitAppRectViewModel --> initSwiperParam openFolderLeftX:39.714285714285715, openFolderRightX:337.447619047619, desktopLeftX:0, desktopRightX:377.14285714285717, screenWidth: 377.14285714285717
+CST 2026-08-31 15:54:08.231  1606  1606 W A01b01/HOME: QuitAppRectViewModel --> gridDesktopTopDistance left:218
+CST 2026-08-31 15:54:08.232  1606  1606 I A01b00/SCB: ViewManagerPolicy --> registerViewCallback
+CST 2026-08-31 15:54:08.232  1606  1606 I A01b01/HOME: SCBTM: registerFoldAnimationController
+CST 2026-08-31 15:54:08.232  1606  1606 I A01b01/HOME: SCBTM: registerExpandAnimationController
+CST 2026-08-31 15:54:08.232  1606  1606 W A01b01/HOME: SwiperPageVM --> appListInfoChange and isOuter:false,pageIndex:1,size:1,pageInfo:0:1
+CST 2026-08-31 15:54:08.233  1606  1606 E A01b00/SCB: HiSysEventUtil: get bundle info of the bundleName com.huawei.hmsapp.litegamelauncher error, code: undefined, msg: BusinessError 17700001: The specified bundle is not found.
+CST 2026-08-31 15:54:08.233  1606  1606 I A01b01/HOME: SCBTM: getStartExitAnimationCount animationCount:0
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: SwiperPageWhiteBoxComponent: aboutToAppear getIndexInSwiper():1
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: PageEditViewModel: getWhiteBoxTranslateY: 0
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: SwiperPageWhiteBoxComponent: onEventhubFallItemEvent for Item rect1
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: DesktopItem --> desktop item 0cn.alfadb.netbird.r1probe0 aboutToAppear start, type: 0 row: 0,       column: 0, indeInSwiper: 1
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: DesktopItem --> registerDragEvent, itemKey = 0cn.alfadb.netbird.r1probe0
+CST 2026-08-31 15:54:08.238  1606  1606 I A01b01/HOME: DragEventManager: register drag event 0cn.alfadb.netbird.r1probe0 success
+CST 2026-08-31 15:54:08.239  1606  1606 W A01b01/HOME: GridLayoutUtil: generateUniqueKey invalid type:undefined, keyName:undefined
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: DropAnimationManager: isInDropAnimation scene:1 key:0cn.alfadb.netbird.r1probe0
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: DesktopItem --> initDragParam itemKey:0cn.alfadb.netbird.r1probe0 isDragStart:false isInDrag:false
+CST 2026-08-31 15:54:08.239  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: DesktopItem --> create page-item gravity animation with drag false type: 0, id: cn.alfadb.netbird.r1probe, page: 1, row: 0, column: 0, size 1 * 1, x: 53.22857142857143, y: 99.85714285714285
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: GravityAnimationManager: SET ACTIVE-COMPONENT [P:-1,R:-1,C:-1,X:0+0,Y:0+0,W:-1,H:-1] layout -> [P:3,R:0,C:0,W:1,H:1]
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: GravityAnimationManager: SET ACTIVE-COMPONENT [P:3,R:0,C:0,X:0+0,Y:0+0,W:1,H:1] position -> [X:53.22857142857143,Y:99.85714285714285]
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: GravityAnimationManager: SET ACTIVE-COMPONENT [P:3,R:0,C:0,X:53.22857142857143+0,Y:99.85714285714285+0,W:1,H:1] status -> ACTIVE
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: GravityAnimationManager: add new ACTIVE-COMPONENT [P:3,R:0,C:0,X:53.22857142857143+0,Y:99.85714285714285+0,W:1,H:1] to page, total 1 components
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: multiSelectListenerManager --> listener regist desktopItem_0cn.alfadb.netbird.r1probe0
+CST 2026-08-31 15:54:08.239  1606  1606 I A01b01/HOME: DesktopItem --> desktop item 0cn.alfadb.netbird.r1probe0 focusKey cn.alfadb.netbird.r1probeEntryAbilityentry0 aboutToAppear end
+CST 2026-08-31 15:54:08.241  1606  1606 W A01b01/HOME: DesktopItem --> build item typeId[0],iconId[16777222],cardId[undefined],folderId[undefined],formStackId[undefined],rowColumn[0,0], page[1],area[1, 1],iconResource[undefined],moduleName[entry],abilityName[EntryAbility],appName[R1 API 24 Probe],cardDimension[undefined],status[0], isFolderChange:false, isOuterDesktop:false
+CST 2026-08-31 15:54:08.241  1606  1606 I A01b01/HOME: DesktopItem --> build item key cn.alfadb.netbird.r1probeentryEntryAbility00Mon Aug 31 2026 15:52:44 GMT+080016777222167772190
+CST 2026-08-31 15:54:08.243  1606  1606 I A01b01/HOME: DesktopAppIcon --> aboutToAppear
+CST 2026-08-31 15:54:08.243  1606  1606 I A01b01/HOME: DesktopAppIcon --> The product does not need adding external screen apps
+CST 2026-08-31 15:54:08.243  1606  1606 I A01b01/HOME: DesktopAppIcon --> iconSize: 58, iconRadius: 15.037037037037038 nameMarginTop 3.4482758620689657
+CST 2026-08-31 15:54:08.245  1606  1606 W A01c06/ICON: AppIconCommonView --> aboutToAppear cn.alfadb.netbird.r1probe 1.
+CST 2026-08-31 15:54:08.245  1606  1606 I A01c06/ICON: AppIconCommonEvent --> init: cn.alfadb.netbird.r1probe.
+CST 2026-08-31 15:54:08.246  1606  1606 W A01b01/HOME: BadgeManager --> registerBadgeListener bundle:cn.alfadb.netbird.r1probe 0
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconCloneBadgeEvent --> initCloneAndDownloadBadgeType, badgeType: 6, cloneBadgeVisible : true
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconDisableMaskEvent --> enable: cn.alfadb.netbird.r1probe_false
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconCommonEvent --> initIconData, bundleName: cn.alfadb.netbird.r1probe, isOuterDesktop: false
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconModel --> bundleName: cn.alfadb.netbird.r1probe, not in dynamicIconList.
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconResConfig --> -100_AppIcon_Image_cn.alfadb.netbird.r1probeEntryAbilityentry0_undefined_0, init icon image,typeId:0, isDynamicIcon:false, isOnlineTheme:false, appStatus:0, iconResource is invalid:true
+CST 2026-08-31 15:54:08.246  1606  1606 I A01b00/SCB: IconResourceManager: getCombIcon is penglai false, **.netbird.r1probe, entry, EntryAbility, 0, -100_AppIcon_Image_cn.alfadb.netbird.r1probeEntryAbilityentry0_undefined_0, false, false
+CST 2026-08-31 15:54:08.246  1606  1606 I A01c06/ICON: AppIconCommonEvent --> initEventhubEvent, iconContainerOpacityKey is Opacity_AppIconRelative_cn.alfadb.netbird.r1probeEntryAbilityentry0
+CST 2026-08-31 15:54:08.247  1606  1606 I A01c06/ICON: AppIconCommonEvent --> appInstall getAppUpdateEventId: cn.alfadb.netbird.r1probeEntryAbilityentry0 appStatus: 0
+CST 2026-08-31 15:54:08.247  1606  1606 I A01b01/HOME: SCBTM: registerTransitionController, icon id:AppIcon_Image_cn.alfadb.netbird.r1probeEntryAbilityentry0_undefined_0
+CST 2026-08-31 15:54:08.247  1606  1606 I A01b01/HOME: SCBTM: transitionControllerList length:12
+CST 2026-08-31 15:54:08.247  1606  1606 W A01c06/ICON: AppIconCheckAndFixManager --> registerAppIconCheckAndFix cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.247  1606  1606 I A01b00/SCB: MemoryCache --> getCombIcon cacheKey cn.alfadb.netbird.r1probe#entryEntryAbility0
+CST 2026-08-31 15:54:08.247  1606  1606 W A01b00/SCB: IconResourceManager: combIcon is empty: false, bundleName: **.netbird.r1probe
+CST 2026-08-31 15:54:08.248  1606  1606 I A01c06/ICON: AppIconCommonView --> isVisible: true, cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.259  1606  1606 W A01c06/ICON: AppIconModel --> disableShadow:false, isBarPhone:true, isOuterHome:false, isOnlineTheme:false, extra:true, enforceEnableShadow: false
+CST 2026-08-31 15:54:08.260  1606  1606 I A01b01/HOME: DesktopDragPointLightManager --> no point light found.
+CST 2026-08-31 15:54:08.261  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.calendar - getHdsIcon, size: (512, 512), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.262  1606  1606 W A01c06/ICON: AppIconCommonView --> isShowInstallImage, bundleName:cn.alfadb.netbird.r1probe, itemShow:false
+CST 2026-08-31 15:54:08.266  1606  1606 I A01c06/ICON: AppNameLiteModel --> aboutToAppear appName: R**e,len:15 labelId: 16777219 bundleName: cn.alfadb.netbird.r1probe, moduleName: entry, abilityName: EntryAbility typeId: 0 isNeedUpdateName: true, appStatus: 0
+CST 2026-08-31 15:54:08.266  1606  1606 I A01b00/SCB: IconResourceManager: getAppNameWithCallback success from memoryCache, cachedAppName:R1 API 24 Probe, params:**.netbird.r1probe,entry,16777219,0
+CST 2026-08-31 15:54:08.266  1606  1606 W A01c06/ICON: AppNameLiteModel --> updateFontColor:#ffffff
+CST 2026-08-31 15:54:08.266  1606  1606 I A01c06/ICON: AppNameLiteModel --> initAppInstallEvent bundleName: cn.alfadb.netbird.r1probe
+CST 2026-08-31 15:54:08.268  1606  1606 I A01b01/HOME: PreLoadViewModel --> preloadNextPage preload done, page: 1/2
+CST 2026-08-31 15:54:08.268  1606  1606 I A01b01/HOME: SettingsDataManager: setValue:true
+CST 2026-08-31 15:54:08.296  1606  1606 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-08-31 15:54:08.297  1606  1606 I A01b01/HOME: LauncherStartup: passStep PRELOAD_FINISHED when 1788162848297 and valueInfo:undefined
+CST 2026-08-31 15:54:08.297  1606  1606 W A01b01/HOME: PreLoadViewModel --> preload success finished with preloadPageIndex:3,pageLength:2
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.297  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.298  1606  1606 I A01c03/LM: GridItemPositionUtil: getCenterPosition offsetX: 0,90.22857142857143,180.45714285714286,270.6857142857143 offsetY: 0,100,200,300,400,500 area: 1,1 left:8.114285714285717 top:62.28571428571428
+CST 2026-08-31 15:54:08.299  1606  1606 W A01b01/HOME: PhoneLayoutRulesControllers --> calculateDock DockHeight: 82, mSysUIBottomHeight: 0
+CST 2026-08-31 15:54:08.299  1606  1606 I A01b01/HOME: PhoneLayoutRulesControllers --> phone dock layout: {"mDockGap":18,"mIconSize":58,"mBackgroundColor":"#85FAFAFA","mBackdropBlur":0,"mBackSaturation":1.4,"mListItemWidth":58,"mListItemHeight":58,"mListItemGap":32.228571428571435,"mDockPadding":12,"mMaxNum":5,"mMaxRecentNum":0,"mMaxDockNum":5,"mMinResidentNum":0,"mDockHeight":82,"mMarginBottom":28,"mRecentArrowWidth":0,"mRecentArrowHeight":0,"mRecentArrowPadding":0,"mRecentArrowGap":0} this.mBaseConfig.getDockHeight() 108
+CST 2026-08-31 15:54:08.299  1606  1606 I A01c03/LM: SmartDockStyleConfig: updateDockStyle, isInPreviewMode:false, iconSizeScale:, mIconSize:58, mIconRadius:15.037037037037038, mDockRadius:27.037037037037038
+CST 2026-08-31 15:54:08.299  1606  1606 I A01c03/LM: SmartDockStyleConfig: dock init config mIconSize:58, mDockHeight:82, mMarginBottom:28
+CST 2026-08-31 15:54:08.299  1606  1606 W A01b01/HOME: PhoneLayoutRulesControllers --> calculateDock DockHeight: 82, mSysUIBottomHeight: 0
+CST 2026-08-31 15:54:08.299  1606  1606 I A01b01/HOME: PhoneLayoutRulesControllers --> phone dock layout: {"mDockGap":18,"mIconSize":58,"mBackgroundColor":"#85FAFAFA","mBackdropBlur":0,"mBackSaturation":1.4,"mListItemWidth":58,"mListItemHeight":58,"mListItemGap":32.228571428571435,"mDockPadding":12,"mMaxNum":5,"mMaxRecentNum":0,"mMaxDockNum":5,"mMinResidentNum":0,"mDockHeight":82,"mMarginBottom":28,"mRecentArrowWidth":0,"mRecentArrowHeight":0,"mRecentArrowPadding":0,"mRecentArrowGap":0} this.mBaseConfig.getDockHeight() 108
+CST 2026-08-31 15:54:08.299  1606  1606 I A01c03/LM: SmartDockStyleConfig: updateDockStyle, isInPreviewMode:false, iconSizeScale:, mIconSize:58, mIconRadius:15.037037037037038, mDockRadius:27.037037037037038
+CST 2026-08-31 15:54:08.300  1606  1606 I A01c03/LM: SmartDockStyleConfig: dock init config mIconSize:58, mDockHeight:82, mMarginBottom:28
+CST 2026-08-31 15:54:08.300  1606  1606 I A01b01/HOME: GridLayout2ThemeManager --> REFRESH_PAGE_DESKTOP sendLayoutChange return for not change 0_aboutToAppear_0
+CST 2026-08-31 15:54:08.303  1606  1606 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-08-31 15:54:08.303  1606  1606 W A01b00/SCB: DbCache --> setIconResource, tableName: icon_info insert: 8 iconInfo.iconType normal,bundleName cn.alfadb.netbird.r1probe combinePicLength:9662, foregroundLength:undefined, backgroundLength:undefined
+CST 2026-08-31 15:54:08.344  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.calendar, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.344  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.calendar, 64, true true
+CST 2026-08-31 15:54:08.351  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.calendar, 17038
+CST 2026-08-31 15:54:08.351  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.ohos.contacts, 64, true true
+CST 2026-08-31 15:54:08.351  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.ohos.contacts 0
+CST 2026-08-31 15:54:08.367  1606  2844 W A01b00/SCB: GraphicUtils --> com.ohos.contacts - getHdsIcon, size: (192, 192), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.467  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.ohos.contacts, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.467  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.ohos.contacts, 64, true true
+CST 2026-08-31 15:54:08.489  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.ohos.contacts, 54126
+CST 2026-08-31 15:54:08.489  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.systemmanagerform, 64, true true
+CST 2026-08-31 15:54:08.489  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.systemmanagerform 0
+CST 2026-08-31 15:54:08.494  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.systemmanagerform - getHdsIcon, size: (288, 288), pixelFormat: 4, leftTopPixel is transparent: false, 255-255-255-255
+CST 2026-08-31 15:54:08.546  1606  1606 I A01b00/SCB: ASCFWindowManager: atomicserviceInfoList: 3
+CST 2026-08-31 15:54:08.589  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.systemmanagerform, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.589  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.systemmanagerform, 64, true true
+CST 2026-08-31 15:54:08.598  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.systemmanagerform, 30046
+CST 2026-08-31 15:54:08.598  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.calendardata, 64, true true
+CST 2026-08-31 15:54:08.598  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.calendardata 0
+CST 2026-08-31 15:54:08.603  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.calendardata - getHdsIcon, size: (264, 264), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.677  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.calendardata, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:08.677  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.calendardata, 64, true true
+CST 2026-08-31 15:54:08.683  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.calendardata, 17878
+CST 2026-08-31 15:54:08.683  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.ohos.contactsdataability, 64, true true
+CST 2026-08-31 15:54:08.683  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.ohos.contactsdataability 0
+CST 2026-08-31 15:54:08.693  1606  2844 W A01b00/SCB: GraphicUtils --> com.ohos.contactsdataability - getHdsIcon, size: (192, 192), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:08.840  2715  2715 W A06666/PafLog_TS: LogService PafLogger so load failed, PafLoggerNapi:undefined
+CST 2026-08-31 15:54:08.842  2715  2715 W A06666/PafLog_TS: NapiChannels PafLogger so load failed, PafLoggerNapi:undefined
+CST 2026-08-31 15:54:08.843  2715  2715 E A06666/PafLog_TS: initConfig error cppConfig is undefined
+CST 2026-08-31 15:54:08.876  2715  2715 I A00000/AKI: [INFO:DownloadService.cpp(464)] register AKI addon: network-filedownload-service
+CST 2026-08-31 15:54:08.877  2715  2715 I A00000/AKI: [INFO:napi_init.cpp(99)] begin to initial AKI with version: 1.2.20
+CST 2026-08-31 15:54:08.879  2715  2715 I A00001/NK_DOWNLOAD_TS: Download Engine start, buildVersion:8.0.9-200 buildType:RelWithDebInfo isLite:false
+CST 2026-08-31 15:54:08.879  2715  2715 I A00001/NK_COMM_TS: NetworkStatus set callback to cpp start
+CST 2026-08-31 15:54:08.880  2715  2715 I A00000/chromium: [0831/155408.880016:INFO:network_change_notifier_napi.cpp(199)] SetInitCallback in master JS thread, thread id:2715
+CST 2026-08-31 15:54:09.214  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.ohos.contactsdataability, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:09.214  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.ohos.contactsdataability, 64, true true
+CST 2026-08-31 15:54:09.221  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.ohos.contactsdataability, 40058
+CST 2026-08-31 15:54:09.221  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.useriam.idmwidget, 64, true true
+CST 2026-08-31 15:54:09.221  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.useriam.idmwidget 0
+CST 2026-08-31 15:54:09.223  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.useriam.idmwidget - getHdsIcon, size: (41, 41), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:09.304  1606  1606 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-08-31 15:54:09.310  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.useriam.idmwidget, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:09.310  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.useriam.idmwidget, 64, true true
+CST 2026-08-31 15:54:09.314  1606  1606 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-08-31 15:54:09.317  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.useriam.idmwidget, 47374
+CST 2026-08-31 15:54:09.318  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.filemanager, 64, true true
+CST 2026-08-31 15:54:09.318  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.filemanager 0
+CST 2026-08-31 15:54:09.327  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.filemanager - getHdsIcon, size: (192, 192), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:09.364  2715  2715 I A00000/AKI: [INFO:napi_init.cpp(99)] begin to initial AKI with version: 1.2.20
+CST 2026-08-31 15:54:09.366  2715  2715 I A00001/NK_URL_TS: Url Engine start, buildVersion:8.0.9-200 buildType:RelWithDebInfo isLite:false
+CST 2026-08-31 15:54:09.366  2715  2715 I A00001/NK_COMM_TS: NetworkStatus set callback to cpp start
+CST 2026-08-31 15:54:09.366  2715  2715 I A00000/chromium: [0831/155409.366269:INFO:network_change_notifier_napi.cpp(199)] SetInitCallback in master JS thread, thread id:2715
+CST 2026-08-31 15:54:09.491  2715  2715 W A06666/FLayout/Reusable: card block do not support reusable
+CST 2026-08-31 15:54:09.491  2715  2715 W A06666/FLayout/Reusable: card scrollbar do not support reusable
+CST 2026-08-31 15:54:09.491  2715  2715 W A06666/FLayout/Reusable: card dynamicchildren do not support reusable
+CST 2026-08-31 15:54:09.559  2715  2715 I A00001/AppGallery: initLog called
+CST 2026-08-31 15:54:09.559  2715  2715 W A06666/PafLog_TS: The callInfoMaxLength must be a number. Use 0 instead.
+CST 2026-08-31 15:54:09.559  2715  2715 I A06666/PafLog_TS: call PafLogNode init, enableFlush option is false
+CST 2026-08-31 15:54:09.559  2715  2715 I A06666/PafLog_TS: PafLogNode global init success, and sendMessage To Native
+CST 2026-08-31 15:54:09.559  2715  2715 I A06666/PafLog_TS: setConfig start nodeType:paf_logger appTag:AG level:3
+CST 2026-08-31 15:54:09.610  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.filemanager, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:09.610  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.filemanager, 64, true true
+CST 2026-08-31 15:54:09.613  2715  2715 I A00000/moduleframework: save module cache:account
+CST 2026-08-31 15:54:09.622  2715  2715 I A00000/moduleframework: save module cache:upgrade
+CST 2026-08-31 15:54:09.631  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.filemanager, 30214
+CST 2026-08-31 15:54:09.631  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.ohos.devicemanagerui, 64, true true
+CST 2026-08-31 15:54:09.631  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.ohos.devicemanagerui 0
+CST 2026-08-31 15:54:09.634  1606  2844 W A01b00/SCB: GraphicUtils --> com.ohos.devicemanagerui - getHdsIcon, size: (114, 114), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:09.688  2715  3262 W A06666/PafLog_TS: LogService PafLogger so load failed, PafLoggerNapi:undefined
+CST 2026-08-31 15:54:09.690  2715  3262 W A06666/PafLog_TS: NapiChannels PafLogger so load failed, PafLoggerNapi:undefined
+CST 2026-08-31 15:54:09.690  2715  3262 E A06666/PafLog_TS: initConfig error cppConfig is undefined
+CST 2026-08-31 15:54:09.701  2715  3262 I A06666/AppGallery: random:1788163439493, index:0,[checkStartAbilityWhenDeviceLocked]:caller uid: 0, checked user locked status
+CST 2026-08-31 15:54:09.703  2715  3271 I A06666/AppGallery: random:1788162926274, index:0,[checkStartAbilityWhenDeviceLocked]:0 user unlocked status: unlocked
+CST 2026-08-31 15:54:09.739  2715  2715 I A00000/moduleframework: strConfigKey: DynamicConfig_StaticPackageEvent
+CST 2026-08-31 15:54:09.739  2715  2715 I A00000/moduleframework: hspInfo.name: account
+CST 2026-08-31 15:54:09.748  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.748  2715  2715 I A00000/moduleframework: hspInfo.name: appAssist4Developer
+CST 2026-08-31 15:54:09.763  2715  2715 I A00000/moduleframework: configContent: #src/main/ets/impl/event/AppAssistInstallPackageEvent
+CST 2026-08-31 15:54:09.763  2715  2715 I A00000/moduleframework: hspInfo.name: appInstall4Developer
+CST 2026-08-31 15:54:09.765  2715  3319 I A06666/AppGallery: random:1788163521795, index:0,[ShaderProfileUtil]:getParam const.logsystem.versiontype error, Error: System parameter not found
+CST 2026-08-31 15:54:09.765  2715  3319 I A06666/AppGallery: random:1788163008881, index:0,[ShaderProfileUtil]:getParam persist.sys.dcco.enabled error, Error: System parameter not found
+CST 2026-08-31 15:54:09.773  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.774  2715  2715 I A00000/moduleframework: hspInfo.name: appView4Developer
+CST 2026-08-31 15:54:09.784  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.784  2715  2715 I A00000/moduleframework: hspInfo.name: attribution
+CST 2026-08-31 15:54:09.793  2715  2715 I A00000/moduleframework: configContent: #src/main/ets/attribution/event/AttrStaticPackageEventImpl
+CST 2026-08-31 15:54:09.793  2715  2715 I A00000/moduleframework: hspInfo.name: backgroundTaskFramework
+CST 2026-08-31 15:54:09.801  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.801  2715  2715 I A00000/moduleframework: hspInfo.name: crossDevice
+CST 2026-08-31 15:54:09.812  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.812  2715  2715 I A00000/moduleframework: hspInfo.name: downloadInstall
+CST 2026-08-31 15:54:09.824  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.824  2715  2715 I A00000/moduleframework: hspInfo.name: ecologicalRuleControl
+CST 2026-08-31 15:54:09.836  2715  2715 I A00000/moduleframework: configContent: #src/main/ets/event/InstallStaticPackageEvent
+CST 2026-08-31 15:54:09.836  2715  2715 I A00000/moduleframework: hspInfo.name: enhanceUIToolkit
+CST 2026-08-31 15:54:09.846  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.846  2715  2715 I A00000/moduleframework: hspInfo.name: essentialToolkit
+CST 2026-08-31 15:54:09.855  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.855  2715  2715 I A00000/moduleframework: hspInfo.name: maintenanceOperations
+CST 2026-08-31 15:54:09.862  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.862  2715  2715 I A00000/moduleframework: hspInfo.name: networkFramework
+CST 2026-08-31 15:54:09.871  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.871  2715  2715 I A00000/moduleframework: hspInfo.name: operationActivities
+CST 2026-08-31 15:54:09.882  2715  2715 I A00000/moduleframework: configContent: #src/main/ets/impl/event/InstallPackageStaticEvent
+CST 2026-08-31 15:54:09.883  2715  2715 I A00000/moduleframework: hspInfo.name: privacyCompliance
+CST 2026-08-31 15:54:09.892  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.892  2715  2715 I A00000/moduleframework: hspInfo.name: sdkFacade
+CST 2026-08-31 15:54:09.906  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.906  2715  2715 I A00000/moduleframework: hspInfo.name: upgrade
+CST 2026-08-31 15:54:09.920  2715  2715 I A00000/moduleframework: configContent: #src/main/ets/impl/upgrademanager/commonevent/event/PackageChangedStaticEvent
+CST 2026-08-31 15:54:09.920  2715  2715 I A00000/moduleframework: hspInfo.name: userInfo
+CST 2026-08-31 15:54:09.936  2715  2715 I A00000/moduleframework: getStringByNameSync error: {"code":"9001003"}
+CST 2026-08-31 15:54:09.936  2715  2715 I A00000/moduleframework: ohpmModuleName: app-Assist-4-Developer
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance full path:@normalized:N&appAssist4Developer&&@hw-ae-business/app-assist-4-developer/src/main/ets/impl/event/AppAssistInstallPackageEvent&
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance clazzName:AppAssistInstallPackageEvent
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: ohpmModuleName: attribution
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance full path:@normalized:N&attribution&&@hw-ae-business/attribution/src/main/ets/attribution/event/AttrStaticPackageEventImpl&
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance clazzName:AttrStaticPackageEventImpl
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: ohpmModuleName: ecological-Rule-Control
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance full path:@normalized:N&ecologicalRuleControl&&@hw-ae-business/ecological-rule-control/src/main/ets/event/InstallStaticPackageEvent&
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance clazzName:InstallStaticPackageEvent
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: ohpmModuleName: operation-Activities
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance full path:@normalized:N&operationActivities&&@hw-ae-business/operation-activities/src/main/ets/impl/event/InstallPackageStaticEvent&
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance clazzName:InstallPackageStaticEvent
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: ohpmModuleName: upgrade
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance full path:@normalized:N&upgrade&&@hw-ae-business/upgrade/src/main/ets/impl/upgrademanager/commonevent/event/PackageChangedStaticEvent&
+CST 2026-08-31 15:54:09.937  2715  2715 I A00000/moduleframework: getConfigInstance clazzName:PackageChangedStaticEvent
+CST 2026-08-31 15:54:09.954  2715  2715 I A00000/moduleframework: getConfigInstance import:AppAssistInstallPackageEvent
+CST 2026-08-31 15:54:09.954  2715  2715 I A00000/moduleframework: getConfigInstance import:AttrStaticPackageEventImpl
+CST 2026-08-31 15:54:09.954  2715  2715 I A00000/moduleframework: getConfigInstance import:InstallStaticPackageEvent
+CST 2026-08-31 15:54:09.954  2715  2715 I A00000/moduleframework: getConfigInstance import:InstallPackageStaticEvento35
+CST 2026-08-31 15:54:09.955  2715  2715 I A00000/moduleframework: getConfigInstance import:PackageChangedStaticEvent
+CST 2026-08-31 15:54:09.973  1606  1662 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.ohos.devicemanagerui, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:09.973  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.ohos.devicemanagerui, 64, true true
+CST 2026-08-31 15:54:09.983  1606  1662 I A01a01/NC: NotificationConfigManager: update icon result: com.ohos.devicemanagerui, 38242
+CST 2026-08-31 15:54:09.983  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hms.adsservice, 64, true true
+CST 2026-08-31 15:54:09.983  1606  1662 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hms.adsservice 0
+CST 2026-08-31 15:54:09.986  1606  1662 W A01b00/SCB: GraphicUtils --> com.huawei.hms.adsservice - getHdsIcon, size: (114, 114), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:10.314  1606  1606 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-08-31 15:54:10.335  1606  1606 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-08-31 15:54:10.396  2715  3262 I A06666/AppGallery: random:1788163568312, index:0,[BundleManagerEx]:start get all installed bundle info for all user in taskPool.
+CST 2026-08-31 15:54:10.448  2715  3321 I A06666/AppGallery: random:1788163129414, index:0,[BundleManagerEx]:BundleInfoHelper-generateAppIdMap getAllBundleInfo for any user, bundleArray size:63
+CST 2026-08-31 15:54:10.463  1606  1662 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hms.adsservice, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:10.463  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hms.adsservice, 64, true true
+CST 2026-08-31 15:54:10.474  1606  1662 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hms.adsservice, 38242
+CST 2026-08-31 15:54:10.474  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hmos.files, 64, true true
+CST 2026-08-31 15:54:10.474  1606  1662 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hmos.files 0
+CST 2026-08-31 15:54:10.486  1606  1662 W A01b00/SCB: GraphicUtils --> com.huawei.hmos.files - getHdsIcon, size: (192, 192), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:11.336  1606  1606 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-08-31 15:54:14.335  1606  1606 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-08-31 15:54:14.661  3161  3161 I A02900/N1aProbe: N1A_RESULT|verdict=PASS|c5=not-triggered|throughput_mibps=99.14
+CST 2026-08-31 15:54:14.661  3161  3161 I A02900/N1aProbe: N1A_RES|c7=pass|c8=pass|fd2=closed|fdset=0
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_PROBE_TEST_RESULT|verdict=PASS|N1a probe PASS version=n1a-native-dataplane/0.1.0+boringtun-0.7.1 verifiedPackets=4000 c5=not-triggered throughputMiBps=99.140 pumpMs=39.401 fd2Closed=true tunnelsFreed=2 processModel=unknown
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=0|total=7|sha256=e92bb1efbf105897|data={"version":"n1a-native-dataplane/0.1.0+boringtun-0.7.1","ok":true,"verdict":"pass","error":null,"criteria":{"c1":"pass","c2":"pass","c3":"pass","c4":"pass","c5":"not-triggered","c6":"pass","c7":"pass","c8":"pass","c9":"pass"},"boringtun":"0.7.1","boringtun_crate_sha256":"15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed8
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=1|total=7|sha256=e92bb1efbf105897|data=3ffb9f99f7126939","handshake":{"established":true,"elapsed_ms":825.615,"attempts":1,"first_roundtrip_ok":true,"stats_a":{"time_since_last_handshake":0,"tx_bytes":0,"rx_bytes":0},"stats_b":{"time_since_last_handshake":0,"tx_bytes":0,"rx_bytes":0}},"integrity":{"rounds":10,"packets_per_round":200,"payload_bytes":1024,"ex
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=2|total=7|sha256=e92bb1efbf105897|data=pected_packets_total":4000,"verified_packets_total":4000,"mismatches":0,"lost":0,"first_mismatch":null,"byte_accounting":{"expected_inner_bytes_per_direction":2048000,"tx_bytes_delta_a":2048000,"rx_bytes_delta_b":2048000,"tx_bytes_delta_b":2048000,"rx_bytes_delta_a":2048000,"ok":true}},"throughput":{"verified_plaintext
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=3|total=7|sha256=e92bb1efbf105897|data=_bytes":4096000,"pump_ms":39.401,"mib_per_second":99.140261,"floor_mib_per_second":5},"backpressure":{"induced":false,"eagain_count":0,"send_attempts":33024,"successful_sends":33024,"retransmit_rounds":128,"kernel_queue_drops":32512,"delivered_unique":512,"verified":512,"corrupted":0,"duplicates":0,"so_sndbuf":8192,"so
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=4|total=7|sha256=e92bb1efbf105897|data=_rcvbuf":8192,"elapsed_ms":210.401,"partial_writes":0,"note":"induced is decided only by real errno EAGAIN/ENOBUFS from sendto; kernel_queue_drops (full receive queue, silent datagram drop with send success) is a pure observation field and never participates in the induced decision; zero errno hits = not-triggered; UDP
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=5|total=7|sha256=e92bb1efbf105897|data= datagrams have no partial writes"},"tick":{"quiet_gaps":3,"tick_calls":6,"network_packets":6,"session_ok_after_each_gap":true,"post_gap_burst_ok":true},"resources":{"process_model":"unknown","probe_fd_gate":{"socket_fds":[29,30],"t3_all_closed":true,"fdset_new_at_t3":[],"non_probe_new_fds":[]},"process_observation_onl
+CST 2026-08-31 15:54:14.662  3161  3161 I A02900/N1aProbeTest: N1A_JSON|part=6|total=7|sha256=e92bb1efbf105897|data=y":{"fd_t0":30,"fd_t3":30,"fd_delta":0,"task_t0":14,"task_t3":14,"task_delta":0,"rss_kb_t0":87544,"rss_kb_t3":89040},"new_tids_observed":[],"static_no_pthread":true,"tunnels_freed":2,"sockets_closed":2},"timing":{"handshake_ms":825.615,"pump_ms":39.401,"backpressure_ms":210.401,"total_ms":6591.355}}
+CST 2026-08-31 15:54:14.689  1606  1606 W A01a00/SYS_UI: AppLifeCycleManager: onProcessDied, uid: 20020062, bundleName: cn.alfadb.netbird.r1probe, pid: 3161
+CST 2026-08-31 15:54:14.712  1606  1662 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.huawei.hmos.files, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:14.712  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.huawei.hmos.files, 64, true true
+CST 2026-08-31 15:54:14.719  1606  1662 I A01a01/NC: NotificationConfigManager: update icon result: com.huawei.hmos.files, 29858
+CST 2026-08-31 15:54:14.719  1606  1662 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.ohos.dlpmanager, 64, true true
+CST 2026-08-31 15:54:14.719  1606  1662 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.ohos.dlpmanager 0
+CST 2026-08-31 15:54:14.746  1606  1662 W A01b00/SCB: GraphicUtils --> com.ohos.dlpmanager - getHdsIcon, size: (768, 768), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
+CST 2026-08-31 15:54:15.336  1606  1606 W A01c06/ICON: AppIconWeatherModel --> initWeatherListener, retryTimes: 4
+CST 2026-08-31 15:54:15.343  1606  1606 E A01c06/ICON: AppIconWeatherModel --> get weather info failed, code: 15700010, message: The DataShareHelper is not initialized successfully.
+CST 2026-08-31 15:54:15.824  1606  2844 W A01b00/SCB: GraphicUtils --> combinePic from HdsIcon, bundleName: com.ohos.dlpmanager, iconSizeOfGrid: 64, hasBorder: true
+CST 2026-08-31 15:54:15.824  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon end param: com.ohos.dlpmanager, 64, true true
+CST 2026-08-31 15:54:15.831  1606  2844 I A01a01/NC: NotificationConfigManager: update icon result: com.ohos.dlpmanager, 25026
+CST 2026-08-31 15:54:15.831  1606  2844 I A01b00/SCB: IconResourceFwk --> getBundleIcon start param: com.huawei.hms.floatingnavigation, 64, true true
+CST 2026-08-31 15:54:15.831  1606  2844 W A01b00/SCB: IconResourceUtils --> getIconResource from bms getBundleResourceInfo for com.huawei.hms.floatingnavigation 0
+CST 2026-08-31 15:54:15.833  1606  2844 W A01b00/SCB: GraphicUtils --> com.huawei.hms.floatingnavigation - getHdsIcon, size: (41, 41), pixelFormat: 4, leftTopPixel is transparent: true, 0-0-0-0
