@@ -1,0 +1,4 @@
+N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=probe verdict inconsistent with integrity counters
+TestFinished-ResultCode: 1
+TestFinished-ResultMsg: N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=probe verdict inconsistent with integrity counters
+user test finished.

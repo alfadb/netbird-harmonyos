@@ -1,0 +1,5 @@
+===== TAG HILOG N1aProbe =====
+CST 2026-08-31 13:04:26.197  3088  3088 I A02900/N1aProbe: N1a overlay module initialized
+===== TAG HILOG N1aProbeTest =====
+CST 2026-08-31 13:04:26.198  3088  3088 I A02900/N1aProbeTest: TestRunner onPrepare
+CST 2026-08-31 13:04:34.589  3088  3088 E A02900/N1aProbeTest: N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=probe verdict inconsistent with integrity counters
