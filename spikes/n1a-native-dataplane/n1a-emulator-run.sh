@@ -365,7 +365,7 @@ write_base_manifest() {
     printf 'stage_or_gate=N1a\n'
     printf 'campaign_id=N1A-EMU24-20260830-0001\n'
     printf 'attempt=initial\n'
-    printf 'criteria_revision=frozen-r2 (docs/n1a-gate-plan.md)\n'
+    printf 'criteria_revision=frozen-r3 (docs/n1a-gate-plan.md)\n'
     printf 'code_sha=%s\n' "$code_sha"
     printf 'snapshot_commit=%s\n' "$SNAPSHOT_HEAD"
     printf 'boringtun_version=%s\n' "$BORINGTUN_VERSION"
@@ -417,6 +417,8 @@ seal_and_finalize() {
     printf 'run_status=%s\n' "$result" >>"$MANIFEST"
     printf 'fail_reason=%s\n' "${fail_reason:-}" >>"$MANIFEST"
     printf 'blocked_reason=%s\n' "${blocked_reason:-}" >>"$MANIFEST"
+    printf 'console_sha256=%s\n' "$(sha256sum "$CONSOLE" 2>/dev/null | awk '{print $1}')" >>"$MANIFEST"
+    printf 'aa_start_log_sha256=%s\n' "$(sha256sum "$AA_START_LOG" 2>/dev/null | awk '{print $1}')" >>"$MANIFEST"
     transcript_bytes="$(stat -c %s "$TRANSCRIPT" 2>/dev/null || true)"
     printf 'transcript_final_bytes=%s\n' "$transcript_bytes" >>"$MANIFEST"
     transcript_hash="$(head -c "${transcript_bytes:-0}" "$TRANSCRIPT" 2>/dev/null | sha256sum | awk '{print $1}')" || true
@@ -1872,12 +1874,6 @@ else
   if [[ -n "$OVERLAY_DIAG" && -f "$OVERLAY_DIAG" ]]; then
     printf 'overlay_diag_sha256=%s\n' "$(sha256sum "$OVERLAY_DIAG" | awk '{print $1}')" >>"$MANIFEST"
   # 0008 ruling prerequisite #4: bfreeze evidence binding.
-  if [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
-    printf 'bfreeze_log_sha256=%s\n' "$(sha256sum "$BFREEZE_LOG" | awk '{print $1}')" >>"$MANIFEST"
-    printf 'bfreeze_log_lines=%s\n' "$(wc -l <"$BFREEZE_LOG")" >>"$MANIFEST"
-  else
-    printf 'bfreeze_log_sha256=absent\n' >>"$MANIFEST"
-  fi
     printf 'overlay_diag_lines=%s\n' "$(wc -l <"$OVERLAY_DIAG")" >>"$MANIFEST"
   else
     printf 'overlay_diag_sha256=absent\n' >>"$MANIFEST"
@@ -1969,7 +1965,6 @@ ended_at="$(date --iso-8601=seconds)"
   printf 'tag_hilog_sha256=%s\n' "$(sha256sum "$TAG_HILOG" | awk '{print $1}')"
   printf 'app_hilog_sha256=%s\n' "$(sha256sum "$APP_HILOG" | awk '{print $1}')"
   printf 'page_hilog_sha256=%s\n' "$(sha256sum "$PAGE_HILOG" | awk '{print $1}' 2>/dev/null || printf pending)"
-  printf 'console_sha256=%s\n' "$(sha256sum "$CONSOLE" | awk '{print $1}')"
 } >>"$MANIFEST"
 printf 'PHASE_A_ENDED_AT=%s\n' "$ended_at"
 printf 'RECORD_STATUS=collected\n'
@@ -2027,6 +2022,15 @@ for page_attempt in $(seq 1 60); do
   printf 'PAGE_MARKER_POLL attempt=%s no-marker-yet\n' "$page_attempt"
   sleep 3
 done
+
+# bfreeze manifest binding (moved from the phase-A block where it ran
+# before the file existed - record review of EV-...-0008, major-1)
+if [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
+  printf 'bfreeze_log_sha256=%s\n' "$(sha256sum "$BFREEZE_LOG" | awk '{print $1}')" >>"$MANIFEST"
+  printf 'bfreeze_log_lines=%s\n' "$(wc -l <"$BFREEZE_LOG")" >>"$MANIFEST"
+else
+  printf 'bfreeze_log_sha256=absent\n' >>"$MANIFEST"
+fi
 if [[ "$page_marker_found" != "yes" ]]; then
   printf 'MEASURED_VERDICT=fail\n'
   measured_fail "phase-B page window never produced $MARKER_PREFIX in the bounded poll; frozen C9 missing-marker rule (page clause)"
