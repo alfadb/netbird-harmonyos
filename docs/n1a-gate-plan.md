@@ -1,6 +1,6 @@
 # N1a 门计划与判据预注册（native WG 数据面 × 回环数据泵，Emulator）
 
-最后核验：2026-08-31 ｜ 状态：`criteria-frozen-r3`（r3 复审 pass（2026-08-31，同一审查席）：C7/C8 逐字采纳裁决文本、无新 freeze-blocker；**新 evidence ID 重测须用户显式授权，本冻结不构成执行授权**；0001 ID 不可复用。**r2 判据持有人裁决 `C7_LOCUS_RULING=criteria-defect`（2026-08-31，isolated-xai-grok-4-6-reviewer）**：campaign 0001 实测证明 C7 的进程级精确相等 locus 在 aa-test 环境对非探针框架噪声本质敏感（E2 先例为已预热 EntryAbility 进程不可外推；E1-0002 为同型误判先例；host 安静进程 4→4/2→2 只证探针在 Linux 不漏），0001 的 C7/C8 fail 不得作为探针泄漏的测量事实主张；按停止条件 5 判据缺陷 → 修订 C7/C8（本 r3，逐字采纳持有人修订文本）+ 新审查轮 + 新 evidence ID 重测。0001 consumed-failure 字面记录不改写。C5/C9 等其余判据不变）
+最后核验：2026-08-31 ｜ 状态：`criteria-frozen-r3`（**N1a 门已达成 `reviewed-pass/pass`**：`EV-N1A-EMU24-20260831-0008` 两阶段完整测量 pass（Phase A 85.95 / Phase B 63.33 MiB/s），经两轮记录级独立审查（第一轮 fail→修订→第二轮 pass）；9 个 campaign、8 项实现缺陷修复、2 次判据修订、3 次判据持有人裁决。C5_PHASEB_RULING 的持有人终裁仍悬空（形态数据已落盘），N1a 收口是否以其为前置属治理决定；N1b（物理 VpnExtension fd 集成）须独立治理授权。）（r3 复审 pass（2026-08-31，同一审查席）：C7/C8 逐字采纳裁决文本、无新 freeze-blocker；**新 evidence ID 重测须用户显式授权，本冻结不构成执行授权**；0001 ID 不可复用。**r2 判据持有人裁决 `C7_LOCUS_RULING=criteria-defect`（2026-08-31，isolated-xai-grok-4-6-reviewer）**：campaign 0001 实测证明 C7 的进程级精确相等 locus 在 aa-test 环境对非探针框架噪声本质敏感（E2 先例为已预热 EntryAbility 进程不可外推；E1-0002 为同型误判先例；host 安静进程 4→4/2→2 只证探针在 Linux 不漏），0001 的 C7/C8 fail 不得作为探针泄漏的测量事实主张；按停止条件 5 判据缺陷 → 修订 C7/C8（本 r3，逐字采纳持有人修订文本）+ 新审查轮 + 新 evidence ID 重测。0001 consumed-failure 字面记录不改写。C5/C9 等其余判据不变）
 
 ## 定义与归属
 

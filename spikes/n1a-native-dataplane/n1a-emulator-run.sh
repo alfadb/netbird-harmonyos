@@ -1873,8 +1873,7 @@ else
   # Overlay diagnostic artifact hash (defect #3): always bound, even if empty.
   if [[ -n "$OVERLAY_DIAG" && -f "$OVERLAY_DIAG" ]]; then
     printf 'overlay_diag_sha256=%s\n' "$(sha256sum "$OVERLAY_DIAG" | awk '{print $1}')" >>"$MANIFEST"
-  # 0008 ruling prerequisite #4: bfreeze evidence binding.
-    printf 'overlay_diag_lines=%s\n' "$(wc -l <"$OVERLAY_DIAG")" >>"$MANIFEST"
+      printf 'overlay_diag_lines=%s\n' "$(wc -l <"$OVERLAY_DIAG")" >>"$MANIFEST"
   else
     printf 'overlay_diag_sha256=absent\n' >>"$MANIFEST"
   fi
@@ -1961,7 +1960,8 @@ ended_at="$(date --iso-8601=seconds)"
   printf 'snapshot_log_sha256=%s\n' "$(sha256sum "$SNAPSHOT_LOG" | awk '{print $1}')"
   printf 'build_log_sha256=%s\n' "$(sha256sum "$BUILD_LOG" | awk '{print $1}')"
   printf 'aa_test_log_sha256=%s\n' "$(sha256sum "$AA_TEST_LOG" | awk '{print $1}')"
-  printf 'aa_start_log_sha256=%s\n' "$(sha256sum "$AA_START_LOG" | awk '{print $1}' 2>/dev/null || printf pending)"
+  # aa_start_log_sha256 is now bound at seal time in seal_and_finalize
+  # (record-review minor-A removed the phase-A-time pending placeholder)
   printf 'tag_hilog_sha256=%s\n' "$(sha256sum "$TAG_HILOG" | awk '{print $1}')"
   printf 'app_hilog_sha256=%s\n' "$(sha256sum "$APP_HILOG" | awk '{print $1}')"
   printf 'page_hilog_sha256=%s\n' "$(sha256sum "$PAGE_HILOG" | awk '{print $1}' 2>/dev/null || printf pending)"
@@ -1983,6 +1983,15 @@ hdc shell 'hilog -r' >/dev/null 2>&1 || blocked_env "phase-B hilog clear failed"
 # the C1 main clause.
 hdc shell "aa force-stop $BUNDLE" >/dev/null 2>&1 </dev/null || true
 printf 'PHASE_B_FORCE_STOP=done\n'
+
+# bfreeze early-fail-path absent binding (record-review new-minor-C:
+# early phase-B failures like aa-start semantic failure never reach the
+# post-poll binding; always emit the key so the manifest is complete)
+if [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
+  printf 'bfreeze_log_sha256=%s\n' "$(sha256sum "$BFREEZE_LOG" | awk '{print $1}')" >>"$MANIFEST"
+else
+  printf 'bfreeze_log_sha256=absent\n' >>"$MANIFEST"
+fi
 
 set +e
 aa_start_output="$(timeout 60 "$HDC" -t "$EMULATOR_TARGET" shell "aa start -a $ABILITY -b $BUNDLE -m $MODULE" 2>&1 </dev/null)"
@@ -2023,9 +2032,11 @@ for page_attempt in $(seq 1 60); do
   sleep 3
 done
 
-# bfreeze manifest binding (moved from the phase-A block where it ran
-# before the file existed - record review of EV-...-0008, major-1)
-if [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
+# bfreeze manifest binding at poll completion (moved from the phase-A
+# block; the early-fail binding above may have already written the key)
+if grep -q '^bfreeze_log_sha256=' "$MANIFEST" 2>/dev/null; then
+  : # already bound by the early-fail path; do not duplicate
+elif [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
   printf 'bfreeze_log_sha256=%s\n' "$(sha256sum "$BFREEZE_LOG" | awk '{print $1}')" >>"$MANIFEST"
   printf 'bfreeze_log_lines=%s\n' "$(wc -l <"$BFREEZE_LOG")" >>"$MANIFEST"
 else
