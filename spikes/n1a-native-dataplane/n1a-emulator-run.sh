@@ -212,6 +212,7 @@ SOURCE_MANIFEST=""
 SCREENSHOT_A=""
 SCREENSHOT_B=""
 PROBE_DETAIL=""
+BFREEZE_LOG=""
 OVERLAY_DIAG=""
 
 # --- helper functions -------------------------------------------------------
@@ -431,7 +432,7 @@ check_no_clobber() {
   local f
   for f in "$TRANSCRIPT" "$TAG_HILOG" "$APP_HILOG" "$PAGE_HILOG" "$MANIFEST" \
     "$CONSOLE" "$BUILD_LOG" "$N1A_BUILD_LOG" "$SNAPSHOT_LOG" "$AA_TEST_LOG" \
-    "$AA_START_LOG" "$SOURCE_MANIFEST" "$PROBE_DETAIL" "$OVERLAY_DIAG" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
+    "$AA_START_LOG" "$SOURCE_MANIFEST" "$PROBE_DETAIL" "$OVERLAY_DIAG" "$BFREEZE_LOG" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
     if [[ -n "$f" && -e "$f" ]]; then
       printf 'REFUSE_OVERWRITE=evidence file already exists: %s; refusing to overwrite fixed evidence (use a fresh EVIDENCE_ID or EVIDENCE_ROOT)\n' "$f" >&2
       return 1
@@ -614,6 +615,8 @@ extract_overlay_diag() {
     [[ -n "$f" && -f "$f" ]] || continue
     grep -F 'N1A_DIAG' "$f" 2>/dev/null >>"$out_file" || true
     grep -F 'N1A_CATCH_FALLBACK' "$f" 2>/dev/null >>"$out_file" || true
+    # 0008 ruling prerequisite #3: C5 shape short marker (diagnostic only).
+    grep -F 'N1A_C5|' "$f" 2>/dev/null >>"$out_file" || true
   done
   # Deduplicate identical lines (hilog tag + app logs may duplicate).
   if [[ -s "$out_file" ]]; then
@@ -1167,6 +1170,33 @@ selftest_run() {
   extract_overlay_diag "$od_out" "$od_tmp/c.log" 2>/dev/null
   if grep -qF 'stage=probe-null|probe=null' "$od_out"; then
     printf 'SELFTEST diag-null-probe=pass\n'
+
+  # 0008 ruling prerequisite #3: N1A_C5 line extraction from mixed sources.
+  local c5_tmp
+  c5_tmp="$(mktemp "${TMPDIR:-/tmp}/n1a-st-c5.XXXXXX")"
+  : >"$c5_tmp"
+  printf 'N1A_DIAG|stage=ok|ok=0\n' >>"$c5_tmp"
+  printf 'N1A_C5|delivered=512|corrupted=0|rounds=128|elapsed_ms=200.5|eagain=0|error=bp timebox exceeded (deadlock): delivered=400 of 512\n' >>"$c5_tmp"
+  printf 'N1A_CATCH_FALLBACK|native_throw=true\n' >>"$c5_tmp"
+  extract_overlay_diag "$od_out" "$c5_tmp" "$c5_tmp" >/dev/null 2>&1
+  if grep -qF 'N1A_C5|delivered=512' "$od_out" && \
+     grep -qF 'N1A_DIAG|stage=ok' "$od_out" && \
+     grep -qF 'N1A_CATCH_FALLBACK' "$od_out"; then
+    printf 'SELFTEST diag-n1a-c5-extraction=pass\n'
+  else
+    printf 'SELFTEST FAIL diag-n1a-c5-extraction\n'; rc=1
+  fi
+
+  # 0008 ruling prerequisite #4: bfreeze path is declared and the no-clobber
+  # list covers it (selftest mode keeps it empty — the formal path sets it
+  # from EVIDENCE_ROOT; the check here verifies the variable exists and the
+  # formal-path assignment is in the source).
+  if [[ -n "${BFREEZE_LOG+x}" ]] && \
+     grep -q 'BFREEZE_LOG.*EVIDENCE_ID' "$0" 2>/dev/null; then
+    printf 'SELFTEST bfreeze-path=pass\n'
+  else
+    printf 'SELFTEST FAIL bfreeze-path (not declared or no formal assignment)\n'; rc=1
+  fi
   else
     printf 'SELFTEST FAIL diag-null-probe\n'
     rc=1
@@ -1268,6 +1298,7 @@ else
   OVERLAY_DIAG="$EVIDENCE_ROOT/$EVIDENCE_ID-overlay-diag.log"
   SCREENSHOT_A="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-a.png"
   SCREENSHOT_B="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-b-page.png"
+  BFREEZE_LOG="$EVIDENCE_ROOT/$EVIDENCE_ID-bfreeze.log"
   check_no_clobber || exit 2
   if (( DRY_RUN == 1 )); then
     DRY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/n1a-emu24-dryrun.XXXXXX")"
@@ -1840,6 +1871,13 @@ else
   # Overlay diagnostic artifact hash (defect #3): always bound, even if empty.
   if [[ -n "$OVERLAY_DIAG" && -f "$OVERLAY_DIAG" ]]; then
     printf 'overlay_diag_sha256=%s\n' "$(sha256sum "$OVERLAY_DIAG" | awk '{print $1}')" >>"$MANIFEST"
+  # 0008 ruling prerequisite #4: bfreeze evidence binding.
+  if [[ -n "$BFREEZE_LOG" && -f "$BFREEZE_LOG" ]]; then
+    printf 'bfreeze_log_sha256=%s\n' "$(sha256sum "$BFREEZE_LOG" | awk '{print $1}')" >>"$MANIFEST"
+    printf 'bfreeze_log_lines=%s\n' "$(wc -l <"$BFREEZE_LOG")" >>"$MANIFEST"
+  else
+    printf 'bfreeze_log_sha256=absent\n' >>"$MANIFEST"
+  fi
     printf 'overlay_diag_lines=%s\n' "$(wc -l <"$OVERLAY_DIAG")" >>"$MANIFEST"
   else
     printf 'overlay_diag_sha256=absent\n' >>"$MANIFEST"
@@ -1969,12 +2007,22 @@ fi
 # backpressure). Bounded short loop: non-recovery is environment-class
 # (frozen aggregation), a malformed/duplicate/FAIL marker is measured fail.
 page_marker_found=""
+# 0008 ruling prerequisite #4: bounded AppFreeze/jank sampling during the
+# phase-B poll loop — every 3rd poll (~9s) captures the core hilog buffer
+# (AppFreeze/ANR/jank traces) into the bfreeze evidence file. Bounded by
+# the same 60-attempt poll limit (180s); the file is manifest-bound.
+: >"$BFREEZE_LOG" 2>/dev/null || true
 for page_attempt in $(seq 1 60); do
   hdc shell "hilog -x -T $APP_TAG -v year -v zone" >"$PAGE_HILOG" 2>&1 || true
   if grep -qF "$MARKER_PREFIX" "$PAGE_HILOG"; then
     page_marker_found="yes"
     printf 'PAGE_MARKER_ATTEMPT=%s\n' "$page_attempt"
     break
+  fi
+  if (( page_attempt % 3 == 0 )) && [[ -n "$BFREEZE_LOG" ]]; then
+    printf '=== BFREEZE SAMPLE attempt=%s ===\n' "$page_attempt" >>"$BFREEZE_LOG"
+    timeout 10 "$HDC" -t "$EMULATOR_TARGET" shell 'hilog -x -t core -v year -v zone' \
+      >>"$BFREEZE_LOG" 2>&1 || true
   fi
   printf 'PAGE_MARKER_POLL attempt=%s no-marker-yet\n' "$page_attempt"
   sleep 3

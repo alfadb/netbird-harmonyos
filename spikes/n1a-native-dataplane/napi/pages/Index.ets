@@ -21,6 +21,25 @@ import hilog from '@ohos.hilog';
 const DOMAIN: number = 0x2900;
 const TAG: string = 'N1aProbe';
 
+// 0008 ruling prerequisite #1: chunked N1A_JSON transport from the result
+// page (mirrors OpenHarmonyTestRunner.ets emitChunkedJson; 320-byte data
+// chunks keep the full line ~470 bytes, safely under the ~500-byte hilog
+// cap measured in campaign 0005).
+const JSON_CHUNK_BYTES = 320;
+
+function emitChunkedJson(json: string, sha256Hex: string): void {
+  if (json.length === 0) {
+    return;
+  }
+  const sha16: string = sha256Hex.substring(0, 16);
+  const total: number = Math.ceil(json.length / JSON_CHUNK_BYTES);
+  for (let i = 0; i < total; i++) {
+    const data: string = json.substring(i * JSON_CHUNK_BYTES, (i + 1) * JSON_CHUNK_BYTES);
+    const line: string = `N1A_JSON|part=${i}|total=${total}|sha256=${sha16}|data=${data}`;
+    hilog.error(DOMAIN, TAG, '%{public}s', line);
+  }
+}
+
 function cleanText(value: string): string {
   return value.replace(/\|/g, '/').replace(/\r/g, ' ').replace(/\n/g, ' ');
 }
@@ -49,14 +68,32 @@ struct Index {
       this.verifiedPackets = result.verifiedPacketsTotal.toString();
       this.pumpMs = result.pumpMs.toFixed(1);
       hilog.info(DOMAIN, TAG, 'N1a result page rendered from probe result');
+      // 0008 ruling prerequisite #1: the try path (probe returned a result
+      // object) also chunk-emits the full detail JSON — this is the C5
+      // shape data that was unrecoverable in campaign 0008 (the FAIL
+      // detailJson carries the backpressure counters). On a pass verdict
+      // this is belt-and-suspenders (the ohosTest side also chunks in
+      // phase A); on a fail verdict it is the only structured evidence
+      // from the B window's page-side execution.
+      emitChunkedJson(result.detailJson, result.detailSha256);
     } catch (error) {
       // Fail-closed: a thrown probe renders FAIL. The native overlay has
       // already emitted its FAIL marker for the same execution.
       this.probeDone = true;
       this.probeOk = false;
       this.c5 = 'native-throw';
-      hilog.error(DOMAIN, TAG, 'N1a result page probe threw: %{public}s',
-        cleanText((error as Error).message || 'no-message'));
+      const msg: string = cleanText((error as Error).message || 'no-message');
+      hilog.error(DOMAIN, TAG, 'N1a result page probe threw: %{public}s', msg);
+      // 0008 ruling prerequisite #1: the catch path also emits a fallback
+      // chunk (mirroring the ohosTest catch) so the N1A_JSON channel fires
+      // on every failure path — the overlay's native-side chunk emission
+      // (prerequisite #2) is the belt to this suspend.
+      const fallbackJson: string =
+        `{"verdict":"fail","native_throw":true,"error":${JSON.stringify(msg)}}`;
+      emitChunkedJson(fallbackJson,
+        '0000000000000000000000000000000000000000000000000000000000000000');
+      hilog.error(DOMAIN, TAG,
+        'N1A_CATCH_FALLBACK|native_throw=true|overlay_diag_expected=true');
     }
   }
 

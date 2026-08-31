@@ -56,6 +56,12 @@ namespace {
 constexpr unsigned int kLogDomain = 0x2900;
 constexpr const char *kLogTag = "N1aProbe";
 
+// Chunk size for the N1A_JSON transport (0008 ruling prerequisite #2):
+// must equal the runner's N1A_JSON_CHUNK_MAX and the ets JSON_CHUNK_BYTES.
+// 320-byte data chunks + ~100-byte hilog prefix + ~50-byte protocol header
+// keep the full emitted line (~470 bytes) safely below the ~500-byte cap.
+constexpr size_t kJsonChunkBytes = 320;
+
 // Upper bound for reading the core's JSON string (the document is ~2 KB; a
 // larger value means the terminator is missing — fail closed).
 constexpr size_t kJsonMaxLen = 64 * 1024;
@@ -78,6 +84,13 @@ extern "C" {
         int32_t c7_fdset_diff_count;   // r3: |T3 fd set - T0 set| (observation)
         int32_t c7_new_tids;           // r3: new TIDs in window (observation)
         int32_t c8_tunnels_freed;      // r3: must be 2
+        // 0008 ruling prerequisite #3: C5 shape counters for the N1A_C5
+        // short marker (delivered/corrupted/rounds/eagain/elapsed_ms).
+        int32_t bp_delivered;
+        int32_t bp_corrupted;
+        int32_t bp_retransmit_rounds;
+        int32_t bp_eagain_count;
+        double bp_elapsed_ms;
         unsigned char process_model[32]; // r3: NUL-terminated label
         char *json;                    // NUL-terminated, owned by the result
         unsigned char detail_sha256[65]; // 64 lowercase hex chars + NUL
@@ -385,6 +398,49 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
         probe->criteria[7] == 1 ? "pass" : "fail",
         probe->c7_fd2_closed == 1 ? "closed" : "open",
         probe->c7_fdset_diff_count);
+
+    // 0008 ruling prerequisite #3: C5 shape short marker on the fail path
+    // (distinct prefix; single line; pipe/newline sanitized error text).
+    if (probe->ok != 0) {
+        char err_prefix[61];
+        snprintf(err_prefix, sizeof(err_prefix), "%s",
+            probe->json ? probe->json : "");
+        // Sanitize: pipes and newlines become spaces (FieldSuffix pattern).
+        for (char *c = err_prefix; *c != '\0'; ++c) {
+            if (*c == '|' || *c == '\n' || *c == '\r' || static_cast<unsigned char>(*c) < 0x20) {
+                *c = ' ';
+            }
+        }
+        err_prefix[60] = '\0';
+        OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+            "N1A_C5|delivered=%{public}d|corrupted=%{public}d|rounds=%{public}d|"
+            "elapsed_ms=%{public}.1f|eagain=%{public}d|error=%{public}s",
+            probe->bp_delivered, probe->bp_corrupted,
+            probe->bp_retransmit_rounds, probe->bp_elapsed_ms,
+            probe->bp_eagain_count, err_prefix);
+    }
+
+    // 0008 ruling prerequisite #2: on the fail path (ok != 0), the overlay
+    // itself emits the full detail document via the N1A_JSON chunk protocol
+    // (same protocol the ets side uses) so the B window's runner reassembly
+    // can recover it even if the page ETS is frozen/schedule-starved. On
+    // the pass path (ok == 0) the ets side handles the transport (current
+    // behavior unchanged).
+    if (probe->ok != 0 && json_len > 0 && json_len < kJsonMaxLen) {
+        const int total = static_cast<int>((json_len + kJsonChunkBytes - 1) / kJsonChunkBytes);
+        OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+            "N1A_JSON_CHUNKS|total=%{public}d|bytes=%{public}zu|src=overlay-native",
+            total, json_len);
+        for (size_t off = 0, part = 0; off < json_len; off += kJsonChunkBytes, ++part) {
+            const size_t n = (json_len - off < kJsonChunkBytes)
+                ? (json_len - off) : kJsonChunkBytes;
+            OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+                "N1A_JSON|part=%{public}zu|total=%{public}d|sha256=%{public}.16s|data=%{public}.*s",
+                part, total, detail_sha,
+                static_cast<int>(n), probe->json + off);
+        }
+    }
+
     return result;
 }
 
