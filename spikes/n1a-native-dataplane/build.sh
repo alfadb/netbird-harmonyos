@@ -64,6 +64,23 @@ FORBIDDEN_COUNT="$( { grep -rEc 'pthread_create|std::thread::spawn|napi_create_t
     || die "STATIC_NO_PTHREAD violation: $FORBIDDEN_COUNT occurrences of forbidden threading APIs in src/ + napi/"
 log "STATIC_NO_PTHREAD OK: 0 forbidden threading-API occurrences in src/ + napi/"
 
+# --- 1c. THROW_SNAPSHOT (defect #3 of EV-N1A-EMU24-20260831-0001) ---------
+# Every ThrowError error path in the overlay MUST be preceded (within the
+# enclosing block) by a DiagAndThrow call that emits the diagnostic
+# snapshot. This assertion counts DiagAndThrow call sites and rejects any
+# bare `return ThrowError(` that is NOT inside the DiagAndThrow wrapper
+# itself (the wrapper's single `return ThrowError(env, msg);` line is the
+# only permitted bare call).
+OVERLAY="$ROOT/napi/n1a_overlay.cpp"
+DIAG_CALLS="$(grep -c 'DiagAndThrow(env' "$OVERLAY" || true)"
+BARE_THROWS="$(grep -c 'return ThrowError(env,' "$OVERLAY" || true)"
+# The wrapper itself has exactly 1 bare `return ThrowError(env, msg);`.
+[ "$BARE_THROWS" -le 1 ] \
+    || die "THROW_SNAPSHOT violation: $BARE_THROWS bare ThrowError returns (expected <=1, the DiagAndThrow wrapper); every error path must go through DiagAndThrow"
+[ "$DIAG_CALLS" -ge 1 ] \
+    || die "THROW_SNAPSHOT violation: 0 DiagAndThrow call sites found in overlay"
+log "THROW_SNAPSHOT OK: $DIAG_CALLS DiagAndThrow call sites, $BARE_THROWS bare ThrowError (wrapper only)"
+
 # --- 2. Rust core dual-ABI build (--locked: Cargo.lock is authoritative) ---
 # ring 0.17's build script compiles assembly via the `cc` crate; point it at the
 # official OHOS clang so the objects match the target (same as N0).

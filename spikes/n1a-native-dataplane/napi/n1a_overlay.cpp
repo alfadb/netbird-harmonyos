@@ -47,6 +47,7 @@
 #include <hilog/log.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string.h>
 
@@ -121,9 +122,95 @@ const char *C5MarkerName(int32_t status) {
     }
 }
 
+// Diagnostic snapshot (observability defect #3 of EV-N1A-EMU24-20260831-0001):
+// every ThrowError site MUST call EmitDiagnosticSnapshot first so the probe's
+// real field values survive on the abnormal path. The runner collects these
+// lines into <id>-overlay-diag.log (evidence channel; not a gate).
+constexpr size_t kDiagJsonChunk = 380; // ≤380-byte JSON chunks (≤488 hilog cap)
+
+void EmitDiagnosticSnapshot(const N1aDataplaneResult *probe, const char *stage) {
+    if (probe == nullptr) {
+        OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+            "N1A_DIAG|stage=%{public}s|probe=null", stage);
+        return;
+    }
+    OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+        "N1A_DIAG|stage=%{public}s|ok=%{public}d|"
+        "c=[%{public}d,%{public}d,%{public}d,%{public}d,%{public}d,"
+        "%{public}d,%{public}d,%{public}d,%{public}d]|"
+        "v=%{public}d|mm=%{public}d|lost=%{public}d|bp=%{public}d|"
+        "c7fd2=%{public}d|c7set=%{public}d|c7tid=%{public}d|c8free=%{public}d|"
+        "pm=%{public}s",
+        stage,
+        probe->ok,
+        probe->criteria[0], probe->criteria[1], probe->criteria[2],
+        probe->criteria[3], probe->criteria[4], probe->criteria[5],
+        probe->criteria[6], probe->criteria[7], probe->criteria[8],
+        probe->verified_packets_total, probe->mismatch_count,
+        probe->lost_count, probe->backpressure_triggered,
+        probe->c7_fd2_closed, probe->c7_fdset_diff_count,
+        probe->c7_new_tids, probe->c8_tunnels_freed,
+        reinterpret_cast<const char *>(probe->process_model));
+    // Chunked JSON block: the full detail document, ≤380 bytes per line.
+    // The JSON is verified single-line ASCII by a Rust unit test
+    // (probe_json_is_transport_safe_ascii_single_line_no_pipe), so byte
+    // slicing is safe. The digest's first 16 hex chars identify the block.
+    const size_t json_len = strnlen(probe->json, kJsonMaxLen);
+    if (json_len > 0 && json_len < kJsonMaxLen) {
+        char sha16[17];
+        for (int i = 0; i < 16 && probe->detail_sha256[i] != 0; i++) {
+            sha16[i] = static_cast<char>(probe->detail_sha256[i]);
+        }
+        sha16[16] = '\0';
+        OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+            "N1A_DIAG_JSON_BEG|sha=%{public}s", sha16);
+        for (size_t off = 0; off < json_len; off += kDiagJsonChunk) {
+            const size_t n = (json_len - off < kDiagJsonChunk)
+                ? (json_len - off) : kDiagJsonChunk;
+            OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+                "N1A_DIAG_JSON|%{public}.*s", static_cast<int>(n),
+                probe->json + off);
+        }
+        OH_LOG_Print(LOG_APP, LOG_ERROR, kLogDomain, kLogTag,
+            "N1A_DIAG_JSON_END|sha=%{public}s|bytes=%{public}zu", sha16, json_len);
+    }
+}
+
+// Formats the key fields as a bracketed suffix for the ThrowError message
+// (defect #3: even if hilog is lost, the exception message carries the fields).
+// Returns a static buffer — safe because ThrowError never returns.
+const char *FieldSuffix(const N1aDataplaneResult *probe) {
+    static char buf[192];
+    if (probe == nullptr) {
+        snprintf(buf, sizeof(buf), " [probe=null]");
+        return buf;
+    }
+    snprintf(buf, sizeof(buf),
+        " [ok=%d c=[%d,%d,%d,%d,%d,%d,%d,%d,%d] v=%d mm=%d lost=%d "
+        "c7fd2=%d c8free=%d pm=%s]",
+        probe->ok,
+        probe->criteria[0], probe->criteria[1], probe->criteria[2],
+        probe->criteria[3], probe->criteria[4], probe->criteria[5],
+        probe->criteria[6], probe->criteria[7], probe->criteria[8],
+        probe->verified_packets_total, probe->mismatch_count,
+        probe->lost_count, probe->c7_fd2_closed, probe->c8_tunnels_freed,
+        reinterpret_cast<const char *>(probe->process_model));
+    return buf;
+}
+
 napi_value ThrowError(napi_env env, const char *message) {
     napi_throw_error(env, nullptr, message);
     return nullptr;
+}
+
+// Convenience wrapper: emit the diagnostic snapshot, then throw with the
+// field suffix appended. Every abnormal path in RunN1aProbe uses this.
+napi_value DiagAndThrow(napi_env env, const N1aDataplaneResult *probe,
+                        const char *stage, const char *message) {
+    EmitDiagnosticSnapshot(probe, stage);
+    char msg[512];
+    snprintf(msg, sizeof(msg), "%s%s", message, FieldSuffix(probe));
+    return ThrowError(env, msg);
 }
 
 bool SetNamedInt32(napi_env env, napi_value object, const char *name, int32_t value) {
@@ -178,20 +265,21 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
 
     const char *version = n1a_probe_version();
     if (version == nullptr) {
-        return ThrowError(env, "n1a_probe_version returned null");
+        return DiagAndThrow(env, nullptr, "version-null", "n1a_probe_version returned null");
     }
 
     ResultGuard guard;
     guard.ptr = n1a_dataplane_probe(process_model_arg);
     if (guard.ptr == nullptr) {
-        return ThrowError(env, "n1a_dataplane_probe returned null");
+        return DiagAndThrow(env, nullptr, "probe-null", "n1a_dataplane_probe returned null");
     }
     N1aDataplaneResult *probe = guard.ptr;
 
     // The JSON document must be a NUL-terminated string within a sane bound.
     const size_t json_len = strnlen(probe->json, kJsonMaxLen);
     if (json_len == 0 || json_len == kJsonMaxLen) {
-        return ThrowError(env, "probe json is empty or not NUL-terminated");
+        return DiagAndThrow(env, probe, "json-bad",
+            "probe json is empty or not NUL-terminated");
     }
     // Defect 2 transport digest: NUL-terminated lowercase hex (64 chars).
     char detail_sha[kDetailShaHexLen + 1];
@@ -202,7 +290,8 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     }
     detail_sha[sha_len] = '\0';
     if (sha_len != kDetailShaHexLen) {
-        return ThrowError(env, "probe detail_sha256 is not 64 hex chars");
+        return DiagAndThrow(env, probe, "sha-bad",
+            "probe detail_sha256 is not 64 hex chars");
     }
 
     // Fail-closed consistency: criterion statuses must be in range, and
@@ -211,7 +300,8 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     for (int i = 0; i < 9; i++) {
         const int32_t status = probe->criteria[i];
         if (status != 0 && status != 1 && status != 2) {
-            return ThrowError(env, "probe criterion status out of range");
+            return DiagAndThrow(env, probe, "criterion-range",
+                "probe criterion status out of range");
         }
         if (status == 0) {
             any_failed = true;
@@ -220,21 +310,25 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     // C5 (index 4) may be 2 = not-triggered without failing the verdict.
     bool verdict_consistent = (probe->ok == 0) == !any_failed;
     if (!verdict_consistent) {
-        return ThrowError(env, "probe verdict inconsistent with criterion statuses");
+        return DiagAndThrow(env, probe, "verdict-criteria-mismatch",
+            "probe verdict inconsistent with criterion statuses");
     }
     if (probe->ok == 0 && (probe->verified_packets_total != 2000 ||
                            probe->mismatch_count != 0 || probe->lost_count != 0)) {
-        return ThrowError(env, "probe verdict inconsistent with integrity counters");
+        return DiagAndThrow(env, probe, "verdict-integrity-mismatch",
+            "probe verdict inconsistent with integrity counters");
     }
 
     napi_value result = nullptr;
     if (napi_create_object(env, &result) != napi_ok) {
-        return ThrowError(env, "failed to create runN1aProbe result");
+        return DiagAndThrow(env, probe, "create-object",
+            "failed to create runN1aProbe result");
     }
     if (!SetNamedString(env, result, "version", version) ||
         !SetNamedBool(env, result, "ok", probe->ok == 0) ||
         !SetNamedString(env, result, "verdict", probe->ok == 0 ? "pass" : "fail")) {
-        return ThrowError(env, "failed to build runN1aProbe result");
+        return DiagAndThrow(env, probe, "build-basic",
+            "failed to build runN1aProbe result");
     }
     for (int i = 0; i < 9; i++) {
         char name[4] = {'c', static_cast<char>('1' + i), 0};
@@ -245,7 +339,8 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
         const char *value = (i == 4) ? C5MarkerName(probe->criteria[i])
                                     : CriterionName(probe->criteria[i]);
         if (!SetNamedString(env, result, name, value)) {
-            return ThrowError(env, "failed to build runN1aProbe result");
+            return DiagAndThrow(env, probe, "build-criteria",
+                "failed to build runN1aProbe result");
         }
     }
     if (!SetNamedInt32(env, result, "verifiedPacketsTotal", probe->verified_packets_total) ||
@@ -266,7 +361,8 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
                         reinterpret_cast<const char *>(probe->process_model)) ||
         !SetNamedStringLen(env, result, "detailJson", probe->json, json_len) ||
         !SetNamedStringLen(env, result, "detailSha256", detail_sha, sha_len)) {
-        return ThrowError(env, "failed to build runN1aProbe result");
+        return DiagAndThrow(env, probe, "build-scalars",
+            "failed to build runN1aProbe result");
     }
 
     // Single-line machine-readable marker with the C9-pinned field set

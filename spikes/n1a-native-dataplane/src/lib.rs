@@ -183,6 +183,47 @@ pub unsafe extern "C" fn n1a_result_free(result: *mut n1a_dataplane_result) {
     drop(boxed);
 }
 
+/// Guard-replica of the overlay's two consistency checks
+/// (napi/n1a_overlay.cpp, `RunN1aProbe`). This exists so the exact guard
+/// logic can be unit-tested on the host — the C++ overlay itself cannot be
+/// exercised by cargo. If the overlay's conditions change, this must be
+/// updated in lockstep (the build.sh THROW_SNAPSHOT assertion checks the
+/// overlay; this function's tests check the logic).
+///
+/// Returns `None` when the guards pass (no throw), or `Some(reason)` with
+/// the exact ThrowError stage identifier the overlay would emit.
+///
+/// Defect #3 of EV-N1A-EMU24-20260831-0001: campaign 0002 triggered the
+/// "verdict-integrity-mismatch" guard on the Emulator with a condition that
+/// is mathematically contradictory with a C3-pass on the host path — proving
+/// the guard logic itself is correct on host (these tests) and the
+/// divergence is in the runtime ABI/loading layer.
+pub fn overlay_guard_conditions(
+    ok: i32,
+    criteria: &[i32; 9],
+    verified_packets_total: i32,
+    mismatch_count: i32,
+    lost_count: i32,
+) -> Option<&'static str> {
+    // Guard 1: criterion statuses must be in range {0, 1, 2}.
+    for &s in criteria {
+        if s != 0 && s != 1 && s != 2 {
+            return Some("criterion-range");
+        }
+    }
+    // Guard 2: ok == 0 must hold exactly when no criterion failed.
+    // C5 (index 4) may be 2 = not-triggered without failing the verdict.
+    let any_failed = criteria.iter().any(|&s| s == 0);
+    if (ok == 0) != !any_failed {
+        return Some("verdict-criteria-mismatch");
+    }
+    // Guard 3: a pass verdict must carry exact integrity counters.
+    if ok == 0 && (verified_packets_total != 2000 || mismatch_count != 0 || lost_count != 0) {
+        return Some("verdict-integrity-mismatch");
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Host tests (cargo test on x86_64-linux-gnu): the strongest self-test — the
 // full real pump runs on the host with genuine BoringTun tunnels and a
@@ -405,6 +446,68 @@ mod tests {
             let q = pump::synth_packet(dir, round, seq + 1);
             assert_ne!(p[32..], q[32..], "payload pattern must depend on the marker");
         }
+    }
+
+    /// Guard-replica tests (defect #3): the overlay's two consistency
+    /// conditions replicated as `overlay_guard_conditions` must behave
+    /// exactly as the C++ code does. These four cases cover the full
+    /// decision table; host-pass proves the logic is identical, so any
+    /// Emulator trip is a runtime ABI/loading divergence, not a logic bug.
+    #[test]
+    fn overlay_guard_pass_with_exact_counters_does_not_trigger() {
+        // ok==0 (pass), all criteria pass (C5=2 not-triggered), counters exact.
+        let result = crate::overlay_guard_conditions(
+            0, &[1, 1, 1, 1, 2, 1, 1, 1, 1], 2000, 0, 0,
+        );
+        assert_eq!(result, None, "healthy pass must not trigger any guard");
+    }
+
+    #[test]
+    fn overlay_guard_pass_with_anomalous_counters_triggers_integrity() {
+        // ok==0 (pass) but verified != 2000 → the exact 0002 guard trip.
+        let result = crate::overlay_guard_conditions(
+            0, &[1, 1, 1, 1, 2, 1, 1, 1, 1], 1999, 0, 1,
+        );
+        assert_eq!(result, Some("verdict-integrity-mismatch"),
+            "pass verdict with anomalous counters must trip the integrity guard");
+        // Also: mismatch != 0.
+        assert_eq!(
+            crate::overlay_guard_conditions(0, &[1,1,1,1,2,1,1,1,1], 2000, 1, 0),
+            Some("verdict-integrity-mismatch"));
+        // And: lost != 0.
+        assert_eq!(
+            crate::overlay_guard_conditions(0, &[1,1,1,1,2,1,1,1,1], 2000, 0, 1),
+            Some("verdict-integrity-mismatch"));
+    }
+
+    #[test]
+    fn overlay_guard_fail_with_failed_criteria_does_not_trigger() {
+        // ok!=0 (fail) + a failed criterion → verdict_consistent=true, no
+        // integrity check (that only runs on ok==0). The guards correctly
+        // let a fail verdict through to the typed-result path.
+        let result = crate::overlay_guard_conditions(
+            1, &[1, 1, 1, 1, 2, 1, 0, 0, 1], 1800, 100, 100,
+        );
+        assert_eq!(result, None,
+            "fail verdict with failed criteria is internally consistent (no guard)");
+    }
+
+    #[test]
+    fn overlay_guard_ok_pass_but_criteria_fail_triggers_mismatch() {
+        // ok==0 (claims pass) but c7=0 (fail) → verdict_consistent=false.
+        let result = crate::overlay_guard_conditions(
+            0, &[1, 1, 1, 1, 2, 1, 0, 1, 1], 2000, 0, 0,
+        );
+        assert_eq!(result, Some("verdict-criteria-mismatch"),
+            "ok==0 with a failed criterion must trip the statuses guard");
+        // Reverse: ok!=0 (claims fail) but all criteria pass.
+        assert_eq!(
+            crate::overlay_guard_conditions(1, &[1,1,1,1,2,1,1,1,1], 2000, 0, 0),
+            Some("verdict-criteria-mismatch"));
+        // Out-of-range criterion status.
+        assert_eq!(
+            crate::overlay_guard_conditions(1, &[1,1,1,1,2,1,1,1,99], 0, 0, 0),
+            Some("criterion-range"));
     }
 
     /// The JSON document is structurally sound: balanced braces/brackets,

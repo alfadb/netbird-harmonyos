@@ -76,6 +76,20 @@ export default class OpenHarmonyTestRunner implements TestRunner {
         // The full detail travels on the chunked lines; the marker keeps the
         // short human-readable context only.
         emitChunkedJson(err.detailJson, err.detailSha256);
+      } else {
+        // Defect #3 of EV-N1A-EMU24-20260831-0001: a native NAPI throw
+        // (overlay DiagAndThrow) is NOT an N1aProbeError. The overlay has
+        // already emitted N1A_DIAG|... + N1A_DIAG_JSON|... lines carrying
+        // the full probe field snapshot and JSON; this fallback line
+        // guarantees the N1A_JSON channel also fires on every failure path
+        // so the runner's chunk collector sees at least one artifact. The
+        // sha is a fixed sentinel (all-zeros) identifying it as a fallback
+        // chunk, not a probe detail chunk.
+        const fallbackJson: string =
+          `{"verdict":"fail","native_throw":true,"error":${JSON.stringify(detail)}}`;
+        emitChunkedJson(fallbackJson, '0000000000000000000000000000000000000000000000000000000000000000');
+        hilog.error(DOMAIN, TAG,
+          'N1A_CATCH_FALLBACK|native_throw=true|overlay_diag_expected=true');
       }
       delegator.printSync(marker);
       delegator.finishTest(marker, 1, () => {});

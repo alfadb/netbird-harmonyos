@@ -212,6 +212,7 @@ SOURCE_MANIFEST=""
 SCREENSHOT_A=""
 SCREENSHOT_B=""
 PROBE_DETAIL=""
+OVERLAY_DIAG=""
 
 # --- helper functions -------------------------------------------------------
 print_command() {
@@ -430,7 +431,7 @@ check_no_clobber() {
   local f
   for f in "$TRANSCRIPT" "$TAG_HILOG" "$APP_HILOG" "$PAGE_HILOG" "$MANIFEST" \
     "$CONSOLE" "$BUILD_LOG" "$N1A_BUILD_LOG" "$SNAPSHOT_LOG" "$AA_TEST_LOG" \
-    "$AA_START_LOG" "$SOURCE_MANIFEST" "$PROBE_DETAIL" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
+    "$AA_START_LOG" "$SOURCE_MANIFEST" "$PROBE_DETAIL" "$OVERLAY_DIAG" "$SCREENSHOT_A" "$SCREENSHOT_B"; do
     if [[ -n "$f" && -e "$f" ]]; then
       printf 'REFUSE_OVERWRITE=evidence file already exists: %s; refusing to overwrite fixed evidence (use a fresh EVIDENCE_ID or EVIDENCE_ROOT)\n' "$f" >&2
       return 1
@@ -596,6 +597,31 @@ reassemble_probe_json() {
   [[ "${reasm_sha:0:16}" == "$declared_sha" ]] || { rm -f "$out_path"; return 1; }
   printf '%s' "$reasm_sha"
   return 0
+}
+
+
+# Defect #3 (EV-N1A-EMU24-20260831-0001): extract all N1A_DIAG lines and
+# N1A_DIAG_JSON blocks from the hilog sources into a single overlay-diag
+# artifact. Pure diagnostic channel -- never participates in the verdict.
+# The extraction is best-effort: the file is always created (even if empty)
+# so the manifest can bind its hash; absence of N1A_DIAG lines means the
+# overlay never hit a ThrowError path (healthy) or the hilog was lost.
+extract_overlay_diag() {
+  local out_file="$1"; shift
+  local f
+  : >"$out_file"
+  for f in "$@"; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    grep -F 'N1A_DIAG' "$f" 2>/dev/null >>"$out_file" || true
+    grep -F 'N1A_CATCH_FALLBACK' "$f" 2>/dev/null >>"$out_file" || true
+  done
+  # Deduplicate identical lines (hilog tag + app logs may duplicate).
+  if [[ -s "$out_file" ]]; then
+    local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/n1a-diag-dedup.XXXXXX")"
+    sort -u "$out_file" >"$tmp"
+    mv "$tmp" "$out_file"
+  fi
+  printf 'OVERLAY_DIAG_LINES=%s\n' "$(wc -l <"$out_file")" >&2
 }
 
 # Extract the guest TestFinished-ResultCode from the aa-test log (last match).
@@ -1105,6 +1131,48 @@ selftest_run() {
 
   rm -rf "$rj_tmp"
 
+  # --- overlay-diag extraction (defect #3) ------------------------------------
+  local od_tmp od_out
+  od_tmp="$(mktemp -d "${TMPDIR:-/tmp}/n1a-selftest-diag.XXXXXX")"
+  od_out="$od_tmp/diag.log"
+  # (a) Normal N1A_DIAG lines from multiple sources + dedup of identical lines.
+  printf 'N1A_DIAG|stage=verdict-integrity-mismatch|ok=0|v=1999\n' >"$od_tmp/a.log"
+  printf 'N1A_DIAG_JSON_BEG|sha=abc123\n' >>"$od_tmp/a.log"
+  printf 'N1A_CATCH_FALLBACK|native_throw=true\n' >>"$od_tmp/a.log"
+  printf 'N1A_DIAG|stage=verdict-integrity-mismatch|ok=0|v=1999\n' >"$od_tmp/b.log" # dup of a.log's first
+  printf 'unrelated hilog line\n' >>"$od_tmp/b.log"
+  extract_overlay_diag "$od_out" "$od_tmp/a.log" "$od_tmp/b.log" 2>/dev/null
+  local od_lines
+  od_lines="$(wc -l <"$od_out" | tr -d ' ')"
+  if [[ "$od_lines" -eq 3 ]] && grep -qF 'N1A_DIAG|stage=' "$od_out" \
+      && grep -qF 'N1A_DIAG_JSON_BEG' "$od_out" \
+      && grep -qF 'N1A_CATCH_FALLBACK' "$od_out" \
+      && ! grep -qF 'unrelated' "$od_out"; then
+    printf 'SELFTEST diag-extract=pass\n'
+  else
+    printf 'SELFTEST FAIL diag-extract (lines=%s expected 3)\n' "$od_lines"
+    rc=1
+  fi
+  # (b) Empty sources -> empty but existing file.
+  : >"$od_tmp/empty.log"
+  extract_overlay_diag "$od_out" "$od_tmp/empty.log" 2>/dev/null
+  if [[ -f "$od_out" ]] && [[ ! -s "$od_out" ]]; then
+    printf 'SELFTEST diag-empty=pass\n'
+  else
+    printf 'SELFTEST FAIL diag-empty\n'
+    rc=1
+  fi
+  # (c) null-probe diag line (defect #3 overlay null path).
+  printf 'N1A_DIAG|stage=probe-null|probe=null\n' >"$od_tmp/c.log"
+  extract_overlay_diag "$od_out" "$od_tmp/c.log" 2>/dev/null
+  if grep -qF 'stage=probe-null|probe=null' "$od_out"; then
+    printf 'SELFTEST diag-null-probe=pass\n'
+  else
+    printf 'SELFTEST FAIL diag-null-probe\n'
+    rc=1
+  fi
+  rm -rf "$od_tmp"
+
   # --- teardown no-op --------------------------------------------------------
   emulator_started=0
   installed=0
@@ -1197,6 +1265,7 @@ else
   AA_START_LOG="$EVIDENCE_ROOT/$EVIDENCE_ID-aa-start.log"
   SOURCE_MANIFEST="$EVIDENCE_ROOT/$EVIDENCE_ID-source-manifest.txt"
   PROBE_DETAIL="$EVIDENCE_ROOT/$EVIDENCE_ID-probe-detail.json"
+  OVERLAY_DIAG="$EVIDENCE_ROOT/$EVIDENCE_ID-overlay-diag.log"
   SCREENSHOT_A="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-a.png"
   SCREENSHOT_B="$EVIDENCE_ROOT/$EVIDENCE_ID-phase-b-page.png"
   check_no_clobber || exit 2
@@ -1209,6 +1278,7 @@ else
     AA_START_LOG="$DRY_TMP/aa-start.log"
     SOURCE_MANIFEST="$DRY_TMP/source-manifest.txt"
     PROBE_DETAIL=""
+    OVERLAY_DIAG=""
     TRANSCRIPT=""
     TAG_HILOG=""
     APP_HILOG=""
@@ -1719,6 +1789,11 @@ printf 'TAG_HILOG_LINES=%s\n' "$(wc -l <"$TAG_HILOG")"
 printf 'APP_HILOG_LINES=%s\n' "$(wc -l <"$APP_HILOG")"
 run sha256sum "$TAG_HILOG" "$APP_HILOG"
 
+# --- 10b. overlay diagnostic extraction (defect #3) ------------------------
+# Collect N1A_DIAG lines from all phase-A hilog sources into the overlay-diag
+# artifact. Best-effort: always creates the file for manifest binding.
+extract_overlay_diag "$OVERLAY_DIAG" "$TAG_HILOG" "$APP_HILOG" "$AA_TEST_LOG"
+
 # --- 11. phase-A judgment (frozen) ---------------------------------------------
 mapfile -t distinct_app_markers < <(collect_distinct_markers "$MARKER_PREFIX" "$TAG_HILOG" "$AA_TEST_LOG" "$APP_HILOG")
 printf 'MARKER_DISTINCT_COUNT=%s\n' "${#distinct_app_markers[@]}"
@@ -1762,6 +1837,13 @@ else
   printf 'probe_detail_json_sha256=%s\n' "$probe_detail_sha" >>"$MANIFEST"
   printf 'probe_detail_json_bytes=%s\n' "$(stat -c %s "$PROBE_DETAIL")" >>"$MANIFEST"
   printf 'probe_detail_json_sha16=%s\n' "${probe_detail_sha:0:16}" >>"$MANIFEST"
+  # Overlay diagnostic artifact hash (defect #3): always bound, even if empty.
+  if [[ -n "$OVERLAY_DIAG" && -f "$OVERLAY_DIAG" ]]; then
+    printf 'overlay_diag_sha256=%s\n' "$(sha256sum "$OVERLAY_DIAG" | awk '{print $1}')" >>"$MANIFEST"
+    printf 'overlay_diag_lines=%s\n' "$(wc -l <"$OVERLAY_DIAG")" >>"$MANIFEST"
+  else
+    printf 'overlay_diag_sha256=absent\n' >>"$MANIFEST"
+  fi
 
   printf 'N1A_RESULT_LINE=%s\n' "$marker_line"
   phase_a_verdict="$(marker_field "$marker_line" verdict)"
@@ -1907,6 +1989,13 @@ hdc shell "hilog -x -T $APP_TAG -v year -v zone" >"$PAGE_HILOG" 2>&1 || true
 hdc shell "hilog -x -T $TEST_TAG -v year -v zone" >>"$PAGE_HILOG" 2>&1 || true
 printf 'PAGE_HILOG_LINES=%s\n' "$(wc -l <"$PAGE_HILOG")"
 run sha256sum "$PAGE_HILOG"
+
+# Phase-B diagnostic extraction (defect #3): append any phase-B N1A_DIAG
+# lines to the overlay-diag artifact (phase-A lines are already there).
+if [[ -n "$OVERLAY_DIAG" && -f "$OVERLAY_DIAG" ]]; then
+  grep -F 'N1A_DIAG' "$PAGE_HILOG" 2>/dev/null >>"$OVERLAY_DIAG" || true
+  sort -u "$OVERLAY_DIAG" -o "$OVERLAY_DIAG" 2>/dev/null || true
+fi
 
 mapfile -t distinct_page_markers < <(collect_distinct_markers "$MARKER_PREFIX" "$PAGE_HILOG")
 printf 'PAGE_MARKER_DISTINCT_COUNT=%s\n' "${#distinct_page_markers[@]}"
