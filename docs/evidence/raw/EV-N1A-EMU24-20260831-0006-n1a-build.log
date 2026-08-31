@@ -1,0 +1,29 @@
+$ bash /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/build.sh
+[n1a-build] boringtun-0.7.1.crate sha256 OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[n1a-build] Cargo.lock boringtun checksum OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[n1a-build] STATIC_NO_PTHREAD OK: 0 forbidden threading-API occurrences in src/ + napi/
+[n1a-build] THROW_SNAPSHOT OK: 11 DiagAndThrow call sites, 1 bare ThrowError (wrapper only)
+[n1a-build] cargo build --release --target x86_64-unknown-linux-ohos (linker=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/x86_64-unknown-linux-ohos-clang, ar=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/llvm-ar)
+    Finished `release` profile [optimized] target(s) in 0.07s
+[n1a-build] cargo build --release --target aarch64-unknown-linux-ohos (linker=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang, ar=/home/worker/harmonyos/command-line-tools/6.1.1.290/sdk/default/openharmony/native/llvm/bin/llvm-ar)
+    Finished `release` profile [optimized] target(s) in 0.07s
+[n1a-build] clang++ overlay -> /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (x86_64-unknown-linux-ohos)
+[n1a-build] clang++ overlay -> /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (aarch64-unknown-linux-ohos)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (x86-64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (ARM aarch64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/target/x86_64-unknown-linux-ohos/release/libn1acore.so (x86-64, NEEDED has no libc.so.6)
+[n1a-build] ELF OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/target/aarch64-unknown-linux-ohos/release/libn1acore.so (ARM aarch64, NEEDED has no libc.so.6)
+[n1a-build] symbols OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so (n1a_* C ABI + full BoringTun data-plane C ABI)
+[n1a-build] symbols OK: /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so (n1a_* C ABI + full BoringTun data-plane C ABI)
+[n1a-build] artifact sha256:
+[n1a-build]   070b6d62cc66456af2090173c6c9f11c8163c859e9f87c57359578afc7ee1e8c  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so
+[n1a-build]   64cb2ada85e20f50e491c265542637832decc81acbe39004e3fb79b2fdbdf2d6  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so
+[n1a-build]   070b6d62cc66456af2090173c6c9f11c8163c859e9f87c57359578afc7ee1e8c  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libentry.so
+[n1a-build]   f41acef7450afd74dc6f8175bcf3ca017e91c308ec201013f1ad0c0eca275041  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libn1acore.a
+[n1a-build]   c692292c133a35464c9937de8c01b8113e02c8b49a6851292aff9b86f091d21c  /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/libn1acore.so
+[n1a-build] hap-snapshot identity OK (byte-identical)
+[n1a-build] build OK
+[n1a-build] artifacts:
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/x86_64/libentry.so        (x86_64 overlay, Emulator gate ABI)
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/aarch64/libentry.so       (aarch64 overlay, cross-compile only)
+[n1a-build]   /home/worker/work/base/netbird-harmonyos/spikes/n1a-native-dataplane/out/hap-snapshot/x86_64/      (libentry.so + libn1acore.a + libn1acore.so)
