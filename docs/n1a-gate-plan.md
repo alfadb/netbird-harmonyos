@@ -1,6 +1,6 @@
 # N1a 门计划与判据预注册（native WG 数据面 × 回环数据泵，Emulator）
 
-最后核验：2026-08-30 ｜ 状态：`criteria-revised-r2-pending-re-review`（两轮审查修订；r2 修复停止条件节 semantic-drift 并采纳全部 minor；同一审查席复审确认前不得开始测量；测量后不得追认或修改判据——ADJ-T0-NATIVE-NX-20260830-0001 §二.7）
+最后核验：2026-08-30 ｜ 状态：`criteria-frozen-r2`（第三轮复审 pass（2026-08-30，isolated-xai-grok-4-6-reviewer）：r0 的 4 blocker + 全部 major/minor 与 r1 的 1 blocker + 3 minor 全部 adopted，无新 freeze-blocker；判据已冻结，测量可以开始；测量后不得追认或修改判据——ADJ-T0-NATIVE-NX-20260830-0001 §二.7。记录级观察（不阻塞）：C5 聚合 token `pass-induced` 与 C9 marker 值 `induced` 为两个层面的枚举，映射 `backpressure_induced=true → pass-induced → c5=induced`，marker 值域以 C9 枚举为准）
 
 ## 定义与归属
 
@@ -63,7 +63,7 @@ N0 决议第 9 条停止条件（共 5 项，无 6-9）全文沿用如下；出�
 
 ## 流程
 
-1. 本判据文档（r1）交**同一独立审查席**复审确认后方可开始测量；
-2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照 r1 判据逐条核对；
+1. 本判据文档（r2，已冻结）经同一独立审查席三轮复审 pass（2026-08-30）；测量可以开始；
+2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照 r2 冻结判据逐条核对；
 3. 正式 Emulator campaign（runner 产 sealed evidence：沿 N0 `--dry-run`/formal 模式）；
 4. 证据登记（双轴）→ 记录级独立审查 → 收口。
