@@ -1,6 +1,6 @@
 # N1a 门计划与判据预注册（native WG 数据面 × 回环数据泵，Emulator）
 
-最后核验：2026-08-30 ｜ 状态：`criteria-revised-r1-pending-re-review`（第一轮独立审查 fail → 已按其逐字修正文本修订为 r1；同一审查席复审确认前不得开始测量；测量后不得追认或修改判据——ADJ-T0-NATIVE-NX-20260830-0001 §二.7）
+最后核验：2026-08-30 ｜ 状态：`criteria-revised-r2-pending-re-review`（两轮审查修订；r2 修复停止条件节 semantic-drift 并采纳全部 minor；同一审查席复审确认前不得开始测量；测量后不得追认或修改判据——ADJ-T0-NATIVE-NX-20260830-0001 §二.7）
 
 ## 定义与归属
 
@@ -26,14 +26,14 @@ N1a 是 [native N1-Nx 治理决议](native-nx-governance.md) N1 拆分的 Emulat
 | # | 判据 | pass 条件（fail-closed） |
 | --- | --- | --- |
 | C1 | 库加载 | 唯一 native 成员在普通 `EntryAbility` 内 dlopen 加载成功（N0 同路径）；非 0 退出码/异常 → fail |
-| C2 | 握手建立 | 仅 A 侧调用 `wireguard_force_handshake`（禁止双侧同时 initiation）。按 ffi 合同转发：A init → B `wireguard_read` 得 `WRITE_TO_NETWORK`（response）→ 回 A `wireguard_read` 得 `WRITE_TO_NETWORK`（keepalive data）→ 回 B `wireguard_read`；每一次 `op==WRITE_TO_NETWORK` 必须对同一 tunnel 以空 `src` 重复 `wireguard_read` 直至 `WIREGUARD_DONE`。两侧 `wireguard_stats.time_since_last_handshake >= 0`（禁止引用不存在的 `state`）。时间盒 30s 内任一侧仍为 -1，或任一步 `WIREGUARD_ERROR` → **fail**（非 blocked） |
+| C2 | 握手建立 | 仅 A 侧调用 `wireguard_force_handshake`（禁止双侧同时 initiation）。按 ffi 合同转发：A init → B `wireguard_read` 得 `WRITE_TO_NETWORK`（response）→ 回 A `wireguard_read` 得 `WRITE_TO_NETWORK`（keepalive data）→ 回 B `wireguard_read`（空 keepalive data，该步 `op==WIREGUARD_DONE` 而非 `WRITE_TO_TUNNEL_IPV4`——实现者不得误等 IPV4）；每一次 `op==WRITE_TO_NETWORK` 必须对同一 tunnel 以空 `src` 重复 `wireguard_read` 直至 `WIREGUARD_DONE`。两侧 `wireguard_stats.time_since_last_handshake >= 0`（禁止引用不存在的 `state`）。时间盒 30s 内任一侧仍为 -1，或任一步 `WIREGUARD_ERROR` → **fail**（非 blocked） |
 | C3 | 逐包完整性 | 合成包必须是合法 IPv4（version=4，IHL≥5，total length 与缓冲一致），`(direction, round, seq)` 在 payload。每包：`wireguard_write` 返回 `op==WRITE_TO_NETWORK` 且 `size >= inner_len+32`；信道 UDP 载荷 ≠ 明文且前 4 字节 LE `uint32==4`；对端 `wireguard_read` 返回 `op==WRITE_TO_TUNNEL_IPV4` 且明文逐字节相等。两侧 `stats.tx_bytes`/`rx_bytes` 增量等于该方向内层字节合计。零丢失/零额外**只计** `WRITE_TO_TUNNEL_IPV4` 内层包，不计外层握手/keepalive UDP。C3 必须在**未缩小**的 socket 缓冲上作为独立 unsaturated 阶段运行（不得与 C5 饱和共用同一计数窗口）。负载量：每方向 10 轮 × 200 包 × 1024 字节。任一不符 → fail |
 | C4 | 吞吐下限 | 时钟仅覆盖 C3 unsaturated 泵送：第一包 `wireguard_write` 前启动，最后一包 `WRITE_TO_TUNNEL_IPV4` 校验后停止；排除握手、C5、C6。双向合计有效明文字节（与 C3 内层字节一致）÷ 该时间 ≥ **5 MiB/s**（1 MiB = 1048576 B）；低于即 fail，不调参重测 |
-| C5 | 背压 | **独立阶段**（C3 已 pass 之后）。信道 socket `O_NONBLOCK`；预注册 `SO_RCVBUF=SO_SNDBUF=4096`（实测 `getsockopt` 记入证据）。泵必须交错收发，`EAGAIN`/`ENOBUFS` 时重试不丢已 `sendto` 成功的数据报、不损坏已 `recvfrom` 的字节；时间盒 10s 内返回、无死锁。时间盒内至少一次真实 `errno∈{EAGAIN,ENOBUFS}` → `backpressure_induced=true`；死锁/超时/已收包损坏 → fail。**零次** EAGAIN/ENOBUFS → `backpressure_induced=false`，本子项登记 **`not-triggered`（≠ fail，≠ pass-backpressure）**，不得把 not-triggered 写成背压已验证。禁止把"部分写"列为 UDP 预期；C5 丢包不得回写 C3。聚合：C5 记录 `pass-induced`/`not-triggered`/`fail` 三态；not-triggered **不阻止** N1a overall pass（N1a 的背压主张降级为"attempted, not induced on this channel"写入 evidence）；C5 fail → overall fail |
+| C5 | 背压 | **独立阶段**（C3 已 pass 之后）。信道 socket `O_NONBLOCK`；预注册 `SO_RCVBUF=SO_SNDBUF=4096`（实测 `getsockopt` 记入证据）。泵必须交错收发，`EAGAIN`/`ENOBUFS` 时重试不丢已 `sendto` 成功的数据报、不损坏已 `recvfrom` 的字节；时间盒 10s 内返回、无死锁。时间盒内至少一次真实 `errno∈{EAGAIN,ENOBUFS}` → `backpressure_induced=true`；死锁/超时/已收包损坏 → fail。**零次** EAGAIN/ENOBUFS → `backpressure_induced=false`，本子项登记 **`not-triggered`（≠ fail）**，不得把 not-triggered 写成背压已验证。禁止把"部分写"列为 UDP 预期；C5 丢包不得回写 C3。聚合：C5 记录 `pass-induced`/`not-triggered`/`fail` 三态；not-triggered **不阻止** N1a overall pass（N1a 的背压主张降级为"attempted, not induced on this channel"写入 evidence）；C5 fail → overall fail |
 | C6 | tick 路径 | 两侧 `new_tunnel(..., keep_alive=1, ...)`。C3 之后插入 ≥3 个无数据间隔，每间隔 ≥1s，每侧至少调用一次 `wireguard_tick`。至少 3 次 tick 返回 `op==WRITE_TO_NETWORK`（persistent keepalive；空内层，外层经信道交给对端 `wireguard_read`，对端 `op==WIREGUARD_DONE`）。禁止 `WIREGUARD_ERROR`。间隔结束后两侧 `time_since_last_handshake >= 0`。tick 次数以探针计数器记录，**不得**向 `wireguard_stats` 索取 tick 字段。不满足 → fail。本阶段耗时不计入 C4 |
 | C7 | 资源稳定 | 快照 locus 与 E2 相同：主 ArkTS TID 上、同一 native 调用内 T0=创建 socket/`new_tunnel` 之前，T3=`tunnel_free`+全关 socket 之后（与 C8 同一基线）。`/proc/self/fd` 与 `/proc/self/task` 条目计数：T3==T0，否则 fail。探针不得自建 pthread。RSS 只登记、不设门 |
 | C8 | 清理 | `tunnel_free`×2、socket 全关；fd 快照回到与 C7 共用的 T0 基线 |
-| C9 | 结果页 | 恰好一行 `N1A_RESULT\|verdict=PASS\|...` 或 `FAIL`（字段集预注册，禁止竖线/换行污染）。页面截图非空（沿 E2 `YAVG`/非黑帧）且页上 PASS/FAIL 与 marker 一致；缺 marker、重复 marker、页/marker 不一致 → fail（非 blocked） |
+| C9 | 结果页 | 恰好一行 `N1A_RESULT\|verdict=<PASS\|FAIL>\|c5=<induced\|not-triggered\|fail>\|throughput_mibps=<x.xx>`（marker 字段集**钉死为这四个**，禁止竖线/换行污染；其余结果字段只进结构化 evidence 对象，不得事后升格为门）。页面截图非空（沿 E2 `YAVG`/非黑帧）且页上 PASS/FAIL 与 marker 一致；缺 marker、重复 marker、页/marker 不一致 → fail（非 blocked） |
 
 ## 聚合规则（fail-closed，逐字采纳审查文本）
 
@@ -41,7 +41,15 @@ overall `pass` 当且仅当 C1–C4、C6–C9 均为 pass，且 C5 ∈ {pass-ind
 
 ## 停止条件
 
-N0 决议停止条件（1-9）**全文沿用**（含私有/高维护 patch、第二协议面），并追加本门特化：
+N0 决议第 9 条停止条件（共 5 项，无 6-9）全文沿用如下；出现任一即停止并返回 T0：
+
+1. native core 需要私有/高维护 patch；
+2. 正式 NDK 无法构建/加载；
+3. 真实 VPN fd/protect 不可满足——本门不测该项（N1a 非范围）；归 N1b/N2。N1b/N2 若证实不可满足，停并回 T0，不得在 N1a 把「本门未使用 VPN fd」写成第 3 条已触发；
+4. 固定版本 compat oracle 无法定义；
+5. 范围扩展到第二协议面。
+
+并追加本门特化：
 
 1. 构建失败（含 BoringTun checksum 漂移、cargo 离线锁失败）；
 2. C1/C2 fail（加载或握手失败——测量事实，登记后停）；
