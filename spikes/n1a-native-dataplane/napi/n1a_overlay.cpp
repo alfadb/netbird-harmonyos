@@ -263,7 +263,13 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     // "entryability"; absence or a non-string argument -> NULL -> "unknown".
     const char *process_model_arg = nullptr;
     char process_model_buf[32];
-    size_t argc = 0;
+    // NAPI argc is bidirectional: input = argv capacity, output = actual
+    // argument count. Initializing to 0 tells NAPI the argv buffer holds
+    // zero elements, so argv is never populated even when arguments are
+    // passed — argv[0] stays null and the label silently drops to "unknown"
+    // (the process_model break seen in campaign 0009). Initialize to the
+    // argv array size (1) so the first argument actually lands in argv[0].
+    size_t argc = 1;
     napi_value argv[1] = {nullptr};
     if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) == napi_ok && argc >= 1) {
         napi_valuetype type = napi_undefined;
