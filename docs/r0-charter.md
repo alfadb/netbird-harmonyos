@@ -64,7 +64,7 @@ API 24 x86_64 phone Emulator 上所有客观可执行项仍须优先完成。Emu
 
 E4-E7 的完整义务没有免除；它们移交到 E8 `OPEN` 后同一具名物理设备的 R2/R3 门执行。E8 `OPEN` 只是物理设备投入许可，不表示 VPN、TUN、`protect` 或数据面通过。若新官方 image/build 包含所需授权或注册组件，旧 blocked 边界不再适用于当前聚合；历史记录保留，但必须从 E3 开始重验并按可达性执行后继项。
 
-E8 `OPEN` 的必要条件必须全部满足：所有客观可执行 Emulator 项均为 `reviewed-pass/pass`；当前R0正式基线（现v0.76.3）的 E1 官方 Go loader/runtime 形成 `reviewed-pass/pass`；全部目标元组与代码、上游、制品和输入哈希一致；`E3-PHYS-PREFLIGHT` 同时为 `record_status: reviewed-pass`、`verdict: pass`；独立聚合审查显式决定 `OPEN`。v0.74.6 历史 loader 负面证据保持原绑定；v0.76.3 由 `EV-E1-EMU24-20260809-0003` 实测 `reviewed-pass/blocked`（[证据](evidence/e1-stock-go-v0763-replay-0003-measured-blocked-2026-08-09.md)），仍无 `reviewed-pass/pass`。当前物理预检虽完成独立审查，但判定为 `reviewed-pass/blocked` 而非 `reviewed-pass/pass`，因此 E3 未关闭、E8 继续 `CLOSED`。
+E8 `OPEN` 的必要条件必须全部满足（**2026-08-30 经 [T0 治理决议](native-nx-governance.md) 修订**）：所有客观可执行 Emulator 项均为 `reviewed-pass/pass`（E1 除外——已转休眠门，见下）；**N6 native 端到端门 `reviewed-pass/pass`**（取代原"当前基线 E1 官方 Go loader/runtime `reviewed-pass/pass`"前提；E1 已由 `EV-E1-EMU24-20260809-0003` + `EV-G0PHYS1API26-20260830-0001` 双实测证明 stock 工具链不可达，按决议转 **dormant** 并显式排除出本集合，其历史判定不改写，重开触发器见决议 §六）；全部目标元组与代码、上游、制品和输入哈希一致；`E3-PHYS-PREFLIGHT` 同时为 `record_status: reviewed-pass`、`verdict: pass`（已达成，`EV-E3-PHYS1API26-20260829-0001`）；独立聚合审查显式决定 `OPEN`。E8 `OPEN` 的语义为 **N6 之后的产品/R 门投入许可**；N1-N7 的物理工作在 E8 `CLOSED` 期间按决议 §三 的受治理例外进行（每次物理 campaign 独立 AUTH/pair、冻结元组、白名单 HDC、单次执行、双向不外推），沿用 E3-PHYS-PREFLIGHT 与 G0 既有实践。
 
 ### `E3-PHYS-PREFLIGHT`
 

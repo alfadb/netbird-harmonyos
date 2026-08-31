@@ -1,6 +1,6 @@
 # T0 材料包：native N1-Nx 门定义与 E8 Go 前提处置（草案 v1，供 T0 审议）
 
-最后核验：2026-08-30 ｜ 状态：`draft-for-t0`（未经 T0 表决、未经用户批准，不构成决议）
+最后核验：2026-08-30 ｜ 状态：`t0-ballot-approved`（三席表决完成、用户批准；正式决议见 [native N1-Nx 治理决议](native-nx-governance.md)，本文降级为历史审议材料）
 
 本文为 N0 决议预注册的后续治理（"N0 与物理 E3 都 pass 后，先提交新 ADJ/T0 治理，定义 native N1-Nx 门并处理 E8 的 Go 专属前提"）准备审议材料。触发条件已全部满足，且证据强于预期。
 
@@ -36,15 +36,15 @@
 - 华为官方 FAQ 明文：**"当前禁止三方应用在手机设备上 Fork 进程"**（[harmonyos-faqs/faqs-ability-29](https://developer.huawei.com/consumer/cn/doc/harmonyos-faqs/faqs-ability-29)，2026-06-26 更新）。
 - 官方子进程 API（`childProcessManager.startChildProcess/startArkChildProcess/startNativeChildProcess`、`native_child_process.h` C API）设备差异条款**逐条限定 Tablet/PC/2in1**；phone 返回 `801`/`16000061`/`NCP_ERR_NOT_SUPPORTED`。fd 传递面（`ChildProcessArgs.fds`、`NativeChildProcess_FdList`≤16）仅随这些 phone 排除的 API 存在；SCM_RIGHTS 无公开应用 API。`aa start` 官方定位为 hdc shell 调试工具。
 - SELinux `normal_hap` 域 `neverallow` 应用可写沙箱文件执行；唯一 exec 近路（HNP）被开发者模式门控且 VPN 扩展隔离沙箱（`vpn_isolate_hap`，无子进程豁免条款）不含 HNP 挂载。
-- 附带纠偏：N0 所记 "ChildProcess API 10+" 应为 startChildProcess=API 11 / ArkTS 带 fd 版=API 12 / native C API=API 12/13（登记性修正，不改变结论）。
+- 附带核对：`EV-R1-EMU24-20260717-0008` 曾登记公开 Native Child API 面身份（仅证明 SDK 面存在）；本次取证补充其设备门控事实（startChildProcess=API 11 / ArkTS 带 fd 版=API 12 / native C API=API 12-13，phone 全部排除）。二者不矛盾：公开 API 面存在 ≠ phone 设备支持。
 - **处置：按 N0 决议第 6 条，E 方向（进程外 exec）就此关闭；路线 B 关闭；不开启 exec 探针。T0 只需在 A 线上表决。**
 
 ### 2.2 路线 A 下的 N1-Nx 门骨架（草案，逐门判据在每门开门前细化）
 
 | 门 | 内容 | 环境 | 核心 oracle/判据方向 |
 | --- | --- | --- | --- |
-| N1 | native WG 数据面×TUN 集成：BoringTun + `tun.Device` 等效数据泵 + VpnExtension fd + 双向真实报文（握手+回环） | Emulator 先行 | fd 所有权表（继承 E3/Tailscale-OHOS 审计结论）、加密握手成功、双向包计数一致、资源无泄漏 |
-| N2 | socket 保护与路由/DNS 壳基线：native/壳下 E5 等效判据（逐 socket protect 优先；bundle 排除仅 fallback 候选，须单独表决） | Emulator + 物理 | protect 语义映射表、路由/DNS 由系统壳声明、VPN 生命周期撤销复验 |
+| N1 | native WG 数据面×TUN 集成（**已由 T0 修正案 A2 拆分为 N1a/N1b**：N1a Emulator 回环数据泵；N1b 物理 VpnExtension fd——Emulator 三形态实测缺 VPN 授权组件，见矩阵证据） | N1a Emulator / N1b 物理 | fd 所有权表（继承 E3/Tailscale-OHOS 审计结论）、加密握手成功、双向包计数一致、资源无泄漏 |
+| N2 | socket 保护与路由/DNS 壳基线（**已由 A2 拆分 N2a/N2b**；protect 公开 API 取证门为前置——opus M4） | N2a 壳侧 / N2b 物理 | protect 语义映射表、路由/DNS 由系统壳声明、VPN 生命周期撤销复验 |
 | N3 | management 面一期：protobuf/gRPC native 客户端最小集（setup key 注册/Login/Sync） | Emulator（必要时物理） | **真实自托管 v0.76.3 management** 为行为 oracle；**前置：许可法律评估（BSD 声明映射效力 + combined/ 差异，见 §2.3）** |
 | N4 | signal + relay 面二期：gRPC stream + QUIC relay 最小集 | Emulator + 自托管 | 真实 signal/relay 互操作 |
 | N5 | ICE/conn state 三期：NetBird ICE fork 行为子集（候选交换、连接状态机） | Emulator | 对照固定 ICE fork 源码行为 + 可观察网络行为 |

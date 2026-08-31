@@ -114,6 +114,9 @@
   - 消除合成 build 风险；API `26` 仍由前一 rebind 实测、不从 build 推断；历史原始边界不改 IDs；后续见 `ADJ-20260807-0001`/`0002`；新 campaign 须新 commit/freeze
 - `spikes/e3-vpn-extension-physical-preflight-hap/`
   - API 23 物理预检探针与唯一 governed runner；旧 unsigned hash 仅为历史准备，设备执行只受专用计划授权
+- [native N1-Nx 门治理决议（T0 2026-08-30）](native-nx-governance.md)
+  - 跨厂商三席 T0（opus-5/grok-4.6/gpt-sol）表决、用户批准：路线 A（ArkTS 壳 + NAPI 薄桥 + 单一 native core）为唯一可行性路线；B/E 按两席取证关闭（phone 无公开进程启动/fd 传递机制）
+  - N1-Nx 七门骨架（N1a/N1b、N2a/N2b 拆分与绑定条款）；E8 Go 前提替换为 N6 端到端门、E1 转 dormant（三路触发器）；pre-E8 native 物理例外；许可法律评估为 N3 硬前置；bundle 排除零预授权
 - [G0 stock Go arm64 loader 物理探针计划与证据模板](g0-go-arm64-physical-probe.md)
   - N0 决议第 7 条预定的 E3 预检后第一物理后续动作：冻结元组上 stock（零补丁）Go 1.25.12 arm64 c-shared 的 loader 接受性与最小 runtime 冒烟单次测量
   - [执行授权登记（2026-08-30 · 0001，consumed-blocked）](evidence/g0-probe-authorization-2026-08-30-0001.md)：13 门全部执行，Live 实测 loader 拒绝（[证据](evidence/g0-probe-live-2026-08-30-0001.md) `reviewed-pass`/`blocked`，与 x86_64 Emulator 同错误族）；不是 E1 pass、不是 E8 输入；N0 pass + G0 blocked 构成 native N1-Nx + E8 Go 前提处置新 ADJ/T0 的双实测输入；E8 保持 `CLOSED`
