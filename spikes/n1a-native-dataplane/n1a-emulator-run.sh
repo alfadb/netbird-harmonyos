@@ -541,7 +541,7 @@ marker_field() {
 # digest. Prints the full 64-hex sha on stdout on success; returns 1 on any
 # transport failure (caller treats it as a runner DEFECT, not a measured
 # fail). The JSON document itself is unchanged - transport only.
-N1A_JSON_CHUNK_MAX=384
+N1A_JSON_CHUNK_MAX=320
 reassemble_probe_json() {
   local out_path="$1"; shift
   local f line m part total sha16 data

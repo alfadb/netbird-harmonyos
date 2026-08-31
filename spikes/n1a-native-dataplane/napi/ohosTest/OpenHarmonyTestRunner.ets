@@ -24,12 +24,14 @@ const TAG: string = 'N1aProbeTest';
 /**
  * Chunk size for the detailJson transport (defect 2 of
  * EV-N1A-EMU24-20260830-0001). The 0001 evidence measured the hilog message
- * truncation at ~488 bytes; the chunk header is ~57 bytes, so 384-byte data
- * chunks keep the full line (~441 message bytes) safely below the cap. The
+ * truncation at ~500 bytes INCLUDING the hilog timestamp/tag prefix (~100 bytes)
+ * plus the chunk protocol header (~50 bytes); 320-byte data chunks keep the
+ * full emitted line (~470 bytes) safely below the cap (verified in campaign 0005
+ * where 384-byte chunks were tail-truncated by the prefix-inclusive cap). The
  * probe JSON is pure ASCII (pinned by a Rust unit test), so UTF-16 code-unit
  * slicing equals byte slicing.
  */
-const JSON_CHUNK_BYTES = 384;
+const JSON_CHUNK_BYTES = 320;
 
 /**
  * Emits the full detailJson as chunked `N1A_JSON|part=<i>|total=<n>|sha256=
