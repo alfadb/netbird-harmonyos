@@ -1,6 +1,6 @@
 # N1a 门计划与判据预注册（native WG 数据面 × 回环数据泵，Emulator）
 
-最后核验：2026-08-30 ｜ 状态：`criteria-frozen-r2`（第三轮复审 pass（2026-08-30，isolated-xai-grok-4-6-reviewer）：r0 的 4 blocker + 全部 major/minor 与 r1 的 1 blocker + 3 minor 全部 adopted，无新 freeze-blocker；判据已冻结，测量可以开始；测量后不得追认或修改判据——ADJ-T0-NATIVE-NX-20260830-0001 §二.7。记录级观察（不阻塞）：C5 聚合 token `pass-induced` 与 C9 marker 值 `induced` 为两个层面的枚举，映射 `backpressure_induced=true → pass-induced → c5=induced`，marker 值域以 C9 枚举为准）
+最后核验：2026-08-30 ｜ 状态：`criteria-revised-r3-pending-re-review`（**r2 判据持有人裁决 `C7_LOCUS_RULING=criteria-defect`（2026-08-31，isolated-xai-grok-4-6-reviewer）**：campaign 0001 实测证明 C7 的进程级精确相等 locus 在 aa-test 环境对非探针框架噪声本质敏感（E2 先例为已预热 EntryAbility 进程不可外推；E1-0002 为同型误判先例；host 安静进程 4→4/2→2 只证探针在 Linux 不漏），0001 的 C7/C8 fail 不得作为探针泄漏的测量事实主张；按停止条件 5 判据缺陷 → 修订 C7/C8（本 r3，逐字采纳持有人修订文本）+ 新审查轮 + 新 evidence ID 重测。0001 consumed-failure 字面记录不改写。C5/C9 等其余判据不变）
 
 ## 定义与归属
 
@@ -31,8 +31,8 @@ N1a 是 [native N1-Nx 治理决议](native-nx-governance.md) N1 拆分的 Emulat
 | C4 | 吞吐下限 | 时钟仅覆盖 C3 unsaturated 泵送：第一包 `wireguard_write` 前启动，最后一包 `WRITE_TO_TUNNEL_IPV4` 校验后停止；排除握手、C5、C6。双向合计有效明文字节（与 C3 内层字节一致）÷ 该时间 ≥ **5 MiB/s**（1 MiB = 1048576 B）；低于即 fail，不调参重测 |
 | C5 | 背压 | **独立阶段**（C3 已 pass 之后）。信道 socket `O_NONBLOCK`；预注册 `SO_RCVBUF=SO_SNDBUF=4096`（实测 `getsockopt` 记入证据）。泵必须交错收发，`EAGAIN`/`ENOBUFS` 时重试不丢已 `sendto` 成功的数据报、不损坏已 `recvfrom` 的字节；时间盒 10s 内返回、无死锁。时间盒内至少一次真实 `errno∈{EAGAIN,ENOBUFS}` → `backpressure_induced=true`；死锁/超时/已收包损坏 → fail。**零次** EAGAIN/ENOBUFS → `backpressure_induced=false`，本子项登记 **`not-triggered`（≠ fail）**，不得把 not-triggered 写成背压已验证。禁止把"部分写"列为 UDP 预期；C5 丢包不得回写 C3。聚合：C5 记录 `pass-induced`/`not-triggered`/`fail` 三态；not-triggered **不阻止** N1a overall pass（N1a 的背压主张降级为"attempted, not induced on this channel"写入 evidence）；C5 fail → overall fail |
 | C6 | tick 路径 | 两侧 `new_tunnel(..., keep_alive=1, ...)`。C3 之后插入 ≥3 个无数据间隔，每间隔 ≥1s，每侧至少调用一次 `wireguard_tick`。至少 3 次 tick 返回 `op==WRITE_TO_NETWORK`（persistent keepalive；空内层，外层经信道交给对端 `wireguard_read`，对端 `op==WIREGUARD_DONE`）。禁止 `WIREGUARD_ERROR`。间隔结束后两侧 `time_since_last_handshake >= 0`。tick 次数以探针计数器记录，**不得**向 `wireguard_stats` 索取 tick 字段。不满足 → fail。本阶段耗时不计入 C4 |
-| C7 | 资源稳定 | 快照 locus 与 E2 相同：主 ArkTS TID 上、同一 native 调用内 T0=创建 socket/`new_tunnel` 之前，T3=`tunnel_free`+全关 socket 之后（与 C8 同一基线）。`/proc/self/fd` 与 `/proc/self/task` 条目计数：T3==T0，否则 fail。探针不得自建 pthread。RSS 只登记、不设门 |
-| C8 | 清理 | `tunnel_free`×2、socket 全关；fd 快照回到与 C7 共用的 T0 基线 |
+| C7 | 资源稳定 | 同一 native 调用内，T0=创建 socket/`new_tunnel` 之前，T3=`tunnel_free`+全关 socket 之后（与 C8 同一时刻）。**门控对象仅为探针自有资源**，禁止把进程级 `/proc/self/fd` 与 `/proc/self/task` 条目计数的 T3==T0 作为 pass/fail。(1) 探针在 T0 之后、T3 之前打开的每一个 fd（本门固定为两个 `AF_INET/SOCK_DGRAM` 127.0.0.1 回环 socket）必须在 T3 已关闭：T0 记录当时已开 fd 集合，T3 对「T0 之后新出现的探针 fd」逐个 `fcntl(F_GETFD)`（或等价），任一仍开 → fail；禁止用进程级条目计数替代逐 fd 核对。(2) 探针不得自建 pthread：源码与本调用路径静态断言无 `pthread_create` / `std::thread::spawn` / NAPI worker / `napi_create_threadsafe_function`；本调用内若 `/proc/self/task` 出现新 TID，只要不能归到探针源码，一律记入观察、不构成 fail。(3) 进程级 `/proc/self/fd`、`/proc/self/task` 计数与 RSS 必须写入 JSON **观察字段**（含 T0/T3 数值与差），不设门。本条在 Phase A（`aa test` / TestRunner）与 Phase B（普通 EntryAbility）使用**同一套**探针自有资源门；两窗进程模型不同，进程级观察计数不得互为对照、不得外推、不得升格为门 |
+| C8 | 清理 | `tunnel_free`×2（各恰好一次，由 Tunnel Drop 保证）且 C7(1) 的逐 fd 核对通过。禁止再用进程级 fd 计数是否回到 T0 作为本条 pass/fail |
 | C9 | 结果页 | 恰好一行 `N1A_RESULT\|verdict=<PASS\|FAIL>\|c5=<induced\|not-triggered\|fail>\|throughput_mibps=<x.xx>`（marker 字段集**钉死为这四个**，禁止竖线/换行污染；其余结果字段只进结构化 evidence 对象，不得事后升格为门）。页面截图非空（沿 E2 `YAVG`/非黑帧）且页上 PASS/FAIL 与 marker 一致；缺 marker、重复 marker、页/marker 不一致 → fail（非 blocked） |
 
 ## 聚合规则（fail-closed，逐字采纳审查文本）
@@ -64,6 +64,6 @@ N0 决议第 9 条停止条件（共 5 项，无 6-9）全文沿用如下；出�
 ## 流程
 
 1. 本判据文档（r2，已冻结）经同一独立审查席三轮复审 pass（2026-08-30）；测量可以开始；
-2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照 r2 冻结判据逐条核对；
+2. 实现（Rust 泵 + NAPI 薄层 + runner）经 host-only 验证与自测，并对照冻结判据逐条核对；实现层要求（r3 裁决附注）：fd/逐 fd 核对结果必须经短 marker 或 NAPI 标量进入证据，禁止只依赖被 hilog 行长截断的单行 detailJson；runner 在任何终态（pass/blocked/fail）必须封签；探针 detailJson 分段输出；
 3. 正式 Emulator campaign（runner 产 sealed evidence：沿 N0 `--dry-run`/formal 模式）；
 4. 证据登记（双轴）→ 记录级独立审查 → 收口。
