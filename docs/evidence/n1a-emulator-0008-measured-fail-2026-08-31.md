@@ -14,9 +14,9 @@
 
 裁决登记过"两执行 c5 允许差异（induced vs not-triggered）"——本运行正是差异的真实体现：Phase A not-triggered、Phase B **fail**（不是 induced 也不是 not-triggered）。**任一方 c5=fail → overall fail** 是裁决原文的显式条款。runner 的交叉一致判定、页窗口隔离、窗口化重复规则全部首次在产线正确工作。
 
-## 观测性缺口（登记）
+## 观测性缺口（登记；2026-08-31 判据持有人裁决纠正）
 
-Phase B 的 Index.ets catch 不发射 detail chunk（设计如此——页窗口只承担 C9 页一致性），故 Phase B 的 C5 fail 具体形态（corrupted 计数/deadlock 超时/交付不齐）**不可从证据恢复**。若后续治理需要根因，最小改法是 Index.ets 在 catch 中也 chunk 发 detail（与 ohosTest catch 对称）——属实现层增强，不触判据。
+**裁决纠正**：本执行 Phase B 走的是 **try 成功返回 fail 结果**（hilog 页窗口第五行 "rendered from probe result"），不是 catch 路径——Index.ets **两条路径都不发射 detail chunk**，故 C5 fail 的三态形态（时间盒/重传帽/accounting/会话错）不可从证据恢复。判据持有人裁决 `C5_PHASEB_RULING=insufficient-evidence`：0008 fail 字面保留、不得升格为 N1a 数据面正式终态、不得在形态恢复前修订 C5；后续前置（实现层，不触判据）= Index.ets **双路径** chunk 发 detail + overlay 失败路径 native 自行 chunk + C5 形态短 marker（独立前缀）+ 有界 AppFreeze 采集窗 → 新 ID 重测 → 持有人凭形态终裁。另登记：Phase B 墙钟 226.7s（aboutToAppear→marker）远超探针理论时间上限（~45s），指向 cold-start UI 线程冻结——机制解释见裁决，不作为定论。
 
 ## 处置
 
