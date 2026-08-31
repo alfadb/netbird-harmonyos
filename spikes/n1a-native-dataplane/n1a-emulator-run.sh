@@ -555,7 +555,7 @@ reassemble_probe_json() {
       # Collapse identical re-emitted lines across capture sources.
       [[ -n "${seen_line[$line]:-}" ]] && continue
       seen_line["$line"]=1
-      if [[ "$line" =~ ^N1A_JSON\|part=([0-9]+)\|total=([0-9]+)\|sha256=([0-9a-f]{16})\|data=(.*)$ ]]; then
+      if [[ "$line" =~ N1A_JSON\|part=([0-9]+)\|total=([0-9]+)\|sha256=([0-9a-f]{16})\|data=(.*)$ ]]; then
         part="${BASH_REMATCH[1]}"
         total="${BASH_REMATCH[2]}"
         sha16="${BASH_REMATCH[3]}"
