@@ -32,3 +32,7 @@ __pycache__/
 /spikes/n0-native-core/target/
 /spikes/n0-native-core/out/
 /spikes/n0-native-core/.hvigor/
+
+# N1a native dataplane host build outputs
+/spikes/n1a-native-dataplane/target/
+/spikes/n1a-native-dataplane/out/
