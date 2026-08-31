@@ -1,0 +1,4 @@
+N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=N1a probe detail criteria inconsistent
+TestFinished-ResultCode: 1
+TestFinished-ResultMsg: N1A_PROBE_TEST_RESULT|verdict=FAIL|detail=N1a probe detail criteria inconsistent
+user test finished.
