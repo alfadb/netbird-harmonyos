@@ -31,7 +31,13 @@
 - 缺点/前置：**N0 决议第 6 条卡点**——"只有发现普通 phone 应用公开支持的进程启动 + fd 传递机制，才允许开独立最小 exec 探针；禁止 shell/隐藏 API/特权绕过；无公开机制则关闭 E"。当前无已知的 HarmonyOS 普通第三方应用公开进程启动机制（待专项取证）；VPN Extension 进程内 spawn、fd 传递、生命周期均为未测。**若公开机制取证仍为无，路线 B 按纪律自动关闭。**
 - 附带风险：Go 工具链对 OHOS 目标仍可能需要适配（Tailscale-OHOS fork 的存在暗示 `GOOS=openharmony` 缺失；静态 `GOOS=linux` 二进制能否在设备上运行属未测假设，且即便能跑，"不维护 fork/不偏离 stock 构建"纪律下的问题须 T0 预先定界）。
 
-**建议（主会话意见，供 T0 参考）**：先做**公开机制取证**（1 个只读研究任务：官方文档/公开 API 中普通应用进程启动能力）——若**无**，B 关闭，直接表决 A；若**有**，再批一个最小 exec 探针（G-E0）用实测决定 A/B。该顺序与 N0 第 6 条原文一致，成本一两天，信息价值决定整个路线形态。
+**取证已完成（2026-08-30，两席独立交叉验证，结论一致：不存在）**：
+
+- 华为官方 FAQ 明文：**"当前禁止三方应用在手机设备上 Fork 进程"**（[harmonyos-faqs/faqs-ability-29](https://developer.huawei.com/consumer/cn/doc/harmonyos-faqs/faqs-ability-29)，2026-06-26 更新）。
+- 官方子进程 API（`childProcessManager.startChildProcess/startArkChildProcess/startNativeChildProcess`、`native_child_process.h` C API）设备差异条款**逐条限定 Tablet/PC/2in1**；phone 返回 `801`/`16000061`/`NCP_ERR_NOT_SUPPORTED`。fd 传递面（`ChildProcessArgs.fds`、`NativeChildProcess_FdList`≤16）仅随这些 phone 排除的 API 存在；SCM_RIGHTS 无公开应用 API。`aa start` 官方定位为 hdc shell 调试工具。
+- SELinux `normal_hap` 域 `neverallow` 应用可写沙箱文件执行；唯一 exec 近路（HNP）被开发者模式门控且 VPN 扩展隔离沙箱（`vpn_isolate_hap`，无子进程豁免条款）不含 HNP 挂载。
+- 附带纠偏：N0 所记 "ChildProcess API 10+" 应为 startChildProcess=API 11 / ArkTS 带 fd 版=API 12 / native C API=API 12/13（登记性修正，不改变结论）。
+- **处置：按 N0 决议第 6 条，E 方向（进程外 exec）就此关闭；路线 B 关闭；不开启 exec 探针。T0 只需在 A 线上表决。**
 
 ### 2.2 路线 A 下的 N1-Nx 门骨架（草案，逐门判据在每门开门前细化）
 
@@ -85,7 +91,7 @@ E4-E7（protect/数据面/性能/长稳）本身实现无关，native 路线下�
 
 ## 5. T0 表决问题清单
 
-1. 路线：A / B / 先公开机制取证再定（§2.1 建议）。
+1. 路线：A 全 native 单核（B 已因取证关闭：phone 无公开进程启动/fd 传递机制，华为官方 FAQ 明文禁止 fork，见 §2.1）。
 2. N1-Nx 门骨架（§2.2）是否批准为基线，逐门细则按"开门前细化"处理。
 3. E8 Go 前提处置：选项一/二/三（§3）。
 4. 许可法律评估（对象：shared/ BSD-3 声明映射的效力、combined/ 的 REUSE.toml 差异、生成代码义务）的定位：N3 硬前置（推荐）/ 全路线前置 / 附加净室约束。
