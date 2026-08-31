@@ -85,7 +85,7 @@ cargo test --offline --locked -- --test-threads=1 --nocapture   # 串行 + 打�
 （stats 观测 + 首轮 write→read）、C3 每方向 10×200×1024 逐字节相等且零丢失/
 零多余 + tx/rx 字节账精确相等、C4 ≥ 5 MiB/s、C5 不死锁且已收包零损坏
 （induced 仅由 errno 判定）、C6 keep_alive=1 下 ≥3 个 ≥1s 间隔的真实 persistent
-keepalive tick、C7/C8 fd/线程 T3==T0 精确相等 + `tunnel_free`×2。
+keepalive tick、C7/C8 探针自有资源门（逐 fd fcntl + `tunnel_free`×2；r3）。
 参考测量（host，2026-08-31，串行）：4000/4000 包逐字节验证，吞吐 ≈ 47 MiB/s，
 泵送 ≈ 83 ms；字节账四项 delta 全部 = 2,048,000（每方向）；背压 **induced=false**
 （0 次 EAGAIN/ENOBUFS → 如实 `not-triggered`），`so_rcvbuf=8192` 下 512 包突发
@@ -104,8 +104,8 @@ keepalive tick、C7/C8 fd/线程 T3==T0 精确相等 + `tunnel_free`×2。
 | C4 | 吞吐下限 | 双向合计已验证明文字节（4,000,000 B）÷ 纯泵送窗口（仅数据阶段计时，不含握手/tick/背压）≥ 5 MiB/s |
 | C5 | 背压 | 发送端 SO_SNDBUF=4096、接收端 SO_RCVBUF=4096（getsockopt 回读记录）+ 512 包突发；**induced 仅由 `errno∈{EAGAIN,ENOBUFS}` 判定**（sendto 真实返回）；内核满队列静默丢包按精确账目记入 `kernel_queue_drops` **纯观察字段**、永不参与 induced 判定；有界重传轮在时间盒 10 s 内完成全部轮次、已收包零丢失/零损坏 → pass-induced；**零次 errno → 如实 `not-triggered`（≠ fail，不阻止 overall pass，不得写成背压已验证）**。UDP 数据报语义无部分写，记 0 并注明 |
 | C6 | tick 路径 | 两侧 `new_tunnel(..., keep_alive=1, ...)`；≥3 个无数据静默间隔（各 ≥1s，实现 1100 ms）每侧各调一次真实 `wireguard_tick`；探针计数器记录 `op==WRITE_TO_NETWORK` 的 tick（≥3 次，persistent keepalive 真实经信道送对端、对端 `WIREGUARD_DONE` 消化）；每次间隔后 stats 仍为已建立；随后 8×2 包突发证明会话仍可载业务 |
-| C7 | 资源稳定 | 同一 native 调用内 T0（创建 socket/`new_tunnel` 前）/T3（`tunnel_free`+全关 socket 后）快照 `/proc/self/fd` 与 `/proc/self/task`；冻结规则 **T3==T0 精确相等**（增长或下降都 fail，"下降≠非泄漏"）；探针不自建 pthread；RSS 仅登记不设门；精确计数始终写入 JSON。host 断言须 `--test-threads=1` 串行运行（判据不因 host 测试便利放宽） |
-| C8 | 清理 | `tunnel_free` ×2（Tunnel Drop 保证各恰好一次）、两个 socket 关闭、fd 快照回到与 C7 共用的 T0 基线（精确相等） |
+| C7 | 资源稳定（r3） | 同一 native 调用内 T0/T3 时刻不变。**门控对象仅为探针自有资源**：(1) 两个回环 socket 的 fd 号在创建时记录，T3 逐个 `fcntl(F_GETFD)`——EBADF=已关=pass，任一仍开=fail（先于 fd-set 快照执行，防 readdir fd 号复用污染门）；(2) 静态无线程创建（build.sh `STATIC_NO_PTHREAD` 断言源码树 0 命中禁列 API；新 TID 只观察）；(3) 进程级 fd/task/RSS 为 JSON 观察字段（含 `process_model: testrunner\|entryability\|unknown` 标注），**禁止**作为 pass/fail 门（r3 裁决：aa-test 环境本质噪声敏感）。r3 C7/C8 证据经短 marker `N1A_RES\|c7=<pass\|fail>\|c8=<pass\|fail>\|fd2=<closed\|open>\|fdset=<n>` + NAPI 标量（fd2Closed/fdSetDiffCount/newTidsObserved/tunnelsFreed/processModel）进入证据（不依赖 hilog 截断的单行 detailJson） |
+| C8 | 清理（r3） | `tunnel_free`×2（各恰好一次，Tunnel Drop 保证）+ C7(1) 逐 fd 核对通过；不再使用进程级 fd 回 T0 作门 |
 | C9 | 结果页 | 恰好一行 C9 钉死四字段 marker `N1A_RESULT\|verdict=<PASS\|FAIL>\|c5=<induced\|not-triggered\|fail>\|throughput_mibps=<x.xx>`（其余字段只进结构化对象/JSON，不得事后升格为门）；页面截图非空（沿 E2 YAVG/非黑帧）且页上 PASS/FAIL 与 marker 一致；缺/重复/不一致 → fail。**结果页由 Phase B 普通入口渲染**（`aa start -a EntryAbility`，force-stop 后独立 UIAbility 进程；两次完整探针、两窗口各自恰一行 marker、`hilog -r` 隔离失败=环境类 blocked）；ohosTest 的 `N1A_PROBE_TEST_RESULT` 仅为 Phase A 交叉一致 marker，**不是** C9 页证据（Phase A 截图仅 raw 记录） |
 
 聚合与 fail-closed：任一子项 fail → 总 verdict fail；未测到的子项保持 fail

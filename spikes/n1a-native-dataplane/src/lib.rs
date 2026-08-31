@@ -52,9 +52,18 @@ pub struct n1a_dataplane_result {
     pub throughput_mib_per_sec: c_double,
     /// C4 pure pump time, milliseconds.
     pub pump_ms: c_double,
-    /// C7/C8: /proc/self/fd entry count before the pump and after cleanup.
-    pub fd_baseline: c_int,
-    pub fd_after: c_int,
+    /// C7(1) (r3): 1 when both probe socket fds are closed at T3
+    /// (fcntl F_GETFD = -1/EBADF for each).
+    pub c7_fd2_closed: c_int,
+    /// C7 (r3): |fd set at T3 minus fd set at T0| (observation-only).
+    pub c7_fdset_diff_count: c_int,
+    /// C7(2) (r3): new TIDs observed in the window (observation-only).
+    pub c7_new_tids: c_int,
+    /// C8 (r3): tunnel_free count (must be 2).
+    pub c8_tunnels_freed: c_int,
+    /// NUL-terminated process-model label ("testrunner" | "entryability" |
+    /// "unknown"; 32 bytes; observation-only annotation, frozen r3 C7(3)).
+    pub process_model: [u8; 32],
     /// NUL-terminated JSON detail document (owned by the result).
     pub json: *mut c_char,
     /// NUL-terminated lowercase hex SHA-256 of the JSON bytes (64 chars).
@@ -73,6 +82,10 @@ pub extern "C" fn n1a_probe_version() -> *const c_char {
 /// Runs the full N1a data-plane pump (real BoringTun ffi + UDP loopback
 /// channel) and returns an owned result, or NULL on allocation failure.
 ///
+/// `process_model` is the observation-only label ("testrunner" |
+/// "entryability" | "unknown", frozen r3 C7(3)); NULL is treated as
+/// "unknown". It never gates anything.
+///
 /// The call is synchronous and single-threaded; worst-case duration is
 /// bounded by the pre-registered timeboxes (30 s handshake + 10 s
 /// backpressure) plus the fixed data/tick work.
@@ -81,8 +94,18 @@ pub extern "C" fn n1a_probe_version() -> *const c_char {
 /// The returned pointer (if non-null) must be released exactly once with
 /// `n1a_result_free`. No other thread may free it.
 #[no_mangle]
-pub unsafe extern "C" fn n1a_dataplane_probe() -> *mut n1a_dataplane_result {
-    let outcome = std::panic::catch_unwind(pump::run_probe).unwrap_or_else(|_| panic_outcome());
+pub unsafe extern "C" fn n1a_dataplane_probe(
+    process_model: *const c_char,
+) -> *mut n1a_dataplane_result {
+    let model: String = if process_model.is_null() {
+        "unknown".to_string()
+    } else {
+        std::ffi::CStr::from_ptr(process_model)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let outcome =
+        std::panic::catch_unwind(|| pump::run_probe(&model)).unwrap_or_else(|_| panic_outcome());
     let json = match std::ffi::CString::new(pump::to_json(&outcome)) {
         Ok(j) => j,
         Err(_) => match std::ffi::CString::new(
@@ -107,6 +130,13 @@ pub unsafe extern "C" fn n1a_dataplane_probe() -> *mut n1a_dataplane_result {
         }
         detail_sha256[64] = 0;
     }
+    let mut process_model_buf = [0u8; 32];
+    {
+        let bytes = outcome.process_model.as_bytes();
+        let n = bytes.len().min(31);
+        process_model_buf[..n].copy_from_slice(&bytes[..n]);
+        process_model_buf[n] = 0;
+    }
     let boxed = Box::new(n1a_dataplane_result {
         ok: if outcome.ok { 0 } else { 1 },
         criteria: outcome.criteria.map(|v| v as c_int),
@@ -116,8 +146,11 @@ pub unsafe extern "C" fn n1a_dataplane_probe() -> *mut n1a_dataplane_result {
         backpressure_triggered: if outcome.backpressure_triggered { 1 } else { 0 },
         throughput_mib_per_sec: outcome.throughput_mib_s,
         pump_ms: outcome.pump_ms,
-        fd_baseline: outcome.fd_baseline.map(|v| v as c_int).unwrap_or(-1),
-        fd_after: outcome.fd_after.map(|v| v as c_int).unwrap_or(-1),
+        c7_fd2_closed: if outcome.t3_all_probe_fds_closed { 1 } else { 0 },
+        c7_fdset_diff_count: outcome.t3_fdset_new.len() as c_int,
+        c7_new_tids: outcome.new_tids_observed.len() as c_int,
+        c8_tunnels_freed: outcome.tunnels_freed as c_int,
+        process_model: process_model_buf,
         json: json_ptr,
         detail_sha256,
     });
@@ -128,7 +161,7 @@ pub unsafe extern "C" fn n1a_dataplane_probe() -> *mut n1a_dataplane_result {
 /// written to avoid panics, and boringtun's ffi installs a SIGSEGV panic hook
 /// on first `new_tunnel`, so this path is expected to be unreachable).
 fn panic_outcome() -> pump::ProbeOutcome {
-    let mut o = pump::ProbeOutcome::new(None, None);
+    let mut o = pump::ProbeOutcome::new("unknown");
     o.error = Some("probe panicked".to_string());
     o
 }
@@ -166,7 +199,7 @@ mod tests {
     /// characters. The serializer is under our control - pin it.
     #[test]
     fn probe_json_is_transport_safe_ascii_single_line_no_pipe() {
-        let outcome = pump::run_probe();
+        let outcome = pump::run_probe("testrunner");
         let json = pump::to_json(&outcome);
         assert!(json.is_ascii(), "probe JSON must be ASCII");
         assert!(!json.contains('|'), "probe JSON must not contain a pipe");
@@ -178,7 +211,7 @@ mod tests {
     /// digest after reassembling the chunks).
     #[test]
     fn c_abi_detail_sha256_matches_recomputation() {
-        let outcome = pump::run_probe();
+        let outcome = pump::run_probe("testrunner");
         let json = pump::to_json(&outcome);
         let expected = crate::sha256::sha256_hex(json.as_bytes());
         assert_eq!(expected.len(), 64);
@@ -204,11 +237,11 @@ mod tests {
 
     /// Full real pump on the host: C2 handshake + C3 10x200x1024 both
     /// directions byte-verified + C4 throughput + C5 backpressure + C6 tick
-    /// gaps + C7/C8 resource baseline. Print the JSON (cargo test -- --nocapture)
-    /// to read the measured throughput and timing numbers.
+    /// gaps + C7/C8 probe-owned resource gate (frozen r3). Print the JSON
+    /// (cargo test -- --nocapture) to read the measured numbers.
     #[test]
     fn full_pump_probe_passes_on_host() {
-        let outcome = pump::run_probe();
+        let outcome = pump::run_probe("testrunner");
         let json = pump::to_json(&outcome);
         println!("N1A host probe JSON: {json}");
 
@@ -276,24 +309,77 @@ mod tests {
         assert!(outcome.tick_session_ok_after_each);
         assert!(outcome.post_gap_burst_ok);
 
-        assert_eq!(outcome.criteria[6], pump::CRIT_PASS, "c7 resources must pass: {}", json);
+        // ---- Frozen C7 (r3): probe-owned resource gate -----------------
+        // The gate is the per-fd fcntl check on the two recorded socket
+        // fds. Process-level fd/task counts are observation-only (the r3
+        // ruling: exact process-level equality is noise-sensitive in the
+        // aa-test environment and is FORBIDDEN as a gate on the host too).
+        assert_eq!(outcome.criteria[6], pump::CRIT_PASS,
+            "c7 probe-owned gate must pass: {} (socket_fds={:?}, t3_all_closed={})",
+            json, outcome.socket_fds, outcome.t3_all_probe_fds_closed);
+        assert_eq!(outcome.socket_fds.len(), 2, "exactly two probe sockets recorded");
+        assert!(outcome.t3_all_probe_fds_closed, "both probe socket fds closed at T3");
+        // Observation fields are recorded but never gate: on the host, the
+        // fd set diff may be empty or contain non-probe noise (e.g. the
+        // transient readdir fd); the label must propagate.
+        assert_eq!(outcome.process_model, "testrunner");
+        assert!(outcome.static_no_pthread);
+        assert!(outcome.fd_t0.is_some() && outcome.fd_t3.is_some());
+        assert!(outcome.task_t0.is_some() && outcome.task_t3.is_some());
+
+        // ---- Frozen C8 (r3): tunnel_free x2 + C7(1) per-fd pass ---------
         assert_eq!(outcome.criteria[7], pump::CRIT_PASS, "c8 cleanup must pass: {}", json);
-        let (fb, fa, tb, ta) = (
-            outcome.fd_baseline.expect("fd baseline"),
-            outcome.fd_after.expect("fd after"),
-            outcome.thread_baseline.expect("thread baseline"),
-            outcome.thread_after.expect("thread after"),
-        );
-        // Frozen C7: T3 == T0 EXACT equality (growth or shrinkage both fail).
-        // Run the suite serially (--test-threads=1) so no unrelated harness
-        // thread churns the process-wide /proc counts mid-probe; the criteria
-        // are not relaxed for host-test convenience.
-        assert_eq!(fa, fb, "fd count must be exactly equal: {fb} -> {fa}");
-        assert_eq!(ta, tb, "thread count must be exactly equal: {tb} -> {ta}");
         assert_eq!(outcome.tunnels_freed, 2);
         assert_eq!(outcome.sockets_closed, 2);
 
         assert!(outcome.ok, "aggregate verdict must be pass: {}", json);
+    }
+
+    /// C7(1) per-fd gate primitives (frozen r3): a closed fd must verify as
+    /// closed (EBADF) and an open fd as open — the positive and negative
+    /// cases of the gate, exercised on real sockets.
+    #[test]
+    fn c7_per_fd_gate_closed_and_open_sockets() {
+        use std::net::UdpSocket;
+        use std::os::unix::io::AsRawFd;
+        // Closed case: bind, record fd, drop (close) -> EBADF.
+        let s1 = UdpSocket::bind("127.0.0.1:0").expect("bind s1");
+        let fd1 = s1.as_raw_fd();
+        drop(s1);
+        assert!(pump::fd_is_closed(fd1), "closed socket fd must verify closed (EBADF)");
+
+        // Open case: bind, record fd, keep alive -> fcntl succeeds -> NOT
+        // closed (this is the failing direction of the gate).
+        let s2 = UdpSocket::bind("127.0.0.1:0").expect("bind s2");
+        let fd2 = s2.as_raw_fd();
+        assert!(!pump::fd_is_closed(fd2), "open socket fd must NOT verify closed");
+        drop(s2);
+        assert!(pump::fd_is_closed(fd2));
+    }
+
+    /// fd-set diff helper (observation classification): sorted set difference
+    /// must find exactly the new fds and ignore the common ones.
+    #[test]
+    fn c7_fdset_diff_helper() {
+        assert_eq!(pump::sorted_set_diff(&[1, 2, 3], &[2, 3, 4, 5]), vec![4, 5]);
+        assert_eq!(pump::sorted_set_diff(&[1, 2, 3], &[1, 2, 3]), Vec::<i32>::new());
+        assert_eq!(pump::sorted_set_diff(&[], &[7]), vec![7]);
+        assert_eq!(pump::sorted_set_diff(&[1, 5, 9], &[]), Vec::<i32>::new());
+    }
+
+    /// process_model propagation (frozen r3 C7(3)): every label surfaces in
+    /// the JSON resources section verbatim.
+    #[test]
+    fn process_model_propagates_to_json() {
+        for label in ["testrunner", "entryability", "unknown"] {
+            let outcome = pump::run_probe(label);
+            let json = pump::to_json(&outcome);
+            assert!(
+                json.contains(&format!("\"process_model\":\"{label}\"")),
+                "label {label} must appear in the resources JSON: {json}"
+            );
+            assert_eq!(outcome.process_model, label);
+        }
     }
 
     /// Synthetic packets are well-formed IPv4 with a valid header checksum,
@@ -326,7 +412,7 @@ mod tests {
     /// is present.
     #[test]
     fn json_document_is_structurally_sound() {
-        let outcome = pump::run_probe();
+        let outcome = pump::run_probe("testrunner");
         let json = pump::to_json(&outcome);
 
         let mut depth_objects = 0i64;

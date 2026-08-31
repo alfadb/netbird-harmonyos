@@ -4,7 +4,7 @@
 // Links the Rust core (libn1acore.a, built by build.sh) and exports one
 // synchronous ArkTS entry point: runN1aProbe().
 //
-// runN1aProbe() returns a structured object:
+// runN1aProbe(processModel?: string) returns a structured object:
 //   {
 //     version: string,
 //     ok: boolean,            // fail-closed verdict (true = pass)
@@ -16,18 +16,25 @@
 //     backpressureTriggered: boolean,
 //     throughputMiBps: number,
 //     pumpMs: number,
-//     fdBaseline: number,
-//     fdAfter: number,
-//     detailJson: string      // full machine-readable JSON from the Rust core
+//     fd2Closed: boolean,     // r3 C7(1): both probe socket fds closed at T3
+//     fdSetDiffCount: number, // r3 C7: |T3 fd set - T0 fd set| (observation)
+//     newTidsObserved: number,// r3 C7(2): new TIDs in window (observation)
+//     tunnelsFreed: number,   // r3 C8: tunnel_free count (must be 2)
+//     processModel: string,   // r3 C7(3): "testrunner"|"entryability"|"unknown"
+//     detailJson: string,     // full machine-readable JSON from the Rust core
 //     detailSha256: string    // 64-hex SHA-256 of detailJson (transport
 //                             // integrity; defect 2 of EV-N1A-...-0001)
 //   }
 //
-// Emits exactly one single-line HiLog marker per call, with the C9-pinned
-// field set (frozen criteria r2 — no other field may enter the marker):
-//   N1A_RESULT|verdict=<PASS|FAIL>|c5=<induced|not-triggered|fail>|throughput_mibps=<x.xx>
-// (tag "N1aProbe", domain 0x2900 — same domain as N0). All other result
-// fields stay in the structured NAPI object and the JSON detail document.
+// Emits TWO single-line HiLog markers per call (tag "N1aProbe", domain
+// 0x2900 — same domain as N0):
+//   1. The C9-pinned four-field set (frozen r2/r3 — no other field may enter):
+//      N1A_RESULT|verdict=<PASS|FAIL>|c5=<induced|not-triggered|fail>|throughput_mibps=<x.xx>
+//   2. The r3 C7/C8 evidence short marker (distinct prefix — never uses the
+//      N1A_RESULT prefix, per the r3 re-review; single line, no pipes in values):
+//      N1A_RES|c7=<pass|fail>|c8=<pass|fail>|fd2=<closed|open>|fdset=<diff-count>
+// All other result fields stay in the structured NAPI object and the JSON
+// detail document.
 //
 // Fail-closed: any marshaling error throws a napi error; a failed Rust probe
 // is reported with ok=false (never as success), and the raw JSON detail is
@@ -66,15 +73,15 @@ extern "C" {
         int32_t backpressure_triggered;
         double throughput_mib_per_sec;
         double pump_ms;
-        int32_t fd_baseline;
-        int32_t fd_after;
+        int32_t c7_fd2_closed;         // r3: 1 = both probe sockets closed at T3
+        int32_t c7_fdset_diff_count;   // r3: |T3 fd set - T0 set| (observation)
+        int32_t c7_new_tids;           // r3: new TIDs in window (observation)
+        int32_t c8_tunnels_freed;      // r3: must be 2
+        unsigned char process_model[32]; // r3: NUL-terminated label
         char *json;                    // NUL-terminated, owned by the result
         unsigned char detail_sha256[65]; // 64 lowercase hex chars + NUL
-                                         // (appended last: keeps earlier
-                                         // field offsets identical to the
-                                         // previous ABI revision)
     };
-    N1aDataplaneResult *n1a_dataplane_probe(void);
+    N1aDataplaneResult *n1a_dataplane_probe(const char *process_model);
     void n1a_result_free(N1aDataplaneResult *result);
 }
 
@@ -151,7 +158,23 @@ bool SetNamedStringLen(napi_env env, napi_value object, const char *name,
 }
 
 napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
-    (void)info;
+    // r3 C7(3): optional process-model label (observation-only). The ohosTest
+    // entry passes "testrunner"; the phase-B result page passes
+    // "entryability"; absence or a non-string argument -> NULL -> "unknown".
+    const char *process_model_arg = nullptr;
+    char process_model_buf[32];
+    size_t argc = 0;
+    napi_value argv[1] = {nullptr};
+    if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) == napi_ok && argc >= 1) {
+        napi_valuetype type = napi_undefined;
+        if (napi_typeof(env, argv[0], &type) == napi_ok && type == napi_string) {
+            size_t copied = 0;
+            if (napi_get_value_string_utf8(env, argv[0], process_model_buf,
+                    sizeof(process_model_buf), &copied) == napi_ok) {
+                process_model_arg = process_model_buf;
+            }
+        }
+    }
 
     const char *version = n1a_probe_version();
     if (version == nullptr) {
@@ -159,7 +182,7 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
     }
 
     ResultGuard guard;
-    guard.ptr = n1a_dataplane_probe();
+    guard.ptr = n1a_dataplane_probe(process_model_arg);
     if (guard.ptr == nullptr) {
         return ThrowError(env, "n1a_dataplane_probe returned null");
     }
@@ -232,15 +255,22 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
                       probe->backpressure_triggered == 1) ||
         !SetNamedDouble(env, result, "throughputMiBps", probe->throughput_mib_per_sec) ||
         !SetNamedDouble(env, result, "pumpMs", probe->pump_ms) ||
-        !SetNamedInt32(env, result, "fdBaseline", probe->fd_baseline) ||
-        !SetNamedInt32(env, result, "fdAfter", probe->fd_after) ||
+        // r3 C7/C8 evidence scalars (implementation-layer requirement: fd
+        // verification results reach evidence via short marker/NAPI scalars,
+        // never only via the hilog-truncated single-line detailJson).
+        !SetNamedBool(env, result, "fd2Closed", probe->c7_fd2_closed == 1) ||
+        !SetNamedInt32(env, result, "fdSetDiffCount", probe->c7_fdset_diff_count) ||
+        !SetNamedInt32(env, result, "newTidsObserved", probe->c7_new_tids) ||
+        !SetNamedInt32(env, result, "tunnelsFreed", probe->c8_tunnels_freed) ||
+        !SetNamedString(env, result, "processModel",
+                        reinterpret_cast<const char *>(probe->process_model)) ||
         !SetNamedStringLen(env, result, "detailJson", probe->json, json_len) ||
         !SetNamedStringLen(env, result, "detailSha256", detail_sha, sha_len)) {
         return ThrowError(env, "failed to build runN1aProbe result");
     }
 
     // Single-line machine-readable marker with the C9-pinned field set
-    // (frozen criteria r2): exactly four fields, no more. verdict is
+    // (frozen criteria r2/r3): exactly four fields, no more. verdict is
     // PASS/FAIL (uppercase); c5 uses the C9 enumeration induced /
     // not-triggered / fail; throughput_mibps is printed with two decimals.
     // All %{public} — no key material is ever logged.
@@ -249,6 +279,16 @@ napi_value RunN1aProbe(napi_env env, napi_callback_info info) {
         probe->ok == 0 ? "PASS" : "FAIL",
         C5MarkerName(probe->criteria[4]),
         probe->throughput_mib_per_sec);
+
+    // r3 C7/C8 evidence short marker (distinct prefix from N1A_RESULT, per
+    // the r3 re-review ruling; single line; no pipe characters in values).
+    // c7/c8 use pass|fail; fd2 closed|open; fdset is the diff count.
+    OH_LOG_Print(LOG_APP, LOG_INFO, kLogDomain, kLogTag,
+        "N1A_RES|c7=%{public}s|c8=%{public}s|fd2=%{public}s|fdset=%{public}d",
+        probe->criteria[6] == 1 ? "pass" : "fail",
+        probe->criteria[7] == 1 ? "pass" : "fail",
+        probe->c7_fd2_closed == 1 ? "closed" : "open",
+        probe->c7_fdset_diff_count);
     return result;
 }
 

@@ -50,6 +50,20 @@ LOCK_SHA="$(grep -A3 'name = "boringtun"' "$ROOT/Cargo.lock" | grep checksum | a
 [ "$LOCK_SHA" = "$BORINGTUN_CRATE_SHA256" ] || die "Cargo.lock boringtun checksum mismatch: got $LOCK_SHA"
 log "Cargo.lock boringtun checksum OK: $LOCK_SHA"
 
+# --- 1b. STATIC_NO_PTHREAD (frozen r3 C7(2)) ------------------------------
+# The probe must never create threads: the four forbidden threading APIs
+# must have ZERO occurrences in the probe's source tree (src/ + napi/).
+# build.sh itself is excluded because this very pattern would self-match;
+# README.md is excluded because it documents the criteria text (which quotes
+# the API names). Note: std::thread::sleep is NOT thread creation and is
+# allowed (C6's quiet gaps use it); the grep tokens below only match the
+# creation APIs.
+FORBIDDEN_COUNT="$( { grep -rEc 'pthread_create|std::thread::spawn|napi_create_threadsafe_function|napi_create_async_work' \
+    "$ROOT/src" "$ROOT/napi" || true; } | awk -F: '{sum += $NF} END {print sum+0}')"
+[ "$FORBIDDEN_COUNT" -eq 0 ] \
+    || die "STATIC_NO_PTHREAD violation: $FORBIDDEN_COUNT occurrences of forbidden threading APIs in src/ + napi/"
+log "STATIC_NO_PTHREAD OK: 0 forbidden threading-API occurrences in src/ + napi/"
+
 # --- 2. Rust core dual-ABI build (--locked: Cargo.lock is authoritative) ---
 # ring 0.17's build script compiles assembly via the `cc` crate; point it at the
 # official OHOS clang so the objects match the target (same as N0).

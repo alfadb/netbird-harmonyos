@@ -411,11 +411,41 @@ pub struct ProbeOutcome {
     pub tick_network_packets: u64,
     pub tick_session_ok_after_each: bool,
     pub post_gap_burst_ok: bool,
-    // C7/C8
-    pub fd_baseline: Option<usize>,
-    pub fd_after: Option<usize>,
-    pub thread_baseline: Option<usize>,
-    pub thread_after: Option<usize>,
+    // C7 (r3): probe-owned resource gate + process-level observation fields.
+    // The gate objects are ONLY the probe's own resources; process-wide
+    // counts are observation-only and never gate (frozen r3, criteria-
+    // holder ruling C7_LOCUS_RULING=criteria-defect of 2026-08-31).
+    /// Process-model label supplied by the caller ("testrunner" | 
+    /// "entryability" | "unknown"); observation-only annotation.
+    pub process_model: String,
+    /// Raw fd numbers of the two loopback sockets, recorded at creation.
+    pub socket_fds: Vec<i32>,
+    /// /proc/self/fd fd-number SET at T0 (before socket/tunnel creation).
+    pub t0_fd_set: Option<Vec<i32>>,
+    /// /proc/self/task TID SET at T0 (observation; feeds new_tids_observed).
+    pub t0_task_set: Option<Vec<i32>>,
+    /// C7(1) per-fd gate: true when every probe socket fd is closed at T3
+    /// (fcntl F_GETFD returns -1/EBADF for both).
+    pub t3_all_probe_fds_closed: bool,
+    /// fds present at T3 that were not in the T0 set (observation).
+    pub t3_fdset_new: Vec<i32>,
+    /// New fds at T3 not attributable to probe source (observation-only;
+    /// framework noise never fails the gate).
+    pub non_probe_new_fds: Vec<i32>,
+    /// New TIDs T0->T3 not attributable to probe source (observation-only;
+    /// frozen r3 C7(2): never constitutes a failure).
+    pub new_tids_observed: Vec<i32>,
+    /// Static no-thread-creation property (see build.sh STATIC_NO_PTHREAD;
+    /// the runtime field mirrors the compile-time fact into the JSON).
+    pub static_no_pthread: bool,
+    // Process-level observation-only counters (r3 C7(3); never gates).
+    pub fd_t0: Option<usize>,
+    pub fd_t3: Option<usize>,
+    pub task_t0: Option<usize>,
+    pub task_t3: Option<usize>,
+    pub rss_kb_t0: Option<i64>,
+    pub rss_kb_t3: Option<i64>,
+    // C8
     pub tunnels_freed: u32,
     pub sockets_closed: u32,
     // timing
@@ -425,7 +455,7 @@ pub struct ProbeOutcome {
 impl ProbeOutcome {
     /// Public constructor: fail-closed defaults (every criterion failed,
     /// no stats recorded). Also used by the C ABI's defensive panic path.
-    pub fn new(fd_baseline: Option<usize>, thread_baseline: Option<usize>) -> Self {
+    pub fn new(process_model: &str) -> Self {
         ProbeOutcome {
             ok: false,
             // Fail-closed default: every criterion starts failed and is
@@ -470,10 +500,21 @@ impl ProbeOutcome {
             tick_network_packets: 0,
             tick_session_ok_after_each: true,
             post_gap_burst_ok: false,
-            fd_baseline,
-            fd_after: None,
-            thread_baseline,
-            thread_after: None,
+            process_model: process_model.to_string(),
+            socket_fds: Vec::new(),
+            t0_fd_set: None,
+            t0_task_set: None,
+            t3_all_probe_fds_closed: false,
+            t3_fdset_new: Vec::new(),
+            non_probe_new_fds: Vec::new(),
+            new_tids_observed: Vec::new(),
+            static_no_pthread: true,
+            fd_t0: None,
+            fd_t3: None,
+            task_t0: None,
+            task_t3: None,
+            rss_kb_t0: None,
+            rss_kb_t3: None,
             tunnels_freed: 0,
             sockets_closed: 0,
             total_ms: 0.0,
@@ -1169,13 +1210,79 @@ fn phase_backpressure(
 }
 
 // ---------------------------------------------------------------------------
-// Resource snapshots (C7/C8)
+// Resource snapshots (C7 r3: probe-owned gate + process-level observation)
 // ---------------------------------------------------------------------------
 
-fn snapshot_dir_count(path: &str) -> Option<usize> {
-    // /proc/self/{fd,task} listing; the transient readdir fd appears in both
-    // the baseline and the post snapshots, so the counts stay comparable.
-    Some(fs::read_dir(path).ok()?.count())
+/// Reads /proc/self/fd and returns the SET of open fd numbers (not a count).
+///
+/// Note: the transient readdir fd used by this very read appears in the set;
+/// it is present in both the T0 and T3 captures equally often, and set
+/// membership is observation-only anyway (the C7 gate is the per-fd fcntl
+/// check on the two recorded socket fds, performed BEFORE this snapshot to
+/// avoid the readdir fd reusing a closed socket number).
+fn snapshot_fd_set() -> Option<Vec<i32>> {
+    let mut fds: Vec<i32> = Vec::new();
+    for entry in fs::read_dir("/proc/self/fd").ok()? {
+        let name = entry.ok()?.file_name();
+        let name = name.to_string_lossy();
+        if let Ok(fd) = name.parse::<i32>() {
+            fds.push(fd);
+        }
+    }
+    fds.sort_unstable();
+    Some(fds)
+}
+
+/// Reads /proc/self/task and returns the SET of TIDs (observation-only; r3
+/// C7(2): new TIDs not attributable to probe source never fail the gate).
+fn snapshot_task_set() -> Option<Vec<i32>> {
+    let mut tids: Vec<i32> = Vec::new();
+    for entry in fs::read_dir("/proc/self/task").ok()? {
+        let name = entry.ok()?.file_name();
+        let name = name.to_string_lossy();
+        if let Ok(tid) = name.parse::<i32>() {
+            tids.push(tid);
+        }
+    }
+    tids.sort_unstable();
+    Some(tids)
+}
+
+/// Resident set size in KiB from /proc/self/statm (page 2 of the fields,
+/// multiplied by the page size). Observation-only (r3 C7(3)).
+fn snapshot_rss_kb() -> Option<i64> {
+    let statm = fs::read_to_string("/proc/self/statm").ok()?;
+    let mut it = statm.split_whitespace();
+    let _size_pages: i64 = it.next()?.parse().ok()?;
+    let resident_pages: i64 = it.next()?.parse().ok()?;
+    const PAGE_SIZE: i64 = 4096;
+    Some(resident_pages * PAGE_SIZE / 1024)
+}
+
+/// Set difference `b - a` for sorted ascending vectors. Pub(crate) for the
+/// host unit tests.
+pub(crate) fn sorted_set_diff(a: &[i32], b: &[i32]) -> Vec<i32> {
+    let mut diff = Vec::new();
+    let mut ia = 0usize;
+    for &x in b {
+        while ia < a.len() && a[ia] < x {
+            ia += 1;
+        }
+        if ia >= a.len() || a[ia] != x {
+            diff.push(x);
+        }
+    }
+    diff
+}
+
+/// C7(1) per-fd gate primitive: true when the fd is CLOSED, i.e. fcntl
+/// returns -1 with EBADF. Any open fd (return >= 0) means the probe fd is
+/// still alive -> gate failure. Pub(crate) for the host unit tests.
+pub(crate) fn fd_is_closed(fd: i32) -> bool {
+    unsafe {
+        let rc = libc::fcntl(fd, libc::F_GETFD);
+        rc == -1 && *libc::__errno_location() == libc::EBADF
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1221,13 +1328,15 @@ struct Handles {
 /// Phases run in the pre-registered order (handshake -> integrity ->
 /// tick gaps -> backpressure). A phase failure records its error, fails its
 /// criterion, and stops; unmeasured criteria keep their fail-closed default.
-/// Cleanup (tunnel_free x2 + socket close) and the post-run resource
-/// snapshots always run.
-pub fn run_probe() -> ProbeOutcome {
+/// Cleanup (tunnel_free x2 + socket close) and the C7/C8 post-run accounting
+/// always run.
+///
+/// `process_model` is the observation-only label ("testrunner" |
+/// "entryability" | "unknown") supplied by the NAPI layer (frozen r3 C7(3));
+/// it never gates anything.
+pub fn run_probe(process_model: &str) -> ProbeOutcome {
     let started = Instant::now();
-    let fd_baseline = snapshot_dir_count("/proc/self/fd");
-    let thread_baseline = snapshot_dir_count("/proc/self/task");
-    let mut outcome = ProbeOutcome::new(fd_baseline, thread_baseline);
+    let mut outcome = ProbeOutcome::new(process_model);
 
     // C1 (library load): reaching this code means the native member carrying
     // this probe is loaded, executing, and able to call the real BoringTun C
@@ -1235,6 +1344,17 @@ pub fn run_probe() -> ProbeOutcome {
     // of this result (NAPI marker / ohosTest completion): a library that
     // fails to dlopen can never emit it, so a missing result fails upstream.
     outcome.criteria[0] = CRIT_PASS;
+
+    // T0 (frozen r3 C7): fd SET + task SET + RSS BEFORE socket/tunnel
+    // creation. fd/task/RSS counts are observation-only; the fd SET feeds
+    // the diff classification below.
+    let t0_fd_set = snapshot_fd_set();
+    let t0_task_set = snapshot_task_set();
+    outcome.fd_t0 = t0_fd_set.as_ref().map(|s| s.len());
+    outcome.task_t0 = t0_task_set.as_ref().map(|s| s.len());
+    outcome.rss_kb_t0 = snapshot_rss_kb();
+    outcome.t0_fd_set = t0_fd_set.clone();
+    outcome.t0_task_set = t0_task_set.clone();
 
     // Setup: two key pairs via the real ffi; peers are mutual inverses
     // (A's peer public key == B's public key and vice versa).
@@ -1279,14 +1399,22 @@ pub fn run_probe() -> ProbeOutcome {
         }
     };
 
+    // C7(1): record the two probe socket fd numbers immediately after
+    // creation (the gate's fixed probe-owned fd set; frozen r3).
+    {
+        use std::os::unix::io::AsRawFd;
+        outcome.socket_fds = vec![handles.chan.a.as_raw_fd(), handles.chan.b.as_raw_fd()];
+    }
+
     let mut net = [0u8; BUF_SZ];
     let mut plain = [0u8; BUF_SZ];
     let mut aux = [0u8; BUF_SZ];
 
     let phase_result = run_phases(&handles, &mut net, &mut plain, &mut aux, &mut outcome);
 
-    // C8: cleanup always — tunnel_free x2 (via Drop), then close both
-    // sockets, then the post-run snapshots in `finish`.
+    // C8 cleanup: tunnel_free x2 (each exactly once, via Tunnel Drop), then
+    // both sockets close (via Drop). The C7(1) per-fd check and the T3
+    // snapshots happen inside `finish`, which runs on every path.
     drop(handles);
     outcome.tunnels_freed = 2;
     outcome.sockets_closed = 2;
@@ -1385,33 +1513,70 @@ fn criterion_index(name: &str) -> usize {
     }
 }
 
-/// Post-run accounting: resource snapshots + C7/C8/C9 verdicts + verdict
-/// aggregation. Runs on every path (success and early exit).
+/// Post-run accounting: C7/C8 (frozen r3) + C9 + verdict aggregation. Runs on
+/// every path (success and early exit).
 ///
-/// Frozen C7: the post-cleanup T3 snapshot counts must be EXACTLY equal to
-/// the pre-pump T0 baseline (`T3 == T0`); any difference — growth or
-/// shrinkage — fails. (A downward drift is not "non-leak"; the frozen text
-/// forbids reading it as pass.) The exact counts are recorded in the JSON.
+/// Frozen C7 (r3, criteria-holder ruling C7_LOCUS_RULING=criteria-defect):
+/// the gate objects are ONLY the probe's own resources —
+/// (1) per-fd fcntl(F_GETFD) on the two recorded socket fd numbers at T3;
+///     any still open -> fail. The per-fd check runs BEFORE the fd-set
+///     snapshot so the snapshot's transient readdir fd cannot reuse a just-
+///     closed socket number and corrupt the gate.
+/// (2) the probe creates no threads (static, enforced by build.sh's
+///     STATIC_NO_PTHREAD source check); new TIDs in the window are
+///     observation-only.
+/// (3) process-level fd/task counts and RSS are observation-only fields,
+///     never gates. Process-wide exact equality is explicitly FORBIDDEN as
+///     a pass/fail input (the aa-test environment churns them).
+/// Frozen C8 (r3): tunnel_free x2 (each exactly once via Drop) + C7(1)
+/// per-fd pass; the process-level fd count returning to T0 is no longer a
+/// gate.
 fn finish(outcome: &mut ProbeOutcome, started: Instant) {
-    outcome.fd_after = snapshot_dir_count("/proc/self/fd");
-    outcome.thread_after = snapshot_dir_count("/proc/self/task");
+    // C7(1) per-fd gate FIRST (before any /proc read can open a new fd).
+    // The probe's fixed fd set is the two loopback sockets recorded at
+    // creation; each must be closed (fcntl -1/EBADF) at T3.
+    outcome.t3_all_probe_fds_closed = !outcome.socket_fds.is_empty()
+        && outcome.socket_fds.iter().all(|&fd| fd_is_closed(fd));
 
-    // C7: fd AND thread counts must equal the pre-pump baseline exactly.
-    // /proc unavailable => fail closed.
-    let (exact, fd_exact) = match (
-        outcome.fd_baseline,
-        outcome.fd_after,
-        outcome.thread_baseline,
-        outcome.thread_after,
-    ) {
-        (Some(fb), Some(fa), Some(tb), Some(ta)) => (fa == fb && ta == tb, fa == fb),
-        _ => (false, false),
+    // T3 observation snapshots (never gates).
+    let t3_fd_set = snapshot_fd_set();
+    let t3_task_set = snapshot_task_set();
+    outcome.fd_t3 = t3_fd_set.as_ref().map(|s| s.len());
+    outcome.task_t3 = t3_task_set.as_ref().map(|s| s.len());
+    outcome.rss_kb_t3 = snapshot_rss_kb();
+
+    // fd-set diff (observation): fds present at T3 that were not at T0.
+    // The probe's own sockets are closed by now; anything in the diff that
+    // is not one of the recorded socket fds is framework noise ->
+    // non_probe_new_fds (never fails the gate). A recorded socket fd
+    // appearing in the diff means its NUMBER got reused by a non-probe open
+    // after the close — the per-fd gate above already ran before this
+    // snapshot, so the gate verdict is unaffected; classify by number.
+    if let (Some(t0), Some(t3)) = (outcome.t0_fd_set.as_ref(), t3_fd_set.as_ref()) {
+        let diff = sorted_set_diff(t0, t3);
+        outcome.t3_fdset_new = diff.clone();
+        outcome.non_probe_new_fds = diff
+            .into_iter()
+            .filter(|fd| !outcome.socket_fds.contains(fd))
+            .collect();
+    }
+
+    // New TIDs (observation-only; frozen r3 C7(2) — never a failure).
+    if let (Some(a), Some(b)) = (outcome.t0_task_set.as_ref(), t3_task_set.as_ref()) {
+        outcome.new_tids_observed = sorted_set_diff(a, b);
+    }
+
+    // C7 verdict: per-fd gate only (fail-closed when sockets were never
+    // recorded — e.g. an early setup failure — the gate stays failed).
+    outcome.criteria[6] = if outcome.t3_all_probe_fds_closed {
+        CRIT_PASS
+    } else {
+        CRIT_FAIL
     };
-    outcome.criteria[6] = if exact { CRIT_PASS } else { CRIT_FAIL };
 
-    // C8: tunnels freed (tunnel_free x2), sockets closed, fd count back
-    // exactly at the pre-pump baseline.
-    let c8 = fd_exact && outcome.tunnels_freed == 2 && outcome.sockets_closed == 2;
+    // C8 verdict: tunnel_free x2 (each exactly once via Drop) + the C7(1)
+    // per-fd gate. No process-level counting.
+    let c8 = outcome.t3_all_probe_fds_closed && outcome.tunnels_freed == 2 && outcome.sockets_closed == 2;
     outcome.criteria[7] = if c8 { CRIT_PASS } else { CRIT_FAIL };
 
     // C9 (result page): the structured result (JSON + NAPI object + HiLog
@@ -1540,15 +1705,31 @@ pub fn to_json(o: &ProbeOutcome) -> String {
         o.tick_session_ok_after_each,
         o.post_gap_burst_ok,
     ));
+    // resources (frozen r3 schema): probe-owned gate + process-level
+    // observation-only counters annotated by process model.
+    let fds_json = |v: &[i32]| -> String {
+        let items: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+        format!("[{}]", items.join(","))
+    };
     s.push_str(&format!(
-        "\"resources\":{{\"fd_baseline\":{},\"fd_after\":{},\"thread_baseline\":{},\"thread_after\":{},\"tunnels_freed\":{},\"sockets_closed\":{},\"fd_back_to_baseline\":{}}},",
-        opt_num(o.fd_baseline.map(|v| v as i64)),
-        opt_num(o.fd_after.map(|v| v as i64)),
-        opt_num(o.thread_baseline.map(|v| v as i64)),
-        opt_num(o.thread_after.map(|v| v as i64)),
-        o.tunnels_freed,
-        o.sockets_closed,
-        o.fd_baseline.is_some() && o.fd_after <= o.fd_baseline,
+        "\"resources\":{{\"process_model\":\"{pm}\",\"probe_fd_gate\":{{\"socket_fds\":{sf},\"t3_all_closed\":{ac},\"fdset_new_at_t3\":{dn},\"non_probe_new_fds\":{np}}},\"process_observation_only\":{{\"fd_t0\":{ft0},\"fd_t3\":{ft3},\"fd_delta\":{fd},\"task_t0\":{tt0},\"task_t3\":{tt3},\"task_delta\":{td},\"rss_kb_t0\":{rt0},\"rss_kb_t3\":{rt3}}},\"new_tids_observed\":{nt},\"static_no_pthread\":{sp},\"tunnels_freed\":{tf},\"sockets_closed\":{sc}}},",
+        pm = json_escape(&o.process_model),
+        sf = fds_json(&o.socket_fds),
+        ac = o.t3_all_probe_fds_closed,
+        dn = fds_json(&o.t3_fdset_new),
+        np = fds_json(&o.non_probe_new_fds),
+        ft0 = opt_num(o.fd_t0.map(|v| v as i64)),
+        ft3 = opt_num(o.fd_t3.map(|v| v as i64)),
+        fd = opt_num(match (o.fd_t0, o.fd_t3) { (Some(a), Some(b)) => Some(b as i64 - a as i64), _ => None }),
+        tt0 = opt_num(o.task_t0.map(|v| v as i64)),
+        tt3 = opt_num(o.task_t3.map(|v| v as i64)),
+        td = opt_num(match (o.task_t0, o.task_t3) { (Some(a), Some(b)) => Some(b as i64 - a as i64), _ => None }),
+        rt0 = opt_num(o.rss_kb_t0),
+        rt3 = opt_num(o.rss_kb_t3),
+        nt = fds_json(&o.new_tids_observed),
+        sp = o.static_no_pthread,
+        tf = o.tunnels_freed,
+        sc = o.sockets_closed,
     ));
     s.push_str(&format!(
         "\"timing\":{{\"handshake_ms\":{:.3},\"pump_ms\":{:.3},\"backpressure_ms\":{:.3},\"total_ms\":{:.3}}}",

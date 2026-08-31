@@ -53,7 +53,10 @@ export class N1aProbeError extends Error {
 }
 
 export function runN1aProbeTest(): N1aProbeTestOutcome {
-  const result: N1aProbeResult = n1a.runN1aProbe();
+  // Frozen r3 C7(3): the ohosTest entry labels this execution's process
+  // model as "testrunner" (Phase A window; the phase-B result page passes
+  // "entryability" for its own independent run).
+  const result: N1aProbeResult = n1a.runN1aProbe('testrunner');
   try {
     return runAssertions(result);
   } catch (e) {
@@ -103,9 +106,15 @@ function runAssertions(result: N1aProbeResult): N1aProbeTestOutcome {
   if (result.throughputMiBps < THROUGHPUT_FLOOR_MIBPS) {
     throw new Error(`N1a probe throughput below floor: ${result.throughputMiBps} MiB/s`);
   }
-  // Frozen C7: the fd count must return EXACTLY to the pre-pump baseline.
-  if (result.fdAfter !== result.fdBaseline) {
-    throw new Error(`N1a probe fd drift (T3 must equal T0): ${result.fdBaseline} -> ${result.fdAfter}`);
+  // Frozen C7 (r3): the gate is probe-owned resources only — both loopback
+  // socket fds must verify closed at T3 (the NAPI scalar mirrors the
+  // per-fd fcntl gate; process-level counts are observation-only).
+  if (result.fd2Closed !== true) {
+    throw new Error(`N1a probe C7 per-fd gate failed: fd2 not closed`);
+  }
+  // Frozen C8 (r3): tunnel_free x2.
+  if (result.tunnelsFreed !== 2) {
+    throw new Error(`N1a probe C8 cleanup failed: tunnelsFreed=${result.tunnelsFreed}`);
   }
 
   // The full JSON detail must parse and agree with the typed fields.
@@ -136,7 +145,7 @@ function runAssertions(result: N1aProbeResult): N1aProbeTestOutcome {
   const summary: string =
     `N1a probe PASS version=${result.version} verifiedPackets=${result.verifiedPacketsTotal} ` +
     `c5=${result.c5} throughputMiBps=${result.throughputMiBps.toFixed(3)} pumpMs=${result.pumpMs.toFixed(3)} ` +
-    `fd=${result.fdBaseline}->${result.fdAfter}`;
+    `fd2Closed=${result.fd2Closed} tunnelsFreed=${result.tunnelsFreed} processModel=${result.processModel}`;
   return {
     summary: summary,
     detailJson: result.detailJson,

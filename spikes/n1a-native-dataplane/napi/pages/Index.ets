@@ -38,7 +38,10 @@ struct Index {
   aboutToAppear(): void {
     hilog.info(DOMAIN, TAG, 'N1a result page aboutToAppear');
     try {
-      const result: N1aProbeResult = n1a.runN1aProbe();
+      // Frozen r3 C7(3): the phase-B ordinary entry labels its execution's
+      // process model as "entryability" (the ohosTest entry independently
+      // passes "testrunner" for the phase-A window).
+      const result: N1aProbeResult = n1a.runN1aProbe('entryability');
       this.probeDone = true;
       this.probeOk = result.ok;
       this.c5 = cleanText(result.c5);

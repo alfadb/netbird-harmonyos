@@ -2,10 +2,10 @@
  * Type declarations for the N1a gate data-plane probe NAPI overlay
  * (libentry.so).
  *
- * runN1aProbe() returns structured fields; ok is the fail-closed verdict.
- * Criterion values are "pass", "fail", or (C5 only) "not-triggered".
- * arm64 is cross-compile only; this overlay is only claimed to load on
- * x86_64 (Emulator gate).
+ * runN1aProbe(processModel?) returns structured fields; ok is the fail-closed
+ * verdict. Criterion values are "pass", "fail", or (C5 only)
+ * "not-triggered". arm64 is cross-compile only; this overlay is only claimed
+ * to load on x86_64 (Emulator gate).
  */
 export interface N1aProbeResult {
   /** Rust core version string, e.g. "n1a-native-dataplane/0.1.0+boringtun-0.7.1". */
@@ -26,9 +26,9 @@ export interface N1aProbeResult {
   c5: string;
   /** C6 tick paths at >= 3 no-data gaps without breaking the session. */
   c6: string;
-  /** C7 fd + thread snapshots show no monotonic growth. */
+  /** C7 (r3) probe-owned resource gate: both loopback socket fds closed at T3. */
   c7: string;
-  /** C8 tunnel_free x2 + socket close, fd back at the pre-pump baseline. */
+  /** C8 (r3) cleanup: tunnel_free x2 + the C7(1) per-fd gate. */
   c8: string;
   /** C9 structured result page (this object + the ohosTest rendering). */
   c9: string;
@@ -38,19 +38,25 @@ export interface N1aProbeResult {
   mismatchCount: number;
   /** C3 lost packets (expected 0). */
   lostCount: number;
-  /** true when C5 actually observed saturation (EAGAIN or kernel drops). */
+  /** true when C5 actually observed saturation (EAGAIN/ENOBUFS errno). */
   backpressureTriggered: boolean;
   /** C4 throughput over the pure pump window, MiB/s. */
   throughputMiBps: number;
   /** C4 pure pump time, milliseconds. */
   pumpMs: number;
-  /** /proc/self/fd entry count before the pump (C7/C8). */
-  fdBaseline: number;
-  /** /proc/self/fd entry count after cleanup (C7/C8). */
-  fdAfter: number;
+  /** r3 C7(1): true when both probe socket fds are closed at T3 (fcntl EBADF). */
+  fd2Closed: boolean;
+  /** r3 C7: |fd set at T3 minus fd set at T0| (observation-only, never gates). */
+  fdSetDiffCount: number;
+  /** r3 C7(2): new TIDs observed in the window (observation-only, never gates). */
+  newTidsObserved: number;
+  /** r3 C8: tunnel_free count (must be 2). */
+  tunnelsFreed: number;
+  /** r3 C7(3): process-model label ("testrunner" | "entryability" | "unknown"). */
+  processModel: string;
   /** Full machine-readable JSON detail document from the Rust core. */
   detailJson: string;
   detailSha256: string;
 }
 
-export const runN1aProbe: () => N1aProbeResult;
+export const runN1aProbe: (processModel?: string) => N1aProbeResult;
