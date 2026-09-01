@@ -117,6 +117,16 @@
 - [native N1-Nx 门治理决议（T0 2026-08-30）](native-nx-governance.md)
   - 跨厂商三席 T0（opus-5/grok-4.6/gpt-sol）表决、用户批准：路线 A（ArkTS 壳 + NAPI 薄桥 + 单一 native core）为唯一可行性路线；B/E 按两席取证关闭（phone 无公开进程启动/fd 传递机制）
   - N1-Nx 七门骨架（N1a/N1b、N2a/N2b 拆分与绑定条款）；E8 Go 前提替换为 N6 端到端门、E1 转 dormant（三路触发器）；pre-E8 native 物理例外；许可法律评估为 N3 硬前置；bundle 排除零预授权
+  - **已由 `ADJ-T0-N1B-20260831-0001` 修正 §二.5、§二.8**（见下条）
+- [N1b 门治理决议：E4 范围管辖、§二.2 两项可满足性与 N1b-DISC 发现门授权（T0 2026-08-31）](native-nx-n1b-adjudication.md)
+  - 跨厂商三席 T0（grok-4.6/gpt-5.6-sol/deepseek-v4-pro）表决 + T0+（fable-5）终裁五处未收敛分歧、用户批准；触发原因：N1b 判据两轮五席独立审查全部 fail
+  - E4 义务以 `roadmap.md:348` 原义为准（§二.8 括注是映射标签，不得作删减依据），剩余面具名指派 N2a/N2/N6，R2/R3 兜底不变；N1a 不承担 E4
+  - tun fd 背压/部分写 `not-triggered` 不阻 pass 但**义务不关闭**；FD-P1 恒真判据废止，shutdown unblock 两条关闭路径预授权；C10 聚合后果拉回 T0 并预授权「不可 pass 僵局」三分支出口
+  - 授权门代码 `N1BDISC` 前置发现 campaign（否决材料包 D1-D7 草案，须重拟；沿 G0 十三门流程范式）；**代价逐字登记：保证消耗两个 AUTH/pair 与两个 evidence ID**；不构成设备 Live 授权
+  - [审议材料包（历史，含八处事实错误更正与起草人偏向登记）](t0-n1b-discovery-materials.md)
+- [开放义务台账](open-obligations-ledger.md)
+  - `ADJ-T0-N1B-20260831-0001` §七 新设：登记已由治理设定、尚未被任何门关闭的 §二.2 / E4 义务（首批 OB-01..OB-09）
+  - 把「映射不免除义务」从原则变成可机械审计的检查项；判据预注册与记录级审查须逐条核对，遗漏即审查 blocker
 - [G0 stock Go arm64 loader 物理探针计划与证据模板](g0-go-arm64-physical-probe.md)
   - N0 决议第 7 条预定的 E3 预检后第一物理后续动作：冻结元组上 stock（零补丁）Go 1.25.12 arm64 c-shared 的 loader 接受性与最小 runtime 冒烟单次测量
   - [执行授权登记（2026-08-30 · 0001，consumed-blocked）](evidence/g0-probe-authorization-2026-08-30-0001.md)：13 门全部执行，Live 实测 loader 拒绝（[证据](evidence/g0-probe-live-2026-08-30-0001.md) `reviewed-pass`/`blocked`，与 x86_64 Emulator 同错误族）；不是 E1 pass、不是 E8 输入；N0 pass + G0 blocked 构成 native N1-Nx + E8 Go 前提处置新 ADJ/T0 的双实测输入；E8 保持 `CLOSED`
