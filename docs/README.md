@@ -124,6 +124,9 @@
   - tun fd 背压/部分写 `not-triggered` 不阻 pass 但**义务不关闭**；FD-P1 恒真判据废止，shutdown unblock 两条关闭路径预授权；C10 聚合后果拉回 T0 并预授权「不可 pass 僵局」三分支出口
   - 授权门代码 `N1BDISC` 前置发现 campaign（否决材料包 D1-D7 草案，须重拟；沿 G0 十三门流程范式）；**代价逐字登记：保证消耗两个 AUTH/pair 与两个 evidence ID**；不构成设备 Live 授权
   - [审议材料包（历史，含八处事实错误更正与起草人偏向登记）](t0-n1b-discovery-materials.md)
+- [N3 许可法律评估简报（供外部法律意见）](n3-legal-brief.md)
+  - `pending-external-legal-opinion`：N3 硬前置、agent 不可代办；须用户取得书面可执行的法律结论（五问：根 LICENSE 目录例外效力、`combined/` 与 REUSE.toml 差异、BSD-3 侧 .proto 生成代码义务链、以参考实现为 oracle 再实现的衍生作品风险、HAP 分发的 NOTICE/SBOM）
+  - 2026-08-31 由 `/tmp` 迁入仓库（易失位置）；与 N1b/DISC 完全并行，可即刻启动
 - [开放义务台账](open-obligations-ledger.md)
   - `ADJ-T0-N1B-20260831-0001` §七 新设：登记已由治理设定、尚未被任何门关闭的 §二.2 / E4 义务（首批 OB-01..OB-09）
   - 把「映射不免除义务」从原则变成可机械审计的检查项；判据预注册与记录级审查须逐条核对，遗漏即审查 blocker
