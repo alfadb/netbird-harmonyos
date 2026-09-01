@@ -127,6 +127,11 @@
 - [N3 许可法律评估简报（供外部法律意见）](n3-legal-brief.md)
   - `pending-external-legal-opinion`：N3 硬前置、agent 不可代办；须用户取得书面可执行的法律结论（五问：根 LICENSE 目录例外效力、`combined/` 与 REUSE.toml 差异、BSD-3 侧 .proto 生成代码义务链、以参考实现为 oracle 再实现的衍生作品风险、HAP 分发的 NOTICE/SBOM）
   - 2026-08-31 由 `/tmp` 迁入仓库（易失位置）；与 N1b/DISC 完全并行，可即刻启动
+- [N1BDISC 发现 campaign 判据（r2，审查中）](n1b-disc-gate-plan.md)
+  - `criteria-r2-pending-independent-review`：**判据未冻结、不得测量、不得分配 AUTH/pair 或 evidence ID**
+  - 三轮跨厂商独立审查全部未通过（r0 2 fail / r1 3 fail / r2 2 fail）；r3 待修清单见交接文档
+- [会话交接（2026-09-01）：T0 决议落地 + DISC 三轮审查](session-handoff-2026-09-01.md)
+  - r3 待修 16 项、主会话五处错误登记、派发规模与评审席占用约束、待决策三项
 - [开放义务台账](open-obligations-ledger.md)
   - `ADJ-T0-N1B-20260831-0001` §七 新设：登记已由治理设定、尚未被任何门关闭的 §二.2 / E4 义务（首批 OB-01..OB-09）
   - 把「映射不免除义务」从原则变成可机械审计的检查项；判据预注册与记录级审查须逐条核对，遗漏即审查 blocker
