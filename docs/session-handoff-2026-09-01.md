@@ -94,9 +94,45 @@ F1–F11 事实常量 → A1–A6 D-W 集群 → B1–B7 verdict 集群 → C1�
 2. **N3 法律评估**：简报已就位，**只有用户能做**，与本条线完全并行，越早启动越从容。
 3. **物理执行授权**：判据冻结且审查 0 blocker 后，须用户显式授予新 AUTH。决议已写死拆分**保证消耗两个** AUTH/pair 与两个 evidence ID。
 
-## 七、下一步
+## 七、r3 已完成，第四轮审查三席全 fail
 
-1. r3 修订（上述 16 项，**拆两趟**派 `glm-5.3-flash`）
-2. 主会话自查接缝
-3. 第四轮三席审查（**恢复 deepseek 校准提示**）
+r3 分三趟修订（D1–D10 致命项与接缝 / E1–E11 取值域闭合 / G1–G12 一致性定稿），文档 586 行，状态 `criteria-r3-pending-independent-review`。
+
+**第四轮审查结果**：grok 4 B / sol 10 B / deepseek 1 B——**三席全部 fail**。grok 前两次尝试因文档超长行导致截断，记 `attempt-not-counted`，第三次降档 + 收窄范围 + 告知分段读法后成功。
+
+### r4 的主修法（结构性，最高杠杆）
+
+**DISC 只有一个终态 marker `N1BDISC_RESULT`，且位于 P12——在 P9 destroy 之后。** 而进程能否在 destroy 后存活正是 **U4（未实测）**，E3 先例还指向「destroy 后立刻 terminal」。于是 U4 若为假，RESULT 永不发出，verdict 全靠 post-mortem，而 post-mortem 又依赖 PidOfVpn 基线、faultlogger 解析、capture 静默这几条未实测链——**这就是三席与起草人各自指出的「fail-closed 依赖未实测观测链」的共同根源**。
+
+**N1b r1 已解决过同一模式**（`n1b-gate-plan.md:146,148`）：`PH9 发射 N1B_PRE（destroy 之前，承载全部判定量）`、`PH11 发射 N1B_POST`。审查席当年认可该结构，DISC 起草时丢失。
+
+→ r4 把 RESULT 拆为 **PRE（destroy 前，承载 D1–D8/D7/D-W 进入等待前全部事实）** 与 **POST（destroy 后，承载 D6 与 D-W 结局）**。进程死于 destroy 时，PRE 已带走绝大部分事实，POST 缺失**本身即 U4 的答案**，死因分类不再承载 pass/fail。
+
+### r4 待修（按优先级）
+
+1. **死因分类须为总函数**（grok B1，最严重）：`:435` 叙事称 `unattributed` 为残余兜底，`:451` 表却保留「无新增条目」过滤器 → 存在三行全不命中的可达输入（`other:` 型 fault、D7 超窗 APPFREEZE）；而 fail 触发器写成「`probe-fault` 或 `unattributed`」而非「非 `platform-termination`」→ 无类时不点火 → **else pass**。**探针崩溃可洗成 pass，且同一输入在不同实现下 pass/fail 分叉。** 修法：row3 删除「无新增条目」成为真残余；补显式 else（不可定类 → 不得发可 pass 的 post-mortem）；D7 elapsed 超窗死亡写成表内行，禁止引用静态断言 A8 作运行时死因；fail 触发器改为「非 platform-termination」。
+2. **`platform-termination` 布尔式不唯一**（sol B7）：同一行既写「以下三者同时成立」又写「(i) 或 (ii)，且 (iii)」。→ 写死为 `((i) || (ii)) && (iii)`。
+3. **域外平台值判 fail**（grok B2）：发现 campaign 采到未枚举的返回值/errno **正是产出**。→ 拆为「未枚举平台值 → `unobservable(value-outside-frozen-domain)` + raw，**不 fail**」与「解析器/真值表缺口 → fail」。
+4. **P1 仍在短时步集**（grok B3）：dlopen 有 10 s 盒，与已修的 P2 同类错误只修了一半。→ 短时步集只留 D2 锁定序列 2.1–2.7。
+5. **join 洗白**（grok B4）：P10 的 `pthread_join` 被 A4 豁免为无界，而 P10 不在短时步集 → join 卡死时 APPFREEZE → `platform-termination` → pass。`:457`「洗白路径已关闭」是假声明。→ 死亡位点 ∈ {P10} 或已登记 `join-blocked-observed` 时不得判 platform；删除假声明。**另**：RESULT-PRE 须在尝试 join **之前**发出。
+6. **D7 死亡路径 elapsed 不可求值**（deepseek BL-1 = sol B9）：`elapsed_ms` 只在 `D7_END` 落盘，死于途中时不存在。→ `D7_BEGIN` 补 `start_mono_ms`，并**预注册墙钟代理规则**（死亡墙钟 − BEGIN 墙钟，二者均在 hilog 时间戳内），写明仅用于位点分类。
+7. **sol 其余 blocker**：`revents` 编码未冻结（B6）、canonical ledger 字段不足以重建（B4）、`D2_REJTEXT` 被同时规定为存在与不存在（B5）、U3 优先级与 selftest 冲突（B2）、chunk 重复 index 策略自相矛盾（B3）、`dw_watchdog_killed` skip 同时判 false 与非法（B10）。
+8. **`Fault_Type` 实字面未核实**（grok 最不确定项，硬依赖）：若真机为 `APP_FREEZE`/`JS_CRASH` 而非 `APPFREEZE`/`JSRAWERROR`，死因分类主路径在真机上**永不命中**。冻结前须用一条真实 faultlogger 文本钉死。**仓内无样本，属未实测依赖。**
+9. **长行拆分恢复可审性**：文档多数行为数百字符单行，已实际造成两次审查失败（grok 前两次）。→ 表格单元内容外提、密集 bullet 拆分，语义不变。
+
+### 主会话在 r3 又交的三个错（累计 8 个）
+
+| # | 错误 | 谁抓到 |
+| --- | --- | --- |
+| 6 | `platform-termination` (i) 引用「死亡时刻 elapsed_ms」，该量在死亡路径不存在 | deepseek + sol |
+| 7 | 要求 `unattributed` 改叙事为残余兜底，未同步删表内证据过滤器 → 分类非总函数、fail-open | grok |
+| 8 | 短时步集只把 P2 移出、漏了同样有 10 s 盒的 P1；且 join 豁免与短时步集叠加造出洗白路径 | grok |
+
+**形状不变**：仍是在批量规格里加规则而未检查其边界条件与相互作用。第 7 条尤其典型——只改了叙事没改表，等于制造了两处互相矛盾的冻结文本。
+
+## 八、下一步
+
+1. r4 修订（结构性 PRE/POST 拆分为主 + 上述 9 组，**拆多趟**派 `glm-5.3-flash`，每趟 ≤10 项）
+2. 主会话自查接缝（重点：叙事与表是否同步、新规则引用的量在失败路径是否存在）
+3. 第五轮三席审查（grok 须沿用降档 + 收窄 + 长行读法的提示形态）
 4. 0 blocker 后方可请用户授权
