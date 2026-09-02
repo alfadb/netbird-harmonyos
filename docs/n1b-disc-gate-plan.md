@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-01 ｜ 状态：`criteria-r9-pending-independent-review`
+最后核验：2026-09-01 ｜ 状态：`criteria-r10-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -118,6 +118,22 @@
 > ⑧ barrier 路径补发 SKIP（`not-called` 唯一证明途径，不留旁路）；⑨ 拼法统一取 `cause=` 形式（合法域定义句式用它）。
 > **执行方式**：r9 未走单次派发，按判断密度切**八个**有界工作包（清点 → 机械修正 → 核心改造 → 引用改接 → selftest 重写 → 调用边界 → 域门编码 → 收尾），每包独立验证后进下一包；F2–F9 的逐条核实纠正了规范稿（主会话起草）的 5 处错误，逐条锚见自陈 14(e)。
 > 状态改为 `criteria-r9-pending-independent-review`；r9 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r10 修订（第十轮审查修复：12 blocker / 7 major / 4 minor 全处置）**：r9 经三席跨厂商隔离独立审查——**grok fail（2B/7M/5m，九项裁量全部维持）、sol fail（9B/4M/1m，维持 8 项、对 ② 提落地层挑战）、deepseek-v4-pro 收窄范围 pass（0B/1M，其 M 与另两席收敛）**；
+> 两席全文席发现几乎不重叠（互补盲区），去重 12 条 blocker **全部经主会话逐条核实成立、无一证伪**，完整登记见 `docs/n1b-disc-r8-review-register.md` 第九节。共性：**r9 的 complete 主线通、pre-only（POST 缺）断**——R4 只把 POST 在的 skip 编码折进新闭域，POST 缺的死亡收口留着 r5 旧 cause 在域外；
+> 以及新域门引用了 capture 中无载体的量。
+> r10 修订内容（五个有界工作包，每包独立验证后进下一包）：
+> - **T1 pre-only 收口**：删除 blanket 赋值，`dw_*` 按 marker 真实求值、输入不可得才记 `post-destroy-unobservable`（逐字纳入域，16/8 值）；V2 (1b) 扩为任一 `SKIP|item=destroy`；⑨ 补「无 SKIP」前提与两条验收用例（E3 成功终态、全拒+死于 POST 前，均 pass）。
+> - **T2 字段域与载体**：`revents` 编码域由 0..63 封闭扩为全部非负整数（0..63 降格为已知位组合描述）；D8b 窗口钟补载体 `BEGIN|ws` / `END|we`（此前声称落盘却无任何 marker 承载）；P0 时刻命名 `p0_ready_mono_ms` 纳入钟域门（14 项）。
+> - **T3 七分量全函数**：逐分量补全取值域（`process_death_observed` 补 false 分支、`marker_tail_state` 扩五值、省略号 cause 全部具名化——新造 6 复用 3）；五态第 5 行补分量值 `marker-contradiction`（两轴独立）+ SKIP 同现域门；
+> 死亡证据收紧为 (a) 基线 absent+静默 或 (b) 携 SIGKILL/SIGTERM 条目（「进程退出记录」幽灵支删 4 处；faultlogger 条目证明事件不证明终止）；签名五行求值真值表冻结（无条目=确定观测 false；FaultRecv 失败=unobservable）；complete 崩溃签名登记载体改挂 runner evidence。
+> - **T4 fail-open 收口**：fault 条目多条目保守聚合（任一正向优先不被稀释；混合不可解析条目无可解析正向 → 分量 unobservable——按 false 记是 false-negative）；
+> D7 早退矛盾（`D7_END` 在而 `elapsed<20000`，与伪码出口机械矛盾）挂 F8 + 19999/20000 边界对；F1 第 3 支结构注（位点集全在 P5T 前，恒与 F2 叠加、verdict 由 F2 承载；保留为 N1b 诊断事实记录，防误删）。
+> - **T5 收尾**：F1 索引补限定（三席收敛）+ 5 处「F1-F9」排除式同步；门 3 改 A1-A9；`T_tail` 标签挂 D7；D6 U4 旧句改按 V2；自陈 14(e) F3 行更正；裸拼法 2 处防误引注；F4/F8 论域切分（(4) vs (2)(3)）；「fail 只来自 PRE 缺失」收窄。
+> **r10 主会话裁量（超出审查席最小修法或席间分歧处，请下轮审查席逐项挑战）**：① `post-destroy-unobservable` 采「删 blanket + 折入域」双管（席 A 给的是二选一）；② D8b 载体选 BEGIN|ws / END|we（时序诚实优先于单 marker 集中承载）；③ `marker_tail_state` 新值命名 `no-death-evidence`；
+> ④ 死亡证据 (b) 支限定 SIGKILL/SIGTERM 条目（席 B 只要求删幽灵支，未授权正向收紧——但「条目证明事件不证明终止」是其原推导的自然延伸）；⑤ 签名真值表「无条目=observed-false」（席 B 自陈曾写 unobservable，本裁定以其 #6 构造为机械矛盾消解——该构造无条目且 FaultRecv 执行过，是确定观测）；
+> ⑥ F1 第 3 支保留不删（席 A 给「删或扩」二选一，裁定取保留+结构注：删不改变任何 verdict 却丢 N1b 诊断事实）；⑦ 混合解析失败聚合挂 unobservable 不挂 false；⑧ P0 只设非负不设顺序约束（理由显式登记）。
+> 状态改为 `criteria-r10-pending-independent-review`；r10 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -1329,7 +1345,7 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
  (e) **F2-F9 逐条核实登记（r9 执行规范稿 §3.1「整合前必须核实」义务的记录；锚为现行字面）**：
   - **F2 存在、措辞一致**：verdict 节「终态 marker 异常——**`N1BDISC_PRE` 缺失**（探针未能在 P5T 位点（P6 D7 开始之前）落盘任何终态 marker……同判 `fail`）」+ PRE/POST 求值规则 (3)(4)「**`PRE` 缺失**（无论 POST 是否存在）→ 完整性失败……→ `fail`」；
   - **F3 存在、措辞不同**：verdict 节「**顺序破坏——`protocol=complete` 时校验 P1-P12 全序（含 P5T）（marker 时序单调；……）**」条；r10 更正（A M-05）：规范稿括注例「含 `_C` 在而 `_T` 缺」**现文档已有**——五态表第 5 行（`_C` 在 `_T` 缺 → fail 走 F3）与 selftest ⑨ 对应用例；核实时点早于五态落地，原「在现文档不存在、未引入」的登记照登不擦，此处更正指向；
-  - **F4 存在、措辞不同**：「或任一冻结字段缺项」+「增量落盘缺项（某 D 项完成 marker 在而其 `(stream,item)` chunk 组缺失/组内重组失败/sha256 不符……）」+ criteria-gap 判别方法 (2)-(4)；规范稿「字段取值落在冻结域外」与判别方法 (1)（域外有效平台值 → `unobservable(cause=value-outside-frozen-domain)` 不 fail）**冲突**，以现文档为准、未引入；
+  - **F4 存在、措辞不同**：「或任一冻结字段缺项」+「增量落盘缺项（某 D 项完成 marker 在而其 `(stream,item)` chunk 组缺失/组内重组失败/sha256 不符……）」+ criteria-gap 判别方法 (2)-(4)；规范稿「字段取值落在冻结域外」与判别方法 (1)（域外有效平台值 → `unobservable(cause=value-outside-frozen-domain)` 不 fail）**冲突**，以现文档为准、未引入；（r10 更正：判别方法论域已切分——(2)(3) 现归 F8、(4) 归 F4，见 fail 闭集 F4/F8 行的 r10 切分注）
   - **F5 存在、措辞不同**：「封签失败」+「fd ledger 缺失或与 marker 流矛盾」+「同一切点内探针自发值与 runner 重建值不一致 → `fail`（沿 E2）」；规范稿「freeze SHA-256 复算不符」在现文档归 `invalid` 轴（freeze 资产被冒用/篡改），不并入 fail 闭集；
   - **F6 存在、措辞一致**：「`d1_cmdline` 非 `:vpn` 进程」；
   - **F7 存在、归类不同**：「HDC 命令流出现白名单外命令」归 `invalid` 轴 + 停止条件 S2「立即停止并登记违规」；现文档不将其列为 fail 触发面，F 索引仅作归类登记；
