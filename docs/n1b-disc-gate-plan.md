@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r15-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r16-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -171,6 +171,13 @@
 > - **X2 watchdog ③ 仅认 inwait**（B-03）：BARRIER 只证到达调用点不证进入等待（:676 明文），「BARRIER∨inwait」退化为 BARRIER——③ 收紧为仅 `dw_inwait_confirmed=observed-true`，BARRIER-only → ⑤；:688 头句改历史字段名声明 + 去因果化口径；⑪ 补反例 (c)。
 > - **X3 M/m 批**：② EXIT 缺移前件槽（grok M-01）；FaultRecv raw 级三谓词破循环 + 跨分量不传导（sol M-01 + grok m-04）；skip 透传理由拆分（sol m-01）；「二维/第一维/第二维」活规则索引改指四步（grok m-03）；计数残留清零（deepseek M-02/M-03、grok m-01）；r13 旧块计数原位注（sol m-02）。
 > 状态改为 `criteria-r15-pending-independent-review`；r15 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r16 修订（第十六轮审查修复：5 blocker / 2 major / 5 minor 处置）**：r15 经三席跨厂商隔离独立审查（绑定 ad37cd9）——**三席全部 fail**（deepseek 1B/1M、grok 1B/1M/3m、sol 4B/1M/1m）；上轮三条 blocker 修复核对**全部确认闭合**。去重 5 条 blocker **全部核实成立**（轨迹 12→8→4→3→5——回升，但 5 条中 4 条是 r15 修复自身引入的缝：主会话 P1 手工落盘的传播缺口与 `item=D-W` 笔误、P2 收紧暴露的 inwait 两缺口、B-02 修复未传播到 POST 的死锁。**修复面即新审查面**）。
+> r16 修订内容（两包，均派发执行层）：
+> - **Y1 class 派生集群**（blocker 1/2/3）：派生序传播对齐 6 组活句（含「同一钉两处落盘」都改）；`item=destroy` 笔误更正 + sol 分域声明（无 RETURN 只走 skip/death 编码、类 0 仅认 `item=destroy`、`item=D-W`+RETURN 同现 → F3）；POST class 死锁解环（**主会话裁定方案 b**：complete 由探针主线程 P12 发射前唯一派生、runner 重建比对沿 E2 模式仅作校验、pre-only 由 runner 派生——**供下轮挑战**）；legacy class 负例回归钉；④ 18 类句拆写。
+> - **Y2 inwait 集群**（blocker 4/5）：四字段族死亡收口（`inwait-marker-unobserved` 具名 cause、统一覆盖 INWAIT 缺 + 死亡分量 true 全形态）+ 整条 pre-only pass 夹具；state=S 假阳性收紧（**syscall 不可读不得 true**——主会话裁定宁缺勿误路线，poll-active 原子窗属探针实现变更不采）+ post-poll 阻塞反例。
+> - **Y3 字面收尾**：行号锚更正、raw 谓词 (3) 归一化、门域措辞三处、「:359」残留。
+> 状态改为 `criteria-r16-pending-independent-review`；r16 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -676,14 +683,23 @@ barrier 等待盒（7 s）到期仍未见 marker → destroy **顺延**：主线
 - **in-wait 证据候选（主会话补充设计，与 BL-4 合并处理；可用性本元组未实测）**：主线程在 barrier 标志置位后、destroy 之前，以 10 ms `clock_nanosleep` 间隔 / ≤2 s 上限有界轮询读取两个 `/proc` 同进程自省文件：
   - `/proc/self/task/<tid>/stat`（线程 state 字段的解析规则冻结：**取该行最后一个 `)` 字符之后的下一个 token 作为 state**——第 2 字段 `comm` 用圆括号包裹且**可以含空格与括号**，按空格切分会字段错位、可能把其他字段误判为 `S` 而造成**假阳性解锁路径①**，故必须从右侧定位）
   - 与 `/proc/self/task/<tid>/syscall`（第 1 字段 = 该线程当前所处系统调用号）——**比 barrier 强一档：能真正区分「到达 poll 调用点」与「已阻塞在 poll 等待中」**。判定冻结：
-  - `dw_inwait_confirmed` 三态——`observed-true`：窗内**任一样本** state=`S`（可中断睡眠）**且**（若 `proc-syscall` 可读）syscall 号 ∈ **poll 族冻结集 `{73}`**（r1 更正：此前加入 `414` 基于错误前提——`__NR_ppoll_time64 414` 位于 `asm-generic/unistd.h` 的 `#if __BITS_PER_LONG == 32` 块内，aarch64 目标头 `aarch64-linux-ohos/bits/syscall.h:74` **只有** `__NR_ppoll 73`（`asm-generic/unistd.h:113`），故冻结集退回 `{73}`；
+  - `dw_inwait_confirmed` 三态——`observed-true`：窗内**任一样本** state=`S`（可中断睡眠）**且 `proc-syscall` 可读**且 syscall 号 ∈ **poll 族冻结集 `{73}`**，三条件缺一不可。**r16 收紧（sol B-04，主会话裁定宁缺勿误路线；原「（若 `proc-syscall` 可读）」条件化措辞废除）**：syscall 不可读时**不得判 true**——该样本不可确认为 poll 等待，`dw_inwait_confirmed` 按其余样本判定、全部样本不可确认时落下方 `observed-false` 兜底；
+构造（sol B-04）：poll 可先于采集窗结束返回、worker 阻塞于其他可中断睡眠（HiLog/锁/写）仍呈 state=`S`，仅凭 S 会误记「已确认进入 poll 等待」、沿 `dw_watchdog_killed` ③ 与路径① 条件 1 污染下游。
+（r1 更正：此前加入 `414` 基于错误前提——`__NR_ppoll_time64 414` 位于 `asm-generic/unistd.h` 的 `#if __BITS_PER_LONG == 32` 块内，aarch64 目标头 `aarch64-linux-ohos/bits/syscall.h:74` **只有** `__NR_ppoll 73`（`asm-generic/unistd.h:113`），故冻结集退回 `{73}`；
 判定规则：`proc-syscall` 可读且号 ≠ 73 → **逐字登记该号**并记 `observed-false`；同时预注册：若记录级审查发现该号实为本平台 poll 族的其他合法编号，属判据缺口，由记录级审查处理，**不改 Live verdict**。freeze 时静态审查复核该集合）；
-`observed-false`：窗尽且至少一个可读样本但无一满足（state≠`S`，或 syscall 号可读且**落在 poll 族冻结集之外**——含 worker 尚在 marker 发射等其他内核调用的瞬态，轮询重采样即为此设）；
+`observed-false`：窗尽且至少一个可读样本但无一满足（state≠`S`；或 syscall 号可读且**落在 poll 族冻结集之外**——含 worker 尚在 marker 发射等其他内核调用的瞬态，轮询重采样即为此设；或 r16 收紧第三形态：state=`S` 而 `proc-syscall` 不可读——不可确认为 poll 等待、不作 true（宁缺勿误），窗内全部样本属此形态时窗尽落本支，语义为「窗内从未观测到**可确认的** poll 等待」、仍不构成对「曾在 poll 等待」的否定）；
 `unobservable(cause=proc-introspection-unavailable)`：`proc-stat` 不可读（无论 `proc-syscall` 是否可读——state=`S` 无法建立）或两文件均不可读（errno 逐个登记）。
 barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
-  - `dw_inwait_evidence_source` ∈ {`proc-stat` / `proc-syscall` / `both` / `unreadable`}（本次判定实际可读的文件集；`unreadable` 含 errno）；`dw_inwait_samples`（样本计数）。
-  - **in-wait 采集与 worker poll 返回的竞速（明文登记）**：barrier 确认只证 worker 到达 poll 调用点，采集窗（≤2 s）可能跨越 poll 实际返回的时刻——此后样本采到的是 `state≠S` / 非 poll 族 syscall 号的瞬态（worker 已在用户态发射 marker 等路径）。**兜底机制 = 轮询重采样**：判定取窗内**任一**满足样本即 `observed-true`，单次瞬态假阴性被多次采样平滑；`observed-false` 只在窗尽且无一满足样本时登记，其含义是「窗内从未观测到阻塞于 poll」，不构成对「曾在 poll 等待」的否定。
-竞速不制造假阳性：瞬态样本只会压低 true 概率（假阴性方向），`state=S` 的正样本只能产生于 worker 真实阻塞在 poll 的时段，故路径①不会被该竞速误解锁。
+**死亡收口支（r16 新增，sol B-03；先于上方三态与 barrier-timeout 支求值）**：触发 = `process_death_observed = observed-true`（死亡分量，唯一死亡谓词源）**且** `N1BDISC_DW_INWAIT` marker 缺（采样前或采样中死亡、未来得及发射）**且** 死亡位点 ∈ P8 窗口（沿 `dw_watchdog_killed` ③ 的位点窗口 P8-P10：`DW_SPAWN` 之后、无 `DW_EXIT`，证据规则 4）。
+落值：`N1BDISC_DW_INWAIT` 的 `src/conf/samples/errno` 四载荷字段（`DW_INWAIT` 为其唯一载体；落盘于 `dw_inwait_evidence_source`/`dw_inwait_confirmed`/`dw_inwait_samples` 及其 errno 承载）各自记 `unobservable(cause=inwait-marker-unobserved)`——**r16 新具名 cause，一条覆盖**（物理原因同源：等待确认完成前进程终止、INWAIT 未及发射）；四字段取值域同步扩入该 cause（声明见下方 `dw_inwait_evidence_source` 条）。
+统一覆盖（r16，采主会话倾向、本包裁定执行）：前件不按位点细分——「P8 窗口内、INWAIT 未发 + 死亡分量 true」一条覆盖 drain 中死亡（SPAWN 后 DRAIN 内、BARRIER 前，采集窗未开始）与 BARRIER→poll 间隙 / poll 等待窗内死亡：两形态落值与诊断含义相同（等待确认不可得），且 drain 中死亡原本无任何落值面（采集未开始、barrier-timeout 支亦未到达）→ 同烧 F4，故并入本支统一收口。
+**不触发 F4「missing」**：本支各字段已有预注册 cause 落值，verdict 节「任一 D 项终态为 `missing`（既无探针登记亦无 post-mortem/skip 指派）」对本支不适用（沿 D8b 两支与 u7 支同款声明）；单调钟域门对本支无数值输入、不挂 F8；`marker_tail_state` 的尾丢失观察独立登记、不改本支落值（该字段为纯观察登记）。skip 分支（no-live-fd/dup-failed）不进本支——无 SPAWN、位点不达 P8 窗口，四字段沿 skip 编码。
+求值次序与联动：进程死亡时协议不再走到 barrier 等待盒到点观测，死亡分量 true ∧ INWAIT 缺的输入**不得**改记 `unobservable(cause=barrier-timeout)`；上方 true/false/proc-introspection-unavailable 三态仅进程存活完成采集窗时求值。本支落值时 `dw_watchdog_killed` 依有序互斥表落 ⑤（inwait 非 true、③ 前件不成立）；四字段落盘由 runner 于 pre-only 死亡收口派生（与 `dw_return_class`/`dw_join_result` 的 pre-only 死亡收口同一求值面），探针侧无补发。
+  - `dw_inwait_evidence_source` ∈ {`proc-stat` / `proc-syscall` / `both` / `unreadable`}（本次判定实际可读的文件集；`unreadable` 含 errno）**∪ `unobservable(cause=inwait-marker-unobserved)`（r16 死亡收口支新增值，见上）**；`dw_inwait_samples`（样本计数；r16 取值域 = 非负计数 ∪ `unobservable(cause=inwait-marker-unobserved)`）。
+**r16 核查说明（sol B-04）**：本枚举无「proc-stat-only」类专用值——仅 stat 可读、syscall 不可读时记 `proc-stat`，该值保留为记录值，但 r16 收紧后 `observed-true` **不得**仅凭它成立（须 `proc-syscall` 可读且号 ∈ `{73}`，见三态规则段）。
+  - **in-wait 采集与 worker poll 返回的竞速（明文登记）**：barrier 确认只证 worker 到达 poll 调用点，采集窗（≤2 s）可能跨越 poll 实际返回的时刻——此后样本采到的是 `state≠S` / 非 poll 族 syscall 号的瞬态（worker 已在用户态发射 marker 等路径），或 poll 返回后阻塞于其他可中断睡眠的 state=`S` 样本（r16 补第三形态，sol B-04——syscall 不可读时不得据以判 true）。
+**兜底机制 = 轮询重采样**：判定取窗内**任一**满足样本（r16 起「满足」= state=`S` ∧ `proc-syscall` 可读 ∧ 号 ∈ `{73}` 三条件同一样本成立）即 `observed-true`，单次瞬态假阴性被多次采样平滑；`observed-false` 只在窗尽且无一满足样本时登记，其含义是「窗内从未观测到**可确认的**阻塞于 poll」，不构成对「曾在 poll 等待」的否定。
+竞速不制造假阳性（r16 按收紧口径重述，sol B-04）：瞬态样本只会压低 true 概率（假阴性方向）；state=`S` 样本本身**不足以**判 true（可产生于 poll 返回后的其他可中断睡眠），`observed-true` 须 state=`S` ∧ syscall 号 ∈ `{73}` 同一样本双证据成立，故路径①不会被该竞速或 post-poll 的 S 态睡眠误解锁。
   - **读取本身失败不是 fail，是平台事实**（SELinux 策略与 `hidepid` 挂载选项都可能使其不可读，本元组从未实测——正因如此预注册为候选而非前提）。
 - **弱口径正面处理**：`DW_BARRIER` 只证 worker **到达 poll 调用点**，不证「已进入内核等待」——线程可能在调用 poll 前被调度抢占，或 poll 因残留可读数据立刻返回而从未睡眠；弱 barrier 单独**永远不构成**路径①资格（采认门槛见下）。
 - **落盘字段族**：
@@ -708,7 +724,8 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
       **EXIT 缺已移入前件（r15，grok M-01：与 ① 同构）**（r14 更正，grok M-01 = sol B-02 两席收敛：原 r14「`_T` 在 `_C` 缺 + EXIT 在不可达」的论证**错误**——它漏掉了 EXIT 可早于 `_T` 的交错：inwait 竞态段明文「采集窗（≤2 s）可能跨越 poll 实际返回的时刻」，worker 提前 RETURN+EXIT 后主线程才发 `_T`、再死于 `_C` 前；该组合可达，②须与 ① 同带 EXIT 缺，EXIT 在则本支前件不命中、依序落 ④ `observed-false`——waiter 已正常走到终态，本支不截胡）；
     - ③ `_T`/`_C` **均缺** 且五合取（SPAWN ∧ EXIT 缺 ∧ 静默 ∧ 死亡分量 ∧ inwait 确认）且死亡位点 ∈ P8-P10——`N1BDISC_DW_SPAWN` marker 存在 ∧ `N1BDISC_DW_EXIT` marker 缺失 ∧ capture 三形态关联确认 `DW_SPAWN` 后 `:vpn` 行静默 ∧ `process_death_observed = observed-true`（死亡分量，唯一死亡谓词源）
       ∧ 死亡位点 ∈ P8-P10 窗口（`DW_SPAWN` 之后、无 `DW_EXIT`，证据规则 4）
-      ∧ **poll 进入证据 = `dw_inwait_confirmed = observed-true`（仅此一项，r15 收紧，sol B-03）**——BARRIER 不再作为本支证据（`:668` 明文其只证到达 poll 调用点、可在调用前被抢占、单独永远不证进入内核等待；inwait true 只能在 BARRIER 后取得，原「BARRIER∨inwait」在合法 trace 上退化为 BARRIER——BARRIER→poll 调用间隙的死亡会被本支错记「已确认进入等待」；BARRIER 在而 inwait 非 true → 落 ⑤）→ **`observed-true`**（**waiter 于 destroy 未及窗内死亡且已确认进入等待**——r14 去因果化：本字段的 true 语义是「waiter 于窗内死亡且等待进入的证据在」，
+      ∧ **poll 进入证据 = `dw_inwait_confirmed = observed-true`（仅此一项，r15 收紧，sol B-03）**——BARRIER 不再作为本支证据（弱口径见本节 in-wait 证据候选段的 barrier 定位句——r16 改锚，原 `:668` 行号漂移：其只证到达 poll 调用点、可在调用前被抢占、单独永远不证进入内核等待；
+inwait true 只能在 BARRIER 后取得，原「BARRIER∨inwait」在合法 trace 上退化为 BARRIER——BARRIER→poll 调用间隙的死亡会被本支错记「已确认进入等待」；BARRIER 在而 inwait 非 true → 落 ⑤）→ **`observed-true`**（**waiter 于 destroy 未及窗内死亡且已确认进入等待**——r14 去因果化：本字段的 true 语义是「waiter 于窗内死亡且等待进入的证据在」，
       **不构成 watchdog 归属的证据**：SIGKILL/OOM/生命周期终止在该观测下不可区分，正例构造中的 SIGKILL 条目仅是死亡分量的关联证据；字段名 `dw_watchdog_killed` 保留为 r3 E11 冻结的历史名，改名波及 POST 冻结字段集与 ledger，N1b 不得将该 true 引用为「平台 watchdog 杀了 poll waiter」；
       无 poll 进入证据（inwait 未确认——drain 期死亡 BARRIER/inwait 均无；r15 起含 BARRIER 在而 inwait 非 true 的间隙死亡）→ 落 ⑤，宁缺勿误；①的「`_C` 在 + absent」构造已先行分流、不与本支重叠）；
       （**r12 沿革注**：第四项死亡分量合取 r12 定型，blocker 2（sol B-03）——原第四项〔r4 第二趟 S8 收紧、r9 第五步再收紧：独立死亡证据 = faultlogger 条目含 `APPFREEZE`/watchdog 类签名〕与 r10「事件/死亡两轴分立」正面冲突：签名条目只证明 watchdog**事件**、不证明进程消失，`pidof` 仍非空时会虚构「waiter 被杀」，故死亡状态唯一取自 `process_death_observed` 分量、签名条目仅作关联证据逐字引用。
@@ -1039,7 +1056,7 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
    - `fault_type_observed`：任一条目归一化后 ∈ {`CPPCRASH`, `JSRAWERROR`} → 按该**正向**条目记归一化值（多条正向取聚合序首个正向条目）；无正向条目但有 `APPFREEZE` → 记 `APPFREEZE`；其余情形（全部条目归一化后均域外）→ 记 `other:<第一条域外字面逐字>`——多条域外条目时**全部原值逐字入档（raw 档保留多值）**、分量单值取第一条，多值事实不丢、分量仍单值；
    - `signal_observed` 同构：任一条目携致命信号（`SIGSEGV`/`SIGABRT`/`SIGBUS`/`SIGFPE`）→ 取该信号（多条致命取聚合序首个）；无致命信号但有条目携 `SIGKILL`/`SIGTERM` → 取之；无任何条目携两具名段信号（携「其余」段信号的条目按上方既有规则仅 raw 逐字入档）→ `observed-false`；多条目信号不同时**全部信号字面逐字入档（raw 档保留多值）**、分量单值取优先序最高者（致命段 > 平台终止段）；
    - **可解析与不可解析条目混合（r10 追加一支，主会话裁定；P4 遗留观察 2；r13 扩展，blocker 4，sol B-01——取回失败文件视同不可解析条目进入本支条件，取回状态建模见 `probe_crash_signature_observed` 求值规则前置 r13 条）**：任一**可解析**条目呈正向签名 → 按该正向记（不被不可解析条目稀释，r13：也不被取回失败文件稀释）；
-   **raw 级正向谓词（r15 破循环，sol M-01 + grok m-04）**：三个谓词基于**成功取回的原始条目**、不依赖聚合字段——(1) 存在可解析条目归一化 ∈ {`CPPCRASH`, `JSRAWERROR`}；(2) 存在可解析条目携致命信号；(3) 存在可解析条目 APPFREEZE ∧ 全局 `last_visible_site` ∈ 短时步集 ∧ marker 序列无矛盾。
+   **raw 级正向谓词（r15 破循环，sol M-01 + grok m-04）**：三个谓词基于**成功取回的原始条目**、不依赖聚合字段——(1) 存在可解析条目归一化 ∈ {`CPPCRASH`, `JSRAWERROR`}；(2) 存在可解析条目携致命信号；(3) 存在可解析条目**归一化后** = `APPFREEZE`（r16，grok m-03：与证据规则 5「归一化 + 候选集」同一口径，防 `APP_FREEZE`/`app-freeze` 等字面不命中）∧ 全局 `last_visible_site` ∈ 短时步集 ∧ marker 序列无矛盾。
 **聚合规则**：`fault_type_observed` 侧——raw 谓词 (1) 命中 → 按该条目记（谓词 (3) 的类型条件同时在 fault 侧，命中且 (1) 不命中时记 APPFREEZE）；无 (1)(3) 且存在（不可解析条目∨取回失败）→ `faultrecv-unavailable`/`fault-type-unparsable`（按优先序）；否则域外/无条目照常。`signal_observed` 侧——谓词 (2) 命中 → 按该条目记（**仅本分量的正向**，不被失败文件稀释）；无 (2) 且存在失败源 → unobservable；否则照常。
 **跨分量不传导**：raw 谓词 (3) 命中只保 fault 侧、谓词 (1) 命中只保 fault 侧、谓词 (2) 只保 signal 侧——每分量只看本分量的正向（grok m-04：仅支 3 命中时 signal 侧无正向，仍按本分量规则落值）。（r14「正向签名」按支定义随之由本块改述——其「任一支完整前件真即正向、包括第 3 支」的意图由谓词 (1)-(3) 承载，原循环读法废除）
 **无可解析正向且存在（不可解析条目 ∨ 取回失败文件）** → 该分量 unobservable（r15：「可解析正向」= 上块 raw 级谓词本侧命中——fault 侧 (1)(3)、signal 侧 (2)，不读聚合后分量）——仅不可解析条目时沿原值：`unobservable(cause=fault-type-unparsable)`（`fault_type_observed` 侧）/ `unobservable(cause=signal-unparsable)`（`signal_observed` 侧）；
@@ -1353,6 +1370,10 @@ r10 前 (1b) 仅认 `barrier-never-observed`，本构造无落点 → F4（r10 �
 （a）「`_T` 在、`_C` 缺、**`DW_EXIT` 在**」（inwait 竞态交错：worker 提前 RETURN+EXIT、主线程后发 `_T`、死于 `_C` 前）→ ④ `observed-false`（waiter 正常退出），**不得** `call-boundary-incomplete`；
 （b）「`_T`/`_C` 均缺、五合取中 poll 进入证据缺**（无 `DW_BARRIER` 且 `dw_inwait_confirmed != observed-true`——drain 期死亡）**」→ ⑤ `unobservable(cause=marker-gap-indeterminate)`，**不得 true**（③ r14 收紧；r15 起「进入证据缺」= inwait 非 true，BARRIER 在否均落 ⑤，见 (c)）；
 （c）「`_T`/`_C` 均缺、`DW_SPAWN` 在、`DW_EXIT` 缺、capture 静默、死亡分量确认、位点 P8，**`DW_BARRIER` 在而 `dw_inwait_confirmed != observed-true`**（drain 后、poll 调用前被抢占或未及采样——BARRIER→poll 调用间隙死亡）」→ ⑤ `unobservable(cause=marker-gap-indeterminate)`，**不得 true**（r15 收紧验收钉，sol B-03：BARRIER 不再是 ③ 的 poll 进入证据）；
+（d）**r16 整条 pre-only pass 夹具（sol B-03 点名，inwait 死亡收口验收钉）**：trace = `PRE→SPAWN→DRAIN→BARRIER→死亡`（`N1BDISC_DW_INWAIT`/`DW_DESTROY_T`/`DW_DESTROY_C`/`DW_RETURN`/`DW_EXIT` 均缺；死亡分量确认、位点 P8 poll 等待窗内、无正向崩溃签名条目）——
+inwait 四载荷字段（`dw_inwait_evidence_source`/`dw_inwait_confirmed`/`dw_inwait_samples` 及其 errno 承载）各记 `unobservable(cause=inwait-marker-unobserved)`；`dw_watchdog_killed` = `unobservable(cause=marker-gap-indeterminate)`（⑤，inwait 非 true、③ 前件不成立）；
+`dw_return_class` = `unobservable(cause=destroy-not-reached)`（死于 P8、destroy 未达——五态核对：`_T`/`_C` 均缺、无 SKIP → `not-reached`，pre-only 收口透传）→ 不命中 F4（各字段有预注册落值）/F8（无域违反）/F1（无正向签名）→ `protocol=pre-only` → verdict **`pass`**（合法平台死亡终态）；
+（e）**r16 post-poll 阻塞反例（sol B-04 点名）**：采集窗内 poll 已返回、worker 阻塞于 HiLog（state=`S`）、`proc-syscall` 不可读 → 该样本不满足收紧后三条件（state=S ∧ syscall 可读 ∧ 号 ∈ {73}）→ **不得 `observed-true`**；窗内无其他可确认样本 → `observed-false`（宁缺勿误）——不得经 `dw_watchdog_killed` ③ 或路径① 条件 1 解锁；
 「`DW_DESTROY_C` 在而 `PidOfVpn` absent」原反用例（r9 记 `marker-gap-indeterminate`）随 r13 具名 cause 改记 `destroy-terminal-candidate`（并入上方反例第一支，不另设）；
 五合取缺任一即不得 true 的逐格反例（r15 校正计数，deepseek M-03/grok m-01）；**r12 新增反例（死亡分量未确认时签名条目不得证 true）**：`pidof` 仍非空（positive 基线在、采样恒非空 → `process_death_observed=observed-false`）+ `APPFREEZE` 条目 + `DW_SPAWN` 在、`DW_EXIT` 缺、`DW_SPAWN` 后静默 → **不得 true**，判 `unobservable(cause=marker-gap-indeterminate)`（死亡分量未确认；APPFREEZE 只证 watchdog 事件、不证进程消失））；
 `observed-false` 仅 `DW_EXIT` 在的用例；
@@ -1444,7 +1465,7 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 (f) D8b 的 1024 B storm 包 **id 固定 11 不递增**，checksum 对该 20 字节头一次性重算后全包复用（r1 更正：旧表述「id 自 11 递增、checksum 复用、id 不进校验和」错误——IPv4 Identification 字段（字节 4-5）在校验和覆盖范围内，id 变化必须重算校验和；本 campaign 选固定 id 分支）；
 (g) HDC 白名单原采「语义操作表（本文）+ 字面命令行（freeze 记录誊录）」两层结构——**该表述已被第四趟 C5 取代：完整 argv 已逐字写入正文**（见「DISC HDC 操作白名单」表），不再存在两层结构；
 (h) `dw_inwait_confirmed` 的样本聚合规则（窗内任一满足样本即 true、`proc-stat` 不可读即 unobservable）为起草人对主会话要求的操作化落地；第二趟更正：`proc-stat` 的 `state=S` 是**必要**证据，`proc-syscall` 可读时其号**参与判定**（≠73 即 `observed-false` 并逐字登记该号）——即 syscall 号是可否决判定结果的条件而非「仅加强核对」；
-仅当 `proc-syscall` 不可读时才退化为「stat 单独充分」，与正文判定规则一致。
+仅当 `proc-syscall` 不可读时才退化为「stat 单独充分」，与正文判定规则一致（**r16 注：正文 `observed-true` 已收紧为 state=S ∧ proc-syscall 可读 ∧ 号 ∈ {73}——「stat 单独充分」自 r16 起不再成立，本条为历史裁量原文、以 D-W 节 in-wait 三态规则为准**）。
 7. **第四趟（C1-C9）新引入的裁量**（逐项登记）：(a) C1 把迟到 fd 的处置从「destroy 关闭」改为「只登记 `late-fd-orphaned`、不关闭」——动机是消灭矩阵内 destroy 的唯一例外，但代价是迟到 fd 悬挂至进程退出，若平台对未关闭 fd 有惩罚性行为（未预注册、未实测），该行为会混入后续观察；我判断该风险远小于矩阵中段进程死亡；
 (b) C2 的 D7 读钟上界改由 50 ms `clock_nanosleep` 保证——这给负载形态**新增了一个周期性 syscall**（旧伪码无 sleep），watchdog 对负载形态敏感，故本修正改变了被测负载本身；我将其登记为「冻结负载定义的一次修订」而非等价改写，r2 审查席须确认可接受；
 (c) C2 的 elapsed 接受域（r3 第二趟 E5 改写为互斥区间：`[0, 20000)` 异常 / `[20000, 25000]` 合法 / `> 25000` 具名三态观察不判 fail）上限 25000 是拍板值（外层块时长未实测，理论上界 = 20000 + 一次外层块时长，实际远小于 5 s 宽限；`> 25000` 不判 fail 是 E5 裁定——超出部分可由平台调度延迟造成）；
