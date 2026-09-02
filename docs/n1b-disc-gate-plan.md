@@ -1037,7 +1037,7 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
 废除理由（三路收敛核实）：原行 2「任一输入分量 unobservable → 签名 unobservable」先于行 5「任一支命中 → observed-true」求值，单条目 `Fault_Type=CPPCRASH` 可解析 + `Signal` 字段不可解析的构造下第 1 支字面已成立、签名却被洗成 unobservable → F1 不命中 → pre-only pass（探针崩溃 fail-open）。
 闭集三支仍是 `observed-true` 的唯一字面条件，本规则冻结输入建立、按支求值与聚合赋值路径——两步完成、禁止任何其他赋值路径；输入分量仍取全窗聚合后的单值——聚合规则见证据规则 5 末段的多条目聚合规则，聚合排序键 = faultlogger 文件名字节序（r12 冻结，见该规则段））**：
 
-**前置（最先求值；沿 r10 行 1）**：`FaultRecv` 本身失败（无法取回 fault 条目）→ 三支全部 unknown 且无任何可求值输入 → 签名 `unobservable(cause=faultrecv-unavailable)`，`fault_type_observed`/`signal_observed` 各记 `unobservable(cause=faultrecv-unavailable)`。
+**前置（最先求值；沿 r10 行 1）**：`FaultRecv` 本身失败（无法取回 fault 条目）→ 三支全部 unknown（支 1/2 因两分量不可求值、支 3 因 `fault_type_observed` 不可求值；`last_visible_site` 由 capture 派生、与 `FaultRecv` 无关，其可求值性不影响本落值——r12 措辞精确化）→ 签名 `unobservable(cause=faultrecv-unavailable)`，`fault_type_observed`/`signal_observed` 各记 `unobservable(cause=faultrecv-unavailable)`。
 
 **第一步·按支求值（r12 冻结）**：三支各自独立求三值（true / false / unknown），支间互不拦截：
 - 支 1 只依赖 `fault_type_observed`：可求值 → 归一化字面比较（证据规则 5）∈ {`CPPCRASH`, `JSRAWERROR`} → true，否则 false；不可求值 → 支 1 unknown，缺的输入 = `fault_type_observed`；
@@ -1049,7 +1049,7 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
 无 true 且至少一支 unknown → 签名 `unobservable`，cause 按下方唯一编码取值；全部支可求值且无 true → 签名 `observed-false`。
 
 **unknown cause 唯一编码（r12 冻结；sol B-01 第二点 / grok M-04——多支 unknown 并存时 cause 非唯一则签名落值非单值）**：签名 `unobservable` 的 cause 按**冻结优先序**取第一个命中者：`faultrecv-unavailable` > `fault-type-unparsable` > `signal-unparsable` > `no-visible-marker`；命中的全部 unknown cause 逐字列入 raw 档（多值不丢）。
-四 cause 即三支 unknown 缺口的闭集：`fault_type_observed` 不可求值仅 `fault-type-unparsable`、`signal_observed` 仅 `signal-unparsable`、`last_visible_site` 仅 `no-visible-marker`（均见七分量表分量行）、`FaultRecv` 整体失败仅 `faultrecv-unavailable`——无第五种 unknown 来源。
+四 cause 即三支 unknown 缺口的闭集：`fault_type_observed` 不可求值仅 `fault-type-unparsable`（`FaultRecv` 整体失败时同记 `faultrecv-unavailable`，见前置——r12 措辞精确化）、`signal_observed` 仅 `signal-unparsable`、`last_visible_site` 仅 `no-visible-marker`（均见七分量表分量行）、`FaultRecv` 整体失败仅 `faultrecv-unavailable`——无第五种 unknown 来源。
 
 **第 3 支法理（r9 冻结）**：短时步集内的步骤是**即返 syscall**。平台 watchdog 在一次毫秒级 `fcntl` 上冻结并杀死进程，不构成「不如预期的平台行为」的合理解释——只能是探针自身在该步挂死，故此支是**正向探针缺陷证据**，非平台行为。**反之，非短时步集上的 `APPFREEZE`（含 D7 的 20 s 任务）是本 campaign 要发现的平台行为本身，永远不得 fail**（决议 §4.2）。死亡侧 fail 触发面仅此一条（F1）；`verdict = fail` 的完整 fail 闭集（F1–F6、F8、F9；F7 不在内）与「未完成预注册采集」冻结解释句见「verdict 求值与聚合」节（r10 措辞同步，A m-02）。
 
