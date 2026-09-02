@@ -607,7 +607,7 @@ r11 两派均无消息失败（第六、七次）。收窄策略在该席上的�
 
 sol 独有 B-01（per-file 部分失败）核实成立：:931 快照差分取回文件名集合、:952 契约逐条解析，但 :1040 前置只建模全局 FaultRecv 失败——部分文件取回成功部分失败时两读都错（任一失败读=全局 unknown 稀释已见正向，重现 fail-open；全部失败读=失败文件无落值）。修法（sol）：FaultRecv 可用性按文件建模——已取回条目照常求支，失败文件贡献 faultrecv-unavailable unknown，聚合仍 true>unknown>false。
 
-**第十三轮终账：5 条 blocker（两席去重，全部核实成立）**
+**第十三轮终账（r14 记账更正，sol m-02）：4 条 blocker（两席去重，全部核实成立）**——原计「5 条」把第 5 项「登记块 16+2 笔误」计入，该项自标 m 级非 blocker；轨迹应为 12 → 8 → 4。原「5 major/2 minor 全处置」表述同样过宽（pre-PRE 裸 cause 系裁量⑥维持未修，非处置）。
 1. u7 P5T–P6 窄窗（两席收敛）
 2. dw_watchdog_killed true/unobservable 重叠（两席收敛；sol 另指 SIGKILL 非 watchdog 专属证据——修法须处理）
 3. dw_destroy_distinguishable 17+2 正交相加（两席收敛；sol 修法：先按 destroy 结局分区——timeout/reject 对所有可并存 class 统一 destroy-unresolved，仅 resolved 再按 17 class 求值）
@@ -624,3 +624,23 @@ M-01 混合支未写明先于 APPFREEZE（⑥(d) 依赖）；M-03 `process_death
 
 ### 裁量裁决（grok）：①②③④⑥⑦ 维持；⑤ 挑战成立（= B-01）。
 
+
+## 九之四、第十四轮审查（r13 版 @ e3f33ec）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（收窄：两表机械枚举） | **pass** | 0 B / 2 M（已采纳；其一的「不可达」注后被两席证伪——采纳失察见失误 #29） |
+| grok-4.6（全文） | fail | 1 B / 2 M / 2 m（上轮 1B/3M/3m 全确认已修无回归） |
+| sol（全文） | fail | 3 B / 2 M / 2 m（上轮 4B 全确认已修；其一 m-02 揭出本 register 记账错误） |
+
+**程序事件**：deepseek 先回、其 2M 被主会话当场采纳落盘（ec57b03/d0af06e/1016fd1），违反「审查期间不动文件」纪律；两席重绑 e3f33ec 出票（grok 作废混版票重发）。记为失误 #28（版本纪律）。其中采纳的「② 组合不可达」注未独立核实、被 sol+grok 独立证伪（EXIT 可早于 `_T`——inwait 竞态段明文）——失误 #29（采纳审查席数学断言未核实）。
+
+### 去重终账（4 条实质 + 记账）
+
+1. **二维分区 0/0b 映射前提缺口**（grok B-01 = sol B-03，两席收敛）：「有 RETURN、无 `_C`、无 resolve」的合法平台死亡上 `dw_destroy_distinguishable_from_timeout` 无落点 → F8 烧 ID；死亡收口透传行与第一维括注在 E3 方向两读。修法（grok 四步有序互斥，sol 同向）：(0) skip2∪死亡收口3 → 透传；(1) `_C` 在且无 resolve → `destroy-unresolved`（「已发起」钉死为 `_C` 在）；(2) 已 resolved → 第二维逐值表；(3) 类 0/0b 单列直接映射（0b → `destroy-call-unobserved`，0 → SKIP 位点字面），不入「仅 resolved」第二维。
+2. **watchdog ② EXIT 缺限定**（grok M-01 = sol B-02，两席收敛）：「EXIT 早于 `_T`」可达（inwait 竞态）→ ② 截胡 ④，waiter 已正常退出却记 call-boundary-incomplete。修法：② 加「且 EXIT 缺」；删 r14 错误「不可达」注。
+3. **watchdog ③ 因果包装**（sol B-01 + grok 裁量①挑战；严重度两席分歧、修法同向）：③ 的 true 不含任何 watchdog 专属条目（drain 期死亡也命中）。修法（两席同向）：③ 合取 `DW_BARRIER` 或 `dw_inwait_confirmed=observed-true`（poll 进入证据）；结论句改「waiter 在 destroy 未及窗内死亡**且已确认进入等待**」；字段名 `dw_watchdog_killed` 保留为历史名、加语义注防 N1b 误引（改名波及 POST 冻结字段集，登记为后续裁量）。
+4. **FaultRecv 混合支「正向段」按支定义**（sol M-01）：「可解析正向」现只认 CPPCRASH/JSRAWERROR，可解析 APPFREEZE@短时步+无矛盾（第 3 支完整前件）会被混合支压成 unknown。修法：「无可解析正向」= 无任何三支完整前件为真（含第 3 支）。
+5. **M/m**：⑪ 反例补 EXIT 缺 + EXIT 在对照（grok M-02）；u7 skip-first 无夹具（grok m-02）；`dw_waiter_spawned`/`no-worker` 两项 r14 已修（sol 确认不计票）；版本闭合（r13 状态下正文有 r14 字样——随 r14 修订自然解决）。
+
+### 轨迹（更正后）：12 → 8 → 4 → ?
