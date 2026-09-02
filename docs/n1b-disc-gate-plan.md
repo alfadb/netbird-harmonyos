@@ -487,6 +487,13 @@ MR* 保留时派生 `write_return_boundary_consistent_with_1400`：last_success=
   - **明确不触发字段缺项 fail**：本支的 END 缺失是死亡路径的必然形态、不是缺项——verdict 节「任一 D 项终态为 `missing`（既无探针登记亦无 post-mortem/skip 指派）」（F4 面）对本支不适用：各字段已有预注册 cause 落值；「单调钟派生字段绝对域门」对 `window_end_monotonic` 同理无数值可查（unobservable 落值非负值输入，不挂 F8，见该门 r12 界定条）。与「`not-triggered` 记录必须携带定量参数……缺失按字段缺项 → fail」句的分界：该句管辖 END 已发的正常收口形态，本支 END 未发、不在其域内。
   - **跨度登记**：本支触发时置观察布尔 `storm_incomplete_pre_only=true`（探针已死，由 runner 依 capture 与死亡证据登记入 evidence 记录），并逐字登记 BEGIN 的 `ws=<n>` 原值与死亡证据墙钟、登记跨度数值（登记项 `storm_incomplete_pre_only_span`，供 N1b 参考；跨度以同侧墙钟计——死亡证据墙钟 − BEGIN marker 的 capture 墙钟，取材与减法方向沿 `marker_tail_state` 既有规则；`ws` 为单调钟，与死亡证据墙钟不同源，**禁止跨钟相减**）。
   - **对照（不触发本支）**：BEGIN 在、END 缺、但 `process_death_observed != observed-true`（进程仍活或状态不可判）→ 无死亡证据即非死亡终态，本支不触发、各字段不得取 `storm-incomplete-pre-only`——storm 三熔断上界到期本应发 END 而未发，属探针未完成：字段缺项沿既有 F4 面、观测窗到点进程仍活挂 F9（真正的未完成，不是平台终态；selftest ③ r12 对照例）。
+- **D8b 阶段未达死亡收口（r12，P3 范围外发现）**：触发两条件同时成立——`process_death_observed = observed-true`（死亡分量，同上方唯一死亡谓词源）且死亡位点（证据规则 4）在 `N1BDISC_D8_STORM_BEGIN` 之前（D8b 未开始，如死于 D7 或更早）——进程死于 storm 起点之前、D8b 全部落盘字段无任何输入：
+  - **落值**：D8b 全部 7 个落盘字段（`window_start_monotonic`、`window_end_monotonic`、`eagain_observed`、`partial_write_observed`、`bytes_written_total`、`write_calls`、`caps_hit`）各自记 `unobservable(cause=stage-not-reached)`——**新具名 cause**；
+    与 `dw_*`/u4 死亡收口的 `destroy-not-reached`（PRE/POST 求值规则 (2) r12 分流条款）**语义平行**（同为「进程死于本项位点之前」的合法平台死亡收口），**不跨域共用字面**——`destroy-not-reached` 字面语义限 destroy 位点域（P9），本组是 D8b storm 字段域、未达位点是 storm 起点（P7），沿上方跨域注记格式注明平行关系、防近义字面误引；
+    本支连 BEGIN 亦缺、`window_start_monotonic` 无 `ws` 可重建——与 BEGIN-only 支（`ws` 照常重建）就此分界；落值由 runner 依 capture 与死亡证据登记入 evidence 记录，同 BEGIN-only 支机制、不代发探针 marker。
+  - **明确不触发字段缺项 fail**：verdict 节「任一 D 项终态为 `missing`（既无探针登记亦无 post-mortem/skip 指派）」（F4 面）对本支不适用（各字段已有预注册 cause 落值，同 BEGIN-only 支法理）；单调钟绝对域门对两钟同理无数值可查（unobservable 落值非负值输入，不挂 F8）。
+  - **布尔与跨度**：本支 `storm_incomplete_pre_only=false`、不登记 `storm_incomplete_pre_only_span`——沿既有布尔置位惯例（触发才置位、否则 false），且该布尔的域限语义是「BEGIN 在而 END 缺」的 storm 未完成形态，D8b 未开始不属 storm 未完成；落值 cause `stage-not-reached` 本身即两支的区分标记（防把「未开始」误读成「已开始未完成」）。
+  - **对照（不触发本支）**：无 BEGIN 且 `process_death_observed != observed-true`（进程仍活）→ D8b 未执行属真正的未完成（协议未到 P7 而进程存活）：字段缺项沿既有 F4 面、观测窗到点进程仍活挂 F9（同 BEGIN-only 支对照的法理）。
 - **marker**：`N1BDISC_D8_MTU|len=<n>|ret=<n>|errno=<e>` 逐级 / `N1BDISC_D8_STORM_BEGIN|ws=<n>`（r10 新增字段 `ws`：窗口开始单调钟，发射时已可得）/ `N1BDISC_D8_STORM_END|eagain=<s>|partial=<s>|bytes=<n>|calls=<n>|caps_hit=<b>|we=<n>`（r10 新增字段 `we`：窗口结束单调钟，发射时已可得）。
 
 ### D7 live watchdog（U7）
@@ -1196,12 +1203,15 @@ r10 前 (1b) 仅认 `barrier-never-observed`，本构造无落点 → F4（r10 �
      Ⅱ=新增条目 `Signal=SIGSEGV`（`SIGABRT`/`SIGBUS`/`SIGFPE` 同支变体）→ 第 2 支命中 → 同判 fail；
      Ⅲ=`Fault_Type=APPFREEZE` + `last_visible_site` ∈ 冻结短时步集（D2 保留条目锁定序列 2.1-2.7 的即返 syscall，位点在 P5T 之前故 PRE 未发出）+ marker 序列无矛盾 → 第 3 支命中 → fail（r10 措辞更正，A M-03：本构造同时命中 F2（PRE 未发）、**verdict 由 F2 承载**——PRE 缺失时 `protocol` 不可求值，F1 不进入求值；第 3 支 `observed-true` 在此作为**事实记录**验证（签名分量正确赋值），非独立 fail 触发——
 第 3 支位点集全部位于 P5T 之前、对 pre-only/complete 协议恒假（结构注见三支闭集第 3 支后）；原「`protocol != complete` 成立」「本用例钉死的是第 3 支独立成立」两句随 r10 废除）；
-   - 第 3 支守卫反例：`APPFREEZE` + 位点在短时步集内但 marker 序列自相矛盾（如位点 marker 违反时序单调/全序）→ 第 3 支**不成立** → `observed-false` → 不 fail（证据不足以正向成立不得默认 true，席 B 守卫）；
+   - 第 3 支守卫反例（r12 断言修正，blocker 5）：`APPFREEZE` + 位点在短时步集内但 marker 序列自相矛盾（如位点 marker 违反时序单调/全序）→ 第 3 支**不成立** → `probe_crash_signature_observed = observed-false`（**事实记录验证**：证据不足以正向成立不得默认 true，席 B 守卫）；
+**verdict 由完整性轴承载**——位点在短时步集 ⇒ `N1BDISC_PRE` 未发 ⇒ **fail（F2）**，且 marker 序列自相矛盾 ⇒ 叠加 **fail（F3）**；本用例验证的是第 3 支不稀释为 true、非 verdict 断言（原「→ 不 fail」随 r12 删除——该断言与 F2/F3 正文规则非单值，两席收敛确认）；
    - 非短时步集上的 `APPFREEZE`：`last_visible_site` = P6/D7（20 s 合法时间盒任务）或 P1/P2/P3/P4/P7/P8/P9/P10 任一 → 第 3 支位点守卫不成立、第 1/2 支亦不命中 → `observed-false`，`fault_type_observed`+`last_visible_site` 照常记录、未完成项按既有规则赋 `unobservable` → **不 fail**（本 campaign 要发现的平台行为正例，决议 §4.2）；
-   - `Signal=SIGKILL`/`SIGTERM` 条目（含与任意 `Fault_Type` 组合）→ 不在致命信号集 {`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`} → 第 2 支不命中 → `signal_observed` 照记、`probe_crash_signature_observed=observed-false` → **不 fail**；
+   - `Signal=SIGKILL`/`SIGTERM` 条目（r12 限定，blocker 6：`Fault_Type` 须不命中第 1/3 支——如 `APPFREEZE` 于非短时步位点、或域外词根；原「含与任意 `Fault_Type` 组合」废除——「任意」含 `CPPCRASH`/`JSRAWERROR` 时第 1 支必真、原断言非单值）→ 不在致命信号集 {`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`} → 第 2 支不命中、第 1/3 支亦不命中 → `signal_observed` 照记、`probe_crash_signature_observed=observed-false` → **不 fail**；
+   - r12 对照例（blocker 6）：`Fault_Type=CPPCRASH`（可解析）+ `Signal=SIGKILL` → 第 1 支真 → `probe_crash_signature_observed=observed-true`（按支求值下不受第 2 支的 SIGKILL 影响——SIGKILL/SIGTERM 不在致命信号集只使第 2 支不命中，不抵消第 1 支）→ `protocol=pre-only` 夹具 → **fail（F1）**（P1 的「`CPPCRASH` 可解析 + `Signal` 字段不可解析」验收钉在本「Signal 可解析且属平台终止段」情形下的补充钉）；
    - 无任何新增 faultlogger 条目 + 进程消失（`PidOfVpn` positive 基线后转 absent + capture 三形态静默）→ 七分量逐项取值：
      `process_death_observed=observed-true`、`last_visible_site`=最后可见 marker 位点、`fault_type_observed=observed-false`、`signal_observed=observed-false`、`destroy_call_state` 按其域独立取值、`marker_tail_state` 按五值谓词独立求值（r10 五值域）、`probe_crash_signature_observed=observed-false` → **不 fail**（**原 r4 版此构造落行 6 `unattributed` → `fail`、r9 起不 fail**——该 fail 映射随死因表删除，本例为其替代钉死用例）；
-   - `protocol=complete` + 命中崩溃签名（Ⅰ/Ⅱ/Ⅲ 任一夹具另发 `N1BDISC_POST`）→ F1 的 `protocol != complete` 限定不满足 → **不进 F1、不 fail**，`probe_crash_signature_observed` 仍如实记 `observed-true` 并按 verdict 节登记入 runner evidence 记录（需 N1b 关注的异常观察；r10 载体修正：POST 冻结字段集不承载该观察、marker 已封口不得追写）（r9 作用域恢复条款的钉死用例）；
+   - `protocol=complete` + 命中崩溃签名（r12 限定 Ⅰ/Ⅱ 夹具另发 `N1BDISC_POST`；原「Ⅰ/Ⅱ/Ⅲ 任一」废除——Ⅲ 的短时步位点与 POST 结构上不可达：POST 在则 `last_visible_site` 至少 P12（POST 为全序末位阶段 marker，P12 后无 `N1BDISC_` marker），第 3 支位点守卫必不满足，Ⅲ 的 complete 形态不存在，blocker 6）；
+→ F1 的 `protocol != complete` 限定不满足 → **不进 F1、不 fail**，`probe_crash_signature_observed` 仍如实记 `observed-true` 并按 verdict 节登记入 runner evidence 记录（需 N1b 关注的异常观察；r10 载体修正：POST 冻结字段集不承载该观察、marker 已封口不得追写）（r9 作用域恢复条款的钉死用例）；
    - 七分量互不推导反例：任一分量不得由其他分量的缺失反推——`fault_type_observed=observed-false`（无 fault 条目）**不得**推出 `process_death_observed=observed-false`（后者仅由死亡证据闭集独立判定（r12：`PidOfVpn` 基线转 absent + capture 静默为唯一充分条件，携 `SIGKILL`/`SIGTERM` 条目仅为 pidof absent 确认下的并存关联证据；「进程退出记录」旧支已废））；
 反向同构：进程消失不推出 `fault_type_observed`/`signal_observed` 任一非 `observed-false` 值；`marker_tail_state` 任何取值不参与 `probe_crash_signature_observed` 求值；
    - 逐格核对义务：上述每格七个分量各自有值（记录义务），verdict 断言仅可经 `probe_crash_signature_observed` × F1 触达。
