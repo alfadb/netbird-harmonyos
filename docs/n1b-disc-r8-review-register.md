@@ -603,7 +603,22 @@ r11 两派均无消息失败（第六、七次）。收窄策略在该席上的�
 2. **`dw_watchdog_killed` true/unobservable 重叠**（grok M-02 升格评估中 + sol B2）：物理上最真的「waiter 在 poll 中被杀」（SPAWN 在、EXIT 缺、`_T`/`_C` 均缺）同时命中 true 支四合取与「`_C` 缺无论 `_T` 在否不得 true/false」支。修法（grok）：废除「`_C` 缺一律不得 true」——`_T`/`_C` 均缺 + 四合取齐 = 允许 true；`_C` 在 + pidof absent 仍不得 true（destroy terminal）；⑪ 正例写明双缺。
 3. **`dw_destroy_distinguishable` 17+2 正交相加**（sol B3）：17 个 class 值与 destroy 超时/reject 2 结局是正交输入却按互斥枚举相加——「class 有值 + destroy 未 resolve」组合落两行。修法（主会话）：改为求值序声明——先判 class 是否命中 fd-event-like/timeout-like 两判定行；「其余」内部再按 destroy resolve 与否分流（2 结局是「其余」的内部分流、非平级枚举）。
 
-### grok 的 M/m（待 sol 终稿合并）
+### sol 终稿（4B/2M/1m）与终账
+
+sol 独有 B-01（per-file 部分失败）核实成立：:931 快照差分取回文件名集合、:952 契约逐条解析，但 :1040 前置只建模全局 FaultRecv 失败——部分文件取回成功部分失败时两读都错（任一失败读=全局 unknown 稀释已见正向，重现 fail-open；全部失败读=失败文件无落值）。修法（sol）：FaultRecv 可用性按文件建模——已取回条目照常求支，失败文件贡献 faultrecv-unavailable unknown，聚合仍 true>unknown>false。
+
+**第十三轮终账：5 条 blocker（两席去重，全部核实成立）**
+1. u7 P5T–P6 窄窗（两席收敛）
+2. dw_watchdog_killed true/unobservable 重叠（两席收敛；sol 另指 SIGKILL 非 watchdog 专属证据——修法须处理）
+3. dw_destroy_distinguishable 17+2 正交相加（两席收敛；sol 修法：先按 destroy 结局分区——timeout/reject 对所有可并存 class 统一 destroy-unresolved，仅 resolved 再按 17 class 求值）
+4. FaultRecv per-file 部分失败（sol 独有）
+5. （主会话登记块笔误 16+2 计为 m 级，随 r13 修）
+
+M 级（去重）：grok M-01 混合支先于 APPFREEZE 未写明；grok M-03/sol 无 = false 支残留合取；sol M-01 call-boundary-incomplete 被并入 post-destroy（透传原 cause）；sol M-02/grok m-03 = pre-PRE 裸 cause（裁量⑥族，两席均不升 B）；m-01/m-02 标签与计数。
+
+修复核对：两席对上轮各自 3B/7B 全部确认已修（sol 2 条「部分修」的部分处均为本轮新立案的同缝，非回归）。
+
+### grok 的 M/m（已并入上节）
 
 M-01 混合支未写明先于 APPFREEZE（⑥(d) 依赖）；M-03 `process_death_observed` false 支残留「且无任何上述死亡证据」（UI-SIGTERM + pidof 非空时三态无值——修法：删该合取）；m-01 登记块「16+2」过期（应 17+2）；m-02 追溯标签 P3/P4 打架；m-03 u6/D6 省略号 cause（裁量⑥族，维持不修）。
 
