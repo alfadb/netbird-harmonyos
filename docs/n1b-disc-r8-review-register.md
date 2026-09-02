@@ -665,3 +665,24 @@ M-01 混合支未写明先于 APPFREEZE（⑥(d) 依赖）；M-03 `process_death
 grok M-01（② 的 EXIT 缺写进了 `→` 后括注而非前件槽——最坏读仍截胡 ④）/ grok M-02 = sol B-03 后半（:680/:684 残留）/ sol M-01（FaultRecv「正向段按支定义」循环——正向读聚合字段而聚合字段待正向定义；修法：raw 级三谓词先于聚合）/ sol m-01（skip 透传理由对 dup-failed 不实——它执行 destroy）/ sol m-02（r13 旧块计数未原位标注）/ grok m-01 = deepseek M-03（⑪「四证据」计数滞后）/ deepseek M-01 = grok m-02（不可达注次论证行 4 不依赖 `_C`——随 B-01 重写一并消解）/ deepseek M-02（③「五证据」vs ∧链 6 项计数）/ grok m-03（活规则残「二维/第一维/第二维」索引）/ grok m-04（FaultRecv 仅支 3 命中时 signal 侧未定义——与 sol M-01 同修）。
 
 ### 轨迹：12 → 8 → 4 → 3。B-02 是 r9 以来第一条全新类型（marker 发射时序 vs 终局分类的架构性矛盾），非同构收口问题。
+
+## 九之六、第十六轮审查（r15 版 @ ad37cd9）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（派生序+四步表机械枚举） | fail | 1 B / 1 M |
+| grok-4.6（全文） | fail | 1 B / 1 M / 3 m |
+| sol（全文） | fail | 4 B / 1 M / 1 m |
+
+**去重 5 条 blocker（全部经主会话核实成立）：**
+1. **派生序传播缺口**（grok B-01）：sol B-01 的修法只写进锚句（:626-630）与一条补格（:1263），未知位门操作句（:656-660）、r9 两道门先后、:689/:653/:944、④ 无 `_C` 钉（:1253）仍按旧范围——实现者按操作句实现则原构造仍 F8。**上轮「验证论证的适用范围」教训在修复者（主会话）身上原样重演**。
+2. **`item=D-W` 笔误**（三席收敛）：0/0b 前置检查的 SKIP 支应写 `SKIP|item=destroy`，主会话 P1 手工落盘写成 `item=D-W`（另一枚 marker——D-W 整体 skip 无 RETURN、走步 (0) 编码）。附带 sol 的分域精化：无 RETURN 只走 skip/death 编码、有 RETURN 才进 13 类；`item=D-W` 与 RETURN 同现 → F3 矛盾输入。
+3. **POST class 死锁**（sol B-01）：B-02 修复未传播到 POST——:357 冻结字段集仍要求 `dw_outcome` 含 `dw_return_class`，而 :603 声明 runner 收齐终态（含 POST）后唯一派生。complete 成功态不可实现。**主会话裁定采 sol 方案 (b)**：探针主线程于 P12 发射 POST 前唯一派生（P12 时全部输入已发生——B-02 的洞是 worker 即时 marker 的未来依赖，P12 无此问题）、runner 从 raw 独立重建比对（沿 E2 ledger digest 模式）、pre-only 死亡收口由 runner 派生；登记为裁量供下轮挑战。
+4. **inwait 字段族死亡收口**（sol B-03）：BARRIER→poll 间隙死亡时 `DW_INWAIT` 未发，src/conf/samples/errno 四字段无预注册 cause → F4。pre-only 死亡 cause 域只扩了 return_class/join_result。
+5. **inwait state=S 假阳性**（sol B-04）：`/proc/syscall` 不可读时仅 state=S 即 true——poll 返回后 worker 在其他可中断睡眠（HiLog/锁/写）同样呈 S。**主会话裁定**：syscall 不可读一律不得 true（宁缺勿误路线；poll-active 原子窗属探针实现变更、更侵入，不采）。
+
+M/m：④ 18 类句两读（sol M-01：先要求 18 值过步 (3) 又说明 skip/death 走 (0)/(1)）；未知位门输入域措辞（deepseek M-01：「`_C` 在或 SKIP」→「无 SKIP 且 `_C` 在」）；A5/① 缺 legacy class 负例回归钉（sol m-01）；grok m-01/m-02/m-03（:668 行号漂移、:359「现按二维」残留、raw 谓词 (3) 缺归一化）。
+
+**轨迹：12→8→4→3→5。** 回升但性质明确：5 条中 4 条是 r15 修复自身引入的缝（主会话 P1 手工 2 条、P2/P3 各 1 条）、1 条是收紧暴露的既有缺口。修复面即新审查面。上轮三席票型（两 pass 一 fail）与本轮（三 fail）的翻转说明 pass 票的可靠性依赖第三席对「适用范围」的独立检验——本轮 grok 的任务书校准（先找旁路再采信）在其票里被实际执行并抓到传播缺口。
+
+**主会话同型错误累计 31 次**（第 31 次 = `item=D-W` 字面笔误，落在 r15-P1 手工落盘段）。
