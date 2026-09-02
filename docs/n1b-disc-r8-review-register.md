@@ -644,3 +644,24 @@ M-01 混合支未写明先于 APPFREEZE（⑥(d) 依赖）；M-03 `process_death
 5. **M/m**：⑪ 反例补 EXIT 缺 + EXIT 在对照（grok M-02）；u7 skip-first 无夹具（grok m-02）；`dw_waiter_spawned`/`no-worker` 两项 r14 已修（sol 确认不计票）；版本闭合（r13 状态下正文有 r14 字样——随 r14 修订自然解决）。
 
 ### 轨迹（更正后）：12 → 8 → 4 → ?
+
+## 九之五、第十五轮审查（r14 版 @ a43d0c4）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（两块机械枚举） | **pass** | 0 B / 3 M |
+| grok-4.6（全文） | **pass** | 0 B / 2 M / 4 m（八点高风险逐格核） |
+| sol（全文） | **fail** | 3 B / 1 M / 2 m |
+
+**冻结未达成**：两席 pass 票被 sol 的三条 blocker 推翻——deepseek/grok 验证了主会话不可达性注的内部逻辑（0b 优先级确在行 1-11 前）但未查未知位前置门的旁路（sol 独捉）；B-02（marker class 未来依赖）历轮无人发现。三席互补盲区的又一次兑现——也是「0 blocker 才可冻结」门槛的价值证明。
+
+### 三条 blocker（全部经主会话核实成立）
+
+1. **B-01 未知位前置门绕过 0b，四步表在「other-revents + `_C` 缺 + 无 resolve」无落点**（sol；主会话不可达性注的主论证错误——「0b 截获一切无 `_C` 输入」只对进表输入成立，前置门路由的输入不进表）。构造：`ret=1,revents=64` + worker RETURN/EXIT + 死于 `_T` 前 → (0)-(3) 全不命中 → F8 烧合法平台死亡。修法：派生序冻结「合法域 → 0/0b → 未知位 → 普通 1-11」，0b 的 SKIP/`_C` 门提到未知位门前。
+2. **B-02 即时 `DW_RETURN` marker 冻结 `class=<c>`，但最终分类依赖未来知识**（sol；最深一条）：class 取决于 SKIP、`_T`/`_C` 最终是否出现、`at` 相对 T/C——worker 发 RETURN 时这些均未发生；同一前缀可通向不同终局，即时 marker 无论填什么都至少错一支。修法：从 marker 删 `class`，只发 raw（ret/errno/revents/elapsed/at）；runner 在收齐 SKIP/T/C/终态后唯一派生最终 class；明确 raw 与派生无双源。
+3. **B-03 watchdog ③ 的 BARRIER 析取支不足 + `:680` 因果定义残留**（sol B-03 + grok M-02 收敛）：`:668` 明文 BARRIER 只证到达 poll 调用点、可被抢占、单独不证进入等待——「BARRIER∨inwait」在合法 trace 上退化为 BARRIER、名实矛盾（BARRIER→poll 间隙死亡被错记「已确认进入等待」的 true）。修法：③ 只认 `dw_inwait_confirmed=observed-true`，BARRIER-only 归 ⑤；`:680` 头句改历史字段名声明。
+
+### M/m 汇总（三席去重约 10 条）
+grok M-01（② 的 EXIT 缺写进了 `→` 后括注而非前件槽——最坏读仍截胡 ④）/ grok M-02 = sol B-03 后半（:680/:684 残留）/ sol M-01（FaultRecv「正向段按支定义」循环——正向读聚合字段而聚合字段待正向定义；修法：raw 级三谓词先于聚合）/ sol m-01（skip 透传理由对 dup-failed 不实——它执行 destroy）/ sol m-02（r13 旧块计数未原位标注）/ grok m-01 = deepseek M-03（⑪「四证据」计数滞后）/ deepseek M-01 = grok m-02（不可达注次论证行 4 不依赖 `_C`——随 B-01 重写一并消解）/ deepseek M-02（③「五证据」vs ∧链 6 项计数）/ grok m-03（活规则残「二维/第一维/第二维」索引）/ grok m-04（FaultRecv 仅支 3 命中时 signal 侧未定义——与 sol M-01 同修）。
+
+### 轨迹：12 → 8 → 4 → 3。B-02 是 r9 以来第一条全新类型（marker 发射时序 vs 终局分类的架构性矛盾），非同构收口问题。
