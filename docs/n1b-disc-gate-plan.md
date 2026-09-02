@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-01 ｜ 状态：`criteria-r8-pending-independent-review`
+最后核验：2026-09-01 ｜ 状态：`criteria-r9-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -99,6 +99,25 @@
 > **Y4** gate 10 ⑩/⑪ 补 X5 五用例（30000 置位且行 2 让位、25000/25001 边界对、24999 不置位、减法方向反例），并写明「静默跨度 == `elapsed_proxy`」只在 P8 构造（最后可见 marker = `D7_BEGIN`）下成立、两阈值方可比；
 > **Y5** 本状态行与登记、自陈 13 r8 裁量、路径①条件 3 `destroy_call_mono_ms` 定义式补写（取 `_C` 的 `mono_ms`）。
 > 状态改为 `criteria-r8-pending-independent-review`；r8 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r9 修订（结构性改造：归因停机；T0 裁决 3/3 落地）**：r8 经三席跨厂商隔离独立审查**全部 fail**（grok 2B/2M/2m、sol 6B/3M/0m、deepseek-v4-pro 仅审 r8 增量 2B/1M——该席连续四轮空输出后以收窄范围恢复，见 `docs/n1b-disc-r8-review-register.md`）；去重 **9 blocker / 7 major / 4 minor**。
+> 其中 BL-1（死因表行 2 为空集且与 gate 10 ⑪ 自相矛盾，由 r8 的 Y3 引入）经席 A、席 B 独立收敛，与 BL-6、BL-7 共享同一结构墙：**capture 里的「最后可见 marker + 进程消失 ± APPFREEZE」对互斥死因不是单射**。据此升级为 T0 裁决问题，三席（含两席推翻各自审查阶段立场）3/3 一致：**停止用死因归因驱动 verdict，改为证据向量三态记录 + 窄正向崩溃签名 fail**；行 5/6/7 的 fail 映射一并废除；
+> 不需要新 T0 决议（死因→verdict 是判据超出决议 §4.2 自造的一层，本改造是判据向决议收敛）。设计规范见 `docs/n1b-disc-r9-death-facts-spec.md`。
+> r9 修订内容：
+> - **R1 归因停机**：删除死因分类 7 行表及全部配套条款（优先级全序、fail-closed 兜底、条件外提块、行 3 注/行 5 收敛说明、墙钟代理与 D7 超窗管辖分界）；写入七分量证据向量（互不推导、无优先级、无 else、不合成死因）与 `probe_crash_signature_observed` 三支闭集；冻结席 A 解释句（PRE 封口之后的进程消失，不论能否归因，不构成 fail）；
+> 自陈 14 逐条登记删除的 fail 映射与失去的捕获（含 DryRun 禁止事项：不得以「Live 前还有一次 DryRun」为残余 fail-open 背书，门 11 是 is_evidence=false + HDC0 host-only）。
+> - **R2 fail 闭集**：F1（`probe_crash_signature_observed = observed-true` **且** `protocol != complete`）+ F2–F6、F8、F9（既有完整性触发面的归类索引，经逐条核实；**F7 HDC 白名单违规现归 invalid 轴、不在闭集内**）；「除闭集外一切结局均不 fail」。
+> - **R3 destroy 调用边界**：marker 只能夹住调用、不可能在调用瞬间发射，区间歧义不可消除、只能显式建模——`destroy_call_state` 五态表 + worker 返回时序三分带（毫秒粒度等值不能证先后，闭区间 [T, C] 整体归 `invocation-window-ambiguous`）；路径①只接受严格 `at_mono_ms > C_mono_ms`；共享 destroy 子协议（凡实际调用 destroy 的路径含 dup-failed 一律发 `_T` → 调用 → `_C`）；判定表类 0 拆 `destroy-skip-proven`/`destroy-call-unobserved`（13 类）；V2 三支分岔改四支。
+> - **R4 域门与 skip 编码**：未知 revents 位升格为前置门（原「归优先级 11」在表内程序下不可达、与行 7 按位与读法两处矛盾归类）；单调钟 13 字段统一冻结非负性与顺序约束（挂 F8；`_T`/`_C` 逆序沿 F3）；POST 每子项冻结 `result | skipped(cause) | unobservable(cause)` 三选一编码，`dw_return_class` 增至 15 值、`dw_join_result` 增至 7 值——**全部 create 被拒这一合法平台负面结果自此可记为 pass**（此前两条路都 fail）；
+> `dw_watchdog_killed` 的 S8 收紧（`PidOfVpn absent + _C 缺失` 不再单独构成 waiter 被杀的正向证据）；barrier-never-observed 路径补发 `N1BDISC_SKIP|item=destroy`（`not-called` 在全文只有唯一证明途径）。
+> - **R5 机械与一致性**：新增静态断言 A9（源码层核对 destroy 四步执行序 + 恰一个调用点——此前 A1–A8 只查 marker 字面集，r7 那条 blocker 的修复没有任何机器保证）；A5 比对口径收窄为「活规则中使用的字面」+ 豁免集（旧口径按字面实现必 fail：全文 57 字面 vs 冻结集 55）；
+> ⑨ 补 6 类 ledger 状态机用例；`unobservable` 拼法统一为 `cause=` 形式并冻结「裸形式不是合法字面」；cause 正名 `site-uncertainty-tail-loss` → `marker-tail-loss`；selftest ⑥⑩⑪ 整体重写（⑩ 改为七分量 + F1 三支闭集真值表，含「非短时步 APPFREEZE 不 fail」「无 faultlogger 条目死亡不 fail（原 r4 版 fail、r9 起不 fail）」「complete 命中崩溃签名不进 F1」等钉子用例）；
+> 撤销席 B 的 M-01（P8 预算——核实不成立，那 8 s 属 P10 的 worker 终态轮询盒，席 B 把它记到了 P8 名下）。
+> **主会话九项裁量（均与某审查席建议相左或超出裁决直接授权，请审查席逐项挑战）**：① 删表不留观察版（席 A 建议留作观察分类；采用席 B 的证据向量替换——席 A 反对的正是「互斥因果类」这个数据结构本身）；② F1 作用域恢复 `protocol != complete`（r9 首稿误删 r5 U3 的 pre-only 作用域；恢复非扩大——T0 未授权扩大 fail 面）；③ `unattributed` 直接删、不做改名保留（席 B 建议改名 `death-cause-indeterminate`；但七分量中不存在「死亡原因」字段，该 cause 无处落脚）；
+> ④ 两道前置门「合法域门先、未知位门后」（反序会把带未知位的矛盾输入洗成不 fail）；⑤ 负单调钟挂 F8 不挂 F4（F4 的「域外有效平台值不 fail」豁免以值本身有效为前提）；⑥ POST 三选一编码、不设 `skip_summary` 对应物（避免改冻结字段集、避免重蹈 MJ-5 明禁的「摘要替代逐子项」）；⑦ S8 收紧（宁缺勿误）；
+> ⑧ barrier 路径补发 SKIP（`not-called` 唯一证明途径，不留旁路）；⑨ 拼法统一取 `cause=` 形式（合法域定义句式用它）。
+> **执行方式**：r9 未走单次派发，按判断密度切**八个**有界工作包（清点 → 机械修正 → 核心改造 → 引用改接 → selftest 重写 → 调用边界 → 域门编码 → 收尾），每包独立验证后进下一包；F2–F9 的逐条核实纠正了规范稿（主会话起草）的 5 处错误，逐条锚见自陈 14(e)。
+> 状态改为 `criteria-r9-pending-independent-review`；r9 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -543,7 +562,7 @@ barrier 等待盒（7 s）到期仍未见 marker → destroy **顺延**：主线
   | 8 | `data-ready-post-destroy` | 含 `POLLIN`（无 HUP/ERR）且 `elapsed_ms < 4500` 且 `at_mono_ms` **>** `C_mono_ms`（r9 三分带口径，同行 7：严格大于 `_C` 的 `mono_ms`，歧义带与 `_C` 缺均不满足）且 drain 以 EAGAIN 正常终止（`dw_drain_end == eagain`，同上收紧）——观察类，**不支撑** destroy 归因 |
   | 9 | `timeout-like` | revents 空且 `elapsed_ms >= 4500`（poll 自身超时返回） |
   | 10 | `spurious-early` | revents 空且 `elapsed_ms < 4500` |
-  | 11 | `other-revents` | 穷尽兜底：`ret >= 0`、revents 非空但不匹配以上任一行（如仅 `POLLPRI`）——不归因，逐字登记 revents |
+  | 11 | `other-revents` | 穷尽兜底：`ret >= 0`、revents 非空但不匹配以上任一行（如仅 `POLLPRI`）（r9：含未知位的输入已由未知位前置门在表外定类，本行的论域因此限于掩码全集内的组合）——不归因，逐字登记 revents |
 
 **行 7 注（r4 第四趟 W1 自上表行 7 外提，内容逐字不变）**：**唯一可归因 destroy 的类**：残留数据与外来包只能产生 `POLLIN`（drain + 时序条件已排除残留，外来包仍可能在 destroy 后到达产生 POLLIN——故普通 `POLLIN` 与 `POLLNVAL` 一律**不计入**本类）。
 
@@ -1145,7 +1164,7 @@ Live 后 runner finally 序列**无论成败、进程死亡、观测窗到点或
 以下为已知的自利解释方向，全部提交审查席对抗性核验。r0 自陈五项的裁断结果已吸收：第 1 项（post-mortem）与第 4 项（D8 位次与时间盒）按修法重写；第 2 项（first-accept-lock）保留并按裁定补后位 `unobservable(protocol-first-accept-lock)` 与 MB1 不伪答 U1；第 3 项（close 清单）按 MJ-8 扩为完整清单读法；第 5 项（OB-01/02 保守不关闭）保留。
 
 1. **post-mortem 死因分类的边界**：把「平台终止类死亡」纳入协议完成度（可 pass）仍降低本设计 fail 概率；r1 用「仅平台终止签名可 pass、探针 fault 与无法归因一律 fail」收紧，但 `platform-termination` 的判定仍依赖 faultlogger 的 `Fault_Type` 归类——若平台把探触发的崩溃也记为 APPFREEZE，仍可能洗白。
-第三趟 B1 已收紧为「优先级全序 + APPFREEZE 死亡位点约束（r3 第一趟 D2 反转默认并经 r4 第一趟 R5 收窄：仅 D2 保留条目锁定序列 2.1-2.7 判 `probe-fault`，**P1 已由 R5 移出短时步集**，其余位点走 `platform-termination`，探针 hang 洗白由静态断言 A8 堵）+ 时间窗新增条目过滤 + 无探针 crash 签名三条件合取」，但「平台把探触发的崩溃也记为 APPFREEZE」的残余风险仍依赖 faultlogger 归类正确性，属解释而非决议明文。
+第三趟 B1 已收紧为「优先级全序 + APPFREEZE 死亡位点约束（r3 第一趟 D2 反转默认并经 r4 第一趟 R5 收窄：仅 D2 保留条目锁定序列 2.1-2.7 判 `probe-fault`，**P1 已由 R5 移出短时步集**，其余位点走 `platform-termination`，探针 hang 洗白由静态断言 A8 堵）+ 时间窗新增条目过滤 + 无探针 crash 签名三条件合取」，但「平台把探触发的崩溃也记为 APPFREEZE」的残余风险仍依赖 faultlogger 归类正确性，属解释而非决议明文。（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）
 2. **first-accept-lock**：以牺牲矩阵后位候选的接受性事实换取协议存活率，间接有利于 verdict: pass 的可达性；r1 曾引入的「迟到 fd destroy 关闭」例外已由 r2 第四趟 C1 删除（改为只登记 `late-fd-orphaned` 不关闭）——「绝不矩阵内 destroy」现为无条件冻结，迟到 fd 的悬挂代价见自陈 7(a)。
 3. **syscall 允许清单读法**：把 §4.3.5 的「可用」读为下限而非排他，便利本设计（`close`/socket 族/`clock_nanosleep`/`pthread_join` 均超出决议字面列举）；r1 已一次性写全并附读法依据，仍属解释。
 4. **时间盒数值均为起草人拍板、无实测依据**：观测窗 525 s（467 s 上界 + 58 s 裕量——裕量取 58 s 是裁量；第二趟修订 barrier 盒 2 s → 7 s、第三趟 r3 更正 P8 并发项不得串行相加〔drain 与 barrier 等待并行，P8 = max(7, 5) + 2 = 9〕，上界冻结为 467、裕量 58，冻结值 525 s 不变）、
@@ -1169,12 +1188,12 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 (e) C5 的 argv 表中 `-t <T>` 前缀对全部 campaign 命令统一施加（含 `HilogStream` 长驻流）——G0 先例中部分命令是否带 `-t` 未逐字核对，若目标绑定机制对长驻流有不同要求，freeze 时须复核；
 (f) C6 对 read 返回 0 的「终止 drain」语义是定义选择（非阻塞 fd 上 0 的内核语义此处未穷尽论证），其后果是 `end=zero-read` 与正常终止分立登记、不影响路径①时序条件——若 r2 审查认为 0 应重试或视为 fault，属判据修改；
 (g) C8 的回退条件把「PidOfVpn 不可观测」导向死因分类项 `unobservable`——**该衔接已由 r3 第一趟 D1 在正文逐字闭合，不再靠本自陈与证据规则 2 的括注衔接**：verdict 节到点收口规则已冻结「`PidOfVpn` 可观测性与终态（PRE）完整性是两个独立的判定输入」——`PidOfVpn` 不可观测不得单独判 fail（只使「`:vpn` 消失证据」无法建立、死因记 `unobservable`），fail 只来自完整性条件本身（`N1BDISC_PRE` 缺失；r5 U7 更正：原此处 `N1BDISC_RESULT` 双缺为 R1 拆分前的旧字面残留）；
-`unattributed` 类以「PidOfVpn absent + capture 静默」为前提，前提不成立时自然落入无独立死亡证据路径。审查席若认为判定表与该条款仍有分界缝隙，须逐字指出；
+`unattributed` 类以「PidOfVpn absent + capture 静默」为前提，前提不成立时自然落入无独立死亡证据路径。审查席若认为判定表与该条款仍有分界缝隙，须逐字指出（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
 (h) C9.2 的竞速登记只论证了「瞬态不制造假阳性」，其论证依赖「poll 是 worker 唯一长阻塞点」——该前提在 worker 序列冻结后成立（marker 发射均为即返操作），若未来 worker 序列修改，本论证须重审。
-8. **r3 三趟新引入的裁量**（逐项登记，如实不粉饰）：(a) **死因全序反转**（D1：`probe-fault` > `platform-termination` > `unattributed`）——理由是旧序（platform 先判）会让成功终态被更早判定的类截胡，但反转的代价是把「platform-termination 条件不全成立」的情形后置到 `unattributed`（fail），凡证据链不齐（如 faultlogger 条目缺失或 PidOfVpn 无 positive 基线）一律 fail 收口——我把判定失败的方向压向保守，这是裁量不是必然；
-(b) **APPFREEZE 短时步集收窄**（D2：仅 P1 与 D2 锁定序列 2.1-2.7）——集合边界是我按「即返 syscall」划的，P2 内 60 s create 未列入短时步（其 APPFREEZE 走 platform-termination），若平台对 create 期间的 APPFREEZE 实际含探针缺陷，将被记为平台事实而非 fail，此风险我未消除、仅由 A8 与 (i) 的 D7 正面约束部分对冲；
+8. **r3 三趟新引入的裁量**（逐项登记，如实不粉饰）：(a) **死因全序反转**（D1：`probe-fault` > `platform-termination` > `unattributed`）——理由是旧序（platform 先判）会让成功终态被更早判定的类截胡，但反转的代价是把「platform-termination 条件不全成立」的情形后置到 `unattributed`（fail），凡证据链不齐（如 faultlogger 条目缺失或 PidOfVpn 无 positive 基线）一律 fail 收口——我把判定失败的方向压向保守，这是裁量不是必然（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+(b) **APPFREEZE 短时步集收窄**（D2：仅 P1 与 D2 锁定序列 2.1-2.7）——集合边界是我按「即返 syscall」划的，P2 内 60 s create 未列入短时步（其 APPFREEZE 走 platform-termination），若平台对 create 期间的 APPFREEZE 实际含探针缺陷，将被记为平台事实而非 fail，此风险我未消除、仅由 A8 与 (i) 的 D7 正面约束部分对冲（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
 (c) **A8 断言引入**（D2）——它只静态核对「循环有可达退出路径」，不能证明退出路径在真实调度下及时可达（如时间盒常数过小导致正常路径也被熔断），其保证是形式性的；
-(d) **`destroy-never-called` 的位次**（D4：优先级 0，高于一切依赖 destroy 时刻的类）——理由是锚点缺失时后续判定无定义，但置于最高位意味着 barrier-never-observed 等 worker 异常情形一律不归因、不解锁路径①，waiter 事实倾向 unobservable 化，可判定性让位于归因安全性，这是我的取舍；
+(d) **`destroy-never-called` 的位次**（D4：优先级 0，高于一切依赖 destroy 时刻的类）——理由是锚点缺失时后续判定无定义，但置于最高位意味着 barrier-never-observed 等 worker 异常情形一律不归因、不解锁路径①，waiter 事实倾向 unobservable 化，可判定性让位于归因安全性，这是我的取舍（**防误引注，r9：类名已拆为 `destroy-skip-proven` / `destroy-call-unobserved`，位次理由由后者原样继承；且 barrier-never-observed 现补发 SKIP、按五态记 `not-called`，本条「一律不归因」对该路径的描述已过时，见 r9 第四/五步**）；
 (e) **canonical ledger 排序规则**（E2 (c)：按 `created_at_mono_ms` 升序、not-created 按登记时刻参与、同刻按角色集出现顺序定序）——排序本身不影响 digest 的抗碰撞性，选它只为确定性；「角色集出现顺序」这一同刻 tie-break 是任意的，无深层理由；
 (f) **chunk `stream` 枚举划分**（E3：恰 {`dlerror`,`rejtext`,`u3hex`,`foreign`} 四值）——恰好覆盖现有四类 detail 记录，未预留扩展位；若 freeze 后新增任何 detail 类别须扩枚举，属判据修改；
 (g) **U3 优先级顺序与 `off=both` 决定性 offset**（E4）——**防误引注（r5 U11）：E4 的「优先级 `tun_pi-like` > `other-prefix` > `no-prefix` > `ambiguous` > `unparsable`」排序已被 r4 第二趟 S5 的互斥分区表取代（`ambiguous` 不再被截胡），本项对旧排序的动机自陈仅存历史价值；`off=both` 决定性 offset = offset-4 的裁量仍有效**——旧排序保证的是「判定唯一」，不保证「最符合直觉的类优先」；决定性 offset 选 offset-4 的理由（IPv4 真实起点、结构性差异显式化）成立与否依赖 PI 头确实存在的平台前提，`no-prefix` 实测成立时 off0 对照字段仍可核查，此为后手；
@@ -1184,11 +1203,12 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 (k) **本轮仍未修干净的地方（如实登记）**：① G9 集中列举的 gate 10 用例类别与各节分散要求由我逐条誊录，两处清单的一致性靠人工维护，无机器同源保证，审查席应按「以各节正文为准、gate 10 行为索引」复核；
 ② G5 的换算只覆盖 `dw_drain_end` 四值与 C6 五类的对应，`dw_drain_timeout` 与 `end=box-expiry` 的冗余登记仍同时存在（两字段信息重叠，未合并——改字段集属语义变更，收尾趟不做）；③ 自陈 7(b)（D7 负载因 50 ms sleep 而被修改）与 7(d)（hilog 行长无实测）仍是未实测依赖，r3 未处理；④ 全文多处「r3 冻结」「r3 第一趟」类自引没有统一索引表，跨节核对仍须通读。
 9. **r4 第一趟（R1-R7）新引入的裁量**（逐项登记，如实不粉饰）：(a) 全序新增位点编号 `P8T` 而非重排 P9-P12——动机是最小化全序改动波及面；代价是编号表出现字母后缀，与其他 P 编号不规则；(b) PRE 的 P1-P8 事实以「既有 marker/chunk 流 + PRE 封口断言」承载而非在 PRE 行内重复全字段——动机是避免字段集双写漂移；代价是 PRE 单行不含事实本身，完整性依赖 capture 全流存在性判定；
-(c) 墙钟代理容差取 2000 ms——无实测依据（沿自陈 4 的时间盒数值口径）；(d) 死亡位点 ∈ {P10} 一律判 `probe-fault` 不区分 join 是否实际阻塞——按 R6 授命从宽收口，理论上覆盖「worker 正常结束后死于 P10」的误判情形（fail 方向，不洗白）；
+(c) 墙钟代理容差取 2000 ms——无实测依据（沿自陈 4 的时间盒数值口径）（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+(d) 死亡位点 ∈ {P10} 一律判 `probe-fault` 不区分 join 是否实际阻塞——按 R6 授命从宽收口，理论上覆盖「worker 正常结束后死于 P10」的误判情形（fail 方向，不洗白）（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
 (e) `pre-only` 由 runner 在 evidence 记录登记而不代发探针 marker——改动了旧 post-mortem 机制（**防误引注：「post-mortem」「RESULT marker」均为被取代的旧机制历史描述，现行 protocol 取值域 = {`complete`, `pre-only`}，现行终态 marker = `N1BDISC_PRE`/`N1BDISC_POST`**），封签形态随之变化；(f) `pre-only` 收口附加「host finally 须采得死亡证据」前提（无死亡证据的存活未完成仍 `fail`）——R1 授命字面未含此前提，为防「探针活着磨蹭到观测窗到点」被洗成合法终态而补加。
 10. **r4 第二/三趟（S1-S8、T1-T8）与 r5（U1-U12）新引入的裁量**（逐项登记，如实不粉饰，补 r4 两趟漏登——决议 §九「全部已知自利解释须自陈」）：
 (a) **`closed_by` 的 `open-at-exit`/`process-exit` 推断**（S3，r6 W3 修正：pre-only 形态由 `host-forcestop` 改回 `process-exit`）：仍 open 实例的收口 `closed_by` 由 runner 按收口形态**推断**而非探针自证——`complete` 时断言「进程自然退出时仍未关闭」、pre-only 时断言「ForceStop 是关闭责任方」（**防误引注，r7 X8：pre-only 形态现记 `process-exit`（r6 W3）——本句「ForceStop 是关闭责任方」为 W3 前旧口径**）；若平台在退出前有未观测的隐式关闭行为，该登记与事实不符且无从察觉，我选择可判定性优先；
-(b) **候选集不猜近义词根**（S1）：`JSCRASH`/`JSERROR` 等异词根不并入候选集而走行 5 兜底出口——不猜是对的，但后果是若真机字面恰为异词根，行 1/2/4 全程不命中，crash 类死亡全部降级为不 fail 的观察出口，探针缺陷的 fail 侦测能力在该情形下为零，这是我接受的代价（**防误引注，r7 X8：「全部降级为不 fail」已被 r7 X1 取代——无平台签名的异词根构造现落行 5 `fault-type-unrecognized-no-platform-signature` → fail，有平台签名的落行 4 (iii) 不 fail**）；
+(b) **候选集不猜近义词根**（S1）：`JSCRASH`/`JSERROR` 等异词根不并入候选集而走行 5 兜底出口——不猜是对的，但后果是若真机字面恰为异词根，行 1/2/4 全程不命中，crash 类死亡全部降级为不 fail 的观察出口，探针缺陷的 fail 侦测能力在该情形下为零，这是我接受的代价（**防误引注，r7 X8：「全部降级为不 fail」已被 r7 X1 取代——无平台签名的异词根构造现落行 5 `fault-type-unrecognized-no-platform-signature` → fail，有平台签名的落行 4 (iii) 不 fail**）（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
 (c) **`d2_late_fd` 恒按最终重建形态登记**（r5 U5 沿 S3）：迟到 fd 的 PRE 快照值（`open-at-pre`）与最终值刻意不同且恒不用前者——快照一致性让位于「最终形态唯一」，PRE digest 对该条目的可复核性弱于其他条目（**防误引注，r7 X8：「恒不用前者/恒按最终重建」已被 r6 W2 取代——P5T 快照对含 `d2_late_fd` 的一切未关闭 fd 一律记 `open-at-pre`，最终重建才按收口形态**）；
 (d) **chunk 重复片仅比 payload**（S6）：同 index 重复片的「逐字节一致」只施加于 payload 解码后字节，`count`/`sha256` 字面不一致 r5 U12 才补为 fail——S6 当时漏写这两项属疏漏，r5 补上，非事后加固；
 (e) **P8T 编号、r5 U1 改 P5T 编号**（R1/U1）：位点编号带字母后缀而非重排 P9-P12，两次都是为最小化全序改动波及面；代价是编号表不规则、旧文档引用 `P8T` 全部失效，跨文档追溯须依赖本登记；
@@ -1198,30 +1218,33 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 
 11. **r6 两趟新引入的裁量**（逐项登记，如实不粉饰）：
  (a) **V2 分岔判据选择 `N1BDISC_DW_DESTROY_T` 是否发出**（主会话裁定）：用 marker 存在性作分岔判据是机器可判的，但 destroy 已调用与「进程活过 destroy」不严格等价——destroy 调用后进程仍可能活过 D6b（此时 observed-false 法理成立）或死于 D6b 中途（死亡前已得 result 保留、其后未执行项 observed-false，法理仍成立）；我未找到比 DW_DESTROY_T 更精确的可判锚点，接受该近似（**防误引注，r7 X4：该锚点已被取代——r7 新增 post-invocation marker `DW_DESTROY_C` 作为 V2/行 3/行 4(ii) 的分岔锚点，见自陈 12(b)**）；
- (b) **V4 `site_uncertainty` 阈值 = 该阶段时间盒 × 1.5**（主会话裁定）：无实测依据（沿自陈 4 的时间盒拍板传统）；阈值过小会把正常慢调度误标、过大则尾 marker 丢失漏标——1.5 倍对 D7（20 s × 1.5 = 30 s）的取值纯为「调度噪声显著小于阶段时长」的先验假设（**防误引注，r8 Y3：该 ×1.5 阈值已废弃——r7 X5 落笔沿用的「25 s × 1.5 = 37.5 s」与行 2 判定窗错位，现 `T_uncertainty(P6) = 25000 ms` 挂行 2 之下，见证据规则 4 与自陈 13(b)**）；
- (c) **V4 不确定性只约束 `u7`、不改死因分类**：site_uncertainty 存在时死因分类仍按可见位点判定（行 2 的 APPFREEZE+D7 超窗判定不受影响）——若尾 marker 丢失恰与真实超窗叠加，行 2 可能误判；我接受该残余（行 2 触发面已由 elapsed_proxy 约束），但审查席若认为应同时约束行 2，属合理收紧（**防误引注，r7 X5：审查席意见已被采纳——site_uncertainty 置位时行 2 现一律不命中，见死因分类节墙钟代理段与自陈 12(c)**）；
+ (b) **V4 `site_uncertainty` 阈值 = 该阶段时间盒 × 1.5**（主会话裁定）：无实测依据（沿自陈 4 的时间盒拍板传统）；阈值过小会把正常慢调度误标、过大则尾 marker 丢失漏标——1.5 倍对 D7（20 s × 1.5 = 30 s）的取值纯为「调度噪声显著小于阶段时长」的先验假设（**防误引注，r8 Y3：该 ×1.5 阈值已废弃——r7 X5 落笔沿用的「25 s × 1.5 = 37.5 s」与行 2 判定窗错位，现 `T_uncertainty(P6) = 25000 ms` 挂行 2 之下，见证据规则 4 与自陈 13(b)**）（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+ (c) **V4 不确定性只约束 `u7`、不改死因分类**：site_uncertainty 存在时死因分类仍按可见位点判定（行 2 的 APPFREEZE+D7 超窗判定不受影响）——若尾 marker 丢失恰与真实超窗叠加，行 2 可能误判；我接受该残余（行 2 触发面已由 elapsed_proxy 约束），但审查席若认为应同时约束行 2，属合理收紧（**防误引注，r7 X5：审查席意见已被采纳——site_uncertainty 置位时行 2 现一律不命中，见死因分类节墙钟代理段与自陈 12(c)**）（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
  (d) **W3 恢复 `process-exit` 的字面选择**（主会话裁定）：用 `process-exit` 而非新造字面是为与 r5 U12 删除前的历史字面一致、减少解析器分支；该字面语义是「内核在进程退出时回收」，与 ForceStop 的主动 kill 有明确区分；
- (e) **V6 行 5 拆分判据 = 有无 SIGKILL/SIGTERM 条目**（主会话裁定）：该判据把「平台异词根」的认定系于信号侧证据——若平台用异词根 Fault_Type 且**不写** SIGKILL/SIGTERM 条目（纯静默终止），该情形落行 5b → fail，平台合法行为被烧；我接受该残余（S1 的 freeze 收敛前置会在拿到真实样本后缩小触发面），但这是 5a/5b 拆分的已知代价，特此自陈；
- (f) **W4 行 3 加 `DW_DESTROY_T` 条件的方向**：该修订把「destroy 后死于 P10」从 probe-fault-fail 改为 platform-termination-pass——放宽 fail 面、提高 pass 可达性，属对本设计有利的修订；依据是 grok M1 指认的预期终态截胡（destroy 已 resolve、join 完成、D6b 发出 marker 后的 terminal 是 E3 先例的正常路径），不是为 pass 而 pass。
+ (e) **V6 行 5 拆分判据 = 有无 SIGKILL/SIGTERM 条目**（主会话裁定）：该判据把「平台异词根」的认定系于信号侧证据——若平台用异词根 Fault_Type 且**不写** SIGKILL/SIGTERM 条目（纯静默终止），该情形落行 5b → fail，平台合法行为被烧；我接受该残余（S1 的 freeze 收敛前置会在拿到真实样本后缩小触发面），但这是 5a/5b 拆分的已知代价，特此自陈（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+ (f) **W4 行 3 加 `DW_DESTROY_T` 条件的方向**：该修订把「destroy 后死于 P10」从 probe-fault-fail 改为 platform-termination-pass——放宽 fail 面、提高 pass 可达性，属对本设计有利的修订；依据是 grok M1 指认的预期终态截胡（destroy 已 resolve、join 完成、D6b 发出 marker 后的 terminal 是 E3 先例的正常路径），不是为 pass 而 pass。（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）
 
 12. **r7 新引入的裁量**（逐项登记，如实不粉饰）：
- (a) **X1 删除行 5a 的理由**：r6 行 5a 的构造（`Fault_Type` 归一化不落候选集 + 存在 SIGKILL/SIGTERM 条目 + 行 1-4 不命中）与行 4 (iii)（unknown `Fault_Type` 非 crash 签名 + `Signal` ∈ {SIGKILL, SIGTERM} → `platform-termination`，(iv) 同真）完全重合——5a 在行 4 之后按优先级永不可达，保留只会维持「5a/5b 同名 `fault-type-unrecognized`」的名实不符。这是删除而非改判：平台异词根 + 有平台签名的发现产出**仍不 fail**，只是承载点从 5a 移回行 4 (iii) 本位；「平台用异词根且无任何信号条目」的纯静默终止落行 5 → fail，该残余沿自陈 11(e) 不变，r7 未新增对冲；
- (b) **X4 的 `DW_DESTROY_C` 锚点选择**：V2/行 3/行 4(ii) 的分岔问题是「destroy 调用是否已发起」，`DW_DESTROY_T` 只证「即将调用」（紧贴调用之前），marker 在而调用未发生（如 marker 发出后进程立即被杀）会误判；
+ (a) **X1 删除行 5a 的理由**：r6 行 5a 的构造（`Fault_Type` 归一化不落候选集 + 存在 SIGKILL/SIGTERM 条目 + 行 1-4 不命中）与行 4 (iii)（unknown `Fault_Type` 非 crash 签名 + `Signal` ∈ {SIGKILL, SIGTERM} → `platform-termination`，(iv) 同真）完全重合——5a 在行 4 之后按优先级永不可达，保留只会维持「5a/5b 同名 `fault-type-unrecognized`」的名实不符。
+这是删除而非改判：平台异词根 + 有平台签名的发现产出**仍不 fail**，只是承载点从 5a 移回行 4 (iii) 本位；「平台用异词根且无任何信号条目」的纯静默终止落行 5 → fail，该残余沿自陈 11(e) 不变，r7 未新增对冲（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+ (b) **X4 的 `DW_DESTROY_C` 锚点选择**：V2/行 3/行 4(ii) 的分岔问题是「destroy 调用是否已发起」，`DW_DESTROY_T` 只证「即将调用」（紧贴调用之前），marker 在而调用未发生（如 marker 发出后进程立即被杀）会误判（**防误引注，r9：原死因表行 3 / 行 4(ii) 已随归因停机删除，本条的历史论证对象不复存在；现行口径为 `destroy_call_state` 五态 + F1 闭集，`_C` 现锚定五态的 `call-boundary` 侧与路径①的严格 `at > C`**）；
     sol 指出的 `D6S1_B` 或 destroy resolve 均在调用返回语义之后（resolve 前死亡时不可得），粒度不对——故新造 post-invocation 字面 `DW_DESTROY_C`，发射点钉死为「紧贴 `destroy()` 调用之后、resolve 等待之前」。
     「已调用未返回」（`DW_DESTROY_C` 在、无 resolve 证据）单列第三支记 `unobservable(destroy-unresolved)` 而不并入 observed-false，是宁缺勿误的同一取舍；`DW_DESTROY_T` 保留作时序锚定（**防误引注，r8 Y5：路径①条件 3 的 `destroy_call_mono_ms` 现规定取 `_C` 的 `mono_ms`，不再以 `_T` 为 destroy 时刻锚**，见该条件定义式与自陈 13(c)；**防误引注：`destroy-never-called` 判定锚已改用 `DW_DESTROY_C`，见该行**），一处 marker 两字面是成本，换取三态判据的每一支都有独立机器锚；
  (c) **X5 的比较对象修正**：r6 版「最后 marker 与其前一 marker 的间隔 > 阶段时间盒 × 1.5」在因果上错位——连续尾丢失发生在最后 marker **之后**，前一间隔再短也不能排除其后全丢（grok 构造：PRE 与 D7_BEGIN 间隔很短、D7_END/P7/P8 全丢、死于 P8 → 旧判据漏标 → 错误 u7 + pass）。
     改为「死亡证据墙钟 − 最后可见 marker 墙钟 > T_uncertainty」（**r8 Y2 防误引注：r7 登记落笔把减法方向写反了（marker 侧作被减数）——死亡晚于 marker 时恒为负、永不置位，属执行错误，现全文冻结唯一式为本式**），直接度量「最后可见证据与死亡之间的静默跨度」；~~P6 阶段时间盒钉死 25 s（20 s 冻结时长 + 5 s 宽限）消除「阶段时间盒」在该位点的歧义~~（**r8 Y3 防误引注：×1.5 阈值（37.5 s）已废弃**，r7 阈值取值与行 2 判定窗错位——现取 `T_uncertainty(P6) = 25000 ms` 挂行 2 之下，见证据规则 4）；
-    同时把 site_uncertainty 的效力从「只约束 u7」扩为「u7 与死因行 2 均不得作确定判定」（行 2 不命中、该输入落行 4/5/6 按证据定类）——这收窄了行 2 的触发面，方向偏保守（多 fail），与 11(c) 当初「只约束 u7」的放宽相反，属审查席意见采纳；
- (d) **V4 行 2 约束的残余**：site_uncertainty 是观察项，置位判据依赖死亡证据墙钟（faultlogger 时间戳或 capture 静默判定墙钟），死亡证据本身缺失或不可求值时置位判据同样不可求值——此时行 2 按既有「代理不可求值 → 不命中」规则处理，与 X5 约束同向，未引入新缝隙但登记依赖同源。
+    同时把 site_uncertainty 的效力从「只约束 u7」扩为「u7 与死因行 2 均不得作确定判定」（行 2 不命中、该输入落行 4/5/6 按证据定类）——这收窄了行 2 的触发面，方向偏保守（多 fail），与 11(c) 当初「只约束 u7」的放宽相反，属审查席意见采纳（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）；
+ (d) **V4 行 2 约束的残余**：site_uncertainty 是观察项，置位判据依赖死亡证据墙钟（faultlogger 时间戳或 capture 静默判定墙钟），死亡证据本身缺失或不可求值时置位判据同样不可求值——此时行 2 按既有「代理不可求值 → 不命中」规则处理，与 X5 约束同向，未引入新缝隙但登记依赖同源。（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）
 
 13. **r8 新引入的裁量**（逐项登记，如实不粉饰）：
  (a) **Y1 四步序列的「取得 Promise 不等待」实现契约**：第二步只要求 destroy 调用已发起并取得 Promise 对象、不要求任何完成信号——这把「调用已发起」与「调用已生效」切开：`_C` 锚定前者，resolve 等待盒（10 s）承载后者，`destroy_unresolved` 是二者分离时的观察出口。实现侧风险：若目标 API 的 destroy 返回值不是 Promise 形态，「取得 Promise」应读作「取得该调用返回的完成凭据」；`_C` 的发射时机在调用语句与等待语句之间，属同步区，理论上有发射后进程立即被杀导致调用实际未进入平台层的小窗——接受该残余（`destroy-unresolved` 第三支兜底，宁缺勿误）；
  (b) **Y3 阈值挂行 2 之下的理由与残余**：阈值必须 < 行 2 判定窗 27000 ms，否则真 P8 死亡的静默跨度会先被行 2 误判为 D7 超窗 probe-fail、保护来不及置位；取 `T_uncertainty(P6) = 25000 ms`（= 行 2 elapsed_proxy 阈值 20000 + 5000）使保护窗自「D7 合法时长结束时」即开启，且与既有冻结值同源、不新造数。残余：25000–27000 ms 的静默跨度被保护后行 2 让位、落行 4/5/6 按证据定类——若该跨度的死亡证据不足，结局是 unobservable 而非 probe-fail，fail 侦测面在此窄带内收窄，属宁缺勿误的同一取舍；30–37.5 s 段的旧错位（既不保护又被行 2 窗吞掉）已消除；
     **防误引注，r9 第六步：本条为 r8 当时的历史自陈，三处表述不得按字面引用**——(1)「行 2 elapsed_proxy 阈值」这一称呼当年即为误称：行 2 真实阈值为 `20000 + 5000 + 2000（代理容差）= 27000 ms`，本条所引 `20000 + 5000` 只是其中前两项；(2)「保护窗自「D7 合法时长结束时」即开启」是闭区间读法，与置位谓词的严格大于不符（25000 恰值不置位）；(3) 行 2 与 `elapsed_proxy` 本体均已随 r9 死因表删除，现行口径为 `marker_tail_state` / `T_tail = 25000 ms`（严格大于、纯观察登记），见「死亡事实记录（证据向量）」节。r7 X5 登记行（修订登记头内）对同一误称的历史陈述按「登记照登不改写」惯例保留原样。
  (c) **`destroy_call_mono_ms` 在路径①条件 3 的取值规定**：`_T` 与 `_C` 两枚 mono_ms 并存，规定取 **`_C` 的 `mono_ms`**（post-invocation 锚是「调用已发起」的精确时刻；`_T` 早于调用语句，作比较基准会把 destroy 前数毫秒内的 poll 返回误判为「晚于 destroy」）——该规定使条件 3 的锚点与 V2 分岔、行 3、行 4(ii) 全部统一到 `_C`，`_T` 退为纯时序锚；代价是 `_C` 缺失时条件 3 不可求值、路径①必不解锁，该输入由判定表类 0 收口，不产生 criteria-gap。
+    （**防误引注，r9：本条按 r8 时代口径陈述。「行 3、行 4(ii)」已随死因表删除；「类 0」现拆为 `destroy-skip-proven`/`destroy-call-unobserved` 两类，收口的是后者；
+    条件 3 现冻结为严格 `at_mono_ms > C_mono_ms`，`T ≤ at ≤ C` 闭区间整体归 `invocation-window-ambiguous`、不解锁路径①，见 r9 第三/四步**）。
  (d) **Y4 用例组的本轮自查改正（如实登记）**：Y4 首稿把 (a) 的 30 s 构造注为「30 s < 27000 ms 本就不命中行 2」——算术方向写反（30000 > 27000），据此推出的「行 2 本就不命中」与真值相反，且所谓「另设 28000 ms 变体」与 30000 同在 27000 之上、不构成对照；同时 (b)/(c) 两例（25000、24999）同落不置位一侧，缺本文档既有句法（⑪ 的 27000 不命中 / 27001 命中）要求的跨界边界对。
     派出前自查改正：(a) 归位为「置位优先于行 2」的优先级用例，边界对改 25000/25001，24999 降为界下例，共五例。
-    **登记理由**：本条与 r6/r7 已登记的落笔错误同型——批量补写规则时未逐一核对所引数量的大小关系，属主会话反复出现的失误模式，供审查席校准我方产出的可信度、勿默认算术与阈值方向已被验证。
+    **登记理由**：本条与 r6/r7 已登记的落笔错误同型——批量补写规则时未逐一核对所引数量的大小关系，属主会话反复出现的失误模式，供审查席校准我方产出的可信度、勿默认算术与阈值方向已被验证。（**防误引注，r9**：本条按原死因分类表口径陈述；该表已随 r9 删除，现行口径见「死亡事实记录（证据向量）」节与 F1–F9 闭集）
 
 14. **r9 新引入的裁量与删除登记（证据向量改造，逐项登记，如实不粉饰）**：本轮改造依据 `docs/n1b-disc-r9-death-facts-spec.md`（T0 裁决 3/3 一致的落地说明：停止用死因归因驱动 `verdict`，改证据向量三态记录 + 窄正向崩溃签名 fail），规范已决事项不在此重裁；本条只登记本轮新引入的裁量与删除损失。
  (a) **删除的 fail 映射逐条登记（席 C 义务：删了什么、各失去什么真实探针缺陷捕获、为何该损失是决议 §4.2 `:116` 所要求的）**：
