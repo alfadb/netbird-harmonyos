@@ -703,3 +703,21 @@ M/m：④ 18 类句两读（sol M-01：先要求 18 值过步 (3) 又说明 skip
 M/m 去重：F3 轴错（item=D-W+RETURN 应挂 F8(2) 而非 F3——grok M-01）；errno 第四字段无落盘名（M-02）；`:987`/`:1331` 残「照 13 类判定表」（M-03）；POST 其余派生字段无所有权声明（M-04/sol 同）；r16 登记 5 minor vs 实 4（m-01/sol m-01）；⑪(d) 未钉 barrier 无 RETURN class（m-03）。
 
 **轨迹：12→8→4→3→5→3。** 三席对 r16 五条 blocker 的修复核对：传播对齐、state=S 收紧、inwait 操作句、item=destroy 字面**全部确认落地**（sol 明确「旧 B-02 逐格正确」「旧 B-03 四字段均落值 pass」）；新缝集中在 r16 自己的两个新声明（假分划、P12 裁定未挂闭集）。**主会话裁定①被两席驳回**——裁定方向未被推翻（P12 派生本身可行），但落地不完整（闭集挂载 + raw 交接缺失）即构成 fail-open，须补。
+
+## 九之八、第十八轮审查（r17 版 @ 2806e41）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（分域 14 格 + 快照） | fail | 1 B / 3 M |
+| grok-4.6（全文） | fail | 2 B / 3 M / 4 m |
+| sol（全文） | fail | 2 B / 1 M / 2 m |
+
+**去重 2 条 blocker（三席收敛，全部核实成立）：**
+1. **D6b 位次裁定反事实**（grok B-01 = sol B-02；主会话裁定③被正面驳回）：worker drain/poll 对象就是 `fd_dup`（:616），裁定句「非 worker 持有的原 fd」前提错误；abandoned worker 仍阻塞在 poll(fd_dup) 上，主线程 D6b 对同一 fd read/close——close 唤醒与否使 (d) 的「RETURN 缺」前件非单值（晚到 RETURN vs (d) 成立）、D6b 偷走 destroy 本应留下的 POLLIN/HUP 污染核心发现目标；:811 归因洁净句被裁定自相矛盾。迟到 worker 无 timeout cutoff，可在 D6b/P11/P12 间写快照发 RETURN。修法（grok）：join-timeout 形态禁止 D6b 对仍可能被 poll 的 fd_dup 做 read/close（close 交进程退出）；(d) 的 RETURN 缺检验须在「主线程不再触碰 fd_dup」之后。
+2. **共享快照不构成冻结的 P12 输入面**（sol B-01 = grok B-02 ⊇ deepseek B-01/M-01，三席三个角度）：(a) 快照只冻 poll 五 raw、漏 drain 终态（class 行 7 的第四前件依赖它——同一 poll raw + drain=eagain/zero-read 应落不同类，P12 无输入区分）；(b) 无 release/acquire 发布边界（松散发布可读到初始化值，raw 分叉可同 class 漏检 = fail-open）；(c) 同值无机制（两次写，单次读未钉死）；(d)「RETURN 缺 ⟹ 无 raw」被「发射前写入」证伪（⑪(e) 构造窗：poll 返回→写快照→RETURN 前阻塞）；(e) 第五形态（join 成功 + capture 丢 RETURN marker——标志置位而 capture 无，= capture 完整性矛盾）无收口。修法（grok 主案）：终态标志为快照可读门（标志置位后 P12 才可读）；join-timeout∧标志未置 → 无视快照一律 (d)；标志已置∧capture 无 RETURN → 单独具名 `return-marker-missing`（F8(2) capture 完整性矛盾，非 poll-never-returned 冒充）；同值机制 = 单次读钟/errno 同源两写。
+
+M/m 去重：`dw_drain_end` 交接缺失（sol B-01 内）；`dw_outcome` 全字段所有权的 EXIT 小窗（sol M-01）；④ 段落错位（grok M-01——complete 夹具收口句插在反例 A 钉后）；`:734` confirmed 仍标三态（grok M-02）；criteria-gap (2) 本体未扩 P12≠runner（grok M-03）；:1313/:1314 计数 5/6 冲突（grok m-01 = sol m-01 两席收敛）；「13 类」描述残留（grok m-02）；登记计数口径（sol m-02）。
+
+**轨迹：12→8→4→3→5→3→2。** 三席对 r17 修复核对：Z1 (c) 支、Z2 域扩、Z3 比对挂载、Z5 M/m 全部确认落地（三席各自构造复走通过）；两条 B 全部打在 r17 的两个新声明（D6b 裁定③、快照机制）上。**裁定①二度驳回**（方向仍可成立，落地缺 drain 交接/发布边界/cutoff/raw 同值四处）；裁定②三度维持。
+
+**主会话失误 #32**：裁定③（D6b「非 worker 持有的原 fd」）——判断性最强的动作里未回读 :616 核对 fd 身份。
