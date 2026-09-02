@@ -696,6 +696,7 @@ r12 的逐值具名 cause 冻结沿袭不变（blocker 7，sol B-07——原裸 
       - **(2) `_C` 在且无 resolve 证据** → 一律 `unobservable(cause=destroy-unresolved)`（复用 V2 分岔既有字面；**「已发起」的机器判据钉死为 `_C` 在**、与五态 `call-returned` 对齐——r14 废除「已发起而无 resolve」的可扩域措辞，防误引注见此；超时与 reject 同 cause、结局差异逐字入 raw 档）；
       - **(3) destroy 已 resolve** → 按下方逐值表落值——`fd-event-like` → `observed-true`（destroy 在 10 s 内 resolve 且返回类为 fd 事件，唯一归因类）；`timeout-like` → `observed-false`（返回类即自身超时）；「其余 11 类中的普通 9 类」→ 逐值具名 cause（见下 (步 3) 各行）；本步的求值前提一律为「destroy 已 resolve」。
       **对齐注（防混淆）**：类 0b `destroy-call-unobserved`（判定表类：有 RETURN、无 SKIP、无 `_C`）与死亡收口 cause `call-boundary-incomplete`（五态 `_T` 在 `_C` 缺、判定输入不可得）是 18 值域中**两个不同的值**，输入域不同，本表内前者走 (1)、后者走 (0)，无交叠。
+      **不可达性注（防幻影洞，r14）**：「普通类（步 3 域）+ `_C` 缺 + 未 resolve」结构不可达——判定表优先级 0b 在行 1-11 之前截获一切「无 SKIP 且 `_C` 缺」的 RETURN 输入，且行 4/5/7/8 的判定条件本身依赖 `destroy_call_mono_ms`（取自 `_C`）；故普通类的存在蕴含 `_C` 在，「无 resolve」必落步 (2) 而非两步间的缝。
 枚举与 `dw_return_class` 域闭合（r14 改述：18 值按步分布——(0) 承接 skip 2 + 死亡收口 3、(1) 承接类 0/0b、(3) 承接普通 11 类含 true/false 两判定类，步序穷尽全部 18 值与「`_C` 在无 resolve」这一非 class 维度，无遗漏、无交叠、不留兜底桶）：判定表 13 类 + skip 编码 2 值 + pre-only 死亡收口编码 3 值 = 18 值；
     - **(步 3) destroy 前就绪/非归因类 5 值**——`pre-destroy-ready` / `interrupted` / `poll-error` / `fd-invalid` / `spurious-early` → **`unobservable(cause=no-destroy-correlated-event)`**（poll 返回未与 destroy 相关联：destroy 前就绪或 ret/errno/revents 类结局，均非 destroy 区分证据）；
     - **(步 3) destroy 后非归因类 4 值**——`late-fd-event` / `late-data` / `data-ready-post-destroy` / `other-revents` → **`unobservable(cause=destroy-uncorrelated-class)`**（返回晚于 destroy 调用但判定表明文不归因——观察类不支撑归因，本字段不因晚返回给 true）；
@@ -1222,7 +1223,10 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 （complete 主线 `pre-destroy-ready` 构造落 `unobservable(cause=no-destroy-correlated-event)`，POST 子项三选一编码有合法单值）；
    **r13 二维矩阵用例（blocker 3，sol B-04 验收钉；`(class, destroy 结局)` 至少覆盖下列五格，逐格唯一落值、不得两行并存）**：`fd-event-like`+destroy timeout → **`unobservable(cause=destroy-unresolved)`（不是 `observed-true`——缺 resolve，步 (2) 先于 class 判定）**；`fd-event-like`+resolved → `observed-true`；`timeout-like`+resolved → `observed-false`；
 `pre-destroy-ready`+destroy timeout → `unobservable(cause=destroy-unresolved)`（不是 no-destroy-correlated-event——原 r12 两行并存的构造自此单值）；`pre-destroy-ready`+resolved → `unobservable(cause=no-destroy-correlated-event)`；reject 结局任选一格复核同落 `destroy-unresolved`、结局差异只入 raw 档。
-   **r14 四步补格用例（blocker 1，grok B-01 = sol B-03 验收钉——原二维声明的洞格与两读格）**：`destroy-call-unobserved`（0b）+ 未 resolve（`_C` 缺——worker 已 RETURN、主线程发 `_T` 后死于调用边界）→ **(1) 直接映射 `unobservable(cause=destroy-call-unobserved)`，不是 `destroy-unresolved`**；`post-destroy-unobservable` + 无 resolve（`_C` 在、无 RETURN——E3 方向）→ **(0) 透传 `unobservable(cause=post-destroy-unobservable)`，不是 `destroy-unresolved`**；`destroy-skip-proven` + 任意结局 → (1) SKIP 位点字面；三格共同钉死「先到先得」的步序。
+   **r14 四步补格用例（blocker 1，grok B-01 = sol B-03 验收钉——原二维声明的洞格与两读格）**：
+   `destroy-call-unobserved`（0b）+ 未 resolve（`_C` 缺——worker 已 RETURN、主线程发 `_T` 后死于调用边界）→ **(1) 直接映射 `unobservable(cause=destroy-call-unobserved)`，不是 `destroy-unresolved`**；
+   `post-destroy-unobservable` + 无 resolve（`_C` 在、无 RETURN——E3 方向）→ **(0) 透传 `unobservable(cause=post-destroy-unobservable)`，不是 `destroy-unresolved`**；
+   `destroy-skip-proven` + 任意结局 → (1) SKIP 位点字面；三格共同钉死「先到先得」的步序。
 
 ⑤ U3 分区表全行用例（**r4 第二趟 S5 取代 E4 优先级序**：offset-0 与 offset-4 均可解析的帧**无条件**须定 `ambiguous`（含前 4 字节 `00 00 08 00` 的构造——旧 E4「两 offset 均可解析且 `00 00 08 00` 须定 `tun_pi-like`」用例随 S5 废除）；仅 offset-4 可解析且前 4 字节 `00 00 08 00` → `tun_pi-like`；仅 offset-4 且非 tun_pi 形态 → `other-prefix`；仅 offset-0 → `no-prefix`；均不可 → `unparsable`）；
 
