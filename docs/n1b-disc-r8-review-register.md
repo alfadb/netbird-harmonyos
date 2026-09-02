@@ -686,3 +686,20 @@ M/m：④ 18 类句两读（sol M-01：先要求 18 值过步 (3) 又说明 skip
 **轨迹：12→8→4→3→5。** 回升但性质明确：5 条中 4 条是 r15 修复自身引入的缝（主会话 P1 手工 2 条、P2/P3 各 1 条）、1 条是收紧暴露的既有缺口。修复面即新审查面。上轮三席票型（两 pass 一 fail）与本轮（三 fail）的翻转说明 pass 票的可靠性依赖第三席对「适用范围」的独立检验——本轮 grok 的任务书校准（先找旁路再采信）在其票里被实际执行并抓到传播缺口。
 
 **主会话同型错误累计 31 次**（第 31 次 = `item=D-W` 字面笔误，落在 r15-P1 手工落盘段）。
+
+## 九之七、第十七轮审查（r16 版 @ 3cef412）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（派生序+分域 12 格 / inwait 四关键格） | fail | 1 B / 0 M |
+| grok-4.6（全文） | fail | 3 B / 4 M / 3 m |
+| sol（全文） | fail | 1 B / 1 M / 1 m |
+
+**去重 3 条 blocker（三席高度收敛，全部核实成立）：**
+1. **「无 RETURN」假穷尽分划**（三席收敛，deepseek 格 9 / grok B-01 双形态 / sol B-01）：r16 分域声明「无 RETURN 只走 skip 编码 ∪ pre-only 死亡收口」漏了两个合法形态——(a) **barrier-never-observed + pre-only 死亡**（worker 已 spawn、barrier 未观测、destroy 顺延 SKIP、进程死亡：五态 not-called 但 not-called 支只路由 no-live-fd/dup-failed）；(b) **complete + P10 join-timeout + 无 RETURN**（终态标志只在 RETURN 后置位 → 该路径必然无 RETURN；协议明文允许 timeout 后继续 D6b→P11→P12 走 complete；POST 强制 class 非空 → F4/F8/F9 烧掉预注册的「waiter 卡住」观察事实）。修法：无 RETURN 分域补类 0 支（仅 item=destroy SKIP、不要求 RETURN——其两条真实协议路径本就无 RETURN）+ join-timeout complete 收口具名 cause（grok 建议 `poll-never-returned`）+ D6b 位次冲突裁定 + worker raw 交接声明。
+2. **inwait 域扩传播不全**（grok B-02）：`inwait-marker-unobserved` 只扩了 source/samples 域，`dw_inwait_confirmed` 活域漏扩——⑪(d) 夹具声称 pass 与域缺口 F4 非单值。r16-P2 又一次「部分字段传播」。
+3. **P12 派生比对未挂闭集**（grok B-03 = sol M-01）：比对失败写「沿 E2 模式 fail」但 F5/F8 字面均不含——按局部句 fail、按闭集实现漏判（fail-open）；且 P12 输入清单漏 poll/drain raw（13 类真正输入在 worker，主线程派生依赖未冻结的跨线程通道）。**两席均驳回主会话裁定①**（方向可、必须补挂载+raw 快照）；**均维持裁定②**（syscall 三合一，正样本时序可达性经两席独立验证）。
+
+M/m 去重：F3 轴错（item=D-W+RETURN 应挂 F8(2) 而非 F3——grok M-01）；errno 第四字段无落盘名（M-02）；`:987`/`:1331` 残「照 13 类判定表」（M-03）；POST 其余派生字段无所有权声明（M-04/sol 同）；r16 登记 5 minor vs 实 4（m-01/sol m-01）；⑪(d) 未钉 barrier 无 RETURN class（m-03）。
+
+**轨迹：12→8→4→3→5→3。** 三席对 r16 五条 blocker 的修复核对：传播对齐、state=S 收紧、inwait 操作句、item=destroy 字面**全部确认落地**（sol 明确「旧 B-02 逐格正确」「旧 B-03 四字段均落值 pass」）；新缝集中在 r16 自己的两个新声明（假分划、P12 裁定未挂闭集）。**主会话裁定①被两席驳回**——裁定方向未被推翻（P12 派生本身可行），但落地不完整（闭集挂载 + raw 交接缺失）即构成 fail-open，须补。
