@@ -508,10 +508,49 @@ r9 开工时对「先核实再动手」的纪律做了一次实际检验，结�
 | 席 | 模型 | 范围 | 结论 | 计数 |
 |---|---|---|---|---|
 | A | grok-4.6 | 全文四层次 | fail | 3 B / 6 M / 3 m |
-| B | gpt-5.6-sol | 全文四层次 | fail（终稿待收，中间报告已确认 1 B） | 待计 |
+| B | gpt-5.6-sol | 全文四层次 | fail | 7 B / 2 M / 0 m |
 | C | deepseek-v4-pro | 收窄两块 | **两次无消息失败，attempt-not-counted**（该席累计第七次失败） |
 
-**主会话在派出审查的同时自查立案两条**（详见下），其中第 1 条与席 A B-01、席 B 中间报告**三路收敛**。
+**主会话在派出审查的同时自查立案两条**（详见下），其中第 1 条与席 A B-01、席 B B-01**三路收敛**。
+
+### 席 B（sol）终稿补充的独有 blocker（均经主会话核实成立）
+
+- **B-03（sol）= `dw_watchdog_killed` 的 APPFREEZE 死亡证据**：`:625` 四合取的第四项「独立死亡证据 = faultlogger 条目含 `APPFREEZE`/watchdog 类签名」与 r10「事件条目不证明进程消失」两轴分立**正面冲突**——r10 修 `process_death_observed` 时没有同步这个同源字段。pidof 仍非空时该字段虚构「waiter 被杀」。修法：正向支另合取 `process_death_observed=observed-true`；APPFREEZE 只证 watchdog 事件。
+- **B-04（sol）= D8b BEGIN-only 无收口**（= 席 A M-02 加深为 B）：storm 中途被杀（BEGIN|ws 在、END 缺、有死亡证据）是文档明知的合法平台终态，但 `window_end` 与 END 的 5 个字段无输入、无预注册 cause → F4 fail。r10 只修了完成态。修法：为 BEGIN-only+死亡证据冻结每字段具名 unobservable 落值。
+- **B-06（sol）= selftest ⑥/⑩ 两组断言错误**：`:1156`「SIGKILL 条目**含与任意 Fault_Type 组合** → 签名 observed-false」——「任意」包含 CPPCRASH（届时第 1 支必真）；`:1159`「Ⅰ/Ⅱ/Ⅲ 任一夹具另发 POST」对 Ⅲ 结构不可达（POST 在则位点 ≥ P12）。修法：SIGKILL 反例限定 Fault_Type 不命中第 1/3 支；complete 用例只取 Ⅰ/Ⅱ、删 Ⅲ+POST。
+- **B-07（sol）= `dw_destroy_distinguishable_from_timeout` 裸 `unobservable`**：`:633`「其余 → `unobservable`，逐字穷尽列举」不带 cause，违反 r10 冻结的 `cause=` 逐字比对规则——complete 主线（destroy resolve + `pre-destroy-ready`）落「其余」时 POST 无合法单值。修法：为每一类逐字冻结输出 cause。
+- **M-01（sol）= `post-destroy-unobservable` 单一 cause 语义错盖**：死于 D7（destroy 未达）的 `dw_*` 输入不可得也记「post-destroy」——事实语义错误。修法：按 `destroy_call_state` 拆 `not-reached`（pre-destroy）与 `post-destroy` 两个 cause。
+- **M-02（sol）= 聚合序未定义**（= 席 A M-01 = 主会话自查立案 2，三路收敛）。修法：冻结排序键（文件名字节序，与 FaultRecv 处理序解耦）。
+
+### 两席对八项裁量的裁决对照
+
+| 裁量 | 席 A（grok） | 席 B（sol） |
+|---|---|---|
+| ① 删 blanket+折域 | 维持 | **挑战**（单一 cause 错盖 destroy 前死亡 → 其 M-01 拆 cause） |
+| ② D8b 载体 | 挑战（半状态无收口→M-02） | 维持（载体选择对；BEGIN-only 收口另立 = 其 B-04） |
+| ③ no-death-evidence | 维持 | 维持 |
+| ④ (b) 限 SIGKILL/SIGTERM | 挑战（B-03 非单值） | **挑战**（收窄方向对、但未关联 `:vpn` 且 SIGTERM 可捕获——不能单独证死） |
+| ⑤ 无条目=false | 维持 | 维持 |
+| ⑥ 第 3 支保留 | 方向维持、落地挑战（B-02） | 维持（须修 B-05/B-06 自测） |
+| ⑦ 混合挂 unobservable | **挑战**（F1 上没收到东西） | 维持（组件内对；跨组件须三值 OR 修 B-01） |
+| ⑧ P0 只非负 | 维持 | 维持（增设跨域顺序约束反而伪精确） |
+
+席 B 对其九条 r10 修复的核对：B-01/03/06/08 已修；B-02 已修构造但新真值表另有 B-01；B-04 完成支已修、BEGIN-only 是新 B；B-05 修得不完整；B-07 组件内对、跨组件反向覆盖；B-09 幽灵已删、(b) 未关联 + watchdog 字段未同步。
+
+### 第十一轮去重 blocker 终账（8 条，全部核实成立）
+
+1. 真值表行 2/行 5 冲突（三路收敛；含「不可解析」双口径单值化）
+2. `dw_watchdog_killed` APPFREEZE 死亡证据（sol B-03；两轴分立未同步到同源字段）
+3. 死亡证据 (b) 支非单值（grok B-03 + sol B-02；`:858`/`:768`/分量三处谓词打架；glob 不绑 `:vpn` 已核实）
+4. D8b BEGIN-only 无收口（sol B-04 = grok M-02 加深；合法平台终态被判 fail）
+5. selftest ⑩ 守卫反例「不 fail」vs F2/F3（两路收敛）
+6. selftest ⑥「任意 Fault_Type」+ ⑩「Ⅲ+POST」不可达（sol B-06）
+7. `dw_destroy_distinguishable` 裸 `unobservable` 无 cause（sol B-07；成功主线不能稳定 pass）
+8. 聚合序「首个/第一条」未定义（三路收敛；M 级——多条正向无论取哪个 verdict 相同，但事实记录非确定）
+
+r12 修订按判断密度切包：真值表按支求值重写（1+8 合并）、死亡证据谓词统一（2+3）、D8b BEGIN-only 收口（4）、selftest 断言修正（5+6）、裸 cause 具名化（7）+ M 级若干。
+
+## 十、硬边界状态（本轮未越界）
 
 ### 席 A 对上轮 12 条 blocker 的修复落地核对
 
