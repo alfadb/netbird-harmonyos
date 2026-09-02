@@ -470,18 +470,18 @@ loop {                                   // 外层块：每块恰一次 clock_ge
 
 | `elapsed_ms` 区间 | 判定 |
 | --- | --- |
-| `[0, 20000)` | 探针提前结束（循环在首次读到 ≥ deadline 时才 break，合法值不可能 < 20000）→ `d7_anomaly=early-exit-with-end-marker` + probe-fault 方向（按死因分类 `probe-fault` 证据签名收口，否则逐字登记异常事实），`u7=unobservable(cause=d7-early-exit-anomaly)` |
+| `[0, 20000)` | 探针提前结束（循环在首次读到 ≥ deadline 时才 break，合法值不可能 < 20000）→ `d7_anomaly=early-exit-with-end-marker`（探针异常观察，逐字登记异常事实；r9：不再按任何死因分类收口——本段除非死亡证据独立命中 F1 三支闭集，否则无任何 fail 路径），`u7=unobservable(cause=d7-early-exit-anomaly)` |
 | `[20000, 25000]` | 合法取值域（`[20000, 20000+外层块时长)`，外层块时长 ≪ 5 s 宽限）→ `observed-true` 方向（任务存活跑完） |
 | `> 25000` | **具名三态观察，不得判 fail**（超出 5 s 宽限的部分可由平台调度延迟造成，属平台事实而非探针缺陷）：逐字登记 elapsed/iters 原文，`u7=unobservable(cause=d7-elapsed-overshoot-beyond-grace)`，登记 `d7_anomaly=elapsed-overshoot-observed`（观察项） |
 
 边界归属（消除旧文「`>= 20000` 判 true 与「超过 25000」探针异常在 `>= 25000` 处双命中」的叠域）：`25000` 恰值归 `[20000, 25000]` 区间。**平台调度延迟造成的边界值不得触发 fail**；本表只管辖 D7_END 存在（任务收口）路径，D7 期间进程死亡走死因分类（其 D7 位点约束见该节，不受本表改写）。
 `u7_long_task_watchdog_behavior` 三态赋值规则（与上表互斥区间逐字同源）：`D7_END` 存在**且** `elapsed_ms ∈ [20000, 25000]` → `observed-true`（任务存活跑完；同时登记 elapsed/iters）；
-`D7_END` 存在但 `elapsed_ms < 20000` → **不得判 `observed-true`**——任务提前退出而 marker 在，属探针异常：命中死因分类的 `probe-fault` 证据签名时按其收口，否则逐字登记异常事实（`d7_anomaly=early-exit-with-end-marker` + elapsed/iters 原文），`u7` 记 `unobservable(cause=d7-early-exit-anomaly)`；
+`D7_END` 存在但 `elapsed_ms < 20000` → **不得判 `observed-true`**——任务提前退出而 marker 在，属探针异常：逐字登记异常事实（`d7_anomaly=early-exit-with-end-marker` + elapsed/iters 原文；r9：不再按死因分类收口——除非死亡证据独立命中 F1 三支闭集（见「死亡事实记录（证据向量）」节），否则本段无 fail 路径），`u7` 记 `unobservable(cause=d7-early-exit-anomaly)`；
 `D7_END` 存在但 `elapsed_ms > 25000` → 按上表第三行：`unobservable(cause=d7-elapsed-overshoot-beyond-grace)`，不判 fail；`D7_END` 缺失 **且**（capture 流确认 `D7_BEGIN` 后 `:vpn` 三形态行静默（至死亡位点或观测窗尾，以先到者为准）**且** 存在进程死亡证据：faultlogger 条目或进程退出记录）→ `observed-false`（任务被杀）；
 仅有 marker 缺失而无死亡证据 → `unobservable(cause=marker-gap-indeterminate)`。**禁止以 marker 缺失单独推断被杀**（E3 0001 误判教训，`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:163`）。
-**r6 V4 补充（位点不确定性约束；r7 X5 同步置位判据；r8 Y2/Y3 修正方向与阈值）**：死亡位点判定为 P6 **且** `site_uncertainty=possible-tail-marker-loss` 存在
-（置位判据 = **死亡证据墙钟 − 最后可见 marker 墙钟 > `T_uncertainty(P6) = 25000 ms`**（= 行 2 的 elapsed_proxy 阈值 20000 + 5000；
-r8 Y3：阈值必须 < 行 2 判定窗 27000 ms 才能在行 2 误判前置位——目标构造典型静默跨度 ~30 s 时旧值 37.5 s 不置位，且 27–37.5 s 区间既不受保护又被行 2 误判，错位消除；旧「P6 时间盒 25 s × 1.5」废弃，见死因分类节证据规则 4））
+**r6 V4 补充（位点不确定性约束；r7 X5 同步置位判据；r8 Y2/Y3 修正方向与阈值；r9 改按 `marker_tail_state` / `T_tail` 口径——原 `site_uncertainty` / `T_uncertainty` 及其与行 2 判定窗的全部比较论证随死因表删除）**：死亡位点判定为 P6 **且** `marker_tail_state = possible-tail-loss` 存在
+（置位判据 = **死亡证据墙钟 − 最后可见 marker 墙钟 > `T_tail = 25000 ms`**（谓词与四值域见「死亡事实记录（证据向量）」节 `marker_tail_state` 定义表；取值理由 = 单个最长合法阶段的合法时长上界（D7 冻结时长 20000 + 宽限 5000）；
+r8 Y3 原以「< 行 2 判定窗 27000 ms」为约束的比对论证随死因表删除；旧「P6 时间盒 25 s × 1.5」废弃））
 → `u7` 记 `unobservable(cause=site-uncertainty-tail-loss)`，**不得赋 `observed-false`**（D7_END 可能已实际发出但未落入 capture；区分「被杀」与「marker 丢失」不可靠时宁缺勿误）。
 - **结论边界**：结论只覆盖冻结的 20000 ms 与该负载形态，**不得外推更长任务或其他负载**。
 - **时间盒**：任务 20 s + 宽限 5 s。
@@ -559,7 +559,7 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
   `dw_return_class`（上述 12 值，r3 第一趟 D4 新增 `destroy-never-called`）、`dw_join_result`（`joined` / `join-timeout` / `join-blocked-observed` / `ESRCH` / `other+errno`）、
   - `dw_watchdog_killed`（三态；**赋值规则逐字冻结（r3 第二趟 E11）**——语义方向与 D7 相反：D7 判「任务被杀」，本字段判「**waiter 被 watchdog 杀**」，故不得引用「同 D7」，独立三态如下——
     - `observed-true`：`N1BDISC_DW_SPAWN` marker 存在，**且** `N1BDISC_DW_EXIT` marker 缺失，**且** capture 三形态关联确认 `DW_SPAWN` 后 `:vpn` 行静默，**且** 存在独立死亡证据（**r4 第二趟 S8 收紧**：〔faultlogger 条目含 `APPFREEZE`（按 S1 归一化候选集判定）/watchdog 类签名〕**或**〔`PidOfVpn` absent——须满足证据规则 2 的 positive 基线前置——**且** `N1BDISC_DW_DESTROY_C` marker **缺失**〕——destroy 是否已调用是两类归因的唯一区分锚（r7 X4 后判定锚点为 `_C`）：
-      `DW_DESTROY_C` 在而 `PidOfVpn` absent 的组合属「destroy 使 `:vpn` 进程 terminal」（预期成功终态方向，死因分类行 4 (ii) 承载），**不得**判 waiter 被 watchdog 杀，否则同一物理事件被死因分类与本字段双重归因、内部矛盾），**且** 死亡位点落在 P8-P10 窗口（`DW_SPAWN` 之后、无 `DW_EXIT`）——四证据齐备方可判 waiter 被杀；
+      `DW_DESTROY_C` 在而 `PidOfVpn` absent 的组合属「destroy 使 `:vpn` 进程 terminal」（预期成功终态方向，r9：原「死因分类行 4 (ii) 承载」随死因表删除——该组合现由七分量证据向量的事实组合承载：destroy 调用已发起记入 `destroy_call_state`（五态定义属后续工作包）、`:vpn` 消失记入 `process_death_observed`，不合成任何归因、**不驱动 fail**，沿「除 F1-F9 闭集外一切结局均不 fail」），**不得**判 waiter 被 watchdog 杀，否则同一物理事件被死亡事实记录与本字段双重登记、内部矛盾），**且** 死亡位点落在 P8-P10 窗口（`DW_SPAWN` 之后、无 `DW_EXIT`）——四证据齐备方可判 waiter 被杀；
     - `observed-false`：**仅当** `N1BDISC_DW_EXIT` marker 存在（waiter 正常走到终态并退出，无论 poll 以何类返回——被杀的线程不可能发出 EXIT 后再死；**r4 第二趟 S7：删除旧文「D-W 因 skip 分支未执行亦判 observed-false」的规定——skip 情形一律具名 `unobservable`，skip 主线由此有唯一字段值，RESULT 不因域外值 fail**）；
     - `unobservable(cause=marker-gap-indeterminate)`：`DW_EXIT` 缺失但 watchdog 归因不成立——含无任何独立死亡证据（禁止以 marker 缺失单独推断被杀，E3 0001 教训），以及 `PidOfVpn` absent 但 `DW_DESTROY_C` 在且无 faultlogger watchdog 签名（死亡可由 destroy 解释）；
     - **skip 分支具名清单（S7：全部 skip 情形不得取 true/false）**：`unobservable(cause=no-live-fd)` / `unobservable(cause=dup-failed)` / `unobservable(cause=no-worker)`——对应 skip 分支（skip 表与 P10 行的 cause 字面）。
@@ -588,9 +588,9 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
   1. **窗口最小化**：drain ≤5 s；barrier 等待 ≤7 s（= drain 盒 + 调度裕量，见 D-W 节）；in-wait 证据采集 ≤2 s；destroy 时间盒 10 s（非 60 s——create 才是 60 s）；D6a 为约 3 次即返 syscall；终态轮询 ≤8 s。名义窗口 ≈ T_dw(5 s)+ε ≈ 6-10 s，最坏 ≤27 s 量级。
   2. **位次最后**：D-W/D6 排在全部 fd 相关项（D4/D5/D8a/D8b）与 D7 之后，中窗死亡的最小损失集合就是 D6/D-W 自身——这正是需要正面承受的发现项（watchdog 对 waiter 的行为本身就是 U7/路径②的事实）。
   3. **归因洁净**：在 worker poll 终态（返回或 T_dw 到期）之前，主线程**不触碰 `fd_dup`**（无 `F_SETFL`/`read`/`close`——`F_SETFL(O_NONBLOCK)` 已在 D2.5 完成；drain 在 barrier 之前、由 worker 自身执行），保证任何提前唤醒只可归因于 destroy（或落入 `pre-destroy-ready`/`data-ready-post-destroy`/`spurious-early` 等非归因类）。
-  4. **终态路径（预注册，r4 R1 措辞更新；r5 U3 触发器同步）**：若进程在任意位点死亡，runner 依「capture 静默 + 死亡证据」双条件 + **死因分类**（见 verdict 节）收口：
-     - `platform-termination` 类 → `pre-only`/`complete` 收口可 pass；
-     - 仅当收口形态为 `pre-only` 且分类 ∈ {`probe-fault`、`unattributed`、`fault-type-unrecognized-no-platform-signature`、无类} → verdict `fail`（`platform-termination` 不 fail；r7 X1 同键；`protocol=complete` 不进死因分类——同一规则见 verdict 节 fail 触发器，逐字同源）；
+  4. **终态路径（预注册，r4 R1 措辞更新；r9 触发器改按 F1 闭集）**：若进程在任意位点死亡，runner 依「capture 静默 + 死亡证据」双条件 + 「死亡事实记录（证据向量）」节七分量逐项登记收口（不合成任何死因归因）：
+     - `pre-only`/`complete` 收口可 pass——死亡侧唯一 fail 触发面 = F1：`probe_crash_signature_observed = observed-true` 且 `protocol != complete` → verdict `fail`（三支闭集见「死亡事实记录（证据向量）」节；`protocol=complete` 不进 F1，命中崩溃签名仅按 verdict 节登记为需 N1b 关注的异常观察）；
+     - 除 verdict 节 fail 闭集（F1–F6、F8、F9；F7 不在内）外一切结局均不 fail；
      - 已增量落盘事实保留；`N1BDISC_PRE` 已承载事实照常入账。
   5. D7 先于 D-W 的排序不改变 D-W 自身风险（无论先后，waiter 暴露窗口同样存在），故维持决议裁定顺序、以上述 1-4 缓解。
 
@@ -665,7 +665,7 @@ P12 N1BDISC_POST 终态 marker（D6 逐子项 + D-W 结局 + ledger 最终 diges
 | 位点 | 时间盒 | 超时分类 |
 | --- | --- | --- |
 | P0 Allow 等待 | 300 s（自 `StartEntry` HDC 命令返回起，至 capture 出现首个 N1BDISC marker）；前置与超时分类外提为表后「P0 行外提」子项（r4 第四趟 W1 重构，内容逐字不变） | 同上外提 |
-| P1 dlopen+dlsym | 10 s | 错误返回=observed-false 事实；未返回→死后收口路径（死因分类；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记） |
+| P1 dlopen+dlsym | 10 s | 错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记） |
 | P2 每条 create() | 60 s | 候选记 timeout，进入迟到观察窗 |
 | P2 迟到观察窗 | 60 s（全矩阵恰一次） | 窗尽→indeterminate，矩阵终止走 no-live-fd 分支 |
 | P3 D4 窗口 | 总 10 s / 每 poll 500 ms | 三态收口 |
@@ -684,7 +684,7 @@ P12 N1BDISC_POST 终态 marker（D6 逐子项 + D-W 结局 + ledger 最终 diges
 **P0 行外提（r4 第四趟 W1 自上表 P0 行外提，内容逐字不变）**：
 
 - **前置 = operator-ready 确认步（r3 第二趟 E6 冻结）**：任何 gate 13 / `StartEntry` 命令与 ID 消费之前，操作员在 runner 控制台显式确认就绪，runner 逐字登记确认时刻（墙钟 + 单调时钟）与动作字面 `operator-ready-confirmed`——未取得该确认记录不得发 `StartEntry`、不得消费任何 AUTH/pair 或 evidence ID。该确认记录是「readiness 先于 Live」的机器可审计锚点
-- 到点无 marker → **已消费 campaign 收口（E6）**：`StartEntry` 已实际发出、gate 13 已开始，AUTH/pair 与 evidence ID **已消费，不得再声称未消费**——走既有终态规则：host finally 全序列、死因分类（此处通常无死亡证据与 marker，PRE 缺失按完整性失败收口：探针未完成预注册采集——r4 R1），evidence 记录正常产生（`record_status=collected`、`verdict=fail`），「操作员未 Allow」事实逐字登记。不属 blocked（第三趟 B3 裁定 (a) 修正：readiness 前置改由 StartEntry **之前**的 operator-ready 确认步承载，超时发生在启动之后即按已消费收口）
+- 到点无 marker → **已消费 campaign 收口（E6）**：`StartEntry` 已实际发出、gate 13 已开始，AUTH/pair 与 evidence ID **已消费，不得再声称未消费**——走既有终态规则：host finally 全序列、死亡事实记录（r9：原「死因分类」措辞更名；此处通常无死亡证据与 marker，PRE 缺失按完整性失败收口：探针未完成预注册采集——r4 R1），evidence 记录正常产生（`record_status=collected`、`verdict=fail`），「操作员未 Allow」事实逐字登记。不属 blocked（第三趟 B3 裁定 (a) 修正：readiness 前置改由 StartEntry **之前**的 operator-ready 确认步承载，超时发生在启动之后即按已消费收口）
 
 ### runner 观测窗（r1 冻结数字与推导，BL-1）
 
@@ -699,7 +699,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 - **到点收口规则**：525 s 到点时 runner 停止接受新 marker 进入求值（之后到达的 N1BDISC marker 单独登记 `late_marker_observed`，不参与求值、不改 verdict），随即：若 `N1BDISC_POST` 已在 capture 中 → 正常封签（`protocol=complete`）；
 若仅 `N1BDISC_PRE` 在 → 停止 HilogStream，按 host finally 序列采死亡证据：**有死亡证据**（`:vpn` 消失/平台终止）→ 按 `pre-only` 合法终态收口（求值规则见 verdict 节）；**无死亡证据**（进程仍存活或状态不可判）→ `fail`（探针未完成预注册采集；525 s > 467 s 协议上界，存活未完成不是平台事实）；
 若 `N1BDISC_PRE` 缺 → `fail`（PRE 缺失完整性失败）。
-**`PidOfVpn` 可观测性与终态完整性是两个独立的判定输入（r3 冻结，r4 R1 措辞更新）**：`PidOfVpn` 不可观测**单独**不构成 fail（它只使「`:vpn` 消失证据」无法建立，死因按其自身规则记 `unobservable`）；fail 只来自完整性条件本身——`N1BDISC_PRE` 缺失。
+**`PidOfVpn` 可观测性与终态完整性是两个独立的判定输入（r3 冻结，r4 R1 措辞更新；r9：登记落点改按证据向量分量）**：`PidOfVpn` 不可观测**单独**不构成 fail（它只使「`:vpn` 消失证据」无法建立，`process_death_observed` 按其自身规则记 `unobservable`，见「死亡事实记录（证据向量）」节证据规则 2 回退条件）；fail 只来自完整性条件本身——`N1BDISC_PRE` 缺失。
 - **出处更正（r0 错误登记）**：r0 曾写「沿 G0 固定窗口范式（60 s 量级）」——`docs/g0-go-arm64-physical-probe.md:170` 的固定 60 秒是 G0 场景 S1 的 `HilogStream` 采集窗，属 G0 单场景规格、非十三门范式共享参数，且 60 s 远小于本 campaign 时间盒上界和，引错出处且量级错误；r1 弃用该引法。
 
 ## 静态断言（freeze 前机器检查，违反即审查 blocker）
@@ -713,7 +713,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 | A5 | marker 字面集与本文冻结集逐字一致（正反例 selftest 覆盖，含 `:vpn` 三形态）；冻结集 = 本文**活规则中使用的** `N1BDISC_*` 字面，豁免集 = {`N1BDISC_D2_REJTEXT`、`N1BDISC_RESULT`}（理由见「A5 冻结集注」）——外提为表后「A5 冻结集注」（r4 第四趟 W1 重构；**r9 实现性更正：比对口径自「本文全部 `N1BDISC_*` 字面」收窄，原口径按字面实现必 fail，见冻结集注 r9 条**） |
 | A6 | `openat` 调用点仅存在于 D-W in-wait 证据采集段，且实参路径字面 ∈ {`/proc/self/task/<tid>/stat`、`/proc/self/task/<tid>/syscall`}（`<tid>` 绑定 D-W worker tid；零其他文件路径、零 `O_WRONLY`/`O_RDWR` 打开） |
 | A7 | 探针源码中 `/proc/.../stat` 的 state 解析实现**按该行最后一个 `)` 字符之后的下一个 token 定位 state 字段**（D-W 节冻结规则的机器背书）；**禁止**按空格切分取第 3 字段或任何左侧定位实现（`comm` 可含空格与括号，左侧切分必字段错位）；freeze 前静态审查核对源码实现与 selftest 用例（含 `comm` 带空格/括号的反例） |
-| A8 | **探针源码中所有有界循环的终止条件静态核对（r3 第一趟 D2 新增，freeze 前机器检查）**：逐一核对——D7 主循环（deadline_ms 比较 break）、D8b storm 循环（10 s / 4 MiB / 50 000 写三熔断）、D-W drain 循环（5 s 时间盒 + 各转移）、各 10 ms 有界轮询等待（barrier / in-wait / 终态标志 / 迟到观察窗）——确认每个循环存在**可达的退出路径**且以**单调时钟或固定迭代计数**为界；freeze 前机器检查逐循环登记核对结论。本断言堵住「探针自身 hang 被洗成 `platform-termination`」的反方向（与 `platform-termination` (i) 的 D7 elapsed 正面约束配对） |
+| A8 | **探针源码中所有有界循环的终止条件静态核对（r3 第一趟 D2 新增，freeze 前机器检查）**：逐一核对——D7 主循环（deadline_ms 比较 break）、D8b storm 循环（10 s / 4 MiB / 50 000 写三熔断）、D-W drain 循环（5 s 时间盒 + 各转移）、各 10 ms 有界轮询等待（barrier / in-wait / 终态标志 / 迟到观察窗）——确认每个循环存在**可达的退出路径**且以**单调时钟或固定迭代计数**为界；freeze 前机器检查逐循环登记核对结论。本断言现在堵的是「探针自身 hang 无法在运行时被 verdict 捕获」这一残余的静态侧（r9：原运行时侧配对约束已随死因表删除、按 T0 裁决放弃，见自陈 14(a)） |
 | A9 | **D-W 主线 destroy 四步执行序的源码层静态核对（r9 新增）**：在**源码层**（而非仅 marker 字面集层）核对主线序列四步——`N1BDISC_DW_DESTROY_T` 发射语句 → `destroy()` 调用语句 → `N1BDISC_DW_DESTROY_C` 发射语句 → resolve 有界等待语句——四者在**同一控制流上依次出现，其间无任何分支可跳过 `_C` 发射**；并核对 `destroy()` 在全部探针源码中**有且仅有一个调用点**（P9 位点那次，D6 与 D-W 共用）；任一不满足即 freeze 前 fail，不进入后续门（`_C` 发射先于 `destroy()` 调用的反例必 fail，用例见 gate 10 清单 ①） |
 
 **A4 注（r4 第四趟 W1 自上表 A4 行外提，内容逐字不变）**：
@@ -950,7 +950,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 | --- | --- |
 | 1 host-only 同步 | 同步 trusted refs/bundle；clean HEAD 含本登记+runner+selftests+docs；记录 `code_sha`；HDC0 固定绝对 host `ps` 探针 |
 | 2 候选 ID 消费审计 audit-1 | 仓外双文件 + `.sha256`（AUTH-N1BDISC-… 候选 pair） |
-| 3 freeze + 静态审查 | 判据 freeze；reviewer 静态审查（符号清单誊录核对、**实现配置字面 == 本文 MR 表字面（不一致即不得 freeze）**、静态断言 A1-A8、时间盒表核对；**r4 第二趟 S1 新增：`Fault_Type` 候选集收敛前置——若届时已能取得目标元组的一条真实 faultlogger 文本，须据此把候选集收敛为实测字面并重新提交独立审查；若取不到，则以死因分类节 S1 兜底出口执行（r7 X1 同键：有平台终止签名 → 行 4 (iii) 不 fail；无 → 行 5 `fault-type-unrecognized-no-platform-signature` → fail），并在证据中登记该未实测依赖**） |
+| 3 freeze + 静态审查 | 判据 freeze；reviewer 静态审查（符号清单誊录核对、**实现配置字面 == 本文 MR 表字面（不一致即不得 freeze）**、静态断言 A1-A8、时间盒表核对；**r4 第二趟 S1 新增：`Fault_Type` 候选集收敛前置——若届时已能取得目标元组的一条真实 faultlogger 文本，须据此把候选集收敛为实测字面并重新提交独立审查；若取不到，则以「死亡事实记录（证据向量）」节冻结候选集执行并在证据中登记该未实测依赖（r9：原「以死因分类节 S1 兜底出口执行」及其行 4 (iii)/行 5 分岔随死因表删除——冻结前候选集收敛义务本身保留，域外字面按该节证据规则 5 记 `other:<原值逐字>`、不驱动 fail）**） |
 | 4 host-prep `tconn` + 一次内存级 `list targets` | 同（窄例外沿用） |
 | 5 `-TargetBindingConfirm` | 3 白名单探针；**完整系统版本实测复核**（E3 记录 7.0.0.100 与冻结值 7.0.0.102 的差异在此裁决）；漂移即 blocked record + 退役 |
 | 6 ready freeze draft | 绑定 confirmation record |
@@ -1036,7 +1036,7 @@ faultlogger 无条目时代理取 capture 静默判定墙钟的构造用例；
    | --- | --- |
    | `BundleDump` | `-t <T> shell bm dump -n cn.alfadb.netbird.n1bdisc` |
    | `PidOf` | `-t <T> shell pidof cn.alfadb.netbird.n1bdisc`（UI 进程，无 `:vpn` 后缀） |
-   | `PidOfVpn` | `-t <T> shell pidof cn.alfadb.netbird.n1bdisc:vpn`（观察 `:vpn` 子进程存活；`:vpn` 死亡证据的唯一白名单来源，死因分类见 verdict 节；**使用位点恰二（r3 第二趟 E7）**：① positive 基线采样——首个 `N1BDISC_` marker 出现后恰一次（见死因分类节证据规则 2）；② host finally 步骤 3——死因分类冻结前、`ForceStop` 之前的采样步（r3 第一趟 D6）。可行性先例与回退条件见该节证据规则 2） |
+   | `PidOfVpn` | `-t <T> shell pidof cn.alfadb.netbird.n1bdisc:vpn`（观察 `:vpn` 子进程存活；`:vpn` 死亡证据的唯一白名单来源，死亡事实记录见「死亡事实记录（证据向量）」节（r9：原「死因分类见 verdict 节」随节更名改指）；**使用位点恰二（r3 第二趟 E7）**：① positive 基线采样——首个 `N1BDISC_` marker 出现后恰一次（见该节证据规则 2）；② host finally 步骤 3——死亡事实冻结（r9：原「死因分类冻结」）前、`ForceStop` 之前的采样步（r3 第一趟 D6）。可行性先例与回退条件见该节证据规则 2） |
    | `MkdirStaging` | `-t <T> shell mkdir -p /data/local/tmp/netbird-n1bdisc/hap` |
    | `SendHap` | `-t <T> file send <HAP_DISC> /data/local/tmp/netbird-n1bdisc/hap/n1bdisc.hap` |
    | `InstallHap` | `-t <T> shell bm install -p /data/local/tmp/netbird-n1bdisc/hap` |
@@ -1058,17 +1058,17 @@ faultlogger 无条目时代理取 capture 静默判定墙钟的构造用例；
 Live 后 runner finally 序列**无论成败、进程死亡、观测窗到点或超时，一律执行且顺序冻结**（不依赖探针存活）：
 
 1. 停止 HilogStream（若在采）；
-2. `FaultProbe`（faultlogger find）→ 对命中条目 `FaultRecv` 逐个取回（死因分类证据源）；**只采 campaign 时间窗内新增条目**（与 `StartEntry` 前执行的 `FaultProbe` 快照集合比对，快照集合逐字登记——见死因分类节证据规则 1）；
-3. **`PidOfVpn` 采样（r3 第一趟 D6 新增）**：执行 `PidOfVpn`（白名单既有操作）登记 `:vpn` 进程存在性/absent——它是死因分类的关键判定输入，**必须在下一步 ForceStop 之前采集**；禁止以步骤 8 的 `PidOfVpnPost` 替代本步（`PidOfVpnPost` 仅限 finally absent 复核，正文已禁止用作死因输入）；
-4. **死因分类冻结（B1）**：按 verdict 节死因分类表定类并逐字登记分类结果与全部输入证据（快照集合、新增条目、步骤 3 的 `PidOfVpn` 结果、最后成功 marker 位点）；**须在下一步 `ForceStop` 之前完成**——`ForceStop` 自身产生的进程消失证据不得参与定类；
-   **`N1BDISC_PRE` 已发出时（r4 R1/R2；触发器作用域 r5 U3），死因分类不再承载 pass/fail**——它只产出归因记录与未完成项的 `unobservable` cause，pass/fail 由 PRE/POST 求值规则与 fail 触发器决定（仅 `protocol=pre-only` 时求值：分类 ∈ {`probe-fault`, `unattributed`, `fault-type-unrecognized-no-platform-signature`, 无类} → fail；`platform-termination` → 不 fail；r7 X1 同键；`protocol=complete` 不进死因分类）；
+2. `FaultProbe`（faultlogger find）→ 对命中条目 `FaultRecv` 逐个取回（七分量证据向量的证据源；r9：原「死因分类证据源」随死因表删除改写）；**只采 campaign 时间窗内新增条目**（与 `StartEntry` 前执行的 `FaultProbe` 快照集合比对，快照集合逐字登记——见「死亡事实记录（证据向量）」节证据规则 1）；
+3. **`PidOfVpn` 采样（r3 第一趟 D6 新增）**：执行 `PidOfVpn`（白名单既有操作）登记 `:vpn` 进程存在性/absent——它是七分量证据向量的关键判定输入（r9：原「死因分类的关键判定输入」随死因表删除改写；喂给 `process_death_observed` 分量），**必须在下一步 ForceStop 之前采集**；禁止以步骤 8 的 `PidOfVpnPost` 替代本步（`PidOfVpnPost` 仅限 finally absent 复核，正文已禁止用作死亡事实判定输入）；
+4. **死亡事实冻结（r9 改写，原「死因分类冻结（B1）」）**：按「死亡事实记录（证据向量）」节逐分量登记七分量取值与全部输入证据（快照集合、新增条目、步骤 3 的 `PidOfVpn` 结果、最后成功 marker 位点），**不产出任何合成分类**（七分量互不推导、不合成任何单一「死因」标签，沿该节记录义务）；**须在下一步 `ForceStop` 之前完成**——`ForceStop` 自身产生的进程消失证据不得参与证据向量求值；
+   **`N1BDISC_PRE` 已发出时（r4 R1/R2；r9 起死亡侧触发器为 F1），证据向量不承载 pass/fail**——它只产出死亡事实记录与未完成项的 `unobservable` cause，pass/fail 由 PRE/POST 求值规则与 fail 闭集决定（唯一死亡侧触发面 F1：`probe_crash_signature_observed = observed-true` 且 `protocol != complete` → fail，闭集定义见「死亡事实记录（证据向量）」节；`protocol=complete` 不进 F1）；
 5. `ForceStop(final-cleanup)`；
 6. `Uninstall`；
 7. `RemoveStaging`；
 8. 定向 absent 探针（`BundleDump` 未安装、`PidOfPost` 空、`PidOfVpnPost` 空、`StagingProbe` absent）——四者均 absent 方为 `verified-clean`；
-9. 终态判定与封签（r4 R1；触发器 r5 U3 同步）：
-   - `N1BDISC_POST` 已在 → 核验 `protocol=complete`，**不进死因分类触发器**；
-   - 仅 `N1BDISC_PRE` 在 → 按步骤 4 已冻结的死因分类收口 `protocol=pre-only`（**合法终态**：死亡证据引用与 D6/D-W 的 `unobservable` cause 登记入 evidence 记录，不代发探针 marker；仅当 `protocol=pre-only` 且分类 ∈ {`probe-fault`, `unattributed`, `fault-type-unrecognized-no-platform-signature`, 无类} 触发 `fail`，`platform-termination` 不 fail（r7 X1 同键）；无死亡证据 → `fail`，见观测窗到点收口规则）；
+9. 终态判定与封签（r4 R1；触发器 r9 改按 fail 闭集 F1）：
+   - `N1BDISC_POST` 已在 → 核验 `protocol=complete`，**不进 F1**（命中崩溃签名仅按 verdict 节登记为需 N1b 关注的异常观察，不驱动 verdict）；
+   - 仅 `N1BDISC_PRE` 在 → 按步骤 4 已冻结的死亡事实记录收口 `protocol=pre-only`（**合法终态**：死亡证据引用与 D6/D-W 的 `unobservable` cause 登记入 evidence 记录，不代发探针 marker；仅当 `probe_crash_signature_observed = observed-true` 且 `protocol != complete`（即 F1，三支闭集见「死亡事实记录（证据向量）」节）触发 `fail`；无死亡证据 → `fail`，见观测窗到点收口规则）；
    - `N1BDISC_PRE` 缺 → `fail` 收口。
 10. integrity 记录收尾。
 
