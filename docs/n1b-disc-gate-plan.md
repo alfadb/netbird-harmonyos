@@ -349,7 +349,7 @@ r0 另把 `destination`/`gateway` 写成字符串字面（`"10.99.0.0/24"`/`"10.
 
 每条目矩阵阶段 marker：`N1BDISC_D2_ENTRY|id=<id>|phase=attempted` 先行；
 结局 marker `N1BDISC_D2_ENTRY|id=<id>|outcome=<resolved|rejected|timeout|late-resolved|late-rejected|indeterminate|not_attempted>|fd=<n|none>`；
-拒绝文本经 `N1BDISC_D2_REJTEXT` chunk 族（字面冻结，r3 第二趟 E3：即上节 `N1BDISC_CHUNK` 通用字面施加 `stream=rejtext|item=<该条目 id>`——`MR1`→`item=0`、`MR1B`→`1`、`MR2`→`2`、`MR3`→`3`、`MB1`→`4`，与 `N1BDISC_D2_ENTRY` 的 `id` 同一编号域；无独立 REJTEXT 专用字面）。
+拒绝文本经 `N1BDISC_D2_REJTEXT` chunk 族（字面冻结，r3 第二趟 E3：即上节 `N1BDISC_CHUNK` 通用字面施加 `stream=rejtext|item=<该条目 id>`——`MR1`→`item=0`、`MR1B`→`1`、`MR2`→`2`、`MR3`→`3`、`MB1`→`4`，与 `N1BDISC_D2_ENTRY` 的 `id` 同一编号域；无独立 REJTEXT 专用字面；**防误引注，r9：`N1BDISC_D2_REJTEXT` 自 r4 第二趟 S4 起不在 A5 冻结集内，本处为通用 `N1BDISC_CHUNK` 字面加 `stream=rejtext` 参数的简写指称，非独立专用字面，A5 字面清点不得计入冻结集比对**）。
 
 ## D 项协议（预注册）
 
@@ -710,10 +710,11 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 | A2 | 以 `fd_orig` 为实参的 `read`/`write`/`F_SETFL` 调用点为零；`close(fd_orig)` 调用点仅存在于 D6a 步 3 登记段（文件+行登记） |
 | A3 | 除 `dlopen`/`dlsym`/`dlerror` 外，源码不引用任何 BoringTun 导出符号（数据面零调用；D1 陷阱条款因此不适用的事实由本断言背书） |
 | A4 | **除第二趟修订集群 A5(b) 已登记的 `pthread_join`（worker 终态原子标志置位后调用；该调用无用户态超时出口——r3 第一趟 D5 显式豁免，freeze 静态审查不得因 join 缺超时出口判 A4 不通过）外**，全部等待点经单调时钟且带本文时间盒；其余零无界阻塞调用（零 `pthread_timedjoin_np`、零非清单 sleep/等待原语）。**P10 行与观测窗兜底的关系（冻结）**——外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变） |
-| A5 | marker 字面集与本文冻结集逐字一致（正反例 selftest 覆盖，含 `:vpn` 三形态）；冻结集 = 本文全部 `N1BDISC_*` 字面——外提为表后「A5 冻结集注」（r4 第四趟 W1 重构，内容逐字不变） |
+| A5 | marker 字面集与本文冻结集逐字一致（正反例 selftest 覆盖，含 `:vpn` 三形态）；冻结集 = 本文**活规则中使用的** `N1BDISC_*` 字面，豁免集 = {`N1BDISC_D2_REJTEXT`、`N1BDISC_RESULT`}（理由见「A5 冻结集注」）——外提为表后「A5 冻结集注」（r4 第四趟 W1 重构；**r9 实现性更正：比对口径自「本文全部 `N1BDISC_*` 字面」收窄，原口径按字面实现必 fail，见冻结集注 r9 条**） |
 | A6 | `openat` 调用点仅存在于 D-W in-wait 证据采集段，且实参路径字面 ∈ {`/proc/self/task/<tid>/stat`、`/proc/self/task/<tid>/syscall`}（`<tid>` 绑定 D-W worker tid；零其他文件路径、零 `O_WRONLY`/`O_RDWR` 打开） |
 | A7 | 探针源码中 `/proc/.../stat` 的 state 解析实现**按该行最后一个 `)` 字符之后的下一个 token 定位 state 字段**（D-W 节冻结规则的机器背书）；**禁止**按空格切分取第 3 字段或任何左侧定位实现（`comm` 可含空格与括号，左侧切分必字段错位）；freeze 前静态审查核对源码实现与 selftest 用例（含 `comm` 带空格/括号的反例） |
 | A8 | **探针源码中所有有界循环的终止条件静态核对（r3 第一趟 D2 新增，freeze 前机器检查）**：逐一核对——D7 主循环（deadline_ms 比较 break）、D8b storm 循环（10 s / 4 MiB / 50 000 写三熔断）、D-W drain 循环（5 s 时间盒 + 各转移）、各 10 ms 有界轮询等待（barrier / in-wait / 终态标志 / 迟到观察窗）——确认每个循环存在**可达的退出路径**且以**单调时钟或固定迭代计数**为界；freeze 前机器检查逐循环登记核对结论。本断言堵住「探针自身 hang 被洗成 `platform-termination`」的反方向（与 `platform-termination` (i) 的 D7 elapsed 正面约束配对） |
+| A9 | **D-W 主线 destroy 四步执行序的源码层静态核对（r9 新增）**：在**源码层**（而非仅 marker 字面集层）核对主线序列四步——`N1BDISC_DW_DESTROY_T` 发射语句 → `destroy()` 调用语句 → `N1BDISC_DW_DESTROY_C` 发射语句 → resolve 有界等待语句——四者在**同一控制流上依次出现，其间无任何分支可跳过 `_C` 发射**；并核对 `destroy()` 在全部探针源码中**有且仅有一个调用点**（P9 位点那次，D6 与 D-W 共用）；任一不满足即 freeze 前 fail，不进入后续门（`_C` 发射先于 `destroy()` 调用的反例必 fail，用例见 gate 10 清单 ①） |
 
 **A4 注（r4 第四趟 W1 自上表 A4 行外提，内容逐字不变）**：
 
@@ -726,6 +727,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 - `FD`（r3 第二趟 E2 新增：fd ledger transition marker）；`SKIP`；`CHUNK`；`PRE`/`POST`（r4 第一趟 R1：取代 `RESULT` 的双终态 marker；`RESULT` 字面自 r4 起不在冻结集内）。
 - **r4 第二趟 S4 更正：本集删除 `D2_REJTEXT`**——r3 第二趟 E3 已冻结拒绝文本统一走 `N1BDISC_CHUNK|stream=rejtext`（`CHUNK` 字面 + `stream` 逻辑键承载），无独立 REJTEXT 专用 marker；旧集同时列出两者属自相矛盾（实现无论发否必违反其一）。
 - 同步核对本集其余字面无被后续趟取代的残留（`RESULT` 已删、其余逐字核对仍为在用字面）；rejtext 的 marker 归属登记为 `N1BDISC_CHUNK|stream=rejtext`（非独立 `N1BDISC_*` 前缀字面，属 `CHUNK` 条目的 stream 取值）。
+- **r9 实现性更正（豁免集显式化）**：全文共 57 个不同 `N1BDISC_*` 字面、本集枚举 55 个，A5 旧口径「冻结集 = 本文全部 `N1BDISC_*` 字面」按字面实现静态断言必然 fail、不可实现；比对口径收窄为「本文**活规则中使用的** `N1BDISC_*` 字面」，**豁免集 = {`N1BDISC_D2_REJTEXT`、`N1BDISC_RESULT`}**——前者是已废的通用 chunk 族标签（r4 第二趟 S4 自本集删除，拒绝文本统一走 `N1BDISC_CHUNK` 字面加 `stream=rejtext` 参数，无独立专用字面），后者是 r4 起已被 `PRE`/`POST` 取代（R1）的历史字面，仅出现在修订登记与防误引注中、无活规则引用。
 
 ## verdict 求值与聚合（机器规则，fail-closed）
 
@@ -950,7 +952,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 
 **gate 10 selftest 清单（r4 第四趟 W1 自上表行 10 外提，内容逐字不变）**：
 
-① marker 正反例（**含 `:vpn` tag 三形态用例**，E3 0001 事故教训，`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:5`；**含 `N1BDISC_D4_READ` 的 `off=both` 取值用例**，与 `u1_match_offset` 取值域对齐）；
+① marker 正反例（**含 `:vpn` tag 三形态用例**，E3 0001 事故教训，`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:5`；**含 `N1BDISC_D4_READ` 的 `off=both` 取值用例**，与 `u1_match_offset` 取值域对齐；**r9 A9 反例：源码把 `N1BDISC_DW_DESTROY_C` 发射写在 `destroy()` 调用之前的四步序颠倒夹具，静态断言 A9 必须 fail**）；
 
 ② chunk 重组校验（**含 E3 冻结的 `(stream,item)` 分组用例：跨 stream 不混组、组内 index 缺口判重组失败；r4 第二趟 S6 统一：同组同 index 重复片首到者优先且须与重复片逐字节一致——一致登记 `duplicate_chunk_observed` 不改判定、不一致判 fail；同 index 重复不再仅因重复判重组失败；r5 U12 补全：同 index 重复片 `count` 或 `sha256` 字面不同 → 直接 fail**）；
 
@@ -974,6 +976,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
   - 死亡前已有 result marker 的子项保持记录值；无死亡证据不进入 pre-only 的反用例；
   - PRE 缺 → `fail`；双 marker 任一冻结字段缺项 → `fail`；
   - PRE/POST 各自 `ledger_digest` 与同切点 `N1BDISC_FD` 重建一致性（r5 U5：PRE 对 P5T 快照切点、最终 digest 对收口形态切点，跨切点比较禁止）；
+  - **r9 补登（S3 节「selftest 须含」的 ledger 状态机用例同步入清单，措辞逐字同源）**：`dw_inwait_proc_fd` 双实例（inst=1/2）配对用例、close 先于 create（→ fail）、重复 close（→ fail）、`by=` 域外字面（→ fail）、pre-only 收口未关闭实例 → `process-exit` 的重建用例（r7 X6：r6 W3 后 pre-only 记 `process-exit`，旧「→ `host-forcestop`」用例废除）、另设「存活 fail-cleanup（观测窗到点收口、ForceStop 前进程仍活）→ `host-forcestop`」用例；
 
 ⑩ 死因分类总函数真值表（r4 R2/R3/R6 + r7 X1 行 5 同键收敛）：
   α=`Fault_Type=other:` 新增条目 + `Signal=SIGKILL`（或 SIGTERM）条目存在 + 进程消失 + P9 未发出 → **行 4 (iii)** `platform-termination` → **不 fail**（r7 X1 重写：unknown + 有平台签名的构造先被行 4 (iii) 截获，原 r6「行 5a」路径删除）；
