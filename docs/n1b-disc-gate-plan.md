@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r13-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r14-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -155,6 +155,15 @@
 > - **V3**（M/m 收尾 + 主会话两处补裁）：混合支写明先于 APPFREEZE；false 支删「无任何上述死亡证据」残留合取；`call-boundary-incomplete` 透传自身 cause（不再并入 post-destroy——「destroy 已过」对五态歧义态是事实错误）；主会话补裁① 支 EXIT 缺限定（complete 正常主线语义应为 false）、u7 skip 分支优先；计数与来源标签统一。
 > **r13 主会话裁量（请下轮审查挑战）**：① watchdog 有序表 ③ 允许双缺判 true（两席同向废除「一律不得」——但「waiter 被 watchdog 杀」的正向证据不含任何 watchdog 专属条目，仍只是静默+死亡+位点的合取，接受与否请裁）；② ① 支的 `destroy-terminal-candidate` 为新具名 cause（原句字面收纳）；③ u7 复用 D8b `stage-not-reached` 字面（grok 允许同字面或专名）；④ `call-boundary-incomplete` 透传后域计数 18/10。
 > 状态改为 `criteria-r13-pending-independent-review`；r13 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r14 修订（第十四轮审查修复：4 blocker / 2 major / 2 minor 处置）**：r13 经三席跨厂商隔离独立审查（绑定 e3f33ec）——**deepseek-v4-pro（两表机械枚举）pass 0B/2M**、**grok fail 1B/2M/2m**、**sol fail 3B/2M/2m**；上轮 4 条修复全部确认、无回归；去重 4 条实质（轨迹 12→8→4，第十三轮记账经 sol m-02 更正）。
+> **程序事件登记**：deepseek 先回、其 2M 被主会话当场采纳落盘，违反审查期间版本纪律（失误 #28），两席重绑 e3f33ec 出票；其一「不可达」论证被两席独立证伪（失误 #29：采纳审查席数学断言未独立核实——EXIT 可早于 `_T`，inwait 竞态段明文）。
+> r14 修订内容（两包；P1 及 P2 均因 glm-5.3-flash 无消息失败由主会话接手执行）：
+> - **W1 二维→四步有序互斥**（grok B-01 = sol B-03 收敛）：(0) skip2∪死亡收口3 透传；(1) 类 0/0b 直接映射（`_C` 缺是其路径常态，收进「仅 resolved」正是原洞）；(2) `_C` 在且无 resolve → destroy-unresolved（「已发起」钉死 `_C` 在、与五态对齐，废除可扩域措辞）；(3) 已 resolve → 普通类逐值表。不可达性注（普通类蕴含 `_C` 在——判定表 0b 截获一切无 `_C` 输入）。selftest ④ 补洞格/两读格/skip 格三钉。
+> - **W2 watchdog 集群**（grok M-01 = sol B-02 收敛 + sol B-01/grok 裁量①挑战同向）：② 加 EXIT 缺（原「不可达」注被两席证伪，替换为更正注）；③ 合取 poll 进入证据（`DW_BARRIER` ∨ `dw_inwait_confirmed=observed-true`）+ 结论句去因果化（「waiter 于 destroy 未及窗内死亡且已确认进入等待」——删除一切 watchdog 归属断言；SIGKILL/OOM/生命周期在该观测不可区分）；drain 期死亡 → ⑤。字段名保留为历史名 + 语义注防 N1b 误引。⑪ 正例/反例全面同步（含 EXIT 在交错构造、drain 期构造两新钉）。
+> - **W3 FaultRecv 正向段按支定义**（sol M-01）：「可解析正向」= 任一签名支完整前件真（含第 3 支 APPFREEZE+短时步+无矛盾），不被不可解析条目稀释。
+> - **W4 收尾**：u7 skip-first 夹具（grok m-02）；r14 前临时修复（`dw_waiter_spawned` 定义、no-worker 删除、② 旧注）并入本块登记。
+> 状态改为 `criteria-r14-pending-independent-review`；r14 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -675,15 +684,18 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
       沿「除 fail 闭集（F1–F6、F8、F9；F7 不在内）外一切结局均不 fail」，r10 排除式与闭集正文同步（A m-02））——destroy 之后的死亡不是「waiter 被 watchdog 杀」的语义窗口，waiter 归因不可判，**不得**判 waiter 被杀（否则同一物理事件被死亡事实记录与本字段双重登记、内部矛盾）；
     - ② `N1BDISC_DW_DESTROY_T` 在、`_C` 缺 → `unobservable(cause=call-boundary-incomplete)`（**r13 透传「`destroy_call_state` 五态表」第 3 行同名字面**：调用边界不可判——`_T` 只证「即将调用」、`_C` 缺不得反推「调用未发起」，waiter 归因随之不可判；
       r13 自原 r9 第五步「`PidOfVpn` absent 且 `_C` 缺（无论 `_T` 在否）」支拆出本支——该组合的归因不可判性源于调用边界本身，不以 pidof absent 为前提；
-      r14 注（deepseek M-01）：本支不带「EXIT 缺」限定与 ① 不对称，但「`_T` 在 `_C` 缺 + EXIT 在」组合不可达——`_T`→`_C` 属同步区，进程死于该窗则 waiter 同死、EXIT 必缺；① 的限定是防可达组合被截胡，本支无此需求）；
-    - ③ `_T`/`_C` **均缺** 且四证据合取齐——`N1BDISC_DW_SPAWN` marker 存在 ∧ `N1BDISC_DW_EXIT` marker 缺失 ∧ capture 三形态关联确认 `DW_SPAWN` 后 `:vpn` 行静默 ∧ `process_death_observed = observed-true`（死亡分量，唯一死亡谓词源）
-      ∧ 死亡位点 ∈ P8-P10 窗口（`DW_SPAWN` 之后、无 `DW_EXIT`，证据规则 4）→ **`observed-true`**（waiter 在 poll 等待中被杀——destroy 未及：均缺即 protocol 未到 P9 或 destroy 顺延路径，①的「`_C` 在 + absent」构造已先行分流、不与本支重叠；SPAWN 后静默 + EXIT 缺 + 死亡分量 + 位点窗口共同构成正向证据）；
+      **且 `N1BDISC_DW_EXIT` 缺**（r14 更正，grok M-01 = sol B-02 两席收敛：原 r14「`_T` 在 `_C` 缺 + EXIT 在不可达」的论证**错误**——它漏掉了 EXIT 可早于 `_T` 的交错：inwait 竞态段明文「采集窗（≤2 s）可能跨越 poll 实际返回的时刻」，worker 提前 RETURN+EXIT 后主线程才发 `_T`、再死于 `_C` 前；该组合可达，②须与 ① 同带 EXIT 缺，EXIT 在则 ④ observed-false 先承载——waiter 已正常走到终态，本支不截胡）；
+    - ③ `_T`/`_C` **均缺** 且五证据合取齐——`N1BDISC_DW_SPAWN` marker 存在 ∧ `N1BDISC_DW_EXIT` marker 缺失 ∧ capture 三形态关联确认 `DW_SPAWN` 后 `:vpn` 行静默 ∧ `process_death_observed = observed-true`（死亡分量，唯一死亡谓词源）
+      ∧ 死亡位点 ∈ P8-P10 窗口（`DW_SPAWN` 之后、无 `DW_EXIT`，证据规则 4）
+      ∧ **poll 进入证据**（r14 收紧，sol B-01 + grok 裁量①挑战两席同向：`DW_BARRIER` marker 存在 **或** `dw_inwait_confirmed = observed-true`，二者任一）→ **`observed-true`**（**waiter 于 destroy 未及窗内死亡且已确认进入等待**——r14 去因果化：本字段的 true 语义是「waiter 于窗内死亡且等待进入的证据在」，
+      **不构成 watchdog 归属的证据**：SIGKILL/OOM/生命周期终止在该观测下不可区分，正例构造中的 SIGKILL 条目仅是死亡分量的关联证据；字段名 `dw_watchdog_killed` 保留为 r3 E11 冻结的历史名，改名波及 POST 冻结字段集与 ledger，N1b 不得将该 true 引用为「平台 watchdog 杀了 poll waiter」；
+      无 poll 进入证据（drain 期死亡——BARRIER/inwait 均无）→ 落 ⑤，宁缺勿误；①的「`_C` 在 + absent」构造已先行分流、不与本支重叠）；
       （**r12 沿革注**：第四项死亡分量合取 r12 定型，blocker 2（sol B-03）——原第四项〔r4 第二趟 S8 收紧、r9 第五步再收紧：独立死亡证据 = faultlogger 条目含 `APPFREEZE`/watchdog 类签名〕与 r10「事件/死亡两轴分立」正面冲突：签名条目只证明 watchdog**事件**、不证明进程消失，`pidof` 仍非空时会虚构「waiter 被杀」，故死亡状态唯一取自 `process_death_observed` 分量、签名条目仅作关联证据逐字引用。
       **前三项不蕴含死亡的辨析（r12 写明，r13 沿用）**：第三项「`DW_SPAWN` 后静默」是**事件后静默**（capture 三形态关联后无新增 `:vpn` 行），只证窗内无新行、不证进程消失，故死亡分量不可省。
-      **r13 废除原 r9 第五步「`PidOfVpn` absent 且 `_C` 缺一律不得 true」**——「调用中途死亡」与「waiter 被 watchdog 杀」在 `_T`/`_C` 均缺时以死亡位点窗口区分：位点 ∈ P8-P10 即 waiter 等待窗、位点在窗外归⑤；原「二者不可区分」论断随①②先行分流与位点窗口守卫失效。）
+      **r13 废除原 r9 第五步「`PidOfVpn` absent 且 `_C` 缺一律不得 true」**——「调用中途死亡」与「waiter 于窗内死亡」在 `_T`/`_C` 均缺时以死亡位点窗口区分：位点 ∈ P8-P10 即 waiter 等待窗、位点在窗外归⑤；r14 再加 poll 进入证据合取，drain 期死亡自此归⑤。）
     - ④ `N1BDISC_DW_EXIT` marker 存在 → `observed-false`（waiter 正常走到终态并退出，无论 poll 以何类返回——被杀的线程不可能发出 EXIT 后再死；**r4 第二趟 S7：删除旧文「D-W 因 skip 分支未执行亦判 observed-false」的规定——skip 情形一律具名 `unobservable`，skip 主线由此有唯一字段值，RESULT 不因域外值 fail**）；
-    - ⑤ 其余一切输入 → `unobservable(cause=marker-gap-indeterminate)`（原默认支；含死亡分量未确认为 `observed-true`（`process_death_observed != observed-true`，r12 统一死亡谓词）、`DW_SPAWN` 缺、死亡位点在 P8-P10 窗口外、`_T`/`_C` 均缺但四证据不齐——禁止以 marker 缺失单独推断被杀，E3 0001 教训）。
-    **r13 SIGKILL 证据角色辨析（sol 点名）**：③正例构造中的 SIGKILL 条目仅是死亡分量的**关联证据**（r12 U2 统一后的既有规则：携 `SIGKILL`/`SIGTERM` 的终止条目只在 pidof absent 确认下作并存关联证据、不独立充分），**不证明 watchdog 归属**——watchdog 归属的证据是 ③ 中「SPAWN 后静默 + EXIT 缺 + 位点窗口」与死亡分量的合取；
+    - ⑤ 其余一切输入 → `unobservable(cause=marker-gap-indeterminate)`（原默认支；含死亡分量未确认为 `observed-true`（`process_death_observed != observed-true`，r12 统一死亡谓词）、`DW_SPAWN` 缺、死亡位点在 P8-P10 窗口外、`_T`/`_C` 均缺但五证据不齐（含 **r14：无 BARRIER 且 inwait 未确认的 drain 期死亡**）、`_T` 在 `_C` 缺但 EXIT 在（④ 先承载）——禁止以 marker 缺失单独推断被杀，E3 0001 教训）。
+    **r13 SIGKILL 证据角色辨析（sol 点名；r14 更新）**：③正例构造中的 SIGKILL 条目仅是死亡分量的**关联证据**（r12 U2 统一后的既有规则：携 `SIGKILL`/`SIGTERM` 的终止条目只在 pidof absent 确认下作并存关联证据、不独立充分），**不证明 watchdog 归属**——r14 起 ③ 的 true 语义已去因果化（「于窗内死亡且已确认进入等待」），watchdog 归属**无任何机器可判证据**；
       faultlogger 的 `APPFREEZE`/watchdog 签名条目同理只是关联证据（只证 watchdog 事件、不证进程消失，①构造中签名在否不改变落值）——写明防止「SIGKILL ⇒ watchdog」的误读；
     - **skip 分支具名清单（S7：全部 skip 情形不得取 true/false；r14 更正 deepseek M-02：原第三字面 `no-worker` 删除——skip 表与 P10 行只有 `no-live-fd`/`dup-failed` 两种 D-W skip 情形，协议不存在第三种「worker 创建失败」skip 分支，该字面系 r3 第二趟 S7 清单多列的幽灵引用，从未有定义源）**：`unobservable(cause=no-live-fd)` / `unobservable(cause=dup-failed)`——对应 skip 分支（skip 表与 P10 行的 cause 字面）；r13 注：该清单位于有序表外，skip 路径直接落 skip 编码、不进入①-⑤求值。
     死亡分量未确认为 `observed-true`（`process_death_observed != observed-true`，r12 统一死亡谓词，原「无死亡证据」自立表述随 blocker 2 收敛）时**默认取 `unobservable`（⑤支承载），默认值不得为 observed-true**。本字段是路径①第 5 条件（`dw_watchdog_killed != observed-true`）的唯一定义来源，该条件据此可独立实现）、
@@ -1005,6 +1017,7 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
    - `fault_type_observed`：任一条目归一化后 ∈ {`CPPCRASH`, `JSRAWERROR`} → 按该**正向**条目记归一化值（多条正向取聚合序首个正向条目）；无正向条目但有 `APPFREEZE` → 记 `APPFREEZE`；其余情形（全部条目归一化后均域外）→ 记 `other:<第一条域外字面逐字>`——多条域外条目时**全部原值逐字入档（raw 档保留多值）**、分量单值取第一条，多值事实不丢、分量仍单值；
    - `signal_observed` 同构：任一条目携致命信号（`SIGSEGV`/`SIGABRT`/`SIGBUS`/`SIGFPE`）→ 取该信号（多条致命取聚合序首个）；无致命信号但有条目携 `SIGKILL`/`SIGTERM` → 取之；无任何条目携两具名段信号（携「其余」段信号的条目按上方既有规则仅 raw 逐字入档）→ `observed-false`；多条目信号不同时**全部信号字面逐字入档（raw 档保留多值）**、分量单值取优先序最高者（致命段 > 平台终止段）；
    - **可解析与不可解析条目混合（r10 追加一支，主会话裁定；P4 遗留观察 2；r13 扩展，blocker 4，sol B-01——取回失败文件视同不可解析条目进入本支条件，取回状态建模见 `probe_crash_signature_observed` 求值规则前置 r13 条）**：任一**可解析**条目呈正向签名 → 按该正向记（不被不可解析条目稀释，r13：也不被取回失败文件稀释）；
+   **「正向签名」按支定义（r14 更正，sol M-01）**：= 任一签名支的**完整前件**已真——第 1 支（`fault_type_observed` ∈ {`CPPCRASH`, `JSRAWERROR`}）、第 2 支（致命信号）、**第 3 支（`APPFREEZE` + 短时步位点 + marker 序列无矛盾）**；三支任一完整前件真即「有可解析正向」，**包括第 3 支**——原定义只列第 1/2 支字面，可解析 `APPFREEZE`@短时步会被本支压成 unknown（虽然短时步必在 PRE 前、verdict 由 F2 承载，事实记录仍错）；
 **无可解析正向且存在（不可解析条目 ∨ 取回失败文件）** → 该分量 unobservable——仅不可解析条目时沿原值：`unobservable(cause=fault-type-unparsable)`（`fault_type_observed` 侧）/ `unobservable(cause=signal-unparsable)`（`signal_observed` 侧）；
 存在取回失败文件时落 `unobservable(cause=faultrecv-unavailable)`（冻结优先序中高于字段不可解析——前者整条证据缺失、后者证据在手但字段坏）——不可解析条目与取回失败文件中均可能存在正向签名，按 `observed-false` 记是 false-negative（fail-open）；本支先于 `APPFREEZE` 支与 `other:` 兜底与无信号 `observed-false` 兜底求值（r13 补记，grok M-01：原句漏列 `APPFREEZE` 支，则「可解析 `APPFREEZE` 条目 + 不可解析条目」构造在主规则记 `APPFREEZE` 与本支记 unobservable 间两读、非单值——求值序写死为正向支最先、本支次之、`APPFREEZE` 支仅当无不可解析条目/取回失败文件时才落到）；
 与真值表按支求值口径同构（r12：分量不可解析 → 依赖它的支 unknown；unknown 只在无一支 true 时经聚合把签名落为 `unobservable`，不洗成 `observed-false`）；
@@ -1216,6 +1229,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
    （**r13 补全断言**：本夹具死于 D7 任务中途——`D7_BEGIN` 在、`D7_END` 缺、BEGIN 后静默 + 死亡证据 → `u7_long_task_watchdog_behavior=observed-false`（任务被杀，沿 D7 节既有 observed-false 支）、`start_mono_ms` 自 `D7_BEGIN` 照常重建——r13 前本用例不断言 u7，随 u7 窄窗支落地补全，防该分量无断言漂移）；
    **r13 u7 阶段未达正例（第十三轮 blocker 1，grok B-01 = sol B1 两席收敛；对应 D7 节 r13 阶段未达死亡收口支）**：夹具 `N1BDISC_PRE` 在、`N1BDISC_D7_BEGIN` 缺（D7 未开始）、平台死亡（`process_death_observed = observed-true`：positive 基线在、finally 采样 absent + capture 静默）、无窄崩溃签名、`last_visible_site = P5T`
    → `u7_long_task_watchdog_behavior=unobservable(cause=stage-not-reached)`、D7 派生字段 `start_mono_ms`/`elapsed_ms`/`iters` 同名落值同 cause → 无字段缺项 → 不命中 F4/F8/F1 → `protocol=pre-only` → verdict **`pass`**（grok 构造：PRE 已发、`D7_BEGIN` 未发的合法平台死亡——r13 前 u7 三支前件全假、无落点 → F4 烧 ID，随本支闭合）；
+    **r14 skip-first 夹具（grok m-02 验收钉；对应 D7 节「skip 分支优先」段）**：夹具 D2 矩阵终局无保留条目（全 rejected → `no-live-vpn` 分支）+ `N1BDISC_PRE` 在 + D7 的 SKIP marker 尚未发出即平台死亡（`process_death_observed = observed-true`）→ `u7=unobservable(cause=no-live-vpn)`（skip 表 D7 行指派）、**不得 `stage-not-reached`**（skip 语义是「跳过」而非「未达」，skip 分支优先于阶段未达支）；
    **r10 D7 早退矛盾边界对（B B-08；D7 节接受域首行 r10 口径的边界承载）**：`D7_END` 在、`elapsed_ms=19999`（`0 ≤ elapsed < 20000`，其余输入全合法）→ marker 在而与伪码出口条件机械矛盾 → **fail（F8）**（原值逐字入档，`d7_anomaly=early-exit-with-end-marker` 标签同时驱动 F8）；`elapsed_ms=20000` + `D7_END` 在 → 合法下界 → 不 fail（`u7=observed-true` 方向）——同源边界对，20000 恰值归合法侧沿 E5 边界归属冻结；
 
 ④ `dw_return_class` 优先级判定表真值表（全部 revents 组合（**r4 第二趟 S2 界定 = 冻结掩码全集 {0x001,0x002,0x004,0x008,0x010,0x020} 的全部 64 个子集的十进制编码**——该穷举界定判定表行内匹配的组合域，另含纯未知位用例 `revents=64` → `other-revents` 不 fail；**r9 第五步 BL-3 混合位用例**：`revents=72`（未知位 64 + `POLLERR`）与 `revents=65`（未知位 64 + `POLLIN`）均须由未知位前置门定 `other-revents`、原值入档、不 fail、**不解锁路径①**）× elapsed 4500 边界 × drain 终态 × poll ret/errno 组合，见 D-W 节）；
@@ -1298,9 +1312,14 @@ r10 前 (1b) 仅认 `barrier-never-observed`，本构造无落点 → F4（r10 �
 
 ⑪ **`dw_watchdog_killed` 三态映射真值表 + `marker_tail_state` 边界用例（r4 第三趟 T1 补全 E11 全分支；r9 更新：原「D7 死亡路径墙钟代理边界（`elapsed_proxy` 27000/27001）」与「r8 Y4 X5 置位五用例（`site_uncertainty` 置位、行 2 让位）」两组用例的被测对象（`elapsed_proxy`、`site_uncertainty`、行 2）已随死因表删除，整段废除，改挂 `marker_tail_state` / `T_tail = 25000 ms` 口径）**：
 `observed-true` 四证据合取逐格用例（**r12 更新，blocker 2：第四合取项改挂 `process_death_observed = observed-true`，正向用例须补死亡分量构造**——原「r9 第五步收紧后正向证据仅剩 faultlogger watchdog/`APPFREEZE` 签名路径一例」的构造随第四项改写废除；
-**r13 再更新（有序互斥表③，第十三轮 blocker 2）：正例改「`_T`/`_C` 均缺」构造**——正例：`DW_SPAWN` 在、`DW_EXIT` 缺、`DW_SPAWN` 后 capture 静默、`DW_DESTROY_T`/`DW_DESTROY_C` 均缺（destroy 未及），**且**死亡分量 = positive 基线在、finally 采样 `pidof` absent + capture 静默（携 `SIGKILL` 条目作并存关联证据——仅死亡分量的关联证据、不证明 watchdog 归属），死亡位点 P8 → `observed-true`（waiter 在 poll 等待中被杀）；
+**r13 再更新（有序互斥表③，第十三轮 blocker 2）：正例改「`_T`/`_C` 均缺」构造；r14 再更新（③ 收紧 + 去因果化，sol B-01/grok 裁量①）**——
+正例：`DW_SPAWN` 在、`DW_EXIT` 缺、`DW_SPAWN` 后 capture 静默、`DW_DESTROY_T`/`DW_DESTROY_C` 均缺（destroy 未及），**且**死亡分量 = positive 基线在、finally 采样 `pidof` absent + capture 静默（携 `SIGKILL` 条目作并存关联证据——仅死亡分量的关联证据、不证明 watchdog 归属），死亡位点 P8，
+**且 `DW_BARRIER` 在（或 `dw_inwait_confirmed = observed-true`——poll 进入证据，r14 新增第五合取）** → `observed-true`（**「waiter 于 destroy 未及窗内死亡且已确认进入等待」——r14 去因果化结论，断言中不得出现「被 watchdog 杀」**）；
 **r13 反例两支（原 r9 第五步「`_T` 在 `_C` 缺与 `_T` 缺 `_C` 缺两支均须判 `unobservable(cause=marker-gap-indeterminate)`、不得 true」的双缺反例废除——双缺支随有序表改为上方③正例）**：「`DW_DESTROY_C` 在 + `PidOfVpn` absent」→ `unobservable(cause=destroy-terminal-candidate)`、不得 true（求值序①，destroy 之后的死亡不是 waiter 被杀的语义窗口）；
-「`DW_DESTROY_T` 在、`_C` 缺」→ `unobservable(cause=call-boundary-incomplete)`、不得 true（求值序②，调用边界不可判、waiter 归因随之不可判）；
+「`DW_DESTROY_T` 在、`_C` 缺、**`DW_EXIT` 缺**」→ `unobservable(cause=call-boundary-incomplete)`、不得 true（求值序②，调用边界不可判、waiter 归因随之不可判；r14 更正：原不带 EXIT 缺——「EXIT 在」时 ④ `observed-false` 先承载，② 不截胡）；
+**r14 新增反例二支（grok M-01 = sol B-02 收敛验收钉 + sol B-01 收紧验收钉）**：
+（a）「`_T` 在、`_C` 缺、**`DW_EXIT` 在**」（inwait 竞态交错：worker 提前 RETURN+EXIT、主线程后发 `_T`、死于 `_C` 前）→ ④ `observed-false`（waiter 正常退出），**不得** `call-boundary-incomplete`；
+（b）「`_T`/`_C` 均缺、五合取中 poll 进入证据缺**（无 `DW_BARRIER` 且 `dw_inwait_confirmed != observed-true`——drain 期死亡）**」→ ⑤ `unobservable(cause=marker-gap-indeterminate)`，**不得 true**（③ r14 收紧）；
 「`DW_DESTROY_C` 在而 `PidOfVpn` absent」原反用例（r9 记 `marker-gap-indeterminate`）随 r13 具名 cause 改记 `destroy-terminal-candidate`（并入上方反例第一支，不另设）；
 四证据缺任一即不得 true 的逐格反例；**r12 新增反例（死亡分量未确认时签名条目不得证 true）**：`pidof` 仍非空（positive 基线在、采样恒非空 → `process_death_observed=observed-false`）+ `APPFREEZE` 条目 + `DW_SPAWN` 在、`DW_EXIT` 缺、`DW_SPAWN` 后静默 → **不得 true**，判 `unobservable(cause=marker-gap-indeterminate)`（死亡分量未确认；APPFREEZE 只证 watchdog 事件、不证进程消失））；
 `observed-false` 仅 `DW_EXIT` 在的用例；
