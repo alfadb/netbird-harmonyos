@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-01 ｜ 状态：`criteria-r10-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r12-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -134,6 +134,19 @@
 > ④ 死亡证据 (b) 支限定 SIGKILL/SIGTERM 条目（席 B 只要求删幽灵支，未授权正向收紧——但「条目证明事件不证明终止」是其原推导的自然延伸）；⑤ 签名真值表「无条目=observed-false」（席 B 自陈曾写 unobservable，本裁定以其 #6 构造为机械矛盾消解——该构造无条目且 FaultRecv 执行过，是确定观测）；
 > ⑥ F1 第 3 支保留不删（席 A 给「删或扩」二选一，裁定取保留+结构注：删不改变任何 verdict 却丢 N1b 诊断事实）；⑦ 混合解析失败聚合挂 unobservable 不挂 false；⑧ P0 只设非负不设顺序约束（理由显式登记）。
 > 状态改为 `criteria-r10-pending-independent-review`；r10 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r12 修订（第十一轮审查修复：8 blocker / 8 major / 3 minor 全处置）**：r10 经三席跨厂商隔离独立审查——**grok fail（3B/6M/3m，上轮 12 条 blocker 落地核对 10 已修）、sol fail（7B/2M，其九条修复核对 4 已修 4 部分 1 已修新缝）、deepseek 两派失败记 attempt-not-counted**；
+> 主会话同期自查立案 2 条（其一与两席三路收敛）。8 条去重 blocker **全部逐条核实成立、无一证伪**，登记见 `docs/n1b-disc-r8-review-register.md` 九之二。共性：**全部是「修旧引入的新缝」**——集中在主会话起草规范、执行层机械落地的三处规则块（真值表、死亡证据、成功路径收口）；归因停机主线两席均未挑战，八项裁量多数维持。
+> r12 修订内容（五个有界工作包）：
+> - **U1 真值表按支求值**（三路收敛）：r10 五行按序互斥表废除，改「前置（FaultRecv 失败最先）→ 第一步按支三值求值（支 1 只看 fault_type、支 2 只看 signal、支 3 看 fault_type ∧ last_visible_site ∧ 无矛盾；每支独立 true/false/unknown）→ 第二步聚合 true > unknown > false」——已知正向不被任何旁路未知稀释；
+> 多 unknown cause 冻结优先序（faultrecv-unavailable > fault-type-unparsable > signal-unparsable > no-visible-marker），全部逐字入 raw。双口径单值化：Fault_Type/Signal 字段不可解析豁免（未实测平台产物），其余字段仍 F8。聚合序冻结 = faultlogger 文件名字节序。`dw_destroy_distinguishable_from_timeout` 16+2 逐值落具名 cause（裸 unobservable 废除，complete 主线 POST 自此有合法单值）。
+> - **U2 死亡证据谓词统一**（两席收敛）：(b) 支降为辅助合取——`process_death_observed=observed-true` 唯一充分条件回到 (a)（pidof 基线下 absent + capture 静默），SIGKILL/SIGTERM 条目仅在 pidof absent 确认下作并存关联证据（理由写死：glob 不绑 `:vpn`、SIGTERM 可捕获）；`dw_watchdog_killed` 四合取第四项改死亡分量合取（APPFREEZE 只证事件不证消失）；`:866`/`:776` 自立谓词废除，死亡判定唯一谓词源 = 本分量。「平台终止」11 处逐处归类。已知预期行为变化登记：u4 一构造 observed-false → unobservable。
+> - **U3 收口补全**：D8b 新增 BEGIN-only 死亡收口（六字段落 `storm-incomplete-pre-only`）与**阶段未达**收口（七字段落 `stage-not-reached`，P4 范围外发现）——合法平台死亡的两种 storm 形态不再落 F4；`post-destroy-unobservable` 按五态拆分（死于 P9 前落 `destroy-not-reached` 跨域复用；destroy 已过保留原 cause），域计数 17/9，五态×skip×两 cause 分流矩阵穷尽。
+> - **U4 selftest 断言修正**：⑩ 守卫反例「不 fail」删除（verdict 由 F2/F3 承载，与 Ⅲ 同构）；「含与任意 Fault_Type 组合」限定（原把 CPPCRASH 圈进 false 断言）；「Ⅰ/Ⅱ/Ⅲ 另发 POST」限定为 Ⅰ/Ⅱ（Ⅲ 与 POST 结构不可达）；补 CPPCRASH+SIGKILL → observed-true 对照例。
+> - **U5 执行层纠正主会话 2 处**：跨钟相减（ws 单调钟 − 死亡墙钟）无物理意义，按同侧墙钟落地并写明禁止；r12 登记块初稿「七个工作包」计数错（实列 8 项）——本块实列五包。
+> **r12 主会话裁量（请下轮审查席逐项挑战）**：① unknown cause 优先序取该四值序（无席间先例，主会话定）；② 豁免边界限 Fault_Type/Signal 两字段；③ `destroy-not-reached` 跨域复用不新造变体（近义字面是误引雷区）；④ `dw_watchdog_killed` 死亡合取后正例构造含 SIGKILL 关联证据（非纯 APPFREEZE）；
+> ⑤ u7 的 P5T–P6 窄窗「阶段未达」同构缺口未修（窗口极窄且涉 u7 求值规则本体，登记交挑战）；⑥ pre-PRE 域裸/省略号 cause（M-05 族）未逐字段具名化（verdict 不受影响，工作量与风险比未达平衡点）；⑦ `stage-not-reached` 不跨域共用 `destroy-not-reached` 字面（位点域不同）。
+> 状态改为 `criteria-r12-pending-independent-review`；r12 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -479,7 +492,7 @@ MR* 保留时派生 `write_return_boundary_consistent_with_1400`：last_success=
 - **D8b storm（缩减 + 后移）**：预注册上限 = **10 s 墙钟**（单调时钟）、累计 **4 MiB**、**50 000 次** `write`；负载 = 冻结 1024 B 合法 IPv4 包（布局同 D8a 的 L=1024 级，**id 固定 11 不递增、checksum 按该头一次性重算后复用**——r1 更正：IPv4 头校验和覆盖整个 20 字节头，Identification 字段位于字节 4-5，**在**校验和覆盖范围内，「id 递增而校验和不变」的旧表述错误；本 campaign 选择的分支是**固定 id 不递增**，故全部 storm 包校验和同一）；
 持续写 `fd_dup` 直至首次 `-1/EAGAIN` 或熔断。落盘：`eagain_observed`（三态）、`partial_write_observed`（三态）、`bytes_written_total`、`write_calls`、`window_start/end_monotonic`（r10：两钟分别由 `D8_STORM_BEGIN` 的 `ws=<n>` 与 `D8_STORM_END` 的 `we=<n>` 承载——窗口开始钟于 storm 起点已可得、窗口结束钟于 END 发射时已可得，capture 可重建）、`caps_hit`。
 **熔断是保险丝不是验收路径**：命中即停并登记，不构成 fail、不构成 blocked（沿 N1a C5 法理，`docs/n1a-gate-plan.md:32`）。**措辞口径（决议 §二.2 原句，`docs/native-nx-n1b-adjudication.md:65`）**：未诱发 EAGAIN 时 storm 结论措辞**固定**为 `attempted, not induced on this fd`；`not-triggered` 记录必须携带定量参数（累计字节、写调用次数、时间盒起止单调时钟；r10：时间盒起止单调时钟的载体 = `D8_STORM_BEGIN.ws` / `D8_STORM_END.we`），缺失按字段缺项 → fail。
-**位次理由（BL-9 二选一，选「缩减后移」）**：保留 storm 因 OB-01/OB-02 的事实输入价值（eagain/partial 可写性直接影响 N1b r2 写路径设计）；移至 D7 之后（P7）使 watchdog 高价值事实（U7）先落盘，storm 若压死进程，损失集缩小为 D-W/D6（D8b 自身字段按下方 BEGIN-only 死亡收口段落值，不因 END 缺失 fail——r12）——与既有「位次最后」论证同构；
+**位次理由（BL-9 二选一，选「缩减后移」）**：保留 storm 因 OB-01/OB-02 的事实输入价值（eagain/partial 可写性直接影响 N1b r2 写路径设计）；移至 D7 之后（P7）使 watchdog 高价值事实（U7）先落盘，storm 若压死进程，损失集缩小为 D-W/D6（D8b 自身字段按下方死亡收口两支（BEGIN-only / 阶段未达）落值，不因 END 缺失 fail——r12）——与既有「位次最后」论证同构；
 缩减至 10 s/4 MiB/50k（约原 1/3~1/4）降低压死概率，且该量级仍远超 N1b 实际写模式需求。
 - **D8b BEGIN-only 死亡收口（r12，blocker 4；sol B-04 = grok M-02 加深）**：触发三条件同时成立——`N1BDISC_D8_STORM_BEGIN`（含 `ws=<n>`）在 capture、`N1BDISC_D8_STORM_END` 缺、`process_death_observed = observed-true`（死亡分量，r12 blocker 3 统一后的唯一死亡谓词源，见「死亡事实记录（证据向量）」节）——storm 中途进程被平台终止（如 watchdog 压死，合法平台终态）、END 未及发射：
   - **落值**：`window_end_monotonic` 与 END 承载的 5 个字段（`eagain_observed`/`partial_write_observed`/`bytes_written_total`/`write_calls`/`caps_hit`）各自记 `unobservable(cause=storm-incomplete-pre-only)`——**新具名 cause，一条 cause 覆盖本组六项**（共享同一物理原因：storm 中途进程终止、END 未发射，不为每项另立 cause）；`window_start_monotonic` 不在本支管辖内，由 BEGIN 的 `ws=<n>` 照常重建（不受 END 缺失影响）。
@@ -1149,6 +1162,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
    **r12 D8b BEGIN-only 死亡收口用例（blocker 4，sol B-04 = grok M-02）**：正例——夹具 PRE 在、D7 完成、`D8_STORM_BEGIN|ws=<n>` 在、`D8_STORM_END` 缺、平台 SIGKILL `:vpn`（`process_death_observed = observed-true`：positive 基线在、finally 采样 absent + capture 静默）、无窄崩溃签名；
    期望——`window_end_monotonic` 与 `eagain_observed`/`partial_write_observed`/`bytes_written_total`/`write_calls`/`caps_hit` 各记 `unobservable(cause=storm-incomplete-pre-only)`、`window_start_monotonic` 自 `ws` 照常重建、`storm_incomplete_pre_only=true` 与跨度登记在档 → 无字段缺项（「任一 D 项终态为 `missing`（既无探针登记亦无 post-mortem/skip 指派）」判定不适用本支）、不命中 F4/F8 → `protocol=pre-only` → verdict **`pass`**（合法平台死亡终态不得因 END 缺失烧 ID）；
    对照例——BEGIN 在、END 缺、无死亡证据（进程仍活）→ 死亡收口支不触发、各字段不得取 `storm-incomplete-pre-only` → 真正的未完成：字段缺项沿 F4 面、观测窗到点进程仍活 → **fail（F9）**（存活未完成不是平台终态，D8b 节 r12 对照条）；
+   **r12 阶段未达死亡收口用例（P4 遗留 ②；对应 D8b 节阶段未达支）**：死亡位点在 `N1BDISC_D8_STORM_BEGIN` 前（如死于 D7——`process_death_observed = observed-true`、BEGIN 缺）→ D8b 七字段各记 `unobservable(cause=stage-not-reached)`、`storm_incomplete_pre_only=false` → 不命中 F4 → `protocol=pre-only` → verdict **`pass`**（合法平台死亡终态，同 BEGIN-only 支法理）；
    **r10 D7 早退矛盾边界对（B B-08；D7 节接受域首行 r10 口径的边界承载）**：`D7_END` 在、`elapsed_ms=19999`（`0 ≤ elapsed < 20000`，其余输入全合法）→ marker 在而与伪码出口条件机械矛盾 → **fail（F8）**（原值逐字入档，`d7_anomaly=early-exit-with-end-marker` 标签同时驱动 F8）；`elapsed_ms=20000` + `D7_END` 在 → 合法下界 → 不 fail（`u7=observed-true` 方向）——同源边界对，20000 恰值归合法侧沿 E5 边界归属冻结；
 
 ④ `dw_return_class` 优先级判定表真值表（全部 revents 组合（**r4 第二趟 S2 界定 = 冻结掩码全集 {0x001,0x002,0x004,0x008,0x010,0x020} 的全部 64 个子集的十进制编码**——该穷举界定判定表行内匹配的组合域，另含纯未知位用例 `revents=64` → `other-revents` 不 fail；**r9 第五步 BL-3 混合位用例**：`revents=72`（未知位 64 + `POLLERR`）与 `revents=65`（未知位 64 + `POLLIN`）均须由未知位前置门定 `other-revents`、原值入档、不 fail、**不解锁路径①**）× elapsed 4500 边界 × drain 终态 × poll ret/errno 组合，见 D-W 节）；
