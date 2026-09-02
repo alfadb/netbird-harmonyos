@@ -442,6 +442,63 @@ r9 开工时对「先核实再动手」的纪律做了一次实际检验，结�
 - 未决义务台账：`docs/open-obligations-ledger.md`
 - 证据/门 schema：`docs/evidence-schema.md`
 
-## 八、硬边界状态（本轮未越界）
+## 九、第十轮审查（r9 版）——三席结果与去重登记
+
+被审对象：`docs/n1b-disc-gate-plan.md` @ commit `5dd5261`（状态 `criteria-r9-pending-independent-review`）。
+
+### 9.1 席位与投票
+
+| 席 | 模型 | 范围 | 结论 | 计数 |
+|---|---|---|---|---|
+| A | grok-4.6 | 全文，四层次 | fail | 2 B / 7 M / 5 m |
+| B | gpt-5.6-sol | 全文，四层次 + S2-S5 修复确认 | fail | 9 B / 4 M / 1 m |
+| C | deepseek-v4-pro | 收窄至四个新规则块 | **pass** | 0 B / 1 M |
+
+席 C 连续第二次在收窄范围后正常返回并给出高质量结果；其唯一 M（F1 索引漏限定）与席 A M-02、席 B B-01 **三席收敛到同一条**。
+
+**九项主会话裁量：席 A 全部维持（每项附验证内容）；席 B 维持 8 项、对 ② 提出落地层挑战（正文/闭集索引非单值、complete 登记载体不存在），不挑战方向。**
+
+### 9.2 两席全文席的互补盲区（重要观察）
+
+席 A 抓到的 pre-only 闭域缺口（其 B-01/B-02）席 B 没看到；席 B 抓到的字段域/载体/聚合缺口（其 B-03/B-04/B-07/B-08/B-09）席 A 没看到。**两席发现几乎不重叠。**再次印证第九轮结论：blocker 数量反映审查深度分布，不反映文档质量趋势。
+
+### 9.3 去重后 blocker 清单（全部经主会话逐条核实成立）
+
+1. **F1 闭集索引漏 `protocol != complete`**（三席收敛；`:814` vs `:801` 权威定义）。
+2. **pre-only 的 dw_\* 闭域缺口**（A B-01）：`unobservable(cause=post-destroy-unobservable)` 是 r5 时代旧 cause，仅 `:839` 一处，不在 r9 新闭的 15/7 值域 → E3 预期成功 destroy terminal 落 F8 烧 ID。R4 只修了 POST 在的 skip 编码，没修 POST 缺的。**complete 主线通、pre-only 断。**
+3. **V2 (1b) 只认一个 cause**（A B-02）：`:844` 只认 `cause=barrier-never-observed`，skip 表 destroy 行 `:683` 发的是 `cause=no-live-connection` → 「五 create 全拒 + 死于 POST 前」四支无落点 → F8。
+4. **revents marker 字段域与未知位门冲突**（B B-03）：`DW_RETURN` 字段域冻结 `0..63`（`:526`、`:601`），未知位门却要求 `revents=72` 这类合法平台观测可落盘不 fail——marker schema 禁止了门要求必须可记录的值。
+5. **D8b 窗口钟无 capture 载体**（B B-04）：`:463` 落盘清单与 `:581` 钟域门都引用 `window_start/end_monotonic`，但 `D8_STORM_BEGIN` 裸、`D8_STORM_END` 只带 5 字段——**没有任何 marker 承载这两枚钟**，合法完成 D8b 必然字段缺项 fail。
+6. **七分量非全函数**（B B-05 ⊇ A M-07）：`marker_tail_state` 对「POST 缺 ∧ 无死亡证据」（F9 路径）无值；`process_death_observed` 无 observed-false 完整分支；多处分量只写省略号 cause、无具名可校验字面。
+7. **五态表第五行无分量值**（B B-06）：`_C` 在 `_T` 缺 → F3 fail 但 `destroy_call_state` 无值，违反「七分量任何路径各自有值」；SKIP 与 `_T/_C` 同现的矛盾输入无域门。
+8. **fault 条目无聚合规则**（B B-07）：`:884` 契约逐条目解析，`fault_type_observed` 单值；同窗多条目（如 `APPFREEZE`+`CPPCRASH`）取哪个不定义 → verdict 非单值。
+9. **D7 早退矛盾不 fail**（B B-08）：伪码只在 `now >= deadline` 时退出，`D7_END.elapsed_ms < 20000` 是机械不可能的正向探针控制流缺陷（文档自认「合法值不可能 < 20000」），现仅记观察不 fail → 明确 fail-open。
+10. **`process_death_observed` 证据源缺陷**（B B-09 ⊇ A m-01）：`:905` 析取仍含「进程退出记录」而 `:853` 明文已删；faultlogger 条目证明冻结/崩溃事件、不单独证明进程终止。
+11. **#6 构造的签名值自相矛盾**（B B-02）：selftest ⑩ 写 `observed-false`、自陈 14(c) 写 `unobservable`。须按「输入分量任一不可求值 → 签名不可求值；全部可求值 → 按三支定真假」的真值表冻结（与 A M-06 同一修法），并修自陈示例值。
+12. **complete + 崩溃签名的登记载体不存在**（B M-04）：「在 POST 登记」——POST 冻结字段集无该字段、且崩溃常发生在 POST 之后。应登记入 runner evidence 记录。
+
+### 9.4 Major / minor（去重）
+
+- 门 3 仍写 A1-A8、A9 不进 freeze 清单（A M-04 = B M-01，两席收敛）。
+- P0 operator-ready 单调时刻被钟域门排除（B M-02）。
+- `T_tail` 标签「单个最长合法阶段的合法时长上界」错误——P2 的 create 盒是 60 s（B M-03）。
+- D6 节 U4 旧句「未执行 → observed-false」与 V2 冲突（A M-01）。
+- **F1 第 3 支结构性空集**（A M-03）：短时步集（P1 + D2 2.1-2.7）全在 P5T 之前——PRE 在则 `last_visible_site ≥ P5T` 永不在短时步集；PRE 缺则 F2 已 fail。第 3 支**不能独立改变任何 verdict**；selftest ⑩ Ⅲ「钉死第 3 支独立成立」做不到（它自承同时命中 F2）。**主会话裁定**：保留第 3 支作为**事实记录**（对 N1b 的诊断信息），但明文登记其 fail 效力恒与 F2 叠加、修 ⑩ Ⅲ 措辞——删除该支会丢失诊断事实而不改变任何 verdict。
+- 三支闭集缺「不可求值」操作化谓词（A M-06，与 9.3 #11 同修）。
+- 自陈 14(e) 称 `_C` 在 `_T` 缺规则不存在、五态第 5 行已落地之（A M-05）。
+- m：旧自陈裸拼法 2 处（A m-04 = B m-01）；「F1-F9」未排除 F7 的活规则措辞（A m-02）；F4/F8 论域重叠（A m-03）；「fail 只来自 PRE 缺失」过窄（A m-05）。
+
+### 9.5 席 B 对 S2-S5 的修复确认（r8 四条 blocker）
+
+- S5（skip POST 编码）：**已修**，三选一/15/7/全拒→pass 用例正文表格 selftest 同步。
+- S2（五态+三分带）：修得不完整——第五行无分量值、SKIP 同现未定义（见 9.3 #7）。
+- S3（未知位门）：修得不完整——marker 字段域未同步（见 9.3 #4）。
+- S4（单调钟域门）：修得不完整——D8b 载体缺失、P0 排除、自测覆盖不足（见 9.3 #5、B M-02）。
+
+### 9.6 席 A 的 16 点全函数性抽查确认（r9 主修法已落地）
+
+归因停机与窄 F1、未知位门、负钟 F8、三分带与判定表相容、S8 收紧、barrier SKIP、complete 路径 skip 编码、观测窗算术（467/525 独立复核成立，P10 的 8 s 不在 P8——**第三次独立确认第九轮 MA-2 无效**）——这些在活规则上落地。挡住冻结的是 pre-only 收口与新闭域/V2 的不同步。
+
+## 十、硬边界状态（本轮未越界）
 
 判据未冻结；未分配 AUTH/pair 与 evidence ID；未请求也未执行任何物理 campaign；未写 N1b r2（须依 DISC 实测事实冻结）。
