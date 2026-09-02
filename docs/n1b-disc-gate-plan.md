@@ -599,8 +599,8 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
 - **落盘字段族**：
   - `dw_waiter_spawned`（三态）、`dw_entry_confirmed`（三态，弱口径如上）、`dw_drain_reads/bytes/elapsed_ms/timeout/end/eintr_retries`、`dw_inwait_evidence_source`、`dw_inwait_confirmed`（三态）、`dw_inwait_samples`、`dw_poll_return_elapsed_ms`、`dw_poll_ret`、`dw_poll_errno`、
 `dw_poll_revents`（**十进制 bitmask**，编码逐字沿本节「`revents` 编码冻结（r4 第二趟 S2）」：数值以目标 sysroot 头文件为准、冻结掩码全集 {0x001, 0x002, 0x004, 0x008, 0x010, 0x020}，合法编码域 = 其全部子集的十进制值 0..63；未知位/超域值由未知位前置门（r9 第五步 BL-3 升格，见本节「`revents` 编码冻结」段）直接定类 `other-revents`、不进入表内匹配（原值十进制逐字入档），不 fail——与 `N1BDISC_DW_RETURN` marker 的 `revents=<十进制 bitmask 单值>` 同一编码）、
-  `dw_return_class`（判定表 13 类 + r9 第五步 BL-5 纳入的 skip 编码 2 值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)` = **15 值**；历史：r3 第一趟 D4 曾新增 `destroy-never-called`，r9 拆分为类 0 `destroy-skip-proven` + 类 0b `destroy-call-unobserved` 并废除该字面，原「上述 13 值」表述随编码纳入更正）、
-  `dw_join_result`（`joined` / `join-timeout` / `join-blocked-observed` / `ESRCH` / `other+errno` + r9 第五步 BL-5 纳入的 skip 编码 2 值 = **7 值**）、
+  `dw_return_class`（判定表 13 类 + r9 第五步 BL-5 纳入的 skip 编码 2 值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)` + r10 纳入的 pre-only 死亡收口编码 1 值 `unobservable(cause=post-destroy-unobservable)`（verdict 节 PRE/POST 求值规则 (2) r10 域同步条款）= **16 值**；历史：r3 第一趟 D4 曾新增 `destroy-never-called`，r9 拆分为类 0 `destroy-skip-proven` + 类 0b `destroy-call-unobserved` 并废除该字面，原「上述 13 值」表述随编码纳入更正）、
+  `dw_join_result`（`joined` / `join-timeout` / `join-blocked-observed` / `ESRCH` / `other+errno` + r9 第五步 BL-5 纳入的 skip 编码 2 值 + r10 纳入的 pre-only 死亡收口编码 1 值 `unobservable(cause=post-destroy-unobservable)` = **8 值**）、
   - `dw_watchdog_killed`（三态；**赋值规则逐字冻结（r3 第二趟 E11）**——语义方向与 D7 相反：D7 判「任务被杀」，本字段判「**waiter 被 watchdog 杀**」，故不得引用「同 D7」，独立三态如下——
     - `observed-true`：`N1BDISC_DW_SPAWN` marker 存在，**且** `N1BDISC_DW_EXIT` marker 缺失，**且** capture 三形态关联确认 `DW_SPAWN` 后 `:vpn` 行静默，**且** 存在独立死亡证据（**r4 第二趟 S8 收紧；r9 第五步再收紧（宁缺勿误）**：独立死亡证据 = 〔faultlogger 条目含 `APPFREEZE`（按 S1 归一化候选集判定）/watchdog 类签名〕——
       原第二支〔`PidOfVpn` absent——须满足证据规则 2 的 positive 基线前置——**且** `N1BDISC_DW_DESTROY_C` marker **缺失**〕**废除，不再单独构成正向证据**：按「`destroy_call_state` 五态表」，`_T` 在、`_C` 缺同样可能是「调用已进入平台层、进程在返回凭据前 terminal」的一次**成功 destroy terminal**，该组合把「调用中途死亡」与「waiter 被 watchdog 杀」混为一谈且二者在该观测下不可区分，落歧义处置（见下方 `unobservable` 条）：
@@ -610,9 +610,9 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
     - `unobservable(cause=marker-gap-indeterminate)`：`DW_EXIT` 缺失但 watchdog 归因不成立——含无任何独立死亡证据（禁止以 marker 缺失单独推断被杀，E3 0001 教训），`PidOfVpn` absent 但 `DW_DESTROY_C` 在且无 faultlogger watchdog 签名（死亡可由 destroy 解释），以及 **r9 第五步**：`PidOfVpn` absent（positive 基线前置满足）且 `DW_DESTROY_C` 缺（无论 `DW_DESTROY_T` 在否——五态下该组合可能是成功 destroy terminal、也可能是调用中途死亡，waiter 归因不可判，宁缺勿误，不赋 true/false）；
     - **skip 分支具名清单（S7：全部 skip 情形不得取 true/false）**：`unobservable(cause=no-live-fd)` / `unobservable(cause=dup-failed)` / `unobservable(cause=no-worker)`——对应 skip 分支（skip 表与 P10 行的 cause 字面）。
     无死亡证据时**默认取 `unobservable`，默认值不得为 observed-true**。本字段是路径①第 5 条件（`dw_watchdog_killed != observed-true`）的唯一定义来源，该条件据此可独立实现）、
-  - `dw_destroy_distinguishable_from_timeout`（派生三态：destroy 在 10 s 内 resolve **且** `dw_return_class=fd-event-like` → `observed-true`；destroy resolve 且 class=`timeout-like` → `observed-false`；其余 → `unobservable`，**逐字穷尽列举（与 `dw_return_class` 域闭合——判定表 13 类 + r9 第五步 BL-5 skip 编码 2 值，不留兜底桶）**：
+  - `dw_destroy_distinguishable_from_timeout`（派生三态：destroy 在 10 s 内 resolve **且** `dw_return_class=fd-event-like` → `observed-true`；destroy resolve 且 class=`timeout-like` → `observed-false`；其余 → `unobservable`，**逐字穷尽列举（与 `dw_return_class` 域闭合——判定表 13 类 + r9 第五步 BL-5 skip 编码 2 值 + r10 纳入的 pre-only 死亡收口编码 `unobservable(cause=post-destroy-unobservable)`，不留兜底桶）**：
 `data-ready-post-destroy` / `pre-destroy-ready` / `spurious-early` / `fd-invalid` / `interrupted` / `poll-error` / `late-fd-event` / `late-data` / `other-revents` / `destroy-skip-proven` / `destroy-call-unobserved`（固定 cause：`destroy-call-unobserved`——`_C` 缺、destroy 调用边界不可观测；r9 原固定 cause `destroy-never-called` 废除，缺 `_C` 不再等值「未调用」），
-      以及 destroy 超时或 reject 两种非 class 结局（合计 11 类 + 2 结局 + r9 第五步 BL-5 skip 编码 2 值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)`——skip 路径无 destroy 求值输入，cause 沿 skip 表位点字面，枚举闭合；`fd-event-like` 与 `timeout-like` 两类归入前三态，不在本桶）。
+      以及 destroy 超时或 reject 两种非 class 结局（合计 11 类 + 2 结局 + r9 第五步 BL-5 skip 编码 2 值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)` + r10 纳入的 `unobservable(cause=post-destroy-unobservable)`——skip 路径无 destroy 求值输入，cause 沿 skip 表位点字面；pre-only 死亡收口下本字段判定输入同样不可得（无 `DW_RETURN`/resolve 证据可据），cause 随 `dw_return_class` 的 r10 编码走，枚举闭合；`fd-event-like` 与 `timeout-like` 两类归入前三态，不在本桶）。
 **全部结局均为观察事实，不设 pass 条件**（决议 §三.3）。
 - **「destroy 关闭原始 fd 不得预设为必然唤醒 dup 副本上的 poll」**（决议 §三.4，`docs/native-nx-n1b-adjudication.md:84`）：唤醒与否即待发现事实，由 `dw_return_class` 承载；协议对两种结局对称收口。
 - **共用同一 destroy 事件**：全程恰一次 `destroy()`，即 P9 位点的那一次（D6 与 D-W 共用），不得二次 destroy；P9 之前（含 D2 迟到 fd 处置）禁止任何 `destroy()` 调用（决议 §三.3；C1 冻结；r9：skip 表 `dup-failed` 分支的 destroy 执行同为该 P9 位点这一次，经「共享 destroy 子协议」发出 `_T`/`_C`，「恰一次」按调用点计，不因分支复用变多）。
@@ -627,7 +627,7 @@ barrier-timeout → 不执行采集，`unobservable(cause=barrier-timeout)`。
 
   任一条件不成立 → 「waiter 可被 destroy 唤醒可测」的结论至多 `unobservable`，路径①不可解锁。
 `timeout-like` / `data-ready-post-destroy` / `pre-destroy-ready` / `spurious-early` / `fd-invalid` / `interrupted` / `poll-error` / `late-fd-event` / `late-data` / `other-revents` / `destroy-skip-proven` / `destroy-call-unobserved`（r9 拆分，原 `destroy-never-called` 废除）**一律不解锁路径①**，全部走路径②（义务不删除，按决议 §三.5-② 转移 N6/E7 并书面登记；
-r9 第五步：skip 编码两值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)` 同不解锁——skip 路径无 `N1BDISC_DW_RETURN` marker，条件 6 本不成立，无路径①/②判定面）。
+r9 第五步：skip 编码两值 `unobservable(cause=no-live-fd)`/`unobservable(cause=dup-failed)` 同不解锁——skip 路径无 `N1BDISC_DW_RETURN` marker，条件 6 本不成立，无路径①/②判定面；r10：pre-only 死亡收口编码 `unobservable(cause=post-destroy-unobservable)` 同不解锁——该值仅当判定输入不可得时登记，`DW_RETURN` marker 不在（条件 6 不成立）、`fd-event-like`（条件 2）不可得，无路径①/②判定面）。
 **弱 barrier（`dw_entry_confirmed`）单独永远不构成路径①资格。**`dw_destroy_distinguishable_from_timeout` 与条件 2 同源（同以 `dw_return_class` 为判定输入），仅作 OB-03 台账登记用派生观察字段，不替代上述资格判定。
 - **决议约束正面登记（非自陈，供记录级审查与后续 T0 处置）**：决议 §三.3 要求 worker「于 destroy 之前经预注册 barrier/marker **确认进入**对 dup 副本的有界等待」（`docs/native-nx-n1b-adjudication.md:83`），§三.5 路径①资格条件同为「**可确认进入等待**」（`:86`）——但决议**未论证该确认在用户态是否可达**。
 本 campaign 的 in-wait 证据候选（`/proc` 同进程自省）正是该可达性的实测载体；若实测 `dw_inwait_evidence_source=unreadable`（或 barrier-timeout）且无其他用户态手段，则**路径① 在本元组结构上不可达**，OB-03 只能走路径②。该约束来自决议对「确认进入等待」的要求本身，**不是本 campaign 的实现选择**；
@@ -836,12 +836,17 @@ fd ledger 缺失或与 marker 流矛盾；
 - **PRE/POST 求值规则（逐字冻结，r4 第一趟 R1；字段缺项即 `fail`，沿 MJ-7）**：`protocol` 由双 marker 存在性唯一确定——
   (1) **`PRE` 存在 + `POST` 存在 → `protocol=complete`**：正常终态，P1-P12 全序（含 P5T）校验通过后全部事实入账。
   (2) **`PRE` 存在 + `POST` 缺失 → `protocol=pre-only`**：**合法终态，不是完整性失败**（适用前提：host finally 死亡证据采集确认 `:vpn` 进程消失或平台终止——PRE 在而 POST 缺且无死亡证据属探针存活未完成，走 `fail`，见「runner 观测窗」到点收口规则）
-——PRE 已承载的事实照常入账求值；D6 全部子项与 D-W 结局字段记 `unobservable(cause=post-destroy-unobservable)`；
+——PRE 已承载的事实照常入账求值；
+**`dw_*` 结局字段按已有 marker 真实求值（r10：删除原 blanket 赋值句「D6 全部子项与 D-W 结局字段记 `unobservable(cause=post-destroy-unobservable)`」——它把 D-W 已真实跑完、marker 已在的字段也一律盖成 unobservable，且该 cause 原不在 `dw_return_class`/`dw_join_result` 闭域内（r9 第五步只把 POST 在场的 skip 编码折入），属域外值 → 判别方法 (4) → F8）**；
+poll 已返回、drain 已跑的子项，`dw_return_class` 照 D-W 节 13 类判定表对真实输入求值（E3 预期成功终态里 D-W 是完整跑完的，marker 全在，真实数据不得被 blanket 盖掉）；仅当某字段的判定输入确实不可得（如 worker 未及 poll 即死、无输入 marker 可据）才记 `unobservable(cause=post-destroy-unobservable)`；
+**域同步（r10）**：`unobservable(cause=post-destroy-unobservable)` 自本趟起逐字纳入 `dw_return_class`（判定表 13 类 + 3 编码 = **16 值**）与 `dw_join_result`（5 值 + 3 编码 = **8 值**）取值域，计数同步见 D-W 节落盘字段族、`dw_destroy_distinguishable_from_timeout` 闭合句与路径①不解锁括注；
+**管辖边界（r10）**：本句只管辖 `dw_*` 结局字段；`u4_*` 七子项不受此句管辖，一律按下方 V2 四支分岔求值（原句「D6 全部子项」字样与 V2「死亡之前已发出 result marker 的子项保持其记录值」冲突，以 V2 为准，随本条删除）。
 **`u4_*` 七子项赋值（r5 U6 重写：保留已得结果，不整体抹为 false）**——按死亡位点与 marker 证据逐子项判定：
 - **死亡之前已发出 result marker 的子项保持其记录值**（如进程死于 D6b 中途时，D6a 的真实正结果不得被覆盖）；
 - **死亡之后未执行的子项按 destroy 调用状态分岔（r6 V2 三支；r9 对齐 `destroy_call_state` 五态改四支——「`_T` 在、`_C` 缺」自「destroy 从未发起」支拆出单列：该观测是歧义，不是「未调用」；r7 X4 锚点升级为 `DW_DESTROY_C` 的登记不变；r9 第五步第一支再按 SKIP 显式性分 1a/1b 两小支，分支计数仍为四支）**：
   - **`DW_DESTROY_T` 缺 + `DW_DESTROY_C` 缺**——r9 第五步按 SKIP 显式性分两小支（原两例同记 `not-reached`）：(1a) 无 `N1BDISC_SKIP|item=destroy`（五态 `not-reached`，如死于 D7）→ 未执行子项保持 **`unobservable(cause=destroy-not-reached)`**；
-(1b) 协议显式发出 `N1BDISC_SKIP|item=destroy|cause=barrier-never-observed`（barrier-never-observed 顺延路径，五态 `not-called`，见 D-W 节 destroy 位次硬规则）→ 未执行子项记 **`unobservable(cause=destroy-not-called)`**——两小支均**不得赋 `observed-false`**（r9：原该支 cause `destroy-never-called` 随五态废除——marker 缺失不得推断「未调用」；「destroy 后不可观察」对该路径是假负值；U4 是 OB-04 判定输入，宁缺勿误）；
+(1b) 协议已显式发出**任一** `N1BDISC_SKIP|item=destroy`——cause 无封闭枚举域、按位点字面原样登记，已预注册的有 `no-live-connection`（skip 表 destroy 行，D-W 整体被 skip 的分支）与 `barrier-never-observed`（D-W 节 destroy 位次硬规则顺延路径）两个——（五态 `not-called`）→ 未执行子项记 **`unobservable(cause=destroy-not-called)`**——两小支均**不得赋 `observed-false`**（r9：原该支 cause `destroy-never-called` 随五态废除——marker 缺失不得推断「未调用」；「destroy 后不可观察」对该路径是假负值；U4 是 OB-04 判定输入，宁缺勿误）；
+**r10 扩域注**：(1b) 原字面仅认 `cause=barrier-never-observed`，使「五 create 全拒 + 死于 POST 前」路径发出的 `N1BDISC_SKIP|item=destroy|cause=no-live-connection`（skip 表 destroy 行）无落点——该路径五态为 `not-called`、若落 (1a) 即与五态表矛盾；扩为任一 SKIP 后两 cause 同归 `destroy-not-called`，验收用例见 gate 10 ⑨ r10 用例 A。
   - **`DW_DESTROY_T` 在 + `DW_DESTROY_C` 缺**（五态 `unobservable(cause=call-boundary-incomplete)`——既可能尚未调用，也可能已进入调用但未返回，后者是一次成功的 destroy terminal）→ 未执行子项记 **`unobservable(cause=call-boundary-incomplete)`**，**不得赋 `observed-false`、不得写「destroy 从未发起」**（r9：原 r8 Y1 反例按 `destroy-never-called` 收口，结论随五态改正）；
   - **`DW_DESTROY_C` 已发出且 destroy 已 resolve**（有 resolve/D6a 证据；五态方向 `call-returned`）→ 未执行子项赋 `observed-false`（destroy 后进程不可继续执行，法理成立，同 r4 R1）；
   - **`DW_DESTROY_C` 已发出但无 resolve 证据**（已调用未返回：marker 发出后、destroy 时间盒内进程即死）→ 未执行子项记 **`unobservable(cause=destroy-unresolved)`**（r7 X4 第三支，grok 补充：destroy 是否已实际生效不可判，不得赋假负值）；
@@ -1060,13 +1065,17 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 ⑧ fake-HDC 沙箱；
 
 ⑨ PRE/POST 通道用例（r4 R1：PRE 在+POST 在 → `complete`；PRE 在+POST 缺 → `pre-only` 且 `u4_*` 按 r5 U6 + r7 X3/X4 分岔（锚点 = `DW_DESTROY_C`；r9 对齐 `destroy_call_state` 五态改四支，并补时序三分带用例））：
-  - `DW_DESTROY_T` 缺 + `DW_DESTROY_C` 缺（五态 `not-reached`）→ 死亡后未执行子项 `unobservable(cause=destroy-not-reached)`（不得假负值；r9：原「`DW_DESTROY_C` 缺 → `unobservable(destroy-never-called)`」随五态废除——marker 缺失不再等值「未调用」）；
+  - `DW_DESTROY_T` 缺 + `DW_DESTROY_C` 缺 **且无任何 `N1BDISC_SKIP|item=destroy`**（r10 补前提——已发出任一 SKIP 时五态为 `not-called`、落 (1b)，不得用本行）→ 死亡后未执行子项 `unobservable(cause=destroy-not-reached)`（五态 `not-reached`；不得假负值；r9：原「`DW_DESTROY_C` 缺 → `unobservable(destroy-never-called)`」随五态废除——marker 缺失不再等值「未调用」）；
   - r8 Y1 反例（r9 结论改正）：`DW_DESTROY_T` 在而 `DW_DESTROY_C` 缺 → 五态 `unobservable(cause=call-boundary-incomplete)`，未执行子项同 cause——既可能尚未调用、也可能已进入调用未返回；`_T` 只证「即将调用」，但 `_C` 缺也**不得**反推「调用未发起」（原 `destroy-never-called` 结论废除）；
   - 时序三分带用例（r9；`DW_DESTROY_T`/`DW_DESTROY_C` 均在，比较按「worker 返回时序三分带」）：`at_mono_ms` < `T_mono_ms` → `definitely-pre-invocation` 一例；`at_mono_ms` > `C_mono_ms` → `definitely-post-invocation` 一例（路径①条件 3 唯一接受的带）；`T_mono_ms` ≤ `at_mono_ms` ≤ `C_mono_ms`（含 `at == T`、`at == C` 等值构造——毫秒等值不能证先后）→ `unobservable(cause=invocation-window-ambiguous)` 一例，不解锁路径①条件 3、不归因；
   - `DW_DESTROY_C` 在而 `DW_DESTROY_T` 缺 → marker 顺序/完整性错误 → **fail（F3）**（五态第 5 行；完整性轴，非死亡事实轴）；
   - skip 显式证明：`N1BDISC_SKIP|item=destroy` 显式发出（no-live-fd 分支与 r9 第五步 barrier-never-observed 顺延路径）→ `destroy_call_state=not-called`（唯一可证「未调用」的途径）；
   - **r9 第五步 BL-5 验收用例**：五个 create 全部被平台拒绝 → `no-live-fd` 分支 → POST 照发——`d6_items` D6S1..S7 逐子项 `skipped(cause=no-live-fd)`、`dw_return_class=unobservable(cause=no-live-fd)`、`dw_join_result=unobservable(cause=no-live-fd)`、`dw_*` 终态字段沿具名 skip 清单落值、无字段缺项 → verdict **`pass`**（合法平台负面结果不得因 POST 无 skip 编码而 fail）；
   - **r9 第五步 barrier-never-observed 用例**：该顺延路径补发 `N1BDISC_SKIP|item=destroy|cause=barrier-never-observed` → 五态 `not-called`、死亡后未执行子项 `unobservable(cause=destroy-not-called)`（「未调用」在全文的唯一证明途径 = 显式 SKIP；本路径旧记 `not-reached` 的表述废除）；
+  - **r10 用例 A（五 create 全拒 + 死于 POST 前——V2 (1b) 扩域验收）**：五个 create 全部被平台拒绝 → `no-live-fd` 分支 → 按实际协议位点依次发出 `N1BDISC_SKIP|item=destroy|cause=no-live-connection`（destroy 位点）与 `N1BDISC_SKIP|item=D-W|cause=no-live-fd`（P10 位点——该路径 D-W 整体被 skip，此 SKIP 同在，用例按实际流构造）后、`N1BDISC_POST` 发出前进程死亡；
+`protocol=pre-only`、`destroy_call_state=not-called`、死亡后未执行子项 `unobservable(cause=destroy-not-called)`（V2 (1b) 任一 SKIP 支）、`dw_return_class=unobservable(cause=no-live-fd)`、`dw_join_result=unobservable(cause=no-live-fd)`（`dw_*` 按 skip 编码真实落值，`SKIP|item=D-W` 即其输入证据）→ 无域外值、无字段缺项 → verdict **`pass`**（合法平台负面结果的 pre-only 形态；r10 前 (1b) 仅认 `barrier-never-observed`，本构造无落点 → F8）；
+  - **r10 用例 B（E3 成功终态回归——pre-only `dw_*` 真实求值，blanket 删除验收）**：`N1BDISC_PRE` 在、`DW_DESTROY_T`/`DW_DESTROY_C` 在（destroy 经共享子协议发起）、D-W 于死亡前完整跑完（`DW_RETURN`/`DW_DRAIN`/`DW_EXIT` 在）、进程 terminal（独立死亡证据在）、无 `N1BDISC_POST`、无崩溃签名 → `protocol=pre-only`；
+`dw_return_class` 照 13 类判定表对真实输入求值（如 `fd-event-like`/`timeout-like`——**不是** `unobservable`）、`dw_join_result` 按 marker 真实求值（P10 未及执行而无 join marker 时记 `unobservable(cause=post-destroy-unobservable)`，同属域内值）、死亡后未执行子项按 V2 四支分岔 → F1-F9 均不命中、无字段缺项 → verdict **`pass`**（r10 前本构造被原 blanket 句整盖为域外值 `unobservable(cause=post-destroy-unobservable)` → 判别方法 (4) → F8 烧 ID）；
   - `DW_DESTROY_C` 在且 destroy 已 resolve → 死亡后未执行子项逐项 `observed-false`（含「进程死于 D6b 中途、D6a 正结果不被覆盖」用例）；
   - `DW_DESTROY_C` 在但无 resolve 证据 → `unobservable(cause=destroy-unresolved)`（r7 X3/X9 补分岔用例）；
   - 死亡前已有 result marker 的子项保持记录值；无死亡证据不进入 pre-only 的反用例；
