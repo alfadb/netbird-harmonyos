@@ -402,7 +402,11 @@ r9 开工时对「先核实再动手」的纪律做了一次实际检验，结�
 
 **核实者扩大的范围（席 B 未提）**：`at_mono_ms`、`DW_DESTROY_T`/`_C` 的 `mono_ms`、drain 的 `elapsed_ms`——**同类缺口普遍存在**，全都没有绝对域检查。故 r9 的修法应是**对全部单调钟字段统一冻结非负性与必要顺序约束**，不是只补 `elapsed_ms` 一处。
 
-**BL-5（skip 路径 POST 字段域）成立，且核实者已穷尽搜索过出口。** `dw_return_class` 域 = 判定表 12 值、`dw_join_result` 域 = 5 值（`joined`/`join-timeout`/`join-blocked-observed`/`ESRCH`/`other+errno`），**均无 `unobservable`**；skip 表 D-W/P10 行明文「`dw_*` 全 `unobservable(no-live-fd)`」/「`dw_* = unobservable(dup-failed)`」；全 rejected 终局走 `no-live-fd` 分支且主线「→ P11 → P12」**POST 照发**。POST 字段集逐字冻结且「缺任一冻结字段 → fail（沿 MJ-7）」，`d6_items` 要求「`D6S1..S7` 七子项逐字 ret/errno/reuse 结果全列」、**无 skip 编码**（`D6S5` 占位明写「不得空置」）。
+**BL-5（skip 路径 POST 字段域）成立，且核实者已穷尽搜索过出口。**
+- `dw_return_class` 域 = 判定表 12 值；`dw_join_result` 域 = 5 值（`joined`/`join-timeout`/`join-blocked-observed`/`ESRCH`/`other+errno`）。**两者域内均无 `unobservable`。**
+- skip 表 D-W/P10 行却明文规定「`dw_*` 全 `unobservable(no-live-fd)`」/「`dw_* = unobservable(dup-failed)`」。
+- 全 rejected 终局走 `no-live-fd` 分支，主线仍「→ P11 → P12」，**POST 照发**。
+- POST 字段集逐字冻结且「缺任一冻结字段 → fail（沿 MJ-7）」；`d6_items` 要求「`D6S1..S7` 七子项逐字 ret/errno/reuse 结果全列」、**无 skip 编码**（`D6S5` 占位明写「不得空置」）。
 
 **对比发现（核实者补充）**：PRE 有 `skip_summary` 字段，**POST 无对应物**——这是结构性不对称，正是缺口来源。
 
