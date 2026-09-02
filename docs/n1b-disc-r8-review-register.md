@@ -499,6 +499,49 @@ r9 开工时对「先核实再动手」的纪律做了一次实际检验，结�
 
 归因停机与窄 F1、未知位门、负钟 F8、三分带与判定表相容、S8 收紧、barrier SKIP、complete 路径 skip 编码、观测窗算术（467/525 独立复核成立，P10 的 8 s 不在 P8——**第三次独立确认第九轮 MA-2 无效**）——这些在活规则上落地。挡住冻结的是 pre-only 收口与新闭域/V2 的不同步。
 
+## 九之二、第十一轮审查（r10 版）——结果与去重登记
+
+被审对象：`docs/n1b-disc-gate-plan.md` @ commit `da20408`（状态 `criteria-r10-pending-independent-review`）。
+
+### 席位与投票
+
+| 席 | 模型 | 范围 | 结论 | 计数 |
+|---|---|---|---|---|
+| A | grok-4.6 | 全文四层次 | fail | 3 B / 6 M / 3 m |
+| B | gpt-5.6-sol | 全文四层次 | fail（终稿待收，中间报告已确认 1 B） | 待计 |
+| C | deepseek-v4-pro | 收窄两块 | **两次无消息失败，attempt-not-counted**（该席累计第七次失败） |
+
+**主会话在派出审查的同时自查立案两条**（详见下），其中第 1 条与席 A B-01、席 B 中间报告**三路收敛**。
+
+### 席 A 对上轮 12 条 blocker 的修复落地核对
+
+10 条已修；1 条「完成态已修、中途死未赋值」（blocker 5 → 其 M-02）；1 条「方向已修、selftest 未同步」（blocker 6 关联 → 其 B-02）。观测窗算术第四次独立复核（467/525、P10 的 8 s 不在 P8）。
+
+### 去重 blocker（全部经主会话逐条核实成立）
+
+1. **真值表行 2/行 5 冲突——正向签名被旁路 unobservable 稀释**（主会话自查 + 席 A B-01 + 席 B 中间报告，三路收敛；B 级）。
+   行 2「任一输入分量 unobservable → 签名 unobservable」先于行 5「任一支命中 → observed-true」求值。席 A 构造 C2 最狠：**单条目**（`Fault_Type=CPPCRASH` 可解析 + `Signal` 字段不可解析）即触发——支 1 字面已成立、签名却被洗成 unobservable → F1 不命中 → pre-only **pass**。探针崩溃 fail-open。
+   席 A 另指出「不可解析」双口径：证据规则 5/混合支/⑥(d) 说「unobservable 不 fail」、判别方法 (2) 说「解析失败 F8 fail」——两条读法下 ⑥(d) 的「不 fail」期望都错，verdict 非单值。
+   **修法（主会话已裁）**：改按支求值——支 1 只看 `fault_type`、支 2 只看 `signal`、支 3 看 `fault_type ∧ last_visible_site ∧ 无矛盾`；**任一支所需输入齐备且命中 → observed-true（行 5 先于「不可求值」）**；「不可求值 → unobservable」仅当无一支可判 true 且至少一支之必要输入 unobservable；行 1（FaultRecv 整体失败）仍最先。双口径单值化：判别方法 (2) 豁免 Fault_Type/Signal 字段（F8 面限时间戳等其余字段）或一律 F8——取豁免路线（§4.2 不可解析词根本身是未实测平台产物，fail 违反发现语义），写明豁免边界。
+2. **selftest ⑩ 守卫反例断言与 F2/F3 冲突**（席 B 中间报告 + 席 A B-02，两路收敛；B 级）。
+   「第 3 支守卫反例：marker 序列自相矛盾 → 第 3 支不成立 → observed-false → **不 fail**」——但短时步位点多半在 P5T 前（PRE 未发 → F2）且「marker 矛盾」本身独立命中 F3。正文规则 vs 用例断言非单值。
+   **修法（主会话已裁）**：与 Ⅲ 同构——`observed-false` 为事实记录验证，verdict 由 F2/F3 承载（矛盾时叠加 F3），删「不 fail」。
+3. **死亡证据 (b) 支与「仍存活 → F9」非单值**（席 A B-03；B 级；对主会话 r10 裁量④的正向挑战）。
+   (b) 做成不经 PidOfVpn 的独立充分条件后：PRE 在、pidof 仍非空、同窗有本 bundle SIGKILL 条目（FaultProbe glob `*cn.alfadb.netbird.n1bdisc*` 不绑 `:vpn`，UI 进程同 bundle）→ `:858`「或平台终止」读 pre-only pass vs 观测窗到点「仍存活」读 F9 fail，两读都可达。
+   **修法（主会话已裁）**：(b) 降为辅助——SIGKILL/SIGTERM 条目**不得在 pidof 非空时单独证死亡**；死亡证据以 `process_death_observed` 为唯一谓词源，`:858` 的「或平台终止」改为引用该分量而非自立谓词；`:768`「仍存活」谓词同步挂到该分量。glob 收窄到 `:vpn` 或条目绑 pid 属探针实现细节，登记为设计注记不强制。
+
+### 席 A 的 M 级（待席 B 终稿合并去重后一并排 r11）
+
+M-01 聚合序未定义（= 主会话自查立案 2，两路收敛；修法：FaultRecv 取回序 + 文件名字典序 tie-break）；M-02 D8b 中途死亡 `we` 无载体（BEGIN 在 END 缺 → `unobservable(cause=post-destroy-unobservable)` 或具名 cause，selftest「缺项 fail」限定为 END 在而 we 空）；M-03 混合支把可解析 SIGKILL/SIGTERM 也稀释掉（signal 分量「可解析平台终止段」优先于混合 unobservable）；M-04 行 2 多 cause 并存无唯一解（冻结合取序）；M-05 D2/D6 默认支省略号 cause 残留；M-06 POST 节 skip 编码计数未同步 16/8。
+
+### 席 A 对八项裁量的裁决
+
+维持 ①③⑤⑧；挑战 ②（D8b 半状态无收口→M-02）、④（B-03）、⑦（「挂 unobservable 不挂 false」在 F1 上没收到任何东西——unobservable 与 false 同为不命中，只改诊断标签；真问题是行 2 的 OR 拦截）；⑥ 方向维持、落地层挑战（B-02）。r9 九项裁量无改判。
+
+### 对席 C（deepseek）失败的处置记录
+
+r11 两派均无消息失败（第六、七次）。收窄策略在该席上的成功率不稳定（r9 一成一败、r10 成、r11 两败）。本轮记 attempt-not-counted；席 A 的四层次全文审查已覆盖其收窄范围（真值表、聚合规则均在席 A 的 B-01 内详查），覆盖不受影响。
+
 ## 十、硬边界状态（本轮未越界）
 
 判据未冻结；未分配 AUTH/pair 与 evidence ID；未请求也未执行任何物理 campaign；未写 N1b r2（须依 DISC 实测事实冻结）。
