@@ -1,8 +1,8 @@
 # N1BDISC r9 —— 死亡事实记录规范（归因停机后的替代设计）
 
-最后核验：2026-09-01 ｜ 状态：`spec-draft-for-r9-integration`
+最后核验：2026-09-02 ｜ 状态：`spec-archived-superseded-by-criteria-text`
 
-本文是 r9 结构性改造的**规范输入**，不是判据本体。整合进 `docs/n1b-disc-gate-plan.md` 后，本文保留作为设计依据与裁量登记。
+本文是 r9 结构性改造的**规范输入**，不是判据本体。r10 第十轮审查后判据正文已多处超出本规范（七分量真值表、多条目聚合、五态分量值补全等）——**凡本规范与 `docs/n1b-disc-gate-plan.md` 冲突处，一律以判据正文为准**；本规范保留作为设计依据与裁量登记的历史记录。
 
 依据：`docs/n1b-disc-r8-review-register.md` 第六之三/六之五节记载的 **T0 裁决 3/3 一致**（席 A grok-4.6、席 B gpt-5.6-sol、席 C deepseek-v4-pro）。裁决要点：停止用死因归因驱动 `verdict`；改为证据向量三态记录 + 窄正向崩溃签名 fail；行 5/6/7 的 fail 映射一并废除；**不需要新 T0 决议**（本改动是判据向决议 §4.2 收敛）。
 
@@ -103,7 +103,7 @@ marker 只能在调用**前后**发射，**不可能在调用瞬间发射**。`_
 | `_T` 缺、`_C` 缺 | 按此前协议位点定 `not-reached`；**不得仅凭 marker 缺失推断未调用** |
 | `_T` 在、`_C` 缺 | `unobservable(cause=call-boundary-incomplete)` —— 既可能尚未调用，也可能**已进入调用但未返回**。**不得写 `never-called`** |
 | `_T` 在、`_C` 在 | `call-returned` —— 只能证明**调用表达式已返回完成凭据**，**不能**证明平台效果已发生 |
-| `_C` 在、`_T` 缺 | marker 顺序/完整性错误 → **fail（F3）**。这是完整性轴，不是死因轴 |
+| `_C` 在、`_T` 缺 | marker 顺序/完整性错误 → **fail（F3）**。这是完整性轴，不是死因轴（**r10 同步注：本规范落地时判据正文为该行补了分量值 `unobservable(cause=marker-contradiction)`**——verdict 仍由 F3 fail，但七分量的全函数义务要求分量本身有值；两轴独立，判据正文为准） |
 
 **明确废除**：原「`_T` 在而 `_C` 缺 → `destroy-never-called`」判定。它会把「调用已进入平台层但进程在返回前 terminal」这一**成功终态**误判为未调用，进而经原行 6 烧掉 ID。
 
