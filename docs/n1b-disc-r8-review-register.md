@@ -584,3 +584,28 @@ r11 两派均无消息失败（第六、七次）。收窄策略在该席上的�
 ## 十、硬边界状态（本轮未越界）
 
 判据未冻结；未分配 AUTH/pair 与 evidence ID；未请求也未执行任何物理 campaign；未写 N1b r2（须依 DISC 实测事实冻结）。
+
+## 九之三、第十三轮审查（r12 版）——结果与登记
+
+被审对象：`docs/n1b-disc-gate-plan.md` @ commit `da20408` 后（r12 五包 + 深索 M 采纳，至 `8e69ad3`）。
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| C deepseek-v4-pro（收窄：U1 两步求值，27 格机械枚举） | **pass** | 0 B / 2 M（已采纳修正 `8e69ad3`） |
+| A grok-4.6（全文四层次） | fail | 1 B / 3 M / 3 m |
+| B gpt-5.6-sol（全文四层次） | fail（终稿待收） | 已确认 ≥3 B |
+
+**收敛是真实的**：grok 上轮 3B / sol 上轮 7B 的修复核对全部确认已修；grok 本轮仅 1 B（u7 窄窗——主会话裁量⑤留给挑战、被证实）；sol 与 grok 在 u7 窄窗独立收敛。deepseek 席第三次收窄尝试成功（27 格组合表形态），其 pass 票覆盖 r12 最复杂新规则（U1 两步求值）的全函数验证。
+
+### 已核实的 blocker（终稿后补全去重）
+
+1. **u7 的 P5T–P6 窄窗**（两席收敛；grok B-01 = sol B1）：PRE 已发、D7_BEGIN 未发的合法平台死亡——u7 两支前件均假（END 支要求 BEGIN 后静默、marker-gap 支要求无死亡证据、V4 要求位点 P6 而实为 P5T）→ 无落点 → F4 烧掉冻结解释句明文保护的平台终态。与 r12 已收口的 D8b 阶段未达同构。修法（两席同向）：u7 加 `unobservable(cause=stage-not-reached)` 支（死亡分量 true ∧ D7_BEGIN 缺 ∧ 位点 ≤ P5T），覆盖 u7 全部派生字段，selftest 补正例。
+2. **`dw_watchdog_killed` true/unobservable 重叠**（grok M-02 升格评估中 + sol B2）：物理上最真的「waiter 在 poll 中被杀」（SPAWN 在、EXIT 缺、`_T`/`_C` 均缺）同时命中 true 支四合取与「`_C` 缺无论 `_T` 在否不得 true/false」支。修法（grok）：废除「`_C` 缺一律不得 true」——`_T`/`_C` 均缺 + 四合取齐 = 允许 true；`_C` 在 + pidof absent 仍不得 true（destroy terminal）；⑪ 正例写明双缺。
+3. **`dw_destroy_distinguishable` 17+2 正交相加**（sol B3）：17 个 class 值与 destroy 超时/reject 2 结局是正交输入却按互斥枚举相加——「class 有值 + destroy 未 resolve」组合落两行。修法（主会话）：改为求值序声明——先判 class 是否命中 fd-event-like/timeout-like 两判定行；「其余」内部再按 destroy resolve 与否分流（2 结局是「其余」的内部分流、非平级枚举）。
+
+### grok 的 M/m（待 sol 终稿合并）
+
+M-01 混合支未写明先于 APPFREEZE（⑥(d) 依赖）；M-03 `process_death_observed` false 支残留「且无任何上述死亡证据」（UI-SIGTERM + pidof 非空时三态无值——修法：删该合取）；m-01 登记块「16+2」过期（应 17+2）；m-02 追溯标签 P3/P4 打架；m-03 u6/D6 省略号 cause（裁量⑥族，维持不修）。
+
+### 裁量裁决（grok）：①②③④⑥⑦ 维持；⑤ 挑战成立（= B-01）。
+
