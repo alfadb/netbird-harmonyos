@@ -495,13 +495,14 @@ loop {                                   // 外层块：每块恰一次 clock_ge
 
 | `elapsed_ms` 区间 | 判定 |
 | --- | --- |
-| `[0, 20000)` | 探针提前结束（循环在首次读到 ≥ deadline 时才 break，合法值不可能 < 20000）→ `d7_anomaly=early-exit-with-end-marker`（探针异常观察，逐字登记异常事实；r9：不再按任何死因分类收口——本段除非死亡证据独立命中 F1 三支闭集，否则无任何 fail 路径），`u7=unobservable(cause=d7-early-exit-anomaly)` |
+| `[0, 20000)` | **矛盾输入 → fail（F8）**（r10，B B-08）：`D7_END` 在而 `elapsed_ms` 与伪码出口条件机械矛盾——循环只在首次读到 ≥ deadline 时才 break，合法值不可能 < 20000，属正向探针控制流缺陷（与负 elapsed 同类，沿单调钟域门「记录器未尽职，不是死因」口径）→ **fail（F8）+ 原值逐字入档**；`d7_anomaly=early-exit-with-end-marker` 字面保留为登记标签、**该标签同时驱动 F8**，`u7=unobservable(cause=d7-early-exit-anomaly)` |
 | `[20000, 25000]` | 合法取值域（`[20000, 20000+外层块时长)`，外层块时长 ≪ 5 s 宽限）→ `observed-true` 方向（任务存活跑完） |
 | `> 25000` | **具名三态观察，不得判 fail**（超出 5 s 宽限的部分可由平台调度延迟造成，属平台事实而非探针缺陷）：逐字登记 elapsed/iters 原文，`u7=unobservable(cause=d7-elapsed-overshoot-beyond-grace)`，登记 `d7_anomaly=elapsed-overshoot-observed`（观察项） |
 
 边界归属（消除旧文「`>= 20000` 判 true 与「超过 25000」探针异常在 `>= 25000` 处双命中」的叠域）：`25000` 恰值归 `[20000, 25000]` 区间。**平台调度延迟造成的边界值不得触发 fail**；本表只管辖 D7_END 存在（任务收口）路径，D7 期间进程死亡按「死亡事实记录（证据向量）」节七分量逐项登记（其 D7 位点约束见该节，不受本表改写；r9：原「走死因分类」随死因表删除改写——不合成归因、不驱动 fail，除非死亡证据独立命中 F1 三支闭集）。
 `u7_long_task_watchdog_behavior` 三态赋值规则（与上表互斥区间逐字同源）：`D7_END` 存在**且** `elapsed_ms ∈ [20000, 25000]` → `observed-true`（任务存活跑完；同时登记 elapsed/iters）；
-`D7_END` 存在但 `elapsed_ms < 20000` → **不得判 `observed-true`**——任务提前退出而 marker 在，属探针异常：逐字登记异常事实（`d7_anomaly=early-exit-with-end-marker` + elapsed/iters 原文；r9：不再按死因分类收口——除非死亡证据独立命中 F1 三支闭集（见「死亡事实记录（证据向量）」节），否则本段无 fail 路径），`u7` 记 `unobservable(cause=d7-early-exit-anomaly)`；
+`D7_END` 存在但 `elapsed_ms < 20000` → **不得判 `observed-true`，且矛盾输入 fail（F8）**（r10，B B-08）——marker 在而 `elapsed_ms` 与伪码出口条件（只在首次读到 ≥ deadline 才 break）机械矛盾，属正向探针控制流缺陷、与负 elapsed 同类（r9「仅记观察不 fail」使该缺陷 fail-open，随本条收口；措辞沿单调钟域门「记录器未尽职，不是死因」口径）：elapsed/iters 原值逐字入档，`d7_anomaly=early-exit-with-end-marker` 标签同时驱动 F8，`u7` 记 `unobservable(cause=d7-early-exit-anomaly)`；
+（r10 与其他门的关系：若同时 `elapsed_ms < 0`，单调钟域门（非负性）先命中——两门同挂 F8、同 verdict，不冲突；本条只针对 `0 ≤ elapsed_ms < 20000` 区间）；
 `D7_END` 存在但 `elapsed_ms > 25000` → 按上表第三行：`unobservable(cause=d7-elapsed-overshoot-beyond-grace)`，不判 fail；`D7_END` 缺失 **且**（capture 流确认 `D7_BEGIN` 后 `:vpn` 三形态行静默（至死亡位点或观测窗尾，以先到者为准）**且** 存在进程死亡证据）→ `observed-false`（任务被杀；死亡证据口径 r10 收窄，见下句注）；
 （r10：原「faultlogger 条目或进程退出记录」析取废除——「进程退出记录」为幽灵引用（r3 第三趟 B1 的 `exit-record` 已删），死亡证据口径随「死亡事实记录（证据向量）」节 `process_death_observed` 证据源闭集：`PidOfVpn` positive 基线转 absent + capture 静默，或携 `Signal` ∈ {`SIGKILL`, `SIGTERM`} 的终止条目；事件类条目不证明进程消失）；
 仅有 marker 缺失而无死亡证据 → `unobservable(cause=marker-gap-indeterminate)`。**禁止以 marker 缺失单独推断被杀**（E3 0001 误判教训，`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:163`）。
@@ -900,6 +901,11 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
       **其余**（含空值/未知信号名）：记原文逐字入档、不命中任何签名段）；
       **时间字段** = 条目内**首个匹配 `YYYY-MM-DD hh:mm:ss.mmm` 形态（含前导零、`.` 后恰 3 位数字）的时间戳行**，**仅作观察数据逐字登记（r4 第三趟 T2 冻结）**：该形态无时区标记、设备系统时区来源不在白名单内，故**不参与** campaign 时间窗关联（窗界唯一判据 = 证据规则 1 的快照文件集合差分）；该时间戳本身是否与设备系统时区一致不做判定，逐字落盘即毕；条目中不存在可解析时间字段 → 该条目按 criteria-gap 处理 (2) 解析缺口收口（`fail` + raw 逐字入档，保守不洗白），不得默误当「时间窗内新增」或「窗外旧条目」。
 
+   **r10 多条目聚合规则（blocker 8，B B-07：同窗 `FaultRecv` 可取回多个条目，契约按逐条目解析而 `fault_type_observed`/`signal_observed` 为单值分量——同窗新增一条 `APPFREEZE` 加一条 `CPPCRASH` 时取哪个原不定义 → 分量与 verdict 非单值；主会话裁定：保守聚合，任何正向签名优先）**：两分量均为**全窗聚合单值**——对全部时间窗内新增条目逐条解析完毕后按下述保守优先序聚合恰一次，不取「第一条」「任一条」等未定义捷径：
+   - `fault_type_observed`：任一条目归一化后 ∈ {`CPPCRASH`, `JSRAWERROR`} → 按该**正向**条目记归一化值（多条正向取聚合序首个正向条目）；无正向条目但有 `APPFREEZE` → 记 `APPFREEZE`；其余情形（全部条目归一化后均域外）→ 记 `other:<第一条域外字面逐字>`——多条域外条目时**全部原值逐字入档（raw 档保留多值）**、分量单值取第一条，多值事实不丢、分量仍单值；
+   - `signal_observed` 同构：任一条目携致命信号（`SIGSEGV`/`SIGABRT`/`SIGBUS`/`SIGFPE`）→ 取该信号（多条致命取聚合序首个）；无致命信号但有条目携 `SIGKILL`/`SIGTERM` → 取之；无任何条目携两具名段信号（携「其余」段信号的条目按上方既有规则仅 raw 逐字入档）→ `observed-false`；多条目信号不同时**全部信号字面逐字入档（raw 档保留多值）**、分量单值取优先序最高者（致命段 > 平台终止段）；
+   - **理由（冻结）**：签名判定是 fail 面，聚合必须保守（fail-closed 方向）——任一条目呈正向签名即按正向记，**不得因窗口内存在其他条目而稀释**；正向段严格优先于 `APPFREEZE` 与平台终止段，二者亦不得被域外条目挤出单值判定。
+
 **`Fault_Type` 字面未实测依赖（r4 第二趟 S1，最高优先级登记；r9 随死因表删除改写）**：本节分量 `fault_type_observed` 与 `probe_crash_signature_observed` 第 1/3 支全部依赖 faultlogger 的 `Fault_Type` 字面 `APPFREEZE`/`CPPCRASH`/`JSRAWERROR`，**这些字面从未在本冻结元组的任何真实 faultlogger 条目上核实**，仓内亦无 faultlogger 样本文本。
 后果链（r9 重写）：若真机实际写的是 `APP_FREEZE`、`JS_CRASH` 或任何其他形态且归一化后不落入候选集，则 F1 第 1/3 支在真机上**永不命中**——崩溃类死亡只以 `fault_type_observed = other:<原值逐字>` 记录，可能以 pre-only `pass` 收口（fail-open 残余，逐字登记见自陈 14(c)）；原 r4 版「落行 6 `unattributed` → `fail`、烧掉不可复用 ID」的后果随死因表删除不复存在。
 为此冻结：**(1) 归一化匹配**：`fault_type_observed` 求值与 F1 各支的字面比较一律按证据规则 5 的「归一化 + 候选集」规则解释（E7 段已冻结），不再逐字面严格相等。
@@ -958,9 +964,12 @@ fault 条目内解析出的时间字段只作观察数据逐字落盘，不参�
 2. `signal_observed` ∈ {`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`}；
 3. 归一化 `fault_type_observed` = `APPFREEZE` **且** `last_visible_site` ∈ 冻结短时步集（D2 保留条目锁定序列 2.1-2.7 的即返 syscall；P1 已由 r4 第一趟 R5 移出，位点约束见证据规则 4）**且** marker 序列无矛盾（席 B 补充的守卫，r9 采：marker 序列自相矛盾时该位点判定本身不可信，此支不得成立）。
 
+**r10 结构注（第 3 支，A M-03「F1 第 3 支结构性空集」；主会话裁定：保留本支为事实记录、不删）**：本支位点守卫冻结的短时步集（D2 保留条目锁定序列 2.1-2.7 的即返 syscall）全部位于 P5T（`N1BDISC_PRE` 发射位点）之前——`N1BDISC_PRE` 在时 `last_visible_site ≥ P5T` 永不在短时步集内，本支对 `pre-only`/`complete` 协议恒不成立（结构性空集）；`N1BDISC_PRE` 缺时 F2 已独立判 fail（verdict 节：PRE 缺失时 `protocol` 不可求值、由 F2 承载），本支即便成立也不独立改变任何 verdict。
+本支的价值是对 N1b 的诊断事实记录——短时步集内的 `APPFREEZE` 是探针缺陷的正向证据（法理见下方「第 3 支法理」段），不是独立 fail 触发。r10 于此登记其与 F2 的恒叠加关系：第 3 支命中 ⇒ `N1BDISC_PRE` 必然未发射 ⇒ F2 必然同命中且为 verdict 承载面——**防后续审查误读为死代码而删**，删除该支丢失诊断事实而不改变任何 verdict。
+
 上述三支之外一律 `observed-false`；证据不足以求值时的赋值按下方 r10 求值真值表冻结，不另设路径。
 
-**`probe_crash_signature_observed` 求值真值表（r10 冻结，与 A M-06 同修；闭集三支仍是 `observed-true` 的唯一字面条件，本表冻结的是输入建立与不可求值情形的赋值路径——五行按序求值、逐行互斥，禁止任何其他赋值路径）**：
+**`probe_crash_signature_observed` 求值真值表（r10 冻结，与 A M-06 同修；闭集三支仍是 `observed-true` 的唯一字面条件，本表冻结的是输入建立与不可求值情形的赋值路径——五行按序求值、逐行互斥，禁止任何其他赋值路径；r10：表内输入分量取全窗聚合后的单值——聚合规则见证据规则 5 末段的多条目聚合规则）**：
 
 | # | 输入状态 | 输入分量落值 | `probe_crash_signature_observed` |
 | --- | --- | --- | --- |
@@ -1076,6 +1085,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 
 ③ poll 合法域门矛盾输入用例（**E1**：`ret=0`+revents 非空、`ret>0`+revents 空、`ret` 落在 {-1,0,1} 之外、`ret=-1` 无 errno——均须 fail 且不进入 13 类判定表）；**r9 第五步 BL-4 单调钟绝对域门用例**：`DW_RETURN` 携 `elapsed_ms=-1`（其余输入合法）→ fail（F8）；`DW_DRAIN` 携 `elapsed_ms=-1` → fail（F8）；`DW_DESTROY_T.mono_ms` 晚于 `DW_DESTROY_C.mono_ms` → fail（F3，顺序约束）；
    **r10 D8b 窗口钟载体用例（B B-04）**：D8b 合法完成夹具（storm 至首次 EAGAIN 正常终止或熔断收口，`D8_STORM_BEGIN|ws=<n>` 与 `D8_STORM_END` 全字段含 `we=<n>` 均在 capture）→ `window_start_monotonic`/`window_end_monotonic` 自 `ws`/`we` 重建、无字段缺项、均 ≥ 0 且 `ws` ≤ `we` → 不命中 F8 → verdict **`pass`**（D8b 成功终态稳定可达）；反例三支——`ws`/`we` 任一缺项 → 字段缺项 fail，`we` < `ws` → F8 顺序约束 fail，任一负值 → F8 非负性 fail（沿钟域门 r10 载体条款）；
+   **r10 D7 早退矛盾边界对（B B-08；D7 节接受域首行 r10 口径的边界承载）**：`D7_END` 在、`elapsed_ms=19999`（`0 ≤ elapsed < 20000`，其余输入全合法）→ marker 在而与伪码出口条件机械矛盾 → **fail（F8）**（原值逐字入档，`d7_anomaly=early-exit-with-end-marker` 标签同时驱动 F8）；`elapsed_ms=20000` + `D7_END` 在 → 合法下界 → 不 fail（`u7=observed-true` 方向）——同源边界对，20000 恰值归合法侧沿 E5 边界归属冻结；
 
 ④ `dw_return_class` 优先级判定表真值表（全部 revents 组合（**r4 第二趟 S2 界定 = 冻结掩码全集 {0x001,0x002,0x004,0x008,0x010,0x020} 的全部 64 个子集的十进制编码**——该穷举界定判定表行内匹配的组合域，另含纯未知位用例 `revents=64` → `other-revents` 不 fail；**r9 第五步 BL-3 混合位用例**：`revents=72`（未知位 64 + `POLLERR`）与 `revents=65`（未知位 64 + `POLLIN`）均须由未知位前置门定 `other-revents`、原值入档、不 fail、**不解锁路径①**）× elapsed 4500 边界 × drain 终态 × poll ret/errno 组合，见 D-W 节）；
 
@@ -1085,6 +1095,9 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
   - `Fault_Type` 归一化正反例（r4 第二趟 S1 冻结归一化规则；r9 期望结论按「死亡事实记录（证据向量）」节证据规则 5「归一化 + 候选集」重写）：`APP_FREEZE`/`app-freeze` 须命中 `APPFREEZE`，`JS_RAWERROR` 须命中 `JSRAWERROR`；
   - 域外词根 `JSCRASH`：归一化后不落候选集 → `fault_type_observed = other:JSCRASH`（原值 = 归一化前逐字原文）→ 不命中 `probe_crash_signature_observed` 三支任何一支 → `observed-false` → F1 不命中、**不 fail**（仅作事实登记）；
   - r9 同键对照组：同一 `JSCRASH` 夹具配「无平台信号」与「有 `Signal=SIGKILL`（或 SIGTERM）条目」两支，**期望结论相同**——`signal_observed` 照记、`probe_crash_signature_observed` 仍 `observed-false`、仍不 fail（SIGKILL/SIGTERM 不在致命信号集 {`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`} 内）；原 r4 版「无 → 行 5 → fail；有 → 行 4 (iii) → 不 fail」分岔随死因表删除，「两支结论相同」本身即本组用例的断言点；
+   - **r10 多条目聚合用例（blocker 8，B B-07；聚合规则 = 证据规则 5 末段）**：(a) 同窗双条目 `Fault_Type=APPFREEZE` 与 `Fault_Type=CPPCRASH` → 逐条解析后聚合 `fault_type_observed=CPPCRASH`（正向优先、不被 `APPFREEZE` 稀释）→ 第 1 支命中 → `probe_crash_signature_observed=observed-true` → `protocol=pre-only` 夹具 → **fail（F1）**；
+   - (b) 同窗双条目：`APPFREEZE` 条目（`last_visible_site`=P6/D7 位点，非短时步集）+ 另一条目携 `Signal=SIGSEGV` → `signal_observed=SIGSEGV`（致命段优先）→ 签名经第 2 支 `observed-true` → **fail（F1）**——`APPFREEZE` 条目因位点非短时步集不构成第 3 支，聚合后由第 2 支独立命中；
+   - (c) 同窗双条目均域外字面（如 `JSCRASH` + `JSERROR`）→ 两条原值**全部逐字入档**（raw 档保留多值）、`fault_type_observed` 分量取第一条（`other:JSCRASH`）→ 三支无一命中 → `observed-false` → **不 fail**；
 
 ⑦ stat state 解析（A7：`comm` 带空格/括号反例）；
 
@@ -1114,7 +1127,8 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
    - 三支命中各一例（r4 第一趟 R5 短时步集收窄沿 F1 第 3 支位点守卫承载；三例断言均为对应支命中 → `observed-true` → `protocol != complete` 时 F1 → **fail**）：
      Ⅰ=`Fault_Type=CPPCRASH`（`JSRAWERROR` 同支）新增条目 + 进程消失 + `N1BDISC_PRE` 在（死于 P5T 后，如 P6/P7）→ `protocol=pre-only`、第 1 支命中 → fail；
      Ⅱ=新增条目 `Signal=SIGSEGV`（`SIGABRT`/`SIGBUS`/`SIGFPE` 同支变体）→ 第 2 支命中 → 同判 fail；
-     Ⅲ=`Fault_Type=APPFREEZE` + `last_visible_site` ∈ 冻结短时步集（D2 保留条目锁定序列 2.1-2.7 的即返 syscall，位点在 P5T 之前故 PRE 未发出、`protocol != complete` 成立）+ marker 序列无矛盾 → 第 3 支命中 → fail（该构造同时命中 F2 PRE 缺失、verdict 同判 fail，本用例钉死的是第 3 支独立成立）。
+     Ⅲ=`Fault_Type=APPFREEZE` + `last_visible_site` ∈ 冻结短时步集（D2 保留条目锁定序列 2.1-2.7 的即返 syscall，位点在 P5T 之前故 PRE 未发出）+ marker 序列无矛盾 → 第 3 支命中 → fail（r10 措辞更正，A M-03：本构造同时命中 F2（PRE 未发）、**verdict 由 F2 承载**——PRE 缺失时 `protocol` 不可求值，F1 不进入求值；第 3 支 `observed-true` 在此作为**事实记录**验证（签名分量正确赋值），非独立 fail 触发——
+第 3 支位点集全部位于 P5T 之前、对 pre-only/complete 协议恒假（结构注见三支闭集第 3 支后）；原「`protocol != complete` 成立」「本用例钉死的是第 3 支独立成立」两句随 r10 废除）；
    - 第 3 支守卫反例：`APPFREEZE` + 位点在短时步集内但 marker 序列自相矛盾（如位点 marker 违反时序单调/全序）→ 第 3 支**不成立** → `observed-false` → 不 fail（证据不足以正向成立不得默认 true，席 B 守卫）；
    - 非短时步集上的 `APPFREEZE`：`last_visible_site` = P6/D7（20 s 合法时间盒任务）或 P1/P2/P3/P4/P7/P8/P9/P10 任一 → 第 3 支位点守卫不成立、第 1/2 支亦不命中 → `observed-false`，`fault_type_observed`+`last_visible_site` 照常记录、未完成项按既有规则赋 `unobservable` → **不 fail**（本 campaign 要发现的平台行为正例，决议 §4.2）；
    - `Signal=SIGKILL`/`SIGTERM` 条目（含与任意 `Fault_Type` 组合）→ 不在致命信号集 {`SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGFPE`} → 第 2 支不命中 → `signal_observed` 照记、`probe_crash_signature_observed=observed-false` → **不 fail**；
