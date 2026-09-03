@@ -752,3 +752,14 @@ deepseek pass 票说明：其 16 格对 (a)-(e) 与 D6b skip 的穷尽性验证�
 M/m 去重：grok M-01（skip 表实体未收编）/M-02（(e) 「join 成功」与标题不等价 = deepseek M-03 同）/M-03（A10 强度）/M-04（两 cause 字面 = deepseek M-04 同）；deepseek M-01（「四子域」标题 = grok m-01 同）/M-02（类 0 路径陈旧 + (b)/(c) 求值序）；grok m-02/m-03/m-04。
 
 **轨迹：12→8→4→3→5→3→2→1。** r18 两条 B 的修复（D6b 重裁 + 快照单源化）经三席确认落地（grok 明确「原 B-01 唤醒分叉不可达」「发布窗封闭」「第五形态有落点」）；本轮唯一 blocker 全部集中在标志门边界竞态（三格同根）——修复面即新审查面的模式继续，但每轮新缝的根因在收窄（本轮只剩一个时序门的边界）。
+
+### sol 终稿（绑定 cf7b084，r19 草案未计入）——fail 1B/4M/3m，与 grok B-01 同根确认
+
+sol 终稿确认三格同根的 B-01（与 grok 收敛），并给出**不同的修法方向**：
+- **grok/我已落地的 r19-P1**：五前件 (d) + 1000 ms 局部盒 cutoff + `flag-race-window-expired` 具名收口；
+- **sol 建议**：不等待 flag——冻结 P12 cut 状态写入 POST（`worker_terminal_published_at_p12`）；(d) 改为 `JT∧F=0`（删除 R 缺前件、F=0 优先于 capture R）、cause 改 `worker-output-incomplete-at-cut`；F=0 时 R 仅保 raw 不喂 class；F=1∧R=0 唯一走 (e)；F=1∧R=1 走普通类；join_result sticky JT。
+- **对 r19-P1 cutoff 的批评**（sol 审查期间看到草案后指出）：「禁止用无新局部上界的 spin-wait 修补，worker 可永久活挂」——r19-P1 已采纳（1000 ms 局部盒 + 具名收口 + 禁止拿 525 s 当上界），但 sol 的 cut-state 方案更根本（不等待任何未来事件、在 P12 时点冻结观测状态）。
+
+sol M-01~M-04 与 grok M 大面积收敛（skip 表实体/A10 强度/(e) P12 可实现性/F8 背书过强——M-04 为独有且深刻：「F8 比的是派生值不是六 raw、runner 无法发现自身漏比，一致性保障来自源码约束+release/acquire 而非 F8」）。m-03 为独有（「读单调钟」vs「各读一次」措辞两读）。
+
+**第十九轮最终账：deepseek pass 0B/4M、grok fail 1B/3M/4m、sol fail 1B/4M/3m——去重 1 blocker（标志门边界竞态，三席三角度收敛：grok 边界形态构造、sol 程序序论证、deepseek 16 格表的第 7 格边界）。r19-P1 已按 grok 方案+sol cutoff 建议落地；sol 的 cut-state 替代方案登记为裁量供第二十轮挑战。**
