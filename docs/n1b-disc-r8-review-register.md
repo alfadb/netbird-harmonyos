@@ -729,3 +729,26 @@ M/m 去重：`dw_drain_end` 交接缺失（sol B-01 内）；`dw_outcome` 全字
 2. 裁定①三席合计四度驳回（r17 两度 + r18 两席）；裁定②三度维持。
 
 **轨迹：12→8→4→3→5→3→2。** r18 修复两包已并行派出（P1 D6b 整段 skip + 归因洁净恢复 + A10；P2 快照单源化：单次读同源两写 + 终态标志门 + drain 入快照 + 第五形态 F8(2) 收口 + EXIT 序对调）。
+
+## 九之十、第十九轮审查（r18 版 @ cf7b084）——终账
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（分域 (a)-(e) + D6b skip 16 格机械枚举） | **pass** | 0 B / 4 M |
+| grok-4.6（全文） | fail | 1 B / 3 M / 4 m |
+| sol（全文；首次连接中断后重派完成） | 待终稿（中断前已报告竞态 blocker） | ≥1 B |
+
+### 已核实的 blocker（grok B-01 = sol 中断前报告收敛——标志门边界竞态）
+
+**边界形态 T**（P10 盒到期时标志未置 → JT 登记 + abandoned + D6b skip → P11 → 此后 P12 前迟到 worker 完成序列）：
+- **T-RETURN 在**（JT=1, F=0→1, R=1）：(d) 四前件全真（非 skip∧活到 P12∧JT∧R 缺——**R 缺假**）→ 非 (d) → 读快照 13 类 ✓；但 **F8(2) 对 `dw_join_result` 无重建规则**——runner 侧若无「D6b skip 在 → join_result 重建为 join-timeout」的写死规则，最坏以 EXIT⇒joined 比对 P12 的 join-timeout → **F8(2) 烧掉合法迟到完成 complete**（fail-closed 误伤）。
+- **T-RETURN 缺**（JT=1, F=0→1, R=0）：(e) 标题命中（标志已置∧capture 无 RETURN）→ F8(2) ✓；**但 (d) 四前件在此也全真**（R 缺为真）——(d) 列在 (e) 前，只实现四合取的读者会 **(d) 截胡 (e)** → poll-never-returned + complete pass = **fail-open**（快照已证明 poll 返回）。
+- **sol 中断前报告的格**（JT=1, F=0, R=1——标志未置而 RETURN 已入 capture）：标志门说「一律 (d)」、(d) 前件「capture 为准」失败、(e) 要求标志已置——无收口。deepseek 16 格表的第 7 格（JT=1,F=0）默认 R=0 未枚举此格；grok 走查确认了 T 两个子格但此第三格未显式覆盖。**三格同根：标志（门）与 RETURN 入 capture（capture 前件）不是同一事件的两面——标志在序列末尾。**
+
+grok 修法（四点）：(d) 改五前件（+标志未置）；join_result runner 重建规则写死（D6b skip → join-timeout，EXIT 不喂 join 轴）；联合形态合法性声明（JT∧13 类∧EXIT 同现 = 合法）；④ 补两钉。
+
+deepseek pass 票说明：其 16 格对 (a)-(e) 与 D6b skip 的穷尽性验证成立（第 8/10/11/12 格特别结论均正确），但第 7 格默认 R=0——sol 的 F=0∧R=1 格与 grok 的 T-RETURN 缺格（F=1∧R=0 被 (d) 四前件截胡）未在其枚举维度内。pass 票在其范围内有效。
+
+M/m 去重：grok M-01（skip 表实体未收编）/M-02（(e) 「join 成功」与标题不等价 = deepseek M-03 同）/M-03（A10 强度）/M-04（两 cause 字面 = deepseek M-04 同）；deepseek M-01（「四子域」标题 = grok m-01 同）/M-02（类 0 路径陈旧 + (b)/(c) 求值序）；grok m-02/m-03/m-04。
+
+**轨迹：12→8→4→3→5→3→2→1。** r18 两条 B 的修复（D6b 重裁 + 快照单源化）经三席确认落地（grok 明确「原 B-01 唤醒分叉不可达」「发布窗封闭」「第五形态有落点」）；本轮唯一 blocker 全部集中在标志门边界竞态（三格同根）——修复面即新审查面的模式继续，但每轮新缝的根因在收窄（本轮只剩一个时序门的边界）。
