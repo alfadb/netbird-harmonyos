@@ -818,3 +818,15 @@ sol 明确：本票不构成 cut-state 的预批准（其正式字面仍需独�
 3. `:646` R 分岔旧句未同步纯本地化入口（sol 第三点 = deepseek M-03 收敛）。
 
 **deepseek 的贡献**（即使 pass 票被 sol 的 B 推翻）：14 格表 + 三蕴含链（SIG=0⟹R=0 / FLAG=1⟹SIG=1 / JT=0⟹FLAG=1）的验证不依赖 capture 保序（只依赖程序序+原子一致性）——这些结论对 SIG=0 侧成立且不可被 sol 的 SIG=1 反例推翻；M-02/M-03 与 sol 收敛。
+
+### grok 终稿（fail 2B/4M/4m）+ 第二十一轮终账
+
+**三席齐：deepseek pass 0B/3M、grok fail 2B/4M/4m、sol 终稿在跑（中间 ≥2B）——grok 与 sol 的核心发现双向收敛。**
+
+**去重 2 blocker（全部核实成立）：**
+1. **SIG=1∧R=0 本征窗**（grok B-01 = sol 预警第二点，构造完全同构）：SIG 置于 RETURN 发射前——worker 置 SIG 后卡在 emit RETURN（HiLog 背压/调度抢占）= 合法调度。盒到期 → P12 落 flag-race → POST 即停 → R=0 永久 → sticky 第三合取（RETURN 在）不成立 → runner 重建 poll-never vs POST flag-race → F8(2) **fail**。`:708`「HiLog 背压超盒 complete pass」与 `:713`「预期 fail」**同一物理迹互斥**。`:713` 的蕴含方向（「信号⟹RETURN 应已发射」）被 worker 冻结序证伪——S 只蕴含「下一步是 emit RETURN」不蕴含「已发射/已入 capture」。**deepseek 的 14 格蕴含链只走了 SIG=0 方向；SIG=1 方向的可达格三席中只有 grok/sol 覆盖。**
+2. **:646/:703 仍以 R 为 P12 活路由**（grok B-02 = sol 预警第三点）：r20 本地化入口只写了 :693/:707，:646 的「主线程 R 前件分岔（capture 为准）」与 :703 的「前件 JT∧F=0∧R=1」仍并列活着——sol B-02「P12 不判 R」**未完全落地**（回归风险）。
+
+grok M-01（信号原子无规格化——标识符/初值/sticky/release-acquire 全缺，可见性问题可烧 (d) complete——与 r18 快照门缺发布边界同族）；M-02（sticky 签名两读：「标志仍未置」vs「cause 在 POST」——runner 看不到 worker 标志）；M-03（域扩传播不全：poll raw 域/路径①清单/:831 加法仍 19）；M-04（上界论证再偷换——S 入口后剩余是 RETURN+EXIT+标志三步）。
+
+**轨迹：12→8→4→3→5→3→2→1→2→2。** r20 修复了第二十轮的 2B（sticky 例外闭了 R=1 盒到期的假一致、:640 分岔闭了一律截走），但 SIG 分岔门**把入口从 R 前移到 RETURN 之前**——新开的 S=1∧R=0 窗没有单一 verdict。**修复面即新审查面**的规律在第二十/二十一轮连续兑现——但每轮新缝的根因在急剧收窄：从 r14 的归因停机架构 → r18 的 D6b fd 身份 → r20 的 sticky 循环 → r21 的一个信号位置。**裁定①五裁：方向维持、落地仍 fail。**
