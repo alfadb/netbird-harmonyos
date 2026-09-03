@@ -793,3 +793,7 @@ M 去重：A11 六字段不可实现（drain_end 在 poll 前写——grok M-01�
 **轨迹：12→8→4→3→5→3→2→1→2。** 回升 1——全部集中在 r19-P1 的 cutoff 变体（主会话在 grok 四点方案之外自作主张的部分）+ 两条旧路由未随新求值序改写（传播缺口老病）。grok 方案本体（五前件/重建规则/联合形态）三席全部确认有效（格 1 complete pass、格 2 (e) fail 落地成立）。
 
 **裁定①四裁：方向维持、落地仍 fail（格 3 两条出路均未闭成总函数）。**
+
+### sol 终稿补充（M 核对，与 grok/deepseek 收敛确认）
+
+sol 补充三点 M 核对全部与 grok/deepseek 收敛：M1 预算归属（= deepseek M-01）、M2 相邻语句偷换前提（= grok M-02 = deepseek M-02）、M3 :620 位点枚举（= deepseek M-03）；另登记 A11 六字段字面两读（= grok M-01——drain_end 不来自 poll-return 五 raw、不在 DW_RETURN，意图可实现但字面应分开）。sol 的 B 层结论（三点）已在中期登记中核实并入终账第 1 条。**第二十轮三席终账完整：deepseek fail 1B/3M、grok fail 2B/2M/4m、sol fail ≥3B（三点同根）——去重 2B。**
