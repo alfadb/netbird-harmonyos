@@ -736,7 +736,7 @@ M/m 去重：`dw_drain_end` 交接缺失（sol B-01 内）；`dw_outcome` 全字
 |---|---|---|
 | deepseek-v4-pro（分域 (a)-(e) + D6b skip 16 格机械枚举） | **pass** | 0 B / 4 M |
 | grok-4.6（全文） | fail | 1 B / 3 M / 4 m |
-| sol（全文；首次连接中断后重派完成） | 待终稿（中断前已报告竞态 blocker） | ≥1 B |
+| sol（全文；首次连接中断后重派完成） | fail（终稿待收，中断前已确认竞态 blocker 与 grok 同根） | ≥1 B |
 
 ### 已核实的 blocker（grok B-01 = sol 中断前报告收敛——标志门边界竞态）
 
