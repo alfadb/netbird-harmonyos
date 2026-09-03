@@ -763,3 +763,21 @@ sol 终稿确认三格同根的 B-01（与 grok 收敛），并给出**不同的
 sol M-01~M-04 与 grok M 大面积收敛（skip 表实体/A10 强度/(e) P12 可实现性/F8 背书过强——M-04 为独有且深刻：「F8 比的是派生值不是六 raw、runner 无法发现自身漏比，一致性保障来自源码约束+release/acquire 而非 F8」）。m-03 为独有（「读单调钟」vs「各读一次」措辞两读）。
 
 **第十九轮最终账：deepseek pass 0B/4M、grok fail 1B/3M/4m、sol fail 1B/4M/3m——去重 1 blocker（标志门边界竞态，三席三角度收敛：grok 边界形态构造、sol 程序序论证、deepseek 16 格表的第 7 格边界）。r19-P1 已按 grok 方案+sol cutoff 建议落地；sol 的 cut-state 替代方案登记为裁量供第二十轮挑战。**
+
+### 第二十轮中期（deepseek 已回、sol 中间+新增、grok 在跑）
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek（14 格机械枚举 + 竞态窗深查） | fail | 1 B / 3 M |
+| sol（中间 + 新增两点，终稿在跑） | fail | ≥3 B |
+| grok | 在跑 | — |
+
+**三席已收敛的 blocker（同一根，全部核实成立）**：
+`flag-race-window-expired` 盒到期支三重不自洽（我 r19-P1 落地 cutoff 变体时未走查完的格——派发书里给三席埋的疑点全部命中）：
+1. **F8(2) 机械矛盾**（deepseek B-01 = sol 第一点，逐字验证最完整）：`:698` P12 写 cause / runner 从 R=1 capture 重建必得 13 类 → 比对必 fail，与 complete pass 矛盾；`:699` 的「一致」断言句内自相矛盾（「runner 正常重建」⟹ 13 类 ⟹ 与 cause 不一致，却断言一致）。双读法死锁：读 A（同 cause）⟹ F8 fail；读 B（class 一致）⟹ P12 须写 13 类但标志门禁读、物理不可能。
+2. **P12 不可判**（sol 第二点）：`:684`「以 capture 为准、P12 检验」——设备侧 P12 看不到 host capture，F=0 时无法区分 R=0/R=1；统一等 1000 ms 则 R=0 误落 flag-race、不等则 R=1 误落 poll-never。
+3. **域未注册**（sol 第三点）：`flag-race-window-expired` 不在 19 值域声明/poll raw 域/四步表步 (0) 映射——未预注册 cause → F4，与 pass 矛盾。
+
+deepseek 修法（二选一）：(a) 该支 F8(2) 豁免（非对称输入形态，「同一事实两算」前提不成立）；(b) runner 增 capture 可见签名重建同一 cause。sol 修法方向：cut-state 方案（P12 只依赖本地 F、只记录 cut 状态、不与 runner 重建同轴比对）。
+
+deepseek M-01（1000 ms 容器归属错——应在 P12 ≤5 s 内非 58 s 收尾）、M-02（「相邻语句」论证窗口不对齐）、M-03（:620 位点枚举未纳入 P12）。
