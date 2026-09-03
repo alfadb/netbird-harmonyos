@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r17-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r18-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -187,6 +187,13 @@
 > - **Z4 D6b 位次裁定**（sol）：「worker 终态后」修订为「终态或 join-timeout 登记（abandoned 即主线程侧终态替代）后」；D6b 操作对象 fd_dup 与 worker 存活无冲突。
 > - **Z5 M/m**：`item=D-W`+RETURN 轴改 F8(2)；「照 13 类判定表」两处改派生序；r16 登记 4 minor 更正注；「第二维」历史句加注。
 > 状态改为 `criteria-r17-pending-independent-review`；r17 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r18 修订（第十八轮审查修复：2 blocker / 3 major / 4 minor 处置）**：r17 经三席跨厂商隔离独立审查（绑定 2806e41）——**三席全部 fail**（deepseek 1B/3M、grok 2B/3M/4m、sol 2B/1M/2m）；r17 五条修复全部确认落地、零回归；去重 2 blocker 全部核实（轨迹 12→8→4→3→5→3→2——两条 B 全部打在 r17 的两个新声明上）。**主会话裁定③（D6b「非 worker 持有的原 fd」）被两席正面驳回**（fd 身份前提反事实——worker poll 对象就是 fd_dup；失误 #32 登记）；裁定①四度驳回（方向可成立、落地缺四处）；裁定②三度维持。
+> r18 修订内容（两包并发施工，hunk 零重叠、拼接处核对）：
+> - **X1 D6b 位次重裁**（grok B-01 = sol B-02；裁定③撤回）：join-timeout 形态下 **D6b 整段 skip**（fcntl GETFD 亦 skip——不引入「哪些操作安全」的新判断面）；`u4_dup_*` 四字段收口 `unobservable(cause=d6b-skipped-join-timeout)`；skip 发 `N1BDISC_SKIP|item=D6b|cause=join-timeout-abandoned`；**close(fd_dup) 交进程退出回收**（E3 先例）；归因洁净句（:822）恢复为活规则（全部形态无例外）；(d) 的 RETURN 缺前件补注「capture 为准、P12 检验、**归因洁净由 skip 保证，不由 close 的平台行为决定**」；**新增静态断言 A10**（join-timeout 分支主线程零 fd_dup 操作）+ gate 3 扩 A1-A10；④ 段落错位修复。
+> - **X2 快照单源化**（sol B-01 = grok B-02 ⊇ deepseek B-01/M-01；grok 主案）：**单次读 + 同源两写**（禁二次读钟/errno——同 class 等价类内 raw 分叉漏检的 fail-open 封闭）；快照扩**六字段**（+`dw_drain_end`——class 行 7 第四前件依赖）；**发布边界 = 终态标志置位**（release/acquire；join-timeout∧标志未置 → 无视快照、半写不污染）；单源改述（快照与 marker 是**同一次读取的两个投影**、一致性由 F8(2) 背书）；**第五形态收口**：分域新增 (e)「标志已置∧capture 无 RETURN → fail(F8(2))」不冒充 poll-never-returned；**EXIT 小窗封闭**（worker 序对调：写快照→RETURN→EXIT→置标志，标志语义 =「worker 全部输出已完成」）。
+> - **X3 M/m**：confirmed 五值化与活域同一；步 (0) 6 值统一；criteria-gap (2) 本体扩入；r17 理由行口径更新；(e) 不入四步表注。
+> 状态改为 `criteria-r18-pending-independent-review`；r18 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
