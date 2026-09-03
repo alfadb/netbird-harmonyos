@@ -830,3 +830,11 @@ sol 明确：本票不构成 cut-state 的预批准（其正式字面仍需独�
 grok M-01（信号原子无规格化——标识符/初值/sticky/release-acquire 全缺，可见性问题可烧 (d) complete——与 r18 快照门缺发布边界同族）；M-02（sticky 签名两读：「标志仍未置」vs「cause 在 POST」——runner 看不到 worker 标志）；M-03（域扩传播不全：poll raw 域/路径①清单/:831 加法仍 19）；M-04（上界论证再偷换——S 入口后剩余是 RETURN+EXIT+标志三步）。
 
 **轨迹：12→8→4→3→5→3→2→1→2→2。** r20 修复了第二十轮的 2B（sticky 例外闭了 R=1 盒到期的假一致、:640 分岔闭了一律截走），但 SIG 分岔门**把入口从 R 前移到 RETURN 之前**——新开的 S=1∧R=0 窗没有单一 verdict。**修复面即新审查面**的规律在第二十/二十一轮连续兑现——但每轮新缝的根因在急剧收窄：从 r14 的归因停机架构 → r18 的 D6b fd 身份 → r20 的 sticky 循环 → r21 的一个信号位置。**裁定①五裁：方向维持、落地仍 fail。**
+
+### sol 正式终稿（fail 3B/2M/0m）——与 grok 双向收敛 + sticky 循环 B 级定论
+
+sol 正式定级 3B（sticky 自认证循环 / SIG 蕴含方向 / :646 R 活路由）——其中 B-02/B-03 与 grok 完全同构；**B-01（sticky 循环）为三席分歧点：deepseek 判 M（有界循环无 verdict 后果）、grok 判 M-02（签名两读）、sol 判 B（fail-open——P12 错写 flag-race 时 runner 照抄 → 完整性错误可 pass，与 :653/:1066/:1462 的「P12 错写须 F8 fail」冲突）。主会话核实：sol 的 fail-open 构造成立（盒内置位却写 cause 的探针缺陷——正是 F8(2) 该抓的「探针派生值与 runner 重建值不一致」——但 sticky 使 runner 跟随 P12 的错误值 → 比对一致 → 漏检）。deepseek 的「无 verdict 级后果」论断只覆盖「诚实 P12」威胁模型，未覆盖探针逻辑 bug。B 级成立。**
+
+sol 八格等价性表（第二十轮表 + S 隐藏维扩展）：关键发现——**SIG 维把 JT=1,F=0,R=0 格拆成 pass（S=0）/fail（S=1∧抢占）**——八格不再是总函数。裁定①七裁：继续挑战。裁定②：box+本地信号变体不构成 cut-state 等价替代。
+
+**第二十一轮终账（三席齐）：deepseek pass 0B/3M、grok fail 2B/4M/4m、sol fail 3B/2M/0m——去重 3 blocker：① SIG=1∧R=0 本征窗（三席收敛）；② sticky 自认证循环 fail-open（sol B + grok/deepseek M——主会话裁决 B）；③ :646/:703 R 活路由残留（三席收敛）。**
