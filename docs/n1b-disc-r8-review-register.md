@@ -781,3 +781,15 @@ sol M-01~M-04 与 grok M 大面积收敛（skip 表实体/A10 强度/(e) P12 可
 deepseek 修法（二选一）：(a) 该支 F8(2) 豁免（非对称输入形态，「同一事实两算」前提不成立）；(b) runner 增 capture 可见签名重建同一 cause。sol 修法方向：cut-state 方案（P12 只依赖本地 F、只记录 cut 状态、不与 runner 重建同轴比对）。
 
 deepseek M-01（1000 ms 容器归属错——应在 P12 ≤5 s 内非 58 s 收尾）、M-02（「相邻语句」论证窗口不对齐）、M-03（:620 位点枚举未纳入 P12）。
+
+### 第二十轮终账（三席齐：deepseek fail 1B/3M、grok fail 2B/2M/4m、sol 终稿在跑但其三点已全部经主会话核实）
+
+**去重 2 条 blocker（三席高度收敛，全部核实成立）：**
+1. **`flag-race-window-expired` 盒到期支三重不自洽**（三席三角度收敛：deepseek F8(2) 机械矛盾/双读法死锁证明、sol P12 不可判 + 域未注册、grok F8(2) 假一致 + 19 值未扩 + 反 blanket）：r19-P1 cutoff 变体（主会话自作主张部分）首轮被证伪——与 r14-r18 每轮新声明同构。**grok 修法**（sticky 例外——与 join sticky 同构）：runner 增 class 轴 sticky 重建例外（`SKIP|item=D6b` ∧ capture 有 RETURN ∧ 盒到期标志未置 → runner 重建 `flag-race-window-expired`、禁止走 13 类）；闭域 19→20、四步 (0) 6→7 同步；废除 :699 假断言。**deepseek 方案 (b)**（capture 可见签名重建同 cause）与 grok 修法同构。sol cut-state 为替代方案。
+2. **`:640`/`:691` 旧活路由未废**（grok B-02）：r18 冻结「JT∧F=0 → 一律 (d)」与「非 (a)-(e) 且有 R → 13 类」两条早于 r19 求值序的活路由未随竞态窗改写——第三格整格被 :640 截走（盒内置位成功路也 F8(2) 烧 ID）或被 :691 绕过等待（无 acquire 读快照）。修法：:640 改「JT∧F=0∧R 缺 → (d)；JT∧F=0∧R 在 → 竞态窗」；:691 补「非竞态窗待决、标志已置」。
+
+M 去重：A11 六字段不可实现（drain_end 在 poll 前写——grok M-01，改为五 raw+钟、drain_end 单列）；1000 ms 上界论证偷换前提（EXIT 相邻≠R 相邻——grok M-02 = deepseek M-02；容器归属错 58s→P12≤5s——deepseek M-01）；:620 位点枚举（deepseek M-03）；grok m-01~m-04（gate 3 括注漏 A11、五子域标题 vs 七步、⑪(e) 钉形态覆盖不足、cause 描述漏 EXIT 后子窗）。
+
+**轨迹：12→8→4→3→5→3→2→1→2。** 回升 1——全部集中在 r19-P1 的 cutoff 变体（主会话在 grok 四点方案之外自作主张的部分）+ 两条旧路由未随新求值序改写（传播缺口老病）。grok 方案本体（五前件/重建规则/联合形态）三席全部确认有效（格 1 complete pass、格 2 (e) fail 落地成立）。
+
+**裁定①四裁：方向维持、落地仍 fail（格 3 两条出路均未闭成总函数）。**
