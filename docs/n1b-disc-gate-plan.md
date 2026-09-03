@@ -190,8 +190,10 @@
 >
 > **r18 修订（第十八轮审查修复：2 blocker / 3 major / 4 minor 处置）**：r17 经三席跨厂商隔离独立审查（绑定 2806e41）——**三席全部 fail**（deepseek 1B/3M、grok 2B/3M/4m、sol 2B/1M/2m）；r17 五条修复全部确认落地、零回归；去重 2 blocker 全部核实（轨迹 12→8→4→3→5→3→2——两条 B 全部打在 r17 的两个新声明上）。**主会话裁定③（D6b「非 worker 持有的原 fd」）被两席正面驳回**（fd 身份前提反事实——worker poll 对象就是 fd_dup；失误 #32 登记）；裁定①四度驳回（方向可成立、落地缺四处）；裁定②三度维持。
 > r18 修订内容（两包并发施工，hunk 零重叠、拼接处核对）：
-> - **X1 D6b 位次重裁**（grok B-01 = sol B-02；裁定③撤回）：join-timeout 形态下 **D6b 整段 skip**（fcntl GETFD 亦 skip——不引入「哪些操作安全」的新判断面）；`u4_dup_*` 四字段收口 `unobservable(cause=d6b-skipped-join-timeout)`；skip 发 `N1BDISC_SKIP|item=D6b|cause=join-timeout-abandoned`；**close(fd_dup) 交进程退出回收**（E3 先例）；归因洁净句（:822）恢复为活规则（全部形态无例外）；(d) 的 RETURN 缺前件补注「capture 为准、P12 检验、**归因洁净由 skip 保证，不由 close 的平台行为决定**」；**新增静态断言 A10**（join-timeout 分支主线程零 fd_dup 操作）+ gate 3 扩 A1-A10；④ 段落错位修复。
-> - **X2 快照单源化**（sol B-01 = grok B-02 ⊇ deepseek B-01/M-01；grok 主案）：**单次读 + 同源两写**（禁二次读钟/errno——同 class 等价类内 raw 分叉漏检的 fail-open 封闭）；快照扩**六字段**（+`dw_drain_end`——class 行 7 第四前件依赖）；**发布边界 = 终态标志置位**（release/acquire；join-timeout∧标志未置 → 无视快照、半写不污染）；单源改述（快照与 marker 是**同一次读取的两个投影**、一致性由 F8(2) 背书）；**第五形态收口**：分域新增 (e)「标志已置∧capture 无 RETURN → fail(F8(2))」不冒充 poll-never-returned；**EXIT 小窗封闭**（worker 序对调：写快照→RETURN→EXIT→置标志，标志语义 =「worker 全部输出已完成」）。
+> - **X1 D6b 位次重裁**（grok B-01 = sol B-02；裁定③撤回）：join-timeout 形态下 **D6b 整段 skip**（fcntl GETFD 亦 skip——不引入「哪些操作安全」的新判断面）；`u4_dup_*` 四字段收口 `unobservable(cause=d6b-skipped-join-timeout)`；skip 发 `N1BDISC_SKIP|item=D6b|cause=join-timeout-abandoned`；**close(fd_dup) 交进程退出回收**（E3 先例）；
+> 归因洁净句（:822）恢复为活规则（全部形态无例外）；(d) 的 RETURN 缺前件补注「capture 为准、P12 检验、**归因洁净由 skip 保证，不由 close 的平台行为决定**」；**新增静态断言 A10**（join-timeout 分支主线程零 fd_dup 操作）+ gate 3 扩 A1-A10；④ 段落错位修复。
+> - **X2 快照单源化**（sol B-01 = grok B-02 ⊇ deepseek B-01/M-01；grok 主案）：**单次读 + 同源两写**（禁二次读钟/errno——同 class 等价类内 raw 分叉漏检的 fail-open 封闭）；快照扩**六字段**（+`dw_drain_end`——class 行 7 第四前件依赖）；**发布边界 = 终态标志置位**（release/acquire；join-timeout∧标志未置 → 无视快照、半写不污染）；单源改述（快照与 marker 是**同一次读取的两个投影**、一致性由 F8(2) 背书）；
+> **第五形态收口**：分域新增 (e)「标志已置∧capture 无 RETURN → fail(F8(2))」不冒充 poll-never-returned；**EXIT 小窗封闭**（worker 序对调：写快照→RETURN→EXIT→置标志，标志语义 =「worker 全部输出已完成」）。
 > - **X3 M/m**：confirmed 五值化与活域同一；步 (0) 6 值统一；criteria-gap (2) 本体扩入；r17 理由行口径更新；(e) 不入四步表注。
 > 状态改为 `criteria-r18-pending-independent-review`；r18 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
