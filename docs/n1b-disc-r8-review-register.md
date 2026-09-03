@@ -803,3 +803,18 @@ sol 补充三点 M 核对全部与 grok/deepseek 收敛：M1 预算归属（= de
 sol 终稿正式定级 3B（= 中间三点独立定级）+ 4M。**关键增量：八格等价性对照表**——r19 cutoff 方案与 sol cut-state 方案在 `JT×F×R` 八格中**不等价**：不等价格正是 JT=1,F=0,R=1（cutoff 进 1000ms 盒、cut-state 立即按本地 F=0 落 `worker-output-incomplete-at-cut`）；JT=1,F=0,R=0 的 cause 字面也不同。cut-state 只依赖 P12 本地 F、不把 host capture R 喂给 probe class——**挑战结论成立**（裁定①六裁：继续挑战；「box/cut-state 现裁：挑战 box 变体，cut-state 更根本——消除未来事件等待与 P12 对 R 的依赖」）。
 
 sol 明确：本票不构成 cut-state 的预批准（其正式字面仍需独立审查）。
+
+## 九之十一、第二十一轮审查（r20 版 @ bfa112e）
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek-v4-pro（14 格 + sticky 循环性 + 蕴含链） | **pass** | 0 B / 3 M |
+| grok-4.6 | 在跑 | — |
+| sol | 中间 ≥2B（最终稿在跑） | — |
+
+**deepseek pass 票 + sol 中间预警的分歧聚焦在两个格：**
+1. **sticky 循环性**：deepseek 判 M（有界循环——RETURN 在 capture 是独立闸、无 verdict 级后果）；sol 预警 B（自认证——runner 用被检者的输出做输入）。两者对事实（第三前件 = POST cause 存在性）的认定一致，分歧在等级。
+2. **SIG=1∧R=0 格**（sol 独有——deepseek 蕴含链验证只走了 SIG=0⟹R=0 方向，未覆盖 SIG=1∧R=0 可达）：SIG 置于 RETURN 发射**前**——worker 写完快照+置 SIG 后、emit RETURN **前**被永久抢占 = **合法调度**（SIG=1, R=0, FLAG=0）。P12 走竞态窗→盒到期→flag-race；runner R=0→sticky 不命中→「正常重建」但**无 RETURN raw 可重建**。`:713` 残余格登记的蕴含方向**错误**（「信号⟹快照已写⟹RETURN 应已发射」——SIG 先于发射不蕴含发射必然发生）。该格是合法平台调度（宁缺勿误适用）却落 fail——**B 级成立**（sol 预警确认，主会话验证蕴含方向）。
+3. `:646` R 分岔旧句未同步纯本地化入口（sol 第三点 = deepseek M-03 收敛）。
+
+**deepseek 的贡献**（即使 pass 票被 sol 的 B 推翻）：14 格表 + 三蕴含链（SIG=0⟹R=0 / FLAG=1⟹SIG=1 / JT=0⟹FLAG=1）的验证不依赖 capture 保序（只依赖程序序+原子一致性）——这些结论对 SIG=0 侧成立且不可被 sol 的 SIG=1 反例推翻；M-02/M-03 与 sol 收敛。
