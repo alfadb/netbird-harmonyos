@@ -797,3 +797,9 @@ M 去重：A11 六字段不可实现（drain_end 在 poll 前写——grok M-01�
 ### sol 终稿补充（M 核对，与 grok/deepseek 收敛确认）
 
 sol 补充三点 M 核对全部与 grok/deepseek 收敛：M1 预算归属（= deepseek M-01）、M2 相邻语句偷换前提（= grok M-02 = deepseek M-02）、M3 :620 位点枚举（= deepseek M-03）；另登记 A11 六字段字面两读（= grok M-01——drain_end 不来自 poll-return 五 raw、不在 DW_RETURN，意图可实现但字面应分开）。sol 的 B 层结论（三点）已在中期登记中核实并入终账第 1 条。**第二十轮三席终账完整：deepseek fail 1B/3M、grok fail 2B/2M/4m、sol fail ≥3B（三点同根）——去重 2B。**
+
+### sol 正式终稿（绑定 f321c77，fail 3B/4M/0m）
+
+sol 终稿正式定级 3B（= 中间三点独立定级）+ 4M。**关键增量：八格等价性对照表**——r19 cutoff 方案与 sol cut-state 方案在 `JT×F×R` 八格中**不等价**：不等价格正是 JT=1,F=0,R=1（cutoff 进 1000ms 盒、cut-state 立即按本地 F=0 落 `worker-output-incomplete-at-cut`）；JT=1,F=0,R=0 的 cause 字面也不同。cut-state 只依赖 P12 本地 F、不把 host capture R 喂给 probe class——**挑战结论成立**（裁定①六裁：继续挑战；「box/cut-state 现裁：挑战 box 变体，cut-state 更根本——消除未来事件等待与 P12 对 R 的依赖」）。
+
+sol 明确：本票不构成 cut-state 的预批准（其正式字面仍需独立审查）。
