@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r19-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r20-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -203,6 +203,12 @@
 > **盒到期 → `unobservable(cause=flag-race-window-expired)` 独立收口 → complete pass**（宁缺勿误）；**禁止拿外层 525 s 当本等待上界**——sol 点名：abandoned worker 可永久活挂，总函数 cutoff 由局部盒承载）；selftest ④ 三钉。
 > - **W2 M/m 批**：分域标题五子域；(b) 补限定 + 求值序写死 (a)→(c)→(b)→(d)→(e)→竞态窗→13 类域；类 0 路径陈旧更正（真实路径仅 barrier 顺延）；(e) 措辞扩迟到完成形态；skip 表收编 D6b 第三路径 + 双 cause 交叉引用；A10 判定强度（控制流可达性）；P11 括注三 socket 封闭。
 > 状态改为 `criteria-r19-pending-independent-review`；r19 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r20 修订（第二十轮审查修复：2 blocker / 4 major / 4 minor 处置）**：r19 经三席跨厂商隔离独立审查（绑定 f321c77）——**三席全部 fail**（deepseek 1B/3M、grok 2B/2M/4m、sol 3B/4M）；r19 修复全部确认落地（格 1/格 2 落地成立）；去重 2 blocker（轨迹 12→8→4→3→5→3→2→1→2——回升 1，全部集中在 r19-P1 的 cutoff 变体[主会话在 grok 方案外自作主张部分]与旧路由传播缺口）。**sol 八格等价性对照表证明 cutoff 与 cut-state 不等价**——关键格 JT=1,F=0,R=1。
+> r20 修订内容（一包）：
+> - **V1 sticky 例外 + 本地输入分岔**（B-1 三席收敛 + B-2 grok + sol B-02）：runner class 轴 sticky 重建例外（与 join sticky 同构——D6b skip ∧ RETURN 在 ∧ 盒到期 cause 在 POST → runner 重建 flag-race、禁走 13 类）；`:640`「一律 (d)」改 R 分岔；`:691` 补前件；**(d)/竞态窗 P12 侧入口改纯本地可观测量**（快照写入完成信号 + 终态标志——不判 R，R 判定完全交 runner 侧 F8(2)；分岔门 = 信号已见[进竞态窗]/未置[落 (d)]——执行层自行发现并补件、主会话追认：不加此门则 R=0 经典格 F8(2) 误烧）；域扩 19→20、四步 (0) 6→7（11 处计数同步）；`:699` 假断言废除。
+> - **V2 M/m 残留**：A11 五 raw+钟（drain_end 单列）；上界论证 R=1 前提；容器归属 P12≤5s；时间盒表 P12 行；cause 补子窗；gate 3 括注/七步标题；worker 序补信号原子；marker 丢失残余格显式登记（预期 fail）；(d) 括注本地化读法；:620 位点枚举；⑪(e) JT 子形钉。
+> 状态改为 `criteria-r20-pending-independent-review`；r20 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -617,7 +623,7 @@ r8 Y3 原以「< 行 2 判定窗 27000 ms」为约束的比对论证随死因表
 → `u7` 记 `unobservable(cause=marker-tail-loss)`（r9 正名：原 cause 字面内嵌已删字段名 `site_uncertainty`，随字段更名 `marker_tail_state` 一并正名，判据尚未冻结之际改字面代价最小；旧字面全文清零、不再出现），**不得赋 `observed-false`**（D7_END 可能已实际发出但未落入 capture；区分「被杀」与「marker 丢失」不可靠时宁缺勿误）。
 - **结论边界**：结论只覆盖冻结的 20000 ms 与该负载形态，**不得外推更长任务或其他负载**。
 - **时间盒**：任务 20 s + 宽限 5 s。
-- **barrier/终态轮询原语（冻结）**：原子标志（Rust `AtomicBool` / C11 `atomic_uint`）+ `clock_nanosleep(CLOCK_MONOTONIC, 10ms)` 间隔——用于本门全部「有界轮询等待」位点（D-W barrier、worker 终态），禁止忙等、禁止其他 sleep 原语。
+- **barrier/终态轮询原语（冻结）**：原子标志（Rust `AtomicBool` / C11 `atomic_uint`）+ `clock_nanosleep(CLOCK_MONOTONIC, 10ms)` 间隔——用于本门全部「有界轮询等待」位点（D-W barrier、worker 终态、P12 迟到竞态窗（r20 补——deepseek M-03：原清单只有 D-W barrier/worker 终态，P12 盒沿同一原语但清单未纳）），禁止忙等、禁止其他 sleep 原语。
 
 ### D-W 唯一登记 waiter（含暴露窗口论证与归因收紧）
 
@@ -643,12 +649,12 @@ worker 在 poll 返回后立即发射本 marker，而最终 `dw_return_class` �
 **`dw_return_class` 的 runner sticky 重建例外（r20，第二十轮 B-1——grok 修法，与上方 join sticky 同构；deepseek 方案 (b) 同构）**：capture 中 `SKIP|item=D6b` 在 ∧ capture 有 `DW_RETURN` ∧ P12 记录 1000 ms 盒到期标志仍未置（`unobservable(cause=flag-race-window-expired)` 已写入 POST）→ runner 重建 `flag-race-window-expired`，**禁止**从 RETURN raw 走 13 类
 （「同一事实两算」的前提在该格不成立——P12 输入面=标志门快照[禁读]、runner 输入面=capture RETURN[可得]，两函数不同源，逐字段比对必然不一致——r20 写死该格的重建签名使两侧落同一 cause）；
 `dw_poll_*` 四字段与 `dw_destroy_distinguishable_from_timeout` 同 cause 透传（四步 (0) 扩入后自动承接）+ 同例外。
-**EXIT 存在性无小窗（r18，sol M-01）**：`dw_watchdog_killed` ①②支依赖 `DW_EXIT` 存在性——若 worker 序为「置标志 → emit EXIT」，P12 在标志置位后仍须等 `DW_EXIT` marker 发射（EXIT 小窗、存在性非单值）——**采标志门收口**：worker 侧序改为 写快照 → emit `DW_RETURN` → emit `DW_EXIT` → 置终态标志（下方 worker 序已同步对调），标志语义扩为「worker 全部输出已完成」（raw 已写**且** EXIT 已发射），r18 冻结；
+**EXIT 存在性无小窗（r18，sol M-01）**：`dw_watchdog_killed` ①②支依赖 `DW_EXIT` 存在性——若 worker 序为「置标志 → emit EXIT」，P12 在标志置位后仍须等 `DW_EXIT` marker 发射（EXIT 小窗、存在性非单值）——**采标志门收口**：worker 侧序改为 写快照 → **置快照写入完成信号**（r20 本地原子——worker 写完六字段后即时置位、先于 `DW_RETURN` 发射；(d) 本地证据链与竞态窗入口的分流门，见分域声明 r20）→ emit `DW_RETURN` → emit `DW_EXIT` → 置终态标志（下方 worker 序已同步对调），标志语义扩为「worker 全部输出已完成」（raw 已写**且** EXIT 已发射），r18 冻结；
 runner 从 capture raw **独立重建并比对**，不一致 → **fail，挂 F8(2)**（capture 内自相矛盾：探针 P12 派生值与 runner 从 capture raw 的独立重建值不一致——同一事实两算不符，记录器完整性缺陷；r17 挂载，grok B-03 = sol M-01 两席收敛：原『沿 E2 模式』未入闭集字面，按局部句 fail、按闭集实现漏判 = fail-open），重建值不作为第二事实源、只作校验；
 **pre-only 死亡收口形态**（POST 不存在）下由 runner 收齐 capture 后派生，两形态互斥、各形态唯一派生点（派生序见判定表段 r15 冻结；r15 原声明「runner 在收齐 SKIP/`_T`/`_C`/终态后唯一派生」随死锁解环改述——该声明下 complete 形态的 runner 须先收齐终态（含 POST）方能派生、而 POST `dw_outcome` 又须已含派生 class，循环等待、complete 成功态不可实现）；
 **单源声明（r18 改述——原「raw marker 与派生结果无双源」句随快照机制重写改述；r19 更正一致性来源表述，sol M-04）**：P12 派生的 raw 输入 = 快照（经标志门读取）；runner 重建的 raw 输入 = capture 中的 `DW_RETURN` marker——两输入面的 raw 一致性由**源码层单次读同源两写约束**保证（一致性来自实现约束、非运行时检测——F8(2) 只比对派生值、同 class 等价类内的 raw 分叉不可见，**不得宣称 F8 背书 raw 同值**；单读同源两写由静态断言 A11 背书——r19）；
 快照与 marker 不是双源——同一次读取的两个投影；complete 形态唯一事实源 = 探针主线程 P12 派生值（runner 重建值仅作校验）、pre-only 形态唯一事实源 = runner 派生值，marker 不再携带候选值）
-→ emit `N1BDISC_DW_EXIT` → 置 worker 终态原子标志（**r18 序对调：原「置标志 → emit EXIT」废除**——EXIT 发射纳入标志门，标志语义 = 「worker 全部输出已完成」（raw 已写**且** EXIT 已发射），sol M-01 消 P12 的 EXIT 小窗）→ 线程返回。
+→ emit `N1BDISC_DW_EXIT` → 置 worker 终态原子标志（**r18 序对调：原「置标志 → emit EXIT」废除**——EXIT 发射纳入标志门，标志语义 = 「worker 全部输出已完成」（raw 已写**且** EXIT 已发射），sol M-01 消 P12 的 EXIT 小窗；r20 序补：本序「写快照」与 emit `DW_RETURN` 之间新增**置快照写入完成信号**原子（写完六字段后即时置位、先于 RETURN 发射——(d) 本地证据链与竞态窗入口的分流门，见 :646 与分域声明 r20））→ 线程返回。
 - **主线程序列**：以原子标志 + 10 ms `clock_nanosleep` 有界轮询等待 barrier（**≤7 s** = drain 盒 5 s + 调度裕量 2 s——worker 先 drain 再置 barrier，等待盒必须覆盖 drain 全程，否则 drain 超 2 s 时 barrier 必超时、destroy 在 drain 期间就被调用，违反决议 §三.3「destroy 之前确认进入等待」并使「drain 超时 × in-wait 确认成功」组合结构不可达；超时 → `dw_entry_confirmed=unobservable(cause=barrier-timeout)`，**跳过 in-wait 采集**，waiter 事实按 unobservable 收口）
   → **in-wait 证据采集**（barrier 确认后、destroy 之前；见下）→ emit `N1BDISC_DW_INWAIT|src=<proc-stat|proc-syscall|both|unreadable>|conf=<state>|samples=<n>|errno=<e>` → 读单调时钟并 emit `N1BDISC_DW_DESTROY_T|mono_ms=<n>`（**紧贴 `destroy()` 调用之前的时序锚**；r7 X4 保留；r9：本步至下方 `_C` 步为「共享 destroy 子协议」，见本节专条——凡实际调用 `destroy()` 的路径一律依次走这三步）
   → **发起 `destroy()` 调用**（取得 Promise，**不等待**；全程唯一一次——r8 Y1 四步序列第二步：实现契约只要求调用已发起并取得 Promise 对象，不要求 resolve）
@@ -686,7 +692,9 @@ barrier 等待盒（7 s）到期仍未见 marker → destroy **顺延**：主线
 **r18 补注：join-timeout∧标志已置（迟到返回恰在盒到期前后）→ 非 (d)**——标志已置则读快照走 13 类（RETURN 是否入 capture 由 runner 侧比对/F8(2) 处理））
 ∧ **本地证据链：P12 前序未见快照写入完成信号且终态标志未置**（r20，sol B-02——原「`DW_RETURN` 缺（以 capture 为准、P12 检验）」随 capture 通道不可达废除：设备侧 P12 无 host capture 通道、F=0 时 R 不可判；(d) 与竞态窗两支的 P12 侧分流不依赖 R、各落各自本地 cause，R 的判定完全交 runner 侧 F8(2) 比对——
 快照写入完成信号为 worker 侧本地量（写快照后即时置位、先于 RETURN 发射），其未置 ⟹ RETURN 必未发射 ⟹ capture 无 RETURN——R=0 时 runner 侧 sticky 例外条件不成立、正常重建本支 `poll-never-returned`、与 P12 一致。r18：标志未置是本支机器门，原 r17 括注「终态标志只在 RETURN 后置位 → 该路径必然无 RETURN」随快照发布边界重写废除；
-**r18 归因洁净补注（D6b 重裁侧，grok B-01 = sol B-02）**：进程内 marker 发射与 capture 落盘是两个事件，迟到 RETURN 入 capture 则本前件失败——与上方标志已置补注为同一场景的两面；D6b skip（D6 节 D6b 段 r18 重裁）保证主线程在 P12 前不再触碰 `fd_dup`，晚到 RETURN 若发生不会被 D6b 的 close/read 唤醒或抑制——**归因洁净由 skip 保证，不由 close 的平台行为决定**）∧ **终态标志未置**（r19 第五前件——标志已置则无论 capture 有无 RETURN 均不入 (d)：有 RETURN → 读快照 13 类；无 RETURN → (e)）；该 cause 纳入 `dw_return_class` 取值域（18→19 值）；
+**r18 归因洁净补注（D6b 重裁侧，grok B-01 = sol B-02）**：进程内 marker 发射与 capture 落盘是两个事件，迟到 RETURN 入 capture 则本前件失败——与上方标志已置补注为同一场景的两面；D6b skip（D6 节 D6b 段 r18 重裁）保证主线程在 P12 前不再触碰 `fd_dup`，晚到 RETURN 若发生不会被 D6b 的 close/read 唤醒或抑制——**归因洁净由 skip 保证，不由 close 的平台行为决定**）
+∧ **终态标志未置**（r19 第五前件——标志已置则无论 capture 有无 RETURN 均不入 (d)：有 RETURN → 读快照 13 类；无 RETURN → (e)（r20 注：此为总体路由的 capture 视角描述——P12 侧执行入口见 :687 本地证据链与 :698 竞态窗本地入口，capture 视角的 R 判定由 runner 侧行使））；
+该 cause 纳入 `dw_return_class` 取值域（18→19 值）；
 **`dw_join_result` 不扩域（r17 核对结论）**——该形态 join 侧落既有本体值 `join-timeout`（P10 到期登记本不依赖 RETURN），join 域维持 10 值；`dw_destroy_distinguishable_from_timeout` 四步表：该值归步 (0) 透传（worker 未返回、resolve 两维前提不成立——沿 skip/死亡收口同款理由）；
 RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents`/`dw_poll_return_elapsed_ms` 各记同 cause（poll 未返回、RETURN raw 无值），`dw_drain_*` 不盖——poll 挂死形态下 DRAIN 先于 BARRIER 必已发射、raw 有值（沿 r10 反 blanket 法理，真实数据不得盖掉）；
 **r19 (d)/(e) 求值序**：两支先到先得，先到先得**以五前件为准**——(d) 第五前件（终态标志未置）把标志已置的输入拦在 (d) 外，(e) 不可被 (d) 截胡（r19 前四前件形态下可截胡，grok B-01）。
@@ -702,6 +710,7 @@ RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents
 **1000 ms 到期标志仍未置 → `unobservable(cause=flag-race-window-expired)`**（新具名 cause——「worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占（r20 补 grok m-04——原「EXIT 前」覆盖不了 R=1∧EXIT=1∧F=0 的到期子窗）、标志永不置」的不可判形态：进程活（非死亡分量）、RETURN 在（非 (d)）、标志未置（非 (e)）——三态均不吸附，独立收口）
 → `dw_return_class`/poll raw 字段同 cause、`dw_join_result=join-timeout`（JT 已登记不重写）、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**
 （合法竞态残余宁缺勿误——RETURN 在 capture ⟹ 快照五 raw 已写完、只是标志未 release；**F8(2) 比对按上方 r20 sticky 例外执行**：runner 按 capture 可见签名（D6b skip ∧ RETURN 在 ∧ 盒到期 cause 在 POST）重建同一 cause → 一致 → 不命中——**原 r19「runner 正常重建 13 类、一致」为假断言，r20 废除**）。
+**残余格登记（r20）：快照写入完成信号已见 ∧ 盒到期 ∧ capture 无 `DW_RETURN`**（信号 ⟹ 快照已写 ⟹ RETURN 应已发射——capture 无 = marker 丢失/capture 完整性矛盾）→ P12 落 `flag-race-window-expired`（本地观测如实记录）、runner sticky 条件不成立（RETURN 不在）→ 正常重建→ F8(2) 比对不一致 → **fail(F8(2))**——与 (e) 的 capture 完整性 fail 轴一致（宁缺勿误不适用于记录器完整性矛盾），登记为预期 fail 而非缝。
 **上界理由与外层窗的关系（r19 定稿注）**：1000 ms 局部盒叠加于 **P12 自身 ≤5 s 串行预算**（时间盒表 P5T+P11+P12 槽）内，不改变 467 s 上界与 58 s 收尾裕量（r20 更正 deepseek M-01——原「含于 58 s 收尾裕量」归属错误）；**禁止**把外层观测窗 525 s 当作本等待上界（sol 第十九轮：外层窗不是本格的冻结局部上界、abandoned worker 可永久活挂——本格收口由 1000 ms cutoff 承载，与 525 s 无关）。
 合法域门通过后，方进入下述派生序（r15 改述：原「13 类判定表」的自上而下匹配现按上述前置门序执行；类 0/0b 已前置、行 1-11 为终末匹配）。**首个命中即定类并终止匹配**：
 
@@ -1393,9 +1402,10 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 `dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents`/`dw_poll_return_elapsed_ms` 各记同 cause（poll 未返回、RETURN raw 无值），`dw_drain_*` 保 `DW_DRAIN` marker 真实值（不盖，r10 反 blanket 法理）→ POST 各字段有值、无字段缺项 → fail 闭集（F1-F6、F8、F9）均不命中 → verdict **`complete pass`**（终态标志只在 RETURN 后置位 → 该合法 complete 形态必然无 RETURN，不得烧 ID）。
 **r19 迟到返回 complete pass 钉（grok B-01 验收钉——分域 (d) 五前件 + `dw_join_result` 重建规则验收）**：夹具沿上方 join-timeout 夹具至 P10 盒到期（JT 登记 + `SKIP|item=D6b` + P11），此后 P12 前迟到 worker 完成序列入 capture（`DW_RETURN`/`DW_EXIT` 在、终态标志置位）→ class 走 13 类（快照经标志门可读）、`dw_join_result=join-timeout`（重建规则：D6b skip 在 → 不由 EXIT/RETURN 存在性改写 joined）、D6b skip 编码不变、F8(2) 按重建规则一致 → **complete pass**（合法迟到完成不得烧 ID）。
 **r19 (e) fail 钉（grok B-01 验收钉——(e) 支 + (d) 五前件验收）**：夹具终态标志在 P10 盒内置位（join 正常完成、无 JT 登记）+ capture 无 `DW_RETURN` → (e) 标志已置 ∧ capture 无 marker → **F8(2) fail**（具名 `return-marker-missing` 不适用），**不得落 (d)**（(d) 五前件「终态标志未置」失败——r19 前四前件下 (d) 截胡 (e) 即 fail-open，本钉封死）。
+**r20 JT 子形钉（grok m-03）**：JT=1∧F→1∧R=0（P10 盒到期后、P12 前迟到完成标志置位但 RETURN 未入 capture）→ (e) F8(2) fail，不得落 (d)——五前件第五项（标志未置）失败封死截胡，JT=1 子形与 JT=0 同键。
 **r18 落值断言（D6b skip 编码）**：POST `d6_items` D6S4..S7 各子项 `skipped(cause=join-timeout-abandoned)`（D6a S1..S3 result 编码不变；`SKIP|item=D6b` 不改道类 0——类 0 仅认 `item=destroy`——亦不触发 (a) 全量指派，D-W 未整体 skip）、`u4_dup_getfd`/`u4_dup_read`/`u4_dup_close`/`u4_dup_fd_reuse` 各记 `unobservable(cause=d6b-skipped-join-timeout)`。
-**r19 第三格钉（迟到竞态窗收口验收——分域声明 r19 迟到竞态窗收口 + 1000 ms cutoff）**：夹具同 join-timeout 夹具至 JT 登记 + D6b skip，P12 到点时终态标志仍未置但 capture 已有 `DW_RETURN` → 主线程有界等待（1000 ms 局部盒、冻结轮询原语）：(a) 盒内标志置位 → 读快照走 13 类 + `dw_join_result=join-timeout`（重建规则一致、F8(2) 不命中）→ **complete pass**（capture 有 RETURN 即不入 (d)——标志未置的机器门不否决 capture 既成事实）；
-   (b) 对照——**1000 ms 到期标志仍未置**（worker 在 EXIT 前某点被永久抢占/阻塞）→ `dw_return_class`/poll raw 字段落 `unobservable(cause=flag-race-window-expired)`、`dw_join_result=join-timeout` 不重写、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**（合法竞态残余宁缺勿误；r19 定稿 cutoff——禁止无界等待未知事件、禁止拿外层 525 s 当本等待上界）。
+**r19 第三格钉（迟到竞态窗收口验收——分域声明 r19 迟到竞态窗收口 + 1000 ms cutoff）**：夹具同 join-timeout 夹具至 JT 登记 + D6b skip，P12 到点时终态标志仍未置但 capture 已有 `DW_RETURN` → 主线程有界等待（1000 ms 局部盒、冻结轮询原语）：(a) 盒内标志置位 → 读快照走 13 类 + `dw_join_result=join-timeout`（重建规则一致、F8(2) 不命中）→ **complete pass**（r20 改述：P12 侧入口不判 R——本地信号已见即进竞态窗，见分域声明 r20 入口）；
+   (b) 对照——**1000 ms 到期标志仍未置**（worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占/阻塞（r20 补子窗——见 `:702` cause 描述））→ `dw_return_class`/poll raw 字段落 `unobservable(cause=flag-race-window-expired)`、`dw_join_result=join-timeout` 不重写、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**（合法竞态残余宁缺勿误；r19 定稿 cutoff——禁止无界等待未知事件、禁止拿外层 525 s 当本等待上界）。
 **r18 归因洁净反例钉**：join-timeout 形态下主线程对 `fd_dup` 的任何 D6b 操作 = 违反归因洁净（「watchdog 暴露窗口」缓解 3：worker poll 终态之前主线程不触碰 `fd_dup`）——静态断言 A10 必须 fail（源码层反例 = join-timeout 分支控制流含对 `fd_dup` 的任一 read/write/fcntl/close 调用点，见静态断言表 A10）。
    **r17 barrier-never-observed 钉（grok m-03，B-01 反例 A 验收；分域声明 (c) 支验收）**：夹具 worker 卡死未发 BARRIER → 主线程 7+8 s 盒尽后发 `SKIP|item=destroy|cause=barrier-never-observed` → 交观测窗 → 进程死亡（PRE 在、POST 缺、无崩溃签名）→ 五态 `not-called` → **`dw_return_class`=类 0 `destroy-skip-proven`（分域 (c)：无 RETURN、经 SKIP 存在性直接判类）** → 四步 (1) SKIP 位点字面（`barrier-never-observed`）→ 不命中 F4/F8/F1 → pre-only **pass**。
 （r18 口径注：上句「终态标志只在 RETURN 后置位」为本钉形态的描述——本形态 worker 确未返回；迟到返回形态由标志已置门分流、不入本钉，见分域声明 (d) r18 归因洁净补注与 (e) 支。）
