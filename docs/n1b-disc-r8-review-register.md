@@ -946,3 +946,7 @@ grok M-01（行号锚未改净）/M-02（T' 无 R=0 夹具、RACEWIN 行次无�
 **接手判定复核（sol 全部接受）**：预警 1 判 M 接受（A12 已关闭——旧判例有独立 capture raw 事实源、三输出同源 F_cut 终态无法反证——固有不对称由 A12 静态防线承担）；预警 2 判 B 接受（与 grok 同向）；三深格初判全部确认（SIG 维非缝/死亡窗非缝/三输出联错 M）。
 
 **八格意图终表（sol）**：F_cut=0 两格 R_final 不改 verdict（100/101 均 pass——决胜格 + TOCTOU）；实际 F=1 三输出联错按记录 cut 落 pass——**明确接受的不对称**。裁定①十裁：方向维持、落地仍 fail。裁定②终裁：cut-state 语义本体维持采纳、r23 意图在八格 verdict 上等价、字面因 2B 不等价。
+
+### deepseek 终稿——fail 1B/2M（与 sol B-01 精确收敛 + 独有溯源细节）
+
+deepseek 的 grep 取证比 sol 更细：`:665` 区的 cut-state 字样只在 `:676` 的 class sticky 括注（仅覆盖 class 轴）；`:677`「同例外」模糊且只及 poll raw；**watchdog 轴在所有权块内零 carve-out**（`:673`/`:678` 的 EXIT 喂 ④ 语义恰是催生两读的来源）；(B) 段 `:754` **自证**「runner 见迟到 EXIT 走 ④ → :665 全字段比对 fail」却未回写 :665。M-01 与 sol B-02 同根（允许集示例化）+ 补充「flag-race 的 watchdog 允许集只字未提」「裸 unobservable 会把 skip 具名清单误纳入非 skip 格」。M-02（gate 3 括注缺 r23 纳入 A12——纯登记 nit）。其块 1 其余/块 2 与 sol 复核结论一致（join/派生无张力、EXIT 窗诚实观测、A12/selftest 一致）。
