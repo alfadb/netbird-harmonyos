@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r25-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-frozen-2026-09-02`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -246,6 +246,9 @@
 > **A12 扩员到五输出**（watchdog/poll raw 绑到那一次 F load——r23 三输出未含 watchdog 的洞闭合）。
 > - **Y2 M/m**：闭表与 (i)(ii)(iii) 合取声明；「任何值」→「任何字段值」；selftest 钉补 watchdog=⑤；gate 3 r25 溯源。
 > 状态改为 `criteria-r25-pending-independent-review`；r25 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r26-freeze 冻结（第二十六轮三席全 pass → 用户授权冻结）**：r25 经三席跨厂商隔离独立审查（绑定 b12e671）——**sol pass 0B/0M/0m（首次三零票）、deepseek pass 0B/3M（勘误级）、grok pass 0B/2M/3m**——去重 **0 blocker**，轨迹 12→8→4→3→5→3→2→1→2→3→5→1→2→1→**0**。grok 建议的两项 M 在冻结前落地（M-01 适用域优先序与 cut 缺省句 / M-02 观测推导主句删净）；其 m-01/m-02/m-03（残留误引/A12 全称过宽/cause 字面理据分裂）以「冻结说明登记项」形式在案、经 grok 确认不阻塞。
+> **本判据自此冻结（2026-09-02）**：后续任何修改属判据变更、须重新走跨厂商隔离独立审查流程。ID 分配（AUTH/pair、evidence）与一切物理执行仍以用户逐项显式授权为前置（决议 §4.2/§4.4）。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -770,7 +773,7 @@ runner 侧 sticky 例外签名**去掉 R=1 合取**（最终签名 = `D6b skip �
 **(B) cut=false 格**（P12 读到 FLAG=0——poll-never 或 flag-race）：**runner 不从终态 capture raw 重建上述会被迟到完成分叉的字段**（r24——原『class』未随全轴扩展同步）（**r23 全轴扩展，grok B-01——原 r22 只关 class 轴：watchdog 轴上 P12 于 EXIT 缺时点写 ⑤、runner 见迟到 EXIT 走 ④ → 见 dw_outcome 所有权声明（r24 已加例外指针）——全字段比对 fail；
 poll raw 轴上 P12 写 unobservable、runner 从迟到 RETURN 重建数值 → 不一致 fail——T* 决胜格 fail-closed 与 selftest complete pass 矛盾**）：cut=false 格的 `dw_outcome` **全部**会被迟到完成分叉的字段——`dw_return_class` / `dw_poll_*` 四字段 / `dw_watchdog_killed`——
 runner 一律**不从终态 capture 重建**，只做分支一致性校验：poll raw 字段与 watchdog 字段按「P12 写值透传校验」——**允许集闭表（r24 冻结，第二十四轮 B-2 三席收敛）**：
-- **class=poll-never-returned** ⟹ poll raw 四字段允许集 = {`unobservable(cause=poll-never-returned)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（r25 更正措辞：P12 无 capture 通道 → F_cut=0 时**读不到 EXIT marker** → 写 ⑤——**cut-imputed**（由 cut=false 政策推定、非 EXIT 缺失观测[EXIT 可已发射——T† 窗]；写值绑定见 (d) 落值清单 r25）；写 ①②④或任何其他 unobservable cause 均为错写 → fail(F8(2))）；
+- **class=poll-never-returned** ⟹ poll raw 四字段允许集 = {`unobservable(cause=poll-never-returned)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（r26-freeze 删净 grok M-02：原 r25「读不到 EXIT marker → 写 ⑤」观测推导主句废除——**写 ⑤ 的唯一依据 = cut-imputed**（由 cut=false 政策推定、非 EXIT 缺失观测[EXIT 可已发射——T† 窗]；写值绑定见 (d) 落值清单 r25）；写 ①②④或任何其他 unobservable cause 均为错写 → fail(F8(2))）；
 - **class=flag-race-window-expired** ⟹ poll raw 四字段允许集 = {`unobservable(cause=flag-race-window-expired)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（r25：本行写值依据同行 1 的 cut-imputed 措辞——**不以「EXIT 未见」为据**（T† 窗 EXIT 可已在 capture——deepseek：原「同上」桥接把 poll-never 行论证误扩到本行）——
 **r24 关键措辞：EXIT 的 capture 存在性不参与本校验，无论该 EXIT 是 P12 决策后才入 capture（迟到）还是决策前已发射入 capture（T† 窗：worker 完成 RETURN+EXIT 而未置 FLAG——P12 的 F 读值为唯一事实源、EXIT 在 capture 与 F=0 不矛盾[发射与置标志是两事件]**——两种形态一律不参与）；
 - 上述两行之外的**任何字段值**（r25 更正 deepseek M-01——本行只管字段值；marker 与 class 域分别由 (i)(ii) 承载）（含裸 unobservable、skip 具名 cause、④①②、数值 raw）→ fail(F8(2))。
@@ -865,6 +868,7 @@ errno 承载（r17 更正，grok M-02）：原「四载荷字段」中 errno 非
   `dw_join_result`（`joined` / `join-timeout` / `join-blocked-observed` / `ESRCH` / `other+errno` + r9 第五步 BL-5 纳入的 skip 编码 2 值 + r10 纳入、r12 拆分、r13 第三包再拆分的 pre-only 死亡收口编码 3 值（同 `dw_return_class` r12 拆分、r13 第三包再拆的三 cause） = **10 值**；r17：complete∧join-timeout 形态落既有本体值 `join-timeout`（P10 到期登记、不依赖 RETURN）、本域不扩——D-W 节分域声明 (d) 支核对结论）、
   - `dw_watchdog_killed`（三态；历史字段名（r3 E11 冻结；r15 语义更正，sol B-03/grok M-02）：本字段**不再承载 watchdog 归属语义**——`observed-true` 的语义以 ③ 为准（waiter 于 destroy 未及窗内死亡且 inwait 确认已进入等待），不构成 watchdog 归属的证据（SIGKILL/OOM/生命周期终止在该观测下不可区分）；N1b 不得将该 true 引用为「平台 watchdog 杀了 poll waiter」；赋值规则仍沿 r3 第二趟 E11 的逐字冻结——原「语义方向与 D7 相反」对比句 r15 改口径：D7 判「任务被杀」，本字段不再判「waiter 被 watchdog 杀」（r15 归因语义已废、见上），故仍不得引用「同 D7」，独立三态如下——
     **适用域（r25，第二十五轮 B-1 三席收敛）**：本表适用于 JT=0 格、cut=true 格（(A)——P12 侧 ④ 的本地代理 = `dw_worker_terminal` FLAG load）、pre-only 形态；**JT=1∧cut=false 格不走本表**——P12 写值 = ⑤（cut-imputed，见 (d)/flag-race 落值清单 r25 绑定）、runner 校验走闭表（`dw_watchdog_killed` 允许集恰 {⑤}）——④ 前件（EXIT marker 存在）是 capture 谓词、P12 侧不适用、亦不得另读 FLAG 代理之。
+    **优先序与 cut 缺省（r26-freeze，grok M-01）：`worker_terminal_at_p12`（cut）仅在 complete/POST 形态有定义——pre-only 形态无 POST、cut 不载，**缺省不得读作 false**（最坏实现把缺省 cut 当 false 会把 pre-only 死亡格错误推进 carve-out ⑤ 分支——pre-only 一律走本表，优先于 carve-out 字面；runner 侧对 pre-only 的 watchdog 求值者是收口后的 capture 求值、④ 是真 capture 谓词）**
     **r13 改有序互斥表求值（第十三轮 blocker 2，grok M-02 + sol B-02 两席收敛）**：原 true 支与 unobservable 支「`PidOfVpn` absent 且 `_C` 缺（无论 `_T` 在否——不得 true/false）」争同一构造——物理上最真的「waiter 在 poll 等待中被杀」（`_T`/`_C` 均缺）两支同时命中；sol 另指：正例构造中的 SIGKILL 条目只是平台终止关联证据、不证明 watchdog 归属。故三态改**有序互斥表**：求值序按下述①→⑤写死，**先到先得——命中即定值并终止，后续支不再求值**（分支前件在谓词层面可重叠，结局由求值序唯一化）；skip 具名清单位于表外（skip 路径无 waiter 运行、无本表求值面，见下方清单）：
     - ① `N1BDISC_DW_DESTROY_C` 在 **且** `PidOfVpn` absent（positive 基线前置满足）**且 `N1BDISC_DW_EXIT` 缺**（r13 主会话补：EXIT 在时 waiter 已正常走到终态——本字段语义上应为 ④ `observed-false`，本支不截胡 complete 正常主线）→ `unobservable(cause=destroy-terminal-candidate)`——**r13 新具名 cause，原「死亡可由 destroy 解释」句的字面收纳**：
       `_C` 在而 absent 的组合属「destroy 使 `:vpn` 进程 terminal」（预期成功终态方向，r9：原「死因分类行 4 (ii) 承载」随死因表删除——该组合现由七分量证据向量的事实组合承载：destroy 调用已发起记入 `destroy_call_state`（五态定义见「死亡事实记录（证据向量）」节五态表）、`:vpn` 消失记入 `process_death_observed`，不合成任何归因、**不驱动 fail**，
