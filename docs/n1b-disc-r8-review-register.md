@@ -968,3 +968,7 @@ deepseek 的 grep 取证比 sol 更细：`:665` 区的 cut-state 字样只在 `:
 **B-01（闭表 vs 主表）**：watchdog ①→⑤ 主表（`:856-:874`）的 ④「`DW_EXIT` marker 存在 → observed-false」**无 cut=false carve-out**——T† 格（EXIT 在 capture、F=0、class=flag-race）按主表 ④ 得 observed-false、按闭表（`:765`）得 ⑤ 并宣告 complete pass——**同一合法成功终态双值**。sol 同时给出根基诊断：闭表「恰一值 ⑤」的「P12…EXIT 必未见[本地读]」不是观测推导（P12 无 capture 通道、无 EXIT-local 原子；F=0 不推 EXIT 未发——T† 正是 EXIT=1∧F=0）——⑤ 只能是 **cut-imputed unobservable**（政策推定、非观测）。**修法：watchdog 主表与所有权处加优先特例——JT=1∧cut=false 不求值 ①→⑤ 表、P12 仅由同一次 F 判定赋 ⑤（声明为 cut-imputed、非 EXIT 缺失观测）+ T† 钉断言「全局 ④ 不适用」**。
 
 sol 对联合校验/join 的判定：(B) 内部无漏洞（交叠是合取非缝）；join sticky「无迟到分叉」结论成立（但「JT 登记时 marker 已入 capture」字面不准——D6b skip 在登记后 P11 前发）。裁定①十一裁：方向维持、落地仍 fail。裁定②：cut-state 本体维持、闭表作 scoped 映射可机器定义但缺主表例外。
+
+### deepseek 终稿——fail 1B/1M（与 sol B-01 同根收敛 + 「同上」桥接的精确病理）
+
+deepseek 与 sol 在同一格收敛（T† 的 ④/⑤ 双值），但其病理定位更细：**:765 flag-race 行的「同上」把 poll-never 行的论证（该行 EXIT 必缺、⑤ 成立）误扩到 flag-race 行**——「有序表唯一落 ⑤」是 capture 求值命题、在 T† 窗为假，与 r24 自己的 T† 钉（:1480「按 ①-⑤ 表走 ④ 烧 ID」）自证矛盾。修法与 sol 同向（删「同上」、改「P12 无 capture → F=0 读不到 EXIT → 写 ⑤」+ ④ 前件一律不参与）。M-01（闭表与 (i)(ii)(iii) 的合取关系无显式声明 + 「任何值」→「任何字段值」）。块 2 计数/行宽/溯源全过。
