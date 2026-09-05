@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r23-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r24-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -231,6 +231,13 @@
 > - **V1 (B) 扩全轴**（grok B-01 修法最小集）：cut=false 格的 dw_outcome 全部会被迟到完成分叉的字段（class/poll raw 四字段/watchdog）runner 一律不从终态 capture 重建——poll raw/watchdog 改「P12 写值透传校验」（合法域 + 与 class 分支一致，迟到 EXIT/RETURN 的 capture 存在性不参与）；:714/:715 点时全称废止；路径①/四步 (0) 旁证互斥删；「双向可抓」边界注（整支联错为固有不对称）；A12 静态断言（三输出与 F 分支控制流绑定）+ gate 3 A1-A12；selftest 三钉（T* 全轴/RACEWIN 行次/T' R=0）。
 > - **V2 M/m**：行号锚最后清扫 + r17 夹具点时描述注；「release」内存序旧词更正。
 > 状态改为 `criteria-r23-pending-independent-review`；r23 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r24 修订（第二十四轮审查修复：2 blocker / 2 major / 3 minor 处置；sol 席完成主会话接手判定的完整复核——三项全部接受）**：r23 经三席跨厂商隔离独立审查（绑定 422b27c）——**sol fail 2B/0M/1m、deepseek fail 1B/2M、grok fail 2B/0M/3m**；r23 修复全部确认落地（:714/:715 废止/旁证删/A12/三钉/边界注/行号锚）。去重 2 blocker（轨迹 12→8→4→3→5→3→2→1→2→3→5→1→2——**传播缺口谱系第三次变体**：r16 字段传播→r23 轴传播→本轮规则位传播四处）。**裁定②终裁（sol）：cut-state 方案本体维持采纳**——r23 意图在八格 verdict 上等价、字面因 2B 不等价。
+> r24 修订内容（两趟均执行层）：
+> - **X1 例外指针四处落盘**（B-1 grok「同一钉三处落盘」）：:672/:680/F8 索引/criteria-gap (2) 四处操作句全加 cut=false 格例外指针；cut-state 头句/(B) 首句从「class」改「dw_outcome 会被迟到完成分叉的字段」。
+> - **X2 允许集闭表**（B-2 三席收敛 + grok T† 构造）：class × poll raw × watchdog 允许集冻结——poll-never/flag-race 两行各自**恰一值**（poll raw 同 cause、watchdog=⑤）；两行之外任何值 → fail(F8(2))；「EXIT/RETURN 的 capture 存在性不参与」改 **cut=false 格一律**（T† 决策前已发射形态——发射与置标志是两事件）。
+> - **X3 M/m**：T† 钉 + r22 钉全轴标注；(B) 段行号锚；gate 3 溯源括注；:758 不成对加粗修正（主会话）。
+> 状态改为 `criteria-r24-pending-independent-review`；r24 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -751,7 +758,7 @@ runner 侧 sticky 例外签名**去掉 R=1 合取**（最终签名 = `D6b skip �
 **cut-state 规则（r22，sol B-01 TOCTOU 闭合——四轮同族 blocker 的根治；主会话裁定正面采纳 sol 方案——P12 点时本地观测与 runner 终态 capture 重建的比较在「决策与 POST 发射之间」的窗口上本质竞态；r19-r22 四轮 blocker 同族根治）**：
 **POST 新增 `worker_terminal_at_p12`（cut 记录）**——P12 写 class 时的终态标志读值（true/false）。runner 对 **JT=1 格**（capture 有 `SKIP|item=D6b`）的 **dw_outcome 会被迟到完成分叉的字段**（class/poll raw 四字段/watchdog）校验改 **cut-aware**（r24 更正头句——原『class』未随全轴扩展同步）：
 **(A) cut=true 格**（P12 读到 FLAG=1——worker 已完成全序，RETURN/EXIT 必已发射）：正常 F8(2) 比对保留（runner 从 capture RETURN raw 重建、与 POST class 比对）+ **RETURN 与 EXIT 必在 capture**（缺任一 → (e) 轴 fail(F8(2))——capture 完整性矛盾；deepseek M-03 的盒内 R=0 格同此轴）。
-**(B) cut=false 格**（P12 读到 FLAG=0——poll-never 或 flag-race）：**runner 不从终态 capture raw 重建上述会被迟到完成分叉的字段**（r24——原『class』未随全轴扩展同步）（**r23 全轴扩展，grok B-01——原 r22 只关 class 轴：watchdog 轴上 P12 于 EXIT 缺时点写 ⑤、runner 见迟到 EXIT 走 ④ → `:665` 全字段比对 fail；
+**(B) cut=false 格**（P12 读到 FLAG=0——poll-never 或 flag-race）：**runner 不从终态 capture raw 重建上述会被迟到完成分叉的字段**（r24——原『class』未随全轴扩展同步）（**r23 全轴扩展，grok B-01——原 r22 只关 class 轴：watchdog 轴上 P12 于 EXIT 缺时点写 ⑤、runner 见迟到 EXIT 走 ④ → 见 dw_outcome 所有权声明（r24 已加例外指针）——全字段比对 fail；
 poll raw 轴上 P12 写 unobservable、runner 从迟到 RETURN 重建数值 → 不一致 fail——T* 决胜格 fail-closed 与 selftest complete pass 矛盾**）：cut=false 格的 `dw_outcome` **全部**会被迟到完成分叉的字段——`dw_return_class` / `dw_poll_*` 四字段 / `dw_watchdog_killed`——
 runner 一律**不从终态 capture 重建**，只做分支一致性校验：poll raw 字段与 watchdog 字段按「P12 写值透传校验」——**允许集闭表（r24 冻结，第二十四轮 B-2 三席收敛）**：
 - **class=poll-never-returned** ⟹ poll raw 四字段允许集 = {`unobservable(cause=poll-never-returned)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（P12 于 F_cut=0 时点 EXIT 必未见[本地读]，watchdog 有序表在该时点唯一落 ⑤；写 ①②④或任何其他 unobservable cause 均为错写 → fail(F8(2))）；
@@ -1404,7 +1411,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 | --- | --- |
 | 1 host-only 同步 | 同步 trusted refs/bundle；clean HEAD 含本登记+runner+selftests+docs；记录 `code_sha`；HDC0 固定绝对 host `ps` 探针 |
 | 2 候选 ID 消费审计 audit-1 | 仓外双文件 + `.sha256`（AUTH-N1BDISC-… 候选 pair） |
-| 3 freeze + 静态审查 | 判据 freeze；reviewer 静态审查（符号清单誊录核对、**实现配置字面 == 本文 MR 表字面（不一致即不得 freeze）**、静态断言 A1-A12（r10 纳入 A9、r18/r19 纳入 A10/A11，A M-04/B M-01）、时间盒表核对；**r4 第二趟 S1 新增：`Fault_Type` 候选集收敛前置——若届时已能取得目标元组的一条真实 faultlogger 文本，须据此把候选集收敛为实测字面并重新提交独立审查；若取不到，则以「死亡事实记录（证据向量）」节冻结候选集执行并在证据中登记该未实测依赖（r9：原「以死因分类节 S1 兜底出口执行」及其行 4 (iii)/行 5 分岔随死因表删除——冻结前候选集收敛义务本身保留，域外字面按该节证据规则 5 记 `other:<原值逐字>`、不驱动 fail）**） |
+| 3 freeze + 静态审查 | 判据 freeze；reviewer 静态审查（符号清单誊录核对、**实现配置字面 == 本文 MR 表字面（不一致即不得 freeze）**、静态断言 A1-A12（r10 A9、r18/r19 A10/A11、r23 A12）、时间盒表核对；**r4 第二趟 S1 新增：`Fault_Type` 候选集收敛前置——若届时已能取得目标元组的一条真实 faultlogger 文本，须据此把候选集收敛为实测字面并重新提交独立审查；若取不到，则以「死亡事实记录（证据向量）」节冻结候选集执行并在证据中登记该未实测依赖（r9：原「以死因分类节 S1 兜底出口执行」及其行 4 (iii)/行 5 分岔随死因表删除——冻结前候选集收敛义务本身保留，域外字面按该节证据规则 5 记 `other:<原值逐字>`、不驱动 fail）**） |
 | 4 host-prep `tconn` + 一次内存级 `list targets` | 同（窄例外沿用） |
 | 5 `-TargetBindingConfirm` | 3 白名单探针；**完整系统版本实测复核**（E3 记录 7.0.0.100 与冻结值 7.0.0.102 的差异在此裁决）；漂移即 blocked record + 退役 |
 | 6 ready freeze draft | 绑定 confirmation record |
