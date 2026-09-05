@@ -881,3 +881,19 @@ grok M-01（F8 轴号错挂 F8(3)/F8(2) + A11 伪背书——与 sol M 收敛）
 **grok vs sol 的 RACEWIN 视角互补**：grok B-01（POST-first 实现自由度：顺序未冻结 → 即停截掉）与 sol B-02（通道阻塞：RACEWIN 到不了 POST）——修法同向（冻结 `发射 RACEWIN → 落 cause → 发射 POST` 序 + :718 按 F9 预注册口径修正）。sol 明确指出顺序流中 POST 即停不会反向截掉已消费 marker——grok 的截断只发生在 POST-first 实现，冻结序即消除。
 
 sol 八格+S 维表：JT=1,F=0,R=1,**S=0** 可达（TOCTOU 洞格）。裁定①八裁：继续挑战。裁定②：r21 变体仍不构成 cut-state 等价替代（`JT=1,F_cut=0,S_cut=0,R_final=1` 在 cut-state 下可 pass、r21 却 fail——**这正是 cut-state 方案的决胜格**）。
+
+## 九之十三、第二十二轮终账（三席齐：grok 1B/5M/3m、sol 4B/3M/1m、deepseek 1B/3M）
+
+**去重 5 blocker（+1 项主会话 M 裁定带分歧记录）：**
+1. **(d) 支 TOCTOU**（sol B-01）：S=0 点时读对未来的非法全称——决策与 POST 发射之间 worker 可完成，`JT=1,F_cut=0,S_cut=0,R_final=1` 可达 → F8(2) 烧合法调度。**cut-state 的决胜格**。
+2. **RACEWIN 发射序未冻结**（grok B-01；deepseek 判定「结构上已蕴含但未字面冻结」——实现自由度真实存在）：冻结 P12 序 `发射 RACEWIN → 落 cause → 发射 POST` + 同步 :959/:1492 + selftest 钉行次。
+3. **RACEWIN 同源分支联错**（sol B-03）：值级缺陷可抓、分支级缺陷（marker+class 一致地错）F8(2) 抓不住——「只消除了对 POST 的直接读取、未建立信任边界上的独立性」。
+4. **`:713` 残留活句**（sol B-04）：「capture 前件在 P12 检验」以现行结论语气与本地入口冲突，未标废止。
+5. **F vs SIG 措辞互置**（deepseek B-01）：`:717`/`:661` 把「区分窗口关闭原因」错挂 SIG 再读（实为 FLAG 分支检查）——与 `:719` F8(3) 支表面对立。
+6. **HiLog 同通道阻塞**（sol B-02；**主会话裁定 M 级、sol 维持 B 级——分歧记录**）：F9 落点在 r21 前就存在（POST 一直在该通道）、F9 预注册措辞本宣告该形态为 fail；真正问题是 `:718`「不构成 fail 面」的过度声明。修法同向（按 F9 口径修正声明）。
+
+**三席对 r21 修复的确认**：sol B-01（去循环值级）格 9/10 验收通过（deepseek 独立复验）；sol B-02（R 活路由）落地；两窗（SIG=1∧R∈{0,1} 盒到期）在 RACEWIN 成功发射下 pass；B-04/SIG 窗口收口意图闭环。**:713 残留是第二十轮 B-02 的原位残留（行号平移导致漏改）。**
+
+**轨迹：12→8→4→3→5→3→2→1→2→3→5。** r19-r22 四轮的全部 blocker 落在同一族：**P12 点时本地观测 vs runner 终态 capture 重建的比较在决策与 POST 之间的窗口上本质竞态**。裁定②（sol 四度主张）：cut-state 在决胜格 `JT=1,F_cut=0,S_cut=0,R_final=1` 上可 pass 而 r21 fail——**r22 修复正面采纳 cut-state**。
+
+**r22 修复设计（主会话定稿）**：POST 新增 `worker_terminal_at_p12`（cut 记录）；runner 对 JT=1 格的规则改 cut-aware：(i) RACEWIN 在 ⟺ cut 记录 FLAG=false（分支一致性，违 → F8(2)）；(ii) class=13 类 ⟹ cut FLAG=true ∧ EXIT 在 capture（违 → F8(2)——抓方向 2）；(iii) class∈{poll-never, flag-race} ⟹ cut FLAG=false、**迟到 RETURN/EXIT 非矛盾**（cut 语义——关 TOCTOU）；(iv) flag-race ⟹ RACEWIN 在（违 → F8(2)）；(e) 格保持（capture 完整性轴）。冻结 P12 序 RACEWIN→cause→POST。
