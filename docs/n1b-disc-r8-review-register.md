@@ -873,3 +873,11 @@ sol 构造核实：worker 卡在 emit RETURN（通道背压）→ P12 的 RACEWI
 grok 对 sol B-01（sticky 去循环）的落地判定：**已落地**（签名读 RACEWIN 存在性、独立错写双方向可被抓）——「在 RACEWIN 实际进入 capture 的前提下循环已破；B-01 使该前提对 Live 非永真，sol 修法的运行时效力被同一洞掏空」。B-02（R 活路由）确认落地（`:654` 本地分岔唯一、无一律 (d) 活句）。
 
 grok M-01（F8 轴号错挂 F8(3)/F8(2) + A11 伪背书——与 sol M 收敛）；M-02（`:721` 仍用「RETURN 在」刻画 flag-race——r19 形态说明未删净）；M-03（行号全面漂移——5 处活引用指向错误活句）；M-04（内存序双规格：seq_cst 与 release/acquire 并存）；M-05（T' 无独立夹具）。裁定①六裁：方向维持、落地仍 fail（新声明第一处时序缝）。
+
+### sol 正式终稿（fail 4B/3M/1m）——第二十二轮
+
+4B 全部经主会话核实：B-01 (d) 支 TOCTOU（S=0 点时读对未来的非法全称）；B-02 HiLog 同通道阻塞（F9 落点 + :718 过度声明——主会话预裁定 M 级、sol 维持 B 级，**分歧待 deepseek/终账裁**：sol 补充论据「A4 的零无界阻塞调用保证未覆盖该 emit」）；B-03 RACEWIN 同源分支联错（EXIT 交叉检验为主会话识别的修法方向）；B-04 :713 残留活句。
+
+**grok vs sol 的 RACEWIN 视角互补**：grok B-01（POST-first 实现自由度：顺序未冻结 → 即停截掉）与 sol B-02（通道阻塞：RACEWIN 到不了 POST）——修法同向（冻结 `发射 RACEWIN → 落 cause → 发射 POST` 序 + :718 按 F9 预注册口径修正）。sol 明确指出顺序流中 POST 即停不会反向截掉已消费 marker——grok 的截断只发生在 POST-first 实现，冻结序即消除。
+
+sol 八格+S 维表：JT=1,F=0,R=1,**S=0** 可达（TOCTOU 洞格）。裁定①八裁：继续挑战。裁定②：r21 变体仍不构成 cut-state 等价替代（`JT=1,F_cut=0,S_cut=0,R_final=1` 在 cut-state 下可 pass、r21 却 fail——**这正是 cut-state 方案的决胜格**）。
