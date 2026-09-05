@@ -915,3 +915,22 @@ sol（c045842a）连接中断，中断前两点预警（主会话初步验证）
 ### deepseek 终稿（cut-state 16 格机械枚举）——pass 0B/4M
 
 **pass 票的核心结论**：16 格全穷尽无矛盾；格 6 (A)+(e) 双入口同挂一致；格 7 (E=0) 为 (A) 独有收口（F=1⟹EXIT 已发射）正确；**格 9 SIG 维非缝**（SIG 进程内原子、runner 无通道——(B) 靠 class+RW 校验 P12 解析连贯性——与主会话接手判定一致）；**格 13 cut 错写 false 被 (B)(iii)+「cut 是事实源」显式接受为 TOCTOU 固有不对称、格 14 cut 错写 true 正确 fail（fails closed）——宁缺勿误成立**（对主会话预警 1 的 M 判定提供独立支撑——「固有边界」在规则文本中有显式依据）；格 15 死亡窗 RACEWIN 未被忽略（sticky 签名与 POST 无关、pre-only 收口正确重建——主会话初判的「孤儿 marker」疑虑被打消）；格 16 spurious 已落。冻结序三处一致（行号偏移为任务稿滞后）。4M 均澄清级。
+
+## 九之十五、第二十三轮终账（三席齐：deepseek pass 0B/4M、grok fail 1B/4M/4m、sol 三次失败由主会话接手[预警2 判 B]）
+
+**去重 1 blocker（grok B-01 = 主会话接手判定的预警 2，双向收敛且 grok 深挖出兄弟轴）**：
+
+**cut-aware 例外域不完备——(B)(iii) 只关了 class 轴**。grok 构造 T*（= sol 决胜格的全轴版）：JT=1, P12 读 S=0/F=0 走 (d) 写 poll-never + cut=false + **poll raw=unobservable + watchdog=⑤**，POST 前抢占，worker 完成（RETURN+EXIT 入 capture）——
+- class 轴：(B)(iii) 迟到非矛盾 → pass ✓（r22 核心修复有效）；
+- **watchdog 轴**：`:665` F8(2) 比对全部 dw_outcome 字段——P12 写 ⑤（EXIT 缺时点）、runner 见迟到 EXIT 走 ④ → 不一致 → **fail**；
+- **poll raw 轴**：P12 写 unobservable、runner 从迟到 RETURN 重建数值 → 不一致 → **fail**；
+- `:714`「SIG 未置⟹capture 无 RETURN」/`:715`「迟到 RETURN 入 capture 则前件失败」活语气残留（主会话预警 2 原文）。
+**净结果：决胜格 fail-closed，与 selftest :1447 的 complete pass 矛盾。** r19-r22 同族 blocker 的第五次出现——「点时观测 vs 终态 capture」的比较 r22 只在 class 一轴关闭。
+
+**grok 修法最小集**：(B) 的「不从终态 capture 重建」扩到一切会被迟到完成分叉的 dw_outcome 字段（class/poll raw/watchdog——即 cut=false 格对这些字段的 runner 侧全部走分支一致性或透传校验而非终态重建）；:714/:715 废止点时全称；路径① :894/四步 (0) :876 的「poll-never⟹R 缺」旁证同步删。
+
+**三席对照的关键信息**：deepseek 16 格 pass 票只走 class 轴（grok 明确点名「不采信其 16 格——未走兄弟轴」）；grok 的 T* 恰好补上这一维。**单轴 vs 全轴的教训与 r16 的「同一钉两处落盘」同型——修复的传播必须在全部受影响字段上闭合。**
+
+grok M-01（行号锚未改净）/M-02（T' 无 R=0 夹具、RACEWIN 行次无钉）/M-03（A12 缺口——与主会话预警 1 判定 M 收敛）/M-04（「双向可抓」过称——cut 不诚实时与 T* 不可分、固有不对称）；m-01（方向 1 钉误引 (B)(i)——cut=true 时 (B) 不适用）/m-02/m-03/m-04。
+
+**轨迹：12→8→4→3→5→3→2→1→2→3→5→1。** grok 对 5B 修复的落地核对：发射序/方向 1/方向 2/:713/F-SIG/M-02/M-04 全部落地；TOCTOU「class 轴是/全轴否」。裁定①（grok 票内）：r22 方向对、新声明首轮证伪点仍是同一句。
