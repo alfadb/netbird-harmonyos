@@ -865,3 +865,11 @@ sol 构造核实：worker 卡在 emit RETURN（通道背压）→ P12 的 RACEWI
 **根因**：`:702-703`「S=0 ⟹ RETURN 必未发射 ⟹ capture 无 RETURN」是**点时读取对未来状态的非法全称**——seq_cst 排除读到未来值/回退，但不把 false load 变成对未来的承诺。决策时点与 POST 发射时点之间的窗口内 worker 可完成。**这是与竞态窗同族的第三个 TOCTOU 格**（r19 格 3、r20 SIG 窗、本轮 (d) 支窗）——共同根因：**P12 的点时本地观测与 runner 的最终 capture 重建之间的任何比较，在决策与 POST 发射之间的无界窗口上本质是竞态的**。等待只能缩窗不能关窗。
 
 **方向定论**：r20/r21/r22 连续三轮的 blocker 全部落在这个边界族上；cut-state 方案（POST 记录 cut 状态、runner 比较按 cut 而非终态）历经每轮挑战后仍然是从根上消除该族的唯一方案。第二十二轮修复应正面采纳 cut-state 或其等价物（cut-aware 比对）。
+
+### grok 终稿（fail 1B/5M/3m）——第二十二轮
+
+**B-01（RACEWIN 相对 POST 的发射序未冻结）**：盒到期支写「发 RACEWIN ∧ 落 cause」但**没有冻结 `RACEWIN → POST` 的顺序**——`:959` 冻结全序 P12 动作只有「发射 POST」（RACEWIN 不在全序）、HilogStream「POST 出现即停」。最坏合法实现先发 POST 再发 RACEWIN → RACEWIN 被即停截掉 → sticky 不命中 → T'（SIG=1∧R=0 本征窗）与 r20 R=1 第三格**双双 fail**（本征窗复活 + r20 sticky 刚闭的假一致重开）。**修法最小集：冻结 P12 序 `发射 RACEWIN → 落 cause → 发射 POST`、同步 :959/:1492、selftest 钉 RACEWIN 行次先于 POST、补 T'（无 RETURN）complete pass 夹具。**
+
+grok 对 sol B-01（sticky 去循环）的落地判定：**已落地**（签名读 RACEWIN 存在性、独立错写双方向可被抓）——「在 RACEWIN 实际进入 capture 的前提下循环已破；B-01 使该前提对 Live 非永真，sol 修法的运行时效力被同一洞掏空」。B-02（R 活路由）确认落地（`:654` 本地分岔唯一、无一律 (d) 活句）。
+
+grok M-01（F8 轴号错挂 F8(3)/F8(2) + A11 伪背书——与 sol M 收敛）；M-02（`:721` 仍用「RETURN 在」刻画 flag-race——r19 形态说明未删净）；M-03（行号全面漂移——5 处活引用指向错误活句）；M-04（内存序双规格：seq_cst 与 release/acquire 并存）；M-05（T' 无独立夹具）。裁定①六裁：方向维持、落地仍 fail（新声明第一处时序缝）。
