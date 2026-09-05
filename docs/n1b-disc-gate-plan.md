@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r20-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r21-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -209,6 +209,14 @@
 > - **V1 sticky 例外 + 本地输入分岔**（B-1 三席收敛 + B-2 grok + sol B-02）：runner class 轴 sticky 重建例外（与 join sticky 同构——D6b skip ∧ RETURN 在 ∧ 盒到期 cause 在 POST → runner 重建 flag-race、禁走 13 类）；`:640`「一律 (d)」改 R 分岔；`:691` 补前件；**(d)/竞态窗 P12 侧入口改纯本地可观测量**（快照写入完成信号 + 终态标志——不判 R，R 判定完全交 runner 侧 F8(2)；分岔门 = 信号已见[进竞态窗]/未置[落 (d)]——执行层自行发现并补件、主会话追认：不加此门则 R=0 经典格 F8(2) 误烧）；域扩 19→20、四步 (0) 6→7（11 处计数同步）；`:699` 假断言废除。
 > - **V2 M/m 残留**：A11 五 raw+钟（drain_end 单列）；上界论证 R=1 前提；容器归属 P12≤5s；时间盒表 P12 行；cause 补子窗；gate 3 括注/七步标题；worker 序补信号原子；marker 丢失残余格显式登记（预期 fail）；(d) 括注本地化读法；:620 位点枚举；⑪(e) JT 子形钉。
 > 状态改为 `criteria-r20-pending-independent-review`；r20 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r21 修订（第二十一轮审查修复：3 blocker / 3 major / 4 minor 处置）**：r20 经三席跨厂商隔离独立审查（绑定 bfa112e）——**deepseek pass 0B/3M**（14 格蕴含链 SIG=0 侧验证正确）、**grok fail 2B/4M/4m**、**sol fail 3B/2M/0m**；r20 修复的 R=1 盒到期假一致与 :640 一律截走确认闭合。去重 3 blocker（轨迹 12→8→4→3→5→3→2→1→2→3——全部集中在 r20 新引入的 SIG 分岔门与 sticky 例外的循环性上）。
+> r21 修订内容（两趟：P1 执行层、P2 收尾因执行层两次无消息失败由主会话接手）：
+> - **U1 SIG 本征窗收口**（三席收敛）：盒到期支改 P12 再读 F——F=0 时发射**新 raw marker `N1BDISC_DW_RACEWIN|expired=1`**（盒内置位不发）+ 落 `flag-race-window-expired`（本地事实与 SIG/R 无关）；runner sticky 签名**去掉 R=1 合取**改为 `D6b skip + RACEWIN` 存在性（两窗 R=0 本征/R=1 不可分不需要分——宁缺勿误）；`:713` 蕴含方向错误更正（SIG 只蕴含下一步是 emit RETURN 不蕴含已发射）。
+> - **U2 sticky 去循环**（sol B + 主会话裁决 B）：签名第三前件改读**独立 raw marker**（RACEWIN 在/不在是 F 路径的函数、与 POST class 值无关）——P12 错写双方向均被 F8(2) 独立抓住。
+> - **U3 R 活路由清除**（三席收敛）：`:646` R 前件分岔改本地前件分岔（信号未置→(d)/已见→竞态窗）；`:703` 前件 R=1 改信号已见——sol B-02「P12 不判 R」完全落地。
+> - **U4 M/m**：SIG/终态标志原子规格化（`dw_snapshot_written`/`dw_worker_terminal`，seq_cst——grok M-01）；上界论证改 S=1 三步（M-04）；A5 扩 58 字面（56+2 豁免）；poll raw 域/:831 加法/路径① 补 flag-race（M-03）；冻结序摘要补 SIG；selftest RACEWIN 断言；SIG=0 矛盾形态 F8(3)。
+> 状态改为 `criteria-r21-pending-independent-review`；r21 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -708,6 +716,7 @@ RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents
 **P12 侧入口（r20）：JT 已登记 ∧ 终态标志未置 ∧ 快照写入完成信号已见（(d) 本地证据链不成立）即进 1000 ms 本地盒（不判 R）**；
 **盒到期支（r21 B-1 收口——三席收敛）**：到期 P12 先查终态标志、**再读一次快照写入完成信号**（第二次本地读——盒入口读 SIG=1 决定进盒、到期再读以区分窗口关闭原因）：**F=1**（盒内置位）→ 读快照走 13 类 → complete pass（原路，见下方 cutoff 句）；**F=0**（到期未置）→ 发射 `N1BDISC_DW_RACEWIN|expired=1`（盒内置位则不发）∧ 落 `flag-race-window-expired`（本地事实——盒到期标志未置，与 SIG/R 无关），runner 侧 sticky 例外按独立签名（`D6b skip ∧ DW_RACEWIN`，见 :649 r21 版）重建同 cause（R 判定不需要；原 r20「runner 按 capture 签名重建」句随去循环废除）；
 该格下 P12 读快照须等标志（标志未置 → 快照门禁读）→ **主线程有界等待标志置位，冻结局部上界 = 1000 ms**（r19 定稿值；沿 D-W 节冻结轮询原语 = 原子标志 + 10 ms `clock_nanosleep`、非忙等；依据（r21 更正 grok M-04——原「R 已入 capture ⇒ 剩余至多 = emit EXIT + 置标志」的 R=1 前提在 S 入口下不适用）：**S=1 入口时 worker 剩余工作 = emit RETURN + emit EXIT（各一次 HiLog 发射）+ 置标志 三步**——均无协议等待点；即使 HiLog 背压使 RETURN 阻塞超盒，盒到期支 graceful complete pass（非 fail），不构成 fail 面）。
+**矛盾形态处理（r21）：盒到期再读 SIG=0**（规格不可达——SIG 置位后不自旋不重置，见 :653 信号规格）**→ 实现 bug 面，落 F8(3)**（capture 自相矛盾——SIG 的 seq_cst 单调性由 A11 背书、违反即记录器完整性缺陷）——不落 flag-race（不静默吞掉矛盾输入）。
 **盒到期处理（总函数 cutoff，r19 定稿——sol 第十九轮终稿建议：不得无界等待未知事件）**：1000 ms 内标志置位 → 读快照走 13 类 → complete pass（第三格钉）；
 **1000 ms 到期标志仍未置 → `unobservable(cause=flag-race-window-expired)`**（新具名 cause——「worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占（r20 补 grok m-04——原「EXIT 前」覆盖不了 R=1∧EXIT=1∧F=0 的到期子窗）、标志永不置」的不可判形态：进程活（非死亡分量）、RETURN 在（非 (d)）、标志未置（非 (e)）——三态均不吸附，独立收口）
 → `dw_return_class`/poll raw 字段同 cause、`dw_join_result=join-timeout`（JT 已登记不重写）、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**
@@ -1410,6 +1419,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 **r18 落值断言（D6b skip 编码）**：POST `d6_items` D6S4..S7 各子项 `skipped(cause=join-timeout-abandoned)`（D6a S1..S3 result 编码不变；`SKIP|item=D6b` 不改道类 0——类 0 仅认 `item=destroy`——亦不触发 (a) 全量指派，D-W 未整体 skip）、`u4_dup_getfd`/`u4_dup_read`/`u4_dup_close`/`u4_dup_fd_reuse` 各记 `unobservable(cause=d6b-skipped-join-timeout)`。
 **r19 第三格钉（迟到竞态窗收口验收——分域声明 r19 迟到竞态窗收口 + 1000 ms cutoff）**：夹具同 join-timeout 夹具至 JT 登记 + D6b skip，P12 到点时终态标志仍未置但 capture 已有 `DW_RETURN` → 主线程有界等待（1000 ms 局部盒、冻结轮询原语）：(a) 盒内标志置位 → 读快照走 13 类 + `dw_join_result=join-timeout`（重建规则一致、F8(2) 不命中）→ **complete pass**（r20 改述：P12 侧入口不判 R——本地信号已见即进竞态窗，见分域声明 r20 入口）；
    (b) 对照——**1000 ms 到期标志仍未置**（worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占/阻塞（r20 补子窗——见 `:702` cause 描述））→ `dw_return_class`/poll raw 字段落 `unobservable(cause=flag-race-window-expired)`、`dw_join_result=join-timeout` 不重写、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**（合法竞态残余宁缺勿误；r19 定稿 cutoff——禁止无界等待未知事件、禁止拿外层 525 s 当本等待上界）。
+   **r21 同步：selftest 须断言 `N1BDISC_DW_RACEWIN|expired=1` marker 在 capture**（P12 盒到期 F=0 时发射——r21 新 raw marker；漏发 → runner sticky 不命中 → F8(2) 比对不一致 fail——selftest 钉住 marker 发射义务）。
 **r18 归因洁净反例钉**：join-timeout 形态下主线程对 `fd_dup` 的任何 D6b 操作 = 违反归因洁净（「watchdog 暴露窗口」缓解 3：worker poll 终态之前主线程不触碰 `fd_dup`）——静态断言 A10 必须 fail（源码层反例 = join-timeout 分支控制流含对 `fd_dup` 的任一 read/write/fcntl/close 调用点，见静态断言表 A10）。
    **r17 barrier-never-observed 钉（grok m-03，B-01 反例 A 验收；分域声明 (c) 支验收）**：夹具 worker 卡死未发 BARRIER → 主线程 7+8 s 盒尽后发 `SKIP|item=destroy|cause=barrier-never-observed` → 交观测窗 → 进程死亡（PRE 在、POST 缺、无崩溃签名）→ 五态 `not-called` → **`dw_return_class`=类 0 `destroy-skip-proven`（分域 (c)：无 RETURN、经 SKIP 存在性直接判类）** → 四步 (1) SKIP 位点字面（`barrier-never-observed`）→ 不命中 F4/F8/F1 → pre-only **pass**。
 （r18 口径注：上句「终态标志只在 RETURN 后置位」为本钉形态的描述——本形态 worker 确未返回；迟到返回形态由标志已置门分流、不入本钉，见分域声明 (d) r18 归因洁净补注与 (e) 支。）
