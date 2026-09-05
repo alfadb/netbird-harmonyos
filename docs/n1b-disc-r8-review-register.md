@@ -984,3 +984,11 @@ deepseek 与 sol 在同一格收敛（T† 的 ④/⑤ 双值），但其病理�
 **修法最小集（grok，三席同向）**：(d)/flag-race 落值清单显式 `dw_watchdog_killed=⑤`（与 poll raw 同 cause 同款）**且** A12 扩员把 watchdog（建议连 poll raw）绑到「那一次」F load；①-⑤ 表加适用域句（JT=0/cut=true/pre-only 用本表；JT=1∧cut=false 的 P12 写值与 runner 校验走闭表、④ 不在 P12 侧另读 FLAG）；删 :765「同上」、:764「有序表唯一落 ⑤」改「P12 无 capture 通道 → F=0 读不到 EXIT → 写 ⑤」（sol cut-imputed 定名 + deepseek 措辞）；闭表与 (i)(ii)(iii) 补合取声明（deepseek M-01）。
 
 **轨迹：12→8→4→3→5→3→2→1→2→3→5→1→2→1。** r24 闭表（新声明）首轮证伪——但其 runner 侧字面被三席全部确认落地（T\*/T† runner 单值）；洞收敛到「P12 写侧的求值时点绑定」一个点。修复面继续收窄：从 r19 的方案之争 → r22 的全轴 → r24 的四处指针 → 本轮的一个时点绑定。
+
+## 九之二十、第二十六轮审查（r25 版 @ b12e671）——sol 先回
+
+**sol 终稿：pass 0B/0M/0m**（首次三零票）——
+- 1B 修复三项核对全部通过（主表 carve-out :867 / T† 双值消 / C_wd 五输出绑定闭合）；
+- 三深格全部判定无缺陷：**五输出可实现**（「决定性 FLAG load 缓存为 F_cut + 单一 if/else 使用 F_cut 写五输出 + 仅 flag-race 子支发 RACEWIN——轮询先前的采样 load 不参与输出，A12 的『单一 load』不禁止有界轮询本身」）；**pre-only 死亡格单值**（求值者 runner、收齐 capture 后按 ①-⑤——EXIT 在 → ④ 唯一命中 observed-false；⑤ 只在 complete/P12 的 JT=1∧cut=false 域不可截胡——**④ 语义句「被杀的线程不可能发出 EXIT 后再死」对该格：EXIT 发射后进程死、④ 前件命中、语义句为真**——主会话派发时埋的疑点被 sol 走查为非缝）；**cut-imputed 与 r15 去因果化可共存**（⑤ 线值同字面、复合状态下由 cut 策略解释、原始 capture 保留——命名债但不升缺陷）。
+- 主会话对 P2 残留②的裁决（:1482 F=1 格 watchdog=④）验证正确。
+- 裁定①十二裁：**方向维持、r25 落地闭合、通过**。裁定②：维持 cut-state + scoped 闭表。
