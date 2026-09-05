@@ -972,3 +972,15 @@ sol 对联合校验/join 的判定：(B) 内部无漏洞（交叠是合取非缝
 ### deepseek 终稿——fail 1B/1M（与 sol B-01 同根收敛 + 「同上」桥接的精确病理）
 
 deepseek 与 sol 在同一格收敛（T† 的 ④/⑤ 双值），但其病理定位更细：**:765 flag-race 行的「同上」把 poll-never 行的论证（该行 EXIT 必缺、⑤ 成立）误扩到 flag-race 行**——「有序表唯一落 ⑤」是 capture 求值命题、在 T† 窗为假，与 r24 自己的 T† 钉（:1480「按 ①-⑤ 表走 ④ 烧 ID」）自证矛盾。修法与 sol 同向（删「同上」、改「P12 无 capture → F=0 读不到 EXIT → 写 ⑤」+ ④ 前件一律不参与）。M-01（闭表与 (i)(ii)(iii) 的合取关系无显式声明 + 「任何值」→「任何字段值」）。块 2 计数/行宽/溯源全过。
+
+## 九之十九、第二十五轮终账（三席齐：sol 1B/0M/0m、deepseek 1B/1M、grok 1B/2M/2m）
+
+**去重 1 blocker（三席完全收敛于同一格，三个互补视角）**：
+**闭表「恰一值 ⑤」的 P12 写侧根基未机器化**——
+- **sol 视角**：watchdog ①→⑤ 主表（:857-:874）的 ④「EXIT 在 → observed-false」无 cut=false carve-out——T† 按主表 ④ / 按闭表 ⑤ 双值；
+- **deepseek 视角**：:765「同上」桥接把 poll-never 行论证（该行 EXIT 必缺）误扩到 flag-race 行（T† 窗 EXIT 已发）——「有序表唯一落 ⑤」是 capture 求值命题、在 T† 窗为假，与 T† 钉自证矛盾；
+- **grok 视角（最深）**：**C_wd 构造**——watchdog 求值时点未与 cut 那一次 F load 绑定（A12 只绑 cut/class/RACEWIN 三输出、watchdog 不在内；(d)/flag-race 落值清单不含 watchdog）——P12 在 ②③ 之间**另一次** FLAG load 见 F=1 → 走 ④ → 闭表烧合法 T\*（A12 合规源码、合法调度、一次执行烧 ID）。真引理是「F_cut=0 ⇒ P12 不能确认 ④」——**仅当 watchdog 绑到 cut 那一次 load 才成立**。
+
+**修法最小集（grok，三席同向）**：(d)/flag-race 落值清单显式 `dw_watchdog_killed=⑤`（与 poll raw 同 cause 同款）**且** A12 扩员把 watchdog（建议连 poll raw）绑到「那一次」F load；①-⑤ 表加适用域句（JT=0/cut=true/pre-only 用本表；JT=1∧cut=false 的 P12 写值与 runner 校验走闭表、④ 不在 P12 侧另读 FLAG）；删 :765「同上」、:764「有序表唯一落 ⑤」改「P12 无 capture 通道 → F=0 读不到 EXIT → 写 ⑤」（sol cut-imputed 定名 + deepseek 措辞）；闭表与 (i)(ii)(iii) 补合取声明（deepseek M-01）。
+
+**轨迹：12→8→4→3→5→3→2→1→2→3→5→1→2→1。** r24 闭表（新声明）首轮证伪——但其 runner 侧字面被三席全部确认落地（T\*/T† runner 单值）；洞收敛到「P12 写侧的求值时点绑定」一个点。修复面继续收窄：从 r19 的方案之争 → r22 的全轴 → r24 的四处指针 → 本轮的一个时点绑定。
