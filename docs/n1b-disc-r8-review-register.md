@@ -960,3 +960,11 @@ deepseek 的 grep 取证比 sol 更细：`:665` 区的 cut-state 字样只在 `:
 **sol 的接手判定复核（三席首次对主会话判定的完整复核）**：预警 1 判 M 接受（A12 关闭）、预警 2 判 B 接受、三深格全部确认（SIG 维/死亡窗非缝、三输出联错维持 M 边界）——**主会话接手判定全部获得原席确认**。裁定②终裁：cut-state 方案本体维持采纳（r23 意图在八格 verdict 上等价、字面因 2B 不等价）。
 
 **轨迹：12→8→4→3→5→3→2→1→2→3→5→1→2。** 传播缺口的教训谱系（r16 字段传播→r23 轴传播→本轮规则位传播四处）——grok 修法的「同一钉三处落盘」是制度化的对策。修复量小（四处指针 + 两行闭表 + 三钉），但按「新声明首轮证伪」规律 r24 的允许集闭表将接受首次独立检验。
+
+## 九之十八、第二十五轮审查（r24 版 @ d1ae06d）——sol 先回
+
+**sol 终稿：fail 1B/0M/0m**（2B 修复机械落地全部确认；新 B 为闭表与 watchdog 主赋值表的规则冲突）：
+
+**B-01（闭表 vs 主表）**：watchdog ①→⑤ 主表（`:856-:874`）的 ④「`DW_EXIT` marker 存在 → observed-false」**无 cut=false carve-out**——T† 格（EXIT 在 capture、F=0、class=flag-race）按主表 ④ 得 observed-false、按闭表（`:765`）得 ⑤ 并宣告 complete pass——**同一合法成功终态双值**。sol 同时给出根基诊断：闭表「恰一值 ⑤」的「P12…EXIT 必未见[本地读]」不是观测推导（P12 无 capture 通道、无 EXIT-local 原子；F=0 不推 EXIT 未发——T† 正是 EXIT=1∧F=0）——⑤ 只能是 **cut-imputed unobservable**（政策推定、非观测）。**修法：watchdog 主表与所有权处加优先特例——JT=1∧cut=false 不求值 ①→⑤ 表、P12 仅由同一次 F 判定赋 ⑤（声明为 cut-imputed、非 EXIT 缺失观测）+ T† 钉断言「全局 ④ 不适用」**。
+
+sol 对联合校验/join 的判定：(B) 内部无漏洞（交叠是合取非缝）；join sticky「无迟到分叉」结论成立（但「JT 登记时 marker 已入 capture」字面不准——D6b skip 在登记后 P11 前发）。裁定①十一裁：方向维持、落地仍 fail。裁定②：cut-state 本体维持、闭表作 scoped 映射可机器定义但缺主表例外。
