@@ -911,3 +911,7 @@ sol（c045842a）连接中断，中断前两点预警（主会话初步验证）
 **预警 2（:714/:715 残留）——主会话判定 B 级**：亲验成立。`:714`「SIG 未置 ⟹ RETURN 必未发射 ⟹ capture 无 RETURN」与 `:715`「迟到 RETURN 入 capture 则本前件失败」均以**活规则语气**陈述已被 cut-state (B)(iii) 废弃的论证（「迟到 RETURN 非矛盾」）——r21 在竞态窗侧（:724 区）更正过同类蕴含、但 :714/:715 在 (d) 支内未同步。决胜格（JT=1,S_cut=0,F_cut=0,class=poll-never,R_final=1）按 :715 读法 (d) 前件失败、按 (B)(iii) pass——**同一格两读**，r22 的核心修复被残留句架空。修法：:714/:715 加 r22 语境注（「本蕴含为点时全称、r22 已由 (B)(iii) 取代——(d) 的 P12 侧判定只依赖本地证据链，迟到 RETURN 的 capture 存在性不再是前件」）。
 
 **三深格主会话判定（供第二十四轮挑战）**：三输出联写 = M（威胁模型划分，见预警 1）；SIG 维 (B) 缺失 = 非缝（点时 SIG=0 不推断终态——sol r22 B-01 自己的论证——(iii) 对 SIG=0 格不是错误宽免）；冻结序 ①③间死亡 = 待 grok/deepseek 覆盖（RACEWIN 在 ∧ POST 缺 → pre-only (b) 收口对 RACEWIN 的忽略——若 (b) 不认 RACEWIN 则其为 capture 孤儿 marker，无规则处理）。
+
+### deepseek 终稿（cut-state 16 格机械枚举）——pass 0B/4M
+
+**pass 票的核心结论**：16 格全穷尽无矛盾；格 6 (A)+(e) 双入口同挂一致；格 7 (E=0) 为 (A) 独有收口（F=1⟹EXIT 已发射）正确；**格 9 SIG 维非缝**（SIG 进程内原子、runner 无通道——(B) 靠 class+RW 校验 P12 解析连贯性——与主会话接手判定一致）；**格 13 cut 错写 false 被 (B)(iii)+「cut 是事实源」显式接受为 TOCTOU 固有不对称、格 14 cut 错写 true 正确 fail（fails closed）——宁缺勿误成立**（对主会话预警 1 的 M 判定提供独立支撑——「固有边界」在规则文本中有显式依据）；格 15 死亡窗 RACEWIN 未被忽略（sticky 签名与 POST 无关、pre-only 收口正确重建——主会话初判的「孤儿 marker」疑虑被打消）；格 16 spurious 已落。冻结序三处一致（行号偏移为任务稿滞后）。4M 均澄清级。
