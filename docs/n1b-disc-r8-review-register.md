@@ -838,3 +838,16 @@ sol 正式定级 3B（sticky 自认证循环 / SIG 蕴含方向 / :646 R 活路�
 sol 八格等价性表（第二十轮表 + S 隐藏维扩展）：关键发现——**SIG 维把 JT=1,F=0,R=0 格拆成 pass（S=0）/fail（S=1∧抢占）**——八格不再是总函数。裁定①七裁：继续挑战。裁定②：box+本地信号变体不构成 cut-state 等价替代。
 
 **第二十一轮终账（三席齐）：deepseek pass 0B/3M、grok fail 2B/4M/4m、sol fail 3B/2M/0m——去重 3 blocker：① SIG=1∧R=0 本征窗（三席收敛）；② sticky 自认证循环 fail-open（sol B + grok/deepseek M——主会话裁决 B）；③ :646/:703 R 活路由残留（三席收敛）。**
+
+## 九之十二、第二十二轮审查（r21 版 @ 8763260）——中期
+
+| 席 | 结论 | 计数 |
+|---|---|---|
+| deepseek | 在跑 | — |
+| grok | 在跑 | — |
+| sol | 中间 ≥2B（终稿在跑） | — |
+
+**sol 中间预警（全部经主会话核实）：**
+1. **RACEWIN 同源自认证边界**（B 候选）：RACEWIN 与 POST class 同出 P12 的一个 F 分支——分支级缺陷（F=1 却同支错发 RACEWIN+写 cause / F=0 漏发 RACEWIN+写 13 类）使两者一致地错，F8(2) 抓不住（r21 的去循环只覆盖值级缺陷）。主会话识别修法方向：runner 侧签名加 capture 可见的 EXIT 交叉检验（F=1⟹EXIT 在 capture、F=0⟹EXIT 缺——「RACEWIN∧EXIT」与「POST 13 类∧JT∧EXIT 缺」两矛盾组合均 capture 可见）。
+2. **`:713` 残留活句**（B 候选，第二十轮 B-03 原位残留）：「(d) 的机器门是「标志未置」、capture 前件在 P12 检验」以现行结论语气与 r21「P12 不判 R」冲突，未标废止。
+3. **`:719` A11 误引**（M）：SIG 单调性声称「由 A11 背书」，A11 实际只核 poll raw 同源两写、不含两个原子信号。
