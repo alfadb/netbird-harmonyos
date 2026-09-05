@@ -897,3 +897,9 @@ sol 八格+S 维表：JT=1,F=0,R=1,**S=0** 可达（TOCTOU 洞格）。裁定①
 **轨迹：12→8→4→3→5→3→2→1→2→3→5。** r19-r22 四轮的全部 blocker 落在同一族：**P12 点时本地观测 vs runner 终态 capture 重建的比较在决策与 POST 之间的窗口上本质竞态**。裁定②（sol 四度主张）：cut-state 在决胜格 `JT=1,F_cut=0,S_cut=0,R_final=1` 上可 pass 而 r21 fail——**r22 修复正面采纳 cut-state**。
 
 **r22 修复设计（主会话定稿）**：POST 新增 `worker_terminal_at_p12`（cut 记录）；runner 对 JT=1 格的规则改 cut-aware：(i) RACEWIN 在 ⟺ cut 记录 FLAG=false（分支一致性，违 → F8(2)）；(ii) class=13 类 ⟹ cut FLAG=true ∧ EXIT 在 capture（违 → F8(2)——抓方向 2）；(iii) class∈{poll-never, flag-race} ⟹ cut FLAG=false、**迟到 RETURN/EXIT 非矛盾**（cut 语义——关 TOCTOU）；(iv) flag-race ⟹ RACEWIN 在（违 → F8(2)）；(e) 格保持（capture 完整性轴）。冻结 P12 序 RACEWIN→cause→POST。
+
+## 九之十四、第二十三轮审查（r22 版 @ cfda2c1）——sol 中断前预警登记
+
+sol（c045842a）连接中断，中断前两点预警（主会话初步验证）：
+1. **静态断言缺口**：A11 只保 poll raw 同源两写——无断言把 `worker_terminal_at_p12` 绑定到那一次 `dw_worker_terminal` 读取、无断言把 cut/class/RACEWIN 三输出绑定为相互独立的控制流证据（三输出联错的机器面缺口——与 grok/sol 任务书中的「分支一致性只验证内部一致性」疑点同根）。
+2. **`:715` 残留冲突**：旧 (d) 补注仍写「迟到 RETURN 入 capture 则本前件失败」（r18 归因洁净补注语境）——与 r22 cut-state (B)(iii)「迟到 RETURN 非矛盾」正面相反。主会话初步分析：`:715` 的「前件」指旧 capture 前件（`:713` 已注明废除），但**句子本身以活规则语气陈述**且未标 r22 语境更新——最坏读法使决胜格双判（(d) 前件失败 vs (B)(iii) pass）。**:714 的「SIG 未置 ⟹ capture 无 RETURN」点时全称同样是 r22 已废论证的残留陈述**（r21 曾在 :724 更正过竞态窗侧、但 :714 在 (d) 支内未被同步）。sol 终稿待重派。
