@@ -731,7 +731,8 @@ barrier 等待盒（7 s）到期仍未见 marker → destroy **顺延**：主线
 ∧ **终态标志未置**（r19 第五前件——标志已置则无论 capture 有无 RETURN 均不入 (d)：有 RETURN → 读快照 13 类；无 RETURN → (e)（r20 注：此为总体路由的 capture 视角描述——P12 侧执行入口见 (d) 本地证据链段与竞态窗「P12 侧入口」段（r23：行号锚改节内锚），capture 视角的 R 判定由 runner 侧行使））；
 该 cause 纳入 `dw_return_class` 取值域（18→19 值）；
 **`dw_join_result` 不扩域（r17 核对结论）**——该形态 join 侧落既有本体值 `join-timeout`（P10 到期登记本不依赖 RETURN），join 域维持 10 值；`dw_destroy_distinguishable_from_timeout` 四步表：该值归步 (0) 透传（worker 未返回、resolve 两维前提不成立——沿 skip/死亡收口同款理由）；
-RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents`/`dw_poll_return_elapsed_ms` 各记同 cause（poll 未返回、RETURN raw 无值），`dw_drain_*` 不盖——poll 挂死形态下 DRAIN 先于 BARRIER 必已发射、raw 有值（沿 r10 反 blanket 法理，真实数据不得盖掉）；
+RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents`/`dw_poll_return_elapsed_ms` 各记同 cause（poll 未返回、RETURN raw 无值）；
+`dw_watchdog_killed` = `unobservable(cause=marker-gap-indeterminate)`（⑤）——**r25 写值绑定（grok C_wd 闭合）：本字段与 class/cut 同源于那一次 F load（A12 r25 扩员）——F=0 时 P12 不求值 ①-⑤ 表、直接赋 ⑤（cut-imputed unobservable——sol 定名：由 cut=false 政策推定的 unobservable、非 EXIT 缺失观测；禁止在 ②③ 之间另读 FLAG 走 ④）**，`dw_drain_*` 不盖——poll 挂死形态下 DRAIN 先于 BARRIER 必已发射、raw 有值（沿 r10 反 blanket 法理，真实数据不得盖掉）；
 **r19 (d)/(e) 求值序**：两支先到先得，先到先得**以五前件为准**——(d) 第五前件（终态标志未置）把标志已置的输入拦在 (d) 外，(e) 不可被 (d) 截胡（r19 前四前件形态下可截胡，grok B-01）。
 **(e) 标志已置 ∧ capture 无 `DW_RETURN`（r18 新增第五形态收口——deepseek 第 6 格/grok B-02 第五形态/sol 同，三席三个角度收敛）**：标志已置（join 成功或 join-timeout 后迟到完成两形态）∧ marker 未入 capture——r19 更正（grok M-02 = deepseek M-03：原「join 成功」把 JT=1 后迟到完成的 (e) 形态排除在外）——标志只在 RETURN 发射后置位（r18 序：标志 = worker 全部输出已完成），标志在而 capture 无 = **capture 完整性矛盾**（中间 marker 丢失，hilog 中段丢行）→
 **fail(F8(2))，具名 `unobservable(cause=return-marker-missing)` 不适用**（该形态是 fail 不是 unobservable——与 `poll-never-returned` 的区别：标志已置证明 poll 已返回且 raw 已写，缺的只是 capture 记录）→ 不赋 class 值、直接 fail；
@@ -749,7 +750,7 @@ RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents
 **矛盾形态处理（r21）：盒到期再读 SIG=0**（规格不可达——SIG 置位后不自旋不重置，见 `dw_snapshot_written` 信号规格（seq_cst 段））**→ 实现 bug 面，落 F8(3)**（判定输入真值表未覆盖——SIG 置位后不自旋不重置的规格由 `dw_snapshot_written` 信号规格（seq_cst 段）背书[**非 A11**——A11 是 poll raw 单读同源两写，与 SIG 无关；r22 更正]、违反即记录器完整性缺陷）——不落 flag-race（不静默吞掉矛盾输入）。
 **盒到期处理（总函数 cutoff，r19 定稿——sol 第十九轮终稿建议：不得无界等待未知事件）**：1000 ms 内标志置位 → 读快照走 13 类 → complete pass（若 RETURN 未入 capture 则经 F8(2) 比对 fail——(e)/cut 规则 (A) 同轴）[r22 补 deepseek M-03]（第三格钉）；
 **1000 ms 到期标志仍未置 → `unobservable(cause=flag-race-window-expired)`**（新具名 cause——「worker 在 EXIT 前**或 EXIT 后置标志前**（r23 更正 grok m-03：『release』为内存序旧词、活规格已 seq_cst）某点被永久抢占（r20 补 grok m-04——原「EXIT 前」覆盖不了 R=1∧EXIT=1∧F=0 的到期子窗）、标志永不置」的不可判形态：进程活、标志未置（r22：原「RETURN 在」为 r19 形态说明残留，flag-race 的触发不依赖 R）——两态均不吸附，独立收口）
-→ `dw_return_class`/poll raw 字段同 cause、`dw_join_result=join-timeout`（JT 已登记不重写）、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**
+→ `dw_return_class`/poll raw 字段同 cause、`dw_join_result=join-timeout`（JT 已登记不重写）、D6b skip 编码不变、同 (d)——`dw_watchdog_killed`=⑤、与 class/cut 同一次 F load（r25）→ POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**
 （合法竞态残余宁缺勿误——R=1 时 RETURN 在 capture ⟹ 快照五 raw 已写完、只是标志未 release；R=0 本征窗 SIG 已置 ⟹ 同样快照已写完，两窗 P12 侧同为「盒到期标志未置」不可分、runner 侧不需要分（r21 B-1）；**F8(2) 比对按上方 r21 sticky 例外执行**：runner 按 capture 签名（D6b skip ∧ `DW_RACEWIN` 在——无 R 前件、不读 POST cause）重建同一 cause → 一致 → 不命中——**原 r19「runner 正常重建 13 类、一致」为假断言（r20 废除）；r20 签名「RETURN 在 ∧ 盒到期 cause 在 POST」随 r21 去循环重写废除**）。
 **残余格更正（r21，三席收敛 B-1——原 :713 r20 版蕴含方向错误）**：SIG 置于 RETURN 发射前，`S=1∧R=0` 是 worker 卡在 emit RETURN 的本征可达窗（HiLog 背压/调度抢占），不是 marker 丢失——「信号⟹RETURN 应已发射」为假（SIG 只蕴含下一步是 emit RETURN，不蕴含已发射/已入 capture）。
 该格收口（r21）：P12 落 `flag-race-window-expired`（本地观测如实——盒到期标志未置是唯一本地事实）∧ 发射 `N1BDISC_DW_RACEWIN|expired=1`；
@@ -761,12 +762,13 @@ runner 侧 sticky 例外签名**去掉 R=1 合取**（最终签名 = `D6b skip �
 **(B) cut=false 格**（P12 读到 FLAG=0——poll-never 或 flag-race）：**runner 不从终态 capture raw 重建上述会被迟到完成分叉的字段**（r24——原『class』未随全轴扩展同步）（**r23 全轴扩展，grok B-01——原 r22 只关 class 轴：watchdog 轴上 P12 于 EXIT 缺时点写 ⑤、runner 见迟到 EXIT 走 ④ → 见 dw_outcome 所有权声明（r24 已加例外指针）——全字段比对 fail；
 poll raw 轴上 P12 写 unobservable、runner 从迟到 RETURN 重建数值 → 不一致 fail——T* 决胜格 fail-closed 与 selftest complete pass 矛盾**）：cut=false 格的 `dw_outcome` **全部**会被迟到完成分叉的字段——`dw_return_class` / `dw_poll_*` 四字段 / `dw_watchdog_killed`——
 runner 一律**不从终态 capture 重建**，只做分支一致性校验：poll raw 字段与 watchdog 字段按「P12 写值透传校验」——**允许集闭表（r24 冻结，第二十四轮 B-2 三席收敛）**：
-- **class=poll-never-returned** ⟹ poll raw 四字段允许集 = {`unobservable(cause=poll-never-returned)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（P12 于 F_cut=0 时点 EXIT 必未见[本地读]，watchdog 有序表在该时点唯一落 ⑤；写 ①②④或任何其他 unobservable cause 均为错写 → fail(F8(2))）；
-- **class=flag-race-window-expired** ⟹ poll raw 四字段允许集 = {`unobservable(cause=flag-race-window-expired)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（同上：P12 时点 EXIT 未见——**r24 关键措辞：EXIT 的 capture 存在性不参与本校验，无论该 EXIT 是 P12 决策后才入 capture（迟到）还是决策前已发射入 capture（T† 窗：worker 完成 RETURN+EXIT 而未置 FLAG——P12 的 F 读值为唯一事实源、EXIT 在 capture 与 F=0 不矛盾[发射与置标志是两事件]**——两种形态一律不参与）；
-- 上述两行之外的任何值（含裸 unobservable、skip 具名 cause、④①②、数值 raw）→ fail(F8(2))。
+- **class=poll-never-returned** ⟹ poll raw 四字段允许集 = {`unobservable(cause=poll-never-returned)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（r25 更正措辞：P12 无 capture 通道 → F_cut=0 时**读不到 EXIT marker** → 写 ⑤——**cut-imputed**（由 cut=false 政策推定、非 EXIT 缺失观测[EXIT 可已发射——T† 窗]；写值绑定见 (d) 落值清单 r25）；写 ①②④或任何其他 unobservable cause 均为错写 → fail(F8(2))）；
+- **class=flag-race-window-expired** ⟹ poll raw 四字段允许集 = {`unobservable(cause=flag-race-window-expired)`}；watchdog 允许集 = {`unobservable(cause=marker-gap-indeterminate)`（⑤）}——**恰一值**（r25：本行写值依据同行 1 的 cut-imputed 措辞——**不以「EXIT 未见」为据**（T† 窗 EXIT 可已在 capture——deepseek：原「同上」桥接把 poll-never 行论证误扩到本行）——
+**r24 关键措辞：EXIT 的 capture 存在性不参与本校验，无论该 EXIT 是 P12 决策后才入 capture（迟到）还是决策前已发射入 capture（T† 窗：worker 完成 RETURN+EXIT 而未置 FLAG——P12 的 F 读值为唯一事实源、EXIT 在 capture 与 F=0 不矛盾[发射与置标志是两事件]**——两种形态一律不参与）；
+- 上述两行之外的**任何字段值**（r25 更正 deepseek M-01——本行只管字段值；marker 与 class 域分别由 (i)(ii) 承载）（含裸 unobservable、skip 具名 cause、④①②、数值 raw）→ fail(F8(2))。
 **「EXIT/RETURN 的 capture 存在性不参与」= cut=false 格一律（r24 更正——原 r23「迟到」措辞未覆盖 T† 决策前已发射形态，grok T† 构造）。**
 `dw_join_result` 沿 join sticky（JT 登记 → join-timeout）不受影响；
-`dw_destroy_distinguishable_from_timeout` 按四步表对 class 值的透传自动一致（该格的 capture raw 因迟到完成竞态不可靠——worker 可在决策与 POST 之间完成，其 RETURN/EXIT 入 capture 是**合法的迟到完成、非矛盾**[r22 关键：原「S=0⟹capture 无 RETURN」的点时全称被 sol 第十九至二十二轮反复证伪]）；runner 只验证分支一致性：
+`dw_destroy_distinguishable_from_timeout` 按四步表对 class 值的透传自动一致（该格的 capture raw 因迟到完成竞态不可靠——worker 可在决策与 POST 之间完成，其 RETURN/EXIT 入 capture 是**合法的迟到完成、非矛盾**[r22 关键：原「S=0⟹capture 无 RETURN」的点时全称被 sol 第十九至二十二轮反复证伪]）；runner 只验证分支一致性：**闭表字段值命中后，仍须 (i)(ii)(iii) 全满足（合取关系、非命中序——任一违即 fail(F8(2))；r25 显式声明 deepseek M-01）**：
 (i) `RACEWIN` 在 ⟺ cut=false ∧ class=flag-race（在而 cause 非 flag-race、或 cause 是 flag-race 而不在 → **fail(F8(2))**——分支联错双向可抓：F=1 分支错发 RACEWIN+写 cause → (i) 违 + cut=true 与 RACEWIN 互斥 → fail；F=0 分支漏发 RACEWIN+写 13 类 → cut=false 格写 13 类 → 非 {poll-never,flag-race} → fail（**r23 边界注 grok M-04**：以上「双向可抓」以 cut 诚实为前提——整支走错 F=0 路径（cut 一并错写 false + poll-never + 无 RACEWIN）与诚实 T* 观测不可分，
 属 cut-state 固有不对称[deepseek 格 13「显式接受」、fails-closed 格 14 兜住反向]——「双向可抓」限值级错写、不含整支联错））；
 (ii) class ∈ {poll-never-returned, flag-race-window-expired}（域外值 → fail）；
@@ -854,6 +856,7 @@ errno 承载（r17 更正，grok M-02）：原「四载荷字段」中 errno 非
     历史：r3 第一趟 D4 曾新增 `destroy-never-called`，r9 拆分为类 0 `destroy-skip-proven` + 类 0b `destroy-call-unobserved` 并废除该字面，原「上述 13 值」表述随编码纳入更正）、
   `dw_join_result`（`joined` / `join-timeout` / `join-blocked-observed` / `ESRCH` / `other+errno` + r9 第五步 BL-5 纳入的 skip 编码 2 值 + r10 纳入、r12 拆分、r13 第三包再拆分的 pre-only 死亡收口编码 3 值（同 `dw_return_class` r12 拆分、r13 第三包再拆的三 cause） = **10 值**；r17：complete∧join-timeout 形态落既有本体值 `join-timeout`（P10 到期登记、不依赖 RETURN）、本域不扩——D-W 节分域声明 (d) 支核对结论）、
   - `dw_watchdog_killed`（三态；历史字段名（r3 E11 冻结；r15 语义更正，sol B-03/grok M-02）：本字段**不再承载 watchdog 归属语义**——`observed-true` 的语义以 ③ 为准（waiter 于 destroy 未及窗内死亡且 inwait 确认已进入等待），不构成 watchdog 归属的证据（SIGKILL/OOM/生命周期终止在该观测下不可区分）；N1b 不得将该 true 引用为「平台 watchdog 杀了 poll waiter」；赋值规则仍沿 r3 第二趟 E11 的逐字冻结——原「语义方向与 D7 相反」对比句 r15 改口径：D7 判「任务被杀」，本字段不再判「waiter 被 watchdog 杀」（r15 归因语义已废、见上），故仍不得引用「同 D7」，独立三态如下——
+    **适用域（r25，第二十五轮 B-1 三席收敛）**：本表适用于 JT=0 格、cut=true 格（(A)——P12 侧 ④ 的本地代理 = `dw_worker_terminal` FLAG load）、pre-only 形态；**JT=1∧cut=false 格不走本表**——P12 写值 = ⑤（cut-imputed，见 (d)/flag-race 落值清单 r25 绑定）、runner 校验走闭表（`dw_watchdog_killed` 允许集恰 {⑤}）——④ 前件（EXIT marker 存在）是 capture 谓词、P12 侧不适用、亦不得另读 FLAG 代理之。
     **r13 改有序互斥表求值（第十三轮 blocker 2，grok M-02 + sol B-02 两席收敛）**：原 true 支与 unobservable 支「`PidOfVpn` absent 且 `_C` 缺（无论 `_T` 在否——不得 true/false）」争同一构造——物理上最真的「waiter 在 poll 等待中被杀」（`_T`/`_C` 均缺）两支同时命中；sol 另指：正例构造中的 SIGKILL 条目只是平台终止关联证据、不证明 watchdog 归属。故三态改**有序互斥表**：求值序按下述①→⑤写死，**先到先得——命中即定值并终止，后续支不再求值**（分支前件在谓词层面可重叠，结局由求值序唯一化）；skip 具名清单位于表外（skip 路径无 waiter 运行、无本表求值面，见下方清单）：
     - ① `N1BDISC_DW_DESTROY_C` 在 **且** `PidOfVpn` absent（positive 基线前置满足）**且 `N1BDISC_DW_EXIT` 缺**（r13 主会话补：EXIT 在时 waiter 已正常走到终态——本字段语义上应为 ④ `observed-false`，本支不截胡 complete 正常主线）→ `unobservable(cause=destroy-terminal-candidate)`——**r13 新具名 cause，原「死亡可由 destroy 解释」句的字面收纳**：
       `_C` 在而 absent 的组合属「destroy 使 `:vpn` 进程 terminal」（预期成功终态方向，r9：原「死因分类行 4 (ii) 承载」随死因表删除——该组合现由七分量证据向量的事实组合承载：destroy 调用已发起记入 `destroy_call_state`（五态定义见「死亡事实记录（证据向量）」节五态表）、`:vpn` 消失记入 `process_death_observed`，不合成任何归因、**不驱动 fail**，
@@ -1067,7 +1070,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 | A9 | **共享 destroy 子协议四步执行序的源码层静态核对（r9 新增）**：在**源码层**（而非仅 marker 字面集层）核对子协议四步——`N1BDISC_DW_DESTROY_T` 发射语句 → `destroy()` 调用语句 → `N1BDISC_DW_DESTROY_C` 发射语句 → resolve 有界等待语句——四者在**同一控制流上依次出现，其间无任何分支可跳过 `_C` 发射**；并核对 `destroy()` 在全部探针源码中**有且仅有一个调用点**（r9 第四步扩写：调用点位于「共享 destroy 子协议」内，P9 主线与 `dup-failed` 分支共用该唯一调用点）；任一不满足即 freeze 前 fail，不进入后续门（`_C` 发射先于 `destroy()` 调用的反例必 fail，用例见 gate 10 清单 ①） |
 | A10 | **join-timeout 分支主线程零 `fd_dup` 操作的源码层静态核对（r18 新增）**：在**源码层**核对——`join-timeout` 登记（终态轮询盒到期、worker abandoned）后的主线程控制流内，对 `fd_dup` 的 `read`/`write`/`fcntl`/`close` 调用点为零（D6b 步 4-7 调用点全部位于 worker 终态已确认支内；join-timeout 支只发 `N1BDISC_SKIP|item=D6b|cause=join-timeout-abandoned` 直入 P11，r18 重裁）；任一不满足即 freeze 前 fail，不进入后续门（反例 = join-timeout 分支可达任一上述调用点，用例见 gate 10 清单 ④ 归因洁净反例钉）；判定强度注（r19）外提为表后注 |
 | A11 | **worker poll 返回后 raw 单次读同源两写的源码层静态核对（r19 新增，sol M-04）**：在**源码层**核对——worker 于 `poll` 返回后对 `ret`/`errno`/`revents` 各恰好一次读取、单调钟全局恰一次读取（`at_mono_ms` 与 `elapsed_ms` 为该单次钟读的两个导出值，无第二次钟/errno 读取点），共享快照的**五 raw+单调钟**与 `DW_RETURN` marker 字段同源自该次读取的同一组局部变量写出；`dw_drain_end` 单列（r20，见 A11 注）；任一不满足即 freeze 前 fail（反例 = 源码中任一二次读钟/读 errno 路径，或 marker 字段与快照字段非同源的控制流） |
-| A12 | **cut/class/RACEWIN 三输出与 F 分支控制流绑定的源码层静态核对（r23 新增，sol 九之十四预警 1/grok M-03）**：在源码层核对——`worker_terminal_at_p12` 的值来自且仅来自 P12 对 `dw_worker_terminal` 的那一次 seq_cst load；RACEWIN 的发射点位于且仅位于「F=0 盒到期」条件支内（F=1 支无发射点）；class 写值分支与 cut 值分支共享同一 F 判定结果（单一 if/else、无二次读 F）——三输出的独立性由控制流结构承载，违反即 freeze 前 fail |
+| A12 | **cut/class/RACEWIN/watchdog/poll raw 五输出与 F 分支控制流绑定的源码层静态核对（r23 新增，sol 九之十四预警 1/grok M-03；r25 扩员，grok C_wd 闭合——原 r23 三输出未含 watchdog，留有 ②③ 间另读 FLAG 写 ④ 的合规源码洞）**：在源码层核对五输出（cut/class/RACEWIN/watchdog/poll raw）各自的写值/发射点均与 P12 对 `dw_worker_terminal` 的那一次 seq_cst load 绑定（单一 F 判定、无二次读 F、禁止 ②③ 之间另读 FLAG/重求值），独立性由控制流结构承载，任一不满足即 freeze 前 fail——核对细则外提为表后「A12 注」（r25 扩员时外提，r23 原行内容逐字保留于注内） |
 
 **A4 注（r4 第四趟 W1 自上表 A4 行外提，内容逐字不变）**：
 
@@ -1085,6 +1088,9 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 **A10 判定强度注（r19，grok M-03；自 A10 行外提——行内余量不足，沿 A4/A5 外提先例）**：**判定强度（r19，grok M-03）**：以源码层控制流可达性为准——D6b 步 4-7 的调用点须全部位于「worker 终态已确认」条件支内（if/else 显式结构、非词法扫描）；P11 的 `fd_dup` 不触碰由「close 交进程退出回收」+ P11 括注三 socket 清单封闭。
 
 **A11 注（r20 更正 grok M-01；自 A11 行外提——行内余量不足，沿 A4/A5 外提先例）**：A11 的「同一组局部变量」核对域 = **五 raw 字段与单调钟**（`ret`/`errno`/`revents`/`at_mono_ms`/`elapsed_ms`——poll 返回后该次读取同源两写，含 `DW_RETURN` marker 字段）；`dw_drain_end` **单列**：drain 完成时单次写入、poll 后禁止重读/重写——六字段口径下 drain_end 在 poll 前写、「均自 poll 返回后该次读取的同一组局部变量写出」对其按字面不可满足；快照域 (2) 六字段机制句本身不变；原 A11 行内「同源两写——raw 一致性来自实现约束，F8(2) 只比派生值、不检测 raw 分叉」括注随本次外提移此、内容逐字不变。
+
+**A12 注（r25 五输出扩员时自 A12 行外提——行内余量不足，沿 A4/A5 外提先例；前半为 r23 原行内容逐字保留、r25 扩员句续后）**：在源码层核对——`worker_terminal_at_p12` 的值来自且仅来自 P12 对 `dw_worker_terminal` 的那一次 seq_cst load；RACEWIN 的发射点位于且仅位于「F=0 盒到期」条件支内（F=1 支无发射点）；class 写值分支与 cut 值分支共享同一 F 判定结果（单一 if/else、无二次读 F）——三输出的独立性由控制流结构承载，违反即 freeze 前 fail。
+**r25 扩员（grok C_wd 闭合——原 r23 三输出未含 watchdog，留有 ②③ 间另读 FLAG 写 ④ 的合规源码洞）**：绑定集扩为五输出——`dw_watchdog_killed` 与 `dw_poll_*` 的写值同源于那一次 F load（F=0 → watchdog=⑤ cut-imputed、poll raw=同 cause unobservable——禁止 ②③ 之间另读 FLAG/重求值）；上句「三输出」自此读作「五输出」，核对域与 fail 面同扩。
 
 ## verdict 求值与聚合（机器规则，fail-closed）
 
