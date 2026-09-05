@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-r21-pending-independent-review`
+最后核验：2026-09-02 ｜ 状态：`criteria-r22-pending-independent-review`
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -217,6 +217,13 @@
 > - **U3 R 活路由清除**（三席收敛）：`:646` R 前件分岔改本地前件分岔（信号未置→(d)/已见→竞态窗）；`:703` 前件 R=1 改信号已见——sol B-02「P12 不判 R」完全落地。
 > - **U4 M/m**：SIG/终态标志原子规格化（`dw_snapshot_written`/`dw_worker_terminal`，seq_cst——grok M-01）；上界论证改 S=1 三步（M-04）；A5 扩 58 字面（56+2 豁免）；poll raw 域/:831 加法/路径① 补 flag-race（M-03）；冻结序摘要补 SIG；selftest RACEWIN 断言；SIG=0 矛盾形态 F8(3)。
 > 状态改为 `criteria-r21-pending-independent-review`；r21 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **r22 修订（第二十二轮审查修复：5 blocker / 8 major / 5 minor 处置；HiLog 通道项主会话裁定 M 级、sol 维持 B 级——分歧记录在案）**：r21 经三席跨厂商隔离独立审查（绑定 8763260）——**grok fail 1B/5M/3m、sol fail 4B/3M/1m、deepseek fail 1B/3M**；r21 修复（去循环值级/R 活路由/SIG 窗口）三席确认落地。去重 5 blocker（轨迹 12→8→4→3→5→3→2→1→2→3→5——**r19-r22 四轮全部 blocker 同族**：P12 点时本地观测 vs runner 终态 capture 重建在「决策与 POST 之间」窗口上的本质竞态）。
+> r22 修订内容（两趟：P1 执行层、P2 执行层）：
+> - **W1 cut-state 正面落地**（sol B-01 决胜格 + 四轮同族根治；主会话裁定正面采纳 sol 方案）：POST 新增 `worker_terminal_at_p12`（cut 记录）；runner 对 JT=1 格校验改 **cut-aware**——cut=true 保留正常比对 + RETURN/EXIT 必在（缺 → (e) 轴）；cut=false **不从终态 capture raw 重建**（迟到完成合法非矛盾——原「S=0⟹capture 无 RETURN」点时全称废除），只验分支一致性（RACEWIN⟺flag-race 双向、cause 域）；JT=0 不受影响。验收六格全过（TOCTOU pass/方向 1 fail/方向 2 fail/诚实 flag-race pass/(e) fail/JT=0 不受影响）。
+> - **W2 发射序冻结 + 措辞修正**（grok B-01/deepseek B-01/sol B-04/sol B-02）：P12 冻结序 ① RACEWIN → ② 落 cause → ③ POST（禁止 POST 后再发）；F=FLAG 分支检查与 SIG 再读互置修正；`:713` 残留废止；`:718` 按 F9 预注册口径修正（「不构成 fail 面」无限定声明废除）。
+> - **W3 M/m**：F8(3) 标签理由（:653 信号规格背书、非 A11——deepseek M-01）；盒内置位 R 限定（M-03）；spurious RACEWIN 矛盾面（M-02）；「RETURN 在」残留（grok M-02）；行号锚改节内锚（M-03）；内存序双规格统一（M-04）；selftest 四钉。
+> 状态改为 `criteria-r22-pending-independent-review`；r22 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
 >
 > 依据 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四授权设立门代码 `N1BDISC` 的前置发现 campaign。**判据冻结前：不得开始任何测量、不得分配 AUTH/pair 或 evidence ID**（决议 §4.2：`evidence-schema.md` 门代码扩展已完成登记（`docs/evidence-schema.md:29`），但 ID 分配仍以判据冻结 + 跨厂商隔离独立审查 0 blocker + 用户显式授权为前置）。
 >
@@ -652,7 +659,9 @@ worker 在 poll 返回后立即发射本 marker，而最终 `dw_return_class` �
 **worker→main raw 共享快照（r18 机制冻结——grok 主案，sol B-01 = grok B-02 ⊇ deepseek B-01/M-01 三席收敛；原 r17「发射前写入、与 marker 同值、RETURN 缺则无 raw」三句不能同时成立，随本重写整体废除）**：
 (1) **单次读 + 同源两写**：worker 在 poll 返回后读**一次**单调钟得单一 end 时刻，`at_mono_ms` = end、`elapsed_ms` = end − poll 起始时刻（单钟单读、两个导出值同源）——其余 `ret`/`errno`/`revents` 各单读一次（r19 改述，sol m-03——原「`elapsed_ms` 与 `at_mono_ms` 各读一次」与「单次读钟」两读歧义废除），同一组局部变量值既写共享原子字段又发射 `DW_RETURN` marker——两处同源、禁止二次读钟/读 errno（sol M-01/deepseek M-01：二次读可漂移，同 class 等价类内 raw 分叉漏检）；
 (2) **快照域六字段**：五 raw + `dw_drain_end` 终态（class 行 7 的第四前件依赖它——同一 poll raw 配不同 drain 终态落不同类，P12 须有此输入；worker 在 drain 完成时先写 drain 终态进快照再发 `DW_DRAIN` marker，同源两写同款）；
-(3) **发布边界 = worker 终态原子标志置位（release）**：标志置位前快照字段对主线程**不可读**——join-timeout∧标志未置 → 主线程**无视快照**（快照可能半写）；`dw_return_class` 落值由 **本地前件分岔（r21 改述 r20 分岔（第二十轮 B-2）——R 前件的 capture 视角描述废止、与 :707 本地入口统一，P12 无 capture 通道）**：快照写入完成信号未置 → (d)；信号已见 → **迟到竞态窗**（1000 ms 盒，见下方收口；capture 视角的 R 判定由 runner 侧行使）；主线程读快照（acquire）只在 P12、且仅当标志已置。r18 冻结：标志是唯一可读门——消除松散发布读到初始化值的窗口，及「发射前写入」与「RETURN 缺则无 raw」的矛盾；
+(3) **发布边界 = worker 终态原子标志置位（seq_cst store/load——与信号规格统一，r22 更正 grok M-04：原 release/acquire 措辞为内存序双规格残留）**：标志置位前快照字段对主线程**不可读**——join-timeout∧标志未置 → 主线程**无视快照**（快照可能半写）；
+`dw_return_class` 落值由 **本地前件分岔（r21 改述 r20 分岔（第二十轮 B-2）——R 前件的 capture 视角描述废止、与 :707 本地入口统一，P12 无 capture 通道）**：快照写入完成信号未置 → (d)；信号已见 → **迟到竞态窗**（1000 ms 盒，见下方收口；capture 视角的 R 判定由 runner 侧行使）；主线程读快照（seq_cst store/load——与信号规格统一，r22 更正 grok M-04：原 release/acquire 措辞为内存序双规格残留）只在 P12、且仅当标志已置。
+r18 冻结：标志是唯一可读门——消除松散发布读到初始化值的窗口，及「发射前写入」与「RETURN 缺则无 raw」的矛盾；
 `dw_outcome` 的**全部**派生字段（`dw_return_class`/`dw_join_result`/`dw_destroy_distinguishable_from_timeout` 及 `dw_*` 终态字段）同此所有权——探针 P12 写入、runner 重建比对、不一致挂 F8(2)（r17 扩展：原仅 class 声明，其余字段同批）；
 **`dw_join_result` 的 runner 重建规则（r19，grok B-01——标志门边界形态下 join 轴与 class 轴分立）**：capture 中存在 `N1BDISC_SKIP|item=D6b`（或 `join-timeout-worker-abandoned=true` 已登记）→ runner 重建 `join-timeout`，**不得**由 `DW_EXIT`/`DW_RETURN` 存在性改写为 `joined`（join 轴记录的是「主线程是否调到 `pthread_join`」——P10 盒先到期即 join-timeout，与 worker 此后是否迟到完成无关）；`DW_EXIT` 只喂 `dw_watchdog_killed` ④，不喂 join 轴。
 **`dw_return_class` 的 runner sticky 重建例外（r20，第二十轮 B-1——grok 修法，与上方 join sticky 同构；deepseek 方案 (b) 同构；r21 签名去循环重写——sol B 判定、主会话裁决 B：原第三前件读 POST cause 属自认证 fail-open）**：capture 中 `SKIP|item=D6b` 在 ∧ capture 有 `N1BDISC_DW_RACEWIN|expired=1`（r21 新 raw marker——**独立于 POST 派生值**，P12 盒到期标志未置时发射、盒内置位不发；原「capture 有 `DW_RETURN`」合取随 B-1 去掉）→ runner 重建 `flag-race-window-expired`，**禁止**从 RETURN raw 走 13 类
@@ -713,22 +722,23 @@ RETURN/DRAIN 依赖字段落值：`dw_poll_ret`/`dw_poll_errno`/`dw_poll_revents
 **fail(F8(2))，具名 `unobservable(cause=return-marker-missing)` 不适用**（该形态是 fail 不是 unobservable——与 `poll-never-returned` 的区别：标志已置证明 poll 已返回且 raw 已写，缺的只是 capture 记录）→ 不赋 class 值、直接 fail；
 非 (a)-(e)、**非竞态窗待决（竞态窗前件 JT∧F=0∧信号已见——r21 改，R=1 改为信号已见；未命中或盒已决）**、有 `DW_RETURN`、**标志已置** → 13 类（r20 补——原缺标志已置前件可无 acquire 读快照；(e) 已先行 fail 收口，r18）：合法域门 → 0/0b 前置检查（SKIP 支已上移，见上方 r17 改述）→ 未知位门 → 普通 1-11。**`SKIP|item=D-W` 与 `DW_RETURN` 同现** → 矛盾输入（D-W 整体被 skip 则无 poll、RETURN 不应存在）→ **F8(2) fail**（r17 轴更正，grok M-01：F3 活字面是全序/时序非单调，矛盾双 marker 属 capture 自相矛盾轴——仍在 fail 闭集、verdict 不变，仅轴归属更正）。
 **r17 重写理由（三席收敛，第十七轮 B-01；r18 口径更新）**：原 r16 二分（skip∪death）漏了类 0 的两条真实路径（均无 RETURN）与 complete∧join-timeout 形态——假穷尽使两个合法形态烧 ID。
-**r18 更正本行的「终态标志只在 RETURN 后置位 → 该路径必然无 RETURN」旧论断**：该论断被 (d) 补注取代——标志置位与 RETURN 入 capture 是两个事件（迟到返回形态标志已置而 (d) 不吸附、第五形态标志置而 capture 无 marker 落 (e)），(d) 的机器门是「标志未置」；~~capture 前件在 P12 检验~~（**r22 废止**——sol B-04 残留活句：capture 侧判定由 runner cut-aware 规则行使，P12 无 capture 通道[本地分岔 :654/:716]，本半句为行号平移导致的旧 :703 原位残留、第二十轮 B-03 未随本地化改写）。
+**r18 更正本行的「终态标志只在 RETURN 后置位 → 该路径必然无 RETURN」旧论断**：该论断被 (d) 补注取代——标志置位与 RETURN 入 capture 是两个事件（迟到返回形态标志已置而 (d) 不吸附、第五形态标志置而 capture 无 marker 落 (e)），(d) 的机器门是「标志未置」；~~capture 前件在 P12 检验~~（**r22 废止**——sol B-04 残留活句：capture 侧判定由 runner cut-aware 规则行使，P12 无 capture 通道[本地分岔见上方 (3) 发布边界段与 (d) 本地证据链]，本半句为行号平移导致的旧 :703 原位残留、第二十轮 B-03 未随本地化改写）。
 **合法联合形态声明（r19，grok B-01）**：`join-timeout` ∧ 13 类 class ∧ `DW_EXIT`/`DW_RETURN` 在 capture ∧ `SKIP|item=D6b` 同现 = **合法**（join 轴 = 主线程未及调 pthread_join（盒先到期），class 轴 = worker poll 已迟到返回——同一迟到完成的两个侧面，非矛盾）；F8(2) 比对在该形态下按上方 r19 `dw_join_result` 重建规则执行，P12 写 join-timeout + runner 重建 join-timeout → 一致 → 不命中。
 **迟到竞态窗收口（r19，主会话——sol 第十九轮中断前报告的格：JT=1 ∧ 标志未置 ∧ capture 已有 RETURN；r20 入口改述，sol B-02——P12 分支输入改纯本地可观测量：原入口「capture 已有 RETURN」与 (d) 第四前件「R 缺以 capture 为准」对 P12 不可判定（设备侧无 host capture 通道），capture 签名改由 runner sticky 例外行使）**：worker 冻结序为 写快照→置快照写入完成信号（SIG，r21 摘要补）→RETURN→EXIT→置标志——SIG 置位先于 RETURN 发射，SIG 置位与标志置位之间整段皆为本征窗（含 RETURN 入 capture 与标志置位之间的原窗口）。
 **P12 侧入口（r20）：JT 已登记 ∧ 终态标志未置 ∧ 快照写入完成信号已见（(d) 本地证据链不成立）即进 1000 ms 本地盒（不判 R）**；
-**盒到期支（r21 B-1 收口——三席收敛）**：到期 P12 **先查终态标志（F=FLAG，r22 更正 deepseek B-01——F=1/F=0 分支是 FLAG 检查，非 SIG）：F=1 → 读快照走 13 类（cut 记录 true）；F=0 → 冻结发射序（见下行）**；**另**读一次快照写入完成信号（第二次本地读）**仅做矛盾检测**（SIG=0 → F8(3)，见 :653 信号规格——r22 更正：原「区分窗口关闭原因」归因错误，窗口关闭原因由 FLAG 分支承载）：**F=1**（盒内置位）→ 读快照走 13 类 → complete pass（原路，见下方 cutoff 句）；
+**盒到期支（r21 B-1 收口——三席收敛）**：到期 P12 **先查终态标志（F=FLAG，r22 更正 deepseek B-01——F=1/F=0 分支是 FLAG 检查，非 SIG）：F=1 → 读快照走 13 类（cut 记录 true）；F=0 → 冻结发射序（见下行）**；**另**读一次快照写入完成信号（第二次本地读）**仅做矛盾检测**（SIG=0 → F8(3)，见 `dw_snapshot_written` 信号规格（seq_cst 段）——r22 更正：原「区分窗口关闭原因」归因错误，窗口关闭原因由 FLAG 分支承载）：**F=1**（盒内置位）→ 读快照走 13 类 → complete pass（原路，见下方 cutoff 句）；
 **F=0**（到期未置）→ **P12 冻结发射序（r22，grok B-01）：① 发射 `N1BDISC_DW_RACEWIN|expired=1`（盒内置位则不发）→ ② 落 cause（`flag-race-window-expired` 写入 POST 载荷，含 `worker_terminal_at_p12=false`）→ ③ 发射 `N1BDISC_POST`**——禁止 POST 之后再发任何 `N1BDISC_*`（HilogStream POST 即停会截掉其后 marker——POST-first 实现自由度废除；deepseek 块 2 验证 RACEWIN 结构上先于 POST，此处字面冻结）；
-（本地事实——盒到期标志未置，与 SIG/R 无关，`worker_terminal_at_p12=false` 同源；r22 ② 步落 cause 即含此义）runner 侧 sticky 例外按独立签名（`D6b skip ∧ DW_RACEWIN`，见 :649 r21 版）重建同 cause（R 判定不需要；原 r20「runner 按 capture 签名重建」句随去循环废除）；
+（本地事实——盒到期标志未置，与 SIG/R 无关，`worker_terminal_at_p12=false` 同源；r22 ② 步落 cause 即含此义）runner 侧 sticky 例外按独立签名（`D6b skip ∧ DW_RACEWIN`，见上方 `dw_return_class` sticky 重建例外（r22 现为 cut-state (B)(i) 实现））重建同 cause（R 判定不需要；原 r20「runner 按 capture 签名重建」句随去循环废除）；
 该格下 P12 读快照须等标志（标志未置 → 快照门禁读）→ **主线程有界等待标志置位，冻结局部上界 = 1000 ms**（r19 定稿值；沿 D-W 节冻结轮询原语 = 原子标志 + 10 ms `clock_nanosleep`、非忙等；依据（r21 更正 grok M-04——原「R 已入 capture ⇒ 剩余至多 = emit EXIT + 置标志」的 R=1 前提在 S 入口下不适用）：**S=1 入口时 worker 剩余工作 = emit RETURN + emit EXIT（各一次 HiLog 发射）+ 置标志 三步**——均无协议等待点；
 即使 HiLog 背压使 RETURN 阻塞超盒，盒到期支在**主线程自身发射（RACEWIN/POST）可完成**的前提下 graceful complete pass（**r22 更正 sol B-02：若通道阻塞波及主线程自身发射、POST 永不落 capture → 525 s 观测窗到期、PRE 在、进程活、POST 缺 → F9 fail——该落点为 F9 预注册口径（存活未完成不是平台事实）、非 r21/r22 新增；原「不构成 fail 面」的无限定声明废除**））。
-**矛盾形态处理（r21）：盒到期再读 SIG=0**（规格不可达——SIG 置位后不自旋不重置，见 :653 信号规格）**→ 实现 bug 面，落 F8(3)**（判定输入真值表未覆盖——SIG 置位后不自旋不重置的规格由 :653 信号规格背书[**非 A11**——A11 是 poll raw 单读同源两写，与 SIG 无关；r22 更正]、违反即记录器完整性缺陷）——不落 flag-race（不静默吞掉矛盾输入）。
+**矛盾形态处理（r21）：盒到期再读 SIG=0**（规格不可达——SIG 置位后不自旋不重置，见 `dw_snapshot_written` 信号规格（seq_cst 段））**→ 实现 bug 面，落 F8(3)**（判定输入真值表未覆盖——SIG 置位后不自旋不重置的规格由 `dw_snapshot_written` 信号规格（seq_cst 段）背书[**非 A11**——A11 是 poll raw 单读同源两写，与 SIG 无关；r22 更正]、违反即记录器完整性缺陷）——不落 flag-race（不静默吞掉矛盾输入）。
 **盒到期处理（总函数 cutoff，r19 定稿——sol 第十九轮终稿建议：不得无界等待未知事件）**：1000 ms 内标志置位 → 读快照走 13 类 → complete pass（若 RETURN 未入 capture 则经 F8(2) 比对 fail——(e)/cut 规则 (A) 同轴）[r22 补 deepseek M-03]（第三格钉）；
 **1000 ms 到期标志仍未置 → `unobservable(cause=flag-race-window-expired)`**（新具名 cause——「worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占（r20 补 grok m-04——原「EXIT 前」覆盖不了 R=1∧EXIT=1∧F=0 的到期子窗）、标志永不置」的不可判形态：进程活、标志未置（r22：原「RETURN 在」为 r19 形态说明残留，flag-race 的触发不依赖 R）——两态均不吸附，独立收口）
 → `dw_return_class`/poll raw 字段同 cause、`dw_join_result=join-timeout`（JT 已登记不重写）、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**
 （合法竞态残余宁缺勿误——R=1 时 RETURN 在 capture ⟹ 快照五 raw 已写完、只是标志未 release；R=0 本征窗 SIG 已置 ⟹ 同样快照已写完，两窗 P12 侧同为「盒到期标志未置」不可分、runner 侧不需要分（r21 B-1）；**F8(2) 比对按上方 r21 sticky 例外执行**：runner 按 capture 签名（D6b skip ∧ `DW_RACEWIN` 在——无 R 前件、不读 POST cause）重建同一 cause → 一致 → 不命中——**原 r19「runner 正常重建 13 类、一致」为假断言（r20 废除）；r20 签名「RETURN 在 ∧ 盒到期 cause 在 POST」随 r21 去循环重写废除**）。
 **残余格更正（r21，三席收敛 B-1——原 :713 r20 版蕴含方向错误）**：SIG 置于 RETURN 发射前，`S=1∧R=0` 是 worker 卡在 emit RETURN 的本征可达窗（HiLog 背压/调度抢占），不是 marker 丢失——「信号⟹RETURN 应已发射」为假（SIG 只蕴含下一步是 emit RETURN，不蕴含已发射/已入 capture）。
-该格收口（r21）：P12 落 `flag-race-window-expired`（本地观测如实——盒到期标志未置是唯一本地事实）∧ 发射 `N1BDISC_DW_RACEWIN|expired=1`；runner 侧 sticky 例外签名**去掉 R=1 合取**（最终签名 = `D6b skip ∧ DW_RACEWIN`、无 R 前件、不读 POST cause——:649 r21 版），按签名重建同 cause → F8(2) 一致 → **complete pass**（不要求 RETURN 在 capture——R=0 本征窗与 R=1 窗同为「盒到期标志未置」、P12 侧不可分、runner 侧也不需要分——宁缺勿误：两窗 verdict 同为 complete pass）。
+该格收口（r21）：P12 落 `flag-race-window-expired`（本地观测如实——盒到期标志未置是唯一本地事实）∧ 发射 `N1BDISC_DW_RACEWIN|expired=1`；
+runner 侧 sticky 例外签名**去掉 R=1 合取**（最终签名 = `D6b skip ∧ DW_RACEWIN`、无 R 前件、不读 POST cause——见上方 `dw_return_class` sticky 重建例外（r22 现为 cut-state (B)(i) 实现）），按签名重建同 cause → F8(2) 一致 → **complete pass**（不要求 RETURN 在 capture——R=0 本征窗与 R=1 窗同为「盒到期标志未置」、P12 侧不可分、runner 侧也不需要分——宁缺勿误：两窗 verdict 同为 complete pass）。
 **上界理由与外层窗的关系（r19 定稿注）**：1000 ms 局部盒叠加于 **P12 自身 ≤5 s 串行预算**（时间盒表 P5T+P11+P12 槽）内，不改变 467 s 上界与 58 s 收尾裕量（r20 更正 deepseek M-01——原「含于 58 s 收尾裕量」归属错误）；**禁止**把外层观测窗 525 s 当作本等待上界（sol 第十九轮：外层窗不是本格的冻结局部上界、abandoned worker 可永久活挂——本格收口由 1000 ms cutoff 承载，与 525 s 无关）。
 **cut-state 规则（r22，sol B-01 TOCTOU 闭合——四轮同族 blocker 的根治；主会话裁定正面采纳 sol 方案——P12 点时本地观测与 runner 终态 capture 重建的比较在「决策与 POST 发射之间」的窗口上本质竞态；r19-r22 四轮 blocker 同族根治）**：
 **POST 新增 `worker_terminal_at_p12`（cut 记录）**——P12 写 class 时的终态标志读值（true/false）。runner 对 **JT=1 格**（capture 有 `SKIP|item=D6b`）的 class 校验改 **cut-aware**：
@@ -1434,6 +1444,10 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 **r19 第三格钉（迟到竞态窗收口验收——分域声明 r19 迟到竞态窗收口 + 1000 ms cutoff）**：夹具同 join-timeout 夹具至 JT 登记 + D6b skip，P12 到点时终态标志仍未置但 capture 已有 `DW_RETURN` → 主线程有界等待（1000 ms 局部盒、冻结轮询原语）：(a) 盒内标志置位 → 读快照走 13 类 + `dw_join_result=join-timeout`（重建规则一致、F8(2) 不命中）→ **complete pass**（r20 改述：P12 侧入口不判 R——本地信号已见即进竞态窗，见分域声明 r20 入口）；
    (b) 对照——**1000 ms 到期标志仍未置**（worker 在 EXIT 前**或 EXIT 后 release 前**某点被永久抢占/阻塞（r20 补子窗——见 `:702` cause 描述））→ `dw_return_class`/poll raw 字段落 `unobservable(cause=flag-race-window-expired)`、`dw_join_result=join-timeout` 不重写、D6b skip 编码不变 → POST 各字段有值 → 不命中 F4/F8/F1 → **complete pass**（合法竞态残余宁缺勿误；r19 定稿 cutoff——禁止无界等待未知事件、禁止拿外层 525 s 当本等待上界）。
    **r21 同步：selftest 须断言 `N1BDISC_DW_RACEWIN|expired=1` marker 在 capture**（P12 盒到期 F=0 时发射——r21 新 raw marker；漏发 → runner sticky 不命中 → F8(2) 比对不一致 fail——selftest 钉住 marker 发射义务）。
+   **r22 TOCTOU 钉**：JT=1 + P12 读 S=0/F=0 选 poll-never + 主线程 POST 前被抢占 + worker 完成（RETURN/EXIT 入 capture）+ 主线程恢复按已做决定写 POST（cut=false）→ runner cut-aware (B)(iii)：迟到 RETURN/EXIT 非矛盾 → **complete pass**（r22 核心验收——原 r21 该格 F8(2) 烧合法调度，sol B-01 决胜格）；
+   **r22 方向 1 钉**：cut=true（盒内置位）却发 RACEWIN + 写 flag-race → (A) 与 (B)(i) 双违 → **fail(F8(2))**；
+   **r22 方向 2 钉**：cut=false 盒到期漏发 RACEWIN + 写 13 类 → (B)(ii) 域外 → **fail(F8(2))**；
+   **r22 spurious RACEWIN 钉**（deepseek M-02）：RACEWIN 在 ∧ capture 无 `SKIP|item=D6b`（JT=0）→ capture 自相矛盾 → **fail(F8(2))**。
 **r18 归因洁净反例钉**：join-timeout 形态下主线程对 `fd_dup` 的任何 D6b 操作 = 违反归因洁净（「watchdog 暴露窗口」缓解 3：worker poll 终态之前主线程不触碰 `fd_dup`）——静态断言 A10 必须 fail（源码层反例 = join-timeout 分支控制流含对 `fd_dup` 的任一 read/write/fcntl/close 调用点，见静态断言表 A10）。
    **r17 barrier-never-observed 钉（grok m-03，B-01 反例 A 验收；分域声明 (c) 支验收）**：夹具 worker 卡死未发 BARRIER → 主线程 7+8 s 盒尽后发 `SKIP|item=destroy|cause=barrier-never-observed` → 交观测窗 → 进程死亡（PRE 在、POST 缺、无崩溃签名）→ 五态 `not-called` → **`dw_return_class`=类 0 `destroy-skip-proven`（分域 (c)：无 RETURN、经 SKIP 存在性直接判类）** → 四步 (1) SKIP 位点字面（`barrier-never-observed`）→ 不命中 F4/F8/F1 → pre-only **pass**。
 （r18 口径注：上句「终态标志只在 RETURN 后置位」为本钉形态的描述——本形态 worker 确未返回；迟到返回形态由标志已置门分流、不入本钉，见分域声明 (d) r18 归因洁净补注与 (e) 支。）
