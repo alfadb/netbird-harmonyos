@@ -857,3 +857,11 @@ sol 八格等价性表（第二十轮表 + S 隐藏维扩展）：关键发现�
 sol 构造核实：worker 卡在 emit RETURN（通道背压）→ P12 的 RACEWIN/POST 发射在同一阻塞通道上 → 最坏永久阻塞 → 525 s 窗到期、PRE 在、进程活、POST 缺 → F9 fail。`:718`「即使 HiLog 背压……不构成 fail 面」为过度声明。
 
 **主会话预裁定（供终账对质）**：该格的 F9 落点**不是 r21 新挖的洞**——r21 之前该形态（通道阻塞主线程 POST 发射）同样落 F9（POST 一直在同一通道上）；F9 的预注册措辞「存活未完成不是平台事实」本就宣告了该形态为 fail。RACEWIN 只是给同一通道**多发一枚 marker**，没有改变 F9 落点的存在性。**真正的问题是 `:718` 的字面过度声明**（「不构成 fail 面」与 F9 矛盾）——属措辞修正（M 级）而非结构洞（B 级）。若三席终稿以 B 定级、并给出「r21 前该形态不落 F9 而落 pass」的反例，则推翻本预裁定。
+
+### sol 第三条构造（(d) 支 TOCTOU）——核实成立，B 级
+
+**构造**（全部合法调度、实现完全遵守 r21）：JT=1 → P12 读 S=0/F=0 → 决定 poll-never-returned → **主线程在 POST 发射前被抢占** → worker 此时完成（写快照→S=1→emit RETURN→EXIT→F）全部入 capture → 主线程恢复、按**已做的决定**写 POST poll-never → capture 有 RETURN/EXIT、POST 说 poll-never → runner 重建 13 类 → F8(2) fail。烧掉合法平台调度。
+
+**根因**：`:702-703`「S=0 ⟹ RETURN 必未发射 ⟹ capture 无 RETURN」是**点时读取对未来状态的非法全称**——seq_cst 排除读到未来值/回退，但不把 false load 变成对未来的承诺。决策时点与 POST 发射时点之间的窗口内 worker 可完成。**这是与竞态窗同族的第三个 TOCTOU 格**（r19 格 3、r20 SIG 窗、本轮 (d) 支窗）——共同根因：**P12 的点时本地观测与 runner 的最终 capture 重建之间的任何比较，在决策与 POST 发射之间的无界窗口上本质是竞态的**。等待只能缩窗不能关窗。
+
+**方向定论**：r20/r21/r22 连续三轮的 blocker 全部落在这个边界族上；cut-state 方案（POST 记录 cut 状态、runner 比较按 cut 而非终态）历经每轮挑战后仍然是从根上消除该族的唯一方案。第二十二轮修复应正面采纳 cut-state 或其等价物（cut-aware 比对）。
