@@ -84,5 +84,8 @@ reviewer_role: 待 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
 
 | 门 | 状态 | 事实 |
 | --- | --- | --- |
+| 1 host-only 同步 | pass | clean HEAD `3dd95ac`（0 未提交项，与 origin/main 同步）；`code_sha = 3dd95ac31805dd4da2d159df52064450596b400c`；登记/runner/selftests/docs 均在 clean HEAD；HDC0 固定绝对 `/usr/bin/ps` 探针计数 0 |
+| 2 audit-1 | pass | 本对候选 ID 消费审计：仓外双文件+sha256——`~/harmonyos-signing/netbird-n1bdisc/audit/pair-20260906/new-pair-id-consumption-audit-1.txt`（SHA-256 `e830245fd77d4146a253896a0072429302d68d084b59d65763acfcab00705f42`）；三 ID 检索 7 行/2 文件均为登记性引用；消费标记零命中；`candidate.consumed=false` 保持 |
+| 3 freeze + 静态审查 | **fail（freeze-2 不成立；整改后重走）** | freeze-2 落盘（`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-2-20260906.txt`，SHA-256 `b8729f1d…eb5fa`；绑 code_sha `3dd95ac`、12/12 静态检查〔指纹 `c93fed2ed13c`〕、14/14 符号、MR 字面、时间盒、Fault_Type 冻结候选集+未实测依赖）。reviewer 静态审查（sol，gpt-5.6-sol 跨厂商隔离席——26 轮判据审查链成员、首次审本实现）：**FAIL**，7 blocker / 2 major / 0 minor——probe/entry 符合性面全部通过（符号/MR/时间盒/A1-A12/HDC0/audit-1 亲核一致），**FAIL 全部落在本轮新增 runner 派生层**（U1/U3 身份匹配错配、U2 端口与 payload 身份、u5 not_attempted 派生、join 轴违 :693 与 pending 接纳、D8b 域校验缺失、未注册 cause 未挂 F4、U4 fail-open；ws/we 无符号解析；test_platform 20 钉夹具镜像错误语义）。11 项实现偏差登记：拒 9 / 条件接受 1 / 接受 1。FAIL 处置记录：`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-freeze2-FAIL-disposition-20260906.txt`（SHA-256 `3b85f782…43fc5`）。**整改进行中**：runner 派生层以真实探针 marker 发射语义为基准修复 B1-B7+M1+M2；整改后新 code_sha 重记 gate 1-2、出 freeze-2-v2 并重走跨厂商静态审查。本 FAIL 为 host-only 审查阶段事实，不消费本对 pair |
 
-> 本表随本对执行自 gate 1 起逐门追加；截至本登记落笔（2026-09-06）无任何已执行门，三 ID 保持候选态（`identity_status: candidate`、`consumed: false`）。gate 5 记录若出现元组漂移，即按判据 :1436 收口 blocked record + 退役本对。
+> 本表随本对执行逐门追加。gate 3 首次审查 FAIL 后整改重走中；截至本行落笔，三 ID 保持候选态（`identity_status: candidate`、`consumed: false`）。gate 5 记录若出现元组漂移，即按判据 :1436 收口 blocked record + 退役本对。
