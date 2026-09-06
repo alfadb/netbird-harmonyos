@@ -390,6 +390,176 @@ def eval_probe_crash_signature(
                                 tuple(missing), tuple(causes))
 
 
+# ---------------------------------------------------------------------------
+# 5) D8b 死亡收口三分流（r12：BEGIN-only / 阶段未达两支 + 存活未完成 F9 面）
+# ---------------------------------------------------------------------------
+
+#: D8b BEGIN-only 死亡收口 cause（规格 :604：一条 cause 覆盖 END 承载五字段 +
+#: ``window_end_monotonic``）。
+STORM_INCOMPLETE_CAUSE = "storm-incomplete-pre-only"
+#: D8b 阶段未达死亡收口 cause（规格 :610：七个落盘字段全列；u7 支复用同字面，
+#: 规格 :659——同域同义跨字段共用）。
+STAGE_NOT_REACHED_CAUSE = "stage-not-reached"
+
+#: ``N1BDISC_D8_STORM_END`` 冻结载荷字段（规格 :616）：END 承载的 5 个落盘字段。
+STORM_END_FIELDS: Tuple[str, ...] = (
+    "eagain", "partial", "bytes", "calls", "caps_hit")
+#: D8b 全部落盘字段（规格 :610 七字段全列；两支收口的管辖域）。
+D8B_FIELDS: Tuple[str, ...] = (
+    "window_start_monotonic", "window_end_monotonic",
+    "eagain_observed", "partial_write_observed",
+    "bytes_written_total", "write_calls", "caps_hit")
+#: END 载荷字段 → D8b 落盘字段名（规格 :599/:616 同一承载）。
+_STORM_END_TO_FIELD: Dict[str, str] = {
+    "eagain": "eagain_observed", "partial": "partial_write_observed",
+    "bytes": "bytes_written_total", "calls": "write_calls", "caps_hit": "caps_hit",
+}
+
+
+_UINT_RE = re.compile(r"\A[0-9]+\Z")
+
+
+def _parse_uint(text: Any) -> Optional[int]:
+    """十进制无符号整数字面解析（沿 core 同一门；非负整数字面外的输入 → None）。"""
+    if isinstance(text, str) and _UINT_RE.match(text):
+        return int(text)
+    return None
+
+
+def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
+                     end_kv: Optional[Mapping[str, str]] = None,
+                     death_observed: bool,
+                     death_site_before_storm: bool,
+                     death_wall_ms: Optional[int] = None,
+                     begin_capture_wall_ms: Optional[int] = None,
+                     skip_cause: Optional[str] = None) -> Dict[str, Any]:
+    """D8b（storm）收口三分流（规格 :603-615 + :608/:615 对照 + F9 :1152）。
+
+    求值序（先到先得）：
+
+    0. skip 表指派（:995：D8a/D8b skip → 全字段
+       ``unobservable(cause=no-live-fd)``/``dup-failed``）——no-live-fd /
+       dup-failed 分支下 storm 从未计划执行；
+    1. BEGIN ∧ END 在 → 正常重建：``window_start=ws``、``window_end=we``、
+       五字段自 END 载荷逐字登记；``ws > we`` 或负值 → f8 facet（单调钟域门，
+       规格 :830/:829）；END 载荷字段缺 → f4 面（字段缺项）。
+    2. BEGIN 在 ∧ END 缺 ∧ 死亡分量 true → BEGIN-only 收口（:603-607）：
+       ``window_end`` 与 END 承载五字段各记
+       ``unobservable(cause=storm-incomplete-pre-only)``；``window_start`` 自
+       ``ws`` 照常重建（不受 END 缺失影响）；置
+       ``storm_incomplete_pre_only=True`` 并登记跨度
+       ``storm_incomplete_pre_only_span = 死亡证据墙钟 − BEGIN capture 墙钟``
+       （同侧墙钟相减，``ws`` 为单调钟禁止跨钟相减，:607；任一墙钟不可求值 →
+       跨度不登记、逐字入 raw）。
+    3. BEGIN 缺 ∧ 死亡分量 true ∧ 死亡位点 < P7 → 阶段未达收口（:609-614）：
+       七字段全列各记 ``unobservable(cause=stage-not-reached)``；
+       ``storm_incomplete_pre_only=False``、不登记跨度。
+    4. 无死亡分量（含 BEGIN 在 END 缺而进程仍活的对照，:608/:615）→ 存活未完成：
+       字段缺项沿 F4 面（missing 列表），布尔 False、无跨度——真未完成不是平台
+       终态（verdict 由观测窗到点收口规则 F9 独立出）。
+    5. BEGIN 缺 ∧ 死亡 ∧ 位点不早于 P7 → 真值表未覆盖 → f8 facet（fail-closed）。
+    """
+    out: Dict[str, Any] = {
+        "branch": None,
+        "window_start_monotonic": None,
+        "window_end_monotonic": None,
+        "eagain_observed": None, "partial_write_observed": None,
+        "bytes_written_total": None, "write_calls": None, "caps_hit": None,
+        "storm_incomplete_pre_only": False,
+        "storm_incomplete_pre_only_span": None,
+        "raw": {},
+        "f4_missing": [],
+        "f8_facets": [],
+    }
+    begin_present = begin_kv is not None
+    end_present = end_kv is not None
+
+    if skip_cause in ("no-live-fd", "dup-failed"):
+        # (0) skip 表指派（:995）：D8b 整体 skip，全字段同 cause 编码
+        out["branch"] = "skip"
+        cause = unobs(skip_cause)
+        for field_name in D8B_FIELDS:
+            out[field_name] = cause
+        out["raw"]["skip_cause"] = skip_cause
+        return out
+    if begin_present and end_present:
+        out["branch"] = "rebuilt"
+        ws = _parse_uint(begin_kv.get("ws"))
+        we = _parse_uint(end_kv.get("we"))
+        if ws is None:
+            out["f4_missing"].append("D8_STORM_BEGIN.ws")
+        else:
+            out["window_start_monotonic"] = ws
+            if ws < 0:
+                out["f8_facets"].append("monotonic-domain: D8b ws=%d < 0" % ws)
+        if we is None:
+            out["f4_missing"].append("D8_STORM_END.we")
+        else:
+            out["window_end_monotonic"] = we
+            if we < 0:
+                out["f8_facets"].append("monotonic-domain: D8b we=%d < 0" % we)
+        if ws is not None and we is not None and ws > we:
+            out["f8_facets"].append(
+                "monotonic-domain: window_start %d > window_end %d (规格 :830)" % (ws, we))
+        for key, field_name in _STORM_END_TO_FIELD.items():
+            value = end_kv.get(key)
+            if value is None:
+                out["f4_missing"].append("D8_STORM_END.%s" % key)
+            else:
+                out[field_name] = value
+        return out
+
+    if begin_present and not end_present and death_observed:
+        # BEGIN-only 死亡收口（:603-607）
+        out["branch"] = "storm-incomplete-pre-only"
+        ws = _parse_uint(begin_kv.get("ws"))
+        if ws is None:
+            out["f4_missing"].append("D8_STORM_BEGIN.ws")
+        else:
+            out["window_start_monotonic"] = ws   # ws 照常重建（:604）
+            out["raw"]["storm_begin_ws"] = ws
+        cause = unobs(STORM_INCOMPLETE_CAUSE)
+        out["window_end_monotonic"] = cause
+        for field_name in ("eagain_observed", "partial_write_observed",
+                           "bytes_written_total", "write_calls", "caps_hit"):
+            out[field_name] = cause
+        out["storm_incomplete_pre_only"] = True
+        # 跨度（:607）：死亡证据墙钟 − BEGIN capture 墙钟（同侧墙钟；禁止跨钟）
+        if death_wall_ms is not None and begin_capture_wall_ms is not None:
+            out["storm_incomplete_pre_only_span"] = \
+                death_wall_ms - begin_capture_wall_ms
+        out["raw"].update({
+            "death_wall_ms": death_wall_ms,
+            "begin_capture_wall_ms": begin_capture_wall_ms,
+        })
+        return out
+
+    if not begin_present and death_observed and death_site_before_storm:
+        # 阶段未达死亡收口（:609-614）
+        out["branch"] = "stage-not-reached"
+        cause = unobs(STAGE_NOT_REACHED_CAUSE)
+        for field_name in D8B_FIELDS:
+            out[field_name] = cause
+        out["storm_incomplete_pre_only"] = False   # :614：不登记跨度
+        return out
+
+    if not death_observed:
+        # 对照（:608/:615）：无死亡证据 = 存活未完成——字段缺项沿 F4 面、F9 独立出
+        out["branch"] = "alive-incomplete"
+        out["f4_missing"].extend("D8b.%s" % f for f in D8B_FIELDS)
+        return out
+
+    # BEGIN 缺 ∧ 死亡 ∧ 位点不早于 P7：真值表未覆盖（fail-closed，:1377 (3)）
+    out["branch"] = "uncovered"
+    cause = unobs("marker-gap-indeterminate")
+    for field_name in D8B_FIELDS:
+        out[field_name] = cause
+    out["f8_facets"].append(
+        "d8b-closure-truth-table-gap: death without BEGIN and last_visible_site "
+        "not before P7")
+    return out
+
+
 @dataclass
 class EvidenceVector:
     """七分量证据向量（:1264-1274：逐项有值、互不推导、不合成单一死因标签）。"""
@@ -420,10 +590,13 @@ __all__ = [
     "FAULT_TYPE_CANDIDATES", "CRASH_FAULT_TYPES", "CRASH_SIGNALS",
     "PLATFORM_TERMINATION_SIGNALS", "T_TAIL_MS", "SHORT_STEP_SITES",
     "UNKNOWN_CAUSE_PRIORITY",
+    "STORM_INCOMPLETE_CAUSE", "STAGE_NOT_REACHED_CAUSE",
+    "STORM_END_FIELDS", "D8B_FIELDS",
     "snapshot_diff", "normalize_fault_type", "classify_signal",
     "FaultEntryParse", "parse_fault_entry",
     "FaultComponents", "aggregate_fault_components",
     "eval_process_death", "eval_last_visible_site", "eval_destroy_call_state",
     "eval_marker_tail_state", "CrashSignatureResult",
-    "eval_probe_crash_signature", "EvidenceVector", "unobs", "cause_of",
+    "eval_probe_crash_signature", "eval_d8b_closure",
+    "EvidenceVector", "unobs", "cause_of",
 ]

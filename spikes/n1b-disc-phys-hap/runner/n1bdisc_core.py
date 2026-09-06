@@ -102,6 +102,8 @@ KNOWN_REVENTS_MASK = POLLIN | POLLPRI | POLLOUT | POLLERR | POLLHUP | POLLNVAL
 DW_EAGAIN_THRESHOLD_MS = 4500
 #: poll 返回类判定表中 ``errno == EINTR``（Linux/musl 通用 errno 编号）。
 EINTR = 4
+#: ``pthread_join`` 返回 ``ESRCH``（Linux/musl 通用 errno 编号；dw_join_result 本体值）。
+_ESRCH = 3
 
 # dw 值域（规格 :866/:870）
 #: 普通判定表 13 类（行 0/0b + 1..11）。
@@ -952,6 +954,130 @@ def derive_dw_return_class(inp: DwReturnInput) -> DwReturnClassResult:
                 detail_note="真值表未覆盖（如 ret=0 且 elapsed_ms 缺失）")
 
 
+@dataclass(frozen=True)
+class DwJoinInput:
+    """``dw_join_result`` 完整重建的判定输入（runner 侧 capture + runner 登记）。
+
+    - ``dw_skip_cause``：``N1BDISC_SKIP|item=D-W`` 的 cause（``no-live-fd`` /
+      ``dup-failed``）——skip 表全量指派（规格 :997-1000、D-W 分域 (a) :734）。
+    - ``destroy_call_state``：五态（pre-only 死亡收口分流输入，规格 :1171-1175）。
+    - ``d6b_skip_present`` / ``join_timeout_registered``：join sticky 的两个等价
+      前件（规格 :693：capture 中 ``SKIP|item=D6b`` 或 ``join-timeout-worker-
+      abandoned=true`` 已登记）→ 重建 ``join-timeout``，不得由 ``DW_EXIT``/
+      ``DW_RETURN`` 迟到完成改写。
+    - ``join_blocked_registered``：runner 依轮询超时登记
+      ``join-blocked-observed``（规格 :720/:1091——阻塞线程自身不发登记）。
+    - ``exit_present``/``exit_rc``：``DW_EXIT`` 存在性只喂 watchdog ④、不喂 join
+      轴的改写（:693）；``exit_rc`` 为 ``pthread_join`` 返回值（0=joined、
+      ``ESRCH``、其他 errno → ``other+errno``）。
+    - ``post_present``/``death_observed``：pre-only 死亡收口支只在
+      「POST 缺 ∧ 死亡分量 observed-true」时求值（规格 :1168/:1171）。
+    """
+
+    dw_skip_cause: Optional[str] = None
+    destroy_call_state: str = "not-reached"
+    d6b_skip_present: bool = False
+    join_timeout_registered: bool = False
+    join_blocked_registered: bool = False
+    exit_present: bool = False
+    exit_rc: Optional[int] = None
+    post_present: bool = False
+    death_observed: bool = False
+
+
+@dataclass(frozen=True)
+class DwJoinResult:
+    """重建结果：``outcome="value"`` 时 ``value`` ∈ :data:`DW_JOIN_RESULT_10`；
+    ``outcome="fail"`` 时真值表未覆盖（F8(3) 面，调用方入档）。``sticky``
+    记录 join sticky 是否命中（规格 :693 观察项）。"""
+
+    outcome: str                 # "value" | "fail"
+    value: Optional[str] = None
+    fail_reason: Optional[str] = None
+    sticky: Optional[str] = None
+    detail: Mapping[str, Any] = field(default_factory=dict)
+
+
+def derive_dw_join_result(inp: DwJoinInput) -> DwJoinResult:
+    """``dw_join_result`` 10 值域完整重建（规格 :870；单一权威派生入口）。
+
+    求值序（先到先得，命中即终止）：
+    (1) skip 表指派（:997-1000/:734）——``SKIP|item=D-W`` cause ∈
+        {``no-live-fd``, ``dup-failed``} → 同 cause 编码（无 worker、无 join）；
+    (2) join sticky（:693，r19 runner 重建规则）——D6b skip 在（或 JT 已登记）→
+        ``join-timeout``，迟到 ``DW_EXIT``/``DW_RETURN`` 存在性不得改写；
+        barrier-never-observed 顺延路径同落本支（终态轮询盒先于 SKIP 到期登记，
+        :1177）；
+    (3) runner 登记 ``join-blocked-observed``（:720/:1029/:1047/:1091 A4 注）；
+    (4) pre-only 死亡收口（POST 缺 ∧ 死亡分量 true；:1168/:1171-1175）——按
+        ``destroy_call_state`` 五态分流：``not-reached`` → ``destroy-not-reached``、
+        ``call-returned`` → ``post-destroy-unobservable``、
+        ``call-boundary-incomplete`` → ``call-boundary-incomplete``（三 cause 同入
+        join 域，规格 :870 计数 5+2+3=10）；``not-called`` 不走本收口（:1175）——
+        其两条真实路径已由 (1)/(2) 承接，残余格为真值表缺口 → fail；
+    (5) ``pthread_join`` 返回（runner 侧）：``ESRCH`` / 其他 errno → ``other+errno``；
+    (6) ``DW_EXIT`` 在（或 ``exit_rc == 0``）→ ``joined``；
+    (7) 其余输入组合真值表未覆盖 → fail（调用方按 F8(3) 入档，不伪装域内值）。
+    全部 ``value`` 落点逐字 ∈ :data:`DW_JOIN_RESULT_10`。
+    """
+    def result(value: str, sticky: Optional[str] = None,
+               **detail: Any) -> DwJoinResult:
+        assert value in DW_JOIN_RESULT_10, "derive_dw_join_result 域外落值: %r" % (value,)
+        return DwJoinResult("value", value, None, sticky, detail)
+
+    # (1) skip 表指派（D-W 整体被 skip：无 waiter、无 join 等待）
+    if inp.dw_skip_cause in ("no-live-fd", "dup-failed"):
+        return result(unobservable_value(inp.dw_skip_cause),
+                      detail={"branch": "skip-table"})
+    # (2) join sticky（:693）：JT 登记 → join-timeout，迟到完成不得改写
+    if inp.d6b_skip_present or inp.join_timeout_registered:
+        return result("join-timeout", sticky="join",
+                      detail={"branch": "join-sticky",
+                              "d6b_skip": inp.d6b_skip_present,
+                              "jt_registered": inp.join_timeout_registered})
+    # (3) A5(b)：标志置位后 join 阻塞 → runner 依轮询超时登记（:720/:1091）
+    if inp.join_blocked_registered:
+        return result("join-blocked-observed",
+                      detail={"branch": "join-blocked-registered"})
+    # (4) pre-only 死亡收口（POST 缺 ∧ 死亡分量；:1168/:1171-1175 五态分流）
+    if not inp.post_present and inp.death_observed:
+        closure = {
+            "not-reached": "destroy-not-reached",            # :1172/:1188 (1a)
+            "call-returned": "post-destroy-unobservable",    # :1173
+            "call-boundary-incomplete": "call-boundary-incomplete",  # :1174
+        }
+        if inp.destroy_call_state in closure:
+            return result(unobservable_value(closure[inp.destroy_call_state]),
+                          detail={"branch": "pre-only-death-closure",
+                                  "destroy_call_state": inp.destroy_call_state})
+        if inp.destroy_call_state == "not-called":
+            # :1175 not-called 不走死亡收口——其真实路径（no-live-fd 的 D-W skip /
+            # barrier-never-observed 的 JT 登记）已在 (1)/(2) 承接；到此的残余格
+            # 为真值表缺口（fail-closed，不伪装域内值）。
+            return DwJoinResult("fail", None,
+                                "join-truth-table-gap: not-called without D-W skip "
+                                "or JT registration", None,
+                                {"branch": "pre-only-death-closure",
+                                 "destroy_call_state": "not-called"})
+        return DwJoinResult("fail", None,
+                            "join-truth-table-gap: destroy_call_state=%r"
+                            % (inp.destroy_call_state,), None,
+                            {"branch": "pre-only-death-closure"})
+    # (5) pthread_join 返回（runner 侧登记）
+    if inp.exit_rc is not None and inp.exit_rc != 0:
+        if inp.exit_rc == _ESRCH:
+            return result("ESRCH", detail={"exit_rc": inp.exit_rc})
+        return result("other+errno", detail={"exit_rc": inp.exit_rc})
+    # (6) DW_EXIT 在（EXIT 只喂 ④、不喂 join 改写——此处为正常终态正面支）
+    if inp.exit_present or inp.exit_rc == 0:
+        return result("joined", detail={"branch": "exit-present"})
+    # (7) 真值表未覆盖（如 POST 缺、进程活、无任何 join 输入）
+    return DwJoinResult("fail", None, "join-truth-table-incomplete", None,
+                        {"post_present": inp.post_present,
+                         "death_observed": inp.death_observed,
+                         "exit_present": inp.exit_present})
+
+
 def map_dw_join_result(outcome: Any) -> str:
     """``dw_join_result`` 10 值域（规格 :870）的基础映射。
 
@@ -996,5 +1122,6 @@ __all__ = [
     "serialize_ledger", "ledger_digest", "rebuild_fd_ledger",
     # dw
     "DwReturnInput", "DwReturnClassResult", "derive_dw_return_class",
+    "DwJoinInput", "DwJoinResult", "derive_dw_join_result",
     "unobservable_value", "map_dw_join_result",
 ]

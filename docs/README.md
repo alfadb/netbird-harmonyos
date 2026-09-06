@@ -1,6 +1,6 @@
 # 项目文档
 
-最后核验：2026-09-05
+最后核验：2026-09-06
 
 > **当前活跃开发工具链（2026-09-05 起）**：已迁移为 CLT `26.0.0.821` / HarmonyOS SDK `26.0.0.105`（API 26 **Release**），唯一版本基线见[工具链版本基线](toolchain-baseline.md)；Rust 工具链已安装验证（rustc/cargo 1.98.1、rustup 1.29.1、OHOS aarch64/x86_64 targets，登记同见基线），工具链 smoke（API 26 HAP、BoringTun OHOS）均 PASS，见[工具链 smoke 记录](toolchain-smoke-20260905.md)；N1BDISC 冻结判据的 SDK 锚点在 821 上的对账结论（9/9 PASS）见[N1BDISC SDK 锚点对账](n1bdisc-sdk-anchor-reconciliation-20260905.md)。
 
@@ -132,9 +132,12 @@
 - [N1BDISC 发现 campaign 判据（r26，已冻结）](n1b-disc-gate-plan.md)
   - `criteria-frozen-2026-09-02`（git `04cf222`）：判据已冻结（用户授权；第二十六轮三席跨厂商审查全 pass、0 blocker）；冻结 ≠ 授权——ID 分配与一切物理执行仍以用户逐项显式授权为前置
   - 历史：26 轮审查轨迹（r0 2 fail / r1 3 fail / r2 2 fail 起，blocker 12→0）与逐轮终账见审查登记册 `docs/n1b-disc-r8-review-register.md`
-- [N1BDISC ID 分配授权登记（2026-09-05 · 0001，host-only）](evidence/n1bdisc-authorization-2026-09-05-0001.md)
-  - `AUTH-N1BDISC-PHYS1API26-20260905-0001` / campaign `N1BDISC-PHYS1API26-20260905-0001` / evidence `EV-N1BDISC-PHYS1API26-20260905-0001`：用户 2026-09-05 显式授权的 ID 分配登记（`attempt: initial`、`retry: N/A`，候选态未消费、全新无继承）
-  - 本次授权仅覆盖 ID 分配：测量、HDC/设备命令、tconn、DryRun、Live 及 N1b r2 判据均须逐项另行授权；当前仅允许 host-only（登记文档、spike 实现、host-only 验证）
+- [N1BDISC ID 分配授权登记（2026-09-05 · 0001，host-only，已退役）](evidence/n1bdisc-authorization-2026-09-05-0001.md)
+  - `AUTH-N1BDISC-PHYS1API26-20260905-0001` / campaign `N1BDISC-PHYS1API26-20260905-0001` / evidence `EV-N1BDISC-PHYS1API26-20260905-0001`：用户 2026-09-05 显式授权的 ID 分配登记（`attempt: initial`、`retry: N/A`、全新无继承）；**已于 2026-09-06 gate 5 元组漂移退役（`consumed-blocked-final`，无后继 AUTH）**
+  - gate 1-4 pass；gate 5 实测设备 OTA 至 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` 与冻结值漂移 → blocked record + pair 退役，触发 CC-2 元组重绑与第二对授权登记（见下条）
+- [N1BDISC 第二对 pair ID 分配授权登记（2026-09-06 · 0001，host-only，重绑路径）](evidence/n1bdisc-authorization-2026-09-06-0001.md)
+  - `AUTH-N1BDISC-PHYS1API26-20260906-0001` / campaign `N1BDISC-PHYS1API26-20260906-0001` / evidence `EV-N1BDISC-PHYS1API26-20260906-0001`：用户 2026-09-06 显式授权「重绑新元组继续」的 ID 分配登记（`attempt: initial`、`retry: N/A`，候选态未消费、全新无继承、与首对及 N1b 正式门均不共用）
+  - 授权覆盖重绑路径整体：判据 `04cf222`+CC-1+CC-2（2026-09-06 元组重绑至 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`，deepseek 席重审 0B/0M/2m 通过）；host-only gate 1-3 重走（gate 3 按本对 code_sha 重出 freeze-2）+ 设备侧 gate 4-5 重测；gate 13 Live 须用户全新确认；AGC 资产沿用（bundle 名 `cn.alfadb.netbird.n1bdisc` 冻结值不变、AGC 侧无需重建）
 - [N1BDISC SDK 锚点对账（2026-09-05，9/9 PASS）](n1bdisc-sdk-anchor-reconciliation-20260905.md)
   - 只读对账存档：冻结判据正文引用的 SDK/sysroot 锚点主张在 CLT `26.0.0.821` / SDK `26.0.0.105`（API 26 Release）实际内容上 9/9 类实测一致；非设备 evidence、不占用 evidence ID、未修改冻结判据
 - [N1BDISC 交接文档（2026-09-02 判据冻结后，最新交接）](n1b-disc-handoff-20260902.md)

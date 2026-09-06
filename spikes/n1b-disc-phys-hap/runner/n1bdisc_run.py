@@ -36,6 +36,7 @@ import n1bdisc_fsm as fsm                       # noqa: E402
 import n1bdisc_hdc as hdc                       # noqa: E402
 import n1bdisc_death as death                   # noqa: E402
 import n1bdisc_verdict as verdict               # noqa: E402
+import n1bdisc_platform as platform             # noqa: E402
 import fake_hdc as fake                         # noqa: E402
 
 _RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,7 +55,7 @@ def _unbuffered() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gate 10 形态：selftests（test_core + test_fsm）
+# gate 10 形态：selftests（test_core + test_fsm + test_platform）
 # ---------------------------------------------------------------------------
 
 def _load_selftest_module(name: str):
@@ -68,10 +69,10 @@ def _load_selftest_module(name: str):
 
 
 def run_selftests() -> Dict[str, Any]:
-    """运行两套 selftest 模块（pytest 不在场的自研 main 双兼容形态）。"""
+    """运行三套 selftest 模块（pytest 不在场的自研 main 双兼容形态）。"""
     out: Dict[str, Any] = {}
     ok = True
-    for name in ("test_core", "test_fsm"):
+    for name in ("test_core", "test_fsm", "test_platform"):
         buf = io.StringIO()
         try:
             module = _load_selftest_module(name)
@@ -456,6 +457,66 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
             _has(events, "N1BDISC_DW_RETURN"), _has(events, "N1BDISC_DW_EXIT"))
     gaps_f8 += cut_report_violations
 
+    # dw_join_result 完整重建（分期项 10：单一权威派生入口，规格 :870/:693）+
+    # P12 内层 join= 比对（F8(2)；pending 为探针 skip 形态内层字面，dw.rs:994）
+    d6b_skip_present = any(e.name == "N1BDISC_SKIP" and e.kv.get("item") == "D6b"
+                           for e in events)
+    join_input = core.DwJoinInput(
+        dw_skip_cause=platform.dw_skip_cause_of(events),
+        destroy_call_state=camp["destroy_state"],
+        d6b_skip_present=d6b_skip_present,
+        # runner 侧 JT 登记：DryRun/重建以 capture 中 D6b skip 为同一载体的
+        # 登记事实（规格 :693 括注「或 join-timeout-worker-abandoned=true 已
+        # 登记」——两前件等价，真机 runner 侧轮询登记落同一布尔）。
+        join_timeout_registered=d6b_skip_present,
+        exit_present=_has(events, "N1BDISC_DW_EXIT"),
+        post_present=post is not None,
+        death_observed=camp["death_observed"],
+    )
+    join_rebuilt = core.derive_dw_join_result(join_input)
+    rebuilt_join = join_rebuilt.value
+    if join_rebuilt.outcome == "fail":
+        gaps_f8.append("dw_join_result rebuild truth-table gap: %s"
+                       % join_rebuilt.fail_reason)
+        rebuilt_join = None
+    post_join: Optional[str] = None
+    if post is not None:
+        post_join = verdict.parse_dw_outcome(post.kv.get("dw_outcome", "")).get("join")
+        if rebuilt_join is not None and not verdict.p12_join_consistency(
+                rebuilt_join, post_join, post_class):
+            gaps_f8.append("P12 dw_join_result=%r != runner rebuild %r"
+                           % (post_join, rebuilt_join))
+
+    # u1-u7 平台分量派生（分期项 9；F8/F4 facet 交 verdict 承载）
+    platform_components = platform.derive_platform_components(
+        events=events, chunks=chunks,
+        death_observed=camp["death_observed"],
+        last_site=camp["last_site"], tail_state=camp["tail_state"],
+        post_present=post is not None,
+        destroy_call_state=camp["destroy_state"])
+    gaps_f8 += platform_components["f8_facets"]
+    gaps_f4 += platform_components["f4_facets"]
+
+    # D8b 收口三分流（分期项 11：BEGIN-only / 阶段未达 / 存活未完成 F9 面）
+    storm_begin = _find(events, "N1BDISC_D8_STORM_BEGIN")
+    storm_end = _find(events, "N1BDISC_D8_STORM_END")
+    last_site_idx = (fsm.SITE_ORDER.index(camp["last_site"])
+                     if camp["last_site"] in fsm.SITE_ORDER else None)
+    d8b_closure = death.eval_d8b_closure(
+        begin_kv=storm_begin.kv if storm_begin is not None else None,
+        end_kv=storm_end.kv if storm_end is not None else None,
+        death_observed=camp["death_observed"],
+        death_site_before_storm=(last_site_idx is not None
+                                 and last_site_idx < fsm.SITE_ORDER.index("P7")),
+        # DryRun 确定性合成墙钟（is_evidence=false）：死亡证据墙钟 / BEGIN capture
+        # 墙钟沿 camp 既有合成约定（死亡 100_000、最后可见 marker 80_000），BEGIN
+        # 取 90_000（介于两者）；真机以 faultlogger 时间戳 / capture 墙钟取材（:607）。
+        death_wall_ms=100_000 if camp["death_observed"] else None,
+        begin_capture_wall_ms=90_000 if storm_begin is not None else None,
+        skip_cause=platform.dw_skip_cause_of(events))
+    gaps_f4 += ["d8b-increment-gap: %s" % f for f in d8b_closure["f4_missing"]]
+    gaps_f8 += d8b_closure["f8_facets"]
+
     # 时间字段不可解析条目 → 解析域缺口（:1242；Fault_Type/Signal 豁免，:1378）
     gaps_f8 += ["fault-entry-time-unparsable: %s" % name
                 for name in camp["components"].time_gap_files]
@@ -496,7 +557,11 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         "d2_entry_final_outcomes": d2_entry_final,
         "ledger": ledger_report,
         "dw": {"rebuilt_class": rebuilt_class, "post_class": post_class,
+               "rebuilt_join": rebuilt_join, "post_join": post_join,
+               "join_sticky": join_rebuilt.sticky,
                "cut_report": cut_report},
+        "platform_components": platform_components,
+        "d8b_closure": d8b_closure,
         "chunks": {"failures": chunk_failures,
                    "observations": [dict(o) for o in chunks.observations]},
     }
@@ -614,6 +679,14 @@ def build_record(scenario_name: str, selftests: Dict[str, Any],
         },
         "ledger": judged["ledger"],
         "dw": judged["dw"],
+        "platform_components": judged["platform_components"],
+        "d8b_closure": {k: v for k, v in judged["d8b_closure"].items()
+                        if k in ("branch", "window_start_monotonic",
+                                 "window_end_monotonic", "eagain_observed",
+                                 "partial_write_observed", "bytes_written_total",
+                                 "write_calls", "caps_hit",
+                                 "storm_incomplete_pre_only",
+                                 "storm_incomplete_pre_only_span", "raw")},
         "time_box_audit": {
             "observation_window_s": fsm.OBSERVATION_WINDOW_S,
             "allow_box_s": fsm.ALLOW_BOX_S,
