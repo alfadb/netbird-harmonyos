@@ -25,13 +25,13 @@ campaign_id: N1BDISC-PHYS1API26-20260905-0001
 evidence_id: EV-N1BDISC-PHYS1API26-20260905-0001
 exception: N1BDISC-DISCOVERY-CAMPAIGN
 information_status: current-governance-registration
-record_status: active-governance-registration # 治理登记值（is_evidence: false，不在证据 record_status 枚举内）；未来 EV 记录按 schema :89 沿用 collected → reviewed-pass
+record_status: consumed-blocked-final # gate 5 元组漂移（判据 :1436：漂移即 blocked record + 退役）——2026-09-06 收官，见「门序列执行登记」与文末收官注记
 stage_or_gate: N1BDISC
 related_stages_or_gates: [N1B]
-execution: not-started-host-only
+execution: not-started-host-only # campaign 未执行（无测量、无 Live）；pair 于 gate 5 退役
 is_evidence: false
-authorization_status: granted-id-allocation-only # 表达：用户授权范围仅 ID 分配（值域依据见下注）
-plan_status: id-allocated-pending-per-item-execution-authorization # 表达：判据冻结后、执行未开始，其余事项逐项另行授权（值域依据见下注）
+authorization_status: consumed # 2026-09-06 gate 5 元组漂移退役，终态
+plan_status: consumed-blocked # 2026-09-06 gate 5 元组漂移退役，终态
 criteria_freeze: git-04cf222-plus-cc-1-reviewed-pass-2026-09-05 # 冻结基线 04cf222（2026-09-02）；2026-09-05 CC-1 判据变更经跨厂商隔离重审通过后为此值
 device_readiness: not-yet-requested
 machine_fresh_confirmation: not-yet-requested
@@ -40,8 +40,8 @@ retry: N/A
 candidate:
   campaign_id: N1BDISC-PHYS1API26-20260905-0001
   evidence_id: EV-N1BDISC-PHYS1API26-20260905-0001
-  identity_status: candidate
-  consumed: false
+  identity_status: consumed-blocked # gate 5 元组漂移退役（2026-09-06）；无后继 AUTH
+  consumed: false # campaign 未执行（无测量/Live 未消费 pair）；退役由 gate 5 漂移规则驱动
   reusable: false
 target_tuple: HarmonyOS / PLA-AL10 / PLA-AL10 7.0.0.102(SP8C00E102R7P3) / API 26 / aarch64 / arm64-v8a # gate 5 实测复核；漂移即 blocked record + 退役（判据 :269/:1436）
 bundle_name: cn.alfadb.netbird.n1bdisc # 判据 :270 冻结值，逐字一致
@@ -94,5 +94,9 @@ reviewer_role: 待 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
 | 1 host-only 同步 | pass | clean HEAD `11fabd6`（0 未提交项，与 origin/main 同步）；`code_sha = 11fabd66d66917b2fa0404f5ddbf53a73c288ae1`；登记/runner/selftests/docs 均在 clean HEAD；HDC0 固定绝对 `/usr/bin/ps` 探针最终计数 0——过程记录：发现遗留 hdc server（pid 1726，2026-09-05 23:53 启动，先于本 campaign），`hdc kill` 清理后复核归零，全程零设备接触 |
 | 2 audit-1 | pass | 候选 ID 消费审计：仓外双文件+sha256——`~/harmonyos-signing/netbird-n1bdisc/audit/audit-1/new-pair-id-consumption-audit-1.txt`（SHA-256 `82b24b90eff329911e22458ad976510b508c552d242b2cad97bc3dba894354f6`）；三 ID 全文检索 12 行/3 文件均为登记性引用；消费标记零命中；结论 `outside-consumption-hits=0 inside-evidence-consumption-hits=0`，candidate.consumed=false 保持 |
 | 3 freeze + 静态审查 | pass | freeze-1：`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-1.txt`（SHA-256 `05453491e691ce963ce7cbf787074dbe0806ba753d04287970902e835a2116e4`；附件 `gate3-staticcheck-output.json` `3c940bac…`、`gate3-symbol-transcription.txt` `ad61a4fb…`），绑 code_sha `11fabd6…`、14/14 符号誊录（制品 `.so` SHA-256 `b2a34b05…eef1`）、A1-A12 机器检查 12/12 PASS（被检树指纹 `19e67c52bf9b`）、时间盒表逐项核对、Fault_Type 冻结候选集 `{APPFREEZE, CPPCRASH, JSRAWERROR}` + 未实测依赖登记（取不到目标元组真实 faultlogger 文本，按判据 :1434 条款以冻结候选集执行）；reviewer 静态审查（grok，跨厂商隔离席）：**PASS = freeze 成立**，0 blocker / 0 major / 2 minor；裁决：(a) `.ets` 三处 `:463` 锚语义读作 `:468`（注释校正已落地，L25/L56/L80），(b) A3 取址保链口径采纳为 freeze 口径，(c) 记录结构符合判据 :1434、gate 1/2 事实充分 |
+| 4 host-prep `tconn` + `list targets` | pass（用户执行 tconn，主会话执行 list targets） | 恰一次内存级 `hdc list targets`：targets_count=1、target_redacted=true、endpoint/token 未输出未持久化；tconn 由用户（设备持有人）本人执行 |
+| 5 `-TargetBindingConfirm` | **blocked（元组漂移）** | 三探针逐字 argv（判据 :1621-1622）：`hdc version`→`Ver: 3.2.0f`；`-t <T> shell param get const.product.model`→逐字节 `PLA-AL10 `（trim 后 `PLA-AL10`，与冻结 **MATCH**）；`-t <T> shell param get const.product.software.version`→逐字节 `PLA-AL10 7.0.0.105(SP6C00E105R7P3) `（与冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` **DRIFT**——设备于 2026-08-30 G0 gate-5 实测 7.0.0.102 之后 OTA 升级至 7.0.0.105）。按判据 :266-267/:1436「漂移即 blocked record + 退役」：**blocked record + 本 pair 退役**；blocked confirmation record：`~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`（SHA-256 `d2f59da0a66d9357e59fdcae47b390f3e8780e873a56f2a3267955f3665c7fbd`，is_evidence=false、target_redacted=true）；随后 `hdc kill` 清理 server，HDC0 复核归零 |
 
 > gate 4 起为设备侧（`tconn` / `TargetBindingConfirm` / DryRun / Live），逐门推进且每项均须用户另行授权；本表后续门的登记随执行追加。
+
+> **收官（2026-09-06）**：13 门执行至 gate 5 终止。gate 1-4 pass（host-only 同步/audit-1/freeze-1 静态审查 PASS/用户 tconn + 恰一次内存级 list targets）。**gate 5 元组漂移：设备软件版本实测 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` ≠ 冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（设备在 2026-08-30 G0 实测后 OTA 升级）——按判据 :266-267/:1436 裁 blocked record + 退役本 pair**。blocked record 见 `~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`（SHA-256 `d2f59da0…c7fbd`）。本 AUTH `consumed-blocked`，campaign 未执行（无测量、无 DryRun、无 Live），pair 不可复用，**无后继 AUTH**；`hdc kill` 后 HDC0 归零。若在当前设备版本上继续 DISC，须全新治理：判据按新元组重绑（判据变更，须跨厂商隔离重审）+ 新 AUTH/pair/evidence ID + 从 gate 1 重走门序列。实现资产（spikes/n1b-disc-phys-hap/）与 freeze-1 不因退役失效，其判据符合性结论可被新治理引用，但 gate 5 需按新元组重测。
