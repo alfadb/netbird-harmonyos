@@ -915,6 +915,26 @@ fn derive_post_outcome(
     thirteen(raw, c_mono, t_mono)
 }
 
+/// Fallback for the P12 `dw_join_result` POST column when no join state was
+/// written (`dw_join` never ran / never recorded). Producer-conformant to the
+/// ten-value domain (gate-plan :870) and the skip-table full assignment
+/// (:443/:734): D-W skipped wholesale (worker never spawned) -> the skip
+/// literal verbatim, NOT `pending`. The residual tail (`spawned && !jt` with
+/// no join state) is structurally unreachable on the frozen ets flow
+/// (terminal observed -> `dw_join` always records; terminal not observed ->
+/// jt registered) — keep `pending` there so the runner's strict ten-value
+/// parse fails closed (F8(2)) if a bug ever makes it reachable.
+fn join_result_fallback(spawned: bool, jt: bool, dw_skip: Option<&str>) -> String {
+    if !spawned {
+        return format!("unobservable(cause={})", dw_skip.unwrap_or("no-live-fd"));
+    }
+    if jt {
+        "join-timeout".to_string()
+    } else {
+        "pending".to_string()
+    }
+}
+
 pub fn post_emit(destroy_resolved: bool) -> String {
     let (spawned, jt, destroy_skip, dw_skip, t_mono, c_mono) = with_state(|s| {
         (
@@ -993,7 +1013,7 @@ pub fn post_emit(destroy_resolved: bool) -> String {
 
     let resolved = destroy_resolved || with_state(|s| s.d6.d6a_ran);
     let join_result = with_state(|s| s.join_result.clone())
-        .unwrap_or_else(|| if jt { "join-timeout".to_string() } else { "pending".to_string() });
+        .unwrap_or_else(|| join_result_fallback(spawned, jt, dw_skip.as_deref()));
 
     let distinguishable = derive_distinguishable(
         &out.class,
@@ -1220,6 +1240,34 @@ mod tests {
     }
 
     // ② derive_post_outcome — seven-step chain x cut-state cells.
+
+    #[test]
+    fn join_fallback_skip_case_uses_skip_literal_not_pending() {
+        // B4 probe-side: D-W skipped wholesale (never spawned) -> the skip
+        // literal verbatim (:443/:734/:870 ten-value domain), never `pending`.
+        assert_eq!(
+            join_result_fallback(false, false, Some("no-live-fd")),
+            "unobservable(cause=no-live-fd)"
+        );
+        assert_eq!(
+            join_result_fallback(false, false, Some("dup-failed")),
+            "unobservable(cause=dup-failed)"
+        );
+        assert_eq!(
+            join_result_fallback(false, false, None),
+            "unobservable(cause=no-live-fd)"
+        );
+        // spawned + JT registered (terminal box expired, join not called)
+        // -> join-timeout (:746/:1177).
+        assert_eq!(join_result_fallback(true, true, None), "join-timeout");
+        assert_eq!(
+            join_result_fallback(true, true, Some("no-live-fd")),
+            "join-timeout"
+        );
+        // structurally unreachable residual tail stays `pending` — runner
+        // strict ten-value parse fails closed on it (F8(2)).
+        assert_eq!(join_result_fallback(true, false, None), "pending");
+    }
 
     #[test]
     fn chain_a_dw_skip_assignment() {

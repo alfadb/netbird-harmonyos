@@ -12,6 +12,8 @@ hdc transport——``--dryrun`` 以 fake-hdc 为唯一 "hdc" 形态（HDC0，规
     PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario happy
     PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario pre-only
     PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario no-live-fd
+    # gate 3 整改反例剧本（B1/B2/B3/B4/B5）：join-bogus/d8b-bogus 预期 fail(F8)
+    # exit 1——fail-closed 反例的机器证据，其余反例预期 pass exit 0。
 
     # Live（骨架；无真实 transport，一律拒绝）
     python3 runner/n1bdisc_run.py --live --target <T> --hap <HAP_DISC>   # exit 2
@@ -24,6 +26,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import sys
 import time
 from contextlib import redirect_stdout
@@ -42,7 +45,8 @@ import fake_hdc as fake                         # noqa: E402
 _RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
 _SELFTEST_DIR = os.path.normpath(os.path.join(_RUNNER_DIR, os.pardir, "selftests"))
 
-SCENARIOS = ("happy", "pre-only", "no-live-fd")
+SCENARIOS = ("happy", "pre-only", "no-live-fd", "foreign-packet",
+             "bad-payload", "not-attempted-timeout", "join-bogus", "d8b-bogus")
 
 
 def _unbuffered() -> None:
@@ -166,6 +170,12 @@ def run_dryrun_campaign(scenario_name: str,
         "happy": fake.make_happy_path_scenario,
         "pre-only": fake.make_pre_only_scenario,
         "no-live-fd": fake.make_no_live_fd_scenario,
+        # gate 3 整改反例剧本（B1/B2/B3/B4/B5 端到端反例钉）
+        "foreign-packet": fake.make_foreign_packet_scenario,
+        "bad-payload": fake.make_bad_payload_scenario,
+        "not-attempted-timeout": fake.make_not_attempted_timeout_scenario,
+        "join-bogus": fake.make_join_bogus_scenario,
+        "d8b-bogus": fake.make_d8b_bogus_scenario,
     }
     scenario = scenario if scenario is not None else builders[scenario_name]()
     transport = fake.FakeHdc(scenario)
@@ -312,6 +322,15 @@ def run_dryrun_campaign(scenario_name: str,
     finally_log.append("9.terminal-judgement:" + str(close_kind))
     finally_log.append("10.integrity-close")          # 步 10（integrity empty）
 
+    # B4-c：runner 侧 join 事实登记（:720/:1047——join-blocked-observed 由 runner
+    # 依轮询超时登记、join rc 为 runner 侧 pthread_join 返回登记；DryRun 由剧本
+    # 声明这些 runner 侧观测，live 形态由 fsm 轮询路径供给同一布尔/整数）。
+    join_facts = {
+        "join_blocked_registered": bool(getattr(
+            scenario, "join_blocked_registered", False)),
+        "join_exit_rc": getattr(scenario, "join_exit_rc", None),
+    }
+
     return {
         "scenario": scenario_name,
         "transport": transport,
@@ -339,6 +358,7 @@ def run_dryrun_campaign(scenario_name: str,
         "absent_checks": absent_checks,
         "verified_clean": verified_clean,
         "audit_ops": audit,
+        "join_facts": join_facts,
     }
 
 
@@ -458,9 +478,11 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
     gaps_f8 += cut_report_violations
 
     # dw_join_result 完整重建（分期项 10：单一权威派生入口，规格 :870/:693）+
-    # P12 内层 join= 比对（F8(2)；pending 为探针 skip 形态内层字面，dw.rs:994）
+    # P12 内层 join= 严格十值域比对（B4-b：pending 不再是合法形态；B4-c：
+    # join_blocked_registered/exit_rc 自剧本/fsm 登记路径真实接线，:720/:1047）
     d6b_skip_present = any(e.name == "N1BDISC_SKIP" and e.kv.get("item") == "D6b"
                            for e in events)
+    join_facts = camp.get("join_facts") or {}
     join_input = core.DwJoinInput(
         dw_skip_cause=platform.dw_skip_cause_of(events),
         destroy_call_state=camp["destroy_state"],
@@ -469,6 +491,11 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         # 登记事实（规格 :693 括注「或 join-timeout-worker-abandoned=true 已
         # 登记」——两前件等价，真机 runner 侧轮询登记落同一布尔）。
         join_timeout_registered=d6b_skip_present,
+        # B4-c 真实接线（:720/:1047）：runner 依轮询超时登记 join 阻塞 /
+        # runner 侧 pthread_join 返回值登记（0=joined、ESRCH、other+errno）。
+        join_blocked_registered=bool(join_facts.get("join_blocked_registered",
+                                                    False)),
+        exit_rc=join_facts.get("join_exit_rc"),
         exit_present=_has(events, "N1BDISC_DW_EXIT"),
         post_present=post is not None,
         death_observed=camp["death_observed"],
@@ -479,6 +506,8 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         gaps_f8.append("dw_join_result rebuild truth-table gap: %s"
                        % join_rebuilt.fail_reason)
         rebuilt_join = None
+    # outcome == "no-fact"（B4-a：正常 complete 主线无 runner 侧 join 事实）：
+    # 无比对面、不挂 gap——complete 形态唯一事实源 = 探针 P12 派生值（:703）。
     post_join: Optional[str] = None
     if post is not None:
         post_join = verdict.parse_dw_outcome(post.kv.get("dw_outcome", "")).get("join")
@@ -496,6 +525,19 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         destroy_call_state=camp["destroy_state"])
     gaps_f8 += platform_components["f8_facets"]
     gaps_f4 += platform_components["f4_facets"]
+
+    # POST d6_items 七子项解析与核对（B7：非仅外层存在；:439-440 三选一编码、
+    # :1128 任一 D 项终态 missing → fail；值内 ``|`` 经 producer
+    # sanitize_marker_field 转义，消费侧先还原——core.unescape_marker_field）
+    d6_items_report: Dict[str, Any] = {"items": None, "f4": [], "f8": []}
+    if post is not None:
+        d6_raw = core.unescape_marker_field(post.kv.get("d6_items", ""))
+        items, d4g, d8g = parse_d6_items(d6_raw)
+        d8g += _d6_items_cross_check(events, items)
+        d6_items_report = {"items": {k: dict(v) for k, v in items.items()},
+                           "f4": d4g, "f8": d8g}
+        gaps_f4 += ["d6-items: %s" % f for f in d4g]
+        gaps_f8 += ["d6-items: %s" % f for f in d8g]
 
     # D8b 收口三分流（分期项 11：BEGIN-only / 阶段未达 / 存活未完成 F9 面）
     storm_begin = _find(events, "N1BDISC_D8_STORM_BEGIN")
@@ -521,13 +563,21 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
     gaps_f8 += ["fault-entry-time-unparsable: %s" % name
                 for name in camp["components"].time_gap_files]
 
+    # B6：f4 facet 按「unregistered-cause:」前缀两分（:1373-1380）——未预注册
+    # cause 的缺口送 unregistered_cause_hits（F4 (4)），其余为增量落盘缺项。
+    unregistered_causes = [f[len("unregistered-cause: "):].strip()
+                           for f in gaps_f4 if f.startswith("unregistered-cause:")]
+    gaps_f4_plain = [f for f in gaps_f4
+                     if not f.startswith("unregistered-cause:")]
+
     v_input = verdict.VerdictInput(
         pre_present=pre is not None,
         post_present=post is not None,
         crash_signature=camp["signature"].value,
         order_violations=order_violations,
         frozen_field_missing=frozen_missing,
-        increment_gaps=gaps_f4,
+        increment_gaps=gaps_f4_plain,
+        unregistered_cause_hits=unregistered_causes,
         ledger_failures=ledger_failures,
         d1_cmdline_ok=True if _has(events, "N1BDISC_D1_BEGIN") else None,
         parse_domain_gaps=gaps_f8,
@@ -558,9 +608,12 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         "ledger": ledger_report,
         "dw": {"rebuilt_class": rebuilt_class, "post_class": post_class,
                "rebuilt_join": rebuilt_join, "post_join": post_join,
+               "join_outcome": join_rebuilt.outcome,
                "join_sticky": join_rebuilt.sticky,
+               "join_facts": join_facts,
                "cut_report": cut_report},
         "platform_components": platform_components,
+        "d6_items": d6_items_report,
         "d8b_closure": d8b_closure,
         "chunks": {"failures": chunk_failures,
                    "observations": [dict(o) for o in chunks.observations]},
@@ -581,17 +634,133 @@ def _mono_order_violations(events) -> List[str]:
     return []
 
 
+#: POST ``d6_items`` 七子项三选一编码的 cause 闭域（B7）。判据 :439-440 冻结
+#: skipped cause 集 {no-live-fd, dup-failed, join-timeout-abandoned}；producer
+#: 另沿预注册 skip 位点发射 barrier-never-observed（:717）/destroy-unresolved
+#: （:1046 P9 行「跳过 D6a」）/step-not-executed（d6.rs:700/715 不可达兜底）——
+#: 按「producer 实际发射语义」契约接受并登记遗留偏差；域外 cause → F8。
+D6_ITEMS_SKIPPED_CAUSES = frozenset({
+    "no-live-fd", "dup-failed", "join-timeout-abandoned",
+    "barrier-never-observed", "destroy-unresolved",
+})
+D6_ITEMS_UNOBSERVABLE_CAUSES = frozenset({"step-not-executed"})
+_D6_ITEMS_ITEM_RE = re.compile(r"\AD6S([1-7])\Z")
+_D6_ITEMS_RESULT_RE = re.compile(r"\Aresult\|ret=(-?[0-9]+)\|errno=(-?[0-9]+)\Z")
+_D6_ITEMS_REUSE_RE = re.compile(r"\Aresult\|fd=(-?[0-9]+)\|reuse=(true|false)\Z")
+_D6_ITEMS_SKIPPED_RE = re.compile(r"\Askipped\(cause=([^()|]+)\)\Z")
+_D6_ITEMS_UNOBS_RE = re.compile(r"\Aunobservable\(cause=([^()|]+)\)\Z")
+
+
+def parse_d6_items(d6_items: str) -> Tuple[Optional[Dict[int, Dict[str, str]]],
+                                           List[str], List[str]]:
+    """POST ``d6_items`` 七子项解析（B7；producer dw.rs:665-743 实际格式）。
+
+    格式 = ``;`` 分隔的 ``D6S<n>=<value>``，value 三选一编码（:439-440）：
+    ``result|ret=<int>|errno=<int>``（S7：``result|fd=<int>|reuse=<bool>``）/
+    ``skipped(cause=<c>)`` / ``unobservable(cause=<c>)``。返回
+    ``(items, f4, f8)``：七子项须恰各一次（缺/重复 → F4，:1128/:439「缺任一
+    冻结字段 → fail」）；编码形态/cause 域外 → F8（解析域缺口）。
+    """
+    items: Dict[int, Dict[str, str]] = {}
+    f4: List[str] = []
+    f8: List[str] = []
+    for part in d6_items.split(";"):
+        key, eq, value = part.partition("=")
+        m = _D6_ITEMS_ITEM_RE.match(key)
+        if not eq or m is None:
+            f8.append("d6_items part %r not 'D6S<n>=<value>' (dw.rs:665-743)"
+                      % (part,))
+            continue
+        idx = int(m.group(1))
+        if idx in items:
+            f4.append("d6_items D6S%d duplicated" % idx)
+            continue
+        rm = _D6_ITEMS_RESULT_RE.match(value)
+        um = _D6_ITEMS_REUSE_RE.match(value)
+        sm = _D6_ITEMS_SKIPPED_RE.match(value)
+        om = _D6_ITEMS_UNOBS_RE.match(value)
+        if rm and idx != 7:
+            items[idx] = {"kind": "result", "ret": rm.group(1),
+                          "errno": rm.group(2)}
+        elif um and idx == 7:
+            items[idx] = {"kind": "result", "fd": um.group(1),
+                          "reuse": um.group(2)}
+        elif sm and sm.group(1) in D6_ITEMS_SKIPPED_CAUSES:
+            items[idx] = {"kind": "skipped", "cause": sm.group(1)}
+        elif om and om.group(1) in D6_ITEMS_UNOBSERVABLE_CAUSES:
+            items[idx] = {"kind": "unobservable", "cause": om.group(1)}
+        else:
+            f8.append("d6_items D6S%d=%r outside three-choice encoding "
+                      "(spec :439-440; producer dw.rs:690-740)" % (idx, value))
+    for idx in range(1, 8):
+        if idx not in items and not any("D6S%d" % idx in f for f in f8):
+            f4.append("d6_items D6S%d missing (frozen field, :439/:1128)" % idx)
+    return items, f4, f8
+
+
+def _d6_items_cross_check(events, items: Mapping[int, Mapping[str, str]]
+                          ) -> List[str]:
+    """d6_items 子项编码与 ``D6Sx_R`` marker 字段交叉核对（B7；F8 面）。
+
+    result 编码 ↔ result marker 逐字段相等（ret/errno；S7 fd/reuse）；
+    skipped/unobservable 编码 ↔ result marker 缺席（同现 = capture 自相矛盾）。
+    """
+    gaps: List[str] = []
+    for idx in range(1, 8):
+        item = items.get(idx)
+        if item is None:
+            continue
+        marker = _find(events, "N1BDISC_D6S%d_R" % idx)
+        if item["kind"] == "result":
+            if marker is None:
+                gaps.append("d6_items D6S%d=result but no D6S%d_R marker"
+                            % (idx, idx))
+                continue
+            if idx == 7:
+                if marker.kv.get("fd") != item["fd"] \
+                        or marker.kv.get("reuse") != item["reuse"]:
+                    gaps.append("d6_items D6S7 fd/reuse != D6S7_R fields "
+                                "(%r/%r vs %r/%r)" % (item["fd"], item["reuse"],
+                                                      marker.kv.get("fd"),
+                                                      marker.kv.get("reuse")))
+            else:
+                if marker.kv.get("ret") != item["ret"] \
+                        or marker.kv.get("errno") != item["errno"]:
+                    gaps.append("d6_items D6S%d ret/errno != D6S%d_R fields "
+                                "(%r/%r vs %r/%r)"
+                                % (idx, idx, item["ret"], item["errno"],
+                                   marker.kv.get("ret"), marker.kv.get("errno")))
+        elif marker is not None:
+            gaps.append("d6_items D6S%d=%s but D6S%d_R marker present "
+                        "(capture self-contradiction)" % (idx, item["kind"], idx))
+    return gaps
+
+
 def _dw_class_pipeline(events) -> Tuple[Optional[str], Optional[str], Dict[str, Any]]:
-    """runner 重建 dw_return_class + POST 派生值 + cut-state 输入报告。"""
+    """runner 重建 dw_return_class + POST 派生值 + cut-state 输入报告。
+
+    B4 整改注：cut-state (A)/(B) 仅施于 **JT=1 竞态族**（:773「capture 有
+    ``SKIP|item=D6b``」——D-W 整体 skip 分支的 D6b skip 属 (a) skip 表全量指派
+    （:737 ``(a) 先行``，其 D6b 行不入竞态族），jt_registered 从未置位 →
+    同 :789 (C) 竞态族外——skip 分支走 skip 字面重建比对、不进 cut-state 闭表）。
+    """
     ret = _find(events, "N1BDISC_DW_RETURN")
     post = _find(events, "N1BDISC_POST")
     skip_destroy = any(e.name == "N1BDISC_SKIP" and e.kv.get("item") == "destroy"
                        for e in events)
+    dw_skip_marker = next((e for e in events
+                           if e.name == "N1BDISC_SKIP"
+                           and e.kv.get("item") == "D-W"), None)
+    dw_skip_cause = dw_skip_marker.kv.get("cause") \
+        if dw_skip_marker is not None else None
     t_present = _has(events, "N1BDISC_DW_DESTROY_T")
     c_present = _has(events, "N1BDISC_DW_DESTROY_C")
     drain = _find(events, "N1BDISC_DW_DRAIN")
     rebuilt: Optional[str] = None
-    if ret is not None:
+    if dw_skip_cause in ("no-live-fd", "dup-failed"):
+        # (a) skip 表全量指派（:734）：runner 重建 = skip 字面逐字。
+        rebuilt = core.unobservable_value(dw_skip_cause)
+    elif ret is not None:
         result = core.derive_dw_return_class(core.DwReturnInput(
             ret=int(ret.kv["ret"]),
             revents=int(ret.kv["revents"]),
@@ -612,9 +781,13 @@ def _dw_class_pipeline(events) -> Tuple[Optional[str], Optional[str], Dict[str, 
     if post is not None:
         outcome = verdict.parse_dw_outcome(post.kv.get("dw_outcome", ""))
         post_class = outcome.get("class")
-        jt1 = any(e.name == "N1BDISC_SKIP" and e.kv.get("item") == "D6b"
-                  for e in events)
-        cut_false = post.kv.get("worker_terminal_at_p12") == "false"
+        # JT=1 竞态族代理（:773）：D6b skip 在 ∧ **非 (a) D-W skip 分支**（B4：
+        # skip 分支的 D6b 行属 (a) 全量指派、jt_registered 从未置位 → :789 (C
+        # 竞态族外——cut-state (A)/(B) 不施于该格）。
+        jt1 = (dw_skip_cause not in ("no-live-fd", "dup-failed")) and any(
+            e.name == "N1BDISC_SKIP" and e.kv.get("item") == "D6b"
+            for e in events)
+        cut_false = jt1 and post.kv.get("worker_terminal_at_p12") == "false"
         cut_report = {
             "jt1": jt1,
             "cut_false": cut_false,
@@ -680,6 +853,7 @@ def build_record(scenario_name: str, selftests: Dict[str, Any],
         "ledger": judged["ledger"],
         "dw": judged["dw"],
         "platform_components": judged["platform_components"],
+        "d6_items": judged["d6_items"],
         "d8b_closure": {k: v for k, v in judged["d8b_closure"].items()
                         if k in ("branch", "window_start_monotonic",
                                  "window_end_monotonic", "eagain_observed",

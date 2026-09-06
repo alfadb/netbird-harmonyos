@@ -76,8 +76,11 @@ class FakeMarker:
         return core.MARKER_PREFIX + self.short
 
     def message(self) -> str:
+        # 值内 ``|``/换行按 producer ``sanitize_marker_field``（util.rs:199-214）
+        # 转义——POST ``d6_items`` 等含 ``|`` 的字段（B7/M2 producer-conformant）。
         parts = [self.name]
-        parts.extend("%s=%s" % (k, v) for k, v in self.kv.items())
+        parts.extend("%s=%s" % (k, core.escape_marker_field(str(v)))
+                     for k, v in self.kv.items())
         return "|".join(parts)
 
     def line(self) -> str:
@@ -136,18 +139,31 @@ def fault_entry_text(fault_type: Optional[str], signal: Optional[str],
 
 
 class FakeScenario:
-    """一段可编程剧本：marker 序列 + faultlogger 目录 + 生命周期。"""
+    """一段可编程剧本：marker 序列 + faultlogger 目录 + 生命周期。
+
+    B4-c runner 侧 join 事实（:720/:1047 的 DryRun 登记载体——live 形态由 fsm
+    轮询路径供给同一布尔/整数）：``join_blocked_registered`` = runner 依轮询
+    超时登记 join 阻塞；``join_exit_rc`` = runner 侧 pthread_join 返回值登记
+    （0=joined、ESRCH、其他 errno）。``post_join_override`` 供反例剧本覆写
+    POST ``dw_outcome`` 内层 join 列（模拟探针 bug/域外字面）。
+    """
 
     def __init__(self, markers: Sequence[FakeMarker],
                  fault_files: Sequence[FaultFileSpec] = (),
                  snapshot_files: Sequence[str] = (),
                  die_at_end: bool = False,
-                 fault_probe_fails: bool = False) -> None:
+                 fault_probe_fails: bool = False,
+                 join_blocked_registered: bool = False,
+                 join_exit_rc: Optional[int] = None,
+                 post_join_override: Optional[str] = None) -> None:
         self.markers = list(markers)
         self.fault_files = {f.file_name: f for f in fault_files}
         self.snapshot_files = list(snapshot_files)
         self.die_at_end = die_at_end
         self.fault_probe_fails = fault_probe_fails
+        self.join_blocked_registered = join_blocked_registered
+        self.join_exit_rc = join_exit_rc
+        self.post_join_override = post_join_override
 
 
 class FakeHdc(hdc.HdcTransport):
@@ -283,7 +299,9 @@ class FakeHdc(hdc.HdcTransport):
         :385/:392/:403 complete 收口 → open-at-exit）。FLAG 值仅按剧本登记透传。
 
         dw_outcome 内层列沿探针 derive_post_outcome 各格落值（dw.rs:791-916）：
-        (a) D-W 整体 skip → 全列 skip cause 字面、join=pending（dw.rs:829-841）；
+        (a) D-W 整体 skip → 全列 skip cause 字面、join=同一 skip 编码（B4 探针
+        面修复后 dw.rs ``join_result_fallback``：``!spawned`` → skip 字面逐字，
+        不再发 pending，:443/:734/:870）；
         (e)/(f) RETURN 在 → 13 类 + poll raw 数字 + watchdog=observed-false
        （dw.rs:809-824）；flag-race 格 → 全列 flag-race-window-expired、watchdog=⑤
         marker-gap-indeterminate（dw.rs:896-913）；(d) poll-never 格同形换
@@ -298,7 +316,7 @@ class FakeHdc(hdc.HdcTransport):
         if dw_skip is not None:
             cause = dw_skip.kv.get("cause", "no-live-fd")
             u = core.unobservable_value(cause)
-            dw_outcome = self._dw_outcome_column(u, "pending", u, u, u, u, u, u)
+            dw_outcome = self._dw_outcome_column(u, u, u, u, u, u, u, u)
         elif ret is not None:
             result = core.derive_dw_return_class(core.DwReturnInput(
                 ret=int(ret.kv["ret"]), revents=int(ret.kv["revents"]),
@@ -335,9 +353,16 @@ class FakeHdc(hdc.HdcTransport):
                 u, "join-timeout",
                 core.unobservable_value("marker-gap-indeterminate"),
                 u, u, u, u, u)
-        d6_items = self._d6_items(dw_skip is not None)
+        d6_items = self._d6_items()
         kv = dict(post_marker.kv, ledger_digest=rebuild.digest,
                   d6_items=d6_items, dw_outcome=dw_outcome)
+        # 反例剧本覆写 join 列（模拟探针 bug/域外字面——B4-b 反例钉）。
+        override = getattr(self.scenario, "post_join_override", None)
+        if override is not None:
+            parts = [p for p in dw_outcome.split(";") if p]
+            kv["dw_outcome"] = ";".join(
+                ("join=%s" % override) if p.startswith("join=") else p
+                for p in parts)
         return FakeMarker("POST", post_marker.at_mono_ms, kv, post_marker.tag_form)
 
     def _drain_end(self) -> str:
@@ -352,14 +377,69 @@ class FakeHdc(hdc.HdcTransport):
         m = next((x for x in self.scenario.markers if x.short == short), None)
         return int(m.kv["mono_ms"]) if m else None
 
-    @staticmethod
-    def _d6_items(skip_all: bool) -> str:
-        if skip_all:
-            return ",".join("D6S%d:%s" % (i, "skipped(cause=no-live-fd)")
-                            for i in range(1, 8))
-        return ("D6S1:ret=0/errno=0,D6S2:ret=0/errno=0,D6S3:ret=-1/errno=9,"
-                "D6S4:ret=0/errno=0,D6S5:ret=-1/errno=11,D6S6:ret=0/errno=0,"
-                "D6S7:fd=12/reuse=false")
+    def _d6_items(self) -> str:
+        """POST ``d6_items`` 设备侧模拟——**producer 实际格式与逐支逻辑**
+        （dw.rs:665-743）：``;`` 分隔的 ``D6S<n>=<value>`` 三选一编码，逐段按
+        剧本 marker 状态求值——D6a 段（S1-S3）：D6S1_R 在 → result 行（自
+        D6Sx_R 字段投影）；destroy SKIP（no-live-connection→no-live-fd /
+        barrier-never-observed）→ 对应 skipped cause；否则 destroy-unresolved。
+        D6b 段（S4-S7）：D6S4_R 在 → result 行；jt（D6b skip=join-timeout-
+        abandoned）→ 该 cause；D-W skip → skip cause；barrier-never → 同名；
+        兜底 unobservable(cause=step-not-executed)。"""
+        def _row(idx: int) -> Optional[str]:
+            mk = next((m for m in self.scenario.markers
+                       if m.short == "D6S%d_R" % idx), None)
+            if mk is None:
+                return None
+            if idx == 7:
+                return "D6S7=result|fd=%s|reuse=%s" % (
+                    mk.kv.get("fd", "-1"), mk.kv.get("reuse", "false"))
+            return "D6S%d=result|ret=%s|errno=%s" % (
+                idx, mk.kv.get("ret", "0"), mk.kv.get("errno", "0"))
+
+        destroy_skip = next(
+            (m for m in self.scenario.markers
+             if m.short == "SKIP" and m.kv.get("item") == "destroy"), None)
+        d6b_skip = next(
+            (m for m in self.scenario.markers
+             if m.short == "SKIP" and m.kv.get("item") == "D6b"), None)
+        dw_skip_marker = next(
+            (m for m in self.scenario.markers
+             if m.short == "SKIP" and m.kv.get("item") == "D-W"), None)
+        dw_cause = dw_skip_marker.kv.get("cause") if dw_skip_marker else None
+
+        # D6a 段（dw.rs:680-702）
+        d6a_rows = [_row(i) for i in (1, 2, 3)]
+        if all(r is not None for r in d6a_rows):
+            d6a = list(d6a_rows)
+        elif destroy_skip is not None:
+            cause = destroy_skip.kv.get("cause", "no-live-connection")
+            d6a = ["D6S%d=skipped(cause=%s)" % (i, "no-live-fd"
+                                                if cause == "no-live-connection"
+                                                else cause) for i in (1, 2, 3)]
+        else:
+            d6a = ["D6S%d=skipped(cause=destroy-unresolved)" % i
+                   for i in (1, 2, 3)]
+
+        # D6b 段（dw.rs:704-740）
+        d6b_rows = [_row(i) for i in (4, 5, 6, 7)]
+        if all(r is not None for r in d6b_rows):
+            d6b = list(d6b_rows)
+        elif d6b_skip is not None and \
+                d6b_skip.kv.get("cause") == "join-timeout-abandoned":
+            d6b = ["D6S%d=skipped(cause=join-timeout-abandoned)" % i
+                   for i in (4, 5, 6, 7)]
+        elif dw_cause in ("no-live-fd", "dup-failed"):
+            d6b = ["D6S%d=skipped(cause=%s)" % (i, dw_cause)
+                   for i in (4, 5, 6, 7)]
+        elif destroy_skip is not None and \
+                destroy_skip.kv.get("cause") == "barrier-never-observed":
+            d6b = ["D6S%d=skipped(cause=barrier-never-observed)" % i
+                   for i in (4, 5, 6, 7)]
+        else:
+            d6b = ["D6S%d=unobservable(cause=step-not-executed)" % i
+                   for i in (4, 5, 6, 7)]
+        return ";".join(d6a + d6b)
 
     def late_lines(self) -> List[str]:
         """窗到点后到达的 marker 行（不参与求值，规格 :1066）。"""
@@ -472,16 +552,27 @@ def _fd(short_fd: str, inst: int, action: str, at: int, fd="none", by="none",
 
 
 #: u3hex chunk 帧合成（48 B = PI 4 B ``00 00 08 00`` + IPv4 20 B total_length=44
-#: + UDP 8 B + payload 16 B ``"N1DISCD4"``）：offset-0 不可解析、offset-4 可解析
-#: → S5 分区 ``tun_pi-like``（规格 :551-561）；readlen 48 > total_length 44。
+#: + UDP 8 B + payload 16 B ``"N1DISCD4"``）——**D4 冻结身份方向**（B1/M2，镜像
+#: d4.rs:43-44/:104-107 与 net.rs dst_peer）：src=10.99.0.1（tun 本地）→
+#: **dst=10.99.0.2（发送目的）**、dport=**47001**（d4.rs ``h.dst == dest &&
+#: h.udp_dport == 47001``）。offset-0 不可解析（PI 前缀 version=0）、offset-4
+#: 可解析 → S5 分区 ``tun_pi-like``（规格 :551-561）；readlen 48 > total_length 44。
 _U3HEX_FRAME_HEX = (
     "00000800"                                     # PI 前缀（flags=0, proto=0x0800）
     "4500002c" "00010000" "4011" "0000"            # IPv4：ver4/IHL5, total=44, proto17
-    "0a630002" "0a630001"                          # src 10.99.0.2 → dst 10.99.0.1
-    "b799b7aa" "0018" "0000"                       # UDP：47001→47002, len=24
+    "0a630001" "0a630002"                          # src 10.99.0.1 → dst 10.99.0.2（发送目的）
+    "b799b799" "0018" "0000"                       # UDP：sport 47001→dport 47001, len=24
     "4e31444953434434" "01" "0001" "5a5a5a5a5a"    # "N1DISCD4" + round/seq/pad
 )
 assert len(_U3HEX_FRAME_HEX) == 96
+
+
+def _not_attempted_after_accept(at_mono_ms: int) -> List[FakeMarker]:
+    """first-accept 后未执行条目的 not_attempted 发射（ets:249-252 逐字形态；
+    B3/M2 producer-conformant：MR1B/MR2/MR3/MB1 各一条 outcome=not_attempted）。"""
+    return [FakeMarker("D2_ENTRY", at_mono_ms + i,
+                       {"id": eid, "outcome": "not_attempted"})
+            for i, eid in enumerate(("MR1B", "MR2", "MR3", "MB1"), start=1)]
 
 
 def make_happy_path_scenario() -> FakeScenario:
@@ -493,6 +584,7 @@ def make_happy_path_scenario() -> FakeScenario:
         FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
         FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "resolved"}),
     ]
+    m += _not_attempted_after_accept(140)
     m += _fd("fd_orig", 1, "create", 150, fd="7")
     m += _fd("fd_dup", 1, "create", 160, fd="8")
     for i in range(1, 8):
@@ -504,15 +596,15 @@ def make_happy_path_scenario() -> FakeScenario:
         FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
         FakeMarker("D4_SENT", 210, {"n": "1", "ret": "16", "errno": "0"}),
         FakeMarker("D4_READ", 220, {"off": "4", "len": "48"}),
-        FakeMarker("D4_END", 230, {"ok": "true"}),
+        FakeMarker("D4_END", 230, {"u1": "observed-true"}),
     ]
     m += chunk_markers(_U3HEX_FRAME_HEX, "u3hex", 0, 235)
     m += _fd("d4_send_socket", 1, "create", 240, fd="9")
     m += [
         FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
         FakeMarker("D5_WRITE", 310, {"round": "1", "ret": "44", "errno": "0"}),
-        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2"}),
-        FakeMarker("D5_END", 330, {"ok": "true"}),
+        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2:47001"}),
+        FakeMarker("D5_END", 330, {"u2": "observed-true"}),
     ]
     m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
     m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
@@ -523,9 +615,9 @@ def make_happy_path_scenario() -> FakeScenario:
         FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
         FakeMarker("D7_END", 31000, {"elapsed_ms": "20000", "iters": "400"}),
         FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
-        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "true",
-                                           "partial": "false", "bytes": "4194304",
-                                           "calls": "40000", "caps_hit": "false"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "observed-true",
+                                           "partial": "observed-false", "bytes": "4194304",
+                                           "calls": "40000", "caps_hit": "none"}),
     ]
     m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
     m += [
@@ -572,7 +664,9 @@ def make_happy_path_scenario() -> FakeScenario:
                          "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
                          "ledger_digest": "POST_DIGEST_PLACEHOLDER",
                          "worker_terminal_at_p12": "true"}))
-    return FakeScenario(markers=m, die_at_end=False)
+    # B4-c：runner 侧 pthread_join 返回登记（live 形态由 fsm 轮询供给；happy
+    # 主线 join 成功返回 0 → runner 重建 joined，与 POST join=joined 比对一致）。
+    return FakeScenario(markers=m, die_at_end=False, join_exit_rc=0)
 
 
 def make_pre_only_scenario() -> FakeScenario:
@@ -584,6 +678,7 @@ def make_pre_only_scenario() -> FakeScenario:
         FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
         FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "resolved"}),
     ]
+    m += _not_attempted_after_accept(140)
     m += _fd("fd_orig", 1, "create", 150, fd="7")
     m += _fd("fd_dup", 1, "create", 160, fd="8")
     for i in range(1, 8):
@@ -595,15 +690,15 @@ def make_pre_only_scenario() -> FakeScenario:
         FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
         FakeMarker("D4_SENT", 210, {"n": "1", "ret": "16", "errno": "0"}),
         FakeMarker("D4_READ", 220, {"off": "4", "len": "48"}),
-        FakeMarker("D4_END", 230, {"ok": "true"}),
+        FakeMarker("D4_END", 230, {"u1": "observed-true"}),
     ]
     m += chunk_markers(_U3HEX_FRAME_HEX, "u3hex", 0, 235)
     m += _fd("d4_send_socket", 1, "create", 240, fd="9")
     m += [
         FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
         FakeMarker("D5_WRITE", 310, {"round": "1", "ret": "44", "errno": "0"}),
-        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2"}),
-        FakeMarker("D5_END", 330, {"ok": "true"}),
+        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2:47001"}),
+        FakeMarker("D5_END", 330, {"u2": "observed-true"}),
     ]
     m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
     m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
@@ -637,15 +732,21 @@ def make_no_live_fd_scenario() -> FakeScenario:
                    "entry"),
         FakeMarker("SKIP", 151, {"item": "D4", "cause": "no-live-fd"}, "entry"),
         FakeMarker("SKIP", 152, {"item": "D5", "cause": "no-live-fd"}, "entry"),
-        FakeMarker("SKIP", 153, {"item": "D7", "cause": "no-live-vpn"}, "entry"),
+        FakeMarker("SKIP", 153, {"item": "D8a", "cause": "no-live-fd"}, "entry"),
+        FakeMarker("SKIP", 154, {"item": "D7", "cause": "no-live-vpn"}, "entry"),
+        FakeMarker("SKIP", 155, {"item": "D8b", "cause": "no-live-fd"}, "entry"),
+        FakeMarker("SKIP", 156, {"item": "D6a", "cause": "no-live-fd"}, "entry"),
         FakeMarker("SKIP", 160, {"item": "D-W", "cause": "no-live-fd"}, "entry"),
+        FakeMarker("SKIP", 161, {"item": "D6b", "cause": "no-live-fd"}, "entry"),
         FakeMarker("PRE", 200, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
                                 "skip_summary": "destroy:no-live-connection"}),
+        # producer cut=f（dw.rs:839：!spawned 支 ``cut: f``——worker 从未 spawn、
+        # 终态标志从未置位 → worker_terminal_at_p12=false）。
         FakeMarker("POST", 300,
                    {"d6_items": "POST_D6_ITEMS_PLACEHOLDER",
                     "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
                     "ledger_digest": "POST_DIGEST_PLACEHOLDER",
-                    "worker_terminal_at_p12": "true"}),
+                    "worker_terminal_at_p12": "false"}),
     ]
     return FakeScenario(markers=m, die_at_end=False)
 
@@ -667,23 +768,29 @@ def make_flag_race_scenario() -> FakeScenario:
     """
     m: List[FakeMarker] = [
         FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
-        FakeMarker("D2_ENTRY", 140, {"id": "MR1"}),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "resolved"}),
     ]
+    m += _not_attempted_after_accept(140)
     m += _fd("fd_orig", 1, "create", 150, fd="7")
     m += _fd("fd_dup", 1, "create", 160, fd="8")
+    for i in range(1, 8):
+        kv = {"step": str(i), "ok": "true"}
+        if i == 4:
+            kv["u6"] = "o_nonblock_absent"
+        m.append(FakeMarker("D2_S%d" % i, 160 + i, kv))
     m += [
         FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
         FakeMarker("D4_SENT", 210, {"n": "1", "ret": "16", "errno": "0"}),
         FakeMarker("D4_READ", 220, {"off": "4", "len": "48"}),
-        FakeMarker("D4_END", 230, {"ok": "true"}),
+        FakeMarker("D4_END", 230, {"u1": "observed-true"}),
     ]
     m += chunk_markers(_U3HEX_FRAME_HEX, "u3hex", 0, 235)
     m += _fd("d4_send_socket", 1, "create", 240, fd="9")
     m += [
         FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
         FakeMarker("D5_WRITE", 310, {"round": "1", "ret": "44", "errno": "0"}),
-        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2"}),
-        FakeMarker("D5_END", 330, {"ok": "true"}),
+        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2:47001"}),
+        FakeMarker("D5_END", 330, {"u2": "observed-true"}),
     ]
     m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
     m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
@@ -694,9 +801,11 @@ def make_flag_race_scenario() -> FakeScenario:
         FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
         FakeMarker("D7_END", 31000, {"elapsed_ms": "20000", "iters": "400"}),
         FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
-        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "true",
-                                           "partial": "false", "bytes": "4194304",
-                                           "calls": "40000", "caps_hit": "false"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100",
+                                           "eagain": "observed-true",
+                                           "partial": "observed-false",
+                                           "bytes": "4194304",
+                                           "calls": "40000", "caps_hit": "none"}),
     ]
     m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
     m += [
@@ -741,6 +850,7 @@ def _p2_prefix() -> List[FakeMarker]:
         FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
         FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "resolved"}),
     ]
+    m += _not_attempted_after_accept(140)
     m += _fd("fd_orig", 1, "create", 150, fd="7")
     m += _fd("fd_dup", 1, "create", 160, fd="8")
     for i in range(1, 8):
@@ -752,15 +862,15 @@ def _p2_prefix() -> List[FakeMarker]:
         FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
         FakeMarker("D4_SENT", 210, {"n": "1", "ret": "16", "errno": "0"}),
         FakeMarker("D4_READ", 220, {"off": "4", "len": "48"}),
-        FakeMarker("D4_END", 230, {"ok": "true"}),
+        FakeMarker("D4_END", 230, {"u1": "observed-true"}),
     ]
     m += chunk_markers(_U3HEX_FRAME_HEX, "u3hex", 0, 235)
     m += _fd("d4_send_socket", 1, "create", 240, fd="9")
     m += [
         FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
         FakeMarker("D5_WRITE", 310, {"round": "1", "ret": "44", "errno": "0"}),
-        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2"}),
-        FakeMarker("D5_END", 330, {"ok": "true"}),
+        FakeMarker("D5_RECV", 320, {"round": "1", "src": "10.99.0.2:47001"}),
+        FakeMarker("D5_END", 330, {"u2": "observed-true"}),
     ]
     m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
     m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
@@ -820,9 +930,9 @@ def make_alive_incomplete_scenario() -> FakeScenario:
         FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
         FakeMarker("D7_END", 31000, {"elapsed_ms": "20000", "iters": "400"}),
         FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
-        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "true",
-                                           "partial": "false", "bytes": "4194304",
-                                           "calls": "40000", "caps_hit": "false"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "observed-true",
+                                           "partial": "observed-false", "bytes": "4194304",
+                                           "calls": "40000", "caps_hit": "none"}),
     ]
     m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
     m += [
@@ -875,9 +985,9 @@ def make_death_in_d6b_scenario() -> FakeScenario:
         FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
         FakeMarker("D7_END", 31000, {"elapsed_ms": "20000", "iters": "400"}),
         FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
-        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "true",
-                                           "partial": "false", "bytes": "4194304",
-                                           "calls": "40000", "caps_hit": "false"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "eagain": "observed-true",
+                                           "partial": "observed-false", "bytes": "4194304",
+                                           "calls": "40000", "caps_hit": "none"}),
     ]
     m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
     m += [
@@ -916,6 +1026,107 @@ def make_death_in_d6b_scenario() -> FakeScenario:
                         snapshot_files=[snapshot.file_name], die_at_end=True)
 
 
+# ---------------------------------------------------------------------------
+# gate 3 整改反例剧本（B1/B2/B3/B4/B5 端到端反例钉，M2）
+# ---------------------------------------------------------------------------
+
+def _clone_markers(scenario: "FakeScenario") -> List[FakeMarker]:
+    return [FakeMarker(m.short, m.at_mono_ms, dict(m.kv), m.tag_form, m.late)
+            for m in scenario.markers]
+
+
+#: 外来包首 64 字节（d4.rs:127-131 foreign 流载体）：可解析 IPv4+UDP 但
+#: dst=198.51.100.7 / dport=53 / payload 非 N1DISCD4 族——身份不匹配。
+_FOREIGN_FRAME_HEX = (
+    "45000030" "00010000" "4011" "0000"
+    "c6336401" "c6336407"          # src 198.51.100.1 → dst 198.51.100.7
+    "9a3f" "0035" "0000"           # UDP sport 39487 → dport 53
+    "deadbeef" "cafe" "000102030405060708090a0b0c0d0e0f1011"
+)
+
+
+def make_foreign_packet_scenario() -> FakeScenario:
+    """B1 反例：外来可解析 IPv4 包（``D4_READ|off=4`` + foreign chunk）绝不产生
+    observed-true——sendto 前提成立（ret=16）、窗口收口（``D4_END|u1=
+    observed-false``）→ u1=observed-false、u3 全字段 no-controlled-read。"""
+    m = [x for x in _clone_markers(make_happy_path_scenario())
+         if not (x.short == "CHUNK" and x.kv.get("stream") == "u3hex")]
+    for x in m:
+        if x.short == "D4_END":
+            x.kv["u1"] = "observed-false"
+    foreign_at = next(x.at_mono_ms for x in m if x.short == "D4_READ")
+    m += chunk_markers(_FOREIGN_FRAME_HEX, "foreign", 0, foreign_at + 1)
+    m.sort(key=lambda x: x.at_mono_ms)
+    return FakeScenario(markers=m, die_at_end=False, join_exit_rc=0)
+
+
+def make_bad_payload_scenario() -> FakeScenario:
+    """B2 反例：RECV src 形态与冻结 src:port 逐字相符而 payload 身份未证实
+    （探针 E10 收口 observed-false）→ u2=observed-false，绝不折算 true。"""
+    m = _clone_markers(make_happy_path_scenario())
+    for x in m:
+        if x.short == "D5_END":
+            x.kv["u2"] = "observed-false"
+    return FakeScenario(markers=m, die_at_end=False, join_exit_rc=0)
+
+
+def make_not_attempted_timeout_scenario() -> FakeScenario:
+    """B3 反例（timeout 终止族）：MR1 timeout → 迟到窗尽 indeterminate（m-07
+    双行）→ 矩阵终止、其余条目 not_attempted（ets:232-235 形态）→ u5 =
+    create-indeterminate / matrix-terminated-on-create-timeout；无保留条目 →
+    no-live-fd 分支收口（PRE+POST 照发，complete pass）。"""
+    m: List[FakeMarker] = [
+        FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
+        FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "timeout"}),
+        FakeMarker("D2_ENTRY", 141, {"id": "MR1", "outcome": "indeterminate"}),
+        FakeMarker("D2_ENTRY", 142, {"id": "MR1B", "outcome": "not_attempted"}),
+        FakeMarker("D2_ENTRY", 143, {"id": "MR2", "outcome": "not_attempted"}),
+        FakeMarker("D2_ENTRY", 144, {"id": "MR3", "outcome": "not_attempted"}),
+        FakeMarker("D2_ENTRY", 145, {"id": "MB1", "outcome": "not_attempted"}),
+        FakeMarker("SKIP", 150, {"item": "D4", "cause": "no-live-fd"}),
+        FakeMarker("SKIP", 151, {"item": "D5", "cause": "no-live-fd"}),
+        FakeMarker("SKIP", 152, {"item": "D8a", "cause": "no-live-fd"}),
+        FakeMarker("PRE", 200, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
+                                "skip_summary":
+                                    "D4:no-live-fd,D5:no-live-fd,"
+                                    "D8a:no-live-fd"}),
+        FakeMarker("SKIP", 210, {"item": "D7", "cause": "no-live-vpn"}),
+        FakeMarker("SKIP", 211, {"item": "D8b", "cause": "no-live-fd"}),
+        FakeMarker("SKIP", 212, {"item": "destroy",
+                                 "cause": "no-live-connection"}),
+        FakeMarker("SKIP", 213, {"item": "D6a", "cause": "no-live-fd"}),
+        FakeMarker("SKIP", 214, {"item": "D-W", "cause": "no-live-fd"}),
+        FakeMarker("SKIP", 215, {"item": "D6b", "cause": "no-live-fd"}),
+        # producer cut=f（dw.rs:839 !spawned 支）。
+        FakeMarker("POST", 300,
+                   {"d6_items": "POST_D6_ITEMS_PLACEHOLDER",
+                    "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
+                    "ledger_digest": "POST_DIGEST_PLACEHOLDER",
+                    "worker_terminal_at_p12": "false"}),
+    ]
+    return FakeScenario(markers=m, die_at_end=False)
+
+
+def make_join_bogus_scenario() -> FakeScenario:
+    """B4-b 反例：POST ``dw_outcome`` 内层 ``join=pending``（域外字面——修复前
+    探针 skip 形态/探针 bug）+ runner 侧 join rc 登记（=0 → 重建 joined）→
+    严格十值域解析不一致 → F8(2) fail。"""
+    m = _clone_markers(make_happy_path_scenario())
+    return FakeScenario(markers=m, die_at_end=False, join_exit_rc=0,
+                        post_join_override="pending")
+
+
+def make_d8b_bogus_scenario() -> FakeScenario:
+    """B5 反例：``D8_STORM_END`` 五值 bogus（eagain 域外三态 / bytes 非整数 /
+    we 负值——M1 单调钟域）→ 逐字段 F8 fail-closed，不洗白为缺项。"""
+    m = _clone_markers(make_happy_path_scenario())
+    for x in m:
+        if x.short == "D8_STORM_END":
+            x.kv.update({"eagain": "maybe", "bytes": "abc", "we": "-5"})
+    return FakeScenario(markers=m, die_at_end=False, join_exit_rc=0)
+
+
 __all__ = [
     "FakeMarker", "chunk_markers", "duplicate_chunk_markers", "FaultFileSpec",
     "fault_entry_text", "FakeScenario", "FakeHdc", "format_hilog_line",
@@ -923,4 +1134,7 @@ __all__ = [
     "make_no_live_fd_scenario", "make_flag_race_scenario",
     "make_death_after_pre_scenario", "make_storm_death_scenario",
     "make_alive_incomplete_scenario", "make_death_in_d6b_scenario",
+    "make_foreign_packet_scenario", "make_bad_payload_scenario",
+    "make_not_attempted_timeout_scenario", "make_join_bogus_scenario",
+    "make_d8b_bogus_scenario",
 ]

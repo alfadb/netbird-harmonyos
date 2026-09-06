@@ -416,14 +416,25 @@ _STORM_END_TO_FIELD: Dict[str, str] = {
 }
 
 
-_UINT_RE = re.compile(r"\A[0-9]+\Z")
+_INT_SRE = re.compile(r"\A-?[0-9]+\Z")
 
 
-def _parse_uint(text: Any) -> Optional[int]:
-    """十进制无符号整数字面解析（沿 core 同一门；非负整数字面外的输入 → None）。"""
-    if isinstance(text, str) and _UINT_RE.match(text):
+def _parse_int(text: Any) -> Optional[int]:
+    """带符号十进制整数字面解析（M1：ws/we/D7 数值须有符号解析，负值才可见）。"""
+    if isinstance(text, str) and _INT_SRE.match(text):
         return int(text)
     return None
+
+
+#: ``eagain``/``partial`` 三态闭域（producer d8.rs:156-157 只发这两值；域外 →
+#: F8 解析域缺口，不得整包照登——B5）。
+STORM_THREE_STATE = frozenset({"observed-true", "observed-false"})
+#: ``caps_hit`` 闭域（producer d8.rs:145-155：``none`` 或 {bytes,calls,time} 按
+#: push 序的字面子集组合，恰 8 个字面——B5）。
+STORM_CAPS_HIT_DOMAIN = frozenset({
+    "none", "bytes", "calls", "time",
+    "bytes,calls", "bytes,time", "calls,time", "bytes,calls,time",
+})
 
 
 def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
@@ -440,7 +451,7 @@ def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
     0. skip 表指派（:995：D8a/D8b skip → 全字段
        ``unobservable(cause=no-live-fd)``/``dup-failed``）——no-live-fd /
        dup-failed 分支下 storm 从未计划执行；
-    1. BEGIN ∧ END 在 → 正常重建：``window_start=ws``、``window_end=we``、
+    1. BEGIN ∧ END 在 → 正常重建（B5 逐字段闭域验证：ws/we 有符号解析——M1 负值/不可解析归 F8 单调钟/解析域面、不归 F4 missing；eagain/partial 三态闭域、bytes/calls 非负整数、caps_hit 8 字面闭域——bogus 值 → f8、键缺 → f4；``window_start=ws``、``window_end=we``、
        五字段自 END 载荷逐字登记；``ws > we`` 或负值 → f8 facet（单调钟域门，
        规格 :830/:829）；END 载荷字段缺 → f4 面（字段缺项）。
     2. BEGIN 在 ∧ END 缺 ∧ 死亡分量 true → BEGIN-only 收口（:603-607）：
@@ -449,15 +460,17 @@ def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
        ``ws`` 照常重建（不受 END 缺失影响）；置
        ``storm_incomplete_pre_only=True`` 并登记跨度
        ``storm_incomplete_pre_only_span = 死亡证据墙钟 − BEGIN capture 墙钟``
-       （同侧墙钟相减，``ws`` 为单调钟禁止跨钟相减，:607；任一墙钟不可求值 →
-       跨度不登记、逐字入 raw）。
+       （同侧墙钟相减，``ws`` 为单调钟禁止跨钟相减，:607；B5：**:607 强制
+       span**——任一墙钟不可求值时不得静默省略登记，该缺口无预注册 cause，
+       按 criteria-gap 两分法 (4) 落 f4 面）。
     3. BEGIN 缺 ∧ 死亡分量 true ∧ 死亡位点 < P7 → 阶段未达收口（:609-614）：
        七字段全列各记 ``unobservable(cause=stage-not-reached)``；
        ``storm_incomplete_pre_only=False``、不登记跨度。
     4. 无死亡分量（含 BEGIN 在 END 缺而进程仍活的对照，:608/:615）→ 存活未完成：
        字段缺项沿 F4 面（missing 列表），布尔 False、无跨度——真未完成不是平台
        终态（verdict 由观测窗到点收口规则 F9 独立出）。
-    5. BEGIN 缺 ∧ 死亡 ∧ 位点不早于 P7 → 真值表未覆盖 → f8 facet（fail-closed）。
+    5. BEGIN 缺 ∧ 死亡 ∧ 位点不早于 P7 → 真值表未覆盖 → f8 facet（fail-closed；
+       B6：不伪造未预注册 cause，字段值留 None）。
     """
     out: Dict[str, Any] = {
         "branch": None,
@@ -484,37 +497,79 @@ def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
         return out
     if begin_present and end_present:
         out["branch"] = "rebuilt"
-        ws = _parse_uint(begin_kv.get("ws"))
-        we = _parse_uint(end_kv.get("we"))
-        if ws is None:
-            out["f4_missing"].append("D8_STORM_BEGIN.ws")
-        else:
-            out["window_start_monotonic"] = ws
-            if ws < 0:
-                out["f8_facets"].append("monotonic-domain: D8b ws=%d < 0" % ws)
-        if we is None:
-            out["f4_missing"].append("D8_STORM_END.we")
-        else:
-            out["window_end_monotonic"] = we
-            if we < 0:
-                out["f8_facets"].append("monotonic-domain: D8b we=%d < 0" % we)
-        if ws is not None and we is not None and ws > we:
+        # ws/we 有符号解析（M1）：负值 → F8 单调钟域门；非整数字面 → F8 解析域
+        # 缺口；键缺 → F4 字段缺项——负值/不可解析不归 F4 missing。
+        for key, field in (("ws", "window_start_monotonic"),
+                           ("we", "window_end_monotonic")):
+            raw = (begin_kv if key == "ws" else end_kv).get(key)
+            if raw is None:
+                out["f4_missing"].append("D8_STORM_%s.%s"
+                                         % ("BEGIN" if key == "ws" else "END", key))
+                continue
+            value = _parse_int(raw)
+            if value is None:
+                out["f8_facets"].append("storm-parse: D8b %s=%r not an integer "
+                                        "literal (规格 :616/:1377(2))" % (key, raw))
+                continue
+            if value < 0:
+                out["f8_facets"].append("monotonic-domain: D8b %s=%d < 0 (规格 :829)"
+                                        % (key, value))
+                continue
+            out[field] = value
+        ws = out["window_start_monotonic"]
+        we = out["window_end_monotonic"]
+        if isinstance(ws, int) and isinstance(we, int) and ws > we:
             out["f8_facets"].append(
                 "monotonic-domain: window_start %d > window_end %d (规格 :830)" % (ws, we))
-        for key, field_name in _STORM_END_TO_FIELD.items():
+        # 五字段逐项闭域验证（B5：bogus 值 → F8，不整包照登；键缺 → F4）
+        for key in ("eagain", "partial"):
             value = end_kv.get(key)
+            field = _STORM_END_TO_FIELD[key]
             if value is None:
                 out["f4_missing"].append("D8_STORM_END.%s" % key)
+            elif value not in STORM_THREE_STATE:
+                out["f8_facets"].append(
+                    "storm-parse: D8_STORM_END.%s=%r outside three-state domain "
+                    "{observed-true, observed-false} (producer d8.rs:156-157)"
+                    % (key, value))
             else:
-                out[field_name] = value
+                out[field] = value
+        for key in ("bytes", "calls"):
+            value = end_kv.get(key)
+            field = _STORM_END_TO_FIELD[key]
+            if value is None:
+                out["f4_missing"].append("D8_STORM_END.%s" % key)
+                continue
+            parsed = _parse_int(value)
+            if parsed is None or parsed < 0:
+                out["f8_facets"].append(
+                    "storm-parse: D8_STORM_END.%s=%r not a non-negative integer "
+                    "(producer d8.rs:164 u64)" % (key, value))
+            else:
+                out[field] = value
+        value = end_kv.get("caps_hit")
+        if value is None:
+            out["f4_missing"].append("D8_STORM_END.caps_hit")
+        elif value not in STORM_CAPS_HIT_DOMAIN:
+            out["f8_facets"].append(
+                "storm-parse: D8_STORM_END.caps_hit=%r outside closed domain "
+                "{none, bytes/calls/time subsets} (producer d8.rs:145-155)" % (value,))
+        else:
+            out["caps_hit"] = value
         return out
 
     if begin_present and not end_present and death_observed:
         # BEGIN-only 死亡收口（:603-607）
         out["branch"] = "storm-incomplete-pre-only"
-        ws = _parse_uint(begin_kv.get("ws"))
-        if ws is None:
+        raw_ws = begin_kv.get("ws")
+        ws = _parse_int(raw_ws)
+        if raw_ws is None:
             out["f4_missing"].append("D8_STORM_BEGIN.ws")
+        elif ws is None:
+            out["f8_facets"].append("storm-parse: D8b ws=%r not an integer literal "
+                                    "(规格 :616/:1377(2))" % (raw_ws,))
+        elif ws < 0:
+            out["f8_facets"].append("monotonic-domain: D8b ws=%d < 0 (规格 :829)" % ws)
         else:
             out["window_start_monotonic"] = ws   # ws 照常重建（:604）
             out["raw"]["storm_begin_ws"] = ws
@@ -524,10 +579,17 @@ def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
                            "bytes_written_total", "write_calls", "caps_hit"):
             out[field_name] = cause
         out["storm_incomplete_pre_only"] = True
-        # 跨度（:607）：死亡证据墙钟 − BEGIN capture 墙钟（同侧墙钟；禁止跨钟）
+        # 跨度（:607 强制登记——B5）：死亡证据墙钟与 BEGIN capture 墙钟相减（同侧
+        # 墙钟；禁止跨钟）。任一墙钟不可求值 → 不得静默省略：:607 未预注册该缺口
+        # 的 unobservable cause，按 criteria-gap 两分法 (4) 落 F4 面。
         if death_wall_ms is not None and begin_capture_wall_ms is not None:
             out["storm_incomplete_pre_only_span"] = \
                 death_wall_ms - begin_capture_wall_ms
+        else:
+            out["f4_missing"].append(
+                "storm_incomplete_pre_only_span: :607 mandatory span undecidable "
+                "(death_wall_ms=%r, begin_capture_wall_ms=%r)"
+                % (death_wall_ms, begin_capture_wall_ms))
         out["raw"].update({
             "death_wall_ms": death_wall_ms,
             "begin_capture_wall_ms": begin_capture_wall_ms,
@@ -550,10 +612,9 @@ def eval_d8b_closure(*, begin_kv: Optional[Mapping[str, str]] = None,
         return out
 
     # BEGIN 缺 ∧ 死亡 ∧ 位点不早于 P7：真值表未覆盖（fail-closed，:1377 (3)）
+    # B6：不伪造未预注册 cause（marker-gap-indeterminate 不在本支授权位），
+    # 字段值留 None，F8 facet 承载。
     out["branch"] = "uncovered"
-    cause = unobs("marker-gap-indeterminate")
-    for field_name in D8B_FIELDS:
-        out[field_name] = cause
     out["f8_facets"].append(
         "d8b-closure-truth-table-gap: death without BEGIN and last_visible_site "
         "not before P7")

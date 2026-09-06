@@ -271,7 +271,9 @@ def parse_marker_message(message: str) -> Tuple[str, Mapping[str, str], Tuple[st
     """解析 ``N1BDISC_<NAME>|k=v|...`` 消息体。
 
     返回 ``(name, kv, malformed_segments, duplicate_keys)``；kv 值保留原始字符串
-    （可含空格/UTF-8/`|` 之外的任意字符）。
+    （可含空格/UTF-8/`|` 之外的任意字符——**值内 ``|`` 由 producer
+    ``sanitize_marker_field``（probe/src/util.rs:199-214）转义为 ``\\x7c``**，
+    消费侧经 :func:`unescape_marker_field` 还原）。
     """
     if not isinstance(message, str) or not message.startswith(MARKER_PREFIX):
         raise ValueError("not an N1BDISC_ marker message: %r" % (message,))
@@ -290,6 +292,28 @@ def parse_marker_message(message: str) -> Tuple[str, Mapping[str, str], Tuple[st
             continue
         kv[key] = value
     return name, kv, tuple(malformed), tuple(duplicate)
+
+
+#: producer ``sanitize_marker_field``（util.rs:199-214）的转义对（值内 ``|`` 与
+#: 换行不允许裸现——marker 消息体以 ``|`` 分段、hilog 以行承载）。
+_MARKER_FIELD_ESCAPES = (("\\x7c", "|"), ("\\x0a", "\n"), ("\\x0d", "\r"))
+
+
+def escape_marker_field(value: str) -> str:
+    """producer ``sanitize_marker_field`` 的 runner 侧镜像（转义 ``|``/换行）。"""
+    out = value
+    for esc, _ch in _MARKER_FIELD_ESCAPES:
+        out = out.replace(_ch, esc)
+    return out
+
+
+def unescape_marker_field(value: str) -> str:
+    """producer 转义序列还原（``\\x7c`` → ``|`` 等；POST ``d6_items`` 等含
+    ``|`` 的字段消费侧必经本门——B7）。"""
+    out = value
+    for esc, ch in _MARKER_FIELD_ESCAPES:
+        out = out.replace(esc, ch)
+    return out
 
 
 def scan_markers(lines: Iterable[str], bundle: str = DEFAULT_BUNDLE) -> List[MarkerEvent]:
@@ -967,8 +991,9 @@ class DwJoinInput:
       ``DW_RETURN`` 迟到完成改写。
     - ``join_blocked_registered``：runner 依轮询超时登记
       ``join-blocked-observed``（规格 :720/:1091——阻塞线程自身不发登记）。
-    - ``exit_present``/``exit_rc``：``DW_EXIT`` 存在性只喂 watchdog ④、不喂 join
-      轴的改写（:693）；``exit_rc`` 为 ``pthread_join`` 返回值（0=joined、
+    - ``exit_present``/``exit_rc``：``DW_EXIT`` 存在性只喂 watchdog ④、**不喂
+      join 轴**（:693 明文——B4-a 整改后 runner 不再由 EXIT 推 joined）；
+      ``exit_rc`` 为 runner 侧登记的 ``pthread_join`` 返回值（0=joined、
       ``ESRCH``、其他 errno → ``other+errno``）。
     - ``post_present``/``death_observed``：pre-only 死亡收口支只在
       「POST 缺 ∧ 死亡分量 observed-true」时求值（规格 :1168/:1171）。
@@ -988,8 +1013,9 @@ class DwJoinInput:
 @dataclass(frozen=True)
 class DwJoinResult:
     """重建结果：``outcome="value"`` 时 ``value`` ∈ :data:`DW_JOIN_RESULT_10`；
-    ``outcome="fail"`` 时真值表未覆盖（F8(3) 面，调用方入档）。``sticky``
-    记录 join sticky 是否命中（规格 :693 观察项）。"""
+    ``outcome="no-fact"`` 时无 runner 侧 join 事实（complete 主线正常格，
+    无比对面、不挂 fail）；``outcome="fail"`` 时真值表未覆盖（F8(3) 面，
+    调用方入档）。``sticky`` 记录 join sticky 是否命中（:693 观察项）。"""
 
     outcome: str                 # "value" | "fail"
     value: Optional[str] = None
@@ -1015,9 +1041,11 @@ def derive_dw_join_result(inp: DwJoinInput) -> DwJoinResult:
         ``call-boundary-incomplete`` → ``call-boundary-incomplete``（三 cause 同入
         join 域，规格 :870 计数 5+2+3=10）；``not-called`` 不走本收口（:1175）——
         其两条真实路径已由 (1)/(2) 承接，残余格为真值表缺口 → fail；
-    (5) ``pthread_join`` 返回（runner 侧）：``ESRCH`` / 其他 errno → ``other+errno``；
-    (6) ``DW_EXIT`` 在（或 ``exit_rc == 0``）→ ``joined``；
-    (7) 其余输入组合真值表未覆盖 → fail（调用方按 F8(3) 入档，不伪装域内值）。
+    (5) ``pthread_join`` 返回（runner 侧登记）：``ESRCH`` / 其他 errno → ``other+errno``；
+    (6) runner 侧登记 ``exit_rc == 0`` → ``joined``（join 轴正当依据 = 终态轮询
+        事实与 skip 编码，:693/:717-719——**不以 DW_EXIT 存在性推 joined**，B4-a）；
+    (7) 无 runner 侧 join 事实（正常 complete 主线）→ ``no-fact``（无比对面、
+        不挂 fail；complete 形态唯一事实源 = 探针 P12 派生值，:703）。
     全部 ``value`` 落点逐字 ∈ :data:`DW_JOIN_RESULT_10`。
     """
     def result(value: str, sticky: Optional[str] = None,
@@ -1068,11 +1096,17 @@ def derive_dw_join_result(inp: DwJoinInput) -> DwJoinResult:
         if inp.exit_rc == _ESRCH:
             return result("ESRCH", detail={"exit_rc": inp.exit_rc})
         return result("other+errno", detail={"exit_rc": inp.exit_rc})
-    # (6) DW_EXIT 在（EXIT 只喂 ④、不喂 join 改写——此处为正常终态正面支）
-    if inp.exit_present or inp.exit_rc == 0:
-        return result("joined", detail={"branch": "exit-present"})
-    # (7) 真值表未覆盖（如 POST 缺、进程活、无任何 join 输入）
-    return DwJoinResult("fail", None, "join-truth-table-incomplete", None,
+    # (6) runner 侧 pthread_join 成功登记（exit_rc == 0）→ joined——join 轴记录
+    # 「主线程是否调到 pthread_join」，正当依据 = 终态轮询事实与 skip 编码
+    # （:693/:717-719），**不是** DW_EXIT marker 存在性（:693 明文 EXIT 只喂
+    # dw_watchdog_killed ④、不喂 join 轴；B4-a 整改：旧 exit_present→joined 支
+    # 删除，B4 blocker 根因之一）。
+    if inp.exit_rc == 0:
+        return result("joined", detail={"branch": "join-rc-registered"})
+    # (7) 无 runner 侧 join 事实（正常 complete 主线：join 调用与返回都在探针
+    # 进程内，capture 无载体）——非真值表缺口：complete 形态唯一事实源 = 探针
+    # P12 派生值（:703），runner 重建值仅在有重建规则的格作校验，本格无比对面。
+    return DwJoinResult("no-fact", None, "no runner-side join fact", None,
                         {"post_present": inp.post_present,
                          "death_observed": inp.death_observed,
                          "exit_present": inp.exit_present})
@@ -1114,6 +1148,7 @@ __all__ = [
     # 关联与 marker
     "HilogLine", "MarkerEvent", "parse_hilog_line", "bundle_tag_forms", "tag_form_of",
     "parse_marker_message", "scan_markers",
+    "escape_marker_field", "unescape_marker_field",
     # chunk
     "ChunkPiece", "ChunkFailure", "ChunkReassembly", "validate_chunk_stream_item",
     "encode_chunks", "reassemble_chunks",

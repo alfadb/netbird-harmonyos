@@ -128,33 +128,23 @@ def p12_class_consistency(rebuilt_class: str, post_class: Optional[str]) -> bool
     return rebuilt_class == post_class
 
 
-#: 探针 dw_outcome 内层 ``join=pending`` 字面（probe/src/dw.rs:994：D-W 整体 skip
-#: 或未及 join 时 join 轴无事实可载——skip 编码由 class 列承载）。
-PROBE_JOIN_PENDING = "pending"
-#: skip 形态 join 轴的合法编码集（:997-1000；与 :data:`core.DW_JOIN_RESULT_10` 前两收口一致）。
-JOIN_SKIP_ENCODINGS = tuple(
-    core.unobservable_value(c) for c in ("no-live-fd", "dup-failed"))
-
-
 def p12_join_consistency(rebuilt_join: Optional[str],
                          post_join: Optional[str],
-                         post_class: Optional[str]) -> bool:
+                         post_class: Optional[str] = None) -> bool:
     """F8(2) 挂载比对（join 轴）：runner 重建值 vs POST 内层 ``join=`` 字面。
 
-    - 内层字面 ∈ :data:`core.DW_JOIN_RESULT_10`（10 值域）→ 与重建值逐字相等；
-    - 内层字面 = ``pending``（探针 skip/未及 join 形态，dw.rs:994——判据未冻结该
-      内层字面，沿 DW_OUTCOME_FIELDS 同一「探针实际格式契约」登记）→ 一致当且仅当
-      runner 重建为 skip 编码之一且 POST class 列携带同一 cause（skip 编码的全量
-      指派在 class 列逐字可见，join 列以 pending 表达「无 join 事实」）；
-    - 其余（域外字面/缺字段）→ 不一致（fail-closed，调用方挂 F8(2)）。
+    B4-b 整改：**严格十值域解析**——``post_join`` 必须逐字 ∈
+    :data:`core.DW_JOIN_RESULT_10`（:870/:443：D-W skip 形态由 dw.rs
+    ``join_result_fallback`` 逐字携带 skip 编码，``pending`` 自探针修复后
+    不再出现在任何合法发射格；旧「pending + skip 重建一致」的宽松接受随
+    blocker 删除）。域外字面/缺字段 → 不一致（fail-closed，调用方挂 F8(2)）；
+    ``post_class`` 形参保留仅为调用方签名兼容，不再参与判定。
     """
     if post_join is None or rebuilt_join is None:
         return False
-    if post_join in core.DW_JOIN_RESULT_10:
-        return post_join == rebuilt_join
-    if post_join == PROBE_JOIN_PENDING:
-        return rebuilt_join in JOIN_SKIP_ENCODINGS and post_class == rebuilt_join
-    return False
+    if post_join not in core.DW_JOIN_RESULT_10:
+        return False
+    return post_join == rebuilt_join
 
 
 def racewin_sticky_signature(d6b_skip_present: bool,
@@ -386,7 +376,7 @@ __all__ = [
     "classify_criteria_gap", "derive_protocol", "parse_dw_outcome",
     "DW_OUTCOME_FIELDS", "DW_OUTCOME_POLL_RAW_KEYS",
     "p12_class_consistency", "racewin_sticky_signature", "apply_join_stickiness",
-    "PROBE_JOIN_PENDING", "JOIN_SKIP_ENCODINGS", "p12_join_consistency",
+    "p12_join_consistency",
     "CUT_FALSE_CLASSES", "CUT_FALSE_WATCHDOG_ALLOWED", "POLL_RAW_FIELDS",
     "cut_state_b_violations", "cut_state_a_violations",
     "eval_watchdog_killed", "VerdictInput", "VerdictResult", "evaluate",
