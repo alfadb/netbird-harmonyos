@@ -86,3 +86,13 @@ reviewer_role: 待 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
 ## 当前 host-only 边界
 
 当前只允许：本登记文档，以及后续 spike 实现（`spikes/n1b-disc-phys-hap/`，判据 :270）与 host-only 验证（构建、selftest、静态断言准备）。禁止：任何真实 HDC executable、任何设备命令、pair 消费（含 audit/freeze/record 落盘）、TargetBindingConfirm、DryRun、Live——gate 4 起逐门推进且每项均须用户另行授权；gate 13 Live 前须用户全新确认（决议 §4.3.9）。判据冻结块的既有约束不变：判据修改 = 判据变更，须重审（判据 :253）。
+
+## 门序列执行登记（2026-09-06 起，host-only 门 1-3）
+
+| 门 | 状态 | 事实 |
+| --- | --- | --- |
+| 1 host-only 同步 | pass | clean HEAD `11fabd6`（0 未提交项，与 origin/main 同步）；`code_sha = 11fabd66d66917b2fa0404f5ddbf53a73c288ae1`；登记/runner/selftests/docs 均在 clean HEAD；HDC0 固定绝对 `/usr/bin/ps` 探针最终计数 0——过程记录：发现遗留 hdc server（pid 1726，2026-09-05 23:53 启动，先于本 campaign），`hdc kill` 清理后复核归零，全程零设备接触 |
+| 2 audit-1 | pass | 候选 ID 消费审计：仓外双文件+sha256——`~/harmonyos-signing/netbird-n1bdisc/audit/audit-1/new-pair-id-consumption-audit-1.txt`（SHA-256 `82b24b90eff329911e22458ad976510b508c552d242b2cad97bc3dba894354f6`）；三 ID 全文检索 12 行/3 文件均为登记性引用；消费标记零命中；结论 `outside-consumption-hits=0 inside-evidence-consumption-hits=0`，candidate.consumed=false 保持 |
+| 3 freeze + 静态审查 | pass | freeze-1：`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-1.txt`（SHA-256 `05453491e691ce963ce7cbf787074dbe0806ba753d04287970902e835a2116e4`；附件 `gate3-staticcheck-output.json` `3c940bac…`、`gate3-symbol-transcription.txt` `ad61a4fb…`），绑 code_sha `11fabd6…`、14/14 符号誊录（制品 `.so` SHA-256 `b2a34b05…eef1`）、A1-A12 机器检查 12/12 PASS（被检树指纹 `19e67c52bf9b`）、时间盒表逐项核对、Fault_Type 冻结候选集 `{APPFREEZE, CPPCRASH, JSRAWERROR}` + 未实测依赖登记（取不到目标元组真实 faultlogger 文本，按判据 :1434 条款以冻结候选集执行）；reviewer 静态审查（grok，跨厂商隔离席）：**PASS = freeze 成立**，0 blocker / 0 major / 2 minor；裁决：(a) `.ets` 三处 `:463` 锚语义读作 `:468`（注释校正已落地，L25/L56/L80），(b) A3 取址保链口径采纳为 freeze 口径，(c) 记录结构符合判据 :1434、gate 1/2 事实充分 |
+
+> gate 4 起为设备侧（`tconn` / `TargetBindingConfirm` / DryRun / Live），逐门推进且每项均须用户另行授权；本表后续门的登记随执行追加。

@@ -22,7 +22,7 @@ const OUTCOME_LATE_REJECTED: string = 'late-rejected';
 const OUTCOME_INDETERMINATE: string = 'indeterminate';
 const OUTCOME_NOT_ATTEMPTED: string = 'not_attempted';
 
-// Matrix arbitration states: at most one in-flight create() (:463); the late
+// Matrix arbitration states: at most one in-flight create() (:468); the late
 // observation window opens at most once per matrix (:468-475).
 const STATE_RUNNING: string = 'running';
 const STATE_LATE_WINDOW: string = 'lateWindow';
@@ -53,7 +53,7 @@ interface MatrixEntrySpec {
 }
 
 // Per-entry settle record handed back to the matrix loop by the create()
-// then/catch callbacks registered synchronously at the call site (:463).
+// then/catch callbacks registered synchronously at the call site (:468).
 interface EntryResult {
   kind: string;
   fd: number;
@@ -77,7 +77,7 @@ class MatrixEntry {
 // @ohos.net.vpnExtension.d.ts VpnConfig / connection RouteInfo / LinkAddress).
 // MR1B runs only when MR1 closed `rejected` and the matrix is not terminated
 // (:457 MR table row + :468-475 matrix-termination rule). The matrix is serial:
-// at most one in-flight create() at any time (:463).
+// at most one in-flight create() at any time (:468).
 function buildMatrixSpecs(): MatrixEntrySpec[] {
   const specs: MatrixEntrySpec[] = [];
   // MR1 — main candidate (N1b r2 target shape), isBlocking omitted.
