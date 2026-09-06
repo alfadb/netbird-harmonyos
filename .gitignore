@@ -28,6 +28,12 @@ __pycache__/
 /spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/*
 !/spikes/g0-go-arm64-phys-hap/entry/libs/arm64-v8a/libgoprobe.so
 
+# N1BDISC: the probe .so IS committed (hash-registered artifact for gate-8
+# freeze binding; reproducible via probe/build.sh offline+locked on the
+# 26.0.0.821 baseline); every other generated file stays ignored.
+/spikes/n1b-disc-phys-hap/entry/libs/arm64-v8a/*
+!/spikes/n1b-disc-phys-hap/entry/libs/arm64-v8a/libn1bdisc_probe.so
+
 # N0 native core host build outputs
 /spikes/n0-native-core/target/
 /spikes/n0-native-core/out/

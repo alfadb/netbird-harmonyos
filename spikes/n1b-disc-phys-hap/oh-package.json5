@@ -1,0 +1,9 @@
+{
+  modelVersion: '26.0.0',
+  name: 'n1b-disc-phys-hap',
+  version: '1.0.0',
+  description: 'N1BDISC physical-device HAP skeleton: carrier for the Rust probe and ArkTS orchestration.',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}

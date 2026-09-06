@@ -1,0 +1,704 @@
+# -*- coding: utf-8 -*-
+"""n1bdisc fake-hdc — 可编程假 hdc（host-only 唯一"hdc"形态）。
+
+权威规格：``docs/n1b-disc-gate-plan.md``（只读冻结）。本模块是 runner 的默认
+transport（规格门 11 DryRun = HDC0；真实 hdc transport 本任务不实现）。
+
+能力：
+1. **hilog 合成流**：按剧本输出 marker 序列（``N1BDISC_<SHORT>|k=v``）、三形态 tag
+   （entry / ``:vpn`` 截断 / ``:vpn`` 完整，规格 :417）、可注入 chunk / 重复片 /
+   late marker（窗到点后到达，规格 :1066）；
+2. **faultlogger 目录合成**：可配置 APPFREEZE/CPPCRASH/JSRAWERROR/域外类型/多条目，
+   快照（窗界判据 = 快照文件集合差分，规格 :1214）、逐文件取回失败（r13 按文件建模）、
+   FaultProbe 全局失败；
+3. **bundle dump / pidof 语义**：安装态、UI 与 ``:vpn`` 进程存活态；
+4. **命令校验**：transport 侧与白名单 argv 逐字比对（规格 :1622-1643），违规抛
+   :class:`n1bdisc_hdc.HdcViolation`。
+
+全部行为 host-only：无真实 hdc/设备/网络端点。
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
+
+import n1bdisc_core as core
+import n1bdisc_hdc as hdc
+
+_UI_PID = 20001
+_VPN_PID = 20002
+
+#: 三形态 tag 路径（规格 :417；与 core.bundle_tag_forms 一致）。
+_TAG_PATHS: Dict[str, str] = {
+    "entry": core.DEFAULT_BUNDLE,
+    "truncated": "." + core.DEFAULT_BUNDLE[len("cn."): ] + ":vpn",
+    "complete": core.DEFAULT_BUNDLE + ":vpn",
+}
+
+
+def _mono_to_wall(mono_ms: int) -> str:
+    """确定性墙钟合成：08-30 10:00:00.000 起随 mono 推进（仅 hilog 行形态需要）。"""
+    total = 10 * 3600 * 1000 + mono_ms
+    hh, rem = divmod(total, 3600 * 1000)
+    mm, rem = divmod(rem, 60 * 1000)
+    ss, ms = divmod(rem, 1000)
+    return "08-30 %02d:%02d:%02d.%03d" % (hh, mm, ss, ms)
+
+
+def format_hilog_line(tag_form: str, message: str, mono_ms: int,
+                      pid: int) -> str:
+    """合成一行可被 ``core.parse_hilog_line`` 关联的 hilog 文本。"""
+    if tag_form not in _TAG_PATHS:
+        raise ValueError("tag_form must be one of %r" % (sorted(_TAG_PATHS),))
+    return "%s  %5d  %5d D %s/%s: %s" % (
+        _mono_to_wall(mono_ms), pid, pid, _TAG_PATHS[tag_form], core.HILOG_TAG,
+        message)
+
+
+class FakeMarker:
+    """剧本中的一枚合成 marker。
+
+    ``late=True`` 的 marker 不进正常流，仅在窗到点后由 :meth:`FakeHdc.late_lines`
+    提供（规格 :1066 ``late_marker_observed`` 的合成源）。
+    """
+
+    def __init__(self, short: str, at_mono_ms: int,
+                 kv: Optional[Mapping[str, str]] = None,
+                 tag_form: str = "entry", late: bool = False) -> None:
+        self.short = short
+        self.at_mono_ms = int(at_mono_ms)
+        self.kv = dict(kv or {})
+        self.tag_form = tag_form
+        self.late = late
+
+    @property
+    def name(self) -> str:
+        return core.MARKER_PREFIX + self.short
+
+    def message(self) -> str:
+        parts = [self.name]
+        parts.extend("%s=%s" % (k, v) for k, v in self.kv.items())
+        return "|".join(parts)
+
+    def line(self) -> str:
+        pid = _UI_PID if self.tag_form == "entry" else _VPN_PID
+        return format_hilog_line(self.tag_form, self.message(),
+                                 self.at_mono_ms, pid)
+
+
+def chunk_markers(text: str, stream: str, item: int, at_mono_ms: int,
+                  tag_form: str = "entry") -> List[FakeMarker]:
+    """把 detail 文本按 core 冻结编码切成 ``N1BDISC_CHUNK`` marker 剧本序列。"""
+    pieces = core.encode_chunks(text, stream, item)
+    return [FakeMarker("CHUNK", at_mono_ms + i, piece, tag_form)
+            for i, piece in enumerate(pieces)]
+
+
+def duplicate_chunk_markers(markers: Sequence[FakeMarker],
+                            payload_override: Optional[str] = None
+                            ) -> List[FakeMarker]:
+    """复制一组 chunk marker（重复片注入）；``payload_override`` 可构造不一致重复片。"""
+    out: List[FakeMarker] = []
+    for m in markers:
+        kv = dict(m.kv)
+        if payload_override is not None:
+            kv["payload"] = payload_override
+        out.append(FakeMarker("CHUNK", m.at_mono_ms, kv, m.tag_form))
+    return out
+
+
+class FaultFileSpec:
+    """一个合成 faultlogger 条目文件。"""
+
+    def __init__(self, file_name: str, content: str,
+                 recv_fail: bool = False) -> None:
+        self.file_name = file_name
+        self.content = content
+        self.recv_fail = recv_fail
+
+    def remote_path(self) -> str:
+        return hdc.FAULTLOGGER_DIR + "/" + self.file_name
+
+
+def fault_entry_text(fault_type: Optional[str], signal: Optional[str],
+                     timestamp: str = "2026-09-06 10:00:00.000",
+                     module: str = core.DEFAULT_BUNDLE,
+                     raw_lines: Sequence[str] = ()) -> str:
+    """按解析契约字段形态合成 fault 条目文本；``None`` 字段 = 字段行缺失。"""
+    lines = list(raw_lines)
+    if fault_type is not None:
+        lines.append("Fault_Type: %s" % fault_type)
+    if signal is not None:
+        lines.append("Signal: %s" % signal)
+    lines.append(timestamp)
+    lines.append("Module: %s" % module)
+    return "\n".join(lines) + "\n"
+
+
+class FakeScenario:
+    """一段可编程剧本：marker 序列 + faultlogger 目录 + 生命周期。"""
+
+    def __init__(self, markers: Sequence[FakeMarker],
+                 fault_files: Sequence[FaultFileSpec] = (),
+                 snapshot_files: Sequence[str] = (),
+                 die_at_end: bool = False,
+                 fault_probe_fails: bool = False) -> None:
+        self.markers = list(markers)
+        self.fault_files = {f.file_name: f for f in fault_files}
+        self.snapshot_files = list(snapshot_files)
+        self.die_at_end = die_at_end
+        self.fault_probe_fails = fault_probe_fails
+
+
+class FakeHdc(hdc.HdcTransport):
+    """可编程假 hdc transport（runner 默认 transport；host-only）。
+
+    命令校验：任何进入 :meth:`call` / :meth:`open_stream` 的 argv 先与白名单模板
+    （本实例的 target/hap 展开形）逐字比对，不命中即 :class:`hdc.HdcViolation`。
+    """
+
+    def __init__(self, scenario: FakeScenario, target: str = "FAKE-TARGET-1",
+                 hap_path: str = "/host/fake/n1bdisc.hap") -> None:
+        self.scenario = scenario
+        self.target = target
+        self.hap_path = hap_path
+        # 生命周期状态
+        self.staged = False
+        self.hap_sent = False
+        self.installed = False
+        self.app_started = False
+        self.ui_alive = False
+        self.vpn_alive = False
+        self.vpn_died = False
+        self.force_stop_reasons: List[str] = []
+        #: faultlogger 新条目物化标志：新增条目在进程死亡时刻产生（快照差分的前提）
+        self.fault_materialized = False
+        #: FaultRecv 取回结果：远端文件名 → 文本（host 侧落位由 fake 记录承载）
+        self.received: Dict[str, str] = {}
+        self.recv_failures: List[str] = []
+
+    # ------------------------------------------------------------------
+    # transport 接口
+    # ------------------------------------------------------------------
+
+    def call(self, argv: Sequence[str]) -> hdc.HdcTransportResult:
+        op = self._validate(argv)
+        argv = list(argv)
+        if op == "FaultRecv":
+            remote, host_path = argv[-2], argv[-1]
+            name = remote[len(hdc.FAULTLOGGER_DIR) + 1:]
+            spec = self.scenario.fault_files.get(name)
+            if spec is None or spec.recv_fail:
+                self.recv_failures.append(name)
+                return hdc.HdcTransportResult(1, "", "file recv failed: %s\n" % name)
+            self.received[name] = spec.content
+            return hdc.HdcTransportResult(0, "", "")
+        handler = getattr(self, "_op_%s" % op.lower())
+        return handler()
+
+    # ------------------------------------------------------------------
+    # 白名单 argv 逐字反向校验
+    # ------------------------------------------------------------------
+
+    def _validate(self, argv: Sequence[str]) -> str:
+        argv = list(argv)
+        for op, template in hdc.HDC_ARGV_TABLE.items():
+            expected = hdc.expand_template(template, target=self.target,
+                                           hap_path=self.hap_path)
+            if op == "FaultRecv":
+                # 冻结部分逐字比对；<命中文件>/<host路径> 两参数 token 形态校验
+                if (argv[:-2] == expected[:-2]
+                        and len(argv) == len(expected)
+                        and argv[-2].startswith(hdc.FAULTLOGGER_DIR + "/")
+                        and argv[-1]):
+                    return op
+                continue
+            if argv == expected:
+                return op
+        raise hdc.HdcViolation("argv-not-in-whitelist", {"argv": argv})
+
+    # ------------------------------------------------------------------
+    # hilog 合成流
+    # ------------------------------------------------------------------
+
+    def _mark_vpn_dead(self) -> None:
+        self.vpn_alive = False
+        self.vpn_died = True
+        # 进程死亡时刻物化本窗新增 fault 条目（快照差分窗界，:1213-1215）
+        self.fault_materialized = True
+
+    def _stream_lines(self) -> Iterator[str]:
+        for m in self.scenario.markers:
+            if m.late:
+                continue
+            if m.short == "PRE" and m.kv.get("ledger_digest") == "PRE_DIGEST_PLACEHOLDER":
+                yield FakeMarker("PRE", m.at_mono_ms,
+                                 dict(m.kv, ledger_digest=self._pre_digest(m)),
+                                 m.tag_form).line()
+            elif m.short == "POST":
+                yield self._post_line(m).line()
+            else:
+                yield m.line()
+        if self.scenario.die_at_end:
+            # 流末 = 进程死亡（pre-only 剧本）；finally 采样在此之后执行。
+            self._mark_vpn_dead()
+
+    # -- 设备侧（探针侧）模拟：终态 marker 字段的真实承载 ----------------
+
+    def _fd_transitions(self) -> List[Mapping[str, str]]:
+        return [m.kv for m in self.scenario.markers if m.short == "FD"]
+
+    def _pre_digest(self, pre_marker: FakeMarker) -> str:
+        """P5T 快照切点 digest（规格 :1200-1201：PRE 值只与 P5T 切点重建比对）。"""
+        at = [t for t in self._fd_transitions()
+              if int(t["at_mono_ms"]) <= pre_marker.at_mono_ms]
+        rebuild = core.rebuild_fd_ledger(at, "pre-snapshot")
+        assert rebuild.ok and rebuild.digest is not None
+        return rebuild.digest
+
+    @staticmethod
+    def _dw_outcome_column(class_v: str, join_v: str, watchdog_v: str,
+                           dist_v: str, poll_ret: str, poll_errno: str,
+                           poll_revents: str, poll_elapsed_ms: str) -> str:
+        """按探针 ``post_emit`` 字面合成 ``dw_outcome`` 内层列（观察 (ii) 对齐钉）。
+
+        探针实际格式 = ``probe/src/dw.rs:1008-1018`` format! 字面：内层 ``;`` 分隔
+        k=v、八字段位序固定（class/join/watchdog/dist/poll_ret/poll_errno/
+        poll_revents/poll_elapsed_ms）；runner 解析同源契约
+        （n1bdisc_verdict.DW_OUTCOME_FIELDS / parse_dw_outcome）。
+        """
+        return ";".join((
+            "class=%s" % class_v, "join=%s" % join_v,
+            "watchdog=%s" % watchdog_v, "dist=%s" % dist_v,
+            "poll_ret=%s" % poll_ret, "poll_errno=%s" % poll_errno,
+            "poll_revents=%s" % poll_revents,
+            "poll_elapsed_ms=%s" % poll_elapsed_ms))
+
+    def _post_line(self, post_marker: FakeMarker) -> FakeMarker:
+        """POST 字段设备侧模拟：ledger 最终 digest + d6_items + dw_outcome（r16/r22）。
+
+        digest 切口对齐探针实现（观察 (i)）：POST 最终 digest 恒按 ``complete``
+        切口（仍 open 条目记 ``open-at-exit``）计算——探针 ``ledger::digest(false)``
+        与 ``worker_terminal_at_p12`` FLAG 读值无关（probe/src/dw.rs:1006；判据
+        :385/:392/:403 complete 收口 → open-at-exit）。FLAG 值仅按剧本登记透传。
+
+        dw_outcome 内层列沿探针 derive_post_outcome 各格落值（dw.rs:791-916）：
+        (a) D-W 整体 skip → 全列 skip cause 字面、join=pending（dw.rs:829-841）；
+        (e)/(f) RETURN 在 → 13 类 + poll raw 数字 + watchdog=observed-false
+       （dw.rs:809-824）；flag-race 格 → 全列 flag-race-window-expired、watchdog=⑤
+        marker-gap-indeterminate（dw.rs:896-913）；(d) poll-never 格同形换
+        poll-never-returned 字面（dw.rs:878-895）。
+        """
+        rebuild = core.rebuild_fd_ledger(self._fd_transitions(), "complete")
+        assert rebuild.ok and rebuild.digest is not None
+        dw_skip = next((m for m in self.scenario.markers
+                        if m.short == "SKIP" and m.kv.get("item") == "D-W"), None)
+        ret = next((m for m in self.scenario.markers
+                    if m.short == "DW_RETURN"), None)
+        if dw_skip is not None:
+            cause = dw_skip.kv.get("cause", "no-live-fd")
+            u = core.unobservable_value(cause)
+            dw_outcome = self._dw_outcome_column(u, "pending", u, u, u, u, u, u)
+        elif ret is not None:
+            result = core.derive_dw_return_class(core.DwReturnInput(
+                ret=int(ret.kv["ret"]), revents=int(ret.kv["revents"]),
+                errno=int(ret.kv["errno"]) if ret.kv.get("errno") not in (None, "none") else None,
+                at_mono_ms=int(ret.kv["at_mono_ms"]),
+                elapsed_ms=int(ret.kv["elapsed_ms"]),
+                drain_end=self._drain_end(),
+                has_skip_destroy=self._has_skip_destroy(),
+                has_destroy_c=any(m.short == "DW_DESTROY_C"
+                                  for m in self.scenario.markers),
+                t_mono_ms=self._destroy_mono("DW_DESTROY_T"),
+                c_mono_ms=self._destroy_mono("DW_DESTROY_C"),
+            ))
+            dw_class = result.value or "other-revents"
+            # dist 沿 derive_distinguishable（dw.rs:619-663）：unobservable 类透传、
+            # fd-event-like/timeout-like 具值、其余类 uncorrelated 收口。
+            if dw_class.startswith("unobservable(cause="):
+                dist = dw_class
+            elif dw_class == "fd-event-like":
+                dist = "observed-true"
+            elif dw_class == "timeout-like":
+                dist = "observed-false"
+            else:
+                dist = core.unobservable_value("destroy-uncorrelated-class")
+            dw_outcome = self._dw_outcome_column(
+                dw_class, "joined", "observed-false", dist,
+                ret.kv["ret"], ret.kv["errno"], ret.kv["revents"],
+                ret.kv["elapsed_ms"])
+        else:
+            race = any(m.short == "DW_RACEWIN" for m in self.scenario.markers)
+            cause = "flag-race-window-expired" if race else "poll-never-returned"
+            u = core.unobservable_value(cause)
+            dw_outcome = self._dw_outcome_column(
+                u, "join-timeout",
+                core.unobservable_value("marker-gap-indeterminate"),
+                u, u, u, u, u)
+        d6_items = self._d6_items(dw_skip is not None)
+        kv = dict(post_marker.kv, ledger_digest=rebuild.digest,
+                  d6_items=d6_items, dw_outcome=dw_outcome)
+        return FakeMarker("POST", post_marker.at_mono_ms, kv, post_marker.tag_form)
+
+    def _drain_end(self) -> str:
+        drain = next((m for m in self.scenario.markers if m.short == "DW_DRAIN"), None)
+        return drain.kv.get("end", "eagain") if drain else "eagain"
+
+    def _has_skip_destroy(self) -> bool:
+        return any(m.short == "SKIP" and m.kv.get("item") == "destroy"
+                   for m in self.scenario.markers)
+
+    def _destroy_mono(self, short: str) -> Optional[int]:
+        m = next((x for x in self.scenario.markers if x.short == short), None)
+        return int(m.kv["mono_ms"]) if m else None
+
+    @staticmethod
+    def _d6_items(skip_all: bool) -> str:
+        if skip_all:
+            return ",".join("D6S%d:%s" % (i, "skipped(cause=no-live-fd)")
+                            for i in range(1, 8))
+        return ("D6S1:ret=0/errno=0,D6S2:ret=0/errno=0,D6S3:ret=-1/errno=9,"
+                "D6S4:ret=0/errno=0,D6S5:ret=-1/errno=11,D6S6:ret=0/errno=0,"
+                "D6S7:fd=12/reuse=false")
+
+    def late_lines(self) -> List[str]:
+        """窗到点后到达的 marker 行（不参与求值，规格 :1066）。"""
+        return [m.line() for m in self.scenario.markers if m.late]
+
+    # ------------------------------------------------------------------
+    # 命令语义（_op_* 方法名与白名单操作名小写对应）
+    # ------------------------------------------------------------------
+
+    def _op_version(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, "hdc 1.2.3\n", "")
+
+    def _op_parammodel(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, "FAKE-MODEL-1\n", "")
+
+    def _op_paramsoftwareversion(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, "7.0.0.102\n", "")
+
+    def _op_bundledump(self) -> hdc.HdcTransportResult:
+        if not self.installed:
+            return hdc.HdcTransportResult(1, "", "bm dump failed: not installed\n")
+        return hdc.HdcTransportResult(
+            0, "BundleName: %s\nAppStates: IS_INSTALLED=true\n"
+               % core.DEFAULT_BUNDLE, "")
+
+    def _op_pidof(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, str(_UI_PID) + "\n" if self.ui_alive else "", "")
+
+    def _op_pidofpost(self) -> hdc.HdcTransportResult:
+        return self._op_pidof()
+
+    def _op_pidofvpn(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, str(_VPN_PID) + "\n" if self.vpn_alive else "", "")
+
+    def _op_pidofvpnpost(self) -> hdc.HdcTransportResult:
+        return self._op_pidofvpn()
+
+    def _op_mkdirstaging(self) -> hdc.HdcTransportResult:
+        self.staged = True
+        return hdc.HdcTransportResult(0, "", "")
+
+    def _op_sendhap(self) -> hdc.HdcTransportResult:
+        if not self.staged:
+            return hdc.HdcTransportResult(1, "", "file send failed: no staging dir\n")
+        self.hap_sent = True
+        return hdc.HdcTransportResult(0, "FileTransfer finish\n", "")
+
+    def _op_installhap(self) -> hdc.HdcTransportResult:
+        if not self.hap_sent:
+            return hdc.HdcTransportResult(1, "", "bm install failed: hap missing\n")
+        self.installed = True
+        return hdc.HdcTransportResult(0, "install bundle successfully\n", "")
+
+    def _op_startentry(self) -> hdc.HdcTransportResult:
+        if not self.installed:
+            return hdc.HdcTransportResult(1, "", "aa start failed: not installed\n")
+        self.app_started = True
+        self.ui_alive = True
+        self.vpn_alive = True
+        return hdc.HdcTransportResult(0, "start ability successfully\n", "")
+
+    def _op_hilogstream(self) -> hdc.HdcTransportResult:
+        return hdc.HdcTransportResult(0, "", "")
+
+    def _op_faultprobe(self) -> hdc.HdcTransportResult:
+        if self.scenario.fault_probe_fails:
+            return hdc.HdcTransportResult(1, "", "find failed\n")
+        names = set(self.scenario.snapshot_files)
+        if self.fault_materialized:
+            names |= set(self.scenario.fault_files)
+        return hdc.HdcTransportResult(
+            0, "".join(hdc.FAULTLOGGER_DIR + "/" + n + "\n" for n in sorted(names)), "")
+
+    def _op_forcestop(self) -> hdc.HdcTransportResult:
+        self.ui_alive = False
+        if self.vpn_alive:
+            self._mark_vpn_dead()
+        self.force_stop_reasons.append("recorded")
+        return hdc.HdcTransportResult(0, "", "")
+
+    def _op_uninstall(self) -> hdc.HdcTransportResult:
+        self.installed = False
+        return hdc.HdcTransportResult(0, "", "")
+
+    def _op_removestaging(self) -> hdc.HdcTransportResult:
+        self.staged = False
+        self.hap_sent = False
+        return hdc.HdcTransportResult(0, "", "")
+
+    def _op_stagingprobe(self) -> hdc.HdcTransportResult:
+        if not self.staged:
+            return hdc.HdcTransportResult(1, "", "ls: No such file or directory\n")
+        return hdc.HdcTransportResult(0, "drwxrwxrwx ... %s\n" % hdc.STAGING_ROOT, "")
+
+    def open_stream(self, argv: Sequence[str]) -> Iterator[str]:
+        self._validate(argv)
+        return self._stream_lines()
+
+
+# ---------------------------------------------------------------------------
+# 内置剧本：DryRun 冒烟用
+# ---------------------------------------------------------------------------
+
+def _fd(short_fd: str, inst: int, action: str, at: int, fd="none", by="none",
+        cause="none") -> List[FakeMarker]:
+    return [FakeMarker("FD", at, {"fd": str(fd), "role": short_fd,
+                                  "inst": str(inst), "action": action,
+                                  "at_mono_ms": str(at), "by": by, "cause": cause},
+                       tag_form="complete")]
+
+
+def make_happy_path_scenario() -> FakeScenario:
+    """完整 happy-path：P0-P12 全 marker、正常类（fd-event-like）、POST（complete）。"""
+    m: List[FakeMarker] = [
+        FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
+        FakeMarker("D1_LOADED", 110, {"ok": "true"}, "truncated"),
+        FakeMarker("D1_SYM", 120, {"sym": "boringtun"}, "truncated"),
+        FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1"}),
+    ]
+    m += _fd("fd_orig", 1, "create", 150, fd="7")
+    m += _fd("fd_dup", 1, "create", 160, fd="8")
+    for i in range(1, 8):
+        m.append(FakeMarker("D2_S%d" % i, 160 + i, {"step": str(i), "ok": "true"}))
+    m += [
+        FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
+        FakeMarker("D4_SENT", 210, {"len": "64"}),
+        FakeMarker("D4_READ", 220, {"off": "tun_pi-like", "len": "64"}),
+        FakeMarker("D4_END", 230, {"ok": "true"}),
+    ]
+    m += _fd("d4_send_socket", 1, "create", 240, fd="9")
+    m += [
+        FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
+        FakeMarker("D5_WRITE", 310, {"len": "512"}),
+        FakeMarker("D5_RECV", 320, {"len": "512"}),
+        FakeMarker("D5_END", 330, {"ok": "true"}),
+    ]
+    m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
+    m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
+    m += chunk_markers("dlerror-detail-empty", "dlerror", 0, 410)
+    m += [
+        FakeMarker("PRE", 1000, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
+                                 "skip_summary": "none"}),
+        FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
+        FakeMarker("D7_END", 31000, {"elapsed_ms": "20000"}),
+        FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "bytes": "4194304",
+                                           "writes": "40000"}),
+    ]
+    m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
+    m += [
+        FakeMarker("DW_SPAWN", 50200, {"tid": "20003"}, "complete"),
+        FakeMarker("DW_DRAIN", 50300, {"elapsed_ms": "100", "timeout": "false",
+                                       "end": "eagain", "reads": "1",
+                                       "bytes": "0", "eintr_retries": "0"},
+                   "complete"),
+        FakeMarker("DW_BARRIER", 50400, {"mono_ms": "50400"}, "complete"),
+        FakeMarker("DW_INWAIT", 50500, {"src": "both", "confirmed": "true",
+                                        "samples": "3", "errno": "0"},
+                   "complete"),
+    ]
+    m += _fd("dw_inwait_proc_fd", 1, "close", 50600, fd="11", by="probe-protocol-close")
+    m += [
+        FakeMarker("DW_DESTROY_T", 60000, {"mono_ms": "60000"}, "complete"),
+        FakeMarker("DW_DESTROY_C", 60010, {"mono_ms": "60010"}, "complete"),
+        FakeMarker("D6S1_B", 60100, {}, "complete"),
+        FakeMarker("D6S1_R", 60110, {"ret": "0", "errno": "0"}, "complete"),
+        FakeMarker("D6S2_B", 60120, {}, "complete"),
+        FakeMarker("D6S2_R", 60130, {"ret": "0", "errno": "0"}, "complete"),
+        FakeMarker("D6S3_B", 60140, {}, "complete"),
+        FakeMarker("D6S3_R", 60150, {"ret": "-1", "errno": "9"}, "complete"),
+        FakeMarker("DW_RETURN", 60200,
+                   {"ret": "1", "errno": "0", "revents": str(hdc.core.POLLERR),
+                    "at_mono_ms": "60200", "elapsed_ms": "200"}, "complete"),
+        FakeMarker("DW_EXIT", 60210, {"code": "0"}, "complete"),
+        FakeMarker("D6S4_B", 60300, {}, "complete"),
+        FakeMarker("D6S4_R", 60310, {"ret": "0", "errno": "0"}, "complete"),
+        FakeMarker("D6S5_B", 60320, {}, "complete"),
+        FakeMarker("D6S5_R", 60330, {"ret": "-1", "errno": "11"}, "complete"),
+        FakeMarker("D6S6_B", 60340, {}, "complete"),
+        FakeMarker("D6S6_R", 60350, {"ret": "0", "errno": "0"}, "complete"),
+        FakeMarker("D6S7_B", 60360, {}, "complete"),
+        FakeMarker("D6S7_R", 60370, {"fd": "12", "reuse": "false"}, "complete"),
+    ]
+    m += _fd("d6b_reuse_probe_socket", 1, "create", 60360, fd="12")
+    m += _fd("d6b_reuse_probe_socket", 1, "close", 60380, fd="12",
+             by="probe-protocol-close")
+    m += _fd("d4_send_socket", 1, "close", 70000, fd="9", by="probe-protocol-close")
+    m += _fd("d5_sink_socket", 1, "close", 70010, fd="10", by="probe-protocol-close")
+    m.append(FakeMarker("POST", 80000,
+                        {"d6_items": "POST_D6_ITEMS_PLACEHOLDER",
+                         "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
+                         "ledger_digest": "POST_DIGEST_PLACEHOLDER",
+                         "worker_terminal_at_p12": "true"}))
+    return FakeScenario(markers=m, die_at_end=False)
+
+
+def make_pre_only_scenario() -> FakeScenario:
+    """pre-only 剧本：PRE 后死于 D7（无 D7_END），SIGKILL fault 条目（平台终止）。"""
+    m: List[FakeMarker] = [
+        FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
+        FakeMarker("D1_LOADED", 110, {"ok": "true"}, "truncated"),
+        FakeMarker("D1_SYM", 120, {"sym": "boringtun"}, "truncated"),
+        FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1"}),
+    ]
+    m += _fd("fd_orig", 1, "create", 150, fd="7")
+    m += _fd("fd_dup", 1, "create", 160, fd="8")
+    for i in range(1, 8):
+        m.append(FakeMarker("D2_S%d" % i, 160 + i, {"step": str(i), "ok": "true"}))
+    m += [
+        FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
+        FakeMarker("D4_SENT", 210, {"len": "64"}),
+        FakeMarker("D4_READ", 220, {"off": "tun_pi-like", "len": "64"}),
+        FakeMarker("D4_END", 230, {"ok": "true"}),
+    ]
+    m += _fd("d4_send_socket", 1, "create", 240, fd="9")
+    m += [
+        FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
+        FakeMarker("D5_WRITE", 310, {"len": "512"}),
+        FakeMarker("D5_RECV", 320, {"len": "512"}),
+        FakeMarker("D5_END", 330, {"ok": "true"}),
+    ]
+    m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
+    m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
+    m.append(FakeMarker("PRE", 1000, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
+                                      "skip_summary": "none"}))
+    m.append(FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}))
+    # 死于 D7 任务中途：无 D7_END 及其后任何 marker。
+    snapshot = FaultFileSpec(
+        "faultlogger-0001-preexisting-cn.alfadb.netbird.n1bdisc",
+        fault_entry_text("APPFREEZE", None, "2026-08-01 09:00:00.000"))
+    fresh = FaultFileSpec(
+        "faultlogger-0002-cn.alfadb.netbird.n1bdisc",
+        fault_entry_text("APPFREEZE", "SIGKILL", "2026-09-06 10:00:00.000"))
+    return FakeScenario(markers=m, fault_files=[snapshot, fresh],
+                        snapshot_files=[snapshot.file_name], die_at_end=True)
+
+
+def make_no_live_fd_scenario() -> FakeScenario:
+    """五 create 全拒 → no-live-fd 分支：POST 照发（skip 编码，规格 :1543 验收形态）。"""
+    m: List[FakeMarker] = [
+        FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
+        FakeMarker("D1_LOADED", 110, {"ok": "true"}, "truncated"),
+        FakeMarker("D1_SYM", 120, {"sym": "boringtun"}, "truncated"),
+        FakeMarker("D1_END", 130, {"ok": "true"}, "truncated"),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1", "outcome": "rejected"}),
+        FakeMarker("SKIP", 150, {"item": "destroy", "cause": "no-live-connection"},
+                   "entry"),
+        FakeMarker("SKIP", 160, {"item": "D-W", "cause": "no-live-fd"}, "entry"),
+        FakeMarker("PRE", 200, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
+                                "skip_summary": "destroy:no-live-connection"}),
+        FakeMarker("POST", 300,
+                   {"d6_items": "POST_D6_ITEMS_PLACEHOLDER",
+                    "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
+                    "ledger_digest": "POST_DIGEST_PLACEHOLDER",
+                    "worker_terminal_at_p12": "true"}),
+    ]
+    return FakeScenario(markers=m, die_at_end=False)
+
+
+def make_flag_race_scenario() -> FakeScenario:
+    """complete 形态但 ``worker_terminal_at_p12=false``（真机 flag-race 格）。
+
+    观察 (i) 端到端验证格：POST 在（close_kind=complete-seal）而 FLAG=false——
+    探针 POST digest 恒按 open-at-exit 切口算（probe/src/dw.rs:1006），runner 最终
+    重建必须同切口（close_kind 驱动；判据 :390-395 限同一切点）。账本含 POST 时仍
+    open 的条目（fd_orig/fd_dup 全程无 close），complete 切口（open-at-exit）与
+    pre-only 切口（process-exit）digest 必然不同 → 旧 wtap 启发在此格必假 F5。
+
+    cut-state (B)（:777-788）闭表对齐：RACEWIN 在（r22 仅此格发射，dw.rs:989-991）；
+    class 与 poll raw 四字段 = ``unobservable(cause=flag-race-window-expired)``；
+    watchdog = ⑤ ``unobservable(cause=marker-gap-indeterminate)``。poll 未返回
+   （无 DW_RETURN/DW_EXIT，:738-749 前件）、join 超时弃收（join-timeout）、
+    destroy 已调用并返回（_T/_C 在）。
+    """
+    m: List[FakeMarker] = [
+        FakeMarker("D1_BEGIN", 100, {"mono_ms": "100"}),
+        FakeMarker("D2_ENTRY", 140, {"id": "MR1"}),
+    ]
+    m += _fd("fd_orig", 1, "create", 150, fd="7")
+    m += _fd("fd_dup", 1, "create", 160, fd="8")
+    m += [
+        FakeMarker("D4_BEGIN", 200, {"mono_ms": "200"}),
+        FakeMarker("D4_SENT", 210, {"len": "64"}),
+        FakeMarker("D4_READ", 220, {"off": "tun_pi-like", "len": "64"}),
+        FakeMarker("D4_END", 230, {"ok": "true"}),
+    ]
+    m += _fd("d4_send_socket", 1, "create", 240, fd="9")
+    m += [
+        FakeMarker("D5_BEGIN", 300, {"mono_ms": "300"}),
+        FakeMarker("D5_WRITE", 310, {"len": "512"}),
+        FakeMarker("D5_RECV", 320, {"len": "512"}),
+        FakeMarker("D5_END", 330, {"ok": "true"}),
+    ]
+    m += _fd("d5_sink_socket", 1, "create", 340, fd="10")
+    m.append(FakeMarker("D8_MTU", 400, {"len": "1400", "ret": "0"}))
+    m += chunk_markers("dlerror-detail-empty", "dlerror", 0, 410)
+    m += [
+        FakeMarker("PRE", 1000, {"ledger_digest": "PRE_DIGEST_PLACEHOLDER",
+                                 "skip_summary": "none"}),
+        FakeMarker("D7_BEGIN", 1100, {"start_mono_ms": "1100"}),
+        FakeMarker("D7_END", 31000, {"elapsed_ms": "20000"}),
+        FakeMarker("D8_STORM_BEGIN", 31100, {"ws": "31100"}),
+        FakeMarker("D8_STORM_END", 41100, {"we": "41100", "bytes": "4194304",
+                                           "writes": "40000"}),
+    ]
+    m += _fd("dw_inwait_proc_fd", 1, "create", 50100, fd="11")
+    m += [
+        FakeMarker("DW_SPAWN", 50200, {"tid": "20003"}, "complete"),
+        FakeMarker("DW_DRAIN", 50300, {"elapsed_ms": "100", "timeout": "false",
+                                       "end": "eagain", "reads": "1",
+                                       "bytes": "0", "eintr_retries": "0"},
+                   "complete"),
+        FakeMarker("DW_BARRIER", 50400, {"mono_ms": "50400"}, "complete"),
+        FakeMarker("DW_INWAIT", 50500, {"src": "both", "confirmed": "true",
+                                        "samples": "3", "errno": "0"},
+                   "complete"),
+    ]
+    m += _fd("dw_inwait_proc_fd", 1, "close", 50600, fd="11", by="probe-protocol-close")
+    m += [
+        FakeMarker("DW_DESTROY_T", 60000, {"mono_ms": "60000"}, "complete"),
+        FakeMarker("DW_DESTROY_C", 60010, {"mono_ms": "60010"}, "complete"),
+    ]
+    m += _fd("d4_send_socket", 1, "close", 70000, fd="9", by="probe-protocol-close")
+    m += _fd("d5_sink_socket", 1, "close", 70010, fd="10", by="probe-protocol-close")
+    # r22 冻结发射序：RACEWIN → POST（dw.rs:986-991，仅 flag-race 格发射）
+    m.append(FakeMarker("DW_RACEWIN", 79000, {"expired": "1"}, "complete"))
+    m.append(FakeMarker("POST", 80000,
+                        {"d6_items": "POST_D6_ITEMS_PLACEHOLDER",
+                         "dw_outcome": "POST_DW_OUTCOME_PLACEHOLDER",
+                         "ledger_digest": "POST_DIGEST_PLACEHOLDER",
+                         "worker_terminal_at_p12": "false"}))
+    return FakeScenario(markers=m, die_at_end=False)
+
+
+__all__ = [
+    "FakeMarker", "chunk_markers", "duplicate_chunk_markers", "FaultFileSpec",
+    "fault_entry_text", "FakeScenario", "FakeHdc", "format_hilog_line",
+    "make_happy_path_scenario", "make_pre_only_scenario",
+    "make_no_live_fd_scenario", "make_flag_race_scenario",
+]

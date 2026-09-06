@@ -1,11 +1,13 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-02 ｜ 状态：`criteria-frozen-2026-09-02`
+最后核验：2026-09-05 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1 变更经跨厂商隔离重审通过，可 freeze 状态已恢复——见下方修订登记）
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
 > r0 自陈「SDK d.ts 在仓外不可核实」**有误**，实测路径 `/home/worker/harmonyos/command-line-tools/26.0.0.461/sdk/default/openharmony/ets/api/@ohos.net.connection.d.ts` 与 `@ohos.net.vpnExtension.d.ts`），**以及主会话开工后补充的 D-W in-wait 证据要求（优先级等同 blocker，与 BL-4 合并处理；见 D-W 节「in-wait 证据」与「决议约束正面登记」）**。
 > r1 须再次经跨厂商隔离独立审查 0 blocker，方可请用户授权判据冻结与后续动作。
+>
+> **2026-09-05 判据变更 CC-1（冻结后首次，实现阶段独立审查 B-04 发现）**：原 `:368`（现 `:370`）原文「`dw_inwait_proc_fd` 两个 `/proc` 路径各占 `inst=1`/`inst=2`」与 原 `:831`（现 `:833`）的 in-wait 采集「≤2 s 窗口、10 ms 间隔重采样」在冻结 syscall 闭表（原 `:351-358`（现 `:353-360`）；无 `lseek`/`pread`，同 fd 二次 read 必返 0，每次采样必须重开文件）下**互斥不可同时满足**。用户（直接人类决策者）于 2026-09-05 会话内显式授权方案①：`inst` 按创建时刻自 1 递增、不设两实例上限（三个候选修法中改动最小、保留全密度采样事实）。变更面：原 `:368`（现 `:370`）一句 + 原 `:364`（现 `:366`）括注（「每次采样两个路径各一」）+ 原 `:383`（现 `:385`）canonical 第三键（「同刻同 role 按 `inst` 升序」）+ 本登记 + 状态行。**CC-1 经跨厂商隔离重审（grok 席，2026-09-05）通过：0 blocker / 2 major（M-1/M-2，已按重审建议在同一补丁内闭合）+ 4 minor（m-1 N-inst selftest 夹具与 m-2 自陈防误引注留待实现期随动，m-4 path↔inst 双射取消由 A6/DW_INWAIT.src 承载，登记于案不阻塞）。重审结论「重审通过后可恢复可 freeze 状态」已履行——状态恢复为可 freeze。** 变更授权语境：判据冻结 git `04cf222`、实现阶段独立审查（隔离席）发现的 B-04 blocker 上报。本登记块内行号引用统一为「原 `:NNN`（现 `:NNN`）」双标注（原 = 冻结 git `04cf222` 编号；现 = 本登记块插入致 `:10` 以下 +2 位移后编号）。
 >
 > **2026-09-01 第一趟事实常量更正（F1-F11）**：仅更正事实性/机械性错误（PI 前缀常量、D8b 校验和主张、MTU oracle 接口表述、poll 族冻结集 `{73}`、观测窗 467/525 数字统一、HilogStream 墙钟 ≥825 s 与求值窗 525 s 分立、complete 全序校验范围 P1-P12、ledger_digest 完整 SHA-256、决议引用 `:66`、白名单计数表述、
 > `D4_READ off=both`）；状态保持 `criteria-r1-pending-independent-review`，**设计级修订待下一趟，届时统一改状态并登记**。
@@ -361,11 +363,11 @@ r0 另把 `destination`/`gateway` 写成字符串字面（`"10.99.0.0/24"`/`"10.
 
 ### fd 纪律（完整性要求，非平台判据）
 
-- **fd ledger 强制**：`fd_orig`（create 返回的原始 fd）、`fd_dup`（唯一副本）、`d4_send_socket`、`d5_sink_socket`、`d6b_reuse_probe_socket`、`dw_inwait_proc_fd`（D-W in-wait 证据瞬态 fd：`openat` → 读取 → 即关，两个路径各一，登记开/关位点）、`d2_late_fd`（迟到 resolve 携带的 fd：只登记 `late-fd-orphaned` + fd 号 + 出现时刻，**不关闭**——关闭责任方为进程自然退出与 host finally 的 `ForceStop`，见矩阵执行协议第 3 条），逐项登记号/角色/创建点/关闭责任方/关闭点；
+- **fd ledger 强制**：`fd_orig`（create 返回的原始 fd）、`fd_dup`（唯一副本）、`d4_send_socket`、`d5_sink_socket`、`d6b_reuse_probe_socket`、`dw_inwait_proc_fd`（D-W in-wait 证据瞬态 fd：`openat` → 读取 → 即关，**每次采样**两个路径各一，inst 跨 tick 递增——CC-1 变更，2026-09-05 用户授权方案①，消解与 in-wait 采集重采样要求的互斥）、`d2_late_fd`（迟到 resolve 携带的 fd：只登记 `late-fd-orphaned` + fd 号 + 出现时刻，**不关闭**——关闭责任方为进程自然退出与 host finally 的 `ForceStop`，见矩阵执行协议第 3 条），逐项登记号/角色/创建点/关闭责任方/关闭点；
   **未创建的条目登记 `not-created|cause=<分支原因>`，不留空**。ledger 缺失或与 marker 流矛盾 → verdict `fail`（完整性轴）。
 - **fd ledger transition marker（r3 第二趟 E2 新增，冻结字面）**：每次 fd 状态迁移（`create` / `close` / `not-created`）发生时，探针**立即**发射一条 marker（经既有 HiLog 通道）：
 `N1BDISC_FD|fd=<n|none>|role=<role[#k]>|inst=<n>|action=<create|close|not-created>|at_mono_ms=<n>|by=<closed_by|none>|cause=<cause|none>`。字段约束：`role` ∈ 冻结角色集 {`fd_orig`, `fd_dup`, `d4_send_socket`, `d5_sink_socket`, `d6b_reuse_probe_socket`, `dw_inwait_proc_fd`, `d2_late_fd`}（与 ledger 条目一一对应）；
-  - **`inst` 字段（r4 第二趟 S3 新增）**：同 `role` 多实例的序号，十进制自 1 递增、按创建时刻排序——单实例角色恒 `inst=1`；`dw_inwait_proc_fd` 两个 `/proc` 路径各占 `inst=1`/`inst=2`（按其开/关位点在冻结全序中的先后定 1/2）；ledger 条目与 marker 均以 `(role, inst)` 二元组唯一标识实例（canonical 行 `role` 字段写 `role#k` 形态，如 `dw_inwait_proc_fd#2`）；
+  - **`inst` 字段（r4 第二趟 S3 新增）**：同 `role` 多实例的序号，十进制自 1 递增、按创建时刻排序——单实例角色恒 `inst=1`；`dw_inwait_proc_fd` 不受实例数上限约束——D-W in-wait 重采样在冻结 syscall 闭表（无 `lseek`/`pread`）下每次采样必须重开 `/proc` 文件，其 `inst` 按创建时刻自 1 递增、不设两实例上限（CC-1 变更，2026-09-05 用户授权方案①，消解与 in-wait 采集重采样要求的互斥）；ledger 条目与 marker 均以 `(role, inst)` 二元组唯一标识实例（canonical 行 `role` 字段写 `role#k` 形态，如 `dw_inwait_proc_fd#2`）；
   `action=create`/`close` 时 `fd=<n>` 为实际 fd 号、`by=` 字段必填、`cause=none` 占位（**字段恒在**，占位字面冻结，runner 解析无缺字段歧义）。
   **`by=` 字段取值域按 `action` 拆分（r5 U9）**：
   - `action=create` 时 `by` 恒 `none`（create 无收口方，不参与 `closed_by` 域校验）；
@@ -380,7 +382,7 @@ r0 另把 `destination`/`gateway` 写成字符串字面（`"10.99.0.0/24"`/`"10.
   - **PRE 快照（P5T 切点）→ `open-at-pre`**；
   - **最终重建（POST 或 pre-only 收口）→ 按收口形态记 `open-at-exit`（complete）/ `process-exit`（pre-only，r6 W3 恢复——进程死亡时内核回收；`host-forcestop` 仅用于 ForceStop 前进程仍活的 fail-cleanup 形态）**；
   两种切点下 `closed_at_mono_ms` 均写 `none`；
-  (b) 数值一律**十进制无前导零**（fd 号、时刻均十进制整数）；(c) 条目**排序规则 = 按创建时刻单调序**（`created_at_mono_ms` 升序；`not-created` 条目按其登记时刻参与排序；时刻相同按上列角色集出现顺序定序）；
+  (b) 数值一律**十进制无前导零**（fd 号、时刻均十进制整数）；(c) 条目**排序规则 = 按创建时刻单调序**（`created_at_mono_ms` 升序；`not-created` 条目按其登记时刻参与排序；时刻相同先按上列角色集出现顺序定序，**同刻同 role 再按 `inst` 升序定序**——CC-1 重审 M-2 闭合：第三键冻结，防同刻多实例产生歧序 digest）；
   (d) 行序即该排序，行尾无分隔符，条目间以 `\n` 连接，UTF-8 编码，无 BOM、无尾随换行；(e) digest = 该字节串的 SHA-256 完整 64 hex。
   **发 digest 的责任分立（r4 R1 更新字面；r5 U5 切点冻结）**：探针正常收尾时由探针发（`N1BDISC_POST` 携带最终值）；pre-only 收口时探针来不及发——由 **runner 依 transition marker 重建 ledger 并按同一 canonical 规则重算** digest（r4 R1：`pre-only` 收口时由 runner 在 evidence 记录中携带，重建条目在记录中逐字标注 `rebuilt-from-transition-marker`）。
   **digest 一致性校验限同一切点（r5 U5，禁止跨时点比较）**：

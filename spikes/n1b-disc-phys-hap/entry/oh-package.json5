@@ -1,0 +1,9 @@
+{
+  modelVersion: '26.0.0',
+  name: 'entry',
+  version: '1.0.0',
+  description: 'Entry module for the N1BDISC physical HAP skeleton.',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}

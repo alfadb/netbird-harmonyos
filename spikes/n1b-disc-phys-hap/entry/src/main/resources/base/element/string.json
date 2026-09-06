@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "N1BDISC physical HAP skeleton entry module"
+    },
+    {
+      "name": "ability_description",
+      "value": "UI trigger only; orchestration lives in the VPN extension"
+    },
+    {
+      "name": "ability_name",
+      "value": "N1BDISC Skeleton"
+    }
+  ]
+}

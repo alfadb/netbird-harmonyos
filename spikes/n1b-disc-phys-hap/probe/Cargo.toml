@@ -1,0 +1,36 @@
+# N1BDISC physical probe — native side (host-only build, no device/HDC/signing).
+# Authoritative spec: docs/n1b-disc-gate-plan.md@04cf222+CC-1(criteria-change-1-reviewed-pass-2026-09-05) (read-only; CC-1 后行号 +2).
+#
+# BoringTun is pinned verbatim per gate-plan "构面输入" (frozen build input):
+#   boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
+#   crate sha256 = 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+# The `device` feature is forbidden (TunSocket::new would treat a numeric name as an fd
+# and Drop would close it unconditionally).
+#
+# BoringTun's data plane is NEVER called (gate-plan :302); the 14 frozen ffi symbols
+# are only address-referenced so they survive linker GC and stay in dynsym for D1
+# dlopen+dlsym resolution (see src/btkeep.rs and DEVIATIONS in src/lib.rs).
+
+[package]
+name = "n1bdisc_probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "n1bdisc_probe"
+crate-type = ["cdylib"]
+
+[dependencies]
+boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
+
+# NAPI bindings are handwritten raw extern "C" declarations (src/napi.rs) resolved
+# from the host process (libace_napi.z.so); no napi-rs dependency, and per A1 the
+# crate contains zero napi_create_threadsafe_function / napi_create_async_work.
+#
+# panic=abort: panics must not unwind across the NAPI/extern "C" boundary.
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = false
+strip = "debuginfo"

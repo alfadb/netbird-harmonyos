@@ -74,3 +74,15 @@
 - **单轴 vs 全轴**（r23 教训）：修复的传播必须在全部受影响字段/规则位闭合，「同一钉两处落盘」。
 - 席位失败模式：sol 会连接中断（3 次后主会话接手并留局限声明，下一轮原席复核）；glm-5.3-flash（执行层）偶发无消息失败（2 次后接手）；deepseek 只适合机械枚举。
 - 主会话 32 次同型失误登记在 register——批量落盘时未核对数量/引用/传播是主要模式，新会话自警。
+
+## 九、工具链迁移补充（2026-09-05 追加，上文不改）
+
+> 本节为 2026-09-05 的追加登记，不修改上文任何历史内容；与上文表述冲突时，冻结判据与决议为准。
+
+- **当前新开发一律使用 CLT `26.0.0.821`（HarmonyOS SDK `26.0.0.105`，API 26 Release）**：唯一版本基线见 [`docs/toolchain-baseline.md`](toolchain-baseline.md)；稳定链 `6.1.1.290` 与 Beta 链 `26.0.0.461` 已退役、本机不存在，本文涉及其的历史叙述按写作时点理解。
+- **SDK 锚点对账 9/9 PASS**：冻结判据正文引用的 SDK/sysroot 锚点主张已在 821 实际内容上逐项复核一致，见 [`docs/n1bdisc-sdk-anchor-reconciliation-20260905.md`](n1bdisc-sdk-anchor-reconciliation-20260905.md)（只读对账存档：非设备 evidence、不占用 evidence ID）。
+- **冻结判据正文不改**：该对账不构成判据修订、不触发重新审查义务；461→821 的行号漂移已在对账 §3.8 照实登记，判据的任何修改仍按硬边界第 1 条走判据变更流程。
+- **Rust 工具链已安装验证（2026-09-05）**：前缀 `$HOME/rust`，rustc/cargo `1.98.1`、rustup `1.29.1`，OHOS `aarch64-unknown-linux-ohos` 与 `x86_64-unknown-linux-ohos` targets 已装；`$HOME/rust/env.sh` 由 `.zshrc` 条件加载，不设置全局 `CC`/`AR`，不影响系统 Node.js。登记见 [`docs/toolchain-baseline.md`](toolchain-baseline.md)；工具链 smoke：API 26 HAP 与 BoringTun OHOS 均 PASS，见 [`docs/toolchain-smoke-20260905.md`](toolchain-smoke-20260905.md)。
+- **AGC profile 已完成（2026-09-05，用户授权会话内）；vendor/lock freeze 仍是后续前置**：AGC 侧已创建 HarmonyOS 应用 NetBird N1BDISC（包名 `cn.alfadb.netbird.n1bdisc`，与冻结值逐字一致；APP ID `6917615611100883458`；所属项目 NetBird HarmonyOS Preflight）与调试 Profile「NetBird N1BDISC Debug」（类型 debug；证书复用 NetBird E3 Debug，SHA-256 指纹 `F9:A6:EB:86:4E:C1:D1:9A:A3:0B:6D:7B:FC:B2:AF:A6:3C:09:0A:5C:CC:1D:17:73:D5:46:F3:5D:B4:9D:72:F0`，与历史 E3 A/G0 profile 内嵌证书一致；设备绑定已注册 PHYS-1（UDID `C863D22EDE37…D833`），失效 2027-08-06）；profile 文件 `/home/worker/harmonyos-signing/netbird-n1bdisc/profiles/NetBird N1BDISC Debug.p7b`（4117 字节，SHA-256 `49c99c567d0e8693269a1bda74f5d921ae0771e2cc0859512d9b3cd950df19a4`），`hap-sign-tool verify-profile` PASS。注意点：① AGC 开放能力「定位服务」为平台强制默认勾选（is-disabled is-checked，无法取消），非本项目选择，对调试签名无影响；② 仓外既有文件 `netbird-e3/cert/NetBird E3 Debug.cer` 实际内容为华为 CBG Root CA G2 根证书（序列号 `4A18699F9D7D8CD0`），文件名有误导，本地签名应使用 profile 内嵌开发证书或 `verify-temp/c6acae7-host-remediation/profile-dev-cert.pem`，勿改该既有文件。Rust 工具链的技术前置已闭合（安装验证 + smoke PASS）；BoringTun 同版本 checksum / `--offline --locked` 构建链已证明可构建；但 N1BDISC 的正式 vendor/lock/同产物 freeze 仍未开始——仍是 §七 第 1 步（ID 分配申请）与第 2 步（runner 实现）之前须另行处理的后续前置项。
+- **ID 分配已完成（2026-09-05 用户显式授权「授权分配」——仅 ID 分配，不含测量/设备命令/DryRun/Live）**：`AUTH-N1BDISC-PHYS1API26-20260905-0001` / campaign `N1BDISC-PHYS1API26-20260905-0001` / evidence `EV-N1BDISC-PHYS1API26-20260905-0001`；`attempt: initial`、`retry: N/A`，候选态未消费；正式授权登记见 [`docs/evidence/n1bdisc-authorization-2026-09-05-0001.md`](evidence/n1bdisc-authorization-2026-09-05-0001.md)（含授权状态 YAML、硬边界、失败代价披露与签名链）。据此 **§七 第 1 步（ID 分配申请）已完成**；§七 其余步骤（runner 实现、DryRun、Live、N1b r2 判据）仍须逐项用户授权，当前保持 host-only 边界。本节为唯一更新点，第一至八节原文不动。
+- **gate 3 静态审查待办**：`entry/src/main/ets/vpnextensionability/N1BDiscVpnExtensionAbility.ets` 三处 `:463` 锚在冻结编号下即指向空行（语义应为「至多一个在途 create()」，现行判据 :468），语义校正留 gate 3 裁决（终审第三轮存疑项，机械 +2 已保持编号基线一致）。

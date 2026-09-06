@@ -1,0 +1,25 @@
+{
+  apiType: 'stageMode',
+  // nativeLib.debugSymbol.strip: false — keep the packaged
+  // libs/arm64-v8a/libn1bdisc_probe.so byte-identical (sha256) to the probe
+  // artifact verified by probe/build.sh; hvigor's default strip rewrites the
+  // member during DoNativeStrip.
+  buildOption: {
+    nativeLib: {
+      debugSymbol: {
+        strip: false
+      }
+    }
+  },
+  targets: [
+    {
+      name: 'default',
+      runtimeOS: 'HarmonyOS',
+      config: {
+        deviceType: [
+          'phone'
+        ]
+      }
+    }
+  ]
+}
