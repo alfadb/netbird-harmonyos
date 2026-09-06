@@ -1,5 +1,7 @@
 # Linux Worker 非门控 API24 x86_64 Emulator 复跑交接
 
+> **⚠️ LEGACY / RETIRED（2026-09-05 登记）**：本文依赖的稳定链 `6.1.1.290` 与 Beta Emulator 链 `26.0.0.461` 已退役、本机不存在；当前活跃开发工具链已迁移为 CLT `26.0.0.821` / HarmonyOS SDK API 26 Release（唯一基线见 [`toolchain-baseline.md`](toolchain-baseline.md)）。本文仅作历史操作流程存档，正文路径与版本保持原样，**不得照文执行**；如需复跑须先按新基线重建环境并另行派发。
+
 最后核验：2026-08-11
 
 本文交接一次**非门控**的 N0(b) API 24 x86_64 phone Emulator 复跑：用户将切到此前已成功跑通 N0 的 Linux worker，按本文顺序执行只读检查、透明代理绕行、连通验证、runner selftest / dry-run 与一次非门控 full rerun。本文只描述复跑操作，**不改变任何 gate 状态**；N0 的 `reviewed-pass/pass` 结论、E8 `CLOSED`、物理设备禁令均不受影响。

@@ -1,6 +1,8 @@
 # 项目文档
 
-最后核验：2026-08-30
+最后核验：2026-09-05
+
+> **当前活跃开发工具链（2026-09-05 起）**：已迁移为 CLT `26.0.0.821` / HarmonyOS SDK `26.0.0.105`（API 26 **Release**），唯一版本基线见[工具链版本基线](toolchain-baseline.md)；Rust 工具链已安装验证（rustc/cargo 1.98.1、rustup 1.29.1、OHOS aarch64/x86_64 targets，登记同见基线），工具链 smoke（API 26 HAP、BoringTun OHOS）均 PASS，见[工具链 smoke 记录](toolchain-smoke-20260905.md)；N1BDISC 冻结判据的 SDK 锚点在 821 上的对账结论（9/9 PASS）见[N1BDISC SDK 锚点对账](n1bdisc-sdk-anchor-reconciliation-20260905.md)。
 
 本目录记录 `netbird-harmonyos` 当前阶段的环境调查、平台边界和实施建议。项目仍处于验证阶段；文档会明确区分已经观察到的现场事实、官方资料中的能力、建议方案和尚未完成的验证。
 
@@ -127,10 +129,17 @@
 - [N3 许可法律评估简报（供外部法律意见）](n3-legal-brief.md)
   - `pending-external-legal-opinion`：N3 硬前置、agent 不可代办；须用户取得书面可执行的法律结论（五问：根 LICENSE 目录例外效力、`combined/` 与 REUSE.toml 差异、BSD-3 侧 .proto 生成代码义务链、以参考实现为 oracle 再实现的衍生作品风险、HAP 分发的 NOTICE/SBOM）
   - 2026-08-31 由 `/tmp` 迁入仓库（易失位置）；与 N1b/DISC 完全并行，可即刻启动
-- [N1BDISC 发现 campaign 判据（r2，审查中）](n1b-disc-gate-plan.md)
-  - `criteria-r2-pending-independent-review`：**判据未冻结、不得测量、不得分配 AUTH/pair 或 evidence ID**
-  - 三轮跨厂商独立审查全部未通过（r0 2 fail / r1 3 fail / r2 2 fail）；r3 待修清单见交接文档
-- [会话交接（2026-09-01）：T0 决议落地 + DISC 三轮审查](session-handoff-2026-09-01.md)
+- [N1BDISC 发现 campaign 判据（r26，已冻结）](n1b-disc-gate-plan.md)
+  - `criteria-frozen-2026-09-02`（git `04cf222`）：判据已冻结（用户授权；第二十六轮三席跨厂商审查全 pass、0 blocker）；冻结 ≠ 授权——ID 分配与一切物理执行仍以用户逐项显式授权为前置
+  - 历史：26 轮审查轨迹（r0 2 fail / r1 3 fail / r2 2 fail 起，blocker 12→0）与逐轮终账见审查登记册 `docs/n1b-disc-r8-review-register.md`
+- [N1BDISC ID 分配授权登记（2026-09-05 · 0001，host-only）](evidence/n1bdisc-authorization-2026-09-05-0001.md)
+  - `AUTH-N1BDISC-PHYS1API26-20260905-0001` / campaign `N1BDISC-PHYS1API26-20260905-0001` / evidence `EV-N1BDISC-PHYS1API26-20260905-0001`：用户 2026-09-05 显式授权的 ID 分配登记（`attempt: initial`、`retry: N/A`，候选态未消费、全新无继承）
+  - 本次授权仅覆盖 ID 分配：测量、HDC/设备命令、tconn、DryRun、Live 及 N1b r2 判据均须逐项另行授权；当前仅允许 host-only（登记文档、spike 实现、host-only 验证）
+- [N1BDISC SDK 锚点对账（2026-09-05，9/9 PASS）](n1bdisc-sdk-anchor-reconciliation-20260905.md)
+  - 只读对账存档：冻结判据正文引用的 SDK/sysroot 锚点主张在 CLT `26.0.0.821` / SDK `26.0.0.105`（API 26 Release）实际内容上 9/9 类实测一致；非设备 evidence、不占用 evidence ID、未修改冻结判据
+- [N1BDISC 交接文档（2026-09-02 判据冻结后，最新交接）](n1b-disc-handoff-20260902.md)
+  - 判据已冻结、ID 分配申请尚未开始；当前状态、硬边界、治理结构、审查纪律与下一步顺序速查
+- [会话交接（2026-09-01，历史）：T0 决议落地 + DISC 三轮审查](session-handoff-2026-09-01.md)
   - r3 待修 16 项、主会话五处错误登记、派发规模与评审席占用约束、待决策三项
 - [开放义务台账](open-obligations-ledger.md)
   - `ADJ-T0-N1B-20260831-0001` §七 新设：登记已由治理设定、尚未被任何门关闭的 §二.2 / E4 义务（首批 OB-01..OB-09）
@@ -164,6 +173,10 @@
   - 当前 Pod 的操作系统、持久化边界和已安装工具链
   - HarmonyOS 官方 Linux 支持边界及 2026-07-16 Emulator 启动实测
   - 当前 HOME 恢复入口、环境维护建议和待验证清单
+- [工具链版本基线（当前活跃开发）](toolchain-baseline.md)
+  - 唯一版本基线：CLT `26.0.0.821` / SDK `26.0.0.105`（API 26 Release）与 Rust（rustc/cargo 1.98.1、rustup 1.29.1、OHOS aarch64/x86_64 targets，前缀 `$HOME/rust`）的在用版本、绝对路径、安装归档与关键二进制校验值；已退役链路 `6.1.1.290` / `26.0.0.461` 边界
+- [工具链 smoke 记录（2026-09-05）](toolchain-smoke-20260905.md)
+  - API 26 HAP smoke 与 BoringTun OHOS smoke 均 PASS；Rust 工具链安装验证的运行证据，BoringTun 同版本 checksum / `--offline --locked` 构建链可构建的实测记录
 - [HarmonyOS 工具链运行手册](toolchain-runbook.md)
   - Pod 重建和新终端的工具链健康检查顺序
   - Emulator 启停、Beta HDC 连接、分层验收和长稳探测

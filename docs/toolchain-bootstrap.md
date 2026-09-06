@@ -1,6 +1,6 @@
 # HarmonyOS CLI 登录、工具链与依赖下载
 
-最后核验：2026-07-16
+最后核验：2026-09-05
 
 本文记录 HarmonyOS Command Line Tools 首次获取、SDK 与 Emulator 管理、
 公开依赖下载及后续自动化的边界。
@@ -8,6 +8,8 @@
 结论按“官方资料确认、当前实测、推荐流程、尚未验证”区分。
 完成 bootstrap 后，日常恢复、Emulator 生命周期、HDC 验收和故障取证以
 [HarmonyOS 工具链运行手册](toolchain-runbook.md)为准。
+当前基线（Command Line Tools 26.0.0.821，API 26 Release）与冻结判据登记在
+[工具链基线](toolchain-baseline.md)，仓库侧只读校验入口为 `scripts/check-toolchain.sh`。
 
 ## 官方资料确认
 
@@ -60,9 +62,7 @@ HarmonyOS Command Line Tools 的官方入口包括使用说明和下载中心：
 - `Emulator -config`：配置默认实例路径、镜像路径或代理等。
 - `Emulator -license accept`：接受命令行展示的相关许可。
 
-按官方文档，工具位于带 Emulator 的 Command Line Tools 包中。规划脚本时应通过
-`HOME` 下的绝对路径调用工具，并让镜像、配置和缓存留在持久目录中。
-官方参数形态如下；路径变量使用本项目当前独立的 Emulator 链路，不能改成不含 Emulator 的稳定 `current`：
+按官方文档，工具位于带 Emulator 的 Command Line Tools 包中；26.0.0.821 包内含 Emulator 26.0.0.400。规划脚本时应通过 `HOME` 下的绝对路径调用工具，并让镜像、配置和缓存留在持久目录中。官方参数形态如下；`emulator-current` 只是交互入口，无人值守脚本应改用绝对版本目录 `$HOME/harmonyos/command-line-tools/26.0.0.821`：
 
 ```bash
 EMULATOR_ROOT="$HOME/harmonyos/emulator-current"
@@ -125,23 +125,33 @@ Huawei 工具包、随包 SDK、Emulator 镜像和用户级构建缓存适合放
 
 ### 官方制品与本地指纹
 
-以下两个归档均由授权人员通过官方入口取得；“官方”描述来源渠道和版本性质，文件大小与 SHA-256 是本次落盘后的本地实测值，不表述为华为公开校验值：
+当前基线是单条 26.0.0.821 Release 链路。该归档由授权人员通过官方入口取得；
+其文件名、大小、SHA-256、获取日期与授权记录统一登记在[工具链基线](toolchain-baseline.md)，本文不重复指纹值。
+2026-09-05 现场核验：包已安装到 `$HOME/harmonyos/command-line-tools/26.0.0.821`，
+包内 `version.txt` 实测 `releaseType: release`、hvigor 6.26.4、ohpm 26.0.0.630、
+`HarmonyOS SDK: HarmonyOS 26.0.0 Release（include Ohos_sdk_public 26.0.0.105 (API Version 26 Release)）`、
+`apiVersion: 26`；另实测随包 Node.js 24.14.1、HDC 3.2.0f（`$HARMONYOS_STABLE_HDC` 与 `$HARMONYOS_EMULATOR_HDC` 同一二进制）、
+Emulator 26.0.0.400。构建与 Emulator 现由同一条链路承担，`current` 与
+`emulator-current` 均指向该版本目录，仅作交互入口。
 
-| 渠道 | 文件 | 大小（bytes） | 本地 SHA-256 | 安装目录 |
+### 历史已退役：双链归档（2026-07 获取，2026-09 初退役）
+
+在 2026-09-05 之前，Pod 安装并维护下列两个归档；以下文件大小与 SHA-256 是当时落盘后的本地实测值，仅用于解释引用旧归档的历史 evidence 与内部制品库留存，不描述当前链路：
+
+| 渠道 | 文件 | 大小（bytes） | 本地 SHA-256 | 安装目录（已移除） |
 | --- | --- | ---: | --- | --- |
-| 官方稳定包 | `commandline-tools-linux-x64-6.1.1.290.zip` | 2141528295 | `292a86fe0cdd28088d92be789649f2950dca915540e1d1261532edd6c7eb424b` | `$HOME/harmonyos/command-line-tools/6.1.1.290` |
-| 官方 Beta 包 | `commandline-tools-linux-x64-26.0.0.461.zip` | 2371939057 | `b046da0a1a06fe13b3d82d198738abc54788d79c6c9d07c36617ec7fc31a3b3b` | `$HOME/harmonyos/command-line-tools/26.0.0.461` |
+| 官方稳定包（已退役） | `commandline-tools-linux-x64-6.1.1.290.zip` | 2141528295 | `292a86fe0cdd28088d92be789649f2950dca915540e1d1261532edd6c7eb424b` | `$HOME/harmonyos/command-line-tools/6.1.1.290` |
+| 官方 Beta 包（已退役） | `commandline-tools-linux-x64-26.0.0.461.zip` | 2371939057 | `b046da0a1a06fe13b3d82d198738abc54788d79c6c9d07c36617ec7fc31a3b3b` | `$HOME/harmonyos/command-line-tools/26.0.0.461` |
 
-稳定链路 `$HOME/harmonyos/command-line-tools/current` 指向 `6.1.1.290`。
-该归档实测包含 Node.js 18.20.1、ohpm 6.1.2.285、hvigorw 6.24.3、HDC 3.2.0d，以及 HarmonyOS/OpenHarmony SDK 6.1.1/API 24，但不含 Emulator。
-
-Beta 包作为 Emulator 链路独立安装，`$HOME/harmonyos/emulator-current` 指向 `26.0.0.461`。
-该归档实测包含 Node.js 24.14.1、Emulator 26.0.0.200、HDC 3.2.0e 和完整 API 26 Beta 工具链，不替代稳定构建链路。
+当时稳定链路 `current` 指向 `6.1.1.290`（实测含 Node.js 18.20.1、ohpm 6.1.2.285、hvigorw 6.24.3、HDC 3.2.0d 和 HarmonyOS/OpenHarmony SDK 6.1.1/API 24，不含 Emulator）；
+Beta 包由 `emulator-current` 指向 `26.0.0.461`（实测含 Node.js 24.14.1、Emulator 26.0.0.200、HDC 3.2.0e 和完整 API 26 Beta 工具链）。
+截至 2026-09-05 现场核验，两个版本目录已从本机移除，两条软链接改指 `26.0.0.821`；
+旧链时代“稳定 HDC 与 Emulator HDC 不混用”等双链纪律随之失效。
 
 ### 网页授权与协议处理
 
 2026-07-16，用户已在官方网页完成人工 Beta 试用协议处理，并明确阅读同意 Emulator 展示的 SDK License Agreement 和 Software License Agreement。
-该记录只描述本次授权人员完成的交互，不代表可跳过未来版本、镜像或账号再次展示的协议，也不扩大缓存、复制、团队使用或 CI 分发权利。
+该记录只描述当次授权人员完成的交互，不代表可跳过未来版本、镜像或账号再次展示的协议，也不扩大缓存、复制、团队使用或 CI 分发权利。
 文档未保存账号、Cookie、令牌、临时下载 URL 或协议文本副本。
 
 ### 持久化和系统边界
@@ -149,7 +159,7 @@ Beta 包作为 Emulator 链路独立安装，`$HOME/harmonyos/emulator-current` 
 当前 Pod 的 `HOME` 位于持久存储，可用于保存人工下载的主包、解压后的工具、
 随包 SDK、Emulator 镜像、设备配置和依赖缓存。
 根文件系统是易失的 overlay；在运行中手工执行 `apt` 的结果可能随 Pod 重建丢失。
-本轮对 Node、两套 HDC 和 Emulator 二进制的动态库检查均可解析，没有执行 `apt` 安装。
+2026-09-05 健康检查对随包 Node、HDC 和 Emulator 二进制的动态库检查全部可解析，没有执行 `apt` 安装。
 Pod 重建后仍须重新运行健康检查；需要长期存在的额外系统库应固化到基础镜像，而不是依赖当前 overlay。
 
 建议的持久路径均以 `$HOME` 为根，例如：
@@ -168,32 +178,39 @@ $HOME/.npm/
 实际目录应以工具包结构和各工具的受支持配置项为准；
 仓库不应承载主包、SDK、镜像、依赖缓存或任何凭据。
 
-### Emulator 镜像与启动结果
+### Emulator 镜像与实例现状（2026-09-05）
 
-2026-07-16 当前 Pod 实测：
+- 已安装镜像仍只有 2026-07-16 安装的 `HarmonyOS 6.1.1(24)`（software `6.1.0.125`），位于 `$HOME/harmonyos/emulator-images/system-image/HarmonyOS-6.1.1`。
+- `$HOME/harmonyos/emulator-instances/` 当前不存在，本机没有任何实例；helper 默认实例名仍为 `netbird_api24_phone`，但其 `.ini` 已随实例退役移除。
+- 没有下载或安装任何 API 26 镜像；Emulator 26.0.0.400 能否使用既有 `HarmonyOS 6.1.1` 镜像尚未验证（列入「尚未验证」）。
+- 因此 26.0.0.821 链路下尚未执行过任何 Emulator 启动、HDC 连接或 guest 验收；首次启动属于待办验证，不是既成事实。
+
+### 历史实测：Emulator 首次启动与 HDC 退化（2026-07-16，旧链）
+
+以下结果录制于旧 Beta 链（Emulator 26.0.0.200 + `HarmonyOS 6.1.1` 镜像 + `netbird_api24_phone` 实例），保留用于解释同期 evidence：
 
 - 已把 `HarmonyOS 6.1.1(24)`、software `6.1.0.125` 镜像安装到 `$HOME/harmonyos/emulator-images`。
 - 已在 `$HOME/harmonyos/emulator-instances` 建立 `netbird_api24_phone` 实例，并使用 KVM、`-noWindow` 成功启动。
 - guest 已上报 `boot.completed`；Emulator HDC 3.2.0e 经 `127.0.0.1:10000` 初始显示 `Connected`，并成功读取设备参数 `const.product.os.dist.name=HarmonyOS`。
 - 运行约 25 分钟后，HDC target 仍显示 `Connected`，TCP 连接和 heartbeat 仍保持，但 `hdc shell` RPC 连续超时。长期 HDC shell 以及安装、调试稳定性因此不视为验收通过。
-- 已排除残留 host client 和 host client/server 版本错配；当前问题范围集中到 Emulator guest HDC daemon/`express_bridge` 数据面。同期 `watchdog_service` 异常仅作为伴随信号记录，尚未证明与 RPC 超时存在因果关系。
-- 默认 bridge 端口 5555 未能连接。显式 `-hdcport` 在当前版本只接受 10000-16555，10000 实测成功。
-- 稳定 HDC 3.2.0d 与 Emulator HDC 3.2.0e 不混用；连接 Emulator 时使用 Beta 包随附的 HDC。
+- 已排除残留 host client 和 host client/server 版本错配；当时问题范围集中到 Emulator guest HDC daemon/`express_bridge` 数据面。同期 `watchdog_service` 异常仅作为伴随信号记录，尚未证明与 RPC 超时存在因果关系。
+- 默认 bridge 端口 5555 未能连接。显式 `-hdcport` 在该版本只接受 10000-16555，10000 实测成功。
+- 当时稳定 HDC 3.2.0d 与 Emulator HDC 3.2.0e 不混用；该纪律随双链退役失效，当前链路只有一个 HDC 3.2.0f。
 
-这是一次有日期的首次启动和初始连接成功验证，不表示长期数据面稳定，也不替代 Pod 重建后的健康检查。本轮验收后已正常停止实例，镜像、实例配置和日志保留；这只记录本轮操作结果，不把停止状态写成长期事实。
+这是一次有日期的首次启动和初始连接成功验证，不表示长期数据面稳定。本轮验收后已正常停止实例；后续实例已随双链退役移除，镜像保留至今。
 
 ### HOME 恢复入口
 
 ```bash
 source "$HOME/harmonyos/env.sh"
+"$HOME/.init/harmonyos-check.sh"
 tmux new-session -d -s harmonyos-emulator-run "$HOME/harmonyos/bin/emulator-start"
 "$HOME/harmonyos/bin/emulator-connect"
 "$HOME/harmonyos/bin/emulator-stop"
-"$HOME/.init/harmonyos-check.sh"
 ```
 
-新启动的 zsh 默认由 Volta 提供 Node.js 24.15.0，并通过 `.zshrc` 自动加载 `env.sh`；自动加载只注入 HarmonyOS CLI、SDK、稳定 HDC 和 Emulator 路径，不替换默认 Node.js。稳定 `bin/hvigorw`/`bin/ohpm` wrapper 调用时局部使用随包 Node.js 18.20.1，Beta wrapper 局部使用随包 Node.js 24.14.1。bash 或其他非 zsh shell 可手动 `source` 该脚本，同样不会替换其 Node.js。加载环境脚本不会下载或启动 Emulator。
-恢复时使用上面的 `tmux` 命令后台启动实例，再显式运行连接或停止命令；健康检查不下载、不升级、不安装系统包，也不自动启动 Emulator。
+新启动的 zsh 默认使用系统 Node.js（当前实测 v24.20.0），并通过 `.zshrc` 自动加载 `env.sh`；自动加载只注入 HarmonyOS CLI、SDK、HDC 和 Emulator 路径，不替换默认 Node.js。`bin/hvigorw`/`bin/ohpm` wrapper 调用时局部使用 26.0.0.821 随包 Node.js 24.14.1。bash 或其他非 zsh shell 可手动 `source` 该脚本，同样不会替换其 Node.js。加载环境脚本不会下载或启动 Emulator。
+恢复时先跑健康检查，再使用上面的 `tmux` 命令后台启动实例，最后显式运行连接或停止命令；实例不存在时 `emulator-start` 失败属预期，需先完成镜像/实例准备。健康检查不下载、不升级、不安装系统包，也不自动启动 Emulator。
 
 ### VNC 交互入口
 
@@ -211,7 +228,7 @@ SSH 与 VNC 的访问控制、会话隔离和审计仍由运行环境管理方�
 
 本节负责制品准备与版本安装；安装完成后的日常操作以
 [HarmonyOS 工具链运行手册](toolchain-runbook.md)为准。
-以下流程是后续重装、升级或 CI 制品准备的建议。本轮人工获取、协议处理、指纹记录、双版本安装、镜像安装和启动验证已经完成，不应继续列为当前缺口。
+以下流程是后续重装、升级或 CI 制品准备的建议。历次人工获取、协议处理、指纹记录、双链安装、镜像安装和启动验证已完成；单条 26.0.0.821 Release 链的安装与健康检查已于 2026-09-05 完成，不应继续列为当前缺口。
 
 ### 阶段一：人工 bootstrap
 
@@ -223,8 +240,9 @@ SSH 与 VNC 的访问控制、会话隔离和审计仍由运行环境管理方�
 4. 选择与 Linux 宿主架构、目标版本相符的主包，下载到 `$HOME` 持久目录。
 5. 记录官方页面显示的版本、文件名、下载日期和适用平台。
 6. 对落盘文件计算并记录 SHA-256；如官方提供校验值，同时核对官方值。
-7. 按许可和组织政策判断是否允许上传到访问受控的内部制品库。
-8. 若不允许内部再分发，则保留人工获取步骤，并只自动化后续本地处理。
+7. 把上述获取与指纹记录登记到[工具链基线](toolchain-baseline.md)。
+8. 按许可和组织政策判断是否允许上传到访问受控的内部制品库。
+9. 若不允许内部再分发，则保留人工获取步骤，并只自动化后续本地处理。
 
 阶段一不应采集 Cookie、临时 URL、浏览器 profile 或账号口令。
 内部制品库也不能改变上游许可；上传前必须确认缓存、复制和团队使用权限。
@@ -234,15 +252,16 @@ SHA-256 用于确认文件一致性，不代表来源授权或许可审查已经
 
 在主包已经通过合规渠道进入受控存储后，自动化可执行：
 
-1. 从持久目录或许可允许的内部制品库取得固定版本制品。
+1. 从持久目录或许可允许的内部制品库取得固定版本制品，并以[工具链基线](toolchain-baseline.md)登记的指纹为准。
 2. 校验文件名、版本、大小和预先登记的 SHA-256。
-3. 解压到 `$HOME` 下的版本目录；稳定构建链路和 Emulator 链路分别切换 `current` 与 `emulator-current`。
-4. 检查随包 `sdk` 目录及关键工具版本，不调用旧 `sdkmgr` 下载 SDK。
-5. 在许可允许且命令支持的范围内处理 Emulator 展示的许可；网页或命令再次展示新协议时转由授权人员确认。
-6. 使用 `Emulator -imageList` 检查镜像，再按固定标识安装或选择镜像。
-7. 分别配置 ohpm 与 npm/pnpm 的公开 registry；私仓凭据按需单独注入。
-8. 运行 `ohpm install --all`、`hvigorw` 依赖准备和确定的构建任务。
-9. 输出版本、校验和、依赖锁定状态及构建结果，但过滤凭据和敏感路径。
+3. 解压到 `$HOME` 下新的不可变版本目录；切换 `current` 与 `emulator-current`（交互入口），并把活跃脚本与冻结判据中的绝对版本路径同步更新到新目录——只切链接不算完成升级。
+4. 检查包内 `version.txt`、`sdk` 目录及关键工具版本（hvigor、ohpm、HDC、随包 Node、Emulator），不调用旧 `sdkmgr` 下载 SDK。
+5. 运行 `scripts/check-toolchain.sh` 与 `$HOME/.init/harmonyos-check.sh` 做只读校验；两者任一失败即停止。
+6. 在许可允许且命令支持的范围内处理 Emulator 展示的许可；网页或命令再次展示新协议时转由授权人员确认。
+7. 使用 `Emulator -imageList` 检查镜像，再按固定标识安装或选择镜像；当前本机只有 `HarmonyOS 6.1.1` 镜像、没有任何 API 26 镜像和实例，API 26 镜像的获取与安装属于未完成事项。
+8. 分别配置 ohpm 与 npm/pnpm 的公开 registry；私仓凭据按需单独注入。
+9. 运行 `ohpm install --all`、`hvigorw` 依赖准备和确定的构建任务。
+10. 输出版本、校验和、依赖锁定状态及构建结果，但过滤凭据和敏感路径。
 
 自动化应在版本或校验不一致时失败，不应静默升级工具包、SDK 或镜像。
 镜像许可、账号限制或 DevEco Studio 前置条件无法满足时，应明确停止并转人工处理。
@@ -265,16 +284,18 @@ SHA-256 用于确认文件一致性，不代表来源授权或许可审查已经
 
 以下事项仍未在当前 Pod 中形成完整证据，不应写成已具备能力：
 
-- `/dev/dri`、硬件图形加速及有窗口模式；本轮仅验证 KVM `-noWindow`。
+- Emulator 26.0.0.400 与既有 `HarmonyOS 6.1.1`(API 24) 镜像的兼容性；当前链路下没有任何 API 26 镜像或实例，26.0.0.821 链路尚未执行过一次 Emulator 启动。
+- API 26 镜像的获取、许可处理、安装、实例创建和首次启动闭环。
+- 旧链实测的约 25 分钟后 shell RPC 连续超时是否在 26.0.0.400 上复现；定位仍需 HDC 数据面的可复现时长测试、完整日志归档和上游 Emulator/HDC 版本对比。
+- `/dev/dri`、硬件图形加速及有窗口模式；历轮仅验证 KVM `-noWindow`。
 - Emulator gRPC 的端口、认证、生命周期控制和并发限制。
-- HDC 数据面的可复现时长测试、完整日志归档和上游 Emulator/HDC 版本对比；需用这些证据定位约 25 分钟后出现的 shell RPC 连续超时。
 - 最小 HAP 的构建、调试签名、安装、启动、调试和日志采集闭环及其持续稳定性。
 - NetBird Go 核心交叉编译，以及 NAPI、native fd、Network Kit 和 VPN Extension 的模拟器行为。
 - 真机连接、设备 SysCap、VPN 行为、性能和稳定性。
 - 正式签名、审核、上架、更新流程及相关角色划分。
 - 官方 ohpm registry 与工程锁定版本下 npm/pnpm、hvigorw 的代理、限速、离线缓存和可复现行为。
 - 内部制品库保存主包、SDK 或镜像是否满足对应许可与组织合规要求。
-- Debian 13 的长期兼容性和官方支持边界；官方 Linux 宿主要求以 Ubuntu 为基线，本次成功不构成 Debian 官方支持。
+- Debian 13 的长期兼容性和官方支持边界；官方 Linux 宿主要求以 Ubuntu 为基线，历次成功不构成 Debian 官方支持。
 
 后续验证仍应记录工具版本、官方来源 URL、执行日期、非敏感命令输出和 SHA-256。
-涉及网页授权或许可变化时，应重新由授权人员确认，不能仅沿用本次记录。
+涉及网页授权或许可变化时，应重新由授权人员确认，不能仅沿用历史记录。
