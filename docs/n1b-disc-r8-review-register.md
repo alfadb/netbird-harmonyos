@@ -1021,3 +1021,10 @@ N1BDISC 判据（docs/n1b-disc-gate-plan.md，git 04cf222，1784 行）经用户
 - **可 freeze 状态恢复**：重审结论「重审通过后可恢复可 freeze 状态」已履行——判据状态行恢复为可 freeze（`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`）。
 - **变更面**：原 `:368`（inst 字段句）+ 原 `:364` fd ledger 括注（「每次采样两个路径各一」）+ 原 `:383` canonical 第三键（「同刻同 role 按 `inst` 升序」）+ 文首修订登记块 + 状态行。
 - **行号锚 +2 位移事实**：CC-1 登记块在文首 `:10` 后插入 2 行，致冻结版 `:10` 以下全部行号 +2 位移（冻结 1784 行 → 现 1786 行）；冻结编号引用在登记块内以「原 `:NNN`（现 `:NNN`）」双标注，spike 交付物判据行号锚已按 CC-1 后编号同步重扫（27 文件、701 处锚；清单存档：`docs/evidence/n1bdisc-anchor-plus2-manifest-20260905.md`）。
+
+## CC-2 判据变更记录（2026-09-06）
+
+- **触发**：首对 pair（`AUTH-N1BDISC-PHYS1API26-20260905-0001`）gate 5 三探针实测设备软件版本 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` ≠ 原冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（设备于 2026-08-30 G0 gate-5 实测后 OTA 升级）——按判据 gate 5 条款（`:1436`）强制裁 blocked record + 退役该 pair（blocked record `~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`，SHA-256 `d2f59da0…c7fbd`）。用户 2026-09-06 显式授权「重绑新元组继续」。
+- **变更面**：判据 `:268` 冻结元组软件版本重绑（7.0.0.102(SP8C00E102R7P3) → 7.0.0.105(SP6C00E105R7P3)）+ `:269` 版本核对警示补印证句 + `:1436` gate 5 历史差异例更新 + 状态行 + **文末追加登记块**（沿本登记册文末先例，避免文首插入造成第三次行号锚位移；判据 1786→1790 行、`:10`-`:1786` 零位移，首对实现 723 处锚全部保持有效）。
+- **重审（deepseek 席，2026-09-06，跨厂商隔离）**：**0 blocker / 0 major / 2 minor，通过**。m-1（`:268` 括注「文首」应为「文末」，1 字零位移）已修；m-2（API/arch 为「历史实测沿用+OTA 性质推断」非本次复测，与 rebind8 实测纪律的张力）已在判据 CC-2 块显式登记。观察项 o-1：`docs/n1b-gate-plan.md:25`（N1b 正式门）仍冻结 7.0.0.102，设备 OTA 后同样漂移，须经其自身判据变更流程重绑（非 CC-2 范围，登记待办）。
+- **结论**：CC-2 经跨厂商隔离重审通过，新元组 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` / API 26 / aarch64 / arm64-v8a 可按判据恢复可 freeze/测量状态；首对 pair 退役不撤销；新治理须新 AUTH/pair/evidence 三 ID 并自 gate 1 重走门序列（实现资产与 freeze-1 符合性结论可被新治理引用）。

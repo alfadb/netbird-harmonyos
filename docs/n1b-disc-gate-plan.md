@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-05 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1 变更经跨厂商隔离重审通过，可 freeze 状态已恢复——见下方修订登记）
+最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -265,8 +265,8 @@ N1BDISC 是按 [`ADJ-T0-N1B-20260831-0001`](native-nx-n1b-adjudication.md) §四
 
 - **证据身份**（决议 §4.2，`docs/native-nx-n1b-adjudication.md:113`）：授权 `AUTH-N1BDISC-PHYS1API26-<YYYYMMDD>-0001`；campaign `N1BDISC-PHYS1API26-<YYYYMMDD>-0001`；evidence `EV-N1BDISC-PHYS1API26-<YYYYMMDD>-0001`。attempt `initial`、retry `N/A`、单次执行不重试不换 ID（沿 G0 campaign 纪律，`docs/g0-go-arm64-physical-probe.md:162-166`）。
   日期在正式授权时冻结。**不得与 N1b 共用同一 AUTH/pair。**
-- **环境**：物理冻结元组 HarmonyOS / PLA-AL10 / `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` / API 26 / aarch64 / arm64-v8a——pre-E8 native 物理例外（`docs/native-nx-governance.md:53`）：独立 AUTH/pair、冻结元组与输入哈希、白名单 HDC、单次执行、双向不外推、禁止性能/长稳/渠道/产品外扩。
-  **版本核对警示**：E3 0002 授权记录的同一设备版本为 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:15`），与本冻结值不同；目标绑定门（流程第 5 门）必须实测复核完整系统版本，漂移即 `blocked` 停。
+- **环境**：物理冻结元组 HarmonyOS / PLA-AL10 / `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`（CC-2 变更，2026-09-06 用户授权重绑；原冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` 由首对 pair 于 gate 5 实测漂移退役，见文末 CC-2 登记块） / API 26 / aarch64 / arm64-v8a——pre-E8 native 物理例外（`docs/native-nx-governance.md:53`）：独立 AUTH/pair、冻结元组与输入哈希、白名单 HDC、单次执行、双向不外推、禁止性能/长稳/渠道/产品外扩。
+  **版本核对警示**：E3 0002 授权记录的同一设备版本为 `PLA-AL10 7.0.0.100(SP8C00E32R7P2)`（`docs/evidence/e3-physical-preflight-authorization-2026-08-14-0002.md:15`），与本冻结值不同；目标绑定门（流程第 5 门）必须实测复核完整系统版本，漂移即 `blocked` 停。**CC-2 印证（2026-09-06）**：首对 pair 即于该门实测 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` 漂移退役——本警示条款由此从预警变为已发生事实，重绑后门 5 仍逐次实测复核。
 - **实现载体**：新独立目录 `spikes/n1b-disc-phys-hap/`（ArkTS VpnExtensionAbility + Rust/NAPI 探针 + host runner），不与任何既有 spike 共用代码。bundle 名冻结 `cn.alfadb.netbird.n1bdisc`（沿 `cn.alfadb.netbird.*` 惯例；HDC 白名单与 faultlogger 匹配均用此名）。
 - **使用边界**（决议 §4.4，`docs/native-nx-n1b-adjudication.md:134-136`）：DISC 事实只作为 N1b r2 判据的预注册设计输入，不构成 fd 合同、数据面、E4 或任何门的功能结论。`verdict: pass` 不得在任何后续文档中被引用为平台行为结论（`docs/evidence-schema.md:90`）。仅当 DISC 达到 `reviewed-pass` 且目标元组、VpnConfig、进程模型、SDK 与相关哈希与 N1b 一致时，其事实方可进入 N1b 预注册；**禁止「DISC 已见故 N1b 跳过复测」**。
 
@@ -1433,7 +1433,7 @@ N0 决议五项停止条件沿用如下；出现任一即停止并返回 T0：
 | 2 候选 ID 消费审计 audit-1 | 仓外双文件 + `.sha256`（AUTH-N1BDISC-… 候选 pair） |
 | 3 freeze + 静态审查 | 判据 freeze；reviewer 静态审查（符号清单誊录核对、**实现配置字面 == 本文 MR 表字面（不一致即不得 freeze）**、静态断言 A1-A12（r10 A9、r18/r19 A10/A11、r23 A12[r25 扩员五输出]）、时间盒表核对；**r4 第二趟 S1 新增：`Fault_Type` 候选集收敛前置——若届时已能取得目标元组的一条真实 faultlogger 文本，须据此把候选集收敛为实测字面并重新提交独立审查；若取不到，则以「死亡事实记录（证据向量）」节冻结候选集执行并在证据中登记该未实测依赖（r9：原「以死因分类节 S1 兜底出口执行」及其行 4 (iii)/行 5 分岔随死因表删除——冻结前候选集收敛义务本身保留，域外字面按该节证据规则 5 记 `other:<原值逐字>`、不驱动 fail）**） |
 | 4 host-prep `tconn` + 一次内存级 `list targets` | 同（窄例外沿用） |
-| 5 `-TargetBindingConfirm` | 3 白名单探针；**完整系统版本实测复核**（E3 记录 7.0.0.100 与冻结值 7.0.0.102 的差异在此裁决）；漂移即 blocked record + 退役 |
+| 5 `-TargetBindingConfirm` | 3 白名单探针；**完整系统版本实测复核**（历史差异例：E3 记录 7.0.0.100；首对 N1BDISC pair 2026-09-06 于本门实测 7.0.0.105 漂移退役、触发 CC-2 重绑——完整系统版本以本门逐次实测为准）；漂移即 blocked record + 退役 |
 | 6 ready freeze draft | 绑定 confirmation record |
 | 7 reviewer record | `n1bdisc-ready-freeze-review`（0 blocker / 0 major） |
 | 8 最终 ready freeze | 绑定 clean HEAD、runner bytes、signed HAP/profile/cert、`.so` 成员 hash、符号清单、配置矩阵、全部外部输入 |
@@ -1784,3 +1784,7 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
   - **F9 存在、措辞不同（规范稿为概括句）**：「runner 观测窗」到点收口规则「**无死亡证据**（进程仍存活或状态不可判）→ `fail`（探针未完成预注册采集；525 s > 467 s 协议上界，存活未完成不是平台事实）」+ PRE/POST 求值规则 (2) 适用前提句，以现文档为准。
  (f) **其余 r9 裁量**：(i) `unattributed` **直接删除、不做改名保留**——席 B 建议改名 `unobservable(cause=death-cause-indeterminate)`，但七分量向量中不存在「死亡原因」字段，该 cause 无处落脚，保留反而诱导实现者再造合成字段；此处与席 B 建议相左，请审查席挑战；(ii) `marker_tail_state` 阈值沿用 r8 Y3 已冻结的 25000 ms 数值、取值理由改写为「单个最长合法阶段的合法时长上界」并解除与任何 fail 判定的耦合（原「置位则行 2 不命中」及 27000 比较论证随表删除）；
  (iii) F1 第 3 支「marker 序列无矛盾」守卫为席 B 补充，本轮照采；(iv) `destroy_call_state` 本轮仅占位（分量名与「互不推导」纪律）——**r9 第四步已在正文落地五态表与 worker 返回时序三分带（见「死亡事实记录（证据向量）」节），本括注原「五态定义属后续工作包、本文件暂无该字段取值域」的表述随之失效**；(v) 原行 4 (ii) 预期成功终态的法理（E3 先例）保留为窄 fail 闭集的正面理由；(vi) 「字段域缺口」一词仅在冻结解释句（席 A 逐字）中出现，不构成对判别方法 (1) 的改写。
+
+---
+
+> **2026-09-06 判据变更 CC-2（首对 pair gate 5 元组漂移触发，用户授权重绑；登记续于文末——沿审查登记册文末追加先例，避免文首插入造成第三次行号锚位移；文首状态行指向本块）**：首对 pair（`AUTH-N1BDISC-PHYS1API26-20260905-0001`，授权登记 `docs/evidence/n1bdisc-authorization-2026-09-05-0001.md`）于 gate 5 三探针实测设备软件版本 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` ≠ 原冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（设备于 2026-08-30 G0 实测 7.0.0.102 后 OTA 升级）——按本判据「目标绑定门」条款（`:1436`）裁 blocked record + 退役该 pair（blocked record：`~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`，SHA-256 `d2f59da0a66d9357e59fdcae47b390f3e8780e873a56f2a3267955f3665c7fbd`）。用户于 2026-09-06 会话内显式授权「重绑新元组继续」。变更面：`:268` 冻结元组软件版本字面（`7.0.0.102(SP8C00E102R7P3)` → `7.0.0.105(SP6C00E105R7P3)`）+ `:269` 版本核对警示补 CC-2 印证句 + `:1436` gate 5 历史差异例更新 + 本登记 + 状态行；**行号均按 CC-1 后现行编号（本块文末追加，`:1786` 以下零位移）**。**除设备侧元组外本判据的其余冻结面不变**：API 26 / aarch64 / arm64-v8a 不变——**CC-2 重审 m-2 登记**：此三者为「沿同设备历史实测沿用 + build 级 OTA 性质推断」，本次 gate 5 未复测（gate 5 白名单仅三探针、不得扩）；arch 为硬件属性不可经 OTA 改变，API level 绑定主版本 7.0.0 不变；与 rebind8「实测不从 build 推断」纪律的表面张力登记于案，不阻塞；SDK/sysroot 锚点（`:309` 起，26.0.0.821 实测对账 9/9 PASS，见 `docs/n1bdisc-sdk-anchor-reconciliation-20260905.md`）为 SDK 侧、与设备小版本无关；syscall 闭表、marker 字面集、时间盒表、MR 表、HDC 白名单、faultlogger 候选集与 13 门流程均不变。**新元组的设备侧行为依赖（watchdog / faultlogger 格式 / loader 接受性等）本判据原即以实测为目的、不预置结论**；Fault_Type 候选集仍未实测收敛（gate 3 条款原样适用，未实测依赖随新 pair 证据登记）。**本变更须跨厂商隔离重审通过后方可按新元组恢复可 freeze/测量状态；首对 pair 退役不因本变更撤销；新治理须新 AUTH/pair/evidence 三 ID 并从 gate 1 重走门序列**（实现资产与首对 freeze-1 符合性结论可被新治理引用）。
