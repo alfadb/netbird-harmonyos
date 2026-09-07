@@ -1,35 +1,29 @@
 # -*- coding: utf-8 -*-
-"""n1bdisc_run — N1BDISC host runner CLI 主入口（组装 FSM/HDC/death/verdict）。
+"""n1bdisc_run — N1BDISC host runner CLI 薄转发入口（正式 CLI 在 n1bdisc_cli）。
 
-权威规格：``docs/n1b-disc-gate-plan.md``（只读冻结）。host-only：本增量不实现真实
-hdc transport——``--dryrun`` 以 fake-hdc 为唯一 "hdc" 形态（HDC0，规格 :1771 门 11
-口径：``is_evidence=false``、HDC0、integrity empty）；``--live`` 仅保留参数骨架并
-**显式拒绝执行**。
+权威规格：``docs/n1b-disc-gate-plan.md``（只读冻结）。CLI 生产路径统一收敛到
+:mod:`n1bdisc_cli`（``--live`` 冻结门 + ``--dryrun`` 同一 ``run_campaign``
+engine，见其模块 docstring）；本模块 ``main`` 只做薄转发，``--help`` 语义与
+退出码以 :mod:`n1bdisc_cli` 为准。既有派生 helpers（``run_dryrun_campaign`` /
+``derive_and_judge`` / ``build_record`` / ``run_selftests``）保留给基线单测与
+派生层复用，**不再是任何 CLI 生产路径**。
 
-用法::
+基线单测仍直接使用本模块 helpers（test_fsm/test_platform/test_engine）::
 
-    # DryRun（gate 10-13 形态：selftests → DryRun 解析 → verdict → JSON 记录）
-    PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario happy
-    PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario pre-only
-    PYTHONUNBUFFERED=1 python3 runner/n1bdisc_run.py --dryrun --scenario no-live-fd
-    # gate 3 整改反例剧本（B1/B2/B3/B4/B5）：join-bogus/d8b-bogus 预期 fail(F8)
-    # exit 1——fail-closed 反例的机器证据，其余反例预期 pass exit 0。
-
-    # Live（骨架；无真实 transport，一律拒绝）
-    python3 runner/n1bdisc_run.py --live --target <T> --hap <HAP_DISC>   # exit 2
+    camp = run_dryrun_campaign("happy")     # 旧平行模拟器：仅基线钉用
+    judged = derive_and_judge(camp)
 """
 
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import io
-import json
 import os
 import re
 import sys
 import time
 from contextlib import redirect_stdout
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -371,6 +365,32 @@ def _skip_anchor_conflict(events) -> bool:
     return (skip and (t_present or c_present)) or (c_present and not t_present)
 
 
+@dataclass(frozen=True)
+class CaptureWallFacts:
+    """capture/证据侧真实墙钟事实（毫秒；engine/live 传入，DryRun 缺省合成对）。
+
+    - ``death_wall_ms``：死亡证据墙钟（engine = 快照差分新增 fault 条目内首个
+      可解析 ``YYYY-MM-DD hh:mm:ss.mmm`` 设备侧时间戳；原 DryRun 合成 100_000）；
+    - ``begin_capture_wall_ms``：``D8_STORM_BEGIN`` 捕获行设备侧墙钟
+      （原 DryRun 合成 90_000）。
+
+    两个值只用于同源设备侧差值（D8b ``storm_incomplete_pre_only_span``、
+    ``marker_tail_state`` 静默跨度）；任一为 ``None`` 时由既有冻结求值落
+    ``tail-clock-unresolvable`` / :607 强制跨度 F4 面——engine 绝不携带合成值进
+    Live，也不新造 cause。
+    """
+
+    death_wall_ms: Optional[int] = None
+    begin_capture_wall_ms: Optional[int] = None
+
+
+#: DryRun 既有合成约定（is_evidence=false）：死亡 100_000、BEGIN capture 90_000
+#: （介于死亡与最后可见 marker 80_000 之间）——``derive_and_judge`` 缺省保持原
+#: DryRun 行为不回归；engine/live 显式传真实 :class:`CaptureWallFacts`。
+_DRYRUN_WALL_FACTS = CaptureWallFacts(death_wall_ms=100_000,
+                                      begin_capture_wall_ms=90_000)
+
+
 def _final_rebuild_cut(close_kind: Optional[str]) -> str:
     """最终 ledger 重建切点 = 收口形态驱动（观察 (i) 整改钉；判据 :385/:402-404）。
 
@@ -388,8 +408,19 @@ def _final_rebuild_cut(close_kind: Optional[str]) -> str:
     return "complete"
 
 
-def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
-    """capture 全流解析（chunk/ledger/终态字段/全序/dw 比对）+ verdict 主求值。"""
+def derive_and_judge(camp: Dict[str, Any],
+                     *, wall_facts: Optional[CaptureWallFacts] = None,
+                     freeze_integrity_failures: Optional[List[str]] = None
+                     ) -> Dict[str, Any]:
+    """capture 全流解析（chunk/ledger/终态字段/全序/dw 比对）+ verdict 主求值。
+
+    ``wall_facts``：capture/证据侧真实墙钟事实（engine/live 路径显式传入；
+    ``None`` = DryRun 既有合成对，原 CLI 行为逐字不变）。
+    ``freeze_integrity_failures``：live freeze 收口复核失败码（engine 步 10
+    integrity 收尾传入；``None``/空 = 无复核失败，DryRun 恒空）。非空时走既有
+    verdict invalid 优先轴（:1124 ``freeze-integrity``），不新造判据/cause。
+    """
+    walls = wall_facts if wall_facts is not None else _DRYRUN_WALL_FACTS
     events = camp["stream_events"]
     # m-07：同 id 双 D2_ENTRY outcome 行按「后到者为准」收敛终值（登记见
     # d2_entry_final_outcomes；判据未定，只登记不驱动 verdict）。
@@ -506,12 +537,19 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         gaps_f8.append("dw_join_result rebuild truth-table gap: %s"
                        % join_rebuilt.fail_reason)
         rebuilt_join = None
-    # outcome == "no-fact"（B4-a：正常 complete 主线无 runner 侧 join 事实）：
-    # 无比对面、不挂 gap——complete 形态唯一事实源 = 探针 P12 派生值（:703）。
+    # POST join 值：十值域闭域检查**恒在**（T0 裁定 join-bogus 回归整改）——
+    # POST 在场时 pending/未知/缺失一律 F8(2)；no-fact 只免除「重建 vs P12」
+    # 比对面，不免除域检查。比对仍仅在 runner 侧有独立 join 事实（rebuilt 非
+    # None）时进行；EXIT 不喂 join、join_exit_rc None、join_blocked False 保持。
     post_join: Optional[str] = None
     if post is not None:
         post_join = verdict.parse_dw_outcome(post.kv.get("dw_outcome", "")).get("join")
-        if rebuilt_join is not None and not verdict.p12_join_consistency(
+        if post_join is None or post_join not in core.DW_JOIN_RESULT_10:
+            gaps_f8.append(
+                "P12 dw_join_result=%r outside DW_JOIN_RESULT_10 closed domain"
+                " (probe contract ;'-separated k=v, dw.rs:1008-1018)"
+                % (post_join,))
+        elif rebuilt_join is not None and not verdict.p12_join_consistency(
                 rebuilt_join, post_join, post_class):
             gaps_f8.append("P12 dw_join_result=%r != runner rebuild %r"
                            % (post_join, rebuilt_join))
@@ -550,11 +588,11 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         death_observed=camp["death_observed"],
         death_site_before_storm=(last_site_idx is not None
                                  and last_site_idx < fsm.SITE_ORDER.index("P7")),
-        # DryRun 确定性合成墙钟（is_evidence=false）：死亡证据墙钟 / BEGIN capture
-        # 墙钟沿 camp 既有合成约定（死亡 100_000、最后可见 marker 80_000），BEGIN
-        # 取 90_000（介于两者）；真机以 faultlogger 时间戳 / capture 墙钟取材（:607）。
-        death_wall_ms=100_000 if camp["death_observed"] else None,
-        begin_capture_wall_ms=90_000 if storm_begin is not None else None,
+        # 墙钟事实：DryRun 沿既有合成约定（is_evidence=false，上方注释）；engine/
+        # live 经 wall_facts 传真实捕获/证据侧读数（不携带 100_000/90_000 进 Live）。
+        death_wall_ms=walls.death_wall_ms if camp["death_observed"] else None,
+        begin_capture_wall_ms=walls.begin_capture_wall_ms
+        if storm_begin is not None else None,
         skip_cause=platform.dw_skip_cause_of(events))
     gaps_f4 += ["d8b-increment-gap: %s" % f for f in d8b_closure["f4_missing"]]
     gaps_f8 += d8b_closure["f8_facets"]
@@ -582,6 +620,7 @@ def derive_and_judge(camp: Dict[str, Any]) -> Dict[str, Any]:
         d1_cmdline_ok=True if _has(events, "N1BDISC_D1_BEGIN") else None,
         parse_domain_gaps=gaps_f8,
         window_expired_alive=(camp["fsm"].close_kind == fsm.CLOSE_FAIL_F9),
+        freeze_integrity_failures=list(freeze_integrity_failures or ()),
     )
     result = verdict.evaluate(v_input)
 
@@ -873,44 +912,9 @@ def build_record(scenario_name: str, selftests: Dict[str, Any],
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    _unbuffered()
-    parser = argparse.ArgumentParser(prog="n1bdisc_run")
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--dryrun", action="store_true",
-                      help="gate 11 DryRun（fake-hdc；is_evidence=false）")
-    mode.add_argument("--live", action="store_true",
-                      help="Live 骨架（无真实 transport，显式拒绝执行）")
-    parser.add_argument("--scenario", choices=SCENARIOS, default="happy")
-    parser.add_argument("--target", default="<PHYS_1_TARGET>")
-    parser.add_argument("--hap", default="<HAP_DISC>")
-    parser.add_argument("--json", default=None, help="记录 JSON 另存路径")
-    parser.add_argument("--skip-selftests", action="store_true",
-                        help="跳过 gate 10 selftest 步（pytest 内嵌调用防递归用）")
-    args = parser.parse_args(argv)
-
-    if args.live:
-        # Live 模式：仅参数骨架；真实 hdc transport 本增量不实现 → 显式拒绝。
-        print(json.dumps({
-            "mode": "live", "refused": True,
-            "reason": "真实 hdc transport 未实现（host-only 增量）；"
-                      "live 执行被显式拒绝（不 retry）",
-            "target": args.target, "hap": args.hap,
-        }, ensure_ascii=False))
-        return 2
-
-    selftests = ({"ok": True, "modules": {}, "skipped": True}
-                 if args.skip_selftests else run_selftests())
-    camp = run_dryrun_campaign(args.scenario)
-    judged = derive_and_judge(camp)
-    record = build_record(args.scenario, selftests, camp, judged)
-    text = json.dumps(record, ensure_ascii=False, indent=2)
-    if args.json:
-        with open(args.json, "w", encoding="utf-8") as fh:
-            fh.write(text + "\n")
-    print(text)
-    ok = (record["steps"]["gate10_selftests"]["ok"]
-          and record["verdict"] == "pass")
-    return 0 if ok else 1
+    """CLI 薄转发：生产入口统一收敛到 :func:`n1bdisc_cli.main`（同 argv 契约）。"""
+    import n1bdisc_cli   # noqa: PLC0415 — 延迟导入：helpers 单测零 CLI 依赖
+    return n1bdisc_cli.main(argv=argv)
 
 
 if __name__ == "__main__":

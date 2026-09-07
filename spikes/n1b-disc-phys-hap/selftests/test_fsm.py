@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 
@@ -1170,29 +1171,52 @@ def test_hilog_wallclock_fallback_wiring():
 
 
 # ==========================================================================
-# E2E：CLI 主入口（gate 11-13 形态装配；selftest 步由 --skip-selftests 跳过）
+# E2E：CLI 主入口（薄转发 n1bdisc_cli 后更新——CLI 集成增量语义变更钉）
 # ==========================================================================
 
 def test_cli_dryrun_happy_end_to_end():
-    proc = subprocess.run(
-        [sys.executable, run.__file__, "--dryrun", "--scenario", "happy",
-         "--skip-selftests"],
-        capture_output=True, text=True, timeout=120)
-    expect(proc.returncode == 0, "CLI happy exit 0（stderr=%r）" % proc.stderr[-400:])
-    record = __import__("json").loads(proc.stdout)
-    expect(record["mode"] == "dryrun" and record["is_evidence"] is False
-           and record["hdc0"] == "fake-hdc" and record["integrity"] == {},
-           "记录头部：is_evidence=false、HDC0=fake-hdc、integrity empty（门 11）")
-    expect(record["verdict"] == "pass" and record["protocol"] == "complete",
-           "CLI 记录：complete + pass")
+    # CLI 集成增量语义变更（只改本测试并说明）：--dryrun 不再走旧平行模拟器，
+    # 统一经 n1bdisc_engine.run_campaign（同一 engine）；--skip-selftests 移除
+    # （CLI 不再内嵌 selftest 步）；stdout 只给单行无敏摘要，完整最终记录在
+    # run 目录 result.json（增量目录面）。门 11 头部断言保持等价强度。
+    import json as _json
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="n1bfsm-cli-")
+    try:
+        root = os.path.join(tmp, "run")
+        proc = subprocess.run(
+            [sys.executable, run.__file__, "--dryrun", "--scenario", "happy",
+             "--output-root", root],
+            capture_output=True, text=True, timeout=120)
+        expect(proc.returncode == 0, "CLI happy exit 0（stderr=%r）"
+               % proc.stderr[-400:])
+        record = _json.load(open(os.path.join(root, "result.json"),
+                                 encoding="utf-8"))["result"]
+        expect(record["mode"] == "dryrun" and record["is_evidence"] is False
+               and record["integrity"] == {},
+               "记录头部：is_evidence=false、integrity empty（门 11 原字面）")
+        expect(record["verdict"] == "pass" and record["protocol"] == "complete",
+               "CLI 记录：complete + pass")
+        summary = _json.loads(proc.stdout.strip().splitlines()[-1])
+        expect(summary["freeze_bound"] is False
+               and summary["gate11_eligible"] is False,
+               "无 manifest smoke 明确不具门 11 资格")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_cli_live_refused():
+    # CLI 集成增量语义变更（只改本测试并说明）：--live 不再是打印 target 的
+    # 骨架拒绝；缺完整冻结四件套在 argparse 层拒绝（exit 2 不变），target 永不
+    # 回显（stdout/stderr 均不含），真实 transport 只有 preflight 全过才构造。
     proc = subprocess.run(
-        [sys.executable, run.__file__, "--live", "--target", "T", "--hap", "x"],
+        [sys.executable, run.__file__, "--live", "--target",
+         "CLI-E2E-TGT-2099", "--hap", "x"],
         capture_output=True, text=True, timeout=60)
-    expect(proc.returncode == 2, "live 模式显式拒绝（exit 2）")
-    expect("拒绝" in proc.stdout, "拒绝原因逐字输出")
+    expect(proc.returncode == 2, "live 缺冻结四件套 → argparse exit 2")
+    expect("CLI-E2E-TGT-2099" not in proc.stdout
+           and "CLI-E2E-TGT-2099" not in proc.stderr,
+           "target 不回显（新旧语义冲突点：旧实现打印 target，已按安全边界移除）")
 
 
 # ==========================================================================

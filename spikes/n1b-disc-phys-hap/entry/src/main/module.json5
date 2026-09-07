@@ -39,6 +39,11 @@
         type: 'vpn',
         exported: false
       }
+    ],
+    requestPermissions: [
+      {
+        name: 'ohos.permission.INTERNET'
+      }
     ]
   }
 }
