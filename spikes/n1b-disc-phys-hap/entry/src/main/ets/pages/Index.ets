@@ -69,6 +69,7 @@ struct Index {
         .backgroundColor(this.requestSent ? '#8A9AA6' : '#17324D')
         .enabled(!this.requestSent)
         .onClick(() => {
+          hilog.info(DOMAIN, TAG, 'UI_START_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
           this.requestStart();
         })
       Text(this.statusText)
