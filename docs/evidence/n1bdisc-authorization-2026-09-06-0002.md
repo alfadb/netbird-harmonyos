@@ -50,6 +50,7 @@ code_sha: pending-gate-1-binding # 待 local commit 后由后续 gate 1 绑定�
 target_tuple: HarmonyOS / PLA-AL10 / PLA-AL10 7.0.0.105(SP6C00E105R7P3) / API 26 / aarch64 / arm64-v8a # 判据 :268 CC-2 重绑值（登记引用；设备当前状态不推断，见「设备状态与未来确认要求」节）
 bundle_name: cn.alfadb.netbird.n1bdisc # 判据 :270 冻结值，逐字一致
 reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
+terminal_disposition: retired-tuple-drift-20260911 # 终态处置：第三对 gate 5 元组漂移退役（2026-09-11）；本键为追加，不改既有键值；仓外 blocked record 见文末「终态处置」节
 ```
 
 > **YAML 值域依据**：[`evidence-schema.md`](../evidence-schema.md) **未定义** `authorization_status` 与 `plan_status` 的合法值集（全文无此二字段）；`record_status` 七值（:60-71）针对证据记录本体，本治理登记不占用。本登记沿前两对先例（[首对授权登记](n1bdisc-authorization-2026-09-05-0001.md)、[第二对授权登记](n1bdisc-authorization-2026-09-06-0001.md)，各带同款「YAML 值域依据」注）采用治理登记 kebab 值：`granted-id-allocation-and-candidate-local-commit` / `id-allocated-local-commit-authorized-not-executed` / `active-governance-registration`，取值字面表达「三 ID 分配 + 候选本地提交授权、执行未开始、登记活跃」。`governance_naming_date` / `generated_at` / `workspace` / `candidate_base` / `code_sha` 为本登记新增治理事实字段（schema 未定义，注释化治理，沿先例做法）。schema 其余实际值集均针对证据记录本体，本登记不占用：信息状态四值（:11-17）、`verdict` 四值 `pass | fail | blocked | invalid`（:76-85、:160）；未来本对 `EV-N1BDISC` 证据记录须按其采用（`record_status` 执行后 `collected`、审查合格后 `reviewed-pass`，:89）。
@@ -108,3 +109,60 @@ reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated revie
 **本轮整改链（三个提交 + 更早两个，均已推送）**：`53faa1f`（B-1 实现：`N1BDISC_D1_END` payload 追加 `|elapsed_ms=<ms>`、`.so` 重建、新增 selftest）→ `4b81f53`（CC-4 判据：`:521` payload 冻结扩展、`:526` 落盘清单加 `d1_elapsed_ms`、`:1059` 上界→名义预算 + 525 硬到点、`:1067` 收口法理改写）→ `5a56ba3`（CC-4 转正 + `:1067` 措辞修正）；更早另有 `e53bb3d`（CC-3：P1 时间盒语义收窄）、`dccd66e`（M1：`Fault_Type` 空值 → `fault-type-unparsable`）。
 
 **收官（2026-09-11）**：第三对 pair host-only 门 **gate 1-3 全部 pass**，**freeze-3-v4 成立**（0 blocker / 0 major / 2 minor）。三 ID 仍未消费；gate 3 的 FAIL→整改→重出流程合规（全程零设备接触、pair 未消费）。下一步 **gate 4**（设备侧，须用户本人连接设备）；gate 5 三探针对照 CC-2 重绑元组；gate 13 Live 须用户全新确认。逐门登记随执行继续追加。
+
+## 终态处置（2026-09-11 追加；事件 2026-09-11）
+
+> 本节为 2026-09-11 的终态登记，**上文（含 YAML 顶部字段、依据、范围声明、门序列执行登记节）不改**；与上文表述冲突时以本节为准。本节只登记执行事实与终态语义，不复制判据正文。
+
+### gate 4/5 执行事实（设备侧，用户本人连接）
+
+- **gate 4（host-prep）**：用户本人 `tconn`；主会话执行**恰一次**内存级 `list targets` → `rc=0`、`targets_count=1`、target 形状 `###.###.##.###:#####`（长度 20）；**target 值未输出、未持久化**（`target_redacted: true`、`endpoint_or_token_persisted: false`）。
+- **gate 5 三探针**（同一次执行，逐字 argv）：
+  1. `hdc version` → `Ver: 3.2.0f`
+  2. `hdc -t <T> shell param get const.product.model` → 实测含**尾随空白**（printf 显示 `PLA-AL10` + 1 个尾随空格）；trim 后 = `PLA-AL10`
+  3. `hdc -t <T> shell param get const.product.software.version` → `od -c` 逐字节记录（36 字节，含 1 个尾随空格）
+- `hdc_binary` = `/home/worker/harmonyos/command-line-tools/26.0.0.821/sdk/default/openharmony/toolchains/hdc`（冻结绝对路径）。
+- `code_sha_at_execution` = `53faccd552935ee3586bfac96d74c564e3464a26`（gate 1-3 登记后的 HEAD）。
+- **清理**：`hdc kill` 已执行，HDC0 复核归零（`ps` 探针计数 0）。
+
+### 漂移逐字证据（冻结 vs 实测）
+
+- **判据冻结元组（CC-2 重绑，判据 `:268`）**：`PLA-AL10 7.0.0.105(SP6C00E105R7P3)`
+- **实测（trim 后）**：`PLA-AL10 7.0.0.105(SP10C00E105R7P3)`
+- **model**：trim 后 **MATCH**（`PLA-AL10`）。首次自动比对报 DRIFT 系比对脚本未剥尾随空白所致（**比对脚本缺陷**），非 model 值漂移；如实登记。
+- **software**：**DRIFT** —— 数字版本 `7.0.0.105` **相同**，构建分支标签 `SP6C00E105R7P3` → `SP10C00E105R7P3` **不同**。
+- software 实测 verbatim（36 字节；`od -c` 原文的等价逐字节记录，末字节空格以 `<SP>` 显式标注以免行尾空白）：
+
+```text
+0000000   P   L   A   -   A   L   1   0       7   .   0   .   0   .   1
+0000020   0   5   (   S   P   1   0   C   0   0   E   1   0   5   R   7
+0000040   P   3   )   <SP>
+0000044
+```
+
+### 历史交叉印证（排除抄录错误）
+
+仓外两份 2026-09-06 记录均**逐字**记为 `SP6C00E105R7P3`：
+
+- `records/target-binding-confirmation-20260906-0001.json`：`measured_target_tuple.software_version_verbatim = "PLA-AL10 7.0.0.105(SP6C00E105R7P3) "`（首对 gate 5 触发 CC-2 的那次）。
+- `records/target-binding-confirmation-pair2-20260906-0002.json`：`measured.software_version_trimmed = "PLA-AL10 7.0.0.105(SP6C00E105R7P3)"`、`comparison.software_version = "MATCH (逐字)"`。
+
+→ 故本次为**设备侧真实变更**（2026-09-06 与 2026-09-11 之间再次更新），**非判据抄录错误**。
+
+### 判据依据与裁决
+
+- 判据 [`n1b-disc-gate-plan.md`](../n1b-disc-gate-plan.md) `:1436`：gate 5「完整系统版本实测复核…漂移即 blocked record + 退役」。
+- `:1162`：`blocked` 仅限含「目标绑定门元组漂移（含完整系统版本与冻结值不符）」。
+- `:268`：CC-2 冻结元组。
+- **裁决**：`verdict: blocked-tuple-drift` —— 判据强制后果，非裁量。
+
+### 仓外 blocked record
+
+- 路径：`/home/worker/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-pair3-20260911.json`
+- SHA-256：`aa664446723139c388176d026c8c0be64927f695d6b4c3abb767d475c7fbba8e`（同名 `.sha256` sidecar；`sha256sum -c` OK）
+
+### 终态语义
+
+- `pair_disposition: retired-terminal`；`consumed: false`（**未执行任何测量、未 Live**）；`reusable: false`；**无后继 AUTH**。
+- 本对三 ID（`AUTH-N1BDISC-PHYS1API26-20260906-0002` / campaign `N1BDISC-PHYS1API26-20260906-0002` / evidence `EV-N1BDISC-PHYS1API26-20260906-0002`）随本对退役；campaign 未执行。
+- **gate 1-3 成果（含 freeze-3-v4 成立、0 blocker / 0 major / 2 minor、A1-A12 12/12、14 符号不变、`.so` 哈希等）作为可复用资产保留，不因本对退役而撤销**；其效力仅限作为历史符合性结论被未来新治理引用，不构成本对继续执行的依据。

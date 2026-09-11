@@ -1,6 +1,6 @@
 # N1BDISC Live 候选工作区状态（防重启交接）
 
-> 本文件是工程交接快照，只记主进度与当前事实；治理历史见 `docs/n1b-disc-*` 既有文档，不在此展开。本文件不构成任何审查通过记录。创建：2026-09-06；更新：2026-09-07（新 ID 授权登记）、2026-09-11（候选快进合并入 main 后）。
+> 本文件是工程交接快照，只记主进度与当前事实；治理历史见 `docs/n1b-disc-*` 既有文档，不在此展开。本文件不构成任何审查通过记录。创建：2026-09-06；更新：2026-09-07（新 ID 授权登记）、2026-09-11（候选快进合并入 main 后）、2026-09-11（第三对 gate 5 元组漂移退役）。
 
 ## 授权与边界（当前有效）
 
@@ -54,7 +54,7 @@
 
 ## 下一步（顺序，均需用户明确授权）
 
-1. 候选 local 提交与合并：**已完成**——本地提交后经用户授权**快进合并入 `main` 并推送（`ea44b87`）**。第三对 **gate 1-3 已 pass（host-only）、freeze-3-v4 成立**（0 blocker / 0 major / 2 minor；code_sha `5a56ba3`；逐门登记见 [第三对授权登记「门序列执行登记」](evidence/n1bdisc-authorization-2026-09-06-0002.md)）。**下一步 gate 4**：设备侧 `tconn` + 恰一次内存级 `list targets`，**须用户本人连接设备**；gate 5 三探针对照 CC-2 重绑元组 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`；**gate 13 Live 须用户全新确认**（决议 §4.3.9）；本轮不执行任何门/设备/签名/新 freeze。
+1. 候选 local 提交与合并：**已完成**——本地提交后经用户授权**快进合并入 `main` 并推送（`ea44b87`）**。第三对 **gate 1-3 已 pass（host-only）、freeze-3-v4 成立**（0 blocker / 0 major / 2 minor；code_sha `5a56ba3`；逐门登记见 [第三对授权登记「门序列执行登记」与「终态处置」](evidence/n1bdisc-authorization-2026-09-06-0002.md)）。**gate 4-5 已执行（2026-09-11，设备侧）：gate 5 元组漂移 → `blocked-tuple-drift` + 第三对 pair `retired-terminal`**——gate 4 恰一次内存级 `list targets`（`targets_count=1`，target 未输出未持久化）；gate 5 实测 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`，构建分支标签 `SP10C00E105R7P3` 与冻结值 `SP6C00E105R7P3` 不同（数字版本 `7.0.0.105` 相同；已由仓外两份 2026-09-06 记录交叉印证为设备侧真实变更）→ `consumed: false`（未测量/未 Live）、`reusable: false`、**无后继 AUTH**；仓外 blocked record `records/target-binding-confirmation-pair3-20260911.json`（sha256 `aa664446723139c388176d026c8c0be64927f695d6b4c3abb767d475c7fbba8e`）。**下一步：设备侧元组需用户重新决策**——是否再次 rebind 到新元组并以新三 ID 重走门序列（gate 1 起），或暂停；**gate 13 Live 须用户全新确认**（决议 §4.3.9）；本轮（2026-09-11 gate 4-5 执行后）不执行任何进一步门/设备/签名/新 freeze。
 2. 候选冻结准备/新 freeze（仍需用户明确授权）。
 3. 设备绑定：独立明确授权。
 4. Live：独立明确授权。
