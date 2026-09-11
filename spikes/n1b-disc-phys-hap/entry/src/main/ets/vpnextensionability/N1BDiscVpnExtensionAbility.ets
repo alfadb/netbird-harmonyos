@@ -393,6 +393,21 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     // D5 so the frozen P3/P4 results are already recorded, and before D8a;
     // the P-chain itself is untouched.
     probe.wg_probe(fdDup, mb1);
+    // WG-NET (out-of-gate, added 2026-09-11): the same BoringTun tunnel driven
+    // by REAL UDP datagrams. Binds 0.0.0.0:47010, answers the peer's handshake
+    // initiation, decrypts the peer's first transport packet, writes the
+    // decapsulated 44-byte IPv4/UDP packet into this TUN fd and confirms a
+    // local sink socket (0.0.0.0:47003) receives it. Blocks this chain for up
+    // to 90 s; that wait is the probe. No ledger transition, and D4/D5/D8/D-W
+    // are untouched.
+    probe.wg_net_probe(fdDup, mb1);
+    // WG-UDP (out-of-gate, added 2026-09-11): host -> device plain-UDP
+    // reachability. Deliberately NOT called: it binds the same 0.0.0.0:47010
+    // that wg_net_probe owns, and its first-datagram handshake would consume
+    // the peer's WireGuard initiation. The function and its NAPI export are
+    // retained (it is the recorded reachability regression), just out of the
+    // chain.
+    // probe.wg_udp_probe();
     // P5 D8a 10-level MTU write-return ladder.
     probe.d8a_probe(fdDup, mb1);
     // P5T PRE (P1-P5 facts + fd-ledger P5T snapshot digest; no skips on this path).

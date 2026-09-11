@@ -19,6 +19,12 @@
 //! This is explicitly OUTSIDE the frozen P-chain: no ledger transition is
 //! emitted for the sink socket (it is closed before returning), and the
 //! D4/D5/D8/D-W calls in the ArkTS caller are untouched.
+//!
+//! `wg_net_probe` (added 2026-09-11) is the same tunnel driven by REAL UDP
+//! datagrams: it binds 0.0.0.0:47010, answers the peer's handshake initiation
+//! with `sendto`, decrypts the peer's first transport packet, and closes the
+//! same TUN/sink loop. `wg_probe` (in-process) and `wg_udp_probe` (plain-UDP
+//! reachability) are retained unchanged.
 
 use std::ffi::CString;
 
@@ -27,7 +33,7 @@ use boringtun::ffi;
 use crate::hilog::emit;
 use crate::net::{self, d5_packet};
 use crate::sys;
-use crate::util::{jbool, jnum, jstr};
+use crate::util::{hex_lower, jbool, jinum, jnum, jstr};
 
 // ffi::result_type op codes (boringtun-0.7.1/src/ffi/mod.rs:34-45)
 const OP_DONE: i32 = 0;
@@ -496,6 +502,608 @@ pub fn wg_probe(fd_dup: i32, mb1: bool) -> String {
     j.push_str(&jstr("reason", &reason));
     j.push_str(",");
     j.push_str(&jnum("elapsed_ms", elapsed));
+    j.push('}');
+    j
+}
+
+/// JSON result of the UDP reachability probe (flat fields only).
+#[allow(clippy::too_many_arguments)]
+fn udp_json(
+    verdict: &str,
+    bind_rc: i32,
+    bind_errno: i32,
+    recv_len: isize,
+    src: &str,
+    sent: isize,
+    send_errno: i32,
+    waited_ms: u64,
+) -> String {
+    let mut j = String::from("{");
+    j.push_str(&jstr("verdict", verdict));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_rc\":{}", bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_errno\":{}", bind_errno));
+    j.push_str(",");
+    j.push_str(&format!("\"recv_len\":{}", recv_len));
+    j.push_str(",");
+    j.push_str(&jstr("src", src));
+    j.push_str(",");
+    j.push_str(&format!("\"sent\":{}", sent));
+    j.push_str(",");
+    j.push_str(&format!("\"send_errno\":{}", send_errno));
+    j.push_str(",");
+    j.push_str(&jnum("waited_ms", waited_ms));
+    j.push('}');
+    j
+}
+
+/// UDP reachability probe (out-of-gate, added 2026-09-11): can a UDP datagram
+/// sent from the host to this device's address be received by a socket bound
+/// inside this VPN extension process, and can the extension send a reply back
+/// to the sender?
+///
+/// Binds 0.0.0.0:47010, waits up to 90 s for the FIRST datagram only, replies
+/// to its source with a 16-byte literal, then closes the socket. Every stage
+/// emits an `N1BDISC_WG_UDP_*` marker, so a timeout is distinguishable from a
+/// socket/bind failure. Outside the frozen P-chain: no ledger transition, and
+/// the caller's D4/D5/D8/D-W sequence is untouched.
+///
+/// `wg_udp_probe() -> string` (JSON).
+pub fn wg_udp_probe() -> String {
+    const PORT: u16 = 47010;
+    const WAIT_MS: u64 = 90_000;
+    /// 16-byte reply payload carrying a recognizable literal.
+    const REPLY: &[u8] = b"N1BDISCUDP-47010";
+
+    let t0 = sys::mono_ms();
+
+    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        let e = sys::errno();
+        emit(&format!(
+            "N1BDISC_WG_UDP_BEGIN|port={}|bind_rc=-1|errno={}",
+            PORT, e
+        ));
+        let waited = sys::mono_ms().saturating_sub(t0);
+        emit(&format!(
+            "N1BDISC_WG_UDP_END|verdict=socket_fail|waited_ms={}|errno={}",
+            waited, e
+        ));
+        return udp_json("socket_fail", -1, e, -1, "", -1, e, waited);
+    }
+
+    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], PORT);
+    let bind_rc = unsafe {
+        sys::bind(
+            fd,
+            &bind_sa,
+            core::mem::size_of::<sys::sockaddr_in>() as u32,
+        )
+    };
+    let bind_errno = if bind_rc == -1 { sys::errno() } else { 0 };
+    emit(&format!(
+        "N1BDISC_WG_UDP_BEGIN|port={}|bind_rc={}|errno={}",
+        PORT, bind_rc, bind_errno
+    ));
+
+    let mut verdict = "timeout";
+    let mut recv_len: isize = -1;
+    let mut src = String::new();
+    let mut sent: isize = -1;
+    let mut send_errno = 0;
+
+    if bind_rc == 0 {
+        let deadline = t0 + WAIT_MS;
+        loop {
+            let now = sys::mono_ms();
+            if now >= deadline {
+                break;
+            }
+            let (ret, e, revents) = sys::poll1(fd, sys::POLLIN, (deadline - now) as i32);
+            if ret > 0 {
+                if (revents & sys::POLLIN) == 0 {
+                    verdict = "poll_no_pollin";
+                    break;
+                }
+                let mut rbuf = [0u8; 2048];
+                let mut from = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+                let mut flen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+                let rn = unsafe {
+                    sys::recvfrom(
+                        fd,
+                        rbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                        rbuf.len(),
+                        0,
+                        &mut from,
+                        &mut flen,
+                    )
+                };
+                if rn < 0 {
+                    verdict = "recv_error";
+                    send_errno = sys::errno();
+                    break;
+                }
+                recv_len = rn;
+                src = format!(
+                    "{}.{}.{}.{}:{}",
+                    from.sin_addr[0],
+                    from.sin_addr[1],
+                    from.sin_addr[2],
+                    from.sin_addr[3],
+                    u16::from_be(from.sin_port)
+                );
+                emit(&format!("N1BDISC_WG_UDP_RECV|len={}|src={}", recv_len, src));
+                let flen_out = core::mem::size_of::<sys::sockaddr_in>() as u32;
+                let sn = unsafe {
+                    sys::sendto(
+                        fd,
+                        REPLY.as_ptr() as *const core::ffi::c_void,
+                        REPLY.len(),
+                        0,
+                        &from,
+                        flen_out,
+                    )
+                };
+                sent = sn;
+                send_errno = if sn == -1 { sys::errno() } else { 0 };
+                emit(&format!(
+                    "N1BDISC_WG_UDP_REPLY|sent={}|errno={}",
+                    sent, send_errno
+                ));
+                verdict = if sn as usize == REPLY.len() {
+                    "pass"
+                } else {
+                    "recv_no_reply"
+                };
+                break;
+            }
+            if ret == 0 {
+                break; // 90 s elapsed with nothing received
+            }
+            if e != sys::EINTR {
+                verdict = "poll_error";
+                send_errno = e;
+                break;
+            }
+        }
+    } else {
+        verdict = "bind_fail";
+    }
+
+    unsafe { sys::close(fd) };
+    let waited = sys::mono_ms().saturating_sub(t0);
+    emit(&format!(
+        "N1BDISC_WG_UDP_END|verdict={}|waited_ms={}|recv_len={}|src={}|sent={}|send_errno={}|bind_rc={}|bind_errno={}",
+        verdict, waited, recv_len, src, sent, send_errno, bind_rc, bind_errno
+    ));
+
+    udp_json(
+        verdict, bind_rc, bind_errno, recv_len, &src, sent, send_errno, waited,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// wg_net_probe — the same BoringTun tunnel driven by REAL UDP datagrams
+// ---------------------------------------------------------------------------
+
+/// Device-side (this process) fixed test secret: 32 bytes of 0x11. Synthetic,
+/// not deployment material (same convention as SECRET_A/SECRET_B above).
+const NET_DEV_SECRET: [u8; 32] = [0x11; 32];
+/// Peer (host) fixed test secret: 32 bytes of 0x22. The peer's PUBLIC key is
+/// derived from it here, through the same frozen `x25519_public_key` export, so
+/// the two sides cannot end up with different keys.
+const NET_HOST_SECRET: [u8; 32] = [0x22; 32];
+/// UDP port this probe binds and the peer sends to. Owned solely by this probe:
+/// `wg_udp_probe` uses the same port and is therefore no longer called from the
+/// ArkTS chain (see the note at its call site).
+const NET_PORT: u16 = 47010;
+/// Whole-loop bound: no datagram for 90 s -> verdict=timeout.
+const NET_WAIT_MS: u64 = 90_000;
+/// One poll slice, so the 90 s bound is re-checked every 500 ms.
+const NET_POLL_MS: i32 = 500;
+/// Local index seeded into this tunnel's index space.
+const NET_INDEX: u32 = 1;
+/// Sequence frozen into the inner packet the peer must send (bytes 37-38, BE).
+const NET_SEQ: u16 = 0x0001;
+
+/// The 44-byte inner IPv4/UDP packet the peer is expected to send through the
+/// tunnel: D5's frozen IPv4/UDP framing (`net::d5_packet`, payload magic
+/// "N1DISCD5") with the UDP destination re-pointed at this probe's sink port
+/// (47003 — 47002 is held by the still-open D5 sink) and the peer's 5-byte text
+/// payload ("hello") in the last 5 bytes. The IPv4 checksum covers only the
+/// 20-byte header, so the dport/payload edits leave it valid.
+fn net_packet(seq: u16, mb1: bool) -> [u8; 44] {
+    let mut p = d5_packet(seq, mb1);
+    p[22] = (SINK_PORT >> 8) as u8;
+    p[23] = (SINK_PORT & 0xff) as u8;
+    p[39..44].copy_from_slice(b"hello");
+    p
+}
+
+/// `a.b.c.d:port` of a sockaddr_in (network-order port decoded).
+fn sa_str(sa: &sys::sockaddr_in) -> String {
+    format!(
+        "{}.{}.{}.{}:{}",
+        sa.sin_addr[0],
+        sa.sin_addr[1],
+        sa.sin_addr[2],
+        sa.sin_addr[3],
+        u16::from_be(sa.sin_port)
+    )
+}
+
+#[derive(Default)]
+struct NetOutcome {
+    dev_pub: String,
+    host_pub: String,
+    bind_rc: i32,
+    bind_errno: i32,
+    recv_count: u32,
+    recv_len: isize,
+    peer: String,
+    send_count: u32,
+    send_len: isize,
+    send_errno: i32,
+    hs_time_s: i64,
+    hs_ok: bool,
+    decrypt_len: usize,
+    decrypt_first8: String,
+    plain_match: bool,
+    tun_written: i64,
+    tun_errno: i32,
+    sink_bind_errno: i32,
+    sink_recv: bool,
+    sink_payload_match: bool,
+    sink_src: String,
+    verdict: String,
+    reason: String,
+    waited_ms: u64,
+}
+
+/// Stage machine; every exit path has already emitted its own marker and left
+/// `verdict`/`reason` set.
+fn run_net(fd_dup: i32, mb1: bool) -> NetOutcome {
+    let mut o = NetOutcome::default();
+    let t0 = sys::mono_ms();
+
+    // --- 1. socket + bind 0.0.0.0:47010 -------------------------------------
+    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        o.bind_rc = -1;
+        o.bind_errno = sys::errno();
+        emit(&format!(
+            "N1BDISC_WG_NET_BEGIN|port={}|bind_rc=-1|errno={}",
+            NET_PORT, o.bind_errno
+        ));
+        o.verdict = "socket_fail".into();
+        o.reason = "socket".into();
+        o.waited_ms = sys::mono_ms().saturating_sub(t0);
+        return o;
+    }
+    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
+    o.bind_rc =
+        unsafe { sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
+    o.bind_errno = if o.bind_rc == -1 { sys::errno() } else { 0 };
+    emit(&format!(
+        "N1BDISC_WG_NET_BEGIN|port={}|bind_rc={}|errno={}",
+        NET_PORT, o.bind_rc, o.bind_errno
+    ));
+    if o.bind_rc != 0 {
+        unsafe { sys::close(fd) };
+        o.verdict = "bind_fail".into();
+        o.reason = "bind".into();
+        o.waited_ms = sys::mono_ms().saturating_sub(t0);
+        return o;
+    }
+
+    // --- 2. fixed secrets -> real public keys -> one tunnel ------------------
+    let dev_sk = ffi::x25519_key { key: NET_DEV_SECRET };
+    let dev_pk = ffi::x25519_public_key(ffi::x25519_key { key: NET_DEV_SECRET });
+    let host_pk = ffi::x25519_public_key(ffi::x25519_key { key: NET_HOST_SECRET });
+    let (dev_sec_b64, dev_pub_b64, host_pub_b64) =
+        match (key_to_b64(dev_sk), key_to_b64(dev_pk), key_to_b64(host_pk)) {
+            (Some(s), Some(dp), Some(hp)) => (s, dp, hp),
+            _ => {
+                unsafe { sys::close(fd) };
+                o.verdict = "key_b64_null".into();
+                o.reason = "key-to-base64-null".into();
+                o.waited_ms = sys::mono_ms().saturating_sub(t0);
+                return o;
+            }
+        };
+    o.dev_pub = dev_pub_b64.clone();
+    o.host_pub = host_pub_b64.clone();
+    emit(&format!(
+        "N1BDISC_WG_NET_KEYS|dev_pub={}|host_pub={}",
+        dev_pub_b64, host_pub_b64
+    ));
+
+    let tunnel = match Tunnel::new(&dev_sec_b64, &host_pub_b64, NET_INDEX, "NET") {
+        Some(t) => t,
+        None => {
+            unsafe { sys::close(fd) };
+            o.verdict = "new_tunnel_null".into();
+            o.reason = "new_tunnel-null".into();
+            o.waited_ms = sys::mono_ms().saturating_sub(t0);
+            return o;
+        }
+    };
+    emit(&format!(
+        "N1BDISC_WG_NET_TUNNEL|keep_alive={}|idx={}",
+        KEEP_ALIVE, NET_INDEX
+    ));
+
+    let expected = net_packet(NET_SEQ, mb1);
+
+    // --- 3. bounded receive loop: real datagrams -> tunnel -------------------
+    let deadline = t0 + NET_WAIT_MS;
+    let mut rbuf = [0u8; BUF];
+    let mut out = [0u8; BUF];
+    let mut decrypted = false;
+
+    while sys::mono_ms() < deadline {
+        let (ret, e, revents) = sys::poll1(fd, sys::POLLIN, NET_POLL_MS);
+        if ret == 0 {
+            continue; // 500 ms slice elapsed; re-check the deadline
+        }
+        if ret < 0 {
+            if e == sys::EINTR {
+                continue;
+            }
+            o.verdict = "poll_error".into();
+            o.reason = format!("poll-{}", e);
+            break;
+        }
+        if (revents & sys::POLLIN) == 0 {
+            continue;
+        }
+
+        let mut from = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut flen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        let rn = unsafe {
+            sys::recvfrom(
+                fd,
+                rbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                rbuf.len(),
+                0,
+                &mut from,
+                &mut flen,
+            )
+        };
+        if rn < 0 {
+            o.verdict = "recv_error".into();
+            o.reason = format!("recvfrom-{}", sys::errno());
+            break;
+        }
+        let n = rn as usize;
+        if n == 0 || n > BUF {
+            o.verdict = "recv_bad_len".into();
+            o.reason = format!("recv-len-{}", n);
+            break;
+        }
+        o.recv_count += 1;
+        o.recv_len = rn;
+        o.peer = sa_str(&from);
+        emit(&format!("N1BDISC_WG_NET_RECV|len={}|src={}", rn, o.peer));
+
+        let (op, len) = tunnel.read(&rbuf[..n], &mut out);
+        let (hs_time, _tx, _rx) = tunnel.stats();
+        o.hs_time_s = hs_time;
+        o.hs_ok = hs_time >= 0;
+        emit(&format!("N1BDISC_WG_NET_HS|time={}|ok={}", hs_time, o.hs_ok));
+
+        match op {
+            OP_NETWORK => {
+                if len == 0 || len > BUF {
+                    o.verdict = "net_out_bad_len".into();
+                    o.reason = format!("network-out-len-{}", len);
+                    break;
+                }
+                let addrlen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+                // Reply to the source of the datagram just processed — that is
+                // the peer's endpoint (ip:port), recorded above as `o.peer`.
+                let sn = unsafe {
+                    sys::sendto(
+                        fd,
+                        out.as_ptr() as *const core::ffi::c_void,
+                        len,
+                        0,
+                        &from,
+                        addrlen,
+                    )
+                };
+                o.send_count += 1;
+                o.send_len = sn;
+                o.send_errno = if sn == -1 { sys::errno() } else { 0 };
+                emit(&format!(
+                    "N1BDISC_WG_NET_SEND|len={}|op={}|sent={}|errno={}",
+                    len, op, sn, o.send_errno
+                ));
+                if sn < 0 {
+                    o.verdict = "send_error".into();
+                    o.reason = format!("sendto-{}", o.send_errno);
+                    break;
+                }
+            }
+            OP_TUN_V4 => {
+                o.decrypt_len = len;
+                o.decrypt_first8 = hex_lower(&out[..len.min(8)]);
+                o.plain_match = len == expected.len() && out[..len] == expected[..];
+                emit(&format!(
+                    "N1BDISC_WG_NET_DECRYPT|len={}|first8={}|match={}",
+                    len, o.decrypt_first8, o.plain_match
+                ));
+                decrypted = true;
+                break;
+            }
+            _ => {
+                // OP_DONE (keepalive absorbed), OP_ERROR, or a new op: record it
+                // rather than guess. OP_ERROR is terminal.
+                emit(&format!("N1BDISC_WG_NET_OP|op={}|len={}", op, len));
+                if op == OP_ERROR {
+                    o.verdict = "tunnel_error".into();
+                    o.reason = format!("wg-read-op-{}", op);
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- 4. closure: decrypted packet -> REAL TUN fd -> kernel stack ---------
+    if decrypted && o.decrypt_len >= 44 {
+        let plain = &out[..o.decrypt_len];
+        let sink = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        if sink < 0 {
+            o.verdict = "sink_socket_fail".into();
+            o.reason = format!("sink-socket-{}", sys::errno());
+        } else {
+            let sink_sa = sys::sockaddr_in::new([0, 0, 0, 0], SINK_PORT);
+            let br = unsafe {
+                sys::bind(
+                    sink,
+                    &sink_sa,
+                    core::mem::size_of::<sys::sockaddr_in>() as u32,
+                )
+            };
+            o.sink_bind_errno = if br == -1 { sys::errno() } else { 0 };
+            let want_src = net::dst_peer(mb1);
+            let identity = &plain[28..44];
+            let mut attempt = 0u32;
+            while attempt < TUN_ATTEMPTS && !o.sink_recv {
+                attempt += 1;
+                let _ = sys::poll1(fd_dup, sys::POLLOUT, 500);
+                let (wn, we) = sys::write_fd(fd_dup, plain);
+                o.tun_written = wn as i64;
+                o.tun_errno = we;
+                emit(&format!(
+                    "N1BDISC_WG_NET_TUN_WRITE|attempt={}|written={}|errno={}|len={}",
+                    attempt,
+                    wn,
+                    we,
+                    plain.len()
+                ));
+                let (_pret, _pe, revents) = sys::poll1(sink, sys::POLLIN, 500);
+                if (revents & sys::POLLIN) != 0 {
+                    let mut srbuf = [0u8; 2048];
+                    let mut sfrom = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+                    let mut sflen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+                    let srn = unsafe {
+                        sys::recvfrom(
+                            sink,
+                            srbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                            srbuf.len(),
+                            0,
+                            &mut sfrom,
+                            &mut sflen,
+                        )
+                    };
+                    if srn > 0 {
+                        o.sink_src = sa_str(&sfrom);
+                        o.sink_payload_match = sfrom.sin_addr == want_src
+                            && u16::from_be(sfrom.sin_port) == SRC_PORT
+                            && srn as usize == identity.len()
+                            && srbuf[..identity.len()] == *identity;
+                        o.sink_recv = o.sink_payload_match;
+                        emit(&format!(
+                            "N1BDISC_WG_NET_TUN_RECV|attempt={}|rn={}|src={}|payload_match={}",
+                            attempt, srn, o.sink_src, o.sink_payload_match
+                        ));
+                    }
+                }
+            }
+            unsafe { sys::close(sink) };
+        }
+        emit(&format!(
+            "N1BDISC_WG_NET_TUN|written={}|errno={}|bind_errno={}|sink_recv={}|src={}",
+            o.tun_written, o.tun_errno, o.sink_bind_errno, o.sink_recv, o.sink_src
+        ));
+        if o.verdict.is_empty() {
+            if o.plain_match && o.sink_recv {
+                o.verdict = "pass".into();
+                o.reason = "ok".into();
+            } else {
+                let mut fails: Vec<&str> = Vec::new();
+                if !o.plain_match {
+                    fails.push("plaintext");
+                }
+                if !o.sink_recv {
+                    fails.push("tun");
+                }
+                o.verdict = "fail".into();
+                o.reason = fails.join("+");
+            }
+        }
+    } else if decrypted {
+        o.verdict = "fail".into();
+        o.reason = format!("plaintext-too-short-{}", o.decrypt_len);
+    } else if o.verdict.is_empty() {
+        o.verdict = "timeout".into();
+        o.reason = if o.recv_count == 0 { "no-packet" } else { "no-plaintext" }.into();
+    }
+
+    unsafe { sys::close(fd) };
+    o.waited_ms = sys::mono_ms().saturating_sub(t0);
+    emit(&format!(
+        "N1BDISC_WG_NET_END|verdict={}|reason={}|elapsed_ms={}|waited_ms={}",
+        o.verdict, o.reason, o.waited_ms, o.waited_ms
+    ));
+    o
+}
+
+/// `wg_net_probe(fdDup: number, mb1: boolean) -> string` (JSON).
+pub fn wg_net_probe(fd_dup: i32, mb1: bool) -> String {
+    emit("N1BDISC_WG_NET_ENTER|");
+    let o = run_net(fd_dup, mb1);
+
+    let mut j = String::from("{");
+    j.push_str(&jstr("dev_pub", &o.dev_pub));
+    j.push_str(",");
+    j.push_str(&jstr("host_pub", &o.host_pub));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_rc\":{}", o.bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_errno\":{}", o.bind_errno));
+    j.push_str(",");
+    j.push_str(&jnum("recv_count", o.recv_count as u64));
+    j.push_str(",");
+    j.push_str(&format!("\"recv_len\":{}", o.recv_len));
+    j.push_str(",");
+    j.push_str(&jstr("peer", &o.peer));
+    j.push_str(",");
+    j.push_str(&jnum("send_count", o.send_count as u64));
+    j.push_str(",");
+    j.push_str(&format!("\"send_len\":{}", o.send_len));
+    j.push_str(",");
+    j.push_str(&format!("\"send_errno\":{}", o.send_errno));
+    j.push_str(",");
+    j.push_str(&jinum("hs_time_s", o.hs_time_s));
+    j.push_str(",");
+    j.push_str(&jbool("hs_ok", o.hs_ok));
+    j.push_str(",");
+    j.push_str(&jnum("decrypt_len", o.decrypt_len as u64));
+    j.push_str(",");
+    j.push_str(&jstr("decrypt_first8", &o.decrypt_first8));
+    j.push_str(",");
+    j.push_str(&jbool("match", o.plain_match));
+    j.push_str(",");
+    j.push_str(&jinum("tun_written", o.tun_written));
+    j.push_str(",");
+    j.push_str(&format!("\"tun_errno\":{}", o.tun_errno));
+    j.push_str(",");
+    j.push_str(&format!("\"sink_bind_errno\":{}", o.sink_bind_errno));
+    j.push_str(",");
+    j.push_str(&jbool("sink_recv", o.sink_recv));
+    j.push_str(",");
+    j.push_str(&jbool("sink_payload_match", o.sink_payload_match));
+    j.push_str(",");
+    j.push_str(&jstr("sink_src", &o.sink_src));
+    j.push_str(",");
+    j.push_str(&jstr("verdict", &o.verdict));
+    j.push_str(",");
+    j.push_str(&jstr("reason", &o.reason));
+    j.push_str(",");
+    j.push_str(&jnum("elapsed_ms", o.waited_ms));
     j.push('}');
     j
 }
