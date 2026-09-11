@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）；`criteria-change-3-pending-review-2026-09-11`（CC-3 P1 `dlopen`/`dlsym` 时间盒语义判据文本收窄——判据解释裁决认定实现不违反判据、`:1029` 的单一豁免措辞为过度断言（原文见文末登记块 ① 改前对照），三处行内替换零新增行；**须经跨厂商隔离重审通过后方可生效**，见**文末**登记块）
+最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）；`criteria-change-3-reviewed-pass-2026-09-11`（CC-3 P1 `dlopen`/`dlsym` 时间盒语义判据文本收窄——判据解释裁决认定实现不违反判据、`:1029` 的单一豁免措辞为过度断言（原文见文末登记块 ① 改前对照），三处行内替换零新增行；经跨厂商隔离重审通过（0 blocker / 0 major / 4 minor 已处置）——CC-3 已生效，可按收窄后的口径 freeze/测量，见**文末**登记块）
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -1026,12 +1026,12 @@ P11 探针自有 fd 清理（d4_send_socket/d5_sink_socket/d6b_reuse_probe_socke
 P12 （`DW_RACEWIN` 若发射必先于此——r22 冻结序）N1BDISC_POST 终态 marker（D6 逐子项 + D-W 结局 + ledger 最终 digest，r4 R1）-> 封签 -> 进程自然退出（观察，不判定）
 ```
 
-**每个等待点均有单调时钟有界时间盒**（超时分类预注册；**用户态无超时出口的调用恰两处、均为登记豁免**：**(1) `pthread_join`**——按第二趟修订集群 A5(b) 裁定 join 不可有界，仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」；**(2) P1 `dlopen`/`dlsym`**——同属无用户态超时出口的调用（A1 禁第二线程、`:355-360` 闭表无 alarm/timer/sigaction，且 loader 持锁期间无安全中止路径），其表内 10 s 为**预注册测量与分类参数、非中止阈值**（预算面见观测窗推导、位点分类面见 `APPFREEZE` 位点约束），出口按 D1 节「时间盒/超时分类」条 = 错误返回 ∨ 进程死亡 ∨ 观测窗到点，**探针侧不设中止分支，freeze 静态审查不得因此判不通过**）：
+**每个等待点均有单调时钟有界时间盒**（超时分类预注册；**用户态无超时出口的调用恰两处、均为登记豁免**：**(1) `pthread_join`**——按第二趟修订集群 A5(b) 裁定 join 不可有界，仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」；**(2) P1 `dlopen`/`dlsym`**——同属无用户态超时出口的调用（A1 禁第二线程、`:355-360` 闭表无 alarm/timer/sigaction，且 loader 持锁期间无安全中止路径），其表内 10 s 为**预注册测量与分类参数、非中止阈值**（预算面见观测窗推导、位点分类面见 `APPFREEZE` 位点约束），出口 = D1 节「时间盒/超时分类」条前两支（错误返回 ∨ 进程死亡）+ runner 观测窗到点（`:1066-1068`），**探针侧不设中止分支，freeze 静态审查不得因此判不通过**）：
 
 | 位点 | 时间盒 | 超时分类 |
 | --- | --- | --- |
 | P0 Allow 等待 | 300 s（自 `StartEntry` HDC 命令返回起，至 capture 出现首个 N1BDISC marker）；前置与超时分类外提为表后「P0 行外提」子项（r4 第四趟 W1 重构，内容逐字不变） | 同上外提 |
-| P1 dlopen+dlsym | 10 s（**测量与分类参数，非中止阈值**；`d1_elapsed_ms` 逐字落盘） | **盒到期无探针侧动作**；错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记）；**调用返回但耗时超盒 → 仅逐字记录、不改 verdict**（沿 criteria-gap 判别方法 (1)） |
+| P1 dlopen+dlsym | 10 s（**测量与分类参数，非中止阈值**；`d1_elapsed_ms` 逐字落盘） | **盒到期无探针侧动作**；错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记）；**调用返回但耗时超盒 → 仅逐字记录、不改 verdict**（沿决议 §4.2） |
 | P2 每条 create() | 60 s | 候选记 timeout，进入迟到观察窗 |
 | P2 迟到观察窗 | 60 s（全矩阵恰一次） | 窗尽→indeterminate，矩阵终止走 no-live-fd 分支 |
 | P3 D4 窗口 | 总 10 s / 每 poll 500 ms | 三态收口 |
@@ -1791,7 +1791,7 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 
 ---
 
-> **2026-09-11 判据变更 CC-3（第三对 pair gate 3 审查 FAIL 触发；用户显式授权「全量三处行内替换」；登记续于文末——沿 CC-1/CC-2 文末追加先例，避免文首插入造成行号锚位移；文首状态行指向本块）**：**变更编号 CC-3 ｜ 日期 2026-09-11 ｜ 授权 = 用户（直接人类决策者）于 2026-09-11 会话内显式授权「全量三处行内替换」 ｜ 变更性质 = 判据文本收窄 / 实现性更正，非实现变更**。
+> **2026-09-11 判据变更 CC-3（第三对 pair gate 3 审查 FAIL 触发；用户显式授权「全量三处行内替换」；登记续于文末——文末追加先例自 CC-2 起（CC-1 实际登记于文首 `:10`，曾造成锚位移）；本块沿 CC-2 先例文末追加，避免文首插入造成行号锚位移；文首状态行指向本块）**：**变更编号 CC-3 ｜ 日期 2026-09-11 ｜ 授权 = 用户（直接人类决策者）于 2026-09-11 会话内显式授权「全量三处行内替换」 ｜ 变更性质 = 判据文本收窄 / 实现性更正，非实现变更**。
 >
 > **触发事实**：第三对 pair 的 gate 3 冻结审查由**跨厂商隔离席**给出 **FAIL**（1 blocker / 1 major / 2 minor），其中 blocker = 「P1 `dlopen`/`dlsym` 的 10 s 时间盒未实现（`d1.rs` 无 deadline 分支、`P1_DLOPEN_BOX_S` 无运行时消费者）」。
 >
@@ -1805,8 +1805,16 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 >
 > **③ `:1079`**——改前原文（该表格行末尾）「外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变） |」；改后原文「外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变）；**P1 `dlopen`/`dlsym` 不属本断言「等待点」——本协议等待原语闭集 = `poll` 与 `clock_nanosleep`（探针 syscall 面节），dlopen/dlsym 为工作调用非等待原语，其 10 s 按时间盒表 P1 行为测量/分类参数，freeze 静态审查不得因 D1 实现无 deadline 分支判 A4 不通过** |」。
 >
-> **零新增行约束的声明与验证**：三处均为**行内替换**（无换行插入、无行删除），既有 `:NNNN` 交叉锚点全部不变；唯一新增 = 本登记块（文件最末）。**验证方式与结果**：(a) `wc -l docs/n1b-disc-gate-plan.md` = 改动前 **1790** → 三处替换后 **1790**（完全不变）→ 追加本登记块后 **1812**；(b) 锚点抽验 `sed -n '530p;1029p;1031p;1034p;1040p;1049p;1059p;1079p;1095p;1231,1232p;1434p'` 逐行与改动前对应，仅 `:1029`/`:1034` 按本变更改写、`:1079` 行尾追加，其余逐字不变，无错位；(c) `git diff --numstat docs/n1b-disc-gate-plan.md` = **4 行修改（4 insertions / 4 deletions；`:3` 状态行 + `:1029` + `:1034` + `:1079`）**，加本登记块新增行（0 deletions）；(d) `npx --no-install markdownlint-cli2 docs/n1b-disc-gate-plan.md` 告警数 **236 → 236**（无新增）。
+> **零新增行约束的声明与验证**：三处均为**行内替换**（无换行插入、无行删除），既有 `:NNNN` 交叉锚点全部不变；唯一新增 = 本登记块（文件最末）。**验证方式与结果**：(a) `wc -l docs/n1b-disc-gate-plan.md` = 改动前 **1790** → 三处替换后 **1790**（完全不变）→ 追加本登记块后 **1812**；(b) 锚点抽验 `sed -n '530p;1029p;1031p;1034p;1040p;1049p;1059p;1079p;1095p;1231,1232p;1434p'` 逐行与改动前对应，仅 `:1029`/`:1034` 按本变更改写、`:1079` 行尾追加，其余逐字不变，无错位；(c) `git diff --numstat docs/n1b-disc-gate-plan.md` = **26 4**（正文 4 行替换 = 4 insertions / 4 deletions；文末登记块 = +22 insertions / 0 deletions）；(d) `npx --no-install markdownlint-cli2 docs/n1b-disc-gate-plan.md` 告警数 **236 → 236**（无新增）。
 >
 > **跨节影响（零改动清单）**：`:530`（D1 节「时间盒/超时分类」）**零改动**，并被本变更指为 P1 出口的权威定义；`:1231-1232`（`APPFREEZE` 位点约束）与 `:1316`（位点守卫第 3 支）零改动；`:1059` 观测窗预算加数 **467 s / 冻结值 525 s 零改动**（P1 的 10 仍作预算加数消费）；A8（有界循环终止条件核对）、F1-F9 闭集、gate 3 清单（`:1434`）零改动、**不新增 fail 面**；`spikes/n1b-disc-phys-hap/staticcheck/check_static.py` **无需代码改动**——A4 检查器按循环注册表（`MONO_DEADLINE`/`MONO_DEADLINE_GATE`/`COUNTER_FUSE` 类）判等待点，`dlopen`/`dlsym` 不在其列，A4 现为 **PASS**。
 >
 > **生效前提**：本变更须经**跨厂商隔离重审**通过后方可生效（文首状态行随之更新为 reviewed-pass）；**重审席与本次 gate 3 审查席、判据解释裁决席均不同厂商**。重审通过前状态保持 `criteria-change-3-pending-review-2026-09-11`，不得据此变更恢复可 freeze/测量状态。
+>
+> **重审结论（2026-09-11，跨厂商隔离重审席）**：CC-3 **通过**——**0 blocker / 0 major / 4 minor**；重审席**明确拒绝读法 A**（「必须改实现」），与本块「判据解释裁决——实现不违反判据」一致。**本块「生效前提」已满足**：CC-3 自本日起生效，文首状态行更新为 `criteria-change-3-reviewed-pass-2026-09-11`，可按收窄后的口径恢复可 freeze/测量状态；原「重审通过前状态保持 pending-review」句作为历史记录保留。**四条 minor 处置**：(1) **m-1 已按重审席逐字措辞应用**——`:1029` 第三出口引用更正为「D1 节「时间盒/超时分类」条前两支（错误返回 ∨ 进程死亡）+ runner 观测窗到点（`:1066-1068`）」；原措辞把「观测窗到点」误挂到 D1 节，实测 `:530` 只写「错误返回」与「未返回且进程死亡」两支，观测窗到点在 `:1066-1068`（卡在 P1 时 PRE 未发射 → F2）。(2) **m-2 已按重审席逐字措辞应用**——`:1034` 行末类比括注「（沿 criteria-gap 判别方法 (1)）」更正为「（沿决议 §4.2）」；原类比过宽：`:1375`(1) 是「未枚举平台值 → `value-outside-frozen-domain`」枚举域溢出，而耗时超盒是数值测量、非枚举域溢出。(3) **m-4 已更正事实**——本块 m-4a（文末追加先例自 CC-2 起，CC-1 实际在文首 `:10`）与 m-4b（`git diff --numstat` 实测 **26 4**）。(4) **m-3 本次不改**——补 `d1_elapsed_ms` 进 D1 落盘清单超出用户授权的「全量三处行内替换」范围，登记为后续项（见下）。
+>
+> **后续项（本次不改，登记在案）**：
+>
+> - **m-3（D1 落盘清单未列 `d1_elapsed_ms`）**：`d1_elapsed_ms` 已在 `probe/src/d1.rs:135` 落盘、并因 CC-3 首次进入判据正文（`:1034` 时间盒列「`d1_elapsed_ms` 逐字落盘」），但 D1 落盘清单（`:525-526`）未列该字段——建议后续将其补进该清单，避免「正文引用字段」与「落盘清单」双源。
+> - **`check_static.py:582` 注释口径略旧**：`spikes/n1b-disc-phys-hap/staticcheck/check_static.py:582` 附近注释仍称 `pthread_join` 为「唯一无界调用」，与 CC-3 后口径（无用户态超时出口的调用恰两处）不一致——注释略旧，不影响 A4 PASS/FAIL，留待下次必然重建时更正。
+> - **`.ets:198` 注释与实现不符**：`spikes/n1b-disc-phys-hap/entry/src/main/ets/vpnextensionability/N1BDiscVpnExtensionAbility.ets:198` 注释写「10 s box **inside native**」，与实现不符（native 侧无盒）——现在不改（改 .ets 会触发重编译与 HAP 哈希漂移），登记为已知表述瑕疵。
