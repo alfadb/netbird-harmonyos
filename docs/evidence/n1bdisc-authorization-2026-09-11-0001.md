@@ -100,6 +100,8 @@ reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated revie
 | 1 host-only 同步 | pass | 现场核验（2026-09-11）：`git status --short --branch` → `## main...origin/main`；`git status --porcelain` → 空（0 未提交项）；`git rev-parse HEAD` → `8f926fb6581febab58df6487b0b818b3b8f9fab6`；`git rev-list --left-right --count origin/main...HEAD` → 左右计数均 0（原始输出以 TAB 分隔，即 `0`/`0`，与 origin/main 同步）；HDC0 只读探针 `pgrep -x hdc -a` → `618318 hdc -m -s ::ffff:127.0.0.1:8710`、`ps -eo pid,comm \| awk '$2=="hdc"'` → `618318 hdc`（同一次实测，同一进程；`ps -o lstart` 实测启动于 14:05:07，PPID 1）——该进程为 **hdc server/daemon**（`-m -s` + endpoint 参数形态），非设备命令执行；**未执行任何设备/hdc 命令**、未连接设备、未执行 `hdc kill`，**零设备接触** |
 | 2 audit-1 | pass | 本对 gate 2 证据 = 仓外双文件（现场复核存在 + 复算一致）：`~/harmonyos-signing/netbird-n1bdisc/audit/pair-20260911-0001/new-pair-id-consumption-audit-1.txt`（5626 B，SHA-256 `9a56c006a4dbdef95f52887e28e7517459b84a0f95a6bcd9df74ce3e5d9e5cf7`）+ 同名 `.sha256` sidecar（内容即上述哈希，`sha256sum -c` → `OK`）。**新 code_sha 有界 grep 复检**（限定 `README.md docs scripts spikes`，排除 `build/.hvigor/target/node_modules/.git/__pycache__`）：三 ID 命中 **AUTH 5 行 / campaign 9 行 / EV 6 行**，全部为治理登记本体与索引/交接引用；消费标记（`consumed: true`/`consumed=true`、本对非 candidate `identity_status`、本对 evidence 记录本体 `record_status: collected/reviewed-pass`）**零命中**（仓内既有 `consumed: true` 命中均为 E3 历史记录与第三对执行表自述，无一绑定本对）→ candidate 态保持 |
 | 3 freeze + 静态审查 | pass（**freeze-4 成立**） | 有效记录 = **freeze-4 原文 + 更新版沿革勘误**的组合（审查席裁决「成立、0 blocker / 0 major / 1 minor、**无需重出 freeze-4**」）。freeze-4：`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-4-20260911.txt`（SHA-256 `b5aed745a25c3029c86100a2ac5a4ff441a413e2ccea1b3eba5d59e1c3ad4a84`，现场复算与 sidecar 一致）；附件 `gate3-staticcheck-output-pair4.json`（`ae3bd883fcc61e08a8f7eaaa22df79ef9af7f7b34b0b8f49ae58080c6339cd54`）、`gate3-symbol-transcription-pair4.txt`（`ad61a4fb147482379adda6b1ee326a88f917ef79acaa5efe00d88a3560df7f57`）、`gate3-criteria-dimension-recheck-pair4-20260911.txt`（`905ac168824852ce5a4c07ebde1c371b07e7b5b299977ecdb3a24dc4f1c909ad`），三附件现场复算一致；沿革勘误 `gate3-freeze4-erratum-lineage-20260911.txt`（`9b85b1c4a4439782c67c7708bff24a7142afaf358e2c999fe167bd2de90bc289`） |
+| 4 host-prep `tconn` + 一次内存级 `list targets` | pass | 设备侧（2026-09-11）：`tconn` 由**用户本人**执行，连接建立于 **2026-09-11 14:05:07 CST**（设备 LAN 地址已脱敏，形状 `###.###.##.###:#####`）；**用户已确认该连接即为 gate 4 的 `tconn`**。主会话执行**恰一次**内存级 `list targets`：`rc=0`、`targets_count=1`、target 形状 `###.###.##.###:#####`、长度 20；**target 值未输出、未持久化**（`endpoint_or_token_persisted: false`）。**过程注记**：该连接建立于 gate 3 复审结论落定之前，属用户预备连接；该期间**未执行任何设备查询**——gate 4 的 `list targets` 与 gate 5 三探针均在其后一次性执行（详见下方追加段） |
+| 5 `-TargetBindingConfirm` | pass（**元组逐字 MATCH**） | 三探针（同一次执行，逐字 argv）：① `hdc version` → `Ver: 3.2.0f`；② `hdc -t <T> shell param get const.product.model` → verbatim **9 字节**（含 1 个尾随 ASCII 空格）→ trim 后 `PLA-AL10` → **MATCH（trim 后）**；③ `hdc -t <T> shell param get const.product.software.version` → verbatim **36 字节**、`od -c` 逐字节证据 → trim 后 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)` → **MATCH（逐字）**。对照 CC-5 冻结元组（判据 `:268`）→ `verdict = pass-tuple-bind-confirmed`（详见下方追加段） |
 
 **判据基线**：`docs/n1b-disc-gate-plan.md` @ git `04cf222`（冻结，`criteria-frozen-2026-09-02`）+ **CC-1**（`criteria-change-1-reviewed-pass-2026-09-05`）+ **CC-2**（`criteria-change-2-reviewed-pass-2026-09-06`，元组重绑）+ **CC-3**（`criteria-change-3-reviewed-pass-2026-09-11`，P1 `dlopen`/`dlsym` 时间盒语义收窄）+ **CC-4**（`criteria-change-4-reviewed-pass-2026-09-11`，D1 `elapsed_ms` 落盘依据 + 467/525 上界法理修正）+ **CC-5**（`criteria-change-5-reviewed-pass-2026-09-11`，设备元组重绑至 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`，判据 `:268`），**六者全部 `reviewed-pass`**；设备冻结元组 = `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`（判据 `:268`）。
 
@@ -116,3 +118,32 @@ reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated revie
 **收官（2026-09-11）**：第四对 pair host-only 门 **gate 1-3 全部 pass**，**freeze-4 成立**（0 blocker / 0 major / 1 minor，含沿革勘误消解）。三 ID 仍未消费；全程零设备接触、零 HDC 命令、pair 未消费。下一步 **gate 4**（设备侧，须用户本人连接设备）；gate 5 三探针对照 CC-5 重绑元组；gate 13 Live 须用户全新确认。逐门登记随执行继续追加。
 
 **执行提醒**：**设备自动更新须关闭**——首对与第三对两次 gate 5 元组漂移退役均系设备 OTA 所致；执行 gate 4-5 前须关闭设备自动更新，避免再次漂移退役。
+
+### 门 4-5 执行登记追加（第四对，2026-09-11，设备侧；本节为追加，上文不改）
+
+**gate 4（host-prep `tconn` + 恰一次内存级 `list targets`）**：`tconn` 由**用户本人**执行，连接建立于 **2026-09-11 14:05:07 CST**（设备 LAN 地址已脱敏，形状 `###.###.##.###:#####`）；**用户已确认该连接即为 gate 4 的 `tconn`**。主会话执行**恰一次**内存级 `list targets`：`rc=0`、`targets_count=1`、target 形状 `###.###.##.###:#####`、长度 20；**target 值未输出、未持久化**（`endpoint_or_token_persisted: false`）。
+
+**gate 5（`-TargetBindingConfirm`）三探针逐字 argv 与实测值**（同一次执行）：
+
+1. `hdc version` → `Ver: 3.2.0f`
+2. `hdc -t <T> shell param get const.product.model` → verbatim **9 字节**（含 1 个尾随 ASCII 空格）→ **只剥尾随空白** trim 后 = `PLA-AL10` → **MATCH（trim 后）**
+3. `hdc -t <T> shell param get const.product.software.version` → verbatim **36 字节**，`od -c` 逐字节证据（末行行尾为 1 个空格字节，此处以 `␠` 标记以免行尾空白；逐字原文见仓外 record 的 `measured.software_version_verbatim_od_c`）：
+
+```text
+0000000   P   L   A   -   A   L   1   0       7   .   0   .   0   .   1
+0000020   0   5   (   S   P   1   0   C   0   0   E   1   0   5   R   7
+0000040   P   3   )   ␠
+0000044
+```
+
+   trim 后 = `PLA-AL10 7.0.0.105(SP10C00E105R7P3)` → **MATCH（逐字）**。比对纪律：**只剥尾随空白、内部空格必须保留**——前两对曾因 trim 误删分隔空格而误报 DRIFT。对照 CC-5 冻结元组（判据 `:268`）→ **`verdict = pass-tuple-bind-confirmed`**。
+
+**过程注记（tconn 时点）**：该 `tconn` 建立于 **14:05:07**，**早于 gate 3 复审结论落定**，属用户为 gate 4 预备而建立的**预备连接**；该期间**未执行任何设备查询**——gate 4 的 `list targets` 与 gate 5 三探针均在其后一次性执行。用户已确认该连接即为 gate 4 的 `tconn`，故按过程注记如实登记。
+
+**gate 1 HDC0 表述澄清（2026-09-11 追加，重要）**：本节 gate 1 一栏记录的「登记时只读探针命中 1 个 `hdc` server」须按下述读法理解——**gate 1 实际执行于 13:42（当时 HDC0 = 0，已核验）**；登记时（约 14:18）探针所见的该 server 系 **14:05:07 用户为 gate 4 预备而建立的连接**，**属 gate 1 执行之后的状态变化**，**不构成 gate 1 的 HDC0 不合格**（gate 1 执行时点 HDC0 为 0，合规）。
+
+**仓外 confirmation record**：`~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-pair4-20260911-0001.json`，sha256 `80f110087bfa6e0cb365d4f0585e99a2297dbd1c9a7debafbb8ec16e59c90528`（同名 `.sha256` sidecar，`sha256sum -c` → `OK`）。
+
+**清理**：`hdc kill` 已由父会话执行；HDC0 已复核归零（`pgrep -x hdc -a`、`ps -eo pid,comm | awk '$2=="hdc"'`、`ss -ltnp | grep 8710` 均零匹配、无 8710 监听）。
+
+**下一步**：**gates 6-12（host-only，HDC0 已恢复）**——gate 8 用既有 AGC profile 重新签名 HAP；**gate 13 Live 须用户全新确认**（决议 §4.3.9）。三 ID 保持 candidate 态、`consumed=false`、未执行 DryRun/Live。
