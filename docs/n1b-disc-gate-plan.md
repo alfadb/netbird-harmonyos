@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）；`criteria-change-3-reviewed-pass-2026-09-11`（CC-3 P1 `dlopen`/`dlsym` 时间盒语义判据文本收窄——判据解释裁决认定实现不违反判据、`:1029` 的单一豁免措辞为过度断言（原文见文末登记块 ① 改前对照），三处行内替换零新增行；经跨厂商隔离重审通过（0 blocker / 0 major / 4 minor 已处置）——CC-3 已生效，可按收窄后的口径 freeze/测量，见**文末**登记块）；`criteria-change-4-pending-review-2026-09-11`（CC-4 判据与证据格式同步——D1 `elapsed_ms` 落盘依据 + 467/525 上界法理修正；须经跨厂商隔离重审通过后方可生效，见文末登记块）
+最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）；`criteria-change-3-reviewed-pass-2026-09-11`（CC-3 P1 `dlopen`/`dlsym` 时间盒语义判据文本收窄——判据解释裁决认定实现不违反判据、`:1029` 的单一豁免措辞为过度断言（原文见文末登记块 ① 改前对照），三处行内替换零新增行；经跨厂商隔离重审通过（0 blocker / 0 major / 4 minor 已处置）——CC-3 已生效，可按收窄后的口径 freeze/测量，见**文末**登记块）；`criteria-change-4-reviewed-pass-2026-09-11`（CC-4 判据与证据格式同步——D1 `elapsed_ms` 落盘依据 + 467/525 上界法理修正；经跨厂商隔离重审通过（0 blocker / 0 major / 2 minor 已处置）——CC-4 已生效，判据与证据格式一致，见文末登记块）
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -1064,7 +1064,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 **HilogStream 停止条件（r3 第二趟 E8 冻结，按终态停止，机器可判定）**：下列任一成立即停——(a) `N1BDISC_POST` marker 已在 capture 流中出现（终态已捕获，`complete` 字面；r4 R1）；(b) host finally 序列执行至其步骤 1（finally 自身即停流，覆盖观测窗到点、死亡、挂起等一切收口路径）。825 s 仅在二者均未发生的 runner 异常情形下兜底熔断；尾窗不再依赖「启动到 StartEntry 返回之间的实际耗时 ≪ 预留裕量」这一未实测假设。
 **求值窗 525 s 自首个 `N1BDISC_` marker 起算**，不按 HilogStream 启动时刻起算。Allow 盒到点未出现首个 marker → 按其自身规则收口（**已消费 campaign 收口**：StartEntry 已发出、ID 已消费，走 host finally + fail 终态，见时间盒表 P0 行与 B3 裁定 (a) 的 r3 第二趟 E6 修正），观测窗从未开启。
 - **到点收口规则**：525 s 到点时 runner 停止接受新 marker 进入求值（之后到达的 N1BDISC marker 单独登记 `late_marker_observed`，不参与求值、不改 verdict），随即：若 `N1BDISC_POST` 已在 capture 中 → 正常封签（`protocol=complete`）；
-若仅 `N1BDISC_PRE` 在 → 停止 HilogStream，按 host finally 序列采死亡证据：`process_death_observed = observed-true` → 按 `pre-only` 合法终态收口（求值规则见 verdict 节）；`process_death_observed != observed-true`（即 false 或 unobservable——进程仍存活或状态不可判）→ `fail`（探针未完成预注册采集；525 s 为**硬到点**，467 s 系**名义预算、非严格上界**——P1 属登记豁免无局部上界；到点仍存活即未完成预注册采集，按本规则收口 `fail`，**含 P1 慢/挂情形**：该裁决为预注册决定，与 `:1231-1232`「平台 watchdog 在一次合法加载上杀进程不得判成探针缺陷」不冲突——后者约束**探针缺陷归因**，本处仅按完整性失败收口）——**r12 两侧死亡谓词统一挂 `process_death_observed` 分量（blocker 3）**：原「有死亡证据（`:vpn` 消失/平台终止）」「无死亡证据」自立谓词废除，判定一律经「死亡事实记录（证据向量）」节闭集；
+若仅 `N1BDISC_PRE` 在 → 停止 HilogStream，按 host finally 序列采死亡证据：`process_death_observed = observed-true` → 按 `pre-only` 合法终态收口（求值规则见 verdict 节）；`process_death_observed != observed-true`（即 false 或 unobservable——进程仍存活或状态不可判）→ `fail`（探针未完成预注册采集；525 s 为**硬到点**，467 s 系**名义预算、非严格上界**——P1 属登记豁免无局部上界；到点仍存活即未完成预注册采集，按本规则收口 `fail`，**含 P1 返回后超时吃预算的情形**（P1 挂死时 PRE 未发射，走 `:1068` PRE 缺失支）：该裁决为预注册决定，与 `:1231-1232`「平台 watchdog 在一次合法加载上杀进程不得判成探针缺陷」不冲突——后者约束**探针缺陷归因**，本处仅按完整性失败收口）——**r12 两侧死亡谓词统一挂 `process_death_observed` 分量（blocker 3）**：原「有死亡证据（`:vpn` 消失/平台终止）」「无死亡证据」自立谓词废除，判定一律经「死亡事实记录（证据向量）」节闭集；
 若 `N1BDISC_PRE` 缺 → `fail`（PRE 缺失完整性失败）。
 **`PidOfVpn` 可观测性与终态完整性是两个独立的判定输入（r3 冻结，r4 R1 措辞更新；r9：登记落点改按证据向量分量）**：`PidOfVpn` 不可观测**单独**不构成 fail（它只使「`:vpn` 消失证据」无法建立，`process_death_observed` 按其自身规则记 `unobservable`，见「死亡事实记录（证据向量）」节证据规则 2 回退条件）；`PidOfVpn` 不可观测不单独构成 fail；fail 仍只来自 fail 闭集（本情形下真正的 fail 源通常是 F2 或 F9）（r10，A m-05：原「fail 只来自完整性条件本身——`N1BDISC_PRE` 缺失」过窄，漏 F9 等其余闭集 fail 源）。
 - **出处更正（r0 错误登记）**：r0 曾写「沿 G0 固定窗口范式（60 s 量级）」——`docs/g0-go-arm64-physical-probe.md:170` 的固定 60 秒是 G0 场景 S1 的 `HilogStream` 采集窗，属 G0 单场景规格、非十三门范式共享参数，且 60 s 远小于本 campaign 时间盒上界和，引错出处且量级错误；r1 弃用该引法。
@@ -1852,3 +1852,11 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 > **生效前提**：本变更须经**跨厂商隔离重审**通过后方可生效（文首状态行随之更新）；**重审席与本次 gate 3 复审席不同厂商**。重审通过前状态保持 `criteria-change-4-pending-review-2026-09-11`，不得据此变更恢复可 freeze/测量状态。
 >
 > **本变更不构成任何执行授权**——不授权 freeze、不授权测量、不授权任何 gate 动作或 pair/evidence ID 消费。
+>
+> **重审结论（2026-09-11，CC-4 生效手续）**：CC-4 经**跨厂商隔离重审**（重审席与本次 gate 3 复审席不同厂商）判**通过**——**0 blocker / 0 major / 2 minor**。重审席明确表态「CC-4 是正当的判据与证据格式同步——方向是**增加义务**：`:1034` 的「逐字落盘」一字未删（`:1034` 与 `05b2b53` 逐字 IDENTICAL）、`:521` 冻结扩展 payload、`:526` 写入落盘清单、实现侧真的落盘；若走「删掉该句」路线则 CC-3 只剩豁免、失去唯一能机器证明 P1 实际耗时的字段」，并**拒绝**「删掉 `:1034` 逐字落盘句」的替代路线。**本块「生效前提」已满足**，CC-4 自本日起生效，文首状态行转 `criteria-change-4-reviewed-pass-2026-09-11`。
+>
+> **重审 minor 处置**：
+>
+> **m-1（本块验证句不精确）**：重审席指出本块「零新增行约束的声明与验证」处写「正文四处」而实际 `git show 4b81f53 --unified=0` 为 **5 处单行替换**（`:3` 状态行 + `:521`/`:526`/`:1059`/`:1067`）+ 文末 `@@ -1820,0 +1821,34 @@`；且提交后对 `HEAD:` 自比对恒 IDENTICAL。**据此更正**：明确写明「正文四处（`:521`/`:526`/`:1059`/`:1067`）+ 状态行 `:3` 一处，共 5 处单行替换；锚点比对基准为 `05b2b53`（CC-4 前）」。`:3` 状态行属 CC-2/CC-3 既定先例（历次变更均以状态行登记生效态），不构成越权改动。
+>
+> **m-2（`:1067` P1 措辞过宽）**：已按重审席逐字建议将 `:1067` 的「**含 P1 慢/挂情形**」改为「**含 P1 返回后超时吃预算的情形**（P1 挂死时 PRE 未发射，走 `:1068` PRE 缺失支）」——P1 **挂死**时 P5T 未到、PRE 从未发射，实际走 `:1068`（PRE 缺失 → `fail`）；只有 **P1 返回但耗时超预算**才可能落 `:1067`。该处置**未改变 fail 结论**（方向仍是把 P1 相关情形纳入 `fail`，未开免责口子）。
