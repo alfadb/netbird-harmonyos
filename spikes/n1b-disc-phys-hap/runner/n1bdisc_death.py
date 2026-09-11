@@ -140,6 +140,13 @@ class FaultEntryParse:
 def parse_fault_entry(file_name: str, text: str) -> FaultEntryParse:
     """按证据规则 5 契约解析一条 faultlogger 文本条目（:1234-1242）。"""
     ft_raw = _extract_field(text, "Fault_Type")
+    # M1（gate 3 审查）：:1234 值契约 = ``:`` 后**首个非空白 token** 起至行尾；
+    # 无 token 时该契约无定义产物 = 值无法提取（:1378）→ 收口为 None，走既有
+    # unobservable(cause=fault-type-unparsable) 支。**仅 Fault_Type 如此收口**：
+    # ``Signal`` 空值属「其余」段（:1241 逐字含空值），须保持空串原文入档
+    # （classify_signal('') → other），不得对称化。
+    if ft_raw == "":
+        ft_raw = None
     sig_raw = _extract_field(text, "Signal")
     if ft_raw is None:
         ft_kind, ft_value = None, None

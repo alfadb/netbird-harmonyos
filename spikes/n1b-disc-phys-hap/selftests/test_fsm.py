@@ -11,7 +11,8 @@
   T. 时间盒常量与观测窗冻结值（:1031-1049/:1056-1065 逐项一致断言）
   W. 观测窗状态机四分支 / late_marker / Allow 已消费收口 / 位次约束
   ⑥ fault 解析契约正反例（归一化/JSCRASH 域外不 fail/SIGKILL 对照/多条目聚合/
-     混合可解析/FaultRecv 部分失败/raw 谓词）
+     混合可解析/FaultRecv 部分失败/raw 谓词/Fault_Type 空值不可解析（M1）/
+     空 Signal 其余段回归钉）
   ⑧ fake-HDC 沙箱（违规 argv 拒绝/合法白名单全操作可过/合成流三形态+chunk 注入）
   ⑨ PRE/POST 通道（complete/pre-only、SKIP 同现域门、全拒 POST 照发 pass、
      barrier-never-observed、ledger 同切点、P12 派生比对 F8(2) 钉、flag-race
@@ -323,6 +324,54 @@ def test_fault_timestamp_and_field_contracts():
            "Fault_Type/Signal 字段行缺失 = 不可解析（分量 unobservable 面，:1378）")
     expect(death.snapshot_diff(["a", "b"], ["b", "c", "a", "d"]) == ["c", "d"],
            "窗界唯一判据 = 快照文件集合差分、字节序（:1214/:1254）")
+
+
+def test_fault_type_empty_value_unparsable():
+    # M1（gate 3 审查）：:1234 值 = ``:`` 后首个非空白 token 起至行尾；无 token 时
+    # 契约无定义产物 = 值无法提取 → :1378 走 unobservable(fault-type-unparsable)，
+    # 不得洗成 other:<空>（:1237 空值显式排除在 other: 分支外）。
+    for tag, text in (
+            ("Fault_Type:（无内容）",
+             "Fault_Type:\nSignal: SIGSEGV\n2026-09-06 10:00:00.000\n"),
+            ("Fault_Type:   （全空白）",
+             "Fault_Type:   \nSignal: SIGSEGV\n2026-09-06 10:00:00.000\n")):
+        p = death.parse_fault_entry("a.txt", text)
+        expect(p.fault_type_raw is None and p.fault_type_kind is None
+               and p.fault_type_value is None,
+               "%s → 值无法提取 = 字段不可解析 None（:1234/:1378）" % tag)
+        components = agg([p])
+        expect(components.fault_type_observed == unobs("fault-type-unparsable"),
+               "%s → 分量 unobservable(fault-type-unparsable)（:1378）" % tag)
+        expect(components.unknown_causes == ("fault-type-unparsable",),
+               "%s → unknown cause 入档（:1343）" % tag)
+        expect(components.out_of_domain_literals == (),
+               "%s → 空值不进 other: 域外档（:1237）" % tag)
+    # :1234 语义不变：``:`` 后首个非空白 token 起至行尾（含内部空格原样返回）
+    spaced = death.parse_fault_entry(
+        "b.txt", "Fault_Type:  foo bar\n2026-09-06 10:00:00.000\n")
+    expect(spaced.fault_type_raw == "foo bar",
+           "含内部空格的值仍按「至行尾」原样返回（:1234）")
+
+
+def test_signal_empty_value_regression_other_segment():
+    # 回归保护（防未来误对称化）：Signal 空值属「其余」段（:1241 逐字含空值）——
+    # 原文逐字入档、不命中任何签名段 → observed-false；不得变 signal-unparsable。
+    for tag, text in (
+            ("Signal:（无内容）",
+             "Fault_Type: JSCRASH\nSignal:\n2026-09-06 10:00:00.000\n"),
+            ("Signal:   （全空白）",
+             "Fault_Type: JSCRASH\nSignal:   \n2026-09-06 10:00:00.000\n")):
+        p = death.parse_fault_entry("a.txt", text)
+        expect(p.signal_raw == "" and p.signal_kind == "other"
+               and p.signal_value == "",
+               "%s → 其余段 other + 空原文逐字（:1241）" % tag)
+        components = agg([p])
+        expect(components.signal_observed == "observed-false",
+               "%s → observed-false（不命中签名段，:1246）" % tag)
+        expect(components.signal_literals == ("",),
+               "%s → 原文逐字入档（:1241）" % tag)
+        expect(components.signal_observed != unobs("signal-unparsable"),
+               "%s → 不得走 signal-unparsable（:1241 空值仍可解析）" % tag)
 
 
 def test_multi_entry_positive_first_not_diluted():
