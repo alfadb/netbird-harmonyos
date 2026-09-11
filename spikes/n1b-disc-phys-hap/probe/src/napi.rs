@@ -95,6 +95,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("rejtext_emit", napi_rejtext_emit);
     reg!("d4_probe", napi_d4_probe);
     reg!("d5_probe", napi_d5_probe);
+    reg!("wg_probe", napi_wg_probe);
     reg!("d8a_probe", napi_d8a_probe);
     reg!("d7_probe", napi_d7_probe);
     reg!("d8b_probe", napi_d8b_probe);
@@ -411,6 +412,11 @@ unsafe extern "C" fn napi_d4_probe(env: NapiEnv, info: NapiCallbackInfo) -> Napi
 unsafe extern "C" fn napi_d5_probe(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::d5::d5_probe(a.i32_at(0, -1)))
+}
+
+unsafe extern "C" fn napi_wg_probe(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::wg::wg_probe(a.i32_at(0, -1), a.bool_at(1, false)))
 }
 
 unsafe extern "C" fn napi_d8a_probe(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

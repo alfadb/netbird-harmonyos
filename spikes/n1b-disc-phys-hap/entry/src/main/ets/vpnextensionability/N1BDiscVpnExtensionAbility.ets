@@ -387,6 +387,12 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     probe.d4_probe(fdDup, mb1);
     // P4 D5 tun write -> sink.
     probe.d5_probe(fdDup);
+    // WG (out-of-gate, added 2026-09-11): real BoringTun handshake + crypto
+    // round trip between two in-process tunnels, closed by writing the
+    // decrypted packet into this same TUN fd (sink 0.0.0.0:47003). Runs after
+    // D5 so the frozen P3/P4 results are already recorded, and before D8a;
+    // the P-chain itself is untouched.
+    probe.wg_probe(fdDup, mb1);
     // P5 D8a 10-level MTU write-return ladder.
     probe.d8a_probe(fdDup, mb1);
     // P5T PRE (P1-P5 facts + fd-ledger P5T snapshot digest; no skips on this path).
