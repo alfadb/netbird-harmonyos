@@ -182,6 +182,23 @@ def test_marker_parse_malformed_and_unknown_literals():
            "spot-check frozen literals")
 
 
+def test_d1_end_payload_carries_elapsed_ms_after_b1():
+    """gate 3 复审 B-1：D1_END payload 追加 `elapsed_ms` 后仍可经解析入口逐字捕获。"""
+    message = "N1BDISC_D1_END|load=loaded|elapsed_ms=123"
+    events = core.scan_markers([mk("cn.alfadb.netbird.n1bdisc", message)])
+    expect(len(events) == 1 and events[0].name == "N1BDISC_D1_END",
+           "marker name must stay N1BDISC_D1_END: %r" % [e.name for e in events])
+    expect(events[0].kv.get("elapsed_ms") == "123",
+           "elapsed_ms must be captured verbatim: %r" % events[0].kv)
+    expect(events[0].kv.get("load") == "loaded",
+           "existing load field must not regress: %r" % events[0].kv)
+    name, kv, malformed, duplicate = core.parse_marker_message(message)
+    expect(name == "N1BDISC_D1_END" and kv == {"load": "loaded", "elapsed_ms": "123"},
+           "parse_marker_message on D1_END payload: %r" % (kv,))
+    expect(malformed == () and duplicate == (),
+           "no malformed/duplicate segments: %r %r" % (malformed, duplicate))
+
+
 # ==========================================================================
 # B. chunk 重组
 # ==========================================================================

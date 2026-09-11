@@ -4,7 +4,7 @@
 //!
 //! Marker sequence (:521): `N1BDISC_D1_BEGIN` -> `N1BDISC_D1_LOADED|so=<member>`
 //! | `N1BDISC_D1_FAIL|err=<dlerror>` (full text also via CHUNK stream=dlerror
-//! item=0) -> `N1BDISC_D1_SYM|total=14|resolved=<n>` -> `N1BDISC_D1_END|load=`.
+//! item=0) -> `N1BDISC_D1_SYM|total=14|resolved=<n>` -> `N1BDISC_D1_END|load=<state>|elapsed_ms=<ms>`.
 //! Timebox 10 s (measured; dlopen of the already-loaded self is non-blocking —
 //! a hang would surface via the runner's window, see gate-plan :530).
 //!
@@ -88,7 +88,10 @@ pub fn d1_probe(so_path: &str) -> String {
     ));
 
     let elapsed = sys::mono_ms().saturating_sub(t0);
-    emit(&format!("N1BDISC_D1_END|load={}", load_state));
+    emit(&format!(
+        "N1BDISC_D1_END|load={}|elapsed_ms={}",
+        load_state, elapsed
+    ));
 
     let mut j = String::from("{");
     j.push_str(&jstr(
