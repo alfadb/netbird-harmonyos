@@ -82,3 +82,29 @@ reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated revie
 
 - AGC 应用 **NetBird N1BDISC**（包名 `cn.alfadb.netbird.n1bdisc`，与判据 :270 冻结 bundle 名逐字一致）与调试 Profile「NetBird N1BDISC Debug」为既有事实，沿第二对登记（[n1bdisc-authorization-2026-09-06-0001.md](n1bdisc-authorization-2026-09-06-0001.md)「签名链」节）引用；本文不复算、不新增签名事实。
 - **本授权不含任何签名执行**；签名须届时另行授权。
+
+## 门序列执行登记（第三对，2026-09-11，host-only 门 1-3）
+
+> 本节为 2026-09-11 的追加登记，**上文（含 YAML 顶部字段、依据、范围声明、门序列节）不改**；与上文表述冲突时以本节执行事实为准。体例沿首对授权登记「门序列执行登记」表。
+
+| 门 | 状态 | 事实 |
+| --- | --- | --- |
+| 1 host-only 同步 | pass | 现场核验（2026-09-11）：`git status --short --branch` → `## main...origin/main`；`git status --porcelain` → 空（0 未提交项）；`git rev-parse HEAD` → `5a56ba30e9d672ac0e543cb1e0175f03a853509c`；`git rev-list --left-right --count origin/main...HEAD` → 左右计数均 0（输出以 TAB 分隔，即 `0`/`0`，与 origin/main 同步）；HDC0 探针 `ps -eo pid,args` 经 `grep -E '[h]dc'` 过滤 → **零匹配（rc=1）**，无 hdc 进程，未执行 `hdc kill`（无对象），**零设备接触** |
+| 2 audit-1 | pass | 本对 gate 2 证据 = 仓外双文件（现场复核存在）：`~/harmonyos-signing/netbird-n1bdisc/audit/pair-20260906-0002/new-pair-id-consumption-audit-1.txt`（4525 B，SHA-256 `35825ebde9a267cf78f14202c983894021d381157643bba0221d558082274a4c`）+ 同名 `.sha256` sidecar（内容即上述哈希，现场复算一致）。**audit-1 沿用 + 新 code_sha 检索复检**：audit-1 执行时 code_sha=`e6ca262b…`，本对 gate 1-3 完成于新 code_sha `5a56ba3…`，现场以有界 grep（限定 `README.md docs scripts spikes`，排除 `build/.hvigor/target/node_modules/.git/__pycache__`）复检三 ID：命中 **9 行 / 4 文件**，全部为治理登记/索引引用；消费标记（`consumed: true`/`consumed=true`、本对非 candidate `identity_status`、本对 evidence 记录本体 `record_status: collected/reviewed-pass`）**零命中** → `outside-consumption-hits=0`、`inside-evidence-consumption-hits=0`，candidate 态保持 |
+| 3 freeze + 静态审查 | pass（**freeze-3-v4 成立**） | freeze 记录 `~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-3-v4-20260911.txt`（SHA-256 `b0a018f424d4f87513bbae26091c8b5324c03189103214c93148a88caa191894`，现场复算一致）；附件 `gate3-staticcheck-output-pair3-v4.json`（`ae3bd883fcc61e08a8f7eaaa22df79ef9af7f7b34b0b8f49ae58080c6339cd54`）、`gate3-symbol-transcription-pair3-v4.txt`（`ad61a4fb147482379adda6b1ee326a88f917ef79acaa5efe00d88a3560df7f57`）、`gate3-criteria-dimension-recheck-pair3-v4-20260911.txt`（`2258fcf243d7fe5716d187f67b4c8dc88d88133f955658acf477599280a121fd`），三附件现场复算一致。**跨厂商隔离复审结论：0 blocker / 0 major / 2 minor**（m-1/m-2 见下），判 freeze-3-v4 成立。gate 3 经 v2 FAIL → v3 FAIL → 整改 → v4 重出（FAIL 不消费 pair） |
+
+**判据基线**：`docs/n1b-disc-gate-plan.md` @ git `04cf222`（冻结）+ **CC-1**（2026-09-05）+ **CC-2**（2026-09-06 元组重绑）+ **CC-3**（2026-09-11，P1 `dlopen`/`dlsym` 时间盒语义收窄）+ **CC-4**（2026-09-11，D1 `elapsed_ms` 落盘依据 + 467/525 上界法理修正），**CC-1~CC-4 全部 `reviewed-pass`**。
+
+**关键实测数字（freeze-3-v4）**：selftests **207 passed**（0 failed/error）；探针 host 单测 **15 passed**（fresh 重编译 `cargo test --offline --locked`）；A1-A12 **12/12**（被检树指纹 `e6e93916ef18` / 45 文件，差异 2 文件全部归因 B-1 实现整改 `53faa1f`）；导出 T 符号 **14/14 不变**；制品 `.so` SHA-256 **`5e5408772e75b78f3b01d7a6297bc2ab9fe16a9860ba9c36df248bed667a297c`**（1160224 B；`entry/libs/arm64-v8a/` 与 `probe/target/aarch64-unknown-linux-ohos/release/` 两处一致，现场复算一致）。
+
+**两条 minor 与处置**：
+
+- **m-1（陈旧元数据/注释）**：freeze 后**不得修正**被冻结资产（含注释/元数据）——freeze 后改动资产会撞判据 `:1124` 的 `invalid` 条件（ready freeze 后 HAP/`.so`/runner/配置矩阵/符号清单/marker 集冻结文件 SHA-256 与 freeze 记录不一致即判 invalid）；陈旧注释只能在**本 campaign 结束后**或**下一对 freeze 前**一次性更正。
+- **m-2（v4 §12 引用计数）**：v4 记录 §12 的「3+2」计数与当前实况不符——**v1/v2 当前实为各 7 文件**被引用（现场 `grep -rIl` 实测各 7 文件）；**不改冻结资产**，在后续记录中更正。
+- 两条将另出 **v4 勘误**收口。
+
+**三 ID 状态**：`AUTH-N1BDISC-PHYS1API26-20260906-0002` / campaign `N1BDISC-PHYS1API26-20260906-0002` / evidence `EV-N1BDISC-PHYS1API26-20260906-0002` 保持 **candidate 态、未消费**（`identity_status: candidate`、`consumed=false`、`reusable=false`、`is_evidence=false`）；**gate 4 起为设备侧**（`tconn` + 恰一次内存级 `list targets`，须用户本人连接设备；gate 5 三探针对照 CC-2 重绑元组 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`）；**gate 13 Live 须用户全新确认**（决议 §4.3.9）。
+
+**本轮整改链（三个提交 + 更早两个，均已推送）**：`53faa1f`（B-1 实现：`N1BDISC_D1_END` payload 追加 `|elapsed_ms=<ms>`、`.so` 重建、新增 selftest）→ `4b81f53`（CC-4 判据：`:521` payload 冻结扩展、`:526` 落盘清单加 `d1_elapsed_ms`、`:1059` 上界→名义预算 + 525 硬到点、`:1067` 收口法理改写）→ `5a56ba3`（CC-4 转正 + `:1067` 措辞修正）；更早另有 `e53bb3d`（CC-3：P1 时间盒语义收窄）、`dccd66e`（M1：`Fault_Type` 空值 → `fault-type-unparsable`）。
+
+**收官（2026-09-11）**：第三对 pair host-only 门 **gate 1-3 全部 pass**，**freeze-3-v4 成立**（0 blocker / 0 major / 2 minor）。三 ID 仍未消费；gate 3 的 FAIL→整改→重出流程合规（全程零设备接触、pair 未消费）。下一步 **gate 4**（设备侧，须用户本人连接设备）；gate 5 三探针对照 CC-2 重绑元组；gate 13 Live 须用户全新确认。逐门登记随执行继续追加。

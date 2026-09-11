@@ -54,7 +54,7 @@
 
 ## 下一步（顺序，均需用户明确授权）
 
-1. 候选 local 提交与合并：**已完成**——本地提交后经用户授权**快进合并入 `main` 并推送（`ea44b87`）**。下一步：**等待/执行第三对 gate 1-3（host-only）**；**gate 4-5 需用户连接设备、gate 13 Live 须用户全新确认**；本轮不执行任何门/设备/签名/新 freeze。
+1. 候选 local 提交与合并：**已完成**——本地提交后经用户授权**快进合并入 `main` 并推送（`ea44b87`）**。第三对 **gate 1-3 已 pass（host-only）、freeze-3-v4 成立**（0 blocker / 0 major / 2 minor；code_sha `5a56ba3`；逐门登记见 [第三对授权登记「门序列执行登记」](evidence/n1bdisc-authorization-2026-09-06-0002.md)）。**下一步 gate 4**：设备侧 `tconn` + 恰一次内存级 `list targets`，**须用户本人连接设备**；gate 5 三探针对照 CC-2 重绑元组 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`；**gate 13 Live 须用户全新确认**（决议 §4.3.9）；本轮不执行任何门/设备/签名/新 freeze。
 2. 候选冻结准备/新 freeze（仍需用户明确授权）。
 3. 设备绑定：独立明确授权。
 4. Live：独立明确授权。
