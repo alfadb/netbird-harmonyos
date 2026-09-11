@@ -44,9 +44,9 @@ manifest v1 schema（``schema_version == 1``，封闭键集）::
         "campaign_id":      "N1BDISC-PHYS1API26-YYYYMMDD-NNNN",
         "evidence_id":      "EV-N1BDISC-PHYS1API26-YYYYMMDD-NNNN"
       },
-      "target_tuple": {  # 逐字 == CC-2 冻结元组（:268，2026-09-06 重绑）
+      "target_tuple": {  # 逐字 == 现行冻结元组（:268；CC-5，2026-09-11 重绑）
         "os": "HarmonyOS", "model": "PLA-AL10",
-        "software_version": "PLA-AL10 7.0.0.105(SP6C00E105R7P3)",
+        "software_version": "PLA-AL10 7.0.0.105(SP10C00E105R7P3)",
         "api_level": 26, "arch": "aarch64", "abi": "arm64-v8a"
       },
       "frozen_literals": {  # 逐字 == 当前 runner 常量（:1618 白名单 / StartEntry）
@@ -149,11 +149,12 @@ _STATICSHECK_FILE = SPIKE_ROOT + "/staticcheck/check_static.py"
 #: ``[lib] name = "n1bdisc_probe"`` cdylib → HAP ``libs/arm64-v8a/`` 布局）。
 HAP_SO_MEMBER = "libs/arm64-v8a/libn1bdisc_probe.so"
 
-#: CC-2 冻结目标元组（判据 :268，2026-09-06 用户授权重绑字面；逐字比对）。
+#: 现行冻结目标元组（判据 :268；CC-5，2026-09-11 用户授权重绑字面；逐字比对）。
+#: 常量名 ``CC2_TARGET_TUPLE`` 为最小兼容保留（不全局重命名），值随 CC-5 更新。
 CC2_TARGET_TUPLE: Dict[str, Any] = {
     "os": "HarmonyOS",
     "model": "PLA-AL10",
-    "software_version": "PLA-AL10 7.0.0.105(SP6C00E105R7P3)",
+    "software_version": "PLA-AL10 7.0.0.105(SP10C00E105R7P3)",
     "api_level": 26,
     "arch": "aarch64",
     "abi": "arm64-v8a",
@@ -442,7 +443,7 @@ def validate_manifest(manifest: FreezeManifest) -> ValidationReport:
         if not diff and not extra:
             diff = {"<type>": "值类型漂移（如 26.0 float 冒充 26 int / bool 冒充 int）"}
         _fail(out, "target-tuple-drift",
-              note="必须逐字等于 CC-2 冻结元组（判据 :268；类型严格）",
+              note="必须逐字等于现行冻结元组（判据 :268，CC-5；类型严格）",
               diff=diff, unknown_keys=extra)
     lit = data["frozen_literals"]
     if not isinstance(lit, dict):

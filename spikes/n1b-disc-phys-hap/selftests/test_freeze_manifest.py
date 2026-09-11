@@ -46,6 +46,7 @@ import tempfile
 import zipfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir, os.pardir))
 sys.path.insert(0, os.path.join(_HERE, os.pardir, "runner"))
 import n1bdisc_freeze_manifest as fm  # noqa: E402
 
@@ -293,6 +294,64 @@ def test_manifest_json_no_secret_like_fields():
             expect(bad not in text, "manifest 不得出现敏感字段字样: %s" % bad)
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# 跨层回归：现行判据元组（CC-5）↔ runner 冻结常量
+# --------------------------------------------------------------------------
+
+def _criteria_software_version():
+    """从现行判据环境行独立取得冻结软件版本字面（不复制被测常量）。"""
+    path = os.path.join(_REPO_ROOT, "docs", "n1b-disc-gate-plan.md")
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            if "物理冻结元组" not in line:
+                continue
+            for chunk in line.split("`"):
+                if chunk.startswith("PLA-AL10 ") and chunk.endswith(")"):
+                    return chunk
+    raise AssertionError("判据环境行未找到冻结元组字面: %s" % path)
+
+
+def _cc5_verify(base, manifest_ver, conf_ver):
+    """既有 fixtures：manifest+confirmation 同带指定版本 → 真实 verify_inputs。"""
+    repo = build_repo(base)
+    arts = build_artifacts(base, conf_kwargs={"software_version": conf_ver})
+    data = manifest_dict(_RUNNER_FILES, arts,
+                         target_tuple=dict(CC2, software_version=manifest_ver))
+    p, s = write_manifest(base, data)
+    return fm.verify_inputs(fm.load_manifest(p, expected_manifest_sha256=s),
+                            repo_root=repo, current_code_sha=FAKE_CODE_SHA,
+                            current_dirty=False, retired_pair_ids=())
+
+
+def test_cc5_criteria_tuple_manifest_and_confirmation_pass():
+    """现行判据元组（独立取得）经 manifest+confirmation 真实 verify 通过。"""
+    ver = _criteria_software_version()
+    base = fresh("cc5-pass")
+    try:
+        r = _cc5_verify(base, ver, ver)
+        expect(r.ok, "现行判据元组应通过 verify: %s"
+               % sorted(f.code for f in r.failures))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_cc5_old_sp6c_rejected_on_manifest_and_confirmation():
+    """旧 CC-2 SP6C 字面在 manifest 侧与 confirmation 侧分别拒绝。"""
+    ver = _criteria_software_version()
+    old = "PLA-AL10 7.0.0.105(SP6C00E105R7P3)"
+    for side, mv, cv, want in (
+            ("manifest", old, ver, "target-tuple-drift"),
+            ("confirmation", ver, old, "confirmation-software-version-drift")):
+        base = fresh("cc5-neg-" + side)
+        try:
+            r = _cc5_verify(base, mv, cv)
+            cs = sorted(f.code for f in r.failures)
+            expect(not r.ok and want in cs,
+                   "%s 侧旧 SP6C 必须以 %s 拒绝: %s" % (side, want, cs))
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
