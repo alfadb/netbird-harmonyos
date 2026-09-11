@@ -1,0 +1,92 @@
+# N1BDISC 第四对 pair 三 ID 分配授权登记（治理命名 2026-09-11 · 0001，host-only，CC-5 重绑后重走门序列）
+
+最后核验：2026-09-11
+
+本文登记用户（直接人类决策者）2026-09-11 会话内的显式治理决定（**选项 A**）：「再次 rebind 到新元组并以新三 ID 重走门序列」——为 N1BDISC 发现 campaign 分配第四对新三 ID 并登记落盘。**治理命名日期在授权时固定为 `20260911-0001`，授权后不随实际落笔或执行日期变化**；本文实际 generated_at 为 2026-09-11 13:20:12 CST（`date` 实测，与命名日区分）。据此建立 `AUTH-N1BDISC-PHYS1API26-20260911-0001`、campaign `N1BDISC-PHYS1API26-20260911-0001` 与 evidence `EV-N1BDISC-PHYS1API26-20260911-0001`。这是全新 `attempt: initial`，无 retry；本文仅登记治理 ID 分配（allocated/unused，candidate 态，`consumed=false`/`reusable=false`，`is_evidence=false`），**任何门均未执行**。本文沿既有 AUTH 登记结构（含顶部 YAML 块、依据、范围声明、YAML 值域依据注），不复制旧 pair 门执行记录，不宣称旧 confirmation 有效。
+
+## 依据
+
+- **用户 2026-09-11 会话内显式授权（选项 A）**：授权范围为——上述三 ID 分配 + 本登记落盘；**不含**任何门执行、设备接触 / `tconn` / `list targets` / 参数查询、签名、freeze、DryRun、Live。
+- **触发事实 = 第三对 pair gate 5 元组漂移退役**：第三对 `AUTH-N1BDISC-PHYS1API26-20260906-0002` 于 2026-09-11 gate 5 三探针实测 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)` ≠ 前冻结值 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`（数字版本相同、构建分支标签 SP6C→SP10C），按判据 `:1436` 裁 `blocked-tuple-drift` + blocked record + 退役；用户据此显式授权 rebind 至新元组并以新三 ID 重走门序列。该重绑即**判据变更 CC-5**（commit `afd04ea448f37c701539c0d65936e5ef325ed592`），当前状态 `criteria-change-5-pending-review-2026-09-11`。
+- **判据基线（引用，不变更）**：[N1BDISC 判据](../n1b-disc-gate-plan.md)，冻结基线 git `04cf222`（2026-09-02）+ CC-1（2026-09-05）+ CC-2（2026-09-06 元组重绑）+ CC-3（2026-09-11）+ CC-4（2026-09-11），**CC-1~CC-4 全部 `reviewed-pass`**；外加 **CC-5（2026-09-11 设备元组重绑，`criteria-change-5-pending-review-2026-09-11`）**——按判据 CC-5 文末登记块，**须经跨厂商隔离重审通过后方可按新元组恢复可 freeze/测量状态**。本登记不变更判据。
+- **前三对 pair 终态（不继承、不复用、不撤销）**：
+  - 首对 `AUTH-N1BDISC-PHYS1API26-20260905-0001`：gate 5 元组漂移 `7.0.0.102(SP8C00E102R7P3)` → `7.0.0.105(SP6C00E105R7P3)`（2026-09-06），`consumed-blocked-final`；仓外 blocked record `/home/worker/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`（sha256 `d2f59da0a66d9357e59fdcae47b390f3e8780e873a56f2a3267955f3665c7fbd`）；登记 [n1bdisc-authorization-2026-09-05-0001.md](n1bdisc-authorization-2026-09-05-0001.md)。
+  - 第二对 `AUTH-N1BDISC-PHYS1API26-20260906-0001`：治理违规退役——gate 4 `list targets` 实际执行两次、违反判据「恰一次」约束，用户不追认、审查席无豁免权（2026-09-06），`retired-unused-governance-violation`、`consumed: false`（未 Live、未产生测量）；仓外退役记录 `/home/worker/harmonyos-signing/netbird-n1bdisc/reviews/pair2-retirement-exact-once.json`（sha256 `5dfd19c39ef45780ad1bb6e42a6afb77d886851f3d9d7ebab1e25bcda0e8c652`）；登记 [n1bdisc-authorization-2026-09-06-0001.md](n1bdisc-authorization-2026-09-06-0001.md)。
+  - 第三对 `AUTH-N1BDISC-PHYS1API26-20260906-0002`：gate 5 元组漂移 `7.0.0.105(SP6C00E105R7P3)` → `7.0.0.105(SP10C00E105R7P3)`（2026-09-11），`blocked-tuple-drift` + `retired-terminal`、`consumed: false`（未测量、未 Live）、`reusable: false`、无后继 AUTH；仓外 blocked record `/home/worker/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-pair3-20260911.json`（sha256 `aa664446723139c388176d026c8c0be64927f695d6b4c3abb767d475c7fbba8e`，同名 `.sha256` sidecar）；登记 [n1bdisc-authorization-2026-09-06-0002.md](n1bdisc-authorization-2026-09-06-0002.md)。
+  - 三对终态均**不复用、不继承、不撤销**；旧 confirmation / ready-freeze / 门执行记录仅作历史审计对象，**不可继承其效力**。
+- **可复用资产声明（不因前对退役撤销）**：`freeze-3-v4` 成立结论；实现 commit `53faa1f`（制品 `.so` sha256 `5e5408772e75b78f3b01d7a6297bc2ab9fe16a9860ba9c36df248bed667a297c`，1160224 B）；判据 CC-1~CC-4；第三对 gate 2 audit-1 仓外双文件 `/home/worker/harmonyos-signing/netbird-n1bdisc/audit/pair-20260906-0002/new-pair-id-consumption-audit-1.txt`（sha256 `35825ebde9a267cf78f14202c983894021d381157643bba0221d558082274a4c`）。以上可被本新治理引用，但**不构成本对任何门已执行或已通过**。
+- **AGC 资产沿用（无需重建）**：bundle 名 `cn.alfadb.netbird.n1bdisc` 冻结值不变；AGC 应用 NetBird N1BDISC 与调试 Profile「NetBird N1BDISC Debug」为既有事实，有效期至 2027-08-06、绑定 PHYS-1，沿用既有引用；本文不复算、不新增签名事实。
+- **先前 host-only 开发授权继续可引用**（host-only 验证、构建、selftest），但本登记不自动扩大至正式门流程。
+
+## 授权状态
+
+```yaml
+authorization_id: AUTH-N1BDISC-PHYS1API26-20260911-0001
+campaign_id: N1BDISC-PHYS1API26-20260911-0001
+evidence_id: EV-N1BDISC-PHYS1API26-20260911-0001
+exception: N1BDISC-DISCOVERY-CAMPAIGN
+information_status: current-governance-registration
+record_status: active-governance-registration # 活跃治理登记（非证据记录本体）；执行后另立 EV-N1BDISC 证据记录
+stage_or_gate: N1BDISC
+related_stages_or_gates: [N1B]
+execution: not-started # 无门执行、无测量、无 HDC/设备命令、无签名、无 freeze、无 DryRun/Live
+is_evidence: false
+authorization_status: granted-id-allocation-and-registration # 三 ID 分配 + 本登记落盘授权；schema 无此字段值集，沿先例治理 kebab 值（见下方值域依据注）
+plan_status: id-allocated-not-executed # 三 ID 已分配未执行；门序列未开始
+criteria_freeze: git-04cf222-plus-cc-1-plus-cc-2-plus-cc-3-plus-cc-4-reviewed-pass-plus-cc-5-pending-review-2026-09-11 # 判据基线引用，本登记不变更
+device_readiness: not-yet-requested
+machine_fresh_confirmation: not-yet-requested
+attempt: initial
+retry: N/A
+candidate:
+  campaign_id: N1BDISC-PHYS1API26-20260911-0001
+  evidence_id: EV-N1BDISC-PHYS1API26-20260911-0001
+  identity_status: candidate # 候选态（未消费），未来 gate 2/9 消费审计的受检对象
+  consumed: false # 本登记不消费任何 ID；本登记仅登记 ID 分配，不是门执行
+  reusable: false
+governance_naming_date: "20260911-0001" # 授权时固定，不随实际执行日期变化
+generated_at: "2026-09-11 13:20:12 CST" # date 实测
+workspace: /home/worker/work/base/netbird-harmonyos # main 工作区（候选实现已合并入 main，无独立候选 worktree）
+code_sha: pending-gate-1-binding # 待未来 gate 1 绑定届时 clean HEAD；本文不填造
+target_tuple: HarmonyOS / PLA-AL10 / PLA-AL10 7.0.0.105(SP10C00E105R7P3) / API 26 / aarch64 / arm64-v8a # 判据 :268 CC-5 重绑值（登记引用；设备当前状态不推断，见「设备状态与未来确认要求」节）
+bundle_name: cn.alfadb.netbird.n1bdisc # 判据 :270 冻结值，逐字一致
+reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
+```
+
+> **YAML 值域依据**：[`evidence-schema.md`](../evidence-schema.md) **未定义** `authorization_status` 与 `plan_status` 的合法值集（全文无此二字段）；`record_status` 七值（:60-71）针对证据记录本体，本治理登记不占用。本登记沿前三对先例（[首对授权登记](n1bdisc-authorization-2026-09-05-0001.md)、[第二对授权登记](n1bdisc-authorization-2026-09-06-0001.md)、[第三对授权登记](n1bdisc-authorization-2026-09-06-0002.md)，各带同款「YAML 值域依据」注）采用治理登记 kebab 值：`granted-id-allocation-and-registration` / `id-allocated-not-executed` / `active-governance-registration`，取值字面表达「三 ID 分配、执行未开始、登记活跃」。`governance_naming_date` / `generated_at` / `workspace` / `code_sha` 为本登记治理事实字段（schema 未定义，注释化治理，沿先例做法）；第三对登记中的 `candidate_base`（独立候选 worktree 基线）与 `terminal_disposition`（退役终态）在本对**不适用故不设**——候选实现 `spikes/n1b-disc-phys-hap/` 已合并入 `main`、无独立候选 worktree，且本对为活跃候选、未退役。schema 其余实际值集均针对证据记录本体，本登记不占用：信息状态四值（:11-17）、`verdict` 四值 `pass | fail | blocked | invalid`（:76-85、:160）；未来本对 `EV-N1BDISC` 证据记录须按其采用（`record_status` 执行后 `collected`、审查合格后 `reviewed-pass`，:89）。
+
+## 范围声明（硬边界）
+
+- **本次授权范围（仅以下两项）**：三 ID 分配（本文登记）+ 本登记落盘。
+- **明确不含**：任何门执行（gate 1-13）、设备接触 / `tconn` / `list targets` / 参数查询（含 gate 5 三探针）、签名执行、freeze 执行、DryRun、Live。
+- **gate 4 起为设备侧**：`tconn` + **恰一次**内存级 `list targets`，**须用户本人连接设备**；gate 5 三探针对照 CC-5 重绑元组 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`；**gate 13 Live 须用户全新确认**（决议 §4.3.9）。
+- **全新无继承**：`attempt: initial`、`retry: N/A`；前三对 pair 终态（元组漂移退役 / exact-once 治理违规退役 / 元组漂移退役）不复用、不继承、不撤销；旧 confirmation / ready-freeze 仅历史审计，不继承；与 N1b 正式门禁止共用同一 AUTH/pair（决议 §4.3.8，`native-nx-n1b-adjudication.md:131`）。
+- **候选态保持**：本登记不消费任何 ID（`consumed=false`、`reusable=false`）；不得以本登记为由越过门序列消费 pair 或产出 audit/freeze/record。
+- **CC-5 生效前提**：本登记仅按判据 CC-5 文末登记块引用新元组；**CC-5 重审通过前不得据此恢复可 freeze/测量状态**。
+
+## 设备状态与未来确认要求
+
+- CC-5 元组登记引用：model `PLA-AL10`、完整软件版本 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`（2026-09-11 gate 5 实测值；`od` 逐字节 **36 字节含 1 尾随空格**，trim 后登记）；**API 26 / aarch64 / arm64-v8a 为沿同设备历史实测沿用，本次未复测**；本登记不对设备当前状态作任何推断。
+- 新 machine confirmation 须由未来**独立授权的设备绑定流程**产生；旧 confirmation（含 pair2 `target-binding-confirmation-pair2-20260906-0002.json`、pair3 `target-binding-confirmation-pair3-20260911.json`）不因本登记恢复效力。
+- 届时 target 句柄纪律：同一进程内**只查一次**、只 trim 首尾空白、失败即停，**不静默重查**。
+- **设备自动更新须关闭**：前三对中两对（首对、第三对）均因 gate 5 元组漂移退役，设备 OTA 是连续漂移的直接成因；执行前须关闭设备自动更新，避免 gate 1-3 host-only 期间再次漂移。
+- Live 重连规则**不得自动继承旧 pair 先例**，须届时按判据与用户确认另行确定；gate 13 Live 须用户全新确认（决议 §4.3.9）。
+
+## 失败代价披露
+
+- 单次执行、不重试、不换 ID（判据 :266；决议 §4.3.9 沿基础决议 §三）；pass / fail / blocked / invalid 均为终态消费、无后继 AUTH（`verdict` 枚举 schema :160）。
+- gate 5 元组漂移即 blocked record + 退役本对（判据 :1436/:269：完整系统版本须实测复核 CC-5 重绑值 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`，漂移即停）。
+- 以上为未来门执行时生效的判据约束，本文仅登记引用、不预执行。
+
+## 门序列
+
+13 门完整序列**不在本文复制**，逐字以判据「流程」节为准：[n1b-disc-gate-plan.md:1432-1444](../n1b-disc-gate-plan.md)。本对**全部门未执行**；本次授权不含任何门执行。`code_sha` 由未来 gate 1 绑定届时 clean HEAD；gate 2 起按门序届时推进。未来门执行记录按门序届时追加登记，本文不预建执行表。
+
+## 签名资产引用
+
+- AGC 应用 **NetBird N1BDISC**（包名 `cn.alfadb.netbird.n1bdisc`，与判据 :270 冻结 bundle 名逐字一致）与调试 Profile「NetBird N1BDISC Debug」为既有事实，沿第二/第三对登记引用；有效期至 2027-08-06、绑定 PHYS-1，**无需重建**。本文不复算、不新增签名事实。
+- **本授权不含任何签名执行**；签名须届时另行授权。
+
+## 三 ID 状态
+
+`AUTH-N1BDISC-PHYS1API26-20260911-0001` / campaign `N1BDISC-PHYS1API26-20260911-0001` / evidence `EV-N1BDISC-PHYS1API26-20260911-0001` 保持 **candidate 态、未消费**（`identity_status: candidate`、`consumed=false`、`reusable=false`、`is_evidence=false`）；**任何门均未执行**（无 gate 执行、无测量、无设备/HDC 命令、无签名、无 freeze、无 DryRun/Live）。
