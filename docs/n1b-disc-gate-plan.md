@@ -1,6 +1,6 @@
 # N1BDISC 发现 campaign 计划与判据预注册（N1b r2 设计输入 × 物理 VpnExtension 平台事实采集）
 
-最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）
+最后核验：2026-09-06 ｜ 状态：`criteria-frozen-2026-09-02`；`criteria-change-1-reviewed-pass-2026-09-05`（CC-1，见文首登记块）；`criteria-change-2-reviewed-pass-2026-09-06`（CC-2 元组重绑经跨厂商隔离重审通过——0 blocker / 0 major / 2 minor 已处置，见**文末**登记块；可按新元组 freeze/测量）；`criteria-change-3-pending-review-2026-09-11`（CC-3 P1 `dlopen`/`dlsym` 时间盒语义判据文本收窄——判据解释裁决认定实现不违反判据、`:1029` 的单一豁免措辞为过度断言（原文见文末登记块 ① 改前对照），三处行内替换零新增行；**须经跨厂商隔离重审通过后方可生效**，见**文末**登记块）
 
 > **修订登记（r0 → r1，正文整体取代）**：r0 已经三席跨厂商隔离独立审查——**两席 fail（分别 6 blocker 与 10 blocker）、一席 pass**；pass 席的引用抽查漏检 MR1 溢出主张、其自陈最不踏实条目恰为 post-mortem 死因分类，按 **2 fail** 处理，修订强度不因一席 pass 降低。判据**未冻结**。
 > r1 依据 = 三席去重合并的 BL-1..BL-10、MJ-1..MJ-13 与 minor 清单，主会话对目标 SDK d.ts 的逐字实测（`RouteInfo`/`LinkAddress`/`NetAddress`/`VpnConfig` 真实形态，见「SDK 依据」节；
@@ -1026,12 +1026,12 @@ P11 探针自有 fd 清理（d4_send_socket/d5_sink_socket/d6b_reuse_probe_socke
 P12 （`DW_RACEWIN` 若发射必先于此——r22 冻结序）N1BDISC_POST 终态 marker（D6 逐子项 + D-W 结局 + ledger 最终 digest，r4 R1）-> 封签 -> 进程自然退出（观察，不判定）
 ```
 
-**每个等待点均有单调时钟有界时间盒**（超时分类预注册；**唯一豁免 = `pthread_join`**：按第二趟修订集群 A5(b) 裁定 join 不可有界——仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」）：
+**每个等待点均有单调时钟有界时间盒**（超时分类预注册；**用户态无超时出口的调用恰两处、均为登记豁免**：**(1) `pthread_join`**——按第二趟修订集群 A5(b) 裁定 join 不可有界，仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」；**(2) P1 `dlopen`/`dlsym`**——同属无用户态超时出口的调用（A1 禁第二线程、`:355-360` 闭表无 alarm/timer/sigaction，且 loader 持锁期间无安全中止路径），其表内 10 s 为**预注册测量与分类参数、非中止阈值**（预算面见观测窗推导、位点分类面见 `APPFREEZE` 位点约束），出口按 D1 节「时间盒/超时分类」条 = 错误返回 ∨ 进程死亡 ∨ 观测窗到点，**探针侧不设中止分支，freeze 静态审查不得因此判不通过**）：
 
 | 位点 | 时间盒 | 超时分类 |
 | --- | --- | --- |
 | P0 Allow 等待 | 300 s（自 `StartEntry` HDC 命令返回起，至 capture 出现首个 N1BDISC marker）；前置与超时分类外提为表后「P0 行外提」子项（r4 第四趟 W1 重构，内容逐字不变） | 同上外提 |
-| P1 dlopen+dlsym | 10 s | 错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记） |
+| P1 dlopen+dlsym | 10 s（**测量与分类参数，非中止阈值**；`d1_elapsed_ms` 逐字落盘） | **盒到期无探针侧动作**；错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记）；**调用返回但耗时超盒 → 仅逐字记录、不改 verdict**（沿 criteria-gap 判别方法 (1)） |
 | P2 每条 create() | 60 s | 候选记 timeout，进入迟到观察窗 |
 | P2 迟到观察窗 | 60 s（全矩阵恰一次） | 窗尽→indeterminate，矩阵终止走 no-live-fd 分支 |
 | P3 D4 窗口 | 总 10 s / 每 poll 500 ms | 三态收口 |
@@ -1076,7 +1076,7 @@ worker 的 T_dw=5 s 与 P8 in-wait 采集 + P9 destroy 重叠，含于主线盒�
 | A1 | 探针源码恰一个 `pthread_create` 调用点 = D-W 登记位点；**零**出现以下任何线程/异步旁路：`std::thread::spawn`、`std::thread::Builder`（含 `Builder::spawn`）、`tokio::spawn`/tokio runtime、`async-std`、`smol`、`rayon`、任意 async 运行时、`napi_create_threadsafe_function`、`napi_create_async_work`/NAPI worker |
 | A2 | 以 `fd_orig` 为实参的 `read`/`write`/`F_SETFL` 调用点为零；`close(fd_orig)` 调用点仅存在于 D6a 步 3 登记段（文件+行登记） |
 | A3 | 除 `dlopen`/`dlsym`/`dlerror` 外，源码不引用任何 BoringTun 导出符号（数据面零调用；D1 陷阱条款因此不适用的事实由本断言背书） |
-| A4 | **除第二趟修订集群 A5(b) 已登记的 `pthread_join`（worker 终态原子标志置位后调用；该调用无用户态超时出口——r3 第一趟 D5 显式豁免，freeze 静态审查不得因 join 缺超时出口判 A4 不通过）外**，全部等待点经单调时钟且带本文时间盒；其余零无界阻塞调用（零 `pthread_timedjoin_np`、零非清单 sleep/等待原语）。**P10 行与观测窗兜底的关系（冻结）**——外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变） |
+| A4 | **除第二趟修订集群 A5(b) 已登记的 `pthread_join`（worker 终态原子标志置位后调用；该调用无用户态超时出口——r3 第一趟 D5 显式豁免，freeze 静态审查不得因 join 缺超时出口判 A4 不通过）外**，全部等待点经单调时钟且带本文时间盒；其余零无界阻塞调用（零 `pthread_timedjoin_np`、零非清单 sleep/等待原语）。**P10 行与观测窗兜底的关系（冻结）**——外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变）；**P1 `dlopen`/`dlsym` 不属本断言「等待点」——本协议等待原语闭集 = `poll` 与 `clock_nanosleep`（探针 syscall 面节），dlopen/dlsym 为工作调用非等待原语，其 10 s 按时间盒表 P1 行为测量/分类参数，freeze 静态审查不得因 D1 实现无 deadline 分支判 A4 不通过** |
 | A5 | marker 字面集与本文冻结集逐字一致（正反例 selftest 覆盖，含 `:vpn` 三形态）；冻结集 = 本文**活规则中使用的** `N1BDISC_*` 字面，豁免集 = {`N1BDISC_D2_REJTEXT`、`N1BDISC_RESULT`}（理由见「A5 冻结集注」）——外提为表后「A5 冻结集注」（r4 第四趟 W1 重构；**r9 实现性更正：比对口径自「本文全部 `N1BDISC_*` 字面」收窄，原口径按字面实现必 fail，见冻结集注 r9 条**） |
 | A6 | `openat` 调用点仅存在于 D-W in-wait 证据采集段，且实参路径字面 ∈ {`/proc/self/task/<tid>/stat`、`/proc/self/task/<tid>/syscall`}（`<tid>` 绑定 D-W worker tid；零其他文件路径、零 `O_WRONLY`/`O_RDWR` 打开） |
 | A7 | 探针源码中 `/proc/.../stat` 的 state 解析实现**按该行最后一个 `)` 字符之后的下一个 token 定位 state 字段**（D-W 节冻结规则的机器背书）；**禁止**按空格切分取第 3 字段或任何左侧定位实现（`comm` 可含空格与括号，左侧切分必字段错位）；freeze 前静态审查核对源码实现与 selftest 用例（含 `comm` 带空格/括号的反例） |
@@ -1788,3 +1788,25 @@ Allow 盒 300 s（第三趟 B3 裁定 (a) 经 r3 第二趟 E6 修正：readiness
 ---
 
 > **2026-09-06 判据变更 CC-2（首对 pair gate 5 元组漂移触发，用户授权重绑；登记续于文末——沿审查登记册文末追加先例，避免文首插入造成第三次行号锚位移；文首状态行指向本块）**：首对 pair（`AUTH-N1BDISC-PHYS1API26-20260905-0001`，授权登记 `docs/evidence/n1bdisc-authorization-2026-09-05-0001.md`）于 gate 5 三探针实测设备软件版本 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` ≠ 原冻结值 `PLA-AL10 7.0.0.102(SP8C00E102R7P3)`（设备于 2026-08-30 G0 实测 7.0.0.102 后 OTA 升级）——按本判据「目标绑定门」条款（`:1436`）裁 blocked record + 退役该 pair（blocked record：`~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-20260906-0001.json`，SHA-256 `d2f59da0a66d9357e59fdcae47b390f3e8780e873a56f2a3267955f3665c7fbd`）。用户于 2026-09-06 会话内显式授权「重绑新元组继续」。变更面：`:268` 冻结元组软件版本字面（`7.0.0.102(SP8C00E102R7P3)` → `7.0.0.105(SP6C00E105R7P3)`）+ `:269` 版本核对警示补 CC-2 印证句 + `:1436` gate 5 历史差异例更新 + 本登记 + 状态行；**行号均按 CC-1 后现行编号（本块文末追加，`:1786` 以下零位移）**。**除设备侧元组外本判据的其余冻结面不变**：API 26 / aarch64 / arm64-v8a 不变——**CC-2 重审 m-2 登记**：此三者为「沿同设备历史实测沿用 + build 级 OTA 性质推断」，本次 gate 5 未复测（gate 5 白名单仅三探针、不得扩）；arch 为硬件属性不可经 OTA 改变，API level 绑定主版本 7.0.0 不变；与 rebind8「实测不从 build 推断」纪律的表面张力登记于案，不阻塞；SDK/sysroot 锚点（`:309` 起，26.0.0.821 实测对账 9/9 PASS，见 `docs/n1bdisc-sdk-anchor-reconciliation-20260905.md`）为 SDK 侧、与设备小版本无关；syscall 闭表、marker 字面集、时间盒表、MR 表、HDC 白名单、faultlogger 候选集与 13 门流程均不变。**新元组的设备侧行为依赖（watchdog / faultlogger 格式 / loader 接受性等）本判据原即以实测为目的、不预置结论**；Fault_Type 候选集仍未实测收敛（gate 3 条款原样适用，未实测依赖随新 pair 证据登记）。**本变更须跨厂商隔离重审通过后方可按新元组恢复可 freeze/测量状态；首对 pair 退役不因本变更撤销；新治理须新 AUTH/pair/evidence 三 ID 并从 gate 1 重走门序列**（实现资产与首对 freeze-1 符合性结论可被新治理引用）。
+
+---
+
+> **2026-09-11 判据变更 CC-3（第三对 pair gate 3 审查 FAIL 触发；用户显式授权「全量三处行内替换」；登记续于文末——沿 CC-1/CC-2 文末追加先例，避免文首插入造成行号锚位移；文首状态行指向本块）**：**变更编号 CC-3 ｜ 日期 2026-09-11 ｜ 授权 = 用户（直接人类决策者）于 2026-09-11 会话内显式授权「全量三处行内替换」 ｜ 变更性质 = 判据文本收窄 / 实现性更正，非实现变更**。
+>
+> **触发事实**：第三对 pair 的 gate 3 冻结审查由**跨厂商隔离席**给出 **FAIL**（1 blocker / 1 major / 2 minor），其中 blocker = 「P1 `dlopen`/`dlsym` 的 10 s 时间盒未实现（`d1.rs` 无 deadline 分支、`P1_DLOPEN_BOX_S` 无运行时消费者）」。
+>
+> **判据解释裁决（另一跨厂商隔离席）——实现不违反判据**：(1) 时间盒表是「位点预算/分类参数表」，P1 属参数行；`:1031` 表头为「位点」而非「等待点」，表内已有 `:1040` P5T「即返」、`:1049` D6「即返 syscall」等非等待行；(2) `:1034` P1 行的「超时分类」列不含任何探针侧盒到期动作（对照 `:1035`/`:1043`/`:1048` 均有）；(3) 该 10 在 `:1059`（预算加数 467 s）与 `:1231-1232`（位点分类参数）被非控制流消费；(4) `:1029` 的可执行面 A4 由闭表定义「等待点」（`:358` 等待原语仅 `poll` 与 `clock_nanosleep`），`dlopen`/`dlsym` 在 `:355` 以工作调用列入。**`:1029` 的单一豁免措辞（原文见本块 ① 改前对照）为事实上的过度断言**：P1 是第二处「无用户态超时出口、由观测窗收口」的位点却未登记；`:1434` 把「时间盒表核对」列为无机器检查器背书的 reviewer 独立义务，按字面执行必卡。**探针内实现真实 10 s 机制技术上不可能**：A1（`:1076`）禁第二线程；`alarm`/`timer_create`/`setitimer`/`sigaction` 不在 `:355-360` 闭表内（`:362` 明定超表 syscall 即 blocker）；POSIX 不给 dlopen 用户态取消出口（信号处理器内 longjmp 出 loader 会持锁离开 → 后续 `dl*` 死锁，属 UB）。**判例在案**：`:1100` A5 旧口径「按字面实现必然 fail、不可实现」→ 处置是**收窄判据文本**、非改实现；本例同构。
+>
+> **三处改动逐字前后对照（均为行内替换、零新增行）**：
+>
+> **① `:1029`**——改前原文「**唯一豁免 = `pthread_join`**：按第二趟修订集群 A5(b) 裁定 join 不可有界——仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」」；改后原文「**用户态无超时出口的调用恰两处、均为登记豁免**：**(1) `pthread_join`**——按第二趟修订集群 A5(b) 裁定 join 不可有界，仅限终态标志置位后调用，其阻塞无用户态超时出口，由观测窗到点与 host finally 收口兜底，`join-blocked-observed` 由 runner 依轮询超时登记，见 D-W 节「有界 join 可行性裁定」；**(2) P1 `dlopen`/`dlsym`**——同属无用户态超时出口的调用（A1 禁第二线程、`:355-360` 闭表无 alarm/timer/sigaction，且 loader 持锁期间无安全中止路径），其表内 10 s 为**预注册测量与分类参数、非中止阈值**（预算面见观测窗推导、位点分类面见 `APPFREEZE` 位点约束），出口按 D1 节「时间盒/超时分类」条 = 错误返回 ∨ 进程死亡 ∨ 观测窗到点，**探针侧不设中止分支，freeze 静态审查不得因此判不通过**」（该行其余文字逐字不变）。
+>
+> **② `:1034`**——改前原文「| P1 dlopen+dlsym | 10 s | 错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记） |」；改后原文「| P1 dlopen+dlsym | 10 s（**测量与分类参数，非中止阈值**；`d1_elapsed_ms` 逐字落盘） | **盒到期无探针侧动作**；错误返回=observed-false 事实；未返回→死后收口路径（死亡事实记录（r9：原「死因分类」随死因表删除更名），见「死亡事实记录（证据向量）」节；现行 protocol 取值为 `complete`/`pre-only`，`post-mortem` 仅存于历史登记）；**调用返回但耗时超盒 → 仅逐字记录、不改 verdict**（沿 criteria-gap 判别方法 (1)） |」——时间盒列「10 s」→「10 s（**测量与分类参数，非中止阈值**；`d1_elapsed_ms` 逐字落盘）」；超时分类列首加「**盒到期无探针侧动作**；」、列尾（末 `|` 前）追加「；**调用返回但耗时超盒 → 仅逐字记录、不改 verdict**（沿 criteria-gap 判别方法 (1)）」；中间「未返回→死后收口路径（…）」逐字不变。
+>
+> **③ `:1079`**——改前原文（该表格行末尾）「外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变） |」；改后原文「外提为表后「A4 注」（r4 第四趟 W1 重构，内容逐字不变）；**P1 `dlopen`/`dlsym` 不属本断言「等待点」——本协议等待原语闭集 = `poll` 与 `clock_nanosleep`（探针 syscall 面节），dlopen/dlsym 为工作调用非等待原语，其 10 s 按时间盒表 P1 行为测量/分类参数，freeze 静态审查不得因 D1 实现无 deadline 分支判 A4 不通过** |」。
+>
+> **零新增行约束的声明与验证**：三处均为**行内替换**（无换行插入、无行删除），既有 `:NNNN` 交叉锚点全部不变；唯一新增 = 本登记块（文件最末）。**验证方式与结果**：(a) `wc -l docs/n1b-disc-gate-plan.md` = 改动前 **1790** → 三处替换后 **1790**（完全不变）→ 追加本登记块后 **1812**；(b) 锚点抽验 `sed -n '530p;1029p;1031p;1034p;1040p;1049p;1059p;1079p;1095p;1231,1232p;1434p'` 逐行与改动前对应，仅 `:1029`/`:1034` 按本变更改写、`:1079` 行尾追加，其余逐字不变，无错位；(c) `git diff --numstat docs/n1b-disc-gate-plan.md` = **4 行修改（4 insertions / 4 deletions；`:3` 状态行 + `:1029` + `:1034` + `:1079`）**，加本登记块新增行（0 deletions）；(d) `npx --no-install markdownlint-cli2 docs/n1b-disc-gate-plan.md` 告警数 **236 → 236**（无新增）。
+>
+> **跨节影响（零改动清单）**：`:530`（D1 节「时间盒/超时分类」）**零改动**，并被本变更指为 P1 出口的权威定义；`:1231-1232`（`APPFREEZE` 位点约束）与 `:1316`（位点守卫第 3 支）零改动；`:1059` 观测窗预算加数 **467 s / 冻结值 525 s 零改动**（P1 的 10 仍作预算加数消费）；A8（有界循环终止条件核对）、F1-F9 闭集、gate 3 清单（`:1434`）零改动、**不新增 fail 面**；`spikes/n1b-disc-phys-hap/staticcheck/check_static.py` **无需代码改动**——A4 检查器按循环注册表（`MONO_DEADLINE`/`MONO_DEADLINE_GATE`/`COUNTER_FUSE` 类）判等待点，`dlopen`/`dlsym` 不在其列，A4 现为 **PASS**。
+>
+> **生效前提**：本变更须经**跨厂商隔离重审**通过后方可生效（文首状态行随之更新为 reviewed-pass）；**重审席与本次 gate 3 审查席、判据解释裁决席均不同厂商**。重审通过前状态保持 `criteria-change-3-pending-review-2026-09-11`，不得据此变更恢复可 freeze/测量状态。
