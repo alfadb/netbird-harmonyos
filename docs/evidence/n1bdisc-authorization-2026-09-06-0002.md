@@ -122,7 +122,7 @@ terminal_disposition: retired-tuple-drift-20260911 # 终态处置：第三对 ga
   2. `hdc -t <T> shell param get const.product.model` → 实测含**尾随空白**（printf 显示 `PLA-AL10` + 1 个尾随空格）；trim 后 = `PLA-AL10`
   3. `hdc -t <T> shell param get const.product.software.version` → `od -c` 逐字节记录（36 字节，含 1 个尾随空格）
 - `hdc_binary` = `/home/worker/harmonyos/command-line-tools/26.0.0.821/sdk/default/openharmony/toolchains/hdc`（冻结绝对路径）。
-- `code_sha_at_execution` = `53faccd552935ee3586bfac96d74c564e3464a26`（gate 1-3 登记后的 HEAD）。
+- `code_sha_at_execution` = `53faccd552935ee3586bfac96d74d564e3464a26`（gate 1-3 登记后的 HEAD）（2026-09-11 勘误：原误写为 `53faccd552935ee3586bfac96d74c564e3464a26`（40 字符、单字符替换 `d`→`c`、不可解析）；正确值为 `53faccd552935ee3586bfac96d74d564e3464a26`；仓外勘误见 `records/target-binding-confirmation-pair3-20260911-erratum.txt`）。
 - **清理**：`hdc kill` 已执行，HDC0 复核归零（`ps` 探针计数 0）。
 
 ### 漂移逐字证据（冻结 vs 实测）
