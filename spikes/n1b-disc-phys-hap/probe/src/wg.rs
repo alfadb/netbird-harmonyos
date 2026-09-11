@@ -1212,34 +1212,53 @@ fn fwd_tun_write(fd_dup: i32, len: usize, out: &[u8], o: &mut FwdOutcome) {
 /// Stage machine; every exit path leaves `verdict`/`reason` set and has already
 /// emitted the markers for the stage it stopped in. `fd_dup` is the O_NONBLOCK
 /// dup of the real TUN fd (d2 S5), safe to read inside the poll loop.
-fn run_fwd(fd_dup: i32) -> FwdOutcome {
+///
+/// Socket stage shapes: `pre = None` opens + binds `0.0.0.0:47010` here
+/// (wg_fwd_probe); `pre = Some((fd, bind_rc, bind_errno))` adopts a socket
+/// already opened + bound by `wg_fwd_open` — that gap is where ArkTS calls
+/// `VpnConnection.protect(fd)` so the WG outer datagrams bypass the VPN
+/// (added 2026-09-12; the pre-opened socket is closed by the same exit paths
+/// as before). Marker semantics are unchanged: exactly one
+/// `N1BDISC_WG_FWD_BIND` per successful run, emitted by whichever stage bound.
+fn run_fwd(fd_dup: i32, pre: Option<(i32, i32, i32)>) -> FwdOutcome {
     let mut o = FwdOutcome::default();
     o.start_ms = sys::mono_ms();
     let t0 = o.start_ms;
 
     // --- 1. UDP socket bound 0.0.0.0:47010 ----------------------------------
-    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-    if fd < 0 {
-        o.bind_rc = -1;
-        o.bind_errno = sys::errno();
-        o.verdict = "socket_fail".into();
-        o.reason = "socket".into();
-        return o;
-    }
-    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
-    o.bind_rc =
-        unsafe { sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
-    o.bind_errno = if o.bind_rc == -1 { sys::errno() } else { 0 };
-    emit(&format!(
-        "N1BDISC_WG_FWD_BIND|port={}|rc={}|errno={}",
-        NET_PORT, o.bind_rc, o.bind_errno
-    ));
-    if o.bind_rc != 0 {
-        unsafe { sys::close(fd) };
-        o.verdict = "bind_fail".into();
-        o.reason = "bind".into();
-        return o;
-    }
+    let fd: i32 = match pre {
+        Some((fd, bind_rc, bind_errno)) => {
+            o.bind_rc = bind_rc;
+            o.bind_errno = bind_errno;
+            fd
+        }
+        None => {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            if fd < 0 {
+                o.bind_rc = -1;
+                o.bind_errno = sys::errno();
+                o.verdict = "socket_fail".into();
+                o.reason = "socket".into();
+                return o;
+            }
+            let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
+            o.bind_rc = unsafe {
+                sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32)
+            };
+            o.bind_errno = if o.bind_rc == -1 { sys::errno() } else { 0 };
+            emit(&format!(
+                "N1BDISC_WG_FWD_BIND|port={}|rc={}|errno={}",
+                NET_PORT, o.bind_rc, o.bind_errno
+            ));
+            if o.bind_rc != 0 {
+                unsafe { sys::close(fd) };
+                o.verdict = "bind_fail".into();
+                o.reason = "bind".into();
+                return o;
+            }
+            fd
+        }
+    };
 
     // --- 2. fixed test secrets -> real public keys -> one tunnel -------------
     let dev_sk = ffi::x25519_key { key: NET_DEV_SECRET };
@@ -1538,7 +1557,7 @@ fn run_fwd(fd_dup: i32) -> FwdOutcome {
 pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     emit("N1BDISC_WG_FWD_ENTER|");
     let _ = mb1; // kept for signature parity with wg_net_probe; unused here
-    let mut o = run_fwd(fd_dup);
+    let mut o = run_fwd(fd_dup, None);
     o.elapsed_ms = sys::mono_ms().saturating_sub(o.start_ms);
     emit(&format!(
         "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|elapsed_ms={}|reason={}",
@@ -1575,6 +1594,83 @@ pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     j.push_str(&jinum("tun_last_written", o.tun_last_written));
     j.push_str(",");
     j.push_str(&format!("\"tun_last_errno\":{}", o.tun_last_errno));
+    j.push_str(",");
+    j.push_str(&jstr("verdict", &o.verdict));
+    j.push_str(",");
+    j.push_str(&jstr("reason", &o.reason));
+    j.push_str(",");
+    j.push_str(&jnum("elapsed_ms", o.elapsed_ms));
+    j.push('}');
+    j
+}
+
+/// `wg_fwd_open() -> string` (JSON `{fd, bind_rc, bind_errno}`). Split-variant
+/// stage 1 (added 2026-09-12): create the WG UDP socket and bind
+/// `0.0.0.0:47010` WITHOUT running anything, so ArkTS can call
+/// `VpnConnection.protect(fd)` on it before a single datagram flows. Marker
+/// semantics mirror run_fwd exactly — `N1BDISC_WG_FWD_BIND` with truthful
+/// rc/errno whenever socket() succeeded, silence on socket() failure; no new
+/// marker literal is introduced. The caller owns the fd: either hand it to
+/// `wg_fwd_run` (which closes it on every exit path) or close it ArkTS-side
+/// when skipping the run.
+pub fn wg_fwd_open() -> String {
+    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        let e = sys::errno();
+        return format!("{{\"fd\":-1,\"bind_rc\":-1,\"bind_errno\":{}}}", e);
+    }
+    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
+    let bind_rc =
+        unsafe { sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
+    let bind_errno = if bind_rc == -1 { sys::errno() } else { 0 };
+    emit(&format!(
+        "N1BDISC_WG_FWD_BIND|port={}|rc={}|errno={}",
+        NET_PORT, bind_rc, bind_errno
+    ));
+    if bind_rc != 0 {
+        unsafe { sys::close(fd) };
+    }
+    format!(
+        "{{\"fd\":{},\"bind_rc\":{},\"bind_errno\":{}}}",
+        fd, bind_rc, bind_errno
+    )
+}
+
+/// `wg_fwd_run(fd: number, fdDup: number, mb1: boolean) -> string` (same JSON
+/// shape as `wg_fwd_probe`). Split-variant stages 2-4 (added 2026-09-12):
+/// handshake + bidirectional forward loop over a socket ALREADY opened and
+/// bound by `wg_fwd_open` (and ideally protected via `VpnConnection.protect`).
+/// `fd < 0` degrades to the monolithic shape (run_fwd opens + binds its own
+/// socket), i.e. wg_fwd_probe behavior minus the protected gap. The adopted
+/// socket is closed on every exit path, exactly as in the monolithic path.
+/// Outside the frozen P-chain: no ledger transition, D4/D5/D8/D-W untouched.
+pub fn wg_fwd_run(fd: i32, fd_dup: i32, mb1: bool) -> String {
+    emit("N1BDISC_WG_FWD_ENTER|");
+    let _ = mb1; // kept for signature parity with wg_fwd_probe; unused here
+    let pre = if fd >= 0 { Some((fd, 0, 0)) } else { None };
+    let mut o = run_fwd(fd_dup, pre);
+    o.elapsed_ms = sys::mono_ms().saturating_sub(o.start_ms);
+    emit(&format!(
+        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|elapsed_ms={}|reason={}",
+        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.elapsed_ms, o.reason
+    ));
+
+    let mut j = String::from("{");
+    j.push_str(&format!("\"bind_rc\":{}", o.bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_errno\":{}", o.bind_errno));
+    j.push_str(",");
+    j.push_str(&jbool("hs_ok", o.hs_ok));
+    j.push_str(",");
+    j.push_str(&jstr("endpoint", &o.endpoint));
+    j.push_str(",");
+    j.push_str(&jnum("recv", o.recv as u64));
+    j.push_str(",");
+    j.push_str(&jnum("sent", o.sent as u64));
+    j.push_str(",");
+    j.push_str(&jnum("tun_rx", o.tun_rx as u64));
+    j.push_str(",");
+    j.push_str(&jnum("tun_write", o.tun_write as u64));
     j.push_str(",");
     j.push_str(&jstr("verdict", &o.verdict));
     j.push_str(",");

@@ -220,8 +220,8 @@ def test_chunk_roundtrip_single_and_multi_utf8_byteslice():
 
 
 def test_chunk_item_mapping_and_256b_boundary():
-    expect(core.REJTEXT_ITEM_IDS == {"MR1": 0, "MR1B": 1, "MR2": 2, "MR3": 3, "MB1": 4},
-           "matrix item id mapping (spec :421)")
+    expect(core.REJTEXT_ITEM_IDS == {"MR1": 0, "MR1B": 1, "MR2": 2, "MR3": 3, "MB1": 4, "MR4": 5},
+           "matrix item id mapping (spec :421 + 2026-09-12 MR4 out-of-gate append)")
     for stream in ("dlerror", "u3hex", "foreign"):
         try:
             core.validate_chunk_stream_item(stream, 1)
@@ -319,8 +319,8 @@ def test_chunk_utf8_decode_fail():
 
 
 def test_chunk_item_domain_and_stream_domain_fail():
-    res = core.reassemble_chunks([chunk("rejtext", 5, 0, 1, b"x")])   # 矩阵域 {0..4}
-    expect(not res.ok and res.failures[0].reason == "item-domain", "rejtext item=5 rejected")
+    res = core.reassemble_chunks([chunk("rejtext", 6, 0, 1, b"x")])   # 矩阵域 {0..5}
+    expect(not res.ok and res.failures[0].reason == "item-domain", "rejtext item=6 rejected")
     res = core.reassemble_chunks([chunk("foreign", 1, 0, 1, b"x")])   # 恒 item=0
     expect(not res.ok and res.failures[0].reason == "item-domain", "foreign item=1 rejected")
     res = core.reassemble_chunks([chunk("bogus", 0, 0, 1, b"x")])

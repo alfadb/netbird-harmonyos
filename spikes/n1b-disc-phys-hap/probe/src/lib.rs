@@ -29,7 +29,7 @@
 //! | `d2_entry_attempted(id: string)` | | `N1BDISC_D2_ENTRY\|id=\|phase=attempted` — call at each matrix create attempt |
 //! | `d2_entry_outcome(id: string, outcome: string, fd: number)` | | `N1BDISC_D2_ENTRY\|id=\|outcome=\|fd=`; outcome ∈ resolved/rejected/timeout/late-resolved/late-rejected/indeterminate/not_attempted; fd=-1 → `none` |
 //! | `d2_late(id: string, kind: string)` | | `N1BDISC_D2_LATE\|id=\|kind=<resolve\|reject>` (late callback isolation) |
-//! | `rejtext_emit(item: number, text: string)` | | rejection text via CHUNK `stream=rejtext`; item = matrix id 0..4 (MR1→0 … MB1→4) |
+//! | `rejtext_emit(item: number, text: string)` | | rejection text via CHUNK `stream=rejtext`; item = matrix id 0..5 (MR1→0 … MB1→4, MR4→5 since 2026-09-12) |
 //! | `d4_probe(fdDup: number, mb1: boolean)` | | U1/U3; dest `10.99.0.2:47001` (MR*) / `192.0.2.2:47001` (MB1) |
 //! | `d5_probe(fdDup: number)` | | U2; 44 B frozen packet; sink binds `0.0.0.0:47002`; MB1 addresses follow the matrix flag recorded by `d4_probe` |
 //! | `d8a_probe(fdDup: number, mb1: boolean)` | | 10-level ladder, per-level checksum |

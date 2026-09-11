@@ -10,9 +10,12 @@ const TAG: string = 'N1BDiscVpn';
 // Frozen timeboxes (gate-plan :1031-1049): P2 per-entry create() 60 s, P2 late
 // observation window 60 s (once per matrix), P9 destroy() resolve wait 10 s.
 // All other waits live inside the native probe (bounded polls / D7 / D-W).
+// PROTECT_BOX_MS (added 2026-09-12): the one out-of-gate ArkTS-side wait —
+// bounded box around VpnConnection.protect() in the WG-FWD-PROTECT split.
 const CREATE_BOX_MS: number = 60000;
 const LATE_WINDOW_MS: number = 60000;
 const DESTROY_BOX_MS: number = 10000;
+const PROTECT_BOX_MS: number = 5000;
 
 const OUTCOME_RESOLVED: string = 'resolved';
 const OUTCOME_REJECTED: string = 'rejected';
@@ -40,6 +43,14 @@ interface ProbeBarrierResult {
 
 interface ProbeTerminalResult {
   terminal: boolean;
+}
+
+// wg_fwd_open() JSON (added 2026-09-12): pre-bound WG UDP socket handle for
+// the protected split; fd < 0 means socket()/bind() already failed.
+interface ProbeFwdOpenResult {
+  fd: number;
+  bind_rc: number;
+  bind_errno: number;
 }
 
 interface BusinessFailure extends Error {
@@ -78,8 +89,51 @@ class MatrixEntry {
 // MR1B runs only when MR1 closed `rejected` and the matrix is not terminated
 // (:457 MR table row + :468-475 matrix-termination rule). The matrix is serial:
 // at most one in-flight create() at any time (:468).
+//
+// MR4 (added 2026-09-12, out-of-gate like the WG probes): default-route
+// candidate placed FIRST so the first-accept-lock lets it be the entry that is
+// actually attempted; MR1..MB1 stay in their original relative order as
+// fallback + control rows and still run whenever MR4 is rejected. Field shapes
+// per @ohos.net.connection.d.ts RouteInfo: isDefaultRoute @since 8 (line 2209),
+// isExcludedRoute @since 20 (line 2217) — both within the API-26 device.
 function buildMatrixSpecs(): MatrixEntrySpec[] {
   const specs: MatrixEntrySpec[] = [];
+  // MR4 — default route + host-LAN exclusion (= MR1 base + two extra routes).
+  // Route 1 keeps MR1's proven tunnel-subnet shape; route 2 is the IPv4
+  // default via the tunnel (isDefaultRoute: true on destination 0.0.0.0/0) so
+  // OTHER apps' traffic enters the VPN network domain; route 3 EXCLUDES the
+  // host LAN 192.168.50.0/24 so hdc TCP returns and the WG outer UDP towards
+  // the host are never captured by our own tunnel (self-loop guard).
+  // isBlocking stays omitted (= false), mtu stays 1400, addresses stay
+  // 10.99.0.1/32 — identical base to MR1.
+  specs.push({
+    id: 'MR4',
+    rejItem: 5,
+    config: {
+      addresses: [{ address: { address: '10.99.0.1', family: 1 }, prefixLength: 32 }],
+      routes: [{
+        interface: 'vpn-tun',
+        destination: { address: { address: '10.99.0.0', family: 1 }, prefixLength: 24 },
+        gateway: { address: '10.99.0.1', family: 1 },
+        hasGateway: true,
+        isDefaultRoute: false
+      }, {
+        interface: 'vpn-tun',
+        destination: { address: { address: '0.0.0.0', family: 1 }, prefixLength: 0 },
+        gateway: { address: '10.99.0.1', family: 1 },
+        hasGateway: true,
+        isDefaultRoute: true
+      }, {
+        interface: 'vpn-tun',
+        destination: { address: { address: '192.168.50.0', family: 1 }, prefixLength: 24 },
+        gateway: { address: '10.99.0.1', family: 1 },
+        hasGateway: true,
+        isDefaultRoute: false,
+        isExcludedRoute: true
+      }],
+      mtu: 1400
+    }
+  });
   // MR1 — main candidate (N1b r2 target shape), isBlocking omitted.
   specs.push({
     id: 'MR1',
@@ -315,7 +369,8 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     clearTimeout(entry.boxTimer);
     clearTimeout(entry.windowTimer);
     // Rejection text travels via the CHUNK stream=rejtext, item = matrix id
-    // domain MR1->0 .. MB1->4 (:421, :507-509).
+    // domain MR1->0 .. MB1->4, MR4->5 (out-of-gate append 2026-09-12)
+    // (:421, :507-509).
     probe.rejtext_emit(this.rejItemOf(entry.id), describeError(err));
     const inWindow = this.matrixState === STATE_LATE_WINDOW;
     probe.d2_entry_outcome(entry.id, inWindow ? OUTCOME_LATE_REJECTED : OUTCOME_REJECTED, -1);
@@ -338,6 +393,9 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     }
     if (id === 'MR3') {
       return 3;
+    }
+    if (id === 'MR4') {
+      return 5;
     }
     return 4;
   }
@@ -402,7 +460,26 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     // full round trip, the 90 s / 64-event bound, or a fatal error. Blocks
     // this chain for up to ~90 s; that wait is the probe. No ledger
     // transition, and D4/D5/D8/D-W are untouched.
-    probe.wg_fwd_probe(fdDup, mb1);
+    //
+    // WG-FWD-PROTECT (out-of-gate, added 2026-09-12): split execution of the
+    // SAME data plane. wg_fwd_open() creates + binds the WG UDP socket alone,
+    // so ArkTS can protect it on the retained VPN connection
+    // (VpnConnection.protect(socketFd), @ohos.net.vpnExtension.d.ts line 244,
+    // @since 11) BEFORE any datagram flows — its traffic then takes the
+    // physical network instead of the VPN. wg_fwd_run(fd, fdDup, mb1) drives
+    // the unchanged handshake + forward loop on that adopted socket. protect()
+    // is best-effort: on open() failure or protect() failure the chain falls
+    // back to the proven single-call wg_fwd_probe path (own socket, no
+    // protect); the MR4 excluded route stays the primary outer-path guard.
+    const fwd = JSON.parse(probe.wg_fwd_open()) as ProbeFwdOpenResult;
+    if (fwd.fd >= 0) {
+      await this.protectSocketWithBox(retained.conn, fwd.fd);
+      probe.wg_fwd_run(fwd.fd, fdDup, mb1);
+    } else {
+      hilog.warn(DOMAIN, TAG, 'WG_FWD_OPEN_FAILED|bind_rc=%{public}d|bind_errno=%{public}d',
+        fwd.bind_rc, fwd.bind_errno);
+      probe.wg_fwd_probe(fdDup, mb1);
+    }
     // WG-NET (out-of-gate, added 2026-09-11; on-device PASS): single-shot
     // variant that decrypts the peer's first transport packet and closes the
     // TUN/sink loop. Deliberately NOT called anymore: it binds the same
@@ -466,6 +543,34 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     probe.cleanup_sockets(notCreatedCause);
     // P12 POST (late-race window and class derivation inside native).
     probe.post_emit(destroyResolved);
+  }
+
+  // Best-effort VpnConnection.protect() with a bounded 5 s box (added
+  // 2026-09-12; house rule — every ArkTS-side wait is bounded). Never throws:
+  // rejected/timeout merely logs and returns false, leaving the WG outer path
+  // to the MR4 excluded route. A pending protect after box expiry is left
+  // fire-and-forget; the forward loop starts regardless.
+  private async protectSocketWithBox(conn: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
+    const settled = new Promise<boolean>((resolve) => {
+      conn.protect(fd).then((): void => {
+        resolve(true);
+      }).catch((err: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'WG_FWD_PROTECT|fd=%{public}d|result=rejected|%{public}s',
+          fd, describeError(err));
+        resolve(false);
+      });
+    });
+    const box = new Promise<boolean>((resolve) => {
+      setTimeout((): void => {
+        hilog.warn(DOMAIN, TAG, 'WG_FWD_PROTECT|fd=%{public}d|result=timeout', fd);
+        resolve(false);
+      }, PROTECT_BOX_MS);
+    });
+    const ok = await Promise.race([settled, box]);
+    if (ok) {
+      hilog.info(DOMAIN, TAG, 'WG_FWD_PROTECT|fd=%{public}d|result=resolved', fd);
+    }
+    return ok;
   }
 
   // Shared destroy subprotocol (:709-713): _T immediately before the

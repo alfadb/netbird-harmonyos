@@ -58,8 +58,9 @@ EXEMPT_MARKERS = frozenset({"N1BDISC_D2_REJTEXT", "N1BDISC_RESULT"})
 CHUNK_STREAMS: Tuple[str, ...] = ("dlerror", "rejtext", "u3hex", "foreign")
 #: ``item`` 恒 0 的 stream（各恰一条记录）。
 CHUNK_ITEM_ZERO_STREAMS: Tuple[str, ...] = ("dlerror", "u3hex", "foreign")
-#: rejtext 的 item = 矩阵条目 id 编号域（规格 :421）。
-REJTEXT_ITEM_IDS: Mapping[str, int] = {"MR1": 0, "MR1B": 1, "MR2": 2, "MR3": 3, "MB1": 4}
+#: rejtext 的 item = 矩阵条目 id 编号域（规格 :421）。MR4→5 为 2026-09-12
+#: out-of-gate 追加（默认路由候选变体），既有 0..4 映射不变。
+REJTEXT_ITEM_IDS: Mapping[str, int] = {"MR1": 0, "MR1B": 1, "MR2": 2, "MR3": 3, "MB1": 4, "MR4": 5}
 REJTEXT_ITEM_DOMAIN = frozenset(REJTEXT_ITEM_IDS.values())
 #: 单片原始字节上限（规格 :427(a)）。
 CHUNK_SLICE_MAX_BYTES = 256
@@ -355,7 +356,7 @@ def validate_chunk_stream_item(stream: str, item: int) -> None:
         if item != 0:
             raise ValueError("stream %r requires item=0, got %r" % (stream, item))
     elif item not in REJTEXT_ITEM_DOMAIN:
-        raise ValueError("rejtext item out of matrix-id domain {0..4}: %r" % (item,))
+        raise ValueError("rejtext item out of matrix-id domain {0..5}: %r" % (item,))
 
 
 def encode_chunks(text: str, stream: str, item: int) -> List[Mapping[str, str]]:

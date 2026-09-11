@@ -204,10 +204,11 @@ pub fn d2_late(id: &str, kind: &str) -> String {
 }
 
 /// Rejection-text transport for the create matrix: CHUNK stream=rejtext with
-/// item = matrix id number (MR1→0 … MB1→4, :421).
+/// item = matrix id number (MR1→0 … MB1→4, :421). MR4→5 appended 2026-09-12
+/// (out-of-gate default-route candidate; existing ids 0..=4 unchanged).
 pub fn rejtext_emit(item: i32, text: &str) -> String {
-    if !(0..=4).contains(&item) {
-        return format!("{{{}}}", jstr("error", "item outside 0..=4 matrix domain"));
+    if !(0..=5).contains(&item) {
+        return format!("{{{}}}", jstr("error", "item outside 0..=5 matrix domain"));
     }
     crate::chunk::emit_chunk(crate::chunk::STREAM_REJTEXT, item as u32, text);
     format!("{{{},\"emitted\":true}}", jinum("item", item as i64))
