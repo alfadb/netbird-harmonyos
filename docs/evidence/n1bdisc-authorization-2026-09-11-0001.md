@@ -90,3 +90,29 @@ reviewer_role: 待未来 gate 3/7 freeze 重新绑定（跨厂商 isolated revie
 ## 三 ID 状态
 
 `AUTH-N1BDISC-PHYS1API26-20260911-0001` / campaign `N1BDISC-PHYS1API26-20260911-0001` / evidence `EV-N1BDISC-PHYS1API26-20260911-0001` 保持 **candidate 态、未消费**（`identity_status: candidate`、`consumed=false`、`reusable=false`、`is_evidence=false`）；**任何门均未执行**（无 gate 执行、无测量、无设备/HDC 命令、无签名、无 freeze、无 DryRun/Live）。
+
+## 门序列执行登记（第四对，2026-09-11，host-only 门 1-3）
+
+> 本节为 2026-09-11 的追加登记，**上文（含 YAML 顶部字段、依据、范围声明、门序列节）不改**；与上文表述冲突时以本节执行事实为准。体例沿第三对授权登记「门序列执行登记」节。
+
+| 门 | 状态 | 事实 |
+| --- | --- | --- |
+| 1 host-only 同步 | pass | 现场核验（2026-09-11）：`git status --short --branch` → `## main...origin/main`；`git status --porcelain` → 空（0 未提交项）；`git rev-parse HEAD` → `8f926fb6581febab58df6487b0b818b3b8f9fab6`；`git rev-list --left-right --count origin/main...HEAD` → 左右计数均 0（原始输出以 TAB 分隔，即 `0`/`0`，与 origin/main 同步）；HDC0 只读探针 `pgrep -x hdc -a` → `618318 hdc -m -s ::ffff:127.0.0.1:8710`、`ps -eo pid,comm \| awk '$2=="hdc"'` → `618318 hdc`（同一次实测，同一进程；`ps -o lstart` 实测启动于 14:05:07，PPID 1）——该进程为 **hdc server/daemon**（`-m -s` + endpoint 参数形态），非设备命令执行；**未执行任何设备/hdc 命令**、未连接设备、未执行 `hdc kill`，**零设备接触** |
+| 2 audit-1 | pass | 本对 gate 2 证据 = 仓外双文件（现场复核存在 + 复算一致）：`~/harmonyos-signing/netbird-n1bdisc/audit/pair-20260911-0001/new-pair-id-consumption-audit-1.txt`（5626 B，SHA-256 `9a56c006a4dbdef95f52887e28e7517459b84a0f95a6bcd9df74ce3e5d9e5cf7`）+ 同名 `.sha256` sidecar（内容即上述哈希，`sha256sum -c` → `OK`）。**新 code_sha 有界 grep 复检**（限定 `README.md docs scripts spikes`，排除 `build/.hvigor/target/node_modules/.git/__pycache__`）：三 ID 命中 **AUTH 5 行 / campaign 9 行 / EV 6 行**，全部为治理登记本体与索引/交接引用；消费标记（`consumed: true`/`consumed=true`、本对非 candidate `identity_status`、本对 evidence 记录本体 `record_status: collected/reviewed-pass`）**零命中**（仓内既有 `consumed: true` 命中均为 E3 历史记录与第三对执行表自述，无一绑定本对）→ candidate 态保持 |
+| 3 freeze + 静态审查 | pass（**freeze-4 成立**） | 有效记录 = **freeze-4 原文 + 更新版沿革勘误**的组合（审查席裁决「成立、0 blocker / 0 major / 1 minor、**无需重出 freeze-4**」）。freeze-4：`~/harmonyos-signing/netbird-n1bdisc/freeze/gate3-criteria-conformance-freeze-4-20260911.txt`（SHA-256 `b5aed745a25c3029c86100a2ac5a4ff441a413e2ccea1b3eba5d59e1c3ad4a84`，现场复算与 sidecar 一致）；附件 `gate3-staticcheck-output-pair4.json`（`ae3bd883fcc61e08a8f7eaaa22df79ef9af7f7b34b0b8f49ae58080c6339cd54`）、`gate3-symbol-transcription-pair4.txt`（`ad61a4fb147482379adda6b1ee326a88f917ef79acaa5efe00d88a3560df7f57`）、`gate3-criteria-dimension-recheck-pair4-20260911.txt`（`905ac168824852ce5a4c07ebde1c371b07e7b5b299977ecdb3a24dc4f1c909ad`），三附件现场复算一致；沿革勘误 `gate3-freeze4-erratum-lineage-20260911.txt`（`9b85b1c4a4439782c67c7708bff24a7142afaf358e2c999fe167bd2de90bc289`） |
+
+**判据基线**：`docs/n1b-disc-gate-plan.md` @ git `04cf222`（冻结，`criteria-frozen-2026-09-02`）+ **CC-1**（`criteria-change-1-reviewed-pass-2026-09-05`）+ **CC-2**（`criteria-change-2-reviewed-pass-2026-09-06`，元组重绑）+ **CC-3**（`criteria-change-3-reviewed-pass-2026-09-11`，P1 `dlopen`/`dlsym` 时间盒语义收窄）+ **CC-4**（`criteria-change-4-reviewed-pass-2026-09-11`，D1 `elapsed_ms` 落盘依据 + 467/525 上界法理修正）+ **CC-5**（`criteria-change-5-reviewed-pass-2026-09-11`，设备元组重绑至 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`，判据 `:268`），**六者全部 `reviewed-pass`**；设备冻结元组 = `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`（判据 `:268`）。
+
+**关键实测数字（freeze-4）**：selftests **207 passed**（0 failed/error）；探针 host 单测 **15 passed**（fresh 重编译 `cargo test --offline --locked`）；A1-A12 **12/12**（被检树指纹 `e6e93916ef18` / 45 文件，与 freeze-3-v4 逐字节相同）；导出 T 符号 **14/14 不变**；制品 `.so` SHA-256 **`5e5408772e75b78f3b01d7a6297bc2ab9fe16a9860ba9c36df248bed667a297c`**（1160224 B；`entry/libs/arm64-v8a/` 与 `probe/target/aarch64-unknown-linux-ohos/release/` 两处一致）。
+
+**gate 3 有效记录构成（审查席裁决）**：freeze-4 原文（`gate3-criteria-conformance-freeze-4-20260911.txt`，SHA-256 `b5aed745a25c3029c86100a2ac5a4ff441a413e2ccea1b3eba5d59e1c3ad4a84`）**+** 更新版沿革勘误（`gate3-freeze4-erratum-lineage-20260911.txt`，SHA-256 `9b85b1c4a4439782c67c7708bff24a7142afaf358e2c999fe167bd2de90bc289`）——两者并存，沿革段 `:27` 表述冲突时以勘误为准；**审查席明确「无需重出 freeze-4」**。勘误只更正 freeze-4 `:27` 的**跨 pair 归属错误**（第三对初版冻结被误写作 `freeze-1`，实为 `gate3-criteria-conformance-freeze-3-20260911.txt`）并新增「术语消歧」节（绑定输入 / 分析结论 / 结论一致性三层面 + 建议统一表述句）；不改写 freeze-4 原文、不触碰任何被冻结资产。
+
+**1 项 minor 与既定处置**：
+
+- **m-1（陈旧注释）**：`spikes/n1b-disc-phys-hap/runner/n1bdisc_fsm.py:75-77` 注释仍写「唯一时间盒豁免 = pthread_join」（CC-3 后该「单一豁免」措辞已收窄，属陈旧）。**freeze 后不得修正**被冻结资产（含注释/元数据）——freeze 后改动资产会撞判据 `:1124` 的 `invalid` 条件（ready freeze 后 HAP/`.so`/runner/配置矩阵/符号清单/marker 集冻结文件 SHA-256 与 freeze 记录不一致即判 invalid）；陈旧注释只能在**本 campaign 结束后**或**下一对 freeze 前**统一更正。
+
+**三 ID 状态**：`AUTH-N1BDISC-PHYS1API26-20260911-0001` / campaign `N1BDISC-PHYS1API26-20260911-0001` / evidence `EV-N1BDISC-PHYS1API26-20260911-0001` 保持 **candidate 态、未消费**（`identity_status: candidate`、`consumed=false`、`reusable=false`、`is_evidence=false`）；**gate 4 起为设备侧**（`tconn` + 恰一次内存级 `list targets`，**须用户本人连接设备**；gate 5 三探针对照 CC-5 重绑元组 `PLA-AL10 7.0.0.105(SP10C00E105R7P3)`）；**gate 13 Live 须用户全新确认**（决议 §4.3.9）。
+
+**收官（2026-09-11）**：第四对 pair host-only 门 **gate 1-3 全部 pass**，**freeze-4 成立**（0 blocker / 0 major / 1 minor，含沿革勘误消解）。三 ID 仍未消费；全程零设备接触、零 HDC 命令、pair 未消费。下一步 **gate 4**（设备侧，须用户本人连接设备）；gate 5 三探针对照 CC-5 重绑元组；gate 13 Live 须用户全新确认。逐门登记随执行继续追加。
+
+**执行提醒**：**设备自动更新须关闭**——首对与第三对两次 gate 5 元组漂移退役均系设备 OTA 所致；执行 gate 4-5 前须关闭设备自动更新，避免再次漂移退役。
