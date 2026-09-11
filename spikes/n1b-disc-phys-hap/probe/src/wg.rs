@@ -25,6 +25,13 @@
 //! with `sendto`, decrypts the peer's first transport packet, and closes the
 //! same TUN/sink loop. `wg_probe` (in-process) and `wg_udp_probe` (plain-UDP
 //! reachability) are retained unchanged.
+//!
+//! `wg_fwd_probe` (added 2026-09-11) is the same tunnel as a REAL bidirectional
+//! data plane: after answering the host's handshake it keeps running — `poll`
+//! on the WG UDP socket AND the TUN fd, encrypting device-originated IPv4
+//! frames towards the host and writing decapsulated plaintext back into the
+//! real TUN, with `wireguard_tick` serviced every loop. `wg_probe` and
+//! `wg_net_probe` are retained unchanged as recorded on-device regressions.
 
 use std::ffi::CString;
 
@@ -121,6 +128,16 @@ impl Tunnel {
     fn force_handshake(&self, dst: &mut [u8]) -> (i32, usize) {
         let r = unsafe {
             ffi::wireguard_force_handshake(self.ptr as *const _, dst.as_mut_ptr(), dst.len() as u32)
+        };
+        (r.op as i32, r.size)
+    }
+
+    /// Periodic timer service (`wireguard_tick`, recommended ~100 ms cadence):
+    /// emits keepalives, retransmits handshakes, rekeys. Produces a datagram
+    /// only when one is due (usually `OP_DONE`).
+    fn tick(&self, dst: &mut [u8]) -> (i32, usize) {
+        let r = unsafe {
+            ffi::wireguard_tick(self.ptr as *const _, dst.as_mut_ptr(), dst.len() as u32)
         };
         (r.op as i32, r.size)
     }
@@ -1104,6 +1121,466 @@ pub fn wg_net_probe(fd_dup: i32, mb1: bool) -> String {
     j.push_str(&jstr("reason", &o.reason));
     j.push_str(",");
     j.push_str(&jnum("elapsed_ms", o.waited_ms));
+    j.push('}');
+    j
+}
+
+// ---------------------------------------------------------------------------
+// wg_fwd_probe — the same tunnel as a REAL bidirectional VPN data plane
+// ---------------------------------------------------------------------------
+
+/// OP_TUN_V6 (boringtun-0.7.1/src/ffi/mod.rs result_type): decapsulated IPv6
+/// plaintext. Handled like OP_TUN_V4 (write back into the TUN fd).
+const OP_TUN_V6: i32 = 5;
+/// One poll slice of the forwarding loop; `wireguard_tick` runs once per slice
+/// (recommended ~100 ms; 250 ms keeps keepalive/retransmit timers accurate
+/// without spinning the loop).
+const FWD_POLL_MS: i32 = 250;
+/// Handshake wait bound: no host datagram that establishes a session within
+/// 90 s -> verdict=timeout, reason=handshake-timeout.
+const FWD_HS_WAIT_MS: u64 = 90_000;
+/// Forwarding loop bound: 90 s, or the event cap below, or the first full
+/// round trip, whichever comes first.
+const FWD_LOOP_MS: u64 = 90_000;
+/// Loop also ends after this many processed events (UDP datagrams + TUN reads)
+/// so a chatty kernel cannot extend the probe forever.
+const FWD_EVENT_CAP: u32 = 64;
+/// Max TUN frames drained per readable poll, so a kernel transmit burst cannot
+/// starve the UDP half of the loop (each drain re-polls on the next iteration).
+const FWD_TUN_DRAIN: u32 = 8;
+
+#[derive(Default)]
+struct FwdOutcome {
+    dev_pub: String,
+    host_pub: String,
+    bind_rc: i32,
+    bind_errno: i32,
+    hs_time_s: i64,
+    hs_ok: bool,
+    endpoint: String,
+    recv: u32,
+    sent: u32,
+    send_errno: i32,
+    tun_rx: u32,
+    tun_rx_skip: u32,
+    tun_write: u32,
+    tun_last_written: i64,
+    tun_last_errno: i32,
+    verdict: String,
+    reason: String,
+    start_ms: u64,
+    elapsed_ms: u64,
+}
+
+/// Send one ciphertext datagram to the recorded peer endpoint; counts a
+/// success into `sent`, records errno on failure. Returns sendto's rc.
+fn fwd_send(fd: i32, peer: &sys::sockaddr_in, out: &[u8], len: usize, o: &mut FwdOutcome) -> isize {
+    let sn = unsafe {
+        sys::sendto(
+            fd,
+            out.as_ptr() as *const core::ffi::c_void,
+            len,
+            0,
+            peer,
+            core::mem::size_of::<sys::sockaddr_in>() as u32,
+        )
+    };
+    if sn >= 0 {
+        o.sent += 1;
+    } else {
+        o.send_errno = sys::errno();
+    }
+    sn
+}
+
+/// Write decapsulated plaintext back into the REAL TUN fd; counts a successful
+/// (n > 0) write into `tun_write`. Panic-free: caller guarantees
+/// `len <= out.len()`.
+fn fwd_tun_write(fd_dup: i32, len: usize, out: &[u8], o: &mut FwdOutcome) {
+    let (wn, we) = sys::write_fd(fd_dup, &out[..len]);
+    o.tun_last_written = wn as i64;
+    o.tun_last_errno = we;
+    if wn > 0 {
+        o.tun_write += 1;
+    }
+    emit(&format!(
+        "N1BDISC_WG_FWD_TUN_WRITE|len={}|written={}|errno={}",
+        len, wn, we
+    ));
+}
+
+/// Stage machine; every exit path leaves `verdict`/`reason` set and has already
+/// emitted the markers for the stage it stopped in. `fd_dup` is the O_NONBLOCK
+/// dup of the real TUN fd (d2 S5), safe to read inside the poll loop.
+fn run_fwd(fd_dup: i32) -> FwdOutcome {
+    let mut o = FwdOutcome::default();
+    o.start_ms = sys::mono_ms();
+    let t0 = o.start_ms;
+
+    // --- 1. UDP socket bound 0.0.0.0:47010 ----------------------------------
+    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        o.bind_rc = -1;
+        o.bind_errno = sys::errno();
+        o.verdict = "socket_fail".into();
+        o.reason = "socket".into();
+        return o;
+    }
+    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
+    o.bind_rc =
+        unsafe { sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
+    o.bind_errno = if o.bind_rc == -1 { sys::errno() } else { 0 };
+    emit(&format!(
+        "N1BDISC_WG_FWD_BIND|port={}|rc={}|errno={}",
+        NET_PORT, o.bind_rc, o.bind_errno
+    ));
+    if o.bind_rc != 0 {
+        unsafe { sys::close(fd) };
+        o.verdict = "bind_fail".into();
+        o.reason = "bind".into();
+        return o;
+    }
+
+    // --- 2. fixed test secrets -> real public keys -> one tunnel -------------
+    let dev_sk = ffi::x25519_key { key: NET_DEV_SECRET };
+    let dev_pk = ffi::x25519_public_key(ffi::x25519_key { key: NET_DEV_SECRET });
+    let host_pk = ffi::x25519_public_key(ffi::x25519_key { key: NET_HOST_SECRET });
+    let (dev_sec_b64, dev_pub_b64, host_pub_b64) =
+        match (key_to_b64(dev_sk), key_to_b64(dev_pk), key_to_b64(host_pk)) {
+            (Some(s), Some(dp), Some(hp)) => (s, dp, hp),
+            _ => {
+                unsafe { sys::close(fd) };
+                o.verdict = "key_b64_null".into();
+                o.reason = "key-to-base64-null".into();
+                return o;
+            }
+        };
+    o.dev_pub = dev_pub_b64;
+    o.host_pub = host_pub_b64.clone();
+    emit(&format!(
+        "N1BDISC_WG_FWD_KEYS|dev_pub={}|host_pub={}",
+        o.dev_pub, host_pub_b64
+    ));
+
+    let tunnel = match Tunnel::new(&dev_sec_b64, &host_pub_b64, NET_INDEX, "FWD") {
+        Some(t) => t,
+        None => {
+            unsafe { sys::close(fd) };
+            o.verdict = "new_tunnel_null".into();
+            o.reason = "new_tunnel-null".into();
+            return o;
+        }
+    };
+    emit(&format!(
+        "N1BDISC_WG_FWD_TUNNEL|keep_alive={}|idx={}",
+        KEEP_ALIVE, NET_INDEX
+    ));
+
+    // Peer endpoint, refreshed by every recvfrom; all sends go to the last
+    // source observed (the host's WG port).
+    let mut peer = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+    let mut have_peer = false;
+    let mut rbuf = [0u8; BUF];
+    let mut out = [0u8; BUF];
+
+    // --- 3. bounded handshake wait: answer the host's initiation -------------
+    // Responder role, same as wg_net_probe (the host initiates). A decapsulated
+    // transport packet that slips in during this phase is still written to the
+    // TUN — it is real data-plane traffic within an established session.
+    let hs_deadline = t0 + FWD_HS_WAIT_MS;
+    while !o.hs_ok && sys::mono_ms() < hs_deadline {
+        let (ret, e, revents) = sys::poll1(fd, sys::POLLIN, FWD_POLL_MS);
+        if ret == 0 {
+            continue; // slice elapsed; re-check the deadline
+        }
+        if ret < 0 {
+            if e == sys::EINTR {
+                continue;
+            }
+            o.verdict = "poll_error".into();
+            o.reason = format!("hs-poll-{}", e);
+            break;
+        }
+        if (revents & sys::POLLIN) == 0 {
+            continue;
+        }
+        let mut from = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut flen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        let rn = unsafe {
+            sys::recvfrom(
+                fd,
+                rbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                rbuf.len(),
+                0,
+                &mut from,
+                &mut flen,
+            )
+        };
+        if rn <= 0 {
+            continue; // spurious wakeup or zero-length datagram
+        }
+        o.recv += 1;
+        peer = from;
+        have_peer = true;
+        o.endpoint = sa_str(&from);
+        emit(&format!(
+            "N1BDISC_WG_FWD_RECV|phase=hs|len={}|src={}",
+            rn, o.endpoint
+        ));
+
+        let n = rn as usize; // rn > 0 and <= rbuf.len() by recvfrom semantics
+        let (op, len) = tunnel.read(&rbuf[..n], &mut out);
+        match op {
+            OP_NETWORK if len > 0 && len <= BUF => {
+                let sn = fwd_send(fd, &peer, &out, len, &mut o);
+                emit(&format!(
+                    "N1BDISC_WG_FWD_OP|phase=hs|len={}|op={}|sent={}",
+                    len, op, sn
+                ));
+            }
+            OP_TUN_V4 | OP_TUN_V6 if len > 0 && len <= BUF => {
+                fwd_tun_write(fd_dup, len, &out, &mut o);
+            }
+            OP_ERROR => emit(&format!("N1BDISC_WG_FWD_OP|phase=hs|len={}|op={}", len, op)),
+            _ => {}
+        }
+
+        // Session is installed the moment the initiation validates
+        // (boringtun handle_handshake_init -> set_current_session), so stats
+        // flips to >= 0 right after the response is queued.
+        let (hs_time, _tx, _rx) = tunnel.stats();
+        o.hs_time_s = hs_time;
+        o.hs_ok = hs_time >= 0;
+    }
+    emit(&format!(
+        "N1BDISC_WG_FWD_HS|time={}|ok={}",
+        o.hs_time_s, o.hs_ok
+    ));
+    if !o.hs_ok {
+        if o.verdict.is_empty() {
+            o.verdict = "timeout".into();
+            o.reason = "handshake-timeout".into();
+        }
+        unsafe { sys::close(fd) };
+        return o;
+    }
+
+    // --- 4. bidirectional forwarding loop ------------------------------------
+    let loop_deadline = sys::mono_ms() + FWD_LOOP_MS;
+    let mut events = 0u32;
+    while o.verdict.is_empty() {
+        if sys::mono_ms() >= loop_deadline {
+            o.reason = "deadline".into();
+            break;
+        }
+        if events >= FWD_EVENT_CAP {
+            o.reason = "packet-cap".into();
+            break;
+        }
+
+        // Keepalives / handshake retransmits / rekeys; send whatever is due.
+        let (top, tlen) = tunnel.tick(&mut out);
+        if top == OP_NETWORK && tlen > 0 && tlen <= BUF && have_peer {
+            let sn = fwd_send(fd, &peer, &out, tlen, &mut o);
+            emit(&format!(
+                "N1BDISC_WG_FWD_TICK|op={}|len={}|sent={}",
+                top, tlen, sn
+            ));
+        } else if top == OP_ERROR {
+            emit(&format!("N1BDISC_WG_FWD_TICK_ERR|op={}|len={}", top, tlen));
+        }
+
+        // Poll BOTH fds: [0] = WG UDP socket, [1] = real TUN fd. (poll1 covers
+        // one fd; the closed-table `poll` primitive takes the pair.)
+        let mut fds = [
+            sys::pollfd { fd, events: sys::POLLIN, revents: 0 },
+            sys::pollfd { fd: fd_dup, events: sys::POLLIN, revents: 0 },
+        ];
+        let ret = unsafe { sys::poll(fds.as_mut_ptr(), 2, FWD_POLL_MS) };
+        if ret < 0 {
+            let e = sys::errno();
+            if e == sys::EINTR {
+                continue;
+            }
+            o.verdict = "fail".into();
+            o.reason = format!("poll-{}", e);
+            break;
+        }
+
+        // --- TUN readable: device-originated plaintext -> encrypt -> host ----
+        if (fds[1].revents & sys::POLLIN) != 0 {
+            for _ in 0..FWD_TUN_DRAIN {
+                // fd_dup is O_NONBLOCK: read returns immediately once drained.
+                let (rn, re) = sys::read_fd(fd_dup, &mut rbuf);
+                if rn <= 0 {
+                    if re != sys::EAGAIN && re != 0 {
+                        emit(&format!("N1BDISC_WG_FWD_TUN_ERR|rn={}|errno={}", rn, re));
+                    }
+                    break;
+                }
+                events += 1;
+                let n = rn as usize; // <= rbuf.len() by read semantics
+                // Only IPv4 with IHL==5 goes into the tunnel. The kernel also
+                // emits its own control frames on this interface (observed:
+                // 116-byte IPv6 MLDv2 reports, version nibble 6); forwarding
+                // those would pollute the tunnel, so skip and count them.
+                let (ver, ihl) = ((rbuf[0] >> 4), (rbuf[0] & 0x0f));
+                if n < 20 || ver != 4 || ihl != 5 {
+                    o.tun_rx_skip += 1;
+                    emit(&format!(
+                        "N1BDISC_WG_FWD_SKIP|len={}|ver={}|ihl={}",
+                        n, ver, ihl
+                    ));
+                    continue;
+                }
+                o.tun_rx += 1;
+                emit(&format!(
+                    "N1BDISC_WG_FWD_TUN_RX|len={}|first8={}",
+                    n,
+                    hex_lower(&rbuf[..n.min(8)])
+                ));
+                let (wop, wlen) = tunnel.write(&rbuf[..n], &mut out);
+                if wop == OP_NETWORK && wlen > 0 && wlen <= BUF {
+                    if have_peer {
+                        let sn = fwd_send(fd, &peer, &out, wlen, &mut o);
+                        emit(&format!(
+                            "N1BDISC_WG_FWD_SEND|len={}|ct_len={}|sent={}",
+                            n, wlen, sn
+                        ));
+                    }
+                } else {
+                    // No session yet, or a transient encapsulate error: record
+                    // and keep looping; this is not fatal to the probe.
+                    emit(&format!(
+                        "N1BDISC_WG_FWD_ENC|op={}|len={}|pt_len={}",
+                        wop, wlen, n
+                    ));
+                }
+            }
+        }
+
+        // --- UDP readable: host datagram -> decapsulate ----------------------
+        if (fds[0].revents & sys::POLLIN) != 0 && o.verdict.is_empty() {
+            let mut from = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+            let mut flen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+            let rn = unsafe {
+                sys::recvfrom(
+                    fd,
+                    rbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                    rbuf.len(),
+                    0,
+                    &mut from,
+                    &mut flen,
+                )
+            };
+            if rn > 0 {
+                events += 1;
+                o.recv += 1;
+                peer = from;
+                have_peer = true;
+                o.endpoint = sa_str(&from);
+                emit(&format!(
+                    "N1BDISC_WG_FWD_RECV|phase=fwd|len={}|src={}",
+                    rn, o.endpoint
+                ));
+                let n = rn as usize;
+                let (op, len) = tunnel.read(&rbuf[..n], &mut out);
+                match op {
+                    OP_TUN_V4 | OP_TUN_V6 if len > 0 && len <= BUF => {
+                        fwd_tun_write(fd_dup, len, &out, &mut o);
+                    }
+                    OP_NETWORK if len > 0 && len <= BUF => {
+                        let sn = fwd_send(fd, &peer, &out, len, &mut o);
+                        emit(&format!("N1BDISC_WG_FWD_OP|len={}|op={}|sent={}", len, op, sn));
+                    }
+                    OP_ERROR => {
+                        o.verdict = "fail".into();
+                        o.reason = format!("wg-read-error-{}", len);
+                    }
+                    _ => emit(&format!("N1BDISC_WG_FWD_OP|len={}|op={}", len, op)),
+                }
+            }
+        }
+
+        // First observed full round trip (decrypted data reached the TUN AND
+        // encrypted data was sent back) proves the data plane both ways; stop
+        // here instead of burning the remaining bound.
+        if o.tun_write > 0 && o.sent > 0 {
+            o.reason = "roundtrip".into();
+            break;
+        }
+    }
+
+    unsafe { sys::close(fd) };
+    if o.verdict.is_empty() {
+        // pass = decrypted data made it back into the real TUN; partial =
+        // something moved but never the TUN closure; timeout = nothing moved.
+        if o.tun_write > 0 {
+            o.verdict = "pass".into();
+        } else if o.recv > 0 || o.tun_rx > 0 || o.sent > 0 {
+            o.verdict = "partial".into();
+        } else {
+            o.verdict = "timeout".into();
+        }
+        if o.reason.is_empty() {
+            o.reason = "loop-end".into();
+        }
+    }
+    o
+}
+
+/// `wg_fwd_probe(fdDup: number, mb1: boolean) -> string` (JSON). Real
+/// bidirectional data plane over one BoringTun tunnel: answers the host's
+/// handshake, then forwards in BOTH directions between the real TUN fd and the
+/// WG UDP socket until the first full round trip, the 90 s / 64-event bound, or
+/// a fatal error. Outside the frozen P-chain: no ledger transition, and the
+/// caller's D4/D5/D8/D-W sequence is untouched.
+pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
+    emit("N1BDISC_WG_FWD_ENTER|");
+    let _ = mb1; // kept for signature parity with wg_net_probe; unused here
+    let mut o = run_fwd(fd_dup);
+    o.elapsed_ms = sys::mono_ms().saturating_sub(o.start_ms);
+    emit(&format!(
+        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|elapsed_ms={}|reason={}",
+        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.elapsed_ms, o.reason
+    ));
+
+    let mut j = String::from("{");
+    j.push_str(&jstr("dev_pub", &o.dev_pub));
+    j.push_str(",");
+    j.push_str(&jstr("host_pub", &o.host_pub));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_rc\":{}", o.bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"bind_errno\":{}", o.bind_errno));
+    j.push_str(",");
+    j.push_str(&jinum("hs_time_s", o.hs_time_s));
+    j.push_str(",");
+    j.push_str(&jbool("hs_ok", o.hs_ok));
+    j.push_str(",");
+    j.push_str(&jstr("endpoint", &o.endpoint));
+    j.push_str(",");
+    j.push_str(&jnum("recv", o.recv as u64));
+    j.push_str(",");
+    j.push_str(&jnum("sent", o.sent as u64));
+    j.push_str(",");
+    j.push_str(&format!("\"send_errno\":{}", o.send_errno));
+    j.push_str(",");
+    j.push_str(&jnum("tun_rx", o.tun_rx as u64));
+    j.push_str(",");
+    j.push_str(&jnum("tun_rx_skip", o.tun_rx_skip as u64));
+    j.push_str(",");
+    j.push_str(&jnum("tun_write", o.tun_write as u64));
+    j.push_str(",");
+    j.push_str(&jinum("tun_last_written", o.tun_last_written));
+    j.push_str(",");
+    j.push_str(&format!("\"tun_last_errno\":{}", o.tun_last_errno));
+    j.push_str(",");
+    j.push_str(&jstr("verdict", &o.verdict));
+    j.push_str(",");
+    j.push_str(&jstr("reason", &o.reason));
+    j.push_str(",");
+    j.push_str(&jnum("elapsed_ms", o.elapsed_ms));
     j.push('}');
     j
 }

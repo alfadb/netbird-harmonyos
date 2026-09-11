@@ -393,14 +393,23 @@ export default class N1BDiscVpnExtensionAbility extends VpnExtensionAbility {
     // D5 so the frozen P3/P4 results are already recorded, and before D8a;
     // the P-chain itself is untouched.
     probe.wg_probe(fdDup, mb1);
-    // WG-NET (out-of-gate, added 2026-09-11): the same BoringTun tunnel driven
-    // by REAL UDP datagrams. Binds 0.0.0.0:47010, answers the peer's handshake
-    // initiation, decrypts the peer's first transport packet, writes the
-    // decapsulated 44-byte IPv4/UDP packet into this TUN fd and confirms a
-    // local sink socket (0.0.0.0:47003) receives it. Blocks this chain for up
-    // to 90 s; that wait is the probe. No ledger transition, and D4/D5/D8/D-W
-    // are untouched.
-    probe.wg_net_probe(fdDup, mb1);
+    // WG-FWD (out-of-gate, added 2026-09-11): the same BoringTun tunnel as a
+    // REAL bidirectional data plane. Binds 0.0.0.0:47010, answers the peer's
+    // handshake initiation, then keeps running: polls the WG UDP socket AND
+    // this TUN fd, encrypts device-originated IPv4 frames towards the peer,
+    // writes decapsulated plaintext back into the TUN, and services
+    // wireguard_tick (keepalives/retransmits) every loop. Ends on the first
+    // full round trip, the 90 s / 64-event bound, or a fatal error. Blocks
+    // this chain for up to ~90 s; that wait is the probe. No ledger
+    // transition, and D4/D5/D8/D-W are untouched.
+    probe.wg_fwd_probe(fdDup, mb1);
+    // WG-NET (out-of-gate, added 2026-09-11; on-device PASS): single-shot
+    // variant that decrypts the peer's first transport packet and closes the
+    // TUN/sink loop. Deliberately NOT called anymore: it binds the same
+    // 0.0.0.0:47010 that wg_fwd_probe owns, and the peer's WireGuard
+    // initiation can only be consumed by one responder. The function and its
+    // NAPI export are retained (recorded regression), just out of the chain.
+    // probe.wg_net_probe(fdDup, mb1);
     // WG-UDP (out-of-gate, added 2026-09-11): host -> device plain-UDP
     // reachability. Deliberately NOT called: it binds the same 0.0.0.0:47010
     // that wg_net_probe owns, and its first-datagram handshake would consume
