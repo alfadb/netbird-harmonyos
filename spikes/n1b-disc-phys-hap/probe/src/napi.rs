@@ -20,6 +20,12 @@ extern "C" {
         data: *mut c_void,
         result: *mut NapiValue,
     ) -> i32;
+    fn napi_set_named_property(
+        env: NapiEnv,
+        object: NapiValue,
+        utf8name: *const u8,
+        value: NapiValue,
+    ) -> i32;
     fn napi_get_cb_info(
         env: NapiEnv,
         info: NapiCallbackInfo,
@@ -71,6 +77,11 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
             );
             if rc != 0 {
                 // registration failure cannot be reported through NAPI itself
+            } else {
+                let rc = napi_set_named_property(env, exports, name.as_ptr(), r);
+                if rc != 0 {
+                    // property attach failure cannot be reported through NAPI itself
+                }
             }
         };
     }
@@ -198,11 +209,40 @@ fn ret_json(env: NapiEnv, json: String) -> NapiValue {
 
 // Host-test link surface (cfg(test) only, never part of the cdylib): the test
 // binary links the whole crate on the host triple, where libace_napi.z.so does
-// not exist. No-op definitions satisfy the linker; the NAPI face is never
-// exercised by the pure-function tests.
+// not exist. Stubs satisfy the linker; the registration test records attachment
+// through napi_set_named_property, while native runtime behavior is not exercised.
 #[cfg(test)]
 mod host_stubs {
     use super::*;
+    use core::ffi::CStr;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        // name -> fake function value returned by napi_create_function
+        static FAKE_FUNCS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+        // (object, name, value) recorded by napi_set_named_property
+        static SET_CALLS: RefCell<Vec<(usize, String, usize)>> = RefCell::new(Vec::new());
+    }
+
+    pub fn reset() {
+        FAKE_FUNCS.with(|m| m.borrow_mut().clear());
+        SET_CALLS.with(|c| c.borrow_mut().clear());
+    }
+
+    pub fn fake_funcs() -> HashMap<String, usize> {
+        FAKE_FUNCS.with(|m| m.borrow().clone())
+    }
+
+    pub fn set_calls() -> Vec<(usize, String, usize)> {
+        SET_CALLS.with(|c| c.borrow().clone())
+    }
+
+    fn c_name(p: *const u8) -> String {
+        unsafe { CStr::from_ptr(p as *const core::ffi::c_char) }
+            .to_string_lossy()
+            .into_owned()
+    }
 
     #[no_mangle]
     pub extern "C" fn napi_module_register(_mod_: *mut NapiModule) {}
@@ -210,12 +250,33 @@ mod host_stubs {
     #[no_mangle]
     pub extern "C" fn napi_create_function(
         _env: NapiEnv,
-        _utf8name: *const u8,
+        utf8name: *const u8,
         _length: usize,
         _cb: NapiCallback,
         _data: *mut c_void,
-        _result: *mut NapiValue,
+        result: *mut NapiValue,
     ) -> i32 {
+        let name = c_name(utf8name);
+        // non-null, distinct fake function object per name
+        let fake = FAKE_FUNCS.with(|m| {
+            let mut m = m.borrow_mut();
+            let v = 0x1000usize + m.len() + 1;
+            m.insert(name, v);
+            v
+        });
+        unsafe { *result = fake as NapiValue };
+        0
+    }
+
+    #[no_mangle]
+    pub extern "C" fn napi_set_named_property(
+        _env: NapiEnv,
+        object: NapiValue,
+        utf8name: *const u8,
+        value: NapiValue,
+    ) -> i32 {
+        let name = c_name(utf8name);
+        SET_CALLS.with(|c| c.borrow_mut().push((object as usize, name, value as usize)));
         0
     }
 
@@ -260,6 +321,36 @@ mod host_stubs {
     #[no_mangle]
     pub extern "C" fn napi_get_value_bool(_env: NapiEnv, _value: NapiValue, _result: *mut bool) -> i32 {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_stubs::{fake_funcs, reset, set_calls};
+    use super::*;
+
+    // Real regression: napi_init must attach the created function objects to the
+    // exports object it was handed (returns that same object). Fails on the old
+    // behavior where reg! dropped the created value without set_named_property.
+    #[test]
+    fn napi_init_attaches_registered_functions_to_exports() {
+        reset();
+        let env = 0x1 as NapiEnv;
+        let exports = 0x2 as NapiValue;
+        let out = unsafe { napi_init(env, exports) };
+        assert_eq!(out as usize, exports as usize,
+                   "napi_init must return the same exports object");
+        let calls = set_calls();
+        let funcs = fake_funcs();
+        for name in ["version", "d1_probe"] {
+            let call = calls.iter().find(|(_, n, _)| n == name)
+                .unwrap_or_else(|| panic!("{} not attached to exports", name));
+            assert_eq!(call.0, exports as usize, "{} attached to wrong object", name);
+            let fake = *funcs.get(name)
+                .unwrap_or_else(|| panic!("{} create_function not called", name));
+            assert_ne!(fake, 0, "{} fake function must be non-null", name);
+            assert_eq!(call.2, fake, "{} value must be the created function object", name);
+        }
     }
 }
 
