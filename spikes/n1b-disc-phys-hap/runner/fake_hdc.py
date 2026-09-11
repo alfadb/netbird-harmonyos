@@ -460,7 +460,8 @@ class FakeHdc(hdc.HdcTransport):
 
     def _op_bundledump(self) -> hdc.HdcTransportResult:
         if not self.installed:
-            return hdc.HdcTransportResult(1, "", "bm dump failed: not installed\n")
+            return hdc.HdcTransportResult(
+                1, "", "error: bundle %s not found\n" % core.DEFAULT_BUNDLE)
         return hdc.HdcTransportResult(
             0, "BundleName: %s\nAppStates: IS_INSTALLED=true\n"
                % core.DEFAULT_BUNDLE, "")
@@ -531,7 +532,8 @@ class FakeHdc(hdc.HdcTransport):
 
     def _op_stagingprobe(self) -> hdc.HdcTransportResult:
         if not self.staged:
-            return hdc.HdcTransportResult(1, "", "ls: No such file or directory\n")
+            return hdc.HdcTransportResult(
+                1, "", "ls: %s: No such file or directory\n" % hdc.STAGING_ROOT)
         return hdc.HdcTransportResult(0, "drwxrwxrwx ... %s\n" % hdc.STAGING_ROOT, "")
 
     def open_stream(self, argv: Sequence[str]) -> Iterator[str]:

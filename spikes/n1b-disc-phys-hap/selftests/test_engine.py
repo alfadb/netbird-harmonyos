@@ -134,13 +134,15 @@ class TimedStream:
 class FakeTimedTransport(hdc.HdcTransport):
     """既有 FakeHdc 的 engine 适配：call 语义原样（FaultRecv 补真实 file recv
     的 host 落盘副作用），open_stream 包装成有界 read_event 定时流；
-    ``fail_ops`` 注入 call 异常、``taint_ops`` 注入携 target 的非零 stderr。"""
+    ``fail_ops`` 注入 call 异常、``taint_ops`` 注入携 target 的非零 stderr、
+    ``rc0_stderr_ops`` 注入 rc=0 但 stderr 携 target 错误文本（输出留存回归）。"""
 
     def __init__(self, scenario, fail_ops=(), taint_ops=(), policy="eof",
-                 exit_code=0):
+                 exit_code=0, rc0_stderr_ops=()):
         self.inner = fake.FakeHdc(scenario)
         self.fail_ops = tuple(fail_ops)
         self.taint_ops = tuple(taint_ops)
+        self.rc0_stderr_ops = tuple(rc0_stderr_ops)
         self.policy = policy
         self.exit_code = exit_code
         self.call_log = []          # (op, argv)（仅测试断言用，绝不入记录）
@@ -171,6 +173,10 @@ class FakeTimedTransport(hdc.HdcTransport):
                 os.makedirs(os.path.dirname(argv[5]), exist_ok=True)
                 with open(argv[5], "w", encoding="utf-8") as fh:
                     fh.write(content)
+        if op in self.rc0_stderr_ops:
+            # rc=0 但 stderr 携错误文本（HDC 成功仍可能带错误输出）。
+            return hdc.HdcTransportResult(
+                0, result.stdout, "WARN: connect %s\n" % self.target)
         return result
 
     def open_stream(self, argv):
@@ -194,12 +200,13 @@ def make_recorder(tmp, label="run", mode="dryrun"):
 def run_with_scenario(scenario, *, tmp, mode="dryrun", operator_ready=True,
                       timing=TEST_TIMING, fail_ops=(), taint_ops=(),
                       policy="eof", stream_exit_code=0, label="run",
-                      auto_step_ms=10):
+                      auto_step_ms=10, rc0_stderr_ops=()):
     """engine 一次运行封装：FakeHdc 定时流适配 + FakeClock + TEST recorder。"""
     clock = FakeClock(auto_step_ms=auto_step_ms)
     transport = FakeTimedTransport(scenario, fail_ops=fail_ops,
                                    taint_ops=taint_ops, policy=policy,
-                                   exit_code=stream_exit_code)
+                                   exit_code=stream_exit_code,
+                                   rc0_stderr_ops=rc0_stderr_ops)
     executor = hdc.HdcExecutor(transport, target=transport.target,
                                hap_path=transport.hap_path)
     recorder = make_recorder(tmp, label, mode=mode)
@@ -642,6 +649,28 @@ def test_target_never_in_files_and_argv_never_logged():
         expect(record["verdict"] == "pass", "ForceStop 失败不改判据（既有闭集）")
 
 
+def test_command_output_retained_and_redacted():
+    """rc0 命令的 stdout 与（含错误的）stderr 仍留存于 hdc-command 事件 details；
+    仅 target 定点替换，保留换行/首尾空白（仍非原始无损字节）。"""
+    with sandbox() as tmp:
+        record, transport, recorder, _ = run_with_scenario(
+            fake.make_happy_path_scenario(), tmp=tmp, label="retain",
+            rc0_stderr_ops=("Version",))
+        ver = [e for e in read_events(recorder) if e["label"] == "Version"]
+        expect(len(ver) == 1, "Version 事件 1 条")
+        d = ver[0]["details"]
+        expect(d.get("exit_code") == 0, "Version rc=0")
+        # 既有 fake Version stdout = "hdc 1.2.3\n"：rc0 也留存，且保留尾换行
+        expect(d.get("stdout") == "hdc 1.2.3\n",
+               "rc0 stdout 留存且保留换行: %r" % d.get("stdout"))
+        # rc0 但 stderr 携错误文本 + target：留存且 target 已定点替换
+        expect(d.get("stderr") == "WARN: connect <TARGET>\n",
+               "rc0 stderr 留存且 target 脱敏: %r" % d.get("stderr"))
+        blob = open(os.path.join(recorder.root, "events.jsonl"),
+                    encoding="utf-8").read()
+        expect(transport.target not in blob, "target 不入 events")
+
+
 # ==========================================================================
 # 10. storm 死亡无设备墙钟 → span 如实 F4；DryRun 合成对不泄漏、原行为不回归
 # ==========================================================================
@@ -917,8 +946,8 @@ def test_absent_probe_failure_not_clean():
         record, recorder = _run_with_transport(transport, tmp=tmp,
                                                label="absentrc1")
         facts = record["steps"]["campaign_facts"]
-        expect(facts["absent_checks"]["pidof_post_empty"] is False,
-               "rc=1 探针不判 absent: %s" % facts["absent_checks"])
+        expect(facts["absent_checks"]["pidof_post_empty"] is None,
+               "rc=1 探针不判 absent（三态 None）: %s" % facts["absent_checks"])
         expect(facts["verified_clean"] is not True,
                "verified_clean 不声称: %s" % facts["verified_clean"])
         expect(any(f.startswith("PidOfPost exit_code=1")
@@ -927,6 +956,238 @@ def test_absent_probe_failure_not_clean():
         expect(record["verdict"] == "pass",
                "探针失败不改判据（既有闭集）: %s"
                % record["steps"]["gate13_verdict"])
+
+
+def test_absent_probe_tristate_and_verified_clean():
+    """cleanup 三态矩阵：True/False/None；权限优先；泛失败不裸认 absent；
+    四 True 才 verified_clean；False/None 不 clean 且 verdict 不受影响。"""
+    # 纯分类器矩阵（无 I/O）；正例均带精确对象/真实样式
+    expect(engine.classify_bundle_dump(
+        1, "", "error: bundle %s not found\n" % hdc.BUNDLE) is True,
+        "BundleDump 精确 bundle 未安装 → True")
+    expect(engine.classify_bundle_dump(
+        0, "BundleName: %s\nAppStates: IS_INSTALLED=true\n" % hdc.BUNDLE, "")
+        is False, "BundleDump 在场 → False")
+    expect(engine.classify_bundle_dump(0, "", "Permission denied\n") is None,
+           "BundleDump 权限（rc0）→ None")
+    expect(engine.classify_bundle_dump(1, "", "failed to get information\n")
+           is None, "BundleDump 泛失败 → None")
+    expect(engine.classify_bundle_dump(0, "", "") is None,
+           "BundleDump 空输出 → None")
+    # 真实设备样本（phys-diag-20260911T212046；脱敏后固定公开字面）
+    expect(engine.classify_bundle_dump(
+        0, "error: failed to get information and the parameters may be wrong.\n",
+        "") is None, "真实 q3 bm dump 泛失败（rc0）→ None，不认 absent")
+    # 整行语法正例变体（有限语法：主语就是精确对象，逐字相等）
+    expect(engine.classify_bundle_dump(
+        1, "", "bundle %s is not installed\n" % hdc.BUNDLE) is True,
+        "BundleDump is-not-installed 语法 → True")
+    expect(engine.classify_bundle_dump(
+        1, "", "error: bundle %s does not exist\n" % hdc.BUNDLE) is True,
+        "BundleDump does-not-exist 语法 → True")
+    expect(engine.classify_staging_probe(
+        1, "", "ls: cannot access '%s': No such file or directory\n"
+               % hdc.STAGING_ROOT) is True,
+        "StagingProbe cannot-access 语法 → True")
+
+    expect(engine.classify_staging_probe(
+        1, "", "ls: %s: No such file or directory\n" % hdc.STAGING_ROOT) is True,
+        "StagingProbe 精确路径 ENOENT → True")
+    expect(engine.classify_staging_probe(
+        0, "drwxrwxrwx ... %s\n" % hdc.STAGING_ROOT, "") is False,
+        "StagingProbe 在场 → False")
+    expect(engine.classify_staging_probe(0, "", "Permission denied\n") is None,
+           "StagingProbe 权限（rc0）→ None")
+    expect(engine.classify_staging_probe(1, "", "some other failure\n") is None,
+           "StagingProbe 其他失败 → None")
+    expect(engine.classify_staging_probe(0, "", "") is None,
+           "StagingProbe 空输出 → None")
+    # 真实设备样本（phys-diag-20260911T212046；脱敏后固定公开字面）
+    expect(engine.classify_staging_probe(
+        0, "ls: %s: No such file or directory\n" % hdc.STAGING_ROOT, "") is True,
+        "真实 q4 ls-ld 精确路径 ENOENT（rc0）→ True")
+
+    expect(engine.classify_pidof(0, "", "") is True, "PidOf rc0 空 → True")
+    expect(engine.classify_pidof(0, "1234\n", "") is False, "PidOf rc0 非空 → False")
+    expect(engine.classify_pidof(1, "", "not found\n") is None,
+           "PidOf rc≠0 不裸认 not found → None")
+    expect(engine.classify_pidof(0, "", "Permission denied\n") is None,
+           "PidOf 权限（rc0）→ None")
+
+    with sandbox() as tmp:
+        # 正常清理生命周期：四探针全 True → verified_clean True
+        record, _, _, _ = run_with_scenario(
+            fake.make_happy_path_scenario(), tmp=tmp, label="clean-4true")
+        facts = record["steps"]["campaign_facts"]
+        expect(set(facts["absent_checks"].values()) == {True},
+               "四探针全 True: %s" % facts["absent_checks"])
+        expect(facts["verified_clean"] is True, "verified_clean True")
+        expect(record["verdict"] == "pass", "verdict 不受 cleanup 影响")
+    with sandbox() as tmp:
+        # 一个探针 None（rc≠0）→ 不 clean，verdict 不变
+        record, _, _, _ = run_with_scenario(
+            fake.make_happy_path_scenario(), tmp=tmp, label="clean-none",
+            taint_ops=("PidOf",))
+        facts = record["steps"]["campaign_facts"]
+        expect(facts["absent_checks"]["pidof_post_empty"] is None,
+               "PidOfPost rc≠0 → None: %s" % facts["absent_checks"])
+        expect(facts["verified_clean"] is not True, "含 None 不 clean")
+        expect(record["verdict"] == "pass",
+               "cleanup 三态不改 verdict: %s" % record["verdict"])
+
+
+def test_absent_probe_object_boundary_rejections():
+    """反例：裸工具错误/兄弟包/子路径/无路径 ENOENT/目标名出现在未知错误/权限与
+    absence 混合 → 一律 None（精确对象边界 + 权限优先）。"""
+    cb = engine.classify_bundle_dump
+    cs = engine.classify_staging_probe
+    cp = engine.classify_pidof
+    sibling = hdc.BUNDLE + "2"
+    # BundleDump
+    expect(cb(127, "", "bm not installed\n") is None, "裸 bm not installed → None")
+    expect(cb(1, "", "error: %s not found\n" % sibling) is None,
+           "兄弟包 not found → None")
+    expect(cb(1, "", "failed querying %s\n" % hdc.BUNDLE) is None,
+           "未知错误含目标名 → None（非 presence 证据）")
+    expect(cb(0, "", "Permission denied: bundle %s not found\n" % hdc.BUNDLE)
+           is None, "权限与 absence 混合 → 权限优先 None")
+    # 工具自身错误/请求回显：目标名出现≠absence/presence 证据
+    expect(cb(127, "", "hdc command not found while querying %s\n" % hdc.BUNDLE)
+           is None, "hdc 工具错误 while querying 目标 → None")
+    expect(cb(0, '{"error":"command not found","request":{"bundleName":"%s"}}\n'
+               % hdc.BUNDLE, "") is None,
+           "rc0 错误 JSON 回显（bundleName 是请求参数）→ None，不判在场")
+    expect(cs(127, "", "ls: No such file: /system/bin/ls (requested %s)\n"
+               % hdc.STAGING_ROOT) is None,
+           "ls 自身缺失（requested 回显目标路径）→ None")
+    expect(cb(0, "BundleName: %s\n" % hdc.BUNDLE,
+              "error: bundle %s not found\n" % hdc.BUNDLE) is None,
+           "absence/presence 证据矛盾 → None 不强行 True")
+    # StagingProbe
+    expect(cs(1, "", "ls: no such file or directory\n") is None,
+           "无路径 ENOENT → None")
+    expect(cs(1, "", "ls: %s/other: No such file or directory\n" % hdc.STAGING_ROOT)
+           is None, "子路径 ENOENT → None")
+    expect(cs(1, "", "ls: %s-other: No such file or directory\n" % hdc.STAGING_ROOT)
+           is None, "兄弟路径 ENOENT → None")
+    expect(cs(0, "", "Permission denied: %s: No such file\n" % hdc.STAGING_ROOT)
+           is None, "权限与 ENOENT 混合 → 权限优先 None")
+    # PidOf
+    expect(cp(0, "", "not found\n") is None, "rc0 非空 stderr → None")
+    expect(cp(0, "", "pidof not found\n") is None, "pidof not found 文本 → None")
+    expect(cp(0, "pidof not found\n", "") is None, "stdout 非 PID 文本 → None")
+    expect(cp(0, "0\n", "") is None, "stdout 非正 PID → None")
+
+
+def test_absent_probe_error_output_never_clean():
+    """错误回显组合钉：BundleDump rc0 错误 JSON 回显、StagingProbe rc127 ls 自身
+    缺失 → 两项均 None（不判 absent 也不判在场）；单项非 True 即不产生
+    verified_clean=True，verdict 不受影响。"""
+
+    class _ErrorEchoTransport(FakeTimedTransport):
+        """BundleDump/StagingProbe 替换为工具错误/JSON 回显形态（其余走原样）。"""
+
+        def call(self, argv):
+            op = self.inner._validate(argv)
+            if op == "BundleDump":
+                return hdc.HdcTransportResult(
+                    0, '{"error":"command not found","request":'
+                       '{"bundleName":"%s"}}\n' % hdc.BUNDLE, "")
+            if op == "StagingProbe":
+                return hdc.HdcTransportResult(
+                    127, "",
+                    "ls: No such file: /system/bin/ls (requested %s)\n"
+                    % hdc.STAGING_ROOT)
+            return super().call(argv)
+
+    with sandbox() as tmp:
+        transport = _ErrorEchoTransport(fake.make_happy_path_scenario())
+        record, recorder = _run_with_transport(transport, tmp=tmp,
+                                               label="absent-echo")
+        facts = record["steps"]["campaign_facts"]
+        expect(facts["absent_checks"]["bundle_dump_absent"] is None,
+               "JSON 回显 → None: %s" % facts["absent_checks"])
+        expect(facts["absent_checks"]["staging_probe_absent"] is None,
+               "ls 工具错误 → None: %s" % facts["absent_checks"])
+        expect(facts["verified_clean"] is not True,
+               "错误组合不产生 verified_clean=True: %s"
+               % facts["verified_clean"])
+        expect(record["verdict"] == "pass",
+               "探针未知不改判据（既有闭集）: %s" % record["verdict"])
+
+
+def test_fault_probe_tristate_classification():
+    """FaultProbe 三态：rc0 干净且全行合法 → basename 列表（可空）；rc≠0/权限/非空
+    stderr/解析错误 → None；公开 parse_fault_snapshot 坏行抛专用异常。"""
+    fd = hdc.FAULTLOGGER_DIR
+    b = hdc.BUNDLE
+
+    def R(rc, out, err=""):
+        return hdc.HdcTransportResult(rc, out, err)
+
+    expect(engine.classify_fault_probe(R(0, "")) == [], "rc0 空 → []")
+    expect(engine.classify_fault_probe(R(0, "%s/f1-%s\n" % (fd, b)))
+           == ["f1-%s" % b], "单合法完整路径 → basename")
+    expect(engine.classify_fault_probe(
+        R(0, "%s/f2-%s\n%s/f1-%s\n" % (fd, b, fd, b)))
+        == ["f1-%s" % b, "f2-%s" % b], "多合法路径 → 排序去重 basename")
+    expect(engine.classify_fault_probe(R(1, "", "find failed\n")) is None,
+           "rc≠0 → None")
+    expect(engine.classify_fault_probe(R(0, "find: %s: Permission denied\n" % fd))
+           is None, "stdout 权限 → None")
+    expect(engine.classify_fault_probe(R(0, "", "Permission denied\n")) is None,
+           "stderr 权限 → None")
+    expect(engine.classify_fault_probe(R(0, "%s/f1-%s\n" % (fd, b), "warning\n"))
+           is None, "合法 stdout + 非空 stderr → None")
+    expect(engine.classify_fault_probe(R(0, "%s/f1-%s\nnot-a-path\n" % (fd, b)))
+           is None, "合法+坏行混合 → None")
+    expect(engine.classify_fault_probe(R(0, "/tmp/f1-%s\n" % b)) is None,
+           "非 FAULTLOGGER_DIR → None")
+    expect(engine.classify_fault_probe(R(0, "%s/sub/f1-%s\n" % (fd, b))) is None,
+           "子目录非直接 basename → None")
+    expect(engine.classify_fault_probe(R(0, "%s/other-name\n" % fd)) is None,
+           "不命中 bundle glob → None")
+    expect(engine.parse_fault_snapshot("%s/f1-%s\n" % (fd, b)) == ["f1-%s" % b],
+           "公开 parse 成功接口")
+    try:
+        engine.parse_fault_snapshot("garbage\n")
+        expect(False, "坏行必须抛 FaultSnapshotParseError")
+    except engine.FaultSnapshotParseError:
+        pass
+
+
+def test_fault_probe_unknown_propagation():
+    """pre/final 任一 unknown：new_fault_files null、零 FaultRecv、fault 分量既有
+    unobservable；pre unknown 仍发 StartEntry（不 launchabort）。"""
+    with sandbox() as tmp:
+        scenario = fake.make_happy_path_scenario()
+        scenario.fault_probe_fails = True
+        record, _, _, _ = run_with_scenario(scenario, tmp=tmp, label="fp-unknown")
+        facts = record["steps"]["campaign_facts"]
+        expect(facts["snapshot_files"] is None, "pre unknown → snapshot_files null")
+        expect(facts["new_fault_files"] is None, "unknown → new_fault_files null")
+        expect(facts["faultrecv_failures"] == [], "unknown → 零 FaultRecv 失败")
+        expect("StartEntry" in record["hdc_audit_ops"],
+               "pre unknown 仍发 StartEntry（不 launchabort）")
+        expect(facts["launch_aborted"] is None, "非 launch abort")
+        expect(record["hdc_audit_ops"].count("FaultRecv") == 0, "unknown 零 FaultRecv")
+        expect(record["evidence_vector"]["fault_type_observed"]
+               == "unobservable(cause=faultrecv-unavailable)",
+               "fault_type 既有 unobservable")
+        expect(record["evidence_vector"]["signal_observed"]
+               == "unobservable(cause=faultrecv-unavailable)",
+               "signal 既有 unobservable")
+
+
+def test_fault_probe_known_empty_no_new():
+    """两端 known-empty → snapshot_files=[]、new_fault_files=[]、零 FaultRecv。"""
+    with sandbox() as tmp:
+        record, _, _, _ = run_with_scenario(
+            fake.make_happy_path_scenario(), tmp=tmp, label="fp-empty")
+        facts = record["steps"]["campaign_facts"]
+        expect(facts["snapshot_files"] == [], "known pre → []")
+        expect(facts["new_fault_files"] == [], "两端 known-empty → 无新增")
+        expect(record["hdc_audit_ops"].count("FaultRecv") == 0, "无新增 → 零 FaultRecv")
 
 
 class FailingEventRecorder(recording.RunRecorder):

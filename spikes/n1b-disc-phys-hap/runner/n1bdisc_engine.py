@@ -113,21 +113,71 @@ class EngineError(Exception):
 # 纯事实 helpers（无 I/O；供测试直接钉）
 # ---------------------------------------------------------------------------
 
-def redact_text(text: Any, target: str, limit: int = 200) -> str:
-    """异常/stderr 摘要落 events 前的定点脱敏：target → ``<TARGET>`` 并截断。"""
+def redact_text(text: Any, target: str, limit: int = 200,
+                strip: bool = True) -> str:
+    """落 events 前的定点脱敏：target → ``<TARGET>``。
+
+    默认（``strip=True, limit=200``）保持既有摘要口径；``strip=False`` +
+    ``limit=0`` 供命令输出留存用——只替换 target，保留换行/首尾空白、不截断
+    （仍**非**原始无损字节：target 已被替换）。
+    """
     value = str(text or "")
     if target:
         value = value.replace(target, "<TARGET>")
-    value = value.strip()
-    if len(value) > limit:
+    if strip:
+        value = value.strip()
+    if limit and len(value) > limit:
         value = value[:limit] + "…"
     return value
 
 
+class FaultSnapshotParseError(Exception):
+    """FaultProbe stdout 含非合法 ``find -print`` 行（整 probe 视为 unknown）。"""
+
+
+_FAULT_PATH_PREFIX = hdc.FAULTLOGGER_DIR + "/"
+
+
 def parse_fault_snapshot(stdout: str) -> List[str]:
-    """FaultProbe ``find -print`` stdout → 命中文件 basename 集合（字节序）。"""
-    return sorted(ln.strip().rsplit("/", 1)[-1]
-                  for ln in (stdout or "").splitlines() if ln.strip())
+    """FaultProbe ``find -print`` stdout → 命中文件 basename 集合（字节序）。
+
+    每个非空行必须是 ``FAULTLOGGER_DIR`` 下的**完整路径**、直接子项纯 basename、
+    且命中冻结 bundle glob（``*<bundle>*``）；任何非法/混合行抛
+    :class:`FaultSnapshotParseError`（调用方据此整 probe 记 unknown，不静默过滤）。
+    """
+    out: List[str] = []
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if not line.startswith(_FAULT_PATH_PREFIX):
+            raise FaultSnapshotParseError("not-under-faultlogger-dir: %r" % line)
+        name = line[len(_FAULT_PATH_PREFIX):]
+        if (not name) or ("/" in name) or ("\\" in name) or name in (".", ".."):
+            raise FaultSnapshotParseError("not-direct-basename: %r" % line)
+        if core.DEFAULT_BUNDLE not in name:
+            raise FaultSnapshotParseError("not-bundle-glob-match: %r" % line)
+        out.append(name)
+    return sorted(set(out))
+
+
+def classify_fault_probe(result: Optional[hdc.HdcTransportResult]
+                         ) -> Optional[List[str]]:
+    """FaultProbe 三态：rc0 且 stdout/stderr 均干净且全部行合法 → 排序去重 basename
+    列表（可为 ``[]``）；其余（rc≠0 / 权限 / 非空 stderr / 解析错误 / transport 异常）
+    → ``None``（unknown，不写 ``[]``、不 observed-false）。"""
+    if result is None:
+        return None
+    if result.exit_code != 0:
+        return None
+    if _permission_denied(result.stdout, result.stderr):
+        return None
+    if (result.stderr or "").strip():
+        return None
+    try:
+        return parse_fault_snapshot(result.stdout)
+    except FaultSnapshotParseError:
+        return None
 
 
 def device_wall_ms(text: str) -> Optional[int]:
@@ -207,7 +257,13 @@ def _event(recorder: recording.RunRecorder, label: str, target: str,
     """脱敏事件登记（details 中的自由文本定点替换 target；不含 argv）。"""
     safe: Dict[str, Any] = {}
     for key, value in details.items():
-        safe[key] = redact_text(value, target) if isinstance(value, str) else value
+        if not isinstance(value, str):
+            safe[key] = value
+        elif key in ("stdout", "stderr"):
+            # 命令输出留存：只做 target 定点替换，保留换行/首尾空白、不截断。
+            safe[key] = redact_text(value, target, limit=0, strip=False)
+        else:
+            safe[key] = redact_text(value, target)
     recorder.append_event(label, safe)
 
 
@@ -216,7 +272,11 @@ def _exec_step(ctx: _Campaign, op: str, *, label: Optional[str] = None,
     """执行一个白名单一次性操作并登记事件（成功/失败都登记，不吞事实）。"""
     record = ctx.executor.execute(op, **params)
     ctx.ops.append(op)
-    details: Dict[str, Any] = {"exit_code": record.result.exit_code}
+    details: Dict[str, Any] = {
+        "exit_code": record.result.exit_code,
+        "stdout": record.result.stdout,
+        "stderr": record.result.stderr,
+    }
     if purpose:
         details["purpose"] = purpose
     if record.result.exit_code != 0:
@@ -266,15 +326,22 @@ def _finally_faultprobe_recv(ctx: _Campaign) -> None:
     except Exception as exc:  # noqa: BLE001
         ctx.step_failures.append("FaultProbe: %s"
                                  % redact_text(repr(exc), ctx.target))
-    current: List[str] = []
-    ctx.faultprobe_failed = True
-    if probe is not None:
-        ctx.faultprobe_failed = probe.result.exit_code != 0
-        if ctx.faultprobe_failed:
-            ctx.step_failures.append("FaultProbe exit_code=%d"
-                                     % probe.result.exit_code)
-        else:
-            current = parse_fault_snapshot(probe.result.stdout)
+    current = None if probe is None else classify_fault_probe(probe.result)
+    if probe is not None and probe.result.exit_code != 0:
+        ctx.step_failures.append("FaultProbe exit_code=%d"
+                                 % probe.result.exit_code)
+    if ctx.snapshot_files is None or current is None:
+        # 任一 unknown：不 snapshot_diff、零 FaultRecv；经既有
+        # aggregate_fault_components(fault_probe_failed=True) → unobservable。
+        ctx.faultprobe_failed = True
+        ctx.new_files = None
+        ctx.step_failures.append(
+            "FaultProbe diff unknown (pre=%s final=%s)"
+            % ("known" if ctx.snapshot_files is not None else "unknown",
+               "known" if current is not None else "unknown"))
+        ctx.finally_log.append("2.faultprobe+faultrecv")
+        return
+    ctx.faultprobe_failed = False
     ctx.new_files = death.snapshot_diff(ctx.snapshot_files, current)
     fault_dir = os.path.join(ctx.recorder.root, FAULTLOGGER_SUBDIR)
     try:
@@ -435,32 +502,157 @@ def _finally_simple(ctx: _Campaign, step_no: int, tag: str, op: str) -> None:
     ctx.finally_log.append("%d.%s" % (step_no, tag))
 
 
+_PERMISSION_MARKERS = ("permission denied", "access denied",
+                       "operation not permitted")
+# absence/presence 一律按**整行语法**识别：关键词大小写不敏感，主语捕获后与精确
+# 对象（core.DEFAULT_BUNDLE / hdc.STAGING_ROOT）逐字相等才算——工具自身错误、
+# 请求/错误 JSON 回显、兄弟前后缀、其他子路径的行都不构成证据（词拼接不认）。
+_BUNDLE_ABSENCE_RE = re.compile(
+    r"^\s*(?:error\s*:\s*)?bundle\s+(?P<subject>\S+)\s+"
+    r"(?:is\s+not\s+installed|not\s+installed|not\s+found|does\s+not\s+exist)"
+    r"\s*[.!]?\s*$",
+    re.IGNORECASE)
+_BUNDLE_PRESENCE_RE = re.compile(
+    r"^\s*bundle[\s_]?name\s*:\s*(?P<value>\S+)\s*$", re.IGNORECASE)
+_STAGING_ENOENT_RE = re.compile(
+    r"^\s*ls\s*:\s*(?:cannot\s+access\s*)?[\"']?(?P<subject>\S+?)[\"']?"
+    r"\s*:\s*"
+    r"(?:no\s+such\s+file\s+or\s+directory|no\s+such\s+file|does\s+not\s+exist)"
+    r"\s*[.:]?\s*$",
+    re.IGNORECASE)
+_STAGING_RE = re.compile(r"(?<![A-Za-z0-9._/-])" + re.escape(hdc.STAGING_ROOT)
+                         + r"(?![A-Za-z0-9._/-])")
+_LS_ENTRY_RE = re.compile(r"^[dlbcps-][rwxStTs-]{9}\s")
+
+
+def _permission_denied(stdout: str, stderr: str) -> bool:
+    low = ("%s\n%s" % (stdout or "", stderr or "")).lower()
+    return any(m in low for m in _PERMISSION_MARKERS)
+
+
+def _text_lines(stdout: str, stderr: str) -> List[str]:
+    return ("%s\n%s" % (stdout or "", stderr or "")).splitlines()
+
+
+def classify_bundle_dump(exit_code: int, stdout: str,
+                         stderr: str) -> Optional[bool]:
+    """BundleDump 三态：True=已证明本精确 bundle 未安装/不存在；False=已证明在场；
+    None=未知。
+
+    True 仅认**主语就是本 bundle 的整行 absence 语法**（``error: bundle <EXACT>
+    not found`` / ``bundle <EXACT> is not installed`` / ``bundle <EXACT> does
+    not exist``；关键词大小写不敏感，捕获的 subject 与 DEFAULT_BUNDLE 逐字相等，
+    兄弟前后缀不算）：裸工具错误（``bm not installed``）、``hdc command not
+    found while querying <bundle>``、请求/错误 JSON 回显、``failed querying
+    <bundle>`` 等一律 None。False 仅 rc0 且存在真实响应行 ``BundleName:
+    <EXACT>``（key-value 整行，值逐字相等）；JSON 里的 bundleName 请求参数不是
+    事实。absence 与 presence 证据并存（互相矛盾）→ None，不强行 True。权限/
+    访问拒绝优先。
+    """
+    if _permission_denied(stdout, stderr):
+        return None
+    lines = _text_lines(stdout, stderr)
+    absent = False
+    for line in lines:
+        m = _BUNDLE_ABSENCE_RE.match(line)
+        if m and m.group("subject") == core.DEFAULT_BUNDLE:
+            absent = True
+    present = False
+    if exit_code == 0:
+        for line in lines:
+            m = _BUNDLE_PRESENCE_RE.match(line)
+            if m and m.group("value") == core.DEFAULT_BUNDLE:
+                present = True
+    if absent and present:
+        return None
+    if absent:
+        return True
+    if present:
+        return False
+    return None
+
+
+def classify_staging_probe(exit_code: int, stdout: str,
+                           stderr: str) -> Optional[bool]:
+    """StagingProbe 三态：True=已证明精确 staging 路径不存在；False=已列出该路径；
+    None=未知。
+
+    True 仅认 **ls 错误整行且错误主语就是本路径**（``ls: <EXACT>: No such file
+    or directory`` / ``ls: cannot access '<EXACT>': No such file or directory``；
+    捕获的 subject 与 STAGING_ROOT 逐字相等）：``ls: No such file: /system/bin/ls
+    (requested <root>)`` 等工具自身错误、子路径/兄弟路径 ENOENT、无路径 ENOENT
+    一律 None。False 仅 rc0 且存在真正 ``ls -ld`` 条目（mode 串开头，允许 symlink
+    节点）列出该精确路径；任意含路径的句子不算。矛盾证据并存 → None。权限优先。
+    """
+    if _permission_denied(stdout, stderr):
+        return None
+    lines = _text_lines(stdout, stderr)
+    absent = False
+    for line in lines:
+        m = _STAGING_ENOENT_RE.match(line)
+        if m and m.group("subject") == hdc.STAGING_ROOT:
+            absent = True
+    present = False
+    if exit_code == 0:
+        for line in lines:
+            if _STAGING_RE.search(line) and _LS_ENTRY_RE.match(line):
+                present = True
+    if absent and present:
+        return None
+    if absent:
+        return True
+    if present:
+        return False
+    return None
+
+
+def classify_pidof(exit_code: int, stdout: str,
+                   stderr: str) -> Optional[bool]:
+    """PidOf 三态：rc0 且 stdout 空且 stderr 空=True；rc0 有效正整数 PID 列表=False；
+    其余（非零/权限/非空 stderr/非 PID 文本/异常）=None。
+
+    权限/访问拒绝优先；`pidof not found` 等文本不得标 present；不裸匹配 not found。
+    """
+    if _permission_denied(stdout, stderr):
+        return None
+    if exit_code != 0:
+        return None
+    if (stderr or "").strip():
+        return None
+    out = (stdout or "").strip()
+    if out == "":
+        return True
+    toks = out.split()
+    if toks and all(t.isdigit() and int(t) > 0 for t in toks):
+        return False
+    return None
+
+
 def _finally_absent_probes(ctx: _Campaign) -> None:
-    """步 8：四定向 absent 探针（探测本身失败 = 该项不 absent，不静默 pass）。"""
-    probes = (("BundleDump", "bundle_dump_absent", "exit"),
-              ("PidOfPost", "pidof_post_empty", "empty"),
-              ("PidOfVpnPost", "pidof_vpn_post_empty", "empty"),
-              ("StagingProbe", "staging_probe_absent", "exit"))
-    for op, key, kind in probes:
-        ok = False
+    """步 8：四定向 absent 探针，显式三态（True=已证明 absent / False=已证明
+    present / None=未知）；``verified_clean`` 仅当**四者全 True**。探测失败/不可判
+    记 None + step 失败（含原输出），不静默 pass、不假定 rc≠0 等价 absent。"""
+    probes = (("BundleDump", "bundle_dump_absent", classify_bundle_dump),
+              ("PidOfPost", "pidof_post_empty", classify_pidof),
+              ("PidOfVpnPost", "pidof_vpn_post_empty", classify_pidof),
+              ("StagingProbe", "staging_probe_absent", classify_staging_probe))
+    for op, key, classify in probes:
+        verdict: Optional[bool] = None
         try:
             record = _exec_step(ctx, op, purpose="finally-absent-probe")
-            if kind == "exit":
-                # exit 类：非零退出 = absent 信号（未安装/已清理的命令形态）。
-                ok = record.result.exit_code != 0
-            else:
-                # empty 类：rc=0 且 stdout 空 = absent；rc≠0 = 探测自身失败
-                # （通道故障与 absent 不可区分）→ 不判 absent，登记失败事实。
-                ok = (record.result.exit_code == 0
-                      and record.result.stdout.strip() == "")
-                if record.result.exit_code != 0:
-                    ctx.step_failures.append("%s exit_code=%d"
-                                             % (op, record.result.exit_code))
+            verdict = classify(record.result.exit_code,
+                               record.result.stdout, record.result.stderr)
+            if verdict is None:
+                ctx.step_failures.append(
+                    "%s exit_code=%d absent=None stdout=%r stderr=%r"
+                    % (op, record.result.exit_code,
+                       redact_text(record.result.stdout, ctx.target),
+                       redact_text(record.result.stderr, ctx.target)))
         except Exception as exc:  # noqa: BLE001
             ctx.step_failures.append("%s: %s" % (op, redact_text(repr(exc),
                                                                  ctx.target)))
-        ctx.absent_checks[key] = ok
-    ctx.verified_clean = all(ctx.absent_checks.values())
+        ctx.absent_checks[key] = verdict
+    ctx.verified_clean = all(v is True for v in ctx.absent_checks.values())
     ctx.finally_log.append("8.absent-probes")
 
 
@@ -658,13 +850,13 @@ def run_campaign(*, executor: hdc.HdcExecutor, target: str, hap_path: str,
     ctx.ops: List[str] = []
     ctx.step_failures: List[str] = []
     ctx.finally_log: List[str] = []
-    ctx.snapshot_files: List[str] = []
+    ctx.snapshot_files: Optional[List[str]] = None
     ctx.snapshot_ok = False
     ctx.stream = None
     ctx.capture: Optional[cap.CaptureResult] = None
     ctx.positive_baseline_pid: Optional[str] = None
     ctx.launch_aborted: Optional[str] = None
-    ctx.new_files: List[str] = []
+    ctx.new_files: Optional[List[str]] = None
     ctx.recv_failures: List[str] = []
     ctx.received_texts: Dict[str, str] = {}
     ctx.faultprobe_failed = True
@@ -683,7 +875,7 @@ def run_campaign(*, executor: hdc.HdcExecutor, target: str, hap_path: str,
     ctx.death_wall_ms: Optional[int] = None
     ctx.last_marker_wall_ms: Optional[int] = None
     ctx.begin_capture_wall_ms: Optional[int] = None
-    ctx.absent_checks: Dict[str, bool] = {}
+    ctx.absent_checks: Dict[str, Optional[bool]] = {}
     ctx.verified_clean = False
     ctx.close_kind: Optional[str] = None
     ctx.force_stop_reason: Optional[str] = None
@@ -711,13 +903,27 @@ def run_campaign(*, executor: hdc.HdcExecutor, target: str, hap_path: str,
         _launch_exec(ctx, "Version")
         _launch_exec(ctx, "ParamModel")
         _launch_exec(ctx, "ParamSoftwareVersion")
-        snapshot = _launch_exec(ctx, "FaultProbe", purpose="pre-campaign-snapshot")
-        ctx.snapshot_ok = True
-        ctx.snapshot_files = parse_fault_snapshot(snapshot.result.stdout)
-        _event(recorder, "faultprobe-snapshot", target,
-               files=len(ctx.snapshot_files))
-        recorder.update_state("gate5-done",
-                              snapshot_files=len(ctx.snapshot_files))
+        # pre FaultProbe：局部 guard（**不** _launch_exec）——unknown 不得中止发现序列。
+        snapshot = None
+        try:
+            snapshot = _exec_step(ctx, "FaultProbe",
+                                  purpose="pre-campaign-snapshot")
+        except Exception as exc:  # noqa: BLE001
+            ctx.step_failures.append("FaultProbe pre: %s"
+                                     % redact_text(repr(exc), ctx.target))
+        pre_files = (None if snapshot is None
+                     else classify_fault_probe(snapshot.result))
+        ctx.snapshot_files = pre_files
+        ctx.snapshot_ok = pre_files is not None
+        if not ctx.snapshot_ok:
+            ctx.faultprobe_failed = True
+            ctx.step_failures.append("FaultProbe pre snapshot unknown")
+            _event(recorder, "faultprobe-snapshot", target, unknown=True)
+            recorder.update_state("gate5-done", snapshot_files=None)
+        else:
+            _event(recorder, "faultprobe-snapshot", target,
+                   files=len(pre_files))
+            recorder.update_state("gate5-done", snapshot_files=len(pre_files))
 
         _launch_exec(ctx, "MkdirStaging")
         _launch_exec(ctx, "SendHap")
@@ -936,8 +1142,10 @@ def _campaign_record(*, mode: str, is_evidence: bool, judged: Dict[str, Any],
                 },
                 "capture_silence": ctx.capture_silence,
                 "positive_baseline_pid": ctx.positive_baseline_pid,
-                "snapshot_files": list(ctx.snapshot_files),
-                "new_fault_files": list(ctx.new_files),
+                "snapshot_files": (None if ctx.snapshot_files is None
+                                   else list(ctx.snapshot_files)),
+                "new_fault_files": (None if ctx.new_files is None
+                                    else list(ctx.new_files)),
                 "faultrecv_failures": list(ctx.recv_failures),
                 "pidof_absent": ctx.pidof_absent,
                 "host_finally": list(ctx.finally_log),

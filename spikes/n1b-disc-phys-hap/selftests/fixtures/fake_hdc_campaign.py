@@ -259,7 +259,7 @@ def main() -> int:
         names = sorted(os.listdir(fault_dir)) if os.path.isdir(fault_dir) else []
         for name in names:
             if bundle in name and os.path.isfile(os.path.join(fault_dir, name)):
-                _write_all(os.path.join(fault_dir, name) + "\n")
+                _write_all("/data/log/faultlog/faultlogger/" + name + "\n")
         return 0
     if len(core) == 4 and core[0] == "file" and core[1] == "recv":
         name = core[2].rsplit("/", 1)[-1]
@@ -307,7 +307,7 @@ def main() -> int:
         if state.get("installed"):
             _write_all("BundleName: %s\nAppStates: IS_INSTALLED=true\n" % bundle)
             return 0
-        return _fail("bm dump failed: not installed")
+        return _fail("error: bundle %s not found" % bundle)
     return _fail("unknown command argv")
 
 
