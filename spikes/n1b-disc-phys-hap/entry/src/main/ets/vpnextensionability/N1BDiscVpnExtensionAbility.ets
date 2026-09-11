@@ -87,7 +87,7 @@ function buildMatrixSpecs(): MatrixEntrySpec[] {
     config: {
       addresses: [{ address: { address: '10.99.0.1', family: 1 }, prefixLength: 32 }],
       routes: [{
-        interface: 'wlan0',
+        interface: 'vpn-tun',
         destination: { address: { address: '10.99.0.0', family: 1 }, prefixLength: 24 },
         gateway: { address: '10.99.0.1', family: 1 },
         hasGateway: true,
@@ -103,7 +103,7 @@ function buildMatrixSpecs(): MatrixEntrySpec[] {
     config: {
       addresses: [{ address: { address: '10.99.0.1', family: 1 }, prefixLength: 32 }],
       routes: [{
-        interface: 'wlan0',
+        interface: 'vpn-tun',
         destination: { address: { address: '10.99.0.0', family: 1 }, prefixLength: 24 },
         gateway: { address: '10.99.0.1', family: 1 },
         hasGateway: true,
