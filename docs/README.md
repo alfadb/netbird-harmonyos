@@ -135,13 +135,17 @@
 - [N1BDISC ID 分配授权登记（2026-09-05 · 0001，host-only，已退役）](evidence/n1bdisc-authorization-2026-09-05-0001.md)
   - `AUTH-N1BDISC-PHYS1API26-20260905-0001` / campaign `N1BDISC-PHYS1API26-20260905-0001` / evidence `EV-N1BDISC-PHYS1API26-20260905-0001`：用户 2026-09-05 显式授权的 ID 分配登记（`attempt: initial`、`retry: N/A`、全新无继承）；**已于 2026-09-06 gate 5 元组漂移退役（`consumed-blocked-final`，无后继 AUTH）**
   - gate 1-4 pass；gate 5 实测设备 OTA 至 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)` 与冻结值漂移 → blocked record + pair 退役，触发 CC-2 元组重绑与第二对授权登记（见下条）
-- [N1BDISC 第二对 pair ID 分配授权登记（2026-09-06 · 0001，host-only，重绑路径）](evidence/n1bdisc-authorization-2026-09-06-0001.md)
+- [N1BDISC 第二对 pair ID 分配授权登记（2026-09-06 · 0001，host-only，重绑路径，已退役）](evidence/n1bdisc-authorization-2026-09-06-0001.md)
   - `AUTH-N1BDISC-PHYS1API26-20260906-0001` / campaign `N1BDISC-PHYS1API26-20260906-0001` / evidence `EV-N1BDISC-PHYS1API26-20260906-0001`：用户 2026-09-06 显式授权「重绑新元组继续」的 ID 分配登记（`attempt: initial`、`retry: N/A`，候选态未消费、全新无继承、与首对及 N1b 正式门均不共用）
   - 授权覆盖重绑路径整体：判据 `04cf222`+CC-1+CC-2（2026-09-06 元组重绑至 `PLA-AL10 7.0.0.105(SP6C00E105R7P3)`，deepseek 席重审 0B/0M/2m 通过）；host-only gate 1-3 重走（gate 3 按本对 code_sha 重出 freeze-2）+ 设备侧 gate 4-5 重测；gate 13 Live 须用户全新确认；AGC 资产沿用（bundle 名 `cn.alfadb.netbird.n1bdisc` 冻结值不变、AGC 侧无需重建）
+  - **终态（2026-09-11 追加；事件 2026-09-06）**：本对走到 gate 12（离线 DryRun 独立审查 PASS）后**因治理违规退役**——gate 4 `list targets` 实际执行两次、违反判据「恰一次」约束，用户不追认、审查席无豁免权；`identity_status: retired-unused-governance-violation`、`consumed: false`（未执行 Live、未产生测量）、`reusable: false`、`live_executed: false`，**无后继 AUTH**；仓外依据 `reviews/pair2-retirement-exact-once.json`（sha256 `5dfd19c39ef45780ad1bb6e42a6afb77d886851f3d9d7ebab1e25bcda0e8c652`）
+- [N1BDISC 第三对 pair 三 ID 分配与候选本地提交授权登记（2026-09-06 · 0002，host-only）](evidence/n1bdisc-authorization-2026-09-06-0002.md)
+  - `AUTH-N1BDISC-PHYS1API26-20260906-0002` / campaign `N1BDISC-PHYS1API26-20260906-0002` / evidence `EV-N1BDISC-PHYS1API26-20260906-0002`：三 ID 已分配、候选态未消费（`consumed=false`/`reusable=false`、`is_evidence=false`），任何门均未执行；前两对 pair 终态不复用、不继承、不撤销
+  - 候选实现 `spikes/n1b-disc-phys-hap/` 全套 commit `ea44b87` 已快进合并入 `main` 并推送；下一步 gate 1-3（host-only），gate 4-5 需用户重新连接设备，gate 13 Live 须用户全新确认（决议 §4.3.9）
 - [N1BDISC SDK 锚点对账（2026-09-05，9/9 PASS）](n1bdisc-sdk-anchor-reconciliation-20260905.md)
   - 只读对账存档：冻结判据正文引用的 SDK/sysroot 锚点主张在 CLT `26.0.0.821` / SDK `26.0.0.105`（API 26 Release）实际内容上 9/9 类实测一致；非设备 evidence、不占用 evidence ID、未修改冻结判据
 - [N1BDISC 交接文档（2026-09-02 判据冻结后，最新交接）](n1b-disc-handoff-20260902.md)
-  - 判据已冻结、ID 分配申请尚未开始；当前状态、硬边界、治理结构、审查纪律与下一步顺序速查
+  - 判据已冻结（`04cf222` + CC-1 + CC-2）；三组 ID 已分配、前两组退役（首对 gate 5 元组漂移 / 第二对 gate 4 恰一次违规），第三对候选实现 `ea44b87` 已落地 `main`；下一步第三对 gate 1-3（host-only）；含当前状态、硬边界、治理结构、审查纪律与下一步顺序速查
 - [会话交接（2026-09-01，历史）：T0 决议落地 + DISC 三轮审查](session-handoff-2026-09-01.md)
   - r3 待修 16 项、主会话五处错误登记、派发规模与评审席占用约束、待决策三项
 - [开放义务台账](open-obligations-ledger.md)

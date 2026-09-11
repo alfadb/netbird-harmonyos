@@ -23,6 +23,7 @@ evidence_id: EV-N1BDISC-PHYS1API26-20260906-0001
 exception: N1BDISC-DISCOVERY-CAMPAIGN
 information_status: current-governance-registration
 record_status: active-governance-registration # 活跃治理登记（非证据记录本体）；执行后另立 EV-N1BDISC 证据记录
+terminal_disposition: retired-unused-governance-violation-20260906 # 2026-09-11 追加（事件 2026-09-06）：本对 gate 12 离线审查 PASS 后因 gate 4 恰一次违规退役（未执行 Live、未消费测量、无后继 AUTH）；见文末「终态处置」节
 stage_or_gate: N1BDISC
 related_stages_or_gates: [N1B]
 execution: not-started-host-only # 本对未执行（无测量、无 HDC/设备命令、无 DryRun/Live）
@@ -92,3 +93,12 @@ reviewer_role: 待 gate 3/7 freeze 重新绑定（跨厂商 isolated reviewer）
 | 5 `-TargetBindingConfirm` | **pass（元组 MATCH）** | 三探针逐字 argv（判据 :1621-1622）：`hdc version`→`Ver: 3.2.0f`；model→`PLA-AL10` **MATCH**；software→`PLA-AL10 7.0.0.105(SP6C00E105R7P3)`（仅尾随空白差异，正确 trim 后）与 CC-2 重绑冻结值 **逐字 MATCH**——首次比较显示 DRIFT 系 trim 函数误删分隔空格的显示层假象，复比确认。confirmation record：`~/harmonyos-signing/netbird-n1bdisc/records/target-binding-confirmation-pair2-20260906-0002.json`（SHA-256 `60870bf5…5c8`，is_evidence=false、target_redacted=true；param get 各执行两次的过程注已登记——只读幂等、两次值一致）。随后 `hdc kill`，HDC0 复核归零（gates 6-12 HDC0 纪律；gate 13 Live 前须用户重新 tconn） |
 
 > 本表随本对执行逐门追加。gate 1-5 已 pass（gate 3 经 FAIL→整改→v2 复审）；截至本行落笔，三 ID 保持候选态（`identity_status: candidate`、`consumed: false`——pair 消费发生于 gate 13 Live）。gates 6-12（ready freeze 链/audit-2/selftests/DryRun/复审）为 host-only，DryRun 须用户另行授权；gate 13 Live 须用户全新确认（决议 §4.3.9）+ 重新 tconn。
+
+## 终态处置（2026-09-11 追加；事件 2026-09-06）
+
+> 本节为 2026-09-11 的追加登记，上文不改；与上文（含上方门序列执行登记表与「当前 host-only 边界」节）表述冲突时，以本节终态为准。
+
+- **退役事实**：第二对 pair（`AUTH-N1BDISC-PHYS1API26-20260906-0001`）于 gate 12（离线 DryRun 独立审查 PASS）后**因治理违规退役**：gate 4 的 `list targets` 实际执行了两次，违反判据的「恰一次」约束（exact-once narrow exception exceeded）；**用户不追认**该事后例外，**审查席不具豁免权**（专项审查席意见不构成事后追认）。
+- **终态语义**：`identity_status: retired-unused-governance-violation`、`consumed: false`（未执行 Live、未产生测量）、`reusable: false`、`live_executed: false`；**无后继 AUTH**（本对不重开、不改写、不复用）。
+- **仓外依据文件**：`/home/worker/harmonyos-signing/netbird-n1bdisc/reviews/pair2-retirement-exact-once.json`（同名 `.sha256` sidecar）；sha256 逐字 `5dfd19c39ef45780ad1bb6e42a6afb77d886851f3d9d7ebab1e25bcda0e8c652`。该记录 `record_type=governance-retirement-disposition`、`is_evidence=false`、`subject.pair=pair2`；其中 `forward_state.new_ids=not-allocated` 为该记录生成时点事实，现已被第三对分配取代（不回写仓外文件）。
+- **历史材料边界**：本对的门序表（gate 1-5 pass）与 gate 12 审查摘要均为**历史审计材料**，不构成对第三对（`...-20260906-0002`）的绑定输入；第三对的 confirmation / freeze 一律重新生成。
