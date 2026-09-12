@@ -76,3 +76,11 @@ sha256sum -c /home/worker/harmonyos-signing/netbird-n1bdisc/ready-freeze/ready-f
 ```
 
 Python 侧无 ruff/flake8/pylint/mypy 配置或安装；静态检查当前只有 markdownlint（文档）。
+
+## 终态追加登记（2026-09-12，只追加不改写）
+
+> 本节 2026-09-12 追加：只追加、不改写上文任何内容；只登记已发生事实及其出处，不构成任何新授权。以下 sha256 均为 2026-09-12 以 `sha256sum` 现算。
+
+- **候选状态已被超越**：本文件所载工作区快照（含「候选可进入新 ID 申请与候选冻结准备」及「下一步」各条）已被第四对 pair（`AUTH-N1BDISC-PHYS1API26-20260911-0001`）的实际执行超越——gate 6-12 已执行（仓外 `reviews/gate12-dryrun-review-pair4-20260911.txt`，2026-09-11 19:30:40 CST，PASS）；gate 13 Live 终态 **fail**（StartEntry 后 300 s allow-box 内 0 个首 marker，E6 allow-deadline；独立审查 0 blocker / 3 major / 1 minor，`reviews/gate13-live-terminal-review-pair4-20260911.txt`，20:20:55 CST）；三 ID 终态登记 `verdict=fail`、`identity_status=consumed-terminal-fail`、`consumed=true`、`reusable=false`、`retry_allowed=false`、`successor_auth=none`（仓外 `records/terminal-disposition-pair4-20260911.json`，2026-09-11 20:24:49 CST，sha256 `bb46b3be9f0ec603e018c002b3b3a5a29a0db225aa45b810422236fd4cb1c23d`，sidecar OK）。逐门事实与出处见 [evidence/n1bdisc-authorization-2026-09-11-0001.md](evidence/n1bdisc-authorization-2026-09-11-0001.md) 末「终态追加登记（2026-09-12，只追加不改写）」节。
+- **仍不得标 live-ready**：fail 终态之外另有冻结漂移——pair4 冻结 `code_sha 0616aa78` 与 main `33a987d` 已不一致，窗口内 9 个提交（自冻结以来共 10 个）全部改冻结实现 `spikes/n1b-disc-phys-hap/`，`e8e2cf9`（2026-09-12 01:33:19）引入的 MR4 不在冻结 MR 表（`docs/n1b-disc-gate-plan.md:453-456` 只有 MR1/MR1B/MR2/MR3），触 `:464` 硬停止条款——本候选及其后续实现**不得标注 live-ready**，后继工作须重新 freeze + 跨厂商独立重审。
+- **下一候选须新授权**：三 ID 已被单次 Live 终态消费、无后继 AUTH；任何新 Live / 新 campaign 须用户**全新授权新三 ID** 并重走门序列（gate 1 起）。09-12 ad-hoc 真机验证（N 轮 `20260912T191913`，联调脚本自身判定 `verdict=pass`）**`is_evidence:false`，不是任何门的判定**，不构成门结论、不构成重开依据。09-11 20:18 → 09-12 19:36 真机活动经独立跨厂商 T0 裁定为「(b) 有授权主体实质同意、但无合规 AUTH 登记的越界执行 = 治理登记缺口」，事后登记见仓外 `~/harmonyos-signing/netbird-n1bdisc/records/retrospective-device-activity-20260912.json`（sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`）、裁定归档 `reviews/t0-auth-boundary-ruling-20260912.md`（sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`）、取证报告归档 `diagnostics/auth-boundary-facts-20260912.md`（sha256 `73c07729719e279c16216c8bf8c6d1394970c5c6447db54f184d40bcaba5f8c6`）。

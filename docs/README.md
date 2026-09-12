@@ -259,3 +259,14 @@
 ## 维护约定
 
 新增调查结果时，应保留来源 URL，并把结果归入上述四种信息状态之一。环境现场发生变化时，优先更新“当前实测”和“尚未验证”；SDK 或官方文档发生变化时，同时更新核验日期。平台方案变更时，应分别说明 OpenHarmony 与 HarmonyOS 的影响，避免把一侧的测试结果直接推广到另一侧。
+
+## 终态追加登记（2026-09-12，只追加不改写）
+
+> 本节 2026-09-12 追加：只追加、不改写上文任何内容；只登记已发生事实及其出处，不构成任何新授权。以下 sha256 均为 2026-09-12 以 `sha256sum` 现算。逐门事实与完整出处见 [evidence/n1bdisc-authorization-2026-09-11-0001.md](evidence/n1bdisc-authorization-2026-09-11-0001.md) 末「终态追加登记（2026-09-12，只追加不改写）」节。
+
+- **pair4 终态（2026-09-11 晚，仓外执行）**：第四对 pair（`AUTH-N1BDISC-PHYS1API26-20260911-0001`）gate 6-12 已执行；gate 13 Live 终态 **fail**（StartEntry 后 300 s allow-box 内 0 个首 marker，E6 allow-deadline；独立审查 0 blocker / 3 major / 1 minor）；终态登记 `identity_status=consumed-terminal-fail`、`consumed=true`、`reusable=false`、`retry_allowed=false`、`successor_auth=none`。仓外登记：`~/harmonyos-signing/netbird-n1bdisc/records/terminal-disposition-pair4-20260911.json`（sha256 `bb46b3be9f0ec603e018c002b3b3a5a29a0db225aa45b810422236fd4cb1c23d`，sidecar OK）。
+- **09-12 ad-hoc 真机验证不是门判定**：N 轮（`20260912T191913`）联调脚本自身给出 `N1BDISC_WG_FWD_END|verdict=pass|tun_rx=108|sent=112|recv=19|tun_write=7|sink_recv=1|elapsed_ms=90649|reason=deadline`——**这是 ad-hoc 开发验证脚本的判定，不是任何门（gate）的判定，`is_evidence:false`，不得作为门结论或判据输入**。09-11 20:18 → 09-12 19:36 真机活动经独立跨厂商 T0 判断席裁定为「(b) 有授权主体实质同意、但无合规 AUTH 登记的越界执行 = 治理登记缺口」；事后登记（`is_new_authorization=false`、`is_evidence=false`、`grants_nothing=true`、`ratifies_nothing=true`、`produces_n1bdisc_verdict=false`、`creates_claim=false`、`uses_pair4_ids=false`、`modifies_terminal_disposition=false`）见 `~/harmonyos-signing/netbird-n1bdisc/records/retrospective-device-activity-20260912.json`（sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`，含 `.sha256` sidecar）。
+- **证据归档**：`~/harmonyos-signing/netbird-n1bdisc/archive-manifest-20260912.md`（sha256 `5912e328fc08e029c41149dc2bbcd65d3641fc9bab130c154595aec686d939e9`）：39 个证据文件 / 1,411,761 字节，sidecar 40/40 校验 OK；被归档的 ad-hoc 轮次目录按 `docs/evidence-schema.md:69` 的隔离语义标 `is_evidence:false`。
+- **治理材料（仓外归档，自 /tmp 易失路径复制）**：T0 裁定 `~/harmonyos-signing/netbird-n1bdisc/reviews/t0-auth-boundary-ruling-20260912.md`（sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`）；只读取证报告 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/auth-boundary-facts-20260912.md`（sha256 `73c07729719e279c16216c8bf8c6d1394970c5c6447db54f184d40bcaba5f8c6`）。
+- **诊断授权类别提案（待用户批准）**：`~/harmonyos-signing/netbird-n1bdisc/proposals/diagnostic-authorization-class-20260912.md`——最小边界（适用范围/允许/禁止/≤24h 时限/session-scoped 消费语义/人类逐条确认签发、agent 不得自分配 ID/口述先落盘回读/证据去处 `diagnostics/<auth-id>/` 且 `is_evidence:false`），并建议在 `docs/evidence-schema.md:118` 增加第二个显式例外；本登记不批准任何事、不修改该判据文档。
+- **后继状态**：pair4 冻结 `code_sha 0616aa78` 与 main `33a987d` 已不一致（窗口内 9 个提交全部改冻结实现 `spikes/n1b-disc-phys-hap/`，`e8e2cf9` 的 MR4 不在冻结 MR 表 `docs/n1b-disc-gate-plan.md:453-456`，触 `:464` 硬停止条款）——后继工作须重新 freeze + 跨厂商独立重审；任何新 Live / 新 campaign 须用户全新授权新三 ID。
