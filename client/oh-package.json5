@@ -1,0 +1,9 @@
+{
+  modelVersion: '26.0.0',
+  name: 'netbird-client',
+  version: '1.0.0',
+  description: 'NetBird HarmonyOS client: product engineering skeleton (Rust core + entry HAP).',
+  license: 'MIT',
+  dependencies: {},
+  devDependencies: {}
+}

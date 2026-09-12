@@ -1,0 +1,13 @@
+# Build config for the N1BDISC probe crate (host cross-build only).
+# Linker = SDK26 native llvm aarch64 OHOS clang wrapper (knows its own sysroot).
+# -L points at the sysroot lib dir so `-lhilog_ndk.z` / `-lace_napi.z` resolve;
+#   both become DT_NEEDED entries of libn1bdisc_probe.so and the raw HiLog/NAPI
+#   extern "C" symbols resolve from the host process at load time.
+
+[target.aarch64-unknown-linux-ohos]
+linker = "/home/worker/harmonyos/command-line-tools/current/sdk/default/openharmony/native/llvm/bin/aarch64-unknown-linux-ohos-clang"
+rustflags = [
+    "-C", "link-arg=-L/home/worker/harmonyos/command-line-tools/current/sdk/default/openharmony/native/sysroot/usr/lib/aarch64-linux-ohos",
+    "-C", "link-arg=-lhilog_ndk.z",
+    "-C", "link-arg=-lace_napi.z",
+]

@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_description",
+      "value": "NetBird HarmonyOS client entry module"
+    },
+    {
+      "name": "ability_description",
+      "value": "UI trigger only; VPN lifecycle lives in the VPN extension"
+    },
+    {
+      "name": "ability_name",
+      "value": "NetBird"
+    }
+  ]
+}

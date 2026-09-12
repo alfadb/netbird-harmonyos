@@ -1,0 +1,32 @@
+# NetBird HarmonyOS client core — native side (Rust/NAPI cdylib).
+#
+# Product skeleton promoted from the verified spike chain:
+#   - boringtun pinned verbatim per spikes/n1b-disc-phys-hap/probe (frozen
+#     build input): boringtun = { version = "=0.7.1", default-features = false,
+#     features = ["ffi-bindings"] }, crate sha256 =
+#     15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939.
+#     The `device` feature stays forbidden (TunSocket::new would treat a numeric
+#     name as an fd and Drop would close it unconditionally).
+#   - Handwritten raw NAPI extern "C" declarations (src/napi.rs) resolved from
+#     the host process (libace_napi.z.so); no napi-rs dependency, zero
+#     napi_create_threadsafe_function / napi_create_async_work.
+#
+# panic=abort: panics must not unwind across the NAPI/extern "C" boundary.
+[package]
+name = "netbird_core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "netbird_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = false
+strip = "debuginfo"
