@@ -116,3 +116,25 @@
 - **冻结漂移与硬停止（2026-09-12 追加）**：pair4 冻结 `code_sha 0616aa78` 与 main `33a987d` 已不一致；窗口内起点提交 `97ab073` 之后的 9 个提交（自冻结以来共 10 个）全部改冻结实现 `spikes/n1b-disc-phys-hap/`，其中 `e8e2cf9` 引入的 MR4 **不在冻结 MR 表**（`docs/n1b-disc-gate-plan.md:453-456` 只有 MR1/MR1B/MR2/MR3）→ 触 `:464` 硬停止条款。
 - **09-11 20:18 → 09-12 19:36 无 AUTH 真机活动的事后登记（2026-09-12 追加）**：独立跨厂商 T0 裁定性定为「**(b) 有授权主体实质同意、但无合规 AUTH 登记的越界执行 = 治理登记缺口**」（许可来源 = 用户 09-11 22:38:53 / 22:46:28 口述指示「直接写代码在实际设备上验证VPN功能」，未登记为 AUTH）；加重情节两条：三份 diagnostics AUTH 系 agent 自签（log-prep JSON 自陈 `the id was assigned by the agent`）且 agent 自行出具 main_session_ruling；冻结实现被改并 push。09-12 ad-hoc 真机验证（N 轮 `20260912T191913`）的总判定 `N1BDISC_WG_FWD_END|verdict=pass|…|reason=deadline` **系联调脚本自身判定，`is_evidence:false`，不是任何门的判定**。逐字引文、逐轮台账、7 项不可核实事项见仓外：`records/retrospective-device-activity-20260912.json`（sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`）、`reviews/t0-auth-boundary-ruling-20260912.md`（sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`）、`diagnostics/auth-boundary-facts-20260912.md`（sha256 `73c07729719e279c16216c8bf8c6d1394970c5c6447db54f184d40bcaba5f8c6`）。
 - **下一步（事实，2026-09-12）**：三 ID 已终态消费、无后继 AUTH——任何新 Live / 新 campaign 须用户**全新授权新三 ID**（重走门序列，gate 1 起）；且因冻结漂移（含 MR4 越表、触 `docs/n1b-disc-gate-plan.md:464`），后继工作须**重新 freeze + 跨厂商独立重审**后方可恢复可测量状态。
+
+### N1BDISC campaign 终态关闭（2026-09-12 追加）
+
+> 本子节 2026-09-12 追加（只追加、不改写上文任何内容）：登记 N1BDISC 发现 campaign 的**终态关闭**决定及其依据与边界。本子节不构成任何新授权、不产生任何门级 verdict、不分配/不追加/不复用任何 AUTH-/campaign-/EV- ID。仓B 终态记录：`~/harmonyos-signing/netbird-n1bdisc/records/campaign-terminal-n1bdisc-20260912.json`（sha256 `73ec96d4a3fa1785b0560f78611b21a4a936e89cb000247aacd962aa6bcef618`，同名 `.sha256` sidecar，`disposition=closed-scope-achieved-transferred-to-implementation`）。以下 sha256 均为 2026-09-12/13 以 `sha256sum` 现算。
+
+**关闭理由**（三条，均带出处）：
+
+1. **数据面事实已取得**：2026-09-12 真机 ad-hoc 联调已走通隧道、设备内 WG 握手与加解密、真实应用流量经默认路由进 TUN、MR4 默认路由被平台接受、`protect()` 对 native fd 生效；该轮总判定 `N1BDISC_WG_FWD_END|verdict=pass|…|reason=deadline`（N 轮 `20260912T191913`）**系 ad-hoc 联调脚本自身判定，`is_evidence:false`，非门结论**，不得作为门结论或判据输入。判据已加固为链式判据（主机 TX seq → FWD_TUN_WRITE → FWD_SINK 按序闭合），加固后重评 N/R/P 三轮真实日志判据翻转 = 0、假阳性探针 A/B 由旧 PASS 变新 FAIL。出处（仓B）：`handoff/vpn-core-verification-20260912.md`（sha256 `d51f73c04bb44ae4f5c0048890ff1eb29bd7e82644b84df4acc88774e7ba713c`）、`reviews/criterion-hardening-20260912.md`（sha256 `d757012aa09d244d2278e115c73b76acdc3ea1b5a9af394db44a0a6a0c945820`）、`records/artifact-version-note-20260912.md`（sha256 `39c8e5985984f7de8274506fc959df344506fe01231cb4c3e3d44f63a80538ac`）。
+2. **pair4 三 ID 已终态消费**：`AUTH-N1BDISC-PHYS1API26-20260911-0001` 三 ID `consumed-terminal-fail`、`consumed=true`、`reusable=false`、`retry_allowed=false`、`successor_auth=none`——既有终态登记（本文件上文第一条追加登记；仓B `records/terminal-disposition-pair4-20260911.json`，sha256 `bb46b3be9f0ec603e018c002b3b3a5a29a0db225aa45b810422236fd4cb1c23d`）。三 ID 终态消费后该 campaign 无可继续执行的治理载体。
+3. **用户 2026-09-12 明确指示**：**转入客户端整体实现阶段（路线 1：并行推进不受 N3 法律前置约束的工程；N3-N6 作为"实现里程碑 + 每门一次受治理验证"）**。该指示逐字转录于仓B 终态记录 `basis.user_directive_verbatim` 字段（截至落盘时点该指示无独立会话存档文件，以该字段与本文为登记载体）。
+
+**关闭后效果**：
+
+- N1BDISC campaign 登记为**终态关闭**；**pair4 的 freeze-4 不再约束工作区**——实现阶段对 `spikes/n1b-disc-phys-hap/` 及其余代码的继续开发不再受该冻结约束（判据 `:1124` 资产哈希 invalid 条款所依附的 campaign 已终态）。freeze-4 与全部历史记录**原样保留**：不改写、不撤销、不删除。
+- 工作区移交**客户端整体实现阶段**：N3-N6 作为**实现里程碑 + 每门一次受治理验证**；OB-01/02/03/04/07 五条「须专门测量」义务转为实现期定向验证项（处置口径见 [`docs/open-obligations-ledger.md`](open-obligations-ledger.md) 文末追加节；指针见 [`docs/README.md`](README.md)「终态追加登记」节末）。
+
+**未放宽的治理条款（逐字引用，效力不变）**：
+
+- `docs/native-nx-governance.md` §三（pre-E8 native 物理例外条目）：「E8 OPEN 的语义相应变为 **N6 之后的产品/R 门投入许可**——这是明示治理，不是静默替代 E1。N6 未 pass 前不得开启产品实现。」
+- `docs/native-nx-governance.md` §四（首段）：「**N3 硬前置**：在任何 N3 IDL codegen、复制/转译参考实现或协议实现提交之前，取得**书面、可执行**的专业法律结论（"已委托评估"不满足）。」
+
+**边界（本次关闭不做的事）**：不得据此声称 N1BDISC 任何门 pass 或任何门级 verdict 成立（pair4 gate 13 Live 既有终态登记为 fail，引用不改写）；不得据此声称产品实现已获授权；不放宽 §三与 §四 的任何条款；不追溯批准 09-11 20:18 → 09-12 19:36 无 AUTH 真机活动（治理定性见仓B `reviews/t0-auth-boundary-ruling-20260912.md` sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`、`records/retrospective-device-activity-20260912.json` sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`，`ratifies_nothing=true`）。**后续任何新测量 / 新 Live / 新 campaign 须用户全新授权全新三 ID（AUTH-/campaign-/EV-）并重走门序列（gate 1 起）；因冻结漂移（上文第二条追加登记），后继受治理测量须重新 freeze + 跨厂商独立重审后方可恢复可测量状态。**
