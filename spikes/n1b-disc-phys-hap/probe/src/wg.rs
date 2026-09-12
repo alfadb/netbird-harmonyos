@@ -1139,11 +1139,13 @@ const FWD_POLL_MS: i32 = 250;
 /// Handshake wait bound: no host datagram that establishes a session within
 /// 90 s -> verdict=timeout, reason=handshake-timeout.
 const FWD_HS_WAIT_MS: u64 = 90_000;
-/// Forwarding loop bound: 90 s, or the event cap below, or the first full
-/// round trip, whichever comes first.
+/// Forwarding loop bound: 90 s or the event cap below, whichever comes first.
+/// There is deliberately NO early exit on the first full round trip: after a
+/// packet is written into the TUN the kernel needs time to answer (echo reply,
+/// local delivery), so the loop must keep polling until a real bound is hit.
 const FWD_LOOP_MS: u64 = 90_000;
-/// Loop also ends after this many processed events (UDP datagrams + TUN reads)
-/// so a chatty kernel cannot extend the probe forever.
+/// Loop also ends after this many processed events (UDP datagrams + TUN reads
+/// + sink datagrams) so a chatty kernel cannot extend the probe forever.
 const FWD_EVENT_CAP: u32 = 200_000;
 /// Max TUN frames drained per readable poll, so a kernel transmit burst cannot
 /// starve the UDP half of the loop (each drain re-polls on the next iteration).
@@ -1166,6 +1168,9 @@ struct FwdOutcome {
     tun_write: u32,
     tun_last_written: i64,
     tun_last_errno: i32,
+    sink_bind_rc: i32,
+    sink_bind_errno: i32,
+    sink_recv: u32,
     verdict: String,
     reason: String,
     start_ms: u64,
@@ -1385,6 +1390,33 @@ fn run_fwd(fd_dup: i32, pre: Option<(i32, i32, i32)>) -> FwdOutcome {
     }
 
     // --- 4. bidirectional forwarding loop ------------------------------------
+    // Local sink socket 0.0.0.0:47003 (same port wg_net_probe used; that probe
+    // is commented out of the .ets call chain, so nothing else owns the port).
+    // Kernel-local delivery evidence: a host datagram decrypted into the TUN
+    // with dst=10.99.0.1 is delivered by the kernel to this socket WITHOUT a
+    // route lookup, so it proves the tunnel -> kernel-stack path even when the
+    // main route table has no VPN route for the reply (per-UID routing keeps
+    // kernel-originated packets out of the VPN network domain). A bind failure
+    // is recorded truthfully and is NOT fatal: the ICMP half keeps running.
+    let sink_fd: i32 = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+    if sink_fd < 0 {
+        o.sink_bind_rc = -1;
+        o.sink_bind_errno = sys::errno();
+        emit(&format!(
+            "N1BDISC_WG_FWD_SINK_BIND|port={}|rc=-1|errno={}",
+            SINK_PORT, o.sink_bind_errno
+        ));
+    } else {
+        let sink_sa = sys::sockaddr_in::new([0, 0, 0, 0], SINK_PORT);
+        o.sink_bind_rc = unsafe {
+            sys::bind(sink_fd, &sink_sa, core::mem::size_of::<sys::sockaddr_in>() as u32)
+        };
+        o.sink_bind_errno = if o.sink_bind_rc == -1 { sys::errno() } else { 0 };
+        emit(&format!(
+            "N1BDISC_WG_FWD_SINK_BIND|port={}|rc={}|errno={}",
+            SINK_PORT, o.sink_bind_rc, o.sink_bind_errno
+        ));
+    }
     let loop_deadline = sys::mono_ms() + FWD_LOOP_MS;
     let mut events = 0u32;
     while o.verdict.is_empty() {
@@ -1409,13 +1441,17 @@ fn run_fwd(fd_dup: i32, pre: Option<(i32, i32, i32)>) -> FwdOutcome {
             emit(&format!("N1BDISC_WG_FWD_TICK_ERR|op={}|len={}", top, tlen));
         }
 
-        // Poll BOTH fds: [0] = WG UDP socket, [1] = real TUN fd. (poll1 covers
-        // one fd; the closed-table `poll` primitive takes the pair.)
+        // Poll ALL fds: [0] = WG UDP socket, [1] = real TUN fd, [2] = local
+        // 47003 sink. (poll1 covers one fd; the closed-table `poll` primitive
+        // takes the array. A failed sink socket keeps fd < 0 and is dropped
+        // from the set via nfds so poll never visits it.)
         let mut fds = [
             sys::pollfd { fd, events: sys::POLLIN, revents: 0 },
             sys::pollfd { fd: fd_dup, events: sys::POLLIN, revents: 0 },
+            sys::pollfd { fd: sink_fd, events: sys::POLLIN, revents: 0 },
         ];
-        let ret = unsafe { sys::poll(fds.as_mut_ptr(), 2, FWD_POLL_MS) };
+        let nfds = if sink_fd >= 0 { 3 } else { 2 };
+        let ret = unsafe { sys::poll(fds.as_mut_ptr(), nfds, FWD_POLL_MS) };
         if ret < 0 {
             let e = sys::errno();
             if e == sys::EINTR {
@@ -1521,15 +1557,45 @@ fn run_fwd(fd_dup: i32, pre: Option<(i32, i32, i32)>) -> FwdOutcome {
             }
         }
 
-        // First observed full round trip (decrypted data reached the TUN AND
-        // encrypted data was sent back) proves the data plane both ways; stop
-        // here instead of burning the remaining bound.
-        if o.tun_write > 0 && o.sent > 0 {
-            o.reason = "roundtrip".into();
-            break;
+        // --- sink readable: kernel delivered a tunnel packet locally ---------
+        if sink_fd >= 0 && (fds[2].revents & sys::POLLIN) != 0 {
+            let mut from = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+            let mut flen = core::mem::size_of::<sys::sockaddr_in>() as u32;
+            let rn = unsafe {
+                sys::recvfrom(
+                    sink_fd,
+                    rbuf.as_mut_ptr() as *mut core::ffi::c_void,
+                    rbuf.len(),
+                    0,
+                    &mut from,
+                    &mut flen,
+                )
+            };
+            if rn > 0 {
+                // A processed datagram like the UDP/TUN events above, so the
+                // event cap stays a bound on total work.
+                events += 1;
+                o.sink_recv += 1;
+                emit(&format!(
+                    "N1BDISC_WG_FWD_SINK|len={}|src={}",
+                    rn,
+                    sa_str(&from)
+                ));
+            } else if rn < 0 {
+                emit(&format!("N1BDISC_WG_FWD_SINK_ERR|errno={}", sys::errno()));
+            }
         }
+
+        // No early exit on the first full round trip (removed 2026-09-12): the
+        // former `tun_write > 0 && sent > 0 -> reason=roundtrip` stop fired
+        // ~1 ms after the first TUN write, before the kernel could answer, so
+        // echo replies were never read back. The loop now ends ONLY on the
+        // deadline or the event cap (plus genuine poll/read failures).
     }
 
+    if sink_fd >= 0 {
+        unsafe { sys::close(sink_fd) };
+    }
     unsafe { sys::close(fd) };
     if o.verdict.is_empty() {
         // pass = decrypted data made it back into the real TUN; partial =
@@ -1550,9 +1616,10 @@ fn run_fwd(fd_dup: i32, pre: Option<(i32, i32, i32)>) -> FwdOutcome {
 
 /// `wg_fwd_probe(fdDup: number, mb1: boolean) -> string` (JSON). Real
 /// bidirectional data plane over one BoringTun tunnel: answers the host's
-/// handshake, then forwards in BOTH directions between the real TUN fd and the
-/// WG UDP socket until the first full round trip, the 90 s / 64-event bound, or
-/// a fatal error. Outside the frozen P-chain: no ledger transition, and the
+/// handshake, then forwards in BOTH directions between the real TUN fd, the WG
+/// UDP socket and a local 47003 sink until the 90 s deadline, the 200_000-event
+/// cap, or a fatal error (no early exit on the first round trip). Outside the
+/// frozen P-chain: no ledger transition, and the
 /// caller's D4/D5/D8/D-W sequence is untouched.
 pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     emit("N1BDISC_WG_FWD_ENTER|");
@@ -1560,8 +1627,8 @@ pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     let mut o = run_fwd(fd_dup, None);
     o.elapsed_ms = sys::mono_ms().saturating_sub(o.start_ms);
     emit(&format!(
-        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|elapsed_ms={}|reason={}",
-        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.elapsed_ms, o.reason
+        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|sink_recv={}|elapsed_ms={}|reason={}",
+        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.sink_recv, o.elapsed_ms, o.reason
     ));
 
     let mut j = String::from("{");
@@ -1594,6 +1661,12 @@ pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     j.push_str(&jinum("tun_last_written", o.tun_last_written));
     j.push_str(",");
     j.push_str(&format!("\"tun_last_errno\":{}", o.tun_last_errno));
+    j.push_str(",");
+    j.push_str(&format!("\"sink_bind_rc\":{}", o.sink_bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"sink_bind_errno\":{}", o.sink_bind_errno));
+    j.push_str(",");
+    j.push_str(&jnum("sink_recv", o.sink_recv as u64));
     j.push_str(",");
     j.push_str(&jstr("verdict", &o.verdict));
     j.push_str(",");
@@ -1651,8 +1724,8 @@ pub fn wg_fwd_run(fd: i32, fd_dup: i32, mb1: bool) -> String {
     let mut o = run_fwd(fd_dup, pre);
     o.elapsed_ms = sys::mono_ms().saturating_sub(o.start_ms);
     emit(&format!(
-        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|elapsed_ms={}|reason={}",
-        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.elapsed_ms, o.reason
+        "N1BDISC_WG_FWD_END|verdict={}|tun_rx={}|sent={}|recv={}|tun_write={}|sink_recv={}|elapsed_ms={}|reason={}",
+        o.verdict, o.tun_rx, o.sent, o.recv, o.tun_write, o.sink_recv, o.elapsed_ms, o.reason
     ));
 
     let mut j = String::from("{");
@@ -1671,6 +1744,12 @@ pub fn wg_fwd_run(fd: i32, fd_dup: i32, mb1: bool) -> String {
     j.push_str(&jnum("tun_rx", o.tun_rx as u64));
     j.push_str(",");
     j.push_str(&jnum("tun_write", o.tun_write as u64));
+    j.push_str(",");
+    j.push_str(&format!("\"sink_bind_rc\":{}", o.sink_bind_rc));
+    j.push_str(",");
+    j.push_str(&format!("\"sink_bind_errno\":{}", o.sink_bind_errno));
+    j.push_str(",");
+    j.push_str(&jnum("sink_recv", o.sink_recv as u64));
     j.push_str(",");
     j.push_str(&jstr("verdict", &o.verdict));
     j.push_str(",");
