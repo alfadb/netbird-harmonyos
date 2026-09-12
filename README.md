@@ -58,6 +58,8 @@ E8 前 API23 initial live 已于 2026-08-06 消费并登记为 `EV-E3-PHYS1API23
 
 ## 许可证
 
-本项目以 [MIT 许可证](LICENSE) 发布。
+本项目以 [GNU Affero 通用公共许可证 v3.0（AGPL-3.0）](LICENSE) 发布；历史版本在各自发布时点按其当时声明的许可证（MIT）授权，不回溯改变。
 
-NetBird 名称及商标归其各自权利人所有。NetBird 上游项目以及本项目引用或衍生的上游代码遵循各自的许可证；本项目的 MIT 许可证不改变这些许可条款。
+NetBird 名称及商标归其各自权利人所有。NetBird 上游项目以及本项目引用或衍生的上游代码遵循各自的许可证；本项目的 AGPL-3.0 许可证不改变这些许可条款。
+
+第三方依赖（如 boringtun）按其自身许可证授权，归属与版本清单见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
