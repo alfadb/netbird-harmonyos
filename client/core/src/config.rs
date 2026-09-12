@@ -4,7 +4,7 @@
 //! DNS servers, MTU, optional listen port.
 //!
 //! Scope guard: this module is CONFIG ONLY. No management/signal protocol
-//! interaction lives here (none is implemented anywhere in the crate yet).
+//! interaction lives here (the management REST client lives in `management`).
 //!
 //! ## JSON input
 //! `serde`/`serde_json` are NOT used: serde_json is not in the frozen offline
@@ -546,7 +546,10 @@ pub(crate) enum Json {
 
 const MAX_DEPTH: usize = 32;
 
-fn parse_document(text: &str) -> Result<Json, ConfigError> {
+/// Strict single-document parse. `pub(crate)`: shared with the management
+/// client (`management.rs`), which maps the same JSON reader onto management
+/// API responses. Unknown/extra fields are the CALLER's concern here.
+pub(crate) fn parse_document(text: &str) -> Result<Json, ConfigError> {
     let mut p = Parser { s: text.as_bytes(), pos: 0, depth: 0 };
     let v = p.value()?;
     p.skip_ws();

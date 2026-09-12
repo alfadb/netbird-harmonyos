@@ -30,6 +30,11 @@
 //!              NON-SECURE in-memory implementation; platform secure storage
 //!              (HarmonyOS) is a future implementation point: NOT implemented,
 //!              NOT verified
+//! - `management` — NetBird management REST API client skeleton (N3-1):
+//!              HttpTransport trait + plain-text TCP transport (TEST BASELINE
+//!              ONLY; TLS is a later increment), login/session, peer list and
+//!              node-config fetch; setup-key register is a TODO(未确认)
+//!              mock-only contract (upstream registration is gRPC-only)
 //! - `btkeep`, `chunk`, `hilog`, `net`, `sys`, `util` — support modules,
 //!              verbatim from the probe
 //!
@@ -76,6 +81,7 @@ pub mod config;
 pub mod credential;
 pub mod hilog;
 pub mod ledger;
+pub mod management;
 pub mod napi;
 pub mod net;
 pub mod state;
