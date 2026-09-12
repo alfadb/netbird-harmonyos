@@ -102,6 +102,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("tun_write", napi_tun_write);
     reg!("tun_poll", napi_tun_poll);
     reg!("tun_close", napi_tun_close);
+    reg!("config_validate", napi_config_validate);
     exports
 }
 
@@ -347,6 +348,7 @@ mod tests {
             "tun_write",
             "tun_poll",
             "tun_close",
+            "config_validate",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -432,4 +434,10 @@ unsafe extern "C" fn napi_tun_poll(env: NapiEnv, info: NapiCallbackInfo) -> Napi
 unsafe extern "C" fn napi_tun_close(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::tun::tun_close_json(a.i32_at(0, -1)))
+}
+
+unsafe extern "C" fn napi_config_validate(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let s = a.string_at(0);
+    ret_json(env, crate::config::config_validate_json(&s))
 }

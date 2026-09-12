@@ -21,6 +21,15 @@
 //!              symbols in the loaded .so, adapted from the probe's d1.rs
 //! - `napi`   — handwritten raw NAPI glue (no napi-rs; all exports
 //!              synchronous, zero threadsafe-function / async-work)
+//! - `config` — client configuration model (R3): peer config + validation
+//!              (keys, CIDR, MTU, endpoint), own strict JSON reader; NO
+//!              management/signal protocol logic
+//! - `state`  — connection state machine (R3): explicit transition table,
+//!              illegal transitions are errors, pure logic / no I/O
+//! - `credential` — credential store trait (R3) + a DEVELOPMENT-ONLY,
+//!              NON-SECURE in-memory implementation; platform secure storage
+//!              (HarmonyOS) is a future implementation point: NOT implemented,
+//!              NOT verified
 //! - `btkeep`, `chunk`, `hilog`, `net`, `sys`, `util` — support modules,
 //!              verbatim from the probe
 //!
@@ -50,20 +59,26 @@
 //! | `tun_write(session: number, hexFrame: string)` | | full-frame write (short writes, EAGAIN + POLLOUT budget) -> `{ok,n}` / `{ok:false,error:"backpressure",written,errno}` |
 //! | `tun_poll(session: number, timeoutMs: number)` | | poll(POLLIN) readiness; POLLNVAL -> `error:"badfd"` (foreign close / destroy detection) |
 //! | `tun_close(session: number)` | | close the session's dup exactly once; second close -> `error:"already-closed"`, use after close -> `error:"closed"` |
+//! | `config_validate(json: string)` | `(json) => string` | validate a client-config JSON document -> `{valid:true,endpoint,mtu,routes,default_route,dns_servers,preshared_key,listen_port}` / `{valid:false,error}` (never echoes key material) |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd
-//! retention probe stages and `state.rs` (n1b), the n1a ffi data pump
-//! (`pump.rs`), and the e3 C fdprobe (superseded here by `fd_status`).
+//! retention probe stages and the n1b fd-retention `state.rs` (unrelated to
+//! this crate's `state.rs`, which is the R3 connection state machine), plus
+//! the n1a ffi data pump (`pump.rs`), and the e3 C fdprobe (superseded here
+//! by `fd_status`).
 
 #![allow(static_mut_refs)]
 
 pub mod abi;
 pub mod btkeep;
 pub mod chunk;
+pub mod config;
+pub mod credential;
 pub mod hilog;
 pub mod ledger;
 pub mod napi;
 pub mod net;
+pub mod state;
 pub mod sys;
 pub mod tun;
 pub mod util;
