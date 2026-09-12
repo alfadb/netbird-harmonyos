@@ -63,7 +63,7 @@ HarmonyOS / PLA-AL10 / `PLA-AL10 7.0.0.102(SP8C00E102R7P3)` / API 26 / aarch64 /
 
 | 项 | 状态 |
 | --- | --- |
-| N3 法律评估（shared/ BSD-3 声明效力 + combined/ 差异 + 生成代码义务） | 简报已备 `/tmp/n3-legal-brief.md`，**须用户提交外部法律意见**；N3 硬前置 |
+| N3 法律评估（shared/ BSD-3 声明效力 + combined/ 差异 + 生成代码义务） | 简报已备 `docs/n3-legal-brief.md`，**须用户提交外部法律意见**；N3 硬前置 |
 | C5_PHASEB_FINAL_RULING | ✅ 已终裁 measured-fact、已登记 |
 | process_model NAPI argc 修复 | ✅ 已修、下轮生效 |
 | Go 1.27 研究 | ✅ RS-G0-GO127ELF-20260830-0001 已登记 |

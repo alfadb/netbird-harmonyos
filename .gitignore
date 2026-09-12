@@ -42,3 +42,6 @@ __pycache__/
 # N1a native dataplane host build outputs
 /spikes/n1a-native-dataplane/target/
 /spikes/n1a-native-dataplane/out/
+
+# Python pytest cache
+.pytest_cache/
