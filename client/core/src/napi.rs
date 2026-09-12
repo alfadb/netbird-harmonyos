@@ -1,6 +1,6 @@
 //! Handwritten NAPI bindings (no napi-rs dependency; promoted from
 //! spikes/n1b-disc-phys-hap/probe/src/napi.rs with the export surface trimmed
-//! to the product skeleton: version / abi_probe / fd_status / wg_*).
+//! to the product skeleton: version / abi_probe / fd_status / wg_* / tun_*).
 //! A1-clean: this file contains ZERO napi_create_threadsafe_function /
 //! napi_create_async_work — all exports are synchronous. Symbols resolve at
 //! load time from the host process's libace_napi.z.so (DT_NEEDED via
@@ -97,6 +97,11 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("wg_fwd_probe", napi_wg_fwd_probe);
     reg!("wg_fwd_open", napi_wg_fwd_open);
     reg!("wg_fwd_run", napi_wg_fwd_run);
+    reg!("tun_open", napi_tun_open);
+    reg!("tun_read", napi_tun_read);
+    reg!("tun_write", napi_tun_write);
+    reg!("tun_poll", napi_tun_poll);
+    reg!("tun_close", napi_tun_close);
     exports
 }
 
@@ -327,7 +332,22 @@ mod tests {
                    "napi_init must return the same exports object");
         let calls = set_calls();
         let funcs = fake_funcs();
-        for name in ["version", "abi_probe", "fd_status"] {
+        for name in [
+            "version",
+            "abi_probe",
+            "fd_status",
+            "wg_probe",
+            "wg_udp_probe",
+            "wg_net_probe",
+            "wg_fwd_probe",
+            "wg_fwd_open",
+            "wg_fwd_run",
+            "tun_open",
+            "tun_read",
+            "tun_write",
+            "tun_poll",
+            "tun_close",
+        ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
             assert_eq!(call.0, exports as usize, "{} attached to wrong object", name);
@@ -386,4 +406,30 @@ unsafe extern "C" fn napi_wg_fwd_open(env: NapiEnv, _info: NapiCallbackInfo) -> 
 unsafe extern "C" fn napi_wg_fwd_run(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::wg::wg_fwd_run(a.i32_at(0, -1), a.i32_at(1, -1), a.bool_at(2, false)))
+}
+
+unsafe extern "C" fn napi_tun_open(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::tun::tun_open_json(a.i32_at(0, -1)))
+}
+
+unsafe extern "C" fn napi_tun_read(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::tun::tun_read_json(a.i32_at(0, -1)))
+}
+
+unsafe extern "C" fn napi_tun_write(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let s = a.string_at(1);
+    ret_json(env, crate::tun::tun_write_json(a.i32_at(0, -1), &s))
+}
+
+unsafe extern "C" fn napi_tun_poll(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::tun::tun_poll_json(a.i32_at(0, -1), a.i32_at(1, 0)))
+}
+
+unsafe extern "C" fn napi_tun_close(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::tun::tun_close_json(a.i32_at(0, -1)))
 }

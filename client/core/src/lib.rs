@@ -10,6 +10,13 @@
 //! - `ledger` — fd ledger (transition markers + canonical digest), verbatim
 //!              from the same probe, plus the minimal `fd_status` F_GETFD
 //!              check used by the entry module's fd contract
+//! - `tun`    — TUN data plane over the dup-copy fd contract (R2-A): `TunFd`
+//!              holds exactly one dup of the platform fd (F_DUPFD_CLOEXEC,
+//!              dup() fallback), read/write with EAGAIN + short-write +
+//!              bounded-backpressure handling, poll-based shutdown unblock,
+//!              close-once with double-close/use-after-close as explicit
+//!              errors; ledger transitions for every dup create/close; the
+//!              platform raw fd is never stored nor closed by native
 //! - `abi`    — dlopen+dlsym verification of the 14 frozen BoringTun ffi
 //!              symbols in the loaded .so, adapted from the probe's d1.rs
 //! - `napi`   — handwritten raw NAPI glue (no napi-rs; all exports
@@ -38,6 +45,11 @@
 //! | `wg_fwd_probe(fdDup: number, mb1: boolean)` | | real bidirectional data plane (blocking) |
 //! | `wg_fwd_open()` | `() => string` | pre-bound WG UDP socket handle (fd < 0 = bind failed) |
 //! | `wg_fwd_run(fd: number, fdDup: number, mb1: boolean)` | | fwd loop on a caller-owned (protectable) socket |
+//! | `tun_open(fdOrig: number)` | `(fd) => string` | open a TUN session on a DUP copy of the platform fd (F_DUPFD_CLOEXEC, dup() fallback; raw fd never stored, never closed by native) -> `{ok,session,fd,nonblock_ofd}` |
+//! | `tun_read(session: number)` | `(session) => string` | one read(2) on the session's dup -> `{ok,n,hex}` / `{eagain:true}` / `{eof:true}` / `{ok:false,error,errno}` |
+//! | `tun_write(session: number, hexFrame: string)` | | full-frame write (short writes, EAGAIN + POLLOUT budget) -> `{ok,n}` / `{ok:false,error:"backpressure",written,errno}` |
+//! | `tun_poll(session: number, timeoutMs: number)` | | poll(POLLIN) readiness; POLLNVAL -> `error:"badfd"` (foreign close / destroy detection) |
+//! | `tun_close(session: number)` | | close the session's dup exactly once; second close -> `error:"already-closed"`, use after close -> `error:"closed"` |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd
 //! retention probe stages and `state.rs` (n1b), the n1a ffi data pump
@@ -53,5 +65,6 @@ pub mod ledger;
 pub mod napi;
 pub mod net;
 pub mod sys;
+pub mod tun;
 pub mod util;
 pub mod wg;

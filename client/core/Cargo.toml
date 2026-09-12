@@ -5,8 +5,15 @@
 #     build input): boringtun = { version = "=0.7.1", default-features = false,
 #     features = ["ffi-bindings"] }, crate sha256 =
 #     15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939.
-#     The `device` feature stays forbidden (TunSocket::new would treat a numeric
-#     name as an fd and Drop would close it unconditionally).
+#   - The `device` feature STAYS DISABLED — now a binding fd-contract clause,
+#     not just a probe freeze (docs/native-nx-governance.md §二 条款 2):
+#     TunSocket::new treats a numeric name as an fd and Drop closes it
+#     unconditionally, i.e. it would consume the platform raw fd whose ONLY
+#     closer must be VpnConnection.destroy(). The TUN read/write path lives in
+#     src/tun.rs instead: TunFd owns a dup copy (F_DUPFD_CLOEXEC, dup()
+#     fallback), does raw read/write/poll on the copy only, and closes
+#     exactly its own fd. Enabling `device` would also add socket2/thiserror
+#     to the offline dependency set for zero contract-legal capability.
 #   - Handwritten raw NAPI extern "C" declarations (src/napi.rs) resolved from
 #     the host process (libace_napi.z.so); no napi-rs dependency, zero
 #     napi_create_threadsafe_function / napi_create_async_work.
@@ -20,7 +27,9 @@ publish = false
 
 [lib]
 name = "netbird_core"
-crate-type = ["cdylib"]
+# rlib: lets tests/tun_fd_contract.rs (integration-process tests) link the
+# crate on the host; the shipped artifact remains the cdylib below.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
