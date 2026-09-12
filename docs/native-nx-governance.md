@@ -94,3 +94,16 @@ E1（stock Go loader/runtime 门）转为 dormant，既有判定保持原绑定�
 - 依据：跨厂商 T0 裁定 Q4（`~/harmonyos-signing/netbird-n1bdisc/reviews/t0-auth-boundary-ruling-20260912.md`，sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`，2026-09-13 现算）；事实依据 `~/harmonyos-signing/netbird-n1bdisc/records/retrospective-device-activity-20260912.json`（sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`，2026-09-13 现算）；提案 `~/harmonyos-signing/netbird-n1bdisc/proposals/diagnostic-authorization-class-20260912.md`（sha256 `abb8eb499312d27653d857b2ab54b955f608af31e1d18092e8000c4e1dacdb9c`，2026-09-13 现算）**已获用户 2026-09-13 批准并落地**——提案文件按其自身边界声明保持原样、未改写，本条即为该提案状态的登记。
 - AUTH 模板：`~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-TEMPLATE-diagnostic-20260913.json`（sha256 `93330d783a937f8998f35b302159ca0920b191ee09394f3cb99ce9539b30a044`，sidecar `.sha256` 就地 `sha256sum -c` 可校验）。模板是占位符骨架，**不是授权**；实际签发须人类逐条确认，agent 不得自分配 AUTH ID，口述指示须先落盘回读确认后方可执行。
 - 本类别**不放宽**本文 §三（N6 未 pass 前不得开启产品实现）与 §四（N3 书面法律前置），也不改写 `docs/n1b-disc-gate-plan.md` 任何冻结判据；campaign 类物理执行仍按既有 pair AUTH 路径须用户逐项显式授权。
+
+## §四 修订（2026-09-13，唯一现行）：许可路线改为 AGPL
+
+> 本节 2026-09-13 依用户决定文末追加，未改写上文任何文字；在许可路线范围内，本节是本文**唯一现行**的许可条款，与其冲突的既有表述以本节为准。本节登记用户决定与机械合规义务，**不构成法律意见**。
+
+1. **取代声明**：本条**全文取代** §四 原文「许可法律评估（Q4，3/3 签署 + 修正案 A4/M10）」（:57-66，N3 编码前书面法律结论前置）。§四 原文自本条起仅作历史保留，**不再现行**，其「评估完成前的不变项」（禁止以 AGPL 目录源码为参考等）一并失效。为此前路线产出的缩范围提案 `~/harmonyos-signing/netbird-n1bdisc/proposals/cc-amendment-section4-cleanroom-20260913.md` 与 T0 裁定 `~/harmonyos-signing/netbird-n1bdisc/reviews/t0-section4-amendment-review-20260913.md` **保留为历史记录，不删除、不改写**；该裁定所附 C1-C6 条件**不再落地**——其全部前提（保持 MIT 洁净）已随本项目改用 AGPL 而消失。
+2. **新许可基线**：本项目整体以 **AGPL-3.0** 发布（根 `LICENSE`）；历史版本按其各自当时的许可声明（MIT）授权，**不回溯改变**。
+3. **上游使用范围**：可阅读、参考上游 NetBird 任意部分（含原列为例外的 `management/`、`signal/`、`relay/`、`combined/` 服务端目录）；据此产出或派生的代码受 AGPL 约束；**必须保留**上游 BSD-3 部分的版权与归属声明，不得移除；不得移除上游许可文本与署名。
+4. **机械合规（取代净室机器）**：每次**上游 bump** 必须完成——拉取新 commit、跑许可扫描（REUSE/SPDX 或等效；无工具则逐文件映射人工登记）、把 bump commit 与扫描工具/结果登记到仓B `~/harmonyos-signing/netbird-n1bdisc/`。**净室纪律（clean-room log、commit 门检 trailer、独立席相似度抽检）自本条起不适用**，其规范与模板随本条一并作废（仓内 `docs/cleanroom-log-spec-20260913.md` 与 `scripts/check-cleanroom-env.sh` 已删除；仓B `cleanroom/cleanroom-log-template-20260913.jsonl(+.sha256)` 与 `records/cleanroom-env-baseline-20260913.json(+.sha256)` 保留为历史，随净室路线一并作废）。
+5. **发布门**（「发布前」定义逐字沿用上述 T0 裁定 C2）：「「发布前」必须显式包含：(a) 向公开 remote 推送含 N3 产物（含 `alfadb/netbird-harmonyos`）；(b) tag/release；(c) HAP/内测/公开下载。」每次「发布前」必须完成：NOTICE/第三方清单刷新、SBOM 生成、AGPL 要求的 **Corresponding Source 获取方式**说明、**目标分发渠道（应用市场）条款核对**。
+6. **回退条款**：若日后决定改回宽松许可，必须先移除或重写一切 AGPL 派生内容，并回到 T0 重新裁定；已发布版本不可撤回。
+7. **未验证声明**：应用市场条款与 HAP 分发下的源码提供机制**尚未核对**；上游 v0.76.3 的逐文件许可映射与 SBOM **尚未重做**——本节及任何登记不得被读作已完成上述合规。
+8. **不放宽其它绑定条款**：§二（含其第 10 条：门范围、顺序、阈值、SLO 或补丁预算变化回到 T0）、§三（N6 前不得开启产品实现）、§五 均未被本条修改；`docs/n1b-disc-gate-plan.md` 冻结判据不受影响。
