@@ -1144,7 +1144,7 @@ const FWD_HS_WAIT_MS: u64 = 90_000;
 const FWD_LOOP_MS: u64 = 90_000;
 /// Loop also ends after this many processed events (UDP datagrams + TUN reads)
 /// so a chatty kernel cannot extend the probe forever.
-const FWD_EVENT_CAP: u32 = 64;
+const FWD_EVENT_CAP: u32 = 200_000;
 /// Max TUN frames drained per readable poll, so a kernel transmit burst cannot
 /// starve the UDP half of the loop (each drain re-polls on the next iteration).
 const FWD_TUN_DRAIN: u32 = 8;
