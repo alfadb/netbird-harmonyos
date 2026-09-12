@@ -117,6 +117,18 @@ E8 `OPEN` 至少同时满足以下必要条件，缺一即保持 `CLOSED`：
 
 预检通过只是上述必要条件之一，不是充分条件，也不自动 `OPEN` E8。E8 前唯一物理设备例外是 [E3-PHYS-PREFLIGHT](e3-physical-preflight.md)：一个冻结 campaign 在一台具名 HarmonyOS 6.1 arm64 设备上，用普通开发签名的纯 ArkTS/C 公共 VPN Extension A/B 探针判断 E3 可达性。证据必须绑定设备型号、完整 build、API、arm64、稳定设备别名、签名/profile、A/B HAP、源码/SDK/hash 和清理基线，并保留原始 HiLog、transcript、screenshots、状态/布局、fault list、hash manifest 和独立审查。HDC target、序列号及签名秘密不得入库；其重试、60 秒场景窗口、deny、Settings 和清理判据以专用计划为准。除该例外外，E8 前仍禁止物理设备执行。
 
+> 例外二（2026-09-13 追加，诊断授权类别 diagnostic authorization）：本段为在上述唯一物理设备例外之外新增的**第二个显式例外**，依据跨厂商 T0 裁定 Q4（仓外 `~/harmonyos-signing/netbird-n1bdisc/reviews/t0-auth-boundary-ruling-20260912.md`）与用户 2026-09-13 明确批准设立；AUTH 模板见仓外 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-TEMPLATE-diagnostic-20260913.json`。边界如下，逐条为规范文本：
+>
+> - **适用范围**：不消费、不引用任何 campaign/pair/evidence ID，且不产生任何门结论（verdict/claim/campaign 证据）的**开发性设备操作**。正式门序列、任何 Live、任何冻结元组绑定测量不适用本例外，仍走既有 pair AUTH 路径。
+> - **允许（白名单，逐条写入 AUTH 文件）**：hdc 只读查询；日志级别设置（限单 tag、非持久）；本项目 debug bundle 的 install / start / force-stop / uninstall；uitest 输入；`/data/local/tmp/<namespace>` 内临时文件读写与清理。
+> - **禁止**：引用或消费任何 campaign/pair/evidence ID（含已 consumed 的历史 ID）；产生 verdict/claim；写入仓外 `live/`、`run-state*/`、`ready-freeze*/`、`records/`；修改任何已冻结判据或冻结实现（含 `spikes/` 下被冻结资产）；复用已 consumed 的 AUTH；root/privileged 操作；设备枚举（`list targets` 超出连接维持所需）；非本项目 bundle。
+> - **时限**：AUTH 文件必须显式携带 `valid_from` / `valid_until`，上限为单会话或 24 小时（二者取小）；过期即失效，逾期操作须新签，不得顺延。
+> - **消费语义**：session-scoped——会话内同一 AUTH 可多次执行白名单内操作（区别于 campaign pair 的单次原子消费）；AUTH 文件必须包含 `consumed` / `reusable` / `retry_allowed` / `successor_auth` 四字段以对齐既有口径；会话结束或 `valid_until` 到点即 `consumed: true`。
+> - **签发**：操作白名单、时限与目标 bundle 须**人类逐条确认**；**agent 不得自分配 AUTH ID**；用户口述指示时，agent 必须先把 AUTH 文件落盘（含逐字口述引文与行号出处），回读给用户确认后方可执行，不得先执行后补文。
+> - **证据去处**：仓外 `diagnostics/<auth-id>/`，与 campaign 证据物理隔离；目录内声明 `is_evidence: false`（按本文「记录状态枚举」`invalidated` 的隔离语义：记录保留但不得继续引用、不得作为 E8 当前成员），全部文件带 `.sha256` sidecar。
+>
+> 本例外**不放宽** [native-nx-governance.md](native-nx-governance.md) §三（N6 未 pass 前不得开启产品实现）与 §四（N3 书面法律前置），不构成对任何已发生操作的授权或追认，人类直接决策优先权仍按本文「动态调整记录模板」节既有条款执行。
+
 arm64 ABI、其他真实硬件、物理网络切换、硬件密钥、能耗、渠道签名/审核/重签/最终制品和长时间稳定性等项目仍列入 E8 `OPEN` 后的具名物理设备义务。C-only 证据不能独立满足含官方 Go loader/runtime 的 E1。`EV-R1-EMU24-20260717-0010` 及其 PS4 候选保持历史研究证据；PS4 未发布且不是当前门输入，不能满足当前R0正式基线（现v0.76.3）的官方 Go loader 或 VPN runtime 门。
 
 ## 脱敏规则

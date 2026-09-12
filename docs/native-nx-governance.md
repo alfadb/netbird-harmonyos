@@ -85,3 +85,12 @@ E1（stock Go loader/runtime 门）转为 dormant，既有判定保持原绑定�
 - N0 决议矩阵中 management/signal 权威路径标注与实际位置（`shared/` 侧）不符——以本次逐路径纠正为准，历史文档不改写。
 - BoringTun 0.7.1 crate 缺 LICENSE 文件（N0 已记）：SBOM/NOTICE 待办，不阻塞。
 - 本决议不改变：N0 决议全部条款、R0 章程（除 §三 所述 E8 条款同步修订）、历史 evidence 与判定、E8 其余必要条件。
+
+## 追加登记：诊断授权类别（2026-09-13，只追加不改写）
+
+> 本节 2026-09-13 追加：只追加、不改写上文任何内容。本文 §一至 §五（含 §二 绑定条款第 10 条、§三 pre-E8 native 物理例外与「N6 未 pass 前不得开启产品实现」、§四 N3 书面法律硬前置）的既有文字一字未动；本节只是登记一个新授权类别的设立，不修改、不削弱上述任何绑定条款的效力。
+
+- 诊断授权类别（diagnostic authorization）**已设立**：作为 `docs/evidence-schema.md`「E8 前唯一物理设备例外」段之外的**第二个显式例外**（「例外二（2026-09-13 追加）」），覆盖不消费任何 campaign/pair/evidence ID、不产生任何门结论的开发性设备操作；完整边界（适用范围/允许白名单/禁止/时限/消费语义四字段/签发纪律/证据去处）以该例外条款为准。
+- 依据：跨厂商 T0 裁定 Q4（`~/harmonyos-signing/netbird-n1bdisc/reviews/t0-auth-boundary-ruling-20260912.md`，sha256 `080d4f44356d0fda8398c68c5fc8af8d4003e6669870c93a1d35efeb8490869a`，2026-09-13 现算）；事实依据 `~/harmonyos-signing/netbird-n1bdisc/records/retrospective-device-activity-20260912.json`（sha256 `90feab1f8b7af8f475a00f807e5e41246fa29ef76163a537b6152a52e98aef85`，2026-09-13 现算）；提案 `~/harmonyos-signing/netbird-n1bdisc/proposals/diagnostic-authorization-class-20260912.md`（sha256 `abb8eb499312d27653d857b2ab54b955f608af31e1d18092e8000c4e1dacdb9c`，2026-09-13 现算）**已获用户 2026-09-13 批准并落地**——提案文件按其自身边界声明保持原样、未改写，本条即为该提案状态的登记。
+- AUTH 模板：`~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-TEMPLATE-diagnostic-20260913.json`（sha256 `93330d783a937f8998f35b302159ca0920b191ee09394f3cb99ce9539b30a044`，sidecar `.sha256` 就地 `sha256sum -c` 可校验）。模板是占位符骨架，**不是授权**；实际签发须人类逐条确认，agent 不得自分配 AUTH ID，口述指示须先落盘回读确认后方可执行。
+- 本类别**不放宽**本文 §三（N6 未 pass 前不得开启产品实现）与 §四（N3 书面法律前置），也不改写 `docs/n1b-disc-gate-plan.md` 任何冻结判据；campaign 类物理执行仍按既有 pair AUTH 路径须用户逐项显式授权。
