@@ -423,3 +423,30 @@ N4/N5（signal + ICE + 数据面转发）。
   tonic/rustls 代码不再被链接器 GC**：`libnetbird_core.so` 由 N3-4 的
   1,171,880 字节增至 5,036,576 字节（约 4.3×），为接线控制面的真实代价，
   如实记录。`bash client/build.sh`（HAP 链）exit 0。
+
+## N5c 追加：signal 通道上的 ICE 编排（peer_conn）
+
+signal 消息到 ICE 的**消费侧**在本增量落地（`client/core/src/peer_conn.rs`，
+详见 `docs/n3-ice-notes.md` §八）。与 signal 协议的衔接点：
+
+- **帧的消费形态**：connector 侧把 `crate::signal::SignalSession`
+  解密出的 [`SignalMessage`]（`from_key`=`EncryptedMessage.key` 发送方
+  WG 公钥，grpc.go:414-431 decryptMessage）转成
+  `PeerIceOrchestrator::handle_signal(from_key, kind, payload, now)`；
+  `Body.type` 的 `OFFER/ANSWER/CANDIDATE` 三类映射
+  `PeerSignalKind`，其余（MODE/HEARTBEAT/GO_IDLE）仍不进 ICE 路径。
+- **payload 契约不变**：OFFER/ANSWER = `"ufrag:pwd"`
+  （`shared/signal/client/client.go:74-101`，`parse_ufrag_pwd` 解析并按
+  RFC 8445 §16 校验）；CANDIDATE = `candidate.Marshal()`
+  （`peer/signaler.go:32-41` 发、`engine.go:2063-2071` 收，本仓
+  `Candidate::marshal/unmarshal` 往返）。密钥材料（ufrag/pwd 是短期
+  ICE 凭证，非设备密钥）只进 STUN 报文，不进日志/错误/状态 JSON。
+- **发送 seam**：`SignalExchange::send(to_key, kind, payload,
+  wg_listen_port)` 对应上游 `SendToStream` 的 seal-for-remote_key 语义
+  （grpc.go:396-411）；生产实现在 connector 持有真实 signal 流之前为
+  `LoggingSignalExchange`（打点丢弃），`signal_ready` 恒 false——
+  即 N4a 的 SignalClient/SignalSession 已具备传输能力，但 connector 尚
+  未拨号注册 signal 流，故真机上 peer 仍不会连通（未做项，ice-notes §8.7）。
+- **NAPI**：新增 `connector_ice_socket_feed(fd)`（ICE 受保护 UDP socket
+  补给，与 `connector_socket_feed` 同合同）；`connector_status()` 增
+  `ice:{...}` per-peer 汇总。

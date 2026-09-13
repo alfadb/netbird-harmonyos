@@ -293,3 +293,130 @@ e2e 坏 FP 用例对「无应答」这一负向事实的 300ms 有界 `recv` 超
 | `bash client/build.sh` | exit 0（HAP 大小见本轮验收输出） |
 | 依赖探针 | 无新增依赖 → 无需（见 §7.2，sha1 不在 cache 的证据） |
 | `git status --short` | 仅 `client/core/**`（src/ice_session.rs 新增、src/ice.rs、src/stun.rs、src/lib.rs、tests/ice_session_*.rs 新增）+ `docs/n3-ice-notes.md`；未 commit/push |
+
+## 八、N5c：per-peer ICE 编排接入 Connector（追加）
+
+> 范围：`client/core/src/peer_conn.rs`（新增）、`client/core/src/connector.rs`
+> （WG seam 扩展 + 状态暴露 + 泵线程）、`client/core/src/napi.rs`/`lib.rs`
+> （`connector_ice_socket_feed` 导出）、`tests/peer_conn_e2e.rs`（新增）。
+> 上游锚点一律 pinned commit `791401060d2b`，只引用 文件:行号。
+
+### 8.1 编排时序（`peer_conn.rs`，双实例 e2e 钉住）
+
+1. **peer 集合对账**：connector `apply_update` 从 NetworkMap 取
+   `peers[].allowedIps` 非空者的 `wgPubKey` 列表，`set_peers` 增删对账
+   （新增 Idle 条目、消失的随 Drop 关会话 socket、既有的保持——上游对
+   网络图刷新不拆已有连接）。
+2. **发起**（`run_once`，注入时钟；`signal_ready` 前不发）：生成凭证
+   （N5b `IceCredentials::generate`，16/32 runesAlpha）→ `gather_candidates`
+   （N5a：接口黑名单 `DEFAULT_INTERFACE_BLACKLIST` + `netbird_config.stuns`
+   经 `apply_update`→`set_stuns` 注入）→ 每个 host 候选经受保护 provider
+   绑定**会话长连 socket**（端口交内核重分，避免 gather socket 关闭后的
+   端口复用竞态）→ outbox 入队 OFFER（`"ufrag:pwd"`）与候选
+   （`candidate.Marshal()`）。
+3. **应答**：收到 OFFER（`handle_signal`）→ controlled 起始建会话、
+   `set_remote_credentials` → 本地候选收集 → ANSWER+候选入队。
+4. **发送队列**：所有出帧走 per-peer FIFO outbox，失败保留下一拍重试；
+   trickle 候选早于会话到达的暂存 `pending_remote`，start 前入列。
+5. **start 前置**：远端凭证 + 本地候选 + ≥1 远端候选齐备才
+   `IceSession::start()`（Idle/Gathering → Checking）；检查/提名/
+   keepalive/超时全部复用 N5b，`run_once(now_ms)` 泵，模块无墙钟无
+   sleep。生产由 connector 的 100ms `ice-pump` **std 线程**喂数
+   （独占线程而非 tokio task：真实 STUN 收集的阻塞不占 runtime worker）。
+6. **六态状态机**：Idle / Gathering（会话在、检查未启）/ Checking
+   （start 后）/ Connected（SelectedPair）/ Disconnected / Failed（N5b
+   事件驱动）。失败重试带 2s 冷却（注入时钟衡量），不热循环。
+
+signal 收方向：connector 把解密后的 `SignalMessage`（`crate::signal`，
+`EncryptedMessage.key/remoteKey` 对端绑定语义，engine.go:2039-2042）转成
+`handle_signal(from_key, kind, payload, now)`；非网络图 peer 的帧丢弃并
+计数，不作为错误。
+
+### 8.2 role 决策
+
+RFC 8445 的 controlling/controlled **不在 signal 报文里**（client.go:74-101
+的 OFFER/ANSWER payload 只有 `"ufrag:pwd"` + 版本/端口字段）。本编排的
+初始角色是本地策略：**主动发 OFFER 的一方 controlling，纯应答方
+controlled**（`set_initiator(key,false)` 显式指定应答方）；双方同时发起
+（glare）时两边都 controlling，冲突完全交给 N5b 已实现的 §7.3.1.1/
+§7.2.5.1 tie-breaker 修复——e2e `both_offer_glare_converges_via_tiebreaker`
+钉住：两个 OFFER 交叉、大 tie-breaker 保留 controlling、小者切换、选择
+一致、不活锁。
+
+### 8.3 selected pair → WG endpoint 落配路径（含 wg.rs 结论）
+
+- 上游路径：`GetSelectedCandidatePair` → `ResolveUDPAddr` →
+  `ConfigureWGEndpoint`（`worker_ice.go:293`、`conn.go:444-478`）。
+  本仓等价物：orchestrator 收到 `IceEvent::SelectedPair` → 解析对端
+  候选 dotted-quad → `WgPeerApplier::apply_endpoint(pub_key, addr, port)`
+  （connector.rs）。落配失败记 Network 类错误且 `endpoint_applied=false`
+  ——该 peer 不进「可用」集合，绝不静默当作可用。
+- **`wg.rs` 现有 API 结论：不支持**。wg.rs 是 N1BDISC 探针层（BoringTun
+  单隧道探针 `wg_probe`/`wg_net_probe`/`wg_fwd_*`，endpoint 即 recvfrom
+  源地址），没有多 peer 注册表、没有 endpoint 配置概念；connector 数据面
+  的 WG 层是 `WgPeerApplier`/`WgPeerRegistry` seam。因此最小扩展落在
+  seam 本体：trait 新增 `apply_endpoint`（默认 Err("wg-endpoint-
+  unsupported")，fail-closed：不能落配的 seam 不得假装成功）；
+  `WgPeerRegistry` 实现（未注册 peer 拒绝、重选覆盖、`clear()` 连带清除；
+  新增 `endpoint()`/`endpoints()` 快照）。**wg.rs 一行未动**（探针代码
+  无消费者会用到 peer endpoint API，扩它反而是死代码）。
+
+### 8.4 与 N3-7 默认路由安全闸的联动
+
+- 纯函数 `ice_ready_for_default_route(&IceOrchestratorSummary)`：编排里
+  **没有任何可用 peer**（`reachable == Connected && endpoint_applied` 的
+  计数为 0 且 peers > 0）→ ICE 不判数据面就绪；`peers == 0`（无编排
+  对象）→ 维持 N3-7 原语义。
+- `apply_update` 的闸输入变为
+  `tunnel_ready = wg.tunnel_ready() && ice_ready`：全部 peer Failed
+  （本增量无 relay 回落，conn.go:489-520 的回落路径不做）时默认路由**仍
+  被 HOLD**（`default-route-held:data-plane-not-ready`，`0.0.0.0/0` 不
+  导出）。e2e `unreachable_candidate_fails_peer_and_default_route_stays_held`
+  走真实 `from_map_gated` 断言。
+
+### 8.5 状态暴露
+
+- `connector_status()` 新增 `"ice":{peers,idle,gathering,checking,
+  connected,disconnected,failed,endpoints_applied,reachable,last_error}`
+  （计数 + 错误分类，无密钥材料；单 peer 明细经 `PeerIceStatus` 供
+  测试/诊断）。`network_config()` 的 peer 摘要**未**加 `ice_state`：
+  快照在 apply 时生成，彼时 ICE 尚未跑，字段恒为初始值，无信息量
+  （刻意不做，非遗漏）。
+- 新 NAPI 导出 `connector_ice_socket_feed(fd)`：壳侧为 ICE 候选收集 +
+  每候选检查 socket 补给受保护 UDP fd（与 `connector_socket_feed` 同一
+  fail-closed 合同：不喂 → 无候选，peer 停 Idle + Network 类错误）。
+
+### 8.6 测试（13 新增，全仓 245 通过 / 0 失败）
+
+| 文件 | 用例数 | 关键断言 |
+| --- | --- | --- |
+| `src/peer_conn.rs` 内嵌 | 7 | `"ufrag:pwd"` 解析往返+畸形拒绝；六态名+summary JSON 契约；默认路由联动纯函数（无 reachable→HOLD、peers==0 不改 N3-7 语义）；set_peers 对账+未知 peer 帧计数；**空 provider fail-closed**（零出帧、taken==0、Idle+Network 错误、冷却退避）；stuns 解析（turn:/垃圾 URI 跳过）；trickle 早到暂存 |
+| `tests/peer_conn_e2e.rs` | 4 | **双实例 loopback**：双 Orchestrator（真实 127.0.0.1 socket 经 `ProtectedUdpFdSource`）+ 进程内 mock signal → 双方 Connected、selected pair 一致互为镜像、**可注入 WG seam 收到 `apply_endpoint(peer, 127.0.0.1, 对端端口)` 且参数逐字段相等**、offer 恰 1 条 answer 恰 1 条（凭证 16/32 规则）、`taken==2==attempts`；**glare 双 OFFER 收敛**（恰 2 OFFER、大 tb 保留 controlling、落配一致）；**不可达候选**（对端 socket 关闭）→ 7×RTO 耗尽 → Failed → 不可达 → WG seam 零调用 → 真实 `from_map_gated` 下默认路由仍 HOLD（`0.0.0.0/0` 被剥离）；**注入时钟驱动超时**（对端静默后恰 ~+6s Disconnected、~+12s Failed，+6s 前绝不提前，闸保持 HOLD） |
+| `src/connector.rs` 内嵌 | 2 | registry endpoint 落配/覆盖/未注册拒绝/clear 清除/trait 默认 loud-unsupported；**apply_update 真实路径**：ICE 无 reachable peer 时即使 WG `tunnel_ready()=true` 默认路由仍 HOLD + stuns/peers 对账生效 |
+
+约束遵守：离线零新增依赖（无 Cargo.lock 变更）；既有 232 用例零删除零
+降强度（`ConnectorHandle::spawn` 增至 13 参的既有调用点补 `None`，断言
+未动）；新增源文件带 SPDX 头（AGPL-3.0-or-later）。
+
+### 8.7 未做项（N5c 边界，刻意不做）
+
+1. **connector 真实 signal 流接线**：编排的 signal 发送 seam 生产暂为
+   `LoggingSignalExchange`（打点丢弃，`LoggingConfigApplier` 先例），
+   `signal_ready` 恒 false——真实设备上 peer 不会因本增量真正连通；
+   `crate::signal::SignalSession` → `SignalExchange` 适配器与
+   `handle_signal` 的异步桥接是下一增量。
+2. relay/TURN 回落（conn.go:489-520 的 relay 路径）、prflx 本地候选。
+3. ICE restart / 重协商、session id 语义（worker_ice.go:69-74）、IPv6、
+   mDNS；srflx 候选产自 N5a 一次性收集 socket，NAT 拓扑下其 pair 可能
+   不通（host pair 为承载路径；UDPMux 式共享 socket 留后续）。
+4. WG 真实隧道设备层（`apply_endpoint` 目前落在进程内 registry；真机
+   数据面留后续增量）；真机/设备命令本增量未执行（硬约束）。
+
+### 8.8 验收记录（N5c 实跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `bash client/core/build.sh` | exit 0（`libnetbird_core.so` 5,322,712 字节，ELF/符号/import/init_array 检查全过） |
+| `cd client/core && cargo test --offline --locked` | **245 passed / 0 failed**（新增 13：peer_conn 内嵌 7 + e2e 4 + connector 内嵌 2） |
+| `bash client/build.sh` | exit 0（HAP `entry-default-unsigned.hap` 3,562,854 字节） |
+| `git status --short` / `git diff --stat` | 仅 `client/core/**`（src/peer_conn.rs、tests/peer_conn_e2e.rs 新增；src/connector.rs、src/napi.rs、src/lib.rs、tests/connector.rs、tests/mgmt_socket.rs 修改）+ `docs/n3-ice-notes.md`、`docs/n3-management-protocol-notes.md`；未 commit/push |

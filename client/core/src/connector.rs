@@ -47,16 +47,25 @@
 //!
 //! ## ⚠️ 限制声明（调用方必读，不得误读为"已能连上 peer"）
 //!
-//! **本增量不实现 signal/ICE**。因此：
+//! **N5c 已接入 per-peer ICE 编排**（`crate::peer_conn`，connector_status
+//! 的 `ice` 字段）：网络图里有 allowed_ips 的 remote peer 各建一个 ICE
+//! 会话（候选收集 + signal OFFER/ANSWER/候选交换 + selected pair → WG
+//! endpoint 落配）。但仍有硬边界：
 //!
-//! 1. 无法为任何 peer 发现可达 endpoint，也无法建立真实 peer 隧道；
-//! 2. 网络图里的 remote peers 只做**本地登记**（公钥 + allowed_ips 进
-//!    [`WgPeerApplier`]，生产默认落在进程内 [`WgPeerRegistry`]）——这只是
-//!    WireGuard 侧的本地配置，不是连通性；
-//! 3. 路由/DNS 通过 [`ConfigApplier`] 交给壳侧（宿主）；壳侧不接时生产
-//!    默认 [`LoggingConfigApplier`] 只打点，不落任何系统配置；
-//! 4. "Connected" 仅指 **management 控制面连接已建立**（登录成功 + Sync
-//!    流在），与 peer 连通无关。真实 peer 连通留 N4/N5。
+//! 1. connector 尚未持有真实 signal 流：ICE 的发送 seam 暂为
+//!    [`crate::peer_conn::LoggingSignalExchange`]（打点丢弃），
+//!    `signal_ready` 保持 false —— 生产设备上 peer 因此还不会真正连通；
+//!    真实流接线是下一增量。
+//! 2. ICE 的 UDP socket 来自壳侧补给的受保护源
+//!    （`connector_ice_socket_feed(fd)`）；壳侧不喂则候选收集 fail-closed，
+//!    peer 停在 Idle 并记录 Network 类错误。
+//! 3. 网络图里的 remote peers 仍做**本地登记**（公钥 + allowed_ips 进
+//!    [`WgPeerApplier`]，生产默认 [`WgPeerRegistry`]，N5c 增加 endpoint
+//!    记录）——这只是 WireGuard 侧的本地配置，登记 ≠ 连通。
+//! 4. 路由/DNS 通过 [`ConfigApplier`] 交给壳侧（宿主）；壳侧不接时生产
+//!    默认 [`LoggingConfigApplier`] 只打点，不落任何系统配置。
+//! 5. "Connected" 仍指 **management 控制面连接已建立**（登录成功 + Sync
+//!    流在），与 peer 连通无关；peer 级状态在 status 的 `ice` 字段。
 //!
 //! ## 注入 seam（宿主测试与壳侧接线点）
 //!
@@ -66,8 +75,13 @@
 //! - sync 策略：[`SyncPolicy`]（backoff/时钟/随机源，透传给
 //!   [`crate::sync::SyncSession::with_policy`]，测试零真实长睡眠）。
 //! - 数据面 WG peer 登记：[`WgPeerApplier`]（生产默认 [`WgPeerRegistry`]，
-//!   进程内登记表；未来真实 WG 设备层实现同一 trait）。
+//!   进程内登记表 + N5c endpoint 记录；未来真实 WG 设备层实现同一 trait）。
 //! - 壳侧配置应用：[`ConfigApplier`]（路由/DNS/本机地址交给宿主）。
+//! - N5c per-peer ICE：[`crate::peer_conn::PeerIceOrchestrator`]（接口枚举
+//!   `crate::ice::InterfaceSource`、受保护 UDP 源
+//!   `connector_ice_socket_feed` 补给、signal 发送
+//!   [`crate::peer_conn::SignalExchange`]、endpoint 落配置用同一个
+//!   [`WgPeerApplier`]）。
 //!
 //! ## 凭据与日志纪律
 //!
@@ -95,6 +109,10 @@ use crate::hilog;
 use crate::management::ManagementError;
 use crate::mgmtsock::{dup_socket_fd, ManagementSocketProvider, ProtectedSocketFdSource};
 use crate::network_map::NetworkMap;
+use crate::peer_conn::{
+    ice_ready_for_default_route, IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps,
+    PeerIceOrchestrator,
+};
 use crate::state::{ConnEvent, ConnState, StateMachine};
 use crate::sync::{SyncLoopEvent, SyncSession, SyncUpdate};
 use crate::util::{jbool, jinum, jnum, jstr};
@@ -207,7 +225,8 @@ impl SessionDeadline {
 /// One WireGuard peer registration derived from a NetworkMap remote peer:
 /// public key (base64, as sent) + allowed_ips (masked IPv4 prefixes).
 /// NOTE: this is LOCAL configuration only — without signal/ICE there is no
-/// endpoint and no tunnel (module limitation statement).
+/// endpoint and no tunnel (module limitation statement; N5c adds per-peer
+/// endpoints through [`WgPeerApplier::apply_endpoint`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WgPeerEntry {
     pub pub_key_b64: String,
@@ -232,14 +251,24 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn tunnel_ready(&self) -> bool {
         false
     }
+    /// N5c: configure the endpoint of one registered peer from its ICE
+    /// selected pair (upstream `ConfigureWGEndpoint`, `conn.go:444-478`,
+    /// driven by `worker_ice.go:293`). Default: UNSUPPORTED and loud —
+    /// a seam that cannot land endpoints must fail the peer's reachability,
+    /// never pretend the pair landed (fail-closed).
+    fn apply_endpoint(&self, _pub_key_b64: &str, _addr: [u8; 4], _port: u16) -> Result<(), String> {
+        Err("wg-endpoint-unsupported".to_string())
+    }
 }
 
 /// In-process WG peer registry — the production default of
-/// [`WgPeerApplier`]. Honest scope: local registration only; no endpoints,
-/// no handshakes, no tunnels in this increment (module limitation).
+/// [`WgPeerApplier`]. Honest scope: local registration + (N5c) per-peer
+/// endpoint records; the tunnel device itself is a later increment.
 #[derive(Debug, Default)]
 pub struct WgPeerRegistry {
     peers: Mutex<Vec<WgPeerEntry>>,
+    /// N5c: per-peer endpoint landed from the ICE selected pair.
+    endpoints: Mutex<Vec<(String, [u8; 4], u16)>>,
 }
 
 impl WgPeerRegistry {
@@ -259,6 +288,20 @@ impl WgPeerRegistry {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// N5c: the endpoint currently configured for `pub_key_b64`, if any.
+    pub fn endpoint(&self, pub_key_b64: &str) -> Option<([u8; 4], u16)> {
+        self.endpoints
+            .lock_poison()
+            .iter()
+            .find(|(k, _, _)| k == pub_key_b64)
+            .map(|(_, a, p)| (*a, *p))
+    }
+
+    /// N5c: all landed endpoints (snapshot; latest record per peer wins).
+    pub fn endpoints(&self) -> Vec<(String, [u8; 4], u16)> {
+        self.endpoints.lock_poison().clone()
+    }
 }
 
 impl WgPeerApplier for WgPeerRegistry {
@@ -269,6 +312,24 @@ impl WgPeerApplier for WgPeerRegistry {
 
     fn clear(&self) {
         self.peers.lock_poison().clear();
+        self.endpoints.lock_poison().clear();
+    }
+
+    /// N5c: record/replace the endpoint for the peer. Unknown peers are
+    /// REJECTED (a WG endpoint for an unregistered peer is a config bug,
+    /// not something to silently store).
+    fn apply_endpoint(&self, pub_key_b64: &str, addr: [u8; 4], port: u16) -> Result<(), String> {
+        let registered = self.peers.lock_poison().iter().any(|p| p.pub_key_b64 == pub_key_b64);
+        if !registered {
+            return Err(format!("peer '{pub_key_b64}' is not registered"));
+        }
+        let mut eps = self.endpoints.lock_poison();
+        if let Some(slot) = eps.iter_mut().find(|(k, _, _)| k == pub_key_b64) {
+            *slot = (pub_key_b64.to_string(), addr, port);
+        } else {
+            eps.push((pub_key_b64.to_string(), addr, port));
+        }
+        Ok(())
     }
 }
 
@@ -714,6 +775,12 @@ struct StateInner {
 struct ConnectorShared {
     inner: Mutex<StateInner>,
     running: AtomicBool,
+    /// N5c: per-peer ICE orchestrator (set once at spawn; unit tests that
+    /// build `ConnectorShared::new` directly simply run without ICE).
+    ice: std::sync::OnceLock<Arc<Mutex<PeerIceOrchestrator>>>,
+    /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
+    /// handle for `connector_ice_socket_feed`).
+    ice_sockets: std::sync::OnceLock<Arc<crate::ice::ProtectedUdpFdSource>>,
 }
 
 impl ConnectorShared {
@@ -737,6 +804,8 @@ impl ConnectorShared {
                 force_default_route,
             }),
             running: AtomicBool::new(false),
+            ice: std::sync::OnceLock::new(),
+            ice_sockets: std::sync::OnceLock::new(),
         }
     }
 
@@ -800,6 +869,13 @@ impl ConnectorShared {
         if update.session_deadline_unix.is_some() {
             self.lock().deadline.apply_wire(update.session_deadline_unix);
         }
+        // N5c: STUN server set rides every sync (netbird_config.stuns —
+        // engine.go:1525-1541 updateSTUNs); applied even without a map.
+        if let Some(cfg) = update.netbird_config.as_ref() {
+            if let Some(ice) = self.ice.get() {
+                ice.lock_poison().set_stuns(&cfg.stuns);
+            }
+        }
         let Some(map) = update.network_map.as_ref() else {
             // No NetworkMap in this snapshot; the receipt still refreshes
             // the "last update" marker (the session deadline above was
@@ -821,6 +897,17 @@ impl ConnectorShared {
             }
         }
         let peers = map.peers.len() + map.offline_peers.len();
+        // N5c: default-route gate input now includes the ICE view — the data
+        // plane is only "ICE-ready" when at least one peer has a LANDED
+        // endpoint (Connected + apply_endpoint OK). All-Failed/never-connected
+        // peers keep the default route HELD (N3-7 linkage).
+        let ice_ready = {
+            let summary = self.ice.get().map(|ice| ice.lock_poison().summary());
+            match summary {
+                Some(s) => ice_ready_for_default_route(&s),
+                None => true, // no orchestrator (unit-test construction): N3-7 semantics unchanged
+            }
+        };
         {
             let mut g = self.lock();
             g.last_serial = map.serial;
@@ -831,8 +918,20 @@ impl ConnectorShared {
             g.net_config = Some(ShellNetworkConfig::from_map_gated(
                 map,
                 g.force_default_route,
-                wg.tunnel_ready(),
+                wg.tunnel_ready() && ice_ready,
             ));
+        }
+        // N5c: reconcile the per-peer ICE orchestrator with the map's
+        // connectable peers (allowed_ips only — that is the data plane this
+        // client can route to).
+        if let Some(ice) = self.ice.get() {
+            let keys: Vec<String> = map
+                .peers
+                .iter()
+                .filter(|p| !p.allowed_ips.is_empty())
+                .map(|p| p.wg_pub_key.clone())
+                .collect();
+            ice.lock_poison().set_peers(&keys);
         }
         // WG data plane: register remote + offline peers (identity +
         // allowed_ips only — module limitation statement).
@@ -898,6 +997,9 @@ pub struct ConnectorStatus {
     /// terminal: state is `disconnected`; a reconnecting connector is
     /// `running:true`). Semantics pinned by Rust tests (gap 3).
     pub terminal: bool,
+    /// N5c: per-peer ICE summary (counts + endpoint landings + error class;
+    /// zero-peered default until a network map registers peers).
+    pub ice: IceOrchestratorSummary,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -924,7 +1026,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -952,6 +1054,7 @@ impl ConnectorStatus {
                 self.logout_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
             ),
             jbool("terminal", self.terminal),
+            format!("\"ice\":{}", self.ice.to_json()),
         )
     }
 }
@@ -1251,6 +1354,12 @@ pub struct ConnectorHandle {
     /// the connector was started through `connector_start_with_socket`.
     /// `connector_socket_feed` resupplies it across the NAPI boundary.
     socket_source: Option<Arc<ProtectedSocketFdSource>>,
+    /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
+    /// handle for `connector_ice_socket_feed`). `None` = caller-supplied
+    /// orchestrator (tests).
+    ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>,
+    /// N5c: per-peer ICE orchestrator (status/stop surface).
+    ice: Arc<Mutex<PeerIceOrchestrator>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     runtime: tokio::runtime::Handle,
@@ -1271,7 +1380,11 @@ impl ConnectorHandle {
     /// `runtime`. Returns immediately; progress is polled via `status()`.
     /// N3-7: `force_default_route` arms the default-route gate override;
     /// `socket_source` (when set) is the resupply handle for
-    /// `connector_socket_feed`.
+    /// `connector_socket_feed`. N5c: `ice = None` builds the production
+    /// orchestrator (SystemInterfaces + a fresh protected-UDP source fed by
+    /// `connector_ice_socket_feed` + `LoggingSignalExchange` + the same WG
+    /// seam) and starts the injected-clock pump thread; tests may inject a
+    /// fully-stubbed orchestrator instead.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         runtime: tokio::runtime::Handle,
@@ -1286,10 +1399,39 @@ impl ConnectorHandle {
         renew_check_interval: Duration,
         force_default_route: bool,
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
+        ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
     ) -> Arc<ConnectorHandle> {
         let shared = Arc::new(ConnectorShared::new(force_default_route));
         shared.set_running(true);
         shared.lock().started_at_unix = Some(unix_now());
+
+        // N5c: per-peer ICE orchestrator + pump thread (injected clock:
+        // the thread only supplies monotonic ms; the orchestrator itself
+        // never reads a wall clock or sleeps). The pump exits on the same
+        // stop flag as worker/renewal.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>;
+        let ice = match ice {
+            Some(orch) => {
+                ice_sockets = None;
+                orch
+            }
+            None => {
+                let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+                let orch = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+                    ifaces: Arc::new(crate::ice::SystemInterfaces),
+                    socks: socks.clone(),
+                    signal: Arc::new(LoggingSignalExchange::default()),
+                    wg: wg.clone(),
+                    tie_breaker: None,
+                })));
+                let _ = shared.ice_sockets.set(socks.clone());
+                ice_sockets = Some(socks);
+                orch
+            }
+        };
+        let _ = shared.ice.set(ice.clone());
+        spawn_ice_pump(ice.clone(), stop_flag.clone());
 
         let worker_deps = WorkerDeps {
             shared: shared.clone(),
@@ -1304,7 +1446,6 @@ impl ConnectorHandle {
             sync_clock: sync_policy.clock,
         };
         let logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>> = Arc::new(Mutex::new(None));
-        let stop_flag = Arc::new(AtomicBool::new(false));
         // the start transition happens synchronously so the very first
         // status poll already reports `connecting` (no spawn race)
         shared.transition(ConnEvent::Connect);
@@ -1327,6 +1468,8 @@ impl ConnectorHandle {
             logout_slot,
             stop_flag,
             socket_source,
+            ice_sockets,
+            ice,
             worker: Mutex::new(Some(worker)),
             renewal: Mutex::new(Some(renewal)),
             runtime,
@@ -1353,6 +1496,7 @@ impl ConnectorHandle {
             wg_apply_errors: g.wg_apply_errors,
             logout_ok: g.logout_ok,
             terminal: is_terminal_state(running, state),
+            ice: self.ice.lock_poison().summary(),
         }
     }
 
@@ -1390,6 +1534,8 @@ impl ConnectorHandle {
         self.shared.transition(ConnEvent::Disconnect);
         // cleanup: local registrations and host-applied config go away
         // (the shell snapshot goes with them — nothing applied remains)
+        // N5c: ICE sessions too (their dup sockets close exactly once).
+        self.ice.lock_poison().stop_all();
         self.wg.clear();
         self.host.clear();
         self.shared.lock().net_config = None;
@@ -1425,6 +1571,34 @@ impl ConnectorHandle {
 // ---------------------------------------------------------------------------
 // worker tasks
 // ---------------------------------------------------------------------------
+
+/// N5c ICE pump tick (production cadence; the orchestrator itself is fully
+/// clock-injected and never sleeps — this loop only FEEDS it).
+pub const ICE_PUMP_TICK_MS: u64 = 100;
+
+/// The ICE pump thread: feeds the orchestrator with monotonic ms every
+/// [`ICE_PUMP_TICK_MS`], until the connector stop flag fires. A detached
+/// std::thread (not a tokio task) so a blocking candidate gather (real STUN
+/// timeouts) can never stall a runtime worker; errors are logged by class
+/// and never kill the pump.
+fn spawn_ice_pump(ice: Arc<Mutex<PeerIceOrchestrator>>, stop_flag: Arc<AtomicBool>) {
+    let _ = std::thread::Builder::new().name("ice-pump".into()).spawn(move || {
+        while !stop_flag.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(ICE_PUMP_TICK_MS));
+            if stop_flag.load(Ordering::Acquire) {
+                return;
+            }
+            let now = crate::sys::mono_ms();
+            let mut orch = ice.lock_poison();
+            if let Err(e) = orch.run_once(now) {
+                hilog::emit(&format!(
+                    "peer-conn: pump error ({})",
+                    ErrorClass::from_management(&e).as_str()
+                ));
+            }
+        }
+    });
+}
 
 /// The connection worker: connect → login → Sync session (internal
 /// reconnect loop). Fatal (Auth) and backoff exhaustion both end the worker
@@ -1702,7 +1876,8 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         config.renew_lead,
         config.renew_check_interval,
         config.force_default_route,
-        None,
+        None, // N3-7: no protected management socket source
+        None, // N5c: build the production ICE orchestrator
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -1811,6 +1986,7 @@ pub fn connector_start_with_socket_json(
         config.renew_check_interval,
         config.force_default_route,
         Some(source),
+        None, // N5c: build the production ICE orchestrator
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -1866,6 +2042,31 @@ pub fn connector_socket_feed_json(fd: i32) -> String {
     )
 }
 
+/// The `connector_ice_socket_feed(fd)` implementation (N5c) — shell-side
+/// resupply of fresh protected UDP sockets for the per-peer ICE sessions
+/// (candidate-gather sockets + one long-lived check socket per local
+/// candidate, see `crate::peer_conn`). Same fail-closed contract as
+/// [`connector_socket_feed_json`]: without resupply, gathers fail CLOSED
+/// (no candidates, peers stay Idle with a Network-class error), never
+/// unprotected.
+pub fn connector_ice_socket_feed_json(fd: i32) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let Some(source) = handle.ice_sockets.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-socket-source"));
+    };
+    if fd < 0 {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-fd-missing"));
+    }
+    if let Err(e) = dup_socket_fd(fd) {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token()));
+    }
+    source.feed(fd);
+    format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
+}
+
 /// Parse the `{"connect_addr":"ip:port"}` argument of
 /// [`connector_start_with_socket_json`].
 fn parse_connect_addr(json: &str) -> Result<SocketAddr, ConfigError> {
@@ -1912,6 +2113,7 @@ pub fn connector_status_json() -> String {
             wg_apply_errors: 0,
             logout_ok: None,
             terminal: false,
+            ice: IceOrchestratorSummary::default(),
         }
         .to_json(),
     }
@@ -2083,6 +2285,7 @@ mod tests {
             wg_apply_errors: 0,
             logout_ok: None,
             terminal: true,
+            ice: IceOrchestratorSummary::default(),
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
@@ -2212,6 +2415,15 @@ mod tests {
             wg_apply_errors: 0,
             logout_ok: None,
             terminal: false,
+            ice: IceOrchestratorSummary {
+                peers: 2,
+                connected: 1,
+                failed: 1,
+                endpoints_applied: 1,
+                reachable: 1,
+                last_error: Some(ErrorClass::Network),
+                ..Default::default()
+            },
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -2223,6 +2435,15 @@ mod tests {
         assert!(json.contains("\"session_expiry\":\"set\""), "{json}");
         assert!(json.contains("\"session_expires_at_unix\":1700000000"), "{json}");
         assert!(json.contains("\"logout_ok\":null"), "{json}");
+        // N5c: the per-peer ICE summary rides the status document
+        assert!(
+            json.contains(
+                "\"ice\":{\"peers\":2,\"idle\":0,\"gathering\":0,\"checking\":0,\"connected\":1,\
+                 \"disconnected\":0,\"failed\":1,\"endpoints_applied\":1,\"reachable\":1,\
+                 \"last_error\":{\"class\":\"network\",\"status\":0}}"
+            ),
+            "{json}"
+        );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
 
         let empty = ConnectorStatus {
@@ -2240,6 +2461,7 @@ mod tests {
             wg_apply_errors: 0,
             logout_ok: None,
             terminal: false,
+            ice: IceOrchestratorSummary::default(),
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -2247,6 +2469,10 @@ mod tests {
         assert!(empty.contains("\"last_error\":null"), "{empty}");
         assert!(empty.contains("\"session_expiry\":\"unknown\""), "{empty}");
         assert!(empty.contains("\"session_expires_at_unix\":null"), "{empty}");
+        assert!(
+            empty.contains("\"ice\":{\"peers\":0,\"idle\":0"),
+            "default ICE summary must render: {empty}"
+        );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
     }
 
@@ -2269,6 +2495,109 @@ mod tests {
         assert_eq!(registry.snapshot(), peers[..1]);
         registry.clear();
         assert!(registry.is_empty());
+    }
+
+    /// N5c: endpoint landing on the registry — registered peers only
+    /// (fail-closed), latest record wins, clear() tears endpoints down.
+    #[test]
+    fn wg_registry_endpoints_apply_replace_and_clear() {
+        let registry = WgPeerRegistry::new();
+        let peers = vec![WgPeerEntry {
+            pub_key_b64: "UDI=".into(),
+            allowed_ips: vec![config::Route { addr: [10, 0, 0, 1], prefix_len: 32 }],
+        }];
+        registry.apply_peers(&peers).expect("apply");
+        // unregistered peer is REJECTED, never silently stored
+        assert!(registry.apply_endpoint("VU5LTk9XTg==", [127, 0, 0, 1], 51820).is_err());
+        registry.apply_endpoint("UDI=", [127, 0, 0, 1], 51820).expect("land");
+        assert_eq!(registry.endpoint("UDI="), Some(([127, 0, 0, 1], 51820)));
+        // re-selection replaces the endpoint
+        registry.apply_endpoint("UDI=", [127, 0, 0, 1], 51821).expect("replace");
+        assert_eq!(registry.endpoint("UDI="), Some(([127, 0, 0, 1], 51821)));
+        assert_eq!(registry.endpoints().len(), 1);
+        registry.clear();
+        assert_eq!(registry.endpoint("UDI="), None, "clear() must tear endpoints down");
+
+        // the trait default is loud-unsupported (fail-closed for seams that
+        // cannot land endpoints)
+        struct NoEndpointWg;
+        impl WgPeerApplier for NoEndpointWg {
+            fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+        }
+        assert_eq!(
+            NoEndpointWg.apply_endpoint("X", [1, 2, 3, 4], 1),
+            Err("wg-endpoint-unsupported".to_string())
+        );
+    }
+
+    /// N5c × N3-7 linkage through the REAL apply_update path: with the ICE
+    /// orchestrator holding peers but NONE reachable, the default route
+    /// stays HELD even when the WG seam reports tunnel_ready().
+    #[test]
+    fn apply_update_gate_holds_default_route_while_no_ice_peer_is_reachable() {
+        struct ReadyWg;
+        impl WgPeerApplier for ReadyWg {
+            fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+            fn tunnel_ready(&self) -> bool {
+                true
+            }
+        }
+        let shared = ConnectorShared::new(false);
+        let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
+            wg: Arc::new(ReadyWg),
+            tie_breaker: Some(7),
+        })));
+        ice.lock_poison().set_peers(&["UEVFUjA=".to_string()]);
+        let _ = shared.ice.set(ice.clone());
+
+        shared.apply_update(
+            &ReadyWg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: vec!["stun:stun.netbird.io:3478".into()],
+                    ..Default::default()
+                }),
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let json = shared.network_config_json();
+        assert!(
+            json.contains("\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}"),
+            "no reachable ICE peer must hold the default route: {json}"
+        );
+        assert!(!json.contains("{\"network\":\"0.0.0.0/0\""), "held route leaked: {json}");
+        // the orchestrator got the map's connectable peers + the stuns
+        let guard = ice.lock_poison();
+        assert_eq!(guard.peer_keys(), vec!["UEVFUjA=".to_string()]);
+        assert_eq!(guard.stuns().len(), 1);
+        // no peers at all in the orchestrator view → N3-7 semantics unchanged
+        drop(guard);
+        ice.lock_poison().set_peers(&[]);
+        shared.apply_update(
+            &ReadyWg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let ready_json = shared.network_config_json();
+        assert!(
+            ready_json.contains("\"default_route\":{\"allowed\":true"),
+            "peers==0 must not change N3-7 semantics (ReadyWg is ready): {ready_json}"
+        );
     }
 
     // N3-6: shell network-config snapshot -----------------------------------
