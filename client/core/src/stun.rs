@@ -205,7 +205,11 @@ fn parse_success(body: &[u8]) -> Option<StunReply> {
 /// RFC 5389 §15.1 address value: `0x00 | family | port(2, BE) | addr`.
 /// `family` 0x01 = IPv4; XOR form un-masks port with the cookie's high half
 /// and each address byte with the corresponding cookie byte.
-fn decode_address(val: &[u8], xored: bool) -> Option<([u8; 4], u16)> {
+///
+/// `pub(crate)` since N5b: `ice_session.rs` reuses this for XOR-MAPPED-
+/// ADDRESS on connectivity-check responses (same wire format, same
+/// UDP4-only semantics — no second decoder).
+pub(crate) fn decode_address(val: &[u8], xored: bool) -> Option<([u8; 4], u16)> {
     if val.len() < 8 || val[0] != 0x00 {
         return None;
     }

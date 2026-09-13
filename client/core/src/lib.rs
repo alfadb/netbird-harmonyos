@@ -109,6 +109,10 @@ pub mod hilog;
 // N5a: ICE candidate gathering (host + srflx via STUN) — candidate model in
 // the Body.payload wire form, protected-UDP provider, fail-closed seams.
 pub mod ice;
+// N5b: ICE session layer — credentials, trickle, connectivity checks with
+// MESSAGE-INTEGRITY/FINGERPRINT, pair state machine, nomination/selected
+// pair, keepalive/disconnect timers (injected clock).
+pub mod ice_session;
 pub mod ledger;
 pub mod management;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only

@@ -189,3 +189,107 @@ $ cargo tree --offline | wc -l   # 依赖树规模
 | `bash client/build.sh` | exit 0；HAP 3,480,294 字节 |
 | 探针交叉编译 | exit 0；依赖树 1 行（零新增 crate）；无需追加 NOTICES |
 | `git status --short` | 仅 `client/core/**`（src/ice.rs、src/stun.rs、src/sys.rs、src/lib.rs、tests/ice_*.rs）+ `docs/n3-ice-notes.md`；未 commit/push |
+
+## 七、N5b：ICE 会话层与连通性检查（追加）
+
+覆盖 `client/core/src/ice_session.rs`、`tests/ice_session_{codec,e2e,state}.rs`
+与 `src/ice.rs`/`src/stun.rs`/`src/lib.rs` 的小幅扩展（`pub(crate)`
+`priority_for`/`seam_to_management`/`set_nonblock`/`decode_address` +
+模块注册）。上文 §五「未完成项」的 **1（连通性检查）、2（prflx 子集 +
+提名/选择）、6（agent 状态机）、7（MESSAGE-INTEGRITY/FINGERPRINT）** 在本
+增量闭环；本节为完成记录。
+
+### 7.1 上游侦察结论（逐行号，pinned `791401060d2b`）
+
+| 事实 | 上游/规范来源 |
+| --- | --- |
+| credentials 生成：ufrag 16 / pwd 32 字符，字母表 `runesAlpha`（A-Za-z） | `client/internal/peer/ice/agent.go:114-123`（`GenerateICECredentials` = `randutil.GenerateCryptoRandomString`）、常量 `agent.go:16-18` |
+| offer/answer payload = `"ufrag:pwd"`，解析要求恰好两段 | `shared/signal/client/client.go:74-101`（payload 拼接 L77）、`client.go:60-71`（`UnMarshalCredential`） |
+| 长度约束：ufrag ≥ 4、pwd ≥ 22（上限取 256），字符集 `ice-char`（ALPHA/DIGIT/+//） | RFC 8445 §16、RFC 8839 §16（pion `NewAgent` 同款下限） |
+| 检查包属性集合：USERNAME=`remote:local`、PRIORITY=本地候选 prflx 型优先级、ICE-CONTROLLING/CONTROLLED+tie-breaker(64bit 随机)、USE-CANDIDATE(仅提名)、MI、FP | RFC 8445 §7.1.2（分项 §7.1.2.1-§7.1.2.4）；tie-breaker 随机性 §5.1.3.1 |
+| MI key = **对端**密码；收方用自己密码验请求、以自己密码答响应；请求方以对端密码验响应 | RFC 8445 §7.2.2 + RFC 5389 §10.1（短串凭证） |
+| MI/FINGERPRINT 的「伪长度」规则：HMAC 输入长度指向 **MI 属性末尾（不含 FP）**；CRC 输入长度 = **完整线上长度（含 FP）** | RFC 5389 §15.4/§15.5，并以 **RFC 5769 §2.1/§2.2 向量逐字节实证**（§2.1 线上 0x58 / HMAC 0x50 / CRC 0x58；§2.2 CRC 0x3c）——本仓 codec 全对账（`tests/ice_session_codec.rs`） |
+| pion 源码未在本地（go.mod `replace` 到 netbirdio/ice fork，机器无 Go module cache），检查属性语义以 RFC + RFC 5769 向量对账为准 | 本仓 `go.mod` 参考副本 L95/L338 |
+| keepalive 4s / disconnected 6s / failed 6s（failed 从 disconnected 起再计 6s） | `agent.go:22-24`（常量）、`agent.go:61-63`（注入 agent） |
+| 重传：RTO 初值 500ms、每事务 7 次后 pair Failed | RFC 5389 §7.2.1（RTO 默认）、RFC 5245 §16（`Rc` 默认 7）、RFC 8445 §7.2.5.2.3 |
+| pair 状态机 Frozen/Waiting/InProgress/Succeeded/Failed；串行优先级序检查；pair 优先级 `2^32*MIN+2*MAX+(G>D)` | RFC 8445 §6.1.2.6、§6.1.2.3；触发检查 §7.3.1.4 |
+| 提名 = regular nomination：controlling 对最佳 Succeeded pair 补发 USE-CANDIDATE 检查，响应成功即 selected；controlled 收到带 USE-CANDIDATE 的有效检查即提名 | RFC 8445 §8.1.1、§8.2、§7.3.1.5 |
+| role 冲突：controlling 收 ICE-CONTROLLING → 己方 tie-breaker ≥ 对方则回 487 **并保留角色**，否则切换为 controlled；controlled 收 ICE-CONTROLLED → 己方 ≥ 对方则切换为 controlling，否则回 487 保留；收 487 必须换角色并**换 tie-breaker**，角色变化后重算 pair 优先级 | RFC 8445 §7.3.1.1、§7.2.5.1、§6.1.2.3 |
+| prflx 最小子集：未知源地址的有效检查 → 以请求 PRIORITY 建 prflx 远端候选并配对触发 | RFC 8445 §7.3.1.3/§7.3.1.4 |
+| 收发路径边界（本增量止于 selected pair）：dial 完成检查后 `GetSelectedCandidatePair()`；直连 ep = selected 对端地址；再 `ConfigureWGEndpoint` 落配 WG；上游 ICE socket 经 UDPMux 与业务共用 | `client/internal/peer/worker_ice.go:255-306`、`client/internal/peer/conn.go:444-461`、`conn.go:476-478`、`client/internal/engine_generic.go:15-16` |
+
+### 7.2 依赖选择（探针结论：无新依赖）
+
+- **方案①（引入 `sha1` crate）不可行**：`sha1` 不在项目 cargo registry
+  cache（`ls $CARGO_HOME/registry/cache/*/ | grep sha1` → 空；同目录
+  `hmac-0.12.1.crate`、`digest-0.10.7.crate` 在），`--offline --locked`
+  无法解析——离线是硬要求，仓外交叉编译探针无须再做（依赖在取包一步即
+  失败）。
+- **方案②（全自写）被采纳**：SHA-1（RFC 3174，~50 行）+ HMAC-SHA1
+  （RFC 2104，~20 行）+ CRC-32 IEEE 反射 0xEDB88320（~12 行，逐位实现）。
+  `hmac` 0.12.1 虽在锁内但无 SHA-1 后端即不可用，而把手写核心接进
+  `digest` trait 的代码量超过 SHA-1 本身。
+- 代价与证据：零锁文件改动、零新 crate、零新 FFI/链接面（纯 core 代码；
+  交叉编译面由 `client/core/build.sh` 步骤 4 的 aarch64-unknown-linux-ohos
+  全量构建直接复验，无需独立探针）。正确性对账：RFC 2202 HMAC 向量 ×2、
+  SHA-1("abc")/56 字节尾向量、CRC-32 校验值 `0xCBF43926`、RFC 5769
+  §2.1/§2.2 完整报文 MI+FP 逐字节。`THIRD-PARTY-NOTICES.md` 无需追加。
+
+### 7.3 实现要点
+
+- **时钟注入**：模块内无墙钟；全部时序经 `run_once(now_ms)` 显式注入
+  （poll 超时 0，纯非阻塞泵；调用方拥有循环与时间）。keepalive 节奏从
+  selected 时刻起算；disconnected/failed 两段各 6s（§7.1）。
+- **检查编解码**（`build_check_request`/`parse_stun`/
+  `verify_message_integrity`/`verify_fingerprint` 公开，供 N5c 连接器与
+  测试服务端复用）：属性 4 字节对齐零填充；FP 恒为末属性；401 错误响应
+  故意不带 MI（请求未通过认证），487 带 MI（USERNAME 已匹配）。
+- **状态机**：pair 形成即 Frozen（单组件单 check list，§6.1.1 的多列表
+  thaw 不适用），`start()` 解冻为 Waiting；串行 pacing（同一时刻至多一个
+  InProgress，按优先级取队首）——确定性优先，`Ta` 全速并行留待实测需要
+  时再做。重传复用**同一事务 id**；7 次耗尽 pair Failed；全 pair Failed →
+  会话 `Failed("all-pairs-failed")`。
+- **role 切换**：清提名态、（487 路径）重抽 tie-breaker、按新角色重算
+  pair 优先级重排序（§6.1.2.3 的 G/D 随角色互换），pair 状态跨重建保留。
+- **受保护 socket（治理 §二.4）**：每本地候选一根长连 dup ——
+  `take_fd → dup → O_NONBLOCK → bind(候选地址) → 收发`，`port 0` 由
+  `getsockname` 回填候选；provider fd 号全程借用，只关自己的 dup；
+  `stop()`/Drop 关闭。空 provider → `Network("protected-udp:
+  no-protected-socket …")` fail-closed，模块内无任何 `socket(2)` 调用。
+- **错误分类沿用六类**：套接字/熵失败=Network；候选串/凭证畸形=Parse/
+  Request(status 0)；重传耗尽不作为返回错误（pair 状态 + Failed 事件）。
+  检查流量中的恶意/畸形数据报**不是错误而是静默丢弃**（RFC 5389 FP 不符
+  即弃），只能从状态机观测——这正是敌意数据报测试有意义的原因。
+
+### 7.4 测试（26 新增用例，全仓 232 通过 / 0 失败）
+
+| 文件 | 用例数 | 关键断言 |
+| --- | --- | --- |
+| `src/ice_session.rs` 内嵌 | 8 | RFC 2202 HMAC ×2、SHA-1 ×2（含 56 字节尾）、CRC-32 校验值、凭证生成（16/32/runesAlpha/两次必不同）、凭证校验拒绝表、built 检查往返 + 篡改 MI/FP 单字节各自翻转判定（reseal FP 隔离 MI 判定） |
+| `tests/ice_session_codec.rs` | 7 | **RFC 5769 §2.1/§2.2 逐字节**：解析字段、MI/FP 全对账；篡改翻转；缺 MI/FP 拒绝；built 检查线格式（长度/对齐/USERNAME 序/角色属性）；成功与 487/401 响应往返；6 种敌意形状全 `stun-check:*` 不 panic |
+| `tests/ice_session_e2e.rs` | 6 | **双 agent（真实 loopback socket，经受保护 fd provider）pair 双侧 Succeeded 且 selected pair 一致**（A.remote.port==B.local.port 互为镜像）；**双 controlling 角色冲突按 tie-breaker 收敛**（大者保留、小者切换、选择一致，用 generate() 凭证走真实 wire 路径）；错误 pwd 请求方向（401 → A 全 pair Failed、B 零提名零选择）与响应方向（对端伪造 valid-FP/wrong-MI 成功响应被拒、同事务 id 重传至耗尽）；坏 FINGERPRINT 请求静默丢弃而同一请求 FP 完好即被应答（响应 XOR-MAPPED/MI/FP 全验证）；未知事务 id 的完美签名响应仍被丢弃 |
+| `tests/ice_session_state.rs` | 5 | keepalive：选中后 +4000ms 前零包、之后一包且为完整认证检查（经 provider 原 fd 线上验证 username/MI/FP）；注入时钟推进 → 恰在 +6s Disconnected、+12s Failed（此前绝不提前），断连期间 keepalive 持续；对端静默 → 恰 7 次尝试（**同一事务 id**）后 pair Failed → 会话 Failed 且无 Disconnected（无先验入站）；空 provider fail-closed（taken==0、无事件、start 拒绝、泵为 no-op）；pair 生命周期 Frozen→Waiting + relay/IPv6/重复远端不成对 |
+
+约束遵守：测试主断言全部基于注入时钟与状态/线数据；唯一的真实等待是
+e2e 坏 FP 用例对「无应答」这一负向事实的 300ms 有界 `recv` 超时；既有
+232-26=206 用例零改动零降强度。
+
+### 7.5 N5c 边界（本增量明确不做）
+
+1. WG endpoint 落配：selected pair → `ConfigureWGEndpoint`
+   （conn.go:476-478 等价物）与连接器泵循环。
+2. TURN/relay 候选与 relay client；prflx 本地候选（§7.2.5.3.1 的
+   XOR-MAPPED 不对称推导——环回/单 socket 拓扑不触发）。
+3. IPv6、mDNS、ICE restart/重协商、session id 语义
+   （worker_ice.go:69-74）。
+4. 多 check list / 多组件、`Ta` 全速并行 pacing、64 连接级并发。
+
+### 7.6 验收记录（N5b 实跑）
+
+| 命令 | 结果 |
+| --- | --- |
+| `bash client/core/build.sh` | exit 0（产物大小见本轮验收输出） |
+| `cd client/core && cargo test --offline --locked` | **232 passed / 0 failed**（新增 26） |
+| `bash client/build.sh` | exit 0（HAP 大小见本轮验收输出） |
+| 依赖探针 | 无新增依赖 → 无需（见 §7.2，sha1 不在 cache 的证据） |
+| `git status --short` | 仅 `client/core/**`（src/ice_session.rs 新增、src/ice.rs、src/stun.rs、src/lib.rs、tests/ice_session_*.rs 新增）+ `docs/n3-ice-notes.md`；未 commit/push |

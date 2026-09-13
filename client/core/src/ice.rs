@@ -353,7 +353,11 @@ impl Candidate {
 }
 
 /// RFC 8445 §5.1.2.1: `(2^24)*type_pref + (2^8)*local_pref + (256 - component)`.
-fn priority_for(typ: CandidateType) -> u32 {
+///
+/// `pub(crate)` since N5b: `ice_session.rs` needs the same formula for the
+/// prflx PRIORITY carried in Binding Requests (RFC 8445 §7.1.2.2: the
+/// request's PRIORITY is the local candidate's prflx-type priority).
+pub(crate) fn priority_for(typ: CandidateType) -> u32 {
     (1 << 24) * typ.type_preference() + (1 << 8) * LOCAL_PREFERENCE + (256 - COMPONENT_ID)
 }
 
@@ -571,14 +575,19 @@ impl UdpSocketSource for ProtectedUdpFdSource {
 }
 
 /// `SocketSeamError` → the shared taxonomy (Network class; stable tokens).
-fn seam_to_management(e: SocketSeamError) -> ManagementError {
+/// `pub(crate)` since N5b: `ice_session.rs` takes sockets from the same
+/// provider seam and maps failures onto the same class.
+pub(crate) fn seam_to_management(e: SocketSeamError) -> ManagementError {
     ManagementError::Network(format!("protected-udp: {} (errno={})", e.token(), e.errno()))
 }
 
 /// `O_NONBLOCK` on the DUP copy — mgmtsock's documented idiom (the shared
 /// open-file description flips the provider's flag too; providers must not
 /// do blocking I/O after hand-over).
-fn set_nonblock(fd: sys::c_int) -> Result<(), SocketSeamError> {
+///
+/// `pub(crate)` since N5b: `ice_session.rs` prepares its long-lived check
+/// sockets with the same idiom.
+pub(crate) fn set_nonblock(fd: sys::c_int) -> Result<(), SocketSeamError> {
     let fl = unsafe { sys::fcntl(fd, sys::F_GETFL) };
     if fl == -1 {
         return Err(SocketSeamError::NonBlock { errno: sys::errno() });
