@@ -33,9 +33,26 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
+prost = "0.14"
+prost-types = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router", "tls-ring"] }
+tonic-prost = "0.14"
 
 [profile.release]
 panic = "abort"
 opt-level = 2
 debug = false
 strip = "debuginfo"
+
+[build-dependencies]
+protox = "0.9"
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+prost = "0.14"
+prost-types = "0.14"
+rcgen = "0.14.10"
+tokio = { version = "1", features = ["macros"] }
+tokio-stream = { version = "0.1", features = ["net"] }

@@ -32,9 +32,19 @@
 //!              NOT verified
 //! - `management` — NetBird management REST API client skeleton (N3-1):
 //!              HttpTransport trait + plain-text TCP transport (TEST BASELINE
-//!              ONLY; TLS is a later increment), login/session, peer list and
-//!              node-config fetch; setup-key register is a TODO(未确认)
-//!              mock-only contract (upstream registration is gRPC-only)
+//!              ONLY), TLS transport + https parsing (N3-2: rustls/ring,
+//!              INJECTED trust root — no system store), login/session, peer
+//!              list and node-config fetch; setup-key register remains a
+//!              TODO(未确认) mock-only REST contract — the REAL registration
+//!              path is the `grpc` module
+//! - `grpc`    — NetBird management gRPC channel + `Login` (N3-2): tonic +
+//!              rustls (injected trust root), stubs generated at build time
+//!              from the in-repo verbatim `proto/management.proto`
+//!              (proto/README.md: provenance + license);
+//!              `ManagementService/Login(setupKey, meta, jwtToken,
+//!              peerKeys)` → decoded LoginResponse session info; the
+//!              upstream EncryptedMessage NaCl body-encryption layer is
+//!              explicitly NOT implemented (module docs)
 //! - `btkeep`, `chunk`, `hilog`, `net`, `sys`, `util` — support modules,
 //!              verbatim from the probe
 //!
@@ -79,6 +89,7 @@ pub mod btkeep;
 pub mod chunk;
 pub mod config;
 pub mod credential;
+pub mod grpc;
 pub mod hilog;
 pub mod ledger;
 pub mod management;

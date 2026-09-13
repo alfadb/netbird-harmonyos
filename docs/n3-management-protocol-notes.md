@@ -48,3 +48,49 @@
 - gRPC/protobuf 管理通道、Signal、Relay、WireGuard 网络映射（Sync）下发。
 - 真实 NetBird 服务端联调、真机/adb/hdc 验证。
 - 依赖保持不变（仍仅 boringtun；JSON 用 `config.rs` 手写读取器），未动 `Cargo.lock`。
+
+---
+
+# N3-2 增量更新（2026-09-13）：gRPC 通道 + `Login` + TLS 传输
+
+同一上游参考 commit（`791401060d2b95e5f51e3439c0649729132f571e`）不变的补充侦察与实现事实。
+
+## 新增协议事实（均为该 commit 仓库内实证）
+
+| 事实 | 来源 |
+| --- | --- |
+| `Login(EncryptedMessage) → EncryptedMessage`，请求体为 `LoginRequest{setupKey(1), meta(2, PeerSystemMeta), jwtToken(3), peerKeys(4, PeerKeys{sshPubKey(1), wgPubKey(2)}), dnsLabels(5)}` | `shared/management/proto/management.proto` L33-36/L175-186/L190-196（已逐字引入 `client/core/proto/`，BSD-3-Clause，见 proto/README.md） |
+| `LoginResponse{netbirdConfig(1), peerConfig(2), Checks(3), sessionExpiresAt(4)}` —— **响应不含 JWT**；"会话信息" = `sessionExpiresAt` 三态（unset→无信息 / 置零→显式关闭过期 / 有效值→绝对期限）+ `PeerConfig.address`（分配的 VPN IP） | management.proto L280-293（注释 L288-291 明确三态编码）、L404-426 |
+| 信封：`EncryptedMessage{wgPubKey(string)=peer WG 公钥的 base64 字符串, body, version}`；`PeerKeys.wgPubKey(bytes)` 装的是**该 base64 字符串的字节**（`[]byte(c.key.PublicKey().String())`）；Login 调用不设置 version | `shared/management/client/grpc.go` `login()`/`Register()`（L595-612、L641-647） |
+| 上游在 Login 前先 `GetServerKey` 取服务端 WG 公钥，再用 NaCl box 加解密**信封 body**（`encryption.EncryptMessage(serverKey, c.key, req)`） | `shared/management/client/grpc.go` `login()` L538/L595/L607/L629 |
+| 无效 setup key → 服务端返回 `PermissionDenied`（proto 注释：Login 在 PermissionDenied 时可用 setupKey 注册） | management.proto L33-35 |
+
+## 本增量实现（client/core）
+
+- `src/grpc.rs`：`ManagementGrpcClient`（tonic Channel + 生成 stub），
+  `login(LoginParams) -> LoginOutcome{response, session_deadline_unix, peer_address}`；
+  gRPC 状态码 → 既有六类错误映射（`map_grpc_status`，Auth=Unauthenticated/PermissionDenied，
+  Request=InvalidArgument 等 8 码，Server=Internal/Unknown/DataLoss/ResourceExhausted，
+  Network=Unavailable，Timeout=DeadlineExceeded/自管超时）。
+- `src/management.rs`：`TlsHttpTransport`（rustls/ring 阻塞 StreamOwned）+
+  `parse_base_url_tls` + `ManagementClient::new_tls`；`parse_base_url` 保持只收
+  `http://`（mock 基线契约不变）。TLS 信任根一律**调用方注入**（PEM/DER CA），
+  不读任何系统 store（冻结文档风险项）。
+- `build.rs`：protox（免 protoc，WKT 走内嵌 GoogleFileResolver）→
+  tonic-prost-build `compile_fds`；生成 `$OUT_DIR/management.rs`（消息+客户端+服务端
+  stub 同文件；server stub 供 in-process 测试用，generate_default_stubs=true）。
+- 错误分类沿用六类，未新增类别。
+
+## 明确边界（本增量仍未做）
+
+1. **信封 body 的 NaCl 加密层未实现**（冻结栈无 crypto_box；`GetServerKey` 未接）。
+   本增量发送的是序列化 `LoginRequest` 明文 body——gRPC/TLS/stub/字段映射为真，
+   对真实 NetBird 服务端互通仍差这一层（测试服务器按明文 body 契约实现）。
+2. `Sync` 网络映射流、`Logout`、`GetDeviceAuthorizationFlow`/`GetPKCEAuthorizationFlow`
+   （SSO JWT 的真实来源）未实现；REST `/api/peers` 的 JWT/PAT 由调用方持有。
+3. 重连/backoff：上游用 backoff.Retry（仅 Canceled 重试），本增量零自动重试，策略同 N3-1。
+4. 证书信任根来源（webpki-roots 内嵌 vs OHOS 证书目录）仍未取证（冻结文档风险项）。
+5. gRPC 通道运行期行为（tokio/mio epoll、tonic 真实连接、ALPN）仅在 host 实测，
+   ohos 目标为冻结栈编译通过（`docs/n3-stack-freeze-20260913.md`），未上真机。
+6. 服务端 stub 会进入发布 cdylib（供测试；dead code 不剔除）——体积裁剪候选：
+   codegen 拆分 client/server，或 `PROFILE` 条件 codegen；待体积评估增量处理。

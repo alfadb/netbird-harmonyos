@@ -32,6 +32,44 @@
 | untrusted | 0.9.0 | ISC | 不可信输入的安全零 panic 解析 |
 | x25519-dalek | 2.0.1 | BSD-3-Clause | X25519 椭圆曲线 Diffie-Hellman 密钥交换（纯 Rust） |
 
+## 引入的上游源文件（N3-2，2026-09-13）
+
+| 文件 | 来源（上游 commit `791401060d2b95e5f51e3439c0649729132f571e`） | 许可 | 引入目的 |
+| --- | --- | --- | --- |
+| `client/core/proto/management.proto` | netbirdio/netbird `shared/management/proto/management.proto`（逐字复制，sha256 `9d54ca25ecc65076d8b371bb0c5c1e15e1566ab8eb66d52d50a68889a352e9f5` 复制前后一致；原文件无内嵌许可头，归属按 BSD-3 条款保留） | **BSD-3-Clause**（上游根 LICENSE 声明仅顶层 `management/`、`signal/`、`relay/`、`combined/` 为 AGPLv3；本文件在 `shared/` 下，按登记记录 `仓B/records/upstream-bump-79140106-20260913.json` 的目录映射为 BSD-3-Clause） | NetBird 真实注册/登录走 gRPC `ManagementService/Login`（上游无 REST setup-key 注册端点）；本文件是 `client/core` tonic/prost 构建期代码生成的输入（`client/core/build.rs`，protox + tonic-prost-build，免 protoc、不依赖网络）。详见 `client/core/proto/README.md` |
+
+## 直接依赖（2026-09-13 增量，N3-2 gRPC/TLS 栈）
+
+许可取自 cargo registry 内**锁定版本**已发布 manifest 的 `license` 字段（本环境 crates.io
+API 不可达；registry 内容即 crates.io 发布清单的本地副本）。
+
+### normal（client/core/Cargo.toml `[dependencies]`）
+
+| 名称 | 锁定版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| tokio | 1.53.1 | MIT | 异步运行时（rt-multi-thread/net/time，gRPC 客户端驱动；`docs/n3-stack-freeze-20260913.md` 冻结项） |
+| tonic | 0.14.6 | MIT | gRPC 客户端/服务端框架（transport+codegen+router+tls-ring，default-features 关闭） |
+| tonic-prost | 0.14.6 | MIT | tonic 生成代码的 prost 编解码运行时（ProstCodec） |
+| prost | 0.14.4 | Apache-2.0 | protobuf 编解码运行时 |
+| prost-types | 0.14.4 | Apache-2.0 | protobuf well-known types（management.proto 的 Timestamp/Duration 字段） |
+| rustls | 0.23.44 | Apache-2.0 OR ISC OR MIT | TLS（REST `https://` 传输 `TlsHttpTransport`；ring provider，无系统信任根——信任根由调用方注入） |
+
+### build（`[build-dependencies]`）
+
+| 名称 | 锁定版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| protox | 0.9.1 | MIT OR Apache-2.0 | 纯 Rust protobuf 编译器（免 protoc；内嵌 well-known types 解析器） |
+| tonic-prost-build | 0.14.6 | MIT | tonic/prost 构建期代码生成（`build.rs`） |
+
+### dev（`[dev-dependencies]`，仅测试）
+
+| 名称 | 锁定版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| tokio（macros 特性） | 1.53.1 | MIT | `#[tokio::test]` |
+| tokio-stream | 0.1.19 | MIT | 测试内 tonic 服务器的 `TcpListenerStream` |
+| rcgen | 0.14.10 | MIT OR Apache-2.0 | 测试自签 CA/证书生成（真实 TLS 握手） |
+| prost / prost-types | 同上 | Apache-2.0 | 测试中对 `LoginRequest`/`LoginResponse` 的编解码断言 |
+
 ## 归属与许可文本说明
 
 - 各依赖的许可均取自 crates.io 该锁定版本已发布 manifest 的 `license` 字段（`license-file` 未出现）；本清单不转写各许可全文，分发制品时须按各 crate 包内随附的许可文本与版权声明保留归属。

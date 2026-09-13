@@ -50,16 +50,24 @@
 //! is not idempotent; the caller decides about retrying.
 //!
 //! ## TLS
-//! Not implemented. [`parse_base_url`] rejects `https://` with
-//! [`ManagementError::UnsupportedUrl`]. Plain-text HTTP exists ONLY to run the
-//! local mock baseline; real deployments must NOT use it (credentials in
-//! clear). TLS is the next increment.
+//! Since N3-2 the TLS path exists: [`TlsHttpTransport`] (rustls/ring, blocking
+//! `StreamOwned`) + [`ManagementClient::new_tls`] + [`parse_base_url_tls`].
+//! The trust root is INJECTED (`root_certs` parameter; rustls reads no system
+//! store and we never add one — docs/n3-stack-freeze-20260913.md risk list).
+//! Plain-text HTTP ([`PlainHttpTransport`], `http://` only) remains the local
+//! mock baseline; real deployments must use `https://` (credentials in clear
+//! otherwise). [`parse_base_url`] keeps rejecting `https://` — the TLS
+//! transport has its own parser, so the mock-baseline contract is unchanged.
 
 use crate::config::parse_document;
 use crate::config::Json;
 use crate::util::json_escape;
+use rustls::pki_types::pem::PemObject as _;
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Pinned upstream reference commit this module's protocol facts come from.
@@ -105,7 +113,9 @@ pub enum ManagementError {
     /// Response was not the JSON shape we require (truncated body, bad
     /// encoding, unexpected status, unparseable chunked body, ...).
     Parse(String),
-    /// URL scheme not usable by this skeleton (https:// until TLS exists).
+    /// URL scheme not usable by the selected transport (plain transport:
+    /// `https://` rejected; TLS transport: `http://` rejected; plus malformed
+    /// URLs on either path).
     UnsupportedUrl(String),
 }
 
@@ -198,27 +208,148 @@ impl HttpTransport for PlainHttpTransport {
         stream
             .set_write_timeout(Some(remaining(self.timeout, started)?))
             .map_err(map_io_timeout("set write timeout"))?;
-        let body = req.body.as_deref().unwrap_or("");
-        let mut head = format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: netbird-harmonyos-core/0.1 (management skeleton)\r\nAccept: application/json\r\nConnection: close\r\n",
-            req.method, req.path, self.authority
-        );
-        if let Some(auth) = &req.authorization {
-            head.push_str(&format!("Authorization: {auth}\r\n"));
-        }
-        if !body.is_empty() {
-            head.push_str("Content-Type: application/json\r\n");
-            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
-        }
-        head.push_str("\r\n");
+        write_request(&mut stream, req, &self.authority)?;
+        read_response(&mut stream, self.timeout, started)
+    }
+}
+
+/// Serialize one request head (+ body) onto a stream. Byte-identical across
+/// the plain and TLS transports (the mock baseline asserts this shape).
+fn write_request<S: Write>(
+    stream: &mut S,
+    req: &HttpRequest,
+    authority: &str,
+) -> Result<(), ManagementError> {
+    let body = req.body.as_deref().unwrap_or("");
+    let mut head = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: netbird-harmonyos-core/0.1 (management skeleton)\r\nAccept: application/json\r\nConnection: close\r\n",
+        req.method, req.path, authority
+    );
+    if let Some(auth) = &req.authorization {
+        head.push_str(&format!("Authorization: {auth}\r\n"));
+    }
+    if !body.is_empty() {
+        head.push_str("Content-Type: application/json\r\n");
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .map_err(map_io_timeout("write request head"))?;
+    if !body.is_empty() {
         stream
-            .write_all(head.as_bytes())
-            .map_err(map_io_timeout("write request head"))?;
-        if !body.is_empty() {
-            stream
-                .write_all(body.as_bytes())
-                .map_err(map_io_timeout("write request body"))?;
+            .write_all(body.as_bytes())
+            .map_err(map_io_timeout("write request body"))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// TLS HTTP transport (N3-2) — https for the REST surface
+// ---------------------------------------------------------------------------
+
+/// Blocking HTTPS/1.1 transport: rustls (`ring` provider) `ClientConnection`
+/// over a `TcpStream`, one connection per request — the same framing and
+/// timeout rules as [`PlainHttpTransport`].
+///
+/// Trust root: ONLY the caller-provided CA certificates are trusted. rustls
+/// reads no system store and this transport never adds one
+/// (docs/n3-stack-freeze-20260913.md risk list).
+pub struct TlsHttpTransport {
+    authority: String,
+    server_name: ServerName<'static>,
+    peer: SocketAddr,
+    timeout: Duration,
+    config: Arc<ClientConfig>,
+}
+
+/// Decode PEM-encoded X509 certificate(s) into the DER form the transports
+/// take ([`CertificateDer`]); multiple PEM blocks are all decoded.
+pub fn decode_pem_certificates(
+    pem: &[u8],
+) -> Result<Vec<CertificateDer<'static>>, ManagementError> {
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<_, _>>()
+        .map_err(|e| {
+            ManagementError::Parse(format!("PEM certificate decode failed: {e}"))
+        })?;
+    if certs.is_empty() {
+        return Err(ManagementError::Parse(
+            "PEM certificate decode failed: no CERTIFICATE block".into(),
+        ));
+    }
+    Ok(certs)
+}
+
+impl TlsHttpTransport {
+    pub fn new(
+        host: &str,
+        port: u16,
+        timeout: Duration,
+        root_certs: Vec<CertificateDer<'static>>,
+    ) -> Result<Self, ManagementError> {
+        if root_certs.is_empty() {
+            return Err(ManagementError::Request {
+                status: 0,
+                message: "TLS requested but no CA certificates provided \
+                          (trust root must be injected; no system store is used)"
+                    .into(),
+            });
         }
+        let mut roots = RootCertStore::empty();
+        for cert in &root_certs {
+            roots.add(cert.clone()).map_err(|e| {
+                ManagementError::Parse(format!("TLS root certificate rejected: {e}"))
+            })?;
+        }
+        let config = ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .map_err(|e| ManagementError::Network(format!("tls protocol versions: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+        let addrs: Vec<SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| ManagementError::Network(format!("resolve {host}: {e}")))?
+            .collect();
+        // Prefer IPv4 loopback-able literals; first v4, else first addr.
+        let peer = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
+            .ok_or_else(|| ManagementError::Network(format!("no address for {host}")))?;
+        let server_name = ServerName::try_from(host.to_string())
+            .map_err(|e| ManagementError::UnsupportedUrl(format!("{host:?}: bad TLS name ({e})")))?;
+        Ok(TlsHttpTransport {
+            authority: format!("{host}:{port}"),
+            server_name,
+            peer,
+            timeout,
+            config: Arc::new(config),
+        })
+    }
+}
+
+impl HttpTransport for TlsHttpTransport {
+    fn execute(&self, req: &HttpRequest) -> Result<HttpResponse, ManagementError> {
+        let started = Instant::now();
+        let sock = TcpStream::connect_timeout(&self.peer, self.timeout)
+            .map_err(map_io_timeout("connect"))?;
+        let conn = ClientConnection::new(Arc::clone(&self.config), self.server_name.clone())
+            .map_err(|e| {
+                ManagementError::Network(format!("tls handshake setup: {e}"))
+            })?;
+        let mut stream = StreamOwned::new(conn, sock);
+        stream
+            .sock
+            .set_write_timeout(Some(remaining(self.timeout, started)?))
+            .map_err(map_io_timeout("set write timeout"))?;
+        write_request(&mut stream, req, &self.authority)?;
+        // TLS failures on the first read/write surface here (handshake runs
+        // lazily) and classify as Network.
         read_response(&mut stream, self.timeout, started)
     }
 }
@@ -236,20 +367,38 @@ fn map_io_timeout(stage: &'static str) -> impl Fn(std::io::Error) -> ManagementE
     }
 }
 
-fn set_read_deadline(
-    stream: &TcpStream,
+/// A reader over which the per-request read budget can be re-armed before
+/// every read: the raw TCP socket and the rustls TLS stream over a TCP socket.
+trait ReadWithDeadline: Read {
+    fn arm_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl ReadWithDeadline for TcpStream {
+    fn arm_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_read_timeout(timeout)
+    }
+}
+
+impl ReadWithDeadline for StreamOwned<ClientConnection, TcpStream> {
+    fn arm_read_deadline(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.sock.set_read_timeout(timeout)
+    }
+}
+
+fn set_read_deadline<R: ReadWithDeadline>(
+    stream: &R,
     budget: Duration,
     started: Instant,
 ) -> Result<(), ManagementError> {
     stream
-        .set_read_timeout(Some(remaining(budget, started)?))
+        .arm_read_deadline(Some(remaining(budget, started)?))
         .map_err(map_io_timeout("set read timeout"))
 }
 
 /// Read head + body. Body framing: `Content-Length` first, then
 /// `Transfer-Encoding: chunked`, then read-to-EOF (Connection: close).
-fn read_response(
-    stream: &mut TcpStream,
+fn read_response<R: ReadWithDeadline>(
+    stream: &mut R,
     budget: Duration,
     started: Instant,
 ) -> Result<HttpResponse, ManagementError> {
@@ -322,8 +471,8 @@ fn read_response(
 
 /// One `read(2)` into `buf`. Returns `Ok(false)` on clean EOF; `Err(Timeout)`
 /// when the per-request budget runs out; other I/O errors are `Network`.
-fn read_more(
-    stream: &mut TcpStream,
+fn read_more<R: ReadWithDeadline>(
+    stream: &mut R,
     buf: &mut Vec<u8>,
     budget: Duration,
     started: Instant,
@@ -389,9 +538,10 @@ pub struct BaseUrl {
 }
 
 /// `http://host[:port][/...]` → [`BaseUrl`]. `https://` is rejected with
-/// [`ManagementError::UnsupportedUrl`] (TLS not implemented — next increment).
-/// Any other scheme is a parse failure. A non-empty path is rejected: the
-/// endpoints above are absolute (`/api/...`).
+/// [`ManagementError::UnsupportedUrl`] (the plain transport stays mock-baseline
+/// only; the TLS transport uses [`parse_base_url_tls`]). Any other scheme is a
+/// parse failure. A non-empty path is rejected: the endpoints above are
+/// absolute (`/api/...`).
 pub fn parse_base_url(url: &str) -> Result<BaseUrl, ManagementError> {
     let bad = |m: &str| ManagementError::UnsupportedUrl(format!("{url:?}: {m}"));
     let (scheme, rest) = url
@@ -403,13 +553,48 @@ pub fn parse_base_url(url: &str) -> Result<BaseUrl, ManagementError> {
         other => return Err(bad(&format!("unknown scheme '{other}': use http:// (https rejected: TLS not implemented)"))),
     }
     let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = split_host_port(url, host_port, 80)?;
+    Ok(BaseUrl { host, port })
+}
+
+/// `https://host[:port][/...]` → [`BaseUrl`] for the TLS transport (N3-2).
+/// Default port 443; a non-empty path is rejected (same rule as
+/// [`parse_base_url`]). Plain `http://` is NOT accepted here — it has its own
+/// transport and parser.
+pub fn parse_base_url_tls(url: &str) -> Result<BaseUrl, ManagementError> {
+    let bad = |m: &str| ManagementError::UnsupportedUrl(format!("{url:?}: {m}"));
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| bad("missing scheme (expected https://host[:port])"))?;
+    match scheme {
+        "https" => {}
+        "http" => {
+            return Err(bad(
+                "plain http is not valid for the TLS transport (use parse_base_url + PlainHttpTransport)",
+            ))
+        }
+        other => return Err(bad(&format!("unknown scheme '{other}': use https://"))),
+    }
+    let host_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let (host, port) = split_host_port(url, host_port, 443)?;
+    Ok(BaseUrl { host, port })
+}
+
+/// Shared `host[:port]` splitting. `url` is only used in error text;
+/// `default_port` = 80 (http) / 443 (https).
+fn split_host_port(
+    url: &str,
+    host_port: &str,
+    default_port: u16,
+) -> Result<(String, u16), ManagementError> {
+    let bad = |m: &str| ManagementError::UnsupportedUrl(format!("{url:?}: {m}"));
     let (host, port) = match host_port.rsplit_once(':') {
         Some((h, p)) => (
             h,
             p.parse::<u16>()
                 .map_err(|_| bad(&format!("bad port '{p}'")))?,
         ),
-        None => (host_port, 80),
+        None => (host_port, default_port),
     };
     if host.is_empty() {
         return Err(bad("empty host"));
@@ -418,7 +603,7 @@ pub fn parse_base_url(url: &str) -> Result<BaseUrl, ManagementError> {
         // bare IPv6 literals need bracket parsing — out of scope, be explicit
         return Err(bad("IPv6 hosts not supported yet"));
     }
-    Ok(BaseUrl { host: host.to_string(), port })
+    Ok((host.to_string(), port))
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +770,23 @@ impl ManagementClient<PlainHttpTransport> {
         let BaseUrl { host, port } = parse_base_url(base_url)?;
         Ok(ManagementClient {
             transport: PlainHttpTransport::new(&host, port, timeout)?,
+        })
+    }
+}
+
+impl ManagementClient<TlsHttpTransport> {
+    /// Build a client on the TLS transport (N3-2). `base_url` must be
+    /// `https://host[:port]`; `root_certs` are the DER-encoded CA
+    /// certificate(s) to trust — injected by the caller (see
+    /// [`decode_pem_certificates`] for the PEM form; NO system store is used).
+    pub fn new_tls(
+        base_url: &str,
+        timeout: Duration,
+        root_certs: Vec<CertificateDer<'static>>,
+    ) -> Result<Self, ManagementError> {
+        let BaseUrl { host, port } = parse_base_url_tls(base_url)?;
+        Ok(ManagementClient {
+            transport: TlsHttpTransport::new(&host, port, timeout, root_certs)?,
         })
     }
 }
@@ -787,5 +989,39 @@ mod tests {
     fn credential_header_forms() {
         assert_eq!(Credential::Jwt("a.b.c".into()).header_value(), "Bearer a.b.c");
         assert_eq!(Credential::Pat("nbp_x".into()).header_value(), "Token nbp_x");
+    }
+
+    #[test]
+    fn tls_base_url_parsing() {
+        assert_eq!(
+            parse_base_url_tls("https://mgmt.example.com:443").unwrap(),
+            BaseUrl { host: "mgmt.example.com".into(), port: 443 }
+        );
+        assert_eq!(
+            parse_base_url_tls("https://mgmt.example.com").unwrap().port,
+            443,
+            "https defaults to 443"
+        );
+        assert!(matches!(
+            parse_base_url_tls("http://mgmt.example.com"),
+            Err(ManagementError::UnsupportedUrl(_))
+        ));
+        assert!(matches!(
+            parse_base_url_tls("ftp://x"),
+            Err(ManagementError::UnsupportedUrl(_))
+        ));
+        assert!(parse_base_url_tls("no-scheme").is_err());
+        assert!(parse_base_url_tls("https://[::1]:443").is_err());
+    }
+
+    #[test]
+    fn pem_certificate_decoding() {
+        // rcgen-shaped single PEM cert (self-signed, generated at test time in
+        // tests/management_grpc.rs); here a deliberately broken PEM must fail.
+        assert!(decode_pem_certificates(b"not a pem").is_err());
+        assert!(decode_pem_certificates(b"").is_err());
+        // a PEM block of the wrong section kind is rejected/filtered
+        let key_only = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+        assert!(decode_pem_certificates(key_only).is_err());
     }
 }
