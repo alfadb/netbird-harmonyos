@@ -1,19 +1,26 @@
 import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
+import { ConnectorStatusResult, pollStatusOrNull } from '../vpnextensionability/NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 const EXTENSION_ABILITY: string = 'NetBirdVpnExtensionAbility';
+const STATUS_POLL_MS: number = 2000;
 
 interface BusinessFailure extends Error {
   code?: number;
 }
 
-// Minimal trigger surface (promoted from the n1b skeleton): one click-gated
-// start and one click-gated stop request per attempt; each latch never
-// resets (reject does not re-issue, no retry). No UI design here.
+// Minimal trigger + status surface (promoted from the n1b skeleton, extended
+// in N3-6): one click-gated start and one click-gated stop request per
+// attempt; each latch never resets (reject does not re-issue, no retry).
+// Status rows poll core.connector_status() directly in THIS process —
+// documented limitation: if the platform runs the VpnExtensionAbility in a
+// separate process, the UI sees its own empty snapshot (state 'unknown' /
+// 'disconnected'); no cross-process status channel exists in this increment.
+// No UI design here.
 @Entry
 @Component
 struct Index {
@@ -21,7 +28,41 @@ struct Index {
   @State detailText: string = 'tap to send one start request';
   @State requestSent: boolean = false;
   @State stopSent: boolean = false;
+  @State connectorState: string = 'unknown';
+  @State peerCount: number = 0;
+  @State routeCount: number = 0;
+  @State lastErrorClass: string = 'none';
   private requestId: string = `ui-${Date.now()}`;
+  private pollTimer: number = -1;
+
+  aboutToAppear(): void {
+    this.pollConnectorStatus();
+    this.pollTimer = setInterval((): void => {
+      this.pollConnectorStatus();
+    }, STATUS_POLL_MS);
+  }
+
+  aboutToDisappear(): void {
+    if (this.pollTimer >= 0) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = -1;
+    }
+  }
+
+  private pollConnectorStatus(): void {
+    const status: ConnectorStatusResult | null = pollStatusOrNull();
+    if (status === null) {
+      this.connectorState = 'unavailable';
+      return;
+    }
+    this.connectorState = status.state;
+    this.peerCount = status.peer_count;
+    this.routeCount = status.route_count;
+    this.lastErrorClass =
+      status.last_error !== null && status.last_error !== undefined
+        ? status.last_error.class
+        : 'none';
+  }
 
   private buildWant(): Want {
     const params: Record<string, Object> = { 'requestId': this.requestId };
@@ -91,6 +132,17 @@ struct Index {
         .fontSize(14)
         .fontColor('#3D4A55')
         .textAlign(TextAlign.Center)
+      // Minimal connector status rows (control plane state, peer count,
+      // route count, last error classification). Data: core.connector_status.
+      Text(`state: ${this.connectorState}`)
+        .fontSize(16)
+        .fontColor('#17324D')
+      Text(`peers: ${this.peerCount}   routes: ${this.routeCount}`)
+        .fontSize(16)
+        .fontColor('#17324D')
+      Text(`last error: ${this.lastErrorClass}`)
+        .fontSize(16)
+        .fontColor(this.lastErrorClass === 'none' ? '#176B3A' : '#A12622')
       Button(this.requestSent ? 'Request sent' : 'Connect VPN')
         .fontSize(17)
         .width(220)

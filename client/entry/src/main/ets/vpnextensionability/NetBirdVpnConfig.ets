@@ -1,4 +1,5 @@
 import vpnExtension from '@ohos.net.vpnExtension';
+import { CoreNetworkConfig, CoreRouteEntry } from './NetBirdConnector';
 
 // Client-side VPN tunnel configuration model + platform VpnConfig mapper.
 //
@@ -95,6 +96,70 @@ const DEFAULT_VPN_TUNNEL_CONFIG: VpnTunnelConfig = {
 // legally gated) will replace this body; every consumer must go through it.
 export function loadVpnTunnelConfig(): VpnTunnelConfig {
   return DEFAULT_VPN_TUNNEL_CONFIG;
+}
+
+// N3-6: overlay a core.connector_network_config() snapshot onto the base
+// local config. Applied ONCE, at start, before connection.create() — the
+// platform VpnConfig (addresses/routes/dnsAddresses) is FIXED at create()
+// time and VpnConnection has no route/DNS update API, so later map changes
+// CANNOT be applied at runtime (the extension logs them as explicitly
+// NOT applied — see NetBirdVpnExtensionAbility watch loop). Empty/absent
+// snapshot fields fall back to the base deployment values. The
+// deployment-specific host-LAN exclusions from the base config are kept —
+// the outer path (management/WG endpoint traffic) must stay out of our own
+// tunnel regardless of what the map routes.
+export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig): VpnTunnelConfig {
+  const address: string =
+    net.address !== undefined && net.address !== null && net.address.length > 0
+      ? net.address
+      : base.tunnelAddress;
+  const prefixLength: number =
+    net.address_prefix_len !== undefined && net.address_prefix_len !== null
+      ? net.address_prefix_len
+      : base.tunnelPrefixLength;
+
+  const routes: VpnRouteConfig[] = [];
+  const managed: CoreRouteEntry[] = net.routes !== undefined && net.routes !== null
+    ? net.routes
+    : [];
+  for (let i = 0; i < managed.length; i++) {
+    const parts: string[] = managed[i].network.split('/');
+    if (parts.length !== 2) {
+      // core renders canonical 'a.b.c.d/prefix'; anything else is a
+      // contract violation — skip it loudly rather than guess
+      continue;
+    }
+    routes.push({
+      destination: parts[0],
+      prefixLength: Number(parts[1]),
+      gateway: address,
+      hasGateway: true,
+      isDefaultRoute: managed[i].is_default,
+      isExcludedRoute: false
+    });
+  }
+  for (let i = 0; i < base.routes.length; i++) {
+    if (base.routes[i].isExcludedRoute) {
+      routes.push(base.routes[i]);
+    }
+  }
+
+  const dnsServers: string[] = [];
+  if (net.dns !== undefined && net.dns !== null) {
+    for (let i = 0; i < net.dns.servers.length; i++) {
+      dnsServers.push(net.dns.servers[i].ip);
+    }
+  }
+
+  return {
+    tunnelAddress: address,
+    tunnelPrefixLength: prefixLength,
+    interfaceName: base.interfaceName,
+    routes: routes.length > 0 ? routes : base.routes,
+    dnsServers: dnsServers.length > 0 ? dnsServers : base.dnsServers,
+    mtu: base.mtu,
+    peerEndpoint: base.peerEndpoint
+  };
 }
 
 // Maps the client configuration onto the platform VpnConfig exactly in the

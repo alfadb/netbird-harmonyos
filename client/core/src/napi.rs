@@ -105,6 +105,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("config_validate", napi_config_validate);
     reg!("connector_start", napi_connector_start);
     reg!("connector_status", napi_connector_status);
+    reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
     exports
 }
@@ -354,6 +355,7 @@ mod tests {
             "config_validate",
             "connector_start",
             "connector_status",
+            "connector_network_config",
             "connector_stop",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
@@ -460,6 +462,12 @@ unsafe extern "C" fn napi_connector_start(env: NapiEnv, info: NapiCallbackInfo) 
 
 unsafe extern "C" fn napi_connector_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::connector::connector_status_json())
+}
+
+// N3-6: read-only shell snapshot of the last applied network map (tunnel
+// address, routes + default marks, DNS, peer summary — public keys only).
+unsafe extern "C" fn napi_connector_network_config(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_network_config_json())
 }
 
 unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {

@@ -77,6 +77,7 @@
 //! | `config_validate(json: string)` | `(json) => string` | validate a client-config JSON document -> `{valid:true,endpoint,mtu,routes,default_route,dns_servers,preshared_key,listen_port}` / `{valid:false,error}` (never echoes key material) |
 //! | `connector_start(configJson, setupKeyJson?)` | | start the N3-5 connection lifecycle (async worker; returns immediately) -> `{started:true,state}` / `{started:false,error}` — poll `connector_status` |
 //! | `connector_status()` | `() => string` | connector snapshot -> `{running,state,started_at_unix,last_update_unix,peer_count,route_count,reconnects,last_error,session_expiry,session_expires_at_unix,session_renew_attempts,wg_apply_failed,wg_apply_errors,logout_ok}` (error = class + status code only, never key material) |
+//! | `connector_network_config()` | `() => string` | read-only shell snapshot of the last applied network map -> `{available:true,serial,address,address_prefix_len,interface_dns,routes:[{network,is_default}],dns:{service_enable,servers:[{ip,port}]},peer_count,peers:[{pub_key,allowed_ips}]}` / `{available:false,reason:"no-network-map"}` (public keys only — no secret material; N3-6) |
 //! | `connector_stop()` | `() => string` | idempotent stop (Sync stream close → best-effort logout → cleanup) -> `{ok,already_stopped,state}` |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd

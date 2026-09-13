@@ -641,7 +641,29 @@ async fn lifecycle_login_updates_apply_to_data_plane() {
         assert!(json.contains(fragment), "status JSON missing {fragment}: {json}");
     }
 
+    // N3-6: the shell network-config snapshot reflects the LATEST applied
+    // map (serial 6), not the skipped outdated one (serial 4)
+    let netcfg = handle.network_config_json();
+    for fragment in [
+        "\"available\":true",
+        "\"serial\":6",
+        "\"address\":\"10.64.0.9\"",
+        "\"address_prefix_len\":32",
+        "\"network\":\"172.16.1.0/24\"",
+        "\"is_default\":false",
+        "\"peer_count\":2",
+        "\"allowed_ips\":1",
+    ] {
+        assert!(netcfg.contains(fragment), "network config missing {fragment}: {netcfg}");
+    }
+    assert!(netcfg.starts_with("{\"available\":true,"), "{netcfg}");
+
     handle.stop();
+    // stop tears the applied shell config down with the rest of the seams
+    assert_eq!(
+        handle.network_config_json(),
+        "{\"available\":false,\"reason\":\"no-network-map\"}"
+    );
 }
 
 /// Mid-stream break → automatic reconnect through the injected backoff →

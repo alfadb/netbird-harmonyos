@@ -586,6 +586,9 @@ struct StateInner {
     wg_apply_errors: u64,
     logout_ok: Option<bool>,
     started_at_unix: Option<i64>,
+    /// Last applied shell network-config snapshot (N3-6); `None` until the
+    /// first NetworkMap arrives, reset on stop.
+    net_config: Option<ShellNetworkConfig>,
 }
 
 /// State shared between the connector worker tasks and the status/stop
@@ -614,6 +617,7 @@ impl ConnectorShared {
                 wg_apply_errors: 0,
                 logout_ok: None,
                 started_at_unix: None,
+                net_config: None,
             }),
             running: AtomicBool::new(false),
         }
@@ -646,6 +650,17 @@ impl ConnectorShared {
 
     fn state(&self) -> ConnState {
         self.lock().machine.state()
+    }
+
+    /// The `connector_network_config()` payload: the last applied snapshot,
+    /// or the explicit no-network-map answer (before the first map / after
+    /// stop).
+    fn network_config_json(&self) -> String {
+        let g = self.lock();
+        match g.net_config.as_ref() {
+            Some(cfg) => cfg.to_json(),
+            None => NO_NETWORK_MAP_JSON.to_string(),
+        }
     }
 
     fn record_error(&self, err: &ManagementError) {
@@ -694,6 +709,9 @@ impl ConnectorShared {
             g.last_serial = map.serial;
             g.peer_count = peers;
             g.route_count = map.routes.len();
+            // N3-6: snapshot the shell-applicable subset for the read-only
+            // connector_network_config() export.
+            g.net_config = Some(ShellNetworkConfig::from_map(map));
         }
         // WG data plane: register remote + offline peers (identity +
         // allowed_ips only — module limitation statement).
@@ -801,6 +819,183 @@ impl ConnectorStatus {
                 "\"logout_ok\":{}",
                 self.logout_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
             ),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shell network-config snapshot (N3-6)
+// ---------------------------------------------------------------------------
+
+/// `connector_network_config()` answer before the first NetworkMap is
+/// applied (also after stop: the applied config is torn down with it).
+const NO_NETWORK_MAP_JSON: &str = "{\"available\":false,\"reason\":\"no-network-map\"}";
+
+/// One managed route of the shell snapshot: canonical masked network plus
+/// the default-route mark (`0.0.0.0/0`, [`crate::config::Route::is_default`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRouteEntry {
+    pub network: String,
+    pub is_default: bool,
+}
+
+/// One resolver of the shell snapshot (management order, deduplicated).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellDnsServer {
+    pub ip: String,
+    pub port: u16,
+}
+
+/// Per-peer summary: public key (PUBLIC material — safe to export) and the
+/// allowed-ips COUNT. No key material beyond the public key and no endpoint
+/// data exists at this layer (no signal/ICE — module limitation statement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellPeerSummary {
+    pub pub_key_b64: String,
+    pub allowed_ips: usize,
+}
+
+/// Read-only snapshot of the shell-applicable subset of the LAST APPLIED
+/// NetworkMap: own tunnel address, managed routes, DNS and the peer summary.
+/// Built at apply time in [`ConnectorShared::apply_update`] and served by
+/// `connector_network_config()`; runtime changes after the shell applied a
+/// snapshot are the shell's to observe (HarmonyOS VpnConfig is fixed at
+/// create() time — see docs/n3-shell-integration-notes.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellNetworkConfig {
+    pub serial: u64,
+    /// Own tunnel address as assigned by management (e.g. "10.64.0.7").
+    pub address: Option<String>,
+    /// 32 when `address` parses as IPv4 (NetBird assigns a host address);
+    /// `None` when unparseable (e.g. IPv6 — not supported yet).
+    pub address_prefix_len: Option<u8>,
+    /// Management DNS resolver for the interface (`PeerConfig.dns`).
+    pub interface_dns: Option<String>,
+    pub routes: Vec<ShellRouteEntry>,
+    pub dns_service_enable: bool,
+    pub dns_servers: Vec<ShellDnsServer>,
+    pub peers: Vec<ShellPeerSummary>,
+}
+
+/// Canonical dotted-quad/prefix rendering of a parsed route network.
+fn route_network_string(route: &config::Route) -> String {
+    format!(
+        "{}.{}.{}.{}/{}",
+        route.addr[0], route.addr[1], route.addr[2], route.addr[3], route.prefix_len
+    )
+}
+
+impl ShellNetworkConfig {
+    /// Reduce a converted NetworkMap to the shell-applicable subset. Peers
+    /// include offline peers (the WG seam registers both).
+    pub fn from_map(map: &NetworkMap) -> ShellNetworkConfig {
+        let address = map.peer.as_ref().and_then(|p| p.address.clone());
+        let address_prefix_len =
+            address.as_deref().and_then(config::parse_ipv4).map(|_| 32u8);
+        let mut routes = Vec::with_capacity(map.routes.len());
+        for r in &map.routes {
+            routes.push(ShellRouteEntry {
+                network: route_network_string(&r.network),
+                is_default: r.network.is_default(),
+            });
+        }
+        let mut dns_servers: Vec<ShellDnsServer> = Vec::new();
+        if let Some(dns) = map.dns.as_ref() {
+            for group in &dns.name_server_groups {
+                for ns in &group.name_servers {
+                    // dedup (one resolver may repeat across groups), keep
+                    // management order — the shell consumes it as priority
+                    if !dns_servers
+                        .iter()
+                        .any(|s| s.ip == ns.ip && s.port == ns.port)
+                    {
+                        dns_servers.push(ShellDnsServer { ip: ns.ip.clone(), port: ns.port });
+                    }
+                }
+            }
+        }
+        let peers = map
+            .peers
+            .iter()
+            .chain(map.offline_peers.iter())
+            .map(|p| ShellPeerSummary {
+                pub_key_b64: p.wg_pub_key.clone(),
+                allowed_ips: p.allowed_ips.len(),
+            })
+            .collect();
+        ShellNetworkConfig {
+            serial: map.serial,
+            address,
+            address_prefix_len,
+            interface_dns: map.peer.as_ref().and_then(|p| p.interface_dns.clone()),
+            routes,
+            dns_service_enable: map.dns.as_ref().map(|d| d.service_enable).unwrap_or(false),
+            dns_servers,
+            peers,
+        }
+    }
+
+    /// The `connector_network_config()` payload (with the `available` mark).
+    /// Public keys are PUBLIC material; nothing secret crosses this boundary
+    /// (module credential discipline).
+    pub fn to_json(&self) -> String {
+        let mut routes = String::new();
+        for (i, r) in self.routes.iter().enumerate() {
+            if i > 0 {
+                routes.push(',');
+            }
+            routes.push_str(&format!(
+                "{{{},{}}}",
+                jstr("network", &r.network),
+                jbool("is_default", r.is_default)
+            ));
+        }
+        let mut dns_servers = String::new();
+        for (i, s) in self.dns_servers.iter().enumerate() {
+            if i > 0 {
+                dns_servers.push(',');
+            }
+            dns_servers.push_str(&format!(
+                "{{{},{}}}",
+                jstr("ip", &s.ip),
+                jnum("port", s.port as u64)
+            ));
+        }
+        let mut peers = String::new();
+        for (i, p) in self.peers.iter().enumerate() {
+            if i > 0 {
+                peers.push(',');
+            }
+            peers.push_str(&format!(
+                "{{{},{}}}",
+                jstr("pub_key", &p.pub_key_b64),
+                jnum("allowed_ips", p.allowed_ips as u64)
+            ));
+        }
+        let address = match self.address.as_ref() {
+            Some(a) => jstr("address", a),
+            None => "\"address\":null".to_string(),
+        };
+        let address_prefix_len = match self.address_prefix_len {
+            Some(p) => jinum("address_prefix_len", p as i64),
+            None => "\"address_prefix_len\":null".to_string(),
+        };
+        let interface_dns = match self.interface_dns.as_ref() {
+            Some(d) => jstr("interface_dns", d),
+            None => "\"interface_dns\":null".to_string(),
+        };
+        format!(
+            "{{{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}]}}",
+            jbool("available", true),
+            jnum("serial", self.serial),
+            address,
+            address_prefix_len,
+            interface_dns,
+            routes,
+            jbool("service_enable", self.dns_service_enable),
+            format!("\"servers\":[{dns_servers}]"),
+            jnum("peer_count", self.peers.len() as u64),
+            peers,
         )
     }
 }
@@ -967,6 +1162,13 @@ impl ConnectorHandle {
         self.status().to_json()
     }
 
+    /// The `connector_network_config()` JSON document (read-only snapshot of
+    /// the last applied NetworkMap — the parts the shell applies platform
+    /// side; `no-network-map` before the first map).
+    pub fn network_config_json(&self) -> String {
+        self.shared.network_config_json()
+    }
+
     /// Stop the connector: close the Sync stream (worker abort), logout
     /// with the last logged-in client (failure does NOT block the stop),
     /// clear the data-plane seams. Idempotent: a second call reports
@@ -988,8 +1190,10 @@ impl ConnectorHandle {
         }
         self.shared.transition(ConnEvent::Disconnect);
         // cleanup: local registrations and host-applied config go away
+        // (the shell snapshot goes with them — nothing applied remains)
         self.wg.clear();
         self.host.clear();
+        self.shared.lock().net_config = None;
         // logout is best-effort and must never block the stop
         if let Some(mut client) = self.logout_slot.lock_poison().take() {
             let shared = self.shared.clone();
@@ -1311,6 +1515,20 @@ pub fn connector_status_json() -> String {
     }
 }
 
+/// The `connector_network_config()` implementation: read-only snapshot of
+/// the shell-applicable subset of the last applied NetworkMap (tunnel
+/// address/prefix, managed routes with the default-route mark, DNS servers,
+/// peer summary — public keys + allowed-ips counts only). Always valid JSON;
+/// with no connector or before the first map:
+/// `{"available":false,"reason":"no-network-map"}`.
+pub fn connector_network_config_json() -> String {
+    let slot = connector_slot();
+    match slot.as_ref() {
+        Some(handle) => handle.network_config_json(),
+        None => NO_NETWORK_MAP_JSON.to_string(),
+    }
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {
@@ -1588,5 +1806,184 @@ mod tests {
         assert_eq!(registry.snapshot(), peers[..1]);
         registry.clear();
         assert!(registry.is_empty());
+    }
+
+    // N3-6: shell network-config snapshot -----------------------------------
+
+    /// Recording-free host seam for the snapshot tests.
+    struct NoopHost;
+    impl ConfigApplier for NoopHost {
+        fn apply(&self, _map: &NetworkMap) {}
+        fn clear(&self) {}
+    }
+
+    fn shell_test_map() -> NetworkMap {
+        use crate::network_map::{DnsConfig, ManagedRoute, NameServer, NameServerGroup, PeerInfo, PeerSelfConfig};
+        NetworkMap {
+            serial: 42,
+            peer: Some(PeerSelfConfig {
+                address: Some("10.64.0.7".into()),
+                interface_dns: Some("100.100.0.1".into()),
+                fqdn: Some("me.netbird.cloud".into()),
+                mtu: Some(1380),
+                routing_peer_dns_resolution_enabled: true,
+                lazy_connection_enabled: false,
+            }),
+            peers: vec![
+                PeerInfo {
+                    wg_pub_key: "UEVFUjA=".into(),
+                    allowed_ips: vec![
+                        config::Route { addr: [10, 30, 30, 1], prefix_len: 32 },
+                        config::Route { addr: [192, 168, 7, 0], prefix_len: 24 },
+                    ],
+                    fqdn: None,
+                },
+                PeerInfo {
+                    wg_pub_key: "UEVFUjE=".into(),
+                    allowed_ips: vec![],
+                    fqdn: None,
+                },
+            ],
+            peers_is_empty: false,
+            offline_peers: vec![PeerInfo {
+                wg_pub_key: "T0ZGTElORQ==".into(),
+                allowed_ips: vec![config::Route { addr: [10, 9, 9, 9], prefix_len: 32 }],
+                fqdn: None,
+            }],
+            routes: vec![
+                ManagedRoute {
+                    id: "r-default".into(),
+                    network: config::Route { addr: [0, 0, 0, 0], prefix_len: 0 },
+                    domains: vec![],
+                    net_id: "net-d".into(),
+                    network_type: 1,
+                    peer: "relay".into(),
+                    metric: 9999,
+                    masquerade: false,
+                    keep_route: false,
+                    skip_auto_apply: false,
+                },
+                ManagedRoute {
+                    id: "r-1".into(),
+                    network: config::Route { addr: [172, 16, 0, 0], prefix_len: 12 },
+                    domains: vec![],
+                    net_id: "net-1".into(),
+                    network_type: 1,
+                    peer: "relay".into(),
+                    metric: 10,
+                    masquerade: false,
+                    keep_route: false,
+                    skip_auto_apply: false,
+                },
+            ],
+            skipped_routes: vec![],
+            dns: Some(DnsConfig {
+                service_enable: true,
+                name_server_groups: vec![
+                    NameServerGroup {
+                        name_servers: vec![
+                            NameServer { ip: "1.1.1.1".into(), ns_type: 0, port: 53 },
+                            NameServer { ip: "8.8.8.8".into(), ns_type: 1, port: 853 },
+                        ],
+                        primary: true,
+                        domains: vec![],
+                        search_domains_enabled: false,
+                    },
+                    // same resolver again: deduplicated in the snapshot
+                    NameServerGroup {
+                        name_servers: vec![NameServer { ip: "1.1.1.1".into(), ns_type: 0, port: 53 }],
+                        primary: false,
+                        domains: vec![],
+                        search_domains_enabled: false,
+                    },
+                ],
+            }),
+        }
+    }
+
+    #[test]
+    fn shell_network_config_snapshot_and_json_contract() {
+        let snap = ShellNetworkConfig::from_map(&shell_test_map());
+        assert_eq!(snap.serial, 42);
+        assert_eq!(snap.address.as_deref(), Some("10.64.0.7"));
+        assert_eq!(snap.address_prefix_len, Some(32));
+        assert_eq!(snap.interface_dns.as_deref(), Some("100.100.0.1"));
+        // default-route mark on 0.0.0.0/0, canonical masked networks
+        assert_eq!(
+            snap.routes,
+            vec![
+                ShellRouteEntry { network: "0.0.0.0/0".into(), is_default: true },
+                ShellRouteEntry { network: "172.16.0.0/12".into(), is_default: false },
+            ]
+        );
+        // resolvers deduplicated across groups, management order kept
+        assert_eq!(
+            snap.dns_servers,
+            vec![
+                ShellDnsServer { ip: "1.1.1.1".into(), port: 53 },
+                ShellDnsServer { ip: "8.8.8.8".into(), port: 853 },
+            ]
+        );
+        assert!(snap.dns_service_enable);
+        // peers = remote + offline, public key + allowed-ips count only
+        assert_eq!(snap.peers.len(), 3);
+        assert_eq!(snap.peers[0].pub_key_b64, "UEVFUjA=");
+        assert_eq!(snap.peers[0].allowed_ips, 2);
+        assert_eq!(snap.peers[2].pub_key_b64, "T0ZGTElORQ==");
+        assert_eq!(snap.peers[2].allowed_ips, 1);
+
+        let json = snap.to_json();
+        for fragment in [
+            "\"available\":true",
+            "\"serial\":42",
+            "\"address\":\"10.64.0.7\"",
+            "\"address_prefix_len\":32",
+            "\"interface_dns\":\"100.100.0.1\"",
+            "{\"network\":\"0.0.0.0/0\",\"is_default\":true}",
+            "{\"network\":\"172.16.0.0/12\",\"is_default\":false}",
+            "\"service_enable\":true",
+            "{\"ip\":\"1.1.1.1\",\"port\":53}",
+            "{\"ip\":\"8.8.8.8\",\"port\":853}",
+            "\"peer_count\":3",
+            "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2}",
+        ] {
+            assert!(json.contains(fragment), "missing {fragment} in {json}");
+        }
+        // the strict crate reader must accept the document (JSON contract)
+        assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
+        // credential discipline: no private-key field of any kind
+        assert!(!json.contains("private"), "{json}");
+        assert!(!json.contains("setup"), "{json}");
+    }
+
+    #[test]
+    fn network_config_unavailable_until_first_map_then_cleared_on_stop_shape() {
+        let shared = ConnectorShared::new();
+        assert_eq!(
+            shared.network_config_json(),
+            "{\"available\":false,\"reason\":\"no-network-map\"}"
+        );
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let json = shared.network_config_json();
+        assert!(json.contains("\"available\":true"), "{json}");
+        assert!(json.contains("\"serial\":42"), "{json}");
+        // an update WITHOUT a network map keeps the last snapshot (only the
+        // receipt is recorded) — same as the deadline/counts handling
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate { session_deadline_unix: None, netbird_config: None, network_map: None },
+        );
+        assert!(shared.network_config_json().contains("\"serial\":42"));
+        // the global export path answers no-network-map with no connector
+        // (CONNECTOR slot untouched by the unit tests)
     }
 }

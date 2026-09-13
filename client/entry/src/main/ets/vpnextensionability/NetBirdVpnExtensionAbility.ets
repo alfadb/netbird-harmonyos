@@ -3,7 +3,13 @@ import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
-import { VpnTunnelConfig, buildPlatformVpnConfig, loadVpnTunnelConfig } from './NetBirdVpnConfig';
+import { VpnTunnelConfig, buildPlatformVpnConfig, loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
+import {
+  CoreNetworkConfig, ConnectorStartResult, ConnectorStatusResult, DeviceConfigFile,
+  DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
+  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorStart, connectorStop,
+  parseDeviceConfig, pollStatusOrNull, readPrivateFileText, sleep
+} from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -65,19 +71,20 @@ function safeError(error: Error): string {
 // VPN extension shell, config-driven (promoted from the verified e3 physical
 // preflight create/destroy + fd contract and the verified n1b MR4 config /
 // protect split):
-// - Config: loadVpnTunnelConfig() -> buildPlatformVpnConfig() feeds
-//   VpnConfig {addresses, routes (default + excluded routes per verified
-//   MR4), dnsAddresses, mtu}. Peer endpoint stays shell-side data (native
-//   data plane input; platform VpnConfig has no endpoint field).
+// - Start flow (N3-6): credentials read from app-private filesDir files
+//   (DEVELOPMENT-TIME practice, NOT secure storage) -> core.connector_start
+//   -> bounded wait for core.connector_network_config -> merge
+//   address/routes/DNS into VpnConfig (MR4 shapes) -> connection.create()
+//   -> fd contract + fail-closed protect gate. The map snapshot is applied
+//   at create() time (platform VpnConfig is fixed then); later map changes
+//   are logged as explicitly NOT applied.
 // - Protect: after create() yields a valid TUN fd, the native outer UDP
 //   socket (core.wg_fwd_open) is protected via VpnConnection.protect()
 //   BEFORE any datagram flows; protect is fail-closed (governance
 //   docs/native-nx-governance.md item 4): open/bind/protect failure or the
 //   5 s box expiring destroys the VPN and never starts traffic.
-// - Destroy: exactly-once destroy + fd close re-check; the raw TUN fd is
-//   only ever closed by connection.destroy() — native sees read-only
-//   fd_status probes and must use dup copies for any data-plane use
-//   (TODO: dup-taking core export not yet wired, Rust side in flight).
+// - Stop flow: onDestroy -> core.connector_stop (idempotent) -> exactly-
+//   once destroy + fd close re-check (fd contract unchanged).
 export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private requestId: string = 'missing';
   private connectionCreationAttempted: boolean = false;
@@ -97,6 +104,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the shell only audits it read-only via core.fd_status.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
+  // N3-6 control-plane wiring state. destroyRequested latches onDestroy so
+  // the (async) start flow never creates a VPN after teardown began.
+  private destroyRequested: boolean = false;
+  private watcherTimer: number = -1;
+  // Serial of the network-config snapshot merged into the platform
+  // VpnConfig at create() time (-1 = none applied).
+  private appliedNetSerial: number = -1;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -128,33 +142,169 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
-    const tunnelConfig: VpnTunnelConfig = loadVpnTunnelConfig();
-    const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(tunnelConfig);
-    this.logConfigApplied(tunnelConfig);
+    // N3-6 start flow (async, bounded waits only): read credentials from
+    // the app-private dir -> connector_start -> bounded wait for the
+    // network map -> merge address/routes/DNS into the platform VpnConfig
+    // -> connection.create() -> fd contract + fail-closed protect gate.
+    // The map is applied at create() time because the platform VpnConfig is
+    // fixed then; later map changes are logged as NOT applied.
+    this.startConnectorThenCreate(want, connection).catch((error: Error) => {
+      hilog.error(DOMAIN, TAG,
+        'VPN_START_FLOW_REJECTED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error));
+    });
+  }
 
+  // N3-6 start flow. Abort paths (credentials missing, connector refused)
+  // leave the VPN un-created and report a stable error class.
+  private async startConnectorThenCreate(want: Want, connection: vpnExtension.VpnConnection):
+    Promise<void> {
+    const filesDir: string = this.context.filesDir;
+    const setupKeyFile: string =
+      String(want.parameters?.['setupKeyFile'] ?? DEFAULT_SETUP_KEY_FILE);
+    const deviceFile: string =
+      String(want.parameters?.['deviceConfigFile'] ?? DEFAULT_DEVICE_CONFIG_FILE);
+
+    let setupKey: string;
+    let device: DeviceConfigFile;
+    try {
+      // DEVELOPMENT-TIME credential source, NOT secure storage (module doc
+      // + docs/n3-shell-integration-notes.md): plain filesDir files.
+      setupKey = readPrivateFileText(filesDir, setupKeyFile);
+      device = parseDeviceConfig(readPrivateFileText(filesDir, deviceFile));
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=credentials|' +
+        'errorClass=credentials-missing|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return;
+    }
+
+    const creds: Record<string, Object> = { 'setup_key': setupKey };
+    const start: ConnectorStartResult = connectorStart(buildConnectorConfigJson(device),
+      JSON.stringify(creds));
+    if (!start.started) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
+        this.requestId, start.error ?? 'start-failed');
+      return;
+    }
+    hilog.info(DOMAIN, TAG, 'VPN_CONNECTOR_STARTED|requestId=%{public}s|state=%{public}s',
+      this.requestId, start.state ?? 'unknown');
+
+    const net: CoreNetworkConfig | null = await this.waitNetworkConfigBounded();
+    if (this.destroyRequested) {
+      connectorStop();
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=false|state=closed|' +
+        'note=destroy-during-network-map-wait', this.requestId);
+      return;
+    }
+
+    const base: VpnTunnelConfig = loadVpnTunnelConfig();
+    const merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
+    if (net !== null) {
+      this.appliedNetSerial = net.serial ?? -1;
+      hilog.info(DOMAIN, TAG,
+        'VPN_NETCFG_APPLIED|requestId=%{public}s|serial=%{public}s|address=%{public}s|' +
+        'routes=%{public}d|dns=%{public}d|appliedAt=create',
+        this.requestId, String(this.appliedNetSerial), merged.tunnelAddress,
+        merged.routes.length, merged.dnsServers.length);
+    } else {
+      // map never arrived within the bounded box: fallback config, snapshot
+      // explicitly NOT applied
+      hilog.warn(DOMAIN, TAG,
+        'VPN_NETCFG_NOT_APPLIED|requestId=%{public}s|reason=no-network-map-in-box|' +
+        'boxMs=%{public}d|fallback=local-config', this.requestId, NETWORK_MAP_WAIT_MS);
+    }
+    this.logConfigApplied(merged);
+
+    const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_BEGIN|requestId=%{public}s|address=%{public}s|prefixLength=%{public}d',
-      this.requestId, tunnelConfig.tunnelAddress, tunnelConfig.tunnelPrefixLength);
-    try {
-      const rawCreate: Promise<number> = connection.create(config);
-      this.createPromise = rawCreate.then((fd: number): Promise<CreateOutcome> => {
-        return this.settleCreate(fd);
-      }, (error: Error): CreateOutcome => {
-        this.createSettled = true;
-        hilog.error(DOMAIN, TAG,
-          'VPN_CREATE_REJECTED|requestId=%{public}s|phase=create|summary=%{public}s',
-          this.requestId, safeError(error));
-        return {
-          destroyRequired: false,
-          accepted: false,
-          reason: 'create-rejected'
-        };
-      });
-    } catch (error) {
+      this.requestId, merged.tunnelAddress, merged.tunnelPrefixLength);
+    const rawCreate: Promise<number> = connection.create(config);
+    this.createPromise = rawCreate.then((fd: number): Promise<CreateOutcome> => {
+      return this.settleCreate(fd);
+    }, (error: Error): CreateOutcome => {
       this.createSettled = true;
       hilog.error(DOMAIN, TAG,
-        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=create-sync|summary=%{public}s',
-        this.requestId, safeError(error as Error));
+        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=create|summary=%{public}s',
+        this.requestId, safeError(error));
+      return {
+        destroyRequired: false,
+        accepted: false,
+        reason: 'create-rejected'
+      };
+    });
+  }
+
+  // Bounded wait for the first network map (NETWORK_MAP_WAIT_MS box,
+  // NETWORK_MAP_POLL_MS steps). Returns null on box expiry — never throws.
+  private async waitNetworkConfigBounded(): Promise<CoreNetworkConfig | null> {
+    const deadline: number = Date.now() + NETWORK_MAP_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (this.destroyRequested) {
+        return null;
+      }
+      try {
+        const net: CoreNetworkConfig = connectorNetworkConfig();
+        if (net.available) {
+          return net;
+        }
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_NETCFG_POLL_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error as Error));
+      }
+      await sleep(NETWORK_MAP_POLL_MS);
+    }
+    return null;
+  }
+
+  // Runtime watch (while the VPN is up): poll connector_status (state /
+  // counts / last error class) and connector_network_config. Platform
+  // conclusion baked in here: VpnConnection has NO runtime route/DNS update
+  // API — a map serial newer than the applied one is logged as explicitly
+  // NOT applied, never silently dropped, never pretended applied.
+  private startStatusAndNetcfgWatcher(): void {
+    if (this.watcherTimer >= 0 || this.destroyRequested) {
+      return;
+    }
+    this.watcherTimer = setInterval((): void => {
+      const status: ConnectorStatusResult | null = pollStatusOrNull();
+      if (status !== null) {
+        const errorClass: string =
+          status.last_error !== null && status.last_error !== undefined
+            ? status.last_error.class
+            : 'none';
+        hilog.info(DOMAIN, TAG,
+          'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
+          'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s',
+          this.requestId, String(status.running), status.state, status.peer_count,
+          status.route_count, status.reconnects, errorClass);
+      }
+      try {
+        const net: CoreNetworkConfig = connectorNetworkConfig();
+        const serial: number = net.available && net.serial !== undefined ? net.serial : -1;
+        if (serial >= 0 && serial !== this.appliedNetSerial) {
+          hilog.warn(DOMAIN, TAG,
+            'VPN_NETCFG_CHANGED_NOT_APPLIED|requestId=%{public}s|appliedSerial=%{public}d|' +
+            'newSerial=%{public}d|reason=platform-vpnconfig-fixed-at-create',
+            this.requestId, this.appliedNetSerial, serial);
+        }
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_NETCFG_WATCH_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error as Error));
+      }
+    }, STATUS_POLL_MS);
+  }
+
+  private stopStatusAndNetcfgWatcher(): void {
+    if (this.watcherTimer >= 0) {
+      clearInterval(this.watcherTimer);
+      this.watcherTimer = -1;
     }
   }
 
@@ -231,6 +381,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // protected socket (WireGuard handshake towards the configured endpoint)
     // is not wired — it needs a dup-copy-taking core export (Rust side). The
     // protect gate itself is verified platform shape (e8e2cf9).
+    // VPN is up (create accepted + protect passed): start the status /
+    // network-config watch. Runtime map changes are logged as NOT applied
+    // (platform VpnConfig fixed at create — see the watcher).
+    this.startStatusAndNetcfgWatcher();
     return {
       destroyRequired: true,
       accepted: true,
@@ -318,6 +472,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'VPN_ONDESTROY|requestId=%{public}s', this.requestId);
+    // Stop flow (N3-6): latch first (the async start flow must not create
+    // past this point), stop the watch, stop the connector (idempotent,
+    // safe with no connector), then the exactly-once VPN destroy — the
+    // destroy semantics and fd contract are unchanged.
+    this.destroyRequested = true;
+    this.stopStatusAndNetcfgWatcher();
+    try {
+      const stop = connectorStop();
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s',
+        this.requestId, String(stop.already_stopped), stop.state);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    }
     this.destroyOnce('onDestroy').catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=unexpected|summary=%{public}s',
