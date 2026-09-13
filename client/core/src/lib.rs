@@ -111,6 +111,17 @@ pub mod credential;
 pub mod envelope;
 pub mod grpc;
 pub mod hilog;
+// N9: HOST-ONLY interop harness sockets + CLI engine support
+// (docs/self-hosted-interop-plan.md). 主机联调专用，非设备路径: this module
+// creates plain sockets itself (no VpnConnection.protect exists on the host)
+// and feeds them through the UNCHANGED production seams
+// (`connector_start_with_socket` / `connector_*_feed`). It never relaxes the
+// device-path fail-closed invariants: the device still starts only through
+// shell-fed fds (`connector_start` keeps refusing by default), the device
+// path never calls into this module, and the shipped cdylib behavior is
+// unchanged. Compiled into the rlib so `cargo test` can cover the pure
+// logic; only `cargo build --features cli --bin nbinterop` consumes it.
+pub mod host_sockets;
 // N5a: ICE candidate gathering (host + srflx via STUN) — candidate model in
 // the Body.payload wire form, protected-UDP provider, fail-closed seams.
 pub mod ice;

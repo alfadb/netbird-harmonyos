@@ -79,3 +79,21 @@ prost-types = "0.14"
 rcgen = "0.14.10"
 tokio = { version = "1", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+
+# N9 host-interop harness: the `cli` feature gates ONLY the host-only bin
+# target below (src/bin/nbinterop.rs). The cdylib chain (build.sh, the OHOS
+# cross build) never enables it, so the frozen artifact path is untouched.
+# Feature-only: no new dependencies (the CLI hand-parses its args and reuses
+# the crate's frozen offline dependency set — Cargo.lock unchanged).
+[features]
+cli = []
+
+[[bin]]
+name = "nbinterop"
+path = "src/bin/nbinterop.rs"
+# Host-only interop harness (docs/self-hosted-interop-plan.md). Built
+# explicitly on the host triple:
+#   cargo build --offline --locked --features cli --bin nbinterop
+# `required-features` keeps the bin out of `cargo build` / `cargo test` and
+# out of the OHOS cross build unless the `cli` feature is requested.
+required-features = ["cli"]
