@@ -1382,6 +1382,10 @@ pub struct ShellDnsServer {
 pub struct ShellPeerSummary {
     pub pub_key_b64: String,
     pub allowed_ips: usize,
+    /// The peer's allowed IPs as dotted-quad/prefix strings (the peer's VPN
+    /// address lives here). Public runtime material — the interop CLI reads
+    /// this for probe targeting (`--probe-dst`); nothing secret.
+    pub vpn_addresses: Vec<String>,
 }
 
 /// Read-only snapshot of the shell-applicable subset of the LAST APPLIED
@@ -1469,8 +1473,13 @@ impl ShellNetworkConfig {
         tunnel_ready: bool,
     ) -> ShellNetworkConfig {
         let address = map.peer.as_ref().and_then(|p| p.address.clone());
-        let address_prefix_len =
-            address.as_deref().and_then(config::parse_ipv4).map(|_| 32u8);
+        let address_prefix_len = address
+            .as_deref()
+            // NetBird delivers "ip/prefix" ("100.102.55.28/16"); the prefix
+            // length rides the suffix, the address part decides IPv4-ness.
+            .and_then(|a| a.split('/').next())
+            .and_then(config::parse_ipv4)
+            .map(|_| 32u8);
         let peer_count = map.peers.len() + map.offline_peers.len();
         let (default_route_allowed, default_route_reason) =
             Self::default_route_decision(peer_count, tunnel_ready, force_default_route);
@@ -1509,6 +1518,11 @@ impl ShellNetworkConfig {
             .map(|p| ShellPeerSummary {
                 pub_key_b64: p.wg_pub_key.clone(),
                 allowed_ips: p.allowed_ips.len(),
+                vpn_addresses: p
+                    .allowed_ips
+                    .iter()
+                    .map(route_network_string)
+                    .collect(),
             })
             .collect();
         ShellNetworkConfig {
@@ -1560,10 +1574,17 @@ impl ShellNetworkConfig {
             if i > 0 {
                 peers.push(',');
             }
+            let vpn = p
+                .vpn_addresses
+                .iter()
+                .map(|a| format!("\"{a}\""))
+                .collect::<Vec<String>>()
+                .join(",");
             peers.push_str(&format!(
-                "{{{},{}}}",
+                "{{{},{},\"vpn_addresses\":[{}]}}",
                 jstr("pub_key", &p.pub_key_b64),
-                jnum("allowed_ips", p.allowed_ips as u64)
+                jnum("allowed_ips", p.allowed_ips as u64),
+                vpn
             ));
         }
         let address = match self.address.as_ref() {
@@ -3744,6 +3765,10 @@ mod tests {
         assert_eq!(snap.peers.len(), 3);
         assert_eq!(snap.peers[0].pub_key_b64, "UEVFUjA=");
         assert_eq!(snap.peers[0].allowed_ips, 2);
+        assert_eq!(
+            snap.peers[0].vpn_addresses,
+            vec!["10.30.30.1/32".to_string(), "192.168.7.0/24".to_string()]
+        );
         assert_eq!(snap.peers[2].pub_key_b64, "T0ZGTElORQ==");
         assert_eq!(snap.peers[2].allowed_ips, 1);
 
@@ -3759,7 +3784,8 @@ mod tests {
             "{\"ip\":\"1.1.1.1\",\"port\":53}",
             "{\"ip\":\"8.8.8.8\",\"port\":853}",
             "\"peer_count\":3",
-            "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2}",
+            "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2,\
+              \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"]}",
             // N3-7 gate markers
             "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
         ] {

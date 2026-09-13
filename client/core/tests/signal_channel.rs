@@ -11,9 +11,15 @@
 //!    upstream always sends it (signal.go:87,117), absence = misbehaving
 //!    server → fail closed.
 //! 2. Offer/Answer/Candidate round trip between TWO REAL clients through
-//!    the mock forwarder, with server-side REAL decryption of the sealed
-//!    bodies (the sink peer opens with the sender's public key and asserts
-//!    the plaintext fields — type/payload/wgListenPort/netBirdVersion).
+//!    the mock forwarder — every frame rides the UNARY `Send` RPC, the
+//!    only path the deployed server generation forwards (v0.78.1 never
+//!    reads `ConnectStream` inbound frames) — with server-side REAL
+//!    decryption of the sealed bodies (the sink peer opens with the
+//!    sender's public key and asserts the plaintext fields —
+//!    type/payload/wgListenPort/netBirdVersion). The registered streams
+//!    carry NO client→server frames (N10b: stream-side sends are
+//!    black-holed by the real server, `SignalClient::register` no longer
+//!    exposes an outbound half).
 //! 3. HEARTBEAT self-addressed round trip (Key = RemoteKey = own key,
 //!    grpc.go:555-566): the server routes it straight back.
 //! 4. REAL TLS handshake (rcgen CA + leaf): exchange over TLS through the
@@ -29,7 +35,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use prost::Message as _;
 use tonic::Streaming;
 
 use netbird_core::envelope::EnvelopeKeyPair;
@@ -97,7 +102,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     let sink_records = sink.records.clone();
     mock.sink = Arc::new(Mutex::new(Some(sink)));
     // install BEFORE the clone: the server copy shares the sink Arc
-    let (addr, _counter) = spawn_signal_mock(mock).await;
+    let (addr, _counter) = spawn_signal_mock(mock.clone()).await;
 
     let source_a = socket_source(1);
     let source_b = socket_source(1);
@@ -108,7 +113,9 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     let mut reg_a = client_a.register().await.expect("A register");
     let mut reg_b = client_b.register().await.expect("B register");
 
-    // --- OFFER: A → B through the open streams
+    // --- OFFER: A → B through the UNARY Send RPC (the only forwarding
+    // path of the deployed server generation; v0.78.1 never reads the
+    // ConnectStream body — signal.go:106-132)
     let offer = client_a.build_message(
         &keys_b.public_key_base64(),
         body::Type::Offer,
@@ -118,7 +125,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     let wire = client_a.encrypt_message(&offer).expect("seal");
     assert_eq!(wire.key, keys_a.public_key_base64());
     assert_eq!(wire.remote_key, keys_b.public_key_base64());
-    reg_a.outbound.send(wire).await.expect("send offer");
+    client_a.send(&offer).await.expect("send offer (unary)");
 
     let env_b = recv(&mut reg_b.inbound).await;
     let got_b = client_b.decrypt_envelope(&env_b).expect("B opens");
@@ -129,25 +136,21 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     assert_eq!(got_b.wg_listen_port, 51_820);
     assert_eq!(got_b.net_bird_version, SIGNAL_CLIENT_VERSION);
 
-    // --- ANSWER: B → A
+    // --- ANSWER: B → A (unary as well)
     let answer = client_b.build_message(
         &keys_a.public_key_base64(),
         body::Type::Answer,
         "ufragB:pwdB",
         51_821,
     );
-    reg_b
-        .outbound
-        .send(client_b.encrypt_message(&answer).expect("seal"))
-        .await
-        .expect("send answer");
+    client_b.send(&answer).await.expect("send answer (unary)");
     let env_a = recv(&mut reg_a.inbound).await;
     let got_a = client_a.decrypt_envelope(&env_a).expect("A opens");
     assert_eq!(got_a.kind, body::Type::Answer);
     assert_eq!(got_a.payload, "ufragB:pwdB");
     assert_eq!(got_a.wg_listen_port, 51_821);
 
-    // --- CANDIDATE: A → B via the UNARY Send RPC (both paths exercised)
+    // --- CANDIDATE: A → B via the UNARY Send RPC
     client_a
         .send(&client_a.build_message(
             &keys_b.public_key_base64(),
@@ -163,7 +166,10 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     assert_eq!(got_c.payload, "candidate:udp:127.0.0.1:51820");
 
     // --- server-side decrypt proof: the sink opened the sealed frames with
-    // B's private key and saw exactly the plaintext fields
+    // B's private key and saw exactly the plaintext fields; everything
+    // arrived through the unary path and NOTHING rode the stream bodies
+    // (the v0.78.1 server never reads them — and the mock counts any such
+    // frame instead of forwarding)
     let records = sink_records.lock().expect("records");
     let offer_rec =
         format!("{}|ufragA:pwdA|51820|{SIGNAL_CLIENT_VERSION}", body::Type::Offer as i32);
@@ -184,6 +190,9 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
         !records.iter().any(|r| r.contains("ufragB:pwdB")),
         "messages sealed for A must not be decryptable by B's key"
     );
+    drop(records);
+    assert_eq!(mock.stream_frames_seen(), 0, "no frame may ride the ConnectStream body");
+    assert!(mock.unary_sends() >= 3, "all frames ride the unary Send");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -281,18 +290,15 @@ async fn every_reconnect_takes_a_fresh_protected_socket_and_exhaustion_fails_clo
         source.taken() >= 2,
         "every reconnect re-protects (N3-7 parity): the re-dial took a fresh fd"
     );
-    // the new stream really works: a self-addressed candidate through it
+    // the new stream really works: a self-addressed candidate through the
+    // unary Send (the registered stream itself carries no client frames)
     let m = client.build_message(
         &keys.public_key_base64(),
         body::Type::Candidate,
         "post-reconnect",
         0,
     );
-    reg2
-        .outbound
-        .send(client.encrypt_message(&m).expect("seal"))
-        .await
-        .expect("send on new stream");
+    client.send(&m).await.expect("send on re-registered channel");
     let env = recv(&mut reg2.inbound).await;
     assert_eq!(client.decrypt_envelope(&env).expect("open").payload, "post-reconnect");
 

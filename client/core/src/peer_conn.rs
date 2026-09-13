@@ -96,6 +96,14 @@ use crate::util::jnum;
 /// 发起/应答失败后的重试冷却（注入时钟衡量；避免熵/收集失败时热循环）。
 pub const RETRY_COOLDOWN_MS: u64 = 2000;
 
+/// 握手重发周期（注入时钟衡量）：signal 服务端对未注册目的地的转发是
+/// best-effort 丢弃（signal.go forwardMessageToPeer 的 not-connected
+/// 路径，"todo respond to the sender?"），先发方的 OFFER/候选可能在
+/// 对端注册前被丢掉且**无任何错误面**。会话未 Connected 前周期性把已
+/// 发帧重新入队——上游 handshaker 对握手的重试职责（handshaker 会
+/// 重发 OFFER 直到 ICE Connected / 失败重启）。
+pub const HANDSHAKE_RETRY_MS: u64 = 3000;
+
 // ---------------------------------------------------------------------------
 // 状态模型
 // ---------------------------------------------------------------------------
@@ -217,7 +225,9 @@ fn wire_kind(kind: PeerSignalKind) -> crate::signal::proto::body::Type {
 /// 生产 [`SignalExchange`]（N5d）：把编排层的帧经无界队列交给
 /// [`spawn_signal_link`] 启动的 signal worker，由
 /// [`crate::signal::SignalSession`] 密封（peer=remote_key，
-/// grpc.go:434-451）并推上注册好的 `ConnectStream`（grpc.go:396-411）。
+/// grpc.go:434-451）并经 **unary `SignalExchange/Send`** 送达
+/// （signal.go:95-104；N10b：0.78.1 起服务端 `ConnectStream` 从不读
+/// 请求体，流侧发送会被静默黑洞——见 `docs/interop-run-1-20260913.md`）。
 ///
 /// **未注册 → 显式失败，不静默丢弃**：`send()` 在 link 未注册时返回
 /// `Network` 类错误（upstream `ErrSignalIsNotReady` 同型，
@@ -518,6 +528,12 @@ struct PeerConn {
     endpoint_applied: bool,
     last_error: Option<ErrorClass>,
     cooldown_until: u64,
+    /// 已成功送进 signal seam 的帧（offer/候选/answer），供握手重发
+    /// （见 [`HANDSHAKE_RETRY_MS`]：对端未注册时服务端按 best-effort
+    /// 丢弃转发，重发直到 Connected 是上游 handshaker 的职责）。
+    signaled: Vec<(PeerSignalKind, String)>,
+    /// 下一次握手重发的时刻（0 = 尚无已发帧）。
+    retry_at_ms: u64,
 }
 
 impl PeerConn {
@@ -541,6 +557,8 @@ impl PeerConn {
             endpoint_applied: false,
             last_error: None,
             cooldown_until: 0,
+            signaled: Vec::new(),
+            retry_at_ms: 0,
         }
     }
 
@@ -800,9 +818,35 @@ impl PeerIceOrchestrator {
                         }
                     }
                 }
+                // 握手重发（HANDSHAKE_RETRY_MS 周期，注入时钟）：会话未
+                // Connected 前，把已送进 seam 的帧（OFFER/候选/ANSWER）
+                // 重新入队——对端未注册时服务端会静默丢弃转发，若不重发
+                // 握手就永久卡死（round-6 现场归因）。对端已就绪时这些
+                // 重复帧是幂等的（凭证采纳为 no-op、候选按 (addr,port)
+                // 去重）。
+                let needs_retry = {
+                    let p = &self.peers[idx];
+                    !p.signaled.is_empty()
+                        && p.state != PeerIceState::Connected
+                        && p.retry_at_ms != 0
+                        && now_ms >= p.retry_at_ms
+                };
+                if needs_retry {
+                    let p = &mut self.peers[idx];
+                    p.retry_at_ms = now_ms + HANDSHAKE_RETRY_MS;
+                    for frame in p.signaled.clone() {
+                        p.outbox.push_back(frame);
+                    }
+                }
                 if let Err(e) = self.flush_outbox(idx) {
                     if first_err.is_none() {
                         first_err = Some(e);
+                    }
+                }
+                {
+                    let peer = &mut self.peers[idx];
+                    if peer.retry_at_ms == 0 && !peer.signaled.is_empty() {
+                        peer.retry_at_ms = now_ms + HANDSHAKE_RETRY_MS;
                     }
                 }
                 {
@@ -889,6 +933,7 @@ impl PeerIceOrchestrator {
     }
 
     /// outbox FIFO 刷给 signal seam；失败即停（剩余帧下一拍重试）。
+    /// 成功送出的帧记入 `signaled`（握手重发的母本，去重）。
     fn flush_outbox(&mut self, idx: usize) -> Result<(), ManagementError> {
         loop {
             let (kind, payload, key) = {
@@ -899,7 +944,13 @@ impl PeerIceOrchestrator {
                 }
             };
             self.signal.send(&key, kind, &payload, 0)?;
-            self.peers[idx].outbox.pop_front();
+            {
+                let peer = &mut self.peers[idx];
+                peer.outbox.pop_front();
+                if !peer.signaled.contains(&(kind, payload.clone())) {
+                    peer.signaled.push((kind, payload));
+                }
+            }
         }
     }
 
@@ -951,7 +1002,16 @@ impl PeerIceOrchestrator {
                         // conn.go:444-478 的本仓等价物）。落配失败 ≠ 可用：
                         // 记 Network 类错误，不给默认路由闸任何可用信号。
                         match self.wg.apply_endpoint(&peer.key, addr, remote.port) {
-                            Ok(()) => peer.endpoint_applied = true,
+                            Ok(()) => {
+                                peer.endpoint_applied = true;
+                                // selected-pair evidence (public runtime
+                                // material: ip + port only)
+                                crate::hilog::emit(&format!(
+                                    "N5_ICE|selected-pair|{}:{}",
+                                    std::net::Ipv4Addr::from(addr),
+                                    remote.port
+                                ));
+                            }
                             Err(msg) => {
                                 peer.endpoint_applied = false;
                                 let e = ManagementError::Network(format!("wg-endpoint: {msg}"));
@@ -1113,6 +1173,86 @@ mod tests {
             crate::connector::ShellNetworkConfig::default_route_decision(2, tunnel_ready, false);
         assert!(!allowed);
         assert_eq!(reason, "default-route-held:data-plane-not-ready");
+    }
+
+    #[test]
+    fn handshake_is_re_signaled_periodically_until_connected() {
+        // round-6 归因的回归钉子：OFFER/候选在信号 seam 交付成功后，若对端
+        // 一直没有回音（典型：对端尚未注册，服务端 best-effort 丢弃转发，
+        // 无任何错误面），编排层必须按 HANDSHAKE_RETRY_MS 周期重发已发帧，
+        // 直到该 peer Connected；重发不得无限增长 signaled 母本。
+        #[derive(Default)]
+        struct RecordingSignal {
+            frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
+        }
+        impl SignalExchange for RecordingSignal {
+            fn send(
+                &self,
+                to_key: &str,
+                kind: PeerSignalKind,
+                payload: &str,
+                _port: u32,
+            ) -> Result<(), ManagementError> {
+                self.frames
+                    .lock()
+                    .expect("frames")
+                    .push((to_key.to_string(), kind, payload.to_string()));
+                Ok(())
+            }
+        }
+
+        // 真实可绑定的本地候选（host 测试：原始 UDP socket 喂给源）
+        extern "C" {
+            fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+        }
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        for _ in 0..4 {
+            let fd = unsafe { socket(2, 2, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd);
+        }
+
+        let signal = Arc::new(RecordingSignal::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+
+        let sent = || signal.frames.lock().expect("frames").len();
+        // 拍 1（t=1000）：发起 → gather → OFFER + 候选交付 seam
+        orch.run_once(1000).expect("first beat converges the send");
+        let first = sent();
+        assert!(first >= 2, "offer + candidates must be delivered, got {first}");
+        // 首发后重发定时器已武装：冷却窗口内（<1000+3000）无重发
+        orch.run_once(2000).expect("beat 2");
+        orch.run_once(3999).expect("beat 3");
+        assert_eq!(sent(), first, "no re-signal before HANDSHAKE_RETRY_MS");
+        // 到点：重发同一批帧（offer + 候选），且母本不增长（去重）
+        orch.run_once(4000).expect("beat 4 fires the retry");
+        assert!(sent() >= first * 2, "re-signal must re-deliver the frames");
+        {
+            let p = &orch.peers[0];
+            assert_eq!(
+                p.signaled.len(),
+                first,
+                "signaled store stays deduplicated ({} vs {})",
+                p.signaled.len(),
+                first
+            );
+        }
+        // 继续周期重发（t=7000 再到点）
+        orch.run_once(6999).expect("beat 5");
+        assert_eq!(sent(), first * 2, "still inside the retry window");
+        orch.run_once(7000).expect("beat 6 fires the second retry");
+        assert!(sent() >= first * 3, "periodic re-signal continues until Connected");
     }
 
     #[test]

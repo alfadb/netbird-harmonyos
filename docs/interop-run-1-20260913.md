@@ -174,3 +174,155 @@ setup key 注册，**不需要任何外部 IdP（Zitadel）或 OIDC 交互**：
 - `client/core/tests/ice_gather.rs`：+2 host 回归测试（+22）。
 - `docs/interop-run-1-20260913.md`：本文件（新建）。
 - 其余产物均在仓库外 `/home/worker/netbird-interop/`。
+
+---
+
+# 第二轮（N10b）—— signal 出帧黑洞根因修复 + 数据面里程碑更新
+
+日期：2026-09-13 晚（同一环境复用第一轮现场）。结论先行：
+
+1. **第一轮第 6 节"开放问题"已定位并修复**：出帧从未到达服务端的根因
+   是**本仓把 OFFER/候选推上了 `ConnectStream` 请求体，而 0.78.1 服务端
+   从不读流**（详见 §N10b-1）。修复后信号面全通：服务端 trace 出现
+   双向 `received a new message`（96 行）与 `forwarding a new message`
+   （signal.go:162）。
+2. **六项里程碑更新**：①②③ 维持 PASS；**④ ICE Connected + 一致选路
+   本轮达成（PASS）**；⑤⑥ 未达，但归因已从"信号面黑洞"推进为**新的、
+   证据完备的数据面边界问题**（WG 传输 socket ≠ ICE 选中的 socket，
+   §N10b-4）。
+3. 附带发现并修复两处小缺陷：网络图自身地址带 CIDR 后缀导致探针源解析
+   失败；握手帧被丢后无重发机制（上游 handshaker 职责，§N10b-3）。
+
+## N10b-1 根因（含关键代码路径与证据）
+
+- **服务端行为（第一轮结论的修正）**：v0.78.1 `ConnectStream`
+  （signal/server/signal.go:106-132）注册 + 回确认头后阻塞在
+  `stream.Context().Done()`，**从不 `stream.Recv()`**；转发只发生在
+  unary `Send`（signal.go:95-104 → forwardMessageToPeer L155-209）。
+  第一轮"服务端 trace 接收计数 0"里，`received a new message...`
+  实为 **Tracef 且只在 unary 路径**——流侧收到的帧连日志都不会有。
+- **客户端行为（证据修正）**：第一轮"客户端 strace 无 DATA 帧写出"的
+  观察不准确：`/tmp/nb-a2.strace`（18:46，修复 libc 后的定点复跑）
+  显示 signal 连接 fd 28 上**有** 679 字节 DATA 帧（OFFER+候选，h2
+  stream 1）。帧**离开了进程**，但服务端 gRPC 传输层 ACK 后应用层永不
+  读取——与"零接收、零错误、reconnects=0、无 Broken"的全部观察吻合。
+- **本仓缺陷路径**：`SignalSession::send_to_stream`（N4a
+  `SendToStream` grpc.go:396-411 同型）把帧推入 mpsc(64) 请求体 →
+  `OutboundStream` → h2。mock 测试全绿的原因：`tests/signal_mock` 按
+  **旧版上游形态**实现了"读流并转发"的任务（signal_mock mod.rs 旧
+  L402-416），真实服务端没有这条路径。
+- **上游客户端对照**：signaler.go:36-66（OFFER/ANSWER/CANDIDATE/GO_IDLE）
+  与心跳探针 grpc.go:555-566 全部走 unary `Send`；`SendToStream` 无引擎
+  调用方。本仓实现把未用的上游兼容面当成了生产行为。
+
+## N10b-2 修复（最小必要改动，全部在 `client/core/**`）
+
+1. `src/signal.rs`：`SignalSession::send_outgoing` 改走 unary
+   `SignalExchange/Send`（`SignalClient::send`，上游 signaler.go:36-66
+   对应物）；删除 `send_to_stream` 及整条流侧发送机器（`OutboundStream`
+   / mpsc(64) / `RegisteredStream.outbound`），`register()` 的请求体改为
+   永不 yield 的 `PendingStream`——保持流打开（上游 Go 客户端同型）且
+   **结构上杜绝**再向流体发帧。模块文档同步（"the server is a pure
+   forwarder"小节）。
+2. `tests/signal_mock/mod.rs`：mock 改为真实 0.78.1 形态——`ConnectStream`
+   请求体**只计数不转发**（`stream_frames_seen`），转发只走 unary
+   （`unary_sends` 计数）。既有信号测试套件在此形态下全绿即回归面。
+3. `tests/signal_channel.rs`：两处流侧发送改为 unary（原断言强度不变，
+   并新增 `stream_frames_seen()==0` / `unary_sends()>=3` 断言）。
+4. `tests/signal_link.rs`：新增专门回归测试
+   **`offer_reaches_sink_via_unary_send_while_server_never_reads_the_stream`**
+   （服务端只收不回的保守场景：B 只有解密 sink、不发一帧；A 经完整
+   编排→exchange→worker 链路发起）。**修复前失败证据**：还原 bug 版
+   `signal.rs`（git HEAD）跑本套件——该测试在
+   `signal_link.rs:555`（OFFER 必达断言）失败，且同套件 4 个双实例测试
+   全部失败（converge 断言）；恢复修复后全绿。单测计数对账：修复前
+   `signal_link` 套件 `1 passed; 4 failed`，修复后 `5 passed; 0 failed`。
+5. `src/peer_conn.rs`：新增握手重发（`HANDSHAKE_RETRY_MS=3000`）——
+   signal 服务端对未注册目的地的转发是 best-effort 丢弃
+   （forwardMessageToPeer 的 not-connected 路径），首发 OFFER/候选可能
+   在对端注册前被丢且无错误面；会话未 Connected 前按周期把已发帧
+   （`signaled` 母本，去重）重新入队，Connected 即停。上游对应职责在
+   handshaker（重发 OFFER 直到 ICE 成功）。回归钉子：
+   `handshake_is_re_signaled_periodically_until_connected`。
+6. 附带两处小修复：`src/host_sockets.rs` 网络图自身地址解析容忍 CIDR
+   后缀（`"100.102.55.28/16"`，此前导致探针源 `own_addr` 永远缺失）+
+   单测；`src/connector.rs` 快照 peers 增加 `vpn_addresses`（公开运行时
+   材料），`src/bin/nbinterop.rs` 一次性打印本端/对端 VPN 地址与
+   selected-pair 证据行。
+
+**影响面**：device 路径（OHOS/musl）不受影响——改动全部在信号发送 seam
+与 host 测试夹具；`send_to_stream` 的公开 API 移除已核对本仓无其他调用方
+（唯一调用方是 `send_outgoing`）。既有测试强度未降低：mock 更严了
+（流上帧只计数 = 真实服务端形态），原流侧发送断言改走 unary 后覆盖等价。
+
+## N10b-3 六项里程碑更新结果（round-7 双实例，同环境）
+
+| # | 里程碑 | 第一轮 | 第二轮（N10b） | 证据（原始片段） |
+| --- | --- | --- | --- | --- |
+| ① | login（信封加密） | PASS | **PASS** | `connector: login ok (peer address assigned)`；`state -> connected` |
+| ② | Sync 网络图 | PASS | **PASS** | `network map applied serial=2 peers=1`；`own tunnel address [100, 102, 55, 28]; peer vpn addresses: ["100.102.1.90/32"]` |
+| ③ | signal registered | PASS | **PASS** | `[milestone] signal registered`；服务端 `peer registered [xHgwt1pN…]`/`[qkCtgzGR…]` |
+| ④ | ICE Connected + 一致选路 | FAIL | **PASS（新达成）** | 双端 `hilog\|N5_ICE\|selected-pair\|10.98.0.180:59554`（A→B 端点）/`…:41412`（B→A 端点）；`[milestone] ice connected peers = 1`（双端）；status 双端 `ice:{connected:1,endpoints_applied:1,reachable:1,last_error:null}` |
+| ⑤ | WG handshake | FAIL | **FAIL（新归因，见 N10b-4）** | 双端 `handshakes:9/10`、`peers_with_session:0`、`rx_packets:0` |
+| ⑥ | 双向探针 | FAIL | **FAIL（依赖 ⑤）** | `tx_packets:9/10, rx_packets:0` |
+
+信号面服务端证据（round-7，logLevel=trace）：
+
+```
+19:44:11.404 TRAC signal/server/signal.go:96: received a new message to send from peer [qkCtgzGR…] to peer [xHgwt1pN…]
+19:44:11.404 TRAC signal/server/signal.go:162: forwarding a new message from peer [qkCtgzGR…] to peer [xHgwt1pN…]
+19:44:12.405 TRAC signal/server/signal.go:96:  received a new message to send from peer [xHgwt1pN…] to peer [qkCtgzGR…]
+19:44:12.405 TRAC signal/server/signal.go:162:  forwarding a new message from peer [xHgwt1pN…] to peer [qkCtgzGR…]
+```
+
+（B→A 与 A→B 双向收+转；A→B 的首发在 B 注册前被 best-effort 丢弃，
+由握手重发在 +3s 补达——N10b-2 第 5 条机制的实测生效。）
+
+## N10b-4 ⑤⑥ 未达的新归因（证据完备，不蒙混）
+
+- **现象**：ICE Connected 后，WG 侧双端各自发起握手 9/10 次，但
+  `peers_with_session:0`、`rx_packets:0`（对端 WG 设备零接收）。
+- **直接证据（round-7 双端日志）**：
+  - A 的 WG 传输 socket：`N6_WG_DEVICE|adopt|local=0.0.0.0:49599`
+  - B 的 WG 传输 socket：`N6_WG_DEVICE|adopt|local=0.0.0.0:46832`
+  - A 落配的对端 WG endpoint：`10.98.0.180:41412`（= B 的 **ICE 候选
+    socket**，非 46832）
+  - B 落配的对端 WG endpoint：`10.98.0.180:59554`（= A 的 **ICE 候选
+    socket**，非 49599）
+- **归因**：本仓 N6 设计里 WG 设备持有**独立的受保护 UDP socket**，
+  而 endpoint 落配用的是 ICE 选中候选（对端的 **ICE 检查 socket**）。
+  WG 握手包被发到对端 ICE socket 上，被 ICE 会话当作非 STUN 包丢弃，
+  永远到不了对端 WG socket——`rx=0`、会话永不建立。上游 netbird 的
+  对应拓扑是 **WG 直接骑在 ICE 选中的连接上**（选中后把 ICE conn 作为
+  WG transport，因此"endpoint=候选地址"天然成立）；本仓要在双端成立
+  等价语义，需要"ICE 选中 socket 让渡/复用为 WG 传输"的架构增量
+  （或对 ICE/WG 共享 socket 做 STUN/noise 分用），**超出 N10b 的
+  最小修复范围**，按任务要求保留现场、如实归因，留待下一增量。
+- ⑥ 双向探针依赖 ⑤ 的会话密钥，随之未达。
+
+## N10b-5 验收（实跑输出）
+
+1. `cargo test --offline --locked`（最终代码，连跑 3 次）：22 套件、
+   **300 passed / 0 failed** ×3（新增 1 个信号回归 + 1 个重发回归 +
+   1 个 CIDR 解析断言并入既有测试）。
+2. `bash client/core/build.sh` → exit 0；`bash client/build.sh` → exit 0。
+3. 回归测试证据见 §N10b-2 第 4 条（修复前 4 failed / 修复后全绿）。
+4. 六项里程碑与 ⑤⑥ 新归因见 §N10b-3 / §N10b-4。
+
+## N10b-6 现场与收尾
+
+- 服务端以 `logLevel: "trace"` 重启（`config.yaml` 该键按文件内注释的
+  诊断用法切回 trace），诊断结束后**已停止、端口已释放**：进程确认无
+  `netbird-server`，`ss` 复验 TCP 18080/19000/19090 与 UDP 3478 均无
+  监听（留档于本轮报告）。
+- 第一轮现场全部保留；本轮新增产物：
+  `run/nb-{a,b}.round6.{jsonl,log}`（修复前基线：信号收发已现、ICE
+  因首轮 offer 丢失停在 idle/failed）、`run/nb-{a,b}.round7.{jsonl,log}`
+  （④ 达成轮）、`server/logs/server-n10b.log`（trace 服务端日志）。
+- 凭据纪律：第一轮 setup key 仍然有效（revoke 从未落地、24h 有效期至
+  次日），本轮直接复用，未新建任何凭据；所有秘密仍在 600 文件内，
+  未进 argv/日志正文/报告/仓库。
+- `git status` 范围：`client/core/src/{signal.rs,peer_conn.rs,connector.rs,host_sockets.rs}`、
+  `client/core/src/bin/nbinterop.rs`、
+  `client/core/tests/{signal_mock/mod.rs,signal_channel.rs,signal_link.rs}`、
+  `docs/interop-run-1-20260913.md`、`docs/n3-signal-notes.md`（未 commit/push）。

@@ -443,8 +443,40 @@ pub fn own_address_from_network_config(text: &str) -> Option<[u8; 4]> {
     if !doc_bool(&doc, "available")? {
         return None;
     }
-    let s = doc_str(&doc, "address")?;
-    parse_ipv4(&s)
+    // NetBird delivers the tunnel address WITH its prefix ("100.102.55.28/16"
+    // — the deployed server shape); the probe source is the address part.
+    let raw = doc_str(&doc, "address")?;
+    let ip = raw.split('/').next().unwrap_or(raw.as_str());
+    parse_ipv4(ip)
+}
+
+/// Peer VPN addresses from the network-config snapshot: every entry of
+/// every `peers[*].vpn_addresses` (dotted-quad/prefix strings). The
+/// interop CLI surfaces these once so the operator can aim `--probe-dst`
+/// at the peer's managed address; public runtime material, no secrets.
+pub fn peer_vpn_addresses_from_network_config(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(doc) = parse_document(text) else { return out };
+    let Json::Obj(entries) = &doc else { return out };
+    let Some(Json::Arr(peers)) = entries.iter().find(|(k, _)| k == "peers").map(|(_, v)| v)
+    else {
+        return out;
+    };
+    for peer in peers {
+        let Json::Obj(fields) = peer else { continue };
+        for (k, v) in fields {
+            if k == "vpn_addresses" {
+                if let Json::Arr(addrs) = v {
+                    for a in addrs {
+                        if let Json::Str(s) = a {
+                            out.push(s.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse a strict dotted-quad IPv4 literal.
@@ -1437,6 +1469,14 @@ mod tests {
         assert_eq!(
             signal_uri_from_network_config("{\"available\":true,\"signal\":null}"),
             None
+        );
+        // the deployed server shape carries a CIDR suffix on the tunnel
+        // address ("ip/prefix") — the extractor takes the address part
+        // (N10b: "100.102.55.28/16" must not fail the probe source parse)
+        let cidr = "{\"available\":true,\"address\":\"100.102.55.28/16\"}";
+        assert_eq!(
+            own_address_from_network_config(cidr),
+            Some([100, 102, 55, 28])
         );
     }
 

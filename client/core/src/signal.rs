@@ -42,11 +42,29 @@
 //!   missing → `FailedPrecondition` L137-140), registers the peer, and the
 //!   stream handler confirms with `SendHeader(successHeader)` where
 //!   `successHeader = x-wiretrustee-peer-registered: 1` (L87, L117-121).
-//! - **The server is a pure forwarder** (it never holds peer keys, never
-//!   decrypts): `Send` looks the destination up in the registry and forwards
-//!   (signal.go:95-104; unknown destination → dispatcher, L103);
-//!   `forwardMessageToPeer` routes by `msg.RemoteKey` (L166) and pushes the
-//!   unchanged `EncryptedMessage` onto the destination stream (L161-209).
+//! - **The server is a pure forwarder** — and in the DEPLOYED generation
+//!   (v0.78.1, still true on main) it forwards ONLY frames that arrive on
+//!   the unary `Send` RPC (`signal.go:95-104`: lookup `msg.remote_key` in
+//!   the registry, forward; unknown destination → dispatcher). The
+//!   `ConnectStream` handler (`signal.go:106-132`) registers the peer,
+//!   confirms with the success header, and then blocks on
+//!   `stream.Context().Done()` — it NEVER calls `stream.Recv()`. Frames a
+//!   client pushes onto the stream body are ACKed by the gRPC transport
+//!   (HTTP/2 flow control) but never read by the application: no forward,
+//!   no error, no log — a silent black hole. That is exactly how the
+//!   upstream client drives it: `client/internal/peer/signaler.go:36-66`
+//!   sends OFFER/ANSWER/CANDIDATE/GO_IDLE through `signal.Send` (the UNARY,
+//!   `grpc.go:454-492`), the receive-watchdog probe is unary too
+//!   (`grpc.go:555-566`), and `SendToStream` (`grpc.go:396-411`) has no
+//!   callers in the engine. THIS crate originally pushed frames onto the
+//!   stream body and passed every mock test — the mock implemented the OLD
+//!   upstream shape (a Recv loop inside `ConnectStream`) and forwarded
+//!   them. Against the real 0.78.1 server the frames never left the
+//!   process observably (N10b root cause; see
+//!   `docs/interop-run-1-20260913.md` §N10b). Delivery here is therefore
+//!   UNARY-ONLY: [`SignalSession::send_outgoing`] routes through
+//!   [`SignalClient::send`], and the stream body is held open without ever
+//!   sending (see [`SignalClient::register`]).
 //! - **Heartbeat / keepalive**: `Body.HEARTBEAT = 6`
 //!   (signalexchange.proto L51) is used as a SELF-ADDRESSED probe the server
 //!   routes back to the sender (`shared/signal/client/grpc.go:555-566
@@ -151,6 +169,11 @@
 //! through (queued sends never wait for inbound traffic; a queued frame
 //! that was never sent survives a stream break only as far as the open
 //! stream — re-signaling on reconnect is the orchestrator's outbox job).
+//! N10b: queued frames are delivered through the UNARY
+//! `SignalExchange/Send` (`SignalSession::send_outgoing` →
+//! [`SignalClient::send`]) — the deployed server generation never reads
+//! the `ConnectStream` request body, so frame delivery must not touch it
+//! (module docs, "the server is a pure forwarder").
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -293,12 +316,11 @@ pub struct SignalClient {
     request_timeout: core::time::Duration,
 }
 
-/// A registered `ConnectStream`: the live outbound half plus the inbound
-/// frame source (upstream `proto.SignalExchange_ConnectStreamClient`).
+/// A registered `ConnectStream`: the inbound frame source (upstream
+/// `proto.SignalExchange_ConnectStreamClient`). The request body is held
+/// open and NEVER sent on — current servers never read it (see
+/// [`SignalClient::register`]); all outbound frames ride the unary `Send`.
 pub struct RegisteredStream {
-    /// Send [`proto::EncryptedMessage`]s through the stream
-    /// (upstream `SendToStream`, grpc.go:396-411).
-    pub outbound: tokio::sync::mpsc::Sender<proto::EncryptedMessage>,
     /// Receive [`proto::EncryptedMessage`]s pushed by the server.
     pub inbound: Streaming<proto::EncryptedMessage>,
 }
@@ -360,9 +382,19 @@ impl SignalClient {
     /// by the session like upstream grpc.go:324-327). A server rejecting
     /// the identity (e.g. `FailedPrecondition` for a missing header,
     /// signal.go:137-140) maps through [`map_grpc_status`].
+    ///
+    /// The request body is a stream that NEVER yields and NEVER ends: the
+    /// deployed server generation (v0.78.1, still main) does not read
+    /// `ConnectStream` inbound frames at all (`signal.go:106-132` blocks on
+    /// `stream.Context().Done()`), and the upstream Go client likewise
+    /// holds the stream open without ever sending on it — every
+    /// client-originated frame rides the unary `Send` (module docs, "the
+    /// server is a pure forwarder"). A pending body keeps the stream open
+    /// for the server→client half while making stream-side sends
+    /// structurally impossible (the N10b silent-black-hole path is gone by
+    /// construction, not by discipline).
     pub async fn register(&mut self) -> Result<RegisteredStream, ManagementError> {
-        let (tx, rx) = tokio::sync::mpsc::channel::<proto::EncryptedMessage>(64);
-        let mut request = tonic::Request::new(OutboundStream::new(rx));
+        let mut request = tonic::Request::new(PendingStream);
         let id = self.keys.public_key_base64();
         let value: tonic::metadata::AsciiMetadataValue = id
             .parse()
@@ -391,7 +423,7 @@ impl SignalClient {
                 "signal server sent an empty x-wiretrustee-peer-registered header".into(),
             ));
         }
-        Ok(RegisteredStream { outbound: tx, inbound: response.into_inner() })
+        Ok(RegisteredStream { inbound: response.into_inner() })
     }
 
     /// Seal `msg.body` for `msg.remote_key` into the wire
@@ -495,7 +527,6 @@ impl SignalClient {
 // ---------------------------------------------------------------------------
 
 struct ActiveStream {
-    outbound: tokio::sync::mpsc::Sender<proto::EncryptedMessage>,
     frames: Streaming<proto::EncryptedMessage>,
 }
 
@@ -609,41 +640,27 @@ impl SignalSession {
     /// via the shared retry helper contract, retry.go:22).
     pub async fn connect(&mut self) -> Result<(), ManagementError> {
         let registered = self.client.register().await?;
-        self.active = Some(ActiveStream {
-            outbound: registered.outbound,
-            frames: registered.inbound,
-        });
+        self.active = Some(ActiveStream { frames: registered.inbound });
         self.last_stream_error = None;
         self.backoff.reset(self.clock.as_ref());
         Ok(())
     }
 
-    /// Send a plaintext `Message` through the ACTIVE stream
-    /// (upstream `SendToStream`, grpc.go:396-411: seal for `remote_key`,
-    /// push onto the open stream). No active stream → `Network`.
-    pub async fn send_to_stream(&mut self, msg: &proto::Message) -> Result<(), ManagementError> {
-        let wire = self.client.encrypt_message(msg)?;
-        let active = self.active.as_mut().ok_or_else(|| {
-            ManagementError::Network(
-                "signal stream not registered (call connect() first)".into(),
-            )
-        })?;
-        active.outbound.send(wire).await.map_err(|_| {
-            ManagementError::Network("signal stream outbound half is closed".into())
-        })
-    }
-
-    /// Seal + send one queued [`SignalOutgoing`] through the ACTIVE stream —
-    /// the N5d exchange-seam entry point. Identity stamping
-    /// (`Message.key` = our base64 public key, grpc.go:446-448) and the
-    /// `MarshalCredential` field set (client.go:74-97: type/payload/
-    /// wgListenPort/netBirdVersion) happen here, exactly like
-    /// [`SignalSession::send_to_stream`].
+    /// Seal + send one queued [`SignalOutgoing`] to the server — the N5d
+    /// exchange-seam entry point. Delivery rides the UNARY
+    /// `SignalExchange/Send` (upstream signaler.go:36-66 → `GrpcClient::
+    /// send`, grpc.go:454-492 → signal.go:95-104): the deployed server
+    /// generation never reads `ConnectStream` inbound frames, so a
+    /// stream-side send is silently black-holed (the N10b root cause).
+    /// Identity stamping (`Message.key` = our base64 public key,
+    /// grpc.go:446-448) and the `MarshalCredential` field set
+    /// (client.go:74-97: type/payload/wgListenPort/netBirdVersion) happen
+    /// in [`SignalClient::build_message`].
     pub async fn send_outgoing(&mut self, out: &SignalOutgoing) -> Result<(), ManagementError> {
         let msg = self
             .client
             .build_message(&out.remote_key, out.kind, out.payload.as_str(), out.wg_listen_port);
-        self.send_to_stream(&msg).await
+        self.client.send(&msg).await
     }
 
     /// Receive the next frame from the ACTIVE stream: decrypt (sender key
@@ -709,15 +726,17 @@ impl SignalSession {
     /// register/receive/backoff policy, with each inner step multiplexing
     /// `next_frame()` against `outbox.recv()` (`tokio::select!`) so queued
     /// sends never wait for inbound traffic. The queue drains through
-    /// [`SignalSession::send_outgoing`]:
+    /// [`SignalSession::send_outgoing`] — UNARY `SignalExchange/Send`
+    /// delivery (see that method; stream-side sends are black-holed by the
+    /// deployed server generation):
     ///
     /// - frame-shaping failures (bad remote key → `Parse`/`Request`) drop
     ///   the single frame and keep the stream (a bad frame is not a broken
     ///   transport, grpc.go:600-602 parity);
-    /// - stream-level send failures (`Network`) follow the receive-break
-    ///   path: `Broken` event, backoff, re-register (grpc.go:396-411 — the
-    ///   stream carries the frame; a dead stream must be re-registered
-    ///   before anything else flows);
+    /// - unary delivery failures (`Timeout`/`Network`/`Server`) follow the
+    ///   receive-break path: `Broken` event, backoff, re-register
+    ///   (grpc.go:396-411 era semantics kept: a dead channel must be
+    ///   re-registered before anything else flows);
     /// - all senders dropped (`recv() == None`) → `Ok(())`: the owning
     ///   exchange is gone, the worker exits cleanly.
     pub async fn run_events_with_outbox<E>(
@@ -774,8 +793,11 @@ impl SignalSession {
                                     );
                                 }
                                 Err(e) => {
-                                    // stream-level send failure → the same
-                                    // reconnect path as a receive break
+                                    // unary delivery failure (timeout /
+                                    // transport / server class) → the same
+                                    // reconnect path as a receive break:
+                                    // fail loudly, re-register, never
+                                    // silently swallow a frame
                                     self.last_stream_error = Some(e);
                                     self.reconnects += 1;
                                     on_event(SignalLoopEvent::Broken(
@@ -819,29 +841,21 @@ impl SignalSession {
 }
 
 // ---------------------------------------------------------------------------
-// the client→server request stream (bidi outbound half)
+// the `ConnectStream` request body: a stream that never yields and never
+// ends (see `SignalClient::register`) — there is deliberately NO outbound
+// stream half left to send on.
 // ---------------------------------------------------------------------------
 
-/// [`futures_core::Stream`] over a tokio mpsc receiver — the live outbound
-/// half of `ConnectStream` (upstream keeps `stream.Send(...)` available on
-/// the gRPC stream object, grpc.go:396-411; tonic models the client half as
-/// a request `Stream`).
-struct OutboundStream {
-    rx: tokio::sync::mpsc::Receiver<proto::EncryptedMessage>,
-}
+/// The never-yielding request body of `ConnectStream` (upstream keeps the
+/// stream object's `Send` available but the engine never calls it against
+/// current servers — and the servers never read the body at all).
+struct PendingStream;
 
-impl OutboundStream {
-    fn new(rx: tokio::sync::mpsc::Receiver<proto::EncryptedMessage>) -> Self {
-        OutboundStream { rx }
-    }
-}
-
-impl Stream for OutboundStream {
+impl Stream for PendingStream {
     type Item = proto::EncryptedMessage;
 
-    // `Receiver` is Unpin, so pinning the receiver projection is enough.
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().rx).poll_recv(cx)
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
     }
 }
 

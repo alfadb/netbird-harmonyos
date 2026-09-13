@@ -2,20 +2,36 @@
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 
 //! Shared rig for the N4a signal integration tests (`signal_channel.rs`,
-//! `signal_session.rs`): an in-process tonic `SignalExchange` mock that
-//! implements the REAL protocol discovered upstream — header registration
-//! (`x-wiretrustee-peer-id` → `x-wiretrustee-peer-registered: 1`,
-//! signal/server/signal.go:87,117,134-140) and pure forwarding by
-//! `remoteKey` (signal.go:95-104, 161-209) — plus the counting listener,
-//! protected-socket fd source and rcgen TLS material reused from the
-//! N3-2/N3-7 test patterns. This module is NOT a test target itself.
+//! `signal_session.rs`, `signal_link.rs`): an in-process tonic
+//! `SignalExchange` mock that implements the REAL protocol of the DEPLOYED
+//! server generation (netbird-server v0.78.1, verified against the release
+//! binary in the N10 interop; `docs/interop-run-1-20260913.md` §N10b):
+//!
+//! - header registration (`x-wiretrustee-peer-id` →
+//!   `x-wiretrustee-peer-registered: 1`, signal/server/signal.go:87,117,
+//!   134-152);
+//! - `ConnectStream` NEVER reads the request body — the v0.78.1 handler
+//!   (signal.go:106-132) registers, confirms the header and blocks on
+//!   `stream.Context().Done()`. The mock still DRAINS the body (tonic
+//!   needs it consumed to observe disconnects) but only COUNTS the frames
+//!   seen there (`stream_frames_seen`): a frame on the stream is never
+//!   forwarded — exactly like the real server, where such frames are not
+//!   even read;
+//! - forwarding happens EXCLUSIVELY on the unary `Send` RPC
+//!   (signal.go:95-104 → `forwardMessageToPeer`), by pure `remoteKey`
+//!   lookup — the path the upstream client's signaler actually uses
+//!   (`client/internal/peer/signaler.go:36-66`).
+//!
+//! plus the counting listener, protected-socket fd source and rcgen TLS
+//! material reused from the N3-2/N3-7 test patterns. This module is NOT a
+//! test target itself.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -295,6 +311,14 @@ pub struct SignalMock {
     /// Knob: flip a byte in every forwarded `body` (envelope authentication
     /// must fail client-side WITHOUT killing the stream).
     pub corrupt_forwarded_bodies: Arc<AtomicBool>,
+    /// Frames the mock observed ON the `ConnectStream` request body. The
+    /// v0.78.1 server never reads them (never forwards them either) — a
+    /// client that still pushes frames onto the stream body shows up here
+    /// while the peer starves (the N10b regression signature).
+    stream_frames_seen: Arc<AtomicU64>,
+    /// Frames delivered through the unary `Send` RPC — the ONLY path the
+    /// real server forwards (signal.go:95-104).
+    unary_sends: Arc<AtomicU64>,
     /// The decrypting sink peer (optionally also registered as a
     /// forwarding destination under its public key).
     pub sink: Arc<Mutex<Option<SinkPeer>>>,
@@ -309,6 +333,8 @@ impl Default for SignalMock {
             fail_registration_unavailable: Arc::new(AtomicBool::new(false)),
             omit_registered_header: Arc::new(AtomicBool::new(false)),
             corrupt_forwarded_bodies: Arc::new(AtomicBool::new(false)),
+            stream_frames_seen: Arc::new(AtomicU64::new(0)),
+            unary_sends: Arc::new(AtomicU64::new(0)),
             sink: Arc::new(Mutex::new(None)),
         }
     }
@@ -318,6 +344,16 @@ impl SignalMock {
     /// Registrations observed so far (identity headers).
     pub fn registered_ids(&self) -> Vec<String> {
         self.seen_ids.lock().expect("seen_ids").clone()
+    }
+
+    /// Frames seen ON the stream body (never forwarded — real-server shape).
+    pub fn stream_frames_seen(&self) -> u64 {
+        self.stream_frames_seen.load(Ordering::Acquire)
+    }
+
+    /// Frames delivered via the unary `Send` RPC (the forwarding path).
+    pub fn unary_sends(&self) -> u64 {
+        self.unary_sends.load(Ordering::Acquire)
     }
 
     fn record_if_sink(&self, env: &EncryptedMessage) {
@@ -365,6 +401,7 @@ impl SignalExchange for SignalMock {
         request: Request<EncryptedMessage>,
     ) -> Result<Response<EncryptedMessage>, Status> {
         let env = request.into_inner();
+        self.unary_sends.fetch_add(1, Ordering::AcqRel);
         self.record_if_sink(&env);
         self.forward(&env);
         // upstream returns an EMPTY EncryptedMessage (signal.go:100)
@@ -399,14 +436,17 @@ impl SignalExchange for SignalMock {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<EncryptedMessage, Status>>(64);
         self.registry.lock().expect("registry").insert(id.clone(), tx);
 
-        // consume + forward this peer's inbound frames for the stream's
-        // lifetime (upstream reads the same stream inside ConnectStream)
+        // v0.78.1 ConnectStream shape (signal.go:106-132): the request body
+        // is NEVER forwarded from — drained only to (a) COUNT stray frames
+        // (a client that still pushes the stream is caught by the
+        // `stream_frames_seen` regression assertion) and (b) keep the
+        // registry entry alive for exactly the stream's lifetime. Any frame
+        // seen here would be silently black-holed by the real server.
         let mut inbound = request.into_inner();
         let forward_self = self.clone();
         tokio::spawn(async move {
-            while let Ok(Some(env)) = inbound.message().await {
-                forward_self.record_if_sink(&env);
-                forward_self.forward(&env);
+            while let Ok(Some(_env)) = inbound.message().await {
+                forward_self.stream_frames_seen.fetch_add(1, Ordering::AcqRel);
             }
             forward_self
                 .registry

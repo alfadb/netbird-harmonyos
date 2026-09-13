@@ -125,11 +125,24 @@
 
 ## 三、协议时序（实测与上游代码一致）
 
+> **N10b 修正**：本节初版假设 OFFER/候选也可以推上 `ConnectStream` 请求体
+> （旧版上游 `SendToStream` 的形态）。对真实 netbird-server **0.78.1**（及
+> 现行 main）的实测与源码核对结论：**服务端 `ConnectStream` 处理器
+> （signal/server/signal.go:106-132）从不调用 `stream.Recv()`**——注册、
+> 回确认头之后即在 `stream.Context().Done()` 上阻塞。客户端推上流体的帧
+> 被 gRPC 传输层 ACK（HTTP/2 流控），但应用层永不读取：无转发、无日志、
+> 无错误，是静默黑洞。上游客户端同样只把流当"注册 + 收帧"用：引擎
+> signaler（signaler.go:36-66）与心跳探针（grpc.go:555-566）全部走
+> **unary `Send`**；`SendToStream`（grpc.go:396-411）在引擎里已无调用方。
+> 本仓 N4a 初版 mock 之所以全绿，是因为 mock 按旧形态实现了"读流并转发"，
+> 与真实服务端行为相悖——N10b 起 mock 与真实服务端同型（流上只计数、
+> 转发只走 unary），并新增了专门回归测试（tests/signal_link.rs）。
+
 ```
 A(客户端)                        Signal 服务                        B(客户端)
   | ConnectStream + x-wiretrustee-peer-id: A公钥 |                    |
   |  <- headers: x-wiretrustee-peer-registered: 1 --|                 |
-  |   （注册完成，此后流长期保持）                                      |
+  |   （注册完成，此后流长期保持；请求体保持打开、永不发送）             |
   | ConnectStream + header B公钥 ---------------------------------->  |  (B 同理)
   | Send{key:A, remoteKey:B, body=seal(B公钥, Body{OFFER,"ufrag:pwd",port})} |
   |                            registry[ 取 remoteKey=B ] ------------> | B 用 A公钥+B私钥 open
@@ -177,12 +190,15 @@ L2088）。
   未做 trait 改名/新模块：`mgmtsock.rs` 的 seam 本就是 provider-泛型的，
   改名会波及 N3-7 已交付的 connector/napi 面与测试，收益为零。
 - `register()`：开 `ConnectStream` + 身份 header + 确认头校验（返回
-  `RegisteredStream{outbound: mpsc::Sender, inbound: Streaming}`）。
+  `RegisteredStream{inbound: Streaming}`；N10b 起请求体为永不让步的
+  `PendingStream`——保持流打开但**结构上不可能**再向流体发帧，服务端
+  也从不读它）。
 - `send(msg)`：unary `Send`（对 `remote_key` 封装；单次尝试 + 客户端级
   超时——上游 4 次重试阶梯 grpc.go:470-492 属发送策略，留给 N5 接线方
-  决定）。
-- `send_to_stream(msg)`（经 `SignalSession`）：`SendToStream` 同型
-  （grpc.go:396-411）。
+  决定）。**N10b：生产出站帧（OFFER/ANSWER/CANDIDATE/心跳）全部经由
+  本 unary 路径**（`SignalSession::send_outgoing` → `SignalClient::send`）。
+- `send_to_stream(msg)`：**N10b 删除**。流侧发送对 0.78.1 服务端是静默
+  黑洞（见 §三 N10b 修正），不留死路径。
 - `build_message / encrypt_message / decrypt_envelope / send_heartbeat`：
   组包与信封原语（单测覆盖）。
 - `SignalSession`（镜像 `crate::sync::SyncSession`）：`connect` /

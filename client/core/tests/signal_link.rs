@@ -464,9 +464,9 @@ async fn dual_peer_real_signal_sessions_converge_and_land_wg_endpoints() {
     assert_eq!(sa.controlling, Some(true), "offerer controlling");
     assert_eq!(sb.controlling, Some(false), "answerer controlled");
 
-    // server-side frame capture: the OFFER A→B was REALLY on the signal
-    // stream (envelope opened by the mock with A's public key + B's private
-    // key) and carries "ufrag:pwd"
+    // server-side frame capture: the OFFER A→B reached the server through
+    // the UNARY Send path (envelope opened by the mock with A's public key
+    // + B's private key) and carries "ufrag:pwd"
     let offers: Vec<String> = sink_records(&mock)
         .into_iter()
         .filter(|(t, _)| *t == Type::Offer as i32)
@@ -481,6 +481,21 @@ async fn dual_peer_real_signal_sessions_converge_and_land_wg_endpoints() {
     let seen = mock.seen_ids.lock().expect("seen");
     assert!(seen.contains(&key_a) && seen.contains(&key_b), "both registered: {seen:?}");
 
+    // N10b regression pins, enforced on every dual-instance exchange: the
+    // frames rode the UNARY Send (the only path the deployed server
+    // generation forwards) and NONE of them rode the ConnectStream request
+    // body (which the v0.78.1 server never reads — a stream frame would be
+    // silently black-holed while the peer starves)
+    assert!(
+        mock.stream_frames_seen() == 0,
+        "no frame may ride the ConnectStream body (real servers never read it)"
+    );
+    assert!(
+        mock.unary_sends() >= 3,
+        "offer/answer/candidates must ride the unary Send, got {}",
+        mock.unary_sends()
+    );
+
     // protected fds: both nodes' signal dials came from the provider
     assert!(a.signal_source.taken() >= 1 && b.signal_source.taken() >= 1);
     assert!(
@@ -492,6 +507,105 @@ async fn dual_peer_real_signal_sessions_converge_and_land_wg_endpoints() {
 
     a.link.abort();
     b.link.abort();
+}
+
+/// N10b 回归（真实 0.78.1 服务端形态：**服务端只收不回**）——真正的
+/// 抓 bug 测试。v0.78.1 的 `ConnectStream` 处理器从不读请求体
+/// （signal.go:106-132 阻塞在 `stream.Context().Done()`），转发只发生在
+/// unary `Send`（signal.go:95-104）。本 mock 与真实服务端同型：流上的帧
+/// 只计数不转发（`stream_frames_seen`），转发只走 unary（`unary_sends`）。
+///
+/// 修复前（帧被推上 ConnectStream 请求体）：服务端收到帧也不转发，B 一
+///无所获，本测试在 `offer_delivered` 断言处失败（且 `stream_frames_seen`
+/// > 0）；修复后（unary 送达）：OFFER 经服务端解密验证抵达 sink，且流上
+/// 零帧。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offer_reaches_sink_via_unary_send_while_server_never_reads_the_stream() {
+    let mock = SignalMock::default();
+    let keys_a = EnvelopeKeyPair::generate().expect("keys A");
+    let keys_b = EnvelopeKeyPair::generate().expect("keys B");
+    // B plays "server only receives, never sends": no second node, just the
+    // decrypting sink aimed at B's public key
+    mock.sink
+        .lock()
+        .expect("sink")
+        .replace(SinkPeer::for_keys(keys_b.clone()));
+    let (addr, _counter) = spawn_signal_mock(mock.clone()).await;
+
+    let mut a = spawn_node(
+        keys_a.clone(),
+        &keys_b.public_key_base64(),
+        0x1111,
+        addr,
+        mock.seen_ids.clone(),
+        false,
+        8,
+    );
+    let key_a = a.key.clone();
+
+    wait_for("A registered", || a.registered_count() >= 1).await;
+
+    // pump A alone: initiate → gather → OFFER + candidates into the
+    // exchange → the session's unary delivery
+    let mut now = 1000u64;
+    let offer_delivered = pump_until_sink(&mut a, &mut now, 120_000, &mock, |records| {
+        records.iter().any(|(t, _)| *t == Type::Offer as i32)
+    })
+    .await;
+    assert!(
+        offer_delivered,
+        "the OFFER must reach the server through the unary Send path \
+         (a stream-pushed frame is black-holed by v0.78.1 servers)"
+    );
+
+    // the exact N10b signature: NOTHING rode the ConnectStream request body
+    assert_eq!(
+        mock.stream_frames_seen(),
+        0,
+        "client must not push frames on the stream body (real servers never read it)"
+    );
+    assert!(
+        mock.unary_sends() >= 1,
+        "frames must ride the unary Send, got {}",
+        mock.unary_sends()
+    );
+    // and the sink REALLY decrypted A's offer (server-side envelope proof)
+    let offers: Vec<String> = sink_records(&mock)
+        .into_iter()
+        .filter(|(t, _)| *t == Type::Offer as i32)
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(offers.len(), 1);
+    let creds = parse_ufrag_pwd(&offers[0]).expect("offer payload is ufrag:pwd");
+    assert_eq!(creds.ufrag.len(), 16);
+    assert!(mock
+        .seen_ids
+        .lock()
+        .expect("seen")
+        .contains(&key_a));
+
+    a.link.abort();
+}
+
+/// Pump ONE orchestrator on the shared injected clock until the mock sink
+/// satisfies `cond` (server-side decrypted capture).
+async fn pump_until_sink(
+    a: &mut PeerNode,
+    now: &mut u64,
+    deadline_ms: u64,
+    mock: &SignalMock,
+    cond: impl Fn(&[(i32, String)]) -> bool,
+) -> bool {
+    while *now <= deadline_ms {
+        a.sim_now.store(*now, Ordering::Release);
+        let _ = a.orch.lock().expect("orch").run_once(*now);
+        *now += 10;
+        if cond(&sink_records(mock)) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(4)).await;
+    }
+    false
 }
 
 /// 未就绪不出帧：with the link unable to register (empty protected fd

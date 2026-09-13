@@ -658,6 +658,13 @@ fn maintain(
 
     let net = hs::network_config_json();
     if let Some(addr) = hs::own_address_from_network_config(&net) {
+        if own_addr.is_none() {
+            // one-shot diagnostics: the probe source/target pair. The peer
+            // VPN addresses are the WG allowed_ips (public runtime
+            // material) — the operator aims --probe-dst at one of them.
+            let peers = hs::peer_vpn_addresses_from_network_config(&net);
+            eprintln!("[milestone] own tunnel address {addr:?}; peer vpn addresses: {peers:?}");
+        }
         *own_addr = Some(addr);
     }
     if sig_addr.is_none() {
