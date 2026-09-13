@@ -103,6 +103,9 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("tun_poll", napi_tun_poll);
     reg!("tun_close", napi_tun_close);
     reg!("config_validate", napi_config_validate);
+    reg!("connector_start", napi_connector_start);
+    reg!("connector_status", napi_connector_status);
+    reg!("connector_stop", napi_connector_stop);
     exports
 }
 
@@ -349,6 +352,9 @@ mod tests {
             "tun_poll",
             "tun_close",
             "config_validate",
+            "connector_start",
+            "connector_status",
+            "connector_stop",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -440,4 +446,22 @@ unsafe extern "C" fn napi_config_validate(env: NapiEnv, info: NapiCallbackInfo) 
     let a = cb_args(env, info);
     let s = a.string_at(0);
     ret_json(env, crate::config::config_validate_json(&s))
+}
+
+// N3-5 connector lifecycle. All three exports are synchronous JSON->JSON
+// (the lifecycle itself runs on the crate-wide tokio runtime and is observed
+// by polling connector_status — no threadsafe-function / async-work).
+unsafe extern "C" fn napi_connector_start(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let config = a.string_at(0);
+    let credentials = a.string_at(1);
+    ret_json(env, crate::connector::connector_start_json(&config, &credentials))
+}
+
+unsafe extern "C" fn napi_connector_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_status_json())
+}
+
+unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_stop_json())
 }

@@ -307,7 +307,8 @@ impl SyncSession {
         SyncUpdate::from_response(response).map_err(SyncStreamError::Closed)
     }
 
-    /// Run the session until a FATAL error or backoff exhaustion.
+    /// Run the session until a FATAL error or backoff exhaustion (the
+    /// update-only form of [`SyncSession::run_events`]).
     ///
     /// Loop shape mirrors upstream `withMgmtStream` + `handleSyncStream`
     /// (grpc.go:224-275, L427-476) driven by the `Retry` helper
@@ -331,16 +332,59 @@ impl SyncSession {
     where
         F: FnMut(&SyncUpdate),
     {
+        self.run_events(|event| {
+            if let SyncLoopEvent::Update(update) = event {
+                on_update(update);
+            }
+        })
+        .await
+    }
+}
+
+/// Event emitted by [`SyncSession::run_events`] — N3-5: lets a lifecycle
+/// owner (the `connector` module) observe stream OPEN/BREAK transitions in
+/// addition to the decoded updates, so it can drive its state machine
+/// without duplicating the retry loop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncLoopEvent<'a> {
+    /// A Sync stream was established (the initial one or a reconnect —
+    /// upstream `notifyConnected` after `connectToSyncStream` succeeded,
+    /// grpc.go:446-447).
+    Opened,
+    /// A decoded update arrived on the active stream.
+    Update(&'a SyncUpdate),
+    /// The active stream broke or a connect attempt failed with a
+    /// retryable error; the session will back off and reconnect
+    /// (upstream `notifyDisconnected` + "will retry silently",
+    /// grpc.go:435-441 / L472).
+    Broken(&'a ManagementError),
+}
+
+impl SyncSession {
+    /// [`SyncSession::run`] with lifecycle events: `Opened` fires after
+    /// every successful stream establishment (including reconnects),
+    /// `Broken` fires when a stream breaks or a connect attempt fails with
+    /// a retryable error, `Update` per decoded snapshot. The retry/fatal/
+    /// backoff semantics are exactly [`SyncSession::run`]'s (documented
+    /// there); the loop shape is unchanged.
+    pub async fn run_events<E>(&mut self, mut on_event: E) -> Result<(), ManagementError>
+    where
+        E: for<'a> FnMut(SyncLoopEvent<'a>),
+    {
         loop {
             match self.connect().await {
                 Ok(()) => {
+                    on_event(SyncLoopEvent::Opened);
                     loop {
                         match self.next_update().await {
-                            Ok(update) => on_update(&update),
+                            Ok(update) => on_event(SyncLoopEvent::Update(&update)),
                             Err(SyncStreamError::Fatal(e)) => return Err(e),
                             Err(SyncStreamError::Closed(e)) => {
                                 self.last_stream_error = Some(e);
                                 self.reconnects += 1;
+                                on_event(SyncLoopEvent::Broken(
+                                    self.last_stream_error.as_ref().expect("error just stored"),
+                                ));
                                 break;
                             }
                         }
@@ -351,6 +395,9 @@ impl SyncSession {
                         return Err(e); // Permanent — grpc.go:436-438
                     }
                     self.last_stream_error = Some(e);
+                    on_event(SyncLoopEvent::Broken(
+                        self.last_stream_error.as_ref().expect("error just stored"),
+                    ));
                 }
             }
             // Backoff between attempts; exhaustion (Stop) gives up with the

@@ -318,3 +318,108 @@ management；peer 身份就是 `wgPubKey` 字符串。模型照实建，未虚�
   组件信封显式错误、无 NetworkMap 帧的三态 deadline）；`src/backoff.rs` 7 例（增长链/抖动边界/
   预算 Stop/重置/两预设/dial 形状）；`src/network_map.rs` 9 例（全字段、空图、主机位掩码、坏
   路由跳过上报、缺 wgPubKey、坏 allowed_ips、端口越界、**未知新字段容忍**、NetbirdConfig 提取）。
+
+# N3-5 增量更新（2026-09-13）：连接生命周期 Connector + NAPI 导出
+
+新增 `client/core/src/connector.rs`：把 gRPC 通道 + 信封加密（N3-2/N3-3）→
+`Login` → `Sync` 会话（N3-4）串成可启动/可查询/可停止的连接生命周期。
+生命周期形状对照上游 `shared/management/client/grpc.go:224-275`
+（`withMgmtStream`）+ `handleSyncStream`（grpc.go:427-476）：连接 → 登录 →
+持有 Sync 流；断流按 `backoff.rs` 重连；`PermissionDenied`/`Unauthenticated`
+按上游 `backoff.Permanent` 终止（grpc.go:436-438/L468-470；登录路径同语义
+grpc.go:322-324）。
+
+## 生命周期时序
+
+```
+connector_start(configJson, setupKeyJson?)
+  └─ 同步完成 Connect 转移（Disconnected→Connecting），随后异步 worker：
+     1. 拨号 gRPC（TLS：CA 由 configJson 注入；无系统根存储）→ Login（密封信封）
+        · Auth 类失败 = Permanent → FatalError → Failed（终态，不重试）
+        · 其他失败 → 记录 + 注入 backoff 重试；预算耗尽 → RetryExhausted → Failed
+     2. Sync 流建立 → Established → Connected（"Connected" 仅指控制面，见限制）
+     3. 每个 Sync 更新：3 态 sessionExpiresAt 锚定 → serial 顺序检查
+        （严格旧于已应用 serial 的快照丢弃，上游 engine.go:1572-1576）
+        → 状态计数（peer/route）→ WG peer 登记 → 路由/DNS 交壳侧回调
+     4. 断流 → Lost → Reconnecting → backoff 重连（成功回到 Connected）
+connector_status()   轮询快照（无 NAPI 回调；异步进度全靠它观察）
+connector_stop()     幂等：abort worker（关 Sync 流）→ 尽力 logout
+                     （失败不阻塞停止，结果记录在 logout_ok）→ 清理 WG 登记/壳侧配置
+```
+
+## NAPI 导出契约（同步、JSON 字符串，风格对齐 `config_validate`/`tun_*`）
+
+- `connector_start(configJson, setupKeyJson?)` →
+  `{"started":true,"state":"connecting"}` 或
+  `{"started":false,"error":"already-running"|"invalid-config"|"invalid-credentials"}`。
+  `configJson`：`management_url`（必填）、`private_key`（必填，base64 32B）、
+  `ca_pem`（`https://` 必填，字符串或数组）、`server_name`、`hostname`/`os_name`/
+  `os_version`/`netbird_version`、`connect_timeout_ms`/`request_timeout_ms`、
+  `session_renew_lead_ms`/`renew_check_interval_ms`。
+  `setupKeyJson`：`{"setup_key":"..."}` 与/或 `{"jwt":"..."}`（至少一个非空）。
+- `connector_status()` → `{"running","state","started_at_unix","last_update_unix",
+  "peer_count","route_count","reconnects","last_error","session_expiry",
+  "session_expires_at_unix","session_renew_attempts","wg_apply_failed",
+  "wg_apply_errors","logout_ok"}`。`state` 复用 `state.rs` 六态；
+  `last_error` 仅 `{"class","status"}` 分类（network/timeout/auth/request/
+  server/parse/unsupported_url），**无任何 server/transport message**；
+  `session_expiry` 三态 `unknown`/`disabled`/`set`。
+- `connector_stop()` → `{"ok":true,"already_stopped":bool,"state"}`（幂等；
+  无连接器时同样返回 ok）。stop 后槽位释放，可再次 start。
+
+## 注入 seam（生产默认 + 宿主测试注入点）
+
+- management：`ManagementFactory` trait（生产 `GrpcManagementFactory`＝每
+  次尝试新拨 tonic 通道，上游重试环同样包住 dial，grpc.go:224-275；测试可注
+  桩工厂，`tests/connector.rs` 即含注入失败工厂用例）。
+- sync：`SyncPolicy`（backoff/时钟/随机源透传
+  `SyncSession::with_policy`，测试零真实长睡眠）；`sync.rs` 新增
+  `run_events`（`Opened`/`Update`/`Broken` 事件），`run()` 委托之，
+  既有签名与 12 例测试不变。
+- 数据面 WG peer：`WgPeerApplier` trait（生产默认 `WgPeerRegistry` 进程内
+  登记表；全快照替换语义）。
+- 壳侧配置：`ConfigApplier` trait（路由/DNS/本机地址交宿主；生产默认
+  `LoggingConfigApplier` 只打点——壳侧真实应用器是下一增量）。
+
+## 会话续期时机（出处）
+
+Login/Sync 上的 3 态 `sessionExpiresAt` 按上游
+`client/internal/engine_authsession.go:17-62`（`ApplySessionDeadline`：
+nil=保持、显式零=禁用、有效值=新期限）锚定；剩余寿命小于
+`session_renew_lead_ms`（默认 10 分钟，即上游交互警告提前量
+`client/internal/auth/sessionwatch/watcher.go:34-37`）时调用
+`ExtendAuthSession`。入口语义对照 `engine_authsession.go:83-107`：
+空 JWT 本地拒绝不发起 I/O（L84-86）；只刷新期限、不重同步不动隧道
+（L71-73 注释、L97-102）；响应 3 态写回（L102 + management.proto
+L306-310）。续期失败记录净化分类后等下一 tick 重试（上游把错误交还
+调用方由警告流重触发，engine_authsession.go:98-100；HarmonyOS 侧暂无
+对应警告流）。
+
+## ⚠️ 限制（不得误读为"已能连上 peer"）
+
+**本增量不实现 signal/ICE**：无法为 peer 发现可达 endpoint、无法建立真实
+peer 隧道。网络图里的 peer 只做**本地登记**（公钥 + allowed_ips 进 WG
+seam/登记表）；路由/DNS 仅交给壳侧回调（默认实现只打点）；
+`Connected` 只表示 **management 控制面**在线。真实 peer 连通性留
+N4/N5（signal + ICE + 数据面转发）。
+
+## 本增量实现与验证（client/core）
+
+- 新文件：`src/connector.rs`（生命周期 + seam + 净化错误面 +
+  全局 runtime/单例 + 7 例单测：config 解析与 TLS 预检、Debug 密钥遮蔽、
+  凭据解析、错误分类无 message、3 态 deadline、status JSON 契约、
+  WG 登记表全快照语义）；`tests/connector.rs` 9 例（in-process tonic mock
+  `GetServerKey`+`Login`+`Sync`+`Logout`+`ExtendAuthSession` 驱动真实
+  Connector：登录 + 2 快照 + 旧 serial 丢弃、断流重连续收、登录
+  PermissionDenied 终态且 0 重试 0 Sync、注入失败工厂的重试预算上界、
+  stop 幂等/清理/logout 失败路径、WG 应用器失败仅计数不致命、哨兵
+  setup key/JWT/私钥不出现在 status/stop/Debug、续期仅在有 JWT 且临期时
+  触发一次、NAPI 三导出全局往返）。
+- `src/sync.rs`：新增 `SyncLoopEvent` + `run_events`（additive，`run()`
+  委托）；`src/napi.rs`：3 个同步导出 + 注册测试名清单扩展；`src/lib.rs`：
+  模块挂载与导出表。**零新增依赖**（`Cargo.toml`/`Cargo.lock` 未动，
+  THIRD-PARTY-NOTICES.md 不变）。
+- 交叉构建 `bash client/core/build.sh` exit 0；注意 **NAPI 接线后 gRPC/
+  tonic/rustls 代码不再被链接器 GC**：`libnetbird_core.so` 由 N3-4 的
+  1,171,880 字节增至 5,036,576 字节（约 4.3×），为接线控制面的真实代价，
+  如实记录。`bash client/build.sh`（HAP 链）exit 0。
