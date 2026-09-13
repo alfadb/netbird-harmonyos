@@ -85,6 +85,9 @@
 #![allow(static_mut_refs)]
 
 pub mod abi;
+// N3-4: management reconnect backoff (upstream defaultBackoff shape,
+// injectable clock/rng).
+pub mod backoff;
 pub mod btkeep;
 pub mod chunk;
 pub mod config;
@@ -95,9 +98,13 @@ pub mod grpc;
 pub mod hilog;
 pub mod ledger;
 pub mod management;
+// N3-4: minimal NetworkMap model decoded from Sync frames.
+pub mod network_map;
 pub mod napi;
 pub mod net;
 pub mod state;
+// N3-4: management Sync session (first frame, frame decode, reconnect).
+pub mod sync;
 pub mod sys;
 pub mod tun;
 pub mod util;

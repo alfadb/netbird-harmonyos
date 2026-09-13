@@ -74,6 +74,32 @@
 //! gRPC status codes map per [`map_grpc_status`] (unit-tested below).
 //! Envelope crypto failures reuse the same classes — see `crate::envelope`
 //! module docs ("Error classification").
+//!
+//! ## N3-4 additions: Sync stream, Logout, ExtendAuthSession
+//!
+//! - [`ManagementGrpcClient::open_sync_stream`] opens the `Sync` RPC
+//!   (`management.proto` L20: `rpc Sync(EncryptedMessage) returns (stream
+//!   EncryptedMessage)` — **server-streaming, one request frame**, NOT
+//!   bidi; the bidi RPC upstream is `Job`, L53). The first (and only)
+//!   client frame is the sealed `SyncRequest{meta}`
+//!   (upstream `shared/management/client/grpc.go:478-495
+//!   connectToSyncStream`); frames come back as sealed `SyncResponse`s.
+//!   Session state lives in [`crate::sync::SyncSession`].
+//! - [`ManagementGrpcClient::logout`] mirrors upstream
+//!   `GrpcClient.Logout` (grpc.go:848-872): seal `Empty{}` → `Logout` →
+//!   the `Empty` reply is ignored (not an envelope).
+//! - [`ManagementGrpcClient::extend_auth_session`] mirrors upstream
+//!   `GrpcClient.ExtendAuthSession` (grpc.go:662-699): seal
+//!   `ExtendAuthSessionRequest{jwtToken, meta}` → `ExtendAuthSession` →
+//!   open `ExtendAuthSessionResponse` and surface `sessionExpiresAt`.
+//!   Failure classification goes through the same [`map_grpc_status`]
+//!   six classes as login.
+//!
+//! Per-RPC deadlines stay the client-wide `request_timeout` passed to
+//! [`ManagementGrpcClient::connect`] (the established N3-2 contract).
+//! Upstream uses per-call contexts instead: Logout 15s (grpc.go:854) and
+//! ExtendAuthSession 10s = `ConnectTimeout` (grpc.go:33, L681) — keep those
+//! numbers in mind when choosing `request_timeout`.
 
 use crate::envelope::{EnvelopeKeyPair, EnvelopePublicKey};
 use crate::management::ManagementError;
@@ -339,6 +365,14 @@ impl ManagementGrpcClient {
         })
     }
 
+    /// Crate-internal clone of the client identity keys — the streaming
+    /// session layer (`crate::sync`) opens pushed frames with the same key
+    /// pair that sealed its requests.
+    #[doc(hidden)]
+    pub(crate) fn envelope_keys(&self) -> crate::envelope::EnvelopeKeyPair {
+        self.envelope_keys.clone()
+    }
+
     /// `ManagementService/GetServerKey` (management.proto L24, L314-320):
     /// the server's base64 WireGuard public key, used as the envelope peer
     /// key. Upstream wraps this with a 5s context (grpc.go:537-549); the
@@ -454,15 +488,163 @@ impl ManagementGrpcClient {
                 ssh_pub_key: params.peer_keys.ssh_pub_key.clone(),
                 wg_pub_key: params.peer_keys.wg_pub_key.clone(),
             }),
-            meta: Some(proto::PeerSystemMeta {
-                hostname: params.meta.hostname.clone(),
-                go_os: params.meta.os_name.clone(),
-                os_version: params.meta.os_version.clone(),
-                netbird_version: params.meta.netbird_version.clone(),
-                ..Default::default()
-            }),
+            meta: Some(build_peer_system_meta(&params.meta)),
             dns_labels: Vec::new(),
         }
+    }
+
+    /// Open the `Sync` server-streaming RPC — the wire shape of upstream
+    /// `connectToSyncStream` (grpc.go:478-495): exactly ONE request frame,
+    /// the sealed `SyncRequest{meta}` (`SyncRequest` has only `meta`,
+    /// management.proto L126-128 — there is no `msg` field), inside
+    /// `EncryptedMessage{wgPubKey: our base64 public key, body}`. The
+    /// server key must be fetched fresh (upstream fetches it per attempt,
+    /// grpc.go:260) and is what the reply frames are sealed for.
+    ///
+    /// This only opens the stream (headers + first frame sent); frame
+    /// consumption, decoding and reconnect policy live in
+    /// [`crate::sync::SyncSession`].
+    pub async fn open_sync_stream(
+        &mut self,
+        meta: &PeerMeta,
+        server_key: &EnvelopePublicKey,
+    ) -> Result<tonic::Streaming<proto::EncryptedMessage>, ManagementError> {
+        let request = proto::SyncRequest { meta: Some(build_peer_system_meta(meta)) };
+        let body = crate::envelope::seal(server_key, &self.envelope_keys, &request.encode_to_vec())?;
+        let envelope = proto::EncryptedMessage {
+            wg_pub_key: self.envelope_keys.public_key_base64(),
+            body,
+            // upstream does not set version on the sync request either
+            // (grpc.go:489 builds EncryptedMessage without Version)
+            version: 0,
+        };
+        let response = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .sync(tonic::Request::new(envelope))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)??;
+        Ok(response.into_inner())
+    }
+
+    /// `ManagementService/Logout` — upstream `GrpcClient.Logout`
+    /// (grpc.go:848-872): seal `proto.Empty{}` and send it; the reply is a
+    /// plain `Empty` (management.proto L50), NOT an `EncryptedMessage`, and
+    /// is discarded without opening. One attempt, no retry (unlike login).
+    ///
+    /// Status failures map through [`map_grpc_status`]; note the daemon
+    /// layer upstream additionally treats `NotFound` as success ("peer
+    /// already gone", client/server/server.go:1602-1611 +
+    /// logoutPeerGone L2754-2761) — this primitive reports it as
+    /// [`ManagementError::Request`] and lets the caller decide.
+    pub async fn logout(&mut self) -> Result<(), ManagementError> {
+        let server_key = self.get_server_key().await?;
+        let body = crate::envelope::seal(
+            &server_key,
+            &self.envelope_keys,
+            &proto::Empty {}.encode_to_vec(),
+        )?;
+        let envelope = proto::EncryptedMessage {
+            wg_pub_key: self.envelope_keys.public_key_base64(),
+            body,
+            version: 0,
+        };
+        let _reply = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .logout(tonic::Request::new(envelope))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)??;
+        Ok(())
+    }
+
+    /// `ManagementService/ExtendAuthSession` — upstream
+    /// `GrpcClient.ExtendAuthSession` (grpc.go:662-699): seal
+    /// `ExtendAuthSessionRequest{jwtToken, meta}` (fields 1/2,
+    /// management.proto L298-304) and open the sealed
+    /// `ExtendAuthSessionResponse{sessionExpiresAt}` (L306-310). Refreshes
+    /// only the SSO session deadline; no network-map sync, no tunnel churn
+    /// (grpc.go:658-661 comment, engine_authsession.go:72-107).
+    ///
+    /// An empty JWT is rejected locally (`Request{0}`) — upstream engine
+    /// guards the same way (engine_authsession.go:76-78).
+    pub async fn extend_auth_session(
+        &mut self,
+        meta: &PeerMeta,
+        jwt_token: &str,
+    ) -> Result<ExtendAuthSessionOutcome, ManagementError> {
+        if jwt_token.is_empty() {
+            return Err(ManagementError::Request {
+                status: 0,
+                message: "jwt token is required (empty token cannot refresh a session)".into(),
+            });
+        }
+        let server_key = self.get_server_key().await?;
+        let request = proto::ExtendAuthSessionRequest {
+            jwt_token: jwt_token.to_string(),
+            meta: Some(build_peer_system_meta(meta)),
+        };
+        let body =
+            crate::envelope::seal(&server_key, &self.envelope_keys, &request.encode_to_vec())?;
+        let envelope = proto::EncryptedMessage {
+            wg_pub_key: self.envelope_keys.public_key_base64(),
+            body,
+            version: 0,
+        };
+        let reply = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .extend_auth_session(tonic::Request::new(envelope))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)?? // outer deadline; inner mapped status
+        .into_inner();
+        // open with the SAME server key the request was sealed for
+        // (grpc.go:693-698 DecryptMessage(*serverKey, c.key, ...))
+        let plaintext = crate::envelope::open(&server_key, &self.envelope_keys, &reply.body)?;
+        let response = proto::ExtendAuthSessionResponse::decode(plaintext.as_slice())
+            .map_err(|e| ManagementError::Parse(format!("ExtendAuthSessionResponse decode failed: {e}")))?;
+        Ok(ExtendAuthSessionOutcome {
+            // same 3-state encoding as LoginResponse.sessionExpiresAt
+            session_deadline_unix: response.session_expires_at.map(|ts| ts.seconds),
+        })
+    }
+}
+
+/// New absolute SSO session deadline from
+/// [`ManagementGrpcClient::extend_auth_session`].
+///
+/// `session_deadline_unix` mirrors [`LoginOutcome::session_deadline_unix`]
+/// 3-state semantics: `None` = field unset (no info — keep the deadline
+/// already anchored), `Some(0)` = explicit "expiry disabled / not SSO",
+/// `Some(t)` = absolute deadline in unix seconds
+/// (management.proto L306-310; decoding at engine_authsession.go:32-66).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtendAuthSessionOutcome {
+    pub session_deadline_unix: Option<i64>,
+}
+
+/// Wire `PeerSystemMeta` from the minimal [`PeerMeta`] — shared by Login,
+/// Sync first frame and ExtendAuthSession (upstream `infoToMetaData`,
+/// grpc.go:995-1057, fills the full posture-check surface; we send the
+/// identity subset and leave capabilities EMPTY and `syncMessageVersion = 0`
+/// (`Base`, shared/management/grpc/sync_message_versions.go:9-16): we do
+/// NOT advertise `PeerCapabilityComponentNetworkMap`, so management keeps
+/// sending the legacy full `NetworkMap` this crate consumes — and a
+/// components envelope arriving anyway is an explicit error, see
+/// `crate::sync`).
+pub fn build_peer_system_meta(meta: &PeerMeta) -> proto::PeerSystemMeta {
+    proto::PeerSystemMeta {
+        hostname: meta.hostname.clone(),
+        go_os: meta.os_name.clone(),
+        os_version: meta.os_version.clone(),
+        netbird_version: meta.netbird_version.clone(),
+        ..Default::default()
     }
 }
 
