@@ -35,10 +35,12 @@ extern "C" {
     pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     pub fn close(fd: c_int) -> c_int;
 
-    // sockets: AF_INET with SOCK_DGRAM (WG outer probe) or SOCK_STREAM|SOCK_CLOEXEC
-    // (N3-7 management TCP socket pre-opened for the shell protect gate).
+    // sockets: AF_INET with SOCK_DGRAM (WG outer probe; N5a ICE/STUN protected
+    // UDP gathering) or SOCK_STREAM|SOCK_CLOEXEC (N3-7 management TCP socket
+    // pre-opened for the shell protect gate).
     // No listen/accept/connect here — TCP connect happens through tokio on
-    // the dup copy only (mgmtsock).
+    // the dup copy only (mgmtsock); UDP sendto/recvfrom ride the dup of a
+    // shell-protected socket (ice.rs).
     pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     pub fn bind(fd: c_int, addr: *const sockaddr_in, len: u32) -> c_int;
     pub fn sendto(
@@ -57,6 +59,8 @@ extern "C" {
         addr: *mut sockaddr_in,
         addrlen: *mut u32,
     ) -> isize;
+    // N5a: local (addr, port) of a bound dup — host-candidate port source.
+    pub fn getsockname(fd: c_int, addr: *mut sockaddr_in, addrlen: *mut u32) -> c_int;
 
     // clock: CLOCK_MONOTONIC only; clock_nanosleep only 10 ms / 50 ms (A4)
     pub fn clock_gettime(clk_id: c_int, tp: *mut timespec) -> c_int;
@@ -80,6 +84,13 @@ extern "C" {
     // openat: O_RDONLY only, whitelisted paths only (A6):
     //   /proc/self/task/<tid>/stat and /proc/self/task/<tid>/syscall
     pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
+
+    // N5a: getifaddrs/freeifaddrs (interface enumeration) and getaddrinfo/
+    // freeaddrinfo (STUN hostname resolve) are resolved at RUNTIME via
+    // dlopen("libc.so") + dlsym (the abi.rs/napi.rs idiom) — no link-time
+    // symbol dependency; absence fails closed in ice.rs (no candidates, no
+    // guess). Their lookups live in ice.rs; nothing new enters the LINK
+    // surface here.
 
     // tid for DW_SPAWN and the /proc paths (see module doc deviation note)
     pub fn gettid() -> i32;

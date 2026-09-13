@@ -106,6 +106,9 @@ pub mod credential;
 pub mod envelope;
 pub mod grpc;
 pub mod hilog;
+// N5a: ICE candidate gathering (host + srflx via STUN) — candidate model in
+// the Body.payload wire form, protected-UDP provider, fail-closed seams.
+pub mod ice;
 pub mod ledger;
 pub mod management;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
@@ -119,6 +122,9 @@ pub mod net;
 // bidi stream over the protected socket seam, per-peer NaCl envelopes.
 pub mod signal;
 pub mod state;
+// N5a: minimal STUN client codec (RFC 5389 Binding + XOR-MAPPED-ADDRESS)
+// feeding ice.rs srflx gathering; RFC 5769 vectors pinned in tests.
+pub mod stun;
 // N3-4: management Sync session (first frame, frame decode, reconnect).
 pub mod sync;
 pub mod sys;
