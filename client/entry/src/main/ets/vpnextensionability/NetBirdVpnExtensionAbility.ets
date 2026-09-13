@@ -7,10 +7,12 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
 import {
   CoreNetworkConfig, ConnectorStartResult, ConnectorStatusResult, DeviceConfigFile,
+  ManagementEndpoint,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorStartWithSocket,
-  connectorSocketFeed, connectorStop, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint,
-  pollStatusOrNull, readPrivateFileText, resolveManagementIp, sleep
+  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorSignalFeed,
+  connectorStartWithSocket, connectorSocketFeed, connectorStop, mgmtSocketOpen, parseDeviceConfig,
+  parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readPrivateFileText,
+  resolveManagementIp, sleep
 } from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
@@ -80,17 +82,20 @@ function safeError(error: Error): string {
 // VPN extension shell, config-driven (promoted from the verified e3 physical
 // preflight create/destroy + fd contract and the verified n1b MR4 config /
 // protect split):
-// - Start flow (N3-6 + N3-7): credentials read from app-private filesDir
-//   files (DEVELOPMENT-TIME practice, NOT secure storage) -> shell-side DNS
-//   of the management host -> core.mgmt_socket_open (TCP, unconnected) ->
-//   fail-closed VpnConnection.protect(fd) gate -> core.connector_start_with_socket
-//   -> bounded wait for core.connector_network_config -> merge
-//   address/routes/DNS into VpnConfig under the default-route safety gate
-//   (0.0.0.0/0 held unless the core gate allows / forceDefaultRoute opt-in)
-//   -> connection.create() -> fd contract + fail-closed protect gate for the
-//   WG outer socket. The map snapshot is applied at create() time (platform
-//   VpnConfig is fixed then); later map changes are logged as explicitly NOT
-//   applied.
+// - Start flow (N3-6 + N3-7 + N5d): credentials read from app-private
+//   filesDir files (DEVELOPMENT-TIME practice, NOT secure storage) ->
+//   shell-side DNS of the management host -> core.mgmt_socket_open (TCP,
+//   unconnected) -> fail-closed VpnConnection.protect(fd) gate ->
+//   core.connector_start_with_socket -> bounded wait for
+//   core.connector_network_config -> N5d: provision the SIGNAL socket
+//   (parse netbird_config.signal → shell-side DNS → open+protect →
+//   core.connector_signal_socket_feed; any failure = connector stopped,
+//   NO VPN created) -> merge address/routes/DNS into VpnConfig under the
+//   default-route safety gate (0.0.0.0/0 held unless the core gate allows /
+//   forceDefaultRoute opt-in) -> connection.create() -> fd contract +
+//   fail-closed protect gate for the WG outer socket. The map snapshot is
+//   applied at create() time (platform VpnConfig is fixed then); later map
+//   changes are logged as explicitly NOT applied.
 // - Protect: the management socket is protected BEFORE the connector's first
 //   dial (reconnects re-protect via core-fed sockets), and after create()
 //   yields a valid TUN fd, the native outer UDP socket (core.wg_fwd_open) is
@@ -300,6 +305,29 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
+    // N5d signal provisioning (fail-closed, governance §二.4 — signal is an
+    // enumerated protect socket): the core's real signal link dials ONLY
+    // over shell-protected sockets. The signal URI rides the network-config
+    // snapshot; resolve it shell-side, open + protect a TCP socket, feed it
+    // (with the resolved address) to the core. ANY failure is fail-closed:
+    // the connector is stopped and the VPN is NOT created — without signal
+    // there is no offer/answer/candidate path, hence no peer connectivity.
+    if (net !== null && net.signal !== undefined && net.signal !== null && net.signal.length > 0) {
+      const signalOk: boolean = await this.provisionSignalSocket(connection, net.signal);
+      if (!signalOk) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-provision|' +
+          'errorClass=signal-provision-fail-closed|action=connector-stopped-no-vpn',
+          this.requestId);
+        connectorStop();
+        return;
+      }
+    } else {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_SIGNAL_NOT_PROVISIONED|requestId=%{public}s|reason=%{public}s',
+        this.requestId, net === null ? 'no-network-map' : 'no-signal-uri-in-config');
+    }
+
     const base: VpnTunnelConfig = loadVpnTunnelConfig();
     let merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
     // N3-7 default-route safety gate (shell half): hold 0.0.0.0/0 unless the
@@ -380,6 +408,75 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return null;
   }
 
+  // N5d signal provisioning (parse → DNS → open → protect → feed). Every
+  // step is fail-closed with a stable stage marker: parse/dns/open/protect/
+  // feed failure or the protect box expiring returns false (the caller
+  // stops the connector and never creates the VPN). DNS stays OUT of native
+  // (same rule as the management dial); the FIRST fed address wins for the
+  // link's lifetime (core-side contract), later feeds only refill the fd
+  // queue — reconnect re-protect needs fresh feeds, which the runtime
+  // watcher may add as an N5+ refinement.
+  private async provisionSignalSocket(connection: vpnExtension.VpnConnection,
+    signalUri: string): Promise<boolean> {
+    // 1. parse (port default 443 — production signal is TLS; a bare uri
+    //    inherits the management transport security level core-side)
+    let endpoint: ManagementEndpoint;
+    try {
+      endpoint = parseSignalEndpoint(signalUri, 443);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=parse|uri=%{public}s|' +
+        'summary=%{public}s', this.requestId, signalUri, safeError(error as Error));
+      return false;
+    }
+    // 2. DNS over the default network, bounded
+    let addr: string;
+    try {
+      addr = await resolveManagementIp(endpoint, DNS_RESOLVE_BOX_MS);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=dns|host=%{public}s|' +
+        'summary=%{public}s', this.requestId, endpoint.host, safeError(error as Error));
+      return false;
+    }
+    // 3. open (unconnected TCP) + protect BEFORE any packet can flow
+    let fd: number = -1;
+    try {
+      const opened = mgmtSocketOpen();
+      fd = opened.fd;
+      if (fd < 0 || opened.bind_rc !== 0) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=open|fd=%{public}d|' +
+          'bindRc=%{public}d', this.requestId, fd, opened.bind_rc);
+        return false;
+      }
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=open-throw|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return false;
+    }
+    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+    if (!protectedOk) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d|' +
+        'errorClass=protect-fail-closed', this.requestId, fd);
+      return false;
+    }
+    // 4. feed the protected socket + the resolved address to the core
+    const fed = connectorSignalFeed(fd, addr);
+    if (!fed.ok) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|' +
+        'error=%{public}s', this.requestId, fd, fed.error ?? 'no-message');
+      return false;
+    }
+    hilog.info(DOMAIN, TAG,
+      'VPN_SIGNAL_FED|requestId=%{public}s|fd=%{public}d|addr=%{public}s|queued=%{public}s',
+      this.requestId, fd, addr, String(fed.queued ?? -1));
+    return true;
+  }
+
   // Runtime watch (while the VPN is up): poll connector_status (state /
   // counts / last error class) and connector_network_config. Platform
   // conclusion baked in here: VpnConnection has NO runtime route/DNS update
@@ -408,12 +505,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.last_error !== null && status.last_error !== undefined
             ? status.last_error.class
             : 'none';
+        // N5d: signal link state rides the same poll (registered /
+        // reconnects / class-only last error)
+        const signalRegistered: string =
+          status.signal !== undefined && status.signal !== null
+            ? String(status.signal.registered)
+            : 'unknown';
+        const signalReconnects: number =
+          status.signal !== undefined && status.signal !== null ? status.signal.reconnects : -1;
+        const signalError: string =
+          status.signal !== undefined && status.signal !== null &&
+          status.signal.last_error !== null && status.signal.last_error !== undefined
+            ? status.signal.last_error.class
+            : 'none';
         hilog.info(DOMAIN, TAG,
           'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
           'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
-          'terminal=%{public}s',
+          'terminal=%{public}s|signalRegistered=%{public}s|signalReconnects=%{public}d|' +
+          'signalLastError=%{public}s',
           this.requestId, String(status.running), status.state, status.peer_count,
-          status.route_count, status.reconnects, errorClass, String(status.terminal));
+          status.route_count, status.reconnects, errorClass, String(status.terminal),
+          signalRegistered, signalReconnects, signalError);
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;

@@ -32,6 +32,9 @@ struct Index {
   @State peerCount: number = 0;
   @State routeCount: number = 0;
   @State lastErrorClass: string = 'none';
+  // N5d: real signal link state.
+  @State signalRegistered: boolean = false;
+  @State signalReconnects: number = 0;
   private requestId: string = `ui-${Date.now()}`;
   private pollTimer: number = -1;
 
@@ -62,6 +65,13 @@ struct Index {
       status.last_error !== null && status.last_error !== undefined
         ? status.last_error.class
         : 'none';
+    // N5d: the real signal link (registered = offer/answer/candidate path up)
+    this.signalRegistered = status.signal !== undefined && status.signal !== null
+      ? status.signal.registered
+      : false;
+    this.signalReconnects = status.signal !== undefined && status.signal !== null
+      ? status.signal.reconnects
+      : 0;
   }
 
   private buildWant(): Want {
@@ -140,6 +150,11 @@ struct Index {
       Text(`peers: ${this.peerCount}   routes: ${this.routeCount}`)
         .fontSize(16)
         .fontColor('#17324D')
+      // N5d: signal channel status — registered / reconnect count.
+      Text(`signal: ${this.signalRegistered ? 'registered' : 'not registered'}   ` +
+        `reconnects: ${this.signalReconnects}`)
+        .fontSize(16)
+        .fontColor(this.signalRegistered ? '#176B3A' : '#8A6D1A')
       Text(`last error: ${this.lastErrorClass}`)
         .fontSize(16)
         .fontColor(this.lastErrorClass === 'none' ? '#176B3A' : '#A12622')

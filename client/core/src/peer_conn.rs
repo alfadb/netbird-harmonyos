@@ -55,23 +55,42 @@
 //!
 //! ## 传输 seam
 //!
-//! [`SignalExchange`] 是编排对 signal 通道的唯一依赖（send 方向）；收方
+//! [`SignalExchange`] 是编排对 signal 通道的唯一依赖（send 方向）；收方向
 //! 由 connector 把解密后的 `SignalMessage`（`crate::signal`）转成
-//! [`PeerIceOrchestrator::handle_signal`] 调用。生产实现（把
-//! `crate::signal::SignalSession` 的流接进 seam）在 connector 持有真实
-//! signal 流之前是 [`LoggingSignalExchange`]（与 `LoggingConfigApplier`
-//! 同一先例：打点、不假装成功）。
+//! [`PeerIceOrchestrator::handle_signal`] 调用。
+//!
+//! 生产实现（N5d）：[`RealSignalExchange`] 把 `crate::signal::SignalSession`
+//! 的真实流接进 seam——`send()` 经无界队列交给 signal worker 任务（注册后
+//! 密封发送，peer=remote_key）；未注册时 `send()` 返回 `Network` 类错误
+//! （upstream `ErrSignalIsNotReady` 同型，`client/internal/peer/
+//! handshaker.go:16,208` —— `sendOffer` 前检查 `signaler.Ready()`，
+//! handshaker.go:212-214），编排层把帧保留在 outbox 下一拍重试，
+//! **绝不静默丢弃**（与 [`LoggingSignalExchange`] 的"打点丢弃"形成对照；
+//! 后者保留为测试/对照实现，生产不再使用）。
+//! [`spawn_signal_link`] 负责把受保护 socket 源 + `netbird_config.signal`
+//! 端点组装成 worker 任务：初始受保护拨号失败按 backoff 重试（上游
+//! `signal.NewClient` 在构造内重试拨号，`shared/signal/client/grpc.go:
+//! 123-131`），此后 [`crate::signal::SignalSession::run_events_with_outbox`]
+//! 驱动注册/收帧/发帧/断流重连（每次重连重新 register + 经 tonic 连接器
+//! 重取受保护 fd，语义归 [`crate::signal`] 所有，本层不绕过）。
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::backoff::{ExponentialBackoff, MonotonicClock, OsRandom};
 use crate::connector::{ErrorClass, WgPeerApplier};
+use crate::envelope::EnvelopeKeyPair;
+use crate::grpc::GrpcTransport;
 use crate::ice::{
     Candidate, GatherConfig, InterfaceSource, StunServer, UdpSocketSource,
     DEFAULT_INTERFACE_BLACKLIST, DEFAULT_STUN_TIMEOUT_MS,
 };
 use crate::ice_session::{IceCredentials, IceEvent, IceSession};
 use crate::management::ManagementError;
+use crate::mgmtsock::ManagementSocketProvider;
+use crate::signal::{SignalClient, SignalLoopEvent, SignalMessage, SignalOutgoing, SignalSession};
 use crate::util::jnum;
 
 /// 发起/应答失败后的重试冷却（注入时钟衡量；避免熵/收集失败时热循环）。
@@ -147,8 +166,10 @@ pub trait SignalExchange: Send + Sync {
     ) -> Result<(), ManagementError>;
 }
 
-/// 生产默认 [`SignalExchange`]：connector 尚未持有真实 signal 流之前的
-/// 打点实现（`LoggingConfigApplier` 先例）。发进这里的帧被计数后丢弃。
+/// 测试/对照用 [`SignalExchange`]：发进这里的帧被计数后丢弃（`Logging
+/// ConfigApplier` 先例）。**生产不再使用**——N5d 起生产路径是
+/// [`RealSignalExchange`]；保留本实现既有的测试继续成立，并作为"静默
+/// 丢弃"反例被 [`RealSignalExchange`] 的显式失败语义对照钉住。
 #[derive(Debug, Default)]
 pub struct LoggingSignalExchange {
     sent: std::sync::atomic::AtomicU64,
@@ -176,6 +197,200 @@ impl SignalExchange for LoggingSignalExchange {
         ));
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// 真实 signal 适配器（N5d）：SignalSession 流 ↔ SignalExchange seam
+// ---------------------------------------------------------------------------
+
+/// [`PeerSignalKind`] → 线上 `Body.type`（`signalexchange.proto` L45-52：
+/// `OFFER=0 / ANSWER=1 / CANDIDATE=2`）。
+fn wire_kind(kind: PeerSignalKind) -> crate::signal::proto::body::Type {
+    use crate::signal::proto::body::Type;
+    match kind {
+        PeerSignalKind::Offer => Type::Offer,
+        PeerSignalKind::Answer => Type::Answer,
+        PeerSignalKind::Candidate => Type::Candidate,
+    }
+}
+
+/// 生产 [`SignalExchange`]（N5d）：把编排层的帧经无界队列交给
+/// [`spawn_signal_link`] 启动的 signal worker，由
+/// [`crate::signal::SignalSession`] 密封（peer=remote_key，
+/// grpc.go:434-451）并推上注册好的 `ConnectStream`（grpc.go:396-411）。
+///
+/// **未注册 → 显式失败，不静默丢弃**：`send()` 在 link 未注册时返回
+/// `Network` 类错误（upstream `ErrSignalIsNotReady` 同型，
+/// handshaker.go:16,208,212-214），编排层把帧留在 outbox 下一拍重试
+/// （`run_once`/`flush_outbox` 的既有重试语义）。
+#[derive(Debug)]
+pub struct RealSignalExchange {
+    registered: Arc<AtomicBool>,
+    tx: tokio::sync::mpsc::UnboundedSender<SignalOutgoing>,
+    /// 未注册期间被拒绝的 send 计数（诊断）。
+    refused: AtomicU64,
+}
+
+impl RealSignalExchange {
+    /// 建立适配器与其出帧队列的接收端（接收端交给
+    /// [`spawn_signal_link`]）。
+    pub fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SignalOutgoing>();
+        let exchange = Arc::new(RealSignalExchange {
+            registered: Arc::new(AtomicBool::new(false)),
+            tx,
+            refused: AtomicU64::new(0),
+        });
+        (exchange, rx)
+    }
+
+    /// signal 流是否已注册（worker 任务维护；`send()` 的放行条件）。
+    pub fn is_registered(&self) -> bool {
+        self.registered.load(Ordering::Acquire)
+    }
+
+    /// 强制清注册态（connector stop 的 abort 路径跳过 worker 收尾时补齐）。
+    pub fn mark_unregistered(&self) {
+        self.registered.store(false, Ordering::Release);
+    }
+
+    /// 未注册期间被拒绝的 send 计数（诊断）。
+    pub fn refused_sends(&self) -> u64 {
+        self.refused.load(Ordering::Acquire)
+    }
+}
+
+impl SignalExchange for RealSignalExchange {
+    fn send(
+        &self,
+        to_key: &str,
+        kind: PeerSignalKind,
+        payload: &str,
+        wg_listen_port: u32,
+    ) -> Result<(), ManagementError> {
+        if !self.is_registered() {
+            self.refused.fetch_add(1, Ordering::AcqRel);
+            return Err(ManagementError::Network(
+                "signal-stream-not-registered (frame retained in orchestrator outbox)".into(),
+            ));
+        }
+        self.tx
+            .send(SignalOutgoing {
+                remote_key: to_key.to_string(),
+                kind: wire_kind(kind),
+                payload: payload.to_string(),
+                wg_listen_port,
+            })
+            .map_err(|_| {
+                ManagementError::Network("signal-link-closed (worker gone)".into())
+            })
+    }
+}
+
+/// [`spawn_signal_link`] 的静态材料：endpoint/传输（TLS 注入 CA）+ 身份
+/// 密钥 + 受保护 socket 源与已解析地址（DNS 壳侧解析；协议语义见
+/// [`crate::signal::SignalClient::connect_with_socket_source`]）。
+pub struct SignalLinkConfig {
+    pub endpoint: String,
+    pub transport: GrpcTransport,
+    pub connect_timeout: core::time::Duration,
+    pub request_timeout: core::time::Duration,
+    pub keys: EnvelopeKeyPair,
+    pub sockets: Arc<dyn ManagementSocketProvider>,
+    pub connect_addr: SocketAddr,
+}
+
+/// signal worker 事件（connector 侧消费：状态暴露 + 编排路由）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalLinkEvent {
+    /// 初始受保护拨号失败（携带分类错误；按 backoff 重试中——上游
+    /// `signal.NewClient` 同样在构造内重试拨号，grpc.go:123-131）。
+    DialFailed(ManagementError),
+    /// 流注册成功（首次或每次重连；此后 `send()` 放行）。
+    Registered,
+    /// 解密后的收帧（`from_key` = 发送方 WG 公钥，grpc.go:414-431）。
+    Message(SignalMessage),
+    /// 帧级解密/解码失败：已上报、流保持（grpc.go:600-602）。
+    Malformed,
+    /// 流断开（传输类；退避后将重连+重注册）。
+    Broken(ManagementError),
+    /// worker 结束（fatal Auth / 退避预算耗尽 / 拨号预算耗尽）。
+    Ended(Result<(), ManagementError>),
+}
+
+/// 启动真实 signal worker（N5d connector 生产路径的唯一启动口）：
+///
+/// 1. **初始受保护拨号**（重试直至成功/预算耗尽；空 fd 源即失败关闭，
+///    绝无未保护回退——每次拨号经 [`crate::mgmtsock::ProtectedSocketConnector`]
+///    取新鲜 fd）；
+/// 2. [`crate::signal::SignalSession::run_events_with_outbox`] 驱动注册/
+///    收帧/发帧/断流重连：每次重连**重新 register**（重注册必然经 tonic
+///    连接器**重取受保护 fd**，`crate::signal` 既有语义，本层不绕过）；
+/// 3. 事件转发给 `on_event`；`Registered`/`Broken` 同步维护适配器的
+///    registered 闸（`send()` 放行条件）。
+///
+/// 停止：abort 返回的 task（connector stop），或丢弃 exchange（队列
+/// `None` → worker 干净退出）。
+pub fn spawn_signal_link(
+    runtime: tokio::runtime::Handle,
+    cfg: SignalLinkConfig,
+    exchange: Arc<RealSignalExchange>,
+    rx: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
+    on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync>,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        // 初始拨号退避：与会话重连同参（上游 defaultBackoff，
+        // grpc.go:173-183）；OS 随机源 + 单调时钟（无 sleep 参数断言）。
+        let mut dial_backoff = ExponentialBackoff::upstream_stream_default();
+        let mut rng = OsRandom;
+        let clock = MonotonicClock;
+        let client = loop {
+            match SignalClient::connect_with_socket_source(
+                &cfg.endpoint,
+                cfg.transport.clone(),
+                cfg.connect_timeout,
+                cfg.request_timeout,
+                cfg.keys.clone(),
+                cfg.sockets.clone(),
+                cfg.connect_addr,
+            )
+            .await
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    on_event(SignalLinkEvent::DialFailed(e));
+                    match dial_backoff.next_delay(&clock, &mut rng) {
+                        Some(d) => tokio::time::sleep(d).await,
+                        None => {
+                            on_event(SignalLinkEvent::Ended(Err(ManagementError::Network(
+                                "signal dial retry budget exhausted".into(),
+                            ))));
+                            return;
+                        }
+                    }
+                }
+            }
+        };
+        let registered = exchange.registered.clone();
+        let sink = on_event.clone();
+        let mut session = SignalSession::new(client);
+        let result = session
+            .run_events_with_outbox(rx, move |ev| match ev {
+                SignalLoopEvent::Registered => {
+                    registered.store(true, Ordering::Release);
+                    sink(SignalLinkEvent::Registered);
+                }
+                SignalLoopEvent::Message(m) => sink(SignalLinkEvent::Message(m.clone())),
+                SignalLoopEvent::Malformed(_) => sink(SignalLinkEvent::Malformed),
+                SignalLoopEvent::Broken(e) => {
+                    registered.store(false, Ordering::Release);
+                    sink(SignalLinkEvent::Broken(e.clone()));
+                }
+            })
+            .await;
+        exchange.registered.store(false, Ordering::Release);
+        on_event(SignalLinkEvent::Ended(result));
+    })
 }
 
 /// OFFER/ANSWER payload（`"ufrag:pwd"`，`client.go:74-101`）解析：恰好一个
@@ -423,6 +638,12 @@ impl PeerIceOrchestrator {
     /// `run_once` 不发起任何东西）。
     pub fn set_signal_ready(&mut self, ready: bool) {
         self.signal_ready = ready;
+    }
+
+    /// signal 流就绪状态（N5d：link 的 `Registered`/`Broken` 事件维护；
+    /// 测试/诊断断言 `signal_ready` 只在注册后为真）。
+    pub fn signal_ready(&self) -> bool {
+        self.signal_ready
     }
 
     /// 发起策略（N5c）：`initiator = false` 把该 peer 设为纯应答方（不发

@@ -256,3 +256,134 @@ Auth/Closed 划分。合计新增 **16 个用例**；全库 `cargo test --offlin
   socket feed/start API 需为 signal 增量设计）；shell 侧 signal socket 的
   回填节奏（每个重连一个）与 DNS 解析也属该增量。
 - 上游 `GO_IDLE/MODE/featuresSupported/rosenpass` 字段透传但不主动产生。
+
+---
+
+## 九、N5d — 真实 signal 流接入 Connector（2026-09）
+
+任务：把 N4a 的 `SignalSession` 真实流接进 Connector 的 per-peer ICE 编排，
+替换 N5c 的临时 `LoggingSignalExchange` seam。**本节为交付记录**（时序、
+语义、暴露面、契约、未做项）；上游引用一律 `文件:行号`（pinned commit）。
+
+### 9.1 接线时序（生产路径）
+
+```
+sync(netbird_config.signal) ──┐
+                              ├─ 都齐备 → SignalRuntime::maybe_start()
+壳 feed(fd, connect_addr) ────┘        │
+   connector_signal_socket_feed        ▼
+                          spawn_signal_link（peer_conn.rs）
+                                       │ 1) 初始受保护拨号（失败按
+                                       │    upstream backoff 重试，
+                                       │    grpc.go:123-131；空 fd 源
+                                       │    fail-closed，绝无裸连）
+                                       ▼
+                          SignalSession::run_events_with_outbox
+                          （register → 收帧/发帧 select → Broken→
+                           退避→重注册，每次重连重取受保护 fd）
+```
+
+- `SignalClient::connect_with_socket_source` 之外的**每次** tonic 重拨都经
+  `ProtectedSocketConnector` 取新鲜 fd（N4a 语义，接线未绕过）；
+  `Registered`/`Broken` 事件同步维护 `PeerIceOrchestrator::set_signal_ready`
+  与适配器的 registered 闸。
+- 收帧路由（connector.rs `route_signal_message`）：`from_key` =
+  信封 `EncryptedMessage.key` = 发送方 WG 公钥（grpc.go:414-431），与网络图
+  peer 的 `wg_pub_key` 同一身份域，直接交给
+  `PeerIceOrchestrator::handle_signal(from_key, …)`——编排层按该键匹配
+  （engine.go:2043-2045 按 `msg.Key` 找 peerConn 的同型；未知 key 由编排层
+  丢弃计数）。`HEARTBEAT/MODE/GO_IDLE` 非 ICE 帧，路由层直接跳过
+  （engine.go:2036-2040 心跳短路；GO_IDLE 走 connMgr，本增量不做）。
+- 发帧：编排 outbox → `RealSignalExchange::send`（无界队列）→
+  `SignalSession::send_outgoing` 密封（peer=remote_key，grpc.go:434-451）
+  → 活跃流（`SendToStream`，grpc.go:396-411）。队列在 select 中与收帧并举，
+  出帧不等收帧。
+- signal 地址（`derive_signal_endpoint`）：显式 `http(s)://` 按 scheme；裸
+  `host:port`（线上形态）**继承 management 传输安全等级**（同一注入 CA）。
+  依据：`connectToSignal` 按 `HostConfig.protocol == HTTPS` 决定 TLS
+  （connect.go:717-721），但本仓网络图只保留 uri（engine.go:1185
+  "todo update signal"，protocol 字段未进模型），故以 management 的
+  TLS 决策为代理。
+
+### 9.2 role / 应答语义（含行号）
+
+- signal 报文**不携带角色字段**；ICE controlling/controlled 是本地决策。
+  收到对端 OFFER 而本端尚未发起时：**必须应答**——上游 handshaker 的
+  `Listen` 对每条远端 OFFER 无条件 `sendAnswer()`
+  （`client/internal/peer/handshaker.go:130-152`，L150）；本仓
+  `PeerIceOrchestrator::handle_signal` 的 Offer 分支在无会话时建
+  controlled 起始会话（`IceSession::new(creds, controlling=false, …)`）、
+  采纳对端凭证并置 `answer_owed`（本地候选就绪后补发 ANSWER）。glare
+  （双方同时 OFFER）沿用 N5b tie-breaker 语义收敛（RFC 8445
+  §7.3.1.1/§7.2.5.1，N5c/peer_conn_e2e 已测）。
+- **未就绪不发不假装**：上游发送前检查 `signaler.Ready()`，未就绪返回
+  `ErrSignalIsNotReady`（handshaker.go:16 定义、L208 使用、L212-214
+  `sendOffer` 前置检查）。本仓同型：`RealSignalExchange::send` 在未注册时
+  返回 `Network` 类错误（计数 `refused_sends()`），编排层把帧**保留在
+  outbox** 下一拍重试——与 `LoggingSignalExchange` 的"打点丢弃"（返回 Ok、
+  帧消失）形成对照，测试钉死（tests/signal_link.rs 未注册用例）。
+
+### 9.3 signal 状态暴露（connector_status）
+
+`status.signal` 字段（N5d）：`{"registered":bool,"reconnects":u64,
+"last_error":{"class","status"}|null}` —— registered 由 `Registered`/
+`Broken`/worker 结束事件维护；reconnects 只计流断开（初始注册与拨号失败
+不计，`crate::signal` 诊断口径）；last_error 仅分类（凭据纪律）。
+`connector_network_config()` 快照新增 `signal` 字段（URI），壳侧据此补给。
+
+### 9.4 ArkTS feed 契约
+
+- 新 NAPI：`connector_signal_socket_feed(fd, addrJson)`，
+  `addrJson = {"connect_addr":"ip:port"}` **必填**；`{ok:true,queued:N}` /
+  `{ok:false,error:token}`（token：`no-connector` / `no-socket-source` /
+  `socket-fd-missing` / `socket-fd-invalid` / `socket-addr-invalid`）。
+- 壳侧流程（NetBirdVpnExtensionAbility `provisionSignalSocket`，位于
+  connector 启动之后、`connection.create()` 之前）：解析快照 `signal` URI
+  （`parseSignalEndpoint`，端口缺省 443）→ **壳侧 DNS**（DNS 不进 native，
+  同 management 规则）→ `mgmt_socket_open()`（TCP，未连接）→
+  `VpnConnection.protect(fd)`（5s box，fail-closed）→
+  `connectorSignalFeed(fd, addr)`。**任一步失败 = connectorStop + 不建
+  VPN**（没有 signal 就没有 offer/answer/候选路径，等于没有 peer 连通，
+  fail-closed 并已在代码注释与本节标注）。
+- 地址契约：**首个** feed 的地址在链路生命周期内生效（与 management
+  factory 固定 connect_addr 同约定）；后续 feed 只补充 fd 队列（重连
+  逐次消费）。重连后的再补给节奏（watcher 周期性喂）是后续增量。
+
+### 9.5 测试（tests/signal_link.rs，全部离线 in-process）
+
+1. `dual_peer_real_signal_sessions_converge_and_land_wg_endpoints`：双实例
+   经真实 `SignalSession`（注册 header、信封加解密、mock 纯转发）交换
+   offer/answer/候选 → 双方 Connected、selected pair 一致、WG endpoint 落配
+   （可注入 WG seam 断言）；mock sink 服务端**真解密**断言 OFFER 字段
+   （`ufrag:pwd` 16/32 规则）；`signal_ready` 仅在服务端确认注册后置真
+   （事件回调内对着服务端 registry 断言，客户端无法"先亮灯"）。
+2. `unregistered_sends_are_refused_retained_and_delivered_after_registration`：
+   空 fd 源 → 拨号 fail-closed；强制 ready 的编排发起后 seam 显式拒绝
+   （refused 计数）且帧保留，注册恢复后同帧送达（服务端恰 1 条 OFFER）。
+3. `transport_break_reconnects_re_registers_and_re_takes_protected_fd`：
+   传输层 kill → Broken → signal_ready 落假 → 重连（taken 增长 = 重取
+   受保护 fd；服务端同 key 第二条注册 header）→ signal_ready 重新置真、
+   ICE 会话保持 Connected、重注册后信号路径再次通帧。
+4. `empty_signal_socket_source_fails_closed_without_any_dial`：空源
+   `taken==0`、服务端永远看不到该 peer（无裸连）、pump 后 peer 停在 Idle。
+   另有 connector 单测：`apply_update_arms_signal_link_and_dials_fail_
+   closed_without_fds`（sync 触发启动 + 状态暴露 + 空源失败分类）、
+   `signal_endpoint_derivation_rules`、`signal_feed_requires_connector_
+   source_and_addr`。
+
+### 9.6 未做项（如实）
+
+- **relay/TURN**：`turns`/`relay` 仍不实现；Fallback 到 relay 的上游语义
+  （conn.go:489-520）不存在——peer 失败即不可达。
+- **ICE restart / 会话重建**：signal 断流期间已 flush 的帧不重发；握手
+  中途断流的续传依赖对端重发（上游由 conn 状态机周期重 offer，本增量未做）。
+  worker 结束（fatal/预算耗尽）后不自动重启链路。
+- **真机**：全部为宿主 in-process 验证；`VpnConnection.protect` on-device
+  行为仍属物理门（N2b），signal socket 的真机 protect 路径未验证。
+- **双实例 E2E 的 WG 层**：WG 端点仍落在 `WgPeerRegistry`（本地登记 +
+  endpoint 记录），无真实 WG 设备数据面、无真实握手流量。
+- **接收看门狗**（30s/10s 自寻址探针，grpc.go:522-553）仍未实现
+  （N4a 起遗留）；`GO_IDLE/MODE` 不产生不消费。
+- 上游 `signal.NewClient` 的拨号重试预算（30 分钟形态）以
+  `ExponentialBackoff::upstream_stream_default` 代理；`Send` 的 4 次重试
+  阶梯（grpc.go:470-492）仍未复刻。

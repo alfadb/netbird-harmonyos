@@ -143,6 +143,14 @@
 //! Auth-class failures return `Err` and end the loop. Frame crypto failures
 //! keep the stream; backoff exhaustion (injected [`crate::backoff`]) ends
 //! the session with the pending error.
+//!
+//! N5d adds [`SignalSession::run_events_with_outbox`]: the same
+//! register/receive/backoff policy with an outbound queue
+//! ([`SignalOutgoing`]) multiplexed into every inner step — the seam the
+//! per-peer ICE orchestrator pushes its offer/answer/candidate frames
+//! through (queued sends never wait for inbound traffic; a queued frame
+//! that was never sent survives a stream break only as far as the open
+//! stream — re-signaling on reconnect is the orchestrator's outbox job).
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -491,6 +499,26 @@ struct ActiveStream {
     frames: Streaming<proto::EncryptedMessage>,
 }
 
+/// One outbound frame queued by the exchange seam (N5d) and drained by the
+/// session loop onto the ACTIVE stream. Identity stamping (`Message.key` =
+/// our public key) happens inside [`SignalSession::send_outgoing`] — the
+/// queue never carries a spoofable identity (grpc.go:446-448 parity).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignalOutgoing {
+    /// Base64 WireGuard public key of the RECIPIENT (`remoteKey` — the
+    /// envelope is sealed FOR this key, grpc.go:434-451).
+    pub remote_key: String,
+    /// `Body.type` (OFFER/ANSWER/CANDIDATE are the ICE-relevant subset;
+    /// other values pass through untouched — the server is
+    /// direction-agnostic).
+    pub kind: proto::body::Type,
+    /// `Body.payload` — `"ufrag:pwd"` for OFFER/ANSWER, the marshaled
+    /// candidate for CANDIDATE (client.go:74-101, signaler.go:32-41).
+    pub payload: String,
+    /// `Body.wgListenPort`.
+    pub wg_listen_port: u32,
+}
+
 /// Long-lived signal session with upstream-shaped reconnect: register the
 /// stream, receive/decrypt frames, back off and re-register on breaks.
 ///
@@ -605,6 +633,19 @@ impl SignalSession {
         })
     }
 
+    /// Seal + send one queued [`SignalOutgoing`] through the ACTIVE stream —
+    /// the N5d exchange-seam entry point. Identity stamping
+    /// (`Message.key` = our base64 public key, grpc.go:446-448) and the
+    /// `MarshalCredential` field set (client.go:74-97: type/payload/
+    /// wgListenPort/netBirdVersion) happen here, exactly like
+    /// [`SignalSession::send_to_stream`].
+    pub async fn send_outgoing(&mut self, out: &SignalOutgoing) -> Result<(), ManagementError> {
+        let msg = self
+            .client
+            .build_message(&out.remote_key, out.kind, out.payload.as_str(), out.wg_listen_port);
+        self.send_to_stream(&msg).await
+    }
+
     /// Receive the next frame from the ACTIVE stream: decrypt (sender key
     /// from the envelope) + decode into [`SignalMessage`].
     ///
@@ -651,24 +692,64 @@ impl SignalSession {
     ///
     /// Shutdown: drop the future/task owning this session — the loop holds
     /// no catch-all that survives task cancellation.
-    pub async fn run_events<E>(&mut self, mut on_event: E) -> Result<(), ManagementError>
+    pub async fn run_events<E>(&mut self, on_event: E) -> Result<(), ManagementError>
     where
         E: for<'a> FnMut(SignalLoopEvent<'a>),
     {
+        // idle outbox: sender kept alive for the whole call, so `recv()`
+        // pends forever and the loop below behaves EXACTLY like the
+        // receive-only loop it replaces (no early `None` exit).
+        let (idle_tx, idle_rx) = tokio::sync::mpsc::unbounded_channel::<SignalOutgoing>();
+        let result = self.run_events_with_outbox(idle_rx, on_event).await;
+        drop(idle_tx);
+        result
+    }
+
+    /// [`SignalSession::run_events`] with an outbound queue: the SAME
+    /// register/receive/backoff policy, with each inner step multiplexing
+    /// `next_frame()` against `outbox.recv()` (`tokio::select!`) so queued
+    /// sends never wait for inbound traffic. The queue drains through
+    /// [`SignalSession::send_outgoing`]:
+    ///
+    /// - frame-shaping failures (bad remote key → `Parse`/`Request`) drop
+    ///   the single frame and keep the stream (a bad frame is not a broken
+    ///   transport, grpc.go:600-602 parity);
+    /// - stream-level send failures (`Network`) follow the receive-break
+    ///   path: `Broken` event, backoff, re-register (grpc.go:396-411 — the
+    ///   stream carries the frame; a dead stream must be re-registered
+    ///   before anything else flows);
+    /// - all senders dropped (`recv() == None`) → `Ok(())`: the owning
+    ///   exchange is gone, the worker exits cleanly.
+    pub async fn run_events_with_outbox<E>(
+        &mut self,
+        mut outbox: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
+        mut on_event: E,
+    ) -> Result<(), ManagementError>
+    where
+        E: for<'a> FnMut(SignalLoopEvent<'a>),
+    {
+        enum Step {
+            Inbound(Result<IncomingFrame, SignalStreamError>),
+            Outbound(Option<SignalOutgoing>),
+        }
         loop {
             match self.connect().await {
                 Ok(()) => {
                     on_event(SignalLoopEvent::Registered);
                     loop {
-                        match self.next_frame().await {
-                            Ok(IncomingFrame::Message(msg)) => {
+                        let step = tokio::select! {
+                            frame = self.next_frame() => Step::Inbound(frame),
+                            out = outbox.recv() => Step::Outbound(out),
+                        };
+                        match step {
+                            Step::Inbound(Ok(IncomingFrame::Message(msg))) => {
                                 on_event(SignalLoopEvent::Message(&msg));
                             }
-                            Ok(IncomingFrame::Malformed(e)) => {
+                            Step::Inbound(Ok(IncomingFrame::Malformed(e))) => {
                                 on_event(SignalLoopEvent::Malformed(&e));
                             }
-                            Err(SignalStreamError::Fatal(e)) => return Err(e),
-                            Err(SignalStreamError::Closed(e)) => {
+                            Step::Inbound(Err(SignalStreamError::Fatal(e))) => return Err(e),
+                            Step::Inbound(Err(SignalStreamError::Closed(e))) => {
                                 self.last_stream_error = Some(e);
                                 self.reconnects += 1;
                                 on_event(SignalLoopEvent::Broken(
@@ -676,6 +757,35 @@ impl SignalSession {
                                 ));
                                 break;
                             }
+                            Step::Outbound(None) => {
+                                // every sender dropped: the exchange seam is
+                                // gone — nothing will ever be queued again
+                                return Ok(());
+                            }
+                            Step::Outbound(Some(out)) => match self.send_outgoing(&out).await {
+                                Ok(()) => {}
+                                Err(e @ (ManagementError::Parse(_) | ManagementError::Request { .. })) =>
+                                {
+                                    // undeliverable FRAME (bad remote key /
+                                    // missing body): drop it, keep the stream
+                                    let _ = e; // class-only logging: no message text (credential discipline)
+                                    crate::hilog::emit(
+                                        "signal: undeliverable frame dropped (parse/request class)",
+                                    );
+                                }
+                                Err(e) => {
+                                    // stream-level send failure → the same
+                                    // reconnect path as a receive break
+                                    self.last_stream_error = Some(e);
+                                    self.reconnects += 1;
+                                    on_event(SignalLoopEvent::Broken(
+                                        self.last_stream_error
+                                            .as_ref()
+                                            .expect("error just stored"),
+                                    ));
+                                    break;
+                                }
+                            },
                         }
                     }
                 }

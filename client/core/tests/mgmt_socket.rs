@@ -625,6 +625,7 @@ async fn failing_provider_fails_closed_to_terminal_error() {
         false,
         None,
         None, // N5c: production (idle, signal-less) ICE orchestrator
+        None, // N5d: no signal material in this harness
     );
 
     wait_for("terminal Failed state with a socket-starved dial", || {
@@ -698,6 +699,7 @@ async fn every_redial_takes_a_fresh_fd_matching_attempts() {
         false,
         Some(source.clone()),
         None, // N5c: production (idle, signal-less) ICE orchestrator
+        None, // N5d: no signal material in this harness
     );
 
     wait_for("first snapshot applied over protected socket #1", || {

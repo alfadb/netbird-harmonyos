@@ -108,6 +108,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_start_with_socket", napi_connector_start_with_socket);
     reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
+    reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
@@ -362,6 +363,7 @@ mod tests {
             "connector_start_with_socket",
             "connector_socket_feed",
             "connector_ice_socket_feed",
+            "connector_signal_socket_feed",
             "connector_status",
             "connector_network_config",
             "connector_stop",
@@ -502,6 +504,20 @@ unsafe extern "C" fn napi_connector_ice_socket_feed(
     let a = cb_args(env, info);
     let fd = a.i32_at(0, -1);
     ret_json(env, crate::connector::connector_ice_socket_feed_json(fd))
+}
+
+// N5d: shell-side resupply of PROTECTED signal sockets plus the
+// shell-resolved signal address (fail-closed: no feed ⇒ the signal dial
+// fails, no unprotected fallback). fd first, `{"connect_addr":"ip:port"}`
+// JSON second — both required.
+unsafe extern "C" fn napi_connector_signal_socket_feed(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    let addr = a.string_at(1);
+    ret_json(env, crate::connector::connector_signal_socket_feed_json(fd, &addr))
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the shell

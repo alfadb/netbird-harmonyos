@@ -493,6 +493,12 @@ pub fn socket_source(count: usize) -> Arc<ProtectedSocketFdSource> {
     Arc::new(source)
 }
 
+/// Feed ONE more pre-opened (unconnected, bound) TCP socket into an
+/// existing source — the N5d "shell feeds the starved queue" contract.
+pub fn feed_tcp_fd(source: &ProtectedSocketFdSource) {
+    source.feed(parse_open_fd());
+}
+
 /// Which transport a [`connect_client`] call uses.
 pub enum TestTransport<'a> {
     /// Plaintext h2 (`http://`) — dev/test only.

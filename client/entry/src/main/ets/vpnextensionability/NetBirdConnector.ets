@@ -83,6 +83,14 @@ export interface ConnectorErrorClass {
   status: number;
 }
 
+// N5d: core.connector_status().signal — real signal link state
+// (registered / reconnects / class-only last error).
+export interface SignalStatus {
+  registered: boolean;
+  reconnects: number;
+  last_error: ConnectorErrorClass | null;
+}
+
 // core.connector_status snapshot (subset the shell consumes).
 export interface ConnectorStatusResult {
   running: boolean;
@@ -97,6 +105,8 @@ export interface ConnectorStatusResult {
   // N3-7: worker ENDED BY ITSELF (fatal / retry budget exhausted). This is
   // the signal the shell watcher tears the VPN down on (gap 3).
   terminal: boolean;
+  // N5d: the real signal link (registered = frames may flow).
+  signal: SignalStatus;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -145,6 +155,10 @@ export interface CoreNetworkConfig {
   peer_count?: number;
   peers?: CorePeerSummary[];
   default_route?: CoreDefaultRouteGate;
+  // N5d: the signal server URI from netbird_config.signal (host:port,
+  // possibly scheme-prefixed). The shell resolves it, opens + protects a
+  // socket and feeds it back via connectorSignalFeed.
+  signal?: string | null;
 }
 
 // netbird-device-config.json shape (app-private dir, development-time —
@@ -235,6 +249,18 @@ export function connectorSocketFeed(fd: number): SocketFeedResult {
   return JSON.parse(core.connector_socket_feed(fd)) as SocketFeedResult;
 }
 
+// N5d: feed a fresh PROTECTED signal socket (open + protect first) plus the
+// shell-resolved signal address. The real signal link dials ONLY over such
+// sockets — every dial (initial AND per reconnect) takes a fresh one; a
+// starved queue fails the dial CLOSED (no unprotected fallback). The FIRST
+// fed address wins for the lifetime of the link (same fixed-address
+// contract as the management factory).
+export function connectorSignalFeed(fd: number, connectAddr: string): SocketFeedResult {
+  const addrJson: Record<string, Object> = { 'connect_addr': connectAddr };
+  return JSON.parse(core.connector_signal_socket_feed(fd, JSON.stringify(addrJson))) as
+    SocketFeedResult;
+}
+
 // N3-7: open + bind (NO connect) a TCP management socket for the protect
 // gate. fd stays native-created; the shell protects it, then hands the SAME
 // number back via connectorStartWithSocket/connectorSocketFeed.
@@ -287,6 +313,54 @@ export function parseManagementEndpoint(url: string): ManagementEndpoint {
     port = Number(authority.slice(colon + 1));
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
       throw new Error('management-url-malformed');
+    }
+  }
+  // bare IPv4 literal → no DNS leg at all
+  const octets: string[] = host.split('.');
+  const isV4Literal: boolean = octets.length === 4 &&
+    octets.every((o: string): boolean => {
+      const n: number = Number(o);
+      return o.length > 0 && Number.isInteger(n) && n >= 0 && n <= 255;
+    });
+  return { host: host, port: port, ip: isV4Literal ? host : '' };
+}
+
+// N5d: parse the `netbird_config.signal` URI into host + port (same
+// ManagementEndpoint shape as the management parser so resolveManagementIp
+// is reusable). Handles bare `host:port` (the wire shape, e.g.
+// 'signal.netbird.io:10000'), optional http(s):// prefixes; `defaultPort`
+// is the caller's TLS decision (443 for https-style configs, 80 otherwise).
+// Malformed input throws a stable error text — the caller aborts
+// (fail-closed).
+export function parseSignalEndpoint(uri: string, defaultPort: number): ManagementEndpoint {
+  if (uri.length === 0) {
+    throw new Error('signal-uri-malformed');
+  }
+  let rest: string = uri;
+  let port: number = defaultPort;
+  const schemeSep: number = rest.indexOf('://');
+  if (schemeSep > 0) {
+    const scheme: string = rest.slice(0, schemeSep);
+    if (scheme !== 'https' && scheme !== 'http') {
+      throw new Error('signal-uri-malformed');
+    }
+    port = scheme === 'https' ? 443 : 80;
+    rest = rest.slice(schemeSep + 3);
+  }
+  const slash: number = rest.indexOf('/');
+  if (slash >= 0) {
+    rest = rest.slice(0, slash);
+  }
+  if (rest.length === 0) {
+    throw new Error('signal-uri-malformed');
+  }
+  const colon: number = rest.lastIndexOf(':');
+  let host: string = rest;
+  if (colon >= 0) {
+    host = rest.slice(0, colon);
+    port = Number(rest.slice(colon + 1));
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+      throw new Error('signal-uri-malformed');
     }
   }
   // bare IPv4 literal → no DNS leg at all

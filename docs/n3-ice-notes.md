@@ -420,3 +420,27 @@ controlled**（`set_initiator(key,false)` 显式指定应答方）；双方同�
 | `cd client/core && cargo test --offline --locked` | **245 passed / 0 failed**（新增 13：peer_conn 内嵌 7 + e2e 4 + connector 内嵌 2） |
 | `bash client/build.sh` | exit 0（HAP `entry-default-unsigned.hap` 3,562,854 字节） |
 | `git status --short` / `git diff --stat` | 仅 `client/core/**`（src/peer_conn.rs、tests/peer_conn_e2e.rs 新增；src/connector.rs、src/napi.rs、src/lib.rs、tests/connector.rs、tests/mgmt_socket.rs 修改）+ `docs/n3-ice-notes.md`、`docs/n3-management-protocol-notes.md`；未 commit/push |
+
+---
+
+## 九、N5d 增补 — ICE 的 signal seam 换成真实流
+
+N5c §8.7 第 1 条的"下一增量"已交付：编排的 signal 发送 seam 生产实现换成
+`RealSignalExchange`（`crate::peer_conn`），connector 持有真实
+`SignalSession` 流（接线时序、role/应答语义与行号、状态暴露、ArkTS feed
+契约、未做项详见 `docs/n3-signal-notes.md` §九）。ICE 侧变化：
+
+- `signal_ready` 不再恒 false：link 的 `Registered` 置真（此前 `run_once`
+  不发起任何东西的闸门语义不变）、`Broken`/worker 结束落假——signal 断开
+  时 ICE 会话**不拆除**（检查/keepalive 走 ICE 自己的 socket，对端静默由
+  N5b 的 +6s/+12s 时钟按既有语义转为 Disconnected/Failed），恢复注册后
+  继续发帧。
+- `LoggingSignalExchange` 降级为测试/对照实现（生产不再使用）；其"打点
+  丢弃"（send 返回 Ok、帧消失）被 `RealSignalExchange` 的"未注册显式
+  返回 Network 错误 + 编排 outbox 重试"对照钉死（upstream
+  `ErrSignalIsNotReady`，handshaker.go:16,208,212-214）。
+- `PeerIceOrchestrator` 新增 `signal_ready()` 查询（测试/诊断断言
+  "注册后才为真"用）。
+- 收帧进入编排的唯一入口仍是 `handle_signal(from_key, kind, payload, now)`；
+  N5d 只是把"谁调它"从测试换成了 connector 的 signal worker
+  （`from_key` = 信封发送方公钥 = 网络图 `wg_pub_key`，路由规则不变）。

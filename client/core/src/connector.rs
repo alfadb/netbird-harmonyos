@@ -50,22 +50,28 @@
 //! **N5c 已接入 per-peer ICE 编排**（`crate::peer_conn`，connector_status
 //! 的 `ice` 字段）：网络图里有 allowed_ips 的 remote peer 各建一个 ICE
 //! 会话（候选收集 + signal OFFER/ANSWER/候选交换 + selected pair → WG
-//! endpoint 落配）。但仍有硬边界：
+//! endpoint 落配）。**N5d 起真实 signal 流已接入**：sync 带来的
+//! `netbird_config.signal` 地址生效后由 [`SignalRuntime`] 启动
+//! `crate::peer_conn::spawn_signal_link`（真实 `SignalSession`：注册、
+//! 信封加密收发、断流重连重注册），ICE 发送 seam 换成
+//! [`crate::peer_conn::RealSignalExchange`]（未注册显式失败、编排层
+//! outbox 重试，不再打点丢弃），收帧按发送方公钥路由进编排。剩余硬边界：
 //!
-//! 1. connector 尚未持有真实 signal 流：ICE 的发送 seam 暂为
-//!    [`crate::peer_conn::LoggingSignalExchange`]（打点丢弃），
-//!    `signal_ready` 保持 false —— 生产设备上 peer 因此还不会真正连通；
-//!    真实流接线是下一增量。
+//! 1. signal socket 仍由壳侧补给：`connector_signal_socket_feed(fd, addr)`
+//!    注入已 protect 的 signal socket 与 DNS 解析结果；壳不喂则拨号
+//!    fail-closed 重试，`signal_ready` 保持 false（peer 不发起 ICE）。
 //! 2. ICE 的 UDP socket 来自壳侧补给的受保护源
 //!    （`connector_ice_socket_feed(fd)`）；壳侧不喂则候选收集 fail-closed，
 //!    peer 停在 Idle 并记录 Network 类错误。
 //! 3. 网络图里的 remote peers 仍做**本地登记**（公钥 + allowed_ips 进
 //!    [`WgPeerApplier`]，生产默认 [`WgPeerRegistry`]，N5c 增加 endpoint
-//!    记录）——这只是 WireGuard 侧的本地配置，登记 ≠ 连通。
+//!    记录）——这只是 WireGuard 侧的本地配置；对端 WG 端点由 ICE 选中后
+//!    落配，但本仓尚无真实 WG 设备数据面（登记/endpoint 记录 ≠ 隧道）。
 //! 4. 路由/DNS 通过 [`ConfigApplier`] 交给壳侧（宿主）；壳侧不接时生产
 //!    默认 [`LoggingConfigApplier`] 只打点，不落任何系统配置。
 //! 5. "Connected" 仍指 **management 控制面连接已建立**（登录成功 + Sync
-//!    流在），与 peer 连通无关；peer 级状态在 status 的 `ice` 字段。
+//!    流在），与 peer 连通无关；peer 级状态在 status 的 `ice` 字段，
+//!    signal 通道状态在 `signal` 字段（registered/reconnects/last_error）。
 //!
 //! ## 注入 seam（宿主测试与壳侧接线点）
 //!
@@ -110,9 +116,11 @@ use crate::management::ManagementError;
 use crate::mgmtsock::{dup_socket_fd, ManagementSocketProvider, ProtectedSocketFdSource};
 use crate::network_map::NetworkMap;
 use crate::peer_conn::{
-    ice_ready_for_default_route, IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps,
-    PeerIceOrchestrator,
+    ice_ready_for_default_route, spawn_signal_link, IceOrchestratorSummary, LoggingSignalExchange,
+    PeerIceDeps, PeerIceOrchestrator, PeerSignalKind, RealSignalExchange, SignalLinkConfig,
+    SignalLinkEvent,
 };
+use crate::signal::{SignalMessage, SignalOutgoing};
 use crate::state::{ConnEvent, ConnState, StateMachine};
 use crate::sync::{SyncLoopEvent, SyncSession, SyncUpdate};
 use crate::util::{jbool, jinum, jnum, jstr};
@@ -781,6 +789,10 @@ struct ConnectorShared {
     /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
     /// handle for `connector_ice_socket_feed`).
     ice_sockets: std::sync::OnceLock<Arc<crate::ice::ProtectedUdpFdSource>>,
+    /// N5d: the real signal link runtime (set once at spawn when
+    /// [`SignalMaterial`] was provided; unit tests that build
+    /// `ConnectorShared::new` directly simply run without signal).
+    signal: std::sync::OnceLock<Arc<SignalRuntime>>,
 }
 
 impl ConnectorShared {
@@ -806,6 +818,7 @@ impl ConnectorShared {
             running: AtomicBool::new(false),
             ice: std::sync::OnceLock::new(),
             ice_sockets: std::sync::OnceLock::new(),
+            signal: std::sync::OnceLock::new(),
         }
     }
 
@@ -871,9 +884,28 @@ impl ConnectorShared {
         }
         // N5c: STUN server set rides every sync (netbird_config.stuns —
         // engine.go:1525-1541 updateSTUNs); applied even without a map.
+        // N5d: the signal URI rides the same config (connectToSignal is fed
+        // from netbirdConfig upstream, connect.go:715-731) and ARMS the real
+        // signal link once both the URI and the shell-fed connect address
+        // exist.
+        let mut signal_uri: Option<String> = None;
         if let Some(cfg) = update.netbird_config.as_ref() {
             if let Some(ice) = self.ice.get() {
                 ice.lock_poison().set_stuns(&cfg.stuns);
+            }
+            if let Some(uri) = cfg.signal.as_ref() {
+                signal_uri = Some(uri.clone());
+            }
+        } else {
+            // config-less snapshot: keep the previously announced URI visible
+            signal_uri = self.lock().net_config.as_ref().and_then(|c| c.signal.clone());
+        }
+        if let Some(uri) = signal_uri.as_ref() {
+            if let Some(rt) = self.signal.get() {
+                rt.set_uri(uri);
+                if self.is_running() {
+                    rt.maybe_start();
+                }
             }
         }
         let Some(map) = update.network_map.as_ref() else {
@@ -915,11 +947,12 @@ impl ConnectorShared {
             g.route_count = map.routes.len();
             // N3-6/N3-7: snapshot the shell-applicable subset, through the
             // default-route safety gate (force flag + live WG readiness).
-            g.net_config = Some(ShellNetworkConfig::from_map_gated(
-                map,
-                g.force_default_route,
-                wg.tunnel_ready() && ice_ready,
-            ));
+            // N5d: the signal URI rides the snapshot so the shell can
+            // resolve + protect + feed the signal socket.
+            let mut snapshot =
+                ShellNetworkConfig::from_map_gated(map, g.force_default_route, wg.tunnel_ready() && ice_ready);
+            snapshot.signal = signal_uri;
+            g.net_config = Some(snapshot);
         }
         // N5c: reconcile the per-peer ICE orchestrator with the map's
         // connectable peers (allowed_ips only — that is the data plane this
@@ -1000,6 +1033,9 @@ pub struct ConnectorStatus {
     /// N5c: per-peer ICE summary (counts + endpoint landings + error class;
     /// zero-peered default until a network map registers peers).
     pub ice: IceOrchestratorSummary,
+    /// N5d: real signal link state (registered / reconnects / last error
+    /// class). All-false default until the link registers.
+    pub signal: SignalLinkStatus,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -1026,7 +1062,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -1055,6 +1091,7 @@ impl ConnectorStatus {
             ),
             jbool("terminal", self.terminal),
             format!("\"ice\":{}", self.ice.to_json()),
+            format!("\"signal\":{}", self.signal.to_json()),
         )
     }
 }
@@ -1119,6 +1156,12 @@ pub struct ShellNetworkConfig {
     /// `default-route-held:*` / `default-route-forced:*`. The held tokens
     /// name the exact reason the `0.0.0.0/0` route was NOT exported.
     pub default_route_reason: String,
+    /// N5d: the signal server URI from `netbird_config.signal`
+    /// (`host:port`, possibly scheme-prefixed). The shell resolves it
+    /// (DNS shell-side), opens + protects a socket and feeds it back via
+    /// `connector_signal_socket_feed(fd, addr)`. `None` = no signal config
+    /// seen yet (peers cannot connect without it).
+    pub signal: Option<String>,
 }
 
 /// Canonical dotted-quad/prefix rendering of a parsed route network.
@@ -1219,6 +1262,10 @@ impl ShellNetworkConfig {
             peers,
             default_route_allowed,
             default_route_reason,
+            // N5d: the caller (apply_update) stamps the signal URI on the
+            // snapshot — from_map_gated sees only the map, the URI rides the
+            // sync config.
+            signal: None,
         }
     }
 
@@ -1271,13 +1318,18 @@ impl ShellNetworkConfig {
             Some(d) => jstr("interface_dns", d),
             None => "\"interface_dns\":null".to_string(),
         };
+        let signal = match self.signal.as_ref() {
+            Some(u) => jstr("signal", u),
+            None => "\"signal\":null".to_string(),
+        };
         format!(
-            "{{{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}}}}",
+            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}}}}",
             jbool("available", true),
             jnum("serial", self.serial),
             address,
             address_prefix_len,
             interface_dns,
+            signal,
             routes,
             jbool("service_enable", self.dns_service_enable),
             format!("\"servers\":[{dns_servers}]"),
@@ -1311,6 +1363,302 @@ impl SyncPolicy {
             rng: Box::new(OsRandom),
             clock: Box::new(MonotonicClock),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N5d: real signal link (netbird_config.signal → SignalSession worker)
+// ---------------------------------------------------------------------------
+
+/// Per-spawn static material for the signal link (N5d). Production start
+/// paths build it from the parsed [`ConnectorConfig`]; host tests pass
+/// `None` and simply run without a signal link.
+#[derive(Clone)]
+pub struct SignalMaterial {
+    pub transport: GrpcTransport,
+    pub keys: EnvelopeKeyPair,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+}
+
+/// signal 通道状态快照（`connector_status()` 的 `signal` 字段）。只有
+/// 注册态 / 重连计数 / 错误分类——无消息文本（凭据纪律）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalLinkStatus {
+    /// `ConnectStream` 当前已注册（`Registered` 事件置真，`Broken`/
+    /// worker 结束置假）。
+    pub registered: bool,
+    /// 流断开重连次数（初始注册不计；`crate::signal` 诊断口径）。
+    pub reconnects: u64,
+    pub last_error: Option<ErrorClass>,
+}
+
+impl Default for SignalLinkStatus {
+    fn default() -> Self {
+        SignalLinkStatus { registered: false, reconnects: 0, last_error: None }
+    }
+}
+
+impl SignalLinkStatus {
+    fn to_json(&self) -> String {
+        format!(
+            "{{{},{},{}}}",
+            jbool("registered", self.registered),
+            jnum("reconnects", self.reconnects),
+            format!(
+                "\"last_error\":{}",
+                self.last_error
+                    .as_ref()
+                    .map(ErrorClass::to_json)
+                    .unwrap_or_else(|| "null".to_string())
+            ),
+        )
+    }
+}
+
+/// `netbird_config.signal` URI → gRPC endpoint + transport。
+///
+/// 上游 `connectToSignal`（`client/internal/connect.go:715-731`）按
+/// `HostConfig.protocol == HTTPS` 决定 TLS（L717-721）；本仓网络图只保留
+/// `uri`（`crate::network_map`，上游 engine.go:1185 注 "todo update
+/// signal"，protocol 字段未进模型）。因此：显式 scheme 按 scheme；
+/// 裸 `host:port`（线上形态，如 `signal.netbird.io:10000`）**继承
+/// management 传输的安全等级**——两者共用同一注入 CA（无系统根存储）。
+fn derive_signal_endpoint(
+    uri: &str,
+    mgmt: &GrpcTransport,
+) -> Result<(String, GrpcTransport), ConfigError> {
+    let bad = |reason: &'static str| {
+        ConfigError::Field { field: "signal", reason: reason.into() }
+    };
+    if let Some(rest) = uri.strip_prefix("https://") {
+        if rest.is_empty() {
+            return Err(bad("empty https authority"));
+        }
+        match mgmt {
+            GrpcTransport::Tls(_) => Ok((uri.to_string(), mgmt.clone())),
+            GrpcTransport::Plaintext => Err(bad(
+                "https:// signal uri requires TLS material (injected CA), but management is plaintext",
+            )),
+        }
+    } else if let Some(rest) = uri.strip_prefix("http://") {
+        if rest.is_empty() {
+            return Err(bad("empty http authority"));
+        }
+        Ok((uri.to_string(), GrpcTransport::Plaintext))
+    } else if uri.is_empty() {
+        Err(bad("empty uri"))
+    } else {
+        // bare host:port → inherit the management transport's security level
+        match mgmt {
+            GrpcTransport::Tls(_) => Ok((format!("https://{uri}"), mgmt.clone())),
+            GrpcTransport::Plaintext => Ok((format!("http://{uri}"), GrpcTransport::Plaintext)),
+        }
+    }
+}
+
+/// signal link 的静态启动材料（spawn 时一次性注入 [`SignalRuntime`]）。
+struct SignalLinkMaterials {
+    runtime: tokio::runtime::Handle,
+    transport: GrpcTransport,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+    keys: EnvelopeKeyPair,
+    /// 受保护 signal socket 源——壳侧经 `connector_signal_socket_feed`
+    /// 补给；空源 → 每次拨号 fail-closed（绝无未保护回退）。
+    sockets: Arc<ProtectedSocketFdSource>,
+}
+
+/// 连接器持有的真实 signal 链路（N5d）：惰性启动（`netbird_config.signal`
+/// URI 与壳侧 `connect_addr` 都到位后），收帧路由进 per-peer ICE 编排，
+/// 事件落 [`SignalLinkStatus`]。适配器（exchange）与出帧队列在构造时
+/// 一次性建立并交给编排 seam——同一实例贯穿 send 侧与 worker 侧。
+struct SignalRuntime {
+    materials: std::sync::OnceLock<SignalLinkMaterials>,
+    orch: std::sync::OnceLock<Arc<Mutex<PeerIceOrchestrator>>>,
+    /// 最近一次 sync 看到的 signal URI（首次非空生效；上游 engine.go:1185
+    /// "todo update signal"——运行中变更不支持，如实记录）。
+    uri: Mutex<Option<String>>,
+    /// 壳侧首次 feed 的已解析地址（先到先得，与 management 的固定
+    /// connect_addr 同约定；后续 feed 只补给 fd）。
+    connect_addr: Mutex<Option<SocketAddr>>,
+    /// 运行中的 worker 任务句柄（stop 时 abort）。
+    link: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 编排 seam 持有的同一适配器（registered 闸的真源）。
+    exchange: Arc<RealSignalExchange>,
+    /// 出帧队列接收端（maybe_start 时交给 worker；已取走即已启动）。
+    outbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>>>,
+    state: Arc<Mutex<SignalLinkStatus>>,
+}
+
+impl SignalRuntime {
+    fn new(
+        materials: SignalLinkMaterials,
+        exchange: Arc<RealSignalExchange>,
+        outbox: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
+    ) -> Self {
+        SignalRuntime {
+            materials: {
+                let m = std::sync::OnceLock::new();
+                let _ = m.set(materials);
+                m
+            },
+            orch: std::sync::OnceLock::new(),
+            uri: Mutex::new(None),
+            connect_addr: Mutex::new(None),
+            link: Mutex::new(None),
+            exchange,
+            outbox: Mutex::new(Some(outbox)),
+            state: Arc::new(Mutex::new(SignalLinkStatus::default())),
+        }
+    }
+
+    fn record(&self, f: impl FnOnce(&mut SignalLinkStatus)) {
+        let mut g = self.state.lock_poison();
+        f(&mut g);
+    }
+
+    fn status(&self) -> SignalLinkStatus {
+        let registered = self.exchange.is_registered();
+        let g = self.state.lock_poison();
+        SignalLinkStatus { registered, ..g.clone() }
+    }
+
+    /// sync 带来 signal URI：记录（首次非空生效）。
+    fn set_uri(&self, uri: &str) {
+        let mut g = self.uri.lock_poison();
+        if g.is_none() {
+            *g = Some(uri.to_string());
+        }
+    }
+
+    /// 壳侧 feed 的已解析地址（首次生效）。
+    fn set_connect_addr(&self, addr: SocketAddr) {
+        let mut g = self.connect_addr.lock_poison();
+        if g.is_none() {
+            *g = Some(addr);
+        }
+    }
+
+    /// URI 与 connect_addr 齐备且尚未启动 → 启动 worker（幂等）。返回
+    /// 是否真的启动了。
+    fn maybe_start(&self) -> bool {
+        let (Some(materials), Some(orch)) = (self.materials.get(), self.orch.get()) else {
+            return false;
+        };
+        let (Some(uri), Some(addr)) = (
+            self.uri.lock_poison().clone(),
+            self.connect_addr.lock_poison().as_ref().copied(),
+        ) else {
+            return false; // 前置未齐：URI 来自 sync，addr 来自壳侧 feed
+        };
+        let mut link = self.link.lock_poison();
+        if link.is_some() {
+            return false;
+        }
+        let Some(rx) = self.outbox.lock_poison().take() else {
+            return false; // 队列已被并发启动取走：link guard 保证不再重复
+        };
+        // endpoint 派生失败（如 https URI 但无 TLS 材料）→ 显式失败，不启动
+        let (endpoint, transport) = match derive_signal_endpoint(&uri, &materials.transport) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record(|s| {
+                    s.last_error = Some(ErrorClass::Parse);
+                });
+                hilog::emit(&format!(
+                    "connector: signal link NOT started (parse class: {})",
+                    e
+                ));
+                return false;
+            }
+        };
+        let state = self.state.clone();
+        let orch_cb = orch.clone();
+        let on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync> = Arc::new(move |ev| match ev {
+            SignalLinkEvent::DialFailed(_) => {
+                // 初始受保护拨号失败：fail-closed，记录分类后由 worker 退避重试
+                state.lock_poison().last_error = Some(ErrorClass::Network);
+                hilog::emit("connector: signal protected dial failed (network), will retry");
+            }
+            SignalLinkEvent::Registered => {
+                orch_cb.lock_poison().set_signal_ready(true);
+                hilog::emit("connector: signal stream registered (ice initiation armed)");
+            }
+            SignalLinkEvent::Message(m) => route_signal_message(&orch_cb, &m),
+            SignalLinkEvent::Malformed => {
+                // 帧级失败已上报、流保持（crate::signal；grpc.go:600-602）
+                hilog::emit("connector: signal malformed frame (stream stays up)");
+            }
+            SignalLinkEvent::Broken(_) => {
+                let mut g = state.lock_poison();
+                g.reconnects += 1;
+                g.last_error = Some(ErrorClass::Network);
+                drop(g);
+                orch_cb.lock_poison().set_signal_ready(false);
+                hilog::emit("connector: signal stream broken (backoff, will re-register)");
+            }
+            SignalLinkEvent::Ended(result) => {
+                if let Err(e) = result {
+                    state.lock_poison().last_error = Some(ErrorClass::from_management(&e));
+                }
+                orch_cb.lock_poison().set_signal_ready(false);
+                hilog::emit("connector: signal worker ended");
+            }
+        });
+        let handle = spawn_signal_link(
+            materials.runtime.clone(),
+            SignalLinkConfig {
+                endpoint,
+                transport,
+                connect_timeout: materials.connect_timeout,
+                request_timeout: materials.request_timeout,
+                keys: materials.keys.clone(),
+                sockets: materials.sockets.clone(),
+                connect_addr: addr,
+            },
+            self.exchange.clone(),
+            rx,
+            on_event,
+        );
+        *link = Some(handle);
+        hilog::emit("connector: signal link started (real SignalSession worker)");
+        true
+    }
+
+    /// connector stop：abort worker、放掉注册态。幂等。
+    fn shutdown(&self) {
+        if let Some(h) = self.link.lock_poison().take() {
+            // abort 路径跳过 worker 的收尾（Ended 事件），这里补齐注册态
+            self.exchange.mark_unregistered();
+            h.abort();
+        }
+        self.record(|s| s.registered = false);
+    }
+}
+
+/// 收帧路由（N5d 核心规则）：`from_key` = 发送方 WG 公钥（信封
+/// `EncryptedMessage.key`，grpc.go:414-431），与网络图 peer 的
+/// `wg_pub_key` 同一身份域——`PeerIceOrchestrator::handle_signal` 正是按
+/// 该键匹配 peer（engine.go:2043-2045 按消息 key 找 peerConn 的同型；
+/// 未知 key 由编排层丢弃并计数）。HEARTBEAT/MODE/GO_IDLE 与 ICE 无关
+/// （engine.go:2036-2040 心跳短路；GO_IDLE 走 connMgr，非本增量）。
+fn route_signal_message(orch: &Mutex<PeerIceOrchestrator>, m: &SignalMessage) {
+    use crate::signal::proto::body::Type;
+    let kind = match m.kind {
+        Type::Offer => PeerSignalKind::Offer,
+        Type::Answer => PeerSignalKind::Answer,
+        Type::Candidate => PeerSignalKind::Candidate,
+        _ => return,
+    };
+    let now = crate::sys::mono_ms();
+    let mut guard = orch.lock_poison();
+    if let Err(e) = guard.handle_signal(&m.from_key, kind, &m.payload, now) {
+        // 畸形 payload（坏凭证/坏候选）：分类记录，不断流
+        hilog::emit(&format!(
+            "connector: signal frame rejected ({})",
+            ErrorClass::from_management(&e).as_str()
+        ));
     }
 }
 
@@ -1358,6 +1706,10 @@ pub struct ConnectorHandle {
     /// handle for `connector_ice_socket_feed`). `None` = caller-supplied
     /// orchestrator (tests).
     ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>,
+    /// N5d: the protected signal-socket source behind the signal link
+    /// (resupply handle for `connector_signal_socket_feed`). `None` = no
+    /// signal material provided (host-test construction).
+    signal_sockets: Option<Arc<ProtectedSocketFdSource>>,
     /// N5c: per-peer ICE orchestrator (status/stop surface).
     ice: Arc<Mutex<PeerIceOrchestrator>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1377,14 +1729,18 @@ impl core::fmt::Debug for ConnectorHandle {
 
 impl ConnectorHandle {
     /// Build deps + spawn the worker and session-renewal tasks on
-    /// `runtime`. Returns immediately; progress is polled via `status()`.
+    /// `runtime`. Returns immediately; progress is observed via `status()`.
     /// N3-7: `force_default_route` arms the default-route gate override;
     /// `socket_source` (when set) is the resupply handle for
     /// `connector_socket_feed`. N5c: `ice = None` builds the production
     /// orchestrator (SystemInterfaces + a fresh protected-UDP source fed by
-    /// `connector_ice_socket_feed` + `LoggingSignalExchange` + the same WG
-    /// seam) and starts the injected-clock pump thread; tests may inject a
-    /// fully-stubbed orchestrator instead.
+    /// `connector_ice_socket_feed` + the same WG seam) and starts the
+    /// injected-clock pump thread; tests may inject a fully-stubbed
+    /// orchestrator instead. N5d: `signal_material = Some(..)` attaches the
+    /// real signal runtime — the ICE orchestrator's send seam becomes a
+    /// [`crate::peer_conn::RealSignalExchange`] and the link starts once
+    /// `netbird_config.signal` (sync) and the shell-fed connect address are
+    /// both present; `None` keeps the link absent (tests).
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         runtime: tokio::runtime::Handle,
@@ -1400,6 +1756,7 @@ impl ConnectorHandle {
         force_default_route: bool,
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
+        signal_material: Option<SignalMaterial>,
     ) -> Arc<ConnectorHandle> {
         let shared = Arc::new(ConnectorShared::new(force_default_route));
         shared.set_running(true);
@@ -1408,8 +1765,11 @@ impl ConnectorHandle {
         // N5c: per-peer ICE orchestrator + pump thread (injected clock:
         // the thread only supplies monotonic ms; the orchestrator itself
         // never reads a wall clock or sleeps). The pump exits on the same
-        // stop flag as worker/renewal.
+        // stop flag as worker/renewal. N5d: the production build swaps the
+        // send seam to the real exchange and attaches the signal runtime
+        // (the link itself starts lazily — see apply_update / signal feed).
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let mut signal_sockets: Option<Arc<ProtectedSocketFdSource>> = None;
         let ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>;
         let ice = match ice {
             Some(orch) => {
@@ -1418,10 +1778,36 @@ impl ConnectorHandle {
             }
             None => {
                 let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+                let seam: Arc<dyn crate::peer_conn::SignalExchange> =
+                    match signal_material.as_ref() {
+                        Some(mat) => {
+                            // N5d: real link materials — ONE exchange is
+                            // created here and shared by the orchestrator
+                            // seam (send side) and the worker (queue side).
+                            let src = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+                            signal_sockets = Some(src.clone());
+                            let (exchange, rx) = RealSignalExchange::new();
+                            let rt = Arc::new(SignalRuntime::new(
+                                SignalLinkMaterials {
+                                    runtime: runtime.clone(),
+                                    transport: mat.transport.clone(),
+                                    connect_timeout: mat.connect_timeout,
+                                    request_timeout: mat.request_timeout,
+                                    keys: mat.keys.clone(),
+                                    sockets: src,
+                                },
+                                exchange.clone(),
+                                rx,
+                            ));
+                            let _ = shared.signal.set(rt);
+                            exchange
+                        }
+                        None => Arc::new(LoggingSignalExchange::default()),
+                    };
                 let orch = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
                     ifaces: Arc::new(crate::ice::SystemInterfaces),
                     socks: socks.clone(),
-                    signal: Arc::new(LoggingSignalExchange::default()),
+                    signal: seam,
                     wg: wg.clone(),
                     tie_breaker: None,
                 })));
@@ -1431,6 +1817,12 @@ impl ConnectorHandle {
             }
         };
         let _ = shared.ice.set(ice.clone());
+        // N5d: the signal runtime routes received frames into the
+        // orchestrator — same handle in both branches (injected-orchestrator
+        // constructions simply have no signal runtime attached).
+        if let Some(rt) = shared.signal.get() {
+            let _ = rt.orch.set(ice.clone());
+        }
         spawn_ice_pump(ice.clone(), stop_flag.clone());
 
         let worker_deps = WorkerDeps {
@@ -1469,6 +1861,7 @@ impl ConnectorHandle {
             stop_flag,
             socket_source,
             ice_sockets,
+            signal_sockets,
             ice,
             worker: Mutex::new(Some(worker)),
             renewal: Mutex::new(Some(renewal)),
@@ -1497,6 +1890,12 @@ impl ConnectorHandle {
             logout_ok: g.logout_ok,
             terminal: is_terminal_state(running, state),
             ice: self.ice.lock_poison().summary(),
+            signal: self
+                .shared
+                .signal
+                .get()
+                .map(|rt| rt.status())
+                .unwrap_or_default(),
         }
     }
 
@@ -1535,6 +1934,10 @@ impl ConnectorHandle {
         // cleanup: local registrations and host-applied config go away
         // (the shell snapshot goes with them — nothing applied remains)
         // N5c: ICE sessions too (their dup sockets close exactly once).
+        // N5d: the signal worker aborts with the rest.
+        if let Some(rt) = self.shared.signal.get() {
+            rt.shutdown();
+        }
         self.ice.lock_poison().stop_all();
         self.wg.clear();
         self.host.clear();
@@ -1878,6 +2281,14 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         config.force_default_route,
         None, // N3-7: no protected management socket source
         None, // N5c: build the production ICE orchestrator
+        Some(SignalMaterial {
+            // N5d: the signal link rides the same injected trust root and
+            // identity keys as management (connect.go:722-723 parity)
+            transport: config.transport.clone(),
+            keys: config.keys.clone(),
+            connect_timeout: config.connect_timeout,
+            request_timeout: config.request_timeout,
+        }),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -1987,6 +2398,14 @@ pub fn connector_start_with_socket_json(
         config.force_default_route,
         Some(source),
         None, // N5c: build the production ICE orchestrator
+        Some(SignalMaterial {
+            // N5d: the signal link rides the same injected trust root and
+            // identity keys as management (connect.go:722-723 parity)
+            transport: config.transport.clone(),
+            keys: config.keys.clone(),
+            connect_timeout: config.connect_timeout,
+            request_timeout: config.request_timeout,
+        }),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -2067,8 +2486,62 @@ pub fn connector_ice_socket_feed_json(fd: i32) -> String {
     format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
 }
 
+/// The `connector_signal_socket_feed(fd, addrJson)` implementation (N5d) —
+/// shell-side resupply of PROTECTED signal sockets plus the shell-resolved
+/// signal address. The shell parses `netbird_config.signal` (from
+/// `connector_network_config()`), resolves the host DNS-side, opens a TCP
+/// socket, `VpnConnection.protect(fd)`s it and feeds it here; the real
+/// signal link dials ONLY over such sockets (every dial takes a fresh one —
+/// initial AND per reconnect; empty source fails the dial CLOSED).
+///
+/// `addrJson` is `{"connect_addr":"ip:port"}` — required: without it the
+/// link cannot dial (nothing is queued, `{"ok":false,"error":
+/// "socket-addr-invalid"}`). The FIRST fed address wins for the lifetime of
+/// the link (same fixed-address contract as the management factory); later
+/// feeds only refill the fd queue.
+///
+/// Failure tokens (fail-closed): `no-connector`, `no-socket-source` (host
+/// started without signal material), `socket-fd-missing` (fd < 0),
+/// `socket-fd-invalid` (not dup-able), `socket-addr-invalid`.
+pub fn connector_signal_socket_feed_json(fd: i32, connect_addr_json: &str) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let Some(source) = handle.signal_sockets.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-socket-source"));
+    };
+    let Some(rt) = handle.shared.signal.get() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-socket-source"));
+    };
+    if fd < 0 {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-fd-missing"));
+    }
+    let connect_addr = match parse_connect_addr(connect_addr_json) {
+        Ok(a) => a,
+        Err(_) => {
+            return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid"))
+        }
+    };
+    if let Err(e) = dup_socket_fd(fd) {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token()));
+    }
+    source.feed(fd);
+    rt.set_connect_addr(connect_addr);
+    // the link starts once BOTH the sync-delivered URI and this address
+    // exist (whichever arrives last triggers the start); if the connector
+    // was stopped in the meantime, do not leave a worker behind
+    if handle.shared.is_running() {
+        rt.maybe_start();
+    } else {
+        rt.shutdown();
+    }
+    format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
+}
+
 /// Parse the `{"connect_addr":"ip:port"}` argument of
-/// [`connector_start_with_socket_json`].
+/// [`connector_start_with_socket_json`] and
+/// [`connector_signal_socket_feed_json`].
 fn parse_connect_addr(json: &str) -> Result<SocketAddr, ConfigError> {
     let doc = config::parse_document(json)?;
     let entries = match doc {
@@ -2114,6 +2587,7 @@ pub fn connector_status_json() -> String {
             logout_ok: None,
             terminal: false,
             ice: IceOrchestratorSummary::default(),
+            signal: SignalLinkStatus::default(),
         }
         .to_json(),
     }
@@ -2286,10 +2760,25 @@ mod tests {
             logout_ok: None,
             terminal: true,
             ice: IceOrchestratorSummary::default(),
+            signal: SignalLinkStatus::default(),
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
         assert!(s.to_json().contains("\"terminal\":false"), "{}", s.to_json());
+        // N5d: the signal summary rides the document too (registered /
+        // reconnects / class-only last error)
+        s.signal = SignalLinkStatus {
+            registered: true,
+            reconnects: 3,
+            last_error: Some(ErrorClass::Network),
+        };
+        let js = s.to_json();
+        assert!(
+            js.contains("\"signal\":{\"registered\":true,\"reconnects\":3,\
+                         \"last_error\":{\"class\":\"network\",\"status\":0}}"),
+            "{js}"
+        );
+        assert!(matches!(config::parse_document(&js), Ok(Json::Obj(_))));
     }
 
     /// Credential discipline: the parsed config must not retain raw private
@@ -2424,6 +2913,11 @@ mod tests {
                 last_error: Some(ErrorClass::Network),
                 ..Default::default()
             },
+            signal: SignalLinkStatus {
+                registered: true,
+                reconnects: 1,
+                last_error: Some(ErrorClass::Timeout),
+            },
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -2462,6 +2956,7 @@ mod tests {
             logout_ok: None,
             terminal: false,
             ice: IceOrchestratorSummary::default(),
+            signal: SignalLinkStatus::default(),
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -2472,6 +2967,10 @@ mod tests {
         assert!(
             empty.contains("\"ice\":{\"peers\":0,\"idle\":0"),
             "default ICE summary must render: {empty}"
+        );
+        assert!(
+            empty.contains("\"signal\":{\"registered\":false,\"reconnects\":0,\"last_error\":null}"),
+            "default signal summary must render: {empty}"
         );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
     }
@@ -2866,5 +3365,186 @@ mod tests {
         assert!(shared.network_config_json().contains("\"serial\":42"));
         // the global export path answers no-network-map with no connector
         // (CONNECTOR slot untouched by the unit tests)
+    }
+
+    // N5d: real signal link --------------------------------------------------
+
+    #[test]
+    fn signal_endpoint_derivation_rules() {
+        // bare host:port (the wire shape, engine.go:1185) inherits the
+        // management transport's security level
+        let (ep, t) = derive_signal_endpoint(
+            "signal.netbird.io:10000",
+            &GrpcTransport::Tls(crate::grpc::GrpcTlsConfig::new(vec![b"CA".to_vec()])),
+        )
+        .expect("bare uri over tls mgmt");
+        assert_eq!(ep, "https://signal.netbird.io:10000");
+        assert!(matches!(t, GrpcTransport::Tls(_)));
+        let (ep, t) =
+            derive_signal_endpoint("sig.example:10000", &GrpcTransport::Plaintext).expect("bare");
+        assert_eq!(ep, "http://sig.example:10000");
+        assert_eq!(t, GrpcTransport::Plaintext);
+        // explicit schemes are honored
+        let (ep, t) = derive_signal_endpoint(
+            "https://sig.example:10000",
+            &GrpcTransport::Tls(crate::grpc::GrpcTlsConfig::new(vec![])),
+        )
+        .expect("explicit https");
+        assert!(matches!(t, GrpcTransport::Tls(_)));
+        assert_eq!(ep, "https://sig.example:10000");
+        let (_ep, t) =
+            derive_signal_endpoint("http://sig.example:10000", &GrpcTransport::Plaintext)
+                .expect("explicit http");
+        assert_eq!(t, GrpcTransport::Plaintext);
+        // https uri over a plaintext management config → refused (no CA)
+        assert!(derive_signal_endpoint("https://sig.example:10000", &GrpcTransport::Plaintext)
+            .is_err());
+        // empty variants refused
+        assert!(derive_signal_endpoint("", &GrpcTransport::Plaintext).is_err());
+        assert!(
+            derive_signal_endpoint(
+                "https://",
+                &GrpcTransport::Tls(crate::grpc::GrpcTlsConfig::new(vec![]))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn signal_feed_requires_connector_source_and_addr() {
+        // no connector at all (the CONNECTOR slot is untouched by unit tests)
+        let json = connector_signal_socket_feed_json(3, "{\"connect_addr\":\"127.0.0.1:1\"}");
+        assert_eq!(json, "{\"ok\":false,\"error\":\"no-connector\"}");
+        let json = connector_signal_socket_feed_json(-1, "{\"connect_addr\":\"127.0.0.1:1\"}");
+        assert_eq!(json, "{\"ok\":false,\"error\":\"no-connector\"}");
+    }
+
+    /// N5d wiring through the REAL apply_update path: the sync-delivered
+    /// `netbird_config.signal` URI + the shell-fed connect address arm the
+    /// signal link; with an EMPTY protected source the initial dial fails
+    /// CLOSED (Network class, `registered` stays false, ICE never armed),
+    /// and the shell snapshot carries the URI for the shell to feed.
+    #[tokio::test]
+    async fn apply_update_arms_signal_link_and_dials_fail_closed_without_fds() {
+        let shared = Arc::new(ConnectorShared::new(false));
+        let orch = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: Arc::new(WgPeerRegistry::new()),
+            tie_breaker: Some(7),
+        })));
+        let _ = shared.ice.set(orch.clone());
+
+        // signal runtime with an EMPTY protected fd source: nothing dials,
+        // nothing unprotected — fail-closed by construction
+        let (exchange, rx) = RealSignalExchange::new();
+        let rt = Arc::new(SignalRuntime::new(
+            SignalLinkMaterials {
+                runtime: tokio::runtime::Handle::current(),
+                transport: GrpcTransport::Plaintext,
+                connect_timeout: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+                keys: EnvelopeKeyPair::from_secret_bytes(&[9u8; 32]),
+                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+            },
+            exchange.clone(),
+            rx,
+        ));
+        let _ = rt.orch.set(orch.clone());
+        let _ = shared.signal.set(rt.clone());
+        shared.set_running(true);
+
+        // BEFORE the uri: no link, signal_ready false
+        assert!(!orch.lock_poison().signal_ready());
+
+        // sync WITHOUT signal uri → nothing starts
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: vec![],
+                    ..Default::default()
+                }),
+                network_map: Some(shell_test_map()),
+            },
+        );
+        assert!(
+            shared.network_config_json().contains("\"signal\":null"),
+            "no uri announced yet: {}",
+            shared.network_config_json()
+        );
+        assert!(!orch.lock_poison().signal_ready());
+
+        // sync WITH the uri + a pre-set connect addr → the link starts and
+        // the initial protected dial fails closed (no fds)
+        rt.set_connect_addr(std::net::SocketAddr::from(([127, 0, 0, 1], 1)));
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: vec![],
+                    signal: Some("127.0.0.1:1".into()),
+                    ..Default::default()
+                }),
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let json = shared.network_config_json();
+        assert!(
+            json.contains("\"signal\":\"127.0.0.1:1\""),
+            "uri must ride the shell snapshot: {json}"
+        );
+        assert!(json.contains("\"available\":true"), "{json}");
+        // the link is running (worker spawned) and its dial fails CLOSED
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while rt.status().last_error != Some(ErrorClass::Network) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "expected a fail-closed dial error (Network class), got {:?}",
+                rt.status()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let st = rt.status();
+        assert!(!st.registered, "no fds → never registered");
+        assert_eq!(st.reconnects, 0, "initial dial failures are not reconnects");
+        assert!(
+            !orch.lock_poison().signal_ready(),
+            "ICE must stay unarmed while signal is down"
+        );
+        // status surface: registered=false, class-only error
+        let status_json = ConnectorStatus {
+            running: true,
+            state: ConnState::Connected,
+            started_at_unix: None,
+            last_update_unix: None,
+            peer_count: 0,
+            route_count: 0,
+            reconnects: 0,
+            last_error: None,
+            deadline: SessionDeadline::Unknown,
+            renew_attempts: 0,
+            wg_apply_failed: false,
+            wg_apply_errors: 0,
+            logout_ok: None,
+            terminal: false,
+            ice: orch.lock_poison().summary(),
+            signal: rt.status(),
+        }
+        .to_json();
+        assert!(
+            status_json.contains("\"signal\":{\"registered\":false,\"reconnects\":0,\
+                                  \"last_error\":{\"class\":\"network\",\"status\":0}}"),
+            "{status_json}"
+        );
+        assert!(matches!(config::parse_document(&status_json), Ok(Json::Obj(_))));
+
+        // stop tears the worker down and clears the registered flag
+        rt.shutdown();
     }
 }
