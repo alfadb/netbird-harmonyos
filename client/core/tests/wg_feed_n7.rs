@@ -226,6 +226,18 @@ fn fd_open(fd: i32) -> bool {
     unsafe { sys::fcntl(fd, sys::F_GETFD) != -1 }
 }
 
+/// Serializes every test in this file. Required by the fd-liveness
+/// assertions (`fd_open` on a number a test just closed itself): fd numbers
+/// are handed out lowest-free-first from the process-global table, so with
+/// parallel test execution another test's socket()/dup() can re-open a
+/// just-closed number between the close and the probe and flip the expected
+/// `false`. Same pattern as tests/tun_fd_contract.rs::TEST_LOCK (std-only,
+/// no new dependency). Dead-feed probes here use an unallocatable fd number
+/// (`DEAD_FD`, far beyond RLIMIT_NOFILE) and stay deterministic regardless;
+/// the lock covers the liveness probes that must observe a real, now-dead
+/// number.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// One IPv4/UDP packet with a valid header checksum.
 fn ip_udp_packet(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(28 + payload.len());
@@ -451,6 +463,7 @@ fn pump_until(
 
 #[test]
 fn production_path_real_wgdevice_closed_loop() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let peer = Peer::build(&SECRET_B, key_b(), key_a(), vec![(ADDR_A, 32)]);
     let mut slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
     let mut now = 1000u64;
@@ -548,6 +561,7 @@ impl ManagementFactory for NeverFactory {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connector_status_reflects_fed_device_and_stop_tears_it_down() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let peer = Peer::build(&SECRET_B, key_b(), key_a(), vec![(ADDR_A, 32)]);
     let slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
     let mut now = 2000u64;
@@ -618,6 +632,7 @@ async fn connector_status_reflects_fed_device_and_stop_tears_it_down() {
 
 #[test]
 fn missing_feed_fails_closed_and_takes_no_unprotected_socket() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ice_sockets = Arc::new(ProtectedUdpFdSource::new_with_fd(-1)); // shell never feeds ICE
 
     // case 1: only the TUN fd fed (WG socket missing)
@@ -644,14 +659,16 @@ fn missing_feed_fails_closed_and_takes_no_unprotected_socket() {
     assert!(slot.with_device(|_| ()).is_none());
 
     // case 2: the missing fd arrives dead → refused at the boundary, nothing
-    // stored; the data plane still never starts without a VALID pair
-    let dead: i32 = { // grab a real fd and close it immediately
-        let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-        assert!(fd >= 0);
-        unsafe { sys::close(fd) };
-        fd
-    };
-    let err = slot.feed_wg_socket(dead).unwrap_err();
+    // stored; the data plane still never starts without a VALID pair.
+    // DEAD_FD can never be open — far beyond any RLIMIT_NOFILE, so the
+    // kernel never allocates it and no parallel test can hold it — making
+    // the boundary probe's EBADF deterministic. Deliberately NOT "open one
+    // and close it": fd numbers are handed out lowest-free-first from the
+    // process-global table, so under parallel test execution another test
+    // can re-open the just-closed number before the feed lands and the
+    // expected refusal would turn into Ok(()).
+    const DEAD_FD: i32 = 1 << 30;
+    let err = slot.feed_wg_socket(DEAD_FD).unwrap_err();
     assert_eq!(err.token(), "socket-fd-invalid");
     assert_eq!(slot.feed_wg_socket(-1).unwrap_err().token(), "socket-fd-missing");
     assert!(!slot.device_up());
@@ -677,6 +694,7 @@ fn missing_feed_fails_closed_and_takes_no_unprotected_socket() {
 
 #[test]
 fn fd_contract_native_uses_only_dups_originals_stay_caller_owned() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Phase A: close the ORIGINALS right after the feeds — the device must
     // keep working (it holds dups; touching the originals would EBADF).
     let peer = Peer::build(&SECRET_B, key_b(), key_a(), vec![(ADDR_A, 32)]);
@@ -687,6 +705,11 @@ fn fd_contract_native_uses_only_dups_originals_stay_caller_owned() {
 
     // the caller's rights: close the raw WG socket + raw TUN fd
     slot_end.close_originals();
+    // The numbers must now read as closed. This cannot race with parallel
+    // tests: every test in this binary holds TEST_LOCK (see its doc), so no
+    // other thread is allocating fds — without that lock, lowest-free-first
+    // re-allocation could legitimately resurrect either number between the
+    // close and this probe.
     assert!(!fd_open(slot_end.wg_raw) && !fd_open(slot_end.tun_raw));
 
     // the tunnel still completes the handshake and carries payload — proof

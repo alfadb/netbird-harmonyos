@@ -1524,9 +1524,17 @@ mod feed_tests {
         // missing
         assert_eq!(slot.feed_wg_socket(-1).unwrap_err().token(), "socket-fd-missing");
         assert_eq!(slot.feed_tun(-1).unwrap_err().token(), "socket-fd-missing");
-        // dead: close the tun end first, then feeding it must be refused
-        unsafe { sys::close(tun_raw) };
-        let err = slot.feed_tun(tun_raw).unwrap_err();
+        // dead: a fd number that CANNOT be open — far beyond any RLIMIT_NOFILE
+        // (Linux caps per-process fd numbers far below 2^30), so the boundary
+        // dup/F_GETFD probe returns EBADF deterministically and NO parallel
+        // test can ever hold this number. Deliberately NOT "open one and
+        // close it": fd numbers are handed out lowest-free-first from the
+        // process-global table, so under parallel test execution another
+        // test's socket()/dup() can re-open the just-closed number before
+        // the feed lands — the expected refusal turns into Ok(()) and the
+        // test flakes (observed on ~25% of lib-target runs).
+        const DEAD_FD: i32 = 1 << 30;
+        let err = slot.feed_tun(DEAD_FD).unwrap_err();
         assert_eq!(err.token(), "socket-fd-invalid");
         assert_eq!(err.errno(), sys::EBADF);
         // nothing was stored: the seam stays completely unfed
@@ -1537,7 +1545,9 @@ mod feed_tests {
         slot.feed_wg_socket(wg_raw).expect("valid socket feed");
         assert!(!slot.device_up(), "one feed alone must not start the data plane");
         assert!(!slot.tunnel_ready());
-        for fd in [wg_raw, tun_end] {
+        // tun_raw stayed open this round (the DEAD_FD probe replaced the
+        // close-the-tun-end trick), so it is ours to close here
+        for fd in [wg_raw, tun_raw, tun_end] {
             unsafe { sys::close(fd) };
         }
     }

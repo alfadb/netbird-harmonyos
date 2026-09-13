@@ -622,14 +622,16 @@ fn recreate_dead_fd_refused_no_half_state_then_fail_closed_teardown() {
     assert!(slot_end.ready());
 
     // a DEAD fd ("create() handed us a closed fd" / protect-path casualty):
-    // refused at the boundary, the device stays on the OLD tun untouched
-    let dead: i32 = {
-        let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-        assert!(fd >= 0);
-        unsafe { sys::close(fd) };
-        fd
-    };
-    let err = slot_end.slot.feed_tun(dead).unwrap_err();
+    // refused at the boundary, the device stays on the OLD tun untouched.
+    // DEAD_FD can never be open — far beyond any RLIMIT_NOFILE, so the
+    // kernel never allocates it and no parallel test can hold it — making
+    // the boundary probe's EBADF deterministic. Deliberately NOT "open one
+    // and close it": fd numbers are handed out lowest-free-first from the
+    // process-global table, so under parallel test execution another test
+    // can re-open the just-closed number before the feed lands and the
+    // expected refusal would turn into Ok(()).
+    const DEAD_FD: i32 = 1 << 30;
+    let err = slot_end.slot.feed_tun(DEAD_FD).unwrap_err();
     assert_eq!(err.token(), "socket-fd-invalid", "dead fd refused at the boundary");
     assert_eq!(err.errno(), sys::EBADF);
     // NO half state: device still up, session still live, old fd still active

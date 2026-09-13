@@ -535,9 +535,13 @@ async fn dial_consumes_a_dup_original_stays_owner_owned() {
     assert_ne!(dup, fd, "dup must be a distinct descriptor number");
     unsafe { sys::close(dup) };
 
-    // the owner closes the original — native never did, never will
-    unsafe { sys::close(fd) };
-    assert!(!fd_open(fd));
+    // the owner closes the original — native never did, never will. The
+    // close's own return value proves it landed; probing the NUMBER with
+    // F_GETFD afterwards would race: fd numbers are handed out
+    // lowest-free-first from the process-global table, so a parallel test
+    // or runtime thread can re-open the just-closed number before the probe
+    // and flip the expected `false`.
+    assert_eq!(unsafe { sys::close(fd) }, 0, "owner close must succeed");
 
     // --- variant B: pre-connected socket (host-test shape): the dial must
     // ADOPT it (EISCONN path), again without touching the original.
