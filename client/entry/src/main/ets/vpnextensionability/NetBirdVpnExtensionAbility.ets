@@ -7,13 +7,14 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
-  DeviceConfigFile, ManagementEndpoint, RouteSetAppliedResult, WgFeedResult,
+  DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RouteSetAppliedResult,
+  SocketFeedResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorRouteSetApplied,
-  connectorSignalFeed, connectorStartWithSocket, connectorSocketFeed, connectorStop,
-  connectorTunFdFeed, connectorWgSocketFeed, mgmtSocketOpen, parseDeviceConfig,
-  parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readCredentialFileText,
-  resolveManagementIp, sleep
+  STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed, connectorNetworkConfig,
+  connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket, connectorSocketFeed,
+  connectorStop, connectorTunFdFeed, connectorWgSocketFeed, iceSocketOpen, mgmtSocketOpen,
+  parseDeviceConfig, parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull,
+  readCredentialFileText, resolveManagementIp, sleep
 } from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
@@ -145,6 +146,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // yet — TODO/未验证); the shell only audits it read-only via core.fd_status.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
+  // N5c/N7 device gap: the ICE UDP socket (core-opened, shell-protected,
+  // fed via connectorIceSocketFeed). Without it candidate gathering fails
+  // closed and ICE never leaves idle (device run 1: 61x "pump error").
+  private iceSocketFd: number = -1;
+  private iceProtected: boolean = false;
   // N3-6 control-plane wiring state. destroyRequested latches onDestroy so
   // the (async) start flow never creates a VPN after teardown began.
   private destroyRequested: boolean = false;
@@ -1019,6 +1025,37 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       };
     }
 
+    // N5c/N7 device gap: provision the ICE UDP socket (core-opened unbound
+    // UDP → shell protect gate → connectorIceSocketFeed). The protected-fd
+    // rule of §二.4 covers ICE/STUN as explicitly as it covers management:
+    // without a fed socket the core's candidate gathering fails CLOSED and
+    // ICE stays idle (device run 1: 61x "peer-conn: pump error (network)").
+    // Failure here is the same fail-closed teardown as the WG feed.
+    const iceOk: boolean = await this.protectAndFeedIceSocket();
+    if (!iceOk) {
+      try {
+        const stop = connectorStop();
+        hilog.info(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s|' +
+          'cause=ice-socket-feed-fail-closed',
+          this.requestId, String(stop.already_stopped), stop.state);
+      } catch (error) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error as Error));
+      }
+      this.destroyOnce('ice-socket-feed-fail-closed').catch((error: Error) => {
+        hilog.error(DOMAIN, TAG,
+          'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=ice-feed-fail-closed|summary=%{public}s',
+          this.requestId, safeError(error));
+      });
+      return {
+        destroyRequired: true,
+        accepted: true,
+        reason: 'ice-socket-feed-fail-closed'
+      };
+    }
+
     // VPN is up (create accepted + protect passed + WG data plane fed):
     // N8 — ACK the route set applied to the platform VpnConfig (initial
     // create; arms the core's desired-vs-applied recreate comparison), then
@@ -1151,25 +1188,89 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return true;
   }
 
+  // N5c/N7 device gap: ICE UDP socket provisioning (core-open → protect →
+  // feed). Mirrors protectOutboundSocketFailClosed for the ICE seam: the fd
+  // is core-opened UNBOUND (ice_socket_open — binding here would pick the
+  // port before the interface is known), protected BEFORE the ICE consumer
+  // binds a dup copy, then handed over. Every leg is fail-closed.
+  private async protectAndFeedIceSocket(): Promise<boolean> {
+    const connection: vpnExtension.VpnConnection | undefined = this.connection;
+    if (connection === undefined) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=connection-missing', this.requestId);
+      return false;
+    }
+    let fd: number = -1;
+    try {
+      const opened: NativeTcpSocketOpen = iceSocketOpen();
+      fd = opened.fd;
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open-throw|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return false;
+    }
+    if (fd < 0) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open|fd=%{public}d', this.requestId, fd);
+      return false;
+    }
+    this.iceSocketFd = fd;
+    hilog.info(DOMAIN, TAG,
+      'VPN_ICE_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d', this.requestId, fd);
+    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+    if (!protectedOk) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d', this.requestId, fd);
+      return false;
+    }
+    this.iceProtected = true;
+    let fed: SocketFeedResult;
+    try {
+      fed = connectorIceSocketFeed(fd);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed-throw|fd=%{public}d|summary=%{public}s',
+        this.requestId, fd, safeError(error as Error));
+      return false;
+    }
+    if (!fed.ok) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|error=%{public}s',
+        this.requestId, fd, fed.error ?? 'no-message');
+      return false;
+    }
+    hilog.info(DOMAIN, TAG,
+      'VPN_ICE_FEED|fed|fd=%{public}d|protected=%{public}s', fd, String(this.iceProtected));
+    return true;
+  }
+
   // Bounded VpnConnection.protect() box (same shape as the verified spike
   // helper protectSocketWithBox, e8e2cf9). Never throws. Box expiry is
   // reported as failure (fail-closed) — stricter than the spike's
   // best-effort treatment, per governance item 4.
   private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
+    const t0: number = Date.now();
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       connection.protect(fd).then((): void => {
+        // Device-observed 2026-09-13: some protect() promises settle late (or
+        // never); the elapsed time distinguishes "slow" from "hung", which
+        // the box alone cannot tell.
+        hilog.info(DOMAIN, TAG,
+          'VPN_PROTECT_SETTLED|requestId=%{public}s|fd=%{public}d|elapsedMs=%{public}d',
+          this.requestId, fd, Date.now() - t0);
         resolve(true);
       }).catch((error: Error): void => {
         hilog.warn(DOMAIN, TAG,
-          'VPN_PROTECT_REJECTED|requestId=%{public}s|fd=%{public}d|summary=%{public}s',
-          this.requestId, fd, safeError(error));
+          'VPN_PROTECT_REJECTED|requestId=%{public}s|fd=%{public}d|elapsedMs=%{public}d|summary=%{public}s',
+          this.requestId, fd, Date.now() - t0, safeError(error));
         resolve(false);
       });
     });
     const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       setTimeout((): void => {
         hilog.warn(DOMAIN, TAG,
-          'VPN_PROTECT_TIMEOUT|requestId=%{public}s|fd=%{public}d|boxMs=%{public}d',
+          'VPN_PROTECT_TIMEOUT|requestId=%{public}s|fd=%{public}d|boxMs=%{public}d|stillPending=true',
           this.requestId, fd, PROTECT_BOX_MS);
         resolve(false);
       }, PROTECT_BOX_MS);

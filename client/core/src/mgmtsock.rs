@@ -389,6 +389,28 @@ pub fn mgmt_socket_open() -> String {
     format!("{{\"fd\":{fd},\"bind_rc\":0,\"bind_errno\":0}}")
 }
 
+/// Device-path ICE socket opener (N5c/N7 gap): same shape as
+/// [`mgmt_socket_open`] but SOCK_DGRAM and deliberately **unbound** — the ICE
+/// consumer (`ice::ProtectedUdpFdSource`) dups the fd, binds the COPY to the
+/// chosen interface address and reads the chosen port back via `getsockname`
+/// (see `ice.rs` module docs). Binding here would pick the port before the
+/// interface is known.
+///
+/// fd ownership identical to the TCP opener: native-created, native-owned
+/// until handed to `connector_ice_socket_feed`, then provider-owned (dup-only,
+/// never closed by the consumer).
+pub fn udp_socket_open() -> String {
+    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        let e = sys::errno();
+        return format!("{{\"fd\":-1,\"bind_rc\":-1,\"bind_errno\":{e}}}");
+    }
+    hilog::emit(&format!(
+        "mgmtsock: udp socket pre-opened for ICE protect gate fd={fd} (unbound, protected=nothing-yet)"
+    ));
+    format!("{{\"fd\":{fd},\"bind_rc\":0,\"bind_errno\":0}}")
+}
+
 // ---------------------------------------------------------------------------
 // tests (host: Linux — same syscall numbers/constants as the OHOS target)
 // ---------------------------------------------------------------------------

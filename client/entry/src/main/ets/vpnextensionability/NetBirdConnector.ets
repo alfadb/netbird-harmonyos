@@ -393,6 +393,22 @@ export function mgmtSocketOpen(): NativeTcpSocketOpen {
   return JSON.parse(core.mgmt_socket_open()) as NativeTcpSocketOpen;
 }
 
+// Device-path ICE socket opener (N5c/N7 device gap): the same protect-gate
+// split as the management socket, UDP variant. Core opens an UNBOUND UDP
+// socket (binding here would pick the port before the interface is known);
+// the ICE consumer dups the fd, binds the copy per interface and reads the
+// chosen port back via getsockname.
+export function iceSocketOpen(): NativeTcpSocketOpen {
+  return JSON.parse(core.ice_socket_open()) as NativeTcpSocketOpen;
+}
+
+// Feed a PROTECTED ICE UDP socket (open + protect first). Every gathering
+// round takes a fresh fd; a starved queue fails candidate gathering CLOSED —
+// there is no unprotected UDP fallback (governance §二.4).
+export function connectorIceSocketFeed(fd: number): SocketFeedResult {
+  return JSON.parse(core.connector_ice_socket_feed(fd)) as SocketFeedResult;
+}
+
 // ---------------------------------------------------------------------------
 // N3-7 shell-side management endpoint resolution (DNS stays OUT of native —
 // the protected dial must never trigger a nameserver trip through our own

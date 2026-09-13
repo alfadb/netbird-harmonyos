@@ -1590,14 +1590,28 @@ impl ShellNetworkConfig {
         force_default_route: bool,
         tunnel_ready: bool,
     ) -> ShellNetworkConfig {
-        let address = map.peer.as_ref().and_then(|p| p.address.clone());
-        let address_prefix_len = address
-            .as_deref()
-            // NetBird delivers "ip/prefix" ("100.102.55.28/16"); the prefix
-            // length rides the suffix, the address part decides IPv4-ness.
-            .and_then(|a| a.split('/').next())
-            .and_then(config::parse_ipv4)
-            .map(|_| 32u8);
+        // NetBird delivers "ip/prefix" ("100.102.55.28/16"): the platform
+        // VpnConfig LinkAddress takes a BARE IP plus a separate prefixLength.
+        // Device-verified 2026-09-13: handing the raw "ip/prefix" string to
+        // the shell made NETMANAGER_EXT reject the whole config
+        // ("invalid ip address"/"ParseAddress failed", code 401), and the
+        // previous hardcoded 32 produced a /32 host route for a /16 overlay.
+        // So: strip the suffix AND use the value it carries.
+        let raw_address = map.peer.as_ref().and_then(|p| p.address.clone());
+        let (address, address_prefix_len) = match raw_address.as_deref() {
+            Some(raw) => {
+                let mut parts = raw.splitn(2, '/');
+                let ip = parts.next().unwrap_or("").trim().to_string();
+                let prefix = parts.next().and_then(|p| p.trim().parse::<u8>().ok());
+                if config::parse_ipv4(&ip).is_some() {
+                    (Some(ip), Some(prefix.unwrap_or(32)))
+                } else {
+                    // IPv6 or unparseable: do not hand a bad address to the shell.
+                    (None, None)
+                }
+            }
+            None => (None, None),
+        };
         let peer_count = map.peers.len() + map.offline_peers.len();
         let (default_route_allowed, default_route_reason) =
             Self::default_route_decision(peer_count, tunnel_ready, force_default_route);
@@ -3863,6 +3877,40 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn shell_address_strips_the_cidr_suffix_and_uses_its_prefix() {
+        // Device-verified 2026-09-13 (device run 1): management delivers the
+        // peer's own address as "ip/prefix" ("100.106.188.170/16"). Handing
+        // that raw string to the shell made the platform reject the WHOLE
+        // VpnConfig (NETMANAGER_EXT "invalid ip address" / "ParseAddress
+        // failed", code 401 "Parameter error"), and the previous hardcoded
+        // prefix produced a /32 host route for a /16 overlay. Both halves are
+        // pinned here.
+        let mut map = shell_test_map();
+        if let Some(peer) = map.peer.as_mut() {
+            peer.address = Some("100.106.188.170/16".into());
+        }
+        let snap = ShellNetworkConfig::from_map_gated(&map, false, false);
+        assert_eq!(snap.address.as_deref(), Some("100.106.188.170"));
+        assert_eq!(snap.address_prefix_len, Some(16));
+
+        // A bare address (no suffix) keeps the host /32 default.
+        if let Some(peer) = map.peer.as_mut() {
+            peer.address = Some("100.106.188.170".into());
+        }
+        let bare = ShellNetworkConfig::from_map_gated(&map, false, false);
+        assert_eq!(bare.address.as_deref(), Some("100.106.188.170"));
+        assert_eq!(bare.address_prefix_len, Some(32));
+
+        // IPv6 / unparseable: not handed to the shell at all.
+        if let Some(peer) = map.peer.as_mut() {
+            peer.address = Some("fd00::1/128".into());
+        }
+        let v6 = ShellNetworkConfig::from_map_gated(&map, false, false);
+        assert_eq!(v6.address, None);
+        assert_eq!(v6.address_prefix_len, None);
+    }
+
     fn shell_network_config_snapshot_and_json_contract() {
         // N3-7 default: the WG data plane is NOT ready (registry), so the
         // managed default route is HELD — not exported for install.

@@ -43,6 +43,17 @@
     requestPermissions: [
       {
         name: 'ohos.permission.INTERNET'
+      },
+      {
+        // Device-verified 2026-09-13: VpnConnection.protect() performs an
+        // ohos.permission.MANAGE_VPN check inside netmanager
+        // ("permission check failed, permission:ohos.permission.MANAGE_VPN,
+        // callerToken:<app>"); without it the protect promise never settles
+        // and every protected-socket gate times out. This is a restricted
+        // (ACL) permission: it must ALSO be granted by the signing profile
+        // (AGC debug profile -> 申请权限/受控ACL权限), otherwise the install
+        // keeps the empty acl list and the check still fails.
+        name: 'ohos.permission.MANAGE_VPN'
       }
     ]
   }

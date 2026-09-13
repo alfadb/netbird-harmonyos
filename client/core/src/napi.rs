@@ -104,6 +104,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("tun_close", napi_tun_close);
     reg!("config_validate", napi_config_validate);
     reg!("mgmt_socket_open", napi_mgmt_socket_open);
+    reg!("ice_socket_open", napi_ice_socket_open);
     reg!("connector_start", napi_connector_start);
     reg!("connector_start_with_socket", napi_connector_start_with_socket);
     reg!("connector_socket_feed", napi_connector_socket_feed);
@@ -362,6 +363,7 @@ mod tests {
             "tun_close",
             "config_validate",
             "mgmt_socket_open",
+            "ice_socket_open",
             "connector_start",
             "connector_start_with_socket",
             "connector_socket_feed",
@@ -568,6 +570,13 @@ unsafe extern "C" fn napi_connector_route_set_applied(
 // protect gate (the wg_fwd_open split, TCP variant).
 unsafe extern "C" fn napi_mgmt_socket_open(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::mgmtsock::mgmt_socket_open())
+}
+
+// N5c/N7 device-path gap: open an UNBOUND UDP socket for the shell protect
+// gate; the ICE consumer dups it, binds the copy per interface and reads the
+// port back (see mgmtsock::udp_socket_open).
+unsafe extern "C" fn napi_ice_socket_open(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::mgmtsock::udp_socket_open())
 }
 
 unsafe extern "C" fn napi_connector_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
