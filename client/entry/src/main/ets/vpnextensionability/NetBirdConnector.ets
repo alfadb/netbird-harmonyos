@@ -106,6 +106,23 @@ export interface WgDataplaneStatus {
   decrypt_errors: number;
 }
 
+// N8: core.connector_status().recreate — controlled-recreate state. The
+// platform VpnConfig is fixed at create() time; when the DESIRED route set
+// (live default-route gate applied to the map's routes) diverges from the
+// route set the shell last ACKed as applied, `required=true` tells the shell
+// to rebuild the connection. `count` = completed recreates (budget 3
+// core-side, RECREATE_MAX), `exhausted` = budget spent (never re-requested),
+// `cooling_down` = a divergence exists but is parked inside the 30 s
+// cooldown window, `reason` = stable token
+// ('none' | 'route-set-changed' | 'limit-reached').
+export interface RecreateStatus {
+  required: boolean;
+  count: number;
+  exhausted: boolean;
+  cooling_down: boolean;
+  reason: string;
+}
+
 // core.connector_status snapshot (subset the shell consumes).
 export interface ConnectorStatusResult {
   running: boolean;
@@ -124,6 +141,8 @@ export interface ConnectorStatusResult {
   signal: SignalStatus;
   // N7: the real WG data plane (fed/device/ready + device counters).
   wg?: WgDataplaneStatus;
+  // N8: the controlled-recreate trigger (the shell rebuilds when required).
+  recreate?: RecreateStatus;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -299,8 +318,34 @@ export function connectorWgSocketFeed(fd: number): WgFeedResult {
 // N7: feed the platform TUN fd from VpnConnection.create(). The shell KEEPS
 // the raw fd — its close belongs exclusively to VpnConnection.destroy();
 // native consumes ONLY a dup copy at device construction (fd contract).
+// N8: while the device is up this REPLACES the platform TUN fd (controlled
+// recreate — new dup adopted, old dup deactivated, WG sessions kept).
 export function connectorTunFdFeed(fd: number): WgFeedResult {
   return JSON.parse(core.connector_tun_fd_feed(fd)) as WgFeedResult;
+}
+
+// N8: connector_route_set_applied result —
+// {ok:true,recreate:{required,count,exhausted,cooling_down,reason}} /
+// {ok:false,error}.
+export interface RouteSetAppliedResult {
+  ok: boolean;
+  recreate?: RecreateStatus;
+  error?: string;
+}
+
+// N8: ACK the route set the shell just applied to the platform VpnConfig at
+// its (re)create() time (`routes` = the canonical networks from
+// connector_network_config(), e.g. ['0.0.0.0/0','172.16.0.0/12']).
+// `isRecreate=false` records the INITIAL create's applied set (arms the
+// desired-vs-applied comparison); `true` records a COMPLETED controlled
+// recreate (counts against the core-side budget and arms the cooldown).
+// Without this ACK the core never raises `recreate.required` (N7 behavior
+// preserved for an older shell).
+export function connectorRouteSetApplied(routes: string[], isRecreate: boolean):
+  RouteSetAppliedResult {
+  const payload: Record<string, Object> = { 'routes': routes };
+  return JSON.parse(core.connector_route_set_applied(JSON.stringify(payload), isRecreate)) as
+    RouteSetAppliedResult;
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the protect

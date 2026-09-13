@@ -138,6 +138,72 @@ use crate::util::{jbool, jinum, jnum, jstr};
 pub const UPSTREAM_COMMIT: &str = crate::grpc::UPSTREAM_COMMIT;
 
 // ---------------------------------------------------------------------------
+// N8: controlled-recreate state (platform VpnConfig is fixed at create())
+// ---------------------------------------------------------------------------
+
+/// Recreate budget: at most this many completed recreates per connector
+/// lifetime. Bounds a flapping data plane (each desired-set change consumes
+/// one) so the shell can never be driven into a recreate storm.
+pub const RECREATE_MAX: u64 = 3;
+
+/// Recreate cooldown (monotonic ms): after a completed recreate, a NEW
+/// desired-set change is not re-raised until this much time has passed. The
+/// watcher's periodic `status()`/`network_config()` reads re-run the refresh,
+/// so the requirement re-surfaces after the cooldown without any spinning.
+pub const RECREATE_COOLDOWN_MS: u64 = 30_000;
+
+/// N8 controlled-recreate state (exposed through `connector_status()`'s
+/// `recreate` object — no key material). The platform VpnConfig is fixed at
+/// `VpnConnection.create()` time, so when the DESIRED route set (the live
+/// gate decision applied to the last network map's routes) diverges from the
+/// route set the shell last reported as APPLIED, the default route can only
+/// reach the tunnel through a controlled connection rebuild. This surface
+/// tells the shell WHEN (`required`) and bounds the churn (`count` /
+/// `exhausted` / `cooling_down`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecreateStatus {
+    /// The shell should rebuild the connection NOW (desired route set !=
+    /// applied route set, budget left, cooldown passed). Level-based: it
+    /// stays true across refreshes until the shell ACKs a new applied set.
+    pub required: bool,
+    /// Completed recreates (ACKed with `is_recreate=true`).
+    pub count: u64,
+    /// The budget is spent — no further recreates will be requested this
+    /// connector lifetime (logged loudly; the snapshot gate stays honest).
+    pub exhausted: bool,
+    /// A desired-set change exists but is parked inside the cooldown window.
+    pub cooling_down: bool,
+    /// Stable reason token: `none` / `route-set-changed` / `limit-reached`.
+    pub reason: String,
+}
+
+impl Default for RecreateStatus {
+    fn default() -> Self {
+        RecreateStatus {
+            required: false,
+            count: 0,
+            exhausted: false,
+            cooling_down: false,
+            reason: "none".to_string(),
+        }
+    }
+}
+
+impl RecreateStatus {
+    /// The `connector_status()` `recreate` JSON object.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{{},{},{},{},{}}}",
+            jbool("required", self.required),
+            jinum("count", self.count as i64),
+            jbool("exhausted", self.exhausted),
+            jbool("cooling_down", self.cooling_down),
+            jstr("reason", &self.reason),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // sanitized error surface (classification only — never a message)
 // ---------------------------------------------------------------------------
 
@@ -802,6 +868,14 @@ struct StateInner {
     net_routes_all: Vec<ShellRouteEntry>,
     /// N3-7: the (dev opt-in) force flag for the default-route gate.
     force_default_route: bool,
+    /// N8: the route set the shell last reported as APPLIED to the platform
+    /// VpnConfig at its (re)create() time (`None` = the shell never ACKed —
+    /// e.g. an older shell; recreate signaling stays silent in that case).
+    applied_route_set: Option<Vec<String>>,
+    /// N8: monotonic anchor of the last COMPLETED recreate (cooldown).
+    last_recreate_ms: Option<u64>,
+    /// N8: the controlled-recreate state machine (required/count/exhausted).
+    recreate: RecreateStatus,
 }
 
 /// State shared between the connector worker tasks and the status/stop
@@ -843,6 +917,9 @@ impl ConnectorShared {
                 net_config: None,
                 net_routes_all: Vec::new(),
                 force_default_route,
+                applied_route_set: None,
+                last_recreate_ms: None,
+                recreate: RecreateStatus::default(),
             }),
             running: AtomicBool::new(false),
             ice: std::sync::OnceLock::new(),
@@ -900,7 +977,19 @@ impl ConnectorShared {
     /// the live decision differs, the gate fields AND the exported routes
     /// are rebuilt (the default route is re-exported / re-held from the
     /// ungated record).
+    ///
+    /// N8: the same read also advances the controlled-recreate state — the
+    /// DESIRED route set (gate decision applied to the ungated record) is
+    /// compared against the route set the shell last ACKed as applied; a
+    /// divergence (either direction: a released default route must be
+    /// INSTALLED, a re-held one should be REMOVED to keep the black-hole
+    /// rule) raises `recreate.required` for the shell, bounded by
+    /// [`RECREATE_MAX`] + [`RECREATE_COOLDOWN_MS`].
     fn refresh_net_gate(&self, wg: &dyn WgPeerApplier) {
+        self.refresh_net_gate_at(wg, crate::sys::mono_ms());
+    }
+
+    fn refresh_net_gate_at(&self, wg: &dyn WgPeerApplier, now_ms: u64) {
         let mut g = self.lock();
         // disjoint field borrows on the guard data: `net_config.as_mut()`
         // holds the mutable borrow of that field while the decision reads
@@ -918,21 +1007,95 @@ impl ConnectorShared {
             wg.tunnel_ready() && ice_ready,
             inner.force_default_route,
         );
-        if allowed == snap.default_route_allowed && reason == snap.default_route_reason {
-            return;
+        if allowed != snap.default_route_allowed || reason != snap.default_route_reason {
+            hilog::emit(&format!(
+                "connector: default-route gate refresh allowed={} reason={}",
+                allowed, reason
+            ));
+            snap.default_route_allowed = allowed;
+            snap.default_route_reason = reason.clone();
+            snap.routes = inner
+                .net_routes_all
+                .iter()
+                .filter(|r| !r.is_default || allowed)
+                .cloned()
+                .collect();
         }
-        hilog::emit(&format!(
-            "connector: default-route gate refresh allowed={} reason={}",
-            allowed, reason
-        ));
-        snap.default_route_allowed = allowed;
-        snap.default_route_reason = reason.clone();
-        snap.routes = inner
+        // N8: desired (live-gated) vs applied route set → recreate signal.
+        let desired: Vec<String> = inner
             .net_routes_all
             .iter()
             .filter(|r| !r.is_default || allowed)
-            .cloned()
+            .map(|r| r.network.clone())
             .collect();
+        inner.recreate.cooling_down = false;
+        match inner.applied_route_set.as_ref() {
+            // the shell never ACKed an applied set (older shell / initial
+            // create still pending): the signal stays silent — N7 behavior
+            None => {
+                inner.recreate.required = false;
+                inner.recreate.reason = "none".to_string();
+            }
+            Some(applied) if *applied == desired => {
+                inner.recreate.required = false;
+                inner.recreate.reason = "none".to_string();
+            }
+            Some(_) => {
+                if inner.recreate.exhausted {
+                    // budget spent: never again this connector lifetime
+                    inner.recreate.required = false;
+                    inner.recreate.reason = "limit-reached".to_string();
+                } else if inner
+                    .last_recreate_ms
+                    .map_or(false, |t| now_ms.saturating_sub(t) < RECREATE_COOLDOWN_MS)
+                {
+                    // parked inside the cooldown; the next periodic read
+                    // re-raises it once the window has passed
+                    inner.recreate.required = false;
+                    inner.recreate.cooling_down = true;
+                    inner.recreate.reason = "route-set-changed".to_string();
+                } else {
+                    if !inner.recreate.required {
+                        hilog::emit(
+                            "connector: recreate required (desired route set != applied route set)",
+                        );
+                    }
+                    inner.recreate.required = true;
+                    inner.recreate.reason = "route-set-changed".to_string();
+                }
+            }
+        }
+    }
+
+    /// N8: shell ACK — `routes` is now the route set APPLIED to the platform
+    /// VpnConfig (`is_recreate=false`: the initial create; `true`: a
+    /// completed controlled recreate — counts against [`RECREATE_MAX`] and
+    /// arms the [`RECREATE_COOLDOWN_MS`] window). Idempotent-safe: repeated
+    /// ACKs of the same set without `is_recreate` just re-record it.
+    pub fn ack_applied_route_set(&self, routes: Vec<String>, is_recreate: bool, now_ms: u64) {
+        let mut g = self.lock();
+        g.applied_route_set = Some(routes.clone());
+        if is_recreate {
+            g.recreate.count = g.recreate.count.saturating_add(1);
+            g.last_recreate_ms = Some(now_ms);
+            g.recreate.required = false;
+            g.recreate.cooling_down = false;
+            if g.recreate.count >= RECREATE_MAX {
+                g.recreate.exhausted = true;
+                hilog::emit(&format!(
+                    "connector: recreate budget exhausted (count={})",
+                    g.recreate.count
+                ));
+            }
+            hilog::emit(&format!(
+                "connector: recreate acked (count={}, routes={})",
+                g.recreate.count,
+                routes.len()
+            ));
+        } else {
+            g.recreate.required = false;
+            hilog::emit(&format!("connector: applied route set acked (routes={})", routes.len()));
+        }
     }
 
     fn record_error(&self, err: &ManagementError) {
@@ -1123,6 +1286,10 @@ pub struct ConnectorStatus {
     /// counters; `crate::wg_device::WgDataplaneStatus`). All-false default
     /// when the seam has no device capability (registry — test/reference).
     pub wg: crate::wg_device::WgDataplaneStatus,
+    /// N8: controlled-recreate state (required/count/exhausted/cooling_down
+    /// + reason token) — the shell's trigger to rebuild the connection when
+    /// the desired route set diverges from the applied one.
+    pub recreate: RecreateStatus,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -1149,7 +1316,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -1180,6 +1347,7 @@ impl ConnectorStatus {
             format!("\"ice\":{}", self.ice.to_json()),
             format!("\"signal\":{}", self.signal.to_json()),
             format!("\"wg\":{}", self.wg.to_json()),
+            format!("\"recreate\":{}", self.recreate.to_json()),
         )
     }
 }
@@ -1979,7 +2147,8 @@ impl ConnectorHandle {
 
     /// Current status snapshot. N7: refreshes the default-route gate
     /// against LIVE data-plane readiness first, so the snapshot and the
-    /// `wg` field always describe reality at read time.
+    /// `wg` field always describe reality at read time. N8: the same read
+    /// advances the controlled-recreate state (`recreate` field).
     pub fn status(&self) -> ConnectorStatus {
         self.shared.refresh_net_gate(self.wg.as_ref());
         let g = self.shared.lock();
@@ -2008,6 +2177,7 @@ impl ConnectorHandle {
                 .map(|rt| rt.status())
                 .unwrap_or_default(),
             wg: self.wg.dataplane_status().unwrap_or_default(),
+            recreate: g.recreate.clone(),
         }
     }
 
@@ -2059,6 +2229,11 @@ impl ConnectorHandle {
             let mut g = self.shared.lock();
             g.net_config = None;
             g.net_routes_all.clear();
+            // N8: the applied-set bookkeeping goes with the applied config —
+            // a fresh start begins with no recreate history
+            g.applied_route_set = None;
+            g.last_recreate_ms = None;
+            g.recreate = RecreateStatus::default();
         }
         // logout is best-effort and must never block the stop
         if let Some(mut client) = self.logout_slot.lock_poison().take() {
@@ -2730,6 +2905,87 @@ fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
     }
 }
 
+/// The `connector_route_set_applied(routesJson, isRecreate)` implementation
+/// (N8) — shell ACK that `routes` is the route set now APPLIED to the
+/// platform VpnConfig. `routesJson` = `{"routes":["0.0.0.0/0","a.b.c.d/p"]}`
+/// (canonical `network` strings exactly as `connector_network_config()`
+/// renders them). `isRecreate=false` records the INITIAL create()'s applied
+/// set (arms the N8 comparison); `true` records a COMPLETED controlled
+/// recreate (counts against `recreate.count`, arms the cooldown window).
+/// After the ACK the live refresh re-compares desired-vs-applied, so the
+/// `recreate.required` flag clears exactly when the shell's applied set
+/// matches the desired one.
+///
+/// Failure tokens: `no-connector`, `route-set-invalid` (malformed JSON /
+/// non-string entries / empty list — an empty platform route set would be a
+/// black hole by construction and is never accepted as an applied state).
+pub fn connector_route_set_applied_json(routes_json: &str, is_recreate: bool) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let routes = match parse_route_set(routes_json) {
+        Ok(r) => r,
+        Err(_) => {
+            return format!(
+                "{{{},{}}}",
+                jbool("ok", false),
+                jstr("error", "route-set-invalid")
+            )
+        }
+    };
+    handle
+        .shared
+        .ack_applied_route_set(routes, is_recreate, crate::sys::mono_ms());
+    let recreate = handle.shared.lock().recreate.clone();
+    format!(
+        "{{{},{}}}",
+        jbool("ok", true),
+        format!("\"recreate\":{}", recreate.to_json())
+    )
+}
+
+/// Parse the `{"routes":["a.b.c.d/p",...]}` argument of
+/// [`connector_route_set_applied_json`]. At least one route is required
+/// (an empty applied set is never a legal platform state for this client).
+fn parse_route_set(json: &str) -> Result<Vec<String>, ConfigError> {
+    let doc = config::parse_document(json)?;
+    let entries = match doc {
+        Json::Obj(entries) => entries,
+        _ => {
+            return Err(ConfigError::Field {
+                field: "(root)",
+                reason: "expected a JSON object".into(),
+            })
+        }
+    };
+    for (key, val) in &entries {
+        if key == "routes" {
+            let items = match val {
+                Json::Arr(items) => items,
+                _ => {
+                    return Err(ConfigError::Field {
+                        field: "routes",
+                        reason: "expected an array of network strings".into(),
+                    })
+                }
+            };
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(field_str(item, "routes")?.to_string());
+            }
+            if out.is_empty() {
+                return Err(ConfigError::Field {
+                    field: "routes",
+                    reason: "at least one route is required".into(),
+                });
+            }
+            return Ok(out);
+        }
+    }
+    Err(ConfigError::Field { field: "routes", reason: "missing field".into() })
+}
+
 /// Parse the `{"connect_addr":"ip:port"}` argument of
 /// [`connector_start_with_socket_json`] and
 /// [`connector_signal_socket_feed_json`].
@@ -2780,6 +3036,7 @@ pub fn connector_status_json() -> String {
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
+            recreate: RecreateStatus::default(),
         }
         .to_json(),
     }
@@ -2954,10 +3211,27 @@ mod tests {
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
+            recreate: RecreateStatus::default(),
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
         assert!(s.to_json().contains("\"terminal\":false"), "{}", s.to_json());
+        // N8: the recreate summary rides the document and renders its tokens
+        s.recreate = RecreateStatus {
+            required: true,
+            count: 1,
+            exhausted: false,
+            cooling_down: false,
+            reason: "route-set-changed".to_string(),
+        };
+        assert!(
+            s.to_json().contains(
+                "\"recreate\":{\"required\":true,\"count\":1,\"exhausted\":false,\
+                 \"cooling_down\":false,\"reason\":\"route-set-changed\"}"
+            ),
+            "{}",
+            s.to_json()
+        );
         // N5d: the signal summary rides the document too (registered /
         // reconnects / class-only last error)
         s.signal = SignalLinkStatus {
@@ -3123,6 +3397,13 @@ mod tests {
                 dropped_no_route: 1,
                 decrypt_errors: 2,
             },
+            recreate: RecreateStatus {
+                required: false,
+                count: 2,
+                exhausted: false,
+                cooling_down: true,
+                reason: "route-set-changed".to_string(),
+            },
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -3153,6 +3434,14 @@ mod tests {
             ),
             "{json}"
         );
+        // N8: the controlled-recreate summary rides the same document
+        assert!(
+            json.contains(
+                "\"recreate\":{\"required\":false,\"count\":2,\"exhausted\":false,\
+                 \"cooling_down\":true,\"reason\":\"route-set-changed\"}"
+            ),
+            "{json}"
+        );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
 
         let empty = ConnectorStatus {
@@ -3173,6 +3462,7 @@ mod tests {
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
+            recreate: RecreateStatus::default(),
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -3195,6 +3485,13 @@ mod tests {
                  \"rx_packets\":0,\"dropped_no_route\":0,\"decrypt_errors\":0}"
             ),
             "default wg summary must render: {empty}"
+        );
+        assert!(
+            empty.contains(
+                "\"recreate\":{\"required\":false,\"count\":0,\"exhausted\":false,\
+                 \"cooling_down\":false,\"reason\":\"none\"}"
+            ),
+            "default recreate summary must render: {empty}"
         );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
     }
@@ -3591,6 +3888,185 @@ mod tests {
         // (CONNECTOR slot untouched by the unit tests)
     }
 
+    // N8: controlled recreate ------------------------------------------------
+
+    /// Test seam with an injectable `tunnel_ready` (the data-plane readiness
+    /// the gate + recreate state react to).
+    struct FlipWg(std::sync::atomic::AtomicBool);
+    impl FlipWg {
+        fn new(ready: bool) -> FlipWg {
+            FlipWg(std::sync::atomic::AtomicBool::new(ready))
+        }
+        fn set(&self, ready: bool) {
+            self.0.store(ready, Ordering::Release);
+        }
+    }
+    impl WgPeerApplier for FlipWg {
+        fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear(&self) {}
+        fn tunnel_ready(&self) -> bool {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    /// Shared N8 fixture: a connector shared state with the shell_test_map
+    /// applied (default route + 172.16.0.0/12) and the shell's INITIAL
+    /// create() ACKed with the HELD route set (no 0.0.0.0/0).
+    fn recreate_fixture(wg: &FlipWg, initial_ack_ms: u64) -> ConnectorShared {
+        let shared = ConnectorShared::new(false);
+        wg.set(false);
+        shared.apply_update(
+            wg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        // the shell applied the HELD set at create() (no default route) and
+        // ACKed it (initial create, not a recreate)
+        shared.ack_applied_route_set(vec!["172.16.0.0/12".to_string()], false, initial_ack_ms);
+        shared
+    }
+
+    /// 闸翻转触发重建一次：HOLD→ALLOWED（真实握手完成由 tunnel_ready 模拟）
+    /// 恰好产生一个 `required` 请求（级别信号，不重复计数），recreate ACK
+    /// 后清除，且期望集合不变时不再触发第二次。
+    #[test]
+    fn recreate_required_raises_once_on_gate_open_and_clears_on_recreate_ack() {
+        let wg = FlipWg::new(false);
+        let shared = recreate_fixture(&wg, 10_000);
+        let mut now = 10_100u64;
+
+        // still HELD and applied==desired: nothing requested
+        shared.refresh_net_gate_at(&wg, now);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required && rec.count == 0 && rec.reason == "none", "{rec:?}");
+
+        // the data plane becomes REALLY ready (handshake done): the desired
+        // set now contains 0.0.0.0/0 → ONE required request, count untouched
+        wg.set(true);
+        shared.refresh_net_gate_at(&wg, now + 100);
+        let rec = shared.lock().recreate.clone();
+        assert!(rec.required, "gate open must demand a recreate: {rec:?}");
+        assert_eq!(rec.reason, "route-set-changed");
+        assert_eq!(rec.count, 0, "requesting must not consume the budget");
+        assert!(!rec.exhausted && !rec.cooling_down);
+
+        // repeated reads keep the LEVEL (idempotent) — the shell acts once
+        for i in 1..5 {
+            shared.refresh_net_gate_at(&wg, now + 100 + i * 1000);
+            let rec = shared.lock().recreate.clone();
+            assert!(rec.required && rec.count == 0, "level must persist: {rec:?}");
+        }
+
+        // the shell rebuilds and ACKs the NEW applied set (with the default)
+        shared.ack_applied_route_set(
+            vec!["0.0.0.0/0".to_string(), "172.16.0.0/12".to_string()],
+            true,
+            now + 6_000,
+        );
+        let rec = shared.lock().recreate.clone();
+        assert_eq!(rec.count, 1, "exactly one completed recreate");
+        assert!(!rec.required);
+        // desired == applied now: further refreshes never re-request
+        for i in 1..5 {
+            shared.refresh_net_gate_at(&wg, now + 6_000 + i * 1_000);
+            let rec = shared.lock().recreate.clone();
+            assert!(!rec.required && rec.reason == "none", "{rec:?}");
+        }
+        // ...and the snapshot's exported routes really contain the default
+        let json = shared.network_config_json();
+        assert!(json.contains("{\"network\":\"0.0.0.0/0\",\"is_default\":true}"), "{json}");
+    }
+
+    /// 不重复重建 + 有界：连续翻转受冷却窗与次数上限约束；预算耗尽后
+    /// `required` 永不再置位（`limit-reached`），快照闸保持诚实。
+    #[test]
+    fn recreate_flap_is_bounded_by_cooldown_and_limit() {
+        let wg = FlipWg::new(true);
+        let shared = ConnectorShared::new(false);
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        // initial create applied the FULL (allowed) set
+        shared.ack_applied_route_set(
+            vec!["0.0.0.0/0".to_string(), "172.16.0.0/12".to_string()],
+            false,
+            1_000,
+        );
+
+        let full = vec!["0.0.0.0/0".to_string(), "172.16.0.0/12".to_string()];
+        let held = vec!["172.16.0.0/12".to_string()];
+        let mut t = 2_000u64;
+
+        // flap 1: data plane dies → desired=held ≠ applied=full. No recreate
+        // has completed yet → no cooldown anchor → requested immediately.
+        wg.set(false);
+        shared.refresh_net_gate_at(&wg, t);
+        assert!(shared.lock().recreate.required);
+        shared.ack_applied_route_set(held.clone(), true, t + 500);
+        assert_eq!(shared.lock().recreate.count, 1);
+
+        // flap 2 requested INSIDE the cooldown window: parked (cooling_down),
+        // not required — the shell cannot be stormed
+        wg.set(true);
+        shared.refresh_net_gate_at(&wg, t + 500 + 1_000);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required && rec.cooling_down, "{rec:?}");
+        // once the window has passed, the SAME divergence resurfaces
+        shared.refresh_net_gate_at(&wg, t + 500 + RECREATE_COOLDOWN_MS + 1);
+        let rec = shared.lock().recreate.clone();
+        assert!(rec.required && !rec.cooling_down, "{rec:?}");
+        shared.ack_applied_route_set(full.clone(), true, t + 500 + RECREATE_COOLDOWN_MS + 2);
+        assert_eq!(shared.lock().recreate.count, 2);
+
+        // flap 3: same cooldown shape, then the LAST budget unit is spent
+        wg.set(false);
+        shared.refresh_net_gate_at(&wg, t + 500 + RECREATE_COOLDOWN_MS + 3);
+        assert!(!shared.lock().recreate.required, "inside cooldown");
+        shared.refresh_net_gate_at(&wg, t + 1_000 + 2 * RECREATE_COOLDOWN_MS);
+        assert!(shared.lock().recreate.required);
+        shared.ack_applied_route_set(held.clone(), true, t + 1_000 + 2 * RECREATE_COOLDOWN_MS + 1);
+        let rec = shared.lock().recreate.clone();
+        assert_eq!(rec.count, RECREATE_MAX, "budget spent");
+        assert!(rec.exhausted, "hitting the limit latches exhausted");
+
+        // flap 4 (past exhaustion): the divergence exists but is NEVER
+        // requested again — the churn is bounded by construction
+        wg.set(true);
+        shared.refresh_net_gate_at(&wg, t + 2_000 + 3 * RECREATE_COOLDOWN_MS);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required, "exhausted must never re-request: {rec:?}");
+        assert_eq!(rec.reason, "limit-reached");
+        assert_eq!(shared.lock().recreate.count, RECREATE_MAX);
+    }
+
+    /// 失败语义（Rust 半边）：重建途中喂入死 TUN fd 在 seam 边界被拒收，
+    /// 设备保持旧 TUN 原样（无半状态）；ACK 校验拒绝空集合/坏形状。
+    #[test]
+    fn route_set_ack_rejects_bad_shapes_and_no_connector() {
+        // no connector in the global slot (unit tests never start one)
+        let json = connector_route_set_applied_json("{\"routes\":[\"0.0.0.0/0\"]}", true);
+        assert_eq!(json, "{\"ok\":false,\"error\":\"no-connector\"}");
+
+        // shape validation (pure parser)
+        assert!(parse_route_set("{\"routes\":[\"0.0.0.0/0\",\"10.0.0.0/8\"]}").is_ok());
+        assert!(parse_route_set("{\"routes\":[]}").is_err(), "empty set rejected");
+        assert!(parse_route_set("{\"routes\":[1,2]}").is_err(), "non-string rejected");
+        assert!(parse_route_set("{}").is_err(), "missing field rejected");
+        assert!(parse_route_set("[]").is_err(), "non-object rejected");
+    }
+
     // N5d: real signal link --------------------------------------------------
 
     #[test]
@@ -3760,6 +4236,7 @@ mod tests {
             ice: orch.lock_poison().summary(),
             signal: rt.status(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
+            recreate: RecreateStatus::default(),
         }
         .to_json();
         assert!(

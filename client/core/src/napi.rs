@@ -111,6 +111,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
     reg!("connector_wg_socket_feed", napi_connector_wg_socket_feed);
     reg!("connector_tun_fd_feed", napi_connector_tun_fd_feed);
+    reg!("connector_route_set_applied", napi_connector_route_set_applied);
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
@@ -368,6 +369,7 @@ mod tests {
             "connector_signal_socket_feed",
             "connector_wg_socket_feed",
             "connector_tun_fd_feed",
+            "connector_route_set_applied",
             "connector_status",
             "connector_network_config",
             "connector_stop",
@@ -547,6 +549,19 @@ unsafe extern "C" fn napi_connector_tun_fd_feed(
     let a = cb_args(env, info);
     let fd = a.i32_at(0, -1);
     ret_json(env, crate::connector::connector_tun_fd_feed_json(fd))
+}
+
+// N8: shell ACK of the route set applied to the platform VpnConfig at
+// (re)create() time. `{"routes":[...]}` JSON first, isRecreate bool second —
+// arms the controlled-recreate comparison (connector_status `recreate`).
+unsafe extern "C" fn napi_connector_route_set_applied(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let routes = a.string_at(0);
+    let is_recreate = a.bool_at(1, false);
+    ret_json(env, crate::connector::connector_route_set_applied_json(&routes, is_recreate))
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the shell

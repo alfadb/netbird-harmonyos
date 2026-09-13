@@ -248,3 +248,116 @@ tx_packets, rx_packets, dropped_no_route, decrypt_errors}`（结构体
 - `VpnConfig` 在 `create()` 时刻固定 ⇒ 默认路由即使数据面后来 ready 也不
   会追加安装（平台限制，N3-6 已声明"运行中变更 NOT applied"）；壳侧
   `VPN_WG_DATAPLANE_FED` 之后的真实端到端连通需真机联调。
+
+---
+
+## 10. N8 增量：受控重建（VpnConfig 固定 ⇒ 数据面就绪后默认路由装不上）
+
+**问题**（N7 实测确认）：`VpnConnection.create(config)` 一旦调用路由集固
+定；安全闸（N3-7/N5c/N7）要求 WG 握手完成才允许 `0.0.0.0/0` 进隧道 ⇒
+create 时闸必然 HOLD ⇒ 默认路由永远装不上（除非重建连接），full-tunnel
+实际不可用。**N8 方案**：不绕闸、不假装放行，而是**数据面就绪后由壳侧
+受控重建连接**——先按 HOLD 集合 create（无默认路由、无黑洞窗口），握手
+完成后重建一次把默认路由装进新连接。
+
+### 10.1 重建时序（核心半边）
+
+1. `refresh_net_gate`（每次 `connector_status()` /
+   `connector_network_config()` 读取时执行）照旧用**实时 readiness** 重判
+   默认路由闸，并据此得出**期望路由集** `desired`（未过滤路由记录按
+   allowed 过滤后的 canonical 网络串）。
+2. 期望集合与**已应用集合**（壳侧 ACK 的 `applied_route_set`，见
+   §10.2）不一致 ⇒ 置 `recreate.required=true`（级别信号，重复读取不重复
+   计数，直到壳侧 ACK）；一致 ⇒ 清除。壳侧从未 ACK 过 ⇒ 信号保持沉默
+   （N7 行为完全保留）。
+3. 壳侧执行重建：destroy 旧连接 → 新 `create()`（期望路由集）→ 新
+   TUN fd 经既有 `connector_tun_fd_feed` 喂入 → 设备**原位替换** TUN（见
+   §10.3）→ 壳侧 ACK（`is_recreate=true`）。
+
+### 10.2 状态面与 NAPI
+
+- `connector_status()` 新增 `recreate:{required, count, exhausted,
+  cooling_down, reason}`（`RecreateStatus`，无密钥材料）。`reason` token：
+  `none` / `route-set-changed` / `limit-reached`。
+- 新增 NAPI `connector_route_set_applied(routesJson, isRecreate)`：
+  `routesJson = {"routes":["0.0.0.0/0","a.b.c.d/p"]}`（canonical 网络串），
+  `isRecreate=false` 记录初始 create 的已应用集合（只武装比较），`true`
+  记录一次完成的重建（`count+1`、武装冷却窗、清 `required`）。错误
+  token：`no-connector` / `route-set-invalid`（坏形状/空集合——空平台路由
+  集本身就是黑洞形态，永不接受）。
+- connector stop 重置全部重建簿记（`applied_route_set` / 计数 / 冷却）。
+
+### 10.3 TUN fd 替换语义与 fd 合同（`wg_device.rs`）
+
+- `WgDevice::replace_tun(raw)`：先经 `TunFd::dup_from_raw` 为**新** fd 取
+  dup（失败则旧 TUN 原样保留，无半状态），再换入新 `TunFd`；旧 `TunFd`
+  的 Drop 只关**旧 dup**。壳侧原号的关闭仍只属于
+  `VpnConnection.destroy()`——重建时序里 destroy 发生在喂新 fd **之前**，
+  此时设备靠自己的旧 dup 存活（dup 持有 open-file description），native
+  从不使用/关闭原号。
+- **会话保留（取舍：保留而非重建会话）**：BoringTun tunnel 是纯字节层状
+  态机，从不引用 TUN fd；WG 外层 UDP socket 在重建中不变。因此换 TUN
+  零成本保留全部 peer 会话——重建后**不需要重新握手**（测试断言握手计数
+  不变、`tunnel_ready` 全程为真、载荷立即双向可通）。重建会话方案被否：
+  要拆会话、重新握手，徒增不可用窗口且无任何收益。
+- feed seam：设备在位时 `feed_tun` = 替换；`feed_wg_socket` **同号幂等
+  no-op**（壳侧重放 feed 序列无副作用）、**异号拒绝**
+  （`socket-fd-conflict`，新增 token）——受保护外层 socket 不可换。设备
+  不在位时一切仍按 N7 冷启动规则。
+
+### 10.4 幂等 / 有界策略（防重建风暴）
+
+- **同一期望集合只重建一次**：`required` 是级别信号，ACK 后 `desired ==
+  applied` ⇒ 不再置位。
+- **次数上限**：`RECREATE_MAX = 3`（每 connector 生命周期），耗尽即
+  `exhausted=true`、`reason=limit-reached`，永不再请求；快照闸保持诚实
+  （闸关了照样在 `default_route` 字段如实报告，只是不再自动重建）。
+- **冷却**：`RECREATE_COOLDOWN_MS = 30_000`（单调钟）。一次重建完成后若
+  期望集合再次改变，冷却窗内 `cooling_down=true` 且 `required=false`（壳
+  侧无法被风暴）；周期性读取会在窗口过后重新升起请求。
+- 双向触发：数据面死亡（ALLOWED→HOLD）同样产生 `desired != applied`——
+  把默认路由**摘下来**同样重要（否则黑洞规则被绕过）；预算上限把振荡封
+  顶。
+
+### 10.5 失败语义
+
+重建途中任一环失败（新 fd 死亡/feed 拒收/ACK 失败/壳侧 create 失败）：
+
+- Rust 侧：替换类失败**不触碰旧状态**（设备带着旧 TUN 与会话原样运行，
+  无半状态；死 fd 在边界 dup 探针即拒收 `socket-fd-invalid`）；随后壳侧
+  fail-closed 拆除（connector stop ⇒ `clear()`）回落到 N7 冷态（无设备、
+  无 feed、`tunnel_ready=false`、默认路由 HOLD）。
+- 壳侧（见 n3 notes N8 节）：`connectorStop()` + `destroyOnce`，回到未连
+  接；不重试（预算与一次性 destroy 语义天然防循环）。
+
+### 10.6 测试证据（新增）
+
+- `connector.rs` 单测 3 例：
+  `recreate_required_raises_once_on_gate_open_and_clears_on_recreate_ack`
+  （HOLD→ALLOWED 恰好产生一个请求、级别信号不重复计数、ACK 后清除、期望
+  集合含 `0.0.0.0/0` 且快照 routes 真的导出）；`recreate_flap_is_bounded_
+  by_cooldown_and_limit`（连续翻转受冷却窗与 `RECREATE_MAX=3` 约束、耗尽
+  后 `limit-reached` 永不再请求）；`route_set_ack_rejects_bad_shapes_and_
+  no_connector`（ACK 形状校验/空集合拒绝/无 connector 拒绝）。
+- `tests/wg_recreate_n8.rs` 集成 3 例：
+  `tun_replacement_keeps_sessions_and_carries_bidirectional_payload`（模拟
+  平台 destroy 关原号 → 设备靠 dup 存活 → 喂新 fd 原位替换 → 无重新握手
+  （握手计数不变）→ 新 fd 双向载荷字节精确 → 旧 fd 停用（停用 fd 接收队
+  列里的帧原样未被消费）→ 设备 fd ≠ 任何原号（dup 合同）→ 新原号仍归壳
+  侧）；`recreate_dead_fd_refused_no_half_state_then_fail_closed_teardown`
+  （死 fd 拒收 `socket-fd-invalid`、设备/会话原样、载荷照通 = 无半状态；
+  随后 `clear()` 回落冷态 + 默认路由 HOLD）；`wg_socket_feed_idempotent_
+  same_fd_and_refuses_swap_while_device_up`（同号幂等不重建设备——会话保
+  存、异号拒绝 `socket-fd-conflict`、clear 后冷启动规则不变）。
+
+### 10.7 N8 新增未验证项（真机）
+
+- `VpnConnection.destroy()` → 重新 `createVpnConnection` + `create()` 的
+  平台侧行为（能否连续多代创建、destroy 后旧 fd 号是否立即失效）——宿主
+  无法验证，物理门 N2b 承接；
+- 重建窗口（destroy 到新 feed 之间）的真实流量中断时长与平台对 TUN fd
+  的清理时机；
+- `connector_route_set_applied` ACK 的 canonical 网络串与平台
+  `RouteInfo` 目的串的一致性（`10.99.0.0/24` 形态）需真机比对；
+- 重建后 WG 会话在真实内核 TUN 上的无缝续流（宿主 socketpair 上已证明
+  逻辑无缝，真实 TUN 的缓冲/MTU 行为未验证）。

@@ -137,3 +137,95 @@ N7 把真实 `WgDevice` 接成 connector 的生产默认 seam（`WgDeviceFeed`�
 `protect()` 于 create() 前的可用性、protect 后 WG socket 的真实收发、
 TUN fd 的 MTU/杂帧行为——宿主侧仅验证 feed 契约、fd 合同与 fail-closed
 语义（`client/core/tests/wg_feed_n7.rs`）。
+
+---
+
+# N8：壳侧受控重建流程（VpnConfig 固定 ⇒ 就绪后装默认路由）
+
+范围：`client/core`（`recreate` 状态面 + `connector_route_set_applied` +
+`WgDevice::replace_tun`）、`client/entry`（watcher 触发的重建流程）。不碰
+真机。背景与核心半边语义见 `docs/n6-wg-dataplane-notes.md` §10。
+
+## 问题与方案
+
+平台 `VpnConfig` 在 `create()` 时固定，而安全闸要求数据面真实就绪才允许
+`0.0.0.0/0` ⇒ create 时闸必然 HOLD ⇒ 默认路由永远装不上（N7 实测）。
+N8 = **就绪后按需重建连接**：初次 create 按 HOLD 集合（无默认路由，无黑
+洞窗口）；`refresh_net_gate` 检测到期望路由集（实时闸判定）≠ 壳侧已应用
+集合时升起 `status.recreate.required`，壳侧 watcher 执行一次受控重建。
+
+## 核心侧判定面（判定在 Rust，壳侧只执行）
+
+- `connector_status().recreate = {required, count, exhausted, cooling_down,
+  reason}`。触发条件：`desired != applied`（双向——默认路由放行要装上、
+  收闸要摘下），且预算未耗尽、冷却窗已过。`required` 是级别信号：ACK 前
+  保持 true（重复读取不重复计数），ACK 后清除。
+- **有界**：`RECREATE_MAX=3`（每 connector 生命周期，耗尽即
+  `limit-reached`，永不再请求）+ `RECREATE_COOLDOWN_MS=30_000`（窗口内
+  `cooling_down=true`，不置 `required`，周期读取窗口过后重新升起）。
+- 壳侧 ACK：新 NAPI `connector_route_set_applied(routesJson, isRecreate)`
+  （`NetBirdConnector.connectorRouteSetApplied`）。**初始 create** 成功
+  （fd 合同 + protect + WG feed 全过）后 ACK `isRecreate=false`（只武装
+  比较，`VPN_ROUTE_SET_ACKED`）；**重建**成功后 ACK `isRecreate=true`（计
+  数 + 冷却 + 清 required）。不 ACK ⇒ 信号永远沉默 = N7 行为（向后兼
+  容）。`routes` 传 canonical 网络串（`net.routes[].network` 原样，即核心
+  期望集合的渲染——不含壳侧本地排除路由）。
+
+## 壳侧重建流程（`NetBirdVpnExtensionAbility.performControlledRecreate`）
+
+watcher（5 s 周期）读到 `recreate.required===true` ⇒ 触发；`recreateIn
+Flight` 串行化（重建期间后续 tick 直接跳过），teardown 已闩
+（`destroyRequested`/`connectorDeathHandled`）则不启动：
+
+1. **snapshot**：实时读 `connector_network_config()`，按既有
+   `applyNetworkConfig` + `gateDefaultRoutes`（core 闸判定）合成新
+   `VpnTunnelConfig`；快照不可用（无 map/空 routes）⇒ 抛错走 fail-closed。
+2. **destroy**：`destroyConnectionBounded`（5 s box）销毁**旧**连接——旧
+   原始 TUN fd 在此失效（fd 合同：原号只由 `VpnConnection.destroy()` 关
+   闭；native 靠自身 dup 存活直到替换落地）。box 到期/平台拒绝 ⇒ 失败。
+3. **create**：全新 `createVpnConnection` + `createConnectionBounded`
+   （5 s box）以新配置 create，取**新** TUN fd。
+4. **fd-contract**：与初次 create 相同的 `core.fd_status` 只读探针核验。
+5. **wg-feed**：复用既有 `feedWgDataplane()`——受保护 WG 外层 socket 先喂
+   （核心侧同号幂等：socket 不换），新 TUN fd 后喂（核心侧原位替换：
+   `WgDevice::replace_tun`，**WG 会话保留、无需重新握手**）。
+6. **ack**：`connectorRouteSetApplied(net.routes 网络, true)`；同步更新
+   `appliedNetSerial`，并把 `createPromise` 簿记指向新代（此后 onDestroy /
+   connector-death 的一次性 destroy 作用于新连接）。
+
+每步之间复查 teardown 闩；任一步失败 ⇒ **failRecreate**（幂等）：停
+watcher → `connectorStop()` → `destroyOnce("recreate-fail-closed:<stage>")`
+拆除当前代 —— 回到未连接，无半配置设备，不重试。
+
+## fd 所有权在重建中的不变量
+
+| fd | 初次 create | 重建 |
+| --- | --- | --- |
+| TUN 原号 | `create()` 产出，壳侧持有 | 第 2 步由 `destroy()` 关闭（平台） |
+| TUN dup（native） | `TunFd::dup_from_raw` 取得 | 新 fd 取新 dup；旧 dup 由替换 Drop 关闭；原号永不被 native 使用/关闭 |
+| WG 外层 socket | `wg_fwd_open` + protect | **不变**：同号幂等 feed，异号拒绝（`socket-fd-conflict`） |
+| 一次性 destroy 闩 | `destroyOnce`（终局拆除） | 重建腿用 generation-scoped 有界 destroy；ACK 后终局闩指向新代 |
+
+## 状态可见性（watcher / 日志）
+
+- 新日志：`VPN_RECREATE_BEGIN/SNAPSHOT/DONE/FAIL/SKIP`、
+  `VPN_RECREATE_DESTROY_REJECTED`、`VPN_ROUTE_SET_ACKED/FAILED/SKIPPED`。
+- `connector_status()` 的 `recreate` 对象随既有 5 s 状态行可观测（UI 未扩
+  展，`Index.ets` 不在本增量范围）。
+
+## 测试证据
+
+核心侧见 `docs/n6-wg-dataplane-notes.md` §10.6（`connector.rs` 单测 3 例
++ `tests/wg_recreate_n8.rs` 集成 3 例：重建恰一次/重建后双向通/有界不信
+号/失败 fail-closed/fd 合同）。壳侧 ArkTS 无宿主测试设施，重建流程的正确
+性由核心侧状态机测试 + N7 既有 feed/destroy 契约背书，真机行为列入下方
+未验证项。
+
+## 未验证（真机）
+
+- destroy → 重新 `createVpnConnection`/`create()` 的平台侧行为（多代创
+  建、fd 失效时机）——N2b 物理门；
+- 重建窗口内（destroy 到新 feed 之间）真实流量中断时长；
+- 重建后默认路由在真实网络栈的生效与旧路由回收；
+- ArkTS `performControlledRecreate` 全流程（含 5 s box 与 teardown 竞争
+  路径）仅在代码评审 + 核心侧契约测试层面验证。

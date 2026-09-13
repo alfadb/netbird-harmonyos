@@ -6,12 +6,12 @@ import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
 import {
-  CoreNetworkConfig, ConnectorStartResult, ConnectorStatusResult, DeviceConfigFile,
-  ManagementEndpoint, WgFeedResult,
+  ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
+  DeviceConfigFile, ManagementEndpoint, RouteSetAppliedResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorSignalFeed,
-  connectorStartWithSocket, connectorSocketFeed, connectorStop, connectorTunFdFeed,
-  connectorWgSocketFeed, mgmtSocketOpen, parseDeviceConfig,
+  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorRouteSetApplied,
+  connectorSignalFeed, connectorStartWithSocket, connectorSocketFeed, connectorStop,
+  connectorTunFdFeed, connectorWgSocketFeed, mgmtSocketOpen, parseDeviceConfig,
   parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readPrivateFileText,
   resolveManagementIp, sleep
 } from './NetBirdConnector';
@@ -32,6 +32,11 @@ const DNS_RESOLVE_BOX_MS: number = 5000;
 // N3-7 gap 3: consecutive connector_status() native-call failures before the
 // watcher concludes the connector is unreachable and tears the VPN down.
 const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
+// N8: bounded boxes for the controlled-recreate destroy/create legs (house
+// rule: every ArkTS-side wait is bounded). Box expiry = recreate failure =
+// fail-closed teardown (never a half-configured tunnel).
+const RECREATE_DESTROY_BOX_MS: number = 5000;
+const RECREATE_CREATE_BOX_MS: number = 5000;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -97,9 +102,18 @@ function safeError(error: Error): string {
 //   fail-closed protect gate for the WG outer socket -> N7: FEED THE WG
 //   DATA PLANE (protected outer UDP socket via core.connector_wg_socket_feed
 //   + TUN fd via core.connector_tun_fd_feed; any failure = connector
-//   stopped + VPN destroyed — no data plane, no default route). The map
-//   snapshot is applied at create() time (platform VpnConfig is fixed
-//   then); later map changes are logged as explicitly NOT applied.
+//   stopped + VPN destroyed — no data plane, no default route) -> N8: ACK
+//   the applied route set (core.connector_route_set_applied,
+//   isRecreate=false). The map snapshot is applied at create() time
+//   (platform VpnConfig is fixed then); a LATER desired-route-set change
+//   (e.g. the gate releasing 0.0.0.0/0 once the WG handshake completes —
+//   necessarily AFTER create()) is healed by the N8 CONTROLLED RECREATE:
+//   the core raises status.recreate.required (bounded: budget 3 + 30 s
+//   cooldown), the shell destroys the connection, create()s again with the
+//   desired route set, feeds the NEW TUN fd (core-side replace-while-up
+//   keeps the WG sessions and the protected outer socket) and ACKs with
+//   isRecreate=true. Any recreate failure is fail-closed: connector
+//   stopped + VPN destroyed — never a half-configured tunnel.
 // - Protect: the management socket is protected BEFORE the connector's first
 //   dial (reconnects re-protect via core-fed sockets), and after create()
 //   yields a valid TUN fd, the native outer UDP socket (core.wg_fwd_open) is
@@ -143,6 +157,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the destroyOnce latch).
   private statusPollFailures: number = 0;
   private connectorDeathHandled: boolean = false;
+  // N8: route networks destined for the initial-create ACK (the managed
+  // subset actually merged into the platform VpnConfig; core-visible form =
+  // canonical 'a.b.c.d/p' strings exactly as connector_network_config
+  // renders them). Stashed before create(), consumed in settleCreate.
+  private pendingAppliedRoutes: string[] | null = null;
+  // N8: one controlled recreate at a time (the watcher ticks faster than a
+  // recreate completes; this is the shell-side serialization on top of the
+  // core-side budget/cooldown bounds).
+  private recreateInFlight: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -371,6 +394,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.logConfigApplied(merged);
 
     const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
+    // N8: stash the managed route set actually merged into the platform
+    // VpnConfig, for the initial-create ACK once create() + the WG feed
+    // succeed (settleCreate). Only a real core snapshot qualifies — the
+    // base fallback shape is not the core's desired rendering.
+    this.pendingAppliedRoutes =
+      net !== null && net.routes !== undefined && net.routes !== null && net.routes.length > 0
+        ? net.routes.map((r: CoreRouteEntry): string => r.network)
+        : null;
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_BEGIN|requestId=%{public}s|address=%{public}s|prefixLength=%{public}d',
       this.requestId, merged.tunnelAddress, merged.tunnelPrefixLength);
@@ -542,6 +573,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
         }
+        // N8 controlled recreate (the platform-VpnConfig-is-fixed gap): when
+        // the core's desired route set diverges from the set the shell last
+        // ACKed as applied, it raises recreate.required (bounded core-side:
+        // budget RECREATE_MAX=3 + 30 s cooldown; level-based until ACKed).
+        // The shell then rebuilds the connection ONCE per request —
+        // serialized by recreateInFlight, fail-closed on any error.
+        if (status.recreate !== undefined && status.recreate !== null &&
+          status.recreate.required === true) {
+          this.performControlledRecreate(status.recreate.reason).catch((error: Error): void => {
+            hilog.error(DOMAIN, TAG,
+              'VPN_RECREATE_REJECTED|requestId=%{public}s|summary=%{public}s',
+              this.requestId, safeError(error));
+            this.failRecreate('unexpected-throw', error);
+          });
+          return;
+        }
       } else {
         this.statusPollFailures++;
         hilog.warn(DOMAIN, TAG,
@@ -599,6 +646,230 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=connector-death|summary=%{public}s',
         this.requestId, safeError(error));
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // N8: controlled recreate — the platform VpnConfig is fixed at create()
+  // time, so a desired-route-set change (typically 0.0.0.0/0 released once
+  // the WG handshake completes, necessarily AFTER create()) can only reach
+  // the tunnel by rebuilding the connection. The core decides WHEN
+  // (status.recreate.required, bounded by its own budget + cooldown); the
+  // shell executes: snapshot desired config -> destroy old connection (the
+  // raw TUN fd dies here — fd contract) -> fresh create() with the desired
+  // route set -> fd contract -> feed the NEW TUN fd (core-side
+  // replace-while-up keeps the WG sessions and the protected outer socket)
+  // -> ACK the new applied set (isRecreate=true). Any failed leg is
+  // fail-closed: connector stopped + current generation destroyed — never a
+  // half-configured tunnel, never an unprotected fallback.
+  // ---------------------------------------------------------------------------
+
+  // N8: initial-create ACK (best-effort — a failed ACK only leaves the
+  // recreate signaling silent, i.e. exact N7 behavior; it never fails the
+  // start flow).
+  private ackAppliedRoutesInitial(): void {
+    const routes: string[] | null = this.pendingAppliedRoutes;
+    this.pendingAppliedRoutes = null;
+    if (routes === null || routes.length === 0) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ROUTE_SET_ACK_SKIPPED|requestId=%{public}s|reason=no-core-snapshot-routes',
+        this.requestId);
+      return;
+    }
+    try {
+      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routes, false);
+      if (!ack.ok) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_ROUTE_SET_ACK_FAILED|requestId=%{public}s|error=%{public}s',
+          this.requestId, ack.error ?? 'no-message');
+        return;
+      }
+      hilog.info(DOMAIN, TAG,
+        'VPN_ROUTE_SET_ACKED|requestId=%{public}s|routes=%{public}d|isRecreate=false',
+        this.requestId, routes.length);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ROUTE_SET_ACK_FAILED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    }
+  }
+
+  private async performControlledRecreate(reason: string): Promise<void> {
+    if (this.recreateInFlight) {
+      hilog.info(DOMAIN, TAG,
+        'VPN_RECREATE_SKIP|requestId=%{public}s|reason=already-in-flight', this.requestId);
+      return;
+    }
+    if (this.destroyRequested || this.connectorDeathHandled) {
+      return; // teardown already latched — nothing to rebuild
+    }
+    if (this.connection === undefined || !this.createSettled || this.tunFd < 0) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_RECREATE_SKIP|requestId=%{public}s|reason=initial-generation-not-settled',
+        this.requestId);
+      return;
+    }
+    this.recreateInFlight = true;
+    hilog.info(DOMAIN, TAG,
+      'VPN_RECREATE_BEGIN|requestId=%{public}s|reason=%{public}s', this.requestId, reason);
+    let stage: string = 'snapshot';
+    try {
+      // 1. the DESIRED config, fresh from the core (live gate state)
+      const net: CoreNetworkConfig = connectorNetworkConfig();
+      if (!net.available || net.routes === undefined || net.routes === null ||
+        net.routes.length === 0) {
+        throw new Error('recreate-no-usable-snapshot');
+      }
+      const base: VpnTunnelConfig = loadVpnTunnelConfig();
+      let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
+      const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
+        ? net.default_route.allowed
+        : false;
+      merged = gateDefaultRoutes(merged, gateAllowed);
+      // the ACK set is the core-visible managed subset — exactly the
+      // networks the core renders as its desired set (NOT the shell-local
+      // base exclusions, which the core does not track)
+      const routeNetworks: string[] = net.routes.map((r: CoreRouteEntry): string => r.network);
+      const defaultRoutes: number = merged.routes.filter(
+        (r: VpnRouteConfig): boolean => r.isDefaultRoute).length;
+      hilog.info(DOMAIN, TAG,
+        'VPN_RECREATE_SNAPSHOT|requestId=%{public}s|serial=%{public}s|routes=%{public}d|' +
+        'defaultRoutes=%{public}d|gateAllowed=%{public}s',
+        this.requestId, String(net.serial ?? -1), merged.routes.length, defaultRoutes,
+        String(gateAllowed));
+
+      // 2. destroy the OLD connection — the raw TUN fd dies here (fd
+      // contract: its close belongs exclusively to VpnConnection.destroy());
+      // the data plane keeps running on its own dups until the replacement
+      // lands (no route-less window worse than the old config).
+      stage = 'destroy';
+      const oldConnection: vpnExtension.VpnConnection = this.connection;
+      const destroyed: boolean = await this.destroyConnectionBounded(oldConnection);
+      if (!destroyed) {
+        throw new Error('recreate-destroy-failed');
+      }
+      if (this.destroyRequested || this.connectorDeathHandled) {
+        throw new Error('recreate-interrupted-by-teardown');
+      }
+      this.connection = undefined;
+      this.tunFd = -1;
+      this.fdConfirmedOpenAfterCreate = false;
+
+      // 3. a FRESH VpnConnection + create() with the desired route set
+      stage = 'create';
+      const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
+      this.connection = conn;
+      const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
+      const fd: number = await this.createConnectionBounded(conn, config);
+
+      // 4. the same fd contract as the initial create
+      stage = 'fd-contract';
+      const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
+      if (!(snapshot.integer && snapshot.nonnegative && snapshot.probed && snapshot.open)) {
+        throw new Error('recreate-invalid-fd');
+      }
+      this.tunFd = fd;
+      this.fdConfirmedOpenAfterCreate = true;
+      this.logFdSnapshot('recreate-post-create', snapshot, 'RECREATE_FD_ACCEPTED');
+
+      // 5. feed the data plane: the protected outer socket FIRST (SAME
+      // native socket — an idempotent no-op while the device is up; a fresh
+      // pair if the device somehow went down), then the NEW TUN fd (the
+      // core replaces its TUN in place and keeps the WG sessions).
+      stage = 'wg-feed';
+      if (!this.feedWgDataplane()) {
+        throw new Error('recreate-wg-feed-failed');
+      }
+
+      // 6. ACK the newly applied route set — completes the recreate (counts
+      // against the core-side budget, arms the cooldown, clears `required`)
+      stage = 'ack';
+      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routeNetworks, true);
+      if (!ack.ok) {
+        throw new Error(`recreate-ack-failed:${ack.error ?? 'no-message'}`);
+      }
+      this.appliedNetSerial = net.serial !== undefined && net.serial !== null
+        ? net.serial
+        : this.appliedNetSerial;
+      // final-teardown bookkeeping now points at the NEW generation
+      this.createSettled = true;
+      this.createPromise = Promise.resolve<CreateOutcome>({
+        destroyRequired: true,
+        accepted: true,
+        reason: 'recreate-created'
+      });
+      hilog.info(DOMAIN, TAG,
+        'VPN_RECREATE_DONE|requestId=%{public}s|tunFd=%{public}d|routes=%{public}d|' +
+        'defaultRoutes=%{public}d|recreateCount=%{public}s',
+        this.requestId, fd, merged.routes.length, defaultRoutes,
+        String(ack.recreate !== undefined && ack.recreate !== null ? ack.recreate.count : -1));
+    } catch (error) {
+      // fail-closed: ANY failed leg leaves no half-configured device — the
+      // connector is stopped and whatever generation is current is destroyed
+      this.failRecreate(stage, error as Error);
+    } finally {
+      this.recreateInFlight = false;
+    }
+  }
+
+  // Bounded destroy of ONE connection generation (recreate leg only).
+  // Unlike destroyOnce (the latched FINAL teardown), this is
+  // generation-scoped; box expiry reports failure (fail-closed).
+  private destroyConnectionBounded(connection: vpnExtension.VpnConnection): Promise<boolean> {
+    const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+      connection.destroy().then((): void => {
+        resolve(true);
+      }).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_RECREATE_DESTROY_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error));
+        resolve(false);
+      });
+    });
+    const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+      setTimeout((): void => resolve(false), RECREATE_DESTROY_BOX_MS);
+    });
+    return Promise.race([settled, box]);
+  }
+
+  // Bounded create of the NEW generation (recreate leg). Box expiry rejects
+  // (fail-closed — the caller tears everything down).
+  private createConnectionBounded(connection: vpnExtension.VpnConnection,
+    config: vpnExtension.VpnConfig): Promise<number> {
+    const settled: Promise<number> = connection.create(config);
+    const box: Promise<number> = new Promise<number>((_resolve: (value: number) => void,
+      reject: (e: Error) => void) => {
+      setTimeout((): void => {
+        reject(new Error('recreate-create-timeout'));
+      }, RECREATE_CREATE_BOX_MS);
+    });
+    return Promise.race([settled, box]);
+  }
+
+  // N8 recreate failure = the N3-7 fail-closed teardown: stop the watcher,
+  // stop the connector (idempotent), destroy whatever generation is current
+  // (latched destroyOnce — the final teardown latch).
+  private failRecreate(stage: string, error: Error): void {
+    hilog.error(DOMAIN, TAG,
+      'VPN_RECREATE_FAIL|requestId=%{public}s|stage=%{public}s|' +
+      'action=teardown-vpn-fail-closed|summary=%{public}s',
+      this.requestId, stage, safeError(error));
+    this.stopStatusAndNetcfgWatcher();
+    try {
+      const stop = connectorStop();
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s|' +
+        'cause=recreate-fail-closed',
+        this.requestId, String(stop.already_stopped), stop.state);
+    } catch (err) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(err as Error));
+    }
+    this.destroyOnce(`recreate-fail-closed:${stage}`).catch((err: Error): void => {
+      hilog.error(DOMAIN, TAG,
+        'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=recreate-fail-closed|summary=%{public}s',
+        this.requestId, safeError(err));
     });
   }
 
@@ -746,9 +1017,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     // VPN is up (create accepted + protect passed + WG data plane fed):
+    // N8 — ACK the route set applied to the platform VpnConfig (initial
+    // create; arms the core's desired-vs-applied recreate comparison), then
     // start the status / network-config watch. Runtime map changes are
     // logged as NOT applied (platform VpnConfig fixed at create — see the
-    // watcher).
+    // watcher); a desired-route-set CHANGE goes through the controlled
+    // recreate below.
+    this.ackAppliedRoutesInitial();
     this.startStatusAndNetcfgWatcher();
     return {
       destroyRequired: true,

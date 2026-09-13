@@ -73,6 +73,22 @@
 //! ⇒ `tunnel_ready()=false` ⇒ 默认路由 HOLD（无任何未保护回退）。生产泵
 //! 线程 [`WgDeviceFeed::spawn_data_plane_pump`] 以注入单调钟驱动
 //! `service_tun`/`service_udp`/`tick`。
+//!
+//! ## N8：受控重建下的 TUN fd 替换（会话保留）
+//!
+//! 平台 `VpnConfig` 在 `create()` 时固定 ⇒ 数据面就绪后默认路由要装进隧道
+//! 只能**重建连接**（壳侧 destroy → 新 create → 新 TUN fd）。设备侧合同：
+//!
+//! - [`WgDevice::replace_tun`]：先为新 fd 取 dup（失败则旧 TUN 原样保留，
+//!   无半状态），再换入新 [`TunFd`]；旧 [`TunFd`] 的 Drop 只关**旧 dup**，
+//!   壳侧原号永远只归 `VpnConnection.destroy()` 关（fd 合同不变）。
+//! - **会话保留是零成本的**：BoringTun tunnel 是纯字节层状态机，从不引用
+//!   TUN fd；WG 外层 UDP socket（`self.fd`）在重建中不变。因此换 TUN 不
+//!   触碰任何握手/密钥状态——peer 会话原样存活，重建后载荷立即双向可通，
+//!   不需要重新握手。
+//! - feed seam：设备在位时 `feed_tun` = 替换（[`WgDeviceFeed::feed_tun`]）；
+//!   `feed_wg_socket` 同号为幂等 no-op、异号拒绝（`socket-fd-conflict`）——
+//!   受保护外层 socket 不可换。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -301,6 +317,33 @@ impl WgDevice {
             next_index: INDEX_BASE,
             stats: WgDeviceStats::default(),
         })
+    }
+
+    /// N8 — controlled-recreate TUN replacement: adopt a dup of the NEW
+    /// platform TUN fd and deactivate the old one, keeping peers, tunnels
+    /// AND established WG sessions (the session-preserving choice, see the
+    /// module docs N8 section). Semantics:
+    /// - the new fd is validated by `TunFd::dup_from_raw` FIRST; on any
+    ///   failure the OLD [`TunFd`] stays active untouched (no half state —
+    ///   the caller sees the error and runs its fail-closed teardown);
+    /// - the swap drops the old [`TunFd`], whose Drop closes ONLY the old
+    ///   native dup (fd contract: the shell-side raw fd keeps belonging to
+    ///   `VpnConnection.destroy()`; native never closes that number);
+    /// - sessions survive because a BoringTun tunnel is a pure byte-level
+    ///   state machine: it never references the TUN fd. Only the plaintext
+    ///   sink/source changes, so payload continues over the same WG keys.
+    pub fn replace_tun(&mut self, tun_raw: i32) -> Result<(), crate::tun::TunError> {
+        let tun = TunFd::dup_from_raw(tun_raw)?;
+        let old = core::mem::replace(&mut self.tun, tun);
+        drop(old); // closes the old DUP only (fd contract)
+        emit("N8_WG_DEVICE|tun-replaced|sessions-kept");
+        Ok(())
+    }
+
+    /// Our current TUN dup fd number (`None` if the TunFd were closed —
+    /// observability only; always distinct from the shell-side raw numbers).
+    pub fn tun_fd(&self) -> Option<i32> {
+        self.tun.fd()
     }
 
     /// Adopt a NEW socket (dup + close of the OLD dup only) keeping peers,
@@ -1024,6 +1067,15 @@ pub enum WgFeedRefusal {
     FdMissing,
     /// Not an open descriptor (dup/F_GETFD failed — dead or foreign fd).
     FdInvalid { errno: i32 },
+    /// N8: a DIFFERENT WG outer socket fed while the device is up. The
+    /// protected outer socket is NOT swappable (the controlled recreate
+    /// replaces only the platform TUN); the same number is an idempotent
+    /// no-op, a different number is refused fail-closed.
+    SocketSwapUnsupported,
+    /// N8: the new TUN fd could not be adopted at replace time (it died
+    /// between the boundary probe and the swap). The OLD TUN stays active —
+    /// no half state; the caller runs its fail-closed teardown.
+    TunReplaceFailed { errno: i32 },
 }
 
 impl WgFeedRefusal {
@@ -1032,6 +1084,8 @@ impl WgFeedRefusal {
         match self {
             WgFeedRefusal::FdMissing => "socket-fd-missing",
             WgFeedRefusal::FdInvalid { .. } => "socket-fd-invalid",
+            WgFeedRefusal::SocketSwapUnsupported => "socket-fd-conflict",
+            WgFeedRefusal::TunReplaceFailed { .. } => "tun-replace-failed",
         }
     }
 
@@ -1039,6 +1093,8 @@ impl WgFeedRefusal {
         match self {
             WgFeedRefusal::FdMissing => 0,
             WgFeedRefusal::FdInvalid { errno } => *errno,
+            WgFeedRefusal::SocketSwapUnsupported => 0,
+            WgFeedRefusal::TunReplaceFailed { errno } => *errno,
         }
     }
 }
@@ -1115,6 +1171,9 @@ impl WgDeviceFeed {
 
     /// Shell feed #2: the platform TUN fd (same validation + ownership
     /// rules; `TunFd::dup_from_raw` carries the executable fd contract).
+    /// N8: while the device is up this REPLACES the platform TUN fd
+    /// (controlled recreate — [`WgDevice::replace_tun`]); the WG socket feed
+    /// stays first-write-wins and is idempotent while up.
     pub fn feed_tun(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
         self.feed_fd(raw_fd, FeedWhich::Tun)
     }
@@ -1135,8 +1194,41 @@ impl WgDeviceFeed {
         let built = {
             let mut g = self.inner.lock_poison();
             match which {
-                FeedWhich::WgSocket => g.wg_socket_raw = Some(raw_fd),
-                FeedWhich::Tun => g.tun_raw = Some(raw_fd),
+                FeedWhich::WgSocket => {
+                    // N8: while a device is up the protected WG outer socket
+                    // is NOT swappable. Same number = idempotent no-op (the
+                    // controlled recreate re-feeds nothing); a DIFFERENT
+                    // number is refused fail-closed (the running device keeps
+                    // its dup of the original protected socket).
+                    if let Some(stored) = g.wg_socket_raw {
+                        if g.device.is_some() {
+                            if raw_fd == stored {
+                                g.feeds_accepted += 1;
+                                emit("N8_WG_FEED|socket-feed-idempotent|device-kept");
+                                return Ok(());
+                            }
+                            return Err(WgFeedRefusal::SocketSwapUnsupported);
+                        }
+                    }
+                    g.wg_socket_raw = Some(raw_fd);
+                }
+                FeedWhich::Tun => {
+                    if let Some(dev) = g.device.as_ref() {
+                        // N8 controlled recreate: a TUN feed while the device
+                        // is up REPLACES the platform TUN fd (adopt the new
+                        // dup, deactivate the old; sessions kept). On failure
+                        // the old TUN stays active (no half state) and the
+                        // refusal surfaces to the shell's fail-closed path.
+                        if let Err(e) = dev.with_device(|d| d.replace_tun(raw_fd)) {
+                            return Err(WgFeedRefusal::TunReplaceFailed { errno: e.errno() });
+                        }
+                        g.tun_raw = Some(raw_fd);
+                        g.feeds_accepted += 1;
+                        emit("N8_WG_FEED|tun-replaced|device-kept");
+                        return Ok(());
+                    }
+                    g.tun_raw = Some(raw_fd);
+                }
             }
             g.feeds_accepted += 1;
             Self::try_build(&mut g, &self.cfg)
