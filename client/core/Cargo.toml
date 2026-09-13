@@ -33,6 +33,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 boringtun = { version = "=0.7.1", default-features = false, features = ["ffi-bindings"] }
+# N3-3 management envelope: NaCl crypto_box (X25519 + XSalsa20-Poly1305), the
+# same primitive pair as upstream Go nacl/box (encryption/encryption.go).
+# Cross-compile to aarch64-unknown-linux-ohos verified in the repo-external
+# probe (~/harmonyos-signing/netbird-n1bdisc/refs/nacl-probe): exit 0.
+crypto_box = "0.9.1"
+# base64 for ServerKeyResponse.key / wgPubKey string forms; "0.22" unifies
+# with the base64 0.22.1 already in the lock (boringtun) — no new major.
+base64 = "0.22"
 prost = "0.14"
 prost-types = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

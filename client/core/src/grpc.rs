@@ -40,19 +40,23 @@
 //! set-zero → expiry disabled; set → absolute deadline; comment L288-291) and
 //! the peer's VPN config (`PeerConfig.address`, L404-426).
 //!
-//! ## Message-body encryption NOT implemented (explicit boundary)
+//! ## Message-body encryption (N3-3): GetServerKey + NaCl crypto_box
 //!
 //! Upstream wraps each RPC payload in `EncryptedMessage.body` **NaCl-box
-//! encrypted** after a `GetServerKey` key exchange
-//! (`shared/management/client/grpc.go` `login()`:
-//! `encryption.EncryptMessage(serverKey, c.key, req)`). The frozen stack has
-//! no crypto_box, so THIS INCREMENT sends the serialized `LoginRequest`
-//! protobuf as the envelope body and decodes `LoginResponse` from the reply
-//! body without that layer. The gRPC transport, TLS, stubs and field mapping
-//! are real; against a REAL NetBird server the body encryption layer is
-//! still required before interop (tracked in
-//! docs/n3-management-protocol-notes.md). Our in-process test server
-//! (tests/management_grpc.rs) validates the plaintext-body contract.
+//! encrypted** after a `GetServerKey` key exchange. THIS INCREMENT implements
+//! it: [`ManagementGrpcClient::login`] fetches the server key
+//! ([`ManagementGrpcClient::get_server_key`]), seals the `LoginRequest` with
+//! [`crate::envelope::seal`] and opens the reply with
+//! [`crate::envelope::open`]. Wire details, key provenance (the WireGuard
+//! private key is reused upstream) and nonce handling live in
+//! `crate::envelope` module docs; the flow is: `GetServerKey` → seal →
+//! `Login` → open (upstream `shared/management/client/grpc.go:585-637`).
+//!
+//! [`LoginBodyMode::Plaintext`] is an EXPLICIT opt-out that sends the raw
+//! serialized `LoginRequest` as the envelope body — **NOT upstream
+//! behavior**, kept only for tests/debugging against non-NetBird mock
+//! servers. The default ([`LoginBodyMode::Encrypted`]) is the only
+//! interop-capable path.
 //!
 //! ## TLS trust root — injected, never a system store
 //!
@@ -68,7 +72,10 @@
 //!
 //! The six N3-1 classes are reused ([`crate::management::ManagementError`]);
 //! gRPC status codes map per [`map_grpc_status`] (unit-tested below).
+//! Envelope crypto failures reuse the same classes — see `crate::envelope`
+//! module docs ("Error classification").
 
+use crate::envelope::{EnvelopeKeyPair, EnvelopePublicKey};
 use crate::management::ManagementError;
 use prost::Message as _;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
@@ -180,6 +187,21 @@ pub struct LoginParams {
     pub meta: PeerMeta,
 }
 
+/// How the `EncryptedMessage.body` is produced/consumed on `login`.
+///
+/// Upstream ALWAYS encrypts (`grpc.go:595` `EncryptMessage`); the plaintext
+/// variant here is a LOCAL test/debug extension, not an upstream mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LoginBodyMode {
+    /// `GetServerKey` → NaCl `crypto_box` seal → `Login`, reply opened with
+    /// the same server key. The upstream wire behavior and the default.
+    #[default]
+    Encrypted,
+    /// Raw serialized `LoginRequest` in `EncryptedMessage.body` (N3-2
+    /// intermediate contract). **NOT upstream behavior** — debug/test only.
+    Plaintext,
+}
+
 /// The session-relevant parts of a decoded `LoginResponse`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoginOutcome {
@@ -252,6 +274,10 @@ fn map_transport_error(stage: &'static str, e: tonic::transport::Error) -> Manag
 #[derive(Debug, Clone)]
 pub struct ManagementGrpcClient {
     stub: proto::management_service_client::ManagementServiceClient<Channel>,
+    /// Device identity keys for the message-body envelope. Upstream injects
+    /// the WireGuard private key here (`grpc.go:128 NewClient(...
+    /// ourPrivateKey wgtypes.Key ...)` fed from `connect.go:243`).
+    envelope_keys: EnvelopeKeyPair,
     /// Per-RPC deadline, enforced client-side (tokio::time::timeout).
     request_timeout: core::time::Duration,
 }
@@ -259,6 +285,8 @@ pub struct ManagementGrpcClient {
 impl ManagementGrpcClient {
     /// Connect to `endpoint` (`https://host:port` or `http://host:port`).
     ///
+    /// - `envelope_keys` is the device NaCl/WireGuard identity key pair used
+    ///   to seal/unseal RPC bodies (see [`crate::envelope`]).
     /// - `https://` requires [`GrpcTransport::Tls`] with an injected trust
     ///   root; `http://` requires [`GrpcTransport::Plaintext`]. Mismatches are
     ///   rejected before any I/O.
@@ -272,6 +300,7 @@ impl ManagementGrpcClient {
         transport: GrpcTransport,
         connect_timeout: core::time::Duration,
         request_timeout: core::time::Duration,
+        envelope_keys: EnvelopeKeyPair,
     ) -> Result<Self, ManagementError> {
         let endpoint_url = endpoint.to_string();
         let mut ep = Endpoint::from_shared(endpoint_url.clone())
@@ -305,27 +334,80 @@ impl ManagementGrpcClient {
         })?;
         Ok(ManagementGrpcClient {
             stub: proto::management_service_client::ManagementServiceClient::new(channel),
+            envelope_keys,
             request_timeout,
         })
     }
 
-    /// `ManagementService/Login` with a `LoginRequest` payload
-    /// (management.proto L33-36, L175-186). See module docs for the envelope
-    /// and encryption boundary.
+    /// `ManagementService/GetServerKey` (management.proto L24, L314-320):
+    /// the server's base64 WireGuard public key, used as the envelope peer
+    /// key. Upstream wraps this with a 5s context (grpc.go:537-549); the
+    /// deadline here is the client-wide `request_timeout` (Timeout class),
+    /// status failures map through [`map_grpc_status`], and a malformed
+    /// `key` string is `ManagementError::Parse`.
+    pub async fn get_server_key(&mut self) -> Result<EnvelopePublicKey, ManagementError> {
+        let reply = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .get_server_key(tonic::Request::new(proto::Empty {}))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)??
+        .into_inner();
+        EnvelopePublicKey::from_base64(&reply.key)
+    }
+
+    /// `ManagementService/Login` with the DEFAULT body mode
+    /// ([`LoginBodyMode::Encrypted`] — the upstream wire behavior).
     pub async fn login(&mut self, params: LoginParams) -> Result<LoginOutcome, ManagementError> {
+        self.login_with_mode(params, LoginBodyMode::Encrypted).await
+    }
+
+    /// `ManagementService/Login` (management.proto L33-36, L175-186) with an
+    /// explicit body mode. The encrypted path mirrors upstream
+    /// `GrpcClient::login` (grpc.go:585-637): `GetServerKey` → seal body →
+    /// send → open reply with the same server key. The peer identity on the
+    /// envelope AND in `PeerKeys.wgPubKey` always comes from the injected
+    /// key pair (upstream `c.key`; `PeerKeys.wgPubKey` = the BYTES OF THE
+    /// base64 STRING, grpc.go:643-647), overriding any caller-set value.
+    pub async fn login_with_mode(
+        &mut self,
+        params: LoginParams,
+        mode: LoginBodyMode,
+    ) -> Result<LoginOutcome, ManagementError> {
         if params.setup_key.is_empty() && params.jwt_token.is_empty() {
             return Err(ManagementError::Request {
                 status: 0,
                 message: "login needs a setup key or a jwt token (both empty)".into(),
             });
         }
-        let request = Self::build_login_request(&params);
+
+        let mut request = Self::build_login_request(&params);
+        // Upstream single source of identity: our own public key, base64
+        // string for EncryptedMessage.wgPubKey (grpc.go:608) and the bytes
+        // of that string for PeerKeys.wgPubKey (grpc.go:644).
+        let wg_pub_key_b64 = self.envelope_keys.public_key_base64();
+        if let Some(peer_keys) = request.peer_keys.as_mut() {
+            peer_keys.wg_pub_key = wg_pub_key_b64.clone().into_bytes();
+        }
+
+        // Fetched ONCE per login and reused for the reply (upstream keeps
+        // `serverKey` in scope across send + DecryptMessage, grpc.go:587-631).
+        let mut server_key: Option<EnvelopePublicKey> = None;
+        let body = match mode {
+            LoginBodyMode::Encrypted => {
+                let key = self.get_server_key().await?;
+                let sealed =
+                    crate::envelope::seal(&key, &self.envelope_keys, &request.encode_to_vec())?;
+                server_key = Some(key);
+                sealed
+            }
+            LoginBodyMode::Plaintext => request.encode_to_vec(),
+        };
         let envelope = proto::EncryptedMessage {
-            // base64 string of the peer WG key (upstream grpc.go login()).
-            wg_pub_key: String::from_utf8_lossy(&params.peer_keys.wg_pub_key).into_owned(),
-            // Explicit boundary: serialized LoginRequest, NOT NaCl-encrypted
-            // (module docs: message-body crypto is a later increment).
-            body: request.encode_to_vec(),
+            wg_pub_key: wg_pub_key_b64,
+            body,
             version: 0, // upstream Go does not set it on Login either
         };
 
@@ -339,8 +421,18 @@ impl ManagementGrpcClient {
         .map_err(|_| ManagementError::Timeout)?? // outer: our deadline; inner: mapped status
         .into_inner();
 
-        let response = proto::LoginResponse::decode(reply.body.as_slice())
-            .map_err(|e| ManagementError::Parse(format!("LoginResponse decode failed: {e}")))?;
+        let response = match mode {
+            LoginBodyMode::Encrypted => {
+                // open with the SAME server key the request was sealed for
+                // (grpc.go:627-631 DecryptMessage(*serverKey, c.key, ...)).
+                let key = server_key
+                    .expect("encrypted mode fetches the server key before sending");
+                let plaintext = crate::envelope::open(&key, &self.envelope_keys, &reply.body)?;
+                proto::LoginResponse::decode(plaintext.as_slice())
+            }
+            LoginBodyMode::Plaintext => proto::LoginResponse::decode(reply.body.as_slice()),
+        }
+        .map_err(|e| ManagementError::Parse(format!("LoginResponse decode failed: {e}")))?;
 
         // 3-state sessionExpiresAt (management.proto L288-291).
         let session_deadline_unix = response.session_expires_at.as_ref().map(|ts| ts.seconds);

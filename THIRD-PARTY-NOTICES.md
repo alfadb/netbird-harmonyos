@@ -53,6 +53,23 @@ API 不可达；registry 内容即 crates.io 发布清单的本地副本）。
 | prost | 0.14.4 | Apache-2.0 | protobuf 编解码运行时 |
 | prost-types | 0.14.4 | Apache-2.0 | protobuf well-known types（management.proto 的 Timestamp/Duration 字段） |
 | rustls | 0.23.44 | Apache-2.0 OR ISC OR MIT | TLS（REST `https://` 传输 `TlsHttpTransport`；ring provider，无系统信任根——信任根由调用方注入） |
+| crypto_box | 0.9.1 | Apache-2.0 OR MIT | NaCl crypto_box（X25519 + XSalsa20-Poly1305）：管理信封 body 加解密（N3-3，上游 Go `nacl/box` 的 Rust 对应物） |
+| base64 | 0.22.1 | Apache-2.0 OR MIT | `ServerKeyResponse.key` / `wgPubKey` 的 base64 编解码（与 boringtun 既有 0.22.1 单副本统一） |
+
+#### N3-3 信封新增传递依赖（crypto_box 0.9.1 闭包，normal）
+
+| 名称 | 锁定版本 | 许可 | 用途 |
+| --- | --- | --- | --- |
+| crypto_secretbox | 0.1.1 | Apache-2.0 OR MIT | XSalsa20-Poly1305 AEAD 实现（crypto_box 的底层 secretbox） |
+| salsa20 | 0.10.2 | MIT OR Apache-2.0 | XSalsa20 流密码 |
+| poly1305 | 0.8.0 | Apache-2.0 OR MIT | Poly1305 消息认证码 |
+| universal-hash | 0.5.1 | MIT OR Apache-2.0 | universal hash trait（poly1305 依赖） |
+| opaque-debug | 0.3.1 | MIT OR Apache-2.0 | 调试不泄密宏（salsa20 依赖） |
+| cpufeatures | 0.2.17 | MIT OR Apache-2.0 | 目标 CPU 特性探测（salsa20 依赖） |
+
+说明：aead 0.5.2 / curve25519-dalek 4.1.3 / x25519-dalek 2.0.1 / zeroize 1.9.0 /
+subtle 2.6.1 / getrandom 0.2.17 由 boringtun 0.7.1 已带入（见上节传递依赖表），
+crypto_box 与其单副本并存，未引入任何重复 major。
 
 ### build（`[build-dependencies]`）
 

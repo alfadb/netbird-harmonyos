@@ -89,6 +89,8 @@ pub mod btkeep;
 pub mod chunk;
 pub mod config;
 pub mod credential;
+// N3-3: management message-body NaCl envelope (GetServerKey + crypto_box).
+pub mod envelope;
 pub mod grpc;
 pub mod hilog;
 pub mod ledger;
