@@ -87,3 +87,53 @@
 - management socket 原号的消费后退役、以及重连期间的系统性 resupply 策略（何时 open+protect+feed）留 N4+；本期饥饿即 fail-closed。
 - `protect()` 在 `create()` 之前对未建立 VPN 的 `VpnConnection` 是否可用：设备未验证（N2b 物理门）；失败即 abort，符合 fail-closed。
 - `O_NONBLOCK` 对共享 OFD 的作用面已在文档与测试注释声明；`mgmt_socket_open` 的 TCP socket 原号在 connector 生命周期内不关闭（native 创建、native 队列持有，无泄漏放大路径）。
+
+## N7：壳侧 WG 数据面 feed 时序（受保护 WG UDP socket + TUN fd）
+
+N7 把真实 `WgDevice` 接成 connector 的生产默认 seam（`WgDeviceFeed`，见
+`docs/n6-wg-dataplane-notes.md` §9）。数据面需要的两个 fd 全部由壳侧在
+**create()/protect 之后**喂入；两步都 fail-closed——任一步失败 ⇒ 数据面不
+启动、默认路由保持 HOLD ⇒ `connectorStop()` + `destroyOnce`（VPN 拆除，
+不装 0.0.0.0/0，绝无未保护回退）。
+
+### 时序（`NetBirdVpnExtensionAbility.settleCreate`，全部在保护门之后）
+
+1. `connection.create(VpnConfig)` 返回**原始 TUN fd**（壳侧保留，关闭只属
+   于 `VpnConnection.destroy()`）→ 既有 fd 合同核验（`core.fd_status`
+   F_GETFD 只读探针）。
+2. `core.wg_fwd_open()` 打开外层 UDP socket（native 创建、bind，未连接）
+   → `VpnConnection.protect(fd)`（5 s box）——**先于任何数据报**（治理
+   §二.4）。失败 ⇒ 走既有 `protect-fail-closed` 拆除路径。
+3. **feed #1**：`core.connector_wg_socket_feed(outboundSocketFd)` —— 受保
+   护 WG 外层 socket。native 做 dup 探针校验后**借用**存储 fd 号；设备建
+   成时 `dup_socket_fd` 取 dup，原号从不被使用/关闭。
+4. **feed #2**：`core.connector_tun_fd_feed(tunFd)` —— 平台 TUN fd。同
+   fd 合同：壳侧保留原号；native 只经 `TunFd::dup_from_raw` 消费 dup 副本
+   （dup 后复查原号仍开；close 只发生在 dup 上）。
+5. 两个 feed 齐备 ⇒ native `WgDevice::adopt` 建成设备（缓冲的网络图
+   peer/endpoint 重放）⇒ 返回 `{"ok":true,"device_up":true}`，hilog
+   `VPN_WG_DATAPLANE_FED`。此后 native 泵线程驱动 `service_tun` /
+   `service_udp` / `tick`，ICE 落配 endpoint 即握手。
+6. 任一 feed 报错 / 抛异常 / `device_up!==true` ⇒ `VPN_WG_FEED_FAIL` →
+   `connectorStop()`（幂等）→ `destroyOnce("wg-dataplane-feed-fail-closed")`
+   → 流程终止（无数据面、无默认路由）。
+
+### fd 所有权小结（两条 feed 各自的合同）
+
+| fd | 谁创建 | 谁保护 | 原号归谁 | native 消费方式 |
+| --- | --- | --- | --- | --- |
+| WG 外层 UDP socket | `core.wg_fwd_open` | 壳侧 `VpnConnection.protect` | native 生命周期持有（原号借用给 seam；native 不关） | `dup_socket_fd` dup 副本（设备 Drop 只关 dup） |
+| TUN fd | `VpnConnection.create()`（平台） | ——（TUN 无需 protect） | **壳侧**，关闭只属于 `VpnConnection.destroy()` | `TunFd::dup_from_raw` dup 副本（唯一 close 点在 dup） |
+
+### 状态可见性（watcher / UI）
+
+- watcher 的 `VPN_CONNECTOR_STATUS` 行新增 `wgDeviceUp` / `wgReady` /
+  `wgSessions`（来自 `connector_status().wg`）。
+- `Index.ets` 新增 `tunnel: ready/not ready   wg sessions: N` 行
+  （`status.wg.ready` / `status.wg.peers_with_session`）。
+
+### 未验证（真机，N2b 物理门承接）
+
+`protect()` 于 create() 前的可用性、protect 后 WG socket 的真实收发、
+TUN fd 的 MTU/杂帧行为——宿主侧仅验证 feed 契约、fd 合同与 fail-closed
+语义（`client/core/tests/wg_feed_n7.rs`）。

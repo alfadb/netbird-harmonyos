@@ -547,6 +547,7 @@ fn spawn_connector(
         None,  // N3-7: no protected-socket source in the generic helper
         None,  // N5c: build the production (idle, signal-less) ICE orchestrator
         None,  // N5d: no signal material in the generic helper
+        None,  // N7: no shell-fed WG device seam in the generic helper
     )
 }
 

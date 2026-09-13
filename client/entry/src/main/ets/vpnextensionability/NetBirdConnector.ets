@@ -91,6 +91,21 @@ export interface SignalStatus {
   last_error: ConnectorErrorClass | null;
 }
 
+// N7: core.connector_status().wg — real WireGuard data-plane status of the
+// shell-fed device seam (counters only, no key material).
+export interface WgDataplaneStatus {
+  fed_socket: boolean;
+  fed_tun: boolean;
+  device_up: boolean;
+  ready: boolean;
+  peers_with_session: number;
+  handshakes: number;
+  tx_packets: number;
+  rx_packets: number;
+  dropped_no_route: number;
+  decrypt_errors: number;
+}
+
 // core.connector_status snapshot (subset the shell consumes).
 export interface ConnectorStatusResult {
   running: boolean;
@@ -107,6 +122,8 @@ export interface ConnectorStatusResult {
   terminal: boolean;
   // N5d: the real signal link (registered = frames may flow).
   signal: SignalStatus;
+  // N7: the real WG data plane (fed/device/ready + device counters).
+  wg?: WgDataplaneStatus;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -259,6 +276,31 @@ export function connectorSignalFeed(fd: number, connectAddr: string): SocketFeed
   const addrJson: Record<string, Object> = { 'connect_addr': connectAddr };
   return JSON.parse(core.connector_signal_socket_feed(fd, JSON.stringify(addrJson))) as
     SocketFeedResult;
+}
+
+// N7 feed results: {ok:true,device_up:bool} — device_up flips true once BOTH
+// the WG socket and the TUN fd have been fed (the data plane is pumping).
+export interface WgFeedResult {
+  ok: boolean;
+  device_up?: boolean;
+  error?: string;
+}
+
+// N7: feed the PROTECTED WG outer UDP socket (native-opened via
+// core.wg_fwd_open, then VpnConnection.protect'ed BEFORE any datagram flows
+// — governance §二.4). fd crosses as a number; native dup-consumes it at
+// device construction and never uses/closes the original. Fail-closed:
+// until BOTH feeds land the data plane stays down, `tunnel_ready` stays
+// false and the default route stays HELD (no unprotected fallback).
+export function connectorWgSocketFeed(fd: number): WgFeedResult {
+  return JSON.parse(core.connector_wg_socket_feed(fd)) as WgFeedResult;
+}
+
+// N7: feed the platform TUN fd from VpnConnection.create(). The shell KEEPS
+// the raw fd — its close belongs exclusively to VpnConnection.destroy();
+// native consumes ONLY a dup copy at device construction (fd contract).
+export function connectorTunFdFeed(fd: number): WgFeedResult {
+  return JSON.parse(core.connector_tun_fd_feed(fd)) as WgFeedResult;
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the protect

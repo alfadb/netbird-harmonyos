@@ -109,6 +109,8 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
+    reg!("connector_wg_socket_feed", napi_connector_wg_socket_feed);
+    reg!("connector_tun_fd_feed", napi_connector_tun_fd_feed);
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
@@ -364,6 +366,8 @@ mod tests {
             "connector_socket_feed",
             "connector_ice_socket_feed",
             "connector_signal_socket_feed",
+            "connector_wg_socket_feed",
+            "connector_tun_fd_feed",
             "connector_status",
             "connector_network_config",
             "connector_stop",
@@ -518,6 +522,31 @@ unsafe extern "C" fn napi_connector_signal_socket_feed(
     let fd = a.i32_at(0, -1);
     let addr = a.string_at(1);
     ret_json(env, crate::connector::connector_signal_socket_feed_json(fd, &addr))
+}
+
+// N7: shell-side feed of the PROTECTED WG outer UDP socket (wg_fwd_open +
+// VpnConnection.protect BEFORE any datagram) — first of the two feeds the
+// real WireGuard data plane needs. The fd crosses as a number; native
+// dup-consumes it at device construction (never uses/closes the original).
+unsafe extern "C" fn napi_connector_wg_socket_feed(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    ret_json(env, crate::connector::connector_wg_socket_feed_json(fd))
+}
+
+// N7: shell-side feed of the platform TUN fd (VpnConnection.create) — the
+// shell KEEPS the raw fd (destroy() closes it); native consumes ONLY a dup
+// copy (TunFd contract).
+unsafe extern "C" fn napi_connector_tun_fd_feed(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    ret_json(env, crate::connector::connector_tun_fd_feed_json(fd))
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the shell

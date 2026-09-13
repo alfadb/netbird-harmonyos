@@ -35,6 +35,9 @@ struct Index {
   // N5d: real signal link state.
   @State signalRegistered: boolean = false;
   @State signalReconnects: number = 0;
+  // N7: real WG data-plane state (device-backed seam).
+  @State wgReady: boolean = false;
+  @State wgSessions: number = 0;
   private requestId: string = `ui-${Date.now()}`;
   private pollTimer: number = -1;
 
@@ -71,6 +74,11 @@ struct Index {
       : false;
     this.signalReconnects = status.signal !== undefined && status.signal !== null
       ? status.signal.reconnects
+      : 0;
+    // N7: the real WG data plane (device fed + tunnel_ready + live sessions)
+    this.wgReady = status.wg !== undefined && status.wg !== null ? status.wg.ready : false;
+    this.wgSessions = status.wg !== undefined && status.wg !== null
+      ? status.wg.peers_with_session
       : 0;
   }
 
@@ -155,6 +163,11 @@ struct Index {
         `reconnects: ${this.signalReconnects}`)
         .fontSize(16)
         .fontColor(this.signalRegistered ? '#176B3A' : '#8A6D1A')
+      // N7: WG data-plane status — tunnel_ready + peers with a live session.
+      Text(`tunnel: ${this.wgReady ? 'ready' : 'not ready'}   ` +
+        `wg sessions: ${this.wgSessions}`)
+        .fontSize(16)
+        .fontColor(this.wgReady ? '#176B3A' : '#8A6D1A')
       Text(`last error: ${this.lastErrorClass}`)
         .fontSize(16)
         .fontColor(this.lastErrorClass === 'none' ? '#176B3A' : '#A12622')

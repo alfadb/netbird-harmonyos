@@ -7,10 +7,11 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
 import {
   CoreNetworkConfig, ConnectorStartResult, ConnectorStatusResult, DeviceConfigFile,
-  ManagementEndpoint,
+  ManagementEndpoint, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorSignalFeed,
-  connectorStartWithSocket, connectorSocketFeed, connectorStop, mgmtSocketOpen, parseDeviceConfig,
+  connectorStartWithSocket, connectorSocketFeed, connectorStop, connectorTunFdFeed,
+  connectorWgSocketFeed, mgmtSocketOpen, parseDeviceConfig,
   parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readPrivateFileText,
   resolveManagementIp, sleep
 } from './NetBirdConnector';
@@ -82,7 +83,7 @@ function safeError(error: Error): string {
 // VPN extension shell, config-driven (promoted from the verified e3 physical
 // preflight create/destroy + fd contract and the verified n1b MR4 config /
 // protect split):
-// - Start flow (N3-6 + N3-7 + N5d): credentials read from app-private
+// - Start flow (N3-6 + N3-7 + N5d + N7): credentials read from app-private
 //   filesDir files (DEVELOPMENT-TIME practice, NOT secure storage) ->
 //   shell-side DNS of the management host -> core.mgmt_socket_open (TCP,
 //   unconnected) -> fail-closed VpnConnection.protect(fd) gate ->
@@ -93,9 +94,12 @@ function safeError(error: Error): string {
 //   NO VPN created) -> merge address/routes/DNS into VpnConfig under the
 //   default-route safety gate (0.0.0.0/0 held unless the core gate allows /
 //   forceDefaultRoute opt-in) -> connection.create() -> fd contract +
-//   fail-closed protect gate for the WG outer socket. The map snapshot is
-//   applied at create() time (platform VpnConfig is fixed then); later map
-//   changes are logged as explicitly NOT applied.
+//   fail-closed protect gate for the WG outer socket -> N7: FEED THE WG
+//   DATA PLANE (protected outer UDP socket via core.connector_wg_socket_feed
+//   + TUN fd via core.connector_tun_fd_feed; any failure = connector
+//   stopped + VPN destroyed — no data plane, no default route). The map
+//   snapshot is applied at create() time (platform VpnConfig is fixed
+//   then); later map changes are logged as explicitly NOT applied.
 // - Protect: the management socket is protected BEFORE the connector's first
 //   dial (reconnects re-protect via core-fed sockets), and after create()
 //   yields a valid TUN fd, the native outer UDP socket (core.wg_fwd_open) is
@@ -116,14 +120,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private destroyPromise?: Promise<void>;
   private destroyTrigger: string = 'none';
   // Raw TUN fd. Invariant: the ONLY owner of its close is
-  // connection.destroy(); the sole native call that receives it is the
-  // read-only core.fd_status (F_GETFD) probe. Any future native consumer
-  // must operate on a dup copy (no such export exists yet — TODO/未验证).
+  // connection.destroy(); native consumes it ONLY as a dup copy via the N7
+  // core.connector_tun_fd_feed (TunFd fd contract — the raw number itself is
+  // never stored nor closed by native).
   private tunFd: number = -1;
   private fdConfirmedOpenAfterCreate: boolean = false;
-  // Native-owned tunnel-outer UDP socket fd opened for the protect gate.
-  // Native owns its lifecycle (no close export in core yet — TODO/未验证);
-  // the shell only audits it read-only via core.fd_status.
+  // Native-owned tunnel-outer UDP socket fd, opened for the protect gate and
+  // (N7) fed to the WG data plane after the protect gate passes. Native owns
+  // its lifecycle (dup-consumed by the WG device; no close export in core
+  // yet — TODO/未验证); the shell only audits it read-only via core.fd_status.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
   // N3-6 control-plane wiring state. destroyRequested latches onDestroy so
@@ -518,14 +523,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.signal.last_error !== null && status.signal.last_error !== undefined
             ? status.signal.last_error.class
             : 'none';
+        // N7: WG data-plane state (device-backed seam) rides the same poll
+        const wgReady: string =
+          status.wg !== undefined && status.wg !== null ? String(status.wg.ready) : 'unknown';
+        const wgSessions: number =
+          status.wg !== undefined && status.wg !== null ? status.wg.peers_with_session : -1;
+        const wgDeviceUp: string =
+          status.wg !== undefined && status.wg !== null ? String(status.wg.device_up) : 'unknown';
         hilog.info(DOMAIN, TAG,
           'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
           'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
           'terminal=%{public}s|signalRegistered=%{public}s|signalReconnects=%{public}d|' +
-          'signalLastError=%{public}s',
+          'signalLastError=%{public}s|wgDeviceUp=%{public}s|wgReady=%{public}s|wgSessions=%{public}d',
           this.requestId, String(status.running), status.state, status.peer_count,
           status.route_count, status.reconnects, errorClass, String(status.terminal),
-          signalRegistered, signalReconnects, signalError);
+          signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions);
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
@@ -702,19 +714,111 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         reason: 'protect-fail-closed'
       };
     }
-    // TODO(未验证): the native data plane that would now CONNECT through the
-    // protected socket (WireGuard handshake towards the configured endpoint)
-    // is not wired — it needs a dup-copy-taking core export (Rust side). The
-    // protect gate itself is verified platform shape (e8e2cf9).
-    // VPN is up (create accepted + protect passed): start the status /
-    // network-config watch. Runtime map changes are logged as NOT applied
-    // (platform VpnConfig fixed at create — see the watcher).
+
+    // N7 fail-closed WG data-plane feed: hand the PROTECTED outer UDP socket
+    // and the TUN fd to the core (dup copies only) so the real WireGuard
+    // device comes up. ANY feed failure ⇒ no data plane ⇒ default route
+    // stays held ⇒ connector stopped + VPN destroyed (never a half-wired
+    // tunnel, never an unprotected fallback).
+    const fedOk: boolean = this.feedWgDataplane();
+    if (!fedOk) {
+      try {
+        const stop = connectorStop();
+        hilog.info(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s|' +
+          'cause=wg-dataplane-feed-fail-closed',
+          this.requestId, String(stop.already_stopped), stop.state);
+      } catch (error) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error as Error));
+      }
+      this.destroyOnce('wg-dataplane-feed-fail-closed').catch((error: Error) => {
+        hilog.error(DOMAIN, TAG,
+          'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=wg-feed-fail-closed|summary=%{public}s',
+          this.requestId, safeError(error));
+      });
+      return {
+        destroyRequired: true,
+        accepted: true,
+        reason: 'wg-dataplane-feed-fail-closed'
+      };
+    }
+
+    // VPN is up (create accepted + protect passed + WG data plane fed):
+    // start the status / network-config watch. Runtime map changes are
+    // logged as NOT applied (platform VpnConfig fixed at create — see the
+    // watcher).
     this.startStatusAndNetcfgWatcher();
     return {
       destroyRequired: true,
       accepted: true,
-      reason: 'create-open-fd-confirmed-protect-ok'
+      reason: 'create-open-fd-confirmed-protect-ok-wg-fed'
     };
+  }
+
+  // N7 WG data-plane feed (protected socket → TUN fd → device up). Order is
+  // mandatory: the outer UDP socket must ALREADY be protected here (§二.4 —
+  // protect before any datagram flows; the WG device sends the handshake the
+  // moment the endpoint lands), and the TUN fd is the second of the two
+  // feeds. Both numbers cross as BORROWED fd numbers — native dups them
+  // (F_DUPFD_CLOEXEC) at device construction and never uses/closes the
+  // originals: the raw TUN fd keeps belonging to connection.destroy(), the
+  // raw WG socket stays native-opened for audits. Returns true only when the
+  // core reports device_up (both feeds landed and the device is pumping).
+  private feedWgDataplane(): boolean {
+    if (this.outboundSocketFd < 0 || !this.outboundProtected || this.tunFd < 0) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=precondition|wgFd=%{public}d|' +
+        'protected=%{public}s|tunFd=%{public}d',
+        this.requestId, this.outboundSocketFd, String(this.outboundProtected), this.tunFd);
+      return false;
+    }
+    // 1. the protected WG outer socket (data plane feed #1)
+    let sock: WgFeedResult;
+    try {
+      sock = connectorWgSocketFeed(this.outboundSocketFd);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=wg-socket-throw|fd=%{public}d|summary=%{public}s',
+        this.requestId, this.outboundSocketFd, safeError(error as Error));
+      return false;
+    }
+    if (!sock.ok) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=wg-socket|fd=%{public}d|error=%{public}s',
+        this.requestId, this.outboundSocketFd, sock.error ?? 'no-message');
+      return false;
+    }
+    // 2. the platform TUN fd (data plane feed #2) — device comes up here
+    let tun: WgFeedResult;
+    try {
+      tun = connectorTunFdFeed(this.tunFd);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=tun-throw|fd=%{public}d|summary=%{public}s',
+        this.requestId, this.tunFd, safeError(error as Error));
+      return false;
+    }
+    if (!tun.ok) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=tun|fd=%{public}d|error=%{public}s',
+        this.requestId, this.tunFd, tun.error ?? 'no-message');
+      return false;
+    }
+    if (tun.device_up !== true) {
+      // a feed can report ok while the pair is still incomplete (e.g. the
+      // socket feed was accepted but this tun feed somehow did not complete
+      // the pair) — treat anything but an explicit device_up as failure
+      hilog.error(DOMAIN, TAG,
+        'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=device-not-up|wgFd=%{public}d|tunFd=%{public}d',
+        this.requestId, this.outboundSocketFd, this.tunFd);
+      return false;
+    }
+    hilog.info(DOMAIN, TAG,
+      'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true',
+      this.requestId, this.outboundSocketFd, this.tunFd);
+    return true;
   }
 
   // ControlProtectSocket equivalent on the shell side: protect ONE socket,

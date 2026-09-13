@@ -161,3 +161,90 @@ panic→SIGSEGV hook（ffi/mod.rs PANIC_HOOK），测试在首个隧道建立后
 2. `cd client/core && cargo test --offline --locked` → 262 passed / 0
    failed（含新增 10）
 3. `bash client/build.sh` → exit 0（HAP 产出）
+
+## 9. N7 增量：生产接线（`WgDeviceFeed`——真实设备成为生产默认）
+
+状态：**本仓内已验证**（Rust 侧 feed 入口喂入受保护 UDP socket +
+socketpair TUN，双端真实握手、`tunnel_ready=true`、默认路由放行、双向载
+荷）；**真机未验证**（§6 的差距清单对 N7 依然成立，另见文末）。
+
+### 9.1 生产默认切换与开关
+
+- `connector` 的生产默认 `WgPeerApplier` 由 `WgPeerRegistry` 切换为
+  [`crate::wg_device::WgDeviceFeed`]（`connector.rs` 两个生产 start 路径
+  `connector_start_with_socket_json` / `connector_start_json` 均构造并以
+  其为 wg seam）。两个 NAPI start 入口均无"是否用真设备"的开关——缺
+  feed 时设备不启动，这就是默认（fail-closed）。
+- `WgPeerRegistry` 保留为**测试/对照** seam（既有测试全部不动）；N6 直连
+  形态 `WgDeviceApplier` 供宿主测试/驱动注入。`ConnectorHandle::spawn`
+  仍是注入式（`wg: Arc<dyn WgPeerApplier>` + 新增 `wg_feed:
+  Option<Arc<WgDeviceFeed>>`，`Some` 时由 handle 拉起数据面泵线程并在
+  stop flag 上退出）。
+
+### 9.2 feed 契约（壳侧 → native）
+
+- `connector_wg_socket_feed(fd)`：喂**受保护** WG 外层 UDP socket
+  （`wg_fwd_open` 打开 + `VpnConnection.protect`，先于任何数据报）。fd 以
+  number 过界，先做 dup 探针校验（拒绝死 fd：`socket-fd-missing` /
+  `socket-fd-invalid`），原号**借用存储**；设备建成时 native 再
+  `dup_socket_fd` 取自己的 dup，从不使用/关闭原号。
+- `connector_tun_fd_feed(fd)`：喂平台 TUN fd（`VpnConnection.create()`
+  产出）。同样先 dup 探针校验、原号借用存储；设备建成时经
+  `TunFd::dup_from_raw` 取 dup（可执行 fd 合同：dup 后复查原号仍开、
+  close 只发生在 dup 上）。壳侧保留原号，其关闭只属于
+  `VpnConnection.destroy()`。
+- 返回 `{"ok":true,"device_up":<bool>}`；错误 token 同族
+  （`no-connector` / `no-wg-device` / `socket-fd-missing` /
+  `socket-fd-invalid`）。
+- 建成顺序无关（先 socket 后 tun 或反之均可）；**两个 feed 齐备**才
+  `WgDevice::adopt`。建成失败（fd 死亡等）时丢弃两个已存 fd 号并计数、
+  打点，重新喂入一对新 fd 才会重试——不做半套设备。
+
+### 9.3 feed 前的行为（fail-closed 条件）
+
+- 缺任一 feed ⇒ 设备不存在 ⇒ `tunnel_ready()=false` ⇒ N3-7 闸 HOLD
+  `0.0.0.0/0`；控制面调用（`apply_peers`/`apply_endpoint`）**缓冲并照常
+  应答**（网络图/ICE 落配不会楔死），设备建成时全量重放（endpoint 每
+  peer 只保留最新一条，重复落配不触发多余握手）。
+- **没有任何未保护/自建 socket 的隐式回退**；未 feed 的 slot 是纯惰性
+  状态，唯一的 socket 创建者是壳侧 `wg_fwd_open` + `protect`。
+- connector stop ⇒ `clear()`：设备拆除（dup 关闭）、缓冲与已喂 fd 号全部
+  丢弃；之后必须重新喂入一对新 fd 才会再有数据面。
+
+### 9.4 状态字段（`connector_status()` 的 `wg` 对象）
+
+`wg:{fed_socket, fed_tun, device_up, ready, peers_with_session, handshakes,
+tx_packets, rx_packets, dropped_no_route, decrypt_errors}`（结构体
+`WgDataplaneStatus`）。全部来自 `WgDevice` 既有计数器
+（`WgDeviceStats.handshake_initiations` → `handshakes`、
+`no_route_drops` → `dropped_no_route`），无任何密钥材料；registry 等
+"无设备能力" seam 返回 `None`，渲染为全 false/0 默认。同时
+`connector_network_config()` 的默认路由判定改为**读取时实时重判**
+（`refresh_net_gate`：`wg.tunnel_ready()` × ICE 可达视图 × force 旗标，
+路由表从"未过滤记录"重建）——sync 之后 feed/握手才完成（生产时序必然如
+此）不再需要等下一次 sync 才放行/收闸。
+
+### 9.5 测试证据（新增）
+
+- `client/core/tests/wg_feed_n7.rs`（4 例）：
+  `production_path_real_wgdevice_closed_loop`（feed 入口喂真实 fd 对 →
+  缓冲重放 → 双端真实握手 → `tunnel_ready=true` → N3-7 闸放行 → 双向载荷
+  字节精确 + 真实计数器）；`connector_status_reflects_fed_device_and_stop_t
+  ears_it_down`（真实 `ConnectorHandle`：`status().wg` 反映设备、
+  `status_json` 含 `wg` 对象、stop 拆数据面）；`missing_feed_fails_closed_a
+  nd_takes_no_unprotected_socket`（缺 feed ⇒ 不建设备、闸 HOLD、ICE
+  provider `taken()==0`、死 fd 拒收）；`fd_contract_native_uses_only_dups_
+  originals_stay_caller_owned`（原号在 feed 后立即可被调用方关闭而设备照
+  常握手/载荷 = 只用 dup；设备拆除后原号仍 open 可用 = native 不关原号）。
+- `wg_device.rs` 单测 4 例（缓冲/重放、死/缺 fd 拒收、未注册 peer 拒绝、
+  clear 语义）+ `connector.rs` 单测 2 例（`status_json` 的 `wg` 契约、
+  `network_config_gate_refreshes_with_live_tunnel_ready` 活跃闸）。
+
+### 9.6 N7 新增未验证项（真机）
+
+- `protect` 后的 WG socket 在真机上收发（运营商 NAT 下 keepalive/重钥）；
+- 平台 TUN fd 的 MTU/杂帧（内核注入的 ICMP/MLD 等）与 `O_NONBLOCK` 共享
+  ofd 行为（继承 §6 清单）；
+- `VpnConfig` 在 `create()` 时刻固定 ⇒ 默认路由即使数据面后来 ready 也不
+  会追加安装（平台限制，N3-6 已声明"运行中变更 NOT applied"）；壳侧
+  `VPN_WG_DATAPLANE_FED` 之后的真实端到端连通需真机联调。

@@ -63,8 +63,19 @@
 //! WG UDP socket 只经 [`crate::mgmtsock::dup_socket_fd`] 拿 **dup 副本**
 //! （F_DUPFD_CLOEXEC），`Drop`/`reattach_socket` 只关自己的 dup；原始 fd
 //! 由壳侧（protect 后）拥有。TUN 侧复用 [`TunFd`]（dup + 唯一 close 点）。
+//!
+//! ## N7：生产默认 seam [`WgDeviceFeed`]
+//!
+//! 把本模块的设备驱动接成 connector 的**生产默认**：fd（受保护 WG UDP
+//! socket + 平台 TUN）由壳侧经 `connector_wg_socket_feed` /
+//! `connector_tun_fd_feed` 补给，两个 feed 齐备才 adopt 设备；网络图 peer
+//! 与 ICE endpoint 在此之前**缓冲**，设备建成时重放。缺任一 feed ⇒ 无设备
+//! ⇒ `tunnel_ready()=false` ⇒ 默认路由 HOLD（无任何未保护回退）。生产泵
+//! 线程 [`WgDeviceFeed::spawn_data_plane_pump`] 以注入单调钟驱动
+//! `service_tun`/`service_udp`/`tick`。
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use base64::Engine as _;
 
@@ -863,6 +874,62 @@ fn getsockname(fd: i32) -> Result<([u8; 4], u16), String> {
 }
 
 // ---------------------------------------------------------------------------
+// status surface for the connector (N7)
+// ---------------------------------------------------------------------------
+
+/// Data-plane status exposed through `connector_status()` (`wg` field).
+/// Counters are the REAL [`WgDeviceStats`] values once a device is up; all
+/// booleans false / counters zero while the data plane is not started
+/// (fail-closed: no shell feeds ⇒ no device ⇒ nothing ready). No key
+/// material — public-key-free by construction (per-peer detail would carry
+/// public keys only, but the summary does not even need that).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WgDataplaneStatus {
+    /// The shell fed a (protected) WG UDP socket fd.
+    pub fed_socket: bool,
+    /// The shell fed the platform TUN fd.
+    pub fed_tun: bool,
+    /// The device was constructed from both feeds (data plane pumping).
+    pub device_up: bool,
+    /// REAL `tunnel_ready()`: ≥1 established, non-expired WG session.
+    pub ready: bool,
+    /// Peers whose WG session is established and non-expired.
+    pub peers_with_session: usize,
+    /// Handshake initiations sent (initial + retransmits + rekeys).
+    pub handshakes: u64,
+    pub tx_packets: u64,
+    pub rx_packets: u64,
+    /// Outbound frames dropped: no allowed_ips prefix matched.
+    pub dropped_no_route: u64,
+    /// Inbound datagrams a matched peer failed to process.
+    pub decrypt_errors: u64,
+}
+
+impl WgDataplaneStatus {
+    /// The unfed / not-started snapshot (all false, all zero).
+    pub fn not_started() -> Self {
+        WgDataplaneStatus::default()
+    }
+
+    /// The `connector_status()` `wg` JSON object.
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{{},{},{},{},{},{},{},{},{},{}}}",
+            crate::util::jbool("fed_socket", self.fed_socket),
+            crate::util::jbool("fed_tun", self.fed_tun),
+            crate::util::jbool("device_up", self.device_up),
+            crate::util::jbool("ready", self.ready),
+            crate::util::jinum("peers_with_session", self.peers_with_session as i64),
+            crate::util::jinum("handshakes", self.handshakes as i64),
+            crate::util::jinum("tx_packets", self.tx_packets as i64),
+            crate::util::jinum("rx_packets", self.rx_packets as i64),
+            crate::util::jinum("dropped_no_route", self.dropped_no_route as i64),
+            crate::util::jinum("decrypt_errors", self.decrypt_errors as i64),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // the connector seam implementation
 // ---------------------------------------------------------------------------
 
@@ -938,5 +1005,482 @@ impl WgPeerApplier for WgDeviceApplier {
     fn apply_endpoint(&self, pub_key_b64: &str, addr: [u8; 4], port: u16) -> Result<(), String> {
         let now = sys::mono_ms();
         self.device.lock_poison().set_endpoint(pub_key_b64, addr, port, now)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WgDeviceFeed — the PRODUCTION-DEFAULT seam (N7)
+// ---------------------------------------------------------------------------
+
+/// Pump cadence for the production data-plane thread (same shape as the ICE
+/// pump; the device itself is clock-injected — this loop only FEEDS it).
+pub const WG_PUMP_TICK_MS: u64 = 100;
+
+/// Why a [`WgDeviceFeed::feed_wg_socket`] / [`WgDeviceFeed::feed_tun`] call
+/// was refused (stable tokens only — they cross the NAPI error surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgFeedRefusal {
+    /// fd < 0.
+    FdMissing,
+    /// Not an open descriptor (dup/F_GETFD failed — dead or foreign fd).
+    FdInvalid { errno: i32 },
+}
+
+impl WgFeedRefusal {
+    /// Stable error token, same family as the other feed seams.
+    pub fn token(&self) -> &'static str {
+        match self {
+            WgFeedRefusal::FdMissing => "socket-fd-missing",
+            WgFeedRefusal::FdInvalid { .. } => "socket-fd-invalid",
+        }
+    }
+
+    pub fn errno(&self) -> i32 {
+        match self {
+            WgFeedRefusal::FdMissing => 0,
+            WgFeedRefusal::FdInvalid { errno } => *errno,
+        }
+    }
+}
+
+/// The PRODUCTION-DEFAULT [`WgPeerApplier`] (N7): a [`WgDevice`] that comes
+/// alive only when the SHELL feeds both fds the data plane needs —
+///
+/// - the WG outer UDP socket (native-opened via `wg_fwd_open`, then
+///   `VpnConnection.protect`ed by the shell — §二.4: protect before any
+///   datagram flows), fed through `connector_wg_socket_feed`;
+/// - the platform TUN fd (from `VpnConnection.create()`), fed through
+///   `connector_tun_fd_feed`.
+///
+/// ## fail-closed semantics
+///
+/// Until BOTH feeds arrive (and a device is successfully adopted), the seam
+/// behaves like an honest registry: peer registrations and endpoint landings
+/// are BUFFERED and acknowledged (the control plane keeps working), while
+/// `tunnel_ready()` stays FALSE — so the N3-7 default-route gate HOLDS
+/// `0.0.0.0/0`. There is NO fallback path that creates a socket or adopts a
+/// device without a shell feed; a feed of a dead fd is REFUSED at the
+/// boundary (dup probe) and never stored.
+///
+/// ## fd 合同（§二.4）
+///
+/// Fed fd numbers are BORROWED: stored raw numbers stay owned by the shell
+/// (protect/`VpnConnection` lifecycle); at device construction native takes
+/// dup copies ONLY (`dup_socket_fd` for the socket, `TunFd::dup_from_raw`
+/// for the TUN) and never uses/closes the originals. When construction fails
+/// (e.g. an fd died between feed and adopt), both stored numbers are dropped
+/// and the data plane stays down — a fresh matching feed pair retries.
+///
+/// ## buffering + replay
+///
+/// The network map usually arrives BEFORE both feeds (sync runs while
+/// create() has not happened yet), and the ICE selected pair can land before
+/// them too. `apply_peers` and `apply_endpoint` are therefore buffered in
+/// full and REPLAYED into the device at construction (latest endpoint per
+/// peer wins — repeated landings must not re-trigger multiple handshakes).
+pub struct WgDeviceFeed {
+    cfg: WgDeviceConfig,
+    inner: Mutex<FeedInner>,
+}
+
+#[derive(Default)]
+struct FeedInner {
+    /// Shell-fed RAW fd numbers (borrowed; native dup-only at adopt time).
+    wg_socket_raw: Option<i32>,
+    tun_raw: Option<i32>,
+    /// Buffered peer set (full-snapshot semantics, as received).
+    peers: Vec<crate::connector::WgPeerEntry>,
+    /// Latest endpoint per peer (upsert; replay order deterministic).
+    endpoints: Vec<(String, [u8; 4], u16)>,
+    /// Live device once both feeds arrived and adoption succeeded.
+    device: Option<Arc<WgDeviceApplier>>,
+    /// Audit counters (tests + honest observation; not in the status JSON).
+    feeds_accepted: u64,
+    build_failures: u64,
+}
+
+impl WgDeviceFeed {
+    /// A fresh, unfed slot for `cfg` (device config: local identity +
+    /// injected-clock timer policy).
+    pub fn new(cfg: WgDeviceConfig) -> WgDeviceFeed {
+        WgDeviceFeed { cfg, inner: Mutex::new(FeedInner::default()) }
+    }
+
+    /// Shell feed #1: the (protected) WG outer UDP socket fd. The number is
+    /// validated by an immediate dup probe (fail-closed at the boundary) and
+    /// stored raw; the device dups it again at adopt time.
+    pub fn feed_wg_socket(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
+        self.feed_fd(raw_fd, FeedWhich::WgSocket)
+    }
+
+    /// Shell feed #2: the platform TUN fd (same validation + ownership
+    /// rules; `TunFd::dup_from_raw` carries the executable fd contract).
+    pub fn feed_tun(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
+        self.feed_fd(raw_fd, FeedWhich::Tun)
+    }
+
+    fn feed_fd(&self, raw_fd: i32, which: FeedWhich) -> Result<(), WgFeedRefusal> {
+        if raw_fd < 0 {
+            return Err(WgFeedRefusal::FdMissing);
+        }
+        // boundary validation: refuse dead fds BEFORE storing. The probe dup
+        // is closed immediately (fd discipline: nothing leaks, the number is
+        // stored raw and the device takes its own dup at adopt time).
+        match crate::mgmtsock::dup_socket_fd(raw_fd) {
+            Ok(probe) => {
+                unsafe { sys::close(probe) };
+            }
+            Err(e) => return Err(WgFeedRefusal::FdInvalid { errno: e.errno() }),
+        }
+        let built = {
+            let mut g = self.inner.lock_poison();
+            match which {
+                FeedWhich::WgSocket => g.wg_socket_raw = Some(raw_fd),
+                FeedWhich::Tun => g.tun_raw = Some(raw_fd),
+            }
+            g.feeds_accepted += 1;
+            Self::try_build(&mut g, &self.cfg)
+        };
+        if built {
+            emit("N7_WG_FEED|device-up|data-plane-started");
+        }
+        Ok(())
+    }
+
+    /// Whether the device is live (data plane constructed and pumping).
+    pub fn device_up(&self) -> bool {
+        self.inner.lock_poison().device.is_some()
+    }
+
+    /// Exclusive device access for the data-plane pump / tests. `None` while
+    /// the device is not up (fail-closed: nothing to pump).
+    pub fn with_device<R>(&self, f: impl FnOnce(&mut WgDevice) -> R) -> Option<R> {
+        let g = self.inner.lock_poison();
+        g.device.as_ref().map(|d| d.with_device(f))
+    }
+
+    /// Spawn the PRODUCTION data-plane pump thread: every
+    /// [`WG_PUMP_TICK_MS`] it drives `service_tun` / `service_udp` / `tick`
+    /// on the real monotonic clock while a device is up, and exits on the
+    /// connector stop flag. A detached std::thread (never blocks a runtime
+    /// worker); without feeds it simply no-ops until the device appears.
+    pub fn spawn_data_plane_pump(self: &Arc<Self>, stop_flag: Arc<AtomicBool>) {
+        let slot = Arc::clone(self);
+        let _ = std::thread::Builder::new().name("wg-pump".into()).spawn(move || {
+            while !stop_flag.load(Ordering::Acquire) {
+                std::thread::sleep(core::time::Duration::from_millis(WG_PUMP_TICK_MS));
+                if stop_flag.load(Ordering::Acquire) {
+                    return;
+                }
+                let now = sys::mono_ms();
+                // one pump step; no-op while the device is not up
+                let _ = slot.with_device(|d| {
+                    d.service_tun(now);
+                    d.service_udp(now);
+                    d.tick(now);
+                });
+            }
+        });
+    }
+
+    /// Build the device when both feeds are present. Returns whether a
+    /// device came up. On ANY failure both stored fds are dropped (data
+    /// plane stays down; a fresh matching feed pair retries) and the failure
+    /// is counted + logged.
+    fn try_build(g: &mut FeedInner, cfg: &WgDeviceConfig) -> bool {
+        if g.device.is_some() {
+            return false;
+        }
+        let (Some(wg_raw), Some(tun_raw)) = (g.wg_socket_raw, g.tun_raw) else {
+            return false; // still missing a feed — the buffered state is kept
+        };
+        let tun = match TunFd::dup_from_raw(tun_raw) {
+            Ok(t) => t,
+            Err(e) => return Self::build_failed(g, &format!("tun-dup-{}-errno-{}", e.name(), e.errno())),
+        };
+        let dev = match WgDevice::adopt(cfg.clone(), wg_raw, tun) {
+            Ok(d) => d,
+            Err(e) => return Self::build_failed(g, &e),
+        };
+        let app = Arc::new(WgDeviceApplier::new(dev));
+        // replay the buffered control-plane state; peer-set errors here mean
+        // buffered entries the device rejects — fail the build (the map is
+        // re-synced with the same content, so a persistent error stays loud
+        // via wg_apply_failed instead of silently dropping peers)
+        if let Err(e) = app.apply_peers(&g.peers) {
+            return Self::build_failed(g, &format!("replay-peers-{e}"));
+        }
+        for (key, addr, port) in &g.endpoints {
+            // individually validated at buffer time; a replay failure would
+            // mean the peer vanished from the just-applied set — logged (the
+            // key is PUBLIC material), the next ICE re-selection re-lands it
+            if let Err(e) = app.apply_endpoint(key, *addr, *port) {
+                emit(&format!("N7_WG_FEED|replay-endpoint-failed|{}", e));
+            }
+        }
+        emit(&format!(
+            "N7_WG_FEED|adopted|peers={}|endpoints={}",
+            g.peers.len(),
+            g.endpoints.len()
+        ));
+        g.device = Some(app);
+        true
+    }
+
+    /// Common build-failure handling: count, log the token, drop BOTH fed
+    /// fds (the pair must be re-fed to retry — keeps the state machine
+    /// honest about which fds actually worked).
+    fn build_failed(g: &mut FeedInner, reason: &str) -> bool {
+        g.build_failures += 1;
+        g.wg_socket_raw = None;
+        g.tun_raw = None;
+        emit(&format!("N7_WG_FEED|build-failed|reason={reason}"));
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FeedWhich {
+    WgSocket,
+    Tun,
+}
+
+impl WgPeerApplier for WgDeviceFeed {
+    fn apply_peers(&self, peers: &[crate::connector::WgPeerEntry]) -> Result<(), String> {
+        let mut g = self.inner.lock_poison();
+        g.peers = peers.to_vec();
+        match g.device.as_ref() {
+            Some(d) => d.apply_peers(peers),
+            None => Ok(()), // buffered: control plane stays alive pre-feed
+        }
+    }
+
+    fn clear(&self) {
+        let mut g = self.inner.lock_poison();
+        // full stop semantics: buffers, endpoints, fed fds and the device
+        // all go away — after a connector stop the data plane stays down
+        // until the shell re-feeds a fresh pair
+        g.peers.clear();
+        g.endpoints.clear();
+        g.wg_socket_raw = None;
+        g.tun_raw = None;
+        if let Some(d) = g.device.take() {
+            d.clear();
+        }
+    }
+
+    /// Real data-plane readiness once a device is up; always false before
+    /// (fail-closed: no feeds ⇒ no handshakes ⇒ the N3-7 gate HOLDS the
+    /// default route).
+    fn tunnel_ready(&self) -> bool {
+        let g = self.inner.lock_poison();
+        g.device.as_ref().map(|d| d.tunnel_ready()).unwrap_or(false)
+    }
+
+    fn apply_endpoint(&self, pub_key_b64: &str, addr: [u8; 4], port: u16) -> Result<(), String> {
+        let mut g = self.inner.lock_poison();
+        match g.device.as_ref() {
+            Some(d) => d.apply_endpoint(pub_key_b64, addr, port),
+            None => {
+                // buffer (latest per peer wins); unregistered peers are
+                // rejected exactly like the registry / device seams
+                if !g.peers.iter().any(|p| p.pub_key_b64 == pub_key_b64) {
+                    return Err(format!("peer '{pub_key_b64}' is not registered"));
+                }
+                if let Some(slot) =
+                    g.endpoints.iter_mut().find(|(k, _, _)| k == pub_key_b64)
+                {
+                    *slot = (pub_key_b64.to_string(), addr, port);
+                } else {
+                    g.endpoints.push((pub_key_b64.to_string(), addr, port));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The `connector_status()` `wg` field: feed/device state + REAL device
+    /// counters. The not-up state reports fed flags honestly (so the shell
+    /// can tell "waiting for feeds" from "running").
+    fn dataplane_status(&self) -> Option<WgDataplaneStatus> {
+        let g = self.inner.lock_poison();
+        let mut st = WgDataplaneStatus {
+            fed_socket: g.wg_socket_raw.is_some(),
+            fed_tun: g.tun_raw.is_some(),
+            device_up: g.device.is_some(),
+            ..WgDataplaneStatus::default()
+        };
+        if let Some(d) = g.device.as_ref() {
+            let (ready, sessions, stats) = d.with_device(|dev| {
+                let sessions = dev
+                    .peers()
+                    .iter()
+                    .filter(|p| p.session_established && !p.expired)
+                    .count();
+                (dev.tunnel_ready(), sessions, dev.stats())
+            });
+            st.ready = ready;
+            st.peers_with_session = sessions;
+            st.handshakes = stats.handshake_initiations;
+            st.tx_packets = stats.tx_packets;
+            st.rx_packets = stats.rx_packets;
+            st.dropped_no_route = stats.no_route_drops;
+            st.decrypt_errors = stats.decrypt_errors;
+        }
+        Some(st)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests (feed slot: buffering, replay, fail-closed refusals, clear)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+    use crate::config;
+
+    extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut [i32; 2]) -> i32;
+    }
+
+    fn test_secret_b64(byte: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([byte; 32])
+    }
+
+    fn peer_entry(key: &str, addr: [u8; 4]) -> crate::connector::WgPeerEntry {
+        crate::connector::WgPeerEntry {
+            pub_key_b64: key.to_string(),
+            allowed_ips: vec![config::Route { addr, prefix_len: 32 }],
+        }
+    }
+
+    /// Bound loopback UDP socket (the shell-protected WG outer socket stand-
+    /// in) + a datagram socketpair playing the TUN half. Returns all raw fds
+    /// the caller must close.
+    fn fed_fds() -> (i32, i32, i32) {
+        let wg = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(wg >= 0);
+        let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        assert_eq!(
+            unsafe { sys::bind(wg, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) },
+            0
+        );
+        let mut sv = [-1i32; 2];
+        assert_eq!(unsafe { socketpair(1, 2, 0, &mut sv) }, 0);
+        (wg, sv[0], sv[1])
+    }
+
+    fn test_slot() -> (WgDeviceFeed, i32, i32, i32) {
+        let (wg_raw, tun_raw, tun_test_end) = fed_fds();
+        let slot = WgDeviceFeed::new(WgDeviceConfig::new(test_secret_b64(0xA5)));
+        (slot, wg_raw, tun_raw, tun_test_end)
+    }
+
+    #[test]
+    fn feed_slot_buffers_until_both_fds_then_builds_and_replays() {
+        let (slot, wg_raw, tun_raw, _tun_end) = test_slot();
+        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+
+        // pre-feed: control-plane calls buffer, data plane stays down
+        slot.apply_peers(&[peer_entry(&key, [10, 7, 0, 2])]).expect("buffered peers");
+        slot.apply_endpoint(&key, [127, 0, 0, 1], 51820).expect("buffered endpoint");
+        assert!(!slot.device_up());
+        assert!(!slot.tunnel_ready(), "no feeds ⇒ never ready (fail-closed)");
+        let st = slot.dataplane_status().expect("feed seam always reports");
+        assert!(!st.fed_socket && !st.fed_tun && !st.device_up && !st.ready);
+        assert_eq!(st.to_json(), "{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
+             \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
+             \"rx_packets\":0,\"dropped_no_route\":0,\"decrypt_errors\":0}");
+
+        // first feed alone: still not up
+        slot.feed_tun(tun_raw).expect("tun feed");
+        assert!(!slot.device_up());
+        let st = slot.dataplane_status().unwrap();
+        assert!(st.fed_tun && !st.fed_socket && !st.device_up);
+
+        // second feed completes the pair: device up, buffered state replayed
+        slot.feed_wg_socket(wg_raw).expect("wg socket feed");
+        assert!(slot.device_up());
+        let st = slot.dataplane_status().unwrap();
+        assert!(st.fed_socket && st.fed_tun && st.device_up);
+        assert!(!st.ready, "no handshake yet");
+        slot.with_device(|d| {
+            assert_eq!(d.peer_count(), 1, "buffered peer set replayed");
+            let peer = &d.peers()[0];
+            assert_eq!(peer.pub_key_b64, key);
+            assert_eq!(peer.endpoint, Some(([127, 0, 0, 1], 51820)), "endpoint replayed");
+        })
+        .expect("device access");
+
+        // post-build control-plane calls land directly on the device
+        slot.apply_endpoint(&key, [127, 0, 0, 1], 51821).expect("live landing");
+        slot.with_device(|d| {
+            assert_eq!(d.peers()[0].endpoint, Some(([127, 0, 0, 1], 51821)));
+        })
+        .expect("device access");
+
+        // cleanup: the test owns the raws (device holds only dups)
+        for fd in [wg_raw, tun_raw, _tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    #[test]
+    fn feed_slot_refuses_missing_and_dead_fds_fail_closed() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        // missing
+        assert_eq!(slot.feed_wg_socket(-1).unwrap_err().token(), "socket-fd-missing");
+        assert_eq!(slot.feed_tun(-1).unwrap_err().token(), "socket-fd-missing");
+        // dead: close the tun end first, then feeding it must be refused
+        unsafe { sys::close(tun_raw) };
+        let err = slot.feed_tun(tun_raw).unwrap_err();
+        assert_eq!(err.token(), "socket-fd-invalid");
+        assert_eq!(err.errno(), sys::EBADF);
+        // nothing was stored: the seam stays completely unfed
+        let st = slot.dataplane_status().unwrap();
+        assert!(!st.fed_socket && !st.fed_tun && !st.device_up);
+        assert!(!slot.tunnel_ready());
+        // and with only the socket fed, the data plane never starts
+        slot.feed_wg_socket(wg_raw).expect("valid socket feed");
+        assert!(!slot.device_up(), "one feed alone must not start the data plane");
+        assert!(!slot.tunnel_ready());
+        for fd in [wg_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    #[test]
+    fn feed_slot_unregistered_endpoint_rejected_like_registry() {
+        let (slot, _wg_raw, _tun_raw, _tun_end) = test_slot();
+        let unknown = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        let err = slot.apply_endpoint(&unknown, [127, 0, 0, 1], 1).unwrap_err();
+        assert!(err.contains("not registered"), "{err}");
+    }
+
+    #[test]
+    fn feed_slot_clear_tears_device_and_feeds_down() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let key = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        slot.apply_peers(&[peer_entry(&key, [10, 7, 0, 2])]).expect("peers");
+        slot.feed_tun(tun_raw).expect("tun");
+        slot.feed_wg_socket(wg_raw).expect("wg");
+        assert!(slot.device_up());
+        slot.clear();
+        assert!(!slot.device_up(), "clear() must tear the device down");
+        assert!(!slot.tunnel_ready());
+        let st = slot.dataplane_status().unwrap();
+        assert!(!st.fed_socket && !st.fed_tun, "clear() must drop fed fds");
+        // re-feeding a fresh pair rebuilds cleanly (buffered peers were
+        // cleared too, so the map must re-sync first — exact N7 semantics)
+        let (wg2, tun2, tun2_end) = fed_fds();
+        slot.feed_tun(tun2).expect("re-feed tun");
+        slot.feed_wg_socket(wg2).expect("re-feed wg");
+        assert!(slot.device_up());
+        slot.with_device(|d| assert_eq!(d.peer_count(), 0, "cleared peers stay cleared"))
+            .expect("device access");
+        for fd in [wg_raw, tun_end, wg2, tun2_end] {
+            unsafe { sys::close(fd) };
+        }
     }
 }

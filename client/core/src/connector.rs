@@ -63,18 +63,21 @@
 //! 2. ICE 的 UDP socket 来自壳侧补给的受保护源
 //!    （`connector_ice_socket_feed(fd)`）；壳侧不喂则候选收集 fail-closed，
 //!    peer 停在 Idle 并记录 Network 类错误。
-//! 3. 网络图里的 remote peers 的 WG 侧配置走 [`WgPeerApplier`]：生产默认
-//!    仍是 [`WgPeerRegistry`]（本地登记 + endpoint 记录，等壳侧补给 WG
-//!    socket fd）；**N6 起存在真实驱动** [`crate::wg_device::WgDeviceApplier`]
-//!    ——同一 trait 直接驱动多 peer WG 设备（`crate::wg_device`）：endpoint
-//!    落配即握手、`tunnel_ready` 反映真实会话状态。registry 与设备驱动
-//!    的差别只在有无壳侧补给的真实 socket；「登记 ≠ 隧道」对 registry 仍
-//!    成立。
+//! 3. 网络图里的 remote peers 的 WG 侧配置走 [`WgPeerApplier`]：**N7 起生产
+//!    默认是 [`crate::wg_device::WgDeviceFeed`]**（真实 [`WgDeviceApplier`]，
+//!    fd 由壳侧 feed 补给后建成设备，feed 前缓冲 peer/endpoint、
+//!    `tunnel_ready` 恒 false——fail-closed，默认路由 HOLD）；N6 的真实设备
+//!    驱动 [`crate::wg_device::WgDeviceApplier`] 是其直连形态（测试/宿主
+//!    注入用），N3-5 的 [`WgPeerRegistry`]（本地登记 + endpoint 记录、
+//!    `tunnel_ready` 恒 false）保留为测试/对照 seam。「登记 ≠ 隧道」对
+//!    registry 仍成立，设备驱动则给出真实会话状态。
 //! 4. 路由/DNS 通过 [`ConfigApplier`] 交给壳侧（宿主）；壳侧不接时生产
 //!    默认 [`LoggingConfigApplier`] 只打点，不落任何系统配置。
 //! 5. "Connected" 仍指 **management 控制面连接已建立**（登录成功 + Sync
 //!    流在），与 peer 连通无关；peer 级状态在 status 的 `ice` 字段，
-//!    signal 通道状态在 `signal` 字段（registered/reconnects/last_error）。
+//!    signal 通道状态在 `signal` 字段（registered/reconnects/last_error），
+//!    WG 数据面在 `wg` 字段（N7：fed_socket/fed_tun/device_up/ready + 真实
+//!    设备计数——`crate::wg_device::WgDataplaneStatus`）。
 //!
 //! ## 注入 seam（宿主测试与壳侧接线点）
 //!
@@ -83,9 +86,10 @@
 //!   存储——见 `crate::grpc` 模块文档）。宿主测试可注入桩工厂。
 //! - sync 策略：[`SyncPolicy`]（backoff/时钟/随机源，透传给
 //!   [`crate::sync::SyncSession::with_policy`]，测试零真实长睡眠）。
-//! - 数据面 WG peer 登记：[`WgPeerApplier`]（生产默认 [`WgPeerRegistry`]，
-//!   进程内登记表 + N5c endpoint 记录；N6 起真实 WG 设备驱动见
-//!   [`crate::wg_device::WgDeviceApplier`]——同一 trait，真实数据面）。
+//! - 数据面 WG peer 登记：[`WgPeerApplier`]（**N7 生产默认
+//!   [`crate::wg_device::WgDeviceFeed`]**——壳侧 feed 补给 fd 后建成的真实
+//!   设备；[`WgPeerRegistry`] 保留为测试/对照，N6 直连形态
+//!   [`crate::wg_device::WgDeviceApplier`] 供宿主测试注入）。
 //! - 壳侧配置应用：[`ConfigApplier`]（路由/DNS/本机地址交给宿主）。
 //! - N5c per-peer ICE：[`crate::peer_conn::PeerIceOrchestrator`]（接口枚举
 //!   `crate::ice::InterfaceSource`、受保护 UDP 源
@@ -246,9 +250,10 @@ pub struct WgPeerEntry {
 }
 
 /// WG data-plane seam: register/replace the local WireGuard peer set.
-/// Production default: [`WgPeerRegistry`] (in-process registry). N6: the
-/// real device driver [`crate::wg_device::WgDeviceApplier`] implements this
-/// same trait.
+/// **N7 production default: [`crate::wg_device::WgDeviceFeed`]** (the
+/// shell-fed real device). [`WgPeerRegistry`] stays as the test/reference
+/// seam; [`crate::wg_device::WgDeviceApplier`] is the direct (pre-fed)
+/// device driver for host tests.
 pub trait WgPeerApplier: Send + Sync + 'static {
     /// Replace the registered peer set with `peers` (full snapshot
     /// semantics: the legacy wire format this client consumes carries full
@@ -275,11 +280,19 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn apply_endpoint(&self, _pub_key_b64: &str, _addr: [u8; 4], _port: u16) -> Result<(), String> {
         Err("wg-endpoint-unsupported".to_string())
     }
+    /// N7: the real data-plane status behind `connector_status()`'s `wg`
+    /// field (feed/device/ready + REAL device counters). `None` = the seam
+    /// has no device capability at all (e.g. the test registry); the status
+    /// renders the all-false default in that case, so the observation stays
+    /// honest either way.
+    fn dataplane_status(&self) -> Option<crate::wg_device::WgDataplaneStatus> {
+        None
+    }
 }
 
-/// In-process WG peer registry — the production default of
-/// [`WgPeerApplier`] until the shell feeds a WG UDP socket fd (the device
-/// driver [`crate::wg_device::WgDeviceApplier`] needs one). Honest scope:
+/// In-process WG peer registry — the N3-5..N6 production default, kept as
+/// the TEST/REFERENCE [`WgPeerApplier`] since N7 (the production default is
+/// now the shell-fed [`crate::wg_device::WgDeviceFeed`]). Honest scope:
 /// local registration + (N5c) per-peer endpoint records + `tunnel_ready()`
 /// always false (no handshakes can exist here — keep the gate fail-closed).
 #[derive(Debug, Default)]
@@ -782,6 +795,11 @@ struct StateInner {
     /// Last applied shell network-config snapshot (N3-6); `None` until the
     /// first NetworkMap arrives, reset on stop.
     net_config: Option<ShellNetworkConfig>,
+    /// N7: the UNGATED route list of the last applied map (same rendering as
+    /// the snapshot's routes). `refresh_net_gate` rebuilds the snapshot's
+    /// gated `routes` from here when live data-plane readiness moves the
+    /// default-route decision between reads.
+    net_routes_all: Vec<ShellRouteEntry>,
     /// N3-7: the (dev opt-in) force flag for the default-route gate.
     force_default_route: bool,
 }
@@ -823,6 +841,7 @@ impl ConnectorShared {
                 logout_ok: None,
                 started_at_unix: None,
                 net_config: None,
+                net_routes_all: Vec::new(),
                 force_default_route,
             }),
             running: AtomicBool::new(false),
@@ -870,6 +889,50 @@ impl ConnectorShared {
             Some(cfg) => cfg.to_json(),
             None => NO_NETWORK_MAP_JSON.to_string(),
         }
+    }
+
+    /// N7: re-decide the snapshot's default-route gate against LIVE
+    /// data-plane readiness (`wg.tunnel_ready()` on the device-backed seam ×
+    /// the ICE view). The snapshot built at sync time is gated with the
+    /// readiness THEN; with feeds/handshakes completing between syncs the
+    /// decision can move, and every status / network-config read must
+    /// reflect reality (the shell gates the platform config on this). When
+    /// the live decision differs, the gate fields AND the exported routes
+    /// are rebuilt (the default route is re-exported / re-held from the
+    /// ungated record).
+    fn refresh_net_gate(&self, wg: &dyn WgPeerApplier) {
+        let mut g = self.lock();
+        // disjoint field borrows on the guard data: `net_config.as_mut()`
+        // holds the mutable borrow of that field while the decision reads
+        // `force_default_route` / `net_routes_all`
+        let inner = &mut *g;
+        let Some(snap) = inner.net_config.as_mut() else {
+            return;
+        };
+        let ice_ready = match self.ice.get() {
+            Some(ice) => ice_ready_for_default_route(&ice.lock_poison().summary()),
+            None => true, // no orchestrator (unit-test construction): unchanged rule
+        };
+        let (allowed, reason) = ShellNetworkConfig::default_route_decision(
+            snap.peers.len(),
+            wg.tunnel_ready() && ice_ready,
+            inner.force_default_route,
+        );
+        if allowed == snap.default_route_allowed && reason == snap.default_route_reason {
+            return;
+        }
+        hilog::emit(&format!(
+            "connector: default-route gate refresh allowed={} reason={}",
+            allowed, reason
+        ));
+        snap.default_route_allowed = allowed;
+        snap.default_route_reason = reason.clone();
+        snap.routes = inner
+            .net_routes_all
+            .iter()
+            .filter(|r| !r.is_default || allowed)
+            .cloned()
+            .collect();
     }
 
     fn record_error(&self, err: &ManagementError) {
@@ -962,6 +1025,16 @@ impl ConnectorShared {
             let mut snapshot =
                 ShellNetworkConfig::from_map_gated(map, g.force_default_route, wg.tunnel_ready() && ice_ready);
             snapshot.signal = signal_uri;
+            // N7: keep the UNGATED route record so `refresh_net_gate` can
+            // re-export / re-hold the default route as live readiness moves
+            g.net_routes_all = map
+                .routes
+                .iter()
+                .map(|r| ShellRouteEntry {
+                    network: route_network_string(&r.network),
+                    is_default: r.network.is_default(),
+                })
+                .collect();
             g.net_config = Some(snapshot);
         }
         // N5c: reconcile the per-peer ICE orchestrator with the map's
@@ -1046,6 +1119,10 @@ pub struct ConnectorStatus {
     /// N5d: real signal link state (registered / reconnects / last error
     /// class). All-false default until the link registers.
     pub signal: SignalLinkStatus,
+    /// N7: WG data-plane status (feeds / device / REAL readiness + device
+    /// counters; `crate::wg_device::WgDataplaneStatus`). All-false default
+    /// when the seam has no device capability (registry — test/reference).
+    pub wg: crate::wg_device::WgDataplaneStatus,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -1072,7 +1149,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -1102,6 +1179,7 @@ impl ConnectorStatus {
             jbool("terminal", self.terminal),
             format!("\"ice\":{}", self.ice.to_json()),
             format!("\"signal\":{}", self.signal.to_json()),
+            format!("\"wg\":{}", self.wg.to_json()),
         )
     }
 }
@@ -1724,6 +1802,10 @@ pub struct ConnectorHandle {
     /// (resupply handle for `connector_signal_socket_feed`). `None` = no
     /// signal material provided (host-test construction).
     signal_sockets: Option<Arc<ProtectedSocketFdSource>>,
+    /// N7: the production WG data-plane seam when the connector was started
+    /// with one (feed handles + the pump owner). `None` = a host-injected
+    /// seam (registry / direct device applier — tests).
+    wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
     /// N5c: per-peer ICE orchestrator (status/stop surface).
     ice: Arc<Mutex<PeerIceOrchestrator>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1754,7 +1836,11 @@ impl ConnectorHandle {
     /// real signal runtime — the ICE orchestrator's send seam becomes a
     /// [`crate::peer_conn::RealSignalExchange`] and the link starts once
     /// `netbird_config.signal` (sync) and the shell-fed connect address are
-    /// both present; `None` keeps the link absent (tests).
+    /// both present; `None` keeps the link absent (tests). N7:
+    /// `wg_feed = Some(feed)` marks the PRODUCTION device-backed seam: the
+    /// handle stores the feed (resupply surface for the `connector_*_feed`
+    /// NAPI entries) and spawns the data-plane pump thread on the stop
+    /// flag. Tests injecting other seams pass `None`.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         runtime: tokio::runtime::Handle,
@@ -1771,6 +1857,7 @@ impl ConnectorHandle {
         socket_source: Option<Arc<ProtectedSocketFdSource>>,
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
         signal_material: Option<SignalMaterial>,
+        wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
     ) -> Arc<ConnectorHandle> {
         let shared = Arc::new(ConnectorShared::new(force_default_route));
         shared.set_running(true);
@@ -1838,6 +1925,12 @@ impl ConnectorHandle {
             let _ = rt.orch.set(ice.clone());
         }
         spawn_ice_pump(ice.clone(), stop_flag.clone());
+        // N7: the production data-plane pump (device-backed seam only). The
+        // pump exits on the same stop flag; with no device yet it no-ops
+        // until the shell feeds both fds.
+        if let Some(feed) = wg_feed.as_ref() {
+            feed.spawn_data_plane_pump(stop_flag.clone());
+        }
 
         let worker_deps = WorkerDeps {
             shared: shared.clone(),
@@ -1876,6 +1969,7 @@ impl ConnectorHandle {
             socket_source,
             ice_sockets,
             signal_sockets,
+            wg_feed,
             ice,
             worker: Mutex::new(Some(worker)),
             renewal: Mutex::new(Some(renewal)),
@@ -1883,8 +1977,11 @@ impl ConnectorHandle {
         })
     }
 
-    /// Current status snapshot.
+    /// Current status snapshot. N7: refreshes the default-route gate
+    /// against LIVE data-plane readiness first, so the snapshot and the
+    /// `wg` field always describe reality at read time.
     pub fn status(&self) -> ConnectorStatus {
+        self.shared.refresh_net_gate(self.wg.as_ref());
         let g = self.shared.lock();
         let running = self.shared.is_running();
         let state = g.machine.state();
@@ -1910,6 +2007,7 @@ impl ConnectorHandle {
                 .get()
                 .map(|rt| rt.status())
                 .unwrap_or_default(),
+            wg: self.wg.dataplane_status().unwrap_or_default(),
         }
     }
 
@@ -1920,8 +2018,10 @@ impl ConnectorHandle {
 
     /// The `connector_network_config()` JSON document (read-only snapshot of
     /// the last applied NetworkMap — the parts the shell applies platform
-    /// side; `no-network-map` before the first map).
+    /// side; `no-network-map` before the first map). N7: the default-route
+    /// gate is re-decided against LIVE data-plane readiness at read time.
     pub fn network_config_json(&self) -> String {
+        self.shared.refresh_net_gate(self.wg.as_ref());
         self.shared.network_config_json()
     }
 
@@ -1955,7 +2055,11 @@ impl ConnectorHandle {
         self.ice.lock_poison().stop_all();
         self.wg.clear();
         self.host.clear();
-        self.shared.lock().net_config = None;
+        {
+            let mut g = self.shared.lock();
+            g.net_config = None;
+            g.net_routes_all.clear();
+        }
         // logout is best-effort and must never block the stop
         if let Some(mut client) = self.logout_slot.lock_poison().take() {
             let shared = self.shared.clone();
@@ -2281,10 +2385,16 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
             )
         }
     };
+    // N7: the PRODUCTION WG seam — the shell-fed device slot. Without feeds
+    // the data plane never starts (tunnel_ready=false ⇒ default route held);
+    // there is no unprotected/implicit socket fallback.
+    let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
+        crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
+    ));
     let handle = ConnectorHandle::spawn(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
-        Arc::new(WgPeerRegistry::new()),
+        wg_feed.clone(),
         Arc::new(LoggingConfigApplier),
         secrets,
         config.meta.clone(),
@@ -2303,6 +2413,7 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
         }),
+        Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -2393,6 +2504,11 @@ pub fn connector_start_with_socket_json(
         }
     };
     let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
+    // N7: the PRODUCTION WG seam — the shell-fed device slot (same as
+    // connector_start; the feeds arrive later, after create()+protect)
+    let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
+        crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
+    ));
     let handle = ConnectorHandle::spawn(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::with_socket_source(
@@ -2401,7 +2517,7 @@ pub fn connector_start_with_socket_json(
             source.clone(),
             connect_addr,
         )),
-        Arc::new(WgPeerRegistry::new()),
+        wg_feed.clone(),
         Arc::new(LoggingConfigApplier),
         secrets,
         config.meta.clone(),
@@ -2420,6 +2536,7 @@ pub fn connector_start_with_socket_json(
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
         }),
+        Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -2553,6 +2670,66 @@ pub fn connector_signal_socket_feed_json(fd: i32, connect_addr_json: &str) -> St
     format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
 }
 
+/// The `connector_wg_socket_feed(fd)` implementation (N7) — shell-side feed
+/// of the PROTECTED WG outer UDP socket (native-opened via `wg_fwd_open`,
+/// then `VpnConnection.protect`ed by the shell BEFORE any datagram flows,
+/// governance §二.4). First of the two feeds the real WireGuard data plane
+/// needs; the number is validated by a dup probe and stored BORROWED (the
+/// device dups it at adopt time, never uses/closes the original — fd
+/// contract). Both feeds together bring the device up; until then the data
+/// plane stays down (`tunnel_ready=false`, default route HELD) and there is
+/// NO unprotected fallback.
+///
+/// Failure tokens (fail-closed): `no-connector`, `no-wg-device` (connector
+/// started without the device seam — host-test construction),
+/// `socket-fd-missing`, `socket-fd-invalid`. Success:
+/// `{"ok":true,"device_up":<bool>}`.
+pub fn connector_wg_socket_feed_json(fd: i32) -> String {
+    wg_feed_json(fd, FeedFdKind::WgSocket)
+}
+
+/// The `connector_tun_fd_feed(fd)` implementation (N7) — shell-side feed of
+/// the platform TUN fd from `VpnConnection.create()`. The shell KEEPS the
+/// raw fd (its close belongs exclusively to `VpnConnection.destroy()`);
+/// native consumes ONLY a dup copy via `TunFd::dup_from_raw` at device
+/// construction (fd contract). Second of the two data-plane feeds; see
+/// [`connector_wg_socket_feed_json`] for tokens and the fail-closed rules.
+pub fn connector_tun_fd_feed_json(fd: i32) -> String {
+    wg_feed_json(fd, FeedFdKind::Tun)
+}
+
+#[derive(Clone, Copy)]
+enum FeedFdKind {
+    WgSocket,
+    Tun,
+}
+
+fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let Some(feed) = handle.wg_feed.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-wg-device"));
+    };
+    let fed = match kind {
+        FeedFdKind::WgSocket => feed.feed_wg_socket(fd),
+        FeedFdKind::Tun => feed.feed_tun(fd),
+    };
+    match fed {
+        Ok(()) => format!(
+            "{{{},{}}}",
+            jbool("ok", true),
+            jbool("device_up", feed.device_up())
+        ),
+        Err(e) => format!(
+            "{{{},{}}}",
+            jbool("ok", false),
+            jstr("error", e.token())
+        ),
+    }
+}
+
 /// Parse the `{"connect_addr":"ip:port"}` argument of
 /// [`connector_start_with_socket_json`] and
 /// [`connector_signal_socket_feed_json`].
@@ -2602,6 +2779,7 @@ pub fn connector_status_json() -> String {
             terminal: false,
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
+            wg: crate::wg_device::WgDataplaneStatus::default(),
         }
         .to_json(),
     }
@@ -2775,6 +2953,7 @@ mod tests {
             terminal: true,
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
+            wg: crate::wg_device::WgDataplaneStatus::default(),
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
@@ -2932,6 +3111,18 @@ mod tests {
                 reconnects: 1,
                 last_error: Some(ErrorClass::Timeout),
             },
+            wg: crate::wg_device::WgDataplaneStatus {
+                fed_socket: true,
+                fed_tun: true,
+                device_up: true,
+                ready: true,
+                peers_with_session: 1,
+                handshakes: 3,
+                tx_packets: 9,
+                rx_packets: 8,
+                dropped_no_route: 1,
+                decrypt_errors: 2,
+            },
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -2949,6 +3140,16 @@ mod tests {
                 "\"ice\":{\"peers\":2,\"idle\":0,\"gathering\":0,\"checking\":0,\"connected\":1,\
                  \"disconnected\":0,\"failed\":1,\"endpoints_applied\":1,\"reachable\":1,\
                  \"last_error\":{\"class\":\"network\",\"status\":0}}"
+            ),
+            "{json}"
+        );
+        // N7: the WG data-plane summary (feeds / device / REAL readiness +
+        // device counters — no key material)
+        assert!(
+            json.contains(
+                "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
+                 \"peers_with_session\":1,\"handshakes\":3,\"tx_packets\":9,\"rx_packets\":8,\
+                 \"dropped_no_route\":1,\"decrypt_errors\":2}"
             ),
             "{json}"
         );
@@ -2971,6 +3172,7 @@ mod tests {
             terminal: false,
             ice: IceOrchestratorSummary::default(),
             signal: SignalLinkStatus::default(),
+            wg: crate::wg_device::WgDataplaneStatus::default(),
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -2985,6 +3187,14 @@ mod tests {
         assert!(
             empty.contains("\"signal\":{\"registered\":false,\"reconnects\":0,\"last_error\":null}"),
             "default signal summary must render: {empty}"
+        );
+        assert!(
+            empty.contains(
+                "\"wg\":{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
+                 \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
+                 \"rx_packets\":0,\"dropped_no_route\":0,\"decrypt_errors\":0}"
+            ),
+            "default wg summary must render: {empty}"
         );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
     }
@@ -3549,6 +3759,7 @@ mod tests {
             terminal: false,
             ice: orch.lock_poison().summary(),
             signal: rt.status(),
+            wg: crate::wg_device::WgDataplaneStatus::default(),
         }
         .to_json();
         assert!(
@@ -3560,5 +3771,76 @@ mod tests {
 
         // stop tears the worker down and clears the registered flag
         rt.shutdown();
+    }
+
+    /// N7: the network-config default-route gate reflects LIVE data-plane
+    /// readiness (the device-backed seam's `tunnel_ready`), not only the
+    /// readiness captured at sync time. Readiness flipping between reads
+    /// re-gates the snapshot: held ⇄ allowed, and the `0.0.0.0/0` route is
+    /// exported / re-held accordingly (rebuilt from the ungated record).
+    #[test]
+    fn network_config_gate_refreshes_with_live_tunnel_ready() {
+        struct FlipWg(AtomicBool);
+        impl WgPeerApplier for FlipWg {
+            fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+            fn tunnel_ready(&self) -> bool {
+                self.0.load(Ordering::Acquire)
+            }
+        }
+        let wg = Arc::new(FlipWg(AtomicBool::new(false)));
+        let shared = ConnectorShared::new(false);
+
+        // sync arrives while the data plane is down (the N7 production
+        // shape: feeds/handshakes complete after create()): HELD
+        shared.apply_update(
+            wg.as_ref(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let held = shared.network_config_json();
+        assert!(
+            held.contains("\"default_route\":{\"allowed\":false,\"reason\":\
+                           \"default-route-held:data-plane-not-ready\"}"),
+            "{held}"
+        );
+        assert!(!held.contains("{\"network\":\"0.0.0.0/0\""), "{held}");
+
+        // the WG session comes up between syncs: the next read re-gates
+        wg.0.store(true, Ordering::Release);
+        shared.refresh_net_gate(wg.as_ref());
+        let allowed = shared.network_config_json();
+        assert!(
+            allowed.contains(
+                "\"default_route\":{\"allowed\":true,\"reason\":\
+                 \"default-route-allowed:peers-registered-and-tunnel-ready\"}"
+            ),
+            "{allowed}"
+        );
+        assert!(
+            allowed.contains("{\"network\":\"0.0.0.0/0\",\"is_default\":true}"),
+            "allowed default route must be exported: {allowed}"
+        );
+        // non-default routes survive the rebuild unchanged
+        assert!(
+            allowed.contains("{\"network\":\"172.16.0.0/12\",\"is_default\":false}"),
+            "{allowed}"
+        );
+
+        // and it flips back when readiness is lost (session expiry shape)
+        wg.0.store(false, Ordering::Release);
+        shared.refresh_net_gate(wg.as_ref());
+        let held_again = shared.network_config_json();
+        assert!(
+            held_again.contains("\"default_route\":{\"allowed\":false"),
+            "{held_again}"
+        );
+        assert!(!held_again.contains("{\"network\":\"0.0.0.0/0\""), "{held_again}");
     }
 }

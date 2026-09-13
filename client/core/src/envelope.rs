@@ -151,6 +151,17 @@ impl EnvelopeKeyPair {
     pub fn public_key_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD.encode(self.public.as_bytes())
     }
+
+    /// N7: the SAME secret as base64 (std) for the WG device config
+    /// (`WgDeviceConfig::local_secret_b64`) — upstream reuses the WireGuard
+    /// private key for BOTH tunnel and envelope (`connect.go:243`; the
+    /// module interop cross-check proves the key domains coincide). SECRET
+    /// material: the caller must keep it out of logs / errors / Debug like
+    /// the raw bytes; being a method (not a derived formatter), no
+    /// formatting path can reach it accidentally.
+    pub fn secret_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.secret.to_bytes())
+    }
 }
 
 /// The remote peer's NaCl/X25519 public key (server key for `login()`; a
