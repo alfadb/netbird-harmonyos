@@ -1075,6 +1075,8 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
         signal: Arc::new(MockSignalEndpoint { me: key_a().to_string(), bus: bus.clone() }),
         wg: a.app.clone(),
         tie_breaker: Some(0x1111),
+        fixed_local_port: None,
+        advertised_candidates: Vec::new(),
     });
     let mut orch_b = PeerIceOrchestrator::new(PeerIceDeps {
         ifaces: Arc::new(StaticInterfaces(vec![InterfaceAddr {
@@ -1085,6 +1087,8 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
         signal: Arc::new(MockSignalEndpoint { me: key_b().to_string(), bus: bus.clone() }),
         wg: b.app.clone(),
         tie_breaker: Some(0x2222),
+        fixed_local_port: None,
+        advertised_candidates: Vec::new(),
     });
     orch_a.set_peers(&[key_b().to_string()]);
     orch_b.set_peers(&[key_a().to_string()]);

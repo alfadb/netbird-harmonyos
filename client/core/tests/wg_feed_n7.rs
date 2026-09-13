@@ -603,6 +603,7 @@ async fn connector_status_reflects_fed_device_and_stop_tears_it_down() {
         None,
         None,
         Some(slot_end.slot.clone()),
+        netbird_core::connector::HostIceTuning::default(), // N12a HOST-ONLY: defaults
     );
     let st = handle.status();
     assert!(st.wg.fed_socket && st.wg.fed_tun && st.wg.device_up, "{:?}", st.wg);

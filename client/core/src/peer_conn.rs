@@ -589,6 +589,19 @@ pub struct PeerIceDeps {
     pub wg: Arc<dyn WgPeerApplier>,
     /// tie-breaker 覆盖（测试确定性；生产 None = 每会话抽熵）。
     pub tie_breaker: Option<u64>,
+    /// **HOST-ONLY（N12a）**：本地 ICE socket 的固定绑定端口。`None` =
+    /// 临时端口（默认，设备路径与既有行为完全一致）。仅主机联调 CLI
+    /// （`nbinterop --ice-port`，经配置字段 `ice_fixed_port` 注入）设置；
+    /// 语义见 `ensure_locals` 与 `docs/self-hosted-interop-plan.md`
+    /// §端口映射 / 对外候选。不新建任何 socket——只改变 seam 所供 socket
+    /// 的 bind() 端口。
+    pub fixed_local_port: Option<u16>,
+    /// **HOST-ONLY（N12a）**：显式对外可达候选（端口映射后的
+    /// `外部IP:端口`），作为**额外的 host 型候选**随既有 signal 路径原样
+    /// 发给对端（wire 形态 = [`Candidate::marshal`]，优先级比真实 host
+    /// 候选低一档 local preference——见
+    /// [`Candidate::advertised_host_candidate`]）。默认为空 = 不通告。
+    pub advertised_candidates: Vec<Candidate>,
 }
 
 /// Per-peer ICE 编排器：`set_peers`（网络图）→ 发起/应答（signal seam）→
@@ -608,6 +621,10 @@ pub struct PeerIceOrchestrator {
     signal_ready: bool,
     /// 非网络图 peer 的 signal 帧计数（观测，不作为错误）。
     unknown_signal: u64,
+    /// HOST-ONLY（N12a）：固定绑定端口（None = 临时端口，默认）。
+    fixed_local_port: Option<u16>,
+    /// HOST-ONLY（N12a）：显式对外候选（默认空 = 不通告）。
+    advertised_candidates: Vec<Candidate>,
 }
 
 impl PeerIceOrchestrator {
@@ -623,6 +640,8 @@ impl PeerIceOrchestrator {
             peers: Vec::new(),
             signal_ready: false,
             unknown_signal: 0,
+            fixed_local_port: deps.fixed_local_port,
+            advertised_candidates: deps.advertised_candidates,
         }
     }
 
@@ -918,6 +937,19 @@ impl PeerIceOrchestrator {
     /// 绑定成功就继续；一个候选都没有 → 硬错误（不发没有候选支撑的
     /// OFFER/ANSWER，fail-closed）。成功后候选入 outbox（trickle），应答方
     /// 再补 ANSWER。
+    ///
+    /// 两条收集路径：
+    /// - **默认**（`fixed_local_port = None`，设备与既有主机行为）：
+    ///   [`crate::ice::gather_candidates`]——每接口一枚受保护 socket、
+    ///   临时端口，候选端口交给内核重分（gather 的 socket 已关）；
+    /// - **固定端口**（HOST-ONLY，N12a）：不做 per-interface 收集也不做
+    ///   STUN（端口映射场景里显式对外候选取代 srflx），取**首个允许
+    ///   接口地址**一枚候选、以 [`IceSession::add_local_candidate_fixed_port`]
+    ///   通配绑定 `0.0.0.0:<port>`（转发目的地址不可预知，通配绑定才使
+    ///   固定端口可达；上游同形：单一 `0.0.0.0:NET_PORT` 共享 socket），
+    ///   候选保留接口地址 + 固定端口（getsockname 回填校验）。
+    ///   之后 [`advertised_candidates`] 逐个以既有 wire 形态追加进 outbox
+    ///   （extra host 候选，随握手重发语义一起重发）。
     fn ensure_locals(&mut self, idx: usize) -> Result<(), ManagementError> {
         if self.peers[idx].locals_done {
             return Ok(());
@@ -929,27 +961,47 @@ impl PeerIceOrchestrator {
             self.peers[idx].creds = Some(creds);
             self.peers[idx].session = Some(session);
         }
-        let gathered = {
-            // 共享借用收敛在块内：gather 用 seam/配置（字段级 disjoint），
-            // 结果 owned，块后 peers[idx] 可再独占借用。
-            let cfg = GatherConfig {
-                blacklist: &self.blacklist,
-                servers: &self.stuns,
-                timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
-            };
-            crate::ice::gather_candidates(&cfg, self.ifaces.as_ref(), self.socks.as_ref())?
+        let fixed_port = self.fixed_local_port;
+        let (host_list, srflx_list) = match fixed_port {
+            Some(port) => {
+                let addrs = self.allowed_iface_addrs()?;
+                (addrs.first().map(|a| Candidate::host_candidate(*a, port)).into_iter().collect::<Vec<_>>(), Vec::new())
+            }
+            None => {
+                let gathered = {
+                    // 共享借用收敛在块内：gather 用 seam/配置（字段级
+                    // disjoint），结果 owned，块后 peers[idx] 可再独占借用。
+                    let cfg = GatherConfig {
+                        blacklist: &self.blacklist,
+                        servers: &self.stuns,
+                        timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+                    };
+                    crate::ice::gather_candidates(&cfg, self.ifaces.as_ref(), self.socks.as_ref())?
+                };
+                (gathered.host, gathered.srflx)
+            }
         };
         let added = {
             let peer = &mut self.peers[idx];
             let session = peer.session.as_mut().expect("session just ensured");
             let mut added = 0usize;
-            for cand in &gathered.host {
-                // 端口交给内核重分（gather 的 socket 已关，避免端口复用竞态）；
-                // add_local_candidate 返回 FINAL 候选（getsockname 回填后的
-                // 端口），直接以其线格式入 outbox（signaler.go:32-41 形态）。
+            for cand in &host_list {
                 let addr = parse_ipv4(&cand.address)?;
-                let fresh = Candidate::host_candidate(addr, 0);
-                let bound = session.add_local_candidate(fresh, self.socks.as_ref())?;
+                let fresh = match fixed_port {
+                    // 固定端口：候选保留指定端口（绑定失败 = 端口被占，
+                    // fail-closed 硬错误——绝不静默回落临时端口）。
+                    Some(_) => Candidate::host_candidate(addr, cand.port),
+                    // 默认：端口交给内核重分（gather 的 socket 已关，避免
+                    // 端口复用竞态）；add_local_candidate 返回 FINAL 候选
+                    // （getsockname 回填后的端口），直接以其线格式入 outbox
+                    //（signaler.go:32-41 形态）。
+                    None => Candidate::host_candidate(addr, 0),
+                };
+                let bound = if fixed_port.is_some() {
+                    session.add_local_candidate_fixed_port(fresh, self.socks.as_ref())?
+                } else {
+                    session.add_local_candidate(fresh, self.socks.as_ref())?
+                };
                 peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
                 peer.locals_signaled += 1;
                 added += 1;
@@ -957,7 +1009,14 @@ impl PeerIceOrchestrator {
             // srflx：N5a 的收集 socket 是一次性的（模块文档「未做项」），候选
             // 仍按上游 signaler 语义 trickle 出去；NAT 拓扑下其 pair 可能
             // 不通，host pair 才是本设计的承载路径。
-            for cand in &gathered.srflx {
+            for cand in &srflx_list {
+                peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+            }
+            // HOST-ONLY（N12a）：显式对外候选——额外的 host 型候选，wire
+            // 形态与本地 host 候选一致（[`Candidate::advertised_host_candidate`]，
+            // 优先级低一档）；仅入 signal outbox，不注册为本会话本地候选
+            // （对端检查到达时按 (本地socket × 远端候选) 配对，无需别名）。
+            for cand in &self.advertised_candidates {
                 peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
             }
             added
@@ -974,6 +1033,23 @@ impl PeerIceOrchestrator {
         }
         self.maybe_start(idx);
         Ok(())
+    }
+
+    /// 允许接口的 IPv4 地址列表（固定端口路径专用）：与 gather 相同的
+    /// 枚举 + blacklist 前缀过滤 + 去重，但**不消耗任何 socket**——固定
+    /// 端口路径整个收集阶段只消耗一枚 socket（首个候选的通配绑定）。
+    fn allowed_iface_addrs(&self) -> Result<Vec<[u8; 4]>, ManagementError> {
+        let all = self.ifaces.list()?;
+        let mut out: Vec<[u8; 4]> = Vec::new();
+        for iface in all {
+            if !crate::ice::interface_allowed(&iface.name, &self.blacklist) {
+                continue;
+            }
+            if !out.contains(&iface.addr) {
+                out.push(iface.addr);
+            }
+        }
+        Ok(out)
     }
 
     /// outbox FIFO 刷给 signal seam；失败即停（剩余帧下一拍重试）。
@@ -1190,6 +1266,7 @@ fn parse_ipv4(s: &str) -> Result<[u8; 4], ManagementError> {
 mod tests {
     use super::*;
     use crate::connector::WgPeerEntry;
+    use crate::sys;
     use std::sync::Mutex;
 
     fn noop_wg() -> Arc<dyn WgPeerApplier> {
@@ -1321,6 +1398,8 @@ mod tests {
             signal: signal.clone(),
             wg: noop_wg(),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
@@ -1362,6 +1441,8 @@ mod tests {
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         orch.set_peers(&["P1".into(), "P2".into()]);
         assert_eq!(orch.peer_keys(), vec!["P1".to_string(), "P2".to_string()]);
@@ -1410,6 +1491,8 @@ mod tests {
             signal: signal.clone(),
             wg: noop_wg(),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
@@ -1443,6 +1526,8 @@ mod tests {
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         let n = orch.set_stuns(&[
             "stun:stun.netbird.io:3478".to_string(),
@@ -1466,6 +1551,8 @@ mod tests {
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         orch.set_peers(&["P".into()]);
         let cand = Candidate::host_candidate([127, 0, 0, 1], 51820);
@@ -1475,5 +1562,159 @@ mod tests {
         orch.handle_signal("P", PeerSignalKind::Answer, "abcd:0123456789012345678901", 20)
             .expect("dropped");
         assert_eq!(orch.unknown_signal(), 1);
+    }
+
+    /// 一枚空闲 UDP 端口（绑定→读 getsockname→关闭；测试端口极少竞争，
+    /// 与既有 e2e 的临时端口获取同一量级的 TOCTOU 容忍）。
+    fn grab_free_udp_port() -> u16 {
+        let fd = crate::host_sockets::open_udp_ephemeral().expect("probe socket");
+        let port = crate::host_sockets::udp_bound_port(fd).expect("probe port");
+        unsafe { sys::close(fd) };
+        assert!(port > 0);
+        port
+    }
+
+    /// N12a（HOST-ONLY）固定端口 + 显式对外候选的信号形态：
+    /// - 固定端口路径消耗**恰好一枚** socket，通配绑定 0.0.0.0:P——候选
+    ///   端口经 getsockname 回填校验后等于指定端口（接口地址可以是本机
+    ///   不存在的 10.99.0.7：固定路径绝不按接口地址绑定）；
+    /// - 对外候选以**额外 host 型候选**入 signal（wire 形态与
+    ///   `Candidate::marshal` 一致，优先级比真实 host 低一档 = −256）。
+    #[test]
+    fn fixed_port_binds_specified_port_and_advertised_candidate_is_signaled() {
+        #[derive(Default)]
+        struct RecordingSignal {
+            frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
+        }
+        impl SignalExchange for RecordingSignal {
+            fn send(
+                &self,
+                to_key: &str,
+                kind: PeerSignalKind,
+                payload: &str,
+                _port: u32,
+            ) -> Result<(), ManagementError> {
+                self.frames
+                    .lock()
+                    .expect("frames")
+                    .push((to_key.to_string(), kind, payload.to_string()));
+                Ok(())
+            }
+        }
+
+        let port = grab_free_udp_port();
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(2, 2, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd);
+        }
+        let signal = Arc::new(RecordingSignal::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            // 不可绑定（本机不存在）的接口地址：固定路径只**枚举**地址，
+            // 绝不按它绑定——通配绑定由 add_local_candidate_fixed_port 做。
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [10, 99, 0, 7],
+            }])),
+            socks: socks.clone(),
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: Some(port),
+            advertised_candidates: vec![Candidate::advertised_host_candidate([127, 0, 0, 1], port)],
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+
+        orch.run_once(1000).expect("fixed-port locals must converge");
+        let frames = signal.frames.lock().expect("frames").clone();
+        let cands: Vec<Candidate> = frames
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Candidate)
+            .map(|(_, _, p)| Candidate::unmarshal(p).expect("wire form"))
+            .collect();
+        assert_eq!(cands.len(), 2, "one real host candidate + one advertised: {frames:?}");
+        // ① 真实 host 候选：接口地址 + 固定端口。端口 == 指定值即
+        //    getsockname 校验通过的证据（socket 确实绑到该端口）。
+        let host = cands.iter().find(|c| c.address == "10.99.0.7").expect("host candidate");
+        assert_eq!(host.port, port, "fixed port must reach the signaled candidate");
+        assert_eq!(host.priority, crate::ice::priority_for(crate::ice::CandidateType::Host));
+        // ② 对外候选：host 型、指定地址:端口、优先级低一档（−256）。
+        let adv = cands.iter().find(|c| c.address == "127.0.0.1").expect("advertised candidate");
+        assert_eq!(adv.port, port);
+        assert_eq!(adv.typ, crate::ice::CandidateType::Host);
+        assert_eq!(adv.priority, crate::ice::priority_for(crate::ice::CandidateType::Host) - 256);
+        assert_eq!(adv.marshal(), Candidate::advertised_host_candidate([127, 0, 0, 1], port).marshal());
+        // 固定端口路径的 socket 预算：整个收集恰好一枚（通配绑定）。
+        assert_eq!(socks.taken(), 1, "fixed-port gather consumes exactly one socket");
+        // marshal/unmarshal 往返一致（本机侧再验一次 wire 契约）。
+        for c in &cands {
+            assert_eq!(Candidate::unmarshal(&c.marshal()).unwrap(), *c);
+        }
+    }
+
+    /// N12a fail-closed：固定端口被占（本测试先占住它）→ 收集硬错误、
+    /// 绝不发没有候选支撑的帧、peer 留在 Idle、冷却后重试同样失败。
+    #[test]
+    fn fixed_port_conflict_fails_closed_without_signaling() {
+        #[derive(Default)]
+        struct CountingSignal {
+            frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
+        }
+        impl SignalExchange for CountingSignal {
+            fn send(
+                &self,
+                to_key: &str,
+                kind: PeerSignalKind,
+                payload: &str,
+                _port: u32,
+            ) -> Result<(), ManagementError> {
+                self.frames
+                    .lock()
+                    .expect("frames")
+                    .push((to_key.to_string(), kind, payload.to_string()));
+                Ok(())
+            }
+        }
+        let port = grab_free_udp_port();
+        // 先占住端口（0.0.0.0:P 与会话的通配绑定冲突 → EADDRINUSE）
+        let holder = {
+            let fd = unsafe { sys::socket(2, 2, 0) };
+            assert!(fd >= 0);
+            let sa = sys::sockaddr_in::new([0, 0, 0, 0], port);
+            assert_eq!(
+                unsafe { sys::bind(fd, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) },
+                0,
+                "holder bind must succeed"
+            );
+            fd
+        };
+        let signal = Arc::new(CountingSignal::default());
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        let fd = unsafe { sys::socket(2, 2, 0) };
+        assert!(fd >= 0);
+        socks.feed(fd);
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [10, 99, 0, 7],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: Some(port),
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        assert!(orch.run_once(1000).is_err(), "bind conflict must fail the gather");
+        assert!(
+            signal.frames.lock().expect("frames").is_empty(),
+            "no frame may leave without a bound candidate"
+        );
+        assert_eq!(orch.peer_status("P").expect("peer").state, PeerIceState::Idle);
+        unsafe { sys::close(holder) };
     }
 }

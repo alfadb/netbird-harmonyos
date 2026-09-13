@@ -43,6 +43,21 @@
 //!        --probe-interval <ms>  probe period (default 0 = off)
 //!        --exit-on-terminal     exit when the connector reaches a terminal
 //!                               state (exit code = error class)
+//!        --wg-port <port>       HOST-ONLY: bind the WG outer UDP socket to
+//!                               a FIXED port instead of an ephemeral one
+//!                               (host-side analog of the device's fixed
+//!                               wg_fwd_open port; for a port-mapped pod)
+//!        --ice-port <port>      HOST-ONLY: bind the peer's ICE socket to a
+//!                               FIXED port (wildcard 0.0.0.0:<port>) — the
+//!                               port the operator's UDP mapping aims at;
+//!                               default = ephemeral (unchanged behavior)
+//!        --advertise-candidate <ip:port>
+//!                               HOST-ONLY: additionally advertise this
+//!                               EXTERNALLY reachable address as an extra
+//!                               host candidate (repeatable). Needed when
+//!                               this process runs behind a port mapping:
+//!                               its own interface addresses are not
+//!                               reachable from the peer
 //!        --verbose              forward HiLog markers to stderr
 //!        --json                 accepted on selftest (report is JSON anyway)
 //!        --help                 this text
@@ -198,10 +213,23 @@ const USAGE: &str = "\
 nbinterop — host-side NetBird interop CLI (host-only; see docs/self-hosted-interop-plan.md)
 
 USAGE:
-    nbinterop selftest
+    nbinterop selftest [--wg-port <port>] [--ice-port <port>]
+                       [--advertise-candidate <ip:port>]
     nbinterop connect --config <file> [--dry-run] [--interval <ms>] [--timeout <s>]
-                      [--probe-dst <ip>] [--probe-interval <ms>] [--exit-on-terminal] [--verbose]
+                      [--probe-dst <ip>] [--probe-interval <ms>] [--exit-on-terminal]
+                      [--wg-port <port>] [--ice-port <port>]
+                      [--advertise-candidate <ip:port>]... [--verbose]
     nbinterop peer    --config <file> [same flags]
+
+HOST-ONLY port-mapping switches (N12a; no effect on the device path):
+    --wg-port <port>      WG outer socket binds a FIXED port (default: ephemeral)
+    --ice-port <port>     ICE socket binds 0.0.0.0:<port> (default: ephemeral);
+                          use the port your operator's UDP mapping aims at
+    --advertise-candidate <ip:port>
+                          advertise an EXTERNALLY reachable address as an extra
+                          host candidate (repeatable) — required when this
+                          process's own interface addresses are unreachable from
+                          the peer (e.g. a k8s pod behind a host port mapping)
 
 Credentials (management URL / private key / setup key / CA) come ONLY from
 the config file or the environment — never the command line.
@@ -223,6 +251,12 @@ struct RunOpts {
     probe_interval_ms: u64,
     exit_on_terminal: bool,
     verbose: bool,
+    /// HOST-ONLY (N12a): fixed port for the WG outer UDP socket.
+    wg_port: Option<u16>,
+    /// HOST-ONLY (N12a): fixed port for the peer's ICE socket.
+    ice_port: Option<u16>,
+    /// HOST-ONLY (N12a): externally reachable candidates to advertise.
+    advertise: Vec<String>,
 }
 
 impl Default for RunOpts {
@@ -236,6 +270,9 @@ impl Default for RunOpts {
             probe_interval_ms: 0,
             exit_on_terminal: false,
             verbose: false,
+            wg_port: None,
+            ice_port: None,
+            advertise: Vec::new(),
         }
     }
 }
@@ -357,6 +394,31 @@ fn parse_flags(args: &[String]) -> Result<(RunOpts, bool), i32> {
             }
             "--exit-on-terminal" => o.exit_on_terminal = true,
             "--verbose" => o.verbose = true,
+            "--wg-port" | "--ice-port" => {
+                let v = value(&key)?;
+                let port: u16 = v.parse().map_err(|_| {
+                    eprintln!("error: {key} '{v}' is not a valid UDP port");
+                    hs::EXIT_USAGE
+                })?;
+                if port == 0 {
+                    eprintln!("error: {key} 0 is meaningless (0 = the ephemeral default; omit the flag)");
+                    return Err(hs::EXIT_USAGE);
+                }
+                if key == "--wg-port" {
+                    o.wg_port = Some(port);
+                } else {
+                    o.ice_port = Some(port);
+                }
+            }
+            "--advertise-candidate" => {
+                let v = value("--advertise-candidate")?;
+                // fail at the CLI with exit 2, not deep inside the connector
+                if let Err(e) = netbird_core::ice::parse_advertised_candidate(&v) {
+                    eprintln!("error: --advertise-candidate '{v}': {e}");
+                    return Err(hs::EXIT_USAGE);
+                }
+                o.advertise.push(v);
+            }
             "--json" => json = true,
             other => {
                 eprintln!("error: unknown flag '{other}'\n\n{USAGE}");
@@ -373,12 +435,19 @@ fn parse_flags(args: &[String]) -> Result<(RunOpts, bool), i32> {
 // ---------------------------------------------------------------------------
 
 fn cmd_selftest(args: &[String]) -> i32 {
-    let (_, _) = match parse_flags(args) {
+    let (o, _) = match parse_flags(args) {
         Ok(v) => v,
         Err(code) => return code,
     };
     set_hilog_forward(false);
-    let outcomes = hs::run_selftest();
+    // N12a: when the host-only port-mapping flags were given, the fixed-port
+    // / advertised-candidate check exercises those EXACT values (offline).
+    let tuning = hs::CliIceTuning {
+        ice_fixed_port: o.ice_port,
+        advertised_candidates: o.advertise.clone(),
+        wg_fixed_port: o.wg_port,
+    };
+    let outcomes = hs::run_selftest_tuned(&tuning);
     println!("{}", hs::selftest_json(&outcomes));
     for o in &outcomes {
         if o.ok {
@@ -414,7 +483,14 @@ fn cmd_engine(mode: &'static str, args: &[String]) -> i32 {
     }
     set_hilog_forward(o.verbose);
 
-    let loaded = match hs::load_cli_config(&o.config) {
+    // N12a HOST-ONLY: the port-mapping flags ride into the connector config
+    // (ice_fixed_port / advertised_candidates); defaults inject nothing.
+    let tuning = hs::CliIceTuning {
+        ice_fixed_port: o.ice_port,
+        advertised_candidates: o.advertise.clone(),
+        wg_fixed_port: o.wg_port,
+    };
+    let loaded = match hs::load_cli_config_tuned(&o.config, &tuning) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("error: {e}");
@@ -479,13 +555,28 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
     eprintln!("[nbinterop] connector started (state={state}) over host-fed management socket");
 
     // ---- data-plane feeds: WG outer UDP socket + TUN stand-in ----
-    let wg_fd = match hs::open_udp_ephemeral() {
-        Ok(fd) => fd,
-        Err(e) => {
-            eprintln!("error: wg socket: {e}");
-            hs::stop_connector();
-            return hs::exit_code_for_class("network");
-        }
+    // N12a HOST-ONLY: --wg-port binds a FIXED port (the mapped outer port);
+    // the default stays ephemeral (unchanged behavior).
+    let wg_fd = match o.wg_port {
+        Some(port) => match hs::open_udp_bound(port) {
+            Ok(fd) => {
+                eprintln!("[nbinterop] wg outer socket bound to fixed port {port}");
+                fd
+            }
+            Err(e) => {
+                eprintln!("error: wg socket (fixed port {port}): {e}");
+                hs::stop_connector();
+                return hs::exit_code_for_class("network");
+            }
+        },
+        None => match hs::open_udp_ephemeral() {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("error: wg socket: {e}");
+                hs::stop_connector();
+                return hs::exit_code_for_class("network");
+            }
+        },
     };
     bag.keep(wg_fd);
     let (tun_fed, tun_hand) = match hs::open_tun_standby_pair() {
@@ -503,7 +594,20 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
         hs::stop_connector();
         return hs::exit_code_for_class("network");
     }
-    eprintln!("[nbinterop] wg outer socket (ephemeral port) + tun stand-in fed");
+    eprintln!(
+        "[nbinterop] wg outer socket ({}) + tun stand-in fed",
+        match o.wg_port {
+            Some(p) => format!("fixed port {p}"),
+            None => "ephemeral port".to_string(),
+        }
+    );
+    // N12a HOST-ONLY milestone: make the port-mapping posture observable.
+    if o.ice_port.is_some() || !o.advertise.is_empty() {
+        eprintln!(
+            "[nbinterop] host-only port-mapping mode: ice_port={:?} advertise={:?}",
+            o.ice_port, o.advertise
+        );
+    }
 
     // ---- feeder state ----
     let mut mgmt_queued: i64 = 0;

@@ -7,7 +7,7 @@
 //! `engine.go:2063-2071`) and `"ufrag:pwd"` under OFFER/ANSWER
 //! (`shared/signal/client/client.go:77`). Everything here is offline.
 
-use netbird_core::ice::{Candidate, CandidateType};
+use netbird_core::ice::{parse_advertised_candidate, Candidate, CandidateType};
 use netbird_core::management::ManagementError;
 use netbird_core::signal::proto::{body, Body};
 use prost::Message as _;
@@ -232,5 +232,85 @@ fn malformed_payloads_are_parse_errors() {
             matches!(&err, ManagementError::Parse(t) if t.starts_with("candidate:")),
             "'{payload}' misclassified: {err:?}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N12a — advertised (externally reachable) host candidates (HOST-ONLY)
+// ---------------------------------------------------------------------------
+
+/// The advertised candidate is a REGULAR host-shaped wire entry: same
+/// grammar as `Candidate::marshal` (`candidate:<f> 1 udp <prio> <addr>
+/// <port> typ host generation 0`), host type, no raddr/rport — a peer's
+/// `ice.UnmarshalCandidate` accepts it without knowing this feature exists.
+/// Priority sits exactly ONE local-preference step (256) below a genuine
+/// host candidate and above srflx ("same family as host, slightly lower").
+#[test]
+fn advertised_candidate_is_a_slightly_demoted_host_wire_entry() {
+    let host = Candidate::host_candidate([10, 98, 0, 180], 51820);
+    let adv = Candidate::advertised_host_candidate([192, 168, 50, 20], 51820);
+    // wire shape: host type, component 1, udp, no related address
+    assert_eq!(adv.typ, CandidateType::Host);
+    assert_eq!(adv.component, 1);
+    assert_eq!(adv.transport, "udp");
+    assert!(adv.related_address.is_none() && adv.related_port.is_none());
+    // priority: one local-preference step below host, still above srflx
+    assert_eq!(adv.priority, host.priority - 256);
+    let srflx = Candidate::srflx_candidate(&host, [1, 2, 3, 4], 9);
+    assert!(adv.priority > srflx.priority);
+    // marshal/unmarshal roundtrip is lossless (the task's wire-form pin)
+    let back = Candidate::unmarshal(&adv.marshal()).expect("advertised marshals");
+    assert_eq!(back, adv);
+    assert_eq!(
+        adv.marshal(),
+        format!(
+            "candidate:{} 1 udp {} 192.168.50.20 51820 typ host generation 0",
+            adv.foundation, adv.priority
+        ),
+        "exact wire form"
+    );
+    // and it survives the real proto Body envelope untouched
+    let mut body = Body::default();
+    body.r#type = body::Type::Candidate as i32;
+    body.payload = adv.marshal();
+    let bytes = body.encode_to_vec();
+    let decoded = Body::decode(&bytes[..]).expect("proto roundtrip");
+    assert_eq!(Candidate::unmarshal(&decoded.payload).unwrap(), adv);
+}
+
+/// `parse_advertised_candidate`: strict `ip:port`, rejects everything that
+/// is not an unambiguous IPv4 literal + port (fail-closed, Request class —
+/// local validation, no HTTP exchange happened).
+#[test]
+fn parse_advertised_candidate_is_strict() {
+    let ok = parse_advertised_candidate("192.168.50.20:51820").expect("canonical form");
+    assert_eq!(ok.address, "192.168.50.20");
+    assert_eq!(ok.port, 51820);
+    assert_eq!(ok.typ, CandidateType::Host);
+    // whitespace-tolerant, but nothing else loose
+    assert_eq!(
+        parse_advertised_candidate(" 10.0.0.1:3478 ").unwrap(),
+        Candidate::advertised_host_candidate([10, 0, 0, 1], 3478)
+    );
+    for bad in [
+        "192.168.50.20",        // no port
+        ":51820",               // no host
+        "192.168.50:51820",     // three octets
+        "192.168.50.20.1:5182", // five octets
+        "256.0.0.1:51820",      // octet overflow
+        "192.168.50.20:0",      // port 0
+        "192.168.50.20:99999",  // port overflow
+        "192.168.50.20:abc",    // non-numeric port
+        "[::1]:51820",          // ipv6 unsupported (udp4-only)
+        "host.example:51820",   // no DNS on this path (literal-only)
+    ] {
+        let err = parse_advertised_candidate(bad)
+            .err()
+            .unwrap_or_else(|| panic!("'{bad}' must be rejected"));
+        assert!(
+            matches!(&err, ManagementError::Request { status: 0, .. }),
+            "'{bad}' misclassified: {err:?}"
+        );
+        assert!(format!("{err}").contains("advertised-candidate"), "{err}");
     }
 }

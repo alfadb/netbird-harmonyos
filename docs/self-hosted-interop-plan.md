@@ -6,7 +6,8 @@ Copyright (C) 2026 NetBird HarmonyOS contributors
 状态：**方案 + 工具已就绪；本文档只描述配方，本文写作时未启动任何服务端/容器。**
 目标：在 **不用真机** 的前提下，验证「我们的栈（`client/core`）↔ 真实 NetBird
 服务端」的互操作：management 登录 → Sync 网络图 → signal 注册 → ICE 选路 →
-WireGuard 握手 → 双向测试包。
+WireGuard 握手 → 双向测试包。§7 增补 **端口映射 / 对外候选**（N12a）：
+pod/容器形态下固定本端 UDP 端口并显式通告对外可达候选。
 
 工具：`nbinterop` —— `client/core` 包内的 **host-only** CLI
 （`client/core/src/bin/nbinterop.rs`，复用 `client/core/src/host_sockets.rs`
@@ -31,7 +32,7 @@ ArkTS 壳创建并 `VpnConnection.protect(fd)` 后喂 fd；库的 fail-closed �
 | 把 fd + 地址喂给 `connector_start_with_socket` | 完全相同的生产入口 |
 | `connector_ice_socket_feed`（未绑定 UDP） | 相同 seam，主机自建未绑定 UDP |
 | `connector_signal_socket_feed(fd, addr)` | 相同 seam |
-| `wg_fwd_open()`（固定端口 47010）UDP | 主机变体绑定 **临时端口**（同机双实例必须端口不同） |
+| `wg_fwd_open()`（固定端口 47010）UDP | 主机变体默认绑定 **临时端口**（同机双实例必须端口不同；`--wg-port` 可显式钉住固定端口，见 §7） |
 | `connector_tun_fd_feed`（平台 TUN fd） | **socketpair 替身**（不创建内核 TUN；泵对 dup 的裸读写对数据报 socketpair 同样成立） |
 
 隔离保证（三层）：
@@ -115,7 +116,7 @@ docker compose v2、jq、curl；运行官方 `getting-started-with-zitadel.sh`
   "server_name": "netbird.example.com",
   "private_key": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
   "hostname": "interop-a",
-  "setup_key": "DED1BC68-0000-0000-0000-9E3E33B7D6F5"
+  "setup_key": "<SETUP-KEY-PLACEHOLDER-NOT-A-REAL-KEY>"
 }
 ```
 
@@ -135,6 +136,8 @@ nbinterop peer    --config F [flags]            # 对端最小模式：首个 WG
 flags: --dry-run --interval <ms> --timeout <s>
        --probe-dst <ip> --probe-interval <ms>
        --exit-on-terminal --verbose
+       --wg-port <port> --ice-port <port>       # HOST-ONLY 固定端口（§7）
+       --advertise-candidate <ip:port>          # HOST-ONLY 对外候选（§7，可重复）
 退出码: 0 ok | 1 selftest 失败 | 2 用法 | 3 配置 | 4 凭据
        | 10 network | 11 timeout | 12 auth | 13 request | 14 server | 15 parse
        | 16 unsupported_url | 17 超时未达目标 | 18 peer 未建立会话 | 19 未知类别
@@ -220,3 +223,95 @@ cargo build --offline --locked --features cli --bin nbinterop
 - `--dry-run` 与 `selftest` 之外的一切都会发起真实网络连接 —— 确认目标服务端
   是你自己搭建的靶子，不要对公网托管服务（如 netbird.io 云）跑本工具。
 - 本文档中的全部 key/域名均为示例占位，不是真实凭据。
+
+---
+
+## 7. 端口映射 / 对外候选（N12a，host-only）
+
+> 本节所有开关**只在主机联调模式生效**（`nbinterop` CLI / `host_sockets`）。
+> 设备路径不受影响：壳侧 fd 语义逐字节不变——没有壳侧 feed 就不启动；两个
+> 开关都**不新建任何 socket**（固定端口只改变 seam 所供 socket 的 `bind()`
+> 端口；对外候选只是额外的 signal 条目）。
+
+### 7.1 场景：k8s pod 里的 CLI ↔ 手机（真机目标）
+
+CLI 跑在 pod（`10.98.0.180/24`）里，手机在运维局域网 `192.168.50.0/24`
+（例：`192.168.50.199`）。pod 的接口地址对手机**不可达**，所以运维把宿主机
+局域网 IP 的端口映射进 pod：
+
+| 运维映射（宿主机 LAN IP） | pod 侧 | 用途 |
+| --- | --- | --- |
+| TCP 18080 | 18080 | management/signal 直连形态（`http://宿主机IP:18080`） |
+| UDP 3478 | 3478 | STUN（`stun:宿主机IP:3478`，可选） |
+| UDP 51820 | 51820 | 本端 peer 的 ICE/WG 数据面端口（本节主角） |
+
+### 7.2 为什么必须显式通告对外候选
+
+我们的候选收集（`ice.rs`）只通告**本机接口地址**——pod 里就是
+`10.98.0.180:P`。手机向它发包永远到不了 pod（不在同网段、无路由），ICE 检查
+全部失败。静态端口映射不是 STUN，**没有任何机制替我们把这个映射告诉对端**：
+srflx 只能发现"经 NAT 出去后的地址"，而 pod 到手机的流量根本出不了这层
+映射。因此必须由操作者显式传入"对外可达地址"（映射后的宿主机局域网
+`IP:port`），CLI 把它作为**额外的 host 型候选**随既有 signal 路径发给对端。
+同时本端 ICE socket 要绑定映射指向的 pod 侧固定端口，映射进来的包才有
+socket 可达。
+
+### 7.3 CLI 传参
+
+```bash
+# pod 侧（A）——UDP 51820 映射进本 pod
+./target/debug/nbinterop peer --config ~/n9/interop-a.json \
+    --ice-port 51820 \
+    --advertise-candidate 192.168.50.20:51820 \
+    --wg-port 51820            # 可选：仅当运维同时映射了 WG outer 端口；
+                               # 注意不要与 --ice-port 同值（同机 bind 冲突）
+# 手机侧（B）在 192.168.50.0/24 内，通常两个开关都不需要
+
+# 离线自检同样接受这些开关（仍离线，loopback 绑定）：
+./target/debug/nbinterop selftest --wg-port 51820 \
+    --advertise-candidate 192.168.50.20:51820
+```
+
+- `--ice-port <port>`（默认**不传 = 临时端口**，既有行为不变）：本端 ICE
+  socket 以**通配绑定** `0.0.0.0:<port>` 固定端口（转发目的地址不可预知，
+  通配绑定才使固定端口可达；与上游单 socket `0.0.0.0:NET_PORT` 同形）。
+  固定端口模式下整个收集只消耗一枚 socket，取首个允许接口地址作为候选地址，
+  不做 STUN/srflx 收集（对外候选在该场景取代 srflx）。绑定失败（端口被占）
+  = fail-closed 硬错误，绝不静默回落临时端口。
+- `--advertise-candidate <ip:port>`（可重复；默认不传 = 不通告）：严格
+  `IPv4 字面量:端口`。以 [`Candidate::marshal`] 的既有 wire 形态作为额外的
+  **host 型候选**发给对端（本端不注册进会话——对端检查到达时按
+  (本地 socket × 远端候选) 配对，无需别名条目）。配置文件等价字段：
+  `"advertised_candidates": ["192.168.50.20:51820"]`、`"ice_fixed_port":
+  51820`；CLI 旗标优先于文件字段。
+- `--wg-port <port>`（默认不传 = 临时端口）：WG outer UDP socket 的固定
+  端口（设备 `wg_fwd_open` 固定端口的主机侧对应物）。ICE 选中后 WG 数据
+  骑选中 socket（N11），所以**可达性取决于 `--ice-port`**；`--wg-port`
+  只是把 outer socket 也钉在映射端口上（若运维另映射了一枚）。
+
+### 7.4 对外候选的优先级取舍
+
+对外候选 = host 类型、类型偏好 126（与真实 host 候选同族），但 local
+preference 取 65534（比真实 host 候选低一档 = 优先级 −256，仍高于 srflx
+的 100）：
+
+- **不给满档 host 优先级**：在有直连路径的拓扑里，对端不会仅因候选顺序就
+  优先绕行端口映射（映射路径是人为配置的单点，能直连时绕它纯属多余）；
+- **不降到 srflx 档**：本特性就是为"只能走映射"的拓扑准备的，压得太低会
+  无谓拖慢该场景下的选路（串行检查按优先级排序）。
+
+对端按既有规则对该候选做检查、可与 prflx 派生互补；wire 形态与
+`candidate.Marshal()` 完全一致（`candidate:<foundation> 1 udp <priority>
+<address> <port> typ host generation 0`），对端无需知晓本特性即接受。
+
+### 7.5 pod 场景操作清单
+
+1. 运维完成 §7.1 的三类映射；确认 `UDP 51820 → pod:51820`。
+2. pod 侧配置文件照常（§3）；启动时加 `--ice-port 51820
+   --advertise-candidate <宿主机局域网IP>:51820`。
+3. 手机侧正常入网（NetBird 官方客户端或第二台真机联调形态）；两端候选
+   交换后，手机应能对 `宿主机IP:51820` 的候选完成检查并选中。
+4. 排错：映射未生效 → A 侧 `ice.connected` 恒 0 且 B 的检查全部超时；
+   `--advertise-candidate` 写错（写成 pod IP）→ 同样全失败——候选地址必须
+   是**手机可达**的宿主机局域网地址。自检：`nbinterop selftest` 新增
+   `host-fixed-port-candidates` 检查项（固定端口绑定 + 对外候选 wire 往返）。

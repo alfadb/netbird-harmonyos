@@ -250,6 +250,41 @@ impl Candidate {
         }
     }
 
+    /// HOST-ONLY (N12a) — extra host-type candidate for an EXTERNALLY
+    /// REACHABLE address of this peer (port-mapping scenario: the pod's
+    /// 10.98.0.180 is unreachable from the peer LAN, so the operator
+    /// explicitly advertises the mapped `host-lan-ip:port`).
+    ///
+    /// Wire form is the REGULAR host shape ([`Candidate::marshal`], the
+    /// `Body.payload` grammar): same type (`host`), same component, no
+    /// `raddr`/`rport`. Priority is ONE local-preference step BELOW a
+    /// genuine host candidate (`LOCAL_PREFERENCE - 1` ⇒ −256): the peer
+    /// ranks advertised candidates "same family as host, slightly lower" —
+    /// above srflx (type preference 100), below every real interface
+    /// address, so an advertised entry never outranks a path that probably
+    /// works directly, yet still gets checked and can be selected when it
+    /// is the only reachable one. The trade-off (documented in
+    /// `docs/self-hosted-interop-plan.md` §端口映射): advertising at full
+    /// host priority would make peers prefer the mapped address even where
+    /// a direct path exists (needless hairpin through the port mapping);
+    /// demoting it further (srflx level) would delay setup in the exact
+    /// topology this feature exists for.
+    pub fn advertised_host_candidate(addr: [u8; 4], port: u16) -> Self {
+        let address = ipv4_str(addr);
+        let priority = priority_with_local_pref(CandidateType::Host, LOCAL_PREFERENCE - 1);
+        Candidate {
+            foundation: foundation("udp", "host", &address, None),
+            component: COMPONENT_ID,
+            transport: "udp".into(),
+            priority,
+            address,
+            port,
+            typ: CandidateType::Host,
+            related_address: None,
+            related_port: None,
+        }
+    }
+
     /// The wire form `Body.payload` carries (pion `Candidate.Marshal()`):
     /// `candidate:<foundation> <component> udp <priority> <address> <port>
     /// typ <type> [raddr <addr> rport <port>] generation 0` — the RFC 8839
@@ -358,7 +393,54 @@ impl Candidate {
 /// prflx PRIORITY carried in Binding Requests (RFC 8445 §7.1.2.2: the
 /// request's PRIORITY is the local candidate's prflx-type priority).
 pub(crate) fn priority_for(typ: CandidateType) -> u32 {
-    (1 << 24) * typ.type_preference() + (1 << 8) * LOCAL_PREFERENCE + (256 - COMPONENT_ID)
+    priority_with_local_pref(typ, LOCAL_PREFERENCE)
+}
+
+/// The §5.1.2.1 formula at an explicit local preference — used by
+/// [`Candidate::advertised_host_candidate`] to sit exactly one local-
+/// preference step below the regular host candidates.
+fn priority_with_local_pref(typ: CandidateType, local_pref: u32) -> u32 {
+    (1 << 24) * typ.type_preference() + (1 << 8) * local_pref + (256 - COMPONENT_ID)
+}
+
+/// Parse one `--advertise-candidate` / `advertised_candidates[]` entry —
+/// `"ip:port"` with a STRICT dotted-quad IPv4 literal and a port in
+/// `1..=65535` — and build the advertised host candidate ([`Candidate::
+/// advertised_host_candidate`]). HOST-ONLY (N12a): the device path never
+/// feeds this; malformed input is an explicit [`ManagementError::Request`]
+/// (status 0 — local validation), never a guessed candidate.
+pub fn parse_advertised_candidate(s: &str) -> Result<Candidate, ManagementError> {
+    let bad = |why: String| {
+        ManagementError::Request {
+            status: 0,
+            message: format!("advertised-candidate: '{s}' {why} (expected ip:port)"),
+        }
+    };
+    let s = s.trim();
+    let Some((ip, port_raw)) = s.rsplit_once(':') else {
+        return Err(bad("lacks a :port".into()));
+    };
+    if ip.starts_with('[') {
+        return Err(bad("ipv6 is unsupported (udp4-only)".into()));
+    }
+    let octets: Vec<&str> = ip.split('.').collect();
+    if octets.len() != 4 {
+        return Err(bad("address is not a dotted quad".into()));
+    }
+    let mut addr = [0u8; 4];
+    for (i, o) in octets.iter().enumerate() {
+        if o.is_empty() || o.len() > 3 || !o.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad("address is not a dotted quad".into()));
+        }
+        addr[i] = o.parse().map_err(|_| bad("octet out of range".into()))?;
+    }
+    let port: u16 = port_raw
+        .parse()
+        .map_err(|_| bad("port out of range".into()))?;
+    if port == 0 {
+        return Err(bad("port 0".into()));
+    }
+    Ok(Candidate::advertised_host_candidate(addr, port))
 }
 
 /// FNV-1a 32-bit over (transport, type, address, related base) — a

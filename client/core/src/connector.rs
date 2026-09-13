@@ -646,6 +646,15 @@ pub struct ConnectorConfig {
     /// (`connector_start` without a protected socket). NOT upstream
     /// behavior; the production path is `connector_start_with_socket`.
     pub allow_unprotected_management: bool,
+    /// **HOST-ONLY（N12a）**：主机联调 CLI 的固定 ICE 端口（`--ice-port` /
+    /// 配置字段 `ice_fixed_port`）。`0` = 临时端口（默认；设备壳永不携带
+    /// 该字段，设备路径行为逐字节不变）。不新建任何 socket——只改变
+    /// seam 所供 UDP socket 的 bind() 端口。
+    pub ice_fixed_port: u16,
+    /// **HOST-ONLY（N12a）**：显式对外可达候选（`--advertise-candidate` /
+    /// 配置字段 `advertised_candidates`），额外的 host 型候选经既有 signal
+    /// 路径发给对端。默认为空 = 不通告（设备路径不变）。
+    pub advertised_candidates: Vec<crate::ice::Candidate>,
 }
 
 impl ConnectorConfig {
@@ -665,7 +674,9 @@ impl ConnectorConfig {
     ///   "connect_timeout_ms": 5000, "request_timeout_ms": 10000,
     ///   "session_renew_lead_ms": 600000, "renew_check_interval_ms": 30000,
     ///   "force_default_route": false,
-    ///   "allow_unprotected_management": false
+    ///   "allow_unprotected_management": false,
+    ///   "ice_fixed_port": 0,
+    ///   "advertised_candidates": []
     /// }
     /// ```
     ///
@@ -680,6 +691,13 @@ impl ConnectorConfig {
     /// `allow_unprotected_management` (N3-7, default FALSE): DEVELOPMENT
     /// opt-in for an UNPROTECTED direct management dial via
     /// `connector_start`. NOT upstream behavior; default is REFUSE.
+    ///
+    /// `ice_fixed_port` / `advertised_candidates` (N12a, defaults `0` /
+    /// `[]`): **HOST-ONLY** interop tuning for the port-mapping scenario —
+    /// the host CLI pins the peer's UDP port and advertises an externally
+    /// reachable candidate. Never set by the device shell; absent keys
+    /// leave the device path byte-identical (and no socket is created by
+    /// either knob — see [`HostIceTuning`]).
     pub fn from_json(text: &str) -> Result<ConnectorConfig, ConfigError> {
         let doc = config::parse_document(text)?;
         let entries = match doc {
@@ -706,6 +724,8 @@ impl ConnectorConfig {
         let mut renew_check_interval = DEFAULT_RENEW_CHECK_INTERVAL;
         let mut force_default_route = false;
         let mut allow_unprotected_management = false;
+        let mut ice_fixed_port: u16 = 0;
+        let mut advertised_candidates: Vec<crate::ice::Candidate> = Vec::new();
 
         for (key, val) in &entries {
             match key.as_str() {
@@ -769,6 +789,41 @@ impl ConnectorConfig {
                     allow_unprotected_management =
                         field_bool(val, "allow_unprotected_management")?
                 }
+                // N12a HOST-ONLY tuning (never set by the device shell —
+                // absent keys keep the device path byte-identical).
+                "ice_fixed_port" => {
+                    let p = field_u64(val, "ice_fixed_port")?;
+                    if p == 0 || p > u16::MAX as u64 {
+                        return Err(ConfigError::Field {
+                            field: "ice_fixed_port",
+                            reason: "must be a UDP port in 1..=65535".into(),
+                        });
+                    }
+                    ice_fixed_port = p as u16;
+                }
+                "advertised_candidates" => {
+                    let items = match val {
+                        Json::Arr(items) => items,
+                        _ => {
+                            return Err(ConfigError::Field {
+                                field: "advertised_candidates",
+                                reason: "expected an array of \"ip:port\" strings".into(),
+                            })
+                        }
+                    };
+                    for item in items {
+                        let s = field_str(item, "advertised_candidates")?;
+                        match crate::ice::parse_advertised_candidate(s) {
+                            Ok(c) => advertised_candidates.push(c),
+                            Err(e) => {
+                                return Err(ConfigError::Field {
+                                    field: "advertised_candidates",
+                                    reason: format!("{e}"),
+                                })
+                            }
+                        }
+                    }
+                }
                 _ => {} // unknown fields ignored
             }
         }
@@ -812,7 +867,41 @@ impl ConnectorConfig {
             renew_check_interval,
             force_default_route,
             allow_unprotected_management,
+            ice_fixed_port,
+            advertised_candidates,
         })
+    }
+}
+
+/// N12a HOST-ONLY interop tuning carried into the production orchestrator
+/// (`ConnectorHandle::spawn`; built from [`ConnectorConfig`] at the start
+/// seams). Every device config leaves both fields at their defaults
+/// (`0` / empty), which keeps the device path byte-identical: no extra
+/// socket is created anywhere — the fixed port only changes the `bind()`
+/// of a seam-provided UDP socket, and advertised candidates are extra
+/// SIGNAL entries, not sockets. See
+/// `docs/self-hosted-interop-plan.md` §端口映射 / 对外候选.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostIceTuning {
+    /// `0` = ephemeral (default).
+    pub ice_fixed_port: u16,
+    /// Extra host-type candidates signaled verbatim.
+    pub advertised_candidates: Vec<crate::ice::Candidate>,
+}
+
+impl HostIceTuning {
+    /// The defaults (`0` / empty): the exact pre-N12a behavior.
+    pub fn is_default(&self) -> bool {
+        self.ice_fixed_port == 0 && self.advertised_candidates.is_empty()
+    }
+
+    /// Extract the HOST-ONLY tuning from a parsed config (the start seams'
+    /// single construction point).
+    pub fn from_config(cfg: &ConnectorConfig) -> Self {
+        HostIceTuning {
+            ice_fixed_port: cfg.ice_fixed_port,
+            advertised_candidates: cfg.advertised_candidates.clone(),
+        }
     }
 }
 
@@ -2076,6 +2165,7 @@ impl ConnectorHandle {
         ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
         signal_material: Option<SignalMaterial>,
         wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
+        ice_tuning: HostIceTuning,
     ) -> Arc<ConnectorHandle> {
         let shared = Arc::new(ConnectorShared::new(force_default_route));
         shared.set_running(true);
@@ -2129,6 +2219,11 @@ impl ConnectorHandle {
                     signal: seam,
                     wg: wg.clone(),
                     tie_breaker: None,
+                    // N12a HOST-ONLY tuning: defaults (0/empty) in every
+                    // device config = the exact pre-N12a orchestrator.
+                    fixed_local_port: (ice_tuning.ice_fixed_port != 0)
+                        .then_some(ice_tuning.ice_fixed_port),
+                    advertised_candidates: ice_tuning.advertised_candidates.clone(),
                 })));
                 let _ = shared.ice_sockets.set(socks.clone());
                 ice_sockets = Some(socks);
@@ -2639,6 +2734,7 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
             request_timeout: config.request_timeout,
         }),
         Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
+        HostIceTuning::from_config(&config), // N12a HOST-ONLY tuning
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -2762,6 +2858,7 @@ pub fn connector_start_with_socket_json(
             request_timeout: config.request_timeout,
         }),
         Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
+        HostIceTuning::from_config(&config), // N12a HOST-ONLY tuning
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -3625,6 +3722,8 @@ mod tests {
             signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
             wg: Arc::new(ReadyWg),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         })));
         ice.lock_poison().set_peers(&["UEVFUjA=".to_string()]);
         let _ = shared.ice.set(ice.clone());
@@ -4188,6 +4287,8 @@ mod tests {
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: Arc::new(WgPeerRegistry::new()),
             tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         })));
         let _ = shared.ice.set(orch.clone());
 

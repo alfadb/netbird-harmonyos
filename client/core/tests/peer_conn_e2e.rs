@@ -282,6 +282,8 @@ impl TestOrch {
             signal: Arc::new(MockSignalEndpoint { me, bus: bus.clone() }),
             wg: wg.clone(),
             tie_breaker: Some(tie_breaker),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         let keys: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
         orch.set_peers(&keys);

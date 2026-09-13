@@ -191,6 +191,8 @@ fn spawn_node(
         signal: exchange.clone(),
         wg: wg.clone(),
         tie_breaker: Some(tie_breaker),
+        fixed_local_port: None,
+        advertised_candidates: Vec::new(),
     })));
     orch.lock().expect("orch").set_peers(&[remote_key.to_string()]);
     if answerer {

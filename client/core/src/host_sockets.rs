@@ -151,8 +151,20 @@ pub fn open_udp_unbound() -> Result<i32, HostSocketError> {
 /// device helper `wg_fwd_open` binds the FIXED `NET_PORT`, which two
 /// same-host instances cannot share; the host harness binds ephemeral.
 pub fn open_udp_ephemeral() -> Result<i32, HostSocketError> {
+    open_udp_bound(0)
+}
+
+/// One AF_INET/SOCK_DGRAM socket bound to `0.0.0.0:<port>` — the WG outer
+/// socket with a FIXED port (HOST-ONLY, N12a `--wg-port`: the host-side
+/// analog of the device's fixed-port `wg_fwd_open`, needed when the
+/// operator maps a host LAN port to this pod's outer socket). `port == 0`
+/// is exactly [`open_udp_ephemeral`]. The requested port must actually be
+/// bindable — EADDRINUSE surfaces as an honest [`HostSocketError`], never a
+/// silent fallback to an ephemeral port (a mapped peer would aim at a port
+/// nobody listens on).
+pub fn open_udp_bound(port: u16) -> Result<i32, HostSocketError> {
     let fd = open_udp_unbound()?;
-    let sa = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+    let sa = sys::sockaddr_in::new([0, 0, 0, 0], port);
     let rc = unsafe { sys::bind(fd, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
     if rc != 0 {
         let errno = sys::errno();
@@ -657,6 +669,35 @@ impl EnvSecrets {
     }
 }
 
+/// **HOST-ONLY（N12a）** — the CLI-layer ICE tuning for the port-mapping
+/// interop scenario (`nbinterop --ice-port` / `--advertise-candidate`).
+/// The values are injected into the pass-through config document as the
+/// `ice_fixed_port` / `advertised_candidates` keys (CLI flags WIN over
+/// config-file copies), which [`crate::connector::ConnectorConfig`] parses
+/// into the orchestrator's HOST-ONLY tuning. Defaults leave both keys out:
+/// the device shell never sets them and its path is untouched.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CliIceTuning {
+    /// Fixed UDP port the host peer's ICE socket binds (wildcard).
+    /// `None` = ephemeral (default, unchanged behavior).
+    pub ice_fixed_port: Option<u16>,
+    /// Externally reachable `ip:port` strings advertised as extra host
+    /// candidates (validated by `crate::ice::parse_advertised_candidate`
+    /// at config parse time).
+    pub advertised_candidates: Vec<String>,
+    /// Fixed UDP port for the WG outer socket (`--wg-port`). CLI-layer
+    /// only — the WG socket is created and fed by the host harness itself,
+    /// so nothing is injected into the config document; the selftest's
+    /// fixed-port check uses this value when no `--ice-port` was given.
+    pub wg_fixed_port: Option<u16>,
+}
+
+impl CliIceTuning {
+    pub fn is_default(&self) -> bool {
+        self.ice_fixed_port.is_none() && self.advertised_candidates.is_empty()
+    }
+}
+
 /// Redacted config facts safe for plan output and logs (public key + URL are
 /// not secrets; setup key / private key / CA are reduced to length only).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -758,6 +799,20 @@ fn read_config_file(path: &str) -> Result<String, CliError> {
 /// `NETBIRD_CA_PEM`) WIN over the file so secrets can stay out of files
 /// entirely.
 pub fn load_cli_config(path: &str) -> Result<LoadedConfig, CliError> {
+    load_cli_config_tuned(path, &CliIceTuning::default())
+}
+
+/// [`load_cli_config`] with HOST-ONLY ICE tuning (N12a): `tuning` values
+/// (from the `nbinterop --ice-port` / `--advertise-candidate` flags) are
+/// injected into the pass-through document as the `ice_fixed_port` /
+/// `advertised_candidates` keys, REPLACING any config-file copies (the CLI
+/// is the explicit host-only switch). Defaults inject nothing — the file's
+/// own copies pass through untouched and both keys stay absent in the pure
+/// device shape.
+pub fn load_cli_config_tuned(
+    path: &str,
+    tuning: &CliIceTuning,
+) -> Result<LoadedConfig, CliError> {
     let text = read_config_file(path)?;
     let doc = parse_document(&text).map_err(|e| {
         CliError::new(EXIT_CONFIG, format!("config file '{path}': invalid JSON: {e}"))
@@ -771,16 +826,17 @@ pub fn load_cli_config(path: &str) -> Result<LoadedConfig, CliError> {
             ))
         }
     };
-    load_cli_entries(entries, &EnvSecrets::from_process())
+    load_cli_entries(entries, &EnvSecrets::from_process(), tuning)
         .map_err(|e| CliError::new(e.exit_code, format!("config file '{path}': {}", e.message)))
 }
 
-/// Pure core of [`load_cli_config`] (unit-testable without files/env).
+/// Pure core of [`load_cli_config_tuned`] (unit-testable without files/env).
 /// Crate-private by design: `Json` is not part of the public surface; the
 /// CLI consumes [`load_cli_config`].
 fn load_cli_entries(
     entries: Vec<(String, Json)>,
     env: &EnvSecrets,
+    tuning: &CliIceTuning,
 ) -> Result<LoadedConfig, CliError> {
     // pull the CLI-only fields out, apply env overrides, rebuild pass-through
     let mut setup_key = String::new();
@@ -853,6 +909,25 @@ fn load_cli_entries(
     if let Some(j) = env.jwt.as_ref() {
         jwt = j.clone();
         jwt_source = "env";
+    }
+
+    // N12a HOST-ONLY: CLI tuning flags WIN over config-file copies — strip
+    // the file's `ice_fixed_port` / `advertised_candidates` and re-emit the
+    // CLI-provided ones (the pass-through is the single channel into
+    // `ConnectorConfig::from_json`; empty tuning injects nothing, so the
+    // device-shaped document stays byte-identical).
+    if let Some(port) = tuning.ice_fixed_port {
+        passthrough.retain(|e| !e.starts_with("\"ice_fixed_port\":"));
+        passthrough.push(format!("\"ice_fixed_port\":{port}"));
+    }
+    if !tuning.advertised_candidates.is_empty() {
+        passthrough.retain(|e| !e.starts_with("\"advertised_candidates\":"));
+        let items: Vec<String> = tuning
+            .advertised_candidates
+            .iter()
+            .map(|s| format!("\"{}\"", json_escape(s)))
+            .collect();
+        passthrough.push(format!("\"advertised_candidates\":[{}]", items.join(",")));
     }
 
     // early validation through the REAL parser (also derives the public key)
@@ -969,10 +1044,19 @@ pub struct CheckOutcome {
 /// Run ALL offline selftest checks. No network beyond loopback binds; no
 /// management/signal server contact; no kernel TUN.
 pub fn run_selftest() -> Vec<CheckOutcome> {
+    run_selftest_tuned(&CliIceTuning::default())
+}
+
+/// [`run_selftest`] with the HOST-ONLY N12a tuning: when the CLI was given
+/// `--wg-port` / `--ice-port` / `--advertise-candidate`, the fixed-port and
+/// advertised-candidate check exercises THOSE exact values (still offline —
+/// loopback binds only).
+pub fn run_selftest_tuned(tuning: &CliIceTuning) -> Vec<CheckOutcome> {
     vec![
         check_config_parse(),
         check_envelope_roundtrip(),
         check_ice_stun_offline(),
+        check_fixed_port_candidates(tuning),
         check_wg_loopback_pair(),
     ]
 }
@@ -1132,7 +1216,76 @@ fn ice_stun_offline_check() -> Result<String, String> {
     ))
 }
 
-/// Check 4: two in-process WG devices complete a REAL BoringTun handshake
+/// Check 4 (N12a, HOST-ONLY): fixed local bind port + advertised candidate
+/// wire contract. Offline: loopback binds only. With CLI tuning present the
+/// check uses the operator's exact values; otherwise it self-selects a free
+/// port and the matching loopback advertised address.
+fn check_fixed_port_candidates(tuning: &CliIceTuning) -> CheckOutcome {
+    check("host-fixed-port-candidates", fixed_port_candidates_check(tuning))
+}
+
+fn fixed_port_candidates_check(tuning: &CliIceTuning) -> Result<String, String> {
+    use crate::ice::{Candidate, CandidateType};
+    // ① fixed bind port: bind 0.0.0.0:<port> and verify getsockname returns
+    //    exactly that port; a second bind of the same port must fail
+    //    (EADDRINUSE — an honest conflict, never a silent fallback).
+    let port = match tuning.ice_fixed_port.or(tuning.wg_fixed_port) {
+        Some(p) => p,
+        None => {
+            // no explicit port: self-select a free one for the default run
+            let probe = open_udp_ephemeral().map_err(|e| format!("probe socket: {e}"))?;
+            let p = udp_bound_port(probe).map_err(|e| format!("probe port: {e}"))?;
+            unsafe { sys::close(probe) };
+            p
+        }
+    };
+    let bound = open_udp_bound(port).map_err(|e| format!("bind {port}: {e}"))?;
+    let got = udp_bound_port(bound).map_err(|e| format!("getsockname: {e}"))?;
+    if got != port {
+        unsafe { sys::close(bound) };
+        return Err(format!("requested port {port}, getsockname returned {got}"));
+    }
+    let conflict = open_udp_bound(port);
+    if let Ok(dup) = conflict {
+        unsafe { sys::close(dup) };
+        unsafe { sys::close(bound) };
+        return Err(format!("a second bind of port {port} must fail (EADDRINUSE)"));
+    }
+    unsafe { sys::close(bound) };
+
+    // ② advertised candidate: parse (strict ip:port) → marshal → unmarshal
+    //    roundtrip; host type, priority exactly one local-preference step
+    //    below a genuine host candidate (documented ranking).
+    let advertised: Vec<String> = if tuning.advertised_candidates.is_empty() {
+        vec![format!("127.0.0.1:{port}")]
+    } else {
+        tuning.advertised_candidates.clone()
+    };
+    let mut parsed = Vec::with_capacity(advertised.len());
+    for raw in &advertised {
+        let cand = crate::ice::parse_advertised_candidate(raw)
+            .map_err(|e| format!("advertise '{raw}': {e}"))?;
+        let wire = cand.marshal();
+        let back = Candidate::unmarshal(&wire)
+            .map_err(|e| format!("advertise '{raw}' unmarshal: {e:?}"))?;
+        if back != cand {
+            return Err(format!("advertise '{raw}': wire roundtrip mismatch"));
+        }
+        if back.typ != CandidateType::Host {
+            return Err(format!("advertise '{raw}': must be a host-type candidate"));
+        }
+        if back.priority != Candidate::host_candidate([10, 0, 0, 1], 1).priority - 256 {
+            return Err(format!("advertise '{raw}': priority must sit one step below host"));
+        }
+        parsed.push(format!("{}:{}", back.address, back.port));
+    }
+    Ok(format!(
+        "port {port} bound (getsockname verified; conflict refused); advertised {} marshal+roundtrip ok",
+        parsed.join(", ")
+    ))
+}
+
+/// Check 5: two in-process WG devices complete a REAL BoringTun handshake
 /// over loopback UDP and carry one probe packet EACH WAY through their TUN
 /// stand-ins. Same construction as `tests/wg_e2e.rs`, driven live.
 fn check_wg_loopback_pair() -> CheckOutcome {
@@ -1338,7 +1491,9 @@ mod tests {
         .unwrap();
         match entries {
             Json::Obj(entries) => {
-                let loaded = load_cli_entries(entries, &EnvSecrets::default()).unwrap();
+                let loaded =
+                    load_cli_entries(entries, &EnvSecrets::default(), &CliIceTuning::default())
+                        .unwrap();
                 // pass-through keeps the connector fields, drops the secrets
                 assert!(loaded.config_json.contains("\"management_url\""));
                 assert!(loaded.config_json.contains("\"ca_pem\":\"PEM-DATA\""));
@@ -1368,7 +1523,7 @@ mod tests {
                     management_url: Some("https://env.example:2".into()),
                     ..EnvSecrets::default()
                 };
-                let loaded2 = load_cli_entries(entries2, &env).unwrap();
+                let loaded2 = load_cli_entries(entries2, &env, &CliIceTuning::default()).unwrap();
                 assert!(loaded2.config_json.contains("env.example:2"));
                 assert!(!loaded2.config_json.contains("file.example"));
                 assert!(loaded2.secrets_json.contains("ENV-KEY"));
@@ -1392,9 +1547,122 @@ mod tests {
             Json::Obj(e) => e,
             other => panic!("expected object, got {other:?}"),
         };
-        let err = load_cli_entries(entries, &EnvSecrets::default()).unwrap_err();
+        let err = load_cli_entries(entries, &EnvSecrets::default(), &CliIceTuning::default())
+            .unwrap_err();
         assert_eq!(err.exit_code, EXIT_CREDENTIALS);
         assert!(err.message.contains(ENV_SETUP_KEY), "{}", err.message);
+    }
+
+    /// N12a (HOST-ONLY): `open_udp_bound` really binds the requested port
+    /// (getsockname) and refuses a second bind of the same port; the
+    /// default path stays ephemeral (unchanged behavior).
+    #[test]
+    fn open_udp_bound_binds_the_requested_port_and_conflicts_fail() {
+        let probe = open_udp_ephemeral().expect("probe ephemeral");
+        let port = udp_bound_port(probe).expect("probe port");
+        unsafe { sys::close(probe) };
+        assert!(port > 0);
+
+        let bound = open_udp_bound(port).expect("fixed bind");
+        assert_eq!(udp_bound_port(bound).expect("bound port"), port);
+        // second bind of the same port = honest conflict, never a fallback
+        let dup = open_udp_bound(port);
+        if let Ok(d) = dup {
+            unsafe { sys::close(d) };
+            unsafe { sys::close(bound) };
+            panic!("second bind of {port} must fail");
+        }
+        unsafe { sys::close(bound) };
+
+        // default path unchanged: ephemeral still assigns a nonzero port
+        let eph = open_udp_ephemeral().expect("ephemeral");
+        assert!(udp_bound_port(eph).expect("eph port") > 0);
+        unsafe { sys::close(eph) };
+    }
+
+    /// N12a (HOST-ONLY): CLI tuning flags are injected into the pass-through
+    /// document as the `ice_fixed_port` / `advertised_candidates` keys and
+    /// REPLACE config-file copies; empty tuning injects nothing (the
+    /// document shape is byte-identical to the pre-N12a pass-through). The
+    /// real `ConnectorConfig::from_json` accepts the injected document.
+    #[test]
+    fn cli_tuning_injection_replaces_file_keys_and_defaults_inject_nothing() {
+        let build = |body: &str| match parse_document(body) {
+            Ok(Json::Obj(e)) => e,
+            other => panic!("expected object, got {other:?}"),
+        };
+        let key = crate::util::base64(&[7u8; 32]);
+
+        // ① CLI flags replace config-file copies
+        let entries = build(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:1\",\"ice_fixed_port\":1111,\
+             \"advertised_candidates\":[\"10.9.9.9:1111\"],\"private_key\":\"{key}\",\
+             \"setup_key\":\"TEST-KEY\"}}"
+        ));
+        let tuning = CliIceTuning {
+            ice_fixed_port: Some(51820),
+            advertised_candidates: vec!["192.168.50.20:51820".into()],
+            wg_fixed_port: None,
+        };
+        let loaded = load_cli_entries(entries, &EnvSecrets::default(), &tuning).unwrap();
+        assert!(loaded.config_json.contains("\"ice_fixed_port\":51820"), "{}", loaded.config_json);
+        assert!(!loaded.config_json.contains("1111"), "{}", loaded.config_json);
+        assert!(loaded.config_json.contains("\"advertised_candidates\":[\"192.168.50.20:51820\"]"));
+        assert!(!loaded.config_json.contains("10.9.9.9"));
+        // the real parser accepts the injected document and keeps the values
+        let cfg = crate::connector::ConnectorConfig::from_json(&loaded.config_json).unwrap();
+        assert_eq!(cfg.ice_fixed_port, 51820);
+        assert_eq!(cfg.advertised_candidates.len(), 1);
+        assert_eq!(cfg.advertised_candidates[0].address, "192.168.50.20");
+        assert_eq!(cfg.advertised_candidates[0].port, 51820);
+
+        // ② empty tuning injects nothing
+        let entries = build(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:1\",\"private_key\":\"{key}\",\
+             \"setup_key\":\"TEST-KEY\"}}"
+        ));
+        let loaded = load_cli_entries(entries, &EnvSecrets::default(), &CliIceTuning::default())
+            .unwrap();
+        assert!(
+            !loaded.config_json.contains("ice_fixed_port")
+                && !loaded.config_json.contains("advertised_candidates"),
+            "{}",
+            loaded.config_json
+        );
+    }
+
+    /// N12a (HOST-ONLY): the selftest fixed-port check passes with defaults
+    /// (self-selected port) and with explicit tuning values.
+    #[test]
+    fn selftest_fixed_port_check_honors_cli_tuning() {
+        // defaults: self-selected free port, loopback advertised address
+        let outcomes = run_selftest_tuned(&CliIceTuning::default());
+        let check = outcomes.iter().find(|o| o.name == "host-fixed-port-candidates").expect("check");
+        assert!(check.ok, "{}", check.detail);
+
+        // explicit values (the CLI-acceptance shape)
+        let probe = open_udp_ephemeral().expect("probe");
+        let port = udp_bound_port(probe).expect("port");
+        unsafe { sys::close(probe) };
+        let tuning = CliIceTuning {
+            ice_fixed_port: Some(port),
+            advertised_candidates: vec![format!("127.0.0.1:{port}")],
+            wg_fixed_port: None,
+        };
+        let outcomes = run_selftest_tuned(&tuning);
+        let check = outcomes.iter().find(|o| o.name == "host-fixed-port-candidates").expect("check");
+        assert!(check.ok, "{}", check.detail);
+        assert!(check.detail.contains(&format!("{port} bound")), "{}", check.detail);
+
+        // a bad advertised address fails the check with a stable token
+        let bad = CliIceTuning {
+            ice_fixed_port: None,
+            advertised_candidates: vec!["not-an-ip:port".into()],
+            wg_fixed_port: None,
+        };
+        let outcomes = run_selftest_tuned(&bad);
+        let check = outcomes.iter().find(|o| o.name == "host-fixed-port-candidates").expect("check");
+        assert!(!check.ok, "malformed advertise must fail: {}", check.detail);
     }
 
     #[test]

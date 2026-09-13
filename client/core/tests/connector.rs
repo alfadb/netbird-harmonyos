@@ -548,6 +548,7 @@ fn spawn_connector(
         None,  // N5c: build the production (idle, signal-less) ICE orchestrator
         None,  // N5d: no signal material in the generic helper
         None,  // N7: no shell-fed WG device seam in the generic helper
+        netbird_core::connector::HostIceTuning::default(), // N12a HOST-ONLY: defaults
     )
 }
 

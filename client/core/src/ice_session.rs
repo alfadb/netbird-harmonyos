@@ -848,7 +848,37 @@ impl IceSession {
     /// [`IceEvent::LocalCandidateReady`] with the FINAL candidate.
     pub fn add_local_candidate(
         &mut self,
+        cand: Candidate,
+        socks: &dyn UdpSocketSource,
+    ) -> Result<Candidate, ManagementError> {
+        self.add_local_candidate_on(cand, false, socks)
+    }
+
+    /// HOST-ONLY (N12a) fixed-port variant: the check socket binds
+    /// `0.0.0.0:<cand.port>` (wildcard) while the candidate KEEPS its
+    /// interface address for signaling. The port-mapped interop topology
+    /// (docs/self-hosted-interop-plan.md §端口映射) forwards an external
+    /// `ip:port` to the peer's mapped local address — which socket address
+    /// the forwarded datagram carries is not knowable in advance, so the
+    /// wildcard bind is what makes a fixed port reachable at all (upstream
+    /// does the same: ONE `0.0.0.0:NET_PORT` shared ICE/WG socket,
+    /// `client/iface/bind/ice_bind.go`). Everything else — protected fd
+    /// source, dup-only consumption, fail-closed steps, getsockname port
+    /// pinning — is identical to [`IceSession::add_local_candidate`].
+    pub fn add_local_candidate_fixed_port(
+        &mut self,
+        cand: Candidate,
+        socks: &dyn UdpSocketSource,
+    ) -> Result<Candidate, ManagementError> {
+        self.add_local_candidate_on(cand, true, socks)
+    }
+
+    /// Shared body: `wildcard_bind = false` binds the candidate's own
+    /// address (default path, unchanged), `true` binds `0.0.0.0`.
+    fn add_local_candidate_on(
+        &mut self,
         mut cand: Candidate,
+        wildcard_bind: bool,
         socks: &dyn UdpSocketSource,
     ) -> Result<Candidate, ManagementError> {
         if self.stopped {
@@ -864,7 +894,8 @@ impl IceSession {
             cleanup(dup);
             return Err(seam_to_management(e));
         }
-        let local = sys::sockaddr_in::new(addr, cand.port);
+        let bind_addr = if wildcard_bind { [0, 0, 0, 0] } else { addr };
+        let local = sys::sockaddr_in::new(bind_addr, cand.port);
         if unsafe { sys::bind(dup, &local, core::mem::size_of::<sys::sockaddr_in>() as u32) } == -1 {
             let e = sys::errno();
             cleanup(dup);

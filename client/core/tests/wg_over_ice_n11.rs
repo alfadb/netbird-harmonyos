@@ -300,6 +300,8 @@ impl Node {
             signal: Arc::new(MockSignalEndpoint { me: me_key.to_string(), bus: bus.clone() }),
             wg: feed.clone(),
             tie_breaker: Some(tie_breaker),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
         });
         orch.set_peers(&[peer_key.to_string()]);
         orch.set_signal_ready(true);
