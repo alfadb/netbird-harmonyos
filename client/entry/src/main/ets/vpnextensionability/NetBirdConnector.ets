@@ -21,6 +21,14 @@ import core from 'libnetbird_core.so';
 // docs/n3-shell-integration-notes.md. File names are configurable per
 // request via the want parameters 'setupKeyFile' / 'deviceConfigFile'
 // (resolved under filesDir; no absolute-path escape is honored here).
+//
+// DEVELOPMENT-ONLY OVERRIDE (2026-09-13, device-validation aid): hdc can
+// only push files to /data/local/tmp, not into the app sandbox. When a
+// file with the SAME NAME exists under DEV_CREDENTIAL_DIR, it is read
+// INSTEAD of the filesDir copy (readCredentialFileText). That directory is
+// a world-readable device scratch path — never secure storage, never for
+// production. The fail-closed invariant is unchanged: credentials found in
+// NEITHER location still abort the start (stage=credentials, no VPN).
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -28,6 +36,9 @@ const TAG: string = 'NetBirdVpn';
 // Default file names under filesDir.
 export const DEFAULT_SETUP_KEY_FILE: string = 'netbird-setup-key';
 export const DEFAULT_DEVICE_CONFIG_FILE: string = 'netbird-device-config.json';
+// Development-time credential override directory (see the DEVELOPMENT-ONLY
+// OVERRIDE note above). Device-local absolute path, hdc-writable.
+export const DEV_CREDENTIAL_DIR: string = '/data/local/tmp';
 
 // Bounds for the network-map wait (house rule: every ArkTS-side wait is
 // bounded). The control plane needs management to answer Login+Sync before
@@ -222,6 +233,33 @@ export function readPrivateFileText(filesDir: string, fileName: string): string 
     throw new Error(`empty file under filesDir: ${fileName}`);
   }
   return text.trim();
+}
+
+// Read a credential file with the DEVELOPMENT-ONLY /data/local/tmp override
+// (DEV_CREDENTIAL_DIR — see the note at the top of this file). Same name-only
+// resolution and same fail-closed semantics as readPrivateFileText: an empty
+// override file throws; a missing/unreachable override (the app sandbox may
+// simply not see that path) falls back to filesDir; credentials found in
+// NEITHER location throw and the caller aborts the VPN start.
+export function readCredentialFileText(filesDir: string, fileName: string): string {
+  const devPath: string = `${DEV_CREDENTIAL_DIR}/${fileName}`;
+  let devAvailable: boolean = false;
+  try {
+    devAvailable = fs.accessSync(devPath);
+  } catch (error) {
+    devAvailable = false;
+  }
+  if (devAvailable) {
+    hilog.warn(DOMAIN, TAG,
+      'CRED_DEV_OVERRIDE|file=%{public}s|source=data-local-tmp|note=development-only-not-secure-storage',
+      fileName);
+    const text: string = fs.readTextSync(devPath);
+    if (text.length === 0) {
+      throw new Error(`empty dev override file: ${devPath}`);
+    }
+    return text.trim();
+  }
+  return readPrivateFileText(filesDir, fileName);
 }
 
 // Parse + minimally validate netbird-device-config.json.

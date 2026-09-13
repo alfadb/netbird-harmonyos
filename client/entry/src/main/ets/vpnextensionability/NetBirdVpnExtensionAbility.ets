@@ -12,7 +12,7 @@ import {
   STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorRouteSetApplied,
   connectorSignalFeed, connectorStartWithSocket, connectorSocketFeed, connectorStop,
   connectorTunFdFeed, connectorWgSocketFeed, mgmtSocketOpen, parseDeviceConfig,
-  parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readPrivateFileText,
+  parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull, readCredentialFileText,
   resolveManagementIp, sleep
 } from './NetBirdConnector';
 
@@ -236,9 +236,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let device: DeviceConfigFile;
     try {
       // DEVELOPMENT-TIME credential source, NOT secure storage (module doc
-      // + docs/n3-shell-integration-notes.md): plain filesDir files.
-      setupKey = readPrivateFileText(filesDir, setupKeyFile);
-      device = parseDeviceConfig(readPrivateFileText(filesDir, deviceFile));
+      // + docs/n3-shell-integration-notes.md): filesDir files, with the
+      // development-only /data/local/tmp same-name override (device
+      // validation aid — hdc cannot write into the app sandbox). Missing
+      // in BOTH locations still aborts here: no credentials, no VPN.
+      setupKey = readCredentialFileText(filesDir, setupKeyFile);
+      device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=credentials|' +
