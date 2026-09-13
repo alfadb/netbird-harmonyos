@@ -115,6 +115,25 @@
 //! The provided fd number stays borrowed (never read/written/closed here),
 //! the mgmtsock/ice borrow contract.
 //!
+//! ## N11 — WG rides the selected socket: packet demux (upstream shape)
+//!
+//! Upstream NetBird has ONE UDP socket serve both ICE and WireGuard: the WG
+//! bind owns the socket and demuxes on receive — WireGuard-shaped or
+//! non-STUN packets go to WG, STUN goes to the ICE mux
+//! (`client/iface/bind/ice_bind.go:313-345`, WG-first classification
+//! `isWireGuardMsg` at `ice_bind.go:403-421` so a WG receiver index that
+//! happens to equal the STUN magic cookie can never misroute data into the
+//! STUN handler). This module reproduces exactly that demux on ITS socket
+//! reads: [`is_wg_datagram`] first, then STUN ([`is_stun_message`] +
+//! [`parse_stun`]); everything else is non-STUN data and is queued for the
+//! WG data plane via [`IceSession::take_data_rx`]. The WG device reads
+//! NOTHING from the selected socket — this session is the sole reader, so
+//! keepalives/checks and WG transport packets coexist without stealing from
+//! each other. Egress rides the same socket: the orchestrator dups the
+//! selected local fd ([`IceSession::selected_local_fd`]) into the WG device
+//! as the peer's send socket (each layer closes only its own dup — the fd
+//! contract is unchanged).
+//!
 //! ## Error taxonomy
 //!
 //! No new error class (the six [`ManagementError`] variants suffice):
@@ -174,6 +193,57 @@ const FINGERPRINT_XOR: u32 = 0x5354_554e;
 /// RFC 5389 §10.1.2) and 487 (role conflict, RFC 8445 §7.2.5.1/§7.3.1.1).
 const ERR_UNAUTHORIZED: u16 = 401;
 pub const ERR_ROLE_CONFLICT: u16 = 487;
+
+// ---------------------------------------------------------------------------
+// N11 packet classification — WG vs STUN on a shared socket (upstream
+// client/iface/bind/ice_bind.go demux, pinned commit 791401060d2b)
+// ---------------------------------------------------------------------------
+
+/// `wgMsgTypeHandshakeInitiation` — the lowest WireGuard message type
+/// (ice_bind.go:25-27).
+const WG_MSG_TYPE_MIN: u32 = 1;
+/// `wgMsgTypeTransport` — the highest WireGuard message type
+/// (ice_bind.go:28-30).
+const WG_MSG_TYPE_MAX: u32 = 4;
+/// `wgMinMsgSize` — the smallest WG message: an empty-payload transport
+/// packet (keepalive), 32 bytes (ice_bind.go:31-33).
+pub const WG_MIN_MSG_SIZE: usize = 32;
+
+/// Upstream `isWireGuardMsg` (ice_bind.go:403-421): a little-endian u32
+/// message type in 1..=4, in a packet long enough to hold any WG message.
+/// Deliberately checked BEFORE the STUN classifier: a WG transport packet's
+/// receiver index (bytes 4..8) can coincide with the STUN magic cookie, and
+/// `stun.IsMessage` looks only at the cookie — the WG-first order is what
+/// keeps such a session's data from being misrouted into the STUN handler
+/// (ice_bind.go:408-420 comment).
+pub fn is_wg_datagram(pkt: &[u8]) -> bool {
+    if pkt.len() < WG_MIN_MSG_SIZE {
+        return false;
+    }
+    let msg_type = u32::from_le_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]);
+    (WG_MSG_TYPE_MIN..=WG_MSG_TYPE_MAX).contains(&msg_type)
+}
+
+/// pion `stun.IsMessage` shape (ice_bind.go:320 consumes it): at least a
+/// STUN header, magic cookie at bytes 4..8, and the top two bits of the
+/// first byte clear (RFC 5389 §5 — the method space). A WG packet's first
+/// byte is also < 0xC0, which is exactly why [`is_wg_datagram`] must run
+/// first.
+pub(crate) fn is_stun_message(pkt: &[u8]) -> bool {
+    pkt.len() >= HEADER_LEN
+        && u32::from_be_bytes([pkt[4], pkt[5], pkt[6], pkt[7]]) == MAGIC_COOKIE
+        && (pkt[0] & 0xC0) == 0
+}
+
+/// The upstream demux predicate verbatim (`filterOutStunMessages`,
+/// ice_bind.go:319: `isWireGuardMsg(pkt) || !stun.IsMessage(pkt)` → hand to
+/// WireGuard): true = this datagram belongs to the WG data plane, false = it
+/// is STUN and goes to the ICE machinery. The WG-shaped disjunct evaluated
+/// FIRST is what keeps a WG receiver index coinciding with the magic cookie
+/// from misrouting data into the STUN handler (ice_bind.go:408-420).
+pub(crate) fn demux_routes_to_wg(pkt: &[u8]) -> bool {
+    is_wg_datagram(pkt) || !is_stun_message(pkt)
+}
 
 // ---------------------------------------------------------------------------
 // credentials
@@ -656,6 +726,14 @@ struct LocalSock {
     fd: sys::c_int,
 }
 
+/// Cap of the outbound-of-ICE queue ([`IceSession::take_data_rx`]): non-STUN
+/// datagrams this session read but the WG data plane has not absorbed yet.
+/// Bounded so a stalled WG consumer can never grow the session without
+/// bound; overflow drops the NEWEST datagram and counts
+/// ([`IceSession::data_dropped`]) — a stalled consumer is a failure the
+/// pump must observe, not a silent unbounded buffer.
+const DATA_RX_CAP: usize = 64;
+
 struct Pair {
     local: usize,
     remote: usize,
@@ -699,6 +777,13 @@ pub struct IceSession {
     emitted_disconnected: bool,
     emitted_failed: bool,
     emitted_all_pairs_failed: bool,
+    /// N11: non-STUN (WG data-plane) datagrams read on our sockets, in
+    /// arrival order — consumed by the orchestrator via
+    /// [`IceSession::take_data_rx`] and fed to the WG device (upstream: the
+    /// shared receive loop hands non-STUN packets to WG,
+    /// ice_bind.go:279-303).
+    data_rx: VecDeque<([u8; 4], u16, Vec<u8>)>,
+    data_dropped: u64,
 }
 
 impl IceSession {
@@ -740,6 +825,8 @@ impl IceSession {
             emitted_disconnected: false,
             emitted_failed: false,
             emitted_all_pairs_failed: false,
+            data_rx: VecDeque::new(),
+            data_dropped: 0,
         })
     }
 
@@ -1088,12 +1175,39 @@ impl IceSession {
             }
             let addr = src.sin_addr;
             let port = u16::from_be(src.sin_port);
-            self.handle_inbound(idx, &buf[..n as usize], addr, port, now);
+            self.demux_inbound(idx, &buf[..n as usize], addr, port, now);
         }
     }
 
-    fn handle_inbound(&mut self, local_idx: usize, datagram: &[u8], src: [u8; 4], src_port: u16, now: u64) {
-        let Ok(parsed) = parse_stun(datagram) else { return };
+    /// N11 demux — upstream `ICEBind` receive shape (ice_bind.go:279-345):
+    /// the WG/non-STUN predicate (`demux_routes_to_wg`, the verbatim
+    /// `filterOutStunMessages` condition) is evaluated FIRST so a
+    /// cookie-overlap WG packet can never reach the STUN parser; STUN
+    /// messages go to the check/keepalive machinery (malformed STUN is
+    /// dropped at the ICE layer, ice_bind.go:332-338, not handed to WG);
+    /// everything else is queued for the WG data plane.
+    fn demux_inbound(&mut self, idx: usize, datagram: &[u8], src: [u8; 4], src_port: u16, now: u64) {
+        if demux_routes_to_wg(datagram) {
+            self.push_data_rx(src, src_port, datagram);
+            return;
+        }
+        match parse_stun(datagram) {
+            Ok(parsed) => self.handle_inbound(idx, datagram, &parsed, src, src_port, now),
+            // STUN-shaped but undecodable: dropped (upstream clears the
+            // buffer on a parse error, ice_bind.go:332-338).
+            Err(_) => {}
+        }
+    }
+
+    fn push_data_rx(&mut self, src: [u8; 4], src_port: u16, datagram: &[u8]) {
+        if self.data_rx.len() >= DATA_RX_CAP {
+            self.data_dropped += 1;
+            return;
+        }
+        self.data_rx.push_back((src, src_port, datagram.to_vec()));
+    }
+
+    fn handle_inbound(&mut self, local_idx: usize, datagram: &[u8], parsed: &ParsedStun, src: [u8; 4], src_port: u16, now: u64) {
         match parsed.msg_type {
             BINDING_REQUEST => self.on_check_request(local_idx, datagram, &parsed, src, src_port, now),
             BINDING_SUCCESS => self.on_check_response(datagram, &parsed, now),
@@ -1402,6 +1516,32 @@ impl IceSession {
         Some(self.pair_candidates(pi))
     }
 
+    /// N11: the selected pair's LOCAL socket fd (our dup) — the orchestrator
+    /// dups it into the WG device as the peer's egress so WG data rides the
+    /// selected transport. The number stays BORROWED: the consumer takes its
+    /// own dup (`dup_socket_fd`) and never closes this one (fd contract, the
+    /// `WgDeviceFeed::feed_wg_socket` borrow shape).
+    pub fn selected_local_fd(&self) -> Option<sys::c_int> {
+        let key = self.selected?;
+        let pi = self
+            .pairs
+            .iter()
+            .position(|p| p.key(&self.local_socks, &self.remote_cands) == key)?;
+        Some(self.local_socks[self.pairs[pi].local].fd)
+    }
+
+    /// N11: drain the non-STUN (WG data-plane) datagrams this session read
+    /// since the last call, in arrival order: `(src_addr, src_port, bytes)`.
+    pub fn take_data_rx(&mut self) -> Vec<([u8; 4], u16, Vec<u8>)> {
+        self.data_rx.drain(..).collect()
+    }
+
+    /// N11: datagrams dropped because the WG data plane fell
+    /// [`DATA_RX_CAP`] behind (observability; never silent loss).
+    pub fn data_dropped(&self) -> u64 {
+        self.data_dropped
+    }
+
     /// Current role (tests/inspection).
     pub fn is_controlling(&self) -> bool {
         self.controlling
@@ -1569,8 +1709,7 @@ mod tests {
     /// passes MI/FP verification with the right key; corrupting one MI or
     /// FP byte flips the verdict.
     #[test]
-    fn check_request_roundtrip_and_tamper() {
-        let req = CheckRequest {
+    fn check_request_roundtrip_and_tamper() {        let req = CheckRequest {
             username: "REMOTEufragXXXXXX:LOCALufragXXXXX".into(),
             priority: priority_for(CandidateType::Prflx),
             controlling: true,
@@ -1616,6 +1755,86 @@ mod tests {
         set_msg_len(&mut input, (msg.len() - HEADER_LEN) as u16);
         let crc = crc32_ieee(&input) ^ FINGERPRINT_XOR;
         msg[fp_off + 4..fp_off + 8].copy_from_slice(&crc.to_be_bytes());
+    }
+
+    /// N11 demux vectors (upstream ice_bind.go:403-421): all four WG message
+    /// types classify as WG at their exact wire sizes, STUN checks do not,
+    /// short WG-shaped noise does not, and the cookie-overlap transport
+    /// packet (receiver index == magic cookie) stays WG — the misroute the
+    /// upstream comment pins.
+    #[test]
+    fn wg_vs_stun_classification_matches_upstream_demux() {
+        // WG handshake initiation / response / cookie / transport-keepalive.
+        let mut init = vec![0u8; 148];
+        init[0] = 1;
+        let mut resp = vec![0u8; 92];
+        resp[0] = 2;
+        let mut cookie = vec![0u8; 64];
+        cookie[0] = 3;
+        let mut ka = vec![0u8; 32];
+        ka[0] = 4;
+        for (name, pkt) in [("init", &init[..]), ("resp", &resp[..]), ("cookie", &cookie[..]), ("ka", &ka[..])] {
+            assert!(is_wg_datagram(pkt), "{name} must classify as WG");
+        }
+        // Receiver index coincides with the STUN magic cookie: the WG-shaped
+        // disjunct runs FIRST, so the datagram routes to WG even though the
+        // cookie now sits in STUN position (ice_bind.go:408-420).
+        let mut overlap = ka.clone();
+        overlap[4..8].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
+        assert!(is_wg_datagram(&overlap), "cookie-overlap WG packet must stay WG");
+        assert!(
+            demux_routes_to_wg(&overlap),
+            "cookie-overlap WG packet must route to WG, not the STUN handler"
+        );
+        // 31 bytes = one short of wgMinMsgSize → not provably WG.
+        assert!(!is_wg_datagram(&init[..31]));
+        // A real ICE check is STUN, never WG.
+        let req = CheckRequest {
+            username: "REMOTEufragXXXXXX:LOCALufragXXXXX".into(),
+            priority: priority_for(CandidateType::Prflx),
+            controlling: true,
+            tie_breaker: 9,
+            use_candidate: false,
+            integrity_key: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef".into(),
+        };
+        let stun_req = build_check_request(&req, stun::random_transaction_id().expect("entropy"));
+        assert!(!is_wg_datagram(&stun_req), "STUN check must not classify as WG");
+        assert!(is_stun_message(&stun_req));
+        // Non-STUN non-WG noise: neither classifier claims it, and the
+        // upstream predicate routes it to WG (`!stun.IsMessage` branch).
+        let noise = vec![0xABu8; 60];
+        assert!(!is_wg_datagram(&noise) && !is_stun_message(&noise));
+        assert!(demux_routes_to_wg(&noise));
+        // Malformed STUN (cookie present, garbage attributes): STUN-shaped →
+        // NOT to WG; the ICE layer drops it after a parse failure.
+        let mut bad = stun_req.clone();
+        bad.truncate(24); // header claims more attributes than exist
+        assert!(!demux_routes_to_wg(&bad), "STUN-shaped stays out of WG");
+        assert!(parse_stun(&bad).is_err());
+    }
+
+    /// N11: the data queue is bounded — overflowing drops the newest
+    /// datagram and counts, never grows without bound.
+    #[test]
+    fn data_rx_queue_is_bounded_and_counts_drops() {
+        let mut session = IceSession::new(
+            IceCredentials { ufrag: "abcd".into(), pwd: "0123456789012345678901".into() },
+            true,
+            Some(5),
+        )
+        .expect("session");
+        let pkt = vec![4u8, 0, 0, 0, 0, 0, 0, 0]; // + padding below via full size
+        for i in 0..(DATA_RX_CAP + 8) {
+            let mut d = pkt.clone();
+            d.push(i as u8);
+            session.push_data_rx([127, 0, 0, 1], 100, &d);
+        }
+        assert_eq!(session.data_rx.len(), DATA_RX_CAP, "queue stays at cap");
+        assert_eq!(session.data_dropped(), 8, "overflow counted");
+        let drained = session.take_data_rx();
+        assert_eq!(drained.len(), DATA_RX_CAP);
+        assert_eq!(drained[0].2[0], 4, "oldest kept (arrival order)");
+        assert!(session.take_data_rx().is_empty(), "drain empties");
     }
 
     fn hex20(s: &str) -> [u8; 20] {

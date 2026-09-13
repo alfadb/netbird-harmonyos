@@ -120,6 +120,9 @@ impl WgPeerApplier for RecordingWg {
             .push((pub_key_b64.to_string(), addr, port));
         Ok(())
     }
+    fn attach_egress_socket(&self, _pub_key_b64: &str, _raw_fd: i32) -> Result<(), String> {
+        Ok(()) // N11 seam contract: a capable seam accepts the attach
+    }
 }
 
 /// What a node's signal link recorded (test-side event log).

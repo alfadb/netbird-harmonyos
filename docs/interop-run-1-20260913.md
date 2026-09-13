@@ -326,3 +326,103 @@ setup key 注册，**不需要任何外部 IdP（Zitadel）或 OIDC 交互**：
   `client/core/src/bin/nbinterop.rs`、
   `client/core/tests/{signal_mock/mod.rs,signal_channel.rs,signal_link.rs}`、
   `docs/interop-run-1-20260913.md`、`docs/n3-signal-notes.md`（未 commit/push）。
+
+---
+
+# 第三轮（N11）—— WG 骑上 ICE 选中连接，⑤⑥ 打通
+
+日期：2026-09-13 深夜（同一环境，服务端 0.78.1 原库重启，`logLevel: trace`）。
+结论先行：**N10b-4 归因的"WG 传输 socket ≠ ICE 选中 socket"已按上游架构
+修复——⑤ WG handshake 与 ⑥ 双向探针本轮全部达成（PASS）**，六项里程碑
+①–⑥ 首次全绿。侦察与实现细节见 `docs/n11-wg-over-ice-notes.md`（含上游
+`791401060d2b` 全部 文件:行号 证据）。
+
+## N11-1 上游侦察结论（方案 b：单 socket 共用 + 接收侧分用）
+
+上游（userspace 路径）让 WG bind **拥有** UDP socket，把**同一 socket**
+包成 `UniversalUDPMuxDefault` 交给 ICE agent（`iface/bind/ice_bind.go:
+293-322` → `engine.go:657` → `engine_generic.go:14-16` → `peer/ice/
+agent.go:57-58`）；接收侧在 WG 接收循环里按包类型分用：`isWireGuardMsg
+(pkt) || !stun.IsMessage(pkt)` → WG，否则 STUN → mux（`ice_bind.go:313-345`，
+WG 先判的 cookie 重叠防线 `ice_bind.go:403-421`）；direct 模式下 WG
+endpoint = `RemoteConn.RemoteAddr()`（`conn.go:453-461`）+ `ConfigureWG
+Endpoint`（`conn.go:476`）——对端地址即对端共用 socket；断开时
+`RemoveEndpointAddress`（`conn.go:531`）fail-closed，恢复靠新协商
+（`worker_ice.go:100-160` 按新 session-id recreate agent）。
+
+## N11-2 本仓实现（最小改动，全部 `client/core/**`）
+
+- `ice_session.rs`：逐字复刻上游分用谓词（`demux_routes_to_wg` =
+  `isWireGuardMsg || !stun.IsMessage`），非 STUN 包入 `data_rx` 队列
+  （有界 64、溢出计数）；新增 `selected_local_fd()` / `take_data_rx()`。
+- `wg_device.rs`：per-peer **egress fd**（选中 pair 本地 socket 的 dup，
+  `set_egress_socket`）+ `recycle_endpoint`（endpoint=None + 关 egress +
+  清战役，= `RemoveEndpointAddress`）；全部发送路径优先走 peer egress。
+- `connector.rs`：`WgPeerApplier` 新增 `attach_egress_socket`（默认
+  Err，fail-closed）/ `handle_udp_inbound` / `recycle_endpoint`；
+  `WgDeviceFeed` 完整实现并在设备重建时 **egress 先于 endpoint 重放**。
+- `peer_conn.rs`：SelectedPair → **先 attach egress 再落配 endpoint**
+  （attach 失败 ⇒ 不落配，结构性堵死 round-7 形态）；每拍把 `data_rx`
+  喂给设备；Disconnected/Failed → 回收；Failed → 拆会话 + 冷却重发起；
+  收到**不同凭证**的 Offer（Connected/Disconnected 状态）⇒ recreate 会话
+  （上游新 session-id 语义的等价物，同会话重发同值幂等不误触发）。
+- `nbinterop.rs`：新增 `[probe-recv]` ⑥ 载荷级证据（TUN stand-in 收到
+  经隧道解封装的探针帧）。
+
+fd 合同（§二.4）不变：native 只持 dup，原始号归 provider/壳侧；会话与
+设备各关各的 dup；无任何未保护回退；`tunnel_ready` 语义、allowed_ips
+路由、N3-7 默认路由闸均未改动。
+
+## N11-3 六项里程碑更新（round-8/round-9 双实例，同环境）
+
+| # | 里程碑 | 第二轮 | 第三轮（N11） | 证据（原始片段，round-9 `--verbose`） |
+| --- | --- | --- | --- | --- |
+| ①②③ | login/Sync/signal | PASS | **PASS（维持）** | `[milestone] signal registered`；服务端 trace `forwarding a new message` ×6（双向，signal.go:162） |
+| ④ | ICE Connected + 一致选路 | PASS | **PASS（维持）** | A `N5_ICE\|selected-pair\|10.98.0.180:53169` + `N11_WG\|egress-attach\|local=…:55040`；B `selected-pair|…:55040` + `egress-attach|…:53169` —— **镜像闭合** |
+| ⑤ | WG handshake | FAIL | **PASS（新达成）** | 双端 `N6_WG_DEVICE\|session-established`；status 双端 `wg:{ready:true, peers_with_session:1, handshakes:1, decrypt_errors:0}`（A tx=70/rx=84；B tx=80/rx=70，持续增长） |
+| ⑥ | 双向探针 | FAIL | **PASS（新达成）** | A：`[probe-recv] 100.102.1.90 -> 100.102.55.28 len=43 payload="nbinterop-probe"`（×70）；B：`[probe-recv] 100.102.55.28 -> 100.102.1.90 … payload="nbinterop-probe"`（×69）—— 载荷级双向送达 |
+
+**⑤⑥ 的关键新证据是"骑"本身**：A 的 egress local 地址 == B 落配的
+selected 地址（`:55040`），B 的 egress == A 的 selected（`:53169`），
+且 WG 设备不再使用自建 socket（round-7 的 `adopt|local=0.0.0.0:49599`
+现在只是兜底，握手全部从选中路径出入——`unknown_peer_drops` /
+`decrypt_errors` 全程为 0）。round-8（无 verbose）同样全绿：双端
+`peers_with_session:1, handshakes:1, decrypt_errors:0`，探针双向送达。
+B 末尾一条 `ice:disconnected` 是 A 先到 60s 超时退出后的预期静默遥测，
+非中途故障（B 的 status 时间线显示断开前 14 个采样点持续
+`connected:1, reachable:1`）。
+
+## N11-4 验收（实跑输出）
+
+1. `cargo test --offline --locked` 连跑 3 次：23 套件 **305 passed /
+   0 failed ×3**（新增 N11 套件 3 项 + 分用单测 2 项；既有测试强度
+   只增不减）。
+2. `bash client/core/build.sh` → exit 0（ELF/AArch64/frozen symbols 全过）；
+   `bash client/build.sh` → exit 0（HAP 打包校验通过）。
+3. 新增测试（`tests/wg_over_ice_n11.rs`，全部离线、注入时钟）：
+   `wg_handshake_and_probes_ride_the_ice_selected_socket`（闭环 + 三重
+   "走选中 socket"证明 + 分用共存 + 闸联动）、
+   `wg_from_a_non_selected_socket_never_establishes_a_session`（反例：
+   round-7 形态复现——握手发出、落在 ICE socket、为 WG 形态、但
+   永无会话）、`selected_connection_failure_recycles_fail_closed_then_
+   renegotiates`（+6s Disconnected 回收 → +12s Failed 拆会话 → 新协商
+   重建，闸全程 HOLD/恢复）。连跑 5 次稳定全绿。
+4. **20 轮 stress（全量套件）**：`/tmp/n11-stress/run-01..20.log`，
+   20/20 exit=0，累计 **6100 passed / 0 failed** —— 此前 14 轮未复现的
+   一次性失败（161+1）未再现。
+5. `git status` 范围：`client/core/src/{ice_session.rs,wg_device.rs,
+   connector.rs,peer_conn.rs,bin/nbinterop.rs}`、`client/core/tests/
+   {peer_conn_e2e.rs,signal_link.rs}`、`client/core/tests/
+   wg_over_ice_n11.rs`（新）、`docs/n11-wg-over-ice-notes.md`（新）、
+   本文件（未 commit/push）。
+
+## N11-5 现场与收尾
+
+- 服务端本轮以原配置重启（原 sqlite 库完好，`setup_required:false`，
+  setup key 沿用第一轮凭据，未新建任何密钥）；诊断结束**已停止、端口
+  已释放**（18080/19000/19090 TCP、3478 UDP `ss` 复验无监听）。
+- 本轮新增现场产物：`run/nb-{a,b}.round8.{jsonl,log}`、
+  `run/nb-{a,b}.round9.{jsonl,log}`、`server/logs/server-n11-boot.log`；
+  第一/二轮现场全部保留。
+- 凭据纪律：setup key 经环境变量注入（600 文件读取），argv/日志/报告/
+  仓库均无秘密值。

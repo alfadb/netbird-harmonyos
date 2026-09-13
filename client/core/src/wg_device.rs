@@ -90,6 +90,24 @@
 //!   `feed_wg_socket` 同号为幂等 no-op、异号拒绝（`socket-fd-conflict`）——
 //!   受保护外层 socket 不可换。
 
+//! ## N11：WG 骑 ICE 选中连接（egress 让渡 + 入向分用）
+//!
+//! 上游形态：ICE 与 WG 共用同一条 UDP 传输，接收侧按包类型分用（STUN →
+//! ICE mux，WG/非 STUN → WireGuard，`client/iface/bind/ice_bind.go:313-345`），
+//! WG endpoint = 对端 ICE 选中地址（`conn.go:453-460`）。本仓的对应实现：
+//!
+//! - **出向**：每个 peer 可挂一个 **egress fd**——ICE 选中 pair 本地 socket
+//!   的 **dup 副本**（[`WgDevice::set_egress_socket`]，dup-only fd 合同
+//!   不变；原始号仍归 provider/壳侧）。`send` 一律优先走 peer 的 egress
+//!   fd，未挂时回落设备自身 socket（选中前无 endpoint，实际不发）。
+//! - **入向**：设备**从不读**选中 socket——ICE 会话是唯一读者，非 STUN
+//!   包经其分用后由编排层喂给 [`WgDevice::handle_udp`]（来源匹配 peer
+//!   endpoint 的既有规则不变）。保活/检查与 WG 数据在同一条 socket 上
+//!   互不误伤。
+//! - **回收**：ICE 断开/失败 → [`WgDevice::recycle_endpoint`]：endpoint
+//!   置空（无路径可发 = fail-closed）、关 egress dup、清握手战役——绝不
+//!   静默沿用旧路径（上游 `RemoveEndpointAddress`，conn.go:531）。
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -219,6 +237,9 @@ pub struct WgPeerStatus {
     pub expired: bool,
     /// boringtun `time_since_last_handshake` seconds (-1 = no session yet).
     pub last_handshake_s: i64,
+    /// N11: local address of the attached egress socket (the ICE selected
+    /// pair's local candidate) — `None` until WG rides the selected path.
+    pub egress_local: Option<([u8; 4], u16)>,
 }
 
 /// One `handle_udp` outcome (observation surface for tests/pumps).
@@ -242,6 +263,13 @@ struct WgPeer {
     allowed_ips: Vec<([u8; 4], u8)>,
     tunnel: Tunnel,
     endpoint: Option<([u8; 4], u16)>,
+    /// N11: OUR dup of the peer's ICE-selected local socket (egress). The
+    /// raw/orig numbers (provider fd, the ICE session's own dup) belong to
+    /// their owners; only this dup is closed here. `None` → sends fall back
+    /// to the device socket (pre-selection; no endpoint exists then anyway).
+    egress_fd: Option<i32>,
+    /// getsockname of the egress dup at attach time (observability/tests).
+    egress_local: Option<([u8; 4], u16)>,
     /// Set the moment boringtun stats reports a completed handshake; see the
     /// module docs for the `tunnel_ready` semantics this feeds.
     session_established: bool,
@@ -253,6 +281,16 @@ struct WgPeer {
     last_init_ms: Option<u64>,
     /// Last outbound activity (data or keepalive), keepalive anchor.
     last_outbound_ms: Option<u64>,
+}
+
+impl Drop for WgPeer {
+    fn drop(&mut self) {
+        // N11 fd contract: exactly our egress dup; provider/ICE-session fds
+        // are never touched here.
+        if let Some(fd) = self.egress_fd.take() {
+            unsafe { sys::close(fd) };
+        }
+    }
 }
 
 impl WgPeer {
@@ -428,6 +466,8 @@ impl WgDevice {
                         allowed_ips: masked,
                         tunnel,
                         endpoint: None,
+                        egress_fd: None,
+                        egress_local: None,
                         session_established: false,
                         session_established_ms: 0,
                         expired: false,
@@ -474,6 +514,61 @@ impl WgDevice {
             self.initiate_handshake(idx, now_ms);
         }
         Ok(())
+    }
+
+    /// N11 — attach the peer's egress socket: a DUP of the ICE-selected
+    /// pair's local socket (upstream shape: WG rides the selected transport;
+    /// `conn.go:453-460` reads the remote address off that transport and
+    /// `ice_bind.go` shares the socket). The provided number is BORROWED:
+    /// dup-only, original never closed here (fd contract, same as
+    /// `adopt`/`reattach_socket`). Attach BEFORE `set_endpoint` — the
+    /// endpoint landing fires the handshake, which must leave via the
+    /// selected path. Unknown peers are REJECTED (fail-closed).
+    pub fn set_egress_socket(&mut self, pub_key_b64: &str, raw_fd: i32) -> Result<(), String> {
+        let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
+            return Err(format!("peer '{pub_key_b64}' is not registered"));
+        };
+        let fd = crate::mgmtsock::dup_socket_fd(raw_fd)
+            .map_err(|e| format!("wg-device-egress-bad-fd (errno={})", e.errno()))?;
+        let local = match getsockname(fd) {
+            Ok(l) => l,
+            Err(e) => {
+                unsafe { sys::close(fd) };
+                return Err(e);
+            }
+        };
+        if let Some(old) = self.peers[idx].egress_fd.replace(fd) {
+            unsafe { sys::close(old) }; // replaced attach: close OUR old dup only
+        }
+        self.peers[idx].egress_local = Some(local);
+        emit(&format!(
+            "N11_WG|egress-attach|local={}.{}.{}.{}:{}",
+            local.0[0], local.0[1], local.0[2], local.0[3], local.1
+        ));
+        Ok(())
+    }
+
+    /// N11 — recycle the peer's endpoint (upstream `RemoveEndpointAddress`,
+    /// `conn.go:531` on ICE disconnect): endpoint cleared (nothing can be
+    /// sent — fail-closed), egress dup closed, handshake campaign reset.
+    /// The WG session/keys are kept (rekeying on the next path is normal WG
+    /// semantics); `tunnel_ready` semantics are unchanged.
+    pub fn recycle_endpoint(&mut self, pub_key_b64: &str) {
+        let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
+            return;
+        };
+        let p = &mut self.peers[idx];
+        let had_path = p.endpoint.is_some() || p.egress_fd.is_some();
+        p.endpoint = None;
+        if let Some(fd) = p.egress_fd.take() {
+            unsafe { sys::close(fd) };
+        }
+        p.egress_local = None;
+        p.first_init_ms = None;
+        p.last_init_ms = None;
+        if had_path {
+            emit("N11_WG|endpoint-recycled");
+        }
     }
 
     /// Route + encapsulate + send one device-originated frame. Returns true
@@ -632,7 +727,8 @@ impl WgDevice {
             if op == OP_NETWORK && len > 0 {
                 if let Some(ep) = self.peers[idx].endpoint {
                     let datagram = out[..len].to_vec();
-                    if self.send_to(&datagram, ep) {
+                    let fd = self.egress_fd_of(idx);
+                    if self.send_to(fd, &datagram, ep) {
                         sent += 1;
                     }
                 }
@@ -673,7 +769,8 @@ impl WgDevice {
                 }
             }
             OP_NETWORK if len > 0 => {
-                if self.send_to(&plain[..len], src) {
+                let fd = self.egress_fd_of(idx);
+                if self.send_to(fd, &plain[..len], src) {
                     out.sent += 1;
                 }
             }
@@ -720,7 +817,8 @@ impl WgDevice {
             self.stats.send_errors += 1;
             return false;
         };
-        let sent_ok = self.send_to(&datagram, ep);
+        let fd = self.egress_fd_of(idx);
+        let sent_ok = self.send_to(fd, &datagram, ep);
         if !sent_ok {
             return false;
         }
@@ -746,7 +844,8 @@ impl WgDevice {
         let Some(ep) = self.peers[idx].endpoint else {
             return false;
         };
-        if !self.send_to(&datagram, ep) {
+        let fd = self.egress_fd_of(idx);
+        if !self.send_to(fd, &datagram, ep) {
             return false;
         }
         self.stats.tx_packets += 1;
@@ -775,7 +874,8 @@ impl WgDevice {
         let Some(ep) = self.peers[idx].endpoint else {
             return false;
         };
-        if !self.send_to(&datagram, ep) {
+        let fd = self.egress_fd_of(idx);
+        if !self.send_to(fd, &datagram, ep) {
             return false;
         }
         self.stats.tx_packets += 1;
@@ -796,7 +896,8 @@ impl WgDevice {
             }
             let datagram = ct[..len].to_vec();
             let Some(ep) = self.peers[idx].endpoint else { break };
-            if !self.send_to(&datagram, ep) {
+            let fd = self.egress_fd_of(idx);
+            if !self.send_to(fd, &datagram, ep) {
                 break;
             }
             self.stats.tx_packets += 1;
@@ -806,9 +907,11 @@ impl WgDevice {
         sent
     }
 
-    /// sendto on OUR socket dup. Returns success; failures count.
-    fn send_to(&mut self, data: &[u8], dst: ([u8; 4], u16)) -> bool {
-        let Some(fd) = self.fd else {
+    /// sendto on the given socket dup (`egress_fd_of(idx)`: the peer's
+    /// ICE-selected socket, falling back to the device socket). `None` or a
+    /// sendto failure counts `send_errors` and returns false.
+    fn send_to(&mut self, fd: Option<i32>, data: &[u8], dst: ([u8; 4], u16)) -> bool {
+        let Some(fd) = fd else {
             self.stats.send_errors += 1;
             return false;
         };
@@ -828,6 +931,12 @@ impl WgDevice {
             return false;
         }
         true
+    }
+
+    /// N11: the socket this peer's datagrams leave by — the attached egress
+    /// (ICE-selected socket dup) when present, the device socket otherwise.
+    fn egress_fd_of(&self, idx: usize) -> Option<i32> {
+        self.peers[idx].egress_fd.or(self.fd)
     }
 
     fn alloc_index(&mut self) -> Result<u32, String> {
@@ -850,6 +959,7 @@ impl WgPeer {
             session_established: self.session_established,
             expired: self.expired,
             last_handshake_s: hs,
+            egress_local: self.egress_local,
         }
     }
 }
@@ -867,6 +977,20 @@ impl Drop for WgDevice {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// N11 (tests / host CLI): derive the x25519 PUBLIC key (base64 std) of a
+/// base64(std) secret through the same frozen boringtun export the device's
+/// tunnels use — a test cannot drift from the data plane by deriving keys
+/// differently. `None` on malformed input (not base64 / not 32 bytes).
+pub fn x25519_public_b64(secret_b64: &str) -> Option<String> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(secret_b64.trim())
+        .ok()?;
+    let raw: [u8; 32] = raw.try_into().ok()?;
+    let sk = boringtun::ffi::x25519_key { key: raw };
+    let pk = boringtun::ffi::x25519_public_key(sk);
+    crate::wg::key_to_b64(pk)
+}
 
 /// base64(std) → exactly 32 nonzero-validated bytes is NOT required; 32 bytes
 /// is (boringtun parses the same form).
@@ -1049,6 +1173,23 @@ impl WgPeerApplier for WgDeviceApplier {
         let now = sys::mono_ms();
         self.device.lock_poison().set_endpoint(pub_key_b64, addr, port, now)
     }
+
+    /// N11: dup the ICE-selected local socket into the peer's egress slot
+    /// (module docs: WG rides the selected transport).
+    fn attach_egress_socket(&self, pub_key_b64: &str, raw_fd: i32) -> Result<(), String> {
+        self.device.lock_poison().set_egress_socket(pub_key_b64, raw_fd)
+    }
+
+    /// N11: hand a demuxed non-STUN datagram to the device (source-match +
+    /// decapsulate; returns reply datagrams sent).
+    fn handle_udp_inbound(&self, datagram: &[u8], src: ([u8; 4], u16), now_ms: u64) -> usize {
+        self.device.lock_poison().handle_udp(datagram, src, now_ms).sent
+    }
+
+    /// N11: recycle endpoint + egress (fail-closed on ICE teardown).
+    fn recycle_endpoint(&self, pub_key_b64: &str) {
+        self.device.lock_poison().recycle_endpoint(pub_key_b64);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1289,12 @@ struct FeedInner {
     peers: Vec<crate::connector::WgPeerEntry>,
     /// Latest endpoint per peer (upsert; replay order deterministic).
     endpoints: Vec<(String, [u8; 4], u16)>,
+    /// N11: buffered egress attach per peer (key → BORROWED raw fd of the
+    /// ICE-selected local socket), upsert; replayed BEFORE endpoints so the
+    /// replayed handshakes leave via the selected path. Each number is
+    /// dup-probe validated at buffer time and again at replay time (a
+    /// session that closed meanwhile fails loudly, never silently).
+    egress: Vec<(String, i32)>,
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
     /// Audit counters (tests + honest observation; not in the status JSON).
@@ -1302,6 +1449,15 @@ impl WgDeviceFeed {
         if let Err(e) = app.apply_peers(&g.peers) {
             return Self::build_failed(g, &format!("replay-peers-{e}"));
         }
+        // N11: egress FIRST (the selected transport), then endpoints — a
+        // replayed endpoint fires its handshake, which must leave via the
+        // selected socket. A stale buffered fd (session closed meanwhile)
+        // surfaces as a replay failure; the next ICE selection re-attaches.
+        for (key, fd) in &g.egress {
+            if let Err(e) = app.attach_egress_socket(key, *fd) {
+                emit(&format!("N11_WG_FEED|replay-egress-failed|{}", e));
+            }
+        }
         for (key, addr, port) in &g.endpoints {
             // individually validated at buffer time; a replay failure would
             // mean the peer vanished from the just-applied set — logged (the
@@ -1349,11 +1505,12 @@ impl WgPeerApplier for WgDeviceFeed {
 
     fn clear(&self) {
         let mut g = self.inner.lock_poison();
-        // full stop semantics: buffers, endpoints, fed fds and the device
-        // all go away — after a connector stop the data plane stays down
-        // until the shell re-feeds a fresh pair
+        // full stop semantics: buffers, endpoints, egress, fed fds and the
+        // device all go away — after a connector stop the data plane stays
+        // down until the shell re-feeds a fresh pair
         g.peers.clear();
         g.endpoints.clear();
+        g.egress.clear();
         g.wg_socket_raw = None;
         g.tun_raw = None;
         if let Some(d) = g.device.take() {
@@ -1388,6 +1545,55 @@ impl WgPeerApplier for WgDeviceFeed {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// N11: dup the selected socket into the live device now, or buffer the
+    /// (dup-probe-validated) number for replay at build time — same
+    /// borrowed-number discipline as the other feeds.
+    fn attach_egress_socket(&self, pub_key_b64: &str, raw_fd: i32) -> Result<(), String> {
+        if raw_fd < 0 {
+            return Err("wg-egress-fd-missing".to_string());
+        }
+        let mut g = self.inner.lock_poison();
+        if let Some(d) = g.device.as_ref() {
+            return d.attach_egress_socket(pub_key_b64, raw_fd);
+        }
+        // pre-device: validate the fd is alive, then buffer (latest wins)
+        match crate::mgmtsock::dup_socket_fd(raw_fd) {
+            Ok(probe) => unsafe { sys::close(probe); }
+            Err(e) => return Err(format!("wg-egress-fd-invalid (errno={})", e.errno())),
+        }
+        if !g.peers.iter().any(|p| p.pub_key_b64 == pub_key_b64) {
+            return Err(format!("peer '{pub_key_b64}' is not registered"));
+        }
+        if let Some(slot) = g.egress.iter_mut().find(|(k, _)| k == pub_key_b64) {
+            slot.1 = raw_fd;
+        } else {
+            g.egress.push((pub_key_b64.to_string(), raw_fd));
+        }
+        Ok(())
+    }
+
+    /// N11: demuxed inbound datagram → live device (source-matched); no
+    /// device ⇒ nothing to feed (fail-closed no-op).
+    fn handle_udp_inbound(&self, datagram: &[u8], src: ([u8; 4], u16), now_ms: u64) -> usize {
+        let g = self.inner.lock_poison();
+        match g.device.as_ref() {
+            Some(d) => d.handle_udp_inbound(datagram, src, now_ms),
+            None => 0,
+        }
+    }
+
+    /// N11: recycle endpoint + egress on the live device; pre-device, drop
+    /// the buffered endpoint/egress so a rebuild never resurrects the dead
+    /// path (fail-closed).
+    fn recycle_endpoint(&self, pub_key_b64: &str) {
+        let mut g = self.inner.lock_poison();
+        g.endpoints.retain(|(k, _, _)| k != pub_key_b64);
+        g.egress.retain(|(k, _)| k != pub_key_b64);
+        if let Some(d) = g.device.as_ref() {
+            d.recycle_endpoint(pub_key_b64);
         }
     }
 

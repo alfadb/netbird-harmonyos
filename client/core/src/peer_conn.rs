@@ -510,8 +510,8 @@ struct PeerConn {
     initiated: bool,
     /// 已绑定进会话的本地候选数（观测 + fail-closed 判断）。
     locals_signaled: usize,
-    /// 远端凭证已设置。
-    remote_creds_set: bool,
+    /// N11：当前会话的远端凭证（新协商检测：不同凭证的 Offer = 对端新会话）。
+    remote_creds: Option<IceCredentials>,
     /// 远端候选入列次数（含重复；仅用于 start 前置判断）。
     remote_cands_seen: usize,
     /// 会话已 start（进入 Checking）。
@@ -546,7 +546,7 @@ impl PeerConn {
             initiator: true,
             initiated: false,
             locals_signaled: 0,
-            remote_creds_set: false,
+            remote_creds: None,
             remote_cands_seen: 0,
             started: false,
             locals_done: false,
@@ -640,10 +640,20 @@ impl PeerIceOrchestrator {
     }
 
     /// 与网络图对账：`keys` = 有 allowed_ips 的 remote peer 公钥。新增的
-    /// 建立条目（Idle），消失的拆除（Drop 关闭其会话 socket），既有的
-    /// 保持现状（上游对网络图刷新不拆已有连接）。
+    /// 建立条目（Idle），消失的拆除（Drop 关闭其会话 socket）+ N11 回收
+    /// 其 WG endpoint/egress，既有的保持现状（上游对网络图刷新不拆已有
+    /// 连接）。
     pub fn set_peers(&mut self, keys: &[String]) {
+        let removed: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|p| !keys.contains(&p.key))
+            .map(|p| p.key.clone())
+            .collect();
         self.peers.retain(|p| keys.contains(&p.key));
+        for key in removed {
+            self.wg.recycle_endpoint(&key);
+        }
         for key in keys {
             if self.peers.iter().any(|p| &p.key == key) {
                 continue;
@@ -722,16 +732,39 @@ impl PeerIceOrchestrator {
         match kind {
             PeerSignalKind::Offer => {
                 let creds = parse_ufrag_pwd(payload)?;
+                // N11：本地会话处于 Disconnected（旧路径已死、endpoint 已
+                // 回收）时收到的 Offer = 对端重启了协商（上游按新
+                // session-id recreate agent 的形态，worker_ice.go:105-130）：
+                // 拆除死会话，走全新应答流程（新凭证、新候选、新选择）。
+                // 同理，Connected 状态下收到**不同凭证**的 Offer 也是新
+                // 协商（凭证是每会话随机生成，同会话的重发必然同值 = 幂等
+                // 去重，不会误触发）。Failed 会话已在事件处理中拆掉
+                //（session=None），天然落入全新应答路径。
+                let renegotiate = self.peers[idx].session.is_some()
+                    && (self.peers[idx].state == PeerIceState::Disconnected
+                        || (self.peers[idx].state == PeerIceState::Connected
+                            && self.peers[idx].remote_creds.as_ref() != Some(&creds)));
+                if renegotiate {
+                    let peer = &mut self.peers[idx];
+                    peer.session = None;
+                    peer.creds = None;
+                    peer.locals_done = false;
+                    peer.started = false;
+                    peer.remote_cands_seen = 0;
+                    peer.pending_remote.clear();
+                    peer.signaled.clear();
+                    peer.retry_at_ms = 0;
+                }
                 let had_session = self.peers[idx].session.is_some();
                 if !had_session {
                     // 应答方：controlled 起始（上游 signal 无角色字段；
                     // 冲突由 N5b tie-breaker 修复）。
                     let local = IceCredentials::generate()?;
                     let mut session = IceSession::new(local.clone(), false, self.tie_breaker)?;
-                    session.set_remote_credentials(creds)?;
+                    session.set_remote_credentials(creds.clone())?;
                     let peer = &mut self.peers[idx];
                     peer.creds = Some(local);
-                    peer.remote_creds_set = true;
+                    peer.remote_creds = Some(creds);
                     peer.session = Some(session);
                     peer.state = PeerIceState::Gathering;
                     peer.answer_owed = true;
@@ -744,8 +777,8 @@ impl PeerIceOrchestrator {
                     // glare（双方同时 OFFER）：已有会话，采纳对端凭证、
                     // 保留本端角色，冲突交给检查层的 tie-breaker。
                     let peer = &mut self.peers[idx];
-                    peer.session.as_mut().expect("session checked").set_remote_credentials(creds)?;
-                    peer.remote_creds_set = true;
+                    peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
+                    peer.remote_creds = Some(creds);
                 }
             }
             PeerSignalKind::Answer => {
@@ -755,8 +788,8 @@ impl PeerIceOrchestrator {
                 }
                 let creds = parse_ufrag_pwd(payload)?;
                 let peer = &mut self.peers[idx];
-                peer.session.as_mut().expect("session checked").set_remote_credentials(creds)?;
-                peer.remote_creds_set = true;
+                peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
+                peer.remote_creds = Some(creds);
             }
             PeerSignalKind::Candidate => {
                 let cand = Candidate::unmarshal(payload)?;
@@ -860,7 +893,18 @@ impl PeerIceOrchestrator {
                         }
                     }
                 }
-                self.drain_events(idx);
+                self.drain_events(idx, now_ms);
+                // N11: WG 数据面入向 —— ICE 会话分用出的非 STUN（WG）包喂给
+                // 设备（上游：共享接收循环把非 STUN 包交给 WG，
+                // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
+                // 规则不变；会话已拆（Failed 回收）则数据随之消亡（路径已死）。
+                let datagrams = match self.peers[idx].session.as_mut() {
+                    Some(s) => s.take_data_rx(),
+                    None => Vec::new(),
+                };
+                for (src, src_port, datagram) in datagrams {
+                    let _sent = self.wg.handle_udp_inbound(&datagram, (src, src_port), now_ms);
+                }
             }
         }
         match first_err {
@@ -959,7 +1003,7 @@ impl PeerIceOrchestrator {
         if self.peers[idx].started || self.peers[idx].session.is_none() {
             return;
         }
-        if !self.peers[idx].remote_creds_set
+        if self.peers[idx].remote_creds.is_none()
             || !self.peers[idx].locals_done
             || self.peers[idx].remote_cands_seen == 0
         {
@@ -987,7 +1031,7 @@ impl PeerIceOrchestrator {
         }
     }
 
-    fn drain_events(&mut self, idx: usize) {
+    fn drain_events(&mut self, idx: usize, now_ms: u64) {
         let events = match self.peers[idx].session.as_mut() {
             Some(s) => s.take_events(),
             None => return,
@@ -998,19 +1042,45 @@ impl PeerIceOrchestrator {
                     let peer = &mut self.peers[idx];
                     if let Ok(addr) = parse_ipv4(&remote.address) {
                         peer.selected_remote = Some((addr, remote.port));
-                        // ICE 选中 → WG endpoint 落配（worker_ice.go:293 →
-                        // conn.go:444-478 的本仓等价物）。落配失败 ≠ 可用：
-                        // 记 Network 类错误，不给默认路由闸任何可用信号。
-                        match self.wg.apply_endpoint(&peer.key, addr, remote.port) {
+                        // N11：WG 骑选中连接 —— 先把选中 pair 的本地 socket
+                        // dup 进设备做 egress，再落配 endpoint（落配即触发
+                        // 握手，握手必须从选中路径发出）。attach 失败 =
+                        // 路径不可骑：不落配、记错误、不给可用信号
+                        // （fail-closed，绝不回退到旧 socket 发握手——
+                        // round-7 的 bug 形态被结构性堵死）。
+                        let egress_fd =
+                            peer.session.as_ref().and_then(|s| s.selected_local_fd());
+                        let attached = match egress_fd {
+                            Some(fd) => self.wg.attach_egress_socket(&peer.key, fd),
+                            None => Err("ice:no-selected-local-socket".to_string()),
+                        };
+                        let landed = match attached {
+                            Ok(()) => self.wg.apply_endpoint(&peer.key, addr, remote.port),
+                            Err(msg) => Err(msg),
+                        };
+                        match landed {
                             Ok(()) => {
                                 peer.endpoint_applied = true;
                                 // selected-pair evidence (public runtime
                                 // material: ip + port only)
+                                let local = peer
+                                    .session
+                                    .as_ref()
+                                    .and_then(|s| s.selected_pair())
+                                    .map(|(l, _)| l);
                                 crate::hilog::emit(&format!(
                                     "N5_ICE|selected-pair|{}:{}",
                                     std::net::Ipv4Addr::from(addr),
                                     remote.port
                                 ));
+                                if let Some(l) = local {
+                                    let laddr = parse_ipv4(&l.address).unwrap_or([0, 0, 0, 0]);
+                                    crate::hilog::emit(&format!(
+                                        "N11_ICE|wg-egress|local={}:{}",
+                                        std::net::Ipv4Addr::from(laddr),
+                                        l.port
+                                    ));
+                                }
                             }
                             Err(msg) => {
                                 peer.endpoint_applied = false;
@@ -1029,12 +1099,41 @@ impl PeerIceOrchestrator {
                     peer.state = PeerIceState::Connected;
                 }
                 IceEvent::Disconnected => {
-                    self.peers[idx].state = PeerIceState::Disconnected;
+                    // N11：ICE 断开 —— 立即回收 endpoint + egress（上游
+                    // `RemoveEndpointAddress`，conn.go:531）：设备从此无路径
+                    // 可发（fail-closed），绝不静默沿用旧路径；恢复连接须经
+                    // 新一轮协商（重选 pair 后重新 attach + 落配）。
+                    let peer = &mut self.peers[idx];
+                    peer.state = PeerIceState::Disconnected;
+                    peer.endpoint_applied = false;
+                    self.wg.recycle_endpoint(&peer.key);
+                    crate::hilog::emit("N11_ICE|disconnected|endpoint-recycled");
                 }
                 IceEvent::Failed(_) => {
                     // 无 relay 的本增量：Failed → peer 不可达（绝不静默
                     // 当作可用；默认路由闸经 summary().reachable 生效）。
-                    self.peers[idx].state = PeerIceState::Failed;
+                    // N11：回收 WG 端点与 egress，并拆除死会话（关闭其
+                    // socket dup = 死路径 fail-closed）+ 冷却后重新发起
+                    // （上游：agent Failed → closeAgent → handshaker 重启
+                    // 协商，worker_ice.go:584-593 / conn.go:495-534）。
+                    let peer = &mut self.peers[idx];
+                    peer.state = PeerIceState::Failed;
+                    peer.endpoint_applied = false;
+                    peer.selected_remote = None;
+                    self.wg.recycle_endpoint(&peer.key);
+                    peer.session = None; // Drop 关闭该会话全部 dup socket
+                    peer.creds = None;
+                    peer.remote_creds = None;
+                    peer.locals_done = false;
+                    peer.started = false;
+                    peer.remote_cands_seen = 0;
+                    peer.pending_remote.clear();
+                    peer.signaled.clear();
+                    peer.outbox.clear();
+                    peer.retry_at_ms = 0;
+                    peer.initiated = false;
+                    peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                    crate::hilog::emit("N11_ICE|failed|session-dropped|renegotiation-armed");
                 }
                 IceEvent::Closed => {}
                 IceEvent::CheckSucceeded { .. } => {}

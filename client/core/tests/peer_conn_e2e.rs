@@ -192,10 +192,13 @@ impl SignalExchange for MockSignalEndpoint {
     }
 }
 
-/// Injectable WG seam: records every endpoint landing (peer, addr, port).
+/// Injectable WG seam: records every endpoint landing (peer, addr, port) and
+/// every N11 egress attach (peer; fd numbers are process-global, so only the
+/// fact + ordering vs the endpoint landing are asserted).
 #[derive(Default)]
 struct RecordingWg {
     endpoints: Mutex<Vec<(String, [u8; 4], u16)>>,
+    egress: Mutex<Vec<String>>,
 }
 
 impl RecordingWg {
@@ -210,9 +213,14 @@ impl WgPeerApplier for RecordingWg {
     }
     fn clear(&self) {
         self.endpoints.lock().expect("endpoints").clear();
+        self.egress.lock().expect("egress").clear();
     }
     fn apply_endpoint(&self, pub_key_b64: &str, addr: [u8; 4], port: u16) -> Result<(), String> {
         self.endpoints.lock().expect("endpoints").push((pub_key_b64.to_string(), addr, port));
+        Ok(())
+    }
+    fn attach_egress_socket(&self, pub_key_b64: &str, _raw_fd: i32) -> Result<(), String> {
+        self.egress.lock().expect("egress").push(pub_key_b64.to_string());
         Ok(())
     }
 }
@@ -409,6 +417,11 @@ fn dual_peer_signal_exchange_reaches_connected_and_lands_wg_endpoints() {
     // the selected address as arguments (injectable-seam assertion).
     assert_eq!(a.wg.calls(), vec![(KEY_B.to_string(), [127, 0, 0, 1], b_local_port)]);
     assert_eq!(b.wg.calls(), vec![(KEY_A.to_string(), [127, 0, 0, 1], a_local_port)]);
+    // N11: the egress attach (dup of the selected LOCAL socket) precedes the
+    // endpoint landing and happens exactly once per peer — the landing fires
+    // the handshake, which must leave via the selected path.
+    assert_eq!(*a.wg.egress.lock().expect("egress"), vec![KEY_B.to_string()]);
+    assert_eq!(*b.wg.egress.lock().expect("egress"), vec![KEY_A.to_string()]);
 
     // Role decision: the offerer is controlling, the answerer controlled.
     assert_eq!(sa.controlling, Some(true), "A offered → controlling");

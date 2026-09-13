@@ -354,6 +354,29 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn dataplane_status(&self) -> Option<crate::wg_device::WgDataplaneStatus> {
         None
     }
+    /// N11: attach the peer's egress socket — a dup of the ICE-selected
+    /// pair's LOCAL socket — so WG data leaves via the selected transport
+    /// (upstream: WG and ICE share the selected UDP path, demuxed by
+    /// `client/iface/bind/ice_bind.go`; the remote address is read off that
+    /// transport at `conn.go:453-460`). The raw number is BORROWED
+    /// (dup-only; the original belongs to its provider/session). Default:
+    /// UNSUPPORTED and loud — a seam that cannot ride the selected socket
+    /// must fail the peer's reachability, never fake it (fail-closed).
+    fn attach_egress_socket(&self, _pub_key_b64: &str, _raw_fd: i32) -> Result<(), String> {
+        Err("wg-egress-unsupported".to_string())
+    }
+    /// N11: feed one demuxed (non-STUN) datagram into the WG data plane —
+    /// the device's source-match rules apply unchanged (upstream: the
+    /// shared receive loop hands non-STUN packets to WG,
+    /// `ice_bind.go:279-303`). Returns datagrams produced in reply.
+    fn handle_udp_inbound(&self, _datagram: &[u8], _src: ([u8; 4], u16), _now_ms: u64) -> usize {
+        0
+    }
+    /// N11: recycle the peer's WG endpoint + egress after ICE teardown
+    /// (upstream `RemoveEndpointAddress`, `conn.go:531`) — afterwards the
+    /// device must not send anything for the peer (fail-closed; no silent
+    /// riding of a dead path).
+    fn recycle_endpoint(&self, _pub_key_b64: &str) {}
 }
 
 /// In-process WG peer registry — the N3-5..N6 production default, kept as
@@ -427,6 +450,12 @@ impl WgPeerApplier for WgPeerRegistry {
             eps.push((pub_key_b64.to_string(), addr, port));
         }
         Ok(())
+    }
+
+    /// N11: drop the peer's endpoint record (no egress/transport exists on
+    /// the registry seam — the honest mirror of the device-side recycle).
+    fn recycle_endpoint(&self, pub_key_b64: &str) {
+        self.endpoints.lock_poison().retain(|(k, _, _)| k != pub_key_b64);
     }
 }
 

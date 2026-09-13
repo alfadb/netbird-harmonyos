@@ -545,6 +545,11 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
             last_probe = now;
             send_probe(o, own_addr, tun_hand);
         }
+        // N11 ⑥ evidence: frames that arrived THROUGH the tunnel land on the
+        // TUN stand-in hand — drain + log them (payload-level proof).
+        if o.probe_interval_ms > 0 {
+            recv_probes(tun_hand);
+        }
 
         if !printed || now.saturating_sub(last_print) >= o.interval_ms as u128 {
             printed = true;
@@ -717,6 +722,38 @@ fn send_probe(o: &RunOpts, own_addr: Option<[u8; 4]>, tun_hand: i32) {
     let (n, errno) = sys::write_fd(tun_hand, &pkt);
     if n <= 0 {
         eprintln!("[probe] write failed (errno={errno})");
+    }
+}
+
+/// N11 ⑥ evidence: drain the TUN stand-in hand NON-BLOCKINGLY and log every
+/// decapsulated frame that arrived THROUGH the tunnel (proof the peer's
+/// probe payload reached our TUN: src/dst + the payload magic). poll-before-
+/// read with timeout 0; EAGAIN just means "nothing this round". The hand is
+/// a plain socketpair end (blocking), so reads are bounded by the poll gate
+/// and the 8-frame cap.
+fn recv_probes(tun_hand: i32) {
+    let mut got = 0usize;
+    while got < 8 {
+        let (ret, _e, rev) = sys::poll1(tun_hand, 0x0001 /* POLLIN */, 0);
+        if ret <= 0 || (rev & 0x0001) == 0 {
+            return;
+        }
+        let mut buf = [0u8; 2048];
+        let (n, _errno) = sys::read_fd(tun_hand, &mut buf);
+        if n <= 0 {
+            return;
+        }
+        got += 1;
+        let n = n as usize;
+        let frame = &buf[..n];
+        if frame.len() >= 28 {
+            let src = std::net::Ipv4Addr::new(frame[12], frame[13], frame[14], frame[15]);
+            let dst = std::net::Ipv4Addr::new(frame[16], frame[17], frame[18], frame[19]);
+            let payload = String::from_utf8_lossy(&frame[28..]);
+            eprintln!("[probe-recv] {src} -> {dst} len={n} payload={payload:?}");
+        } else {
+            eprintln!("[probe-recv] short frame len={n}");
+        }
     }
 }
 
