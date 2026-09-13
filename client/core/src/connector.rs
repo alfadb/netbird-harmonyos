@@ -63,10 +63,13 @@
 //! 2. ICE 的 UDP socket 来自壳侧补给的受保护源
 //!    （`connector_ice_socket_feed(fd)`）；壳侧不喂则候选收集 fail-closed，
 //!    peer 停在 Idle 并记录 Network 类错误。
-//! 3. 网络图里的 remote peers 仍做**本地登记**（公钥 + allowed_ips 进
-//!    [`WgPeerApplier`]，生产默认 [`WgPeerRegistry`]，N5c 增加 endpoint
-//!    记录）——这只是 WireGuard 侧的本地配置；对端 WG 端点由 ICE 选中后
-//!    落配，但本仓尚无真实 WG 设备数据面（登记/endpoint 记录 ≠ 隧道）。
+//! 3. 网络图里的 remote peers 的 WG 侧配置走 [`WgPeerApplier`]：生产默认
+//!    仍是 [`WgPeerRegistry`]（本地登记 + endpoint 记录，等壳侧补给 WG
+//!    socket fd）；**N6 起存在真实驱动** [`crate::wg_device::WgDeviceApplier`]
+//!    ——同一 trait 直接驱动多 peer WG 设备（`crate::wg_device`）：endpoint
+//!    落配即握手、`tunnel_ready` 反映真实会话状态。registry 与设备驱动
+//!    的差别只在有无壳侧补给的真实 socket；「登记 ≠ 隧道」对 registry 仍
+//!    成立。
 //! 4. 路由/DNS 通过 [`ConfigApplier`] 交给壳侧（宿主）；壳侧不接时生产
 //!    默认 [`LoggingConfigApplier`] 只打点，不落任何系统配置。
 //! 5. "Connected" 仍指 **management 控制面连接已建立**（登录成功 + Sync
@@ -81,7 +84,8 @@
 //! - sync 策略：[`SyncPolicy`]（backoff/时钟/随机源，透传给
 //!   [`crate::sync::SyncSession::with_policy`]，测试零真实长睡眠）。
 //! - 数据面 WG peer 登记：[`WgPeerApplier`]（生产默认 [`WgPeerRegistry`]，
-//!   进程内登记表 + N5c endpoint 记录；未来真实 WG 设备层实现同一 trait）。
+//!   进程内登记表 + N5c endpoint 记录；N6 起真实 WG 设备驱动见
+//!   [`crate::wg_device::WgDeviceApplier`]——同一 trait，真实数据面）。
 //! - 壳侧配置应用：[`ConfigApplier`]（路由/DNS/本机地址交给宿主）。
 //! - N5c per-peer ICE：[`crate::peer_conn::PeerIceOrchestrator`]（接口枚举
 //!   `crate::ice::InterfaceSource`、受保护 UDP 源
@@ -242,8 +246,9 @@ pub struct WgPeerEntry {
 }
 
 /// WG data-plane seam: register/replace the local WireGuard peer set.
-/// Production default: [`WgPeerRegistry`] (in-process registry). A future
-/// real WG device layer implements the same trait.
+/// Production default: [`WgPeerRegistry`] (in-process registry). N6: the
+/// real device driver [`crate::wg_device::WgDeviceApplier`] implements this
+/// same trait.
 pub trait WgPeerApplier: Send + Sync + 'static {
     /// Replace the registered peer set with `peers` (full snapshot
     /// semantics: the legacy wire format this client consumes carries full
@@ -253,9 +258,12 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn clear(&self);
     /// N3-7 default-route gate input: can the WG data plane actually carry
     /// traffic RIGHT NOW (tunnel device up + workable handshake state)?
-    /// The registry default is ALWAYS false — module limitation: no
-    /// signal/ICE means no endpoints, no handshakes, no tunnel. A registered
-    /// peer alone must never flip the default route on.
+    /// The registry default is ALWAYS false — with no shell-fed WG socket
+    /// there are no handshakes. N6: [`crate::wg_device::WgDeviceApplier`]
+    /// replaces the approximation with the REAL session state (an
+    /// established, non-expired WG session on at least one peer —
+    /// `crate::wg_device` module docs); a registered peer alone must never
+    /// flip the default route on.
     fn tunnel_ready(&self) -> bool {
         false
     }
@@ -270,8 +278,10 @@ pub trait WgPeerApplier: Send + Sync + 'static {
 }
 
 /// In-process WG peer registry — the production default of
-/// [`WgPeerApplier`]. Honest scope: local registration + (N5c) per-peer
-/// endpoint records; the tunnel device itself is a later increment.
+/// [`WgPeerApplier`] until the shell feeds a WG UDP socket fd (the device
+/// driver [`crate::wg_device::WgDeviceApplier`] needs one). Honest scope:
+/// local registration + (N5c) per-peer endpoint records + `tunnel_ready()`
+/// always false (no handshakes can exist here — keep the gate fail-closed).
 #[derive(Debug, Default)]
 pub struct WgPeerRegistry {
     peers: Mutex<Vec<WgPeerEntry>>,
@@ -1177,9 +1187,13 @@ impl ShellNetworkConfig {
     ///
     /// - `0.0.0.0/0` is exported for shell install ONLY when at least one
     ///   peer is registered AND the WG data plane reports `tunnel_ready()`.
-    ///   Today that combination cannot happen (module limitation: no
-    ///   signal/ICE ⇒ no tunnel), so the default route is HELD by default —
-    ///   installing it without a working data plane is a traffic black hole.
+    ///   With the default registry seam that combination cannot happen
+    ///   (registry readiness is always false — no shell-fed WG socket ⇒ no
+    ///   handshake); N6's device-backed seam
+    ///   ([`crate::wg_device::WgDeviceApplier`]) reports REAL session state,
+    ///   so the gate now means "the data plane can actually carry traffic".
+    ///   Without that, the default route stays HELD — installing it without
+    ///   a working data plane is a traffic black hole.
     /// - `force=true` (explicit dev opt-in `force_default_route`) overrides
     ///   the hold and carries the black-hole warning token.
     pub fn default_route_decision(

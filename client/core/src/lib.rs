@@ -139,4 +139,7 @@ pub mod sync;
 pub mod sys;
 pub mod tun;
 pub mod util;
+// N6: multi-peer WireGuard data plane (real BoringTun tunnels + protected
+// UDP socket + TUN dup) — the real driver behind the connector WG seam.
+pub mod wg_device;
 pub mod wg;

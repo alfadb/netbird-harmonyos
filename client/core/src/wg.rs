@@ -43,10 +43,14 @@ use crate::sys;
 use crate::util::{hex_lower, jbool, jinum, jnum, jstr};
 
 // ffi::result_type op codes (boringtun-0.7.1/src/ffi/mod.rs:34-45)
-const OP_DONE: i32 = 0;
-const OP_NETWORK: i32 = 1;
-const OP_ERROR: i32 = 2;
-const OP_TUN_V4: i32 = 4;
+// pub(crate) since N6: shared with the wg_device layer.
+pub(crate) const OP_DONE: i32 = 0;
+pub(crate) const OP_NETWORK: i32 = 1;
+pub(crate) const OP_ERROR: i32 = 2;
+pub(crate) const OP_TUN_V4: i32 = 4;
+/// OP_TUN_V6 (boringtun-0.7.1/src/ffi/mod.rs result_type): decapsulated IPv6
+/// plaintext — a data-plane inbound frame like OP_TUN_V4.
+pub(crate) const OP_TUN_V6: i32 = 5;
 
 const BUF: usize = 2048;
 /// Sink port for the TUN closure (D5's sink owns 47002 while this runs).
@@ -73,7 +77,10 @@ const SECRET_B: [u8; 32] = [
 ];
 
 /// One owned BoringTun tunnel (`tunnel_free` exactly once, on drop).
-struct Tunnel {
+/// `pub(crate)` since N6: `wg_device` reuses THIS wrapper (the ffi call
+/// sequence verified on-device by the N1BDISC probes) for its per-peer
+/// tunnels instead of re-wrapping the ffi.
+pub(crate) struct Tunnel {
     ptr: *mut core::ffi::c_void,
     name: &'static str,
 }
@@ -82,14 +89,37 @@ impl Tunnel {
     /// `secret_b64` / `peer_public_b64` are base64 x25519 keys; `index` seeds
     /// the local index space and must be unique per tunnel.
     fn new(secret_b64: &str, peer_public_b64: &str, index: u32, name: &'static str) -> Option<Tunnel> {
+        Tunnel::new_with(secret_b64, peer_public_b64, None, KEEP_ALIVE, index, name)
+    }
+
+    /// N6 parametrized form of the exact `new_tunnel` call above: optional
+    /// preshared key (base64), caller-chosen persistent-keepalive seconds
+    /// (0 = disabled at the boringtun layer — `wg_device` runs keepalive on
+    /// its own INJECTABLE clock) and index seed.
+    pub(crate) fn new_with(
+        secret_b64: &str,
+        peer_public_b64: &str,
+        preshared_b64: Option<&str>,
+        keep_alive: u16,
+        index: u32,
+        name: &'static str,
+    ) -> Option<Tunnel> {
         let secret = CString::new(secret_b64).ok()?;
         let peer = CString::new(peer_public_b64).ok()?;
+        let psk = match preshared_b64.map(CString::new) {
+            Some(Ok(k)) => Some(k),
+            Some(Err(_)) => return None,
+            None => None,
+        };
+        let psk_ptr = psk
+            .as_ref()
+            .map_or(core::ptr::null(), |k| k.as_ptr() as *const _);
         let ptr = unsafe {
             ffi::new_tunnel(
                 secret.as_ptr() as *const _,
                 peer.as_ptr() as *const _,
-                core::ptr::null(), // no preshared key
-                KEEP_ALIVE,
+                psk_ptr,
+                keep_alive,
                 index,
             )
         };
@@ -99,7 +129,7 @@ impl Tunnel {
         Some(Tunnel { ptr: ptr as *mut core::ffi::c_void, name })
     }
 
-    fn write(&self, src: &[u8], dst: &mut [u8]) -> (i32, usize) {
+    pub(crate) fn write(&self, src: &[u8], dst: &mut [u8]) -> (i32, usize) {
         let r = unsafe {
             ffi::wireguard_write(
                 self.ptr as *const _,
@@ -112,7 +142,7 @@ impl Tunnel {
         (r.op as i32, r.size)
     }
 
-    fn read(&self, src: &[u8], dst: &mut [u8]) -> (i32, usize) {
+    pub(crate) fn read(&self, src: &[u8], dst: &mut [u8]) -> (i32, usize) {
         let r = unsafe {
             ffi::wireguard_read(
                 self.ptr as *const _,
@@ -125,7 +155,7 @@ impl Tunnel {
         (r.op as i32, r.size)
     }
 
-    fn force_handshake(&self, dst: &mut [u8]) -> (i32, usize) {
+    pub(crate) fn force_handshake(&self, dst: &mut [u8]) -> (i32, usize) {
         let r = unsafe {
             ffi::wireguard_force_handshake(self.ptr as *const _, dst.as_mut_ptr(), dst.len() as u32)
         };
@@ -135,7 +165,7 @@ impl Tunnel {
     /// Periodic timer service (`wireguard_tick`, recommended ~100 ms cadence):
     /// emits keepalives, retransmits handshakes, rekeys. Produces a datagram
     /// only when one is due (usually `OP_DONE`).
-    fn tick(&self, dst: &mut [u8]) -> (i32, usize) {
+    pub(crate) fn tick(&self, dst: &mut [u8]) -> (i32, usize) {
         let r = unsafe {
             ffi::wireguard_tick(self.ptr as *const _, dst.as_mut_ptr(), dst.len() as u32)
         };
@@ -144,7 +174,7 @@ impl Tunnel {
 
     /// `(time_since_last_handshake_seconds, tx_bytes, rx_bytes)`; -1 seconds
     /// means "no session yet" (ffi/mod.rs:381-396 — the unit is SECONDS).
-    fn stats(&self) -> (i64, u64, u64) {
+    pub(crate) fn stats(&self) -> (i64, u64, u64) {
         let s = unsafe { ffi::wireguard_stats(self.ptr as *const _) };
         (s.time_since_last_handshake, s.tx_bytes as u64, s.rx_bytes as u64)
     }
@@ -157,9 +187,19 @@ impl Drop for Tunnel {
     }
 }
 
+// Safety: the ffi hands back `*mut Mutex<Tunn>` (boringtun-0.7.1
+// ffi/mod.rs::new_tunnel) — interior access is mutex-guarded inside the
+// library and the pointer is only ever dereferenced by the ffi calls above
+// from the owning thread's `&self`/`&mut self`. Moving the pointer between
+// threads is therefore sound (the device layer keeps all calls on one thread
+// behind `&mut self`).
+unsafe impl Send for Tunnel {}
+
 /// base64 of a key through the frozen export (the returned C string is owned by
 /// the ffi and must be handed back to `x25519_key_to_str_free`).
-fn key_to_b64(k: ffi::x25519_key) -> Option<String> {
+/// `pub(crate)` since N6 (used by `wg_device` for the same on-device key
+/// derivation path).
+pub(crate) fn key_to_b64(k: ffi::x25519_key) -> Option<String> {
     let p = ffi::x25519_key_to_base64(ffi::x25519_key { key: k.key });
     if p.is_null() {
         return None;
@@ -1129,9 +1169,6 @@ pub fn wg_net_probe(fd_dup: i32, mb1: bool) -> String {
 // wg_fwd_probe — the same tunnel as a REAL bidirectional VPN data plane
 // ---------------------------------------------------------------------------
 
-/// OP_TUN_V6 (boringtun-0.7.1/src/ffi/mod.rs result_type): decapsulated IPv6
-/// plaintext. Handled like OP_TUN_V4 (write back into the TUN fd).
-const OP_TUN_V6: i32 = 5;
 /// One poll slice of the forwarding loop; `wireguard_tick` runs once per slice
 /// (recommended ~100 ms; 250 ms keeps keepalive/retransmit timers accurate
 /// without spinning the loop).
