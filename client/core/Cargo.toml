@@ -47,6 +47,14 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router", "tls-ring"] }
 tonic-prost = "0.14"
+# N3-7 protected management socket: Endpoint::connect_with_connector needs a
+# Service<Uri> whose response implements hyper 1.x rt::Read/rt::Write;
+# hyper-util's TokioIo adapts a tokio TcpStream to those traits and
+# tower_service is the Service trait tonic's bound names. Both crates are
+# ALREADY in Cargo.lock as tonic dependencies (same versions) — no new
+# packages, offline-safe.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+tower-service = "0.3"
 
 [profile.release]
 panic = "abort"

@@ -3,12 +3,14 @@ import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
-import { VpnTunnelConfig, buildPlatformVpnConfig, loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
+import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
+  loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
 import {
   CoreNetworkConfig, ConnectorStartResult, ConnectorStatusResult, DeviceConfigFile,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorStart, connectorStop,
-  parseDeviceConfig, pollStatusOrNull, readPrivateFileText, sleep
+  STATUS_POLL_MS, buildConnectorConfigJson, connectorNetworkConfig, connectorStartWithSocket,
+  connectorSocketFeed, connectorStop, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint,
+  pollStatusOrNull, readPrivateFileText, resolveManagementIp, sleep
 } from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
@@ -20,6 +22,13 @@ const MAX_NATIVE_FD: number = 2147483647;
 // best-effort treatment, the shell treats box expiry as protect failure
 // (governance docs/native-nx-governance.md item 4: fail-closed).
 const PROTECT_BOX_MS: number = 5000;
+// N3-7: bound for the shell-side DNS resolution of the management host
+// (DNS must stay OUT of native so the protected dial never pulls nameserver
+// traffic through our own tunnel).
+const DNS_RESOLVE_BOX_MS: number = 5000;
+// N3-7 gap 3: consecutive connector_status() native-call failures before the
+// watcher concludes the connector is unreachable and tears the VPN down.
+const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -71,20 +80,28 @@ function safeError(error: Error): string {
 // VPN extension shell, config-driven (promoted from the verified e3 physical
 // preflight create/destroy + fd contract and the verified n1b MR4 config /
 // protect split):
-// - Start flow (N3-6): credentials read from app-private filesDir files
-//   (DEVELOPMENT-TIME practice, NOT secure storage) -> core.connector_start
+// - Start flow (N3-6 + N3-7): credentials read from app-private filesDir
+//   files (DEVELOPMENT-TIME practice, NOT secure storage) -> shell-side DNS
+//   of the management host -> core.mgmt_socket_open (TCP, unconnected) ->
+//   fail-closed VpnConnection.protect(fd) gate -> core.connector_start_with_socket
 //   -> bounded wait for core.connector_network_config -> merge
-//   address/routes/DNS into VpnConfig (MR4 shapes) -> connection.create()
-//   -> fd contract + fail-closed protect gate. The map snapshot is applied
-//   at create() time (platform VpnConfig is fixed then); later map changes
-//   are logged as explicitly NOT applied.
-// - Protect: after create() yields a valid TUN fd, the native outer UDP
-//   socket (core.wg_fwd_open) is protected via VpnConnection.protect()
-//   BEFORE any datagram flows; protect is fail-closed (governance
-//   docs/native-nx-governance.md item 4): open/bind/protect failure or the
-//   5 s box expiring destroys the VPN and never starts traffic.
+//   address/routes/DNS into VpnConfig under the default-route safety gate
+//   (0.0.0.0/0 held unless the core gate allows / forceDefaultRoute opt-in)
+//   -> connection.create() -> fd contract + fail-closed protect gate for the
+//   WG outer socket. The map snapshot is applied at create() time (platform
+//   VpnConfig is fixed then); later map changes are logged as explicitly NOT
+//   applied.
+// - Protect: the management socket is protected BEFORE the connector's first
+//   dial (reconnects re-protect via core-fed sockets), and after create()
+//   yields a valid TUN fd, the native outer UDP socket (core.wg_fwd_open) is
+//   protected via VpnConnection.protect() BEFORE any datagram flows; protect
+//   is fail-closed (governance docs/native-nx-governance.md item 4): any
+//   open/bind/protect failure or the 5 s box expiring aborts the flow /
+//   destroys the VPN and never starts traffic.
 // - Stop flow: onDestroy -> core.connector_stop (idempotent) -> exactly-
-//   once destroy + fd close re-check (fd contract unchanged).
+//   once destroy + fd close re-check (fd contract unchanged). N3-7: a
+//   SELF-terminated connector (status.terminal) or repeated status-poll
+//   failures trigger the same teardown from the runtime watcher.
 export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private requestId: string = 'missing';
   private connectionCreationAttempted: boolean = false;
@@ -111,6 +128,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Serial of the network-config snapshot merged into the platform
   // VpnConfig at create() time (-1 = none applied).
   private appliedNetSerial: number = -1;
+  // N3-7 gap 3: consecutive connector_status() native-call failures and the
+  // one-shot latch for the connector-death teardown (idempotent on top of
+  // the destroyOnce latch).
+  private statusPollFailures: number = 0;
+  private connectorDeathHandled: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -155,8 +177,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
-  // N3-6 start flow. Abort paths (credentials missing, connector refused)
-  // leave the VPN un-created and report a stable error class.
+  // N3-6/N3-7 start flow. Abort paths leave the VPN un-created and report a
+  // stable error class. N3-7 pre-flight (fail-closed, governance §二.4 —
+  // per-socket protect BEFORE the first connect AND before every reconnect;
+  // upstream ControlProtectSocket semantics, protectsocket_android.go:22-46):
+  //   resolve management host shell-side (DNS) → open a TCP socket
+  //   (core.mgmt_socket_open, unconnected) → VpnConnection.protect(fd) →
+  //   ONLY THEN core.connector_start_with_socket(fd, …, ip:port).
+  // DNS failure / open failure / protect failure / start refusal ⇒ the
+  // connector never starts and no VPN is created.
   private async startConnectorThenCreate(want: Want, connection: vpnExtension.VpnConnection):
     Promise<void> {
     const filesDir: string = this.context.filesDir;
@@ -164,6 +193,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       String(want.parameters?.['setupKeyFile'] ?? DEFAULT_SETUP_KEY_FILE);
     const deviceFile: string =
       String(want.parameters?.['deviceConfigFile'] ?? DEFAULT_DEVICE_CONFIG_FILE);
+    // N3-7 DEVELOPMENT opt-in (default false): force the managed default
+    // route into VpnConfig even while the data plane is not ready. Risk:
+    // traffic black hole until a peer tunnel actually works.
+    const forceDefaultRoute: boolean =
+      String(want.parameters?.['forceDefaultRoute'] ?? 'false') === 'true';
 
     let setupKey: string;
     let device: DeviceConfigFile;
@@ -180,17 +214,82 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
+    if (this.destroyRequested) {
+      return;
+    }
+    // 1. shell-side endpoint parse + DNS resolution (never native)
+    let connectAddr: string;
+    try {
+      const endpoint = parseManagementEndpoint(device.management_url);
+      connectAddr = await resolveManagementIp(endpoint, DNS_RESOLVE_BOX_MS);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dns|' +
+        'errorClass=%{public}s|summary=%{public}s',
+        this.requestId, (error as Error).message ?? 'dns-failed',
+        safeError(error as Error));
+      return;
+    }
+
+    // 2. open the management TCP socket (unconnected — no packet flows yet)
+    let mgmtFd: number = -1;
+    try {
+      const opened = mgmtSocketOpen();
+      mgmtFd = opened.fd;
+      if (mgmtFd < 0 || opened.bind_rc !== 0) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=mgmt-socket-open|' +
+          'errorClass=mgmt-socket-open-failed|fd=%{public}d|bindRc=%{public}d|bindErrno=%{public}d',
+          this.requestId, mgmtFd, opened.bind_rc, opened.bind_errno);
+        return;
+      }
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=mgmt-socket-open-throw|' +
+        'errorClass=mgmt-socket-open-failed|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return;
+    }
+
+    // 3. protect the management socket BEFORE any packet can flow (the
+    // connect itself happens later, on a native dup, only after this gate).
+    // TODO(未验证): protect() on a VpnConnection before create() is the
+    // required shape here; the on-device behavior is physical-gate work
+    // (N2b) — this box treats any failure/timeout as fail-closed abort.
+    const mgmtProtected: boolean = await this.protectSocketWithBox(connection, mgmtFd);
+    if (!mgmtProtected) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=mgmt-protect|' +
+        'errorClass=protect-fail-closed|fd=%{public}d',
+        this.requestId, mgmtFd);
+      return;
+    }
+
+    // 4. start the connector over the protected socket (Rust dup-consumes
+    // the fd per dial; the original number stays shell-owned — fd contract)
     const creds: Record<string, Object> = { 'setup_key': setupKey };
-    const start: ConnectorStartResult = connectorStart(buildConnectorConfigJson(device),
-      JSON.stringify(creds));
+    const start: ConnectorStartResult =
+      connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
+        JSON.stringify(creds), connectAddr);
     if (!start.started) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
         this.requestId, start.error ?? 'start-failed');
       return;
     }
-    hilog.info(DOMAIN, TAG, 'VPN_CONNECTOR_STARTED|requestId=%{public}s|state=%{public}s',
-      this.requestId, start.state ?? 'unknown');
+    if (forceDefaultRoute) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_DEFAULT_ROUTE_FORCED|requestId=%{public}s|' +
+        'warning=data-plane-not-ready-black-hole-risk|optIn=forceDefaultRoute',
+        this.requestId);
+    }
+    // seed ONE spare protected socket so a single reconnect dial can
+    // re-protect; further resupply policy is an N4+ increment (a starved
+    // queue fails dials CLOSED — never unprotected)
+    this.feedSpareProtectedSocket(connection);
+    hilog.info(DOMAIN, TAG, 'VPN_CONNECTOR_STARTED|requestId=%{public}s|state=%{public}s|' +
+      'mgmtSocket=protected|connectAddr=%{public}s',
+      this.requestId, start.state ?? 'unknown', connectAddr);
 
     const net: CoreNetworkConfig | null = await this.waitNetworkConfigBounded();
     if (this.destroyRequested) {
@@ -202,7 +301,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     const base: VpnTunnelConfig = loadVpnTunnelConfig();
-    const merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
+    let merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
+    // N3-7 default-route safety gate (shell half): hold 0.0.0.0/0 unless the
+    // core gate allowed it (usable peers + WG tunnel ready) or the explicit
+    // forceDefaultRoute opt-in was honored. The core already excludes a held
+    // route from the snapshot `routes`; this pass also guards the base
+    // fallback path (no network map) and the empty-routes fallback.
+    let gateAllowed: boolean = forceDefaultRoute;
+    let gateReason: string = 'default-route-held:shell-fallback-no-network-map';
+    if (net !== null && net.default_route !== undefined && net.default_route !== null) {
+      gateAllowed = net.default_route.allowed || forceDefaultRoute;
+      gateReason = forceDefaultRoute && !net.default_route.allowed
+        ? 'default-route-forced:debug-opt-in-black-hole-risk'
+        : net.default_route.reason;
+    }
+    merged = gateDefaultRoutes(merged, gateAllowed);
+    hilog.info(DOMAIN, TAG,
+      'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
+      'defaultRoutesInConfig=%{public}d',
+      this.requestId, String(gateAllowed), gateReason,
+      merged.routes.filter((r: VpnRouteConfig): boolean => r.isDefaultRoute).length);
     if (net !== null) {
       this.appliedNetSerial = net.serial ?? -1;
       hilog.info(DOMAIN, TAG,
@@ -267,6 +385,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // conclusion baked in here: VpnConnection has NO runtime route/DNS update
   // API — a map serial newer than the applied one is logged as explicitly
   // NOT applied, never silently dropped, never pretended applied.
+  //
+  // N3-7 gap 3 (connector-death teardown): the watcher ACTIVELY dismantles
+  // the VPN when
+  //   (a) status.terminal === true — the worker ended by itself (fatal auth
+  //       error / retry budget exhausted: running=false, state=failed), or
+  //   (b) connector_status() failed CONNECTOR_POLL_FAILURE_LIMIT times in a
+  //       row (native library unreachable).
+  // Teardown = connectorStop() (idempotent) + exactly-once
+  // connection.destroy() via destroyOnce (latched), each with the logged
+  // reason. A USER stop (state=disconnected) is NOT terminal and never
+  // triggers this path.
   private startStatusAndNetcfgWatcher(): void {
     if (this.watcherTimer >= 0 || this.destroyRequested) {
       return;
@@ -274,15 +403,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.watcherTimer = setInterval((): void => {
       const status: ConnectorStatusResult | null = pollStatusOrNull();
       if (status !== null) {
+        this.statusPollFailures = 0;
         const errorClass: string =
           status.last_error !== null && status.last_error !== undefined
             ? status.last_error.class
             : 'none';
         hilog.info(DOMAIN, TAG,
           'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
-          'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s',
+          'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
+          'terminal=%{public}s',
           this.requestId, String(status.running), status.state, status.peer_count,
-          status.route_count, status.reconnects, errorClass);
+          status.route_count, status.reconnects, errorClass, String(status.terminal));
+        if (status.terminal === true) {
+          this.handleConnectorDeath(`terminal-state:${status.state}`);
+          return;
+        }
+      } else {
+        this.statusPollFailures++;
+        hilog.warn(DOMAIN, TAG,
+          'VPN_CONNECTOR_STATUS_UNREACHABLE|requestId=%{public}s|consecutive=%{public}d|' +
+          'limit=%{public}d',
+          this.requestId, this.statusPollFailures, CONNECTOR_POLL_FAILURE_LIMIT);
+        if (this.statusPollFailures >= CONNECTOR_POLL_FAILURE_LIMIT) {
+          this.handleConnectorDeath('connector-status-unreachable');
+          return;
+        }
       }
       try {
         const net: CoreNetworkConfig = connectorNetworkConfig();
@@ -299,6 +444,74 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.requestId, safeError(error as Error));
       }
     }, STATUS_POLL_MS);
+  }
+
+  // N3-7 gap 3: connector died by itself → tear the VPN down instead of
+  // holding a tunnel that no control plane governs (default-route scenarios
+  // turn this into a traffic black hole). Idempotent: the
+  // connectorDeathHandled latch short-circuits repeat watcher ticks, and the
+  // underlying connectorStop()/destroyOnce() are independently idempotent.
+  private handleConnectorDeath(reason: string): void {
+    if (this.connectorDeathHandled || this.destroyRequested) {
+      return;
+    }
+    this.connectorDeathHandled = true;
+    hilog.error(DOMAIN, TAG,
+      'VPN_CONNECTOR_DEAD|requestId=%{public}s|reason=%{public}s|action=teardown-vpn',
+      this.requestId, reason);
+    this.stopStatusAndNetcfgWatcher();
+    try {
+      const stop = connectorStop();
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s|' +
+        'cause=connector-death',
+        this.requestId, String(stop.already_stopped), stop.state);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    }
+    this.destroyOnce(`connector-dead:${reason}`).catch((error: Error) => {
+      hilog.error(DOMAIN, TAG,
+        'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=connector-death|summary=%{public}s',
+        this.requestId, safeError(error));
+    });
+  }
+
+  // N3-7: seed ONE spare protected management socket into the core queue so
+  // a single reconnect dial can re-protect without new shell involvement.
+  // Best-effort: failures are logged, never fatal (a starved queue fails
+  // dials CLOSED — never unprotected); systematic resupply is N4+ work.
+  private feedSpareProtectedSocket(connection: vpnExtension.VpnConnection): void {
+    let fd: number = -1;
+    try {
+      const opened = mgmtSocketOpen();
+      fd = opened.fd;
+      if (fd < 0 || opened.bind_rc !== 0) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=open|fd=%{public}d',
+          this.requestId, fd);
+        return;
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=open-throw|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return;
+    }
+    this.protectSocketWithBox(connection, fd).then((ok: boolean): void => {
+      if (!ok) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=protect|fd=%{public}d',
+          this.requestId, fd);
+        return;
+      }
+      const fed = connectorSocketFeed(fd);
+      hilog.info(DOMAIN, TAG,
+        'VPN_MGMT_SOCKET_FED|requestId=%{public}s|fd=%{public}d|ok=%{public}s|queued=%{public}s|' +
+        'error=%{public}s',
+        this.requestId, fd, String(fed.ok), String(fed.queued ?? -1), fed.error ?? 'none');
+    });
   }
 
   private stopStatusAndNetcfgWatcher(): void {

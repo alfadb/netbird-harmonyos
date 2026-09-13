@@ -26,6 +26,25 @@
 //! - 快照顺序：`client/internal/engine.go:1572-1576` — serial 严格小于
 //!   已应用值的 NetworkMap 直接丢弃（相等仍应用）。
 //!
+//! ## N3-7 fail-closed 缺口修复
+//!
+//! 1. **管理连接自身 socket 过 protect 门**：`GrpcManagementFactory` 可携带
+//!    受保护 socket 源（[`crate::mgmtsock::ManagementSocketProvider`]），
+//!    每次 dial（首连 + tonic/hyper 每次重连 + 会话续期连接）都取一条**新鲜**
+//!    已保护 socket，经 `Endpoint::connect_with_connector` 让 gRPC 通道走该
+//!    socket；fd 只消费 dup 副本（`F_DUPFD_CLOEXEC`，绝不使用/关闭原始 fd，
+//!    见 `crate::mgmtsock` fd 合同）。`connector_start_with_socket` 未提供
+//!    有效 fd 时**拒绝启动**；无保护直连只能通过配置项
+//!    `allow_unprotected_management=true` 显式 opt-in（非上游行为、危险，
+//!    启动时打 hilog 警示）。上游语义出处见 `crate::mgmtsock` 模块文档。
+//! 2. **默认路由安全闸**：`ShellNetworkConfig::from_map_gated` 只在
+//!    「已登记 peer > 0 且 WG 数据面 `tunnel_ready()`」时才把 `0.0.0.0/0`
+//!    导出给壳安装，否则剥离并携带 `default-route-held:*` 原因
+//!    token（`force_default_route` 为显式开发期 opt-in，标注黑洞风险）。
+//! 3. **connector 死亡语义**：`ConnectorStatus.terminal` = worker 自行终止
+//!    （fatal/backoff 耗尽，`running:false` 且 `state:failed`）；壳侧
+//!    watcher 据此拆除 VPN（见 notes N3-7 节）。
+//!
 //! ## ⚠️ 限制声明（调用方必读，不得误读为"已能连上 peer"）
 //!
 //! **本增量不实现 signal/ICE**。因此：
@@ -60,6 +79,7 @@
 //! hilog 行只含状态与计数；私钥在解析后不保留任何原始字节形式。
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -73,6 +93,7 @@ use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::{GrpcTransport, LoginParams, ManagementGrpcClient, PeerMeta};
 use crate::hilog;
 use crate::management::ManagementError;
+use crate::mgmtsock::{dup_socket_fd, ManagementSocketProvider, ProtectedSocketFdSource};
 use crate::network_map::NetworkMap;
 use crate::state::{ConnEvent, ConnState, StateMachine};
 use crate::sync::{SyncLoopEvent, SyncSession, SyncUpdate};
@@ -203,6 +224,14 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn apply_peers(&self, peers: &[WgPeerEntry]) -> Result<(), String>;
     /// Tear down local registration (connector stop).
     fn clear(&self);
+    /// N3-7 default-route gate input: can the WG data plane actually carry
+    /// traffic RIGHT NOW (tunnel device up + workable handshake state)?
+    /// The registry default is ALWAYS false — module limitation: no
+    /// signal/ICE means no endpoints, no handshakes, no tunnel. A registered
+    /// peer alone must never flip the default route on.
+    fn tunnel_ready(&self) -> bool {
+        false
+    }
 }
 
 /// In-process WG peer registry — the production default of
@@ -293,14 +322,33 @@ pub trait ManagementFactory: Send + Sync + 'static {
 /// Production factory: a fresh [`ManagementGrpcClient`] per call, TLS with
 /// the caller-injected CA roots for `https://`, plaintext for `http://`
 /// (mismatch rules enforced by
-/// [`crate::grpc::ManagementGrpcClient::connect`]).
-#[derive(Debug, Clone)]
+/// [`crate::grpc::ManagementGrpcClient::connect`]). N3-7: with a socket
+/// source set, EVERY dial runs through a freshly-taken protected socket
+/// (`crate::grpc::ManagementGrpcClient::connect_with_socket_source`) —
+/// fail-closed when the source cannot hand out a socket.
+#[derive(Clone)]
 pub struct GrpcManagementFactory {
     endpoint: String,
     transport: GrpcTransport,
     connect_timeout: Duration,
     request_timeout: Duration,
     keys: EnvelopeKeyPair,
+    /// `(protected socket source, shell-resolved connect address)`. `None`
+    /// means the (DANGEROUS, opt-in) unprotected direct dial.
+    socket: Option<(Arc<dyn ManagementSocketProvider>, SocketAddr)>,
+}
+
+impl core::fmt::Debug for GrpcManagementFactory {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // secret-free shape: envelope keys Debug prints the public key only
+        // (crate::envelope); the socket source is a count-free seam handle.
+        f.debug_struct("GrpcManagementFactory")
+            .field("endpoint", &self.endpoint)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("protected_socket", &self.socket.is_some())
+            .finish()
+    }
 }
 
 impl GrpcManagementFactory {
@@ -312,6 +360,26 @@ impl GrpcManagementFactory {
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
             keys,
+            socket: None,
+        }
+    }
+
+    /// N3-7: protected-socket variant — every dial takes a fresh protected
+    /// socket from `source` and connects it to `connect_addr` (DNS resolved
+    /// shell-side; TLS still verifies the endpoint URL host).
+    pub fn with_socket_source(
+        config: &ConnectorConfig,
+        keys: EnvelopeKeyPair,
+        source: Arc<dyn ManagementSocketProvider>,
+        connect_addr: SocketAddr,
+    ) -> Self {
+        GrpcManagementFactory {
+            endpoint: config.management_url.clone(),
+            transport: config.transport.clone(),
+            connect_timeout: config.connect_timeout,
+            request_timeout: config.request_timeout,
+            keys,
+            socket: Some((source, connect_addr)),
         }
     }
 }
@@ -326,15 +394,32 @@ impl ManagementFactory for GrpcManagementFactory {
         let keys = self.keys.clone();
         let connect_timeout = self.connect_timeout;
         let request_timeout = self.request_timeout;
+        let socket = self.socket.clone();
         Box::pin(async move {
-            ManagementGrpcClient::connect(
-                &endpoint,
-                transport,
-                connect_timeout,
-                request_timeout,
-                keys,
-            )
-            .await
+            match socket {
+                Some((source, connect_addr)) => {
+                    ManagementGrpcClient::connect_with_socket_source(
+                        &endpoint,
+                        transport,
+                        connect_timeout,
+                        request_timeout,
+                        keys,
+                        source,
+                        connect_addr,
+                    )
+                    .await
+                }
+                None => {
+                    ManagementGrpcClient::connect(
+                        &endpoint,
+                        transport,
+                        connect_timeout,
+                        request_timeout,
+                        keys,
+                    )
+                    .await
+                }
+            }
         })
     }
 }
@@ -366,6 +451,14 @@ pub struct ConnectorConfig {
     pub renew_lead: Duration,
     /// How often the renewal task re-checks the deadline.
     pub renew_check_interval: Duration,
+    /// N3-7: dev opt-in — export the managed default route even when the
+    /// data plane cannot carry traffic (traffic-black-hole risk acknowledged
+    /// by the caller). Default FALSE; honored state is logged loudly.
+    pub force_default_route: bool,
+    /// N3-7: dev opt-in — permit an UNPROTECTED direct management dial
+    /// (`connector_start` without a protected socket). NOT upstream
+    /// behavior; the production path is `connector_start_with_socket`.
+    pub allow_unprotected_management: bool,
 }
 
 impl ConnectorConfig {
@@ -383,13 +476,23 @@ impl ConnectorConfig {
     ///   "os_name": "harmonyos", "os_version": "5.0.0",
     ///   "netbird_version": "0.1.0",
     ///   "connect_timeout_ms": 5000, "request_timeout_ms": 10000,
-    ///   "session_renew_lead_ms": 600000, "renew_check_interval_ms": 30000
+    ///   "session_renew_lead_ms": 600000, "renew_check_interval_ms": 30000,
+    ///   "force_default_route": false,
+    ///   "allow_unprotected_management": false
     /// }
     /// ```
     ///
     /// `ca_pem` (string or array of strings) is REQUIRED for `https://`
     /// (no system store is used); it is ignored for `http://` (plaintext,
     /// test only). Unknown fields are ignored.
+    ///
+    /// `force_default_route` (N3-7, default FALSE): DEVELOPMENT opt-in to
+    /// export the managed default route while the data plane is not ready —
+    /// that combination is a traffic black hole, so the default is HOLD.
+    ///
+    /// `allow_unprotected_management` (N3-7, default FALSE): DEVELOPMENT
+    /// opt-in for an UNPROTECTED direct management dial via
+    /// `connector_start`. NOT upstream behavior; default is REFUSE.
     pub fn from_json(text: &str) -> Result<ConnectorConfig, ConfigError> {
         let doc = config::parse_document(text)?;
         let entries = match doc {
@@ -414,6 +517,8 @@ impl ConnectorConfig {
         let mut request_timeout = DEFAULT_REQUEST_TIMEOUT;
         let mut renew_lead = DEFAULT_RENEW_LEAD;
         let mut renew_check_interval = DEFAULT_RENEW_CHECK_INTERVAL;
+        let mut force_default_route = false;
+        let mut allow_unprotected_management = false;
 
         for (key, val) in &entries {
             match key.as_str() {
@@ -470,6 +575,13 @@ impl ConnectorConfig {
                     renew_check_interval =
                         Duration::from_millis(field_u64(val, "renew_check_interval_ms")?)
                 }
+                "force_default_route" => {
+                    force_default_route = field_bool(val, "force_default_route")?
+                }
+                "allow_unprotected_management" => {
+                    allow_unprotected_management =
+                        field_bool(val, "allow_unprotected_management")?
+                }
                 _ => {} // unknown fields ignored
             }
         }
@@ -511,6 +623,8 @@ impl ConnectorConfig {
             request_timeout,
             renew_lead,
             renew_check_interval,
+            force_default_route,
+            allow_unprotected_management,
         })
     }
 }
@@ -589,6 +703,8 @@ struct StateInner {
     /// Last applied shell network-config snapshot (N3-6); `None` until the
     /// first NetworkMap arrives, reset on stop.
     net_config: Option<ShellNetworkConfig>,
+    /// N3-7: the (dev opt-in) force flag for the default-route gate.
+    force_default_route: bool,
 }
 
 /// State shared between the connector worker tasks and the status/stop
@@ -601,7 +717,7 @@ struct ConnectorShared {
 }
 
 impl ConnectorShared {
-    fn new() -> Self {
+    fn new(force_default_route: bool) -> Self {
         ConnectorShared {
             inner: Mutex::new(StateInner {
                 machine: StateMachine::new(),
@@ -618,6 +734,7 @@ impl ConnectorShared {
                 logout_ok: None,
                 started_at_unix: None,
                 net_config: None,
+                force_default_route,
             }),
             running: AtomicBool::new(false),
         }
@@ -709,9 +826,13 @@ impl ConnectorShared {
             g.last_serial = map.serial;
             g.peer_count = peers;
             g.route_count = map.routes.len();
-            // N3-6: snapshot the shell-applicable subset for the read-only
-            // connector_network_config() export.
-            g.net_config = Some(ShellNetworkConfig::from_map(map));
+            // N3-6/N3-7: snapshot the shell-applicable subset, through the
+            // default-route safety gate (force flag + live WG readiness).
+            g.net_config = Some(ShellNetworkConfig::from_map_gated(
+                map,
+                g.force_default_route,
+                wg.tunnel_ready(),
+            ));
         }
         // WG data plane: register remote + offline peers (identity +
         // allowed_ips only — module limitation statement).
@@ -771,6 +892,17 @@ pub struct ConnectorStatus {
     pub wg_apply_failed: bool,
     pub wg_apply_errors: u64,
     pub logout_ok: Option<bool>,
+    /// N3-7: the worker ENDED BY ITSELF — fatal (auth) or retry-budget
+    /// exhaustion, i.e. `running:false` AND `state:failed`. This is the
+    /// signal the shell watcher tears the VPN down on (a user stop is NOT
+    /// terminal: state is `disconnected`; a reconnecting connector is
+    /// `running:true`). Semantics pinned by Rust tests (gap 3).
+    pub terminal: bool,
+}
+
+/// N3-7: single definition of "the connector died on its own".
+pub fn is_terminal_state(running: bool, state: ConnState) -> bool {
+    !running && state == ConnState::Failed
 }
 
 fn unix_now() -> i64 {
@@ -792,7 +924,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -819,6 +951,7 @@ impl ConnectorStatus {
                 "\"logout_ok\":{}",
                 self.logout_ok.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string())
             ),
+            jbool("terminal", self.terminal),
         )
     }
 }
@@ -875,6 +1008,14 @@ pub struct ShellNetworkConfig {
     pub dns_service_enable: bool,
     pub dns_servers: Vec<ShellDnsServer>,
     pub peers: Vec<ShellPeerSummary>,
+    /// N3-7 default-route safety gate: TRUE only when the data plane can
+    /// actually carry traffic (registered peers + WG `tunnel_ready()`), or
+    /// when the dev opt-in `force_default_route` was honored.
+    pub default_route_allowed: bool,
+    /// Stable reason token: `default-route-allowed:*` /
+    /// `default-route-held:*` / `default-route-forced:*`. The held tokens
+    /// name the exact reason the `0.0.0.0/0` route was NOT exported.
+    pub default_route_reason: String,
 }
 
 /// Canonical dotted-quad/prefix rendering of a parsed route network.
@@ -886,17 +1027,58 @@ fn route_network_string(route: &config::Route) -> String {
 }
 
 impl ShellNetworkConfig {
+    /// The N3-7 default-route safety gate (pure function, unit-tested):
+    ///
+    /// - `0.0.0.0/0` is exported for shell install ONLY when at least one
+    ///   peer is registered AND the WG data plane reports `tunnel_ready()`.
+    ///   Today that combination cannot happen (module limitation: no
+    ///   signal/ICE ⇒ no tunnel), so the default route is HELD by default —
+    ///   installing it without a working data plane is a traffic black hole.
+    /// - `force=true` (explicit dev opt-in `force_default_route`) overrides
+    ///   the hold and carries the black-hole warning token.
+    pub fn default_route_decision(
+        peer_count: usize,
+        tunnel_ready: bool,
+        force: bool,
+    ) -> (bool, String) {
+        if force {
+            (true, "default-route-forced:debug-opt-in-black-hole-risk".to_string())
+        } else if peer_count == 0 {
+            (false, "default-route-held:no-usable-peer".to_string())
+        } else if !tunnel_ready {
+            (false, "default-route-held:data-plane-not-ready".to_string())
+        } else {
+            (true, "default-route-allowed:peers-registered-and-tunnel-ready".to_string())
+        }
+    }
+
     /// Reduce a converted NetworkMap to the shell-applicable subset. Peers
-    /// include offline peers (the WG seam registers both).
-    pub fn from_map(map: &NetworkMap) -> ShellNetworkConfig {
+    /// include offline peers (the WG seam registers both). The default-route
+    /// gate decides whether `0.0.0.0/0` stays in `routes`: when held, the
+    /// entry is REMOVED (a mapping-only shell cannot install what is not
+    /// exported) and the reason token records the hold.
+    pub fn from_map_gated(
+        map: &NetworkMap,
+        force_default_route: bool,
+        tunnel_ready: bool,
+    ) -> ShellNetworkConfig {
         let address = map.peer.as_ref().and_then(|p| p.address.clone());
         let address_prefix_len =
             address.as_deref().and_then(config::parse_ipv4).map(|_| 32u8);
+        let peer_count = map.peers.len() + map.offline_peers.len();
+        let (default_route_allowed, default_route_reason) =
+            Self::default_route_decision(peer_count, tunnel_ready, force_default_route);
         let mut routes = Vec::with_capacity(map.routes.len());
         for r in &map.routes {
+            let is_default = r.network.is_default();
+            if is_default && !default_route_allowed {
+                // held: not exported for install — the reason token is the
+                // observable proof (see to_json)
+                continue;
+            }
             routes.push(ShellRouteEntry {
                 network: route_network_string(&r.network),
-                is_default: r.network.is_default(),
+                is_default,
             });
         }
         let mut dns_servers: Vec<ShellDnsServer> = Vec::new();
@@ -932,6 +1114,8 @@ impl ShellNetworkConfig {
             dns_service_enable: map.dns.as_ref().map(|d| d.service_enable).unwrap_or(false),
             dns_servers,
             peers,
+            default_route_allowed,
+            default_route_reason,
         }
     }
 
@@ -985,7 +1169,7 @@ impl ShellNetworkConfig {
             None => "\"interface_dns\":null".to_string(),
         };
         format!(
-            "{{{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}]}}",
+            "{{{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}}}}",
             jbool("available", true),
             jnum("serial", self.serial),
             address,
@@ -996,6 +1180,8 @@ impl ShellNetworkConfig {
             format!("\"servers\":[{dns_servers}]"),
             jnum("peer_count", self.peers.len() as u64),
             peers,
+            jbool("allowed", self.default_route_allowed),
+            jstr("reason", &self.default_route_reason),
         )
     }
 }
@@ -1061,6 +1247,10 @@ pub struct ConnectorHandle {
     /// Latest logged-in management client, taken by stop() for logout.
     logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>>,
     stop_flag: Arc<AtomicBool>,
+    /// N3-7: the protected-socket source behind the management factory, when
+    /// the connector was started through `connector_start_with_socket`.
+    /// `connector_socket_feed` resupplies it across the NAPI boundary.
+    socket_source: Option<Arc<ProtectedSocketFdSource>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     runtime: tokio::runtime::Handle,
@@ -1079,6 +1269,9 @@ impl core::fmt::Debug for ConnectorHandle {
 impl ConnectorHandle {
     /// Build deps + spawn the worker and session-renewal tasks on
     /// `runtime`. Returns immediately; progress is polled via `status()`.
+    /// N3-7: `force_default_route` arms the default-route gate override;
+    /// `socket_source` (when set) is the resupply handle for
+    /// `connector_socket_feed`.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         runtime: tokio::runtime::Handle,
@@ -1091,8 +1284,10 @@ impl ConnectorHandle {
         sync_policy: SyncPolicy,
         renew_lead: Duration,
         renew_check_interval: Duration,
+        force_default_route: bool,
+        socket_source: Option<Arc<ProtectedSocketFdSource>>,
     ) -> Arc<ConnectorHandle> {
-        let shared = Arc::new(ConnectorShared::new());
+        let shared = Arc::new(ConnectorShared::new(force_default_route));
         shared.set_running(true);
         shared.lock().started_at_unix = Some(unix_now());
 
@@ -1131,6 +1326,7 @@ impl ConnectorHandle {
             host,
             logout_slot,
             stop_flag,
+            socket_source,
             worker: Mutex::new(Some(worker)),
             renewal: Mutex::new(Some(renewal)),
             runtime,
@@ -1140,9 +1336,11 @@ impl ConnectorHandle {
     /// Current status snapshot.
     pub fn status(&self) -> ConnectorStatus {
         let g = self.shared.lock();
+        let running = self.shared.is_running();
+        let state = g.machine.state();
         ConnectorStatus {
-            running: self.shared.is_running(),
-            state: g.machine.state(),
+            running,
+            state,
             started_at_unix: g.started_at_unix,
             last_update_unix: g.last_update_unix,
             peer_count: g.peer_count,
@@ -1154,6 +1352,7 @@ impl ConnectorHandle {
             wg_apply_failed: g.wg_apply_failed,
             wg_apply_errors: g.wg_apply_errors,
             logout_ok: g.logout_ok,
+            terminal: is_terminal_state(running, state),
         }
     }
 
@@ -1433,16 +1632,106 @@ fn connector_slot() -> MutexGuard<'static, Option<Arc<ConnectorHandle>>> {
 
 /// The `connector_start(configJson, setupKeyJson?)` implementation.
 ///
-/// Starts the lifecycle asynchronously and returns immediately: progress is
-/// observed by polling [`connector_status_json`] (no NAPI callbacks — the
-/// export stays synchronous, matching `tun_*`/`wg_*` style). Production
-/// data-plane seams: [`WgPeerRegistry`] + [`LoggingConfigApplier`].
+/// N3-7 (fail-closed gap 1): starting WITHOUT a protected management socket
+/// is REFUSED by default — `{"started":false,"error":"management-socket-required"}`.
+/// The production path is [`connector_start_with_socket_json`]. The only way
+/// past the gate is the explicit config opt-in
+/// `"allow_unprotected_management": true`, which is a DEVELOPMENT/debug mode:
+/// NOT upstream behavior (upstream protects every management dial,
+/// protectsocket_android.go:22-46) and DANGEROUS once the tunnel owns the
+/// default route (the management dial gets eaten by our own tunnel —
+/// bootstrap loop). The opt-in is logged loudly.
 ///
 /// Returns `{"started":true,"state":"connecting"}` on success, or
 /// `{"started":false,"error":"<reason>"}` — reason is a stable token
-/// (`already-running` / `invalid-config` / `invalid-credentials`), never
-/// secret material or server text.
+/// (`management-socket-required` / `already-running` / `invalid-config` /
+/// `invalid-credentials`), never secret material or server text.
 pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String {
+    let mut slot = connector_slot();
+    if let Some(existing) = slot.as_ref() {
+        if existing.is_running() {
+            return format!(
+                "{{{},{}}}",
+                jbool("started", false),
+                jstr("error", "already-running")
+            );
+        }
+    }
+    let config = match ConnectorConfig::from_json(config_json) {
+        Ok(c) => c,
+        Err(_) => {
+            return format!(
+                "{{{},{}}}",
+                jbool("started", false),
+                jstr("error", "invalid-config")
+            )
+        }
+    };
+    if !config.allow_unprotected_management {
+        // fail-closed: no protected socket, no opt-in → no start
+        return format!(
+            "{{{},{}}}",
+            jbool("started", false),
+            jstr("error", "management-socket-required")
+        );
+    }
+    hilog::emit(
+        "connector: UNPROTECTED management direct dial (allow_unprotected_management=true) \
+         — NOT upstream behavior, DANGEROUS: unprotected traffic + bootstrap-loop risk \
+         while the tunnel owns the default route",
+    );
+    let secrets = match ConnectorSecrets::from_json(credentials_json) {
+        Ok(s) => s,
+        Err(_) => {
+            return format!(
+                "{{{},{}}}",
+                jbool("started", false),
+                jstr("error", "invalid-credentials")
+            )
+        }
+    };
+    let handle = ConnectorHandle::spawn(
+        global_runtime().handle().clone(),
+        Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
+        Arc::new(WgPeerRegistry::new()),
+        Arc::new(LoggingConfigApplier),
+        secrets,
+        config.meta.clone(),
+        ExponentialBackoff::upstream_stream_default(),
+        SyncPolicy::production(),
+        config.renew_lead,
+        config.renew_check_interval,
+        config.force_default_route,
+        None,
+    );
+    let state = handle.status().state;
+    *slot = Some(handle);
+    format!("{{{}, {}}}", jbool("started", true), jstr("state", state.as_str()))
+}
+
+/// The `connector_start_with_socket(fd, configJson, setupKeyJson?, addrJson)`
+/// implementation — the N3-7 PRODUCTION start path (fail-closed gap 1).
+///
+/// The shell (ArkTS) must, before calling this: resolve the management host
+/// (DNS shell-side), open a TCP socket via `mgmt_socket_open`, and
+/// successfully `VpnConnection.protect(fd)` it. The fd crosses as a NUMBER
+/// only; native dups it (`F_DUPFD_CLOEXEC`) per dial and never uses or
+/// closes the original (fd contract — `crate::mgmtsock`).
+///
+/// `addrJson` is `{"connect_addr":"ip:port"}` — the shell-resolved
+/// management address the protected socket is connected to; TLS still
+/// verifies the endpoint URL host.
+///
+/// Refusals (fail-closed, stable tokens): `already-running`,
+/// `invalid-config`, `invalid-credentials`, `socket-fd-missing` (fd < 0),
+/// `socket-fd-invalid` (not dup-able — e.g. protect path closed it or the
+/// protect gate failed shell-side), `socket-addr-invalid`.
+pub fn connector_start_with_socket_json(
+    fd: i32,
+    config_json: &str,
+    credentials_json: &str,
+    connect_addr_json: &str,
+) -> String {
     let mut slot = connector_slot();
     if let Some(existing) = slot.as_ref() {
         if existing.is_running() {
@@ -1473,9 +1762,45 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
             )
         }
     };
+    // fail-closed fd gate: a missing or dead fd refuses the start
+    if fd < 0 {
+        return format!(
+            "{{{},{}}}",
+            jbool("started", false),
+            jstr("error", "socket-fd-missing")
+        );
+    }
+    if let Err(e) = dup_socket_fd(fd) {
+        hilog::emit(&format!(
+            "connector: start refused ({} errno={}) — protect gate failed or fd dead",
+            e.token(),
+            e.errno()
+        ));
+        return format!(
+            "{{{},{}}}",
+            jbool("started", false),
+            jstr("error", e.token())
+        );
+    }
+    let connect_addr = match parse_connect_addr(connect_addr_json) {
+        Ok(a) => a,
+        Err(_) => {
+            return format!(
+                "{{{},{}}}",
+                jbool("started", false),
+                jstr("error", "socket-addr-invalid")
+            )
+        }
+    };
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
     let handle = ConnectorHandle::spawn(
         global_runtime().handle().clone(),
-        Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
+        Arc::new(GrpcManagementFactory::with_socket_source(
+            &config,
+            config.keys.clone(),
+            source.clone(),
+            connect_addr,
+        )),
         Arc::new(WgPeerRegistry::new()),
         Arc::new(LoggingConfigApplier),
         secrets,
@@ -1484,10 +1809,86 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         SyncPolicy::production(),
         config.renew_lead,
         config.renew_check_interval,
+        config.force_default_route,
+        Some(source),
     );
     let state = handle.status().state;
     *slot = Some(handle);
-    format!("{{{}, {}}}", jbool("started", true), jstr("state", state.as_str()))
+    hilog::emit("connector: started over protected management socket (fd dup-consumed per dial)");
+    format!(
+        "{{{},{},{}}}",
+        jbool("started", true),
+        jstr("state", state.as_str()),
+        jbool("protected", true)
+    )
+}
+
+/// The `connector_socket_feed(fd)` implementation — shell-side resupply of
+/// fresh protected sockets for reconnect dials. The shell opens a NEW
+/// socket (`mgmt_socket_open`), protects it, and feeds it here; the queue is
+/// consumed FIFO by the per-dial seam. Without resupply, reconnect dials
+/// fail CLOSED (`no-protected-socket`), never unprotected.
+pub fn connector_socket_feed_json(fd: i32) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!(
+            "{{{},{}}}",
+            jbool("ok", false),
+            jstr("error", "no-connector")
+        );
+    };
+    let Some(source) = handle.socket_source.as_ref() else {
+        return format!(
+            "{{{},{}}}",
+            jbool("ok", false),
+            jstr("error", "no-socket-source")
+        );
+    };
+    if fd < 0 {
+        return format!(
+            "{{{},{}}}",
+            jbool("ok", false),
+            jstr("error", "socket-fd-missing")
+        );
+    }
+    if let Err(e) = dup_socket_fd(fd) {
+        return format!(
+            "{{{},{}}}",
+            jbool("ok", false),
+            jstr("error", e.token())
+        );
+    }
+    source.feed(fd);
+    format!(
+        "{{{},{}}}",
+        jbool("ok", true),
+        jinum("queued", source.pending() as i64)
+    )
+}
+
+/// Parse the `{"connect_addr":"ip:port"}` argument of
+/// [`connector_start_with_socket_json`].
+fn parse_connect_addr(json: &str) -> Result<SocketAddr, ConfigError> {
+    let doc = config::parse_document(json)?;
+    let entries = match doc {
+        Json::Obj(entries) => entries,
+        _ => {
+            return Err(ConfigError::Field {
+                field: "(root)",
+                reason: "expected a JSON object".into(),
+            })
+        }
+    };
+    for (key, val) in &entries {
+        if key == "connect_addr" {
+            let s = field_str(val, "connect_addr")?;
+            return s.parse::<SocketAddr>().map_err(|_| ConfigError::Field {
+                field: "connect_addr",
+                reason: "expected ip:port".into(),
+            });
+        }
+    }
+    Err(ConfigError::Field { field: "connect_addr", reason: "missing field".into() })
 }
 
 /// The `connector_status()` implementation (always valid JSON, even with no
@@ -1510,6 +1911,7 @@ pub fn connector_status_json() -> String {
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
+            terminal: false,
         }
         .to_json(),
     }
@@ -1564,6 +1966,13 @@ fn field_u64(val: &Json, field: &'static str) -> Result<u64, ConfigError> {
     match val {
         Json::Num(n) => Ok(*n),
         _ => Err(ConfigError::Field { field, reason: "expected a number".into() }),
+    }
+}
+
+fn field_bool(val: &Json, field: &'static str) -> Result<bool, ConfigError> {
+    match val {
+        Json::Bool(b) => Ok(*b),
+        _ => Err(ConfigError::Field { field, reason: "expected a boolean".into() }),
     }
 }
 
@@ -1626,6 +2035,58 @@ mod tests {
         );
         let err = ConnectorConfig::from_json(&bad_key).unwrap_err();
         assert!(matches!(err, ConfigError::Field { field: "private_key", .. }), "{err}");
+
+        // N3-7 flags default FALSE (fail-closed defaults) and parse as bools
+        assert!(!cfg.force_default_route);
+        assert!(!cfg.allow_unprotected_management);
+        let opted = ConnectorConfig::from_json(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:8012\",\"private_key\":\"{}\",\
+             \"force_default_route\":true,\"allow_unprotected_management\":true}}",
+            test_private_key_b64(2)
+        ))
+        .expect("opt-in config");
+        assert!(opted.force_default_route);
+        assert!(opted.allow_unprotected_management);
+        let bad_flag = format!(
+            "{{\"management_url\":\"http://x:1\",\"private_key\":\"{}\",\"force_default_route\":\"yes\"}}",
+            test_private_key_b64(2)
+        );
+        let err = ConnectorConfig::from_json(&bad_flag).unwrap_err();
+        assert!(matches!(err, ConfigError::Field { field: "force_default_route", .. }), "{err}");
+    }
+
+    /// N3-7 gap 3: `terminal` = the worker ENDED BY ITSELF (fatal /
+    /// budget exhaustion). A user stop (`disconnected`) is NOT terminal and
+    /// neither is any running state.
+    #[test]
+    fn terminal_semantics_pinned() {
+        assert!(is_terminal_state(false, ConnState::Failed), "fatal/exhausted");
+        assert!(!is_terminal_state(true, ConnState::Failed), "cannot be running+failed");
+        assert!(!is_terminal_state(true, ConnState::Connecting));
+        assert!(!is_terminal_state(true, ConnState::Connected));
+        assert!(!is_terminal_state(true, ConnState::Reconnecting));
+        assert!(!is_terminal_state(false, ConnState::Disconnected), "user stop");
+        assert!(!is_terminal_state(false, ConnState::Closed));
+        // and the JSON field renders it
+        let mut s = ConnectorStatus {
+            running: false,
+            state: ConnState::Failed,
+            started_at_unix: None,
+            last_update_unix: None,
+            peer_count: 0,
+            route_count: 0,
+            reconnects: 0,
+            last_error: Some(ErrorClass::Network),
+            deadline: SessionDeadline::Unknown,
+            renew_attempts: 0,
+            wg_apply_failed: false,
+            wg_apply_errors: 0,
+            logout_ok: None,
+            terminal: true,
+        };
+        assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
+        s.terminal = false;
+        assert!(s.to_json().contains("\"terminal\":false"), "{}", s.to_json());
     }
 
     /// Credential discipline: the parsed config must not retain raw private
@@ -1750,6 +2211,7 @@ mod tests {
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
+            terminal: false,
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -1777,6 +2239,7 @@ mod tests {
             wg_apply_failed: false,
             wg_apply_errors: 0,
             logout_ok: None,
+            terminal: false,
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -1903,16 +2366,19 @@ mod tests {
 
     #[test]
     fn shell_network_config_snapshot_and_json_contract() {
-        let snap = ShellNetworkConfig::from_map(&shell_test_map());
+        // N3-7 default: the WG data plane is NOT ready (registry), so the
+        // managed default route is HELD — not exported for install.
+        let snap = ShellNetworkConfig::from_map_gated(&shell_test_map(), false, false);
         assert_eq!(snap.serial, 42);
         assert_eq!(snap.address.as_deref(), Some("10.64.0.7"));
         assert_eq!(snap.address_prefix_len, Some(32));
         assert_eq!(snap.interface_dns.as_deref(), Some("100.100.0.1"));
-        // default-route mark on 0.0.0.0/0, canonical masked networks
+        // default route HELD: absent from the exported routes, with reason
+        assert!(!snap.default_route_allowed);
+        assert_eq!(snap.default_route_reason, "default-route-held:data-plane-not-ready");
         assert_eq!(
             snap.routes,
             vec![
-                ShellRouteEntry { network: "0.0.0.0/0".into(), is_default: true },
                 ShellRouteEntry { network: "172.16.0.0/12".into(), is_default: false },
             ]
         );
@@ -1939,16 +2405,22 @@ mod tests {
             "\"address\":\"10.64.0.7\"",
             "\"address_prefix_len\":32",
             "\"interface_dns\":\"100.100.0.1\"",
-            "{\"network\":\"0.0.0.0/0\",\"is_default\":true}",
             "{\"network\":\"172.16.0.0/12\",\"is_default\":false}",
             "\"service_enable\":true",
             "{\"ip\":\"1.1.1.1\",\"port\":53}",
             "{\"ip\":\"8.8.8.8\",\"port\":853}",
             "\"peer_count\":3",
             "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2}",
+            // N3-7 gate markers
+            "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
         ] {
             assert!(json.contains(fragment), "missing {fragment} in {json}");
         }
+        // the held default route must NOT appear as an installable route
+        assert!(
+            !json.contains("{\"network\":\"0.0.0.0/0\""),
+            "held default route leaked into routes: {json}"
+        );
         // the strict crate reader must accept the document (JSON contract)
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
         // credential discipline: no private-key field of any kind
@@ -1956,9 +2428,89 @@ mod tests {
         assert!(!json.contains("setup"), "{json}");
     }
 
+    // N3-7: default-route safety gate --------------------------------------
+
+    #[test]
+    fn default_route_gate_zero_peers_holds_even_with_ready_tunnel() {
+        let (allowed, reason) =
+            ShellNetworkConfig::default_route_decision(0, true, false);
+        assert!(!allowed);
+        assert_eq!(reason, "default-route-held:no-usable-peer");
+    }
+
+    #[test]
+    fn default_route_gate_peers_without_tunnel_holds() {
+        let (allowed, reason) =
+            ShellNetworkConfig::default_route_decision(3, false, false);
+        assert!(!allowed);
+        assert_eq!(reason, "default-route-held:data-plane-not-ready");
+    }
+
+    #[test]
+    fn default_route_gate_install_requires_peers_and_ready_tunnel() {
+        let (allowed, reason) =
+            ShellNetworkConfig::default_route_decision(2, true, false);
+        assert!(allowed);
+        assert_eq!(reason, "default-route-allowed:peers-registered-and-tunnel-ready");
+    }
+
+    #[test]
+    fn default_route_gate_force_opt_in_overrides_and_warns() {
+        // explicit dev opt-in installs even while the data plane is dead,
+        // and the reason token names the black-hole risk
+        let (allowed, reason) =
+            ShellNetworkConfig::default_route_decision(0, false, true);
+        assert!(allowed);
+        assert_eq!(reason, "default-route-forced:debug-opt-in-black-hole-risk");
+    }
+
+    #[test]
+    fn default_route_exported_only_when_gate_allows() {
+        // ready tunnel + peers: the default route is exported for install
+        let snap = ShellNetworkConfig::from_map_gated(&shell_test_map(), false, true);
+        assert!(snap.default_route_allowed);
+        assert!(snap.routes.contains(&ShellRouteEntry {
+            network: "0.0.0.0/0".into(),
+            is_default: true,
+        }));
+        let json = snap.to_json();
+        assert!(
+            json.contains("{\"network\":\"0.0.0.0/0\",\"is_default\":true}"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"default_route\":{\"allowed\":true,\"reason\":\"default-route-allowed:peers-registered-and-tunnel-ready\"}"),
+            "{json}"
+        );
+
+        // forced opt-in installs the route with the warning token
+        let forced = ShellNetworkConfig::from_map_gated(&shell_test_map(), true, false);
+        assert!(forced.default_route_allowed);
+        assert!(forced.routes.contains(&ShellRouteEntry {
+            network: "0.0.0.0/0".into(),
+            is_default: true,
+        }));
+        assert_eq!(
+            forced.default_route_reason,
+            "default-route-forced:debug-opt-in-black-hole-risk"
+        );
+
+        // no peers at all (empty map): held even with a ready tunnel
+        let mut empty_map = shell_test_map();
+        empty_map.peers.clear();
+        empty_map.offline_peers.clear();
+        let held = ShellNetworkConfig::from_map_gated(&empty_map, false, true);
+        assert!(!held.default_route_allowed);
+        assert_eq!(held.default_route_reason, "default-route-held:no-usable-peer");
+        assert!(!held
+            .routes
+            .iter()
+            .any(|r| r.network == "0.0.0.0/0"));
+    }
+
     #[test]
     fn network_config_unavailable_until_first_map_then_cleared_on_stop_shape() {
-        let shared = ConnectorShared::new();
+        let shared = ConnectorShared::new(false);
         assert_eq!(
             shared.network_config_json(),
             "{\"available\":false,\"reason\":\"no-network-map\"}"

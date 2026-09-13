@@ -57,6 +57,11 @@ export interface VpnTunnelConfig {
 // (keeps the outer path — management/signal/WG endpoint traffic — out of our
 // own tunnel; the exclusion network is deployment-specific and stays
 // configurable).
+//
+// N3-7: route 2 is a TEMPLATE entry only. The default-route safety gate
+// (`gateDefaultRoutes` below + the core-side snapshot gate) decides whether
+// it may actually be installed; installing 0.0.0.0/0 while the data plane
+// cannot carry traffic is a traffic black hole, so the default is HOLD.
 const DEFAULT_VPN_TUNNEL_CONFIG: VpnTunnelConfig = {
   tunnelAddress: '10.99.0.1',
   tunnelPrefixLength: 32,
@@ -162,12 +167,39 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
   };
 }
 
+// N3-7 default-route safety gate (shell half — the deciding half lives in
+// core, see ShellNetworkConfig::default_route_decision): while the data
+// plane cannot carry traffic, 0.0.0.0/0 must NOT enter the platform
+// VpnConfig, or every flow (including our own management dial) is sucked
+// into a dead tunnel = traffic black hole. `allowed=false` strips every
+// isDefaultRoute entry from the merged config; the caller logs the core
+// reason token (e.g. `default-route-held:data-plane-not-ready`).
+export function gateDefaultRoutes(config: VpnTunnelConfig, allowed: boolean): VpnTunnelConfig {
+  if (allowed) {
+    return config;
+  }
+  const held: VpnRouteConfig[] = [];
+  for (let i = 0; i < config.routes.length; i++) {
+    if (!config.routes[i].isDefaultRoute) {
+      held.push(config.routes[i]);
+    }
+  }
+  return {
+    tunnelAddress: config.tunnelAddress,
+    tunnelPrefixLength: config.tunnelPrefixLength,
+    interfaceName: config.interfaceName,
+    routes: held,
+    dnsServers: config.dnsServers,
+    mtu: config.mtu,
+    peerEndpoint: config.peerEndpoint
+  };
+}
+
 // Maps the client configuration onto the platform VpnConfig exactly in the
 // spike-verified MR4 field shapes. Non-excluded routes omit isExcludedRoute
 // (platform default false) to stay byte-shape identical to the verified MR4
 // literals; excluded routes set it explicitly.
-export function buildPlatformVpnConfig(config: VpnTunnelConfig): vpnExtension.VpnConfig {
-  const address: vpnExtension.LinkAddress = {
+export function buildPlatformVpnConfig(config: VpnTunnelConfig): vpnExtension.VpnConfig {  const address: vpnExtension.LinkAddress = {
     address: { address: config.tunnelAddress, family: 1 },
     prefixLength: config.tunnelPrefixLength
   };

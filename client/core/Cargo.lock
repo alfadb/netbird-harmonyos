@@ -905,6 +905,7 @@ dependencies = [
  "base64 0.22.1",
  "boringtun",
  "crypto_box",
+ "hyper-util",
  "prost",
  "prost-types",
  "protox",
@@ -915,6 +916,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower-service",
 ]
 
 [[package]]

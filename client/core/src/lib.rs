@@ -75,9 +75,12 @@
 //! | `tun_poll(session: number, timeoutMs: number)` | | poll(POLLIN) readiness; POLLNVAL -> `error:"badfd"` (foreign close / destroy detection) |
 //! | `tun_close(session: number)` | | close the session's dup exactly once; second close -> `error:"already-closed"`, use after close -> `error:"closed"` |
 //! | `config_validate(json: string)` | `(json) => string` | validate a client-config JSON document -> `{valid:true,endpoint,mtu,routes,default_route,dns_servers,preshared_key,listen_port}` / `{valid:false,error}` (never echoes key material) |
-//! | `connector_start(configJson, setupKeyJson?)` | | start the N3-5 connection lifecycle (async worker; returns immediately) -> `{started:true,state}` / `{started:false,error}` — poll `connector_status` |
-//! | `connector_status()` | `() => string` | connector snapshot -> `{running,state,started_at_unix,last_update_unix,peer_count,route_count,reconnects,last_error,session_expiry,session_expires_at_unix,session_renew_attempts,wg_apply_failed,wg_apply_errors,logout_ok}` (error = class + status code only, never key material) |
-//! | `connector_network_config()` | `() => string` | read-only shell snapshot of the last applied network map -> `{available:true,serial,address,address_prefix_len,interface_dns,routes:[{network,is_default}],dns:{service_enable,servers:[{ip,port}]},peer_count,peers:[{pub_key,allowed_ips}]}` / `{available:false,reason:"no-network-map"}` (public keys only — no secret material; N3-6) |
+//! | `mgmt_socket_open()` | `() => string` | N3-7: open + bind (NO connect) a TCP management socket so the shell can `VpnConnection.protect(fd)` BEFORE any packet flows -> `{fd,bind_rc,bind_errno}` (wg_fwd_open pattern, TCP variant) |
+//! | `connector_start(configJson, setupKeyJson?)` | | start the N3-5 connection lifecycle (async worker; returns immediately) -> `{started:true,state}` / `{started:false,error}` — **N3-7: REFUSED by default** (`management-socket-required`); unprotected direct dial only with the explicit config opt-in `allow_unprotected_management:true` (debug, NOT upstream, dangerous). Poll `connector_status` |
+//! | `connector_start_with_socket(fd, configJson, setupKeyJson?, addrJson)` | | N3-7 production start: protected management socket fd (shell-resolved DNS + `mgmt_socket_open` + `VpnConnection.protect` BEFORE this call); `addrJson` = `{"connect_addr":"ip:port"}`. Native dups the fd per dial (`F_DUPFD_CLOEXEC`), never uses/closes the original; every reconnect takes a FRESH protected socket. Fail-closed refusals: `socket-fd-missing` / `socket-fd-invalid` / `socket-addr-invalid` |
+//! | `connector_socket_feed(fd)` | `(fd) => string` | N3-7 shell-side resupply of a fresh protected socket for reconnect dials -> `{ok:true,queued:N}` / `{ok:false,error}` |
+//! | `connector_status()` | `() => string` | connector snapshot -> `{running,state,started_at_unix,last_update_unix,peer_count,route_count,reconnects,last_error,session_expiry,session_expires_at_unix,session_renew_attempts,wg_apply_failed,wg_apply_errors,logout_ok,terminal}` (error = class + status code only, never key material; N3-7 `terminal` = worker ended by itself — fatal/exhausted — the shell tears the VPN down on it) |
+//! | `connector_network_config()` | `() => string` | read-only shell snapshot of the last applied network map -> `{available:true,serial,address,address_prefix_len,interface_dns,routes:[{network,is_default}],dns:{service_enable,servers:[{ip,port}]},peer_count,peers:[{pub_key,allowed_ips}],default_route:{allowed,reason}}` / `{available:false,reason:"no-network-map"}` (public keys only — no secret material; N3-6; N3-7: `0.0.0.0/0` is exported only when the default-route gate allows, else held with a `default-route-held:*` reason) |
 //! | `connector_stop()` | `() => string` | idempotent stop (Sync stream close → best-effort logout → cleanup) -> `{ok,already_stopped,state}` |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd
@@ -105,6 +108,9 @@ pub mod grpc;
 pub mod hilog;
 pub mod ledger;
 pub mod management;
+// N3-7: protected management socket seam (fd provider + per-dial dup-only
+// consumption + tonic connector service) — fail-closed gap 1 fix.
+pub mod mgmtsock;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;
 pub mod napi;

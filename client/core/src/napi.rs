@@ -103,7 +103,10 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("tun_poll", napi_tun_poll);
     reg!("tun_close", napi_tun_close);
     reg!("config_validate", napi_config_validate);
+    reg!("mgmt_socket_open", napi_mgmt_socket_open);
     reg!("connector_start", napi_connector_start);
+    reg!("connector_start_with_socket", napi_connector_start_with_socket);
+    reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
@@ -353,7 +356,10 @@ mod tests {
             "tun_poll",
             "tun_close",
             "config_validate",
+            "mgmt_socket_open",
             "connector_start",
+            "connector_start_with_socket",
+            "connector_socket_feed",
             "connector_status",
             "connector_network_config",
             "connector_stop",
@@ -458,6 +464,37 @@ unsafe extern "C" fn napi_connector_start(env: NapiEnv, info: NapiCallbackInfo) 
     let config = a.string_at(0);
     let credentials = a.string_at(1);
     ret_json(env, crate::connector::connector_start_json(&config, &credentials))
+}
+
+// N3-7: production start over a shell-protected management socket. The fd
+// crosses as a number; native dup-consumes it per dial (never uses or closes
+// the original — fd contract in crate::mgmtsock).
+unsafe extern "C" fn napi_connector_start_with_socket(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    let config = a.string_at(1);
+    let credentials = a.string_at(2);
+    let connect_addr = a.string_at(3);
+    ret_json(
+        env,
+        crate::connector::connector_start_with_socket_json(fd, &config, &credentials, &connect_addr),
+    )
+}
+
+// N3-7: shell-side resupply of fresh protected sockets (reconnect dials).
+unsafe extern "C" fn napi_connector_socket_feed(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    ret_json(env, crate::connector::connector_socket_feed_json(fd))
+}
+
+// N3-7: open + bind (NO connect) a TCP management socket for the shell
+// protect gate (the wg_fwd_open split, TCP variant).
+unsafe extern "C" fn napi_mgmt_socket_open(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::mgmtsock::mgmt_socket_open())
 }
 
 unsafe extern "C" fn napi_connector_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {

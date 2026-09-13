@@ -499,7 +499,7 @@ fn snapshot(serial: u64, peers: usize, routes: usize, deadline: Option<i64>) -> 
 fn config_json_for(addr: std::net::SocketAddr) -> String {
     format!(
         "{{\"management_url\":\"http://{addr}\",\"private_key\":\"{}\",\
-         \"hostname\":\"ohos-connector\"}}",
+          \"hostname\":\"ohos-connector\",\"allow_unprotected_management\":true}}",
         sentinel_private_key_b64()
     )
 }
@@ -543,6 +543,8 @@ fn spawn_connector(
         },
         renew_lead,
         renew_interval,
+        false, // N3-7 default-route gate: no force opt-in
+        None,  // N3-7: no protected-socket source in the generic helper
     )
 }
 
@@ -604,6 +606,8 @@ async fn lifecycle_login_updates_apply_to_data_plane() {
     assert_eq!(status.last_error, None);
     assert_eq!(status.deadline, netbird_core::connector::SessionDeadline::At(1_700_000_000));
     assert_eq!(status.reconnects, 0);
+    // N3-7 gap 3: a healthy (even just connecting) connector is NOT terminal
+    assert!(!status.terminal, "running connector is not terminal");
 
     // host applier saw serials 5 and 6 — the outdated 4 was skipped
     assert_eq!(host.serials.lock().expect("serials").clone(), vec![5, 6]);
@@ -738,6 +742,10 @@ async fn permission_denied_on_login_is_terminal() {
     let status = handle.status();
     assert_eq!(status.state, ConnState::Failed);
     assert!(!status.running, "worker exited");
+    // N3-7 gap 3: a self-terminated worker IS terminal — the field the
+    // shell watcher tears the VPN down on
+    assert!(status.terminal, "fatal login is terminal");
+    assert!(handle.status_json().contains("\"terminal\":true"));
     assert_eq!(
         status.last_error,
         Some(ErrorClass::Auth { status: 7 }),
@@ -784,6 +792,9 @@ async fn retry_budget_exhaustion_is_bounded_and_sanitized() {
     wait_for("terminal Failed state", || handle.status().state == ConnState::Failed).await;
     let status = handle.status();
     assert_eq!(status.state, ConnState::Failed);
+    // N3-7 gap 3: budget exhaustion is also a SELF-terminated worker
+    assert!(status.terminal, "retry exhaustion is terminal");
+    assert!(handle.status_json().contains("\"terminal\":true"));
     assert_eq!(
         status.last_error,
         Some(ErrorClass::Network),
@@ -838,6 +849,10 @@ async fn stop_is_idempotent_and_cleans_up_even_when_logout_fails() {
         let status = handle.status();
         assert_eq!(status.state, ConnState::Disconnected);
         assert!(!status.running);
+        // N3-7 gap 3: a USER stop is explicitly NOT terminal (the watcher
+        // must not treat it as a connector death)
+        assert!(!status.terminal, "user stop is not terminal");
+        assert!(handle.status_json().contains("\"terminal\":false"));
         assert!(host.cleared.load(Ordering::Acquire), "host applier cleared");
         wait_for("wg registry cleared", || wg.is_empty()).await;
 
@@ -1119,6 +1134,17 @@ async fn napi_global_start_status_stop_roundtrip() {
     // invalid config rejected before credentials are even parsed
     let json = connector_start_json("not json", "{\"setup_key\":\"k\"}");
     assert!(json.contains("invalid-config"), "{json}");
+
+    // N3-7 fail-closed: WITHOUT the explicit opt-in, an unprotected start is
+    // refused even when the config itself is valid
+    let no_opt_in = format!(
+        "{{\"management_url\":\"http://127.0.0.1:1\",\"private_key\":\"{}\",\
+          \"hostname\":\"ohos-connector\"}}",
+        sentinel_private_key_b64()
+    );
+    let json = connector_start_json(&no_opt_in, "{\"setup_key\":\"SETUP-GLOBAL\"}");
+    assert!(json.contains("\"started\":false"), "{json}");
+    assert!(json.contains("management-socket-required"), "{json}");
 
     // a real start (endpoint unreachable → the worker retries in the
     // background; running stays true)

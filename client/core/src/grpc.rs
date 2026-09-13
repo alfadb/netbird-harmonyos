@@ -294,6 +294,42 @@ fn map_transport_error(stage: &'static str, e: tonic::transport::Error) -> Manag
 // client
 // ---------------------------------------------------------------------------
 
+/// Shared endpoint construction (URL validation + transport/TLS rules) for
+/// both dial paths ([`ManagementGrpcClient::connect`] and
+/// [`ManagementGrpcClient::connect_with_socket_source`]). Mismatch rules are
+/// enforced BEFORE any I/O.
+fn build_endpoint(
+    endpoint: &str,
+    transport: &GrpcTransport,
+    connect_timeout: core::time::Duration,
+) -> Result<Endpoint, ManagementError> {
+    let endpoint_url = endpoint.to_string();
+    let mut ep = Endpoint::from_shared(endpoint_url.clone())
+        .map_err(|e| {
+            ManagementError::UnsupportedUrl(format!("{endpoint:?}: bad endpoint uri ({e})"))
+        })?
+        .connect_timeout(connect_timeout);
+
+    match (transport, endpoint_url.starts_with("https://")) {
+        (GrpcTransport::Tls(tls), true) => {
+            ep = ep.tls_config(tls.tonic_config()?)
+                .map_err(|e| map_transport_error("tls config", e))?;
+        }
+        (GrpcTransport::Tls(_), false) => {
+            return Err(ManagementError::UnsupportedUrl(format!(
+                "{endpoint:?}: TLS configured but endpoint is not https://"
+            )));
+        }
+        (GrpcTransport::Plaintext, true) => {
+            return Err(ManagementError::UnsupportedUrl(format!(
+                "{endpoint:?}: https endpoint requires an injected TLS trust root"
+            )));
+        }
+        (GrpcTransport::Plaintext, false) => {}
+    }
+    Ok(ep)
+}
+
 /// Management gRPC client: a tonic `Channel` + the generated
 /// `ManagementService` client stub. Async API: the future NAPI layer owns a
 /// tokio runtime (frozen stack) and will wrap these calls.
@@ -328,35 +364,46 @@ impl ManagementGrpcClient {
         request_timeout: core::time::Duration,
         envelope_keys: EnvelopeKeyPair,
     ) -> Result<Self, ManagementError> {
-        let endpoint_url = endpoint.to_string();
-        let mut ep = Endpoint::from_shared(endpoint_url.clone())
-            .map_err(|e| {
-                ManagementError::UnsupportedUrl(format!("{endpoint:?}: bad endpoint uri ({e})"))
-            })?
-            .connect_timeout(connect_timeout);
-
-        match (&transport, endpoint_url.starts_with("https://")) {
-            (GrpcTransport::Tls(tls), true) => {
-                ep = ep.tls_config(tls.tonic_config()?)
-                    .map_err(|e| map_transport_error("tls config", e))?;
-            }
-            (GrpcTransport::Tls(_), false) => {
-                return Err(ManagementError::UnsupportedUrl(format!(
-                    "{endpoint:?}: TLS configured but endpoint is not https://"
-                )));
-            }
-            (GrpcTransport::Plaintext, true) => {
-                return Err(ManagementError::UnsupportedUrl(format!(
-                    "{endpoint:?}: https endpoint requires an injected TLS trust root"
-                )));
-            }
-            (GrpcTransport::Plaintext, false) => {}
-        }
-
+        let ep = build_endpoint(endpoint, &transport, connect_timeout)?;
         let channel = ep.connect().await.map_err(|e| {
             // Connect failures include TLS verification failures (the
             // handshake happens during/around connect).
             map_transport_error("connect", e)
+        })?;
+        Ok(ManagementGrpcClient {
+            stub: proto::management_service_client::ManagementServiceClient::new(channel),
+            envelope_keys,
+            request_timeout,
+        })
+    }
+
+    /// N3-7: connect with the gRPC channel running over a PROTECTED
+    /// management socket. The transport is NOT dialed by hyper: every dial
+    /// (initial connect AND every re-dial after the pooled connection dies)
+    /// takes a fresh pre-protected socket from `sockets` — the per-dial
+    /// re-protect semantics of upstream `ControlProtectSocket`
+    /// (dialer_init_android.go:4-6, protectsocket_android.go:22-46; the
+    /// management retry loop re-dials per reconnect, grpc.go:224-275).
+    ///
+    /// `connect_addr` (`ip:port`, DNS RESOLVED SHELL-SIDE) is where the
+    /// protected socket is connected; the endpoint URL host is still what
+    /// TLS uses for SNI and certificate verification — the custom connector
+    /// changes only the transport, never the identity check.
+    pub async fn connect_with_socket_source(
+        endpoint: &str,
+        transport: GrpcTransport,
+        connect_timeout: core::time::Duration,
+        request_timeout: core::time::Duration,
+        envelope_keys: EnvelopeKeyPair,
+        sockets: std::sync::Arc<dyn crate::mgmtsock::ManagementSocketProvider>,
+        connect_addr: std::net::SocketAddr,
+    ) -> Result<Self, ManagementError> {
+        let ep = build_endpoint(endpoint, &transport, connect_timeout)?;
+        let connector =
+            crate::mgmtsock::ProtectedSocketConnector::new(sockets, connect_addr);
+        let channel = ep.connect_with_connector(connector).await.map_err(|e| {
+            // includes the protected-dial failures (no socket / refused)
+            map_transport_error("connect(protected mgmt socket)", e)
         })?;
         Ok(ManagementGrpcClient {
             stub: proto::management_service_client::ManagementServiceClient::new(channel),

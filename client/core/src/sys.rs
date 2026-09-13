@@ -35,7 +35,10 @@ extern "C" {
     pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
     pub fn close(fd: c_int) -> c_int;
 
-    // sockets: only AF_INET / SOCK_DGRAM / 0
+    // sockets: AF_INET with SOCK_DGRAM (WG outer probe) or SOCK_STREAM|SOCK_CLOEXEC
+    // (N3-7 management TCP socket pre-opened for the shell protect gate).
+    // No listen/accept/connect here — TCP connect happens through tokio on
+    // the dup copy only (mgmtsock).
     pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
     pub fn bind(fd: c_int, addr: *const sockaddr_in, len: u32) -> c_int;
     pub fn sendto(
@@ -133,6 +136,8 @@ impl sockaddr_in {
 pub const CLOCK_MONOTONIC: c_int = 1;
 pub const AF_INET: c_int = 2;
 pub const SOCK_DGRAM: c_int = 2;
+pub const SOCK_STREAM: c_int = 1; // N3-7 mgmt TCP pre-open (values per target sysroot)
+pub const SOCK_CLOEXEC: c_int = 0o2000000;
 pub const POLLIN: i16 = 0x001;
 pub const POLLOUT: i16 = 0x004;
 pub const POLLERR: i16 = 0x008;
@@ -155,6 +160,7 @@ pub const EBADF: c_int = 9;
 pub const EINTR: c_int = 4;
 pub const EMSGSIZE: c_int = 90;
 pub const ESRCH: c_int = 3;
+pub const EISCONN: c_int = 106; // N3-7: adopt an already-connected provided socket
 
 // ---------------------------------------------------------------------------
 // helpers
