@@ -435,11 +435,27 @@ struct SockAddr {
 type GetIfAddrs = unsafe extern "C" fn(*mut *mut IfAddrs) -> sys::c_int;
 type FreeIfAddrs = unsafe extern "C" fn(*mut IfAddrs);
 
+/// dlopen the C runtime for `getifaddrs`/`getaddrinfo`. `libc.so` is the
+/// musl/OHOS soname; glibc hosts ship only `libc.so.6` as the loaded DSO
+/// (`libc.so` there is a linker-script text stub from libc6-dev, which
+/// `dlopen` rejects with "invalid ELF header"). Try the OHOS name first,
+/// fall back to the glibc soname — the host-side interop CLI (N10) runs on
+/// glibc and must not fail interface enumeration (`interface-enum:` /
+/// `stun-resolve:` errors are the observed symptom). Handle may still be
+/// null when neither name loads; callers keep their fail-closed errors.
+unsafe fn dlopen_libc() -> *mut core::ffi::c_void {
+    let handle = sys::dlopen(b"libc.so\0".as_ptr(), sys::RTLD_NOW);
+    if !handle.is_null() {
+        return handle;
+    }
+    sys::dlopen(b"libc.so.6\0".as_ptr(), sys::RTLD_NOW)
+}
+
 impl InterfaceSource for SystemInterfaces {
     fn list(&self) -> Result<Vec<InterfaceAddr>, ManagementError> {
         let local = |tok: &'static str| ManagementError::Request { status: 0, message: tok.to_string() };
         unsafe {
-            let libc = sys::dlopen(b"libc.so\0".as_ptr(), sys::RTLD_NOW);
+            let libc = dlopen_libc();
             if libc.is_null() {
                 return Err(local("interface-enum: dlopen libc.so failed"));
             }
@@ -894,7 +910,7 @@ pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
         }
     }
     unsafe {
-        let libc = sys::dlopen(b"libc.so\0".as_ptr(), sys::RTLD_NOW);
+        let libc = dlopen_libc();
         if libc.is_null() {
             return Err(fail("stun-resolve: dlopen libc.so failed".into()));
         }

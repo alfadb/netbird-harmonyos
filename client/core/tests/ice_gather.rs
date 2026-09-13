@@ -574,3 +574,25 @@ fn no_usable_interface_is_an_empty_success() {
     assert!(result.host.is_empty() && result.srflx.is_empty() && result.errors.is_empty());
     assert_eq!(provider.source.taken(), 0, "filtered interfaces take no socket");
 }
+
+/// N10: the PRODUCTION interface source must load libc at runtime on both
+/// OHOS (musl, `libc.so`) and glibc hosts (`libc.so.6`; plain `libc.so`
+/// there is a linker-script stub `dlopen` rejects). Regressed as
+/// `interface-enum: dlopen libc.so failed` → ICE stuck `idle` with
+/// `pump error (request)` on the host interop CLI.
+#[test]
+fn system_interfaces_list_works_on_this_host() {
+    let list =
+        netbird_core::ice::InterfaceSource::list(&netbird_core::ice::SystemInterfaces)
+            .expect("getifaddrs via libc fallback");
+    assert!(!list.is_empty(), "a host always has at least one IPv4 interface");
+}
+
+/// N10: the STUN hostname resolver rides the same libc fallback — a
+/// NAME (not a literal) forces the getaddrinfo path. `localhost` resolves
+/// offline via /etc/hosts; no network is touched.
+#[test]
+fn resolve_ipv4_hostname_loads_libc_on_this_host() {
+    let got = netbird_core::ice::resolve_ipv4("localhost").expect("getaddrinfo via libc fallback");
+    assert_eq!(got, [127, 0, 0, 1]);
+}
