@@ -115,6 +115,9 @@ pub mod mgmtsock;
 pub mod network_map;
 pub mod napi;
 pub mod net;
+// N4a: signal service channel (peer discovery / candidate exchange) — gRPC
+// bidi stream over the protected socket seam, per-peer NaCl envelopes.
+pub mod signal;
 pub mod state;
 // N3-4: management Sync session (first frame, frame decode, reconnect).
 pub mod sync;

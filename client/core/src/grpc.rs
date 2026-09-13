@@ -295,10 +295,11 @@ fn map_transport_error(stage: &'static str, e: tonic::transport::Error) -> Manag
 // ---------------------------------------------------------------------------
 
 /// Shared endpoint construction (URL validation + transport/TLS rules) for
-/// both dial paths ([`ManagementGrpcClient::connect`] and
-/// [`ManagementGrpcClient::connect_with_socket_source`]). Mismatch rules are
-/// enforced BEFORE any I/O.
-fn build_endpoint(
+/// the dial paths ([`ManagementGrpcClient::connect`],
+/// [`ManagementGrpcClient::connect_with_socket_source`] and the signal
+/// client, `crate::signal` — N4a reuses this exact crate-internal helper).
+/// Mismatch rules are enforced BEFORE any I/O.
+pub(crate) fn build_endpoint(
     endpoint: &str,
     transport: &GrpcTransport,
     connect_timeout: core::time::Duration,

@@ -905,6 +905,7 @@ dependencies = [
  "base64 0.22.1",
  "boringtun",
  "crypto_box",
+ "futures-core",
  "hyper-util",
  "prost",
  "prost-types",

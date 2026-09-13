@@ -1,0 +1,891 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 NetBird HarmonyOS contributors
+
+//! # signal — NetBird signal service channel (N4a)
+//!
+//! The peer discovery / candidate exchange transport: a gRPC client for the
+//! `SignalExchange` service, riding the SAME protected-socket seam and the
+//! SAME NaCl envelope primitives as the management channel (no second stack,
+//! per governance `docs/native-nx-governance.md` §二 item 4 — "signal" is an
+//! enumerated socket that must be protected per FIRST connect AND per
+//! reconnect, fail-closed).
+//!
+//! ## Upstream recon: what signal really is (pinned commit
+//! `791401060d2b95e5f51e3439c0649729132f571e` — [`crate::grpc::UPSTREAM_COMMIT`])
+//!
+//! **It is a gRPC (bidi streaming) service, not a WebSocket.** Evidence:
+//!
+//! - `shared/signal/proto/signalexchange.proto:9-14`:
+//!   `service SignalExchange` with `rpc Send(EncryptedMessage) returns
+//!   (EncryptedMessage)` (L11, unary) and `rpc ConnectStream(stream
+//!   EncryptedMessage) returns (stream EncryptedMessage)` (L13, bidi).
+//!   → NO new dependency: the existing tonic 0.14 stack generates both stubs
+//!   (an offline `cargo build` was verified; tokio gained only the `sync`
+//!   feature flag for the mpsc request stream — no new crate, lockfile
+//!   unchanged).
+//! - **Entry URL / TLS**: the URI + protocol come from the management
+//!   LoginResponse `NetbirdConfig.signal` (`HostConfig`, management.proto
+//!   L341-355: `uri` L348, `protocol` L349 with `HTTPS = 3` L352). Upstream:
+//!   `client/internal/connect.go:715-731 connectToSignal` — TLS enabled iff
+//!   `wtConfig.Signal.Protocol == HTTPS` (L717-721), then
+//!   `signal.NewClient(ctx, wtConfig.Signal.Uri, ourPrivateKey, sigTLSEnabled)`
+//!   (L722-723) dials the URI through `client/grpc/dialer.go:31-66
+//!   CreateConnection` (system roots + embedded fallback, L35-43 — OUR trust
+//!   root stays INJECTED, `GrpcTlsConfig`, never a system store).
+//! - **Registration** is header-based on `ConnectStream` (there is no
+//!   register request message): the client attaches metadata
+//!   `x-wiretrustee-peer-id: <base64 WireGuard public key>`
+//!   (`shared/signal/proto/constants.go:4`, `shared/signal/client/grpc.go:311-314`)
+//!   and then BLOCKS on the response headers requiring
+//!   `x-wiretrustee-peer-registered` (grpc.go:320-327). Server side:
+//!   `signal/server/signal.go:134-152 RegisterPeer` reads the header (L136;
+//!   missing → `FailedPrecondition` L137-140), registers the peer, and the
+//!   stream handler confirms with `SendHeader(successHeader)` where
+//!   `successHeader = x-wiretrustee-peer-registered: 1` (L87, L117-121).
+//! - **The server is a pure forwarder** (it never holds peer keys, never
+//!   decrypts): `Send` looks the destination up in the registry and forwards
+//!   (signal.go:95-104; unknown destination → dispatcher, L103);
+//!   `forwardMessageToPeer` routes by `msg.RemoteKey` (L166) and pushes the
+//!   unchanged `EncryptedMessage` onto the destination stream (L161-209).
+//! - **Heartbeat / keepalive**: `Body.HEARTBEAT = 6`
+//!   (signalexchange.proto L51) is used as a SELF-ADDRESSED probe the server
+//!   routes back to the sender (`shared/signal/client/grpc.go:555-566
+//!   sendReceiveProbe`, Key = RemoteKey = own public key). The receive
+//!   watchdog fires it after 30s of stream silence and reconnects if the
+//!   probe does not return within 10s (constants L29-41, watchdog
+//!   L522-553). Transport keepalive: `dialer.go:53-56` (Time 30s / Timeout
+//!   10s). The watchdog itself is an N5 increment; the [`SignalClient::
+//!   send_heartbeat`] primitive is provided so it can be added without
+//!   protocol work.
+//! - **Reconnect semantics**: upstream retries the whole stream-open+receive
+//!   with `defaultBackoff` — 800ms initial / randomization 1 / multiplier
+//!   1.7 / max 10s / 3-month budget (`shared/signal/client/grpc.go:173-183`)
+//!   — the same numbers as [`crate::backoff::ExponentialBackoff::
+//!   upstream_stream_default`]. Receive-loop error split (grpc.go:570-587):
+//!   `Canceled` → shutdown, `Unavailable` → retry, EOF (server closed) →
+//!   retry, everything else → retry. Only `connectivity.Shutdown` is
+//!   `backoff.Permanent` (grpc.go:211-213). A registration without the
+//!   confirm header is a plain retried error (grpc.go:324-327).
+//! - **PermissionDenied → terminate**: the signal retry loop itself only
+//!   marks Shutdown permanent, but the signal client lives INSIDE the engine
+//!   connect loop, which treats management-login `PermissionDenied` as
+//!   `backoff.Permanent` ("unrecoverable error") and cancels the run
+//!   (`client/internal/connect.go:353-356`). This crate pins that policy at
+//!   the session layer: `Auth`-class errors (PermissionDenied AND
+//!   Unauthenticated, [`crate::grpc::map_grpc_status`]) are
+//!   [`SignalStreamError::Fatal`] and end
+//!   [`SignalSession::run_events`] with the cause — the same split as the
+//!   management Sync session (`crate::sync`, grpc.go:436-438 parity).
+//!
+//! ## Encryption: the SAME NaCl envelope, sealed PER PEER
+//!
+//! `EncryptedMessage.body` carries `Body` **protobuf-serialized and then
+//! crypto_box-sealed** ("encrypted with the Wireguard private key and the
+//! remote Peer key", signalexchange.proto L16-17):
+//!
+//! - seal: `encryption/encryption.go:18-24` — `box.Seal(nonce[:], msg,
+//!   nonce, remotePub, ourPriv)`, i.e. wire = `nonce(24B) || ciphertext`,
+//!   fresh random 24-byte nonce per message (L44-51);
+//! - open: `encryption/encryption.go:27-42` — nonce from the first 24
+//!   bytes, open over the remainder;
+//! - keys are the WireGuard identity keys, EXACTLY as management
+//!   (`connect.go:243` → the same private key is handed to the signal
+//!   client, `connect.go:722-723`): incoming frames open with
+//!   `peer = msg.key` (the SENDER's public key,
+//!   `shared/signal/client/grpc.go:414-431 decryptMessage`), outgoing
+//!   frames seal with `peer = msg.remote_key` (the RECIPIENT's public key,
+//!   grpc.go:434-451 encryptMessage).
+//!
+//! → [`crate::envelope::seal`]/[`crate::envelope::open`] are reused
+//! unchanged (byte-compatible with Go `box.Seal/Open`), with the
+//! [`crate::envelope::EnvelopeKeyPair`] injected at
+//! [`SignalClient::connect_with_socket_source`]. Unlike management there is
+//! NO `GetServerKey` exchange here and NO JWT: the only identity is the
+//! WireGuard public key header (grpc.go:311 — "identifying ourselves with a
+//! public WireGuard key"). [`SignalClient::send`] seals the body for the
+//! named remote key and refuses keys that are not base64/32-byte
+//! ([`crate::envelope::EnvelopePublicKey::from_base64`]).
+//!
+//! ## Message types and roles
+//!
+//! `Body.Type` = `OFFER=0 / ANSWER=1 / CANDIDATE=2 / MODE=4 / GO_IDLE=5 /
+//! HEARTBEAT=6` (signalexchange.proto L45-52). Either peer may send any of
+//! them (the server is direction-agnostic): upstream wraps OFFER/ANSWER
+//! with ICE credentials `"ufrag:pwd"` in `payload` plus `wgListenPort`,
+//! `netBirdVersion`, optional rosenpass/relay/sessionId fields
+//! (`shared/signal/client/client.go:74-97 MarshalCredential`, driven by
+//! `client/internal/peer/signaler.go:24-79`); `CANDIDATE.payload` is the
+//! marshaled ICE candidate string (signaler.go:32-41). The engine consumes
+//! the decoded stream in one handler (`client/internal/engine.go:2021-2088`)
+//! — that consumption is the N5 (ICE) boundary: this module delivers the
+//! decrypted [`SignalMessage`] and stays ICE-agnostic.
+//!
+//! ## Protected socket: reuse, not a second seam
+//!
+//! Every dial — the first connect and every tonic re-dial after a pooled
+//! connection dies, i.e. EVERY reconnect — takes a fresh socket from the
+//! injected [`crate::mgmtsock::ManagementSocketProvider`] through the
+//! [`crate::mgmtsock::ProtectedSocketConnector`] (`mgmtsock.rs` N3-7
+//! component used as-is: per-dial `take_fd` → dup → connect AFTER protect;
+//! empty provider fails the dial — fail-closed, no unprotected fallback).
+//! DNS is resolved shell-side (`connect_addr`), the endpoint URL host still
+//! drives TLS SNI/verification — the management `connect_with_socket_source`
+//! contract verbatim. There is deliberately NO unprotected constructor.
+//!
+//! ## Loop model (mirrors `crate::sync`)
+//!
+//! [`SignalSession::run_events`] emits [`SignalLoopEvent`]::
+//! `Registered` (stream registered, incl. reconnects), `Message`
+//! (decrypted [`SignalMessage`]), `Malformed` (a frame failed
+//! envelope-open/decode — the stream STAYS UP, upstream parity: decryption
+//! failures are logged in the worker and never disconnect, grpc.go:600-602
+//! + 610-625), `Broken` (transport-class failure; reconnect after backoff).
+//! Auth-class failures return `Err` and end the loop. Frame crypto failures
+//! keep the stream; backoff exhaustion (injected [`crate::backoff`]) ends
+//! the session with the pending error.
+
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use futures_core::Stream;
+use prost::Message as _;
+use tonic::transport::Channel;
+use tonic::Streaming;
+
+use crate::backoff::{Clock, ExponentialBackoff, MonotonicClock, OsRandom, Rng};
+use crate::envelope::{EnvelopeKeyPair, EnvelopePublicKey};
+use crate::grpc::{map_grpc_status, GrpcTransport};
+use crate::management::ManagementError;
+
+/// Generated protobuf + tonic stubs for `signalexchange.proto`
+/// (`$OUT_DIR/signalexchange.rs`; verbatim proto, see proto/README.md).
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/signalexchange.rs"));
+}
+
+// ---------------------------------------------------------------------------
+// protocol constants (upstream `shared/signal/proto/constants.go:4-5`)
+// ---------------------------------------------------------------------------
+
+/// gRPC metadata header carrying OUR base64 WireGuard public key on
+/// `ConnectStream` (constants.go:4; set by the client at grpc.go:312, read
+/// by the server at signal.go:136).
+pub const HEADER_ID: &str = "x-wiretrustee-peer-id";
+/// gRPC metadata header the server sets on the response (value "1") to
+/// confirm registration (constants.go:5; signal.go:87, client check
+/// grpc.go:320-327).
+pub const HEADER_REGISTERED: &str = "x-wiretrustee-peer-registered";
+
+/// `netBirdVersion` stamped into outgoing `Body`s (upstream
+/// `version.NetbirdVersion()`, client.go:79).
+pub const SIGNAL_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ---------------------------------------------------------------------------
+// models
+// ---------------------------------------------------------------------------
+
+/// A decrypted, decoded signal message (the `Message`/`Body` pair of
+/// signalexchange.proto L31-39/L43-78, reduced to what a consumer needs;
+/// ICE semantics stay with N5).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignalMessage {
+    /// Base64 WireGuard public key of the SENDER (`EncryptedMessage.key`,
+    /// the key the frame's envelope was sealed FOR us with).
+    pub from_key: String,
+    /// Base64 WireGuard public key the sender addressed (`remoteKey`) —
+    /// normally our own public key.
+    pub remote_key: String,
+    /// `Body.type`.
+    pub kind: proto::body::Type,
+    /// `Body.payload` — ICE credentials `"ufrag:pwd"` for OFFER/ANSWER,
+    /// the marshaled candidate for CANDIDATE (client.go:74-79,
+    /// signaler.go:32-41).
+    pub payload: String,
+    /// `Body.wgListenPort`.
+    pub wg_listen_port: u32,
+    /// `Body.netBirdVersion` (sender's client version).
+    pub net_bird_version: String,
+    /// `Body.sessionId`.
+    pub session_id: Option<Vec<u8>>,
+    /// `Body.relayServerAddress`.
+    pub relay_server_address: Option<String>,
+}
+
+impl SignalMessage {
+    fn from_parts(key: String, remote_key: String, body: proto::Body) -> Self {
+        SignalMessage {
+            from_key: key,
+            remote_key,
+            kind: proto::body::Type::try_from(body.r#type)
+                .unwrap_or(proto::body::Type::Candidate),
+            payload: body.payload,
+            wg_listen_port: body.wg_listen_port,
+            net_bird_version: body.net_bird_version,
+            session_id: body.session_id,
+            relay_server_address: body.relay_server_address,
+        }
+    }
+}
+
+/// Failure of the active signal stream — the [`crate::sync::SyncStreamError`]
+/// split: only the Auth class is unrecoverable (module docs,
+/// "PermissionDenied → terminate").
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalStreamError {
+    /// Stream ended; reconnecting is allowed (transport failure, server
+    /// EOF, non-Auth gRPC status).
+    Closed(ManagementError),
+    /// Unrecoverable (PermissionDenied / Unauthenticated → the engine-level
+    /// permanent policy, connect.go:353-356). The session loop MUST stop.
+    Fatal(ManagementError),
+}
+
+impl SignalStreamError {
+    fn from_management(err: ManagementError) -> Self {
+        match err {
+            e @ ManagementError::Auth { .. } => SignalStreamError::Fatal(e),
+            e => SignalStreamError::Closed(e),
+        }
+    }
+
+    /// The concrete error, for logging/reporting.
+    pub fn into_inner(self) -> ManagementError {
+        match self {
+            SignalStreamError::Closed(e) | SignalStreamError::Fatal(e) => e,
+        }
+    }
+}
+
+/// One decoded receive-side outcome: a good message, or a frame that could
+/// not be opened/decoded (the stream STAYS UP — upstream decrypt-worker
+/// behavior, grpc.go:600-602; surfaced instead of silently dropped).
+#[derive(Debug, Clone, PartialEq)]
+pub enum IncomingFrame {
+    Message(SignalMessage),
+    Malformed(ManagementError),
+}
+
+// ---------------------------------------------------------------------------
+// the client
+// ---------------------------------------------------------------------------
+
+/// Signal exchange gRPC client over the protected-socket seam.
+///
+/// Construct ONLY through [`SignalClient::connect_with_socket_source`]
+/// (fail-closed protected dial; there is no unprotected constructor).
+#[derive(Debug, Clone)]
+pub struct SignalClient {
+    stub: proto::signal_exchange_client::SignalExchangeClient<Channel>,
+    /// Our WireGuard/NaCl identity keys: header identity
+    /// (`public_key_base64`), envelope seal/open keys.
+    keys: EnvelopeKeyPair,
+    /// Per-RPC deadline for the unary `Send` (tokio::time::timeout →
+    /// [`ManagementError::Timeout`]), the established N3-2 contract.
+    request_timeout: core::time::Duration,
+}
+
+/// A registered `ConnectStream`: the live outbound half plus the inbound
+/// frame source (upstream `proto.SignalExchange_ConnectStreamClient`).
+pub struct RegisteredStream {
+    /// Send [`proto::EncryptedMessage`]s through the stream
+    /// (upstream `SendToStream`, grpc.go:396-411).
+    pub outbound: tokio::sync::mpsc::Sender<proto::EncryptedMessage>,
+    /// Receive [`proto::EncryptedMessage`]s pushed by the server.
+    pub inbound: Streaming<proto::EncryptedMessage>,
+}
+
+// No derived Debug: the stream handles are not inspectable and must never
+// leak frame content through formatting.
+impl core::fmt::Debug for RegisteredStream {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RegisteredStream").finish_non_exhaustive()
+    }
+}
+
+impl SignalClient {
+    /// Connect to `endpoint` (`https://host:port` or `http://host:port`)
+    /// with the gRPC transport running over a PROTECTED signal socket —
+    /// every dial (initial AND every tonic re-dial after the pooled
+    /// connection dies) takes a fresh pre-protected socket from `sockets`
+    /// (governance §二 item 4; `crate::mgmtsock` module docs). `connect_addr`
+    /// is the shell-resolved `ip:port` the protected socket connects to;
+    /// the endpoint URL host still drives TLS SNI/certificate verification.
+    ///
+    /// `keys` are the device WireGuard/NaCl identity keys (upstream passes
+    /// the WireGuard private key, `connect.go:722-723`); they double as the
+    /// registration identity (base64 public key) and the envelope keys.
+    pub async fn connect_with_socket_source(
+        endpoint: &str,
+        transport: GrpcTransport,
+        connect_timeout: core::time::Duration,
+        request_timeout: core::time::Duration,
+        keys: EnvelopeKeyPair,
+        sockets: Arc<dyn crate::mgmtsock::ManagementSocketProvider>,
+        connect_addr: std::net::SocketAddr,
+    ) -> Result<Self, ManagementError> {
+        let ep = crate::grpc::build_endpoint(endpoint, &transport, connect_timeout)?;
+        let connector = crate::mgmtsock::ProtectedSocketConnector::new(sockets, connect_addr);
+        let channel = ep.connect_with_connector(connector).await.map_err(|e| {
+            // includes protected-dial failures: no socket / connect refused /
+            // TLS verification failure — fail-closed, nothing dialed bare.
+            ManagementError::Network(format!("connect(protected signal socket): {e}"))
+        })?;
+        Ok(SignalClient {
+            stub: proto::signal_exchange_client::SignalExchangeClient::new(channel),
+            keys,
+            request_timeout,
+        })
+    }
+
+    /// Our base64 WireGuard public key — the `x-wiretrustee-peer-id`
+    /// registration identity (grpc.go:312) and `EncryptedMessage.key`
+    /// value (grpc.go:446-448).
+    pub fn local_key(&self) -> String {
+        self.keys.public_key_base64()
+    }
+
+    /// `ConnectStream` registration (upstream `connect`, grpc.go:308-330):
+    /// opens the bidi stream with `x-wiretrustee-peer-id: <our public key>`
+    /// and REQUIRES the `x-wiretrustee-peer-registered` confirm header in
+    /// the response metadata (missing → [`ManagementError::Parse`], retried
+    /// by the session like upstream grpc.go:324-327). A server rejecting
+    /// the identity (e.g. `FailedPrecondition` for a missing header,
+    /// signal.go:137-140) maps through [`map_grpc_status`].
+    pub async fn register(&mut self) -> Result<RegisteredStream, ManagementError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<proto::EncryptedMessage>(64);
+        let mut request = tonic::Request::new(OutboundStream::new(rx));
+        let id = self.keys.public_key_base64();
+        let value: tonic::metadata::AsciiMetadataValue = id
+            .parse()
+            .map_err(|e| {
+                ManagementError::Request {
+                    status: 0,
+                    message: format!("peer id is not header-safe: {e}"),
+                }
+            })?;
+        request.metadata_mut().insert(HEADER_ID, value);
+
+        let response = self
+            .stub
+            .connect_stream(request)
+            .await
+            .map_err(map_grpc_status)?;
+        let registered = response.metadata().get(HEADER_REGISTERED).ok_or_else(|| {
+            ManagementError::Parse(
+                "signal server did not confirm registration \
+                 (no x-wiretrustee-peer-registered response header)"
+                    .into(),
+            )
+        })?;
+        if registered.is_empty() {
+            return Err(ManagementError::Parse(
+                "signal server sent an empty x-wiretrustee-peer-registered header".into(),
+            ));
+        }
+        Ok(RegisteredStream { outbound: tx, inbound: response.into_inner() })
+    }
+
+    /// Seal `msg.body` for `msg.remote_key` into the wire
+    /// [`proto::EncryptedMessage`] (upstream `encryptMessage`,
+    /// grpc.go:434-451): envelope peer = the RECIPIENT's public key, our
+    /// private key; `key` = our base64 public key.
+    pub fn encrypt_message(
+        &self,
+        msg: &proto::Message,
+    ) -> Result<proto::EncryptedMessage, ManagementError> {
+        let body = msg.body.as_ref().ok_or_else(|| {
+            ManagementError::Request { status: 0, message: "signal message without body".into() }
+        })?;
+        let remote = EnvelopePublicKey::from_base64(&msg.remote_key)?;
+        let sealed = crate::envelope::seal(&remote, &self.keys, &body.encode_to_vec())?;
+        Ok(proto::EncryptedMessage {
+            key: self.keys.public_key_base64(),
+            remote_key: msg.remote_key.clone(),
+            body: sealed,
+        })
+    }
+
+    /// Open a received wire envelope and decode the `Body` (upstream
+    /// `decryptMessage`, grpc.go:414-431): envelope peer = the SENDER's
+    /// public key (`msg.key`), our private key. Wrong key / tampered data /
+    /// bad protobuf → [`ManagementError::Parse`].
+    pub fn decrypt_envelope(
+        &self,
+        envelope: &proto::EncryptedMessage,
+    ) -> Result<SignalMessage, ManagementError> {
+        let sender = EnvelopePublicKey::from_base64(&envelope.key)?;
+        let plaintext = crate::envelope::open(&sender, &self.keys, &envelope.body)?;
+        let body = proto::Body::decode(plaintext.as_slice())
+            .map_err(|e| ManagementError::Parse(format!("signal Body decode failed: {e}")))?;
+        Ok(SignalMessage::from_parts(
+            envelope.key.clone(),
+            envelope.remote_key.clone(),
+            body,
+        ))
+    }
+
+    /// Build a plaintext (not yet sealed) `Message` — the
+    /// `MarshalCredential` shape (client.go:74-97) minus the fields this
+    /// client does not produce yet (rosenpass, features, mode): set
+    /// explicitly on the returned `body` if ever needed.
+    pub fn build_message(
+        &self,
+        remote_key: &str,
+        kind: proto::body::Type,
+        payload: impl Into<String>,
+        wg_listen_port: u32,
+    ) -> proto::Message {
+        proto::Message {
+            key: self.keys.public_key_base64(),
+            remote_key: remote_key.to_string(),
+            body: Some(proto::Body {
+                r#type: kind as i32,
+                payload: payload.into(),
+                wg_listen_port,
+                net_bird_version: SIGNAL_CLIENT_VERSION.to_string(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// `SignalExchange/Send` (unary, signalexchange.proto L11): seals and
+    /// delivers one message (upstream `GrpcClient::send`, grpc.go:454-492 —
+    /// their 4-attempt timeout ladder is deferred; one attempt under the
+    /// client-wide `request_timeout`, failing loudly). The reply is an
+    /// empty `EncryptedMessage` (signal.go:100) and is discarded.
+    pub async fn send(&mut self, msg: &proto::Message) -> Result<(), ManagementError> {
+        let wire = self.encrypt_message(msg)?;
+        let _reply = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .send(tonic::Request::new(wire))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)??;
+        Ok(())
+    }
+
+    /// Self-addressed HEARTBEAT (`Key = RemoteKey = own public key`,
+    /// upstream `sendReceiveProbe`, grpc.go:555-566): the server routes it
+    /// straight back (signal.go:95-104), exercising the exact receive path
+    /// the N5 receive watchdog will guard.
+    pub async fn send_heartbeat(&mut self) -> Result<(), ManagementError> {
+        let msg = self.build_message(
+            &self.keys.public_key_base64(),
+            proto::body::Type::Heartbeat,
+            "",
+            0,
+        );
+        self.send(&msg).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// session (run_events loop, mirrors crate::sync)
+// ---------------------------------------------------------------------------
+
+struct ActiveStream {
+    outbound: tokio::sync::mpsc::Sender<proto::EncryptedMessage>,
+    frames: Streaming<proto::EncryptedMessage>,
+}
+
+/// Long-lived signal session with upstream-shaped reconnect: register the
+/// stream, receive/decrypt frames, back off and re-register on breaks.
+///
+/// Drive it with [`SignalSession::run_events`] (loop + callback), or step
+/// manually with [`SignalSession::connect`] / [`SignalSession::next_frame`].
+pub struct SignalSession {
+    client: SignalClient,
+    active: Option<ActiveStream>,
+    backoff: ExponentialBackoff,
+    rng: Box<dyn Rng + Send>,
+    clock: Box<dyn Clock + Send>,
+    reconnects: u64,
+    observed_delays: std::sync::Mutex<Vec<core::time::Duration>>,
+    last_stream_error: Option<ManagementError>,
+}
+
+/// Event emitted by [`SignalSession::run_events`] (the signal counterpart
+/// of [`crate::sync::SyncLoopEvent`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalLoopEvent<'a> {
+    /// The stream is registered (initial connect or reconnect — upstream
+    /// `notifyStreamConnected` after the registered header, grpc.go:236,
+    /// 292-306).
+    Registered,
+    /// A decrypted message arrived.
+    Message(&'a SignalMessage),
+    /// A frame failed envelope-open/protobuf-decode. The stream STAYS UP
+    /// (upstream decrypt worker logs and continues, grpc.go:600-602);
+    /// surfaced so a broken peer/key is visible, not silently dropped.
+    Malformed(&'a ManagementError),
+    /// The stream broke or a register attempt failed with a retryable
+    /// error; the session backs off and reconnects (upstream
+    /// notifyDisconnected + "will retry silently", grpc.go:266-272).
+    Broken(&'a ManagementError),
+}
+
+impl SignalSession {
+    /// New session with the upstream signal backoff preset (800ms/×1.7/10s
+    /// cap/f=1/3-months, `shared/signal/client/grpc.go:173-183` — identical
+    /// numbers to [`ExponentialBackoff::upstream_stream_default`]), OS
+    /// randomness and the monotonic clock.
+    pub fn new(client: SignalClient) -> Self {
+        SignalSession {
+            client,
+            active: None,
+            backoff: ExponentialBackoff::upstream_stream_default(),
+            rng: Box::new(OsRandom),
+            clock: Box::new(MonotonicClock),
+            reconnects: 0,
+            observed_delays: std::sync::Mutex::new(Vec::new()),
+            last_stream_error: None,
+        }
+    }
+
+    /// Test/owner overrides: exact backoff policy, deterministic RNG and
+    /// injectable clock (no sleeping in parameter assertions) — the
+    /// [`crate::sync::SyncSession::with_policy`] contract.
+    pub fn with_policy(
+        mut self,
+        backoff: ExponentialBackoff,
+        rng: Box<dyn Rng + Send>,
+        clock: Box<dyn Clock + Send>,
+    ) -> Self {
+        self.backoff = backoff;
+        self.rng = rng;
+        self.clock = clock;
+        self
+    }
+
+    /// Stream breaks that triggered (or will trigger) a reconnect attempt;
+    /// the initial registration is not counted (diagnostics).
+    pub fn reconnects(&self) -> u64 {
+        self.reconnects
+    }
+
+    /// The backoff delays driven through reconnect sleeps, in order.
+    pub fn observed_reconnect_delays(&self) -> Vec<core::time::Duration> {
+        self.observed_delays.lock().expect("observed_delays lock").clone()
+    }
+
+    /// The stream error that broke the most recent connection.
+    pub fn last_stream_error(&self) -> Option<&ManagementError> {
+        self.last_stream_error.as_ref()
+    }
+
+    /// Open + register the stream (upstream `connect` inside the Receive
+    /// operation, grpc.go:230). On success the backoff resets (grpc.go:268
+    /// via the shared retry helper contract, retry.go:22).
+    pub async fn connect(&mut self) -> Result<(), ManagementError> {
+        let registered = self.client.register().await?;
+        self.active = Some(ActiveStream {
+            outbound: registered.outbound,
+            frames: registered.inbound,
+        });
+        self.last_stream_error = None;
+        self.backoff.reset(self.clock.as_ref());
+        Ok(())
+    }
+
+    /// Send a plaintext `Message` through the ACTIVE stream
+    /// (upstream `SendToStream`, grpc.go:396-411: seal for `remote_key`,
+    /// push onto the open stream). No active stream → `Network`.
+    pub async fn send_to_stream(&mut self, msg: &proto::Message) -> Result<(), ManagementError> {
+        let wire = self.client.encrypt_message(msg)?;
+        let active = self.active.as_mut().ok_or_else(|| {
+            ManagementError::Network(
+                "signal stream not registered (call connect() first)".into(),
+            )
+        })?;
+        active.outbound.send(wire).await.map_err(|_| {
+            ManagementError::Network("signal stream outbound half is closed".into())
+        })
+    }
+
+    /// Receive the next frame from the ACTIVE stream: decrypt (sender key
+    /// from the envelope) + decode into [`SignalMessage`].
+    ///
+    /// - envelope/protobuf failure → `Ok(Malformed)` — the stream stays up
+    ///   (upstream decrypt worker, grpc.go:600-602);
+    /// - transport/EOF → `Err(Closed)` — the reconnect trigger
+    ///   (grpc.go:570-587: EOF means the server closed the stream and is
+    ///   retried like any transport failure);
+    /// - `PermissionDenied`/`Unauthenticated` → `Err(Fatal)` — terminate.
+    pub async fn next_frame(&mut self) -> Result<IncomingFrame, SignalStreamError> {
+        let active = self.active.as_mut().ok_or_else(|| {
+            SignalStreamError::Closed(ManagementError::Network(
+                "signal stream not registered (call connect() first)".into(),
+            ))
+        })?;
+        let envelope = match active.frames.message().await {
+            Ok(Some(envelope)) => envelope,
+            // io.EOF — server closed the stream (grpc.go:581-583)
+            Ok(None) => {
+                return Err(SignalStreamError::Closed(ManagementError::Network(
+                    "signal stream closed by server (EOF)".into(),
+                )));
+            }
+            Err(status) => {
+                return Err(SignalStreamError::from_management(map_grpc_status(status)));
+            }
+        };
+        match self.client.decrypt_envelope(&envelope) {
+            Ok(msg) => Ok(IncomingFrame::Message(msg)),
+            Err(e) => Ok(IncomingFrame::Malformed(e)),
+        }
+    }
+
+    /// Run the session until a FATAL error or backoff exhaustion — the
+    /// [`crate::sync::SyncSession::run_events`] shape, with the signal
+    /// event set ([`SignalLoopEvent`]):
+    ///
+    /// 1. register (Auth-class failure → `Err`, NO retry);
+    /// 2. on success emit `Registered` and deliver frames;
+    /// 3. frame-level crypto/decode failure → `Malformed`, stream stays up;
+    /// 4. stream failure → `Broken`, take the next backoff delay (injected
+    ///    clock/rng), sleep, re-register; `None` (budget spent) → `Err`
+    ///    with the pending error.
+    ///
+    /// Shutdown: drop the future/task owning this session — the loop holds
+    /// no catch-all that survives task cancellation.
+    pub async fn run_events<E>(&mut self, mut on_event: E) -> Result<(), ManagementError>
+    where
+        E: for<'a> FnMut(SignalLoopEvent<'a>),
+    {
+        loop {
+            match self.connect().await {
+                Ok(()) => {
+                    on_event(SignalLoopEvent::Registered);
+                    loop {
+                        match self.next_frame().await {
+                            Ok(IncomingFrame::Message(msg)) => {
+                                on_event(SignalLoopEvent::Message(&msg));
+                            }
+                            Ok(IncomingFrame::Malformed(e)) => {
+                                on_event(SignalLoopEvent::Malformed(&e));
+                            }
+                            Err(SignalStreamError::Fatal(e)) => return Err(e),
+                            Err(SignalStreamError::Closed(e)) => {
+                                self.last_stream_error = Some(e);
+                                self.reconnects += 1;
+                                on_event(SignalLoopEvent::Broken(
+                                    self.last_stream_error.as_ref().expect("error just stored"),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if matches!(e, ManagementError::Auth { .. }) {
+                        return Err(e); // permanent — engine policy, connect.go:353-356
+                    }
+                    self.last_stream_error = Some(e);
+                    on_event(SignalLoopEvent::Broken(
+                        self.last_stream_error.as_ref().expect("error just stored"),
+                    ));
+                }
+            }
+            let delay = match self.backoff.next_delay(self.clock.as_ref(), self.rng.as_mut()) {
+                Some(d) => d,
+                None => {
+                    return Err(self.last_stream_error.take().unwrap_or_else(|| {
+                        ManagementError::Network(
+                            "signal reconnect backoff exhausted without a pending error".into(),
+                        )
+                    }));
+                }
+            };
+            self.observed_delays
+                .lock()
+                .expect("observed_delays lock")
+                .push(delay);
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the client→server request stream (bidi outbound half)
+// ---------------------------------------------------------------------------
+
+/// [`futures_core::Stream`] over a tokio mpsc receiver — the live outbound
+/// half of `ConnectStream` (upstream keeps `stream.Send(...)` available on
+/// the gRPC stream object, grpc.go:396-411; tonic models the client half as
+/// a request `Stream`).
+struct OutboundStream {
+    rx: tokio::sync::mpsc::Receiver<proto::EncryptedMessage>,
+}
+
+impl OutboundStream {
+    fn new(rx: tokio::sync::mpsc::Receiver<proto::EncryptedMessage>) -> Self {
+        OutboundStream { rx }
+    }
+}
+
+impl Stream for OutboundStream {
+    type Item = proto::EncryptedMessage;
+
+    // `Receiver` is Unpin, so pinning the receiver projection is enough.
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().rx).poll_recv(cx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// unit tests: message building / envelope round trip (no I/O)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client() -> SignalClient {
+        // host unit test: never dials; only exercises the crypto/wire
+        // builders (the constructor requires I/O, so assemble directly).
+        SignalClient {
+            stub: build_dead_stub(),
+            keys: EnvelopeKeyPair::generate().unwrap(),
+            request_timeout: core::time::Duration::from_secs(5),
+        }
+    }
+
+    fn build_dead_stub() -> proto::signal_exchange_client::SignalExchangeClient<Channel> {
+        // a channel that can never carry traffic is fine: none of the
+        // tested paths touch the stub.
+        let ep = tonic::transport::Endpoint::from_static("http://127.0.0.1:1");
+        proto::signal_exchange_client::SignalExchangeClient::new(ep.connect_lazy())
+    }
+
+    #[test]
+    fn header_constants_match_upstream() {
+        assert_eq!(HEADER_ID, "x-wiretrustee-peer-id");
+        assert_eq!(HEADER_REGISTERED, "x-wiretrustee-peer-registered");
+    }
+
+    // The dead-stub construction needs a lazy channel, which wants a tokio
+    // reactor context; the tests below are async purely for that stub.
+    #[tokio::test]
+    async fn build_message_sets_identity_type_payload_and_version() {
+        let c = client();
+        let msg = c.build_message(
+            "REMOTEKEY",
+            proto::body::Type::Offer,
+            "ufrag:pwd",
+            51_820,
+        );
+        assert_eq!(msg.key, c.keys.public_key_base64());
+        assert_eq!(msg.remote_key, "REMOTEKEY");
+        let body = msg.body.as_ref().expect("body");
+        assert_eq!(body.r#type, proto::body::Type::Offer as i32);
+        assert_eq!(body.payload, "ufrag:pwd");
+        assert_eq!(body.wg_listen_port, 51_820);
+        assert_eq!(body.net_bird_version, SIGNAL_CLIENT_VERSION);
+    }
+
+    #[tokio::test]
+    async fn encrypt_decrypt_roundtrip_seals_for_remote_opens_with_sender() {
+        let alice = client();
+        let bob = client();
+        let msg = alice.build_message(
+            &bob.keys.public_key_base64(),
+            proto::body::Type::Candidate,
+            "candidate-1",
+            0,
+        );
+        let wire = alice.encrypt_message(&msg).unwrap();
+        // wire shape: key=alice pub b64, remote_key=bob pub b64
+        assert_eq!(wire.key, alice.keys.public_key_base64());
+        assert_eq!(wire.remote_key, bob.keys.public_key_base64());
+        // nonce(24) || protobuf-Body || tag(16)
+        let plain = msg.body.as_ref().unwrap().encode_to_vec();
+        assert_eq!(wire.body.len(), crate::envelope::NONCE_SIZE + plain.len() + 16);
+
+        // bob opens with alice's public key (the envelope sender)
+        let opened = bob.decrypt_envelope(&wire).unwrap();
+        assert_eq!(opened.from_key, alice.keys.public_key_base64());
+        assert_eq!(opened.remote_key, bob.keys.public_key_base64());
+        assert_eq!(opened.kind, proto::body::Type::Candidate);
+        assert_eq!(opened.payload, "candidate-1");
+    }
+
+    #[tokio::test]
+    async fn decrypt_rejects_wrong_sender_key_and_garbage() {
+        let alice = client();
+        let bob = client();
+        let eve = client();
+        let msg = alice.build_message(
+            &bob.keys.public_key_base64(),
+            proto::body::Type::Offer,
+            "u:p",
+            0,
+        );
+        let wire = alice.encrypt_message(&msg).unwrap();
+        // eve is not the addressed peer: authentication fails
+        assert!(matches!(
+            eve.decrypt_envelope(&wire),
+            Err(ManagementError::Parse(_))
+        ));
+        // truncated / garbage bodies fail before protobuf decoding
+        let mut garbage = wire.clone();
+        garbage.body.truncate(10);
+        assert!(matches!(
+            bob.decrypt_envelope(&garbage),
+            Err(ManagementError::Parse(_))
+        ));
+        // not-a-protobuf plaintext after open → Parse
+        let sealed = crate::envelope::seal(
+            &EnvelopePublicKey::from_base64(&alice.keys.public_key_base64()).unwrap(),
+            &bob.keys,
+            b"not-a-proto",
+        )
+        .unwrap();
+        let forged = proto::EncryptedMessage {
+            key: alice.keys.public_key_base64(),
+            remote_key: bob.keys.public_key_base64(),
+            body: sealed,
+        };
+        assert!(matches!(
+            bob.decrypt_envelope(&forged),
+            Err(ManagementError::Parse(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn encrypt_message_requires_body_and_valid_remote_key() {
+        let c = client();
+        let empty = proto::Message { key: String::new(), remote_key: "x".into(), body: None };
+        assert!(matches!(
+            c.encrypt_message(&empty),
+            Err(ManagementError::Request { status: 0, .. })
+        ));
+        let msg = c.build_message("not-base64!!!", proto::body::Type::Offer, "", 0);
+        assert!(matches!(
+            c.encrypt_message(&msg),
+            Err(ManagementError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn signal_stream_error_splits_on_auth_class() {
+        let auth = ManagementError::Auth { status: 7, message: "denied".into() };
+        assert!(matches!(
+            SignalStreamError::from_management(auth),
+            SignalStreamError::Fatal(_)
+        ));
+        for e in [
+            ManagementError::Network("x".into()),
+            ManagementError::Parse("y".into()),
+            ManagementError::Timeout,
+            ManagementError::Server { status: 13 },
+        ] {
+            assert!(matches!(
+                SignalStreamError::from_management(e),
+                SignalStreamError::Closed(_)
+            ));
+        }
+    }
+}

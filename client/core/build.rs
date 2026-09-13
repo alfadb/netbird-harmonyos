@@ -7,6 +7,10 @@
 //!   proto/management.proto  --protox-->  FileDescriptorSet  --tonic-prost-build-->
 //!   $OUT_DIR/management.rs  (messages + tonic client/server in one file)
 //!
+//! N4a adds the same pipeline for the signal exchange protocol:
+//!   proto/signalexchange.proto --> $OUT_DIR/signalexchange.rs
+//! (consumed by `src/signal.rs`; verbatim copy, see proto/README.md).
+//!
 //! - `protox` is a pure-Rust protobuf compiler: NO protoc, NO network access.
 //!   The well-known imports of management.proto
 //!   (google/protobuf/timestamp.proto, google/protobuf/duration.proto) are
@@ -38,4 +42,19 @@ fn main() {
         .generate_default_stubs(true)
         .compile_fds(file_descriptors)
         .expect("tonic-prost-build failed to generate management stubs");
+
+    // N4a: the signal exchange protocol (`SignalExchange/Send` unary +
+    // `SignalExchange/ConnectStream` bidi stream). Same offline pipeline;
+    // the `google/protobuf/descriptor.proto` import resolves through protox's
+    // embedded GoogleFileResolver like the management well-known imports.
+    let signal_proto = proto_root.join("signalexchange.proto");
+    println!("cargo:rerun-if-changed={}", signal_proto.display());
+    let signal_fds = protox::compile([signal_proto], [proto_root])
+        .unwrap_or_else(|e| panic!("protox failed to compile signalexchange.proto: {e}"));
+    tonic_prost_build::configure()
+        .build_client(true)
+        .build_server(true)
+        .generate_default_stubs(true)
+        .compile_fds(signal_fds)
+        .expect("tonic-prost-build failed to generate signal stubs");
 }

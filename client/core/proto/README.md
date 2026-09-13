@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
-# client/core/proto — 引入的上游 gRPC 协议文件（N3-2）
+# client/core/proto — 引入的上游 gRPC 协议文件（N3-2、N4a）
 
 ## management.proto
 
@@ -24,15 +24,33 @@
 ## import 闭包说明
 
 `management.proto` 只 import 两个 well-known type（`google/protobuf/timestamp.proto`
-与 `google/protobuf/duration.proto`）。这两个文件**未复制进仓库**：构建期
+与 `google/protobuf/duration.proto`）；`signalexchange.proto` 只 import
+`google/protobuf/descriptor.proto`。这些文件**未复制进仓库**：构建期
 codegen（`build.rs`）通过 `protox::Compiler` 内建的
 `GoogleFileResolver`（protox 依赖内嵌的 WKT 描述符池）解析，构建不依赖网络、
 不依赖 protoc，也不引入多余的仓库内文件。
+
+## signalexchange.proto（N4a）
+
+- **来源**：同上 commit `791401060d2b95e5f51e3439c0649729132f571e`。
+- **上游路径**：`shared/signal/proto/signalexchange.proto`
+- **复制方式**：逐字复制，未做任何修改（sha256 复制前后一致；
+  `9374413168551f7ded6c009dda2bfaa55e111bf138f2fe61780752a05c566ab9`）。
+- **许可**：**BSD-3-Clause**（同 management.proto 的目录映射：本文件位于
+  `shared/` 下，非顶层 AGPLv3 四目录）。原文件**没有**内嵌版权/许可头
+  （文件以 `syntax = "proto3";` 开头），本目录不添加、也不篡改任何头；
+  归属在 [THIRD-PARTY-NOTICES.md](../../THIRD-PARTY-NOTICES.md) 保留。
+- **引入目的**：NetBird signal 服务通道（peer 发现 / ICE 候选交换的传输层），
+  `SignalExchange/Send`（unary）+ `SignalExchange/ConnectStream`（bidi 流），
+  消息 `EncryptedMessage{key, remoteKey, body}` 与 `Body{type, payload,
+  wgListenPort, ...}`。此 proto 是 `src/signal.rs` 的 tonic/prost 代码生成
+  输入与协议事实来源；协议时序与逐行号侦察结论见 `docs/n3-signal-notes.md`。
 
 ## 重新生成/对账
 
 ```bash
 # 与仓外上游参考逐字对账（commit 变更时重跑）：
-sha256sum proto/management.proto \
-  ~/harmonyos-signing/netbird-n1bdisc/refs/netbird-791401060d2b/shared/management/proto/management.proto
+sha256sum proto/management.proto proto/signalexchange.proto \
+  ~/harmonyos-signing/netbird-n1bdisc/refs/netbird-791401060d2b/shared/management/proto/management.proto \
+  ~/harmonyos-signing/netbird-n1bdisc/refs/netbird-791401060d2b/shared/signal/proto/signalexchange.proto
 ```

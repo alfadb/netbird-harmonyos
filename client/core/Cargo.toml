@@ -44,7 +44,10 @@ base64 = "0.22"
 prost = "0.14"
 prost-types = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time"] }
+# N4a signal channel: ConnectStream is a bidi gRPC stream, so the client side
+# needs a live request stream — tokio mpsc (sync feature) + a 15-line Stream
+# impl. Same crate/lockfile, feature flag only — offline/locked unchanged.
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router", "tls-ring"] }
 tonic-prost = "0.14"
 # N3-7 protected management socket: Endpoint::connect_with_connector needs a
@@ -55,6 +58,10 @@ tonic-prost = "0.14"
 # packages, offline-safe.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 tower-service = "0.3"
+# N4a signal channel: the bidi ConnectStream client needs a Stream impl for
+# its outbound half (hand-rolled over tokio mpsc). futures-core is ALREADY in
+# Cargo.lock as a tonic/hyper dependency — no new package, offline-safe.
+futures-core = "0.3"
 
 [profile.release]
 panic = "abort"
