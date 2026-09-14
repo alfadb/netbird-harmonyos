@@ -580,6 +580,34 @@ impl WgDevice {
         };
         let Some(idx) = self.route(dst) else {
             self.stats.no_route_drops += 1;
+            // A growing no-route count with a live session means the routing
+            // table lacks the destination — dump what IS installed (the probe
+            // path dropped 1/s silently before this; device-validation run 6
+            // showed dropped_no_route climbing while tx_bytes stayed 0).
+            if self.stats.no_route_drops <= 3 || self.stats.no_route_drops % 60 == 0 {
+                let table: String = self
+                    .peers
+                    .iter()
+                    .flat_map(|p| {
+                        p.allowed_ips.iter().map(move |(net, plen)| {
+                            format!(
+                                "{}.{}.{}.{}/{}",
+                                net[0], net[1], net[2], net[3], plen
+                            )
+                        })
+                    })
+                    .collect::<Vec<String>>()
+                    .join(",");
+                emit(&format!(
+                    "N6_WG_DEVICE|no-route|dst={}.{}.{}.{}|peers={}|routes=[{}]",
+                    dst[0],
+                    dst[1],
+                    dst[2],
+                    dst[3],
+                    self.peers.len(),
+                    table
+                ));
+            }
             return false;
         };
         self.encap_and_send(idx, frame, now_ms)
