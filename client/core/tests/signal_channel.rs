@@ -324,9 +324,11 @@ async fn every_reconnect_takes_a_fresh_protected_socket_and_exhaustion_fails_clo
 }
 
 /// Bounded wait until the listener has accepted `n` connections (the accept
-/// event is delivered asynchronously to the client's connect(2)).
+/// event is delivered asynchronously to the client's connect(2)). HANG
+/// GUARD, not a latency assertion; generous (60s) so a fully loaded parallel
+/// `cargo test` run never trips it spuriously.
 async fn wait_accept(counter: &signal_mock::CountingListener, n: usize) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while counter.accepted() < n {
         assert!(
             std::time::Instant::now() <= deadline,
@@ -337,9 +339,11 @@ async fn wait_accept(counter: &signal_mock::CountingListener, n: usize) {
 }
 
 /// The frame source of a killed transport: EOF or a transport status —
-/// bounded wait (the FIN/RST needs a moment to cross the loopback).
+/// bounded wait (the FIN/RST needs a moment to cross the loopback). HANG
+/// GUARD, not a latency assertion; generous (60s) so a fully loaded parallel
+/// `cargo test` run never trips it spuriously.
 async fn wait_dead(stream: &mut Streaming<EncryptedMessage>) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         match stream.message().await {
             Ok(None) => return,     // clean EOF

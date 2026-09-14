@@ -106,8 +106,11 @@ use netbird_core::ws::{client_handshake, random_sec_websocket_key, WsClient, WsE
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Fuse for every wait on an event that MUST happen.
-const FUSE: Duration = Duration::from_secs(5);
+/// Fuse for every wait on an event that MUST happen. HANG GUARD, not a
+/// latency assertion: these events take microseconds over loopback and the
+/// fuse only bounds a stuck scheduler/peer. Generous (60s) so a fully loaded
+/// parallel `cargo test` run never trips it spuriously.
+const FUSE: Duration = Duration::from_secs(60);
 
 // Fabricated (NOT secret) token parts — same shape as the relay.rs fixtures:
 // 32×0xA5 signature, ASCII Unix-seconds payload.

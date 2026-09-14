@@ -419,8 +419,13 @@ async fn spawn_tls_management(ca: &TestCa, svc: MockManagement) -> SocketAddr {
     addr
 }
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// Hang guards for the happy-path TLS connects/requests (loopback answers in
+// microseconds). NOT latency assertions — no test relies on these firing;
+// the timeout-mapping tests below pass their own tighter deadlines (300ms).
+// Generous (60s) so a fully loaded parallel `cargo test` run never trips
+// them spuriously.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fresh client identity per test (upstream: one per device profile).
 fn client_keys() -> EnvelopeKeyPair {

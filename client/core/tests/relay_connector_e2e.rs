@@ -166,8 +166,11 @@ mod host_link_stubs {
 // ---------------------------------------------------------------------------
 
 /// Real-time fuse for events that MUST happen (the relay client runs on the
-/// injected virtual clock; this bounds only scheduler latency).
-const FUSE: Duration = Duration::from_secs(5);
+/// injected virtual clock; this bounds only scheduler latency). HANG GUARD,
+/// not a latency assertion: the events happen in microseconds over loopback
+/// and the fuse only bounds a stuck scheduler/peer. Generous (60s) so a fully
+/// loaded parallel `cargo test` run never trips it spuriously.
+const FUSE: Duration = Duration::from_secs(60);
 
 /// Bounded predicate wait (no sleeps as assertions; fuse expiry = failure).
 async fn wait_for(fuse: Duration, mut pred: impl FnMut() -> bool, what: &str) {

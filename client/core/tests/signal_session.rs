@@ -83,9 +83,11 @@ fn quick_policy(max_elapsed: Option<Duration>) -> ExponentialBackoff {
 }
 
 /// Bounded wait for a predicate over the recorded events (no
-/// sleep-as-assertion; the condition itself is the assertion).
+/// sleep-as-assertion; the condition itself is the assertion). HANG GUARD,
+/// not a latency assertion; generous (60s) so a fully loaded parallel
+/// `cargo test` run never trips it spuriously.
 async fn wait_for<F: Fn() -> bool>(what: &'static str, cond: F) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while !cond() {
         assert!(
             std::time::Instant::now() <= deadline,

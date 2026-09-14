@@ -1828,8 +1828,53 @@ mod tests {
 
     #[test]
     fn fd_bag_closes_every_kept_fd() {
-        let a = open_tcp_prebound().unwrap();
-        let b = open_udp_unbound().unwrap();
+        // Cross-test fd-reuse race (same class as wg_device's DEAD_FD):
+        // fd numbers are handed out lowest-free-first from the process-global
+        // table, so the freshly-opened numbers below sit exactly in the range
+        // every other test (and every other tokio runtime thread) allocates
+        // from. Between `Drop` closing them and the EBADF assertions, a
+        // parallel test's socket()/dup() can re-open the SAME number and the
+        // `fcntl == -1` assertion flakes. Fix: dup each socket to a HIGH fd
+        // number — lowest-free >= floor, with the floor far above anything
+        // concurrent tests allocate — close the low originals immediately,
+        // and run the FdBag scenario on the high copies only. No parallel
+        // test can ever hold these numbers, so the post-Drop EBADF is
+        // deterministic.
+        //
+        // The floor is ADAPTIVE because RLIMIT_NOFILE caps the highest
+        // allocatable fd number: this environment measures soft=hard=524288,
+        // so a fixed 1<<20 floor would make F_DUPFD_CLOEXEC fail with EMFILE
+        // on every run. Candidates go high→low; the first tier that dups
+        // wins, and the chosen floor is still asserted to stay out of the
+        // concurrent-allocator zone (>= 1<<12: test processes hold at most
+        // a few hundred fds, never thousands). If EVERY tier fails the
+        // environment is too constrained for a race-free assertion — fail
+        // loudly with ulimit + errno, never silently fall back to a low
+        // (reusable) number.
+        let dup_high = |fd: i32| -> i32 {
+            const CANDIDATES: [i32; 4] = [1 << 20, 1 << 18, 1 << 16, 1 << 14];
+            for floor in CANDIDATES {
+                let hi = unsafe { sys::fcntl(fd, sys::F_DUPFD_CLOEXEC, floor) };
+                if hi >= floor {
+                    assert!(floor >= 1 << 12, "floor escaped the race-free zone: {floor}");
+                    unsafe { sys::close(fd) }; // retire the reusable low number at once
+                    return hi;
+                }
+            }
+            panic!(
+                "no high-fd tier worked (ulimit -n: {}); fd {} cannot be moved out of the \
+                 concurrent-allocator range — race-free EBADF assertion impossible",
+                std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg("ulimit -n")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string()),
+                fd,
+            );
+        };
+        let a = dup_high(open_tcp_prebound().unwrap());
+        let b = dup_high(open_udp_unbound().unwrap());
         {
             let mut bag = FdBag::new();
             bag.keep(a);
@@ -1838,7 +1883,8 @@ mod tests {
             // still open inside the scope
             assert!(unsafe { sys::fcntl(a, sys::F_GETFD) } != -1);
         }
-        // closed exactly once by Drop
+        // closed exactly once by Drop: EBADF on a number NO parallel test
+        // can ever have re-opened
         assert_eq!(unsafe { sys::fcntl(a, sys::F_GETFD) }, -1);
         assert_eq!(unsafe { sys::fcntl(b, sys::F_GETFD) }, -1);
         assert_eq!(sys::errno(), 9 /* EBADF */);

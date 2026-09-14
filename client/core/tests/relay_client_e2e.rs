@@ -118,8 +118,13 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 /// Real-time fuse for events that MUST happen (test scaffolding only — the
-/// client under test runs on the injected virtual clock).
-const FUSE: Duration = Duration::from_secs(5);
+/// client under test runs on the injected virtual clock). This is a HANG
+/// GUARD, not a latency assertion: every wait here targets an event that
+/// happens in microseconds over loopback, and the fuse only bounds a stuck
+/// scheduler/peer. Sized generously (60s) so full `cargo test` runs under
+/// heavy CPU parallelism never trip it spuriously (observed flakes at 5s
+/// under load); no behavioral assertion depends on its value.
+const FUSE: Duration = Duration::from_secs(60);
 
 // Fabricated (NOT secret) token parts — same shape as the relay.rs fixtures.
 const SIG_B64: &str = "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=";
@@ -256,18 +261,28 @@ async fn auth_rejection_is_typed_and_retry_stays_on_the_exact_backoff() {
     .await;
     clock.advance(Duration::from_secs(4));
     wait_for(FUSE, || client.stats().dial_attempts == 3, "round 2 dialed").await;
-    // The third attempt's rejection lands a scheduling step later.
+    // The third attempt's rejection lands a scheduling step later, and the
+    // next round records its backoff at round-arm time (§6.2 worker: the
+    // push happens a scheduling step after the rejection). Wait for the
+    // record itself, never assert right after a wait (repo pattern —
+    // relay_client.rs `auth_timeout_is_typed_and_retry_stays_on_the_backoff`
+    // does exactly this); the settled chain is the deterministic fact.
     wait_for(FUSE, || {
         server.stats().auth_rejected == 3
             && client.stats().last_error_class == Some(RelayErrorClass::AuthRejected)
             && client.state() == RelayState::Reconnecting
-    }, "third rejection recorded, back in Reconnecting")
+            && client.stats().observed_backoff
+                == vec![Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8)]
+    }, "third rejection recorded, third backoff armed, back in Reconnecting")
     .await;
 
     let stats = client.stats();
     assert_eq!(stats.last_error_class, Some(RelayErrorClass::AuthRejected));
     assert_eq!(stats.state, RelayState::Reconnecting);
-    assert_eq!(stats.observed_backoff, vec![Duration::from_secs(2), Duration::from_secs(4)]);
+    assert_eq!(
+        stats.observed_backoff,
+        vec![Duration::from_secs(2), Duration::from_secs(4), Duration::from_secs(8)]
+    );
     assert_eq!(stats.dial_attempts, 3, "exactly one dial per round — no retry addiction");
     assert_eq!(server.stats().auth_rejected, 3);
     client.stop();
@@ -520,9 +535,22 @@ async fn server_disconnect_mid_session_reconnects_without_backoff() {
     wait_for(FUSE, || client.state() == RelayState::Ready, "ready").await;
 
     assert!(server.drop_connection(&local_peer_for(seed)), "connection tracked by peer id");
+    // Race-free wait (same read-and-race class as the accept counters): the
+    // client counts the drop a scheduling step before it re-dials, so
+    // `reconnects == 1 && state == Ready` alone can catch the pre-redial
+    // instant. Require the redial to have been INITIATED too (dial_attempts
+    // bumps at round start, before Dialing/Ready).
     wait_for(FUSE, || {
-        client.stats().reconnects == 1 && client.state() == RelayState::Ready
+        client.stats().reconnects == 1
+            && client.state() == RelayState::Ready
+            && client.stats().dial_attempts == 2
     }, "fast reconnected after the drop")
+    .await;
+    // the server's accept counter is bumped on its own task after the new
+    // TCP connection lands — wait for the event, never read-and-race
+    wait_for(FUSE, || {
+        server.stats().connections_accepted == 2
+    }, "second connection accepted")
     .await;
     let stats = client.stats();
     assert_eq!(stats.last_error_class, Some(RelayErrorClass::ServerClosed));

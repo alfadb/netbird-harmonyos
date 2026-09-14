@@ -175,8 +175,11 @@ async fn connect_plain(addr: std::net::SocketAddr, keys: EnvelopeKeyPair) -> Man
 }
 
 /// Wait (bounded) until `cond()` holds; panics with `what` on deadline.
+/// HANG GUARD, not a latency assertion: the awaited events happen in
+/// microseconds over loopback; the fuse is generous (60s) so a fully loaded
+/// parallel `cargo test` run never trips it spuriously.
 async fn wait_for<F: Fn() -> bool>(what: &'static str, cond: F) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !cond() {
         assert!(Instant::now() <= deadline, "deadline waiting for {what}");
         tokio::time::sleep(Duration::from_millis(10)).await;
