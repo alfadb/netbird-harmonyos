@@ -3554,7 +3554,9 @@ mod tests {
                 peers_with_session: 1,
                 handshakes: 3,
                 tx_packets: 9,
+                tx_bytes: 900,
                 rx_packets: 8,
+                rx_bytes_to_tun: 800,
                 dropped_no_route: 1,
                 decrypt_errors: 2,
             },
@@ -3586,11 +3588,13 @@ mod tests {
             "{json}"
         );
         // N7: the WG data-plane summary (feeds / device / REAL readiness +
-        // device counters — no key material)
+        // device counters — no key material). N2-H: byte counters ride along
+        // so counter reconciliation can read connector_status() directly.
         assert!(
             json.contains(
                 "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
-                 \"peers_with_session\":1,\"handshakes\":3,\"tx_packets\":9,\"rx_packets\":8,\
+                 \"peers_with_session\":1,\"handshakes\":3,\"tx_packets\":9,\"tx_bytes\":900,\
+                 \"rx_packets\":8,\"rx_bytes_to_tun\":800,\
                  \"dropped_no_route\":1,\"decrypt_errors\":2}"
             ),
             "{json}"
@@ -3643,7 +3647,8 @@ mod tests {
             empty.contains(
                 "\"wg\":{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
                  \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
-                 \"rx_packets\":0,\"dropped_no_route\":0,\"decrypt_errors\":0}"
+                 \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
+                 \"dropped_no_route\":0,\"decrypt_errors\":0}"
             ),
             "default wg summary must render: {empty}"
         );

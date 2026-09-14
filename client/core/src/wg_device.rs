@@ -1065,7 +1065,13 @@ pub struct WgDataplaneStatus {
     /// Handshake initiations sent (initial + retransmits + rekeys).
     pub handshakes: u64,
     pub tx_packets: u64,
+    /// Encapsulated transport BYTES handed to sendto (N2-H counter
+    /// reconciliation reads byte counters, not only packet counts).
+    pub tx_bytes: u64,
     pub rx_packets: u64,
+    /// Plaintext bytes written into the TUN (N2-H: reconciled against an
+    /// independent drain of the TUN interface).
+    pub rx_bytes_to_tun: u64,
     /// Outbound frames dropped: no allowed_ips prefix matched.
     pub dropped_no_route: u64,
     /// Inbound datagrams a matched peer failed to process.
@@ -1081,7 +1087,7 @@ impl WgDataplaneStatus {
     /// The `connector_status()` `wg` JSON object.
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{}}}",
             crate::util::jbool("fed_socket", self.fed_socket),
             crate::util::jbool("fed_tun", self.fed_tun),
             crate::util::jbool("device_up", self.device_up),
@@ -1089,7 +1095,9 @@ impl WgDataplaneStatus {
             crate::util::jinum("peers_with_session", self.peers_with_session as i64),
             crate::util::jinum("handshakes", self.handshakes as i64),
             crate::util::jinum("tx_packets", self.tx_packets as i64),
+            crate::util::jinum("tx_bytes", self.tx_bytes as i64),
             crate::util::jinum("rx_packets", self.rx_packets as i64),
+            crate::util::jinum("rx_bytes_to_tun", self.rx_bytes_to_tun as i64),
             crate::util::jinum("dropped_no_route", self.dropped_no_route as i64),
             crate::util::jinum("decrypt_errors", self.decrypt_errors as i64),
         )
@@ -1621,7 +1629,9 @@ impl WgPeerApplier for WgDeviceFeed {
             st.peers_with_session = sessions;
             st.handshakes = stats.handshake_initiations;
             st.tx_packets = stats.tx_packets;
+            st.tx_bytes = stats.tx_bytes;
             st.rx_packets = stats.rx_packets;
+            st.rx_bytes_to_tun = stats.rx_bytes_to_tun;
             st.dropped_no_route = stats.no_route_drops;
             st.decrypt_errors = stats.decrypt_errors;
         }
@@ -1689,7 +1699,8 @@ mod feed_tests {
         assert!(!st.fed_socket && !st.fed_tun && !st.device_up && !st.ready);
         assert_eq!(st.to_json(), "{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
              \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
-             \"rx_packets\":0,\"dropped_no_route\":0,\"decrypt_errors\":0}");
+             \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
+             \"dropped_no_route\":0,\"decrypt_errors\":0}");
 
         // first feed alone: still not up
         slot.feed_tun(tun_raw).expect("tun feed");

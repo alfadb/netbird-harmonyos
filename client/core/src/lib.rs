@@ -131,6 +131,14 @@ pub mod ice;
 pub mod ice_session;
 pub mod ledger;
 pub mod management;
+// N2-H (host-side evidence tool): route-exclusion ISOLATION EVIDENCE for one
+// connection session — frozen outer endpoints, per-protocol unique probes,
+// TUN package-level NEGATIVE evidence, tunnel POSITIVE CONTROL, endpoint-side
+// delivery proof, counter reconciliation, verdict n2h-pass/fail/inconclusive.
+// Host-side analysis only: the device path never calls into this module and
+// the shipped cdylib behavior is unchanged; it does NOT change governance
+// (N2-H takes effect only after user approval + formal revision — module docs).
+pub mod n2h;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
 // consumption + tonic connector service) — fail-closed gap 1 fix.
 pub mod mgmtsock;

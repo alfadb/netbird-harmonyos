@@ -82,6 +82,10 @@ pub const EXIT_WAIT_TIMEOUT: i32 = 17;
 pub const EXIT_PEER_NOT_ESTABLISHED: i32 = 18;
 /// Terminal connector error with an unrecognized error class.
 pub const EXIT_UNKNOWN_CLASS: i32 = 19;
+/// `isolation-check`: the N2-H evidence could not establish the claim
+/// (missing freeze / positive control / receipts / reconciliation) — never a
+/// pass, but not a falsification either.
+pub const EXIT_INCONCLUSIVE: i32 = 20;
 
 /// Map an existing [`crate::connector::ErrorClass`] token to its exit code
 /// (10..16 in class order; 0 reserved for success).
@@ -185,25 +189,32 @@ pub fn udp_bound_port(fd: i32) -> Result<u16, HostSocketError> {
     Ok(u16::from_be(name.sin_port))
 }
 
-/// The TUN stand-in for host runs: a SOCK_DGRAM Unix socketpair. End 0 is
-/// FED to the connector (`connector_tun_fd_feed`) — `TunFd::dup_from_raw`
+/// The TUN stand-in for host runs: an AF_UNIX SOCK_SEQPACKET socketpair. End
+/// 0 is FED to the connector (`connector_tun_fd_feed`) — `TunFd::dup_from_raw`
 /// accepts any dupable fd and the data-plane pump does raw read/write, which
-/// a datagram socketpair satisfies; end 1 stays with the CLI as its "hand"
-/// for injecting probe frames and observing delivered ones. NO kernel TUN
-/// device is created.
+/// a sequenced-packet socketpair satisfies; end 1 stays with the CLI as its
+/// "hand" for injecting probe frames and observing delivered ones. NO kernel
+/// TUN device is created.
+///
+/// **Boundary fidelity (defect fix):** this pair used to be SOCK_STREAM
+/// (`UnixStream::pair`), which silently COALESCES back-to-back writes into
+/// one read — the device then reads two frames as one bogus frame (and a
+/// real TUN fd, being packet-preserving, never does that). Any package-level
+/// TUN observation (N2-H negative scan, probe delivery) is only trustworthy
+/// with frame boundaries preserved, so the pair is SOCK_SEQPACKET: one
+/// write = one datagram = one read, exactly like the kernel TUN contract.
 pub fn open_tun_standby_pair() -> Result<(i32, i32), HostSocketError> {
-    use std::os::fd::IntoRawFd;
-    match std::os::unix::net::UnixStream::pair() {
-        Ok((a, b)) => {
-            let fa = a.into_raw_fd();
-            let fb = b.into_raw_fd();
-            Ok((fa, fb))
-        }
-        Err(e) => Err(HostSocketError {
-            token: "socketpair-failed",
-            errno: e.raw_os_error().unwrap_or(0),
-        }),
+    const AF_UNIX: i32 = 1;
+    const SOCK_SEQPACKET: i32 = 5;
+    extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut [i32; 2]) -> i32;
     }
+    let mut sv = [-1i32; 2];
+    let rc = unsafe { socketpair(AF_UNIX, SOCK_SEQPACKET, 0, &mut sv) };
+    if rc != 0 || sv[0] < 0 || sv[1] < 0 {
+        return Err(HostSocketError { token: "socketpair-failed", errno: sys::errno() });
+    }
+    Ok((sv[0], sv[1]))
 }
 
 /// Provider-side fd ownership for one CLI run: every socket this module
@@ -1782,6 +1793,35 @@ mod tests {
         let (rn, _) = sys::read_fd(fed, &mut buf);
         assert_eq!(rn, 4);
         assert_eq!(&buf[..4], b"ping");
+        unsafe { sys::close(fed) };
+        unsafe { sys::close(hand) };
+    }
+
+    /// Defect-fix regression (N2-H evidence prerequisite): the TUN stand-in
+    /// must preserve FRAME boundaries — two back-to-back writes into the
+    /// hand must arrive as TWO reads of the exact original lengths on the
+    /// fed end (a SOCK_STREAM pair coalesced them into one bogus frame).
+    #[test]
+    fn tun_standby_pair_preserves_frame_boundaries() {
+        let (fed, hand) = open_tun_standby_pair().expect("socketpair");
+        let f1 = build_ipv4_udp_packet([10, 77, 0, 1], [10, 77, 0, 2], 40000, 40001, b"frame-one");
+        let f2 = build_ipv4_udp_packet([10, 77, 0, 2], [10, 77, 0, 1], 40001, 40000, b"frame-two!");
+        let (n1, _) = sys::write_fd(hand, &f1);
+        let (n2, _) = sys::write_fd(hand, &f2);
+        assert_eq!(n1 as usize, f1.len());
+        assert_eq!(n2 as usize, f2.len());
+
+        let mut buf = [0u8; 2048];
+        let (r1, _) = sys::read_fd(fed, &mut buf);
+        assert_eq!(r1 as usize, f1.len(), "first read must be exactly frame one");
+        assert_eq!(&buf[..r1 as usize], &f1[..]);
+        let (r2, _) = sys::read_fd(fed, &mut buf);
+        assert_eq!(r2 as usize, f2.len(), "second read must be exactly frame two");
+        assert_eq!(&buf[..r2 as usize], &f2[..]);
+        // and no third frame may appear (nothing coalesced, nothing lost)
+        let (ret, _e, rev) = sys::poll1(fed, sys::POLLIN, 0);
+        assert!(ret == 0 || (rev & sys::POLLIN) == 0, "no third frame expected");
+
         unsafe { sys::close(fed) };
         unsafe { sys::close(hand) };
     }

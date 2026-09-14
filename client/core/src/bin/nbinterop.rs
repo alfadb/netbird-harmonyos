@@ -32,6 +32,19 @@
 //!     SUCCESS exit (0) as soon as one WG peer session is established
 //!     (`wg.peers_with_session >= 1`), instead of running until stopped.
 //!
+//! nbinterop isolation-check [--out <file>] [--fault-* ...]
+//!     N2-H route-exclusion ISOLATION EVIDENCE for one connection session
+//!     (host-side; see netbird_core::n2h). Offline dual-instance loopback
+//!     run by default: freezes every outer endpoint family (management /
+//!     signal / STUN / TURN / relay / WG peer / DNS), fires unique five-tuple
+//!     + unique payload probes per family, scans every TUN frame for outer
+//!     probe payloads (negative evidence), sends tunnel positive controls,
+//!     collects endpoint-side receipts and reconciles interface counters,
+//!     then writes the `n2h-isolation-evidence.json` document. Exit 0 =
+//!     n2h-pass, 1 = n2h-fail, 20 = n2h-inconclusive. An evidence tool does
+//!     NOT change governance: N2-H takes effect only after user approval +
+//!     formal revision; per-socket protect stays UNSAT.
+//!
 //! Flags: --config <file>        config document (see the recipe doc)
 //!        --dry-run              parse config + print the plan, NO socket,
 //!                               NO resolution, NO connection (exit 0)
@@ -73,10 +86,11 @@
 //!
 //! ## Exit codes
 //!
-//! `0` success · `1` selftest failure · `2` usage · `3` config · `4`
-//! credentials · `10..16` connector error classes (network/timeout/auth/
-//! request/server/parse/unsupported_url) · `17` `--timeout` elapsed ·
-//! `18` peer ended without a session · `19` unknown error class.
+//! `0` success / n2h-pass · `1` selftest failure / n2h-fail · `2` usage · `3`
+//! config · `4` credentials · `10..16` connector error classes
+//! (network/timeout/auth/request/server/parse/unsupported_url) · `17`
+//! `--timeout` elapsed · `18` peer ended without a session · `19` unknown
+//! error class · `20` n2h-inconclusive.
 //!
 //! ## Host link stubs
 //!
@@ -220,6 +234,31 @@ USAGE:
                       [--wg-port <port>] [--ice-port <port>]
                       [--advertise-candidate <ip:port>]... [--verbose]
     nbinterop peer    --config <file> [same flags]
+    nbinterop isolation-check [--out <file>] [--loopback]
+                              [--fault-leak] [--fault-no-posctl]
+                              [--fault-omit-endpoint <kind>]
+                              [--config <file>] [--outer-endpoint <kind:host:port>]...
+
+isolation-check (N2-H evidence tool; evidence only — no governance change):
+    --out <file>          evidence JSON path (default: n2h-isolation-evidence.json)
+    --loopback            offline dual-instance loopback session (default;
+                          synthetic fixed TEST keys, loopback sinks only)
+    --config <file>       pre-connect freeze check against a real deployment:
+                          freezes + probes what is knowable WITHOUT a session
+                          (management_url from config + --outer-endpoint);
+                          reads no secret material; verdict stays inconclusive
+                          (no tunnel yet)
+    --outer-endpoint      freeze one more endpoint (repeatable):
+                          <kind:host:port>, kind in management|signal|stun|
+                          turn|relay|wg_peer|dns
+    --fault-leak          FAULT INJECTION (loopback): replay an outer probe
+                          payload INTO the tunnel — the tool must return
+                          n2h-fail (counter-example A)
+    --fault-no-posctl     FAULT INJECTION (loopback): route the positive
+                          control outside allowed_ips — must return
+                          n2h-inconclusive (counter-example B)
+    --fault-omit-endpoint FAULT INJECTION (loopback): simulate a freeze
+                          failure for <kind> — must return n2h-inconclusive
 
 HOST-ONLY port-mapping switches (N12a; no effect on the device path):
     --wg-port <port>      WG outer socket binds a FIXED port (default: ephemeral)
@@ -234,9 +273,10 @@ HOST-ONLY port-mapping switches (N12a; no effect on the device path):
 Credentials (management URL / private key / setup key / CA) come ONLY from
 the config file or the environment — never the command line.
 
-Exit codes: 0 ok | 1 selftest failed | 2 usage | 3 config | 4 credentials
+Exit codes: 0 ok/n2h-pass | 1 selftest failed/n2h-fail | 2 usage | 3 config | 4 credentials
 | 10 network | 11 timeout | 12 auth | 13 request | 14 server | 15 parse
-| 16 unsupported_url | 17 wait-timeout | 18 peer-no-session | 19 unknown-class";
+| 16 unsupported_url | 17 wait-timeout | 18 peer-no-session | 19 unknown-class
+| 20 n2h-inconclusive";
 
 /// Secret-bearing flag prefixes the CLI must never accept.
 const SECRET_FLAGS: [&str; 4] = ["--setup-key", "--jwt", "--private-key", "--ca-pem"];
@@ -324,6 +364,7 @@ fn run() -> i32 {
         "selftest" => cmd_selftest(&args[1..]),
         "connect" => cmd_engine("connect", &args[1..]),
         "peer" => cmd_engine("peer", &args[1..]),
+        "isolation-check" => cmd_isolation_check(&args[1..]),
         other => {
             eprintln!("error: unknown subcommand '{other}'\n\n{USAGE}");
             hs::EXIT_USAGE
@@ -466,6 +507,183 @@ fn cmd_selftest(args: &[String]) -> i32 {
 
 fn set_hilog_forward(on: bool) {
     FORWARD_HILOG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// isolation-check (N2-H evidence tool)
+// ---------------------------------------------------------------------------
+
+/// `nbinterop isolation-check`: run the N2-H isolation-evidence pipeline and
+/// emit `n2h-isolation-evidence.json`. Default (no --config) is the offline
+/// dual-instance loopback session; `--config` runs a pre-connect endpoint
+/// freeze check (management_url + --outer-endpoint, no session). Fault flags
+/// arm the counter-example scenarios (they are INJECTIONS and are recorded as
+/// such inside the evidence document).
+fn cmd_isolation_check(args: &[String]) -> i32 {
+    let mut out_path = String::from("n2h-isolation-evidence.json");
+    let mut config: Option<String> = None;
+    let mut outer: Vec<(netbird_core::n2h::EndpointKind, String, u16)> = Vec::new();
+    let mut fault_leak = false;
+    let mut fault_no_posctl = false;
+    let mut fault_omit: Option<netbird_core::n2h::EndpointKind> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = match args[i].split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (args[i].clone(), None),
+        };
+        let mut consumed_next = false;
+        let mut value = |what: &str| -> Result<String, i32> {
+            if let Some(v) = inline.clone() {
+                return Ok(v);
+            }
+            match args.get(i + 1) {
+                Some(v) => {
+                    consumed_next = true;
+                    Ok(v.clone())
+                }
+                None => {
+                    eprintln!("error: {what} requires a value");
+                    Err(hs::EXIT_USAGE)
+                }
+            }
+        };
+        match key.as_str() {
+            "--out" => match value("--out") {
+                Ok(v) => out_path = v,
+                Err(code) => return code,
+            },
+            "--loopback" => {}
+            "--config" => match value("--config") {
+                Ok(v) => config = Some(v),
+                Err(code) => return code,
+            },
+            "--fault-leak" => fault_leak = true,
+            "--fault-no-posctl" => fault_no_posctl = true,
+            "--fault-omit-endpoint" => {
+                let v = match value("--fault-omit-endpoint") {
+                    Ok(v) => v,
+                    Err(code) => return code,
+                };
+                match netbird_core::n2h::EndpointKind::from_name(&v) {
+                    Some(k) => fault_omit = Some(k),
+                    None => {
+                        eprintln!(
+                            "error: --fault-omit-endpoint '{v}': kind must be one of {}",
+                            kinds_help()
+                        );
+                        return hs::EXIT_USAGE;
+                    }
+                }
+            }
+            "--outer-endpoint" => {
+                let v = match value("--outer-endpoint") {
+                    Ok(v) => v,
+                    Err(code) => return code,
+                };
+                match parse_outer_endpoint(&v) {
+                    Ok(e) => outer.push(e),
+                    Err(e) => {
+                        eprintln!("error: --outer-endpoint '{v}': {e}");
+                        return hs::EXIT_USAGE;
+                    }
+                }
+            }
+            "--json" | "--verbose" => {}
+            other => {
+                eprintln!("error: unknown flag '{other}' for isolation-check\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+        }
+        i += 1 + usize::from(consumed_next);
+    }
+
+    let (faults_used, mode_name) = (
+        fault_leak || fault_no_posctl || fault_omit.is_some(),
+        config.is_some(),
+    );
+    if faults_used && mode_name {
+        eprintln!("error: --fault-* flags apply only to the offline loopback mode (no --config)");
+        return hs::EXIT_USAGE;
+    }
+
+    let evidence = if let Some(cfg) = &config {
+        match netbird_core::n2h::run_preconnect_freeze(cfg, &outer) {
+            Ok(ev) => ev,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return hs::EXIT_CONFIG;
+            }
+        }
+    } else {
+        let opts = netbird_core::n2h::LoopbackOpts {
+            omit_kind: fault_omit,
+            leak_outer_probe_into_tunnel: fault_leak,
+            suppress_positive_control: fault_no_posctl,
+        };
+        match netbird_core::n2h::run_loopback_check(&opts) {
+            Ok(ev) => ev,
+            Err(e) => {
+                eprintln!("error: loopback evidence run failed: {e}");
+                return hs::EXIT_UNKNOWN_CLASS;
+            }
+        }
+    };
+
+    let json = evidence.to_json();
+    if let Err(e) = std::fs::write(&out_path, format!("{json}\n")) {
+        eprintln!("error: cannot write evidence file {out_path}: {e}");
+        return hs::EXIT_UNKNOWN_CLASS;
+    }
+    println!("{json}");
+    eprintln!(
+        "[isolation-check] verdict={} evidence={} probes={} endpoints={} receipts={} counters-windows={}",
+        evidence.verdict,
+        out_path,
+        evidence.probes.len(),
+        evidence.frozen_endpoints.len(),
+        evidence.endpoint_side.len(),
+        evidence.counters.len(),
+    );
+    for r in &evidence.reasons {
+        eprintln!("[isolation-check] reason: {r}");
+    }
+    match evidence.verdict.as_str() {
+        netbird_core::n2h::VERDICT_PASS => hs::EXIT_OK,
+        netbird_core::n2h::VERDICT_FAIL => hs::EXIT_SELFTEST_FAILED,
+        _ => hs::EXIT_INCONCLUSIVE,
+    }
+}
+
+fn kinds_help() -> String {
+    netbird_core::n2h::EndpointKind::ALL
+        .iter()
+        .map(|k| k.name())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Parse `<kind>:<host>:<port>` (host may be a DNS name; the transport is
+/// derived from the kind).
+fn parse_outer_endpoint(
+    s: &str,
+) -> Result<(netbird_core::n2h::EndpointKind, String, u16), String> {
+    let (kind, rest) = s
+        .split_once(':')
+        .ok_or_else(|| format!("expected <kind:host:port>, got '{s}'"))?;
+    let kind = netbird_core::n2h::EndpointKind::from_name(kind)
+        .ok_or_else(|| format!("unknown kind '{kind}' (use one of {})", kinds_help()))?;
+    let (host, port) = rest
+        .rsplit_once(':')
+        .ok_or_else(|| format!("expected <kind:host:port>, got '{s}'"))?;
+    if host.is_empty() {
+        return Err(format!("empty host in '{s}'"));
+    }
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("bad port '{port}' in '{s}'"))?;
+    Ok((kind, host.to_string(), port))
 }
 
 // ---------------------------------------------------------------------------
