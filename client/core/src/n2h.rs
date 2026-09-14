@@ -130,9 +130,16 @@ impl EndpointKind {
     }
 
     /// Transport the outer probe uses against this endpoint family.
+    ///
+    /// T0 relay-increment ruling (2026-09-14, `grok-4.6` seat): the NetBird
+    /// relay is **WSS over TCP** in the deployment we validate
+    /// (`rels://home.alfadb.cn:28443`), so labelling `Relay` as UDP made the
+    /// frozen set unable to falsify an outer hairpin. QUIC-only relays would
+    /// be UDP and must be derived from the URI scheme at freeze time; until
+    /// that exists, the probe default is the production transport (tcp).
     pub fn proto(&self) -> &'static str {
         match self {
-            EndpointKind::Management | EndpointKind::Signal => "tcp",
+            EndpointKind::Management | EndpointKind::Signal | EndpointKind::Relay => "tcp",
             _ => "udp",
         }
     }
@@ -1245,7 +1252,10 @@ pub fn run_loopback_check(opts: &LoopbackOpts) -> Result<Evidence, String> {
     let mut sig_sink = TcpSink::bind()?;
     let mut stun_sink = UdpSink::bind(true)?;
     let mut turn_sink = UdpSink::bind(false)?;
-    let mut relay_sink = UdpSink::bind(false)?;
+    // Relay rides WSS/TCP in the validated deployment (T0 relay ruling
+    // 2026-09-14), so the loopback sink must accept TCP — an UDP sink here
+    // made the relay probe panic against a datagram socket.
+    let mut relay_sink = TcpSink::bind()?;
     let mut dns_sink = UdpSink::bind(false)?;
 
     // ---- WG pair: two real devices, loopback outer sockets, TUN stand-ins ----
@@ -2354,6 +2364,9 @@ mod tests {
         assert!(!EndpointKind::Relay.required());
         assert_eq!(EndpointKind::Signal.proto(), "tcp");
         assert_eq!(EndpointKind::Stun.proto(), "udp");
+        // T0 relay ruling: the validated deployment relays over WSS/TCP — the
+        // frozen set must say tcp or an outer hairpin cannot be falsified.
+        assert_eq!(EndpointKind::Relay.proto(), "tcp");
     }
 
     #[test]
