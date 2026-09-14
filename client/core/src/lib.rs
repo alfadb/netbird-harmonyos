@@ -167,3 +167,4 @@ pub mod util;
 pub mod wg_device;
 pub mod wg;
 pub mod ws;
+pub mod relay_testserver; // N13-B: test-only fake relay server (inert in the device path; see module docs)
