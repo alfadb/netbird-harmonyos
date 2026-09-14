@@ -1160,7 +1160,21 @@ async fn napi_global_start_status_stop_roundtrip() {
         "{\"setup_key\":\"SETUP-GLOBAL\"}",
     );
     assert!(json.contains("\"started\":true"), "{json}");
-    assert!(json.contains("\"state\":\"connecting\""), "{json}");
+    // INVARIANT, not a fixed value: the start response snapshots the state
+    // machine AFTER the worker task is already running, so the snapshot
+    // races the worker's FIRST login. The endpoint (127.0.0.1:1) refuses by
+    // construction, so the worker may already have taken
+    // Connecting --Lost--> Reconnecting (src/state.rs next_state) before the
+    // status read — that transition is legal at any instant after spawn.
+    // Reachable set here is exactly {connecting, reconnecting}: Connected
+    // needs a successful login (nothing listens on port 1), Failed needs the
+    // retry budget of ExponentialBackoff::upstream_stream_default() to
+    // exhaust (hours of sim time), Disconnected/Closed need a stop.
+    let state = json_field_str(&json, "state");
+    assert!(
+        matches!(state.as_deref(), Some("connecting" | "reconnecting")),
+        "freshly spawned connector must be connecting|reconnecting, got {json}"
+    );
 
     let status = connector_status_json();
     assert!(status.contains("\"running\":true"), "{status}");
@@ -1183,6 +1197,16 @@ async fn napi_global_start_status_stop_roundtrip() {
     // stopping with no connector at all is fine (idempotent)
     let json = connector_stop_json();
     assert!(json.contains("\"already_stopped\":true"), "{json}");
+}
+
+/// String value of `"key":"..."` in a flat connector JSON document (the
+/// napi surface is a string-only seam; the strict reader is crate-internal).
+fn json_field_str(doc: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let i = doc.find(&needle)? + needle.len();
+    let rest = &doc[i..];
+    let end = rest.find('"').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
 }
 
 fn unix_now() -> i64 {

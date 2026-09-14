@@ -28,8 +28,12 @@ log() { printf '[flake-check] %s\n' "$*"; }
 cd "$ROOT"
 
 FAILED_ROUNDS=0
+# Unique per-run stamp: failed-round logs must NEVER clobber those of a
+# previous run (a re-run used to overwrite round-N.log, destroying evidence).
+STAMP="$(date +%Y%m%d-%H%M%S)"
+log "run stamp: ${STAMP} — failed-round logs are kept in target/flake-check-${STAMP}-round-<N>.log"
 for round in $(seq 1 "$ROUNDS"); do
-    OUT_FILE="$ROOT/target/flake-check-round-${round}.log"
+    OUT_FILE="$ROOT/target/flake-check-${STAMP}-round-${round}.log"
     log "=== round ${round}/${ROUNDS} ==="
     # --color never: no ANSI codes in the captured log (keeps the grep
     # patterns exact)

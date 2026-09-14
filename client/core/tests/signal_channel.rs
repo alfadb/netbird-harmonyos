@@ -53,11 +53,19 @@ fn keys() -> EnvelopeKeyPair {
     EnvelopeKeyPair::generate().expect("key pair")
 }
 
-/// Receive one frame from a registered stream (test helper).
+/// Receive one frame from a registered stream (test helper). The read is
+/// wrapped in the FUSE hang guard: a stream that never delivers anything
+/// (lost wake-up, dead transport without EOF) must fail with context within
+/// FUSE, not hang the suite (see `wait_dead` — this suite once hung 22min).
 async fn recv(stream: &mut Streaming<EncryptedMessage>) -> EncryptedMessage {
-    stream
-        .message()
+    tokio::time::timeout(FUSE, stream.message())
         .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "recv: no frame within {FUSE:?} — silence where a frame was \
+                 expected (silent hang guard)"
+            )
+        })
         .expect("frame from signal server")
         .expect("stream open")
 }
@@ -323,12 +331,17 @@ async fn every_reconnect_takes_a_fresh_protected_socket_and_exhaustion_fails_clo
     assert_eq!(counter.accepted(), 2, "no unprotected dial reached the server");
 }
 
+/// The hang-guard fuse for reconnect/kill waits: generous so a fully loaded
+/// parallel `cargo test` run never trips it spuriously, finite so a SILENT
+/// stall still fails loudly instead of hanging the suite forever (this test
+/// once hung 22 minutes on a blocked `stream.message().await`).
+const FUSE: Duration = Duration::from_secs(60);
+
 /// Bounded wait until the listener has accepted `n` connections (the accept
 /// event is delivered asynchronously to the client's connect(2)). HANG
-/// GUARD, not a latency assertion; generous (60s) so a fully loaded parallel
-/// `cargo test` run never trips it spuriously.
+/// GUARD, not a latency assertion.
 async fn wait_accept(counter: &signal_mock::CountingListener, n: usize) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + FUSE;
     while counter.accepted() < n {
         assert!(
             std::time::Instant::now() <= deadline,
@@ -340,15 +353,27 @@ async fn wait_accept(counter: &signal_mock::CountingListener, n: usize) {
 
 /// The frame source of a killed transport: EOF or a transport status —
 /// bounded wait (the FIN/RST needs a moment to cross the loopback). HANG
-/// GUARD, not a latency assertion; generous (60s) so a fully loaded parallel
-/// `cargo test` run never trips it spuriously.
+/// GUARD, not a latency assertion.
+///
+/// The deadline check below can only fire while FRAMES KEEP ARRIVING; a
+/// silently blocked `stream.message().await` (no frames, no EOF, no error)
+/// would hang this loop forever. Each individual read is therefore wrapped
+/// in `timeout(FUSE, ..)`: complete silence for FUSE fails with context
+/// instead of hanging the suite. (If this ever fires it means the kill path
+/// lost its wake-up — EOF/error never crossed — which would be a mock or
+/// client defect, not a latency problem: a 60s stall on a loopback kill is
+/// not a working transport.)
 async fn wait_dead(stream: &mut Streaming<EncryptedMessage>) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + FUSE;
     loop {
-        match stream.message().await {
-            Ok(None) => return,     // clean EOF
-            Err(_status) => return, // transport error
-            Ok(Some(_)) => {
+        match tokio::time::timeout(FUSE, stream.message()).await {
+            Err(_elapsed) => panic!(
+                "wait_dead: total silence for {FUSE:?} — the killed transport \
+                 delivered neither EOF, an error, nor frames (silent hang guard)"
+            ),
+            Ok(Ok(None)) => return,     // clean EOF
+            Ok(Err(_status)) => return, // transport error
+            Ok(Ok(Some(_frame))) => {
                 assert!(
                     std::time::Instant::now() <= deadline,
                     "stream kept delivering after the transport kill"

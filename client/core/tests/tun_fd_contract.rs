@@ -335,14 +335,23 @@ fn backpressure_partial_write_budget_then_drain_completes() {
         }
         other => panic!("expected backpressure with partial count, got {other:?}"),
     }
-    // drain from the peer in parallel: the same write with a real budget
-    // completes through POLLOUT unblocks (short writes + EAGAIN handled)
+    // drain from the peer in parallel — with the reader bound to the socket's
+    // TOTAL byte count (first attempt's leftovers + this frame), not merely
+    // `total`. The old bound (`seen < total`) let the phase-1 leftovers count
+    // toward `total`, so under load the reader could quit while the writer
+    // still had the tail in flight; with the consumer gone the socket stays
+    // full (bytes + per-skb truesize overhead) and POLLOUT never fires within
+    // the budget — observed as `Backpressure { written: 292352 }`. Draining
+    // to byte conservation removes that timing assumption BY CONSTRUCTION:
+    // the reader can only exit after the writer pushed its last byte, so the
+    // budget write below always has a live drainer until it is done.
     let peer = sv[1];
     let total = big.len();
+    let grand_total = pushed_first + total;
     let reader = std::thread::spawn(move || {
         let mut seen = 0usize;
         let mut buf = [0u8; 65536];
-        while seen < total {
+        while seen < grand_total {
             let (n, e) = sys::read_fd(peer, &mut buf);
             if n > 0 {
                 seen += n as usize;
@@ -357,12 +366,12 @@ fn backpressure_partial_write_budget_then_drain_completes() {
         total
     );
     let seen = reader.join().expect("reader");
-    // the peer receives the first partial attempt's bytes plus this frame;
-    // the 64KiB reader chunks may only overshoot `total`, never miss it
-    assert!(
-        seen >= total && seen <= pushed_first + total,
-        "peer bytes out of range: {seen} not in [{total}, {}]",
-        pushed_first + total
+    // byte conservation: exactly the bytes both writes pushed cross the
+    // socketpair, each exactly once (a read cannot return unwritten bytes,
+    // and the loop only exits once every written byte was consumed)
+    assert_eq!(
+        seen, grand_total,
+        "peer must observe every written byte exactly once"
     );
     t.close().expect("close");
     unsafe {

@@ -1038,11 +1038,19 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
 
     // devices FIRST (the applier is the orchestrators' WG seam), each over
     // raw provider socket #0 as a PROVISIONAL socket — after the pair is
-    // selected the device reattaches to the actual selected candidate socket
-    let fed_a = FedSocks::new(8);
-    let fed_b = FedSocks::new(8);
+    // selected the device reattaches to the actual selected candidate socket.
+    // OWNERSHIP: raws[0] MOVES into the adopted Node (Node::drop closes it),
+    // so it is removed from the FedSocks list — FedSocks::drop must never
+    // close it a second time. A double close does not stay harmless: the fd
+    // number is recycled within microseconds under parallel tests, and the
+    // second close lands on whoever owns that number by then — observed as
+    // errno=9 (EBADF) on another test's brand-new socket (e.g. the stranger
+    // socket of unknown_sources_…) under suite pressure.
+    let mut fed_a = FedSocks::new(8);
+    let mut fed_b = FedSocks::new(8);
+    let prov_a = fed_a.raws.remove(0);
     let a = Node::adopt(
-        fed_a.raws[0],
+        prov_a,
         ADDR_A,
         key_a(),
         vec![(key_b(), vec![(ADDR_B, 32)])],
@@ -1052,8 +1060,9 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
             c // consumed an initiation during the ICE phase
         },
     );
+    let prov_b = fed_b.raws.remove(0);
     let b = Node::adopt(
-        fed_b.raws[0],
+        prov_b,
         ADDR_B,
         key_b(),
         vec![(key_a(), vec![(ADDR_A, 32)])],

@@ -808,9 +808,23 @@ async fn start_with_socket_refusal_gate_and_feed() {
     let json = connector_start_with_socket_json(fd, &cfg, creds, &format!("{{\"connect_addr\":\"{addr}\"}}"));
     assert!(json.contains("\"started\":true"), "{json}");
     assert!(json.contains("\"protected\":true"), "{json}");
-    assert!(json.contains("\"state\":\"connecting\""), "{json}");
+    // INVARIANT, not a fixed value: `addr` belongs to a listener that was
+    // already dropped (bound-then-closed above), so the worker's first
+    // management dial is refused by construction and the snapshot taken by
+    // the start response races that first failure — Connecting
+    // --Lost--> Reconnecting (src/state.rs next_state) is legal at any
+    // instant after spawn. Reachable set is exactly {connecting,
+    // reconnecting}: Connected needs a successful login (the port is
+    // closed), Failed needs the retry budget to exhaust (hours), the rest
+    // need a stop.
+    let state = json_field_str(&json, "state");
+    assert!(
+        matches!(state.as_deref(), Some("connecting" | "reconnecting")),
+        "freshly started connector must be connecting|reconnecting, got {json}"
+    );
 
-    // status while running: not terminal
+    // status while running: not terminal (holds for every reachable state
+    // above — is_terminal_state is false for running+Connecting/Reconnecting)
     let status = connector_status_json();
     assert!(status.contains("\"terminal\":false"), "{status}");
 
@@ -843,6 +857,16 @@ async fn start_with_socket_refusal_gate_and_feed() {
 // ---------------------------------------------------------------------------
 // small helpers used above
 // ---------------------------------------------------------------------------
+
+/// String value of `"key":"..."` in a flat connector JSON document (the
+/// napi surface is a string-only seam; the strict reader is crate-internal).
+fn json_field_str(doc: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let i = doc.find(&needle)? + needle.len();
+    let rest = &doc[i..];
+    let end = rest.find('"').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
 
 fn open_fd() -> i32 {
     // `mgmt_socket_open()` JSON is `{"fd":N,"bind_rc":R,"bind_errno":E}`;
