@@ -1,5 +1,6 @@
 import VpnExtensionAbility from '@ohos.app.ability.VpnExtensionAbility';
 import Want from '@ohos.app.ability.Want';
+import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
@@ -638,6 +639,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.route_count, status.reconnects, errorClass, String(status.terminal),
           signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions,
           wgRxToTun, wgTxBytes);
+        // Cross-process status bridge (device-verified defect 2026-09-14): the
+        // UI ability lives in ITS OWN process, so its NAPI status reads hit an
+        // empty connector slot and the UI showed "disconnected / wg sessions: 0"
+        // while THIS process had a live WG session. Publish the same fields to
+        // filesDir, which both processes share.
+        this.publishStatusForUi(status);
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
@@ -1309,8 +1316,53 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }, ICE_SOCKET_TOPUP_MS);
   }
 
-  // Feed ONE ICE socket unless the pool is already full. Each ICE interface
-  // round needs a FRESH unbound UDP socket (dups share one socket object, so a
+  // Publish the live connector status for the UI process (see the call site).
+  // Best-effort: a failure here must never disturb the VPN.
+  private publishStatusForUi(status: ConnectorStatusResult): void {
+    const path: string = `${this.context.filesDir}/netbird-status.json`;
+    let file: fs.File | undefined = undefined;
+    try {
+      const errorClass: string =
+        status.last_error !== undefined && status.last_error !== null
+          ? status.last_error.class
+          : 'none';
+      const signalRegistered: boolean =
+        status.signal !== undefined && status.signal !== null ? status.signal.registered : false;
+      const signalReconnects: number =
+        status.signal !== undefined && status.signal !== null ? status.signal.reconnects : 0;
+      const wgReady: boolean =
+        status.wg !== undefined && status.wg !== null ? status.wg.ready : false;
+      const wgSessions: number =
+        status.wg !== undefined && status.wg !== null ? status.wg.peers_with_session : 0;
+      const doc: Record<string, Object> = {
+        'updated_at_ms': Date.now(),
+        'state': status.state,
+        'peer_count': status.peer_count,
+        'route_count': status.route_count,
+        'last_error_class': errorClass,
+        'signal_registered': signalRegistered,
+        'signal_reconnects': signalReconnects,
+        'wg_ready': wgReady,
+        'wg_sessions': wgSessions
+      };
+      file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, JSON.stringify(doc));
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_STATUS_PUBLISH_FAIL|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (closeError) {
+          // best-effort document: nothing to recover
+        }
+      }
+    }
+  }
+
+  // Feed ONE ICE socket unless the pool is already full. Each ICE interface  // round needs a FRESH unbound UDP socket (dups share one socket object, so a
   // bound copy cannot be re-bound for the next interface), and the device has
   // several IPv4 interfaces — a single socket starves the gather right after
   // the first round (device-verified 2026-09-14: "protected-udp:

@@ -1,7 +1,7 @@
 import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
-import { ConnectorStatusResult, pollStatusOrNull } from '../vpnextensionability/NetBirdConnector';
+import { PublishedStatus, readPublishedStatus } from '../vpnextensionability/NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -16,10 +16,10 @@ interface BusinessFailure extends Error {
 // Minimal trigger + status surface (promoted from the n1b skeleton, extended
 // in N3-6): one click-gated start and one click-gated stop request per
 // attempt; each latch never resets (reject does not re-issue, no retry).
-// Status rows poll core.connector_status() directly in THIS process —
-// documented limitation: if the platform runs the VpnExtensionAbility in a
-// separate process, the UI sees its own empty snapshot (state 'unknown' /
-// 'disconnected'); no cross-process status channel exists in this increment.
+// Status: the platform DOES run the VpnExtensionAbility in a separate process,
+// so this page reads the live document the extension publishes into the shared
+// filesDir (device-verified 2026-09-14 — direct NAPI polling here rendered a
+// dead "disconnected / wg sessions: 0" while the tunnel was up).
 // No UI design here.
 @Entry
 @Component
@@ -56,7 +56,10 @@ struct Index {
   }
 
   private pollConnectorStatus(): void {
-    const status: ConnectorStatusResult | null = pollStatusOrNull();
+    // The connector runs in the VpnExtension process: read the document that
+    // process publishes into the shared filesDir (a NAPI call here would read
+    // an empty slot and show a dead "disconnected" state).
+    const status: PublishedStatus | null = readPublishedStatus(getContext(this).filesDir);
     if (status === null) {
       this.connectorState = 'unavailable';
       return;
@@ -65,21 +68,15 @@ struct Index {
     this.peerCount = status.peer_count;
     this.routeCount = status.route_count;
     this.lastErrorClass =
-      status.last_error !== null && status.last_error !== undefined
-        ? status.last_error.class
+      status.last_error_class !== undefined && status.last_error_class !== null
+        ? status.last_error_class
         : 'none';
     // N5d: the real signal link (registered = offer/answer/candidate path up)
-    this.signalRegistered = status.signal !== undefined && status.signal !== null
-      ? status.signal.registered
-      : false;
-    this.signalReconnects = status.signal !== undefined && status.signal !== null
-      ? status.signal.reconnects
-      : 0;
+    this.signalRegistered = status.signal_registered;
+    this.signalReconnects = status.signal_reconnects;
     // N7: the real WG data plane (device fed + tunnel_ready + live sessions)
-    this.wgReady = status.wg !== undefined && status.wg !== null ? status.wg.ready : false;
-    this.wgSessions = status.wg !== undefined && status.wg !== null
-      ? status.wg.peers_with_session
-      : 0;
+    this.wgReady = status.wg_ready;
+    this.wgSessions = status.wg_sessions;
   }
 
   private buildWant(): Want {

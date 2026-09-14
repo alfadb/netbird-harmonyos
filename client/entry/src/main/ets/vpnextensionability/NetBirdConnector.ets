@@ -390,6 +390,49 @@ export function connectorRouteSetApplied(routes: string[], isRecreate: boolean):
     RouteSetAppliedResult;
 }
 
+// Cross-process status bridge, UI side (device-verified defect 2026-09-14):
+// the connector runs in the VpnExtension process, so a NAPI status call from
+// the UI process reads an empty slot and shows "disconnected / wg sessions: 0"
+// while the tunnel is live. The extension publishes these fields into the
+// shared filesDir instead; the UI reads that document.
+export interface PublishedStatus {
+  updated_at_ms: number;
+  state: string;
+  peer_count: number;
+  route_count: number;
+  last_error_class: string;
+  signal_registered: boolean;
+  signal_reconnects: number;
+  wg_ready: boolean;
+  wg_sessions: number;
+}
+
+// Read the published status. A missing, unreadable, malformed or STALE
+// document returns null so the caller can render "unavailable" rather than
+// passing off默 zeroes as live state.
+export function readPublishedStatus(filesDir: string): PublishedStatus | null {
+  const path: string = `${filesDir}/netbird-status.json`;
+  try {
+    if (!fs.accessSync(path)) {
+      return null;
+    }
+    const text: string = fs.readTextSync(path);
+    if (text.length === 0) {
+      return null;
+    }
+    const doc: PublishedStatus = JSON.parse(text) as PublishedStatus;
+    if (doc.updated_at_ms === undefined || doc.updated_at_ms === null) {
+      return null;
+    }
+    if (Date.now() - doc.updated_at_ms > STATUS_POLL_MS * 3) {
+      return null;
+    }
+    return doc;
+  } catch (error) {
+    return null;
+  }
+}
+
 // N3-7: open + bind (NO connect) a TCP management socket for the protect
 // gate. fd stays native-created; the shell protects it, then hands the SAME
 // number back via connectorStartWithSocket/connectorSocketFeed.
