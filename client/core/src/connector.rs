@@ -1250,6 +1250,21 @@ impl ConnectorShared {
             if let Some(uri) = cfg.signal.as_ref() {
                 signal_uri = Some(uri.clone());
             }
+            // Relay advertisement (NetbirdConfig.relay): the urls are public
+            // routing material, the token is a management-issued credential —
+            // log ONLY url count/values and whether a token rode along, never
+            // the token itself. This is the read-only probe that confirms a
+            // deployment actually advertises relays (relay implementation is
+            // not in this increment).
+            match cfg.relay.as_ref() {
+                Some(r) => hilog::emit(&format!(
+                    "connector: netbird-config relay urls={} token_present={} (uris={})",
+                    r.urls.len(),
+                    !r.token_payload.is_empty() && !r.token_signature.is_empty(),
+                    r.urls.join(",")
+                )),
+                None => hilog::emit("connector: netbird-config relay none"),
+            }
         } else {
             // config-less snapshot: keep the previously announced URI visible
             signal_uri = self.lock().net_config.as_ref().and_then(|c| c.signal.clone());
