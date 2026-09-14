@@ -1,119 +1,105 @@
-# 任务：为自研 NetBird 客户端采集「官方客户端中继行为 oracle」（只读采集，不改线上配置）
+# 任务：为自研 NetBird 客户端采集「官方客户端中继行为 oracle」（只读采集，尽量零改动）
 
 ## 背景（一句话）
 
-我们正在开发一个 **HarmonyOS 平台的自研 NetBird 客户端**（不是官方客户端）。它的 P2P 路径（ICE + WireGuard）已在真机跑通，现在要补 **中继（relay）** 路径。按我们项目的治理要求，实现前必须先在**同一套生产实例**上采集**官方客户端的可观察行为**作为对照基准（oracle）——否则只有协议自洽、没有行为对照，测量结论无效。
+我们在开发一个 **HarmonyOS 平台的自研 NetBird 客户端**（非官方客户端）。P2P 路径（ICE + WireGuard）已在真机跑通，现在要补 **中继（relay）** 路径。按项目治理要求，实现前必须先在**同一套生产实例**上采集**官方客户端的可观察行为**作为对照基准（oracle），否则只有协议自洽、没有行为对照，测量结论无效。
 
-**这次只需要你们做两件事：跑一次官方客户端 + 抓包。** 不改任何线上 NetBird 配置。
+**不需要新增任何客户端**：请从你们网络里**已有官方客户端的设备中挑一台**（下面有挑选建议）。
 
-## 需要交付的东西（清单）
+## 挑选设备的原则
+
+优先级从高到低：
+
+1. **本身就是"Relayed"的 peer** —— 在任意一台设备上跑 `netbird status -d`，看每个 peer 的连接类型；若有 peer 显示 **Relayed**（NAT 后的设备通常如此），**直接选它**：这种情况**完全不需要改任何配置**（零改动）。
+2. **能抓到包的 Linux 设备**（有 root/sudo 与 `tcpdump`）—— 能同时看到"到 peer 的 WG UDP"和"到中继的 WSS TCP"，是最理想的采集点。
+3. 若设备本身抓不了包，但**它的上行网关/出口**能抓 —— 也可以，但请告诉我们采集点在哪一跳。
+
+⚠️ 尽量选**测试/开发设备**；如果是生产设备，请选低峰窗口，且只做第 2 步那条可撤销的临时规则。
+
+## 需要交付的东西
 
 | # | 交付物 | 用途 |
 |---|---|---|
-| 1 | **A 拓扑 pcap**：P2P 可用时（默认状态） | 建立"直连基线" |
-| 2 | **B 拓扑 pcap**：故意阻断 UDP 后（强制走中继） | 建立"中继基线" |
-| 3 | **两种拓扑下的 `netbird status` 输出**（含连接类型 P2P/Relayed） | 官方客户端自己声明的路径 |
-| 4 | **客户端 debug 日志**（两种拓扑各一份） | 中继 URL、Auth/OpenConn/Transport/HealthCheck 时序、token 刷新 |
-| 5 | **元数据**：客户端版本、management/signal/relay 版本、抓包时间（含时区）、抓包接口与过滤表达式、实际生效的中继 URL | 证据可复现 |
-| 6 | （可选，很有价值）**中继主机侧的同时段抓包** | 证明中继侧确实收到该会话 |
+| 1 | **该设备 `netbird status -d` 全文** | 官方客户端自己声明的连接类型（P2P / Relayed），以及它看到的中继 |
+| 2 | **A 拓扑 pcap**：该设备处于 P2P 时的抓包 | 直连基线 |
+| 3 | **B 拓扑 pcap**：该设备处于 **Relayed** 时的抓包 | 中继基线（若已有 Relayed peer，A/B 可能来自两台不同设备，请分别标注） |
+| 4 | **客户端日志**（debug 级，含中继 URL、Auth/OpenConn/Transport/HealthCheck 时序） | 协议时序对照 |
+| 5 | **元数据**：设备名/系统、官方客户端版本、management/signal/relay 版本、抓包时间（含时区）、抓包接口与过滤表达式、实际生效的中继 URL、对端 peer 名 | 证据可复现 |
+| 6 | （可选，很有价值）**中继主机侧同时段抓包** | 证明中继侧确实收到该会话 |
+| 7 | （可选）若期间发生过中继切换/failover | **请记录切换时刻**——这本身是我们需要的观测之一 |
 
 ## 执行步骤
 
-### 0. 前置
+### 1. 先看现状（零改动）
 
-- 在一台**你能抓到包、也能跑客户端**的机器上做（k8s 节点最合适；需要 root 或 `CAP_NET_ADMIN` + `/dev/net/tun`）。
-- 需要 `tcpdump` 与 `iptables`。
-- **一次性 setup key**（只能用 1 次，注册 1 台设备）：
-
-  ```text
-  <ONE-OFF-SETUP-KEY — 由用户单独提供，仓库内不落凭据>
-  ```
-
-  > 你也可以在 dashboard 自己新建一把（等同）。**用完请 revoke**——按官方语义，revoke 不会踢掉已注册设备。
-  > 本文件在仓库中**已脱敏**：实际 key 不进入版本库（凭据纪律）。
-- 建议**不要**用生产节点名，注册时把主机名设为可识别的测试名，例如 `oracle-official-1`。
-
-### 1. 跑官方客户端
-
-容器方式（推荐，最省事）：
+在若干台设备上（或结合 dashboard 的 peer 列表）执行：
 
 ```bash
-docker run -d --name oracle-netbird --restart=no \
-  --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --device=/dev/net/tun \
-  -e NB_SETUP_KEY=<SETUP-KEY> \
-  -e NB_MANAGEMENT_URL=https://api.netcenter.alfadb.cn \
-  netbirdio/netbird:latest
+netbird status -d
 ```
 
-或直接在宿主机跑官方二进制（同样需要 root）：
+**记录每个 peer 的连接类型**。若发现已有的 Relayed peer，直接进入第 3 步（跳过第 2 步的 UDP 阻断）。
+
+### 2. （仅当网络里没有 Relayed peer 时）制造 Relayed 条件
+
+在**选定设备**上临时阻断出向 UDP（保留 DNS），迫使该设备回退到中继：
 
 ```bash
-netbird up --setup-key <SETUP-KEY> \
-  --management-url https://api.netcenter.alfadb.cn --log-level debug
+# 记录现状，便于复原核对
+sudo iptables -S OUTPUT > /tmp/oracle-iptables-before.txt
+
+sudo iptables -I OUTPUT -p udp --dport 53 -j ACCEPT
+sudo iptables -I OUTPUT -p udp -j DROP
+
+# 让客户端重新协商
+sudo netbird down && sudo netbird up        # 或 systemctl restart netbird
 ```
 
-**记录版本**：`netbird version`（容器内 `docker exec oracle-netbird netbird version`）。
+> 说明：中继走 **WSS/TCP**，阻断 UDP 不会切断中继本身，只会切断直连 WG。
+> **如该设备是生产设备、或你无法在设备上改防火墙**：请跳过本步，只做第 1/3 步，并在交付里注明"无 Relayed 样本"。我们据此调整采集方案。
 
-### 2. 拓扑 A：P2P 可用（默认）
+### 3. 抓包
 
-1. 抓包（**请用 `-s 128` 截断**，只取头部，避免把载荷/令牌落进 pcap；如你愿意也可另外补一份 `-s 0` 的短窗口）：
+在**能同时看到该设备出向流量**的位置抓（设备本机最佳）：
 
-   ```bash
-   # 把 <CLIENT_IP> 换成跑官方客户端那台机器的 IP；<PEER_IP> 换成对端公网 IP
-   tcpdump -i any -s 128 -w /tmp/oracle-A.pcap \
-     '(host <CLIENT_IP> and (tcp port 443 or tcp port 28443 or udp)) or host <PEER_IP>' &
-   ```
+```bash
+# <DEV_IP> = 选定设备 IP；若直接在设备本机抓，可省略 host 过滤
+sudo tcpdump -i any -s 128 -w /tmp/oracle-relayed.pcap \
+  '(host <DEV_IP> and (tcp port 443 or tcp port 28443 or udp))' &
+```
 
-2. 等 P2P 建起来，采集：
+- 抓 **≥60 秒**，期间让 overlay 跑点流量（例如 ping 对端 overlay IP 20 次、或访问一个内网服务）。
+- `-s 128` 是**有意截断**：只取头部，避免把中继令牌/载荷落进 pcap。
+- 同一台设备在 P2P 状态下重复一次，文件名 `oracle-p2p.pcap`。
 
-   ```bash
-   netbird status -d            # 容器：docker exec oracle-netbird netbird status -d
-   netbird status --json        # 若有该选项，一并给出
-   ```
+### 4. 采集日志
 
-3. 让 overlay 跑一点流量（例如 ping 对端 overlay IP 20 次），再抓 60 秒。
+```bash
+journalctl -u netbird --since "-10 min" > /tmp/oracle-netbird.log     # 容器则 docker logs
+```
 
-4. 停抓包：`pkill -INT tcpdump`，保存 `status` 输出与客户端日志。
+若日志级别不是 debug，可临时提高后再重跑一次（记得改回）：`sudo netbird up --log-level debug`。
 
-### 3. 拓扑 B：阻断 UDP，强制走中继
+### 5. 恢复（**务必执行**）
 
-1. 在客户端机器上阻断出向 UDP（**保留 DNS**）：
-
-   ```bash
-   iptables -I OUTPUT -p udp --dport 53 -j ACCEPT
-   iptables -I OUTPUT -p udp -j DROP
-   ```
-
-2. 重启客户端让它重新协商：`docker restart oracle-netbird`（或 `netbird down && netbird up`）。
-
-3. 同样抓包（换个文件名 `/tmp/oracle-B.pcap`），并再次采集 `netbird status -d` 与 debug 日志。
-
-4. **务必恢复**：`iptables -D OUTPUT -p udp -j DROP; iptables -D OUTPUT -p udp --dport 53 -j ACCEPT`，确认 `iptables -L OUTPUT -n` 已无残留。
-
-### 4. 收尾
-
-- 客户端下线：`docker stop oracle-netbird && docker rm oracle-netbird`（或 `netbird down`）。
-- 到 dashboard **revoke 那把一次性 key**；如果要彻底清理，把该 peer 也删掉。
+```bash
+sudo iptables -D OUTPUT -p udp -j DROP
+sudo iptables -D OUTPUT -p udp --dport 53 -j ACCEPT
+diff <(sudo iptables -S OUTPUT) /tmp/oracle-iptables-before.txt && echo "OUTPUT 规则已复原"
+```
 
 ## 交付方式
 
-把以下内容打包（或直接贴关键片段）给我们：
-
-1. `oracle-A.pcap` / `oracle-B.pcap`
-2. 两种拓扑的 `netbird status -d` 文本（**特别标注连接类型：P2P 还是 Relayed**）
-3. 客户端 debug 日志（两种拓扑各一份；如含敏感信息可先脱敏）
-4. 元数据（版本 / 时间与时区 / 接口与过滤表达式 / 实际中继 URL）
-5. 可选：中继主机侧同时段抓包
+把 pcap、`netbird status -d` 全文、日志、元数据打包（或贴关键片段）给我们即可。**不需要提供任何 setup key**（本次不新增设备）。
 
 ## 重要约束
 
-- **只读采集**：除上面那两条临时 `iptables` 规则（且已要求恢复）与注册一台测试客户端外，**不修改任何线上 NetBird 配置**。
-- pcap 建议 `-s 128` 截断；如提供全量包，请注明（其中可能含中继令牌，我们会按敏感材料处理并只做行为分析）。
-- setup key 是一次性凭据，**用完 revoke**；不要在其它环境复用。
-- 若 `home.alfadb.cn` 在这一时段发生中继切换（failover 到 `relay.netcenter.alfadb.cn`），**请如实记录切换时刻**——这本身就是我们需要的观测之一。
+- **不新增客户端、不新建 setup key**（若手上有一把为本次准备的一次性 key，请**直接 revoke，未使用**）。
+- **不改线上 NetBird 配置**（management / signal / relay 一律不动）。
+- 唯一允许的临时改动是第 2 步那条 UDP 阻断规则，**必须在第 5 步复原**；生产设备上请勿执行第 2 步。
+- pcap 已用 `-s 128` 截断；若提供全量包请注明（可能含中继令牌，我们会按敏感材料处理，只做行为分析）。
+- 若选定设备属于他人/生产用途，请先确认影响面再操作。
 
-## 备注（我们这边会做什么，不需要你们配合）
+## 备注（我们这边会做什么）
 
-- 我们只把这些材料作为"官方客户端行为基准"，用于对照自研客户端的 relay 路径；
-- 我们不会据此对你们的部署做任何变更；
-- 如果你们更希望**由我们在自己的 pod 里跑官方客户端、你们只负责在节点/中继主机抓包**，也可以——告诉我们，我们给出开始/结束的时间戳与客户端 IP，你们按同一过滤表达式抓即可。
+我们只把这些材料作为"官方客户端行为基准"，用于对照自研客户端的中继路径；不会据此对你们的部署做任何变更。如果你们更希望**由我们在自己的 pod 里跑官方客户端、你们只负责在节点/中继主机抓包**，也可以——告诉我们，我们给出开始/结束时间戳与客户端 IP，你们按同一过滤表达式抓即可。
