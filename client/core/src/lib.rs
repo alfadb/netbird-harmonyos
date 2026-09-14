@@ -150,6 +150,7 @@ pub mod net;
 // selected pair → WG endpoint landing, per-peer states (injected clock).
 pub mod peer_conn;
 pub mod relay;
+pub mod relay_client; // N13-C: relay connection state machine (injected clock/dialer/TLS seams, fail-closed token & liveness; module docs)
 // N4a: signal service channel (peer discovery / candidate exchange) — gRPC
 // bidi stream over the protected socket seam, per-peer NaCl envelopes.
 pub mod signal;
