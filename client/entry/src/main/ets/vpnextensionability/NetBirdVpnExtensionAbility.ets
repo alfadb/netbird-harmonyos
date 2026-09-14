@@ -151,6 +151,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // closed and ICE never leaves idle (device run 1: 61x "pump error").
   private iceSocketFd: number = -1;
   private iceProtected: boolean = false;
+  // Process-level protect (protectProcessNet, API 22+) — attempted once per
+  // session; when it resolves it covers every socket of this process, which
+  // is the whole outer-socket set (management/signal/ICE/WG).
+  private processProtectAttempted: boolean = false;
+  private processProtected: boolean = false;
+  // DEV-ONLY (user-approved 2026-09-14): see onCreate — when armed, an
+  // unavailable protect (MANAGE_VPN gated) is recorded as a deviation and the
+  // flow continues on route exclusion. NEVER a gate pass.
+  private protectDeviationRouteExclusion: boolean = false;
   // N3-6 control-plane wiring state. destroyRequested latches onDestroy so
   // the (async) start flow never creates a VPN after teardown began.
   private destroyRequested: boolean = false;
@@ -237,6 +246,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // traffic black hole until a peer tunnel actually works.
     const forceDefaultRoute: boolean =
       String(want.parameters?.['forceDefaultRoute'] ?? 'false') === 'true';
+    // DEV-ONLY DEVIATION (user-approved 2026-09-14; T0 ruling in flight):
+    // on this platform BOTH VpnConnection.protect(fd) AND protectProcessNet()
+    // are gated internally by the restricted ohos.permission.MANAGE_VPN
+    // (netmanager: "Caller is not allowed, need sys permissive"), the
+    // permission is not appliable in the AGC ACL list, and merely DECLARING
+    // it makes the install fail (9568289 "grant request permissions failed").
+    // With this opt-in the shell treats protect as UNAVAILABLE and leans on
+    // the VpnConfig isExcludedRoute entry that keeps the outer endpoints out
+    // of the tunnel. It is loudly logged, recorded as a deviation and is
+    // NEVER a gate pass; the default (flag absent) stays fail-closed.
+    this.protectDeviationRouteExclusion =
+      String(want.parameters?.['protectDeviation'] ?? '') === 'route-exclusion';
+    if (this.protectDeviationRouteExclusion) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_PROTECT_DEVIATION_ARMED|requestId=%{public}s|mode=route-exclusion|' +
+        'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
+        this.requestId);
+    }
 
     let setupKey: string;
     let device: DeviceConfigFile;
@@ -1251,6 +1278,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // best-effort treatment, per governance item 4.
   private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
     const t0: number = Date.now();
+    // Device-verified 2026-09-13: per-fd protect() performs an internal
+    // ohos.permission.MANAGE_VPN check (a restricted ACL permission this
+    // project deliberately does not request — docs/e3-physical-preflight.md:39
+    // forbids it), and on failure the promise NEVER settles, so the box
+    // always expires. Try the process-level API first (protectProcessNet,
+    // API 22+, no permission tag in the SDK): it covers every socket of this
+    // extension process, which is exactly our outer-socket set.
+    if (!this.processProtectAttempted) {
+      this.processProtectAttempted = true;
+      const processOk: boolean = await this.protectProcessNetWithBox(connection);
+      this.processProtected = processOk;
+      if (processOk) {
+        hilog.info(DOMAIN, TAG,
+          'VPN_PROTECT_SOURCE|requestId=%{public}s|source=process-net|fd=%{public}d',
+          this.requestId, fd);
+        return true;
+      }
+    }
+    if (this.processProtected) {
+      return true;
+    }
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       connection.protect(fd).then((): void => {
         // Device-observed 2026-09-13: some protect() promises settle late (or
@@ -1272,6 +1320,49 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.warn(DOMAIN, TAG,
           'VPN_PROTECT_TIMEOUT|requestId=%{public}s|fd=%{public}d|boxMs=%{public}d|stillPending=true',
           this.requestId, fd, PROTECT_BOX_MS);
+        resolve(false);
+      }, PROTECT_BOX_MS);
+    });
+    const outcome: boolean = await Promise.race([settled, box]);
+    if (!outcome && this.protectDeviationRouteExclusion) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
+        'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
+        this.requestId, fd);
+      return true;
+    }
+    return outcome;
+  }
+
+  // Bounded process-level protect (protectProcessNet). Same house rule: every
+  // ArkTS wait is bounded; expiry = failure and the per-fd path takes over.
+  private async protectProcessNetWithBox(connection: vpnExtension.VpnConnection): Promise<boolean> {
+    const t0: number = Date.now();
+    const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+      try {
+        connection.protectProcessNet().then((): void => {
+          hilog.info(DOMAIN, TAG,
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=resolved|elapsedMs=%{public}d',
+            this.requestId, Date.now() - t0);
+          resolve(true);
+        }).catch((error: Error): void => {
+          hilog.warn(DOMAIN, TAG,
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=rejected|elapsedMs=%{public}d|summary=%{public}s',
+            this.requestId, Date.now() - t0, safeError(error));
+          resolve(false);
+        });
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=throw|summary=%{public}s',
+          this.requestId, safeError(error as Error));
+        resolve(false);
+      }
+    });
+    const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
+      setTimeout((): void => {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=timeout|boxMs=%{public}d',
+          this.requestId, PROTECT_BOX_MS);
         resolve(false);
       }, PROTECT_BOX_MS);
     });
