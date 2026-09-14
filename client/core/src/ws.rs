@@ -453,6 +453,11 @@ fn validate_handshake_response(head: &str, sec_websocket_key: &str) -> Result<()
 /// `rel`/`rels` URLs is the caller's job); `sec_websocket_key` should come
 /// from [`random_sec_websocket_key`]. TLS: wrap the stream yourself (rustls,
 /// SNI per spec §1.4) and hand it in.
+///
+/// Cancellation: the request is sent before the first response byte is read;
+/// dropping the future mid-handshake loses whatever response bytes were
+/// already consumed into its local buffer — do not reuse the stream for a
+/// second attempt, dial fresh.
 pub async fn client_handshake<S>(
     mut io: S,
     host: &str,
@@ -586,6 +591,20 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsClient<S> {
     /// Read the next complete message. Pings are auto-ponged (never
     /// surfaced). On ANY error the session is undefined for further reads —
     /// drop the client and redial.
+    ///
+    /// # Cancellation semantics
+    ///
+    /// Dropping this future at an await point (e.g. under
+    /// `tokio::time::timeout`) never corrupts the READ state: no inbound
+    /// bytes are consumed or buffered for a cancelled read, a partially
+    /// received frame stays byte-exact in the internal buffer, and the next
+    /// `read_message` resumes parsing exactly where the cancelled one
+    /// parked. The exceptions are the in-flight control-frame ANSWERS, which
+    /// are wire side effects and cannot be rolled back — if cancellation
+    /// lands while a pong or close echo is being sent (the only awaits
+    /// inside parsing, see `try_parse_one`), that answer may be partially
+    /// written and its trigger frame is already consumed from the buffer;
+    /// treat the session as dead and redial, exactly as after an `Err`.
     pub async fn read_message(&mut self) -> Result<WsMessage, WsError> {
         if self.close_received {
             return Err(WsError::AlreadyClosed);
@@ -636,6 +655,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsClient<S> {
     /// Begin the closing handshake. Valid codes only (see
     /// [`is_valid_close_code`]); reason ≤ 123 bytes. Further writes are
     /// rejected; reads continue until the peer's close arrives.
+    ///
+    /// Cancellation: `close_sent` flips only AFTER the close frame is fully
+    /// on the wire. Dropping this future mid-write can leave a partial close
+    /// frame on the stream while `close_sent` is still `false` — never retry
+    /// on the same session; drop it and redial.
     pub async fn write_close(&mut self, code: Option<u16>, reason: &str) -> Result<(), WsError> {
         if self.close_sent {
             return Err(WsError::AlreadyClosed);
@@ -683,6 +707,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsClient<S> {
         let payload = self.buffer[header.header_len..total].to_vec();
         self.buffer.drain(..total);
 
+        // From here on the frame is fully consumed; the arms below are the
+        // ONLY places parsing awaits (pong / close echo). Those sends are
+        // wire side effects and are NOT cancel-safe: if the future is
+        // dropped mid-send, the trigger frame is gone from the buffer and
+        // the answer may be half-written — see the cancellation notes on
+        // `read_message`.
         match header.opcode {
             OP_CLOSE => {
                 let info = parse_close_payload(&payload)?;
@@ -740,20 +770,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> WsClient<S> {
         }
     }
 
+    /// Pull more wire bytes into the read buffer. Cancellation-safe by
+    /// construction: `self` is only touched AFTER the read has completed —
+    /// bytes land in a local `tmp` first and are appended on success, so a
+    /// future dropped at the await point (e.g. a `tokio::time::timeout`
+    /// around `read_message`) leaves `self` byte-identical and consumes no
+    /// stream bytes. (The previous resize-in-place-then-truncate pattern
+    /// left 4096 zero bytes behind on cancellation; the next parse read
+    /// them as a continuation frame → `unexpected-continuation`.)
     async fn fill_buffer(&mut self) -> Result<(), WsError> {
         const CHUNK: usize = 4096;
-        let start = self.buffer.len();
-        self.buffer.resize(start + CHUNK, 0);
-        match read_some(&mut self.io, &mut self.buffer[start..]).await {
-            Ok(0) => Err(WsError::Eof),
-            Ok(n) => {
-                self.buffer.truncate(start + n);
-                Ok(())
-            }
-            Err(e) => Err(WsError::Io(e)),
+        let mut tmp = [0u8; CHUNK];
+        let n = read_some(&mut self.io, &mut tmp).await.map_err(WsError::Io)?;
+        if n == 0 {
+            return Err(WsError::Eof);
         }
+        self.buffer.extend_from_slice(&tmp[..n]);
+        Ok(())
     }
 
+    /// Send one frame. NOT cancel-safe: dropping the future mid-`write_all`
+    /// can leave a PARTIAL frame on the outbound stream — written bytes
+    /// cannot be un-written, so a cancelled send poisons the write direction
+    /// and the session must be dropped, not retried (same for the public
+    /// `write_*` wrappers; the flags at their call sites are only set after
+    /// the write completes, see `write_close`).
     async fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
         if self.close_sent {
             return Err(WsError::AlreadyClosed);
@@ -1402,6 +1443,59 @@ mod tests {
                 ),
             }
         }
+    }
+
+    // ---- cancellation safety ------------------------------------------------
+    // The real relay client wraps reads in tokio::time::timeout; a read
+    // future dropped at the await point must leave the session byte-exact.
+    // Deterministic: timeout(Duration::ZERO) is already expired on the first
+    // poll, so the read is polled exactly once — it parks in fill_buffer —
+    // and is then dropped. No sleeps, no real waiting.
+
+    #[tokio::test]
+    async fn read_cancelled_while_idle_leaves_no_zero_residue() {
+        let (client_io, mut server) = duplex_pair();
+        let mut client = WsClient::new(client_io, Vec::new());
+
+        // Peer silent: the read parks inside fill_buffer and is cancelled
+        // there by the already-elapsed zero timer.
+        let res = tokio::time::timeout(std::time::Duration::ZERO, client.read_message()).await;
+        assert!(res.is_err(), "silent peer must time out, not complete");
+        // ① Nothing may be buffered for a cancelled read (the pre-fix code
+        //    left 4096 zero bytes here).
+        assert!(client.buffer.is_empty(), "zero-byte residue after cancel");
+
+        // ② A complete valid frame afterwards must parse normally — the
+        //    residue zeros used to be parsed as a continuation frame
+        //    ("unexpected-continuation").
+        feed(&mut server, &[0x82, 0x03, 7, 8, 9]).await;
+        assert_eq!(client.read_message().await.unwrap(), WsMessage::Binary(vec![7, 8, 9]));
+        // ③ Buffer fully consumed again — no residue of any kind.
+        assert!(client.buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_cancelled_mid_frame_then_completed_parses_exactly() {
+        let (client_io, mut server) = duplex_pair();
+        let mut client = WsClient::new(client_io, Vec::new());
+
+        // Header + one payload byte of a 4-byte binary frame: the first read
+        // completes on these, the second parks waiting for the rest and is
+        // cancelled there.
+        feed(&mut server, &[0x82, 0x04, 0xA1]).await;
+        let res = tokio::time::timeout(std::time::Duration::ZERO, client.read_message()).await;
+        assert!(res.is_err(), "partial frame must leave the read pending");
+        // Exactly the three arrived bytes — no duplication, no zero padding
+        // (pre-fix the buffer grew by 4096 zeros here).
+        assert_eq!(client.buffer, vec![0x82, 0x04, 0xA1], "buffer after mid-frame cancel");
+
+        // The remainder arrives; the same message must come out byte-exact.
+        feed(&mut server, &[0xB2, 0xC3, 0xD4]).await;
+        assert_eq!(
+            client.read_message().await.unwrap(),
+            WsMessage::Binary(vec![0xA1, 0xB2, 0xC3, 0xD4])
+        );
+        assert!(client.buffer.is_empty());
     }
 
     enum WsErrorShape {
