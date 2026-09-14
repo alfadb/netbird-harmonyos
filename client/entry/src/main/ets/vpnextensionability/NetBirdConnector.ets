@@ -1,6 +1,8 @@
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import connection from '@ohos.net.connection';
+import resourceManager from '@ohos.resourceManager';
+import util from '@ohos.util';
 import core from 'libnetbird_core.so';
 
 // N3-6: ArkTS-side wrapper around the synchronous connector_* NAPI exports
@@ -286,6 +288,50 @@ export function parseDeviceConfig(text: string): DeviceConfigFile {
     throw new Error('device config: private_key missing');
   }
   return device;
+}
+
+// ---------------------------------------------------------------------------
+// Packaged public CA roots (https management without an explicit device
+// ca_pem): the core reads NO system trust store — it requires the caller to
+// inject the PEM roots (client/core/src/grpc.rs:63-66) and treats a missing
+// ca_pem for https:// as a configuration error (connector.rs:683).
+// HarmonyOS exposes no API to export the platform root store, so the PUBLIC
+// Let's Encrypt anchors (ISRG Root X1 + X2) ship inside the HAP rawfile and
+// are injected shell-side for https deployments; an explicit device.ca_pem
+// (private CA / self-hosted) keeps priority. Rawfile path is relative to
+// resources/rawfile, no leading slash (resourceManager rawfile contract).
+// ---------------------------------------------------------------------------
+export const PACKAGED_CA_ROOTS_RAWFILE: string = 'nb-public-roots.pem';
+
+// Count PEM CERTIFICATE blocks — meta information only (logging discipline:
+// certificate bodies are never logged, only this count).
+export function countPemCertificates(pem: string): number {
+  return pem.split('-----BEGIN CERTIFICATE-----').length - 1;
+}
+
+// Read the packaged public roots PEM from the HAP rawfile and decode it as
+// UTF-8. Throws on read failure, empty content or certificate-less content —
+// the caller maps ANY throw to the fail-closed https-ca-roots abort (an
+// https management connection must never start with an empty root set).
+// API signatures verified against the local SDK
+// (@ohos.resourceManager.d.ts / @ohos.util.d.ts):
+//   getRawFileContentSync(path: string): Uint8Array  (@since 10)
+//   util.TextDecoder.create(encoding?: string): TextDecoder
+//   TextDecoder.decodeToString(input: Uint8Array): string
+export function readPackagedCaRootsPem(resManager: resourceManager.ResourceManager): string {
+  const bytes: Uint8Array = resManager.getRawFileContentSync(PACKAGED_CA_ROOTS_RAWFILE);
+  if (bytes.length === 0) {
+    throw new Error('empty packaged ca roots rawfile');
+  }
+  const decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+  const pem: string = decoder.decodeToString(bytes).trim();
+  if (pem.length === 0) {
+    throw new Error('empty decoded ca roots pem');
+  }
+  if (countPemCertificates(pem) === 0) {
+    throw new Error('packaged ca roots pem has no certificate');
+  }
+  return pem;
 }
 
 // Build the core.connector_start / connector_start_with_socket configJson

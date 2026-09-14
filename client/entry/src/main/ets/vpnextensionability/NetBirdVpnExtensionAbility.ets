@@ -11,11 +11,11 @@ import {
   DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RouteSetAppliedResult,
   SocketFeedResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed, connectorNetworkConfig,
-  connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket, connectorSocketFeed,
-  connectorStop, connectorTunFdFeed, connectorWgSocketFeed, iceSocketOpen, mgmtSocketOpen,
-  parseDeviceConfig, parseManagementEndpoint, parseSignalEndpoint, pollStatusOrNull,
-  readCredentialFileText, resolveManagementIp, sleep
+  PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
+  connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
+  connectorSocketFeed, connectorStop, connectorTunFdFeed, connectorWgSocketFeed, countPemCertificates,
+  iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseSignalEndpoint,
+  pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveManagementIp, sleep
 } from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
@@ -322,6 +322,39 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.destroyRequested) {
       return;
     }
+
+    // Packaged public CA roots: the core reads NO system trust store — for
+    // https:// it REQUIRES caller-injected ca_pem (grpc.rs:63-66;
+    // connector.rs:683 missing-ca-for-https = config error). An https
+    // management deployment WITHOUT an explicit device ca_pem therefore gets
+    // the Let's Encrypt anchors shipped in the HAP rawfile; an explicit
+    // device.ca_pem (private CA / self-hosted) keeps priority, and http://
+    // deployments are completely untouched (no new logic runs for them).
+    // Fail-closed: a missing/unreadable/empty rawfile aborts the start like
+    // missing credentials — never an https start with an empty root set.
+    if (device.management_url.startsWith('https://')) {
+      if (device.ca_pem !== undefined && device.ca_pem.length > 0) {
+        hilog.info(DOMAIN, TAG,
+          'VPN_CA_ROOTS_SOURCE|requestId=%{public}s|source=device-config|note=explicit-ca-pem-wins',
+          this.requestId);
+      } else {
+        try {
+          device.ca_pem = readPackagedCaRootsPem(this.context.resourceManager);
+          hilog.info(DOMAIN, TAG,
+            'VPN_CA_ROOTS_SOURCE|requestId=%{public}s|source=rawfile|file=%{public}s|' +
+            'bytes=%{public}d|certs=%{public}d',
+            this.requestId, PACKAGED_CA_ROOTS_RAWFILE, device.ca_pem.length,
+            countPemCertificates(device.ca_pem));
+        } catch (error) {
+          hilog.error(DOMAIN, TAG,
+            'VPN_CA_ROOTS_FAIL|requestId=%{public}s|stage=rawfile|file=%{public}s|' +
+            'errorClass=https-ca-roots-missing|summary=%{public}s',
+            this.requestId, PACKAGED_CA_ROOTS_RAWFILE, safeError(error as Error));
+          return;
+        }
+      }
+    }
+
     // 1. shell-side endpoint parse + DNS resolution (never native)
     let connectAddr: string;
     try {
