@@ -110,11 +110,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
+use std::future::{poll_fn, Future};
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::TcpStream;
@@ -504,6 +504,11 @@ impl fmt::Display for RelayUrl {
 pub enum RelayErrorClass {
     Url,
     TlsRequired,
+    /// TLS handshake/record-layer failure AFTER a connector was supplied
+    /// (N13-D1: bad certificate, alert, truncated handshake). Distinct from
+    /// [`RelayErrorClass::TlsRequired`] which marks the fail-closed "no TLS
+    /// connector / no trust root" refusal.
+    Tls,
     Dial,
     DialTimeout,
     WsHandshake,
@@ -534,8 +539,14 @@ pub enum RelayClientError {
     /// Non-`rel`/`rels` scheme or malformed URL — fail-closed, no fallback.
     UnsupportedUrl { reason: &'static str },
     /// `rels://` dialed without a caller-supplied TLS connector — refused
-    /// BEFORE any wire byte (no plaintext downgrade).
+    /// BEFORE any wire byte (no plaintext downgrade). Also the typed refusal
+    /// when a connector could not be built (empty/unusable injected root
+    /// set) or the SNI name is unusable.
     TlsRequired,
+    /// The TLS layer failed while it was in use (N13-D1): handshake alert,
+    /// unparseable records, truncated transport. The wire TLS bytes may
+    /// already have flown — this is never a downgrade to plaintext.
+    Tls(io::Error),
     /// TCP dial failure.
     Dial(io::Error),
     /// A dial/handshake/auth phase exceeded its injected-clock budget.
@@ -582,6 +593,7 @@ impl RelayClientError {
         match self {
             RelayClientError::UnsupportedUrl { .. } => RelayErrorClass::Url,
             RelayClientError::TlsRequired => RelayErrorClass::TlsRequired,
+            RelayClientError::Tls(_) => RelayErrorClass::Tls,
             RelayClientError::Dial(_) => RelayErrorClass::Dial,
             RelayClientError::Timeout(c) => *c,
             RelayClientError::Ws(_) => RelayErrorClass::Ws,
@@ -611,8 +623,9 @@ impl fmt::Display for RelayClientError {
                 write!(f, "relay url unsupported (fail-closed): {reason}")
             }
             RelayClientError::TlsRequired => {
-                write!(f, "rels:// without a TLS connector — refusing plaintext downgrade")
+                write!(f, "rels:// without a usable TLS connector/root — refusing plaintext downgrade")
             }
+            RelayClientError::Tls(e) => write!(f, "relay tls layer failed: {e}"),
             RelayClientError::Dial(e) => write!(f, "relay tcp dial failed: {e}"),
             RelayClientError::Timeout(c) => write!(f, "relay phase timed out: {c:?}"),
             RelayClientError::Ws(e) => write!(f, "relay ws error: {e}"),
@@ -662,6 +675,7 @@ impl PartialEq for RelayClientError {
         match (self, other) {
             (E::UnsupportedUrl { reason: a }, E::UnsupportedUrl { reason: b }) => a == b,
             (E::TlsRequired, E::TlsRequired) => true,
+            (E::Tls(a), E::Tls(b)) => a.kind() == b.kind(),
             (E::Dial(a), E::Dial(b)) => a.kind() == b.kind(),
             (E::Timeout(a), E::Timeout(b)) => a == b,
             (E::Ws(_), E::Ws(_)) => true,
@@ -802,15 +816,287 @@ impl RelayDialer for TcpDialer {
 /// TLS seam: wrap an established TCP stream for `server_name` (SNI, §1.4).
 /// The IMPLEMENTATION owns the rustls config and the trust root — this
 /// module never decides certificate policy (management-path `ca_pem`
-/// philosophy). TODO(increment D): the production connector (rustls with
-/// the management-injected CA driving the async stream) lives with the
-/// caller that already builds TLS configs for management/gRPC.
+/// philosophy). The production connector is
+/// [`RustlsRelayTlsConnector`] (N13-D1); tests inject in-memory
+/// connectors.
 pub trait RelayTlsConnector: Send + Sync + 'static {
     fn connect(
         &self,
         stream: BoxStream,
         server_name: String,
     ) -> Pin<Box<dyn Future<Output = Result<BoxStream, RelayClientError>> + Send>>;
+}
+
+// ---------------------------------------------------------------------------
+// production TLS connector (N13-D1): rustls, injected trust root ONLY
+// ---------------------------------------------------------------------------
+
+/// TLS read/write scratch chunk. One TLS record is ≤ 16 KiB of plaintext
+/// plus overhead; `read_tls` buffers partial input, so an undersized chunk
+/// only means the remainder is fed on the next poll.
+const TLS_CHUNK: usize = 16_384;
+
+/// Production [`RelayTlsConnector`] for `rels://`: rustls (ring provider)
+/// trusting EXACTLY the caller-injected PEM root set — the same 「注入信任
+/// 根、不读系统库」philosophy as the management/gRPC path (`crate::grpc`,
+/// `crate::management`). There is no fallback store of any kind: an empty
+/// or unparseable root set fails construction CLOSED with
+/// [`RelayClientError::TlsRequired`], so a `rels://` URL can never degrade
+/// to plaintext (T0 Q3 / N13 plan §3.4 fail-closed rule).
+pub struct RustlsRelayTlsConnector {
+    /// Built once at construction; `None` = refused (no usable root set).
+    config: Option<Arc<rustls::ClientConfig>>,
+}
+
+impl fmt::Debug for RustlsRelayTlsConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Public certificate material only — shape token, no PEM bytes.
+        f.debug_struct("RustlsRelayTlsConnector")
+            .field("built", &self.config.is_some())
+            .finish()
+    }
+}
+
+impl RustlsRelayTlsConnector {
+    /// Build the client config from the connector's injected `ca_pem` (the
+    /// SAME root material the management TLS path was built with). Any
+    /// failure (empty set, unparseable PEM, no usable protocol versions) is
+    /// the typed, fail-closed [`RelayClientError::TlsRequired`].
+    pub fn new(root_certs_pem: Vec<Vec<u8>>) -> Result<Self, RelayClientError> {
+        use rustls::pki_types::pem::PemObject as _;
+        let refuse = || RelayClientError::TlsRequired;
+        if root_certs_pem.is_empty() {
+            return Err(refuse());
+        }
+        let mut roots = rustls::RootCertStore::empty();
+        for pem in &root_certs_pem {
+            for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem) {
+                let cert = cert.map_err(|_| refuse())?;
+                roots.add(cert).map_err(|_| refuse())?;
+            }
+        }
+        if roots.is_empty() {
+            return Err(refuse());
+        }
+        let config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .map_err(|_| refuse())?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        Ok(RustlsRelayTlsConnector { config: Some(Arc::new(config)) })
+    }
+}
+
+impl RelayTlsConnector for RustlsRelayTlsConnector {
+    fn connect(
+        &self,
+        stream: BoxStream,
+        server_name: String,
+    ) -> Pin<Box<dyn Future<Output = Result<BoxStream, RelayClientError>> + Send>> {
+        let config = self.config.clone();
+        Box::pin(async move {
+            // A refused construction (no trust root) never touches the wire.
+            let config = config.ok_or(RelayClientError::TlsRequired)?;
+            // SNI/verification name: the URL host (spec §1.4). An
+            // unparseable name (e.g. a bare non-ASCII host) is refused
+            // typed — no IP-sanctifying fallback, no plaintext fallback.
+            let name = rustls::pki_types::ServerName::try_from(server_name)
+                .map_err(|_| RelayClientError::TlsRequired)?;
+            let conn = rustls::ClientConnection::new(config, name)
+                .map_err(|_| RelayClientError::TlsRequired)?;
+            let stream = RustlsStream { conn, io: stream };
+            let stream = stream.complete_handshake().await.map_err(RelayClientError::Tls)?;
+            Ok(Box::new(stream) as BoxStream)
+        })
+    }
+}
+
+/// A rustls TLS session over an owned transport stream. Implements
+/// `AsyncRead`/`AsyncWrite` by driving the rustls record layer by hand —
+/// the frozen dependency set has no tokio-rustls, and the frozen tokio
+/// feature set has no `io-util` (poll-method style throughout, mirroring
+/// `ws.rs`). Plaintext flows through `ClientConnection`'s reader/writer;
+/// TLS records flow through the transport.
+struct RustlsStream {
+    conn: rustls::ClientConnection,
+    io: BoxStream,
+}
+
+impl RustlsStream {
+    /// Drive the TLS handshake to completion. Deterministic (no timeouts
+    /// here — the caller wraps this future in the dial budget, see
+    /// [`dial_stream`]).
+    async fn complete_handshake(mut self) -> io::Result<Self> {
+        let mut buf = vec![0u8; TLS_CHUNK];
+        loop {
+            if !self.conn.is_handshaking() {
+                return Ok(self);
+            }
+            // Push whatever flight the state machine wants to send.
+            poll_fn(|cx| self.poll_flush_tls(cx)).await?;
+            if !self.conn.is_handshaking() {
+                return Ok(self);
+            }
+            // Pull the peer's next flight.
+            let n = poll_fn(|cx| poll_read_some(&mut self.io, cx, &mut buf)).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "tls handshake: transport closed",
+                ));
+            }
+            Self::feed_tls(&mut self.conn, &buf[..n])?;        }
+    }
+
+    /// Feed a raw transport chunk into the rustls deframer. `read_tls`
+    /// consumes AT MOST one internal read step (~4 KiB) per call, so the
+    /// chunk is looped through to the last byte — dropping the remainder
+    /// would silently lose wire data.
+    fn feed_tls(conn: &mut rustls::ClientConnection, mut chunk: &[u8]) -> io::Result<()> {
+        while !chunk.is_empty() {
+            let consumed = conn
+                .read_tls(&mut chunk)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if consumed == 0 {
+                // close_notify state: nothing more will ever be read.
+                break;
+            }
+            conn.process_new_packets()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        }
+        Ok(())
+    }
+
+    /// Push every TLS byte the state machine currently holds out to the
+    /// transport. `Ready(Ok)` = no pending TLS output.
+    fn poll_flush_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut out = [0u8; TLS_CHUNK];
+        loop {
+            if !self.conn.wants_write() {
+                return Poll::Ready(Ok(()));
+            }
+            // `write_tls` drains into the `&mut [u8]` (advancing it) and
+            // returns the number of TLS bytes it queued.
+            let mut slice: &mut [u8] = &mut out;
+            let n = self
+                .conn
+                .write_tls(&mut slice)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if n == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            ready!(poll_write_all_io(&mut self.io, cx, &out[..n]))?;
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for RustlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        use std::io::Read as _;
+        let this = self.get_mut();
+        let mut plain = [0u8; TLS_CHUNK];
+        loop {
+            // 1. Serve already-decrypted plaintext. `Ok(0)` = clean TLS EOF
+            //    (close_notify processed) — surface as transport EOF. The
+            //    read is CAPPED at the caller's remaining capacity: rustls
+            //    may hold several decrypted records ready at once.
+            let cap = buf.remaining().min(plain.len());
+            match this.conn.reader().read(&mut plain[..cap]) {
+                Ok(0) => return Poll::Ready(Ok(())),
+                Ok(n) => {
+                    buf.put_slice(&plain[..n]);
+                    return Poll::Ready(Ok(()));
+                }
+                // WouldBlock = the receive buffer needs more TLS bytes.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Poll::Ready(Err(e)),
+            }
+            // 2. Emit any pending TLS output (alerts, handshake tail).
+            ready!(this.poll_flush_tls(cx))?;
+            // 3. Pull more TLS bytes from the transport and feed them.
+            let got = ready!(poll_read_some(&mut this.io, cx, &mut plain))?;
+            if got == 0 {
+                // Raw EOF without close_notify — the clean-EOF case above
+                // never fired, so this is a truncation, never a success.
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "tls transport closed without close_notify",
+                )));
+            }
+            Self::feed_tls(&mut this.conn, &plain[..got])?;
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for RustlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        use std::io::Write as _;
+        let this = self.get_mut();
+        // Space any earlier TLS output out first so a stalled transport
+        // backpressures instead of buffering without bound.
+        ready!(this.poll_flush_tls(cx))?;
+        let n = this.conn.writer().write(data)?;
+        ready!(this.poll_flush_tls(cx))?;
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().poll_flush_tls(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        this.conn.send_close_notify();
+        ready!(this.poll_flush_tls(cx))?;
+        ready!(Pin::new(&mut this.io).poll_shutdown(cx))?;
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Read SOME bytes (poll style; the frozen tokio feature set has no
+/// `io-util` — mirrors the `ws.rs` helpers).
+fn poll_read_some(
+    io: &mut BoxStream,
+    cx: &mut Context<'_>,
+    buf: &mut [u8],
+) -> Poll<io::Result<usize>> {
+    use tokio::io::AsyncRead as _;
+    let mut rb = tokio::io::ReadBuf::new(buf);
+    match Pin::new(&mut *io).poll_read(cx, &mut rb) {
+        Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
+        Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        Poll::Pending => Poll::Pending,
+    }
+}
+
+/// Write ALL bytes (poll style; mirrors the `ws.rs` helpers).
+fn poll_write_all_io(
+    io: &mut BoxStream,
+    cx: &mut Context<'_>,
+    mut data: &[u8],
+) -> Poll<io::Result<()>> {
+    use tokio::io::AsyncWrite as _;
+    while !data.is_empty() {
+        let n = ready!(Pin::new(&mut *io).poll_write(cx, data))?;
+        if n == 0 {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "tls transport write made no progress",
+            )));
+        }
+        data = &data[n..];
+    }
+    Poll::Ready(Ok(()))
 }
 
 // ---------------------------------------------------------------------------

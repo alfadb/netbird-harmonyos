@@ -655,6 +655,15 @@ pub struct ConnectorConfig {
     /// 配置字段 `advertised_candidates`），额外的 host 型候选经既有 signal
     /// 路径发给对端。默认为空 = 不通告（设备路径不变）。
     pub advertised_candidates: Vec<crate::ice::Candidate>,
+    /// **N13-D1（默认 FALSE，硬要求）**：接入 relay 客户端（`rel://`/`rels://`
+    /// 的 NetBird relay，`NetbirdConfig.relay`）。关闭时连接器行为与本增量
+    /// 之前完全一致（不启动 relay 客户端、状态 `relay.enabled:false`、不拨
+    /// 任何 relay 连接）。
+    ///
+    /// 理由（T0 Q3 / `docs/n13-relay-increment-plan-20260914.md` §5）：默认
+    /// 路由下启用 WSS 前，必须先把 relay 的 **TCP** 端点纳入 N2-H 冻结并排
+    /// 除——那属于增量 D2 与设备侧工作，本期不得在设备路径上默认启用。
+    pub relay_enabled: bool,
 }
 
 impl ConnectorConfig {
@@ -675,6 +684,7 @@ impl ConnectorConfig {
     ///   "session_renew_lead_ms": 600000, "renew_check_interval_ms": 30000,
     ///   "force_default_route": false,
     ///   "allow_unprotected_management": false,
+    ///   "relay_enabled": false,
     ///   "ice_fixed_port": 0,
     ///   "advertised_candidates": []
     /// }
@@ -691,6 +701,13 @@ impl ConnectorConfig {
     /// `allow_unprotected_management` (N3-7, default FALSE): DEVELOPMENT
     /// opt-in for an UNPROTECTED direct management dial via
     /// `connector_start`. NOT upstream behavior; default is REFUSE.
+    ///
+    /// `relay_enabled` (N13-D1, default FALSE): opt-in to run the relay
+    /// client against `NetbirdConfig.relay` from every Sync. The relay TLS
+    /// trust root is the SAME `ca_pem` injected here (management
+    /// consistency); a `rels://` URL with no usable root is refused typed
+    /// (never plaintext-downgraded). With the key absent the device path is
+    /// byte-identical to the pre-N13 connector.
     ///
     /// `ice_fixed_port` / `advertised_candidates` (N12a, defaults `0` /
     /// `[]`): **HOST-ONLY** interop tuning for the port-mapping scenario —
@@ -726,6 +743,7 @@ impl ConnectorConfig {
         let mut allow_unprotected_management = false;
         let mut ice_fixed_port: u16 = 0;
         let mut advertised_candidates: Vec<crate::ice::Candidate> = Vec::new();
+        let mut relay_enabled = false;
 
         for (key, val) in &entries {
             match key.as_str() {
@@ -789,6 +807,9 @@ impl ConnectorConfig {
                     allow_unprotected_management =
                         field_bool(val, "allow_unprotected_management")?
                 }
+                // N13-D1: relay client opt-in (DEFAULT FALSE — device path
+                // unchanged; see the field doc for the T0 Q3 rationale).
+                "relay_enabled" => relay_enabled = field_bool(val, "relay_enabled")?,
                 // N12a HOST-ONLY tuning (never set by the device shell —
                 // absent keys keep the device path byte-identical).
                 "ice_fixed_port" => {
@@ -869,6 +890,7 @@ impl ConnectorConfig {
             allow_unprotected_management,
             ice_fixed_port,
             advertised_candidates,
+            relay_enabled,
         })
     }
 }
@@ -903,6 +925,76 @@ impl HostIceTuning {
             advertised_candidates: cfg.advertised_candidates.clone(),
         }
     }
+}
+
+/// N13-D1: injected seams for the relay client a connector runs. The same
+/// pattern as [`SignalMaterial`]: production builds one value at the start
+/// seams ([`RelayMaterials::from_connector_transport`]); tests inject a
+/// virtual clock / scripted dialer / no-op TLS connector.
+#[derive(Clone)]
+pub struct RelayMaterials {
+    /// Time source for token expiry and every relay deadline (injected in
+    /// tests; [`SystemClock`] in production).
+    pub clock: Arc<dyn crate::relay_client::RelayClock>,
+    /// Transport seam ([`crate::relay_client::TcpDialer`] in production;
+    /// the D2 protected-socket seam replaces it on the device path).
+    pub dialer: Arc<dyn crate::relay_client::RelayDialer>,
+    /// TLS connector for `rels://`. `None` = `rels://` is refused typed
+    /// (`TlsRequired`) BEFORE any wire byte — never plaintext-downgraded.
+    pub tls: Option<Arc<dyn crate::relay_client::RelayTlsConnector>>,
+}
+
+impl RelayMaterials {
+    /// Production materials derived from the SAME parsed connector config
+    /// the management/signal paths use: system clock, plain TCP dialer and
+    /// — when the management transport carries an injected CA (`ca_pem`) —
+    /// a rustls connector trusting exactly those roots. With a plaintext
+    /// management transport there is no root material, so `tls` stays
+    /// `None` and `rels://` relay URLs fail closed.
+    pub fn from_connector_transport(transport: &GrpcTransport) -> Self {
+        let tls = match transport {
+            GrpcTransport::Tls(tls_cfg) => {
+                // A root set the TLS connector cannot use (empty/unparseable
+                // PEM) fails CLOSED here — `tls: None` means every `rels://`
+                // dial is later refused typed (`TlsRequired`), never
+                // plaintext-downgraded. No panic crosses the NAPI boundary.
+                match crate::relay_client::RustlsRelayTlsConnector::new(
+                    tls_cfg.root_certs_pem.clone(),
+                ) {
+                    Ok(connector) => {
+                        Some(Arc::new(connector) as Arc<dyn crate::relay_client::RelayTlsConnector>)
+                    }
+                    Err(_) => None,
+                }
+            }
+            GrpcTransport::Plaintext => None,
+        };
+        RelayMaterials {
+            clock: Arc::new(crate::relay_client::SystemClock),
+            dialer: Arc::new(crate::relay_client::TcpDialer),
+            tls,
+        }
+    }
+}
+
+impl core::fmt::Debug for RelayMaterials {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Shape only: seams are trait objects and carry no secret material.
+        f.debug_struct("RelayMaterials")
+            .field("clock", &"injected")
+            .field("dialer", &"injected")
+            .field("tls", &self.tls.is_some())
+            .finish()
+    }
+}
+
+/// N13-D1: everything a spawned connector needs to run the relay client —
+/// the LOCAL peer's WireGuard public key (relay peerID source, relay spec
+/// §3.2) and the injected seams. Built only when `relay_enabled` is set.
+#[derive(Clone, Debug)]
+pub struct RelayAttach {
+    pub wg_pubkey_b64: String,
+    pub materials: Arc<RelayMaterials>,
 }
 
 /// Login credentials parsed from the optional `setupKeyJson` argument.
@@ -1013,10 +1105,31 @@ struct ConnectorShared {
     /// [`SignalMaterial`] was provided; unit tests that build
     /// `ConnectorShared::new` directly simply run without signal).
     signal: std::sync::OnceLock<Arc<SignalRuntime>>,
+    /// N13-D1: relay opt-in — `false` keeps the device path relay-free
+    /// (hard default; the T0 Q3/D2 rationale is on [`ConnectorConfig`]).
+    relay_enabled: bool,
+    /// N13-D1: LOCAL WG public key + injected seams (set at spawn; `None`
+    /// = relay never attachable).
+    relay_attach: Option<RelayAttach>,
+    /// N13-D1: the live relay client slot. `client` is started by the first
+    /// `NetbirdConfig.relay` sync and stays (after `stop_relay` it is kept
+    /// only so status can render its terminal `Dead` state — the worker is
+    /// gone by then, so it can never be reused). Lock order: `inner` BEFORE
+    /// `relay` — never the reverse.
+    relay: Mutex<RelaySlot>,
+}
+
+/// N13-D1: relay slot contents (urls = the configured set, public routing
+/// material — safe to render into the status document).
+#[derive(Default)]
+struct RelaySlot {
+    client: Option<crate::relay_client::RelayClient>,
+    urls: Vec<String>,
 }
 
 impl ConnectorShared {
-    fn new(force_default_route: bool) -> Self {
+    fn new(force_default_route: bool, relay_attach: Option<RelayAttach>) -> Self {
+        let relay_enabled = relay_attach.is_some();
         ConnectorShared {
             inner: Mutex::new(StateInner {
                 machine: StateMachine::new(),
@@ -1043,6 +1156,9 @@ impl ConnectorShared {
             ice: std::sync::OnceLock::new(),
             ice_sockets: std::sync::OnceLock::new(),
             signal: std::sync::OnceLock::new(),
+            relay_enabled,
+            relay_attach,
+            relay: Mutex::new(RelaySlot::default()),
         }
     }
 
@@ -1120,11 +1236,8 @@ impl ConnectorShared {
             Some(ice) => ice_ready_for_default_route(&ice.lock_poison().summary()),
             None => true, // no orchestrator (unit-test construction): unchanged rule
         };
-        let (allowed, reason) = ShellNetworkConfig::default_route_decision(
-            snap.peers.len(),
-            wg.tunnel_ready() && ice_ready,
-            inner.force_default_route,
-        );
+        let (allowed, reason) =
+            self.decide_default_route(inner.force_default_route, wg, ice_ready, snap.peers.len());
         if allowed != snap.default_route_allowed || reason != snap.default_route_reason {
             hilog::emit(&format!(
                 "connector: default-route gate refresh allowed={} reason={}",
@@ -1216,8 +1329,223 @@ impl ConnectorShared {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // N13-D1: two-path data-plane readiness (T0 Q3)
+    // -----------------------------------------------------------------------
+
+    /// The default-route decision under the two-path readiness rule: the
+    /// data plane carries traffic only with a live WG session
+    /// (`wg.tunnel_ready()`) AND a carrier — an ICE-nominated path (the
+    /// pre-N13 rule) OR the relay client Ready with a valid token
+    /// ([`ConnectorShared::relay_ready`]). Feeds the UNCHANGED
+    /// [`ShellNetworkConfig::default_route_decision`]; when ONLY the relay
+    /// path enables the route the reason token names it, so the shell and
+    /// the diagnostics can always tell the paths apart:
+    /// - (a) relay Ready only → allowed, `…-relay-ready`
+    /// - (b) ICE nominated → allowed, `…-tunnel-ready` (unchanged tokens)
+    /// - (c) ICE Failed and relay not ready → HELD (`data-plane-not-ready`)
+    ///   — ICE Failed is NEVER silently treated as reachable.
+    fn decide_default_route(
+        &self,
+        force: bool,
+        wg: &dyn WgPeerApplier,
+        ice_nominated: bool,
+        peer_count: usize,
+    ) -> (bool, String) {
+        let relay_ready = self.relay_ready();
+        let ready = two_path_readiness(wg.tunnel_ready(), ice_nominated, relay_ready);
+        let (allowed, mut reason) =
+            ShellNetworkConfig::default_route_decision(peer_count, ready, force);
+        if allowed && !force && !ice_nominated && relay_ready {
+            reason = DEFAULT_ROUTE_REASON_RELAY_READY.to_string();
+        }
+        (allowed, reason)
+    }
+
     fn record_error(&self, err: &ManagementError) {
         self.lock().last_error = Some(ErrorClass::from_management(err));
+    }
+
+    // -----------------------------------------------------------------------
+    // N13-D1: relay client lifecycle (opt-in via relay_enabled)
+    // -----------------------------------------------------------------------
+
+    /// 「relay 可用」for the data-plane readiness judgement: enabled, the
+    /// client is at `Ready` (authenticated session live) AND the current
+    /// token is still valid — fail-closed on expiry (the plan §3.6 stop
+    /// condition 「令牌过期静默假通」: the session is killed by the client,
+    /// and the connector must not report readiness across that window).
+    /// T0 Q3: judged ONLY from relay state — the ICE counters/summary are
+    /// never touched, so relay bytes can never count as ICE success.
+    fn relay_ready(&self) -> bool {
+        if !self.relay_enabled {
+            return false;
+        }
+        let slot = self.relay.lock_poison();
+        let Some(client) = slot.client.as_ref() else {
+            return false;
+        };
+        client.state() == crate::relay_client::RelayState::Ready
+            && matches!(
+                client.token_validity(),
+                crate::relay_client::TokenValidity::Valid { .. }
+            )
+    }
+
+    /// Apply one Sync's `RelayServers` (relay spec §6.1/§6.2): the first
+    /// advertisement starts the client; the SAME URL set only refreshes the
+    /// token (`update_token` — a live session is NOT reconnected, the
+    /// protocol has no in-band re-auth); a CHANGED URL set replaces the
+    /// client (old one stopped — its teardown is the relay Close frame +
+    /// socket close). Fail-closed: an unusable token/URL set never touches a
+    /// live client and never starts one; every outcome is logged (counts and
+    /// url values only — never token material).
+    fn relay_apply(&self, relay: &crate::network_map::RelayServers) {
+        let Some(attach) = self.relay_attach.as_ref() else {
+            return;
+        };
+        if relay.urls.is_empty() {
+            self.relay_drop("relay-urls-empty");
+            return;
+        }
+        let token = match crate::relay::AuthToken::from_management(
+            &relay.token_payload,
+            &relay.token_signature,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                hilog::emit(&format!(
+                    "connector: relay token unusable (reason token: {e:?}) — relay not updated"
+                ));
+                return;
+            }
+        };
+        let mut slot = self.relay.lock_poison();
+        match slot.client.as_ref() {
+            Some(client) if slot.urls == relay.urls => {
+                client.update_token(token);
+                hilog::emit(&format!(
+                    "connector: relay token refreshed (urls={})",
+                    slot.urls.len()
+                ));
+            }
+            Some(client) => {
+                // URL set changed (spec §6.2 step 1): replace the client.
+                client.stop();
+                hilog::emit("connector: relay urls changed — restarting relay client");
+                slot.client = None;
+                slot.urls = relay.urls.clone();
+                match Self::relay_start(attach, relay, token) {
+                    Ok(new) => {
+                        slot.client = Some(new);
+                        hilog::emit(&format!(
+                            "connector: relay client restarted (urls={})",
+                            relay.urls.len()
+                        ));
+                    }
+                    Err(e) => hilog::emit(&format!(
+                        "connector: relay restart failed ({e:?}) — relay unavailable (fail-closed)"
+                    )),
+                }
+            }
+            None => {
+                slot.urls = relay.urls.clone();
+                match Self::relay_start(attach, relay, token) {
+                    Ok(new) => {
+                        slot.client = Some(new);
+                        hilog::emit(&format!(
+                            "connector: relay client started (urls={})",
+                            relay.urls.len()
+                        ));
+                    }
+                    Err(e) => hilog::emit(&format!(
+                        "connector: relay start failed ({e:?}) — relay unavailable (fail-closed)"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Build + start one relay client from the injected seams. Requires a
+    /// running tokio runtime (always true: called from the sync worker).
+    fn relay_start(
+        attach: &RelayAttach,
+        relay: &crate::network_map::RelayServers,
+        token: crate::relay::AuthToken,
+    ) -> Result<crate::relay_client::RelayClient, crate::relay_client::RelayClientError> {        let mut cfg = crate::relay_client::RelayClientConfig::new(
+            &relay.urls,
+            &attach.wg_pubkey_b64,
+            token,
+        )?
+        .with_clock(attach.materials.clock.clone())
+        .with_dialer(attach.materials.dialer.clone());
+        if let Some(tls) = attach.materials.tls.as_ref() {
+            cfg = cfg.with_tls(tls.clone());
+        }
+        crate::relay_client::RelayClient::start(cfg)
+    }
+
+    /// Management stopped advertising relay (or an empty url set arrived):
+    /// stop the client — no orphan outbound relay connection. The handle is
+    /// kept ONLY so status renders the terminal state; the urls record goes.
+    fn relay_drop(&self, why: &'static str) {
+        let mut slot = self.relay.lock_poison();
+        if let Some(client) = slot.client.as_ref() {
+            client.stop();
+            hilog::emit(&format!("connector: relay client stopped ({why})"));
+        }
+        slot.urls.clear();
+    }
+
+    /// 撤销清理 (N13 plan §4: 「注销/destroy 后 WSS 必须消失，不得留出站连
+    /// 接」): called from `ConnectorHandle::stop()` AND when the connector
+    /// worker ends by itself — the relay client must never outlive the
+    /// connector. The handle is kept so status can render `Dead`.
+    fn stop_relay(&self) {
+        let slot = self.relay.lock_poison();
+        if let Some(client) = slot.client.as_ref() {
+            client.stop();
+            hilog::emit("connector: relay client stopped (connector teardown)");
+        }
+    }
+
+    /// The running relay client handle, if any (slot reader shared by the
+    /// status section and the handle accessor).
+    fn relay_handle(&self) -> Option<crate::relay_client::RelayClient> {
+        self.relay.lock_poison().client.clone()
+    }
+
+    /// The status document's `relay` section (counts/urls/class only —
+    /// never token material; credential discipline as everywhere else).
+    fn relay_status(&self) -> RelayStatus {
+        if !self.relay_enabled {
+            return RelayStatus::disabled();
+        }
+        let slot = self.relay.lock_poison();
+        let urls = slot.urls.clone();
+        let Some(client) = slot.client.as_ref() else {
+            return RelayStatus {
+                enabled: true,
+                state: relay_state_token(crate::relay_client::RelayState::Disconnected).into(),
+                urls,
+                ..RelayStatus::empty_counters()
+            };
+        };
+        let stats = client.stats();
+        RelayStatus {
+            enabled: true,
+            state: relay_state_token(stats.state).into(),
+            urls,
+            reconnects: stats.reconnects,
+            frames_tx: stats.frames_tx.iter().sum(),
+            frames_rx: stats.frames_rx.iter().sum(),
+            transport_bytes: stats.transport_tx_bytes + stats.transport_rx_bytes,
+            token_valid: matches!(
+                client.token_validity(),
+                crate::relay_client::TokenValidity::Valid { .. }
+            ),
+            last_error_class: stats.last_error_class.map(|c| relay_error_class_token(c).to_string()),
+        }
     }
 
     fn count_retryable_failure(&self) {
@@ -1265,6 +1593,17 @@ impl ConnectorShared {
                 )),
                 None => hilog::emit("connector: netbird-config relay none"),
             }
+            // N13-D1: run/update the relay client (opt-in only — with
+            // `relay_enabled:false` (the hard default) NOTHING below runs
+            // and the device path behaves exactly as before). Relay rides
+            // netbird_config, so this happens BEFORE the map-serial gate
+            // (every sync refreshes, upstream engine.go:1185-1214).
+            if self.relay_enabled {
+                match cfg.relay.as_ref() {
+                    Some(r) => self.relay_apply(r),
+                    None => self.relay_drop("relay-removed-from-sync"),
+                }
+            }
         } else {
             // config-less snapshot: keep the previously announced URI visible
             signal_uri = self.lock().net_config.as_ref().and_then(|c| c.signal.clone());
@@ -1302,6 +1641,8 @@ impl ConnectorShared {
         // plane is only "ICE-ready" when at least one peer has a LANDED
         // endpoint (Connected + apply_endpoint OK). All-Failed/never-connected
         // peers keep the default route HELD (N3-7 linkage).
+        // N13-D1: the same gate now accepts a SECOND carrier — the relay
+        // client at Ready (T0 Q3 two-path rule, see `two_path_readiness`).
         let ice_ready = {
             let summary = self.ice.get().map(|ice| ice.lock_poison().summary());
             match summary {
@@ -1318,8 +1659,17 @@ impl ConnectorShared {
             // default-route safety gate (force flag + live WG readiness).
             // N5d: the signal URI rides the snapshot so the shell can
             // resolve + protect + feed the signal socket.
+            // N13-D1: relay readiness is the second carrier (independent of
+            // the ICE view — never merged into ICE counters).
+            let relay_ready = self.relay_ready();
+            let data_plane_ready =
+                two_path_readiness(wg.tunnel_ready(), ice_ready, relay_ready);
             let mut snapshot =
-                ShellNetworkConfig::from_map_gated(map, g.force_default_route, wg.tunnel_ready() && ice_ready);
+                ShellNetworkConfig::from_map_gated(map, g.force_default_route, data_plane_ready);
+            if data_plane_ready && !g.force_default_route && !ice_ready && relay_ready {
+                // the relay path enabled the route — name it in the token
+                snapshot.default_route_reason = DEFAULT_ROUTE_REASON_RELAY_READY.to_string();
+            }
             snapshot.signal = signal_uri;
             // N7: keep the UNGATED route record so `refresh_net_gate` can
             // re-export / re-hold the default route as live readiness moves
@@ -1423,6 +1773,9 @@ pub struct ConnectorStatus {
     /// + reason token) — the shell's trigger to rebuild the connection when
     /// the desired route set diverges from the applied one.
     pub recreate: RecreateStatus,
+    /// N13-D1: relay client section (enabled/state/urls/counters/token —
+    /// [`RelayStatus`]; counts and shape tokens only, no token material).
+    pub relay: RelayStatus,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -1449,7 +1802,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -1481,6 +1834,7 @@ impl ConnectorStatus {
             format!("\"signal\":{}", self.signal.to_json()),
             format!("\"wg\":{}", self.wg.to_json()),
             format!("\"recreate\":{}", self.recreate.to_json()),
+            format!("\"relay\":{}", self.relay.to_json()),
         )
     }
 }
@@ -1765,6 +2119,154 @@ impl ShellNetworkConfig {
             peers,
             jbool("allowed", self.default_route_allowed),
             jstr("reason", &self.default_route_reason),
+        )
+    }
+}
+
+/// N13-D1: the reason token when the default route is enabled by the RELAY
+/// carrier (and NOT by an ICE nomination) — stable, JSON-safe, mirrors the
+/// shape of the pre-N13 `…-tunnel-ready` token.
+pub const DEFAULT_ROUTE_REASON_RELAY_READY: &str =
+    "default-route-allowed:peers-registered-and-relay-ready";
+
+/// N13-D1 two-path data-plane readiness (T0 Q3, pure — unit-pinned):
+///
+/// `tunnel_ready && (ice_nominated || relay_ready)`
+///
+/// - (b) ICE 已提名 → 就绪（既有语义，relay 无关）；
+/// - (a) 仅 relay Ready（且 WG 会话在）→ 就绪，理由 token 用
+///   [`DEFAULT_ROUTE_REASON_RELAY_READY`];
+/// - (c) ICE Failed 且 relay 未就绪 → **不得**判就绪（默认路由继续 HOLD，
+///   绝不静默当作可达）;
+/// - 双路径并存时互不污染：relay 的字节/帧计数只存在于 relay 客户端统计，
+///   [`crate::peer_conn::IceOrchestratorSummary`] 不接收任何 relay 输入，
+///   反之亦然（各自独立计数与判定）。
+fn two_path_readiness(tunnel_ready: bool, ice_nominated: bool, relay_ready: bool) -> bool {
+    tunnel_ready && (ice_nominated || relay_ready)
+}
+
+/// `RelayState` → stable status token (state only — no URLs/peers here).
+fn relay_state_token(state: crate::relay_client::RelayState) -> &'static str {
+    use crate::relay_client::RelayState as S;
+    match state {
+        S::Disconnected => "disconnected",
+        S::Dialing => "dialing",
+        S::Handshaking => "handshaking",
+        S::Authenticating => "authenticating",
+        S::Ready => "ready",
+        S::Reconnecting => "reconnecting",
+        S::Dead => "dead",
+    }
+}
+
+/// [`crate::relay_client::RelayErrorClass`] → stable lowercase token for the
+/// status document (class only — never a server/error message).
+fn relay_error_class_token(class: crate::relay_client::RelayErrorClass) -> &'static str {
+    use crate::relay_client::RelayErrorClass as C;
+    match class {
+        C::Url => "url",
+        C::TlsRequired => "tls-required",
+        C::Tls => "tls",
+        C::Dial => "dial",
+        C::DialTimeout => "dial-timeout",
+        C::WsHandshake => "ws-handshake",
+        C::Ws => "ws",
+        C::Codec => "codec",
+        C::FrameTooLarge => "frame-too-large",
+        C::AuthRejected => "auth-rejected",
+        C::AuthTimeout => "auth-timeout",
+        C::AuthProtocol => "auth-protocol",
+        C::ServerClosed => "server-closed",
+        C::Io => "io",
+        C::KeepaliveTimeout => "keepalive-timeout",
+        C::TokenExpired => "token-expired",
+        C::ConnectionLost => "connection-lost",
+        C::OpenConnTimeout => "open-conn-timeout",
+        C::SubscribeDuplicate => "subscribe-duplicate",
+        C::PeerOffline => "peer-offline",
+        C::Backpressured => "backpressured",
+        C::NotReady => "not-ready",
+        C::Stopped => "stopped",
+    }
+}
+
+/// The `relay` section of the status document (N13-D1). Counters and shape
+/// tokens ONLY: no token material, no peer ids, no server messages — the
+/// credential discipline of the whole status boundary applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayStatus {
+    /// The `relay_enabled` opt-in (hard default false — device path unchanged).
+    pub enabled: bool,
+    /// Client state token (`disabled` when not enabled).
+    pub state: String,
+    /// The configured relay URL set from the last `NetbirdConfig.relay`
+    /// (public routing material).
+    pub urls: Vec<String>,
+    /// Established sessions that ended and triggered a reconnect.
+    pub reconnects: u64,
+    /// TOTAL relay frames sent (all types — reconciliation surface).
+    pub frames_tx: u64,
+    /// TOTAL relay frames received (all types).
+    pub frames_rx: u64,
+    /// Transport payload bytes, outbound + inbound (§4.2).
+    pub transport_bytes: u64,
+    /// The current token parses and has NOT expired against the clock
+    /// (fail-closed visibility: `false` ⇒ the relay is/becomes unusable).
+    pub token_valid: bool,
+    /// Last failure class token (never a message).
+    pub last_error_class: Option<String>,
+}
+
+impl RelayStatus {
+    /// The disabled shape (the pre-N13 device path): zero counters, no urls,
+    /// nothing ever dialed.
+    pub fn disabled() -> Self {
+        RelayStatus {
+            enabled: false,
+            state: "disabled".to_string(),
+            urls: Vec::new(),
+            ..RelayStatus::empty_counters()
+        }
+    }
+
+    fn empty_counters() -> Self {
+        RelayStatus {
+            enabled: true,
+            state: "disconnected".to_string(),
+            urls: Vec::new(),
+            reconnects: 0,
+            frames_tx: 0,
+            frames_rx: 0,
+            transport_bytes: 0,
+            token_valid: false,
+            last_error_class: None,
+        }
+    }
+
+    /// JSON object (embedded into the status document).
+    pub fn to_json(&self) -> String {
+        let urls = self
+            .urls
+            .iter()
+            .map(|u| format!("\"{u}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let last_error = self
+            .last_error_class
+            .as_ref()
+            .map(|c| format!("\"{c}\""))
+            .unwrap_or_else(|| "null".to_string());
+        format!(
+            "{{{},{},{},{},{},{},{},{},{}}}",
+            jbool("enabled", self.enabled),
+            jstr("state", &self.state),
+            format!("\"urls\":[{urls}]"),
+            jnum("reconnects", self.reconnects),
+            jnum("frames_tx", self.frames_tx),
+            jnum("frames_rx", self.frames_rx),
+            jnum("transport_bytes", self.transport_bytes),
+            jbool("token_valid", self.token_valid),
+            format!("\"last_error_class\":{last_error}"),
         )
     }
 }
@@ -2207,7 +2709,65 @@ impl ConnectorHandle {
         wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
         ice_tuning: HostIceTuning,
     ) -> Arc<ConnectorHandle> {
-        let shared = Arc::new(ConnectorShared::new(force_default_route));
+        // N13-D1: the pre-existing signature keeps the hard default — NO
+        // relay client (relay_enabled=false; the T0 Q3/D2 rationale is on
+        // [`ConnectorConfig::relay_enabled`]). Opt-in via
+        // [`ConnectorHandle::spawn_with_relay`].
+        Self::spawn_with_relay(
+            runtime,
+            factory,
+            wg,
+            host,
+            secrets,
+            meta,
+            policy_backoff,
+            sync_policy,
+            renew_lead,
+            renew_check_interval,
+            force_default_route,
+            socket_source,
+            ice,
+            signal_material,
+            wg_feed,
+            ice_tuning,
+            false,
+            None,
+        )
+    }
+
+    /// [`ConnectorHandle::spawn`] plus the N13-D1 relay opt-in:
+    /// `relay_enabled=true` starts/updates a [`crate::relay_client::RelayClient`]
+    /// from every Sync's `NetbirdConfig.relay` (lifecycle in
+    /// [`ConnectorShared::relay_apply`]), tears it down on stop/worker end
+    /// (no orphan outbound relay connection), and feeds the two-path
+    /// readiness rule. `relay_attach.wg_pubkey_b64` is the LOCAL peer's
+    /// WireGuard public key (base64) — the relay peerID source (relay spec
+    /// §3.2).
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_relay(
+        runtime: tokio::runtime::Handle,
+        factory: Arc<dyn ManagementFactory>,
+        wg: Arc<dyn WgPeerApplier>,
+        host: Arc<dyn ConfigApplier>,
+        secrets: ConnectorSecrets,
+        meta: PeerMeta,
+        policy_backoff: ExponentialBackoff,
+        sync_policy: SyncPolicy,
+        renew_lead: Duration,
+        renew_check_interval: Duration,
+        force_default_route: bool,
+        socket_source: Option<Arc<ProtectedSocketFdSource>>,
+        ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
+        signal_material: Option<SignalMaterial>,
+        wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
+        ice_tuning: HostIceTuning,
+        relay_enabled: bool,
+        relay_attach: Option<RelayAttach>,
+    ) -> Arc<ConnectorHandle> {
+        // The flag is authoritative: materials without the opt-in are
+        // dropped (the device default keeps EVERY relay seam detached).
+        let relay_attach = relay_enabled.then_some(relay_attach).flatten();
+        let shared = Arc::new(ConnectorShared::new(force_default_route, relay_attach));
         shared.set_running(true);
         shared.lock().started_at_unix = Some(unix_now());
 
@@ -2363,6 +2923,7 @@ impl ConnectorHandle {
                 .unwrap_or_default(),
             wg: self.wg.dataplane_status().unwrap_or_default(),
             recreate: g.recreate.clone(),
+            relay: self.shared.relay_status(),
         }
     }
 
@@ -2421,6 +2982,10 @@ impl ConnectorHandle {
         if let Some(rt) = self.shared.signal.get() {
             rt.shutdown();
         }
+        // N13-D1 撤销清理: the relay client is torn down with the connector —
+        // no outbound relay connection may outlive `connector_stop()`
+        // (N13 plan §4). Runs even when never started (no-op).
+        self.shared.stop_relay();
         self.ice.lock_poison().stop_all();
         self.wg.clear();
         self.host.clear();
@@ -2460,6 +3025,18 @@ impl ConnectorHandle {
 
     pub fn is_running(&self) -> bool {
         self.shared.is_running()
+    }
+
+    /// N13-D1: the relay client handle, when one is running (opt-in +
+    /// first relay sync seen). This is the D2 WG-carrier attachment point:
+    /// `open_conn`/`send_to_peer`/`recv` pump the WG bind through it once
+    /// the relay stream becomes a WG outer carrier. `None` = relay disabled
+    /// or no relay sync seen yet.
+    pub fn relay_client(&self) -> Option<crate::relay_client::RelayClient> {
+        if !self.shared.relay_enabled {
+            return None;
+        }
+        self.shared.relay_handle()
     }
 }
 
@@ -2613,6 +3190,10 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
             hilog::emit("connector: sync session retry budget exhausted");
         }
     }
+    // N13-D1: the worker ended by itself — the relay client must not
+    // outlive it (撤销清理; the expired-token fail-closed rule also forbids
+    // keeping an unattended relay session alive past its management owner).
+    shared.stop_relay();
     shared.set_running(false);
 }
 
@@ -2769,7 +3350,7 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
     let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
-    let handle = ConnectorHandle::spawn(
+    let handle = ConnectorHandle::spawn_with_relay(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
         wg_feed.clone(),
@@ -2793,6 +3374,13 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         }),
         Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
         HostIceTuning::from_config(&config), // N12a HOST-ONLY tuning
+        // N13-D1: relay opt-in (DEFAULT FALSE — see ConnectorConfig).
+        // The relay TLS root is the SAME injected ca_pem as management.
+        config.relay_enabled,
+        config.relay_enabled.then(|| RelayAttach {
+            wg_pubkey_b64: config.keys.public_key_base64(),
+            materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport)),
+        }),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -2888,7 +3476,7 @@ pub fn connector_start_with_socket_json(
     let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
-    let handle = ConnectorHandle::spawn(
+    let handle = ConnectorHandle::spawn_with_relay(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::with_socket_source(
             &config,
@@ -2917,6 +3505,13 @@ pub fn connector_start_with_socket_json(
         }),
         Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
         HostIceTuning::from_config(&config), // N12a HOST-ONLY tuning
+        // N13-D1: relay opt-in (DEFAULT FALSE — see ConnectorConfig).
+        // The relay TLS root is the SAME injected ca_pem as management.
+        config.relay_enabled,
+        config.relay_enabled.then(|| RelayAttach {
+            wg_pubkey_b64: config.keys.public_key_base64(),
+            materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport)),
+        }),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -3242,6 +3837,7 @@ pub fn connector_status_json() -> String {
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
+            relay: RelayStatus::disabled(),
         }
         .to_json(),
     }
@@ -3417,6 +4013,7 @@ mod tests {
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
+            relay: RelayStatus::disabled(),
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
@@ -3611,6 +4208,7 @@ mod tests {
                 cooling_down: true,
                 reason: "route-set-changed".to_string(),
             },
+            relay: RelayStatus::disabled(),
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -3676,6 +4274,7 @@ mod tests {
             signal: SignalLinkStatus::default(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
+            relay: RelayStatus::disabled(),
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -3782,7 +4381,7 @@ mod tests {
                 true
             }
         }
-        let shared = ConnectorShared::new(false);
+        let shared = ConnectorShared::new(false, None);
         let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
             socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
@@ -4114,7 +4713,7 @@ mod tests {
 
     #[test]
     fn network_config_unavailable_until_first_map_then_cleared_on_stop_shape() {
-        let shared = ConnectorShared::new(false);
+        let shared = ConnectorShared::new(false, None);
         assert_eq!(
             shared.network_config_json(),
             "{\"available\":false,\"reason\":\"no-network-map\"}"
@@ -4170,7 +4769,7 @@ mod tests {
     /// applied (default route + 172.16.0.0/12) and the shell's INITIAL
     /// create() ACKed with the HELD route set (no 0.0.0.0/0).
     fn recreate_fixture(wg: &FlipWg, initial_ack_ms: u64) -> ConnectorShared {
-        let shared = ConnectorShared::new(false);
+        let shared = ConnectorShared::new(false, None);
         wg.set(false);
         shared.apply_update(
             wg,
@@ -4243,7 +4842,7 @@ mod tests {
     #[test]
     fn recreate_flap_is_bounded_by_cooldown_and_limit() {
         let wg = FlipWg::new(true);
-        let shared = ConnectorShared::new(false);
+        let shared = ConnectorShared::new(false, None);
         shared.apply_update(
             &wg,
             &NoopHost,
@@ -4381,7 +4980,7 @@ mod tests {
     /// and the shell snapshot carries the URI for the shell to feed.
     #[tokio::test]
     async fn apply_update_arms_signal_link_and_dials_fail_closed_without_fds() {
-        let shared = Arc::new(ConnectorShared::new(false));
+        let shared = Arc::new(ConnectorShared::new(false, None));
         let orch = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
             socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
@@ -4494,6 +5093,7 @@ mod tests {
             signal: rt.status(),
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
+            relay: RelayStatus::disabled(),
         }
         .to_json();
         assert!(
@@ -4525,7 +5125,7 @@ mod tests {
             }
         }
         let wg = Arc::new(FlipWg(AtomicBool::new(false)));
-        let shared = ConnectorShared::new(false);
+        let shared = ConnectorShared::new(false, None);
 
         // sync arrives while the data plane is down (the N7 production
         // shape: feeds/handshakes complete after create()): HELD
@@ -4576,5 +5176,313 @@ mod tests {
             "{held_again}"
         );
         assert!(!held_again.contains("{\"network\":\"0.0.0.0/0\""), "{held_again}");
+    }
+
+    // -----------------------------------------------------------------------
+    // N13-D1: relay connector integration
+    // -----------------------------------------------------------------------
+
+    /// The T0 Q3 two-path readiness matrix (pure, exact):
+    /// (a) relay Ready only → ready; (b) ICE nominated → ready (unchanged);
+    /// (c) ICE Failed AND relay not ready → NOT ready (never silently
+    /// reachable); the WG session itself stays mandatory in every branch.
+    #[test]
+    fn relay_two_path_readiness_matrix() {
+        assert!(two_path_readiness(true, false, true), "(a) relay Ready only");
+        assert!(two_path_readiness(true, true, false), "(b) ICE nominated only");
+        assert!(
+            !two_path_readiness(true, false, false),
+            "(c) ICE Failed + no relay must NOT be ready"
+        );
+        assert!(two_path_readiness(true, true, true), "both carriers");
+        // no live WG session → never ready, whatever the carriers say
+        assert!(!two_path_readiness(false, true, true));
+        assert!(!two_path_readiness(false, false, true));
+    }
+
+    /// `relay_enabled` defaults FALSE (hard requirement) and parses as a
+    /// bool; the relay TLS material comes from the SAME injected ca_pem as
+    /// management (Tls transport → rustls connector), while a plaintext
+    /// transport carries no root at all (rels:// then fails closed).
+    #[test]
+    fn relay_config_defaults_and_tls_material_mapping() {
+        let base = format!(
+            "{{\"management_url\":\"https://mgmt.example:443\",\"ca_pem\":[\"-----BEGIN CERTIFICATE-----\\nX\\n-----END CERTIFICATE-----\"],\"private_key\":\"{}\"}}",
+            test_private_key_b64(3)
+        );
+        let cfg = ConnectorConfig::from_json(&base).expect("https config");
+        assert!(!cfg.relay_enabled, "relay_enabled must DEFAULT false");
+        assert!(matches!(cfg.transport, GrpcTransport::Tls(_)));
+
+        let opted = ConnectorConfig::from_json(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:8012\",\"private_key\":\"{}\",\"relay_enabled\":true}}",
+            test_private_key_b64(3)
+        ))
+        .expect("opted config");
+        assert!(opted.relay_enabled);
+
+        let bad = format!(
+            "{{\"management_url\":\"http://x:1\",\"private_key\":\"{}\",\"relay_enabled\":\"yes\"}}",
+            test_private_key_b64(3)
+        );
+        let err = ConnectorConfig::from_json(&bad).unwrap_err();
+        assert!(matches!(err, ConfigError::Field { field: "relay_enabled", .. }), "{err}");
+
+        // TLS material mapping: a usable root set → the rustls connector;
+        // garbage PEM / plaintext transport → None (rels:// then refused
+        // typed, never downgraded). A VALID certificate is exercised by the
+        // tests/relay_connector_e2e.rs TLS round-trip.
+        let ca = vec![b"-----BEGIN CERTIFICATE-----\nMII garbage\n-----END CERTIFICATE-----".to_vec()];
+        let tls_transport = GrpcTransport::Tls(crate::grpc::GrpcTlsConfig::new(ca.clone()));
+        let mats = RelayMaterials::from_connector_transport(&tls_transport);
+        assert!(mats.tls.is_none(), "unparseable roots fail closed (no TLS connector)");
+        let plain = RelayMaterials::from_connector_transport(&GrpcTransport::Plaintext);
+        assert!(plain.tls.is_none(), "no root material → no TLS connector (fail-closed)");
+
+        // and an EMPTY root set is refused at the connector itself
+        let err = crate::relay_client::RustlsRelayTlsConnector::new(Vec::new()).unwrap_err();
+        assert_eq!(err, crate::relay_client::RelayClientError::TlsRequired);
+        let err = crate::relay_client::RustlsRelayTlsConnector::new(ca.clone()).unwrap_err();
+        assert_eq!(err, crate::relay_client::RelayClientError::TlsRequired);
+    }
+
+    /// Fabricated (NOT secret) 32-byte signature, base64 — same fixture
+    /// shape as tests/relay_client_e2e.rs.
+    const RELAY_TEST_SIG_B64: &str = "paWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaU=";
+    /// Fabricated virtual epoch for relay lifecycle tests.
+    const RELAY_TEST_EPOCH: u64 = 1_770_000_000;
+
+    fn relay_test_attach(clock: Arc<crate::relay_client::VirtualClock>) -> RelayAttach {
+        RelayAttach {
+            wg_pubkey_b64: "ZW1yZWxheS1jb25uZWN0b3ItbG9jYWwtd2drZXk=".to_string(),
+            materials: Arc::new(RelayMaterials {
+                clock,
+                dialer: Arc::new(crate::relay_client::TcpDialer),
+                tls: None, // rel:// loopback topology only (spec §1.1)
+            }),
+        }
+    }
+
+    fn relay_servers(urls: Vec<String>, expires_at_unix: u64) -> crate::network_map::RelayServers {
+        crate::network_map::RelayServers {
+            urls,
+            token_payload: expires_at_unix.to_string(),
+            token_signature: RELAY_TEST_SIG_B64.to_string(),
+        }
+    }
+
+    /// Bounded real-time fuse for events that MUST happen (the relay client
+    /// itself runs on the injected virtual clock — nothing here sleeps).
+    async fn relay_wait(fuse: Duration, mut pred: impl FnMut() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + fuse;
+        loop {
+            if pred() {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "condition not met within fuse: {what}");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Full relay lifecycle through the REAL apply path: first sync starts
+    /// the client (Ready over the fake loopback server), a second sync with
+    /// the SAME urls only refreshes the token, expiry goes fail-closed and
+    /// VISIBLE (token_valid:false + not ready), a fresh relay sync recovers
+    /// it with ZERO real waiting (injected clock), and `stop_relay` leaves
+    /// the terminal Dead state with the server observing the close.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_lifecycle_ready_refresh_expire_and_revoke() {
+        use crate::relay_client::{RelayState, TokenValidity};
+        use crate::relay_testserver::{RelayTestServer, TestServerConfig};
+
+        let server = RelayTestServer::start(TestServerConfig::default()).await.expect("fake relay");
+        let clock = Arc::new(crate::relay_client::VirtualClock::new(RELAY_TEST_EPOCH));
+        let shared =
+            Arc::new(ConnectorShared::new(false, Some(relay_test_attach(clock.clone()))));
+
+        // before the first relay sync: enabled, idle, nothing dialed
+        let st = shared.relay_status();
+        assert!(st.enabled);
+        assert_eq!(st.state, "disconnected");
+        assert!(st.urls.is_empty());
+        assert!(!st.token_valid);
+
+        // first sync: near-expiry token (60 virtual seconds)
+        let urls = vec![format!("rel://127.0.0.1:{}", server.addr().port())];
+        shared.relay_apply(&relay_servers(urls.clone(), RELAY_TEST_EPOCH + 60));
+        relay_wait(Duration::from_secs(5), || {
+            shared.relay_status().state == "ready"
+        }, "ready after first relay sync")
+        .await;
+        let st = shared.relay_status();
+        assert!(st.token_valid, "token starts valid");
+        assert_eq!(st.urls, urls);
+        assert_eq!(st.last_error_class, None);
+        assert_eq!(st.frames_tx, 1, "exactly the Auth frame so far");
+        assert_eq!(st.frames_rx, 1, "exactly the AuthResponse so far");
+        assert_eq!(st.transport_bytes, 0);
+        assert_eq!(server.stats().connections_accepted, 1);
+
+        // same-urls sync → token refresh ONLY (spec §6.1: no reconnect)
+        shared.relay_apply(&relay_servers(urls.clone(), RELAY_TEST_EPOCH + 600));
+        let st = shared.relay_status();
+        assert!(st.token_valid);
+        assert_eq!(server.stats().connections_accepted, 1, "no reconnect on token refresh");
+
+        // expiry: the session is killed fail-closed; status makes it VISIBLE
+        clock.advance(Duration::from_secs(700));
+        relay_wait(Duration::from_secs(5), || {
+            !shared.relay_status().token_valid
+        }, "token_valid flips false at expiry")
+        .await;
+        relay_wait(Duration::from_secs(5), || {
+            shared.relay_status().state == "reconnecting"
+        }, "relay unusable while the token stays expired")
+        .await;
+        assert!(!shared.relay_ready(), "expired token ⇒ relay NOT ready (fail-closed)");
+        assert_eq!(
+            shared.relay_handle().expect("client present").token_validity(),
+            TokenValidity::Expired { expired_for: Duration::from_secs(100) }
+        );
+
+        // new sync carries a fresh RelayServers → recovery, zero real wait
+        shared.relay_apply(&relay_servers(urls.clone(), RELAY_TEST_EPOCH + 700 + 3_600));
+        relay_wait(Duration::from_secs(5), || {
+            shared.relay_status().state == "ready" && shared.relay_status().token_valid
+        }, "relay recovered after the token refresh")
+        .await;
+        assert!(shared.relay_ready());
+        assert_eq!(server.stats().frames_rx(crate::relay::MSG_CLOSE), 0);
+
+        // revoke: stop_relay → terminal Dead + the server observed the close
+        shared.stop_relay();
+        relay_wait(Duration::from_secs(5), || {
+            shared.relay_status().state == "dead"
+        }, "relay state reaches Dead after teardown")
+        .await;
+        relay_wait(Duration::from_secs(5), || {
+            server.stats().frames_rx(crate::relay::MSG_CLOSE) == 1
+        }, "the server observed exactly one relay Close frame")
+        .await;
+        let accepted = server.stats().connections_accepted;
+        assert_eq!(accepted, 2, "initial + post-refresh session, never more");
+        assert!(!shared.relay_ready(), "Dead relay is not ready");
+        assert_eq!(shared.relay_handle().unwrap().state(), RelayState::Dead);
+        server.shutdown().await;
+    }
+
+    /// The default-route gate through the LIVE readiness path with relay:
+    /// (a) relay Ready (+ WG session up, ICE not nominated) → allowed with
+    /// the relay-ready reason token; (c) the same view WITHOUT a relay
+    /// client stays HELD — ICE Failed is never silently reachable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_ready_opens_the_default_route_gate_only_via_the_relay_path() {
+        use crate::relay_testserver::{RelayTestServer, TestServerConfig};
+
+        struct ReadyWg;
+        impl WgPeerApplier for ReadyWg {
+            fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+            fn tunnel_ready(&self) -> bool {
+                true
+            }
+        }
+
+        let server = RelayTestServer::start(TestServerConfig::default()).await.expect("fake relay");
+        let clock = Arc::new(crate::relay_client::VirtualClock::new(RELAY_TEST_EPOCH));
+        let shared =
+            Arc::new(ConnectorShared::new(false, Some(relay_test_attach(clock.clone()))));
+        // an ICE orchestrator holding ONE peer that never connects:
+        // peers=1, reachable=0 → the ICE view is NOT nominated.
+        let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
+            wg: Arc::new(ReadyWg),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        })));
+        ice.lock_poison().set_peers(&["UEVFUjA=".to_string()]);
+        let _ = shared.ice.set(ice.clone());
+
+        // (c) WITHOUT relay: ICE not nominated + no relay → gate HELD
+        let (allowed, reason) = shared.decide_default_route(false, &ReadyWg, false, 1);
+        assert!(!allowed, "(c) ICE Failed without relay must hold the default route");
+        assert_eq!(reason, "default-route-held:data-plane-not-ready", "{reason}");
+
+        // bring the relay to Ready via the real apply path
+        let urls = vec![format!("rel://127.0.0.1:{}", server.addr().port())];
+        shared.relay_apply(&relay_servers(urls, RELAY_TEST_EPOCH + 3_600));
+        relay_wait(Duration::from_secs(5), || {
+            shared.relay_status().state == "ready"
+        }, "relay Ready")
+        .await;
+
+        // (a) relay Ready + WG session up + ICE not nominated → allowed,
+        // with the relay path NAMED in the reason token
+        let (allowed, reason) = shared.decide_default_route(false, &ReadyWg, false, 1);
+        assert!(allowed, "(a) relay Ready must enable the gate");
+        assert_eq!(reason, DEFAULT_ROUTE_REASON_RELAY_READY, "{reason}");
+        // ... and the force flag still wins over both (unchanged semantics)
+        let (allowed, reason) = shared.decide_default_route(true, &ReadyWg, false, 1);
+        assert!(allowed);
+        assert_eq!(reason, "default-route-forced:debug-opt-in-black-hole-risk", "{reason}");
+        // (b) ICE nominated (empty peers view) → the tunnel token,
+        // relay-independent
+        ice.lock_poison().set_peers(&[]);
+        let (allowed, reason) = shared.decide_default_route(false, &ReadyWg, true, 1);
+        assert!(allowed, "(b) ICE nominated must enable the gate");
+        assert_eq!(reason, "default-route-allowed:peers-registered-and-tunnel-ready", "{reason}");
+
+        // the disabled shape: status renders enabled:false and nothing else
+        let plain = ConnectorShared::new(false, None);
+        let st = plain.relay_status();
+        assert!(!st.enabled);
+        assert_eq!(st.state, "disabled");
+        assert_eq!(st.to_json(), "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\"last_error_class\":null}");
+        assert!(matches!(config::parse_document(&st.to_json()), Ok(Json::Obj(_))));
+        server.shutdown().await;
+    }
+
+    /// `rels://` with no usable trust root is refused typed BEFORE any wire
+    /// byte: the relay client starts, never dials, and the status document
+    /// exposes `tls-required` — with the loopback server observing ZERO
+    /// connections (no plaintext downgrade, T0 Q3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_rels_without_root_is_refused_and_never_downgrades() {
+        use crate::relay_testserver::{RelayTestServer, TestServerConfig};
+
+        let server = RelayTestServer::start(TestServerConfig::default()).await.expect("fake relay");
+        let clock = Arc::new(crate::relay_client::VirtualClock::new(RELAY_TEST_EPOCH));
+        // materials with tls: None == a plaintext management transport (no
+        // ca_pem): exactly what the connector would build for rels:// here.
+        let shared =
+            Arc::new(ConnectorShared::new(false, Some(relay_test_attach(clock.clone()))));
+        shared.relay_apply(&relay_servers(
+            vec![format!("rels://127.0.0.1:{}", server.addr().port())],
+            RELAY_TEST_EPOCH + 3_600,
+        ));
+        relay_wait(Duration::from_secs(5), || {
+            let st = shared.relay_status();
+            st.last_error_class == Some("tls-required".to_string()) && st.state == "reconnecting"
+        }, "typed TlsRequired refusal surfaced in status, client held")
+        .await;
+        let st = shared.relay_status();
+        assert_eq!(st.state, "reconnecting", "held, never downgraded");
+        assert_eq!(st.urls, vec![format!("rels://127.0.0.1:{}", server.addr().port())]);
+        relay_wait(Duration::from_secs(5), || {
+            server.stats().connections_accepted == 0
+        }, "the server must NEVER see a connection (no downgrade)")
+        .await;
+        // even long past any dial budget, nothing ever connects
+        clock.advance(Duration::from_secs(600));
+        relay_wait(Duration::from_secs(5), || {
+            server.stats().connections_accepted == 0
+        }, "still no connection after clock movement")
+        .await;
+        server.shutdown().await;
     }
 }
