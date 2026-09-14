@@ -1154,7 +1154,12 @@ fn send_stun_probe(
     wait_ms: u64,
 ) -> Result<(FiveTuple, Option<([u8; 4], u16)>), String> {
     use crate::stun::{build_binding_request, parse_binding_response, TransactionId};
-    let sock = std::net::UdpSocket::bind("127.0.0.1:0")
+    // Wildcard bind, NOT 127.0.0.1 (regression found in device-validation
+    // run 2): a loopback-bound probe socket makes every send to a real,
+    // non-loopback outer endpoint fail with EINVAL ("stun probe send:
+    // Invalid argument") because the kernel rejects a source address that is
+    // invalid for the route. The wildcard lets the kernel pick a valid source.
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| format!("probe socket bind: {e}"))?;
     let src = sock.local_addr().map_err(|e| format!("probe socket addr: {e}"))?;
     let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(wait_ms.max(1))));
@@ -2349,5 +2354,31 @@ mod tests {
         assert!(!EndpointKind::Relay.required());
         assert_eq!(EndpointKind::Signal.proto(), "tcp");
         assert_eq!(EndpointKind::Stun.proto(), "udp");
+    }
+
+    #[test]
+    fn stun_probe_reaches_a_non_loopback_local_endpoint() {
+        // Regression (device-validation run 2): the probe socket used to bind
+        // 127.0.0.1, so sending to any real, non-loopback outer endpoint
+        // failed with EINVAL — surfaced by the CLI as
+        // "stun probe send: Invalid argument (os error 22)". A wildcard bind
+        // lets the kernel pick a source address valid for the route.
+        let routing_probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("bind");
+        // No packets are sent: connect() only asks the kernel which source
+        // address it WOULD use towards a routable destination.
+        if routing_probe.connect("192.0.2.1:9").is_err() {
+            return; // no route information on this host: nothing to assert
+        }
+        let local = routing_probe.local_addr().expect("local addr").ip();
+        if local.is_loopback() || local.is_unspecified() {
+            return; // host without a routable non-loopback IPv4: skip
+        }
+        let dst: SocketAddr = (local, 9).into();
+        let out = send_stun_probe(dst, [0x5au8; 12], 50);
+        assert!(
+            out.is_ok(),
+            "stun probe to the non-loopback local address {dst} must not fail at send: {:?}",
+            out.err()
+        );
     }
 }
