@@ -109,3 +109,59 @@ T0 要求的最小采集（官方客户端 × 同一实例）：
 - 生产实例对接实测（零代码确认）：`~/harmonyos-signing/netbird-n1bdisc/records/prod-management-relay-probe-20260914.md`（+`.sha256`，`is_evidence:false`）。
 - 线格式规格：`docs/relay-client-spec-20260914.md`（上游 `file:line` 依据）。
 - 本增量的设备侧证据将写入 `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260914-0002/`（现 AUTH 有效期至 2026-09-15T14:29+08:00）。
+
+## 附录：测试偶发（flake）治理记录（2026-09-14）
+
+### A1. 发现方式与标准变更
+
+- N13 推进期间的一次 **100 轮全量压测**发现 8/100 轮失败，涉及 5 个不同测试；而同样的测试**单测隔离 220 次全部通过**。隔离通过 + 并行失败，判定依据就是**跨测试并行干扰**（fd 号复用、瞬态状态、时序假设），不是测试自身逻辑错。
+- 由此修订"已验证"标准：**3 连跑不足以支撑"已验证"**；改用 `flake-check.sh` 压测 **≥30 轮**，且任何失败必须带**测试名与断言原文**（只有"failed"计数不算证据）。
+- 反向推论同样成立：**单测隔离复现失败 ≠ 无 bug**——隔离通过只证明无自身逻辑错，不能排除并行干扰。
+
+### A2. 工具：`client/core/flake-check.sh`
+
+- 用法：`bash client/core/flake-check.sh N`（N 为轮数，默认 20）。每轮循环跑一次全量 `cargo test --offline --locked --color never`。
+- 失败轮的完整日志按**每轮唯一时间戳**保留在 `target/flake-check-<时间戳>-round-<N>.log`，**不覆盖**（重跑不再毁证据，此改进属 `57be0da`）；脚本就地抓出失败测试名与 panic 断言原文。
+- 汇总"N 轮中有几轮失败"；只要有失败轮即**非零退出码**，可直接作验收门。
+
+### A3. 两轮修复的事实清单
+
+**第一轮 `ebd9d30`（fd 号复用 + 熔断过紧 + 瞬态断言）**
+
+1. `host_sockets::fd_bag_closes_every_kept_fd`（3/100）：断言依赖 fd 号，Drop 关闭后并行测试可能复用同号。修法是 `F_DUPFD_CLOEXEC` **自适应高位**复制：候选 `1<<20 / 1<<18 / 1<<16 / 1<<14` 从高到低，选中后仍断言 floor ≥ `1<<12`，全失败则 panic 并打印 ulimit，绝不退回低号。本环境实测 `ulimit -Sn` / `ulimit -Hn` 均为 524288（soft=hard）→ `1<<20` 正确落空（超上限）、**实际选中 `1<<18`**。Drop 后的 EBADF 断言强度不变。
+2. 熔断加固 5s→60s：relay_client_e2e / relay_e2e / relay_connector_e2e 的 FUSE，connector / mgmt_socket / signal_session / sync_stream 的 `wait_for`，signal_channel 的 `wait_accept` / `wait_dead`，以及 tests/management_grpc.rs 的测试局部 CONNECT/REQUEST_TIMEOUT。这些是**挂起保护**而非时延断言——放宽它们不改变任何通过条件；生产侧 `connector.rs` 的 `DEFAULT_CONNECT_TIMEOUT=5s` / `DEFAULT_REQUEST_TIMEOUT=10s` **未动**（可 grep 复核）。
+3. 两处 relay_client_e2e 瞬态断言纠正（语义变更）：`server_disconnect` 谓词补 `dial_attempts==2` 并等待 server accepted==2；`auth_rejection` 旧断言 `[2s,4s]` 会在第三条 8s backoff 落盘的微秒瞬态失效（push 发生在每轮 arm 时刻，`src/relay_client.rs` 约 1672 行附近），改为等第三条落盘后断言 `[2,4,8]`——既确定又更强。
+4. 同轮新增 `flake-check.sh`（见 A2）。
+
+**第二轮 `57be0da`（A–E 五项残余）**
+
+- **A** `wg_e2e::endpoint_change_switches_the_path_and_keeps_traffic_flowing`（原 1/30）：真根因是**真实 fd 双重 close → 号复用误杀**。ICE 测试里 `fed_a.raws[0]` 被 `Node::adopt`（`src/wg_device.rs` 的 `WgDevice::adopt`，fd 归 Node、由其 drop 关闭）与测试本地的 `FedSocks::drop`（`tests/wg_e2e.rs`）**双重所有**；第二次 close 落在已被内核回收复用的 fd 号上，杀掉并行测试刚 bind 的 socket——探针实测 `sendto` 返回 EBADF errno=9。（提交信息曾写的"断言假设/端口复用"原假设被实证推翻：`assert_ne!(new_port, old_port)` 在 500+ 观察轮从未命中，旧 socket 未关时内核不复用该端口。）修法：`raws.remove(0)` 所有权移交，不变量"每 fd 恰一 owner"；未放宽任何断言。复现需 4 进程并发的整二进制压力：修复前 320 轮 2 失败 → 修复后 320 轮 0 失败。
+- **B/C** `connector::napi_global_start_status_stop_roundtrip` 与 `mgmt_socket::start_with_socket_refusal_gate_and_feed`：瞬态状态断言改为**可达集不变量** `state ∈ {connecting, reconnecting}`（首拨构造性拒连，Connecting→Lost→Reconnecting 合法随时发生；该窗口内 Connected 需 login 成功、Failed 需退避预算耗尽，均不可达）。
+- **D** `signal_channel`：`wait_dead`（及 `recv`）的每次阻塞读包进 `timeout(FUSE=60s)`——原 deadline 只约束"有帧继续到达"的循环，对静默阻塞的读永不触发，曾导致一次 22 分钟静默挂起。注释写明：guard 触发即应视为真实缺陷上报。
+- **E** `tun_fd_contract::backpressure_partial_write_budget_then_drain_completes`：判定为**测试时序假设**而非生产缺陷——读者退出条件 `seen >= total` 把 phase-1 残留（约 212,992B）计入，读者可在写者还剩尾部时退出，残留 + truesize 开销使 POLLOUT 在预算内永不就绪（实测 `Backpressure{written:292352}` 与模型自洽）。修法：读者改为 drain 到 `grand_total`（两次写之和），断言改 `assert_eq!(seen, grand_total)` 的**字节守恒**；生产侧行为不变（对端停读 → 预算耗尽返回）。⚠️ `57be0da` 的提交信息在此处被截断，本段的收尾结论系依据提交 diff（tun_fd_contract.rs 的 `grand_total` 改动与其注释）重建。
+- 同轮 `flake-check.sh` 补日志保留改动（每轮唯一时间戳，见 A2）。
+
+### A4. 验收数字与复核命令
+
+以下数字均应能用仓库内命令复核；未标注"本机复跑"的来自两个提交的记录（`git log --format=%B -n 2 ebd9d30`、`git log --format=%B -n 1 57be0da`）。
+
+| 数字 | 含义 | 复核命令 |
+|---|---|---|
+| 8/100 轮失败、5 个测试 | 治理前的压测发现 | 提交记录；可用 `bash client/core/flake-check.sh 100` 复现量级 |
+| 隔离 220 次全过 | 证明非自身逻辑错 | 提交记录 |
+| fd_bag 3/100、endpoint_change 1/30 等 | 各项修复前的失败率 | 提交记录 |
+| 修复前 320 轮 2 失败 → 修复后 320 轮 0 | A 项修复的压力对照（4 进程并发） | 提交记录；重跑需同型并发压测 |
+| 修复后 flake-check 0/30 | 两轮修复后的验收 | `bash client/core/flake-check.sh 30`（本节写入时未重跑 30 轮，数字取自提交记录） |
+| 29 个测试目标、455 passed / 0 failed | 当前全量基线 | `cargo test --offline --locked`（**2026-09-14 本机复跑确认**） |
+| ulimit soft=hard=524288、选中 `1<<18` | fd 高位复制的环境依据 | `ulimit -Sn; ulimit -Hn`（已实测）；选中值可读 `src/host_sockets.rs` 候选表推算 |
+| 生产超时 5s/10s 未动 | 挂起保护非时延断言 | `grep -n DEFAULT_CONNECT_TIMEOUT client/core/src/connector.rs` |
+
+### A5. 已知残余与存疑（如实保留）
+
+1. **endpoint_change 的每轮具体断言路径属推断**：EBADF（errno=9）有探针实测，修复后压测零复现，但"哪一轮哪个断言被误杀"的逐轮路径没有逐轮日志可指证，属合理推断。
+2. **`tun_fd_contract::close_once_double_close_and_use_after_close`**：仅在 4 倍超压下 2/100 失败（ledger diff 挑错 inst 行），修复另行进行。**截至本记录写入（HEAD=`57be0da`，工作区干净）该修复尚未提交**——`git log -S close_once_double_close_and_use_after_close -- client/core` 仅命中其创建提交 `5ca19dd`；若读到此记录时已有新提交，以 git 历史为准。
+3. **生产侧是否有真实竞态**：无可指证证据。两轮修复全部落在测试侧（除 A 项所有权不变量本身是真实代码合同的澄清），不据此断言生产代码有或无竞态。
+
+### A6. 结论
+
+flake 是**证据质量问题**，不是"测试琐事"：8% 的失败率意味着任何一次"通过"都可能是运气，基于它的验收、回归与 T0 裁决全部失去意义。压测轮数、失败证据（测试名+断言原文）与所有权/可达集级别的根因修复，是把"通过"重新变回证据的最低配置。
