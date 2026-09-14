@@ -107,3 +107,30 @@ E1（stock Go loader/runtime 门）转为 dormant，既有判定保持原绑定�
 6. **回退条款**：若日后决定改回宽松许可，必须先移除或重写一切 AGPL 派生内容，并回到 T0 重新裁定；已发布版本不可撤回。
 7. **未验证声明**：应用市场条款与 HAP 分发下的源码提供机制**尚未核对**；上游 v0.76.3 的逐文件许可映射与 SBOM **尚未重做**——本节及任何登记不得被读作已完成上述合规。
 8. **不放宽其它绑定条款**：§二（含其第 10 条：门范围、顺序、阈值、SLO 或补丁预算变化回到 T0）、§三（N6 前不得开启产品实现）、§五 均未被本条修改；`docs/n1b-disc-gate-plan.md` 冻结判据不受影响。
+
+## 追加登记：N2-H 判据设立与生效（2026-09-14，只追加不改写）
+
+> 本节 2026-09-14 追加：只追加、不改写上文任何内容。§二 第 3/4 条与 §五「零预授权」段的既有文字**一字未动**；本节登记一个新判据（N2-H）的**设立与生效**，其适用条件严格受限（见「适用边界」），不修改、不削弱上述任何绑定条款的效力。
+
+- **依据（可校验）**：
+  - **用户批准**：2026-09-14 用户直接指示「批准」（本条即该决定的登记；提案文本见下，与 T0 草案逐字一致）。
+  - **跨厂商 T0 裁定**：`~/harmonyos-signing/netbird-n1bdisc/reviews/t0-n2-protect-substitution-ruling-20260914.md`，sha256 `54c88d2713273bf1b4c0a56a7f6088699d9322eaf70a4da9b386cd2228f025b9`（sidecar 就地 `sha256sum -c` 可校验）。
+  - **事实依据**（真机实测，AUTH `AUTH-DIAG-DEVICE-VALIDATION-20260913-0001`，均在仓B `diagnostics/<auth-id>/`）：
+    `device-run-3.hilog.log` sha256 `e72e10553d6cbc333b8feea17193aeb34fa696d7b1bc10aaa0345d7703b28997`、
+    `device-run-6.hilog.log` sha256 `00a001f11007d27b4b3f560d591297acc60814816469075e3bd66d046ea4eb7b`、
+    `device-run-7.hilog.log` sha256 `8bbca9e6b2c1fd499815f30bb1b06a409e8179dbd6cacc118d787f903ac46781`。
+    关键事实：`VpnConnection.protect(fd)` 与 `protectProcessNet()` **均被平台内部 `ohos.permission.MANAGE_VPN` 校验拦住**（`Caller is not allowed, need sys permissive` / `permission check failed`），且两个 API 的 promise **不 settle**；该权限在 AGC「ACL权限」列表中**不存在**；manifest 声明它会使**安装失败**（`code:9568289 grant request permissions failed`）。
+    即 §二 第 3 条的**前置取证门在本平台结论为「无普通第三方可用的逐 socket bypass API」**。
+
+- **判据 N2-H（本平台替代判据，逐字采用 T0 草案）**：
+  「N2-H：普通第三方公开逐 socket bypass 不可用时，可采用端点派生的最小主机路由排除。VPN 创建及每次连接/重连前，完整冻结并枚举 management、signal、relay、ICE/STUN/TURN、WG peer、DNS 外层端点；全部排除后方可建连，解析失败、端点变化或观测不符均 fail-closed。以 TUN 包级负证据、隧道正控及端点侧投递/源地址证明实际旁路；API 返回值不作证据；撤销后复验。原 E5 登记 deviation，结论仅为 N2-H pass。」
+
+- **适用边界（不得外推）**：
+  1. 仅在「逐 socket bypass 无公开 API」结论成立的目标平台上适用；官方 SDK 一旦出现逐 socket 机制，**优先回到 §二 第 4 条原路径**。
+  2. 结论只可写 **`N2-H pass`**；**禁止**出现 `protect pass`、`N2 pass`、`等同逐 socket protect`、`waived`、`N/A`。
+  3. 证据与登记中必须把**逐 socket protect 义务记为 `UNSAT/未满足`**，并写明原因、替代机制、适用端点/前缀/拓扑/时间窗、oracle 结果与残余风险；不得以任何措辞掩盖。
+  4. 残余范围必须明示（至少）：域名/CDN、DNS 上游、动态候选、重连换址、非 LAN/NAT 拓扑、宽前缀旁路、IPv6。
+  5. 本判据**不改变** §五 两条：「任何 bundle 排除**测量**须新 T0 决定」「own-bundle 排除仅可作纵深附加，不得单独构成 pass」。
+
+- **工具与执行**：N2-H 证据由 `nbinterop isolation-check`（`client/core/src/n2h.rs`）产出，字段含 `frozen_endpoints`/`probes`/`tun_negative`/`tunnel_positive_control`/`endpoint_side`/`counters`/`verdict`/`residual_scope`/`unsat_note`，并自带反例（注入泄漏必须判 `fail`、正控缺失必须判 `inconclusive`）。
+- **未完成声明（不得被读作已达成）**：**设备侧 N2-H 证据尚未产出**；在产出并经独立审查前，本平台 N2 相关结论一律为 `UNSAT + 替代测量进行中`，且**开发期偏离**（`--ps protectDeviation route-exclusion`，日志带 `is_evidence=false|not_a_gate_pass=true`）不构成任何门证据。
