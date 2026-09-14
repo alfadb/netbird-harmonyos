@@ -149,6 +149,7 @@ pub mod net;
 // N5c: per-peer ICE orchestration — signal OFFER/ANSWER/候选 exchange,
 // selected pair → WG endpoint landing, per-peer states (injected clock).
 pub mod peer_conn;
+pub mod relay;
 // N4a: signal service channel (peer discovery / candidate exchange) — gRPC
 // bidi stream over the protected socket seam, per-peer NaCl envelopes.
 pub mod signal;
@@ -165,3 +166,4 @@ pub mod util;
 // UDP socket + TUN dup) — the real driver behind the connector WG seam.
 pub mod wg_device;
 pub mod wg;
+pub mod ws;
