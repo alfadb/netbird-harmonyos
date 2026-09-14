@@ -3583,10 +3583,14 @@ mod tests {
         assert!(json.contains("\"session_expires_at_unix\":1700000000"), "{json}");
         assert!(json.contains("\"logout_ok\":null"), "{json}");
         // N5c: the per-peer ICE summary rides the status document
+        // (unknown_signal = signal frames dropped for an unmatched sender key;
+        // device run 3 stalled the whole negotiation with this as the ONLY
+        // symptom, so it is part of the frozen contract).
         assert!(
             json.contains(
                 "\"ice\":{\"peers\":2,\"idle\":0,\"gathering\":0,\"checking\":0,\"connected\":1,\
                  \"disconnected\":0,\"failed\":1,\"endpoints_applied\":1,\"reachable\":1,\
+                 \"unknown_signal\":0,\
                  \"last_error\":{\"class\":\"network\",\"status\":0}}"
             ),
             "{json}"
