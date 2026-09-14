@@ -101,6 +101,21 @@
 //! there too. Presence/subscription state does NOT survive a reconnect —
 //! D must re-`open_conn` after observing `state() == Ready` again.
 //!
+//! ## Increment-D2: the WG bearer (shipped — `RelayWgCarrier`)
+//!
+//! The D2 write side is [`RelayWgCarrier`]: one lane = one remote peer, the
+//! device's egress-carrier seam delivers encapsulated WG datagrams straight
+//! into [`RelayClient::send_to_peer`]. MTU registration (spec §7.2): the
+//! Transport frame adds 38B (2B header + 36B id), WS adds 2–4B + 4B mask,
+//! then TLS/TCP/IP — typical ≈44–46B per packet; the per-packet ceiling is
+//! [`MAX_TRANSPORT_PAYLOAD`] = 8782 (8820 − 38), refused typed as
+//! `FrameTooLarge` BEFORE any wire byte. WG MTUs 1280/1420 encapsulate to
+//! ≈1326/1466B — far inside the ceiling. The read side stays
+//! [`RelayClient::recv`] → `(sender PeerId, datagram)`; the connector's
+//! relay-carrier pump reverses the sender id to the WG public key and
+//! feeds the device through its carrier-ingress seam (the matching rule is
+//! documented in `crate::wg_device`, N13-D2).
+//!
 //! ## Sensitive discipline
 //!
 //! Token signature/payload bytes never appear in `Debug`/logs/errors
@@ -1487,6 +1502,110 @@ impl RelayClient {
     /// Idempotent.
     pub fn stop(&self) {
         let _ = self.shared.stop_tx.send(true);
+    }
+
+    /// N13-D2: whether `other` is a handle to the SAME running client (the
+    /// connector's carrier orchestrator uses this to swap clients only when
+    /// a start/restart actually produced a new one).
+    pub fn same_client(&self, other: &RelayClient) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N13-D2: the WG egress carrier handle (the wgProxy write side)
+// ---------------------------------------------------------------------------
+
+/// One relay lane seen from the WG device: forwards encapsulated WG
+/// datagrams for ONE peer through [`RelayClient::send_to_peer`] — the
+/// write half of the upstream wgProxy mapping (spec §7.1), behind the
+/// device's [`crate::wg_device::WgEgressCarrier`] seam. Pure Rust handle —
+/// it holds NO fd (fd contract: the relay WSS/TCP socket is native-owned by
+/// the relay client session; the platform TUN raw fd is never touched here
+/// and stays exclusively the shell's, closed only by `VpnConnection.destroy()`).
+///
+/// Failure shape (never silently dropped): every refusal of `send_to_peer`
+/// surfaces typed —
+/// - [`RelayClientError::FrameTooLarge`]: payload > [`MAX_TRANSPORT_PAYLOAD`]
+///   (8782B, spec §7.2 — the WG-over-relay MTU ceiling; encapsulation
+///   overhead 38B frame + WS (2–4B + 4B mask) + TLS/TCP ⇒ ≈44–46B/packet
+///   typical, so 1280/1420 WG MTUs are safe);
+/// - [`RelayClientError::NotReady`]: session not Ready (reconnecting /
+///   stopped) — the device counts and moves on (WG retransmits);
+/// - [`RelayClientError::PeerOffline`] / [`RelayClientError::Backpressured`]:
+///   destination known-offline / bounded queue full (upstream semantics).
+#[derive(Clone)]
+pub struct RelayWgCarrier {
+    client: RelayClient,
+    peer: PeerId,
+}
+
+impl RelayWgCarrier {
+    /// A lane to `peer` over `client`. The caller (connector's relay
+    /// carrier pump) guarantees `open_conn` succeeded for this peer — the
+    /// lane is subscribed (`PeersOnline` seen) before anything is sent.
+    pub fn new(client: RelayClient, peer: PeerId) -> Self {
+        RelayWgCarrier { client, peer }
+    }
+
+    /// The lane's relay client handle (observability: stats/state).
+    pub fn client(&self) -> &RelayClient {
+        &self.client
+    }
+
+    /// The destination peer id (= `PeerId::from_wg_pubkey_string` of the
+    /// remote WG public key, relay spec §3.2).
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer
+    }
+
+    /// Deliver one encapsulated WG datagram. Typed refusals only — see the
+    /// struct docs.
+    pub fn send_datagram(&self, datagram: &[u8]) -> Result<(), RelayClientError> {
+        self.client.send_to_peer(&self.peer, datagram)
+    }
+}
+
+impl crate::wg_device::WgEgressCarrier for RelayWgCarrier {
+    fn send_datagram(&self, datagram: &[u8]) -> Result<(), String> {
+        // Shape-token mapping only: class + shapes, never payload bytes and
+        // never token material.
+        self.send_datagram(datagram)
+            .map_err(|e| format!("relay-{}", relay_class_token(e.class())))
+    }
+
+    fn kind(&self) -> &'static str {
+        "relay-wss"
+    }
+}
+
+/// Stable lowercase token for a relay error class (carrier reason strings;
+/// shape-only diagnostics).
+fn relay_class_token(class: RelayErrorClass) -> &'static str {
+    match class {
+        RelayErrorClass::Url => "url",
+        RelayErrorClass::TlsRequired => "tls-required",
+        RelayErrorClass::Tls => "tls",
+        RelayErrorClass::Dial => "dial",
+        RelayErrorClass::DialTimeout => "dial-timeout",
+        RelayErrorClass::WsHandshake => "ws-handshake",
+        RelayErrorClass::Ws => "ws",
+        RelayErrorClass::Codec => "codec",
+        RelayErrorClass::FrameTooLarge => "frame-too-large",
+        RelayErrorClass::AuthRejected => "auth-rejected",
+        RelayErrorClass::AuthTimeout => "auth-timeout",
+        RelayErrorClass::AuthProtocol => "auth-protocol",
+        RelayErrorClass::ServerClosed => "server-closed",
+        RelayErrorClass::Io => "io",
+        RelayErrorClass::KeepaliveTimeout => "keepalive-timeout",
+        RelayErrorClass::TokenExpired => "token-expired",
+        RelayErrorClass::ConnectionLost => "connection-lost",
+        RelayErrorClass::OpenConnTimeout => "open-conn-timeout",
+        RelayErrorClass::SubscribeDuplicate => "subscribe-duplicate",
+        RelayErrorClass::PeerOffline => "peer-offline",
+        RelayErrorClass::Backpressured => "backpressured",
+        RelayErrorClass::NotReady => "not-ready",
+        RelayErrorClass::Stopped => "stopped",
     }
 }
 

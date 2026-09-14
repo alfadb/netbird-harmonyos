@@ -106,6 +106,7 @@
 //! [`ErrorClass`]（分类 + 状态码，**无** server/transport message）；
 //! hilog 行只含状态与计数；私钥在解析后不保留任何原始字节形式。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -377,6 +378,43 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     /// device must not send anything for the peer (fail-closed; no silent
     /// riding of a dead path).
     fn recycle_endpoint(&self, _pub_key_b64: &str) {}
+    /// N13-D2: attach the peer's NON-UDP egress carrier — the relay bearer
+    /// (upstream wgProxy equivalent). The carrier is a pure Rust handle
+    /// (`crate::relay_client::RelayWgCarrier` → `send_to_peer`); no fd
+    /// crosses this seam (fd contract: the relay WSS socket is native-owned
+    /// by the relay client; the platform TUN raw fd stays exclusively the
+    /// shell's, closed only by `VpnConnection.destroy()`). Default:
+    /// UNSUPPORTED and loud — a seam that cannot host a lane must fail the
+    /// relay carrier attach, never fake it (fail-closed, mirrors
+    /// `attach_egress_socket`).
+    fn attach_carrier(
+        &self,
+        _pub_key_b64: &str,
+        _carrier: std::sync::Arc<dyn crate::wg_device::WgEgressCarrier>,
+    ) -> Result<(), String> {
+        Err("wg-carrier-unsupported".to_string())
+    }
+    /// N13-D2: detach the peer's relay carrier (relay revoked/unavailable,
+    /// connector teardown). After this the peer's only remaining path is a
+    /// nominated ICE endpoint — or none (fail-closed).
+    fn detach_carrier(&self, _pub_key_b64: &str) {}
+    /// N13-D2: detach EVERY relay carrier (relay removed from sync /
+    /// connector worker end). No-op by default.
+    fn detach_all_carriers(&self) {}
+    /// N13-D2: can this seam host relay lanes at all? The connector's
+    /// carrier pump only starts (and only opens relay lanes) for capable
+    /// seams — a registry-style test seam must never cause relay
+    /// subscriptions it cannot use.
+    fn carrier_capable(&self) -> bool {
+        false
+    }
+    /// N13-D2: feed one datagram that arrived over the relay carrier —
+    /// the device's carrier-match rules apply (sender key authoritative;
+    /// `crate::wg_device` module docs「入向匹配映射」). Returns datagrams
+    /// produced in reply.
+    fn handle_carrier_inbound(&self, _datagram: &[u8], _pub_key_b64: &str, _now_ms: u64) -> usize {
+        0
+    }
 }
 
 /// In-process WG peer registry — the N3-5..N6 production default, kept as
@@ -1117,6 +1155,15 @@ struct ConnectorShared {
     /// gone by then, so it can never be reused). Lock order: `inner` BEFORE
     /// `relay` — never the reverse.
     relay: Mutex<RelaySlot>,
+    /// N13-D2: the WG relay-carrier orchestrator (created at the first relay
+    /// client start; only when the WG seam is carrier-capable).
+    relay_carrier: std::sync::OnceLock<std::sync::Arc<RelayCarrier>>,
+    /// N13-D2: the WG seam the carrier lanes attach to (set at spawn, with
+    /// the relay opt-in only).
+    relay_wg: std::sync::OnceLock<std::sync::Arc<dyn WgPeerApplier>>,
+    /// N13-D2: the runtime the carrier pump task spawns on (set at spawn,
+    /// with the relay opt-in only).
+    relay_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
 }
 
 /// N13-D1: relay slot contents (urls = the configured set, public routing
@@ -1159,6 +1206,9 @@ impl ConnectorShared {
             relay_enabled,
             relay_attach,
             relay: Mutex::new(RelaySlot::default()),
+            relay_carrier: std::sync::OnceLock::new(),
+            relay_wg: std::sync::OnceLock::new(),
+            relay_runtime: std::sync::OnceLock::new(),
         }
     }
 
@@ -1501,11 +1551,39 @@ impl ConnectorShared {
     /// 接」): called from `ConnectorHandle::stop()` AND when the connector
     /// worker ends by itself — the relay client must never outlive the
     /// connector. The handle is kept so status can render `Dead`.
+    /// N13-D2: the relay-carrier pump and every attached lane are torn down
+    /// with it (no reachable bearer, no residual outbound connection).
     fn stop_relay(&self) {
-        let slot = self.relay.lock_poison();
-        if let Some(client) = slot.client.as_ref() {
-            client.stop();
-            hilog::emit("connector: relay client stopped (connector teardown)");
+        {
+            let slot = self.relay.lock_poison();
+            if let Some(client) = slot.client.as_ref() {
+                client.stop();
+                hilog::emit("connector: relay client stopped (connector teardown)");
+            }
+        }
+        if let Some(carrier) = self.relay_carrier.get() {
+            carrier.shutdown();
+        }
+    }
+
+    /// N13-D2 — arm the WG relay-carrier pump after a relay client start
+    /// (called from the sync path; idempotent). No-op unless the WG seam is
+    /// carrier-capable: a seam that cannot host lanes must never cause
+    /// relay subscriptions it cannot use (fail-closed honesty).
+    fn relay_carrier_client_started(&self, client: crate::relay_client::RelayClient) {
+        let (Some(wg), Some(rt)) = (self.relay_wg.get(), self.relay_runtime.get()) else {
+            return;
+        };
+        if !wg.carrier_capable() {
+            return;
+        }
+        if self.relay_carrier.get().is_none() {
+            let _ = self.relay_carrier.set(RelayCarrier::new(wg.clone()));
+        }
+        let carrier = self.relay_carrier.get().expect("carrier slot just set");
+        if !carrier.has_client(&client) {
+            carrier.attach_client(client);
+            carrier.ensure_pump(rt);
         }
     }
 
@@ -1598,10 +1676,23 @@ impl ConnectorShared {
             // and the device path behaves exactly as before). Relay rides
             // netbird_config, so this happens BEFORE the map-serial gate
             // (every sync refreshes, upstream engine.go:1185-1214).
+            // N13-D2: a started relay client arms the WG carrier pump (the
+            // relay bearer over the WG seam); management dropping the relay
+            // advertisement detaches every lane (fail-closed).
             if self.relay_enabled {
                 match cfg.relay.as_ref() {
-                    Some(r) => self.relay_apply(r),
-                    None => self.relay_drop("relay-removed-from-sync"),
+                    Some(r) => {
+                        self.relay_apply(r);
+                        if let Some(client) = self.relay_handle() {
+                            self.relay_carrier_client_started(client);
+                        }
+                    }
+                    None => {
+                        self.relay_drop("relay-removed-from-sync");
+                        if let Some(carrier) = self.relay_carrier.get() {
+                            carrier.detach_all();
+                        }
+                    }
                 }
             }
         } else {
@@ -1686,14 +1777,19 @@ impl ConnectorShared {
         // N5c: reconcile the per-peer ICE orchestrator with the map's
         // connectable peers (allowed_ips only — that is the data plane this
         // client can route to).
+        // N13-D2: the same key set is the relay-carrier lane universe (the
+        // carrier pump opens lanes exactly for these peers).
+        let connectable_keys: Vec<String> = map
+            .peers
+            .iter()
+            .filter(|p| !p.allowed_ips.is_empty())
+            .map(|p| p.wg_pub_key.clone())
+            .collect();
         if let Some(ice) = self.ice.get() {
-            let keys: Vec<String> = map
-                .peers
-                .iter()
-                .filter(|p| !p.allowed_ips.is_empty())
-                .map(|p| p.wg_pub_key.clone())
-                .collect();
-            ice.lock_poison().set_peers(&keys);
+            ice.lock_poison().set_peers(&connectable_keys);
+        }
+        if let Some(carrier) = self.relay_carrier.get() {
+            carrier.set_peers(&connectable_keys);
         }
         // WG data plane: register remote + offline peers (identity +
         // allowed_ips only — module limitation statement).
@@ -1721,6 +1817,329 @@ impl ConnectorShared {
             map.peers.len(),
             map.routes.len()
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// N13-D2: the WG relay-carrier orchestrator (lanes + inbound pump)
+// ---------------------------------------------------------------------------
+
+/// Observability of the relay-carrier orchestration (counters only — peer
+/// keys are PUBLIC material but even they are not rendered here; the
+/// per-carrier byte/packet counts live on the WG device stats).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelayCarrierStats {
+    /// `open_conn` calls that saw `PeersOnline` (§4.1).
+    pub lanes_open_ok: u64,
+    /// `open_conn` failures (typed; retried on the next pump pass).
+    pub lanes_open_failed: u64,
+    /// Lane handles actually attached to the WG seam.
+    pub attach_ok: u64,
+    /// WG seam carrier-attach refusals (e.g. unregistered peer — config bug).
+    pub attach_err: u64,
+    /// Lane detachments (revocation / relay-down fail-closed / stop).
+    pub detach_ok: u64,
+    /// Inbound relay datagrams fed to the WG device (matched senders).
+    pub frames_in: u64,
+    /// Reply datagrams the device produced while processing them.
+    pub frames_in_replies: u64,
+    /// Inbound relay datagrams whose sender matched NO registered peer
+    /// (dropped + counted — never fed to the device).
+    pub frames_in_unknown: u64,
+    /// Last `open_conn` failure class (stable token, diagnostics only).
+    pub last_open_error: Option<&'static str>,
+}
+
+/// N13-D2: the relay↔WG bridge for one connector — upstream's wgProxy
+/// orchestrator in minimal form. Duties:
+///
+/// - **lanes**: for every connectable peer (network-map keys) hold one
+///   subscribed relay lane: `open_conn` (waits for `PeersOnline`, §4.1) →
+///   attach a [`crate::relay_client::RelayWgCarrier`] to the WG seam. The
+///   device's own dispatch keeps the bearer priority (`Relay < ICE`):
+///   attaching a lane NEVER diverts traffic that has an ICE-selected path.
+/// - **inbound pump**: `RelayClient::recv()` frames are reversed from the
+///   sender peer id to the WG public key (the peer id IS derived from it,
+///   relay spec §3.2 — the matching rule is documented in
+///   `crate::wg_device`, N13-D2「入向匹配映射」) and fed to the device's
+///   carrier ingress. Unknown senders are dropped + counted.
+/// - **fail-closed lifecycle**: relay not Ready ⇒ lanes detached (a dead
+///   relay must not look like a path); peer removed from the map ⇒ lane
+///   detached; `shutdown()` (connector stop / worker end) ⇒ pump aborted +
+///   all lanes detached — no reachable relay bearer survives the connector.
+///
+/// fd contract: this struct holds NO fd. The lane handles are pure Rust
+/// objects over the relay client; the relay WSS/TCP socket is native-owned
+/// by the relay client session and outlives nothing (D1 teardown); the
+/// platform TUN raw fd is never touched here (closed only by the shell's
+/// `VpnConnection.destroy()`).
+pub struct RelayCarrier {
+    /// The live relay client (set at the first start / refreshed when the
+    /// URL set changes — a swap aborts the old pump and detaches lanes:
+    /// presence does not survive a relay reconnect, D1 semantics).
+    client: Mutex<Option<crate::relay_client::RelayClient>>,
+    wg: std::sync::Arc<dyn WgPeerApplier>,
+    /// Connectable peer keys ↔ their relay peer ids (the reverse map for
+    /// the inbound pump; rebuilt from every network-map sync).
+    peers: Mutex<Vec<(String, crate::relay::PeerId)>>,
+    /// Currently attached lanes: peer key → the carrier handle the WG seam
+    /// received (identity for idempotent attach/detach bookkeeping).
+    attached: Mutex<HashMap<String, std::sync::Arc<crate::relay_client::RelayWgCarrier>>>,
+    stats: Mutex<RelayCarrierStats>,
+    /// The production pump task (spawned on the connector runtime).
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl RelayCarrier {
+    /// An unarmed orchestrator over `wg` (host/test entry: arm it with
+    /// [`RelayCarrier::attach_client`] once a relay client exists; the
+    /// connector arms it automatically from the sync path).
+    pub fn new(wg: std::sync::Arc<dyn WgPeerApplier>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(RelayCarrier {
+            client: Mutex::new(None),
+            wg,
+            peers: Mutex::new(Vec::new()),
+            attached: Mutex::new(HashMap::new()),
+            stats: Mutex::new(RelayCarrierStats::default()),
+            task: Mutex::new(None),
+        })
+    }
+
+    fn bump(&self, f: impl FnOnce(&mut RelayCarrierStats)) {
+        f(&mut self.stats.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+
+    /// Snapshot of the orchestration counters.
+    pub fn stats(&self) -> RelayCarrierStats {
+        *self.stats.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Currently attached lane count (observability).
+    pub fn lane_count(&self) -> usize {
+        self.attached.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Whether `client` is the client this orchestrator currently serves.
+    fn has_client(&self, client: &crate::relay_client::RelayClient) -> bool {
+        self.client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|c| c.same_client(client))
+            .unwrap_or(false)
+    }
+
+    /// (Re)arm with a relay client: detaches all lanes (presence does not
+    /// survive a relay reconnect) and aborts any pump of a PREVIOUS client.
+    pub fn attach_client(&self, client: crate::relay_client::RelayClient) {
+        self.detach_all();
+        if let Some(h) = self.task.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            h.abort();
+        }
+        *self.client.lock().unwrap_or_else(PoisonError::into_inner) = Some(client);
+        hilog::emit("connector: relay carrier armed with the relay client");
+    }
+
+    /// The connectable peer set from the last network map (lane universe).
+    /// Lanes of peers that left the map are detached immediately. Public:
+    /// host/test drivers of the orchestrator feed the same map-derived key
+    /// set the sync path does.
+    pub fn set_peers(&self, keys: &[String]) {
+        {
+            let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+            *peers = keys
+                .iter()
+                .map(|k| (k.clone(), crate::relay::PeerId::from_wg_pubkey_string(k)))
+                .collect();
+        }
+        let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+        let stale: Vec<String> = attached
+            .keys()
+            .filter(|k| !keys.contains(k))
+            .cloned()
+            .collect();
+        for key in stale {
+            attached.remove(&key);
+            self.wg.detach_carrier(&key);
+            self.bump(|s| s.detach_ok += 1);
+            hilog::emit("connector: relay carrier lane detached (peer left the map)");
+        }
+    }
+
+    /// Spawn the production pump task (idempotent) on `rt`.
+    fn ensure_pump(self: &std::sync::Arc<Self>, rt: &tokio::runtime::Handle) {
+        let mut task = self.task.lock().unwrap_or_else(PoisonError::into_inner);
+        if task.is_some() {
+            return;
+        }
+        *task = Some(rt.spawn(relay_carrier_pump(self.clone())));
+        hilog::emit("connector: relay carrier pump started");
+    }
+
+    /// One `open_conn` + attach for `key` if no lane is attached yet.
+    /// `true` = a lane is attached (maybe from an earlier pass).
+    pub async fn ensure_lane(self: &std::sync::Arc<Self>, key: &str) -> bool {
+        if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(key) {
+            return true;
+        }
+        let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        else {
+            return false;
+        };
+        let pid = crate::relay::PeerId::from_wg_pubkey_string(key);
+        match client.open_conn(&pid).await {
+            Ok(()) => {
+                let lane = std::sync::Arc::new(
+                    crate::relay_client::RelayWgCarrier::new(client, pid),
+                );
+                match self.wg.attach_carrier(key, lane.clone()) {
+                    Ok(()) => {
+                        self.attached
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .insert(key.to_string(), lane);
+                        self.bump(|s| {
+                            s.lanes_open_ok += 1;
+                            s.attach_ok += 1;
+                        });
+                        hilog::emit("connector: relay carrier lane attached (peers-online)");
+                        true
+                    }
+                    Err(e) => {
+                        self.bump(|s| s.attach_err += 1);
+                        hilog::emit(&format!(
+                            "connector: relay carrier attach failed (seam: {e})"
+                        ));
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                self.bump(|s| {
+                    s.lanes_open_failed += 1;
+                    s.last_open_error = Some(relay_error_class_token(e.class()));
+                });
+                false
+            }
+        }
+    }
+
+    /// Open every missing lane (the pump's per-pass fan-out).
+    async fn ensure_lanes(self: &std::sync::Arc<Self>) {
+        let keys: Vec<String> = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            // sequential: bounded by open_conn's own injected-clock budget
+            let _ = self.ensure_lane(&key).await;
+        }
+    }
+
+    /// Detach every lane (relay revoked / down / teardown). The device then
+    /// routes only via a nominated ICE path — or nothing (fail-closed).
+    fn detach_all(&self) {
+        let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+        if attached.is_empty() {
+            return;
+        }
+        for (key, _) in attached.drain() {
+            self.wg.detach_carrier(&key);
+            self.bump(|s| s.detach_ok += 1);
+        }
+        hilog::emit("connector: relay carrier lanes detached");
+    }
+
+    /// Pump ONE inbound relay frame into the WG device. `false` = the relay
+    /// client is gone/stopped (the pump exits on that).
+    pub async fn pump_once(&self) -> bool {
+        let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        else {
+            return false;
+        };
+        let Some((sender, payload)) = client.recv().await else {
+            return false;
+        };
+        self.ingest(&sender, &payload);
+        true
+    }
+
+    /// Reverse-map the sender peer id to the registered WG public key and
+    /// feed the device's carrier ingress. Unknown senders: dropped+counted.
+    pub fn ingest(&self, sender: &crate::relay::PeerId, payload: &[u8]) {
+        let key = {
+            let peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+            peers
+                .iter()
+                .find(|(_, pid)| pid == sender)
+                .map(|(k, _)| k.clone())
+        };
+        match key {
+            Some(key) => {
+                let replies = self
+                    .wg
+                    .handle_carrier_inbound(payload, &key, crate::sys::mono_ms());
+                self.bump(|s| {
+                    s.frames_in += 1;
+                    s.frames_in_replies += replies as u64;
+                });
+            }
+            None => {
+                self.bump(|s| s.frames_in_unknown += 1);
+            }
+        }
+    }
+
+    /// Teardown: pump aborted + every lane detached (connector stop / worker
+    /// end / host-driven teardown). Idempotent.
+    pub fn shutdown(&self) {
+        if let Some(h) = self.task.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            h.abort();
+        }
+        self.detach_all();
+    }
+}
+
+/// The production pump loop: lanes open while (and only while) the relay is
+/// Ready; inbound frames are pumped between passes. Exits when the client
+/// stops (recv drained to `None`) or the state machine reaches `Dead` —
+/// teardown additionally aborts this task.
+async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
+    loop {
+        let Some(client) = carrier
+            .client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        match client.state() {
+            crate::relay_client::RelayState::Dead => return,
+            crate::relay_client::RelayState::Ready => carrier.ensure_lanes().await,
+            // relay down: no lane may look like a path (fail-closed)
+            _ => carrier.detach_all(),
+        }
+        tokio::select! {
+            // pump inbound frames as they arrive; `false` = client gone
+            kept = async {
+                loop {
+                    if !carrier.pump_once().await {
+                        return false;
+                    }
+                }
+            } => {
+                if !kept {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(core::time::Duration::from_millis(500)) => {
+                // periodic re-check: lanes to open / relay state changes
+            }
+        }
     }
 }
 
@@ -2768,6 +3187,13 @@ impl ConnectorHandle {
         // dropped (the device default keeps EVERY relay seam detached).
         let relay_attach = relay_enabled.then_some(relay_attach).flatten();
         let shared = Arc::new(ConnectorShared::new(force_default_route, relay_attach));
+        // N13-D2: with the opt-in, the carrier orchestrator needs the WG
+        // seam + the runtime (used from the sync path when the first relay
+        // client starts). Without the opt-in nothing is stored.
+        if relay_enabled {
+            let _ = shared.relay_wg.set(wg.clone());
+            let _ = shared.relay_runtime.set(runtime.clone());
+        }
         shared.set_running(true);
         shared.lock().started_at_unix = Some(unix_now());
 
@@ -3037,6 +3463,19 @@ impl ConnectorHandle {
             return None;
         }
         self.shared.relay_handle()
+    }
+
+    /// N13-D2: the relay-carrier orchestration counters, when the carrier
+    /// is armed (relay enabled + a carrier-capable WG seam + a relay client
+    /// started). `None` = relay disabled / no capable seam / not started.
+    pub fn relay_carrier_stats(&self) -> Option<RelayCarrierStats> {
+        self.shared.relay_carrier.get().map(|c| c.stats())
+    }
+
+    /// N13-D2: currently attached relay-carrier lane count (`None` when the
+    /// carrier is not armed).
+    pub fn relay_carrier_lanes(&self) -> Option<usize> {
+        self.shared.relay_carrier.get().map(|c| c.lane_count())
     }
 }
 
@@ -4200,6 +4639,7 @@ mod tests {
                 rx_bytes_to_tun: 800,
                 dropped_no_route: 1,
                 decrypt_errors: 2,
+                ..Default::default()
             },
             recreate: RecreateStatus {
                 required: false,
@@ -4236,12 +4676,16 @@ mod tests {
         // N7: the WG data-plane summary (feeds / device / REAL readiness +
         // device counters — no key material). N2-H: byte counters ride along
         // so counter reconciliation can read connector_status() directly.
+        // N13-D2: the relay-carrier counters are APPENDED after the pre-D2
+        // fields (positional contract; zero here — the fixture has no lane).
         assert!(
             json.contains(
                 "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
                  \"peers_with_session\":1,\"handshakes\":3,\"tx_packets\":9,\"tx_bytes\":900,\
                  \"rx_packets\":8,\"rx_bytes_to_tun\":800,\
-                 \"dropped_no_route\":1,\"decrypt_errors\":2}"
+                 \"dropped_no_route\":1,\"decrypt_errors\":2,\"carrier_tx_packets\":0,\
+                 \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
+                 \"direct_restores\":0}"
             ),
             "{json}"
         );
@@ -4295,7 +4739,9 @@ mod tests {
                 "\"wg\":{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
                  \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
                  \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
-                 \"dropped_no_route\":0,\"decrypt_errors\":0}"
+                 \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
+                 \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
+                 \"direct_restores\":0}"
             ),
             "default wg summary must render: {empty}"
         );

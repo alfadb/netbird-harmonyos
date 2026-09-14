@@ -107,6 +107,53 @@
 //! - **回收**：ICE 断开/失败 → [`WgDevice::recycle_endpoint`]：endpoint
 //!   置空（无路径可发 = fail-closed）、关 egress dup、清握手战役——绝不
 //!   静默沿用旧路径（上游 `RemoveEndpointAddress`，conn.go:531）。
+//!
+//! ## N13-D2：relay 作为第二条 WG 承载（等价上游 wgProxy，`Relay < ICE`）
+//!
+//! 上游把 relayed `net.Conn` 交给 wgProxy，伪造 `127.1.x.x` 假 UDP endpoint
+//! 注册进 userspace bind（spec §7.1，`proxy.go:204-226`）；本实现的等价
+//! seam 更直接：**不伪造地址**，把「路径选择」收进设备的一个裁决点
+//! [`WgDevice::dispatch`]——
+//!
+//! - **优先级 `Relay < ICE`（最小忠实子集）**：peer 的 ICE endpoint 在位
+//!   ⇒ 出向一律走 UDP 直连（egress dup 优先，语义与 N11 完全一致）；
+//!   endpoint 不在位（无选中/已回收 = ICE 无提名或 Failed）且已注入
+//!   [`WgEgressCarrier`] ⇒ 被封装的 WG 报文经载体交付（生产实现 =
+//!   `crate::relay_client::RelayWgCarrier` → `RelayClient::send_to_peer`，
+//!   即上游 wgProxy 的写侧）。ICE 重新提名（`set_endpoint`）⇒ 下一包起
+//!   切回直连；`recycle_endpoint` **不清除**载体 ⇒ 自动回落 relay。
+//!   切换可观测：[`WgDeviceStats::carrier_takeovers`]（出向首次经载体，
+//!   每次 UDP→载体 episode 计 1）、[`WgDeviceStats::direct_restores`]
+//!   （载体→直连）+ 有界日志（`N13_WG|direct->carrier` /
+//!   `N13_WG|carrier->direct`）。
+//! - **载体故障不阻塞直连**：endpoint 在位时 dispatch 根本不触碰载体；
+//!   载体拒绝（容量/未就绪/超限）是**类型化**失败（`Err(reason)`），计
+//!   [`WgDeviceStats::carrier_rejects`] 并有界记日志——绝不静默丢弃。
+//! - **入向匹配映射**（与 `handle_udp` 的源地址匹配等价）：UDP 域里身份
+//!   = `src == endpoint`；relay 域里没有 UDP 五元组，身份由帧自带——
+//!   Transport 帧的 36B 字段是**发送方 peer id**（§4.2，服务端改写），
+//!   而 peer id = `PeerId::from_wg_pubkey_string(对端 WG 公钥 base64)`
+//!   （relay spec §3.2）。编排层（connector 的 `RelayCarrier`）持有
+//!   「注册 peer 公钥 → peer id」反查表，把 sender id 反查回 WG 公钥后调
+//!   [`WgDevice::handle_carrier`]，按 `key_b64` 定位 peer——与
+//!   `handle_udp` 共用同一段收包体（解封装 → TUN / 回包 / 会话建立观察），
+//!   既有 UDP 语义零改动。选择「公钥匹配」而非上游的假地址注册：假地址
+//!   需要一个额外的状态位区分真假 endpoint，公钥匹配则把 relay 帧的既有
+//!   身份字段直接用足。
+//! - **MTU / 封装开销**（登记，spec §7.2）：Transport 帧 = 2B 头 + 36B id
+//!   ⇒ 38B 固定开销，再套 WS 客户端帧（2–4B 头 + 4B mask）+ TLS/TCP/IP
+//!   ⇒ 典型每包 ≈ 44–46B。`send_to_peer` 单包上限 **8782B**
+//!   （8820 − 38）；设备侧报文物理上限 [`WG_BUF`] = 2048B，恒在限内——
+//!   超限载荷只能在载体句柄处出现，且被 `RelayClientError::FrameTooLarge`
+//!   类型化拒绝（见 `relay_client` 模块文档）。对 MTU 的影响：1280/1420
+//!   的 WG MTU 均安全（1420 封装后 ≈ 1466B ≪ 8782）。
+//! - **fd 合同（N13-D2 / N13 plan §4 重验项）**：relay 承载**不持有、不
+//!   close 任何平台 fd**——[`WgEgressCarrier`] 是纯 Rust 对象（relay
+//!   client 句柄），relay 的 WSS/TCP socket 是 native 自建（同 management
+//!   通道，不经 `VpnConnection.protect`），其生命周期只随 relay client 的
+//!   会话；平台 TUN 原始 fd 的关闭权**仅属**壳侧 `VpnConnection.destroy()`
+//!   ——本模块（含载体路径）只经 [`TunFd`]/dup 副本接触 fd，载体挂载/
+//!   拆除/`connector_stop()` 都不会触碰那个号码。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -225,6 +272,23 @@ pub struct WgDeviceStats {
     pub send_errors: u64,
     /// TUN write failures for decapsulated plaintext.
     pub tun_write_errors: u64,
+    // -- N13-D2 relay-carrier counters (independent of the UDP counters
+    //    above: relay bytes never appear in tx_*/rx_* UDP accounting and
+    //    vice versa, so the two carriers stay reconcilable separately) --
+    /// Encapsulated datagrams delivered via the injected non-UDP egress
+    /// carrier (relay) — disjoint from `tx_packets`.
+    pub carrier_tx_packets: u64,
+    /// Encapsulated bytes delivered via the carrier.
+    pub carrier_tx_bytes: u64,
+    /// Typed carrier refusals (backpressure / not-ready / frame too large).
+    /// Counted + logged — never silently dropped (WG retransmits).
+    pub carrier_rejects: u64,
+    /// Outbound episodes that STARTED on the carrier (first dispatch with
+    /// no ICE endpoint after a non-carrier state — the UDP→relay takeover).
+    pub carrier_takeovers: u64,
+    /// Outbound episodes that returned to the ICE-selected UDP path after a
+    /// carrier episode (the relay→direct restore on ICE nomination).
+    pub direct_restores: u64,
 }
 
 /// Read-only per-peer snapshot (public key is PUBLIC material).
@@ -240,6 +304,11 @@ pub struct WgPeerStatus {
     /// N11: local address of the attached egress socket (the ICE selected
     /// pair's local candidate) — `None` until WG rides the selected path.
     pub egress_local: Option<([u8; 4], u16)>,
+    /// N13-D2: a non-UDP egress carrier (relay) is injected for the peer.
+    pub carrier_attached: bool,
+    /// N13-D2: the peer's outbound currently leaves via the carrier (last
+    /// dispatch had no ICE endpoint) — the observable bearer source.
+    pub on_carrier: bool,
 }
 
 /// One `handle_udp` outcome (observation surface for tests/pumps).
@@ -251,6 +320,31 @@ pub struct WgInbound {
     pub wrote_tun: usize,
     /// Response datagrams produced and sent (handshake response / flush).
     pub sent: usize,
+}
+
+// ---------------------------------------------------------------------------
+// N13-D2: non-UDP egress carrier seam (the relay bearer injection point)
+// ---------------------------------------------------------------------------
+
+/// 出向载体 seam：一条**非 UDP socket** 的 WG 外层承载（生产实现 =
+/// `crate::relay_client::RelayWgCarrier`，经 `RelayClient::send_to_peer`
+/// 发出；测试可注入内存桩）。
+///
+/// 合同：
+/// - `send_datagram` 收到的是**已封装**的 WG 报文（boringtun 输出），实现
+///   方只做交付，不再加解密；
+/// - `Ok(())` = 已接受上承载（relay 协议无投递 ack —— 这不是送达确认）；
+/// - `Err(reason)` = **类型化拒绝**（背压 / 会话未就绪 / 帧超限等，reason
+///   为稳定 shape token）：设备计 `carrier_rejects` 并有界记日志，绝不静默
+///   丢弃（WG 自带重传）；
+/// - 实现方**不得持有或关闭任何 fd**（fd 合同：relay 承载是纯 Rust 对象，
+///   模块文档 N13-D2 节）；
+/// - `Send + Sync`：设备在数据面泵线程里同步调用。
+pub trait WgEgressCarrier: Send + Sync + 'static {
+    /// Deliver one encapsulated WG datagram. See the trait contract above.
+    fn send_datagram(&self, datagram: &[u8]) -> Result<(), String>;
+    /// Bearer shape token for logs/diagnostics (e.g. `"relay-wss"`).
+    fn kind(&self) -> &'static str;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +375,13 @@ struct WgPeer {
     last_init_ms: Option<u64>,
     /// Last outbound activity (data or keepalive), keepalive anchor.
     last_outbound_ms: Option<u64>,
+    /// N13-D2: injected non-UDP egress carrier (relay). Dropped with the
+    /// peer; `remove_carrier` detaches explicitly (relay unavailable /
+    /// teardown). Never an fd — a pure Rust handle (fd contract).
+    carrier: Option<Arc<dyn WgEgressCarrier>>,
+    /// N13-D2: the bearer the peer's outbound LAST left by (`true` = the
+    /// carrier). Drives the takeover/restore switch counters in `dispatch`.
+    on_carrier: bool,
 }
 
 impl Drop for WgPeer {
@@ -296,6 +397,21 @@ impl Drop for WgPeer {
 impl WgPeer {
     fn stats(&self) -> (i64, u64, u64) {
         self.tunnel.stats()
+    }
+
+    fn status(&self) -> WgPeerStatus {
+        let (hs, _, _) = self.stats();
+        WgPeerStatus {
+            pub_key_b64: self.key_b64.clone(),
+            endpoint: self.endpoint,
+            allowed_ips: self.allowed_ips.clone(),
+            session_established: self.session_established,
+            expired: self.expired,
+            last_handshake_s: hs,
+            egress_local: self.egress_local,
+            carrier_attached: self.carrier.is_some(),
+            on_carrier: self.on_carrier,
+        }
     }
 }
 
@@ -474,6 +590,8 @@ impl WgDevice {
                         first_init_ms: None,
                         last_init_ms: None,
                         last_outbound_ms: None,
+                        carrier: None,
+                        on_carrier: false,
                     });
                 }
             }
@@ -552,7 +670,11 @@ impl WgDevice {
     /// `conn.go:531` on ICE disconnect): endpoint cleared (nothing can be
     /// sent — fail-closed), egress dup closed, handshake campaign reset.
     /// The WG session/keys are kept (rekeying on the next path is normal WG
-    /// semantics); `tunnel_ready` semantics are unchanged.
+    /// semantics); `tunnel_ready` semantics are unchanged. N13-D2: an
+    /// attached relay carrier is deliberately KEPT — this is exactly the
+    /// ICE-lost → relay fallback transition (`dispatch` routes the next
+    /// outbound through the carrier; a fresh handshake campaign re-arms on
+    /// the next tick because `has_path` stays true).
     pub fn recycle_endpoint(&mut self, pub_key_b64: &str) {
         let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
             return;
@@ -569,6 +691,63 @@ impl WgDevice {
         if had_path {
             emit("N11_WG|endpoint-recycled");
         }
+    }
+
+    /// N13-D2 — inject the peer's non-UDP egress carrier (relay bearer, the
+    /// wgProxy equivalent). Idempotent upsert: a re-attach replaces the
+    /// previous carrier object. Unknown peers are REJECTED (fail-closed,
+    /// same rule as `set_endpoint`). The carrier is a pure Rust handle —
+    /// no fd crosses this seam (module docs, N13-D2 fd contract).
+    pub fn set_carrier(&mut self, pub_key_b64: &str, carrier: Arc<dyn WgEgressCarrier>) -> Result<(), String> {
+        let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
+            return Err(format!("peer '{pub_key_b64}' is not registered"));
+        };
+        let replaced = self.peers[idx].carrier.is_some();
+        self.peers[idx].carrier = Some(carrier);
+        emit(&format!(
+            "N13_WG|carrier-attach|kind={}|replaced={replaced}",
+            self.peers[idx]
+                .carrier
+                .as_ref()
+                .map(|c| c.kind())
+                .unwrap_or("?")
+        ));
+        Ok(())
+    }
+
+    /// N13-D2 — detach the peer's relay carrier (relay unavailable / lane
+    /// revoked / teardown). After this the peer has whatever path remains —
+    /// the ICE endpoint if nominated, otherwise NO path (fail-closed, the
+    /// pre-D2 behavior). `true` when a carrier was actually removed.
+    pub fn remove_carrier(&mut self, pub_key_b64: &str) -> bool {
+        let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
+            return false;
+        };
+        if self.peers[idx].carrier.take().is_some() {
+            // the bearer source resets with the carrier: the next dispatch
+            // (direct OR a re-attached carrier) counts as a fresh transition
+            self.peers[idx].on_carrier = false;
+            emit("N13_WG|carrier-detach");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// N13-D2 — detach every peer's relay carrier (bulk teardown).
+    pub fn remove_all_carriers(&mut self) {
+        for peer in self.peers.iter_mut() {
+            if peer.carrier.take().is_some() {
+                peer.on_carrier = false;
+            }
+        }
+        emit("N13_WG|carrier-detach-all");
+    }
+
+    /// Whether the peer has ANY outbound path: the ICE-selected UDP path
+    /// (endpoint) or an injected carrier (relay).
+    fn has_path(&self, idx: usize) -> bool {
+        self.peers[idx].endpoint.is_some() || self.peers[idx].carrier.is_some()
     }
 
     /// Route + encapsulate + send one device-originated frame. Returns true
@@ -624,7 +803,44 @@ impl WgDevice {
         };
         out.peer_matched = true;
         self.stats.rx_packets += 1;
-        self.process_datagram(idx, datagram, src, &mut out);
+        self.ingest(idx, datagram, InboundPath::Udp(src), now_ms, &mut out);
+        out
+    }
+    /// N13-D2 — process one inbound datagram that arrived over the peer's
+    /// non-UDP egress carrier (relay). Matching rule (module docs, N13-D2
+    /// 「入向匹配映射」): the carrier layer already identified the SENDER —
+    /// the relay Transport frame's 36B field is the sender peer id, which
+    /// the orchestration layer reverses to the WG public key. Matching is
+    /// therefore by registered `key_b64` — the identity-domain equivalent
+    /// of `handle_udp`'s `src == endpoint` rule, sharing the same ingest
+    /// body (decapsulate → TUN / reply / session observation). Unknown keys
+    /// are dropped + counted (`unknown_peer_drops`), never processed.
+    pub fn handle_carrier(&mut self, datagram: &[u8], pub_key_b64: &str, now_ms: u64) -> WgInbound {
+        let mut out = WgInbound::default();
+        let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
+            self.stats.unknown_peer_drops += 1;
+            return out;
+        };
+        out.peer_matched = true;
+        self.stats.rx_packets += 1;
+        self.ingest(idx, datagram, InboundPath::Carrier, now_ms, &mut out);
+        out
+    }
+
+    /// Shared inbound body of BOTH receive paths (UDP + carrier): decrypt →
+    /// TUN / reply, then the session-establishment observation + queued
+    /// packet flush. The reply path follows the arrival path for UDP (back
+    /// to `src`, the pre-D2 rule) and the bearer priority for carrier
+    /// arrivals (`dispatch`).
+    fn ingest(
+        &mut self,
+        idx: usize,
+        datagram: &[u8],
+        path: InboundPath,
+        now_ms: u64,
+        out: &mut WgInbound,
+    ) {
+        self.process_datagram(idx, datagram, path, out);
 
         // Session-establishment observation (boringtun stats flips to >= 0
         // the moment a handshake completes) + queued-packet flush.
@@ -643,7 +859,6 @@ impl WgDevice {
             }
             out.sent += self.flush_queued(idx, now_ms);
         }
-        out
     }
 
     /// Poll + read + `send_from_tun` (device-originated frames). Non-blocking:
@@ -716,8 +931,9 @@ impl WgDevice {
                 self.peers[idx].expired = true;
                 emit("N6_WG_DEVICE|session-expired");
             }
-            // handshake campaign (endpoint present, no live session)
-            if self.peers[idx].endpoint.is_some() && !self.peers[idx].session_established {
+            // handshake campaign (a path exists — ICE endpoint or relay
+            // carrier (N13-D2) — but no live session)
+            if self.has_path(idx) && !self.peers[idx].session_established {
                 let campaign = self.peers[idx].first_init_ms;
                 match campaign {
                     Some(t0) if now_ms.saturating_sub(t0) >= cfg.hs_deadline_ms => {
@@ -749,16 +965,15 @@ impl WgDevice {
                 sent += usize::from(self.send_keepalive(idx, now_ms));
             }
             // boringtun internal timers (rekey/cookie housekeeping on its own
-            // real clock); whatever datagram becomes due goes out now
+            // real clock); whatever datagram becomes due goes out now over
+            // the dispatch-selected bearer (N13-D2: counted when it was
+            // silently dropped pre-endpoint before)
             let mut out = [0u8; WG_BUF];
             let (op, len) = { self.peers[idx].tunnel.tick(&mut out) };
-            if op == OP_NETWORK && len > 0 {
-                if let Some(ep) = self.peers[idx].endpoint {
-                    let datagram = out[..len].to_vec();
-                    let fd = self.egress_fd_of(idx);
-                    if self.send_to(fd, &datagram, ep) {
-                        sent += 1;
-                    }
+            if op == OP_NETWORK && len > 0 && self.has_path(idx) {
+                let datagram = out[..len].to_vec();
+                if self.dispatch(idx, &datagram) {
+                    sent += 1;
                 }
             }
         }
@@ -781,8 +996,15 @@ impl WgDevice {
     // -- internals ----------------------------------------------------------
 
     /// Decrypt/process one source-matched datagram: transport data → TUN,
-    /// handshake responses/cookies → out (sent back to the source).
-    fn process_datagram(&mut self, idx: usize, datagram: &[u8], src: ([u8; 4], u16), out: &mut WgInbound) {
+    /// handshake responses/cookies → out (UDP: back to the arrival `src`;
+    /// carrier: via the bearer-priority `dispatch`).
+    fn process_datagram(
+        &mut self,
+        idx: usize,
+        datagram: &[u8],
+        path: InboundPath,
+        out: &mut WgInbound,
+    ) {
         let mut plain = [0u8; WG_BUF];
         let (op, len) = { self.peers[idx].tunnel.read(datagram, &mut plain) };
         match op {
@@ -797,13 +1019,70 @@ impl WgDevice {
                 }
             }
             OP_NETWORK if len > 0 => {
-                let fd = self.egress_fd_of(idx);
-                if self.send_to(fd, &plain[..len], src) {
+                let sent = match path {
+                    InboundPath::Udp(src) => {
+                        let fd = self.egress_fd_of(idx);
+                        self.send_to(fd, &plain[..len], src)
+                    }
+                    // reply rides the selected bearer (ICE endpoint if it
+                    // won meanwhile, the carrier otherwise)
+                    InboundPath::Carrier => self.dispatch(idx, &plain[..len]),
+                };
+                if sent {
                     out.sent += 1;
                 }
             }
             OP_ERROR => self.stats.decrypt_errors += 1,
             _ => {} // OP_DONE: keepalive/cookie absorbed
+        }
+    }
+
+    /// N13-D2 bearer dispatch — THE single egress decision point (module
+    /// docs, N13-D2): ICE endpoint present ⇒ UDP direct (egress dup first,
+    /// device socket fallback — the unchanged N11 semantics); otherwise an
+    /// injected carrier (relay) ⇒ typed delivery; neither ⇒ counted
+    /// failure (fail-closed, pre-D2 behavior). The UDP→carrier and
+    /// carrier→UDP transitions are counted + logged here.
+    fn dispatch(&mut self, idx: usize, datagram: &[u8]) -> bool {
+        if self.peers[idx].endpoint.is_some() {
+            if self.peers[idx].on_carrier {
+                self.peers[idx].on_carrier = false;
+                self.stats.direct_restores += 1;
+                emit("N13_WG|carrier->direct|ice-selected-path");
+            }
+            let ep = self.peers[idx].endpoint.expect("endpoint checked above");
+            let fd = self.egress_fd_of(idx);
+            return self.send_to(fd, datagram, ep);
+        }
+        if !self.peers[idx].on_carrier {
+            self.peers[idx].on_carrier = true;
+            self.stats.carrier_takeovers += 1;
+            emit("N13_WG|direct->carrier|no-ice-endpoint");
+        }
+        let Some(carrier) = self.peers[idx].carrier.clone() else {
+            // routed but never given any path: fail-closed, counted
+            self.stats.send_errors += 1;
+            return false;
+        };
+        match carrier.send_datagram(datagram) {
+            Ok(()) => {
+                self.stats.carrier_tx_packets += 1;
+                self.stats.carrier_tx_bytes += datagram.len() as u64;
+                true
+            }
+            Err(reason) => {
+                // typed refusal, never silent: counted + bounded log (the
+                // reason is a shape token; the payload is never logged)
+                self.stats.carrier_rejects += 1;
+                if self.stats.carrier_rejects <= 3 || self.stats.carrier_rejects % 100 == 0 {
+                    emit(&format!(
+                        "N13_WG|carrier-reject|kind={}|reason={reason}|count={}",
+                        carrier.kind(),
+                        self.stats.carrier_rejects
+                    ));
+                }
+                false
+            }
         }
     }
 
@@ -826,6 +1105,7 @@ impl WgDevice {
     /// Encapsulate + send one frame to peer `idx`. With no session,
     /// `wireguard_write` queues the frame AND produces the handshake
     /// initiation — both handled here (init bookkeeping on the campaign).
+    /// The egress bearer is picked by `dispatch` (ICE direct, else carrier).
     fn encap_and_send(&mut self, idx: usize, frame: &[u8], now_ms: u64) -> bool {
         let had_session = self.peers[idx].session_established;
         let mut ct = [0u8; WG_BUF];
@@ -839,15 +1119,7 @@ impl WgDevice {
             return false;
         }
         let datagram = ct[..len].to_vec();
-        let Some(ep) = self.peers[idx].endpoint else {
-            // routed but never given an endpoint (no ICE yet): nothing to
-            // send to; counted so the observation is honest
-            self.stats.send_errors += 1;
-            return false;
-        };
-        let fd = self.egress_fd_of(idx);
-        let sent_ok = self.send_to(fd, &datagram, ep);
-        if !sent_ok {
+        if !self.dispatch(idx, &datagram) {
             return false;
         }
         self.stats.tx_packets += 1;
@@ -860,8 +1132,9 @@ impl WgDevice {
         true
     }
 
-    /// Force a handshake initiation to the peer's endpoint (fresh ephemeral
-    /// every call — the retransmit/rekey form).
+    /// Force a handshake initiation to the peer (fresh ephemeral every
+    /// call — the retransmit/rekey form). Requires a path (`has_path`); the
+    /// bearer is picked by `dispatch`.
     fn initiate_handshake(&mut self, idx: usize, now_ms: u64) -> bool {
         let mut ct = [0u8; WG_BUF];
         let (op, len) = { self.peers[idx].tunnel.force_handshake(&mut ct) };
@@ -869,11 +1142,7 @@ impl WgDevice {
             return false;
         }
         let datagram = ct[..len].to_vec();
-        let Some(ep) = self.peers[idx].endpoint else {
-            return false;
-        };
-        let fd = self.egress_fd_of(idx);
-        if !self.send_to(fd, &datagram, ep) {
+        if !self.dispatch(idx, &datagram) {
             return false;
         }
         self.stats.tx_packets += 1;
@@ -892,6 +1161,7 @@ impl WgDevice {
     }
 
     /// Send an empty-payload transport packet (WG persistent keepalive).
+    /// The bearer is picked by `dispatch`.
     fn send_keepalive(&mut self, idx: usize, now_ms: u64) -> bool {
         let mut ct = [0u8; WG_BUF];
         let (op, len) = { self.peers[idx].tunnel.write(&[], &mut ct) };
@@ -899,11 +1169,7 @@ impl WgDevice {
             return false;
         }
         let datagram = ct[..len].to_vec();
-        let Some(ep) = self.peers[idx].endpoint else {
-            return false;
-        };
-        let fd = self.egress_fd_of(idx);
-        if !self.send_to(fd, &datagram, ep) {
+        if !self.dispatch(idx, &datagram) {
             return false;
         }
         self.stats.tx_packets += 1;
@@ -914,6 +1180,7 @@ impl WgDevice {
 
     /// Flush boringtun's queued packets after session establishment
     /// (decapsulate-empty repeat-until-Done, bounded; ffi contract).
+    /// The bearer is picked by `dispatch`.
     fn flush_queued(&mut self, idx: usize, now_ms: u64) -> usize {
         let mut sent = 0usize;
         for _ in 0..FLUSH_MAX {
@@ -923,9 +1190,7 @@ impl WgDevice {
                 break;
             }
             let datagram = ct[..len].to_vec();
-            let Some(ep) = self.peers[idx].endpoint else { break };
-            let fd = self.egress_fd_of(idx);
-            if !self.send_to(fd, &datagram, ep) {
+            if !self.dispatch(idx, &datagram) {
                 break;
             }
             self.stats.tx_packets += 1;
@@ -977,21 +1242,6 @@ impl WgDevice {
     }
 }
 
-impl WgPeer {
-    fn status(&self) -> WgPeerStatus {
-        let (hs, _, _) = self.stats();
-        WgPeerStatus {
-            pub_key_b64: self.key_b64.clone(),
-            endpoint: self.endpoint,
-            allowed_ips: self.allowed_ips.clone(),
-            session_established: self.session_established,
-            expired: self.expired,
-            last_handshake_s: hs,
-            egress_local: self.egress_local,
-        }
-    }
-}
-
 impl Drop for WgDevice {
     fn drop(&mut self) {
         // fd contract: ONLY our dup is closed here; the raw socket belongs to
@@ -1005,6 +1255,17 @@ impl Drop for WgDevice {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Which path an inbound datagram arrived by — determines where its reply
+/// leaves (N13-D2: UDP replies go back to the arrival address; carrier
+/// replies follow the bearer priority via `dispatch`).
+#[derive(Debug, Clone, Copy)]
+enum InboundPath {
+    /// Plain UDP: replies go back to the arrival address (pre-D2 rule).
+    Udp(([u8; 4], u16)),
+    /// The relay carrier: replies follow the bearer priority.
+    Carrier,
+}
 
 /// N11 (tests / host CLI): derive the x25519 PUBLIC key (base64 std) of a
 /// base64(std) secret through the same frozen boringtun export the device's
@@ -1104,6 +1365,19 @@ pub struct WgDataplaneStatus {
     pub dropped_no_route: u64,
     /// Inbound datagrams a matched peer failed to process.
     pub decrypt_errors: u64,
+    // -- N13-D2 relay-carrier counters (appended to the JSON AFTER the
+    //    pre-D2 fields; consumers read the head positionally) --
+    /// Encapsulated datagrams delivered via the relay carrier (disjoint
+    /// from `tx_packets` — the two bearers stay separately reconcilable).
+    pub carrier_tx_packets: u64,
+    /// Encapsulated bytes delivered via the relay carrier.
+    pub carrier_tx_bytes: u64,
+    /// Typed carrier refusals (counted, never silent).
+    pub carrier_rejects: u64,
+    /// UDP→relay outbound takeovers (ICE lost / never nominated).
+    pub carrier_takeovers: u64,
+    /// relay→UDP restores (ICE (re)nominated while a carrier episode ran).
+    pub direct_restores: u64,
 }
 
 impl WgDataplaneStatus {
@@ -1115,7 +1389,7 @@ impl WgDataplaneStatus {
     /// The `connector_status()` `wg` JSON object.
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             crate::util::jbool("fed_socket", self.fed_socket),
             crate::util::jbool("fed_tun", self.fed_tun),
             crate::util::jbool("device_up", self.device_up),
@@ -1128,6 +1402,11 @@ impl WgDataplaneStatus {
             crate::util::jinum("rx_bytes_to_tun", self.rx_bytes_to_tun as i64),
             crate::util::jinum("dropped_no_route", self.dropped_no_route as i64),
             crate::util::jinum("decrypt_errors", self.decrypt_errors as i64),
+            crate::util::jinum("carrier_tx_packets", self.carrier_tx_packets as i64),
+            crate::util::jinum("carrier_tx_bytes", self.carrier_tx_bytes as i64),
+            crate::util::jinum("carrier_rejects", self.carrier_rejects as i64),
+            crate::util::jinum("carrier_takeovers", self.carrier_takeovers as i64),
+            crate::util::jinum("direct_restores", self.direct_restores as i64),
         )
     }
 }
@@ -1174,8 +1453,7 @@ impl WgDeviceApplier {
     }
 }
 
-impl WgPeerApplier for WgDeviceApplier {
-    fn apply_peers(&self, peers: &[WgPeerEntry]) -> Result<(), String> {
+impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPeerEntry]) -> Result<(), String> {
         let specs: Vec<WgPeerSpec> = peers
             .iter()
             .map(|e| WgPeerSpec {
@@ -1225,6 +1503,37 @@ impl WgPeerApplier for WgDeviceApplier {
     /// N11: recycle endpoint + egress (fail-closed on ICE teardown).
     fn recycle_endpoint(&self, pub_key_b64: &str) {
         self.device.lock_poison().recycle_endpoint(pub_key_b64);
+    }
+
+    /// N13-D2: inject the peer's relay carrier into the live device.
+    fn attach_carrier(
+        &self,
+        pub_key_b64: &str,
+        carrier: std::sync::Arc<dyn WgEgressCarrier>,
+    ) -> Result<(), String> {
+        self.device.lock_poison().set_carrier(pub_key_b64, carrier)
+    }
+
+    /// N13-D2: detach the peer's relay carrier.
+    fn detach_carrier(&self, pub_key_b64: &str) {
+        self.device.lock_poison().remove_carrier(pub_key_b64);
+    }
+
+    /// N13-D2: detach EVERY carrier on the live device.
+    fn detach_all_carriers(&self) {
+        self.device.lock_poison().remove_all_carriers();
+    }
+
+    /// N13-D2: the seam CAN carry relay lanes (the device accepts carrier
+    /// injection — the capability probe behind the connector's pump start).
+    fn carrier_capable(&self) -> bool {
+        true
+    }
+
+    /// N13-D2: hand a relay-arrived datagram to the device (key-matched;
+    /// returns reply datagrams sent).
+    fn handle_carrier_inbound(&self, datagram: &[u8], pub_key_b64: &str, now_ms: u64) -> usize {
+        self.device.lock_poison().handle_carrier(datagram, pub_key_b64, now_ms).sent
     }
 }
 
@@ -1331,6 +1640,12 @@ struct FeedInner {
     /// dup-probe validated at buffer time and again at replay time (a
     /// session that closed meanwhile fails loudly, never silently).
     egress: Vec<(String, i32)>,
+    /// N13-D2: buffered relay carrier per peer (key → carrier handle),
+    /// upsert; replayed after egress and BEFORE endpoints (a replayed
+    /// endpoint fires its handshake, which must leave via the bearer that
+    /// priority selects — the device's `dispatch` decides at send time).
+    /// Carriers are pure Rust handles — no fd is stored here (fd contract).
+    carriers: Vec<(String, Arc<dyn WgEgressCarrier>)>,
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
     /// Audit counters (tests + honest observation; not in the status JSON).
@@ -1485,13 +1800,19 @@ impl WgDeviceFeed {
         if let Err(e) = app.apply_peers(&g.peers) {
             return Self::build_failed(g, &format!("replay-peers-{e}"));
         }
-        // N11: egress FIRST (the selected transport), then endpoints — a
-        // replayed endpoint fires its handshake, which must leave via the
-        // selected socket. A stale buffered fd (session closed meanwhile)
-        // surfaces as a replay failure; the next ICE selection re-attaches.
+        // N11: egress FIRST (the selected transport), then the N13-D2 relay
+        // carriers, then endpoints — a replayed endpoint fires its handshake,
+        // which must leave via the path `dispatch` selects. A stale buffered
+        // fd (session closed meanwhile) surfaces as a replay failure; the
+        // next ICE selection re-attaches.
         for (key, fd) in &g.egress {
             if let Err(e) = app.attach_egress_socket(key, *fd) {
                 emit(&format!("N11_WG_FEED|replay-egress-failed|{}", e));
+            }
+        }
+        for (key, carrier) in &g.carriers {
+            if let Err(e) = app.attach_carrier(key, carrier.clone()) {
+                emit(&format!("N13_WG_FEED|replay-carrier-failed|{}", e));
             }
         }
         for (key, addr, port) in &g.endpoints {
@@ -1541,12 +1862,15 @@ impl WgPeerApplier for WgDeviceFeed {
 
     fn clear(&self) {
         let mut g = self.inner.lock_poison();
-        // full stop semantics: buffers, endpoints, egress, fed fds and the
-        // device all go away — after a connector stop the data plane stays
-        // down until the shell re-feeds a fresh pair
+        // full stop semantics: buffers, endpoints, egress, carriers, fed fds
+        // and the device all go away — after a connector stop the data plane
+        // stays down until the shell re-feeds a fresh pair. N13-D2: the
+        // relay carriers (and through them the relay lane handles) go with
+        // it — `connector_stop()` leaves no reachable relay bearer behind.
         g.peers.clear();
         g.endpoints.clear();
         g.egress.clear();
+        g.carriers.clear();
         g.wg_socket_raw = None;
         g.tun_raw = None;
         if let Some(d) = g.device.take() {
@@ -1623,13 +1947,76 @@ impl WgPeerApplier for WgDeviceFeed {
 
     /// N11: recycle endpoint + egress on the live device; pre-device, drop
     /// the buffered endpoint/egress so a rebuild never resurrects the dead
-    /// path (fail-closed).
+    /// path (fail-closed). N13-D2: the carrier is deliberately KEPT — this
+    /// is the ICE-lost → relay fallback transition.
     fn recycle_endpoint(&self, pub_key_b64: &str) {
         let mut g = self.inner.lock_poison();
         g.endpoints.retain(|(k, _, _)| k != pub_key_b64);
         g.egress.retain(|(k, _)| k != pub_key_b64);
         if let Some(d) = g.device.as_ref() {
             d.recycle_endpoint(pub_key_b64);
+        }
+    }
+
+    /// N13-D2: inject the relay carrier into the live device now, or buffer
+    /// it for replay at build time (same upsert semantics as the egress
+    /// buffer; the handle is a pure Rust object — no fd discipline needed).
+    fn attach_carrier(
+        &self,
+        pub_key_b64: &str,
+        carrier: std::sync::Arc<dyn WgEgressCarrier>,
+    ) -> Result<(), String> {
+        let mut g = self.inner.lock_poison();
+        if let Some(d) = g.device.as_ref() {
+            return d.attach_carrier(pub_key_b64, carrier);
+        }
+        if !g.peers.iter().any(|p| p.pub_key_b64 == pub_key_b64) {
+            return Err(format!("peer '{pub_key_b64}' is not registered"));
+        }
+        if let Some(slot) = g.carriers.iter_mut().find(|(k, _)| k == pub_key_b64) {
+            slot.1 = carrier;
+        } else {
+            g.carriers.push((pub_key_b64.to_string(), carrier));
+        }
+        Ok(())
+    }
+
+    /// N13-D2: detach the relay carrier — live device AND any buffered
+    /// slot, so a rebuild never resurrects a revoked lane (fail-closed).
+    fn detach_carrier(&self, pub_key_b64: &str) {
+        let mut g = self.inner.lock_poison();
+        g.carriers.retain(|(k, _)| k != pub_key_b64);
+        if let Some(d) = g.device.as_ref() {
+            d.detach_carrier(pub_key_b64);
+        }
+    }
+
+    /// N13-D2: detach every relay carrier — live device AND the buffer.
+    fn detach_all_carriers(&self) {
+        let mut g = self.inner.lock_poison();
+        let had = !g.carriers.is_empty();
+        g.carriers.clear();
+        if let Some(d) = g.device.as_ref() {
+            d.detach_all_carriers();
+        }
+        if had {
+            emit("N13_WG_FEED|carriers-detach-all");
+        }
+    }
+
+    /// N13-D2: the feed CAN carry relay lanes (buffered pre-device, live
+    /// after adoption).
+    fn carrier_capable(&self) -> bool {
+        true
+    }
+
+    /// N13-D2: relay-arrived datagram → live device (key-matched); no
+    /// device ⇒ nothing to feed (fail-closed no-op).
+    fn handle_carrier_inbound(&self, datagram: &[u8], pub_key_b64: &str, now_ms: u64) -> usize {
+        let g = self.inner.lock_poison();
+        match g.device.as_ref() {
+            Some(d) => d.handle_carrier_inbound(datagram, pub_key_b64, now_ms),
+            None => 0,
         }
     }
 
@@ -1662,6 +2049,11 @@ impl WgPeerApplier for WgDeviceFeed {
             st.rx_bytes_to_tun = stats.rx_bytes_to_tun;
             st.dropped_no_route = stats.no_route_drops;
             st.decrypt_errors = stats.decrypt_errors;
+            st.carrier_tx_packets = stats.carrier_tx_packets;
+            st.carrier_tx_bytes = stats.carrier_tx_bytes;
+            st.carrier_rejects = stats.carrier_rejects;
+            st.carrier_takeovers = stats.carrier_takeovers;
+            st.direct_restores = stats.direct_restores;
         }
         Some(st)
     }
@@ -1728,7 +2120,9 @@ mod feed_tests {
         assert_eq!(st.to_json(), "{\"fed_socket\":false,\"fed_tun\":false,\"device_up\":false,\
              \"ready\":false,\"peers_with_session\":0,\"handshakes\":0,\"tx_packets\":0,\
              \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
-             \"dropped_no_route\":0,\"decrypt_errors\":0}");
+             \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
+             \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
+             \"direct_restores\":0}");
 
         // first feed alone: still not up
         slot.feed_tun(tun_raw).expect("tun feed");
