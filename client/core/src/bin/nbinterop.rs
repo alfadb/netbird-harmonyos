@@ -880,10 +880,28 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
             println!("{status}");
             seen.report(&status);
 
-            if mode == "peer" && status_num(&status, "wg.peers_with_session") >= 1 {
+            // The peer exits once a WG session exists — unless a probe target
+            // was asked for, in which case the session is only the MEANS and
+            // the run must stay up to keep probing (device validation: the
+            // bidirectional probe needs the peer alive on both ends).
+            if mode == "peer"
+                && o.probe_dst.is_none()
+                && status_num(&status, "wg.peers_with_session") >= 1
+            {
                 eprintln!("[nbinterop] peer goal reached: wg session established — exiting 0");
                 hs::stop_connector();
                 return hs::EXIT_OK;
+            }
+            if mode == "peer"
+                && o.probe_dst.is_some()
+                && !seen.probe_session_note
+                && status_num(&status, "wg.peers_with_session") >= 1
+            {
+                seen.probe_session_note = true;
+                eprintln!(
+                    "[nbinterop] wg session established — staying up for probes (dst={})",
+                    o.probe_dst.as_deref().unwrap_or("?")
+                );
             }
             if status_bool(&status, "terminal") {
                 let class = status_str(&status, "last_error.class").unwrap_or_default();
@@ -1103,6 +1121,8 @@ struct Milestones {
     wg_device_up: bool,
     wg_ready: bool,
     ice_connected: i64,
+    /// One-shot note for a probe run that stays up past session establish.
+    probe_session_note: bool,
 }
 
 impl Milestones {

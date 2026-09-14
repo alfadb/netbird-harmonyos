@@ -2446,9 +2446,13 @@ fn spawn_ice_pump(ice: Arc<Mutex<PeerIceOrchestrator>>, stop_flag: Arc<AtomicBoo
             let now = crate::sys::mono_ms();
             let mut orch = ice.lock_poison();
             if let Err(e) = orch.run_once(now) {
+                // Device diagnostics: the class alone ("network") cannot tell a
+                // missing protected socket from a gather/parse failure — print
+                // the message too (device run 3 was blind without it).
                 hilog::emit(&format!(
-                    "peer-conn: pump error ({})",
-                    ErrorClass::from_management(&e).as_str()
+                    "peer-conn: pump error ({}): {}",
+                    ErrorClass::from_management(&e).as_str(),
+                    e
                 ));
             }
         }

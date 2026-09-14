@@ -26,6 +26,17 @@ const MAX_NATIVE_FD: number = 2147483647;
 // best-effort treatment, the shell treats box expiry as protect failure
 // (governance docs/native-nx-governance.md item 4: fail-closed).
 const PROTECT_BOX_MS: number = 5000;
+// ICE socket pool: the ICE gather consumes one FRESH unbound UDP socket per
+// IPv4 interface round (dups share the socket object, so a bound copy cannot
+// be re-bound), and a device has several interfaces — one socket starves the
+// gather after the first round (device-verified 2026-09-14).
+const ICE_SOCKET_POOL_SIZE: number = 8;
+// A failed ICE session is re-negotiated after a cooldown, and every retry
+// consumes fresh sockets again (the pool is one-shot). Top it up on a bounded
+// cadence while the dev deviation is armed; the cap keeps the fd growth of a
+// long unattended run finite.
+const ICE_SOCKET_TOPUP_MS: number = 4000;
+const ICE_SOCKET_TOPUP_MAX: number = 30;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
@@ -151,6 +162,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // closed and ICE never leaves idle (device run 1: 61x "pump error").
   private iceSocketFd: number = -1;
   private iceProtected: boolean = false;
+  private iceTopUpTimer: number = -1;
   // Process-level protect (protectProcessNet, API 22+) — attempted once per
   // session; when it resolves it covers every socket of this process, which
   // is the whole outer-socket set (management/signal/ICE/WG).
@@ -256,8 +268,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // the VpnConfig isExcludedRoute entry that keeps the outer endpoints out
     // of the tunnel. It is loudly logged, recorded as a deviation and is
     // NEVER a gate pass; the default (flag absent) stays fail-closed.
-    this.protectDeviationRouteExclusion =
-      String(want.parameters?.['protectDeviation'] ?? '') === 'route-exclusion';
+    // Handed over through filesDir by EntryAbility (see its
+    // PROTECT_DEVIATION_FILE): Index.buildWant() builds the extension want
+    // itself and does NOT forward the launcher's --ps parameters, so reading
+    // the want here silently never armed the flag (device-verified
+    // 2026-09-14). The file is the same development-time channel the
+    // credentials already use.
+    this.protectDeviationRouteExclusion = false;
+    try {
+      const deviation: string =
+        readCredentialFileText(this.context.filesDir, 'netbird-protect-deviation');
+      this.protectDeviationRouteExclusion = deviation.trim() === 'route-exclusion';
+    } catch (error) {
+      this.protectDeviationRouteExclusion = false;
+    }
     if (this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION_ARMED|requestId=%{public}s|mode=route-exclusion|' +
@@ -597,14 +621,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.wg !== undefined && status.wg !== null ? status.wg.peers_with_session : -1;
         const wgDeviceUp: string =
           status.wg !== undefined && status.wg !== null ? String(status.wg.device_up) : 'unknown';
+        // Byte counters make the tunnel's traffic observable from the device
+        // side (probe validation: rx_bytes_to_tun growing = the peer's probe
+        // was decrypted and handed to the platform TUN).
+        const wgRxToTun: number =
+          status.wg !== undefined && status.wg !== null ? (status.wg.rx_bytes_to_tun ?? -1) : -1;
+        const wgTxBytes: number =
+          status.wg !== undefined && status.wg !== null ? (status.wg.tx_bytes ?? -1) : -1;
         hilog.info(DOMAIN, TAG,
           'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
           'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
           'terminal=%{public}s|signalRegistered=%{public}s|signalReconnects=%{public}d|' +
-          'signalLastError=%{public}s|wgDeviceUp=%{public}s|wgReady=%{public}s|wgSessions=%{public}d',
+          'signalLastError=%{public}s|wgDeviceUp=%{public}s|wgReady=%{public}s|wgSessions=%{public}d|' +
+          'wgRxToTun=%{public}d|wgTxBytes=%{public}d',
           this.requestId, String(status.running), status.state, status.peer_count,
           status.route_count, status.reconnects, errorClass, String(status.terminal),
-          signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions);
+          signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions,
+          wgRxToTun, wgTxBytes);
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
@@ -1216,10 +1249,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   // N5c/N7 device gap: ICE UDP socket provisioning (core-open → protect →
-  // feed). Mirrors protectOutboundSocketFailClosed for the ICE seam: the fd
-  // is core-opened UNBOUND (ice_socket_open — binding here would pick the
-  // port before the interface is known), protected BEFORE the ICE consumer
-  // binds a dup copy, then handed over. Every leg is fail-closed.
+  // feed). Mirrors protectOutboundSocketFailClosed for the ICE seam: each fd
+  // is core-opened UNBOUND (ice_socket_open — binding here would pick the port
+  // before the interface is known), protected BEFORE the ICE consumer binds a
+  // dup copy, then handed over. A POOL is fed because every interface round
+  // consumes one socket (see feedOneIceSocket). Failure of the whole pool is
+  // fail-closed; a partial pool is logged and the gather simply has fewer
+  // interfaces to work with.
   private async protectAndFeedIceSocket(): Promise<boolean> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;
     if (connection === undefined) {
@@ -1227,6 +1263,59 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=connection-missing', this.requestId);
       return false;
     }
+    let fedCount: number = 0;
+    for (let i = 0; i < ICE_SOCKET_POOL_SIZE; i++) {
+      const ok: boolean = await this.feedOneIceSocket(connection);
+      if (ok) {
+        fedCount++;
+      }
+    }
+    if (fedCount === 0) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=pool|fed=0|size=%{public}d',
+        this.requestId, ICE_SOCKET_POOL_SIZE);
+      return false;
+    }
+    hilog.warn(DOMAIN, TAG,
+      'VPN_ICE_POOL|fed=%{public}d|size=%{public}d', fedCount, ICE_SOCKET_POOL_SIZE);
+    this.startIceSocketTopUp(connection);
+    return true;
+  }
+
+  // Bounded top-up of the ICE socket pool: a failed session is renegotiated
+  // after a cooldown and needs fresh sockets again (device run 3: the retry
+  // hit "no-protected-socket" forever because the pool was one-shot).
+  private startIceSocketTopUp(connection: vpnExtension.VpnConnection): void {
+    if (this.iceTopUpTimer !== -1) {
+      return;
+    }
+    let given: number = 0;
+    this.iceTopUpTimer = setInterval((): void => {
+      if (given >= ICE_SOCKET_TOPUP_MAX || this.destroyRequested) {
+        clearInterval(this.iceTopUpTimer);
+        this.iceTopUpTimer = -1;
+        hilog.warn(DOMAIN, TAG,
+          'VPN_ICE_TOPUP|stopped|given=%{public}d|max=%{public}d', given, ICE_SOCKET_TOPUP_MAX);
+        return;
+      }
+      given++;
+      this.feedOneIceSocket(connection).then((ok: boolean): void => {
+        if (!ok) {
+          hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|feed-failed|given=%{public}d', given);
+        }
+      }).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|rejected|summary=%{public}s', safeError(error));
+      });
+    }, ICE_SOCKET_TOPUP_MS);
+  }
+
+  // Feed ONE ICE socket unless the pool is already full. Each ICE interface
+  // round needs a FRESH unbound UDP socket (dups share one socket object, so a
+  // bound copy cannot be re-bound for the next interface), and the device has
+  // several IPv4 interfaces — a single socket starves the gather right after
+  // the first round (device-verified 2026-09-14: "protected-udp:
+  // no-protected-socket" every 2 s, ICE never left idle).
+  private async feedOneIceSocket(connection: vpnExtension.VpnConnection): Promise<boolean> {
     let fd: number = -1;
     try {
       const opened: NativeTcpSocketOpen = iceSocketOpen();
@@ -1242,9 +1331,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open|fd=%{public}d', this.requestId, fd);
       return false;
     }
-    this.iceSocketFd = fd;
-    hilog.info(DOMAIN, TAG,
-      'VPN_ICE_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d', this.requestId, fd);
+    if (this.iceSocketFd < 0) {
+      this.iceSocketFd = fd;
+    }
     const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
     if (!protectedOk) {
       hilog.error(DOMAIN, TAG,
@@ -1267,8 +1356,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, fd, fed.error ?? 'no-message');
       return false;
     }
-    hilog.info(DOMAIN, TAG,
-      'VPN_ICE_FEED|fed|fd=%{public}d|protected=%{public}s', fd, String(this.iceProtected));
+    hilog.warn(DOMAIN, TAG,
+      'VPN_ICE_FEED|fed|fd=%{public}d|queue=%{public}d', fd, fed.queued ?? -1);
     return true;
   }
 
@@ -1278,32 +1367,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // best-effort treatment, per governance item 4.
   private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
     const t0: number = Date.now();
-    // Device-verified 2026-09-13: per-fd protect() performs an internal
-    // ohos.permission.MANAGE_VPN check (a restricted ACL permission this
-    // project deliberately does not request — docs/e3-physical-preflight.md:39
-    // forbids it), and on failure the promise NEVER settles, so the box
-    // always expires. Try the process-level API first (protectProcessNet,
-    // API 22+, no permission tag in the SDK): it covers every socket of this
-    // extension process, which is exactly our outer-socket set.
-    if (!this.processProtectAttempted) {
-      this.processProtectAttempted = true;
-      const processOk: boolean = await this.protectProcessNetWithBox(connection);
-      this.processProtected = processOk;
-      if (processOk) {
-        hilog.info(DOMAIN, TAG,
-          'VPN_PROTECT_SOURCE|requestId=%{public}s|source=process-net|fd=%{public}d',
-          this.requestId, fd);
-        return true;
-      }
-    }
-    if (this.processProtected) {
+    // Device-verified 2026-09-14: on this platform a per-fd protect() whose
+    // internal ohos.permission.MANAGE_VPN check fails WEDGES the ArkTS thread
+    // outright — observed twice: the extension's main thread went permanently
+    // silent right after the call (not even the box below could resume, so the
+    // fail-closed teardown never ran either). protectProcessNet() was tried as
+    // a public alternative and also never settles.
+    //
+    // Therefore, when the user-approved dev opt-in is armed, the platform call
+    // is NOT attempted at all — "treat protect as unavailable" is precisely
+    // what the deviation says, and calling it would only wedge the shell. The
+    // deviation is recorded per socket; it is never a gate pass.
+    if (this.protectDeviationRouteExclusion) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
+        'reason=manage-vpn-permission-missing|platform_call=not-attempted|' +
+        'is_evidence=false|not_a_gate_pass=true',
+        this.requestId, fd);
       return true;
     }
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       connection.protect(fd).then((): void => {
-        // Device-observed 2026-09-13: some protect() promises settle late (or
-        // never); the elapsed time distinguishes "slow" from "hung", which
-        // the box alone cannot tell.
         hilog.info(DOMAIN, TAG,
           'VPN_PROTECT_SETTLED|requestId=%{public}s|fd=%{public}d|elapsedMs=%{public}d',
           this.requestId, fd, Date.now() - t0);

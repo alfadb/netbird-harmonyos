@@ -455,6 +455,11 @@ pub struct IceOrchestratorSummary {
     pub endpoints_applied: usize,
     /// 可用 peer 数（Connected + endpoint 已落配）。
     pub reachable: usize,
+    // Signal frames dropped because their sender key matched no peer in the
+    // local ICE map (peer_conn handle_signal). Silent by design in the log;
+    // exposed here because a key-format mismatch makes the whole negotiation
+    // stall with NO other symptom (device run 3: peer stayed `idle` forever).
+    pub unknown_signal: u64,
     pub last_error: Option<ErrorClass>,
 }
 
@@ -462,7 +467,7 @@ impl IceOrchestratorSummary {
     /// JSON 对象（计数 + 分类，无密钥材料）。
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{}}}",
             jnum("peers", self.peers as u64),
             jnum("idle", self.idle as u64),
             jnum("gathering", self.gathering as u64),
@@ -472,6 +477,7 @@ impl IceOrchestratorSummary {
             jnum("failed", self.failed as u64),
             jnum("endpoints_applied", self.endpoints_applied as u64),
             jnum("reachable", self.reachable as u64),
+            jnum("unknown_signal", self.unknown_signal),
             format!(
                 "\"last_error\":{}",
                 self.last_error
@@ -711,7 +717,11 @@ impl PeerIceOrchestrator {
     }
 
     pub fn summary(&self) -> IceOrchestratorSummary {
-        let mut s = IceOrchestratorSummary { peers: self.peers.len(), ..Default::default() };
+        let mut s = IceOrchestratorSummary {
+            peers: self.peers.len(),
+            unknown_signal: self.unknown_signal,
+            ..Default::default()
+        };
         for p in &self.peers {
             match p.state {
                 PeerIceState::Idle => s.idle += 1,
@@ -1019,6 +1029,15 @@ impl PeerIceOrchestrator {
             for cand in &self.advertised_candidates {
                 peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
             }
+            // Device diagnostics (run 3 was blind here): how many local
+            // candidates the gather actually bound decides whether ICE can
+            // ever pair — a zero/low count means the socket pool or the
+            // interface enumeration starved, not the peer.
+            crate::hilog::emit(&format!(
+                "N5c_ICE|locals-gathered|added={added}|srflx={}|advertised={}",
+                srflx_list.len(),
+                self.advertised_candidates.len()
+            ));
             added
         };
         if added == 0 {
@@ -1185,7 +1204,7 @@ impl PeerIceOrchestrator {
                     self.wg.recycle_endpoint(&peer.key);
                     crate::hilog::emit("N11_ICE|disconnected|endpoint-recycled");
                 }
-                IceEvent::Failed(_) => {
+                IceEvent::Failed(reason) => {
                     // 无 relay 的本增量：Failed → peer 不可达（绝不静默
                     // 当作可用；默认路由闸经 summary().reachable 生效）。
                     // N11：回收 WG 端点与 egress，并拆除死会话（关闭其
@@ -1209,7 +1228,11 @@ impl PeerIceOrchestrator {
                     peer.retry_at_ms = 0;
                     peer.initiated = false;
                     peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                    crate::hilog::emit("N11_ICE|failed|session-dropped|renegotiation-armed");
+                    // The payload carries WHY the session died — device run 3
+                    // needed exactly this and the marker alone said nothing.
+                    crate::hilog::emit(&format!(
+                        "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}"
+                    ));
                 }
                 IceEvent::Closed => {}
                 IceEvent::CheckSucceeded { .. } => {}

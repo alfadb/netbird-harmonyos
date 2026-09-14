@@ -26,8 +26,14 @@ const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 // logged (only file name + byte count).
 const CONFIG_PARAM: string = 'netbird_config';
 const SETUP_KEY_PARAM: string = 'netbird_setup_key';
+const PROTECT_DEVIATION_PARAM: string = 'protectDeviation';
 const CONFIG_FILE: string = 'netbird-device-config.json';
 const SETUP_KEY_FILE: string = 'netbird-setup-key';
+// Handed to the VpnExtensionAbility through filesDir rather than through its
+// want: Index.buildWant() constructs the extension want itself and does not
+// forward launcher parameters (device-verified 2026-09-14: the extension
+// never saw --ps protectDeviation).
+const PROTECT_DEVIATION_FILE: string = 'netbird-protect-deviation';
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
@@ -57,11 +63,15 @@ export default class EntryAbility extends UIAbility {
     }
     const config: Object | undefined = params[CONFIG_PARAM];
     const setupKey: Object | undefined = params[SETUP_KEY_PARAM];
+    const deviation: Object | undefined = params[PROTECT_DEVIATION_PARAM];
     if (typeof config === 'string' && config.length > 0) {
       this.writeFile(CONFIG_FILE, config);
     }
     if (typeof setupKey === 'string' && setupKey.length > 0) {
       this.writeFile(SETUP_KEY_FILE, `${setupKey}\n`);
+    }
+    if (typeof deviation === 'string' && deviation.length > 0) {
+      this.writeFile(PROTECT_DEVIATION_FILE, `${deviation}\n`);
     }
   }
 

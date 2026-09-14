@@ -113,6 +113,10 @@ export interface WgDataplaneStatus {
   handshakes: number;
   tx_packets: number;
   rx_packets: number;
+  // N2-H byte-reconciliation counters (device path): rx_bytes_to_tun must
+  // equal the TUN side's delivered bytes over the same window.
+  tx_bytes?: number;
+  rx_bytes_to_tun?: number;
   dropped_no_route: number;
   decrypt_errors: number;
 }
