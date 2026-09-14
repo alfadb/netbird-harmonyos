@@ -104,6 +104,16 @@ pub const RETRY_COOLDOWN_MS: u64 = 2000;
 /// 重发 OFFER 直到 ICE Connected / 失败重启）。
 pub const HANDSHAKE_RETRY_MS: u64 = 3000;
 
+/// 谈判启动超时（注入时钟衡量）：会话已建、本地候选已发，但 `start()`
+/// 前置（远端凭证/候选）在 `3 * HANDSHAKE_RETRY_MS` 内始终没有凑齐——
+/// 典型场景：对端仍持有旧会话（自认 Connected）而不再发 Offer/Answer，
+/// 本端若不拆除这个永不 start 的「僵尸谈判」就永久沉默（真机
+/// AUTH-DIAG-DEVICE-VALIDATION-20260913-0001 的 H3 形态）。到期即拆除
+/// 会话、冷却后以**全新凭证**重新发起（上游 handshaker 超时重启语义，
+/// worker_ice.go:584-593 / conn.go:495-534）。已 `start()` 的会话不适用
+/// ——其死亡由 keepalive/断连/全对失败事件驱动，不由此超时判定。
+pub const START_DEADLINE_MS: u64 = 3 * HANDSHAKE_RETRY_MS;
+
 // ---------------------------------------------------------------------------
 // 状态模型
 // ---------------------------------------------------------------------------
@@ -540,6 +550,9 @@ struct PeerConn {
     signaled: Vec<(PeerSignalKind, String)>,
     /// 下一次握手重发的时刻（0 = 尚无已发帧）。
     retry_at_ms: u64,
+    /// 当前会话的创建时刻（注入时钟；0 = 无会话）。[`START_DEADLINE_MS`]
+    /// 的计时起点：创建后始终未 `start()` 的谈判到期拆除重发起。
+    session_at_ms: u64,
 }
 
 impl PeerConn {
@@ -565,6 +578,7 @@ impl PeerConn {
             cooldown_until: 0,
             signaled: Vec::new(),
             retry_at_ms: 0,
+            session_at_ms: 0,
         }
     }
 
@@ -783,6 +797,7 @@ impl PeerIceOrchestrator {
                     peer.pending_remote.clear();
                     peer.signaled.clear();
                     peer.retry_at_ms = 0;
+                    peer.session_at_ms = 0;
                 }
                 let had_session = self.peers[idx].session.is_some();
                 if !had_session {
@@ -797,7 +812,8 @@ impl PeerIceOrchestrator {
                     peer.session = Some(session);
                     peer.state = PeerIceState::Gathering;
                     peer.answer_owed = true;
-                    if let Err(e) = self.ensure_locals(idx) {
+                    peer.session_at_ms = now_ms;
+                    if let Err(e) = self.ensure_locals(idx, now_ms) {
                         let peer = &mut self.peers[idx];
                         peer.last_error = Some(ErrorClass::from_management(&e));
                         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
@@ -834,12 +850,18 @@ impl PeerIceOrchestrator {
         Ok(())
     }
 
-    /// 一拍：发起待发 peer、补齐本地候选、刷发送队列、泵全部会话、
-    /// 处理事件（含 selected pair → WG endpoint 落配）。`now_ms` 注入。
+    /// 一拍：发起待发 peer、补齐本地候选、刷发送队列（以上仅 signal 就绪
+    /// 时——它们是信令活动）；**会话泵、事件处理、WG 入向数据则无条件
+    /// 运行**：ICE 会话的收包/keepalive/超时与 signal 流健康无关（上游
+    /// pion agent 由独立的 ICE worker 泵送；signal 只承载信令）。把会话
+    /// 泵挂在 `signal_ready` 下会让断流侧的会话既聋又冻结——本端不再读
+    /// selected socket、对端把我们判 disconnected，而本端状态却永远停在
+    /// Connected（真机 12:00 成功连接后 ~7s `disconnected→failed` 的形态
+    /// ：对端断流冻结，本端诚实超时）。`now_ms` 注入。
     pub fn run_once(&mut self, now_ms: u64) -> Result<(), ManagementError> {
         let mut first_err: Option<ManagementError> = None;
-        if self.signal_ready {
-            for idx in 0..self.peers.len() {
+        for idx in 0..self.peers.len() {
+            if self.signal_ready {
                 // 发起（仅 signal 就绪后；每 peer 冷却后重试；纯应答方不发起）
                 let want_initiate = {
                     let p = &self.peers[idx];
@@ -847,7 +869,7 @@ impl PeerIceOrchestrator {
                 };
                 if want_initiate {
                     self.peers[idx].initiated = true;
-                    match self.ensure_locals(idx) {
+                    match self.ensure_locals(idx, now_ms) {
                         Ok(()) => {
                             let peer = &mut self.peers[idx];
                             let creds = peer.creds.as_ref().expect("creds after locals");
@@ -871,7 +893,7 @@ impl PeerIceOrchestrator {
                     p.session.is_some() && !p.locals_done && now_ms >= p.cooldown_until
                 };
                 if want_locals {
-                    if let Err(e) = self.ensure_locals(idx) {
+                    if let Err(e) = self.ensure_locals(idx, now_ms) {
                         let peer = &mut self.peers[idx];
                         peer.last_error = Some(ErrorClass::from_management(&e));
                         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
@@ -911,29 +933,35 @@ impl PeerIceOrchestrator {
                         peer.retry_at_ms = now_ms + HANDSHAKE_RETRY_MS;
                     }
                 }
-                {
-                    let peer = &mut self.peers[idx];
-                    if let Some(session) = peer.session.as_mut() {
-                        if let Err(e) = session.run_once(now_ms) {
-                            peer.last_error = Some(ErrorClass::from_management(&e));
-                            if first_err.is_none() {
-                                first_err = Some(e);
-                            }
+            }
+            // 僵尸谈判拆除（H3）：会话已建但始终未 start（对端持旧会话、
+            // 不再应答）——到期拆除，冷却后重新发起。signal 无关的本地
+            // 策略，不受断流影响。
+            self.expire_dead_negotiation(idx, now_ms);
+            // 会话泵（无条件）：收包/检查/keepalive/超时不依赖 signal 流。
+            {
+                let peer = &mut self.peers[idx];
+                if let Some(session) = peer.session.as_mut() {
+                    if let Err(e) = session.run_once(now_ms) {
+                        peer.last_error = Some(ErrorClass::from_management(&e));
+                        if first_err.is_none() {
+                            first_err = Some(e);
                         }
                     }
                 }
-                self.drain_events(idx, now_ms);
-                // N11: WG 数据面入向 —— ICE 会话分用出的非 STUN（WG）包喂给
-                // 设备（上游：共享接收循环把非 STUN 包交给 WG，
-                // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
-                // 规则不变；会话已拆（Failed 回收）则数据随之消亡（路径已死）。
-                let datagrams = match self.peers[idx].session.as_mut() {
-                    Some(s) => s.take_data_rx(),
-                    None => Vec::new(),
-                };
-                for (src, src_port, datagram) in datagrams {
-                    let _sent = self.wg.handle_udp_inbound(&datagram, (src, src_port), now_ms);
-                }
+            }
+            self.drain_events(idx, now_ms);
+            // N11: WG 数据面入向 —— ICE 会话分用出的非 STUN（WG）包喂给
+            // 设备（上游：共享接收循环把非 STUN 包交给 WG，
+            // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
+            // 规则不变；会话已拆（Failed 回收）则数据随之消亡（路径已死）。
+            // 无条件执行：入向数据面同样不得随 signal 流断而停。
+            let datagrams = match self.peers[idx].session.as_mut() {
+                Some(s) => s.take_data_rx(),
+                None => Vec::new(),
+            };
+            for (src, src_port, datagram) in datagrams {
+                let _sent = self.wg.handle_udp_inbound(&datagram, (src, src_port), now_ms);
             }
         }
         match first_err {
@@ -960,7 +988,7 @@ impl PeerIceOrchestrator {
     ///   候选保留接口地址 + 固定端口（getsockname 回填校验）。
     ///   之后 [`advertised_candidates`] 逐个以既有 wire 形态追加进 outbox
     ///   （extra host 候选，随握手重发语义一起重发）。
-    fn ensure_locals(&mut self, idx: usize) -> Result<(), ManagementError> {
+    fn ensure_locals(&mut self, idx: usize, now_ms: u64) -> Result<(), ManagementError> {
         if self.peers[idx].locals_done {
             return Ok(());
         }
@@ -970,6 +998,7 @@ impl PeerIceOrchestrator {
             let session = IceSession::new(creds.clone(), controlling, self.tie_breaker)?;
             self.peers[idx].creds = Some(creds);
             self.peers[idx].session = Some(session);
+            self.peers[idx].session_at_ms = now_ms;
         }
         let fixed_port = self.fixed_local_port;
         let (host_list, srflx_list) = match fixed_port {
@@ -1211,34 +1240,75 @@ impl PeerIceOrchestrator {
                     // socket dup = 死路径 fail-closed）+ 冷却后重新发起
                     // （上游：agent Failed → closeAgent → handshaker 重启
                     // 协商，worker_ice.go:584-593 / conn.go:495-534）。
-                    let peer = &mut self.peers[idx];
-                    peer.state = PeerIceState::Failed;
-                    peer.endpoint_applied = false;
-                    peer.selected_remote = None;
-                    self.wg.recycle_endpoint(&peer.key);
-                    peer.session = None; // Drop 关闭该会话全部 dup socket
-                    peer.creds = None;
-                    peer.remote_creds = None;
-                    peer.locals_done = false;
-                    peer.started = false;
-                    peer.remote_cands_seen = 0;
-                    peer.pending_remote.clear();
-                    peer.signaled.clear();
-                    peer.outbox.clear();
-                    peer.retry_at_ms = 0;
-                    peer.initiated = false;
-                    peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                    // The payload carries WHY the session died — device run 3
-                    // needed exactly this and the marker alone said nothing.
-                    crate::hilog::emit(&format!(
-                        "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}"
-                    ));
+                    self.drop_session_rearm(idx, now_ms, &reason);
                 }
                 IceEvent::Closed => {}
                 IceEvent::CheckSucceeded { .. } => {}
                 // 本地候选的最终形态已在 ensure_locals 里直接入 outbox。
                 IceEvent::LocalCandidateReady(_) => {}
             }
+        }
+    }
+
+    /// 拆除当前会话并重新武装谈判（`IceEvent::Failed` 与僵尸谈判超时
+    /// [`Self::expire_dead_negotiation`] 共用）：peer 不可达、回收 WG
+    /// 端点与 egress、Drop 关闭会话全部 dup socket、清空在途信令状态、
+    /// 冷却后允许重新发起。`reason` 只进日志（公开诊断材料）。
+    fn drop_session_rearm(&mut self, idx: usize, now_ms: u64, reason: &str) {
+        let peer = &mut self.peers[idx];
+        peer.state = PeerIceState::Failed;
+        peer.endpoint_applied = false;
+        peer.selected_remote = None;
+        self.wg.recycle_endpoint(&peer.key);
+        peer.session = None; // Drop 关闭该会话全部 dup socket
+        peer.creds = None;
+        peer.remote_creds = None;
+        peer.locals_done = false;
+        peer.started = false;
+        peer.remote_cands_seen = 0;
+        peer.pending_remote.clear();
+        peer.signaled.clear();
+        peer.outbox.clear();
+        peer.retry_at_ms = 0;
+        peer.initiated = false;
+        peer.answer_owed = false; // 死会话不欠 ANSWER：重发起走 Offer 路径
+        peer.session_at_ms = 0;
+        peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+        // The payload carries WHY the session died — device run 3
+        // needed exactly this and the marker alone said nothing.
+        crate::hilog::emit(&format!(
+            "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}"
+        ));
+    }
+
+    /// 僵尸谈判拆除（H3 修复，[`START_DEADLINE_MS`]）：会话已建、本地
+    /// 候选已发，但远端凭证/候选始终没有凑齐（`started == false`）——
+    /// 典型：对端仍持有旧会话、自认 Connected、不再发 Offer/Answer。
+    /// 不拆除则本端永久沉默（want_initiate 要 `session.is_none()`，
+    /// want_locals 要 `!locals_done`，无事件可拆会话）。到期即拆除重
+    /// 武装：冷却后以全新凭证重新发起，对端（其旧会话仍活着）会把新
+    /// 凭证的 Offer 采纳为新谈判并应答。已 start 的会话不适用——其
+    /// 死亡由 keepalive/断连/全对失败事件诚实驱动。
+    fn expire_dead_negotiation(&mut self, idx: usize, now_ms: u64) {
+        let zombie = {
+            let p = &self.peers[idx];
+            p.session.is_some()
+                && !p.started
+                && p.session_at_ms != 0
+                && now_ms.saturating_sub(p.session_at_ms) >= START_DEADLINE_MS
+                // Only a negotiation the remote NEVER answered is a zombie.
+                // Device run 5: a HEALTHY negotiation legitimately needs
+                // ~15-30 s (gather → signal → checks → nomination), so
+                // expiring on the deadline alone tore down sessions that were
+                // still converging (and, in the host's fixed-port mode, wedged
+                // the port). Any progress — remote credentials or a single
+                // remote candidate — hands the session over to its own honest
+                // failure paths (all-pairs-failed / disconnected / keepalive).
+                && p.remote_creds.is_none()
+                && p.remote_cands_seen == 0
+        };
+        if zombie {
+            self.drop_session_rearm(idx, now_ms, "negotiation-start-timeout");
         }
     }
 

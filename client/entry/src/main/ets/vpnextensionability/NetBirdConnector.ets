@@ -139,6 +139,12 @@ export interface RecreateStatus {
 }
 
 // core.connector_status snapshot (subset the shell consumes).
+// N5c: LIVE ICE socket queue depth from connector_status().ice_sockets.
+export interface IceSocketDepth {
+  queued: number;
+  taken: number;
+}
+
 export interface ConnectorStatusResult {
   running: boolean;
   state: string;
@@ -146,6 +152,10 @@ export interface ConnectorStatusResult {
   route_count: number;
   reconnects: number;
   last_error: ConnectorErrorClass | null;
+  // N5c starvation observability: the ICE socket queue depth (queued = still
+  // available to the core, taken = consumed so far; -1 = no shell-fed source).
+  // The shell MUST read this instead of trusting its own last feed reading.
+  ice_sockets?: IceSocketDepth;
   session_expiry: string;
   wg_apply_failed: boolean;
   wg_apply_errors: number;
@@ -395,8 +405,7 @@ export function connectorRouteSetApplied(routes: string[], isRecreate: boolean):
 // the UI process reads an empty slot and shows "disconnected / wg sessions: 0"
 // while the tunnel is live. The extension publishes these fields into the
 // shared filesDir instead; the UI reads that document.
-export interface PublishedStatus {
-  updated_at_ms: number;
+export interface PublishedStatus {  updated_at_ms: number;
   state: string;
   peer_count: number;
   route_count: number;

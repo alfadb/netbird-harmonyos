@@ -28,24 +28,43 @@ extern "C" {
 /// Strips interior NUL bytes (cannot cross the C string boundary) and drops
 /// the trailing NUL. Safe to call from any thread, including the D-W worker.
 pub fn emit(line: &str) {
-    let owned: Vec<u8> = line.bytes().filter(|b| *b != 0).collect();
-    let mut buf = owned;
-    buf.push(0u8);
-    unsafe {
-        OH_LOG_Print(
-            LOG_APP,
-            LOG_INFO,
-            DOMAIN,
-            TAG.as_ptr(),
-            FMT.as_ptr(),
-            buf.as_ptr(),
-        );
+    // Device (aarch64-unknown-linux-ohos): the frozen HiLog channel.
+    // Everything else (host CLI, harness, tests): the SAME marker text on
+    // stderr — without it the host side of a device investigation is blind:
+    // every core marker was invisible in the CLI's log while the device side
+    // showed the full story (device-validation runs 3-5).
+    #[cfg(not(target_env = "ohos"))]
+    {
+        eprintln!("[n1b] {line}");
+    }
+    #[cfg(target_env = "ohos")]
+    {
+        let owned: Vec<u8> = line.bytes().filter(|b| *b != 0).collect();
+        let mut buf = owned;
+        buf.push(0u8);
+        unsafe {
+            OH_LOG_Print(
+                LOG_APP,
+                LOG_INFO,
+                DOMAIN,
+                TAG.as_ptr(),
+                FMT.as_ptr(),
+                buf.as_ptr(),
+            );
+        }
     }
 }
 
 /// Whether the frozen channel is loggable at INFO (diagnostic only).
 pub fn loggable() -> bool {
-    unsafe { OH_LOG_IsLoggable(DOMAIN, TAG.as_ptr(), LOG_INFO) }
+    #[cfg(not(target_env = "ohos"))]
+    {
+        true
+    }
+    #[cfg(target_env = "ohos")]
+    {
+        unsafe { OH_LOG_IsLoggable(DOMAIN, TAG.as_ptr(), LOG_INFO) }
+    }
 }
 
 // Host-test link surface (cfg(test) only, never part of the cdylib): the

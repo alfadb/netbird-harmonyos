@@ -34,10 +34,18 @@ const PROTECT_BOX_MS: number = 5000;
 const ICE_SOCKET_POOL_SIZE: number = 8;
 // A failed ICE session is re-negotiated after a cooldown, and every retry
 // consumes fresh sockets again (the pool is one-shot). Top it up on a bounded
-// cadence while the dev deviation is armed; the cap keeps the fd growth of a
-// long unattended run finite.
+// cadence while the dev deviation is armed — but only while the core's queue
+// is actually draining (the feed reports its depth): a core that is not
+// gathering must not make the shell pile up fds (device run 3 reached
+// queue=26 while nothing consumed them).
 const ICE_SOCKET_TOPUP_MS: number = 4000;
-const ICE_SOCKET_TOPUP_MAX: number = 30;
+const ICE_SOCKET_TOPUP_MAX: number = 2000;
+// Keep a full pool queued, not a trickle: ONE gather round binds one socket
+// per IPv4 interface and the round's checks take more, so a queue of 2-3
+// drains mid-round and the core reports "protected-udp: no-protected-socket"
+// while the shell still believes it is fine (device run 5, queue=3 > high).
+const ICE_QUEUE_HIGH_WATER: number = 8;
+const ICE_TOPUP_BATCH: number = 4;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
@@ -164,6 +172,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private iceSocketFd: number = -1;
   private iceProtected: boolean = false;
   private iceTopUpTimer: number = -1;
+  // Depth reported by the last accepted feed — the top-up uses it to tell a
+  // draining core (keep feeding) from an idle one (stop piling up).
+  private iceQueueDepth: number = 0;
   // Process-level protect (protectProcessNet, API 22+) — attempted once per
   // session; when it resolves it covers every socket of this process, which
   // is the whole outer-socket set (management/signal/ICE/WG).
@@ -645,6 +656,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // while THIS process had a live WG session. Publish the same fields to
         // filesDir, which both processes share.
         this.publishStatusForUi(status);
+        // Refresh the ICE queue depth from the LIVE status: a depth learned
+        // only from our own feed calls goes stale and stops resupply exactly
+        // when the queue has drained (the host CLI starved that way, and the
+        // shell gate had the same flaw).
+        if (status.ice_sockets !== undefined && status.ice_sockets !== null) {
+          this.iceQueueDepth = status.ice_sockets.queued;
+        }
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
@@ -1305,15 +1323,34 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'VPN_ICE_TOPUP|stopped|given=%{public}d|max=%{public}d', given, ICE_SOCKET_TOPUP_MAX);
         return;
       }
-      given++;
-      this.feedOneIceSocket(connection).then((ok: boolean): void => {
-        if (!ok) {
+      this.topUpIceBatch(connection).then((fed: number): void => {
+        given += fed;
+        if (fed === 0 && this.iceQueueDepth > ICE_QUEUE_HIGH_WATER) {
+          hilog.warn(DOMAIN, TAG,
+            'VPN_ICE_TOPUP|satisfied|queue=%{public}d|given=%{public}d',
+            this.iceQueueDepth, given);
+        } else if (fed === 0) {
           hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|feed-failed|given=%{public}d', given);
         }
       }).catch((error: Error): void => {
         hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|rejected|summary=%{public}s', safeError(error));
       });
     }, ICE_SOCKET_TOPUP_MS);
+  }
+
+  // Feed up to ICE_TOPUP_BATCH sockets while the live queue depth is at or
+  // below the high-water mark (one gather round needs one socket per IPv4
+  // interface, so a trickle starves it mid-round).
+  private async topUpIceBatch(connection: vpnExtension.VpnConnection): Promise<number> {
+    let fed: number = 0;
+    for (let n = 0; n < ICE_TOPUP_BATCH && this.iceQueueDepth <= ICE_QUEUE_HIGH_WATER; n++) {
+      const ok: boolean = await this.feedOneIceSocket(connection);
+      if (!ok) {
+        break;
+      }
+      fed++;
+    }
+    return fed;
   }
 
   // Publish the live connector status for the UI process (see the call site).
@@ -1410,6 +1447,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     hilog.warn(DOMAIN, TAG,
       'VPN_ICE_FEED|fed|fd=%{public}d|queue=%{public}d', fd, fed.queued ?? -1);
+    this.iceQueueDepth = fed.queued ?? this.iceQueueDepth;
     return true;
   }
 

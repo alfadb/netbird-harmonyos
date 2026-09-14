@@ -895,11 +895,29 @@ impl IceSession {
             return Err(seam_to_management(e));
         }
         let bind_addr = if wildcard_bind { [0, 0, 0, 0] } else { addr };
-        let local = sys::sockaddr_in::new(bind_addr, cand.port);
-        if unsafe { sys::bind(dup, &local, core::mem::size_of::<sys::sockaddr_in>() as u32) } == -1 {
-            let e = sys::errno();
-            cleanup(dup);
-            return Err(ManagementError::Network(format!("ice-bind-failed (errno={e})")));
+        // Fixed-port mode (N12a host tuning) feeds an ALREADY-BOUND shared
+        // socket: dup() shares the socket object, so the copy handed to us IS
+        // the feeder's socket — binding it again fails with EADDRINUSE and
+        // wedges the port for the rest of the process (device-validation run
+        // 5: after one teardown every retry reported
+        // "ice-bind-failed (errno=98)" while the feeder's original fd kept the
+        // port bound). Upstream ships ONE `0.0.0.0:NET_PORT` shared socket
+        // (client/iface/bind/ice_bind.go), so reuse is the intended shape.
+        let already_bound = {
+            let mut probe = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+            let mut probe_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+            let rc = unsafe { sys::getsockname(dup, &mut probe, &mut probe_len) };
+            rc == 0 && u16::from_be(probe.sin_port) != 0
+        };
+        if !already_bound {
+            let local = sys::sockaddr_in::new(bind_addr, cand.port);
+            if unsafe { sys::bind(dup, &local, core::mem::size_of::<sys::sockaddr_in>() as u32) }
+                == -1
+            {
+                let e = sys::errno();
+                cleanup(dup);
+                return Err(ManagementError::Network(format!("ice-bind-failed (errno={e})")));
+            }
         }
         let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
         let mut name_len = core::mem::size_of::<sys::sockaddr_in>() as u32;

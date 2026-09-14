@@ -2065,6 +2065,17 @@ fn route_signal_message(orch: &Mutex<PeerIceOrchestrator>, m: &SignalMessage) {
         _ => return,
     };
     let now = crate::sys::mono_ms();
+    // Frame-level diagnostics: everything else about a stalled negotiation is
+    // silent (device run 5: both sides looped on negotiation-start-timeout
+    // with unknown_signal=0, so "were frames routed at all?" was unanswerable).
+    hilog::emit(&format!(
+        "connector: signal frame routed (kind={})",
+        match kind {
+            PeerSignalKind::Offer => "offer",
+            PeerSignalKind::Answer => "answer",
+            PeerSignalKind::Candidate => "candidate",
+        }
+    ));
     let mut guard = orch.lock_poison();
     if let Err(e) = guard.handle_signal(&m.from_key, kind, &m.payload, now) {
         // 畸形 payload（坏凭证/坏候选）：分类记录，不断流
@@ -2342,7 +2353,21 @@ impl ConnectorHandle {
 
     /// The `connector_status()` JSON document.
     pub fn status_json(&self) -> String {
-        self.status().to_json()
+        let base = self.status().to_json();
+        // N5c starvation observability: expose the ICE socket queue depth so a
+        // FEEDER can read the real value. A feeder that only learns the depth
+        // from its own feed calls keeps a stale "still queued" reading and
+        // stops resupplying exactly when the queue is empty — device run 5 and
+        // the host CLI both sat in endless "protected-udp:
+        // no-protected-socket" that way. -1 = no shell-fed source attached.
+        let (queued, taken) = match self.shared.ice_sockets.get() {
+            Some(s) => (s.pending() as i64, s.taken() as i64),
+            None => (-1, -1),
+        };
+        format!(
+            "{},\"ice_sockets\":{{\"queued\":{queued},\"taken\":{taken}}}}}",
+            &base[..base.len() - 1]
+        )
     }
 
     /// The `connector_network_config()` JSON document (read-only snapshot of

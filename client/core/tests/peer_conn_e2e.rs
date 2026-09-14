@@ -643,3 +643,180 @@ fn disconnect_and_failed_transitions_follow_the_injected_clock() {
     assert!(!snap.default_route_allowed);
     assert_eq!(snap.default_route_reason, "default-route-held:data-plane-not-ready");
 }
+
+/// 真机 20260913 H1/H2 回归：signal 流断掉的一侧不得冻结其 ICE 会话泵。
+/// 断流前双方已 Connected（WG egress 已挂）：A 断流后——
+/// ① A 仍诚实应答 B 的 keepalive（B 不掉 Disconnected，数据面不陪葬）；
+/// ② A 的信令活动（发起/重发/flush）仍被 `signal_ready` 门住，零帧外出；
+/// ③ B 彻底静默时，A 的 keepalive/断连计时器仍按注入时钟前进
+///   （+6s Disconnected、+12s Failed）——修复前 A 会永远冻结在 Connected
+///   （12:00 主机侧快照 `ice{connected:1}` 的形态），对端反而被误判；
+/// ④ signal 恢复后，冷却期满 A 以全新凭证重新发起（renegotiation armed）。
+#[test]
+fn ice_session_pump_survives_signal_outage_and_timers_stay_honest() {
+    let bus = Arc::new(SignalBus::default());
+    let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
+    let mut b = TestOrch::new(KEY_B, &[KEY_A], 0x2222, bus.clone());
+    b.orch.set_initiator(KEY_A, false);
+
+    let mut now = 1000u64;
+    let converged = pump_until(&bus, &mut a, &mut b, &mut now, 30_000, |a, b| {
+        a.status_of(KEY_B).state == PeerIceState::Connected
+            && b.status_of(KEY_A).state == PeerIceState::Connected
+    });
+    assert!(converged, "precondition: both Connected");
+    let connected_at = now;
+
+    // ① A 的 signal 流断（Broken → set_signal_ready(false) 的生产行为）。
+    a.orch.set_signal_ready(false);
+    while now <= connected_at + 8_000 {
+        let _ = a.orch.run_once(now);
+        let _ = b.orch.run_once(now);
+        now += 50;
+        deliver(&bus, now, &mut a, Some(&mut b));
+        let sb = b.status_of(KEY_A);
+        assert_ne!(
+            sb.state,
+            PeerIceState::Disconnected,
+            "A must keep answering B's checks while A's signal link is down"
+        );
+        assert!(sb.endpoint_applied, "B's data plane must not die with A's signal link");
+    }
+
+    // ② 断流期间 A 零信令帧外出（门仍生效）。
+    let frames_while_down = bus.seen().iter().filter(|f| f.from == KEY_A).count();
+    let _ = a.orch.run_once(now);
+    deliver(&bus, now, &mut a, Some(&mut b));
+    assert_eq!(
+        frames_while_down,
+        bus.seen().iter().filter(|f| f.from == KEY_A).count(),
+        "no signaling frames may leave while signal_ready=false"
+    );
+
+    // ③ B 彻底静默：A 的计时器仍前进（不再冻结在 Connected）。
+    let silence_at = now;
+    let mut failed_at = None;
+    while now <= silence_at + 16_000 {
+        let _ = a.orch.run_once(now);
+        now += 50;
+        let st = a.status_of(KEY_B);
+        if now <= silence_at + 6_000 {
+            assert_ne!(st.state, PeerIceState::Disconnected, "no premature disconnect");
+        }
+        if failed_at.is_none() && now > silence_at + 12_000 && st.state == PeerIceState::Failed {
+            failed_at = Some(now);
+        }
+        if failed_at.is_some() {
+            break;
+        }
+    }
+    assert!(
+        failed_at.is_some(),
+        "A must reach Failed on the injected clock while its signal is down \
+         (the frozen-session bug kept such a peer at Connected forever)"
+    );
+
+    // ④ signal 恢复：冷却期满，A 以全新凭证重新发起。
+    a.orch.set_signal_ready(true);
+    let first_offer = bus
+        .seen()
+        .iter()
+        .find(|f| f.kind == PeerSignalKind::Offer && f.from == KEY_A)
+        .map(|f| f.payload.clone())
+        .expect("the original offer was signaled");
+    let deadline = now + 12_000;
+    let mut reoffered = None;
+    while now <= deadline {
+        let _ = a.orch.run_once(now);
+        now += 50;
+        deliver(&bus, now, &mut a, None); // B 仍缺席
+        if let Some(f) = bus
+            .seen()
+            .iter()
+            .rev()
+            .find(|f| f.kind == PeerSignalKind::Offer && f.from == KEY_A)
+        {
+            if f.payload != first_offer {
+                reoffered = Some(f.payload.clone());
+                break;
+            }
+        }
+    }
+    let fresh = reoffered
+        .expect("after the signal link returns, A must re-initiate with FRESH credentials");
+    assert_ne!(
+        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
+        parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
+        "the re-initiation must carry NEW credentials (a new negotiation, not a replay)"
+    );
+}
+
+/// 真机 20260913 H3 回归：对端仍持有旧会话、不再应答（收不到
+/// Answer/候选）时，本端此前会**永久沉默**——会话永不 `start()`，
+/// `want_initiate` 要 `session.is_none()`、`want_locals` 要
+/// `!locals_done`，谁都不再触发，gather 一次后死寂（池填满、无
+/// `locals-gathered`，只有对端重启才救活）。修复：会话创建后
+/// [`netbird_core::peer_conn::START_DEADLINE_MS`] 内仍未 start → 拆除、
+/// 冷却、以全新凭证重新发起（上游 handshaker 超时重启语义）。
+#[test]
+fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
+    let bus = Arc::new(SignalBus::default());
+    // B 从不存在：A 的 OFFER/候选全部发进虚空（对端持旧会话、永不回答）。
+    let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
+
+    let mut now = 1000u64;
+    let _ = a.orch.run_once(now);
+    now += 10;
+    deliver(&bus, now, &mut a, None);
+    let first_offer = bus
+        .seen()
+        .iter()
+        .find(|f| f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload.clone())
+        .expect("initial offer");
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no answer → never leaves Idle");
+
+    // 截止前：不拆除；周期重发只复用同一凭证（signaled 母本去重）。
+    while now < 1000 + netbird_core::peer_conn::START_DEADLINE_MS - 500 {
+        let _ = a.orch.run_once(now);
+        now += 100;
+        deliver(&bus, now, &mut a, None);
+    }
+    assert_eq!(
+        a.status_of(KEY_B).state,
+        PeerIceState::Idle,
+        "no teardown before the start deadline"
+    );
+    let distinct_offers: std::collections::HashSet<String> = bus
+        .seen()
+        .iter()
+        .filter(|f| f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload.clone())
+        .collect();
+    assert_eq!(distinct_offers.len(), 1, "pre-deadline re-signals reuse the SAME offer");
+
+    // 截止后：拆除 + 冷却 + 全新凭证重新发起（自愈，无需对端重启）。
+    let mut fresh = None;
+    while now <= 1000 + netbird_core::peer_conn::START_DEADLINE_MS + 15_000 {
+        let _ = a.orch.run_once(now);
+        now += 100;
+        deliver(&bus, now, &mut a, None);
+        if let Some(f) = bus.seen().iter().rev().find(|f| f.kind == PeerSignalKind::Offer) {
+            if f.payload != first_offer {
+                fresh = Some(f.payload.clone());
+                break;
+            }
+        }
+    }
+    let fresh = fresh.expect("a FRESH offer must be re-initiated after the start deadline");
+    assert_ne!(
+        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
+        parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
+        "the zombie teardown must re-initiate with NEW credentials"
+    );
+    assert!(
+        a.socks.taken() >= 4,
+        "two gather rounds must have consumed provider sockets, got {}",
+        a.socks.taken()
+    );
+}

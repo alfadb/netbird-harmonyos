@@ -835,9 +835,31 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
     let mut own_addr: Option<[u8; 4]> = None;
     let mut seen = Milestones::default();
 
+    // N12a fixed-port mode: ONE shared `0.0.0.0:<ice_port>` socket for the
+    // whole run (upstream shape, see ice_session::add_local_candidate_on).
+    // The feeder hands out DUPS of it, so every gather round sees the same
+    // already-bound socket and the port survives renegotiations — feeding
+    // fresh sockets instead wedged the port after the first teardown
+    // ("ice-bind-failed (errno=98)" forever: dup shares the socket object, so
+    // the feeder's original stayed bound).
+    let ice_shared: Option<i32> = match o.ice_port {
+        Some(port) => match hs::open_udp_bound(port) {
+            Ok(fd) => {
+                eprintln!("[nbinterop] ice shared socket bound to 0.0.0.0:{port} (fed as dups)");
+                Some(fd)
+            }
+            Err(e) => {
+                eprintln!("error: ice shared socket (fixed port {port}): {e}");
+                hs::stop_connector();
+                return hs::exit_code_for_class("network");
+            }
+        },
+        None => None,
+    };
+
     // prime the queues (mirrors the shell feeding its first sockets)
     top_up_management(&mut bag, &mut mgmt_queued);
-    top_up_ice(&mut bag, &mut ice_queued);
+    top_up_ice(&mut bag, &mut ice_queued, ice_shared);
 
     let start = Instant::now();
     let mut last_print: u128 = 0;
@@ -858,6 +880,7 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
                 &mut sig_queued,
                 &mut sig_addr,
                 &mut own_addr,
+                ice_shared,
             );
         }
 
@@ -962,12 +985,34 @@ fn top_up_management(bag: &mut hs::FdBag, queued: &mut i64) {
 
 /// Keep ≥4 unbound UDP sockets queued for ICE (gather rounds + check
 /// sockets take fresh fds; two interface rounds must never starve).
-fn top_up_ice(bag: &mut hs::FdBag, queued: &mut i64) {
+fn top_up_ice(bag: &mut hs::FdBag, queued: &mut i64, shared: Option<i32>) {
+    // Refresh the depth from the LIVE status first. The local counter is only
+    // updated when we feed, so trusting it alone stops resupply exactly when
+    // the queue has drained — the CLI then sat in endless
+    // "protected-udp: no-protected-socket" while believing 4 were queued.
+    let live = status_num(&hs::status_json(), "ice_sockets.queued");
+    if live >= 0 {
+        *queued = live;
+    }
     if *queued >= 4 {
         return;
     }
     for _ in 0..2 {
-        match hs::open_udp_unbound() {
+        // Fixed-port mode: feed a DUP of the shared bound socket (never a new
+        // unbound one — the shared socket is what keeps the mapped port
+        // reachable across renegotiations).
+        let opened: Result<i32, String> = match shared {
+            Some(master) => {
+                let dup = unsafe { sys::dup(master) };
+                if dup < 0 {
+                    Err(format!("dup of shared ice socket failed (errno={})", sys::errno()))
+                } else {
+                    Ok(dup)
+                }
+            }
+            None => hs::open_udp_unbound().map_err(|e| format!("{} (errno={})", e.token, e.errno)),
+        };
+        match opened {
             Ok(fd) => match hs::feed_ice(fd) {
                 Ok(q) => {
                     *queued = q;
@@ -997,9 +1042,10 @@ fn maintain(
     sig_queued: &mut i64,
     sig_addr: &mut Option<std::net::SocketAddr>,
     own_addr: &mut Option<[u8; 4]>,
+    ice_shared: Option<i32>,
 ) {
     top_up_management(bag, mgmt_queued);
-    top_up_ice(bag, ice_queued);
+    top_up_ice(bag, ice_queued, ice_shared);
 
     let net = hs::network_config_json();
     if let Some(addr) = hs::own_address_from_network_config(&net) {
