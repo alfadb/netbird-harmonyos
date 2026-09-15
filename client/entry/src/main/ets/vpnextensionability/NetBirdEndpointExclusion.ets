@@ -14,6 +14,9 @@
 //   - parseRelayUrl: rel:// / rels:// authority extraction, a structural
 //     mirror of the core's own RelayUrl::parse (client/core/src/relay_client.rs)
 //     so the shell freezes exactly the host:port the core will dial;
+//   - stripDialPort: 'IPv4:port' dial shape -> bare IPv4 literal (regression
+//     guard: an exclusion `address` must never carry a port — the create-401
+//     of 2026-09-15 froze 'IP:port' as an ipv6 /128 family=2 entry);
 //   - buildExcludedRouteEntries: resolved endpoints -> /32 (IPv4) and /128
 //     (IPv6) isExcludedRoute entries, deduplicated;
 //   - isExclusionFailClosed: the N2-H severity rule (any resolution failure
@@ -72,36 +75,83 @@ export interface RelayEndpoint {
 
 export type AddressClass = 'ipv4' | 'ipv6' | 'invalid';
 
-// Classify a resolution result as a routable address literal. IPv4 = strict
-// dotted-quad (digits only, 0-255 per octet); IPv6 = contains ':' (kept as
-// text — the platform NetAddress takes the literal verbatim); anything else is
-// invalid and the caller treats it as a FAILED resolution.
-export function classifyAddress(address: string): AddressClass {
-  if (address.length === 0) {
-    return 'invalid';
-  }
-  if (address.indexOf(':') >= 0) {
-    return 'ipv6';
-  }
-  const octets: string[] = address.split('.');
+// Strict dotted-quad IPv4 literal check (digits only, 0-255 per octet) —
+// shared by classifyAddress and stripDialPort (same shape as
+// NetBirdConnector.isIPv4Literal; this module stays zero-import).
+function isIPv4LiteralStr(value: string): boolean {
+  const octets: string[] = value.split('.');
   if (octets.length !== 4) {
-    return 'invalid';
+    return false;
   }
   for (let i = 0; i < octets.length; i++) {
     const octet: string = octets[i];
     if (octet.length === 0 || octet.length > 3) {
-      return 'invalid';
+      return false;
     }
     for (let c = 0; c < octet.length; c++) {
       const code: number = octet.charCodeAt(c);
       if (code < 0x30 || code > 0x39) {
-        return 'invalid';
+        return false;
       }
     }
-    const value: number = Number(octet);
-    if (value > 255) {
-      return 'invalid';
+    if (Number(octet) > 255) {
+      return false;
     }
+  }
+  return true;
+}
+
+// Strip a trailing ':port' from the 'IPv4:port' DIAL shape (e.g.
+// '203.0.113.7:443' as resolveManagementIp returns it for the connector
+// dial). Exclusion entries freeze BARE address literals only: a port in the
+// address field is not an IPv6 literal, yet the pre-fix 'contains ":" ->
+// ipv6' rule rendered exactly that shape as a /128 family=2 entry the
+// platform rejects at VpnConnection.create (the create-401 of 2026-09-15).
+// Matches EXACTLY ONE ':' with a strict dotted-quad prefix and pure-digit
+// suffix; genuine IPv6 literals (multiple ':') and bracket forms ('[v6]',
+// '[v6]:port') are returned UNTOUCHED — never mis-stripped.
+export function stripDialPort(address: string): string {
+  const colon: number = address.indexOf(':');
+  if (colon < 0 || address.indexOf(':', colon + 1) >= 0) {
+    return address; // no colon, or more than one — never an IPv4:port shape
+  }
+  const port: string = address.slice(colon + 1);
+  if (port.length === 0 || port.length > 5) {
+    return address;
+  }
+  for (let c = 0; c < port.length; c++) {
+    const code: number = port.charCodeAt(c);
+    if (code < 0x30 || code > 0x39) {
+      return address;
+    }
+  }
+  if (!isIPv4LiteralStr(address.slice(0, colon))) {
+    return address;
+  }
+  return address.slice(0, colon);
+}
+
+// Classify a resolution result as a routable address literal. IPv4 = strict
+// dotted-quad (digits only, 0-255 per octet), also recognized in the
+// 'IPv4:port' dial shape (family is IPv4 — pair with stripDialPort before
+// rendering a destination; DEFENSIVE: this is the exact branch that
+// mis-classified the port-carrying management address as ipv6 pre-fix);
+// IPv6 = contains ':' and is NOT the IPv4:port shape (kept as text — the
+// platform NetAddress takes the literal verbatim; multi-':' and bracketed
+// forms always fall through here untouched); anything else is invalid and
+// the caller treats it as a FAILED resolution.
+export function classifyAddress(address: string): AddressClass {
+  if (address.length === 0) {
+    return 'invalid';
+  }
+  if (stripDialPort(address) !== address) {
+    return 'ipv4'; // 'a.b.c.d:port' dial shape: IPv4 family, port stripped
+  }
+  if (address.indexOf(':') >= 0) {
+    return 'ipv6';
+  }
+  if (!isIPv4LiteralStr(address)) {
+    return 'invalid';
   }
   return 'ipv4';
 }
@@ -199,7 +249,13 @@ export function buildExcludedRouteEntries(resolutions: EndpointResolution[],
       failed.push(resolution);
       continue;
     }
-    const addressClass: AddressClass = classifyAddress(resolution.address);
+    // DEFENSIVE regression guard (pairs with the stripDialPort call at the
+    // management derivation site in NetBirdVpnExtensionAbility): `address`
+    // must be a BARE literal — never 'IP:port'. Stripping here too keeps
+    // every caller safe: the old direct classification re-created the
+    // ipv6 /128 family=2 entry the platform rejects at create-time.
+    const address: string = stripDialPort(resolution.address);
+    const addressClass: AddressClass = classifyAddress(address);
     let prefix: number = -1;
     if (addressClass === 'ipv4') {
       prefix = 32;
@@ -210,13 +266,13 @@ export function buildExcludedRouteEntries(resolutions: EndpointResolution[],
       failed.push(resolution);
       continue;
     }
-    if (seen.indexOf(resolution.address) >= 0) {
+    if (seen.indexOf(address) >= 0) {
       duplicatesRemoved++;
       continue;
     }
-    seen.push(resolution.address);
+    seen.push(address);
     routes.push({
-      destination: resolution.address,
+      destination: address,
       prefixLength: prefix,
       gateway: gateway,
       hasGateway: true,

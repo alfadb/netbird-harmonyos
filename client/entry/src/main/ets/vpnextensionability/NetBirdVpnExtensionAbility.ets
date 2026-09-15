@@ -9,7 +9,8 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, formatRouteTable, formatRouteViolation,
   validateRouteEntries } from './NetBirdRouteValidation';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
-  RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl
+  RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl,
+  stripDialPort
 } from './NetBirdEndpointExclusion';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
@@ -516,8 +517,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // excluded even when relay_enabled=false (harmless and required), and
     // only an enabled relay turns its resolution failures fatal.
     const baseTemplate: VpnTunnelConfig = loadVpnTunnelConfig();
+    // The exclusion `address` field must be a BARE IP — NEVER 'IP:port'.
+    // resolveManagementIp returns the 'ip:port' DIAL address (needed
+    // verbatim by connectorStartWithSocket above); passing it through
+    // unstripped made classifyAddress read it as an IPv6 literal (/128,
+    // family=2) and the platform rejected the whole VpnConfig at
+    // VpnConnection.create (create-401, 2026-09-15). 对照 signal 分支:
+    // provisionSignalSocket freezes its dialIp with the same port-strip
+    // (addr.slice(0, addr.lastIndexOf(':'))) — stripDialPort is the shared,
+    // IPv6-safe implementation, and buildExcludedRouteEntries re-applies it
+    // as the builder-side defense.
     const exclusion: EndpointExclusionOutcome = await this.deriveEndpointExclusions(
-      mgmtEndpoint, connectAddr, signalProvisioned, baseTemplate.tunnelAddress);
+      mgmtEndpoint, stripDialPort(connectAddr), signalProvisioned,
+      baseTemplate.tunnelAddress);
     if (exclusion.fatal) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=endpoint-exclusion|' +
