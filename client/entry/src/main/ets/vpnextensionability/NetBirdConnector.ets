@@ -813,6 +813,86 @@ export function parseRelayAdvertised(status: ConnectorStatusResult):
   return view;
 }
 
+// Counter renderer for the relay status line: only finite numbers pass
+// through; every anomaly (null / string / NaN / Infinity) degrades to '-1'.
+function relayCounterOrUnknown(value: number | null | undefined): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.floor(value));
+  }
+  return '-1';
+}
+
+// Relay observability line (VPN_RELAY_STATUS): the periodic
+// VPN_CONNECTOR_STATUS log carries no relay segment, so a live relay's
+// counters were unreadable from the device side. formatRelayStatusLine
+// renders the `relay` + `relay_advertised` sections of ONE connector_status
+// snapshot into a single grep-able line, logged by the shell watcher right
+// after the status line (same poll, no extra timer). Lenient by contract: a
+// missing section, a non-object section, or any null/type-anomalous field
+// degrades to a placeholder ('unknown' / -1 / false) and NEVER throws, so
+// the surrounding watcher loop is untouched. Sensitive discipline: token
+// material cannot pass through by construction — token_valid is a BOOLEAN
+// verdict, and URLs render as a COUNT only (parseRelayAdvertised feeds the
+// count; no url text, no token_payload/token_signature).
+export function formatRelayStatusLine(requestId: string,
+  status: ConnectorStatusResult | null): string {
+  let enabled: string = 'unknown';
+  let state: string = 'unknown';
+  let framesTx: string = '-1';
+  let framesRx: string = '-1';
+  let transportBytes: string = '-1';
+  let reconnects: string = '-1';
+  let tokenValid: string = 'false';
+  let lastError: string = 'unknown';
+  let advertised: string = 'false';
+  let advertisedUrls: string = '-1';
+  try {
+    if (status !== null && status !== undefined) {
+      const relay = status.relay;
+      if (relay !== undefined && relay !== null) {
+        if (typeof relay.enabled === 'boolean') {
+          enabled = relay.enabled ? 'true' : 'false';
+        }
+        if (typeof relay.state === 'string' && relay.state.length > 0) {
+          state = relay.state;
+        }
+        framesTx = relayCounterOrUnknown(relay.frames_tx);
+        framesRx = relayCounterOrUnknown(relay.frames_rx);
+        transportBytes = relayCounterOrUnknown(relay.transport_bytes);
+        reconnects = relayCounterOrUnknown(relay.reconnects);
+        if (typeof relay.token_valid === 'boolean') {
+          tokenValid = relay.token_valid ? 'true' : 'false';
+        }
+        if (relay.last_error_class === null || relay.last_error_class === undefined) {
+          lastError = 'none'; // no error class = healthy relay (status-line convention)
+        } else if (typeof relay.last_error_class === 'string' &&
+          relay.last_error_class.length > 0) {
+          lastError = relay.last_error_class;
+        }
+      }
+      if (status.relay_advertised !== undefined && status.relay_advertised !== null) {
+        const view: RelayAdvertisedView = parseRelayAdvertised(status);
+        advertised = view.advertised ? 'true' : 'false';
+        advertisedUrls = String(view.urls.length);
+      }
+    }
+  } catch (error) {
+    // Lenient by contract: keep the placeholders gathered so far.
+  }
+  return 'VPN_RELAY_STATUS' +
+    '|requestId=' + requestId +
+    '|enabled=' + enabled +
+    '|state=' + state +
+    '|framesTx=' + framesTx +
+    '|framesRx=' + framesRx +
+    '|transportBytes=' + transportBytes +
+    '|reconnects=' + reconnects +
+    '|tokenValid=' + tokenValid +
+    '|lastError=' + lastError +
+    '|advertised=' + advertised +
+    '|advertisedUrls=' + advertisedUrls;
+}
+
 export function connectorStatus(): ConnectorStatusResult {
   return JSON.parse(core.connector_status()) as ConnectorStatusResult;
 }

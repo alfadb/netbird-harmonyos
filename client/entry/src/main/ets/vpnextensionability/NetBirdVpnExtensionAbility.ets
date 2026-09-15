@@ -21,6 +21,7 @@ import {
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   countPemCertificates,
+  formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
   parseSignalEndpoint,
   pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveExclusionEndpointIp,
@@ -950,6 +951,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.route_count, status.reconnects, errorClass, String(status.terminal),
           signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions,
           wgRxToTun, wgTxBytes);
+        // Relay observability: the status line above carries no relay
+        // segment, so a live relay's counters (frames/bytes/reconnects) were
+        // unreadable on-device. One lenient grep-able line from the SAME
+        // snapshot — never throws, never token material (urls = COUNT only).
+        hilog.info(DOMAIN, TAG, '%{public}s',
+          formatRelayStatusLine(this.requestId, status));
         // Cross-process status bridge (device-verified defect 2026-09-14): the
         // UI ability lives in ITS OWN process, so its NAPI status reads hit an
         // empty connector slot and the UI showed "disconnected / wg sessions: 0"
