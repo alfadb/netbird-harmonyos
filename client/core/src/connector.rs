@@ -1707,6 +1707,23 @@ impl ConnectorShared {
                 let mut slot = self.relay.lock_poison();
                 slot.advertised_urls =
                     cfg.relay.as_ref().map(|r| r.urls.clone()).unwrap_or_default();
+                // signal seam 镜像（WG over relay 修复）：OFFER/ANSWER 的
+                // Body 必须携带本端广告的中继地址（signalexchange.proto
+                // 字段 8；上游 handshaker.go:224-242 每个 offer/answer 都
+                // 填），对端**只在**该字段非空时才为我方 OpenConn 建中继
+                // lane（worker_relay.go:122-127 → :69）——缺失即"帧在发、
+                // 对端不建 lane、wgSessions=0"。取广告集**第一个**
+                // （management 广告序 = 上游 picker 的候选序；生产部署单
+                // URL，与上游"本端连接的实例地址"一致，多 URL 见
+                // `RealSignalExchange::set_relay_address` 注释）。未广告 →
+                // `None` 清除，字段回到缺省（无 relay 部署行为不变）。
+                // 广告记录本身无条件于 `relay_enabled`（上面的既有规则），
+                // 镜像沿用同一规则：仅 bookkeeping，绝不 dial。
+                let advertised_first = slot.advertised_urls.first().cloned();
+                drop(slot);
+                if let Some(rt) = self.signal.get() {
+                    rt.exchange.set_relay_address(advertised_first);
+                }
             }
             // N13-D1: run/update the relay client (opt-in only — with
             // `relay_enabled:false` (the hard default) NOTHING below runs
@@ -6140,6 +6157,54 @@ mod tests {
             "{\"advertised\":false,\"advertised_urls\":[]}"
         );
         assert_eq!(st.state, "disabled", "disabled semantics unchanged");
+    }
+
+    /// WG over relay 修复的注入点断言：sync 广告 relay 时，signal seam 的
+    /// exchange 拿到**第一个**广告 URL；管理端撤下（sync 无 relay）→
+    /// 清除。slot → OFFER body 的注入由 peer_conn 的 seam 测试钉住，
+    /// 两侧合并即 sync → offer body 的完整链路。全程 `relay_enabled:
+    /// false`：镜像只是 bookkeeping，绝不 dial。
+    #[tokio::test]
+    async fn sync_mirrors_first_advertised_relay_url_into_signal_seam() {
+        let shared = Arc::new(ConnectorShared::new(false, None));
+        let (exchange, rx) = RealSignalExchange::new();
+        let rt = Arc::new(SignalRuntime::new(
+            SignalLinkMaterials {
+                runtime: tokio::runtime::Handle::current(),
+                transport: GrpcTransport::Plaintext,
+                connect_timeout: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+                keys: EnvelopeKeyPair::from_secret_bytes(&[7u8; 32]),
+                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+            },
+            exchange.clone(),
+            rx,
+        ));
+        let _ = shared.signal.set(rt);
+        let wg = WgPeerRegistry::new();
+
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &advertised_urls_update(Some(advertised_relay_config(vec![
+                "rels://a.example:28443".into(),
+                "rel://b.example:28443".into(),
+            ]))),
+        );
+        assert_eq!(
+            exchange.relay_address().as_deref(),
+            Some("rels://a.example:28443"),
+            "multi-URL advertisement → the FIRST url rides the signal seam"
+        );
+
+        // management stops advertising (relay absent from the sync config)
+        // → the seam clears: offers go back to the field-free shape
+        shared.apply_update(&wg, &NoopHost, &advertised_urls_update(Some(Default::default())));
+        assert_eq!(
+            exchange.relay_address(),
+            None,
+            "no advertisement → field-free offer bodies (pre-fix behavior)"
+        );
     }
 
     /// The enabled-but-idle default shape: no sync yet → nothing advertised,

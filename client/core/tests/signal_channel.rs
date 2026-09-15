@@ -129,6 +129,9 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
         body::Type::Offer,
         "ufragA:pwdA",
         51_820,
+        // WG over relay: OUR advertised relay address rides the OFFER
+        // (signalexchange.proto field 8; upstream handshaker.go:224-242)
+        Some("rels://a.example:28443"),
     );
     let wire = client_a.encrypt_message(&offer).expect("seal");
     assert_eq!(wire.key, keys_a.public_key_base64());
@@ -143,6 +146,9 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     assert_eq!(got_b.payload, "ufragA:pwdA");
     assert_eq!(got_b.wg_listen_port, 51_820);
     assert_eq!(got_b.net_bird_version, SIGNAL_CLIENT_VERSION);
+    // the decrypted plaintext carried A's relay advertisement through the
+    // real unary RPC (the field the remote needs to OpenConn a lane to A)
+    assert_eq!(got_b.relay_server_address.as_deref(), Some("rels://a.example:28443"));
 
     // --- ANSWER: B → A (unary as well)
     let answer = client_b.build_message(
@@ -150,6 +156,8 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
         body::Type::Answer,
         "ufragB:pwdB",
         51_821,
+        // each side advertises ITS OWN relay (B's is deliberately different)
+        Some("rel://b.example:28443"),
     );
     client_b.send(&answer).await.expect("send answer (unary)");
     let env_a = recv(&mut reg_a.inbound).await;
@@ -157,6 +165,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     assert_eq!(got_a.kind, body::Type::Answer);
     assert_eq!(got_a.payload, "ufragB:pwdB");
     assert_eq!(got_a.wg_listen_port, 51_821);
+    assert_eq!(got_a.relay_server_address.as_deref(), Some("rel://b.example:28443"));
 
     // --- CANDIDATE: A → B via the UNARY Send RPC
     client_a
@@ -165,6 +174,7 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
             body::Type::Candidate,
             "candidate:udp:127.0.0.1:51820",
             0,
+            None,
         ))
         .await
         .expect("unary send");
@@ -172,6 +182,8 @@ async fn offer_answer_candidate_roundtrip_with_real_envelope() {
     let got_c = client_b.decrypt_envelope(&env_c).expect("B opens candidate");
     assert_eq!(got_c.kind, body::Type::Candidate);
     assert_eq!(got_c.payload, "candidate:udp:127.0.0.1:51820");
+    // upstream candidate bodies carry no relay fields — must stay absent
+    assert_eq!(got_c.relay_server_address, None);
 
     // --- server-side decrypt proof: the sink opened the sealed frames with
     // B's private key and saw exactly the plaintext fields; everything
@@ -305,6 +317,7 @@ async fn every_reconnect_takes_a_fresh_protected_socket_and_exhaustion_fails_clo
         body::Type::Candidate,
         "post-reconnect",
         0,
+        None,
     );
     client.send(&m).await.expect("send on re-registered channel");
     let env = recv(&mut reg2.inbound).await;

@@ -137,6 +137,7 @@ async fn session_receives_breaks_reconnects_and_receives_again() {
             body::Type::Candidate,
             "ice-candidate-1",
             0,
+            None,
         ))
         .await
         .expect("B sends candidate");
@@ -265,6 +266,7 @@ async fn malformed_frame_is_surfaced_and_stream_stays_up() {
             body::Type::Candidate,
             "corrupted-payload",
             0,
+            None,
         ))
         .await
         .expect("B sends corrupted candidate");
@@ -282,6 +284,7 @@ async fn malformed_frame_is_surfaced_and_stream_stays_up() {
             body::Type::Candidate,
             "clean-payload",
             0,
+            None,
         ))
         .await
         .expect("B sends clean candidate");

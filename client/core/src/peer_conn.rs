@@ -249,6 +249,15 @@ pub struct RealSignalExchange {
     tx: tokio::sync::mpsc::UnboundedSender<SignalOutgoing>,
     /// 未注册期间被拒绝的 send 计数（诊断）。
     refused: AtomicU64,
+    /// 本端广告的中继服务器 URL（`NetbirdConfig.relay.urls` 的第一个，
+    /// signalexchange.proto Body 字段 8 `relayServerAddress`）。connector 的
+    /// sync 路径经 [`Self::set_relay_address`] 更新；OFFER/ANSWER 出帧时
+    /// 带入——上游每个 offer/answer 都携带本端 relay 地址
+    /// （handshaker.go:224-242），对端**只在**该字段非空时才为我方
+    /// OpenConn 建中继 lane（worker_relay.go:122-127 → :69），缺失即
+    /// "WG over relay 无会话"。`None` = 未广告：字段保持缺省（无 relay
+    /// 部署的行为与既有测试不变）。
+    relay_address: std::sync::Mutex<Option<String>>,
 }
 
 impl RealSignalExchange {
@@ -260,8 +269,23 @@ impl RealSignalExchange {
             registered: Arc::new(AtomicBool::new(false)),
             tx,
             refused: AtomicU64::new(0),
+            relay_address: std::sync::Mutex::new(None),
         });
         (exchange, rx)
+    }
+
+    /// connector sync 路径更新广告中继地址。多 URL 取**第一个**：
+    /// management 的广告序即上游 picker 的候选序（同一 `urls` 列表，
+    /// picker.go:47）；上游语义是「本端实际连接的 relay 实例地址」
+    /// （manager.go:248-263），当前生产部署为单 URL，取首与之一致。
+    /// `None`（未广告/管理端撤下）清除——出帧回到无 relay 字段形态。
+    pub fn set_relay_address(&self, address: Option<String>) {
+        *self.relay_address.lock().expect("relay_address lock") = address;
+    }
+
+    /// 当前广告的中继地址（诊断/测试）。
+    pub fn relay_address(&self) -> Option<String> {
+        self.relay_address.lock().expect("relay_address lock").clone()
     }
 
     /// signal 流是否已注册（worker 任务维护；`send()` 的放行条件）。
@@ -294,12 +318,20 @@ impl SignalExchange for RealSignalExchange {
                 "signal-stream-not-registered (frame retained in orchestrator outbox)".into(),
             ));
         }
+        // OFFER/ANSWER 携带本端广告的中继地址（Body 字段 8）——上游
+        // handshaker.go:224-242 对 offer/answer 一律填写；CANDIDATE 的
+        // body 上游本就没有 relay 字段（signaler.go:32-38），保持缺省。
+        let relay_address = match kind {
+            PeerSignalKind::Offer | PeerSignalKind::Answer => self.relay_address(),
+            PeerSignalKind::Candidate => None,
+        };
         self.tx
             .send(SignalOutgoing {
                 remote_key: to_key.to_string(),
                 kind: wire_kind(kind),
                 payload: payload.to_string(),
                 wg_listen_port,
+                relay_server_address: relay_address,
             })
             .map_err(|_| {
                 ManagementError::Network("signal-link-closed (worker gone)".into())
@@ -1388,6 +1420,59 @@ mod tests {
         assert!(parse_ufrag_pwd("abc:0123456789012345678901").is_err(), "ufrag<4");
         assert!(parse_ufrag_pwd("abcd:short").is_err(), "pwd<22");
         assert!(parse_ufrag_pwd("abcd:012345678901234567890:").is_err(), "bad char");
+    }
+
+    /// 广告的中继地址（connector sync 经 `set_relay_address` 写入）被
+    /// 注入 OFFER 与 ANSWER 出帧、不注入 CANDIDATE（上游 offer/answer
+    /// 经 handshaker.go:224-242 一律携带，candidate body 没有该字段，
+    /// signaler.go:32-38）。
+    #[test]
+    fn real_exchange_stamps_relay_address_into_offer_and_answer_only() {
+        let (exchange, mut rx) = RealSignalExchange::new();
+        exchange.registered.store(true, Ordering::Release);
+        exchange.set_relay_address(Some("rels://relay.example:28443".into()));
+
+        for kind in [PeerSignalKind::Offer, PeerSignalKind::Answer] {
+            exchange.send("REMOTEKEY", kind, "ufrag:pwd", 51_820).expect("queued");
+            let out = rx.try_recv().expect("frame queued");
+            assert_eq!(out.remote_key, "REMOTEKEY");
+            assert_eq!(out.payload, "ufrag:pwd");
+            assert_eq!(out.wg_listen_port, 51_820);
+            assert_eq!(
+                out.relay_server_address.as_deref(),
+                Some("rels://relay.example:28443"),
+                "{kind:?} must carry the advertised relay address"
+            );
+        }
+        // candidate stays field-free (upstream candidate bodies never carry it)
+        exchange
+            .send("REMOTEKEY", PeerSignalKind::Candidate, "cand", 0)
+            .expect("queued");
+        let out = rx.try_recv().expect("frame queued");
+        assert_eq!(out.relay_server_address, None, "candidate must stay field-free");
+    }
+
+    /// 回归：未广告（slot 为 `None`，含清除后）所有出帧不带中继字段——
+    /// 无 relay 部署的字节形态与修复前一致。
+    #[test]
+    fn real_exchange_without_advertised_relay_keeps_bodies_field_free() {
+        let (exchange, mut rx) = RealSignalExchange::new();
+        exchange.registered.store(true, Ordering::Release);
+        assert_eq!(exchange.relay_address(), None, "fresh exchange: nothing advertised");
+
+        exchange.send("R", PeerSignalKind::Offer, "u:p", 1).expect("queued");
+        assert_eq!(rx.try_recv().expect("frame").relay_server_address, None);
+
+        // advertise, then management stops advertising → back to field-free
+        exchange.set_relay_address(Some("rel://a.example:1".into()));
+        exchange.send("R", PeerSignalKind::Answer, "u:p", 1).expect("queued");
+        assert_eq!(
+            rx.try_recv().expect("frame").relay_server_address,
+            Some("rel://a.example:1".into())
+        );
+        exchange.set_relay_address(None);
+        exchange.send("R", PeerSignalKind::Offer, "u:p", 1).expect("queued");
+        assert_eq!(rx.try_recv().expect("frame").relay_server_address, None);
     }
 
     #[test]

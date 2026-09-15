@@ -467,14 +467,32 @@ impl SignalClient {
 
     /// Build a plaintext (not yet sealed) `Message` — the
     /// `MarshalCredential` shape (client.go:74-97) minus the fields this
-    /// client does not produce yet (rosenpass, features, mode): set
-    /// explicitly on the returned `body` if ever needed.
+    /// client does not produce yet (rosenpass, features, mode, sessionId):
+    /// set explicitly on the returned `body` if ever needed.
+    ///
+    /// `relay_server_address` is OUR relay server URL (`Body` field 8,
+    /// `relayServerAddress`, signalexchange.proto L66-67) — upstream stamps
+    /// it into every OFFER and ANSWER (handshaker.go:211,218 both build
+    /// through `buildOfferAnswer`; marshal at signaler.go:57-68), and
+    /// the remote side refuses to open a relay lane toward us without it
+    /// (`isRelaySupported`: `RelaySrvAddress != ""`, worker_relay.go:122-127
+    /// → OpenConn at :69). `None` keeps the field absent (no-relay
+    /// deployments; upstream sends empty relay fields for as long as its
+    /// relay client has no instance address, handshaker.go:239-242).
+    /// CANDIDATE/HEARTBEAT frames never carry it upstream (the CANDIDATE
+    /// body at signaler.go:32-38 has no relay fields) — callers pass `None`
+    /// there. `relayServerIP` (field 11) stays unset: upstream fills it with
+    /// the RESOLVED IP of the connected relay instance
+    /// (manager.go:248-263 → client.go:763-774), which this client does not
+    /// track; receivers use it only as a DNS fallback, never as the
+    /// lane-open trigger.
     pub fn build_message(
         &self,
         remote_key: &str,
         kind: proto::body::Type,
         payload: impl Into<String>,
         wg_listen_port: u32,
+        relay_server_address: Option<&str>,
     ) -> proto::Message {
         proto::Message {
             key: self.keys.public_key_base64(),
@@ -484,6 +502,7 @@ impl SignalClient {
                 payload: payload.into(),
                 wg_listen_port,
                 net_bird_version: SIGNAL_CLIENT_VERSION.to_string(),
+                relay_server_address: relay_server_address.map(str::to_string),
                 ..Default::default()
             }),
         }
@@ -517,6 +536,7 @@ impl SignalClient {
             proto::body::Type::Heartbeat,
             "",
             0,
+            None,
         );
         self.send(&msg).await
     }
@@ -548,6 +568,12 @@ pub struct SignalOutgoing {
     pub payload: String,
     /// `Body.wgListenPort`.
     pub wg_listen_port: u32,
+    /// OUR advertised relay server URL (`Body.relayServerAddress`, field 8)
+    /// for OFFER/ANSWER — the field that makes the remote peer open a relay
+    /// lane toward us (worker_relay.go:122-127 → :69; handshaker.go:239-242).
+    /// `None` = field absent (CANDIDATE/HEARTBEAT never carry it upstream;
+    /// no-relay deployments stay field-free).
+    pub relay_server_address: Option<String>,
 }
 
 /// Long-lived signal session with upstream-shaped reconnect: register the
@@ -657,9 +683,13 @@ impl SignalSession {
     /// (client.go:74-97: type/payload/wgListenPort/netBirdVersion) happen
     /// in [`SignalClient::build_message`].
     pub async fn send_outgoing(&mut self, out: &SignalOutgoing) -> Result<(), ManagementError> {
-        let msg = self
-            .client
-            .build_message(&out.remote_key, out.kind, out.payload.as_str(), out.wg_listen_port);
+        let msg = self.client.build_message(
+            &out.remote_key,
+            out.kind,
+            out.payload.as_str(),
+            out.wg_listen_port,
+            out.relay_server_address.as_deref(),
+        );
         self.client.send(&msg).await
     }
 
@@ -900,6 +930,7 @@ mod tests {
             proto::body::Type::Offer,
             "ufrag:pwd",
             51_820,
+            None,
         );
         assert_eq!(msg.key, c.keys.public_key_base64());
         assert_eq!(msg.remote_key, "REMOTEKEY");
@@ -908,6 +939,83 @@ mod tests {
         assert_eq!(body.payload, "ufrag:pwd");
         assert_eq!(body.wg_listen_port, 51_820);
         assert_eq!(body.net_bird_version, SIGNAL_CLIENT_VERSION);
+    }
+
+    /// WG over relay 修复的核心断言：广告了中继时，OFFER 与 ANSWER 的
+    /// Body 携带 `relayServerAddress`（字段 8）且值正确、`relayServerIP`
+    /// （字段 11，需解析 IP，本端不产出）保持缺省——对端只有在该字段
+    /// 非空时才为我方 OpenConn（worker_relay.go:122-127 → :69）。
+    #[tokio::test]
+    async fn build_message_carries_relay_address_for_offer_and_answer() {
+        let c = client();
+        for kind in [proto::body::Type::Offer, proto::body::Type::Answer] {
+            let msg = c.build_message(
+                "REMOTEKEY",
+                kind,
+                "ufrag:pwd",
+                51_820,
+                Some("rels://relay.example:28443"),
+            );
+            assert_eq!(msg.key, c.keys.public_key_base64());
+            assert_eq!(msg.remote_key, "REMOTEKEY");
+            let body = msg.body.as_ref().expect("body");
+            assert_eq!(body.r#type, kind as i32);
+            assert_eq!(body.payload, "ufrag:pwd");
+            assert_eq!(body.wg_listen_port, 51_820);
+            assert_eq!(body.net_bird_version, SIGNAL_CLIENT_VERSION);
+            // the fix: field 8 set, field 11 untouched
+            assert_eq!(
+                body.relay_server_address.as_deref(),
+                Some("rels://relay.example:28443"),
+                "{kind:?} must carry relayServerAddress"
+            );
+            assert!(
+                body.relay_server_ip.is_none(),
+                "relayServerIP needs the resolved instance IP we do not track"
+            );
+        }
+    }
+
+    /// 回归：未广告（`None`）时字段保持缺省——无 relay 部署的字节形态
+    /// 与修复前完全一致（对端照旧判定 "Relay is not supported"，行为
+    /// 不变）。
+    #[tokio::test]
+    async fn build_message_without_relay_keeps_field_absent() {
+        let c = client();
+        let msg = c.build_message(
+            "REMOTEKEY",
+            proto::body::Type::Offer,
+            "ufrag:pwd",
+            51_820,
+            None,
+        );
+        let body = msg.body.as_ref().expect("body");
+        assert_eq!(body.relay_server_address, None);
+        assert_eq!(body.relay_server_ip, None);
+    }
+
+    /// 明文 Body 经真实信封（seal → open → protobuf decode）往返后，
+    /// 读侧 [`SignalMessage`] 携带同一中继地址——对端解出的就是我们的
+    /// 广告值（signal_channel.rs 另有经 mock 服务器的全链路版本）。
+    #[tokio::test]
+    async fn relay_address_survives_envelope_roundtrip() {
+        let alice = client();
+        let bob = client();
+        let msg = alice.build_message(
+            &bob.keys.public_key_base64(),
+            proto::body::Type::Offer,
+            "ufragA:pwdA",
+            51_820,
+            Some("rels://relay.example:28443"),
+        );
+        let wire = alice.encrypt_message(&msg).unwrap();
+        let opened = bob.decrypt_envelope(&wire).unwrap();
+        assert_eq!(opened.kind, proto::body::Type::Offer);
+        assert_eq!(opened.payload, "ufragA:pwdA");
+        assert_eq!(
+            opened.relay_server_address.as_deref(),
+            Some("rels://relay.example:28443")
+        );
     }
 
     #[tokio::test]
@@ -919,6 +1027,7 @@ mod tests {
             proto::body::Type::Candidate,
             "candidate-1",
             0,
+            None,
         );
         let wire = alice.encrypt_message(&msg).unwrap();
         // wire shape: key=alice pub b64, remote_key=bob pub b64
@@ -946,6 +1055,7 @@ mod tests {
             proto::body::Type::Offer,
             "u:p",
             0,
+            None,
         );
         let wire = alice.encrypt_message(&msg).unwrap();
         // eve is not the addressed peer: authentication fails
@@ -986,7 +1096,7 @@ mod tests {
             c.encrypt_message(&empty),
             Err(ManagementError::Request { status: 0, .. })
         ));
-        let msg = c.build_message("not-base64!!!", proto::body::Type::Offer, "", 0);
+        let msg = c.build_message("not-base64!!!", proto::body::Type::Offer, "", 0, None);
         assert!(matches!(
             c.encrypt_message(&msg),
             Err(ManagementError::Parse(_))
