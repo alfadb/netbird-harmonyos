@@ -27,6 +27,14 @@ export interface VpnRouteConfig {
   hasGateway: boolean;
   isDefaultRoute: boolean;
   isExcludedRoute: boolean;
+  // Provenance tag for the pre-create route truth log / fail-closed
+  // validation (H1 diagnosis, docs/vpn-create-401-diagnosis-20260915.md
+  // §3.2/§5): 'managed' is written ONLY by applyNetworkConfig for
+  // core-snapshot-derived entries. Base-template and derived-exclusion
+  // entries stay untagged (classified by shape in
+  // NetBirdRouteValidation.routeEntrySource). Never mapped into the platform
+  // VpnConfig — buildPlatformVpnConfig reads fixed fields only.
+  source?: string;
 }
 
 export interface VpnTunnelConfig {
@@ -151,7 +159,11 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
       gateway: address,
       hasGateway: true,
       isDefaultRoute: managed[i].is_default,
-      isExcludedRoute: false
+      isExcludedRoute: false,
+      // Provenance only (route truth log / H1 validation): marks the entry
+      // as core-snapshot-derived. Values are untouched — the platform shape
+      // produced by buildPlatformVpnConfig is unchanged.
+      source: 'managed'
     });
   }
   for (let i = 0; i < base.routes.length; i++) {

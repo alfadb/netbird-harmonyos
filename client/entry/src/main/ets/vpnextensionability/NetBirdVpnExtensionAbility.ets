@@ -6,6 +6,8 @@ import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions } from './NetBirdVpnConfig';
+import { RouteCheckResult, RouteViolation, formatRouteTable, formatRouteViolation,
+  validateRouteEntries } from './NetBirdRouteValidation';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl
 } from './NetBirdEndpointExclusion';
@@ -557,6 +559,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     this.logConfigApplied(merged);
 
+    // H1 diagnosis (docs/vpn-create-401-diagnosis-20260915.md §3.2/§4/§5):
+    // per-entry SDK-contract validation + the pre-create per-field truth
+    // dump. The core snapshot reaches these entries through a bare
+    // JSON.parse; a required field that arrived undefined/NaN must abort
+    // BEFORE connection.create() — fail-closed, no repair, no silent drop.
+    this.logRouteTable(merged);
+    const routeCheck: RouteCheckResult = validateRouteEntries(merged.routes, merged.interfaceName);
+    if (!routeCheck.ok) {
+      this.logRouteViolations(routeCheck.violations);
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=route-validation|' +
+        'errorClass=route-entry-invalid-fail-closed|action=connector-stopped-no-vpn|' +
+        'violations=%{public}d',
+        this.requestId, routeCheck.violations.length);
+      connectorStop();
+      return;
+    }
+
     const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
     // N8: stash the managed route set actually merged into the platform
     // VpnConfig, for the initial-create ACK once create() + the WG feed
@@ -1036,6 +1056,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         ? net.default_route.allowed
         : false;
       merged = gateDefaultRoutes(merged, gateAllowed);
+      // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
+      // violates the SDK RouteInfo contract must never reach create().
+      // Failing BEFORE the destroy leg keeps the current generation intact
+      // (same early-throw discipline as the snapshot preconditions above).
+      this.logRouteTable(merged);
+      const routeCheck: RouteCheckResult = validateRouteEntries(merged.routes, merged.interfaceName);
+      if (!routeCheck.ok) {
+        this.logRouteViolations(routeCheck.violations);
+        stage = 'route-validation';
+        throw new Error('recreate-route-entry-invalid');
+      }
       // the ACK set is the core-visible managed subset — exactly the
       // networks the core renders as its desired set (NOT the shell-local
       // base exclusions, which the core does not track)
@@ -1247,6 +1278,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // The peer endpoint feeds the native WireGuard data plane, not the
     // platform VpnConfig. TODO: native connect through the protected socket
     // is not wired yet (Rust core data-plane export pending) — 未验证.
+  }
+
+  // H1 pre-create truth dump (diagnosis §5 T0 / §6-4): every route entry
+  // with its per-field runtime truth, BEFORE connection.create() — one
+  // hilog line each (header + one per entry). Field names and route values
+  // only; never tokens or credentials.
+  private logRouteTable(config: VpnTunnelConfig): void {
+    const lines: string[] = formatRouteTable(this.requestId, config.interfaceName, config.routes);
+    for (let i = 0; i < lines.length; i++) {
+      hilog.info(DOMAIN, TAG, '%{public}s', lines[i]);
+    }
+  }
+
+  private logRouteViolations(violations: RouteViolation[]): void {
+    for (let i = 0; i < violations.length; i++) {
+      hilog.error(DOMAIN, TAG, '%{public}s', formatRouteViolation(this.requestId, violations[i]));
+    }
   }
 
   // Post-create settle: TUN fd contract check, then the fail-closed protect

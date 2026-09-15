@@ -252,6 +252,10 @@ export interface DeviceConfigFile {
   ca_pem?: string;
   server_name?: string;
   hostname?: string;
+  // N13-D1: opt-in relay client switch (core ConnectorConfig JSON key
+  // 'relay_enabled', default false). Parsed leniently below: only the exact
+  // boolean true enables it; missing/false/non-boolean stays disabled.
+  relay_enabled?: boolean;
 }
 
 // Read one UTF-8 text file from the app private directory. Throws on
@@ -305,6 +309,12 @@ export function parseDeviceConfig(text: string): DeviceConfigFile {
   }
   if (device.private_key === undefined || device.private_key.length === 0) {
     throw new Error('device config: private_key missing');
+  }
+  // N13-D1 lenient relay opt-in: only the exact boolean true enables; a
+  // missing/false/non-boolean value (e.g. string/number) stays disabled and
+  // NEVER throws — a malformed flag must not abort the existing start flow.
+  if (device.relay_enabled !== true) {
+    device.relay_enabled = undefined;
   }
   return device;
 }
@@ -377,6 +387,12 @@ export function buildConnectorConfigJson(device: DeviceConfigFile,
   }
   if (forceDefaultRoute) {
     cfg['force_default_route'] = true;
+  }
+  // N13-D1: opt-in relay switch — written ONLY when true (core default is
+  // false); enabling on a device requires the N2-H endpoint exclusion set
+  // to be ready for the relay URLs.
+  if (device.relay_enabled === true) {
+    cfg['relay_enabled'] = true;
   }
   return JSON.stringify(cfg);
 }
