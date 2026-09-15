@@ -117,6 +117,11 @@ fn map_errno(e: i32) -> TunError {
 #[derive(Debug)]
 pub struct TunFd {
     fd: Option<i32>,
+    /// Ledger instance number assigned to this dup at create time
+    /// (`emit_create(Role::FdDup, ..)`). Kept so `close_dup` can attribute
+    /// the close BY INSTANCE (`emit_close_inst`): a role+fd lookup alone is
+    /// ambiguous once a foreign close left a stale same-number entry open.
+    ledger_inst: u32,
     /// O_NONBLOCK observed on the shared open-file description at dup time
     /// (F_GETFL read-only). Informative only: flipping it here would flip the
     /// platform fd too, which is why TunFd never writes file flags.
@@ -158,17 +163,21 @@ impl TunFd {
         let nonblock_ofd = fl != -1 && (fl & sys::O_NONBLOCK) != 0;
 
         // ownership table: the platform fd is registered once (observed,
-        // never to be closed by native); every dup is its own entry
+        // never to be closed by native); every dup is its own entry. The
+        // dup's instance number is KEPT on the TunFd so the later close can
+        // be attributed to exactly this entry (fd numbers get reused after a
+        // foreign close, which makes a role+fd lookup ambiguous).
         if !crate::ledger::is_created(crate::ledger::Role::FdOrig) {
             crate::ledger::emit_create(crate::ledger::Role::FdOrig, fd_raw);
         }
-        crate::ledger::emit_create(crate::ledger::Role::FdDup, fd_dup);
+        let ledger_inst = crate::ledger::emit_create(crate::ledger::Role::FdDup, fd_dup);
         emit(&format!(
             "N1BDISC_TUN_OPEN|raw={fd_raw}|dup={fd_dup}|via={}|nonblock_ofd={nonblock_ofd}",
             if via_dupfd { "dupfd_cloexec" } else { "dup_setfd" }
         ));
         Ok(TunFd {
             fd: Some(fd_dup),
+            ledger_inst,
             nonblock_ofd,
         })
     }
@@ -318,7 +327,7 @@ impl TunFd {
     pub fn close(mut self) -> Result<i32, TunError> {
         match self.fd.take() {
             Some(fd) => {
-                close_dup(fd, "explicit");
+                close_dup(fd, self.ledger_inst, "explicit");
                 Ok(fd)
             }
             None => Err(TunError::AlreadyClosed),
@@ -329,20 +338,31 @@ impl TunFd {
 impl Drop for TunFd {
     fn drop(&mut self) {
         if let Some(fd) = self.fd.take() {
-            close_dup(fd, "drop");
+            close_dup(fd, self.ledger_inst, "drop");
         }
     }
 }
 
 /// The ONLY site that runs close(2) on a dup. Ledger close marker only for a
-/// close that actually succeeded (ret == 0, probe convention); a failed close
-/// (foreign close / number reuse) emits the errno so the capture shows the
-/// mismatch instead of silently keeping a bogus open entry.
-fn close_dup(fd: i32, via: &str) {
+/// close that actually succeeded (ret == 0, probe convention), attributed BY
+/// INSTANCE (`emit_close_inst` with the inst this TunFd received at create
+/// time): if a foreign close left this instance's entry stale-open and the
+/// number was reused, a role+fd first-match lookup would mis-attribute the
+/// close to that stale entry and leave our own entry open forever. A failed
+/// close (foreign close / number reuse) emits the errno so the capture shows
+/// the mismatch instead of silently keeping a bogus open entry.
+///
+/// Scope note: this fixes attribution for OUR OWN close of a still-registered
+/// instance. A stale TunFd whose number was already reused by ANOTHER open
+/// would have its sys::close hit the new owner's descriptor (close(2) takes
+/// numbers, not instances) — inherent to the kernel API and detected as
+/// before by the poll/read EBADF contract paths, not by the ledger.
+fn close_dup(fd: i32, ledger_inst: u32, via: &str) {
     let ret = unsafe { sys::close(fd) };
     if ret == 0 {
-        crate::ledger::emit_close(
+        crate::ledger::emit_close_inst(
             crate::ledger::Role::FdDup,
+            ledger_inst,
             fd,
             crate::ledger::ClosedBy::ProbeProtocolClose,
         );

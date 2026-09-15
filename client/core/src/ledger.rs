@@ -157,6 +157,15 @@ pub fn emit_create(role: Role, fd: i32) -> u32 {
 /// `(role, inst)` pairing state machine registers the fail (`close-before-
 /// create` / `state-conflict`). Silently dropping the marker would hide the
 /// contradiction from the rebuild.
+///
+/// Attribution caveat: this lookup matches the FIRST still-open entry of the
+/// same `(role, fd)` — the instance is NOT part of the match. When fd numbers
+/// are reused while a stale entry of the same `(role, fd)` is still open
+/// (e.g. after a foreign close left it open, per the fd contract), the close
+/// is mis-attributed to that stale entry and the new entry stays open.
+/// Existing callers and tests depend on this first-match behavior (kept
+/// unchanged); NEW code that holds the `inst` from [`emit_create`] must
+/// prefer [`emit_close_inst`], which closes by instance.
 pub fn emit_close(role: Role, fd: i32, by: ClosedBy) {
     let at = mono_ms();
     let inst = with_ledger(|l| {
@@ -182,6 +191,69 @@ pub fn emit_close(role: Role, fd: i32, by: ClosedBy) {
             // no open instance matched: emit the orphan close (never-created
             // instance number for this role) and let the runner's pairing
             // state machine carry the :406(c) integrity failure
+            let orphan_inst = with_ledger(|l| l.next_inst[role.order() as usize]);
+            fd_marker(&fd.to_string(), role.literal(), orphan_inst, "close", at, by.literal(), "none");
+        }
+    }
+}
+
+/// Register a probe-performed close attributed BY INSTANCE: only the entry
+/// `(role, inst)` carrying exactly this fd is closed, and only if it is still
+/// open. The `inst` is the value the caller received from [`emit_create`].
+///
+/// This removes the fd-number-reuse ambiguity of [`emit_close`]: with a stale
+/// still-open entry of the same `(role, fd)` (a foreign close left it open
+/// and the kernel reused the number for a new instance), the legacy role+fd
+/// first-match lookup mis-attributes the close to the stale entry, while this
+/// function closes the NEW instance's own entry and leaves the stale entry
+/// untouched (it stays open, as the no-fabricated-close contract requires).
+///
+/// Semantics of the non-closing cases:
+/// - entry `(role, inst, fd)` already closed: idempotent no-op — no state
+///   change and NO second close marker (a repeated close for one instance
+///   would itself be a fabricated transition);
+/// - no entry matches `(role, inst, fd)` (unknown inst, or the instance
+///   carries a different fd): nothing is closed and nothing is fabricated in
+///   the table; the orphan close marker (never-created instance number) is
+///   emitted so the runner's :406(c) pairing state machine still sees the
+///   integrity failure — same discipline as [`emit_close`]'s orphan path.
+///
+/// Scope note: instance attribution is only as good as the caller's `inst`.
+/// In this crate the sole production caller is `close_dup` (TunFd's dup),
+/// which now carries the inst it received at create time. FdOrig is
+/// create-only (its close belongs to destroy() and is never emitted by
+/// native), so no other production role closes at all — see tun.rs.
+pub fn emit_close_inst(role: Role, inst: u32, fd: i32, by: ClosedBy) {
+    let at = mono_ms();
+    let outcome = with_ledger(|l| {
+        match l
+            .entries
+            .iter_mut()
+            .find(|e| e.role == role && e.inst == inst && e.fd == Some(fd))
+        {
+            Some(e) => {
+                if e.closed_at.is_none() {
+                    e.closed_at = Some(at);
+                    e.closed_by = Some(by);
+                    Some(true)
+                } else {
+                    // already closed: never re-close an instance
+                    Some(false)
+                }
+            }
+            None => None,
+        }
+    });
+    match outcome {
+        Some(true) => {
+            fd_marker(&fd.to_string(), role.literal(), inst, "close", at, by.literal(), "none");
+        }
+        Some(false) => {
+            // already-closed instance: idempotent no-op, no marker
+        }
+        None => {
+            // no matching instance: orphan close marker (never-created
+            // instance number), no fabricated ledger entry
             let orphan_inst = with_ledger(|l| l.next_inst[role.order() as usize]);
             fd_marker(&fd.to_string(), role.literal(), orphan_inst, "close", at, by.literal(), "none");
         }
@@ -423,5 +495,94 @@ mod tests {
         emit_close(Role::D5SinkSocket, fd, ClosedBy::ProbeProtocolClose);
         let entries_after = with_ledger(|l| l.entries.len());
         assert_eq!(entries_before, entries_after, "orphan close must not fabricate a ledger entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // Deterministic reproduction of the close-attribution ambiguity: a
+    // foreign close leaves the STALE entry open, the fd number is reused by
+    // a NEW instance, and the new instance's close must land on ITS OWN
+    // entry (by instance), not on the first (role, fd) match. Ledger-level
+    // only: fake fd values (no syscalls run on them), serialized on
+    // TEST_LOCK, zero concurrency — the interleaving that used to make this
+    // a 2/240 pressure flake is here fixed by construction.
+    // -----------------------------------------------------------------------
+
+    fn fd_dup_state(inst: u32) -> (bool, Option<ClosedBy>) {
+        with_ledger(|l| {
+            let e = l
+                .entries
+                .iter()
+                .find(|e| e.role == Role::FdDup && e.inst == inst)
+                .expect("fd_dup entry exists");
+            (e.closed_at.is_some(), e.closed_by)
+        })
+    }
+
+    #[test]
+    fn emit_close_inst_closes_only_its_own_entry_not_a_stale_same_fd_open() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fd = 7000 + (mono_ms() % 1000) as i32;
+        // stale instance: its kernel fd was foreign-closed behind our back,
+        // so its ledger entry STAYS open (no fabricated close) while the
+        // number becomes reusable
+        let stale = emit_create(Role::FdDup, fd);
+        // fd-number reuse: a NEW instance of the same role gets the SAME fd
+        let own = emit_create(Role::FdDup, fd);
+        assert_ne!(stale, own, "two open entries now share this (role, fd)");
+
+        // the fix: close by instance — must land on the new entry only
+        emit_close_inst(Role::FdDup, own, fd, ClosedBy::ProbeProtocolClose);
+        let (own_closed, own_by) = fd_dup_state(own);
+        let (stale_closed, stale_by) = fd_dup_state(stale);
+        assert!(own_closed, "the new instance's close must mark its OWN entry");
+        assert_eq!(own_by, Some(ClosedBy::ProbeProtocolClose));
+        assert!(!stale_closed, "the stale same-number entry must stay open");
+        assert_eq!(stale_by, None, "the stale entry must not be mis-closed");
+
+        // integrity semantics: an unknown inst closes nothing, fabricates
+        // nothing (the orphan close MARKER still goes to the capture)
+        let before = with_ledger(|l| l.entries.len());
+        emit_close_inst(Role::FdDup, u32::MAX, fd, ClosedBy::ProbeProtocolClose);
+        assert_eq!(
+            with_ledger(|l| l.entries.len()),
+            before,
+            "orphan emit_close_inst must not fabricate an entry"
+        );
+        assert!(!fd_dup_state(stale).0, "orphan close must not touch other instances");
+        // and an already-closed instance is never re-closed (idempotent)
+        emit_close_inst(Role::FdDup, own, fd, ClosedBy::D6aProbeClose);
+        let (own_closed2, own_by2) = fd_dup_state(own);
+        assert!(own_closed2 && own_by2 == Some(ClosedBy::ProbeProtocolClose), "no re-close");
+
+        // hygiene: close the stale entry so this test leaves no open fd_dup
+        // entry in the process-global ledger for later tests
+        emit_close_inst(Role::FdDup, stale, fd, ClosedBy::D6aProbeClose);
+        assert!(fd_dup_state(stale).0);
+    }
+
+    #[test]
+    fn legacy_emit_close_first_match_exposes_the_reuse_ambiguity() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fd = 8000 + (mono_ms() % 1000) as i32;
+        let stale = emit_create(Role::FdDup, fd);
+        let own = emit_create(Role::FdDup, fd);
+        // The LEGACY interface keeps its frozen first-(role,fd)-open-match
+        // semantics (existing callers and tests depend on it — see its doc
+        // comment). With a stale open entry sharing the fd number it lands
+        // on the STALE entry and leaves the new one open — the deterministic
+        // reproduction of the mis-attribution that motivated
+        // emit_close_inst. This pins the documented legacy contract so it
+        // cannot silently drift; it is NOT the behavior new code should use.
+        emit_close(Role::FdDup, fd, ClosedBy::ProbeProtocolClose);
+        let (stale_closed, stale_by) = fd_dup_state(stale);
+        let (own_closed, own_by) = fd_dup_state(own);
+        assert!(stale_closed, "legacy role+fd lookup matches the FIRST open entry: the stale one");
+        assert_eq!(stale_by, Some(ClosedBy::ProbeProtocolClose));
+        assert!(!own_closed, "under the legacy lookup the new entry stays open forever");
+        assert_eq!(own_by, None);
+
+        // hygiene: close the remaining entry (by instance)
+        emit_close_inst(Role::FdDup, own, fd, ClosedBy::D6aProbeClose);
+        assert!(fd_dup_state(own).0);
     }
 }
