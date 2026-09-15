@@ -25,6 +25,20 @@
 
 ## 1. 前置条件（全部只读检查）
 
+### 1.0 步骤 0：授权窗口时钟比对（**2026-09-15 增补，硬门前置**；条款文本见 `docs/governance-amendment-proposal-20260915.md` §二）
+
+> **增补缘由**：本手册是 2026-09-15 越界执行的依据文档——AUTH `valid_until` 为 `2026-09-15T14:29:26+08:00`，而设备操作实际执行于当日 18:38–18:53（CST），超窗约 4 小时 9 分；执行者读过 AUTH 内容但未比对当前时刻，派发稿亦口头声称「在窗口内」。据此增补本步骤，先于 §1.1 全部检查执行。
+
+在发出**任何设备命令**（含清理、卸载、撤销、force-stop、安装、点击、抓日志）之前：
+
+1. 记录**主机当前时间**（带时区）与**设备当前时间**（带时区）；
+2. 与当次 AUTH 的 `valid_from`/`valid_until` 原值三方比对，确认主机时刻与设备时刻**均**在窗口内；
+3. 比对结果（含具体时刻、时区、`valid_from`/`valid_until` 原值、窗口内/外结论）**写入运行记录**——无比对记录即视为未比对；
+4. 派发稿须写明 `auth_id` 与窗口原文，执行者**先回报比对结果再动手**；未见比对结果，任何设备命令不得发出；
+5. 「口头认为还在窗口内」不构成依据；只有 AUTH 文件中的窗口与本次实测比对结果构成依据；
+6. **失败即停**：hdc 不可达、设备需解锁、主机与设备时钟偏差超过阈值（提案值 60 秒，待 T0 裁定）→ 立即停止并上报，不得重试或绕过；
+7. 窗口外产生的一切产物标注 `out_of_authorization_window: true` / `is_evidence: false` / `not_a_gate_pass: true`，不得作为证据、不得被后续 AUTH 追认；补签 AUTH 只对签发时刻之后生效。
+
 ### 1.1 设备与连接
 
 ```bash
@@ -178,7 +192,7 @@ printf 'route-exclusion' > /tmp/netbird-protect-deviation
 4. `connector: login ok (peer address assigned)`（`connector.rs:3565`）
 5. `connector: network map applied serial=… peers=… routes=…`（`connector.rs:1815`）与 `connector: signal stream registered (ice initiation armed)`（`connector.rs:2935`）
 6. 系统 VPN 建立：`VPN_CONNECTION_STATUS_CHANGED`（材料1 §1 表里程碑⑥）
-7. **relay 负断言**：日志中不出现 `netbird-config relay urls=…`（`connector.rs:1667`）及任何 relay/WSS 拨号痕迹——本轮 `relay_enabled=false`，出现即说明配置被误改，按失败处理
+7. **relay 判据**（**2026-09-15 判据修正**：原第 7 条把广告行本身写成失败判据，与实现不符，本次修正）：管理面正常广告中继时会出现 `connector: netbird-config relay urls=… token_present=… (uris=…)`（`connector.rs:1659-1673`）——该行是**只读广告探针**，其出现属**正常**，不表示 relay 已启用或有任何拨号（`relay_enabled:false` 为硬默认时，`connector.rs:1674-1697` 的 relay 生命周期**完全不运行**，`relay_status` 亦返回 disabled，`connector.rs:1598-1601`）。判据落在**拨号面**：本轮 `relay_enabled=false`，日志中**不得出现任何 relay/WSS 拨号痕迹**——relay 连接建立/状态迁移、relay Auth/Transport 帧、承载（carrier）帧与字节计数——出现任一即说明配置被误改，按失败处理。须始终区分「**广告**」（管理面下发配置，恒可出现）与「**启用/拨号**」（`relay_enabled=true` 才会发生）。
 
 **失败看什么**：
 
