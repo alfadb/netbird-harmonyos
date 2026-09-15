@@ -1172,6 +1172,16 @@ struct ConnectorShared {
 struct RelaySlot {
     client: Option<crate::relay_client::RelayClient>,
     urls: Vec<String>,
+    /// Management-ADVERTISED relay URL set (`NetbirdConfig.relay.urls`) from
+    /// the last sync carrying a netbird config. Recorded ALWAYS — also when
+    /// `relay_enabled:false` — so the shell can learn the relay host and
+    /// freeze its N2-H endpoint exclusions BEFORE it enables relay (with the
+    /// old record-only-while-running rule the exclusion needed data that was
+    /// exposed only after it had to be in place: a circular dependency).
+    /// Pure bookkeeping: recording never dials; the client lifecycle stays
+    /// gated by `relay_enabled` exactly as before. URLs only — the relay
+    /// token never enters this slot (credential discipline).
+    advertised_urls: Vec<String>,
 }
 
 impl ConnectorShared {
@@ -1595,9 +1605,18 @@ impl ConnectorShared {
 
     /// The status document's `relay` section (counts/urls/class only —
     /// never token material; credential discipline as everywhere else).
+    /// The ADVERTISED url set rides along in EVERY state (also
+    /// `relay_enabled:false`); the runtime fields (enabled/state/counters)
+    /// keep their exact pre-existing semantics.
     fn relay_status(&self) -> RelayStatus {
+        let advertised_urls = self.relay.lock_poison().advertised_urls.clone();
+        let advertised = !advertised_urls.is_empty();
         if !self.relay_enabled {
-            return RelayStatus::disabled();
+            return RelayStatus {
+                advertised,
+                advertised_urls,
+                ..RelayStatus::disabled()
+            };
         }
         let slot = self.relay.lock_poison();
         let urls = slot.urls.clone();
@@ -1606,6 +1625,8 @@ impl ConnectorShared {
                 enabled: true,
                 state: relay_state_token(crate::relay_client::RelayState::Disconnected).into(),
                 urls,
+                advertised,
+                advertised_urls,
                 ..RelayStatus::empty_counters()
             };
         };
@@ -1614,6 +1635,8 @@ impl ConnectorShared {
             enabled: true,
             state: relay_state_token(stats.state).into(),
             urls,
+            advertised,
+            advertised_urls,
             reconnects: stats.reconnects,
             frames_tx: stats.frames_tx.iter().sum(),
             frames_rx: stats.frames_rx.iter().sum(),
@@ -1670,6 +1693,20 @@ impl ConnectorShared {
                     r.urls.join(",")
                 )),
                 None => hilog::emit("connector: netbird-config relay none"),
+            }
+            // The ADVERTISEMENT is recorded on every sync REGARDLESS of the
+            // `relay_enabled` opt-in (loop-dependency fix): the shell reads
+            // `advertised_urls` from the status document to install its
+            // N2-H relay exclusion BEFORE it may enable relay. `None` (no
+            // relay in this sync's config) clears the record — the status
+            // then honestly says "not advertised". Bookkeeping only: this
+            // never dials; the client lifecycle below stays gated exactly
+            // as before, so `relay_enabled:false` keeps ZERO outbound relay
+            // behavior.
+            {
+                let mut slot = self.relay.lock_poison();
+                slot.advertised_urls =
+                    cfg.relay.as_ref().map(|r| r.urls.clone()).unwrap_or_default();
             }
             // N13-D1: run/update the relay client (opt-in only — with
             // `relay_enabled:false` (the hard default) NOTHING below runs
@@ -2221,7 +2258,7 @@ impl ConnectorStatus {
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -2253,6 +2290,11 @@ impl ConnectorStatus {
             format!("\"signal\":{}", self.signal.to_json()),
             format!("\"wg\":{}", self.wg.to_json()),
             format!("\"recreate\":{}", self.recreate.to_json()),
+            // N13 loop-dependency fix: the management ADVERTISEMENT rides the
+            // document ALWAYS (also `relay_enabled:false`), BEFORE the frozen
+            // `relay` runtime object (whose byte shape the compatibility
+            // tests pin, relay last in the document).
+            format!("\"relay_advertised\":{}", self.relay.advertised_to_json()),
             format!("\"relay\":{}", self.relay.to_json()),
         )
     }
@@ -2612,6 +2654,15 @@ fn relay_error_class_token(class: crate::relay_client::RelayErrorClass) -> &'sta
 /// The `relay` section of the status document (N13-D1). Counters and shape
 /// tokens ONLY: no token material, no peer ids, no server messages — the
 /// credential discipline of the whole status boundary applies.
+///
+/// Two information classes live here, and they must never be read as each
+/// other:
+/// - ADVERTISEMENT (always present, also while the client is disabled):
+///   [`RelayStatus::advertised`] + [`RelayStatus::advertised_urls`] — what
+///   MANAGEMENT offers (`NetbirdConfig.relay`), not what this connector
+///   uses. Rendered in the separate `relay_advertised` JSON section.
+/// - RUNTIME (only meaningful while `enabled`): `enabled`, `state`, `urls`,
+///   the counters and `token_valid`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayStatus {
     /// The `relay_enabled` opt-in (hard default false — device path unchanged).
@@ -2621,6 +2672,16 @@ pub struct RelayStatus {
     /// The configured relay URL set from the last `NetbirdConfig.relay`
     /// (public routing material).
     pub urls: Vec<String>,
+    /// Management ADVERTISES relay in the latest sync (`advertised_urls`
+    /// non-empty). Advertisement is NOT usage — the runtime fields above
+    /// carry the running view.
+    pub advertised: bool,
+    /// The management-advertised relay URL set (`NetbirdConfig.relay.urls`)
+    /// from the LAST sync carrying a netbird config — recorded ALWAYS, also
+    /// while `enabled:false` (the shell freezes its N2-H relay endpoint
+    /// exclusions from this BEFORE enabling relay). Public routing material
+    /// only; never the relay token.
+    pub advertised_urls: Vec<String>,
     /// Established sessions that ended and triggered a reconnect.
     pub reconnects: u64,
     /// TOTAL relay frames sent (all types — reconciliation surface).
@@ -2644,6 +2705,8 @@ impl RelayStatus {
             enabled: false,
             state: "disabled".to_string(),
             urls: Vec::new(),
+            advertised: false,
+            advertised_urls: Vec::new(),
             ..RelayStatus::empty_counters()
         }
     }
@@ -2653,6 +2716,8 @@ impl RelayStatus {
             enabled: true,
             state: "disconnected".to_string(),
             urls: Vec::new(),
+            advertised: false,
+            advertised_urls: Vec::new(),
             reconnects: 0,
             frames_tx: 0,
             frames_rx: 0,
@@ -2662,7 +2727,10 @@ impl RelayStatus {
         }
     }
 
-    /// JSON object (embedded into the status document).
+    /// JSON object (embedded into the status document). FROZEN SHAPE: the
+    /// `relay` object carries the RUNTIME view only — the advertised view
+    /// renders separately via [`RelayStatus::advertised_to_json`] so an
+    /// advertised url can never be misread as a relay session in use.
     pub fn to_json(&self) -> String {
         let urls = self
             .urls
@@ -2687,6 +2755,20 @@ impl RelayStatus {
             jbool("token_valid", self.token_valid),
             format!("\"last_error_class\":{last_error}"),
         )
+    }
+
+    /// The status document's `relay_advertised` section — the management
+    /// ADVERTISEMENT (`advertised` + `advertised_urls`), deliberately OUT of
+    /// the frozen `relay` runtime object: advertisement and usage must not
+    /// be readable as each other. URLs only — never token material.
+    pub fn advertised_to_json(&self) -> String {
+        let urls = self
+            .advertised_urls
+            .iter()
+            .map(|u| format!("\"{u}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{{\"advertised\":{},\"advertised_urls\":[{urls}]}}", self.advertised)
     }
 }
 
@@ -5930,5 +6012,188 @@ mod tests {
         }, "still no connection after clock movement")
         .await;
         server.shutdown().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // loop-dependency fix: management-advertised relay urls ride the status
+    // ALWAYS (also `relay_enabled:false`) — bookkeeping only, never a dial.
+    // -----------------------------------------------------------------------
+
+    /// Fabricated (NOT secret) relay sync carrying `RelayServers`; the token
+    /// payload is a distinctive sentinel so the tests can pin that it NEVER
+    /// reaches the status document.
+    fn advertised_relay_config(urls: Vec<String>) -> crate::network_map::NetbirdServers {
+        crate::network_map::NetbirdServers {
+            relay: Some(crate::network_map::RelayServers {
+                urls,
+                token_payload: "4242424242".to_string(),
+                token_signature: RELAY_TEST_SIG_B64.to_string(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn advertised_urls_update(
+        relay: Option<crate::network_map::NetbirdServers>,
+    ) -> SyncUpdate {
+        SyncUpdate {
+            session_deadline_unix: None,
+            netbird_config: relay,
+            network_map: None,
+        }
+    }
+
+    /// `relay_enabled:false` (the hard default) + a sync advertising
+    /// `relay.urls` → the status exposes the advertised set while the
+    /// runtime section stays exactly "disabled/empty", and the token
+    /// material never crosses the status boundary.
+    #[test]
+    fn relay_advertised_urls_exposed_while_relay_disabled() {
+        let shared = ConnectorShared::new(false, None); // relay_enabled = false
+        let wg = WgPeerRegistry::new();
+        let urls = vec!["rels://a.example:28443".to_string()];
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &advertised_urls_update(Some(advertised_relay_config(urls.clone()))),
+        );
+
+        let st = shared.relay_status();
+        assert!(st.advertised, "management advertised relay");
+        assert_eq!(st.advertised_urls, urls, "advertisement recorded while disabled");
+        // runtime view UNCHANGED: not running, nothing configured, no counters
+        assert!(!st.enabled, "relay stays disabled — advertisement is not usage");
+        assert_eq!(st.state, "disabled");
+        assert!(st.urls.is_empty(), "runtime url set stays empty while disabled");
+        assert_eq!(st.frames_tx + st.frames_rx + st.transport_bytes, 0);
+        assert!(!st.token_valid);
+        assert!(st.last_error_class.is_none());
+        assert!(shared.relay_handle().is_none(), "no relay client exists (nothing to dial with)");
+
+        // the advertised view renders in its own section, the frozen runtime
+        // object is byte-identical to the pre-change shape, and NO token
+        // material appears anywhere
+        let adv = st.advertised_to_json();
+        assert_eq!(
+            adv,
+            "{\"advertised\":true,\"advertised_urls\":[\"rels://a.example:28443\"]}"
+        );
+        let runtime_json = st.to_json();
+        assert_eq!(
+            runtime_json,
+            "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\
+             \"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\
+             \"last_error_class\":null}"
+        );
+        assert!(!runtime_json.contains("4242424242"), "token payload leaked: {runtime_json}");
+        assert!(!runtime_json.contains(RELAY_TEST_SIG_B64), "token signature leaked");
+        assert!(!adv.contains("4242424242"), "token payload leaked: {adv}");
+    }
+
+    /// The advertisement follows the LATEST sync (second sync replaces the
+    /// set; management dropping relay clears it) — still with zero runtime
+    /// effect while disabled.
+    #[test]
+    fn relay_advertised_urls_follow_latest_sync_and_clear_when_management_stops() {
+        let shared = ConnectorShared::new(false, None);
+        let wg = WgPeerRegistry::new();
+
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &advertised_urls_update(Some(advertised_relay_config(vec![
+                "rels://a.example:28443".into(),
+            ]))),
+        );
+        assert_eq!(
+            shared.relay_status().advertised_urls,
+            vec!["rels://a.example:28443".to_string()]
+        );
+
+        // second sync carries a NEW url set → the record updates
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &advertised_urls_update(Some(advertised_relay_config(vec![
+                "rels://b.example:28443".into(),
+                "rel://c.example:28443".into(),
+            ]))),
+        );
+        let st = shared.relay_status();
+        assert!(st.advertised);
+        assert_eq!(
+            st.advertised_urls,
+            vec!["rels://b.example:28443".to_string(), "rel://c.example:28443".to_string()]
+        );
+        assert!(!st.enabled, "updating the advertisement still never enables relay");
+        assert_eq!(st.state, "disabled");
+        assert!(shared.relay_handle().is_none());
+
+        // management stops advertising (relay absent from the sync config)
+        // → the record clears: the status honestly says "not advertised"
+        shared.apply_update(&wg, &NoopHost, &advertised_urls_update(Some(Default::default())));
+        let st = shared.relay_status();
+        assert!(!st.advertised);
+        assert!(st.advertised_urls.is_empty());
+        assert_eq!(
+            st.advertised_to_json(),
+            "{\"advertised\":false,\"advertised_urls\":[]}"
+        );
+        assert_eq!(st.state, "disabled", "disabled semantics unchanged");
+    }
+
+    /// The enabled-but-idle default shape: no sync yet → nothing advertised,
+    /// runtime idle (documents the field defaults next to the runtime ones).
+    #[test]
+    fn relay_advertised_urls_default_to_empty_before_any_sync() {
+        let shared = ConnectorShared::new(false, None);
+        let st = shared.relay_status();
+        assert!(!st.advertised);
+        assert!(st.advertised_urls.is_empty());
+        assert!(!st.enabled);
+        assert_eq!(st.state, "disabled");
+
+        // and the document renders both sections in the fixed order:
+        // relay_advertised BEFORE the frozen relay object
+        let status = ConnectorStatus {
+            running: false,
+            state: ConnState::Disconnected,
+            started_at_unix: None,
+            last_update_unix: None,
+            peer_count: 0,
+            route_count: 0,
+            reconnects: 0,
+            last_error: None,
+            deadline: SessionDeadline::Unknown,
+            renew_attempts: 0,
+            wg_apply_failed: false,
+            wg_apply_errors: 0,
+            logout_ok: None,
+            terminal: false,
+            ice: IceOrchestratorSummary::default(),
+            signal: SignalLinkStatus::default(),
+            wg: crate::wg_device::WgDataplaneStatus::default(),
+            recreate: RecreateStatus::default(),
+            relay: st,
+        };
+        let json = status.to_json();
+        let adv_pos = json.find("\"relay_advertised\":").expect("advertised section");
+        let relay_pos = json.find("\"relay\":{").expect("relay section");
+        assert!(adv_pos < relay_pos, "advertised section must precede the runtime section");
+        assert!(
+            json.contains(
+                "\"relay_advertised\":{\"advertised\":false,\"advertised_urls\":[]}"
+            ),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                "\"relay\":{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\
+                 \"reconnects\":0,\"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\
+                 \"token_valid\":false,\"last_error_class\":null}"
+            ),
+            "frozen relay object must stay byte-identical: {json}"
+        );
+        assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
     }
 }
