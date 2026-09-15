@@ -1,5 +1,6 @@
 import vpnExtension from '@ohos.net.vpnExtension';
 import { CoreNetworkConfig, CoreRouteEntry } from './NetBirdConnector';
+import { ExcludedRouteEntry, mergeExcludedRouteEntries } from './NetBirdEndpointExclusion';
 
 // Client-side VPN tunnel configuration model + platform VpnConfig mapper.
 //
@@ -57,6 +58,16 @@ export interface VpnTunnelConfig {
 // (keeps the outer path — management/signal/WG endpoint traffic — out of our
 // own tunnel; the exclusion network is deployment-specific and stays
 // configurable).
+//
+// N2-H (docs/native-nx-governance.md 追加登记; docs/n13-relay-increment-plan
+// §3.4/§5): route 3 alone is NOT a sufficient outer-endpoint exclusion set.
+// The remaining outer endpoints (management, signal, relay — all DDNS-able)
+// are FROZEN and EXCLUDED per start at runtime: deriveEndpointExclusions
+// (NetBirdVpnExtensionAbility) resolves the real endpoints shell-side and
+// withEndpointExclusions below grafts the derived /32|/128 entries onto this
+// base BEFORE create() (routes are fixed at create time). This static LAN
+// entry is only the deployment-specific local piece and is preserved
+// verbatim by the graft.
 //
 // N3-7: route 2 is a TEMPLATE entry only. The default-route safety gate
 // (`gateDefaultRoutes` below + the core-side snapshot gate) decides whether
@@ -167,6 +178,31 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
   };
 }
 
+// N2-H: graft the endpoint-derived exclusion entries onto a tunnel config's
+// route list BEFORE create(). Existing entries are kept verbatim (the
+// host-LAN exclusion and the default-route template keep their semantics);
+// derived /32|/128 entries are appended once, deduplicated against the
+// existing set by destination+prefix (pure merge — unit-tested in
+// client/entry/selfcheck via the NetBirdEndpointExclusion module).
+// applyNetworkConfig carries every isExcludedRoute entry of the grafted base
+// into the merged config, on the create() path AND through the fallback
+// (no-network-map) path alike.
+export function withEndpointExclusions(base: VpnTunnelConfig,
+  derived: ExcludedRouteEntry[]): VpnTunnelConfig {
+  if (derived.length === 0) {
+    return base;
+  }
+  return {
+    tunnelAddress: base.tunnelAddress,
+    tunnelPrefixLength: base.tunnelPrefixLength,
+    interfaceName: base.interfaceName,
+    routes: mergeExcludedRouteEntries(base.routes, derived),
+    dnsServers: base.dnsServers,
+    mtu: base.mtu,
+    peerEndpoint: base.peerEndpoint
+  };
+}
+
 // N3-7 default-route safety gate (shell half — the deciding half lives in
 // core, see ShellNetworkConfig::default_route_decision): while the data
 // plane cannot carry traffic, 0.0.0.0/0 must NOT enter the platform
@@ -206,10 +242,14 @@ export function buildPlatformVpnConfig(config: VpnTunnelConfig): vpnExtension.Vp
   const routes: vpnExtension.RouteInfo[] = [];
   for (let i = 0; i < config.routes.length; i++) {
     const routeConfig: VpnRouteConfig = config.routes[i];
+    // N2-H: an IPv6 exclusion destination (a /128 freeze of a v6 endpoint)
+    // must carry family 2 (NetAddress family: 1 = IPv4 default, 2 = IPv6);
+    // every existing route shape stays family 1.
+    const destinationFamily: number = routeConfig.destination.indexOf(':') >= 0 ? 2 : 1;
     const route: vpnExtension.RouteInfo = {
       interface: config.interfaceName,
       destination: {
-        address: { address: routeConfig.destination, family: 1 },
+        address: { address: routeConfig.destination, family: destinationFamily },
         prefixLength: routeConfig.prefixLength
       },
       gateway: { address: routeConfig.gateway, family: 1 },

@@ -5,7 +5,10 @@ import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
-  loadVpnTunnelConfig, applyNetworkConfig } from './NetBirdVpnConfig';
+  loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions } from './NetBirdVpnConfig';
+import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
+  RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl
+} from './NetBirdEndpointExclusion';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
   DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RouteSetAppliedResult,
@@ -13,9 +16,11 @@ import {
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
-  connectorSocketFeed, connectorStop, connectorTunFdFeed, connectorWgSocketFeed, countPemCertificates,
+  connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
+  countPemCertificates,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseSignalEndpoint,
-  pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveManagementIp, sleep
+  pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveExclusionEndpointIp,
+  resolveManagementIp, sleep
 } from './NetBirdConnector';
 
 const DOMAIN: number = 0x2900;
@@ -69,6 +74,22 @@ interface CreateOutcome {
   reason: string;
 }
 
+// N2-H: outcome of the signal provisioning leg, extended to carry the parsed
+// endpoint + the IP the protected signal socket ACTUALLY dialed (first-fed
+// address wins core-side) — both feed the exclusion derivation.
+interface SignalProvisionResult {
+  endpoint: ManagementEndpoint;
+  dialIp: string;
+}
+
+// N2-H: outcome of the endpoint-exclusion derivation. `fatal=true` is the
+// fail-closed verdict (relay required but some endpoint could not be frozen):
+// the caller must NOT create the VPN.
+interface EndpointExclusionOutcome {
+  fatal: boolean;
+  routes: ExcludedRouteEntry[];
+}
+
 // {open,errno} JSON returned by the synchronous core.fd_status(fd) NAPI export.
 interface FdStatusNative {
   open: boolean;
@@ -117,7 +138,11 @@ function safeError(error: Error): string {
 //   core.connector_network_config -> N5d: provision the SIGNAL socket
 //   (parse netbird_config.signal → shell-side DNS → open+protect →
 //   core.connector_signal_socket_feed; any failure = connector stopped,
-//   NO VPN created) -> merge address/routes/DNS into VpnConfig under the
+//   NO VPN created) -> N2-H endpoint freeze: resolve the real outer
+//   endpoints (management / signal / relay urls from connector_status) and
+//   derive the host /32|/128 isExcludedRoute set BEFORE create()
+//   (relay-enabled + unresolved endpoint = fail-closed, no VPN) -> merge
+//   address/routes/DNS into VpnConfig under the
 //   default-route safety gate (0.0.0.0/0 held unless the core gate allows /
 //   forceDefaultRoute opt-in) -> connection.create() -> fd contract +
 //   fail-closed protect gate for the WG outer socket -> N7: FEED THE WG
@@ -205,6 +230,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // recreate completes; this is the shell-side serialization on top of the
   // core-side budget/cooldown bounds).
   private recreateInFlight: boolean = false;
+  // N2-H: the endpoint-derived exclusion set frozen at THIS session's start
+  // (before the first create()). The controlled recreate grafts the SAME
+  // frozen set onto its rebuilt config — a recreate that dropped the
+  // exclusions would suck the outer endpoints into the fresh (often
+  // default-routed) tunnel. A fresh freeze (re-resolution) happens on the
+  // next full start, never from a cached cross-session set.
+  private frozenEndpointExclusions: ExcludedRouteEntry[] = [];
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -355,11 +387,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
     }
 
-    // 1. shell-side endpoint parse + DNS resolution (never native)
-    let connectAddr: string;
+    // 1. shell-side endpoint parse + DNS resolution (never native).
+    // N2-H: the parsed endpoint + resolved address survive this block — they
+    // are the management half of the exclusion derivation (the IP the
+    // protected management socket actually dials).
+    let mgmtEndpoint: ManagementEndpoint = { host: '', port: 0, ip: '' };
+    let connectAddr: string = '';
     try {
-      const endpoint = parseManagementEndpoint(device.management_url);
-      connectAddr = await resolveManagementIp(endpoint, DNS_RESOLVE_BOX_MS);
+      mgmtEndpoint = parseManagementEndpoint(device.management_url);
+      connectAddr = await resolveManagementIp(mgmtEndpoint, DNS_RESOLVE_BOX_MS);
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dns|' +
@@ -445,9 +481,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // (with the resolved address) to the core. ANY failure is fail-closed:
     // the connector is stopped and the VPN is NOT created — without signal
     // there is no offer/answer/candidate path, hence no peer connectivity.
+    // N2-H: on success the parsed endpoint + dialed IP are kept for the
+    // exclusion derivation below.
+    let signalProvisioned: SignalProvisionResult | null = null;
     if (net !== null && net.signal !== undefined && net.signal !== null && net.signal.length > 0) {
-      const signalOk: boolean = await this.provisionSignalSocket(connection, net.signal);
-      if (!signalOk) {
+      signalProvisioned = await this.provisionSignalSocket(connection, net.signal);
+      if (signalProvisioned === null) {
         hilog.error(DOMAIN, TAG,
           'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-provision|' +
           'errorClass=signal-provision-fail-closed|action=connector-stopped-no-vpn',
@@ -461,7 +500,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, net === null ? 'no-network-map' : 'no-signal-uri-in-config');
     }
 
-    const base: VpnTunnelConfig = loadVpnTunnelConfig();
+    // N2-H outer-endpoint freeze (docs/native-nx-governance.md 追加登记;
+    // docs/n13-relay-increment-plan-20260914.md §3.4/§5): resolve the REAL
+    // outer endpoints (management / signal / relay) and derive the host
+    // /32|/128 exclusion routes BEFORE create() — the platform VpnConfig
+    // routes are fixed at create time, and this deployment leans on route
+    // exclusion instead of the (unavailable) protect path. Relay-enabled
+    // deployments fail CLOSED here if any endpoint cannot be frozen.
+    const baseTemplate: VpnTunnelConfig = loadVpnTunnelConfig();
+    const exclusion: EndpointExclusionOutcome = await this.deriveEndpointExclusions(
+      mgmtEndpoint, connectAddr, signalProvisioned, baseTemplate.tunnelAddress);
+    if (exclusion.fatal) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=endpoint-exclusion|' +
+        'errorClass=endpoint-exclusion-fail-closed|action=connector-stopped-no-vpn|' +
+        'reason=relay-enabled-unresolved-endpoint',
+        this.requestId);
+      connectorStop();
+      return;
+    }
+    this.frozenEndpointExclusions = exclusion.routes;
+    const base: VpnTunnelConfig = withEndpointExclusions(baseTemplate, exclusion.routes);
     let merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
     // N3-7 default-route safety gate (shell half): hold 0.0.0.0/0 unless the
     // core gate allowed it (usable peers + WG tunnel ready) or the explicit
@@ -551,14 +610,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   // N5d signal provisioning (parse → DNS → open → protect → feed). Every
   // step is fail-closed with a stable stage marker: parse/dns/open/protect/
-  // feed failure or the protect box expiring returns false (the caller
-  // stops the connector and never creates the VPN). DNS stays OUT of native
-  // (same rule as the management dial); the FIRST fed address wins for the
-  // link's lifetime (core-side contract), later feeds only refill the fd
-  // queue — reconnect re-protect needs fresh feeds, which the runtime
-  // watcher may add as an N5+ refinement.
+  // feed failure or the protect box expiring returns null (the caller
+  // stops the connector and never creates the VPN). On success the parsed
+  // endpoint and the dialed IP are returned so the N2-H exclusion derivation
+  // freezes exactly what this link dials (first-fed address wins core-side).
+  // DNS stays OUT of native (same rule as the management dial); the FIRST
+  // fed address wins for the link's lifetime (core-side contract), later
+  // feeds only refill the fd queue — reconnect re-protect needs fresh feeds,
+  // which the runtime watcher may add as an N5+ refinement.
   private async provisionSignalSocket(connection: vpnExtension.VpnConnection,
-    signalUri: string): Promise<boolean> {
+    signalUri: string): Promise<SignalProvisionResult | null> {
     // 1. parse (port default 443 — production signal is TLS; a bare uri
     //    inherits the management transport security level core-side)
     let endpoint: ManagementEndpoint;
@@ -568,7 +629,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=parse|uri=%{public}s|' +
         'summary=%{public}s', this.requestId, signalUri, safeError(error as Error));
-      return false;
+      return null;
     }
     // 2. DNS over the default network, bounded
     let addr: string;
@@ -578,7 +639,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=dns|host=%{public}s|' +
         'summary=%{public}s', this.requestId, endpoint.host, safeError(error as Error));
-      return false;
+      return null;
     }
     // 3. open (unconnected TCP) + protect BEFORE any packet can flow
     let fd: number = -1;
@@ -589,20 +650,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.error(DOMAIN, TAG,
           'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=open|fd=%{public}d|' +
           'bindRc=%{public}d', this.requestId, fd, opened.bind_rc);
-        return false;
+        return null;
       }
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=open-throw|summary=%{public}s',
         this.requestId, safeError(error as Error));
-      return false;
+      return null;
     }
     const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
     if (!protectedOk) {
       hilog.error(DOMAIN, TAG,
         'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d|' +
         'errorClass=protect-fail-closed', this.requestId, fd);
-      return false;
+      return null;
     }
     // 4. feed the protected socket + the resolved address to the core
     const fed = connectorSignalFeed(fd, addr);
@@ -610,12 +671,127 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG,
         'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|' +
         'error=%{public}s', this.requestId, fd, fed.error ?? 'no-message');
-      return false;
+      return null;
     }
     hilog.info(DOMAIN, TAG,
       'VPN_SIGNAL_FED|requestId=%{public}s|fd=%{public}d|addr=%{public}s|queued=%{public}s',
       this.requestId, fd, addr, String(fed.queued ?? -1));
-    return true;
+    return { endpoint: endpoint, dialIp: addr.slice(0, addr.lastIndexOf(':')) };
+  }
+
+  // N2-H endpoint-freeze derivation (docs/native-nx-governance.md 追加登记
+  // 2026-09-14; docs/n13-relay-increment-plan-20260914.md §3.4/§5). Runs
+  // BEFORE connection.create() — the platform VpnConfig routes are fixed at
+  // create time, so the exclusion set must be final here.
+  //
+  // Endpoint sources (all EXISTING mechanisms — no new state channel):
+  //   - management: parseManagementEndpoint(device.management_url) + the IP
+  //     this flow's protected socket actually dials (resolved moments ago in
+  //     the same start flow — never a cross-session cache);
+  //   - signal: parseSignalEndpoint(net.signal) + the fed address (first-fed
+  //     wins for the link lifetime core-side);
+  //   - relay: connector_status().relay.urls (N13-D1), `rel://`/`rels://`
+  //     parsed per the core's own RelayUrl::parse contract, then resolved
+  //     FRESH at config-build time — DDNS (relay TTL 600) must never freeze a
+  //     stale IP.
+  // Additionally every endpoint host gets a FRESH build-time resolution so a
+  // DDNS flip inside this start flow is covered too (dial IP + fresh IP both
+  // frozen; pure dedup collapses matches).
+  //
+  // Severity (isExclusionFailClosed): relay in the required freeze set + any
+  // resolution failure = fatal (fail-closed, no VPN); without relay a failed
+  // host is skipped but logged with its reason. Management/signal dial IPs
+  // are always frozen regardless (they are known-good: the flow aborts
+  // earlier when those resolutions fail).
+  //
+  // Log discipline: hosts/ports/counts only — no tokens, no resolved IPs.
+  private async deriveEndpointExclusions(mgmt: ManagementEndpoint, mgmtDialIp: string,
+    signal: SignalProvisionResult | null, gateway: string): Promise<EndpointExclusionOutcome> {
+    // relay state: the connector status is the only source (relay_enabled
+    // rides the core config; the url set arrives with NetbirdConfig.relay).
+    let relayUrls: string[] = [];
+    try {
+      const status: ConnectorStatusResult = connectorStatus();
+      if (status.relay !== undefined && status.relay !== null &&
+        status.relay.urls !== undefined && status.relay.urls !== null) {
+        relayUrls = status.relay.urls;
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ENDPOINT_EXCLUSION_RELAY_STATE_UNKNOWN|requestId=%{public}s|' +
+        'summary=%{public}s|treatment=relay-not-required',
+        this.requestId, safeError(error as Error));
+    }
+    const relayRequired: boolean = relayUrls.length > 0;
+    hilog.info(DOMAIN, TAG,
+      'VPN_ENDPOINT_EXCLUSIONS_BEGIN|requestId=%{public}s|relayRequired=%{public}s|' +
+      'relayUrls=%{public}d',
+      this.requestId, String(relayRequired), relayUrls.length);
+
+    // Endpoint descriptors + the resolutions that bypass DNS (the exact IPs
+    // this flow dials).
+    const endpoints: ExclusionEndpoint[] = [];
+    const resolutions: EndpointResolution[] = [];
+    endpoints.push({ kind: 'management', host: mgmt.host, port: mgmt.port });
+    if (mgmtDialIp.length > 0) {
+      resolutions.push({ kind: 'management', host: mgmt.host, ok: true, address: mgmtDialIp });
+    }
+    if (signal !== null) {
+      endpoints.push({ kind: 'signal', host: signal.endpoint.host, port: signal.endpoint.port });
+      if (signal.dialIp.length > 0) {
+        resolutions.push({ kind: 'signal', host: signal.endpoint.host, ok: true,
+          address: signal.dialIp });
+      }
+    }
+    for (let i = 0; i < relayUrls.length; i++) {
+      const parsed: RelayEndpoint | null = parseRelayUrl(relayUrls[i]);
+      if (parsed === null) {
+        // The core would refuse this url typed as well — an unparsable relay
+        // url is an unfreezable endpoint: record as failed resolution.
+        resolutions.push({ kind: 'relay', host: 'unparsable-relay-url', ok: false, address: '' });
+        hilog.error(DOMAIN, TAG,
+          'VPN_ENDPOINT_EXCLUSION_URL_MALFORMED|requestId=%{public}s|index=%{public}d|' +
+          'schemes=rel|rels',
+          this.requestId, i);
+        continue;
+      }
+      endpoints.push({ kind: 'relay', host: parsed.host, port: parsed.port });
+    }
+
+    // FRESH build-time resolutions (literals short-circuit DNS; IPv4
+    // preferred, IPv6 accepted as a /128 freeze). Failures map to '' here —
+    // severity is decided ONCE on the merged resolution list.
+    const freshAddresses: string[] = await Promise.all<string>(endpoints.map(
+      (endpoint: ExclusionEndpoint): Promise<string> =>
+        resolveExclusionEndpointIp(endpoint.host, DNS_RESOLVE_BOX_MS).catch((): string => '')));
+    for (let i = 0; i < endpoints.length; i++) {
+      resolutions.push({ kind: endpoints[i].kind, host: endpoints[i].host,
+        ok: freshAddresses[i].length > 0, address: freshAddresses[i] });
+    }
+
+    const build: ExclusionBuildResult = buildExcludedRouteEntries(resolutions, gateway);
+    for (let i = 0; i < build.failed.length; i++) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ENDPOINT_EXCLUSION_SKIPPED|requestId=%{public}s|kind=%{public}s|host=%{public}s|' +
+        'reason=unresolved|relayRequired=%{public}s|action=%{public}s',
+        this.requestId, build.failed[i].kind, build.failed[i].host, String(relayRequired),
+        relayRequired ? 'fail-closed' : 'skip-with-log');
+    }
+    hilog.info(DOMAIN, TAG,
+      'VPN_ENDPOINT_EXCLUSIONS|requestId=%{public}s|hosts=%{public}d|resolved=%{public}d|' +
+      'duplicates=%{public}d|failed=%{public}d|routes=%{public}d|relayRequired=%{public}s',
+      this.requestId, endpoints.length, build.resolvedCount, build.duplicatesRemoved,
+      build.failed.length, build.routes.length, String(relayRequired));
+
+    const fatal: boolean = isExclusionFailClosed(build, relayRequired);
+    if (fatal) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ENDPOINT_EXCLUSION_FAIL_CLOSED|requestId=%{public}s|' +
+        'reason=relay-enabled-unresolved-endpoint|failedHosts=%{public}d|' +
+        'action=no-vpn-created|is_evidence=false|not_a_gate_pass=true',
+        this.requestId, build.failed.length);
+    }
+    return { fatal: fatal, routes: build.routes };
   }
 
   // Runtime watch (while the VPN is up): poll connector_status (state /
@@ -847,7 +1023,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         net.routes.length === 0) {
         throw new Error('recreate-no-usable-snapshot');
       }
-      const base: VpnTunnelConfig = loadVpnTunnelConfig();
+      // N2-H: graft the endpoint exclusions frozen at THIS session's start
+      // onto the rebuilt config — a recreate that dropped them would suck
+      // the outer endpoints into the fresh (often default-routed) tunnel.
+      // The frozen set is reused verbatim (no DNS inside the bounded
+      // recreate leg); the next full start re-freezes with fresh
+      // resolutions.
+      const base: VpnTunnelConfig = withEndpointExclusions(loadVpnTunnelConfig(),
+        this.frozenEndpointExclusions);
       let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
       const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
         ? net.default_route.allowed
@@ -861,9 +1044,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         (r: VpnRouteConfig): boolean => r.isDefaultRoute).length;
       hilog.info(DOMAIN, TAG,
         'VPN_RECREATE_SNAPSHOT|requestId=%{public}s|serial=%{public}s|routes=%{public}d|' +
-        'defaultRoutes=%{public}d|gateAllowed=%{public}s',
+        'defaultRoutes=%{public}d|gateAllowed=%{public}s|frozenEndpointExclusions=%{public}d',
         this.requestId, String(net.serial ?? -1), merged.routes.length, defaultRoutes,
-        String(gateAllowed));
+        String(gateAllowed), this.frozenEndpointExclusions.length);
 
       // 2. destroy the OLD connection — the raw TUN fd dies here (fd
       // contract: its close belongs exclusively to VpnConnection.destroy());

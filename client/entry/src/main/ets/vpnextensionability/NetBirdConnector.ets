@@ -140,6 +140,23 @@ export interface RecreateStatus {
   reason: string;
 }
 
+// N13-D1: core.connector_status().relay — the relay client section (counts +
+// shape tokens + the configured PUBLIC relay URL set; no token material —
+// core-side status discipline). `urls` ride `rel://`/`rels://` scheme URIs
+// (RelayUrl::parse contract, relay_client.rs); the shell freezes their
+// host:port into the N2-H exclusion set (NetBirdEndpointExclusion.ets).
+export interface RelayStatus {
+  enabled: boolean;
+  state: string;
+  urls: string[];
+  reconnects: number;
+  frames_tx: number;
+  frames_rx: number;
+  transport_bytes: number;
+  token_valid: boolean;
+  last_error_class: string | null;
+}
+
 // core.connector_status snapshot (subset the shell consumes).
 // N5c: LIVE ICE socket queue depth from connector_status().ice_sockets.
 export interface IceSocketDepth {
@@ -170,6 +187,8 @@ export interface ConnectorStatusResult {
   wg?: WgDataplaneStatus;
   // N8: the controlled-recreate trigger (the shell rebuilds when required).
   recreate?: RecreateStatus;
+  // N13-D1: the relay client section (urls = the freeze/exclusion source).
+  relay?: RelayStatus;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -632,6 +651,70 @@ export async function resolveManagementIp(endpoint: ManagementEndpoint,
         // prefer IPv4 (this client has no IPv6 data plane yet)
         if (addresses[i].address.indexOf(':') < 0) {
           return `${addresses[i].address}:${endpoint.port}`;
+        }
+      }
+      throw new Error('dns-failed');
+    });
+  const box: Promise<string> = new Promise<string>((resolve: (value: string) => void,
+    reject: (e: Error) => void) => {
+    setTimeout((): void => {
+      reject(new Error('dns-failed'));
+    }, timeoutMs);
+  });
+  return Promise.race([resolution, box]);
+}
+
+// Bare IPv4 dotted-quad literal check (digits only, 0-255 per octet) — same
+// shape as the inline checks in parseManagementEndpoint/parseSignalEndpoint.
+function isIPv4Literal(host: string): boolean {
+  const octets: string[] = host.split('.');
+  if (octets.length !== 4) {
+    return false;
+  }
+  return octets.every((o: string): boolean => {
+    if (o.length === 0 || o.length > 3) {
+      return false;
+    }
+    for (let i = 0; i < o.length; i++) {
+      const code: number = o.charCodeAt(i);
+      if (code < 0x30 || code > 0x39) {
+        return false;
+      }
+    }
+    return Number(o) <= 255;
+  });
+}
+
+// N2-H: resolve ONE outer-endpoint host for the route-exclusion set (see
+// NetBirdEndpointExclusion.ets). FRESH per call by contract — DDNS hosts
+// (e.g. the relay endpoint, TTL 600) must never ride a cached IP: every
+// config build re-resolves. Shell-side DNS only (same rule as
+// resolveManagementIp — nameserver traffic never enters native or the
+// tunnel), bounded by `timeoutMs`. IPv4 answers are preferred; an IPv6
+// answer is returned as-is (the exclusion renders it as a /128). IP literals
+// short-circuit DNS. Throws 'dns-failed' — the caller maps failure to
+// skip-with-log (relay not required) or fail-closed (relay required).
+export async function resolveExclusionEndpointIp(host: string, timeoutMs: number):
+  Promise<string> {
+  if (host.length === 0) {
+    throw new Error('dns-failed');
+  }
+  if (host.indexOf(':') >= 0) {
+    return host; // bracketed IPv6 literal — no DNS leg
+  }
+  if (isIPv4Literal(host)) {
+    return host; // IPv4 literal — no DNS leg
+  }
+  const resolution: Promise<string> = connection.getAddressesByName(host)
+    .then((addresses: connection.NetAddress[]): string => {
+      for (let i = 0; i < addresses.length; i++) {
+        if (addresses[i].address.indexOf(':') < 0) {
+          return addresses[i].address; // prefer IPv4 (the dial path's family)
+        }
+      }
+      for (let i = 0; i < addresses.length; i++) {
+        if (addresses[i].address.indexOf(':') >= 0) {
+          return addresses[i].address; // IPv6 fallback — still freezable (/128)
         }
       }
       throw new Error('dns-failed');
