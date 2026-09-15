@@ -157,6 +157,29 @@ export interface RelayStatus {
   last_error_class: string | null;
 }
 
+// N13 loop-dependency fix (core 95f6c02): the MANAGEMENT-ADVERTISED relay url
+// set — the `NetbirdConfig.relay.urls` of the LAST sync carrying a netbird
+// config — rendered by the core as the SIBLING document section
+// `relay_advertised` BEFORE the frozen runtime `relay` object. It is exposed
+// in EVERY state, also `relay_enabled:false`, so the shell can freeze the
+// relay endpoint into its N2-H exclusion set BEFORE it enables relay
+// (docs/n13-relay-increment-plan-20260914.md §3.4/§5). URLs only — public
+// routing material; never the relay token.
+export interface RelayAdvertisedStatus {
+  advertised: boolean;
+  advertised_urls: string[];
+}
+
+// Lenient shell-side view of the `relay_advertised` section (see
+// parseRelayAdvertised): `advertised` is the USABLE verdict (valid string
+// urls present), `malformed` marks a type anomaly for the grep-able hint —
+// both are observations, neither may throw.
+export interface RelayAdvertisedView {
+  advertised: boolean;
+  urls: string[];
+  malformed: boolean;
+}
+
 // core.connector_status snapshot (subset the shell consumes).
 // N5c: LIVE ICE socket queue depth from connector_status().ice_sockets.
 export interface IceSocketDepth {
@@ -189,6 +212,12 @@ export interface ConnectorStatusResult {
   recreate?: RecreateStatus;
   // N13-D1: the relay client section (urls = the freeze/exclusion source).
   relay?: RelayStatus;
+  // N13 loop-dependency fix (core 95f6c02): the management ADVERTISEMENT,
+  // exposed ALWAYS (also relay_enabled:false) as a SIBLING section rendered
+  // before the runtime `relay` object. The N2-H "exclude before enable"
+  // source; consumed leniently (parseRelayAdvertised) — a missing/type-
+  // anomalous section is treated as NOT advertised, never a throw.
+  relay_advertised?: RelayAdvertisedStatus;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -742,6 +771,46 @@ export async function resolveExclusionEndpointIp(host: string, timeoutMs: number
     }, timeoutMs);
   });
   return Promise.race([resolution, box]);
+}
+
+// Lenient parse of the status document's `relay_advertised` sibling section
+// (core 95f6c02). NEVER throws: a missing/absent section, a non-object
+// section, a non-boolean `advertised` flag, a non-array or mixed-element
+// `advertised_urls` — every anomaly lands in `malformed` and the caller
+// treats the verdict as NOT advertised (with a grep-able hint), keeping the
+// existing start flow alive. Only well-formed string elements feed `urls`
+// (deduplicated, order preserved). No token material passes through —
+// public routing URLs only.
+export function parseRelayAdvertised(status: ConnectorStatusResult):
+  RelayAdvertisedView {
+  const view: RelayAdvertisedView = { advertised: false, urls: [], malformed: false };
+  const section = status.relay_advertised;
+  if (section === undefined || section === null) {
+    return view;
+  }
+  const flagIsBoolean: boolean = typeof section.advertised === 'boolean';
+  const rawUrls = section.advertised_urls;
+  const urlsIsArray: boolean = Array.isArray(rawUrls);
+  if (!flagIsBoolean || !urlsIsArray) {
+    view.malformed = true;
+    return view;
+  }
+  const rawList: Object[] = rawUrls as Object[];
+  for (let i = 0; i < rawList.length; i++) {
+    const item: Object | null = rawList[i];
+    if (typeof item === 'string') {
+      const url: string = item as string;
+      if (url.length > 0 && view.urls.indexOf(url) < 0) {
+        view.urls.push(url);
+      }
+    } else {
+      view.malformed = true;
+    }
+  }
+  // Core semantics: advertised ⇔ advertised_urls non-empty. A present but
+  // empty section is an honest "not advertised", NOT a type anomaly.
+  view.advertised = view.urls.length > 0;
+  return view;
 }
 
 export function connectorStatus(): ConnectorStatusResult {

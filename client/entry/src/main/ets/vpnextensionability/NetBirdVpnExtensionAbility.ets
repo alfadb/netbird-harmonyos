@@ -13,14 +13,15 @@ import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, Exclusion
 } from './NetBirdEndpointExclusion';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
-  DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RouteSetAppliedResult,
-  SocketFeedResult, WgFeedResult,
+  DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
+  RouteSetAppliedResult, SocketFeedResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   countPemCertificates,
-  iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseSignalEndpoint,
+  iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
+  parseSignalEndpoint,
   pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveExclusionEndpointIp,
   resolveManagementIp, sleep
 } from './NetBirdConnector';
@@ -508,7 +509,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // /32|/128 exclusion routes BEFORE create() — the platform VpnConfig
     // routes are fixed at create time, and this deployment leans on route
     // exclusion instead of the (unavailable) protect path. Relay-enabled
-    // deployments fail CLOSED here if any endpoint cannot be frozen.
+    // deployments fail CLOSED here if any endpoint cannot be frozen. The
+    // relay hosts come from the management ADVERTISEMENT (core 95f6c02:
+    // relay_advertised, exposed also while relay is disabled) — the N2-H
+    // "exclude BEFORE enable" precondition: an advertised relay endpoint is
+    // excluded even when relay_enabled=false (harmless and required), and
+    // only an enabled relay turns its resolution failures fatal.
     const baseTemplate: VpnTunnelConfig = loadVpnTunnelConfig();
     const exclusion: EndpointExclusionOutcome = await this.deriveEndpointExclusions(
       mgmtEndpoint, connectAddr, signalProvisioned, baseTemplate.tunnelAddress);
@@ -710,37 +716,79 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   //     the same start flow — never a cross-session cache);
   //   - signal: parseSignalEndpoint(net.signal) + the fed address (first-fed
   //     wins for the link lifetime core-side);
-  //   - relay: connector_status().relay.urls (N13-D1), `rel://`/`rels://`
-  //     parsed per the core's own RelayUrl::parse contract, then resolved
-  //     FRESH at config-build time — DDNS (relay TTL 600) must never freeze a
-  //     stale IP.
+  //   - relay: the management ADVERTISEMENT
+  //     connector_status().relay_advertised.advertised_urls (core 95f6c02 —
+  //     exposed ALWAYS, also while relay_enabled=false: the N2-H "exclude
+  //     BEFORE enable" source) UNION the runtime status.relay.urls
+  //     (non-empty only while enabled; identical strings collapse),
+  //     `rel://`/`rels://` parsed per the core's own RelayUrl::parse
+  //     contract, then resolved FRESH at config-build time — DDNS (relay
+  //     TTL 600) must never freeze a stale IP.
   // Additionally every endpoint host gets a FRESH build-time resolution so a
   // DDNS flip inside this start flow is covered too (dial IP + fresh IP both
   // frozen; pure dedup collapses matches).
   //
-  // Severity (isExclusionFailClosed): relay in the required freeze set + any
-  // resolution failure = fatal (fail-closed, no VPN); without relay a failed
-  // host is skipped but logged with its reason. Management/signal dial IPs
-  // are always frozen regardless (they are known-good: the flow aborts
-  // earlier when those resolutions fail).
+  // Severity (isExclusionFailClosed), kept strictly two-branch by the
+  // unchanged relayRequired verdict ("relay is being ENABLED this session"):
+  //   (a) relayRequired=true + any failed parse/resolution = fatal
+  //       (fail-closed, no VPN);
+  //   (b) relay NOT enabled (relayRequired=false, advertisement only) + a
+  //       failed relay endpoint = SKIP that endpoint with the
+  //       VPN_ENDPOINT_EXCLUSION_SKIPPED marker — never fatal (an unused
+  //       relay must not abort the start; the skip stays grep-able).
+  // Management/signal dial IPs are always frozen regardless (they are
+  // known-good: the flow aborts earlier when those resolutions fail).
   //
   // Log discipline: hosts/ports/counts only — no tokens, no resolved IPs.
   private async deriveEndpointExclusions(mgmt: ManagementEndpoint, mgmtDialIp: string,
     signal: SignalProvisionResult | null, gateway: string): Promise<EndpointExclusionOutcome> {
     // relay state: the connector status is the only source (relay_enabled
-    // rides the core config; the url set arrives with NetbirdConfig.relay).
+    // rides the core config; the ADVERTISED url set arrives with the
+    // `relay_advertised` sibling section). Lenient: a missing / type-
+    // anomalous section is treated as NOT advertised (grep-able hint) and
+    // must never throw the existing flow off.
     let relayUrls: string[] = [];
+    let advertisedView: RelayAdvertisedView =
+      { advertised: false, urls: [], malformed: false };
     try {
       const status: ConnectorStatusResult = connectorStatus();
       if (status.relay !== undefined && status.relay !== null &&
         status.relay.urls !== undefined && status.relay.urls !== null) {
         relayUrls = status.relay.urls;
       }
+      advertisedView = parseRelayAdvertised(status);
     } catch (error) {
       hilog.warn(DOMAIN, TAG,
         'VPN_ENDPOINT_EXCLUSION_RELAY_STATE_UNKNOWN|requestId=%{public}s|' +
-        'summary=%{public}s|treatment=relay-not-required',
+        'summary=%{public}s|treatment=relay-not-required|advertised=unknown',
         this.requestId, safeError(error as Error));
+    }
+    if (advertisedView.malformed) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_RELAY_ADVERTISED_MALFORMED|requestId=%{public}s|' +
+        'treatment=not-advertised|note=lenient-parse-no-throw',
+        this.requestId);
+    } else if (!advertisedView.advertised) {
+      hilog.info(DOMAIN, TAG,
+        'VPN_RELAY_ADVERTISED_NONE|requestId=%{public}s|' +
+        'treatment=not-advertised|urls=0',
+        this.requestId);
+    }
+    const relayAdvertised: boolean = advertisedView.advertised;
+    // Exclusion endpoint source = ADVERTISEMENT ∪ runtime urls (identical
+    // strings collapse; with relay enabled the runtime set only ever
+    // repeats the advertisement). relayRequired itself stays computed from
+    // the RUNTIME set only — its meaning is unchanged.
+    const combinedRelayUrls: string[] = [];
+    for (let i = 0; i < advertisedView.urls.length; i++) {
+      if (combinedRelayUrls.indexOf(advertisedView.urls[i]) < 0) {
+        combinedRelayUrls.push(advertisedView.urls[i]);
+      }
+    }
+    for (let i = 0; i < relayUrls.length; i++) {
+      if (combinedRelayUrls.indexOf(relayUrls[i]) < 0) {
+        combinedRelayUrls.push(relayUrls[i]);
+      }
     }
     const relayRequired: boolean = relayUrls.length > 0;
     hilog.info(DOMAIN, TAG,
@@ -763,17 +811,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           address: signal.dialIp });
       }
     }
-    for (let i = 0; i < relayUrls.length; i++) {
-      const parsed: RelayEndpoint | null = parseRelayUrl(relayUrls[i]);
+    // Distinct relay HOSTS frozen from the advertised/union set (log truth:
+    // two urls may share one host, and unparsable urls count only as
+    // failures, never as hosts).
+    const relayHosts: string[] = [];
+    for (let i = 0; i < combinedRelayUrls.length; i++) {
+      const parsed: RelayEndpoint | null = parseRelayUrl(combinedRelayUrls[i]);
       if (parsed === null) {
         // The core would refuse this url typed as well — an unparsable relay
         // url is an unfreezable endpoint: record as failed resolution.
+        // Severity stays with relayRequired: fatal only when relay is being
+        // ENABLED; a disabled relay's bad advertisement is skipped+logged.
         resolutions.push({ kind: 'relay', host: 'unparsable-relay-url', ok: false, address: '' });
         hilog.error(DOMAIN, TAG,
           'VPN_ENDPOINT_EXCLUSION_URL_MALFORMED|requestId=%{public}s|index=%{public}d|' +
           'schemes=rel|rels',
           this.requestId, i);
         continue;
+      }
+      if (relayHosts.indexOf(parsed.host) < 0) {
+        relayHosts.push(parsed.host);
       }
       endpoints.push({ kind: 'relay', host: parsed.host, port: parsed.port });
     }
@@ -799,9 +856,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     hilog.info(DOMAIN, TAG,
       'VPN_ENDPOINT_EXCLUSIONS|requestId=%{public}s|hosts=%{public}d|resolved=%{public}d|' +
-      'duplicates=%{public}d|failed=%{public}d|routes=%{public}d|relayRequired=%{public}s',
+      'duplicates=%{public}d|failed=%{public}d|routes=%{public}d|relayRequired=%{public}s|' +
+      'relayAdvertised=%{public}s|relayHosts=%{public}d',
       this.requestId, endpoints.length, build.resolvedCount, build.duplicatesRemoved,
-      build.failed.length, build.routes.length, String(relayRequired));
+      build.failed.length, build.routes.length, String(relayRequired),
+      String(relayAdvertised), relayHosts.length);
 
     const fatal: boolean = isExclusionFailClosed(build, relayRequired);
     if (fatal) {
