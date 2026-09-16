@@ -259,3 +259,56 @@
 ### 5. 结论
 
 **结论：已对账——310 = 7（首快照前建立帧：1 Auth + 3 SubscribePeerState + 3×148B Transport）+ 284×148B Transport + 19×HealthCheck 回显，「303」是首快照之后的窗口增量而 310 是绝对计数终值，算术层面无需新数据即已闭合；唯 7 帧的按类型分解目前是代码口径推导（计数层不分型输出），若要升级为帧级直证需要分型计数外泄（帧级日志）或中继侧转发视图，设备与中继现状均不可得。**
+
+---
+
+## F 类同中继 A/B 结果：未收敛（2026-09-16 追加）
+
+> 本小节为事后追加，不改写既有正文。来源（全部只读核对，本文未运行任何设备命令）：仓B 证据目录 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260916-0005/`（两份 `clock-check-*`、两臂流式全量 hilog、`arm1-verdict-markers-verbatim.log`、`EXECUTION-RECORD-F1-20260916T1152.md`、`MANIFEST.sha256`）与生效授权 `AUTH-DIAG-DEVICE-VALIDATION-20260916-0005.json`（下称 AUTH）。下文数字均逐字取自上列文件；无任何凭据写入。
+
+### 1. 目的与设计（AUTH F 类）
+
+- 同中继下对照**修复前 `e45f8c9` vs 修复后 `dcbf7d8`（⊇ `18153fa`）**，把唯一变量收敛为提交 `18153fa`（signal OFFER/ANSWER 补 `relayServerAddress` 字段 8）（AUTH `operation_classes.F.purpose`）。
+- 写死判据（AUTH `operation_classes.F.criteria`）：臂 1（修复前）预期 `wgSessions=0` 且 vpn-tun RX 无增长（门关闭）；臂 2（修复后）预期 `wgSessions>0` 且 `wgRxToTun`/vpn-tun RX 增长（门打开）；两臂一致成立 → 唯一变量收敛为 `18153fa`；**任一臂不符 → 如实记录，结论降级「未收敛」**。
+- **两臂生效中继必须相同**（同中继前提，AUTH `criteria` 与 `forbidden` 末条）：两臂都须记录当轮生效中继 URL/主机，不同即判「对照无效」、如实记录并停止、不得拼凑结论。
+- 实际构建（EXECUTION-RECORD-F1 §3/§4）：臂 1 由 `git archive e45f8c9` 独立构建（主工作区未动）；臂 2 构建于主工作区当时 HEAD=`6140a56`（⊇ `dcbf7d8`/`18153fa`，树干净）。
+
+### 2. 结果（两臂对照）
+
+- **同中继前提成立**：两臂 connector 行逐字同串 `connector: netbird-config relay urls=1 token_present=true (uris=rels://home.alfadb.cn:28443)`（臂 1 11:31:20.757、臂 2 11:40:01.431，两份 hilog 本文直读复核一致），`advertisedUrls=1`。
+- **两臂 signed HAP sha256**（EXECUTION-RECORD-F1 §3/§4 逐字核对）：臂 1（修复前）`d39dae3ce1dc06587c487d182c9b0038d841ad93fef66ffbcec6590c58b10f09`；臂 2（修复后）`80c5b7cfcf50fea8c915a1ff4903f86c98621c1740142e2fadf04c1e9155155b`。
+- **臂 1 符合预期 ✓**（判据原文 `arm1-verdict-markers-verbatim.log`，150 行）：`VPN_RELAY_STATUS` `framesTx 2→111`、`framesRx 1→17`、`transportBytes 10212`（11:37:37.509 末条）；`wgSessions=0`、`wgRxToTun=0`；vpn-tun RX 0/0（11:34:19 与 11:37:25 两次读数相同，零增长）。
+- **臂 2 不符预期 ✗**（EXECUTION-RECORD-F1 §4；末条 hilog 本文直读复核一致）：`framesTx 2→118`、`framesRx 1→17`、`transportBytes 10952`（11:46:38.413 末条）；`wgSessions=0`、`wgRxToTun=0`；vpn-tun RX 0/0（11:43:00 与 11:46:05 相同）→ **按写死规则判「未收敛」**。
+- **两臂 relay 计数同量级**（111/17/10212 vs 118/17/10952，均 `state=ready`、`reconnects=0`）→ relay 传输两臂一致，**排除中继差异**。
+- **时钟门两次均 proceed**：11:25:52（skew=1/bound=1）、11:39:02（skew=0/bound=1，臂 2 前）（两份 clock-check json，本文实读）。
+
+### 3. 候选解释（按强度，如实登记；EXECUTION-RECORD-F1 §5）
+
+1. **对端缺席（最强混杂）**：0004 成功轮在案的 nbinterop 主机 peer（pid 239360，09-14 启动）本轮实测已不在运行（ps 无进程；其 tee 日志 `/tmp/devval2-peer2.log` 亦随 /tmp 清理消失）。若无任一生产对端在线应答，WG 握手 initiation 无人回应，`wgSessions=0` 与修复无关——0004 成功时是运维对端 `net-host` 应答（见本文件「中继/对端侧证据并入」节）。
+2. **身份变更**：本轮设备身份为 `ohos-smoke-1`（见第 4 条），对端 peer 表/分组可能不认识该身份——控制面 offer/answer 往来正常、WG 层无响应；该身份是否在对端 peer 表/正确分组未从设备侧证实（EXECUTION-RECORD-F1 存疑 2）。
+3. **中继差异已排除**（见第 2 条末）。
+
+### 4. 派发前提错误（显式登记，责任在主会话；偏差由执行层在 EXECUTION-RECORD-F1 §2 如实登记，本文核对属实）
+
+- 派发稿称主机侧暂存 `~/netbird-interop/smoke-prod/device-config.json` 为 `ohos-relay-1` 配置；执行层实测该文件是 **09-15 18:41 的旧文件**（hostname=`ohos-smoke-1`、无 `relay_enabled` 字段；本文 `ls` 实读 mtime=09-15 18:41 相符）。
+- **`ohos-relay-1` 的私钥已不可恢复**：随 0004 的 E 类清理与 /tmp 清理丢失（执行记录：有界检索无 `9db53981…` 备份）。
+- 执行层按派发核心意图（两臂共用同一身份以保持一致性、不换 key），以该暂存键为共同身份，`jq` 增补 `relay_enabled:true` 后推送（推送 1/2），两臂全程同一配置文件，并在执行记录登记该偏差。
+- ⇒ **本轮的「身份」变量与 0004 轮不同（`ohos-smoke-1` vs `ohos-relay-1`）**，这本身是新增的混杂因素。
+
+### 5. 配额与收尾（EXECUTION-RECORD-F1「配额总账」）
+
+- **F 类**：install 2/3（臂 1 `d39dae3c…`、臂 2 `80c5b7cf…`）；推送 1/2；**循环 2/2 用尽**（臂 1 11:31:03–11:38:44 ≈7min41s、臂 2 11:39:41–11:48:17 ≈8min36s，合计 ≈16min17s ≤30min；各臂观测窗 6min ≤6min）；hilog 每臂 1 次（流式 400s）；点击 2/2。
+- **G 类**：清理 1/1；force-stop 1/2；**App 保留**（uninstall 0/1）；本轮推送的 /data/local/tmp 三文件已删、复核零残留。
+- `/tmp/n13-arm1` 已删、主工作区未被改动（执行记录 git status 干净；本文追加前复核本文路径无未提交变更）。
+- 证据完整性：目录 14 个文件 = 6 份证据产物逐文件附 `.sha256`（产物 + sidecar 各 6）+ `MANIFEST.sha256` + `README.md`（无 sidecar、MANIFEST 自汇总）；本文实跑 `sha256sum --check MANIFEST.sha256` → **13/13 全 OK**、退出码 0。
+
+### 6. 结论与影响（一句话，口径不夸大）
+
+- 本轮**未能**把「`18153fa` 是主因修复」从「机制层成立」升级为「单一变量受控」。
+- 0004 的 D 类结论**不受影响**（设备侧 relay 数据面成立：`wgSessions=2`、TUN RX 4624B）——那是与**运维对端 `net-host`** 的会话。
+- 机制层证据仍成立（修复前对端 499 次 offer / 0 次 answer；修复后 wgProxy + 0.08s 握手，见本文件「中继/对端侧证据并入」节）。
+- **干净重跑的前提**：需要**一个确定在线且认识的应答对端**（例如我们自己控制下的主机侧对端），并保持两臂身份一致；F 类循环已用尽，重跑须新授权。
+
+### 7. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
