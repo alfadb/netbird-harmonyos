@@ -435,3 +435,63 @@
 2. **对端 PID 两处口径不一致**：派发稿"286498…" vs 证据文件 `EXECUTION-RECORD-L1-BLOCK-20260916T2305.md`"286618"；本文一律以证据文件为准（**286618**），"286498"来源不明、不得采用。
 3. **`--probe-dst 100.108.144.165` 字样**：对端窗口切片内未见该 flag 原文；`100.108.144.165` 为设备侧 `VPN_CONFIG_APPLIED` 记录的本机 overlay IP，"探针 dst＝本设备 IP"为 EXECUTION-RECORD §5 口径。
 4. 目录内另有第二份时钟门采样 `clock-check-20260916T230310.json`（23:03:10，`result=proceed`，`prev_checked_at=22:47:44`），不在本小节引用材料清单内，一并如实登记。
+
+## L 类最终结果：A1/A2 同中继配对 —— 方向相反（2026-09-16 追加）
+
+> 本小节为事后追加，不改写既有正文。来源（全部只读核对，本文未运行任何设备命令）：仓B 证据目录 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260916-0008/`（三份 `clock-check-*`、两臂流式全量 hilog `hilog-L-arm1-pre-20260916T2250-full.log` / `hilog-L-arm2-post-20260916T2313-full.log`、两臂对端窗口日志 `peer-log-L-arm1-window.log` / `peer-log-L-arm2-window.log`、`EXECUTION-RECORD-L1-20260916T2327.md`、`EXECUTION-RECORD-L1-BLOCK-20260916T2305.md`、`MANIFEST.sha256`）与生效授权 `AUTH-DIAG-DEVICE-VALIDATION-20260916-0008.json`。下文数字均逐字取自上列文件；无任何凭据写入（敏感扫描 `eyJ` 零命中，仅系统 `token=`/`Bearer` 词形）。注：上一节登记的「`MANIFEST.sha256` 缺失」系彼时（A1 阻断留档期）的目录状态；本轮核对时目录已补齐 `MANIFEST.sha256` 与 `EXECUTION-RECORD-L1-20260916T2327.md`——18 个产物文件全附 `.sha256` sidecar，本文实跑 `sha256sum -c MANIFEST.sha256` 全 OK（19 项含 README）。
+
+### 1. 同中继配对成立（本轮管理面未轮换）
+
+- 两臂（A1/A2）**双端生效中继均为 `rels://home.alfadb.cn:28443`**，臂内一致且**跨臂未变——本轮管理面未轮换**（与 0007 J 类两臂被切换的情形不同）。
+- 同一设备身份（`ohos-smoke-1`/同私钥）、同一对端（主机 peer `netbird-ohos`，PID 286618，connect 模式）、同一探针配置（`--probe-dst 100.108.144.165 --probe-interval 1000`）。
+- **唯一差异＝构建**（修复前 `e45f8c9` vs 修复后 HEAD=`aa6a9c5` ⊇ `18153fa`）。
+
+### 2. 逐臂表（signed sha256 / 设备计数 / 对端计数与拒收增量）
+
+| 项 | A1（修复前 `e45f8c9`，install 1/4） | A2（修复后 HEAD=`aa6a9c5` ⊇ `18153fa`，install 2/4） |
+|---|---|---|
+| signed HAP sha256 | `d1195ca67a5ccc15a38af625efef4d68e1a00ec5bb3565b11243dbd01c3373fe` | `de953f70bbd2ab29381151271cf557619e43e698efa060b655c1490797268b76` |
+| 双端生效中继 | `rels://home.alfadb.cn:28443` | 同 A1（相同 ✓） |
+| 执行时刻 | 22:49:40 启动 → 22:50:02 点击（1/4）→ 8 分钟窗 | **23:00 首启遇 `10106102`（锁屏）停止上报；解锁后 23:13 重跑**（点击 2/4）→ 8 分钟窗（23:13:5x–23:21:4x） |
+| 设备侧 create | `VPN_CREATE_RESOLVED\|…\|accepted=true` | `VPN_CREATE_RESOLVED\|…\|accepted=true` |
+| 设备侧 relay | `VPN_RELAY_STATUS\|…\|state=ready\|framesTx=438\|framesRx=533` | `state=ready\|framesTx=223\|framesRx=21` |
+| 设备侧 WG | **`wgSessions=1\|wgRxToTun=8385`** | **`wgReady=false\|wgSessions=0\|wgRxToTun=0`** |
+| 设备侧 TUN RX | 0→2107B（窗中段）→ **8385B/195p**（窗末）；overlay `100.108.144.165` | **0/0**（TX 520B/5p，零增长） |
+| 对端侧拒收 | **无 `carrier-reject`**（臂 A1 前基线 0 行） | **`carrier-reject\|reason=relay-peer-offline` count 100→800（+700，与本臂窗口重合）**；臂 A2 前基线 100 来源未定（见第 8 节存疑③） |
+| 对端侧探针/lane | `write failed=0`（探针全部写成功）；lane 正常；无 `Relay is not supported` 行 | 探针写成功但握手攻势无响应：`handshake-campaign-deadline` ×7；**无建 lane 通向我方的证据** |
+
+### 3. 无效判据检查：两臂均有效
+
+两臂对端侧 `ice.connected=0`、无 `carrier->direct` → 未触发无效条款，**两臂均有效**（均可作对照证据）。
+
+### 4. 配对结论（如实，禁止拼凑）：我方对端场景的互操作回归信号
+
+- 同中继 + 同身份 + 同对端 + 探针同配置，唯一差异＝构建；观测到**方向完全相反**：修复前被对端接受（建会话、收探针载荷）、修复后被对端拒收（无会话、零收包）→ **这是【我方对端】场景的互操作回归信号**（EXECUTION-RECORD-L1 §6 判读：「修复后构建的帧被对端以 relay-peer-offline 拒收……与 A1 完全相反」）。
+- **定性资格限制**：该场景**不具备对 `18153fa` 主因定性资格**——A1 已反证「修复前必然无会话」前提（见上一节），故本配对**不能**得出「`18153fa` 是/不是 0005/0006 无会话主因」的结论；且 **D 轮（0004，含同一修复 `18153fa`）曾对官方对端建会话成功** → 「含字段即被拒」**不成立**，拒收条件更细（对端实现/模式/状态相关）；回归机制**未从代码/协议侧验证**。
+
+### 5. 主会话独立假设（待验证候选，非结论）
+
+- 两臂之间可能还有第三个变量：**设备在 A2 前掉线过一次并重连**（A1 时设备是新上线、对端全新订阅）。
+- 怀疑**我方对端的「对端在线状态」未随重连刷新**（订阅只做一次 / `PeersWentOffline` 后不重订阅 / 重新上线无新 `PeersOnline`），从而出现「A1 收、A2 拒」。
+- **该假设正在另行只读分析（另案）中，本节只登记为待验证候选，不得写成结论。**
+
+### 6. 配额与收尾（EXECUTION-RECORD-L1「配额总账」）
+
+- **L 类**：install 2/4（`d1195ca6…73fe` / `de953f70…8b76`）；推送 1/2；**臂次 2/4**（A1 8min 窗 + A2 8min 窗；A2 首启锁屏不计完成、重跑完成；合计 ≈35min ≤60min）；hilog 每臂 1 次（流式 480s）；点击 2/4。
+- **M 类**：清理 1/1；force-stop 1/2；**对端停止 1/1（`kill 286618` 已确认消失）**；uninstall 0/1（App 保留）。
+- 时钟门 3 次（22:47:44 / 23:03:10 / 23:12:50）**均 proceed**。
+
+### 7. M 清理实况
+
+设备侧本轮重推的三文件（config/key/start-netbird.sh）逐个删除 → **零残留**；`pidof` 空；**App 保留**；`/tmp/n13-arm-pp` 已删；主工作区未动。
+
+### 8. 存疑（4 条，逐条如实）
+
+1. **回归机制未定因**：`18153fa` 添加的 relayServerAddress 字段与对端拒收（relay-peer-offline）之间的机制联系未从代码/协议侧验证；
+2. **`relay-peer-offline` 语义未从对端代码复核**（本轮只读约束）；
+3. **A2 前拒收基线 100 来源未定**（臂 A1 结束后出现）；
+4. **0004 成功与本轮回归的边界条件（对端模式差异）未归因**。
+
+### 9. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
