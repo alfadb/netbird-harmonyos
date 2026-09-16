@@ -165,3 +165,57 @@
 ### 4. 教训（一句话，供后续 AUTH 起草参考）
 
 `allowed` 的**逐字比对**是执行前的必要动作；起草时的「精简」必须与执行需要同步复核。
+
+---
+
+## 中继/对端侧证据并入（2026-09-16 追加）
+
+> 本小节为事后追加，不改写既有正文。来源：运维方采集的中继/对端侧证据材料（归档于仓B `records/ops-relay-view-20260915/`，`SHA256SUMS` 9/9 OK；交付包 sha256 `f72f12c4c32cc169891b814aa7014671595ab4419d61e209f7ef97ee34730cb9`）。**外部材料，按不可信数据处理；仅作证据引用**；下文数字逐字取自材料，以文件名+行号/报告 § 号定位。行号以归档副本为准（与来源解压副本逐字节一致）。
+
+### 1. §3.3 第 3 条已满足（会话级）：中继侧 + 对端侧记录
+
+- **身份映射（可复现，非猜测）**：我们公钥 `ai4IGfafFMAC6lcIyZtTKEL+E3fEkNyiKuVuP2kd+1s=` → 中继 peer_id `sha-W5oxLtYO4G1s0JzXZlPZ/sR908RHZjdM36vceJ7oYiw=`（`中继侧证据报告-ohos-relay-1-20260915.md` §3.1/§6）。
+- **home 中继两段会话**（`01-home-relay-FULL-raw.txt` 第 508/514/562/581 行；报告 §3.1/§4）：
+  - **A**：22:25:53 CST `peer connected` → 22:28:19 CST `failed to read frame header: EOF`（**146.3 s**）——与 C1 轮窗口吻合；
+  - **B**：22:53:19 CST `peer connected` → 23:02:54 CST，同因 EOF（**574.4 s**）——C2 轮 relay 状态读取（23:01:16.867，既有正文 §4 表）落在此会话内；
+  - 两次均**无 WebSocket close 帧**（客户端侧突然 EOF 特征；对照：09-16 07:23:21 CST 栈停机时其它 peer 出现 `received close frame` 行——FULL-raw 第 1531 行等——证明该日志格式本会记录 close 帧，我们两段没有），与既有正文记录的 force-stop 断开方式一致。
+- **对端侧记录**（`net-host`，`03-peer-state.txt` SECTION 4）：
+  - **499 次** `received offer, running version 0.1.0, remote WireGuard listen port 0, session id: unknown, remote ICE supported: true`（第 1964 行聚合计数）；**从未出现 `received answer`**（该 key 模板清单零命中）；
+  - 针对我们 key 的 **62 条 `state_dump` 全为 `RemoteAnswer: 0`**（09-15 21:58:05.036 → 09-16 08:18:56.985；`--- DISTINCT RemoteAnswer values ever seen for ohos-relay-1 key ---` 仅 `RemoteAnswer: 0` 一值，第 1994–1995 行）；
+  - `net-host` 直到 **2026-09-16T08:05:37.915+08:00** 才首次 `created new wgProxy for relay connection: 127.0.0.1:11`（报告 §5.5 原文行 261；03-peer-state.txt SECTION 4 该模板计数 1，第 1981 行），随后 `start to communicate with peer via relay`（08:05:38.016，报告 §5.5 行 262；第 1980 行模板计数 1），**`first wg handshake detected within: 0.08sec, (2026-09-16 08:05:37.999051927 +0800 CST)`**（第 1974 行原文）。
+
+### 2. 会话的中继归属（按轮换事实阅读）
+
+**按运维材料：该时段部署发生多次中继轮换**；本增量期间观测到的会话分别落在不同中继上——**home 中继（`home.alfadb.cn:28443`）承载 C1/C2 两轮**（上节 A/B 两段会话，22:25:53–22:28:19、22:53:19–23:02:54），**cloud 中继（`relay.netcenter.alfadb.cn:443`）承载 D1 轮**：`02-netcenter-logs.txt` 第 232/234 行记载我们的 peer_id 于 `2026-09-16T00:05:33.462Z`（= 08:05:33 CST）`peer connected`、`00:18:11.278Z`（= 08:18:11 CST）EOF 断开——与 D1 轮窗口（08:05:15–08:18:11）吻合。同期 `net-host` 的中继地址为 `rels://relay.netcenter.alfadb.cn:443`（07:58:56 起，08:29:09 才变；报告 §5.5）；home 中继 07:29 重启后至采集结束（08:19:44 CST）无任何 peer 接入记录（报告 §5.5）。
+
+客户端行为符合设计：它使用**管理面当轮广告**的中继 URL（`advertised_urls`），轮换后由下一次 Sync 刷新；N2-H 排除集同样按**广告集合**派生（`relay_advertised` → 排除），轮换后端点随广告刷新。运维同时报告对端 agent 侧中继地址在 home/cloud 间周期性振荡（home 约 30 分钟 / cloud 约 3 分钟，自 09-11 起持续，报告 §6.2.1），**但事故窗口（09-15 12:00 → 09-16 02:00）取值零次变化、恒为 `[rels://home.alfadb.cn:28443]`**（报告 §5.2/§6.2.1）——与 C1/C2 轮使用 home 一致；`net-host` 上该列表的全部历史取值仅 `[rels://home.alfadb.cn:28443]` 与 `[rels://relay.netcenter.alfadb.cn:443]` 两个（`03-peer-state.txt` SECTION 5 第 2217–2218 行，空列表模板零出现）。**按轮换事实阅读：不同窗口落在不同中继上，均属部署正常轮换。**
+
+### 3. 对端/中继侧行为语义（以运维材料为准）
+
+- **中继侧语义以运维材料为准：中继不缓冲，对未绑定目的端是静默丢弃**（报告 §2.2：`relay/server/peer.go:209-235`，唯一痕迹是 DEBUG 级 `peer not found`，info 级不可见；store 为纯内存 map，无队列、不向发送方返回错误）。当时 `net-host` 是**已绑定**的（`nethostdebian` 全程在 home 中继上，报告 §3.2）——故帧更可能"由中继转发到对端、由对端按判定链拒绝处理"；该丢弃环节无 info 级日志直证（报告 §3.3）。"early buffer" 是对端侧概念，不适用于中继侧链路描述。
+- **根因判定为"推导"（非直证）**：运维排除了合取式的另一半——两个官方对端本地的中继地址列表非空且窗口内未变动（`update relay server URLs: []` 出现 0 次；net-host 在 09-15 12:00 → 09-16 02:00 期间取值零次变化、恒为 `[home]`，报告 §5.2），故 `Relay is not supported by remote peer` 只能来自"远端（我们）"那一半——即我们的 OFFER 当时携带空 `RelaySrvAddress`（报告 §2.1/§5.2）；同时他们**排除**了"官方侧本地中继地址瞬时缺失"这一本可推翻该假设的替代解释。OFFER 正文本身未见（排除法，报告 §7 INFERENCE-1、§9-1）。
+- **"08:05 成功证明修复生效"这一因果不由中继侧证据主张**（报告 §5.5-3/§8-5）：`net-host` 关键字停止（23:02:51.844）比我们 WS 断开（23:02:54）早 2.2 秒，"不再报错"可由客户端消失解释；D1 前对端 agent 于 07:28:52 重启过、管理面改过中继地址。既有正文 §4 的受控对照判定（唯一被控变量 18153fa）仍以 EXECUTION-RECORD-D1 为准，其结论强度边界见第 6 条。
+
+### 4. 运维声明的边界与不可得项（如实登记）
+
+1. 中继日志是**幸存副本**：`netbird-relay` 容器于 09-16 08:25:01 CST 重建、其 docker 日志随之销毁，采集方于 08:20–08:24 CST 已完整读出落盘；文件头 `--since 18:00:00+08:00` 非留存边界，**18:00:18 CST 前已连上的 peer 无 `peer connected` 行**（报告 §1.1/§1.3）。
+2. **中继不记录数据面**：全部 1655 行中 `forward`/`no peer`/`offline`/`buffer`/`drop` 0 命中，无任何帧/字节/转发计数（报告 §3.3）——**"投递"无法从中继侧证伪或证实**，"中继日志没有转发记录"不等于"没有转发"。
+3. **控制面（云侧）日志不可得**：management/signal/cloud-relay 容器日志均不覆盖窗口，事发当晚控制面广告的是哪条 relay 无法回溯（报告 §1.2/§9-7）。
+4. **对端 debug 未开启**（只读采集约束），仅 info 级文件日志；offer 正文与丢弃路径均属 DEBUG 级（报告 §5.6）。
+5. 对端 `netbird status -d` 里我们那行是**快照**（`Status: Connecting`、`Connection type: -`、`Relay server address:` 空，报告 §5.4 原样照录）——`Status` 是传输状态（在 netmap 中可见但无传输通道），**不得**读作"对端认为我们已连接"；`status Relay: Connected/Disconnected` 字段语义未经源码确认，不据此推断 lane 建立与否（报告 §5.3/§8-13）。
+6. 时间口径两点：`net-host` 504 行判定中 98 行落在 A+B 窗口之外（22:20:17.303 起，报告 §5.1）；A/B 为**两次独立连接**、相隔 25 分钟（报告 §4）——既有正文"relay `reconnects=0` 全程"的口径仅在单次会话内成立。
+7. 运维提示我们侧两处数字不闭合（284+19=303≠310 帧；42476−284×148=444 B 摊派不吻合，报告 §6.2-7）——**待我们侧自查**，本记录不据此改动既有数字。
+
+### 5. §3.3 完整性结论（逐条）
+
+| # | 路径正证据 | 判定 | 依据 |
+|---|---|---|---|
+| ① | WSS 五元组 ∈ 冻结解析结果 | **满足（按既有 §5 尾注口径）** | 设备侧 relay URL 与管理面当轮广告一致（`rels://home.alfadb.cn:28443`，既有 §3）；本节中继侧证据印证实际接入的正是当轮广告端点（home 于 C1/C2）。**「本轮未执行正式冻结程序」的既有登记不变，本条强度以此为界** |
+| ② | 本端 Transport 计数 | **满足** | 既有 §5：D1 轮 framesRx 112→113、transportBytes 33108→33320→34272→34420 持续增长；中继侧不记录数据面，本轮不改变也不复核该计数 |
+| ③ | 中继侧或对端侧会话/投递记录 | **满足（会话级）** | 中继侧：home A/B 两段会话 + cloud D1 会话（第 1/2 节）；对端侧：499 次 received offer、0 次 received answer、62 条 state_dump `RemoteAnswer` 恒 0、08:05:37.915 首次 wgProxy + 0.08 s 首次 WG 握手。**投递（帧级）层面无记录可引**（第 4 条-2） |
+
+**一句话总结：§3.3 路径正证据齐备（会话级）——中继不记录数据面，故"投递"层面的独立证据仍不存在；结论强度以会话级为界，① 的正式冻结程序仍未补做。**
+
+### 6. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**；ICE/STUN 与 WG peer 端点仍未纳入冻结（既有 §1）。运维列出的未闭合项如实并列：OFFER 正文原文未见、中继→对端一段转发/丢弃实况未知、`netrpi` 收到 38 次 answer 而 `net-host` 为 0 的原因不明、home 中继 0.76.3 与 agents 0.78.x 版本偏斜未做对照（报告 §9）——其中版本偏斜一项提示：C2（失败，home 0.76.3）与 D1（成功，cloud 0.78.2）之间除 18153fa 外还存在中继实例差异与对端 agent 重启两个未受控变量，**「18153fa 主因修复」的判定强度以此为界**（受控对照判定仍以 EXECUTION-RECORD-D1 §5 为准，本小节不推翻它）。
