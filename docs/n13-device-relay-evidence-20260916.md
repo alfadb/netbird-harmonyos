@@ -135,3 +135,33 @@
 
 ---
 *本文所有数字与标记均逐字取自上列来源文件；无任何键值/令牌/私钥写入。编制：执行子代理（glm-5.3-flash），2026-09-16。*
+
+---
+
+## 更正与偏差登记（2026-09-16 追加）
+
+> 本小节为事后追加登记，不改写既有正文；更正与裁定以判据原文文件与 AUTH 原文为准。
+
+### 1. 时间戳更正（数值无误，仅时刻标注串行）
+
+既有正文（EXECUTION-RECORD-D1 §5）引用判据时，`framesTx=254|framesRx=112|transportBytes=33108` 那条 `VPN_RELAY_STATUS` 的时刻与 **08:16:55.502** 相关联（该记录 §5 判据块首行 CONNECTOR 行即标注 08:16:55.502，RELAY 行括注「3 秒后 framesTx=257」与判据原文不符）。经核对判据原文文件（`D1-verdict-markers-verbatim-20260916T0818.log`）：**该条实际时刻为 08:16:50.492**；而 **08:16:55.502** 对应的是 `framesTx=257|framesRx=112|transportBytes=33320`（两采样间隔 5.010s）。**数值本身无误，仅时刻标注串行**；此后引用一律**以判据原文文件的时间戳为准**。两行判据原文照录如下（含完整时间戳与 requestId），作为更正依据：
+
+```
+08:16:50.492 37500 37500 I A02900/cn.alfadb.netbird:vpn/NetBirdVpn: VPN_RELAY_STATUS|requestId=ui-1789517117508|enabled=true|state=ready|framesTx=254|framesRx=112|transportBytes=33108|reconnects=0|tokenValid=true|lastError=none|advertised=true|advertisedUrls=1
+08:16:55.502 37500 37500 I A02900/cn.alfadb.netbird:vpn/NetBirdVpn: VPN_RELAY_STATUS|requestId=ui-1789517117508|enabled=true|state=ready|framesTx=257|framesRx=112|transportBytes=33320|reconnects=0|tokenValid=true|lastError=none|advertised=true|advertisedUrls=1
+```
+
+### 2. 偏差 1：`hilog` 日志级别设置不在 AUTH-0004 的 `allowed` 字面内
+
+- 事实：AUTH-0004 `allowed` 的日志条目仅为「日志：hdc shell hilog 清缓冲与抓取（限本项目 tag，如 NetBirdVpn/N1BDiscVpn，非持久）」，**「日志级别设置」不在其字面内**（本文实读 AUTH-0004.json：「日志级别」零命中）；该措辞只出现在 AUTH-0003 对应条目（「日志：hdc shell hilog 抓取与日志级别设置（限本项目 tag，如 NetBirdVpn/N1BDiscVpn，非持久）…」）。执行层当时依 0003 措辞作为依据执行了 `hilog -D 0x2900 -b D`（非持久、限本项目域）——**字面上超出 0004 的 `allowed`**。
+- 成因（两侧如实登记）：① 起草方（主会话）起草 AUTH-0004 时按要求「精简 A 类条目」，删掉了 0003 中「日志级别设置」这一项；② 执行层沿用 0003 措辞，未逐字比对 0004 的 `allowed`。
+- 裁定（主会话，已更正先前口径）：**属已执行偏差，不得追认、不得作为先例**；实质上范围未扩大（仅本项目 tag、非持久、未改系统网络/协议、目的是获取授权本已要求的证据），故不推翻 D1 的证据效力；但**今后任何 AUTH 若需要该动作，必须在 `allowed` 中显式列出**。
+- 同时登记：主会话先前口头裁定（「依 AUTH allowed 的日志级别设置」）**引用有误并在此更正**（当时依据执行层转述、未逐字核对 AUTH 原文）。
+
+### 3. 偏差 2：`hilog` 读取 4 次 vs「每循环 ≤1 次」
+
+保持既有登记（EXECUTION-RECORD-D1「观测与仪器偏差」第 3 条；本文 §6-1），并补充：**净有效判据抓取 1 次**；成因=流式抓取零应用行（仪器缺陷）+ 设备晨间重启后应用域被过滤到 WARN+。裁定不变：属仪器故障恢复、范围未扩大；**不得**解读为「限额可放宽」。本 AUTH 内 D 类验证已完成，**不再需要**任何 hilog 读取。
+
+### 4. 教训（一句话，供后续 AUTH 起草参考）
+
+`allowed` 的**逐字比对**是执行前的必要动作；起草时的「精简」必须与执行需要同步复核。
