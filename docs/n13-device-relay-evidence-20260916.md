@@ -219,3 +219,43 @@
 ### 6. 口径不变
 
 仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**；ICE/STUN 与 WG peer 端点仍未纳入冻结（既有 §1）。运维列出的未闭合项如实并列：OFFER 正文原文未见、中继→对端一段转发/丢弃实况未知、`netrpi` 收到 38 次 answer 而 `net-host` 为 0 的原因不明、home 中继 0.76.3 与 agents 0.78.x 版本偏斜未做对照（报告 §9）——其中版本偏斜一项提示：C2（失败，home 0.76.3）与 D1（成功，cloud 0.78.2）之间除 18153fa 外还存在中继实例差异与对端 agent 重启两个未受控变量，**「18153fa 主因修复」的判定强度以此为界**（受控对照判定仍以 EXECUTION-RECORD-D1 §5 为准，本小节不推翻它）。
+
+## 残余对账：framesTx 303 vs 310（2026-09-16 追加）
+
+### 1. 计数口径（实现侧实证）
+
+设备行 `framesTx/framesRx/transportBytes` 由 `formatRelayStatusLine` 原样渲染 Rust 侧 `RelayStatus`（`client/entry/src/main/ets/vpnextensionability/NetBirdConnector.ets:859-861,886-888`）。三个计数的准确口径：
+
+| 计数 | 口径 | 依据（file:line） |
+|---|---|---|
+| `framesTx` | **全部出站帧按类型逐帧累计后求和**，含 Auth、SubscribePeerState、HealthCheck 回显、Close 等，**不只 Transport** | 求和 `client/core/src/connector.rs:1641`（`stats.frames_tx.iter().sum()`；`frames_tx` 为按类型数组 `[u64;12]`，`relay_client.rs:1157`）。递增点仅两处：Auth 每次成功拨号恰 1 次（`relay_client.rs:1914`）；其余全部帧型在 `write_owned` 把帧写上 WS 成功后 +1（`relay_client.rs:2209-2213`）。HealthCheck 回显经 `send_io`→`write_owned` 同点计数（`relay_client.rs:2017-2020`） |
+| `framesRx` | 全部入站帧按类型求和 | `connector.rs:1642`；入站递增点 `relay_client.rs:2015`，AuthResponse 在 pre-auth 路径单独计数（`relay_client.rs:1948`） |
+| `transportBytes` | **仅 Transport 载荷字节（tx+rx 双向合计）**，不含每帧 38B 头（2B 协议头 + 36B dstID，规格 §7.2 `docs/relay-client-spec-20260914.md:167,221`），更不含 WS/TLS 开销 | `connector.rs:1643`（`transport_tx_bytes + transport_rx_bytes`）；载荷提取与累计 `relay_client.rs:2198-2201,2212`（入站 `relay_client.rs:2023`）；各帧全长对照 `relay.rs:381-394`（HealthCheck/Close 仅 2B 头，`relay.rs:386`） |
+
+计数层只输出**和值**、不分型输出——与 C2 记录登记的判别限制一致（`EXECUTION-RECORD-C2-20260915T2306.md:21`；D1 记录「存疑 1」`EXECUTION-RECORD-D1-20260916T0820.md:33`）。
+
+### 2. C2 序列导出（`C2-relay-status-verbatim-20260915T2301.log`，95 行全量）
+
+- 首行（L1，22:53:25.683）：`framesTx=7|framesRx=4|transportBytes=444`
+- 次大行（L94，23:01:11.859）：`framesTx=306|framesRx=22|transportBytes=42032`
+- 计数最大行（L95，23:01:16.867）：`…|framesTx=310|framesRx=23|transportBytes=42476|reconnects=0|tokenValid=true|lastError=none|…` —— **310 与 42476 确为同一条记录**（同一序列另见 hilog 全量流 `hilog-c2-20260915T2253-full.log:6269` 起共 95 条，数值逐条相同）。
+
+逐区间增量（94 个 ≈5s 采样间隔，程序核算全量）：每个间隔的 ΔtransportBytes 均为 **148 的整数倍**（444=3×148 为主；592=4×148 恰一次；296=2×148 恰一次），零例外、零负值；恰好 **19 个间隔**出现「ΔframesRx=+1 且 ΔframesTx 多出 1 个非 Transport 帧」，且这 19 个间隔严格每 5 个采样（≈25s）一个——与服务端 HealthCheck 周期 25s（`docs/relay-client-spec-20260914.md:181`；客户端只回显不主动发，`docs/relay-client-spec-20260914.md:185`、`relay_client.rs:2017-2020`）逐点吻合。
+
+### 3. 对账等式（闭合）
+
+窗口增量（L1→L95，471s）：**ΔframesTx = 303 = 284×Transport（各 148B 载荷）+ 19×HealthCheck 回显（2B，不入 transportBytes）**；ΔtransportBytes = 42476−444 = **42032 = 284×148，逐字节相等**。284 次 ≈ 3 个 peer × 每 5s 一次握手重试 × 94 个间隔（`DEFAULT_HS_RETRY_MS=5000`，`client/core/src/wg_device.rs:177`；`peers=3` 见 `hilog-c2-20260915T2253-full.log:6268` VPN_CONNECTOR_STATUS 行）。
+
+绝对量：**310 = 7 + 303**。其中的 **7 = 首快照（22:53:25.683）之前已发出的会话建立帧：1×Auth + 3×SubscribePeerState + 3×Transport（载荷恰 444=3×148B，即 L1 的 transportBytes）**。等价写法：310 = 287×Transport（3 建立期 + 284 窗口期，载荷合计 287×148=42476）+ 23×控制帧（1 Auth + 3 Subscribe + 19 回显）。既有「303」是**窗口增量**（timeline-diff §5.2 口径，其基线本就写明 7→310：`docs/relay-timeline-diff-official-vs-ours-20260915.md:119-122`），而 310 是**绝对计数终值**——两者口径不同、并不互斥；C2 记录第 207 行登记的「42476−284×148=444B 摊派不吻合」由同一基线闭合（444B = 首快照前 3 帧×148B）。
+
+7 帧的分型依据（计数层不分型，此为代码口径约束下的唯一分解，**如实标注为推导**）：`reconnects=0` 全程（95 行同值）⇒ 单会话恰 1 次 Auth（`relay_client.rs:1914`）；会话存活到采集结束 ⇒ Close 一次未发（`relay_client.rs:2068` 路径未触发）；客户端不主动发 HealthCheck ⇒ 首快照前无回显帧；出站控制帧仅剩 SubscribePeerState——载波泵对**每个可连接 peer 各开一条 lane、各发一次 open_conn 订阅**（`connector.rs:1851,2033-2044`；每帧恰单 peer，`relay_client.rs:2089`），`peers=3` ⇒ 3 帧；其余 3 帧为首批 WG 握手 initiation。旁证：首快照 `framesRx=4` 与 1×AuthResponse（`relay_client.rs:1948`）+ 3×PeersOnline（每条 lane 订阅的 PeersOnline 应答，§4.1）一致；且 444 为纯 148 倍数 ⇒ 首快照前零入站载荷。
+
+### 4. 交叉验证
+
+- **framesRx 旁证**：23 = 4（建立期，如上）+ 19（服务端 HealthCheck ping；25s 节奏下 471s ≈ 18.8 个周期）。窗口内 19 个回显帧与 19 个入站帧 1:1 配对（逐区间核算），且 transportBytes 全程保持 148 的整数倍 ⇒ 入站 Transport 载荷 = 0，与 C2 对照读数 `wgSessions=0`、`wgRxToTun=0`、tun RX=0 一致（`EXECUTION-RECORD-D1-20260916T0820.md:34`）。
+- **D1 同型核对（修复后，同口径）**：判据窗实测 `framesTx=252→254→257`（08:16:45.491/50.492/55.502，`D1-verdict-markers-verbatim-20260916T0818.log:2,4,6`）：252→254 为 Δtx=2、Δrx=+1、ΔtB=+148 ⇒ 1 回显 + 1 帧 148B 载荷 Transport（精确闭合）；254→257 为 Δtx=3、Δrx=0、ΔtB=+212 ⇒ 0 回显 + 3 帧 Transport 载荷合计 212B（结构自洽；分型不可再分，同「存疑 1」）；08:17:25→08:17:30 Δrx=112→113、ΔtB=34272→34420=+148（`EXECUTION-RECORD-D1-20260916T0820.md:32`）⇒ 同为「+1 回显 +148B 载荷」同型。任务稿所引 `framesTx=267` 在 D1 轮存档证据（判据原文、两份 EXECUTION-RECORD、hilog）中**无对应行**，存档可见最大值即 257；该缺口不影响本对账。
+- 口径提示：D1 的 transportBytes 含**入站**载荷（双向合计），且 WG 数据帧尺寸混合，故 D1 只能做结构自洽核对、不能复现 C2 的纯 148B 逐字节等式——这反证 C2 的 284×148 恰是「零入站数据」窗口的特例，而非口径巧合。
+
+### 5. 结论
+
+**结论：已对账——310 = 7（首快照前建立帧：1 Auth + 3 SubscribePeerState + 3×148B Transport）+ 284×148B Transport + 19×HealthCheck 回显，「303」是首快照之后的窗口增量而 310 是绝对计数终值，算术层面无需新数据即已闭合；唯 7 帧的按类型分解目前是代码口径推导（计数层不分型输出），若要升级为帧级直证需要分型计数外泄（帧级日志）或中继侧转发视图，设备与中继现状均不可得。**
