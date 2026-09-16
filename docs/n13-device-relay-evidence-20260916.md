@@ -312,3 +312,16 @@
 ### 7. 口径不变
 
 仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
+
+## 可见性阻断与修复：运维 ACL 根因（2026-09-16 追加）
+
+> 本节是**运维通过会话消息交付的报告**（无文件包）的**要点浓缩转写**，非字节级副本；事实照抄。要点转写全文见仓B `netbird-n1bdisc/records/ops-acl-rootcause-20260916.md`。
+
+- **根因（一句话）**：**不是账号、不是网络，而是账号内 ACL**——4 台 ohos peer 修复前**都只属于 `All` 组**（`All` 组 id `d29etkd27eas73a9rqeg`，账号 `d29etkd27eas73a9rqdg`、`domain=netcenter.local`、overlay `100.108.0.0/16`、peer 23 台全属它），该账号**不存在 `All → All` 策略**，两台"只在 `All` 组"的 peer **互相不可见**；账号内两条相关策略（`HostInternalPolicy`、`AdminAccessPolicy`）的**并集恰为 `{100.108.171.38, 100.108.162.237, 100.108.156.116}`**，与客户端观测的 3 台**逐台一致**。
+- **事件库证明未删 peer**：`activity=5`（PeerRemovedByUser）共 18 条、最近 `2026-08-09`，无一条涉及任何 ohos peer；4 台 ohos peer 各只有 1 条 `activity=1`（PeerAddedWithSetupKey）；`2026-09-16 16:21:13–16:21:25` 的 6 条 `activity=68`（SetupKeyDeleted）删的是遗留 key 而非 peer（删/撤销 key 不影响已注册设备）→ **`ohos-smoke-1` 从未被删除**。
+- **命名订正**：`ohos-ab-host-1` 是 **setup key 名**（`setup_keys.id=dal534l27eas73fo7jig`，one-off/usage_limit=1/used_times=1，创建 2026-09-16 16:21:38，到期 09-23，`revoked=f`）；它注册出的 **peer 名是 `netbird-ohos`**（peer id `dal57ft27eas73fo7ju0`，`dns_label=netbird-ohos-126-29`，`100.108.126.29`）。
+- **已落地修复**（管理 REST API；临时铸造 1h PAT 用完即删，终态 `personal_access_tokens`=0，不记令牌值；未重启任何服务、未改 management/signal/relay 配置）：group `ohos-ab`（id `dal7bnl27eas73fl6nb0`，最终 4 台成员）+ policy `ohos-ab-internal`（id `dal7bnl27eas73fl6ncg`，`enabled=t`，一条 rule：`action=accept`、`protocol=all`、`bidirectional=true`、`sources=destinations=[该组]`）。
+- **服务端验收**：`GET /api/peers/{id}/accessible-peers` 修复前四台各见 3 台 → 第一步后这两台各见 4 台 → 第二步后**四台各见 6 台**，`REMOVED` 为空；API 写入触发 netmap 推送，**在线 peer 无需重连即见新成员**。影响面：`groups 26→27`、`policies 18→19`、`peers 23→23`。
+- **我们的独立验证**：主机侧对端（PID 254451，未重连）状态 `"peers":3` → **`"peers":6`**。
+- **对前两轮的归因更正**：先前两轮（0005 F 类、0006 H 类）"未收敛/前置失败"的**真正原因是可见性缺失**（不是代码、不是中继、不是账号/网络）；修复后已具备做受控 A/B 的前提。
+- **口径不变**：仅 **N13 级证据**；**不构成 N2-N6 pass**。
