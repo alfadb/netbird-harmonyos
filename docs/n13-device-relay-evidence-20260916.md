@@ -325,3 +325,58 @@
 - **我们的独立验证**：主机侧对端（PID 254451，未重连）状态 `"peers":3` → **`"peers":6`**。
 - **对前两轮的归因更正**：先前两轮（0005 F 类、0006 H 类）"未收敛/前置失败"的**真正原因是可见性缺失**（不是代码、不是中继、不是账号/网络）；修复后已具备做受控 A/B 的前提。
 - **口径不变**：仅 **N13 级证据**；**不构成 N2-N6 pass**。
+
+## J 类：可见性修复后的 2 臂 A/B —— 判定「对照无效」（2026-09-16 追加）
+
+> 本小节为事后追加，不改写既有正文。来源（全部只读核对，本文未运行任何设备命令）：仓B 证据目录 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260916-0007/`（两份 `clock-check-*`、两臂流式全量 hilog、两臂对端日志窗口切片、`EXECUTION-RECORD-J1-20260916T2118.md`、`MANIFEST.sha256`）与生效授权 `AUTH-DIAG-DEVICE-VALIDATION-20260916-0007.json`（下称 AUTH）。下文数字均逐字取自上列文件；无任何凭据写入。
+
+### 1. 目的与设计（AUTH J 类）
+
+- 承 0006 H 类（前置①互认失败而停）与运维 ACL 修复（见上一节），在可见性已修复前提下重做自足 A/B：同一设备身份（`ohos-smoke-1`）、应答对端为主机 peer `netbird-ohos`，对照修复前 `e45f8c9` vs 修复后 HEAD ⊇ `18153fa`，把唯一变量收敛为提交 `18153fa`（signal OFFER/ANSWER 补 `relayServerAddress` 字段 8）。
+- 前置①（可见性互认）的判定方式为**双条件**：(a) 设备启动后取自身 overlay IP 与对端 peer 列表互认——设备 `network map applied` 的 peers 计数 ≥6（或明确含对端）；(b) 对端侧停止拒收设备 relay 帧——`carrier-reject|reason=relay-peer-offline` 计数零增长，且出现对设备方向的 carrier 发送。双条件同时成立方可进入两臂。
+- **两臂生效中继必须相同**（写死规则，AUTH `operation_classes.J.hard_precondition` 第③条与 `criteria`、`forbidden` 末条）：每臂开始前双端各记录当轮生效中继 URL，**两臂不同 → 对照无效、如实记录并停止，不得收敛于 `18153fa`**。
+
+### 2. 前置①成立（可见性互认首次真正成立，双证据）
+
+- **(a) 设备侧**：臂 1 启动后 `network map applied serial=297 peers=6`（≥6 ✓）；对端 `ice.peers=6` ✓。
+- **(b) 对端侧**：设备在线后 `carrier-reject|reason=relay-peer-offline` 计数维持 25200 **零增长**（停止拒收 ✓）；臂 1 窗口内对端 `carrier_tx_packets` 3388→3594（**+206**，出现对设备方向的 carrier 发送）✓。
+
+### 3. 两臂读数（signed sha256 / 设备计数 / 对端计数）
+
+- **臂 1（修复前 `e45f8c9`，install 1/4）**：signed HAP sha256 `2c23ef5412b534d4306189bd406954064400d20f7dd1f4c8d07ba7622cb92492`；生效中继 `rels://home.alfadb.cn:28443`。设备侧：`VPN_CREATE_RESOLVED|accepted=true`、`VPN_RELAY_STATUS|state=ready|framesTx=263|framesRx=94`、`wgReady=true|wgSessions=1|wgRxToTun=0`、TUN RX 0/TX 576B。对端侧：`peers_with_session=0` 全窗、carrier lane attached（多次）、无 `Relay is not supported by remote peer` 行。**与预期不符**（预期 `wgSessions=0`）：可见性修复后环境含多个在线 peer，设备那条会话对象是**其他可见 peer**（非 `netbird-ohos`）。
+- **臂 2（修复后 HEAD=`24b5ed1` ⊇ `18153fa`，install 2/4）**：signed HAP sha256 `7b6868146e96ebe753cba7a1c15c6ee3c0b9e52c88ec745f1b386824e3d2a3be`；生效中继 `rels://relay.netcenter.alfadb.cn:443`（对端同窗 `relay_urls` 同步切换，双端臂内一致）。设备侧：`framesTx=359|framesRx=397|transportBytes=53624`、`wgReady=true|wgSessions=2|wgRxToTun=0`、TUN RX 0。对端侧：`peers_with_session=1`（211/250 采样；臂 1 全 0）、`handshakes 1306→1337`、lane attached ✓、无 `wgProxy` 字样行；`carrier-reject` +600（25200→25800，来源未定，见第 7 节存疑⑤）。
+
+### 4. 判定与依据：对照无效（禁止收敛）
+
+- **两臂生效中继不同**：臂 1 `rels://home.alfadb.cn:28443`；臂 2 `rels://relay.netcenter.alfadb.cn:443`——系**管理面在两臂之间切换 relay 指派**。
+- 按 J 类写死规则（两臂中继必须相同；两臂不同 → 对照无效、如实记录并停止；`forbidden`「不得跨中继拼接对照结论」在案）：**本轮判定「对照无效」，不得收敛于 `18153fa`**；「唯一变量收敛为提交 `18153fa`」不成立。
+- 前置①虽首次真正成立（第 2 节双证据），但同中继前提失败，两臂读数不构成受控对照。
+
+### 5. 方向性附注（非结论）
+
+- 臂 2 观测形态**强于**臂 1：`framesRx` 397 vs 94、`wgSessions` 2 vs 1、对端 `peers_with_session` 1 vs 0——方向与修复预期一致；但归因被**中继切换**污染（另有臂 1 会话对象非本对端），**不作为修复生效的结论**。
+
+### 6. 配额与收尾（EXECUTION-RECORD-J1「配额总账」）
+
+- **J 类**：install 2/4（臂 1 `2c23ef54…`、臂 2 `7b686814…`）；推送 0/2（H 轮保留的凭据仍在且哈希一致，按「不做无意义覆写」未重推）；**臂次 2/2 用尽**（每臂 8min 窗 ≤8min，合计 ≈17.5min ≤40min）；hilog 每臂 1 次（流式 480s）；点击 2/2。
+- **K 类**：清理 1/1；force-stop 1/2；**uninstall 0/1（App 保留）**；**主机对端停止 1/1**（PID 254451 已确认消失）。
+- `/tmp/n13-arm1b` 已删、主工作区未被改动；证据目录 `MANIFEST.sha256` 汇总且执行记录实跑 `sha256sum --check` 通过（EXECUTION-RECORD-J1）。
+
+### 7. 存疑与未闭合（5 条，逐条如实）
+
+1. **两臂中继切换系管理侧行为**：同中继 A/B 需固定 relay 指派或改判据设计；
+2. **可见性修复后环境含多在线 peer**：原「臂 1 必为 0」判据失效，宜改为针对 `netbird-ohos` 的定向会话；
+3. **两臂 TUN RX=0**（无 overlay 载荷；对端 `connect` 模式未带 `--probe-dst`）：`wgRxToTun` 判据未获行使；
+4. **对端状态 JSON 不暴露 peer 身份**：会话归因未完全闭合；
+5. **`carrier-reject` +600 来源未定**。
+
+### 8. 下一步设计建议（仅登记，不执行）
+
+- 固定 relay 指派（管理面锁定两臂同一中继），或改判据设计以容忍中继切换；
+- 会话判据改为**针对 `netbird-ohos` 的定向会话**（不再依赖「臂 1 必为 0」）；
+- 对端带 `--probe-dst` 以产生 overlay 载荷，行使 `wgRxToTun`/TUN RX 增长判据；
+- J 类臂次已 2/2 用尽，重跑须新授权。
+
+### 9. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
