@@ -1510,6 +1510,22 @@ impl RelayClient {
     pub fn same_client(&self, other: &RelayClient) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
+
+    /// Whether the latest presence signal for `peer` says OFFLINE (a
+    /// `PeersWentOffline` arrived and no `PeersOnline` since). A peer with
+    /// no signal at all — never seen, or after a session end, which clears
+    /// the cache — is NOT offline.
+    ///
+    /// Public for the lane orchestrator's per-pass reconcile: the relay
+    /// server's came-online interest is ONE-SHOT (consumed by the first
+    /// delivery), so an attached lane whose peer the server reported
+    /// offline can never see presence restore on its own — recovery
+    /// requires a fresh `open_conn` (a new `SubscribePeerState`), the
+    /// upstream client's "went-offline → close per-peer connection →
+    /// re-`OpenConn`" lifecycle.
+    pub fn is_offline(&self, peer: &PeerId) -> bool {
+        self.shared.is_offline(peer)
+    }
 }
 
 // ---------------------------------------------------------------------------

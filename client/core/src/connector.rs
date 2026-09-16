@@ -1891,7 +1891,8 @@ pub struct RelayCarrierStats {
     pub attach_ok: u64,
     /// WG seam carrier-attach refusals (e.g. unregistered peer — config bug).
     pub attach_err: u64,
-    /// Lane detachments (revocation / relay-down fail-closed / stop).
+    /// Lane detachments (revocation / relay-down fail-closed / stop /
+    /// peer went offline — the presence reconcile in [`RelayCarrier::ensure_lane`]).
     pub detach_ok: u64,
     /// Inbound relay datagrams fed to the WG device (matched senders).
     pub frames_in: u64,
@@ -1903,6 +1904,15 @@ pub struct RelayCarrierStats {
     /// Last `open_conn` failure class (stable token, diagnostics only).
     pub last_open_error: Option<&'static str>,
 }
+
+/// Retry backoff for a lane whose `open_conn` failed (e.g. the peer stays
+/// offline and the 30s §4.1 window timed out). This port re-opens lanes on
+/// the pump reconcile where upstream re-opens strictly on demand, so
+/// without it a fast-failing open would retry every pump pass; with it an
+/// offline peer costs one attempt per backoff window (the blocking 30s
+/// window itself stays the dominant rate limiter). Cost: recovery after a
+/// FAILED open is delayed by up to one window.
+const LANE_OPEN_RETRY: Duration = Duration::from_secs(5);
 
 /// N13-D2: the relay↔WG bridge for one connector — upstream's wgProxy
 /// orchestrator in minimal form. Duties:
@@ -1939,6 +1949,10 @@ pub struct RelayCarrier {
     /// Currently attached lanes: peer key → the carrier handle the WG seam
     /// received (identity for idempotent attach/detach bookkeeping).
     attached: Mutex<HashMap<String, std::sync::Arc<crate::relay_client::RelayWgCarrier>>>,
+    /// Per-peer earliest instant the next `open_conn` attempt is allowed
+    /// ([`LANE_OPEN_RETRY`] backoff after a failed open; entries clear on
+    /// success).
+    open_retry_after: Mutex<HashMap<String, std::time::Instant>>,
     stats: Mutex<RelayCarrierStats>,
     /// The production pump task (spawned on the connector runtime).
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1954,6 +1968,7 @@ impl RelayCarrier {
             wg,
             peers: Mutex::new(Vec::new()),
             attached: Mutex::new(HashMap::new()),
+            open_retry_after: Mutex::new(HashMap::new()),
             stats: Mutex::new(RelayCarrierStats::default()),
             task: Mutex::new(None),
         })
@@ -2032,17 +2047,57 @@ impl RelayCarrier {
 
     /// One `open_conn` + attach for `key` if no lane is attached yet.
     /// `true` = a lane is attached (maybe from an earlier pass).
+    ///
+    /// Presence reconcile (upstream client lifecycle): an attached lane
+    /// whose peer the server reported OFFLINE (`PeersWentOffline`) is
+    /// detached here. The relay server's came-online interest is ONE-SHOT
+    /// (consumed by the first `PeersOnline` delivery — only a NEW
+    /// `SubscribePeerState` re-arms it), so a lane kept attached across the
+    /// peer's offline window can never see the peer's return: this is the
+    /// upstream "went-offline → close per-peer connection → re-`OpenConn`
+    /// on demand" half our port was missing. The re-open below IS that
+    /// fresh `open_conn`: it blocks in the §4.1 wait until the peer returns
+    /// (fresh subscribe re-arms the interest → `PeersOnline` → presence
+    /// restored → lane re-attached, egress accepted again), or fails typed
+    /// and backs off [`LANE_OPEN_RETRY`] before the next attempt.
     pub async fn ensure_lane(self: &std::sync::Arc<Self>, key: &str) -> bool {
-        if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(key) {
-            return true;
-        }
         let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
         else {
             return false;
         };
         let pid = crate::relay::PeerId::from_wg_pubkey_string(key);
+        if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(key) {
+            if !client.is_offline(&pid) {
+                return true;
+            }
+            // PeersWentOffline after attach: the lane cannot serve the peer
+            // and cannot learn about its return — detach so the re-open
+            // below re-subscribes (idempotent: the attached table is keyed,
+            // open_conn guards duplicate pending subscribes, and the WG
+            // seam attach is an upsert).
+            self.attached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(key);
+            self.wg.detach_carrier(key);
+            self.bump(|s| s.detach_ok += 1);
+            hilog::emit("connector: relay carrier lane detached (peer went offline)");
+        }
+        if self
+            .open_retry_after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .is_some_and(|t| std::time::Instant::now() < *t)
+        {
+            return false;
+        }
         match client.open_conn(&pid).await {
             Ok(()) => {
+                self.open_retry_after
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(key);
                 let lane = std::sync::Arc::new(
                     crate::relay_client::RelayWgCarrier::new(client, pid),
                 );
@@ -2069,6 +2124,10 @@ impl RelayCarrier {
                 }
             }
             Err(e) => {
+                self.open_retry_after
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key.to_string(), std::time::Instant::now() + LANE_OPEN_RETRY);
                 self.bump(|s| {
                     s.lanes_open_failed += 1;
                     s.last_open_error = Some(relay_error_class_token(e.class()));

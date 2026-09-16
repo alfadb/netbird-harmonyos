@@ -43,11 +43,30 @@
 //!   §3.3). `reject_auth` config reproduces the upstream failure mode: NO
 //!   response, direct close (§3.4). Success answers `AuthResponse` with the
 //!   configured instance URL.
-//! - Subscribe/PeersOnline (§4.1): online peers are answered immediately
-//!   with `PeersOnline`; offline targets register interest and stay SILENT
-//!   until the peer authenticates (blocking-wait semantics, no negative
-//!   ack). Peers going offline push `PeersWentOffline` to remaining
-//!   subscribers.
+//! - Subscribe/PeersOnline (§4.1): offline targets register interest and
+//!   stay SILENT until the peer authenticates (blocking-wait semantics, no
+//!   negative ack). Legacy mode additionally answers already-online targets
+//!   immediately; faithful mode answers them too but (like upstream
+//!   0.78.1) registers BOTH notification interests on EVERY subscribe.
+//! - Presence semantics — two modes ([`TestServerConfig::faithful_presence`]):
+//!   **faithful** replicates the upstream 0.78.1 store exactly
+//!   (`relay/server/store/listener.go`): the `PeersOnline` interest is
+//!   ONE-SHOT (a came-online event is delivered once per subscriber, then
+//!   that subscriber's interest is consumed — a NEW `SubscribePeerState`
+//!   is the only way to re-arm), the `PeersWentOffline` interest is
+//!   PERSISTENT (every went-offline event is delivered; the registration
+//!   stays), and the "target already online" immediate answer does NOT
+//!   consume the online interest (`peer.go` answers without going through
+//!   `peerComeOnline`). Consequence: a peer that bounces twice after one
+//!   subscribe is announced online ONCE and offline EVERY time. **Legacy**
+//!   (`false`) keeps the pre-faithful fake-server behavior: online targets
+//!   register nothing, the single interest table is consumed wholesale by
+//!   the first event — kept so the established tests pin the exact
+//!   semantics they were written against.
+//! - Control plane: [`RelayTestServer::set_peer_online`] scripts
+//!   `PeerCameOnline`/`PeerWentOffline` broadcasts (relay.go:153-163) for
+//!   any peer id — with or without a backing connection — so tests can
+//!   drive offline→online cycles deterministically.
 //! - Transport (§4.2): the 36B field is REWRITTEN to the sender's peer id
 //!   before forwarding; offline destinations are silently dropped + counted
 //!   (no error frame exists in the protocol).
@@ -65,7 +84,8 @@
 //! exposes deterministic control: [`RelayTestServer::wait_connections`],
 //! [`RelayTestServer::drop_connection`], [`RelayTestServer::close_connection`],
 //! [`RelayTestServer::send_ws_binary_to`] (raw frame injection for oversized
-//! frames) and [`RelayTestServer::shutdown`]. No sleeps anywhere: tests
+//! frames), [`RelayTestServer::set_peer_online`] (scripted presence events)
+//! and [`RelayTestServer::shutdown`]. No sleeps anywhere: tests
 //! synchronize via channels/`tokio::time::timeout` only.
 //!
 //! ## Sensitive discipline
@@ -74,7 +94,7 @@
 //! counted beyond shape validation. Stats and errors carry shape/counter
 //! data only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{poll_fn, Future};
 use std::io;
 use std::net::SocketAddr;
@@ -148,6 +168,22 @@ pub struct TestServerConfig {
     /// Per-operation fuse (read/write). A safety net against hangs, never a
     /// synchronization device. Default 30s.
     pub op_timeout: Duration,
+    /// Upstream-faithful presence semantics (NetBird 0.78.1
+    /// `relay/server/store/listener.go`). `true`:
+    /// - every `SubscribePeerState` registers BOTH notification interests
+    ///   (online + went-offline) for every requested peer, unconditionally
+    ///   (`store.go:87` `AddInterestedPeers`);
+    /// - the "target already online" immediate answer does NOT consume the
+    ///   online interest (`peer.go:237-256`);
+    /// - a came-online event (peer Auth, or scripted) is delivered to each
+    ///   subscriber ONCE, then that subscriber's online interest is consumed
+    ///   (`listener.go:107-121` — one-shot);
+    /// - a went-offline event is delivered to every subscriber and the
+    ///   offline interest PERSISTS (`listener.go:92-105`).
+    /// `false` keeps the legacy fake-server behavior the established tests
+    /// were written against: online targets register no interest, and the
+    /// single interest table is consumed by the first event that fires.
+    pub faithful_presence: bool,
 }
 
 impl Default for TestServerConfig {
@@ -158,6 +194,7 @@ impl Default for TestServerConfig {
             handshake: HandshakeBehavior::Normal,
             server_healthcheck_interval: None,
             op_timeout: Duration::from_secs(30),
+            faithful_presence: true,
         }
     }
 }
@@ -234,7 +271,30 @@ struct Registry {
     conn_peer: HashMap<u64, PeerId>,
     /// peerID → connections blocked in Subscribe-wait (§4.1: no negative
     /// ack; they are answered `PeersOnline` when the peer authenticates).
+    /// LEGACY mode only (`faithful_presence = false`); consumed wholesale
+    /// by the first event that fires for the peer.
     interest: HashMap<PeerId, Vec<u64>>,
+    /// FAITHFUL mode: peerID → connections with the ONLINE-notification
+    /// interest. ONE-SHOT: a came-online event is delivered once, then the
+    /// registration is consumed (upstream `listener.go` `peerComeOnline`
+    /// deletes after delivery); only a NEW `SubscribePeerState` re-arms it.
+    interest_online: HashMap<PeerId, Vec<u64>>,
+    /// FAITHFUL mode: peerID → connections with the WENT-OFFLINE
+    /// notification interest. PERSISTENT: delivery does NOT consume
+    /// (upstream `peerWentOffline` keeps the registration).
+    interest_offline: HashMap<PeerId, Vec<u64>>,
+    /// Control plane ([`RelayTestServer::set_peer_online`]): peers forced
+    /// "online" without a backing connection. Presence only — a Transport
+    /// to such a peer still has no route and is dropped as offline.
+    scripted_online: HashSet<PeerId>,
+}
+
+impl Registry {
+    /// Upstream "online" = has a live authenticated connection (or was
+    /// forced online through the control plane).
+    fn is_online(&self, peer: &PeerId) -> bool {
+        self.peer_conn.contains_key(peer) || self.scripted_online.contains(peer)
+    }
 }
 
 struct Shared {
@@ -349,6 +409,49 @@ impl RelayTestServer {
         };
         let _ = entry.outbound.send(ConnMsg::Ws { opcode: OP_BINARY, payload });
         true
+    }
+
+    /// Control plane: force `peer`'s presence to `online`, firing the same
+    /// broadcast the real lifecycle would (upstream `PeerCameOnline` /
+    /// `PeerWentOffline`, relay.go:153-163). Deterministic scripted
+    /// presence — tests drive offline→online cycles without any TCP churn:
+    ///
+    /// - `true`: registers the peer as scripted-online (presence only; a
+    ///   Transport to it still has no route) and fires the came-online
+    ///   broadcast — in faithful mode this CONSUMES each subscriber's
+    ///   one-shot online interest, exactly like a real Auth would;
+    /// - `false`: if the peer has a live connection it is aborted (the real
+    ///   teardown path fires the event asynchronously); otherwise a
+    ///   scripted-online peer is unregistered and the went-offline broadcast
+    ///   fires inline (faithful mode: the offline interest persists).
+    ///
+    /// `true` = a transition happened (event fired); `false` = no-op (the
+    /// peer was already in the requested state).
+    pub fn set_peer_online(&self, peer: &PeerId, online: bool) -> bool {
+        if online {
+            {
+                let mut reg = self.shared.registry.lock().expect("registry lock");
+                if reg.is_online(peer) {
+                    return false;
+                }
+                reg.scripted_online.insert(peer.clone());
+            }
+            fire_came_online(&self.shared, peer, None);
+            true
+        } else {
+            // A live connection IS the offline mechanism (upstream: the
+            // broadcast fires when the connection ends) — abort it and let
+            // the real teardown deliver the event.
+            if self.drop_connection(peer) {
+                return true;
+            }
+            let was_scripted =
+                self.shared.registry.lock().expect("registry lock").scripted_online.remove(peer);
+            if was_scripted {
+                fire_went_offline(&self.shared, peer);
+            }
+            was_scripted
+        }
     }
 
     /// Stop accepting, end every live connection, and join the accept loop.
@@ -557,28 +660,109 @@ async fn run_conn(mut stream: TcpStream, shared: Arc<Shared>) {
 /// Remove the connection from the registry; authenticated peers go offline
 /// and remaining subscribers get `PeersWentOffline` (spec §4.2).
 fn unregister_conn(shared: &Shared, conn_id: u64) {
-    let mut reg = shared.registry.lock().expect("registry lock");
-    reg.conns.remove(&conn_id);
-    let went_offline = match reg.conn_peer.remove(&conn_id) {
-        Some(peer) => {
-            if reg.peer_conn.get(&peer) == Some(&conn_id) {
-                reg.peer_conn.remove(&peer);
+    let outcome = {
+        let mut reg = shared.registry.lock().expect("registry lock");
+        reg.conns.remove(&conn_id);
+        let went_offline = match reg.conn_peer.remove(&conn_id) {
+            Some(peer) => {
+                if reg.peer_conn.get(&peer) == Some(&conn_id) {
+                    reg.peer_conn.remove(&peer);
+                }
+                Some(peer)
             }
-            Some(peer)
+            None => None,
+        };
+        if shared.config.faithful_presence {
+            // The dead connection's OWN subscriptions die with it (an
+            // upstream listener is unregistered when its connection ends,
+            // listener.go:48-56 on unsubscribe / notifier teardown).
+            for waiters in reg.interest_online.values_mut() {
+                waiters.retain(|c| *c != conn_id);
+            }
+            for waiters in reg.interest_offline.values_mut() {
+                waiters.retain(|c| *c != conn_id);
+            }
+            reg.interest_online.retain(|_, w| !w.is_empty());
+            reg.interest_offline.retain(|_, w| !w.is_empty());
         }
-        None => None,
+        // Faithful mode: a peer that already re-authenticated on ANOTHER
+        // connection never went offline — no event exists for a teardown
+        // that lost the race (upstream broadcasts on the peer's LAST
+        // connection end). Legacy keeps the pre-faithful behavior exactly.
+        let still_online = shared.config.faithful_presence
+            && went_offline.as_ref().is_some_and(|p| reg.is_online(p));
+        (went_offline, still_online)
     };
-    let Some(peer) = went_offline else {
+    let (Some(peer), false) = outcome else {
         return;
     };
-    let Some(waiters) = reg.interest.remove(&peer) else {
+    fire_went_offline(shared, &peer);
+}
+
+/// Upstream `PeerCameOnline` broadcast (relay.go:153-155): every subscriber
+/// holding an ONLINE interest for `peer` is answered ONCE and its interest
+/// is consumed (`listener.go:107-121` deletes after delivery) — a NEW
+/// `SubscribePeerState` is the only way to re-arm. LEGACY mode mirrors the
+/// pre-faithful single-table semantics: deliver + consume wholesale (the
+/// `exclude_conn` source-suppression is faithful-only).
+fn fire_came_online(shared: &Shared, peer: &PeerId, exclude_conn: Option<u64>) {
+    let Ok(payload) = (Frame::PeersOnline { peer_ids: vec![peer.clone()] }).encode() else {
         return;
     };
-    let payload = Frame::PeersWentOffline { peer_ids: vec![peer] }.encode().ok();
-    for waiter in waiters {
-        if let (Some(entry), Some(bytes)) = (reg.conns.get(&waiter), payload.as_ref()) {
-            let _ = entry.outbound.send(ConnMsg::Ws { opcode: OP_BINARY, payload: bytes.clone() });
+    let targets: Vec<UnboundedSender<ConnMsg>> = {
+        let mut reg = shared.registry.lock().expect("registry lock");
+        if shared.config.faithful_presence {
+            reg.interest_online
+                .remove(peer)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|c| Some(*c) != exclude_conn)
+                .filter_map(|c| reg.conns.get(&c).map(|e| e.outbound.clone()))
+                .collect()
+        } else {
+            reg.interest
+                .remove(peer)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|c| reg.conns.get(&c).map(|e| e.outbound.clone()))
+                .collect()
         }
+    };
+    for tx in targets {
+        let _ = tx.send(ConnMsg::Ws { opcode: OP_BINARY, payload: payload.clone() });
+    }
+}
+
+/// Upstream `PeerWentOffline` broadcast (relay.go:159-163). FAITHFUL mode:
+/// the went-offline interest is PERSISTENT — deliver to every subscriber
+/// and KEEP the registration (listener.go:92-105). LEGACY mode: consume the
+/// single-table entry (pre-faithful fake-server behavior). The caller
+/// guarantees `peer` is actually offline.
+fn fire_went_offline(shared: &Shared, peer: &PeerId) {
+    let Ok(payload) = (Frame::PeersWentOffline { peer_ids: vec![peer.clone()] }).encode() else {
+        return;
+    };
+    let targets: Vec<UnboundedSender<ConnMsg>> = {
+        let mut reg = shared.registry.lock().expect("registry lock");
+        if shared.config.faithful_presence {
+            match reg.interest_offline.get(peer) {
+                Some(waiters) => waiters
+                    .iter()
+                    .filter_map(|c| reg.conns.get(c).map(|e| e.outbound.clone()))
+                    .collect(),
+                None => Vec::new(),
+            }
+        } else {
+            reg.interest
+                .remove(peer)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|c| reg.conns.get(&c).map(|e| e.outbound.clone()))
+                .collect()
+        }
+    };
+    for tx in targets {
+        let _ = tx.send(ConnMsg::Ws { opcode: OP_BINARY, payload: payload.clone() });
     }
 }
 
@@ -625,12 +809,13 @@ fn handle_relay_frame(
                 shared.bump_stats(|s| s.auth_rejected += 1);
                 return true;
             }
-            let waiters = {
+            {
                 let mut reg = shared.registry.lock().expect("registry lock");
                 reg.peer_conn.insert(peer_id.clone(), conn_id);
                 reg.conn_peer.insert(conn_id, peer_id.clone());
-                reg.interest.remove(&peer_id).unwrap_or_default()
-            };
+                // A real connection replaces any control-plane fiction.
+                reg.scripted_online.remove(&peer_id);
+            }
             conn.peer = Some(peer_id.clone());
             // §5: server-initiated HealthCheck sender (configurable cadence;
             // upstream sends every 25s). Exits when the connection's writer
@@ -662,20 +847,15 @@ fn handle_relay_frame(
                 }
                 Err(_) => return true,
             }
-            // §4.1: subscribers blocked on this peer get their PeersOnline now.
-            for waiter in waiters {
-                let target = {
-                    let reg = shared.registry.lock().expect("registry lock");
-                    reg.conns.get(&waiter).map(|e| e.outbound.clone())
-                };
-                if let Some(tx) = target {
-                    if let Ok(payload) =
-                        (Frame::PeersOnline { peer_ids: vec![peer_id.clone()] }).encode()
-                    {
-                        let _ = tx.send(ConnMsg::Ws { opcode: OP_BINARY, payload });
-                    }
-                }
-            }
+            // §4.1: subscribers blocked on this peer get their PeersOnline
+            // now — the upstream PeerCameOnline broadcast (relay.go:153-155).
+            // Faithful mode consumes each subscriber's ONE-SHOT online
+            // interest here; the authenticating connection itself is never
+            // its own subscriber. Legacy mode keeps the pre-faithful
+            // single-table behavior exactly (no source suppression).
+            let exclude =
+                if shared.config.faithful_presence { Some(conn_id) } else { None };
+            fire_came_online(shared, &peer_id, exclude);
             false
         }
         Frame::AuthResponse { .. } => {
@@ -739,7 +919,26 @@ fn handle_relay_frame(
             {
                 let mut reg = shared.registry.lock().expect("registry lock");
                 for id in &peer_ids {
-                    if reg.peer_conn.contains_key(id) {
+                    if shared.config.faithful_presence {
+                        // 0.78.1 (store.go:87 `AddInterestedPeers`): BOTH
+                        // notification interests are registered on EVERY
+                        // subscribe, online target or not — map semantics,
+                        // so a duplicate subscribe collapses.
+                        let on = reg.interest_online.entry(id.clone()).or_default();
+                        if !on.contains(&conn_id) {
+                            on.push(conn_id);
+                        }
+                        let off = reg.interest_offline.entry(id.clone()).or_default();
+                        if !off.contains(&conn_id) {
+                            off.push(conn_id);
+                        }
+                        if reg.is_online(id) {
+                            online.push(id.clone());
+                        }
+                        // The immediate answer deliberately does NOT consume
+                        // the online interest (peer.go:237-256 answers
+                        // without going through peerComeOnline).
+                    } else if reg.peer_conn.contains_key(id) {
                         online.push(id.clone());
                     } else {
                         // §4.1: offline target = register interest, STAY SILENT
@@ -762,15 +961,40 @@ fn handle_relay_frame(
                 .bump_stats(|s| s.frames_rx_by_type[MSG_UNSUBSCRIBE_PEER_STATE as usize] += 1);
             let mut reg = shared.registry.lock().expect("registry lock");
             for id in &peer_ids {
-                let remove = match reg.interest.get_mut(id) {
-                    Some(waiters) => {
-                        waiters.retain(|c| *c != conn_id);
-                        waiters.is_empty()
+                if shared.config.faithful_presence {
+                    // upstream listener.go:48-56 — unsubscribe deletes BOTH
+                    // interests of this listener.
+                    let empty = match reg.interest_online.get_mut(id) {
+                        Some(waiters) => {
+                            waiters.retain(|c| *c != conn_id);
+                            waiters.is_empty()
+                        }
+                        None => false,
+                    };
+                    if empty {
+                        reg.interest_online.remove(id);
                     }
-                    None => false,
-                };
-                if remove {
-                    reg.interest.remove(id);
+                    let empty = match reg.interest_offline.get_mut(id) {
+                        Some(waiters) => {
+                            waiters.retain(|c| *c != conn_id);
+                            waiters.is_empty()
+                        }
+                        None => false,
+                    };
+                    if empty {
+                        reg.interest_offline.remove(id);
+                    }
+                } else {
+                    let remove = match reg.interest.get_mut(id) {
+                        Some(waiters) => {
+                            waiters.retain(|c| *c != conn_id);
+                            waiters.is_empty()
+                        }
+                        None => false,
+                    };
+                    if remove {
+                        reg.interest.remove(id);
+                    }
                 }
             }
             false
