@@ -495,3 +495,54 @@
 ### 9. 口径不变
 
 仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
+
+---
+
+## A2 拒收的根因闭环：presence 刷新缺陷已修复（2026-09-16/17 追加）
+
+> 本小节为事后追加，不改写既有正文。材料（全部只读核对，本文未运行任何设备命令）：`docs/relay-presence-refresh-analysis-20260916.md`（只读根因分析，全部结论带 file:line；下引上游源码路径均相对该文锚定的 `refs/netbird-791401060d2b/` 只读副本）、`client/core/tests/relay_presence_refresh.rs`（5 用例，含核心复现）、`client/core/src/relay_testserver.rs`（忠实 presence 语义 + 控制面）与 commit `0cfb723`（`git show --stat` 只读核对）。下文数字与原文均逐字取自上列材料；无任何凭据写入。
+
+### 1. A2 的「回归信号」重新定性
+
+上一节（L 类最终结果）把 A2 登记为「我方对端场景的互操作回归信号」，并把「设备在 A2 前掉线过一次并重连」列为待验证候选（其第 4/5 条）。**本节对该信号重新定性：它不是 `18153fa` 的回归，而是我方客户端的一个独立真缺陷**——对端掉线→重连后 presence 缓存永为 `false`、lane 永不恢复，该 peer 的 relay 承载帧在**本 relay 会话存活期内被永久拒收**（`relay-peer-offline`）。两臂之间的第三个变量＝**设备在 A2 前掉线过一次并重连**（与「构建差异」混杂），故 A2 的观测差异**不可归因于构建**。
+
+### 2. 根因（file:line，照抄报告）
+
+- presence 缓存仅由 `PeersOnline`→true / `PeersWentOffline`（PWO）→false 驱动、仅会话结束清空（置 true `relay_client.rs:2028-2038`、置 false `:2040-2053`、整表清空仅 `:2144`；缓存本体 `:1259-1261`）。
+- `SubscribePeerState` 每 lane 只发一次：生产代码唯一构造点在 `open_conn` 内（`relay_client.rs:2089`）；`ensure_lane` 对已挂载 lane 第一行短路（`connector.rs:2035-2038`）。
+- 我方 PWO 处理**不退订、不重开**（`relay_client.rs:2040-2053` 无任何后续动作）。
+- 而上游服务端 **`PeersOnline` 兴趣一次性投递**（投递即删，`relay/server/store/listener.go:107-121`，删除在 ：120）、**PWO 兴趣常驻**（`listener.go:92-105`）→ 对端回来后收不到第二次 `PeersOnline`，presence 停在 `false` → 出向帧被本地拒收（判定链：`wg_device.rs:1046-1086` dispatch → `send_to_peer` 的 `is_offline` 检查 `relay_client.rs:1442-1444` → class token `relay-peer-offline`，`relay_client.rs:1604-1605`）。
+- 上游客户端靠「PWO→退订+关 per-peer 连接→按需重新 OpenConn」自愈（`shared/relay/client/client.go:605-607` 分发、`:784-803` 退订），**我方移植丢了这半圈**。
+
+### 3. 复现（先红）
+
+`client/core/tests/relay_presence_refresh.rs` 5 用例（核心复现 `peer_returning_online_must_restore_the_relay_lane`；另含无 bounce 对照、忠实语义线上锁死、`set_peer_online` 控制面、legacy 档钉死）。修复前核心用例 RED，原文：
+
+> DEFECT: the remote re-authenticated on the same relay server, but the lane never recovered — egress still refused with class token "relay-peer-offline" (server saw 1 SubscribePeerState frames, client received 1 PeersOnline frames; correct behavior is a fresh subscribe + PeersOnline + accepted egress)
+
+（修复前全量 32 套件 475 passed / 1 failed，唯一失败即该用例；既有 12 个 relay e2e 与 471 项零回归。）
+
+### 4. 修复（commit `0cfb723`）
+
+`RelayCarrier::ensure_lane` 每次调度做 presence reconcile——attached lane 的 peer 已被 PWO 置 false 即先 detach、随即全新 `open_conn`（重新订阅，重臂服务端一次性在线兴趣）；抑制点＝每 peer `LANE_OPEN_RETRY=5s` 退避（仅 open 失败后生效，与既有 30s OpenConn 超时叠加，长离线 churn ≈2 帧/35s）；PWO 后首试不受抑制；配套公开 `RelayClient::is_offline()`。改动仅 2 个生产文件（`connector.rs` +67、`relay_client.rs` +16）。未做 PWO 补发 UnsubscribePeerState（reconcile ≤500ms 内同连接重订阅即覆盖兴趣表）。
+
+### 5. 离线验证（实跑）
+
+复现套件 **5/5 ok**（主会话已独立复跑确认核心用例 ok）；全量 **32 套件 476 passed / 0 failed**；复现套件与全量各连跑 3 次结果逐字一致；`bash flake-check.sh 30` → **0/30 失败轮**；`bash build.sh` exit 0（aarch64 .so，14/14 冻结符号 OK）。
+
+### 6. 方法论教训（两条）
+
+1. **测试替身与原件语义不一致本身是一类风险**——既有假服务器与真实服务端恰在 presence 维度不一致（假服务器结构上发不出 PWO），这正是该缺陷长期未被离线测试暴露的原因；已把假服务器改为**上游忠实**（`faithful_presence` 默认 true，legacy 档保留并由专门测试钉死）。
+2. **选对照仪器前先确认仪器里是否包含待测机制**（前一轮 A1 的教训，与此处呼应）。
+
+### 7. 对既有结论的影响
+
+D 轮（设备侧 WG over relay 数据面成立）与 `18153fa` 适用范围的表述**均不受影响**；A2 的拒收**不再**构成「互操作回归信号」（该措辞已被本节更正为「我方独立缺陷」）。
+
+### 8. 待办（未验证，必须显式）
+
+**真机复验未做**——需在设备侧复跑 A2 场景（对端掉线→重连后，我方应能重新接受其帧并建立会话）；自建中继的服务端 presence 语义**偏离未核实**（偏离时恢复时序可能不同，但 fresh-subscribe 恢复路径对任意语义均正确）；多 peer 交错离线组合压测未覆盖。真机复验需**新授权**（本系列 AUTH 均已收尾）。
+
+### 9. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
