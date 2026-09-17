@@ -866,6 +866,11 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
     let mut last_maint: u128 = 0;
     let mut last_probe: u128 = 0;
     let mut printed = false;
+    // N13 D2: sent/acked probe receipts (see `ProbeStats`).
+    let mut probe = ProbeStats {
+        enabled: o.probe_interval_ms > 0,
+        ..Default::default()
+    };
 
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -884,16 +889,24 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
             );
         }
 
+        // N13 D2: the send tick is also the stats tick — ONE `probe-stats`
+        // line per probe interval (the drain below can hand us up to 8 frames
+        // per round, so a per-frame line would be spam).
+        let mut probe_tick = false;
         if o.probe_interval_ms > 0
             && now.saturating_sub(last_probe) >= o.probe_interval_ms as u128
         {
             last_probe = now;
-            send_probe(o, own_addr, tun_hand);
+            probe_tick = true;
+            send_probe(o, own_addr, tun_hand, &mut probe);
         }
         // N11 ⑥ evidence: frames that arrived THROUGH the tunnel land on the
         // TUN stand-in hand — drain + log them (payload-level proof).
         if o.probe_interval_ms > 0 {
-            recv_probes(tun_hand);
+            recv_probes(o, tun_hand, &mut probe);
+        }
+        if probe_tick {
+            probe.report();
         }
 
         if !printed || now.saturating_sub(last_print) >= o.interval_ms as u128 {
@@ -913,6 +926,7 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
             {
                 eprintln!("[nbinterop] peer goal reached: wg session established — exiting 0");
                 hs::stop_connector();
+                probe.report();
                 return hs::EXIT_OK;
             }
             if mode == "peer"
@@ -934,6 +948,7 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
                 if o.exit_on_terminal {
                     eprintln!("{note}");
                     hs::stop_connector();
+                    probe.report();
                     return if class.is_empty() {
                         hs::EXIT_UNKNOWN_CLASS
                     } else {
@@ -950,6 +965,7 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
                 o.timeout_s
             );
             hs::stop_connector();
+            probe.report();
             return if mode == "peer" {
                 hs::EXIT_PEER_NOT_ESTABLISHED
             } else {
@@ -1095,9 +1111,50 @@ fn maintain(
     }
 }
 
+// ---------------------------------------------------------------------------
+// N13 D2: probe delivery counters (sent / acked)
+// ---------------------------------------------------------------------------
+
+/// Process-local probe delivery counters (volatile: no persistence, not in the
+/// status JSON). The ONLY writers are `send_probe` / `recv_probes`, both called
+/// back-to-back from `run_engine`'s single main-loop thread (the bin spawns no
+/// threads of its own), so plain `&mut` state is the correct minimal form — no
+/// atomics and no lock.
+#[derive(Default)]
+struct ProbeStats {
+    /// Probes injected into the TUN stand-in hand (write returned > 0).
+    sent: u64,
+    /// Received frames carrying the probe fingerprint FROM our `--probe-dst`
+    /// target: the peer's own probe reached this TUN, i.e. a receipt. The
+    /// tunnel has no transport-level delivery ack (see `wg_device`'s carrier
+    /// contract), so mutual application-level probing IS the delivery proof.
+    acked: u64,
+    /// Injections the TUN stand-in refused (never counted as `sent`).
+    send_failed: u64,
+    /// Emit the `probe-stats` line only when probing was asked for
+    /// (`--probe-interval > 0`), so a non-probe run's stderr is unchanged.
+    enabled: bool,
+}
+
+impl ProbeStats {
+    /// One pipe-separated line, used periodically (at most once per probe
+    /// interval, never per packet) and for the final value at exit.
+    fn report(&self) {
+        if self.enabled {
+            eprintln!(
+                "nbinterop: probe-stats|sent={}|acked={}|send_failed={}",
+                self.sent, self.acked, self.send_failed
+            );
+        }
+    }
+}
+
 /// Inject one probe packet through the TUN stand-in hand (the pump reads it
 /// as if it came from the kernel TUN and ships it through the WG session).
-fn send_probe(o: &RunOpts, own_addr: Option<[u8; 4]>, tun_hand: i32) {
+/// N13 D2: an accepted write is one `sent`; a refused write is one
+/// `send_failed`. The two early returns (no `--probe-dst`, own tunnel address
+/// not synced yet) are not attempts at all, so they count as neither.
+fn send_probe(o: &RunOpts, own_addr: Option<[u8; 4]>, tun_hand: i32, probe: &mut ProbeStats) {
     let Some(dst) = o.probe_dst.as_deref().and_then(hs::parse_ipv4) else {
         return;
     };
@@ -1107,7 +1164,10 @@ fn send_probe(o: &RunOpts, own_addr: Option<[u8; 4]>, tun_hand: i32) {
     let pkt = hs::build_ipv4_udp_packet(src, dst, 40000, 40001, b"nbinterop-probe");
     let (n, errno) = sys::write_fd(tun_hand, &pkt);
     if n <= 0 {
+        probe.send_failed += 1;
         eprintln!("[probe] write failed (errno={errno})");
+    } else {
+        probe.sent += 1;
     }
 }
 
@@ -1117,7 +1177,13 @@ fn send_probe(o: &RunOpts, own_addr: Option<[u8; 4]>, tun_hand: i32) {
 /// read with timeout 0; EAGAIN just means "nothing this round". The hand is
 /// a plain socketpair end (blocking), so reads are bounded by the poll gate
 /// and the 8-frame cap.
-fn recv_probes(tun_hand: i32) {
+///
+/// N13 D2 receipt rule: a frame whose payload starts with the
+/// `nbinterop-probe` fingerprint AND whose source is our `--probe-dst` target
+/// is one `acked` — we aimed a probe at that peer, and the peer's own probe
+/// arrived here, so the tunnel is proven mutual in both directions.
+fn recv_probes(o: &RunOpts, tun_hand: i32, probe: &mut ProbeStats) {
+    let ack_from = o.probe_dst.as_deref().and_then(hs::parse_ipv4);
     let mut got = 0usize;
     while got < 8 {
         let (ret, _e, rev) = sys::poll1(tun_hand, 0x0001 /* POLLIN */, 0);
@@ -1136,6 +1202,9 @@ fn recv_probes(tun_hand: i32) {
             let src = std::net::Ipv4Addr::new(frame[12], frame[13], frame[14], frame[15]);
             let dst = std::net::Ipv4Addr::new(frame[16], frame[17], frame[18], frame[19]);
             let payload = String::from_utf8_lossy(&frame[28..]);
+            if ack_from == Some(src.octets()) && frame[28..].starts_with(b"nbinterop-probe") {
+                probe.acked += 1;
+            }
             eprintln!("[probe-recv] {src} -> {dst} len={n} payload={payload:?}");
         } else {
             eprintln!("[probe-recv] short frame len={n}");
