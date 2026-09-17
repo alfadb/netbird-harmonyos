@@ -542,6 +542,15 @@ pub trait ManagementFactory: Send + Sync + 'static {
     fn connect(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<ManagementGrpcClient, ManagementError>> + Send + '_>>;
+    /// The address EVERY dial of this factory connects to, when the factory
+    /// has one fixed address — the N3-7 protected-socket path, where the shell
+    /// resolved the management host and core dials exactly that address.
+    /// `None` = no fixed dial address (the unprotected opt-in dev dial, or a
+    /// test stub): the N2-H collector then records a reasoned freeze gap
+    /// instead of inventing an address. Diagnostics only — this never dials.
+    fn dial_address(&self) -> Option<SocketAddr> {
+        None
+    }
 }
 
 /// Production factory: a fresh [`ManagementGrpcClient`] per call, TLS with
@@ -610,6 +619,14 @@ impl GrpcManagementFactory {
 }
 
 impl ManagementFactory for GrpcManagementFactory {
+    /// N2-H (design §4.0 management row): the shell-resolved dial address —
+    /// `socket.1` of the protected-socket variant, i.e. the address core
+    /// actually connects to on every (re)dial. `None` on the unprotected
+    /// dev dial, whose address core resolves itself.
+    fn dial_address(&self) -> Option<SocketAddr> {
+        self.socket.as_ref().map(|(_source, addr)| *addr)
+    }
+
     fn connect(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<ManagementGrpcClient, ManagementError>> + Send + '_>>
@@ -1655,6 +1672,14 @@ impl ConnectorShared {
 
     fn set_logout_ok(&self, ok: bool) {
         self.lock().logout_ok = Some(ok);
+    }
+
+    /// N2-H (design §4.0 stun row): `netbird_config.stuns[]` as the ICE
+    /// orchestrator PARSED it (what `set_stuns` accepted — the exact set core
+    /// gathers against). Read from the session's own state: neither public
+    /// document carries it, and §5.2 forbids adding it there.
+    fn stuns(&self) -> Vec<crate::ice::StunServer> {
+        self.ice.get().map(|ice| ice.lock_poison().stuns().to_vec()).unwrap_or_default()
     }
 
     /// Apply one decoded Sync update to the internal state and the data
@@ -3234,6 +3259,13 @@ pub struct ConnectorHandle {
     wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
     /// N5c: per-peer ICE orchestrator (status/stop surface).
     ice: Arc<Mutex<PeerIceOrchestrator>>,
+    /// N2-H (design §4.0 management row): the shell-resolved address every
+    /// protected management dial connects to ([`ManagementFactory::dial_address`]),
+    /// captured at spawn. `None` = no fixed dial address (unprotected dev
+    /// dial). INTERNAL only — the device collector reads it through
+    /// [`core_freeze_inputs`]; the public status/network documents keep their
+    /// frozen shape (§5.2).
+    management_dial: Option<SocketAddr>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     renewal: Mutex<Option<tokio::task::JoinHandle<()>>>,
     runtime: tokio::runtime::Handle,
@@ -3344,6 +3376,9 @@ impl ConnectorHandle {
         // The flag is authoritative: materials without the opt-in are
         // dropped (the device default keeps EVERY relay seam detached).
         let relay_attach = relay_enabled.then_some(relay_attach).flatten();
+        // N2-H: the session's INTERNAL management dial address, read BEFORE
+        // the factory is moved into the worker/renewal tasks.
+        let management_dial = factory.dial_address();
         let shared = Arc::new(ConnectorShared::new(force_default_route, relay_attach));
         // N13-D2: with the opt-in, the carrier orchestrator needs the WG
         // seam + the runtime (used from the sync path when the first relay
@@ -3468,6 +3503,7 @@ impl ConnectorHandle {
             signal_sockets,
             wg_feed,
             ice,
+            management_dial,
             worker: Mutex::new(Some(worker)),
             renewal: Mutex::new(Some(renewal)),
             runtime,
@@ -3881,6 +3917,25 @@ fn connector_slot() -> MutexGuard<'static, Option<Arc<ConnectorHandle>>> {
     CONNECTOR.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// N2-H (design §7-I5 wiring): register the DEVICE COLLECTOR's process-side
+/// host seam over `feed` — the one call that takes the collector out of its
+/// inert `no-connector` state (`client/core/src/n2h_collector.rs`,
+/// [`crate::n2h_collector::WgFeedHost`]).
+///
+/// Registration ONLY: no thread, no tee, no packet, no clock read. Until an
+/// arm arrives the shipped process behaves exactly as before (§6.1), and an
+/// arm stays refused until the shell feeds the device and a session is
+/// established (`device-not-up` / `tunnel-not-ready`).
+///
+/// Idempotent by REPLACE (one process = one connector slot = one session):
+/// every start entry may call it unconditionally, and a restart re-points the
+/// seam at the NEW feed — keeping a stale feed would refuse every later arm
+/// with `device-not-up`. The seam is removed by `connector_stop_json`, so its
+/// lifetime is exactly the connector session's.
+fn install_collector_host(feed: &Arc<crate::wg_device::WgDeviceFeed>) {
+    crate::n2h_collector::install_host(Arc::new(crate::n2h_collector::WgFeedHost::new(feed.clone())));
+}
+
 /// The `connector_start(configJson, setupKeyJson?)` implementation.
 ///
 /// N3-7 (fail-closed gap 1): starting WITHOUT a protected management socket
@@ -3947,6 +4002,7 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
     let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
+    install_collector_host(&wg_feed);
     let handle = ConnectorHandle::spawn_with_relay(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
@@ -4073,6 +4129,7 @@ pub fn connector_start_with_socket_json(
     let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
+    install_collector_host(&wg_feed);
     let handle = ConnectorHandle::spawn_with_relay(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::with_socket_source(
@@ -4454,10 +4511,57 @@ pub fn connector_network_config_json() -> String {
     }
 }
 
+/// N2-H (design §4.0): the session knowledge the device collector freezes
+/// from that the two PUBLIC connector documents deliberately do NOT carry —
+/// `netbird_config.stuns[]` and the management dial address. The §5.2 frozen
+/// contract of `connector_status()` / `connector_network_config()` is
+/// untouched: this is an internal (non-JSON) accessor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoreFreezeInputs {
+    /// The shell-resolved address every protected management dial connects
+    /// to. `None` = the unprotected dev dial has no fixed address, or no
+    /// connector is running — the collector records the reasoned gap.
+    pub management_dial: Option<SocketAddr>,
+    /// `netbird_config.stuns[]` as parsed by the ICE orchestrator
+    /// (`crate::ice::parse_stun_uri`): the set core gathers against, with
+    /// unusable URIs already dropped by that parser.
+    pub stuns: Vec<crate::ice::StunServer>,
+}
+
+impl ConnectorHandle {
+    /// This session's INTERNAL N2-H freeze inputs (see [`CoreFreezeInputs`]).
+    fn core_freeze_inputs(&self) -> CoreFreezeInputs {
+        CoreFreezeInputs {
+            management_dial: self.management_dial,
+            stuns: self.shared.stuns(),
+        }
+    }
+}
+
+/// The installed connector's INTERNAL N2-H freeze inputs — the ONE read the
+/// device collector's production host ([`crate::n2h_collector::WgFeedHost`])
+/// performs, at arm time (design §4.0: freeze instant = arm instant, so the
+/// stun set of the LAST applied sync is what gets frozen). No connector ⇒
+/// empty inputs, and the collector then records honest reasoned absences
+/// (fail-closed; never an invented address).
+pub fn core_freeze_inputs() -> CoreFreezeInputs {
+    match connector_slot().as_ref() {
+        Some(handle) => handle.core_freeze_inputs(),
+        None => CoreFreezeInputs::default(),
+    }
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {
     let mut slot = connector_slot();
+    // N2-H: the collector's host seam is installed by the start entries and
+    // lives EXACTLY as long as the session (see `install_collector_host`) —
+    // a stopped connector leaves no seam behind, so no connector state (WG
+    // feed/config incl. key material) outlives `connector_stop()`. An already
+    // ARMED window keeps its own host handle: its document stays cached for
+    // the §2.4-R2 replay.
+    crate::n2h_collector::uninstall_host();
     match slot.as_ref() {
         Some(handle) => {
             let json = handle.stop_json();
@@ -5083,6 +5187,85 @@ mod tests {
             ready_json.contains("\"default_route\":{\"allowed\":true"),
             "peers==0 must not change N3-7 semantics (ReadyWg is ready): {ready_json}"
         );
+    }
+
+    /// N2-H (design §4.0 stun + management rows): the collector's freeze
+    /// sources come from the session's INTERNAL state — the stun set the ICE
+    /// orchestrator parsed out of `netbird_config.stuns` and the address the
+    /// management factory dials. Neither is in the public documents (§5.2).
+    #[test]
+    fn core_freeze_inputs_read_the_sessions_internal_stuns_and_dial_address() {
+        struct NoIceWg;
+        impl WgPeerApplier for NoIceWg {
+            fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+        }
+        let shared = ConnectorShared::new(false, None);
+        // no orchestrator (unit-test construction): no stuns, nothing invented
+        assert!(shared.stuns().is_empty());
+        let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
+            wg: Arc::new(NoIceWg),
+            tie_breaker: None,
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        })));
+        let _ = shared.ice.set(ice);
+        shared.apply_update(
+            &NoIceWg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: vec![
+                        "stun:stun.netbird.io:3478".into(),
+                        "stun:203.0.113.9".into(),
+                        "turn:turn.netbird.io:3478".into(),
+                        "not-a-uri".into(),
+                    ],
+                    ..Default::default()
+                }),
+                network_map: None,
+            },
+        );
+        // exactly what the orchestrator gathers against: stun: URIs only
+        // (`turn:` is rejected by `set_stuns`, `not-a-uri` by the parser)
+        let stuns = shared.stuns();
+        assert_eq!(stuns.len(), 2, "internal stun set: {stuns:?}");
+        assert_eq!(stuns[0], crate::ice::StunServer { host: "stun.netbird.io".into(), port: 3478 });
+        assert_eq!(stuns[1].host, "203.0.113.9");
+        assert_eq!(stuns[1].port, 3478, "the stun: URI default port");
+
+        // management: the protected factory carries the shell-resolved dial
+        // address; the unprotected dev dial has none (→ reasoned gap)
+        let cfg = ConnectorConfig::from_json(&test_config_json()).expect("config");
+        let protected = GrpcManagementFactory::with_socket_source(
+            &cfg,
+            cfg.keys.clone(),
+            Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+            "198.51.100.7:443".parse().expect("dial address"),
+        );
+        let expected: Option<SocketAddr> = Some("198.51.100.7:443".parse().expect("addr"));
+        assert_eq!(protected.dial_address(), expected);
+        assert_eq!(GrpcManagementFactory::new(&cfg, cfg.keys.clone()).dial_address(), None);
+        struct StubFactory;
+        impl ManagementFactory for StubFactory {
+            fn connect(
+                &self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<ManagementGrpcClient, ManagementError>> + Send + '_,
+                >,
+            > {
+                Box::pin(async { Err(ManagementError::Network("stub".into())) })
+            }
+        }
+        assert_eq!(StubFactory.dial_address(), None, "a stub never invents an address");
+        println!("[I5-wire] connector internal stuns={stuns:?} dial={expected:?}");
     }
 
     // N3-6: shell network-config snapshot -----------------------------------

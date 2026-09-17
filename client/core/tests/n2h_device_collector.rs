@@ -1565,6 +1565,123 @@ fn the_production_wg_feed_host_gates_the_arm_and_scans_real_tun_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// the PRODUCTION wiring (§7-I5 gap): a started connector installs the seam
+// ---------------------------------------------------------------------------
+
+/// The wiring gap this increment closes: before `connector.rs` called
+/// `install_collector_host`, NOTHING installed the host seam in the shipped
+/// process, so a real device round answered `no-connector` forever and the
+/// window could not be opened at all.
+///
+/// Proven here against the REAL production start entry
+/// (`connector_start_with_socket`, N3-7) and the REAL connector singleton:
+/// ① a started connector installs the production host (and the arm gate then
+///    reports the feed's state instead of `no-connector`);
+/// ② the host freezes MANAGEMENT from the connector's INTERNAL dial address —
+///    a value neither public document carries (§5.2 contract intact);
+/// ③ stun has no sync-delivered `netbird_config` in this process, so it must
+///    be the honest REASONED absence, never an invented endpoint (the
+///    populated internal read is unit-tested in `crate::connector` and
+///    `crate::n2h_collector::tests`);
+/// ④ `connector_stop` removes the seam: its lifetime is the session's.
+#[test]
+fn a_started_connector_installs_the_production_host_with_internal_freeze_sources() {
+    use netbird_core::connector::{
+        connector_network_config_json, connector_start_with_socket_json, connector_status_json,
+        connector_stop_json, core_freeze_inputs,
+    };
+    use std::os::fd::AsRawFd;
+
+    let _guard = serial();
+    show_panics();
+    reset_collector();
+    assert!(nc::installed_host().is_none(), "no connector ⇒ no host seam");
+    assert_eq!(nc::arm_json(""), "{\"ok\":false,\"error\":\"no-connector\"}");
+
+    // the shell-side shape: a resolved management address + a real (dup-able)
+    // fd for the protected-socket start path
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let dial = listener.local_addr().expect("addr");
+    let cfg = format!(
+        "{{\"management_url\":\"http://{dial}\",\"private_key\":\"{}\"}}",
+        netbird_core::util::base64(&[0x11u8; 32])
+    );
+    let started = connector_start_with_socket_json(
+        listener.as_raw_fd(),
+        &cfg,
+        "{\"setup_key\":\"SETUP-N2H-WIRE\"}",
+        &format!("{{\"connect_addr\":\"{dial}\"}}"),
+    );
+    assert!(started.contains("\"started\":true"), "start refused: {started}");
+
+    // ① the production start path installed the seam (the §7-I5 gap itself)
+    let host = nc::installed_host().expect("a started connector must install the collector host");
+    assert_eq!(
+        parse_json(&nc::arm_json("{}")).at("error").str_of(),
+        Some("device-not-up"),
+        "with the seam installed the gate reads the REAL feed (no shell-fed device yet)"
+    );
+
+    // ② the internal sources reach the host's freeze facts
+    let core = core_freeze_inputs();
+    assert_eq!(core.management_dial, Some(dial), "the factory's dial address");
+    assert!(core.stuns.is_empty(), "no management Sync in this process");
+    let facts = nc::CollectorHost::freeze_facts(&*host).expect("connector documents parse");
+    assert_eq!(
+        facts.management_dial.as_ref().map(|e| e.resolved.clone()),
+        Some(dial.to_string()),
+        "management must freeze from the INTERNAL dial address"
+    );
+    // §5.2: neither public document carries that internal value
+    for (name, doc) in [
+        ("connector_status", connector_status_json()),
+        ("connector_network_config", connector_network_config_json()),
+    ] {
+        assert!(
+            !doc.contains(&dial.to_string()),
+            "{name} must keep its frozen shape (no internal dial address): {doc}"
+        );
+    }
+
+    // ③ assembly: management present with its source token; stun a REASONED
+    //    absence here (nothing to freeze is recorded, never fabricated)
+    let frozen = nc::assemble_freezes(&nc::FreezeSources {
+        management_dial: facts.management_dial.clone(),
+        stun_uris: facts.stun_uris.clone(),
+        frozen_at_unix: 1_756_000_000,
+        frozen_at_mono: 42,
+        ..nc::FreezeSources::default()
+    });
+    for kind in EndpointKind::ALL {
+        assert!(
+            frozen.iter().any(|f| f.kind == Some(kind)),
+            "{kind:?} must be represented (present or reasoned absence)"
+        );
+    }
+    let management = frozen
+        .iter()
+        .find(|f| f.kind == Some(EndpointKind::Management))
+        .expect("management entry");
+    assert!(management.present, "{management:?}");
+    assert_eq!(management.source, nc::SOURCE_CORE_DIAL_ADDRESS);
+    assert_eq!(management.resolved, dial.to_string());
+    let stun = frozen.iter().find(|f| f.kind == Some(EndpointKind::Stun)).expect("stun entry");
+    assert!(!stun.present, "no sync ⇒ no stun source to freeze: {stun:?}");
+    assert!(!stun.absent_reason.is_empty(), "the gap must be reasoned: {stun:?}");
+
+    // ④ stop removes the seam — no connector state outlives the session
+    let stopped = connector_stop_json();
+    assert!(stopped.contains("\"ok\":true"), "{stopped}");
+    assert!(nc::installed_host().is_none(), "a stopped connector retains no host seam");
+    assert_eq!(nc::arm_json(""), "{\"ok\":false,\"error\":\"no-connector\"}");
+    println!(
+        "[I5-wire] start ⇒ seam installed (arm gate=device-not-up); internal dial={dial}; \
+         management freeze present source={}; stun absent='{}'; stop ⇒ seam removed",
+        management.source, stun.absent_reason
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the NAPI surface with no window and no host (§6.1/§5.1)
 // ---------------------------------------------------------------------------
 

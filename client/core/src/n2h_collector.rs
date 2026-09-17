@@ -1588,13 +1588,15 @@ pub struct HostDataplane {
 /// Core-session freeze facts (design §4.0's `source` column), read at arm.
 #[derive(Debug, Clone, Default)]
 pub struct HostFreezeFacts {
-    /// Management address core actually dialled, when reachable.
+    /// Management address core dials (the shell-resolved address of the
+    /// protected-socket path, `connector::CoreFreezeInputs::management_dial`).
     pub management_dial: Option<InjectedEndpoint>,
     /// `netbird_config.signal`.
     pub signal_config: Option<InjectedEndpoint>,
     /// `relay_advertised.advertised_urls` ∪ `relay.urls`.
     pub relay_advertised: Vec<InjectedEndpoint>,
-    /// Network-map `stuns[].uri`.
+    /// Network-map `stuns[].uri`, as parsed by the ICE orchestrator
+    /// (`connector::CoreFreezeInputs::stuns`).
     pub stun_uris: Vec<InjectedEndpoint>,
     /// Network-map `turns[].uri` (this build rejects `turn:`, §4.0).
     pub turn_uris: Vec<InjectedEndpoint>,
@@ -2721,21 +2723,22 @@ pub fn assemble_device_evidence(m: WindowMaterial) -> Evidence {
 /// The PRODUCTION [`CollectorHost`]: the connector's live WG data-plane feed
 /// (`crate::wg_device::WgDeviceFeed`) plus the PUBLIC connector documents for
 /// the freeze facts (`connector_status()` / `connector_network_config()` — the
-/// same JSON the shell reads).
+/// same JSON the shell reads), PLUS the connector's INTERNAL session knowledge
+/// (`crate::connector::core_freeze_inputs()`: `netbird_config.stuns[]` and the
+/// management dial address, §7-I5's freeze-source extension — §5.2 keeps both
+/// out of the public documents).
 ///
 /// Design U9 asks the collector's dependencies to be an injectable seam with
 /// the production side taking them from the connector singleton. This type IS
-/// that production side; installing it is ONE call next to the connector's
-/// feed construction:
+/// that production side; it is installed by the connector start entries
+/// (`connector.rs`'s `install_collector_host`, next to the feed construction)
+/// and removed by the stop entry.
 ///
-/// ```text
-/// n2h_collector::install_host(Arc::new(n2h_collector::WgFeedHost::new(wg_feed.clone())));
-/// ```
-///
-/// Until that call exists (the design's §7-I5 file list does not name
-/// `connector.rs`), the collector is INERT in the shipped process: `arm`
-/// answers `{ok:false,error:"no-connector"}` and nothing else happens — the
-/// §6.1 laziness promise holds in the strictest possible way.
+/// Registration itself is inert: with the host installed but no arm, `arm`
+/// answers `{ok:false,error:"device-not-up"|"tunnel-not-ready"}` and nothing
+/// else happens — no thread, no tee, no packet (§6.1). Without any host seam
+/// (a process that never started a connector) `arm` answers
+/// `{ok:false,error:"no-connector"}`.
 pub struct WgFeedHost {
     feed: Arc<crate::wg_device::WgDeviceFeed>,
     hdc_capture_path: Option<std::path::PathBuf>,
@@ -2773,9 +2776,13 @@ impl CollectorHost for WgFeedHost {
     }
 
     fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
-        process_freeze_facts(
+        // public documents (§5.2, unchanged shape) + the connector's INTERNAL
+        // session knowledge (`stuns[]`, management dial address) — read at
+        // ARM time, so the last applied sync's stun set is what gets frozen
+        process_freeze_facts_with_core(
             &crate::connector::connector_status_json(),
             &crate::connector::connector_network_config_json(),
+            &crate::connector::core_freeze_inputs(),
         )
     }
 
@@ -2856,12 +2863,29 @@ fn injected_from_addr(addr: &str) -> Option<InjectedEndpoint> {
 /// (design §4.0's core-session sources). Pure: the documents are arguments, so
 /// the mapping is unit-testable without a connector.
 ///
-/// Facts the public JSON surface does NOT carry are left empty and become
-/// reasoned absences in the document (never invented):
-/// `management_dial` (the status/config documents carry no dial address) and
-/// `stun_uris` (`netbird_config.stuns[]` is not rendered into either
-/// document). Both are recorded as freeze gaps by `assemble_freezes`.
+/// This is the DOCUMENT-ONLY half (kept for callers that have the two public
+/// documents and nothing else); the production host uses
+/// [`process_freeze_facts_with_core`], which adds the session's INTERNAL
+/// sources. Facts the public JSON surface does NOT carry are left empty here
+/// and become reasoned absences in the document (never invented):
+/// `management_dial` and `stun_uris` — see [`apply_core_freeze_inputs`].
 pub fn process_freeze_facts(status_json: &str, network_json: &str) -> Result<HostFreezeFacts, String> {
+    process_freeze_facts_with_core(
+        status_json,
+        network_json,
+        &crate::connector::CoreFreezeInputs::default(),
+    )
+}
+
+/// [`process_freeze_facts`] plus the connector's INTERNAL session knowledge
+/// (design §4.0's `stuns[]` and management dial rows, which §5.2 keeps OUT of
+/// the public documents). This is exactly what
+/// [`WgFeedHost::freeze_facts`] calls, at arm time.
+pub fn process_freeze_facts_with_core(
+    status_json: &str,
+    network_json: &str,
+    core: &crate::connector::CoreFreezeInputs,
+) -> Result<HostFreezeFacts, String> {
     let status = crate::config::parse_document(status_json)
         .map_err(|e| format!("connector_status document: {e}"))?;
     let network = crate::config::parse_document(network_json)
@@ -2953,7 +2977,42 @@ pub fn process_freeze_facts(status_json: &str, network_json: &str) -> Result<Hos
             }
         }
     }
+    apply_core_freeze_inputs(&mut facts, core);
     Ok(facts)
+}
+
+/// Merge the connector's INTERNAL session knowledge (design §4.0) into the
+/// facts read from the public documents — the §7-I5 freeze-source extension.
+///
+/// - **stun**: `netbird_config.stuns[]` as the ICE orchestrator parsed it
+///   ([`crate::connector::CoreFreezeInputs::stuns`]) — the set core gathers
+///   against, and one of the seven kinds the judge requires. `turn:` URIs are
+///   rejected by that parser (`peer_conn.rs` `set_stuns`) and have no internal
+///   store, so the optional `turn` kind keeps its generic reasoned absence.
+/// - **management**: the shell-resolved address every protected dial connects
+///   to ([`crate::connector::CoreFreezeInputs::management_dial`]).
+///
+/// A value that is unusable (empty host / port 0 / IPv6 — this build is
+/// IPv4-only, §10-4) is DROPPED here: `assemble_freezes` then records the
+/// kind's reasoned absence. Nothing is ever invented for a missing source.
+pub fn apply_core_freeze_inputs(
+    facts: &mut HostFreezeFacts,
+    core: &crate::connector::CoreFreezeInputs,
+) {
+    for stun in &core.stuns {
+        if stun.host.trim().is_empty() || stun.port == 0 {
+            continue;
+        }
+        facts.stun_uris.push(InjectedEndpoint::new(&stun.host, stun.port));
+    }
+    if let Some(SocketAddr::V4(v4)) = core.management_dial {
+        let resolved = v4.to_string();
+        facts.management_dial = Some(InjectedEndpoint::with_resolved(
+            &v4.ip().to_string(),
+            v4.port(),
+            &resolved,
+        ));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4427,6 +4486,120 @@ mod tests {
             facts.dns_servers.len(),
             facts.own_overlay,
             facts.peer_overlay
+        );
+    }
+
+    /// §7-I5's freeze-source extension: the connector's INTERNAL session
+    /// knowledge (`stuns[]` parsed by the ICE orchestrator + the management
+    /// dial address) closes the two gaps the public documents leave — the
+    /// `stun` kind is REQUIRED by the judge (`n2h.rs:151-153`), so freezing it
+    /// as an unreasoned absence would make every device round inconclusive.
+    ///
+    /// `process_freeze_facts_with_core` is exactly what
+    /// [`WgFeedHost::freeze_facts`] calls; the connector side of the read
+    /// (orchestrator + factory) is unit-tested in `crate::connector` and
+    /// end-to-end in `tests/n2h_device_collector.rs`.
+    #[test]
+    fn core_freeze_inputs_close_the_stun_and_management_gap() {
+        let status = "{\"running\":true,\"state\":\"connected\",\"wg\":{\"device_up\":true,\
+            \"ready\":true,\"wg_peers\":[{\"pub_key_b64\":\"k\",\"endpoint\":\"198.51.100.4:51820\"}]},\
+            \"relay_advertised\":{\"advertised\":true,\"advertised_urls\":[\"rels://home.example:28443\"]}}";
+        let network = "{\"available\":true,\"serial\":7,\"address\":\"10.77.0.1\",\
+            \"address_prefix_len\":32,\"interface_dns\":\"10.0.0.53\",\"signal\":\"signal.example:10000\",\
+            \"routes\":[],\"dns\":{\"service_enable\":true,\"servers\":[{\"ip\":\"10.0.0.54\",\"port\":53}]},\
+            \"peer_count\":1,\"peers\":[{\"pub_key\":\"k\",\"allowed_ips\":1,\
+            \"vpn_addresses\":[\"10.77.0.2\"]}],\"default_route\":{\"allowed\":false,\"reason\":\"held\"}}";
+
+        // the connector-internal inputs, built by the REAL parser the ICE
+        // orchestrator uses (`set_stuns` → `ice::parse_stun_uri`)
+        let core = crate::connector::CoreFreezeInputs {
+            stuns: vec![
+                crate::ice::parse_stun_uri("stun:stun.netbird.io:3478").expect("stun uri"),
+                crate::ice::parse_stun_uri("stun:203.0.113.9").expect("default port 3478"),
+            ],
+            management_dial: Some("198.51.100.7:443".parse().expect("dial address")),
+        };
+        let facts = process_freeze_facts_with_core(status, network, &core)
+            .expect("both documents parse");
+        let frozen = assemble_freezes(&FreezeSources {
+            management_dial: facts.management_dial.clone(),
+            signal_config: facts.signal_config.clone(),
+            relay_advertised: facts.relay_advertised.clone(),
+            stun_uris: facts.stun_uris.clone(),
+            wg_peer_endpoints: facts.wg_peer_endpoints.clone(),
+            dns_servers: facts.dns_servers.clone(),
+            frozen_at_unix: 1_756_000_000,
+            frozen_at_mono: 42,
+            ..FreezeSources::default()
+        });
+        for kind in EndpointKind::ALL {
+            assert!(
+                frozen.iter().any(|f| f.kind == Some(kind)),
+                "{kind:?} must be represented (present or reasoned absence)"
+            );
+        }
+        assert_eq!(frozen.len(), 9, "7 kinds; stun×2 and dns×2 carry several endpoints");
+
+        // stun: no longer an absence — one entry per parsed URI, core-network-map
+        let stuns: Vec<&FrozenEndpoint> =
+            frozen.iter().filter(|f| f.kind == Some(EndpointKind::Stun)).collect();
+        assert_eq!(stuns.len(), 2, "one freeze per stun URI: {stuns:?}");
+        for entry in &stuns {
+            assert!(entry.present, "stun must freeze from the internal source: {entry:?}");
+            assert_eq!(entry.source, SOURCE_CORE_NETWORK_MAP);
+            assert_eq!(entry.proto, "udp");
+            assert!(entry.absent_reason.is_empty(), "a present entry carries no reason");
+        }
+        assert_eq!(stuns[0].resolved, "stun.netbird.io:3478");
+        assert_eq!(stuns[1].resolved, "203.0.113.9:3478", "the URI default port");
+        assert!(EndpointKind::Stun.required(), "the judge REQUIRES this kind (n2h.rs:151)");
+
+        // management: the dial address, with its own source token
+        let management = frozen
+            .iter()
+            .find(|f| f.kind == Some(EndpointKind::Management))
+            .expect("management entry");
+        assert!(management.present && management.source == SOURCE_CORE_DIAL_ADDRESS);
+        assert_eq!(management.resolved, "198.51.100.7:443");
+
+        // fail-closed without the internal inputs: both kinds are REASONED
+        // absences (no connector ⇒ nothing is invented)
+        let bare = process_freeze_facts_with_core(
+            status,
+            network,
+            &crate::connector::CoreFreezeInputs::default(),
+        )
+        .expect("both documents parse");
+        let bare_frozen = assemble_freezes(&FreezeSources {
+            management_dial: bare.management_dial.clone(),
+            stun_uris: bare.stun_uris.clone(),
+            frozen_at_unix: 1_756_000_000,
+            frozen_at_mono: 42,
+            ..FreezeSources::default()
+        });
+        for kind in [EndpointKind::Stun, EndpointKind::Management] {
+            let entry = bare_frozen.iter().find(|f| f.kind == Some(kind)).expect("entry");
+            assert!(!entry.present, "{kind:?} must not appear without a source");
+            assert!(!entry.absent_reason.is_empty(), "{kind:?} absence must be reasoned");
+        }
+        // unusable internal values are dropped, never invented either
+        let junk = crate::connector::CoreFreezeInputs {
+            stuns: vec![crate::ice::StunServer { host: "  ".into(), port: 3478 }],
+            management_dial: None,
+        };
+        let junk_facts = process_freeze_facts_with_core(status, network, &junk).expect("parses");
+        assert!(junk_facts.stun_uris.is_empty(), "an unusable stun source is dropped");
+        println!(
+            "[I5-wire] stun freezes={:?} source={} management={} source={} bare-stun='{}'",
+            stuns.iter().map(|e| e.resolved.clone()).collect::<Vec<_>>(),
+            SOURCE_CORE_NETWORK_MAP,
+            management.resolved,
+            management.source,
+            bare_frozen
+                .iter()
+                .find(|f| f.kind == Some(EndpointKind::Stun))
+                .map(|f| f.absent_reason.clone())
+                .unwrap_or_default()
         );
     }
 

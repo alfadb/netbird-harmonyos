@@ -374,3 +374,62 @@ hilog 抓取（grep N2H_） ◄────────────────�
 - `git status --porcelain` 实跑仅见本新文件（`?? docs/n2h-device-collector-design-20260917.md`），未修改任何既有文件。
 
 *DRAFT for T0 re-review — 2026-09-17，HEAD 7923288。*
+
+---
+
+## 13. 实现期补充登记（2026-09-17，I5 落地偏离与接线）
+
+本节**只追加**，不改写 §0–§12 任何正文。登记口径：I0–I5 已合入基线 HEAD `568c931`（`git log --oneline -1` 实读）；下列 file:line 均为本补充节落地后的工作树实读（未 commit）。逐条性质：① 与 ② 是本次补齐（§7-I5 清单遗漏的接线 + 冻结来源扩展，有代码改动）；③–⑥ 是对 `568c931` 内既有实现的事实登记（本节只补登记，不产生代码改动）。
+
+### 13.1 ① §7-I5 文件清单遗漏 `connector.rs` 接线（本节即该缺口的补齐）
+
+- **事实**：§7 表中 I5 的「触面（文件级）」列为 `n2h_collector.rs`、`napi.rs`、`lib.rs`、`NetBirdVpnExtensionAbility.ets`（本文档 :294），**未列 `connector.rs`**。后果不是风格问题而是功能不可用：生产进程从未调用 `n2h_collector::install_host`（`client/core/src/n2h_collector.rs:1672` 的进程级接缝），`n2h_collector_arm` 的 fail-closed 第一闸（同文件 `arm_json`，`no-connector`）恒命中，设备窗口根本开不起来。
+- **补齐（本补充节对应的代码改动，仅 `connector.rs`）**：
+  - `install_collector_host(&wg_feed)`（`client/core/src/connector.rs:3935`，函数体）在两个启动入口各调用一次：`connector_start_json`（`connector.rs:4005`）与 `connector_start_with_socket_json`（`connector.rs:4132`，N3-7 生产路径）。两处都是 `let wg_feed = Arc::new(WgDeviceFeed::new(..))` 之后立即注册——**每个入口都接线**，因为二者各自都能成为进程内唯一 connector 单例（`connector_slot()`，`connector.rs:3880-3882`）的持有者；只覆盖其一即留下一个「启动了却仍 no-connector」的入口。
+  - **重复安装语义 = 后者覆盖（replace）**：`install_host` 返回「是否替换了既有 host」（`n2h_collector.rs:1672-1674`）。理由：一进程一 connector 单例一会话，重启必须把接缝重新指向**新** `WgDeviceFeed`；若保留旧 feed，重启后的每次 arm 都会以 `device-not-up` 失败（旧 feed 的设备已被 `WgDeviceFeed::clear` 摘除，`wg_device.rs:2057-2073`）。
+  - **stop 侧卸载**：`connector_stop_json` 在取槽前调用 `n2h_collector::uninstall_host()`（`connector.rs:4564`）。理由：接缝生命周期 = 会话生命周期，`connector_stop()` 之后不再保留任何 connector 状态（feed/config 含 WG 私钥材料的 Arc）；已 ARMED 的窗口自带 `Arc<dyn CollectorHost>` 副本，其已闭合文档仍可供 §2.4-R2 重放（`n2h_collector.rs:2013-2027`），不受卸载影响。
+  - **未 arm 零行为影响论证**：安装动作只做 `HOST` 静态槽的 `Mutex::replace`（`n2h_collector.rs:1667-1674`）——不起线程、不挂 tee（tee 只在 `arm_json` 内 `attach_tee`，`n2h_collector.rs:1901`）、不建/不发任何 socket 或包、不读时钟；未 arm 时 `HOST` 从不被查询。装机进程的可观测差异仅两处：arm 被拒的 token 由 `no-connector` 变为 `device-not-up`/`tunnel-not-ready`（会话未就绪时的真实状态），以及 stop 后回到 `no-connector`（`tests/n2h_device_collector.rs:1588` 新增用例逐条断言）。
+
+### 13.2 ② `WgFeedHost` 冻结来源扩展（stuns / management 取自内部状态，不动公开 JSON）
+
+- **事实（缺口）**：`WgFeedHost::freeze_facts()` 原先只读 connector 两个公开文档（`connector_status()` / `connector_network_config()`），二者都不渲染 `netbird_config.stuns[]` 与 management 拨号地址。`stun` 是**必需类**（`n2h.rs:151-153` 的 `required()` 只豁免 turn/relay），无理由缺席会让设备轮恒 `n2h-inconclusive`。
+- **取值路径（内部访问器，公开 JSON 形状零改动）**：
+  - `stuns[]`：`netbird_config.stuns[].uri` 由 sync 路径送入 ICE 编排器（`connector.rs:1700-1704` → `PeerIceOrchestrator::set_stuns`，`peer_conn.rs:703-711`，解析用 `ice.rs::parse_stun_uri`，`ice.rs:100`），内部读 = `ConnectorShared::stuns()`（`connector.rs:1681-1683`，取 `self.ice` 单例的 `stuns()`，`peer_conn.rs:1362-1364`）。
+  - management 拨号地址：壳侧 DNS 解析后经 `connector_start_with_socket(addrJson)` 传入，落在 `GrpcManagementFactory.socket.1`（`connector.rs:572`、`connector.rs:604-618`）；内部读 = 新增 trait 默认方法 `ManagementFactory::dial_address()`（`connector.rs:551-556`，生产实现在 `connector.rs:626-630`），在 spawn 时捕获进 `ConnectorHandle::management_dial`（字段 `connector.rs:3268`，捕获点 `connector.rs:3381`）。
+  - 汇合口 = `pub fn core_freeze_inputs()`（`connector.rs:4520-4551`，结构 `CoreFreezeInputs`）→ `WgFeedHost::freeze_facts()`（`n2h_collector.rs:2778-2784`）→ `process_freeze_facts_with_core`（`n2h_collector.rs:2884`）→ `apply_core_freeze_inputs`（`n2h_collector.rs:2998`）。**读取时刻 = arm 时刻**（§4.0「冻结时刻=arm 时刻」）：函数在 arm 路径内被调用（`n2h_collector.rs:1878`），因此冻结的是最后一次 sync 的 stun 集，而非启动时刻的空集。
+  - **公开契约不变**：`connector_status_json()`（`connector.rs:4471`）/`connector_network_config_json()`（`connector.rs:4506`）的渲染路径未触碰（无新增字段）；`tests/n2h_device_collector.rs:1588` 的新用例断言这两个文档**不含**内部拨号地址。
+  - **缺失 fail-closed**：无 connector ⇒ `CoreFreezeInputs::default()`（空）⇒ `assemble_freezes` 产出 `present:false` + 既有 `absent_reason`（`n2h_collector.rs:530-556` 口径）；不可用值（空 host / port 0 / IPv6——本设计 IPv4-only，§10-4）在 `apply_core_freeze_inputs` 内丢弃，绝不编造。新增用例：`n2h_collector.rs:4503`（`core_freeze_inputs_close_the_stun_and_management_gap`，断言 stun 变为 present 且 `source=core-network-map`、management 为 `source=core-dial-address`，以及无源时两者均为有理由缺席）与 `connector.rs:5197`（内部集只含 `stun:` URI 的实测）。
+  - **残余如实登记**：`turn:` URI 被 `set_stuns` 拒绝且内部**无**留存（`peer_conn.rs:703-711`），故可选类 `turn` 保持通用理由「no turn endpoint in this session's network map」（`n2h_collector.rs:532-538`）而非 §4.0 预期的 `TURN_REJECTED_REASON`；属可选类、不影响必需类判定，登记为已知取数层局限。
+
+### 13.3 ③ D4 的 hit 级 direction 改记 `notes[]`（理由＝渲染器冻结）
+
+- **偏离**：§3.4 D4（本文档 :147）原定「hit 对象**尾部追加** `direction:"from-os"|"to-os"`」。实现未追加字段，改记入 `notes[]`。
+- **依据**：hit 渲染器 `n2h::TunHit::to_json` 为冻结契约（§3.1 禁增删字段、§5.2 同纪律），追加字段会同时改动设备文档与 host 文档形状；`notes[]` 是 §3.1 明示允许的加法面。代码：`n2h_collector.rs:1402-1410`（`DirectedHit` 头注释与结构）、`n2h_collector.rs:2665-2676`（逐 hit 写 `outer-hit-direction probe_id=… direction=… side=… frame_len=…`）；回归守护 `n2h_collector.rs:4427-4430`（用例断言该 notes 行且断言文档无 direction 字段）。信息量不减：每个泄漏 hit 的方向在 notes 中可判读，正是取证所需。
+
+### 13.4 ④ 新增三个 fail-closed token（`invalid-opts` / `window-failed` / `chunk-out-of-range`）
+
+- 设计 §5.1 只登记了 `no-connector|device-not-up|tunnel-not-ready|already-armed`，实现补齐三个失败语义 token，均为稳定字面、无服务端文本、无秘密：
+  - `ARM_ERR_INVALID_OPTS = "invalid-opts"`（`n2h_collector.rs:1340`；调用点 `n2h_collector.rs:1854`，arm opts JSON 解析失败——半懂不解的 arm 请求绝不开窗，`ArmOptions::parse_json`，`n2h_collector.rs:1721-1783`）；
+  - `ARM_ERR_WINDOW_FAILED = "window-failed"`（`n2h_collector.rs:1341`；调用点 `n2h_collector.rs:1935`，窗口线程 spawn 失败时同步 detach tee 并清空窗口槽）；
+  - `EVIDENCE_ERR_RANGE = "chunk-out-of-range"`（`n2h_collector.rs:1346`；调用点 `n2h_collector.rs:2003`，`n2h_collector_evidence(chunk)` 越界取块）。
+- 依据提交：`568c931`（I5）。
+
+### 13.5 ⑤ disarm 语义（已闭合窗保留供重放，只弃未闭合产物）
+
+- 实现口径（`disarm_json`，`n2h_collector.rs:2013-2041`）：窗口已 `closed` ⇒ 只发 hilog 行（`discarded=false|retained=true`）并**保留**已定稿文档，供 §2.4-R2 的 `n2h_collector_evidence(chunk)` 反复重放；窗口仍开 ⇒ take 窗口槽、置 `disarmed`、同步 `detach_tee`、`discarded=true`（半成品弃置），且窗口线程在拍与判定边界检查 `disarmed` 后不再产出定稿（`n2h_collector.rs:2087-2094`、`:2452`）。幂等：恒 `{ok:true}`。
+- 与 §2.2「中止：未闭合产物弃置」一致，并明确「重放面不得因 disarm 丢失」，登记为实现期收紧。
+- 依据提交：`568c931`（I5）。
+
+### 13.6 ⑥ `collector{}` 块留 I7
+
+- §3.3 的尾部自标识块 `collector{}`（本文档 :131-138）在 I5 **未实现**：文档中 `build_source` 缺省路径只写一条注记 `build-sha256=not-reported (I7 injects the embedded build identity)`（`n2h_collector.rs:2061`），`build.rs` 的 `N2H_BUILD_SHA256` 注入亦未落地——与 §7 表 I7 行（本文档 :296）一致，属计划内留白而非遗漏；本登记仅为避免「I5 已含 A-1 自标识」的误读。
+- 依据提交：`568c931`（I5）。
+
+### 13.7 本节改动面与验收（工作树实读）
+
+- 改动文件：`client/core/src/connector.rs`（① 接线 + ② 内部访问器）、`client/core/src/n2h_collector.rs`（② 冻结来源汇合 + 两个单测）、`client/core/tests/n2h_device_collector.rs`（① 端到端接线用例）、本文件（本节）。`connector_status()`/`connector_network_config()` 契约、渲染器 `n2h.rs`、ets 侧均未改动。
+- 验收实跑（工作树，HEAD `568c931` + 未提交改动）：
+  - `cd client/core && cargo test --offline --locked --color never` → 34 个测试目标全 `ok`，合计 **520 passed / 0 failed / 0 ignored**（基线 517/0 + 本节新增 3 例：`connector::tests::core_freeze_inputs_read_the_sessions_internal_stuns_and_dial_address`、`n2h_collector::tests::core_freeze_inputs_close_the_stun_and_management_gap`、`tests/n2h_device_collector.rs::a_started_connector_installs_the_production_host_with_internal_freeze_sources`）。
+  - `bash client/core/build.sh` → exit 0，`14/14 frozen BoringTun ffi symbols present in dynsym`。
+  - `bash client/build.sh` → exit 0（ArkTS 编译含 I5 的 ets 改动通过），`entry-default-unsigned.hap` 4 208 659 bytes，sha256 `8ec9b0bb49d860a51fc787a55c61e74ad262d6c1ee15ae9666a9e2e49191dc89`。
+
