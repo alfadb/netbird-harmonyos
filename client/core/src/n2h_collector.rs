@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 
-//! # n2h_collector — N2-H DEVICE-side evidence collector (increments I0 + I1)
+//! # n2h_collector — N2-H DEVICE-side evidence collector (increments I0 + I1 + I3 + I4)
 //!
 //! Spec (single source): `docs/n2h-device-collector-design-20260917.md` —
-//! §2.4 (HiLog chunk channel), §4.0 (freeze assembly), §7 I0/I1, §3 (frozen
-//! document alignment). Only those two increments live here; the window state
-//! machine, probe sender, `/proc` reconciliation and the napi exports are
-//! later increments (I3–I5) and do not exist yet.
+//! §2.4 (HiLog chunk channel), §4.0 (freeze assembly), §4.2 (probe sender),
+//! §4.4 (`/proc` reconciliation), §7 I0/I1/I3/I4, §3 (frozen document
+//! alignment). Those four increments live here; the window state machine, the
+//! receipt matrix, the verdict wiring and the napi exports are increment I5 and
+//! do not exist yet.
 //!
 //! - **I0 — chunk encoder.** The evidence document is split into 512-byte raw
 //!   slices; each slice becomes one frozen HiLog line
@@ -21,11 +22,25 @@
 //!   sources only (shell exclusion set ∪ core session knowledge), into the
 //!   `frozen_endpoints[]` array of the evidence document with the D7 `source`
 //!   token and — for a reasoned absence — `absent_reason`.
+//! - **I3 — device probe sender.** One FRESH wildcard-bound socket per probe
+//!   (`0.0.0.0:0`, deliberately NOT the host's `127.0.0.1:0`), payload =
+//!   [`probe_id`] `N2H-<kind>-<nonce>` for UDP/TCP and the 12-byte transaction
+//!   id for STUN; the transport follows the kind's `proto()` column, so a probe
+//!   can never use a transport the frozen set did not declare. The unverified
+//!   `dns-nxdomain-echo` receipt method exists but is OFF by default (design
+//!   §4.0/§9-U5).
+//! - **I4 — `/proc` reconciliation.** The `vpn-tun` row of `/proc/net/dev` (or
+//!   the operator's `hdc` capture as the D-class fallback), paired with the
+//!   core WG counters in the frozen order (`/proc` FIRST), audited by BOTH
+//!   identities of design §4.4 (bytes AND packets) with a bounded resample.
+//!   The read seam is injectable, so no unit test touches the real `/proc`.
 //!
-//! Both increments are deliberately IO-free and take every external fact as a
-//! parameter (clock included). That is what makes the device assembly testable
-//! offline on the host (design §8) and keeps the device path's fail-closed
-//! arms outside this module.
+//! I0/I1 are deliberately IO-free and take every external fact as a parameter
+//! (clock included). I3/I4 own the module's only two IO surfaces and both are
+//! design-mandated (the probe sockets of §4.2, the `/proc` read of §4.4); the
+//! sampling discipline around them (frozen order, bounded resample, honest
+//! unreconciled result) is what keeps a device window auditable instead of
+//! best-effort.
 //!
 //! This module renders **no** JSON: the document is always
 //! [`crate::n2h::Evidence::to_json`], the one renderer shared by the host tool
@@ -43,12 +58,18 @@
 //! **Isolation:** compiled into the cdylib (like `n2h`, `client/core/src/lib.rs`),
 //! but INERT — nothing calls into this module unless the collector entry points
 //! are armed (I5), it contains no routing/exclusion/VPN lifecycle code, and the
-//! shipped cdylib behavior is unchanged. Sources are injected by the caller;
-//! this module never reads the connector, a socket, `/proc` or the filesystem.
+//! shipped cdylib behavior is unchanged. The collector's sources are injected
+//! by the caller: this module reads no connector state and contains no
+//! routing/exclusion/VPN lifecycle code, and its only filesystem read is the
+//! `/proc/net/dev` ledger (§4.4) plus the operator capture it falls back to.
 
 use crate::hilog;
-use crate::n2h::{EndpointKind, FrozenEndpoint};
+use crate::n2h::{
+    probe_id, EndpointKind, FiveTuple, FrozenEndpoint, IfaceSnapshot, WireMarker, WindowCounters,
+};
 use crate::util::{base64, sha256_hex};
+use crate::wg_device::{TunTeeTotals, WgDeviceStats};
+use std::net::SocketAddr;
 
 // ---------------------------------------------------------------------------
 // I0 — chunk encoder (design §2.4-A)
@@ -606,8 +627,661 @@ fn absent_entry(kind: EndpointKind, reason: &str, src: &FreezeSources) -> Frozen
 }
 
 // ---------------------------------------------------------------------------
-// tests (pure logic only — no sockets, no clock, no /proc; the device state
-// machine is a later increment)
+// I3 — device probe sender (design §4.2)
+// ---------------------------------------------------------------------------
+
+/// The wildcard bind of every device probe socket (design §4.2: `0.0.0.0:0`,
+/// one fresh socket per probe).
+///
+/// Deliberately NOT the host sender's `127.0.0.1:0` (`n2h.rs:1135`): the
+/// device-validation run-2 regression was a loopback-bound probe socket whose
+/// every send to a real, non-loopback outer endpoint failed with EINVAL
+/// (`n2h.rs:1163-1170`, regression test `n2h.rs:2373-2396`), and the design
+/// freezes the wildcard for the device path.
+pub const PROBE_BIND_WILDCARD: &str = "0.0.0.0:0";
+
+/// Wait window for a probe's response-side receipt. The arm options carry the
+/// deployed value (`opts.probe_wait_ms`, design §5.1 default 800); this is the
+/// value for a caller that has none.
+pub const PROBE_WAIT_MS_DEFAULT: u64 = 800;
+
+/// TCP probe connect timeout — the host probe's bound (`n2h.rs:1147`), so a
+/// probe against a black-holed endpoint fails inside the same bounded time
+/// instead of stalling the window.
+pub const PROBE_CONNECT_TIMEOUT_MS: u64 = 2_000;
+
+/// One probe as it left the App process (the `probes[]`取数层 of design §3.2).
+///
+/// No clock is taken here: the caller stamps `sent_at_unix`/`sent_at_mono` at
+/// its own call site, exactly like the host driver does (`n2h.rs:1383-1384`).
+/// `Err` from any sender means the probe never left — the caller records it as
+/// `sent:false` plus a reason, never as a silent miss.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentProbe {
+    /// `N2H-<kind>-<nonce>` (built by [`probe_id`], shared with the host); for
+    /// the STUN probe `N2H-stun-<txid hex>` — the txid IS the unique payload
+    /// there, because the Binding Request wire format is fixed.
+    pub probe_id: String,
+    /// The probe's own five-tuple. Unique because every probe leaves from its
+    /// OWN fresh ephemeral socket (design §4.2); the `src` is the probe
+    /// socket's getsockname — `0.0.0.0:<port>` for the UDP probes, the real
+    /// source for TCP (see [`wildcard_udp`] for why the wildcard address is
+    /// reported verbatim rather than reverse-engineered).
+    pub tuple: FiveTuple,
+    /// Unique on-the-wire marker: the ASCII probe id, or the 12-byte STUN
+    /// transaction id ([`WireMarker`], the same match the TUN scanner uses).
+    pub marker: WireMarker,
+    pub payload_len: usize,
+    /// STUN only: the endpoint-reported physical source from a txid-matched
+    /// Binding Success Response (design §4.0 `stun-binding-response`); `None`
+    /// means no receipt inside the wait window — recorded as a gap, never
+    /// invented.
+    pub mapped: Option<([u8; 4], u16)>,
+    /// DNS echo only (default OFF): the resolver carried our qname back.
+    pub echo_received: bool,
+}
+
+/// Bind one fresh WILDCARD UDP socket for a probe (design §4.2: `0.0.0.0:0`,
+/// never the host's loopback bind).
+///
+/// The socket stays UNCONNECTED on purpose: the design matches a receipt by the
+/// probe's unique payload (the STUN txid, §4.2/§4.0) and ignores the reply's
+/// origin, so `recv_from` is used. A connected socket would add a kernel-level
+/// source-address filter the design does not have — it could silently drop a
+/// legitimate response from a multi-homed or anycast endpoint and turn a real
+/// receipt into a gap.
+///
+/// The consequence is that this socket's `local_addr` is
+/// `0.0.0.0:<ephemeral port>`: the address is the wildcard bind (the PORT is
+/// what makes the probe's five-tuple unique). That is the same shape the host's
+/// wildcard-bound STUN sender already reports (`n2h.rs:1169-1171`), and the
+/// design prescribes exactly this getsockname reading for the wg_peer receipt's
+/// `physical_src` (§4.0, "probe socket getsockname", host shape
+/// `n2h.rs:1474-1486`). The address a packet actually carries is the
+/// kernel-chosen route source; it is deliberately NOT reverse-engineered here
+/// (which would cost a second, connected socket per probe) — whichever source
+/// the endpoint sees is what the receipt side reports, as the design asks.
+fn wildcard_udp() -> Result<std::net::UdpSocket, String> {
+    std::net::UdpSocket::bind(PROBE_BIND_WILDCARD).map_err(|e| format!("probe socket bind: {e}"))
+}
+
+/// Send one ASCII-marker UDP probe from a fresh wildcard-bound socket
+/// (design §4.2: the payload IS the probe id).
+pub fn send_udp_probe(dst: SocketAddr, marker: &str) -> Result<SentProbe, String> {
+    let sock = wildcard_udp()?;
+    let src = sock.local_addr().map_err(|e| format!("probe socket addr: {e}"))?;
+    let n = sock.send_to(marker.as_bytes(), dst).map_err(|e| format!("probe send: {e}"))?;
+    Ok(SentProbe {
+        probe_id: marker.to_string(),
+        tuple: FiveTuple { proto: "udp".into(), src: src.to_string(), dst: dst.to_string() },
+        marker: WireMarker::Ascii(marker.to_string()),
+        payload_len: n,
+        mapped: None,
+        echo_received: false,
+    })
+}
+
+/// Send one ASCII-marker TCP probe (connect + write + shutdown, the host
+/// shapes at `n2h.rs:1145-1154`). The connect is what gives every TCP probe its
+/// own source port; the write succeeds only for a listener that actually
+/// accepted, which is the outer-path reachability this probe asserts.
+pub fn send_tcp_probe(dst: SocketAddr, marker: &str) -> Result<SentProbe, String> {
+    use std::io::Write;
+    let stream = std::net::TcpStream::connect_timeout(
+        &dst,
+        std::time::Duration::from_millis(PROBE_CONNECT_TIMEOUT_MS),
+    )
+    .map_err(|e| format!("probe connect: {e}"))?;
+    let src = stream.local_addr().map_err(|e| format!("probe addr: {e}"))?;
+    let mut s = stream;
+    s.write_all(marker.as_bytes()).map_err(|e| format!("probe write: {e}"))?;
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    Ok(SentProbe {
+        probe_id: marker.to_string(),
+        tuple: FiveTuple { proto: "tcp".into(), src: src.to_string(), dst: dst.to_string() },
+        marker: WireMarker::Ascii(marker.to_string()),
+        payload_len: marker.len(),
+        mapped: None,
+        echo_received: false,
+    })
+}
+
+/// Send one STUN Binding probe and wait up to `wait_ms` for the txid-matched
+/// Binding Success Response (design §4.2: the 12-byte transaction id is the
+/// unique payload; §4.0: the response's XOR-MAPPED-ADDRESS is the
+/// endpoint-reported physical source).
+///
+/// The wait is a bounded blocking receive (`set_read_timeout`), not a poll
+/// loop: a datagram that never comes costs the window exactly `wait_ms`.
+pub fn send_stun_probe(
+    dst: SocketAddr,
+    txid: [u8; 12],
+    wait_ms: u64,
+) -> Result<SentProbe, String> {
+    use crate::stun::{build_binding_request, parse_binding_response, StunReply, TransactionId};
+    let sock = wildcard_udp()?;
+    let src = sock.local_addr().map_err(|e| format!("probe socket addr: {e}"))?;
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(wait_ms.max(1))));
+    let req = build_binding_request(TransactionId(txid));
+    sock.send_to(&req, dst).map_err(|e| format!("stun probe send: {e}"))?;
+    let mut mapped = None;
+    let mut buf = [0u8; 2048];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    while std::time::Instant::now() < deadline {
+        match sock.recv_from(&mut buf) {
+            Ok((n, _from)) => {
+                if let Ok(StunReply::Mapped { addr, port }) =
+                    parse_binding_response(&buf[..n], &TransactionId(txid))
+                {
+                    mapped = Some((addr, port));
+                    break;
+                }
+                // mismatched datagram: keep waiting until the deadline
+            }
+            // timed out / would block: the bounded wait is over
+            Err(_) => break,
+        }
+    }
+    Ok(SentProbe {
+        probe_id: probe_id("stun", &crate::util::hex_lower(&txid)),
+        tuple: FiveTuple { proto: "udp".into(), src: src.to_string(), dst: dst.to_string() },
+        marker: WireMarker::StunTxid(txid),
+        payload_len: req.len(),
+        mapped,
+        echo_received: false,
+    })
+}
+
+/// One outer probe of `kind` against the frozen endpoint `dst` (design §4.2),
+/// with the identity and entropy this module owns: a fresh 24-hex nonce from
+/// `/dev/urandom` ([`crate::n2h::fresh_nonce_hex`]) for the ASCII probes, a
+/// fresh STUN transaction id for `stun`.
+///
+/// The transport follows `kind.proto()` — the same column the freeze recorded
+/// (`FrozenEndpoint::proto`) — so the probe cannot silently travel on a
+/// transport the frozen set did not declare.
+///
+/// `dns` deliberately takes the SAME ASCII UDP-marker shape as the other UDP
+/// kinds: the unverified `dns-nxdomain-echo` method stays behind
+/// [`send_dns_echo_probe`] and is never the default path (design §4.0/§9-U5).
+pub fn send_probe(
+    kind: EndpointKind,
+    dst: SocketAddr,
+    wait_ms: u64,
+) -> Result<SentProbe, String> {
+    if kind == EndpointKind::Stun {
+        let txid = crate::stun::random_transaction_id()
+            .map_err(|e| format!("stun probe entropy: {e:?}"))?;
+        return send_stun_probe(dst, txid.0, wait_ms);
+    }
+    let nonce = crate::n2h::fresh_nonce_hex()?;
+    let id = probe_id(kind.name(), &nonce);
+    match kind.proto() {
+        "tcp" => send_tcp_probe(dst, &id),
+        _ => send_udp_probe(dst, &id),
+    }
+}
+
+/// Suffix of the optional DNS echo probe's qname (design §4.0: the query name
+/// is `<marker>.n2h-invalid`, so a resolver echoing the QNAME back proves it
+/// saw our query).
+pub const DNS_ECHO_SUFFIX: &str = ".n2h-invalid";
+
+/// The qname of one DNS echo probe. The caller passes the probe id
+/// (`N2H-<kind>-<nonce>`, `[A-Za-z0-9-]`, ≤ 33 octets), so the joined first
+/// label stays inside the 63-octet DNS label limit.
+pub fn dns_echo_qname(marker: &str) -> String {
+    format!("{marker}{DNS_ECHO_SUFFIX}")
+}
+
+/// DNS wire name: length-prefixed labels plus the root terminator. `None` for
+/// an empty label, a label over 63 octets, a name over 255 octets, or a byte
+/// outside the host-name alphabet (plus the underscore seen in the wild) — a
+/// malformed query is never sent.
+fn dns_wire_name(qname: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for label in qname.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return None;
+        }
+        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return None;
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    if out.len() > 255 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Query id of one DNS echo probe: FNV-1a 16-bit of the qname. Deterministic
+/// (a pure function of the qname) so a receipt is reproducible in a test; it
+/// only correlates a reply with our query — the receipt itself is the echoed
+/// QNAME.
+fn dns_query_id(qname: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in qname.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    (h & 0xffff) as u16
+}
+
+/// The A-query wire form of `qname` (RD set, one question, no EDNS).
+fn build_dns_a_query(qname: &str) -> Option<Vec<u8>> {
+    let name = dns_wire_name(qname)?;
+    let mut q = Vec::with_capacity(12 + name.len() + 4);
+    q.extend_from_slice(&dns_query_id(qname).to_be_bytes());
+    q.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: RD
+    q.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    q.extend_from_slice(&0u16.to_be_bytes()); // ANCOUNT
+    q.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    q.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
+    q.extend_from_slice(&name);
+    q.extend_from_slice(&1u16.to_be_bytes()); // QTYPE A
+    q.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+    Some(q)
+}
+
+/// The receipt test of the DNS echo method: a datagram that is a DNS RESPONSE
+/// (QR set) for our query id AND carries our qname in wire form. The question
+/// section is never name-compressed (RFC 1035 §4.1.4), so a verbatim wire-form
+/// search is a sound "the resolver echoed this QNAME back" test. The RCODE is
+/// deliberately not required: an NXDOMAIN answer proves delivery exactly as
+/// well as a NOERROR one (design §4.0).
+pub fn dns_echo_receipt(response: &[u8], qname: &str) -> bool {
+    if response.len() < 12 || response[2] & 0x80 == 0 {
+        return false;
+    }
+    if u16::from_be_bytes([response[0], response[1]]) != dns_query_id(qname) {
+        return false;
+    }
+    match dns_wire_name(qname) {
+        Some(name) => crate::n2h::frame_contains_marker(response, &name),
+        None => false,
+    }
+}
+
+/// Send one DNS echo probe (design §4.0 `dns-nxdomain-echo`; **default OFF** —
+/// no real resolver has been measured with this method, §9-U5) and wait up to
+/// `wait_ms` for a response carrying our qname back. Enabling it is the
+/// caller's explicit decision, and a miss stays a receipt gap (§4.0), never a
+/// pass.
+///
+/// The marker appears verbatim inside the query (`<marker>.n2h-invalid`), so
+/// the same [`WireMarker::Ascii`] match that guards the other probes also
+/// detects this query if it leaks into the tunnel.
+pub fn send_dns_echo_probe(
+    dst: SocketAddr,
+    marker: &str,
+    wait_ms: u64,
+) -> Result<SentProbe, String> {
+    let qname = dns_echo_qname(marker);
+    let query = build_dns_a_query(&qname)
+        .ok_or_else(|| format!("dns echo qname '{qname}' is not encodable"))?;
+    let sock = wildcard_udp()?;
+    let src = sock.local_addr().map_err(|e| format!("probe socket addr: {e}"))?;
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(wait_ms.max(1))));
+    sock.send_to(&query, dst).map_err(|e| format!("dns echo probe send: {e}"))?;
+    let mut echo_received = false;
+    let mut buf = [0u8; 2048];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    while std::time::Instant::now() < deadline {
+        match sock.recv_from(&mut buf) {
+            Ok((n, _from)) => {
+                if dns_echo_receipt(&buf[..n], &qname) {
+                    echo_received = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    Ok(SentProbe {
+        probe_id: marker.to_string(),
+        tuple: FiveTuple { proto: "udp".into(), src: src.to_string(), dst: dst.to_string() },
+        marker: WireMarker::Ascii(marker.to_string()),
+        payload_len: query.len(),
+        mapped: None,
+        echo_received,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// I4 — /proc reconciliation (design §4.4, the B-6 landing)
+// ---------------------------------------------------------------------------
+
+/// The platform TUN interface name — ONE constant for the three places the
+/// design freezes the same literal: `tun_negative.scanned_sides` (D3),
+/// `counters[].side` (D8) and the `/proc/net/dev` row (B-6).
+pub const TUN_IFACE_NAME: &str = "vpn-tun";
+
+/// The kernel-side ledger (§4.4's independent second book).
+pub const PROC_NET_DEV_PATH: &str = "/proc/net/dev";
+
+/// `counters-source=` token: the /proc ledger read in-process (the device path).
+pub const COUNTERS_SOURCE_PROC: &str = "proc-net-dev";
+/// `counters-source=` token: the operator's `hdc shell "cat /proc/net/dev"`
+/// capture — the D-class fallback when the App cannot read `/proc` (§9-U1).
+pub const COUNTERS_SOURCE_HDC_FALLBACK: &str = "hdc-proc-fallback";
+/// `counters-source=` token: the I2 tee totals standing in for `/proc` in the
+/// OFFLINE harness only (§3.2; never a device-run caliber).
+pub const COUNTERS_SOURCE_TEE_FALLBACK: &str = "tee-fallback";
+
+/// Bounded resampling bound (design §4.4: "有界重采样 ≤3 次"; a pairing that is
+/// still inconsistent after this many extra reads is recorded, never repaired).
+pub const MAX_PAIRING_RESAMPLES: u32 = 3;
+
+/// The four ledger counters of one `/proc/net/dev` row (the only ones the
+/// identity needs; errors/drops stay in the file, unread).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcIfaceRow {
+    pub rx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_bytes: u64,
+    pub tx_packets: u64,
+}
+
+/// Parse the `iface` row out of `/proc/net/dev` text (fixture-injectable: the
+/// caller supplies the text, so the unit tests never read the real file).
+///
+/// `None` when the interface has no row OR its row is unusable (< 16 numeric
+/// fields): both mean "no kernel ledger", and the caller records the gap
+/// rather than reconciling against a guess. The name must match EXACTLY after
+/// trimming (`vpn-tun0` / `xvpn-tun` are different interfaces).
+pub fn parse_proc_net_dev(text: &str, iface: &str) -> Option<ProcIfaceRow> {
+    for line in text.lines() {
+        let (name, rest) = match line.split_once(':') {
+            Some(v) => v,
+            None => continue, // header / separator lines carry no ':'
+        };
+        if name.trim() != iface {
+            continue;
+        }
+        let nums: Vec<u64> =
+            rest.split_whitespace().filter_map(|f| f.parse::<u64>().ok()).collect();
+        if nums.len() < 16 {
+            return None; // matched but malformed: fail closed, do not guess
+        }
+        // /proc/net/dev column order: RX bytes, RX packets, …(6 more)… then TX
+        return Some(ProcIfaceRow {
+            rx_bytes: nums[0],
+            rx_packets: nums[1],
+            tx_bytes: nums[8],
+            tx_packets: nums[9],
+        });
+    }
+    None
+}
+
+/// The read seam (design §4.4 + §8). Production reads the real
+/// `/proc/net/dev` and, when that fails, the operator-provisioned `hdc`
+/// capture; tests inject fixture TEXT, so no unit test depends on the real
+/// `/proc` (design §8's injectable-seam rule).
+pub trait LedgerReads {
+    /// Direct in-process read (the App path). `Err` when permission or
+    /// availability fails — §9-U1 is an UNVERIFIED platform fact and is
+    /// handled as a real failure, never as a guess.
+    fn read_proc_net_dev(&mut self) -> Result<String, String>;
+    /// The operator's `hdc shell "cat /proc/net/dev"` capture text (D-class
+    /// fallback, design §2.4-D/§4.4). `Err` when none was provisioned.
+    fn read_proc_hdc_capture(&mut self) -> Result<String, String>;
+    /// The core WG device counters (the `wg{}` block's source) — read SECOND
+    /// (design §4.4 pairing order).
+    fn read_wg_stats(&mut self) -> Result<WgDeviceStats, String>;
+}
+
+/// Production ledgers. The `/proc` read is direct; the fallback is a file the
+/// operator dropped on the device (`hdc file send`, §6.4-5), `None` when not
+/// provisioned; the wg ledger comes from a caller closure (I5 passes the
+/// connector's device stats handle — this module never reads the connector).
+pub struct DeviceLedgerReads<F> {
+    /// Device path of the operator capture (e.g.
+    /// `/data/local/tmp/netbird-n2h-proc-net-dev`).
+    pub hdc_capture_path: Option<std::path::PathBuf>,
+    /// Reads the live [`WgDeviceStats`].
+    pub wg_stats: F,
+}
+
+impl<F: FnMut() -> Result<WgDeviceStats, String>> LedgerReads for DeviceLedgerReads<F> {
+    fn read_proc_net_dev(&mut self) -> Result<String, String> {
+        std::fs::read_to_string(PROC_NET_DEV_PATH).map_err(|e| format!("{PROC_NET_DEV_PATH}: {e}"))
+    }
+
+    fn read_proc_hdc_capture(&mut self) -> Result<String, String> {
+        let path = self
+            .hdc_capture_path
+            .as_ref()
+            .ok_or_else(|| "no hdc /proc capture provisioned".to_string())?;
+        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn read_wg_stats(&mut self) -> Result<WgDeviceStats, String> {
+        let f = &mut self.wg_stats;
+        f()
+    }
+}
+
+/// Read the `vpn-tun` row through the two allowed paths, in order: the direct
+/// read first, the `hdc` capture second (design §4.4). Returns the row plus
+/// the `counters-source=` token the caller records in `notes[]`.
+///
+/// Both paths failing is an `Err` carrying both reasons: no counters window
+/// exists then, and the caller records that gap (`n2h-inconclusive`,
+/// `n2h.rs:904-910`) instead of reconciling against nothing.
+pub fn read_proc_row<R: LedgerReads + ?Sized>(
+    reads: &mut R,
+) -> Result<(ProcIfaceRow, &'static str), String> {
+    let direct = reads.read_proc_net_dev();
+    if let Ok(text) = &direct {
+        if let Some(row) = parse_proc_net_dev(text, TUN_IFACE_NAME) {
+            return Ok((row, COUNTERS_SOURCE_PROC));
+        }
+    }
+    let direct_note = match &direct {
+        Ok(_) => format!("{PROC_NET_DEV_PATH} carries no usable '{TUN_IFACE_NAME}' row"),
+        Err(e) => format!("{PROC_NET_DEV_PATH} read failed: {e}"),
+    };
+    match reads.read_proc_hdc_capture() {
+        Ok(text) => parse_proc_net_dev(&text, TUN_IFACE_NAME)
+            .map(|row| (row, COUNTERS_SOURCE_HDC_FALLBACK))
+            .ok_or_else(|| {
+                format!("{direct_note}; the hdc capture has no usable '{TUN_IFACE_NAME}' row either")
+            }),
+        Err(e) => Err(format!("{direct_note}; the hdc capture is unavailable: {e}")),
+    }
+}
+
+/// One paired read of the two ledgers, in the FROZEN order (design §4.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PairedRead {
+    pub at_mono: u64,
+    pub at_unix: i64,
+    /// The `/proc/net/dev` `vpn-tun` row — the kernel ledger, read FIRST.
+    pub tun: ProcIfaceRow,
+    /// The core WG counters — read SECOND.
+    pub wg: WgDeviceStats,
+    /// Which `/proc` path answered (`counters-source=` token).
+    pub source: &'static str,
+}
+
+impl PairedRead {
+    /// The document-side snapshot of this read (the D8/D9 caliber).
+    pub fn snapshot(&self) -> IfaceSnapshot {
+        iface_snapshot(&self.wg, &self.tun, self.at_mono, self.at_unix)
+    }
+}
+
+/// Build the document-side counter snapshot (design D8/D9) from a wg-ledger
+/// reading plus a `/proc`-shaped row — the SAME mapping the offline harness's
+/// `counters-source=tee-fallback` caliber uses (§3.2), so the device path and
+/// the offline path cannot drift:
+/// `delivered_bytes`/`delivered_frames` = /proc RX, `injected_frames` = /proc
+/// TX packets (D9: in a real system the OS injects into the TUN, not the
+/// collector).
+pub fn iface_snapshot(
+    wg: &WgDeviceStats,
+    tun: &ProcIfaceRow,
+    at_mono: u64,
+    at_unix: i64,
+) -> IfaceSnapshot {
+    IfaceSnapshot {
+        at_mono,
+        at_unix,
+        wg_tx_packets: wg.tx_packets,
+        wg_tx_bytes: wg.tx_bytes,
+        wg_rx_packets: wg.rx_packets,
+        wg_rx_bytes_to_tun: wg.rx_bytes_to_tun,
+        wg_handshake_initiations: wg.handshake_initiations,
+        wg_no_route_drops: wg.no_route_drops,
+        wg_unknown_peer_drops: wg.unknown_peer_drops,
+        wg_decrypt_errors: wg.decrypt_errors,
+        wg_send_errors: wg.send_errors,
+        wg_tun_write_errors: wg.tun_write_errors,
+        tun_injected_frames: tun.tx_packets,
+        tun_delivered_frames: tun.rx_packets,
+        tun_delivered_bytes: tun.rx_bytes,
+    }
+}
+
+/// Map the I2 tee totals onto the `/proc`-shaped row — the OFFLINE harness's
+/// substitute when `/proc` is unavailable (design §3.2: "`tun.*` 以 tee 独立
+/// 计数替位"). Direction mapping follows D9: `from-os` = OS→TUN = injected,
+/// `to-os` = core→TUN delivered.
+pub fn tee_fallback_row(totals: &TunTeeTotals) -> ProcIfaceRow {
+    ProcIfaceRow {
+        rx_bytes: totals.to_os_bytes,
+        rx_packets: totals.to_os_frames,
+        tx_bytes: totals.from_os_bytes,
+        tx_packets: totals.from_os_frames,
+    }
+}
+
+/// The `notes[]` line naming the ledger path that answered (design §4.4/§3.2:
+/// the fallback caliber must be declared, never implied).
+pub fn counters_source_note(source: &str) -> String {
+    format!("counters-source={source}")
+}
+
+/// The two reconciliation identities of design §4.4 on one window delta.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CounterIdentities {
+    /// The FROZEN identity (`RECONCILIATION_NOTE`, `WindowCounters::reconciled`,
+    /// `n2h.rs:560-563`): `delta.wg.rx_bytes_to_tun == delta.tun.delivered_bytes`.
+    pub bytes: bool,
+    /// The design's STRENGTHENING (§4.4/B-6): `delta.wg.rx_packets ==
+    /// delta.tun.delivered_frames` — the self-consistency check of the paired
+    /// snapshot, which the byte identity alone can miss when frames of unequal
+    /// length cross the pairing gap.
+    pub packets: bool,
+}
+
+impl CounterIdentities {
+    /// Both identities hold — the pairing is self-consistent.
+    pub fn hold(&self) -> bool {
+        self.bytes && self.packets
+    }
+}
+
+/// Evaluate both identities on one delta.
+pub fn counter_identities(delta: &IfaceSnapshot) -> CounterIdentities {
+    CounterIdentities {
+        bytes: delta.wg_rx_bytes_to_tun == delta.tun_delivered_bytes,
+        packets: delta.wg_rx_packets == delta.tun_delivered_frames,
+    }
+}
+
+/// One paired read of the two ledgers in the frozen order: the `/proc/net/dev`
+/// row FIRST, the wg stats SECOND (design §4.4).
+///
+/// The order is part of the pairing protocol. The two reads are µs–ms apart, so
+/// a frame delivered to the TUN between them lands in one ledger's delta and
+/// not the other's; [`close_window`] resamples exactly that, and freezing the
+/// order keeps a captured session reproducible.
+pub fn paired_read<R: LedgerReads + ?Sized>(
+    reads: &mut R,
+    at_mono: u64,
+    at_unix: i64,
+) -> Result<PairedRead, String> {
+    let (tun, source) = read_proc_row(reads)?;
+    let wg = reads.read_wg_stats().map_err(|e| format!("wg stats read: {e}"))?;
+    Ok(PairedRead { at_mono, at_unix, tun, wg, source })
+}
+
+/// Window OPEN: one paired read = the `before` edge. No delta exists yet, so
+/// there is nothing to resample here.
+pub fn open_window<R: LedgerReads + ?Sized>(
+    reads: &mut R,
+    at_mono: u64,
+    at_unix: i64,
+) -> Result<PairedRead, String> {
+    paired_read(reads, at_mono, at_unix)
+}
+
+/// One completed counters window (design §4.4): THE `counters[]` element plus
+/// the pairing audit the caller records.
+#[derive(Debug, Clone)]
+pub struct WindowSample {
+    /// Straight into `Evidence::counters` (I5); `side` = [`TUN_IFACE_NAME`]
+    /// (D8: one element, one platform TUN).
+    pub counters: WindowCounters,
+    /// Identity status of the FINAL paired delta.
+    pub identities: CounterIdentities,
+    /// Extra paired reads of the close edge (bound: ≤ [`MAX_PAIRING_RESAMPLES`]).
+    pub resamples: u32,
+    /// `counters-source=` token of the accepted read.
+    pub source: &'static str,
+}
+
+impl WindowSample {
+    /// Both identities hold on the final delta — reconciled in the design's
+    /// strengthened sense (bytes AND packets).
+    pub fn consistent(&self) -> bool {
+        self.identities.hold()
+    }
+}
+
+/// Window CLOSE (design §4.4 pairing discipline): take the `after` paired read
+/// and audit its delta against `before`; if either identity fails — a frame
+/// crossed between the two reads of this edge — re-take the WHOLE edge, at most
+/// [`MAX_PAIRING_RESAMPLES`] extra times, and accept the first self-consistent
+/// pairing.
+///
+/// A pairing that never becomes self-consistent is RETURNED, not repaired:
+/// `identities` says which identity broke and `resamples` how many bounded
+/// attempts were spent, so I5 records `reconciled:false` honestly (§4.4: 不平
+/// 即如实 inconclusive，不修补、不重试到平为止).
+///
+/// `at_mono`/`at_unix` are the edge instant taken by the caller: the re-reads
+/// happen inside the same edge (µs–ms scale) and do not define a new one.
+pub fn close_window<R: LedgerReads + ?Sized>(
+    reads: &mut R,
+    before: &PairedRead,
+    at_mono: u64,
+    at_unix: i64,
+) -> Result<WindowSample, String> {
+    let mut resamples = 0u32;
+    loop {
+        let read = paired_read(reads, at_mono, at_unix)?;
+        let counters = WindowCounters {
+            side: TUN_IFACE_NAME.to_string(),
+            before: before.snapshot(),
+            after: read.snapshot(),
+        };
+        let identities = counter_identities(&counters.delta());
+        if identities.hold() || resamples >= MAX_PAIRING_RESAMPLES {
+            return Ok(WindowSample { counters, identities, resamples, source: read.source });
+        }
+        resamples += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests — I0/I1 logic is pure; the I3/I4 tests use loopback sockets and
+// fixture text only (no real /proc, no device, no clock)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -992,5 +1666,621 @@ mod tests {
         assert!(section.contains("\"kind\":\"wg_peer\""), "{section}");
         assert!(section.contains("\"kind\":\"dns\""), "{section}");
         println!("[I1] frozen_endpoints=[{section}]");
+    }
+
+    // ---- I3 ----
+
+    /// One probe id of a fixed, valid shape: `N2H-<kind>-<24 hex nonce>`.
+    fn id_of(kind: EndpointKind, nonce_seed: u8) -> String {
+        probe_id(kind.name(), &format!("{nonce_seed:02x}").repeat(12))
+    }
+
+    #[test]
+    fn udp_probe_lands_on_a_local_sink_with_the_probe_marker() {
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        let id = id_of(EndpointKind::Management, 0x01);
+        let sent = send_udp_probe(dst, &id).expect("udp probe");
+
+        // five-tuple: a fresh wildcard-bound socket — the reported source is
+        // the bind's getsockname (design §4.0/§4.2 shape), the PORT is what
+        // makes it unique
+        assert_eq!(sent.tuple.proto, "udp");
+        assert_eq!(sent.tuple.dst, dst.to_string());
+        let src: SocketAddr = sent.tuple.src.parse().expect("src parses");
+        assert_ne!(src.port(), 0, "an ephemeral source port");
+        assert!(src.ip().is_unspecified(), "the reported src is the wildcard bind: {src}");
+        assert_eq!(sent.probe_id, id);
+        assert_eq!(sent.marker, WireMarker::Ascii(id.clone()));
+        assert_eq!(sent.payload_len, id.len());
+        assert_eq!(sent.mapped, None, "a UDP marker probe has no STUN mapping");
+
+        // the sink (design §8's faithful fake endpoint) saw exactly the marker
+        sink.drain();
+        let rec = sink.observed(&sent.marker).expect("sink recorded the marker");
+        assert_eq!(rec.payload, id.as_bytes(), "payload IS the probe id (design §4.2)");
+        assert_eq!(rec.src.port(), src.port(), "the reported source PORT is the on-wire one");
+        assert_eq!(rec.src.ip(), dst.ip(), "the wire carries the kernel's route source");
+        assert_ne!(rec.src.ip(), src.ip(), "…while the reported ADDRESS is the bind itself");
+        println!(
+            "[I3] udp probe: id={id} tuple={}/{}/{} bytes={}",
+            sent.tuple.proto, sent.tuple.src, sent.tuple.dst, sent.payload_len
+        );
+    }
+
+    #[test]
+    fn every_probe_leaves_from_its_own_socket_so_five_tuples_and_markers_are_unique() {
+        let mut udp_sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let mut tcp_sink = crate::n2h::TcpSink::bind().expect("tcp sink");
+        let udp_dst = udp_sink.local_addr().expect("udp addr");
+        let tcp_dst = tcp_sink.local_addr().expect("tcp addr");
+
+        let ids: Vec<String> = (0..3).map(|i| id_of(EndpointKind::Signal, 0x10 + i)).collect();
+        let mut tuples = Vec::new();
+        for id in &ids {
+            tuples.push(send_udp_probe(udp_dst, id).expect("udp probe").tuple);
+        }
+        for id in &ids[..2] {
+            tuples.push(send_tcp_probe(tcp_dst, id).expect("tcp probe").tuple);
+        }
+
+        // five tuples, five distinct (proto, src, dst) — every probe from its
+        // OWN fresh socket (design §4.2), including the two on the same
+        // tcp dst:port
+        assert_eq!(tuples.len(), 5);
+        let mut seen = std::collections::HashSet::new();
+        for t in &tuples {
+            assert!(
+                seen.insert(format!("{}|{}|{}", t.proto, t.src, t.dst)),
+                "duplicate five-tuple {t:?}"
+            );
+        }
+        // …and the payload markers are unique too (fresh nonce per probe)
+        assert_eq!(ids.len(), 3);
+        assert_ne!(ids[0], ids[1]);
+
+        udp_sink.drain();
+        for id in &ids {
+            assert!(
+                udp_sink.observed(&WireMarker::Ascii(id.clone())).is_some(),
+                "udp sink saw {id}"
+            );
+        }
+        tcp_sink.drain();
+        for id in &ids[..2] {
+            let rec = tcp_sink
+                .observed(&WireMarker::Ascii(id.clone()))
+                .unwrap_or_else(|| panic!("tcp sink saw {id}"));
+            assert_eq!(rec.payload, id.as_bytes(), "connect+write put the marker on the wire");
+        }
+        println!(
+            "[I3] 5 probes, 5 unique tuples: {}",
+            tuples
+                .iter()
+                .map(|t| format!("{}/{}/{}", t.proto, t.src, t.dst))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+
+    #[test]
+    fn udp_probe_from_a_wildcard_socket_reaches_a_non_loopback_local_endpoint() {
+        // The device-validation run-2 regression (n2h.rs:2373-2396): a
+        // loopback-bound probe socket made every send to a real, non-loopback
+        // endpoint fail with EINVAL. The device sender binds wildcard, so the
+        // same destination must work — and the packet must leave from the
+        // route's source address.
+        let routing = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD).expect("wildcard bind");
+        // no packet is sent: connect() only resolves the route
+        if routing.connect("192.0.2.1:9").is_err() {
+            println!("[I3] wildcard routing check skipped: no route information on this host");
+            return;
+        }
+        let local = routing.local_addr().expect("local addr").ip();
+        if local.is_loopback() || local.is_unspecified() {
+            println!("[I3] wildcard routing check skipped: no non-loopback IPv4 source");
+            return;
+        }
+        let sink = std::net::UdpSocket::bind((local, 0)).expect("sink on the local address");
+        sink.set_nonblocking(true).expect("nonblocking sink");
+        let id = id_of(EndpointKind::WgPeer, 0x2a);
+        let sent = send_udp_probe(sink.local_addr().expect("sink addr"), &id)
+            .expect("probe to a non-loopback local endpoint must not fail at send");
+        let reported: SocketAddr = sent.tuple.src.parse().expect("src");
+        assert_ne!(reported.port(), 0);
+        assert!(reported.ip().is_unspecified(), "reported src is the wildcard bind: {reported}");
+        let mut buf = [0u8; 256];
+        let (n, from) = sink.recv_from(&mut buf).expect("the probe arrived");
+        assert_eq!(&buf[..n], id.as_bytes());
+        assert_eq!(from.ip(), local, "the kernel used the route source towards {local}");
+        assert_eq!(from.port(), reported.port(), "…from the probe's own ephemeral port");
+        println!(
+            "[I3] wildcard probe -> {local}: n={n} wire_src={from} reported_src={reported}"
+        );
+    }
+
+    #[test]
+    fn stun_probe_is_a_real_binding_request_and_parses_the_txid_matched_mapping() {
+        let txid = [0x5au8; 12];
+        let (dst, responder) = spawn_stun_responder(txid, [203, 0, 113, 9], 7777);
+        let sent = send_stun_probe(dst, txid, 1_000).expect("stun probe");
+        let request = responder.join().expect("responder thread");
+
+        // what went out is a real Binding Request carrying OUR txid
+        assert_eq!(&request[0..2], &crate::stun::BINDING_REQUEST.to_be_bytes());
+        assert_eq!(&request[4..8], &crate::stun::MAGIC_COOKIE.to_be_bytes());
+        assert_eq!(&request[8..20], &txid);
+        assert_eq!(sent.payload_len, request.len());
+        assert_eq!(sent.marker, WireMarker::StunTxid(txid));
+        assert_eq!(sent.probe_id, format!("N2H-stun-{}", "5a".repeat(12)));
+        // …and the txid-matched response's XOR/MAPPED address is reported
+        assert_eq!(sent.mapped, Some(([203, 0, 113, 9], 7777)));
+        println!(
+            "[I3] stun probe: id={} len={} mapped={:?} tuple={}",
+            sent.probe_id, sent.payload_len, sent.mapped, sent.tuple.src
+        );
+    }
+
+    #[test]
+    fn send_probe_follows_the_transport_the_freeze_recorded() {
+        let udp_sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let tcp_sink = crate::n2h::TcpSink::bind().expect("tcp sink");
+
+        // tcp kinds go out over TCP, udp kinds over UDP (kind.proto() is the
+        // frozen column the freezes recorded)
+        let relay = send_probe(EndpointKind::Relay, tcp_sink.local_addr().unwrap(), 200)
+            .expect("relay tcp probe");
+        assert_eq!(relay.tuple.proto, "tcp");
+        assert_eq!(EndpointKind::Relay.proto(), "tcp");
+        let peer = send_probe(EndpointKind::WgPeer, udp_sink.local_addr().unwrap(), 200)
+            .expect("wg_peer udp probe");
+        assert_eq!(peer.tuple.proto, "udp");
+        // id shape: N2H-<kind>-<24 hex nonce>
+        let nonce = peer.probe_id.strip_prefix("N2H-wg_peer-").expect("id shape");
+        assert_eq!(nonce.len(), 24);
+        assert!(nonce.bytes().all(|b| b.is_ascii_hexdigit()), "{nonce}");
+
+        // stun: a fresh 12-byte txid is the marker; no responder here → no
+        // receipt, recorded as None rather than invented
+        let stun = send_probe(EndpointKind::Stun, udp_sink.local_addr().unwrap(), 200)
+            .expect("stun probe");
+        assert!(stun.probe_id.starts_with("N2H-stun-"), "{}", stun.probe_id);
+        assert!(matches!(stun.marker, WireMarker::StunTxid(_)));
+        assert_eq!(stun.mapped, None, "no responder → no receipt (a gap, not a pass)");
+        assert_ne!(stun.marker, peer.marker, "every probe's payload is unique");
+        println!(
+            "[I3] dispatch: relay={}/{} wg_peer={} stun={}",
+            relay.tuple.proto, relay.probe_id, peer.probe_id, stun.probe_id
+        );
+    }
+
+    #[test]
+    fn dns_echo_probe_receives_its_own_qname_back_and_foreign_answers_do_not_count() {
+        let marker = id_of(EndpointKind::Dns, 0x3c);
+        let qname = dns_echo_qname(&marker);
+        assert_eq!(qname, format!("{marker}.n2h-invalid"));
+
+        let (dst, responder) = spawn_dns_responder();
+        let sent = send_dns_echo_probe(dst, &marker, 1_000).expect("dns echo probe");
+        let query = responder.join().expect("responder thread");
+        assert!(sent.echo_received, "the mirrored question section IS the receipt");
+        assert_eq!(sent.marker, WireMarker::Ascii(marker.clone()));
+        assert_eq!(sent.payload_len, query.len());
+        assert_eq!(sent.tuple.proto, "udp");
+
+        // the query on the wire: our query id, one question, our qname
+        assert_eq!(&query[0..2], &dns_query_id(&qname).to_be_bytes());
+        assert_eq!(&query[4..6], &1u16.to_be_bytes(), "QDCOUNT=1");
+        let name = dns_wire_name(&qname).expect("encodable");
+        assert_eq!(&query[12..12 + name.len()], &name[..], "question carries our qname");
+        assert_eq!(&query[query.len() - 4..], &[0, 1, 0, 1], "QTYPE A, QCLASS IN");
+
+        // pure receipt test: the answer must be a RESPONSE for OUR qname
+        let answer = mirror_as_nxdomain(&query);
+        assert!(dns_echo_receipt(&answer, &qname));
+        let mut not_a_response = answer.clone();
+        not_a_response[2] &= 0x7f; // clear QR
+        assert!(!dns_echo_receipt(&not_a_response, &qname), "a query is not a receipt");
+        assert!(!dns_echo_receipt(&answer[..8], &qname), "a truncated header is not a receipt");
+        assert!(
+            !dns_echo_receipt(&answer, &dns_echo_qname(&id_of(EndpointKind::Dns, 0x3d))),
+            "another probe's qname is not this probe's receipt"
+        );
+        assert!(!dns_echo_receipt(&answer, "not a name!"), "an unencodable qname never matches");
+        println!(
+            "[I3] dns echo: qname={qname} query_len={} echo_received={}",
+            sent.payload_len, sent.echo_received
+        );
+    }
+
+    /// A one-shot STUN responder: one bounded blocking receive (no polling, no
+    /// sleep), then a real Binding Success Response carrying a plain
+    /// MAPPED-ADDRESS (which [`crate::stun::parse_binding_response`] accepts,
+    /// `stun.rs`'s RFC 3489 fallback case). Returns the address to probe and
+    /// the request bytes it saw.
+    fn spawn_stun_responder(
+        txid: [u8; 12],
+        mapped_ip: [u8; 4],
+        mapped_port: u16,
+    ) -> (SocketAddr, std::thread::JoinHandle<Vec<u8>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("responder bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout");
+        let addr = sock.local_addr().expect("responder addr");
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (n, from) = sock.recv_from(&mut buf).expect("responder recv");
+            let request = buf[..n].to_vec();
+            let mut resp = Vec::new();
+            resp.extend_from_slice(&crate::stun::BINDING_SUCCESS.to_be_bytes());
+            resp.extend_from_slice(&12u16.to_be_bytes()); // one 12-byte attribute
+            resp.extend_from_slice(&crate::stun::MAGIC_COOKIE.to_be_bytes());
+            resp.extend_from_slice(&txid);
+            resp.extend_from_slice(&crate::stun::ATTR_MAPPED.to_be_bytes());
+            resp.extend_from_slice(&8u16.to_be_bytes());
+            resp.extend_from_slice(&[0x00, 0x01]); // reserved + IPv4 family
+            resp.extend_from_slice(&mapped_port.to_be_bytes());
+            resp.extend_from_slice(&mapped_ip);
+            sock.send_to(&resp, from).expect("responder send");
+            request
+        });
+        (addr, handle)
+    }
+
+    /// A one-shot DNS responder: one bounded blocking receive, then the answer
+    /// a resolver sends for an unknown name — the query mirrored back with QR
+    /// set and RCODE=NXDOMAIN (RFC 1035 §4.1.1), i.e. the same question
+    /// section, which is exactly the `dns-nxdomain-echo` receipt.
+    fn spawn_dns_responder() -> (SocketAddr, std::thread::JoinHandle<Vec<u8>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("responder bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout");
+        let addr = sock.local_addr().expect("responder addr");
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let (n, from) = sock.recv_from(&mut buf).expect("responder recv");
+            let query = buf[..n].to_vec();
+            sock.send_to(&mirror_as_nxdomain(&query), from).expect("responder send");
+            query
+        });
+        (addr, handle)
+    }
+
+    /// Mirror a query into the NXDOMAIN answer that echoes its question section.
+    fn mirror_as_nxdomain(query: &[u8]) -> Vec<u8> {
+        let mut r = query.to_vec();
+        r[2] = 0x81; // QR | RD
+        r[3] = 0x83; // RA | RCODE = NXDOMAIN
+        r
+    }
+
+    // ---- I4 ----
+
+    /// A `/proc/net/dev`-shaped fixture row builder: the header lines are part
+    /// of the real file and must not confuse the row parser. The default
+    /// numbers are the D1 device-run values (`docs/n13-device-relay-evidence-
+    /// 20260916.md`: vpn-tun RX 4624 B / 58 pkts, TX 688 B / 6 pkts).
+    fn proc_text(rx_bytes: u64, rx_packets: u64, tx_bytes: u64, tx_packets: u64) -> String {
+        format!(
+            "Inter-|   Receive                                                |  Transmit\n\
+             \x20face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+             \x20   lo: 1234567    8901    0    0    0     0          0         0  1234567    8901    0    0    0     0       0          0\n\
+             vpn-tun: {rx_bytes} {rx_packets} 0 0 0 0 0 0 {tx_bytes} {tx_packets} 0 0 0 0 0 0\n"
+        )
+    }
+
+    fn wg_stats(rx_packets: u64, rx_bytes_to_tun: u64) -> WgDeviceStats {
+        WgDeviceStats {
+            rx_packets,
+            rx_bytes_to_tun,
+            tx_packets: 6,
+            tx_bytes: 688,
+            ..WgDeviceStats::default()
+        }
+    }
+
+    /// Scripted [`LedgerReads`] fixture: each script is consumed front-to-back
+    /// and its LAST element repeats forever, so a never-converging resample
+    /// case stays bounded and every read is logged in order.
+    struct FixtureReads {
+        direct: Vec<Result<String, String>>,
+        capture: Vec<Result<String, String>>,
+        wg: Vec<Result<WgDeviceStats, String>>,
+        step: [usize; 3],
+        log: Vec<&'static str>,
+    }
+
+    fn pick<'a, T>(items: &'a [T], step: &mut usize) -> &'a T {
+        assert!(!items.is_empty(), "a fixture script must not be empty");
+        let i = (*step).min(items.len() - 1);
+        *step += 1;
+        &items[i]
+    }
+
+    impl FixtureReads {
+        fn new(
+            direct: Vec<Result<String, String>>,
+            capture: Vec<Result<String, String>>,
+            wg: Vec<Result<WgDeviceStats, String>>,
+        ) -> FixtureReads {
+            FixtureReads { direct, capture, wg, step: [0; 3], log: Vec::new() }
+        }
+    }
+
+    impl LedgerReads for FixtureReads {
+        fn read_proc_net_dev(&mut self) -> Result<String, String> {
+            self.log.push("proc-direct");
+            pick(&self.direct, &mut self.step[0]).clone()
+        }
+        fn read_proc_hdc_capture(&mut self) -> Result<String, String> {
+            self.log.push("proc-hdc");
+            pick(&self.capture, &mut self.step[1]).clone()
+        }
+        fn read_wg_stats(&mut self) -> Result<WgDeviceStats, String> {
+            self.log.push("wg");
+            pick(&self.wg, &mut self.step[2]).clone()
+        }
+    }
+
+    #[test]
+    fn proc_net_dev_parses_the_vpn_tun_row_and_nothing_else() {
+        let fixture = proc_text(4624, 58, 688, 6);
+        let row = parse_proc_net_dev(&fixture, TUN_IFACE_NAME).expect("vpn-tun row");
+        assert_eq!(row, ProcIfaceRow { rx_bytes: 4624, rx_packets: 58, tx_bytes: 688, tx_packets: 6 });
+
+        // D8/D9 caliber: RX bytes/packets are the delivered pair (the second
+        // ledger of the identity), TX packets is injected_frames
+        let snap = iface_snapshot(&wg_stats(58, 4624), &row, 111, 1_756_000_111);
+        assert_eq!(snap.tun_delivered_bytes, 4624);
+        assert_eq!(snap.tun_delivered_frames, 58);
+        assert_eq!(snap.tun_injected_frames, 6);
+        assert_eq!(snap.wg_rx_bytes_to_tun, 4624);
+        assert_eq!(snap.wg_rx_packets, 58);
+        assert_eq!((snap.at_mono, snap.at_unix), (111, 1_756_000_111));
+
+        // exact name match: a name that merely CONTAINS the literal is another
+        // interface, and a missing/unusable row is a gap, not a guess
+        assert!(parse_proc_net_dev("vpn-tun0: 1 2 0 0 0 0 0 0 3 4 0 0 0 0 0 0\n", TUN_IFACE_NAME)
+            .is_none());
+        assert!(parse_proc_net_dev(" xvpn-tun : 1 2 0 0 0 0 0 0 3 4 0 0 0 0 0 0\n", TUN_IFACE_NAME)
+            .is_none());
+        assert!(parse_proc_net_dev(&fixture, "wg0").is_none());
+        assert!(parse_proc_net_dev("vpn-tun: 1 2 3\n", TUN_IFACE_NAME).is_none());
+        assert!(parse_proc_net_dev("Inter-|   Receive  |  Transmit\n", TUN_IFACE_NAME).is_none());
+
+        // a counter beyond 32 bits must not wrap (long-lived interface)
+        let big = parse_proc_net_dev(
+            "vpn-tun: 4294967296 7 0 0 0 0 0 0 8 9 0 0 0 0 0 0\n",
+            TUN_IFACE_NAME,
+        )
+        .expect("row");
+        assert_eq!(big.rx_bytes, 4_294_967_296);
+        println!("[I4] parsed vpn-tun row {row:?} -> tun.injected_frames={} \
+                  tun.delivered_frames={} tun.delivered_bytes={}",
+            snap.tun_injected_frames, snap.tun_delivered_frames, snap.tun_delivered_bytes);
+    }
+
+    #[test]
+    fn paired_read_reads_proc_before_wg_and_reports_the_source_token() {
+        let mut reads = FixtureReads::new(
+            vec![Ok(proc_text(4624, 58, 688, 6))],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Ok(wg_stats(58, 4624))],
+        );
+        let paired = paired_read(&mut reads, 7, 1_756_000_007).expect("paired read");
+        assert_eq!(reads.log, vec!["proc-direct", "wg"], "design §4.4 freezes /proc FIRST");
+        assert_eq!(paired.source, COUNTERS_SOURCE_PROC);
+        assert_eq!(paired.tun.rx_bytes, 4624);
+        assert_eq!(paired.wg.rx_bytes_to_tun, 4624);
+        assert_eq!(paired.snapshot().tun_delivered_bytes, 4624);
+        assert_eq!(paired.snapshot().wg_rx_bytes_to_tun, 4624);
+        assert_eq!(counters_source_note(paired.source), "counters-source=proc-net-dev");
+
+        // a wg-ledger failure is an Err (I5 records the counters gap), and the
+        // /proc read still happened first
+        let mut reads = FixtureReads::new(
+            vec![Ok(proc_text(4624, 58, 688, 6))],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Err("connector not ready".into())],
+        );
+        let err = paired_read(&mut reads, 7, 0).unwrap_err();
+        assert!(err.contains("connector not ready"), "{err}");
+        assert_eq!(reads.log, vec!["proc-direct", "wg"]);
+        println!("[I4] paired read source={} wg-error-path='{err}'", paired.source);
+    }
+
+    #[test]
+    fn a_self_consistent_pairing_reconciles_on_both_identities() {
+        // before: RX 4624 B / 58 pkts; after: RX 4724 B / 60 pkts — the same
+        // +100 B / +2 frames in the wg ledger
+        let mut reads = FixtureReads::new(
+            vec![Ok(proc_text(4624, 58, 688, 6)), Ok(proc_text(4724, 60, 700, 7))],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Ok(wg_stats(58, 4624)), Ok(wg_stats(60, 4724))],
+        );
+        let before = open_window(&mut reads, 100, 1_756_000_100).expect("before edge");
+        let sample = close_window(&mut reads, &before, 200, 1_756_000_200).expect("after edge");
+
+        assert!(sample.consistent());
+        assert!(sample.identities.bytes && sample.identities.packets);
+        assert_eq!(sample.resamples, 0, "a first-try pairing needs no resample");
+        assert_eq!(sample.source, COUNTERS_SOURCE_PROC);
+        assert_eq!(sample.counters.side, TUN_IFACE_NAME, "D8: side = vpn-tun");
+        // the FROZEN identity the judge reads (n2h::WindowCounters::reconciled)
+        assert!(sample.counters.reconciled());
+        let d = sample.counters.delta();
+        assert_eq!((d.wg_rx_bytes_to_tun, d.tun_delivered_bytes), (100, 100));
+        assert_eq!((d.wg_rx_packets, d.tun_delivered_frames), (2, 2));
+        assert_eq!((d.tun_injected_frames, before.tun.tx_packets), (1, 6));
+        println!(
+            "[I4] window side={} resamples={} bytes={} packets={} delta(wg_rx_bytes_to_tun={}, \
+             tun_delivered_bytes={}, wg_rx_packets={}, tun_delivered_frames={}, tun_injected_frames={})",
+            sample.counters.side,
+            sample.resamples,
+            sample.identities.bytes,
+            sample.identities.packets,
+            d.wg_rx_bytes_to_tun,
+            d.tun_delivered_bytes,
+            d.wg_rx_packets,
+            d.tun_delivered_frames,
+            d.tun_injected_frames
+        );
+    }
+
+    #[test]
+    fn the_packet_identity_catches_a_break_the_byte_identity_misses() {
+        // A frame crossed between the two reads of the close edge and it is
+        // 100 bytes: wg saw 2 frames / +100 B, /proc saw 1 frame / +100 B. The
+        // frozen byte identity is satisfied; the design's packet identity is
+        // not — which is exactly what it is for.
+        let skewed = IfaceSnapshot {
+            wg_rx_packets: 2,
+            wg_rx_bytes_to_tun: 100,
+            tun_delivered_frames: 1,
+            tun_delivered_bytes: 100,
+            ..IfaceSnapshot::default()
+        };
+        let ids = counter_identities(&skewed);
+        assert!(ids.bytes, "the byte identity alone would accept this pairing");
+        assert!(!ids.packets, "…and the packet identity refuses it");
+        assert!(!ids.hold());
+        let counters = WindowCounters {
+            side: TUN_IFACE_NAME.to_string(),
+            before: IfaceSnapshot::default(),
+            after: skewed,
+        };
+        assert!(counters.reconciled(), "n2h::WindowCounters::reconciled is bytes-only");
+
+        // the sampler must therefore resample the close edge until it is
+        // self-consistent: read #1 is the skewed pairing above, read #2 agrees
+        let mut reads = FixtureReads::new(
+            vec![
+                Ok(proc_text(4624, 58, 688, 6)),
+                Ok(proc_text(4724, 59, 700, 7)),
+                Ok(proc_text(4724, 60, 700, 7)),
+            ],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Ok(wg_stats(58, 4624)), Ok(wg_stats(60, 4724)), Ok(wg_stats(60, 4724))],
+        );
+        let before = open_window(&mut reads, 100, 0).expect("before edge");
+        let sample = close_window(&mut reads, &before, 200, 0).expect("after edge");
+        assert!(sample.consistent(), "the resample found a self-consistent pairing");
+        assert_eq!(sample.resamples, 1, "one extra paired read was enough");
+        assert_eq!(
+            reads.log,
+            vec!["proc-direct", "wg", "proc-direct", "wg", "proc-direct", "wg"],
+            "each resample re-takes BOTH legs of the edge, in order"
+        );
+        println!(
+            "[I4] packet-identity break on the first pairing (bytes=true packets=false) -> \
+             resampled {} time(s) -> consistent={}",
+            sample.resamples,
+            sample.consistent()
+        );
+    }
+
+    #[test]
+    fn a_pairing_that_never_becomes_self_consistent_is_recorded_within_the_bound() {
+        // Every close read has the wg ledger one frame / 100 B ahead of /proc:
+        // a frame crosses the pairing gap every time. The window must be
+        // RECORDED as unreconciled after exactly the bounded resamples.
+        let mut reads = FixtureReads::new(
+            vec![Ok(proc_text(4624, 58, 688, 6)), Ok(proc_text(4624, 58, 688, 6))],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Ok(wg_stats(58, 4624)), Ok(wg_stats(59, 4724))],
+        );
+        let before = open_window(&mut reads, 100, 0).expect("before edge");
+        let sample = close_window(&mut reads, &before, 200, 0).expect("after edge");
+
+        assert!(!sample.consistent(), "an inconsistent pairing is never repaired");
+        assert!(!sample.identities.packets, "wg saw the frame, /proc did not");
+        assert!(!sample.identities.bytes);
+        assert_eq!(sample.resamples, MAX_PAIRING_RESAMPLES, "1 initial + 3 bounded re-reads");
+        assert_eq!(
+            reads.log.iter().filter(|s| **s == "wg").count(),
+            2 + MAX_PAIRING_RESAMPLES as usize,
+            "the before edge + 1 initial close read + exactly the bounded resamples"
+        );
+        // the recorded delta is the LAST read, untouched
+        let d = sample.counters.delta();
+        assert_eq!((d.wg_rx_bytes_to_tun, d.tun_delivered_bytes), (100, 0));
+        println!(
+            "[I4] unreconciled window recorded: resamples={} bytes={} packets={} \
+             delta(wg_rx_bytes_to_tun={}, tun_delivered_bytes={})",
+            sample.resamples,
+            sample.identities.bytes,
+            sample.identities.packets,
+            d.wg_rx_bytes_to_tun,
+            d.tun_delivered_bytes
+        );
+    }
+
+    #[test]
+    fn proc_read_falls_back_to_the_hdc_capture_and_reports_which_path_answered() {
+        // 1. the App's own read is refused (§9-U1 unverified) → the operator's
+        //    `hdc shell "cat /proc/net/dev"` capture answers, and its caliber is
+        //    named for notes[]
+        let mut reads = FixtureReads::new(
+            vec![Err("EACCES: /proc/net/dev".into())],
+            vec![Ok(proc_text(4624, 58, 688, 6))],
+            vec![Ok(wg_stats(58, 4624))],
+        );
+        let (row, source) = read_proc_row(&mut reads).expect("the hdc fallback answers");
+        assert_eq!(row, ProcIfaceRow { rx_bytes: 4624, rx_packets: 58, tx_bytes: 688, tx_packets: 6 });
+        assert_eq!(source, COUNTERS_SOURCE_HDC_FALLBACK);
+        assert_eq!(reads.log, vec!["proc-direct", "proc-hdc"]);
+        assert_eq!(counters_source_note(source), "counters-source=hdc-proc-fallback");
+
+        // 2. the direct read succeeds but the restricted /proc view has no
+        //    vpn-tun row → the capture is still consulted
+        let mut reads = FixtureReads::new(
+            vec![Ok("Inter-|   Receive |  Transmit\n    lo: 1 2 0 0 0 0 0 0 3 4 0 0 0 0 0 0\n"
+                .into())],
+            vec![Ok(proc_text(4624, 58, 688, 6))],
+            vec![Ok(wg_stats(58, 4624))],
+        );
+        assert_eq!(read_proc_row(&mut reads).expect("fallback").1, COUNTERS_SOURCE_HDC_FALLBACK);
+
+        // 3. both paths fail → Err naming BOTH reasons, and the wg ledger is
+        //    never read without a /proc row (no counters[] element is built
+        //    from half a pairing)
+        let mut reads = FixtureReads::new(
+            vec![Err("EACCES: /proc/net/dev".into())],
+            vec![Err("no hdc capture provisioned".into())],
+            vec![Ok(wg_stats(58, 4624))],
+        );
+        let err = read_proc_row(&mut reads).unwrap_err();
+        assert!(err.contains("EACCES") && err.contains("no hdc capture provisioned"), "{err}");
+        assert_eq!(reads.log, vec!["proc-direct", "proc-hdc"], "no wg read without a /proc row");
+        println!("[I4] dual-path fallback: source={source} both-fail='{err}'");
+    }
+
+    #[test]
+    fn tee_fallback_row_maps_the_i2_totals_onto_the_proc_caliber() {
+        let totals = TunTeeTotals {
+            from_os_frames: 6,
+            from_os_bytes: 688,
+            to_os_frames: 58,
+            to_os_bytes: 4624,
+        };
+        let row = tee_fallback_row(&totals);
+        assert_eq!(row, ProcIfaceRow { rx_bytes: 4624, rx_packets: 58, tx_bytes: 688, tx_packets: 6 });
+        // the offline substitute produces the same document-side caliber as a
+        // real /proc row…
+        let offline = iface_snapshot(&wg_stats(58, 4624), &row, 5, 6);
+        let real = iface_snapshot(
+            &wg_stats(58, 4624),
+            &parse_proc_net_dev(&proc_text(4624, 58, 688, 6), TUN_IFACE_NAME).expect("row"),
+            5,
+            6,
+        );
+        assert_eq!(offline, real);
+        // …and it must declare itself (design §3.2)
+        assert_eq!(
+            counters_source_note(COUNTERS_SOURCE_TEE_FALLBACK),
+            "counters-source=tee-fallback"
+        );
+        println!(
+            "[I4] tee-fallback row {row:?} == /proc caliber; note='{}'",
+            counters_source_note(COUNTERS_SOURCE_TEE_FALLBACK)
+        );
     }
 }
