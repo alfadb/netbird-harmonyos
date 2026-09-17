@@ -25,6 +25,7 @@
   - 正式路线门 `R0` 至 `R10`；
   - Emulator 投入门 `E0` 至 `E8`；
   - native 路线门 `N0` 至 `N7`；其中 N1 与 N2 的拆分子门写作 `N1A`/`N1B`/`N2A`/`N2B`（证据 ID 中门代码使用大写无连字符形态，如 `EV-N1A-...`）；
+  - N2-H 平台替代判据门 `N2H`（2026-09-14 设立生效，见 `docs/native-nx-governance.md:111-136` 与仓B `records/section-n2h-registration-20260914.json`）；证据 ID 形如 `EV-N2H-<目标代码>-<YYYYMMDD>-<序号>`（门代码在证据 ID 中使用大写无连字符形态，同 `N1A`/`N2B` 惯例）；N2-H 是本平台逐 socket protect 结论为 `UNSAT` 时的替代判据，其证据不得写成 `protect pass` 或 `N2 pass`，终局口径只可写 `N2-H pass`（见治理 `:130-131`）；本次为**追认登记式扩展**，不改写任何历史证据、既有判定或已消耗的 ID（同 `:31` 先例口径）；
   - 前置探针门 `G0`；
   - 发现型 campaign 门 `N1BDISC`（记录形态见下文「发现型 campaign 记录形态」）。
 
