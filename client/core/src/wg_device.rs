@@ -323,6 +323,103 @@ pub struct WgInbound {
 }
 
 // ---------------------------------------------------------------------------
+// I2 (N2-H): TUN frame tee — the device collector's frame-observation seam
+// ---------------------------------------------------------------------------
+
+/// Direction of one TUN frame crossing a [`WgDevice`] (the tee's two feeds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunFrameDir {
+    /// from-os (outbound): read off the TUN and fed BEFORE `send_from_tun`'s
+    /// route decision — an unroutable frame (`no_route_drops`) is still
+    /// observed, because the frame content is what the scan judges.
+    FromOs,
+    /// to-os (inbound delivery): decapsulated plaintext, fed on the SAME
+    /// success branch that increments `rx_bytes_to_tun` (a frame the TUN
+    /// refused is NOT delivered, hence not observed).
+    ToOs,
+}
+
+/// I2 — the TUN frame tee seam (N2-H §4.1). A [`WgDevice`] hands EVERY frame
+/// it reads from or writes to the TUN to the attached tee, in both
+/// directions; the collector's scan (marker match + five-tuple extraction)
+/// lives behind this seam.
+///
+/// Contract:
+/// - called on the data-plane pump thread with the frame BORROWED: keep the
+///   critical section short (copy + scan) and never block the pump;
+/// - must not panic: the tee is diagnostic, the data plane keeps running;
+/// - `Send + Sync` (same injection shape as [`WgEgressCarrier`]): the handle
+///   is attached/detached through `&mut WgDevice` while the pump may hold the
+///   device lock;
+/// - attached = observation window OPEN: frames before `attach_tun_tee` and
+///   after `detach_tun_tee` are not observed (`frames_scanned` covers the
+///   collector window only).
+///
+/// The production implementation is the collector's scan tee (I5,
+/// `n2h_collector.rs`: registered markers + `WireMarker::matches` + IPv4
+/// five-tuple parse, carrying its own lock) — it plugs in here without
+/// re-touching the data plane.
+pub trait TunFrameTee: Send + Sync + 'static {
+    /// Observe one frame: `dir` is the crossing direction, `frame` the exact
+    /// bytes the device read from / wrote to the TUN.
+    fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]);
+}
+
+/// I2 — minimal counting tee: this seam's per-direction frame/byte totals.
+/// Stands in for the collector's scan tee until I5 merges the scanner into it
+/// (`n2h_collector.rs`); the I2 test asserts frame accounting against
+/// [`WgDeviceStats`] through exactly this shape.
+#[derive(Debug, Default)]
+pub struct TunTeeCounts {
+    inner: Mutex<TunTeeTotals>,
+}
+
+/// One [`TunTeeCounts`] snapshot (copied out; the caller holds no lock).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TunTeeTotals {
+    /// from-os frames observed and their byte total.
+    pub from_os_frames: u64,
+    pub from_os_bytes: u64,
+    /// to-os frames observed and their byte total.
+    pub to_os_frames: u64,
+    pub to_os_bytes: u64,
+}
+
+impl TunTeeCounts {
+    pub fn new() -> Self {
+        TunTeeCounts::default()
+    }
+
+    /// Current totals (poison-tolerant: the same convention as the connector
+    /// seam — a poisoned lock must not take the data plane down).
+    pub fn totals(&self) -> TunTeeTotals {
+        *self.inner.lock_poison()
+    }
+
+    /// Frames observed in BOTH directions (the §4.1 `frames_scanned` feed).
+    pub fn frames_scanned(&self) -> u64 {
+        let t = self.totals();
+        t.from_os_frames + t.to_os_frames
+    }
+}
+
+impl TunFrameTee for TunTeeCounts {
+    fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
+        let mut t = self.inner.lock_poison();
+        match dir {
+            TunFrameDir::FromOs => {
+                t.from_os_frames += 1;
+                t.from_os_bytes += frame.len() as u64;
+            }
+            TunFrameDir::ToOs => {
+                t.to_os_frames += 1;
+                t.to_os_bytes += frame.len() as u64;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // N13-D2: non-UDP egress carrier seam (the relay bearer injection point)
 // ---------------------------------------------------------------------------
 
@@ -434,6 +531,10 @@ pub struct WgDevice {
     peers: Vec<WgPeer>,
     next_index: u32,
     stats: WgDeviceStats,
+    /// I2 (N2-H): the collector's TUN frame tee. `None` (default, never
+    /// armed) = the pre-I2 data path: the two feed points test this handle
+    /// and do nothing else — no copy, no scan, no counter.
+    tun_tee: Option<Arc<dyn TunFrameTee>>,
 }
 
 /// Local index seed for the first peer tunnel of a device (nonzero; each
@@ -470,6 +571,7 @@ impl WgDevice {
             peers: Vec::new(),
             next_index: INDEX_BASE,
             stats: WgDeviceStats::default(),
+            tun_tee: None,
         })
     }
 
@@ -537,6 +639,25 @@ impl WgDevice {
     /// Device counters snapshot.
     pub fn stats(&self) -> WgDeviceStats {
         self.stats
+    }
+
+    /// I2 — attach the collector's TUN frame tee (arm: the observation window
+    /// opens). Idempotent upsert: a re-attach replaces the previous tee and
+    /// returns whether one was already attached. Frames seen before this call
+    /// are not counted.
+    pub fn attach_tun_tee(&mut self, tee: Arc<dyn TunFrameTee>) -> bool {
+        self.tun_tee.replace(tee).is_some()
+    }
+
+    /// I2 — detach the tee (window close) and return the detached handle.
+    /// Afterwards the data path is back on the `None` zero-overhead path.
+    pub fn detach_tun_tee(&mut self) -> Option<Arc<dyn TunFrameTee>> {
+        self.tun_tee.take()
+    }
+
+    /// I2 — is a tee attached right now (the arm-state read).
+    pub fn tun_tee_attached(&self) -> bool {
+        self.tun_tee.is_some()
     }
 
     /// Peer count.
@@ -861,6 +982,15 @@ impl WgDevice {
         }
     }
 
+    /// I2 hook — hand one TUN-crossing frame to the attached tee. `None`
+    /// (default / detached) leaves the data path exactly as before I2: one
+    /// branch test, no buffer copy, no marker scan, no counter.
+    fn feed_tun_tee(&self, dir: TunFrameDir, frame: &[u8]) {
+        if let Some(tee) = &self.tun_tee {
+            tee.on_tun_frame(dir, frame);
+        }
+    }
+
     /// Poll + read + `send_from_tun` (device-originated frames). Non-blocking:
     /// poll timeout 0, at most `DRAIN_MAX` frames per call.
     pub fn service_tun(&mut self, now_ms: u64) -> usize {
@@ -874,6 +1004,9 @@ impl WgDevice {
             let mut buf = [0u8; WG_BUF];
             match self.tun.read_frame(&mut buf) {
                 Ok(len) => {
+                    // I2 from-os feed: AFTER the successful read, BEFORE the
+                    // route decision — an unrouteable frame is observed too.
+                    self.feed_tun_tee(TunFrameDir::FromOs, &buf[..len]);
                     self.send_from_tun(&buf[..len], now_ms);
                     n += 1;
                 }
@@ -1013,6 +1146,9 @@ impl WgDevice {
                 match self.tun.write_frame_budget(frame, TUN_WRITE_BUDGET_MS) {
                     Ok(_) => {
                         self.stats.rx_bytes_to_tun += len as u64;
+                        // I2 to-os feed: same success branch as the counter —
+                        // a TUN write the device refused is not an observation.
+                        self.feed_tun_tee(TunFrameDir::ToOs, frame);
                         out.wrote_tun = len;
                     }
                     Err(_) => self.stats.tun_write_errors += 1,
