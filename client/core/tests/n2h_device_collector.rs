@@ -645,6 +645,18 @@ impl OfflineHost {
         *self.b2a.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
     }
 
+    /// §13.10's arm relay as THIS harness models it: the host's peer facts come
+    /// from §4.3's LIVE status line (`announce_b2a`), so an arm that carried no
+    /// marker leaves those facts alone — an arm that carried one sets them. The
+    /// production [`nc::WgFeedHost`], whose only source is this relay, replaces
+    /// wholesale instead; that replace/clear semantics is pinned in its own
+    /// test (`the_production_host_takes_the_arm_time_peer_announcement`).
+    fn arm_announcement(&self, report: &nc::PeerReport) {
+        if let Some(id) = &report.b2a_probe_id {
+            self.announce_b2a(id);
+        }
+    }
+
     fn skew_after_first_read(&self, packets: u64) {
         self.after_skew_packets.store(packets, Ordering::Release);
     }
@@ -810,6 +822,12 @@ impl nc::CollectorHost for OfflineHost {
         }
     }
 
+    /// §13.10: `arm_json` hands the arm-time announcement in here (only after
+    /// every fail-closed gate passed). See [`OfflineHost::arm_announcement`].
+    fn note_peer_announcement(&self, report: nc::PeerReport) {
+        self.arm_announcement(&report);
+    }
+
     fn probe_receipt(&self, _probe_id: &str, marker: &WireMarker) -> Option<nc::ReceiptFact> {
         if !self.receipts.load(Ordering::Acquire) {
             return None;
@@ -912,6 +930,25 @@ fn offline_opts(addrs: &SinkAddrs, with_signal: bool, probe_wait_ms: u64) -> Str
         addrs.mgmt,
         addrs.peer_overlay.port()
     )
+}
+
+/// `offline_opts` plus §13.10's ops-relay key — added ONLY when `peer_b2a` is
+/// `Some`, so the absent-key case (the reasoned-gap semantics) is exercised
+/// literally rather than by an empty value.
+fn offline_opts_with_peer(
+    addrs: &SinkAddrs,
+    with_signal: bool,
+    probe_wait_ms: u64,
+    peer_b2a: Option<&str>,
+) -> String {
+    let base = offline_opts(addrs, with_signal, probe_wait_ms);
+    match peer_b2a {
+        None => base,
+        Some(id) => format!(
+            "{},\"peer_b2a_probe_id\":\"{id}\"}}",
+            base.strip_suffix('}').expect("offline_opts builds a JSON object")
+        ),
+    }
 }
 
 /// Arm and assert the §5.1 success shape.
@@ -1767,6 +1804,304 @@ fn the_napi_entries_answer_the_documented_shapes_without_a_window_or_host() {
     println!(
         "[I5-unarmed] invalid-opts / no-connector / disarm={} (never-armed shapes: unit test)",
         nc::disarm_json()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §13.10 — the ops relay of the counterparty's b2a announcement into the arm
+// options: the last device-side availability gap of the b2a positive control
+// ---------------------------------------------------------------------------
+
+/// The gap this increment closes: `WgFeedHost::peer_report()` was never
+/// overridden, so the b2a leg of the positive control could only ever be
+/// recorded as "the counterparty announced no marker" — the counterparty's
+/// announcement (I6's `nbinterop n2h-peer` line, `b2a_probe_id=…`) had no
+/// carrier into the device at all.
+///
+/// Here the marker's ONLY carrier is the arm option `peer_b2a_probe_id` (the
+/// harness never calls `announce_b2a`): a valid one must reach the host seam at
+/// arm, be registered by `build_posctl`, and close the b2a leg when the tee
+/// sees the peer's to-os payload.
+#[test]
+fn an_announced_peer_marker_from_the_arm_options_closes_the_b2a_leg() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*host).b2a_probe_id,
+        None,
+        "nothing is announced before the arm"
+    );
+
+    arm_ok(&host, &offline_opts_with_peer(&addrs, true, 200, Some(B2A_ID)));
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*host).b2a_probe_id.as_deref(),
+        Some(B2A_ID),
+        "the arm handed the validated announcement to the host seam"
+    );
+
+    let st = wait_closed(&host, true, 20_000);
+    assert_eq!(st.at("phase").str_of(), Some("closed"), "status: {st:?}");
+    let (doc, _text) = closed_document();
+    let posctl = doc.at("tunnel_positive_control");
+    assert_eq!(
+        posctl.at("observed_in_tunnel").bool_of(),
+        Some(true),
+        "both control legs close: {posctl:?}"
+    );
+    let b2a = posctl
+        .at("probes")
+        .arr_of()
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("b2a"))
+        .expect("the b2a leg is recorded");
+    assert_eq!(b2a.at("probe_id").str_of(), Some(B2A_ID), "b2a: {b2a:?}");
+    assert_eq!(b2a.at("sent").bool_of(), Some(true), "b2a: {b2a:?}");
+    // the hit's `side` is the scanned interface (the frozen renderer's field);
+    // the DIRECTION is carried in the hit's note (D4, §13.3)
+    assert_eq!(
+        b2a.at("observed_in_tunnel").at("side").str_of(),
+        Some("vpn-tun"),
+        "b2a: {b2a:?}"
+    );
+    let b2a_note = b2a.at("note").str_of().unwrap_or("");
+    assert!(
+        b2a_note.contains("b2a observed at the receiver's TUN delivery side (to-os"),
+        "the b2a observation point is the to-os delivery side: {b2a_note:?}"
+    );
+    let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
+    assert!(
+        !notes.iter().any(|n| n.contains("no peer marker was announced")),
+        "the un-announced gap note must be gone: {notes:?}"
+    );
+    assert_eq!(
+        doc.at("verdict").str_of(),
+        Some(VERDICT_PASS),
+        "a device window with every leg closed is a pass: reasons={:?}",
+        doc.at("reasons")
+    );
+    println!(
+        "[13.10] b2a closed from the arm relay: probe_id={B2A_ID} sent=true observed_direction=to-os \
+         verdict={} frames_scanned={}",
+        doc.at("verdict").str_of().unwrap_or("?"),
+        doc.at("tun_negative").at("frames_scanned").uint_of().unwrap_or(0)
+    );
+}
+
+/// The pre-existing semantics this increment must NOT change: an arm whose
+/// options carry no `peer_b2a_probe_id` (the control file has no such key)
+/// leaves the b2a leg a REASONED gap — not sent, with its own note, and the
+/// window verdict stays `n2h-inconclusive` (never a pass without a control).
+#[test]
+fn an_arm_that_carries_no_peer_marker_keeps_the_b2a_leg_a_reasoned_gap() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+
+    arm_ok(&host, &offline_opts(&addrs, true, 200));
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*host).b2a_probe_id,
+        None,
+        "an arm without the key announces nothing"
+    );
+
+    let st = wait_closed(&host, true, 20_000);
+    assert_eq!(st.at("phase").str_of(), Some("closed"), "status: {st:?}");
+    let (doc, _text) = closed_document();
+    let posctl = doc.at("tunnel_positive_control");
+    let legs = posctl.at("probes").arr_of();
+    let b2a = legs
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("b2a"))
+        .expect("the b2a leg is recorded");
+    assert_eq!(b2a.at("sent").bool_of(), Some(false), "b2a: {b2a:?}");
+    let note = b2a.at("note").str_of().unwrap_or("");
+    assert!(note.contains("never announced"), "the gap carries its reason: {note:?}");
+    let a2b = legs
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("a2b"))
+        .expect("the a2b leg exists");
+    assert_eq!(a2b.at("sent").bool_of(), Some(true), "a2b is unaffected: {a2b:?}");
+    let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains("no peer marker was announced")),
+        "the document names the missing announcement: {notes:?}"
+    );
+    let reasons: Vec<&str> =
+        doc.at("reasons").arr_of().iter().filter_map(|r| r.str_of()).collect();
+    assert_eq!(doc.at("verdict").str_of(), Some(VERDICT_INCONCLUSIVE), "{reasons:?}");
+    assert_eq!(reasons.len(), 1, "the b2a control is the ONLY gap: {reasons:?}");
+    assert!(
+        reasons[0].contains("positive control") && reasons[0].contains("not sent"),
+        "{reasons:?}"
+    );
+    assert_eq!(doc.at("tun_negative").at("hit").bool_of(), Some(false));
+    println!("[13.10] no announcement ⇒ b2a sent=false, verdict=inconclusive, reasons={reasons:?}");
+}
+
+/// §13.10's fail-closed edge: an announcement that is not the frozen posctl
+/// shape refuses the WHOLE arm (`invalid-opts`) — no window, no tee, nothing
+/// stored — and the process state stays usable (a following valid arm works).
+/// The refused value never becomes a scanner marker (no injection surface, no
+/// second accepted form beside `posctl_marker`'s).
+#[test]
+fn an_invalid_announced_marker_is_refused_without_opening_a_window() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+    let port = addrs.peer_overlay.port();
+
+    // the payload form (not the announced id form), a bad nonce, an unrelated
+    // marker, an empty value, a non-string value and a JSON-injection shaped
+    // value: all refused
+    let injection = format!("{{\"posctl_port\":{port},\"peer_b2a_probe_id\":\"{B2A_ID}\\\",\\\"posctl_port\\\":0\"}}");
+    let bad_opts = [
+        offline_opts_with_peer(&addrs, true, 200, Some(&nc::posctl_payload(B2A_ID))),
+        offline_opts_with_peer(&addrs, true, 200, Some("N2H-posctl-zzzzzzzzzzzzzzzzzzzzzzzz")),
+        offline_opts_with_peer(&addrs, true, 200, Some("nbinterop-probe")),
+        offline_opts_with_peer(&addrs, true, 200, Some("")),
+        format!("{{\"posctl_port\":{port},\"peer_b2a_probe_id\":40001}}"),
+        injection,
+    ];
+    for opts in &bad_opts {
+        let answer = parse_json(&nc::arm_json(opts));
+        assert_eq!(
+            answer.at("error").str_of(),
+            Some("invalid-opts"),
+            "must refuse {opts}: {answer:?}"
+        );
+        assert!(host.tee_handle().is_none(), "a refused arm attaches no tee: {opts}");
+        assert_eq!(
+            nc::CollectorHost::peer_report(&*host).b2a_probe_id,
+            None,
+            "nothing is stored by a refused arm"
+        );
+        // no window was opened by the refused arm (a PREVIOUS scenario's closed
+        // window may still sit in the process slot for replay — §13.5 — so this
+        // is asserted as "no OPEN phase", not as "no slot")
+        let st = status();
+        assert_ne!(
+            st.at("armed").bool_of(),
+            Some(true),
+            "a refused arm opens no window: {}",
+            nc::status_json()
+        );
+        assert!(
+            !["armed", "probing", "observing"].contains(&st.at("phase").str_of().unwrap_or("")),
+            "a refused arm leaves no open phase: {}",
+            nc::status_json()
+        );
+    }
+    assert!(nc::installed_host().is_some(), "the seam survives the refusals");
+
+    // …and the very next VALID arm still works (the refusals latched nothing)
+    arm_ok(&host, &offline_opts_with_peer(&addrs, true, 200, Some(B2A_ID)));
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*host).b2a_probe_id.as_deref(),
+        Some(B2A_ID)
+    );
+    assert!(host.tee_handle().is_some(), "the valid arm opened its window");
+    assert_eq!(parse_json(&nc::disarm_json()).at("ok").bool_of(), Some(true));
+    println!(
+        "[13.10] {} invalid announcements refused (invalid-opts, no window, no tee, nothing \
+         stored); the next valid arm opened a window",
+        bad_opts.len()
+    );
+}
+
+/// The PRODUCTION host's side of §13.10, against a REAL [`WgDeviceFeed`]:
+/// ① empty until an arm hands an announcement in (the b2a leg is a reasoned gap);
+/// ② a valid announcement is stored verbatim through the trait object (exactly
+///    how `arm_json` calls it), and the COUNTERPARTY's counter field is NOT
+///    filled from anything local — the peer's `unknown_peer_drops` is a
+///    different quantity from this device's own (§4.0's receipt, §4.3's status
+///    line carrier);
+/// ③ an arm without a marker CLEARS it (no window inherits the previous
+///    window's announcement);
+/// ④ the device's own `unknown_peer_drops` (I6's `wg_stats`) is live and
+///    nonzero while `peer_report().unknown_peer_drops` stays `None`: the two
+///    quantities are never substituted for one another.
+#[test]
+fn the_production_host_takes_the_arm_time_peer_announcement_and_keeps_the_counters_apart() {
+    let _guard = serial();
+    show_panics();
+    reset_collector();
+    let wg_raw = host_sockets::open_udp_ephemeral().expect("wg socket");
+    let wg_port = host_sockets::udp_bound_port(wg_raw).expect("wg port");
+    let (tun_raw, tun_hand) = host_sockets::open_tun_standby_pair().expect("TUN stand-in");
+    let mut bag = FdBag::new();
+    bag.keep(wg_raw);
+    bag.keep(tun_raw);
+    bag.keep(tun_hand);
+    let cfg = WgDeviceConfig::new(netbird_core::util::base64(&[0x3Cu8; 32]));
+    let feed = Arc::new(WgDeviceFeed::new(cfg));
+    let host: Arc<nc::WgFeedHost> =
+        Arc::new(nc::WgFeedHost::new(feed.clone()).with_hdc_capture_path(None));
+    let dyn_host: Arc<dyn nc::CollectorHost> = host.clone();
+
+    // ① no arm yet ⇒ nothing is announced (the reasoned-gap default)
+    assert_eq!(nc::CollectorHost::peer_report(&*dyn_host), nc::PeerReport::default());
+
+    // ② the arm relay, through the trait object (exactly how `arm_json` calls it)
+    nc::CollectorHost::note_peer_announcement(
+        &*dyn_host,
+        nc::PeerReport {
+            b2a_probe_id: Some(B2A_ID.to_string()),
+            unknown_peer_drops: Some(7),
+        },
+    );
+    let announced = nc::CollectorHost::peer_report(&*dyn_host);
+    assert_eq!(announced.b2a_probe_id.as_deref(), Some(B2A_ID));
+    assert_eq!(
+        announced.unknown_peer_drops, None,
+        "the COUNTERPARTY's counter is not a local value: it must never be stored from the arm"
+    );
+
+    // ③ an arm that carries no marker clears the announcement
+    nc::CollectorHost::note_peer_announcement(&*dyn_host, nc::PeerReport::default());
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*dyn_host),
+        nc::PeerReport::default(),
+        "no stale marker across arms"
+    );
+
+    // ④ the division of labor, measured: the device's OWN counter is live…
+    feed.feed_wg_socket(wg_raw).expect("wg socket feed");
+    feed.feed_tun(tun_raw).expect("tun feed");
+    assert!(feed.device_up(), "the real device is up after both feeds");
+    let sender = UdpSocket::bind("127.0.0.1:0").expect("sender");
+    let probe = b"N2H-wg_peer-00112233445566778899aabb";
+    assert_eq!(
+        sender
+            .send_to(probe, SocketAddr::from(([127, 0, 0, 1], wg_port)))
+            .expect("off-path datagram"),
+        probe.len()
+    );
+    wait_until(5_000, "the off-path datagram reaches the fed wg socket", || {
+        feed.with_device(|d| d.service_udp(sys::mono_ms())).unwrap_or(0) > 0
+    });
+    let own = nc::CollectorHost::wg_stats(&*dyn_host).expect("device up ⇒ the device's own counters");
+    assert_eq!(own.unknown_peer_drops, 1, "this DEVICE counted the off-path datagram");
+    assert_eq!(
+        nc::CollectorHost::peer_report(&*dyn_host).unknown_peer_drops,
+        None,
+        "…and that is NOT the counterparty's counter (§4.0's wg_peer receipt stays a gap)"
+    );
+    println!(
+        "[13.10] production host: announced={:?}; device's own unknown_peer_drops={} \
+         (wg_stats) vs peer_report().unknown_peer_drops={:?}",
+        nc::CollectorHost::peer_report(&*dyn_host).b2a_probe_id,
+        own.unknown_peer_drops,
+        nc::CollectorHost::peer_report(&*dyn_host).unknown_peer_drops
     );
 }
 

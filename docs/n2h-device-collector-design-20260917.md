@@ -479,3 +479,54 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
 
 活体运行时同一形状，只是 `loopback=false`、`b2a_dst`/`own_overlay` 为真实 overlay 端点、`unknown_peer_drops` 为对端 WG 设备的真实计数（`na` 仅当设备未起）。
 
+### 13.10 ⑧ 接线 `WgFeedHost::peer_report()`：ops 中转的 b2a 公告通道（本节补齐 §13.8 末条登记的残余缺口）
+
+- **依据**：§4.3（正控 a2b/b2a 与对端配合语义）、§4.0（收执矩阵 wg_peer 行）、§5.1（arm opts 契约）、§13.8 末条「残余缺口（本次未接线）」的后续增量建议②。基线 HEAD `8929695`（`git log --oneline -1` 实读）；下列 file:line 均为本节落地后的工作树实读（未 commit）。
+- **缺口（I6 遗留，本节闭合）**：`impl CollectorHost for WgFeedHost`（`n2h_collector.rs:2890`）未覆写 `peer_report()` ⇒ I5 的默认空 `PeerReport`（`:1720-1722`）是设备侧唯一取值 ⇒ `build_posctl` 恒走 `None` 分支（`:2520-2535`）⇒ b2a 腿在设备轮永远是「对端未公告 marker」缺口，而 §4.3 要求双向各至少一条 ⇒ 设备轮正控恒不闭合（与「对端未运行」不可区分）。I6 的公告行由主机侧直接捕获、不经设备（§4.3 末条），因此设备侧**必须**另有一条运维中转的公告载体——这就是本节登记并落地的通道。
+
+**① 通道形态（载体 / 谁写入 / 时序 / 缺失语义）**
+
+- **载体**＝I5 既有的 arm 控制文件 `/data/local/tmp/netbird-n2h-arm`（开发期通道，与 `netbird-protect-deviation` 同目录同类，runbook :158-165；只含非敏感 opts）新增**可选键** `peer_b2a_probe_id`，值为 I6 公告行 `b2a_probe_id=N2H-posctl-<24 hex>`（§13.8/§13.9）的**逐字 id 形态**；`…|positive-control` 载荷形态**不接受**（无第二种形态：判定只有一个权威，见②）。
+- **谁写入**＝运维（人）。顺序：先按 §6.4 起的 AUTH 窗口启动主机侧 `nbinterop n2h-peer`，从其 stderr 首行读 `b2a_probe_id`，再把该值写进设备上的控制文件；随后 ets 的 arm 钩子（`NetBirdVpnExtensionAbility.ets:967` `maybeArmN2hCollector`，每 ability 实例至多一次）读文件并在**键存在时**原样并入 `n2h_collector_arm` 的 opts（`:1047-1050`；不 trim、不改写、不做类型宽容），键不存在则**根本不出现**在 opts 里。
+- **时序**＝arm 之前必须已写入。窗口的 marker 集在 arm 时固定：`build_posctl` 每窗口只读一次 `peer_report()`（`:2497`），而 I6 的对端对整个运行期重复发送**同一** marker（§13.8「一次公告 + 重复发送」），故一次公告覆盖整窗。控制文件在 arm 尝试之后才写入 ⇒ 该轮按「缺失」处理（ets 侧 `n2hArmAttempted` latch，`:968-970`；窗口不会再开）。
+- **端到端链路（全部为既有接缝，无新状态机）**：`ArmOptions::peer_b2a_probe_id`（`:1798`，解析 `:1846-1851`）→ arm 闸门全过 **且** tee attach 成功之后（`:2006-2014`）调 `CollectorHost::note_peer_announcement`（trait 默认空实现 `:1736`）→ `WgFeedHost.peer_announcement`（`:2863`）→ `WgFeedHost::peer_report()`（`:2908-2910`）→ I5 既有消费点：注册 tee marker 并记 `sent:true` 的 b2a 腿（`:2497-2518`）。**缺失时 fail-closed**：`PeerReport::default()` ⇒ b2a `sent:false` + 既有有理由缺口（`:2520-2535` 的 note 已改为指向本通道），未 arm / 未提供 ⇒ 与 I5 逐字相同的行为，verdict 仍 `n2h-inconclusive`。
+- **公告只在 arm 时生效、不跨窗口残留**：每次被接受的 arm 都调用一次（空报告＝清除），窗口线程 spawn 失败的分支把公告回收（`:2047`），未通过闸门的 arm 不触碰存储。
+
+**② 校验与 fail-closed（外部输入不引入反射器/注入面）**
+
+- 传入值必须过**同一**严格判定：新增 `announced_b2a_marker`（`:1355`）把 id 拼成冻结 wire 形态后交给 I6 的 `posctl_marker`（`:1333`）——即「公告的 marker」与「对端数据报必须通过的判定」是同一个，公告不可能出现设备无法归因的形态，也不可能长出第二种被接受的形式。
+- 不符即**拒绝整个 arm**：`{ok:false,error:"invalid-opts"}`（§13.4 既有 token）。不开窗、不挂 tee、不写任何 host 状态、不登记任何 marker。依据＝模块既有的「半懂不解的 arm 请求绝不开窗」纪律（§13.4）；已实测拒绝形态：载荷形态（带 `|positive-control`）、非 24 hex（22 hex）、非 hex、错 kind、空串、非字符串、尾随字节/空格、JSON 注入形状（值内引号只会成为一个被拒的普通字符串）。
+- **缺失 vs 非法的分野**（本节明确）：键缺失 ⇒ 不传 ⇒ b2a 有理由缺口（既有语义，行为不变）；键存在但不合法 ⇒ 拒绝 arm 并如实记因（`arm_err` 只回 token，原因进 hilog `N2H_COLLECTOR_ARM|refused|error=invalid-opts|detail=…`，经 `util::sanitize_marker_field` 转义/截断，`:2159-2165`）。外部值**不进入**证据文档，也不出现在 arm 应答里。
+- 该值不驱动任何 socket／不做目的地：只被用作 TUN 扫描器的匹配 marker（`:2500`，`is_posctl=true`，b2a 命中不构成 `n2h-fail`，`:2497-2518`）与文档字段（`PosctlProbe`）；设备不会因它发出任何包。伪造面＝已受信的运维输入（arm 通道本身即信任根，§6.1/§6.4），严格形态判定防的是「随机值/笔误值被登记成扫描 marker」。
+- **`napi.rs` 未改**：arm opts 是 JSON-string-in 透传（`napi.rs:611-614`），契约扩展只发生在 core 内的 opts 解析；四个导出的签名与注册表（`napi.rs:119-122`）逐字不变。
+
+**③ 与 §4.3「不经设备」的调和**
+
+§4.3 末条的不经设备条款约束的是**对端周期状态行**（`n2h-peer-stats`：对端计数器与收执）由主机侧直接捕获。本通道不是「设备直读对端状态」：它是运维转抄的**一次性公告**（对端启动即定、运行期不变的 marker id），经开发期控制文件人工流转，与设备→对端的任何网络路径无关。二者不冲突且互补：对端状态行仍不经设备（本节未为它新增任何设备侧通路）；而设备在没有公告时仍然**不知道** marker，也不会猜（`None` 分支即该语义的代码体现）。
+
+**④ `unknown_peer_drops` 归属（核实 §4.0/§4.3 后如实登记，含与 §4.0 wg_peer 行的差异）**
+
+- `CollectorHost::wg_stats()`（I6 新增，默认 `None` `:1746`；生产覆写 `:2900-2902`）＝**读它的那个进程自身** WG 设备的计数器。在设备进程里＝设备自身外层 socket 的 `unknown_peer_drops`（别的主机打到设备的未知名包，设备侧数据）；在主机侧 `nbinterop n2h-peer` 进程里＝**对端自身**的计数（§13.8 的 `n2h-peer-stats` 行即该读数）。
+- `PeerReport::unknown_peer_drops` 是**对端**计数，即 §4.0 矩阵 wg_peer 行的 `peer-device-offpath-drop` 收执（证明设备的 `wg_peer` 外层探针到达对端 socket）。它是**活值**：窗口开时取 baseline（`:2193`）、观察期取增量（`:2593`），静态 arm 中转在语义上不可用（baseline ≡ now ⇒ 永不成立）。
+- 故本节**只**中转 marker，**不**把对端计数接进设备文档：`WgFeedHost::note_peer_announcement` 显式丢弃该字段（`:2916-2920`），`peer_report().unknown_peer_drops` 恒 `None`，且**绝不以设备自身的 `unknown_peer_drops` 顶替**（两者同名不同量，顶替＝假收执）。分工一句话：**设备文档内的收执面只放设备侧数据；对端自身的计数器留在主机/运维侧状态行（ops 收执）**。
+- **与 §4.0 的差异如实登记**：§4.0 wg_peer 行写的是「经其对端状态通道回报」到设备。本增量未为对端计数落任何设备侧载体（缺的是**活**载体，不是本节的静态公告）⇒ 设备文档的 wg_peer 收执仍为有理由缺口，依 `n2h.rs:890-902` 第 5 条，运维收执缺位时设备轮 verdict 仍为 `n2h-inconclusive`（§4.0 :186 的诚实结论不变）。**本节消除的是「正控腿在设备轮恒缺口」这一可用性缺陷**（`n2h.rs:863-885` 第 4 条），不是全部收执缺口；对端计数的设备侧（活）载体或纯 ops 收执路径登记为剩余缺口，留给后续增量。
+
+**⑤ 措辞级改动（非行为）**：`build_posctl` 的 b2a 三条文案由「peer status channel / §4.3's peer-side report is I6」改为指向本通道（`:2517`、`:2522-2523`、`:2530`）——原文案在本增量后已属误导。判据、文档字段、verdict 语义零改动；`connector_status()`/`connector_network_config()`/`n2h.rs` 渲染器未触碰。
+
+**⑥ 测试（新增 4 例集成 + 1 例单测；I0–I6 既有测试逐字未改）**
+
+- ① `tests/n2h_device_collector.rs:1826` `an_announced_peer_marker_from_the_arm_options_closes_the_b2a_leg`：marker 的**唯一**载体＝arm opts（harness 不调 `announce_b2a`）⇒ arm 后 `peer_report().b2a_probe_id` 命中；tee 命中该 marker 的 to-os 帧 ⇒ 文档 b2a 腿 `sent:true`、`observed_in_tunnel` 有 hit（hit note 记 `to-os`）⇒ `tunnel_positive_control.observed_in_tunnel=true`、缺口注记消失、verdict `n2h-pass`。
+- ② `…:1899` `an_arm_that_carries_no_peer_marker_keeps_the_b2a_leg_a_reasoned_gap`：键缺失 ⇒ b2a `sent:false`、note 含 `never announced`、`notes[]` 记因、a2b 不受影响、`reasons` 恰一条（`positive control  not sent`）、verdict `n2h-inconclusive`（既有语义回归）。
+- ③ `…:1954` `an_invalid_announced_marker_is_refused_without_opening_a_window`：6 种非法形态逐一 `invalid-opts`、不挂 tee、无 open phase、host 状态零写入、seam 存活；随后一次合法 arm 正常开窗（拒绝未 latch）。
+- ④ `…:2034` `the_production_host_takes_the_arm_time_peer_announcement_and_keeps_the_counters_apart`：真 `WgDeviceFeed` 上——①空默认 ②经 trait 对象写入（并断言「对端计数字段不被本地值填充」）③无 marker 的 arm 清空（无跨窗口残留）④设备自身 `unknown_peer_drops=1`（`wg_stats`）而对端字段仍 `None`（分工的可测量形态）。
+- ⑤ 单测 `n2h_collector::tests::arm_opts_accept_only_a_frozen_shape_peer_announcement`（`n2h_collector.rs:4828`）：冻结形态往返 + 各拒绝形态 + 缺失键。
+
+**⑦ 改动面与验收（工作树实读）**
+
+- 改动文件：`client/core/src/n2h_collector.rs`（`announced_b2a_marker` / `ArmOptions` 新字段与解析 / `note_peer_announcement` 接缝 / `arm_json` 接线与 spawn 失败回收 / `WgFeedHost` 存储与两个覆写 / 三条文案 / 1 单测）、`client/core/tests/n2h_device_collector.rs`（harness 接缝 + 1 辅助 + 4 集成用例）、`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets`（两个 interface 的可选字段 + opts 透传 + 日志字段 `peerB2aProbeId`）、本文件（本节）。**未触碰**：`connector.rs`、`wg_device.rs`、`napi.rs`、`n2h.rs`、`host_sockets.rs`、ets 其余路径、渲染器与判据。
+- 验收实跑（工作树，HEAD `8929695` + 未提交改动）：
+  - `cd client/core && cargo test --offline --locked --color never` → 34 个测试目标全 `ok`，合计 **528 passed / 0 failed / 0 ignored**（I6 基线 523/0 + 本节 5 例；`tests/n2h_device_collector.rs` 目标 15 passed）。
+  - `bash client/core/build.sh` → exit 0，`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`。
+  - `bash client/build.sh` → exit 0（ArkTS 编译含本次 ets 改动通过），`entry-default-unsigned.hap` 4 209 559 bytes，sha256 `28ebf6bc9671d86de1d478f165f2a90a057b51de2d2728ac9f05af742ea85cfe`（同一工作树重复打包得到过不同 sha：打包侧非逐字节可复现，验收以 exit 0 + 逐项 VERIFY OK 为准）。
+  - `git status --porcelain` 只含上述四个文件（无其他改动）。
+

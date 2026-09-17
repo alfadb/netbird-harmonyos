@@ -118,6 +118,12 @@ interface N2hShellExclusion {
 interface N2hArmFileOptions {
   posctl_port: number;
   probe_wait_ms: number;
+  // N2-H §13.10 (ops relay): the b2a marker the counterparty announced, as its
+  // `nbinterop n2h-peer` line prints it (`b2a_probe_id=N2H-posctl-<24 hex>`).
+  // ABSENT key ⇒ nothing is passed ⇒ the b2a leg stays a reasoned gap; a
+  // present value is forwarded verbatim and the core refuses anything that is
+  // not the frozen posctl shape (the arm then fails with `invalid-opts`).
+  peer_b2a_probe_id?: string;
 }
 
 // N2-H I5: the `n2h_collector_arm` options document (§5.1).
@@ -125,6 +131,9 @@ interface N2hArmOptions {
   shell_exclusions: N2hShellExclusion[];
   posctl_port: number;
   probe_wait_ms: number;
+  // §13.10: only set when the control file carried the key (an absent key must
+  // stay absent — the two cases have different, documented semantics).
+  peer_b2a_probe_id?: string;
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -950,9 +959,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // exists AND the live session is ready (fail-closed: no ready session ⇒ no
   // window, the reason is logged). The options carry the shell exclusion set
   // retained above (D7 `shell-exclusion`) plus the non-sensitive window knobs
-  // from the control file. Everything is marker-logged with
-  // `diag=true|is_evidence=false`: arming is a diagnostic action, never gate
-  // evidence — only the reviewed document is.
+  // from the control file — and, when that file carries it, the operator's
+  // §13.10 peer announcement (`peer_b2a_probe_id`) that lets the device
+  // attribute the counterparty's b2a positive control. Everything is
+  // marker-logged with `diag=true|is_evidence=false`: arming is a diagnostic
+  // action, never gate evidence — only the reviewed document is.
   private maybeArmN2hCollector(status: ConnectorStatusResult): void {
     if (this.n2hArmAttempted || this.destroyRequested) {
       return;
@@ -1028,20 +1039,32 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       posctl_port: posctlPort,
       probe_wait_ms: probeWaitMs
     };
+    // §13.10: the operator's peer announcement rides the same control file. The
+    // key is forwarded ONLY when the file carried it — an absent key must stay
+    // absent so the core keeps the documented reasoned-gap semantics; a present
+    // value goes verbatim (no trimming, no rewriting, no type coercion) and the
+    // core's strict `posctl_marker` check accepts or refuses it.
+    const announcedPeer: string | undefined = fileOpts.peer_b2a_probe_id;
+    if (announcedPeer !== undefined) {
+      opts.peer_b2a_probe_id = announcedPeer;
+    }
     const optsJson: string = JSON.stringify(opts);
+    const announcedLog: string = announcedPeer === undefined ? 'none' : clean(String(announcedPeer));
     try {
       const answer: N2hCollectorArmResult = JSON.parse(core.n2h_collector_arm(optsJson)) as
         N2hCollectorArmResult;
       if (answer.ok === true) {
         hilog.info(DOMAIN, TAG,
           'N2H_COLLECTOR_ARMED|requestId=%{public}s|openedMono=%{public}d|exclusions=%{public}d|' +
-          'posctlPort=%{public}d|probeWaitMs=%{public}d|diag=true|is_evidence=false',
-          this.requestId, answer.opened_mono ?? -1, exclusions.length, posctlPort, probeWaitMs);
+          'posctlPort=%{public}d|probeWaitMs=%{public}d|peerB2aProbeId=%{public}s|' +
+          'diag=true|is_evidence=false',
+          this.requestId, answer.opened_mono ?? -1, exclusions.length, posctlPort, probeWaitMs,
+          announcedLog);
       } else {
         hilog.error(DOMAIN, TAG,
           'N2H_COLLECTOR_ARM_FAILED|requestId=%{public}s|error=%{public}s|' +
-          'diag=true|is_evidence=false',
-          this.requestId, answer.error ?? 'unknown');
+          'peerB2aProbeId=%{public}s|diag=true|is_evidence=false',
+          this.requestId, answer.error ?? 'unknown', announcedLog);
       }
     } catch (error) {
       hilog.error(DOMAIN, TAG,

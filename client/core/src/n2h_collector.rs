@@ -1341,6 +1341,27 @@ pub fn posctl_marker(payload: &[u8]) -> Option<&str> {
     Some(marker)
 }
 
+/// The ONE acceptance test of an operator-announced b2a marker (§13.10's ops
+/// relay): the arm option carries the id form the I6 announcement line prints
+/// (`b2a_probe_id=N2H-posctl-<24 hex>`), and it goes through the very validator
+/// the peer's datagram must pass ([`posctl_marker`]) — so an announced marker
+/// can never have a shape this device could not attribute, and no second
+/// accepted form can appear beside the frozen wire one.
+///
+/// `Err(reason)` = refuse the value. The caller ([`ArmOptions::parse_json`])
+/// turns that into `invalid-opts`: a half-understood announcement must not open
+/// a window, and the external value never reaches a document (only the sanitized
+/// hilog detail does).
+pub fn announced_b2a_marker(raw: &str) -> Result<String, String> {
+    match posctl_marker(posctl_payload(raw).as_bytes()) {
+        Some(marker) if marker == raw => Ok(marker.to_string()),
+        _ => Err(format!(
+            "peer_b2a_probe_id is not an N2H-posctl-<24 hex> marker (got '{}')",
+            crate::util::sanitize_marker_field(raw, 96)
+        )),
+    }
+}
+
 /// Hard bound of ONE window (arm → closed). A fuse, not a target: the probe
 /// legs are individually bounded (`PROBE_CONNECT_TIMEOUT_MS` /
 /// `probe_wait_ms`) and the observation loop has its own deadline; this is the
@@ -1644,9 +1665,11 @@ pub struct HostFreezeFacts {
     pub own_overlay: Option<[u8; 4]>,
 }
 
-/// The counterparty's report over its status channel (§4.3). Empty until that
-/// channel exists (I6): a missing report is recorded as a receipt gap, never
-/// as an unproven positive control pretended observed.
+/// The counterparty's report (§4.3). For the b2a marker the production carrier
+/// is the OPERATOR relay registered in §13.10 (the arm option
+/// `peer_b2a_probe_id`, written by the operator and handed to [`WgFeedHost`] as
+/// the arm opens the window); a missing report is recorded as a receipt gap,
+/// never as an unproven positive control pretended observed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PeerReport {
     /// The b2a posctl marker the counterparty announced. Without it the
@@ -1654,6 +1677,13 @@ pub struct PeerReport {
     /// leg is recorded not-sent (a gap) — never guessed.
     pub b2a_probe_id: Option<String>,
     /// The counterparty's own `unknown_peer_drops` (§4.0's wg_peer receipt).
+    ///
+    /// This is the PEER's counter, a live value read across the window; it is
+    /// NOT this device's own `unknown_peer_drops` — that different quantity is
+    /// the I6 `wg_stats()` read (the device's own outer socket) and the two must
+    /// never be substituted for one another. The production host leaves this
+    /// `None` (the peer's counter rides the operator-side status line, §13.10):
+    /// the wg_peer receipt then stays a recorded gap, never a false receipt.
     pub unknown_peer_drops: Option<u64>,
 }
 
@@ -1690,6 +1720,20 @@ pub trait CollectorHost: Send + Sync + 'static {
     fn peer_report(&self) -> PeerReport {
         PeerReport::default()
     }
+    /// §13.10: hand the ARM-TIME peer announcement to the host, once per
+    /// accepted arm. Called after every fail-closed gate passed and after the
+    /// tee attach, BEFORE the window thread starts (the window reads
+    /// [`Self::peer_report`] on its first beats); the value already went
+    /// through [`announced_b2a_marker`], so a host stores it verbatim.
+    ///
+    /// An empty report means "the control file carried no marker".
+    /// [`WgFeedHost`] — whose ONLY peer source is this relay — replaces its
+    /// stored facts wholesale, so a window can never read the previous window's
+    /// announcement. A host that holds an independent live channel (the offline
+    /// harness models §4.3's peer status line) keeps its own facts when the arm
+    /// carried nothing. Defaulted: an injected host that has no such channel
+    /// stays inert and answers `PeerReport::default()`.
+    fn note_peer_announcement(&self, _report: PeerReport) {}
     /// The host's LIVE WG device counters, when it has a device up. This is the
     /// read the I6 peer-side status channel needs: the counterparty's own
     /// `unknown_peer_drops` is what proves the device's `wg_peer` outer probe
@@ -1746,6 +1790,12 @@ pub struct ArmOptions {
     /// Operator-reported build sha256 (§3.3 fallback). Empty = not reported;
     /// I7 injects the embedded value.
     pub build_sha256_reported: String,
+    /// §13.10's ops relay: the b2a marker the counterparty announced (the id
+    /// form the I6 `n2h-peer` line prints). `None` = the control file carried
+    /// no such key ⇒ the b2a leg stays a reasoned gap (the pre-existing
+    /// semantics). A present value is REFUSED unless [`announced_b2a_marker`]
+    /// accepts it.
+    pub peer_b2a_probe_id: Option<String>,
 }
 
 impl Default for ArmOptions {
@@ -1755,6 +1805,7 @@ impl Default for ArmOptions {
             posctl_port: DEFAULT_POSCTL_PORT,
             probe_wait_ms: PROBE_WAIT_MS_DEFAULT,
             build_sha256_reported: String::new(),
+            peer_b2a_probe_id: None,
         }
     }
 }
@@ -1791,6 +1842,12 @@ impl ArmOptions {
         if let Some(v) = obj_get(fields, "build_sha256_reported") {
             let sha = as_str(v).ok_or("build_sha256_reported must be a string")?;
             opts.build_sha256_reported = sha.to_string();
+        }
+        if let Some(v) = obj_get(fields, "peer_b2a_probe_id") {
+            // §13.10: the announced marker is external input; it is accepted
+            // only in the frozen wire shape and anything else refuses the arm.
+            let raw = as_str(v).ok_or("peer_b2a_probe_id must be a string")?;
+            opts.peer_b2a_probe_id = Some(announced_b2a_marker(raw)?);
         }
         if let Some(v) = obj_get(fields, "shell_exclusions") {
             let Json::Arr(items) = v else {
@@ -1946,6 +2003,15 @@ pub fn arm_json(opts_json: &str) -> String {
     if let Err(e) = host.attach_tee(tee.clone() as Arc<dyn TunFrameTee>) {
         return arm_err(ARM_ERR_NO_CONNECTOR, &format!("tee attach failed: {e}"));
     }
+    // §13.10: the operator-relayed announcement reaches the host seam HERE —
+    // after every fail-closed gate and the tee attach succeeded, before the
+    // window thread exists. Always called (an arm without the key hands in an
+    // empty report), so a window never reads a previous window's announcement;
+    // a refused arm above never touches the store.
+    host.note_peer_announcement(PeerReport {
+        b2a_probe_id: options.peer_b2a_probe_id.clone(),
+        unknown_peer_drops: None,
+    });
     let opened_mono = clock.mono_ms();
     let window = Arc::new(Window {
         state: Mutex::new(WindowState {
@@ -1976,6 +2042,9 @@ pub fn arm_json(opts_json: &str) -> String {
         .spawn(move || run_window(thread_window));
     if let Err(e) = spawned {
         let _ = window.host.detach_tee();
+        // the window never existed: take the announcement back out, so no
+        // refused arm leaves a stored marker behind (§13.10)
+        window.host.note_peer_announcement(PeerReport::default());
         *window_slot() = None;
         return arm_err(ARM_ERR_WINDOW_FAILED, &format!("{e}"));
     }
@@ -2368,8 +2437,9 @@ fn unobserved_receipt(
 ///   peer overlay address; observed iff the from-os entrance frame AND the
 ///   echo return in to-os are both seen;
 /// - **b2a**: the counterparty sends the payload; the device can only scan for
-///   a marker it was TOLD, so the leg is `sent:true` only when the peer's
-///   status channel announced it — otherwise it is a recorded gap (never
+///   a marker it was TOLD, so the leg is `sent:true` only when the operator
+///   relay of §13.10 handed the announced marker in through the arm options
+///   ([`CollectorHost::peer_report`]) — otherwise it is a recorded gap (never
 ///   guessed, never replaced by the a2b echo).
 fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> {
     let mut out: Vec<PosctlProbe> = Vec::new();
@@ -2444,20 +2514,20 @@ fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> 
                 sent: true,
                 sent_at_mono: win.clock.mono_ms(),
                 observed: None,
-                note: "peer-initiated: marker announced by the counterparty status channel; observation = the to-os delivery side (§4.3/D5)".into(),
+                note: "peer-initiated: marker announced to this device by the operator relay of §13.10 (arm option peer_b2a_probe_id); observation = the to-os delivery side (§4.3/D5)".into(),
             });
         }
         None => {
             notes.push(
-                "posctl b2a not sent: the counterparty announced no marker (peer status channel \
-                 absent — §4.3's peer-side report is I6)"
+                "posctl b2a not sent: no peer marker was announced to this device (the arm \
+                 options carried no peer_b2a_probe_id — §13.10's operator relay)"
                     .into(),
             );
             out.push(PosctlProbe {
                 direction: "b2a".into(),
                 expected_path: "tunnel",
                 sent: false,
-                note: "the peer's b2a marker was never announced to this device (no peer status channel)"
+                note: "the peer's b2a marker was never announced to this device (the arm options carried no peer_b2a_probe_id)"
                     .into(),
                 ..PosctlProbe::default()
             });
@@ -2787,6 +2857,10 @@ pub fn assemble_device_evidence(m: WindowMaterial) -> Evidence {
 pub struct WgFeedHost {
     feed: Arc<crate::wg_device::WgDeviceFeed>,
     hdc_capture_path: Option<std::path::PathBuf>,
+    /// §13.10's ops relay: the arm-time peer announcement. Replaced on every
+    /// accepted arm (empty when the control file carried no marker), read by
+    /// the window through [`CollectorHost::peer_report`].
+    peer_announcement: Mutex<PeerReport>,
 }
 
 impl WgFeedHost {
@@ -2796,6 +2870,7 @@ impl WgFeedHost {
         WgFeedHost {
             feed,
             hdc_capture_path: Some(std::path::PathBuf::from(N2H_HDC_CAPTURE_PATH)),
+            peer_announcement: Mutex::new(PeerReport::default()),
         }
     }
 
@@ -2824,6 +2899,25 @@ impl CollectorHost for WgFeedHost {
     /// the I6 peer status line then says `unknown_peer_drops=na`).
     fn wg_stats(&self) -> Option<WgDeviceStats> {
         self.feed.with_device(|d| d.stats())
+    }
+
+    /// The device-side known peer announcement (§4.3/§13.10), set at arm from
+    /// the operator-relayed arm option. BEFORE the first arm (and after an arm
+    /// that carried no marker) this is empty: the b2a leg is then a REASONED
+    /// gap with its own note, never an invented marker.
+    fn peer_report(&self) -> PeerReport {
+        self.peer_announcement.lock_poison().clone()
+    }
+
+    /// Wholesale replace (this host's only peer source is the arm relay):
+    /// `PeerReport::default()` clears, so window N+1 cannot inherit window N's
+    /// marker. `unknown_peer_drops` is deliberately dropped: the COUNTERPARTY's
+    /// counter is not a value this device holds (see [`PeerReport`]).
+    fn note_peer_announcement(&self, report: PeerReport) {
+        *self.peer_announcement.lock_poison() = PeerReport {
+            b2a_probe_id: report.b2a_probe_id,
+            unknown_peer_drops: None,
+        };
     }
 
     fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
@@ -4723,6 +4817,66 @@ mod tests {
         }
         assert_eq!(posctl_marker(&[0xff, 0xfe]), None, "non-UTF8 is not a probe");
         println!("[I6] posctl wire form: payload={payload} marker={}", posctl_marker(payload.as_bytes()).unwrap_or("?"));
+    }
+
+    /// §13.10's ops relay contract: the arm option accepts ONLY the frozen
+    /// posctl marker shape (the id form the I6 announcement line prints), and
+    /// anything else refuses the whole arm. External input therefore never
+    /// widens the tee's marker set, and the raw value is never echoed into a
+    /// document (only the sanitized hilog detail carries the reason).
+    #[test]
+    fn arm_opts_accept_only_a_frozen_shape_peer_announcement() {
+        let hex24 = "cd".repeat(12);
+        let id = probe_id(POSCTL_KIND_TOKEN, &hex24);
+
+        // the announced id form round-trips through the SAME validator the
+        // peer's datagram must pass (`posctl_marker`)
+        assert_eq!(announced_b2a_marker(&id), Ok(id.clone()));
+        let opts = ArmOptions::parse_json(&format!(
+            "{{\"posctl_port\":40001,\"peer_b2a_probe_id\":\"{id}\"}}"
+        ))
+        .expect("the announced marker is accepted");
+        assert_eq!(opts.peer_b2a_probe_id.as_deref(), Some(id.as_str()));
+
+        // an ABSENT key is no announcement at all (the reasoned-gap semantics)
+        assert_eq!(ArmOptions::parse_json("{}").expect("no options").peer_b2a_probe_id, None);
+
+        // present but not the frozen shape ⇒ the arm is REFUSED (never
+        // silently ignored, never trimmed into shape)
+        let payload_form = posctl_payload(&id);
+        for bad in [
+            payload_form.as_str(),                        // payload, not the id
+            "N2H-posctl-cdcdcdcdcdcdcdcdcdcdcd",          // 22 hex
+            "N2H-posctl-zzzzzzzzzzzzzzzzzzzzzzzz",        // not hex
+            "N2H-wg_peer-cdcdcdcdcdcdcdcdcdcdcdcd",       // wrong kind, right nonce
+            "nbinterop-probe",                            // unrelated marker
+            "",                                           // present but empty
+        ] {
+            assert!(announced_b2a_marker(bad).is_err(), "must refuse {bad:?}");
+            let json = format!("{{{}}}", jstr("peer_b2a_probe_id", bad));
+            assert!(
+                ArmOptions::parse_json(&json).is_err(),
+                "a present-but-invalid announcement must refuse the arm: {json}"
+            );
+        }
+        // trailing byte / trailing space: the validator is exact
+        assert!(announced_b2a_marker(&format!("{id} ")).is_err());
+        assert!(announced_b2a_marker(&format!("{id}!")).is_err());
+        // a JSON-injection shaped value stays a plain (refused) string: it can
+        // never smuggle another option field into the arm document
+        let injected = format!("{hex24}\",\"posctl_port\":0");
+        assert!(announced_b2a_marker(&injected).is_err());
+        assert!(ArmOptions::parse_json(&format!(
+            "{{{}}}",
+            jstr("peer_b2a_probe_id", &injected)
+        ))
+        .is_err());
+        // a non-string value is refused by the parser, before any validation
+        assert!(ArmOptions::parse_json("{\"peer_b2a_probe_id\":40001}").is_err());
+        println!(
+            "[13.10] arm announcement: accepted={id} (frozen shape); payload/22-hex/non-hex/\
+             wrong-kind/empty/trailing-byte/injected shapes refused; absent key ⇒ no announcement"
+        );
     }
 
     /// The defaulted [`CollectorHost::wg_stats`]: an injected host that does not
