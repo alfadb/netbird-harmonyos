@@ -546,3 +546,73 @@ D 轮（设备侧 WG over relay 数据面成立）与 `18153fa` 适用范围的�
 ### 9. 口径不变
 
 仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**。
+
+## V 类：presence 修复的真机受控验证 —— 判定「未收敛/不完整」（2026-09-17 追加）
+
+> 本节为事后追加，不改写既有正文；与仓B `AUTH-DIAG-DEVICE-VALIDATION-20260917-0009.json` 的 consumed 回填同批完成（追加授权来源见该文件 `issuance.amendment_events` 第 1 条）。材料（全部只读核对，本节未运行任何设备命令）：仓B 证据目录 `AUTH-DIAG-DEVICE-VALIDATION-20260917-0009/`（两份 clock-check、两臂流式 hilog、两臂对端窗口日志、`EXECUTION-RECORD-V1-20260917T1215.md`、`MANIFEST.sha256`）与生效件 `AUTH-…-0009.json`。下文 sha256/计数/时刻/PID 均逐字取自上列材料；无任何凭据写入。
+
+### 1. 目的与受控设计
+
+- **目的**：presence 修复（commit `0cfb723`）的真机受控验证（授权 AUTH-DIAG-DEVICE-VALIDATION-20260917-0009，窗口 2026-09-17T07:49:00+08:00 → 2026-09-18T06:49:00+08:00，执行时 consumed=false）。
+- **固定变量**＝主机对端用已修版核心（`nbinterop ⊇ 0cfb723`，两臂同一构建且带探针 `--probe-dst <设备当轮 self overlay IP> --probe-interval 1000`）＋同一中继＋同一身份（设备 peer 名 ohos-smoke-1，本轮设备 overlay `100.108.144.165`）；**唯一变量**＝设备侧核心：V2 = 修复前 `842a139`（已核实为 `0cfb723` 的父提交；执行中曾把 merge-base 检查的 echo 标签写反，已更正），V1 = 已修 HEAD `8671093`；每臂内做一次**对端重启＝offline→online 循环**（主机侧 kill 后以同配置同探针重启同一 peer）。臂序：先 V2 后 V1。
+
+### 2. 前置①（成立）
+
+- 设备侧：`network map applied serial=297 peers=6` ✓（臂 V2 实测）；
+- 对端侧：臂前基线拒收 burst 已停（`carrier-reject|relay-peer-offline` count 900 恒定、30s 复测 delta=0）✓；carrier_tx 持续（1420 帧 / 171336B，探针在跑）✓；
+- 时钟门 2 次（11:49:32 skew=1 / 12:02:27 skew=0）均 proceed。
+
+### 3. 逐臂表
+
+| 臂 | 设备侧核心 | signed HAP sha256 | install | 双端中继 | 对端重启（PID→PID） | ① 出向拒发行 | ② WG 会话 | ③ TUN RX（探针载荷） |
+|---|---|---|---|---|---|---|---|---|
+| V2 | 修复前 `842a139`（`0cfb723` 父提交） | `aba88c97…f51b` | 1/2 | `rels://home.alfadb.cn:28443`（双端一致 ✓） | 669506→673774 @11:55:15 | **0 行**（预期「持续增长」✗；`842a139` 可能无该日志标记 → 不可区分） | **重建 2 条**（预期 0 ✗；对象非探针源：对端侧 `peers_with_session=0`、`wg.ready=false`） | **不恢复 ✓**（0/520B 恒定） |
+| V1 | 已修 HEAD `8671093` ⊇ `0cfb723` | `52036cfe…c423` | 2/2 | `rels://home.alfadb.cn:28443`（双端一致 ✓） | 673774→674315 @12:05:42 | **4 行后停止 ✓**（12:08:31 与 12:11:12 两次读数均 4） | **`wgSessions=2`**（✓ >0） | **未恢复 ✗**（12:05:39→12:11:12 零增长，`wgRxToTun=0`） |
+
+全量 signed sha256（照抄执行记录）：V2 = `aba88c974e11bd4f7b1d2969fe27eca328c9c2a43746854cdcfd5d68adb9f51b`；V1 = `52036cfe7c87d495ba52d8dfe381e956a216c1ec7cd6f325df67ff4951cdc423`。
+
+臂内时序（照抄执行记录）：V2 11:51:49 启动 → 11:52:17 点击（1/2）→ 基线段 2.5 分钟 → 对端重启（11:55:12 kill 669506、11:55:15 确认消失后重启）→ 观测至 12:00:55；V1 12:02:42 启动 → 12:03:08 点击（2/2）→ 基线段 2.5 分钟 → 对端重启（12:05:39–12:05:42 kill 673774）→ 观测至 12:11:12。
+
+对端侧（V1 重启后自身读数）：`wg.ready=true|peers_with_session=1|handshakes=268|rx_packets=179`——有 1 条会话，**对象身份不可见**；拒收计数重置后又到 100（新 PID 计数器，peer-v.log 终态 50195 行）。无效判据未触发：两臂臂内双端中继一致；执行记录未登记任何 `carrier->direct` / `ice.connected=1` 事件。
+
+### 4. 判定与依据（如实：未收敛/不完整）
+
+- **两臂均未复现完整预期签名** → 按 AUTH-0009 `operation_classes.V.criteria` 降级「未收敛/不完整」。
+- **共性**＝两臂在对端重启后都重建了 2 条 WG 会话（presence/lane 层两臂无差异）；**探针载荷两臂均未到达设备**（`wgRxToTun=0`）。
+- **差异**仅 V1 有 4 行出向拒发后停滞（V2 为 0 行、可能无该日志标记，方向性弱）。
+- → **presence 修复未获真机受控验证支持**（既未复现旧缺陷签名，也未观测到探针载荷恢复；「未取得支持」不是「被否证」，见 §7-③）。
+
+### 5. 臂前基线 12 行拒收的查明结论
+
+- 对端日志（PID 669506，offset=44722）：`carrier-reject|relay-peer-offline` count **1→900**，集中在日志行 4939–5257（对端启动初期，状态行 last_update_unix=1789601127 附近，约对端启动后 ~15 分钟）；**现 count=900 停止增长（30s 复测 delta=0）**。
+- 按机制最可能是对端启动初期向「当时未上线的本设备（探针目标 `100.108.144.165`）」发帧被拒、presence reconcile 后停止——与「对端已含修复（`0cfb723`）」吻合；**行内无 peer 标识，目标归属为推断**（不排除其他离线目标，如实登记）。
+- `carrier_rx_packets` 字段在对端状态 JSON 中不存在（改以设备侧 TUN RX 与对端 `wg.rx_packets` 佐证）。
+
+### 6. 探针未恢复的三条候选（照抄，未归因）
+
+1. 对端探针写向无会话对端被静默丢弃（`write 成功 ≠ 送达`）；
+2. 会话对象非探针目标（对端侧 wg 会话对象身份不可见）；
+3. 解密入 TUN 另有条件。
+
+——均需对端侧（主会话管辖）归因，本轮未归因。
+
+### 7. 主会话判断（三条；标注为判断，非结论）
+
+1. 设备级验证受阻于**归属能力不足**：我方状态 JSON 不暴露「会话属于哪个 peer」、探针送达与否不可观测。
+2. **V2 未复现缺陷**可能意味着**生产中继的 presence 语义与该 bug 触发条件不符**（分析报告已登记「自建中继版本未核实」），即该缺陷在现网可能不触发——这是**该轮唯一有信息量的方向性观察**，**仍属待证**。
+3. 本修复的**机制正确性**已有**离线忠实复现（先红后绿）＋全量 476/0＋flake-check 30/0** 支撑；真机验证**未取得支持**（不是「被否证」）。
+
+### 8. 配额与 W 清理
+
+- **V 类**：install 2/2；推送 1/2；臂次 2/2（V2 ≈9min6s ＋ V1 ≈8min30s ≈17.6min ≤40min；观测窗 2.5+5min ≤10min/臂）；对端重启各 1 次/臂；hilog 每臂 1 次（流式 480s）；点击 2/2（11:52:17 / 12:03:08）；时钟门 2 次均 proceed。
+- **W 类**：清理 1/1（设备与对端均零残留）；force-stop 1/2；uninstall 0/1（**App 保留**）；对端停止 1/1（kill 674315 已确认消失）；`/tmp/n13-arm-v2` 已删；主工作区未动（HEAD `8671093`）。
+
+### 9. 证据与校验
+
+- 证据目录 `~/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260917-0009/`：7 份内容产物（2 份 clock-check、2 臂流式 hilog、2 臂对端窗口日志、`EXECUTION-RECORD-V1-20260917T1215.md`）各附 `.sha256` sidecar（配对共 14 个文件）；`MANIFEST.sha256` 15 项 `--check` 全部 OK（本节追加时实跑复核通过）；README.md 为目录占位声明。
+- 生效件 `AUTH-…-0009.json` 回填前 sha256 `98ecdb32…045f80c`（与当时 sidecar 及两份 clock-check 的 `auth_file_sha256` 一致）；本节追加同批按 `amendment_rule` 完成 consumed 回填与用途达成登记（见该文件 `issuance.amendment_events` 第 1 条，`readback_required=true`），sidecar 重算后 `sha256sum -c` OK。
+- 敏感扫描 0 命中（本轮最干净；照主会话登记口径转录，本节未重跑）。全部产物 `is_evidence:false`，不进入证据链。
+
+### 10. 口径不变
+
+仅 **N13 级证据**；**不构成 N2-H pass**；**不构成 N6 pass**；本节判定「未收敛/不完整」不构成任何门结论。
