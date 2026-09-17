@@ -32,6 +32,23 @@
 //!     SUCCESS exit (0) as soon as one WG peer session is established
 //!     (`wg.peers_with_session >= 1`), instead of running until stopped.
 //!
+//! nbinterop n2h-peer --config <file> --overlay <ip[:port]> [flags]
+//!     N2-H POSITIVE-CONTROL COUNTERPARTY (design §4.3/§7-I6): the host-side
+//!     end of the device collector's a2b/b2a legs, riding the SAME tunnel as
+//!     `peer` (no new socket, no new port, nothing product-facing):
+//!       · echoes every well-formed `N2H-posctl-<nonce>|positive-control`
+//!         datagram that arrives THROUGH the tunnel back to its source,
+//!         payload VERBATIM — that is the device's a2b receipt;
+//!       · periodically injects its OWN posctl probe toward the device overlay
+//!         (`--overlay`) under ONE marker announced at start-up — the device
+//!         registers that marker for its b2a observation;
+//!       · prints a periodic `n2h-peer-stats|…` line carrying the announced
+//!         marker and THIS peer's live `unknown_peer_drops` (the device's
+//!         `wg_peer` outer-probe receipt, design §4.0/§4.3) on stderr.
+//!     `--loopback` runs the offline 对拍 self-check instead (one socketpair
+//!     as the tunnel stand-in + a fake device): exit 0 = the echo path and the
+//!     status line both verified, no connector and no network involved.
+//!
 //! nbinterop isolation-check [--out <file>] [--fault-* ...]
 //!     N2-H route-exclusion ISOLATION EVIDENCE for one connection session
 //!     (host-side; see netbird_core::n2h). Offline dual-instance loopback
@@ -54,6 +71,17 @@
 //!        --probe-dst <ip>       VPN IP to send probe packets to (the
 //!                               peer's managed address)
 //!        --probe-interval <ms>  probe period (default 0 = off)
+//!        --overlay <ip[:port]>  n2h-peer ONLY: the DEVICE's overlay endpoint
+//!                               (b2a destination; port defaults to
+//!                               --echo-port). IPv4 literal — never a name
+//!        --echo-port <port>     n2h-peer ONLY: the posctl port convention of
+//!                               BOTH ends (default 40001 = the collector's
+//!                               `posctl_port`); the port the device's a2b
+//!                               probe is addressed to on this peer
+//!        --posctl-interval <ms> n2h-peer ONLY: b2a probe period (default 1000)
+//!        --loopback             n2h-peer ONLY: offline 对拍 self-check of the
+//!                               echo path + status line (no --config, no
+//!                               connector, no network beyond a socketpair)
 //!        --exit-on-terminal     exit when the connector reaches a terminal
 //!                               state (exit code = error class)
 //!        --wg-port <port>       HOST-ONLY: bind the WG outer UDP socket to
@@ -90,7 +118,8 @@
 //! config · `4` credentials · `10..16` connector error classes
 //! (network/timeout/auth/request/server/parse/unsupported_url) · `17`
 //! `--timeout` elapsed · `18` peer ended without a session · `19` unknown
-//! error class · `20` n2h-inconclusive.
+//! error class · `20` n2h-inconclusive. `n2h-peer --timeout` is the registered
+//! STOP form of a run that has no goal to reach: it exits `0`.
 //!
 //! ## Host link stubs
 //!
@@ -219,6 +248,7 @@ mod host_link_stubs {
 use std::time::{Duration, Instant};
 
 use netbird_core::host_sockets as hs;
+use netbird_core::n2h_collector as nc;
 use netbird_core::sys;
 
 use host_link_stubs::FORWARD_HILOG;
@@ -234,10 +264,44 @@ USAGE:
                       [--wg-port <port>] [--ice-port <port>]
                       [--advertise-candidate <ip:port>]... [--verbose]
     nbinterop peer    --config <file> [same flags]
+    nbinterop n2h-peer --config <file> --overlay <ip[:port]> [--echo-port <port>]
+                       [--posctl-interval <ms>] [--interval <ms>] [--timeout <s>]
+    nbinterop n2h-peer --loopback [--overlay <ip[:port]>] [--echo-port <port>]
+                       [--posctl-interval <ms>] [--timeout <s>]
     nbinterop isolation-check [--out <file>] [--loopback]
                               [--fault-leak] [--fault-no-posctl]
                               [--fault-omit-endpoint <kind>]
                               [--config <file>] [--outer-endpoint <kind:host:port>]...
+
+n2h-peer (N2-H positive-control counterparty, design §4.3/§7-I6; opt-in by the
+subcommand itself, no product surface, no new socket or port):
+    --config <file>       the peer's own NetBird session (same config as `peer`);
+                          required unless --loopback
+    --overlay <ip[:port]> the DEVICE's overlay endpoint: where the b2a probe is
+                          sent and where this peer is addressed as the posctl
+                          endpoint. IPv4 literal only, port defaults to
+                          --echo-port
+    --echo-port <port>    the posctl port convention of both ends (default 40001,
+                          the collector's arm-opt `posctl_port`): every
+                          well-formed N2H-posctl-<nonce>|positive-control that
+                          arrives through the tunnel is echoed back VERBATIM to
+                          its source; anything else is ignored
+    --posctl-interval <ms> b2a probe period (default 1000)
+    --loopback            offline 对拍 self-check of the echo path + the status
+                          line: one socketpair stands in for the tunnel and a fake
+                          device must observe the b2a probe and must get its a2b
+                          probe echoed verbatim (exit 0 = verified)
+
+The peer status lines (stderr, the CLI's existing `nbinterop: <token>|<k=v>`
+house shape; stdout stays pure status JSONL):
+    nbinterop: n2h-peer|b2a_probe_id=…|b2a_dst=…|echo_port=…|posctl_interval_ms=…|loopback=…
+    nbinterop: n2h-peer-stats|b2a_probe_id=…|b2a_sent=…|a2b_seen=…|echoes_sent=…
+        |echoes_skipped=…|last_a2b_from=…|own_overlay=…|unknown_peer_drops=…
+        |unknown_peer_drops_delta=…
+    `b2a_probe_id` is the marker the device collector registers for its b2a
+    observation; `unknown_peer_drops` is this peer's live WG counter (the
+    device's wg_peer outer-probe receipt, design §4.0) read through the
+    collector's installed host seam — `na` while no device is up.
 
 isolation-check (N2-H evidence tool; evidence only — no governance change):
     --out <file>          evidence JSON path (default: n2h-isolation-evidence.json)
@@ -276,7 +340,7 @@ the config file or the environment — never the command line.
 Exit codes: 0 ok/n2h-pass | 1 selftest failed/n2h-fail | 2 usage | 3 config | 4 credentials
 | 10 network | 11 timeout | 12 auth | 13 request | 14 server | 15 parse
 | 16 unsupported_url | 17 wait-timeout | 18 peer-no-session | 19 unknown-class
-| 20 n2h-inconclusive";
+| 20 n2h-inconclusive   (n2h-peer: --timeout is the registered stop form → 0)";
 
 /// Secret-bearing flag prefixes the CLI must never accept.
 const SECRET_FLAGS: [&str; 4] = ["--setup-key", "--jwt", "--private-key", "--ca-pem"];
@@ -297,6 +361,9 @@ struct RunOpts {
     ice_port: Option<u16>,
     /// HOST-ONLY (N12a): externally reachable candidates to advertise.
     advertise: Vec<String>,
+    /// N2-H I6: set by `n2h-peer`'s own flags ONLY (any other subcommand
+    /// rejects them, so the mode cannot be entered by accident).
+    n2h_peer: Option<N2hPeerOpts>,
 }
 
 impl Default for RunOpts {
@@ -313,8 +380,100 @@ impl Default for RunOpts {
             wg_port: None,
             ice_port: None,
             advertise: Vec::new(),
+            n2h_peer: None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// N2-H I6: `n2h-peer`, the positive-control counterparty (design §4.3)
+// ---------------------------------------------------------------------------
+
+/// One TUN-stand-in frame buffer (the existing `recv_probes` bound: a WG inner
+/// frame of the platform MTU plus headroom).
+const N2H_PEER_FRAME_MAX: usize = 2048;
+/// Frames drained per beat (bounded, like `recv_probes`' 8).
+const N2H_PEER_DRAIN_MAX: usize = 8;
+/// b2a probe period (design §4.3: the peer probes periodically while the device
+/// window is open; the collector's own window deadline is 60 s).
+const N2H_PEER_POSCTL_INTERVAL_MS: u64 = 1_000;
+/// Default fuse of the `--loopback` 对拍 (it has no session to wait for).
+const N2H_PEER_LOOPBACK_FUSE_MS: u64 = 5_000;
+/// Per-step bounded wait of the 对拍's fake device.
+const N2H_PEER_LOOPBACK_STEP_MS: i32 = 1_000;
+/// The `--loopback` negative case's observation window (a non-posctl payload
+/// must not come back).
+const N2H_PEER_LOOPBACK_NEGATIVE_MS: i32 = 300;
+
+/// `n2h-peer` options. Explicitly opt-in: NOTHING here is reachable without
+/// the `n2h-peer` subcommand plus its flags (design §6.1's "default off, no
+/// product surface" discipline).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct N2hPeerOpts {
+    /// `--overlay <ip[:port]>`: the DEVICE's overlay endpoint. `None` in
+    /// `--loopback` (which then plays both ends on 127.0.0.1) and refused in
+    /// the live mode — the peer never guesses which overlay address is the
+    /// device.
+    overlay: Option<std::net::Ipv4Addr>,
+    /// Port part of `--overlay` (default: [`N2hPeerOpts::echo_port`]).
+    overlay_port: Option<u16>,
+    /// The posctl port convention of BOTH ends: the collector's arm-opt
+    /// `posctl_port` (§5.1 default 40001, [`nc::DEFAULT_POSCTL_PORT`]).
+    echo_port: u16,
+    posctl_interval_ms: u64,
+    /// Offline 对拍 mode (`--loopback`): no config, no connector.
+    loopback: bool,
+}
+
+impl Default for N2hPeerOpts {
+    fn default() -> Self {
+        N2hPeerOpts {
+            overlay: None,
+            overlay_port: None,
+            echo_port: nc::DEFAULT_POSCTL_PORT,
+            posctl_interval_ms: N2H_PEER_POSCTL_INTERVAL_MS,
+            loopback: false,
+        }
+    }
+}
+
+impl N2hPeerOpts {
+    /// The device overlay endpoint as `(ip, port)` — the b2a destination.
+    fn overlay_dst(&self) -> Option<([u8; 4], u16)> {
+        let ip = self.overlay?;
+        Some((ip.octets(), self.overlay_port.unwrap_or(self.echo_port)))
+    }
+}
+
+/// Parse `--overlay <ip[:port]>`: a LITERAL IPv4 address with an optional port
+/// (design §10-4: this tool is IPv4-only). Refusing names is deliberate — a
+/// probe endpoint that re-resolves between runs would not be reproducible, and
+/// this value is echoed in the status line the device side reads.
+fn parse_overlay_endpoint(s: &str) -> Result<(std::net::Ipv4Addr, Option<u16>), String> {
+    let (ip, port) = match s.rsplit_once(':') {
+        Some((ip, port)) => (ip, Some(port)),
+        None => (s, None),
+    };
+    let ip: std::net::Ipv4Addr = ip
+        .parse()
+        .map_err(|_| format!("'{ip}' is not a literal IPv4 address (no names, no IPv6)"))?;
+    let port = match port {
+        Some(p) => {
+            let p: u16 = p.parse().map_err(|_| format!("'{p}' is not a UDP port"))?;
+            if p == 0 {
+                return Err("port 0 is not a usable endpoint".to_string());
+            }
+            Some(p)
+        }
+        None => None,
+    };
+    Ok((ip, port))
+}
+
+/// `a.b.c.d:port` — the endpoint display form of every status line here (the
+/// collector's own form, `n2h_collector.rs`'s posctl notes).
+fn endpoint_text(ip: [u8; 4], port: u16) -> String {
+    format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port)
 }
 
 fn main() {
@@ -364,6 +523,7 @@ fn run() -> i32 {
         "selftest" => cmd_selftest(&args[1..]),
         "connect" => cmd_engine("connect", &args[1..]),
         "peer" => cmd_engine("peer", &args[1..]),
+        "n2h-peer" => cmd_n2h_peer(&args[1..]),
         "isolation-check" => cmd_isolation_check(&args[1..]),
         other => {
             eprintln!("error: unknown subcommand '{other}'\n\n{USAGE}");
@@ -459,6 +619,51 @@ fn parse_flags(args: &[String]) -> Result<(RunOpts, bool), i32> {
                     return Err(hs::EXIT_USAGE);
                 }
                 o.advertise.push(v);
+            }
+            "--overlay" => {
+                let v = value("--overlay")?;
+                match parse_overlay_endpoint(&v) {
+                    Ok((ip, port)) => {
+                        let peer = o.n2h_peer.get_or_insert_with(N2hPeerOpts::default);
+                        peer.overlay = Some(ip);
+                        peer.overlay_port = port;
+                    }
+                    Err(e) => {
+                        eprintln!("error: --overlay '{v}': {e}");
+                        return Err(hs::EXIT_USAGE);
+                    }
+                }
+            }
+            "--echo-port" => {
+                let v = value("--echo-port")?;
+                let port: u16 = v.parse().map_err(|_| {
+                    eprintln!("error: --echo-port '{v}' is not a valid UDP port");
+                    hs::EXIT_USAGE
+                })?;
+                if port == 0 {
+                    eprintln!(
+                        "error: --echo-port 0 is meaningless (the posctl port convention; \
+                         the collector's arm-opt default is {})",
+                        nc::DEFAULT_POSCTL_PORT
+                    );
+                    return Err(hs::EXIT_USAGE);
+                }
+                o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).echo_port = port;
+            }
+            "--posctl-interval" => {
+                let v = value("--posctl-interval")?;
+                let ms: u64 = v.parse().map_err(|_| {
+                    eprintln!("error: --posctl-interval '{v}' is not a number");
+                    hs::EXIT_USAGE
+                })?;
+                if ms == 0 {
+                    eprintln!("error: --posctl-interval 0 would never send a b2a probe");
+                    return Err(hs::EXIT_USAGE);
+                }
+                o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).posctl_interval_ms = ms;
+            }
+            "--loopback" => {
+                o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).loopback = true;
             }
             "--json" => json = true,
             other => {
@@ -687,6 +892,505 @@ fn parse_outer_endpoint(
 }
 
 // ---------------------------------------------------------------------------
+// n2h-peer (N2-H I6: the device collector's positive-control counterparty)
+// ---------------------------------------------------------------------------
+
+/// `nbinterop n2h-peer` — see the module docs. The subcommand IS the opt-in:
+/// no code path here is reachable from `connect`/`peer`/`selftest`, and nothing
+/// product-facing changes (design §6.1). `--loopback` runs the offline 对拍
+/// self-check instead of a session.
+fn cmd_n2h_peer(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--loopback" || a.starts_with("--loopback=")) {
+        return cmd_n2h_peer_loopback(args);
+    }
+    cmd_engine("n2h-peer", args)
+}
+
+/// Live state of the peer-side posctl endpoint, plus the counters the periodic
+/// status line reports. Only the engine's single loop thread touches it (the
+/// bin spawns no threads of its own in this mode), so plain `&mut` state is the
+/// correct minimal form — no atomics, no lock (the `ProbeStats` precedent).
+struct N2hPeerState {
+    opts: N2hPeerOpts,
+    /// The ONE announced b2a marker, stable for the whole run: the device
+    /// registers the counterparty marker ONCE per window (`build_posctl` reads
+    /// `peer_report()` a single time), so a fresh nonce per probe could never be
+    /// observed — announcement and probes must agree on this value.
+    marker: String,
+    b2a_sent: u64,
+    /// Well-formed posctl probes that arrived THROUGH the tunnel (the device's
+    /// a2b leg reaching this peer — proof of the outer path).
+    a2b_seen: u64,
+    echoes_sent: u64,
+    /// Posctl probes seen but not echoed (no learned overlay address yet, or the
+    /// TUN-stand-in write failed): recorded, never silently dropped.
+    echoes_skipped: u64,
+    last_a2b_from: Option<String>,
+    last_posctl_mono: u64,
+    /// `unknown_peer_drops` at the FIRST readable sample (the delta is
+    /// operator-facing; the device computes its own baseline at window open).
+    drops_baseline: Option<u64>,
+    own_absent_noted: bool,
+    session_not_ready_noted: bool,
+}
+
+impl N2hPeerState {
+    /// Fresh run state: the marker is `N2H-posctl-<24 hex nonce>` — exactly the
+    /// shape the device's `build_posctl` builds and registers with the TUN
+    /// scanner (shared code: [`netbird_core::n2h::probe_id`] +
+    /// [`nc::POSCTL_KIND_TOKEN`]).
+    fn new(opts: N2hPeerOpts) -> Result<N2hPeerState, String> {
+        let nonce = netbird_core::n2h::fresh_nonce_hex()?;
+        Ok(N2hPeerState {
+            opts,
+            marker: netbird_core::n2h::probe_id(nc::POSCTL_KIND_TOKEN, &nonce),
+            b2a_sent: 0,
+            a2b_seen: 0,
+            echoes_sent: 0,
+            echoes_skipped: 0,
+            last_a2b_from: None,
+            last_posctl_mono: 0,
+            drops_baseline: None,
+            own_absent_noted: false,
+            session_not_ready_noted: false,
+        })
+    }
+
+    /// The start-up announcement, printed BEFORE any probe so a capture window
+    /// can never miss the marker (design §4.3: the device must be told which
+    /// marker to register for b2a).
+    fn announce_line(&self) -> String {
+        let dst = match self.opts.overlay_dst() {
+            Some((ip, port)) => endpoint_text(ip, port),
+            None => "na".to_string(),
+        };
+        format!(
+            "nbinterop: n2h-peer|b2a_probe_id={}|b2a_dst={dst}|echo_port={}|\
+             posctl_interval_ms={}|loopback={}",
+            self.marker, self.opts.echo_port, self.opts.posctl_interval_ms, self.opts.loopback
+        )
+    }
+
+    /// Take the `unknown_peer_drops` sample of one status line: the first
+    /// readable value becomes the run's baseline; `None` stays `None` (the line
+    /// prints `na` — never a fabricated zero).
+    fn sample_drops(&mut self, drops: Option<u64>) -> (Option<u64>, Option<u64>) {
+        match drops {
+            Some(v) => {
+                let base = *self.drops_baseline.get_or_insert(v);
+                (Some(v), Some(v.saturating_sub(base)))
+            }
+            None => (None, None),
+        }
+    }
+
+    /// The periodic counterparty status line (design §4.3): ONE `|`-separated
+    /// line on stderr in the CLI's existing `nbinterop: <token>|…` house shape
+    /// (stdout is reserved for the status JSONL). It carries the announced b2a
+    /// marker AND this peer's live `unknown_peer_drops` — the device's `wg_peer`
+    /// outer-probe receipt (§4.0's `peer-device-offpath-drop`).
+    fn status_line(
+        &self,
+        own: Option<[u8; 4]>,
+        drops: (Option<u64>, Option<u64>),
+    ) -> String {
+        let own_text = match own {
+            Some(ip) => endpoint_text(ip, self.opts.echo_port),
+            None => "na".to_string(),
+        };
+        let (abs, delta) = match drops {
+            (Some(a), Some(d)) => (a.to_string(), d.to_string()),
+            _ => ("na".to_string(), "na".to_string()),
+        };
+        format!(
+            "nbinterop: n2h-peer-stats|b2a_probe_id={}|b2a_sent={}|a2b_seen={}|echoes_sent={}|\
+             echoes_skipped={}|last_a2b_from={}|own_overlay={own_text}|unknown_peer_drops={abs}|\
+             unknown_peer_drops_delta={delta}",
+            self.marker,
+            self.b2a_sent,
+            self.a2b_seen,
+            self.echoes_sent,
+            self.echoes_skipped,
+            self.last_a2b_from.as_deref().unwrap_or("na"),
+        )
+    }
+
+    /// One last status line at exit (the run's final counters).
+    fn report_final(&self, own: Option<[u8; 4]>) {
+        let drops = match n2h_peer_drops() {
+            Some(v) => (Some(v), self.drops_baseline.map(|b| v.saturating_sub(b))),
+            None => (None, None),
+        };
+        eprintln!("{}", self.status_line(own, drops));
+    }
+}
+
+/// The counterparty's own `unknown_peer_drops` — the receipt of the device's
+/// `wg_peer` outer probe (design §4.0's `peer-device-offpath-drop`) — read
+/// through the collector's INSTALLED HOST SEAM (the connector's live WG feed;
+/// `n2h_collector::installed_host`, design §7-I6's "reuse n2h_collector"). The
+/// CLI never reads connector state itself: the seam is the one public path, and
+/// `None` (no connector / no device up) is reported as `na`, never as a zero.
+fn n2h_peer_drops() -> Option<u64> {
+    nc::installed_host().and_then(|h| h.wg_stats()).map(|s| s.unknown_peer_drops)
+}
+
+/// One `n2h-peer` beat:
+/// 1. drain the tunnel DELIVERY side and echo every well-formed posctl probe
+///    back to its source, payload verbatim (§4.3's a2b receipt) — every beat, so
+///    the echo is prompt;
+/// 2. once per `--posctl-interval`, with a live session, inject the b2a probe
+///    into the tunnel and print the status line.
+fn n2h_peer_tick(
+    state: &mut N2hPeerState,
+    own: Option<[u8; 4]>,
+    session_ready: bool,
+    tun_hand: i32,
+    now: u64,
+) {
+    n2h_peer_drain_and_echo(state, own, tun_hand);
+    if now.saturating_sub(state.last_posctl_mono) < state.opts.posctl_interval_ms {
+        return;
+    }
+    state.last_posctl_mono = now;
+    if session_ready {
+        n2h_peer_send_b2a(state, own, tun_hand);
+    } else if !state.session_not_ready_noted {
+        state.session_not_ready_noted = true;
+        eprintln!(
+            "[n2h-peer] no live WG session yet (wg.ready=false): the b2a probe waits — \
+             nothing is injected into a tunnel that is not up"
+        );
+    }
+    let drops = state.sample_drops(n2h_peer_drops());
+    eprintln!("{}", state.status_line(own, drops));
+}
+
+/// Drain up to [`N2H_PEER_DRAIN_MAX`] frames the tunnel delivered, and echo
+/// every well-formed posctl probe (`N2H-posctl-<nonce>|positive-control`) back
+/// to its source with the five-tuple SWAPPED and the payload UNTOUCHED — the
+/// device's to-os tee matches the marker, so verbatim is what closes its a2b
+/// leg (design §4.3/D5).
+///
+/// Anything that is not a well-formed posctl probe is left alone: this endpoint
+/// is not a reflector (the strict test is [`nc::posctl_marker`], the device
+/// sender's own contract).
+fn n2h_peer_drain_and_echo(state: &mut N2hPeerState, own: Option<[u8; 4]>, tun_hand: i32) {
+    let mut buf = [0u8; N2H_PEER_FRAME_MAX];
+    for _ in 0..N2H_PEER_DRAIN_MAX {
+        // poll 0 = non-blocking: never wait in the data path
+        let Some(n) = read_frame_within(tun_hand, &mut buf, 0) else { return };
+        let frame = &buf[..n];
+        let Some(view) = netbird_core::n2h::parse_ipv4_frame(frame) else { continue };
+        if view.proto != 17 || nc::posctl_marker(view.payload).is_none() {
+            continue;
+        }
+        let from = endpoint_text(view.src, view.sport);
+        state.a2b_seen += 1;
+        state.last_a2b_from = Some(from.clone());
+        let Some(own) = own else {
+            state.echoes_skipped += 1;
+            if !state.own_absent_noted {
+                state.own_absent_noted = true;
+                eprintln!(
+                    "[n2h-peer] a posctl probe arrived but this peer has no overlay address yet \
+                     (network map not applied): not echoing — the source is never invented"
+                );
+            }
+            continue;
+        };
+        let echo = hs::build_ipv4_udp_packet(own, view.src, view.dport, view.sport, view.payload);
+        let (wn, errno) = sys::write_fd(tun_hand, &echo);
+        if wn <= 0 {
+            state.echoes_skipped += 1;
+            eprintln!("[n2h-peer] echo write failed (errno={errno}) to {from}");
+        } else {
+            state.echoes_sent += 1;
+            eprintln!(
+                "[n2h-peer] echoed a2b probe back to {from} ({} bytes, verbatim)",
+                view.payload.len()
+            );
+        }
+    }
+}
+
+/// Inject ONE b2a posctl probe toward the device overlay (design §4.3): the
+/// announced marker's payload, from this peer's overlay address on the posctl
+/// port, into the TUN stand-in — i.e. through the real WG session.
+fn n2h_peer_send_b2a(state: &mut N2hPeerState, own: Option<[u8; 4]>, tun_hand: i32) {
+    let Some((dst_ip, dst_port)) = state.opts.overlay_dst() else { return };
+    let Some(own) = own else {
+        if !state.own_absent_noted {
+            state.own_absent_noted = true;
+            eprintln!(
+                "[n2h-peer] no overlay address yet (network map not applied): the b2a probe waits"
+            );
+        }
+        return;
+    };
+    let payload = nc::posctl_payload(&state.marker);
+    let frame = hs::build_ipv4_udp_packet(
+        own,
+        dst_ip,
+        state.opts.echo_port,
+        dst_port,
+        payload.as_bytes(),
+    );
+    let (n, errno) = sys::write_fd(tun_hand, &frame);
+    if n <= 0 {
+        eprintln!(
+            "[n2h-peer] b2a inject failed (errno={errno}) to {}",
+            endpoint_text(dst_ip, dst_port)
+        );
+        return;
+    }
+    state.b2a_sent += 1;
+}
+
+/// `Some(frame_len)` when a frame is readable on `fd` within `wait_ms`
+/// (bounded poll + read); `None` = the wait expired or the fd had nothing
+/// usable. `wait_ms = 0` makes it the non-blocking data-path read; the 对拍's
+/// fake device uses it with a real wait so every step is a bounded
+/// observation, never a sleep-as-assertion.
+fn read_frame_within(fd: i32, buf: &mut [u8], wait_ms: i32) -> Option<usize> {
+    let (ret, _errno, rev) = sys::poll1(fd, sys::POLLIN, wait_ms);
+    if ret <= 0 || (rev & sys::POLLIN) == 0 {
+        return None;
+    }
+    let (n, _errno) = sys::read_fd(fd, buf);
+    if n <= 0 {
+        None
+    } else {
+        Some(n as usize)
+    }
+}
+
+// ---- the offline `--loopback` 对拍 (design §7-I6's CLI unit test) ----
+
+/// Every field is an OBSERVATION of the fake device, never an expectation
+/// written down as a result.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct N2hPeerLoopbackReport {
+    /// ① the peer's ACTIVE b2a probe reached the device side.
+    b2a_observed: bool,
+    /// ② the device's a2b probe came back.
+    a2b_echo_observed: bool,
+    /// ② …byte-identical to what was sent.
+    echo_verbatim: bool,
+    /// ② …with the five-tuple swapped (src↔dst, sport↔dport).
+    echo_tuple_swapped: bool,
+    /// ③ a NON-posctl payload was echoed back (a reflection bug — must stay
+    /// false).
+    non_posctl_echo: bool,
+    frames_seen: u64,
+}
+
+impl N2hPeerLoopbackReport {
+    /// All three legs held.
+    fn ok(&self) -> bool {
+        self.b2a_observed
+            && self.a2b_echo_observed
+            && self.echo_verbatim
+            && self.echo_tuple_swapped
+            && !self.non_posctl_echo
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"tool\":\"nbinterop\",\"check\":\"n2h-peer-loopback\",\"ok\":{},\
+             \"b2a_observed\":{},\"a2b_echo_observed\":{},\"echo_verbatim\":{},\
+             \"echo_tuple_swapped\":{},\"non_posctl_echo\":{},\"frames_seen\":{}}}",
+            self.ok(),
+            self.b2a_observed,
+            self.a2b_echo_observed,
+            self.echo_verbatim,
+            self.echo_tuple_swapped,
+            self.non_posctl_echo,
+            self.frames_seen
+        )
+    }
+}
+
+/// `nbinterop n2h-peer --loopback`: the offline 对拍 of design §7-I6
+/// ("CLI 单测（loopback 对拍）"), runnable on any host with no connector, no
+/// config and no network beyond ONE AF_UNIX socketpair that stands in for the
+/// tunnel. The PEER side runs the SHIPPED [`n2h_peer_tick`]; a FAKE DEVICE on
+/// the far end plays the device collector's two posctl legs (see
+/// [`N2hPeerLoopbackReport`]). Human lines — including the REAL status lines —
+/// go to stderr, one JSON summary to stdout; exit 0 = all three legs held.
+fn cmd_n2h_peer_loopback(args: &[String]) -> i32 {
+    let (o, _json) = match parse_flags(args) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    if !o.config.is_empty() {
+        eprintln!("error: --loopback starts no connector: drop --config\n\n{USAGE}");
+        return hs::EXIT_USAGE;
+    }
+    let opts = o.n2h_peer.clone().unwrap_or_default();
+    let fuse_ms = if o.timeout_s > 0 { o.timeout_s * 1000 } else { N2H_PEER_LOOPBACK_FUSE_MS };
+    let (code, report) = match run_n2h_peer_loopback(&opts, fuse_ms) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: n2h-peer --loopback: {e}");
+            return hs::EXIT_UNKNOWN_CLASS;
+        }
+    };
+    println!("{}", report.to_json());
+    eprintln!(
+        "[n2h-peer] loopback 对拍: ok={} b2a_observed={} a2b_echo={} verbatim={} tuple_swapped={} \
+         non_posctl_echo={} frames_seen={}",
+        report.ok(),
+        report.b2a_observed,
+        report.a2b_echo_observed,
+        report.echo_verbatim,
+        report.echo_tuple_swapped,
+        report.non_posctl_echo,
+        report.frames_seen
+    );
+    code
+}
+
+/// The 对拍 itself: the real tick against a socketpair whose far end is the
+/// fake device. Bounded by `fuse_ms` (the fake device's own steps are bounded
+/// too, so the join always returns).
+fn run_n2h_peer_loopback(
+    opts: &N2hPeerOpts,
+    fuse_ms: u64,
+) -> Result<(i32, N2hPeerLoopbackReport), String> {
+    // the loopback stand-in: this process plays itself as 127.0.0.1 and the
+    // device as `--overlay` (default: the same loopback pair, posctl port)
+    let own: [u8; 4] = [127, 0, 0, 1];
+    let dev: ([u8; 4], u16) = opts
+        .overlay_dst()
+        .unwrap_or(([127, 0, 0, 1], opts.echo_port));
+    let peer_port = opts.echo_port;
+    let device_sport = 40_002u16; // the device's ephemeral posctl socket port
+    // the state needs the EFFECTIVE destination (live mode always has one:
+    // `cmd_engine` refuses an n2h-peer run without `--overlay`)
+    let mut opts = opts.clone();
+    opts.overlay = Some(std::net::Ipv4Addr::from(dev.0));
+    opts.overlay_port = Some(dev.1);
+    let mut state = N2hPeerState::new(opts)?;
+    let a2b_payload = nc::posctl_payload(&netbird_core::n2h::probe_id(
+        nc::POSCTL_KIND_TOKEN,
+        &netbird_core::n2h::fresh_nonce_hex()?,
+    ));
+
+    let (peer_hand, dev_hand) = hs::open_tun_standby_pair()
+        .map_err(|e| format!("TUN stand-in pair: {} (errno={})", e.token, e.errno))?;
+    let mut bag = hs::FdBag::new();
+    bag.keep(peer_hand);
+    bag.keep(dev_hand);
+
+    eprintln!("{}", state.announce_line());
+    let fake = std::thread::spawn(move || {
+        n2h_peer_fake_device(dev_hand, dev, (own, peer_port), device_sport, a2b_payload.as_bytes())
+    });
+
+    let start = Instant::now();
+    while !fake.is_finished() && start.elapsed().as_millis() < fuse_ms as u128 {
+        n2h_peer_tick(&mut state, Some(own), true, peer_hand, sys::mono_ms());
+        sys::sleep_ms(20);
+    }
+    let report = match fake.join() {
+        Ok(r) => r,
+        Err(_) => return Err("the fake device panicked".to_string()),
+    };
+    state.report_final(Some(own));
+    let code = if report.ok() { hs::EXIT_OK } else { hs::EXIT_SELFTEST_FAILED };
+    Ok((code, report))
+}
+
+/// The fake device of the `--loopback` 对拍 (its own thread; every step is a
+/// bounded poll):
+/// ① it must see the peer's b2a probe arrive on the posctl port (the announced
+///    marker, a well-formed `N2H-posctl-…|positive-control` payload);
+/// ② it sends an a2b posctl probe FROM its own port and must get it back
+///    verbatim with the five-tuple swapped;
+/// ③ it sends one non-posctl payload and must get NOTHING back.
+fn n2h_peer_fake_device(
+    hand: i32,
+    dev: ([u8; 4], u16),
+    peer: ([u8; 4], u16),
+    device_sport: u16,
+    a2b_payload: &[u8],
+) -> N2hPeerLoopbackReport {
+    let mut report = N2hPeerLoopbackReport::default();
+    let mut buf = [0u8; N2H_PEER_FRAME_MAX];
+
+    // ① the peer's active b2a probe
+    let deadline = Instant::now() + Duration::from_millis(N2H_PEER_LOOPBACK_STEP_MS as u64);
+    while !report.b2a_observed && Instant::now() < deadline {
+        let Some(n) = read_frame_within(hand, &mut buf, 100) else { continue };
+        report.frames_seen += 1;
+        let Some(view) = netbird_core::n2h::parse_ipv4_frame(&buf[..n]) else { continue };
+        if view.proto == 17
+            && view.dst == dev.0
+            && view.dport == dev.1
+            && nc::posctl_marker(view.payload).is_some()
+        {
+            report.b2a_observed = true;
+            eprintln!(
+                "[n2h-peer --loopback] device side observed the b2a probe {} ({} -> {})",
+                String::from_utf8_lossy(view.payload),
+                endpoint_text(view.src, view.sport),
+                endpoint_text(view.dst, view.dport)
+            );
+        }
+    }
+
+    // ② the a2b probe + the verbatim echo
+    let a2b = hs::build_ipv4_udp_packet(dev.0, peer.0, device_sport, peer.1, a2b_payload);
+    let (wn, errno) = sys::write_fd(hand, &a2b);
+    if wn as usize == a2b.len() {
+        let deadline = Instant::now() + Duration::from_millis(N2H_PEER_LOOPBACK_STEP_MS as u64);
+        while !report.a2b_echo_observed && Instant::now() < deadline {
+            let Some(n) = read_frame_within(hand, &mut buf, 100) else { continue };
+            report.frames_seen += 1;
+            let Some(view) = netbird_core::n2h::parse_ipv4_frame(&buf[..n]) else { continue };
+            if view.payload != a2b_payload {
+                continue;
+            }
+            report.a2b_echo_observed = true;
+            // the payload equality above IS the verbatim check
+            report.echo_verbatim = true;
+            report.echo_tuple_swapped = view.src == peer.0
+                && view.sport == peer.1
+                && view.dst == dev.0
+                && view.dport == device_sport;
+            eprintln!(
+                "[n2h-peer --loopback] device side received the echo {} -> {} ({} bytes, verbatim)",
+                endpoint_text(view.src, view.sport),
+                endpoint_text(view.dst, view.dport),
+                view.payload.len()
+            );
+        }
+    } else {
+        eprintln!("[n2h-peer --loopback] a2b write failed (errno={errno})");
+    }
+
+    // ③ the negative case: a non-posctl payload must NOT come back
+    let junk = b"nbinterop-probe";
+    let junk_frame = hs::build_ipv4_udp_packet(dev.0, peer.0, device_sport, peer.1, junk);
+    let _ = sys::write_fd(hand, &junk_frame);
+    let deadline = Instant::now() + Duration::from_millis(N2H_PEER_LOOPBACK_NEGATIVE_MS as u64);
+    while Instant::now() < deadline {
+        let Some(n) = read_frame_within(hand, &mut buf, 50) else { continue };
+        report.frames_seen += 1;
+        if let Some(view) = netbird_core::n2h::parse_ipv4_frame(&buf[..n]) {
+            if view.payload == junk {
+                report.non_posctl_echo = true;
+                eprintln!(
+                    "[n2h-peer --loopback] the peer echoed a NON-posctl payload (reflection bug)"
+                );
+            }
+        }
+    }
+    report
+}
+
+// ---------------------------------------------------------------------------
 // connect / peer engine
 // ---------------------------------------------------------------------------
 
@@ -695,6 +1399,29 @@ fn cmd_engine(mode: &'static str, args: &[String]) -> i32 {
         Ok(v) => v,
         Err(code) => return code,
     };
+    if mode == "n2h-peer" {
+        // I6 fail-closed inputs, checked BEFORE anything is dialled: the
+        // `n2h-peer` mode exists only with its flags (never inherited by
+        // accident), and the device overlay endpoint is never guessed.
+        match o.n2h_peer.as_ref() {
+            None => {
+                eprintln!("error: n2h-peer requires --overlay <ip[:port]> (the DEVICE's overlay endpoint)\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+            Some(p) if p.loopback => {
+                eprintln!("error: n2h-peer --loopback starts no connector: drop --config\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+            Some(p) if p.overlay.is_none() => {
+                eprintln!("error: n2h-peer requires --overlay <ip[:port]> (the DEVICE's overlay endpoint)\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+            Some(_) => {}
+        }
+    } else if o.n2h_peer.is_some() {
+        eprintln!("error: the n2h-peer flags (--overlay/--echo-port/--posctl-interval/--loopback) belong to the n2h-peer subcommand\n\n{USAGE}");
+        return hs::EXIT_USAGE;
+    }
     if o.config.is_empty() {
         eprintln!("error: --config <file> is required for {mode}\n\n{USAGE}");
         return hs::EXIT_USAGE;
@@ -871,6 +1598,24 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
         enabled: o.probe_interval_ms > 0,
         ..Default::default()
     };
+    // N2-H I6: the peer-side posctl endpoint, ONLY when `n2h-peer` asked for it
+    // (every other mode leaves this `None` and runs the loop unchanged). The
+    // b2a marker is announced HERE, before the first probe, so the device side
+    // can register it for its own window.
+    let mut n2h_peer = match o.n2h_peer.as_ref() {
+        Some(p) => match N2hPeerState::new(p.clone()) {
+            Ok(state) => {
+                eprintln!("{}", state.announce_line());
+                Some(state)
+            }
+            Err(e) => {
+                eprintln!("error: n2h-peer entropy unavailable: {e}");
+                hs::stop_connector();
+                return hs::EXIT_UNKNOWN_CLASS;
+            }
+        },
+        None => None,
+    };
 
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -907,6 +1652,13 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
         }
         if probe_tick {
             probe.report();
+        }
+
+        // N2-H I6: the peer-side posctl endpoint (echo every beat, probe +
+        // status line once per --posctl-interval). `seen.wg_ready` is the
+        // session gate: nothing is injected into a tunnel that is not up.
+        if let Some(state) = n2h_peer.as_mut() {
+            n2h_peer_tick(state, own_addr, seen.wg_ready, tun_hand, now as u64);
         }
 
         if !printed || now.saturating_sub(last_print) >= o.interval_ms as u128 {
@@ -960,6 +1712,19 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
         }
 
         if o.timeout_s > 0 && now >= o.timeout_s as u128 * 1000 {
+            if let Some(state) = n2h_peer.as_ref() {
+                // `n2h-peer` has no goal to reach: `--timeout` IS the
+                // registered stop form (§6.4-6), so a bounded run that did
+                // what it was asked for exits 0 (and states its final
+                // counters one last time).
+                eprintln!(
+                    "[n2h-peer] --timeout {}s elapsed; stopping (the registered stop form)",
+                    o.timeout_s
+                );
+                state.report_final(own_addr);
+                hs::stop_connector();
+                return hs::EXIT_OK;
+            }
             eprintln!(
                 "[nbinterop] --timeout {}s elapsed before the goal; stopping",
                 o.timeout_s
@@ -1279,5 +2044,211 @@ impl Milestones {
             eprintln!("[milestone] ice connected peers = {connected}");
         }
         self.ice_connected = connected;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I6 tests — the `n2h-peer` echo path and status line, offline (design §7-I6)
+// ---------------------------------------------------------------------------
+
+/// Run with `cargo test --offline --locked --features cli --bin nbinterop`
+/// (the bin is `required-features = ["cli"]`, so the default `cargo test` does
+/// not build it). Nothing here needs a connector, a config or the network: the
+/// 对拍 runs over ONE AF_UNIX socketpair.
+#[cfg(test)]
+mod n2h_peer_tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The design §7-I6 acceptance: the echo path and the peer status line,
+    /// end to end, with a fake device on the far end of the tunnel stand-in.
+    #[test]
+    fn the_loopback_check_verifies_the_echo_path_and_the_status_line() {
+        let opts = N2hPeerOpts { posctl_interval_ms: 100, ..Default::default() };
+        let (code, report) = run_n2h_peer_loopback(&opts, 5_000).expect("loopback run");
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(code, hs::EXIT_OK, "{report:?}");
+        assert!(report.b2a_observed, "the peer's active probe reached the device side");
+        assert!(report.a2b_echo_observed, "the device's probe came back");
+        assert!(report.echo_verbatim && report.echo_tuple_swapped, "{report:?}");
+        assert!(!report.non_posctl_echo, "the peer must not be a reflector");
+        println!("[I6-cli] loopback 对拍: {}", report.to_json());
+    }
+
+    /// …and the same run through the CLI entry (`--loopback` is the opt-in, the
+    /// exit code is the verdict).
+    #[test]
+    fn the_cli_loopback_entry_exits_zero_on_a_healthy_run() {
+        let code = cmd_n2h_peer(&args(&[
+            "--loopback",
+            "--posctl-interval",
+            "100",
+            "--timeout",
+            "4",
+        ]));
+        assert_eq!(code, hs::EXIT_OK);
+    }
+
+    /// One non-posctl frame in ⇒ nothing out (the endpoint is not a reflector);
+    /// one well-formed posctl probe in ⇒ the SAME bytes out with the five-tuple
+    /// swapped.
+    #[test]
+    fn a_posctl_probe_is_echoed_verbatim_and_anything_else_is_ignored() {
+        let (hand, far) = hs::open_tun_standby_pair().expect("TUN stand-in pair");
+        let mut bag = hs::FdBag::new();
+        bag.keep(hand);
+        bag.keep(far);
+        let mut state = N2hPeerState::new(N2hPeerOpts::default()).expect("state");
+        let own = [127, 0, 0, 1];
+        let mut buf = [0u8; N2H_PEER_FRAME_MAX];
+
+        // ① a foreign payload (the CLI's own probe fingerprint) is NOT echoed
+        let junk = hs::build_ipv4_udp_packet(own, [127, 0, 0, 9], 41_000, 40_001, b"nbinterop-probe");
+        assert_eq!(sys::write_fd(far, &junk).0 as usize, junk.len());
+        for _ in 0..5 {
+            n2h_peer_drain_and_echo(&mut state, Some(own), hand);
+            sys::sleep_ms(10);
+        }
+        assert_eq!((state.a2b_seen, state.echoes_sent), (0, 0));
+        assert_eq!(read_frame_within(far, &mut buf, 50), None, "nothing may come back");
+
+        // ② a well-formed posctl probe (any addressed port, the marker is the
+        //    receipt) comes back byte-identical with the tuple swapped
+        let marker = netbird_core::n2h::probe_id(nc::POSCTL_KIND_TOKEN, &"cd".repeat(12));
+        let payload = nc::posctl_payload(&marker);
+        let probe =
+            hs::build_ipv4_udp_packet([127, 0, 0, 7], own, 41_000, 40_001, payload.as_bytes());
+        assert_eq!(sys::write_fd(far, &probe).0 as usize, probe.len());
+        let mut echoed: Option<Vec<u8>> = None;
+        for _ in 0..100 {
+            n2h_peer_drain_and_echo(&mut state, Some(own), hand);
+            if let Some(n) = read_frame_within(far, &mut buf, 10) {
+                echoed = Some(buf[..n].to_vec());
+                break;
+            }
+            sys::sleep_ms(10);
+        }
+        let echoed = echoed.expect("the echo came back");
+        assert_eq!(&echoed[28..], payload.as_bytes(), "payload verbatim");
+        let view = netbird_core::n2h::parse_ipv4_frame(&echoed).expect("echo parses");
+        assert_eq!(
+            (view.src, view.sport, view.dst, view.dport),
+            (own, 40_001, [127, 0, 0, 7], 41_000),
+            "five-tuple swapped"
+        );
+        assert_eq!((state.a2b_seen, state.echoes_sent), (1, 1));
+        println!("[I6-cli] verbatim echo: {} bytes, tuple {view:?}", echoed.len());
+    }
+
+    /// The status line is the device-side channel: the announced marker, the
+    /// destinations, and `unknown_peer_drops` reported as `na` when no
+    /// connector/device exists (never a fabricated zero), with the absolute
+    /// value plus the delta once it is readable.
+    #[test]
+    fn the_status_line_announces_the_marker_and_reports_the_drops_gap_honestly() {
+        let opts = N2hPeerOpts {
+            overlay: Some(std::net::Ipv4Addr::new(100, 64, 0, 7)),
+            overlay_port: Some(40_001),
+            ..Default::default()
+        };
+        let mut state = N2hPeerState::new(opts).expect("state");
+        assert!(state.marker.starts_with("N2H-posctl-"), "{}", state.marker);
+        assert_eq!(state.marker.len(), "N2H-posctl-".len() + 24);
+        let marker_payload = nc::posctl_payload(&state.marker);
+        assert_eq!(nc::posctl_marker(marker_payload.as_bytes()), Some(state.marker.as_str()));
+
+        let announce = state.announce_line();
+        assert!(announce.starts_with("nbinterop: n2h-peer|"), "{announce}");
+        assert!(announce.contains(&format!("b2a_probe_id={}", state.marker)), "{announce}");
+        assert!(announce.contains("b2a_dst=100.64.0.7:40001"), "{announce}");
+        assert!(announce.contains("echo_port=40001"), "{announce}");
+        assert!(announce.contains("loopback=false"), "{announce}");
+
+        // no connector in this process ⇒ `na`, never a zero
+        let none = state.sample_drops(None);
+        assert_eq!(none, (None, None));
+        let line = state.status_line(Some([100, 64, 0, 8]), none);
+        assert!(line.starts_with("nbinterop: n2h-peer-stats|"), "{line}");
+        assert!(line.contains(&format!("b2a_probe_id={}", state.marker)), "{line}");
+        assert!(line.contains("own_overlay=100.64.0.8:40001"), "{line}");
+        assert!(line.contains("unknown_peer_drops=na|unknown_peer_drops_delta=na"), "{line}");
+        assert!(line.contains("last_a2b_from=na"), "{line}");
+
+        // a readable counter: absolute value + delta since the first sample
+        assert_eq!(state.sample_drops(Some(7)), (Some(7), Some(0)));
+        let sample = state.sample_drops(Some(9));
+        assert_eq!(sample, (Some(9), Some(2)));
+        let line = state.status_line(Some([100, 64, 0, 8]), sample);
+        assert!(line.contains("unknown_peer_drops=9|unknown_peer_drops_delta=2"), "{line}");
+        println!("[I6-cli] {announce}");
+        println!("[I6-cli] {line}");
+    }
+
+    /// The flags are parsed fail-closed, and the mode is never entered by
+    /// accident (design §6's "default off, explicit opt-in").
+    #[test]
+    fn n2h_peer_flags_are_parsed_fail_closed() {
+        let (o, _) = parse_flags(&args(&["--overlay", "100.64.0.7"])).expect("parses");
+        let peer = o.n2h_peer.clone().expect("n2h-peer opts");
+        assert_eq!(peer.overlay_dst(), Some(([100, 64, 0, 7], 40_001)));
+        assert!(!peer.loopback);
+
+        let (o, _) = parse_flags(&args(&[
+            "--overlay=100.64.0.7:40002",
+            "--echo-port",
+            "40003",
+            "--posctl-interval",
+            "250",
+            "--loopback",
+        ]))
+        .expect("parses");
+        let peer = o.n2h_peer.clone().expect("n2h-peer opts");
+        assert_eq!(peer.overlay_dst(), Some(([100, 64, 0, 7], 40_002)));
+        assert_eq!(peer.echo_port, 40_003);
+        assert_eq!(peer.posctl_interval_ms, 250);
+        assert!(peer.loopback);
+
+        for bad in ["::1", "peer.example", "100.64.0.7:0", "100.64.0.7:http", "300.1.1.1", "100.64.0.7:"] {
+            assert!(
+                parse_flags(&args(&["--overlay", bad])).is_err(),
+                "--overlay {bad} must be refused"
+            );
+        }
+        for bad in [
+            ["--echo-port", "0"],
+            ["--echo-port", "70000"],
+            ["--posctl-interval", "0"],
+            ["--posctl-interval", "soon"],
+        ] {
+            assert!(parse_flags(&args(&bad)).is_err(), "{bad:?} must be refused");
+        }
+
+        // no n2h-peer flag at all ⇒ the mode is not entered
+        let (o, _) = parse_flags(&args(&["--config", "x.conf"])).expect("parses");
+        assert!(o.n2h_peer.is_none());
+    }
+
+    /// The mode's own gates: a live run needs `--overlay` (checked before any
+    /// config or socket work), `--loopback` starts no connector, and the
+    /// n2h-peer flags are refused by every other subcommand.
+    #[test]
+    fn n2h_peer_requires_its_own_flags_and_never_borrows_another_mode() {
+        assert_eq!(
+            cmd_engine("n2h-peer", &args(&["--config", "does-not-exist.conf"])),
+            hs::EXIT_USAGE
+        );
+        assert_eq!(
+            cmd_n2h_peer(&args(&["--loopback", "--config", "does-not-exist.conf"])),
+            hs::EXIT_USAGE
+        );
+        assert_eq!(
+            cmd_engine("peer", &args(&["--config", "x.conf", "--overlay", "100.64.0.7"])),
+            hs::EXIT_USAGE
+        );
+        assert_eq!(cmd_engine("connect", &args(&["--echo-port", "40001"])), hs::EXIT_USAGE);
+        println!("[I6-cli] mode gates: n2h-peer flags are opt-in and refused elsewhere");
     }
 }

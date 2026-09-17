@@ -274,6 +274,10 @@ hilog 抓取（grep N2H_） ◄────────────────�
 5. hdc shell "cat /proc/net/dev"（vpn-tun 计数，C7/C9；App 内直读失败时为 D 类 fallback）
 6. 主机侧（非设备操作，一并登记）：nbinterop n2h-peer 的启动与停止
    （形态：target/debug/nbinterop n2h-peer --overlay <ip:port> --echo-port 40001）
+   【I6 落地后的逐字形态，2026-09-17，理由见 §13.8：`target/debug/nbinterop n2h-peer
+   --config <主机侧对端 config 路径> --overlay <设备 overlay ip[:port]> --echo-port 40001
+   [--posctl-interval <ms>] [--timeout <s>]`；`--timeout` 到期即退出 0（登记为停止形态）；
+   `--loopback` 为离线自检对拍，不属设备轮命令面】
 ```
 
 每条的坐标/目的/次数逐条登记（沿草案 §5 纪律）；授权类别选择（campaign pair vs 诊断例外二）仍由人类/T0 决定（预注册草案 §5 末、§9-1）。
@@ -432,4 +436,46 @@ hilog 抓取（grep N2H_） ◄────────────────�
   - `cd client/core && cargo test --offline --locked --color never` → 34 个测试目标全 `ok`，合计 **520 passed / 0 failed / 0 ignored**（基线 517/0 + 本节新增 3 例：`connector::tests::core_freeze_inputs_read_the_sessions_internal_stuns_and_dial_address`、`n2h_collector::tests::core_freeze_inputs_close_the_stun_and_management_gap`、`tests/n2h_device_collector.rs::a_started_connector_installs_the_production_host_with_internal_freeze_sources`）。
   - `bash client/core/build.sh` → exit 0，`14/14 frozen BoringTun ffi symbols present in dynsym`。
   - `bash client/build.sh` → exit 0（ArkTS 编译含 I5 的 ets 改动通过），`entry-default-unsigned.hap` 4 208 659 bytes，sha256 `8ec9b0bb49d860a51fc787a55c61e74ad262d6c1ee15ae9666a9e2e49191dc89`。
+
+### 13.8 ⑦ I6 落地：`nbinterop n2h-peer`（echo + posctl 发送 + 对端状态行）
+
+- **依据**：§7-I6 行（本文档 :295）+ §4.3（正控 a2b/b2a 语义与对端配合）+ §6.4 第 6 条（AUTH 逐字命令面）。基线 HEAD `e6e4f3a`（`git log --oneline -1` 实读）；下列 file:line 均为落地后工作树实读（未 commit）。
+- **命令面（落地形态，§6.4 第 6 条已就地补注）**：
+  - 活体：`target/debug/nbinterop n2h-peer --config <主机侧对端 config> --overlay <设备 overlay ip[:port]> [--echo-port <port>] [--posctl-interval <ms>] [--interval <ms>] [--timeout <s>]`（`bin/nbinterop.rs:1397` 的 `cmd_engine` 模式分支 `n2h-peer`，`:902` 的 `cmd_n2h_peer` 分派）。
+  - 离线自检：`target/debug/nbinterop n2h-peer --loopback [--overlay …] [--echo-port …] [--posctl-interval …] [--timeout <s>]`（§7-I6 的「CLI 单测（loopback 对拍）」的可执行形态：一条 AF_UNIX socketpair 作隧道替身 + 对端假设备线程；`:1221`/`:1257`）。
+  - **与 §6.4 示例形态的差异（唯一一处）**：设计示例未含 `--config`，但 echo 与 b2a 双腿都走隧道（对端必须是同一 NetBird 网络的 WG 成员：b2a 要经隧道抵达设备 to-os 侧，echo 要经隧道回设备），且 `unknown_peer_drops` 是**该对端自身 WG 设备**的计数器——故 `--config` 为必需项（与既有 `peer` 子命令同源）。停形态：`--timeout <s>` 到期 → 打印末次状态行并 **exit 0**（`:1721`；该模式无「目标可达」语义，超时即登记停止形态）。
+- **默认关闭（§6.1）**：仅 `n2h-peer` 子命令可达；其他子命令带 `--overlay/--echo-port/--posctl-interval/--loopback` 任一 → `cmd_engine` 直接 exit 2（`:1421`）；活体缺 `--overlay` → exit 2，且在**任何** config/拨号动作之前判定（`:1402`；`--overlay` 是设备 overlay 端点，绝不猜）。
+- **marker 通道（§4.3 的 b2a 前提）**：启动即生成**一次**稳定 marker `b2a_probe_id=N2H-posctl-<24 hex>`（`n2h::probe_id` + `n2h::fresh_nonce_hex`，与设备 §4.2/I3 完全同形），b2a 探针按 `--posctl-interval`（默认 1000 ms，`bin/nbinterop.rs:399` 的 `N2H_PEER_POSCTL_INTERVAL_MS`）**重复发送同一 marker**——设备侧 `build_posctl` 每窗口只读一次 `peer_report()`（`n2h_collector.rs:2427`），故「一次公告 + 重复发送」是与 I5 观测面对齐的唯一可用语义（每次换 nonce 永远不可能被观测到）。
+  - **载体 = stderr 行**（`nbinterop: n2h-peer|…` 公告行 `bin/nbinterop.rs:962` + `nbinterop: n2h-peer-stats|…` 周期状态行 `:992`）。理由：§4.3 只规定「周期状态行由主机侧直接捕获、不经设备」，未指定 stderr/stdout；本 CLI 既有约定是 **stdout 仅放状态 JSONL**（模块文档 :15-28）、诊断行一律 `nbinterop: <token>|<k=v>` 走 stderr（既有 `probe-stats` 同形，`:1907`），故沿 stderr。`n2h-peer-stats` 字段固定为
+    `b2a_probe_id|b2a_sent|a2b_seen|echoes_sent|echoes_skipped|last_a2b_from|own_overlay|unknown_peer_drops|unknown_peer_drops_delta`。
+  - **残余缺口（如实登记，本次未接线）**：设备侧消费端仍缺——`impl CollectorHost for WgFeedHost`（`n2h_collector.rs:2815`）**未覆写** `peer_report()`，故 I5 的默认空 `PeerReport` 仍是设备轮实际取值：b2a 腿会按 §4.3 记为「对端未公告 marker」缺口、`unknown_peer_drops` 收执不进设备文档。后续增量建议（两小步，均不在 I6 触面内）：① 公告行落一个 hdc 可取文件（或把 marker 并入 arm opts，`bin/nbinterop.rs` 侧已是一行即可加）；② `WgFeedHost::peer_report()` 从该来源读 `b2a_probe_id` 与 `unknown_peer_drops`。本次不改的原因：I6 触面限定 `bin/nbinterop.rs`（+ `n2h_collector.rs` 的必要 pub 暴露），且 §4.3 明示该状态行「不经设备」。
+- **`unknown_peer_drops` 的取值路径（本次唯一 pub 面扩张，理由=无其他公开路径）**：`n2h_collector` 新增默认 trait 方法 `CollectorHost::wg_stats() -> Option<WgDeviceStats>`（`n2h_collector.rs:1702`，默认 `None`）；生产实现 `WgFeedHost` 覆写为 `self.feed.with_device(|d| d.stats())`（`:2825`）。CLI 经既有的 `n2h_collector::installed_host()`（connector 启动时由 §13.1 的接线安装）取到 seam 并只读 `unknown_peer_drops`（`bin/nbinterop.rs:1034`）。`None` ⇒ 状态行打印 `unknown_peer_drops=na`（无 connector/设备未起时不猜零）。**不触碰** `connector.rs`/`wg_device.rs`/`n2h.rs`：`connector_status().wg{}` 无该字段且其渲染器是位置读冻结契约（`wg_device.rs:1532-1551`），新增字段会改 `wg` 对象形状。
+- **复用 I3 契约（未另造探针形态）**：新 pub `n2h_collector::posctl_payload(id)`（`n2h_collector.rs:1318`；`send_posctl` 改用之，行为逐字不变）与 `posctl_marker(payload) -> Option<&str>`（`:1333`，严格判定 `N2H-posctl-<24 hex>` + `|positive-control`、无尾随字节）。对端**只回显通过该判定的载荷**（`bin/nbinterop.rs:1085`），故该端点不会成为反射器（对拍第 ③ 步即该负例）。
+- **收发都在隧道内（无新 socket/端口）**：对端读 `tun_hand` = 隧道交付帧（设备的 a2b 探针），写 `tun_hand` = 注入隧道（b2a 与 echo）；echo = 收到的帧五元组交换、载荷逐字（设备 to-os tee 按 marker 子串匹配，`n2h_collector.rs:2541`）。会话未 ready（`wg.ready=false`）时 b2a 不发（`bin/nbinterop.rs:1661` 传入 `seen.wg_ready`、`:1056` 判定）——不向未建的隧道注入。
+
+- **验收实跑（工作树，HEAD `e6e4f3a` + 未提交改动）**：
+  - `cd client/core && cargo build --offline --locked --features cli --bin nbinterop` → exit 0。
+  - `cargo test --offline --locked --color never` → 34 个测试目标全 `ok`，合计 **523 passed / 0 failed / 0 ignored**（I5 基线 520/0 + 本次 3 例：`n2h_collector::tests::posctl_payload_and_marker_round_trip_on_the_frozen_wire_shape`、`n2h_collector::tests::the_default_host_exposes_no_wg_counters`、`tests/n2h_device_collector.rs::the_production_host_reports_its_live_wg_counters_for_the_peer_status_line`）。
+  - `cargo test --offline --locked --features cli --bin nbinterop` → **6 passed / 0 failed**（bin 为 `required-features = ["cli"]`，默认全量跑不含它）。
+  - `bash client/core/build.sh` → exit 0，`14/14 frozen BoringTun ffi symbols present in dynsym`（.so 未受影响：bin 不入 .so）。
+  - 离线对拍实跑：`./target/debug/nbinterop n2h-peer --loopback --posctl-interval 300 --timeout 3` → **exit 0**，stdout `{"tool":"nbinterop","check":"n2h-peer-loopback","ok":true,"b2a_observed":true,"a2b_echo_observed":true,"echo_verbatim":true,"echo_tuple_swapped":true,"non_posctl_echo":false,…}`（真实 stderr 状态行样例见 §13.9）。
+- **改动文件**：`client/core/src/bin/nbinterop.rs`（子命令 + 活体接线 + 离线对拍 + 6 单测）、`client/core/src/n2h_collector.rs`（`posctl_payload`/`posctl_marker` 两个 pub 函数 + `CollectorHost::wg_stats` 默认方法 + `WgFeedHost` 覆写 + 2 单测）、`client/core/tests/n2h_device_collector.rs`（+1 生产 host 计数器用例）、本文件（§6.4 第 6 条补注 + 本节）。未触碰 `connector.rs`/`napi.rs`/`n2h.rs`/`wg_device.rs`/`host_sockets.rs`/ets。
+
+### 13.9 ⑦ 真实 stderr 样例（I6 离线对拍，逐字）
+
+`./target/debug/nbinterop n2h-peer --loopback --posctl-interval 300 --timeout 3` → exit 0：
+
+```
+nbinterop: n2h-peer|b2a_probe_id=N2H-posctl-cea8da680963ce14456c4f6d|b2a_dst=127.0.0.1:40001|echo_port=40001|posctl_interval_ms=300|loopback=true
+nbinterop: n2h-peer-stats|b2a_probe_id=N2H-posctl-cea8da680963ce14456c4f6d|b2a_sent=1|a2b_seen=0|echoes_sent=0|echoes_skipped=0|last_a2b_from=na|own_overlay=127.0.0.1:40001|unknown_peer_drops=na|unknown_peer_drops_delta=na
+[n2h-peer --loopback] device side observed the b2a probe N2H-posctl-cea8da680963ce14456c4f6d|positive-control (127.0.0.1:40001 -> 127.0.0.1:40001)
+[n2h-peer] echoed a2b probe back to 127.0.0.1:40002 (52 bytes, verbatim)
+[n2h-peer --loopback] device side received the echo 127.0.0.1:40001 -> 127.0.0.1:40002 (52 bytes, verbatim)
+nbinterop: n2h-peer-stats|b2a_probe_id=N2H-posctl-cea8da680963ce14456c4f6d|b2a_sent=2|a2b_seen=1|echoes_sent=1|echoes_skipped=0|last_a2b_from=127.0.0.1:40002|own_overlay=127.0.0.1:40001|unknown_peer_drops=na|unknown_peer_drops_delta=na
+[n2h-peer] loopback 对拍: ok=true b2a_observed=true a2b_echo=true verbatim=true tuple_swapped=true non_posctl_echo=false frames_seen=3
+```
+
+stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":true,"b2a_observed":true,"a2b_echo_observed":true,"echo_verbatim":true,"echo_tuple_swapped":true,"non_posctl_echo":false,"frames_seen":3}`
+
+活体运行时同一形状，只是 `loopback=false`、`b2a_dst`/`own_overlay` 为真实 overlay 端点、`unknown_peer_drops` 为对端 WG 设备的真实计数（`na` 仅当设备未起）。
 

@@ -1565,6 +1565,70 @@ fn the_production_wg_feed_host_gates_the_arm_and_scans_real_tun_frames() {
 }
 
 // ---------------------------------------------------------------------------
+// I6: the peer-side status channel's read — the PRODUCTION host's live counters
+// ---------------------------------------------------------------------------
+
+/// `nbinterop n2h-peer` must report the counterparty's own `unknown_peer_drops`
+/// (design §4.3/§4.0's `peer-device-offpath-drop` receipt). The read goes
+/// through the collector's installed host seam — the connector's live WG feed —
+/// because that is the ONE public path to those counters from a host process;
+/// this test pins it against a REAL [`WgDeviceFeed`]:
+/// ① no device up ⇒ `None` (the status line says `na`, never a guess);
+/// ② device up ⇒ the feed's exact live counters;
+/// ③ a datagram from an UNKNOWN source (exactly what a remote peer's
+///    `wg_peer` outer probe looks like at the receiving socket) is counted by
+///    the device and is visible through the seam.
+#[test]
+fn the_production_host_reports_its_live_wg_counters_for_the_peer_status_line() {
+    let _guard = serial();
+    show_panics();
+    reset_collector();
+    let wg_raw = host_sockets::open_udp_ephemeral().expect("wg socket");
+    let wg_port = host_sockets::udp_bound_port(wg_raw).expect("wg port");
+    let (tun_raw, tun_hand) = host_sockets::open_tun_standby_pair().expect("TUN stand-in");
+    let mut bag = FdBag::new();
+    bag.keep(wg_raw);
+    bag.keep(tun_raw);
+    bag.keep(tun_hand);
+    let cfg = WgDeviceConfig::new(netbird_core::util::base64(&[0x5Au8; 32]));
+    let feed = Arc::new(WgDeviceFeed::new(cfg));
+    let host: Arc<nc::WgFeedHost> =
+        Arc::new(nc::WgFeedHost::new(feed.clone()).with_hdc_capture_path(None));
+
+    // ① no feed ⇒ no device ⇒ no counters (fail-closed, never a zero guess)
+    assert_eq!(nc::CollectorHost::wg_stats(&*host), None);
+
+    feed.feed_wg_socket(wg_raw).expect("wg socket feed");
+    feed.feed_tun(tun_raw).expect("tun feed");
+    assert!(feed.device_up(), "the real device is up after both feeds");
+    let fresh = nc::CollectorHost::wg_stats(&*host).expect("device up ⇒ counters");
+    assert_eq!(fresh, feed.with_device(|d| d.stats()).expect("device"));
+    assert_eq!(fresh.unknown_peer_drops, 0);
+
+    // ③ an off-path datagram: the source (127.0.0.1:<ephemeral>) is no peer
+    // endpoint, so the device drops + counts it — the receipt the device-side
+    // collector reads as `peer-device-offpath-drop`
+    let sender = UdpSocket::bind("127.0.0.1:0").expect("sender");
+    let probe = b"N2H-wg_peer-00112233445566778899aabb";
+    let sent = sender
+        .send_to(probe, SocketAddr::from(([127, 0, 0, 1], wg_port)))
+        .expect("off-path datagram");
+    assert_eq!(sent, probe.len());
+    wait_until(5_000, "the off-path datagram reaches the fed wg socket", || {
+        feed.with_device(|d| d.service_udp(sys::mono_ms())).unwrap_or(0) > 0
+    });
+    let counted = nc::CollectorHost::wg_stats(&*host).expect("counters");
+    assert_eq!(counted.unknown_peer_drops, 1, "unknown source ⇒ counted, not processed");
+    assert_eq!(counted.rx_packets, 0, "…and it is NOT counted as peer traffic");
+    assert_eq!(counted, feed.with_device(|d| d.stats()).expect("device"));
+    println!(
+        "[I6] production host wg_stats: unknown_peer_drops={} rx_packets={} (read through \
+         n2h_collector::CollectorHost::wg_stats)",
+        counted.unknown_peer_drops, counted.rx_packets
+    );
+}
+
+// ---------------------------------------------------------------------------
 // the PRODUCTION wiring (§7-I5 gap): a started connector installs the seam
 // ---------------------------------------------------------------------------
 

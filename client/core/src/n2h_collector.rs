@@ -1308,6 +1308,39 @@ pub const POSCTL_PAYLOAD_SUFFIX: &str = "|positive-control";
 /// Probe-id kind token of the positive control (the host uses the same one).
 pub const POSCTL_KIND_TOKEN: &str = "posctl";
 
+/// The datagram payload of ONE positive control: `N2H-posctl-<nonce>` +
+/// [`POSCTL_PAYLOAD_SUFFIX`] (design §4.3; the host shape `n2h.rs:1558`).
+///
+/// Single source of the wire form for BOTH ends of the leg: the device
+/// collector sends it ([`send_posctl`], I3/I5) and the host-side peer endpoint
+/// (`nbinterop n2h-peer`, I6) recognizes it with [`posctl_marker`] — so the
+/// sender and the receipt test cannot drift apart.
+pub fn posctl_payload(probe_id: &str) -> String {
+    format!("{probe_id}{POSCTL_PAYLOAD_SUFFIX}")
+}
+
+/// The strict receipt test of a posctl payload: the marker of
+/// [`probe_id`]`(POSCTL_KIND_TOKEN, nonce)` — `N2H-posctl-<24 hex nonce>` —
+/// followed by `|positive-control` and NOTHING else. `Some(marker)` = the
+/// substring the TUN scanner registers (`build_posctl`), `None` = not a posctl
+/// probe.
+///
+/// Strict on purpose: the I6 peer echoes ONLY a well-formed posctl probe, so
+/// the endpoint can never be turned into a reflector for unrelated traffic
+/// (design §6's explicit, default-off diagnostic discipline). Wrong kind
+/// token, a nonce that is not 24 hex, a missing suffix and any trailing byte
+/// all answer `None`.
+pub fn posctl_marker(payload: &[u8]) -> Option<&str> {
+    let prefix = format!("N2H-{POSCTL_KIND_TOKEN}-");
+    let text = std::str::from_utf8(payload).ok()?;
+    let marker = text.strip_suffix(POSCTL_PAYLOAD_SUFFIX)?;
+    let nonce = marker.strip_prefix(&prefix)?;
+    if nonce.len() != 24 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(marker)
+}
+
 /// Hard bound of ONE window (arm → closed). A fuse, not a target: the probe
 /// legs are individually bounded (`PROBE_CONNECT_TIMEOUT_MS` /
 /// `probe_wait_ms`) and the observation loop has its own deadline; this is the
@@ -1656,6 +1689,18 @@ pub trait CollectorHost: Send + Sync + 'static {
     /// §4.3 counterparty facts. Empty by default: the device records the gaps.
     fn peer_report(&self) -> PeerReport {
         PeerReport::default()
+    }
+    /// The host's LIVE WG device counters, when it has a device up. This is the
+    /// read the I6 peer-side status channel needs: the counterparty's own
+    /// `unknown_peer_drops` is what proves the device's `wg_peer` outer probe
+    /// reached the peer's socket (§4.0's `peer-device-offpath-drop`), and the
+    /// host CLI has no other public path to it.
+    ///
+    /// `None` = no device up (or a host that does not expose counters) — the
+    /// caller records the gap, never a guess. Defaulted so an injected offline
+    /// host keeps compiling and answers honestly.
+    fn wg_stats(&self) -> Option<WgDeviceStats> {
+        None
     }
     /// Endpoint-side observation of one probe (§4.0 matrix) beyond the
     /// collector's own STUN self-proof. `None` by default — the device's
@@ -2427,7 +2472,7 @@ fn send_posctl(dst: SocketAddr, id: &str) -> Result<(usize, String), String> {
     let sock = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD)
         .map_err(|e| format!("posctl socket bind: {e}"))?;
     let src = sock.local_addr().map_err(|e| format!("posctl socket addr: {e}"))?;
-    let payload = format!("{id}{POSCTL_PAYLOAD_SUFFIX}");
+    let payload = posctl_payload(id);
     let n = sock
         .send_to(payload.as_bytes(), dst)
         .map_err(|e| format!("posctl send: {e}"))?;
@@ -2773,6 +2818,12 @@ impl CollectorHost for WgFeedHost {
             device_up: self.feed.device_up(),
             ready: crate::connector::WgPeerApplier::tunnel_ready(&*self.feed),
         })
+    }
+
+    /// The live counters of the fed device (`None` while no device is up —
+    /// the I6 peer status line then says `unknown_peer_drops=na`).
+    fn wg_stats(&self) -> Option<WgDeviceStats> {
+        self.feed.with_device(|d| d.stats())
     }
 
     fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
@@ -4623,5 +4674,82 @@ mod tests {
         assert!(installed_host().is_none());
         assert!(window_slot().is_none(), "a refused arm leaves no window behind");
         println!("[I5] unarmed surface: status={} evidence={}", status_json(), evidence_json(-1));
+    }
+
+    // ---- I6 ----
+
+    /// The posctl wire form is ONE contract shared by the device sender (I3/I5)
+    /// and the host peer endpoint (I6): the peer echoes exactly what
+    /// [`posctl_marker`] accepts, so this test is the receipt test's guard
+    /// against drift AND against the endpoint being used as a reflector.
+    #[test]
+    fn posctl_payload_and_marker_round_trip_on_the_frozen_wire_shape() {
+        let id = probe_id(POSCTL_KIND_TOKEN, &"ab".repeat(12));
+        let payload = posctl_payload(&id);
+        assert_eq!(payload, format!("N2H-posctl-{}|positive-control", "ab".repeat(12)));
+        assert_eq!(posctl_marker(payload.as_bytes()), Some(id.as_str()));
+        // …and the device's OWN sender produces exactly that payload (the
+        // single-source property: `send_posctl` calls `posctl_payload`).
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        let (n, _src) = send_posctl(dst, &id).expect("posctl send");
+        assert_eq!(n, payload.len());
+        let mut recorded: Option<Vec<u8>> = None;
+        for _ in 0..100 {
+            sink.drain();
+            if let Some(rec) = sink.observed(&WireMarker::Ascii(id.clone())) {
+                recorded = Some(rec.payload.clone());
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert_eq!(recorded.as_deref(), Some(payload.as_bytes()), "the sink recorded the probe");
+
+        let hex24 = "ab".repeat(12);
+        for bad in [
+            String::new(),
+            "N2H-posctl-|positive-control".to_string(),
+            format!("N2H-posctl-{}|positive-control", "ab".repeat(11)), // 22 hex
+            format!("N2H-posctl-{}|positive-control", "ab".repeat(13)), // 26 hex
+            format!("N2H-posctl-{}|positive-control", "zz".repeat(12)), // not hex
+            format!("N2H-posctl-{hex24}"),                              // no suffix
+            format!("N2H-wg_peer-{hex24}|positive-control"),            // wrong kind
+            format!("N2H-posctl-{hex24}|positive-control!"),            // trailing byte
+            format!("N2H-posctl-{hex24}|positive-control|positive-control"),
+            format!("N2H-posctl-{hex24}|positive-control extra"),
+            "nbinterop-probe".to_string(),
+        ] {
+            assert_eq!(posctl_marker(bad.as_bytes()), None, "must not echo {bad:?}");
+        }
+        assert_eq!(posctl_marker(&[0xff, 0xfe]), None, "non-UTF8 is not a probe");
+        println!("[I6] posctl wire form: payload={payload} marker={}", posctl_marker(payload.as_bytes()).unwrap_or("?"));
+    }
+
+    /// The defaulted [`CollectorHost::wg_stats`]: an injected host that does not
+    /// expose counters answers `None` (the I6 status line then prints `na`)
+    /// instead of inventing a value.
+    #[test]
+    fn the_default_host_exposes_no_wg_counters() {
+        struct Bare;
+        impl CollectorHost for Bare {
+            fn dataplane(&self) -> Result<HostDataplane, String> {
+                Err("no device".into())
+            }
+            fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
+                Ok(HostFreezeFacts::default())
+            }
+            fn attach_tee(&self, _tee: Arc<dyn TunFrameTee>) -> Result<(), String> {
+                Err("no device".into())
+            }
+            fn detach_tee(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn paired_read(&self, _at_mono: u64, _at_unix: i64) -> Result<PairedRead, String> {
+                Err("no device".into())
+            }
+        }
+        let bare: Arc<dyn CollectorHost> = Arc::new(Bare);
+        assert_eq!(bare.wg_stats(), None);
+        println!("[I6] default host wg_stats: None (the status line prints na)");
     }
 }
