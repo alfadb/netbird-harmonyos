@@ -121,4 +121,20 @@ log "import surface OK (napi/hilog from host process)"
 grep -q 'R_AARCH64_RELATIVE' "$ROOT/target/rel.dyn" || die "no relative relocations (init_array constructor unwired?)"
 log ".init_array constructor relocation present (register_module wired)"
 
+# --- 7. build self-identification (I7/A-1, design §3.3) ---
+# build.rs embeds N2H_BUILD_SHA256 into the cdylib (the device evidence
+# document reports it in its trailing collector{} block). Its default caliber
+# is the DETERMINISTIC digest of this crate's build inputs; recompute that
+# digest here with an INDEPENDENT implementation (shell) and require the
+# artifact to actually carry it — the value printed below is the one the device
+# document reports, and the same source tree always yields the same value (no
+# dependence on host, target, profile or build directory).
+IDENT="$( { printf 'n2h-build-id-v1\n'
+            for f in $( { printf '%s\n' Cargo.toml Cargo.lock build.rs; find proto src -type f; } | LC_ALL=C sort ); do
+                printf '%s\n' "$f"; cat "$f"; printf '\0'
+            done; } | sha256sum | awk '{print $1}' )"
+printf '%s' "$IDENT" | grep -qE '^[0-9a-f]{64}$' || die "build self-identification is not a 64-hex digest: '${IDENT}'"
+grep -aq "$IDENT" "$OUT" || die "embedded N2H_BUILD_SHA256 ${IDENT} not found in $OUT (build.rs injection broken?)"
+log "build self-identification N2H_BUILD_SHA256=$IDENT (recomputed independently; present in the artifact)"
+
 log "build OK: $OUT"

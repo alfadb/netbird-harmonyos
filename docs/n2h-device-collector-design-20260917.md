@@ -530,3 +530,58 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
   - `bash client/build.sh` → exit 0（ArkTS 编译含本次 ets 改动通过），`entry-default-unsigned.hap` 4 209 559 bytes，sha256 `28ebf6bc9671d86de1d478f165f2a90a057b51de2d2728ac9f05af742ea85cfe`（同一工作树重复打包得到过不同 sha：打包侧非逐字节可复现，验收以 exit 0 + 逐项 VERIFY OK 为准）。
   - `git status --porcelain` 只含上述四个文件（无其他改动）。
 
+### 13.11 ⑨ I7 落地：构建自标识 + `collector{}` 块 + `n2h-decode` + runbook 设备操作章节
+
+- **依据**：§7-I7 行（本文档 :300）、§3.3（A-1 自标识块字段定义）、§3.4-D10（唯一新增差异：尾部 `collector{}`）、§2.4（hilog 分块通道与主机侧重组成交件）、§6.4（AUTH allowed 逐字命令面）、§13.6（`collector{}` 留 I7 的留白与 I5 占位注记）。基线 HEAD `c3f0832`；下列 file:line 均为落地后工作树实读（未 commit）。
+
+**① `N2H_BUILD_SHA256` 口径（可复现优先；对 §3.3 的一处收紧，见 ② 的偏差登记）**
+
+- 注入点：`client/core/build.rs` 新增 `emit_build_identity()`（`build.rs:101`），经 `cargo:rustc-env` 注入 `N2H_BUILD_SHA256` 与 `N2H_BUILD_TARGET`；collector 侧常量 `BUILD_SHA256` / `BUILD_TARGET_TRIPLE`（`n2h_collector.rs:2733` / `:2740`）。每个摘要输入都打 `cargo:rerun-if-changed`（`build.rs:104-106`）+ `rerun-if-env-changed=N2H_BUILD_SHA256`，摘要不可能因跳过 build.rs 而陈旧。
+- **两级口径**（优先级从高到低）：
+  1. 构建时环境变量 `N2H_BUILD_SHA256` 若为 64-hex ⇒ 原样采用（小写归一）——即 §3.3「由 build.sh 传入 sha256」的接缝，用于把文档绑到某一**具体制品**；给了但**不是** 64-hex ⇒ 构建期 panic（`build.rs:112-118`，不静默忽略）；
+  2. 否则**源码摘要**：`sha256("n2h-build-id-v1\n" ++ Σ_{按相对路径字节序} (相对路径 ++ "\n" ++ 文件字节 ++ "\0"))`；输入集固定为 `Cargo.toml`、`Cargo.lock`（存在时）、`build.rs`、`src/**`、`proto/**`（`build.rs:71`/`:76`/`:145-192`）。`tests/**` **不入**（不参与制品字节），`target/**` 永不入。
+- **可复现性**：默认口径是**源码的纯函数**——与 host/target/profile/构建目录无关；实测（工作树）：shell 独立实现重算、`client/core/build.sh`（aarch64 release 制品）打印、host 构建（x86_64 debug）文档里 `collector.build_sha256` 三者同为 `3a8e6d72c4f9e73e0b09f164502869b567f6c438b6eab5785d45f3f7f8649820`。
+- **离线核对**：`client/core/build.sh` 新增第 7 步（`build.sh:124-138`）以**独立 shell 实现**重算该摘要并 `grep -aq` 制品（命中才 log 通过）；既有链未动：`boringtun-0.7.1.crate sha256 OK` / `Cargo.lock boringtun checksum OK` / `14/14 frozen BoringTun ffi symbols` 全部保留。
+- **为什么不是「build.sh 传入 .so/HAP sha」**：① .so/HAP 的 sha 只在制品产出**之后**存在，而 build.rs 在编译期运行 ⇒ 单次构建无法注入（要注入就得两遍构建）；② HAP 打包**不可逐字节复现**（§13.10⑦）⇒ 采用它会把 §7-I7「同源码同摘要」的验收要求直接排除。故默认口径取源码摘要，把「绑定具体制品」交给：环境变量接缝（①）＋ `build_source="operator-reported"` 的 arm opts 回退（§3.3 原文语义）＋ runbook §9.1 的 HAP sha 冻结登记。三者分工由 `build_source` 字段如实标注。
+- **偏差登记（§3.3 字面 → 落地形态，两处）**：
+  1. §3.3 写 `target_triple` 用「编译期 `env!("TARGET")`」——**不可实现**：`TARGET` 是 build script 变量，crate 编译读不到（实测编译错误：`TARGET may not be available for the current Cargo target`）。落地＝build.rs 转发 `N2H_BUILD_TARGET`（同值同语义），collector 读 `env!("N2H_BUILD_TARGET")`（`n2h_collector.rs:2740`）。
+  2. §3.3 的 `build_sha256` 字面口径（build.sh 传入制品 sha）如 ② 所述收紧为「源码摘要为默认、环境变量为接缝」。
+
+**② `collector{}` 块进入设备证据文档（D10，尾部追加）**
+
+- 渲染：`collector_block_json(reported)` / `with_collector_block(document, reported)`（`n2h_collector.rs:2756-2771`）；窗口线程在定稿处调用（`n2h_collector.rs:2311`）。**`n2h.rs` 渲染器逐字未动**——块是拼在 `Evidence::to_json()` 输出尾部（`strip_suffix('}')` + `,"collector":{…}}`），即 §3.1 的尾部追加纪律（先例 a1947b9 的 `wg_peers`），`collector` 是文档**最后一个键**。
+- 字段（§3.3 逐字）：`crate_version`＝`env!("CARGO_PKG_VERSION")`、`target_triple`＝`N2H_BUILD_TARGET`、`build_sha256`、`build_source`（`embedded` / `operator-reported`）。
+- **`build_sha256` 取值优先级**（如实标注来源，绝不把报告值冒充构建值）：arm opts 的 `build_sha256_reported` 非空 ⇒ 取该值 + `build_source="operator-reported"`（§3.3 的 fallback，用于绑定**实际安装的那个制品**）；否则取内嵌 `BUILD_SHA256` + `"embedded"`。两分支都不可能为空（编译期常量 + build.rs 的 64-hex 断言）。
+- **I5 占位注记的移除**（§13.6 预告的收尾）：`run_window` 里两条 `notes[]` 行（`build-sha256=not-reported (I7 injects…)` 与 `build-sha256=<sha> (operator-reported, design §3.3 fallback)`）**删除**——自标识的权威载体现在是 `collector{}`（含来源），`notes[]` 回归「缺口与运行注记」语义（§3.2）。
+- **与 host 文档的对齐纪律**：新增顶层键仅 `collector` 一个，且已在 §3.4-D10 登记（无新增差异）；`tests/n2h_device_collector.rs` 的 §8-1 同键同型断言据此学习该**已登记**差异（`d10_collector_paths()`，`:451`；白名单外的 device-only 路径仍 panic），并在场景 1 增断言：四字段取值、64-hex、`build_source="embedded"`、`notes[]` 内无 `build-sha256=` 前缀行、`collector{}` 为文档尾键（`:1114-1132`）。
+- **残余缺口（如实登记）**：ets arm 通道**不转发** `build_sha256_reported`（`NetBirdVpnExtensionAbility.ets:1007-1050` 的白名单只有 `posctl_port`/`probe_wait_ms`/§13.10 的 `peer_b2a_probe_id`）⇒ **设备轮实际取值面为 `embedded`**；`operator-reported` 只在直接调用 `napi` 时出现。实际安装 HAP 的 sha256 因此由 runbook §9.1 的冻结件（+ `MANIFEST.sha256`）承担绑定，不由设备文档承担。
+
+**③ `nbinterop n2h-decode`（runbook 可执行性的必需件；§7-I7 行未列，本次新增）**
+
+- 命令面（逐字）：`target/debug/nbinterop n2h-decode <hilog-capture> [--out <file>]`（分派 `bin/nbinterop.rs:558`，实现 `:1009`）。
+- 行为：读抓取文件 → 每行**搜索** `N2H_EVIDENCE` 标记并取标记到行尾（hilog 前缀/夹杂行自动跳过，`N2hCapture::read` `:955`）→ 交给**既有的** `n2h_collector::decode_evidence` 重组校验（**未另写解码逻辑**）→ 校验通过才写 `--out`（或 stdout 原始字节）；不通过**绝不落盘**。
+- 退出码：`0`＝已校验文档落盘；`21`＝抓取被拒（缺块/摘要不符/重复/拼接/畸形/读失败，`EXIT_N2H_DECODE_FAILED` `:934`，非证据 verdict）；`2`＝用法错误。失败时 stderr 打**缺口明细**：`nbinterop: n2h-decode|ok=false|error=chunk-error|…|lines=<n>|chunk_lines=<n>|total=<n|na>|missing=<seq 列表|na>|detail=<ChunkError>`（`gap_line()` `:984`）+ 一条处置提示行。
+- AUTH 面：该子命令属**主机侧**命令，但必须逐字进入当次 AUTH `allowed`（§6.4 新增候选；runbook §9 的抓取步骤依赖它），否则不得执行。
+
+**④ runbook 设备操作章节（只追加）**
+
+- `docs/device-relay-enablement-runbook-20260914.md` 追加 **§9「(C) 设备轮：N2-H 设备侧采集器启用与证据回收」**（`:367` 起，**+182 行，0 删除**；既有 §0–§8 正文逐字未动）。含：§9.1 制品冻结纪律（HAP sha 不可复现 ⇒ 只打包一次、登记**实际安装件**的 sha256、冻结后不得重打包、不得用新包 sha 回填旧证据）、§9.2 构建与登记、§9.3 签名/安装/启动逐字命令、§9.4 主机侧 `nbinterop n2h-peer`（启动命令 + 公告行读法 + `--timeout` 停止形态）、§9.5 控制文件（路径/可选键 `peer_b2a_probe_id` 来源与时序＝**arm 前**写入、非法形态拒绝整个 arm、清理命令）、§9.6 证据抓取与重组（**日志级别设置命令单列逐字**——`hilog -D 0x2900 -b D`，N13 偏差教训；`hilog -r` 清缓冲；抓取 pattern 含 `N2H_EVIDENCE|N2H_COLLECTOR|N2H_|NetBirdVpn|N1BDiscVpn`；`n2h-decode` 重组与成功/失败判据）、§9.7 状态检查（`n2h_collector_status()` 是 napi 导出、shell 不可直接调用 ⇒ 经 `N2H_COLLECTOR_*` hilog 标记读，五种形态逐条列出）与停止条件（引用 §1.0 步骤 0、§3.5、fail-closed 拒绝、缺块重抓失败、零帧/`/proc` 不可读、AUTH `retry_allowed:false`）、§9.8 收尾留档、§9.9 本节新增待确认 ⑨–⑫。
+
+**⑤ 测试（新增 3 单测 + 4 bin 单测；I0–I6b 既有测试逐字未改，仅 §8-1 断言学习 D10）**
+
+- 单测（默认 feature 集）：`n2h_collector::tests::the_collector_block_identifies_the_build_with_the_frozen_shape`（`:4970`）、`…::a_reported_digest_wins_and_is_labelled_operator_reported`（`:4997`）、`…::the_collector_block_is_tail_appended_to_the_frozen_renderer_output`（`:5017`）。
+- CLI 单测（`--features cli --bin nbinterop`，新模块 `n2h_decode_tests` `:2485`）：往返（真 `encode_evidence` 产物 + hilog 前缀 + 夹杂行 → 字节一致）、缺块（`Missing{seq}` + `missing=` 明细）、篡改（`Sha256Mismatch`）、用法闸门（无参/未知旗标 ⇒ 2；不可读抓取 ⇒ 21）。
+- 集成断言更新（唯一改动）：`tests/n2h_device_collector.rs` 的 `assert_same_schema` 增加 D10 白名单 + 场景 1 的 `collector{}`/`notes[]` 断言（见 ②）。
+
+**⑥ 改动面与验收（工作树实读）**
+
+- 改动文件：`client/core/build.rs`（+`emit_build_identity`/`build_inputs`/`source_digest`/`sha256_hex`）、`client/core/build.sh`（+第 7 步自标识核对）、`client/core/src/n2h_collector.rs`（`collector{}` 三常量 + 两函数 + `run_window` 接线与占位删除 + 3 单测）、`client/core/src/bin/nbinterop.rs`（`n2h-decode` 子命令 + 4 单测 + 模块文档/USAGE/退出码）、`client/core/tests/n2h_device_collector.rs`（D10 容忍 + 场景 1 断言）、`docs/device-relay-enablement-runbook-20260914.md`（§9 追加）、本文件（本节）。**未触碰**：`n2h.rs`（渲染器与判据）、`connector.rs`、`wg_device.rs`、`napi.rs`、`host_sockets.rs`、ets、`Cargo.toml`/`Cargo.lock`（无新依赖）、`.cargo/config.toml`。
+- 验收实跑（工作树，HEAD `c3f0832` + 未提交改动）：
+  - `cd client/core && cargo test --offline --locked --color never` → 34 个测试目标全 `ok`，合计 **531 passed / 0 failed / 0 ignored**（I6b 基线 528/0 + 本节 3 单测；`tests/n2h_device_collector.rs` 目标仍 15 passed）。
+  - `cargo test --offline --locked --color never --features cli --bin nbinterop` → **10 passed / 0 failed**（I6 的 6 例 + 本节 4 例）。
+  - `cargo build --offline --locked --features cli --bin nbinterop` → exit 0。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；`boringtun-0.7.1.crate sha256 OK` 与 `Cargo.lock boringtun checksum OK` 两条既有校验仍在；末行 `build self-identification N2H_BUILD_SHA256=3a8e6d72c4f9e73e0b09f164502869b567f6c438b6eab5785d45f3f7f8649820 (recomputed independently; present in the artifact)`。
+  - `bash client/build.sh` → exit 0（逐项 `VERIFY OK`），`entry-default-unsigned.hap` 4 204 623 bytes，sha256 `329984020c57d4b2871888d40ec3d1dccbd2524372026fae71d14a55dca477f3`（与 §13.10⑦ 记录值不同，符合「打包不可逐字节复现」；验收以 exit 0 + 逐项 VERIFY OK 为准）。
+  - `n2h-decode` 三类用例（真跑，输入＝集成测试 `--nocapture` 的真实 hilog 抓取 87 行/19 块）：①往返 exit 0，落盘文档 sha256 `f2b27795370b78409684daa31a802148cbb442c7dddce81292b77e2baeb1576b` 与全部分块行声明值逐字相同，文档尾键为 `collector`（`build_sha256=3a8e6d72…`、`build_source="embedded"`，`notes[]` 无 `build-sha256=` 行）；②抽掉 `seq=7/19` 一行 ⇒ exit **21**、`chunk_lines=18|total=19|missing=7|detail=missing chunk seq 7`、**未落盘**；③翻转 `seq=11/19` 的一个 b64 字符 ⇒ exit **21**、`detail=reassembled document sha256 591a9287… does not match the declared f2b27795…`、**未落盘**。
+  - `git status --porcelain` 只含上述 7 个文件（无其他改动）。
+

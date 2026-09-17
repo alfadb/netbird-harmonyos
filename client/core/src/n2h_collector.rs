@@ -2170,15 +2170,10 @@ fn arm_err(token: &str, detail: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn run_window(win: Arc<Window>) {
+    // I7: the build identity is no longer a `notes[]` line (the I5 placeholder
+    // announced its own replacement, §13.6) — the trailing `collector{}` block
+    // below carries the digest AND its source, and is the document's last key.
     let mut notes = win.arm_notes.lock_poison().clone();
-    if win.options.build_sha256_reported.trim().is_empty() {
-        notes.push("build-sha256=not-reported (I7 injects the embedded build identity)".to_string());
-    } else {
-        notes.push(format!(
-            "build-sha256={} (operator-reported, design §3.3 fallback)",
-            win.options.build_sha256_reported.trim()
-        ));
-    }
 
     // -- window OPEN: the `before` edge of the counters pairing (§4.4) --
     let open_mono = win.clock.mono_ms();
@@ -2313,7 +2308,7 @@ fn run_window(win: Arc<Window>) {
         closed_mono: close_mono,
         generated_unix: win.clock.unix_s(),
     });
-    let document = evidence.to_json();
+    let document = with_collector_block(&evidence.to_json(), &win.options.build_sha256_reported);
     let sha256 = crate::util::sha256_hex(document.as_bytes());
     let chunks = encode_evidence(document.as_bytes());
     for chunk in &chunks {
@@ -2712,6 +2707,65 @@ pub fn tee_fallback_read(
         wg,
         source: COUNTERS_SOURCE_TEE_FALLBACK,
     }
+}
+
+// ---------------------------------------------------------------------------
+// I7 — `collector{}`: the build self-identification block (design §3.3/A-1)
+// ---------------------------------------------------------------------------
+
+/// Embedded build digest (design §3.3 `build_sha256`), injected by
+/// `client/core/build.rs` (I7). Non-empty and reproducible by construction:
+/// build.rs refuses to emit anything but a 64-hex digest, and its default
+/// caliber is the deterministic digest of the crate's own build inputs
+/// (`client/core/build.sh` step 7 recomputes it independently and greps the
+/// shipped `.so` for it).
+pub const BUILD_SHA256: &str = env!("N2H_BUILD_SHA256");
+
+/// `target_triple` (design §3.3), forwarded by build.rs: `env!("TARGET")` is a
+/// BUILD SCRIPT variable and is refused for the crate compilation, so the
+/// value is relayed as `N2H_BUILD_TARGET` (same string, same meaning).
+pub const BUILD_TARGET_TRIPLE: &str = env!("N2H_BUILD_TARGET");
+
+/// §3.3 `build_source`: the digest was injected at build time.
+pub const BUILD_SOURCE_EMBEDDED: &str = "embedded";
+
+/// §3.3 `build_source`: the digest came from the operator's arm options
+/// (`build_sha256_reported`) — the design's fallback, labelled as such.
+pub const BUILD_SOURCE_OPERATOR_REPORTED: &str = "operator-reported";
+
+/// The trailing `collector{}` block of the device document (design §3.3, D10).
+///
+/// `build_sha256` precedence: a non-empty operator report from the arm options
+/// (`build_sha256_reported`, §3.3's fallback) wins and is labelled
+/// `operator-reported` — that value is what can bind the document to the ONE
+/// artifact installed on the device (a HAP digest is not reproducible, design
+/// §13.10⑦); otherwise the embedded [`BUILD_SHA256`] is used and labelled
+/// `embedded` (the reproducible source caliber). Neither branch can be empty.
+pub fn collector_block_json(reported_sha256: &str) -> String {
+    let reported = reported_sha256.trim();
+    let (sha256, source) = if reported.is_empty() {
+        (BUILD_SHA256, BUILD_SOURCE_EMBEDDED)
+    } else {
+        (reported, BUILD_SOURCE_OPERATOR_REPORTED)
+    };
+    format!(
+        "\"collector\":{{{},{},{},{}}}",
+        jstr("crate_version", env!("CARGO_PKG_VERSION")),
+        jstr("target_triple", BUILD_TARGET_TRIPLE),
+        jstr("build_sha256", sha256),
+        jstr("build_source", source)
+    )
+}
+
+/// Tail-append the `collector{}` block to the frozen renderer's output (design
+/// §3.1's tail-append discipline, precedent a1947b9's `wg_peers`): nothing is
+/// inserted between the existing fields, `n2h::Evidence::to_json` stays the ONE
+/// renderer and untouched, and the block is the document's last key.
+pub fn with_collector_block(document: &str, reported_sha256: &str) -> String {
+    let body = document
+        .strip_suffix('}')
+        .expect("n2h::Evidence::to_json always renders one JSON object");
+    format!("{body},{}}}", collector_block_json(reported_sha256))
 }
 
 // ---------------------------------------------------------------------------
@@ -4905,5 +4959,83 @@ mod tests {
         let bare: Arc<dyn CollectorHost> = Arc::new(Bare);
         assert_eq!(bare.wg_stats(), None);
         println!("[I6] default host wg_stats: None (the status line prints na)");
+    }
+
+    // ---- I7 ----
+
+    /// The embedded self-identification is well-formed by construction (design
+    /// §3.3/A-1 requires a NON-EMPTY digest): 64 hex characters, and the
+    /// `collector{}` block carries it verbatim with the frozen four fields.
+    #[test]
+    fn the_collector_block_identifies_the_build_with_the_frozen_shape() {
+        assert_eq!(BUILD_SHA256.len(), 64, "embedded build digest: {BUILD_SHA256}");
+        assert!(
+            BUILD_SHA256.bytes().all(|b| b.is_ascii_hexdigit()),
+            "embedded build digest is not hex: {BUILD_SHA256}"
+        );
+        assert!(!BUILD_TARGET_TRIPLE.is_empty(), "target triple must be non-empty");
+
+        let block = collector_block_json("");
+        let document = format!("{{{block}}}");
+        // §8-1 discipline: even the block alone is strict JSON
+        let parsed = crate::config::parse_document(&document).expect("block is strict JSON");
+        let _ = parsed;
+        assert!(block.contains(&format!("\"build_sha256\":\"{BUILD_SHA256}\"")));
+        assert!(block.contains(&format!(
+            "\"crate_version\":\"{}\"",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(block.contains(&format!("\"target_triple\":\"{BUILD_TARGET_TRIPLE}\"")));
+        assert!(block.contains(&format!("\"build_source\":\"{BUILD_SOURCE_EMBEDDED}\"")));
+        println!("[I7] embedded collector{{}} block: {document}");
+    }
+
+    /// §3.3's fallback: an operator-reported digest wins and is LABELLED as
+    /// reported (never passed off as the embedded value), and the embedded
+    /// digest is what an absent/blank report falls back to.
+    #[test]
+    fn a_reported_digest_wins_and_is_labelled_operator_reported() {
+        let reported = "a".repeat(64);
+        let block = collector_block_json(&format!("  {reported}  "));
+        assert!(block.contains(&format!("\"build_sha256\":\"{reported}\"")));
+        assert!(block.contains(&format!(
+            "\"build_source\":\"{BUILD_SOURCE_OPERATOR_REPORTED}\""
+        )));
+        assert!(!block.contains(BUILD_SHA256), "the embedded digest must not be claimed");
+        for blank in ["", "   "] {
+            let block = collector_block_json(blank);
+            assert!(block.contains(&format!("\"build_sha256\":\"{BUILD_SHA256}\"")));
+            assert!(block.contains(&format!("\"build_source\":\"{BUILD_SOURCE_EMBEDDED}\"")));
+        }
+        println!("[I7] reported digest precedence: operator-reported wins, embedded is the default");
+    }
+
+    /// The tail-append discipline (design §3.1/D10): the block is added AFTER
+    /// every frozen renderer field, the untouched prefix is byte-identical to
+    /// `n2h::Evidence::to_json()`, and the composed document still parses.
+    #[test]
+    fn the_collector_block_is_tail_appended_to_the_frozen_renderer_output() {
+        let evidence = assemble_device_evidence(clean_material());
+        let plain = evidence.to_json();
+        assert!(plain.ends_with('}'), "the renderer emits one JSON object");
+        for reported in ["", "b".repeat(64).as_str()] {
+            let document = with_collector_block(&plain, reported);
+            assert!(
+                document.starts_with(&plain[..plain.len() - 1]),
+                "the renderer's fields must be untouched"
+            );
+            assert!(document.ends_with(&format!(",{}}}", collector_block_json(reported))));
+            crate::config::parse_document(&document).expect("composed document is strict JSON");
+            assert_eq!(
+                document.matches("\"collector\":").count(),
+                1,
+                "exactly one collector block"
+            );
+        }
+        println!(
+            "[I7] tail append: {} -> {} bytes, one trailing collector{{}} block",
+            plain.len(),
+            with_collector_block(&plain, "").len()
+        );
     }
 }

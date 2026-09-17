@@ -361,3 +361,185 @@ grep -rInE 'token|signature|secret|password|bearer|eyJ' "$EVDIR"
 | ⑥ | uitest 点击坐标 `658 1661` 当晚是否有效 | 为 run1 实测值，UI 可能变化；用 `uitest dumpLayout`（只读）复核 |
 | ⑦ | pod 侧可达性检查「verify=0」原始命令形态 | 探测记录 §1 表未落命令；本手册 `curl -w '%{ssl_verify_result}'` 为等效重构 |
 | ⑧ | start-netbird.sh 设备上现内容 | run1 遗留文件在设备侧，仓内无副本；本手册仅按材料1 §4 原样调用 |
+
+---
+
+## 9. (C) 设备轮：N2-H 设备侧采集器启用与证据回收（**2026-09-17 增补，I7**；本节只追加，不改本文其余正文）
+
+> **适用**：把设备侧证据采集器（设计 `docs/n2h-device-collector-design-20260917.md`，I0–I7 已合入仓库）在真机轮里启起来，并把设备产出的 `n2h-isolation-evidence` 文档完整收回（设备侧产物只能经 hilog 分块通道离设备，设计 §2.4-A）。
+>
+> **硬前置（本节不重复定义，逐字引用）**：本节**任何**设备命令之前先执行 **§1.0 步骤 0（授权窗口时钟比对）**；§1.0 的全部失败即停条款适用于本节。
+>
+> **授权口径**：设计 §6.4 第 1–5 条＝本节设备侧命令（arm 控制文件 `file send`、`rm` 清理、hilog 清缓冲与抓取、**日志级别设置单列**、`cat /proc/net/dev`），第 6 条＝主机侧 `nbinterop n2h-peer`；**I7 新增主机侧 `nbinterop n2h-decode`**（设计 §2.4「grep → 按 seq 拼接 → sha256 比对 → 通过才落盘」的落地子命令，设计 §13.11 登记）——**AUTH `allowed` 必须逐字包含它**，否则不得执行。本节全部命令未获授权一律不执行。
+
+### 9.1 制品冻结纪律（先读；本节唯一不可协商的顺序约束）
+
+- **事实**：HAP 打包**不可逐字节复现**——同一工作树重复打包得到过不同 sha256（I6b 实测，设计 §13.10⑦）。「重打包一次拿同一个 sha」**不是**可用手段。
+- **纪律**：
+  1. 本轮**只打包一次**；打包后立即记录**实际安装的那个 HAP 文件**的 `sha256`（含文件路径、size、时刻与签名产物名），登记进本轮冻结件（执行记录 + `MANIFEST.sha256`，§5）；
+  2. **冻结后不得重新打包**：任何源码/资源/配置改动 ⇒ 新制品 ⇒ 必须重新登记、重新签名、重新安装，并且**不得**用新包的 sha256 回填旧一轮证据；
+  3. `client/core/build.sh` 末行打印的 `N2H_BUILD_SHA256`（I7 构建自标识）逐轮登记：它＝设备文档 `collector.build_sha256` 在 `build_source="embedded"` 下的取值（§9.6 核对）；**任何源码改动都会改变它**，与证据一起登记即完成「证据 ↔ 构建输入」绑定；
+  4. 设备文档 `collector{}` 块（设计 §3.3/A-1）恒带 `crate_version`/`target_triple`/`build_sha256`/`build_source` 四字段；本轮的设备侧 arm 通道**不转发** `build_sha256_reported`（ets 白名单只有 §9.5 的三个键）⇒ 预期 `build_source="embedded"`，**实际安装 HAP 的 sha256 由本节冻结件承担**，不由文档承担（设计 §13.11 登记）。
+
+### 9.2 构建（core + HAP）与登记
+
+（构建命令与 §2.1 同源；本节只增列 I7 的自标识输出。）
+
+```bash
+cd /home/worker/work/base/netbird-harmonyos
+
+# a) core：冻结符号链 + I7 构建自标识（末行 N2H_BUILD_SHA256=<64hex>，逐轮登记）
+bash client/core/build.sh
+
+# b) HAP：ArkTS 打包；末尾打印 HAP 路径 / size / sha256（**这就是 §9.1 要登记的 sha**）
+bash client/build.sh
+
+# c) 登记（冻结件；§5 的 sidecar/MANIFEST 规则一并适用）
+sha256sum client/entry/build/default/outputs/default/entry-default-unsigned.hap | tee -a "$EVDIR/HAP-FREEZE.txt"
+```
+
+预期输出片段（逐字）：
+
+```text
+[netbird-core] 14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)
+[netbird-core] build self-identification N2H_BUILD_SHA256=<64hex> (recomputed independently; present in the artifact)
+[netbird-hap] VERIFY OK: libs/arm64-v8a/libnetbird_core.so present, sha256 identical to llvm-strip'd core artifact
+[netbird-hap] sha256: <HAP sha256>
+```
+
+### 9.3 签名 / 安装 / 启动（逐字；签名流程沿 §2.2 原样，本节不重复展开）
+
+```bash
+TOOL=/home/worker/harmonyos/command-line-tools/26.0.0.821/sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar
+# 签名：命令同 §2.2（javac + N1bdiscSignLauncher），仅把输入换成 §9.2 的 HAP、输出换成下列名字
+#   … client/entry/build/default/outputs/default/entry-default-unsigned.hap /tmp/netbird-n2h-collector-signed.hap netbird-harmonyos 26
+
+sha256sum /tmp/netbird-n2h-collector-signed.hap | tee -a "$EVDIR/HAP-FREEZE.txt"   # 安装件的 sha，一并登记
+
+"$HDC" file send <本机 device-config.json 路径> /data/local/tmp/netbird-device-config.json   # 同 §2.4
+"$HDC" file send <本机 setup-key 文件路径>      /data/local/tmp/netbird-setup-key             # 同 §2.4
+"$HDC" install -r /tmp/netbird-n2h-collector-signed.hap
+"$HDC" shell "sh /data/local/tmp/start-netbird.sh"    # 凭据注入（同 §2.5；脚本为 run1 遗留，不改其内容）
+"$HDC" shell "uitest uiInput click 658 1661"          # Connect VPN（同 §2.5；坐标/控件/目的逐条登记）
+```
+
+- 采集器**不开产品面**、无 UI：arm 只由控制文件触发（§9.5），窗口是**一次**有界测量（`WINDOW_DEADLINE_MS=60000`，`client/core/src/n2h_collector.rs:1369`）。
+- 连接必须达到 `status.wg.device_up && status.wg.ready` 才会 arm（ets 侧闸门 `NetBirdVpnExtensionAbility.ets:975-978`）：未就绪时打 `N2H_COLLECTOR_NOT_ARMED|requestId=…|reason=session-not-ready|diag=true|is_evidence=false`（`:986`）且**不开窗**。
+
+### 9.4 主机侧对端：`nbinterop n2h-peer`（**先起它，再写控制文件**）
+
+设计 §4.3 的正控 a2b/b2a 双腿都需要主机侧对端；它的启动公告行 `b2a_probe_id` 是 §9.5 控制文件里 `peer_b2a_probe_id` 的**唯一来源**。
+
+```bash
+cd /home/worker/work/base/netbird-harmonyos/client/core
+target/debug/nbinterop n2h-peer \
+  --config <主机侧对端 config 路径> \
+  --overlay <设备 overlay ip[:port]> \
+  --echo-port 40001 \
+  --posctl-interval 1000 \
+  --timeout 900 \
+  2>&1 | tee "$EVDIR/n2h-peer-<HHMM>.log"
+```
+
+- **公告行**（stderr 首行，逐字形态）：`nbinterop: n2h-peer|b2a_probe_id=N2H-posctl-<24 hex>|b2a_dst=…|echo_port=40001|posctl_interval_ms=1000|loopback=false`（`client/core/src/bin/nbinterop.rs:1185`；I6 真实样例见设计 §13.9）。
+- **状态行**（周期，stderr）：`nbinterop: n2h-peer-stats|…|unknown_peer_drops=<n|na>|unknown_peer_drops_delta=<n|na>`（`:1215`）——对端自身计数器，属**运维侧收执**，不随设备文档（设计 §13.10④）。
+- **停止形态**：`--timeout <s>` 到期打印末次状态行并 **exit 0**（设计 §13.8；该模式无「目标可达」语义，超时即登记停止）。
+- 读公告行的动作**必须在 §9.5 写入控制文件之前完成**；公告行未取得 ⇒ 本轮 b2a 腿按「对端未公告」记为有理由缺口（不得猜、不得用 a2b 回包顶替）。
+
+### 9.5 控制文件（arm 通道）写入与清理
+
+**写入（arm 之前）**：
+
+```bash
+cat > /tmp/netbird-n2h-arm <<'EOF'
+{"posctl_port":40001,"probe_wait_ms":800,"peer_b2a_probe_id":"N2H-posctl-<24 hex，逐字取自 §9.4 公告行>"}
+EOF
+"$HDC" file send /tmp/netbird-n2h-arm /data/local/tmp/netbird-n2h-arm
+```
+
+- 路径固定 `/data/local/tmp/netbird-n2h-arm`（ets `N2H_ARM_FILE`，`NetBirdVpnExtensionAbility.ets:75`），只含非敏感窗口旋钮（开发期通道，先例 §2.4 的 `netbird-protect-deviation`）。
+- 键语义：`posctl_port` 缺省 40001（`n2h_collector.rs:1304`）、`probe_wait_ms` 缺省 800（`:651`）；`peer_b2a_probe_id` 为**可选键**，**只在键存在时**原样并入 arm opts（`:1047-1050`），值必须是 `N2H-posctl-<24 hex>` 逐字 id 形态——带 `|positive-control` 载荷形态、非 24 hex、空串、尾随字节等一律**拒绝整个 arm**（`{ok:false,error:"invalid-opts"}`，设计 §13.10②）；键缺失＝不公告（b2a 记有理由缺口），两者语义不同。
+- **时序**：**arm 之前**写入。ets watcher 每轮轮询检查文件存在，且每个 ability 实例**至多尝试一次**（`n2hArmAttempted`，`:305`/`:967-970`）；文件在尝试之后才出现 ⇒ 该轮按缺失处理、**不会再开窗**（设计 §13.10①）。
+- 文件体解析失败/为空 ⇒ 回落 §5.1 缺省并打 `N2H_COLLECTOR_ARM_OPTS_IGNORED|…|action=defaults|diag=true|is_evidence=false`（`:1002`）。
+
+**清理（收尾，同 §6.3 命名空间；AUTH allowed 第 4 条）**：
+
+```bash
+"$HDC" shell "rm -f /data/local/tmp/netbird-n2h-arm"
+```
+
+### 9.6 证据抓取与重组（顺序固定：日志级别 → 清缓冲 → arm → 抓取 → 重组）
+
+```bash
+# (a) 日志级别设置——**单独一条，逐字**（N13 偏差教训：该动作不在 AUTH allowed 字面内即不得执行）
+#     限本项目域 0x2900、非持久、重启失效（N13 实录 docs/n13-device-relay-evidence-20260916.md:97）
+"$HDC" shell "hilog -D 0x2900 -b D"
+
+# (b) 清缓冲（窗口前的空缓冲起点；设计 §6.4 第 3 条）
+"$HDC" shell "hilog -r"
+
+# >>> 此处写 §9.5 的 arm 文件并等待窗口闭合（verdict 行见 §9.7）<<<
+
+# (c) 抓取（窗口闭合后**立刻**抓，避免缓冲旋转；pattern 必须含 N2H_EVIDENCE/N2H_COLLECTOR/N2H_ 与既有 NetBirdVpn/N1BDiscVpn）
+"$HDC" shell "hilog -x | grep -aE 'N2H_EVIDENCE|N2H_COLLECTOR|N2H_|NetBirdVpn|N1BDiscVpn'" \
+  | tee "$EVDIR/hilog-n2h-collector-<HHMM>.log"
+
+# (d) 重组（I7；缺块或摘要不符 ⇒ exit 21 + 缺口明细，**不落未验证文档**）
+cd /home/worker/work/base/netbird-harmonyos/client/core
+target/debug/nbinterop n2h-decode "$EVDIR/hilog-n2h-collector-<HHMM>.log" \
+  --out "$EVDIR/n2h-isolation-evidence-device-<HHMM>.json"
+```
+
+- 通道形态：每行 `N2H_EVIDENCE|seq=i/n|sha256=<全文档>|b64=<512B 原始切片>`（`n2h_collector.rs:86`、`:90`），文档 8–20 KB ⇒ 约 20–60 行；hilog 前缀与夹杂行由 `n2h-decode` 自动跳过（设计 §2.4）。
+- **成功判据（逐字）**：stderr 打 `nbinterop: n2h-decode|ok=true|…|sha256=<全文档>|out=<路径>`、**exit 0**、产物 JSON 落指定路径；输出的 `sha256` 必须与 (c) 抓取行里 `sha256=` 字段**逐字相同**。
+- **失败处置（fail-closed）**：`ok=false|error=chunk-error|…|missing=<seq 列表>|detail=…`、**exit 21**，且**不写任何文档**——先在缓冲仍持有窗口时**重抓一次** (c)+(d)；仍缺即按设计 §2.4-R2（重放对应 chunk 需经 ets 再调 napi）或**如实登记缺口并停止**，不得修补、不得拼接跨轮产物（跨轮拼接会以 `sha256` 不符被拒，这属预期）。
+- 另按设计 §2.4-D 类 fallback 可选抓 `"$HDC" shell "cat /proc/net/dev"`（vpn-tun 计数，C7/C9；App 内直读失败时为备用口径）。
+
+### 9.7 状态检查（经 shell/日志读）与停止条件
+
+- `n2h_collector_status()` 是 napi 导出（`n2h_collector.rs:2062`），shell 域不可直接调用 ⇒ 设备轮的状态读数口径＝**hilog 标记**：
+
+```bash
+"$HDC" shell "hilog -x | grep -aE 'N2H_COLLECTOR'"
+```
+
+| 标记（出处） | 形态 | 读法 |
+|---|---|---|
+| `N2H_COLLECTOR_ARM`（`n2h_collector.rs:1383`/`:2052`） | `…\|requestId=core\|opened_mono=…\|deadline_mono=…\|frozen=…\|shell_exclusions=…\|diag=true\|is_evidence=false` | 窗口已开；`deadline_mono` 给出上界 |
+| `N2H_COLLECTOR_ARM\|refused`（`:2161`） | `…\|refused\|error=<no-connector\|device-not-up\|tunnel-not-ready\|already-armed\|invalid-opts\|window-failed>\|detail=…` | arm 被拒（fail-closed）；**不重试绕过**，记因上报 |
+| `N2H_COLLECTOR_CLOSE`（`:1384`/`:2335`） | `…\|phase=closed\|verdict=<n2h-pass\|n2h-fail\|n2h-inconclusive>\|frames_scanned=…\|hits=…\|probes_sent=…\|receipts_observed=…\|chunks=…\|sha256=<全文档>\|diag=true\|is_evidence=false` | 窗口闭合；`chunks`/`sha256` 与 §9.6(d) 核对 |
+| `N2H_COLLECTOR_DISARM`（`:1385`/`:2138`/`:2152`） | `…\|discarded=true\|…`（未闭合窗）或 `…\|discarded=false\|retained=true\|…`（已闭合窗，产物留待重放） | 中止语义（设计 §13.5） |
+| ets 侧 `N2H_COLLECTOR_ARMED` / `N2H_COLLECTOR_ARM_FAILED` / `N2H_COLLECTOR_NOT_ARMED` / `N2H_COLLECTOR_ARM_OPTS_IGNORED`（`NetBirdVpnExtensionAbility.ets:1058`/`:1065`/`:986`/`:1002`） | 壳侧 arm 钩子的读数（含 `peerB2aProbeId=<id\|none>`） | 判定「文件是否被看到、是否就绪、是否被拒」 |
+
+- **判定口径**：`verdict` 只由证据 JSON 内判据解释；**运维收执缺位时设备轮预期恒为 `n2h-inconclusive`（收执缺口，设计 §4.0 诚实结论）——这是设计行为，不是工具故障**；`n2h-fail` 才是否定（证伪优先）。
+- **何时停止（引用既有条款，不新增）**：
+  1. §1.0 步骤 0 任一失败（时钟超阈/不可达/需解锁）⇒ **立即停止并上报**；
+  2. §3.5 既有停止条件出现任一；
+  3. 采集器 fail-closed：未就绪不开窗（§9.3）；arm 被拒（上表 `refused`）⇒ 记录后停止，不得改文件重试到平；
+  4. 抓取缺块且重抓失败 ⇒ 按 S13 仪器异常**先停再上报**（设计 §6.3、§2.4-R2）；
+  5. `frames_scanned=0`（tee 零帧）或 `/proc` 双路径皆不可读 ⇒ 该腿记缺口、verdict `n2h-inconclusive`，**不得**当清洁扫描或假通（`n2h_collector.rs:2816-2824`）；
+  6. AUTH `retry_allowed:false` 与 §6.6：本轮失败不得在原 AUTH 内重试。
+
+### 9.8 收尾与留档
+
+```bash
+# 清理控制文件（同上 §9.5）；停应用与卸载沿 §6.1/§6.2 原样
+"$HDC" shell "rm -f /data/local/tmp/netbird-n2h-arm"
+"$HDC" shell "aa force-stop cn.alfadb.netbird"
+
+# 逐文件 sidecar + 汇总回验（§5 规则；本节新增产物：hilog 抓取、设备证据 JSON、n2h-peer 日志、HAP-FREEZE.txt）
+cd "$EVDIR" && sha256sum hilog-n2h-collector-*.log n2h-isolation-evidence-device-*.json n2h-peer-*.log HAP-FREEZE.txt > MANIFEST.sha256 \
+  && sha256sum --check MANIFEST.sha256
+```
+
+- 全部产物仍声明 `is_evidence:false` 且**不构成任何门结论**（AUTH `evidence_destination_rules`）；设备证据文档含外层端点 IP/域名（设计 §2.4-A 的有意例外），只落 AUTH 证据目录并按 §5 敏感扫描。
+- 设备文档的 `collector.build_sha256` 与本轮 §9.1/§9.2 登记的 `N2H_BUILD_SHA256` 必须逐字相同；安装 HAP 的 sha256 以 §9.1 冻结件为准（HAP 不可复现，见设计 §13.10⑦）。
+
+### 9.9 本节新增待确认（执行前逐项关闭；§8 表继续有效）
+
+| # | 待确认 | 原因（为何本手册不能确证） |
+|---|---|---|
+| ⑨ | arm 文件在 watcher 轮询间隔内的可见性（`fs.accessSync` 对 `/data/local/tmp` 的读权限已证，写侧未单独复验） | 设备侧 arm 钩子为 I5 落地实现，仅离线 harness 验证；真机 arm 需本轮实测（失败形态 `N2H_COLLECTOR_NOT_ARMED`/`ARM_OPTS_IGNORED` 可分辨） |
+| ⑩ | hilog 缓冲在窗口期间是否足以容纳 20–60 行且不旋转 | 依赖设备 hilog 缓冲配置与当轮日志量；失败形态＝`n2h-decode` exit 21 + `missing=<seq>` |
+| ⑪ | 设备侧 `/proc/net/dev` 的 App 内直读权限（设计 §9-U1） | 未在真机验证；不可读时该腿退化为 hdc fallback 或在 `notes[]` 记 `counters-source=` 缺口 |
+| ⑫ | `hilog -D 0x2900 -b D` 在本轮设备 hilog 版本的参数兼容性 | 沿用 N13 实测形态（`docs/n13-device-relay-evidence-20260916.md:97`）；参数名以设备版本为准，仍须在 AUTH allowed 字面内 |

@@ -49,6 +49,18 @@
 //!     as the tunnel stand-in + a fake device): exit 0 = the echo path and the
 //!     status line both verified, no connector and no network involved.
 //!
+//! nbinterop n2h-decode <hilog-capture> [--out <file>]
+//!     N2-H EVIDENCE REASSEMBLY (design §2.4's host-side step, §7-I7): reads a
+//!     captured log (lines carrying `N2H_EVIDENCE|seq=i/n|sha256=…|b64=…`,
+//!     hilog prefix and other lines allowed), joins the chunks by `seq`,
+//!     verifies the full-document sha256 every line declared and writes the
+//!     document to `--out` (or stdout). Exit 0 = verified document; 21 = the
+//!     capture was refused (missing/mutated/spliced/malformed/read failure)
+//!     with the gap detail on stderr — an unverified document is never written.
+//!     The decoder is `n2h_collector::decode_evidence` itself (no second
+//!     implementation), so the tool and the device collector's encoder cannot
+//!     drift apart. Offline, no connector, no device.
+//!
 //! nbinterop isolation-check [--out <file>] [--fault-* ...]
 //!     N2-H route-exclusion ISOLATION EVIDENCE for one connection session
 //!     (host-side; see netbird_core::n2h). Offline dual-instance loopback
@@ -118,8 +130,10 @@
 //! config · `4` credentials · `10..16` connector error classes
 //! (network/timeout/auth/request/server/parse/unsupported_url) · `17`
 //! `--timeout` elapsed · `18` peer ended without a session · `19` unknown
-//! error class · `20` n2h-inconclusive. `n2h-peer --timeout` is the registered
-//! STOP form of a run that has no goal to reach: it exits `0`.
+//! error class · `20` n2h-inconclusive · `21` n2h-decode capture refused
+//! (missing chunk / digest mismatch / unreadable capture — never an evidence
+//! verdict). `n2h-peer --timeout` is the registered STOP form of a run that has
+//! no goal to reach: it exits `0`.
 //!
 //! ## Host link stubs
 //!
@@ -268,6 +282,7 @@ USAGE:
                        [--posctl-interval <ms>] [--interval <ms>] [--timeout <s>]
     nbinterop n2h-peer --loopback [--overlay <ip[:port]>] [--echo-port <port>]
                        [--posctl-interval <ms>] [--timeout <s>]
+    nbinterop n2h-decode <hilog-capture> [--out <file>]
     nbinterop isolation-check [--out <file>] [--loopback]
                               [--fault-leak] [--fault-no-posctl]
                               [--fault-omit-endpoint <kind>]
@@ -302,6 +317,21 @@ house shape; stdout stays pure status JSONL):
     observation; `unknown_peer_drops` is this peer's live WG counter (the
     device's wg_peer outer-probe receipt, design §4.0) read through the
     collector's installed host seam — `na` while no device is up.
+
+n2h-decode (N2-H I7: the host-side reassembly step of design §2.4 — the tool
+the device runbook's capture step calls; decode only, no network, no device):
+    <hilog-capture>       the captured log file: every line carrying
+                          N2H_EVIDENCE|seq=i/n|sha256=…|b64=… is used (the
+                          hilog prefix is allowed, other lines are ignored)
+    --out <file>          write the reassembled document there; without it the
+                          document goes to stdout (raw bytes, byte-exact)
+    exit 0 = the document reassembled AND its sha256 matches the digest EVERY
+    chunk line declared; 21 = refused (missing chunk, mutated payload, spliced
+    or malformed capture, unreadable capture/out) — the gap detail
+    (lines/chunk_lines/total/missing) and the reason go to stderr, and an
+    unverified document is NEVER written. The capture-failure path never
+    produces a verdict: re-capture while the device log buffer still holds the
+    window, or record the gap and stop (§2.4-R2).
 
 isolation-check (N2-H evidence tool; evidence only — no governance change):
     --out <file>          evidence JSON path (default: n2h-isolation-evidence.json)
@@ -340,7 +370,8 @@ the config file or the environment — never the command line.
 Exit codes: 0 ok/n2h-pass | 1 selftest failed/n2h-fail | 2 usage | 3 config | 4 credentials
 | 10 network | 11 timeout | 12 auth | 13 request | 14 server | 15 parse
 | 16 unsupported_url | 17 wait-timeout | 18 peer-no-session | 19 unknown-class
-| 20 n2h-inconclusive   (n2h-peer: --timeout is the registered stop form → 0)";
+| 20 n2h-inconclusive | 21 n2h-decode capture refused
+   (n2h-peer: --timeout is the registered stop form → 0)";
 
 /// Secret-bearing flag prefixes the CLI must never accept.
 const SECRET_FLAGS: [&str; 4] = ["--setup-key", "--jwt", "--private-key", "--ca-pem"];
@@ -524,6 +555,7 @@ fn run() -> i32 {
         "connect" => cmd_engine("connect", &args[1..]),
         "peer" => cmd_engine("peer", &args[1..]),
         "n2h-peer" => cmd_n2h_peer(&args[1..]),
+        "n2h-decode" => cmd_n2h_decode(&args[1..]),
         "isolation-check" => cmd_isolation_check(&args[1..]),
         other => {
             eprintln!("error: unknown subcommand '{other}'\n\n{USAGE}");
@@ -889,6 +921,197 @@ fn parse_outer_endpoint(
         .parse()
         .map_err(|_| format!("bad port '{port}' in '{s}'"))?;
     Ok((kind, host.to_string(), port))
+}
+
+// ---------------------------------------------------------------------------
+// n2h-decode (N2-H I7: the host-side reassembly step of design §2.4)
+// ---------------------------------------------------------------------------
+
+/// `n2h-decode` (I7): a capture that could not be reassembled into a document
+/// whose sha256 matches the declared one. NOT an evidence verdict — a capture
+/// failure — so it has its own code and the tool never writes an unverified
+/// document (a partial or mutated capture must fail, never degrade silently).
+const EXIT_N2H_DECODE_FAILED: i32 = 21;
+
+/// One capture's chunk lines plus the diagnostics a failure report needs.
+/// The DECODE itself is always [`nc::decode_evidence`] — this type never
+/// re-implements reassembly, it only counts what the capture carried.
+struct N2hCapture {
+    /// Lines from the marker to the end of line, in capture order (§2.4 step 1).
+    chunk_lines: Vec<String>,
+    /// `seq` values that arrived (diagnostics only).
+    present: std::collections::BTreeSet<usize>,
+    /// Declared chunk totals (diagnostics only).
+    totals: std::collections::BTreeSet<usize>,
+    /// All lines of the capture, marker lines included.
+    lines: usize,
+}
+
+impl N2hCapture {
+    /// Extract every chunk line from a hilog capture. The marker is SEARCHED
+    /// (a real capture line carries the hilog prefix), trailing whitespace is
+    /// trimmed, and lines without the marker are ignored — a capture is allowed
+    /// to carry other lines (design §2.4: "grep N2H_EVIDENCE").
+    fn read(text: &str) -> N2hCapture {
+        let mut capture = N2hCapture {
+            chunk_lines: Vec::new(),
+            present: std::collections::BTreeSet::new(),
+            totals: std::collections::BTreeSet::new(),
+            lines: text.lines().count(),
+        };
+        for line in text.lines() {
+            let Some(idx) = line.find(nc::CHUNK_MARKER) else { continue };
+            let chunk = line[idx..].trim_end().to_string();
+            for field in chunk.split('|') {
+                if let Some(pair) = field.strip_prefix("seq=") {
+                    if let Some((seq, total)) = pair.split_once('/') {
+                        if let Ok(seq) = seq.parse::<usize>() {
+                            capture.present.insert(seq);
+                        }
+                        if let Ok(total) = total.parse::<usize>() {
+                            capture.totals.insert(total);
+                        }
+                    }
+                }
+            }
+            capture.chunk_lines.push(chunk);
+        }
+        capture
+    }
+
+    /// The gap detail of a rejected capture: what arrived (lines, chunk lines),
+    /// what the lines declared (`total`), and which `seq` never made it.
+    fn gap_line(&self) -> String {
+        let total = match self.totals.len() {
+            1 => self.totals.iter().next().copied().unwrap_or(0).to_string(),
+            _ => "na".to_string(),
+        };
+        let missing: Vec<String> = match self.totals.len() {
+            1 => {
+                let total = self.totals.iter().next().copied().unwrap_or(0);
+                (0..total)
+                    .filter(|seq| !self.present.contains(seq))
+                    .map(|seq| seq.to_string())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        format!(
+            "lines={}|chunk_lines={}|total={total}|missing={}",
+            self.lines,
+            self.chunk_lines.len(),
+            if missing.is_empty() { "na".to_string() } else { missing.join(",") }
+        )
+    }
+}
+
+/// `nbinterop n2h-decode <capture> [--out <file>]` — see the module docs.
+fn cmd_n2h_decode(args: &[String]) -> i32 {
+    let mut capture_path: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let (key, inline) = match args[i].split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (args[i].clone(), None),
+        };
+        let mut consumed_next = false;
+        let mut value = |what: &str| -> Result<String, i32> {
+            if let Some(v) = inline.clone() {
+                return Ok(v);
+            }
+            match args.get(i + 1) {
+                Some(v) => {
+                    consumed_next = true;
+                    Ok(v.clone())
+                }
+                None => {
+                    eprintln!("error: {what} requires a value");
+                    Err(hs::EXIT_USAGE)
+                }
+            }
+        };
+        match key.as_str() {
+            "--out" => match value("--out") {
+                Ok(v) => out_path = Some(v),
+                Err(code) => return code,
+            },
+            "help" | "--help" | "-h" => {
+                println!("{USAGE}");
+                return hs::EXIT_OK;
+            }
+            other if other.starts_with("--") => {
+                eprintln!("error: unknown flag '{other}'\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+            positional if capture_path.is_none() => capture_path = Some(positional.to_string()),
+            other => {
+                eprintln!("error: unexpected extra argument '{other}'\n\n{USAGE}");
+                return hs::EXIT_USAGE;
+            }
+        }
+        i += 1 + usize::from(consumed_next);
+    }
+    let Some(capture_path) = capture_path else {
+        eprintln!("error: n2h-decode needs the hilog capture file\n\n{USAGE}");
+        return hs::EXIT_USAGE;
+    };
+    let text = match std::fs::read_to_string(&capture_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "nbinterop: n2h-decode|ok=false|error=read-failed|capture={capture_path}|detail={e}"
+            );
+            return EXIT_N2H_DECODE_FAILED;
+        }
+    };
+    let capture = N2hCapture::read(&text);
+    let refs: Vec<&str> = capture.chunk_lines.iter().map(|l| l.as_str()).collect();
+    match nc::decode_evidence(&refs) {
+        Ok(raw) => {
+            let sha256 = netbird_core::util::sha256_hex(&raw);
+            let where_to = match &out_path {
+                Some(path) => match std::fs::write(path, &raw) {
+                    Ok(()) => path.clone(),
+                    Err(e) => {
+                        eprintln!(
+                            "nbinterop: n2h-decode|ok=false|error=write-failed|out={path}|detail={e}"
+                        );
+                        return EXIT_N2H_DECODE_FAILED;
+                    }
+                },
+                None => {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout();
+                    if stdout.write_all(&raw).and_then(|()| stdout.flush()).is_err() {
+                        eprintln!("nbinterop: n2h-decode|ok=false|error=write-failed|out=stdout");
+                        return EXIT_N2H_DECODE_FAILED;
+                    }
+                    "stdout".to_string()
+                }
+            };
+            eprintln!(
+                "nbinterop: n2h-decode|ok=true|capture={capture_path}|{}|chunks={}|bytes={}|\
+                 sha256={sha256}|out={where_to}",
+                capture.gap_line(),
+                capture.chunk_lines.len(),
+                raw.len()
+            );
+            hs::EXIT_OK
+        }
+        Err(e) => {
+            eprintln!(
+                "nbinterop: n2h-decode|ok=false|error=chunk-error|capture={capture_path}|{}|\
+                 detail={e}",
+                capture.gap_line()
+            );
+            eprintln!(
+                "[n2h-decode] the capture did NOT reassemble: {e} — re-capture while the device \
+                 log buffer still holds the window, or record the gap and stop (§2.4-R2)"
+            );
+            EXIT_N2H_DECODE_FAILED
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2250,5 +2473,141 @@ mod n2h_peer_tests {
         );
         assert_eq!(cmd_engine("connect", &args(&["--echo-port", "40001"])), hs::EXIT_USAGE);
         println!("[I6-cli] mode gates: n2h-peer flags are opt-in and refused elsewhere");
+    }
+}
+
+/// N2-H I7: the capture → document step of design §2.4. The three cases the
+/// runbook depends on are exercised through the SAME functions the CLI uses
+/// (`N2hCapture::read` + `n2h_collector::decode_evidence`), with the chunk
+/// lines produced by the collector's own `encode_evidence` — no second encoder
+/// and no second decoder exist here.
+#[cfg(test)]
+mod n2h_decode_tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A real document of a shape the device window produces (JSON, multi-chunk
+    /// at the frozen 512-byte slice), encoded by the collector itself.
+    fn document() -> Vec<u8> {
+        let mut doc = String::from("{\"tool\":\"n2h-isolation-evidence\",\"notes\":[");
+        while doc.len() < nc::CHUNK_PAYLOAD_BYTES * 3 + 7 {
+            doc.push_str("\"filler-filler-filler\",");
+        }
+        doc.push_str("\"end\"]}");
+        doc.into_bytes()
+    }
+
+    /// A hilog capture: every chunk line behind a realistic hilog prefix, plus
+    /// the foreign lines a real capture always carries (§2.4: grep the marker).
+    fn capture(doc: &[u8]) -> String {
+        let mut text = String::new();
+        text.push_str("09-17 12:00:00.000  1234  1234 I A00000/N1BDiscVpn: N2H_COLLECTOR_ARM|requestId=core\n");
+        for (i, chunk) in nc::encode_evidence(doc).iter().enumerate() {
+            text.push_str(&format!(
+                "09-17 12:00:0{}.000  1234  1234 I A00000/N1BDiscVpn: {}\n",
+                i % 10,
+                chunk.line()
+            ));
+        }
+        text.push_str("09-17 12:00:09.000  1234  1234 I A00000/N1BDiscVpn: N2H_COLLECTOR_CLOSE|phase=closed\n");
+        text
+    }
+
+    /// ① round trip: a capture with hilog prefixes and foreign lines reassembles
+    /// byte-identically to the encoded document.
+    #[test]
+    fn a_hilog_capture_reassembles_to_the_encoded_document() {
+        let doc = document();
+        let text = capture(&doc);
+        let capture = N2hCapture::read(&text);
+        assert_eq!(capture.chunk_lines.len(), nc::encode_evidence(&doc).len());
+        let refs: Vec<&str> = capture.chunk_lines.iter().map(|l| l.as_str()).collect();
+        let raw = nc::decode_evidence(&refs).expect("the capture reassembles");
+        assert_eq!(raw, doc, "byte-identical document");
+        assert_eq!(netbird_core::util::sha256_hex(&raw), netbird_core::util::sha256_hex(&doc));
+        println!(
+            "[I7-cli] roundtrip: {} bytes, {} chunk lines, {} capture lines, sha256={}",
+            raw.len(),
+            capture.chunk_lines.len(),
+            capture.lines,
+            netbird_core::util::sha256_hex(&raw)
+        );
+    }
+
+    /// ② a dropped line is DETECTED (never silently shipped) and the gap detail
+    /// names the missing `seq`.
+    #[test]
+    fn a_missing_chunk_is_refused_with_its_seq_in_the_gap_detail() {
+        let doc = document();
+        let mut text = capture(&doc);
+        let total = nc::encode_evidence(&doc).len();
+        assert!(total >= 3, "the fixture must span several chunks, got {total}");
+        // drop the SECOND chunk line (a middle one, the realistic hilog loss)
+        let lines: Vec<&str> = text.lines().collect();
+        let mut kept: Vec<String> = Vec::new();
+        let mut dropped = false;
+        for line in lines {
+            if !dropped && line.contains("|seq=1/") {
+                dropped = true;
+                continue;
+            }
+            kept.push(line.to_string());
+        }
+        assert!(dropped, "the middle chunk line was removed");
+        text = format!("{}\n", kept.join("\n"));
+        let capture = N2hCapture::read(&text);
+        let refs: Vec<&str> = capture.chunk_lines.iter().map(|l| l.as_str()).collect();
+        let err = nc::decode_evidence(&refs).expect_err("a dropped chunk must fail");
+        assert_eq!(err, nc::ChunkError::Missing { seq: 1 }, "{err}");
+        let gap = capture.gap_line();
+        assert!(gap.contains("missing=1"), "{gap}");
+        assert!(gap.contains(&format!("total={total}")), "{gap}");
+        println!("[I7-cli] missing chunk: error='{err}' gap='{gap}'");
+    }
+
+    /// ③ a mutated payload is DETECTED by the declared full-document digest —
+    /// the mutated chunk still decodes as base64, so only the sha256 can catch it.
+    #[test]
+    fn a_tampered_payload_is_refused_by_the_declared_digest() {
+        let doc = document();
+        let text = capture(&doc);
+        let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        let target = lines
+            .iter_mut()
+            .find(|l| l.contains("|seq=2/"))
+            .expect("the third chunk line exists");
+        let at = target.find("b64=").expect("b64 field") + 4;
+        let first = target.as_bytes()[at] as char;
+        let flipped = if first == 'A' { 'B' } else { 'A' };
+        target.replace_range(at..at + 1, &flipped.to_string());
+        let text = format!("{}\n", lines.join("\n"));
+        let capture = N2hCapture::read(&text);
+        let refs: Vec<&str> = capture.chunk_lines.iter().map(|l| l.as_str()).collect();
+        let err = nc::decode_evidence(&refs).expect_err("a mutated payload must fail");
+        match &err {
+            nc::ChunkError::Sha256Mismatch { declared, actual } => {
+                assert_ne!(declared, actual);
+                assert_eq!(declared.len(), 64);
+                assert_eq!(actual.len(), 64);
+            }
+            other => panic!("expected a digest refusal, got {other:?}"),
+        }
+        println!("[I7-cli] tampered chunk: error='{err}'");
+    }
+
+    /// Usage is fail-closed: no capture argument, an unknown flag and an
+    /// unreadable capture are all refused (2 = misuse, 21 = capture failure).
+    #[test]
+    fn the_decode_subcommand_is_fail_closed_on_misuse() {
+        assert_eq!(cmd_n2h_decode(&args(&[])), hs::EXIT_USAGE);
+        assert_eq!(cmd_n2h_decode(&args(&["--bogus", "x.log"])), hs::EXIT_USAGE);
+        assert_eq!(
+            cmd_n2h_decode(&args(&["/nonexistent/n2h-capture.log"])),
+            EXIT_N2H_DECODE_FAILED
+        );
+        println!("[I7-cli] misuse gates: no arg/unknown flag ⇒ 2; unreadable capture ⇒ 21");
     }
 }

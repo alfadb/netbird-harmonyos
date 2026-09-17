@@ -443,12 +443,27 @@ fn schema_of(doc: &V) -> BTreeMap<String, &'static str> {
     out
 }
 
+/// Design §3.4-D10 (a REGISTERED difference, §13.11): the device document
+/// carries the trailing `collector{}` build self-identification block
+/// (§3.3/A-1) that the frozen host renderer has no field for. Its paths are the
+/// ONLY tolerated device-only exception — and each one must still carry
+/// exactly the type §3.3 freezes, so the exemption cannot hide a shape drift.
+fn d10_collector_paths() -> BTreeMap<&'static str, &'static str> {
+    BTreeMap::from([
+        ("$.collector", "object"),
+        ("$.collector.crate_version", "string"),
+        ("$.collector.target_triple", "string"),
+        ("$.collector.build_sha256", "string"),
+        ("$.collector.build_source", "string"),
+    ])
+}
+
 /// The device document must be key-for-key and type-for-type identical to the
-/// host `n2h.rs` document. The ONE tolerated difference is an element path
-/// (`…[]…`) whose owning array is COMPLETELY EMPTY in the other document
-/// (a clean host run has no `notes`, a clean device run has no `reasons`):
-/// an empty array carries no element to compare, so the array itself is
-/// compared instead.
+/// host `n2h.rs` document, EXCEPT for the registered D10 collector{} block. The
+/// other tolerated difference is an element path (`…[]…`) whose owning array is
+/// COMPLETELY EMPTY in the other document (a clean host run has no `notes`, a
+/// clean device run has no `reasons`): an empty array carries no element to
+/// compare, so the array itself is compared instead.
 fn assert_same_schema(device: &BTreeMap<String, &'static str>, host: &BTreeMap<String, &'static str>) {
     for (path, kind) in device {
         if let Some(host_kind) = host.get(path) {
@@ -480,7 +495,16 @@ fn assert_same_schema(device: &BTreeMap<String, &'static str>, host: &BTreeMap<S
              (a real schema difference)"
         );
     };
+    let d10 = d10_collector_paths();
     for path in &device_only {
+        if let Some(expected) = d10.get(path.as_str()) {
+            assert_eq!(
+                device.get(path.as_str()).copied(),
+                Some(*expected),
+                "D10 collector{{}} path {path} does not carry the type §3.3 freezes"
+            );
+            continue;
+        }
         check(path, host, "device");
     }
     for path in &host_only {
@@ -1085,6 +1109,25 @@ fn clean_device_window_passes_and_matches_the_host_document_schema() {
     // the design §3.2 caliber is DECLARED
     let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
     assert!(notes.contains(&"counters-source=tee-fallback"), "notes: {notes:?}");
+    // I7/A-1 (D10, §13.11): the trailing `collector{}` self-identification block
+    // — and the I5 `notes[]` placeholder it REPLACED (§13.6 said I7 would).
+    let collector = doc.at("collector");
+    assert_eq!(collector.at("crate_version").str_of(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(collector.at("target_triple").str_of(), Some(nc::BUILD_TARGET_TRIPLE));
+    assert_eq!(collector.at("build_sha256").str_of(), Some(nc::BUILD_SHA256));
+    assert_eq!(collector.at("build_source").str_of(), Some(nc::BUILD_SOURCE_EMBEDDED));
+    assert_eq!(collector.at("build_sha256").str_of().unwrap().len(), 64, "non-empty digest");
+    assert!(
+        !notes.iter().any(|n| n.starts_with("build-sha256=")),
+        "the I5 build-sha256 notes[] placeholder must be gone: {notes:?}"
+    );
+    // tail-append discipline: the block is the document's LAST key and the
+    // renderer's own bytes are untouched before it
+    assert!(
+        text.ends_with(&format!(",{}}}", nc::collector_block_json(""))),
+        "collector{{}} is not the trailing key: …{}",
+        &text[text.len().saturating_sub(160)..]
+    );
     // both positive-control directions observed, a2b through BOTH points
     assert_eq!(doc.at("tunnel_positive_control").at("observed_in_tunnel").bool_of(), Some(true));
     let posctl = doc.at("tunnel_positive_control").at("probes").arr_of();
