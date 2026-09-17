@@ -139,6 +139,13 @@ pub mod management;
 // the shipped cdylib behavior is unchanged; it does NOT change governance
 // (N2-H takes effect only after user approval + formal revision — module docs).
 pub mod n2h;
+// N2-H (device-side evidence collector): I0 HiLog chunk encoder (512 B slices,
+// seq/total/sha256 + replay) and I1 endpoint freeze assembly (7 classes from
+// injected sources) — spec docs/n2h-device-collector-design-20260917.md.
+// Compiled into the cdylib, but INERT: nothing calls into it until the napi
+// collector entry points are armed (I5); it performs no IO itself and the
+// shipped cdylib behavior is unchanged.
+pub mod n2h_collector;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
 // consumption + tonic connector service) — fail-closed gap 1 fix.
 pub mod mgmtsock;
