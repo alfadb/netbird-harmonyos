@@ -68,6 +68,14 @@ const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
 // fail-closed teardown (never a half-configured tunnel).
 const RECREATE_DESTROY_BOX_MS: number = 5000;
 const RECREATE_CREATE_BOX_MS: number = 5000;
+// N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
+// evidence collector. The file only carries NON-SENSITIVE window options; its
+// EXISTENCE is the arm request (same /data/local/tmp development channel as
+// `netbird-protect-deviation`). No arm file ⇒ the collector stays inert.
+const N2H_ARM_FILE: string = '/data/local/tmp/netbird-n2h-arm';
+// §5.1 arm-option defaults (the file may override them; core re-validates).
+const N2H_POSCTL_PORT_DEFAULT: number = 40001;
+const N2H_PROBE_WAIT_MS_DEFAULT: number = 800;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -93,6 +101,39 @@ interface SignalProvisionResult {
 interface EndpointExclusionOutcome {
   fatal: boolean;
   routes: ExcludedRouteEntry[];
+}
+
+// N2-H I5: one shell-exclusion entry of the arm options (§5.1
+// `{"shell_exclusions":[{kind,host,port,resolved}]}`, the D7
+// `shell-exclusion` freeze source).
+interface N2hShellExclusion {
+  kind: string;
+  host: string;
+  port: number;
+  resolved: string;
+}
+
+// N2-H I5: the non-sensitive options the arm control file may carry (0 =
+// absent → the §5.1 default).
+interface N2hArmFileOptions {
+  posctl_port: number;
+  probe_wait_ms: number;
+}
+
+// N2-H I5: the `n2h_collector_arm` options document (§5.1).
+interface N2hArmOptions {
+  shell_exclusions: N2hShellExclusion[];
+  posctl_port: number;
+  probe_wait_ms: number;
+}
+
+// N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
+// opened_mono}` or `{ok:false,error:"<token>"}`.
+interface N2hCollectorArmResult {
+  ok: boolean;
+  armed?: boolean;
+  opened_mono?: number;
+  error?: string;
 }
 
 // {open,errno} JSON returned by the synchronous core.fd_status(fd) NAPI export.
@@ -242,6 +283,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // default-routed) tunnel. A fresh freeze (re-resolution) happens on the
   // next full start, never from a cached cross-session set.
   private frozenEndpointExclusions: ExcludedRouteEntry[] = [];
+  // N2-H I5 (§5.3-2): the SHELL exclusion set retention for the device-side
+  // evidence collector — the same derivation's endpoints (kind/host/port) and
+  // per-endpoint resolutions, kept on this instance so `n2h_collector_arm` can
+  // freeze the shell-side half of C1/C2 in the SAME document. Development
+  // channel only: nothing is read from them unless the arm control file
+  // exists (§6.1), and the arm action itself is never gate evidence.
+  private n2hExclusionEndpoints: ExclusionEndpoint[] = [];
+  private n2hExclusionResolutions: EndpointResolution[] = [];
+  // N2-H I5 (§5.3-1): the one-shot latch of the control-file check, so the
+  // watcher attempts the arm at most once per ability instance.
+  private n2hArmAttempted: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -883,7 +935,120 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'action=no-vpn-created|is_evidence=false|not_a_gate_pass=true',
         this.requestId, build.failed.length);
     }
+    // N2-H I5 (§5.3-2): retain THIS derivation's endpoints + resolutions on the
+    // instance (counts/addresses only, no secret material) so the collector's
+    // arm can freeze the shell-side exclusion half. Nothing is read from them
+    // unless the arm control file appears (§6.1); the product paths above are
+    // untouched.
+    this.n2hExclusionEndpoints = endpoints;
+    this.n2hExclusionResolutions = resolutions;
     return { fatal: fatal, routes: build.routes };
+  }
+
+  // N2-H I5 (§5.3-1): the device-side evidence collector's arm hook. Runs at
+  // most ONCE per ability instance, only when the development control file
+  // exists AND the live session is ready (fail-closed: no ready session ⇒ no
+  // window, the reason is logged). The options carry the shell exclusion set
+  // retained above (D7 `shell-exclusion`) plus the non-sensitive window knobs
+  // from the control file. Everything is marker-logged with
+  // `diag=true|is_evidence=false`: arming is a diagnostic action, never gate
+  // evidence — only the reviewed document is.
+  private maybeArmN2hCollector(status: ConnectorStatusResult): void {
+    if (this.n2hArmAttempted || this.destroyRequested) {
+      return;
+    }
+    let present: boolean = false;
+    try {
+      present = fs.accessSync(N2H_ARM_FILE);
+    } catch (error) {
+      present = false;
+    }
+    if (!present) {
+      return;
+    }
+    this.n2hArmAttempted = true;
+    const deviceUp: boolean =
+      status.wg !== undefined && status.wg !== null && status.wg.device_up === true;
+    const ready: boolean = status.wg !== undefined && status.wg !== null && status.wg.ready === true;
+    if (!deviceUp || !ready) {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_COLLECTOR_NOT_ARMED|requestId=%{public}s|reason=session-not-ready|' +
+        'deviceUp=%{public}s|ready=%{public}s|diag=true|is_evidence=false',
+        this.requestId, String(deviceUp), String(ready));
+      return;
+    }
+    // The control file carries only non-sensitive window options; a malformed
+    // or absent body falls back to the §5.1 defaults (the core re-validates
+    // and refuses anything it cannot understand).
+    let fileOpts: N2hArmFileOptions = { posctl_port: 0, probe_wait_ms: 0 };
+    try {
+      const text: string = fs.readTextSync(N2H_ARM_FILE).trim();
+      if (text.length > 0) {
+        fileOpts = JSON.parse(text) as N2hArmFileOptions;
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_COLLECTOR_ARM_OPTS_IGNORED|requestId=%{public}s|summary=%{public}s|' +
+        'action=defaults|diag=true|is_evidence=false',
+        this.requestId, safeError(error as Error));
+      fileOpts = { posctl_port: 0, probe_wait_ms: 0 };
+    }
+    const posctlPort: number = fileOpts.posctl_port > 0
+      ? fileOpts.posctl_port
+      : N2H_POSCTL_PORT_DEFAULT;
+    const probeWaitMs: number = fileOpts.probe_wait_ms > 0
+      ? fileOpts.probe_wait_ms
+      : N2H_PROBE_WAIT_MS_DEFAULT;
+    // Shell exclusion set: join the retained endpoints (kind/host/port) with
+    // the retained resolutions (which carry the dialed address). Only a
+    // resolved endpoint can be frozen; an unresolved one stays a core-side
+    // freeze gap in the document (never guessed here).
+    const exclusions: N2hShellExclusion[] = [];
+    for (let i = 0; i < this.n2hExclusionEndpoints.length; i++) {
+      const endpoint: ExclusionEndpoint = this.n2hExclusionEndpoints[i];
+      for (let j = 0; j < this.n2hExclusionResolutions.length; j++) {
+        const resolution: EndpointResolution = this.n2hExclusionResolutions[j];
+        if (resolution.kind !== endpoint.kind || resolution.host !== endpoint.host) {
+          continue;
+        }
+        if (resolution.ok !== true || resolution.address.length === 0) {
+          break;
+        }
+        exclusions.push({
+          kind: endpoint.kind,
+          host: endpoint.host,
+          port: endpoint.port,
+          resolved: `${stripDialPort(resolution.address)}:${endpoint.port}`
+        });
+        break;
+      }
+    }
+    const opts: N2hArmOptions = {
+      shell_exclusions: exclusions,
+      posctl_port: posctlPort,
+      probe_wait_ms: probeWaitMs
+    };
+    const optsJson: string = JSON.stringify(opts);
+    try {
+      const answer: N2hCollectorArmResult = JSON.parse(core.n2h_collector_arm(optsJson)) as
+        N2hCollectorArmResult;
+      if (answer.ok === true) {
+        hilog.info(DOMAIN, TAG,
+          'N2H_COLLECTOR_ARMED|requestId=%{public}s|openedMono=%{public}d|exclusions=%{public}d|' +
+          'posctlPort=%{public}d|probeWaitMs=%{public}d|diag=true|is_evidence=false',
+          this.requestId, answer.opened_mono ?? -1, exclusions.length, posctlPort, probeWaitMs);
+      } else {
+        hilog.error(DOMAIN, TAG,
+          'N2H_COLLECTOR_ARM_FAILED|requestId=%{public}s|error=%{public}s|' +
+          'diag=true|is_evidence=false',
+          this.requestId, answer.error ?? 'unknown');
+      }
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'N2H_COLLECTOR_ARM_REJECTED|requestId=%{public}s|summary=%{public}s|' +
+        'diag=true|is_evidence=false',
+        this.requestId, safeError(error as Error));
+    }
   }
 
   // Runtime watch (while the VPN is up): poll connector_status (state /
@@ -990,6 +1155,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           });
           return;
         }
+        // N2-H I5 (§5.3-1): one-shot development-channel arm check. It never
+        // changes a product path — no arm file ⇒ nothing happens (the
+        // collector stays inert per §6.1); a terminal connector or a pending
+        // recreate has already returned above, so a window never straddles a
+        // teardown or a rebuild.
+        this.maybeArmN2hCollector(status);
       } else {
         this.statusPollFailures++;
         hilog.warn(DOMAIN, TAG,

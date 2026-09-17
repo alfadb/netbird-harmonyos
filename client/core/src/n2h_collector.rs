@@ -63,13 +63,18 @@
 //! routing/exclusion/VPN lifecycle code, and its only filesystem read is the
 //! `/proc/net/dev` ledger (§4.4) plus the operator capture it falls back to.
 
+use crate::config::Json;
 use crate::hilog;
 use crate::n2h::{
-    probe_id, EndpointKind, FiveTuple, FrozenEndpoint, IfaceSnapshot, WireMarker, WindowCounters,
+    probe_id, EndpointKind, EndpointReceipt, Evidence, FiveTuple, FrozenEndpoint, IfaceSnapshot,
+    OuterProbe, PosctlEvidence, PosctlProbe, TunHit, TunScanResult, TunnelScanner, WireMarker,
+    WindowCounters,
 };
-use crate::util::{base64, sha256_hex};
-use crate::wg_device::{TunTeeTotals, WgDeviceStats};
+use crate::util::{base64, jbool, jinum, jstr, sha256_hex};
+use crate::wg_device::{TunFrameDir, TunFrameTee, TunTeeTotals, WgDeviceStats};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 // ---------------------------------------------------------------------------
 // I0 — chunk encoder (design §2.4-A)
@@ -1280,6 +1285,1678 @@ pub fn close_window<R: LedgerReads + ?Sized>(
 }
 
 // ---------------------------------------------------------------------------
+// I5 — scan tee, window state machine, verdict wiring, napi JSON surface
+// ---------------------------------------------------------------------------
+
+/// The device document's `mode` (design D1).
+pub const MODE_DEVICE: &str = "device";
+/// The device document's `session` descriptor (design D2).
+pub const SESSION_DEVICE: &str =
+    "device session; TUN = platform vpn-tun fd (dup); outer probes from app process";
+
+/// Window phases of the `n2h_collector_status()` document (§5.1).
+pub const PHASE_ARMED: &str = "armed";
+pub const PHASE_PROBING: &str = "probing";
+pub const PHASE_OBSERVING: &str = "observing";
+pub const PHASE_CLOSED: &str = "closed";
+
+/// Arm-option defaults (§5.1: `posctl_port:40001`, `probe_wait_ms:800`).
+pub const DEFAULT_POSCTL_PORT: u16 = 40_001;
+/// Positive-control payload suffix — the host payload shape
+/// `N2H-posctl-<nonce>|positive-control` (`n2h.rs:1558`).
+pub const POSCTL_PAYLOAD_SUFFIX: &str = "|positive-control";
+/// Probe-id kind token of the positive control (the host uses the same one).
+pub const POSCTL_KIND_TOKEN: &str = "posctl";
+
+/// Hard bound of ONE window (arm → closed). A fuse, not a target: the probe
+/// legs are individually bounded (`PROBE_CONNECT_TIMEOUT_MS` /
+/// `probe_wait_ms`) and the observation loop has its own deadline; this is the
+/// outer bound the state machine checks between legs (§2.2: 全程 deadline 有界).
+pub const WINDOW_DEADLINE_MS: u64 = 60_000;
+/// Observation deadline after the probes are out (the host's
+/// `OBSERVE_DEADLINE_MS` shape, `n2h.rs:1229`).
+pub const OBSERVE_DEADLINE_MS: u64 = 5_000;
+/// Observation-loop beat (`sys::sleep_ms`), the host's 10 ms shape.
+pub const OBSERVE_BEAT_MS: u64 = 10;
+/// Consecutive beats after the observation goal first holds, so in-flight
+/// frames and late receipts land INSIDE the window (host
+/// `OBSERVE_SETTLE_ROUNDS`, `n2h.rs:1232`).
+pub const OBSERVE_SETTLE_ROUNDS: u32 = 15;
+
+/// Core-side HiLog markers (`N2H_COLLECTOR` family, design §6.4-3). Every line
+/// carries `diag=true|is_evidence=false`: an arm/close ACTION is never gate
+/// evidence, only the reviewed document is (§6.1).
+pub const MARK_ARM: &str = "N2H_COLLECTOR_ARM";
+pub const MARK_CLOSE: &str = "N2H_COLLECTOR_CLOSE";
+pub const MARK_DISARM: &str = "N2H_COLLECTOR_DISARM";
+
+/// Arm error tokens — the four of §5.1 plus the two shapes the design did not
+/// name (malformed opts, window thread could not start). Both extra tokens are
+/// fail-closed answers the caller can act on; nothing else is ever returned.
+pub const ARM_ERR_NO_CONNECTOR: &str = "no-connector";
+pub const ARM_ERR_DEVICE_NOT_UP: &str = "device-not-up";
+pub const ARM_ERR_TUNNEL_NOT_READY: &str = "tunnel-not-ready";
+pub const ARM_ERR_ALREADY_ARMED: &str = "already-armed";
+pub const ARM_ERR_INVALID_OPTS: &str = "invalid-opts";
+pub const ARM_ERR_WINDOW_FAILED: &str = "window-failed";
+
+/// Evidence error tokens of §5.1 (`{error:"no-evidence"}`) plus the
+/// out-of-range answer for a chunk index the document does not have.
+pub const EVIDENCE_ERR_NONE: &str = "no-evidence";
+pub const EVIDENCE_ERR_RANGE: &str = "chunk-out-of-range";
+
+/// The device path of the operator's `hdc shell "cat /proc/net/dev"` capture
+/// (the D-class fallback of §4.4; `hdc file send` per §6.4-5).
+pub const N2H_HDC_CAPTURE_PATH: &str = "/data/local/tmp/netbird-n2h-proc-net-dev";
+
+/// Poison-tolerant lock (the crate's convention: a poisoned mutex must not
+/// take the NAPI boundary down — `panic=abort` in release).
+trait LockPoison<T> {
+    fn lock_poison(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> LockPoison<T> for Mutex<T> {
+    fn lock_poison(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// clock seam (design U9: the clock is injected, tests never sleep on the clock)
+// ---------------------------------------------------------------------------
+
+/// The window's clock. Injected so the state machine's timestamps are a seam
+/// (design U9), never read from the ambient clock inside the logic.
+pub trait CollectorClock: Send + Sync + 'static {
+    /// `sys::mono_ms()` (monotonic milliseconds).
+    fn mono_ms(&self) -> u64;
+    /// Unix seconds (the document's `*_unix` fields).
+    fn unix_s(&self) -> i64;
+}
+
+/// Production clock.
+pub struct SystemClock;
+
+impl CollectorClock for SystemClock {
+    fn mono_ms(&self) -> u64 {
+        crate::sys::mono_ms()
+    }
+
+    fn unix_s(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
+/// The production clock handle.
+pub fn system_clock() -> Arc<dyn CollectorClock> {
+    Arc::new(SystemClock)
+}
+
+// ---------------------------------------------------------------------------
+// the scan tee (§4.1): the production `TunFrameTee` implementation
+// ---------------------------------------------------------------------------
+
+/// One marker hit with its crossing direction. The frozen renderer
+/// (`n2h::TunHit::to_json`) has no direction field and §3.1/§5.2 forbid
+/// changing it, so the direction travels in `notes[]` instead (design D4's
+/// information, recorded where the design allows additions).
+#[derive(Debug, Clone)]
+pub struct DirectedHit {
+    pub probe_id: String,
+    pub direction: TunFrameDir,
+    pub hit: TunHit,
+}
+
+/// One consistent read of the tee (window close).
+#[derive(Debug, Clone)]
+pub struct TeeSnapshot {
+    /// Both-direction frame/byte totals (the `tee-fallback` caliber's source,
+    /// §3.2).
+    pub totals: TunTeeTotals,
+    /// Frames scanned (`tun_negative.frames_scanned`, both directions).
+    pub frames_scanned: u64,
+    /// Scan sides seen (always `["vpn-tun"]`, D3).
+    pub sides: Vec<String>,
+    /// Outer-probe hits (the violation list; a hit ⇒ `n2h-fail`).
+    pub outer_hits: Vec<TunHit>,
+    /// First hit per (probe id, direction).
+    pub directed: Vec<DirectedHit>,
+}
+
+/// The collector's scan tee (design §4.1): the object attached to the live
+/// `WgDevice` through the I2 seam. Per frame it does exactly what the host
+/// scan does — count the direction, feed the shared [`TunnelScanner`], and
+/// keep the first hit per (probe, direction) so the positive control's two
+/// observation points (§4.3/D5) stay distinguishable.
+///
+/// The critical section is short (count + substring scan + occasional copy);
+/// the lock is the tee's own, never the device's.
+pub struct CollectorTee {
+    inner: Mutex<TeeInner>,
+    clock: Arc<dyn CollectorClock>,
+}
+
+struct TeeEntry {
+    probe_id: String,
+    marker: WireMarker,
+    /// false = outer probe (a hit is a violation), true = positive control.
+    positive: bool,
+}
+
+struct TeeInner {
+    totals: TunTeeTotals,
+    scanner: TunnelScanner,
+    entries: Vec<TeeEntry>,
+    directed: Vec<DirectedHit>,
+}
+
+impl CollectorTee {
+    pub fn new(clock: Arc<dyn CollectorClock>) -> Self {
+        CollectorTee {
+            inner: Mutex::new(TeeInner {
+                totals: TunTeeTotals::default(),
+                scanner: TunnelScanner::default(),
+                entries: Vec::new(),
+                directed: Vec::new(),
+            }),
+            clock,
+        }
+    }
+
+    /// Register one probe marker for the window (design §4.1: registered at
+    /// arm/send, so pre-window frames can never be attributed to a probe).
+    /// The shared [`TunnelScanner`] is the negative-scan authority; the tee's
+    /// own entry table only splits the hits by direction.
+    pub fn register(&self, probe_id: &str, marker: WireMarker, positive: bool) {
+        let mut g = self.inner.lock_poison();
+        g.scanner.register(probe_id, marker.clone(), positive);
+        g.entries.push(TeeEntry { probe_id: probe_id.to_string(), marker, positive });
+    }
+
+    /// Both-direction totals (the `tee-fallback` row §3.2).
+    pub fn totals(&self) -> TunTeeTotals {
+        self.inner.lock_poison().totals
+    }
+
+    /// Frames scanned in the window (both directions).
+    pub fn frames_scanned(&self) -> u64 {
+        self.inner.lock_poison().scanner.frames_scanned()
+    }
+
+    /// Violations seen so far (live status).
+    pub fn outer_hit_count(&self) -> usize {
+        self.inner.lock_poison().scanner.outer_hits().len()
+    }
+
+    /// First observed hit of one probe id in ONE direction (the D5
+    /// observation point split).
+    pub fn directed_hit(&self, probe_id: &str, dir: TunFrameDir) -> Option<TunHit> {
+        self.inner
+            .lock_poison()
+            .directed
+            .iter()
+            .find(|d| d.probe_id == probe_id && d.direction == dir)
+            .map(|d| d.hit.clone())
+    }
+
+    /// One consistent snapshot for the document (window close).
+    pub fn snapshot(&self) -> TeeSnapshot {
+        let g = self.inner.lock_poison();
+        TeeSnapshot {
+            totals: g.totals,
+            frames_scanned: g.scanner.frames_scanned(),
+            sides: g.scanner.sides(),
+            outer_hits: g.scanner.outer_hits(),
+            directed: g.directed.clone(),
+        }
+    }
+}
+
+impl TunFrameTee for CollectorTee {
+    fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
+        let now = self.clock.mono_ms();
+        let mut g = self.inner.lock_poison();
+        match dir {
+            TunFrameDir::FromOs => {
+                g.totals.from_os_frames += 1;
+                g.totals.from_os_bytes += frame.len() as u64;
+            }
+            TunFrameDir::ToOs => {
+                g.totals.to_os_frames += 1;
+                g.totals.to_os_bytes += frame.len() as u64;
+            }
+        }
+        // the shared host scanner is the negative-scan authority (§4.1)
+        g.scanner.scan(TUN_IFACE_NAME, frame, now);
+        let matched: Vec<(String, bool)> = g
+            .entries
+            .iter()
+            .filter(|e| e.marker.matches(frame))
+            .map(|e| (e.probe_id.clone(), e.positive))
+            .collect();
+        for (probe_id, _positive) in matched {
+            if g.directed.iter().any(|d| d.probe_id == probe_id && d.direction == dir) {
+                continue;
+            }
+            let (src, dst, sport, dport) = match crate::n2h::parse_ipv4_frame(frame) {
+                Some(v) => (v.src, v.dst, v.sport, v.dport),
+                None => ([0, 0, 0, 0], [0, 0, 0, 0], 0, 0),
+            };
+            g.directed.push(DirectedHit {
+                probe_id: probe_id.clone(),
+                direction: dir,
+                hit: TunHit {
+                    probe_id,
+                    side: TUN_IFACE_NAME.to_string(),
+                    src,
+                    dst,
+                    sport,
+                    dport,
+                    frame_len: frame.len(),
+                    observed_at_mono: now,
+                },
+            });
+        }
+    }
+}
+
+/// `from-os` / `to-os` token (the direction fact of D4).
+pub fn direction_token(dir: TunFrameDir) -> &'static str {
+    match dir {
+        TunFrameDir::FromOs => "from-os",
+        TunFrameDir::ToOs => "to-os",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// host seam (design U9) + the process registry the napi exports resolve
+// ---------------------------------------------------------------------------
+
+/// Data-plane readiness read (the §2.2 arm gate).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostDataplane {
+    /// `connector_status().wg.device_up`: the WG device was constructed from
+    /// both feeds and the data plane is pumping.
+    pub device_up: bool,
+    /// `connector_status().wg.ready`: ≥1 established, non-expired session.
+    pub ready: bool,
+}
+
+/// Core-session freeze facts (design §4.0's `source` column), read at arm.
+#[derive(Debug, Clone, Default)]
+pub struct HostFreezeFacts {
+    /// Management address core actually dialled, when reachable.
+    pub management_dial: Option<InjectedEndpoint>,
+    /// `netbird_config.signal`.
+    pub signal_config: Option<InjectedEndpoint>,
+    /// `relay_advertised.advertised_urls` ∪ `relay.urls`.
+    pub relay_advertised: Vec<InjectedEndpoint>,
+    /// Network-map `stuns[].uri`.
+    pub stun_uris: Vec<InjectedEndpoint>,
+    /// Network-map `turns[].uri` (this build rejects `turn:`, §4.0).
+    pub turn_uris: Vec<InjectedEndpoint>,
+    /// `wg.wg_peers[].endpoint` — the session's outer UDP endpoints.
+    pub wg_peer_endpoints: Vec<InjectedEndpoint>,
+    /// Network-map DNS (`dns.servers[]` + `interface_dns`).
+    pub dns_servers: Vec<InjectedEndpoint>,
+    /// Peer overlay addresses (network-map `peers[].vpn_addresses`) — the a2b
+    /// positive control's destination (§4.3).
+    pub peer_overlay: Vec<[u8; 4]>,
+    /// This device's own overlay address (network-map `address`).
+    pub own_overlay: Option<[u8; 4]>,
+}
+
+/// The counterparty's report over its status channel (§4.3). Empty until that
+/// channel exists (I6): a missing report is recorded as a receipt gap, never
+/// as an unproven positive control pretended observed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerReport {
+    /// The b2a posctl marker the counterparty announced. Without it the
+    /// device cannot attribute a to-os frame to the peer's probe, so the b2a
+    /// leg is recorded not-sent (a gap) — never guessed.
+    pub b2a_probe_id: Option<String>,
+    /// The counterparty's own `unknown_peer_drops` (§4.0's wg_peer receipt).
+    pub unknown_peer_drops: Option<u64>,
+}
+
+/// One endpoint-side receipt fact observed by the host seam beyond the
+/// collector's own STUN self-proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptFact {
+    pub physical_src: String,
+    pub physical_src_source: String,
+    pub method: String,
+    pub detail: String,
+}
+
+/// Everything the window needs from the process it runs in (design U9).
+///
+/// Production: [`WgFeedHost`] (the connector's WG feed + the connector JSON
+/// documents). Offline harness: a test type — the seam exists exactly so the
+/// collector never reads `connector` state itself.
+pub trait CollectorHost: Send + Sync + 'static {
+    /// §2.2 arm gate: fail-closed input (no ready session ⇒ no arm).
+    fn dataplane(&self) -> Result<HostDataplane, String>;
+    /// §4.0 core-side freeze facts, read at the arm instant.
+    fn freeze_facts(&self) -> Result<HostFreezeFacts, String>;
+    /// §4.1 attach the scan tee to the live device. `Err` = no device to
+    /// observe ⇒ the arm is refused (no window without a tee).
+    fn attach_tee(&self, tee: Arc<dyn TunFrameTee>) -> Result<(), String>;
+    /// §2.2 window close: detach (idempotent; `Ok` when nothing is attached).
+    fn detach_tee(&self) -> Result<(), String>;
+    /// ONE paired counters read in the frozen order (§4.4). The collector
+    /// resamples this exact call on the close edge, so a device host hands in
+    /// the `/proc` path and an offline host the `tee-fallback` caliber (§3.2).
+    fn paired_read(&self, at_mono: u64, at_unix: i64) -> Result<PairedRead, String>;
+    /// §4.3 counterparty facts. Empty by default: the device records the gaps.
+    fn peer_report(&self) -> PeerReport {
+        PeerReport::default()
+    }
+    /// Endpoint-side observation of one probe (§4.0 matrix) beyond the
+    /// collector's own STUN self-proof. `None` by default — the device's
+    /// management/signal/relay endpoints are real services whose delivery
+    /// logs are operator-side (§4.0), so the gap is recorded honestly.
+    fn probe_receipt(&self, _probe_id: &str, _marker: &WireMarker) -> Option<ReceiptFact> {
+        None
+    }
+}
+
+static HOST: Mutex<Option<Arc<dyn CollectorHost>>> = Mutex::new(None);
+
+/// Install the process-side host seam (idempotent replace; returns whether a
+/// previous host was replaced). This is the ONE call the production wiring
+/// needs — see [`WgFeedHost`].
+pub fn install_host(host: Arc<dyn CollectorHost>) -> bool {
+    HOST.lock_poison().replace(host).is_some()
+}
+
+/// Remove the installed host (idempotent; returns whether one was installed).
+pub fn uninstall_host() -> bool {
+    HOST.lock_poison().take().is_some()
+}
+
+/// The installed host, if any.
+pub fn installed_host() -> Option<Arc<dyn CollectorHost>> {
+    HOST.lock_poison().clone()
+}
+
+// ---------------------------------------------------------------------------
+// arm options (§5.1)
+// ---------------------------------------------------------------------------
+
+/// `n2h_collector_arm(optsJson)` options (§5.1). `shell_exclusions` is the
+/// shell's own exclusion resolution (D7 `shell-exclusion`, the artifact C2
+/// cross-checks in the SAME document); the rest are bounded window knobs.
+#[derive(Debug, Clone)]
+pub struct ArmOptions {
+    pub shell_exclusions: Vec<ShellExclusion>,
+    pub posctl_port: u16,
+    /// Response-side wait of one probe (STUN/DNS) and the receipt window knob.
+    pub probe_wait_ms: u64,
+    /// Operator-reported build sha256 (§3.3 fallback). Empty = not reported;
+    /// I7 injects the embedded value.
+    pub build_sha256_reported: String,
+}
+
+impl Default for ArmOptions {
+    fn default() -> Self {
+        ArmOptions {
+            shell_exclusions: Vec::new(),
+            posctl_port: DEFAULT_POSCTL_PORT,
+            probe_wait_ms: PROBE_WAIT_MS_DEFAULT,
+            build_sha256_reported: String::new(),
+        }
+    }
+}
+
+impl ArmOptions {
+    /// Parse the arm options JSON strictly (`crate::config::parse_document`).
+    /// An empty string means "no options" (all defaults); anything malformed
+    /// is REFUSED — a half-understood arm request must not open a window.
+    pub fn parse_json(text: &str) -> Result<ArmOptions, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(ArmOptions::default());
+        }
+        let doc = crate::config::parse_document(trimmed)
+            .map_err(|e| format!("arm options are not a JSON document: {e}"))?;
+        let Json::Obj(fields) = &doc else {
+            return Err("arm options must be a JSON object".to_string());
+        };
+        let mut opts = ArmOptions::default();
+        if let Some(v) = obj_get(fields, "posctl_port") {
+            let port = as_u64(v).ok_or("posctl_port must be a non-negative integer")?;
+            if port == 0 || port > u16::MAX as u64 {
+                return Err(format!("posctl_port {port} is not a usable port"));
+            }
+            opts.posctl_port = port as u16;
+        }
+        if let Some(v) = obj_get(fields, "probe_wait_ms") {
+            let wait = as_u64(v).ok_or("probe_wait_ms must be a non-negative integer")?;
+            if wait == 0 {
+                return Err("probe_wait_ms 0 is not a usable wait window".to_string());
+            }
+            opts.probe_wait_ms = wait;
+        }
+        if let Some(v) = obj_get(fields, "build_sha256_reported") {
+            let sha = as_str(v).ok_or("build_sha256_reported must be a string")?;
+            opts.build_sha256_reported = sha.to_string();
+        }
+        if let Some(v) = obj_get(fields, "shell_exclusions") {
+            let Json::Arr(items) = v else {
+                return Err("shell_exclusions must be an array".to_string());
+            };
+            for item in items {
+                let Json::Obj(entry) = item else {
+                    return Err("each shell exclusion must be an object".to_string());
+                };
+                let kind_name = obj_get(entry, "kind")
+                    .and_then(as_str)
+                    .ok_or("shell exclusion 'kind' is missing")?;
+                let kind = EndpointKind::from_name(kind_name)
+                    .ok_or_else(|| format!("unknown shell exclusion kind '{kind_name}'"))?;
+                let host = obj_get(entry, "host")
+                    .and_then(as_str)
+                    .ok_or("shell exclusion 'host' is missing")?;
+                let port = obj_get(entry, "port")
+                    .and_then(as_u64)
+                    .ok_or("shell exclusion 'port' is missing")?;
+                if host.trim().is_empty() || port == 0 || port > u16::MAX as u64 {
+                    return Err(format!("shell exclusion '{host}' has no usable host/port"));
+                }
+                let resolved =
+                    obj_get(entry, "resolved").and_then(as_str).unwrap_or("").to_string();
+                opts.shell_exclusions.push(ShellExclusion::with_resolved(
+                    kind,
+                    host,
+                    port as u16,
+                    &resolved,
+                ));
+            }
+        }
+        Ok(opts)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// window state machine (§2.2)
+// ---------------------------------------------------------------------------
+
+struct WindowState {
+    phase: &'static str,
+    opened_mono: u64,
+    deadline_mono: u64,
+    closed_mono: u64,
+    probes_sent: usize,
+    receipts_observed: usize,
+    verdict: Option<String>,
+    document: Option<String>,
+    sha256: String,
+    chunks: Vec<EvidenceChunk>,
+}
+
+struct Window {
+    state: Mutex<WindowState>,
+    tee: Arc<CollectorTee>,
+    host: Arc<dyn CollectorHost>,
+    options: ArmOptions,
+    clock: Arc<dyn CollectorClock>,
+    facts: HostFreezeFacts,
+    freeze: Vec<FrozenEndpoint>,
+    disarmed: AtomicBool,
+    arm_notes: Mutex<Vec<String>>,
+}
+
+impl Window {
+    fn is_open(&self) -> bool {
+        self.state.lock_poison().phase != PHASE_CLOSED
+    }
+
+    fn disarmed(&self) -> bool {
+        self.disarmed.load(Ordering::Acquire)
+    }
+
+    fn set_phase(&self, phase: &'static str) {
+        self.state.lock_poison().phase = phase;
+    }
+
+    fn set_counts(&self, probes_sent: usize, receipts_observed: usize) {
+        let mut st = self.state.lock_poison();
+        st.probes_sent = probes_sent;
+        st.receipts_observed = receipts_observed;
+    }
+}
+
+static WINDOW: Mutex<Option<Arc<Window>>> = Mutex::new(None);
+
+fn window_slot() -> MutexGuard<'static, Option<Arc<Window>>> {
+    WINDOW.lock_poison()
+}
+
+/// `n2h_collector_arm(optsJson)` (design §5.1). Synchronous: it validates,
+/// freezes, attaches the tee and starts the bounded window thread; the window
+/// itself runs off the caller's thread and is observed through
+/// [`status_json`] / [`evidence_json`].
+///
+/// Fail-closed order (§2.2): no host seam → `no-connector`; not fed →
+/// `device-not-up`; no established session → `tunnel-not-ready`; a window
+/// already open → `already-armed`; no device to attach the tee to →
+/// `no-connector` (a window without frame observation would be a false
+/// measurement).
+pub fn arm_json(opts_json: &str) -> String {
+    let options = match ArmOptions::parse_json(opts_json) {
+        Ok(o) => o,
+        Err(e) => return arm_err(ARM_ERR_INVALID_OPTS, &e),
+    };
+    {
+        let slot = window_slot();
+        if let Some(open) = slot.as_ref().filter(|w| w.is_open()) {
+            let opened = open.state.lock_poison().opened_mono;
+            return arm_err(ARM_ERR_ALREADY_ARMED, &format!("window opened at mono={opened}"));
+        }
+    }
+    let Some(host) = installed_host() else {
+        return arm_err(ARM_ERR_NO_CONNECTOR, "no host seam installed in this process");
+    };
+    let dataplane = match host.dataplane() {
+        Ok(d) => d,
+        Err(e) => return arm_err(ARM_ERR_NO_CONNECTOR, &e),
+    };
+    if !dataplane.device_up {
+        return arm_err(ARM_ERR_DEVICE_NOT_UP, "wg.device_up is false");
+    }
+    if !dataplane.ready {
+        return arm_err(ARM_ERR_TUNNEL_NOT_READY, "wg.ready is false (no established session)");
+    }
+    let clock = system_clock();
+    let mut arm_notes: Vec<String> = Vec::new();
+    let facts = match host.freeze_facts() {
+        Ok(f) => f,
+        Err(e) => {
+            // a freeze-fact read failure is a RECORDED gap, not an arm refusal:
+            // the document must show which kinds could not be frozen (§4.0)
+            arm_notes.push(format!("core freeze facts unavailable at arm: {e}"));
+            HostFreezeFacts::default()
+        }
+    };
+    let sources = FreezeSources {
+        shell_exclusions: options.shell_exclusions.clone(),
+        management_dial: facts.management_dial.clone(),
+        signal_config: facts.signal_config.clone(),
+        relay_advertised: facts.relay_advertised.clone(),
+        stun_uris: facts.stun_uris.clone(),
+        turn_uris: facts.turn_uris.clone(),
+        wg_peer_endpoints: facts.wg_peer_endpoints.clone(),
+        dns_servers: facts.dns_servers.clone(),
+        frozen_at_unix: clock.unix_s(),
+        frozen_at_mono: clock.mono_ms(),
+    };
+    let freeze = assemble_freezes(&sources);
+    let tee = Arc::new(CollectorTee::new(clock.clone()));
+    if let Err(e) = host.attach_tee(tee.clone() as Arc<dyn TunFrameTee>) {
+        return arm_err(ARM_ERR_NO_CONNECTOR, &format!("tee attach failed: {e}"));
+    }
+    let opened_mono = clock.mono_ms();
+    let window = Arc::new(Window {
+        state: Mutex::new(WindowState {
+            phase: PHASE_ARMED,
+            opened_mono,
+            deadline_mono: opened_mono + WINDOW_DEADLINE_MS,
+            closed_mono: 0,
+            probes_sent: 0,
+            receipts_observed: 0,
+            verdict: None,
+            document: None,
+            sha256: String::new(),
+            chunks: Vec::new(),
+        }),
+        tee,
+        host,
+        options,
+        clock,
+        facts,
+        freeze,
+        disarmed: AtomicBool::new(false),
+        arm_notes: Mutex::new(arm_notes),
+    });
+    *window_slot() = Some(window.clone());
+    let thread_window = window.clone();
+    let spawned = std::thread::Builder::new()
+        .name("n2h-collector".into())
+        .spawn(move || run_window(thread_window));
+    if let Err(e) = spawned {
+        let _ = window.host.detach_tee();
+        *window_slot() = None;
+        return arm_err(ARM_ERR_WINDOW_FAILED, &format!("{e}"));
+    }
+    hilog::emit(&format!(
+        "{MARK_ARM}|requestId=core|opened_mono={opened_mono}|deadline_mono={}|frozen={}|shell_exclusions={}|diag=true|is_evidence=false",
+        opened_mono + WINDOW_DEADLINE_MS,
+        window.freeze.len(),
+        window.options.shell_exclusions.len()
+    ));
+    format!("{{{},{},\"opened_mono\":{opened_mono}}}", jbool("ok", true), jbool("armed", true))
+}
+
+/// `n2h_collector_status()` (design §5.1). Never armed → the §6.1 shape
+/// `{ok:false,error:"not-armed"}`; otherwise the §5.1 status object.
+pub fn status_json() -> String {
+    let slot = window_slot();
+    let Some(w) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "not-armed"));
+    };
+    let st = w.state.lock_poison();
+    let armed = st.phase != PHASE_CLOSED;
+    let verdict = match (&st.verdict, armed) {
+        (Some(v), false) => format!(",\"verdict\":\"{v}\""),
+        _ => String::new(),
+    };
+    format!(
+        "{{{},\"armed\":{},\"phase\":\"{}\",\"frames_scanned\":{},\"hits\":{},\"probes_sent\":{},\
+         \"receipts_observed\":{},\"window\":{{\"opened_mono\":{},\"deadline_mono\":{},\
+         \"closed_mono\":{}}}{verdict}}}",
+        jbool("ok", true),
+        armed,
+        st.phase,
+        w.tee.frames_scanned(),
+        w.tee.outer_hit_count(),
+        st.probes_sent,
+        st.receipts_observed,
+        st.opened_mono,
+        st.deadline_mono,
+        st.closed_mono,
+    )
+}
+
+/// `n2h_collector_evidence(chunk)` (design §5.1): `-1` = the chunk count,
+/// otherwise one chunk. Repeatable by design — the same document always
+/// re-encodes byte-identically, which IS the hilog-line replay (§2.4-R2).
+pub fn evidence_json(chunk: i64) -> String {
+    let slot = window_slot();
+    let Some(w) = slot.as_ref() else {
+        return format!("{{{}}}", jstr("error", EVIDENCE_ERR_NONE));
+    };
+    let st = w.state.lock_poison();
+    if st.phase != PHASE_CLOSED {
+        return format!("{{{}}}", jstr("phase", "running"));
+    }
+    let total = st.chunks.len();
+    if chunk < 0 {
+        return format!(
+            "{{\"seq\":-1,\"total\":{total},{},\"b64\":\"\"}}",
+            jstr("sha256", &st.sha256)
+        );
+    }
+    match st.chunks.get(chunk as usize) {
+        Some(c) => format!(
+            "{{{},\"total\":{},{},{}}}",
+            jinum("seq", c.seq as i64),
+            total,
+            jstr("sha256", &c.sha256),
+            jstr("b64", &c.b64)
+        ),
+        None => format!("{{{}}}", jstr("error", EVIDENCE_ERR_RANGE)),
+    }
+}
+
+/// `n2h_collector_disarm()` (design §5.1/§2.2 中止). For an OPEN window it
+/// detaches the tee synchronously (the data-plane cost ends with the call),
+/// discards the partial window and records the abort. A window that already
+/// CLOSED is left alone: its document is final and stays cached for the
+/// §2.4-R2 replay (only an *unclosed* product is discarded).
+/// Idempotent: `{ok:true}` always.
+pub fn disarm_json() -> String {
+    let phase = window_slot().as_ref().map(|w| w.state.lock_poison().phase);
+    let Some(phase) = phase else {
+        return format!("{{{}}}", jbool("ok", true));
+    };
+    if phase == PHASE_CLOSED {
+        let (frames, hits) = match window_slot().as_ref() {
+            Some(w) => (w.tee.frames_scanned(), w.tee.outer_hit_count()),
+            None => (0, 0),
+        };
+        hilog::emit(&format!(
+            "{MARK_DISARM}|phase=closed|frames_scanned={frames}|hits={hits}|tee_detached=true|\
+             discarded=false|retained=true|note=finalized document kept for replay|\
+             diag=true|is_evidence=false"
+        ));
+        return format!("{{{}}}", jbool("ok", true));
+    }
+    let Some(w) = window_slot().take() else {
+        return format!("{{{}}}", jbool("ok", true));
+    };
+    w.disarmed.store(true, Ordering::Release);
+    let detach = w.host.detach_tee();
+    let frames = w.tee.frames_scanned();
+    let error = detach.err().unwrap_or_default();
+    hilog::emit(&format!(
+        "{MARK_DISARM}|phase={phase}|frames_scanned={frames}|tee_detached={}|discarded=true|\
+         error={error}|diag=true|is_evidence=false",
+        error.is_empty()
+    ));
+    format!("{{{}}}", jbool("ok", true))
+}
+
+fn arm_err(token: &str, detail: &str) -> String {
+    hilog::emit(&format!(
+        "{MARK_ARM}|refused|error={token}|detail={}|diag=true|is_evidence=false",
+        crate::util::sanitize_marker_field(detail, 200)
+    ));
+    format!("{{{},{}}}", jbool("ok", false), jstr("error", token))
+}
+
+// ---------------------------------------------------------------------------
+// the window thread (§2.2's lifecycle: freeze → before → probes → posctl →
+// settle → after → judge → chunked output)
+// ---------------------------------------------------------------------------
+
+fn run_window(win: Arc<Window>) {
+    let mut notes = win.arm_notes.lock_poison().clone();
+    if win.options.build_sha256_reported.trim().is_empty() {
+        notes.push("build-sha256=not-reported (I7 injects the embedded build identity)".to_string());
+    } else {
+        notes.push(format!(
+            "build-sha256={} (operator-reported, design §3.3 fallback)",
+            win.options.build_sha256_reported.trim()
+        ));
+    }
+
+    // -- window OPEN: the `before` edge of the counters pairing (§4.4) --
+    let open_mono = win.clock.mono_ms();
+    let open_unix = win.clock.unix_s();
+    let before = match win.host.paired_read(open_mono, open_unix) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            notes.push(format!("window-open counters read failed (no before edge): {e}"));
+            None
+        }
+    };
+    let peer_baseline = win.host.peer_report().unknown_peer_drops;
+
+    // -- outer probes: one per PRESENT frozen endpoint, transport = the kind --
+    win.set_phase(PHASE_PROBING);
+    let mut probes: Vec<OuterProbe> = Vec::new();
+    let mut receipts: Vec<EndpointReceipt> = Vec::new();
+    for f in win.freeze.iter().filter(|f| f.present) {
+        let Some(kind) = f.kind else { continue };
+        if win.disarmed() {
+            return;
+        }
+        let deadline_mono = win.state.lock_poison().deadline_mono;
+        if win.clock.mono_ms() >= deadline_mono {
+            notes.push(format!(
+                "window deadline {WINDOW_DEADLINE_MS} ms reached before the '{}' probe was sent (bounded window; remaining probes recorded not-sent)",
+                kind.name()
+            ));
+            break;
+        }
+        let fallback_nonce = crate::n2h::fresh_nonce_hex()
+            .unwrap_or_else(|_| "000000000000000000000000".to_string());
+        let fallback_id = probe_id(kind.name(), &fallback_nonce);
+        let dst: SocketAddr = match f.resolved.parse() {
+            Ok(a) => a,
+            Err(_) => {
+                notes.push(format!(
+                    "probe not sent for '{}': frozen resolved '{}' is not an ip:port literal (the device sender targets shell-resolved endpoints, §4.2)",
+                    kind.name(),
+                    f.resolved
+                ));
+                probes.push(OuterProbe {
+                    probe_id: fallback_id.clone(),
+                    kind: Some(kind),
+                    expected_path: "outer",
+                    sent: false,
+                    ..OuterProbe::default()
+                });
+                receipts.push(unobserved_receipt(
+                    &fallback_id,
+                    kind,
+                    "none",
+                    "probe never left: the frozen endpoint is not an ip:port literal",
+                ));
+                continue;
+            }
+        };
+        match send_probe(kind, dst, win.options.probe_wait_ms) {
+            Ok(sent) => {
+                win.tee.register(&sent.probe_id, sent.marker.clone(), false);
+                probes.push(OuterProbe {
+                    probe_id: sent.probe_id.clone(),
+                    kind: Some(kind),
+                    tuple: sent.tuple.clone(),
+                    expected_path: "outer",
+                    sent: true,
+                    sent_at_unix: win.clock.unix_s(),
+                    sent_at_mono: win.clock.mono_ms(),
+                    marker: Some(sent.marker.clone()),
+                    payload_len: sent.payload_len,
+                });
+                receipts.push(initial_receipt(&win, kind, &sent));
+                win.set_counts(
+                    probes.iter().filter(|p| p.sent).count(),
+                    receipts.iter().filter(|r| r.observed).count(),
+                );
+            }
+            Err(e) => {
+                notes.push(format!("probe send failure for '{}' ({dst}): {e}", kind.name()));
+                probes.push(OuterProbe {
+                    probe_id: fallback_id.clone(),
+                    kind: Some(kind),
+                    expected_path: "outer",
+                    sent: false,
+                    ..OuterProbe::default()
+                });
+                receipts.push(unobserved_receipt(
+                    &fallback_id,
+                    kind,
+                    "none",
+                    "probe never left the process",
+                ));
+            }
+        }
+    }
+
+    // -- positive control (§4.3): a2b is ours, b2a is the counterparty's --
+    win.set_phase(PHASE_OBSERVING);
+    let mut posctl = build_posctl(&win, &mut notes);
+    observe(&win, &probes, &mut receipts, &mut posctl, peer_baseline, &mut notes);
+
+    // -- window CLOSE (§2.2): the `after` edge FIRST, then the tee detach
+    //    ("窗口关 = tee detach、证据文档定稿") --
+    let close_mono = win.clock.mono_ms();
+    let close_unix = win.clock.unix_s();
+    let sample = match &before {
+        Some(b) => match close_window_host(&win.host, b, close_mono, close_unix) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                notes.push(format!("window-close counters read failed (no after edge): {e}"));
+                None
+            }
+        },
+        None => None,
+    };
+    if let Err(e) = win.host.detach_tee() {
+        notes.push(format!("tee detach failed at window close: {e}"));
+    }
+    if win.disarmed() {
+        return;
+    }
+    let scan = win.tee.snapshot();
+    let evidence = assemble_device_evidence(WindowMaterial {
+        freeze: win.freeze.clone(),
+        probes,
+        posctl,
+        receipts,
+        scan,
+        sample,
+        notes,
+        opened_mono: win.state.lock_poison().opened_mono,
+        closed_mono: close_mono,
+        generated_unix: win.clock.unix_s(),
+    });
+    let document = evidence.to_json();
+    let sha256 = crate::util::sha256_hex(document.as_bytes());
+    let chunks = encode_evidence(document.as_bytes());
+    for chunk in &chunks {
+        hilog::emit(&chunk.line());
+    }
+    let (verdict, frames, hits, sent, observed) = {
+        let mut st = win.state.lock_poison();
+        st.phase = PHASE_CLOSED;
+        st.closed_mono = win.clock.mono_ms();
+        st.verdict = Some(evidence.verdict.clone());
+        st.sha256 = sha256.clone();
+        st.chunks = chunks.clone();
+        st.document = Some(document);
+        (
+            evidence.verdict.clone(),
+            evidence.tun_negative.frames_scanned,
+            evidence.tun_negative.hits.len(),
+            evidence.probes.iter().filter(|p| p.sent).count(),
+            evidence.endpoint_side.iter().filter(|r| r.observed).count(),
+        )
+    };
+    win.set_counts(sent, observed);
+    hilog::emit(&format!(
+        "{MARK_CLOSE}|phase=closed|verdict={verdict}|frames_scanned={frames}|hits={hits}|\
+         probes_sent={sent}|receipts_observed={observed}|chunks={}|sha256={sha256}|\
+         diag=true|is_evidence=false",
+        chunks.len()
+    ));
+}
+
+/// The first `endpoint_side[]` record of one sent probe (design §4.0 matrix):
+/// STUN proves itself (txid-matched Binding Response, endpoint-reported);
+/// wg_peer's receipt is the counterparty's counter, recorded in the host's own
+/// pre-confirmation shape (`n2h.rs:1474-1486`) and flipped by the observe loop;
+/// every other kind is a recorded gap (`method:"none"`) until a host seam
+/// observes it.
+fn initial_receipt(win: &Arc<Window>, kind: EndpointKind, sent: &SentProbe) -> EndpointReceipt {
+    if kind == EndpointKind::Stun {
+        let (observed, physical_src, detail) = match sent.mapped {
+            Some((ip, port)) => (
+                true,
+                format!("{}.{}.{}.{}:{port}", ip[0], ip[1], ip[2], ip[3]),
+                "txid-matched Binding Success Response (XOR/MAPPED-ADDRESS = the physical source the endpoint saw)"
+                    .to_string(),
+            ),
+            None => (
+                false,
+                String::new(),
+                format!(
+                    "no txid-matched Binding Response within the {} ms probe wait (record kept; a later response may still confirm)",
+                    win.options.probe_wait_ms
+                ),
+            ),
+        };
+        return EndpointReceipt {
+            probe_id: sent.probe_id.clone(),
+            kind: kind.name().to_string(),
+            observed,
+            physical_src,
+            physical_src_source: "endpoint-reported".into(),
+            at_unix: win.clock.unix_s(),
+            method: "stun-binding-response".into(),
+            detail,
+        };
+    }
+    if let Some(fact) = win.host.probe_receipt(&sent.probe_id, &sent.marker) {
+        return EndpointReceipt {
+            probe_id: sent.probe_id.clone(),
+            kind: kind.name().to_string(),
+            observed: true,
+            physical_src: fact.physical_src,
+            physical_src_source: fact.physical_src_source,
+            at_unix: win.clock.unix_s(),
+            method: fact.method,
+            detail: fact.detail,
+        };
+    }
+    if kind == EndpointKind::WgPeer {
+        return EndpointReceipt {
+            probe_id: sent.probe_id.clone(),
+            kind: kind.name().to_string(),
+            observed: false,
+            physical_src: sent.tuple.src.clone(),
+            physical_src_source: "probe-socket-getsockname".into(),
+            at_unix: win.clock.unix_s(),
+            method: "peer-device-offpath-drop".into(),
+            detail: "datagram sent to the frozen WG peer outer endpoint; the receipt is the \
+                     counterparty's own unknown_peer_drops delta (§4.0) — not yet observed"
+                .into(),
+        };
+    }
+    unobserved_receipt(
+        &sent.probe_id,
+        kind,
+        "none",
+        "outer-path delivery unproven from inside the device: this endpoint's delivery log is \
+         operator-side (§4.0)",
+    )
+}
+
+fn unobserved_receipt(
+    probe_id: &str,
+    kind: EndpointKind,
+    method: &str,
+    detail: &str,
+) -> EndpointReceipt {
+    EndpointReceipt {
+        probe_id: probe_id.to_string(),
+        kind: kind.name().to_string(),
+        observed: false,
+        physical_src: String::new(),
+        physical_src_source: String::new(),
+        at_unix: 0,
+        method: method.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// Build both positive-control legs (§4.3/D5):
+/// - **a2b**: the collector SENDS `N2H-posctl-<nonce>|positive-control` to the
+///   peer overlay address; observed iff the from-os entrance frame AND the
+///   echo return in to-os are both seen;
+/// - **b2a**: the counterparty sends the payload; the device can only scan for
+///   a marker it was TOLD, so the leg is `sent:true` only when the peer's
+///   status channel announced it — otherwise it is a recorded gap (never
+///   guessed, never replaced by the a2b echo).
+fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> {
+    let mut out: Vec<PosctlProbe> = Vec::new();
+    let peer_ip = win.facts.peer_overlay.first().copied();
+    match peer_ip {
+        Some(ip) => {
+            let dst = SocketAddr::from((ip, win.options.posctl_port));
+            let nonce = crate::n2h::fresh_nonce_hex()
+                .unwrap_or_else(|_| "000000000000000000000000".to_string());
+            let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
+            match send_posctl(dst, &id) {
+                Ok((_n, src)) => {
+                    win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
+                    out.push(PosctlProbe {
+                        probe_id: id,
+                        direction: "a2b".into(),
+                        tuple: FiveTuple {
+                            proto: "ipv4".into(),
+                            src,
+                            dst: dst.to_string(),
+                        },
+                        expected_path: "tunnel",
+                        sent: true,
+                        sent_at_mono: win.clock.mono_ms(),
+                        observed: None,
+                        note: "awaiting the from-os tunnel-entrance frame AND the echo return in to-os (§4.3/D5)".into(),
+                    });
+                }
+                Err(e) => {
+                    notes.push(format!("posctl a2b send failure to {dst}: {e}"));
+                    out.push(PosctlProbe {
+                        probe_id: id,
+                        direction: "a2b".into(),
+                        expected_path: "tunnel",
+                        sent: false,
+                        note: format!("send failed: {e}"),
+                        ..PosctlProbe::default()
+                    });
+                }
+            }
+        }
+        None => {
+            notes.push(
+                "posctl a2b not sent: no peer overlay address in the freeze facts (§4.3)".into(),
+            );
+            out.push(PosctlProbe {
+                direction: "a2b".into(),
+                expected_path: "tunnel",
+                sent: false,
+                note: "no peer overlay address (network-map peers[].vpn_addresses empty)".into(),
+                ..PosctlProbe::default()
+            });
+        }
+    }
+    let report = win.host.peer_report();
+    match report.b2a_probe_id {
+        Some(id) => {
+            win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
+            let own = win
+                .facts
+                .own_overlay
+                .map(|a| format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], win.options.posctl_port))
+                .unwrap_or_default();
+            let peer = peer_ip
+                .map(|a| format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], win.options.posctl_port))
+                .unwrap_or_default();
+            out.push(PosctlProbe {
+                probe_id: id,
+                direction: "b2a".into(),
+                tuple: FiveTuple { proto: "ipv4".into(), src: peer, dst: own },
+                expected_path: "tunnel",
+                sent: true,
+                sent_at_mono: win.clock.mono_ms(),
+                observed: None,
+                note: "peer-initiated: marker announced by the counterparty status channel; observation = the to-os delivery side (§4.3/D5)".into(),
+            });
+        }
+        None => {
+            notes.push(
+                "posctl b2a not sent: the counterparty announced no marker (peer status channel \
+                 absent — §4.3's peer-side report is I6)"
+                    .into(),
+            );
+            out.push(PosctlProbe {
+                direction: "b2a".into(),
+                expected_path: "tunnel",
+                sent: false,
+                note: "the peer's b2a marker was never announced to this device (no peer status channel)"
+                    .into(),
+                ..PosctlProbe::default()
+            });
+        }
+    }
+    out
+}
+
+/// Send one positive-control datagram from a fresh WILDCARD socket (§4.2's
+/// socket discipline) with the host payload shape (§4.3).
+fn send_posctl(dst: SocketAddr, id: &str) -> Result<(usize, String), String> {
+    let sock = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD)
+        .map_err(|e| format!("posctl socket bind: {e}"))?;
+    let src = sock.local_addr().map_err(|e| format!("posctl socket addr: {e}"))?;
+    let payload = format!("{id}{POSCTL_PAYLOAD_SUFFIX}");
+    let n = sock
+        .send_to(payload.as_bytes(), dst)
+        .map_err(|e| format!("posctl send: {e}"))?;
+    Ok((n, src.to_string()))
+}
+
+/// The observation loop (host shape, `n2h.rs:1643-1751`): bounded 10 ms beats
+/// until every leg is closed, then a settle tail; the deadline is the exit.
+/// No long sleep is ever the mechanism.
+fn observe(
+    win: &Arc<Window>,
+    probes: &[OuterProbe],
+    receipts: &mut Vec<EndpointReceipt>,
+    posctl: &mut [PosctlProbe],
+    peer_baseline: Option<u64>,
+    notes: &mut Vec<String>,
+) {
+    let deadline = win.clock.mono_ms() + OBSERVE_DEADLINE_MS;
+    let mut settle = 0u32;
+    let mut wg_confirmed = false;
+    loop {
+        if win.disarmed() {
+            return;
+        }
+        // 1. late endpoint-side receipts (offline harness sink records; the
+        //    production seam answers None — its endpoints are real services)
+        for p in probes.iter().filter(|p| p.sent) {
+            if receipts.iter().any(|r| r.probe_id == p.probe_id && r.observed) {
+                continue;
+            }
+            let Some(marker) = p.marker.as_ref() else { continue };
+            if let Some(fact) = win.host.probe_receipt(&p.probe_id, marker) {
+                let kind = p.kind.map(|k| k.name()).unwrap_or("unknown").to_string();
+                receipts.push(EndpointReceipt {
+                    probe_id: p.probe_id.clone(),
+                    kind,
+                    observed: true,
+                    physical_src: fact.physical_src,
+                    physical_src_source: fact.physical_src_source,
+                    at_unix: win.clock.unix_s(),
+                    method: fact.method,
+                    detail: fact.detail,
+                });
+            }
+        }
+        // 2. the wg_peer receipt: the counterparty's own off-path drop count
+        if !wg_confirmed {
+            if let (Some(base), Some(now)) = (peer_baseline, win.host.peer_report().unknown_peer_drops)
+            {
+                if now > base {
+                    if let Some(r) = receipts.iter_mut().find(|r| r.kind == "wg_peer") {
+                        r.observed = true;
+                        r.detail = format!(
+                            "counted at the counterparty's outer socket: unknown_peer_drops delta = {} (off-path demux drop — the outer path carried it, §4.0)",
+                            now - base
+                        );
+                    }
+                    wg_confirmed = true;
+                }
+            }
+        }
+        // 3. positive controls from the tee (D5's two observation points)
+        for p in posctl.iter_mut().filter(|p| p.sent && p.observed.is_none()) {
+            if p.direction == "a2b" {
+                let entrance = win.tee.directed_hit(&p.probe_id, TunFrameDir::FromOs);
+                let echo = win.tee.directed_hit(&p.probe_id, TunFrameDir::ToOs);
+                match (entrance, echo) {
+                    (Some(e), Some(r)) => {
+                        p.note = format!(
+                            "a2b closed end to end: from-os entrance frame observed (len={}, mono={}) AND the echo return observed in to-os (len={}, mono={}) (§4.3/D5)",
+                            e.frame_len, e.observed_at_mono, r.frame_len, r.observed_at_mono
+                        );
+                        p.observed = Some(e);
+                    }
+                    (Some(e), None) => {
+                        p.note = format!(
+                            "a2b entered the tunnel (from-os, len={}, mono={}) but the echo return was NOT observed in to-os inside the window — the end-to-end closure is missing (§4.3/D5)",
+                            e.frame_len, e.observed_at_mono
+                        );
+                    }
+                    (None, Some(r)) => {
+                        p.note = format!(
+                            "a2b echo seen in to-os (len={}, mono={}) but the from-os tunnel-entrance frame was not — the entrance leg is unproven (§4.3/D5)",
+                            r.frame_len, r.observed_at_mono
+                        );
+                    }
+                    (None, None) => {
+                        p.note = "a2b observed in neither direction inside the window (no tunnel entrance frame, no echo return)"
+                            .into();
+                    }
+                }
+            } else if let Some(hit) = win.tee.directed_hit(&p.probe_id, TunFrameDir::ToOs) {
+                p.note = format!(
+                    "b2a observed at the receiver's TUN delivery side (to-os, len={}, mono={}) (§4.3/D5)",
+                    hit.frame_len, hit.observed_at_mono
+                );
+                p.observed = Some(hit);
+            } else {
+                p.note = "b2a not observed in the to-os direction inside the window (the peer-initiated payload never reached this TUN)"
+                    .into();
+            }
+        }
+        let sent_probes: usize = probes.iter().filter(|p| p.sent).count();
+        let observed_receipts: usize = receipts.iter().filter(|r| r.observed).count();
+        win.set_counts(sent_probes, observed_receipts);
+        let all_receipts = probes.iter().filter(|p| p.sent).all(|p| {
+            receipts.iter().any(|r| r.probe_id == p.probe_id && r.observed)
+        });
+        let all_posctl = posctl.iter().filter(|p| p.sent).all(|p| p.observed.is_some());
+        if all_receipts && all_posctl {
+            settle += 1;
+            if settle >= OBSERVE_SETTLE_ROUNDS {
+                return;
+            }
+        } else {
+            settle = 0;
+        }
+        if win.clock.mono_ms() >= deadline {
+            notes.push(format!(
+                "observation deadline {OBSERVE_DEADLINE_MS} ms reached with legs still open; the document records the gaps"
+            ));
+            return;
+        }
+        crate::sys::sleep_ms(OBSERVE_BEAT_MS);
+    }
+}
+
+/// Window close through the host's paired read, with the bounded resample of
+/// design §4.4 (the device-side twin of I4's `close_window`, which takes a
+/// [`LedgerReads`] rather than the host seam).
+fn close_window_host(
+    host: &Arc<dyn CollectorHost>,
+    before: &PairedRead,
+    at_mono: u64,
+    at_unix: i64,
+) -> Result<WindowSample, String> {
+    let mut resamples = 0u32;
+    loop {
+        let read = host.paired_read(at_mono, at_unix)?;
+        let counters = WindowCounters {
+            side: TUN_IFACE_NAME.to_string(),
+            before: before.snapshot(),
+            after: read.snapshot(),
+        };
+        let identities = counter_identities(&counters.delta());
+        if identities.hold() || resamples >= MAX_PAIRING_RESAMPLES {
+            return Ok(WindowSample { counters, identities, resamples, source: read.source });
+        }
+        resamples += 1;
+    }
+}
+
+/// One paired read for the OFFLINE `tee-fallback` caliber (§3.2): the I2 tee
+/// totals stand in for `/proc/net/dev`, so a harness never invents a ledger —
+/// and the caliber is declared in `notes[]` through
+/// [`counters_source_note`].
+pub fn tee_fallback_read(
+    totals: &TunTeeTotals,
+    wg: WgDeviceStats,
+    at_mono: u64,
+    at_unix: i64,
+) -> PairedRead {
+    PairedRead {
+        at_mono,
+        at_unix,
+        tun: tee_fallback_row(totals),
+        wg,
+        source: COUNTERS_SOURCE_TEE_FALLBACK,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// document assembly + the two checks the judge cannot make
+// ---------------------------------------------------------------------------
+
+/// Everything the device document is assembled from (design §3.2's 取数层,
+/// one field per evidence leg). Pure input — the assembly performs no IO, so
+/// the judge-reaching rules are directly unit-testable.
+pub struct WindowMaterial {
+    pub freeze: Vec<FrozenEndpoint>,
+    pub probes: Vec<OuterProbe>,
+    pub posctl: Vec<PosctlProbe>,
+    pub receipts: Vec<EndpointReceipt>,
+    pub scan: TeeSnapshot,
+    pub sample: Option<WindowSample>,
+    pub notes: Vec<String>,
+    pub opened_mono: u64,
+    pub closed_mono: u64,
+    pub generated_unix: i64,
+}
+
+/// Assemble the device document and judge it — with the TWO rules the frozen
+/// judge cannot see, both of which can only make the verdict STRICTER:
+///
+/// 1. **design §4.4's second identity.** `WindowCounters::reconciled()` (the
+///    judge's step 6) checks the BYTE identity only (`n2h.rs:560-563`), so a
+///    pairing whose packet identity broke would slip through. When
+///    `WindowSample::consistent()` is false the collector appends the reason
+///    and forces `n2h-inconclusive` — the resample bound already tried.
+/// 2. **§6.3's zero-frame anomaly.** A window in which the tee saw NO frame at
+///    all is a collector anomaly, not a clean scan: a negative scan over zero
+///    frames proves nothing.
+///
+/// Falsification is never downgraded: an outer-marker hit stays `n2h-fail`.
+pub fn assemble_device_evidence(m: WindowMaterial) -> Evidence {
+    let mut notes = m.notes;
+    let mut counters: Vec<WindowCounters> = Vec::new();
+    let mut identity_reasons: Vec<String> = Vec::new();
+    if let Some(sample) = &m.sample {
+        counters.push(sample.counters.clone());
+        notes.push(counters_source_note(sample.source));
+        if sample.resamples > 0 {
+            notes.push(format!("counters-pairing-resamples={}", sample.resamples));
+        }
+        if !sample.identities.bytes {
+            notes.push("counters-identity=bytes-broken".to_string());
+        }
+        if !sample.identities.packets {
+            notes.push("counters-identity=packets-broken".to_string());
+        }
+        if !sample.identities.hold() {
+            let d = sample.counters.delta();
+            identity_reasons.push(format!(
+                "counter reconciliation mismatch (design §4.4 second identity, invisible to \
+                 WindowCounters::reconciled): delta.wg.rx_packets {} != delta.tun.delivered_frames \
+                 {} (bytes identity holds: {}); {} bounded resample(s) taken, none self-consistent \
+                 — recorded, never repaired",
+                d.wg_rx_packets,
+                d.tun_delivered_frames,
+                sample.identities.bytes,
+                sample.resamples
+            ));
+        }
+    }
+    // D4's direction fact, recorded where the design allows additions: the
+    // frozen renderer carries no per-hit direction field.
+    for hit in &m.scan.outer_hits {
+        if let Some(dir) = m.scan.directed.iter().find(|d| d.probe_id == hit.probe_id) {
+            notes.push(format!(
+                "outer-hit-direction probe_id={} direction={} side={} frame_len={}",
+                hit.probe_id,
+                direction_token(dir.direction),
+                hit.side,
+                hit.frame_len
+            ));
+        }
+    }
+    let mut evidence = Evidence {
+        mode: MODE_DEVICE.to_string(),
+        session: SESSION_DEVICE.to_string(),
+        generated_unix: m.generated_unix,
+        started_mono: m.opened_mono,
+        finished_mono: m.closed_mono,
+        frozen_endpoints: m.freeze,
+        probes: m.probes,
+        tunnel_positive_control: PosctlEvidence { probes: m.posctl },
+        tun_negative: TunScanResult {
+            hit: !m.scan.outer_hits.is_empty(),
+            frames_scanned: m.scan.frames_scanned,
+            hits: m.scan.outer_hits.clone(),
+            sides: m.scan.sides.clone(),
+        },
+        endpoint_side: m.receipts,
+        counters,
+        notes,
+        ..Evidence::default()
+    };
+    let (mut verdict, mut reasons) = evidence.judge();
+    reasons.extend(identity_reasons);
+    let mut strict_override = m.sample.as_ref().is_some_and(|s| !s.identities.hold());
+    if m.scan.frames_scanned == 0 {
+        reasons.push(
+            "tun_negative: zero frames scanned in the window — the tee observed nothing (the \
+             window was too short or the tee was never fed); a clean negative scan over zero \
+             frames is not interpretable"
+                .to_string(),
+        );
+        strict_override = true;
+    }
+    // falsification is never downgraded: a `n2h-fail` stays a fail
+    if strict_override && verdict != crate::n2h::VERDICT_FAIL {
+        verdict = crate::n2h::VERDICT_INCONCLUSIVE.to_string();
+    }
+    evidence.verdict = verdict;
+    evidence.reasons = reasons;
+    evidence
+}
+
+// ---------------------------------------------------------------------------
+// production host: the connector's live WG feed (design U9)
+// ---------------------------------------------------------------------------
+
+/// The PRODUCTION [`CollectorHost`]: the connector's live WG data-plane feed
+/// (`crate::wg_device::WgDeviceFeed`) plus the PUBLIC connector documents for
+/// the freeze facts (`connector_status()` / `connector_network_config()` — the
+/// same JSON the shell reads).
+///
+/// Design U9 asks the collector's dependencies to be an injectable seam with
+/// the production side taking them from the connector singleton. This type IS
+/// that production side; installing it is ONE call next to the connector's
+/// feed construction:
+///
+/// ```text
+/// n2h_collector::install_host(Arc::new(n2h_collector::WgFeedHost::new(wg_feed.clone())));
+/// ```
+///
+/// Until that call exists (the design's §7-I5 file list does not name
+/// `connector.rs`), the collector is INERT in the shipped process: `arm`
+/// answers `{ok:false,error:"no-connector"}` and nothing else happens — the
+/// §6.1 laziness promise holds in the strictest possible way.
+pub struct WgFeedHost {
+    feed: Arc<crate::wg_device::WgDeviceFeed>,
+    hdc_capture_path: Option<std::path::PathBuf>,
+}
+
+impl WgFeedHost {
+    /// Host over a live feed, with the operator `/proc` capture path (§4.4's
+    /// D-class fallback) wired to [`N2H_HDC_CAPTURE_PATH`].
+    pub fn new(feed: Arc<crate::wg_device::WgDeviceFeed>) -> Self {
+        WgFeedHost {
+            feed,
+            hdc_capture_path: Some(std::path::PathBuf::from(N2H_HDC_CAPTURE_PATH)),
+        }
+    }
+
+    /// Override the operator capture path (`None` = never consult it).
+    pub fn with_hdc_capture_path(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.hdc_capture_path = path;
+        self
+    }
+
+    fn wg_stats(&self) -> Result<WgDeviceStats, String> {
+        self.feed
+            .with_device(|d| d.stats())
+            .ok_or_else(|| "wg device is not up".to_string())
+    }
+}
+
+impl CollectorHost for WgFeedHost {
+    fn dataplane(&self) -> Result<HostDataplane, String> {
+        Ok(HostDataplane {
+            device_up: self.feed.device_up(),
+            ready: crate::connector::WgPeerApplier::tunnel_ready(&*self.feed),
+        })
+    }
+
+    fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
+        process_freeze_facts(
+            &crate::connector::connector_status_json(),
+            &crate::connector::connector_network_config_json(),
+        )
+    }
+
+    fn attach_tee(&self, tee: Arc<dyn TunFrameTee>) -> Result<(), String> {
+        self.feed
+            .with_device(|d| d.attach_tun_tee(tee))
+            .map(|_replaced| ())
+            .ok_or_else(|| "wg device is not up (no tee attached)".to_string())
+    }
+
+    fn detach_tee(&self) -> Result<(), String> {
+        match self.feed.with_device(|d| d.detach_tun_tee()) {
+            Some(_detached) => Ok(()),
+            None => Ok(()), // no device ⇒ nothing attached: idempotent
+        }
+    }
+
+    fn paired_read(&self, at_mono: u64, at_unix: i64) -> Result<PairedRead, String> {
+        let mut reads = DeviceLedgerReads {
+            hdc_capture_path: self.hdc_capture_path.clone(),
+            wg_stats: || self.wg_stats(),
+        };
+        paired_read(&mut reads, at_mono, at_unix)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON readers used by the production host (pure, fixture-testable)
+// ---------------------------------------------------------------------------
+
+fn obj_get<'a>(fields: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
+    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+fn as_u64(v: &Json) -> Option<u64> {
+    match v {
+        Json::Num(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn as_str(v: &Json) -> Option<&str> {
+    match v {
+        Json::Str(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn as_obj(v: &Json) -> Option<&[(String, Json)]> {
+    match v {
+        Json::Obj(f) => Some(f),
+        _ => None,
+    }
+}
+
+fn as_arr(v: &Json) -> &[Json] {
+    match v {
+        Json::Arr(items) => items,
+        _ => &[],
+    }
+}
+
+fn parse_addr_literal(s: &str) -> Option<([u8; 4], u16)> {
+    let addr: SocketAddr = s.parse().ok()?;
+    match addr {
+        SocketAddr::V4(v4) => Some((v4.ip().octets(), v4.port())),
+        SocketAddr::V6(_) => None, // IPv4-only (design §10-4)
+    }
+}
+
+fn injected_from_addr(addr: &str) -> Option<InjectedEndpoint> {
+    let (ip, port) = parse_addr_literal(addr)?;
+    let host = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    Some(InjectedEndpoint::with_resolved(&host, port, addr))
+}
+
+/// Freeze facts of the production host from the two connector documents
+/// (design §4.0's core-session sources). Pure: the documents are arguments, so
+/// the mapping is unit-testable without a connector.
+///
+/// Facts the public JSON surface does NOT carry are left empty and become
+/// reasoned absences in the document (never invented):
+/// `management_dial` (the status/config documents carry no dial address) and
+/// `stun_uris` (`netbird_config.stuns[]` is not rendered into either
+/// document). Both are recorded as freeze gaps by `assemble_freezes`.
+pub fn process_freeze_facts(status_json: &str, network_json: &str) -> Result<HostFreezeFacts, String> {
+    let status = crate::config::parse_document(status_json)
+        .map_err(|e| format!("connector_status document: {e}"))?;
+    let network = crate::config::parse_document(network_json)
+        .map_err(|e| format!("connector_network_config document: {e}"))?;
+    // both documents are produced by this crate's own renderers, so a
+    // non-object shape is a bug: the caller records it as an unattributable
+    // freeze-facts gap instead of silently reading nothing
+    let status_fields = as_obj(&status)
+        .ok_or_else(|| "connector_status document is not a JSON object".to_string())?;
+    let network_fields = as_obj(&network)
+        .ok_or_else(|| "connector_network_config document is not a JSON object".to_string())?;
+    let mut facts = HostFreezeFacts::default();
+
+    // -- status: the session's outer WG endpoints + the relay url sets --
+    {
+        let fields = status_fields;
+        if let Some(wg) = obj_get(fields, "wg").and_then(as_obj) {
+            for peer in obj_get(wg, "wg_peers").map(as_arr).unwrap_or(&[]) {
+                if let Some(endpoint) = as_obj(peer).and_then(|p| obj_get(p, "endpoint")).and_then(as_str)
+                {
+                    if let Some(ep) = injected_from_addr(endpoint) {
+                        facts.wg_peer_endpoints.push(ep);
+                    }
+                }
+            }
+        }
+        let mut urls: Vec<String> = Vec::new();
+        // §4.0: the ADVERTISED set is the relay freeze source; the runtime set
+        // only ever repeats it, and is appended so a live url never vanishes
+        if let Some(adv) = obj_get(fields, "relay_advertised").and_then(as_obj) {
+            for url in obj_get(adv, "advertised_urls").map(as_arr).unwrap_or(&[]) {
+                if let Some(u) = as_str(url) {
+                    urls.push(u.to_string());
+                }
+            }
+        }
+        if let Some(relay) = obj_get(fields, "relay").and_then(as_obj) {
+            for url in obj_get(relay, "urls").map(as_arr).unwrap_or(&[]) {
+                if let Some(u) = as_str(url) {
+                    urls.push(u.to_string());
+                }
+            }
+        }
+        for url in urls {
+            match crate::relay_client::RelayUrl::parse(&url) {
+                Ok(parsed) => facts
+                    .relay_advertised
+                    .push(InjectedEndpoint::new(parsed.host(), parsed.port())),
+                Err(_) => continue, // an unparsable advertisement is not a freeze
+            }
+        }
+    }
+
+    // -- network config: signal, DNS, own + peer overlay addresses --
+    {
+        let fields = network_fields;
+        if let Some(signal) = obj_get(fields, "signal").and_then(as_str) {
+            if let Ok((host, port)) = crate::host_sockets::parse_signal_uri(signal) {
+                facts.signal_config = Some(InjectedEndpoint::new(&host, port));
+            }
+        }
+        if let Some(dns) = obj_get(fields, "dns").and_then(as_obj) {
+            for server in obj_get(dns, "servers").map(as_arr).unwrap_or(&[]) {
+                let Some(entry) = as_obj(server) else { continue };
+                let (Some(ip), Some(port)) =
+                    (obj_get(entry, "ip").and_then(as_str), obj_get(entry, "port").and_then(as_u64))
+                else {
+                    continue;
+                };
+                if let Some(ep) = injected_from_addr(&format!("{ip}:{port}")) {
+                    facts.dns_servers.push(ep);
+                }
+            }
+        }
+        if let Some(iface_dns) = obj_get(fields, "interface_dns").and_then(as_str) {
+            if let Some(ep) = injected_from_addr(&format!("{iface_dns}:53")) {
+                facts.dns_servers.push(ep);
+            }
+        }
+        if let Some(addr) = obj_get(fields, "address").and_then(as_str) {
+            facts.own_overlay = parse_addr_literal(&format!("{addr}:0")).map(|(ip, _)| ip);
+        }
+        for peer in obj_get(fields, "peers").map(as_arr).unwrap_or(&[]) {
+            let Some(entry) = as_obj(peer) else { continue };
+            for vpn in obj_get(entry, "vpn_addresses").map(as_arr).unwrap_or(&[]) {
+                if let Some(a) = as_str(vpn).and_then(|s| parse_addr_literal(&format!("{s}:0"))) {
+                    facts.peer_overlay.push(a.0);
+                }
+            }
+        }
+    }
+    Ok(facts)
+}
+
+// ---------------------------------------------------------------------------
 // tests — I0/I1 logic is pure; the I3/I4 tests use loopback sockets and
 // fixture text only (no real /proc, no device, no clock)
 // ---------------------------------------------------------------------------
@@ -2282,5 +3959,496 @@ mod tests {
             "[I4] tee-fallback row {row:?} == /proc caliber; note='{}'",
             counters_source_note(COUNTERS_SOURCE_TEE_FALLBACK)
         );
+    }
+
+    // ---- I5 ----
+
+    /// A frozen clock: the state machine's timestamps are injected (design
+    /// U9), so no unit test depends on wall time.
+    struct FixedClock {
+        mono: u64,
+        unix: i64,
+    }
+
+    impl CollectorClock for FixedClock {
+        fn mono_ms(&self) -> u64 {
+            self.mono
+        }
+        fn unix_s(&self) -> i64 {
+            self.unix
+        }
+    }
+
+    fn fixed_clock(mono: u64) -> Arc<dyn CollectorClock> {
+        Arc::new(FixedClock { mono, unix: 1_756_000_000 })
+    }
+
+    /// One honest IPv4/UDP frame (`parse_ipv4_frame` reads it back).
+    fn udp_frame(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+        let mut p = Vec::with_capacity(28 + payload.len());
+        p.extend_from_slice(&[0x45, 0x00]);
+        p.extend_from_slice(&((20 + 8 + payload.len()) as u16).to_be_bytes());
+        p.extend_from_slice(&[0, 1, 0, 0, 64, 17, 0, 0]);
+        p.extend_from_slice(&src);
+        p.extend_from_slice(&dst);
+        p.extend_from_slice(&sport.to_be_bytes());
+        p.extend_from_slice(&dport.to_be_bytes());
+        p.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        p.extend_from_slice(&[0, 0]);
+        p.extend_from_slice(payload);
+        p
+    }
+
+    #[test]
+    fn arm_options_parse_the_documented_shape_and_refuse_malformed_input() {
+        // §5.1's documented document
+        let opts = ArmOptions::parse_json(
+            "{\"shell_exclusions\":[{\"kind\":\"management\",\"host\":\"mgmt.example\",\
+             \"port\":443,\"resolved\":\"203.0.113.7:443\"},{\"kind\":\"signal\",\
+             \"host\":\"signal.example\",\"port\":10000}],\"posctl_port\":40002,\
+             \"probe_wait_ms\":900,\"build_sha256_reported\":\"deadbeef\"}",
+        )
+        .expect("documented opts parse");
+        assert_eq!(opts.posctl_port, 40_002);
+        assert_eq!(opts.probe_wait_ms, 900);
+        assert_eq!(opts.build_sha256_reported, "deadbeef");
+        assert_eq!(opts.shell_exclusions.len(), 2);
+        assert_eq!(opts.shell_exclusions[0].kind, EndpointKind::Management);
+        assert_eq!(opts.shell_exclusions[0].resolved, "203.0.113.7:443");
+        assert_eq!(opts.shell_exclusions[1].resolved, "", "resolved is optional");
+        // the shell set feeds the freeze with the D7 token
+        let frozen = assemble_freezes(&FreezeSources {
+            shell_exclusions: opts.shell_exclusions.clone(),
+            ..FreezeSources::default()
+        });
+        let mgmt = frozen.iter().find(|f| f.kind == Some(EndpointKind::Management)).unwrap();
+        assert!(mgmt.present);
+        assert_eq!(mgmt.source, SOURCE_SHELL_EXCLUSION);
+        assert_eq!(mgmt.resolved, "203.0.113.7:443");
+
+        // empty = all defaults; malformed = refused (never half-understood)
+        let defaults = ArmOptions::parse_json("").expect("empty opts");
+        assert_eq!(defaults.posctl_port, DEFAULT_POSCTL_PORT);
+        assert_eq!(defaults.probe_wait_ms, PROBE_WAIT_MS_DEFAULT);
+        assert!(defaults.shell_exclusions.is_empty());
+        for bad in [
+            "not json",
+            "[]",
+            "{\"posctl_port\":0}",
+            "{\"posctl_port\":70000}",
+            "{\"probe_wait_ms\":0}",
+            "{\"shell_exclusions\":{}}",
+            "{\"shell_exclusions\":[{\"kind\":\"nope\",\"host\":\"h\",\"port\":1}]}",
+            "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"\",\"port\":1}]}",
+            "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"h\",\"port\":0}]}",
+            "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"h\"}]}",
+        ] {
+            assert!(ArmOptions::parse_json(bad).is_err(), "'{bad}' must be refused");
+        }
+        println!(
+            "[I5] arm opts: posctl_port={} probe_wait_ms={} shell_exclusions={}",
+            opts.posctl_port,
+            opts.probe_wait_ms,
+            opts.shell_exclusions.len()
+        );
+    }
+
+    #[test]
+    fn collector_tee_scans_both_directions_and_keeps_hits_per_direction() {
+        let tee = CollectorTee::new(fixed_clock(77));
+        let outer_id = "N2H-management-00112233445566778899aabb";
+        let posctl_id = "N2H-posctl-ffeeddccbbaa998877665544";
+        tee.register(outer_id, WireMarker::Ascii(outer_id.into()), false);
+        tee.register(posctl_id, WireMarker::Ascii(posctl_id.into()), true);
+
+        // a benign frame in each direction: counted + scanned, no hit
+        let benign = udp_frame([10, 77, 0, 1], [10, 77, 0, 2], 1111, 2222, b"benign");
+        tee.on_tun_frame(TunFrameDir::FromOs, &benign);
+        tee.on_tun_frame(TunFrameDir::ToOs, &benign);
+
+        // the outer probe's payload appears in the tunnel: a violation
+        let leak = udp_frame([10, 77, 0, 1], [10, 77, 0, 2], 40000, 40001, outer_id.as_bytes());
+        tee.on_tun_frame(TunFrameDir::FromOs, &leak);
+        // the positive control is seen entering AND returning
+        let entrance =
+            udp_frame([10, 77, 0, 1], [10, 77, 0, 2], 40000, 40001, posctl_id.as_bytes());
+        tee.on_tun_frame(TunFrameDir::FromOs, &entrance);
+        tee.on_tun_frame(TunFrameDir::ToOs, &entrance);
+
+        let snap = tee.snapshot();
+        assert_eq!(snap.frames_scanned, 5, "both directions are scanned");
+        assert_eq!(snap.totals.from_os_frames, 3);
+        assert_eq!(snap.totals.to_os_frames, 2);
+        assert_eq!(snap.totals.from_os_bytes, (benign.len() + leak.len() + entrance.len()) as u64);
+        assert_eq!(snap.totals.to_os_bytes, (benign.len() + entrance.len()) as u64);
+        // D3: ONE interface name for both directions
+        assert_eq!(snap.sides, vec![TUN_IFACE_NAME.to_string()]);
+        // the violation list is the outer probe only
+        assert_eq!(snap.outer_hits.len(), 1);
+        assert_eq!(snap.outer_hits[0].probe_id, outer_id);
+        assert_eq!(snap.outer_hits[0].side, TUN_IFACE_NAME);
+        assert_eq!(snap.outer_hits[0].frame_len, leak.len());
+        assert_eq!(snap.outer_hits[0].observed_at_mono, 77);
+        // D5: the positive control's two observation points stay distinct
+        let entrance_hit = tee.directed_hit(posctl_id, TunFrameDir::FromOs).expect("entrance");
+        let echo_hit = tee.directed_hit(posctl_id, TunFrameDir::ToOs).expect("echo");
+        assert_eq!(entrance_hit.dport, 40001);
+        assert_eq!(echo_hit.dport, 40001);
+        assert!(tee.directed_hit(outer_id, TunFrameDir::ToOs).is_none(), "no return of the leak");
+        assert_eq!(tee.outer_hit_count(), 1);
+        assert_eq!(tee.frames_scanned(), 5);
+        assert_eq!(direction_token(TunFrameDir::FromOs), "from-os");
+        assert_eq!(direction_token(TunFrameDir::ToOs), "to-os");
+        println!(
+            "[I5] tee: frames={} from-os={}/{}B to-os={}/{}B hits={} sides={:?}",
+            snap.frames_scanned,
+            snap.totals.from_os_frames,
+            snap.totals.from_os_bytes,
+            snap.totals.to_os_frames,
+            snap.totals.to_os_bytes,
+            snap.outer_hits.len(),
+            snap.sides
+        );
+    }
+
+    /// A complete, clean window's material: every kind frozen (turn absent
+    /// WITH reason), a sent probe + an observed receipt per present kind, both
+    /// positive-control directions observed, frames scanned and a
+    /// self-consistent counters pairing.
+    fn clean_material() -> WindowMaterial {
+        let freeze = assemble_freezes(&all_seven_sources());
+        let probes: Vec<OuterProbe> = freeze
+            .iter()
+            .filter(|f| f.present)
+            .map(|f| {
+                let kind = f.kind.expect("kind");
+                let id = id_of(kind, 0x40);
+                OuterProbe {
+                    probe_id: id.clone(),
+                    kind: Some(kind),
+                    tuple: FiveTuple {
+                        proto: kind.proto().into(),
+                        src: "0.0.0.0:5000".into(),
+                        dst: f.resolved.clone(),
+                    },
+                    expected_path: "outer",
+                    sent: true,
+                    sent_at_unix: 1_756_000_000,
+                    sent_at_mono: 1,
+                    marker: Some(WireMarker::Ascii(id)),
+                    payload_len: 30,
+                }
+            })
+            .collect();
+        let receipts: Vec<EndpointReceipt> = probes
+            .iter()
+            .map(|p| EndpointReceipt {
+                probe_id: p.probe_id.clone(),
+                kind: p.kind.map(|k| k.name()).unwrap_or("unknown").into(),
+                observed: true,
+                physical_src: "203.0.113.7:443".into(),
+                physical_src_source: "endpoint-reported".into(),
+                at_unix: 1_756_000_000,
+                method: "sink-record".into(),
+                detail: "harness sink".into(),
+            })
+            .collect();
+        let hit = |id: &str, dir: TunFrameDir| DirectedHit {
+            probe_id: id.to_string(),
+            direction: dir,
+            hit: TunHit {
+                probe_id: id.to_string(),
+                side: TUN_IFACE_NAME.to_string(),
+                src: [10, 77, 0, 1],
+                dst: [10, 77, 0, 2],
+                sport: 40000,
+                dport: 40001,
+                frame_len: 64,
+                observed_at_mono: 5,
+            },
+        };
+        let posctl = vec![
+            PosctlProbe {
+                probe_id: "N2H-posctl-a2b".into(),
+                direction: "a2b".into(),
+                tuple: FiveTuple {
+                    proto: "ipv4".into(),
+                    src: "0.0.0.0:40000".into(),
+                    dst: "10.77.0.2:40001".into(),
+                },
+                expected_path: "tunnel",
+                sent: true,
+                sent_at_mono: 4,
+                observed: Some(hit("N2H-posctl-a2b", TunFrameDir::FromOs).hit),
+                note: "closed end to end".into(),
+            },
+            PosctlProbe {
+                probe_id: "N2H-posctl-b2a".into(),
+                direction: "b2a".into(),
+                tuple: FiveTuple {
+                    proto: "ipv4".into(),
+                    src: "10.77.0.2:40001".into(),
+                    dst: "10.77.0.1:40001".into(),
+                },
+                expected_path: "tunnel",
+                sent: true,
+                sent_at_mono: 4,
+                observed: Some(hit("N2H-posctl-b2a", TunFrameDir::ToOs).hit),
+                note: "peer-initiated".into(),
+            },
+        ];
+        let before = IfaceSnapshot {
+            at_mono: 1,
+            at_unix: 1_756_000_000,
+            wg_rx_packets: 10,
+            wg_rx_bytes_to_tun: 1000,
+            tun_delivered_frames: 10,
+            tun_delivered_bytes: 1000,
+            ..IfaceSnapshot::default()
+        };
+        let after = IfaceSnapshot {
+            at_mono: 9,
+            at_unix: 1_756_000_009,
+            wg_rx_packets: 14,
+            wg_rx_bytes_to_tun: 1400,
+            tun_delivered_frames: 14,
+            tun_delivered_bytes: 1400,
+            ..IfaceSnapshot::default()
+        };
+        let counters = WindowCounters { side: TUN_IFACE_NAME.to_string(), before, after };
+        let identities = counter_identities(&counters.delta());
+        assert!(identities.hold(), "the clean fixture must be self-consistent");
+        WindowMaterial {
+            freeze,
+            probes,
+            posctl,
+            receipts,
+            scan: TeeSnapshot {
+                totals: TunTeeTotals {
+                    from_os_frames: 3,
+                    from_os_bytes: 300,
+                    to_os_frames: 4,
+                    to_os_bytes: 400,
+                },
+                frames_scanned: 7,
+                sides: vec![TUN_IFACE_NAME.to_string()],
+                outer_hits: Vec::new(),
+                directed: Vec::new(),
+            },
+            sample: Some(WindowSample {
+                counters,
+                identities,
+                resamples: 0,
+                source: COUNTERS_SOURCE_TEE_FALLBACK,
+            }),
+            notes: Vec::new(),
+            opened_mono: 1,
+            closed_mono: 9,
+            generated_unix: 1_756_000_009,
+        }
+    }
+
+    #[test]
+    fn clean_device_document_parses_with_the_strict_reader_and_device_rules() {
+        let evidence = assemble_device_evidence(clean_material());
+        assert_eq!(evidence.verdict, crate::n2h::VERDICT_PASS, "{:?}", evidence.reasons);
+        assert!(evidence.reasons.is_empty(), "{:?}", evidence.reasons);
+        assert_eq!(evidence.mode, MODE_DEVICE);
+        assert_eq!(evidence.session, SESSION_DEVICE);
+        assert_eq!(evidence.counters.len(), 1, "D8: one platform TUN");
+        assert_eq!(evidence.counters[0].side, TUN_IFACE_NAME);
+        assert!(evidence.counters[0].reconciled());
+        assert_eq!(evidence.tun_negative.sides, vec![TUN_IFACE_NAME.to_string()]);
+        assert!(!evidence.tun_negative.hit);
+        // the source caliber is DECLARED, never implied (§3.2)
+        assert!(
+            evidence.notes.iter().any(|n| n == "counters-source=tee-fallback"),
+            "{:?}",
+            evidence.notes
+        );
+        let json = evidence.to_json();
+        // §8-1: the document parses under the crate's OWN strict reader
+        crate::config::parse_document(&json).expect("the device document is strict JSON");
+        assert!(json.contains("\"mode\":\"device\""));
+        assert!(json.contains("\"scanned_sides\":[\"vpn-tun\"]"));
+        assert!(json.contains("\"unsat_note\":"));
+        for forbidden in ["protect pass", "N2 pass", "等同逐 socket protect", "waived", "N/A"] {
+            assert!(!json.contains(forbidden), "forbidden token '{forbidden}' in evidence");
+        }
+        println!(
+            "[I5] clean device document: {} bytes, verdict={}, counters side={}, frames_scanned={}",
+            json.len(),
+            evidence.verdict,
+            evidence.counters[0].side,
+            evidence.tun_negative.frames_scanned
+        );
+    }
+
+    #[test]
+    fn the_packet_identity_and_a_zero_frame_scan_force_inconclusive() {
+        // 1. design §4.4's SECOND identity: the judge's step 6 only reads
+        //    WindowCounters::reconciled() (bytes). A pairing the byte identity
+        //    ACCEPTS but the packet identity refuses must NOT pass — the
+        //    collector appends the reason and downgrades the verdict itself.
+        let mut m = clean_material();
+        {
+            let sample = m.sample.as_mut().expect("sample");
+            sample.counters.after.wg_rx_packets += 1; // wg saw one extra frame
+            sample.counters.after.tun_delivered_frames -= 1;
+            sample.identities = counter_identities(&sample.counters.delta());
+            sample.resamples = MAX_PAIRING_RESAMPLES;
+            assert!(sample.identities.bytes, "the frozen byte identity still holds");
+            assert!(!sample.identities.hold(), "…and the packet identity does not");
+            assert!(
+                sample.counters.reconciled(),
+                "WindowCounters::reconciled is bytes-only — the judge cannot see this break"
+            );
+        }
+        let evidence = assemble_device_evidence(m);
+        assert_eq!(evidence.verdict, crate::n2h::VERDICT_INCONCLUSIVE);
+        assert!(
+            evidence.reasons.iter().any(|r| r.contains("design §4.4 second identity")),
+            "{:?}",
+            evidence.reasons
+        );
+        assert!(
+            evidence.notes.iter().any(|n| n == "counters-identity=packets-broken"),
+            "{:?}",
+            evidence.notes
+        );
+
+        // 2. §6.3: a window that scanned ZERO frames proves nothing
+        let mut m = clean_material();
+        m.scan.frames_scanned = 0;
+        m.scan.totals = TunTeeTotals::default();
+        m.sample = None;
+        let evidence = assemble_device_evidence(m);
+        assert_eq!(evidence.verdict, crate::n2h::VERDICT_INCONCLUSIVE);
+        assert!(
+            evidence.reasons.iter().any(|r| r.contains("zero frames scanned")),
+            "{:?}",
+            evidence.reasons
+        );
+
+        // 3. falsification is never downgraded: an outer hit stays n2h-fail
+        //    even with the packet identity broken in the same window
+        let mut m = clean_material();
+        let leaked = m.probes[0].probe_id.clone();
+        {
+            let sample = m.sample.as_mut().expect("sample");
+            sample.counters.after.wg_rx_packets += 1;
+            sample.identities = counter_identities(&sample.counters.delta());
+        }
+        m.scan.outer_hits.push(TunHit {
+            probe_id: leaked.clone(),
+            side: TUN_IFACE_NAME.to_string(),
+            src: [10, 77, 0, 1],
+            dst: [10, 77, 0, 2],
+            sport: 40000,
+            dport: 40001,
+            frame_len: 64,
+            observed_at_mono: 5,
+        });
+        m.scan.directed.push(DirectedHit {
+            probe_id: leaked.clone(),
+            direction: TunFrameDir::FromOs,
+            hit: m.scan.outer_hits[0].clone(),
+        });
+        let evidence = assemble_device_evidence(m);
+        assert_eq!(evidence.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence.reasons);
+        assert!(evidence.tun_negative.hit);
+        assert!(
+            evidence.reasons.iter().any(|r| r.contains(&leaked)),
+            "the fail reason names the leaked probe: {:?}",
+            evidence.reasons
+        );
+        assert!(
+            evidence.notes.iter().any(|n| n
+                == &format!(
+                    "outer-hit-direction probe_id={leaked} direction=from-os side=vpn-tun frame_len=64"
+                )),
+            "D4's direction fact is recorded in notes: {:?}",
+            evidence.notes
+        );
+        println!(
+            "[I5] forced rules: packet-identity break → {}, zero frames → {}, leak → {}",
+            crate::n2h::VERDICT_INCONCLUSIVE,
+            crate::n2h::VERDICT_INCONCLUSIVE,
+            crate::n2h::VERDICT_FAIL
+        );
+    }
+
+    #[test]
+    fn process_freeze_facts_map_both_connector_documents() {
+        let status = "{\"running\":true,\"state\":\"connected\",\"wg\":{\"device_up\":true,\
+            \"ready\":true,\"wg_peers\":[{\"pub_key_b64\":\"k\",\"endpoint\":\"198.51.100.4:51820\",\
+            \"allowed_ips\":[\"10.77.0.2/32\"]},{\"pub_key_b64\":\"j\",\"endpoint\":null}]},\
+            \"relay_advertised\":{\"advertised\":true,\"advertised_urls\":[\"rels://home.example:28443\",\
+            \"garbage\"]},\"relay\":{\"enabled\":true,\"urls\":[\"rel://relay.example:8080\"]}}";
+        let network = "{\"available\":true,\"serial\":7,\"address\":\"10.77.0.1\",\
+            \"address_prefix_len\":32,\"interface_dns\":\"10.0.0.53\",\"signal\":\"signal.example:10000\",\
+            \"routes\":[],\"dns\":{\"service_enable\":true,\"servers\":[{\"ip\":\"10.0.0.54\",\"port\":53}]},\
+            \"peer_count\":1,\"peers\":[{\"pub_key\":\"k\",\"allowed_ips\":1,\
+            \"vpn_addresses\":[\"10.77.0.2\"]}],\"default_route\":{\"allowed\":false,\"reason\":\"held\"}}";
+        let facts = process_freeze_facts(status, network).expect("both documents parse");
+        assert_eq!(facts.wg_peer_endpoints.len(), 1, "a null endpoint is not a freeze");
+        assert_eq!(facts.wg_peer_endpoints[0].resolved, "198.51.100.4:51820");
+        // advertised urls first, then the runtime urls, unparsable ones dropped
+        let relays: Vec<String> = facts
+            .relay_advertised
+            .iter()
+            .map(|e| format!("{}:{}", e.host, e.port))
+            .collect();
+        assert_eq!(relays, vec!["home.example:28443", "relay.example:8080"]);
+        assert_eq!(facts.signal_config.as_ref().expect("signal").port, 10_000);
+        assert_eq!(facts.dns_servers.len(), 2, "dns.servers + interface_dns");
+        assert_eq!(facts.dns_servers[0].resolved, "10.0.0.54:53");
+        assert_eq!(facts.dns_servers[1].resolved, "10.0.0.53:53");
+        assert_eq!(facts.own_overlay, Some([10, 77, 0, 1]));
+        assert_eq!(facts.peer_overlay, vec![[10, 77, 0, 2]]);
+        // the assembly turns these into the D7 freeze + the a2b destination
+        let frozen = assemble_freezes(&FreezeSources {
+            signal_config: facts.signal_config.clone(),
+            relay_advertised: facts.relay_advertised.clone(),
+            wg_peer_endpoints: facts.wg_peer_endpoints.clone(),
+            dns_servers: facts.dns_servers.clone(),
+            ..FreezeSources::default()
+        });
+        let signal = frozen.iter().find(|f| f.kind == Some(EndpointKind::Signal)).unwrap();
+        assert!(signal.present);
+        assert_eq!(signal.source, SOURCE_CORE_SIGNAL_CONFIG);
+        // malformed documents are refused, never guessed
+        assert!(process_freeze_facts("{", network).is_err());
+        assert!(process_freeze_facts(status, "[]").is_err());
+        println!(
+            "[I5] process freeze facts: wg_peers={} relays={:?} dns={} own={:?} peer={:?}",
+            facts.wg_peer_endpoints.len(),
+            relays,
+            facts.dns_servers.len(),
+            facts.own_overlay,
+            facts.peer_overlay
+        );
+    }
+
+    #[test]
+    fn the_unarmed_napi_surface_is_inert_and_idempotent() {
+        // §6.1: with no window at all the four entries answer the documented
+        // not-armed shapes and touch nothing.
+        uninstall_host();
+        *window_slot() = None;
+        assert_eq!(status_json(), "{\"ok\":false,\"error\":\"not-armed\"}");
+        assert_eq!(evidence_json(-1), "{\"error\":\"no-evidence\"}");
+        assert_eq!(evidence_json(0), "{\"error\":\"no-evidence\"}");
+        assert_eq!(disarm_json(), "{\"ok\":true}");
+        // no host seam installed ⇒ the arm is refused fail-closed (§6.1)
+        assert_eq!(
+            arm_json(""),
+            "{\"ok\":false,\"error\":\"no-connector\"}",
+            "an uninstalled host must refuse the arm"
+        );
+        assert_eq!(arm_json("{"), "{\"ok\":false,\"error\":\"invalid-opts\"}");
+        assert!(installed_host().is_none());
+        assert!(window_slot().is_none(), "a refused arm leaves no window behind");
+        println!("[I5] unarmed surface: status={} evidence={}", status_json(), evidence_json(-1));
     }
 }

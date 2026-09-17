@@ -87,6 +87,10 @@
 //! | `connector_status()` | `() => string` | connector snapshot -> `{running,state,started_at_unix,last_update_unix,peer_count,route_count,reconnects,last_error,session_expiry,session_expires_at_unix,session_renew_attempts,wg_apply_failed,wg_apply_errors,logout_ok,terminal,ice:{peers,idle,gathering,checking,connected,disconnected,failed,endpoints_applied,reachable,last_error},signal:{registered,reconnects,last_error},wg:{fed_socket,fed_tun,device_up,ready,peers_with_session,handshakes,tx_packets,rx_packets,dropped_no_route,decrypt_errors,carrier_tx_packets,carrier_tx_bytes,carrier_rejects,carrier_takeovers,direct_restores,wg_peers:[{pub_key_b64,endpoint,allowed_ips,session_established,expired,last_handshake_s,egress_local,carrier_attached,on_carrier}]},recreate:{required,count,exhausted,cooling_down,reason}}` (error = class + status code only, never key material; N3-7 `terminal` = worker ended by itself — fatal/exhausted — the shell tears the VPN down on it; N5c `ice` = per-peer ICE summary; N5d `signal` = real signal link state; N7 `wg` = REAL data-plane status of the device-backed seam; N8 `recreate` = controlled-recreate trigger: `required=true` when the desired route set diverges from the shell-ACKed applied set, bounded by count limit + cooldown) |
 //! | `connector_network_config()` | `() => string` | read-only shell snapshot of the last applied network map -> `{available:true,serial,address,address_prefix_len,interface_dns,signal,routes:[{network,is_default}],dns:{service_enable,servers:[{ip,port}]},peer_count,peers:[{pub_key,allowed_ips}],default_route:{allowed,reason}}` / `{available:false,reason:"no-network-map"}` (public keys only — no secret material; N3-6; N3-7: `0.0.0.0/0` is exported only when the default-route gate allows, else held with a `default-route-held:*` reason; N5d `signal` = the `netbird_config.signal` URI for the shell to resolve + protect + feed; N7: the gate is re-decided against LIVE `tunnel_ready` at read time, so feeds/handshakes completing between syncs are reflected without waiting for the next map) |
 //! | `connector_stop()` | `() => string` | idempotent stop (Sync stream close → best-effort logout → cleanup) -> `{ok,already_stopped,state}` |
+//! | `n2h_collector_arm(optsJson)` | `(opts) => string` | I5 N2-H device-side evidence collector: open ONE bounded measurement window (design docs/n2h-device-collector-design-20260917.md §5.1). `optsJson` = `{"shell_exclusions":[{kind,host,port,resolved}],"posctl_port":40001,"probe_wait_ms":800,"build_sha256_reported":"…"?}` -> `{ok:true,armed:true,opened_mono}` / `{ok:false,error:"no-connector"\|"device-not-up"\|"tunnel-not-ready"\|"already-armed"\|"invalid-opts"\|"window-failed"}` (fail-closed: no ready session, no attachable tee ⇒ no window). Arm itself is a marker (`N2H_COLLECTOR_ARM|…|diag=true\|is_evidence=false`), never gate evidence |
+//! | `n2h_collector_status()` | `() => string` | window state -> `{ok:true,armed,phase:"armed"\|"probing"\|"observing"\|"closed",frames_scanned,hits,probes_sent,receipts_observed,window:{opened_mono,deadline_mono,closed_mono},verdict?}`; never armed -> `{ok:false,error:"not-armed"}` (§6.1). Diagnostic state only — `connector_status()` is NOT extended (§5.2) |
+//! | `n2h_collector_evidence(chunk)` | `(chunk) => string` | one `N2H_EVIDENCE` chunk of the closed document: `{seq,total,sha256,b64}` (`chunk = -1` = the chunk count, `seq:-1`, empty `b64`); window still running -> `{phase:"running"}`; no closed document -> `{error:"no-evidence"}` / `{error:"chunk-out-of-range"}`. Repeatable on purpose: the replayed lines are byte-identical (hilog line-loss recovery, §2.4-R2) |
+//! | `n2h_collector_disarm()` | `() => string` | abort the window: detaches the tee, discards the partial document and records it (`N2H_COLLECTOR_DISARM`) -> `{ok:true}` (idempotent) |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd
 //! retention probe stages and the n1b fd-retention `state.rs` (unrelated to
@@ -140,11 +144,15 @@ pub mod management;
 // (N2-H takes effect only after user approval + formal revision — module docs).
 pub mod n2h;
 // N2-H (device-side evidence collector): I0 HiLog chunk encoder (512 B slices,
-// seq/total/sha256 + replay) and I1 endpoint freeze assembly (7 classes from
-// injected sources) — spec docs/n2h-device-collector-design-20260917.md.
-// Compiled into the cdylib, but INERT: nothing calls into it until the napi
-// collector entry points are armed (I5); it performs no IO itself and the
-// shipped cdylib behavior is unchanged.
+// seq/total/sha256 + replay), I1 endpoint freeze assembly (7 classes from
+// injected sources), I3 wildcard probe sender, I4 `/proc` reconciliation and
+// I5 the window state machine + verdict wiring + the four `n2h_collector_*`
+// NAPI entries — spec docs/n2h-device-collector-design-20260917.md.
+// Compiled into the cdylib, but INERT until a control-file arm: no arm ⇒ no
+// window, no tee, no traffic, and every export answers `not-armed` (§6.1). The
+// collector reads the process only through the injected `CollectorHost` seam;
+// without a host installed (`n2h_collector::install_host`, the production side
+// being `WgFeedHost`) the arm is refused `no-connector`.
 pub mod n2h_collector;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
 // consumption + tonic connector service) — fail-closed gap 1 fix.

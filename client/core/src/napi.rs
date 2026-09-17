@@ -116,6 +116,10 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
+    reg!("n2h_collector_arm", napi_n2h_collector_arm);
+    reg!("n2h_collector_status", napi_n2h_collector_status);
+    reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
+    reg!("n2h_collector_disarm", napi_n2h_collector_disarm);
     exports
 }
 
@@ -375,6 +379,10 @@ mod tests {
             "connector_status",
             "connector_network_config",
             "connector_stop",
+            "n2h_collector_arm",
+            "n2h_collector_status",
+            "n2h_collector_evidence",
+            "n2h_collector_disarm",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -591,4 +599,29 @@ unsafe extern "C" fn napi_connector_network_config(env: NapiEnv, _info: NapiCall
 
 unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::connector::connector_stop_json())
+}
+
+// I5 N2-H device-side evidence collector (design
+// docs/n2h-device-collector-design-20260917.md §5.1): four synchronous
+// JSON-string exports, no callbacks, no threads created at the NAPI boundary
+// (the window runs on a core-owned thread started inside `arm`). Inert until
+// the control file arms them (§6.1): no arm ⇒ every export answers the
+// documented not-armed / no-evidence shape and `connector_status()` — the
+// frozen document — is untouched (§5.2).
+unsafe extern "C" fn napi_n2h_collector_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::n2h_collector::arm_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_n2h_collector_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::n2h_collector::status_json())
+}
+
+unsafe extern "C" fn napi_n2h_collector_evidence(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::n2h_collector::evidence_json(a.i32_at(0, -1) as i64))
+}
+
+unsafe extern "C" fn napi_n2h_collector_disarm(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::n2h_collector::disarm_json())
 }
