@@ -157,10 +157,16 @@ use netbird_core::wg_device::{WgDevice, WgDeviceApplier, WgDeviceConfig, WgDevic
 const SECRET_A: [u8; 32] = [0xA5; 32];
 /// Far-end peer device: 32 bytes of 0xB6.
 const SECRET_B: [u8; 32] = [0xB6; 32];
+/// N13-D1: a SECOND registered peer that never completes a handshake (no
+/// endpoint is ever landed for it) — the per-peer attribution must show it
+/// side by side with the session-bearing peer.
+const SECRET_C: [u8; 32] = [0xC7; 32];
 
 /// Tunnel addresses inside the routed range.
 const ADDR_A: [u8; 4] = [10, 77, 0, 1];
 const ADDR_B: [u8; 4] = [10, 77, 0, 2];
+/// Overlay address of the session-less peer (N13-D1).
+const ADDR_C: [u8; 4] = [10, 77, 0, 3];
 
 fn pub_key_raw(secret: &[u8; 32]) -> [u8; 32] {
     ffi::x25519_public_key(ffi::x25519_key { key: *secret }).key
@@ -178,6 +184,11 @@ fn key_a() -> &'static str {
 fn key_b() -> &'static str {
     static K: OnceLock<String> = OnceLock::new();
     K.get_or_init(|| b64(&pub_key_raw(&SECRET_B)))
+}
+
+fn key_c() -> &'static str {
+    static K: OnceLock<String> = OnceLock::new();
+    K.get_or_init(|| b64(&pub_key_raw(&SECRET_C)))
 }
 
 /// Quick device-clock policy (injected ms; loopback delivery is synchronous
@@ -763,4 +774,127 @@ fn fd_contract_native_uses_only_dups_originals_stay_caller_owned() {
     for fd in [wg_raw, tun_raw, tun_test_end] {
         unsafe { sys::close(fd) };
     }
+}
+
+// ---------------------------------------------------------------------------
+// 5. N13-D1: the status document attributes the session to the PEER (two
+//    registered peers, only one of them ever handshakes)
+// ---------------------------------------------------------------------------
+
+/// N13-D1 acceptance: `connector_status()` used to expose only the aggregate
+/// `wg.peers_with_session=N` — nothing tied the count to a peer (n13
+/// evidence). The `wg.wg_peers` tail now carries the per-peer attribution:
+/// the peers the aggregate is counted from, one entry each, with the overlay
+/// prefixes, endpoint and bearer flags the attribution decision needs.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_json_attributes_the_session_to_the_right_peer() {
+    let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let peer = Peer::build(&SECRET_B, key_b(), key_a(), vec![(ADDR_A, 32)]);
+    let slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
+    // the second registered peer: no far end, no endpoint — it can never
+    // establish a session, so it is the negative half of the attribution
+    slot_end
+        .slot
+        .apply_peers(&[
+            WgPeerEntry {
+                pub_key_b64: key_b().to_string(),
+                allowed_ips: vec![config::Route { addr: ADDR_B, prefix_len: 32 }],
+            },
+            WgPeerEntry {
+                pub_key_b64: key_c().to_string(),
+                allowed_ips: vec![config::Route { addr: ADDR_C, prefix_len: 32 }],
+            },
+        ])
+        .expect("two buffered peers");
+    let mut now = 4000u64;
+    slot_end.feed_both();
+    peer.app
+        .with_device(|d| d.set_endpoint(key_a(), [127, 0, 0, 1], slot_end.port(), now))
+        .expect("peer endpoint");
+    assert!(
+        pump_until(&slot_end, &peer, &mut now, 10_000, |s, p| s.ready() && p.ready()),
+        "handshake must establish with the session-bearing peer"
+    );
+
+    let handle: Arc<ConnectorHandle> = ConnectorHandle::spawn(
+        tokio::runtime::Handle::current(),
+        Arc::new(NeverFactory),
+        slot_end.slot.clone(),
+        Arc::new(netbird_core::connector::LoggingConfigApplier),
+        ConnectorSecrets { setup_key: "N7-TEST-SETUP-KEY".into(), jwt: String::new() },
+        netbird_core::grpc::PeerMeta {
+            hostname: "n7-test".into(),
+            os_name: "harmonyos".into(),
+            os_version: "0".into(),
+            netbird_version: "0.1.0".into(),
+        },
+        netbird_core::backoff::ExponentialBackoff::new(
+            std::time::Duration::from_millis(5),
+            0.0,
+            1.5,
+            std::time::Duration::from_millis(50),
+            None,
+        ),
+        SyncPolicy::production(),
+        std::time::Duration::from_secs(600),
+        std::time::Duration::from_millis(100),
+        false,
+        None,
+        None,
+        None,
+        Some(slot_end.slot.clone()),
+        netbird_core::connector::HostIceTuning::default(), // N12a HOST-ONLY: defaults
+    );
+
+    // both registered peers are attributed, in registration order
+    let st = handle.status();
+    assert_eq!(st.wg.peers_with_session, 1, "one session-bearing peer: {:?}", st.wg.wg_peers);
+    assert_eq!(st.wg.wg_peers.len(), 2, "both registered peers must be attributed");
+    let live = &st.wg.wg_peers[0];
+    assert_eq!(live.pub_key_b64, key_b(), "peer identity = WG public key");
+    assert!(live.session_established && !live.expired, "{live:?}");
+    assert_eq!(live.allowed_ips, vec![(ADDR_B, 32)], "overlay attribution: {live:?}");
+    assert_eq!(live.endpoint, Some(([127, 0, 0, 1], peer.port())), "{live:?}");
+    assert!(live.last_handshake_s >= 0, "session ⇒ real handshake age: {live:?}");
+    assert!(!live.carrier_attached && !live.on_carrier, "UDP bearer here: {live:?}");
+    let idle = &st.wg.wg_peers[1];
+    assert_eq!(idle.pub_key_b64, key_c(), "the session-less peer, not the session one");
+    assert!(!idle.session_established && !idle.expired, "{idle:?}");
+    assert_eq!(idle.endpoint, None, "no endpoint was ever landed for it");
+    assert_eq!(idle.last_handshake_s, -1, "no session ⇒ no handshake age");
+    assert_eq!(idle.allowed_ips, vec![(ADDR_C, 32)], "{idle:?}");
+    assert!(!idle.carrier_attached && !idle.on_carrier, "{idle:?}");
+    // the aggregate IS the per-peer view — the two can never disagree
+    assert_eq!(
+        st.wg.wg_peers.iter().filter(|p| p.session_established && !p.expired).count(),
+        st.wg.peers_with_session
+    );
+
+    // the same attribution in the status JSON: the session peer's entry is
+    // pinned up to the (dynamic) handshake age, the session-less entry
+    // completely (its age renders `null`: no session yet — the document's
+    // absent-value convention, which also keeps the whole document readable
+    // by the strict reader, negative numbers included)
+    let json = handle.status_json();
+    assert!(
+        json.contains(&format!(
+            "\"wg_peers\":[{{\"pub_key_b64\":\"{}\",\"endpoint\":\"127.0.0.1:{}\",\
+             \"allowed_ips\":[\"10.77.0.2/32\"],\"session_established\":true,\
+             \"expired\":false,\"last_handshake_s\":",
+            key_b(),
+            peer.port()
+        )),
+        "{json}"
+    );
+    assert!(
+        json.contains(&format!(
+            "{{\"pub_key_b64\":\"{}\",\"endpoint\":null,\"allowed_ips\":[\"10.77.0.3/32\"],\
+             \"session_established\":false,\"expired\":false,\"last_handshake_s\":null,\
+             \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false}}]}}",
+            key_c()
+        )),
+        "{json}"
+    );
+
+    handle.stop();
 }

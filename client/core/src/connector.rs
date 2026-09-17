@@ -4797,6 +4797,33 @@ mod tests {
                 rx_bytes_to_tun: 800,
                 dropped_no_route: 1,
                 decrypt_errors: 2,
+                // N13-D1: the per-peer attribution tail — one peer with a
+                // live session riding the carrier, one registered peer with
+                // no session (both entry shapes frozen here).
+                wg_peers: vec![
+                    crate::wg_device::WgPeerStatus {
+                        pub_key_b64: "bjEzLWQxLXBlZXItc2Vzc2lvbg==".to_string(),
+                        endpoint: None,
+                        allowed_ips: vec![([10, 30, 30, 2], 32)],
+                        session_established: true,
+                        expired: false,
+                        last_handshake_s: 12,
+                        egress_local: Some(([192, 168, 1, 5], 51820)),
+                        carrier_attached: true,
+                        on_carrier: true,
+                    },
+                    crate::wg_device::WgPeerStatus {
+                        pub_key_b64: "bjEzLWQxLXBlZXItaWRsZQ==".to_string(),
+                        endpoint: Some(([203, 0, 113, 9], 51820)),
+                        allowed_ips: vec![([10, 30, 30, 3], 32), ([10, 30, 30, 4], 32)],
+                        session_established: false,
+                        expired: false,
+                        last_handshake_s: -1,
+                        egress_local: None,
+                        carrier_attached: false,
+                        on_carrier: false,
+                    },
+                ],
                 ..Default::default()
             },
             recreate: RecreateStatus {
@@ -4836,6 +4863,9 @@ mod tests {
         // so counter reconciliation can read connector_status() directly.
         // N13-D2: the relay-carrier counters are APPENDED after the pre-D2
         // fields (positional contract; zero here — the fixture has no lane).
+        // N13-D1: the per-peer session attribution is APPENDED after those,
+        // so `wg_peers` is the LAST `wg` field (relay stays last in the
+        // document — the `wg` object only moves its own tail).
         assert!(
             json.contains(
                 "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
@@ -4843,7 +4873,17 @@ mod tests {
                  \"rx_packets\":8,\"rx_bytes_to_tun\":800,\
                  \"dropped_no_route\":1,\"decrypt_errors\":2,\"carrier_tx_packets\":0,\
                  \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
-                 \"direct_restores\":0}"
+                 \"direct_restores\":0,\"wg_peers\":[\
+                 {\"pub_key_b64\":\"bjEzLWQxLXBlZXItc2Vzc2lvbg==\",\"endpoint\":null,\
+                 \"allowed_ips\":[\"10.30.30.2/32\"],\"session_established\":true,\
+                 \"expired\":false,\"last_handshake_s\":12,\
+                 \"egress_local\":\"192.168.1.5:51820\",\"carrier_attached\":true,\
+                 \"on_carrier\":true},\
+                 {\"pub_key_b64\":\"bjEzLWQxLXBlZXItaWRsZQ==\",\
+                 \"endpoint\":\"203.0.113.9:51820\",\
+                 \"allowed_ips\":[\"10.30.30.3/32\",\"10.30.30.4/32\"],\
+                 \"session_established\":false,\"expired\":false,\"last_handshake_s\":null,\
+                 \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false}]}"
             ),
             "{json}"
         );
@@ -4854,6 +4894,12 @@ mod tests {
                  \"cooling_down\":true,\"reason\":\"route-set-changed\"}"
             ),
             "{json}"
+        );
+        // the relay segment stays the LAST section of the document (the ets
+        // consumer reads by field; N13-D1 must not move it)
+        assert!(
+            json.ends_with(&format!("\"relay\":{}}}", status.relay.to_json())),
+            "relay must stay last in the document: {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
 
@@ -4899,7 +4945,7 @@ mod tests {
                  \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
                  \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
                  \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
-                 \"direct_restores\":0}"
+                 \"direct_restores\":0,\"wg_peers\":[]}"
             ),
             "default wg summary must render: {empty}"
         );

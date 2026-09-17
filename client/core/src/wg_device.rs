@@ -1336,10 +1336,9 @@ fn getsockname(fd: i32) -> Result<([u8; 4], u16), String> {
 /// Data-plane status exposed through `connector_status()` (`wg` field).
 /// Counters are the REAL [`WgDeviceStats`] values once a device is up; all
 /// booleans false / counters zero while the data plane is not started
-/// (fail-closed: no shell feeds ⇒ no device ⇒ nothing ready). No key
-/// material — public-key-free by construction (per-peer detail would carry
-/// public keys only, but the summary does not even need that).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// (fail-closed: no shell feeds ⇒ no device ⇒ nothing ready). No secret
+/// material: the `wg_peers` tail carries PUBLIC keys only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WgDataplaneStatus {
     /// The shell fed a (protected) WG UDP socket fd.
     pub fed_socket: bool,
@@ -1378,6 +1377,13 @@ pub struct WgDataplaneStatus {
     pub carrier_takeovers: u64,
     /// relay→UDP restores (ICE (re)nominated while a carrier episode ran).
     pub direct_restores: u64,
+    // -- N13-D1 per-peer session attribution (appended to the JSON AFTER the
+    //    carrier_* counters; consumers read the head positionally) --
+    /// Read-only per-peer snapshots ([`WgPeerStatus`], registration order) —
+    /// the attribution surface for `peers_with_session`: WHICH peer's
+    /// session is up, on which overlay prefixes and which bearer. Empty
+    /// while no device is up (nothing to attribute).
+    pub wg_peers: Vec<WgPeerStatus>,
 }
 
 impl WgDataplaneStatus {
@@ -1389,7 +1395,7 @@ impl WgDataplaneStatus {
     /// The `connector_status()` `wg` JSON object.
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\"wg_peers\":[{}]}}",
             crate::util::jbool("fed_socket", self.fed_socket),
             crate::util::jbool("fed_tun", self.fed_tun),
             crate::util::jbool("device_up", self.device_up),
@@ -1407,8 +1413,60 @@ impl WgDataplaneStatus {
             crate::util::jinum("carrier_rejects", self.carrier_rejects as i64),
             crate::util::jinum("carrier_takeovers", self.carrier_takeovers as i64),
             crate::util::jinum("direct_restores", self.direct_restores as i64),
+            self.wg_peers.iter().map(wg_peer_json).collect::<Vec<String>>().join(","),
         )
     }
+}
+
+/// `"key":"ip:port"` / `"key":null` for an optional IPv4 endpoint (the
+/// `route_network_string` dotted-quad convention plus the port).
+fn opt_endpoint_json(key: &str, v: Option<([u8; 4], u16)>) -> String {
+    match v {
+        Some((ip, port)) => {
+            format!("\"{key}\":\"{}.{}.{}.{}:{port}\"", ip[0], ip[1], ip[2], ip[3])
+        }
+        None => format!("\"{key}\":null"),
+    }
+}
+
+/// `"key":<seconds>` for a handshake age, `null` while there is no session.
+/// [`WgPeerStatus::last_handshake_s`] carries boringtun's -1 sentinel; the
+/// JSON uses the document's `null`-for-absent convention instead, so the
+/// whole `connector_status()` document stays readable by the strict reader
+/// (`config::parse_document` rejects negative numbers) — the same reason
+/// `session_expires_at_unix` is null when unset.
+fn opt_handshake_json(key: &str, v: i64) -> String {
+    if v < 0 {
+        format!("\"{key}\":null")
+    } else {
+        crate::util::jinum(key, v)
+    }
+}
+
+/// One `wg_peers` entry (N13-D1): the per-peer session attribution surface —
+/// PUBLIC key, overlay prefixes (`masked`, the [`WgPeerStatus`] convention)
+/// and the bearer/session flags. No secret material.
+fn wg_peer_json(p: &WgPeerStatus) -> String {
+    let allowed_ips = p
+        .allowed_ips
+        .iter()
+        .map(|&(ip, prefix_len)| {
+            format!("\"{}.{}.{}.{}/{prefix_len}\"", ip[0], ip[1], ip[2], ip[3])
+        })
+        .collect::<Vec<String>>()
+        .join(",");
+    format!(
+        "{{{},{},\"allowed_ips\":[{}],{},{},{},{},{},{}}}",
+        crate::util::jstr("pub_key_b64", &p.pub_key_b64),
+        opt_endpoint_json("endpoint", p.endpoint),
+        allowed_ips,
+        crate::util::jbool("session_established", p.session_established),
+        crate::util::jbool("expired", p.expired),
+        opt_handshake_json("last_handshake_s", p.last_handshake_s),
+        opt_endpoint_json("egress_local", p.egress_local),
+        crate::util::jbool("carrier_attached", p.carrier_attached),
+        crate::util::jbool("on_carrier", p.on_carrier),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,16 +2090,20 @@ impl WgPeerApplier for WgDeviceFeed {
             ..WgDataplaneStatus::default()
         };
         if let Some(d) = g.device.as_ref() {
-            let (ready, sessions, stats) = d.with_device(|dev| {
-                let sessions = dev
-                    .peers()
+            let (ready, sessions, peers, stats) = d.with_device(|dev| {
+                // N13-D1: ONE peer snapshot — the aggregate count and the
+                // per-peer attribution are read from the same view, so they
+                // can never disagree in one document.
+                let peers = dev.peers();
+                let sessions = peers
                     .iter()
                     .filter(|p| p.session_established && !p.expired)
                     .count();
-                (dev.tunnel_ready(), sessions, dev.stats())
+                (dev.tunnel_ready(), sessions, peers, dev.stats())
             });
             st.ready = ready;
             st.peers_with_session = sessions;
+            st.wg_peers = peers;
             st.handshakes = stats.handshake_initiations;
             st.tx_packets = stats.tx_packets;
             st.tx_bytes = stats.tx_bytes;
@@ -2122,7 +2184,7 @@ mod feed_tests {
              \"tx_bytes\":0,\"rx_packets\":0,\"rx_bytes_to_tun\":0,\
              \"dropped_no_route\":0,\"decrypt_errors\":0,\"carrier_tx_packets\":0,\
              \"carrier_tx_bytes\":0,\"carrier_rejects\":0,\"carrier_takeovers\":0,\
-             \"direct_restores\":0}");
+             \"direct_restores\":0,\"wg_peers\":[]}");
 
         // first feed alone: still not up
         slot.feed_tun(tun_raw).expect("tun feed");
