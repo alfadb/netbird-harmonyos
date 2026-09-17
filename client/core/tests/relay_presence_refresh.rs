@@ -41,6 +41,10 @@
 //! 5. [`legacy_mode_keeps_the_pre_faithful_semantics`] — pins the
 //!    `faithful_presence = false` side of the knob (the pre-faithful
 //!    behavior the established suites were written against).
+//! 6. [`peer_bounce_flips_the_presence_counters`] — N13-D3 observability:
+//!    the online→offline→online bounce is COUNTED per transition
+//!    (`peers_online_rx` / `peers_went_offline_rx`, the counter side of
+//!    the per-transition marker lines) on a real `RelayClient`.
 //!
 //! Determinism discipline: the relay client runs on the injected
 //! [`VirtualClock`], which is NEVER advanced — no keepalive death and no
@@ -782,5 +786,68 @@ async fn legacy_mode_keeps_the_pre_faithful_semantics() {
         "legacy mode must stay silent on the return (pre-faithful behavior)"
     );
 
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// 6. N13-D3: every presence transition is counted (the marker-line side)
+// ---------------------------------------------------------------------------
+
+/// The counter side of the D3 per-transition markers, on a REAL
+/// [`RelayClient`]: the scripted control plane drives online→offline→online
+/// while `peers_online_rx` / `peers_went_offline_rx` must flip exactly with
+/// the transitions (and the presence cache with them). The markers
+/// themselves go to the frozen log channel (`relay: peers-online|peer=…` /
+/// `relay: peers-went-offline|peer=…` / `relay: presence-cleared`); the
+/// counters are the assertable projection of the same transitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn peer_bounce_flips_the_presence_counters() {
+    let server = start_faithful().await;
+    let clock = VirtualClock::new(EPOCH);
+    let client = start_client(&server, &clock);
+    wait_for(FUSE, || client.state() == RelayState::Ready, "relay client Ready").await;
+
+    // Baseline: nothing subscribed yet, so no presence event has arrived —
+    // the counters start where the session does.
+    assert_eq!(client.stats().peers_online_rx, 0, "no PeersOnline before the subscribe");
+    assert_eq!(client.stats().peers_went_offline_rx, 0, "no PWO before the subscribe");
+
+    // --- online: the subscribe is answered IMMEDIATELY (control plane
+    // scripted the peer online), which is the first transition.
+    assert!(server.set_peer_online(&remote_id(), true), "scripted came-online transition");
+    client.open_conn(&remote_id()).await.expect("subscribe answered by the online peer");
+    wait_for(FUSE, || client.stats().peers_online_rx == 1, "first PeersOnline counted").await;
+    assert!(!client.is_offline(&remote_id()), "the PeersOnline restored presence");
+
+    // --- offline: PWO. The offline counter flips; the online one must NOT.
+    assert!(server.set_peer_online(&remote_id(), false), "scripted went-offline transition");
+    wait_for(FUSE, || client.stats().peers_went_offline_rx == 1, "PWO counted").await;
+    wait_for(FUSE, || client.is_offline(&remote_id()), "presence flipped to offline").await;
+    assert_eq!(client.stats().peers_online_rx, 1, "a PWO must not touch peers_online_rx");
+
+    // --- online again: the first recovery after a real offline is
+    // delivered (the offline interest is persistent; the immediate answer
+    // did not consume the one-shot online interest — test 4 at the wire
+    // level) → the second counted transition, presence back to online.
+    assert!(server.set_peer_online(&remote_id(), true), "scripted recovery transition");
+    wait_for(FUSE, || client.stats().peers_online_rx == 2, "recovery PeersOnline counted").await;
+    wait_for(FUSE, || !client.is_offline(&remote_id()), "presence restored after the bounce")
+        .await;
+    assert_eq!(
+        client.stats().peers_went_offline_rx,
+        1,
+        "the recovery must not be counted as a went-offline"
+    );
+
+    // Teardown also exercises the session-end path: the session ends with a
+    // NON-EMPTY presence cache, which is exactly the `relay:
+    // presence-cleared` transition (once — the worker's second clear finds
+    // an empty cache and stays silent).
+    client.stop();
+    wait_for(FUSE, || client.state() == RelayState::Dead, "terminal Dead").await;
+    assert!(
+        !client.is_offline(&remote_id()),
+        "a cleared presence cache reports NO peer as offline"
+    );
     server.shutdown().await;
 }

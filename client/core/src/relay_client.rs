@@ -135,6 +135,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::hilog::emit;
 use crate::relay::{
     AuthToken, Frame, PeerId, RelayError, MAX_MESSAGE_SIZE, MSG_AUTH, MSG_AUTH_RESPONSE,
     HEADER_LEN, PEER_ID_SIZE,
@@ -1170,6 +1171,10 @@ pub struct RelayStats {
     /// Inbound frames with an illegal type byte (dropped + kept,
     /// upstream client.go:574-579).
     pub unknown_frames_rx: u64,
+    /// `PeersOnline` notifications received (one per inbound
+    /// `PeersOnline` frame — the arrival granularity, symmetric with
+    /// `peers_went_offline_rx`; the per-peer transition is logged).
+    pub peers_online_rx: u64,
     /// `PeersWentOffline` notifications received.
     pub peers_went_offline_rx: u64,
     /// Dial attempts launched (each URL of each round counts once).
@@ -1202,6 +1207,7 @@ impl Default for RelayStats {
             outbound_dropped: 0,
             send_rejected_offline: 0,
             unknown_frames_rx: 0,
+            peers_online_rx: 0,
             peers_went_offline_rx: 0,
             dial_attempts: 0,
             reconnects: 0,
@@ -1632,6 +1638,22 @@ impl fmt::Debug for RelayClient {
     }
 }
 
+/// Clear the session's presence cache, one `relay: presence-cleared` marker
+/// per ACTUAL transition: a clear of an already-empty cache is not a
+/// transition (the normal session-end path clears in `run_session` and
+/// again, no-op, in `worker_main`) and stays silent. `worker_main` also
+/// clears for a hard-ABORTED session, where `run_session` never reached its
+/// own clear — the entries still vanish there, so the marker must fire.
+fn clear_presence(shared: &Shared) {
+    let mut presence = shared.presence.lock().expect("relay presence lock");
+    if presence.is_empty() {
+        return;
+    }
+    presence.clear();
+    drop(presence);
+    emit("relay: presence-cleared");
+}
+
 // ---------------------------------------------------------------------------
 // worker — connect policy
 // ---------------------------------------------------------------------------
@@ -1741,7 +1763,7 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
             }
         };
         *shared.session.lock().expect("relay session lock") = None;
-        shared.presence.lock().expect("relay presence lock").clear();
+        clear_presence(&shared);
         shared.bump(|s| {
             s.last_error_class = Some(class);
             if was_ready {
@@ -2042,9 +2064,11 @@ async fn run_session(
                             }
                         }
                         InboundAction::PeersOnline { peer_ids } => {
+                            shared.bump(|s| s.peers_online_rx += 1);
                             let mut presence =
                                 shared.presence.lock().expect("relay presence lock");
                             for peer in peer_ids {
+                                emit(&format!("relay: peers-online|peer={}", peer.readable()));
                                 presence.insert(peer.clone(), true);
                                 if let Some((replies, _)) = waiters.remove(&peer) {
                                     for reply in replies {
@@ -2058,6 +2082,10 @@ async fn run_session(
                             let mut presence =
                                 shared.presence.lock().expect("relay presence lock");
                             for peer in peer_ids {
+                                emit(&format!(
+                                    "relay: peers-went-offline|peer={}",
+                                    peer.readable()
+                                ));
                                 presence.insert(peer.clone(), false);
                                 if let Some((replies, _)) = waiters.remove(&peer) {
                                     for reply in replies {
@@ -2157,7 +2185,7 @@ async fn run_session(
             let _ = reply.send(Err(RelayClientError::ConnectionLost));
         }
     }
-    shared.presence.lock().expect("relay presence lock").clear();
+    clear_presence(&shared);
     (class, true)
 }
 
