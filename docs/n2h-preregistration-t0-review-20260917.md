@@ -116,3 +116,79 @@
 - **结论：三处均如实登记，未打扮成可自证**——未把运维侧收执写成设备自证（不以设备自身同名计数器或回包顶替）、未把 3/7 排除面写成判据已满足、未以聚合计数顶替 EAGAIN/部分写观测；缺口与「不得登记通过类结论」的限制在正文可见，无假通措辞。
 
 - **本节登记边界**：本节只归档第二轮复审会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；修订稿与最终生效稿内容以其自身文件为准。
+
+---
+
+## 第三轮裁定（2026-09-18，同日续，7/7 排除覆盖口径）
+
+> 本节为同一文件**追加**的第三轮归档（会话消息要点转写，非字节级副本）；首轮（§1–§4）与第二轮复审归档不改写、内容不变。裁定原文的编号、要点与结论强度逐字保留自派发与回报消息；会话完整原文以当次会话记录为准，本文件不代为断言其逐字内容。归档会话只读核对仓库文档与代码（含 HarmonyOS SDK 26.0.0.821 typings 只读探测）；未修改任何文件、未运行构建、未执行任何设备命令。
+
+- **审查对象与起因**：v2 生效稿（锚点 `bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be`）在「7/7 排除覆盖」补齐工作流派发前，其三项口径（dns 类构成／turn 缺席形态／wg_peer 代际语义）送 T0 钉口径；审查同时旁及两点（fail-closed 触发面、N8 recreate 预算静默 fail-open，即「附带两点」）。
+- **审查席**：T0 独立审查，2026-09-18，`anthropic/claude-opus-5` 席，**干净上下文单席**（spawn 形态，不带主会话已完成轮次）。单席，无第二席；与 v1/v2 两轮同席——故 v3 重审须换**跨厂商席**。
+- **总裁定：可推进，但须先完成 5 项前置（一次性收口进 v3）**：①项1 dns 类口径定义；②项2 turn 缺席形态时效声明；③项3 wg_peer 代际判定＋C2 七条规则；④C10 第四类＋S20；⑤fail-closed 触发面扩大。五项收口后：换跨厂商 T0 重审（`openai/gpt-5.6-sol` 席，干净上下文）→ 人类批准 → sha256 重登记（v2 锚点据以测量效力作废）。
+
+### 三项口径结论（要点转写）
+
+1. **dns**：dns 冻结集＝隧道外解析器端点集（①壳侧平台默认网络 DNS 属性 ∪ ②`netbird_config.dns.servers[]` 中不落在 `address/address_prefix_len` 或任一 `routes[].network` 覆盖范围内的条目）；`interface_dns` 与 overlay 内 server 一律不入冻结集，只在 `notes[]` 记 `dns-overlay-internal-excluded-from-freeze=<n>`；①②皆空 ⇒ dns 必需类缺口 ⇒ C1 不成立，dns **不得**改列可选类；**禁止**把 overlay 内解析器排除（＝把隧道内 DNS 踢出隧道＋新造物理明网泄漏面）。**DNS 能力探测（同日只读实测）**：SDK 26.0.0.821 完全暴露物理网络 DNS——`getDefaultNet(Sync)`（`@ohos.net.connection.d.ts:152/:182`）、`getConnectionProperties(Sync)`（`:270/:289`）、`ConnectionProperties.dnses[]` 必填（`:2099/:2127`）、`NetAddress`（`:2249/:2258/:2267/:2276`）；无 `@systemapi`（grep 计数 0）；仅需 `ohos.permission.GET_NETWORK_INFO`（system_grant／normal／since 8，与已用 INTERNET 同级，不受 MANAGE_VPN 受限 ACL 约束）；非 VPN 网络可筛（`getAllNetsSync` `:230`＋`getNetCapabilitiesSync` `:349`＋`BEARER_VPN=4` `:2061`／`NET_CAPABILITY_NOT_VPN=15` `:1974`）；doc `:2093` 警告 `dnses` 可能为空。
+2. **turn**：`absent_reason` 只对**本 build** 成立（`ice.rs` 硬拒 `turn:`，stun-only gathering，`client/core/src/ice.rs:103/:111-113`）；后续 build 启用 turn 路径即失效，turn 须回到 present 面重新登记，旧结论不外推。只钉歧义，不改类归属（turn 保持可选类语义）。
+3. **wg_peer 代际**：「冻结解析集」＝`frozen_endpoints[]` 中 `present==true` ∧ `resolved` 非空的条目的 IPv4 地址集（按 /32）；`present==false`（如 turn）不参与集合包含比对、不构成缺行。C2 按代际判定（七条，见下节）；「首次 create 前 7/7」在本平台**结构性不可满足**（endpoint 须 ICE 选中对落配后才存在，`peer_conn.rs:1197-1216`）⇒ 接受「首代 6/7」的代际等价论证（前提＝首代无默认路由：`gateDefaultRoutes` 扣住 `:612-620`、recreate 腿同理 `:1327-1330`）。
+
+### C2 代际判定七条（要点）
+
+证据代 G＝采集器 arm 时刻之前最后一次被接受的 `create()` 所建立的连接代。(1) 每代在其 `create()` 之前输出恰一行 `VPN_EXCLUSION_GENERATION|requestId=<id>|gen=<n>|kind=initial|recreate|exclusions=<m>|wgPeerEndpoints=<k>`，`n` 自 0 单调递增、同 `requestId` 不重复；(2) 该代全部 `VPN_ROUTE_ENTRY|…` 行携带同值 `gen=<n>`，行集按 `gen` 分割，跨代混入即不可解析；(3) 逐条比对通过＝冻结解析集每个地址 A 在 `gen==G` 行集**恰**一行 `dest==A ∧ prefix=="32" ∧ isExcludedRoute=="true"`；(4) 接受锚点：`kind=initial`＝`VPN_CREATE_RESOLVED|…|accepted=true`，`kind=recreate`＝新增行 `VPN_RECREATE_RESOLVED|requestId=<id>|gen=<n>|accepted=true`；该代 generation 行与全部 `gen==G` 的 route 行须**早于**接受行；(5) `frozen_endpoints[].frozen_at_mono`（`n2h_collector.rs:1998-1999`）须晚于代 G 接受行、早于代 G+1 的 generation 行（若存在），否则冻结集与排除集不同代 ⇒ C2 不成立；(6) 首代（`gen=0`）出现 `isDefaultRoute=="true"`，或 `wg_peer` present 而代 G `wgPeerEndpoints==0` ⇒ C2 不成立；(7) 任一行缺失、`gen` 不可解析、`kind` 非二值 ⇒ C2 不成立（`n2h-inconclusive`）。配套**三条硬条件**：①证据轮禁用 `forceDefaultRoute`（`:612-618` debug opt-in，书面登记为证据轮纪律）；②首代无宽前缀吸入面（按 `gen` 分割逐行核）；③冻结集与排除集同代（第 (5) 款）。
+
+### C10 第四类与 S20、fail-closed 扩面
+
+- **C10④（代际变化）**：窗口内出现 `VPN_RECREATE_BEGIN`／`VPN_EXCLUSION_GENERATION` 的 `gen` 递增／`VPN_RECREATE_DONE` ⇒ 排除集在窗口内被重新定型而冻结集无法重冻 ⇒ 即 fail-closed 结束该窗口并按 `n2h-inconclusive` 登记（S8 同一纪律）。
+- **S20**：arm 时刻 `connector_status().recreate` 满足 `cooling_down==true`，或 `exhausted==true ∧ reason=="limit-reached"` ⇒ 存在待决未落地的排除集变更，不得开窗；壳侧 arm 硬前置须与 `device_up && ready` 并列检查这两项（`NetBirdVpnExtensionAbility.ets:981-990`）；`exhausted` 分支同时对应既有未结义务 OB-10。
+- **fail-closed 扩面（实质变更）**：任一必需类（management/signal/stun/wg_peer/dns）解析失败 ⇒ fatal（不建连）；relay/turn 保持可选类语义（带 `absent_reason`）；**产品行为变更登记**：STUN/DNS 解析抖动将导致不建连（用户可见、重启可恢复、无数据损失），定级**中–高**；证据轮因必需类解析失败未建连 ⇒ 记 `n2h-inconclusive`（判据设计行为，S8 纪律不重试、不换端点）；实现落点 `NetBirdEndpointExclusion.ets:293-296`（现行 `relayRequired && failed.length>0` 须改按必需类判定）。经人类批准「接受治理口径（推荐）」扩到 5 类必需端点。
+
+### 附带 (ii) 转 OB-10
+
+N8 侧静默 fail-open（`connector.rs` `RECREATE_MAX=3`／30 s 冷却耗尽后置 `required=false, reason="limit-reached"`，desired≠applied 永不再修、无标记、无 fail-closed）**不入本工作流**：经人类批准「登记为待议项（推荐）」，由 commit `c914cf6` 登记为 **OB-10**（台账 `docs/open-obligations-ledger.md:95-125`）；判据侧已入 v3（S20 的 `exhausted` 分支＋C10 第四类），实现侧按台账待议项处置（持有门建议 N6，待 T0 确认）。
+
+### 变更性质判定表（哪些属实质变更入 v3）
+
+| 变更 | 性质判定 | 入 v3 形态 |
+|---|---|---|
+| dns 类口径（项1） | **实质变更**（新增判据输入定义；剔除错误排除面并保留必需类） | C1 追加款（逐字） |
+| 「冻结解析集」定义（项3 前置） | 钉歧义（口径澄清，不改判定强度） | C2 追加款 |
+| turn 时效声明（项2） | 钉歧义（build 局部事实登记） | C2 追加款 |
+| C2 代际七条＋三条硬条件（项3） | **实质变更**（新增判定规则与证据轮纪律） | 新节 §2.1（逐字）＋C2 指针 |
+| 机制等价说明 | 说明性（供复审理解「首代 6/7」，不改变判定） | §2.1 |
+| C10 第四类（附带④） | **实质变更**（新增触发类） | C10 追加款（逐字） |
+| S20 | **实质变更**（新增停止条件） | §4-S20（逐字） |
+| fail-closed 扩面（附带①） | **实质变更＋产品行为变更登记**（定级中–高） | C2 追加款（逐字） |
+| residual 第九条 | 残余范围登记更新（探测结论驱动，降级残余项） | §8.1-8 |
+| 头部/§0 版本状态/修订记录 | 程序性（G-4④ 程序落地） | 头部＋§0＋文末 |
+
+全部变更方向＝**加严或纠错**，符合治理 `docs/native-nx-governance.md:35`；改动时点合法（设备侧 N2-H 证据尚未产出、G-4② 未发生，`:43`「测量后不得追认或修改」未触发）。
+
+### 推荐路径与 v3 程序（裁定转写）
+
+一次性收口 5 项前置进 v3（纯文档，不改代码）→ **跨厂商 T0 重审**（`openai/gpt-5.6-sol` 席，干净上下文；原席 `anthropic/claude-opus-5` 已任 v1/v2 与本轮，按评审独立性纪律不再任 v3 审席）→ **人类批准** → **定稿 sha256 重登记**仓B `records/`（并注明作废 v2 锚点 `bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be` 的据以测量效力）。重登记完成前 v2 仍为唯一生效文本，v3 不得据以测量、不得引用登记任何 verdict。人类批准 verbatim（2026-09-18，DSH Web GUI）：「批准开 v3（推荐）」「接受治理口径（推荐）」「登记为待议项（推荐）」。
+
+### 新发现（F-N1…F-N5，要点转写）
+
+- **F-N1**：dns 冻结集构成未定义——v2 只要求「dns 类 present=true」，未定义端点集；若把 `interface_dns`/overlay 内 server 误入冻结集或排除集＝把隧道内 DNS 踢出隧道＋新造物理明网泄漏面。
+- **F-N2**：turn 缺席形态是 build 局部事实——`ice.rs` 硬拒 `turn:`（stun-only gathering），后续 build 启用即失效；`absent_reason` 不得跨 build 外推。
+- **F-N3**：wg_peer endpoint 在首次 create 前结构性不存在（`peer_conn.rs:1197-1216`，ICE SelectedPair 落配后才存在）⇒「首次 create 前 7/7」不可满足；排除集跨代（initial/recreate）不可比，须按代际行集分割判定；首代无默认路由（`:612-620`/`:1327-1330`）是代际等价论证前提。
+- **F-N4**：fail-closed 触发面过窄——`NetBirdEndpointExclusion.ets:293-296` 现行 `relayRequired && failed.length>0` 只护 relay 类；必需类（stun/dns）解析失败不触发不建连，与治理 `:126`「解析失败、端点变化或观测不符均 fail-closed」冲突。
+- **F-N5**：arm 前置缺 recreate 状态检查——`cooling_down`/`exhausted(limit-reached)`（`connector.rs:176-177/:1339-1375`）时存在待决未落地的排除集变更，此时开窗 ⇒ 冻结集与排除集跨代不同源；其 N8 侧静默 fail-open 面即附带(ii)→OB-10。
+
+### 不确定点（U-N1…U-N5，要点转写；均待真机验证）
+
+- **U-N1**：`dnses[]` 运行时是否非空（doc `:2093` 允许为空；空值与「无 DNS」不可区分）。
+- **U-N2**：`dnses[]` 是否即物理解析器（物理归属）。
+- **U-N3**：VPN 生效后 `getDefaultNet`/`getAllNets` 的语义（d.ts doc 称 default net「is not a VPN network」，与常见平台行为存在张力）。
+- **U-N4**：`GET_NETWORK_INFO` 声明后真机运行时授予与行为（声明层 system_grant/normal 已确认、与 INTERNET 同级；运行时待验）。
+- **U-N5**：v3 新增标记行（`VPN_EXCLUSION_GENERATION`/`VPN_RECREATE_RESOLVED`）与 `VPN_ROUTE_ENTRY` 的 `gen=` 字段尚未在实现输出（HEAD `c914cf6` 零命中）——判据先行，实现落齐前按七条第 (7) 条记 `n2h-inconclusive`。
+
+### 抽验引用要点（裁定所引 file:line 锚点；本节落盘会话于工作树 HEAD `c914cf6` 逐项只读复核一致）
+
+- **壳侧**：`NetBirdVpnExtensionAbility.ets:612-618`（forceDefaultRoute debug opt-in，`gateAllowed = forceDefaultRoute` 实读）、`:1327-1330`（recreate 腿 `gateDefaultRoutes`）、`:981-990`（arm 前置 `device_up`/`ready` 检查）、`:1309/:1415`（`VPN_RECREATE_BEGIN`/`VPN_RECREATE_DONE` 已在）、`:32`（TAG `NetBirdVpn`）；`NetBirdEndpointExclusion.ets:293-296`（`relayRequired && result.failed.length > 0` 实读）；`NetBirdConnector.ets:3`（import `@ohos.net.connection`）与 `:693/:753`（仅 `getAddressesByName`；`getDefaultNet`/`getConnectionProperties`/`getAllNets` 在 `client/entry/src` 零命中）；`module.json5:43-46`（仅声明 `ohos.permission.INTERNET`）；三处 selfcheck 替身只 stub `getAddressesByName`（`client/entry/selfcheck/relay-exclusion-hooks.mjs:45-54`、`relay-flag-hooks.mjs:12`、`route-check-hooks.mjs:27-28`）。
+- **core**：`n2h_collector.rs:1998-1999`（`frozen_at_unix`/`frozen_at_mono` 实读）；`peer_conn.rs:1197-1216`（`IceEvent::SelectedPair` → `apply_endpoint`）；`connector.rs:176-177`（`cooling_down`/reason token）、`:1339-1375`（exhausted／`limit-reached` 分支，`:1355` 置 `reason="limit-reached"`）；`NetBirdRouteValidation.ets:245-253`（`VPN_ROUTE_ENTRY` 行格式，无 `gen=` 字段）。
+- **SDK 26.0.0.821（只读）**：`.../sdk/default/openharmony/ets/api/@ohos.net.connection.d.ts` `:152/:182/:230/:270/:289/:349`（六 API）、`:1974`（NET_CAPABILITY_NOT_VPN=15）、`:2061`（BEARER_VPN=4）、`:2093`（空值逐字警告）、`:2099/:2127`（`ConnectionProperties.dnses` 必填）、`:2249/:2258/:2267/:2276`（`NetAddress`）；`grep -c "@systemapi"`＝0；`.../openharmony/toolchains/lib/PermissionDefinitions.json`：`GET_NETWORK_INFO` grantMode=system_grant／availableLevel=normal／since 8（与 `INTERNET` 同 mode 同级，INTERNET since 9）。
+- **治理与台账**：`docs/native-nx-governance.md:35`（「开门前细化」只能细化证据方法，不得删改或削弱）、`:43`（测量后不得追认或修改）；`docs/open-obligations-ledger.md:95-125`（OB-10 只追加节，commit `c914cf6`）。
+
+- **本节登记边界**：本节只归档第三轮裁定会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；v3 修订稿内容以 `docs/n2h-device-evidence-preregistration-draft-20260917.md` 为准。
