@@ -68,6 +68,32 @@
 //      a file appearing later never arms it); the present-file NOT_ARMED (gate
 //      closed, both field combinations) and ARMED (gate open) paths stay
 //      byte-identical (regression).
+//   C1-C6 (N2-H arm private channel, 2026-09-18): the arm ticket moved from
+//      the app-invisible /data/local/tmp path into the app's OWN filesDir,
+//      written by the REAL EntryAbility from the non-secret `n2h_arm_options`
+//      want parameter and read by the REAL extension under the SAME basename
+//      (`netbird-n2h-arm`) and the SAME filesDir mechanism as the credentials:
+//      C1 the want payload lands byte-verbatim in filesDir, logged as
+//      file-name + UTF-8 byte count with the payload never printed (C1b: a
+//      multibyte payload pins the UTF-8 count against UTF-16 impersonation);
+//      C2 the
+//      extension's probe + read resolve <filesDir>/netbird-n2h-arm and the
+//      EXISTING arm options (posctl_port / probe_wait_ms /
+//      peer_b2a_probe_id) reach the core n2h_collector_arm unchanged; C3 a
+//      launch WITHOUT the parameter deletes a leftover ticket (default: no
+//      arm) while every credential/config/deviation file stays byte-identical;
+//      C4 an invalid-JSON payload keeps the ORIGINAL convention
+//      (ARM_OPTS_IGNORED + §5.1 defaults, honestly logged, still no fabricated
+//      success); C5/C5b a failed OPEN and a failed/short WRITE after the
+//      TRUNC-ing open each leave NO usable ticket (the latter removes exactly
+//      the wiped diagnostic file, logged independently with codes) and the
+//      extension then reports arm-file-absent (never a faked arm); C5c a
+//      failed CLEANUP is logged as REMOVE_FAILED with its code — never claimed
+//      as removed; C6 the per-instance
+//      one-shot arm attempt is intact on the new channel (a second tick calls
+//      the core again ZERO times). Source pins: the extension no longer
+//      references /data/local/tmp/netbird-n2h-arm anywhere, the credential
+//      dev-override channel is untouched.
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -82,6 +108,18 @@ register(new URL('./exclusion-generation-hooks.mjs', import.meta.url).href);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
+// The fixture EntryAbility lives in its own source dir (arm private channel,
+// C group): staged byte-identically like the five extension modules.
+const REAL_ENTRY_DIR = join(HERE, '..', 'src', 'main', 'ets', 'entryability');
+
+// The filesDir every arm-driven fixture instance shares — the string the B
+// group already used; the fake fs (exclusion-generation-hooks.mjs) keys its
+// in-memory map by the RESOLVED path, so the extension's real
+// `<context.filesDir>/netbird-n2h-arm` join and the fixture EntryAbility's
+// own writes land on one and the same file.
+const FIXTURE_FILESDIR = '/tmp/n2h-i5b-fixture';
+const ARM_TICKET_PATH = `${FIXTURE_FILESDIR}/netbird-n2h-arm`;
+const ARM_TICKET_NAME = 'netbird-n2h-arm';
 
 // The five real modules staged byte-identically (code under test = shipped
 // code), and the erased interface names each shim must re-declare for the ESM
@@ -145,9 +183,16 @@ function fieldOf(line: string, key: string): string {
   return hit === undefined ? '' : hit.slice(key.length + 1);
 }
 
-function freshAbility(mod: Record<string, unknown>): Record<string, unknown> {
+function freshAbility(mod: Record<string, unknown>,
+  filesDir?: string): Record<string, unknown> {
   const ability = new (mod['default'] as new () => Record<string, unknown>)();
   ability['requestId'] = REQUEST_ID;
+  // Arm-driven instances need the context the REAL lifecycle always provides;
+  // the B-group lifecycle beacons deliberately keep the context ABSENT (their
+  // "async start flow aborts on the fixture's absent context" regression).
+  if (filesDir !== undefined) {
+    ability['context'] = { filesDir: filesDir };
+  }
   return ability;
 }
 
@@ -159,15 +204,40 @@ function tickArm(ability: Record<string, unknown>, status: Record<string, unknow
   (ability['maybeArmN2hCollector'] as (s: unknown) => void)(status);
 }
 
-// The arm-file state globals of the fs stub, in one place: PRESENT true/false =
-// the boolean answer the API gives; ACCESS_ERROR = the code a throw carries (a
-// non-number token ⇒ the throw has NO code); both undefined = throw 13900002
-// (a missing file as the device sees it).
-function setArmFile(present: boolean | undefined, accessError: unknown): void {
-  G['__NB_ARM_PRESENT'] = present;
-  G['__NB_ARM_ACCESS_ERROR'] = accessError;
-  G['__NB_ARM_TEXT'] = '';
+// The arm-file state of the path-aware fs stub (exclusion-generation-hooks.mjs),
+// in one place: the ticket is a REAL entry in the in-memory map keyed by the
+// RESOLVED path (present=true puts `text` there, present=false removes it,
+// present=undefined leaves the map untouched for a pre-seeded body), and
+// accessError simulates the code an accessSync throw carries ('no-code' = a
+// throw without a code). No file + no error = the boolean-false answer the
+// 2026-09-18 device actually produced (accessError=none).
+function setArmFile(present: boolean | undefined, accessError: unknown,
+  text: string = ''): void {
+  const files = (G['__NB_FS'] ?? {}) as Record<string, string>;
+  const errs = (G['__NB_FS_ACCESS_ERROR'] ?? {}) as Record<string, unknown>;
+  if (present === true) {
+    files[ARM_TICKET_PATH] = text;
+  } else if (present === false) {
+    delete files[ARM_TICKET_PATH];
+  }
+  if (accessError === undefined) {
+    delete errs[ARM_TICKET_PATH];
+  } else {
+    errs[ARM_TICKET_PATH] = accessError;
+  }
+  G['__NB_FS'] = files;
+  G['__NB_FS_ACCESS_ERROR'] = errs;
   G['__NB_ARM_OPTS'] = undefined;
+}
+
+function seedFile(path: string, text: string): void {
+  const files = (G['__NB_FS'] ?? {}) as Record<string, string>;
+  files[path] = text;
+  G['__NB_FS'] = files;
+}
+
+function fileOf(path: string): string | undefined {
+  return ((G['__NB_FS'] ?? {}) as Record<string, string>)[path];
 }
 
 // The desired-route-set snapshot the REAL recreate leg consumes: two managed
@@ -218,6 +288,10 @@ try {
     writeFileSync(join(dir, name + '.ts'),
       readFileSync(join(REAL_DIR, name + '.ets'))); // byte-identical real file
   }
+  // The fixture EntryAbility (arm private channel, C group): byte-identical
+  // real file, no sibling imports, no shim needed.
+  writeFileSync(join(dir, 'EntryAbility.ts'),
+    readFileSync(join(REAL_ENTRY_DIR, 'EntryAbility.ets')));
   for (const name of Object.keys(SHIM_TYPES)) {
     writeFileSync(join(dir, name + '.shim.ts'),
       'export * from \'./' + name + '.ts\';\n' +
@@ -250,7 +324,7 @@ try {
     (c: unknown, allowed: boolean) => Record<string, unknown>)(merged, false);
 
   // ---------------- G1: the initial generation marker + its rows -----------
-  const ability = freshAbility(mod);
+  const ability = freshAbility(mod, FIXTURE_FILESDIR);
   resetLog();
   const gen0 = (ability['logExclusionGeneration'] as
     (kind: string, routes: unknown[], k: number) => number)(
@@ -376,8 +450,7 @@ try {
     [marker0[0], marker1[0], marker2[0]].join('\n'));
 
   // ---------------- G5: three-way R-2 consistency via the REAL arm hook ----
-  G['__NB_ARM_PRESENT'] = true;
-  G['__NB_ARM_TEXT'] = '';
+  setArmFile(true, undefined);
   resetLog();
   (ability['maybeArmN2hCollector'] as (s: unknown) => void)(
     { wg: { device_up: true, ready: true } });
@@ -400,7 +473,7 @@ try {
     armed.endsWith('|diag=true|is_evidence=false'), armed);
 
   // ---------------- G6: a NOT-accepted create() reports no generation ------
-  const rejectAbility = freshAbility(mod);
+  const rejectAbility = freshAbility(mod, FIXTURE_FILESDIR);
   resetLog();
   const genR = (rejectAbility['logExclusionGeneration'] as
     (kind: string, routes: unknown[], k: number) => number)(
@@ -414,9 +487,7 @@ try {
     rejectAbility['n2hAcceptedExclusionGeneration'] === -1,
     lastLine('VPN_CREATE_RESOLVED|') + ' ' + String(
       rejectAbility['n2hAcceptedExclusionGeneration']));
-  G['__NB_ARM_PRESENT'] = true;
-  G['__NB_ARM_TEXT'] = '';
-  G['__NB_ARM_OPTS'] = undefined;
+  setArmFile(true, undefined);
   resetLog();
   (rejectAbility['maybeArmN2hCollector'] as (s: unknown) => void)(
     { wg: { device_up: true, ready: true } });
@@ -427,22 +498,23 @@ try {
     JSON.stringify(optsR) + ' ' + armedR);
 
   // ---------------- A (I5a §13.15): the arm check is never a silent branch --
-  // ① the arm file is NOT there (the probe throws the documented ENOENT code,
-  //    which is exactly what the 2026-09-18 device dry-run hit): the hook must
+  // ① the arm file probe THROWS the documented ENOENT code: the hook must
   //    leave ONE grep-able skip line naming the reason and the raw code, and
-  //    must NOT call the core arm. The file body sentinel proves nothing about
-  //    the file rides the marker.
-  const absentAbility = freshAbility(mod);
-  setArmFile(undefined, undefined);
-  G['__NB_ARM_TEXT'] = 'SENTINEL-ARM-BODY';
+  //    must NOT call the core arm. The ticket body seeded in the fs map proves
+  //    nothing about the file rides the marker (the probe threw before any
+  //    read). The path on the line is the RESOLVED filesDir join — the same
+  //    basename the fixture EntryAbility writes (C group).
+  const absentAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(true, 13900002, 'SENTINEL-ARM-BODY');
   resetLog();
   tickArm(absentAbility, WG_READY);
   const skipLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
   check('A1 a missing arm file emits exactly ONE skip marker',
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1, JSON.stringify(logs()));
-  check('A1 skip marker literal (reason=arm-file-absent + the raw access code)',
+  check('A1 skip marker literal (reason=arm-file-absent + the raw access code + the resolved ' +
+    'filesDir path)',
     skipLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
-    '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=13900002' +
+    '|reason=arm-file-absent|path=' + ARM_TICKET_PATH + '|accessError=13900002' +
     '|attempted=true|diag=true|is_evidence=false', skipLine);
   check('A1 the skip does NOT call the core arm (no ARMED / NOT_ARMED / no opts)',
     G['__NB_ARM_OPTS'] === undefined && linesWith('N2H_COLLECTOR_ARMED|').length === 0 &&
@@ -467,9 +539,10 @@ try {
     logs().length === 0 && G['__NB_ARM_OPTS'] === undefined &&
     absentAbility['n2hArmAttempted'] === true, JSON.stringify(logs()));
 
-  // The API can also ANSWER "not found" as a boolean; the reason stays the same
-  // and the difference is visible in accessError (none = no error was thrown).
-  const falseAbility = freshAbility(mod);
+  // The API can also ANSWER "not found" as a boolean — the shape the 2026-09-18
+  // device run actually produced (accessError=none; NOT a proven ENOENT). The
+  // reason stays the same and the difference is visible in accessError.
+  const falseAbility = freshAbility(mod, FIXTURE_FILESDIR);
   setArmFile(false, undefined);
   resetLog();
   tickArm(falseAbility, WG_READY);
@@ -477,33 +550,33 @@ try {
   check('A3 the boolean not-found answer is the SAME reason with accessError=none',
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
     falseLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
-    '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=none' +
+    '|reason=arm-file-absent|path=' + ARM_TICKET_PATH + '|accessError=none' +
     '|attempted=true|diag=true|is_evidence=false', falseLine);
 
   // An error code that does NOT prove absence must be a DIFFERENT reason — the
   // two cases may never collapse into one (13900012 = permission denied).
-  const unreadableAbility = freshAbility(mod);
-  setArmFile(undefined, 13900012);
+  const unreadableAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(false, 13900012);
   resetLog();
   tickArm(unreadableAbility, WG_READY);
   const unreadableLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
   check('A4 a non-ENOENT error is reason=arm-file-unreadable with its code kept',
     unreadableLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
-    '|reason=arm-file-unreadable|path=/data/local/tmp/netbird-n2h-arm|accessError=13900012' +
+    '|reason=arm-file-unreadable|path=' + ARM_TICKET_PATH + '|accessError=13900012' +
     '|attempted=true|diag=true|is_evidence=false', unreadableLine);
-  const noCodeAbility = freshAbility(mod);
-  setArmFile(undefined, 'no-code');
+  const noCodeAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(false, 'no-code');
   resetLog();
   tickArm(noCodeAbility, WG_READY);
   const noCodeLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
   check('A4 an error thrown WITHOUT a code never claims absence (accessError=no-code)',
     noCodeLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
-    '|reason=arm-file-unreadable|path=/data/local/tmp/netbird-n2h-arm|accessError=no-code' +
+    '|reason=arm-file-unreadable|path=' + ARM_TICKET_PATH + '|accessError=no-code' +
     '|attempted=true|diag=true|is_evidence=false', noCodeLine);
 
   // ② ③ regressions: the file present keeps the EXISTING two branches verbatim
   // (and prints no skip line).
-  const notReadyAbility = freshAbility(mod);
+  const notReadyAbility = freshAbility(mod, FIXTURE_FILESDIR);
   setArmFile(true, undefined);
   resetLog();
   tickArm(notReadyAbility, { wg: { device_up: false, ready: true } });
@@ -513,7 +586,7 @@ try {
     'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
     '|reason=session-not-ready|deviceUp=false|ready=true|diag=true|is_evidence=false' &&
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
-  const notReadyAbility2 = freshAbility(mod);
+  const notReadyAbility2 = freshAbility(mod, FIXTURE_FILESDIR);
   resetLog();
   tickArm(notReadyAbility2, { wg: { device_up: true, ready: false } });
   check('A5 the arm gate still requires BOTH device_up and ready (regression)',
@@ -521,7 +594,7 @@ try {
     'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
     '|reason=session-not-ready|deviceUp=true|ready=false|diag=true|is_evidence=false' &&
     G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
-  const readyAbility = freshAbility(mod);
+  const readyAbility = freshAbility(mod, FIXTURE_FILESDIR);
   readyAbility['n2hAcceptedExclusionGeneration'] = 0;
   resetLog();
   tickArm(readyAbility, WG_READY);
@@ -629,10 +702,9 @@ try {
 
   // B3: the watcher beacon — one line per instance, never per tick, through the
   // REAL start method + REPLAYED REAL ticks (matrix ①: beacons + absent file).
-  const tickAbility = freshAbility(mod);
-  tickAbility['context'] = { filesDir: '/tmp/n2h-i5b-fixture' };
+  const tickAbility = freshAbility(mod, FIXTURE_FILESDIR);
   G['__NB_STATUS'] = watcherStatus;
-  setArmFile(undefined, undefined); // the device form: ENOENT, proved absent
+  setArmFile(false, undefined); // the device form: boolean false (accessError=none)
   resetLog();
   (tickAbility['startStatusAndNetcfgWatcher'] as () => void)();
   const watcherBeaconLine: string = pathLines('watcher-started').length > 0
@@ -658,15 +730,14 @@ try {
   check('B3 matrix ①: beacons + arm file absent ⇒ exactly ONE ARM_SKIPPED (I5a regression)',
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
     lastLine('N2H_COLLECTOR_ARM_SKIPPED|') === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' +
-    REQUEST_ID + '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|' +
-    'accessError=13900002|attempted=true|diag=true|is_evidence=false',
+    REQUEST_ID + '|reason=arm-file-absent|path=' + ARM_TICKET_PATH + '|' +
+    'accessError=none|attempted=true|diag=true|is_evidence=false',
     JSON.stringify(linesWith('N2H_COLLECTOR_ARM_SKIPPED|')));
 
   // B4: matrix ② — the extension AND the watcher were reached, but the watcher
   // never ticked: both beacons, and NOT ONE arm line.
-  const idleAbility = freshAbility(mod);
-  idleAbility['context'] = { filesDir: '/tmp/n2h-i5b-fixture' };
-  setArmFile(undefined, undefined);
+  const idleAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(false, undefined);
   resetLog();
   (idleAbility['onCreate'] as (w: unknown) => void)(
     { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });
@@ -705,6 +776,265 @@ try {
   check('B6 each beacon literal exists exactly ONCE in the shipped source (no extra copy)',
     extSource.split('stage=onCreate-reached').length === 2 &&
     extSource.split('stage=watcher-started').length === 2, 'beacon literal pin');
+
+  // ---------------- C (N2-H arm private channel, 2026-09-18): the REAL
+  // EntryAbility want -> filesDir ticket -> REAL extension read -> native arm.
+  // Both fixtures are the SHIPPED files; the path-aware fake fs keys its map
+  // by the RESOLVED path, so the two processes meet on ONE file — exactly the
+  // cross-process filesDir mechanism the device already validated for the
+  // credentials.
+  const entryMod = await import(pathToFileURL(join(dir, 'EntryAbility.ts')).href) as
+    Record<string, unknown>;
+  const ARM_PAYLOAD = '{"posctl_port":41000,"probe_wait_ms":900,' +
+    '"peer_b2a_probe_id":"N2H-posctl-fixture"}';
+  const newEntry = (): Record<string, unknown> => {
+    const entry = new (entryMod['default'] as new () => Record<string, unknown>)();
+    entry['context'] = { filesDir: FIXTURE_FILESDIR };
+    return entry;
+  };
+  const resetFs = (): void => {
+    G['__NB_FS'] = {};
+    G['__NB_FS_ACCESS_ERROR'] = {};
+    G['__NB_FS_OPEN_ERROR'] = {};
+    G['__NB_FS_WRITE_ERROR'] = {};
+    G['__NB_ARM_OPTS'] = undefined;
+  };
+
+  // C1: the explicit non-secret want lands byte-verbatim in filesDir, logged
+  // as file name + byte count, payload never printed. The count is the payload's
+  // real UTF-8 byte length (never the UTF-16 code-unit string length).
+  resetFs();
+  const writeEntry = newEntry();
+  resetLog();
+  (writeEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('C1 the want payload is written VERBATIM to <filesDir>/netbird-n2h-arm',
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD, JSON.stringify(fileOf(ARM_TICKET_PATH)));
+  check('C1 the write is logged as file name + UTF-8 byte count only',
+    linesWith('N2H_ARM_TICKET_WRITTEN|').length === 1 &&
+    lastLine('N2H_ARM_TICKET_WRITTEN|') === 'N2H_ARM_TICKET_WRITTEN|file=' + ARM_TICKET_NAME +
+    '|bytes=' + String(Buffer.byteLength(ARM_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret',
+    linesWith('N2H_ARM_TICKET_WRITTEN|').join('\n'));
+  check('C1 the payload never reaches the log',
+    logs().join('\n').indexOf('N2H-posctl-fixture') < 0, JSON.stringify(logs()));
+
+  // C1b: the logged byte count is UTF-8 bytes — a multibyte payload exposes any
+  // UTF-16 code-unit impersonation (2 chars cost 6 UTF-8 bytes, not 2).
+  const UNI_PAYLOAD = '{"peer_b2a_probe_id":"N2H-λ-超"}';
+  resetLog();
+  (writeEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': UNI_PAYLOAD } }, {});
+  check('C1b the byte count is UTF-8 (multibyte payload), file byte-verbatim',
+    fileOf(ARM_TICKET_PATH) === UNI_PAYLOAD &&
+    lastLine('N2H_ARM_TICKET_WRITTEN|').indexOf('|bytes=' +
+      String(Buffer.byteLength(UNI_PAYLOAD, 'utf8')) + '|') > 0 &&
+    Buffer.byteLength(UNI_PAYLOAD, 'utf8') !== UNI_PAYLOAD.length,
+    lastLine('N2H_ARM_TICKET_WRITTEN|') + ' vs len=' + UNI_PAYLOAD.length);
+  seedFile(ARM_TICKET_PATH, ARM_PAYLOAD); // C2 reads the C1 payload, not C1b's
+
+  // C2: the REAL extension probes + reads the SAME basename under the SAME
+  // filesDir and forwards the EXISTING arm options to the native arm.
+  const channelAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  channelAbility['n2hAcceptedExclusionGeneration'] = 0;
+  resetLog();
+  tickArm(channelAbility, WG_READY);
+  const channelOpts = JSON.parse(String(G['__NB_ARM_OPTS'] ?? '{}')) as Record<string, unknown>;
+  check('C2 the extension reads the filesDir ticket and sends the existing arm options to native',
+    channelOpts['posctl_port'] === 41000 && channelOpts['probe_wait_ms'] === 900 &&
+    channelOpts['peer_b2a_probe_id'] === 'N2H-posctl-fixture',
+    JSON.stringify(channelOpts));
+  check('C2 the ARMED marker carries the announced peer and the non-default knobs',
+    lastLine('N2H_COLLECTOR_ARMED|') === 'N2H_COLLECTOR_ARMED|requestId=' + REQUEST_ID +
+    '|gen=0|openedMono=4242|exclusions=0|posctlPort=41000|probeWaitMs=900|' +
+    'peerB2aProbeId=N2H-posctl-fixture|diag=true|is_evidence=false',
+    lastLine('N2H_COLLECTOR_ARMED|'));
+  check('C2 a present ticket produces NO skip line',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
+
+  // C3: default no arm — a launch WITHOUT the parameter deletes a leftover
+  // ticket; credential/config/deviation files stay byte-identical.
+  const SETUP_PATH = `${FIXTURE_FILESDIR}/netbird-setup-key`;
+  const DEVCFG_PATH = `${FIXTURE_FILESDIR}/netbird-device-config.json`;
+  const DEVIATION_PATH = `${FIXTURE_FILESDIR}/netbird-protect-deviation`;
+  seedFile(ARM_TICKET_PATH, '{"posctl_port":41000}'); // leftover diagnostic round
+  seedFile(SETUP_PATH, 'setup-key-body-untouched');
+  seedFile(DEVCFG_PATH, '{"management_url":"http://m","private_key":"pk-body"}');
+  seedFile(DEVIATION_PATH, 'route-exclusion');
+  const normalEntry = newEntry();
+  resetLog();
+  (normalEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird' }, {}); // NO parameters at all
+  check('C3 a parameter-less launch deletes the leftover ticket (default: no arm)',
+    fileOf(ARM_TICKET_PATH) === undefined &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 1 &&
+    lastLine('N2H_ARM_TICKET_REMOVED|') === 'N2H_ARM_TICKET_REMOVED|file=' + ARM_TICKET_NAME +
+    '|note=default-no-arm', JSON.stringify(logs()));
+  check('C3 the credential/config/deviation files are NOT touched by the cleanup',
+    fileOf(SETUP_PATH) === 'setup-key-body-untouched' &&
+    fileOf(DEVCFG_PATH) === '{"management_url":"http://m","private_key":"pk-body"}' &&
+    fileOf(DEVIATION_PATH) === 'route-exclusion', 'private files pin');
+  const cleanAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  G['__NB_ARM_OPTS'] = undefined;
+  resetLog();
+  tickArm(cleanAbility, WG_READY);
+  check('C3 after the cleanup the extension reports arm-file-absent and never arms',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    lastLine('N2H_COLLECTOR_ARM_SKIPPED|').indexOf('|reason=arm-file-absent|') > 0 &&
+    G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
+  // A credentials-bearing launch WITHOUT the arm param behaves the same. (Its
+  // credential writes follow the PRE-EXISTING flow verbatim — including
+  // netbird_config overwriting netbird-device-config.json.)
+  const credEntry = newEntry();
+  resetLog();
+  (credEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'netbird_setup_key': 'K2', 'netbird_config': '{"a":1}' } }, {});
+  check('C3 a credential launch without the arm param also clears the ticket, credentials intact',
+    fileOf(ARM_TICKET_PATH) === undefined && fileOf(SETUP_PATH) === 'K2\n' &&
+    fileOf(DEVCFG_PATH) === '{"a":1}' && fileOf(DEVIATION_PATH) === 'route-exclusion',
+    JSON.stringify({ setup: fileOf(SETUP_PATH), devcfg: fileOf(DEVCFG_PATH),
+      arm: fileOf(ARM_TICKET_PATH) }));
+
+  // C4: an invalid-JSON payload keeps the ORIGINAL convention — the file is
+  // written verbatim, the extension logs ARM_OPTS_IGNORED and falls back to
+  // the §5.1 defaults; the ARMED marker shows the defaults (a REAL arming
+  // under defaults, never the refused options smuggled through as applied).
+  resetFs();
+  const badEntry = newEntry();
+  (badEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2h_arm_options': '{not-json' } }, {});
+  check('C4 an invalid-JSON payload is written verbatim (the extension owns the parse)',
+    fileOf(ARM_TICKET_PATH) === '{not-json', JSON.stringify(fileOf(ARM_TICKET_PATH)));
+  const badAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  badAbility['n2hAcceptedExclusionGeneration'] = 0;
+  resetLog();
+  tickArm(badAbility, WG_READY);
+  check('C4 invalid JSON keeps the original convention: ARM_OPTS_IGNORED + defaults, still armed',
+    linesWith('N2H_COLLECTOR_ARM_OPTS_IGNORED|').length === 1 &&
+    fieldOf(lastLine('N2H_COLLECTOR_ARM_OPTS_IGNORED|'), 'action') === 'defaults' &&
+    lastLine('N2H_COLLECTOR_ARMED|').indexOf('|posctlPort=40001|probeWaitMs=800|') > 0 &&
+    lastLine('N2H_COLLECTOR_ARMED|').indexOf('peerB2aProbeId=none|') > 0,
+    JSON.stringify(logs()));
+
+  // C5: a failed OPEN leaves NO ticket and is logged with its error CODE —
+  // the extension then sees arm-file-absent; nobody fakes an arm.
+  resetFs();
+  G['__NB_FS_OPEN_ERROR'] = { [ARM_TICKET_PATH]: 13900042 };
+  const failEntry = newEntry();
+  resetLog();
+  (failEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('C5 a failed open leaves NO ticket and logs the error CODE (never the payload)',
+    fileOf(ARM_TICKET_PATH) === undefined &&
+    lastLine('N2H_ARM_TICKET_WRITE_FAILED|') === 'N2H_ARM_TICKET_WRITE_FAILED|file=' +
+    ARM_TICKET_NAME + '|code=13900042|note=no-ticket-no-arm' &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 0,
+    linesWith('N2H_ARM_TICKET_WRITE_FAILED|').join('\n') + '\n' +
+    linesWith('N2H_ARM_TICKET_REMOVED|').join('\n'));
+  const failAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  resetLog();
+  tickArm(failAbility, WG_READY);
+  check('C5 after a failed open the extension reports arm-file-absent (no faked arm)',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    lastLine('N2H_COLLECTOR_ARM_SKIPPED|').indexOf('|reason=arm-file-absent|') > 0 &&
+    G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
+
+  // C5b: the dangerous shape — the OPEN succeeded (its TRUNC wiped the
+  // previous round's ticket) and the WRITE then threw: the on-disk file is an
+  // empty ticket the extension would parse into the §5.1 defaults and ARM.
+  // The failure path must REMOVE exactly this one diagnostic ticket (logged
+  // independently), never touch the credentials, and the extension must then
+  // SKIP with no native arm call.
+  resetFs();
+  seedFile(ARM_TICKET_PATH, '{"posctl_port":41000}'); // the previous ticket, now TRUNC-wiped
+  seedFile(SETUP_PATH, 'setup-key-body-untouched');
+  seedFile(DEVCFG_PATH, '{"management_url":"http://m","private_key":"pk-body"}');
+  seedFile(DEVIATION_PATH, 'route-exclusion');
+  G['__NB_FS_WRITE_ERROR'] = { [ARM_TICKET_PATH]: 13900001 };
+  const halfEntry = newEntry();
+  resetLog();
+  (halfEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('C5b a failed write after TRUNC removes the empty ticket (it must not survive)',
+    fileOf(ARM_TICKET_PATH) === undefined, JSON.stringify(fileOf(ARM_TICKET_PATH)));
+  check('C5b the write failure and the cleanup are logged independently with codes',
+    lastLine('N2H_ARM_TICKET_WRITE_FAILED|') === 'N2H_ARM_TICKET_WRITE_FAILED|file=' +
+    ARM_TICKET_NAME + '|code=13900001|note=no-ticket-no-arm' &&
+    lastLine('N2H_ARM_TICKET_REMOVED|') === 'N2H_ARM_TICKET_REMOVED|file=' + ARM_TICKET_NAME +
+    '|note=failed-write-cleanup', JSON.stringify(logs()));
+  const halfAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  G['__NB_ARM_OPTS'] = undefined;
+  resetLog();
+  tickArm(halfAbility, WG_READY);
+  check('C5b the extension then SKIPS (arm-file-absent) and never calls the native arm',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    lastLine('N2H_COLLECTOR_ARM_SKIPPED|').indexOf('|reason=arm-file-absent|') > 0 &&
+    G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
+  check('C5b the credential/config/deviation files are byte-identical',
+    fileOf(SETUP_PATH) === 'setup-key-body-untouched' &&
+    fileOf(DEVCFG_PATH) === '{"management_url":"http://m","private_key":"pk-body"}' &&
+    fileOf(DEVIATION_PATH) === 'route-exclusion', 'private files pin');
+
+  // C5c: if even the CLEANUP fails, the surviving (truncated) file is reported
+  // as what it is — REMOVE_FAILED with its code — and never as removed.
+  resetFs();
+  seedFile(ARM_TICKET_PATH, '{"posctl_port":41000}');
+  G['__NB_FS_WRITE_ERROR'] = { [ARM_TICKET_PATH]: 13900001 };
+  G['__NB_FS_ACCESS_ERROR'] = { [ARM_TICKET_PATH]: 13900042 };
+  const stuckEntry = newEntry();
+  resetLog();
+  (stuckEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('C5c a failed cleanup keeps the truncated file and logs REMOVE_FAILED (no false removal)',
+    fileOf(ARM_TICKET_PATH) === '' &&
+    lastLine('N2H_ARM_TICKET_REMOVE_FAILED|') === 'N2H_ARM_TICKET_REMOVE_FAILED|file=' +
+    ARM_TICKET_NAME + '|code=13900042|note=failed-write-cleanup' &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 0, JSON.stringify(logs()));
+
+  // C6: the per-instance ONE-SHOT arm attempt is intact on the new channel —
+  // the second tick of the same instance never calls the native arm again.
+  resetFs();
+  setArmFile(true, undefined, ARM_PAYLOAD);
+  const latchAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  latchAbility['n2hAcceptedExclusionGeneration'] = 0;
+  resetLog();
+  tickArm(latchAbility, WG_READY);
+  const callsAfterFirst: number = Number(G['__NB_ARM_CALLS'] ?? 0);
+  check('C6 the first tick with a ticket calls the native arm exactly once',
+    callsAfterFirst >= 1 && linesWith('N2H_COLLECTOR_ARMED|').length === 1,
+    JSON.stringify(logs()));
+  resetLog();
+  tickArm(latchAbility, WG_READY);
+  tickArm(latchAbility, WG_READY);
+  check('C6 the SECOND tick of the same instance repeats NOTHING (no second native call)',
+    logs().length === 0 && Number(G['__NB_ARM_CALLS'] ?? 0) === callsAfterFirst,
+    JSON.stringify({ logs: logs(), calls: G['__NB_ARM_CALLS'] }));
+
+  // C7: source pins — the extension has NO app-invisible arm path left, the
+  // channel rides the SAME filesDir mechanism as the credentials, and the
+  // credential dev-override channel is untouched.
+  const entrySource: string = readFileSync(join(dir, 'EntryAbility.ts')).toString();
+  check('C7 the extension no longer references the app-invisible /data/local/tmp arm path',
+    extSource.indexOf('/data/local/tmp/netbird-n2h-arm') < 0 &&
+    extSource.indexOf("const N2H_ARM_FILE_NAME: string = 'netbird-n2h-arm';") > 0 &&
+    extSource.indexOf('${this.context.filesDir}/${N2H_ARM_FILE_NAME}') > 0,
+    'arm path pin');
+  check('C7 the EntryAbility carries the non-secret param, the same basename, and the cleanup',
+    entrySource.indexOf("'n2h_arm_options'") > 0 &&
+    entrySource.indexOf("'netbird-n2h-arm'") > 0 &&
+    entrySource.indexOf("this.removeArmTicket('default-no-arm')") > 0 &&
+    entrySource.indexOf("this.removeArmTicket('failed-write-cleanup')") > 0 &&
+    entrySource.indexOf('short-write:') > 0 &&
+    entrySource.indexOf('new util.TextEncoder().encode(text).byteLength') > 0 &&
+    entrySource.indexOf('N2H_ARM_TICKET_WRITTEN') > 0,
+    'entry channel pin');
+  check('C7 the credential dev-override channel is untouched',
+    readFileSync(join(dir, 'NetBirdConnector.ts')).toString()
+      .indexOf('DEV_CREDENTIAL_DIR') > 0,
+    'credential override pin');
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

@@ -14,17 +14,30 @@
 //                     globalThis.__NB_LOG, so the marker assertions run against
 //                     the REAL hilog call sites (same recorder as
 //                     relay-exclusion-hooks.mjs).
-//   - @ohos.file.fs -> the arm control file, in the three shapes the real
-//                     @ohos.file.fs.accessSync can answer with (SDK 26.0.0.821
-//                     @ohos.file.fs.d.ts:309-336 — boolean false / BusinessError
-//                     13900002 for "not there", other codes for a probe that did
-//                     not prove absence):
-//                       __NB_ARM_PRESENT === true   -> returns true
-//                       __NB_ARM_PRESENT === false  -> returns false
-//                       __NB_ARM_ACCESS_ERROR = <n> -> throws BusinessError <n>
-//                       __NB_ARM_ACCESS_ERROR = 'x' -> throws WITHOUT a code
-//                       both unset                  -> throws 13900002
-//                     `readTextSync` returns globalThis.__NB_ARM_TEXT verbatim.
+//   - @ohos.file.fs -> a PATH-AWARE in-memory filesystem (globalThis.__NB_FS,
+//                     a {absPath: text} map) so the arm private channel
+//                     (2026-09-18) is driven through the REAL filesDir join:
+//                     the extension resolves <context.filesDir>/netbird-n2h-arm
+//                     and the fixture EntryAbility resolves its own filesDir —
+//                     same basename, same mechanism as the credentials. A
+//                     per-path error table (__NB_FS_ACCESS_ERROR) keeps the
+//                     three shapes the real @ohos.file.fs.accessSync can
+//                     answer with (SDK 26.0.0.821 @ohos.file.fs.d.ts:309-336 —
+//                     boolean false / BusinessError 13900002 for "not there",
+//                     other codes for a probe that did not prove absence):
+//                       path in __NB_FS                     -> accessSync true
+//                       path not in __NB_FS                 -> accessSync false
+//                       __NB_FS_ACCESS_ERROR[path]=<n>      -> throws BusinessError n
+//                       __NB_FS_ACCESS_ERROR[path]='no-code' -> throws WITHOUT a code
+//                     openSync honors __NB_FS_OPEN_ERROR[path] (open-failure
+//                     tests) and writeSync honors __NB_FS_WRITE_ERROR[fd] (the
+//                     TRUNC-wiped short/failed-write case: the entry is first
+//                     emptied, then the error is thrown). writeSync returns
+//                     the REAL UTF-8 byte count (Buffer.byteLength) — the
+//                     contract @ohos.file.fs.writeSync documents — so the
+//                     fixture EntryAbility's short-write detection is driven
+//                     honestly. openSync returns {fd: path}; writeSync stores
+//                     the text under that fd (== the path); unlinkSync deletes.
 //   - @ohos.net.vpnExtension -> `createVpnConnection()` returns a fake
 //                     connection whose create() resolves to
 //                     globalThis.__NB_CREATE_FD (default 99) and records every
@@ -49,8 +62,15 @@
 //                     the paths under test).
 //   - @ohos.app.ability.VpnExtensionAbility -> a bare base class so the real
 //                     extension class can be `new`-ed on the host.
-// Everything else (@ohos.app.ability.Want / @ohos.resourceManager / @ohos.util)
-// is dead code for the driven paths -> empty stubs.
+//   - @ohos.app.ability.UIAbility -> a bare base class so the real
+//                     EntryAbility (arm private channel, C group) can be
+//                     `new`-ed the same way.
+//   - @ohos.util -> a REAL TextEncoder (Buffer-backed UTF-8): the fixture
+//                     EntryAbility uses it for the write-completeness byte
+//                     count (UTF-8 bytes, never UTF-16 code units).
+// Everything else (@ohos.app.ability.Want / @ohos.app.ability.AbilityConstant /
+// @ohos.window / @ohos.resourceManager) is dead code for the driven paths ->
+// empty stubs.
 //
 // Sibling modules are NOT stubbed: the test stages the five REAL files
 // byte-identically in one temp dir and writes <Name>.shim.ts bridges for the
@@ -74,18 +94,56 @@ const HILOG = 'data:text/javascript,' + encodeURIComponent(
 
 const FS = 'data:text/javascript,' + encodeURIComponent(
   'function g() { return globalThis; }\n' +
+  'function files() { if (!g().__NB_FS) { g().__NB_FS = {}; } return g().__NB_FS; }\n' +
+  'function thrower(path, what) {\n' +
+  '  const code = (g().__NB_FS_ACCESS_ERROR || {})[path];\n' +
+  '  if (code === undefined) { return; }\n' +
+  '  const e = new Error(what + " failed: " + path);\n' +
+  '  if (code !== "no-code") { e.code = code; }\n' +
+  '  throw e;\n' +
+  '}\n' +
   'export default {\n' +
+  '  OpenMode: { READ_WRITE: 3, CREATE: 8, TRUNC: 16 },\n' +
   '  accessSync: (path) => {\n' +
-  '    if (g().__NB_ARM_PRESENT === true) { return true; }\n' +
-  '    if (g().__NB_ARM_PRESENT === false) { return false; }\n' +
-  '    const code = g().__NB_ARM_ACCESS_ERROR;\n' +
-  '    const e = new Error("arm probe failed: " + path);\n' +
-  '    if (typeof code === "number") { e.code = code; }\n' +
-  '    else if (code === undefined) { e.code = 13900002; }\n' +
-  '    throw e;\n' +
+  '    thrower(path, "access");\n' +
+  '    return Object.prototype.hasOwnProperty.call(files(), path);\n' +
   '  },\n' +
-  '  readTextSync: () => (typeof g().__NB_ARM_TEXT === "string" ? g().__NB_ARM_TEXT : "")\n' +
+  '  readTextSync: (path) => {\n' +
+  '    thrower(path, "read");\n' +
+  '    if (!Object.prototype.hasOwnProperty.call(files(), path)) {\n' +
+  '      const e = new Error("readText failed: " + path); e.code = 13900002;\n' +
+  '      throw e;\n' +
+  '    }\n' +
+  '    return files()[path];\n' +
+  '  },\n' +
+  '  openSync: (path) => {\n' +
+  '    const code = (g().__NB_FS_OPEN_ERROR || {})[path];\n' +
+  '    if (code !== undefined) {\n' +
+  '      const e = new Error("open failed: " + path); e.code = code; throw e;\n' +
+  '    }\n' +
+  '    return { fd: path };\n' +
+  '  },\n' +
+  '  writeSync: (fd, text) => {\n' +
+  '    const err = (g().__NB_FS_WRITE_ERROR || {})[fd];\n' +
+  '    if (err !== undefined) {\n' +
+  '      files()[fd] = ""; // the open already TRUNCed; nothing got written\n' +
+  '      const e = new Error("write failed: " + fd); e.code = err; throw e;\n' +
+  '    }\n' +
+  '    const bytes = Buffer.byteLength(String(text), "utf8");\n' +
+  '    files()[fd] = String(text);\n' +
+  '    return bytes;\n' +
+  '  },\n' +
+  '  closeSync: () => {},\n' +
+  '  unlinkSync: (path) => { delete files()[path]; }\n' +
   '};');
+
+// Real UTF-8 encoding for the fixture EntryAbility's completeness check (the
+// platform util.TextEncoder contract: encode() returns the UTF-8 bytes).
+const UTIL = 'data:text/javascript,' + encodeURIComponent(
+  'class TextEncoder {\n' +
+  '  encode(input) { return Uint8Array.from(Buffer.from(String(input ?? ""), "utf8")); }\n' +
+  '}\n' +
+  'export default { TextEncoder: TextEncoder };');
 
 const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   'function g() { return globalThis; }\n' +
@@ -148,6 +206,7 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ ok: true, recreate: { count: 1 } });\n' +
   '  },\n' +
   '  n2h_collector_arm: (optsJson) => {\n' +
+  '    g().__NB_ARM_CALLS = (g().__NB_ARM_CALLS || 0) + 1;\n' +
   '    g().__NB_ARM_OPTS = optsJson;\n' +
   '    return JSON.stringify({ ok: true, armed: true, opened_mono: 4242 });\n' +
   '  }\n' +
@@ -156,13 +215,20 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': 'data:text/javascript,' + encodeURIComponent(
     'export default class VpnExtensionAbility {}'),
+  // The fixture EntryAbility (arm private channel): a bare base class so the
+  // real UIAbility subclass can be `new`-ed on the host; its `context` (with
+  // filesDir) is assigned by the test before onCreate.
+  '@ohos.app.ability.UIAbility': 'data:text/javascript,' + encodeURIComponent(
+    'export default class UIAbility {}'),
+  '@ohos.app.ability.AbilityConstant': EMPTY,
   '@ohos.app.ability.Want': EMPTY,
+  '@ohos.window': EMPTY,
   '@ohos.file.fs': FS,
   '@ohos.hilog': HILOG,
   '@ohos.net.connection': CONNECTION,
   '@ohos.net.vpnExtension': VPN_EXT,
   '@ohos.resourceManager': EMPTY,
-  '@ohos.util': EMPTY,
+  '@ohos.util': UTIL,
   'libnetbird_core.so': CORE
 };
 

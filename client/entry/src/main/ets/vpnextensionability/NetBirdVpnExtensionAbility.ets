@@ -74,9 +74,19 @@ const RECREATE_DESTROY_BOX_MS: number = 5000;
 const RECREATE_CREATE_BOX_MS: number = 5000;
 // N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
 // evidence collector. The file only carries NON-SENSITIVE window options; its
-// EXISTENCE is the arm request (same /data/local/tmp development channel as
-// `netbird-protect-deviation`). No arm file ⇒ the collector stays inert.
-const N2H_ARM_FILE: string = '/data/local/tmp/netbird-n2h-arm';
+// EXISTENCE is the arm request. No arm file ⇒ the collector stays inert.
+// N2-H arm private channel (2026-09-18): the ticket is NO LONGER under the
+// shared /data/local/tmp location — that path is invisible to the app sandbox
+// (device 19:49-19:50: `fs.accessSync` answered boolean false →
+// accessError=none, NOT a proven ENOENT — while the shell listed the same
+// file; only "this process cannot see the path" is proven, never SELinux or a
+// mount verdict). EntryAbility now writes the ticket from the non-secret
+// `n2h_arm_options` want parameter into the app's OWN filesDir — the SAME
+// basename and the SAME directory mechanism as the credential files — and
+// deletes a leftover ticket on every launch WITHOUT the parameter (default:
+// no arm). The name below is resolved under this.context.filesDir at read
+// time (n2hArmFilePath), never a fixed absolute path.
+const N2H_ARM_FILE_NAME: string = 'netbird-n2h-arm';
 // N2-H I5a (§13.15): the two outcomes the arm-file probe can PROVE, and the
 // documented "No such file or directory" code that separates them. SDK
 // 26.0.0.821 `@ohos.file.fs.d.ts:309-336` (`accessSync(path, mode?): boolean`)
@@ -1140,18 +1150,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // reached this hook and never again, and `attempted=true` on that line is
     // the visible form of the same single field (no second counter).
     this.n2hArmAttempted = true;
-    const probe: N2hArmProbeOutcome = this.probeN2hArmFile();
+    const armPath: string = this.n2hArmFilePath();
+    const probe: N2hArmProbeOutcome = this.probeN2hArmFile(armPath);
     if (!probe.present) {
       // The silent branch the 2026-09-18 device dry-run could not explain: 84
       // zero-row collector reads, a2b_seen=0, and no marker saying the arm had
       // never been attempted. The reason distinguishes "proved absent" from
-      // "probe failed without proving absence"; `path=` is the fixed
-      // development-channel constant (never file content), `accessError=` is an
-      // error CODE token only.
+      // "probe failed without proving absence"; `path=` is the resolved
+      // filesDir join of the fixed development-channel name (never file
+      // content), `accessError=` is an error CODE token only.
       hilog.warn(DOMAIN, TAG,
         'N2H_COLLECTOR_ARM_SKIPPED|requestId=%{public}s|reason=%{public}s|path=%{public}s|' +
         'accessError=%{public}s|attempted=true|diag=true|is_evidence=false',
-        this.requestId, probe.skipReason, N2H_ARM_FILE, probe.accessError);
+        this.requestId, probe.skipReason, armPath, probe.accessError);
       return;
     }
     const deviceUp: boolean =
@@ -1169,7 +1180,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // and refuses anything it cannot understand).
     let fileOpts: N2hArmFileOptions = { posctl_port: 0, probe_wait_ms: 0 };
     try {
-      const text: string = fs.readTextSync(N2H_ARM_FILE).trim();
+      const text: string = fs.readTextSync(armPath).trim();
       if (text.length > 0) {
         fileOpts = JSON.parse(text) as N2hArmFileOptions;
       }
@@ -1278,6 +1289,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  // The arm ticket's path under THIS process's own filesDir: the same
+  // name-only resolution the credential files use (`<filesDir>/<basename>`,
+  // N2H_ARM_FILE_NAME for the why). Never a fixed absolute path again.
+  private n2hArmFilePath(): string {
+    return `${this.context.filesDir}/${N2H_ARM_FILE_NAME}`;
+  }
+
   // N2-H I5a (§13.15): probe the arm control file WITHOUT hiding why the arm
   // did not happen. `fs.accessSync(path)` (@ohos.file.fs) can report "not
   // there" in TWO documented shapes — the boolean `false` return and the
@@ -1289,10 +1307,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // not get to it). The raw code rides the skip line as `accessError=`: a
   // decimal code, 'none' for the boolean answer, 'no-code' for an error thrown
   // without a code token — never path content, never a message.
-  private probeN2hArmFile(): N2hArmProbeOutcome {
+  private probeN2hArmFile(path: string): N2hArmProbeOutcome {
     let present: boolean = false;
     try {
-      present = fs.accessSync(N2H_ARM_FILE);
+      present = fs.accessSync(path);
     } catch (error) {
       const code: string = String((error as BusinessFailure).code ?? 'no-code');
       return {
