@@ -1005,6 +1005,23 @@ fn offline_opts_with_peer(
     }
 }
 
+/// `offline_opts` plus one verbatim extra member — the minimal way a test
+/// carries §4.3's explicit `peer_overlay_ip` pin (a bare dotted-quad string)
+/// without touching the documented base shape.
+fn offline_opts_with_extra(
+    addrs: &SinkAddrs,
+    with_signal: bool,
+    probe_wait_ms: u64,
+    member: &str,
+) -> String {
+    let base = offline_opts(addrs, with_signal, probe_wait_ms);
+    format!(
+        "{},{}}}",
+        base.strip_suffix('}').expect("offline_opts builds a JSON object"),
+        member
+    )
+}
+
 /// Arm and assert the §5.1 success shape.
 fn arm_ok(host: &Arc<OfflineHost>, opts: &str) -> V {
     let answer = parse_json(&nc::arm_json(opts));
@@ -2116,6 +2133,126 @@ fn an_arm_that_carries_no_peer_marker_keeps_the_b2a_leg_a_reasoned_gap() {
     );
     assert_eq!(doc.at("tun_negative").at("hit").bool_of(), Some(false));
     println!("[13.10] no announcement ⇒ b2a sent=false, verdict=inconclusive, reasons={reasons:?}");
+}
+
+/// §4.3's multi-peer a2b discipline, end to end: the freeze facts carry TWO
+/// peer overlay addresses whose FIRST is deliberately NOT the echo host, the
+/// arm pins `peer_overlay_ip` to the echo host (the SECOND), and the a2b leg
+/// is REALLY sent to `pin:posctl_port` (the mock echo answers and the return
+/// is observed) — `tuple.dst` records the pin, never the list order.
+#[test]
+fn a2b_pin_selects_the_second_peer_address_and_the_probe_really_leaves() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let not_the_host = [198, 51, 100, 9];
+    let facts = nc::HostFreezeFacts {
+        peer_overlay: vec![not_the_host, PEER],
+        ..offline_facts(&addrs, true)
+    };
+    let host = OfflineHost::new(facts, sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+
+    arm_ok(
+        &host,
+        &offline_opts_with_extra(
+            &addrs,
+            true,
+            200,
+            "\"peer_overlay_ip\":\"127.0.0.1\"",
+        ),
+    );
+    wait_closed(&host, true, 20_000);
+    let (doc, _text) = closed_document();
+    let a2b = doc
+        .at("tunnel_positive_control")
+        .at("probes")
+        .arr_of()
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("a2b"))
+        .expect("the a2b leg exists");
+    assert_eq!(a2b.at("sent").bool_of(), Some(true), "the pinned a2b is sent: {a2b:?}");
+    assert_eq!(
+        a2b.at("tuple").at("dst").str_of(),
+        Some(&format!("127.0.0.1:{}", addrs.peer_overlay.port())[..]),
+        "the destination is the PIN (the second address), never the first: {a2b:?}"
+    );
+    println!("[4.3] pin=127.0.0.1 selected out of a 2-address map; dst={:?}",
+        a2b.at("tuple").at("dst").str_of());
+}
+
+/// §4.3's multi-peer discipline: WITHOUT a pin, several usable candidates are
+/// an `ambiguous-peer-target` gap — nothing is sent and the reason names the
+/// count (list order is not a selection rule on a 6-peer map).
+#[test]
+fn a2b_without_a_pin_and_several_candidates_stays_an_ambiguous_gap() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let facts = nc::HostFreezeFacts {
+        peer_overlay: vec![[198, 51, 100, 9], PEER],
+        ..offline_facts(&addrs, true)
+    };
+    let host = OfflineHost::new(facts, sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+
+    arm_ok(&host, &offline_opts(&addrs, true, 200));
+    wait_closed(&host, true, 20_000);
+    let (doc, _text) = closed_document();
+    let a2b = doc
+        .at("tunnel_positive_control")
+        .at("probes")
+        .arr_of()
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("a2b"))
+        .expect("the a2b leg exists");
+    assert_eq!(a2b.at("sent").bool_of(), Some(false), "no pin, no send: {a2b:?}");
+    let note = a2b.at("note").str_of().unwrap_or("");
+    assert!(
+        note.contains("ambiguous-peer-target") && note.contains('2'),
+        "the gap names the ambiguity and the count: {note:?}"
+    );
+    println!("[4.3] no pin + 2 candidates ⇒ a2b sent=false, note={note:?}");
+}
+
+/// §4.3's multi-peer discipline: a pin the freeze facts contradict is its own
+/// reasoned gap — never a silent fallback to the first usable address.
+#[test]
+fn a2b_pin_outside_the_freeze_facts_stays_a_gap_not_a_fallback() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+
+    arm_ok(
+        &host,
+        &offline_opts_with_extra(
+            &addrs,
+            true,
+            200,
+            "\"peer_overlay_ip\":\"203.0.113.5\"",
+        ),
+    );
+    wait_closed(&host, true, 20_000);
+    let (doc, _text) = closed_document();
+    let a2b = doc
+        .at("tunnel_positive_control")
+        .at("probes")
+        .arr_of()
+        .iter()
+        .find(|p| p.at("direction").str_of() == Some("a2b"))
+        .expect("the a2b leg exists");
+    assert_eq!(a2b.at("sent").bool_of(), Some(false), "a contradicting pin sends nothing: {a2b:?}");
+    let note = a2b.at("note").str_of().unwrap_or("");
+    assert!(
+        note.contains("not among the usable IPv4 peer overlay"),
+        "the gap names the contradicting pin: {note:?}"
+    );
+    println!("[4.3] pin outside the map ⇒ a2b sent=false, note={note:?}");
 }
 
 /// §13.10's fail-closed edge: an announcement that is not the frozen posctl

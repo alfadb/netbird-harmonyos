@@ -114,12 +114,29 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
 const VPN_ABILITY = 'data:text/javascript,' + encodeURIComponent(
   'export default class VpnExtensionAbility {}');
 
+// @ohos.net.statistics: the extension now imports the iface-bytes probe module
+// (2026-09-18 availability probe), whose specifier must resolve for the REAL
+// extension fixture to link. These suites never arm the collector, so the
+// probe never RUNS here — the stub exists so an accidental run fails loudly
+// (rejected promise, documented internal-error code) instead of faking a
+// value. Same shape as exclusion-generation-hooks.mjs without the recorder.
+const STATISTICS = 'data:text/javascript,' + encodeURIComponent(
+  'function boom(nic) {\n' +
+  '  const e = new Error("statistics unset: " + nic); e.code = 2100003;\n' +
+  '  return Promise.reject(e);\n' +
+  '}\n' +
+  'export default {\n' +
+  '  getIfaceRxBytes: (nic) => boom(nic),\n' +
+  '  getIfaceTxBytes: (nic) => boom(nic)\n' +
+  '};');
+
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,
   '@ohos.app.ability.Want': EMPTY,
   '@ohos.file.fs': EMPTY,
   '@ohos.hilog': HILOG,
   '@ohos.net.connection': CONNECTION,
+  '@ohos.net.statistics': STATISTICS,
   '@ohos.net.vpnExtension': EMPTY,
   '@ohos.resourceManager': EMPTY,
   '@ohos.util': EMPTY,
@@ -128,12 +145,15 @@ const STUBS = {
 
 // Sibling modules of the extension: the ESM link would fail on the erased
 // type-only named imports, so the hook redirects them to the shim files the
-// test writes next to the byte-identical fixtures.
+// test writes next to the byte-identical fixtures. NetBirdInterfaceStatsProbe
+// has no erased types (the extension imports only its one exported function),
+// so its entry is plain extension resolution for the extensionless specifier.
 const SHIMS = {
   './NetBirdConnector': 'NetBirdConnector.shim.ts',
   './NetBirdEndpointExclusion': 'NetBirdEndpointExclusion.shim.ts',
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
-  './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts'
+  './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
+  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts'
 };
 
 export function resolve(specifier, context, next) {

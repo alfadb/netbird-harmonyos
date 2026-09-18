@@ -47,9 +47,13 @@ const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
 
 // The five real modules staged byte-identically (code under test = shipped
 // code), and the erased interface names each shim must re-declare for the
-// ESM link (see relay-exclusion-hooks.mjs).
+// ESM link (see relay-exclusion-hooks.mjs). NetBirdInterfaceStatsProbe rides
+// along: the REAL extension imports it (2026-09-18 iface-bytes probe), so the
+// byte-identical fixture needs the byte-identical helper (no shim — the
+// extension imports only its one exported function).
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
-  'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion'];
+  'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
+  'NetBirdInterfaceStatsProbe'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',

@@ -99,6 +99,33 @@
 //      the core again ZERO times). Source pins: the extension no longer
 //      references /data/local/tmp/netbird-n2h-arm anywhere, the credential
 //      dev-override channel is untouched.
+//   C8 (2026-09-18 peer_overlay_ip bridge): the parallel posctl-target fix's
+//      optional non-secret `peer_overlay_ip` (the ACTUAL n2h-peer overlay
+//      address; multi-peer maps no longer mean first()) is bridged with the
+//      peer_b2a_probe_id verbatim discipline — present ⇒ in the native opts
+//      JSON verbatim (existing fields unchanged), absent ⇒ the key stays
+//      absent (no default injected), wrong-type (e.g. a JSON number) ⇒
+//      forwarded AS THAT VALUE for the core's bare-IPv4 + peer-map check to
+//      refuse; no marker field and no log literal changes.
+//   P1-P8 (2026-09-18 iface-bytes availability probe): the OFFICIAL
+//      @ohos.net.statistics getIfaceRxBytes/getIfaceTxBytes (since 10, no
+//      permission on the iface methods) is called ONLY from the arm SUCCESS
+//      branch, exactly once per instance, as one four-promise round over
+//      'vpn-tun' + the fixed negative-control name 'n2h-none0'.
+//      P1 the four calls (negative control actually invoked); P2 the vpn-tun
+//      line carries the resolved byte values, none-errors, digit-shaped
+//      begin/end ms and the diag flags; P3 the unknown name's 0-answer is
+//      recorded verbatim (never read as a proof about vpn-tun); P4 a
+//      per-direction rejection leaves that byte field unavailable with the
+//      raw code kept while the other direction records; P5 NO native ARM
+//      success ⇒ NO probe (no ticket / gate closed / core answers not-ok);
+//      P6 ticks after the arm repeat nothing (one-shot inherited); P7 a
+//      resolved non-finite/negative value is never printed and never turned
+//      into 0 (invalid-value), a resolved 0 prints as 0; P8 source pins (call
+//      site inside the ok-branch after the ARMED literal, byte-only probe
+//      module — no /proc read, no getUid*/GET_NETWORK_STATS, no exception
+//      message text — and module.json5 unchanged). The probe never touches
+//      Evidence.counters/notes; no packet count exists anywhere.
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -125,12 +152,19 @@ const REAL_ENTRY_DIR = join(HERE, '..', 'src', 'main', 'ets', 'entryability');
 const FIXTURE_FILESDIR = '/tmp/n2h-i5b-fixture';
 const ARM_TICKET_PATH = `${FIXTURE_FILESDIR}/netbird-n2h-arm`;
 const ARM_TICKET_NAME = 'netbird-n2h-arm';
+// The 2026-09-18 iface-bytes availability probe marker (the P group below).
+const PROBE_PREFIX = 'N2H_IFACE_BYTES_PROBE|';
 
 // The five real modules staged byte-identically (code under test = shipped
 // code), and the erased interface names each shim must re-declare for the ESM
 // link (same list as run-relay-exclusion.mts — see that file's hook comment).
+// NetBirdInterfaceStatsProbe (2026-09-18 iface-bytes availability probe) is
+// staged the same way: the REAL extension imports it, so the byte-identical
+// fixture needs the byte-identical helper (no sibling imports of its own —
+// no shim needed).
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
-  'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion'];
+  'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
+  'NetBirdInterfaceStatsProbe'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
@@ -243,6 +277,26 @@ function seedFile(path: string, text: string): void {
 
 function fileOf(path: string): string | undefined {
   return ((G['__NB_FS'] ?? {}) as Record<string, string>)[path];
+}
+
+// The statistics stub's append-only call record ('method:nic' strings) and the
+// per-NIC answer tables (exclusion-generation-hooks.mjs): a number resolves,
+// {code:n} rejects, an UNSET name rejects 2100003 — an unexpected probe can
+// never fake a value.
+function statsCalls(): string[] {
+  return (G['__NB_STATS_CALLS'] ?? []) as string[];
+}
+
+function seedStats(rx: Record<string, unknown>, tx: Record<string, unknown>): void {
+  G['__NB_STATS_RX'] = rx;
+  G['__NB_STATS_TX'] = tx;
+}
+
+// Every probe log line is written several microtasks after the tick that
+// armed it (four awaited statistics promises); one macrotask boundary drains
+// the whole chain deterministically (the same pattern the B1 await uses).
+async function drainProbe(): Promise<void> {
+  await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 0); });
 }
 
 // The desired-route-set snapshot the REAL recreate leg consumes: two managed
@@ -1080,6 +1134,261 @@ try {
     readFileSync(join(dir, 'NetBirdConnector.ts')).toString()
       .indexOf('DEV_CREDENTIAL_DIR') > 0,
     'credential override pin');
+
+  // ---------------- C8 (2026-09-18): peer_overlay_ip verbatim bridging -----
+  // The parallel posctl-target fix adds the optional non-secret
+  // `peer_overlay_ip` to the arm file options: the ACTUAL n2h-peer overlay
+  // address (multi-peer maps no longer mean "first()"). The shell NEVER
+  // validates or repairs it — present ⇒ forwarded verbatim into the native
+  // opts JSON, absent ⇒ the key stays absent (no default injected), wrong-type
+  // ⇒ forwarded as that value and the CORE's strict bare-IPv4 + peer-map check
+  // refuses it. No marker field and no log literal changes.
+  const overlayAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  overlayAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"peer_overlay_ip":"10.99.0.7"}');
+  resetLog();
+  tickArm(overlayAbility, WG_READY);
+  const overlayOpts = JSON.parse(String(G['__NB_ARM_OPTS'] ?? '{}')) as Record<string, unknown>;
+  check('C8 a present peer_overlay_ip reaches the native opts JSON verbatim',
+    overlayOpts['peer_overlay_ip'] === '10.99.0.7' &&
+    String(G['__NB_ARM_OPTS']).indexOf('"peer_overlay_ip":"10.99.0.7"') > 0,
+    String(G['__NB_ARM_OPTS']));
+  check('C8 the existing arm fields ride unchanged next to the new key',
+    overlayOpts['posctl_port'] === 40001 && overlayOpts['probe_wait_ms'] === 800,
+    String(G['__NB_ARM_OPTS']));
+
+  const noOverlayAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  noOverlayAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"posctl_port":41000}');
+  resetLog();
+  tickArm(noOverlayAbility, WG_READY);
+  const noOverlayOpts =
+    JSON.parse(String(G['__NB_ARM_OPTS'] ?? '{}')) as Record<string, unknown>;
+  check('C8 an absent peer_overlay_ip stays absent (no key, no default injected)',
+    noOverlayOpts['peer_overlay_ip'] === undefined &&
+    String(G['__NB_ARM_OPTS']).indexOf('peer_overlay_ip') < 0,
+    String(G['__NB_ARM_OPTS']));
+
+  const badOverlayAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  badOverlayAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"peer_overlay_ip":123}');
+  resetLog();
+  tickArm(badOverlayAbility, WG_READY);
+  const badOverlayOpts =
+    JSON.parse(String(G['__NB_ARM_OPTS'] ?? '{}')) as Record<string, unknown>;
+  check('C8 a wrong-type value is forwarded AS THAT VALUE (never dropped, never defaulted)',
+    badOverlayOpts['peer_overlay_ip'] === 123 &&
+    String(G['__NB_ARM_OPTS']).indexOf('"peer_overlay_ip":123') > 0,
+    String(G['__NB_ARM_OPTS']));
+
+  // ---------------- P (2026-09-18): the iface-bytes availability probe -----
+  // The OFFICIAL per-NIC byte API (@ohos.net.statistics getIfaceRxBytes /
+  // getIfaceTxBytes, since 10, NO permission on the iface methods) is the
+  // availability question run 0017 left open: the app cannot read
+  // /proc/net/dev (Permission denied, counters=[]). The probe is wired ONLY
+  // into the arm SUCCESS branch — these checks pin exactly that: when it
+  // fires, what it records (values / codes / begin-end / negative control),
+  // what it must never do (fire without a native ARM success, turn an error
+  // into 0, print a bogus value, run twice per instance), and the unchanged
+  // literals around the insertion point. Bytes only: nothing here feeds
+  // Evidence.counters, no packet count exists, no ARM reconciliation runs.
+  await drainProbe(); // settle the probes the earlier groups' ARMED ticks armed
+  resetLog();
+
+  // P1: the REAL arm success branch triggers exactly ONE probe round.
+  const probeAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  probeAbility['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1234, 'n2h-none0': 0 },
+    { 'vpn-tun': 5678, 'n2h-none0': 0 });
+  setArmFile(true, undefined);
+  const callsAtP1 = statsCalls().length;
+  tickArm(probeAbility, WG_READY);
+  await drainProbe();
+  const p1Calls = statsCalls().slice(callsAtP1);
+  check('P1 the arm SUCCESS branch triggers exactly ONE probe round: the four documented calls',
+    linesWith(PROBE_PREFIX).length === 2 &&
+    p1Calls.length === 4 &&
+    p1Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
+    p1Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0 &&
+    p1Calls.indexOf('getIfaceRxBytes:n2h-none0') >= 0 &&
+    p1Calls.indexOf('getIfaceTxBytes:n2h-none0') >= 0,
+    JSON.stringify({ probeLines: linesWith(PROBE_PREFIX), calls: p1Calls }));
+
+  // P2: the vpn-tun line — exact head (values + none-errors), digit-shaped
+  // begin/end with finished >= started, the diag flags as the tail.
+  const p1Vpn = linesWith(PROBE_PREFIX).filter((l: string): boolean =>
+    fieldOf(l, 'interface') === 'vpn-tun');
+  const p1VpnLine = p1Vpn.length === 1 ? p1Vpn[0] : '';
+  const p1Started = fieldOf(p1VpnLine, 'startedUnixMs');
+  const p1Finished = fieldOf(p1VpnLine, 'finishedUnixMs');
+  check('P2 vpn-tun line: resolved values + none-errors + digit begin/end + diag flags',
+    p1VpnLine === 'N2H_IFACE_BYTES_PROBE|requestId=' + REQUEST_ID +
+    '|interface=vpn-tun|rxBytes=1234|txBytes=5678|rxError=none|txError=none|' +
+    'startedUnixMs=' + p1Started + '|finishedUnixMs=' + p1Finished +
+    '|diag=true|is_evidence=false' &&
+    /^\d+$/.test(p1Started) && /^\d+$/.test(p1Finished) &&
+    Number(p1Finished) >= Number(p1Started),
+    p1VpnLine);
+
+  // P3: the negative control line — the 0-answer of the nonexistent name is
+  // recorded verbatim (a finding about the unknown-name shape, never read as
+  // a proof that the vpn-tun value works).
+  const p1Neg = linesWith(PROBE_PREFIX).filter((l: string): boolean =>
+    fieldOf(l, 'interface') === 'n2h-none0');
+  check('P3 the fixed nonexistent name IS sampled and its 0-answer recorded verbatim',
+    p1Neg.length === 1 &&
+    p1Neg[0] === 'N2H_IFACE_BYTES_PROBE|requestId=' + REQUEST_ID +
+    '|interface=n2h-none0|rxBytes=0|txBytes=0|rxError=none|txError=none|' +
+    'startedUnixMs=' + fieldOf(p1Neg[0], 'startedUnixMs') +
+    '|finishedUnixMs=' + fieldOf(p1Neg[0], 'finishedUnixMs') +
+    '|diag=true|is_evidence=false',
+    p1Neg.join('\n'));
+
+  // P4: per-direction honesty — a rejected call leaves its byte field
+  // unavailable with the raw code kept; the OTHER direction still records;
+  // the round still made its full four calls.
+  const errAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  errAbility['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': { code: 2103012 }, 'n2h-none0': 7 },
+    { 'vpn-tun': 99, 'n2h-none0': { code: 2100002 } });
+  setArmFile(true, undefined);
+  const callsAtP4 = statsCalls().length;
+  resetLog();
+  tickArm(errAbility, WG_READY);
+  await drainProbe();
+  const p4Vpn = linesWith(PROBE_PREFIX).filter((l: string): boolean =>
+    fieldOf(l, 'interface') === 'vpn-tun');
+  const p4Neg = linesWith(PROBE_PREFIX).filter((l: string): boolean =>
+    fieldOf(l, 'interface') === 'n2h-none0');
+  check('P4 rx rejects -> rxBytes=unavailable with the code kept, tx still records',
+    p4Vpn.length === 1 &&
+    fieldOf(p4Vpn[0], 'rxBytes') === 'unavailable' &&
+    fieldOf(p4Vpn[0], 'rxError') === '2103012' &&
+    fieldOf(p4Vpn[0], 'txBytes') === '99' &&
+    fieldOf(p4Vpn[0], 'txError') === 'none',
+    p4Vpn.join('\n'));
+  check('P4 tx rejects -> txBytes=unavailable with the code kept, rx still records',
+    p4Neg.length === 1 &&
+    fieldOf(p4Neg[0], 'rxBytes') === '7' &&
+    fieldOf(p4Neg[0], 'rxError') === 'none' &&
+    fieldOf(p4Neg[0], 'txBytes') === 'unavailable' &&
+    fieldOf(p4Neg[0], 'txError') === '2100002',
+    p4Neg.join('\n'));
+  check('P4 the failed round still made its full four statistics calls',
+    statsCalls().length - callsAtP4 === 4, String(statsCalls().length - callsAtP4));
+
+  // P5: NO native ARM success ⇒ NO probe. Three shapes: the plain-start
+  // default (no ticket), the ticket with the session gate still closed, and
+  // the gate open but the core answering not-ok.
+  const callsAtP5 = statsCalls().length;
+  const noTicketAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(false, undefined);
+  resetLog();
+  tickArm(noTicketAbility, WG_READY);
+  await drainProbe();
+  check('P5a no arm ticket (the plain-start default) -> the ONE skip line, no probe call',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    linesWith(PROBE_PREFIX).length === 0 &&
+    statsCalls().length === callsAtP5, JSON.stringify(logs()));
+
+  const waitingAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  setArmFile(true, undefined, '');
+  resetLog();
+  tickArm(waitingAbility, { wg: { device_up: true, ready: false } });
+  await drainProbe();
+  check('P5b ticket present but the session gate closed -> one WAITING line, no probe call',
+    linesWith('N2H_COLLECTOR_WAITING|').length === 1 &&
+    linesWith(PROBE_PREFIX).length === 0 &&
+    statsCalls().length === callsAtP5, JSON.stringify(logs()));
+
+  const refusedAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  refusedAbility['n2hAcceptedExclusionGeneration'] = 0;
+  G['__NB_ARM_ANSWER'] = '{"ok":false,"error":"forced-by-p5"}';
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(refusedAbility, WG_READY);
+  G['__NB_ARM_ANSWER'] = undefined;
+  await drainProbe();
+  check('P5c the core answers not-ok -> one ARM_FAILED line, no probe call (out.ok gates it)',
+    linesWith('N2H_COLLECTOR_ARM_FAILED|').length === 1 &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 0 &&
+    linesWith(PROBE_PREFIX).length === 0 &&
+    statsCalls().length === callsAtP5, JSON.stringify(logs()));
+
+  // P6: the probe inherits the arm's one-shot semantics — ticks after the arm
+  // repeat nothing: no line, no statistics call (the P1 instance, re-ticked).
+  const callsAtP6 = statsCalls().length;
+  resetLog();
+  tickArm(probeAbility, WG_READY);
+  tickArm(probeAbility, WG_READY);
+  await drainProbe();
+  check('P6 ticks after the arm repeat nothing: no probe line, no statistics call',
+    logs().length === 0 && statsCalls().length === callsAtP6, JSON.stringify(logs()));
+
+  // P7: value honesty — a RESOLVED value that is not a finite nonnegative
+  // byte count is never printed and never turned into 0 (token
+  // invalid-value); a resolved 0 IS finite nonnegative and prints as 0.
+  const honestAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  honestAbility['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': -5, 'n2h-none0': 0 },
+    { 'vpn-tun': NaN, 'n2h-none0': 0 });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(honestAbility, WG_READY);
+  await drainProbe();
+  const p7Lines = linesWith(PROBE_PREFIX);
+  check('P7 negative/NaN answers -> unavailable + invalid-value (no 0-laundering)',
+    p7Lines.length === 2 &&
+    fieldOf(p7Lines[0], 'interface') === 'vpn-tun' &&
+    fieldOf(p7Lines[0], 'rxBytes') === 'unavailable' &&
+    fieldOf(p7Lines[0], 'rxError') === 'invalid-value' &&
+    fieldOf(p7Lines[0], 'txBytes') === 'unavailable' &&
+    fieldOf(p7Lines[0], 'txError') === 'invalid-value',
+    JSON.stringify(p7Lines));
+  check('P7 the negative control still records its honest zeros in the same round',
+    p7Lines.length === 2 &&
+    fieldOf(p7Lines[1], 'interface') === 'n2h-none0' &&
+    fieldOf(p7Lines[1], 'rxBytes') === '0' &&
+    fieldOf(p7Lines[1], 'txBytes') === '0' &&
+    fieldOf(p7Lines[1], 'rxError') === 'none',
+    JSON.stringify(p7Lines));
+
+  // P8: wiring pins on the byte-identical sources — the call site sits INSIDE
+  // the arm success branch (ok -> ARMED literal -> probe -> else), the probe
+  // module carries the fixed names and stays byte-only (no /proc read, no
+  // getUid*/permission surface, no message text), and module.json5 grew no
+  // permission.
+  const probeSource: string =
+    readFileSync(join(dir, 'NetBirdInterfaceStatsProbe.ts')).toString();
+  const okBranchAt = extSource.indexOf('if (answer.ok === true) {');
+  const armedLit = extSource.indexOf(
+    "'N2H_COLLECTOR_ARMED|requestId=%{public}s|gen=%{public}d|openedMono=%{public}d|'");
+  const probeCall = extSource.indexOf('runInterfaceStatsProbe(this.requestId)');
+  const elseAt = extSource.indexOf('} else {', armedLit);
+  check('P8 the probe call sits INSIDE the arm success branch (ok -> ARMED literal -> probe -> else)',
+    okBranchAt > 0 && armedLit > okBranchAt && probeCall > armedLit && elseAt > probeCall &&
+    extSource.indexOf(
+      "import { runInterfaceStatsProbe } from './NetBirdInterfaceStatsProbe';") > 0,
+    JSON.stringify({ okBranchAt, armedLit, probeCall, elseAt }));
+  check('P8 the probe module pins the two fixed names, the marker, and the byte-only scope',
+    probeSource.indexOf("const PROBE_IFACE: string = 'vpn-tun';") > 0 &&
+    probeSource.indexOf("const PROBE_NEGATIVE_IFACE: string = 'n2h-none0';") > 0 &&
+    probeSource.indexOf(PROBE_PREFIX) > 0 &&
+    probeSource.indexOf('diag=true|is_evidence=false') > 0 &&
+    probeSource.indexOf('@ohos.file.fs') < 0 &&
+    probeSource.indexOf('readTextSync') < 0 &&
+    probeSource.indexOf('getUidRxBytes') < 0 &&
+    probeSource.indexOf('.message') < 0,
+    'probe module pin');
+  check('P8 the aborted-sample guard prints codes/names only (never an exception message)',
+    extSource.indexOf(
+      "'N2H_IFACE_BYTES_PROBE_ABORTED|requestId=%{public}s|code=%{public}s|'") > 0 &&
+    extSource.indexOf("'name=%{public}s|diag=true|is_evidence=false',") > 0,
+    'aborted-guard pin');
+  check('P8 no permission surface was added (module.json5 carries no GET_NETWORK_STATS)',
+    readFileSync(join(HERE, '..', 'src', 'main', 'module.json5')).toString()
+      .indexOf('GET_NETWORK_STATS') < 0,
+    'module.json5 pin');
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

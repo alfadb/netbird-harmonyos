@@ -60,6 +60,17 @@
 //   - @ohos.net.connection -> the four synchronous network APIs + the fake DNS
 //                     table globalThis.__NB_DNS (the real derivation runs on
 //                     the paths under test).
+//   - @ohos.net.statistics -> the per-NIC byte counters the 2026-09-18
+//                     iface-bytes availability probe calls (SDK 26.0.0.821
+//                     @ohos.net.statistics.d.ts:79/113, since 10, no
+//                     permission on the iface methods). Functional stub keyed
+//                     by NIC name: __NB_STATS_RX / __NB_STATS_TX map a name to
+//                     a number (resolved value) or {code:n} (rejected
+//                     BusinessError); an UNSET name rejects with the
+//                     documented internal-error code 2100003 so an unexpected
+//                     probe can never fake a value. Every call is recorded in
+//                     __NB_STATS_CALLS as "method:nic" (append-only — the
+//                     probe tests assert on length deltas).
 //   - @ohos.app.ability.VpnExtensionAbility -> a bare base class so the real
 //                     extension class can be `new`-ed on the host.
 //   - @ohos.app.ability.UIAbility -> a bare base class so the real
@@ -187,6 +198,29 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '  getAllNetsSync: () => []\n' +
   '};');
 
+// The per-NIC byte counters (see the header comment): a number resolves,
+// {code:n} rejects, an unset NIC rejects 2100003; every call is recorded.
+const STATISTICS = 'data:text/javascript,' + encodeURIComponent(
+  'function g() { return globalThis; }\n' +
+  'function pick(table, method, nic) {\n' +
+  '  const calls = g().__NB_STATS_CALLS || (g().__NB_STATS_CALLS = []);\n' +
+  '  calls.push(method + ":" + nic);\n' +
+  '  const v = (g()[table] || {})[nic];\n' +
+  '  if (v === undefined) {\n' +
+  '    const e = new Error("statistics unset: " + nic); e.code = 2100003;\n' +
+  '    return Promise.reject(e);\n' +
+  '  }\n' +
+  '  if (v !== null && typeof v === "object") {\n' +
+  '    const e = new Error("statistics rejected: " + nic); e.code = v.code;\n' +
+  '    return Promise.reject(e);\n' +
+  '  }\n' +
+  '  return Promise.resolve(Number(v));\n' +
+  '}\n' +
+  'export default {\n' +
+  '  getIfaceRxBytes: (nic) => pick("__NB_STATS_RX", "getIfaceRxBytes", nic),\n' +
+  '  getIfaceTxBytes: (nic) => pick("__NB_STATS_TX", "getIfaceTxBytes", nic)\n' +
+  '};');
+
 const CORE = 'data:text/javascript,' + encodeURIComponent(
   'function g() { return globalThis; }\n' +
   'function j(v, fallback) {\n' +
@@ -208,6 +242,7 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  n2h_collector_arm: (optsJson) => {\n' +
   '    g().__NB_ARM_CALLS = (g().__NB_ARM_CALLS || 0) + 1;\n' +
   '    g().__NB_ARM_OPTS = optsJson;\n' +
+  '    if (typeof g().__NB_ARM_ANSWER === "string") { return g().__NB_ARM_ANSWER; }\n' +
   '    return JSON.stringify({ ok: true, armed: true, opened_mono: 4242 });\n' +
   '  }\n' +
   '};');
@@ -226,6 +261,7 @@ const STUBS = {
   '@ohos.file.fs': FS,
   '@ohos.hilog': HILOG,
   '@ohos.net.connection': CONNECTION,
+  '@ohos.net.statistics': STATISTICS,
   '@ohos.net.vpnExtension': VPN_EXT,
   '@ohos.resourceManager': EMPTY,
   '@ohos.util': UTIL,
@@ -234,12 +270,15 @@ const STUBS = {
 
 // Sibling modules of the extension: the ESM link would fail on the erased
 // type-only named imports, so the hook redirects them to the shim files the
-// test writes next to the byte-identical fixtures.
+// test writes next to the byte-identical fixtures. NetBirdInterfaceStatsProbe
+// has no erased types (the extension imports only its one exported function),
+// so its entry is plain extension resolution for the extensionless specifier.
 const SHIMS = {
   './NetBirdConnector': 'NetBirdConnector.shim.ts',
   './NetBirdEndpointExclusion': 'NetBirdEndpointExclusion.shim.ts',
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
-  './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts'
+  './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
+  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts'
 };
 
 export function resolve(specifier, context, next) {

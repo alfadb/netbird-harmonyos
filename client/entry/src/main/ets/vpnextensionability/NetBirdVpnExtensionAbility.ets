@@ -9,6 +9,7 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
+import { runInterfaceStatsProbe } from './NetBirdInterfaceStatsProbe';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
@@ -151,6 +152,13 @@ interface N2hArmFileOptions {
   // present value is forwarded verbatim and the core refuses anything that is
   // not the frozen posctl shape (the arm then fails with `invalid-opts`).
   peer_b2a_probe_id?: string;
+  // 2026-09-18 (parallel posctl-target fix): the ACTUAL n2h-peer overlay
+  // address, so the posctl legs stop assuming the FIRST peer in the map.
+  // Same verbatim discipline as peer_b2a_probe_id: the shell never validates,
+  // trims, rewrites, type-coerces, or defaults it — a present value (whatever
+  // its runtime type) is forwarded as-is and the CORE strictly refuses
+  // anything that is not a bare IPv4 present in the peer map.
+  peer_overlay_ip?: string;
 }
 
 // N2-H I5: the `n2h_collector_arm` options document (§5.1).
@@ -171,6 +179,10 @@ interface N2hArmOptions {
   // §13.10: only set when the control file carried the key (an absent key must
   // stay absent — the two cases have different, documented semantics).
   peer_b2a_probe_id?: string;
+  // 2026-09-18: the actual n2h-peer overlay address, only set when the control
+  // file carried the key (absent stays absent; forwarded verbatim, validated
+  // core-side — see N2hArmFileOptions).
+  peer_overlay_ip?: string;
   // v3.1 C1 dns: the branch record of this session's derivation (always set —
   // a missing record is a dns gap for the judge).
   dns?: N2hDnsArmReport;
@@ -1285,6 +1297,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (announcedPeer !== undefined) {
       opts.peer_b2a_probe_id = announcedPeer;
     }
+    // 2026-09-18 (parallel posctl-target fix): the actual n2h-peer overlay
+    // address rides the same control file with the SAME verbatim discipline —
+    // forwarded ONLY when the file carried the key (absent stays absent, so
+    // the core's "which peer" default remains the documented one), never
+    // validated/trimmed/rewritten/type-coerced here. A wrong-type value (e.g.
+    // a JSON number) is forwarded as that value and the core's strict bare
+    // IPv4 + peer-map check refuses it — the refusal is core-side evidence,
+    // not something the shell silently repairs. No marker field and no log
+    // literal changes: this key is not echoed into N2H_COLLECTOR_ARMED.
+    const announcedOverlay: string | undefined = fileOpts.peer_overlay_ip;
+    if (announcedOverlay !== undefined) {
+      opts.peer_overlay_ip = announcedOverlay;
+    }
     const optsJson: string = JSON.stringify(opts);
     const announcedLog: string = announcedPeer === undefined ? 'none' : clean(String(announcedPeer));
     try {
@@ -1297,6 +1322,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'peerB2aProbeId=%{public}s|diag=true|is_evidence=false',
           this.requestId, exclusionGeneration, answer.opened_mono ?? -1, exclusions.length,
           posctlPort, probeWaitMs, announcedLog);
+        // 2026-09-18 iface-bytes availability probe (diag-only): run 0017
+        // could not read /proc/net/dev (Permission denied, counters=[]) while
+        // the OFFICIAL per-NIC byte API (@ohos.net.statistics, since 10)
+        // documents NO permission for the iface methods. This ONE
+        // fire-and-forget sample runs ONLY on the diagnostic arm SUCCESS
+        // branch — never on a plain VPN start, never inside the native window
+        // (no await, no timer, no loop); every rejection is caught (the probe
+        // catches each call, this catch is the last resort), so the arm path
+        // cannot gain an unhandled rejection. Bytes only, diag-only: the
+        // sample never joins Evidence.counters/notes, never becomes a packet
+        // count, and no pre/post-ARM reconciliation happens.
+        runInterfaceStatsProbe(this.requestId).catch((error: Error): void => {
+          // Codes/names only — the probe's discipline (never an exception
+          // message, never a payload).
+          hilog.warn(DOMAIN, TAG,
+            'N2H_IFACE_BYTES_PROBE_ABORTED|requestId=%{public}s|code=%{public}s|' +
+            'name=%{public}s|diag=true|is_evidence=false',
+            this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
+            clean(error.name || 'Error'));
+        });
       } else {
         hilog.error(DOMAIN, TAG,
           'N2H_COLLECTOR_ARM_FAILED|requestId=%{public}s|error=%{public}s|' +

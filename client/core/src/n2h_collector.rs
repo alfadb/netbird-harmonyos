@@ -1872,6 +1872,15 @@ pub struct ArmOptions {
     /// semantics). A present value is REFUSED unless [`announced_b2a_marker`]
     /// accepts it.
     pub peer_b2a_probe_id: Option<String>,
+    /// §4.3's explicit a2b destination for MULTI-peer network maps: the bare
+    /// dotted-quad IPv4 the operator pins FROM the map's
+    /// `peers[].vpn_addresses[]` (public routing material, never a secret).
+    /// Strictly parsed at arm time — a CIDR, IPv6, hostname or non-string
+    /// refuses the arm. `None` = not pinned: the target is auto-selected only
+    /// when the deduped usable peer overlay holds exactly ONE address (list
+    /// order is never a selection rule); it is honoured only when it IS one
+    /// of those addresses.
+    pub peer_overlay_ip: Option<[u8; 4]>,
     /// v3.1's dns branch record (see [`ShellDnsReport`]). `None` = the shell
     /// reported no branch at all: no `dns-branch=` line enters the document
     /// (a missing record is the judge's dns gap, never a fabricated one).
@@ -1893,6 +1902,7 @@ impl Default for ArmOptions {
             probe_wait_ms: PROBE_WAIT_MS_DEFAULT,
             build_sha256_reported: String::new(),
             peer_b2a_probe_id: None,
+            peer_overlay_ip: None,
             dns: None,
             exclusion_generation: None,
         }
@@ -1937,6 +1947,16 @@ impl ArmOptions {
             // only in the frozen wire shape and anything else refuses the arm.
             let raw = as_str(v).ok_or("peer_b2a_probe_id must be a string")?;
             opts.peer_b2a_probe_id = Some(announced_b2a_marker(raw)?);
+        }
+        if let Some(v) = obj_get(fields, "peer_overlay_ip") {
+            // §4.3's explicit a2b target: a BARE dotted-quad IPv4 only — the
+            // map's own `ip/prefix` shape, IPv6 or a hostname must not sneak
+            // through the arm (fail-closed, same discipline as every other
+            // option); the address is the only thing taken.
+            let raw = as_str(v).ok_or("peer_overlay_ip must be a string")?;
+            let ip = crate::config::parse_ipv4(raw.trim())
+                .ok_or_else(|| format!("peer_overlay_ip '{raw}' is not a bare dotted-quad IPv4 address"))?;
+            opts.peer_overlay_ip = Some(ip);
         }
         if let Some(v) = obj_get(fields, "exclusion_generation") {
             // N2-H I3a (v3.1 §2.1 R-2①): the shell's accepted generation —
@@ -2576,57 +2596,94 @@ fn unobserved_receipt(
 ///   relay of §13.10 handed the announced marker in through the arm options
 ///   ([`CollectorHost::peer_report`]) — otherwise it is a recorded gap (never
 ///   guessed, never replaced by the a2b echo).
+/// The a2b positive control's destination (§4.3) out of the freeze facts'
+/// `peer_overlay` addresses. An explicit arm-option pin is honoured only when
+/// it IS one of the usable addresses (a pin the map contradicts is a reasoned
+/// gap, never a fallback to list order); without a pin the target is
+/// auto-selected only when the DEDUPED usable set holds exactly ONE address —
+/// several candidates are an `ambiguous-peer-target` gap (list order is not a
+/// selection rule on multi-peer maps), zero is the no-overlay gap. The `Err`
+/// text is the probe's recorded reason.
+fn select_posctl_peer_target(
+    explicit: Option<[u8; 4]>,
+    peer_overlay: &[[u8; 4]],
+) -> Result<[u8; 4], String> {
+    let mut usable: Vec<[u8; 4]> = Vec::new();
+    for addr in peer_overlay {
+        if !usable.contains(addr) {
+            usable.push(*addr);
+        }
+    }
+    match explicit {
+        Some(ip) if usable.contains(&ip) => Ok(ip),
+        Some(ip) => Err(format!(
+            "explicit peer_overlay_ip {}.{}.{}.{} is not among the usable IPv4 peer overlay \
+             addresses (network-map peers[].vpn_addresses)",
+            ip[0], ip[1], ip[2], ip[3]
+        )),
+        None => match usable.as_slice() {
+            [] => Err("no usable IPv4 peer overlay (network-map peers[].vpn_addresses)".to_string()),
+            [only] => Ok(*only),
+            many => Err(format!(
+                "ambiguous-peer-target: {} usable IPv4 peer overlay addresses and no explicit \
+                 peer_overlay_ip arm option",
+                many.len()
+            )),
+        },
+    }
+}
+
 fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> {
     let mut out: Vec<PosctlProbe> = Vec::new();
-    let peer_ip = win.facts.peer_overlay.first().copied();
-    match peer_ip {
-        Some(ip) => {
-            let dst = SocketAddr::from((ip, win.options.posctl_port));
-            let nonce = crate::n2h::fresh_nonce_hex()
-                .unwrap_or_else(|_| "000000000000000000000000".to_string());
-            let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
-            match send_posctl(dst, &id) {
-                Ok((_n, src)) => {
-                    win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
-                    out.push(PosctlProbe {
-                        probe_id: id,
-                        direction: "a2b".into(),
-                        tuple: FiveTuple {
-                            proto: "ipv4".into(),
-                            src,
-                            dst: dst.to_string(),
-                        },
-                        expected_path: "tunnel",
-                        sent: true,
-                        sent_at_mono: win.clock.mono_ms(),
-                        observed: None,
-                        note: "awaiting the from-os tunnel-entrance frame AND the echo return in to-os (§4.3/D5)".into(),
-                    });
-                }
-                Err(e) => {
-                    notes.push(format!("posctl a2b send failure to {dst}: {e}"));
-                    out.push(PosctlProbe {
-                        probe_id: id,
-                        direction: "a2b".into(),
-                        expected_path: "tunnel",
-                        sent: false,
-                        note: format!("send failed: {e}"),
-                        ..PosctlProbe::default()
-                    });
-                }
+    let peer_ip =
+        match select_posctl_peer_target(win.options.peer_overlay_ip, &win.facts.peer_overlay) {
+            Ok(ip) => Some(ip),
+            Err(reason) => {
+                notes.push(format!("posctl a2b not sent: {reason} (§4.3)"));
+                out.push(PosctlProbe {
+                    direction: "a2b".into(),
+                    expected_path: "tunnel",
+                    sent: false,
+                    note: reason,
+                    ..PosctlProbe::default()
+                });
+                None
             }
-        }
-        None => {
-            notes.push(
-                "posctl a2b not sent: no peer overlay address in the freeze facts (§4.3)".into(),
-            );
-            out.push(PosctlProbe {
-                direction: "a2b".into(),
-                expected_path: "tunnel",
-                sent: false,
-                note: "no peer overlay address (network-map peers[].vpn_addresses empty)".into(),
-                ..PosctlProbe::default()
-            });
+        };
+    if let Some(ip) = peer_ip {
+        let dst = SocketAddr::from((ip, win.options.posctl_port));
+        let nonce = crate::n2h::fresh_nonce_hex()
+            .unwrap_or_else(|_| "000000000000000000000000".to_string());
+        let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
+        match send_posctl(dst, &id) {
+            Ok((_n, src)) => {
+                win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
+                out.push(PosctlProbe {
+                    probe_id: id,
+                    direction: "a2b".into(),
+                    tuple: FiveTuple {
+                        proto: "ipv4".into(),
+                        src,
+                        dst: dst.to_string(),
+                    },
+                    expected_path: "tunnel",
+                    sent: true,
+                    sent_at_mono: win.clock.mono_ms(),
+                    observed: None,
+                    note: "awaiting the from-os tunnel-entrance frame AND the echo return in to-os (§4.3/D5)".into(),
+                });
+            }
+            Err(e) => {
+                notes.push(format!("posctl a2b send failure to {dst}: {e}"));
+                out.push(PosctlProbe {
+                    probe_id: id,
+                    direction: "a2b".into(),
+                    expected_path: "tunnel",
+                    sent: false,
+                    note: format!("send failed: {e}"),
+                    ..PosctlProbe::default()
+                });
+            }
         }
     }
     let report = win.host.peer_report();
@@ -3215,6 +3272,25 @@ fn parse_addr_literal(s: &str) -> Option<([u8; 4], u16)> {
     }
 }
 
+/// One peer OVERLAY address from the network map's `peers[].vpn_addresses[]`
+/// (§4.3: the a2b positive control's destination set). The connector renders
+/// EVERY entry through `route_network_string` — `a.b.c.d/p` (evidence 0017:
+/// `100.108.126.29/32`) — so a legal `/0..=32` prefix is the production shape:
+/// the ADDRESS is taken, the prefix only validated. A bare dotted-quad stays
+/// valid (older documents). Anything else — IPv6, an out-of-range or
+/// non-numeric prefix, a hostname, junk — is not an address: `None`, never a
+/// guessed IPv4. This is the peer-overlay reader ONLY; outer endpoints keep
+/// the strict `host:port` [`parse_addr_literal`] and never accept a CIDR.
+fn peer_overlay_ipv4(s: &str) -> Option<[u8; 4]> {
+    match s.split_once('/') {
+        Some((addr, prefix)) => {
+            prefix.trim().parse::<u8>().ok().filter(|p| *p <= 32)?;
+            crate::config::parse_ipv4(addr.trim())
+        }
+        None => crate::config::parse_ipv4(s.trim()),
+    }
+}
+
 fn injected_from_addr(addr: &str) -> Option<InjectedEndpoint> {
     let (ip, port) = parse_addr_literal(addr)?;
     let host = format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
@@ -3460,8 +3536,8 @@ pub fn process_freeze_facts_with_core(
         for peer in obj_get(fields, "peers").map(as_arr).unwrap_or(&[]) {
             let Some(entry) = as_obj(peer) else { continue };
             for vpn in obj_get(entry, "vpn_addresses").map(as_arr).unwrap_or(&[]) {
-                if let Some(a) = as_str(vpn).and_then(|s| parse_addr_literal(&format!("{s}:0"))) {
-                    facts.peer_overlay.push(a.0);
+                if let Some(a) = as_str(vpn).and_then(peer_overlay_ipv4) {
+                    facts.peer_overlay.push(a);
                 }
             }
         }
@@ -4602,6 +4678,13 @@ mod tests {
         assert_eq!(opts.shell_exclusions[0].kind, EndpointKind::Management);
         assert_eq!(opts.shell_exclusions[0].resolved, "203.0.113.7:443");
         assert_eq!(opts.shell_exclusions[1].resolved, "", "resolved is optional");
+        // §4.3's explicit a2b pin: a BARE dotted-quad IPv4, strictly parsed
+        let pinned = ArmOptions::parse_json(
+            "{\"posctl_port\":40001,\"peer_overlay_ip\":\"10.77.0.9\"}",
+        )
+        .expect("a bare IPv4 pin parses");
+        assert_eq!(pinned.peer_overlay_ip, Some([10, 77, 0, 9]));
+        assert_eq!(pinned.posctl_port, 40_001, "the neighbouring options are untouched");
         // the shell set feeds the freeze with the D7 token
         let frozen = assemble_freezes(&FreezeSources {
             shell_exclusions: opts.shell_exclusions.clone(),
@@ -4617,6 +4700,7 @@ mod tests {
         assert_eq!(defaults.posctl_port, DEFAULT_POSCTL_PORT);
         assert_eq!(defaults.probe_wait_ms, PROBE_WAIT_MS_DEFAULT);
         assert!(defaults.shell_exclusions.is_empty());
+        assert_eq!(defaults.peer_overlay_ip, None, "no pin without the key");
         for bad in [
             "not json",
             "[]",
@@ -4628,6 +4712,13 @@ mod tests {
             "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"\",\"port\":1}]}",
             "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"h\",\"port\":0}]}",
             "{\"shell_exclusions\":[{\"kind\":\"relay\",\"host\":\"h\"}]}",
+            // the pin accepts a bare IPv4 ONLY: the map's own CIDR shape,
+            // IPv6, a hostname, a wrong type and a bad octet all refuse
+            "{\"peer_overlay_ip\":\"10.77.0.2/32\"}",
+            "{\"peer_overlay_ip\":\"::1\"}",
+            "{\"peer_overlay_ip\":\"n2h-peer.example\"}",
+            "{\"peer_overlay_ip\":42}",
+            "{\"peer_overlay_ip\":\"10.77.0.256\"}",
         ] {
             assert!(ArmOptions::parse_json(bad).is_err(), "'{bad}' must be refused");
         }
@@ -5008,7 +5099,7 @@ mod tests {
             \"address_prefix_len\":32,\"interface_dns\":\"10.0.0.53\",\"signal\":\"signal.example:10000\",\
             \"routes\":[],\"dns\":{\"service_enable\":true,\"servers\":[{\"ip\":\"10.0.0.54\",\"port\":53}]},\
             \"peer_count\":1,\"peers\":[{\"pub_key\":\"k\",\"allowed_ips\":1,\
-            \"vpn_addresses\":[\"10.77.0.2\"]}],\"default_route\":{\"allowed\":false,\"reason\":\"held\"}}";
+            \"vpn_addresses\":[\"10.77.0.2/32\"]}],\"default_route\":{\"allowed\":false,\"reason\":\"held\"}}";
         let facts = process_freeze_facts(status, network).expect("both documents parse");
         assert_eq!(facts.wg_peer_endpoints.len(), 1, "a null endpoint is not a freeze");
         assert_eq!(facts.wg_peer_endpoints[0].resolved, "198.51.100.4:51820");
@@ -5064,6 +5155,87 @@ mod tests {
             facts.own_overlay,
             facts.peer_overlay
         );
+    }
+
+    /// Evidence 0017's PRODUCTION shape: the connector renders EVERY
+    /// `peers[].vpn_addresses[]` entry as `a.b.c.d/p`
+    /// (`route_network_string`, e.g. `100.108.126.29/32`), so the
+    /// peer-overlay source must take the address out of a legal `/0..=32`
+    /// CIDR while bare IPv4 keeps working — and must refuse IPv6, a bad
+    /// prefix, or a hostname without ever inventing an IPv4. The pre-fix
+    /// reader parsed `"{s}:0"` as a SocketAddr and silently dropped every
+    /// CIDR entry: the field was non-empty yet `peer_overlay` came out
+    /// empty, so the a2b positive control was never sent.
+    #[test]
+    fn peer_overlay_vpn_addresses_take_cidr_addresses_and_refuse_non_ipv4() {
+        // production shape, bare compat, prefix range ends, surrounding space
+        assert_eq!(peer_overlay_ipv4("100.108.126.29/32"), Some([100, 108, 126, 29]));
+        assert_eq!(peer_overlay_ipv4("10.77.0.2"), Some([10, 77, 0, 2]));
+        assert_eq!(peer_overlay_ipv4("10.0.0.1/0"), Some([10, 0, 0, 1]));
+        assert_eq!(peer_overlay_ipv4(" 10.77.0.3/24 "), Some([10, 77, 0, 3]));
+        // refusals — a non-address never becomes a fabricated IPv4
+        assert_eq!(peer_overlay_ipv4("10.77.0.2/33"), None, "prefix out of range");
+        assert_eq!(peer_overlay_ipv4("10.77.0.2/abc"), None, "non-numeric prefix");
+        assert_eq!(peer_overlay_ipv4("10.77.0.2/"), None, "empty prefix");
+        assert_eq!(peer_overlay_ipv4("::1/128"), None, "IPv6 with prefix");
+        assert_eq!(peer_overlay_ipv4("2001:db8::1"), None, "bare IPv6");
+        assert_eq!(peer_overlay_ipv4("n2h-peer.example"), None, "hostname");
+        assert_eq!(peer_overlay_ipv4("10.77.0.256/32"), None, "bad octet");
+        assert_eq!(peer_overlay_ipv4(""), None, "empty");
+        // document level: peer `k` carries the production CIDR plus a bare
+        // address, peer `j` only unusable entries — the facts keep usable
+        // IPv4 addresses in document order, junk silently out
+        let status = "{\"running\":true,\"state\":\"connected\"}";
+        let network = "{\"available\":true,\"serial\":9,\"address\":\"10.77.0.1\",\
+            \"address_prefix_len\":32,\"routes\":[],\"peer_count\":2,\"peers\":[\
+            {\"pub_key\":\"k\",\"allowed_ips\":2,\
+            \"vpn_addresses\":[\"100.108.126.29/32\",\"10.77.0.9\"]},\
+            {\"pub_key\":\"j\",\"allowed_ips\":1,\
+            \"vpn_addresses\":[\"::1/128\",\"10.77.0.2/33\",\"n2h-peer\"]}]}";
+        let facts = process_freeze_facts(status, network).expect("both documents parse");
+        assert_eq!(
+            facts.peer_overlay,
+            vec![[100, 108, 126, 29], [10, 77, 0, 9]],
+            "CIDR + bare IPv4 are taken, IPv6/bad-prefix/hostname dropped: {:?}",
+            facts.peer_overlay
+        );
+    }
+
+    /// §4.3's multi-peer a2b discipline: a pinned `peer_overlay_ip` wins only
+    /// when the map corroborates it (a pin outside the usable set is a
+    /// reasoned gap, never a fallback to list order); without a pin the target
+    /// is auto-selected ONLY from a deduped single-address set — several
+    /// candidates are an `ambiguous-peer-target` gap. A 6-peer host must never
+    /// send its positive control to "whatever came first".
+    #[test]
+    fn posctl_peer_target_is_pinned_or_unique_and_never_list_order() {
+        // the production-ish 2-peer map: the FIRST entry is deliberately NOT
+        // the n2h peer, the second is the pinned target
+        let peers = [[100, 108, 126, 29], [10, 77, 0, 9]];
+        assert_eq!(
+            select_posctl_peer_target(Some([10, 77, 0, 9]), &peers),
+            Ok([10, 77, 0, 9]),
+            "the pin selects its own address (the second), not the first"
+        );
+        // a pin the map contradicts: a reasoned gap, no first-fallback
+        let miss = select_posctl_peer_target(Some([10, 99, 0, 1]), &peers).unwrap_err();
+        assert!(miss.contains("not among the usable IPv4 peer overlay"), "{miss}");
+        // no pin + several candidates: ambiguous, list order is not a rule
+        let ambiguous = select_posctl_peer_target(None, &peers).unwrap_err();
+        assert!(ambiguous.contains("ambiguous-peer-target"), "{ambiguous}");
+        assert!(ambiguous.contains('2'), "the reason names the candidate count: {ambiguous}");
+        // no pin + exactly one usable address: the pre-existing auto behavior
+        assert_eq!(select_posctl_peer_target(None, &[[10, 77, 0, 2]]), Ok([10, 77, 0, 2]));
+        // no pin + no usable address: the familiar no-overlay gap
+        assert_eq!(
+            select_posctl_peer_target(None, &[]),
+            Err("no usable IPv4 peer overlay (network-map peers[].vpn_addresses)".to_string())
+        );
+        // duplicates never fake ambiguity; a pinned duplicate is fine
+        let dupes = [[10, 77, 0, 2], [10, 77, 0, 2]];
+        assert_eq!(select_posctl_peer_target(None, &dupes), Ok([10, 77, 0, 2]));
+        assert_eq!(select_posctl_peer_target(Some([10, 77, 0, 2]), &dupes), Ok([10, 77, 0, 2]));
+        println!("[I5] posctl target: pin-or-unique selection refuses list order");
     }
 
     /// v3.1's dns freeze caliber (preregistration :68/:112), the whole rule in
