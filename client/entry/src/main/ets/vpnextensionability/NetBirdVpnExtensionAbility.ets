@@ -372,6 +372,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N2-H I5 (§5.3-1): the one-shot latch of the control-file check, so the
   // watcher attempts the arm at most once per ability instance.
   private n2hArmAttempted: boolean = false;
+  // 2026-09-18 timing fix: log-dedup ONLY — the ticket-present-but-session-
+  // not-ready WAITING line prints once per instance instead of every watcher
+  // tick. It never gates anything: the arm attempt stays owned by
+  // n2hArmAttempted alone.
+  private n2hArmWaitLogged: boolean = false;
   // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the generation counter of THIS ability
   // instance. requestId is fixed for the instance's whole lifetime (onCreate
   // runs before any create()), so a per-instance counter IS the frozen
@@ -1136,23 +1141,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // attribute the counterparty's b2a positive control. Everything is
   // marker-logged with `diag=true|is_evidence=false`: arming is a diagnostic
   // action, never gate evidence — only the reviewed document is.
-  // N2-H I5a (§13.15): every outcome of this hook is now observable — the three
-  // existing markers (ARMED / NOT_ARMED / ARM_FAILED|REJECTED) plus, for the
-  // file probe itself, exactly one N2H_COLLECTOR_ARM_SKIPPED line (see
-  // probeN2hArmFile).
+  // N2-H I5a (§13.15): every outcome of this hook is now observable — ARMED /
+  // ARM_FAILED|REJECTED, the one N2H_COLLECTOR_ARM_SKIPPED line for the file
+  // probe itself (see probeN2hArmFile), and — since the 2026-09-18 timing fix
+  // — one deduped N2H_COLLECTOR_WAITING line while the ticket exists but the
+  // session gate (wg.device_up && wg.ready) is still closed.
   private maybeArmN2hCollector(status: ConnectorStatusResult): void {
     if (this.n2hArmAttempted || this.destroyRequested) {
       return;
     }
-    // N2-H I5a (§13.15): the ONE-SHOT latch is set BEFORE the probe, so the
-    // attempt itself is what happens at most once per ability instance — not
-    // the success. The skip below is therefore printed on the FIRST tick that
-    // reached this hook and never again, and `attempted=true` on that line is
-    // the visible form of the same single field (no second counter).
-    this.n2hArmAttempted = true;
     const armPath: string = this.n2hArmFilePath();
     const probe: N2hArmProbeOutcome = this.probeN2hArmFile(armPath);
     if (!probe.present) {
+      // N2-H I5a (§13.15): for a missing/unreadable file the ONE-SHOT latch is
+      // still consumed — no ticket IS the normal startup default, that single
+      // probe is the whole attempt, and the skip below is printed on the FIRST
+      // tick that reached this hook and never again (`attempted=true` on the
+      // line is the visible form of the same single field, no second counter).
+      this.n2hArmAttempted = true;
       // The silent branch the 2026-09-18 device dry-run could not explain: 84
       // zero-row collector reads, a2b_seen=0, and no marker saying the arm had
       // never been attempted. The reason distinguishes "proved absent" from
@@ -1169,12 +1175,28 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       status.wg !== undefined && status.wg !== null && status.wg.device_up === true;
     const ready: boolean = status.wg !== undefined && status.wg !== null && status.wg.ready === true;
     if (!deviceUp || !ready) {
-      hilog.warn(DOMAIN, TAG,
-        'N2H_COLLECTOR_NOT_ARMED|requestId=%{public}s|reason=session-not-ready|' +
-        'deviceUp=%{public}s|ready=%{public}s|diag=true|is_evidence=false',
-        this.requestId, String(deviceUp), String(ready));
+      // 2026-09-18 real-device fix (0016 run, 21:42): the ticket was written
+      // while WG was still ramping (deviceUp=true, ready=false) and the FIRST
+      // watcher tick consumed the only attempt here — even if the session had
+      // become ready later, that instance could no longer arm (0016 ended
+      // before any later state was observed). While the gate is closed
+      // the attempt is therefore NOT consumed and the native arm is NOT
+      // called: one deduped WAITING line (the boolean above is log-dedup
+      // only, never a gate) and the EXISTING watcher's later ticks re-check.
+      // No timer, no retry loop, the gate itself unchanged.
+      if (!this.n2hArmWaitLogged) {
+        this.n2hArmWaitLogged = true;
+        hilog.warn(DOMAIN, TAG,
+          'N2H_COLLECTOR_WAITING|requestId=%{public}s|reason=session-not-ready|' +
+          'deviceUp=%{public}s|ready=%{public}s|attempted=false|diag=true|is_evidence=false',
+          this.requestId, String(deviceUp), String(ready));
+      }
       return;
     }
+    // Gate open: THIS tick is the one attempt. Latched BEFORE the file read /
+    // native call so a native failure is reported once (ARM_FAILED|REJECTED)
+    // and never retried on later ticks.
+    this.n2hArmAttempted = true;
     // The control file carries only non-sensitive window options; a malformed
     // or absent body falls back to the §5.1 defaults (the core re-validates
     // and refuses anything it cannot understand).

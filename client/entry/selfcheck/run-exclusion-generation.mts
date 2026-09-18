@@ -58,16 +58,21 @@
 //      ARM_SKIPPED (I5a, through the REAL tick); beacons + zero ticks ⇒ the
 //      beacons and NO arm line; neither beacon ⇒ no N2H_COLLECTOR_PATH line at
 //      all (extension process never started). Source pins close the group.
-//   A1-A6 (I5a §13.15): the arm hook's outcome is never silent — an absent or
-//      unreadable arm control file emits exactly ONE
-//      N2H_COLLECTOR_ARM_SKIPPED line (reason=arm-file-absent for a PROVED
-//      absence: boolean false or BusinessError 13900002; reason=
+//   A1-A6 (I5a §13.15 + 2026-09-18 real-device timing fix): the arm hook's
+//      outcome is never silent — an absent or unreadable arm control file
+//      emits exactly ONE N2H_COLLECTOR_ARM_SKIPPED line (reason=arm-file-absent
+//      for a PROVED absence: boolean false or BusinessError 13900002; reason=
 //      arm-file-unreadable for every other error token, which does not prove
 //      absence) carrying the raw code as accessError=, WITHOUT calling the core
-//      arm; the one-shot latch silences every later tick of that instance (and
-//      a file appearing later never arms it); the present-file NOT_ARMED (gate
-//      closed, both field combinations) and ARMED (gate open) paths stay
-//      byte-identical (regression).
+//      arm, and that probe consumes the instance's one-shot latch (a file
+//      appearing later never arms it). With the ticket PRESENT but the session
+//      gate closed the attempt is NOT consumed: one deduped
+//      N2H_COLLECTOR_WAITING|attempted=false line (NOT_ARMED retired — the
+//      0016 run showed the first tick eating the only attempt while WG was
+//      still ramping), the SAME instance then arms exactly once on the first
+//      gate-open tick with the payload unchanged, a tick after that repeats
+//      nothing, destroyRequested still arms nothing, and the gate-open ARMED
+//      path stays byte-identical (regression).
 //   C1-C6 (N2-H arm private channel, 2026-09-18): the arm ticket moved from
 //      the app-invisible /data/local/tmp path into the app's OWN filesDir,
 //      written by the REAL EntryAbility from the non-secret `n2h_arm_options`
@@ -574,26 +579,66 @@ try {
     '|reason=arm-file-unreadable|path=' + ARM_TICKET_PATH + '|accessError=no-code' +
     '|attempted=true|diag=true|is_evidence=false', noCodeLine);
 
-  // ② ③ regressions: the file present keeps the EXISTING two branches verbatim
-  // (and prints no skip line).
-  const notReadyAbility = freshAbility(mod, FIXTURE_FILESDIR);
-  setArmFile(true, undefined);
+  // ② ③ (2026-09-18 real-device timing fix): with the ticket present but the
+  // session gate closed the hook WAITS — one deduped WAITING line, no native
+  // call, latch open — and the SAME instance arms exactly once on the first
+  // later tick whose gate opens, ticket payload unchanged. NOT_ARMED is
+  // retired: it consumed the only attempt while WG was still ramping (0016).
+  const waitAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  const WAIT_TICKET = '{"posctl_port":41000,"probe_wait_ms":900}';
+  setArmFile(true, undefined, WAIT_TICKET);
   resetLog();
-  tickArm(notReadyAbility, { wg: { device_up: false, ready: true } });
-  check('A5 file present + gate closed keeps the existing NOT_ARMED literal (regression)',
-    linesWith('N2H_COLLECTOR_NOT_ARMED|').length === 1 &&
-    lastLine('N2H_COLLECTOR_NOT_ARMED|') ===
-    'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
-    '|reason=session-not-ready|deviceUp=false|ready=true|diag=true|is_evidence=false' &&
-    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
-  const notReadyAbility2 = freshAbility(mod, FIXTURE_FILESDIR);
+  const callsAtWait = Number(G['__NB_ARM_CALLS'] ?? 0);
+  tickArm(waitAbility, { wg: { device_up: false, ready: true } });
+  check('A5 file present + gate closed emits ONE deduped WAITING line, no native call, ' +
+    'latch open (NOT_ARMED retired)',
+    linesWith('N2H_COLLECTOR_WAITING|').length === 1 &&
+    lastLine('N2H_COLLECTOR_WAITING|') ===
+    'N2H_COLLECTOR_WAITING|requestId=' + REQUEST_ID +
+    '|reason=session-not-ready|deviceUp=false|ready=true|attempted=false|' +
+    'diag=true|is_evidence=false' &&
+    linesWith('N2H_COLLECTOR_NOT_ARMED|').length === 0 &&
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0 &&
+    Number(G['__NB_ARM_CALLS'] ?? 0) === callsAtWait &&
+    waitAbility['n2hArmAttempted'] === false, JSON.stringify(logs()));
+  tickArm(waitAbility, { wg: { device_up: true, ready: false } });
+  check('A5 a second waiting tick (the 0016 shape deviceUp=true|ready=false) repeats NOTHING ' +
+    '(dedup boolean: still the single first-tick line, zero native calls, latch open)',
+    linesWith('N2H_COLLECTOR_WAITING|').length === 1 &&
+    linesWith('N2H_COLLECTOR_WAITING|').every((l: string): boolean =>
+      l.indexOf('|deviceUp=false|ready=true|attempted=false|') > 0) &&
+    linesWith('N2H_COLLECTOR_WAITING|').every((l: string): boolean =>
+      l.indexOf('|deviceUp=true|') < 0) &&
+    Number(G['__NB_ARM_CALLS'] ?? 0) === callsAtWait &&
+    waitAbility['n2hArmAttempted'] === false, JSON.stringify(logs()));
+  waitAbility['n2hAcceptedExclusionGeneration'] = 0;
+  tickArm(waitAbility, WG_READY);
+  const waitOpts = JSON.parse(String(G['__NB_ARM_OPTS'] ?? '{}')) as Record<string, unknown>;
+  check('A5 the first ready tick arms ONCE on the SAME instance, ticket payload unchanged, ' +
+    'no extra WAITING line',
+    Number(G['__NB_ARM_CALLS'] ?? 0) === callsAtWait + 1 &&
+    waitOpts['posctl_port'] === 41000 && waitOpts['probe_wait_ms'] === 900 &&
+    waitAbility['n2hArmAttempted'] === true &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 1 &&
+    linesWith('N2H_COLLECTOR_WAITING|').length === 1 &&
+    lastLine('N2H_COLLECTOR_ARMED|') ===
+    'N2H_COLLECTOR_ARMED|requestId=' + REQUEST_ID +
+    '|gen=0|openedMono=4242|exclusions=0|posctlPort=41000|probeWaitMs=900|' +
+    'peerB2aProbeId=none|diag=true|is_evidence=false', JSON.stringify(logs()));
   resetLog();
-  tickArm(notReadyAbility2, { wg: { device_up: true, ready: false } });
-  check('A5 the arm gate still requires BOTH device_up and ready (regression)',
-    lastLine('N2H_COLLECTOR_NOT_ARMED|') ===
-    'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
-    '|reason=session-not-ready|deviceUp=true|ready=false|diag=true|is_evidence=false' &&
-    G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
+  tickArm(waitAbility, WG_READY);
+  check('A5 a tick after the arm repeats nothing (one-shot latch, no second native call)',
+    logs().length === 0 && Number(G['__NB_ARM_CALLS'] ?? 0) === callsAtWait + 1,
+    JSON.stringify(logs()));
+  const destroyedAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  destroyedAbility['destroyRequested'] = true;
+  setArmFile(true, undefined); // present-but-empty ticket: A6 below reads the defaults
+  resetLog();
+  tickArm(destroyedAbility, WG_READY);
+  check('A5 destroyRequested still arms nothing (unchanged guard: no line, no native call, ' +
+    'latch stays open)',
+    logs().length === 0 && Number(G['__NB_ARM_CALLS'] ?? 0) === callsAtWait + 1 &&
+    destroyedAbility['n2hArmAttempted'] === false, JSON.stringify(logs()));
   const readyAbility = freshAbility(mod, FIXTURE_FILESDIR);
   readyAbility['n2hAcceptedExclusionGeneration'] = 0;
   resetLog();

@@ -87,3 +87,26 @@ aa start -b cn.alfadb.netbird -a EntryAbility \
 2. 普通（无参数）启动后 connect：`N2H_COLLECTOR_ARM_SKIPPED|reason=arm-file-absent|
    path=<filesDir>/netbird-n2h-arm` 且无 ARMED（默认关验证）。
 3. 诊断轮之后普通冷启动：日志含 `N2H_ARM_TICKET_REMOVED`，凭据登录不受影响。
+
+## 0016 真机事实与等待/attempt 时序修复（2026-09-18 晚，ee9f3b3 基线）
+
+- 0016 轮（21:42:45–21:42:57）：EntryAbility 输出
+  `N2H_ARM_TICKET_WRITTEN|file=netbird-n2h-arm|bytes=99`，凭据登录成功；扩展
+  21:42:54 输出 `N2H_COLLECTOR_NOT_ARMED|requestId=ui-…|reason=session-not-ready|
+  deviceUp=true|ready=false|diag=true|is_evidence=false`；无 ARM_SKIPPED，清理
+  成功。私有票据 probe 已过（该行在 readText 之前，不能声称已读取/解析票据）；
+  但 WG 未 ready 时首个 watcher tick 即把该实例唯一的 arm 尝试消费掉——即使
+  该会话此后变为 ready，该实例也没有 arm 窗口（0016 在 NOT_ARMED 后即收尾，
+  未观测到后续状态，此处为条件式推断）。
+- 时序修复（仅扩展侧 `maybeArmN2hCollector`）：文件缺失/不可读仍一次性
+  SKIPPED（attempted=true，普通启动默认关）；文件存在而
+  `!(wg.device_up && wg.ready)` 时改为**等待**——记一条去重的
+  `N2H_COLLECTOR_WAITING|requestId=…|reason=session-not-ready|deviceUp=…|
+  ready=…|attempted=false|diag=true|is_evidence=false`（NOT_ARMED 退役），
+  不置 `n2hArmAttempted`、不调 native，沿既有 watcher 后续 tick 再检查；gate
+  满足的首个 tick 才在读票据/调 native 前置位 latch。无新 timer/retry loop，
+  `wg.device_up && wg.ready` 闸未降。
+- native once 语义不变：每实例至多一次 native arm 尝试、失败不重试；变的是
+  消费时点（gate 满足时才消费，而非首个 tick）。
+- 该 WAITING→(ready)→ARMED 时序本轮仅 host selfcheck（A 组时序用例）覆盖，
+  未真机验证；ARMED/窗口仍以「真机待验」为准。
