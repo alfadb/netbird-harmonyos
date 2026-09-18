@@ -192,3 +192,46 @@ N8 侧静默 fail-open（`connector.rs` `RECREATE_MAX=3`／30 s 冷却耗尽后�
 - **治理与台账**：`docs/native-nx-governance.md:35`（「开门前细化」只能细化证据方法，不得删改或削弱）、`:43`（测量后不得追认或修改）；`docs/open-obligations-ledger.md:95-125`（OB-10 只追加节，commit `c914cf6`）。
 
 - **本节登记边界**：本节只归档第三轮裁定会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；v3 修订稿内容以 `docs/n2h-device-evidence-preregistration-draft-20260917.md` 为准。
+
+---
+
+## 跨厂商重审（2026-09-18，openai/gpt-5.6-sol 席）
+
+> 本节为同一文件**追加**的跨厂商重审归档（**会话消息要点转写，非字节级副本**）；首轮（§1–§4）、第二轮复审与第三轮裁定归档不改写、内容不变。裁定原文的编号、要点与结论强度逐字保留自派发与回报消息；会话完整原文以当次会话记录为准，本文件不代为断言其逐字内容。归档会话只读核对仓库文档与代码；未修改任何文件、未运行构建、未执行任何设备命令。
+
+- **审查对象与基线**：`docs/n2h-device-evidence-preregistration-draft-20260917.md` **v3**（432 行；工作树 HEAD `714dfb8`，干净）——对 v3（含第三轮裁定五项前置收口：dns 口径/turn 时效/wg_peer 代际七条/C10④+S20/fail-closed 扩面）的跨厂商 T0 重审。
+- **审查席**：T0 独立审查，2026-09-18，`openai/gpt-5.6-sol` 席，**干净上下文单席**（spawn 形态，不带主会话已完成轮次）；**未参与 v1/v2 两轮与第三轮裁定、未执行实现**——满足跨厂商评审独立性（原席 `anthropic/claude-opus-5` 已任 v1/v2/第三轮，不再任 v3 审席）。单席，无第二席。
+- **总裁定：修订后可生效**。v3 框架与第三轮收口成立，但须先关闭 6 项必改（R-1…R-6）；全部关闭并修订后，按「**重算 sha256 → 复审确认 → 人类最终批准 → 再登记**」程序生效——**修订本身不自动生效**，人类最终批准不得以 2026-09-18 三项旧批准代替。
+
+### 必改项（R-1…R-6，要点转写）
+
+- **R-1【高】C2 行集完整性缺可计算基数**：v3 七条规则只按「缺行」判失（第 (7) 款），日志截断掉一条宽路由时硬条件②（首代无宽前缀吸入面）可被假通，(7) 单靠「缺行」无法发现。→ 代际标记行增加 `routes=<r>` 字段；对 `gen==G`：`VPN_ROUTE_ENTRY` 行数**恰为** `r`；`index` 在该代内**唯一且连续覆盖 0..r-1**；`isExcludedRoute=="true"` 行数**恰为** `m`；`n` 自 0 起**逐次 +1、无跳号**；任一不符 ⇒ **C2 不成立**（`n2h-inconclusive`）。
+- **R-2【高】「冻结集与排除集同代」无同一机器域绑定**：第 (5) 款靠 `frozen_at_mono` 时钟序比对，跨进程读点不可机械复核。→ 代 G 作 arm 输入并写入证据文档（新增 `collector.exclusion_generation` 字段）；壳侧固化 `N2H_COLLECTOR_ARMED|…|gen=G`；判定＝`collector.exclusion_generation`、ARMED 的 `gen`、最后一次被接受的 `VPN_EXCLUSION_GENERATION` 的 `gen` **三者逐字相同**且指向同一代（接受锚点按 C2 第 (4) 款）；缺任一字段或不一致 ⇒ C2 不成立。替代方案（所有相关标记固化同一时钟域 mono 并明定比较算法）**不推荐**——新增字段更可机械验证，故选前者。
+- **R-3【中-高】冻结地址解析无唯一规范化算法、`forceDefaultRoute` 只有书面纪律**：→ **唯一规范化规则**（预注册级，不得测量时再定）：冻结解析集元素＝`frozen_endpoints[].resolved` 经**严格 IPv4 SocketAddr 解析**（`host:port`，取 host 部分为 A，按 /32）；`resolved` 非法（非 IPv4/无端口/IPv6/空）⇒ 该条计入 dns/对应必需类缺口（C1 不成立的候选），**不得静默跳过**。**硬条件①通过侧证据**（不再只是书面纪律）：冻结输入须含 `forceDefaultRoute=false`（或等价输入记录），且该轮完整日志**不得出现** `VPN_DEFAULT_ROUTE_FORCED` 标记；任一输入记录缺失、或该标记出现 ⇒ C2 不成立。
+- **R-4【中-高】dns 口径留测量后择优口子**：v3 C1 的「必要时以 all-nets 筛选」可在测量后择优选分支。→ **预先钉死的唯一分支序**：步骤 1 取 default handle（`getDefaultNetSync()`）→ 步骤 2 该 handle 非 0，且 `getNetCapabilitiesSync()` 的 `networkCap` 明确含 `NET_CAPABILITY_NOT_VPN` 且 `bearerTypes` 不含 `BEARER_VPN` → 步骤 3 仅当步骤 2 不成立时才走唯一规定的 all-nets 筛选分支（`getAllNetsSync()` 逐个 handle → 取 `NOT_VPN` 且非 `BEARER_VPN` 者）→ 步骤 4 两路径的错误、空值、无法证明「物理归属」（无 NOT_VPN 证据、或同时含 VPN bearer）均使 dns 必需类缺口（C1 不成立）。**禁止测量后择优**；分支选择过程逐字记入证据 `notes[]`（`dns-branch=default|all-nets-filtered`、`dns-physical-evidence=not-vpn-cap|...`），分支记录缺失即缺口。**唯一允许的改写处**：原文保留＋紧跟替换说明。
+- **R-5【中-高】S20 无通过侧证据契约**（部分实现可假通）：→ 壳侧 ARMED 行必须固化（逐字字段名、取值域取自 `connector_status().recreate`）：`recreateCoolingDown=false|recreateExhausted=false|recreateReason=<值>`；S20 触发时（`cooling_down==true` 或 `exhausted==true ∧ reason=="limit-reached"`）输出**稳定 NOT_ARMED reason**（逐字例：`N2H_COLLECTOR_NOT_ARMED|reason=recreate-pending|coolingDown=true|exhausted=false|recreateReason=route-set-changed`）；ARMED 行缺上述字段、或触发时未输出 ⇒ 按 **S18** 处置并记 `n2h-inconclusive`。
+- **R-6【中，程序必改】v2 规范字节定位须逐字入 §0**：当前已登记生效的 v2 文本不是工作文件当前字节；唯一规范字节＝git commit `0368d5ddf9194585478c957e46e0442640e69048` 中该文件内容，全文 sha256 `bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be`，仓B `records/n2h-preregistration-effective-20260917.json` 及其 sidecar 为登记锚点；v3 在跨厂商重审、人类最终批准和新 sha256 重登记完成前**不具有据以测量效力**；2026-09-18 三项人类原话仅批准开启 v3、接受 fail-closed 口径与登记 OB-10，**不等于对 v3 定稿的最终生效批准**。
+
+### 抽验要点（重审席核对所引代码事实；本节落盘会话于工作树 HEAD `714dfb8` 逐项只读复核一致）
+
+- **generation/recreate-resolved/gen 标记在 HEAD 零命中**：`VPN_EXCLUSION_GENERATION`、`VPN_RECREATE_RESOLVED` 在 `client/entry/src/` 全树 grep 零命中；`VPN_ROUTE_ENTRY` 行（`NetBirdRouteValidation.ets:245-253`）不携带 `gen=` 字段（grep `gen=` 零命中）——判据先行，实现落齐前按七条第 (7) 条如实记 `n2h-inconclusive`。
+- **collector 仍把 `interface_dns` 纳入 dns 冻结来源**：`client/core/src/n2h_collector.rs:478`（`dns_servers` ＝ `dns.servers[]` + `interface_dns`）、`:3162-3165`（`interface_dns` 以 `:53` 端口注入 `dns_servers`）——与 v3 C1 dns 口径（`interface_dns` 一律不入冻结集）不符，属实现面待办（v3 记录未决项 5），落齐前 C1/C2 如实不成立。
+- **当前 build 不能通过 C2，但判据先行**：排除面 3/7（`NetBirdEndpointExclusion.ets:45-51`）＋代际标记/gen 字段未落盘 ⇒ 按 v3 既有登记「本轮预期 C2 不成立 → `n2h-inconclusive`、排除面补齐 7/7 前不得登记通过类结论」；判据不因此削弱。
+- 其余锚点复核沿用第三轮裁定节：`frozen_at_mono`（`n2h_collector.rs:1998-1999`）、recreate 状态字段（`connector.rs:170-179`：`cooling_down`/`exhausted`/`reason`，reason token 域 `none`/`route-set-changed`/`limit-reached` 见 `:177`，`:1355` 置 `limit-reached`）、arm 前置检查（`NetBirdVpnExtensionAbility.ets:981-990`）、ARMED 行现行格式（`:1058`，现无 `gen=` 与 recreate 字段——R-2/R-5 落盘项）。
+
+### 重登记要素清单（修订后生效前逐项落齐）
+
+1. **新定稿字节锚点**：定稿路径（`docs/n2h-device-evidence-preregistration-draft-20260917.md`）、定稿时 git commit、全文 sha256、字节与行数（`wc -c`/`wc -l` 原值）；
+2. **审查席与记录锚点**：跨厂商重审（本节）＋修订后**复审确认**记录（确认 R-1…R-6 已关闭）；
+3. **人类最终批准原话**：重审通过后新取得的一次批准，逐字登记——**不得以 2026-09-18 三项旧批准（开 v3/接受 fail-closed 口径/登记 OB-10）代替**；
+4. **带时区生效时刻**；
+5. **逐字作废声明**：「自该生效时刻起 v2 锚点 `bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be` 的据以测量效力作废，仅保留历史审计效力」；
+6. **campaign AUTH 逐字引用新 v3 sha256**（AUTH 绑定登记）；dry-run 诊断 AUTH 不引用该 sha256、不消费任何 EV/pair ID；
+7. **G-4④ 续行**：生效后任何改动＝新版本＝重新独立审查＋重新登记 sha256；
+8. **登记记录带 `.sha256` sidecar**；禁词自检按 §8.2 固化三点（定稿时/每份证据文档落盘时/每份执行记录落盘时）各实跑一次。
+
+### 不确定点（真机项保持未验证）
+
+真机项一律保持未验证：U-N1 `dnses[]` 运行时非空性、U-N2 是否即物理解析器、U-N3 VPN 生效后 `getDefaultNet`/`getAllNets` 语义、U-N4 `GET_NETWORK_INFO` 运行时授予与行为；U-N5 扩面——v3.1 新要求的标记与字段（`routes=`/`index=`/`gen=`、ARMED 的 `gen` 与 recreate 字段、`VPN_DEFAULT_ROUTE_FORCED`、`collector.exclusion_generation`、dns 分支 `notes[]` 记录）均未在实现输出（HEAD 零命中，判据先行）。落齐并真机验证前不得据以登记任何通过类结论。
+
+- **本节登记边界**：本节只归档跨厂商重审会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；v3.1 修订稿内容以 `docs/n2h-device-evidence-preregistration-draft-20260917.md` 为准。
