@@ -543,3 +543,36 @@ cd "$EVDIR" && sha256sum hilog-n2h-collector-*.log n2h-isolation-evidence-device
 | ⑩ | hilog 缓冲在窗口期间是否足以容纳 20–60 行且不旋转 | 依赖设备 hilog 缓冲配置与当轮日志量；失败形态＝`n2h-decode` exit 21 + `missing=<seq>` |
 | ⑪ | 设备侧 `/proc/net/dev` 的 App 内直读权限（设计 §9-U1） | 未在真机验证；不可读时该腿退化为 hdc fallback 或在 `notes[]` 记 `counters-source=` 缺口 |
 | ⑫ | `hilog -D 0x2900 -b D` 在本轮设备 hilog 版本的参数兼容性 | 沿用 N13 实测形态（`docs/n13-device-relay-evidence-20260916.md:97`）；参数名以设备版本为准，仍须在 AUTH allowed 字面内 |
+
+---
+
+## 待确认① 关闭登记（2026-09-18，纯追加）
+
+> **本节为纯追加**：§1.1（L93、L125）与 §8 表第 ① 行（L356）原文一字未改、一行未删；本节只登记 2026-09-18 本轮人类确认结果，构成待确认①的关闭登记。
+
+**人类选定**（2026-09-18，本会话 DSH Web GUI，`ask_user_question` 应答）：
+
+| 项 | 值 | 出处 / 说明 |
+|---|---|---|
+| 当轮生效签名 profile | `profiles/NetBird HarmonyOS Debug ACL.p7b` | 2026-09-18 人类选定（本会话 DSH Web GUI） |
+| verbatim 应答 | `候选 1（ACL profile）（推荐）` | 同上；逐字誊录，未改写 |
+| sha256 | `4be623b12a203d9560a40a4a69f68586471d5355d3318990f7f9feb2ed7425c5` | 2026-09-18 `sha256sum` 实测（只读） |
+| 大小 / mtime | 4193 B / `2026-09-14 07:20` | 同上（`stat` 实测） |
+
+**选定依据**：`AUTH-DIAG-DEVICE-VALIDATION-20260916-0002` 的 `EXECUTION-RECORD-20260915-1900.md:21` 与 `AUTH-DIAG-DEVICE-VALIDATION-20260915-0003` 的 `EXECUTION-RECORD-20260915T2012-partial.md:15` 均**逐字点名**该 profile；后续轮次的记录沿用「ACL profile」这一称法指代同一文件。
+
+**未选中候选与理由**：
+
+| 候选 | 标识 | 未选中理由 |
+|---|---|---|
+| `NetBird HarmonyOS Debug.p7b` | `820508fb…433c0` | 其载荷与选定件**仅 `uuid` 不同**（`a8ec3a35-…f16d` vs `2ad7bb56-…7126`），且两者 `acls.allowed-acls` 均为 `[]` ⇒ 属等价候选，但非本轮人类选定 |
+| `NetBird N1BDISC Debug.p7b` | `49c99c56…19a4` | 其 bundle 名 `cn.alfadb.netbird.n1bdisc` 与本轮冻结 HAP 的 `cn.alfadb.netbird` 不符 ⇒ **事实性排除**（非偏好性取舍） |
+
+**本纪律不变**：该绑定**仍须每轮由人类确认**——本节只登记本轮（2026-09-18）确认结果，**不构成对后续轮次的预授权**；下一轮仍按 §1.1 L93/L125 与该轮人类确认重新取值并逐条登记。
+
+**承载**：本轮选定结果写入 `AUTH-DIAG-DEVICE-VALIDATION-20260918-0011` 的 allowed 签名条（`<p12> <p12.pass> <cer> <profile.p7b>` 逐字四值，`<profile.p7b>` 位取本节选定件）。
+
+**附注（如实登记，不推断）**：
+
+- `docs/n1b-disc-handoff-20260902.md:86` 注② 记该 cer 文件实际内容为华为 CBG Root CA G2 根证书（文件名有误导）；本节照录该既有登记，未另作推断。
+- `acls.allowed-acls` 为空 ⇒ 该 profile 在**载荷层面**不含 `MANAGE_VPN` 等 ACL 条目，与「`MANAGE_VPN` 不可授权」的既有结论一致（`docs/native-nx-governance.md:122`；`docs/n2h-isolation-evidence-notes.md:10`）。
