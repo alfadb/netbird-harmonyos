@@ -235,3 +235,66 @@ N8 侧静默 fail-open（`connector.rs` `RECREATE_MAX=3`／30 s 冷却耗尽后�
 真机项一律保持未验证：U-N1 `dnses[]` 运行时非空性、U-N2 是否即物理解析器、U-N3 VPN 生效后 `getDefaultNet`/`getAllNets` 语义、U-N4 `GET_NETWORK_INFO` 运行时授予与行为；U-N5 扩面——v3.1 新要求的标记与字段（`routes=`/`index=`/`gen=`、ARMED 的 `gen` 与 recreate 字段、`VPN_DEFAULT_ROUTE_FORCED`、`collector.exclusion_generation`、dns 分支 `notes[]` 记录）均未在实现输出（HEAD 零命中，判据先行）。落齐并真机验证前不得据以登记任何通过类结论。
 
 - **本节登记边界**：本节只归档跨厂商重审会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；v3.1 修订稿内容以 `docs/n2h-device-evidence-preregistration-draft-20260917.md` 为准。
+
+---
+
+## R-1…R-6 关闭确认复审（2026-09-18，openai/gpt-5.6-sol 席）
+
+> 本节为同一文件**追加**的关闭确认复审归档（**会话消息要点转写，非字节级副本**）；首轮（§1–§4）、第二轮复审、第三轮裁定与跨厂商重审（上一节）归档不改写、内容不变。裁定原文的编号、要点与结论强度逐字保留自派发与回报消息；会话完整原文以当次会话记录为准，本文件不代为断言其逐字内容。归档会话只读核对仓库文档与代码；未修改任何文件、未运行构建、未执行任何设备命令。
+
+- **审查对象与基线（实测值）**：预注册定稿 `docs/n2h-device-evidence-preregistration-draft-20260917.md`（v3.1），工作树 HEAD `59fc36605231b0ae3eb96785ec18649946fc5d9d`（干净，`git status --porcelain` 空），全文 sha256 `02f96bc8e4c1a7a282fbf3cd302ce0616af367509f98c40e43439f87c26e12ff`，**123150 bytes、460 lines**；本审查记录自身在本节**追加前**的 sha256 为 `fa8459cc7ebce263b23188bcd3a8f3528ad76e418c026392950ae86f965516a3`（**40095 bytes、237 lines**）。**本节追加后本记录哈希即改变**——重登记记录须引用**追加后的新哈希**（执行时 `sha256sum` 实取并逐字登记），上述追加前值仅作历史基线、不得作重登记锚点；本文件正文不写入追加后的自身哈希，避免自引用。
+- **审查席**：T0 独立复审，2026-09-18，`openai/gpt-5.6-sol` 席，**干净上下文单席**（spawn 形态，不带主会话已完成轮次）；该席同时为 v3 跨厂商重审席（上一节），本轮即其对 R-1…R-6 的**关闭确认复审**（非新增第二次独立审查）；未参与 v1/v2 两轮与第三轮裁定、未执行任何实现。
+- **总裁定（逐字）**：`R-1…R-6 全部关闭，可生效（可进入 sha256 重登记）`。**此句仅确认修订关闭；仍须新取得人类最终批准并完成 sha256 登记才生效，本轮不构成 AUTH、不产生 verdict。**
+
+### 逐条关闭确认（R-1…R-6，要点转写；`file:line` 均为预注册定稿行号）
+
+- **R-1【高】已关闭**：`:95`（(1) 款代际标记行）已含 `routes=<r>` 字段；`:97`（新增 (2a) 款）已落「`VPN_ROUTE_ENTRY` 行数**恰为** `r`」「`index` 在该代内**唯一且连续覆盖 `0..r-1`**」「`isExcludedRoute=="true"` 行数**恰为** `m`」「`n` 自 0 起逐次 +1、**无跳号**」，并逐字注明**任一不符即 C2 不成立（`n2h-inconclusive`）**、不得静默跳过。→ 行集完整性自「只按缺行判失」升级为「申报基数 vs 实读行集」的机械比对，关闭成立。
+- **R-2【高】已关闭**：`:110` 已落同一机器域三方**逐字相同**判定——`collector.exclusion_generation`（代 G 作 arm 输入并写入证据文档）、ARMED 行 `gen=G`、最后一次被接受的 `VPN_EXCLUSION_GENERATION` 的 `gen` 三者逐字相同且指向同一代（接受锚点按 C2 第 (4) 款）；并逐字注明「**缺任一字段或不一致 ⇒ C2 不成立**」；替代方案（所有相关标记固化同一时钟域 mono＋明定比较算法）明确**不采用**并写明理由（新增字段更可机械验证，故选前者）。
+- **R-3【中-高】已关闭**：`:112` 已落**唯一规范化规则**（预注册级，不得测量时再定）——冻结解析集元素＝`frozen_endpoints[].resolved` 经**严格 IPv4 SocketAddr 解析**（`host:port`，取 host 部分为 A，按 /32）；`resolved` 非法（非 IPv4/无端口/IPv6/空）⇒ 计入 dns/对应必需类缺口（C1 不成立候选），**不得静默跳过**；`:114` 已落硬条件①**通过侧证据**——冻结输入须含 `forceDefaultRoute=false`（或等价输入记录）**且**该轮完整日志**不得出现** `VPN_DEFAULT_ROUTE_FORCED`；任一输入记录缺失、或该标记出现 ⇒ C2 不成立。
+- **R-4【中-高】已关闭**：`:68`（C1 判定输入列）已「**原文逐字保留＋紧跟 v3.1 更正说明**」，逐字声明原句「必要时以 all-nets 筛选」**作废**，改为**预先钉死的唯一分支序**（步骤 1 取 default handle（`getDefaultNetSync()`）→ 步骤 2 该 handle 非 0、且 `getNetCapabilitiesSync()` 的 `networkCap` 明确含 `NET_CAPABILITY_NOT_VPN` 且 `bearerTypes` 不含 `BEARER_VPN` → 步骤 3 仅当步骤 2 不成立时才走唯一规定的 all-nets 筛选分支（`getAllNetsSync()` 逐个 handle → 取 `NOT_VPN` 且非 `BEARER_VPN` 者）→ 步骤 4 两路径的错误、空值、无法证明「物理归属」（无 NOT_VPN 证据、或同时含 VPN bearer）均使 dns 必需类缺口，C1 不成立）；**禁止测量后择优**逐字入文；分支选择过程**逐字记入证据 `notes[]`**（`dns-branch=default|all-nets-filtered`、`dns-physical-evidence=not-vpn-cap|...`），分支记录缺失即缺口。**另注（结构未破损）**：该行内 `\|` 为 Markdown 表格**转义**、**不改变渲染后的 token**（渲染仍为 `|`，单元格内容与语义不变）；实读 C1 表（`:66-77`）与 v3.1 处置表（`:447-454`）**每行恰 5 个未转义分隔符**（C1 行 `:68` 计未转义 5＋转义 2；v3.1 处置表 R-2/R-4/R-5 行分别 2/1/6 个转义）——列数正确、表格结构未破损。
+- **R-5【中-高】已关闭**：`:188`（S20 条目内追加契约段）已固化 ARMED 行**逐字字段名与取值域**——`recreateCoolingDown`／`recreateExhausted`（∈ {`true`,`false`}）／`recreateReason`（＝`client/core/src/connector.rs:177` 的 reason token 域 `none`/`route-set-changed`/`limit-reached`），取自 `connector_status().recreate`（`cooling_down`/`exhausted`/`reason` 逐项对应）；S20 触发时须输出**稳定 NOT_ARMED reason**（`reason=recreate-pending` **固定**，后三字段照实固化；逐字例 `N2H_COLLECTOR_NOT_ARMED|reason=recreate-pending|coolingDown=true|exhausted=false|recreateReason=route-set-changed`）；ARMED 行**缺上述字段**、或触发时**未输出** ⇒ 按 **S18** 处置并记 `n2h-inconclusive`。→ 通过侧证据契约成立、部分实现假通口子关闭。
+- **R-6【中，程序必改】已关闭**：`:20`（§0 末段逐字追加，仅加尾注括号）已落 v2 **规范字节定位**（机械核验）——唯一规范字节＝git commit `0368d5ddf9194585478c957e46e0442640e69048` 中该文件内容、全文 sha256 `bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be`、仓B `records/n2h-preregistration-effective-20260917.json` 及其 sidecar 为登记锚点；并注明 v3 在跨厂商重审、人类最终批准与新 sha256 重登记完成前**不具有据以测量效力**，且 **2026-09-18 三项人类原话（开 v3／接受 fail-closed 口径／登记 OB-10）≠ v3 定稿的最终生效批准**。
+
+### 结构未破损与无削弱（实读核对）
+
+- **HEAD diff 范围**：`59fc366` 仅含两份文档（`docs/n2h-device-evidence-preregistration-draft-20260917.md`、`docs/n2h-preregistration-t0-review-20260917.md`），未触碰任何代码或其他文档。
+- **变更性质**：R-1…R-6 全部为**加严**（新增字段、可计算基数、唯一规范化算法、唯一分支序、通过侧证据契约）或**程序澄清**（§0 v2 规范字节定位），无放宽、无判据删除、无延后判定；`S1–S20` 停止纪律与 `§5` AUTH/停止纪律**未见冲突**（本轮未改动其任何条目）。
+- **许可形态计数**：`grep -c 'N2-H pass' docs/n2h-device-evidence-preregistration-draft-20260917.md` 实跑 **10**（均为许可形态：引用、结论口径、登记限制与自检记录，非结论声明；定稿自检登记见 `:456`）。本审查记录文件内同命令实跑 3（本节追加后为 4，新增的 1 次即本条登记引用）。
+- **禁词自检**：预注册定稿 v3.1 自检重跑（`:455-456` 登记）五项字面 **0 命中、退出码 1**；本审查记录本节追加后同一模式实跑 **0 命中、退出码 1**。
+
+### 重登记实测要素清单（逐字，供执行）
+
+1. **定稿路径**：`docs/n2h-device-evidence-preregistration-draft-20260917.md`
+2. **HEAD commit**：`59fc36605231b0ae3eb96785ec18649946fc5d9d`
+3. **全文 sha256**：`02f96bc8e4c1a7a282fbf3cd302ce0616af367509f98c40e43439f87c26e12ff`
+4. **字节数**：`123150 bytes`
+5. **行数**：`460 lines`
+6. **本审查记录锚点**：`docs/n2h-preregistration-t0-review-20260917.md` 全文 sha256——**取本节追加后的新哈希**（执行时 `sha256sum` 实取并逐字登记；追加前值 `fa8459cc7ebce263b23188bcd3a8f3528ad76e418c026392950ae86f965516a3`／40095 bytes／237 lines 仅为历史基线）
+7. **本轮裁定原话（逐字）**：`R-1…R-6 全部关闭，可生效（可进入 sha256 重登记）`
+8. **人类最终批准（逐字登记）**：`【待人类在本轮复审后给出新的最终批准原话，并逐字登记；不得引用 2026-09-18 三项旧批准】`
+9. **生效时刻形态**：`YYYY-MM-DDTHH:MM:SS+08:00（Asia/Shanghai）`
+10. **逐字作废声明**：`自该生效时刻起 v2 锚点 bf04913959f7645ddde3a549a7ae4205a3cf34872a4fc7792f4e9296a30eb5be 的据以测量效力作废，仅保留历史审计效力`
+11. **campaign AUTH 绑定**：首次据以测量的 campaign AUTH **必须逐字引用新 hash** `02f96bc8e4c1a7a282fbf3cd302ce0616af367509f98c40e43439f87c26e12ff`；**dry-run 诊断 AUTH 不引用该 sha256，且不分配／不引用／不消费任何 EV-/pair ID**。
+12. **G-4④ 续行**：生效后任何改动＝新版本＝重新独立审查＋重新登记 sha256。
+13. **登记记录**：置仓B `records/`（文件名含日期与 effective），**带 `.sha256` sidecar**。
+14. **禁词自检三点**：定稿时／每份证据文档落盘时／每份执行记录落盘时**各实跑一次**（按 §8.2 同一模式）。
+15. **无授权无 verdict 声明**：本条清单**不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID**；v2 仍为当前已登记生效文本。
+
+### 非阻断陈旧事实更正（务必随本节登记）
+
+- **陈旧事实**：预注册定稿 `:458`（v3.1 后未决项 ⑤）与**本审查记录 `:235`**（不确定点）均把 `VPN_DEFAULT_ROUTE_FORCED` 列为「未落盘／HEAD 零命中」的实现待办项；**实读否证**——`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:520-524` **已输出该标记**（`grep -n 'VPN_DEFAULT_ROUTE_FORCED'` 命中 `:522`，字面 `'VPN_DEFAULT_ROUTE_FORCED|requestId=%{public}s|' + 'warning=data-plane-not-ready-black-hole-risk|optIn=forceDefaultRoute'`）⇒ 该登记项系**事实陈旧**（非判据冲突）。
+- **不削弱 R-3**：该标记**仅在 `forceDefaultRoute=true` 的 debug opt-in 分支输出**（`:520` 的 `if (forceDefaultRoute)`），故其实现存在不改变 `:114` 硬条件①的判定语义（输入 `forceDefaultRoute=false` 时该轮完整日志**不得出现**该标记）；实现面**反而已具备**该标记，R-3 关闭确认不变。
+- **处置**：**不动预注册定稿字节**（改变字节将须重新确认与重新 sha256 重登记，且属测量后改写，为治理所禁）；更正登记于**本节**与**后续实现台账**（`docs/open-obligations-ledger.md` 追加节，只追加）；**实现增量不得重复实现该标记**（避免重复落盘／双份输出）；`forceDefaultRoute` 本体仍是 `:612-620` 的 debug opt-in／gate 输入（`gateAllowed = forceDefaultRoute`、`gateReason='default-route-forced:debug-opt-in-black-hole-risk'`），落盘时**须核**该点未被改动。
+
+### 代码事实抽验要点（本节落盘会话于 HEAD `59fc366` 逐项只读复核，与复审席实读一致）
+
+- **壳侧**：`NetBirdVpnExtensionAbility.ets:612-620` forceDefaultRoute 仍为 debug opt-in／gate 输入（`gateAllowed = forceDefaultRoute`），且 `:520-524` 已有 FORCED 标记（见上陈旧事实更正）；`:850-946` 排除派生**仅 3 类**（`kind` ∈ management/signal/relay），fatal 走 `isExclusionFailClosed(build, relayRequired)`（`:939`，`VPN_ENDPOINT_EXCLUSION_FAIL_CLOSED` 落 `:940-946`）；`:981-990` arm 前置**仍只检查** `device_up`/`ready`（S20 guard 未实现）；`:1058-1062` ARMED 行**无** `gen=`/recreate 字段（现行字段 `openedMono`/`exclusions`/`posctlPort`/`probeWaitMs`/`peerB2aProbeId`）；`:1292-1426` recreate 有 `VPN_RECREATE_BEGIN`（`:1309`）与 `VPN_RECREATE_DONE`（`:1415`），**无** `generation`/`VPN_RECREATE_RESOLVED`；`:1585` 为初代接受锚点（`VPN_CREATE_RESOLVED|…|accepted=…`）。
+- **壳侧校验/排除**：`NetBirdRouteValidation.ets:225-257` 有 `index=` 行字段（`:246`）但**无** `gen=`（`client/entry/src` 全树 `grep 'gen='` 零命中）；`NetBirdEndpointExclusion.ets:45-51` `kind` 域**仅 3 类**（注释 `'management' | 'signal' | 'relay'`）、`:293-296` fatal **仍为 relay 条件**（`relayRequired && result.failed.length > 0`）。
+- **core**：`client/core/src/n2h_collector.rs:3141-3166` 仍把 `interface_dns:53` push 进 `dns_servers`（`:3162-3166`，`iface_dns` 注入块起于 `:3162`、push 在 `:3164`），且**无** `exclusion_generation`（`client/core/src` 与 `client/entry/src` 全树零命中）；`client/core/src/connector.rs:165-178` recreate 状态域（`required`/`count`/`exhausted`/`cooling_down`/`reason`，reason token 域注释在 `:177`）与 `:1339-1375`（`:1355` 置 `reason="limit-reached"`）与文档一致。
+
+### 不确定点（真机项保持未验证；落齐前只能 inconclusive）
+
+- 真机项 U-N1（`dnses[]` 运行时非空性）、U-N2（是否即物理解析器）、U-N3（VPN 生效后 `getDefaultNet`/`getAllNets` 语义）、U-N4（`GET_NETWORK_INFO` 运行时授予与行为）**均未验证**。
+- 实现面未落地（判据先行，落齐前不得据以登记任何通过类结论）：代际标记 `routes=`/`index=` 与 `gen=`；ARMED 行的 `gen` 与 recreate 三字段；`collector.exclusion_generation`；DNS 分支 `notes[]` 记录；排除面 7/7（`kind` 仅 3 类）与 **5 类 fatal 扩面**；S20 arm guard；`VPN_RECREATE_RESOLVED`。**落齐并真机验证前，C1/C2 如实不成立、只能记 `n2h-inconclusive`。**
+
+- **本节登记边界**：本节只归档 R-1…R-6 关闭确认复审会话的裁定要点（会话消息要点转写，非字节级副本）；不构成任何授权、不产生任何门级 verdict、不分配任何 AUTH-/EV- ID；v3.1 修订稿内容以 `docs/n2h-device-evidence-preregistration-draft-20260917.md` 为准。
