@@ -61,7 +61,9 @@ const SHIM_TYPES: Record<string, string[]> = {
     // v3.1 dns branch order: the erased interface names the real
     // NetBirdConnector / NetBirdVpnExtensionAbility import alongside the values
     'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
-    'DnsPlatformNetAddress'],
+    'DnsPlatformNetAddress',
+    // N2-H I2 stun caliber (§13.13): same erased names, same reason
+    'StunDerivationResult', 'StunUriEntry', 'StunParseResult', 'StunEndpoint'],
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };

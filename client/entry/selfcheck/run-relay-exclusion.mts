@@ -60,7 +60,9 @@ const SHIM_TYPES: Record<string, string[]> = {
     // v3.1 dns branch order: the erased interface names the real
     // NetBirdConnector / NetBirdVpnExtensionAbility import alongside the values
     'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
-    'DnsPlatformNetAddress'],
+    'DnsPlatformNetAddress',
+    // N2-H I2 stun caliber (§13.13): same erased names, same reason
+    'StunDerivationResult', 'StunUriEntry', 'StunParseResult', 'StunEndpoint'],
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };
@@ -121,11 +123,14 @@ function linesWith(prefix: string): string[] {
 
 // One full derivation against the REAL extension class (private method —
 // reachable at runtime; type stripping erases the modifier, not the method).
+// `stuns` is the 5th (N2-H I2) argument: the announced
+// `connector_network_config().stuns` list; a call site that omits it (the pre-I2
+// shape) passes undefined, which must stay an honest gap.
 async function derive(ability: Record<string, unknown>,
-  mgmtDialIp: string, signal: unknown): Promise<{ fatal: boolean; routes:
+  mgmtDialIp: string, signal: unknown, stuns?: unknown): Promise<{ fatal: boolean; routes:
   Array<Record<string, unknown>> }> {
   const outcome = await ability['deriveEndpointExclusions'](
-    { host: 'mgmt.example', port: 443, ip: '' }, mgmtDialIp, signal, '10.99.0.1') as
+    { host: 'mgmt.example', port: 443, ip: '' }, mgmtDialIp, signal, '10.99.0.1', stuns) as
     { fatal: boolean; routes: Array<Record<string, unknown>> };
   return outcome;
 }
@@ -443,6 +448,122 @@ try {
   // network" exactly like the pre-dns fixture did.
   setNetTables(0, [], {}, {});
 
+  // ---------- S1…S6: N2-H I2 stun caliber (design §13.13) -------------------
+  // The announced `netbird_config.stuns[].uri` list reaches the shell in the
+  // tail of `connector_network_config()` (core, asserted in the cargo suite)
+  // and is the 5th argument of the REAL derivation. Nothing here is a mirror:
+  // the REAL parse, the REAL endpoint class, the REAL /32 route entries and
+  // the REAL retained shell-exclusion set are the shipped behavior.
+  setStatus(status([], null));
+  setDns({ 'mgmt.example': '203.0.113.7', 'stun.example': '198.51.100.7' });
+  G['__NB_LOG'] = [];
+  const s1 = await derive(freshAbility(mod), '203.0.113.7', null,
+    [{ uri: 'stun:stun.example:3478' }]);
+  const s1route = routeFor(s1.routes, '198.51.100.7', 32);
+  check('S1 announced stun host -> /32 excluded route (isExcludedRoute), not fatal',
+    s1.fatal === false && s1route !== undefined && s1route['isExcludedRoute'] === true &&
+    s1route['hasGateway'] === true && s1route['gateway'] === '10.99.0.1' &&
+    s1route['isDefaultRoute'] === false, JSON.stringify(s1));
+  const s1marker = linesWith('N2H_STUN_ENDPOINTS|');
+  check('S1 marker carries the verbatim stun tokens (counts + no gap)',
+    s1marker.length === 1 && s1marker[0].indexOf('|stuns=1|') > 0 &&
+    s1marker[0].indexOf('|usable=1|') > 0 && s1marker[0].indexOf('|rejected=0|') > 0 &&
+    s1marker[0].indexOf('|turnRejected=0|') > 0 &&
+    s1marker[0].indexOf('|stunGap=none|') > 0 &&
+    s1marker[0].indexOf('|diag=true|is_evidence=false') > 0, s1marker.join('\n'));
+  check('S1 the stun endpoint enters the VPN_ENDPOINT_EXCLUSIONS summary count',
+    linesWith('VPN_ENDPOINT_EXCLUSIONS|')[0].indexOf('|hosts=2|') > 0 &&
+    linesWith('VPN_ENDPOINT_EXCLUSIONS|')[0].indexOf('|resolved=2|') > 0,
+    linesWith('VPN_ENDPOINT_EXCLUSIONS|')[0]);
+  check('S1 no rejection marker for a usable announcement',
+    linesWith('N2H_STUN_URI_REJECTED|').length === 0, logs().join('\n'));
+
+  // S2: the stun endpoint is RETAINED in the shell exclusion set the arm hands
+  // to the core as `shell-exclusion` (kind 'stun' is a core EndpointKind token)
+  const s2ability = freshAbility(mod);
+  setDns({ 'mgmt.example': '203.0.113.7', 'stun.example': '198.51.100.7' });
+  G['__NB_LOG'] = [];
+  await derive(s2ability, '203.0.113.7', null, [{ uri: 'stun:stun.example:3478' }]);
+  const s2shell = (s2ability['n2hExclusionEndpoints'] as Array<Record<string, unknown>>)
+    .filter((e: Record<string, unknown>): boolean => e['kind'] === 'stun');
+  const s2res = (s2ability['n2hExclusionResolutions'] as Array<Record<string, unknown>>)
+    .filter((e: Record<string, unknown>): boolean => e['kind'] === 'stun');
+  check('S2 the stun endpoint rides the retained shell exclusion set (arm source)',
+    s2shell.length === 1 && s2shell[0]['host'] === 'stun.example' &&
+    s2shell[0]['port'] === 3478 && s2res.length === 1 &&
+    s2res[0]['ok'] === true && s2res[0]['address'] === '198.51.100.7',
+    JSON.stringify(s2shell) + JSON.stringify(s2res));
+
+  // S3: an IPv4 literal short-circuits DNS — the host is absent from the fake
+  // resolver table on purpose, so a route for it can only come from the
+  // literal branch, and the omitted port defaults to 3478
+  const s3ability = freshAbility(mod);
+  setDns({ 'mgmt.example': '203.0.113.7' });
+  G['__NB_LOG'] = [];
+  const s3 = await derive(s3ability, '203.0.113.7', null, [{ uri: 'stun:203.0.113.44' }]);
+  const s3shell = (s3ability['n2hExclusionEndpoints'] as Array<Record<string, unknown>>)
+    .filter((e: Record<string, unknown>): boolean => e['kind'] === 'stun');
+  check('S3 IPv4 literal stun host: /32 route with NO DNS leg, default port 3478',
+    s3.fatal === false && routeFor(s3.routes, '203.0.113.44', 32) !== undefined &&
+    s3shell.length === 1 && s3shell[0]['port'] === 3478 &&
+    linesWith('VPN_ENDPOINT_EXCLUSION_SKIPPED|').length === 0, JSON.stringify(s3));
+
+  // S4: `turn:` is refused BY NAME and generates NO route — even though the
+  // fake resolver WOULD answer for that host (a resolved turn host would show
+  // up as a route if the shell had frozen it)
+  setDns({ 'mgmt.example': '203.0.113.7', 'turn.example': '198.51.100.8' });
+  G['__NB_LOG'] = [];
+  const s4 = await derive(freshAbility(mod), '203.0.113.7', null,
+    [{ uri: 'turn:turn.example:3478' }]);
+  const s4marker = linesWith('N2H_STUN_ENDPOINTS|');
+  const s4rejected = linesWith('N2H_STUN_URI_REJECTED|');
+  check('S4 turn: announced -> NO turn route at all',
+    s4.fatal === false && routeFor(s4.routes, '198.51.100.8', 32) === undefined &&
+    s4.routes.length === 1, JSON.stringify(s4));
+  check('S4 the named turn reason is recorded, counted, and gap-flagged',
+    s4rejected.length === 1 &&
+    s4rejected[0].indexOf('|reason=turn-rejected:no-turn-path-in-this-build|') > 0 &&
+    s4marker.length === 1 && s4marker[0].indexOf('|usable=0|') > 0 &&
+    s4marker[0].indexOf('|turnRejected=1|') > 0 &&
+    s4marker[0].indexOf('|stunGap=unusable-uris|') > 0,
+    s4rejected.join('\n') + '\n' + s4marker.join('\n'));
+
+  // S5: a missing / empty announcement is an honest gap (never an invented
+  // endpoint); the pre-I2 call shape (argument omitted => undefined) behaves
+  // identically
+  setDns({ 'mgmt.example': '203.0.113.7' });
+  for (const [label, announced] of [
+    ['undefined (pre-I2 call shape)', undefined],
+    ['null', null],
+    ['empty array', []]
+  ] as Array<[string, unknown]>) {
+    G['__NB_LOG'] = [];
+    const s5 = await derive(freshAbility(mod), '203.0.113.7', null, announced);
+    const s5marker = linesWith('N2H_STUN_ENDPOINTS|');
+    check('S5 stuns ' + label + ' -> no stun route, stunGap=no-stuns, no throw',
+      s5.fatal === false && s5.routes.length === 1 &&
+      s5marker.length === 1 && s5marker[0].indexOf('|stuns=0|') > 0 &&
+      s5marker[0].indexOf('|usable=0|') > 0 && s5marker[0].indexOf('|rejected=0|') > 0 &&
+      s5marker[0].indexOf('|stunGap=no-stuns|') > 0,
+      JSON.stringify(s5) + '\n' + s5marker.join('\n'));
+  }
+
+  // S6: a type-anomalous announcement element is reported (malformed-entry),
+  // and the usable element in the same list still freezes
+  setDns({ 'mgmt.example': '203.0.113.7', 'stun.example': '198.51.100.7' });
+  G['__NB_LOG'] = [];
+  const s6 = await derive(freshAbility(mod), '203.0.113.7', null,
+    [{ uri: 7 }, { uri: 'stun:stun.example:3478' }]);
+  const s6marker = linesWith('N2H_STUN_ENDPOINTS|');
+  check('S6 anomalous element reported, usable sibling still /32-excluded',
+    s6.fatal === false && routeFor(s6.routes, '198.51.100.7', 32) !== undefined &&
+    linesWith('N2H_STUN_URI_REJECTED|').length === 1 &&
+    linesWith('N2H_STUN_URI_REJECTED|')[0].indexOf('|reason=malformed-entry|') > 0 &&
+    s6marker[0].indexOf('|stuns=2|') > 0 && s6marker[0].indexOf('|usable=1|') > 0 &&
+    s6marker[0].indexOf('|rejected=1|') > 0 &&
+    s6marker[0].indexOf('|stunGap=unusable-uris|') > 0,
+    JSON.stringify(s6) + '\n' + s6marker.join('\n'));
+
   // The last hop cannot be driven host-side (it needs the native arm), so it
   // is pinned TEXTUALLY on the byte-identical shipped source — the precedent
   // is run-exclusion-addr-shape.mts's A5 wiring pins: the branch record the
@@ -459,6 +580,21 @@ try {
     extSource.indexOf("'N2H_DNS_BRANCH|requestId=%{public}s|dns-branch=%{public}s|'") > 0 &&
     extSource.indexOf("'dns-physical-evidence=%{public}s|dnsResolvers=%{public}d|dnsGap=%{public}s|'")
       > 0, 'marker pin');
+
+  // N2-H I2 wiring pins (same textual-precedent discipline, same reason): the
+  // announced stun list is read from the SAME snapshot the caller already holds
+  // (`net.stuns`, the tail of connector_network_config()) and forwarded as the
+  // derivation's 5th argument; the marker formats carry the verbatim tokens the
+  // checks above assert on the real derivation.
+  check('arm wiring: the announced stuns ride net.stuns into the derivation call',
+    extSource.indexOf('baseTemplate.tunnelAddress, net !== null ? net.stuns : null);') > 0,
+    'stun wiring pin');
+  check('arm wiring: the stun marker formats carry the verbatim token names',
+    extSource.indexOf("'N2H_STUN_ENDPOINTS|requestId=%{public}s|stuns=%{public}d|usable=%{public}d|'")
+      > 0 &&
+    extSource.indexOf("'rejected=%{public}d|turnRejected=%{public}d|stunGap=%{public}s|'") > 0 &&
+    extSource.indexOf("'N2H_STUN_URI_REJECTED|requestId=%{public}s|index=%{public}d|reason=%{public}s|'")
+      > 0, 'stun marker pin');
 
   // Log discipline: no token/credential-shaped material in the relay logs
   // (URLs are host:port only; assert the summary line never embeds a scheme).

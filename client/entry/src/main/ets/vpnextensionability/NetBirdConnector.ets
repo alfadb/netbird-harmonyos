@@ -5,6 +5,7 @@ import resourceManager from '@ohos.resourceManager';
 import util from '@ohos.util';
 import core from 'libnetbird_core.so';
 import { DnsDerivationInput, DnsDerivationResult, DnsNetProbe, DnsPlatformNetAddress,
+  StunUriEntry,
   deriveDnsEndpointExclusions, emptyDnsNetProbe, isPhysicalNetEvidence
 } from './NetBirdEndpointExclusion';
 
@@ -279,6 +280,12 @@ export interface CoreNetworkConfig {
   // possibly scheme-prefixed). The shell resolves it, opens + protects a
   // socket and feeds it back via connectorSignalFeed.
   signal?: string | null;
+  // N2-H I2 (design §13.13): the TAIL-appended announced
+  // netbird_config.stuns[].uri list, VERBATIM (the shell's stun-class
+  // exclusion source: parseStunUri mirrors the core's own `stun:` rules and
+  // refuses `turn:` by name). Absent/empty = nothing announced — an honest
+  // gap, never a fabricated endpoint.
+  stuns?: StunUriEntry[] | null;
 }
 
 // netbird-device-config.json shape (app-private dir, development-time —

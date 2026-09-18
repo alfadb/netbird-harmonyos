@@ -1697,10 +1697,17 @@ impl ConnectorShared {
         // signal link once both the URI and the shell-fed connect address
         // exist.
         let mut signal_uri: Option<String> = None;
+        // N2-H I2 (design §13.13): the announced `stuns[]` URIs ride the same
+        // netbird-config as the signal URI. `None` = this update carried no
+        // config at all: the PREVIOUS announcement stays visible (mirrors both
+        // the signal handling below and `ConnectorShared::stuns()`, whose
+        // orchestrator set is only replaced when a config actually arrives).
+        let mut stun_uris: Option<Vec<String>> = None;
         if let Some(cfg) = update.netbird_config.as_ref() {
             if let Some(ice) = self.ice.get() {
                 ice.lock_poison().set_stuns(&cfg.stuns);
             }
+            stun_uris = Some(cfg.stuns.clone());
             if let Some(uri) = cfg.signal.as_ref() {
                 signal_uri = Some(uri.clone());
             }
@@ -1777,6 +1784,8 @@ impl ConnectorShared {
         } else {
             // config-less snapshot: keep the previously announced URI visible
             signal_uri = self.lock().net_config.as_ref().and_then(|c| c.signal.clone());
+            // …and the previously announced stun set (see `stun_uris` above)
+            stun_uris = self.lock().net_config.as_ref().map(|c| c.stuns.clone());
         }
         if let Some(uri) = signal_uri.as_ref() {
             if let Some(rt) = self.signal.get() {
@@ -1841,6 +1850,8 @@ impl ConnectorShared {
                 snapshot.default_route_reason = DEFAULT_ROUTE_REASON_RELAY_READY.to_string();
             }
             snapshot.signal = signal_uri;
+            // N2-H I2: the announced stun URIs (verbatim; empty = honest gap)
+            snapshot.stuns = stun_uris.unwrap_or_default();
             // N7: keep the UNGATED route record so `refresh_net_gate` can
             // re-export / re-hold the default route as live readiness moves
             g.net_routes_all = map
@@ -2471,6 +2482,17 @@ pub struct ShellNetworkConfig {
     /// `connector_signal_socket_feed(fd, addr)`. `None` = no signal config
     /// seen yet (peers cannot connect without it).
     pub signal: Option<String>,
+    /// N2-H (design §13.13, I2): `netbird_config.stuns[].uri` VERBATIM, as
+    /// announced by the last sync that carried a netbird-config — the shell's
+    /// channel for deriving the stun class of the endpoint exclusion set. The
+    /// shell applies the SAME parse core applies to the same strings
+    /// (`crate::ice::parse_stun_uri`: `stun:host[:port]`, default port 3478,
+    /// `turn:` / other schemes refused), so what it freezes is exactly what
+    /// core gathers against; `turn:` URIs are refused shell-side with a named
+    /// reason (this build has no turn path). Empty = nothing announced: the
+    /// honest gap, never an invented endpoint. Public routing material — no
+    /// secret crosses this boundary.
+    pub stuns: Vec<String>,
 }
 
 /// Canonical dotted-quad/prefix rendering of a parsed route network.
@@ -2603,6 +2625,9 @@ impl ShellNetworkConfig {
             // snapshot — from_map_gated sees only the map, the URI rides the
             // sync config.
             signal: None,
+            // N2-H I2 (design §13.13): same stamping discipline for the
+            // announced `stuns[]` URIs (they ride the sync config too).
+            stuns: Vec::new(),
         }
     }
 
@@ -2666,8 +2691,20 @@ impl ShellNetworkConfig {
             Some(u) => jstr("signal", u),
             None => "\"signal\":null".to_string(),
         };
+        // N2-H I2 (design §13.13): the announced `stuns[]` URIs as
+        // `[{"uri":"…"}]`, TAIL-appended after every pre-existing field (the
+        // a1947b9 tail-append discipline: existing field order and shape are
+        // untouched, consumers read fields by name). Empty when nothing was
+        // announced — an honest empty array, never a fabricated endpoint.
+        let mut stuns = String::new();
+        for (i, uri) in self.stuns.iter().enumerate() {
+            if i > 0 {
+                stuns.push(',');
+            }
+            stuns.push_str(&format!("{{{}}}", jstr("uri", uri)));
+        }
         format!(
-            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}}}}",
+            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}},\"stuns\":[{}]}}",
             jbool("available", true),
             jnum("serial", self.serial),
             address,
@@ -2681,6 +2718,7 @@ impl ShellNetworkConfig {
             peers,
             jbool("allowed", self.default_route_allowed),
             jstr("reason", &self.default_route_reason),
+            stuns,
         )
     }
 }
@@ -4500,7 +4538,9 @@ pub fn connector_status_json() -> String {
 /// The `connector_network_config()` implementation: read-only snapshot of
 /// the shell-applicable subset of the last applied NetworkMap (tunnel
 /// address/prefix, managed routes with the default-route mark, DNS servers,
-/// peer summary — public keys + allowed-ips counts only). Always valid JSON;
+/// peer summary — public keys + allowed-ips counts only). N2-H I2: the tail
+/// carries the announced `stuns[].uri` list (the shell's exclusion-derivation
+/// channel — see [`ShellNetworkConfig::stuns`]). Always valid JSON;
 /// with no connector or before the first map:
 /// `{"available":false,"reason":"no-network-map"}`.
 pub fn connector_network_config_json() -> String {
@@ -5396,6 +5436,10 @@ mod tests {
         assert_eq!(v6.address_prefix_len, None);
     }
 
+    // N2-H I2: this contract test had LOST its `#[test]` attribute in
+    // d9346c3 (dead since then — the shape assertions below never ran);
+    // restored here because this increment extends exactly this contract.
+    #[test]
     fn shell_network_config_snapshot_and_json_contract() {
         // N3-7 default: the WG data plane is NOT ready (registry), so the
         // managed default route is HELD — not exported for install.
@@ -5449,9 +5493,15 @@ mod tests {
               \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"]}",
             // N3-7 gate markers
             "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
+            // N2-H I2: the tail-appended stun section (nothing announced on a
+            // from_map_gated snapshot = an honest empty array, never invented)
+            "\"stuns\":[]",
         ] {
             assert!(json.contains(fragment), "missing {fragment} in {json}");
         }
+        // N2-H I2 tail-append discipline: the stun section is the LAST field —
+        // every pre-existing field keeps its order and shape
+        assert!(json.ends_with(",\"stuns\":[]}"), "{json}");
         // the held default route must NOT appear as an installable route
         assert!(
             !json.contains("{\"network\":\"0.0.0.0/0\""),
@@ -5573,6 +5623,87 @@ mod tests {
         assert!(shared.network_config_json().contains("\"serial\":42"));
         // the global export path answers no-network-map with no connector
         // (CONNECTOR slot untouched by the unit tests)
+    }
+
+    /// N2-H I2 (design §13.13): the announced `netbird_config.stuns[].uri`
+    /// list reaches the shell in the document's TAIL, VERBATIM — the shell
+    /// applies core's own parse to the same strings, so a `turn:` URI must
+    /// arrive as-is (it is refused shell-side by name), never pre-filtered
+    /// into a silent omission.
+    #[test]
+    fn network_config_tail_carries_the_announced_stun_uris_verbatim() {
+        let shared = ConnectorShared::new(false, None);
+        let announced = vec![
+            "stun:stun.netbird.io:3478".to_string(),
+            "stun:203.0.113.9".to_string(),
+            "turn:turn.netbird.io:3478".to_string(),
+            "not-a-uri".to_string(),
+        ];
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: announced.clone(),
+                    ..Default::default()
+                }),
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let json = shared.network_config_json();
+        for uri in &announced {
+            assert!(json.contains(&format!("{{\"uri\":\"{uri}\"}}")), "{uri} in {json}");
+        }
+        assert!(json.contains(&format!(
+            "\"stuns\":[{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}}]}}",
+            announced[0], announced[1], announced[2], announced[3]
+        )), "announced order + tail position: {json}");
+        assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
+        // every pre-existing field keeps its exact previous shape
+        for fragment in [
+            "\"available\":true",
+            "\"serial\":42",
+            "\"interface_dns\":\"100.100.0.1\"",
+            "\"peer_count\":3",
+            "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
+        ] {
+            assert!(json.contains(fragment), "missing {fragment} in {json}");
+        }
+
+        // a config-less update keeps the last announcement visible (the same
+        // rule `ConnectorShared::stuns()` follows: the orchestrator set is
+        // only replaced by a config, so the shell must keep seeing it too)
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        assert!(shared.network_config_json().contains(&format!(
+            "{{\"uri\":\"{}\"}}", announced[0]
+        )));
+
+        // an explicit empty announcement clears the list: the honest gap,
+        // never a stale endpoint
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: Some(crate::network_map::NetbirdServers {
+                    stuns: vec![],
+                    ..Default::default()
+                }),
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let cleared = shared.network_config_json();
+        assert!(cleared.ends_with(",\"stuns\":[]}"), "{cleared}");
+        assert!(!cleared.contains("stun.netbird.io"), "{cleared}");
     }
 
     // N8: controlled recreate ------------------------------------------------

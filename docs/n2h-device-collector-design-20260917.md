@@ -167,7 +167,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 | management | 壳排除集（`shell-exclusion`，`NetBirdVpnExtensionAbility.ets:816-818`）∪ core 拨号地址 | 拨号 IP=当轮解析、零缓存 |
 | signal | 壳排除集（:820-825）∪ `netbird_config.signal`（`connector_network_config` 的 `signal` 字段，`lib.rs:88`；ets 侧 `NetBirdConnector.ets:269-272`） | |
 | relay | 壳排除集（:827-849）∪ `relay_advertised.advertised_urls`（core status，`connector.rs:2373,:2737-2847`；「广告即排除」语义 runbook :195） | DDNS 每次调用重解析、换址=重冻 |
-| stun | core network map `netbird_config.stuns[].uri`（解析 `stun:host[:port]`，`ice.rs:100`；map 解码 `network_map.rs:617`） | 壳排除集目前**不含**此类（B-2 的 3/7 现状，如实入档） |
+| stun | core network map `netbird_config.stuns[].uri`（解析 `stun:host[:port]`，`ice.rs:100`；map 解码 `network_map.rs:617`） | **（I2 更正）** 原备注 `壳排除集目前**不含**此类（B-2 的 3/7 现状，如实入档）` **自 §13.13 起失效**：壳排除集现有 `kind=stun`（core 侧来源同前；壳侧经 `connector_network_config()` 尾部 `stuns:[{uri}]` 暴露 ⇒ `parseStunUri` 镜像 `stun:` 解析（默认 3478）⇒ `/32` 排除条目 ⇒ arm 为 `shell-exclusion` 源，`turn:` 以具名理由拒绝且不生成路由）。壳侧排除派生 kind 现状＝**5/7**：management/signal/relay/dns（§13.12）/stun（本文），仅余 **wg_peer** 为缺口（独立增量）。实现与验收见 §13.13 |
 | turn | 同上来源；当前实现**拒绝** `turn:` URI（`peer_conn.rs:701`；host 侧同拒 `host_sockets.rs:1187-1188`） | 预期常态=`present:false` + `absent_reason:"turn: URI rejected by this build (no turn path)"`（可选类带理由缺席，非缺口，`n2h.rs:151-153`） |
 | wg_peer | `connector_status().wg.wg_peers[].endpoint`（`wg_device.rs:298,:1386`；a1947b9 尾部追加面） | ICE 选中对外 UDP 端点；无会话时 fail-closed 不 arm |
 | dns | 壳侧平台默认（物理）网络 DNS（`@ohos.net.connection`：`getDefaultNetSync` → `getNetCapabilitiesSync` → `getConnectionPropertiesSync(...).dnses[]`；步骤 2 不成立时才走**唯一**的 `getAllNetsSync` 过滤分支——v3.1 R-4 分支序）∪ core network map `dns.servers[{ip,port}]` 中**不落在** `address/address_prefix_len` 或任一 `routes[].network` 覆盖范围内的条目（`connector.rs:2537-2547`；`network_map.rs:84,:329`） | **v3.1 更正（本行原「`dns.servers[]`+`interface_dns`」按重审 R-4/预注册 :68 作废）**：`interface_dns` 与 overlay 内 server **一律不入**冻结集，也不入排除集（把 overlay 内解析器 host-route 排除＝把隧道内 DNS 踢出隧道、新造物理明网泄漏面）；`notes[]` 记 `dns-overlay-internal-excluded-from-freeze=<n>`（n＝落入覆盖范围的 `dns.servers[]` 条数）与 `dns-interface-dns-excluded-from-freeze=1`。非法/无端口/IPv6/空的 server 计入 dns 必需类缺口并逐条记 `dns-server-unusable=ip=…\|port=…\|reason=…`＋`dns-freeze-gap=unusable-servers=<n>`，不得静默跳过（R-3 严格 IPv4，端口缺失按 53；IPv6 不入集合）。壳侧分支记录逐字入 `notes[]` 与 `N2H_DNS_BRANCH\|` 标记：`dns-branch=default\|all-nets-filtered\|none`、`dns-physical-evidence=<handle=…;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4>`、缺口时 `dns-gap=<token>`；分支记录缺失即缺口。本轮 fatal 判定不扩大（仍只 relay 必需类）。权限＝`ohos.permission.GET_NETWORK_INFO`（normal/system_grant，`module.json5`）。实现与验收见 §13.12 |
@@ -626,4 +626,69 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
   - 壳侧自检（全 `exit 0`）：`run.mts` **61 passed / 0 failed**（基线 43）、`run-relay-exclusion.mts` **35 / 0**（基线 25）、`run-relay-flag.mts` **9 / 0**、`run-relay-status-log.mts` **3 / 0**、`run-route-validation.mts` **40 / 0**、`run-exclusion-addr-shape.mts` **25 / 0**。
   - `bash client/build.sh` → exit 0（`CompileArkTS` 对含本节改动的 ets 全量编译成功，仅余既有行告警），逐项 `VERIFY OK`（HAP 成员 `.so` 与 llvm-strip 后制品 sha256 相同、ELF64 ET_DYN AArch64、`pack.info` apiVersion 26）；HAP `entry-default-unsigned.hap` **4 216 311 bytes**、sha256 `ad5f3383b823496c97ef6d4cb01c032e32c6b579535fdadcc4ae336bc83f94c3`（打包不可逐字节复现，验收以 exit 0 + 逐项 VERIFY OK 为准）。
   - 残余（如实）：dns 缺口的 fatal 化、壳侧 stun/wg_peer 排除面、代际标记与 S20 仍属后续增量；本轮 dns 缺口只入 `notes[]` 与标记，判定侧据「分支记录缺失/`dns-gap=` 存在」即可判 C1 不成立——该判定接线未在本轮实现。
+
+### 13.13 ⑪ I2 增量落地：stun 类壳侧暴露通道（形态 A 尾部追加）＋壳侧 `stun:` 解析与 /32 排除；turn 缺席形态核对
+
+> 本节以**追加**为主，不改写 §0–§13.12；**唯一例外＝§4.0 冻结来源表的 stun 行**（本增量按 I2 现状就地更正该行备注并保留旧文本为历史引述，见 ⑦ 与 §4.0 行内标注），§5.1/§5.2 及其余各行**未触碰**。基线：工作树 HEAD `9460224`（干净，I1 已合入）+ 本节未提交改动；下列 file:line 为落地后工作树实读。
+
+**① 暴露形态选择：形态 A（`connector_network_config()` 尾部追加），理由**
+
+- 缺口＝**排除面缺 stun**：冻结面已由 core 内部提供（§13.2：`ConnectorShared::stuns()` `connector.rs:1681-1683` → `CoreFreezeInputs.stuns` `:4528` → `apply_core_freeze_inputs` `n2h_collector.rs:3446-3451`，`source=core-network-map`），但 `connector_network_config()` 不渲染 `netbird_config.stuns[]`，壳侧无从派生 stun 的 /32 排除路由（预注册 §2-C2 B-2 的排除面缺口）。
+- **选 A 而非 B**：B（新增 napi 导出）要多两处注册 + lib.rs 表行 + 导出形状测试，且引入「同一个 `napi_init` 表里两个只读快照」的重复面；A 复用壳侧已读文档（`NetBirdConnector.ets:1059-1061` 的 `connectorNetworkConfig()` 已是 `net.signal` 的既有通道，stun 与 signal 同源、同 sync、同读取时刻），零新增导出面。A 亦有**尾部追加先例**：`wg_peers`（commit `a1947b9`）、`relay_advertised`（commit `95f6c02`）。
+- **形状**：`{available:true,…,default_route:{allowed,reason},stuns:[{uri}]}` —— `stuns` 是**最后**一个字段（既有字段顺序与形状零改动；测试 pin `json.ends_with(",\"stuns\":[]}")`）。元素用 `{"uri":"…"}` 对象形态（与 wire 面 `stuns[].uri`、§4.0 stun 行的来源字面一致），值为 `netbird_config.stuns[].uri` **逐字**，**不预过滤**：`turn:` URI 也要如实到达壳侧，由壳侧按具名理由拒绝（否则「拒绝」这件事在壳侧不可观测）。空数组＝「本次会话没有广告」的如实缺口，**绝不编造**端点；无秘密材料（stun URI 是公开路由材料，与 core 自身对 relay url 的逐字 hilog 同级）。
+- **纪律**：`connector_status()` 形状**未触碰**（§5.2 仍成立）；`connector_network_config()` 的 `available:false` 答案逐字节不变（集成测试 `tests/n2h_device_collector.rs:1827-1831` pin）——stun 段只存在于 `available:true` 的尾部，没有 map 就**没有** stun 段（不伪造）。
+- 读取时刻语义：与 `ConnectorShared::stuns()` 同规——**带 config 的 update 覆盖**（空 stuns 也覆盖＝如实清空），**不带 config 的 update 保留上一次公告**（`connector.rs:1700-1712`/`:1784-1789` 快照 stamping，`:1854` 落盘）；因此壳侧看到的列表与 core 实际 gather 的集合同源同变。
+
+**② 壳侧解析与排除实现要点**
+
+- 纯模块 `NetBirdEndpointExclusion.ets`：`STUN_DEFAULT_PORT=3478`（:638）、`TURN_REJECTED_REASON='turn-rejected:no-turn-path-in-this-build'`（:643）、逐条拒绝 token（:647-653）、缺口 token `no-stuns`/`unusable-uris`（:659-660）、`parseStunUri`（:701-757）、`deriveStunEndpointExclusions`（:763-816；结果含 `announced`＝公告元素数，调用方不自行读原始输入的 `length`）。
+- `parseStunUri` **镜像 core `ice.rs:100-143` 的 stun 分支**：首 `:` 切 scheme（大小写不敏感，`stun` 才收）、末 `:` 切 host/port、省略端口⇒3478、端口按 Rust `u16` 语义（接受 1 个前导 `+`、拒空/非数字/超 65535、0 单列 `port-zero`）、拒 `[...]` 括号 IPv6（core udp4-only）。镜像刻意**不比 core 更严**（更严会漏掉 core 实际 gather 的端点 ⇒ C2 包含关系出现空洞）。
+- **唯一一处比 core 更严（已登记）**：切分后 host 仍含 `:`（如 `stun:a:b:3478`，core 会接受 host `a:b`）⇒ 记 `unusable-host` 拒绝。理由＝该 host 既非 IPv4 字面量也非可解析域名，若照抄会经 `resolveExclusionEndpointIp`（含 `:`⇒按括号 IPv6 原样返回）落到 `classifyAddress` 的 `ipv6` 分支，生成一条目的地非法的 /128 条目（2026-09-15 create-401 的同一失效类）；core 对该 host 的 gather 同样必然失败，故不构成 C2 空洞。
+- `deriveStunEndpointExclusions(stuns)`：缺失/`null`/空/非数组/异常元素 ⇒ 缺口 token（`no-stuns` / `unusable-uris`）＋逐条 `N2H_STUN_URI_REJECTED|…|reason=<token>`，**永不**静默丢弃、**永不**编造。可用条目去重（按 host:port）后产出 `{kind:'stun',host,port}`。
+- 接线（`NetBirdVpnExtensionAbility.deriveEndpointExclusions`，第 5 实参＝`net.stuns`，调用点 `:616`；方法头 `:844-846`）：stun 端点**并入同一 `endpoints[]`** ⇒ ① 走既有的 fresh-resolution（IPv4 字面量在 `resolveExclusionEndpointIp` 短路、无 DNS leg）→ `buildExcludedRouteEntries` ⇒ `/32` `isExcludedRoute:true` 条目；② 计入 `VPN_ENDPOINT_EXCLUSIONS|…|hosts=|resolved=|routes=`（该行格式**未改**：stun 只是多一条端点）；③ 留存 `n2hExclusionEndpoints`/`n2hExclusionResolutions` ⇒ arm 时按 kind='stun' 作为 **`shell-exclusion` 源**交给 core（kind token 与 `n2h.rs:120-130` 的 `EndpointKind::name()` 一致，`assemble_freezes` 对该 kind 消费壳条目，`n2h_collector.rs:509-513`/`:587-590`）。
+- 标记（`diag=true|is_evidence=false`，**不进**证据 `notes[]`）：`N2H_STUN_ENDPOINTS|…|stuns=|usable=|rejected=|turnRejected=|stunGap=<token|none>`（:987-994）与逐条 `N2H_STUN_URI_REJECTED|…|index=|reason=`（:981-986）。**arm opts 契约（§5.1）本轮不动**：壳侧 stun 缺口只入 hilog 标记，不新增 opts 段（dns 那套 `opts.dns` 记录通道本轮不复制）。
+- **不扩大 fatal**：`isExclusionFailClosed(build, relayRequired)` 判据逐字未改（stun 端点进了同一 `failed` 列表，故与 dns 一样落进既有的「relay 必需时的未解析端点」规则，属既有规则、非新增致命面）；五类必需端点的 fatal 扩面仍是后续增量（预注册 §2-C2 fail-closed 触发面）。
+
+**③ turn 缺席形态核对（无代码改动，仅登记核对结论）**
+
+- **core 侧已满足**：`TURN_REJECTED_REASON`（`n2h_collector.rs:378`）＝`"turn: URI rejected by this build (no turn path)"`；`absent_reason(EndpointKind::Turn)` 在 `turn_uris` 非空时给出该具名理由，否则给「no turn endpoint in this session's network map (optional kind)」（`:534-540`）；`assemble_freezes` 对 turn **恒定**产出 `present:false` + `absent_reason`（`:578-585`，注释逐字「turn has no freeze path in this build」），`core_candidates(Turn)` 恒空（`:514`），即**永不生成 turn 路由/冻结条目**。对应既有测试：`:3739`（注入 turn 壳排除仍得具名缺席）。
+- **壳侧本轮补齐具名理由**：`turn:` URI 若出现在被暴露的 `stuns[]` 里（本 build 的 `set_stuns` 会拒它、内部无留存，故常态不会出现；暴露面逐字转发 ⇒ 一旦出现即可观测），壳侧以 `TURN_REJECTED_REASON` 拒绝、**不生成任何 turn 路由**（自检 S4：DNS 表故意为该 host 备了答案，仍无路由）。
+
+**④ selfcheck 扩展（host-only，无设备/无网络）**
+
+- `run.mts`（纯模块）：+20 检查（S0 常量；S1 默认端口 3478／S2 显式端口／S3 大小写+trim／S4 前导 `+` 镜像／S5 `turn:` 具名拒绝／S6 其他 scheme 与无 scheme／S7 空 host／S8 `port-zero`+越界+非数字+空端口／S9 括号 IPv6／S10 含 `:` host 不生成非法 /128；S11 去重后 `kind=stun` 端点／S12 逐条拒绝不静默／S13 部分拒绝⇒缺口；S14 空⇒`no-stuns`／S15 缺失⇒同一缺口不抛；S16 仅 turn⇒无端点+具名计数；S17 异常元素逐条报告且可用兄弟仍冻结／S18 非数组段⇒如实缺口不抛；S19 stun 端点⇒`/32` `isExcludedRoute`）。
+- `run-relay-exclusion.mts`（驱动**真实** `deriveEndpointExclusions` 端到端）：+14 检查（S1 stun host 入排除集 `/32`＋标记逐字＋`VPN_ENDPOINT_EXCLUSIONS` 计数含 stun＋无拒绝标记；S2 留存壳排除集/解析（arm 的 `shell-exclusion` 源，kind=stun）；S3 IPv4 字面量短路 DNS（假 DNS 表**故意不含**该 host，仍出 `/32`，端口默认 3478）；S4 `turn:` ⇒ **无任何 turn 路由**（假 DNS 表能应答该 host 也不出路由）＋具名理由行＋`turnRejected=1`＋`stunGap=unusable-uris`；S5 `stuns` 为 undefined（I2 前的调用形态）/null/空数组 ⇒ 无 stun 路由＋`stunGap=no-stuns`＋不抛；S6 异常元素逐条报告且可用兄弟仍 `/32`；2 条 arm 接线文本 pin（`net.stuns` 第 5 实参、两个标记格式逐字）——该跳需原生 arm，沿用 `run-exclusion-addr-shape.mts` A5 文本 pin 先例）。
+- 替身/链接面同步：`run-relay-exclusion.mts:65` 与 `run-exclusion-addr-shape.mts:66` 的 `SHIM_TYPES[NetBirdEndpointExclusion]` 补 4 个被类型剥离擦除的名字（`StunDerivationResult`/`StunUriEntry`/`StunParseResult`/`StunEndpoint`）；`run-relay-flag.mts`/`run-relay-status-log.mts` 写的 `NetBirdEndpointExclusion.dep.ts` 补 `StunUriEntry`（`NetBirdConnector.ets:7-9` 新增的 type-only 导入，值导入面未变）。`@ohos.net.connection` 三处替身**无需**再改（本轮不新增平台 API 调用）。
+- 其余 selfcheck（`run-relay-flag.mts`/`run-relay-status-log.mts`/`run-route-validation.mts`/`run-exclusion-addr-shape.mts`）断言逐字未改，仅上述 stage 同步。
+
+**⑤ core 测试与形状断言（先 grep 全部形状断言）**
+
+- 新增 `connector::tests::network_config_tail_carries_the_announced_stun_uris_verbatim`（`connector.rs:5634`）：逐字入文档（含 `turn:` 与 `not-a-uri`，**不预过滤**）、顺序与尾部位置、仍可被严格 reader 解析、既有字段片段逐条仍在；config-less update 保留上一次公告；显式空公告清空为 `"stuns":[]`。
+- 更新形状测试 `shell_network_config_snapshot_and_json_contract`（`:5443`）：断言 `"stuns":[]`＋`ends_with(",\"stuns\":[]}")`（尾部追加纪律 pin）。
+- **【验证完整性级发现】既有静默缺口：JSON 契约测试长期未运行（已恢复，逐字登记）**：
+  - 事实：`connector::tests::shell_network_config_snapshot_and_json_contract`（`connector.rs:5443`）自 commit `d9346c3`（「fix(client): 真机 run 1 的三个修复——CIDR 地址、沙箱凭据、ICE socket 供给」）起**丢失 `#[test]` 属性** ⇒ 该 JSON 契约测试（含 §13.12 及本节写入其中的断言：地址/前缀、路由条目、DNS 去重、peer 摘要、默认路由闸标记、凭据纪律、严格 reader 可解析）**在恢复前从未运行**；恢复后逐条全绿（`cargo test` 实跑，见 ⑥）。
+  - 判定级别＝**验证完整性（verification integrity）**：不是产品行为缺陷，而是「有测试钉住该契约」这一**表述**在此之前部分不成立——`d9346c3` 之后凡引用「§13.12/既有形状断言已覆盖该 JSON」的验收叙述，其证据强度须按「未运行」重估（`shell_network_config_snapshot_and_json_contract` 的编译告警 `function ... is never used` 是当时唯一可见信号，未被处理）。
+  - 处置：就地恢复 `#[test]` 一行（不改任何断言、不改被测代码）；恢复后该用例逐条通过，说明契约本身**未**在此期间被破坏（漂移为零），结论＝「证据缺失」而非「契约失效」。
+  - **系统性有界扫描（同轮追加，防同类静默缺口）**：对 `client/core/src/**/*.rs` 与 `client/core/tests/*.rs` 做两遍扫描——① 名字含 `test_`/`_test`/`_contract`/`_snapshot`/`_holds`/`_rejects`/`_asserts`/`_is_`/`_must_` 等测试性模式且位于测试上下文（`tests/` 文件或 `#[cfg(test)] mod …`）却无 `#[test]`/`#[tokio::test]` 者；② **不依赖命名**的判据（零参数 + 无返回值 + 体内含 assert/panic + 未被任何地方调用 ⇒ 必然是「测试体」）。**结果：pass① 17 个全部为 helper**（fixture 构造器：`test_private_key_b64`(10)、`test_config_json`(4)、`shell_test_map`(17)、`relay_test_attach`(4)、`test_secret_b64`(2)、`test_slot`(5)、`test_key_b64`(4)、`make_test_ca`(17)、`plaintext_contract`(2)、`test_relay_attach`(2/5)、`base_snapshot`(7)、`fd_is_open`(11)、`fd_is_nonblock`(2)——判定依据＝**带参数或非 `()` 返回**且 `call_occurrences ≥ 2`（被测试调用），无一满足「零参数 + 无返回 + 体内断言」的测试体形态；同类的参数化断言辅助如 `assert_stays_false(window, pred, what)`（`tests/relay_*.rs`/`wg_over_relay_n13.rs`）因带参数而不入 pass② 判据，其「辅助而非测试」由签名直接判定），**pass② 0 个** ⇒ 当前工作树**无其它丢失属性的测试**。扫描器自身以 HEAD 版本（属性仍缺失）做**阳性对照**：pass② 恰好命中 `shell_network_config_snapshot_and_json_contract`（`connector.rs:5399`@HEAD）且仅此一例 ⇒ 判据非空转（扫描脚本为 /tmp 下只读解析器，未入库）。
+- 集成 `tests/n2h_device_collector.rs:1827-1831` 新增断言：无 map 时 `connector_network_config()` 逐字节仍是 `{"available":false,"reason":"no-network-map"}`（stun 段只随 `available:true`，不伪造）。
+- 新增 `n2h_collector::tests::freeze_assembly_takes_the_shell_stun_exclusion_and_keeps_core_stuns_too`（`n2h_collector.rs:3796`）：钉住本增量引入的**跨边界链接的 core 半边**——`shell_exclusions[kind=stun]`（arm 源）冻结为 `source=shell-exclusion`、`proto=udp`、`resolved=<shell 解析的 ip:port>`、`present:true`；与同 `resolved` 的 core-network-map 候选去重后壳条目**保留槽位**；core 源的另一个 stun 端点仍并存冻结（不因合并丢 kind）。
+- 契约行：`lib.rs:88` 形状串补 `,stuns:[{uri}]` + 纪律说明（逐字转发、尾部追加、空=如实缺口、`turn:` 由壳侧具名拒绝）。
+- 未触碰：`n2h.rs`（渲染器/判据）、`napi.rs`、`connector_status()` 渲染路径、`wg_device.rs`、预注册草案、T0 审查记录、`Cargo.toml`/`Cargo.lock`（无新依赖）；`n2h_collector.rs` 仅新增一个测试（生产代码零改动）。
+
+**⑥ 改动面与验收（工作树实读，HEAD `9460224` + 本节未提交改动）**
+
+- 改动文件（13）：`client/core/src/connector.rs`、`client/core/src/lib.rs`、`client/core/src/n2h_collector.rs`、`client/core/tests/n2h_device_collector.rs`、`client/entry/src/main/ets/vpnextensionability/{NetBirdEndpointExclusion,NetBirdConnector,NetBirdVpnExtensionAbility}.ets`、`client/entry/selfcheck/{run.mts,run-relay-exclusion.mts,run-relay-flag.mts,run-relay-status-log.mts,run-exclusion-addr-shape.mts}`、本文件。
+- 验收实跑：
+  - `cd client/core && cargo test --offline --locked --color never` → **34 个测试目标全 ok，合计 537 passed / 0 failed / 0 ignored**（`9460224` 基线 534/0；+2 新用例 +1 由 ⑤ 恢复的既有契约用例）。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=951ca4933710eca319c06492a558353043a078318965ba032d3f6a5156b3e257 (recomputed independently; present in the artifact)`（源码改动 ⇒ 与 §13.12 的 `72bc6e32…` 不同，符合该摘要语义）。
+  - 壳侧自检（全 `exit 0`）：`run.mts` **81 passed / 0 failed**（§13.12 基线 61）、`run-relay-exclusion.mts` **49 / 0**（基线 35）、`run-relay-flag.mts` **9 / 0**、`run-relay-status-log.mts` **3 / 0**、`run-route-validation.mts` **40 / 0**、`run-exclusion-addr-shape.mts` **25 / 0**。
+  - `bash client/build.sh` → exit 0（`CompileArkTS` 对含本节改动的 ets 全量编译成功，仅余既有行告警），逐项 `VERIFY OK`（HAP 成员 `.so` sha256 `3ee888a6947ddc625fbd80b09c843197e956444180ef95c37c3e466ebeeabbf8`，两次构建逐字节相同——摘要输入＝`Cargo.{toml,lock}`/`build.rs`/`proto`/`src`，见 `build.rs:76-77`）；HAP `entry-default-unsigned.hap` **4 225 199 bytes**、sha256 `d233f19d6128e50175d5417d4d1daee22ec7cdfb38bd2c7f7b59348536abeb0a`（HAP 容器不可逐字节复现，同一 `.so` 的两次打包 sha 不同属预期；验收以 exit 0 + 逐项 VERIFY OK + 成员 `.so` 摘要为准；`/tmp/n2h-frozen/` 的冻结制品未触碰）。
+  - `git diff --stat`：13 files changed, 753 insertions(+), 14 deletions(-)（含 §4.0 stun 行就地更正的 1 行改写）。
+
+**⑦ 范围外与如实登记**
+
+- **被本节取代的旧字面（已按批准就地更正 + 在此同步登记）**：§4.0 冻结来源表 stun 行备注原文「壳排除集目前**不含**此类（B-2 的 3/7 现状，如实入档）」**自本节起失效**；该行已按 §13.12 处理 dns 行的同一形态**就地更正**（行内标注「（I2 更正：…）」并保留旧文本为历史引述）。现状：壳侧排除派生 kind＝management/signal/relay/dns（§13.12）/stun（本节）＝**5/7**，仅余 **wg_peer** 为缺口（其独立增量）。预注册 §2-C2 的 B-2 文字属预注册面，本增量不改（纪律），故该处的 3/7 叙述以本节为准。
+- **本轮不做**（各有独立增量）：wg_peer 代际、两个新代际标记行、`gen=` 字段、ARMED gen/recreate 字段、S20 guard、5 类必需端点 fatal 扩面；`turn` 仍为可选类（`present:false` + 具名理由），本 build 无 turn 路径故不新增 turn 通道。
+- **残余（如实）**：(a) 壳侧 stun 缺口只入 hilog 标记，不进证据 `notes[]`（arm opts 契约未扩，判定侧目前据冻结面 `stun` 条目的 `source`/`present` 与排除面 `VPN_ROUTE_ENTRY` 行判定）；(b) `turn:` 在被暴露的 `stuns[]` 中**常态不出现**（core `set_stuns` 拒收即不留存），故壳侧具名拒绝路径在真实流量里通常不可达，仅作为暴露面逐字转发的防御与 `turns[]`（另一字段，本轮不暴露）未来的入口；(c) 壳侧 stun 解析比 core 多一条 `unusable-host` 拒绝（② 已给理由），若未来 core 放宽 host 语义需同步复核。
+
 

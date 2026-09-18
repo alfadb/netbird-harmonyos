@@ -1819,6 +1819,16 @@ fn a_started_connector_installs_the_production_host_with_internal_freeze_sources
             "{name} must keep its frozen shape (no internal dial address): {doc}"
         );
     }
+    // N2-H I2 (design §13.13): with no applied map the network-config document
+    // keeps its byte-exact pre-existing `available:false` answer — the stun
+    // exposure lives in the AVAILABLE document's tail and is never fabricated
+    // for a session that announced nothing (its internal stuns freeze in ③
+    // below, from core's own state, not from this document).
+    assert_eq!(
+        connector_network_config_json(),
+        "{\"available\":false,\"reason\":\"no-network-map\"}",
+        "the no-map answer must not grow a stun section"
+    );
 
     // ③ assembly: management present with its source token; stun a REASONED
     //    absence here (nothing to freeze is recorded, never fabricated)

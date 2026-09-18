@@ -46,7 +46,9 @@ writeFileSync(join(fixtureDir, 'NetBirdEndpointExclusion.dep.ts'),
   'export const DnsDerivationInput = undefined;\n' +
   'export const DnsDerivationResult = undefined;\n' +
   'export const DnsNetProbe = undefined;\n' +
-  'export const DnsPlatformNetAddress = undefined;\n');
+  'export const DnsPlatformNetAddress = undefined;\n' +
+  // N2-H I2 stun caliber (§13.13): another erased type-only import of the real module
+  'export const StunUriEntry = undefined;\n');
 
 let passed: number = 0;
 let failedCount: number = 0;

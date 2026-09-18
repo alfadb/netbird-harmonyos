@@ -10,7 +10,9 @@ import { RouteCheckResult, RouteViolation, formatRouteTable, formatRouteViolatio
   validateRouteEntries } from './NetBirdRouteValidation';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
-  RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl,
+  StunDerivationResult, StunUriEntry,
+  RelayEndpoint, buildExcludedRouteEntries, deriveStunEndpointExclusions,
+  isExclusionFailClosed, parseRelayUrl,
   stripDialPort
 } from './NetBirdEndpointExclusion';
 import {
@@ -611,7 +613,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // as the builder-side defense.
     const exclusion: EndpointExclusionOutcome = await this.deriveEndpointExclusions(
       mgmtEndpoint, stripDialPort(connectAddr), signalProvisioned,
-      baseTemplate.tunnelAddress);
+      baseTemplate.tunnelAddress, net !== null ? net.stuns : null);
     if (exclusion.fatal) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=endpoint-exclusion|' +
@@ -834,8 +836,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // known-good: the flow aborts earlier when those resolutions fail).
   //
   // Log discipline: hosts/ports/counts only — no tokens, no resolved IPs.
+  // N2-H I2: `stuns` = the announced `netbird_config.stuns[].uri` list read
+  // from the SAME `connector_network_config()` snapshot the caller already
+  // holds (`net.stuns`; null/absent when no map arrived) — the stun class of
+  // the seven frozen kinds, parsed by the pure module with the core's own
+  // `stun:` rules (`turn:` refused by name).
   private async deriveEndpointExclusions(mgmt: ManagementEndpoint, mgmtDialIp: string,
-    signal: SignalProvisionResult | null, gateway: string): Promise<EndpointExclusionOutcome> {
+    signal: SignalProvisionResult | null, gateway: string,
+    stuns: StunUriEntry[] | null | undefined): Promise<EndpointExclusionOutcome> {
     // relay state: the connector status is the only source (relay_enabled
     // rides the core config; the ADVERTISED url set arrives with the
     // `relay_advertised` sibling section). Lenient: a missing / type-
@@ -954,6 +962,35 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'diag=true|is_evidence=false',
       this.requestId, dns.branch, dns.physicalEvidence, dns.endpoints.length,
       dns.gap ? dns.gapReason : 'none');
+
+    // N2-H I2 (design §13.13): the REQUIRED stun class, from the announced
+    // `netbird_config.stuns[].uri` list that core tail-appends to
+    // `connector_network_config()` (the shell had no channel to it before this
+    // increment). The pure module applies core's OWN `stun:` parse (default
+    // port 3478) so the shell freezes the very endpoints core gathers against;
+    // `turn:` is refused with the NAMED reason and NO turn route is ever
+    // generated (this build has no turn path). A missing/empty announcement or
+    // a refused URI is recorded here as an honest gap — no invented endpoint,
+    // no silent drop. The gap is diagnostic in this increment (widening
+    // fail-closed to the five required kinds and the arm-opts contract are
+    // separate increments).
+    const stun: StunDerivationResult = deriveStunEndpointExclusions(stuns);
+    for (let i = 0; i < stun.endpoints.length; i++) {
+      endpoints.push(stun.endpoints[i]);
+    }
+    for (let i = 0; i < stun.rejected.length; i++) {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_STUN_URI_REJECTED|requestId=%{public}s|index=%{public}d|reason=%{public}s|' +
+        'diag=true|is_evidence=false',
+        this.requestId, i, stun.rejected[i]);
+    }
+    hilog.info(DOMAIN, TAG,
+      'N2H_STUN_ENDPOINTS|requestId=%{public}s|stuns=%{public}d|usable=%{public}d|' +
+      'rejected=%{public}d|turnRejected=%{public}d|stunGap=%{public}s|' +
+      'diag=true|is_evidence=false',
+      this.requestId, stun.announced,
+      stun.endpoints.length, stun.rejected.length, stun.turnRejected,
+      stun.gap ? stun.gapReason : 'none');
 
     // FRESH build-time resolutions (literals short-circuit DNS; IPv4
     // preferred, IPv6 accepted as a /128 freeze). Failures map to '' here —

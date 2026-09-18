@@ -285,6 +285,94 @@ try {
     'is reported by the caller as apiError, see D6)',
     d7b.gap && d7b.gapReason === 'no-physical-net' && d7b.branch === 'none',
     JSON.stringify(d7b));
+
+  // ---- N2-H I2 stun caliber (design §13.13) --------------------------------
+  // parseStunUri mirrors the core's OWN `stun:` parser (ice.rs:100-143) so the
+  // shell freezes exactly what core gathers against; `turn:` is refused with a
+  // NAMED reason and never becomes an endpoint.
+  check('S0 stun constants are the core literals',
+    mod.STUN_DEFAULT_PORT === 3478 &&
+    mod.TURN_REJECTED_REASON === 'turn-rejected:no-turn-path-in-this-build');
+
+  const stunOk = (uri: string, host: string, port: number): boolean =>
+    deepEq(mod.parseStunUri(uri).endpoint, { host: host, port: port }) &&
+    mod.parseStunUri(uri).reason === '';
+  check('S1 default port 3478 when the URI omits it',
+    stunOk('stun:stun.netbird.io', 'stun.netbird.io', 3478));
+  check('S2 explicit port kept (core u16 branch)',
+    stunOk('stun:203.0.113.9:19302', '203.0.113.9', 19302));
+  check('S3 scheme is case-insensitive + surrounding space trimmed',
+    stunOk('  STUN:stun.example:3478  ', 'stun.example', 3478));
+  check('S4 leading + on the port accepted (Rust u16 parse mirror)',
+    stunOk('stun:stun.example:+3478', 'stun.example', 3478));
+  check('S5 turn: refused with the NAMED reason (no turn path in this build)',
+    mod.parseStunUri('turn:turn.example:3478').endpoint === null &&
+    mod.parseStunUri('TURN:turn.example').reason === mod.TURN_REJECTED_REASON);
+  check('S6 other scheme / no scheme refused',
+    mod.parseStunUri('https://stun.example:443').reason === mod.STUN_REJECT_NO_SCHEME &&
+    mod.parseStunUri('not-a-uri').reason === mod.STUN_REJECT_NO_SCHEME);
+  check('S7 empty host refused', mod.parseStunUri('stun:').reason === mod.STUN_REJECT_NO_HOST);
+  check('S8 port 0 / over 16 bit / non-numeric refused',
+    mod.parseStunUri('stun:h.example:0').reason === mod.STUN_REJECT_PORT_ZERO &&
+    mod.parseStunUri('stun:h.example:65536').reason === mod.STUN_REJECT_BAD_PORT &&
+    mod.parseStunUri('stun:h.example:abc').reason === mod.STUN_REJECT_BAD_PORT &&
+    mod.parseStunUri('stun:h.example:').reason === mod.STUN_REJECT_BAD_PORT);
+  check('S9 bracketed IPv6 refused (udp4-only gathering, core branch)',
+    mod.parseStunUri('stun:[2001:db8::1]:3478').reason === mod.STUN_REJECT_IPV6);
+  check('S10 colon-bearing host refused instead of a bogus /128 route destination',
+    mod.parseStunUri('stun:a:b:3478').reason === mod.STUN_REJECT_UNUSABLE_HOST &&
+    mod.parseStunUri('stun:h.example:3478:9').reason === mod.STUN_REJECT_UNUSABLE_HOST);
+
+  // deriveStunEndpointExclusions: the announced[] -> 'stun' endpoint class
+  const stunMixed = mod.deriveStunEndpointExclusions([
+    { uri: 'stun:stun.example:3478' },
+    { uri: 'turn:turn.example:3478' },
+    { uri: 'garbage' },
+    { uri: 'stun:203.0.113.9' },
+    { uri: 'stun:stun.example:3478' }
+  ]);
+  check('S11 usable URIs become kind=stun endpoints, duplicates collapse',
+    deepEq(stunMixed.endpoints, [{ kind: 'stun', host: 'stun.example', port: 3478 },
+      { kind: 'stun', host: '203.0.113.9', port: 3478 }]), JSON.stringify(stunMixed));
+  check('S12 every refused URI is reported (turn: by name), never a silent drop',
+    deepEq(stunMixed.rejected, [mod.TURN_REJECTED_REASON, mod.STUN_REJECT_NO_SCHEME]) &&
+    stunMixed.turnRejected === 1, JSON.stringify(stunMixed));
+  check('S13 a refusal with usable endpoints is a recorded gap',
+    stunMixed.gap && stunMixed.gapReason === 'unusable-uris', JSON.stringify(stunMixed));
+
+  const stunEmpty = mod.deriveStunEndpointExclusions([]);
+  check('S14 empty announcement -> no-stuns gap, no endpoint invented',
+    stunEmpty.gap && stunEmpty.gapReason === 'no-stuns' && stunEmpty.endpoints.length === 0 &&
+    stunEmpty.rejected.length === 0, JSON.stringify(stunEmpty));
+  check('S15 missing section (undefined/null) -> the SAME honest gap, no throw',
+    mod.deriveStunEndpointExclusions(undefined).gapReason === 'no-stuns' &&
+    mod.deriveStunEndpointExclusions(null).gapReason === 'no-stuns');
+
+  const stunTurnOnly = mod.deriveStunEndpointExclusions([{ uri: 'turn:t.example:3478' }]);
+  check('S16 turn-only announcement: NO endpoint, gap token, named reason counted',
+    stunTurnOnly.endpoints.length === 0 && stunTurnOnly.turnRejected === 1 &&
+    stunTurnOnly.gap && stunTurnOnly.gapReason === 'unusable-uris' &&
+    stunTurnOnly.rejected[0] === mod.TURN_REJECTED_REASON, JSON.stringify(stunTurnOnly));
+
+  const stunAnomalous = mod.deriveStunEndpointExclusions(
+    [null, {}, { uri: 7 }, { uri: '' }, { uri: 'stun:ok.example' }] as unknown[]);
+  check('S17 type-anomalous elements are reported, usable ones still freeze',
+    deepEq(stunAnomalous.endpoints, [{ kind: 'stun', host: 'ok.example', port: 3478 }]) &&
+    deepEq(stunAnomalous.rejected, ['malformed-entry', 'malformed-entry', 'malformed-entry',
+      'malformed-entry']) && stunAnomalous.announced === 5 && stunAnomalous.gap,
+    JSON.stringify(stunAnomalous));
+  check('S18 a non-array section is an honest gap, never a throw',
+    mod.deriveStunEndpointExclusions({} as unknown[]).gap &&
+    mod.deriveStunEndpointExclusions({} as unknown[]).gapReason === 'no-stuns' &&
+    mod.deriveStunEndpointExclusions({} as unknown[]).announced === 0);
+
+  const stunRoute = mod.buildExcludedRouteEntries(
+    [{ kind: 'stun', host: 'stun.example', ok: true, address: '198.51.100.7' }], gw);
+  check('S19 a stun endpoint renders the /32 excluded route (kind passes through)',
+    stunRoute.routes.length === 1 && stunRoute.routes[0].prefixLength === 32 &&
+    stunRoute.routes[0].destination === '198.51.100.7' &&
+    stunRoute.routes[0].isExcludedRoute === true &&
+    stunRoute.routes[0].isDefaultRoute === false, JSON.stringify(stunRoute));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

@@ -3786,6 +3786,44 @@ mod tests {
         assert_eq!(entry(EndpointKind::Management).frozen_at_mono, 999);
     }
 
+    /// N2-H I2 (design §13.13): the shell now feeds its stun class as
+    /// `shell_exclusions[kind=stun]` (the arm source). This pins the CORE half
+    /// of that cross-boundary link: the entry freezes with the shell token and
+    /// the shell-resolved `ip:port`, keeps the slot against an identical
+    /// core-network-map candidate, and a DIFFERENT stun endpoint from the core
+    /// source still freezes alongside it (no kind is dropped by the merge).
+    #[test]
+    fn freeze_assembly_takes_the_shell_stun_exclusion_and_keeps_core_stuns_too() {
+        let sources = FreezeSources {
+            shell_exclusions: vec![ShellExclusion::with_resolved(
+                EndpointKind::Stun,
+                "stun.shell.example",
+                3478,
+                "198.51.100.7:3478",
+            )],
+            // the same resolved endpoint as the shell entry (must not duplicate)
+            // plus a different one (must still freeze from the core source)
+            stun_uris: vec![
+                InjectedEndpoint::new("198.51.100.7", 3478),
+                InjectedEndpoint::new("stun.core.example", 19302),
+            ],
+            ..FreezeSources::default()
+        };
+        let frozen = assemble_freezes(&sources);
+        let stuns: Vec<_> =
+            frozen.iter().filter(|f| f.kind == Some(EndpointKind::Stun)).collect();
+        assert_eq!(stuns.len(), 2, "shell + distinct core stun endpoints: {stuns:?}");
+        assert_eq!(stuns[0].host, "stun.shell.example");
+        assert_eq!(stuns[0].source, SOURCE_SHELL_EXCLUSION, "the C2 cross-check token");
+        assert_eq!(stuns[0].resolved, "198.51.100.7:3478");
+        assert_eq!(stuns[0].proto, "udp", "transport follows the kind");
+        assert_eq!(stuns[0].present, true);
+        assert_eq!(stuns[0].absent_reason, "");
+        assert_eq!(stuns[1].host, "stun.core.example");
+        assert_eq!(stuns[1].source, SOURCE_CORE_NETWORK_MAP);
+        assert_eq!(stuns[1].resolved, "stun.core.example:19302");
+    }
+
     #[test]
     fn freeze_assembly_merges_shell_and_core_sources_without_duplicate_resolved_endpoints() {
         // the shell entry and the core dial address are the SAME resolved /32:

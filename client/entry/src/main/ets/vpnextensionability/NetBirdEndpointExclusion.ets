@@ -29,6 +29,11 @@
 //     all-nets filtered branch ONLY when the default network cannot prove
 //     physical attribution, and a recorded gap (never a silent pick) when
 //     neither path can.
+//   - parseStunUri / deriveStunEndpointExclusions: the N2-H I2 stun caliber
+//     (design §13.13) — `netbird_config.stuns[].uri` as the tail of
+//     `connector_network_config()`, parsed with the core's OWN `stun:` rules
+//     (default port 3478), `turn:` refused by name (no turn path in this
+//     build) and a recorded gap when nothing was announced.
 //
 // Log discipline: callers log hostnames/ports/counts only — never tokens, and
 // this module holds no credential-shaped data at all.
@@ -48,7 +53,8 @@ export interface ExcludedRouteEntry {
 }
 
 // One outer endpoint that must be frozen + excluded. `kind` is a stable token:
-// 'management' | 'signal' | 'relay'.
+// 'management' | 'signal' | 'relay' | 'stun' | 'dns' (the core's
+// EndpointKind::name() tokens — the arm forwards them verbatim).
 export interface ExclusionEndpoint {
   kind: string;
   host: string;
@@ -592,4 +598,219 @@ export function deriveDnsEndpointExclusions(input: DnsDerivationInput): DnsDeriv
   return { endpoints: endpoints, notes: notes, branch: branch,
     physicalEvidence: physicalEvidence, gap: gapReason.length > 0,
     gapReason: gapReason };
+}
+
+// ---------------------------------------------------------------------------
+// N2-H I2 stun freeze: `netbird_config.stuns[].uri` -> /32 excluded endpoints
+// ---------------------------------------------------------------------------
+//
+// The stun class is one of the seven the governance freeze requires
+// (docs/native-nx-governance.md 追加登记; preregistration §2-C1 lists stun as
+// a REQUIRED kind), and until this increment the shell had no channel to it:
+// the core gathers against `netbird_config.stuns[]` internally, and
+// `connector_network_config()` did not render it. Core now tail-appends
+// `stuns:[{uri}]` to that read-only snapshot (design §13.13) and this section
+// turns those URIs into the exclusion set's stun endpoints.
+//
+// PARSE MIRROR: `parseStunUri` mirrors the core's own `parse_stun_uri`
+// (client/core/src/ice.rs:100-143) for the `stun:` branch — first-`:` scheme
+// split, case-insensitive `stun` scheme, LAST-`:` host/port split, default
+// port 3478, `u16` port (leading `+` accepted, 0 and >65535 refused), empty
+// host refused, bracketed IPv6 refused — so the shell freezes exactly the
+// `host:port` core gathers against. `turn:` is refused with the NAMED reason
+// [`TURN_REJECTED_REASON`] and NO turn route is ever generated: this build has
+// no turn path at all (`set_stuns` rejects `turn:`; the collector records the
+// absent kind with the same named reason). One ADDITIONAL shell-side
+// restriction (recorded, never silent): a host that still carries a `:` after
+// the split (`stun:a:b:3478` — core would accept host `a:b`) is refused as
+// [`STUN_REJECT_UNUSABLE_HOST`] instead of being rendered as a bogus /128
+// route entry — that is the create-401 failure class this module already
+// guards elsewhere, and core's own gather could not resolve such a host
+// either.
+//
+// A missing/empty/type-anomalous `stuns` section, and every URI this module
+// refuses, are reported as a GAP token — never an invented endpoint, never a
+// silent drop. The gap is diagnostic (hilog marker) in this increment: the
+// fail-closed widening of the five required kinds and the arm-opts contract
+// (§5.1) are separate increments.
+
+/// The `stun:` default port (pion's default, mirrored from `ice.rs:137`).
+export const STUN_DEFAULT_PORT: number = 3478;
+
+/// The named reason a `turn:` URI is refused: this build has no turn path
+/// (core: `n2h_collector::TURN_REJECTED_REASON`, `peer_conn.rs` `set_stuns`
+/// rejects `turn:`). No turn endpoint is ever frozen or excluded.
+export const TURN_REJECTED_REASON: string = 'turn-rejected:no-turn-path-in-this-build';
+
+/// Per-URI refusal tokens (stable, greppable; mirror the core parser's
+/// distinct rejection branches).
+export const STUN_REJECT_NO_SCHEME: string = 'no-stun-scheme';
+export const STUN_REJECT_BAD_PORT: string = 'bad-port';
+export const STUN_REJECT_PORT_ZERO: string = 'port-zero';
+export const STUN_REJECT_IPV6: string = 'ipv6-rejected';
+export const STUN_REJECT_NO_HOST: string = 'no-host';
+export const STUN_REJECT_UNUSABLE_HOST: string = 'unusable-host';
+export const STUN_REJECT_MALFORMED_ENTRY: string = 'malformed-entry';
+
+/// Gap tokens: nothing announced at all, versus announced-but-unusable. Both
+/// are honest gaps (`stuns` missing on the wire is NOT "no stun endpoint
+/// exists" — it is "the shell was not told", which the core's own freeze then
+/// covers or records as its own reasoned absence).
+export const STUN_GAP_NO_STUNS: string = 'no-stuns';
+export const STUN_GAP_UNUSABLE_URIS: string = 'unusable-uris';
+
+// host:port parsed out of a `stun:` URI.
+export interface StunEndpoint {
+  host: string;
+  port: number;
+}
+
+// The parse outcome: `endpoint` is null exactly when `reason` is non-empty.
+export interface StunParseResult {
+  endpoint: StunEndpoint | null;
+  reason: string;
+}
+
+// One `connector_network_config()` tail element (`stuns:[{uri}]`).
+export interface StunUriEntry {
+  uri: string;
+}
+
+export interface StunDerivationResult {
+  // The stun endpoints to freeze AND exclude (kind 'stun'), deduplicated by
+  // host:port, in announcement order.
+  endpoints: ExclusionEndpoint[];
+  // One refusal token per refused element, in announcement order (never a
+  // silent drop) — `TURN_REJECTED_REASON` for a `turn:` URI.
+  rejected: string[];
+  turnRejected: number;
+  // How many elements the announced list carried (0 when the section is
+  // missing or not an array-shaped list) — reported by the caller instead of
+  // it reaching into the raw input.
+  announced: number;
+  gap: boolean;
+  gapReason: string;
+}
+
+// PURE: one refusal outcome (`endpoint` null ⇔ `reason` non-empty).
+function stunReject(reason: string): StunParseResult {
+  return { endpoint: null, reason: reason };
+}
+
+// PURE: the `stun:` branch mirror of the core parser (see the section header).
+export function parseStunUri(uri: string): StunParseResult {
+  const text: string = uri.trim();
+  const sep: number = text.indexOf(':');
+  if (sep < 0) {
+    return stunReject(STUN_REJECT_NO_SCHEME);
+  }
+  const scheme: string = text.slice(0, sep).toLowerCase();
+  if (scheme !== 'stun') {
+    // `turn:` carries its NAMED reason; any other scheme is refused the same
+    // way core's `lacks a stun: scheme` branch does
+    return stunReject(scheme === 'turn' ? TURN_REJECTED_REASON : STUN_REJECT_NO_SCHEME);
+  }
+  const rest: string = text.slice(sep + 1);
+  let host: string = rest;
+  let port: number = STUN_DEFAULT_PORT;
+  const last: number = rest.lastIndexOf(':');
+  if (last >= 0) {
+    const hostPart: string = rest.slice(0, last);
+    if (hostPart.slice(0, 1) === '[') {
+      return stunReject(STUN_REJECT_IPV6); // bracketed IPv6 literal (core: udp4-only)
+    }
+    const portPart: string = rest.slice(last + 1);
+    // core parses with `str::parse::<u16>()`: digits with an OPTIONAL leading
+    // '+' — mirrored exactly, because a stricter shell parse would omit an
+    // endpoint the core actually gathers against
+    let digits: string = portPart;
+    if (digits.slice(0, 1) === '+') {
+      digits = digits.slice(1);
+    }
+    if (digits.length === 0 || digits.length > 5) {
+      return stunReject(STUN_REJECT_BAD_PORT);
+    }
+    for (let i = 0; i < digits.length; i++) {
+      const code: number = digits.charCodeAt(i);
+      if (code < 0x30 || code > 0x39) {
+        return stunReject(STUN_REJECT_BAD_PORT);
+      }
+    }
+    port = Number(digits);
+    if (port > 65535) {
+      return stunReject(STUN_REJECT_BAD_PORT);
+    }
+    if (port === 0) {
+      return stunReject(STUN_REJECT_PORT_ZERO);
+    }
+    host = hostPart;
+  }
+  if (host.length === 0) {
+    return stunReject(STUN_REJECT_NO_HOST);
+  }
+  if (host.indexOf(':') >= 0) {
+    // shell-side extra guard (see the section header): a colon-bearing host is
+    // a route entry the platform rejects, never a real stun endpoint
+    return stunReject(STUN_REJECT_UNUSABLE_HOST);
+  }
+  return { endpoint: { host: host, port: port }, reason: '' };
+}
+
+// PURE: the announced `stuns[]` entries -> the stun class of the exclusion set
+// (kind 'stun'). Missing / empty / anomalously-typed input and every refused
+// URI become a recorded gap token; nothing is ever invented or silently
+// dropped.
+export function deriveStunEndpointExclusions(stuns: StunUriEntry[] | null | undefined):
+  StunDerivationResult {
+  const endpoints: ExclusionEndpoint[] = [];
+  const rejected: string[] = [];
+  let turnRejected: number = 0;
+  const entries: StunUriEntry[] | null | undefined = stuns;
+  if (entries === null || entries === undefined || entries.length === 0) {
+    return { endpoints: endpoints, rejected: rejected, turnRejected: 0, announced: 0,
+      gap: true, gapReason: STUN_GAP_NO_STUNS };
+  }
+  // the announced count is read HERE (never by the caller): a wrong-typed
+  // section has no length, and that must not leak an `undefined` into a log line
+  const announced: number = typeof entries.length === 'number' ? entries.length : 0;
+  for (let i = 0; i < entries.length; i++) {
+    const entry: StunUriEntry = entries[i];
+    const uri: string = entry !== null && entry !== undefined && typeof entry.uri === 'string'
+      ? entry.uri
+      : '';
+    if (uri.length === 0) {
+      rejected.push(STUN_REJECT_MALFORMED_ENTRY);
+      continue;
+    }
+    const parsed: StunParseResult = parseStunUri(uri);
+    const endpoint: StunEndpoint | null = parsed.endpoint;
+    if (endpoint === null) {
+      rejected.push(parsed.reason);
+      if (parsed.reason === TURN_REJECTED_REASON) {
+        turnRejected++;
+      }
+      continue;
+    }
+    let duplicate: boolean = false;
+    for (let j = 0; j < endpoints.length; j++) {
+      if (endpoints[j].host === endpoint.host && endpoints[j].port === endpoint.port) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      continue;
+    }
+    endpoints.push({ kind: 'stun', host: endpoint.host, port: endpoint.port });
+  }
+  let gapReason: string = '';
+  if (rejected.length > 0) {
+    gapReason = STUN_GAP_UNUSABLE_URIS;
+  } else if (endpoints.length === 0) {
+    // no usable entry and nothing to name as refused (e.g. a section of the
+    // wrong type): still an honest gap
+    gapReason = STUN_GAP_NO_STUNS;
+  }
+  return { endpoints: endpoints, rejected: rejected, turnRejected: turnRejected,
+    announced: announced, gap: gapReason.length > 0, gapReason: gapReason };
 }
