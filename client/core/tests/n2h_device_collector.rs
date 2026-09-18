@@ -455,6 +455,12 @@ fn d10_collector_paths() -> BTreeMap<&'static str, &'static str> {
         ("$.collector.target_triple", "string"),
         ("$.collector.build_sha256", "string"),
         ("$.collector.build_source", "string"),
+        // N2-H I3a (v3.1 §2.1 R-2①): the shell-reported evidence generation,
+        // appended as the block's last field. Every arm in this suite carries
+        // the key, so the path is a NUMBER (the null shape — the shell
+        // reporting no generation — is a value-less gap the judge reads, unit
+        // tested in `n2h_collector`).
+        ("$.collector.exclusion_generation", "number"),
     ])
 }
 
@@ -949,9 +955,16 @@ fn offline_dns_record() -> &'static str {
      \"handle=101;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4\"}"
 }
 
+/// N2-H I3a (v3.1 §2.1 R-2①): the evidence generation G the shell reports at
+/// arm — the gen of its last ACCEPTED `create()`. Every arm below carries it
+/// (the shell always does), so the document's trailing
+/// `collector.exclusion_generation` is asserted end-to-end.
+const OFFLINE_EXCLUSION_GENERATION: u64 = 3;
+
 /// The arm options: the shell's own exclusion resolution (C2's artifact) for
-/// management/signal, the documented window knobs, the v3.1 dns branch record
-/// and the peer overlay port the harness's echo peer answers on.
+/// management/signal, the documented window knobs, the v3.1 dns branch record,
+/// the N2-H I3a accepted generation and the peer overlay port the harness's
+/// echo peer answers on.
 fn offline_opts(addrs: &SinkAddrs, with_signal: bool, probe_wait_ms: u64) -> String {
     let signal = if with_signal {
         format!(
@@ -965,7 +978,7 @@ fn offline_opts(addrs: &SinkAddrs, with_signal: bool, probe_wait_ms: u64) -> Str
     format!(
         "{{\"shell_exclusions\":[{{\"kind\":\"management\",\"host\":\"mgmt.example\",\
          \"port\":{},\"resolved\":\"{}\"}}{signal}],\"posctl_port\":{},\"probe_wait_ms\":{probe_wait_ms},\
-         {}}}",
+         {},\"exclusion_generation\":{OFFLINE_EXCLUSION_GENERATION}}}",
         addrs.mgmt.port(),
         addrs.mgmt,
         addrs.peer_overlay.port(),
@@ -1150,6 +1163,15 @@ fn clean_device_window_passes_and_matches_the_host_document_schema() {
     assert_eq!(collector.at("build_sha256").str_of(), Some(nc::BUILD_SHA256));
     assert_eq!(collector.at("build_source").str_of(), Some(nc::BUILD_SOURCE_EMBEDDED));
     assert_eq!(collector.at("build_sha256").str_of().unwrap().len(), 64, "non-empty digest");
+    // N2-H I3a (v3.1 §2.1 R-2①): the generation the SHELL reported at arm —
+    // the gen of its last accepted create() — reaches the evidence document
+    // verbatim (this is the value the judge compares with the ARMED marker and
+    // the last accepted VPN_EXCLUSION_GENERATION line).
+    assert_eq!(
+        collector.at("exclusion_generation").uint_of(),
+        Some(OFFLINE_EXCLUSION_GENERATION),
+        "the shell-reported generation must reach collector.exclusion_generation"
+    );
     assert!(
         !notes.iter().any(|n| n.starts_with("build-sha256=")),
         "the I5 build-sha256 notes[] placeholder must be gone: {notes:?}"
@@ -1157,9 +1179,12 @@ fn clean_device_window_passes_and_matches_the_host_document_schema() {
     // tail-append discipline: the block is the document's LAST key and the
     // renderer's own bytes are untouched before it
     assert!(
-        text.ends_with(&format!(",{}}}", nc::collector_block_json(""))),
+        text.ends_with(&format!(
+            ",{}}}",
+            nc::collector_block_json("", Some(OFFLINE_EXCLUSION_GENERATION))
+        )),
         "collector{{}} is not the trailing key: …{}",
-        &text[text.len().saturating_sub(160)..]
+        &text[text.len().saturating_sub(200)..]
     );
     // both positive-control directions observed, a2b through BOTH points
     assert_eq!(doc.at("tunnel_positive_control").at("observed_in_tunnel").bool_of(), Some(true));

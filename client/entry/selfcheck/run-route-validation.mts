@@ -29,6 +29,14 @@
 //       VPN_ROUTE_ENTRY lines carry index/source/dest/prefix/family/
 //       isDefaultRoute/isExcludedRoute/hasGateway/interface; raw undefined/
 //       NaN stay visible; formatRouteViolation exact marker shape.
+//   T8  N2-H I3a generation stamping (preregistration §2.1 C2 (1)/(2)/(2a)):
+//       formatExclusionGeneration exact literal (requestId/gen/kind/
+//       exclusions/wgPeerEndpoints/routes); the announced routes=/exclusions=
+//       equal the rendered row counts (index unique + contiguous 0..r-1,
+//       isExcludedRoute=="true" rows == m); every row carries the marker's
+//       gen as its LAST field; a later generation is self-consistent.
+//       (The monotonic +1 counter and both acceptance anchors live on the
+//       real extension class — run-exclusion-generation.mts drives those.)
 //
 // Run: node client/entry/selfcheck/run-route-validation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -202,7 +210,7 @@ try {
     { destination: '172.16.10.0', prefixLength: NaN, gateway: '10.99.0.1',
       hasGateway: true, isExcludedRoute: false, source: 'managed' }
   ];
-  const lines: string[] = v.formatRouteTable('req-1', iface, t7Entries);
+  const lines: string[] = v.formatRouteTable('req-1', iface, t7Entries, 0);
   check('T7 header line shape',
     lines.length === 4 && lines[0] === 'VPN_ROUTE_TABLE|requestId=req-1|count=3|excluded=1',
     JSON.stringify(lines));
@@ -227,7 +235,7 @@ try {
     lines[1].indexOf('|isExcludedRoute=false|') > 0 &&
     lines[3].indexOf('|isExcludedRoute=false|') > 0, all);
   const dirty = v.formatRouteTable('req|2', 'vpn|tun',
-    [{ ...plain, destination: '10.0.0.0|faked=1' }]);
+    [{ ...plain, destination: '10.0.0.0|faked=1' }], 0);
   check('T7 pipe sanitization (no log-format injection)',
     dirty[0].indexOf('requestId=req/2') > 0 &&
     dirty[1].indexOf('|dest=10.0.0.0/faked=1|') > 0 &&
@@ -237,6 +245,69 @@ try {
       { index: 2, source: 'managed', field: 'prefixLength', kind: 'nan' }) ===
     'VPN_ROUTE_ENTRY_INVALID|requestId=req-1|index=2|source=managed|' +
     'field=prefixLength|kind=nan');
+
+  // T8: N2-H I3a (preregistration §2.1 C2 (1)/(2)/(2a), v3.1 R-1) — the
+  // per-generation marker and the gen-stamped route rows. The marker's counts
+  // are the JUDGE's row-count basis, so they must be computed from the very
+  // list the rows are rendered from: routes=<r> (row count), exclusions=<m>
+  // (rendered isExcludedRoute=="true" rows), and every row carries the SAME
+  // gen as the marker.
+  check('T8 kind tokens are the two frozen values',
+    v.EXCLUSION_GENERATION_INITIAL === 'initial' &&
+    v.EXCLUSION_GENERATION_RECREATE === 'recreate');
+  const t8Entries = [
+    { ...def }, { ...lan },
+    { destination: '203.0.113.7', prefixLength: 32, gateway: '10.99.0.1',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }
+  ];
+  const genLine = v.formatExclusionGeneration('req-1', 0,
+    v.EXCLUSION_GENERATION_INITIAL, t8Entries, 0);
+  check('T8 generation line literal (requestId/gen/kind/exclusions/wgPeerEndpoints/routes)',
+    genLine === 'VPN_EXCLUSION_GENERATION|requestId=req-1|gen=0|kind=initial|' +
+    'exclusions=2|wgPeerEndpoints=0|routes=3', genLine);
+  const gen0 = v.formatRouteTable('req-1', iface, t8Entries, 0);
+  const rows0: string[] = gen0.slice(1);
+  const fieldOf = (line: string, key: string): string => {
+    const hit = line.split('|').find((f: string): boolean => f.indexOf(key + '=') === 0);
+    return hit === undefined ? '' : hit.slice(key.length + 1);
+  };
+  check('T8 row count is exactly the announced routes=',
+    rows0.length === 3 &&
+    String(rows0.length) === fieldOf(genLine, 'routes'), JSON.stringify(rows0));
+  check('T8 index is unique and covers 0..r-1 contiguously',
+    JSON.stringify(rows0.map((l: string): string => fieldOf(l, 'index'))) ===
+    JSON.stringify(['0', '1', '2']), JSON.stringify(rows0));
+  check('T8 excluded row count is exactly the announced exclusions=',
+    rows0.filter((l: string): boolean =>
+      fieldOf(l, 'isExcludedRoute') === 'true').length === 2 &&
+    String(rows0.filter((l: string): boolean =>
+      fieldOf(l, 'isExcludedRoute') === 'true').length) === fieldOf(genLine, 'exclusions'),
+    JSON.stringify(rows0));
+  check('T8 every row carries the SAME gen as the generation line',
+    rows0.every((l: string): boolean => fieldOf(l, 'gen') === fieldOf(genLine, 'gen')) &&
+    rows0.every((l: string): boolean => l.endsWith('|gen=0')), JSON.stringify(rows0));
+  check('T8 the appended gen= is the LAST field (pre-I3a shape stays a prefix)',
+    rows0[0].indexOf('VPN_ROUTE_ENTRY|requestId=req-1|index=0|source=') === 0 &&
+    rows0[0].indexOf('|hasGateway=true|gen=0') > 0, rows0[0]);
+  // a SECOND generation announces its own gen and stamps its own rows (the
+  // monotonic +1 sequence itself is driven on the REAL extension class by
+  // run-exclusion-generation.mts, which owns the counter)
+  const genLine1 = v.formatExclusionGeneration('req-1', 1,
+    v.EXCLUSION_GENERATION_RECREATE, [t8Entries[0]], 2);
+  const rows1: string[] = v.formatRouteTable('req-1', iface, [t8Entries[0]], 1).slice(1);
+  check('T8 a later generation is self-consistent (gen=1, kind=recreate, r=1, m=0)',
+    genLine1 === 'VPN_EXCLUSION_GENERATION|requestId=req-1|gen=1|kind=recreate|' +
+    'exclusions=0|wgPeerEndpoints=2|routes=1' &&
+    rows1.length === 1 && rows1[0].endsWith('|gen=1'), genLine1 + '\n' + rows1.join('\n'));
+  // the header's excluded= count uses the SAME predicate as the marker (the
+  // rendered literal), so a truthy-but-not-"true" value cannot split them
+  const oddExcluded: string[] = v.formatRouteTable('req-1', iface,
+    [{ ...plain, isExcludedRoute: 'yes' }], 0);
+  check('T8 table header and marker share one excluded-count predicate',
+    oddExcluded[0].endsWith('|excluded=0') &&
+    v.formatExclusionGeneration('req-1', 0, v.EXCLUSION_GENERATION_INITIAL,
+      [{ ...plain, isExcludedRoute: 'yes' }], 0).indexOf('|exclusions=0|') > 0,
+    JSON.stringify(oddExcluded));
 
   // =============== Part B: real mapper pipeline over real siblings =========
   const dirB = fixtureDir('nb-vpnconfig-mapper-');

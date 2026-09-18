@@ -136,6 +136,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 - `target_triple`：编译期 `env!("TARGET")`（区分 host 构建 vs `aarch64-unknown-linux-ohos`）；
 - `build_sha256`：构建期注入（`client/core/build.rs` 已存在，proto codegen 同文件追加 `cargo:rustc-env=N2H_BUILD_SHA256=…`，由 `client/build.sh` 传入 HAP/so 的 sha256——build.sh 本就计算并打印 .so/HAP sha256，runbook :109）；
 - `build_source`：`"embedded"`（构建期注入）或 `"operator-reported"`（fallback：arm opts 携带操作者登记的 sha256，如实标注来源，避免「推断顶替实测」，预注册草案 :69）。
+- `exclusion_generation`（**I3a 更正**：以上四条为 I3a 之前的字段清单，按只追加纪律**逐条保留为历史引述**；I3a 起**在该块尾部追加**第五条，既有四条的字段名/顺序/位置**不动**——块仍是文档最后一个键、仍可被严格 reader 解析、`n2h::Evidence::to_json` 仍未被触碰）：arm opts 的 `exclusion_generation` 原值（§5.1 契约行，预注册 v3.1 §2.1 R-2①）——值＝arm 时刻**最后一次被接受**的 `create()` 所建立连接代的 `gen`；**缺键**（壳侧尚无被接受的代，如实省略、不编造）⇒ 渲染 `null`（字段恒在、值缺失＝判定侧三方 `gen` 比对缺口，C2 不成立方向）。落点与判定见 §13.14①②。
 
 ### 3.4 差异登记表（全部差异，逐条）
 
@@ -150,7 +151,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 | D7 | `frozen_endpoints[].source` 取值域 | `loopback-mock-sink`/`config`/`cli`/`wg-device-outer-socket`（:179-181） | 新增 `shell-exclusion`（壳排除集，:756-887 的 resolution 结果）/`core-network-map`/`core-relay-advertised`/`core-signal-config` | 来源可追溯性（C1/C2 交叉核对） |
 | D8 | `counters[]` 元素数与 `side` | 2 元素（a/b） | **1 元素**，`side:"vpn-tun"`；`tun.*` 三字段口径 = `/proc/net/dev` vpn-tun（`delivered_*`=RX、`injected_frames`=TX packets，§4.4） | **B-6 直接落点**；单接口；独立第二账本=内核接口计数（host 是采集器自己 drain socketpair——设备上 core 自己的 tee 与 `rx_bytes_to_tun` 同源，不构成独立口径，故必须用 /proc） |
 | D9 | `tun_injected_frames` 语义 | 采集器主动注入 TUN 的帧数（驱动统计，`n2h.rs:1460-1461`） | 窗口内 OS→TUN 方向帧数（/proc TX packets delta；真实系统里「注入方」是 OS 而非采集器） | 方向对应关系如实命名 |
-| D10 | 尾部 `collector{}` | 无 | 有（§3.3） | A-1 |
+| D10 | 尾部 `collector{}` | 无 | 有（§3.3）（**I3a 更正**：该块现含**五**字段——§3.3 原四条 + I3a 尾部追加的 `exclusion_generation`，既有四条的字段名/顺序/位置不动；此处旧「（§3.3）」指代不变，字段清单以 §3.3/§13.14① 为准） | A-1 |
 
 离线 harness（§8）中 `/proc` 不可用时，`tun.*` 以 tee 独立计数替位并在 `notes[]` 声明 `counters-source=tee-fallback`——**仅离线测试**；设备真机一律 /proc（或 D 类 hdc fallback 并声明）。
 
@@ -225,7 +226,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 
 | 导出 | 签名 | 返回 |
 |---|---|---|
-| `n2h_collector_arm(optsJson: string)` | opts：`{"shell_exclusions":[{kind,host,port,resolved}], "posctl_port":40001, "probe_wait_ms":800, "build_sha256_reported":"…"（可选）, "dns":{"branch":"default\|all-nets-filtered\|none","physical_evidence":"<逐字依据>","gap_reason":"<token>"（可选）}}`（**v3.1 C1 dns 追加**：`dns` 段是壳侧分支记录，`branch` 走白名单、两个文本字段限可打印 ASCII 且不含 `\|`/空白/≤96 字符，非此即整臂拒绝 `invalid-opts`；缺段＝文档无 `dns-branch=` 行＝判定侧的 dns 缺口，**不得**由 core 编造。见 §13.12） | `{ok:true,armed:true,opened_mono} \| {ok:false,error:"no-connector"\|"device-not-up"\|"tunnel-not-ready"\|"already-armed"}` |
+| `n2h_collector_arm(optsJson: string)` | opts：`{"shell_exclusions":[{kind,host,port,resolved}], "posctl_port":40001, "probe_wait_ms":800, "build_sha256_reported":"…"（可选）, "dns":{"branch":"default\|all-nets-filtered\|none","physical_evidence":"<逐字依据>","gap_reason":"<token>"（可选）}}`（**v3.1 C1 dns 追加**：`dns` 段是壳侧分支记录，`branch` 走白名单、两个文本字段限可打印 ASCII 且不含 `\|`/空白/≤96 字符，非此即整臂拒绝 `invalid-opts`；缺段＝文档无 `dns-branch=` 行＝判定侧的 dns 缺口，**不得**由 core 编造。见 §13.12）（**I3a 更正**：以上 opts 字面为 I3a 之前形态，按只追加纪律**逐字保留为历史引述**；I3a 起在该字面**尾部追加** `"exclusion_generation":<n>`（可选，非负整数）——现形态＝`{…,"dns":{…},"exclusion_generation":<n>}`：值＝arm 时刻**最后一次被接受**的 `create()` 所建立连接代的 `gen`（壳侧单字段 `n2hAcceptedExclusionGeneration`，与 `N2H_COLLECTOR_ARMED` 行的 `gen=` 同源，见 §13.14①），随证据文档尾部 `collector{}` 块输出为 `collector.exclusion_generation`（§3.3；判定＝该字段、ARMED 行 `gen`、最后一次被接受的 `VPN_EXCLUSION_GENERATION` 行三方**逐字相同**，预注册 v3.1 §2.1 R-2③）；**缺键**＝壳侧尚无被接受的代（如实省略、**不编造**）⇒ core 记 `null`（字段恒在、值缺失），即判定侧的三方比对缺口（C2 不成立方向）；**类型不符**（负数/字符串/`null`/数组/对象）⇒ 整臂拒绝 `invalid-opts`。见 §13.14①②） | `{ok:true,armed:true,opened_mono} \| {ok:false,error:"no-connector"\|"device-not-up"\|"tunnel-not-ready"\|"already-armed"}` |
 | `n2h_collector_status()` | `()` | `{armed,phase:"armed\|probing\|observing\|closed",frames_scanned,hits,probes_sent,receipts_observed,window:{opened_mono,deadline_mono,closed_mono},verdict?}` |
 | `n2h_collector_evidence(chunk: number)` | chunk=-1 取总块数 | `{seq,total,sha256,b64} \| {phase:"running"} \| {error:"no-evidence"}`（**可重复调用**，hilog 丢行重放） |
 | `n2h_collector_disarm()` | `()` | `{ok:true}`（中止窗口，未闭合产物弃置并如实登记） |
@@ -690,5 +691,72 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
 - **被本节取代的旧字面（已按批准就地更正 + 在此同步登记）**：§4.0 冻结来源表 stun 行备注原文「壳排除集目前**不含**此类（B-2 的 3/7 现状，如实入档）」**自本节起失效**；该行已按 §13.12 处理 dns 行的同一形态**就地更正**（行内标注「（I2 更正：…）」并保留旧文本为历史引述）。现状：壳侧排除派生 kind＝management/signal/relay/dns（§13.12）/stun（本节）＝**5/7**，仅余 **wg_peer** 为缺口（其独立增量）。预注册 §2-C2 的 B-2 文字属预注册面，本增量不改（纪律），故该处的 3/7 叙述以本节为准。
 - **本轮不做**（各有独立增量）：wg_peer 代际、两个新代际标记行、`gen=` 字段、ARMED gen/recreate 字段、S20 guard、5 类必需端点 fatal 扩面；`turn` 仍为可选类（`present:false` + 具名理由），本 build 无 turn 路径故不新增 turn 通道。
 - **残余（如实）**：(a) 壳侧 stun 缺口只入 hilog 标记，不进证据 `notes[]`（arm opts 契约未扩，判定侧目前据冻结面 `stun` 条目的 `source`/`present` 与排除面 `VPN_ROUTE_ENTRY` 行判定）；(b) `turn:` 在被暴露的 `stuns[]` 中**常态不出现**（core `set_stuns` 拒收即不留存），故壳侧具名拒绝路径在真实流量里通常不可达，仅作为暴露面逐字转发的防御与 `turns[]`（另一字段，本轮不暴露）未来的入口；(c) 壳侧 stun 解析比 core 多一条 `unusable-host` 拒绝（② 已给理由），若未来 core 放宽 host 语义需同步复核。
+
+### 13.14 ⑫ I3a 增量落地：C2 代际判定的机械地基（代际标记行 + 路由行 `gen=` + recreate 接受锚点 + 采集器侧 `exclusion_generation`）
+
+> 本节以**追加**为主，不改写 §0–§13.13；**唯一例外＝§5.1 arm opts 契约行、§3.3 `collector{}` 字段清单、§3.4-D10 行**（本增量按预注册 v3.1 §2.1 R-2① 就地追加，均带「（I3a 更正）」标注并把旧文本逐字保留为历史引述，见 ⑦ 第 5 项与各该行行内标注），其余各行**未触碰**。基线：工作树 HEAD `8cd80af`（干净，I2 已合入）+ 本节未提交改动；下列 file:line 为落地后工作树实读。
+
+**① 壳侧实现要点（代际标记行 / 路由行 `gen=` / 两个接受锚点）**
+
+- **计数器与发射**：`NetBirdVpnExtensionAbility.ets:348` 新字段 `n2hExclusionGeneration`（每实例自 -1 起；`requestId` 在 `onCreate` 固定 ⇒ 每实例即「同 `requestId` 内」序列）；`:1734-1740` 新方法 `logExclusionGeneration(kind, routes, wgPeerEndpoints): number` —— 先 `++`、再经纯模块 `formatExclusionGeneration`（`NetBirdRouteValidation.ets:259-269`）打**恰一行**，返回 gen 供锚点使用。
+- **两条腿的调用点**（均在该腿 `create()` **之前**，且**先**代际行**后**该代路由行）：initial `:709-711`（`connection.create(config)` 在 `:736`）→ `settleCreate(fd, gen)`（`:738`）；recreate `:1493-1495`（`createConnectionBounded` 在其后）。
+- **计数来源＝即将提交的 config**：两处 `routes` 实参都是随后交给 `buildPlatformVpnConfig(merged)` → `create()` 的同一个 `merged.routes`（recreate 腿中间的 destroy 不改写它）⇒ `routes=`/`exclusions=` 为**实际值**而非估算；`exclusions=` 与行字面用**同一谓词**（`NetBirdRouteValidation.ets:231-239` 新增 `excludedRouteCount`，按 `effectiveExcludedText(...) === 'true'` 计；`VPN_ROUTE_TABLE` 头的 `excluded=` 一并改用该谓词 —— 见 ⑦ 第 4 项）。
+- **路由行 `gen=`**：`formatRouteTable(requestId, interfaceName, routes, gen)`（`NetBirdRouteValidation.ets:279`）每行**末字段**追加 `|gen=<n>`（`:304`）—— 既有字段位置逐字不变，I3a 之前的行是当前行的**字节前缀**（N13/H1 既有 grep 与自检 T7 断言不受影响）。
+- **接受锚点**：initial 保持既有 `VPN_CREATE_RESOLVED|…|accepted=<bool>|marker=…` 字面**不变**（`:1779-1780`），仅在其 `accepted` 分支就地记录接受代（`:1781-1787`；`settleCreate(fd, gen)` 定义 `:1769`）；recreate **新增** `VPN_RECREATE_RESOLVED|requestId=%{public}s|gen=%{public}d|accepted=true`（`:1557-1559`，fd 契约通过处、与 initial 腿**同接受语义**）并在同处记录接受代（`:1556`）。`VPN_RECREATE_SNAPSHOT`/`VPN_RECREATE_DONE`/`VPN_CREATE_BEGIN` 等既有行**未改写**（自检 G7 文本 pin）。
+- **顺序保证**（规则 (4) 后半）：代际行与全部 `gen==G` 行都在锚点**之前**，由两腿调用点位置 + 自检 G2/G3 按 hilog 行序双重钉住。
+
+**② core/采集器侧实现要点（`exclusion_generation`：arm → 证据文档）**
+
+- `ArmOptions.exclusion_generation: Option<u64>`（`n2h_collector.rs:1885`；解析 `:1941-1950`）：非负整数照收；**缺键 ⇒ `None`**（循 `dns` 先例：缺失＝判定侧缺口，core **不编造**）；类型不符（负数/字符串/`null`/数组/对象）⇒ `Err` ⇒ 整臂拒绝 `invalid-opts`。
+- `collector_block_json(reported_sha256, exclusion_generation)`（`:2892-2915`）：在 `collector{}` 块**尾部追加** `,"exclusion_generation":<n|null>` —— 四个 §3.3 字段的顺序/位置不动，块仍是文档最后一个键；`with_collector_block(document, reported_sha256, exclusion_generation)`（`:2920-2932`）同步扩参，唯一生产调用点 `run_window` 传入 `win.options.exclusion_generation`（`:2447-2451`）。
+- **三方同源（R-2）**：壳侧唯一字段 `n2hAcceptedExclusionGeneration`（`:359`）在 arm 钩子内**一次读取**（`:1177`）→ ① `opts.exclusion_generation`（`:1178-1180`，`>= 0` 时）② ARMED 行 `|gen=%{public}d`（`:1211-1215`，插在 `requestId=` 之后，其余字段序逐字不变）；core 侧①的原值即文档字段 ⇒ 「文档字段 ＝ ARMED `gen` ＝ 最后一次被接受的代际行 gen」由结构保证（自检 G5 用真实 arm 钩子断言三方相等，G6 断言无接受代时如实缺值）。
+- **纪律**：`connector_status()` 形状**未触碰**（§5.2 仍成立）；`n2h.rs`（渲染器/判据）零改动；`napi.rs`/`lib.rs` 未改（无新导出、无新依赖）。
+
+**③ 与预注册 v3.1 §2.1 的逐字对照**
+
+| 款 | 原文要求（v3.1 §2.1） | 落点 |
+|---|---|---|
+| (1) | 每代在 `create()` **之前**输出**恰一行** `VPN_EXCLUSION_GENERATION\|requestId=<id>\|gen=<n>\|kind=initial\|recreate\|exclusions=<m>\|wgPeerEndpoints=<k>\|routes=<r>`；`n` 自 0 单调递增、同 `requestId` 内不重复 | ① 的发射点与单计数器；字段名/字段序/字面逐字一致；`kind` 取纯模块常量 `EXCLUSION_GENERATION_INITIAL`/`_RECREATE`（`NetBirdRouteValidation.ets:245-246`），调用点无法造出第三值 |
+| (2) | 该代全部 `VPN_ROUTE_ENTRY\|…` 行携带**同值** `gen=<n>`，行集按 `gen` 分割 | ① 的末字段追加；两腿各自一次调用、gen 取同一次发射的返回值 |
+| (2a) | （R-1）四项：行数恰为 `r`；`index` 唯一连续覆盖 0..r-1；`isExcludedRoute=="true"` 行数恰为 `m`；`n` 自 0 逐次 +1 无跳号 | `r`＝`routes.length`、`m`＝同谓词计数、`index` 由数组序、`n` 由单计数器；自检 T8/G1/G3/G4 逐项断言（含第二次 recreate 的 `0,1,2` 序列） |
+| (4) | initial 锚点＝`VPN_CREATE_RESOLVED\|…\|accepted=true`；recreate 锚点＝新增 `VPN_RECREATE_RESOLVED\|requestId=<id>\|gen=<n>\|accepted=true`；代际行与全部 `gen==G` 行须**早于**该接受行 | ① 的两锚点与顺序；自检 G2（initial，真实 `settleCreate`）/G3（recreate，真实整腿）按行序断言 |
+| R-2① ② ③ | 代 G 作 arm 输入写入 `collector.exclusion_generation`；ARMED 行增补 `gen=G`；三者**逐字相同**，缺任一/不一致 ⇒ C2 不成立 | ② 的同源实现；G5 三方相等、G6 无接受代时缺值不编造（`-1` ⇒ 省略键 / core 记 `null` / ARMED 打 `gen=-1`） |
+
+（R-3 冻结解析集唯一规范化算法已随 I1 落盘、R-5 S20 契约属 S20 增量，均不在本节。）
+
+**④ selfcheck 扩展（host-only，无设备/无网络）**
+
+- **新增套件** `client/entry/selfcheck/run-exclusion-generation.mts`（440 行，**33 检查**）+ 新替身 `client/entry/selfcheck/exclusion-generation-hooks.mjs`（179 行；功能性 stub：记录型 hilog／假 fd 探针／假网络图／假 VpnConnection／假 arm 文件）。原则同 `run-relay-exclusion.mts`：五个真实 .ets 逐字节 stage 后驱动**真实**扩展类 —— G1 initial 腿发射（字面/计数/`index`/gen）；G2 真实 `settleCreate` 出 `VPN_CREATE_RESOLVED|accepted=true` 并把该代记为接受代（行序早于锚点）；G3 真实 `performControlledRecreate` **整腿跑通**（destroy→create→fd 契约→wg feed→ACK `isRecreate=true`）出 `kind=recreate` 行（5 行/3 排除）＋ `VPN_RECREATE_RESOLVED|gen=1|accepted=true`，且 `VPN_RECREATE_SNAPSHOT`/`_DONE` 字段逐字不变；G4 第二次 recreate ⇒ `gen=2`，序列 `0,1,2`（kind `initial,recreate,recreate`）；G5 真实 arm 钩子三方逐字一致；G6 未被接受的 `create()` 不成为接受代且 arm 不编造；G7 文本 pin（两腿调用序、两锚点字面、既有行未改、`merged.routes, 0` 两处传参）。
+- `run-route-validation.mts`：**+9 检查（T8）** —— 代际行逐字（含 `routes=`/`wgPeerEndpoints=`/`exclusions=` 三字段）；行数/`index` 连续/`isExcludedRoute=="true"` 行数三项对账；每行 gen == 代际行 gen 且 `gen=` 为末字段；第二代自洽（`gen=1|kind=recreate`）；表头 `excluded=` 与 `exclusions=` 同谓词。既有 T7 的两处 `formatRouteTable` 调用仅补 `gen` 实参，断言逐字未改。
+- **计数（7 套全 `exit 0`）**：`run.mts` **81/0**、`run-relay-exclusion.mts` **49/0**、`run-exclusion-addr-shape.mts` **25/0**、`run-relay-flag.mts` **9/0**、`run-relay-status-log.mts` **3/0**、`run-route-validation.mts` **49/0**（I2 基线 40）、`run-exclusion-generation.mts` **33/0**（新）。
+
+**⑤ core 测试与形状断言**
+
+- 新增 `n2h_collector::tests::the_collector_block_carries_the_shell_reported_exclusion_generation`（`n2h_collector.rs:5572`）：块尾 `,"exclusion_generation":<n>}`（`None` ⇒ `,"exclusion_generation":null}`）、**恰五字段**且第五条为该键、严格 reader 解析后第五字段值 `Json::Num(gen)` 逐字、既有四字段顺序冻结。
+- 新增 `n2h_collector::tests::arm_options_carry_the_shell_reported_exclusion_generation`（`:4648`）：`0`/`7` 照收（`0` 是真实代，不等于「缺键」）、缺键 ⇒ `None`、六类异常形态（字符串/布尔/`null`/数组/对象/负数）逐条 `Err`。
+- 既有三个 I7 块用例（`the_collector_block_identifies_the_build_with_the_frozen_shape`/`a_reported_digest_wins_and_is_labelled_operator_reported`/`the_collector_block_is_tail_appended_to_the_frozen_renderer_output`）同步扩参，断言逐字保留（含尾部纪律 pin）。
+- 集成 `tests/n2h_device_collector.rs`：`offline_opts` 全程携带 `"exclusion_generation":3`（`:962`/`:981`）⇒ 端到端断言设备文档 `collector.exclusion_generation == 3`（`:1170-1174`）＋尾键 pin（`:1182-1185`）；D10 例外表新增 `("$.collector.exclusion_generation", "number")`（`:463`），schema 走查逐类型核验通过。
+- **未触碰**：`n2h.rs`、`napi.rs`、`lib.rs`、`connector.rs`、`wg_device.rs`、预注册草案、T0 审查记录、`Cargo.toml`/`Cargo.lock`。
+
+**⑥ 改动面与验收（工作树实读，HEAD `8cd80af` + 本节未提交改动）**
+
+- 改动文件（5 已有 + 2 新增 + 本文件）：`client/core/src/n2h_collector.rs`、`client/core/tests/n2h_device_collector.rs`、`client/entry/src/main/ets/vpnextensionability/{NetBirdRouteValidation,NetBirdVpnExtensionAbility}.ets`、`client/entry/selfcheck/run-route-validation.mts`、**新增** `client/entry/selfcheck/{run-exclusion-generation.mts,exclusion-generation-hooks.mjs}`、本文件。
+- 验收实跑：
+  - `cd client/core && cargo test --offline --locked --color never` → **34 个测试目标全 ok，合计 539 passed / 0 failed / 0 ignored**（`8cd80af` 基线 537/0；+2 新用例）。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=00166dfaeab1a65ae55f86583153e92923f4eb9d2f5943bcc60424eb0816cf83`（源码改动 ⇒ 与 §13.13 的 `951ca493…` 不同，符合该摘要语义）。
+  - 壳侧自检 7 套全 `exit 0`：计数见 ④ 末行。
+  - `bash client/build.sh` → exit 0；`CompileArkTS` 对含本节改动的 ets 全量编译成功（仅余既有行告警）；逐项 `VERIFY OK`（HAP 成员 `.so` sha256 `5fc7973276d4ef6b868a7415e23a429ee5734b2bd1aff8038c7270ea882131be`）；HAP `entry-default-unsigned.hap` **4 233 079 bytes**、sha256 `81b47b903ed4c917eecd41003a62ec53a558fcb9e1c28f1f97d78b8cdfaa9023`（HAP 容器不可逐字节复现，验收以 exit 0 + 逐项 VERIFY OK 为准；`/tmp/n2h-frozen/` 冻结制品未触碰）。
+  - `git diff --stat`：**6 files changed, 494 insertions(+), 46 deletions(-)**（含本节就地更正的 3 处行内插入）；另有 2 个新增未跟踪自检文件（`run-exclusion-generation.mts` 440 行 + `exclusion-generation-hooks.mjs` 179 行），`git status --porcelain` 无其它未预期文件。
+- **真实标记样例（真实 .ets fixture + 真实方法驱动，逐字）**：`VPN_EXCLUSION_GENERATION|requestId=req-i3a-sample|gen=0|kind=initial|exclusions=3|wgPeerEndpoints=0|routes=4` → 4 行 `VPN_ROUTE_ENTRY|…|gen=0` → `VPN_CREATE_RESOLVED|requestId=req-i3a-sample|fd=42|accepted=true|marker=CREATE_ACCEPTED`；recreate 腿 `…|gen=1|kind=recreate|exclusions=3|wgPeerEndpoints=0|routes=5` → 5 行 `…|gen=1` → `VPN_RECREATE_RESOLVED|requestId=req-i3a-sample|gen=1|accepted=true`；arm `N2H_COLLECTOR_ARMED|requestId=req-i3a-sample|gen=1|openedMono=4242|exclusions=0|posctlPort=40001|probeWaitMs=800|peerB2aProbeId=none|diag=true|is_evidence=false` ＋ arm opts `{"shell_exclusions":[],"posctl_port":40001,"probe_wait_ms":800,"exclusion_generation":1}`。
+
+**⑦ 偏离、裁定与范围外（逐条如实）**
+
+1. **R-5 推迟到 S20 增量（已裁定「批准」）**：R-5 要求 ARMED 行固化 `recreateCoolingDown`/`recreateExhausted`/`recreateReason` **且** S20 触发时输出稳定 `N2H_COLLECTOR_NOT_ARMED|reason=recreate-pending|…`；本增量范围明写 S20 guard 属后续增量，只落 `gen=G`。**只落三字段而缺 S20 分支正是 R-5 明令防的「部分实现假通」**，故整体一并落；S20 派发稿将显式写「R-5 归入本增量」。
+2. **`wgPeerEndpoints=0` 与第 (6) 款后果：预期内（已裁定确认）**：wg_peer 外层端点集未派生（属 I3b），字段已在而值为 0 ⇒ 真机轮 `wg_peer present==true ∧ wgPeerEndpoints==0` 按 §2.1 (6) 使 **C2 不成立**（`n2h-inconclusive`）—— 与预注册既有登记「排除面补齐 7/7 前不得登记 N2-H pass」一致，判据不削弱。
+3. **无接受代的诚实形态：已裁定批准并保留**：`n2hAcceptedExclusionGeneration == -1` ⇒ arm **省略** `exclusion_generation` 键（core 记 `null`）、ARMED 行 `gen=-1`（`:1177-1180`/`:1211`）。该状态在真实 arm 路径不可达（`device_up && ready` 只在 create 被接受后成立）；此形态保证「缺值」而非「编造值」，方向 fail-closed（三方不一致 ⇒ C2 不成立）。**不**改为 arm 前拒绝开窗。
+4. **`VPN_ROUTE_TABLE` 头 `excluded=` 谓词与行渲染对齐（一行）：已裁定批准**：计数由真值判断改为 `=== 'true'`（与行字面同谓词），使 `exclusions=m`／表头／行字面三者不可能分裂；合法布尔输入下行为不变。
+5. **本文件三处就地更正（本次补做关闭）**：§5.1 arm opts 契约行、§3.3 `collector{}` 字段清单、§3.4-D10 行 —— 均带「（I3a 更正）」标注并把旧文本逐字保留为历史引述；除这三处行内插入外，本增量对本文件**只追加本节**。
+6. **本轮不做**（各有独立增量）：wg_peer /32 注入（I3b）、5 类必需端点 fatal 扩面、S20 壳侧 arm guard（含 R-5 三字段与 NOT_ARMED 稳定 reason）、**C2 比对脚本**（生成侧已可产出全部标记与字段，判定侧脚本未落盘）。
+7. **残余（如实）**：(a) `gen` 计数为**每 ability 实例**（`requestId` 实例内固定）——撤销后复验等**新会话实例**自 0 重新起算，与 §2.1 (1)「同 `requestId` 内」口径一致，**不得跨实例拼接**；(b) 中间失败腿（route-validation 失败／destroy 失败／create 超时／fd 契约失败）会留下**已宣告但无接受锚点**的代 —— 该代**不构成 G**，判定侧不得视为被接受的代（C2 不成立方向）；(c) hilog 丢行无法由实现侧防止，这正是 `routes=`/`exclusions=` 可计算基数（(2a)）要检出截断的目的 —— 行数与申报不符 ⇒ C2 不成立；(d) `VPN_CREATE_RESOLVED` 的 `accepted` 语义＝create 被平台接受（fd 契约通过），其后的 protect/wg-feed/ICE 失败仍按既有 fail-closed 拆除 —— 接受锚点与「完整流程成功」不是同一件事（与 initial 腿既有语义一致）。
 
 

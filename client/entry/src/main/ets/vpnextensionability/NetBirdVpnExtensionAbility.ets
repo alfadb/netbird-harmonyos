@@ -6,8 +6,9 @@ import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions } from './NetBirdVpnConfig';
-import { RouteCheckResult, RouteViolation, formatRouteTable, formatRouteViolation,
-  validateRouteEntries } from './NetBirdRouteValidation';
+import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
+  EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
+  formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
@@ -150,6 +151,12 @@ interface N2hArmOptions {
   // v3.1 C1 dns: the branch record of this session's derivation (always set —
   // a missing record is a dns gap for the judge).
   dns?: N2hDnsArmReport;
+  // N2-H I3a (v3.1 §2.1 R-2①): the evidence generation G — the gen of the
+  // last ACCEPTED create() — which the core echoes into the evidence
+  // document's `collector.exclusion_generation`. Only set when an accepted
+  // generation exists (see n2hAcceptedExclusionGeneration); an absent key
+  // makes the core record a value-less field, never a fabricated generation.
+  exclusion_generation?: number;
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -212,7 +219,11 @@ function safeError(error: Error): string {
 //   NO VPN created) -> N2-H endpoint freeze: resolve the real outer
 //   endpoints (management / signal / relay urls from connector_status) and
 //   derive the host /32|/128 isExcludedRoute set BEFORE create()
-//   (relay-enabled + unresolved endpoint = fail-closed, no VPN) -> merge
+//   (relay-enabled + unresolved endpoint = fail-closed, no VPN) — N2-H I3a:
+//   every create() is GENERATION-STAMPED (one VPN_EXCLUSION_GENERATION line
+//   before it, `gen=` on every VPN_ROUTE_ENTRY row, and an acceptance anchor
+//   after it: VPN_CREATE_RESOLVED for the initial leg, VPN_RECREATE_RESOLVED
+//   for a recreate leg; the arm reports the last accepted generation) -> merge
 //   address/routes/DNS into VpnConfig under the
 //   default-route safety gate (0.0.0.0/0 held unless the core gate allows /
 //   forceDefaultRoute opt-in) -> connection.create() -> fd contract +
@@ -325,6 +336,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N2-H I5 (§5.3-1): the one-shot latch of the control-file check, so the
   // watcher attempts the arm at most once per ability instance.
   private n2hArmAttempted: boolean = false;
+  // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the generation counter of THIS ability
+  // instance. requestId is fixed for the instance's whole lifetime (onCreate
+  // runs before any create()), so a per-instance counter IS the frozen
+  // per-requestId sequence: the initial create() is generation 0, every
+  // recreate leg +1, never reused, never decremented. A leg that aborts
+  // before its create() has already announced its generation (the
+  // announcement precedes the route-row dump so the rows always have their
+  // header); the number the ARM reports is a different, stricter value — the
+  // last ACCEPTED one below.
+  private n2hExclusionGeneration: number = -1;
+  // N2-H I3a (v3.1 §2.1 C2 (4) / R-2③): the ONE source of "the evidence
+  // generation G" — the gen whose create() was ACCEPTED (initial: the
+  // VPN_CREATE_RESOLVED|accepted=true anchor; recreate: the
+  // VPN_RECREATE_RESOLVED|accepted=true anchor). The arm reads this single
+  // field twice (the `exclusion_generation` arm option the core echoes into
+  // `collector.exclusion_generation` and the `gen=` field of the ARMED
+  // marker), so those two and the generation line cannot disagree. -1 = no
+  // accepted create() yet — unreachable on the arm path (device_up/ready are
+  // only reached after an accepted create); it is forwarded as "no
+  // generation", never fabricated into a value.
+  private n2hAcceptedExclusionGeneration: number = -1;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -666,7 +698,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // dump. The core snapshot reaches these entries through a bare
     // JSON.parse; a required field that arrived undefined/NaN must abort
     // BEFORE connection.create() — fail-closed, no repair, no silent drop.
-    this.logRouteTable(merged);
+    // N2-H I3a (v3.1 §2.1 C2 (1)/(2)/(4)): the generation announcement of
+    // THIS create() comes first, then the rows it announces. `merged` is
+    // final here (exclusions grafted, map applied, default route gated), so
+    // the announced exclusions= / routes= are the counts actually submitted.
+    // wgPeerEndpoints=0: the wg_peer outer-endpoint caliber is not derived
+    // yet (its own increment) — the field is mandatory, the value is the
+    // honest "none known" (and §2.1 (6) makes that a C2 failure while the
+    // frozen set carries wg_peer, which is exactly the registered state).
+    const gen: number =
+      this.logExclusionGeneration(EXCLUSION_GENERATION_INITIAL, merged.routes, 0);
+    this.logRouteTable(merged, gen);
     const routeCheck: RouteCheckResult = validateRouteEntries(merged.routes, merged.interfaceName);
     if (!routeCheck.ok) {
       this.logRouteViolations(routeCheck.violations);
@@ -693,7 +735,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       this.requestId, merged.tunnelAddress, merged.tunnelPrefixLength);
     const rawCreate: Promise<number> = connection.create(config);
     this.createPromise = rawCreate.then((fd: number): Promise<CreateOutcome> => {
-      return this.settleCreate(fd);
+      return this.settleCreate(fd, gen);
     }, (error: Error): CreateOutcome => {
       this.createSettled = true;
       hilog.error(DOMAIN, TAG,
@@ -1122,6 +1164,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       posctl_port: posctlPort,
       probe_wait_ms: probeWaitMs
     };
+    // N2-H I3a (v3.1 §2.1 R-2①②③): the evidence generation G — the gen of
+    // the last ACCEPTED create() (n2hAcceptedExclusionGeneration, recorded at
+    // the acceptance anchor itself). This ONE read feeds both the arm option
+    // the core echoes into `collector.exclusion_generation` AND the `gen=`
+    // field of the ARMED marker below, which is what makes the three-way
+    // "逐字相同" requirement structural instead of coincidental.
+    // -1 (no accepted create yet) is unreachable here — status.wg.device_up /
+    // ready are only reached after an accepted create — and is handled
+    // honestly rather than fabricated: the option is NOT sent (the core then
+    // records a value-less field) and the marker prints the sentinel.
+    const exclusionGeneration: number = this.n2hAcceptedExclusionGeneration;
+    if (exclusionGeneration >= 0) {
+      opts.exclusion_generation = exclusionGeneration;
+    }
     // v3.1 C1 dns (R-4): the branch record of this session's derivation rides
     // the arm verbatim (the core validates the frozen token shapes and renders
     // the three `notes[]` lines). It is ALWAYS present when a derivation ran —
@@ -1152,11 +1208,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         N2hCollectorArmResult;
       if (answer.ok === true) {
         hilog.info(DOMAIN, TAG,
-          'N2H_COLLECTOR_ARMED|requestId=%{public}s|openedMono=%{public}d|exclusions=%{public}d|' +
-          'posctlPort=%{public}d|probeWaitMs=%{public}d|peerB2aProbeId=%{public}s|' +
-          'diag=true|is_evidence=false',
-          this.requestId, answer.opened_mono ?? -1, exclusions.length, posctlPort, probeWaitMs,
-          announcedLog);
+          'N2H_COLLECTOR_ARMED|requestId=%{public}s|gen=%{public}d|openedMono=%{public}d|' +
+          'exclusions=%{public}d|posctlPort=%{public}d|probeWaitMs=%{public}d|' +
+          'peerB2aProbeId=%{public}s|diag=true|is_evidence=false',
+          this.requestId, exclusionGeneration, answer.opened_mono ?? -1, exclusions.length,
+          posctlPort, probeWaitMs, announcedLog);
       } else {
         hilog.error(DOMAIN, TAG,
           'N2H_COLLECTOR_ARM_FAILED|requestId=%{public}s|error=%{public}s|' +
@@ -1429,7 +1485,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // violates the SDK RouteInfo contract must never reach create().
       // Failing BEFORE the destroy leg keeps the current generation intact
       // (same early-throw discipline as the snapshot preconditions above).
-      this.logRouteTable(merged);
+      // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the RECREATE generation is
+      // announced BEFORE this leg's create() and before the route rows it
+      // announces — `merged` is the config the create below submits verbatim
+      // (the destroy leg in between does not touch it). wgPeerEndpoints=0 for
+      // the same reason as the initial leg.
+      const gen: number =
+        this.logExclusionGeneration(EXCLUSION_GENERATION_RECREATE, merged.routes, 0);
+      this.logRouteTable(merged, gen);
       const routeCheck: RouteCheckResult = validateRouteEntries(merged.routes, merged.interfaceName);
       if (!routeCheck.ok) {
         this.logRouteViolations(routeCheck.violations);
@@ -1481,6 +1544,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       this.tunFd = fd;
       this.fdConfirmedOpenAfterCreate = true;
       this.logFdSnapshot('recreate-post-create', snapshot, 'RECREATE_FD_ACCEPTED');
+      // N2-H I3a (v3.1 §2.1 C2 (4)): the recreate leg's ACCEPTANCE ANCHOR —
+      // this generation's create() was accepted, with the SAME fd-contract
+      // acceptance semantics as the initial leg's
+      // `VPN_CREATE_RESOLVED|accepted=true`. It is logged after the
+      // generation line and every gen==G route row (rule (4)'s ordering) and
+      // before the wg-feed/ACK legs (a failure there is the same fail-closed
+      // teardown as the initial leg's protect gate). The record of the
+      // accepted generation is made at this anchor, so the anchor and the
+      // value the arm reports cannot drift (R-2③).
+      this.n2hAcceptedExclusionGeneration = gen;
+      hilog.info(DOMAIN, TAG,
+        'VPN_RECREATE_RESOLVED|requestId=%{public}s|gen=%{public}d|accepted=true',
+        this.requestId, gen);
 
       // 5. feed the data plane: the protected outer socket FIRST (SAME
       // native socket — an idempotent no-op while the device is up; a fresh
@@ -1649,12 +1725,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // is not wired yet (Rust core data-plane export pending) — 未验证.
   }
 
+  // N2-H I3a (v3.1 §2.1 C2 (1)/(2), R-1): exactly ONE
+  // VPN_EXCLUSION_GENERATION line per create(), logged BEFORE that create()
+  // and BEFORE the route rows it announces. `routes` MUST be the very list
+  // handed to buildPlatformVpnConfig/create() — the announced counts are
+  // computed from it, never estimated. Returns the generation, so the caller
+  // stamps the acceptance anchor with the same number.
+  private logExclusionGeneration(kind: string, routes: VpnRouteConfig[],
+    wgPeerEndpoints: number): number {
+    this.n2hExclusionGeneration++;
+    const gen: number = this.n2hExclusionGeneration;
+    hilog.info(DOMAIN, TAG, '%{public}s',
+      formatExclusionGeneration(this.requestId, gen, kind, routes, wgPeerEndpoints));
+    return gen;
+  }
+
   // H1 pre-create truth dump (diagnosis §5 T0 / §6-4): every route entry
   // with its per-field runtime truth, BEFORE connection.create() — one
   // hilog line each (header + one per entry). Field names and route values
   // only; never tokens or credentials.
-  private logRouteTable(config: VpnTunnelConfig): void {
-    const lines: string[] = formatRouteTable(this.requestId, config.interfaceName, config.routes);
+  // N2-H I3a: every entry line carries `gen=<n>`, the generation of the
+  // create() it is about to be submitted to (v3.1 §2.1 C2 (2)) — always the
+  // value returned by the logExclusionGeneration call immediately above.
+  private logRouteTable(config: VpnTunnelConfig, gen: number): void {
+    const lines: string[] = formatRouteTable(this.requestId, config.interfaceName,
+      config.routes, gen);
     for (let i = 0; i < lines.length; i++) {
       hilog.info(DOMAIN, TAG, '%{public}s', lines[i]);
     }
@@ -1668,8 +1763,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   // Post-create settle: TUN fd contract check, then the fail-closed protect
   // gate. Any protect-path failure destroys the VPN and never starts traffic
-  // (governance item 4).
-  private async settleCreate(fd: number): Promise<CreateOutcome> {
+  // (governance item 4). `gen` is the generation logged for THIS create()
+  // (logExclusionGeneration) — the acceptance anchor below is what makes it
+  // the evidence generation G of §2.1 C2 (4).
+  private async settleCreate(fd: number, gen: number): Promise<CreateOutcome> {
     this.createSettled = true;
     this.tunFd = fd;
     const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
@@ -1681,7 +1778,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_RESOLVED|requestId=%{public}s|fd=%{public}s|accepted=%{public}s|marker=%{public}s',
       this.requestId, String(fd), String(accepted), marker);
-    if (!accepted) {
+    if (accepted) {
+      // N2-H I3a (v3.1 §2.1 C2 (4) / R-2③): the initial leg's ACCEPTANCE
+      // ANCHOR (`VPN_CREATE_RESOLVED|accepted=true`) is where this generation
+      // becomes the accepted one — the same value the arm later reports as G.
+      // Recorded here, at the anchor itself, so nothing can drift between the
+      // marker, the evidence document field and the generation line.
+      this.n2hAcceptedExclusionGeneration = gen;
+    } else {
       hilog.error(DOMAIN, TAG,
         'VPN_CREATE_INVALID_FD|requestId=%{public}s|fd=%{public}s|marker=CREATE_INVALID_DESTROY_REQUIRED',
         this.requestId, String(fd));

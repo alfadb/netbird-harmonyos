@@ -1876,6 +1876,13 @@ pub struct ArmOptions {
     /// reported no branch at all: no `dns-branch=` line enters the document
     /// (a missing record is the judge's dns gap, never a fabricated one).
     pub dns: Option<ShellDnsReport>,
+    /// N2-H I3a (v3.1 §2.1 R-2①): the evidence generation G — the gen of the
+    /// last ACCEPTED `create()` of the shell session, as reported by the arm.
+    /// `None` = the shell reported none (the control file / arm document
+    /// carried no such key): the document then carries the field with no
+    /// value (a gap for the judge's three-way `gen` comparison), never a
+    /// fabricated generation.
+    pub exclusion_generation: Option<u64>,
 }
 
 impl Default for ArmOptions {
@@ -1887,6 +1894,7 @@ impl Default for ArmOptions {
             build_sha256_reported: String::new(),
             peer_b2a_probe_id: None,
             dns: None,
+            exclusion_generation: None,
         }
     }
 }
@@ -1929,6 +1937,16 @@ impl ArmOptions {
             // only in the frozen wire shape and anything else refuses the arm.
             let raw = as_str(v).ok_or("peer_b2a_probe_id must be a string")?;
             opts.peer_b2a_probe_id = Some(announced_b2a_marker(raw)?);
+        }
+        if let Some(v) = obj_get(fields, "exclusion_generation") {
+            // N2-H I3a (v3.1 §2.1 R-2①): the shell's accepted generation —
+            // a non-negative integer or nothing. A value of another type is
+            // refused (fail-closed, the same discipline as every other
+            // option); an ABSENT key is allowed and stays `None`, which the
+            // document renders as a value-less field (the judge's C2 gap)
+            // rather than as a generation core invented.
+            opts.exclusion_generation =
+                Some(as_u64(v).ok_or("exclusion_generation must be a non-negative integer")?);
         }
         if let Some(v) = obj_get(fields, "dns") {
             // v3.1's branch record: the branch token is an allow-list and the
@@ -2426,7 +2444,11 @@ fn run_window(win: Arc<Window>) {
         closed_mono: close_mono,
         generated_unix: win.clock.unix_s(),
     });
-    let document = with_collector_block(&evidence.to_json(), &win.options.build_sha256_reported);
+    let document = with_collector_block(
+        &evidence.to_json(),
+        &win.options.build_sha256_reported,
+        win.options.exclusion_generation,
+    );
     let sha256 = crate::util::sha256_hex(document.as_bytes());
     let chunks = encode_evidence(document.as_bytes());
     for chunk in &chunks {
@@ -2859,19 +2881,35 @@ pub const BUILD_SOURCE_OPERATOR_REPORTED: &str = "operator-reported";
 /// artifact installed on the device (a HAP digest is not reproducible, design
 /// §13.10⑦); otherwise the embedded [`BUILD_SHA256`] is used and labelled
 /// `embedded` (the reproducible source caliber). Neither branch can be empty.
-pub fn collector_block_json(reported_sha256: &str) -> String {
+///
+/// N2-H I3a (v3.1 §2.1 R-2①): `exclusion_generation` is APPENDED as the
+/// block's last field — the evidence generation G the shell reported at arm
+/// (the gen of its last ACCEPTED `create()`), the value the judge compares
+/// verbatim against the `N2H_COLLECTOR_ARMED` marker and the last accepted
+/// `VPN_EXCLUSION_GENERATION` line. `None` renders as `null` (the shell
+/// reported no generation): the field is always present, its VALUE is never
+/// invented.
+pub fn collector_block_json(
+    reported_sha256: &str,
+    exclusion_generation: Option<u64>,
+) -> String {
     let reported = reported_sha256.trim();
     let (sha256, source) = if reported.is_empty() {
         (BUILD_SHA256, BUILD_SOURCE_EMBEDDED)
     } else {
         (reported, BUILD_SOURCE_OPERATOR_REPORTED)
     };
+    let generation = match exclusion_generation {
+        Some(gen) => gen.to_string(),
+        None => "null".to_string(),
+    };
     format!(
-        "\"collector\":{{{},{},{},{}}}",
+        "\"collector\":{{{},{},{},{},\"exclusion_generation\":{}}}",
         jstr("crate_version", env!("CARGO_PKG_VERSION")),
         jstr("target_triple", BUILD_TARGET_TRIPLE),
         jstr("build_sha256", sha256),
-        jstr("build_source", source)
+        jstr("build_source", source),
+        generation
     )
 }
 
@@ -2879,11 +2917,18 @@ pub fn collector_block_json(reported_sha256: &str) -> String {
 /// §3.1's tail-append discipline, precedent a1947b9's `wg_peers`): nothing is
 /// inserted between the existing fields, `n2h::Evidence::to_json` stays the ONE
 /// renderer and untouched, and the block is the document's last key.
-pub fn with_collector_block(document: &str, reported_sha256: &str) -> String {
+pub fn with_collector_block(
+    document: &str,
+    reported_sha256: &str,
+    exclusion_generation: Option<u64>,
+) -> String {
     let body = document
         .strip_suffix('}')
         .expect("n2h::Evidence::to_json always renders one JSON object");
-    format!("{body},{}}}", collector_block_json(reported_sha256))
+    format!(
+        "{body},{}}}",
+        collector_block_json(reported_sha256, exclusion_generation)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4594,6 +4639,39 @@ mod tests {
         );
     }
 
+    /// N2-H I3a (v3.1 §2.1 R-2①): the shell's ACCEPTED generation rides the
+    /// arm options as a non-negative integer. An absent key stays `None` — the
+    /// document then carries a value-less field instead of a generation core
+    /// invented — and a wrongly-typed value refuses the arm (never a
+    /// half-understood generation).
+    #[test]
+    fn arm_options_carry_the_shell_reported_exclusion_generation() {
+        let opts = ArmOptions::parse_json("{\"exclusion_generation\":0}")
+            .expect("generation 0 parses");
+        assert_eq!(opts.exclusion_generation, Some(0), "0 is a real generation, not 'absent'");
+        let opts = ArmOptions::parse_json("{\"probe_wait_ms\":900,\"exclusion_generation\":7}")
+            .expect("documented shape + generation parses");
+        assert_eq!(opts.exclusion_generation, Some(7));
+        assert_eq!(opts.probe_wait_ms, 900, "the neighbouring options are untouched");
+
+        let defaults = ArmOptions::parse_json("").expect("empty opts");
+        assert_eq!(defaults.exclusion_generation, None);
+        let without = ArmOptions::parse_json("{\"posctl_port\":40002}").expect("opts without key");
+        assert_eq!(without.exclusion_generation, None, "absent key is not a generation");
+
+        for bad in [
+            "{\"exclusion_generation\":\"3\"}",
+            "{\"exclusion_generation\":true}",
+            "{\"exclusion_generation\":null}",
+            "{\"exclusion_generation\":[3]}",
+            "{\"exclusion_generation\":{}}",
+            "{\"exclusion_generation\":-1}",
+        ] {
+            assert!(ArmOptions::parse_json(bad).is_err(), "'{bad}' must be refused");
+        }
+        println!("[I3a] arm opts exclusion_generation: parsed verbatim, absent stays None, malformed refused");
+    }
+
     #[test]
     fn collector_tee_scans_both_directions_and_keeps_hits_per_direction() {
         let tee = CollectorTee::new(fixed_clock(77));
@@ -5450,7 +5528,7 @@ mod tests {
         );
         assert!(!BUILD_TARGET_TRIPLE.is_empty(), "target triple must be non-empty");
 
-        let block = collector_block_json("");
+        let block = collector_block_json("", None);
         let document = format!("{{{block}}}");
         // §8-1 discipline: even the block alone is strict JSON
         let parsed = crate::config::parse_document(&document).expect("block is strict JSON");
@@ -5471,18 +5549,65 @@ mod tests {
     #[test]
     fn a_reported_digest_wins_and_is_labelled_operator_reported() {
         let reported = "a".repeat(64);
-        let block = collector_block_json(&format!("  {reported}  "));
+        let block = collector_block_json(&format!("  {reported}  "), None);
         assert!(block.contains(&format!("\"build_sha256\":\"{reported}\"")));
         assert!(block.contains(&format!(
             "\"build_source\":\"{BUILD_SOURCE_OPERATOR_REPORTED}\""
         )));
         assert!(!block.contains(BUILD_SHA256), "the embedded digest must not be claimed");
         for blank in ["", "   "] {
-            let block = collector_block_json(blank);
+            let block = collector_block_json(blank, None);
             assert!(block.contains(&format!("\"build_sha256\":\"{BUILD_SHA256}\"")));
             assert!(block.contains(&format!("\"build_source\":\"{BUILD_SOURCE_EMBEDDED}\"")));
         }
         println!("[I7] reported digest precedence: operator-reported wins, embedded is the default");
+    }
+
+    /// N2-H I3a (v3.1 §2.1 R-2①): `exclusion_generation` is the block's LAST
+    /// field (the four §3.3 fields keep their order and position), carries the
+    /// shell-reported generation verbatim, and renders as `null` — present but
+    /// value-less — when the shell reported none. The block stays strict JSON
+    /// in both cases, so the judge can read the value mechanically.
+    #[test]
+    fn the_collector_block_carries_the_shell_reported_exclusion_generation() {
+        let four = collector_block_json("", None);
+        assert!(
+            four.ends_with(",\"exclusion_generation\":null}"),
+            "null generation is not the block's last field: {four}"
+        );
+        for gen in [0_u64, 1, 7, u32::MAX as u64] {
+            let block = collector_block_json("", Some(gen));
+            assert!(
+                block.ends_with(&format!(",\"exclusion_generation\":{gen}}}")),
+                "generation {gen} is not the block's appended last field: {block}"
+            );
+            let document = format!("{{{block}}}");
+            let Json::Obj(outer) =
+                crate::config::parse_document(&document).expect("block is strict JSON")
+            else {
+                panic!("the block wrapper is not a JSON object: {document}");
+            };
+            assert_eq!(outer.len(), 1, "one collector key: {block}");
+            assert_eq!(outer[0].0, "collector");
+            let Json::Obj(fields) = &outer[0].1 else {
+                panic!("collector is not a JSON object: {block}");
+            };
+            assert_eq!(fields.len(), 5, "the block carries exactly five fields: {block}");
+            assert_eq!(fields[4].0, "exclusion_generation", "appended last: {block}");
+            assert_eq!(fields[4].1, Json::Num(gen), "verbatim value: {block}");
+            // the four §3.3 fields keep their frozen order and meaning
+            assert_eq!(
+                fields.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+                vec![
+                    "crate_version",
+                    "target_triple",
+                    "build_sha256",
+                    "build_source",
+                    "exclusion_generation"
+                ]
+            );
+        }
+        println!("[I3a] collector{{}} exclusion_generation: appended last, verbatim, null when absent");
     }
 
     /// The tail-append discipline (design §3.1/D10): the block is added AFTER
@@ -5493,13 +5618,18 @@ mod tests {
         let evidence = assemble_device_evidence(clean_material());
         let plain = evidence.to_json();
         assert!(plain.ends_with('}'), "the renderer emits one JSON object");
-        for reported in ["", "b".repeat(64).as_str()] {
-            let document = with_collector_block(&plain, reported);
+        for (reported, generation) in
+            [("", None), ("b".repeat(64).as_str(), Some(2_u64)), ("", Some(0_u64))]
+        {
+            let document = with_collector_block(&plain, reported, generation);
             assert!(
                 document.starts_with(&plain[..plain.len() - 1]),
                 "the renderer's fields must be untouched"
             );
-            assert!(document.ends_with(&format!(",{}}}", collector_block_json(reported))));
+            assert!(document.ends_with(&format!(
+                ",{}}}",
+                collector_block_json(reported, generation)
+            )));
             crate::config::parse_document(&document).expect("composed document is strict JSON");
             assert_eq!(
                 document.matches("\"collector\":").count(),
@@ -5510,7 +5640,7 @@ mod tests {
         println!(
             "[I7] tail append: {} -> {} bytes, one trailing collector{{}} block",
             plain.len(),
-            with_collector_block(&plain, "").len()
+            with_collector_block(&plain, "", None).len()
         );
     }
 }

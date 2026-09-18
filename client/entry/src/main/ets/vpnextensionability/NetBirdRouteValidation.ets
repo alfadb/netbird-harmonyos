@@ -28,6 +28,11 @@
 // - kind tokens: 'missing' (absent or null), 'type' (present, wrong JS
 //   type), 'nan' (number but NaN), 'range' (right type, outside the
 //   declared domain: empty string, non-finite number, family not 1|2).
+// - N2-H I3a (preregistration §2.1 C2 (1)/(2)/(2a)): the truth dump is
+//   GENERATION-STAMPED — formatExclusionGeneration announces one generation
+//   (kind + r/m/k) and every formatRouteTable row of that generation carries
+//   the same `gen=<n>`. Both are read-only renderers over the SAME route
+//   list, so the announced counts and the rendered rows cannot disagree.
 //
 // PURE MODULE (zero imports, same discipline as NetBirdEndpointExclusion.ets):
 // the selfcheck copies this real file byte-for-byte into a temp fixture and
@@ -217,19 +222,63 @@ function effectiveExcludedText(value: FieldValue): string {
   return fieldText(value);
 }
 
+// N2-H I3a (preregistration §2.1 C2 (1)/(2a)): the number of entries whose
+// RENDERED isExcludedRoute is the literal 'true'. Deliberately the same
+// predicate the per-entry rows are rendered with (effectiveExcludedText), so
+// the generation marker's `exclusions=<m>` and the count of rendered
+// `isExcludedRoute="true"` rows can never disagree — the judge compares the
+// two literally (§2.1 (2a)③).
+function excludedRouteCount(routes: RouteEntryView[]): number {
+  let excluded: number = 0;
+  for (let i = 0; i < routes.length; i++) {
+    if (effectiveExcludedText(routes[i].isExcludedRoute) === 'true') {
+      excluded++;
+    }
+  }
+  return excluded;
+}
+
+// N2-H I3a (preregistration §2.1 C2 (1)): the two — and only two — frozen
+// `kind` tokens of the per-generation marker. Callers pass one of these so a
+// third value cannot be invented at a call site (a non-binary kind is a C2
+// failure, §2.1 (7)).
+export const EXCLUSION_GENERATION_INITIAL: string = 'initial';
+export const EXCLUSION_GENERATION_RECREATE: string = 'recreate';
+
+// The per-generation marker (preregistration §2.1 C2 (1), v3.1 R-1): exactly
+// ONE line per generation, emitted BEFORE that generation's create(). The
+// three counts are the row-count basis of the judgement and are therefore
+// computed from the VERY route list that is handed to the platform builder —
+// never estimated:
+//   routes=<r>          the generation's VPN_ROUTE_ENTRY row count (§2.1 (2a)①)
+//   exclusions=<m>      its isExcludedRoute=="true" row count (§2.1 (2a)③)
+//   wgPeerEndpoints=<k> the generation's known outer wg_peer endpoints; the
+//                       FIELD is mandatory even while that caliber yields none
+//                       (§2.1 (6): k=0 with wg_peer present is a C2 failure,
+//                       which is the honest reading before wg_peer is derived).
+export function formatExclusionGeneration(requestId: string, gen: number,
+  kind: string, routes: RouteEntryView[], wgPeerEndpoints: number): string {
+  return 'VPN_EXCLUSION_GENERATION|requestId=' + safeText(requestId) +
+    '|gen=' + String(gen) +
+    '|kind=' + kind +
+    '|exclusions=' + String(excludedRouteCount(routes)) +
+    '|wgPeerEndpoints=' + String(wgPeerEndpoints) +
+    '|routes=' + String(routes.length);
+}
+
 // The pre-create per-field truth dump (diagnosis §5 T0 / §6-4): one header
 // line plus one line per entry with every SDK-relevant field verbatim.
 // Returned as separate lines so the caller emits one hilog line each — a
 // single joined line would risk hilog truncation toward the route bound.
 // Field names and route values only; never tokens or credentials.
+// N2-H I3a (preregistration §2.1 C2 (2)): every entry line also carries the
+// generation of the create() it is about to be submitted to (`gen=<n>`), the
+// same value as the VPN_EXCLUSION_GENERATION line logged immediately before
+// this dump. `gen` is APPENDED as the last field so every existing field
+// keeps its exact position (the pre-I3a line stays a byte-exact prefix).
 export function formatRouteTable(requestId: string, interfaceName: string,
-  routes: RouteEntryView[]): string[] {
-  let excluded: number = 0;
-  for (let i = 0; i < routes.length; i++) {
-    if (routes[i].isExcludedRoute) {
-      excluded++;
-    }
-  }
+  routes: RouteEntryView[], gen: number): string[] {
+  const excluded: number = excludedRouteCount(routes);
   const lines: string[] = [];
   lines.push('VPN_ROUTE_TABLE|requestId=' + safeText(requestId) +
     '|count=' + String(routes.length) + '|excluded=' + String(excluded));
@@ -251,7 +300,8 @@ export function formatRouteTable(requestId: string, interfaceName: string,
       '|family=' + family +
       '|isDefaultRoute=' + fieldText(entry.isDefaultRoute) +
       '|isExcludedRoute=' + effectiveExcludedText(entry.isExcludedRoute) +
-      '|hasGateway=' + fieldText(entry.hasGateway));
+      '|hasGateway=' + fieldText(entry.hasGateway) +
+      '|gen=' + String(gen));
   }
   return lines;
 }
