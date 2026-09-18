@@ -170,7 +170,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 | stun | core network map `netbird_config.stuns[].uri`（解析 `stun:host[:port]`，`ice.rs:100`；map 解码 `network_map.rs:617`） | 壳排除集目前**不含**此类（B-2 的 3/7 现状，如实入档） |
 | turn | 同上来源；当前实现**拒绝** `turn:` URI（`peer_conn.rs:701`；host 侧同拒 `host_sockets.rs:1187-1188`） | 预期常态=`present:false` + `absent_reason:"turn: URI rejected by this build (no turn path)"`（可选类带理由缺席，非缺口，`n2h.rs:151-153`） |
 | wg_peer | `connector_status().wg.wg_peers[].endpoint`（`wg_device.rs:298,:1386`；a1947b9 尾部追加面） | ICE 选中对外 UDP 端点；无会话时 fail-closed 不 arm |
-| dns | core network map DNS（`dns.servers[{ip,port}]`+`interface_dns`，`connector.rs:2537-2547`；`network_map.rs:84,:329`） | |
+| dns | 壳侧平台默认（物理）网络 DNS（`@ohos.net.connection`：`getDefaultNetSync` → `getNetCapabilitiesSync` → `getConnectionPropertiesSync(...).dnses[]`；步骤 2 不成立时才走**唯一**的 `getAllNetsSync` 过滤分支——v3.1 R-4 分支序）∪ core network map `dns.servers[{ip,port}]` 中**不落在** `address/address_prefix_len` 或任一 `routes[].network` 覆盖范围内的条目（`connector.rs:2537-2547`；`network_map.rs:84,:329`） | **v3.1 更正（本行原「`dns.servers[]`+`interface_dns`」按重审 R-4/预注册 :68 作废）**：`interface_dns` 与 overlay 内 server **一律不入**冻结集，也不入排除集（把 overlay 内解析器 host-route 排除＝把隧道内 DNS 踢出隧道、新造物理明网泄漏面）；`notes[]` 记 `dns-overlay-internal-excluded-from-freeze=<n>`（n＝落入覆盖范围的 `dns.servers[]` 条数）与 `dns-interface-dns-excluded-from-freeze=1`。非法/无端口/IPv6/空的 server 计入 dns 必需类缺口并逐条记 `dns-server-unusable=ip=…\|port=…\|reason=…`＋`dns-freeze-gap=unusable-servers=<n>`，不得静默跳过（R-3 严格 IPv4，端口缺失按 53；IPv6 不入集合）。壳侧分支记录逐字入 `notes[]` 与 `N2H_DNS_BRANCH\|` 标记：`dns-branch=default\|all-nets-filtered\|none`、`dns-physical-evidence=<handle=…;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4>`、缺口时 `dns-gap=<token>`；分支记录缺失即缺口。本轮 fatal 判定不扩大（仍只 relay 必需类）。权限＝`ohos.permission.GET_NETWORK_INFO`（normal/system_grant，`module.json5`）。实现与验收见 §13.12 |
 
 冻结时刻=arm 时刻（会话已建立、探针未发）。`present/absent_reason/required` 判定复用 `EndpointKind`（`n2h.rs:106-168`）与 `judge` 第 2 步（:824-849）。
 
@@ -225,7 +225,7 @@ hilog 抓取（grep N2H_） ◄────────────────�
 
 | 导出 | 签名 | 返回 |
 |---|---|---|
-| `n2h_collector_arm(optsJson: string)` | opts：`{"shell_exclusions":[{kind,host,port,resolved}], "posctl_port":40001, "probe_wait_ms":800, "build_sha256_reported":"…"（可选）}` | `{ok:true,armed:true,opened_mono} \| {ok:false,error:"no-connector"\|"device-not-up"\|"tunnel-not-ready"\|"already-armed"}` |
+| `n2h_collector_arm(optsJson: string)` | opts：`{"shell_exclusions":[{kind,host,port,resolved}], "posctl_port":40001, "probe_wait_ms":800, "build_sha256_reported":"…"（可选）, "dns":{"branch":"default\|all-nets-filtered\|none","physical_evidence":"<逐字依据>","gap_reason":"<token>"（可选）}}`（**v3.1 C1 dns 追加**：`dns` 段是壳侧分支记录，`branch` 走白名单、两个文本字段限可打印 ASCII 且不含 `\|`/空白/≤96 字符，非此即整臂拒绝 `invalid-opts`；缺段＝文档无 `dns-branch=` 行＝判定侧的 dns 缺口，**不得**由 core 编造。见 §13.12） | `{ok:true,armed:true,opened_mono} \| {ok:false,error:"no-connector"\|"device-not-up"\|"tunnel-not-ready"\|"already-armed"}` |
 | `n2h_collector_status()` | `()` | `{armed,phase:"armed\|probing\|observing\|closed",frames_scanned,hits,probes_sent,receipts_observed,window:{opened_mono,deadline_mono,closed_mono},verdict?}` |
 | `n2h_collector_evidence(chunk: number)` | chunk=-1 取总块数 | `{seq,total,sha256,b64} \| {phase:"running"} \| {error:"no-evidence"}`（**可重复调用**，hilog 丢行重放） |
 | `n2h_collector_disarm()` | `()` | `{ok:true}`（中止窗口，未闭合产物弃置并如实登记） |
@@ -584,4 +584,46 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
   - `bash client/build.sh` → exit 0（逐项 `VERIFY OK`），`entry-default-unsigned.hap` 4 204 623 bytes，sha256 `329984020c57d4b2871888d40ec3d1dccbd2524372026fae71d14a55dca477f3`（与 §13.10⑦ 记录值不同，符合「打包不可逐字节复现」；验收以 exit 0 + 逐项 VERIFY OK 为准）。
   - `n2h-decode` 三类用例（真跑，输入＝集成测试 `--nocapture` 的真实 hilog 抓取 87 行/19 块）：①往返 exit 0，落盘文档 sha256 `f2b27795370b78409684daa31a802148cbb442c7dddce81292b77e2baeb1576b` 与全部分块行声明值逐字相同，文档尾键为 `collector`（`build_sha256=3a8e6d72…`、`build_source="embedded"`，`notes[]` 无 `build-sha256=` 行）；②抽掉 `seq=7/19` 一行 ⇒ exit **21**、`chunk_lines=18|total=19|missing=7|detail=missing chunk seq 7`、**未落盘**；③翻转 `seq=11/19` 的一个 b64 字符 ⇒ exit **21**、`detail=reassembled document sha256 591a9287… does not match the declared f2b27795…`、**未落盘**。
   - `git status --porcelain` 只含上述 7 个文件（无其他改动）。
+
+### 13.12 ⑩ I1 增量落地：dns 类按预注册 v3.1 判据（`docs/n2h-device-evidence-preregistration-draft-20260917.md` §2-C1 dns 口径 :68 / §2.1 R-3 :112 / R-4）
+
+> 本节只追加，不改写 §0–§13.11；**唯一例外＝§4.0 冻结来源表的 dns 行与 §5.1 的 arm opts 契约行**（本增量按 v3.1 更正/扩展这两行的字面，已在原处就地更新并标注 v3.1）。基线：工作树 HEAD `c22cdc7`（干净）+ 本节未提交改动；下列 file:line 为落地后工作树实读。
+
+**① core 侧：dns 冻结源更正（`client/core/src/n2h_collector.rs`）**
+
+- `process_freeze_facts_with_core` 的 dns 段重写（原 `interface_dns:53` 强 push 已删）：新增 `OverlayRange`（`a.b.c.d/p`，host 位按掩码取，`address` 是**主机地址带前缀**故掩码是口径不是修补）＋ `overlay_ranges()`（`address/address_prefix_len`，前缀缺失按 /32；∪ 每条 `routes[].network`）。
+- **`interface_dns` 移出冻结集**（永不入集合/排除集）；`dns.servers[]` 中落入覆盖范围的条目**排除**并计数；其余条目按 R-3 严格 IPv4 `host:port` 入集合（端口缺失/为 0、IPv6、空、非点分四段、元素非对象 ⇒ 计入 dns 必需类缺口）。
+- `notes[]` 键（新增）：`dns-overlay-internal-excluded-from-freeze=<n>`（n＝落入覆盖范围的 `dns.servers[]` 条数；**恒输出**，证明过滤器已跑）、`dns-interface-dns-excluded-from-freeze=1`（`interface_dns` 非空时；把 `interface_dns` 也计入同一 `n` 会与 :68 的字面「map `dns.servers[]` 中落在覆盖范围内的条目…计数」冲突，故拆成两条，二者都不静默丢弃）、`dns-server-unusable=ip=…|port=…|reason=<empty-ip|ipv6|no-port|not-strict-ipv4-socketaddr|malformed-entry>`（逐条）、`dns-freeze-gap=unusable-servers=<n>`（汇总，n>0 时）。
+- 承载：`HostFreezeFacts` 新增 `notes: Vec<String>`，`arm_json` 把它与壳侧分支记录一起并入窗内 `arm_notes`（→ 证据文档 `notes[]`）。dns 全空时 `absent_reason` 改为「no dns endpoint: the network map has no dns.servers[] entry outside the overlay's own coverage…」（旧文案把 `interface_dns` 当冻结源，已按 v3.1 更正）。
+- **壳侧分支记录通道**：`ArmOptions` 新增 `dns: Option<ShellDnsReport>`（`{branch, physical_evidence, gap_reason?}`）——`branch` 走白名单 `default|all-nets-filtered|none`，两文本字段限「可打印 ASCII、无空白、无 `|`、1..=96 字符」，任一不符**整臂拒绝**（`invalid-opts`，与既有选项同一 fail-closed 纪律；`|` 被拒是因为它同时是 notes 字段分隔符，可伪造第二条注记）。渲染为 `dns-branch=…`、`dns-physical-evidence=…`、`dns-gap=…`（后者仅在有缺口时）。**缺段＝无 `dns-branch=` 行**（判定侧的 dns 缺口），core 不编造。
+
+**② 壳侧：dns 端点派生（v3.1 R-4 唯一分支序）**
+
+- 纯模块 `NetBirdEndpointExclusion.ets` 新增：`NET_CAPABILITY_NOT_VPN=15`/`BEARER_VPN=4`/`NET_FAMILY_*`/`DNS_RESOLVER_PORT_DEFAULT=53`、`isPhysicalNetEvidence()`（要求 NOT_VPN **显式存在**且 `bearerTypes` **不含** BEARER_VPN；缺证据≠证据）、`deriveDnsEndpointExclusions(input)`——**步骤 1** 取 default handle（netId 0＝无）；**步骤 2** 证据成立才读该 handle 的 `dnses[]`（此路径下 `getAllNetsSync` 根本不被调用）；**步骤 3** 仅当步骤 2 不成立才走唯一 all-nets 过滤分支（同谓词逐 handle）；**步骤 4** 错误/空值/无物理归属 ⇒ 记录的 dns 缺口（`api-error[-code-<n>]` / `no-physical-net` / `dnses-empty` / `dnses-not-ipv4`）。纯函数对「同时给了 default 与 all-nets」的输入仍只取 default ⇒ **结构性禁止**测量后择优。
+- 平台取数在 `NetBirdConnector.ets` 的 `derivePlatformDnsEndpoints()`（唯一调用 `@ohos.net.connection` 四个同步 API 处；`readDnsResolvers()` 逐 handle 读 `properties.dnses[]`，读失败 `propertiesOk=false` ⇒ 缺口；错误 token 只取 `BusinessError.code`，不进错误文本）。
+- 接线（`NetBirdVpnExtensionAbility.deriveEndpointExclusions`）：dns 端点并入 `endpoints[]`（⇒ 进排除集、进保留的壳排除集、随臂交给 core），IPv4 字面量在 fresh-resolution 处**短路**（`resolveExclusionEndpointIp` 的字面量分支，无 DNS leg）；分支记录存 `this.n2hDnsReport` 并在 arm 时逐字进 `opts.dns`；同时输出标记 `N2H_DNS_BRANCH|requestId=…|dns-branch=…|dns-physical-evidence=…|dnsResolvers=<n>|dnsGap=<token|none>|diag=true|is_evidence=false`（与文档 `notes[]` 同一逐字 token）。
+- **本轮不扩大 fatal**：dns 缺口只记录（不 abort），fail-closed 五类必需端点扩面属后续增量；`VPN_DEFAULT_ROUTE_FORCED`、`gen=`/代际行/ARMED 字段/S20 均未触碰。
+- 权限：`client/entry/src/main/module.json5` 的 `requestPermissions` 新增 `ohos.permission.GET_NETWORK_INFO`（注释写明用途＝四个同步网络 API、级别 normal、grantMode system_grant/API 8，与 INTERNET 同级同 mode，无需 ACL）。打包后 HAP `module.json` 实读：`requestPermissions` 含 INTERNET + GET_NETWORK_INFO 两项。
+
+**③ selfcheck 扩展（host-only，无设备/无网络）**
+
+- 三处 `@ohos.net.connection` 替身全部升级为**功能性** stub（新增四 API，值由 `globalThis.__NB_NET_DEFAULT_ID/__NB_NET_ALL/__NB_NET_CAPS/__NB_NET_DNSES/__NB_NET_THROW` 注入；未注入时 default netId=0 ⇒ 无端点+缺口，故既有 R/A 系列断言逐字不变）：`relay-exclusion-hooks.mjs`、`relay-flag-hooks.mjs`、`route-check-hooks.mjs`。因 `NetBirdConnector.ets` 新增对 `./NetBirdEndpointExclusion` 的**值导入**，`run-relay-flag.mts`/`run-relay-status-log.mts` 同步 stage 该真实文件＋`NetBirdEndpointExclusion.dep.ts`（`relay-flag-hooks.mjs` 增加该 specifier 的重定向），`run-relay-exclusion.mts`/`run-exclusion-addr-shape.mts` 的 `SHIM_TYPES` 补 4 个被类型剥离擦除的接口名。
+- `run.mts`（纯模块）：+18 检查（常量字面、谓词「必须显式 NOT_VPN」、D1 default 成功/D2 无 NOT_VPN 走 all-nets/D2b 含 BEARER_VPN 同样降级/D3 两路皆败 ⇒ `no-physical-net`/D4 空 dnses ⇒ `dnses-empty`/D5 IPv6 ⇒ `dnses-not-ipv4`（可用 IPv4 仍入集合）/D6 API 错误 token 逐字/D7 读属性失败 ⇒ `api-error`/D7b 无合格网络 ⇒ `no-physical-net`）。
+- `run-relay-exclusion.mts`（真扩展类端到端）：+10 检查（D1 default 分支 `/32` 入排除集＋标记逐字＋保留的壳排除集含 kind=dns＋`n2hDnsReport` 无 gap；D2 步骤 2 不成立走 all-nets 且 default 的解析器**不**入集；D3 无物理网络 ⇒ 无 dns 路由＋`dns-branch=none|dns-gap=no-physical-net`；D4 default 与 all-nets 同时合格时 default 胜（固定序）；D5 API 错误 ⇒ `dnsGap=api-error-code-2100002` 且 all-nets 解析器仍入集；2 条 arm 转发/标记格式的逐字接线 pin——该跳需原生 arm，host 侧不可驱动，沿用 `run-exclusion-addr-shape.mts` A5 的文本 pin 先例）。
+- 其余 selfcheck（`run-relay-flag.mts`/`run-relay-status-log.mts`/`run-route-validation.mts`/`run-exclusion-addr-shape.mts`）逐字未改其断言，仅 stage 变更。
+
+**④ core 测试（新增 2 内联单测 + 1 集成用例，改 2 断言）**
+
+- 新增：`n2h_collector::tests::dns_freeze_caliber_v31_filters_overlay_internal_and_records_unusable_entries`（覆盖 address/20 + 两条 routes 覆盖过滤、`interface_dns` 排除、IPv6/无端口/空/非点分/非对象五种不可用逐条留痕、`dns-freeze-gap=unusable-servers=5`、全内网 ⇒ dns 仍有理由缺席且仍为必需类）；`n2h_collector::tests::arm_opts_carry_the_dns_branch_record_into_the_evidence_notes`（合法记录解析＋三行注记逐字＋8 种非法记录整臂拒绝＋缺段无注记）；集成 `dns_freeze_caliber_v31_holds_through_the_public_document_mapping`（从公开 `process_freeze_facts` + `assemble_freezes` 侧钉同一口径，含「内网解析器不得出现在冻结集任何条目」断言）。
+- 更新：`process_freeze_facts_map_both_connector_documents`（dns 由 2 条改 1 条：`interface_dns` 出集＋两条注记断言）、`core_freeze_inputs_close_the_stun_and_management_gap`（`frozen.len()` 9→8）；集成 `offline_facts` 补 `notes` 字段、`offline_opts` 增加 `dns` 段、场景 1 增三条 `notes[]` 断言（**壳侧分支记录确实抵达证据文档**）。
+
+**⑤ 改动面与验收（工作树实读，HEAD `c22cdc7` + 本节未提交改动）**
+
+- 改动文件（15）：`client/core/src/n2h_collector.rs`、`client/core/tests/n2h_device_collector.rs`、`client/entry/src/main/ets/vpnextensionability/{NetBirdEndpointExclusion,NetBirdConnector,NetBirdVpnExtensionAbility}.ets`、`client/entry/src/main/module.json5`、`client/entry/selfcheck/{relay-exclusion-hooks.mjs,relay-flag-hooks.mjs,route-check-hooks.mjs,run.mts,run-relay-exclusion.mts,run-relay-flag.mts,run-relay-status-log.mts,run-exclusion-addr-shape.mts}`、本文件。**未触碰**：`n2h.rs`（渲染器与判据）、`connector.rs`（公开 JSON 形状）、`napi.rs`、`wg_device.rs`、预注册草案、T0 审查记录、`Cargo.toml`/`Cargo.lock`（无新依赖）。
+- 验收实跑：
+  - `cd client/core && cargo test --offline --locked --color never` → **34 个测试目标全 ok，合计 534 passed / 0 failed / 0 ignored**（`c22cdc7` 基线 531/0 + 本节 3 新用例）；`tests/n2h_device_collector.rs` 目标 16 passed（含新集成用例），冻结类断言按新口径全绿。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=72bc6e32b7dcdbab20f3185228d7bbbe493c820f70339648a9f96c85584e69b0 (recomputed independently; present in the artifact)`（源码改动 ⇒ 与 §13.11 的 `3a8e6d72…` 不同，符合该摘要「任何源码改动都会改变它」的语义）。
+  - 壳侧自检（全 `exit 0`）：`run.mts` **61 passed / 0 failed**（基线 43）、`run-relay-exclusion.mts` **35 / 0**（基线 25）、`run-relay-flag.mts` **9 / 0**、`run-relay-status-log.mts` **3 / 0**、`run-route-validation.mts` **40 / 0**、`run-exclusion-addr-shape.mts` **25 / 0**。
+  - `bash client/build.sh` → exit 0（`CompileArkTS` 对含本节改动的 ets 全量编译成功，仅余既有行告警），逐项 `VERIFY OK`（HAP 成员 `.so` 与 llvm-strip 后制品 sha256 相同、ELF64 ET_DYN AArch64、`pack.info` apiVersion 26）；HAP `entry-default-unsigned.hap` **4 216 311 bytes**、sha256 `ad5f3383b823496c97ef6d4cb01c032e32c6b579535fdadcc4ae336bc83f94c3`（打包不可逐字节复现，验收以 exit 0 + 逐项 VERIFY OK 为准）。
+  - 残余（如实）：dns 缺口的 fatal 化、壳侧 stun/wg_peer 排除面、代际标记与 S20 仍属后续增量；本轮 dns 缺口只入 `notes[]` 与标记，判定侧据「分支记录缺失/`dns-gap=` 存在」即可判 C1 不成立——该判定接线未在本轮实现。
 

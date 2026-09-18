@@ -475,7 +475,9 @@ pub struct FreezeSources {
     pub turn_uris: Vec<InjectedEndpoint>,
     /// `connector_status().wg.wg_peers[].endpoint` of the live session.
     pub wg_peer_endpoints: Vec<InjectedEndpoint>,
-    /// Network-map DNS (`dns.servers[]` + `interface_dns`).
+    /// Network-map DNS (`dns.servers[]`, v3.1 caliber: only the entries that
+    /// do NOT fall inside the overlay's own coverage — `interface_dns` is
+    /// never frozen, preregistration :68).
     pub dns_servers: Vec<InjectedEndpoint>,
     /// Freeze instant = arm instant (§4.0): unix clock + `sys::mono_ms()`.
     pub frozen_at_unix: i64,
@@ -549,8 +551,9 @@ impl FreezeSources {
             EndpointKind::WgPeer => "no wg_peer endpoint: no live session peer endpoint \
                  (fail-closed: the collector is not armed without a ready session)"
                 .to_string(),
-            EndpointKind::Dns => "no dns endpoint: the network map's dns.servers[] and \
-                 interface_dns are empty"
+            EndpointKind::Dns => "no dns endpoint: the network map has no dns.servers[] entry \
+                 outside the overlay's own coverage (v3.1 caliber; interface_dns is never a \
+                 freeze target)"
                 .to_string(),
         }
     }
@@ -1656,8 +1659,15 @@ pub struct HostFreezeFacts {
     pub turn_uris: Vec<InjectedEndpoint>,
     /// `wg.wg_peers[].endpoint` — the session's outer UDP endpoints.
     pub wg_peer_endpoints: Vec<InjectedEndpoint>,
-    /// Network-map DNS (`dns.servers[]` + `interface_dns`).
+    /// Network-map DNS (`dns.servers[]`, v3.1 caliber: only the servers that
+    /// do NOT fall inside the overlay's own coverage — see
+    /// [`overlay_ranges`]; `interface_dns` never enters this set).
     pub dns_servers: Vec<InjectedEndpoint>,
+    /// Freeze-source notes the mapping wants carried into the evidence
+    /// `notes[]` (v3.1 C1 dns caliber: the overlay-internal exclusions and
+    /// every `dns.servers[]` entry that could not become a strict IPv4
+    /// freeze). Empty = nothing to record.
+    pub notes: Vec<String>,
     /// Peer overlay addresses (network-map `peers[].vpn_addresses`) — the a2b
     /// positive control's destination (§4.3).
     pub peer_overlay: Vec<[u8; 4]>,
@@ -1778,6 +1788,72 @@ pub fn installed_host() -> Option<Arc<dyn CollectorHost>> {
 // arm options (§5.1)
 // ---------------------------------------------------------------------------
 
+/// The shell's dns BRANCH RECORD (v3.1 C1 dns caliber / R-4, preregistration
+/// :68): which of the two — and only two — branches produced the dns freeze
+/// set, the verbatim physical-attribution grounds, and whether the shell
+/// recorded a dns required-class gap.
+///
+/// The shell derives all three (it is the only side that can call
+/// `@ohos.net.connection`); the core validates the frozen token shapes and
+/// renders them into the evidence document's `notes[]` verbatim, so a reviewer
+/// can compare the arm options, the hilog marker and the document line by
+/// line. A missing record is a dns gap for the judge (the fatal wiring is a
+/// later increment) — it is never invented here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellDnsReport {
+    /// The ONE branch taken: [`DNS_BRANCH_DEFAULT`],
+    /// [`DNS_BRANCH_ALL_NETS_FILTERED`] or [`DNS_BRANCH_NONE`].
+    pub branch: String,
+    /// Verbatim grounds, e.g.
+    /// `handle=101;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4`.
+    pub physical_evidence: String,
+    /// `Some` iff the shell recorded a dns required-class gap; the token names
+    /// the cause (`api-error-code-201`, `no-physical-net`, `dnses-empty`,
+    /// `dnses-not-ipv4`).
+    pub gap_reason: Option<String>,
+}
+
+/// The `dns-branch` value of the unique default-network branch (step 2 held).
+pub const DNS_BRANCH_DEFAULT: &str = "default";
+/// The `dns-branch` value of the UNIQUE all-nets filtered branch (step 3, taken
+/// only when step 2 did not hold).
+pub const DNS_BRANCH_ALL_NETS_FILTERED: &str = "all-nets-filtered";
+/// The `dns-branch` value when neither branch produced resolvers.
+pub const DNS_BRANCH_NONE: &str = "none";
+
+impl ShellDnsReport {
+    /// The three frozen `branch` values (an allow-list: anything else refuses
+    /// the arm rather than entering the document).
+    pub const BRANCHES: [&'static str; 3] =
+        [DNS_BRANCH_DEFAULT, DNS_BRANCH_ALL_NETS_FILTERED, DNS_BRANCH_NONE];
+
+    /// The `notes[]` lines, verbatim and in this order.
+    pub fn notes(&self) -> Vec<String> {
+        let mut out = vec![
+            format!("dns-branch={}", self.branch),
+            format!("dns-physical-evidence={}", self.physical_evidence),
+        ];
+        if let Some(reason) = &self.gap_reason {
+            out.push(format!("dns-gap={reason}"));
+        }
+        out
+    }
+}
+
+/// Validate one shell-reported dns token: printable ASCII, no whitespace and
+/// no `|` (the notes field separator — a value carrying it could forge a
+/// second note field) and bounded, so the arm option can never smuggle
+/// arbitrary text into the evidence document.
+fn dns_report_token(field: &str, raw: &str) -> Result<String, String> {
+    if raw.is_empty() || raw.len() > 96 {
+        return Err(format!("dns.{field} must be 1..=96 characters"));
+    }
+    if !raw.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'|') {
+        return Err(format!("dns.{field} carries a character outside the frozen token shape"));
+    }
+    Ok(raw.to_string())
+}
+
 /// `n2h_collector_arm(optsJson)` options (§5.1). `shell_exclusions` is the
 /// shell's own exclusion resolution (D7 `shell-exclusion`, the artifact C2
 /// cross-checks in the SAME document); the rest are bounded window knobs.
@@ -1796,6 +1872,10 @@ pub struct ArmOptions {
     /// semantics). A present value is REFUSED unless [`announced_b2a_marker`]
     /// accepts it.
     pub peer_b2a_probe_id: Option<String>,
+    /// v3.1's dns branch record (see [`ShellDnsReport`]). `None` = the shell
+    /// reported no branch at all: no `dns-branch=` line enters the document
+    /// (a missing record is the judge's dns gap, never a fabricated one).
+    pub dns: Option<ShellDnsReport>,
 }
 
 impl Default for ArmOptions {
@@ -1806,6 +1886,7 @@ impl Default for ArmOptions {
             probe_wait_ms: PROBE_WAIT_MS_DEFAULT,
             build_sha256_reported: String::new(),
             peer_b2a_probe_id: None,
+            dns: None,
         }
     }
 }
@@ -1848,6 +1929,35 @@ impl ArmOptions {
             // only in the frozen wire shape and anything else refuses the arm.
             let raw = as_str(v).ok_or("peer_b2a_probe_id must be a string")?;
             opts.peer_b2a_probe_id = Some(announced_b2a_marker(raw)?);
+        }
+        if let Some(v) = obj_get(fields, "dns") {
+            // v3.1's branch record: the branch token is an allow-list and the
+            // two text fields are strictly shaped — a half-understood record
+            // must not reach the evidence document, so anything else refuses
+            // the arm (fail-closed, same discipline as every other option).
+            let entry = as_obj(v).ok_or("dns must be an object")?;
+            let branch =
+                obj_get(entry, "branch").and_then(as_str).ok_or("dns.branch is missing")?;
+            if !ShellDnsReport::BRANCHES.contains(&branch) {
+                return Err(format!(
+                    "dns.branch '{branch}' is not one of the frozen branch tokens"
+                ));
+            }
+            let evidence = obj_get(entry, "physical_evidence")
+                .and_then(as_str)
+                .ok_or("dns.physical_evidence is missing")?;
+            let gap_reason = match obj_get(entry, "gap_reason") {
+                Some(g) => {
+                    let raw = as_str(g).ok_or("dns.gap_reason must be a string")?;
+                    Some(dns_report_token("gap_reason", raw)?)
+                }
+                None => None,
+            };
+            opts.dns = Some(ShellDnsReport {
+                branch: branch.to_string(),
+                physical_evidence: dns_report_token("physical_evidence", evidence)?,
+                gap_reason,
+            });
         }
         if let Some(v) = obj_get(fields, "shell_exclusions") {
             let Json::Arr(items) = v else {
@@ -1977,6 +2087,11 @@ pub fn arm_json(opts_json: &str) -> String {
     }
     let clock = system_clock();
     let mut arm_notes: Vec<String> = Vec::new();
+    // v3.1 C1 dns: the shell's branch record is carried into the document
+    // verbatim (branch + physical evidence + the gap it recorded, if any)
+    if let Some(dns) = &options.dns {
+        arm_notes.extend(dns.notes());
+    }
     let facts = match host.freeze_facts() {
         Ok(f) => f,
         Err(e) => {
@@ -1986,6 +2101,9 @@ pub fn arm_json(opts_json: &str) -> String {
             HostFreezeFacts::default()
         }
     };
+    // the mapping's own notes (v3.1 dns caliber: overlay-internal exclusions
+    // and every unusable `dns.servers[]` entry) travel with the facts
+    arm_notes.extend(facts.notes.iter().cloned());
     let sources = FreezeSources {
         shell_exclusions: options.shell_exclusions.clone(),
         management_dial: facts.management_dial.clone(),
@@ -3058,6 +3176,85 @@ fn injected_from_addr(addr: &str) -> Option<InjectedEndpoint> {
     Some(InjectedEndpoint::with_resolved(&host, port, addr))
 }
 
+/// One IPv4 range of the OVERLAY's own coverage (v3.1 C1 dns caliber): the
+/// `address/address_prefix_len` of this device plus every `routes[].network`
+/// of the applied network map.
+///
+/// The dns freeze set is exactly the resolvers OUTSIDE these ranges: an
+/// overlay-internal resolver (the tunnel's own DNS) must never be frozen —
+/// and, even more, never be route-excluded, because a host route for it would
+/// push the tunnel's DNS out of the tunnel and open a physical clear-net
+/// resolver path (preregistration :68).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverlayRange {
+    /// Network address, host bits masked off.
+    net: u32,
+    mask: u32,
+}
+
+impl OverlayRange {
+    /// `a.b.c.d/p`; a bare `a.b.c.d` means /32. The value is MASKED, not
+    /// validated for host bits: `address` is a HOST address carrying its
+    /// prefix (connector `ShellNetworkConfig::address`), so masking is the
+    /// documented reading, not a repair of bad input.
+    fn parse(s: &str) -> Option<OverlayRange> {
+        let (addr_part, prefix) = match s.split_once('/') {
+            None => (s, 32u8),
+            Some((a, p)) => (a, p.trim().parse::<u8>().ok()?),
+        };
+        if prefix > 32 {
+            return None;
+        }
+        let ip = crate::config::parse_ipv4(addr_part.trim())?;
+        let mask: u32 = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix as u32) };
+        Some(OverlayRange { net: u32::from_be_bytes(ip) & mask, mask })
+    }
+
+    fn contains(&self, ip: [u8; 4]) -> bool {
+        u32::from_be_bytes(ip) & self.mask == self.net
+    }
+}
+
+/// The overlay coverage of one `connector_network_config` document: the
+/// device's own `address` (+ `address_prefix_len`, default /32 as the core
+/// renders it) and every `routes[].network`. An absent/unparsable entry is
+/// simply not a range — it can never silently EXCLUDE a resolver from the
+/// freeze (the fail-open direction is "nothing is overlay-internal").
+fn overlay_ranges(fields: &[(String, Json)]) -> Vec<OverlayRange> {
+    let mut out: Vec<OverlayRange> = Vec::new();
+    if let Some(addr) = obj_get(fields, "address").and_then(as_str) {
+        let prefix = obj_get(fields, "address_prefix_len").and_then(as_u64).unwrap_or(32);
+        if let Some(range) = OverlayRange::parse(&format!("{addr}/{prefix}")) {
+            out.push(range);
+        }
+    }
+    for route in obj_get(fields, "routes").map(as_arr).unwrap_or(&[]) {
+        if let Some(network) =
+            as_obj(route).and_then(|r| obj_get(r, "network")).and_then(as_str)
+        {
+            if let Some(range) = OverlayRange::parse(network) {
+                out.push(range);
+            }
+        }
+    }
+    out
+}
+
+/// Why a `dns.servers[]` entry could not become a freeze (v3.1's strict IPv4
+/// `SocketAddr` rule, preregistration :112). Every reason is recorded in
+/// `notes[]` — an unusable entry is NEVER silently skipped.
+fn dns_entry_unusable_reason(ip: &str, port: Option<u64>) -> &'static str {
+    if ip.trim().is_empty() {
+        "empty-ip"
+    } else if ip.contains(':') {
+        "ipv6" // strictly IPv4 freeze set: an IPv6 resolver is a dns gap
+    } else if port.is_none() || port == Some(0) {
+        "no-port"
+    } else {
+        "not-strict-ipv4-socketaddr"
+    }
+}
+
 /// Freeze facts of the production host from the two connector documents
 /// (design §4.0's core-session sources). Pure: the documents are arguments, so
 /// the mapping is unit-testable without a connector.
@@ -3146,23 +3343,71 @@ pub fn process_freeze_facts_with_core(
                 facts.signal_config = Some(InjectedEndpoint::new(&host, port));
             }
         }
+        // -- dns (v3.1 C1 caliber, preregistration :68/:112) -----------------
+        // The freeze set is the TUNNEL-OUTSIDE resolver set: `interface_dns`
+        // (the platform's tunnel interface resolver) and every `dns.servers[]`
+        // entry that falls inside the overlay's own coverage are kept OUT of
+        // it, and the exclusion is accounted for in `notes[]`. Everything else
+        // must become a strict IPv4 `SocketAddr` freeze (`host:port`, the host
+        // is the /32 the exclusion installs); an entry that cannot — no port,
+        // IPv6, empty, not a dotted quad — is a RECORDED dns gap, never a
+        // silent skip.
+        let ranges = overlay_ranges(fields);
+        let mut overlay_internal_excluded: usize = 0;
+        let mut unusable_servers: usize = 0;
         if let Some(dns) = obj_get(fields, "dns").and_then(as_obj) {
             for server in obj_get(dns, "servers").map(as_arr).unwrap_or(&[]) {
-                let Some(entry) = as_obj(server) else { continue };
-                let (Some(ip), Some(port)) =
-                    (obj_get(entry, "ip").and_then(as_str), obj_get(entry, "port").and_then(as_u64))
-                else {
+                let Some(entry) = as_obj(server) else {
+                    unusable_servers += 1;
+                    facts.notes.push(
+                        "dns-server-unusable=ip=<not-an-object>|port=<absent>|reason=malformed-entry"
+                            .to_string(),
+                    );
                     continue;
                 };
-                if let Some(ep) = injected_from_addr(&format!("{ip}:{port}")) {
-                    facts.dns_servers.push(ep);
+                let ip = obj_get(entry, "ip").and_then(as_str).unwrap_or("");
+                let port = obj_get(entry, "port").and_then(as_u64);
+                if let Some(octets) = crate::config::parse_ipv4(ip.trim()) {
+                    if ranges.iter().any(|r| r.contains(octets)) {
+                        // overlay-internal resolver: never frozen, never
+                        // excluded (a host route for it would kick the
+                        // tunnel's own DNS out of the tunnel)
+                        overlay_internal_excluded += 1;
+                        continue;
+                    }
+                }
+                let frozen = port
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p != 0)
+                    .and_then(|p| injected_from_addr(&format!("{ip}:{p}")));
+                match frozen {
+                    Some(ep) => facts.dns_servers.push(ep),
+                    None => {
+                        unusable_servers += 1;
+                        facts.notes.push(format!(
+                            "dns-server-unusable=ip={}|port={}|reason={}",
+                            if ip.is_empty() { "<empty>" } else { ip },
+                            port.map(|p| p.to_string())
+                                .unwrap_or_else(|| "<absent>".to_string()),
+                            dns_entry_unusable_reason(ip, port)
+                        ));
+                    }
                 }
             }
         }
+        facts.notes.push(format!(
+            "dns-overlay-internal-excluded-from-freeze={overlay_internal_excluded}"
+        ));
         if let Some(iface_dns) = obj_get(fields, "interface_dns").and_then(as_str) {
-            if let Some(ep) = injected_from_addr(&format!("{iface_dns}:53")) {
-                facts.dns_servers.push(ep);
+            if !iface_dns.trim().is_empty() {
+                // the tunnel interface's own resolver: kept out of the freeze
+                // set, accounted for (the v3.1 rule names it explicitly; the
+                // count above is the `dns.servers[]` half of the account)
+                facts.notes.push("dns-interface-dns-excluded-from-freeze=1".to_string());
             }
+        }
+        if unusable_servers > 0 {
+            facts.notes.push(format!("dns-freeze-gap=unusable-servers={unusable_servers}"));
         }
         if let Some(addr) = obj_get(fields, "address").and_then(as_str) {
             facts.own_overlay = parse_addr_literal(&format!("{addr}:0")).map(|(ip, _)| ip);
@@ -4659,9 +4904,26 @@ mod tests {
             .collect();
         assert_eq!(relays, vec!["home.example:28443", "relay.example:8080"]);
         assert_eq!(facts.signal_config.as_ref().expect("signal").port, 10_000);
-        assert_eq!(facts.dns_servers.len(), 2, "dns.servers + interface_dns");
+        // v3.1 C1 dns caliber: `interface_dns` is NOT a freeze target any more
+        // (it is the tunnel interface's own resolver) — it is accounted for in
+        // notes, and the server outside the overlay's coverage is frozen
+        assert_eq!(facts.dns_servers.len(), 1, "dns.servers[] only (interface_dns is out)");
         assert_eq!(facts.dns_servers[0].resolved, "10.0.0.54:53");
-        assert_eq!(facts.dns_servers[1].resolved, "10.0.0.53:53");
+        assert!(
+            facts.notes.contains(&"dns-overlay-internal-excluded-from-freeze=0".to_string()),
+            "the exclusion count is always recorded: {:?}",
+            facts.notes
+        );
+        assert!(
+            facts.notes.contains(&"dns-interface-dns-excluded-from-freeze=1".to_string()),
+            "the interface_dns exclusion is recorded: {:?}",
+            facts.notes
+        );
+        assert!(
+            !facts.notes.iter().any(|n| n.starts_with("dns-freeze-gap=")),
+            "no unusable entry in this document: {:?}",
+            facts.notes
+        );
         assert_eq!(facts.own_overlay, Some([10, 77, 0, 1]));
         assert_eq!(facts.peer_overlay, vec![[10, 77, 0, 2]]);
         // the assembly turns these into the D7 freeze + the a2b destination
@@ -4685,6 +4947,176 @@ mod tests {
             facts.dns_servers.len(),
             facts.own_overlay,
             facts.peer_overlay
+        );
+    }
+
+    /// v3.1's dns freeze caliber (preregistration :68/:112), the whole rule in
+    /// one document: `interface_dns` and every `dns.servers[]` entry inside the
+    /// overlay's own coverage stay OUT of the freeze set (they are the
+    /// tunnel's own resolvers — excluding them would push DNS out of the
+    /// tunnel), everything else freezes as a strict IPv4 `host:port`, and any
+    /// entry that cannot (IPv6 / no port / empty / not a dotted quad /
+    /// malformed element) is a RECORDED dns gap, never a silent skip.
+    #[test]
+    fn dns_freeze_caliber_v31_filters_overlay_internal_and_records_unusable_entries() {
+        let status = "{\"running\":true,\"state\":\"connected\"}";
+        // coverage: the device's own /20 address AND two route networks
+        let network = "{\"available\":true,\"serial\":7,\"address\":\"10.77.0.1\",\
+            \"address_prefix_len\":20,\"interface_dns\":\"10.0.0.53\",\"signal\":\"signal.example:10000\",\
+            \"routes\":[{\"network\":\"10.9.0.0/16\",\"is_default\":false},\
+            {\"network\":\"172.16.0.0/12\",\"is_default\":false}],\
+            \"dns\":{\"service_enable\":true,\"servers\":[\
+            {\"ip\":\"10.77.0.53\",\"port\":53},\
+            {\"ip\":\"10.9.1.53\",\"port\":53},\
+            {\"ip\":\"172.16.5.53\",\"port\":53},\
+            {\"ip\":\"198.51.100.53\",\"port\":53},\
+            {\"ip\":\"203.0.113.53\",\"port\":53},\
+            {\"ip\":\"2001:db8::53\",\"port\":53},\
+            {\"ip\":\"198.51.100.54\"},\
+            {\"ip\":\"\",\"port\":53},\
+            {\"ip\":\"not-an-ip\",\"port\":53},\
+            \"garbage\"]},\"peer_count\":0,\"peers\":[],\
+            \"default_route\":{\"allowed\":false,\"reason\":\"held\"}}";
+        let facts = process_freeze_facts(status, network).expect("both documents parse");
+
+        let dns: Vec<&str> = facts.dns_servers.iter().map(|e| e.resolved.as_str()).collect();
+        assert_eq!(
+            dns,
+            vec!["198.51.100.53:53", "203.0.113.53:53"],
+            "only the resolvers OUTSIDE the overlay coverage are frozen"
+        );
+        for internal in ["10.77.0.53", "10.9.1.53", "172.16.5.53", "10.0.0.53"] {
+            assert!(
+                !dns.iter().any(|r| r.starts_with(&format!("{internal}:"))),
+                "an overlay-internal resolver must never be frozen: {internal} in {dns:?}"
+            );
+        }
+        assert!(
+            facts.notes.contains(&"dns-overlay-internal-excluded-from-freeze=3".to_string()),
+            "the count covers the in-coverage dns.servers[] entries: {:?}",
+            facts.notes
+        );
+        assert!(
+            facts.notes.contains(&"dns-interface-dns-excluded-from-freeze=1".to_string()),
+            "interface_dns is accounted for too: {:?}",
+            facts.notes
+        );
+        for reason in ["ipv6", "no-port", "empty-ip", "not-strict-ipv4-socketaddr"] {
+            assert!(
+                facts.notes.iter().any(|n| n.starts_with("dns-server-unusable=")
+                    && n.ends_with(&format!("|reason={reason}"))),
+                "an unusable entry with reason {reason} is recorded, never skipped: {:?}",
+                facts.notes
+            );
+        }
+        assert!(
+            facts.notes.contains(
+                &"dns-server-unusable=ip=<not-an-object>|port=<absent>|reason=malformed-entry"
+                    .to_string()
+            ),
+            "a malformed element is recorded as well: {:?}",
+            facts.notes
+        );
+        assert!(
+            facts.notes.contains(&"dns-freeze-gap=unusable-servers=5".to_string()),
+            "the unusable entries are counted as a dns required-class gap: {:?}",
+            facts.notes
+        );
+
+        // the assembly turns exactly the filtered set into the dns freeze
+        let frozen = assemble_freezes(&FreezeSources {
+            dns_servers: facts.dns_servers.clone(),
+            ..FreezeSources::default()
+        });
+        let entries: Vec<&FrozenEndpoint> =
+            frozen.iter().filter(|f| f.kind == Some(EndpointKind::Dns)).collect();
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert!(entry.present);
+            assert_eq!(entry.source, SOURCE_CORE_NETWORK_MAP);
+            assert_eq!(entry.proto, "udp");
+        }
+
+        // everything overlay-internal ⇒ a REASONED absence, never an invented
+        // freeze (and never a reclassification of dns into an optional kind)
+        let all_internal = "{\"available\":true,\"serial\":8,\"address\":\"10.77.0.1\",\
+            \"address_prefix_len\":16,\"interface_dns\":\"10.0.0.53\",\
+            \"routes\":[],\"dns\":{\"service_enable\":true,\"servers\":[{\"ip\":\"10.77.9.9\",\"port\":53}]},\
+            \"peer_count\":0,\"peers\":[]}";
+        let bare = process_freeze_facts(status, all_internal).expect("document parses");
+        assert!(bare.dns_servers.is_empty());
+        assert!(
+            bare.notes.contains(&"dns-overlay-internal-excluded-from-freeze=1".to_string()),
+            "{:?}",
+            bare.notes
+        );
+        let bare_frozen = assemble_freezes(&FreezeSources {
+            dns_servers: bare.dns_servers,
+            ..FreezeSources::default()
+        });
+        let absent = bare_frozen
+            .iter()
+            .find(|f| f.kind == Some(EndpointKind::Dns))
+            .expect("the dns kind is always represented");
+        assert!(!absent.present, "no outer resolver ⇒ the dns kind is a reasoned absence");
+        assert!(!absent.absent_reason.is_empty(), "{absent:?}");
+        assert!(EndpointKind::Dns.required(), "dns must stay a REQUIRED kind (C1)");
+        println!(
+            "[v3.1 dns] frozen={dns:?} overlay-internal-excluded=3 unusable=5 notes={:?}",
+            facts.notes
+        );
+    }
+
+    /// The shell's v3.1 dns branch record (R-4): the ONE branch token is an
+    /// allow-list, the two text fields are strictly shaped (a value carrying
+    /// `|` or whitespace could forge a second `notes[]` field), and the notes
+    /// render verbatim — a missing record stays missing (the judge's dns gap).
+    #[test]
+    fn arm_opts_carry_the_dns_branch_record_into_the_evidence_notes() {
+        let good = "{\"dns\":{\"branch\":\"all-nets-filtered\",\
+            \"physical_evidence\":\"handles=101,102;networkCap-has-NOT_VPN=15;\
+            bearerTypes-no-BEARER_VPN=4\",\"gap_reason\":\"dnses-empty\"}}";
+        let opts = ArmOptions::parse_json(good).expect("the branch record parses");
+        let dns = opts.dns.as_ref().expect("dns record");
+        assert_eq!(dns.branch, DNS_BRANCH_ALL_NETS_FILTERED);
+        assert_eq!(
+            dns.notes(),
+            vec![
+                "dns-branch=all-nets-filtered".to_string(),
+                "dns-physical-evidence=handles=101,102;networkCap-has-NOT_VPN=15;\
+                 bearerTypes-no-BEARER_VPN=4"
+                    .to_string(),
+                "dns-gap=dnses-empty".to_string(),
+            ]
+        );
+        // the success shape: no gap_reason ⇒ no dns-gap line
+        let clean = ArmOptions::parse_json(
+            "{\"dns\":{\"branch\":\"default\",\
+             \"physical_evidence\":\"handle=101;networkCap-has-NOT_VPN=15;\
+             bearerTypes-no-BEARER_VPN=4\"}}",
+        )
+        .expect("the default branch record parses");
+        let clean_notes = clean.dns.as_ref().expect("dns record").notes();
+        assert_eq!(clean_notes.len(), 2);
+        assert_eq!(clean_notes[0], "dns-branch=default");
+        // absent section ⇒ NO dns notes at all (never a fabricated branch)
+        assert!(ArmOptions::parse_json("{}").expect("no opts").dns.is_none());
+        // malformed records refuse the arm (half-understood ⇒ no window)
+        for bad in [
+            "{\"dns\":[]}",
+            "{\"dns\":{\"physical_evidence\":\"e\"}}",
+            "{\"dns\":{\"branch\":\"best-effort\",\"physical_evidence\":\"e\"}}",
+            "{\"dns\":{\"branch\":\"default\"}}",
+            "{\"dns\":{\"branch\":\"default\",\"physical_evidence\":\"\"}}",
+            "{\"dns\":{\"branch\":\"default\",\"physical_evidence\":\"handle=1|dns-gap=x\"}}",
+            "{\"dns\":{\"branch\":\"default\",\"physical_evidence\":\"two words\"}}",
+            "{\"dns\":{\"branch\":\"default\",\"physical_evidence\":\"e\",\"gap_reason\":7}}",
+        ] {
+            assert!(ArmOptions::parse_json(bad).is_err(), "must refuse {bad}");
+        }
+        println!(
+            "[v3.1 dns] branch record: {:?} (missing record ⇒ no dns-branch line at all)",
+            dns.notes()
         );
     }
 
@@ -4737,7 +5169,12 @@ mod tests {
                 "{kind:?} must be represented (present or reasoned absence)"
             );
         }
-        assert_eq!(frozen.len(), 9, "7 kinds; stun×2 and dns×2 carry several endpoints");
+        assert_eq!(
+            frozen.len(),
+            8,
+            "7 kinds; stun×2 carries several endpoints and dns ONE (v3.1: interface_dns is not \
+             a freeze target)"
+        );
 
         // stun: no longer an absence — one entry per parsed URI, core-network-map
         let stuns: Vec<&FrozenEndpoint> =

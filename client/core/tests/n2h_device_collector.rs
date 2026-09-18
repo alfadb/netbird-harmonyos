@@ -929,14 +929,29 @@ fn offline_facts(addrs: &SinkAddrs, with_signal: bool) -> nc::HostFreezeFacts {
         turn_uris: vec![nc::InjectedEndpoint::new("turn.example", 3478)],
         wg_peer_endpoints: vec![injected("198.51.100.4", addrs.peer_outer)],
         dns_servers: vec![injected("10.0.0.53", addrs.dns)],
+        // v3.1 C1 dns: the network-document mapping's own notes ride the facts.
+        // This harness injects the freeze facts directly (no network document
+        // to filter), so it carries the shell-reported branch record through
+        // `offline_opts` instead — and asserts both reach the document.
+        notes: Vec::new(),
         peer_overlay: vec![PEER],
         own_overlay: Some(DEV),
     }
 }
 
+/// v3.1 C1 dns: the shell's branch record (§5.1 `dns`) — the ONE branch that
+/// produced the dns freeze set plus its verbatim physical-attribution grounds.
+/// Every arm carries it, so the document's `notes[]` can be asserted to hold
+/// the three lines the preregistration requires (a missing record would be the
+/// judge's dns gap; the shell never omits it).
+fn offline_dns_record() -> &'static str {
+    "\"dns\":{\"branch\":\"default\",\"physical_evidence\":\
+     \"handle=101;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4\"}"
+}
+
 /// The arm options: the shell's own exclusion resolution (C2's artifact) for
-/// management/signal, the documented window knobs, and the peer overlay port
-/// the harness's echo peer answers on.
+/// management/signal, the documented window knobs, the v3.1 dns branch record
+/// and the peer overlay port the harness's echo peer answers on.
 fn offline_opts(addrs: &SinkAddrs, with_signal: bool, probe_wait_ms: u64) -> String {
     let signal = if with_signal {
         format!(
@@ -949,10 +964,12 @@ fn offline_opts(addrs: &SinkAddrs, with_signal: bool, probe_wait_ms: u64) -> Str
     };
     format!(
         "{{\"shell_exclusions\":[{{\"kind\":\"management\",\"host\":\"mgmt.example\",\
-         \"port\":{},\"resolved\":\"{}\"}}{signal}],\"posctl_port\":{},\"probe_wait_ms\":{probe_wait_ms}}}",
+         \"port\":{},\"resolved\":\"{}\"}}{signal}],\"posctl_port\":{},\"probe_wait_ms\":{probe_wait_ms},\
+         {}}}",
         addrs.mgmt.port(),
         addrs.mgmt,
-        addrs.peer_overlay.port()
+        addrs.peer_overlay.port(),
+        offline_dns_record()
     )
 }
 
@@ -1109,6 +1126,22 @@ fn clean_device_window_passes_and_matches_the_host_document_schema() {
     // the design §3.2 caliber is DECLARED
     let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
     assert!(notes.contains(&"counters-source=tee-fallback"), "notes: {notes:?}");
+    // v3.1 C1 dns (R-4): the shell's branch record reaches the evidence
+    // document VERBATIM through the arm options — branch, physical-attribution
+    // grounds, and no fabricated gap line when the shell recorded none. This
+    // is the same string the shell writes into its hilog marker.
+    assert!(notes.contains(&"dns-branch=default"), "notes: {notes:?}");
+    assert!(
+        notes.contains(
+            &"dns-physical-evidence=handle=101;networkCap-has-NOT_VPN=15;\
+              bearerTypes-no-BEARER_VPN=4"
+        ),
+        "notes: {notes:?}"
+    );
+    assert!(
+        !notes.iter().any(|n| n.starts_with("dns-gap=")),
+        "no gap was recorded by the shell: {notes:?}"
+    );
     // I7/A-1 (D10, §13.11): the trailing `collector{}` self-identification block
     // — and the I5 `notes[]` placeholder it REPLACED (§13.6 said I7 would).
     let collector = doc.at("collector");
@@ -1825,10 +1858,72 @@ fn a_started_connector_installs_the_production_host_with_internal_freeze_sources
     );
 }
 
+/// v3.1's dns freeze caliber, pinned from the OUTSIDE (the public mapping API
+/// the device collector's host seam actually calls): `interface_dns` never
+/// freezes, an overlay-covered `dns.servers[]` entry never freezes, the outer
+/// resolvers freeze as strict IPv4 `host:port`, and every unusable entry is
+/// recorded as a dns required-class gap instead of being skipped.
+#[test]
+fn dns_freeze_caliber_v31_holds_through_the_public_document_mapping() {
+    let status = "{\"running\":true,\"state\":\"connected\"}";
+    let network = "{\"available\":true,\"serial\":3,\"address\":\"10.77.0.1\",\
+        \"address_prefix_len\":24,\"interface_dns\":\"10.77.0.53\",\
+        \"routes\":[{\"network\":\"192.168.7.0/24\",\"is_default\":false}],\
+        \"dns\":{\"service_enable\":true,\"servers\":[{\"ip\":\"10.77.0.54\",\"port\":53},\
+        {\"ip\":\"192.168.7.1\",\"port\":53},{\"ip\":\"198.51.100.53\",\"port\":53},\
+        {\"ip\":\"2001:db8::53\",\"port\":53}]},\"peer_count\":0,\"peers\":[]}";
+    let facts = nc::process_freeze_facts(status, network).expect("documents parse");
+    let resolved: Vec<String> = facts.dns_servers.iter().map(|e| e.resolved.clone()).collect();
+    assert_eq!(
+        resolved,
+        vec!["198.51.100.53:53"],
+        "only the resolver outside the overlay coverage may freeze"
+    );
+    assert!(
+        facts.notes.contains(&"dns-overlay-internal-excluded-from-freeze=2".to_string()),
+        "{:?}",
+        facts.notes
+    );
+    assert!(
+        facts.notes.contains(&"dns-interface-dns-excluded-from-freeze=1".to_string()),
+        "{:?}",
+        facts.notes
+    );
+    assert!(
+        facts.notes.iter().any(|n| n.ends_with("|reason=ipv6")),
+        "an IPv6 resolver is a recorded dns gap (R-3 strictly IPv4): {:?}",
+        facts.notes
+    );
+    assert!(
+        facts.notes.contains(&"dns-freeze-gap=unusable-servers=1".to_string()),
+        "{:?}",
+        facts.notes
+    );
+    let frozen = nc::assemble_freezes(&nc::FreezeSources {
+        dns_servers: facts.dns_servers.clone(),
+        ..nc::FreezeSources::default()
+    });
+    let dns: Vec<_> =
+        frozen.iter().filter(|f| f.kind == Some(EndpointKind::Dns)).collect();
+    assert_eq!(dns.len(), 1, "{dns:?}");
+    assert!(dns[0].present);
+    assert_eq!(dns[0].source, nc::SOURCE_CORE_NETWORK_MAP);
+    for internal in ["10.77.0.54", "192.168.7.1", "10.77.0.53"] {
+        assert!(
+            !frozen.iter().any(|f| f.resolved.starts_with(&format!("{internal}:"))),
+            "an overlay-internal resolver must not be frozen anywhere: {internal}"
+        );
+    }
+    println!(
+        "[v3.1 dns] public mapping: frozen={resolved:?}; overlay-internal-excluded=2; \
+         interface_dns excluded; unusable=1 (ipv6); notes={:?}",
+        facts.notes
+    );
+}
+
 // ---------------------------------------------------------------------------
 // the NAPI surface with no window and no host (§6.1/§5.1)
 // ---------------------------------------------------------------------------
-
 /// The never-armed shapes (`status` → `not-armed`, `evidence` → `no-evidence`)
 /// are pinned by the crate unit test
 /// `n2h_collector::tests::the_unarmed_napi_surface_is_inert_and_idempotent`,

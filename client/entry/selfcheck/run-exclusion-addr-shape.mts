@@ -57,7 +57,11 @@ const SHIM_TYPES: Record<string, string[]> = {
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'WgFeedResult'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
-    'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint'],
+    'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
+    // v3.1 dns branch order: the erased interface names the real
+    // NetBirdConnector / NetBirdVpnExtensionAbility import alongside the values
+    'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
+    'DnsPlatformNetAddress'],
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };

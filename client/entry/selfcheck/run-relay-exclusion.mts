@@ -56,7 +56,11 @@ const SHIM_TYPES: Record<string, string[]> = {
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'WgFeedResult'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
-    'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint'],
+    'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
+    // v3.1 dns branch order: the erased interface names the real
+    // NetBirdConnector / NetBirdVpnExtensionAbility import alongside the values
+    'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
+    'DnsPlatformNetAddress'],
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };
@@ -82,6 +86,26 @@ function setStatus(status: unknown): void {
 
 function setDns(table: Record<string, string>): void {
   G['__NB_DNS'] = table;
+}
+
+// v3.1 C1 dns (R-4): the platform-network tables the functional
+// @ohos.net.connection stub reads (see relay-exclusion-hooks.mjs).
+function setNetTables(defaultId: number, all: number[],
+  caps: Record<string, unknown>, dnses: Record<string, unknown>,
+  throwing: string[] = []): void {
+  G['__NB_NET_DEFAULT_ID'] = defaultId;
+  G['__NB_NET_ALL'] = all;
+  G['__NB_NET_CAPS'] = caps;
+  G['__NB_NET_DNSES'] = dnses;
+  G['__NB_NET_THROW'] = throwing;
+}
+
+const NOT_VPN: number = 15;
+const VPN_BEARER: number = 4;
+const WIFI: number = 1;
+
+function physicalCaps(): Record<string, unknown> {
+  return { networkCap: [12, NOT_VPN], bearerTypes: [WIFI] };
 }
 
 function logs(): string[] {
@@ -320,6 +344,121 @@ try {
     linesWith('VPN_RELAY_ADVERTISED_MALFORMED|').length === 1 &&
     linesWith('VPN_ENDPOINT_EXCLUSIONS|')[0].indexOf('|relayAdvertised=false|') > 0,
     JSON.stringify(r7) + '\n' + logs().join('\n'));
+
+  // ---------------- D1…D5: v3.1 C1 dns branch order (R-4) -------------------
+  // The REAL extension derives the dns endpoints through the REAL connector
+  // glue, driven by the platform tables above — the branch order, the routes
+  // and the verbatim branch record are the shipped behavior, not a mirror.
+  setStatus(status([], null));
+  setDns({ 'mgmt.example': '203.0.113.7' });
+  setNetTables(101, [101], { 101: physicalCaps() },
+    { 101: [{ address: '192.168.7.1', family: 1, port: 53 }] });
+  G['__NB_LOG'] = [];
+  const d1 = await derive(freshAbility(mod), '203.0.113.7', null);
+  check('D1 default branch -> the physical resolver IS route-excluded (/32)',
+    d1.fatal === false && routeFor(d1.routes, '192.168.7.1', 32) !== undefined &&
+    routeFor(d1.routes, '192.168.7.1', 32)!['isExcludedRoute'] === true, JSON.stringify(d1));
+  const d1marker = linesWith('N2H_DNS_BRANCH|');
+  check('D1 marker carries the branch + the verbatim physical grounds',
+    d1marker.length === 1 && d1marker[0].indexOf('|dns-branch=default|') > 0 &&
+    d1marker[0].indexOf(
+      '|dns-physical-evidence=handle=101;networkCap-has-NOT_VPN=15;' +
+      'bearerTypes-no-BEARER_VPN=4|') > 0 &&
+    d1marker[0].indexOf('|dnsResolvers=1|') > 0 &&
+    d1marker[0].indexOf('|dnsGap=none|') > 0, d1marker.join('\n'));
+  // the same report is what the ARM hands to the core: the retained shell
+  // exclusion set carries the dns endpoint (kind/host/port/resolved)
+  const d1ability = freshAbility(mod);
+  setNetTables(101, [101], { 101: physicalCaps() },
+    { 101: [{ address: '192.168.7.1', family: 1, port: 53 }] });
+  G['__NB_LOG'] = [];
+  await derive(d1ability, '203.0.113.7', null);
+  const d1shell = (d1ability['n2hExclusionEndpoints'] as Array<Record<string, unknown>>)
+    .filter((e: Record<string, unknown>): boolean => e['kind'] === 'dns');
+  const d1report = d1ability['n2hDnsReport'] as Record<string, unknown>;
+  check('D1 the dns endpoint rides the shell exclusion set handed to the arm',
+    d1shell.length === 1 && d1shell[0]['host'] === '192.168.7.1' && d1shell[0]['port'] === 53,
+    JSON.stringify(d1shell));
+  check('D1 the retained arm report is the branch record (no gap_reason)',
+    d1report['branch'] === 'default' && d1report['gap'] === false &&
+    d1report['physicalEvidence'] ===
+    'handle=101;networkCap-has-NOT_VPN=15;bearerTypes-no-BEARER_VPN=4',
+    JSON.stringify(d1report));
+
+  // D2: step 2 does not hold (default handle has no NOT_VPN) -> all-nets
+  setNetTables(101, [101, 202], { 101: { networkCap: [12], bearerTypes: [WIFI] },
+    202: physicalCaps() }, { 101: [{ address: '203.0.113.99', family: 1, port: 53 }],
+    202: [{ address: '198.51.100.9', family: 1, port: 53 }] });
+  G['__NB_LOG'] = [];
+  const d2 = await derive(freshAbility(mod), '203.0.113.7', null);
+  const d2marker = linesWith('N2H_DNS_BRANCH|');
+  check('D2 step 2 fails -> all-nets branch, only its resolver is excluded',
+    d2.fatal === false && routeFor(d2.routes, '198.51.100.9', 32) !== undefined &&
+    routeFor(d2.routes, '203.0.113.99', 32) === undefined &&
+    d2marker[0].indexOf('|dns-branch=all-nets-filtered|') > 0 &&
+    d2marker[0].indexOf('|dns-physical-evidence=handle=202;') > 0,
+    JSON.stringify(d2) + '\n' + d2marker.join('\n'));
+
+  // D3: neither path proves physical attribution -> dns GAP (no route, no
+  // fabricated branch)
+  setNetTables(0, [], {}, {});
+  G['__NB_LOG'] = [];
+  const d3 = await derive(freshAbility(mod), '203.0.113.7', null);
+  const d3marker = linesWith('N2H_DNS_BRANCH|');
+  check('D3 no physical network -> dns gap, no dns route, no throw',
+    d3.fatal === false && d3.routes.every((r: Record<string, unknown>): boolean =>
+      r['destination'] !== '192.168.7.1') &&
+    d3marker[0].indexOf('|dns-branch=none|') > 0 &&
+    d3marker[0].indexOf('|dns-physical-evidence=none|') > 0 &&
+    d3marker[0].indexOf('|dnsGap=no-physical-net|') > 0, d3marker.join('\n'));
+
+  // D4: evidence-by-value — the default network qualifies AND the all-nets set
+  // carries another physical resolver: the DEFAULT branch wins, because the
+  // order is fixed before any data is seen (no post-hoc branch picking)
+  setNetTables(101, [101, 202], { 101: physicalCaps(), 202: physicalCaps() },
+    { 101: [{ address: '192.168.7.1', family: 1, port: 53 }],
+      202: [{ address: '198.51.100.9', family: 1, port: 53 }] });
+  G['__NB_LOG'] = [];
+  const d4 = await derive(freshAbility(mod), '203.0.113.7', null);
+  const d4marker = linesWith('N2H_DNS_BRANCH|');
+  check('D4 default branch wins even when all-nets could yield more (fixed order)',
+    routeFor(d4.routes, '192.168.7.1', 32) !== undefined &&
+    routeFor(d4.routes, '198.51.100.9', 32) === undefined &&
+    d4marker[0].indexOf('|dns-branch=default|') > 0, JSON.stringify(d4) + '\n' + d4marker.join('\n'));
+
+  // D5: a platform API error is recorded verbatim as the gap token, and the
+  // surviving branch's resolvers are still frozen
+  setNetTables(101, [202], { 202: physicalCaps() },
+    { 202: [{ address: '198.51.100.9', family: 1, port: 53 }] }, ['getDefaultNetSync']);
+  G['__NB_LOG'] = [];
+  const d5 = await derive(freshAbility(mod), '203.0.113.7', null);
+  const d5marker = linesWith('N2H_DNS_BRANCH|');
+  check('D5 API error -> api-error-code token, all-nets resolvers still excluded',
+    d5.fatal === false && routeFor(d5.routes, '198.51.100.9', 32) !== undefined &&
+    d5marker[0].indexOf('|dns-branch=all-nets-filtered|') > 0 &&
+    d5marker[0].indexOf('|dnsGap=api-error-code-2100002|') > 0,
+    JSON.stringify(d5) + '\n' + d5marker.join('\n'));
+
+  // Reset the platform tables: the cases below must start from "no default
+  // network" exactly like the pre-dns fixture did.
+  setNetTables(0, [], {}, {});
+
+  // The last hop cannot be driven host-side (it needs the native arm), so it
+  // is pinned TEXTUALLY on the byte-identical shipped source — the precedent
+  // is run-exclusion-addr-shape.mts's A5 wiring pins: the branch record the
+  // pure module returned (asserted above) is the value the arm forwards
+  // verbatim to the core, which renders it into the evidence `notes[]`.
+  const extSource: string = readFileSync(join(dir, 'NetBirdVpnExtensionAbility.ts')).toString();
+  check('arm wiring: the retained dns report is attached to the arm options verbatim',
+    extSource.indexOf('opts.dns = report;') > 0 &&
+    extSource.indexOf('branch: this.n2hDnsReport.branch,') > 0 &&
+    extSource.indexOf('physical_evidence: this.n2hDnsReport.physicalEvidence') > 0 &&
+    extSource.indexOf('report.gap_reason = this.n2hDnsReport.gapReason;') > 0,
+    'arm forwarding pin');
+  check('arm wiring: the marker format carries the verbatim token names',
+    extSource.indexOf("'N2H_DNS_BRANCH|requestId=%{public}s|dns-branch=%{public}s|'") > 0 &&
+    extSource.indexOf("'dns-physical-evidence=%{public}s|dnsResolvers=%{public}d|dnsGap=%{public}s|'")
+      > 0, 'marker pin');
 
   // Log discipline: no token/credential-shaped material in the relay logs
   // (URLs are host:port only; assert the summary line never embeds a scheme).

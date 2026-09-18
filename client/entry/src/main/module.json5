@@ -43,6 +43,21 @@
     requestPermissions: [
       {
         name: 'ohos.permission.INTERNET'
+      },
+      // N2-H v3.1 C1 dns caliber (preregistration :68, R-4): the shell-side dns
+      // freeze set is the PLATFORM DEFAULT (physical) network's resolver list,
+      // read with the synchronous @ohos.net.connection APIs getDefaultNetSync /
+      // getNetCapabilitiesSync / getConnectionPropertiesSync / getAllNetsSync
+      // (physical attribution is proven by NET_CAPABILITY_NOT_VPN being present
+      // and BEARER_VPN being absent). All four calls require
+      // ohos.permission.GET_NETWORK_INFO.
+      // Level/mode: availableLevel normal, grantMode system_grant (since API 8)
+      // — the same level and mode as the INTERNET permission above, so this
+      // needs no ACL entry in the AGC profile (unlike MANAGE_VPN, see below).
+      // Without the declaration every call throws BusinessError 201 and the
+      // derivation records a dns required-class gap instead of freezing.
+      {
+        name: 'ohos.permission.GET_NETWORK_INFO'
       }
       // NOTE (device-verified 2026-09-13/14): per-fd VpnConnection.protect()
       // performs an internal ohos.permission.MANAGE_VPN check, and that

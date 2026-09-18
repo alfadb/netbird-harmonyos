@@ -155,6 +155,136 @@ try {
     [lanEntry, { destination: '203.0.113.7', prefixLength: 32, gateway: gw, hasGateway: true,
       isDefaultRoute: false, isExcludedRoute: true }], derived);
   check('derived duplicate of existing skipped', noDup.length === 3);
+
+  // ---- v3.1 dns branch order (preregistration §2-C1 dns / R-4) --------------
+  // The ONE branch order: default network first; the all-nets filtered branch
+  // ONLY when the default network cannot prove physical attribution; anything
+  // else is a RECORDED gap (never a silent pick, never a post-hoc choice).
+  const probe = (id: number, networkCap: number[], bearerTypes: number[],
+    dnses: unknown[], capsOk = true, propertiesOk = true): unknown => ({
+    handleId: id, capsOk: capsOk, networkCap: networkCap, bearerTypes: bearerTypes,
+    propertiesOk: propertiesOk, dnses: dnses
+  });
+  const NOT_VPN: number = mod.NET_CAPABILITY_NOT_VPN;
+  const VPN_BEARER: number = mod.BEARER_VPN;
+  check('capability constants are the platform literals',
+    NOT_VPN === 15 && VPN_BEARER === 4 && mod.DNS_RESOLVER_PORT_DEFAULT === 53);
+  check('physical evidence requires the NOT_VPN capability EXPLICITLY',
+    mod.isPhysicalNetEvidence(probe(101, [12, NOT_VPN], [1], [])) &&
+    !mod.isPhysicalNetEvidence(probe(101, [12], [1], [])) &&
+    !mod.isPhysicalNetEvidence(probe(0, [NOT_VPN], [1], [])) &&
+    !mod.isPhysicalNetEvidence(probe(101, [NOT_VPN], [VPN_BEARER], [])));
+
+  // D1: step 2 holds -> the DEFAULT branch, its resolvers, verbatim markers
+  const d1 = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [12, NOT_VPN], [1],
+      [{ address: '203.0.113.53', family: 1, port: 53 }, { address: '203.0.113.54' }]),
+    allNets: [probe(202, [NOT_VPN], [1], [{ address: '198.51.100.9' }])],
+    allNetsRead: true, apiError: ''
+  });
+  check('D1 default branch taken when step 2 holds', d1.branch === 'default' && !d1.gap);
+  check('D1 resolvers are the default network\'s, IPv4 only, port defaulted',
+    deepEq(d1.endpoints, [{ kind: 'dns', host: '203.0.113.53', port: 53 },
+      { kind: 'dns', host: '203.0.113.54', port: 53 }]), JSON.stringify(d1));
+  check('D1 notes carry the branch and the verbatim grounds',
+    deepEq(d1.notes, ['dns-branch=default',
+      'dns-physical-evidence=handle=101;networkCap-has-NOT_VPN=15;' +
+      'bearerTypes-no-BEARER_VPN=4']), JSON.stringify(d1.notes));
+  check('D1 the all-nets resolvers are NOT mixed in (no branch picking)',
+    d1.endpoints.every((e: Record<string, unknown>): boolean => e['host'] !== '198.51.100.9'));
+
+  // D2: step 2 does not hold (no NOT_VPN) -> the UNIQUE all-nets branch
+  const d2 = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [12], [1], [{ address: '203.0.113.53' }]),
+    allNets: [probe(202, [12], [1], [{ address: '192.0.2.1' }]),
+      probe(303, [NOT_VPN], [1], [{ address: '198.51.100.9', family: 1, port: 5353 }])],
+    allNetsRead: true, apiError: ''
+  });
+  check('D2 step 2 fails -> all-nets filtered branch', d2.branch === 'all-nets-filtered' &&
+    !d2.gap);
+  check('D2 only the qualifying handle\'s resolvers are used',
+    deepEq(d2.endpoints, [{ kind: 'dns', host: '198.51.100.9', port: 5353 }]),
+    JSON.stringify(d2));
+  check('D2 notes name the branch and the qualifying handle verbatim',
+    deepEq(d2.notes, ['dns-branch=all-nets-filtered',
+      'dns-physical-evidence=handle=303;networkCap-has-NOT_VPN=15;' +
+      'bearerTypes-no-BEARER_VPN=4']), JSON.stringify(d2.notes));
+
+  // D2b: a VPN bearer type on the default handle disqualifies step 2 as well
+  const d2b = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [NOT_VPN], [VPN_BEARER], [{ address: '203.0.113.53' }]),
+    allNets: [probe(404, [NOT_VPN], [1], [{ address: '203.0.113.60' }])],
+    allNetsRead: true, apiError: ''
+  });
+  check('D2b bearerTypes containing BEARER_VPN disqualifies the default network',
+    d2b.branch === 'all-nets-filtered' &&
+    deepEq(d2b.endpoints, [{ kind: 'dns', host: '203.0.113.60', port: 53 }]),
+    JSON.stringify(d2b));
+
+  // D3: neither path proves physical attribution -> gap (no branch record)
+  const d3 = mod.deriveDnsEndpointExclusions({
+    defaultNet: mod.emptyDnsNetProbe(), allNets: [], allNetsRead: true, apiError: ''
+  });
+  check('D3 both paths fail -> dns gap with no branch', d3.branch === 'none' && d3.gap &&
+    d3.gapReason === 'no-physical-net' && d3.endpoints.length === 0, JSON.stringify(d3));
+  check('D3 the gap is a verbatim note',
+    deepEq(d3.notes, ['dns-branch=none', 'dns-physical-evidence=none',
+      'dns-gap=no-physical-net']), JSON.stringify(d3.notes));
+
+  // D4: empty resolver list on the chosen branch -> gap, branch still recorded
+  const d4 = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [NOT_VPN], [1], []), allNets: [], allNetsRead: false, apiError: ''
+  });
+  check('D4 empty dnses -> dnses-empty gap with the branch recorded',
+    d4.branch === 'default' && d4.gap && d4.gapReason === 'dnses-empty' &&
+    deepEq(d4.notes, ['dns-branch=default',
+      'dns-physical-evidence=handle=101;networkCap-has-NOT_VPN=15;' +
+      'bearerTypes-no-BEARER_VPN=4', 'dns-gap=dnses-empty']), JSON.stringify(d4));
+
+  // D5: R-3 is strictly IPv4 — an IPv6 resolver is a gap, never a /128 freeze
+  const d5 = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [NOT_VPN], [1],
+      [{ address: '2001:db8::53', family: 2 }, { address: '198.51.100.9' }]),
+    allNets: [], allNetsRead: false, apiError: ''
+  });
+  check('D5 IPv6 resolver -> recorded gap, usable IPv4 resolver kept',
+    d5.gap && d5.gapReason === 'dnses-not-ipv4' &&
+    deepEq(d5.endpoints, [{ kind: 'dns', host: '198.51.100.9', port: 53 }]),
+    JSON.stringify(d5));
+  const d5b = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [NOT_VPN], [1], [{ address: '2001:db8::53', family: 2 }]),
+    allNets: [], allNetsRead: false, apiError: ''
+  });
+  check('D5b IPv6-only -> gap with no endpoints',
+    d5b.gap && d5b.gapReason === 'dnses-not-ipv4' && d5b.endpoints.length === 0,
+    JSON.stringify(d5b));
+
+  // D6: an API error is preserved verbatim (and outranks the other reasons)
+  const d6 = mod.deriveDnsEndpointExclusions({
+    defaultNet: mod.emptyDnsNetProbe(),
+    allNets: [probe(505, [NOT_VPN], [1], [{ address: '198.51.100.9' }])],
+    allNetsRead: true, apiError: 'api-error-code-201'
+  });
+  check('D6 api error -> gap token carried verbatim, resolvers still frozen',
+    d6.gap && d6.gapReason === 'api-error-code-201' && d6.branch === 'all-nets-filtered' &&
+    deepEq(d6.endpoints, [{ kind: 'dns', host: '198.51.100.9', port: 53 }]),
+    JSON.stringify(d6));
+
+  // D7: an unreadable properties leg is a gap too (never an invented list)
+  const d7 = mod.deriveDnsEndpointExclusions({
+    defaultNet: probe(101, [NOT_VPN], [1], [], true, false),
+    allNets: [], allNetsRead: false, apiError: ''
+  });
+  check('D7 unread resolver properties -> api-error gap, no endpoints',
+    d7.gap && d7.gapReason === 'api-error' && d7.endpoints.length === 0 &&
+    d7.branch === 'default', JSON.stringify(d7));
+  const d7b = mod.deriveDnsEndpointExclusions({
+    defaultNet: mod.emptyDnsNetProbe(), allNets: [], allNetsRead: false, apiError: ''
+  });
+  check('D7b no qualifying network at all -> no-physical-net gap (a failed all-nets read ' +
+    'is reported by the caller as apiError, see D6)',
+    d7b.gap && d7b.gapReason === 'no-physical-net' && d7b.branch === 'none',
+    JSON.stringify(d7b));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

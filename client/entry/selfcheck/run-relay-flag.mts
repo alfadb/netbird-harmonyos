@@ -28,12 +28,25 @@ import { register } from 'node:module';
 register(new URL('./relay-flag-hooks.mjs', import.meta.url).href);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const REAL = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability',
-  'NetBirdConnector.ets');
+const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
+const REAL = join(REAL_DIR, 'NetBirdConnector.ets');
 
 const fixtureDir: string = mkdtempSync(join(tmpdir(), 'nb-connector-relay-'));
 const fixture: string = join(fixtureDir, 'NetBirdConnector.ts');
 writeFileSync(fixture, readFileSync(REAL)); // byte-identical copy of the real module
+// The real module now VALUE-imports its sibling NetBirdEndpointExclusion (the
+// v3.1 dns branch order), so the harness stages that file byte-identically as
+// well and writes the linker dep file relay-flag-hooks.mjs redirects to: the
+// real module plus shim consts for the interface names node's type stripping
+// erases.
+writeFileSync(join(fixtureDir, 'NetBirdEndpointExclusion.ts'),
+  readFileSync(join(REAL_DIR, 'NetBirdEndpointExclusion.ets')));
+writeFileSync(join(fixtureDir, 'NetBirdEndpointExclusion.dep.ts'),
+  'export * from \'./NetBirdEndpointExclusion.ts\';\n' +
+  'export const DnsDerivationInput = undefined;\n' +
+  'export const DnsDerivationResult = undefined;\n' +
+  'export const DnsNetProbe = undefined;\n' +
+  'export const DnsPlatformNetAddress = undefined;\n');
 
 let passed: number = 0;
 let failedCount: number = 0;

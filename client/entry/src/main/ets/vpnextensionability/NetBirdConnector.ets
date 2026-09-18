@@ -4,6 +4,9 @@ import connection from '@ohos.net.connection';
 import resourceManager from '@ohos.resourceManager';
 import util from '@ohos.util';
 import core from 'libnetbird_core.so';
+import { DnsDerivationInput, DnsDerivationResult, DnsNetProbe, DnsPlatformNetAddress,
+  deriveDnsEndpointExclusions, emptyDnsNetProbe, isPhysicalNetEvidence
+} from './NetBirdEndpointExclusion';
 
 // N3-6: ArkTS-side wrapper around the synchronous connector_* NAPI exports
 // of libnetbird_core.so (JSON string in / JSON string out; no callbacks).
@@ -34,6 +37,12 @@ import core from 'libnetbird_core.so';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
+
+// The shape of a platform `BusinessError` (a code-carrying Error) as far as
+// this module reads it — one numeric field, so no extra @ohos.base import.
+interface PlatformBusinessError extends Error {
+  code?: number;
+}
 
 // Default file names under filesDir.
 export const DEFAULT_SETUP_KEY_FILE: string = 'netbird-setup-key';
@@ -771,6 +780,149 @@ export async function resolveExclusionEndpointIp(host: string, timeoutMs: number
     }, timeoutMs);
   });
   return Promise.race([resolution, box]);
+}
+
+// N2-H v3.1 C1 dns: gather the PLATFORM FACTS the dns freeze caliber needs,
+// then let the PURE module (NetBirdEndpointExclusion.deriveDnsEndpointExclusions)
+// apply the preregistration's single branch order. This function performs the
+// four synchronous `@ohos.net.connection` reads and NOTHING else:
+//
+//   step 1  getDefaultNetSync()             -> the default handle (netId 0 = none)
+//   step 2  getNetCapabilitiesSync(handle)  -> NET_CAPABILITY_NOT_VPN present?
+//           BEARER_VPN absent?  When both hold, THIS handle's
+//           getConnectionPropertiesSync(handle).dnses[] is read and the
+//           all-nets read below is SKIPPED entirely (the branch order is not
+//           a choice to be made after seeing the data).
+//   step 3  only when step 2 did not hold: getAllNetsSync() and the SAME
+//           predicate per handle
+//   step 4  an API error is captured as an `api-error…` token (the platform
+//           throws BusinessError 201/2100002/2100003); the pure module turns
+//           it — like every empty value — into a recorded dns gap. A gap is
+//           NOT fatal in this increment (the fatal widening of the five
+//           required kinds is a separate increment).
+//
+// Requires `ohos.permission.GET_NETWORK_INFO` (module.json5, normal /
+// system_grant) — without it every call throws 201 and the derivation records
+// the gap instead of freezing anything.
+export function derivePlatformDnsEndpoints(): DnsDerivationResult {
+  const input: DnsDerivationInput = {
+    defaultNet: emptyDnsNetProbe(),
+    allNets: [],
+    allNetsRead: false,
+    apiError: ''
+  };
+  let defaultHandle: connection.NetHandle | null = null;
+  try {
+    const handle: connection.NetHandle = connection.getDefaultNetSync();
+    if (handle !== undefined && handle !== null && handle.netId !== 0) {
+      defaultHandle = handle;
+      input.defaultNet.handleId = handle.netId;
+    }
+  } catch (error) {
+    input.apiError = dnsApiErrorToken(error as Error);
+  }
+  if (defaultHandle !== null) {
+    try {
+      const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(defaultHandle);
+      input.defaultNet.networkCap = caps.networkCap !== undefined && caps.networkCap !== null
+        ? caps.networkCap
+        : [];
+      input.defaultNet.bearerTypes = caps.bearerTypes !== undefined && caps.bearerTypes !== null
+        ? caps.bearerTypes
+        : [];
+      input.defaultNet.capsOk = true;
+    } catch (error) {
+      if (input.apiError.length === 0) {
+        input.apiError = dnsApiErrorToken(error as Error);
+      }
+    }
+    if (isPhysicalNetEvidence(input.defaultNet)) {
+      readDnsResolvers(defaultHandle, input.defaultNet);
+      return deriveDnsEndpointExclusions(input); // step 2 held: the default branch
+    }
+  }
+  // step 3 — reached ONLY because step 2 did not hold
+  let handles: connection.NetHandle[] = [];
+  try {
+    const all: connection.NetHandle[] = connection.getAllNetsSync();
+    handles = all !== undefined && all !== null ? all : [];
+    input.allNetsRead = true;
+  } catch (error) {
+    if (input.apiError.length === 0) {
+      input.apiError = dnsApiErrorToken(error as Error);
+    }
+    return deriveDnsEndpointExclusions(input);
+  }
+  for (let i = 0; i < handles.length; i++) {
+    const handle: connection.NetHandle = handles[i];
+    if (handle === undefined || handle === null || handle.netId === 0) {
+      continue;
+    }
+    const probe: DnsNetProbe = emptyDnsNetProbe();
+    probe.handleId = handle.netId;
+    try {
+      const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+      probe.networkCap = caps.networkCap !== undefined && caps.networkCap !== null
+        ? caps.networkCap
+        : [];
+      probe.bearerTypes = caps.bearerTypes !== undefined && caps.bearerTypes !== null
+        ? caps.bearerTypes
+        : [];
+      probe.capsOk = true;
+    } catch (error) {
+      if (input.apiError.length === 0) {
+        input.apiError = dnsApiErrorToken(error as Error);
+      }
+      continue;
+    }
+    if (isPhysicalNetEvidence(probe)) {
+      readDnsResolvers(handle, probe);
+    }
+    input.allNets.push(probe);
+  }
+  return deriveDnsEndpointExclusions(input);
+}
+
+// Read one handle's `dnses[]` into the probe (step 2/step 3 body). A read
+// failure leaves `propertiesOk=false`, which the pure module records as a
+// gap — the resolver list of a network that could not be read is never
+// invented (and never inherited from another network).
+function readDnsResolvers(handle: connection.NetHandle, probe: DnsNetProbe): void {
+  try {
+    const properties: connection.ConnectionProperties =
+      connection.getConnectionPropertiesSync(handle);
+    const raw: connection.NetAddress[] =
+      properties !== undefined && properties !== null && properties.dnses !== undefined &&
+        properties.dnses !== null
+        ? properties.dnses
+        : [];
+    const dnses: DnsPlatformNetAddress[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const entry: connection.NetAddress = raw[i];
+      dnses.push({
+        address: entry.address,
+        family: entry.family,
+        port: entry.port
+      });
+    }
+    probe.dnses = dnses;
+    probe.propertiesOk = true;
+  } catch (error) {
+    probe.propertiesOk = false;
+  }
+}
+
+// Stable, notes-safe token for a platform API failure: the BusinessError code
+// when the platform reported one (201 permission denied, 2100002/2100003
+// service errors), else a bare `api-error`. No error text ever enters the
+// evidence document (log discipline; the token must stay in the frozen
+// character shape the core validates).
+function dnsApiErrorToken(error: Error): string {
+  const code: number | undefined = (error as PlatformBusinessError).code;
+  if (code !== undefined && code !== null && Number.isFinite(code)) {
+    return `api-error-code-${code}`;
+  }
+  return 'api-error';
 }
 
 // Lenient parse of the status document's `relay_advertised` sibling section

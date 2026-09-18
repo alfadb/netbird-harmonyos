@@ -21,19 +21,67 @@
 //                                   is ever rewritten.
 const STUB = 'data:text/javascript,export%20default%20%7B%7D%3B';
 
-const STUBBED = new Set([
-  '@ohos.file.fs',
-  '@ohos.hilog',
-  '@ohos.net.connection',
-  '@ohos.net.vpnExtension',
-  '@ohos.resourceManager',
-  '@ohos.util',
-  'libnetbird_core.so'
+// @ohos.net.connection is a FUNCTIONAL stub (not the empty one): the real
+// NetBirdConnector's v3.1 dns caliber calls four synchronous network APIs,
+// and they must answer with the per-test tables on globalThis instead of
+// crashing the fixture (see relay-exclusion-hooks.mjs for the table names).
+const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
+  'function netG() { return globalThis; }\n' +
+  'function netThrowing(name) {\n' +
+  '  const t = netG().__NB_NET_THROW;\n' +
+  '  return Array.isArray(t) && t.indexOf(name) >= 0;\n' +
+  '}\n' +
+  'function netBoom(name) {\n' +
+  '  const e = new Error("net-api:" + name);\n' +
+  '  e.code = 2100002;\n' +
+  '  throw e;\n' +
+  '}\n' +
+  'function netCaps(id) {\n' +
+  '  const t = netG().__NB_NET_CAPS || {};\n' +
+  '  const c = t[id];\n' +
+  '  return c === undefined || c === null ? { networkCap: [], bearerTypes: [] } : c;\n' +
+  '}\n' +
+  'function netDnses(id) {\n' +
+  '  const t = netG().__NB_NET_DNSES || {};\n' +
+  '  const d = t[id];\n' +
+  '  return d === undefined || d === null ? [] : d;\n' +
+  '}\n' +
+  'export default {\n' +
+  '  getAddressesByName: (host) => Promise.reject(new Error("dns-failed")),\n' +
+  '  getDefaultNetSync: () => {\n' +
+  '    if (netThrowing("getDefaultNetSync")) { netBoom("getDefaultNetSync"); }\n' +
+  '    return { netId: netG().__NB_NET_DEFAULT_ID || 0 };\n' +
+  '  },\n' +
+  '  getNetCapabilitiesSync: (handle) => {\n' +
+  '    if (netThrowing("getNetCapabilitiesSync")) { netBoom("getNetCapabilitiesSync"); }\n' +
+  '    return netCaps(handle.netId);\n' +
+  '  },\n' +
+  '  getConnectionPropertiesSync: (handle) => {\n' +
+  '    if (netThrowing("getConnectionPropertiesSync")) { netBoom("getConnectionPropertiesSync"); }\n' +
+  '    return { interfaceName: "wlan0", dnses: netDnses(handle.netId) };\n' +
+  '  },\n' +
+  '  getAllNetsSync: () => {\n' +
+  '    if (netThrowing("getAllNetsSync")) { netBoom("getAllNetsSync"); }\n' +
+  '    const all = netG().__NB_NET_ALL || [];\n' +
+  '    const out = [];\n' +
+  '    for (let i = 0; i < all.length; i++) { out.push({ netId: all[i] }); }\n' +
+  '    return out;\n' +
+  '  }\n' +
+  '};');
+
+const STUBBED = new Map([
+  ['@ohos.file.fs', STUB],
+  ['@ohos.hilog', STUB],
+  ['@ohos.net.connection', CONNECTION],
+  ['@ohos.net.vpnExtension', STUB],
+  ['@ohos.resourceManager', STUB],
+  ['@ohos.util', STUB],
+  ['libnetbird_core.so', STUB]
 ]);
 
 export function resolve(specifier, context, next) {
   if (STUBBED.has(specifier)) {
-    return { url: STUB, shortCircuit: true };
+    return { url: STUBBED.get(specifier), shortCircuit: true };
   }
   if (context.parentURL === undefined) {
     return next(specifier, context);

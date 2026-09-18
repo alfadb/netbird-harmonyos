@@ -11,7 +11,18 @@
 //                       run against the REAL hilog call sites)
 //   - @ohos.net.connection -> getAddressesByName reads the per-test fake DNS
 //                       table globalThis.__NB_DNS (deterministic, offline;
-//                       a missing host rejects exactly like the platform)
+//                       a missing host rejects exactly like the platform);
+//                       the v3.1 dns caliber's four synchronous network APIs
+//                       (getDefaultNetSync / getNetCapabilitiesSync /
+//                       getConnectionPropertiesSync / getAllNetsSync) read the
+//                       per-test tables below, so the REAL branch order can be
+//                       driven end-to-end:
+//                         globalThis.__NB_NET_DEFAULT_ID  default handle netId (0 = none)
+//                         globalThis.__NB_NET_ALL         array of netIds for getAllNetsSync
+//                         globalThis.__NB_NET_CAPS        { <netId>: {networkCap:[], bearerTypes:[]} }
+//                         globalThis.__NB_NET_DNSES       { <netId>: [{address,family,port}] }
+//                         globalThis.__NB_NET_THROW       array of method names to throw for
+//                                                         (BusinessError-shaped, code 2100002)
 //   - libnetbird_core.so -> connector_status() returns the per-test fake
 //                       status JSON globalThis.__NB_FAKE_STATUS
 //   - @ohos.app.ability.VpnExtensionAbility -> a bare base class so the real
@@ -43,6 +54,26 @@ const HILOG = 'data:text/javascript,' + encodeURIComponent(
   ' error: rec("E") };');
 
 const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
+  'function netG() { return globalThis; }\n' +
+  'function netThrowing(name) {\n' +
+  '  const t = netG().__NB_NET_THROW;\n' +
+  '  return Array.isArray(t) && t.indexOf(name) >= 0;\n' +
+  '}\n' +
+  'function netBoom(name) {\n' +
+  '  const e = new Error("net-api:" + name);\n' +
+  '  e.code = 2100002;\n' +
+  '  throw e;\n' +
+  '}\n' +
+  'function netCaps(id) {\n' +
+  '  const t = netG().__NB_NET_CAPS || {};\n' +
+  '  const c = t[id];\n' +
+  '  return c === undefined || c === null ? { networkCap: [], bearerTypes: [] } : c;\n' +
+  '}\n' +
+  'function netDnses(id) {\n' +
+  '  const t = netG().__NB_NET_DNSES || {};\n' +
+  '  const d = t[id];\n' +
+  '  return d === undefined || d === null ? [] : d;\n' +
+  '}\n' +
   'export default {\n' +
   '  getAddressesByName: (host) => {\n' +
   '    const t = globalThis.__NB_DNS || {};\n' +
@@ -50,6 +81,25 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '    return v !== undefined && v !== null\n' +
   '      ? Promise.resolve([{ address: v }])\n' +
   '      : Promise.reject(new Error("dns-failed"));\n' +
+  '  },\n' +
+  '  getDefaultNetSync: () => {\n' +
+  '    if (netThrowing("getDefaultNetSync")) { netBoom("getDefaultNetSync"); }\n' +
+  '    return { netId: netG().__NB_NET_DEFAULT_ID || 0 };\n' +
+  '  },\n' +
+  '  getNetCapabilitiesSync: (handle) => {\n' +
+  '    if (netThrowing("getNetCapabilitiesSync")) { netBoom("getNetCapabilitiesSync"); }\n' +
+  '    return netCaps(handle.netId);\n' +
+  '  },\n' +
+  '  getConnectionPropertiesSync: (handle) => {\n' +
+  '    if (netThrowing("getConnectionPropertiesSync")) { netBoom("getConnectionPropertiesSync"); }\n' +
+  '    return { interfaceName: "wlan0", dnses: netDnses(handle.netId) };\n' +
+  '  },\n' +
+  '  getAllNetsSync: () => {\n' +
+  '    if (netThrowing("getAllNetsSync")) { netBoom("getAllNetsSync"); }\n' +
+  '    const all = netG().__NB_NET_ALL || [];\n' +
+  '    const out = [];\n' +
+  '    for (let i = 0; i < all.length; i++) { out.push({ netId: all[i] }); }\n' +
+  '    return out;\n' +
   '  }\n' +
   '};');
 

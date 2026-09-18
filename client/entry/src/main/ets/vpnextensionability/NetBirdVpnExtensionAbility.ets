@@ -9,6 +9,7 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, formatRouteTable, formatRouteViolation,
   validateRouteEntries } from './NetBirdRouteValidation';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
+  DnsDerivationResult,
   RelayEndpoint, buildExcludedRouteEntries, isExclusionFailClosed, parseRelayUrl,
   stripDialPort
 } from './NetBirdEndpointExclusion';
@@ -20,7 +21,7 @@ import {
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
-  countPemCertificates,
+  countPemCertificates, derivePlatformDnsEndpoints,
   formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
   parseSignalEndpoint,
@@ -127,6 +128,16 @@ interface N2hArmFileOptions {
 }
 
 // N2-H I5: the `n2h_collector_arm` options document (§5.1).
+// N2-H v3.1 C1 dns (R-4): the branch record the arm hands to the core, which
+// renders it into the evidence document's `notes[]` verbatim. `branch` is one
+// of `default` / `all-nets-filtered` / `none`; `gap_reason` is present only
+// when the shell recorded a dns required-class gap.
+interface N2hDnsArmReport {
+  branch: string;
+  physical_evidence: string;
+  gap_reason?: string;
+}
+
 interface N2hArmOptions {
   shell_exclusions: N2hShellExclusion[];
   posctl_port: number;
@@ -134,6 +145,9 @@ interface N2hArmOptions {
   // §13.10: only set when the control file carried the key (an absent key must
   // stay absent — the two cases have different, documented semantics).
   peer_b2a_probe_id?: string;
+  // v3.1 C1 dns: the branch record of this session's derivation (always set —
+  // a missing record is a dns gap for the judge).
+  dns?: N2hDnsArmReport;
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -300,6 +314,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // exists (§6.1), and the arm action itself is never gate evidence.
   private n2hExclusionEndpoints: ExclusionEndpoint[] = [];
   private n2hExclusionResolutions: EndpointResolution[] = [];
+  // N2-H v3.1 C1 dns (R-4): the branch record of THIS session's dns
+  // derivation (branch token + verbatim physical-attribution grounds + the
+  // gap the shell recorded, if any). It is the shell half of the `notes[]`
+  // lines the evidence document must carry, so the arm hands it to the core
+  // verbatim; nothing is read from it unless the arm control file exists.
+  private n2hDnsReport: DnsDerivationResult | null = null;
   // N2-H I5 (§5.3-1): the one-shot latch of the control-file check, so the
   // watcher attempts the arm at most once per ability instance.
   private n2hArmAttempted: boolean = false;
@@ -909,6 +929,32 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       endpoints.push({ kind: 'relay', host: parsed.host, port: parsed.port });
     }
 
+    // N2-H v3.1 C1 dns (§2-C1 dns caliber / R-4): the 7th frozen kind's SHELL
+    // half is the PLATFORM default (physical) network's resolver set — never
+    // the tunnel's own DNS. The branch order is pinned by the preregistration
+    // and implemented in the pure module (`deriveDnsEndpointExclusions`); this
+    // call site only (a) collects the platform facts and (b) records the
+    // verbatim branch record. The resolvers are ordinary exclusion endpoints
+    // (IPv4 literals — the fresh-resolution pass below short-circuits a
+    // literal, so no DNS leg is ever pulled for them).
+    //
+    // A dns GAP (API error / empty / unprovable physical attribution) is
+    // recorded here and is NOT fatal in this increment: widening fail-closed
+    // to all five required kinds is a separate, later increment.
+    const dns: DnsDerivationResult = derivePlatformDnsEndpoints();
+    this.n2hDnsReport = dns;
+    for (let i = 0; i < dns.endpoints.length; i++) {
+      endpoints.push(dns.endpoints[i]);
+    }
+    // the marker carries the SAME verbatim tokens as the evidence `notes[]`
+    // (a reviewer compares log and document line by line)
+    hilog.info(DOMAIN, TAG,
+      'N2H_DNS_BRANCH|requestId=%{public}s|dns-branch=%{public}s|' +
+      'dns-physical-evidence=%{public}s|dnsResolvers=%{public}d|dnsGap=%{public}s|' +
+      'diag=true|is_evidence=false',
+      this.requestId, dns.branch, dns.physicalEvidence, dns.endpoints.length,
+      dns.gap ? dns.gapReason : 'none');
+
     // FRESH build-time resolutions (literals short-circuit DNS; IPv4
     // preferred, IPv6 accepted as a /128 freeze). Failures map to '' here —
     // severity is decided ONCE on the merged resolution list.
@@ -1039,6 +1085,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       posctl_port: posctlPort,
       probe_wait_ms: probeWaitMs
     };
+    // v3.1 C1 dns (R-4): the branch record of this session's derivation rides
+    // the arm verbatim (the core validates the frozen token shapes and renders
+    // the three `notes[]` lines). It is ALWAYS present when a derivation ran —
+    // an absent record would be a dns gap, so the shell never omits it.
+    if (this.n2hDnsReport !== null) {
+      const report: N2hDnsArmReport = {
+        branch: this.n2hDnsReport.branch,
+        physical_evidence: this.n2hDnsReport.physicalEvidence
+      };
+      if (this.n2hDnsReport.gap) {
+        report.gap_reason = this.n2hDnsReport.gapReason;
+      }
+      opts.dns = report;
+    }
     // §13.10: the operator's peer announcement rides the same control file. The
     // key is forwarded ONLY when the file carried it — an absent key must stay
     // absent so the core keeps the documented reasoned-gap semantics; a present
