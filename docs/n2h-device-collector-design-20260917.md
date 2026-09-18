@@ -828,5 +828,151 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
 - **(d) hilog 丢行**无法由实现侧防止：skip 行是单行、无基数可对账（与既有诊断行同级），其缺失只能与 (a) 的到达打点配合判读。
 - **(e) 证据地位**：skip 行恒带 `diag=true|is_evidence=false`——它是诊断可观测性，**不是**判定证据，不改变 §6.1「默认关闭、不进产品面」与「arm 动作本身从不作 gate evidence」的纪律。
 
+### 13.17 ⑭ I6b 增量落地：`nbinterop n2h-peer --posctl-id <固定 marker>`
+
+> 本节**只追加**，不改写 §0–§13.16 任何正文（本增量对本文档的唯一改动就是本节）。基线：工作树 HEAD `4a0162a`（I5a 已提交，干净）+ 本节未提交改动；下列 file:line 为落地后工作树实读。范围＝`client/core/src/bin/nbinterop.rs` 一个文件（+ 本节）：新增一个 CLI 选项及其校验/选择逻辑、5 条内嵌单元测试。**未触碰**：`client/core/src/n2h_collector.rs`（既有行为与测试逐字未改，只**调用**其既有公开判定 `announced_b2a_marker`）、`connector.rs`、ets 侧任何文件、`/tmp/n2h-frozen/`。
+
+**① 动机（2026-09-18 真机 dry-run 实测的 b2a 缺口）**
+
+- **事实**：I6 的 b2a marker 是**对端进程启动时生成的一次性 nonce**（§13.8 marker 通道：`N2hPeerState::new` → `n2h::fresh_nonce_hex`），设备侧的 arm 选项 `peer_b2a_probe_id` 只能从对端**启动公告行**逐字抄进 arm 控制文件（runbook §9.4 → §9.5，顺序亦被规定为「先起对端、再写控制文件」）。
+- **后果**：对端因 `--timeout` 到期退出（`--timeout` 是 §13.8 登记的**停止形态**，到期 exit 0）后重启 ⇒ nonce 必变 ⇒ **设备在案 marker 陈旧**：设备 to-os tee 仍按旧 marker 注册，而对端发的是新 marker ⇒ b2a 正控腿**在开窗前就被注定为缺口**。2026-09-18 真机实测即为此形态，且当轮**推送池已耗尽**、arm 文件无法重推 ⇒ 无法用「重推 arm」补救。
+- **本增量**：让调用方**显式指定** marker，使「设备在案 marker」与「对端本轮 marker」不再依赖二者落在同一个进程生命周期内。
+
+**② 选项形态与校验规则（逐字）**
+
+- 形态：`--posctl-id <id>`，值必须逐字为 `N2H-posctl-<24 hex>`（合法例：`N2H-posctl-ffeeddccbbaa998877665544`）。
+- **校验复用设备侧同一个判定**：`nc::announced_b2a_marker`（`n2h_collector.rs:1358`，即设备 arm 选项 `peer_b2a_probe_id` 的接受测试；它自身走 I6 的 `posctl_marker`，`:1336`）⇒ CLI 接受的 marker **不可能**是设备会拒绝归因的形态，也不会长出第二种被接受的形式（§13.10② 的判定与 CLI 侧同源）。
+- 拒绝域（`bin/nbinterop.rs:745-758`）：错 kind token（如 `N2H-peer-…`）、非 24 hex（23/25 位、非 hex 字符）、缺 `N2H-` 前缀、带 `|positive-control` 载荷形态、空串、尾随字节。
+- **不合法 ⇒ 启动即失败**（实测逐字）：stderr 首行 `error: --posctl-id '<v>': peer_b2a_probe_id is not an N2H-posctl-<24 hex> marker (got '<v>')`，其后为完整 `USAGE`；**exit 2**（`hs::EXIT_USAGE`）、stdout 零字节——**绝不静默改用随机 nonce**（那会以健康运行的形态公告一个设备在案文件里没有的 marker）。
+- **合法 ⇒ 全程同一 marker**：marker 只在**唯一一处**解析（`n2h_peer_marker`，`:517`，由 `N2hPeerState::new` `:1230` 调用），启动公告行与每一条 `n2h-peer-stats` 行都读同一个 `state.marker`（既有行结构/字段序**逐字未改**）。
+- **未提供 ⇒ 既有行为不变**：`posctl_id: None` ⇒ 仍是一进程一个 fresh nonce（`n2h::fresh_nonce_hex` + `n2h::probe_id`），两次进程启动必不同（实测）。
+- 第二道闸（**同一**判定，不新增接受形态）：`N2hPeerState::new` 经 `n2h_peer_marker` 再校验一次 ⇒ 任何入口（含测试直接构造 opts）都无法把未校验的 marker 带进运行态。
+
+**③ 可发现性登记（该 bin 无 `--help`，沿既有形态）**
+
+- 模块文档 flags 清单：`bin/nbinterop.rs:96-102`；n2h-peer 子命令说明 `:44-46`（固定 marker 与「peer 重启后仍有效」）。
+- `USAGE` 常量三处：两条 n2h-peer 用法行 `:291`/`:294`、n2h-peer 选项块 `:315-324`（含「未提供＝I6 原行为」「非法 exit 2，绝不回落随机 nonce」）。
+- 同族误用文案 `:1709-1712`：`--overlay/--echo-port/--posctl-interval/--posctl-id/--loopback`。
+
+**④ 测试（`#[test]` 内嵌于既有 `n2h_peer_tests`，不新增测试文件）**
+
+- 5 条新测试（`:2358` 常量 + `:2393-2529`）：
+  - ① **合法**：`opts.posctl_id` / `state.marker` / 公告行 / stats 行四处一致且等于固定值，设备侧判定 `announced_b2a_marker` 接受；并带着该 opts **真跑** `run_n2h_peer_loopback`（对拍 ok、exit 0）。
+  - ② **非法**：8 种形态 × 两条路径（`parse_flags` 与 CLI 入口 `cmd_n2h_peer --loopback --posctl-id`）均 exit 2；手工构造的非法 opts 亦进不了 `N2hPeerState`。
+  - ③ **缺省**：形态正确（`N2H-posctl-` + 24 hex）、两次解析互不相同、且不等于固定值。
+  - ④ **线级证据**：`n2h_peer_send_b2a` 真正写进 TUN 替身的那一帧，其 payload 逐字等于 `nc::posctl_payload(<固定值>)`（证明固定值不只是打印）。
+  - ⑤ **CLI 入口**：`cmd_n2h_peer --loopback --posctl-id <固定值>` 返回 exit 0（该选项带着完整对拍跑通）。
+- bin 计数：`cargo test --offline --locked --features cli --bin nbinterop` → **15 passed / 0 failed / 0 ignored**（`#[test]` 数：HEAD `4a0162a` 为 10，现为 15，+5）。
+
+**⑤ 实跑逐字样例（真实二进制，本节工作树）**
+
+```text
+$ target/debug/nbinterop n2h-peer --loopback --posctl-id N2H-posctl-ffeeddccbbaa998877665544 \
+      --posctl-interval 300 --timeout 3          # exit 0
+# stdout（唯一一行 JSON 报告）
+{"tool":"nbinterop","check":"n2h-peer-loopback","ok":true,"b2a_observed":true,"a2b_echo_observed":true,"echo_verbatim":true,"echo_tuple_swapped":true,"non_posctl_echo":false,"frames_seen":3}
+# stderr（逐字；1 条公告行 + 3 条 stats 行，此处各列一条）
+nbinterop: n2h-peer|b2a_probe_id=N2H-posctl-ffeeddccbbaa998877665544|b2a_dst=127.0.0.1:40001|echo_port=40001|posctl_interval_ms=300|loopback=true
+nbinterop: n2h-peer-stats|b2a_probe_id=N2H-posctl-ffeeddccbbaa998877665544|b2a_sent=1|a2b_seen=0|echoes_sent=0|echoes_skipped=0|last_a2b_from=na|own_overlay=127.0.0.1:40001|unknown_peer_drops=na|unknown_peer_drops_delta=na
+```
+
+- 全部 stderr 行提取 `b2a_probe_id=` 取值后 `sort -u` 的**集合大小 = 1**（恒为固定值）：公告行与每一条 stats 行同值。
+- **非法实跑**：`--posctl-id N2H-posctl-zzz` ⇒ exit 2、stdout 0 字节、stderr 首行即 ② 的 error 行（后接 117 行 usage）。
+- **缺省实跑**（对照，证明既有行为未变）：连跑两次公告行分别为 `b2a_probe_id=N2H-posctl-7623b8c8555ebfb2c445ac58` 与 `b2a_probe_id=N2H-posctl-d2b669e527ab6a8ef56d349d`（互不相同；每次运行都是新 nonce，故重放该命令必然得到另一对值）。
+
+**⑥ 下一轮 AUTH 可据此做的安排（不改本轮授权面，仅供签发参考）**
+
+- **arm 文件推送与对端启动可排进同一窗口 / 固定 marker**：有了 `--posctl-id`，「设备在案 marker」与「对端 marker」**不再需要同一进程生命周期**——下一轮可 ① 由人类/AUTH 逐字给出（或沿用上一轮已登记值）一个**固定 marker**；② 把 **arm 文件推送与对端启动排在同一窗口**内完成，先后顺序不再是硬要求（runbook §9.4 的「先起对端、再写控制文件」在固定 marker 下退化为「公告行仍应采集，作运维侧收执与逐字核对」）；③ 对端在窗口内因 `--timeout` 退出并重启**不再使设备在案 marker 陈旧**——这正是本轮实测缺口的直接解法。
+- **AUTH `allowed` 登记**：§6.4 第 6 条（主机侧 `nbinterop n2h-peer` 的启动与停止）在下一轮应把逐字形态补为含 `[--posctl-id <id>]` 的形式，并**逐字给出该固定 marker 值**；本轮授权面**不含**该选项 ⇒ **未获新签发前不得带 `--posctl-id` 执行设备轮命令**（本增量只提供能力，不改变授权面，也不改 §6.4 正文）。
+- **残余（如实，逐条）**：
+  - (a) **唯一性由调用方负责**：CLI 只校验形态，不校验该值是否与本轮其他对端/历史轮次重复；重复使用同一 marker 会让设备侧无法按 marker 区分轮次（判定侧须以窗口/时间界定）。
+  - (b) **形态判定不等于设备在案**：本选项不证明设备 arm 文件真的写了该值——b2a 是否命中仍以设备文档 `observed` 与 arm 行 `peerB2aProbeId=` 为准。
+  - (c) **大写十六进制（`A-F`）被接受**：判定是 `is_ascii_hexdigit`（设备侧同一函数），故 `N2H-posctl-FFEEDDCCBBAA998877665544` 在 CLI 与设备**两侧同样被接受**；若要求小写须另立判定并**两侧同步**——本增量**不**单方面在 CLI 收紧（否则会出现设备接受而 CLI 拒绝的不对称）。
+  - (d) **fresh nonce 的原始风险仍在缺省路径**：不带 `--posctl-id` 时，重启换 marker 的问题原样存在（本增量是可选能力，不是默认行为变更）。
+
+**⑦ 改动面与验收（工作树实读，HEAD `4a0162a` + 本节未提交改动）**
+
+- 改动文件（2）：`client/core/src/bin/nbinterop.rs`（`git diff --numstat` = **220 insertions / 7 deletions**）、本文件（**73 insertions / 0 deletions**，本节纯追加，diff 无删除行）。**未触碰**：`n2h_collector.rs`、`connector.rs`、ets 侧、其余文档、`/tmp/n2h-frozen/`。
+- **并行工作树登记（如实）**：本节落地时同一工作树内另有**并行增量**正在修改 `client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets` 与 `client/entry/selfcheck/run-exclusion-generation.mts`（内容为 `N2H_COLLECTOR_PATH|…|stage=onCreate-reached` / `stage=watcher-started` 到达打点，即 §13.15 ⑥(a) 建议的那一层标记）。⇒ 本节验收若跑 `git status --porcelain`，会看到这 4 个 `M`（本节 2 个 + 并行增量 2 个）；**本节未触碰也未回退**这两个文件，本节的 diff 范围以上一条为准。
+- 验收实跑：
+  - `cargo build --offline --locked --features cli --bin nbinterop` → exit 0。
+  - `cargo test --offline --locked --features cli --bin nbinterop` → **15 passed / 0 failed**（含 5 条新测试）。
+  - `cd client/core && cargo test --offline --locked --color never` → exit 0；**34 个测试目标全 `ok`，合计 539 passed / 0 failed / 0 ignored**（与 `4a0162a` 基线逐条相同——该命令默认不带 `--features cli`，bin 测试不在此计数内，见 ④）。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=22057eecb84744d2edb28bc0266f26262d540287cee98a934f9d01c3122d987d`。
+  - **摘要变更归因（独立复算，非推测）**：`build.sh:132-135` 的摘要覆盖 `find proto src -type f`（含 `src/bin/nbinterop.rs`）。以 `git archive HEAD client/core` 对**提交态**独立复算得 `00166dfaeab1a65ae55f86583153e92923f4eb9d2f5943bcc60424eb0816cf83`（＝§13.15 记录值，证明 HEAD 的 core 源自那以后未变），工作树独立复算得 `22057eec…`（＝ build.sh 打印值）；`git diff --name-only HEAD -- client/core/{proto,src,Cargo.toml,Cargo.lock,build.rs}` 只列出 `client/core/src/bin/nbinterop.rs` ⇒ 摘要变化**完全**由本增量的这一个 host-only bin 文件解释，无夹带。
+
+### 13.16 ⑮ I5b 增量落地：扩展 / watcher 到点标记（三态判读）
+
+> 本节**只追加**：不改写 §0–§13.17 任何正文（本增量对本文档的唯一改动就是本节）。**节序说明**：并行增量 I6b（§13.17）先于本节落盘，其 §13.17 已按「不改写 §0–§13.16」把编号 §13.16 留给本增量 ⇒ 本节按纯追加纪律出现在文末，节序不代表落地顺序（两增量基线同为 HEAD `4a0162a`；I6b 只动 `client/core/src/bin/nbinterop.rs`，与本增量零文件重叠）。范围＝**只加两行到点标记**（无状态、无计数器、不改任何闸）：arm 闸、既有标记的字段/顺序、`connector_status()` 形状、设备命令面、core（Rust）**均未触碰**；`/tmp/n2h-frozen/` 未触碰。下列 file:line 为落地后工作树实读。
+
+**① 动机（2026-09-18 真机 dry-run 的三态同形）**
+
+- **事实**：设备**已建立 VPN 会话**，但 **84 次 `N2H_COLLECTOR*` 读数全 0 行**、宿主对端 `a2b_seen=0`。
+- I5a（§13.15）消掉了「跑到钩子之后」的静默，但 §13.15 ⑥(a) 自己登记的证明力边界仍在：`N2H_COLLECTOR_ARM_SKIPPED` 只能证明「**扩展进程跑到了这个检查点**」；而「**扩展进程从未启动**」与「**扩展启动了但状态 watcher 未运行/未 tick**」这两态与它**同样零行**，彼此不可分。
+- **本增量**：在**两个到达点**各打一行——扩展生命周期的入口（`onCreate`）与状态 watcher 的启动处——使三态在日志上互斥可分（矩阵见 ③）。两行都是纯诊断：不加闩、不加计数器、不读也不改任何闸，也不参与任何判定。
+
+**② 两行逐字形态与打点位置（唯一新增标记；`hilog.info`）**
+
+| # | 逐字 | 打点位置（file:line） | 「只打一次」由什么保证 |
+|---|---|---|---|
+| 1 | `N2H_COLLECTOR_PATH\|requestId=<id>\|stage=onCreate-reached\|diag=true\|is_evidence=false` | `NetBirdVpnExtensionAbility.ets:404-406`，在 `onCreate`（`:387`）内：`requestId` 解析（`:388-393`）**之后**、**所有** early return（含 `:408` 的 `duplicate-onCreate`）**之前** | 框架对每一 ability 实例恰好调用一次 `onCreate` ⇒ 一次调用一行。**不加闩**（加了反而会把打点推到 early return 之后，失去「最早可达点」语义） |
+| 2 | `N2H_COLLECTOR_PATH\|requestId=<id>\|stage=watcher-started\|diag=true\|is_evidence=false` | `:1454-1456`，在 `startStatusAndNetcfgWatcher`（`:1325`）内：**既有**一次性守卫 `:1326` 之后、`setInterval` 语句（`:1445`）**之后**、**tick 回调之外** | **复用既有守卫**（`watcherTimer >= 0` ⇒ 本方法只在首次真正创建 interval 时越过它）＋ 打点在 tick 回调之外 ⇒ 第二次调用与任意多次 tick 都不会重印（自检 B3 以 **3 次重放的真实 tick** 断言） |
+
+- **字段形状恒 5 段**：`标记名|requestId|stage|diag|is_evidence`；`diag=true` 与 `is_evidence=false` 是常量（与 §13.15② 同一纪律）。**没有**计数器、序号或 `attempted=` 之类的额外字段（两行同名 `N2H_COLLECTOR_PATH`，只有 `stage=` 取值不同）。自检 B1/B3 断言 `split('|').length === 5`，把「不得长出计数器字段」钉住。
+- `requestId` 取 `onCreate` 从 want 解析并清洗后的**实例真值**（`:388-393`），不是类默认 `'missing'`（自检 B1 第三检查）。
+- 位置语义：第 1 行证明「**扩展进程起来了并进入生命周期**」；第 2 行证明「**状态 watcher 被真正启动**」（它只在 `settleCreate` 走到 `:1980` 时才被调用——create / fd 契约 / protect / WG 数据面 / ICE 任一闸 fail-closed 都在这之前 return）。
+
+**③ 三态判读矩阵（本增量的唯一目的）**
+
+| 观测（同一 requestId 的 hilog 面） | 判读 | 下一步 |
+|---|---|---|
+| 出现**任一 arm 行**（`N2H_COLLECTOR_ARMED` / `NOT_ARMED` / `ARM_SKIPPED` / `ARM_FAILED` / `ARM_REJECTED`） | 扩展进程与状态 watcher **都在**，且 arm 钩子**已被到达** | 问题在 **arm 输入或闸**：I5a 的 `reason=`/`accessError=` 已给出分支（§13.15②）；闸的两种不满足由 `deviceUp=`/`ready=` 分开 |
+| **只有** `N2H_COLLECTOR_PATH` 行、**无任何 arm 行** | watcher 未 tick，**或** tick 未到达钩子 | 两分：① `watcher-started` 也缺席 ⇒ watcher **从未启动**（查 `:1980` 之前的闸为何 fail-closed）；② `watcher-started` 在而 arm 行不在 ⇒ tick 未跑（周期 `STATUS_POLL_MS=5000`，`NetBirdConnector.ets:62`）**或** tick 在钩子之前 `terminal`（`:1393`）/**recreate**（`:1404`）提前 return |
+| **连 `N2H_COLLECTOR_PATH` 行都没有** | 扩展进程**未起**（或 hilog 未采到该进程/域） | 查扩展是否被拉起、hilog 采集面与域过滤 |
+
+- 三种情形的互斥性由「两行 + arm 行」的组合给出：矩阵第一行 ⇒ 三态都不是问题；第二行 ⇒ 问题在 watcher/tick 面；第三行 ⇒ 问题在进程拉起面。**判读口径仍须按 requestId 归并**（见 ⑦(b)）。
+
+**④ selfcheck 扩展（host-only，无设备/无网络）**
+
+- 沿用 `run-exclusion-generation.mts` + `exclusion-generation-hooks.mjs`（真实 .ets 逐字节 stage、真实扩展类驱动）。**新增 B 组 15 检查**（`run-exclusion-generation.mts:578-707`）：
+  - **B1（4 检查）** 真实 `onCreate`（正常腿）⇒ **恰一行** `stage=onCreate-reached` 且逐字等于 ②、**恰 5 字段**、`requestId` 是 want 解析值（非 `'missing'`）；其异步启动流（fixture 无 context ⇒ 立即 reject，被 `onCreate` 自己的 `.catch` 接住）结束后**仍恰一行**（不重印）。
+  - **B2（1 检查）** `duplicate-onCreate` 形态（预置 `connectionCreationAttempted=true`）⇒ 打点**早于**该 early return，且既有 `VPN_CREATE_REJECTED|…|phase=duplicate-onCreate|…` 逐字未变（该分支的回归钉）。
+  - **B3（5 检查）** 真实 `startStatusAndNetcfgWatcher` ⇒ **恰一行** `stage=watcher-started` 且逐字等于 ②、恰 5 字段；**第二次调用**该启动方法不重印（既有守卫，未加新闩）；**3 次重放的真实 tick** 后仍恰一行（**不刷屏**）；矩阵①：到点行 + arm 文件缺失（ENOENT 形态）⇒ **恰一行** `N2H_COLLECTOR_ARM_SKIPPED` 且逐字与 §13.15② 相同（**I5a 回归**，经真实 tick 驱动）。
+  - **B4（1 检查）** 矩阵②：真实 `onCreate` + 真实 watcher 启动、**零 tick** ⇒ 两行到点标记**顺序为** `onCreate-reached, watcher-started`，且无 `ARM_SKIPPED` / `NOT_ARMED` / `ARMED`（「watcher 未 tick」形态）。
+  - **B5（1 检查）** 矩阵③：只构造实例、不发任何生命周期调用 ⇒ `N2H_COLLECTOR_PATH` **零行**（「扩展进程未起」形态）。
+  - **B6（3 检查）** 源码 pin（对逐字节 fixture 的文本）：第 1 行字面**早于** `duplicate-onCreate` 的 return；第 2 行字面**晚于**既有守卫与 `setInterval` 语句；两个字面在出厂源中各**恰出现一次**。
+- **替身变化**：仅 `run-exclusion-generation.mts` 的 B 组把全局 `setInterval` 换成「**捕获回调但不排程**」的实现 ⇒ 「watcher 已启动但从未 tick」可被真实构造、真实 tick 可被手动重放，同时不给测试留下待触发的真定时器（其余 6 套自检与 `exclusion-generation-hooks.mjs` **零改动**）。
+- **计数（7 套全 `exit 0`）**：`run.mts` **81/0**、`run-relay-exclusion.mts` **49/0**、`run-exclusion-addr-shape.mts` **25/0**、`run-relay-flag.mts` **9/0**、`run-relay-status-log.mts` **3/0**、`run-route-validation.mts` **49/0**、`run-exclusion-generation.mts` **61/0**（I3a/I5a 基线 46，+15）。**A 组 13 检查与 G1–G7 逐字未改、全绿**（本增量对既有断言的唯一改动是在文件头注释追加 B 段落说明）。
+- **变异对照（阴性对照，/tmp 仓库外 fixture，同 §13.15④ 手法）**：(i) 删掉 `onCreate` 打点（回到「扩展未起/已起但未 tick」两态同形）⇒ **8 失败**（B1×4、B2、B4、B6×2）；(ii) 把第 2 行同时放进 tick 回调（每 tick 刷屏）⇒ **3 失败**（B3 反刷屏、B6×2）。两次变异都只影响 B 组，G1–G7 与 A 组全绿 ⇒ 新检查有牙且不误伤。
+
+**⑤ `destroyRequested` 短路（§13.15 ⑥(b) 的残余盲区）——建议加，本轮未加**
+
+- **建议形态**（供后续增量决策）：同 5 段形态再加一行 `stage=arm-skip-destroying`（或按 I5a 的 `reason=` 风格），打点在 arm 钩子 `:1134` 的 `destroyRequested` 分支内。
+- **本轮未加的三条理由**（任一成立即足够）：① 该短路与 `n2hArmAttempted` **同处 arm 闸的同一行**（`:1134` `if (this.n2hArmAttempted || this.destroyRequested) return;`），I5a 已把这行逐字冻结，而本轮派发明文「**不得触碰 arm 闸**」；② 要「只打一次」就必须**新增第二个闩**（＝新增计数器，本轮禁止）或**在该分支上置 `n2hArmAttempted`**（改的是该字段的状态转换语义，属行为改动——尽管在 watcher 已被同步停掉的前提下观测等价）；③ **价值有限**：`destroyRequested` 仅在 `onDestroy` 置位（`:2391`）且**紧接着同步停止 watcher**（`:2392`），该分支只可能被「与 `onDestroy` 交错的在飞 tick」命中，是极窄竞态。
+- ⇒ 结论：**只报建议不加**。若后续要补，应作为独立增量，并在同一次决策里定下闩的归属（并接受对已冻结闸行的改写）。
+
+**⑥ 改动面与验收（工作树实读，HEAD `4a0162a` + 未提交改动）**
+
+- 改动文件（**本增量 2 个代码/自检文件 + 本文件**）：`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets`（**+22 行，纯插入**）、`client/entry/selfcheck/run-exclusion-generation.mts`（**+143 行，纯插入**）、本文件（本节纯追加）。**未触碰**：任何 Rust 源（`client/core/**` 零改动）、`connector_status()` 形状、既有标记字面、`module.json5`、其余 6 套自检、`exclusion-generation-hooks.mjs`、预注册草案、`/tmp/n2h-frozen/`。
+- 验收实跑（本节工作树；下列为**末次**一轮的值，括号内为早前一轮的对照值——两轮都 exit 0）：
+  - `cd client/core && cargo test --offline --locked --color never` → exit 0；**34 个测试目标全 `ok`，合计 539 passed / 0 failed / 0 ignored**（与 `4a0162a` 基线逐条相同——本增量 core 零改动；末次运行的工作树里含并行增量 I6b 在飞的 `nbinterop.rs`（文件 sha256 `423923bb…`，运行前后一致）；更早一轮为 `bb38f50c…`，同样 539/0）。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=22057eecb84744d2edb28bc0266f26262d540287cee98a934f9d01c3122d987d`（早前一轮 `13bb7bff…`）。本增量不改 core 源 ⇒ 该摘要只随并行增量 I6b 的 `bin/nbinterop.rs` 变动。
+  - 壳侧自检 **7 套全 `exit 0`**：计数见 ④ 末行（这 7 套只依赖本增量的两个文件，与并行增量无交集）。
+  - `bash client/build.sh` → exit 0；`BUILD SUCCESSFUL`、`assembleHap exit 0`；`CompileArkTS` 对含本节改动的 ets 编译成功，**两条新插入语句处零新增告警**（余下仍是既有 `Function may throw exceptions` 类）；逐项 `VERIFY OK`（HAP 成员 `.so` sha256 `fdb0fc33a90aaa10db56f0e3989c27fc0bac6c951a6f020c3c9d37121f99776e`，与早前一轮**相同** ⇒ 本增量不改 core 制品）；HAP `entry-default-unsigned.hap` **4 234 291 bytes**、sha256 `04b0e1b1b02684345f38c994999de9f639527ec05777fb0da12e6ba56d8bb2f2`（早前一轮同 size、sha256 `8d57d8a6…`——HAP 容器不可逐字节复现，验收以 exit 0 + 逐项 VERIFY OK 为准；`/tmp/n2h-frozen/` 未触碰）。两轮构建前后均已核对本增量 ets 与 I6b 的 `nbinterop.rs` sha256 未变。
+  - `git status --porcelain`：本增量的 3 个 `M`，另有一个**非本增量**的 `M client/core/src/bin/nbinterop.rs`（并行增量 I6b §13.17 的在飞改动，mtime 晚于本轮开工时间，本增量未触碰、未回退）；无新增未跟踪文件。`git diff --stat` **只看本增量**：`git diff --stat -- client/entry` = `2 files changed, 165 insertions(+), 0 deletions(-)`（ets +22 / 自检 +143），本文件为**纯追加**（本文件 diff 中另有 §13.17 的 +72）。全树 `git diff --stat` 的时点值为 `4 files changed, 531 insertions(+), 7 deletions(-)`——**其中 +220/-7 全在 I6b 的 `bin/nbinterop.rs`**（该文件在本轮内被 I6b 多次改动，故此全树数字是时点值，不构成本增量的改动面）。
+- **真实标记样例（真实 .ets fixture + 真实方法驱动，逐字）**：
+  - `N2H_COLLECTOR_PATH|requestId=req-i3a|stage=onCreate-reached|diag=true|is_evidence=false`
+  - `N2H_COLLECTOR_PATH|requestId=req-i3a|stage=watcher-started|diag=true|is_evidence=false`
+  - 同一 fixture 内 3 次重放真实 tick 后 `N2H_COLLECTOR_PATH` 行数仍为 **2**；`N2H_COLLECTOR_ARM_SKIPPED` 行数为 **1**（I5a 一次性闩仍成立）。
+
+**⑦ 残余盲区（如实，逐条）**
+
+- **(a) 两行同样无基数、单行**：hilog 丢行无法由实现侧防止（与 §13.15(d) 同级）。若三行一起丢失，三态仍退化为不可分——本增量把「不可分」从**必然**降为**需要丢行才发生**，不能降为零。
+- **(b) 第 1 行按「一次 `onCreate` 调用」计数，不是按实例闩**：框架对同一实例重复调用 `onCreate`（现实中不发生）会重印；同一进程若创建多个实例（requestId 不同），每个实例各一行 ⇒ 判读须**按 requestId 归并**。不为这两种情形加闩：那正是本轮禁止的计数器/状态。
+- **(c) 第 2 行只证明「watcher 被启动」**，不证明「tick 已跑过」：tick 由 `STATUS_POLL_MS=5000` 驱动，且 tick 内 `terminal`（`:1393`）与 `recreate`（`:1404`）两条既有 return 都在 arm 钩子（`:1419`）之前 ⇒ 「只有到点行」仍含「tick 跑了但每次都提前 return」这一子形态（矩阵第二行已把它与「watcher 从未启动」分开，但不与「tick 未跑」分开）。
+- **(d) `destroyRequested` 短路仍静默**：建议与未加理由见 ⑤（`:1134`）。
+- **(e) 证据地位**：两行恒带 `diag=true|is_evidence=false`——**诊断可观测性，不是判定证据**，不改变 §6.1「默认关闭、不进产品面」与 §13.15(e) 的同一纪律；也不改变任何闸的通过条件。
+
+
 
 

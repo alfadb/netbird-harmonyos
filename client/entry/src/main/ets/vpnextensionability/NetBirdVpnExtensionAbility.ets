@@ -393,6 +393,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     hilog.info(DOMAIN, TAG, 'VPN_ONCREATE|bundle=%{public}s|requestId=%{public}s',
       want.bundleName ?? 'unknown', this.requestId);
+    // N2-H I5b (§13.16): the extension's own "this process reached the
+    // earliest reachable lifecycle point" beacon, printed AFTER requestId is
+    // resolved (so the id is real) and BEFORE every early return below. It is
+    // the only thing that separates "the extension process never started" from
+    // "it started but the watcher never ticked" — both were zero-row states in
+    // the 2026-09-18 device dry-run. One line per onCreate call: no latch, no
+    // counter, no gate touched, nothing but the fixed development-channel path
+    // marker.
+    hilog.info(DOMAIN, TAG,
+      'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=onCreate-reached|diag=true|is_evidence=false',
+      this.requestId);
 
     if (this.connectionCreationAttempted) {
       hilog.error(DOMAIN, TAG,
@@ -1432,6 +1443,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.requestId, safeError(error as Error));
       }
     }, STATUS_POLL_MS);
+    // N2-H I5b (§13.16): the watcher's own start beacon, printed here — after
+    // the once-guard above (which is the ONLY thing that makes this the first
+    // start: `watcherTimer >= 0` from now on) and after the interval exists,
+    // but OUTSIDE the tick callback, so no tick can ever re-print it. Together
+    // with the onCreate beacon it yields the three-state reading: an arm line
+    // ⇒ extension + watcher both live; only beacons ⇒ the watcher never ticked
+    // (or the hook was never reached); no beacon at all ⇒ the extension process
+    // never started. No latch, no counter, no gate touched.
+    hilog.info(DOMAIN, TAG,
+      'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=watcher-started|diag=true|is_evidence=false',
+      this.requestId);
   }
 
   // N3-7 gap 3: connector died by itself → tear the VPN down instead of

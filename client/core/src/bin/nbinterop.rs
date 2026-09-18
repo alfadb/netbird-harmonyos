@@ -41,7 +41,9 @@
 //!         payload VERBATIM — that is the device's a2b receipt;
 //!       · periodically injects its OWN posctl probe toward the device overlay
 //!         (`--overlay`) under ONE marker announced at start-up — the device
-//!         registers that marker for its b2a observation;
+//!         registers that marker for its b2a observation; `--posctl-id` fixes
+//!         that marker instead of taking a fresh per-process nonce, so a
+//!         marker an arm file already carries survives a peer restart;
 //!       · prints a periodic `n2h-peer-stats|…` line carrying the announced
 //!         marker and THIS peer's live `unknown_peer_drops` (the device's
 //!         `wg_peer` outer-probe receipt, design §4.0/§4.3) on stderr.
@@ -91,6 +93,13 @@
 //!                               `posctl_port`); the port the device's a2b
 //!                               probe is addressed to on this peer
 //!        --posctl-interval <ms> n2h-peer ONLY: b2a probe period (default 1000)
+//!        --posctl-id <id>       n2h-peer ONLY: use this FIXED b2a marker
+//!                               (`N2H-posctl-<24 hex>`) for the whole run
+//!                               instead of the fresh per-process nonce, so
+//!                               the marker does not change when this peer
+//!                               restarts (refused at start-up, exit 2, if
+//!                               the shape is not exactly that — never a
+//!                               silent nonce fallback)
 //!        --loopback             n2h-peer ONLY: offline 对拍 self-check of the
 //!                               echo path + status line (no --config, no
 //!                               connector, no network beyond a socketpair)
@@ -279,9 +288,10 @@ USAGE:
                       [--advertise-candidate <ip:port>]... [--verbose]
     nbinterop peer    --config <file> [same flags]
     nbinterop n2h-peer --config <file> --overlay <ip[:port]> [--echo-port <port>]
-                       [--posctl-interval <ms>] [--interval <ms>] [--timeout <s>]
+                       [--posctl-interval <ms>] [--posctl-id <id>]
+                       [--interval <ms>] [--timeout <s>]
     nbinterop n2h-peer --loopback [--overlay <ip[:port]>] [--echo-port <port>]
-                       [--posctl-interval <ms>] [--timeout <s>]
+                       [--posctl-interval <ms>] [--posctl-id <id>] [--timeout <s>]
     nbinterop n2h-decode <hilog-capture> [--out <file>]
     nbinterop isolation-check [--out <file>] [--loopback]
                               [--fault-leak] [--fault-no-posctl]
@@ -302,6 +312,16 @@ subcommand itself, no product surface, no new socket or port):
                           arrives through the tunnel is echoed back VERBATIM to
                           its source; anything else is ignored
     --posctl-interval <ms> b2a probe period (default 1000)
+    --posctl-id <id>      use this FIXED b2a marker instead of the fresh
+                          per-process nonce: `N2H-posctl-<24 hex>`, the exact id
+                          form the device's arm option `peer_b2a_probe_id`
+                          accepts (same validator). The announcement line and
+                          every `n2h-peer-stats` line carry it for the whole run,
+                          so the marker an already-pushed arm file carries stays
+                          valid across a peer restart. Any other shape is refused
+                          at start-up (exit 2) — this option never falls back to
+                          a random nonce. Omitted = unchanged I6 behavior (one
+                          fresh nonce per process).
     --loopback            offline 对拍 self-check of the echo path + the status
                           line: one socketpair stands in for the tunnel and a fake
                           device must observe the b2a probe and must get its a2b
@@ -452,6 +472,10 @@ struct N2hPeerOpts {
     /// `posctl_port` (§5.1 default 40001, [`nc::DEFAULT_POSCTL_PORT`]).
     echo_port: u16,
     posctl_interval_ms: u64,
+    /// `--posctl-id <id>` (I6b): a FIXED b2a marker for the whole run, already
+    /// validated as `N2H-posctl-<24 hex>` at the CLI boundary. `None` = the I6
+    /// behavior (one fresh nonce per process).
+    posctl_id: Option<String>,
     /// Offline 对拍 mode (`--loopback`): no config, no connector.
     loopback: bool,
 }
@@ -463,6 +487,7 @@ impl Default for N2hPeerOpts {
             overlay_port: None,
             echo_port: nc::DEFAULT_POSCTL_PORT,
             posctl_interval_ms: N2H_PEER_POSCTL_INTERVAL_MS,
+            posctl_id: None,
             loopback: false,
         }
     }
@@ -473,6 +498,29 @@ impl N2hPeerOpts {
     fn overlay_dst(&self) -> Option<([u8; 4], u16)> {
         let ip = self.overlay?;
         Some((ip.octets(), self.overlay_port.unwrap_or(self.echo_port)))
+    }
+}
+
+/// The run's ONE b2a marker (I6, extended by I6b/§13.17): `--posctl-id`
+/// verbatim when the operator fixed it, else a fresh per-process nonce — in
+/// exactly the shape the device's `build_posctl` builds and registers
+/// (`N2H-posctl-<24 hex>`, [`netbird_core::n2h::probe_id`] +
+/// [`nc::POSCTL_KIND_TOKEN`]).
+///
+/// A fixed value goes through [`nc::announced_b2a_marker`] — the very
+/// acceptance test the device applies to the `peer_b2a_probe_id` of its arm
+/// options — so a marker this peer announces can never be one the device would
+/// refuse to attribute. The CLI already refuses a bad shape at parse time
+/// (exit 2, usage on stderr); this is the one place the marker is resolved, so
+/// no other entry point (the 对拍's own state included) can carry a marker the
+/// device could not use.
+fn n2h_peer_marker(opts: &N2hPeerOpts) -> Result<String, String> {
+    match opts.posctl_id.as_deref() {
+        Some(id) => nc::announced_b2a_marker(id),
+        None => {
+            let nonce = netbird_core::n2h::fresh_nonce_hex()?;
+            Ok(netbird_core::n2h::probe_id(nc::POSCTL_KIND_TOKEN, &nonce))
+        }
     }
 }
 
@@ -693,6 +741,20 @@ fn parse_flags(args: &[String]) -> Result<(RunOpts, bool), i32> {
                     return Err(hs::EXIT_USAGE);
                 }
                 o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).posctl_interval_ms = ms;
+            }
+            "--posctl-id" => {
+                let v = value("--posctl-id")?;
+                // the SAME acceptance test the device applies to an announced
+                // b2a marker: a shape this CLI accepts is never one the device
+                // would refuse to attribute. A bad shape FAILS the start-up
+                // (exit 2 + usage) — it must never fall back to a fresh nonce,
+                // which would announce a marker the operator's arm file does
+                // not carry while looking like a healthy run.
+                if let Err(e) = nc::announced_b2a_marker(&v) {
+                    eprintln!("error: --posctl-id '{v}': {e}\n\n{USAGE}");
+                    return Err(hs::EXIT_USAGE);
+                }
+                o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).posctl_id = Some(v);
             }
             "--loopback" => {
                 o.n2h_peer.get_or_insert_with(N2hPeerOpts::default).loopback = true;
@@ -1161,12 +1223,14 @@ impl N2hPeerState {
     /// Fresh run state: the marker is `N2H-posctl-<24 hex nonce>` — exactly the
     /// shape the device's `build_posctl` builds and registers with the TUN
     /// scanner (shared code: [`netbird_core::n2h::probe_id`] +
-    /// [`nc::POSCTL_KIND_TOKEN`]).
+    /// [`nc::POSCTL_KIND_TOKEN`]) — or the operator's fixed `--posctl-id`
+    /// ([`n2h_peer_marker`]), which is the same id for the whole run and for
+    /// every restart.
     fn new(opts: N2hPeerOpts) -> Result<N2hPeerState, String> {
-        let nonce = netbird_core::n2h::fresh_nonce_hex()?;
+        let marker = n2h_peer_marker(&opts)?;
         Ok(N2hPeerState {
             opts,
-            marker: netbird_core::n2h::probe_id(nc::POSCTL_KIND_TOKEN, &nonce),
+            marker,
             b2a_sent: 0,
             a2b_seen: 0,
             echoes_sent: 0,
@@ -1642,7 +1706,10 @@ fn cmd_engine(mode: &'static str, args: &[String]) -> i32 {
             Some(_) => {}
         }
     } else if o.n2h_peer.is_some() {
-        eprintln!("error: the n2h-peer flags (--overlay/--echo-port/--posctl-interval/--loopback) belong to the n2h-peer subcommand\n\n{USAGE}");
+        eprintln!(
+            "error: the n2h-peer flags (--overlay/--echo-port/--posctl-interval/--posctl-id/\
+             --loopback) belong to the n2h-peer subcommand\n\n{USAGE}"
+        );
         return hs::EXIT_USAGE;
     }
     if o.config.is_empty() {
@@ -2286,6 +2353,10 @@ mod n2h_peer_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// I6b: one legal fixed marker — the exact id form the device's arm option
+    /// `peer_b2a_probe_id` accepts (`nc::announced_b2a_marker`).
+    const FIXED_POSCTL_ID: &str = "N2H-posctl-ffeeddccbbaa998877665544";
+
     /// The design §7-I6 acceptance: the echo path and the peer status line,
     /// end to end, with a fake device on the far end of the tunnel stand-in.
     #[test]
@@ -2307,6 +2378,148 @@ mod n2h_peer_tests {
     fn the_cli_loopback_entry_exits_zero_on_a_healthy_run() {
         let code = cmd_n2h_peer(&args(&[
             "--loopback",
+            "--posctl-interval",
+            "100",
+            "--timeout",
+            "4",
+        ]));
+        assert_eq!(code, hs::EXIT_OK);
+    }
+
+    /// I6b, state ①: a legal `--posctl-id` is adopted VERBATIM for the whole
+    /// run — the announcement line and every stats line carry the same fixed
+    /// value (and it is a marker the device's own validator accepts).
+    #[test]
+    fn a_legal_posctl_id_is_adopted_verbatim_by_the_whole_run() {
+        let (o, _) = parse_flags(&args(&[
+            "--config",
+            "host.conf",
+            "--overlay",
+            "100.64.0.7",
+            "--posctl-id",
+            FIXED_POSCTL_ID,
+        ]))
+        .expect("a legal marker parses");
+        let opts = o.n2h_peer.expect("the n2h-peer flags are set");
+        assert_eq!(opts.posctl_id.as_deref(), Some(FIXED_POSCTL_ID));
+
+        let mut state = N2hPeerState::new(opts.clone()).expect("state");
+        assert_eq!(state.marker, FIXED_POSCTL_ID, "the fixed id is the run's marker");
+        // the device's own acceptance test accepts the announced marker
+        assert_eq!(nc::announced_b2a_marker(FIXED_POSCTL_ID).as_deref(), Ok(FIXED_POSCTL_ID));
+        let announce = state.announce_line();
+        assert!(announce.contains(&format!("b2a_probe_id={FIXED_POSCTL_ID}")), "{announce}");
+        assert!(announce.contains("b2a_dst=100.64.0.7:40001"), "{announce}");
+        let sample = state.sample_drops(None);
+        let stats = state.status_line(Some([100, 64, 0, 8]), sample);
+        assert!(stats.starts_with("nbinterop: n2h-peer-stats|"), "{stats}");
+        assert!(stats.contains(&format!("b2a_probe_id={FIXED_POSCTL_ID}")), "{stats}");
+        println!("[I6b-cli] {announce}");
+        println!("[I6b-cli] {stats}");
+
+        // …and the same value runs the shipped 对拍 (the fake device must still
+        // observe a well-formed posctl probe)
+        let (code, report) = run_n2h_peer_loopback(&opts, 5_000).expect("loopback run");
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(code, hs::EXIT_OK, "{report:?}");
+    }
+
+    /// I6b, state ②: a malformed `--posctl-id` FAILS the start-up (exit 2, the
+    /// usage text) and NEVER falls back to a random nonce — neither in the flag
+    /// parser nor through the CLI entry point.
+    #[test]
+    fn a_malformed_posctl_id_is_refused_at_start_up_never_replaced_by_a_nonce() {
+        let bad = [
+            "",                                                        // empty
+            "N2H-posctl-ffeeddccbbaa99887766554",                      // 23 hex
+            "N2H-posctl-ffeeddccbbaa9988776655444",                    // 25 hex
+            "N2H-posctl-ffeeddccbbaa99887766554g",                     // not hex
+            "N2H-peer-ffeeddccbbaa998877665544",                       // wrong kind token
+            "posctl-ffeeddccbbaa998877665544",                         // no N2H- prefix
+            "N2H-posctl-ffeeddccbbaa998877665544|positive-control",    // the payload form
+            "N2H-posctl-ffeeddccbbaa998877665544 ",                    // trailing byte
+        ];
+        for one in bad {
+            let parsed = parse_flags(&args(&[
+                "--config",
+                "host.conf",
+                "--overlay",
+                "100.64.0.7",
+                "--posctl-id",
+                one,
+            ]));
+            assert_eq!(parsed.err(), Some(hs::EXIT_USAGE), "--posctl-id {one:?} must be refused");
+            let code = cmd_n2h_peer(&args(&["--loopback", "--posctl-id", one]));
+            assert_eq!(code, hs::EXIT_USAGE, "--loopback --posctl-id {one:?} must exit 2");
+        }
+        // the state-level resolver is the second (single-source) gate: a
+        // hand-built option can never smuggle an unvalidated marker either
+        let smuggled = N2hPeerOpts {
+            posctl_id: Some("N2H-posctl-not-a-nonce".to_string()),
+            ..Default::default()
+        };
+        assert!(N2hPeerState::new(smuggled).is_err(), "an invalid marker must not become a state");
+    }
+
+    /// I6b, state ③: without the option the I6 behavior is UNCHANGED — one
+    /// fresh, well-formed, per-process nonce (two runs must not collide).
+    #[test]
+    fn without_the_option_the_marker_stays_a_fresh_per_process_nonce() {
+        let (o, _) = parse_flags(&args(&["--config", "host.conf", "--overlay", "100.64.0.7"]))
+            .expect("parse");
+        let opts = o.n2h_peer.expect("the n2h-peer flags are set");
+        assert_eq!(opts.posctl_id, None, "no --posctl-id ⇒ no fixed marker");
+
+        let a = N2hPeerState::new(opts.clone()).expect("state");
+        let b = N2hPeerState::new(opts).expect("state");
+        for m in [&a.marker, &b.marker] {
+            assert!(m.starts_with("N2H-posctl-"), "{m}");
+            assert_eq!(m.len(), "N2H-posctl-".len() + 24, "{m}");
+            assert_eq!(nc::posctl_marker(nc::posctl_payload(m).as_bytes()), Some(m.as_str()));
+            assert_ne!(m, FIXED_POSCTL_ID);
+        }
+        assert_ne!(a.marker, b.marker, "each process gets its own fresh nonce");
+    }
+
+    /// I6b: the fixed marker is not just printed — it is what the b2a probe
+    /// actually puts on the wire (`n2h_peer_send_b2a` → one TUN frame).
+    #[test]
+    fn the_b2a_probe_on_the_wire_carries_the_fixed_marker() {
+        let (hand, far) = hs::open_tun_standby_pair().expect("TUN stand-in pair");
+        let mut bag = hs::FdBag::new();
+        bag.keep(hand);
+        bag.keep(far);
+        let opts = N2hPeerOpts {
+            overlay: Some(std::net::Ipv4Addr::new(100, 64, 0, 7)),
+            overlay_port: Some(40_001),
+            posctl_id: Some(FIXED_POSCTL_ID.to_string()),
+            ..Default::default()
+        };
+        let mut state = N2hPeerState::new(opts).expect("state");
+        let own = [100, 64, 0, 8];
+        n2h_peer_send_b2a(&mut state, Some(own), hand);
+        assert_eq!(state.b2a_sent, 1, "one b2a probe was injected");
+
+        let mut buf = [0u8; N2H_PEER_FRAME_MAX];
+        let n = read_frame_within(far, &mut buf, 200).expect("the b2a frame arrived");
+        let view = netbird_core::n2h::parse_ipv4_frame(&buf[..n]).expect("frame parses");
+        assert_eq!(view.payload, nc::posctl_payload(FIXED_POSCTL_ID).as_bytes());
+        assert_eq!(nc::posctl_marker(view.payload), Some(FIXED_POSCTL_ID));
+        assert_eq!(
+            (view.src, view.sport, view.dst, view.dport),
+            (own, 40_001, [100, 64, 0, 7], 40_001)
+        );
+        println!("[I6b-cli] b2a on the wire: {}", String::from_utf8_lossy(view.payload));
+    }
+
+    /// I6b: the same through the shipped CLI entry — `--loopback --posctl-id
+    /// <fixed>` is accepted and the 对拍 still passes (exit 0).
+    #[test]
+    fn the_cli_loopback_entry_accepts_the_fixed_posctl_id() {
+        let code = cmd_n2h_peer(&args(&[
+            "--loopback",
+            "--posctl-id",
+            FIXED_POSCTL_ID,
             "--posctl-interval",
             "100",
             "--timeout",

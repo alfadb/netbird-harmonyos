@@ -46,6 +46,18 @@
 //   G7 wiring pins on the byte-identical source (the pre-create call sites,
 //      the two anchor literals, the untouched existing recreate lines and the
 //      arm's single-source read)
+//   B1-B6 (I5b §13.16): the two PATH beacons — `stage=onCreate-reached` at the
+//      extension's earliest reachable lifecycle point (BEFORE the duplicate
+//      onCreate early return) and `stage=watcher-started` at the status
+//      watcher's start (after its existing once-guard, outside the tick) —
+//      each emit EXACTLY one line per instance with the five-field
+//      `requestId|stage|diag|is_evidence` shape and nothing else; the onCreate
+//      beacon survives the async start flow; the watcher beacon is not
+//      re-printed by a second start call nor by three REPLAYED REAL ticks. The
+//      three-state reading matrix: beacons + arm file absent ⇒ exactly one
+//      ARM_SKIPPED (I5a, through the REAL tick); beacons + zero ticks ⇒ the
+//      beacons and NO arm line; neither beacon ⇒ no N2H_COLLECTOR_PATH line at
+//      all (extension process never started). Source pins close the group.
 //   A1-A6 (I5a §13.15): the arm hook's outcome is never silent — an absent or
 //      unreadable arm control file emits exactly ONE
 //      N2H_COLLECTOR_ARM_SKIPPED line (reason=arm-file-absent for a PROVED
@@ -562,6 +574,137 @@ try {
   check('G7 the wgPeerEndpoints field is passed at BOTH legs (value 0 until I3b)',
     extSource.indexOf('merged.routes, 0);') > 0 &&
     extSource.split('merged.routes, 0);').length === 3, 'wg_peer field pin');
+
+  // ---------------- B (I5b §13.16): the two PATH beacons + 三态矩阵 ---------
+  // The watcher's interval is CAPTURED, never scheduled: the B group replays
+  // REAL ticks by hand, which is precisely the "the watcher was started but
+  // never ticked" form the device dry-run could not distinguish from "the hook
+  // ran and skipped". No real timer is left pending (the G legs never reach the
+  // watcher: their protect gate fails closed first on the absent wg_fwd_open).
+  const capturedTicks: Array<() => void> = [];
+  G['setInterval'] = (handler: () => void): number => {
+    capturedTicks.push(handler);
+    return 7001;
+  };
+  // The live-session document the REAL tick polls: wg up + ready, not terminal,
+  // no recreate ⇒ the tick reaches the arm hook on every replay.
+  const watcherStatus: Record<string, unknown> = {
+    running: true, state: 'connected', peer_count: 1, route_count: 2,
+    reconnects: 0, terminal: false, wg: { device_up: true, ready: true }
+  };
+  const pathLines = (stage: string): string[] => linesWith('N2H_COLLECTOR_PATH|')
+    .filter((l: string): boolean => fieldOf(l, 'stage') === stage);
+
+  // B1: the onCreate beacon through the REAL onCreate (normal path, its async
+  // start flow aborts on the fixture's absent context — caught by onCreate).
+  const bornAbility = freshAbility(mod);
+  resetLog();
+  (bornAbility['onCreate'] as (w: unknown) => void)(
+    { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });
+  const onCreateBeacons = pathLines('onCreate-reached');
+  const onCreateLine: string = onCreateBeacons.length > 0 ? onCreateBeacons[0] : '';
+  check('B1 onCreate emits exactly ONE stage=onCreate-reached beacon',
+    onCreateBeacons.length === 1, JSON.stringify(linesWith('N2H_COLLECTOR_PATH|')));
+  check('B1 onCreate beacon literal (5 fields: requestId|stage|diag|is_evidence)',
+    onCreateLine === 'N2H_COLLECTOR_PATH|requestId=' + REQUEST_ID +
+    '|stage=onCreate-reached|diag=true|is_evidence=false' &&
+    onCreateLine.split('|').length === 5, onCreateLine);
+  check('B1 the beacon carries the requestId resolved from the want (never the default)',
+    fieldOf(onCreateLine, 'requestId') === REQUEST_ID &&
+    fieldOf(onCreateLine, 'requestId') !== 'missing', onCreateLine);
+  await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 0); });
+  check('B1 the async start flow of that onCreate never re-prints the beacon',
+    pathLines('onCreate-reached').length === 1, JSON.stringify(logs()));
+
+  // B2: the beacon precedes EVERY early return — the earliest reachable point.
+  const dupAbility = freshAbility(mod);
+  dupAbility['connectionCreationAttempted'] = true;
+  resetLog();
+  (dupAbility['onCreate'] as (w: unknown) => void)(
+    { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });
+  check('B2 the beacon is at the entry: it precedes the duplicate-onCreate return',
+    linesWith('N2H_COLLECTOR_PATH|').length === 1 &&
+    lastLine('VPN_CREATE_REJECTED|') === 'VPN_CREATE_REJECTED|requestId=' + REQUEST_ID +
+    '|phase=duplicate-onCreate|summary=connection-already-attempted', JSON.stringify(logs()));
+
+  // B3: the watcher beacon — one line per instance, never per tick, through the
+  // REAL start method + REPLAYED REAL ticks (matrix ①: beacons + absent file).
+  const tickAbility = freshAbility(mod);
+  tickAbility['context'] = { filesDir: '/tmp/n2h-i5b-fixture' };
+  G['__NB_STATUS'] = watcherStatus;
+  setArmFile(undefined, undefined); // the device form: ENOENT, proved absent
+  resetLog();
+  (tickAbility['startStatusAndNetcfgWatcher'] as () => void)();
+  const watcherBeaconLine: string = pathLines('watcher-started').length > 0
+    ? pathLines('watcher-started')[0] : '';
+  check('B3 the watcher start emits exactly ONE stage=watcher-started beacon',
+    pathLines('watcher-started').length === 1 && capturedTicks.length === 1,
+    JSON.stringify({ beacons: pathLines('watcher-started').length,
+      ticks: capturedTicks.length }));
+  check('B3 watcher beacon literal (5 fields: requestId|stage|diag|is_evidence)',
+    watcherBeaconLine === 'N2H_COLLECTOR_PATH|requestId=' + REQUEST_ID +
+    '|stage=watcher-started|diag=true|is_evidence=false' &&
+    watcherBeaconLine.split('|').length === 5, watcherBeaconLine);
+  (tickAbility['startStatusAndNetcfgWatcher'] as () => void)();
+  check('B3 a second start call re-prints nothing (the existing once-guard, no new latch)',
+    pathLines('watcher-started').length === 1 && capturedTicks.length === 1,
+    JSON.stringify({ beacons: pathLines('watcher-started').length,
+      ticks: capturedTicks.length }));
+  for (let i = 0; i < 3; i++) {
+    capturedTicks[0]();
+  }
+  check('B3 three REPLAYED real ticks keep ONE watcher beacon (never per-tick spam)',
+    pathLines('watcher-started').length === 1, JSON.stringify(linesWith('N2H_COLLECTOR_PATH|')));
+  check('B3 matrix ①: beacons + arm file absent ⇒ exactly ONE ARM_SKIPPED (I5a regression)',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    lastLine('N2H_COLLECTOR_ARM_SKIPPED|') === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' +
+    REQUEST_ID + '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|' +
+    'accessError=13900002|attempted=true|diag=true|is_evidence=false',
+    JSON.stringify(linesWith('N2H_COLLECTOR_ARM_SKIPPED|')));
+
+  // B4: matrix ② — the extension AND the watcher were reached, but the watcher
+  // never ticked: both beacons, and NOT ONE arm line.
+  const idleAbility = freshAbility(mod);
+  idleAbility['context'] = { filesDir: '/tmp/n2h-i5b-fixture' };
+  setArmFile(undefined, undefined);
+  resetLog();
+  (idleAbility['onCreate'] as (w: unknown) => void)(
+    { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });
+  (idleAbility['startStatusAndNetcfgWatcher'] as () => void)();
+  check('B4 matrix ②: beacons present + ZERO ticks ⇒ both beacons and NO arm line',
+    JSON.stringify(linesWith('N2H_COLLECTOR_PATH|')
+      .map((l: string): string => fieldOf(l, 'stage'))) ===
+    JSON.stringify(['onCreate-reached', 'watcher-started']) &&
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0 &&
+    linesWith('N2H_COLLECTOR_NOT_ARMED|').length === 0 &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 0, JSON.stringify(logs()));
+
+  // B5: matrix ③ — the extension process never started: no beacon at all.
+  const silentAbility = freshAbility(mod);
+  resetLog();
+  check('B5 matrix ③: an instance that received no lifecycle call emits NO beacon',
+    silentAbility['requestId'] === REQUEST_ID && linesWith('N2H_COLLECTOR_PATH|').length === 0 &&
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
+
+  // B6: source pins on the byte-identical fixture (positions + single copies).
+  const onCreatePathAt = extSource.indexOf(
+    "'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=onCreate-reached|diag=true|is_evidence=false'");
+  const duplicateRejectAt = extSource.indexOf(
+    "'VPN_CREATE_REJECTED|requestId=%{public}s|phase=duplicate-onCreate|summary=connection-already-attempted'");
+  check('B6 the onCreate beacon is pinned BEFORE the duplicate-onCreate early return',
+    onCreatePathAt > 0 && onCreatePathAt < duplicateRejectAt,
+    JSON.stringify({ onCreatePathAt, duplicateRejectAt }));
+  const watcherPathAt = extSource.indexOf(
+    "'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=watcher-started|diag=true|is_evidence=false'");
+  const watcherGuardAt = extSource.indexOf(
+    'if (this.watcherTimer >= 0 || this.destroyRequested) {');
+  const intervalAt = extSource.indexOf('}, STATUS_POLL_MS);');
+  check('B6 the watcher beacon is pinned AFTER the once-guard and the interval creation',
+    watcherPathAt > 0 && watcherPathAt > watcherGuardAt && watcherPathAt > intervalAt,
+    JSON.stringify({ watcherPathAt, watcherGuardAt, intervalAt }));
+  check('B6 each beacon literal exists exactly ONCE in the shipped source (no extra copy)',
+    extSource.split('stage=onCreate-reached').length === 2 &&
+    extSource.split('stage=watcher-started').length === 2, 'beacon literal pin');
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {
