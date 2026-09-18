@@ -46,6 +46,16 @@
 //   G7 wiring pins on the byte-identical source (the pre-create call sites,
 //      the two anchor literals, the untouched existing recreate lines and the
 //      arm's single-source read)
+//   A1-A6 (I5a §13.15): the arm hook's outcome is never silent — an absent or
+//      unreadable arm control file emits exactly ONE
+//      N2H_COLLECTOR_ARM_SKIPPED line (reason=arm-file-absent for a PROVED
+//      absence: boolean false or BusinessError 13900002; reason=
+//      arm-file-unreadable for every other error token, which does not prove
+//      absence) carrying the raw code as accessError=, WITHOUT calling the core
+//      arm; the one-shot latch silences every later tick of that instance (and
+//      a file appearing later never arms it); the present-file NOT_ARMED (gate
+//      closed, both field combinations) and ARMED (gate open) paths stay
+//      byte-identical (regression).
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -127,6 +137,25 @@ function freshAbility(mod: Record<string, unknown>): Record<string, unknown> {
   const ability = new (mod['default'] as new () => Record<string, unknown>)();
   ability['requestId'] = REQUEST_ID;
   return ability;
+}
+
+// The live-session status the REAL arm gate reads (wg.device_up && wg.ready).
+const WG_READY: Record<string, unknown> = { wg: { device_up: true, ready: true } };
+
+// One watcher tick of the REAL arm hook.
+function tickArm(ability: Record<string, unknown>, status: Record<string, unknown>): void {
+  (ability['maybeArmN2hCollector'] as (s: unknown) => void)(status);
+}
+
+// The arm-file state globals of the fs stub, in one place: PRESENT true/false =
+// the boolean answer the API gives; ACCESS_ERROR = the code a throw carries (a
+// non-number token ⇒ the throw has NO code); both undefined = throw 13900002
+// (a missing file as the device sees it).
+function setArmFile(present: boolean | undefined, accessError: unknown): void {
+  G['__NB_ARM_PRESENT'] = present;
+  G['__NB_ARM_ACCESS_ERROR'] = accessError;
+  G['__NB_ARM_TEXT'] = '';
+  G['__NB_ARM_OPTS'] = undefined;
 }
 
 // The desired-route-set snapshot the REAL recreate leg consumes: two managed
@@ -384,6 +413,112 @@ try {
   check('G6 with no accepted generation the arm omits the key (never fabricates one)',
     optsR['exclusion_generation'] === undefined && fieldOf(armedR, 'gen') === '-1',
     JSON.stringify(optsR) + ' ' + armedR);
+
+  // ---------------- A (I5a §13.15): the arm check is never a silent branch --
+  // ① the arm file is NOT there (the probe throws the documented ENOENT code,
+  //    which is exactly what the 2026-09-18 device dry-run hit): the hook must
+  //    leave ONE grep-able skip line naming the reason and the raw code, and
+  //    must NOT call the core arm. The file body sentinel proves nothing about
+  //    the file rides the marker.
+  const absentAbility = freshAbility(mod);
+  setArmFile(undefined, undefined);
+  G['__NB_ARM_TEXT'] = 'SENTINEL-ARM-BODY';
+  resetLog();
+  tickArm(absentAbility, WG_READY);
+  const skipLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
+  check('A1 a missing arm file emits exactly ONE skip marker',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1, JSON.stringify(logs()));
+  check('A1 skip marker literal (reason=arm-file-absent + the raw access code)',
+    skipLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
+    '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=13900002' +
+    '|attempted=true|diag=true|is_evidence=false', skipLine);
+  check('A1 the skip does NOT call the core arm (no ARMED / NOT_ARMED / no opts)',
+    G['__NB_ARM_OPTS'] === undefined && linesWith('N2H_COLLECTOR_ARMED|').length === 0 &&
+    linesWith('N2H_COLLECTOR_NOT_ARMED|').length === 0, JSON.stringify(logs()));
+  check('A1 the attempt latch is visible on the line AND on the single latch field',
+    fieldOf(skipLine, 'attempted') === 'true' && absentAbility['n2hArmAttempted'] === true,
+    String(absentAbility['n2hArmAttempted']));
+  check('A1 the skip line carries no arm-file body (nothing was read)',
+    logs().join('\n').indexOf('SENTINEL-ARM-BODY') < 0, JSON.stringify(logs()));
+
+  // ④ the one-shot latch: the ATTEMPT happens once per instance — the skip is
+  //    printed on the first tick and never repeated, including a file that
+  //    appears later on that same instance.
+  resetLog();
+  tickArm(absentAbility, WG_READY);
+  check('A2 a second tick on the same instance repeats nothing (one-shot latch)',
+    logs().length === 0, JSON.stringify(logs()));
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(absentAbility, WG_READY);
+  check('A2 a file appearing later never arms that instance (ONE latch, no second counter)',
+    logs().length === 0 && G['__NB_ARM_OPTS'] === undefined &&
+    absentAbility['n2hArmAttempted'] === true, JSON.stringify(logs()));
+
+  // The API can also ANSWER "not found" as a boolean; the reason stays the same
+  // and the difference is visible in accessError (none = no error was thrown).
+  const falseAbility = freshAbility(mod);
+  setArmFile(false, undefined);
+  resetLog();
+  tickArm(falseAbility, WG_READY);
+  const falseLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
+  check('A3 the boolean not-found answer is the SAME reason with accessError=none',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
+    falseLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
+    '|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=none' +
+    '|attempted=true|diag=true|is_evidence=false', falseLine);
+
+  // An error code that does NOT prove absence must be a DIFFERENT reason — the
+  // two cases may never collapse into one (13900012 = permission denied).
+  const unreadableAbility = freshAbility(mod);
+  setArmFile(undefined, 13900012);
+  resetLog();
+  tickArm(unreadableAbility, WG_READY);
+  const unreadableLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
+  check('A4 a non-ENOENT error is reason=arm-file-unreadable with its code kept',
+    unreadableLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
+    '|reason=arm-file-unreadable|path=/data/local/tmp/netbird-n2h-arm|accessError=13900012' +
+    '|attempted=true|diag=true|is_evidence=false', unreadableLine);
+  const noCodeAbility = freshAbility(mod);
+  setArmFile(undefined, 'no-code');
+  resetLog();
+  tickArm(noCodeAbility, WG_READY);
+  const noCodeLine = lastLine('N2H_COLLECTOR_ARM_SKIPPED|');
+  check('A4 an error thrown WITHOUT a code never claims absence (accessError=no-code)',
+    noCodeLine === 'N2H_COLLECTOR_ARM_SKIPPED|requestId=' + REQUEST_ID +
+    '|reason=arm-file-unreadable|path=/data/local/tmp/netbird-n2h-arm|accessError=no-code' +
+    '|attempted=true|diag=true|is_evidence=false', noCodeLine);
+
+  // ② ③ regressions: the file present keeps the EXISTING two branches verbatim
+  // (and prints no skip line).
+  const notReadyAbility = freshAbility(mod);
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(notReadyAbility, { wg: { device_up: false, ready: true } });
+  check('A5 file present + gate closed keeps the existing NOT_ARMED literal (regression)',
+    linesWith('N2H_COLLECTOR_NOT_ARMED|').length === 1 &&
+    lastLine('N2H_COLLECTOR_NOT_ARMED|') ===
+    'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
+    '|reason=session-not-ready|deviceUp=false|ready=true|diag=true|is_evidence=false' &&
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
+  const notReadyAbility2 = freshAbility(mod);
+  resetLog();
+  tickArm(notReadyAbility2, { wg: { device_up: true, ready: false } });
+  check('A5 the arm gate still requires BOTH device_up and ready (regression)',
+    lastLine('N2H_COLLECTOR_NOT_ARMED|') ===
+    'N2H_COLLECTOR_NOT_ARMED|requestId=' + REQUEST_ID +
+    '|reason=session-not-ready|deviceUp=true|ready=false|diag=true|is_evidence=false' &&
+    G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
+  const readyAbility = freshAbility(mod);
+  readyAbility['n2hAcceptedExclusionGeneration'] = 0;
+  resetLog();
+  tickArm(readyAbility, WG_READY);
+  check('A6 file present + gate open still ARMs, existing literal unchanged (regression)',
+    linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0 &&
+    lastLine('N2H_COLLECTOR_ARMED|') ===
+    'N2H_COLLECTOR_ARMED|requestId=' + REQUEST_ID +
+    '|gen=0|openedMono=4242|exclusions=0|posctlPort=40001|probeWaitMs=800|' +
+    'peerB2aProbeId=none|diag=true|is_evidence=false', JSON.stringify(logs()));
 
   // ---------------- G7: wiring pins on the byte-identical source -----------
   const extSource: string = readFileSync(join(dir, 'NetBirdVpnExtensionAbility.ts')).toString();

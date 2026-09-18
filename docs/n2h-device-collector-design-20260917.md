@@ -759,4 +759,74 @@ stdout（同一跑）：`{"tool":"nbinterop","check":"n2h-peer-loopback","ok":tr
 6. **本轮不做**（各有独立增量）：wg_peer /32 注入（I3b）、5 类必需端点 fatal 扩面、S20 壳侧 arm guard（含 R-5 三字段与 NOT_ARMED 稳定 reason）、**C2 比对脚本**（生成侧已可产出全部标记与字段，判定侧脚本未落盘）。
 7. **残余（如实）**：(a) `gen` 计数为**每 ability 实例**（`requestId` 实例内固定）——撤销后复验等**新会话实例**自 0 重新起算，与 §2.1 (1)「同 `requestId` 内」口径一致，**不得跨实例拼接**；(b) 中间失败腿（route-validation 失败／destroy 失败／create 超时／fd 契约失败）会留下**已宣告但无接受锚点**的代 —— 该代**不构成 G**，判定侧不得视为被接受的代（C2 不成立方向）；(c) hilog 丢行无法由实现侧防止，这正是 `routes=`/`exclusions=` 可计算基数（(2a)）要检出截断的目的 —— 行数与申报不符 ⇒ C2 不成立；(d) `VPN_CREATE_RESOLVED` 的 `accepted` 语义＝create 被平台接受（fd 契约通过），其后的 protect/wg-feed/ICE 失败仍按既有 fail-closed 拆除 —— 接受锚点与「完整流程成功」不是同一件事（与 initial 腿既有语义一致）。
 
+### 13.15 ⑬ I5a 增量落地：消除 arm 路径的静默分支（arm 控制文件探测的可观测性）
+
+> 本节**只追加**，不改写 §0–§13.14 任何正文（本增量对本文档的唯一改动就是本节）。基线：工作树 HEAD `6cbda4b`（干净）+ 本节未提交改动；下列 file:line 为落地后工作树实读。范围＝**只把静默变可见**：新增一个标记行及其探测分支，既有标记的字段/顺序、arm 闸语义、`connector_status()` 形状、设备命令面**均未触碰**，core（Rust）零改动。
+
+**① 动机（2026-09-18 真机 dry-run 实测）**
+
+- **事实**：设备**已建立 VPN 会话**（`vpn-tun inet 100.108.144.165` 实测存在、宿主对端 `session_established=true`），但 **84 次 `N2H_COLLECTOR*` 读数全 0 行**、宿主对端 `a2b_seen=0`（设备从未回发 a2b 探针）⇒ 采集器**从未 arm**，而**没有任何标记说明为什么**。「arm 从未尝试」与「尝试后静默失败」在日志上不可区分。
+- **最可能成因（本增量即该缺口）**：`maybeArmN2hCollector` 的 arm 控制文件检查是静默路径——`fs.accessSync(N2H_ARM_FILE)` 抛错 ⇒ `present=false` ⇒ **直接 return**，既不置 `n2hArmAttempted`、也不打任何标记（I6b 登记项）。设备上该文件缺省不存在，故这条路径就是「84 次 0 行且无解释」的候选解释。
+
+**② 新标记的逐字形态与取值域（唯一新增标记）**
+
+- 逐字（`NetBirdVpnExtensionAbility.ets:1140-1144`；`hilog.warn`）：
+  `N2H_COLLECTOR_ARM_SKIPPED|requestId=<id>|reason=<token>|path=/data/local/tmp/netbird-n2h-arm|accessError=<token>|attempted=true|diag=true|is_evidence=false`
+- **字段形状恒定**（恒 8 字段，只有值随探测结果变化）：`reason` 与 `accessError` 两个取值域如下，`path` 是源码常量（开发通道固定路径，**非**文件内容），`attempted=true` 与 `diag=true|is_evidence=false` 为常量。
+- `reason` 取值域（**恰好二值，互斥且不合并**，常量 `:90-91`）：
+
+| token | 判据 | 语义 |
+|---|---|---|
+| `arm-file-absent` | `fs.accessSync` 返回 `false`，**或**抛出的 BusinessError 码为 `13900002`（ENOENT） | **已证明**文件不存在 |
+| `arm-file-unreadable` | 抛出**任何其它**错误 token（`13900012` 权限拒绝 / `13900005` I/O / `13900011` / `13900013` / `13900042` / 无 code 的抛出） | 探测失败且**未能证明**不存在——文件可能存在但本进程取不到 |
+
+- `accessError` 取值域（只记错误码，不记路径内容、不记 message、不记文件字节）：`none`（API 以布尔回答，未抛错）／`<十进制错误码>`／`no-code`（抛出但无 code token）。它把 `arm-file-absent` 的**两种形态**（布尔 `false` ⇒ `none`；ENOENT 抛出 ⇒ `13900002`）也如实分开。
+- **`fs.accessSync` 可区分性（实测/实读结论，非推测）**：SDK 26.0.0.821 的 `@ohos.file.fs.d.ts:309-336` 逐字为 `declare function accessSync(path: string, mode?: AccessModeType): boolean`，文档同时给出两条「不存在」的形态——返回 `boolean`（`true` 存在／`false` 相反，`:318`）与 `@throws { BusinessError } 13900002 - No such file or directory`（`:319`）——以及一批**不证明不存在**的错误码（`:320-330`：`13900005` I/O、`13900008`、`13900011`、`13900012` Permission denied、`13900013`、`13900018`、`13900020`、`13900023`、`13900030`、`13900033`、`13900042`）。⇒ **可区分**：以错误码为准把「ENOENT（证明不存在）」与「其它码（未证明不存在）」分开，布尔返回与 ENOENT 抛出同归 `arm-file-absent` 而由 `accessError` 保留形态差异。无 code token 的抛出**不得**冒充「不存在」，故归 `arm-file-unreadable`（fail-honest 方向）。
+- 探测实现：新私有方法 `probeN2hArmFile(): N2hArmProbeOutcome`（`:1281-1296`）＋新接口 `N2hArmProbeOutcome{present,skipReason,accessError}`（`:191`）＋三个常量（`:90-92`）。除 arm 钩子外无第二个调用点。
+
+**③ latch 语义（一次性，仍是同一个 `n2hArmAttempted`）**
+
+- `this.n2hArmAttempted = true;` 由「探测通过后」**前移**到探测**之前**（`:1131`，紧随 `if (this.n2hArmAttempted || this.destroyRequested) return;`）⇒ **上闩的是「尝试」而不是「成功」**：每个 ability 实例的 arm 尝试仍**至多一次**，skip 行因此在**首次**到达该钩子的 tick 上打印且永不重复（自检 A2）。**未新增第二个计数器**：skip 行的 `attempted=true` 就是这**同一个**字段的可见形态（自检 A1 断言两者同时为真）。
+- **行为后果（如实登记）**：旧实现在文件缺席时不上闩、每个 tick 重查一次，故「会话中途放入 arm 文件」原本仍可开窗；现在同实例不再复查（须**新会话实例**才可能 arm）。这是 ④ latch 语义的直接结果，也是让「从未尝试」与「尝试后跳过」可区分的代价；对真机取证流程（arm 文件先于会话放置，runbook 既有操作顺序）无影响。
+- `destroyRequested` 短路（`:1123`）**保持静默**（范围外，见 ⑥(b)）。
+
+**④ selfcheck 扩展（host-only，无设备/无网络）**
+
+- 沿用 `run-exclusion-generation.mts` + `exclusion-generation-hooks.mjs`（真实 .ets 逐字节 stage、真实扩展类驱动）。**新增 A 组 13 检查**（`run-exclusion-generation.mts:417-` 起）：
+  - **A1（5 检查）** ① 文件缺失（探测抛 `13900002`，即真机形态）⇒ **恰一行** skip 行且逐字等于上式、`reason=arm-file-absent|accessError=13900002`；**不调用 arm**（`__NB_ARM_OPTS` 未写入、无 ARMED/NOT_ARMED）；闩可见（行内 `attempted=true` ∧ 实例 `n2hArmAttempted===true`）；日志中无 arm 文件内容（哨兵串不出现）。
+  - **A2（2 检查）** ④ 同实例第二次 tick **零行**；随后把文件置为存在再 tick 仍**零行**、不 ARMED ⇒ 闩是唯一且是「尝试」闩。
+  - **A3（1 检查）** 布尔 `false` 形态 ⇒ 同一 `reason`，`accessError=none`（两种「不存在」形态由 `accessError` 区分）。
+  - **A4（2 检查）** `13900012` ⇒ `reason=arm-file-unreadable|accessError=13900012`；抛出但**无 code** ⇒ `reason=arm-file-unreadable|accessError=no-code`（绝不冒充不存在）——两个 reason 不合并的直接反例。
+  - **A5（2 检查）** ② 回归：文件存在 + 闸不满足（`deviceUp=false,ready=true` 与 `deviceUp=true,ready=false` 两种组合）⇒ 既有 `N2H_COLLECTOR_NOT_ARMED|…` 逐字未变、且**无** skip 行、未调用 arm（闸仍是 `device_up && ready`）。
+  - **A6（1 检查）** ③ 回归：文件存在 + 闸满足 ⇒ 既有 `N2H_COLLECTOR_ARMED|…` 逐字未变（含 `gen=`／`openedMono=`／`exclusions=`／`posctlPort=`／`probeWaitMs=`／`peerB2aProbeId=`／`diag=true|is_evidence=false`），且无 skip 行。
+- **替身扩展**（`exclusion-generation-hooks.mjs`，`@ohos.file.fs` stub）：由「`__NB_ARM_PRESENT===true` 才返回 true、否则抛 `13900002`」扩为四种可驱动形态——`PRESENT===true` ⇒ 返回 true；`PRESENT===false` ⇒ 返回 false；`__NB_ARM_ACCESS_ERROR` 为数 ⇒ 抛该码；为非数（如 `'no-code'`）⇒ 抛出**无 code**；两者皆未设 ⇒ 抛 `13900002`（**与原行为逐字相同的缺省**）。G1–G7 既有断言**逐字未改**（仅前述 header 注释与新增 A 组），其余 6 套自检**零改动**。
+- **计数（7 套全 `exit 0`）**：`run.mts` **81/0**、`run-relay-exclusion.mts` **49/0**、`run-exclusion-addr-shape.mts` **25/0**、`run-relay-flag.mts` **9/0**、`run-relay-status-log.mts` **3/0**、`run-route-validation.mts` **49/0**、`run-exclusion-generation.mts` **46/0**（I3a 基线 33，+13）。
+- **变异对照（阴性对照，/tmp 仓库外 fixture，证明新检查有牙）**：(i) 删掉 skip 的 `hilog.warn` 调用（恢复 I5a 之前的静默分支）⇒ **6 失败**（A1×3、A3、A4×2）；(ii) 把两个 reason 合并为恒 `arm-file-absent` ⇒ **2 失败**（A4×2）。两次变异均只影响新增检查，其余全绿。
+
+**⑤ 改动面与验收（工作树实读，HEAD `6cbda4b` + 本节未提交改动）**
+
+- 改动文件（3 已有 + 本文件）：`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets`、`client/entry/selfcheck/{run-exclusion-generation.mts,exclusion-generation-hooks.mjs}`、本文件。**未触碰**：任何 Rust 源（`client/core/**` 零改动）、`connector_status()` 形状、既有标记字面、`module.json5`、其余 6 套自检、预注册草案、T0 审查记录。
+- 验收实跑：
+  - `cd client/core && cargo test --offline --locked --color never` → exit 0；**34 个测试目标全 `ok`，合计 539 passed / 0 failed / 0 ignored**（与 `6cbda4b` 基线逐条相同——本增量不触碰 core）。
+  - `bash client/core/build.sh` → exit 0；`14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)`；末行 `build self-identification N2H_BUILD_SHA256=00166dfaeab1a65ae55f86583153e92923f4eb9d2f5943bcc60424eb0816cf83`（与 §13.14 **相同**，符合「core 源码未改 ⇒ 摘要不变」）。
+  - 壳侧自检 7 套全 `exit 0`：计数见 ④ 末行。
+  - `bash client/build.sh` → exit 0；`BUILD SUCCESSFUL`、`assembleHap exit 0`；`CompileArkTS` 对含本节改动的 ets 编译成功（仅余既有 `Function may throw exceptions` 行告警）；逐项 `VERIFY OK`（HAP 成员 `.so` sha256 `5fc7973276d4ef6b868a7415e23a429ee5734b2bd1aff8038c7270ea882131be`）；HAP `entry-default-unsigned.hap` **4 233 955 bytes**、sha256 `7b377c64da89c670770f4c384b0fc00b8f0a1337a44af97af76e41cf6e1f4b52`（HAP 容器不可逐字节复现，验收以 exit 0 + 逐项 VERIFY OK 为准；`/tmp/n2h-frozen/` 冻结制品未触碰）。
+  - `git diff --stat`：**4 files changed, 302 insertions(+), 18 deletions(-)**（3 个代码/自检文件 + 本节追加；本节对本文件是**纯追加**，diff 无删除行）；`git status --porcelain` 只含这 4 个 `M`，无新增未跟踪文件。
+- **真实标记样例（真实 .ets fixture + 真实方法驱动，逐字；三形态 + 两回归）**：
+  - ① 缺失（抛 `13900002`）：`N2H_COLLECTOR_ARM_SKIPPED|requestId=req-i5a-sample|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=13900002|attempted=true|diag=true|is_evidence=false`（armCalled=false）
+  - ①b 缺失（布尔 `false`）：`…|reason=arm-file-absent|path=/data/local/tmp/netbird-n2h-arm|accessError=none|attempted=true|diag=true|is_evidence=false`
+  - ①c 未证明不存在（`13900012`）：`…|reason=arm-file-unreadable|path=/data/local/tmp/netbird-n2h-arm|accessError=13900012|attempted=true|diag=true|is_evidence=false`
+  - ④ 同实例第二 tick：无任何行输出。
+  - ② 存在 + 闸不满足（回归，逐字未变）：`N2H_COLLECTOR_NOT_ARMED|requestId=req-i5a-sample|reason=session-not-ready|deviceUp=false|ready=true|diag=true|is_evidence=false`
+  - ③ 存在 + 闸满足（回归，逐字未变）：`N2H_COLLECTOR_ARMED|requestId=req-i5a-sample|gen=-1|openedMono=4242|exclusions=0|posctlPort=40001|probeWaitMs=800|peerB2aProbeId=none|diag=true|is_evidence=false`（`gen=-1` 是该 fixture 无接受代的如实缺值；有接受代时自检 A6 断言 `gen=0`）
+
+**⑥ 残余盲区（如实，逐条）**
+
+- **(a) 本标记的证明力边界**：`N2H_COLLECTOR_ARM_SKIPPED` 只能证明「**扩展进程跑到了这个检查点**」。它**不能**区分「扩展从未启动」与「扩展启动了但 watcher 未运行」——这两种情况同样零行。要区分需**另一层标记**（例如扩展 `onCreate` 的到达打点），那属新的增量，本次**未做**（见派发回报中的建议）。
+- **(b) `destroyRequested` 短路仍静默**（`:1123`）：onDestroy 之后不再尝试 arm 且不打 skip 行——该分支被周围既有 teardown 标记（`VPN_DESTROY*` / onDestroy 路径）界定，但本身无「因为已在拆除所以没 arm」的专行；范围外，未改。
+- **(c) 探测结果是时点观测**：同一实例内文件后放置不会被复查（③ 的 latch 后果），故 skip 行的**不存在**并不等价于「探测被跳过」；判定侧须以「本会话是否出现过 ARMED / NOT_ARMED / ARM_* / ARM_SKIPPED 之一」为口径。
+- **(d) hilog 丢行**无法由实现侧防止：skip 行是单行、无基数可对账（与既有诊断行同级），其缺失只能与 (a) 的到达打点配合判读。
+- **(e) 证据地位**：skip 行恒带 `diag=true|is_evidence=false`——它是诊断可观测性，**不是**判定证据，不改变 §6.1「默认关闭、不进产品面」与「arm 动作本身从不作 gate evidence」的纪律。
+
+
 

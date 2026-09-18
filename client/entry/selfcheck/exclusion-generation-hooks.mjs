@@ -14,10 +14,17 @@
 //                     globalThis.__NB_LOG, so the marker assertions run against
 //                     the REAL hilog call sites (same recorder as
 //                     relay-exclusion-hooks.mjs).
-//   - @ohos.file.fs -> the arm control file: `accessSync` reports presence only
-//                     when globalThis.__NB_ARM_PRESENT === true (otherwise it
-//                     throws the way a missing file does), `readTextSync`
-//                     returns globalThis.__NB_ARM_TEXT verbatim.
+//   - @ohos.file.fs -> the arm control file, in the three shapes the real
+//                     @ohos.file.fs.accessSync can answer with (SDK 26.0.0.821
+//                     @ohos.file.fs.d.ts:309-336 — boolean false / BusinessError
+//                     13900002 for "not there", other codes for a probe that did
+//                     not prove absence):
+//                       __NB_ARM_PRESENT === true   -> returns true
+//                       __NB_ARM_PRESENT === false  -> returns false
+//                       __NB_ARM_ACCESS_ERROR = <n> -> throws BusinessError <n>
+//                       __NB_ARM_ACCESS_ERROR = 'x' -> throws WITHOUT a code
+//                       both unset                  -> throws 13900002
+//                     `readTextSync` returns globalThis.__NB_ARM_TEXT verbatim.
 //   - @ohos.net.vpnExtension -> `createVpnConnection()` returns a fake
 //                     connection whose create() resolves to
 //                     globalThis.__NB_CREATE_FD (default 99) and records every
@@ -70,8 +77,11 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   'export default {\n' +
   '  accessSync: (path) => {\n' +
   '    if (g().__NB_ARM_PRESENT === true) { return true; }\n' +
-  '    const e = new Error("no such file: " + path);\n' +
-  '    e.code = 13900002;\n' +
+  '    if (g().__NB_ARM_PRESENT === false) { return false; }\n' +
+  '    const code = g().__NB_ARM_ACCESS_ERROR;\n' +
+  '    const e = new Error("arm probe failed: " + path);\n' +
+  '    if (typeof code === "number") { e.code = code; }\n' +
+  '    else if (code === undefined) { e.code = 13900002; }\n' +
   '    throw e;\n' +
   '  },\n' +
   '  readTextSync: () => (typeof g().__NB_ARM_TEXT === "string" ? g().__NB_ARM_TEXT : "")\n' +

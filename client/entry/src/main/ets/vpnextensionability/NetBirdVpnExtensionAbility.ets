@@ -77,6 +77,19 @@ const RECREATE_CREATE_BOX_MS: number = 5000;
 // EXISTENCE is the arm request (same /data/local/tmp development channel as
 // `netbird-protect-deviation`). No arm file ⇒ the collector stays inert.
 const N2H_ARM_FILE: string = '/data/local/tmp/netbird-n2h-arm';
+// N2-H I5a (§13.15): the two outcomes the arm-file probe can PROVE, and the
+// documented "No such file or directory" code that separates them. SDK
+// 26.0.0.821 `@ohos.file.fs.d.ts:309-336` (`accessSync(path, mode?): boolean`)
+// documents BOTH shapes for a file that is not there — the boolean `false`
+// return and the BusinessError `13900002` — and other codes for a probe that
+// failed WITHOUT proving absence (`13900012` permission denied / `13900005`
+// I/O error / …). "proved absent" (false OR 13900002) and "could not be read"
+// (any other code) are therefore distinguishable and must NEVER be one reason
+// (device dry-run 2026-09-18: 84 zero-row collector reads with no marker
+// explaining that the arm had never even been attempted).
+const N2H_ARM_FILE_ABSENT: string = 'arm-file-absent';
+const N2H_ARM_FILE_UNREADABLE: string = 'arm-file-unreadable';
+const N2H_ACCESS_ENOENT: string = '13900002';
 // §5.1 arm-option defaults (the file may override them; core re-validates).
 const N2H_POSCTL_PORT_DEFAULT: number = 40001;
 const N2H_PROBE_WAIT_MS_DEFAULT: number = 800;
@@ -166,6 +179,19 @@ interface N2hCollectorArmResult {
   armed?: boolean;
   opened_mono?: number;
   error?: string;
+}
+
+// N2-H I5a (§13.15): the arm control-file probe's outcome — the arm decision
+// plus the observable explanation of a skip. `skipReason` is '' while the file
+// is present, otherwise exactly one of N2H_ARM_FILE_ABSENT /
+// N2H_ARM_FILE_UNREADABLE; `accessError` is 'none' when the API answered with a
+// boolean, the BusinessError CODE as a decimal token when it threw, 'no-code'
+// when it threw without a code (codes only — never path content, never message
+// text, never the file's contents).
+interface N2hArmProbeOutcome {
+  present: boolean;
+  skipReason: string;
+  accessError: string;
 }
 
 // {open,errno} JSON returned by the synchronous core.fd_status(fd) NAPI export.
@@ -1089,20 +1115,34 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // attribute the counterparty's b2a positive control. Everything is
   // marker-logged with `diag=true|is_evidence=false`: arming is a diagnostic
   // action, never gate evidence — only the reviewed document is.
+  // N2-H I5a (§13.15): every outcome of this hook is now observable — the three
+  // existing markers (ARMED / NOT_ARMED / ARM_FAILED|REJECTED) plus, for the
+  // file probe itself, exactly one N2H_COLLECTOR_ARM_SKIPPED line (see
+  // probeN2hArmFile).
   private maybeArmN2hCollector(status: ConnectorStatusResult): void {
     if (this.n2hArmAttempted || this.destroyRequested) {
       return;
     }
-    let present: boolean = false;
-    try {
-      present = fs.accessSync(N2H_ARM_FILE);
-    } catch (error) {
-      present = false;
-    }
-    if (!present) {
+    // N2-H I5a (§13.15): the ONE-SHOT latch is set BEFORE the probe, so the
+    // attempt itself is what happens at most once per ability instance — not
+    // the success. The skip below is therefore printed on the FIRST tick that
+    // reached this hook and never again, and `attempted=true` on that line is
+    // the visible form of the same single field (no second counter).
+    this.n2hArmAttempted = true;
+    const probe: N2hArmProbeOutcome = this.probeN2hArmFile();
+    if (!probe.present) {
+      // The silent branch the 2026-09-18 device dry-run could not explain: 84
+      // zero-row collector reads, a2b_seen=0, and no marker saying the arm had
+      // never been attempted. The reason distinguishes "proved absent" from
+      // "probe failed without proving absence"; `path=` is the fixed
+      // development-channel constant (never file content), `accessError=` is an
+      // error CODE token only.
+      hilog.warn(DOMAIN, TAG,
+        'N2H_COLLECTOR_ARM_SKIPPED|requestId=%{public}s|reason=%{public}s|path=%{public}s|' +
+        'accessError=%{public}s|attempted=true|diag=true|is_evidence=false',
+        this.requestId, probe.skipReason, N2H_ARM_FILE, probe.accessError);
       return;
     }
-    this.n2hArmAttempted = true;
     const deviceUp: boolean =
       status.wg !== undefined && status.wg !== null && status.wg.device_up === true;
     const ready: boolean = status.wg !== undefined && status.wg !== null && status.wg.ready === true;
@@ -1227,6 +1267,34 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  // N2-H I5a (§13.15): probe the arm control file WITHOUT hiding why the arm
+  // did not happen. `fs.accessSync(path)` (@ohos.file.fs) can report "not
+  // there" in TWO documented shapes — the boolean `false` return and the
+  // BusinessError `13900002` — and can also throw codes that do NOT prove
+  // absence (`13900012` permission denied, `13900005` I/O error, `13900011` OOM,
+  // `13900013` bad address, `13900042` unknown, …). The two cases are kept
+  // apart: `arm-file-absent` is a PROOF (false or 13900002), every other error
+  // token is `arm-file-unreadable` (the file may exist but this process could
+  // not get to it). The raw code rides the skip line as `accessError=`: a
+  // decimal code, 'none' for the boolean answer, 'no-code' for an error thrown
+  // without a code token — never path content, never a message.
+  private probeN2hArmFile(): N2hArmProbeOutcome {
+    let present: boolean = false;
+    try {
+      present = fs.accessSync(N2H_ARM_FILE);
+    } catch (error) {
+      const code: string = String((error as BusinessFailure).code ?? 'no-code');
+      return {
+        present: false,
+        skipReason: code === N2H_ACCESS_ENOENT ? N2H_ARM_FILE_ABSENT : N2H_ARM_FILE_UNREADABLE,
+        accessError: code
+      };
+    }
+    return present
+      ? { present: true, skipReason: '', accessError: 'none' }
+      : { present: false, skipReason: N2H_ARM_FILE_ABSENT, accessError: 'none' };
+  }
+
   // Runtime watch (while the VPN is up): poll connector_status (state /
   // counts / last error class) and connector_network_config. Platform
   // conclusion baked in here: VpnConnection has NO runtime route/DNS update
@@ -1332,10 +1400,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           return;
         }
         // N2-H I5 (§5.3-1): one-shot development-channel arm check. It never
-        // changes a product path — no arm file ⇒ nothing happens (the
-        // collector stays inert per §6.1); a terminal connector or a pending
-        // recreate has already returned above, so a window never straddles a
-        // teardown or a rebuild.
+        // changes a product path — the collector stays inert per §6.1, and an
+        // absent/unreadable arm file now costs exactly ONE grep-able
+        // N2H_COLLECTOR_ARM_SKIPPED line (I5a §13.15) instead of silence; a
+        // terminal connector or a pending recreate has already returned above,
+        // so a window never straddles a teardown or a rebuild.
         this.maybeArmN2hCollector(status);
       } else {
         this.statusPollFailures++;
