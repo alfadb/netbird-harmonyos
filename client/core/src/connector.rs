@@ -1989,6 +1989,32 @@ pub struct RelayCarrier {
     /// ([`LANE_OPEN_RETRY`] backoff after a failed open; entries clear on
     /// success).
     open_retry_after: Mutex<HashMap<String, std::time::Instant>>,
+    /// Lifecycle guard (T0-0018 follow-up): the lane-open COMMIT — validity
+    /// re-check + WG attach + attached-table insert, see
+    /// [`RelayCarrier::commit_lane_open`] — and every invalidating transition
+    /// ([`RelayCarrier::attach_client`] re-arm/swap, [`RelayCarrier::set_peers`]
+    /// removal, [`RelayCarrier::shutdown`]) run under THIS mutex, so they are
+    /// mutually exclusive: a late open either sees invalid state and drops,
+    /// or commits before the invalidator, whose detach under the same lock
+    /// then removes it — a removed/stopped carrier can never be resurrected
+    /// by a late open. `true` = armed (between attach_client and shutdown).
+    /// LOCK ORDER: `lifecycle` first, then one leaf lock at a time
+    /// (client/peers/attached/pending_opens/open_retry_after/stats); never
+    /// held across an await; no leaf holder ever acquires `lifecycle` (no
+    /// ABBA).
+    lifecycle: Mutex<bool>,
+    /// Per-peer in-flight lane-open task — at most ONE per peer (0018 fix:
+    /// opens run as managed tasks so a peer that never comes online parks
+    /// only its own task, never the inbound pump). The pump spawns and never
+    /// awaits them; entries carry a generation (`AtomicU64` counter) so a
+    /// task's finish removes ONLY its own registration — an aborted-but-
+    /// never-yielded old task must not unregister a newer task's entry (that
+    /// would orphan it from abort/shutdown bookkeeping and break
+    /// single-flight). Aborted on peer removal / client swap / pump exit /
+    /// teardown; reaped on the pump tick if a task died without bookkeeping.
+    pending_opens: Mutex<HashMap<String, (u64, tokio::task::JoinHandle<()>)>>,
+    /// Generation counter for [`RelayCarrier::pending_opens`] entries.
+    next_open_gen: std::sync::atomic::AtomicU64,
     stats: Mutex<RelayCarrierStats>,
     /// The production pump task (spawned on the connector runtime).
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -2005,6 +2031,9 @@ impl RelayCarrier {
             peers: Mutex::new(Vec::new()),
             attached: Mutex::new(HashMap::new()),
             open_retry_after: Mutex::new(HashMap::new()),
+            lifecycle: Mutex::new(false),
+            pending_opens: Mutex::new(HashMap::new()),
+            next_open_gen: std::sync::atomic::AtomicU64::new(0),
             stats: Mutex::new(RelayCarrierStats::default()),
             task: Mutex::new(None),
         })
@@ -2035,13 +2064,21 @@ impl RelayCarrier {
     }
 
     /// (Re)arm with a relay client: detaches all lanes (presence does not
-    /// survive a relay reconnect) and aborts any pump of a PREVIOUS client.
+    /// survive a relay reconnect), aborts any pump AND any pending lane open
+    /// of a PREVIOUS client. Runs under the lifecycle lock: mutually exclusive
+    /// with the lane-open commit — an old client's open that already passed
+    /// its await either commits BEFORE this (and is detached right here) or
+    /// sees the swapped client in its commit check and drops.
     pub fn attach_client(&self, client: crate::relay_client::RelayClient) {
-        self.detach_all();
+        let mut lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        *lifecycle = true;
+        self.detach_all_locked(&lifecycle);
         if let Some(h) = self.task.lock().unwrap_or_else(PoisonError::into_inner).take() {
             h.abort();
         }
+        self.abort_pending_lanes();
         *self.client.lock().unwrap_or_else(PoisonError::into_inner) = Some(client);
+        drop(lifecycle);
         hilog::emit("connector: relay carrier armed with the relay client");
     }
 
@@ -2050,12 +2087,39 @@ impl RelayCarrier {
     /// host/test drivers of the orchestrator feed the same map-derived key
     /// set the sync path does.
     pub fn set_peers(&self, keys: &[String]) {
-        {
+        // Under the lifecycle lock: the map replacement + removal handling is
+        // mutually exclusive with the lane-open commit (a commit either sees
+        // the peer gone and drops, or attached before this run — the stale
+        // loop below then detaches it).
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        let removed: Vec<String> = {
             let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+            let removed: Vec<String> = peers
+                .iter()
+                .filter(|(k, _)| !keys.contains(k))
+                .map(|(k, _)| k.clone())
+                .collect();
             *peers = keys
                 .iter()
                 .map(|k| (k.clone(), crate::relay::PeerId::from_wg_pubkey_string(k)))
                 .collect();
+            removed
+        };
+        // A removed peer's pending open must never fire into a late attach:
+        // abort the task (a task already past its last await is unaffected by
+        // abort — its commit sees the peer gone and drops); also drop its
+        // backoff entry — the map must not remember a peer the lane universe
+        // forgot.
+        for key in &removed {
+            if let Some((_, h)) =
+                self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).remove(key)
+            {
+                h.abort();
+            }
+            self.open_retry_after
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(key);
         }
         let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
         let stale: Vec<String> = attached
@@ -2069,6 +2133,7 @@ impl RelayCarrier {
             self.bump(|s| s.detach_ok += 1);
             hilog::emit("connector: relay carrier lane detached (peer left the map)");
         }
+        drop(lifecycle);
     }
 
     /// Spawn the production pump task (idempotent) on `rt`.
@@ -2134,30 +2199,7 @@ impl RelayCarrier {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(key);
-                let lane = std::sync::Arc::new(
-                    crate::relay_client::RelayWgCarrier::new(client, pid),
-                );
-                match self.wg.attach_carrier(key, lane.clone()) {
-                    Ok(()) => {
-                        self.attached
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .insert(key.to_string(), lane);
-                        self.bump(|s| {
-                            s.lanes_open_ok += 1;
-                            s.attach_ok += 1;
-                        });
-                        hilog::emit("connector: relay carrier lane attached (peers-online)");
-                        true
-                    }
-                    Err(e) => {
-                        self.bump(|s| s.attach_err += 1);
-                        hilog::emit(&format!(
-                            "connector: relay carrier attach failed (seam: {e})"
-                        ));
-                        false
-                    }
-                }
+                self.commit_lane_open(key, pid, client)
             }
             Err(e) => {
                 self.open_retry_after
@@ -2168,13 +2210,103 @@ impl RelayCarrier {
                     s.lanes_open_failed += 1;
                     s.last_open_error = Some(relay_error_class_token(e.class()));
                 });
+                hilog::emit(&format!(
+                    "connector: relay lane open failed|peer={} class={}",
+                    pid,
+                    relay_error_class_token(e.class())
+                ));
                 false
             }
         }
     }
 
-    /// Open every missing lane (the pump's per-pass fan-out).
-    async fn ensure_lanes(self: &std::sync::Arc<Self>) {
+    /// Atomic lane-open commit (T0-0018 follow-up). The open ran as a
+    /// detached task, so between its resolution and the attach the carrier may
+    /// have been disarmed (shutdown), swapped to another client
+    /// ([`RelayCarrier::attach_client`]) or the peer removed from the map
+    /// ([`RelayCarrier::set_peers`]). The validity re-check AND the WG attach
+    /// + attached-table insert happen inside ONE lifecycle critical section,
+    /// mutually exclusive with those transitions: a late open either (a) sees
+    /// invalid state and drops, or (b) commits BEFORE the invalidator — whose
+    /// detach, under the same lock, then removes the lane. Either way a
+    /// removed/stopped/swapped carrier is never resurrected by a late open.
+    /// Lock order: lifecycle → one leaf at a time; no await under any lock.
+    fn commit_lane_open(&self, key: &str, pid: crate::relay::PeerId, client: crate::relay_client::RelayClient) -> bool {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        let still_wanted =
+            *lifecycle
+                && self.has_client(&client)
+                && self
+                    .peers
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .any(|(k, _)| k == key);
+        if !still_wanted {
+            drop(lifecycle);
+            hilog::emit(&format!(
+                "connector: relay lane open resolved late, dropped|peer={}",
+                pid
+            ));
+            return false;
+        }
+        let lane =
+            std::sync::Arc::new(crate::relay_client::RelayWgCarrier::new(client, pid));
+        match self.wg.attach_carrier(key, lane.clone()) {
+            Ok(()) => {
+                self.attached
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(key.to_string(), lane);
+                self.bump(|s| {
+                    s.lanes_open_ok += 1;
+                    s.attach_ok += 1;
+                });
+                drop(lifecycle);
+                hilog::emit("connector: relay carrier lane attached (peers-online)");
+                true
+            }
+            Err(e) => {
+                self.bump(|s| s.attach_err += 1);
+                drop(lifecycle);
+                hilog::emit(&format!(
+                    "connector: relay carrier attach failed (seam: {e})"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Fan the lane universe out into managed per-peer open tasks (the pump's
+    /// per-pass pass; 0018 fix). NEVER awaits an open: the pre-fix version
+    /// awaited every peer's `open_conn` sequentially here, so one peer that
+    /// never came online parked the whole pump for the 30s §4.1 budget per
+    /// pass — inbound frames of already-connected lanes starved behind it
+    /// (0018: transport bytes flowing, wg.rx_packets 0, session never up).
+    ///
+    /// Registration is ATOMIC and lifecycle-gated (T0 residual): the whole
+    /// await-free pass runs under the lifecycle guard (an unarmed carrier
+    /// registers nothing — a pump pass that survives a concurrent teardown
+    /// cannot register post-shutdown orphans), and per peer the vacant check →
+    /// `tokio::spawn` → insert happen under ONE `pending_opens` critical
+    /// section — two transient pumps can never check-miss each other into
+    /// overwriting a registered handle. `spawn` neither awaits nor polls the
+    /// child, so holding the std mutex across it is safe (a child that races
+    /// ahead parks on the same lock until the insert is done).
+    /// Discipline per peer: skip if a lane is live (presence reconcile still
+    /// runs inside `ensure_lane` for an offline-announced lane), if an open
+    /// is already in flight, or inside the [`LANE_OPEN_RETRY`] backoff — so
+    /// opens are neither duplicated nor re-spammed per tick. Lock order:
+    /// lifecycle first, then one leaf at a time, never nested leaves.
+    fn spawn_pending_lanes(self: &std::sync::Arc<Self>) {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*lifecycle {
+            return;
+        }
+        let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        else {
+            return;
+        };
         let keys: Vec<String> = self
             .peers
             .lock()
@@ -2183,14 +2315,98 @@ impl RelayCarrier {
             .map(|(k, _)| k.clone())
             .collect();
         for key in keys {
-            // sequential: bounded by open_conn's own injected-clock budget
-            let _ = self.ensure_lane(&key).await;
+            // leaf checks first — each taken and released before the next
+            if self
+                .open_retry_after
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .is_some_and(|t| std::time::Instant::now() < *t)
+            {
+                continue;
+            }
+            let pid = crate::relay::PeerId::from_wg_pubkey_string(&key);
+            if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(&key)
+                && !client.is_offline(&pid)
+            {
+                continue;
+            }
+            // Single short critical section: vacant check → spawn → insert
+            // (generational entry — see `finish_open`; an aborted-but-never-
+            // yielded old task finishing late removes only its OWN (key, gen)
+            // entry, never a newer task's).
+            let mut pending =
+                self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.contains_key(&key) {
+                continue;
+            }
+            // Bounded metadata (0018 diagnostics): distinguishes "pump never
+            // ran" from "open never resolved". Rate-limited by the per-peer
+            // single-flight guard + backoff; the peer id is the public
+            // `sha-` form — no payload, no key material.
+            hilog::emit(&format!("connector: relay lane open waiting|peer={}", pid));
+            let gen = self.next_open_gen.fetch_add(1, Ordering::Relaxed);
+            let this = self.clone();
+            let task_key = key.clone();
+            let handle = tokio::spawn(async move {
+                let _ = this.ensure_lane(&task_key).await;
+                this.finish_open(&task_key, gen);
+            });
+            pending.insert(key, (gen, handle));
         }
+    }
+
+    /// Unregister one pending open — but ONLY if `gen` still owns `key`.
+    /// (T0-0018 follow-up: bare-key removal had an ABA — a drained-then-
+    /// re-registered key made the old task's tail delete the NEW task's
+    /// entry, leaving it unmanaged by abort/shutdown and breaking
+    /// single-flight.)
+    fn finish_open(&self, key: &str, gen: u64) {
+        let mut pending = self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+        if pending.get(key).is_some_and(|(g, _)| *g == gen) {
+            pending.remove(key);
+        }
+    }
+
+    /// Abort every pending lane open (client swap / pump exit / teardown).
+    /// Aborting removes the entry AND the task, so nothing can attach later;
+    /// a task already past its last await is unaffected by `abort` — its
+    /// commit re-validates under the lifecycle lock and drops.
+    fn abort_pending_lanes(&self) {
+        let handles: Vec<_> =
+            self.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
+        if handles.is_empty() {
+            return;
+        }
+        for (_, (_, h)) in handles {
+            h.abort();
+        }
+        hilog::emit("connector: relay pending lane opens aborted");
+    }
+
+    /// Reap open tasks that finished WITHOUT self-removing (a panic between
+    /// `ensure_lane` and the map cleanup would otherwise block that peer's
+    /// lane forever). Cheap (no join, just a finished flag) — run per tick.
+    fn reap_finished_lanes(&self) {
+        self.pending_opens
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, (_, h)| !h.is_finished());
     }
 
     /// Detach every lane (relay revoked / down / teardown). The device then
     /// routes only via a nominated ICE path — or nothing (fail-closed).
+    /// Takes the lifecycle lock itself (pump-path entry).
     fn detach_all(&self) {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        self.detach_all_locked(&lifecycle);
+    }
+
+    /// [`RelayCarrier::detach_all`] for callers already holding the lifecycle
+    /// lock (attach_client / shutdown): the `_lifecycle` guard documents and
+    /// enforces that the section is mutually exclusive with the lane-open
+    /// commit.
+    fn detach_all_locked(&self, _lifecycle: &MutexGuard<'_, bool>) {
         let mut attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
         if attached.is_empty() {
             return;
@@ -2228,6 +2444,16 @@ impl RelayCarrier {
         };
         match key {
             Some(key) => {
+                // One-shot metadata (0018 diagnostics): proves the pump IS
+                // running and the sender mapping MATCHED — the counterpoint
+                // to the lane-open markers when a device log is read offline.
+                // Fires once per carrier, never per frame.
+                if self.stats.lock().unwrap_or_else(PoisonError::into_inner).frames_in == 0 {
+                    hilog::emit(&format!(
+                        "connector: relay first inbound frame matched|peer={}",
+                        sender
+                    ));
+                }
                 let replies = self
                     .wg
                     .handle_carrier_inbound(payload, &key, crate::sys::mono_ms());
@@ -2237,25 +2463,42 @@ impl RelayCarrier {
                 });
             }
             None => {
+                // One-shot metadata (0018 diagnostics): distinguishes "frame
+                // arrived from an unregistered sender" (mapping miss / rogue
+                // sender) from "pump not running". Fires once, counted always.
+                if self.stats.lock().unwrap_or_else(PoisonError::into_inner).frames_in_unknown == 0
+                {
+                    hilog::emit(&format!(
+                        "connector: relay first unknown-sender frame dropped|sender={}",
+                        sender
+                    ));
+                }
                 self.bump(|s| s.frames_in_unknown += 1);
             }
         }
     }
 
-    /// Teardown: pump aborted + every lane detached (connector stop / worker
-    /// end / host-driven teardown). Idempotent.
+    /// Teardown: pump aborted + every pending open aborted + every lane
+    /// detached (connector stop / worker end / host-driven teardown).
+    /// Idempotent. Under the lifecycle lock (disarm): mutually exclusive with
+    /// the lane-open commit — a commit either finished before this (detached
+    /// here) or sees the disarmed carrier and drops.
     pub fn shutdown(&self) {
+        let mut lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        *lifecycle = false;
         if let Some(h) = self.task.lock().unwrap_or_else(PoisonError::into_inner).take() {
             h.abort();
         }
-        self.detach_all();
+        self.abort_pending_lanes();
+        self.detach_all_locked(&lifecycle);
     }
 }
 
-/// The production pump loop: lanes open while (and only while) the relay is
-/// Ready; inbound frames are pumped between passes. Exits when the client
-/// stops (recv drained to `None`) or the state machine reaches `Dead` —
-/// teardown additionally aborts this task.
+/// The production pump loop: lane opens are FANNED OUT as managed per-peer
+/// tasks (never awaited inline — a pending open must not park the pump, 0018)
+/// while (and only while) the relay is Ready; inbound frames are pumped
+/// between passes. Exits when the client stops (recv drained to `None`) or
+/// the state machine reaches `Dead` — teardown additionally aborts this task.
 async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
     loop {
         let Some(client) = carrier
@@ -2264,11 +2507,16 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
         else {
+            carrier.abort_pending_lanes();
             return;
         };
         match client.state() {
-            crate::relay_client::RelayState::Dead => return,
-            crate::relay_client::RelayState::Ready => carrier.ensure_lanes().await,
+            crate::relay_client::RelayState::Dead => {
+                carrier.abort_pending_lanes();
+                return;
+            }
+            // spawns only — no open is awaited on the pump's path
+            crate::relay_client::RelayState::Ready => carrier.spawn_pending_lanes(),
             // relay down: no lane may look like a path (fail-closed)
             _ => carrier.detach_all(),
         }
@@ -2281,12 +2529,15 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
                     }
                 }
             } => {
+                carrier.abort_pending_lanes();
                 if !kept {
                     return;
                 }
             }
             _ = tokio::time::sleep(core::time::Duration::from_millis(500)) => {
-                // periodic re-check: lanes to open / relay state changes
+                // periodic re-check: lanes to open / relay state changes; also
+                // reaps open tasks that died without bookkeeping
+                carrier.reap_finished_lanes();
             }
         }
     }
@@ -6679,5 +6930,713 @@ mod tests {
             "frozen relay object must stay byte-identical: {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
+    }
+
+    // -------------------------------------------------------------------
+    // 0018 — relay pump starvation behind pending lane opens
+    // -------------------------------------------------------------------
+    //
+    // These tests drive the REAL production pump (`relay_carrier_pump` via
+    // `ensure_pump`) over a REAL `RelayClient` against the in-process fake
+    // relay server (`crate::relay_testserver`) — no re-implemented pump.
+    // The injected `VirtualClock` freezes the §4.1 open budget so a pending
+    // lane open is deterministic; all other time is real loopback IO.
+
+    use crate::relay::PeerId;
+    use crate::relay_client::{OPEN_CONN_TIMEOUT, RelayState};
+    use crate::relay_testserver::{RelayTestServer, TestServerConfig};
+    use std::time::Instant;
+
+    /// Carrier-capable recording WG seam: attaches/detaches and carrier
+    /// inbound are recorded for assertions.
+    #[derive(Default)]
+    struct CarrierProbeWg {
+        attached: Mutex<Vec<String>>,
+        detached: Mutex<Vec<String>>,
+        inbound: Mutex<Vec<(String, Vec<u8>)>>,
+    }
+
+    impl WgPeerApplier for CarrierProbeWg {
+        fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear(&self) {}
+        fn carrier_capable(&self) -> bool {
+            true
+        }
+        fn attach_carrier(
+            &self,
+            pub_key_b64: &str,
+            _carrier: std::sync::Arc<dyn crate::wg_device::WgEgressCarrier>,
+        ) -> Result<(), String> {
+            self.attached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(pub_key_b64.to_string());
+            Ok(())
+        }
+        fn detach_carrier(&self, pub_key_b64: &str) {
+            self.detached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(pub_key_b64.to_string());
+        }
+        fn handle_carrier_inbound(&self, datagram: &[u8], pub_key_b64: &str, _now_ms: u64) -> usize {
+            self.inbound
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((pub_key_b64.to_string(), datagram.to_vec()));
+            0
+        }
+    }
+
+    /// A well-shaped WG public-key stand-in (the relay path only ever hashes
+    /// the base64 STRING — no key validation exists below this seam).
+    fn relay_lane_key(byte: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([byte; 32])
+    }
+
+    /// Fabricated but well-shaped relay token: payload = expiry unix second.
+    fn relay_fabricated_token(expires_at_unix: u64) -> crate::relay::AuthToken {
+        crate::relay::AuthToken::from_management(
+            &expires_at_unix.to_string(),
+            &base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
+        )
+        .expect("fabricated token is well-shaped")
+    }
+
+    /// Bounded REAL-time wait (client/pump run on real loopback IO; only the
+    /// §4.1 open budget rides the frozen virtual clock).
+    async fn relay_wait_until(fuse: Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + fuse;
+        loop {
+            if pred() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Bounded real-time negative window: `true` = pred stayed false.
+    async fn relay_stays_false_for(window: Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + window;
+        while Instant::now() < deadline {
+            if pred() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    /// A raw remote endpoint on the fake relay server (plays the remote
+    /// node's relay session: auth, then Transport sender).
+    async fn relay_remote(
+        server: &RelayTestServer,
+        id: &PeerId,
+        token: &crate::relay::AuthToken,
+    ) -> crate::ws::WsClient<tokio::net::TcpStream> {
+        let tcp = tokio::net::TcpStream::connect(server.addr()).await.expect("remote dials");
+        let key = crate::ws::random_sec_websocket_key().expect("random key");
+        let mut ws = crate::ws::client_handshake(tcp, &server.addr().to_string(), "/relay", &key)
+            .await
+            .expect("remote ws handshake");
+        ws.write_binary(
+            &crate::relay::Frame::Auth { peer_id: id.clone(), token: token.clone() }
+                .encode()
+                .expect("auth frame"),
+        )
+        .await
+        .expect("remote auth send");
+        match ws.read_message().await.expect("remote auth response") {
+            crate::ws::WsMessage::Binary(bytes) => match crate::relay::Frame::decode(&bytes) {
+                Ok(crate::relay::Frame::AuthResponse { .. }) => ws,
+                other => panic!("remote must be authenticated first, got {other:?}"),
+            },
+            other => panic!("expected auth response binary, got {other:?}"),
+        }
+    }
+
+    async fn relay_starvation_fixture(
+    ) -> (
+        RelayTestServer,
+        std::sync::Arc<crate::relay_client::VirtualClock>,
+        std::sync::Arc<RelayCarrier>,
+        std::sync::Arc<CarrierProbeWg>,
+        crate::relay_client::RelayClient,
+    ) {
+        let server = RelayTestServer::start(TestServerConfig::default())
+            .await
+            .expect("fake relay server");
+        let unix_base: u64 = 1_800_000_000;
+        let token = relay_fabricated_token(unix_base + 3_600);
+        let clock = std::sync::Arc::new(crate::relay_client::VirtualClock::new(unix_base));
+        let pub_self = relay_lane_key(0xC3);
+        let client = crate::relay_client::RelayClient::start(
+            crate::relay_client::RelayClientConfig::new(
+                &[format!("rel://127.0.0.1:{}", server.addr().port())],
+                &pub_self,
+                token,
+            )
+            .expect("relay config")
+            .with_clock(clock.clone()),
+        )
+        .expect("relay client starts");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                client.state() == RelayState::Ready
+            })
+            .await,
+            "relay client must become Ready against the fake server"
+        );
+        let wg = std::sync::Arc::new(CarrierProbeWg::default());
+        let carrier = RelayCarrier::new(wg.clone() as std::sync::Arc<dyn WgPeerApplier>);
+        // Production arming order (relay_carrier_client_started): arm the
+        // carrier with the client, THEN spawn the pump.
+        carrier.attach_client(client.clone());
+        (server, clock, carrier, wg, client)
+    }
+
+    /// THE 0018 REGRESSION: an already-connected peer's inbound frame must be
+    /// ingested in bounded real time (far below the 30s §4.1 window) even
+    /// while ANOTHER peer's lane open is pending. The pre-fix pump ran
+    /// `ensure_lanes` sequentially to completion BEFORE pumping, so the
+    /// pending open parked the whole pump for the open budget per pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_pump_ingests_inbound_while_another_lane_open_is_still_pending() {
+        let (server, clock, carrier, wg, client) = relay_starvation_fixture().await;
+
+        let pub_online = relay_lane_key(0xA1);
+        let pub_silent = relay_lane_key(0xB2);
+        let pub_self = relay_lane_key(0xC3);
+        let pid_online = PeerId::from_wg_pubkey_string(&pub_online);
+        let pid_self = PeerId::from_wg_pubkey_string(&pub_self);
+
+        // The ONLINE peer authenticates BEFORE the client subscribes: its
+        // open_conn resolves immediately. The SILENT peer never shows up: its
+        // open_conn parks until the (frozen) injected clock crosses the §4.1
+        // budget — a deterministic stand-in for 0018's never-online peers.
+        let mut online =
+            relay_remote(&server, &pid_online, &relay_fabricated_token(1_800_003_600)).await;
+
+        // Lane universe ORDER mirrors 0018: a connected peer listed before a
+        // dead one. Production wiring: the pump task via `ensure_pump`.
+        carrier.set_peers(&[pub_online.clone(), pub_silent.clone()]);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.stats().lanes_open_ok == 1).await,
+            "the online peer's lane must attach (stats={:?})",
+            carrier.stats(),
+        );
+
+        // Inbound from the online peer while the silent peer's open parks.
+        online
+            .write_binary(
+                &crate::relay::Frame::Transport {
+                    peer_id: pid_self.clone(),
+                    payload: vec![1, 2, 3, 4],
+                }
+                .encode()
+                .expect("frame encodes"),
+            )
+            .await
+            .expect("online peer sends transport");
+
+        // The frame REACHED the client (its reader is independent of the pump)
+        // — the starvation under test is between the client queue and WG.
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || client.stats().transport_rx_bytes >= 4)
+                .await,
+            "fixture broken: the frame never arrived at the relay client"
+        );
+
+        // THE ASSERTION: ingest in bounded real time, DURING the pending open.
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || carrier.stats().frames_in == 1).await,
+            "inbound frame starved behind a pending lane open (stats={:?})",
+            carrier.stats(),
+        );
+        {
+            let inbound = wg.inbound.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(inbound.len(), 1, "exactly one frame must reach the WG seam");
+            assert_eq!(inbound[0].0, pub_online, "frame keyed by the sender's WG pubkey");
+            assert_eq!(inbound[0].1, vec![1, 2, 3, 4]);
+        }
+        assert_eq!(
+            carrier.stats().lanes_open_failed, 0,
+            "the silent open must STILL be pending — this proved ingestion DURING the wait (stats={:?})",
+            carrier.stats(),
+        );
+
+        // Unblock the parked open the deterministic way: virtual time crosses
+        // the §4.1 budget → typed timeout → backoff; nothing else breaks.
+        clock.advance(OPEN_CONN_TIMEOUT + Duration::from_secs(1));
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || carrier.stats().lanes_open_failed == 1)
+                .await,
+            "the parked open must time out once virtual time crosses its budget (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(carrier.stats().last_open_error, Some("open-conn-timeout"));
+
+        // The pump survived the timeout: the next frame still flows bounded.
+        online
+            .write_binary(
+                &crate::relay::Frame::Transport {
+                    peer_id: pid_self.clone(),
+                    payload: vec![9, 9],
+                }
+                .encode()
+                .expect("frame encodes"),
+            )
+            .await
+            .expect("online peer sends transport");
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || carrier.stats().frames_in == 2).await,
+            "pump must keep ingesting after a lane-open timeout (stats={:?})",
+            carrier.stats(),
+        );
+
+        // Unknown sender end-to-end: counted, NEVER fed to the WG seam.
+        let pid_stranger = PeerId::from_wg_pubkey_string(&relay_lane_key(0xDD));
+        let mut stranger =
+            relay_remote(&server, &pid_stranger, &relay_fabricated_token(1_800_003_600)).await;
+        stranger
+            .write_binary(
+                &crate::relay::Frame::Transport {
+                    peer_id: pid_self.clone(),
+                    payload: vec![7u8; 16],
+                }
+                .encode()
+                .expect("frame encodes"),
+            )
+            .await
+            .expect("stranger sends transport");
+        assert!(
+            relay_wait_until(Duration::from_secs(2), || carrier.stats().frames_in_unknown == 1)
+                .await,
+            "unknown sender must be counted (stats={:?})",
+            carrier.stats(),
+        );
+        assert_eq!(
+            wg.inbound.lock().unwrap_or_else(PoisonError::into_inner).len(),
+            2,
+            "unknown sender must NOT reach the WG seam (only the two online-peer frames may)"
+        );
+        assert!(
+            wg.inbound
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .all(|(k, _)| *k == pub_online),
+            "every fed frame must be keyed by the online peer"
+        );
+
+        carrier.shutdown();
+    }
+
+    /// The pending lane open must END on peer removal and on connector stop:
+    /// no late attach for a removed peer, no resurrected lane after teardown.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_pump_pending_lane_open_ends_on_peer_removal_and_on_stop() {
+        let (server, _clock, carrier, wg, _client) = relay_starvation_fixture().await;
+
+        let pub_silent = relay_lane_key(0xB2);
+        let pid_silent = PeerId::from_wg_pubkey_string(&pub_silent);
+
+        carrier.set_peers(&[pub_silent.clone()]);
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+
+        // The open actually went out (server saw the subscribe) and parks.
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the pending open must reach the server as a SubscribePeerState"
+        );
+        assert_eq!(carrier.stats().lanes_open_ok, 0);
+
+        // Peer removal while the open is pending … then the peer comes
+        // online: a surviving open would attach a lane for a REMOVED peer.
+        carrier.set_peers(&[]);
+        assert!(
+            server.set_peer_online(&pid_silent, true),
+            "came-online must fire to the registered subscriber"
+        );
+        assert!(
+            relay_stays_false_for(Duration::from_millis(700), || {
+                carrier.stats().lanes_open_ok > 0
+                    || carrier.lane_count() > 0
+                    || !wg.attached.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+            })
+            .await,
+            "a removed peer's pending open must not attach after removal"
+        );
+        assert_eq!(carrier.lane_count(), 0);
+
+        // Connector-stop shape: went-offline first (the §4.1 came-online
+        // interest is one-shot in faithful mode), a fresh open goes out for
+        // the re-added peer, then teardown aborts it — the peer coming
+        // online afterwards must never produce a late attach.
+        assert!(server.set_peer_online(&pid_silent, false), "went-offline must fire");
+        carrier.set_peers(&[pub_silent.clone()]);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 2
+            })
+            .await,
+            "a fresh open must go out for the re-added peer"
+        );
+        carrier.shutdown();
+        assert!(server.set_peer_online(&pid_silent, true), "came-online must fire again");
+        assert!(
+            relay_stays_false_for(Duration::from_millis(700), || {
+                carrier.stats().lanes_open_ok > 0
+                    || carrier.lane_count() > 0
+                    || !wg.attached.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+            })
+            .await,
+            "a stopped connector's pending open must not attach after teardown"
+        );
+        assert_eq!(carrier.lane_count(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // 0018 follow-up (T0 review) — lane-open COMMIT atomicity
+    // -------------------------------------------------------------------
+    //
+    // The open task's COMMIT (validity re-check + WG attach + attached-table
+    // insert) must be mutually exclusive with every invalidating transition
+    // (shutdown / client swap / peer removal). These tests park the commit
+    // INSIDE the probe seam's attach_carrier and interleave a concurrent
+    // teardown from another thread — the exact "passed the await, mid-commit"
+    // window an abort cannot cancel.
+
+    /// Probe seam whose `attach_carrier` parks on a gate: models "open
+    /// resolved, check passed, attach in flight". `active` is the
+    /// attach−detach BALANCE — the attach history alone would mislead
+    /// (attached-then-detached is not residue).
+    #[derive(Default)]
+    struct GatedCommitWg {
+        commit_started: AtomicBool,
+        gate: std::sync::Mutex<bool>,
+        gate_cv: std::sync::Condvar,
+        active: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl GatedCommitWg {
+        fn release_gate(&self) {
+            let mut held = self.gate.lock().unwrap();
+            *held = true;
+            self.gate_cv.notify_all();
+        }
+    }
+
+    impl WgPeerApplier for GatedCommitWg {
+        fn apply_peers(&self, _: &[WgPeerEntry]) -> Result<(), String> {
+            Ok(())
+        }
+        fn clear(&self) {}
+        fn carrier_capable(&self) -> bool {
+            true
+        }
+        fn attach_carrier(
+            &self,
+            pub_key_b64: &str,
+            _carrier: std::sync::Arc<dyn crate::wg_device::WgEgressCarrier>,
+        ) -> Result<(), String> {
+            self.commit_started.store(true, Ordering::SeqCst);
+            // Park until the test releases the gate (bounded so a broken
+            // test cannot hang the suite; timing asserts stay bounded).
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut held = self.gate.lock().unwrap();
+            while !*held && Instant::now() < deadline {
+                let (guard, _) =
+                    self.gate_cv.wait_timeout(held, Duration::from_millis(100)).unwrap();
+                held = guard;
+            }
+            self.active.lock().unwrap().insert(pub_key_b64.to_string());
+            Ok(())
+        }
+        fn detach_carrier(&self, pub_key_b64: &str) {
+            self.active.lock().unwrap().remove(pub_key_b64);
+        }
+    }
+
+    async fn relay_commit_race_fixture(
+    ) -> (
+        RelayTestServer,
+        std::sync::Arc<GatedCommitWg>,
+        std::sync::Arc<RelayCarrier>,
+        crate::relay_client::RelayClient,
+    ) {
+        let server = RelayTestServer::start(TestServerConfig::default())
+            .await
+            .expect("fake relay server");
+        let unix_base: u64 = 1_800_000_000;
+        let token = relay_fabricated_token(unix_base + 3_600);
+        let clock = std::sync::Arc::new(crate::relay_client::VirtualClock::new(unix_base));
+        let pub_self = relay_lane_key(0xC3);
+        let client = crate::relay_client::RelayClient::start(
+            crate::relay_client::RelayClientConfig::new(
+                &[format!("rel://127.0.0.1:{}", server.addr().port())],
+                &pub_self,
+                token,
+            )
+            .expect("relay config")
+            .with_clock(clock.clone()),
+        )
+        .expect("relay client starts");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                client.state() == RelayState::Ready
+            })
+            .await,
+            "relay client must become Ready against the fake server"
+        );
+        let wg = std::sync::Arc::new(GatedCommitWg::default());
+        let carrier = RelayCarrier::new(wg.clone() as std::sync::Arc<dyn WgPeerApplier>);
+        (server, wg, carrier, client)
+    }
+
+    /// Drive one silent peer's lane open all the way INTO the commit and
+    /// park it there (returns once the commit is mid-attach).
+    async fn relay_park_commit_mid_attach(
+        server: &RelayTestServer,
+        wg: &GatedCommitWg,
+        carrier: &std::sync::Arc<RelayCarrier>,
+        client: &crate::relay_client::RelayClient,
+    ) {
+        let pub_silent = relay_lane_key(0xB2);
+        let pid_silent = PeerId::from_wg_pubkey_string(&pub_silent);
+        carrier.set_peers(&[pub_silent]);
+        carrier.attach_client(client.clone());
+        carrier.ensure_pump(&tokio::runtime::Handle::current());
+
+        // The open goes out; the peer comes online; open_conn resolves Ok;
+        // the commit parks inside the probe seam's attach_carrier.
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                server.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the open must reach the server as a SubscribePeerState"
+        );
+        assert!(
+            server.set_peer_online(&pid_silent, true),
+            "came-online must fire to the registered subscriber"
+        );
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                wg.commit_started.load(Ordering::SeqCst)
+            })
+            .await,
+            "the lane-open commit must reach the WG attach"
+        );
+    }
+
+    /// The commit is mid-attach when shutdown runs: teardown must serialize
+    /// against the commit — no lane may survive, no unmanaged pending open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_lane_open_commit_is_atomic_against_shutdown() {
+        let (server, wg, carrier, client) = relay_commit_race_fixture().await;
+        relay_park_commit_mid_attach(&server, &wg, &carrier, &client).await;
+
+        let stop_done = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop_done.clone();
+        let carrier_for_stop = carrier.clone();
+        std::thread::spawn(move || {
+            carrier_for_stop.shutdown();
+            stop_flag.store(true, Ordering::SeqCst);
+        });
+        // The commit holds the lifecycle section: teardown cannot complete
+        // behind its back.
+        assert!(
+            relay_stays_false_for(Duration::from_millis(300), || {
+                stop_done.load(Ordering::SeqCst)
+            })
+            .await,
+            "shutdown completed while a lane-open commit was mid-attach (no mutual exclusion)"
+        );
+        wg.release_gate();
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || stop_done.load(Ordering::SeqCst)).await,
+            "shutdown must complete once the commit gate is released"
+        );
+        assert!(
+            wg.active.lock().unwrap().is_empty(),
+            "a late lane-open commit must not resurrect a lane past shutdown"
+        );
+        assert_eq!(carrier.lane_count(), 0, "no lane may survive shutdown");
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "no unmanaged pending open may survive shutdown"
+        );
+    }
+
+    /// Same race against a client swap: the old client's mid-commit open
+    /// must never land a lane on the swapped-in carrier.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_lane_open_commit_is_atomic_against_client_swap() {
+        let (server, wg, carrier, client) = relay_commit_race_fixture().await;
+        relay_park_commit_mid_attach(&server, &wg, &carrier, &client).await;
+
+        let pub_self2 = relay_lane_key(0xC4);
+        let clock2 = Arc::new(crate::relay_client::VirtualClock::new(1_800_000_000));
+        let client2 = crate::relay_client::RelayClient::start(
+            crate::relay_client::RelayClientConfig::new(
+                &[format!("rel://127.0.0.1:{}", server.addr().port())],
+                &pub_self2,
+                relay_fabricated_token(1_800_003_600),
+            )
+            .expect("relay config 2")
+            .with_clock(clock2),
+        )
+        .expect("second relay client starts");
+
+        let swap_done = Arc::new(AtomicBool::new(false));
+        let swap_flag = swap_done.clone();
+        let carrier_for_swap = carrier.clone();
+        let client2_for_swap = client2.clone();
+        std::thread::spawn(move || {
+            carrier_for_swap.attach_client(client2_for_swap);
+            swap_flag.store(true, Ordering::SeqCst);
+        });
+        assert!(
+            relay_stays_false_for(Duration::from_millis(300), || {
+                swap_done.load(Ordering::SeqCst)
+            })
+            .await,
+            "client swap completed while a lane-open commit was mid-attach (no mutual exclusion)"
+        );
+        wg.release_gate();
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || swap_done.load(Ordering::SeqCst)).await,
+            "client swap must complete once the commit gate is released"
+        );
+        assert!(
+            wg.active.lock().unwrap().is_empty(),
+            "the old client's late commit must not leave a lane behind"
+        );
+        assert_eq!(carrier.lane_count(), 0);
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "no unmanaged pending open may survive a client swap"
+        );
+        assert!(carrier.has_client(&client2), "the carrier must serve the new client");
+        assert!(!carrier.has_client(&client), "the old client must be disarmed");
+        carrier.shutdown();
+    }
+
+    /// Generational pending-open bookkeeping (T0-0018 follow-up): an old
+    /// task's late unregister must never evict a NEWER registration of the
+    /// same key — that would orphan the new task from abort/shutdown
+    /// bookkeeping and break per-peer single-flight.
+    #[tokio::test]
+    async fn pending_open_unregister_is_generational() {
+        let carrier = RelayCarrier::new(
+            Arc::new(CarrierProbeWg::default()) as std::sync::Arc<dyn WgPeerApplier>
+        );
+        // Two registered "opens" for the same key: gen 1 (an old task that
+        // got drained and is finishing late) and gen 2 (the current task).
+        let h1 = tokio::spawn(std::future::pending::<()>());
+        let h2 = tokio::spawn(std::future::pending::<()>());
+        {
+            let mut pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+            pending.insert("k".to_string(), (1, h1));
+            pending.insert("k".to_string(), (2, h2));
+        }
+        // The OLD task finishes late: its unregister must NOT evict gen 2.
+        carrier.finish_open("k", 1);
+        assert_eq!(
+            carrier
+                .pending_opens
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get("k")
+                .map(|(g, _)| *g),
+            Some(2),
+            "a stale generation must not unregister the newer pending open"
+        );
+        // The newer entry is still managed: shutdown drains and aborts it.
+        carrier.shutdown();
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "shutdown must drain the current pending open"
+        );
+        // And the matching generation still unregisters its own entry.
+        let h3 = tokio::spawn(std::future::pending::<()>());
+        {
+            let mut pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+            pending.insert("k".to_string(), (3, h3));
+        }
+        carrier.finish_open("k", 3);
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "a matching generation must unregister its own entry"
+        );
+    }
+
+    /// Registration atomicity + lifecycle gate (T0 residual): repeated spawn
+    /// passes for the same key register exactly ONE pending open — the second
+    /// pass sees it vacant-checked under the same lock and neither duplicates
+    /// nor overwrites the generation — and a pass after shutdown registers
+    /// nothing (unarmed gate).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_open_registration_is_atomic_and_gated() {
+        let (_server, _clock, carrier, _wg, client) = relay_starvation_fixture().await;
+        let pub_silent = relay_lane_key(0xB2);
+
+        // The fixture arms the carrier; disarm it to exercise the gate.
+        carrier.shutdown();
+
+        // Unarmed: a pass must register nothing.
+        carrier.set_peers(&[pub_silent.clone()]);
+        carrier.spawn_pending_lanes();
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "an unarmed carrier must not register lane opens"
+        );
+
+        // Armed: two consecutive passes for the same key — one registration,
+        // stable generation (no duplicate, no overwrite).
+        carrier.attach_client(client.clone());
+        carrier.spawn_pending_lanes();
+        let gen_after_first = {
+            let pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(pending.len(), 1, "the first pass must register exactly one open");
+            pending.values().next().map(|(g, _)| *g)
+        };
+        carrier.spawn_pending_lanes();
+        {
+            let pending = carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(
+                pending.len(),
+                1,
+                "a second pass must not register a duplicate pending open"
+            );
+            assert_eq!(
+                pending.values().next().map(|(g, _)| *g),
+                gen_after_first,
+                "a second pass must not overwrite the registered generation"
+            );
+        }
+
+        // Teardown drains the registration; a post-shutdown pass stays empty.
+        carrier.shutdown();
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "shutdown must drain the pending open"
+        );
+        carrier.spawn_pending_lanes();
+        assert!(
+            carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
+            "a pass on a disarmed carrier must not register lane opens"
+        );
     }
 }
