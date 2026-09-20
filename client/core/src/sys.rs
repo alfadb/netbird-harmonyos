@@ -7,6 +7,12 @@
 //! openat paths) but is not spelled out in the :353-360 table; the OHOS musl
 //! sysroot declares `pid_t gettid(void)` in <unistd.h>, so it is called as a plain
 //! libc function.
+//!
+//! Deviation registered 2026-09-20 (n2h posctl socket-context increment): the
+//! READ-ONLY diagnostics section below adds `getuid`/`geteuid` (unistd) and
+//! `getsockopt` (sys/socket.h) for the `SO_MARK`/`SO_BINDTODEVICE` reads of
+//! the posctl probe socket only. Nothing here ever writes to a socket: no
+//! `setsockopt`, no `connect`, no bind change goes through the added externs.
 
 #![allow(non_camel_case_types)]
 
@@ -100,6 +106,29 @@ extern "C" {
 }
 
 // ---------------------------------------------------------------------------
+// read-only socket-context diagnostics (n2h_collector send_posctl only)
+// ---------------------------------------------------------------------------
+// Option values per the OHOS SDK headers: asm-generic/socket.h carries
+// SO_MARK=36 and SO_BINDTODEVICE=25 under SOL_SOCKET=1; <sys/socket.h> declares
+// getsockopt with `socklen_t *optlen` (u32 on this target); <unistd.h> declares
+// getuid/geteuid. All three are exported by the aarch64 OHOS libc (symbol
+// presence verified against the SDK stubs — the actual reads are still to be
+// confirmed on the device). READS ONLY: no setsockopt, no connect, no bind
+// change is declared here.
+
+extern "C" {
+    pub fn getuid() -> u32;
+    pub fn geteuid() -> u32;
+    pub fn getsockopt(
+        fd: c_int,
+        level: c_int,
+        optname: c_int,
+        optval: *mut c_void,
+        optlen: *mut u32,
+    ) -> c_int;
+}
+
+// ---------------------------------------------------------------------------
 // structs
 // ---------------------------------------------------------------------------
 
@@ -172,6 +201,10 @@ pub const EINTR: c_int = 4;
 pub const EMSGSIZE: c_int = 90;
 pub const ESRCH: c_int = 3;
 pub const EISCONN: c_int = 106; // N3-7: adopt an already-connected provided socket
+// socket option levels/names (asm-generic/socket.h per the OHOS SDK)
+pub const SOL_SOCKET: c_int = 1;
+pub const SO_MARK: c_int = 36;
+pub const SO_BINDTODEVICE: c_int = 25;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -236,4 +269,50 @@ pub fn write_fd(fd: c_int, buf: &[u8]) -> (isize, c_int) {
     let n = unsafe { write(fd, buf.as_ptr() as *const c_void, buf.len()) };
     let e = if n == -1 { errno() } else { 0 };
     (n, e)
+}
+
+/// Real and effective uid of this process (`getuid`/`geteuid` never fail).
+pub fn uid_euid() -> (u32, u32) {
+    unsafe { (getuid(), geteuid()) }
+}
+
+/// `getsockopt(fd, SOL_SOCKET, SO_MARK)` — the RAW 32-bit mark as stored on
+/// the socket, or `Err(errno)` when the read itself fails. mark=0 is a VALID
+/// unmarked reading, never "unsupported"; the value is opaque (the fwmark bit
+/// layout is not decoded anywhere in this crate).
+pub fn so_mark(fd: c_int) -> Result<u32, c_int> {
+    let mut v: c_int = 0;
+    let mut len: u32 = core::mem::size_of::<c_int>() as u32;
+    let r = unsafe {
+        getsockopt(fd, SOL_SOCKET, SO_MARK, (&mut v as *mut c_int).cast(), &mut len)
+    };
+    if r == 0 {
+        Ok(v as u32)
+    } else {
+        Err(errno())
+    }
+}
+
+/// `getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE)` — the bound device name, or
+/// `Err(errno)` when the read itself fails. An EMPTY name is the kernel saying
+/// "no explicit device binding" (it does NOT mean a physical interface was
+/// chosen). The raw bytes are filtered to printable ASCII so the value stays
+/// single-line on the diagnostic channel.
+pub fn so_bindtodevice(fd: c_int) -> Result<String, c_int> {
+    let mut buf = [0u8; 64];
+    let mut len: u32 = buf.len() as u32;
+    let r = unsafe {
+        getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, buf.as_mut_ptr().cast(), &mut len)
+    };
+    if r != 0 {
+        return Err(errno());
+    }
+    let n = core::cmp::min(len as usize, buf.len());
+    Ok(buf[..n]
+        .iter()
+        .copied()
+        .take_while(|&b| b != 0)
+        .filter(|&b| (0x20..0x7f).contains(&b))
+        .map(|b| b as char)
+        .collect())
 }

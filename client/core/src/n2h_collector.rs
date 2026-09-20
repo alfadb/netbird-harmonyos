@@ -73,6 +73,7 @@ use crate::n2h::{
 use crate::util::{base64, jbool, jinum, jstr, sha256_hex};
 use crate::wg_device::{TunFrameDir, TunFrameTee, TunTeeTotals, WgDeviceStats};
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -2728,17 +2729,162 @@ fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> 
     out
 }
 
+// ---------------------------------------------------------------------------
+// posctl socket-context diagnostics (read-only increment, 2026-09-20)
+// ---------------------------------------------------------------------------
+// Proven in 0020: the same a2b probe_id was received on the host from
+// 100.108.171.38:46003 (a peer the operator confirmed is 192.168.50.9) while
+// the device's own overlay address is 165.x and the device TUN never saw the
+// marker — but the kernel's /proc/net/route does carry 100.108/16 dev
+// vpn-tun, `ip` does not exist on the device, and the UDP src field was the
+// 0.0.0.0 wildcard. So the open question is what the SENDING SOCKET actually
+// carried, not another route guess: the lines below sample the very fd the
+// datagram leaves on. READS ONLY — no connect, no setsockopt, no interface
+// bind, no resend; a failed read is recorded with its real errno and never
+// touches the send.
+
+/// Frozen prefix of the socket-context diagnostic lines.
+pub const MARK_SOCKET_CONTEXT: &str = "N2H_POSCTL_SOCKET_CONTEXT";
+
+/// One read-only sample of the posctl probe socket (uid/euid are process-wide,
+/// the option reads are on the sampled fd).
+struct SocketContextSample {
+    fd: crate::sys::c_int,
+    uid: u32,
+    euid: u32,
+    /// Raw 32-bit SO_MARK; `Err(errno)` = the READ failed (mark=0 is a valid
+    /// unmarked reading). The value is opaque — the fwmark bit layout is NOT
+    /// decoded here (no netId, no Android layout).
+    mark: Result<u32, crate::sys::c_int>,
+    /// SO_BINDTODEVICE name; empty string = no explicit device binding (which
+    /// does NOT mean a physical interface was chosen). `Err(errno)` = the READ
+    /// failed.
+    bound_device: Result<String, crate::sys::c_int>,
+    mono_ms: u64,
+}
+
+/// Sample the context of `fd` read-only. Nothing here can fail the caller:
+/// every read failure is recorded with its own errno.
+fn sample_socket_context(fd: crate::sys::c_int) -> SocketContextSample {
+    let (uid, euid) = crate::sys::uid_euid();
+    SocketContextSample {
+        fd,
+        uid,
+        euid,
+        mark: crate::sys::so_mark(fd),
+        bound_device: crate::sys::so_bindtodevice(fd),
+        mono_ms: crate::sys::mono_ms(),
+    }
+}
+
+/// `N2H_POSCTL_SOCKET_CONTEXT|probe_id=…|phase=…|fd=…|uid=…|euid=…|mark=…|
+/// mark_errno=…|bound_device=…|bound_device_errno=…|mono_ms=…[|send_len=…|
+/// send_errno=…]|diag=true|is_evidence=false` — metadata only: no payload, no
+/// key material, no error message text, and the mark is raw hex (an
+/// `unavailable` read carries its real errno). The `send_len`/`send_errno`
+/// pair exists on `phase=after` only (errno 0 = the send succeeded).
+fn socket_context_line(
+    ctx: &SocketContextSample,
+    probe_id: &str,
+    phase: &str,
+    sent: Option<(usize, crate::sys::c_int)>,
+) -> String {
+    let (mark, mark_errno) = match ctx.mark {
+        Ok(v) => (format!("0x{v:08x}"), 0),
+        Err(e) => ("unavailable".to_string(), e),
+    };
+    let (bound_device, bound_device_errno) = match &ctx.bound_device {
+        Ok(name) => (name.clone(), 0),
+        Err(e) => ("unavailable".to_string(), *e),
+    };
+    let send_fields = match sent {
+        Some((len, errno)) => format!("send_len={len}|send_errno={errno}|"),
+        None => String::new(),
+    };
+    format!(
+        "{MARK_SOCKET_CONTEXT}|probe_id={probe_id}|phase={phase}|fd={fd}|uid={uid}|euid={euid}|\
+         mark={mark}|mark_errno={mark_errno}|bound_device={bound_device}|\
+         bound_device_errno={bound_device_errno}|mono_ms={}|{send_fields}diag=true|is_evidence=false",
+        ctx.mono_ms,
+        fd = ctx.fd,
+        uid = ctx.uid,
+        euid = ctx.euid,
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam: when set, the context samples read THIS fd instead of
+    /// the send socket's own fd. A kept-alive non-socket fd makes every
+    /// option read fail with the kernel's real errno, so the "failed diag
+    /// read must not change the send" property is exercised against real
+    /// syscalls without touching the live socket.
+    static CTX_FD_OVERRIDE: std::cell::Cell<Option<crate::sys::c_int>> =
+        const { std::cell::Cell::new(None) };
+    /// Test-only capture of the emitted socket-context lines.
+    static CTX_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The fd the context samples read — the send socket's own fd, except for the
+/// test-only override.
+fn context_fd(sock_fd: crate::sys::c_int) -> crate::sys::c_int {
+    #[cfg(test)]
+    return CTX_FD_OVERRIDE.with(|c| c.get().unwrap_or(sock_fd));
+    #[cfg(not(test))]
+    sock_fd
+}
+
+/// Emit one socket-context line on the frozen channel (+ test-only capture).
+fn emit_socket_context(line: &str) {
+    hilog::emit(line);
+    #[cfg(test)]
+    CTX_LINES.with(|l| l.borrow_mut().push(line.to_string()));
+}
+
+/// Drained capture of the emitted lines (test only).
+#[cfg(test)]
+fn take_socket_context_lines() -> Vec<String> {
+    CTX_LINES.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
 /// Send one positive-control datagram from a fresh WILDCARD socket (§4.2's
-/// socket discipline) with the host payload shape (§4.3).
+/// socket discipline) with the host payload shape (§4.3). Around `send_to`
+/// itself the SAME socket fd is sampled read-only (before/after: uid/euid,
+/// SO_MARK, SO_BINDTODEVICE, monotonic time) and each sample goes out as one
+/// [`MARK_SOCKET_CONTEXT`] metadata line — the send semantics (bind, dst,
+/// bytes, call count, lifetime, success/failure text) are exactly the
+/// pre-increment ones, and the send result is captured BEFORE the after-sample
+/// so a diagnostic read can never overwrite the send's own error.
 fn send_posctl(dst: SocketAddr, id: &str) -> Result<(usize, String), String> {
     let sock = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD)
         .map_err(|e| format!("posctl socket bind: {e}"))?;
     let src = sock.local_addr().map_err(|e| format!("posctl socket addr: {e}"))?;
     let payload = posctl_payload(id);
-    let n = sock
+    let fd = sock.as_raw_fd();
+    // The line's probe_id is the marker extracted from the legal payload form,
+    // never the raw parameter (empty if the payload were not a legal marker).
+    let probe_id = posctl_marker(payload.as_bytes()).unwrap_or_default();
+    let before = sample_socket_context(context_fd(fd));
+    emit_socket_context(&socket_context_line(&before, &probe_id, "before", None));
+    // The result (and its raw errno, taken from the OWNED io::Error) is saved
+    // first — later reads share neither it nor the failure text.
+    let sent = sock
         .send_to(payload.as_bytes(), dst)
-        .map_err(|e| format!("posctl send: {e}"))?;
-    Ok((n, src.to_string()))
+        .map_err(|e| (e.raw_os_error().unwrap_or(0), e.to_string()));
+    let after = sample_socket_context(context_fd(fd));
+    let send_len = sent.as_ref().ok().map(|n| *n);
+    let send_errno = sent.as_ref().err().map(|pair| pair.0).unwrap_or(0);
+    emit_socket_context(&socket_context_line(
+        &after,
+        &probe_id,
+        "after",
+        Some((send_len.unwrap_or(0), send_errno)),
+    ));
+    match sent {
+        Ok(n) => Ok((n, src.to_string())),
+        Err((_, msg)) => Err(format!("posctl send: {msg}")),
+    }
 }
 
 /// The observation loop (host shape, `n2h.rs:1643-1751`): bounded 10 ms beats
@@ -5596,6 +5742,225 @@ mod tests {
         }
         assert_eq!(posctl_marker(&[0xff, 0xfe]), None, "non-UTF8 is not a probe");
         println!("[I6] posctl wire form: payload={payload} marker={}", posctl_marker(payload.as_bytes()).unwrap_or("?"));
+    }
+
+    // ---- posctl socket-context diag (read-only increment, 2026-09-20) ----
+
+    /// One `key=value` field of a socket-context line.
+    fn ctx_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        let prefix = format!("{key}=");
+        line.split('|').find_map(|f| f.strip_prefix(&prefix))
+    }
+
+    /// The frozen field contract of the metadata line (order, renderings).
+    #[test]
+    fn socket_context_line_freezes_the_field_contract() {
+        let sample = SocketContextSample {
+            fd: 42,
+            uid: 1000,
+            euid: 1001,
+            mark: Ok(0x1234),
+            bound_device: Ok("eth0".into()),
+            mono_ms: 123456,
+        };
+        let id = "N2H-posctl-aabbcceeddff0011223344";
+        assert_eq!(
+            socket_context_line(&sample, id, "before", None),
+            "N2H_POSCTL_SOCKET_CONTEXT|probe_id=N2H-posctl-aabbcceeddff0011223344|phase=before|\
+             fd=42|uid=1000|euid=1001|mark=0x00001234|mark_errno=0|bound_device=eth0|\
+             bound_device_errno=0|mono_ms=123456|diag=true|is_evidence=false"
+        );
+        assert_eq!(
+            socket_context_line(&sample, id, "after", Some((57, 90))),
+            "N2H_POSCTL_SOCKET_CONTEXT|probe_id=N2H-posctl-aabbcceeddff0011223344|phase=after|\
+             fd=42|uid=1000|euid=1001|mark=0x00001234|mark_errno=0|bound_device=eth0|\
+             bound_device_errno=0|mono_ms=123456|send_len=57|send_errno=90|\
+             diag=true|is_evidence=false"
+        );
+        // failed reads carry the real errno and NEVER a fabricated value
+        let failed = SocketContextSample {
+            fd: 7,
+            uid: 0,
+            euid: 0,
+            mark: Err(2),
+            bound_device: Err(1),
+            mono_ms: 9,
+        };
+        let line = socket_context_line(&failed, id, "before", None);
+        assert!(line.contains("|mark=unavailable|mark_errno=2|"), "{line}");
+        assert!(line.contains("|bound_device=unavailable|bound_device_errno=1|"), "{line}");
+        // an EMPTY bound device = no explicit binding (not a physical choice),
+        // and a high-bit mark renders as its raw bits
+        let unbound = SocketContextSample {
+            fd: 7,
+            uid: 0,
+            euid: 0,
+            mark: Ok(0xffff_8000),
+            bound_device: Ok(String::new()),
+            mono_ms: 9,
+        };
+        let line = socket_context_line(&unbound, id, "before", None);
+        assert!(line.contains("|mark=0xffff8000|mark_errno=0|"), "{line}");
+        assert!(line.contains("|bound_device=|bound_device_errno=0|"), "{line}");
+        // metadata only: no payload text can ever leak into the line
+        assert!(!line.contains("positive-control"), "{line}");
+    }
+
+    /// On the Linux host the REAL reads answer a valid unmarked socket:
+    /// mark=0 is a READING (never "unsupported"), an empty bind-device means
+    /// "no explicit binding", and the wildcard probe bind still gives a real
+    /// ephemeral port.
+    #[test]
+    fn socket_context_records_mark_zero_as_a_valid_reading() {
+        let sock = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD).expect("wildcard bind");
+        assert_ne!(sock.local_addr().expect("addr").port(), 0, "bind ANY:0 → ephemeral port");
+        let ctx = sample_socket_context(sock.as_raw_fd());
+        assert_eq!(ctx.fd, sock.as_raw_fd(), "the sample carries the socket's own fd");
+        assert_eq!(ctx.mark, Ok(0), "an unmarked socket reads mark=0, a valid reading");
+        assert_eq!(
+            ctx.bound_device,
+            Ok(String::new()),
+            "no SO_BINDTODEVICE binding reads as empty, not as a chosen physical interface"
+        );
+        assert_eq!(ctx.uid, ctx.euid, "test process uid/euid are recorded read-only");
+        let line = socket_context_line(&ctx, "N2H-posctl-aabbcceeddff0011223344", "before", None);
+        assert_eq!(ctx_field(&line, "mark"), Some("0x00000000"), "{line}");
+        assert_eq!(ctx_field(&line, "mark_errno"), Some("0"), "{line}");
+        assert_eq!(ctx_field(&line, "bound_device"), Some(""), "{line}");
+        assert_eq!(ctx_field(&line, "bound_device_errno"), Some("0"), "{line}");
+        assert_eq!(ctx_field(&line, "fd"), Some(&*sock.as_raw_fd().to_string()), "{line}");
+        assert!(line.starts_with(MARK_SOCKET_CONTEXT), "{line}");
+        assert!(line.ends_with("diag=true|is_evidence=false"), "{line}");
+    }
+
+    /// The real send emits exactly the before/after pair on the SAME fd, the
+    /// after line carries the saved send result, and the ordinary UDP
+    /// send/receive path still works end-to-end.
+    #[test]
+    fn socket_context_before_and_after_sample_the_same_fd() {
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        take_socket_context_lines();
+        let id = probe_id(POSCTL_KIND_TOKEN, &"ab".repeat(12));
+        let payload = posctl_payload(&id);
+        let (n, src) = send_posctl(dst, &id).expect("posctl send");
+        assert_eq!(n, payload.len(), "send semantics unchanged");
+        assert_ne!(src.parse::<SocketAddr>().expect("src").port(), 0, "wildcard src port");
+        let lines = take_socket_context_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(ctx_field(&lines[0], "phase"), Some("before"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[1], "phase"), Some("after"), "{}", lines[1]);
+        let fd_before = ctx_field(&lines[0], "fd").expect("fd on before");
+        let fd_after = ctx_field(&lines[1], "fd").expect("fd on after");
+        assert_eq!(fd_before, fd_after, "before/after sample the SAME fd: {lines:?}");
+        for line in &lines {
+            assert_eq!(ctx_field(line, "probe_id"), Some(id.as_str()), "{line}");
+            assert_eq!(ctx_field(line, "mark"), Some("0x00000000"), "{line}");
+            assert!(!line.contains("positive-control"), "{line}");
+        }
+        // before: no send result yet; after: the saved one, errno 0 on success
+        assert!(ctx_field(&lines[0], "send_len").is_none(), "{}", lines[0]);
+        assert_eq!(
+            ctx_field(&lines[1], "send_len"),
+            Some(payload.len().to_string()).as_deref(),
+            "{}",
+            lines[1]
+        );
+        assert_eq!(ctx_field(&lines[1], "send_errno"), Some("0"), "{}", lines[1]);
+        // the original receive path still records the marker
+        for _ in 0..100 {
+            sink.drain();
+            if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert!(sink.observed(&WireMarker::Ascii(id.clone())).is_some(), "marker arrived");
+    }
+
+    /// With the test-only fd seam pointed at a held-open NON-socket fd, every
+    /// context read fails with the kernel's real errno — and the send result
+    /// is untouched (Ok bytes, marker received).
+    #[test]
+    fn socket_context_read_failure_does_not_change_the_send_result() {
+        let notsock = std::fs::File::open("/dev/null").expect("open /dev/null");
+        let bad_fd = notsock.as_raw_fd();
+        // the sys helper keeps what the kernel answered (ENOTSOCK, linux ABI)
+        assert_eq!(crate::sys::so_mark(bad_fd).unwrap_err(), 88, "real ENOTSOCK");
+        CTX_FD_OVERRIDE.with(|c| c.set(Some(bad_fd)));
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        take_socket_context_lines();
+        let id = probe_id(POSCTL_KIND_TOKEN, &"cd".repeat(12));
+        let payload = posctl_payload(&id);
+        let (n, _src) =
+            send_posctl(dst, &id).expect("a failed diag read must not change the send result");
+        assert_eq!(n, payload.len(), "send semantics unchanged under failing reads");
+        CTX_FD_OVERRIDE.with(|c| c.set(None));
+        for _ in 0..100 {
+            sink.drain();
+            if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert!(sink.observed(&WireMarker::Ascii(id.clone())).is_some(), "marker arrived");
+        let lines = take_socket_context_lines();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for line in &lines {
+            assert_eq!(ctx_field(line, "mark"), Some("unavailable"), "{line}");
+            assert_eq!(ctx_field(line, "mark_errno"), Some("88"), "{line}");
+            assert_eq!(ctx_field(line, "bound_device"), Some("unavailable"), "{line}");
+            assert_eq!(ctx_field(line, "bound_device_errno"), Some("88"), "{line}");
+            assert!(ctx_field(line, "uid").is_some(), "{line}");
+        }
+        assert_eq!(
+            ctx_field(&lines[1], "send_len"),
+            Some(payload.len().to_string()).as_deref(),
+            "{}",
+            lines[1]
+        );
+        assert_eq!(ctx_field(&lines[1], "send_errno"), Some("0"), "{}", lines[1]);
+    }
+
+    /// A closed fd answers the REAL kernel errno (EBADF=9) on both reads —
+    /// never a fabricated value, never "unsupported" — and the line renders
+    /// it verbatim.
+    #[test]
+    fn socket_context_closed_fd_reads_keep_the_real_errno() {
+        let holder = std::net::UdpSocket::bind("127.0.0.1:0").expect("holder bind");
+        let mut mark = Err(crate::sys::EBADF);
+        let mut dev = Err(crate::sys::EBADF);
+        for _ in 0..8 {
+            // dup + close: the closed number may be instantly reused by a
+            // parallel test thread — retry until both reads really fail
+            let closed = unsafe { crate::sys::dup(holder.as_raw_fd()) };
+            assert!(closed >= 0, "dup failed");
+            assert_eq!(unsafe { crate::sys::close(closed) }, 0, "close of the dup failed");
+            mark = crate::sys::so_mark(closed);
+            dev = crate::sys::so_bindtodevice(closed);
+            if mark.is_err() && dev.is_err() {
+                break;
+            }
+        }
+        assert_eq!(mark, Err(crate::sys::EBADF), "so_mark keeps the real EBADF");
+        assert_eq!(dev, Err(crate::sys::EBADF), "so_bindtodevice keeps the real EBADF");
+        let sample = SocketContextSample {
+            fd: -1,
+            uid: 0,
+            euid: 0,
+            mark,
+            bound_device: dev,
+            mono_ms: 0,
+        };
+        let line = socket_context_line(
+            &sample,
+            "N2H-posctl-aabbcceeddff0011223344",
+            "after",
+            Some((0, crate::sys::EBADF)),
+        );
+        assert!(line.contains("|mark=unavailable|mark_errno=9|"), "{line}");
+        assert!(line.contains("|bound_device=unavailable|bound_device_errno=9|"), "{line}");
     }
 
     /// §13.10's ops relay contract: the arm option accepts ONLY the frozen

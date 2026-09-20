@@ -29,6 +29,7 @@
 // CODE tokens only — never a payload, never an exception message.
 import hilog from '@ohos.hilog';
 import statistics from '@ohos.net.statistics';
+import connection from '@ohos.net.connection';
 
 const PROBE_DOMAIN: number = 0x2900;
 const PROBE_TAG: string = 'NetBirdVpn';
@@ -121,4 +122,189 @@ async function sampleIface(requestId: string, iface: string): Promise<void> {
 export async function runInterfaceStatsProbe(requestId: string): Promise<void> {
   await sampleIface(requestId, PROBE_IFACE);
   await sampleIface(requestId, PROBE_NEGATIVE_IFACE);
+}
+
+// ---------------------------------------------------------------------------
+// N2-H network-context snapshot (2026-09-20, diagnostic-only).
+//
+// What this is: ONE one-shot metadata read of the PUBLIC connection-module
+// getters, paired with the parallel native SO_MARK observation — SDK 26.0.0.821
+// @ohos.net.connection.d.ts, read locally, all Sync forms verified:
+//   getDefaultNetSync(): NetHandle            (:182, since 9, GET_NETWORK_INFO)
+//   getAppNetSync(): NetHandle                (:687, since 10)
+//   getAllNetsSync(): Array<NetHandle>        (:230, since 10, GET_NETWORK_INFO)
+//   getNetCapabilitiesSync(NetHandle)         (:349, since 10, GET_NETWORK_INFO)
+//   getConnectionPropertiesSync(NetHandle)    (:289, since 10, GET_NETWORK_INFO)
+//   NetHandle.netId: number (:1680; 0 = no network, valid values >= 100),
+//   ConnectionProperties.interfaceName (:2106) / .routes: RouteInfo[] (:2143),
+//   RouteInfo.destination: LinkAddress{address, prefixLength} (:2177/:2190),
+//   .gateway: NetAddress (:2190), .hasGateway (:2195),
+//   .isExcludedRoute? boolean since 20 (:2217),
+//   NetCapabilities.bearerTypes: Array<NetBearType> (:1841).
+//
+// What this is NOT: NOT a routing verdict. A default/app/all NetHandle plus its
+// interface/routes/gateway metadata is the SYSTEM's view of its networks at
+// this instant — it does NOT tell which path THIS socket (or the native core's
+// socket) finally takes. There is no public SO_MARK bit layout; this probe
+// neither reads nor decodes SO_MARK — a matching netId is circumstantial at
+// most. No socket binding, no app-network binding, no route/permission change,
+// no UID statistics: getters only. No SSID/MAC/credentials field is read — the
+// connection API does not expose them in the fields taken above.
+//
+// Field discipline (same as the iface probe): one
+// `N2H_NET_CONTEXT|...|diag=true|is_evidence=false` line per arm; every API
+// rejection is caught HERE and printed as the BusinessError CODE token only
+// ('no-code' without one); a failed read is 'unavailable', never turned into a
+// value; empty results print as 'empty'/'0' verbatim. Epoch-ms values ride
+// %{public}s as strings (never %{public}d). getAllNets order is processed
+// verbatim up to NETCTX_MAX_NETS entries (the excess is announced via
+// truncated=true, the full count stays in nets=). The caller contract is the
+// iface probe's: arm SUCCESS branch only, fire-and-forget, no timer, no loop,
+// no await added to the arm path.
+const NETCTX_PREFIX: string = 'N2H_NET_CONTEXT|';
+// Log-line bound: a phone answers with 1-3 nets; the cap keeps one anomalous
+// answer from producing an unbounded single line while the nets= field keeps
+// the honest full count.
+const NETCTX_MAX_NETS: number = 8;
+
+// One RouteInfo rendered into delimiter-safe tokens ('+' between routes,
+// '~' between fields — '|' and '=' stay reserved for the marker frame):
+// dest~<address>~prefix~<n>~excl~<true|false|absent>~gw~<address|none>.
+// 'absent' = the optional (since-20) isExcludedRoute key was not delivered;
+// 'none' = hasGateway false. Values verbatim, never normalized into CIDR.
+function renderNetCtxRoutes(routes: Array<connection.RouteInfo>): string {
+  if (routes === undefined || routes === null) {
+    return 'unavailable';
+  }
+  if (routes.length === 0) {
+    return 'empty';
+  }
+  let out: string = '';
+  for (let i = 0; i < routes.length; i++) {
+    const route: connection.RouteInfo = routes[i];
+    const dest: string = route.destination !== undefined && route.destination !== null &&
+      route.destination.address !== undefined && route.destination.address !== null
+      ? String(route.destination.address.address)
+      : 'none';
+    const prefix: string = route.destination !== undefined && route.destination !== null &&
+      Number.isFinite(route.destination.prefixLength)
+      ? String(route.destination.prefixLength)
+      : 'invalid';
+    const excl: string = route.isExcludedRoute === undefined || route.isExcludedRoute === null
+      ? 'absent'
+      : String(route.isExcludedRoute);
+    const gw: string = route.hasGateway === true && route.gateway !== undefined &&
+      route.gateway !== null && route.gateway.address !== undefined
+      ? String(route.gateway.address)
+      : 'none';
+    out += (i > 0 ? '+' : '') + 'dest~' + dest + '~prefix~' + prefix +
+      '~excl~' + excl + '~gw~' + gw;
+  }
+  return out;
+}
+
+// One NetHandle's metadata segment (fields joined by ','). The two per-net
+// reads are independent: a rejected caps read leaves bearer unavailable with
+// its code while the props read still records, and vice versa.
+function renderNetCtxSegment(handle: connection.NetHandle): string {
+  const idToken: string = handle === undefined || handle === null
+    ? 'undefined'
+    : Number.isFinite(handle.netId) ? String(handle.netId) : 'invalid';
+  let bearer: string = 'unavailable';
+  let capsError: string = 'none';
+  let iface: string = 'unavailable';
+  let propsError: string = 'none';
+  let routes: string = 'unavailable';
+  try {
+    const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+    if (caps !== undefined && caps !== null && caps.bearerTypes !== undefined &&
+      caps.bearerTypes !== null) {
+      let joined: string = '';
+      for (let i = 0; i < caps.bearerTypes.length; i++) {
+        joined += (i > 0 ? '+' : '') + String(caps.bearerTypes[i]);
+      }
+      bearer = caps.bearerTypes.length === 0 ? 'empty' : joined;
+    }
+  } catch (error) {
+    capsError = errorCodeOf(error as Error);
+  }
+  try {
+    const props: connection.ConnectionProperties = connection.getConnectionPropertiesSync(handle);
+    if (props !== undefined && props !== null) {
+      iface = props.interfaceName === undefined || props.interfaceName === null
+        ? 'none'
+        : String(props.interfaceName);
+      routes = renderNetCtxRoutes(props.routes);
+    }
+  } catch (error) {
+    propsError = errorCodeOf(error as Error);
+  }
+  return 'netId=' + idToken + ',iface=' + iface + ',bearer=' + bearer +
+    ',capsError=' + capsError + ',propsError=' + propsError + ',routes=' + routes;
+}
+
+// The netId token of one default/app answer: the handle object, or its absence,
+// verbatim — 0 stays 0 (the API's documented "no network"), never a story.
+function netCtxIdToken(handle: connection.NetHandle): string {
+  if (handle === undefined || handle === null) {
+    return 'undefined';
+  }
+  return Number.isFinite(handle.netId) ? String(handle.netId) : 'invalid';
+}
+
+// The whole snapshot: five synchronous getter reads, each in its own catch, so
+// one rejected API never blanks the others (partial answers are the point).
+// Fully synchronous body — the arm tick pays no await; the async shell only
+// keeps the caller's .catch() contract uniform with the iface probe.
+export async function runNetworkContextProbe(requestId: string): Promise<void> {
+  const startedUnixMs: number = Date.now();
+  let defaultNetId: string = 'unavailable';
+  let defaultNetError: string = 'none';
+  let appNetId: string = 'unavailable';
+  let appNetError: string = 'none';
+  let nets: string = 'unavailable';
+  let allError: string = 'none';
+  let truncated: string = 'false';
+  let netsDetail: string = 'unavailable';
+  try {
+    defaultNetId = netCtxIdToken(connection.getDefaultNetSync());
+  } catch (error) {
+    defaultNetError = errorCodeOf(error as Error);
+  }
+  try {
+    appNetId = netCtxIdToken(connection.getAppNetSync());
+  } catch (error) {
+    appNetError = errorCodeOf(error as Error);
+  }
+  try {
+    const all: connection.NetHandle[] = connection.getAllNetsSync();
+    if (all === undefined || all === null) {
+      allError = 'invalid-value';
+    } else {
+      nets = String(all.length);
+      if (all.length === 0) {
+        netsDetail = 'empty';
+      } else {
+        truncated = all.length > NETCTX_MAX_NETS ? 'true' : 'false';
+        const capped: number = all.length > NETCTX_MAX_NETS ? NETCTX_MAX_NETS : all.length;
+        const parts: string[] = [];
+        for (let i = 0; i < capped; i++) {
+          parts.push(renderNetCtxSegment(all[i]));
+        }
+        netsDetail = parts.join(';');
+      }
+    }
+  } catch (error) {
+    allError = errorCodeOf(error as Error);
+    nets = 'unavailable';
+  }
+  const finishedUnixMs: number = Date.now();
+  hilog.info(PROBE_DOMAIN, PROBE_TAG,
+    NETCTX_PREFIX + 'requestId=%{public}s|defaultNetId=%{public}s|' +
+    'defaultNetError=%{public}s|appNetId=%{public}s|appNetError=%{public}s|' +
+    'nets=%{public}s|allError=%{public}s|truncated=%{public}s|netsDetail=%{public}s|' +
+    'startedUnixMs=%{public}s|finishedUnixMs=%{public}s|diag=true|is_evidence=false',
+    requestId, defaultNetId, defaultNetError, appNetId, appNetError,
+    nets, allError, truncated, netsDetail, String(startedUnixMs),
+    String(finishedUnixMs));
 }

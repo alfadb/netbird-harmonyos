@@ -126,6 +126,20 @@
 //      module — no /proc read, no getUid*/GET_NETWORK_STATS, no exception
 //      message text — and module.json5 unchanged). The probe never touches
 //      Evidence.counters/notes; no packet count exists anywhere.
+//   NC1-NC5 (2026-09-20 network-context snapshot): the PUBLIC connection
+//      getters (getDefaultNetSync/getAppNetSync/getAllNetsSync +
+//      getNetCapabilitiesSync/getConnectionPropertiesSync, all Sync forms read
+//      off the local SDK d.ts) are sampled ONCE per arm SUCCESS, in the same
+//      branch as the iface probe. NC1 the armed line carries the seeded
+//      default/app netIds, the getAllNets list verbatim and per-net
+//      interface/bearerTypes/routes (dest/prefix/excl/gw tokens) with digit
+//      begin/end; NC2 a rejected API (code) leaves that field unavailable
+//      while every independent read still records; NC3 an empty handle world
+//      records nets=0/detail=empty honestly; NC4 no ARM success (gate closed /
+//      core not-ok) fires nothing and the armed instance never repeats; NC5
+//      source pins (getter-only module — no bindSocket/setAppNet, no
+//      .message, still byte-only; call order inside the ok-branch; aborted
+//      guard literal).
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -154,6 +168,8 @@ const ARM_TICKET_PATH = `${FIXTURE_FILESDIR}/netbird-n2h-arm`;
 const ARM_TICKET_NAME = 'netbird-n2h-arm';
 // The 2026-09-18 iface-bytes availability probe marker (the P group below).
 const PROBE_PREFIX = 'N2H_IFACE_BYTES_PROBE|';
+// The 2026-09-20 network-context snapshot marker (the NC group below).
+const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 
 // The five real modules staged byte-identically (code under test = shipped
 // code), and the erased interface names each shim must re-declare for the ESM
@@ -290,6 +306,23 @@ function statsCalls(): string[] {
 function seedStats(rx: Record<string, unknown>, tx: Record<string, unknown>): void {
   G['__NB_STATS_RX'] = rx;
   G['__NB_STATS_TX'] = tx;
+}
+
+// The network-context probe's connection tables (exclusion-generation-hooks.mjs):
+// a number resolves, {code:n} rejects, an UNSET key answers the historical
+// default (netId 0 / empty list / wlan0 without routes) — seeding one table
+// never perturbs what the older groups observe. __NB_NET_THROW_CODES maps a
+// method name to a BusinessError code (or 'no-code').
+function seedNetCtx(tables: Record<string, unknown>): void {
+  G['__NB_NET_DEFAULT_ID'] = undefined;
+  G['__NB_NET_APP_ID'] = undefined;
+  G['__NB_NET_ALL_IDS'] = undefined;
+  G['__NB_NET_CAPS_BY_ID'] = undefined;
+  G['__NB_NET_PROPS_BY_ID'] = undefined;
+  G['__NB_NET_THROW_CODES'] = undefined;
+  for (const key of Object.keys(tables)) {
+    G[key] = tables[key];
+  }
 }
 
 // Every probe log line is written several microtasks after the tick that
@@ -1368,7 +1401,7 @@ try {
   check('P8 the probe call sits INSIDE the arm success branch (ok -> ARMED literal -> probe -> else)',
     okBranchAt > 0 && armedLit > okBranchAt && probeCall > armedLit && elseAt > probeCall &&
     extSource.indexOf(
-      "import { runInterfaceStatsProbe } from './NetBirdInterfaceStatsProbe';") > 0,
+      "import { runInterfaceStatsProbe, runNetworkContextProbe } from './NetBirdInterfaceStatsProbe';") > 0,
     JSON.stringify({ okBranchAt, armedLit, probeCall, elseAt }));
   check('P8 the probe module pins the two fixed names, the marker, and the byte-only scope',
     probeSource.indexOf("const PROBE_IFACE: string = 'vpn-tun';") > 0 &&
@@ -1389,6 +1422,165 @@ try {
     readFileSync(join(HERE, '..', 'src', 'main', 'module.json5')).toString()
       .indexOf('GET_NETWORK_STATS') < 0,
     'module.json5 pin');
+
+  // ---------------- NC (2026-09-20): the network-context snapshot ----------
+  // The PUBLIC connection getters are sampled ONCE per arm SUCCESS, in the
+  // same branch as the iface probe. This is context for the parallel native
+  // SO_MARK observation — NOT a routing verdict: a netId/interface/route list
+  // is the system's metadata view, and nothing here decodes SO_MARK or claims
+  // the socket's final path. Check shape only: values seeded into the stub
+  // come out verbatim, rejections keep their code without blanking the other
+  // reads, and empty worlds record empty.
+  const netctxAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  netctxAbility['n2hAcceptedExclusionGeneration'] = 0;
+  // Two nets, in the exact getAllNets order; net 101 carries two routes
+  // (one without the since-20 isExcludedRoute key -> 'absent'), net 103 keeps
+  // the stub default (wlan0, routes empty). The LAN-style values are stub
+  // fixtures — they assert FIELD PLUMBING, never a real device's addresses.
+  seedNetCtx({
+    __NB_NET_DEFAULT_ID: 101,
+    __NB_NET_APP_ID: 102,
+    __NB_NET_ALL_IDS: [103, 101],
+    __NB_NET_CAPS_BY_ID: {
+      103: { networkCap: [], bearerTypes: [4] },
+      101: { networkCap: [], bearerTypes: [1] }
+    },
+    __NB_NET_PROPS_BY_ID: {
+      101: { routes: [
+        { interface: 'wlan0',
+          destination: { address: { address: '192.168.50.0', family: 1 }, prefixLength: 24 },
+          gateway: { address: '192.168.50.1', family: 1 }, hasGateway: true,
+          isDefaultRoute: false },
+        { interface: 'wlan0',
+          destination: { address: { address: '0.0.0.0', family: 1 }, prefixLength: 0 },
+          gateway: { address: '192.168.50.1', family: 1 }, hasGateway: true,
+          isDefaultRoute: true }
+      ] }
+    }
+  });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(netctxAbility, WG_READY);
+  await drainProbe();
+  const nc1Lines = linesWith(NETCTX_LINE);
+  const nc1 = nc1Lines.length === 1 ? nc1Lines[0] : '';
+  check('NC1 the armed snapshot carries seeded default/app netIds, the list verbatim, ' +
+    'per-net iface/bearer/routes, and digit begin/end',
+    nc1Lines.length === 1 &&
+    nc1 === 'N2H_NET_CONTEXT|requestId=' + REQUEST_ID +
+    '|defaultNetId=101|defaultNetError=none|appNetId=102|appNetError=none|' +
+    'nets=2|allError=none|truncated=false|netsDetail=' +
+    'netId=103,iface=wlan0,bearer=4,capsError=none,propsError=none,routes=empty;' +
+    'netId=101,iface=wlan0,bearer=1,capsError=none,propsError=none,routes=' +
+    'dest~192.168.50.0~prefix~24~excl~absent~gw~192.168.50.1+' +
+    'dest~0.0.0.0~prefix~0~excl~absent~gw~192.168.50.1' +
+    '|startedUnixMs=' + fieldOf(nc1, 'startedUnixMs') +
+    '|finishedUnixMs=' + fieldOf(nc1, 'finishedUnixMs') +
+    '|diag=true|is_evidence=false' &&
+    /^\d+$/.test(fieldOf(nc1, 'startedUnixMs')) &&
+    /^\d+$/.test(fieldOf(nc1, 'finishedUnixMs')) &&
+    Number(fieldOf(nc1, 'finishedUnixMs')) >= Number(fieldOf(nc1, 'startedUnixMs')),
+    JSON.stringify(nc1Lines));
+
+  // NC2: one rejected API keeps its code as 'unavailable' while every
+  // independent read still records — appNet rejects 201, net 101's props
+  // reject 201, and defaultNet / the full list / net 103's segment / net
+  // 101's bearer all still come through.
+  const nc2Ability = freshAbility(mod, FIXTURE_FILESDIR);
+  nc2Ability['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({
+    __NB_NET_DEFAULT_ID: 101,
+    __NB_NET_THROW_CODES: { getAppNetSync: 201 },
+    __NB_NET_ALL_IDS: [103, 101],
+    __NB_NET_PROPS_BY_ID: { 101: { error: 201 } }
+  });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(nc2Ability, WG_READY);
+  await drainProbe();
+  const nc2Lines = linesWith(NETCTX_LINE);
+  const nc2 = nc2Lines.length === 1 ? nc2Lines[0] : '';
+  check('NC2 a rejected API leaves its field unavailable with the code; the other ' +
+    'independent reads still record',
+    nc2Lines.length === 1 &&
+    nc2 === 'N2H_NET_CONTEXT|requestId=' + REQUEST_ID +
+    '|defaultNetId=101|defaultNetError=none|appNetId=unavailable|appNetError=201|' +
+    'nets=2|allError=none|truncated=false|netsDetail=' +
+    'netId=103,iface=wlan0,bearer=empty,capsError=none,propsError=none,routes=empty;' +
+    'netId=101,iface=unavailable,bearer=empty,capsError=none,propsError=201,' +
+    'routes=unavailable' +
+    '|startedUnixMs=' + fieldOf(nc2, 'startedUnixMs') +
+    '|finishedUnixMs=' + fieldOf(nc2, 'finishedUnixMs') +
+    '|diag=true|is_evidence=false',
+    JSON.stringify(nc2Lines));
+
+  // NC3: the empty handle world — 0 / 0 / an empty list record verbatim as
+  // '0'/'0'/nets=0/detail=empty. No physical/VPN selection story is invented.
+  const nc3Ability = freshAbility(mod, FIXTURE_FILESDIR);
+  nc3Ability['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({});
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(nc3Ability, WG_READY);
+  await drainProbe();
+  const nc3Lines = linesWith(NETCTX_LINE);
+  const nc3 = nc3Lines.length === 1 ? nc3Lines[0] : '';
+  check('NC3 an empty handle world records 0/0/0 verbatim (detail=empty), no invented story',
+    nc3Lines.length === 1 &&
+    nc3.indexOf('N2H_NET_CONTEXT|requestId=' + REQUEST_ID +
+      '|defaultNetId=0|defaultNetError=none|appNetId=0|appNetError=none|' +
+      'nets=0|allError=none|truncated=false|netsDetail=empty|startedUnixMs=') === 0 &&
+    nc3.endsWith('|diag=true|is_evidence=false'),
+    JSON.stringify(nc3Lines));
+
+  // NC4: only a real arm SUCCESS triggers the snapshot — a closed gate fires
+  // nothing, a core not-ok answers nothing, and the armed instance never
+  // repeats (one-shot inherited from the arm latch).
+  const nc4Gate = freshAbility(mod, FIXTURE_FILESDIR);
+  nc4Gate['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({ __NB_NET_ALL_IDS: [103] });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(nc4Gate, { wg: { device_up: true, ready: false } });
+  const nc4CallsAtWait = linesWith(NETCTX_LINE).length;
+  const nc4Refused = freshAbility(mod, FIXTURE_FILESDIR);
+  nc4Refused['n2hAcceptedExclusionGeneration'] = 0;
+  G['__NB_ARM_ANSWER'] = '{"ok":false,"error":"forced-by-nc4"}';
+  tickArm(nc4Refused, WG_READY);
+  G['__NB_ARM_ANSWER'] = undefined;
+  await drainProbe();
+  check('NC4 no ARM success fires nothing (gate closed, core not-ok) — zero snapshot lines',
+    nc4CallsAtWait === 0 &&
+    linesWith('N2H_COLLECTOR_ARM_FAILED|').length === 1 &&
+    linesWith(NETCTX_LINE).length === 0 &&
+    linesWith(PROBE_PREFIX).length === 0, JSON.stringify(logs()));
+  resetLog();
+  tickArm(netctxAbility, WG_READY);
+  check('NC4 ticks after the arm repeat nothing (one-shot inherited)',
+    logs().length === 0, JSON.stringify(logs()));
+
+  // NC5: source pins — the snapshot stays getter-only metadata (no
+  // bindSocket/setAppNet/setNet*, no exception message text), still shares the
+  // byte-only module, rides the same ok-branch AFTER the iface probe, and the
+  // last-resort aborted guard prints codes/names only.
+  check('NC5 the snapshot is getter-only metadata in the shared probe module',
+    probeSource.indexOf(NETCTX_LINE) > 0 &&
+    probeSource.indexOf('bindSocket') < 0 &&
+    probeSource.indexOf('setAppNet') < 0 &&
+    probeSource.indexOf('setNet') < 0 &&
+    probeSource.indexOf('.message') < 0 &&
+    probeSource.indexOf('getIfaceRxBytes') > 0,
+    'net-context module pin');
+  const ncCall = extSource.indexOf('runNetworkContextProbe(this.requestId)');
+  check('NC5 the snapshot call rides the same ok-branch, after the iface probe',
+    ncCall > extSource.indexOf('runInterfaceStatsProbe(this.requestId)') &&
+    ncCall > armedLit && ncCall < elseAt,
+    JSON.stringify({ armedLit, elseAt, ncCall }));
+  check('NC5 the aborted guard prints codes/names only (never an exception message)',
+    extSource.indexOf(
+      "'N2H_NET_CONTEXT_ABORTED|requestId=%{public}s|code=%{public}s|'") > 0 &&
+    extSource.indexOf("'name=%{public}s|diag=true|is_evidence=false',") > 0,
+    'net-context aborted-guard pin');
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

@@ -9,7 +9,7 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
-import { runInterfaceStatsProbe } from './NetBirdInterfaceStatsProbe';
+import { runInterfaceStatsProbe, runNetworkContextProbe } from './NetBirdInterfaceStatsProbe';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
@@ -1338,6 +1338,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           // message, never a payload).
           hilog.warn(DOMAIN, TAG,
             'N2H_IFACE_BYTES_PROBE_ABORTED|requestId=%{public}s|code=%{public}s|' +
+            'name=%{public}s|diag=true|is_evidence=false',
+            this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
+            clean(error.name || 'Error'));
+        });
+        // 2026-09-20 network-context snapshot (diag-only): the same ONE-SHOT
+        // arm SUCCESS branch, right after the iface-bytes probe — the PUBLIC
+        // connection getters only (default/app/all NetHandle, per-handle
+        // interface/bearerTypes/routes metadata), NO bindSocket/setAppNet, no
+        // route change, no UID statistics. It records the SYSTEM's network
+        // view at arm time as circumstantial context for the parallel native
+        // SO_MARK observation; it is NOT a routing verdict (no public SO_MARK
+        // layout is decoded here). Same discipline: fire-and-forget (all-Sync
+        // body, no await added to the arm path), every per-call rejection is
+        // caught inside the probe, this catch is the last resort.
+        runNetworkContextProbe(this.requestId).catch((error: Error): void => {
+          hilog.warn(DOMAIN, TAG,
+            'N2H_NET_CONTEXT_ABORTED|requestId=%{public}s|code=%{public}s|' +
             'name=%{public}s|diag=true|is_evidence=false',
             this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
             clean(error.name || 'Error'));

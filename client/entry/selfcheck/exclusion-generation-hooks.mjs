@@ -59,7 +59,29 @@
 //                     silently passing stub.
 //   - @ohos.net.connection -> the four synchronous network APIs + the fake DNS
 //                     table globalThis.__NB_DNS (the real derivation runs on
-//                     the paths under test).
+//                     the paths under test). Since the 2026-09-20
+//                     network-context snapshot probe, the stub also carries
+//                     getAppNetSync and is table-driven so the probe's tests
+//                     can seed answers WITHOUT changing any default the older
+//                     groups observe:
+//                       __NB_NET_DEFAULT_ID  number|{code:n} for
+//                                            getDefaultNetSync (default 0 ->
+//                                            the historical {netId: 0})
+//                       __NB_NET_APP_ID      number|{code:n} for
+//                                            getAppNetSync (default 0)
+//                       __NB_NET_ALL_IDS     number[] for getAllNetsSync
+//                                            (default [] -> the historical
+//                                            empty list)
+//                       __NB_NET_CAPS_BY_ID  netId -> NetCapabilities shape,
+//                                            or {error:n} to reject
+//                                            (default: the historical
+//                                            {networkCap: [], bearerTypes: []})
+//                       __NB_NET_PROPS_BY_ID netId -> {routes}, or {error:n}
+//                                            to reject (default: the
+//                                            historical wlan0 response, now
+//                                            with routes: [])
+//                       __NB_NET_THROW_CODES methodName -> code|'no-code' to
+//                                            throw (default unset: no-op)
 //   - @ohos.net.statistics -> the per-NIC byte counters the 2026-09-18
 //                     iface-bytes availability probe calls (SDK 26.0.0.821
 //                     @ohos.net.statistics.d.ts:79/113, since 10, no
@@ -184,6 +206,22 @@ const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
 
 const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   'function netG() { return globalThis; }\n' +
+  'function netThrow(name) {\n' +
+  '  const c = (netG().__NB_NET_THROW_CODES || {})[name];\n' +
+  '  if (c === undefined) { return; }\n' +
+  '  const e = new Error("net-api:" + name);\n' +
+  '  if (c !== "no-code") { e.code = c; }\n' +
+  '  throw e;\n' +
+  '}\n' +
+  'function netHandleOf(v) {\n' +
+  '  if (v !== null && typeof v === "object") {\n' +
+  '    const e = new Error("net rejected"); e.code = v.code; throw e;\n' +
+  '  }\n' +
+  '  return { netId: Number(v === undefined ? 0 : v) };\n' +
+  '}\n' +
+  'function byNetId(name, handle) {\n' +
+  '  return (netG()[name] || {})[handle ? handle.netId : 0];\n' +
+  '}\n' +
   'export default {\n' +
   '  getAddressesByName: (host) => {\n' +
   '    const t = netG().__NB_DNS || {};\n' +
@@ -192,10 +230,37 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '      ? Promise.resolve([{ address: v }])\n' +
   '      : Promise.reject(new Error("dns-failed"));\n' +
   '  },\n' +
-  '  getDefaultNetSync: () => ({ netId: 0 }),\n' +
-  '  getNetCapabilitiesSync: () => ({ networkCap: [], bearerTypes: [] }),\n' +
-  '  getConnectionPropertiesSync: () => ({ interfaceName: "wlan0", dnses: [] }),\n' +
-  '  getAllNetsSync: () => []\n' +
+  '  getDefaultNetSync: () => {\n' +
+  '    netThrow("getDefaultNetSync");\n' +
+  '    return netHandleOf(netG().__NB_NET_DEFAULT_ID);\n' +
+  '  },\n' +
+  '  getAppNetSync: () => {\n' +
+  '    netThrow("getAppNetSync");\n' +
+  '    return netHandleOf(netG().__NB_NET_APP_ID);\n' +
+  '  },\n' +
+  '  getNetCapabilitiesSync: (handle) => {\n' +
+  '    netThrow("getNetCapabilitiesSync");\n' +
+  '    const c = byNetId("__NB_NET_CAPS_BY_ID", handle);\n' +
+  '    if (c !== undefined && c !== null && c.error !== undefined) {\n' +
+  '      const e = new Error("caps rejected"); e.code = c.error; throw e;\n' +
+  '    }\n' +
+  '    return c === undefined || c === null ? { networkCap: [], bearerTypes: [] } : c;\n' +
+  '  },\n' +
+  '  getConnectionPropertiesSync: (handle) => {\n' +
+  '    netThrow("getConnectionPropertiesSync");\n' +
+  '    const p = byNetId("__NB_NET_PROPS_BY_ID", handle);\n' +
+  '    if (p !== undefined && p !== null && p.error !== undefined) {\n' +
+  '      const e = new Error("props rejected"); e.code = p.error; throw e;\n' +
+  '    }\n' +
+  '    return { interfaceName: "wlan0", dnses: [], routes: (p && p.routes) || [] };\n' +
+  '  },\n' +
+  '  getAllNetsSync: () => {\n' +
+  '    netThrow("getAllNetsSync");\n' +
+  '    const all = netG().__NB_NET_ALL_IDS || [];\n' +
+  '    const out = [];\n' +
+  '    for (let i = 0; i < all.length; i++) { out.push({ netId: all[i] }); }\n' +
+  '    return out;\n' +
+  '  }\n' +
   '};');
 
 // The per-NIC byte counters (see the header comment): a number resolves,
