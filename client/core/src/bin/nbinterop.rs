@@ -445,6 +445,10 @@ impl Default for RunOpts {
 const N2H_PEER_FRAME_MAX: usize = 2048;
 /// Frames drained per beat (bounded, like `recv_probes`' 8).
 const N2H_PEER_DRAIN_MAX: usize = 8;
+/// Receipt lines kept in-process, newest last. A bounded diagnostic ring for
+/// the run's own read-back (the loopback check) — NOT a second delivery path:
+/// every receipt is already on stderr, and the cap keeps a long run bounded.
+const N2H_PEER_RECEIPT_KEEP: usize = 64;
 /// b2a probe period (design §4.3: the peer probes periodically while the device
 /// window is open; the collector's own window deadline is 60 s).
 const N2H_PEER_POSCTL_INTERVAL_MS: u64 = 1_000;
@@ -1203,14 +1207,20 @@ struct N2hPeerState {
     /// observed — announcement and probes must agree on this value.
     marker: String,
     b2a_sent: u64,
-    /// Well-formed posctl probes that arrived THROUGH the tunnel (the device's
-    /// a2b leg reaching this peer — proof of the outer path).
+    /// Well-formed posctl probes that arrived THROUGH the tunnel. A COUNT only:
+    /// `nc::posctl_marker` accepts ANY `N2H-posctl-<24 hex>|positive-control`,
+    /// so this is not proof that one specific nonce (this run's marker, or the
+    /// device's a2b id) was received — the per-frame receipts name the marker
+    /// that actually arrived.
     a2b_seen: u64,
     echoes_sent: u64,
     /// Posctl probes seen but not echoed (no learned overlay address yet, or the
     /// TUN-stand-in write failed): recorded, never silently dropped.
     echoes_skipped: u64,
     last_a2b_from: Option<String>,
+    /// Structured per-frame receipts, newest last (bounded to
+    /// [`N2H_PEER_RECEIPT_KEEP`]) — see [`a2b_receipt_line`].
+    receipts: Vec<String>,
     last_posctl_mono: u64,
     /// `unknown_peer_drops` at the FIRST readable sample (the delta is
     /// operator-facing; the device computes its own baseline at window open).
@@ -1236,6 +1246,7 @@ impl N2hPeerState {
             echoes_sent: 0,
             echoes_skipped: 0,
             last_a2b_from: None,
+            receipts: Vec::new(),
             last_posctl_mono: 0,
             drops_baseline: None,
             own_absent_noted: false,
@@ -1269,6 +1280,16 @@ impl N2hPeerState {
             }
             None => (None, None),
         }
+    }
+
+    /// Record one receipt line in-process (newest last, bounded to
+    /// [`N2H_PEER_RECEIPT_KEEP`]). The line itself is already on stderr; this is
+    /// the in-process record the `--loopback` check reads back.
+    fn record_receipt(&mut self, line: String) {
+        if self.receipts.len() == N2H_PEER_RECEIPT_KEEP {
+            self.receipts.remove(0);
+        }
+        self.receipts.push(line);
     }
 
     /// The periodic counterparty status line (design §4.3): ONE `|`-separated
@@ -1362,6 +1383,12 @@ fn n2h_peer_tick(
 /// Anything that is not a well-formed posctl probe is left alone: this endpoint
 /// is not a reflector (the strict test is [`nc::posctl_marker`], the device
 /// sender's own contract).
+///
+/// Every well-formed posctl frame additionally emits exactly ONE structured
+/// receipt line ([`a2b_receipt_line`]) naming the marker that ARRIVED — never
+/// this run's announced one — plus the five-tuple, the echo outcome and the host
+/// wall-clock. `nc::posctl_marker` accepts any well-formed posctl, so the count
+/// alone (`a2b_seen`) cannot attribute a nonce; the receipt can.
 fn n2h_peer_drain_and_echo(state: &mut N2hPeerState, own: Option<[u8; 4]>, tun_hand: i32) {
     let mut buf = [0u8; N2H_PEER_FRAME_MAX];
     for _ in 0..N2H_PEER_DRAIN_MAX {
@@ -1369,35 +1396,85 @@ fn n2h_peer_drain_and_echo(state: &mut N2hPeerState, own: Option<[u8; 4]>, tun_h
         let Some(n) = read_frame_within(tun_hand, &mut buf, 0) else { return };
         let frame = &buf[..n];
         let Some(view) = netbird_core::n2h::parse_ipv4_frame(frame) else { continue };
-        if view.proto != 17 || nc::posctl_marker(view.payload).is_none() {
+        if view.proto != 17 {
             continue;
         }
+        // The RECEIVED marker (not `state.marker`): this is what the receipt
+        // below names, so a foreign id is never silently attributed to the
+        // device this run announced.
+        let Some(marker) = nc::posctl_marker(view.payload) else { continue };
         let from = endpoint_text(view.src, view.sport);
         state.a2b_seen += 1;
         state.last_a2b_from = Some(from.clone());
-        let Some(own) = own else {
-            state.echoes_skipped += 1;
-            if !state.own_absent_noted {
-                state.own_absent_noted = true;
-                eprintln!(
-                    "[n2h-peer] a posctl probe arrived but this peer has no overlay address yet \
-                     (network map not applied): not echoing — the source is never invented"
-                );
+        let self_marker = marker == state.marker.as_str();
+        let echo = match own {
+            None => {
+                state.echoes_skipped += 1;
+                if !state.own_absent_noted {
+                    state.own_absent_noted = true;
+                    eprintln!(
+                        "[n2h-peer] a posctl probe arrived but this peer has no overlay address yet \
+                         (network map not applied): not echoing — the source is never invented"
+                    );
+                }
+                "no-own".to_string()
             }
-            continue;
+            Some(own) => {
+                let echo =
+                    hs::build_ipv4_udp_packet(own, view.src, view.dport, view.sport, view.payload);
+                let (wn, errno) = sys::write_fd(tun_hand, &echo);
+                if wn <= 0 {
+                    state.echoes_skipped += 1;
+                    eprintln!("[n2h-peer] echo write failed (errno={errno}) to {from}");
+                    format!("write-failed(errno={errno})")
+                } else {
+                    state.echoes_sent += 1;
+                    eprintln!(
+                        "[n2h-peer] echoed a2b probe back to {from} ({} bytes, verbatim)",
+                        view.payload.len()
+                    );
+                    "written".to_string()
+                }
+            }
         };
-        let echo = hs::build_ipv4_udp_packet(own, view.src, view.dport, view.sport, view.payload);
-        let (wn, errno) = sys::write_fd(tun_hand, &echo);
-        if wn <= 0 {
-            state.echoes_skipped += 1;
-            eprintln!("[n2h-peer] echo write failed (errno={errno}) to {from}");
-        } else {
-            state.echoes_sent += 1;
-            eprintln!(
-                "[n2h-peer] echoed a2b probe back to {from} ({} bytes, verbatim)",
-                view.payload.len()
-            );
-        }
+        let receipt = a2b_receipt_line(&view, marker, &echo, self_marker, &host_unix_ms());
+        eprintln!("{receipt}");
+        state.record_receipt(receipt);
+    }
+}
+
+/// The ONE structured receipt of a received posctl frame, in the CLI's
+/// `nbinterop: <token>|…` house shape: the marker that actually arrived
+/// (`probe_id`), the five-tuple's proto/src/dst, the echo outcome
+/// (`written` | `no-own` | `write-failed(errno=…)`) and the host wall-clock.
+/// `self_marker` says only whether the received id equals this run's announced
+/// marker — it never turns another id into a device attribution.
+///
+/// The payload is never echoed into the line: `probe_id` is the validated
+/// `N2H-posctl-<24 hex>` marker (ASCII hex, bounded by `nc::posctl_marker`).
+fn a2b_receipt_line(
+    view: &netbird_core::n2h::Ipv4FrameView<'_>,
+    marker: &str,
+    echo: &str,
+    self_marker: bool,
+    unix_ms: &str,
+) -> String {
+    format!(
+        "nbinterop: n2h-peer-receipt|probe_id={marker}|proto={}|src={}|dst={}|echo={echo}|\
+         self_marker={self_marker}|unix_ms={unix_ms}",
+        view.proto,
+        endpoint_text(view.src, view.sport),
+        endpoint_text(view.dst, view.dport),
+    )
+}
+
+/// The host wall-clock of ONE receipt, in Unix milliseconds, taken from a REAL
+/// `SystemTime` read. A clock before the epoch answers `unavailable` — the line
+/// never fabricates a zero timestamp.
+fn host_unix_ms() -> String {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis().to_string(),
+        Err(_) => "unavailable".to_string(),
     }
 }
 
@@ -1470,6 +1547,13 @@ struct N2hPeerLoopbackReport {
     /// false).
     non_posctl_echo: bool,
     frames_seen: u64,
+    /// The a2b marker the fake device actually put on the wire (a per-run random
+    /// nonce). The peer's receipt lines must name THIS id — proof the receipt is
+    /// taken from the received payload, not from the configured b2a marker.
+    a2b_probe_id: String,
+    /// The peer's structured receipts, read back from the shipped state after
+    /// the run (`N2hPeerState::receipts`).
+    receipts: Vec<String>,
 }
 
 impl N2hPeerLoopbackReport {
@@ -1559,10 +1643,9 @@ fn run_n2h_peer_loopback(
     opts.overlay = Some(std::net::Ipv4Addr::from(dev.0));
     opts.overlay_port = Some(dev.1);
     let mut state = N2hPeerState::new(opts)?;
-    let a2b_payload = nc::posctl_payload(&netbird_core::n2h::probe_id(
-        nc::POSCTL_KIND_TOKEN,
-        &netbird_core::n2h::fresh_nonce_hex()?,
-    ));
+    let a2b_probe_id =
+        netbird_core::n2h::probe_id(nc::POSCTL_KIND_TOKEN, &netbird_core::n2h::fresh_nonce_hex()?);
+    let a2b_payload = nc::posctl_payload(&a2b_probe_id);
 
     let (peer_hand, dev_hand) = hs::open_tun_standby_pair()
         .map_err(|e| format!("TUN stand-in pair: {} (errno={})", e.token, e.errno))?;
@@ -1580,10 +1663,13 @@ fn run_n2h_peer_loopback(
         n2h_peer_tick(&mut state, Some(own), true, peer_hand, sys::mono_ms());
         sys::sleep_ms(20);
     }
-    let report = match fake.join() {
+    let mut report = match fake.join() {
         Ok(r) => r,
         Err(_) => return Err("the fake device panicked".to_string()),
     };
+    // the peer's own observation of what it received (read back, not predicted)
+    report.a2b_probe_id = a2b_probe_id;
+    report.receipts = state.receipts.clone();
     state.report_final(Some(own));
     let code = if report.ok() { hs::EXIT_OK } else { hs::EXIT_SELFTEST_FAILED };
     Ok((code, report))
@@ -2353,6 +2439,13 @@ mod n2h_peer_tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// One `k=v` field of a `nbinterop: <token>|…` receipt/house line.
+    fn receipt_field(line: &str, key: &str) -> String {
+        line.split('|')
+            .find_map(|f| f.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_string()))
+            .unwrap_or_else(|| panic!("no {key}= in {line}"))
+    }
+
     /// I6b: one legal fixed marker — the exact id form the device's arm option
     /// `peer_b2a_probe_id` accepts (`nc::announced_b2a_marker`).
     const FIXED_POSCTL_ID: &str = "N2H-posctl-ffeeddccbbaa998877665544";
@@ -2549,6 +2642,7 @@ mod n2h_peer_tests {
             sys::sleep_ms(10);
         }
         assert_eq!((state.a2b_seen, state.echoes_sent), (0, 0));
+        assert!(state.receipts.is_empty(), "non-posctl traffic emits no receipt");
         assert_eq!(read_frame_within(far, &mut buf, 50), None, "nothing may come back");
 
         // ② a well-formed posctl probe (any addressed port, the marker is the
@@ -2576,7 +2670,98 @@ mod n2h_peer_tests {
             "five-tuple swapped"
         );
         assert_eq!((state.a2b_seen, state.echoes_sent), (1, 1));
+        // ③ the structured receipt names the marker that ARRIVED (`cd…`), never
+        //    this run's own announced one, and carries the received five-tuple
+        assert_eq!(state.receipts.len(), 1, "exactly one receipt per posctl frame");
+        let receipt = &state.receipts[0];
+        assert!(receipt.starts_with("nbinterop: n2h-peer-receipt|"), "{receipt}");
+        assert_eq!(receipt_field(receipt, "probe_id"), marker, "{receipt}");
+        assert_ne!(receipt_field(receipt, "probe_id"), state.marker, "{receipt}");
+        assert_eq!(receipt_field(receipt, "proto"), "17", "{receipt}");
+        assert_eq!(receipt_field(receipt, "src"), "127.0.0.7:41000", "{receipt}");
+        assert_eq!(receipt_field(receipt, "dst"), "127.0.0.1:40001", "{receipt}");
+        assert_eq!(receipt_field(receipt, "echo"), "written", "{receipt}");
+        assert_eq!(receipt_field(receipt, "self_marker"), "false", "{receipt}");
+        assert!(
+            receipt_field(receipt, "unix_ms").parse::<u128>().is_ok(),
+            "a real host clock reading: {receipt}"
+        );
         println!("[I6-cli] verbatim echo: {} bytes, tuple {view:?}", echoed.len());
+        println!("[I6-cli] {receipt}");
+    }
+
+    /// A received frame carrying THIS run's own announced marker is receipted
+    /// honestly as `self_marker=true` with its own id — and the echo/count
+    /// behavior is unchanged (it is still echoed, never silently dropped).
+    #[test]
+    fn a_received_self_marker_is_receipted_as_self_without_changing_the_echo() {
+        let (hand, far) = hs::open_tun_standby_pair().expect("TUN stand-in pair");
+        let mut bag = hs::FdBag::new();
+        bag.keep(hand);
+        bag.keep(far);
+        let opts = N2hPeerOpts {
+            overlay: Some(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            overlay_port: Some(40_001),
+            posctl_id: Some(FIXED_POSCTL_ID.to_string()),
+            ..Default::default()
+        };
+        let mut state = N2hPeerState::new(opts).expect("state");
+        let own = [127, 0, 0, 1];
+        let payload = nc::posctl_payload(&state.marker);
+        let frame =
+            hs::build_ipv4_udp_packet([127, 0, 0, 9], own, 41_000, 40_001, payload.as_bytes());
+        assert_eq!(sys::write_fd(far, &frame).0 as usize, frame.len());
+        for _ in 0..20 {
+            n2h_peer_drain_and_echo(&mut state, Some(own), hand);
+            if !state.receipts.is_empty() {
+                break;
+            }
+            sys::sleep_ms(10);
+        }
+        assert_eq!(state.receipts.len(), 1, "{:?}", state.receipts);
+        let receipt = &state.receipts[0];
+        assert_eq!(receipt_field(receipt, "probe_id"), state.marker, "{receipt}");
+        assert_eq!(receipt_field(receipt, "self_marker"), "true", "{receipt}");
+        assert_eq!(receipt_field(receipt, "echo"), "written", "{receipt}");
+        assert_eq!(receipt_field(receipt, "src"), "127.0.0.9:41000", "{receipt}");
+        // the forwarding/counting semantics did NOT change for this case
+        assert_eq!((state.a2b_seen, state.echoes_sent, state.echoes_skipped), (1, 1, 0));
+        let mut buf = [0u8; N2H_PEER_FRAME_MAX];
+        let n = read_frame_within(far, &mut buf, 200).expect("the echo still came back");
+        let echo = netbird_core::n2h::parse_ipv4_frame(&buf[..n]).expect("echo parses");
+        assert_eq!(&buf[28..n], payload.as_bytes(), "payload verbatim");
+        assert_eq!((echo.src, echo.dst), (own, [127, 0, 0, 9]), "five-tuple swapped");
+        println!("[I6b-cli] {receipt}");
+    }
+
+    /// The receipt of a REAL through-the-tunnel packet: the `--loopback` fake
+    /// device puts a FRESH random a2b marker on the wire while this run's b2a
+    /// marker is the operator's fixed one — the receipt must name the RECEIVED
+    /// id (the a2b payload), never the configured b2a id.
+    #[test]
+    fn the_receipt_names_the_received_a2b_id_not_the_configured_b2a_id() {
+        let opts = N2hPeerOpts {
+            posctl_id: Some(FIXED_POSCTL_ID.to_string()),
+            posctl_interval_ms: 100,
+            ..Default::default()
+        };
+        let (code, report) = run_n2h_peer_loopback(&opts, 5_000).expect("loopback run");
+        assert!(report.ok(), "{report:?}");
+        assert_eq!(code, hs::EXIT_OK, "{report:?}");
+        assert!(report.a2b_probe_id.starts_with("N2H-posctl-"), "{}", report.a2b_probe_id);
+        assert_ne!(report.a2b_probe_id, FIXED_POSCTL_ID, "the a2b id is a fresh nonce");
+        assert_eq!(report.receipts.len(), 1, "one receipt for one a2b frame: {:?}", report.receipts);
+        let receipt = &report.receipts[0];
+        assert_eq!(receipt_field(receipt, "probe_id"), report.a2b_probe_id, "{receipt}");
+        assert_ne!(receipt_field(receipt, "probe_id"), FIXED_POSCTL_ID, "{receipt}");
+        assert_eq!(receipt_field(receipt, "self_marker"), "false", "{receipt}");
+        assert_eq!(receipt_field(receipt, "proto"), "17", "{receipt}");
+        // the loopback fake device sends from 127.0.0.1:40002 to the peer port
+        assert_eq!(receipt_field(receipt, "src"), "127.0.0.1:40002", "{receipt}");
+        assert_eq!(receipt_field(receipt, "dst"), "127.0.0.1:40001", "{receipt}");
+        assert_eq!(receipt_field(receipt, "echo"), "written", "{receipt}");
+        assert!(receipt_field(receipt, "unix_ms").parse::<u128>().is_ok(), "{receipt}");
+        println!("[I6b-cli] {receipt}");
     }
 
     /// The status line is the device-side channel: the announced marker, the
