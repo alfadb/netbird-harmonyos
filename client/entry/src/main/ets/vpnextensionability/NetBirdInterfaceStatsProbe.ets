@@ -308,3 +308,88 @@ export async function runNetworkContextProbe(requestId: string): Promise<void> {
     nets, allError, truncated, netsDetail, String(startedUnixMs),
     String(finishedUnixMs));
 }
+
+// ---------------------------------------------------------------------------
+// N2-H posctl probe netId resolution (2026-09-20, diagnostic-only).
+//
+// What this is: the netId the arm hands the core as `probe_net_id` so the
+// native side can DIAGNOSTICALLY bind the ONE posctl probe socket to the VPN
+// network (OH_NetConn_BindSocket, core-side) instead of leaving its egress to
+// the default network — the 0021 evidence (mark=0, no SO_BINDTODEVICE, device
+// TUN blind to a2b while the peer saw it via the LAN gateway address) is
+// CONSISTENT with default-network egress but proves no mechanism; this
+// resolution only supplies the number, the binding question stays open until
+// a device run reads the answer.
+//
+// What this is NOT: no socket is touched here, no app-network or per-socket
+// binding call, no route/permission change — the SAME official read-only
+// getters the network-context snapshot already uses
+// (getAllNetsSync + getConnectionPropertiesSync, GET_NETWORK_INFO, both Sync).
+// The resolution runs BEFORE the native arm (the iface/NETCTX probes run
+// after it, in the arm SUCCESS branch), is fully synchronous (the arm tick
+// pays no await), and never throws: every API rejection is caught HERE.
+//
+// Result discipline: `found` carries the ONE handle whose interfaceName is
+// exactly `vpn-tun` (the core's own TUN name, PROBE_IFACE). Zero hits is
+// `not-found`, two or more is `ambiguous` (a name collision must not let the
+// core bind a guessed network — the key is then omitted, never resolved by
+// list order), a rejected list read is `list-error` with its BusinessError
+// CODE token, a non-array answer is `invalid-value`, and one unread handle is
+// skipped (its props rejection is not fatal for the remaining handles).
+export class VpnNetIdResolution {
+  found: boolean = false;
+  netId: number = 0;
+  reason: string = 'none';
+  code: string = 'none';
+}
+
+export function resolveVpnTunNetId(): VpnNetIdResolution {
+  const res: VpnNetIdResolution = new VpnNetIdResolution();
+  let all: connection.NetHandle[];
+  try {
+    all = connection.getAllNetsSync();
+  } catch (error) {
+    res.reason = 'list-error';
+    res.code = errorCodeOf(error as Error);
+    return res;
+  }
+  if (all === undefined || all === null) {
+    res.reason = 'invalid-value';
+    return res;
+  }
+  let hit: number = 0;
+  let hits: number = 0;
+  for (let i = 0; i < all.length; i++) {
+    const handle: connection.NetHandle = all[i];
+    if (handle === undefined || handle === null || !Number.isFinite(handle.netId)) {
+      continue;
+    }
+    let iface: string | null = null;
+    try {
+      const props: connection.ConnectionProperties = connection.getConnectionPropertiesSync(handle);
+      if (props !== undefined && props !== null && props.interfaceName !== undefined &&
+        props.interfaceName !== null) {
+        iface = String(props.interfaceName);
+      }
+    } catch (error) {
+      // one unread handle is skipped, not fatal for the remaining handles
+      continue;
+    }
+    if (iface === PROBE_IFACE) {
+      hits++;
+      if (hits > 1) {
+        res.reason = 'ambiguous';
+        return res;
+      }
+      hit = handle.netId;
+    }
+  }
+  if (hits === 1) {
+    res.found = true;
+    res.netId = hit;
+    res.reason = 'found';
+  } else if (hits === 0) {
+    res.reason = 'not-found';
+  }
+  return res;
+}

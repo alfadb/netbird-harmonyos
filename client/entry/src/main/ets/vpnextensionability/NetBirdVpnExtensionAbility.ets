@@ -10,6 +10,7 @@ import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
 import { runInterfaceStatsProbe, runNetworkContextProbe } from './NetBirdInterfaceStatsProbe';
+import { resolveVpnTunNetId, VpnNetIdResolution } from './NetBirdInterfaceStatsProbe';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
@@ -192,6 +193,14 @@ interface N2hArmOptions {
   // generation exists (see n2hAcceptedExclusionGeneration); an absent key
   // makes the core record a value-less field, never a fabricated generation.
   exclusion_generation?: number;
+  // 2026-09-20 (diagnostic-only): the VPN-network netId the shell resolved
+  // for the core's own TUN interface (resolveVpnTunNetId, official read-only
+  // getters only). When present, the core DIAGNOSTICALLY binds the ONE
+  // posctl probe socket to that network before its send (OH_NetConn_BindSocket,
+  // runtime-resolved; every failure is recorded and never changes the send).
+  // Only set when exactly one vpn-tun handle was found; an absent key keeps
+  // the probe byte-identical to the pre-binding behavior.
+  probe_net_id?: number;
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -1309,6 +1318,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const announcedOverlay: string | undefined = fileOpts.peer_overlay_ip;
     if (announcedOverlay !== undefined) {
       opts.peer_overlay_ip = announcedOverlay;
+    }
+    // 2026-09-20 (diagnostic-only): resolve the VPN network's netId via the
+    // official read-only getters BEFORE the native arm, so the core can pin
+    // the posctl probe's egress to the VPN network for this one diagnostic
+    // socket. Found ⇒ the non-secret integer rides the opts JSON; anything
+    // else (no hit, a name collision, a rejected API) keeps the key ABSENT
+    // (the probe stays byte-identical) and one marker carries the reason and
+    // the error CODE token — never an object, never an exception message.
+    const vpnResolution: VpnNetIdResolution = resolveVpnTunNetId();
+    if (vpnResolution.found) {
+      opts.probe_net_id = vpnResolution.netId;
+    } else {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_POSCTL_PROBE_NET_ID_UNAVAILABLE|requestId=%{public}s|reason=%{public}s|' +
+        'code=%{public}s|diag=true|is_evidence=false',
+        this.requestId, vpnResolution.reason, vpnResolution.code);
     }
     const optsJson: string = JSON.stringify(opts);
     const announcedLog: string = announcedPeer === undefined ? 'none' : clean(String(announcedPeer));

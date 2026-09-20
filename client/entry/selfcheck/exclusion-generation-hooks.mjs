@@ -248,14 +248,16 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '  },\n' +
   '  getConnectionPropertiesSync: (handle) => {\n' +
   '    netThrow("getConnectionPropertiesSync");\n' +
+  '    netG().__NB_NET_PROPS_CALLS = (netG().__NB_NET_PROPS_CALLS || 0) + 1;\n' +
   '    const p = byNetId("__NB_NET_PROPS_BY_ID", handle);\n' +
   '    if (p !== undefined && p !== null && p.error !== undefined) {\n' +
   '      const e = new Error("props rejected"); e.code = p.error; throw e;\n' +
   '    }\n' +
-  '    return { interfaceName: "wlan0", dnses: [], routes: (p && p.routes) || [] };\n' +
+  '    return { interfaceName: (p && p.interfaceName !== undefined && p.interfaceName !== null) ? p.interfaceName : "wlan0", dnses: [], routes: (p && p.routes) || [] };\n' +
   '  },\n' +
   '  getAllNetsSync: () => {\n' +
   '    netThrow("getAllNetsSync");\n' +
+  '    netG().__NB_NET_GETALL_CALLS = (netG().__NB_NET_GETALL_CALLS || 0) + 1;\n' +
   '    const all = netG().__NB_NET_ALL_IDS || [];\n' +
   '    const out = [];\n' +
   '    for (let i = 0; i < all.length; i++) { out.push({ netId: all[i] }); }\n' +

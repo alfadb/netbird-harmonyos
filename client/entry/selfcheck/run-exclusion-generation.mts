@@ -1582,6 +1582,145 @@ try {
     extSource.indexOf("'name=%{public}s|diag=true|is_evidence=false',") > 0,
     'net-context aborted-guard pin');
 
+  // ---------------- PB (2026-09-20): the posctl probe netId ----------------
+  // The arm resolves the VPN network's netId via the OFFICIAL read-only
+  // getters BEFORE the native arm and puts the non-secret integer into the
+  // opts JSON ONLY when exactly one vpn-tun handle was found; every other
+  // outcome keeps the key ABSENT (the probe stays byte-identical) and one
+  // marker carries the reason + error CODE token. No bind ever happens in
+  // the shell: the stub module has no bindSocket/setAppNet at all, so any
+  // new call site would be a loud TypeError, and the source pins below keep
+  // it structural.
+  const PROBE_NET_MARKER = 'N2H_POSCTL_PROBE_NET_ID_UNAVAILABLE|';
+
+  function armOptsJson(): Record<string, unknown> {
+    const raw = G['__NB_ARM_OPTS'] as string | undefined;
+    return raw === undefined ? {} : JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  // PB1: found — one vpn-tun handle (net 147) lands in the opts JSON with
+  // the other fields unchanged; the arm still answers ok exactly once.
+  const pb1 = freshAbility(mod, FIXTURE_FILESDIR);
+  pb1['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({
+    __NB_NET_ALL_IDS: [147, 101],
+    __NB_NET_PROPS_BY_ID: { 147: { interfaceName: 'vpn-tun' } }
+  });
+  setArmFile(true, undefined);
+  resetLog();
+  const pb1ArmCallsAt = Number(G['__NB_ARM_CALLS'] ?? 0);
+  tickArm(pb1, WG_READY);
+  await drainProbe();
+  const pb1Opts = armOptsJson();
+  check('PB1 the found vpn-tun netId rides the opts JSON verbatim, other fields unchanged',
+    pb1Opts['probe_net_id'] === 147 &&
+    pb1Opts['exclusion_generation'] === 0 &&
+    typeof pb1Opts['posctl_port'] === 'number' && pb1Opts['posctl_port'] > 0 &&
+    typeof pb1Opts['probe_wait_ms'] === 'number' && pb1Opts['probe_wait_ms'] > 0 &&
+    Array.isArray(pb1Opts['shell_exclusions']),
+    JSON.stringify(pb1Opts));
+  check('PB1 the arm still answers ok exactly once and no unavailability marker fires',
+    Number(G['__NB_ARM_CALLS']) === pb1ArmCallsAt + 1 &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 1 &&
+    linesWith(PROBE_NET_MARKER).length === 0,
+    JSON.stringify(logs()));
+
+  // PB2: not found — the default wlan0-only world keeps the key ABSENT and
+  // records exactly ONE unavailability marker (reason only, code=none).
+  const pb2 = freshAbility(mod, FIXTURE_FILESDIR);
+  pb2['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({ __NB_NET_ALL_IDS: [103] });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(pb2, WG_READY);
+  await drainProbe();
+  const pb2Opts = armOptsJson();
+  const pb2Markers = linesWith(PROBE_NET_MARKER);
+  check('PB2 no vpn-tun handle keeps the key absent and prints ONE reason marker (not-found)',
+    !('probe_net_id' in pb2Opts) &&
+    (G['__NB_ARM_OPTS'] as string).indexOf('probe_net_id') < 0 &&
+    pb2Markers.length === 1 &&
+    pb2Markers[0].indexOf('reason=not-found|code=none|diag=true|is_evidence=false') > 0 &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 1,
+    JSON.stringify({ opts: pb2Opts, markers: pb2Markers }));
+
+  // PB3: the list read rejects — key absent, ONE marker with the raw code.
+  const pb3 = freshAbility(mod, FIXTURE_FILESDIR);
+  pb3['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({ __NB_NET_THROW_CODES: { getAllNetsSync: 201 } });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(pb3, WG_READY);
+  await drainProbe();
+  const pb3Markers = linesWith(PROBE_NET_MARKER);
+  check('PB3 a rejected getAllNetsSync keeps the key absent and prints the code (list-error)',
+    !('probe_net_id' in armOptsJson()) &&
+    pb3Markers.length === 1 &&
+    pb3Markers[0].indexOf('reason=list-error|code=201|diag=true|is_evidence=false') > 0,
+    JSON.stringify(pb3Markers));
+
+  // PB4: a name collision — two vpn-tun handles refuse the resolution (never
+  // a guess by list order); key absent, ONE marker reason=ambiguous.
+  const pb4 = freshAbility(mod, FIXTURE_FILESDIR);
+  pb4['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({
+    __NB_NET_ALL_IDS: [147, 148],
+    __NB_NET_PROPS_BY_ID: {
+      147: { interfaceName: 'vpn-tun' },
+      148: { interfaceName: 'vpn-tun' }
+    }
+  });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(pb4, WG_READY);
+  await drainProbe();
+  const pb4Markers = linesWith(PROBE_NET_MARKER);
+  check('PB4 two vpn-tun handles are ambiguous: key absent, ONE marker, never a list-order pick',
+    !('probe_net_id' in armOptsJson()) &&
+    pb4Markers.length === 1 &&
+    pb4Markers[0].indexOf('reason=ambiguous|code=none|') > 0,
+    JSON.stringify(pb4Markers));
+
+  // PB5: the vpn-tun handle's props reject — the handle is skipped, the
+  // world answers not-found (the code stays with the marker, never a value).
+  const pb5 = freshAbility(mod, FIXTURE_FILESDIR);
+  pb5['n2hAcceptedExclusionGeneration'] = 0;
+  seedNetCtx({
+    __NB_NET_ALL_IDS: [147],
+    __NB_NET_PROPS_BY_ID: { 147: { error: 201 } }
+  });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(pb5, WG_READY);
+  await drainProbe();
+  const pb5Markers = linesWith(PROBE_NET_MARKER);
+  check('PB5 an unreadable vpn-tun handle is skipped: key absent, ONE marker (not-found)',
+    !('probe_net_id' in armOptsJson()) &&
+    pb5Markers.length === 1 &&
+    pb5Markers[0].indexOf('reason=not-found|code=none|') > 0,
+    JSON.stringify(pb5Markers));
+
+  // PB6: source pins — the shell NEVER binds: the byte-identical extension
+  // source has no connection-module import at all (netId facts flow ONLY
+  // through the sibling getter-only module, whose own NC5 pins already hold),
+  // the resolution sits BEFORE the native arm call, the only opts write is
+  // the found branch, and the marker prints codes only.
+  check('PB6 the extension source has no connection-module import (facts via the getter-only sibling)',
+    extSource.indexOf('@ohos.net.connection') < 0 &&
+    extSource.indexOf('resolveVpnTunNetId') > 0,
+    'extension netId pin');
+  const pbResolveAt = extSource.indexOf('resolveVpnTunNetId()');
+  const pbArmAt = extSource.indexOf('core.n2h_collector_arm(optsJson)');
+  check('PB6 the resolution runs BEFORE the native arm call and writes only on found',
+    pbResolveAt > 0 && pbArmAt > pbResolveAt &&
+    extSource.indexOf('opts.probe_net_id = vpnResolution.netId;') > pbResolveAt &&
+    extSource.indexOf("'N2H_POSCTL_PROBE_NET_ID_UNAVAILABLE|requestId=%{public}s|reason=%{public}s|'") > 0,
+    JSON.stringify({ pbResolveAt, pbArmAt }));
+  check('PB6 no permission surface was added (module.json5 requestPermissions untouched)',
+    readFileSync(join(HERE, '..', 'src', 'main', 'module.json5')).toString()
+      .indexOf('GET_NETWORK_STATS') < 0,
+    'module.json5 pin');
+
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {
   failedCount++;

@@ -1893,6 +1893,16 @@ pub struct ArmOptions {
     /// value (a gap for the judge's three-way `gen` comparison), never a
     /// fabricated generation.
     pub exclusion_generation: Option<u64>,
+    /// 2026-09-20 (DIAGNOSTIC-ONLY behavior change): the netId the shell
+    /// resolved for the `vpn-tun` interface (official read-only getters). When
+    /// present, the ONE posctl probe socket is bound to that network via
+    /// `OH_NetConn_BindSocket` (resolved at runtime, see
+    /// [`try_bind_socket_to_net`]) after socket creation and before `send_to`,
+    /// so the a2b probe's egress is pinned to the VPN network — every failure
+    /// (no lib, no symbol, refused call) is RECORDED and never changes the
+    /// send semantics. `None` = not requested: nothing is loaded, nothing is
+    /// bound, the probe runs exactly as before.
+    pub probe_net_id: Option<u32>,
 }
 
 impl Default for ArmOptions {
@@ -1906,6 +1916,7 @@ impl Default for ArmOptions {
             peer_overlay_ip: None,
             dns: None,
             exclusion_generation: None,
+            probe_net_id: None,
         }
     }
 }
@@ -1968,6 +1979,20 @@ impl ArmOptions {
             // rather than as a generation core invented.
             opts.exclusion_generation =
                 Some(as_u64(v).ok_or("exclusion_generation must be a non-negative integer")?);
+        }
+        if let Some(v) = obj_get(fields, "probe_net_id") {
+            // 2026-09-20 diag-only net-binding request: a strictly positive
+            // integer that fits the SDK's `NetConn_NetHandle.netId` (a
+            // signed int32; 0 is the documented "no network" sentinel, not a
+            // network). The document parser already refuses negatives and
+            // fractions; anything else (0, beyond i32, wrong type) refuses
+            // the arm (`invalid-opts`) — a half-understood bind request must
+            // not open a window.
+            let id = as_u64(v).ok_or("probe_net_id must be a non-negative integer")?;
+            if id == 0 || id > i32::MAX as u64 {
+                return Err(format!("probe_net_id {id} is not a usable netId"));
+            }
+            opts.probe_net_id = Some(id as u32);
         }
         if let Some(v) = obj_get(fields, "dns") {
             // v3.1's branch record: the branch token is an allow-list and the
@@ -2656,7 +2681,10 @@ fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> 
         let nonce = crate::n2h::fresh_nonce_hex()
             .unwrap_or_else(|_| "000000000000000000000000".to_string());
         let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
-        match send_posctl(dst, &id) {
+        // 2026-09-20 diag-only: the shell-resolved VPN netId rides the arm
+        // options; `None` keeps the probe byte-identical to the pre-binding
+        // behavior (the bind attempt itself is recorded either way).
+        match send_posctl(dst, &id, win.options.probe_net_id) {
             Ok((_n, src)) => {
                 win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
                 out.push(PosctlProbe {
@@ -2848,6 +2876,152 @@ fn take_socket_context_lines() -> Vec<String> {
     CTX_LINES.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
+// ---------------------------------------------------------------------------
+// posctl probe net-binding (2026-09-20, DIAGNOSTIC-ONLY behavior change)
+// ---------------------------------------------------------------------------
+// Evidence 0021 left the a2b probe's egress path OPEN: the probe socket was
+// sent successfully (52 bytes) with mark=0x00000000 and no SO_BINDTODEVICE,
+// the device TUN never saw it, and the peer saw it from the LAN gateway's
+// address — CONSISTENT with egress via the default network, but the policy
+// route table was never observed, so the mechanism stays an inference. This
+// increment turns the question into an experiment: when the shell hands in
+// the VPN network's netId (`probe_net_id`, resolved via official read-only
+// getters), the ONE probe socket is bound to that network with
+// `OH_NetConn_BindSocket` (SDK `network/netmanager/net_connection.h`,
+// `int32_t OH_NetConn_BindSocket(int32_t socketFd, NetConn_NetHandle *netHandle)`,
+// `NetConn_NetHandle { int32_t netId; }`, lib libnet_connection.so, since 12,
+// no @permission documented on it) — resolved at RUNTIME via dlopen/dlsym
+// (the ice.rs `libc.so` idiom), so no link-time dependency is added.
+//
+// Degradation discipline: a missing lib, a missing symbol or a refused call
+// is RECORDED verbatim and NEVER changes the send semantics — the datagram
+// still goes out exactly as before and the send result is returned as-is.
+// Exactly ONE socket is ever bound (the probe's own fd); no connect, no
+// resend, no setsockopt, no other socket is touched. Whether the binding
+// actually moves the egress onto the TUN (and whether the send then fails
+// with e.g. ENETUNREACH) is a DEVICE question this host-side increment does
+// NOT answer, and the mark is NOT assumed to change.
+
+/// Frozen prefix of the bind-net diagnostic lines.
+pub const MARK_BIND_NET: &str = "N2H_POSCTL_BIND_NET";
+
+/// `NetConn_NetHandle` per the SDK header (`net_connection_type.h:226`): one
+/// signed int32 netId — the layout is pinned here byte-for-byte so the
+/// runtime-resolved call sees exactly the ABI the device exports.
+#[repr(C)]
+struct NetConnNetHandle {
+    net_id: i32,
+}
+
+/// The FFI shape of `OH_NetConn_BindSocket` (per the same header).
+type BindSocketFn = unsafe extern "C" fn(crate::sys::c_int, *mut NetConnNetHandle) -> crate::sys::c_int;
+
+/// One bind attempt's honest outcome. `CallFailed` carries the REAL return
+/// code of `OH_NetConn_BindSocket` (a netmanager code per the header: 401 /
+/// 2100002 / 2100003 shapes); dlopen/dlsym have no numeric contract, so their
+/// failures carry no code at all (their dlerror TEXT is never printed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindNetOutcome {
+    NotRequested,
+    Bound,
+    NoLib,
+    NoSymbol,
+    CallFailed(i32),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam: when `Some`, the real dlopen/dlsym path is NOT entered
+    /// — the attempt is recorded (fd, net_id) and the faked outcome answers,
+    /// so the bound / no-symbol / failed branches run on the host without
+    /// libnet_connection.so. `None` = the REAL runtime path (which on the
+    /// Linux host deterministically answers no-lib — the device would only
+    /// differ if the lib were actually loadable there).
+    static BIND_NET_FAKE: std::cell::RefCell<Option<BindNetOutcome>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only record of the attempts that reached a bind TARGET (the fake
+    /// seam records before answering; the real path records when it is about
+    /// to call the resolved symbol).
+    static BIND_NET_CALLS: std::cell::RefCell<Vec<(crate::sys::c_int, u32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Test-only capture of the emitted bind lines.
+    static BIND_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drained capture of the recorded bind attempts (test only).
+#[cfg(test)]
+fn take_bind_net_calls() -> Vec<(crate::sys::c_int, u32)> {
+    BIND_NET_CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+/// Drained capture of the emitted bind lines (test only).
+#[cfg(test)]
+fn take_bind_net_lines() -> Vec<String> {
+    BIND_LINES.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
+/// Bind ONE socket fd to `net_id` via `OH_NetConn_BindSocket`, resolved at
+/// runtime. Read the outcome, nothing else: the caller records it and sends
+/// regardless. The dlopen handle is deliberately kept (no dlclose — the same
+/// lifetime discipline as every other runtime lookup in this crate).
+fn try_bind_socket_to_net(fd: crate::sys::c_int, net_id: u32) -> BindNetOutcome {
+    #[cfg(test)]
+    if let Some(fake) = BIND_NET_FAKE.with(|f| *f.borrow()) {
+        BIND_NET_CALLS.with(|c| c.borrow_mut().push((fd, net_id)));
+        return fake;
+    }
+    unsafe {
+        let lib = crate::sys::dlopen(b"libnet_connection.so\0".as_ptr(), crate::sys::RTLD_NOW);
+        if lib.is_null() {
+            return BindNetOutcome::NoLib;
+        }
+        let sym = crate::sys::dlsym(lib, b"OH_NetConn_BindSocket\0".as_ptr());
+        if sym.is_null() {
+            return BindNetOutcome::NoSymbol;
+        }
+        let bind: BindSocketFn = core::mem::transmute(sym);
+        #[cfg(test)]
+        BIND_NET_CALLS.with(|c| c.borrow_mut().push((fd, net_id)));
+        let mut handle = NetConnNetHandle { net_id: net_id as i32 };
+        let rc = bind(fd, &mut handle);
+        if rc == 0 {
+            BindNetOutcome::Bound
+        } else {
+            BindNetOutcome::CallFailed(rc)
+        }
+    }
+}
+
+/// `N2H_POSCTL_BIND_NET|probe_id=…|requested_net_id=…|result=…|
+/// errno_or_code=…|diag=true|is_evidence=false` — one line per a2b send.
+/// `requested_net_id` is the requested value or `none`; `result` is one of
+/// `bound` / `no-lib` / `no-symbol` / `failed` / `not-requested`;
+/// `errno_or_code` is the REAL BindSocket return code on `failed` and 0
+/// otherwise (no dlerror text, no payload, no key material — metadata only).
+/// Never enters Evidence / judge / PosctlProbe shapes.
+fn bind_net_line(probe_id: &str, requested: Option<u32>, outcome: &BindNetOutcome) -> String {
+    let requested = requested.map_or("none".to_string(), |n| n.to_string());
+    let (result, code) = match outcome {
+        BindNetOutcome::NotRequested => ("not-requested", 0),
+        BindNetOutcome::Bound => ("bound", 0),
+        BindNetOutcome::NoLib => ("no-lib", 0),
+        BindNetOutcome::NoSymbol => ("no-symbol", 0),
+        BindNetOutcome::CallFailed(rc) => ("failed", *rc),
+    };
+    format!(
+        "{MARK_BIND_NET}|probe_id={probe_id}|requested_net_id={requested}|result={result}|\
+         errno_or_code={code}|diag=true|is_evidence=false"
+    )
+}
+
+/// Emit one bind-net line on the frozen channel (+ test-only capture).
+fn emit_bind_net(line: &str) {
+    hilog::emit(line);
+    #[cfg(test)]
+    BIND_LINES.with(|l| l.borrow_mut().push(line.to_string()));
+}
+
 /// Send one positive-control datagram from a fresh WILDCARD socket (§4.2's
 /// socket discipline) with the host payload shape (§4.3). Around `send_to`
 /// itself the SAME socket fd is sampled read-only (before/after: uid/euid,
@@ -2856,7 +3030,20 @@ fn take_socket_context_lines() -> Vec<String> {
 /// bytes, call count, lifetime, success/failure text) are exactly the
 /// pre-increment ones, and the send result is captured BEFORE the after-sample
 /// so a diagnostic read can never overwrite the send's own error.
-fn send_posctl(dst: SocketAddr, id: &str) -> Result<(usize, String), String> {
+///
+/// 2026-09-20 diag-only increment: when `bind_net` is `Some(net_id)` the SAME
+/// probe socket is bound to that network ([`try_bind_socket_to_net`]) AFTER
+/// the before-sample and BEFORE `send_to` — so the context pair brackets the
+/// binding too (a mark/bound_device change, if any, shows up in the
+/// after-sample) — and the attempt itself goes out as one [`MARK_BIND_NET`]
+/// line. The attempt can never fail the send: every outcome is recorded and
+/// the datagram leaves exactly as before. `None` = not requested: nothing is
+/// loaded, nothing is bound, only the `not-requested` line is added.
+fn send_posctl(
+    dst: SocketAddr,
+    id: &str,
+    bind_net: Option<u32>,
+) -> Result<(usize, String), String> {
     let sock = std::net::UdpSocket::bind(PROBE_BIND_WILDCARD)
         .map_err(|e| format!("posctl socket bind: {e}"))?;
     let src = sock.local_addr().map_err(|e| format!("posctl socket addr: {e}"))?;
@@ -2867,6 +3054,13 @@ fn send_posctl(dst: SocketAddr, id: &str) -> Result<(usize, String), String> {
     let probe_id = posctl_marker(payload.as_bytes()).unwrap_or_default();
     let before = sample_socket_context(context_fd(fd));
     emit_socket_context(&socket_context_line(&before, &probe_id, "before", None));
+    // The bind attempt is diagnostic-only: its outcome is recorded and the
+    // send proceeds regardless (a refused bind is NOT a refused probe).
+    let bind_outcome = match bind_net {
+        Some(net_id) => try_bind_socket_to_net(fd, net_id),
+        None => BindNetOutcome::NotRequested,
+    };
+    emit_bind_net(&bind_net_line(&probe_id, bind_net, &bind_outcome));
     // The result (and its raw errno, taken from the OWNED io::Error) is saved
     // first — later reads share neither it nor the failure text.
     let sent = sock
@@ -5711,7 +5905,7 @@ mod tests {
         // single-source property: `send_posctl` calls `posctl_payload`).
         let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
         let dst = sink.local_addr().expect("sink addr");
-        let (n, _src) = send_posctl(dst, &id).expect("posctl send");
+        let (n, _src) = send_posctl(dst, &id, None).expect("posctl send");
         assert_eq!(n, payload.len());
         let mut recorded: Option<Vec<u8>> = None;
         for _ in 0..100 {
@@ -5843,7 +6037,7 @@ mod tests {
         take_socket_context_lines();
         let id = probe_id(POSCTL_KIND_TOKEN, &"ab".repeat(12));
         let payload = posctl_payload(&id);
-        let (n, src) = send_posctl(dst, &id).expect("posctl send");
+        let (n, src) = send_posctl(dst, &id, None).expect("posctl send");
         assert_eq!(n, payload.len(), "send semantics unchanged");
         assert_ne!(src.parse::<SocketAddr>().expect("src").port(), 0, "wildcard src port");
         let lines = take_socket_context_lines();
@@ -5894,7 +6088,8 @@ mod tests {
         let id = probe_id(POSCTL_KIND_TOKEN, &"cd".repeat(12));
         let payload = posctl_payload(&id);
         let (n, _src) =
-            send_posctl(dst, &id).expect("a failed diag read must not change the send result");
+            send_posctl(dst, &id, None)
+                .expect("a failed diag read must not change the send result");
         assert_eq!(n, payload.len(), "send semantics unchanged under failing reads");
         CTX_FD_OVERRIDE.with(|c| c.set(None));
         for _ in 0..100 {
@@ -5961,6 +6156,233 @@ mod tests {
         );
         assert!(line.contains("|mark=unavailable|mark_errno=9|"), "{line}");
         assert!(line.contains("|bound_device=unavailable|bound_device_errno=9|"), "{line}");
+    }
+
+    // ---- posctl probe net-binding (2026-09-20 diag-only increment) ----
+
+    /// The frozen field contract of the bind-net line: field order, the five
+    /// result renderings, and the code discipline (the REAL BindSocket return
+    /// code on `failed`, 0 everywhere else, never dlerror text, never payload).
+    #[test]
+    fn bind_net_line_freezes_the_field_contract() {
+        let id = "N2H-posctl-aabbcceeddff0011223344";
+        assert_eq!(
+            bind_net_line(id, None, &BindNetOutcome::NotRequested),
+            "N2H_POSCTL_BIND_NET|probe_id=N2H-posctl-aabbcceeddff0011223344|\
+             requested_net_id=none|result=not-requested|errno_or_code=0|\
+             diag=true|is_evidence=false"
+        );
+        assert_eq!(
+            bind_net_line(id, Some(147), &BindNetOutcome::Bound),
+            "N2H_POSCTL_BIND_NET|probe_id=N2H-posctl-aabbcceeddff0011223344|\
+             requested_net_id=147|result=bound|errno_or_code=0|\
+             diag=true|is_evidence=false"
+        );
+        let degraded = [
+            (BindNetOutcome::NoLib, "no-lib", "0"),
+            (BindNetOutcome::NoSymbol, "no-symbol", "0"),
+            (BindNetOutcome::CallFailed(2100002), "failed", "2100002"),
+            (BindNetOutcome::CallFailed(401), "failed", "401"),
+        ];
+        for (outcome, result, code) in degraded {
+            let line = bind_net_line(id, Some(147), &outcome);
+            assert!(line.contains(&format!("|requested_net_id=147|result={result}|")), "{line}");
+            assert!(line.contains(&format!("|errno_or_code={code}|diag=true|is_evidence=false")), "{line}");
+            assert!(line.starts_with("N2H_POSCTL_BIND_NET|probe_id=N2H-posctl-"), "{line}");
+            // metadata only: no payload text can ever leak into the line
+            assert!(!line.contains("positive-control"), "{line}");
+        }
+    }
+
+    /// Without `probe_net_id` the send is byte-identical to the pre-increment
+    /// behavior AND no load/bind is ever attempted: the host would answer any
+    /// real attempt with `no-lib` (libnet_connection.so is not loadable on
+    /// Linux), so the `not-requested` line plus an empty attempt record PROVE
+    /// the attempt path was never entered.
+    #[test]
+    fn send_posctl_without_probe_net_id_never_attempts_a_bind() {
+        BIND_NET_FAKE.with(|f| *f.borrow_mut() = None);
+        take_bind_net_calls();
+        take_bind_net_lines();
+        take_socket_context_lines();
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        let id = probe_id(POSCTL_KIND_TOKEN, &"ef".repeat(12));
+        let payload = posctl_payload(&id);
+        let (n, _src) = send_posctl(dst, &id, None).expect("posctl send");
+        assert_eq!(n, payload.len(), "send semantics unchanged without the option");
+        for _ in 0..100 {
+            sink.drain();
+            if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert!(sink.observed(&WireMarker::Ascii(id.clone())).is_some(), "marker arrived");
+        let calls = take_bind_net_calls();
+        assert!(calls.is_empty(), "no bind attempt without the option: {calls:?}");
+        let lines = take_bind_net_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(ctx_field(&lines[0], "result"), Some("not-requested"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "requested_net_id"), Some("none"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "probe_id"), Some(id.as_str()), "{}", lines[0]);
+        // the socket-context pair is exactly as before (unchanged diag surface)
+        let ctx = take_socket_context_lines();
+        assert_eq!(ctx.len(), 2, "{ctx:?}");
+        assert_eq!(ctx_field(&ctx[0], "phase"), Some("before"));
+        assert_eq!(ctx_field(&ctx[1], "phase"), Some("after"));
+    }
+
+    /// With `probe_net_id` the bind target is called EXACTLY once and ONLY on
+    /// the probe socket's own fd (the `fd=` field of the ctx before-line — the
+    /// very fd the datagram leaves on), the outcome line reads `bound`, and
+    /// the send itself stays honest.
+    #[test]
+    fn send_posctl_binds_exactly_once_and_only_the_probe_fd() {
+        BIND_NET_FAKE.with(|f| *f.borrow_mut() = Some(BindNetOutcome::Bound));
+        take_bind_net_calls();
+        take_bind_net_lines();
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        let id = probe_id(POSCTL_KIND_TOKEN, &"ab".repeat(12));
+        let payload = posctl_payload(&id);
+        let (n, _src) = send_posctl(dst, &id, Some(147)).expect("posctl send");
+        assert_eq!(n, payload.len());
+        BIND_NET_FAKE.with(|f| *f.borrow_mut() = None);
+        for _ in 0..100 {
+            sink.drain();
+            if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert!(sink.observed(&WireMarker::Ascii(id.clone())).is_some(), "marker arrived");
+        let calls = take_bind_net_calls();
+        assert_eq!(calls.len(), 1, "exactly one bind attempt: {calls:?}");
+        let ctx = take_socket_context_lines();
+        let before_fd = ctx_field(&ctx[0], "fd").and_then(|f| f.parse::<i32>().ok());
+        assert_eq!(calls[0].1, 147, "the requested netId is the one passed down");
+        assert_eq!(
+            Some(calls[0].0),
+            before_fd,
+            "the bind hit the probe socket's own fd, never another socket"
+        );
+        let lines = take_bind_net_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(ctx_field(&lines[0], "requested_net_id"), Some("147"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "result"), Some("bound"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "errno_or_code"), Some("0"), "{}", lines[0]);
+    }
+
+    /// Every degradation (no lib, no symbol, refused call) is recorded
+    /// verbatim, never overwrites or blocks the send, and the datagram still
+    /// arrives — the bind attempt is pure diagnosis.
+    #[test]
+    fn send_posctl_bind_degradations_are_recorded_and_never_touch_the_send() {
+        let cases = [
+            (BindNetOutcome::NoLib, "no-lib", "0"),
+            (BindNetOutcome::NoSymbol, "no-symbol", "0"),
+            (BindNetOutcome::CallFailed(2100002), "failed", "2100002"),
+        ];
+        for (fake, result, code) in cases {
+            BIND_NET_FAKE.with(|f| *f.borrow_mut() = Some(fake));
+            take_bind_net_calls();
+            take_bind_net_lines();
+            let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+            let dst = sink.local_addr().expect("sink addr");
+            let id = probe_id(POSCTL_KIND_TOKEN, &"cd".repeat(12));
+            let payload = posctl_payload(&id);
+            let (n, _src) =
+                send_posctl(dst, &id, Some(147)).expect("a failed bind must not fail the send");
+            assert_eq!(n, payload.len(), "send length unchanged under {result}");
+            BIND_NET_FAKE.with(|f| *f.borrow_mut() = None);
+            for _ in 0..100 {
+                sink.drain();
+                if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                    break;
+                }
+                crate::sys::sleep_ms(10);
+            }
+            assert!(
+                sink.observed(&WireMarker::Ascii(id.clone())).is_some(),
+                "marker arrived under {result}"
+            );
+            assert_eq!(take_bind_net_calls().len(), 1, "exactly one attempt under {result}");
+            let lines = take_bind_net_lines();
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert_eq!(ctx_field(&lines[0], "result"), Some(result), "{}", lines[0]);
+            assert_eq!(ctx_field(&lines[0], "errno_or_code"), Some(code), "{}", lines[0]);
+        }
+    }
+
+    /// The REAL runtime path on the Linux host: libnet_connection.so does not
+    /// exist here, so dlopen fails, the line records `no-lib` honestly (with
+    /// no invented code), and the send proceeds unchanged. On the device the
+    /// same path may answer bound/failed — that reading belongs to a device
+    /// run, never to this host test.
+    #[test]
+    fn send_posctl_real_host_path_records_no_lib_and_still_sends() {
+        BIND_NET_FAKE.with(|f| *f.borrow_mut() = None);
+        take_bind_net_calls();
+        take_bind_net_lines();
+        let mut sink = crate::n2h::UdpSink::bind(false).expect("udp sink");
+        let dst = sink.local_addr().expect("sink addr");
+        let id = probe_id(POSCTL_KIND_TOKEN, &"12".repeat(12));
+        let payload = posctl_payload(&id);
+        let (n, _src) = send_posctl(dst, &id, Some(147)).expect("posctl send");
+        assert_eq!(n, payload.len(), "send unchanged under the real no-lib path");
+        for _ in 0..100 {
+            sink.drain();
+            if sink.observed(&WireMarker::Ascii(id.clone())).is_some() {
+                break;
+            }
+            crate::sys::sleep_ms(10);
+        }
+        assert!(sink.observed(&WireMarker::Ascii(id.clone())).is_some(), "marker arrived");
+        assert!(take_bind_net_calls().is_empty(), "no symbol was ever resolved");
+        let lines = take_bind_net_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(ctx_field(&lines[0], "result"), Some("no-lib"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "requested_net_id"), Some("147"), "{}", lines[0]);
+        assert_eq!(ctx_field(&lines[0], "errno_or_code"), Some("0"), "{}", lines[0]);
+    }
+
+    /// The arm option is strict: a present `probe_net_id` must be a positive
+    /// integer that fits the SDK's signed int32 netId; zero (the documented
+    /// "no network" sentinel), anything beyond i32::MAX, wrong types, and the
+    /// document parser's already-refused shapes (negative, fractional) all
+    /// refuse the arm (`invalid-opts`). Absent stays `None`.
+    #[test]
+    fn arm_options_validate_probe_net_id_strictly() {
+        let opts = ArmOptions::parse_json("{\"probe_net_id\":147}").expect("a plain netId parses");
+        assert_eq!(opts.probe_net_id, Some(147));
+        let opts = ArmOptions::parse_json(
+            "{\"probe_net_id\":2147483647,\"exclusion_generation\":3}",
+        )
+        .expect("i32::MAX fits the SDK's int32 netId");
+        assert_eq!(opts.probe_net_id, Some(i32::MAX as u32));
+        assert_eq!(opts.exclusion_generation, Some(3), "the other options are untouched");
+        assert_eq!(
+            ArmOptions::parse_json("{}").expect("no options").probe_net_id,
+            None,
+            "an absent key stays None"
+        );
+        for bad in [
+            "{\"probe_net_id\":0}",          // the documented "no network" sentinel
+            "{\"probe_net_id\":2147483648}", // beyond int32
+            "{\"probe_net_id\":99999999999}", // beyond u64 range entirely
+            "{\"probe_net_id\":\"147\"}",    // a string is not a netId
+            "{\"probe_net_id\":true}",
+            "{\"probe_net_id\":null}",
+            "{\"probe_net_id\":[]}",
+            "{\"probe_net_id\":-1}",  // the document parser refuses negatives
+            "{\"probe_net_id\":1.5}", // …and fractions
+        ] {
+            assert!(
+                ArmOptions::parse_json(bad).is_err(),
+                "'{bad}' must refuse the arm (invalid-opts)"
+            );
+        }
     }
 
     /// §13.10's ops relay contract: the arm option accepts ONLY the frozen
