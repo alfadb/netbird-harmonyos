@@ -107,6 +107,15 @@
 //      absent (no default injected), wrong-type (e.g. a JSON number) ⇒
 //      forwarded AS THAT VALUE for the core's bare-IPv4 + peer-map check to
 //      refuse; no marker field and no log literal changes.
+//   C9 (2026-09-20 dns_nxdomain_echo bridge): v4 effective preregistration
+//      §3 path① / §6.2 item 2's optional non-secret `dns_nxdomain_echo`
+//      (the explicit enable of the dns-nxdomain-echo receipt method; default
+//      OFF) is bridged with the SAME present-only + verbatim discipline —
+//      present true/false ⇒ the key lands in the native opts JSON verbatim
+//      (existing fields unchanged), absent ⇒ the key stays ABSENT (no `false`
+//      default injected), wrong-type (JSON string/number) ⇒ forwarded AS THAT
+//      VALUE for the core's strict boolean check to refuse; no marker field
+//      and no log literal changes.
 //   P1-P8 (2026-09-18 iface-bytes availability probe): the OFFICIAL
 //      @ohos.net.statistics getIfaceRxBytes/getIfaceTxBytes (since 10, no
 //      permission on the iface methods) is called ONLY from the arm SUCCESS
@@ -119,13 +128,34 @@
 //      per-direction rejection leaves that byte field unavailable with the
 //      raw code kept while the other direction records; P5 NO native ARM
 //      success ⇒ NO probe (no ticket / gate closed / core answers not-ok);
-//      P6 ticks after the arm repeat nothing (one-shot inherited); P7 a
+//      P6 ticks after the arm repeat nothing (one-shot inherited) — the FIRST
+//      post-arm tick carries exactly the WINDOW close edge, the tick after it
+//      repeats nothing; P7 a
 //      resolved non-finite/negative value is never printed and never turned
 //      into 0 (invalid-value), a resolved 0 prints as 0; P8 source pins (call
 //      site inside the ok-branch after the ARMED literal, byte-only probe
 //      module — no /proc read, no getUid*/GET_NETWORK_STATS, no exception
 //      message text — and module.json5 unchanged). The probe never touches
 //      Evidence.counters/notes; no packet count exists anywhere.
+//   W1-W6 (2026-09-20 iface-bytes WINDOW two-edge read, v4 preregistration
+//      §4 (ii) C7 same-source-calibration prerequisite): the OPEN edge is the
+//      arm SUCCESS branch's own vpn-tun reading, re-rendered on
+//      N2H_IFACE_BYTES_WINDOW|phase=open from the SAME numbers (no second
+//      read; pairRequestId == requestId); the CLOSE edge is ONE more vpn-tun
+//      read issued on the FIRST arm-hook tick AFTER that open line — never
+//      the arming tick (the latch flips only after the async open line),
+//      never without an open edge, never twice (latch consumed at issue).
+//      W1 open edge once + zero close before the next tick; W2 the close
+//      edge: same requestId, fresh values, close.started >= open.finished,
+//      exactly the two vpn-tun calls; W3 later ticks repeat nothing; W4 a
+//      rejected API prints unavailable + the code and the flow continues;
+//      W5 no ARM success (no ticket / gate closed / core not-ok) ⇒ zero
+//      close reads; W6 source pins (no timer/loop in the window path, no
+//      await added to the tick, the close hook rides the arm hook before its
+//      one-shot return, the read issues only behind the open latch with a
+//      last-resort catch, latch callback writes one boolean inside the
+//      ok-branch, both reads strictly after the native arm call). C7 counting
+//      input only — never Evidence.
 //   NC1-NC5 (2026-09-20 network-context snapshot): the PUBLIC connection
 //      getters (getDefaultNetSync/getAppNetSync/getAllNetsSync +
 //      getNetCapabilitiesSync/getConnectionPropertiesSync, all Sync forms read
@@ -168,6 +198,8 @@ const ARM_TICKET_PATH = `${FIXTURE_FILESDIR}/netbird-n2h-arm`;
 const ARM_TICKET_NAME = 'netbird-n2h-arm';
 // The 2026-09-18 iface-bytes availability probe marker (the P group below).
 const PROBE_PREFIX = 'N2H_IFACE_BYTES_PROBE|';
+// The 2026-09-20 iface-bytes WINDOW two-edge marker (the W group below).
+const WINDOW_PREFIX = 'N2H_IFACE_BYTES_WINDOW|';
 // The 2026-09-20 network-context snapshot marker (the NC group below).
 const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 
@@ -1214,6 +1246,78 @@ try {
     String(G['__NB_ARM_OPTS']).indexOf('"peer_overlay_ip":123') > 0,
     String(G['__NB_ARM_OPTS']));
 
+  // ---------------- C9 (2026-09-20): dns_nxdomain_echo verbatim bridging ----
+  // v4 effective preregistration §3 path① / §6.2 item 2: the optional
+  // non-secret `dns_nxdomain_echo` enable for the device collector's dns
+  // probe. The shell is a PURE FORWARDER — present (true OR false) ⇒ the key
+  // lands in the native opts JSON verbatim (existing fields unchanged),
+  // absent ⇒ the key stays ABSENT (no `false` default injected; the core's
+  // documented OFF is what an omitted key means), wrong-type (JSON string /
+  // number) ⇒ forwarded AS THAT VALUE for the core's strict boolean check to
+  // refuse. No marker field and no log literal changes.
+  const echoOnAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  echoOnAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"dns_nxdomain_echo":true}');
+  resetLog();
+  tickArm(echoOnAbility, WG_READY);
+  const echoOnRaw = String(G['__NB_ARM_OPTS']);
+  const echoOnOpts = JSON.parse(echoOnRaw) as Record<string, unknown>;
+  check('C9 a present dns_nxdomain_echo=true reaches the native opts JSON verbatim',
+    echoOnOpts['dns_nxdomain_echo'] === true &&
+    echoOnRaw.indexOf('"dns_nxdomain_echo":true') > 0,
+    echoOnRaw);
+  check('C9 the existing arm fields ride unchanged next to dns_nxdomain_echo',
+    echoOnOpts['posctl_port'] === 40001 && echoOnOpts['probe_wait_ms'] === 800,
+    echoOnRaw);
+
+  const echoOffAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  echoOffAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"dns_nxdomain_echo":false}');
+  resetLog();
+  tickArm(echoOffAbility, WG_READY);
+  const echoOffRaw = String(G['__NB_ARM_OPTS']);
+  const echoOffOpts = JSON.parse(echoOffRaw) as Record<string, unknown>;
+  check('C9 an explicit false is forwarded as false (never dropped as "absent")',
+    echoOffOpts['dns_nxdomain_echo'] === false &&
+    echoOffRaw.indexOf('"dns_nxdomain_echo":false') > 0,
+    echoOffRaw);
+
+  const noEchoAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  noEchoAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"posctl_port":41000}');
+  resetLog();
+  tickArm(noEchoAbility, WG_READY);
+  const noEchoRaw = String(G['__NB_ARM_OPTS']);
+  const noEchoOpts = JSON.parse(noEchoRaw) as Record<string, unknown>;
+  check('C9 an absent dns_nxdomain_echo stays absent (no key, no false injected)',
+    noEchoOpts['dns_nxdomain_echo'] === undefined &&
+    noEchoRaw.indexOf('dns_nxdomain_echo') < 0,
+    noEchoRaw);
+
+  const badEchoAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  badEchoAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"dns_nxdomain_echo":"true"}');
+  resetLog();
+  tickArm(badEchoAbility, WG_READY);
+  const badEchoRaw = String(G['__NB_ARM_OPTS']);
+  const badEchoOpts = JSON.parse(badEchoRaw) as Record<string, unknown>;
+  check('C9 a wrong-type string is forwarded AS THAT VALUE (never coerced, never dropped)',
+    badEchoOpts['dns_nxdomain_echo'] === 'true' &&
+    badEchoRaw.indexOf('"dns_nxdomain_echo":"true"') > 0,
+    badEchoRaw);
+
+  const numEchoAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  numEchoAbility['n2hAcceptedExclusionGeneration'] = 0;
+  setArmFile(true, undefined, '{"dns_nxdomain_echo":1}');
+  resetLog();
+  tickArm(numEchoAbility, WG_READY);
+  const numEchoRaw = String(G['__NB_ARM_OPTS']);
+  const numEchoOpts = JSON.parse(numEchoRaw) as Record<string, unknown>;
+  check('C9 a wrong-type number is forwarded AS THAT VALUE (never coerced, never dropped)',
+    numEchoOpts['dns_nxdomain_echo'] === 1 &&
+    numEchoRaw.indexOf('"dns_nxdomain_echo":1') > 0,
+    numEchoRaw);
+
   // ---------------- P (2026-09-18): the iface-bytes availability probe -----
   // The OFFICIAL per-NIC byte API (@ohos.net.statistics getIfaceRxBytes /
   // getIfaceTxBytes, since 10, NO permission on the iface methods) is the
@@ -1348,15 +1452,28 @@ try {
     linesWith(PROBE_PREFIX).length === 0 &&
     statsCalls().length === callsAtP5, JSON.stringify(logs()));
 
-  // P6: the probe inherits the arm's one-shot semantics — ticks after the arm
-  // repeat nothing: no line, no statistics call (the P1 instance, re-ticked).
+  // P6: the OPEN probe inherits the arm's one-shot semantics; the FIRST tick
+  // after the arm carries exactly the WINDOW close edge (the W group pins its
+  // shape — here only that it is the one extra thing, then silence): no new
+  // PROBE line, exactly one close round (two statistics calls), and the tick
+  // after that repeats nothing at all.
   const callsAtP6 = statsCalls().length;
   resetLog();
   tickArm(probeAbility, WG_READY);
+  await drainProbe();
+  const p6CloseCalls = statsCalls().length - callsAtP6;
+  check('P6 first post-arm tick: no PROBE repeat, exactly the one WINDOW close round',
+    linesWith(PROBE_PREFIX).length === 0 &&
+    linesWith(WINDOW_PREFIX).length === 1 &&
+    fieldOf(linesWith(WINDOW_PREFIX)[0], 'phase') === 'close' &&
+    p6CloseCalls === 2,
+    JSON.stringify({ window: linesWith(WINDOW_PREFIX), calls: p6CloseCalls }));
+  resetLog();
   tickArm(probeAbility, WG_READY);
   await drainProbe();
-  check('P6 ticks after the arm repeat nothing: no probe line, no statistics call',
-    logs().length === 0 && statsCalls().length === callsAtP6, JSON.stringify(logs()));
+  check('P6 the tick after the close edge repeats nothing: no line, no statistics call',
+    statsCalls().length === callsAtP6 + p6CloseCalls && logs().length === 0,
+    JSON.stringify(logs()));
 
   // P7: value honesty — a RESOLVED value that is not a finite nonnegative
   // byte count is never printed and never turned into 0 (token
@@ -1396,12 +1513,12 @@ try {
   const okBranchAt = extSource.indexOf('if (answer.ok === true) {');
   const armedLit = extSource.indexOf(
     "'N2H_COLLECTOR_ARMED|requestId=%{public}s|gen=%{public}d|openedMono=%{public}d|'");
-  const probeCall = extSource.indexOf('runInterfaceStatsProbe(this.requestId)');
+  const probeCall = extSource.indexOf('runInterfaceStatsProbe(this.requestId, (): void => {');
   const elseAt = extSource.indexOf('} else {', armedLit);
   check('P8 the probe call sits INSIDE the arm success branch (ok -> ARMED literal -> probe -> else)',
     okBranchAt > 0 && armedLit > okBranchAt && probeCall > armedLit && elseAt > probeCall &&
     extSource.indexOf(
-      "import { runInterfaceStatsProbe, runNetworkContextProbe } from './NetBirdInterfaceStatsProbe';") > 0,
+      "import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose } from\n  './NetBirdInterfaceStatsProbe';") > 0,
     JSON.stringify({ okBranchAt, armedLit, probeCall, elseAt }));
   check('P8 the probe module pins the two fixed names, the marker, and the byte-only scope',
     probeSource.indexOf("const PROBE_IFACE: string = 'vpn-tun';") > 0 &&
@@ -1422,6 +1539,208 @@ try {
     readFileSync(join(HERE, '..', 'src', 'main', 'module.json5')).toString()
       .indexOf('GET_NETWORK_STATS') < 0,
     'module.json5 pin');
+
+  // ---------------- W (2026-09-20): the iface-bytes WINDOW two-edge read ----
+  // v4 preregistration §4 (ii), C7 same-source-calibration prerequisite: ONE
+  // OPEN/CLOSE pair on the SAME official per-NIC byte API. The OPEN edge
+  // re-renders the arm branch's own vpn-tun sample (SAME numbers — no second
+  // read); the CLOSE edge is ONE fresh vpn-tun read issued on the first
+  // arm-hook tick AFTER that open line — never the arming tick, never twice,
+  // never without the open latch. Diagnostic-only: the readings are C7
+  // counting input, never Evidence.counters/notes, never the judge. The same
+  // field discipline as the probe line holds (codes only, never a message).
+  const openAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  openAbility['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 2100, 'n2h-none0': 0 }, { 'vpn-tun': 3100, 'n2h-none0': 0 });
+  setArmFile(true, undefined);
+  const callsAtW1 = statsCalls().length;
+  resetLog();
+  tickArm(openAbility, WG_READY);
+  await drainProbe();
+  const w1Lines = linesWith(WINDOW_PREFIX);
+  const w1Open = w1Lines.length === 1 ? w1Lines[0] : '';
+  const w1ProbeVpn = linesWith(PROBE_PREFIX).filter((l: string): boolean =>
+    fieldOf(l, 'interface') === 'vpn-tun');
+  check('W1 the arming tick emits exactly the open edge, no close, and only the four probe calls',
+    w1Lines.length === 1 &&
+    fieldOf(w1Open, 'phase') === 'open' &&
+    fieldOf(w1Open, 'requestId') === REQUEST_ID &&
+    fieldOf(w1Open, 'pairRequestId') === REQUEST_ID &&
+    fieldOf(w1Open, 'interface') === 'vpn-tun' &&
+    fieldOf(w1Open, 'rxBytes') === '2100' && fieldOf(w1Open, 'txBytes') === '3100' &&
+    fieldOf(w1Open, 'rxError') === 'none' && fieldOf(w1Open, 'txError') === 'none' &&
+    /^\d+$/.test(fieldOf(w1Open, 'startedUnixMs')) &&
+    /^\d+$/.test(fieldOf(w1Open, 'finishedUnixMs')) &&
+    fieldOf(w1Open, 'diag') === 'true' && fieldOf(w1Open, 'is_evidence') === 'false' &&
+    statsCalls().length - callsAtW1 === 4,
+    JSON.stringify({ window: w1Lines, calls: statsCalls().slice(callsAtW1) }));
+  check('W1 the open edge is the SAME sample as the PROBE line (no second read: identical numbers)',
+    w1ProbeVpn.length === 1 &&
+    fieldOf(w1ProbeVpn[0], 'startedUnixMs') === fieldOf(w1Open, 'startedUnixMs') &&
+    fieldOf(w1ProbeVpn[0], 'finishedUnixMs') === fieldOf(w1Open, 'finishedUnixMs') &&
+    fieldOf(w1ProbeVpn[0], 'rxBytes') === fieldOf(w1Open, 'rxBytes') &&
+    fieldOf(w1ProbeVpn[0], 'txBytes') === fieldOf(w1Open, 'txBytes'),
+    JSON.stringify({ probe: w1ProbeVpn, open: w1Open }));
+
+  // W2: the CLOSE edge lands on the NEXT watcher tick — same requestId/pair,
+  // FRESH values, exactly two vpn-tun calls, close.started >= open.finished.
+  const callsAtW2 = statsCalls().length;
+  resetLog();
+  seedStats({ 'vpn-tun': 2400, 'n2h-none0': 0 }, { 'vpn-tun': 3600, 'n2h-none0': 0 });
+  tickArm(openAbility, WG_READY);
+  await drainProbe();
+  const w2Lines = linesWith(WINDOW_PREFIX);
+  const w2Close = w2Lines.length === 1 ? w2Lines[0] : '';
+  const w2Calls = statsCalls().slice(callsAtW2);
+  check('W2 the NEXT tick emits exactly the close edge: same requestId/pair, fresh values, two vpn-tun calls',
+    w2Lines.length === 1 &&
+    fieldOf(w2Close, 'phase') === 'close' &&
+    fieldOf(w2Close, 'requestId') === REQUEST_ID &&
+    fieldOf(w2Close, 'pairRequestId') === REQUEST_ID &&
+    fieldOf(w2Close, 'interface') === 'vpn-tun' &&
+    fieldOf(w2Close, 'rxBytes') === '2400' && fieldOf(w2Close, 'txBytes') === '3600' &&
+    fieldOf(w2Close, 'rxError') === 'none' && fieldOf(w2Close, 'txError') === 'none' &&
+    fieldOf(w2Close, 'diag') === 'true' && fieldOf(w2Close, 'is_evidence') === 'false' &&
+    w2Calls.length === 2 &&
+    w2Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
+    w2Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0,
+    JSON.stringify({ window: w2Lines, calls: w2Calls }));
+  check('W2 the close edge is not earlier than the open edge (started >= open.finished)',
+    Number(fieldOf(w2Close, 'startedUnixMs')) >= Number(fieldOf(w1Open, 'finishedUnixMs')),
+    JSON.stringify({ openFinished: fieldOf(w1Open, 'finishedUnixMs'),
+      closeStarted: fieldOf(w2Close, 'startedUnixMs') }));
+
+  // W3: one-shot — the ticks after the close edge repeat nothing at all.
+  const callsAtW3 = statsCalls().length;
+  resetLog();
+  tickArm(openAbility, WG_READY);
+  tickArm(openAbility, WG_READY);
+  await drainProbe();
+  check('W3 ticks after the close edge repeat nothing: no WINDOW/PROBE line, no statistics call',
+    logs().length === 0 && statsCalls().length === callsAtW3, JSON.stringify(logs()));
+
+  // W4: a REJECTED close read prints unavailable + that direction's raw code,
+  // never throws, never launders 0 — and the diagnostic flow continues (the
+  // one-shot latch was consumed at issue; the next tick repeats nothing).
+  const w4Ability = freshAbility(mod, FIXTURE_FILESDIR);
+  w4Ability['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 10, 'n2h-none0': 0 }, { 'vpn-tun': 20, 'n2h-none0': 0 });
+  setArmFile(true, undefined);
+  resetLog();
+  tickArm(w4Ability, WG_READY);
+  await drainProbe();
+  const w4Open = linesWith(WINDOW_PREFIX);
+  seedStats({ 'vpn-tun': { code: 2103012 } }, { 'vpn-tun': { code: 2100002 } });
+  const callsAtW4 = statsCalls().length;
+  resetLog();
+  tickArm(w4Ability, WG_READY);
+  await drainProbe();
+  const w4Lines = linesWith(WINDOW_PREFIX);
+  const w4Close = w4Lines.length === 1 ? w4Lines[0] : '';
+  check('W4 a rejected close read: unavailable + the raw code per direction, no 0-laundering, no throw',
+    w4Open.length === 1 && fieldOf(w4Open[0], 'phase') === 'open' &&
+    w4Lines.length === 1 && fieldOf(w4Close, 'phase') === 'close' &&
+    fieldOf(w4Close, 'requestId') === REQUEST_ID &&
+    fieldOf(w4Close, 'pairRequestId') === REQUEST_ID &&
+    fieldOf(w4Close, 'rxBytes') === 'unavailable' &&
+    fieldOf(w4Close, 'rxError') === '2103012' &&
+    fieldOf(w4Close, 'txBytes') === 'unavailable' &&
+    fieldOf(w4Close, 'txError') === '2100002' &&
+    linesWith('N2H_IFACE_BYTES_WINDOW_CLOSE_ABORTED|').length === 0,
+    JSON.stringify({ open: w4Open, close: w4Lines }));
+  resetLog();
+  tickArm(w4Ability, WG_READY);
+  await drainProbe();
+  check('W4 the diagnostic flow continues: the next tick repeats nothing (one-shot consumed at issue)',
+    logs().length === 0 && statsCalls().length === callsAtW4 + 2,
+    JSON.stringify({ logs: logs(), calls: statsCalls().slice(callsAtW4) }));
+
+  // W5: NO native ARM success ⇒ zero close reads. Three shapes, mirroring P5.
+  const w5Cases: Array<{ name: string; arm: () => void; status: Record<string, unknown> }> = [
+    { name: 'W5a no arm ticket (the plain-start default)', status: WG_READY,
+      arm: (): void => { setArmFile(false, undefined); } },
+    { name: 'W5b ticket present but the session gate closed', status: { wg: { device_up: true, ready: false } },
+      arm: (): void => { setArmFile(true, undefined, ''); } },
+    { name: 'W5c the core answers not-ok', status: WG_READY,
+      arm: (): void => {
+        G['__NB_ARM_ANSWER'] = '{"ok":false,"error":"forced-by-w5"}';
+        setArmFile(true, undefined);
+      } }
+  ];
+  for (const w5Case of w5Cases) {
+    const w5Ability = freshAbility(mod, FIXTURE_FILESDIR);
+    w5Ability['n2hAcceptedExclusionGeneration'] = 0;
+    w5Case.arm();
+    const callsAtW5 = statsCalls().length;
+    resetLog();
+    tickArm(w5Ability, w5Case.status);
+    await drainProbe();
+    tickArm(w5Ability, w5Case.status);
+    await drainProbe();
+    G['__NB_ARM_ANSWER'] = undefined;
+    check(w5Case.name + ' -> zero WINDOW lines, zero close read',
+      linesWith(WINDOW_PREFIX).length === 0 &&
+      linesWith(PROBE_PREFIX).length === 0 &&
+      statsCalls().length === callsAtW5, JSON.stringify(logs()));
+  }
+
+  // W6: source pins on the byte-identical sources — the window path adds no
+  // timer and no loop, the close read is fire-and-forget behind the open
+  // latch, its hook rides the arm hook BEFORE the one-shot return, and the
+  // latch callback writes one boolean inside the ok-branch.
+  const armHookAt = extSource.indexOf('private maybeArmN2hCollector(');
+  const closeHookAt = extSource.indexOf('this.maybeCloseInterfaceStatsWindow();');
+  const armEarlyReturnAt = extSource.indexOf(
+    'if (this.n2hArmAttempted || this.destroyRequested) {', armHookAt);
+  // The window path only — the extension keeps its PRE-EXISTING watcher
+  // interval, so the pin is scoped to the close latch method and the two
+  // probe-module window functions, not to the whole extension.
+  const w6CloseFnMatch = /private maybeCloseInterfaceStatsWindow\(\): void \{[\s\S]*?\n  \}/
+    .exec(extSource);
+  const w6CloseFn = w6CloseFnMatch === null ? '' : w6CloseFnMatch[0];
+  const w6EmitFnMatch = /function emitWindowLine\([\s\S]*?\n\}/.exec(probeSource);
+  const w6EmitFn = w6EmitFnMatch === null ? '' : w6EmitFnMatch[0];
+  const w6CloseExportMatch = /export async function runInterfaceStatsWindowClose\([\s\S]*?\n\}/
+    .exec(probeSource);
+  const w6CloseExport = w6CloseExportMatch === null ? '' : w6CloseExportMatch[0];
+  const w6NoTimerLoop = (text: string): boolean =>
+    !/setInterval|setTimeout|while \(|for \(/.test(text);
+  check('W6 the window path adds no timer and no loop (fire-and-forget, no await added)',
+    w6NoTimerLoop(w6CloseFn) && w6NoTimerLoop(w6EmitFn) && w6NoTimerLoop(w6CloseExport) &&
+    probeSource.indexOf('setInterval') < 0 && probeSource.indexOf('setTimeout') < 0 &&
+    extSource.indexOf('await this.maybeCloseInterfaceStatsWindow') < 0 &&
+    extSource.indexOf('await runInterfaceStatsWindowClose') < 0,
+    JSON.stringify({ closeFn: w6CloseFn.length, emitFn: w6EmitFn.length,
+      closeExport: w6CloseExport.length }));
+  check('W6 the close hook rides the arm hook BEFORE its one-shot early return',
+    armHookAt > 0 && closeHookAt > armHookAt && armEarlyReturnAt > closeHookAt,
+    JSON.stringify({ armHookAt, closeHookAt, armEarlyReturnAt }));
+  const w6GuardAt = extSource.indexOf(
+    'if (!this.n2hIfaceWindowOpenSeen || this.n2hIfaceWindowCloseDone ||');
+  const w6IssueAt = extSource.indexOf('runInterfaceStatsWindowClose(this.requestId).catch(');
+  check('W6 the close read issues only behind the open latch, once (consumed at issue), with a last-resort catch',
+    w6GuardAt > 0 && extSource.indexOf('this.n2hIfaceWindowCloseDone = true;') > w6GuardAt &&
+    w6IssueAt > w6GuardAt && probeCall > 0,
+    JSON.stringify({ w6GuardAt, w6IssueAt }));
+  const latchCbAt = extSource.indexOf('this.n2hIfaceWindowOpenSeen = true;');
+  check('W6 the open latch is one boolean written inside the ok-branch after the probe call',
+    okBranchAt > 0 && armedLit > okBranchAt && probeCall > armedLit &&
+    latchCbAt > probeCall && elseAt > latchCbAt, JSON.stringify({ okBranchAt, probeCall, latchCbAt, elseAt }));
+  // "The read happens AFTER the native arm": the open edge sits in the
+  // ok-branch past the `n2h_collector_arm(...)` call, and the close edge is
+  // gated by the open latch that only that same branch sets (so the close read
+  // cannot precede a successful native arm however the hook is scheduled).
+  const armCallAt = extSource.indexOf('core.n2h_collector_arm(');
+  check('W6 both window reads issue only AFTER the native arm call (open in the ok-branch, close behind the open latch)',
+    armCallAt > 0 && probeCall > armCallAt && latchCbAt > armCallAt &&
+    w6GuardAt > 0 && w6IssueAt > w6GuardAt,
+    JSON.stringify({ armCallAt, probeCall, latchCbAt }));
+  check('W6 both window edges are emitted by the byte-only probe module, diag-only',
+    probeSource.indexOf(WINDOW_PREFIX) > 0 &&
+    probeSource.indexOf("emitWindowLine(requestId, 'open', PROBE_IFACE, vpnSample)") > 0 &&
+    probeSource.indexOf("emitWindowLine(requestId, 'close', PROBE_IFACE, sample)") > 0 &&
+    probeSource.indexOf("'diag=true|is_evidence=false'") > 0,
+    'window source pin');
 
   // ---------------- NC (2026-09-20): the network-context snapshot ----------
   // The PUBLIC connection getters are sampled ONCE per arm SUCCESS, in the
@@ -1573,7 +1892,7 @@ try {
     'net-context module pin');
   const ncCall = extSource.indexOf('runNetworkContextProbe(this.requestId)');
   check('NC5 the snapshot call rides the same ok-branch, after the iface probe',
-    ncCall > extSource.indexOf('runInterfaceStatsProbe(this.requestId)') &&
+    ncCall > extSource.indexOf('runInterfaceStatsProbe(this.requestId, (): void => {') &&
     ncCall > armedLit && ncCall < elseAt,
     JSON.stringify({ armedLit, elseAt, ncCall }));
   check('NC5 the aborted guard prints codes/names only (never an exception message)',

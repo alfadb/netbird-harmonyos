@@ -7010,26 +7010,35 @@ mod tests {
     async fn relay_wait_until(fuse: Duration, mut pred: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + fuse;
         loop {
-            if pred() {
-                return true;
-            }
+            // DEADLINE FIRST: the fuse is authoritative. A run that is
+            // starved past the deadline must surface as an honest timeout
+            // (the caller's assert message), never as a late "pred finally
+            // true" pass that silently bypassed the fuse.
             if Instant::now() >= deadline {
                 return false;
+            }
+            if pred() {
+                return true;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
     /// Bounded real-time negative window: `true` = pred stayed false.
+    /// PRED FIRST: at least one observation is guaranteed even when the
+    /// task is starved past the whole window (a deadline-first loop would
+    /// skip the check on wake and silently PASS without ever looking).
     async fn relay_stays_false_for(window: Duration, mut pred: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + window;
-        while Instant::now() < deadline {
+        loop {
             if pred() {
                 return false;
             }
+            if Instant::now() >= deadline {
+                return true;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        true
     }
 
     /// A raw remote endpoint on the fake relay server (plays the remote
@@ -7323,7 +7332,14 @@ mod tests {
     /// (attached-then-detached is not residue).
     #[derive(Default)]
     struct GatedCommitWg {
-        commit_started: AtomicBool,
+        /// Handshake: set (and signalled) BEFORE the commit parks, so the
+        /// test waits for "parked at the gate" — a verified premise, not an
+        /// inference from "attach entered".
+        at_gate: AtomicBool,
+        /// Set when the commit is about to RETURN from attach_carrier
+        /// (gate released, or its own long fuse expired): past this point
+        /// "the commit is still parked" is no longer a valid premise.
+        commit_returned: AtomicBool,
         gate: std::sync::Mutex<bool>,
         gate_cv: std::sync::Condvar,
         active: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -7334,6 +7350,12 @@ mod tests {
             let mut held = self.gate.lock().unwrap();
             *held = true;
             self.gate_cv.notify_all();
+        }
+
+        /// Premise check for the negative windows: the teardown race is
+        /// only under test while the commit is genuinely parked here.
+        fn commit_still_parked(&self) -> bool {
+            !self.commit_returned.load(Ordering::SeqCst)
         }
     }
 
@@ -7350,9 +7372,15 @@ mod tests {
             pub_key_b64: &str,
             _carrier: std::sync::Arc<dyn crate::wg_device::WgEgressCarrier>,
         ) -> Result<(), String> {
-            self.commit_started.store(true, Ordering::SeqCst);
+            // Signal BEFORE parking: the test may proceed as soon as the
+            // commit is verifiably at the gate.
+            self.at_gate.store(true, Ordering::SeqCst);
+            self.gate_cv.notify_all();
             // Park until the test releases the gate (bounded so a broken
-            // test cannot hang the suite; timing asserts stay bounded).
+            // test cannot hang the suite). The fuse is ~100x the 300ms
+            // negative windows so it must never be the event that ends a
+            // healthy window; if it ever fires first, the tests report
+            // premise-broken instead of a bogus mutex failure.
             let deadline = Instant::now() + Duration::from_secs(30);
             let mut held = self.gate.lock().unwrap();
             while !*held && Instant::now() < deadline {
@@ -7361,6 +7389,9 @@ mod tests {
                 held = guard;
             }
             self.active.lock().unwrap().insert(pub_key_b64.to_string());
+            // The commit is leaving the park: invalidate the "still parked"
+            // premise from here on.
+            self.commit_returned.store(true, Ordering::SeqCst);
             Ok(())
         }
         fn detach_carrier(&self, pub_key_b64: &str) {
@@ -7404,11 +7435,13 @@ mod tests {
         (server, wg, carrier, client)
     }
 
-    /// Drive one silent peer's lane open all the way INTO the commit and
-    /// park it there (returns once the commit is mid-attach).
+    /// Drive one silent peer's lane open into the commit so it parks inside
+    /// the probe seam's attach_carrier. Returns once came-online fired; the
+    /// "commit is verifiably PARKED at the gate" premise is established by
+    /// [`relay_parked_commit_interleave`]'s handshake, not inferred here.
     async fn relay_park_commit_mid_attach(
         server: &RelayTestServer,
-        wg: &GatedCommitWg,
+        _wg: &GatedCommitWg,
         carrier: &std::sync::Arc<RelayCarrier>,
         client: &crate::relay_client::RelayClient,
     ) {
@@ -7431,13 +7464,82 @@ mod tests {
             server.set_peer_online(&pid_silent, true),
             "came-online must fire to the registered subscriber"
         );
-        assert!(
-            relay_wait_until(Duration::from_secs(5), || {
-                wg.commit_started.load(Ordering::SeqCst)
-            })
-            .await,
-            "the lane-open commit must reach the WG attach"
-        );
+    }
+
+    /// Drive the teardown-vs-parked-commit interleaving on a REAL OS thread,
+    /// NOT the tokio runtime. Every wait below is an Instant-deadline poll:
+    /// the parked commit's worker thread blocks in the gate condvar and can
+    /// pin the runtime's timer driver, so a runtime-side wait here would
+    /// stall with it (observed: a 20ms poll left unscheduled for the full
+    /// 30s gate fuse) and turn the gate fuse into the release event. Kernel
+    /// threads, mutexes and condvars are immune to that stall.
+    ///
+    /// Returns `Err` = premise-broken or honest timeout; `Ok` carries
+    /// (pred stayed false through the negative window, teardown completed).
+    fn relay_parked_commit_interleave(
+        wg: std::sync::Arc<GatedCommitWg>,
+        teardown: impl FnOnce() + Send + 'static,
+        done: std::sync::Arc<AtomicBool>,
+    ) -> Result<(bool, bool), String> {
+        // 1. Handshake: wait until the commit signals it is AT the gate.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !wg.at_gate.load(Ordering::SeqCst) {
+            if Instant::now() >= deadline {
+                return Err(
+                    "premise not established: the lane-open commit never reached the \
+                     attach gate (honest timeout)"
+                        .into(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // 2. Premise: the commit must still be parked (not blown through).
+        if !wg.commit_still_parked() {
+            return Err(
+                "premise broken: the commit already RETURNED from the attach gate \
+                 before the test could interleave — mutual exclusion is not under \
+                 test in this run"
+                    .into(),
+            );
+        }
+        // 3. Teardown contender: blocks on the lifecycle mutex the parked
+        // commit holds.
+        std::thread::spawn(teardown);
+        // 4. Negative window (300ms ≪ 30s gate fuse, so the fuse can never
+        // be the release event of a healthy window). Pred-first: a starved
+        // poll still observes at least once.
+        let deadline = Instant::now() + Duration::from_millis(300);
+        let mut stayed = true;
+        loop {
+            if done.load(Ordering::SeqCst) {
+                stayed = false;
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if !stayed && !wg.commit_still_parked() {
+            return Err(
+                "premise broken: the commit un-parked (gate fuse) during the \
+                 negative window, releasing the lifecycle lock — the teardown \
+                 completion is the documented fuse release, not a mutex failure"
+                    .into(),
+            );
+        }
+        // 5. Release the gate; the serialized teardown must now complete.
+        wg.release_gate();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if done.load(Ordering::SeqCst) {
+                return Ok((stayed, true));
+            }
+            if Instant::now() >= deadline {
+                return Ok((stayed, false));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// The commit is mid-attach when shutdown runs: teardown must serialize
@@ -7450,23 +7552,26 @@ mod tests {
         let stop_done = Arc::new(AtomicBool::new(false));
         let stop_flag = stop_done.clone();
         let carrier_for_stop = carrier.clone();
-        std::thread::spawn(move || {
-            carrier_for_stop.shutdown();
-            stop_flag.store(true, Ordering::SeqCst);
-        });
-        // The commit holds the lifecycle section: teardown cannot complete
-        // behind its back.
+        let wg_for_interleave = wg.clone();
+        // The whole interleaving (handshake → premise → negative window →
+        // gate release → completion wait) runs on a real thread with
+        // Instant-deadline polls; see relay_parked_commit_interleave.
+        let (stayed, completed) = relay_parked_commit_interleave(
+            wg_for_interleave,
+            move || {
+                carrier_for_stop.shutdown();
+                stop_flag.store(true, Ordering::SeqCst);
+            },
+            stop_done,
+        )
+        .unwrap_or_else(|msg| panic!("{msg}"));
         assert!(
-            relay_stays_false_for(Duration::from_millis(300), || {
-                stop_done.load(Ordering::SeqCst)
-            })
-            .await,
+            stayed,
             "shutdown completed while a lane-open commit was mid-attach (no mutual exclusion)"
         );
-        wg.release_gate();
         assert!(
-            relay_wait_until(Duration::from_secs(5), || stop_done.load(Ordering::SeqCst)).await,
-            "shutdown must complete once the commit gate is released"
+            completed,
+            "shutdown must complete once the commit gate is released (honest timeout)"
         );
         assert!(
             wg.active.lock().unwrap().is_empty(),
@@ -7503,21 +7608,24 @@ mod tests {
         let swap_flag = swap_done.clone();
         let carrier_for_swap = carrier.clone();
         let client2_for_swap = client2.clone();
-        std::thread::spawn(move || {
-            carrier_for_swap.attach_client(client2_for_swap);
-            swap_flag.store(true, Ordering::SeqCst);
-        });
+        let wg_for_interleave = wg.clone();
+        // Same real-thread interleaving contract as the shutdown twin above.
+        let (stayed, completed) = relay_parked_commit_interleave(
+            wg_for_interleave,
+            move || {
+                carrier_for_swap.attach_client(client2_for_swap);
+                swap_flag.store(true, Ordering::SeqCst);
+            },
+            swap_done,
+        )
+        .unwrap_or_else(|msg| panic!("{msg}"));
         assert!(
-            relay_stays_false_for(Duration::from_millis(300), || {
-                swap_done.load(Ordering::SeqCst)
-            })
-            .await,
+            stayed,
             "client swap completed while a lane-open commit was mid-attach (no mutual exclusion)"
         );
-        wg.release_gate();
         assert!(
-            relay_wait_until(Duration::from_secs(5), || swap_done.load(Ordering::SeqCst)).await,
-            "client swap must complete once the commit gate is released"
+            completed,
+            "client swap must complete once the commit gate is released (honest timeout)"
         );
         assert!(
             wg.active.lock().unwrap().is_empty(),

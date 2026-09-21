@@ -78,7 +78,7 @@ function errorCodeOf(error: Error): string {
   return code === undefined || code === null ? 'no-code' : String(code);
 }
 
-async function sampleIface(requestId: string, iface: string): Promise<void> {
+async function sampleIfaceBytes(requestId: string, iface: string): Promise<IfaceSample> {
   const sample: IfaceSample = new IfaceSample();
   sample.startedUnixMs = Date.now();
   try {
@@ -102,6 +102,13 @@ async function sampleIface(requestId: string, iface: string): Promise<void> {
     sample.txError = errorCodeOf(error as Error);
   }
   sample.finishedUnixMs = Date.now();
+  return sample;
+}
+
+// The availability probe's own line, byte-identical to the 2026-09-18 format
+// (the selfcheck P2/P3 pins match it verbatim).
+async function sampleIface(requestId: string, iface: string): Promise<IfaceSample> {
+  const sample: IfaceSample = await sampleIfaceBytes(requestId, iface);
   // Epoch-ms values ride %{public}s (never %{public}d): they exceed the
   // 32-bit int the d formatter targets, same discipline as the other
   // large-number fields in this shell.
@@ -112,6 +119,45 @@ async function sampleIface(requestId: string, iface: string): Promise<void> {
     requestId, iface, renderBytes(sample.rxBytes), renderBytes(sample.txBytes),
     sample.rxError, sample.txError, String(sample.startedUnixMs),
     String(sample.finishedUnixMs));
+  return sample;
+}
+
+// ---------------------------------------------------------------------------
+// N2-H iface-bytes WINDOW two-edge read (2026-09-20, diagnostic-only).
+//
+// What this is: the OPEN and CLOSE edges of the diagnostic window, both read
+// from the SAME official per-NIC byte API the availability probe uses — the
+// pairing input for the C7 same-source calibration (v4 preregistration
+// §4 (ii): two readings <1 s apart must overlap the /proc side; the 0028 run
+// showed the single arm-time read trails /proc by a full frame, so one edge
+// can never satisfy the criterion). The OPEN edge is the arm SUCCESS branch
+// reading itself — the vpn-tun sample above, re-rendered on its own
+// `N2H_IFACE_BYTES_WINDOW|phase=open` line from the SAME numbers (no second
+// read). The CLOSE edge (`runInterfaceStatsWindowClose`, vpn-tun only) is
+// issued by the extension on the FIRST watcher tick after that open line —
+// the existing status watcher's next tick, no new timer, no loop, at most
+// once per instance, and never without an open edge.
+//
+// What this is NOT: C7 counting input ONLY. Per v4 §4 影响与边界 and the
+// probe doc's governance terms, these readings are never path/isolation
+// evidence, never join Evidence.counters or notes, never feed the judge, and
+// no packet count is derived from them. Same field discipline as the probe
+// line: a rejection prints unavailable + the BusinessError CODE token only —
+// never an exception message, never a payload, never a fabricated number.
+//
+// pairRequestId repeats the requestId on BOTH lines so a device log pairs the
+// edges mechanically: open.pairRequestId == close.requestId ==
+// open.requestId == close.requestId (one instance, one arm, one window).
+function emitWindowLine(requestId: string, phase: string, iface: string,
+  sample: IfaceSample): void {
+  hilog.info(PROBE_DOMAIN, PROBE_TAG,
+    'N2H_IFACE_BYTES_WINDOW|requestId=%{public}s|phase=%{public}s|interface=%{public}s|' +
+    'rxBytes=%{public}s|txBytes=%{public}s|rxError=%{public}s|txError=%{public}s|' +
+    'pairRequestId=%{public}s|startedUnixMs=%{public}s|finishedUnixMs=%{public}s|' +
+    'diag=true|is_evidence=false',
+    requestId, phase, iface, renderBytes(sample.rxBytes), renderBytes(sample.txBytes),
+    sample.rxError, sample.txError, requestId, String(sample.startedUnixMs),
+    String(sample.finishedUnixMs));
 }
 
 // The whole probe: TWO interface samples (the iface under test + the negative
@@ -119,9 +165,31 @@ async function sampleIface(requestId: string, iface: string): Promise<void> {
 // one-shot calls, no parallelism to reason about, and the negative control
 // always runs. Resolves normally in every case (each call carries its own
 // catch); the caller's last-resort catch exists for the impossible path only.
-export async function runInterfaceStatsProbe(requestId: string): Promise<void> {
-  await sampleIface(requestId, PROBE_IFACE);
+// `onWindowOpen` (optional) is the extension's open-edge latch hook: it fires
+// SYNCHRONOUSLY right after the phase=open line is emitted — i.e. strictly
+// after the arm tick's synchronous body has unwound (two awaited API calls
+// later), which is what structurally forces the close edge onto a LATER
+// watcher tick, never the arming one. The callback must stay trivial (a
+// boolean latch write): it runs on the probe's async path.
+export async function runInterfaceStatsProbe(requestId: string,
+  onWindowOpen?: () => void): Promise<void> {
+  const vpnSample: IfaceSample = await sampleIface(requestId, PROBE_IFACE);
+  emitWindowLine(requestId, 'open', PROBE_IFACE, vpnSample);
+  if (onWindowOpen !== undefined) {
+    onWindowOpen();
+  }
   await sampleIface(requestId, PROBE_NEGATIVE_IFACE);
+}
+
+// The CLOSE edge: ONE more vpn-tun sample through the same field discipline,
+// rendered on the phase=close line with the SAME requestId (and pairRequestId)
+// the open line carried. No negative control here — the fixed name is a
+// per-window-pair control already read once by the open round (v4 §4). The
+// extension guarantees at most one call per instance and only after a
+// completed open edge; this function itself stays one read + one line.
+export async function runInterfaceStatsWindowClose(requestId: string): Promise<void> {
+  const sample: IfaceSample = await sampleIfaceBytes(requestId, PROBE_IFACE);
+  emitWindowLine(requestId, 'close', PROBE_IFACE, sample);
 }
 
 // ---------------------------------------------------------------------------

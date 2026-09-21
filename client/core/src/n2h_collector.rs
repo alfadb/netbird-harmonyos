@@ -26,9 +26,12 @@
 //!   (`0.0.0.0:0`, deliberately NOT the host's `127.0.0.1:0`), payload =
 //!   [`probe_id`] `N2H-<kind>-<nonce>` for UDP/TCP and the 12-byte transaction
 //!   id for STUN; the transport follows the kind's `proto()` column, so a probe
-//!   can never use a transport the frozen set did not declare. The unverified
-//!   `dns-nxdomain-echo` receipt method exists but is OFF by default (design
-//!   §4.0/§9-U5).
+//!   can never use a transport the frozen set did not declare. The
+//!   `dns-nxdomain-echo` receipt method is wired behind the arm option
+//!   `dns_nxdomain_echo` (v4 preregistration §3 path①): the dns probe then
+//!   leaves as an A query and the receipt chain consumes the echoed qname; the
+//!   default stays OFF (the pre-existing raw-ASCII dns probe, `method:"none"`
+//!   gap), and real-resolver behavior is still to be re-verified on device.
 //! - **I4 — `/proc` reconciliation.** The `vpn-tun` row of `/proc/net/dev` (or
 //!   the operator's `hdc` capture as the D-class fallback), paired with the
 //!   core WG counters in the frozen order (`/proc` FIRST), audited by BOTH
@@ -810,13 +813,29 @@ pub fn send_stun_probe(
 /// (`FrozenEndpoint::proto`) — so the probe cannot silently travel on a
 /// transport the frozen set did not declare.
 ///
-/// `dns` deliberately takes the SAME ASCII UDP-marker shape as the other UDP
-/// kinds: the unverified `dns-nxdomain-echo` method stays behind
-/// [`send_dns_echo_probe`] and is never the default path (design §4.0/§9-U5).
+/// `dns` takes the SAME ASCII UDP-marker shape as the other UDP kinds here:
+/// the `dns-nxdomain-echo` method stays behind [`send_probe_opts`]' explicit
+/// arm option (v4 preregistration §3 path①) and is NOT this function's path.
 pub fn send_probe(
     kind: EndpointKind,
     dst: SocketAddr,
     wait_ms: u64,
+) -> Result<SentProbe, String> {
+    send_probe_opts(kind, dst, wait_ms, false)
+}
+
+/// [`send_probe`] with the v4 preregistration §3 path① dns echo enabled.
+/// ONLY the `dns` kind changes shape when `dns_echo` is set: the probe leaves
+/// as a real A query for `<probe id>.n2h-invalid` (the probe id stays on the
+/// wire verbatim as the qname's first label, so the [`WireMarker::Ascii`]
+/// tunnel match still sees it) and the send waits up to `wait_ms` for the
+/// echoed qname. Every other kind — and the dns kind itself when `dns_echo`
+/// is unset — is byte-identical to [`send_probe`].
+pub fn send_probe_opts(
+    kind: EndpointKind,
+    dst: SocketAddr,
+    wait_ms: u64,
+    dns_echo: bool,
 ) -> Result<SentProbe, String> {
     if kind == EndpointKind::Stun {
         let txid = crate::stun::random_transaction_id()
@@ -825,6 +844,9 @@ pub fn send_probe(
     }
     let nonce = crate::n2h::fresh_nonce_hex()?;
     let id = probe_id(kind.name(), &nonce);
+    if kind == EndpointKind::Dns && dns_echo {
+        return send_dns_echo_probe(dst, &id, wait_ms);
+    }
     match kind.proto() {
         "tcp" => send_tcp_probe(dst, &id),
         _ => send_udp_probe(dst, &id),
@@ -914,11 +936,12 @@ pub fn dns_echo_receipt(response: &[u8], qname: &str) -> bool {
     }
 }
 
-/// Send one DNS echo probe (design §4.0 `dns-nxdomain-echo`; **default OFF** —
-/// no real resolver has been measured with this method, §9-U5) and wait up to
-/// `wait_ms` for a response carrying our qname back. Enabling it is the
-/// caller's explicit decision, and a miss stays a receipt gap (§4.0), never a
-/// pass.
+/// Send one DNS echo probe (design §4.0 `dns-nxdomain-echo`; v4 preregistration
+/// §3 path① — armed ONLY via the `dns_nxdomain_echo` arm option, default OFF)
+/// and wait up to `wait_ms` for a response carrying our qname back. A miss
+/// stays a receipt gap (§4.0), never a pass. Real-resolver behavior (a real
+/// resolver returning NXDOMAIN with the qname echoed) is still to be
+/// re-verified on device.
 ///
 /// The marker appears verbatim inside the query (`<marker>.n2h-invalid`), so
 /// the same [`WireMarker::Ascii`] match that guards the other probes also
@@ -1893,6 +1916,16 @@ pub struct ArmOptions {
     /// value (a gap for the judge's three-way `gen` comparison), never a
     /// fabricated generation.
     pub exclusion_generation: Option<u64>,
+    /// v4 preregistration §3 path① (decided 2026-09-20): enable the
+    /// `dns-nxdomain-echo` receipt method for the dns probe. `true` sends the
+    /// dns probe as a real A query for `<probe id>.n2h-invalid`, waits up to
+    /// `probe_wait_ms` for a resolver response carrying the qname back, and
+    /// the receipt chain CONSUMES that echo as the probe's endpoint-side
+    /// receipt (`observed:true`, method `dns-nxdomain-echo`); a miss stays a
+    /// recorded receipt gap and never passes by itself. `false` (the DEFAULT)
+    /// keeps the dns probe byte-identical to the pre-existing behavior: raw
+    /// ASCII payload, no echo wait, `method:"none"` operator-side gap.
+    pub dns_nxdomain_echo: bool,
     /// 2026-09-20 (DIAGNOSTIC-ONLY behavior change): the netId the shell
     /// resolved for the `vpn-tun` interface (official read-only getters). When
     /// present, the ONE posctl probe socket is bound to that network via
@@ -1916,6 +1949,7 @@ impl Default for ArmOptions {
             peer_overlay_ip: None,
             dns: None,
             exclusion_generation: None,
+            dns_nxdomain_echo: false,
             probe_net_id: None,
         }
     }
@@ -1979,6 +2013,15 @@ impl ArmOptions {
             // rather than as a generation core invented.
             opts.exclusion_generation =
                 Some(as_u64(v).ok_or("exclusion_generation must be a non-negative integer")?);
+        }
+        if let Some(v) = obj_get(fields, "dns_nxdomain_echo") {
+            // v4 §3 path①'s explicit enable: a strict boolean only — anything
+            // else refuses the arm (fail-closed, the same discipline as every
+            // other option); an ABSENT key keeps the pre-existing dns probe.
+            opts.dns_nxdomain_echo = match v {
+                Json::Bool(b) => *b,
+                _ => return Err("dns_nxdomain_echo must be a boolean".to_string()),
+            };
         }
         if let Some(v) = obj_get(fields, "probe_net_id") {
             // 2026-09-20 diag-only net-binding request: a strictly positive
@@ -2155,6 +2198,12 @@ pub fn arm_json(opts_json: &str) -> String {
     // verbatim (branch + physical evidence + the gap it recorded, if any)
     if let Some(dns) = &options.dns {
         arm_notes.extend(dns.notes());
+    }
+    // v4 §3 path①: the enabled receipt method is registered in the document
+    // (the absent line IS the record that the window ran with the dns probe in
+    // its pre-existing ASCII shape)
+    if options.dns_nxdomain_echo {
+        arm_notes.push("dns-nxdomain-echo=enabled".to_string());
     }
     let facts = match host.freeze_facts() {
         Ok(f) => f,
@@ -2413,7 +2462,8 @@ fn run_window(win: Arc<Window>) {
                 continue;
             }
         };
-        match send_probe(kind, dst, win.options.probe_wait_ms) {
+        match send_probe_opts(kind, dst, win.options.probe_wait_ms, win.options.dns_nxdomain_echo)
+        {
             Ok(sent) => {
                 win.tee.register(&sent.probe_id, sent.marker.clone(), false);
                 probes.push(OuterProbe {
@@ -2428,6 +2478,31 @@ fn run_window(win: Arc<Window>) {
                     payload_len: sent.payload_len,
                 });
                 receipts.push(initial_receipt(&win, kind, &sent));
+                if kind == EndpointKind::Dns && win.options.dns_nxdomain_echo {
+                    // v4 §3 path①'s machine-checkable outcome line (§6.2 item
+                    // 2's completion criterion: one echo-hit receipt line and
+                    // one miss-gap line must be readable in a real window's
+                    // notes[]). A miss is recorded AS a gap, never a pass.
+                    notes.push(if sent.echo_received {
+                        format!("dns-echo-receipt=hit|probe_id={}", sent.probe_id)
+                    } else {
+                        format!("dns-echo-receipt=miss|probe_id={}|gap", sent.probe_id)
+                    });
+                    // v4 §3 path①: this path PROVES DELIVERY ONLY. It carries
+                    // no endpoint-observed physical source — the address the
+                    // resolver replied from is the resolver's, not the probe
+                    // source an endpoint saw — so source-address evidence
+                    // still requires the operator log. Recording the caliber
+                    // explicitly keeps it distinct from the external-receipt
+                    // bundle (same five-field shape, different receipt form).
+                    notes.push(
+                        "dns-echo-receipt-physical-src=not-provided|no endpoint-observed physical \
+                         source on this path (a DNS echo proves delivery only); source-address \
+                         evidence still requires the operator log — a different receipt form from \
+                         the external receipt bundle"
+                            .to_string(),
+                    );
+                }
                 win.set_counts(
                     probes.iter().filter(|p| p.sent).count(),
                     receipts.iter().filter(|r| r.observed).count(),
@@ -2558,6 +2633,58 @@ fn initial_receipt(win: &Arc<Window>, kind: EndpointKind, sent: &SentProbe) -> E
             at_unix: win.clock.unix_s(),
             method: "stun-binding-response".into(),
             detail,
+        };
+    }
+    // v4 preregistration §3 path①: when the arm enabled `dns-nxdomain-echo`,
+    // the receipt chain CONSUMES the probe's echo — the resolver carried our
+    // qname back IS this dns probe's endpoint-side receipt (an in-process
+    // self-proof, independent of the `probe_receipt` seam). A miss stays a
+    // recorded gap and never passes by itself. With the option unset this
+    // branch is unreachable and the dns receipt below stays byte-identical to
+    // the pre-existing `method:"none"` operator-side gap.
+    if kind == EndpointKind::Dns && win.options.dns_nxdomain_echo {
+        return if sent.echo_received {
+            EndpointReceipt {
+                probe_id: sent.probe_id.clone(),
+                kind: kind.name().to_string(),
+                observed: true,
+                // v4 §3 path①: this receipt proves DELIVERY only. A DNS echo
+                // carries no endpoint-reported source (no XOR-MAPPED
+                // equivalent) and the address the reply came from is the
+                // resolver's, not the probe source an endpoint observed — so
+                // this path fills neither `physical_src` nor its source token
+                // (the getsockname reading stays on the probe's five-tuple
+                // only, never in a `physical_src*` slot). The two tokens the
+                // external-receipt caliber confines to other shapes
+                // (`endpoint-reported`, `probe-socket-getsockname`) are NOT
+                // borrowed here: source-address evidence still requires the
+                // operator log.
+                physical_src: String::new(),
+                physical_src_source: String::new(),
+                at_unix: win.clock.unix_s(),
+                method: "dns-nxdomain-echo".into(),
+                detail: "resolver response echoed our qname back (query-id matched, our wire-form \
+                         QNAME verbatim inside a DNS response; RCODE not required, §4.0) — the \
+                         probe's own in-process delivery proof, never a pass by itself; this path \
+                         provides NO endpoint-observed physical source (the reply's address is the \
+                         resolver's), so physical_src/physical_src_source stay empty"
+                    .into(),
+            }
+        } else {
+            EndpointReceipt {
+                probe_id: sent.probe_id.clone(),
+                kind: kind.name().to_string(),
+                observed: false,
+                physical_src: String::new(),
+                physical_src_source: String::new(),
+                at_unix: win.clock.unix_s(),
+                method: "dns-nxdomain-echo".into(),
+                detail: format!(
+                    "no DNS response carrying our qname within the {} ms probe wait — receipt \
+                     gap (a miss is a gap, never a pass; §4.0)",
+                    win.options.probe_wait_ms
+                ),
+            }
         };
     }
     if let Some(fact) = win.host.probe_receipt(&sent.probe_id, &sent.marker) {
@@ -4569,6 +4696,351 @@ mod tests {
         println!(
             "[I3] dns echo: qname={qname} query_len={} echo_received={}",
             sent.payload_len, sent.echo_received
+        );
+    }
+
+    // ---- v4 preregistration §3 path①: the dns-nxdomain-echo wiring ----
+
+    /// A generic one-shot UDP responder: one bounded blocking receive, then the
+    /// caller's answer for whatever datagram arrived. Returns the address to
+    /// probe and the datagram it captured.
+    fn spawn_udp_responder_with(
+        reply: impl FnOnce(&[u8]) -> Vec<u8> + Send + 'static,
+    ) -> (SocketAddr, std::thread::JoinHandle<Vec<u8>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("responder bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout");
+        let addr = sock.local_addr().expect("responder addr");
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let (n, from) = sock.recv_from(&mut buf).expect("responder recv");
+            sock.send_to(&reply(&buf[..n]), from).expect("responder send");
+            buf[..n].to_vec()
+        });
+        (addr, handle)
+    }
+
+    /// A one-shot UDP capture sink: one bounded blocking receive, NO reply —
+    /// the black hole the plain (echo-disabled) probes are sent into.
+    fn spawn_udp_capture() -> (SocketAddr, std::thread::JoinHandle<Vec<u8>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("capture bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(5))).expect("read timeout");
+        let addr = sock.local_addr().expect("capture addr");
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let (n, _) = sock.recv_from(&mut buf).expect("capture recv");
+            buf[..n].to_vec()
+        });
+        (addr, handle)
+    }
+
+    /// A minimal window for the receipt-chain tests: a defaulted host (its
+    /// `probe_receipt` seam answers `None`, the production shape) and the arm
+    /// options under test.
+    fn window_with(options: ArmOptions) -> Arc<Window> {
+        struct Bare;
+        impl CollectorHost for Bare {
+            fn dataplane(&self) -> Result<HostDataplane, String> {
+                Err("no device".into())
+            }
+            fn freeze_facts(&self) -> Result<HostFreezeFacts, String> {
+                Ok(HostFreezeFacts::default())
+            }
+            fn attach_tee(&self, _tee: Arc<dyn TunFrameTee>) -> Result<(), String> {
+                Err("no device".into())
+            }
+            fn detach_tee(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn paired_read(&self, _at_mono: u64, _at_unix: i64) -> Result<PairedRead, String> {
+                Err("no device".into())
+            }
+        }
+        let clock = fixed_clock(7);
+        Arc::new(Window {
+            state: Mutex::new(WindowState {
+                phase: PHASE_ARMED,
+                opened_mono: 1,
+                deadline_mono: 1_000_000,
+                closed_mono: 0,
+                probes_sent: 0,
+                receipts_observed: 0,
+                verdict: None,
+                document: None,
+                sha256: String::new(),
+                chunks: Vec::new(),
+            }),
+            tee: Arc::new(CollectorTee::new(clock.clone())),
+            host: Arc::new(Bare),
+            options,
+            clock,
+            facts: HostFreezeFacts::default(),
+            freeze: Vec::new(),
+            disarmed: AtomicBool::new(false),
+            arm_notes: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[test]
+    fn dns_nxdomain_echo_option_is_a_strict_boolean_defaulting_to_off() {
+        // the DEFAULT stays OFF: an arm without the key keeps the pre-existing
+        // dns probe byte for byte (v4 §3 path① is an explicit enable)
+        assert!(!ArmOptions::default().dns_nxdomain_echo);
+        assert!(!ArmOptions::parse_json("").expect("empty").dns_nxdomain_echo);
+        assert!(
+            ArmOptions::parse_json("{\"dns_nxdomain_echo\":true}")
+                .expect("true")
+                .dns_nxdomain_echo
+        );
+        assert!(
+            !ArmOptions::parse_json("{\"dns_nxdomain_echo\":false}")
+                .expect("false")
+                .dns_nxdomain_echo
+        );
+        // fail-closed: anything but a strict boolean refuses the arm
+        for bad in ["\"true\"", "\"false\"", "1", "0", "null"] {
+            let json = format!("{{\"dns_nxdomain_echo\":{bad}}}");
+            assert!(ArmOptions::parse_json(&json).is_err(), "must refuse {json}");
+        }
+    }
+
+    #[test]
+    fn the_dns_echo_wiring_changes_only_the_dns_probe_and_only_when_enabled() {
+        // mode OFF (the default path): the dns probe is BYTE-IDENTICAL to the
+        // pre-existing shape — the raw ASCII probe id, nothing else, no echo.
+        let (dst, captured) = spawn_udp_capture();
+        let sent = send_probe(EndpointKind::Dns, dst, 200).expect("plain dns probe");
+        let wire = captured.join().expect("capture thread");
+        assert_eq!(wire, sent.probe_id.as_bytes(), "payload IS the probe id, verbatim");
+        assert!(!sent.echo_received, "no echo is even awaited on the plain path");
+        assert_eq!(sent.tuple.proto, "udp");
+
+        // mode ON: the dns probe leaves as an A query whose question carries
+        // `<probe id>.n2h-invalid` — the probe id stays on the wire verbatim,
+        // so the tunnel scanner's Ascii match still sees it.
+        let (echo_dst, responder) = spawn_udp_responder_with(|q| {
+            let mut r = q.to_vec();
+            r[2] = 0x81; // QR | RD
+            r[3] = 0x83; // RA | RCODE = NXDOMAIN
+            r
+        });
+        let sent = send_probe_opts(EndpointKind::Dns, echo_dst, 1_000, true)
+            .expect("dns echo probe via the wired dispatch");
+        let query = responder.join().expect("responder thread");
+        assert!(sent.echo_received, "the echoed qname IS the receipt");
+        assert!(sent.probe_id.starts_with("N2H-dns-"), "{}", sent.probe_id);
+        assert_eq!(sent.marker, WireMarker::Ascii(sent.probe_id.clone()));
+        assert_eq!(&query[4..6], &1u16.to_be_bytes(), "QDCOUNT=1");
+        assert!(
+            query.windows(8).any(|w| w == b"N2H-dns-"),
+            "the probe id is on the wire verbatim: {query:?}"
+        );
+        assert!(
+            query.windows(11).any(|w| w == b"n2h-invalid"),
+            "the echo suffix is on the wire: {query:?}"
+        );
+
+        // mode ON must NOT leak to other kinds: a wg_peer probe stays the raw
+        // ASCII datagram, no echo awaited, no echo reported.
+        let (udp_dst, captured) = spawn_udp_capture();
+        let sent = send_probe_opts(EndpointKind::WgPeer, udp_dst, 200, true)
+            .expect("wg_peer probe with the dns echo armed");
+        let wire = captured.join().expect("capture thread");
+        assert_eq!(wire, sent.probe_id.as_bytes(), "non-dns kinds keep the ASCII shape");
+        assert!(!sent.echo_received);
+        assert!(!wire.windows(11).any(|w| w == b"n2h-invalid"), "no DNS query left");
+    }
+
+    #[test]
+    fn dns_echo_misses_stay_gaps_wrong_name_truncated_garbage_and_timeout() {
+        // a resolver answering a DIFFERENT name is not this probe's receipt
+        let other = build_dns_a_query(&dns_echo_qname(&id_of(EndpointKind::Dns, 0x42)))
+            .expect("other qname encodable");
+        let (dst, responder) =
+            spawn_udp_responder_with(move |_| mirror_as_nxdomain(&other));
+        let sent = send_dns_echo_probe(dst, &id_of(EndpointKind::Dns, 0x43), 400)
+            .expect("dns echo probe");
+        responder.join().expect("responder thread");
+        assert!(!sent.echo_received, "another probe's qname is a miss (a gap)");
+
+        // a TRUNCATED response (cut inside the header) is not a receipt
+        let (dst, responder) =
+            spawn_udp_responder_with(|q| mirror_as_nxdomain(q)[..8].to_vec());
+        let sent = send_dns_echo_probe(dst, &id_of(EndpointKind::Dns, 0x44), 400)
+            .expect("dns echo probe");
+        responder.join().expect("responder thread");
+        assert!(!sent.echo_received, "a truncated answer is a miss (a gap)");
+
+        // GARBAGE (not a DNS message at all) is not a receipt
+        let (dst, responder) = spawn_udp_responder_with(|_| vec![0xde, 0xad, 0xbe, 0xef]);
+        let sent = send_dns_echo_probe(dst, &id_of(EndpointKind::Dns, 0x45), 400)
+            .expect("dns echo probe");
+        responder.join().expect("responder thread");
+        assert!(!sent.echo_received, "a non-DNS datagram is a miss (a gap)");
+
+        // TIMEOUT: nobody answers; the bounded wait ends with NO echo (a gap,
+        // never a pass), and the bounded wait actually ran
+        let hole = std::net::UdpSocket::bind("127.0.0.1:0").expect("black hole bind");
+        let started = std::time::Instant::now();
+        let sent = send_dns_echo_probe(hole.local_addr().expect("hole addr"), &id_of(EndpointKind::Dns, 0x46), 120)
+            .expect("dns echo probe");
+        assert!(!sent.echo_received, "no responder ⇒ a miss (a gap)");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "the bounded echo wait ran ({:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_receipt_chain_consumes_the_echo_only_for_dns_and_only_when_enabled() {
+        let win = window_with(ArmOptions { dns_nxdomain_echo: true, ..ArmOptions::default() });
+        let id = id_of(EndpointKind::Dns, 0x47);
+        let make = |echo_received| SentProbe {
+            probe_id: id.clone(),
+            tuple: FiveTuple {
+                proto: "udp".into(),
+                src: "0.0.0.0:51000".into(),
+                dst: "203.0.113.53:53".into(),
+            },
+            marker: WireMarker::Ascii(id.clone()),
+            payload_len: 44,
+            mapped: None,
+            echo_received,
+        };
+
+        // echo hit ⇒ observed, the NAMED method, and NO physical source: v4 §3
+        // path① proves delivery only (the reply's address is the resolver's,
+        // never an endpoint-observed probe source)
+        let hit = initial_receipt(&win, EndpointKind::Dns, &make(true));
+        assert!(hit.observed, "the echoed qname IS this dns probe's receipt");
+        assert_eq!(hit.method, "dns-nxdomain-echo");
+        assert_eq!(hit.kind, "dns");
+        assert_eq!(hit.probe_id, id);
+        assert_eq!(hit.physical_src, "", "no endpoint-observed source on the dns path");
+        assert_eq!(hit.physical_src_source, "", "and no source token either");
+        assert!(hit.detail.contains("NO endpoint-observed physical source"), "{}", hit.detail);
+
+        // miss ⇒ the gap, honestly recorded, never a pass
+        let miss = initial_receipt(&win, EndpointKind::Dns, &make(false));
+        assert!(!miss.observed, "a miss is a gap, never a pass");
+        assert_eq!(miss.method, "dns-nxdomain-echo");
+        assert!(miss.detail.contains("gap"), "{}", miss.detail);
+
+        // the echo receipt NEVER leaks to other kinds: relay stays the
+        // operator-side gap even with the mode armed
+        let relay_sent = SentProbe {
+            probe_id: id_of(EndpointKind::Relay, 0x48),
+            tuple: FiveTuple {
+                proto: "tcp".into(),
+                src: "203.0.113.7:51001".into(),
+                dst: "203.0.113.7:443".into(),
+            },
+            marker: WireMarker::Ascii(id_of(EndpointKind::Relay, 0x48)),
+            payload_len: 30,
+            mapped: None,
+            echo_received: false,
+        };
+        let relay = initial_receipt(&win, EndpointKind::Relay, &relay_sent);
+        assert!(!relay.observed);
+        assert_eq!(relay.method, "none");
+        assert_eq!(
+            relay.detail,
+            "outer-path delivery unproven from inside the device: this endpoint's delivery log \
+             is operator-side (§4.0)"
+        );
+
+        // mode OFF (default): the dns receipt is BYTE-IDENTICAL to the
+        // pre-existing `method:"none"` operator-side gap — even a (wired-path
+        // impossible) echo-carrying SentProbe cannot flip it
+        let win_off = window_with(ArmOptions::default());
+        let off = initial_receipt(&win_off, EndpointKind::Dns, &make(true));
+        assert!(!off.observed);
+        assert_eq!(off.method, "none");
+        assert_eq!(off.physical_src, "");
+        assert_eq!(off.physical_src_source, "");
+        assert_eq!(
+            off.detail,
+            "outer-path delivery unproven from inside the device: this endpoint's delivery log \
+             is operator-side (§4.0)"
+        );
+
+        // the stun self-proof path is untouched by the dns option (no mapped
+        // address ⇒ the pre-existing txid miss shape)
+        let stun_id = format!("N2H-stun-{}", "5a".repeat(12));
+        let stun_sent = SentProbe {
+            probe_id: stun_id,
+            tuple: FiveTuple {
+                proto: "udp".into(),
+                src: "0.0.0.0:51002".into(),
+                dst: "203.0.113.9:3478".into(),
+            },
+            marker: WireMarker::StunTxid([0x5a; 12]),
+            payload_len: 20,
+            mapped: None,
+            echo_received: false,
+        };
+        let stun = initial_receipt(&win, EndpointKind::Stun, &stun_sent);
+        assert!(!stun.observed);
+        assert_eq!(stun.method, "stun-binding-response");
+    }
+
+    #[test]
+    fn the_dns_echo_receipt_output_borrows_neither_forbidden_source_token() {
+        // v4 §3: the DNS path① proves DELIVERY only — it must not fill
+        // `physical_src`/`physical_src_source`, and its emitted output must
+        // carry neither token the external-receipt caliber reserves for other
+        // shapes (`endpoint-reported`, `probe-socket-getsockname`). The probe
+        // socket's getsockname reading stays on the probe's five-tuple only.
+        let win = window_with(ArmOptions { dns_nxdomain_echo: true, ..ArmOptions::default() });
+        let id = id_of(EndpointKind::Dns, 0x49);
+        let sent = SentProbe {
+            probe_id: id.clone(),
+            tuple: FiveTuple {
+                proto: "udp".into(),
+                src: "0.0.0.0:51000".into(),
+                dst: "203.0.113.53:53".into(),
+            },
+            marker: WireMarker::Ascii(id.clone()),
+            payload_len: 44,
+            mapped: None,
+            echo_received: true,
+        };
+        let hit = initial_receipt(&win, EndpointKind::Dns, &sent);
+        assert!(hit.observed);
+        assert_eq!(hit.method, "dns-nxdomain-echo");
+
+        // the key=value shape this rule names: nothing is bound after either
+        // assignment (no `physical_src_source=<token>`)
+        let kv = format!(
+            "physical_src={}|physical_src_source={}",
+            hit.physical_src, hit.physical_src_source
+        );
+        assert_eq!(kv, "physical_src=|physical_src_source=", "the dns branch names no source");
+
+        // and the emitted document itself, through the ONE renderer: with the
+        // dns probe the sole endpoint_side[] record, neither forbidden token
+        // may appear anywhere in the emitted text.
+        let mut m = clean_material();
+        m.probes = vec![OuterProbe {
+            probe_id: id.clone(),
+            kind: Some(EndpointKind::Dns),
+            tuple: sent.tuple.clone(),
+            expected_path: "outer",
+            sent: true,
+            sent_at_unix: 1_756_000_000,
+            sent_at_mono: 1,
+            marker: Some(WireMarker::Ascii(id.clone())),
+            payload_len: 44,
+        }];
+        m.receipts = vec![hit.clone()];
+        let json = assemble_device_evidence(m).to_json();
+        assert!(!json.contains("probe-socket-getsockname"), "{json}");
+        assert!(!json.contains("endpoint-reported"), "{json}");
+        assert!(json.contains("\"physical_src_source\":\"\""), "slot stays empty: {json}");
+        // the path's caliber is on the record, not implied
+        assert!(
+            json.contains("NO endpoint-observed physical source"),
+            "the honest caliber is rendered: {json}"
         );
     }
 

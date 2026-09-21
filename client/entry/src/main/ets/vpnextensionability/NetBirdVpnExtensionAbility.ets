@@ -9,7 +9,8 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
-import { runInterfaceStatsProbe, runNetworkContextProbe } from './NetBirdInterfaceStatsProbe';
+import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose } from
+  './NetBirdInterfaceStatsProbe';
 import { resolveVpnTunNetId, VpnNetIdResolution } from './NetBirdInterfaceStatsProbe';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
@@ -160,6 +161,18 @@ interface N2hArmFileOptions {
   // its runtime type) is forwarded as-is and the CORE strictly refuses
   // anything that is not a bare IPv4 present in the peer map.
   peer_overlay_ip?: string;
+  // v4 effective preregistration §3 path① (2026-09-20) / §6.2 item 2: the
+  // explicit enable of the `dns-nxdomain-echo` receipt method on the device
+  // collector's dns probe. OPTIONAL and default OFF (the CORE's `ArmOptions`
+  // default `false` keeps the pre-existing ASCII/no-echo probe byte-identical).
+  // The key is forwarded ONLY when the control file carried it: an absent key
+  // stays absent — the shell never injects a `false`, because "key missing" and
+  // "explicit false" are a distinct, core-defined document semantics even
+  // though both mean the core default. Same verbatim discipline as
+  // peer_overlay_ip: the shell never validates, trims, rewrites or type-coerces
+  // it; whatever value the parsed JSON carries rides the opts verbatim and the
+  // CORE's strict boolean check refuses a non-boolean (fail-closed).
+  dns_nxdomain_echo?: boolean;
 }
 
 // N2-H I5: the `n2h_collector_arm` options document (§5.1).
@@ -184,6 +197,10 @@ interface N2hArmOptions {
   // file carried the key (absent stays absent; forwarded verbatim, validated
   // core-side — see N2hArmFileOptions).
   peer_overlay_ip?: string;
+  // v4 §3 path① / §6.2 item 2: the dns-nxdomain-echo enable, only set when the
+  // control file carried the key (absent stays absent — no `false` injected;
+  // forwarded verbatim, validated core-side — see N2hArmFileOptions).
+  dns_nxdomain_echo?: boolean;
   // v3.1 C1 dns: the branch record of this session's derivation (always set —
   // a missing record is a dns gap for the judge).
   dns?: N2hDnsArmReport;
@@ -398,6 +415,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // tick. It never gates anything: the arm attempt stays owned by
   // n2hArmAttempted alone.
   private n2hArmWaitLogged: boolean = false;
+  // N2-H iface-bytes WINDOW (v4 preregistration §4 (ii) C7 same-source
+  // calibration prerequisite, 2026-09-20): the two-edge latch pair.
+  // n2hIfaceWindowOpenSeen flips ONLY from the probe's async open-edge hook —
+  // after the phase=open line is emitted, i.e. after this tick's synchronous
+  // body has fully unwound — so the close edge can never fire on the arming
+  // tick itself. n2hIfaceWindowCloseDone consumes the one-shot close read on
+  // the FIRST later tick that reaches the arm hook. Diagnostic-only (C7
+  // counting reconciliation): never Evidence.counters/notes, never the judge,
+  // never path/isolation evidence; neither latch touches the arm/WAITING
+  // semantics above.
+  private n2hIfaceWindowOpenSeen: boolean = false;
+  private n2hIfaceWindowCloseDone: boolean = false;
   // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the generation counter of THIS ability
   // instance. requestId is fixed for the instance's whole lifetime (onCreate
   // runs before any create()), so a per-instance counter IS the frozen
@@ -1168,6 +1197,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // — one deduped N2H_COLLECTOR_WAITING line while the ticket exists but the
   // session gate (wg.device_up && wg.ready) is still closed.
   private maybeArmN2hCollector(status: ConnectorStatusResult): void {
+    // N2-H iface-bytes WINDOW close edge (v4 preregistration §4 (ii), C7
+    // same-source calibration prerequisite): rides THIS hook's own
+    // reachability — the same watcher ticks the arm lives on (healthy status
+    // poll, non-terminal, no pending recreate) — so the close read lands on
+    // the first such tick AFTER the open edge with no new timer and no loop.
+    // The call is a no-op until the probe's async open-edge latch fires,
+    // which cannot happen inside the arming tick's synchronous body; and it
+    // sits BEFORE the one-shot early return so the post-arm ticks (which all
+    // early-return below) still reach it exactly once. Arm/WAITING semantics
+    // untouched; the read is fire-and-forget, the tick pays no await.
+    this.maybeCloseInterfaceStatsWindow();
     if (this.n2hArmAttempted || this.destroyRequested) {
       return;
     }
@@ -1319,6 +1359,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (announcedOverlay !== undefined) {
       opts.peer_overlay_ip = announcedOverlay;
     }
+    // v4 §3 path① / §6.2 item 2: the dns-nxdomain-echo enable rides the same
+    // control file with the SAME present-only + verbatim discipline — the key
+    // is set ONLY when the file carried it (an absent key stays absent so the
+    // core's documented default OFF is what the omission means; the shell
+    // never injects `false`), never defaulted, never type-coerced. A non-boolean
+    // value (e.g. a JSON string/number) is forwarded AS THAT VALUE and the
+    // core's strict boolean check refuses the arm — the refusal is core-side
+    // evidence, not something the shell silently repairs.
+    const nxdomainEcho: boolean | undefined = fileOpts.dns_nxdomain_echo;
+    if (nxdomainEcho !== undefined) {
+      opts.dns_nxdomain_echo = nxdomainEcho;
+    }
     // 2026-09-20 (diagnostic-only): resolve the VPN network's netId via the
     // official read-only getters BEFORE the native arm, so the core can pin
     // the posctl probe's egress to the VPN network for this one diagnostic
@@ -1358,7 +1410,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // cannot gain an unhandled rejection. Bytes only, diag-only: the
         // sample never joins Evidence.counters/notes, never becomes a packet
         // count, and no pre/post-ARM reconciliation happens.
-        runInterfaceStatsProbe(this.requestId).catch((error: Error): void => {
+        // The latch callback is the WINDOW open edge (v4 §4 (ii)): it flips
+        // n2hIfaceWindowOpenSeen only AFTER the probe emitted its phase=open
+        // line — strictly after this synchronous arm branch has returned —
+        // which is what pins the close edge to a LATER watcher tick (see
+        // maybeCloseInterfaceStatsWindow); it writes one boolean, nothing
+        // else.
+        runInterfaceStatsProbe(this.requestId, (): void => {
+          this.n2hIfaceWindowOpenSeen = true;
+        }).catch((error: Error): void => {
           // Codes/names only — the probe's discipline (never an exception
           // message, never a payload).
           hilog.warn(DOMAIN, TAG,
@@ -1396,6 +1456,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'diag=true|is_evidence=false',
         this.requestId, safeError(error as Error));
     }
+  }
+
+  // The iface-bytes WINDOW close edge: at most ONE vpn-tun re-read per
+  // instance, issued only after the open edge was recorded (the probe's
+  // phase=open line) and never during teardown. One-shot by
+  // n2hIfaceWindowCloseDone, consumed at ISSUE time — later ticks repeat
+  // nothing even if the read itself rejected (the close line then carries
+  // unavailable + the error CODE token; the diagnostic flow continues either
+  // way). Fire-and-forget: no await in the tick, the last-resort catch below
+  // keeps an unhandled rejection impossible (codes/names only, same
+  // discipline as the probe's guard). C7 counting input only — never
+  // Evidence.counters/notes, never the judge (v4 §4 影响与边界).
+  private maybeCloseInterfaceStatsWindow(): void {
+    if (!this.n2hIfaceWindowOpenSeen || this.n2hIfaceWindowCloseDone ||
+      this.destroyRequested) {
+      return;
+    }
+    this.n2hIfaceWindowCloseDone = true;
+    runInterfaceStatsWindowClose(this.requestId).catch((error: Error): void => {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_IFACE_BYTES_WINDOW_CLOSE_ABORTED|requestId=%{public}s|code=%{public}s|' +
+        'name=%{public}s|diag=true|is_evidence=false',
+        this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
+        clean(error.name || 'Error'));
+    });
   }
 
   // The arm ticket's path under THIS process's own filesDir: the same
