@@ -1646,6 +1646,14 @@ mod tests {
     /// (self-selected port) and with explicit tuning values.
     #[test]
     fn selftest_fixed_port_check_honors_cli_tuning() {
+        // The selftest's wg-loopback-pair check runs the REAL WG loopback
+        // pair (`TunFd::dup_from_raw` → ledger `emit_create` at tun.rs:171/173,
+        // plus `close_dup` → `emit_close_inst` on drop): this test APPENDS
+        // entries to the process-global ledger, so it must hold the same
+        // test-only lock as ledger's digest tests or its emissions interleave
+        // with their `digest()` cuts (the `same state, same cut => same
+        // digest` flake).
+        let _ledger_guard = crate::ledger::lock_ledger_for_test();
         // defaults: self-selected free port, loopback advertised address
         let outcomes = run_selftest_tuned(&CliIceTuning::default());
         let check = outcomes.iter().find(|o| o.name == "host-fixed-port-candidates").expect("check");

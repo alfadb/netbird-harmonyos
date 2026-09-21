@@ -421,13 +421,31 @@ pub fn fd_status(fd: i32) -> String {
 // test order.
 // ---------------------------------------------------------------------------
 
+/// Test-only serialization for the PROCESS-GLOBAL ledger (host-unit tests,
+/// `cfg(test)`: absent from the production build).
+///
+/// The ledger is a process-global, so a test that reads a consistent cut of
+/// it (the two `digest()` calls of `digest_is_deterministic_for_a_fixed_state`)
+/// must exclude not only sibling tests in `ledger::tests` but every OTHER
+/// test in the same lib-test binary that appends entries through production
+/// paths — e.g. `host_sockets::tests::selftest_fixed_port_check_honors_cli_tuning`
+/// → `run_selftest_tuned` → `check_wg_loopback_pair` → `TunFd::dup_from_raw`
+/// (tun.rs:171/173 `emit_create`, plus `close_dup`'s `emit_close_inst` on
+/// drop). The former module-private `TEST_LOCK` only serialized ledger's own
+/// tests, so those cross-module emissions could land between the two
+/// `digest(true)` calls and flake `same state, same cut => same digest`
+/// under parallel load (observed 4×). Every test path that can emit a ledger
+/// entry must hold this lock while doing so; production code never does.
+#[cfg(test)]
+pub(crate) fn lock_ledger_for_test() -> std::sync::MutexGuard<'static, ()> {
+    static LEDGER_TEST_LOCK: Mutex<()> = Mutex::new(());
+    LEDGER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use crate::sys::mono_ms;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn ensure_open_entry() {
         // d2_late_fd is registered create-only and never closed (:366), so it
@@ -438,7 +456,7 @@ mod tests {
 
     #[test]
     fn digest_is_deterministic_for_a_fixed_state() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_ledger_for_test();
         ensure_open_entry();
         let pre_a = digest(true);
         let pre_b = digest(true);
@@ -452,7 +470,7 @@ mod tests {
 
     #[test]
     fn cut_points_differ_when_an_entry_is_open() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_ledger_for_test();
         ensure_open_entry();
         // an open entry is registered open-at-pre vs open-at-exit — the two
         // cut literals differ, so the digests must differ (:388-392 禁止跨时点比较)
@@ -488,7 +506,7 @@ mod tests {
         // m-05: an unmatched close must not be swallowed — the ledger keeps
         // no bogus entry, and the marker emission (orphan inst) goes to the
         // capture so the runner's :406(c) pairing state machine can fail it.
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_ledger_for_test();
         let fd = 300 + (mono_ms() % 1000) as i32;
         let entries_before = with_ledger(|l| l.entries.len());
         // no create for this fd: emit_close takes the orphan path
@@ -503,7 +521,7 @@ mod tests {
     // a NEW instance, and the new instance's close must land on ITS OWN
     // entry (by instance), not on the first (role, fd) match. Ledger-level
     // only: fake fd values (no syscalls run on them), serialized on
-    // TEST_LOCK, zero concurrency — the interleaving that used to make this
+    // lock_ledger_for_test, zero concurrency — the interleaving that used to make this
     // a 2/240 pressure flake is here fixed by construction.
     // -----------------------------------------------------------------------
 
@@ -520,7 +538,7 @@ mod tests {
 
     #[test]
     fn emit_close_inst_closes_only_its_own_entry_not_a_stale_same_fd_open() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_ledger_for_test();
         let fd = 7000 + (mono_ms() % 1000) as i32;
         // stale instance: its kernel fd was foreign-closed behind our back,
         // so its ledger entry STAYS open (no fabricated close) while the
@@ -562,7 +580,7 @@ mod tests {
 
     #[test]
     fn legacy_emit_close_first_match_exposes_the_reuse_ambiguity() {
-        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_ledger_for_test();
         let fd = 8000 + (mono_ms() % 1000) as i32;
         let stale = emit_create(Role::FdDup, fd);
         let own = emit_create(Role::FdDup, fd);

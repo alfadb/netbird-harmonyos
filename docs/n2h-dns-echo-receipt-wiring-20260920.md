@@ -30,8 +30,14 @@
 ## 回执链消费点（`initial_receipt`，发送后首个 `endpoint_side[]` 条目）
 
 - `kind==dns && dns_nxdomain_echo` 时消费 `sent.echo_received`：
-  - **命中**（QR 置位＋query-id 匹配＋线格式 qname 逐字回含；RCODE 不要求，
-    §4.0）⇒ `observed:true`、`method:"dns-nxdomain-echo"`，qname 逐字回含即证据；
+  - **判定口径（2026-09-20 独立审查修正，与 v4 §3 注册字面一致）**：判定**只由
+    线格式 qname 逐字回含决定**——qname 回含 ⇒ 收执成立，别无附加门。QR 位与
+    派生 query-id **不参与判定**（此前实现多强制二者，比注册口径更严，属偏离，
+    已改）；二者降级为**非门控诊断字段**：命中时由 `dns_echo_receipt_diagnostics`
+    产出 `qr=<set|clear>`＋`query-id=<matched|unmatched>`（报文不足 DNS 头记
+    `header-absent`），如实追加在 hit notes 行，**永不**改写 `observed`。
+    **命中**（线格式 qname 逐字回含；RCODE 不读，§4.0）⇒ `observed:true`、
+    `method:"dns-nxdomain-echo"`，qname 逐字回含即证据；
     **据实改记（§3 口径）**：本路径**不填** `physical_src` / `physical_src_source`
     ——DNS 回执只证明投递，响应来自 resolver，地址不是端点观测到的探针源址；
     v4 §3 的五字段契约是给**外部回执 bundle**（mgmt/signal/relay）的，DNS 属
@@ -45,22 +51,27 @@
     receipt bundle`。
   - **未收到/不匹配/截断/超时** ⇒ `observed:false`＋miss 缺口，永不单独通过。
 - 窗口 notes 行（§6.2 项 2 完成判据面）：`dns-echo-receipt=hit|probe_id=<id>`
-  或 `dns-echo-receipt=miss|probe_id=<id>|gap`。
+  ［`|qr=<set|clear>`＋`|query-id=<matched|unmatched>` 诊断 kv，命中时如实追加、
+  非门控］或 `dns-echo-receipt=miss|probe_id=<id>|gap`。
 - 其余判定链原样：stun 自证、wg_peer 对端计数、mgmt/signal/relay operator-side
   缺口、tun_negative/C4、`probe_receipt` seam；未新增设备命令或权限。
 
 ## 测试（离线、真实代码路径，未连设备）
 
-新增 5 单测：开关默认 OFF/非布尔拒绝；OFF 线字节＝probe id 逐字（回归）＋ON=
+新增 6 单测：开关默认 OFF/非布尔拒绝；OFF 线字节＝probe id 逐字（回归）＋ON=
 A 查询含 id＋ON 不外推 wg_peer；错名/截断/乱码/超时 ⇒ 缺口；命中⇒observed＋
 具名 method（`physical_src`/`physical_src_source` 均空，输出不含
 `endpoint-reported`/`probe-socket-getsockname` 任一 token，且无
 `physical_src_source=<token>` 赋值——经 `n2h::Evidence::to_json` 真实渲染
 断言）、miss⇒缺口、relay 不受影响、OFF 时 dns 条目与既有 `method:"none"` 缺口
-逐字相等、stun miss 原样。全量 `cargo test --offline --locked --no-fail-fast`
-（client/core）：**566 通过 / 0 失败**（基线 561＋新增 5；首轮无 `--no-fail-fast`
-时 `connector::tests::relay_lane_open_commit_is_atomic_against_client_swap`
-在并发负载下偶发失败，单独重跑与该轮重跑均通过，与本变更无关）。
+逐字相等、stun miss 原样。第 6 测为 2026-09-20 判定口径修正新增
+（`the_echo_receipt_holds_on_the_qname_alone_when_qr_and_query_id_mismatch`）：
+构造「qname 逐字回含但 QR 位清零＋外来 query-id」的响应，断言收执仍成立
+（`echo_received=true`、判定链 `observed=true`），诊断字段如实记
+`qr=clear|query-id=unmatched`，且不填 `physical_src*`；纯函数层同测
+QR-clear/query-id 不匹配/双不匹配三态均判定为真、截断（无法容纳 qname）仍为假。
+全量 `cargo test --offline --locked --no-fail-fast`（client/core）：**567 通过 /
+0 失败**（2026-09-20 修正后实跑；含本修正新增 1 测）。
 
 ## 仍未验证（真机待验）
 

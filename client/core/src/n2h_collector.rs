@@ -691,6 +691,14 @@ pub struct SentProbe {
     pub mapped: Option<([u8; 4], u16)>,
     /// DNS echo only (default OFF): the resolver carried our qname back.
     pub echo_received: bool,
+    /// DNS echo only, NON-GATING diagnostics (v4 §3): how the datagram that
+    /// carried the qname back compared on the DNS header fields
+    /// (`qr=set|query-id=matched`, `qr=clear|query-id=unmatched`, or
+    /// `header-absent`), as produced by [`dns_echo_receipt_diagnostics`].
+    /// The receipt verdict is the qname containment alone; these values are
+    /// recorded truthfully (the `dns-echo-receipt=hit` note line) and never
+    /// gate `observed`. Empty when no echo arrived and on every non-echo path.
+    pub echo_diag: String,
 }
 
 /// Bind one fresh WILDCARD UDP socket for a probe (design §4.2: `0.0.0.0:0`,
@@ -730,6 +738,7 @@ pub fn send_udp_probe(dst: SocketAddr, marker: &str) -> Result<SentProbe, String
         payload_len: n,
         mapped: None,
         echo_received: false,
+        echo_diag: String::new(),
     })
 }
 
@@ -755,6 +764,7 @@ pub fn send_tcp_probe(dst: SocketAddr, marker: &str) -> Result<SentProbe, String
         payload_len: marker.len(),
         mapped: None,
         echo_received: false,
+        echo_diag: String::new(),
     })
 }
 
@@ -801,6 +811,7 @@ pub fn send_stun_probe(
         payload_len: req.len(),
         mapped,
         echo_received: false,
+        echo_diag: String::new(),
     })
 }
 
@@ -917,23 +928,39 @@ fn build_dns_a_query(qname: &str) -> Option<Vec<u8>> {
     Some(q)
 }
 
-/// The receipt test of the DNS echo method: a datagram that is a DNS RESPONSE
-/// (QR set) for our query id AND carries our qname in wire form. The question
-/// section is never name-compressed (RFC 1035 §4.1.4), so a verbatim wire-form
-/// search is a sound "the resolver echoed this QNAME back" test. The RCODE is
-/// deliberately not required: an NXDOMAIN answer proves delivery exactly as
-/// well as a NOERROR one (design §4.0).
+/// The receipt test of the DNS echo method, EXACTLY the v4 preregistration §3
+/// registered caliber: the datagram carries our qname back in wire form,
+/// verbatim — the echoed QNAME alone establishes the receipt. The DNS header
+/// fields (QR bit, query id) are deliberately NOT gates: they are recorded as
+/// non-gating diagnostics alongside the receipt (see
+/// [`dns_echo_receipt_diagnostics`]), never a stricter filter than the
+/// registered literal. The question section is never name-compressed
+/// (RFC 1035 §4.1.4), so a verbatim wire-form search is a sound "the resolver
+/// echoed this QNAME back" test. The RCODE is not read at all: an NXDOMAIN
+/// answer proves delivery exactly as well as a NOERROR one (design §4.0).
 pub fn dns_echo_receipt(response: &[u8], qname: &str) -> bool {
-    if response.len() < 12 || response[2] & 0x80 == 0 {
-        return false;
-    }
-    if u16::from_be_bytes([response[0], response[1]]) != dns_query_id(qname) {
-        return false;
-    }
     match dns_wire_name(qname) {
         Some(name) => crate::n2h::frame_contains_marker(response, &name),
         None => false,
     }
+}
+
+/// Non-gating header diagnostics for one candidate echo datagram: how it
+/// compares on the two DNS header fields. The v4 §3 receipt verdict is the
+/// qname containment ALONE, so what this reports never gates `observed` — it
+/// is recorded truthfully next to the receipt (the `dns-echo-receipt=hit`
+/// note line). Datagrams shorter than a DNS header report `header-absent`.
+pub fn dns_echo_receipt_diagnostics(response: &[u8], qname: &str) -> String {
+    if response.len() < 12 {
+        return "header-absent".to_string();
+    }
+    let qr = if response[2] & 0x80 != 0 { "qr=set" } else { "qr=clear" };
+    let id = if u16::from_be_bytes([response[0], response[1]]) == dns_query_id(qname) {
+        "query-id=matched"
+    } else {
+        "query-id=unmatched"
+    };
+    format!("{qr}|{id}")
 }
 
 /// Send one DNS echo probe (design §4.0 `dns-nxdomain-echo`; v4 preregistration
@@ -959,6 +986,7 @@ pub fn send_dns_echo_probe(
     let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(wait_ms.max(1))));
     sock.send_to(&query, dst).map_err(|e| format!("dns echo probe send: {e}"))?;
     let mut echo_received = false;
+    let mut echo_diag = String::new();
     let mut buf = [0u8; 2048];
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
     while std::time::Instant::now() < deadline {
@@ -966,6 +994,10 @@ pub fn send_dns_echo_probe(
             Ok((n, _from)) => {
                 if dns_echo_receipt(&buf[..n], &qname) {
                     echo_received = true;
+                    // v4 §3: the verdict above was the qname containment
+                    // alone; the header fields ride along as diagnostics and
+                    // never re-enter the verdict.
+                    echo_diag = dns_echo_receipt_diagnostics(&buf[..n], &qname);
                     break;
                 }
             }
@@ -979,6 +1011,7 @@ pub fn send_dns_echo_probe(
         payload_len: query.len(),
         mapped: None,
         echo_received,
+        echo_diag,
     })
 }
 
@@ -2483,8 +2516,16 @@ fn run_window(win: Arc<Window>) {
                     // 2's completion criterion: one echo-hit receipt line and
                     // one miss-gap line must be readable in a real window's
                     // notes[]). A miss is recorded AS a gap, never a pass.
+                    // On a hit, the DNS header fields ride along as the
+                    // non-gating diagnostics they are (v4 §3 registered
+                    // caliber: the verdict was the qname containment alone;
+                    // these kv are the truthful record, never a gate).
                     notes.push(if sent.echo_received {
-                        format!("dns-echo-receipt=hit|probe_id={}", sent.probe_id)
+                        if sent.echo_diag.is_empty() {
+                            format!("dns-echo-receipt=hit|probe_id={}", sent.probe_id)
+                        } else {
+                            format!("dns-echo-receipt=hit|probe_id={}|{}", sent.probe_id, sent.echo_diag)
+                        }
                     } else {
                         format!("dns-echo-receipt=miss|probe_id={}|gap", sent.probe_id)
                     });
@@ -2663,10 +2704,12 @@ fn initial_receipt(win: &Arc<Window>, kind: EndpointKind, sent: &SentProbe) -> E
                 physical_src_source: String::new(),
                 at_unix: win.clock.unix_s(),
                 method: "dns-nxdomain-echo".into(),
-                detail: "resolver response echoed our qname back (query-id matched, our wire-form \
-                         QNAME verbatim inside a DNS response; RCODE not required, §4.0) — the \
-                         probe's own in-process delivery proof, never a pass by itself; this path \
-                         provides NO endpoint-observed physical source (the reply's address is the \
+                detail: "resolver datagram carried our wire-form QNAME back verbatim — the v4 §3 \
+                         registered caliber gates this receipt on the echoed qname ALONE (QR bit \
+                         and query id are non-gating diagnostics, recorded on the \
+                         dns-echo-receipt note line; RCODE not read, §4.0) — the probe's own \
+                         in-process delivery proof, never a pass by itself; this path provides \
+                         NO endpoint-observed physical source (the reply's address is the \
                          resolver's), so physical_src/physical_src_source stay empty"
                     .into(),
             }
@@ -4684,10 +4727,45 @@ mod tests {
         // pure receipt test: the answer must be a RESPONSE for OUR qname
         let answer = mirror_as_nxdomain(&query);
         assert!(dns_echo_receipt(&answer, &qname));
+        // v4 §3 registered caliber: the verdict is the echoed qname ALONE —
+        // the QR bit and the query id are non-gating diagnostics, recorded
+        // truthfully and never a stricter filter than the registered literal.
         let mut not_a_response = answer.clone();
         not_a_response[2] &= 0x7f; // clear QR
-        assert!(!dns_echo_receipt(&not_a_response, &qname), "a query is not a receipt");
-        assert!(!dns_echo_receipt(&answer[..8], &qname), "a truncated header is not a receipt");
+        assert!(
+            dns_echo_receipt(&not_a_response, &qname),
+            "QR is a diagnostic, not a gate: the qname came back, the receipt holds (v4 §3)"
+        );
+        assert_eq!(
+            dns_echo_receipt_diagnostics(&not_a_response, &qname),
+            "qr=clear|query-id=matched",
+            "the mismatching header field is recorded truthfully"
+        );
+        let mut wrong_id = answer.clone();
+        wrong_id[0..2].copy_from_slice(&[0xbe, 0xef]);
+        assert!(
+            dns_echo_receipt(&wrong_id, &qname),
+            "the query id is a diagnostic, not a gate (v4 §3)"
+        );
+        assert_eq!(
+            dns_echo_receipt_diagnostics(&wrong_id, &qname),
+            "qr=set|query-id=unmatched"
+        );
+        let mut neither = not_a_response.clone();
+        neither[0..2].copy_from_slice(&[0xbe, 0xef]);
+        assert!(
+            dns_echo_receipt(&neither, &qname),
+            "neither header field gates: the echoed qname alone is the receipt (v4 §3)"
+        );
+        assert_eq!(
+            dns_echo_receipt_diagnostics(&neither, &qname),
+            "qr=clear|query-id=unmatched",
+            "both mismatches ride the note line as the non-gating record"
+        );
+        assert!(
+            !dns_echo_receipt(&answer[..8], &qname),
+            "a truncated header is not a receipt (the qname cannot be inside 8 bytes)"
+        );
         assert!(
             !dns_echo_receipt(&answer, &dns_echo_qname(&id_of(EndpointKind::Dns, 0x3d))),
             "another probe's qname is not this probe's receipt"
@@ -4892,6 +4970,44 @@ mod tests {
     }
 
     #[test]
+    fn the_echo_receipt_holds_on_the_qname_alone_when_qr_and_query_id_mismatch() {
+        // v4 §3 registered caliber, end to end: a datagram that carries the
+        // qname back but matches NEITHER header field (QR clear, foreign
+        // query id) still establishes the receipt — the header fields are
+        // recorded as non-gating diagnostics, never a stricter filter than
+        // the registered literal.
+        let (dst, responder) = spawn_udp_responder_with(|q| {
+            let mut r = mirror_as_nxdomain(q);
+            r[2] &= 0x7f; // QR clear: not even marked a RESPONSE
+            r[0..2].copy_from_slice(&[0xbe, 0xef]); // a foreign query id
+            r
+        });
+        let sent = send_dns_echo_probe(dst, &id_of(EndpointKind::Dns, 0x4a), 1_000)
+            .expect("dns echo probe");
+        responder.join().expect("responder thread");
+        assert!(sent.echo_received, "the echoed qname alone IS the receipt (v4 §3)");
+        assert_eq!(
+            sent.echo_diag, "qr=clear|query-id=unmatched",
+            "both header mismatches are recorded truthfully, as diagnostics only"
+        );
+
+        // and the receipt chain consumes that echo into observed=true: the
+        // diagnostics never re-enter the verdict (the same rule that keeps a
+        // miss a gap keeps this hit a receipt regardless of the header).
+        let win = window_with(ArmOptions { dns_nxdomain_echo: true, ..ArmOptions::default() });
+        let receipt = initial_receipt(&win, EndpointKind::Dns, &sent);
+        assert!(receipt.observed, "observed is the echoed qname's verdict alone");
+        assert_eq!(receipt.method, "dns-nxdomain-echo");
+        assert_eq!(receipt.physical_src, "", "no endpoint-observed source on the dns path");
+        assert_eq!(receipt.physical_src_source, "", "and no source token either");
+        assert!(
+            receipt.detail.contains("gates this receipt on the echoed qname ALONE"),
+            "{}",
+            receipt.detail
+        );
+    }
+
+    #[test]
     fn the_receipt_chain_consumes_the_echo_only_for_dns_and_only_when_enabled() {
         let win = window_with(ArmOptions { dns_nxdomain_echo: true, ..ArmOptions::default() });
         let id = id_of(EndpointKind::Dns, 0x47);
@@ -4906,6 +5022,7 @@ mod tests {
             payload_len: 44,
             mapped: None,
             echo_received,
+            echo_diag: String::new(),
         };
 
         // echo hit ⇒ observed, the NAMED method, and NO physical source: v4 §3
@@ -4939,6 +5056,7 @@ mod tests {
             payload_len: 30,
             mapped: None,
             echo_received: false,
+            echo_diag: String::new(),
         };
         let relay = initial_receipt(&win, EndpointKind::Relay, &relay_sent);
         assert!(!relay.observed);
@@ -4978,6 +5096,7 @@ mod tests {
             payload_len: 20,
             mapped: None,
             echo_received: false,
+            echo_diag: String::new(),
         };
         let stun = initial_receipt(&win, EndpointKind::Stun, &stun_sent);
         assert!(!stun.observed);
@@ -5004,6 +5123,7 @@ mod tests {
             payload_len: 44,
             mapped: None,
             echo_received: true,
+            echo_diag: String::new(),
         };
         let hit = initial_receipt(&win, EndpointKind::Dns, &sent);
         assert!(hit.observed);
@@ -6590,26 +6710,39 @@ mod tests {
         assert_eq!(ctx_field(&lines[1], "send_errno"), Some("0"), "{}", lines[1]);
     }
 
-    /// A closed fd answers the REAL kernel errno (EBADF=9) on both reads —
-    /// never a fabricated value, never "unsupported" — and the line renders
-    /// it verbatim.
+    /// A closed/invalid fd answers the REAL kernel errno (EBADF=9) on both
+    /// reads — never a fabricated value, never "unsupported" — and the line
+    /// renders it verbatim.
+    ///
+    /// The fd number must be one a parallel test thread CANNOT hand back to
+    /// us while we read it: under `cargo test` the lib suite runs its tests
+    /// on many threads and fd numbers are handed out lowest-free-first
+    /// process-globally, so a dup+close number can be re-opened between our
+    /// `close()` and the `getsockopt` (observed once as a spurious non-EBADF
+    /// reading under parallel load; the dup+close retry loop that used to
+    /// stand in here still lost every one of its 8 attempts under heavy
+    /// fd churn). We therefore read an fd number far beyond RLIMIT_NOFILE
+    /// (2^30 slots cannot exist — the fdtable would need an 8 GiB pointer
+    /// array; this process holds at most a few thousand fds): the fdtable
+    /// lookup misses deterministically and both reads answer the real EBADF
+    /// with no open/close in play at all. The F_GETFD probe asserts that
+    /// premise explicitly — if it ever failed to hold, the test reports
+    /// premise-broken instead of a misleading EBADF assertion.
     #[test]
     fn socket_context_closed_fd_reads_keep_the_real_errno() {
-        let holder = std::net::UdpSocket::bind("127.0.0.1:0").expect("holder bind");
-        let mut mark = Err(crate::sys::EBADF);
-        let mut dev = Err(crate::sys::EBADF);
-        for _ in 0..8 {
-            // dup + close: the closed number may be instantly reused by a
-            // parallel test thread — retry until both reads really fail
-            let closed = unsafe { crate::sys::dup(holder.as_raw_fd()) };
-            assert!(closed >= 0, "dup failed");
-            assert_eq!(unsafe { crate::sys::close(closed) }, 0, "close of the dup failed");
-            mark = crate::sys::so_mark(closed);
-            dev = crate::sys::so_bindtodevice(closed);
-            if mark.is_err() && dev.is_err() {
-                break;
-            }
+        const UNALLOCATABLE_FD: i32 = 1 << 30;
+        // premise: this number cannot be open in this process (F_GETFD must
+        // miss with the kernel's real EBADF)
+        let probe = unsafe { crate::sys::fcntl(UNALLOCATABLE_FD, crate::sys::F_GETFD) };
+        if !(probe == -1 && crate::sys::errno() == crate::sys::EBADF) {
+            panic!(
+                "premise-broken: fd {UNALLOCATABLE_FD} unexpectedly probed open \
+                 (ret={probe}, errno={}) — the beyond-rlimit fd premise no longer holds",
+                crate::sys::errno()
+            );
         }
+        let mark = crate::sys::so_mark(UNALLOCATABLE_FD);
+        let dev = crate::sys::so_bindtodevice(UNALLOCATABLE_FD);
         assert_eq!(mark, Err(crate::sys::EBADF), "so_mark keeps the real EBADF");
         assert_eq!(dev, Err(crate::sys::EBADF), "so_bindtodevice keeps the real EBADF");
         let sample = SocketContextSample {

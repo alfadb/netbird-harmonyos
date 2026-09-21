@@ -421,10 +421,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // after the phase=open line is emitted, i.e. after this tick's synchronous
   // body has fully unwound — so the close edge can never fire on the arming
   // tick itself. n2hIfaceWindowCloseDone consumes the one-shot close read on
-  // the FIRST later tick that reaches the arm hook. Diagnostic-only (C7
-  // counting reconciliation): never Evidence.counters/notes, never the judge,
-  // never path/isolation evidence; neither latch touches the arm/WAITING
-  // semantics above.
+  // the first later watcher trigger, before any early return (the very top of
+  // the watcher body). Diagnostic-only (C7 counting reconciliation): never
+  // Evidence.counters/notes, never the judge, never path/isolation evidence;
+  // neither latch touches the arm/WAITING semantics above.
   private n2hIfaceWindowOpenSeen: boolean = false;
   private n2hIfaceWindowCloseDone: boolean = false;
   // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the generation counter of THIS ability
@@ -1197,17 +1197,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // — one deduped N2H_COLLECTOR_WAITING line while the ticket exists but the
   // session gate (wg.device_up && wg.ready) is still closed.
   private maybeArmN2hCollector(status: ConnectorStatusResult): void {
-    // N2-H iface-bytes WINDOW close edge (v4 preregistration §4 (ii), C7
-    // same-source calibration prerequisite): rides THIS hook's own
-    // reachability — the same watcher ticks the arm lives on (healthy status
-    // poll, non-terminal, no pending recreate) — so the close read lands on
-    // the first such tick AFTER the open edge with no new timer and no loop.
-    // The call is a no-op until the probe's async open-edge latch fires,
-    // which cannot happen inside the arming tick's synchronous body; and it
-    // sits BEFORE the one-shot early return so the post-arm ticks (which all
-    // early-return below) still reach it exactly once. Arm/WAITING semantics
-    // untouched; the read is fire-and-forget, the tick pays no await.
-    this.maybeCloseInterfaceStatsWindow();
     if (this.n2hArmAttempted || this.destroyRequested) {
       return;
     }
@@ -1539,6 +1528,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.watcherTimer = setInterval((): void => {
+      // N2-H iface-bytes WINDOW close edge (v4 preregistration §4 (ii), C7
+      // same-source calibration prerequisite): rides EVERY watcher trigger,
+      // at the VERY TOP of the tick — BEFORE the status read and before the
+      // terminal / recreate / poll-failure early returns — so the two-edge
+      // invariant「open edge seen ⇒ the NEXT watcher trigger issues the close
+      // edge exactly once」is unconditional for every non-teardown watcher
+      // trigger, in every tick form (healthy, terminal, recreate pending,
+      // status unreachable). The sole exception is teardown: destroyRequested
+      // is latched by onDestroy (which also stops the watcher), and the close
+      // edge is skipped while it is set. A
+      // teardown-straddling tick no longer drops the close edge: the close
+      // read is a diag-only paired read that does not depend on connector
+      // status. The call is a no-op until the probe's async open-edge latch
+      // fires (which cannot happen inside the arming tick's synchronous
+      // body, so the close can never land on the arming tick itself); the
+      // one-shot latch consumes the issue, so later ticks repeat nothing.
+      // No new timer, no loop, no await; ARM/latch/WAITING semantics
+      // untouched; C7 counting input only, never Evidence/judge.
+      this.maybeCloseInterfaceStatsWindow();
       const status: ConnectorStatusResult | null = pollStatusOrNull();
       if (status !== null) {
         this.statusPollFailures = 0;

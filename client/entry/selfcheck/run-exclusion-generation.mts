@@ -137,25 +137,31 @@
 //      module — no /proc read, no getUid*/GET_NETWORK_STATS, no exception
 //      message text — and module.json5 unchanged). The probe never touches
 //      Evidence.counters/notes; no packet count exists anywhere.
-//   W1-W6 (2026-09-20 iface-bytes WINDOW two-edge read, v4 preregistration
+//   W1-W7 (2026-09-20 iface-bytes WINDOW two-edge read, v4 preregistration
 //      §4 (ii) C7 same-source-calibration prerequisite): the OPEN edge is the
 //      arm SUCCESS branch's own vpn-tun reading, re-rendered on
 //      N2H_IFACE_BYTES_WINDOW|phase=open from the SAME numbers (no second
 //      read; pairRequestId == requestId); the CLOSE edge is ONE more vpn-tun
-//      read issued on the FIRST arm-hook tick AFTER that open line — never
+//      read issued on the FIRST watcher TRIGGER AFTER that open line — never
 //      the arming tick (the latch flips only after the async open line),
-//      never without an open edge, never twice (latch consumed at issue).
+//      never without an open edge, never twice (latch consumed at issue) —
+//      and, since the 2026-09-20 fix, issued at the VERY TOP of the tick so
+//      NO early-return form bypasses it (v4 §4/§6.2 mechanical two-edge
+//      requirement: open/close each EXACTLY once holds in EVERY tick form).
 //      W1 open edge once + zero close before the next tick; W2 the close
 //      edge: same requestId, fresh values, close.started >= open.finished,
 //      exactly the two vpn-tun calls; W3 later ticks repeat nothing; W4 a
 //      rejected API prints unavailable + the code and the flow continues;
 //      W5 no ARM success (no ticket / gate closed / core not-ok) ⇒ zero
 //      close reads; W6 source pins (no timer/loop in the window path, no
-//      await added to the tick, the close hook rides the arm hook before its
-//      one-shot return, the read issues only behind the open latch with a
+//      await added to the tick, the close hook rides the watcher tick BEFORE
+//      the status read / terminal / recreate early returns and no longer
+//      inside the arm hook, the read issues only behind the open latch with a
 //      last-resort catch, latch callback writes one boolean inside the
-//      ok-branch, both reads strictly after the native arm call). C7 counting
-//      input only — never Evidence.
+//      ok-branch, both reads strictly after the native arm call); W7 the
+//      terminal / recreate / status-unreachable tick forms still issue the
+//      close edge EXACTLY once (the 2026-09-20 fix, replayed REAL ticks).
+//      C7 counting input only — never Evidence.
 //   NC1-NC5 (2026-09-20 network-context snapshot): the PUBLIC connection
 //      getters (getDefaultNetSync/getAppNetSync/getAllNetsSync +
 //      getNetCapabilitiesSync/getConnectionPropertiesSync, all Sync forms read
@@ -289,6 +295,23 @@ const WG_READY: Record<string, unknown> = { wg: { device_up: true, ready: true }
 // One watcher tick of the REAL arm hook.
 function tickArm(ability: Record<string, unknown>, status: Record<string, unknown>): void {
   (ability['maybeArmN2hCollector'] as (s: unknown) => void)(status);
+}
+
+// The REAL watcher tick body, replayed by hand: starts the REAL watcher with
+// the interval CAPTURED (the B-group mechanism — no real timer is left
+// pending) and returns the captured tick closure. The close edge rides THIS
+// body's very top (before the status read and every early return), so the
+// window groups replay REAL ticks, not the arm hook alone.
+function watcherTick(ability: Record<string, unknown>): () => void {
+  const captured: Array<() => void> = [];
+  const previous = G['setInterval'];
+  G['setInterval'] = (handler: () => void): number => {
+    captured.push(handler);
+    return 7300 + captured.length;
+  };
+  (ability['startStatusAndNetcfgWatcher'] as () => void)();
+  G['setInterval'] = previous;
+  return captured[captured.length - 1];
 }
 
 // The arm-file state of the path-aware fs stub (exclusion-generation-hooks.mjs),
@@ -1452,14 +1475,19 @@ try {
     linesWith(PROBE_PREFIX).length === 0 &&
     statsCalls().length === callsAtP5, JSON.stringify(logs()));
 
-  // P6: the OPEN probe inherits the arm's one-shot semantics; the FIRST tick
-  // after the arm carries exactly the WINDOW close edge (the W group pins its
-  // shape — here only that it is the one extra thing, then silence): no new
-  // PROBE line, exactly one close round (two statistics calls), and the tick
-  // after that repeats nothing at all.
+  // P6: the OPEN probe inherits the arm's one-shot semantics; the FIRST
+  // watcher TRIGGER after the arm carries exactly the WINDOW close edge (the
+  // W group pins its shape — here only that it is the one extra thing, then
+  // silence): no new PROBE line, exactly one close round (two statistics
+  // calls), and the REAL tick after that repeats nothing at all.
+  G['__NB_STATUS'] = {
+    running: true, state: 'connected', peer_count: 1, route_count: 2,
+    reconnects: 0, terminal: false, wg: { device_up: true, ready: true }
+  };
+  const p6Tick = watcherTick(probeAbility);
   const callsAtP6 = statsCalls().length;
   resetLog();
-  tickArm(probeAbility, WG_READY);
+  p6Tick();
   await drainProbe();
   const p6CloseCalls = statsCalls().length - callsAtP6;
   check('P6 first post-arm tick: no PROBE repeat, exactly the one WINDOW close round',
@@ -1469,11 +1497,12 @@ try {
     p6CloseCalls === 2,
     JSON.stringify({ window: linesWith(WINDOW_PREFIX), calls: p6CloseCalls }));
   resetLog();
-  tickArm(probeAbility, WG_READY);
+  p6Tick();
   await drainProbe();
   check('P6 the tick after the close edge repeats nothing: no line, no statistics call',
-    statsCalls().length === callsAtP6 + p6CloseCalls && logs().length === 0,
-    JSON.stringify(logs()));
+    statsCalls().length === callsAtP6 + p6CloseCalls &&
+    linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0,
+    JSON.stringify({ window: linesWith(WINDOW_PREFIX), probe: linesWith(PROBE_PREFIX) }));
 
   // P7: value honesty — a RESOLVED value that is not a finite nonnegative
   // byte count is never printed and never turned into 0 (token
@@ -1545,10 +1574,18 @@ try {
   // OPEN/CLOSE pair on the SAME official per-NIC byte API. The OPEN edge
   // re-renders the arm branch's own vpn-tun sample (SAME numbers — no second
   // read); the CLOSE edge is ONE fresh vpn-tun read issued on the first
-  // arm-hook tick AFTER that open line — never the arming tick, never twice,
-  // never without the open latch. Diagnostic-only: the readings are C7
-  // counting input, never Evidence.counters/notes, never the judge. The same
-  // field discipline as the probe line holds (codes only, never a message).
+  // watcher TRIGGER after that open line — at the very top of the tick,
+  // before every early return (the 2026-09-20 fix), never the arming tick,
+  // never twice, never without the open latch. The window groups below replay
+  // REAL watcher ticks (the captured-interval mechanism), not the arm hook
+  // alone. Diagnostic-only: the readings are C7 counting input, never
+  // Evidence.counters/notes, never the judge. The same field discipline as
+  // the probe line holds (codes only, never a message).
+  // The full live-session document the REAL tick polls (the B-group shape).
+  const W_HEALTHY: Record<string, unknown> = {
+    running: true, state: 'connected', peer_count: 1, route_count: 2,
+    reconnects: 0, terminal: false, wg: { device_up: true, ready: true }
+  };
   const openAbility = freshAbility(mod, FIXTURE_FILESDIR);
   openAbility['n2hAcceptedExclusionGeneration'] = 0;
   seedStats({ 'vpn-tun': 2100, 'n2h-none0': 0 }, { 'vpn-tun': 3100, 'n2h-none0': 0 });
@@ -1582,12 +1619,15 @@ try {
     fieldOf(w1ProbeVpn[0], 'txBytes') === fieldOf(w1Open, 'txBytes'),
     JSON.stringify({ probe: w1ProbeVpn, open: w1Open }));
 
-  // W2: the CLOSE edge lands on the NEXT watcher tick — same requestId/pair,
-  // FRESH values, exactly two vpn-tun calls, close.started >= open.finished.
+  // W2: the CLOSE edge lands on the NEXT watcher TRIGGER — a REAL replayed
+  // tick, same requestId/pair, FRESH values, exactly two vpn-tun calls,
+  // close.started >= open.finished.
+  G['__NB_STATUS'] = W_HEALTHY;
+  const w2Tick = watcherTick(openAbility);
   const callsAtW2 = statsCalls().length;
   resetLog();
   seedStats({ 'vpn-tun': 2400, 'n2h-none0': 0 }, { 'vpn-tun': 3600, 'n2h-none0': 0 });
-  tickArm(openAbility, WG_READY);
+  w2Tick();
   await drainProbe();
   const w2Lines = linesWith(WINDOW_PREFIX);
   const w2Close = w2Lines.length === 1 ? w2Lines[0] : '';
@@ -1610,18 +1650,22 @@ try {
     JSON.stringify({ openFinished: fieldOf(w1Open, 'finishedUnixMs'),
       closeStarted: fieldOf(w2Close, 'startedUnixMs') }));
 
-  // W3: one-shot — the ticks after the close edge repeat nothing at all.
+  // W3: one-shot — the ticks after the close edge repeat nothing (no new
+  // WINDOW/PROBE line, no statistics call; the per-tick status lines are the
+  // pre-existing watcher chatter, not window output).
   const callsAtW3 = statsCalls().length;
   resetLog();
-  tickArm(openAbility, WG_READY);
-  tickArm(openAbility, WG_READY);
+  w2Tick();
+  w2Tick();
   await drainProbe();
   check('W3 ticks after the close edge repeat nothing: no WINDOW/PROBE line, no statistics call',
-    logs().length === 0 && statsCalls().length === callsAtW3, JSON.stringify(logs()));
+    linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0 &&
+    statsCalls().length === callsAtW3,
+    JSON.stringify({ window: linesWith(WINDOW_PREFIX), probe: linesWith(PROBE_PREFIX) }));
 
   // W4: a REJECTED close read prints unavailable + that direction's raw code,
   // never throws, never launders 0 — and the diagnostic flow continues (the
-  // one-shot latch was consumed at issue; the next tick repeats nothing).
+  // one-shot latch was consumed at issue; the next REAL tick repeats nothing).
   const w4Ability = freshAbility(mod, FIXTURE_FILESDIR);
   w4Ability['n2hAcceptedExclusionGeneration'] = 0;
   seedStats({ 'vpn-tun': 10, 'n2h-none0': 0 }, { 'vpn-tun': 20, 'n2h-none0': 0 });
@@ -1630,10 +1674,12 @@ try {
   tickArm(w4Ability, WG_READY);
   await drainProbe();
   const w4Open = linesWith(WINDOW_PREFIX);
+  G['__NB_STATUS'] = W_HEALTHY;
+  const w4Tick = watcherTick(w4Ability);
   seedStats({ 'vpn-tun': { code: 2103012 } }, { 'vpn-tun': { code: 2100002 } });
   const callsAtW4 = statsCalls().length;
   resetLog();
-  tickArm(w4Ability, WG_READY);
+  w4Tick();
   await drainProbe();
   const w4Lines = linesWith(WINDOW_PREFIX);
   const w4Close = w4Lines.length === 1 ? w4Lines[0] : '';
@@ -1649,19 +1695,23 @@ try {
     linesWith('N2H_IFACE_BYTES_WINDOW_CLOSE_ABORTED|').length === 0,
     JSON.stringify({ open: w4Open, close: w4Lines }));
   resetLog();
-  tickArm(w4Ability, WG_READY);
+  w4Tick();
   await drainProbe();
   check('W4 the diagnostic flow continues: the next tick repeats nothing (one-shot consumed at issue)',
-    logs().length === 0 && statsCalls().length === callsAtW4 + 2,
-    JSON.stringify({ logs: logs(), calls: statsCalls().slice(callsAtW4) }));
+    linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0 &&
+    statsCalls().length === callsAtW4 + 2,
+    JSON.stringify({ window: linesWith(WINDOW_PREFIX), calls: statsCalls().slice(callsAtW4) }));
 
-  // W5: NO native ARM success ⇒ zero close reads. Three shapes, mirroring P5.
+  // W5: NO native ARM success ⇒ zero close reads. Three shapes, mirroring P5,
+  // each driven through REAL watcher ticks: the close hook runs on EVERY tick
+  // and must stay silent without the open edge.
   const w5Cases: Array<{ name: string; arm: () => void; status: Record<string, unknown> }> = [
-    { name: 'W5a no arm ticket (the plain-start default)', status: WG_READY,
+    { name: 'W5a no arm ticket (the plain-start default)', status: W_HEALTHY,
       arm: (): void => { setArmFile(false, undefined); } },
-    { name: 'W5b ticket present but the session gate closed', status: { wg: { device_up: true, ready: false } },
+    { name: 'W5b ticket present but the session gate closed',
+      status: { ...W_HEALTHY, wg: { device_up: true, ready: false } },
       arm: (): void => { setArmFile(true, undefined, ''); } },
-    { name: 'W5c the core answers not-ok', status: WG_READY,
+    { name: 'W5c the core answers not-ok', status: W_HEALTHY,
       arm: (): void => {
         G['__NB_ARM_ANSWER'] = '{"ok":false,"error":"forced-by-w5"}';
         setArmFile(true, undefined);
@@ -1671,27 +1721,95 @@ try {
     const w5Ability = freshAbility(mod, FIXTURE_FILESDIR);
     w5Ability['n2hAcceptedExclusionGeneration'] = 0;
     w5Case.arm();
+    G['__NB_STATUS'] = w5Case.status;
+    const w5Tick = watcherTick(w5Ability);
     const callsAtW5 = statsCalls().length;
     resetLog();
-    tickArm(w5Ability, w5Case.status);
+    w5Tick();
     await drainProbe();
-    tickArm(w5Ability, w5Case.status);
+    w5Tick();
     await drainProbe();
     G['__NB_ARM_ANSWER'] = undefined;
     check(w5Case.name + ' -> zero WINDOW lines, zero close read',
       linesWith(WINDOW_PREFIX).length === 0 &&
       linesWith(PROBE_PREFIX).length === 0 &&
-      statsCalls().length === callsAtW5, JSON.stringify(logs()));
+      statsCalls().length === callsAtW5, JSON.stringify(linesWith(WINDOW_PREFIX)));
+  }
+
+  // W7 (2026-09-20 fix): the close edge is NOT bypassed by the tick forms that
+  // early-return before the arm hook. v4 §4/§6.2 mechanical two-edge
+  // requirement: once the open edge happened, the NEXT watcher trigger issues
+  // the close edge EXACTLY once — including a TERMINAL tick, a
+  // recreate-pending tick, and a status-unreachable tick. REAL ticks only.
+  const w7Forms: Array<{ name: string; status: Record<string, unknown> | null }> = [
+    { name: 'W7a terminal tick', status: { ...W_HEALTHY, terminal: true, state: 'failed' } },
+    { name: 'W7b recreate-pending tick',
+      status: { ...W_HEALTHY, recreate: { required: true, reason: 'forced-by-w7' } } },
+    { name: 'W7c status-unreachable tick', status: null }
+  ];
+  for (const w7Form of w7Forms) {
+    const w7Ability = freshAbility(mod, FIXTURE_FILESDIR);
+    w7Ability['n2hAcceptedExclusionGeneration'] = 0;
+    seedStats({ 'vpn-tun': 5100, 'n2h-none0': 0 }, { 'vpn-tun': 6100, 'n2h-none0': 0 });
+    setArmFile(true, undefined);
+    G['__NB_STATUS'] = W_HEALTHY;
+    const w7Tick = watcherTick(w7Ability);
+    // the ARMING tick (healthy form): the open edge only, never a close.
+    const callsAtW7Open = statsCalls().length;
+    resetLog();
+    w7Tick();
+    await drainProbe();
+    const w7Armed = linesWith(WINDOW_PREFIX);
+    const w7OpenCalls = statsCalls().length - callsAtW7Open;
+    // the FORM tick: the close edge EXACTLY once — issued at the very top of
+    // the tick, before the terminal/recreate/poll-failure early return.
+    seedStats({ 'vpn-tun': 5400, 'n2h-none0': 0 }, { 'vpn-tun': 6600, 'n2h-none0': 0 });
+    G['__NB_STATUS'] = w7Form.status;
+    const callsAtW7Close = statsCalls().length;
+    resetLog();
+    w7Tick();
+    await drainProbe();
+    const w7CloseLines = linesWith(WINDOW_PREFIX);
+    const w7Close = w7CloseLines.length === 1 ? w7CloseLines[0] : '';
+    const w7Calls = statsCalls().slice(callsAtW7Close);
+    // the tick after: silent (the one-shot latch was consumed at issue).
+    resetLog();
+    G['__NB_STATUS'] = W_HEALTHY;
+    w7Tick();
+    await drainProbe();
+    check(w7Form.name + ': the open edge only on the arming tick',
+      w7Armed.length === 1 && fieldOf(w7Armed[0], 'phase') === 'open' &&
+      w7OpenCalls === 4,
+      JSON.stringify({ window: w7Armed,
+        calls: statsCalls().slice(callsAtW7Open, callsAtW7Open + w7OpenCalls) }));
+    check(w7Form.name + ' still issues the close edge EXACTLY once (top of the tick, before the early return)',
+      w7CloseLines.length === 1 && fieldOf(w7Close, 'phase') === 'close' &&
+      fieldOf(w7Close, 'requestId') === REQUEST_ID &&
+      fieldOf(w7Close, 'pairRequestId') === REQUEST_ID &&
+      w7Calls.length === 2 &&
+      w7Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
+      w7Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0,
+      JSON.stringify({ window: w7CloseLines, calls: w7Calls }));
+    check(w7Form.name + ' leaves no residue: the tick after repeats nothing',
+      linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0,
+      JSON.stringify({ window: linesWith(WINDOW_PREFIX), probe: linesWith(PROBE_PREFIX) }));
   }
 
   // W6: source pins on the byte-identical sources — the window path adds no
   // timer and no loop, the close read is fire-and-forget behind the open
-  // latch, its hook rides the arm hook BEFORE the one-shot return, and the
-  // latch callback writes one boolean inside the ok-branch.
+  // latch, its hook rides the watcher tick at its VERY TOP (before the status
+  // read and the terminal/recreate early returns, no longer inside the arm
+  // hook), and the latch callback writes one boolean inside the ok-branch.
   const armHookAt = extSource.indexOf('private maybeArmN2hCollector(');
-  const closeHookAt = extSource.indexOf('this.maybeCloseInterfaceStatsWindow();');
   const armEarlyReturnAt = extSource.indexOf(
     'if (this.n2hArmAttempted || this.destroyRequested) {', armHookAt);
+  const armHookHead = armEarlyReturnAt > armHookAt
+    ? extSource.slice(armHookAt, armEarlyReturnAt) : '';
+  const setIntervalAt = extSource.indexOf('setInterval((): void => {');
+  const closeHookAt = extSource.indexOf('this.maybeCloseInterfaceStatsWindow();');
+  const statusReadAt = extSource.indexOf(
+    'const status: ConnectorStatusResult | null = pollStatusOrNull();');
+  const terminalReturnAt = extSource.indexOf('if (status.terminal === true) {');
   // The window path only — the extension keeps its PRE-EXISTING watcher
   // interval, so the pin is scoped to the close latch method and the two
   // probe-module window functions, not to the whole extension.
@@ -1712,9 +1830,17 @@ try {
     extSource.indexOf('await runInterfaceStatsWindowClose') < 0,
     JSON.stringify({ closeFn: w6CloseFn.length, emitFn: w6EmitFn.length,
       closeExport: w6CloseExport.length }));
-  check('W6 the close hook rides the arm hook BEFORE its one-shot early return',
-    armHookAt > 0 && closeHookAt > armHookAt && armEarlyReturnAt > closeHookAt,
-    JSON.stringify({ armHookAt, closeHookAt, armEarlyReturnAt }));
+  check('W6 the close hook rides the watcher tick at its VERY TOP, before the status read and every early return',
+    setIntervalAt > 0 && closeHookAt > setIntervalAt && closeHookAt < statusReadAt &&
+    statusReadAt > closeHookAt && closeHookAt < terminalReturnAt &&
+    terminalReturnAt > statusReadAt &&
+    extSource.split('this.maybeCloseInterfaceStatsWindow();').length === 2,
+    JSON.stringify({ setIntervalAt, closeHookAt, statusReadAt, terminalReturnAt,
+      callSites: extSource.split('this.maybeCloseInterfaceStatsWindow();').length - 1 }));
+  check('W6 the arm hook no longer carries the close hook (the early-return path cannot gate the close edge)',
+    armHookAt > 0 && armEarlyReturnAt > armHookAt &&
+    armHookHead.indexOf('maybeCloseInterfaceStatsWindow') < 0,
+    JSON.stringify({ armHookAt, armEarlyReturnAt, headLen: armHookHead.length }));
   const w6GuardAt = extSource.indexOf(
     'if (!this.n2hIfaceWindowOpenSeen || this.n2hIfaceWindowCloseDone ||');
   const w6IssueAt = extSource.indexOf('runInterfaceStatsWindowClose(this.requestId).catch(');
