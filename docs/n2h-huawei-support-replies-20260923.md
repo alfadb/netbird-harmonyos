@@ -7,15 +7,21 @@
   `sha256 a7510430f3ab402c3cd11f1ef39889b6092b8cf3ec8a4b14d2e90c25bc0c0dc7`（2026-09-23 `sha256sum` 实测）。
 - 仓B 登记件（只读，本文未修改）：`/home/worker/harmonyos-signing/netbird-n1bdisc/records/n2h-preregistration-effective-v4-20260920.json`，
   `sha256 a94fb6eea1c80f757ab0334073fe02342809012f3f50a2de78772fbf652dcc83`（同日实测）。
-- 原工单（仓外只读）：`/home/worker/huawei-support/20260921-vpn-extension-blockers.md`，12231 字节，
-  `sha256 465a1df313477417644824b33306b91c96176c95a11efbbd84910d83e3321a8c`（同日实测）。该文件在本文撰写期间被**并行扩写**
+- 原工单（仓外只读）：`/home/worker/huawei-support/20260921-vpn-extension-blockers.md`，12379 字节，
+  `sha256 6bf8a0904c3f3a4d09b9e5dfd7b3b34619d9634d3fcb5b8b85c9d5c02fa91a82`（2026-09-23 更正时实测）。该文件在本文撰写期间被**并行扩写**
   （7213 B → 12231 B），新增 §七「官方回复（归档）」（L125–191，内容即本批回复原文）；本文引用的
   L31–32／L41–42／L64–66／L79–81 全部位于被追加段落**之前**，行号未受影响（逐行实读核对）。
+- **sha256 过期原因（2026-09-23 更正）**：上次提交后该文件又修订一次——§七末尾「后续」行改为中性措辞（点明
+  protect 不返回与 MANAGE_VPN 校验失败行「二者因果未证实」并指向第三轮草稿），字节数 12231 B → 12379 B，
+  sha256 随之变化（原记录 `465a1df313477417644824b33306b91c96176c95a11efbbd84910d83e3321a8c` 已过期）；
+  本次复核行号未受影响（L31–32／L41／L64–66／L79–81／L125 逐行实读一致）。
 - 回复原文（仓外只读，逐字节权威）：
   - 第一轮（2026-09-21 转达）：`/home/worker/huawei-support/reply-round1-relayed-20260921.txt`，883 字节，
     `sha256 2b183aab1457e8866e65e0a67bf101d015fa58676c20fa10a472f1a6c52c5a21`
   - 第二轮（2026-09-23 转达）：`/home/worker/huawei-support/reply-round2-relayed-20260923.txt`，3119 字节，
     `sha256 27b52bec39c9b07d16e69972d51defca56f003ffe02db31ad54e5b2dd877dc81`
+- 第三轮追问草稿（仓外只读，**现已存在**）：`/home/worker/huawei-support/20260923-round3-protect-manage-vpn.md`，
+  附件 `/home/worker/huawei-support/20260923-round3-hilog-excerpt.txt`（2026-09-23 撰写；本文初稿曾记其尚未起草，现更正）。
 - 下文 §1 两个围栏代码块（语言标记 `text`）与上述两个 txt 文件**逐字节一致**（行尾统一 LF；以 `cmp` 实测）。
   原文中的错字、半角引号与行尾空格一律**原样保留**，不作清理。
 
@@ -88,7 +94,7 @@ hdc file recv -b {bundleName} "./data/storage/el2/base/diag.txt" D:\
 | 2 接口级包计数（第二轮「确实无对应接口」，可走需求流程） | L41（是否存在／可否申请接口级包计数公开接口） | v4 已登记具名缺口 `packets-identity=unavailable-no-public-per-iface-packet-api`（`docs/n2h-device-evidence-preregistration-v4-draft-20260920.md:82–83`） | 缺口获厂商**书面确认**；子选项 A 保留条件（同上 `:83`：未来出现具名 per-iface 包计数来源且经真机验证）仍**不满足**；需求流程：**用户 2026-09-23 决定不提** |
 | 第一轮建议「对 vpn-tun 的 TUN fd 做 read()/write() 计数」并与 `getIfaceRxBytes/TxBytes` 对比 | L42（平台推荐的对账做法） | 与 core 自计 `rx_bytes_to_tun` **同源**（`client/core/src/wg_device.rs:258` 字段定义、`:1148` 在 TUN 写成功分支自增）；v4:82 明禁以 WG 自计填 `delivered_frames`，`:84` 给出同源排除理由（tee 与 core 自侧计数不构成独立账本） | **不采纳**（用户 2026-09-23 同意）：fd 计数由 core 自己产生，与 `rx_bytes_to_tun` 同一来源，不能满足「独立账本」要求；字节独立口径仍由 statistics 承担 |
 | 3.1(a) 判定规则：只看 `VpnConfig.routes` 与 `trustedApplications/blockedApplications`；**不存在**「因为是 VPN 应用自身所以默认被排除」 | L64（第 1 问：自身流量不进自身 VPN 是否为平台预期行为） | 0021：未绑定探针 `mark=0x0`、走默认网络 wlan0；该会话 VPN 网络 routes 仅 `192.168.50.0/24` + 排除 `/32`，**不含** `100.108.0.0/16`；内核主表有 `vpn-tun 100.108.0.0/16` 且无默认路由（`docs/n2h-device-evidence-preregistration-v4-draft-20260920.md:25`）；本仓 `docs/n2h-posctl-probe-net-binding-20260920.md:5-11` 曾把机制标为「**推断**」 | 现象与厂商规则**一致**：目的地址未匹配 `VpnConfig.routes`，所以该报文不进 VPN；**更正**：项目此前「应用自身 socket 默认不进自身 VPN」的说法**不成立**，正确表述是「目的地址不匹配 routes 才不进」；策略路由表仍未直接观测，**保留该边界**。产品含义：未导出默认路由时，**其他应用**访问隧道网段也不会进 VPN——当前映射器 `client/entry/src/main/ets/vpnextensionability/NetBirdVpnConfig.ets:250-283`（`VpnConfig` 字面量在 `:276-281`）**只写** `addresses`/`routes`/`dnsAddresses`/`mtu` 四个字段，routes 不含隧道网段；用户决定放到**证据轮之后**再改，并需**单独登记** |
-| 3.1(b) 隧道承载 socket **必须 protect()**（「建立隧道 → protect 隧道 socket → create」，`isBlocking=true` 时不做会自环）；VPN 管理/自诊断 socket 用 `protectProcessNet()` | 原工单**未提** protect 被拦（L64 只问 `blockedApplications`／`protectProcessNet()` 是否即官方自排除机制） | run1（2026-09-13/14）hilog `permission check failed, permission:ohos.permission.MANAGE_VPN`，promise **永不 settle**（`docs/device-validation-run1-handoff-20260914.md:25-29`；`docs/native-nx-governance.md:122`）；SDK **声明无权限要求**（`/home/worker/harmonyos/command-line-tools/26.0.0.821/sdk/default/openharmony/ets/api/@ohos.net.vpnExtension.d.ts:228-275`，全文件 `@permission` 零命中）；`protectProcessNet` 的包装函数 `protectProcessNetWithBox` 在仓内**只有定义、无任何调用点**（`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:2561-2592`，SDK 调用在 `:2565`）；manifest 注释同记该冲突与声明即安装失败（`client/entry/src/main/module.json5:62-71`） | **与厂商陈述冲突**：厂商称隧道 socket「必须 protect()」，但本设备上该调用被普通第三方无法获得的受限 ACL 拦住，**逐 socket protect 仍为 `UNSAT`**；已起草第三轮追问（计划路径 `/home/worker/huawei-support/20260923-round3-protect-manage-vpn.md`；**截至本文撰写该文件尚不存在**，工单 §七 末尾 L191 记为「另行起草」）；现行替代仍为**端点路由排除**（`route-exclusion`），属 deviation，**非**原 N2 判据 pass。附：OpenHarmony 开发指南「VPN 应用仅要求 INTERNET」一说为项目侧既有理解，**本文未独立复核**（仓内无出处文件；gitee 指南页本次未取到），可复核的替代证据＝manifest 实读只声明 `INTERNET` 与 `GET_NETWORK_INFO`（`client/entry/src/main/module.json5:43-61`） |
+| 3.1(b) 隧道承载 socket **必须 protect()**（「建立隧道 → protect 隧道 socket → create」，`isBlocking=true` 时不做会自环）；VPN 管理/自诊断 socket 用 `protectProcessNet()` | 原工单**未提** protect 被拦（L64 只问 `blockedApplications`／`protectProcessNet()` 是否即官方自排除机制） | run1（2026-09-14）hilog：应用**真正调用了** protect，:27/:28/:30/:31 四条 `VPN_PROTECT_TIMEOUT|fd=26/36/39/42|boxMs=5000`，**无** settled/rejected（`/home/worker/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260913-0001/device-run-1.hilog.log`，sha256 `336bfe3c655e7f2b8bc2a4595a500dea97d7702d5b4fb6acddf610af6080770d`；该日志按应用域过滤，不含平台行，`stillPending` 零命中）；2026-09-16 全量日志（`/home/worker/harmonyos-signing/netbird-n1bdisc/diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260915-0004/hilog-d1-20260916T0805-full.log`，sha256 `93fa3ca724bb719a13b8cf05094b7f870a699d72e9eb3b7e1fab411fa181ea51`）：该次运行应用**未调用** protect（:2556 `VPN_PROTECT_DEVIATION_ARMED`；:2558/:2559/:2736/:2858 `platform_call=not-attempted`），netmanager 仍报 :2510 `Caller is not allowed, need sys permissive`、:2738/:2851 同句、:2739/:2850 `permission check failed, permission:ohos.permission.MANAGE_VPN, callerToken:537437623`——故「protect 被 `MANAGE_VPN` 校验拦截」的**因果未证实**，已证实的只有「protect 的 Promise 不返回」；SDK **声明无权限要求**（`/home/worker/harmonyos/command-line-tools/26.0.0.821/sdk/default/openharmony/ets/api/@ohos.net.vpnExtension.d.ts:228-275`，全文件 `@permission` 零命中）；`protectProcessNet` 的包装函数 `protectProcessNetWithBox` 在仓内**只有定义、无任何调用点**（`client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:2561-2592`，SDK 调用在 `:2565`）；manifest 注释同记该冲突与声明即安装失败（`client/entry/src/main/module.json5:62-71`；其中 `9568289` 为**项目内记录，无原始安装日志留存**，见 §5 第 3 条） | **与厂商「必须 protect()」陈述冲突的是 protect 不返回**（已证实：4 条 fd 的 protect Promise 5s 超时、不 settle）；「被 `MANAGE_VPN` 校验拦截」的**归因未证实**（09-16 未调用 protect 的运行同样出现该权限失败行，见上行证据），**逐 socket protect 仍为 `UNSAT`**。第三轮追问草稿**现已存在**：`/home/worker/huawei-support/20260923-round3-protect-manage-vpn.md`（附件 `/home/worker/huawei-support/20260923-round3-hilog-excerpt.txt`；工单 §七 末尾 L191 亦指向该草稿）；现行替代仍为**端点路由排除**（`route-exclusion`），属 deviation，**非**原 N2 判据 pass。附：OpenHarmony 开发指南《连接VPN》文首「说明」块载明「使用该功能需要 ohos.permission.INTERNET 权限」（<https://raw.githubusercontent.com/openharmony/docs/master/zh-cn/application-dev/network/net-vpnExtension.md>，2026-09-23 抓取核对），即该指南的权限要求**仅及 INTERNET**；仓内 manifest 实读只声明 `INTERNET` 与 `GET_NETWORK_INFO`（`client/entry/src/main/module.json5:43-61`） |
 | 3.1(c) `blockedApplications` 填自身包名＝整应用排除 | L64（第 1 问） | 代码未使用；治理不允许单独以其构成 pass（`docs/native-nx-governance.md:70`、`:133`） | 厂商确认其为**官方做法**；代价：本应用**该走隧道**的流量一并被排除、且与 `trustedApplications` **互斥**；定位＝protect 不可用时的**备选**，待第三轮答复后再决策 |
 | 3.2 `SO_MARK`／fwmark 位布局无公开文档，**不能据 mark 反推 netId** | L65（第 2 问） | 项目只输出原始十六进制/数值、不解码（`docs/n2h-posctl-socket-context-20260920.md:34`；`docs/n2h-network-context-probe-20260920.md:48`） | 既有**解读纪律获厂商确认**，无需改动 |
 | 3.3 让自身进程内某条 socket 走隧道＝`bindSocket` 路径 | L66（第 3 问） | 提交 `2962c20`（`feat(diag): bind the posctl probe to the vpn network`，在 HEAD `fd5f71c` 祖先链上）；0022 `N2H_POSCTL_BIND_NET\|…\|result=bound`（`docs/n2h-device-evidence-preregistration-v4-draft-20260920.md:24`） | **E-1 所用方法即厂商认可路径**（从 `getAllNets()`／`getConnectionProperties()` 认出 `interfaceName = vpn-tun` 的网络再 `bindSocket`） |
@@ -100,7 +106,7 @@ hdc file recv -b {bundleName} "./data/storage/el2/base/diag.txt" D:\
 - **v4 不修订**：两轮回复不改变 v4 已登记的判据、缺口注记与字节口径；v4 正文与仓B 登记件 sha256 均与 §0 所列一致（本文未触碰两者）。
 - **正式状态仍为 `n2h-inconclusive`**：本文不构成任何门结论，也不解除任何既有义务。
 - **三项缺口不变**：①`wg_peer` 点对点直连；②服务端投递回执；③计数同源标定。
-- **新增两项发现**：①**protect 冲突**（厂商称隧道 socket 必须 `protect()`，实测被 `ohos.permission.MANAGE_VPN` 拦住且永不 settle）；②**隧道网段未在 routes 中声明**（`VpnConfig.routes` 不含 `100.108.0.0/16`，故其他应用访问隧道网段同样不进 VPN）。
+- **新增两项发现**：①**protect 不返回**（厂商称隧道 socket 必须 `protect()`；实测 run1 的 4 条 fd 全部 5s `VPN_PROTECT_TIMEOUT`、Promise 永不 settle——**已证实**；「被 `ohos.permission.MANAGE_VPN` 校验拦截」的归因**未证实**，见 §2 的 3.1(b) 行与 §5 第 1 条）；②**隧道网段未在 routes 中声明**（`VpnConfig.routes` 不含 `100.108.0.0/16`，故其他应用访问隧道网段同样不进 VPN）。
 
 ## 4. 2026-09-23 用户决定
 
@@ -116,3 +122,11 @@ hdc file recv -b {bundleName} "./data/storage/el2/base/diag.txt" D:\
 4. **隧道网段路由放到证据轮之后**再改（并需单独登记）。
 
 真机部分（安装、复现、取证）**待用户返回后进行**；在那之前不执行任何设备操作。
+
+## 5. 更正记录（2026-09-23）
+
+本小节列出 2026-09-23 复核后对本文初稿及既有记录的更正口径；除本节所列外，本文其余判断与 v4 正文不变。
+
+1. **「protect 被 `MANAGE_VPN` 校验拦截」的因果未证实**。初稿把 run1 的 netmanager 权限失败行与 protect 不返回写成了因果；复核后（证据与行号见 §2 的 3.1(b) 行）：2026-09-16 全量日志中应用**未调用** protect（`hilog-d1-20260916T0805-full.log`:2556 `VPN_PROTECT_DEVIATION_ARMED`；:2558/:2559/:2736/:2858 `platform_call=not-attempted`），netmanager 仍报 :2739/:2850 `permission check failed, permission:ohos.permission.MANAGE_VPN, callerToken:537437623`。因此**已证实的只有「protect 的 Promise 不返回」**，MANAGE_VPN 归因留待第三轮答复。
+2. **`docs/device-validation-run1-handoff-20260914.md:29` 的记述与原始日志不符**。该行称「实测 5 个 fd 全部 `VPN_PROTECT_TIMEOUT|...|stillPending=true`」；原始日志实为 **4 条** `VPN_PROTECT_TIMEOUT`（`device-run-1.hilog.log`:27/:28/:30/:31，fd=26/36/39/42，boxMs=5000），且**无 `stillPending` 字段**（全文件 `stillPending` 与 settled/rejected 均零命中）。该 handoff 文件本次**未修改**，此处仅登记更正。
+3. **「声明 MANAGE_VPN 即安装失败（`9568289`）」无原始依据**。该结论仅见于项目自身记录（`docs/native-nx-governance.md:122`、`docs/n2h-device-evidence-preregistration-draft-20260917.md:36`、`client/entry/src/main/module.json5:66` 注释），仓内外**均无原始安装日志留存**；本文凡引用该处（§2 的 3.1(b) 行 manifest 注释）均标注为**「项目内记录，无原始安装日志留存」**，不构成独立证据。
