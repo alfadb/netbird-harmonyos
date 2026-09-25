@@ -67,7 +67,10 @@ const SHIM_TYPES: Record<string, string[]> = {
     'DnsPlatformNetAddress',
     // N2-H I2 stun caliber (§13.13): same erased names, same reason
     'StunDerivationResult', 'StunUriEntry', 'StunParseResult', 'StunEndpoint'],
-  NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig'],
+  NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig',
+    // S1 diag switch (2026-09-23): the erased outcome interface the real
+    // extension imports alongside withTunnelSubnetRoute
+    'TunnelSubnetRouteOutcome'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };
 

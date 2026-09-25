@@ -5,7 +5,8 @@ import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
-  loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions } from './NetBirdVpnConfig';
+  loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
+  TunnelSubnetRouteOutcome, withTunnelSubnetRoute } from './NetBirdVpnConfig';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -106,6 +107,35 @@ const N2H_ACCESS_ENOENT: string = '13900002';
 // §5.1 arm-option defaults (the file may override them; core re-validates).
 const N2H_POSCTL_PORT_DEFAULT: number = 40001;
 const N2H_PROBE_WAIT_MS_DEFAULT: number = 800;
+
+// S1-S4 diagnostic switches (2026-09-23, REAL-DEVICE diagnostic rounds only):
+// four ADDITIONAL keys of the SAME `netbird-n2h-arm` ticket EntryAbility writes
+// from the non-secret `n2h_arm_options` want parameter (and deletes on every
+// launch without it — the structural default-OFF guarantee). They are read
+// SEPARATELY and EARLIER than the arm options (startConnectorThenCreate: S1/S2
+// must be final before create()), they are NEVER forwarded to the core (the
+// arm opts document below is built field by field, so an extra ticket key has
+// no path into it), and each one is enabled ONLY by a literal JSON boolean
+// true. An ABSENT key is off and prints nothing; a key that is present with a
+// wrong type is off and prints exactly one
+// N2H_DIAG_OPTION_IGNORED|key=…|reason=… line (a ticket that says
+// "diag_tunnel_route":"true" must never be read as armed). No switch ever
+// changes a gate: they only add a route (S1), add one blocked-app entry (S2),
+// fire one diagnostic platform call (S3) or withhold one diagnostic probe
+// option (S4) — every result is `diag=true|is_evidence=false`.
+const N2H_DIAG_TUNNEL_ROUTE_KEY: string = 'diag_tunnel_route';
+const N2H_DIAG_BLOCKED_SELF_KEY: string = 'diag_blocked_self';
+const N2H_DIAG_PROTECT_PROCESS_NET_KEY: string = 'diag_protect_process_net';
+const N2H_DIAG_POSCTL_UNBOUND_KEY: string = 'diag_posctl_unbound';
+// The ONLY reason token of the S1-S4 ignored-key line: the key was present in
+// the ticket document but its value was not a JSON boolean (string / number /
+// null / object). Never printed for an absent key, never for a boolean false.
+const N2H_DIAG_OPTION_IGNORED_REASON: string = 'not-boolean';
+// This app's own bundle name, needed by the S2 diagnostic switch
+// (blockedApplications). Deliberately a LOCAL constant: the same literal
+// exists in the UI half (EntryAbility.ets BUNDLE_NAME, Index.ets) and the
+// extension must not import a UI page/ability module for a name.
+const SELF_BUNDLE_NAME: string = 'cn.alfadb.netbird';
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -448,6 +478,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // only reached after an accepted create); it is forwarded as "no
   // generation", never fabricated into a value.
   private n2hAcceptedExclusionGeneration: number = -1;
+  // S1-S4 diagnostic switches (see the constants above). Read ONCE per start
+  // flow from the arm ticket (readDiagSwitches) and defaulted to false here,
+  // so an instance that never read a ticket — or read an absent/unreadable/
+  // malformed one — is inert in every path below. Nothing else writes them.
+  private diagTunnelRoute: boolean = false;
+  private diagBlockedSelf: boolean = false;
+  private diagProtectProcessNet: boolean = false;
+  private diagPosctlUnbound: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -554,6 +592,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
         this.requestId);
     }
+
+    // S1/S2 (default off): the diagnostic switches of the SAME arm ticket must
+    // be final BEFORE any VpnConfig is built in this flow, so they are read
+    // here — early, on the SAME file the arm hook reads later — and never from
+    // the want (Index.buildWant() does not forward launcher parameters). The
+    // arm hook's own options read, the keys it forwards to the core and every
+    // pre-existing path stay untouched; these four keys never leave this
+    // process. A missing ticket is the normal case: everything stays off and
+    // NOTHING is logged.
+    this.readDiagSwitches();
 
     let setupKey: string;
     let device: DeviceConfigFile;
@@ -774,6 +822,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         : net.default_route.reason;
     }
     merged = gateDefaultRoutes(merged, gateAllowed);
+    // S1 (diag, default off): the tunnel subnet route is grafted AFTER the
+    // default-route gate (it is never an isDefaultRoute entry, so the gate can
+    // never swallow it) and BEFORE the generation marker / route rows / the
+    // fail-closed validation gate below, so all three describe THIS list.
+    if (this.diagTunnelRoute) {
+      merged = this.injectDiagTunnelRoute(merged, 'initial');
+    }
     hilog.info(DOMAIN, TAG,
       'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
       'defaultRoutesInConfig=%{public}d',
@@ -823,7 +878,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
-    const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
+    const config: vpnExtension.VpnConfig =
+      buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('initial'));
     // N8: stash the managed route set actually merged into the platform
     // VpnConfig, for the initial-create ACK once create() + the WG feed
     // succeed (settleCreate). Only a real core snapshot qualifies — the
@@ -1367,8 +1423,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // else (no hit, a name collision, a rejected API) keeps the key ABSENT
     // (the probe stays byte-identical) and one marker carries the reason and
     // the error CODE token — never an object, never an exception message.
+    //
+    // S4 (diag, default off, 2026-09-23): `diag_posctl_unbound` withholds that
+    // option DELIBERATELY — the probe socket then stays on the process's
+    // default network, which is the control arm for the huawei claim 「不进
+    // 隧道只由 routes/应用列表决定」. One marker replaces nothing: the
+    // UNAVAILABLE line below is NOT printed on this branch (the resolution
+    // result is unused, and printing "unavailable" would be a false reason),
+    // and the core records its existing BIND_NET result=not-requested path.
+    // The found/not-found branches are otherwise untouched.
     const vpnResolution: VpnNetIdResolution = resolveVpnTunNetId();
-    if (vpnResolution.found) {
+    if (this.diagPosctlUnbound) {
+      hilog.info(DOMAIN, TAG,
+        'N2H_DIAG_POSCTL_UNBOUND|requestId=%{public}s|diag=true|is_evidence=false',
+        this.requestId);
+    } else if (vpnResolution.found) {
       opts.probe_net_id = vpnResolution.netId;
     } else {
       hilog.warn(DOMAIN, TAG,
@@ -1477,6 +1546,100 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N2H_ARM_FILE_NAME for the why). Never a fixed absolute path again.
   private n2hArmFilePath(): string {
     return `${this.context.filesDir}/${N2H_ARM_FILE_NAME}`;
+  }
+
+  // S1-S4: read the four diagnostic switches out of the arm ticket. Called
+  // ONCE per start flow, BEFORE any VpnConfig is built. Never throws: a
+  // missing / unreadable / empty / malformed ticket leaves every switch OFF
+  // and prints nothing — the ticket's ABSENCE is the documented default (not
+  // an anomaly: EntryAbility deletes a leftover ticket on every launch without
+  // the parameter). Only a key PRESENT with a non-boolean value is logged, by
+  // readDiagSwitch.
+  private readDiagSwitches(): void {
+    this.diagTunnelRoute = false;
+    this.diagBlockedSelf = false;
+    this.diagProtectProcessNet = false;
+    this.diagPosctlUnbound = false;
+    let text: string = '';
+    try {
+      text = fs.readTextSync(this.n2hArmFilePath()).trim();
+    } catch (error) {
+      return; // no ticket / unreadable: structural default, no log
+    }
+    if (text.length === 0) {
+      return; // empty ticket: carries no key at all
+    }
+    let doc: Record<string, Object> | null = null;
+    try {
+      doc = JSON.parse(text) as Record<string, Object>;
+    } catch (error) {
+      return; // malformed document: every key unreadable → off, no log
+    }
+    if (doc === null) {
+      return; // JSON 'null' parses but has no keys
+    }
+    this.diagTunnelRoute = this.readDiagSwitch(doc, N2H_DIAG_TUNNEL_ROUTE_KEY);
+    this.diagBlockedSelf = this.readDiagSwitch(doc, N2H_DIAG_BLOCKED_SELF_KEY);
+    this.diagProtectProcessNet = this.readDiagSwitch(doc, N2H_DIAG_PROTECT_PROCESS_NET_KEY);
+    this.diagPosctlUnbound = this.readDiagSwitch(doc, N2H_DIAG_POSCTL_UNBOUND_KEY);
+  }
+
+  // ONE switch key of the ticket document: literal boolean true = ON. An
+  // absent key is OFF and SILENT (JSON has no `undefined`, so an absent key
+  // reads as undefined; a JSON `null` is NOT absent and takes the ignored
+  // branch below). A present non-boolean value is OFF and prints the one
+  // ignored-key line — the key NAME and the fixed reason token only, never the
+  // value, which may be arbitrary operator text. An explicit boolean `false`
+  // is a valid, correctly typed OFF and stays silent: the line exists to
+  // expose a WRONG TYPE, not to report an intentional disable.
+  private readDiagSwitch(doc: Record<string, Object>, key: string): boolean {
+    const raw: Object | undefined = doc[key];
+    if (raw === undefined) {
+      return false;
+    }
+    if (typeof raw === 'boolean') {
+      return raw === true;
+    }
+    hilog.warn(DOMAIN, TAG,
+      'N2H_DIAG_OPTION_IGNORED|key=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
+      key, N2H_DIAG_OPTION_IGNORED_REASON);
+    return false;
+  }
+
+  // S1 (diag, default off): merge the tunnel's own subnet into `config.routes`
+  // BEFORE the generation/route logs and the fail-closed validation gate (both
+  // legs), so the announced route count and the validation gate cover exactly
+  // the list that is submitted. The pure helper decides
+  // (withTunnelSubnetRoute); this method only logs the outcome — one line per
+  // leg, result=added|skipped plus the reason token, network='' when no
+  // network could be derived. Never a gate: it can only append a non-default,
+  // non-excluded route.
+  private injectDiagTunnelRoute(config: VpnTunnelConfig, leg: string): VpnTunnelConfig {
+    const outcome: TunnelSubnetRouteOutcome = withTunnelSubnetRoute(config);
+    hilog.info(DOMAIN, TAG,
+      'N2H_DIAG_TUNNEL_ROUTE|requestId=%{public}s|addr=%{public}s|prefix=%{public}d|' +
+      'network=%{public}s|leg=%{public}s|result=%{public}s|reason=%{public}s|' +
+      'diag=true|is_evidence=false',
+      this.requestId, config.tunnelAddress, config.tunnelPrefixLength, outcome.network, leg,
+      outcome.added ? 'added' : 'skipped', outcome.reason);
+    return outcome.config;
+  }
+
+  // S2 (diag, default off): the ONE place the blocked-application list is
+  // decided — this app's own bundle name, exactly one entry, ONLY when the
+  // switch is on; otherwise undefined, which keeps VpnConfig.blockedApplications
+  // ABSENT (never an empty array). trustedApplications is never set (the two
+  // lists are mutually exclusive per the SDK); the platform VpnConfig builder
+  // writes the field only for a non-empty list.
+  private diagBlockedApplicationList(leg: string): string[] | undefined {
+    if (!this.diagBlockedSelf) {
+      return undefined;
+    }
+    hilog.info(DOMAIN, TAG,
+      'N2H_DIAG_BLOCKED_APPS|requestId=%{public}s|bundle=%{public}s|count=1|leg=%{public}s|' +
+      'diag=true|is_evidence=false',
+      this.requestId, SELF_BUNDLE_NAME, leg);
+    return [SELF_BUNDLE_NAME];
   }
 
   // N2-H I5a (§13.15): probe the arm control file WITHOUT hiding why the arm
@@ -1792,6 +1955,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         ? net.default_route.allowed
         : false;
       merged = gateDefaultRoutes(merged, gateAllowed);
+      // S1 (diag, default off) on the RECREATE leg too: the rebuilt config
+      // must carry the tunnel subnet route whenever the first one did, or the
+      // recreate would silently DROP it (the platform VpnConfig is fully
+      // replaced). Same placement as the initial leg: after the gate, before
+      // the generation marker / rows / validation gate below.
+      if (this.diagTunnelRoute) {
+        merged = this.injectDiagTunnelRoute(merged, 'recreate');
+      }
       // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
       // violates the SDK RouteInfo contract must never reach create().
       // Failing BEFORE the destroy leg keeps the current generation intact
@@ -1843,7 +2014,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       stage = 'create';
       const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
       this.connection = conn;
-      const config: vpnExtension.VpnConfig = buildPlatformVpnConfig(merged);
+      const config: vpnExtension.VpnConfig =
+        buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'));
       const fd: number = await this.createConnectionBounded(conn, config);
 
       // 4. the same fd contract as the initial create
@@ -2110,6 +2282,41 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         accepted: false,
         reason: 'create-resolved-invalid-or-not-open'
       };
+    }
+
+    // S3 (diag, default off): ONE fire-and-forget protectProcessNet() call per
+    // session, issued here — AFTER the acceptance anchor above (so a create()
+    // that was not accepted never calls it) and BEFORE the fail-closed
+    // per-socket protect gate below (so the platform's whole-process
+    // exclusion, if it works, is in place for the outer socket gate that
+    // follows). The latch (processProtectAttempted) makes it once-only even
+    // across a recreate that settles again; the result is logged by
+    // protectProcessNetWithBox and changes NO gate — a rejection, a throw or
+    // the box expiring is not a failure of this flow (the per-socket gate
+    // below is still the deciding one).
+    //
+    // WARNING (device-verified 2026-09-14, see protectSocketWithBox): the
+    // platform call may WEDGE this extension thread outright — protect() and
+    // protectProcessNet() have both been observed never to settle, with the
+    // box unable to resume. Therefore this call is deliberately NOT routed
+    // through the protect-deviation short-circuit: the switch exists to make
+    // the REAL platform call on a diagnostic round. It is fire-and-forget, so
+    // a wedged call blocks this async flow (never the created VPN's own
+    // threads) — arm it only on an attended diagnostic round.
+    if (this.diagProtectProcessNet && !this.processProtectAttempted) {
+      const processConnection: vpnExtension.VpnConnection | undefined = this.connection;
+      if (processConnection !== undefined) {
+        this.processProtectAttempted = true;
+        this.protectProcessNetWithBox(processConnection).catch((error: Error): void => {
+          // Last resort only: the box inside never rejects (every outcome is
+          // caught there). An unexpected rejection must not surface as an
+          // unhandled rejection in the extension process.
+          hilog.warn(DOMAIN, TAG,
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=unexpected-rejection|' +
+            'summary=%{public}s|switch=s3|diag=true|is_evidence=false',
+            this.requestId, safeError(error));
+        });
+      }
     }
 
     // Fail-closed protect gate: the tunnel-outer socket must be protected
@@ -2556,35 +2763,60 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return outcome;
   }
 
-  // Bounded process-level protect (protectProcessNet). Same house rule: every
-  // ArkTS wait is bounded; expiry = failure and the per-fd path takes over.
+  // Bounded process-level protect (protectProcessNet, API 22+ / SDK
+  // @ohos.net.vpnExtension.d.ts:275 `protectProcessNet(): Promise<void>`).
+  // Same house rule: every ArkTS wait is bounded; expiry = the platform call
+  // did not answer and the per-fd path takes over. Since 2026-09-23 this
+  // wrapper has exactly ONE call site: the S3 diagnostic switch
+  // (settleCreate), so every line below carries the fixed
+  // `switch=s3|diag=true|is_evidence=false` tail and the result NEVER changes
+  // a gate — it is recorded and nothing else.
   private async protectProcessNetWithBox(connection: vpnExtension.VpnConnection): Promise<boolean> {
     const t0: number = Date.now();
+    // The box timer is NOT cancelled when the platform call settles (the
+    // original shape), so its callback can run up to 5 s AFTER a resolved /
+    // rejected / thrown outcome. `raceSettled` makes the timeout line mean
+    // "the box decided this race" instead of "a timer went off": without it a
+    // RESOLVED call would print a second, false `result=timeout` line 5 s
+    // later — indistinguishable from a real wedge in the device evidence, and
+    // reachable now that S3 actually calls this wrapper. The race outcome
+    // itself is unchanged (the box still resolves false; a settled race simply
+    // ignores it).
+    let raceSettled: boolean = false;
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       try {
         connection.protectProcessNet().then((): void => {
+          raceSettled = true;
           hilog.info(DOMAIN, TAG,
-            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=resolved|elapsedMs=%{public}d',
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=resolved|elapsedMs=%{public}d|' +
+            'switch=s3|diag=true|is_evidence=false',
             this.requestId, Date.now() - t0);
           resolve(true);
         }).catch((error: Error): void => {
+          raceSettled = true;
           hilog.warn(DOMAIN, TAG,
-            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=rejected|elapsedMs=%{public}d|summary=%{public}s',
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=rejected|elapsedMs=%{public}d|' +
+            'summary=%{public}s|switch=s3|diag=true|is_evidence=false',
             this.requestId, Date.now() - t0, safeError(error));
           resolve(false);
         });
       } catch (error) {
+        raceSettled = true;
         hilog.warn(DOMAIN, TAG,
-          'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=throw|summary=%{public}s',
+          'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=throw|summary=%{public}s|' +
+          'switch=s3|diag=true|is_evidence=false',
           this.requestId, safeError(error as Error));
         resolve(false);
       }
     });
     const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       setTimeout((): void => {
-        hilog.warn(DOMAIN, TAG,
-          'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=timeout|boxMs=%{public}d',
-          this.requestId, PROTECT_BOX_MS);
+        if (!raceSettled) {
+          hilog.warn(DOMAIN, TAG,
+            'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=timeout|boxMs=%{public}d|' +
+            'switch=s3|diag=true|is_evidence=false',
+            this.requestId, PROTECT_BOX_MS);
+        }
         resolve(false);
       }, PROTECT_BOX_MS);
     });

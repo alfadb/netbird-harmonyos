@@ -43,8 +43,15 @@
 //                     globalThis.__NB_CREATE_FD (default 99) and records every
 //                     submitted config in globalThis.__NB_CREATED_CONFIGS;
 //                     destroy()/protect() resolve (counted in __NB_DESTROYED /
-//                     __NB_PROTECTED). This is what lets the recreate leg run
-//                     to completion on the host.
+//                     __NB_PROTECTED). protectProcessNet() (S3 diag switch,
+//                     API 22+, SDK d.ts:275) is driven by
+//                     globalThis.__NB_PROCESS_PROTECT_MODE —
+//                     'resolved' (default) / 'rejected' (Promise.reject) /
+//                     'throw' (SYNCHRONOUS throw) / 'never' (a promise that
+//                     never settles, i.e. the device-observed wedge) — and
+//                     every call is counted in __NB_PROCESS_PROTECT_CALLS.
+//                     This is what lets the recreate leg AND the settleCreate
+//                     S3 call site run to completion on the host.
 //   - libnetbird_core.so -> the NAPI seam of the paths under test, each reading
 //                     a per-test global:
 //                       __NB_FD_STATUS   {open,errno} for core.fd_status(fd)
@@ -54,6 +61,11 @@
 //                     connector_stop / connector_wg_socket_feed /
 //                     connector_tun_fd_feed / connector_route_set_applied
 //                     answer success shapes (the ACK lands in __NB_ACK).
+//                     Since 2026-09-23 the three management-socket seams of
+//                     the REAL startConnectorThenCreate — mgmt_socket_open
+//                     (__NB_MGMT_FD, default 21), connector_start_with_socket
+//                     and connector_socket_feed — are functional too, because
+//                     the S1/S2 groups drive the initial leg end-to-end.
 //                     Any core function the driven paths do NOT call stays
 //                     undefined: calling it is a loud TypeError, never a
 //                     silently passing stub.
@@ -195,6 +207,14 @@ const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_PROTECTED = (g().__NB_PROTECTED || 0) + 1;\n' +
   '    return Promise.resolve();\n' +
   '  }\n' +
+  '  protectProcessNet() {\n' +
+  '    g().__NB_PROCESS_PROTECT_CALLS = (g().__NB_PROCESS_PROTECT_CALLS || 0) + 1;\n' +
+  '    const mode = g().__NB_PROCESS_PROTECT_MODE || "resolved";\n' +
+  '    if (mode === "throw") { throw new Error("process-protect-throw"); }\n' +
+  '    if (mode === "rejected") { return Promise.reject(new Error("process-protect-rejected")); }\n' +
+  '    if (mode === "never") { return new Promise(() => {}); }\n' +
+  '    return Promise.resolve();\n' +
+  '  }\n' +
   '}\n' +
   'export default {\n' +
   '  createVpnConnection: () => {\n' +
@@ -299,6 +319,17 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  connector_status: () => j(g().__NB_STATUS, {}),\n' +
   '  connector_network_config: () =>\n' +
   '    j(g().__NB_NETCFG, { available: false, reason: "no-network-map" }),\n' +
+  // S1/S2 initial-leg drive (2026-09-23): the REAL startConnectorThenCreate is
+  // driven end-to-end for the two config switches, so the three management
+  // socket seams it walks are functional here. All three are additive — no
+  // pre-existing group reached them (the arm/config groups drive the private
+  // build/arm methods, never the start flow), so nothing else changes shape.
+  '  mgmt_socket_open: () =>\n' +
+  '    JSON.stringify({ fd: typeof g().__NB_MGMT_FD === "number" ? g().__NB_MGMT_FD : 21,\n' +
+  '      bind_rc: 0, bind_errno: 0 }),\n' +
+  '  connector_start_with_socket: () =>\n' +
+  '    JSON.stringify({ started: true, state: "running" }),\n' +
+  '  connector_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
   '  connector_stop: () => JSON.stringify({ already_stopped: true, state: "stopped" }),\n' +
   '  connector_wg_socket_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
   '  connector_tun_fd_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +

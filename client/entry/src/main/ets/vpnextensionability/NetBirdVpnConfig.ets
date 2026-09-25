@@ -243,11 +243,154 @@ export function gateDefaultRoutes(config: VpnTunnelConfig, allowed: boolean): Vp
   };
 }
 
+// ---------------------------------------------------------------------------
+// S1 DIAGNOSTIC SWITCH (default OFF): the tunnel's own subnet as an explicit
+// managed route.
+//
+// Huawei support (docs/n2h-huawei-support-replies-20260923.md §3.1(a), row
+// 3.1(a)) states that whether a packet enters the VPN is decided ONLY by
+// matching VpnConfig.routes (+ the trusted/blocked application lists) — there
+// is NO implicit "the VPN app's own traffic / the tunnel subnet is handled
+// anyway" rule. The on-device session of 0021 therefore sent tunnel-subnet
+// traffic over the physical network: the submitted route list carried only
+// 192.168.50.0/24 + the /32 exclusions, never 100.108.0.0/16 (the kernel main
+// table had `vpn-tun 100.108.0.0/16` without a default route). This helper
+// derives exactly that one route from the tunnel address + prefix already
+// present in the config (100.108.144.165/16 -> 100.108.0.0/16).
+//
+// Pure function, no side effects, never throws: the caller logs the outcome
+// (`N2H_DIAG_TUNNEL_ROUTE|…`) and the returned config is the only input to
+// the downstream route logs / validation gate. It can only ADD a non-default,
+// non-excluded route — it never removes, re-orders or relaxes an existing
+// entry, and it is never a gate pass.
+//
+// The entry is skipped (with a reason token, never silently) when:
+//   - the tunnel address is not a bare IPv4 literal (IPv6 / hostname /
+//     'IPv4:port' dial shape / empty)   -> 'not-ipv4' | 'invalid-address',
+//   - the prefix is 32 (a host route for the tunnel address itself, not a
+//     subnet)                            -> 'prefix-32',
+//   - the prefix is 0 or out of [1,32] (0.0.0.0/0 would be a default route,
+//     which this entry's contract forbids) -> 'prefix-out-of-range',
+//   - an entry with the same destination AND prefix is already present
+//     (the tunnel network may already arrive from the core snapshot)
+//                                        -> 'duplicate'.
+export interface TunnelSubnetRouteOutcome {
+  config: VpnTunnelConfig;
+  added: boolean;
+  // The computed network address, '' when the address/prefix could not yield
+  // one (log truth only — never used to build a route in that case).
+  network: string;
+  // 'none' when added; otherwise one of the skip tokens above.
+  reason: string;
+}
+
+// Strict dotted-quad parse (identical acceptance to the endpoint module's
+// private isIPv4LiteralStr: 4 octets, 1-3 digits each, value <= 255).
+// Returns [] for anything else. Local copy because that helper is not
+// exported and this module must not grow an import cycle.
+function parseIpv4Octets(address: string): number[] {
+  const parts: string[] = address.split('.');
+  if (parts.length !== 4) {
+    return [];
+  }
+  const octets: number[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part: string = parts[i];
+    if (part.length === 0 || part.length > 3) {
+      return [];
+    }
+    for (let c = 0; c < part.length; c++) {
+      const code: number = part.charCodeAt(c);
+      if (code < 0x30 || code > 0x39) {
+        return [];
+      }
+    }
+    const value: number = Number(part);
+    if (value > 255) {
+      return [];
+    }
+    octets.push(value);
+  }
+  return octets;
+}
+
+// Network address of `octets` under `prefix` (0..32), dotted-quad rendered.
+function ipv4NetworkAddress(octets: number[], prefix: number): string {
+  const value: number =
+    ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+  const mask: number = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  const network: number = (value & mask) >>> 0;
+  return `${(network >>> 24) & 0xff}.${(network >>> 16) & 0xff}.` +
+    `${(network >>> 8) & 0xff}.${network & 0xff}`;
+}
+
+export function withTunnelSubnetRoute(config: VpnTunnelConfig): TunnelSubnetRouteOutcome {
+  const skipped = (network: string, reason: string): TunnelSubnetRouteOutcome => {
+    return { config: config, added: false, network: network, reason: reason };
+  };
+  const address: string = config.tunnelAddress;
+  const prefix: number = config.tunnelPrefixLength;
+  // A 'IPv4:port' dial shape or a real IPv6 literal both carry ':' — neither
+  // is a tunnel ADDRESS; the split below would misread the first as a subnet.
+  if (address.indexOf(':') >= 0) {
+    return skipped('', 'not-ipv4');
+  }
+  const octets: number[] = parseIpv4Octets(address);
+  if (octets.length !== 4) {
+    return skipped('', 'invalid-address');
+  }
+  if (!Number.isInteger(prefix) || prefix > 32 || prefix < 1) {
+    return skipped('', 'prefix-out-of-range');
+  }
+  if (prefix === 32) {
+    return skipped(ipv4NetworkAddress(octets, prefix), 'prefix-32');
+  }
+  const network: string = ipv4NetworkAddress(octets, prefix);
+  for (let i = 0; i < config.routes.length; i++) {
+    if (config.routes[i].destination === network &&
+      config.routes[i].prefixLength === prefix) {
+      return skipped(network, 'duplicate');
+    }
+  }
+  const route: VpnRouteConfig = {
+    destination: network,
+    prefixLength: prefix,
+    // Same gateway/interface shape as every managed route (applyNetworkConfig)
+    // and the MR4-verified literals: explicitly non-default, non-excluded.
+    gateway: address,
+    hasGateway: true,
+    isDefaultRoute: false,
+    isExcludedRoute: false
+  };
+  const routes: VpnRouteConfig[] = config.routes.slice();
+  routes.push(route);
+  const withRoute: VpnTunnelConfig = {
+    tunnelAddress: config.tunnelAddress,
+    tunnelPrefixLength: config.tunnelPrefixLength,
+    interfaceName: config.interfaceName,
+    routes: routes,
+    dnsServers: config.dnsServers,
+    mtu: config.mtu,
+    peerEndpoint: config.peerEndpoint
+  };
+  return { config: withRoute, added: true, network: network, reason: 'none' };
+}
+
 // Maps the client configuration onto the platform VpnConfig exactly in the
 // spike-verified MR4 field shapes. Non-excluded routes omit isExcludedRoute
 // (platform default false) to stay byte-shape identical to the verified MR4
 // literals; excluded routes set it explicitly.
-export function buildPlatformVpnConfig(config: VpnTunnelConfig): vpnExtension.VpnConfig {  const address: vpnExtension.LinkAddress = {
+//
+// S2 DIAGNOSTIC SWITCH (default OFF): `blockedApplications` is written ONLY
+// when the caller passes a non-empty list — an absent switch leaves the field
+// ABSENT (never an empty array), which keeps the submitted document
+// byte-shape identical to the pre-switch mapper output. `trustedApplications`
+// is never set (the two lists are mutually exclusive per the SDK); the
+// Huawei-supported use is the SELF bundle name, see the caller
+// (NetBirdVpnExtensionAbility.diagBlockedApplicationList).
+export function buildPlatformVpnConfig(config: VpnTunnelConfig,
+  blockedApplications?: string[]): vpnExtension.VpnConfig {
+  const address: vpnExtension.LinkAddress = {
     address: { address: config.tunnelAddress, family: 1 },
     prefixLength: config.tunnelPrefixLength
   };
@@ -279,5 +422,9 @@ export function buildPlatformVpnConfig(config: VpnTunnelConfig): vpnExtension.Vp
     dnsAddresses: config.dnsServers,
     mtu: config.mtu
   };
+  // S2 (see the doc comment): present ONLY when a non-empty list was passed.
+  if (blockedApplications !== undefined && blockedApplications.length > 0) {
+    vpnConfig.blockedApplications = blockedApplications;
+  }
   return vpnConfig;
 }
