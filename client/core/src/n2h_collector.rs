@@ -2980,12 +2980,24 @@ fn build_posctl(win: &Arc<Window>, notes: &mut Vec<String>) -> Vec<PosctlProbe> 
             let nonce = crate::n2h::fresh_nonce_hex()
                 .unwrap_or_else(|_| "000000000000000000000000".to_string());
             let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
+            // 2026-09-26 (0034): registered BEFORE `send_posctl`, not after it
+            // returned — the a2b frame can be routed into vpn-tun by that very
+            // `send_to`, and the TUN reader scans it then: R0' lost the frame
+            // whose marker was registered a beat too late. A failed send now
+            // leaves a fresh-nonce residue that nothing on the wire can match;
+            // the record still reports `sent=false`, exactly as before.
+            // 2026-09-26 (0034): registered BEFORE `send_posctl`, not after it
+            // returned — the a2b frame can be routed into vpn-tun by that very
+            // `send_to`, and the TUN reader scans it then: R0' lost the frame
+            // whose marker was registered a beat too late. A failed send now
+            // leaves a fresh-nonce residue that nothing on the wire can match;
+            // the record still reports `sent=false`, exactly as before.
+            win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
             // 2026-09-20 diag-only: the shell-resolved VPN netId rides the arm
             // options; `None` keeps the probe byte-identical to the pre-binding
             // behavior (the bind attempt itself is recorded either way).
             match send_posctl(dst, &id, win.options.probe_net_id) {
                 Ok((_n, src)) => {
-                    win.tee.register(&id, WireMarker::Ascii(id.clone()), true);
                     out.push(PosctlProbe {
                         probe_id: id,
                         direction: "a2b".into(),
@@ -4000,6 +4012,17 @@ fn send_protect_probes(
             .unwrap_or_else(|_| "000000000000000000000000".to_string());
         let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
         let qname = protect_probe_qname(&id);
+        // Design §4.1's ordering, and the reason 0034's probes were invisible:
+        // the entry must be live BEFORE the datagram can leave, or the TUN
+        // reader scans the frame against a table that does not carry its marker
+        // yet (the pre-fix register ran after the WHOLE reply wait). Registering
+        // first also decides the send-failure arm: the id is a fresh 24-hex
+        // nonce, so a residue left by a send that never left the process can
+        // only be matched by a frame carrying that nonce — the record still
+        // reports `sent=false` with the real errno, and the marker semantics
+        // (positive for the control arm, negative for the protect arm) are
+        // unchanged.
+        win.tee.register(&id, WireMarker::Ascii(protect_probe_wire_label(&id)), positive);
         // The round trip honours the same two bounds the burst loop does, so
         // its ≤1500 ms wait can never outlive the window.
         let stop = || win.disarmed() || win.clock.mono_ms() >= win.state.lock_poison().deadline_mono;
@@ -4009,7 +4032,6 @@ fn send_protect_probes(
             Err(errno) => (0, errno),
         };
         if send_errno == 0 {
-            win.tee.register(&id, WireMarker::Ascii(protect_probe_wire_label(&id)), positive);
             sent += 1;
         } else {
             notes.push(format!(
@@ -8171,6 +8193,53 @@ mod tests {
         (addr, handle)
     }
 
+    /// The fixture's TUN READ thread (0034's shape): every datagram the probe
+    /// really put on the wire is wrapped in the IPv4/UDP frame the collector's
+    /// own reader would get from vpn-tun and handed to the tee THE MOMENT it is
+    /// read — i.e. while the probe that sent it is still running. The socket is
+    /// bound by the caller first, because the window under test must be armed
+    /// with its address before the reader thread can hold the window's tee.
+    ///
+    /// `inject` bounds how many leading datagrams are scanned (per-probe
+    /// judgement is judged on the first one alone); `echo` mirrors the query
+    /// back like [`spawn_dns_echo_resolver`]. The scan always happens BEFORE
+    /// that echo, so an answered probe can never hide an ordering defect.
+    /// Returns every datagram it read, verbatim: `build_dns_a_query`'s bytes.
+    fn spawn_tun_reader(
+        sock: std::net::UdpSocket,
+        tee: Arc<CollectorTee>,
+        n: usize,
+        inject: usize,
+        echo: bool,
+    ) -> std::thread::JoinHandle<Vec<Vec<u8>>> {
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+        let addr = sock.local_addr().expect("tun reader addr");
+        std::thread::spawn(move || {
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            let mut buf = [0u8; 2048];
+            while seen.len() < n {
+                let Ok((len, from)) = sock.recv_from(&mut buf) else { break };
+                if seen.len() < inject {
+                    tee.on_tun_frame(
+                        TunFrameDir::FromOs,
+                        &udp_frame(
+                            [127, 0, 0, 1],
+                            [100, 108, 0, 2],
+                            from.port(),
+                            addr.port(),
+                            &buf[..len],
+                        ),
+                    );
+                }
+                if echo {
+                    let _ = sock.send_to(&mirror_as_nxdomain(&buf[..len]), from);
+                }
+                seen.push(buf[..len].to_vec());
+            }
+            seen
+        })
+    }
+
     /// A bounded FAKE DNS RESOLVER on 127.0.0.1: answers up to `n` A queries by
     /// mirroring each question back as an NXDOMAIN response (`mirror_as_nxdomain`
     /// — the same shape the dns-nxdomain-echo tests use), so a protect probe's
@@ -8364,6 +8433,103 @@ mod tests {
         println!(
             "[probe] posctl_probes=5: {} datagrams in {elapsed:?}, ids={ids:?}",
             received.len()
+        );
+    }
+
+    /// [0034/R2] The same ordering for the multi-probe positive control: five
+    /// datagrams, each frame handed to the tee by the TUN read thread the moment
+    /// the kernel delivers it, and all five attributed to their own probe id.
+    ///
+    /// An a2b send's window is microseconds wide — far too narrow for a pure
+    /// receive race to decide — so the fixture makes the order WITNESSED instead
+    /// of raced: the tee's own table is held while the burst starts, and no
+    /// marker can be registered behind that hold. A probe datagram on the wire
+    /// during the hold therefore proves the send ran BEFORE its registration,
+    /// which is exactly the pre-fix order (and R0' on the device, where only 4
+    /// of the 5 frames were attributable).
+    #[test]
+    fn posctl_burst_frames_read_on_arrival_are_attributed_per_probe() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer overlay socket");
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(20))).expect("read timeout");
+        let addr = sock.local_addr().expect("peer overlay addr");
+        let win = window_with_facts(
+            ArmOptions { posctl_port: addr.port(), posctl_probes: 5, ..ArmOptions::default() },
+            HostFreezeFacts { peer_overlay: vec![[127, 0, 0, 1]], ..HostFreezeFacts::default() },
+        );
+        let started = std::time::Instant::now();
+        let tee = win.tee.clone();
+        // the TUN read thread: it scans every frame on arrival, timestamped
+        // against the same monotonic origin as the release below.
+        let reader = std::thread::spawn(move || {
+            let mut seen: Vec<(Vec<u8>, u128)> = Vec::new();
+            let mut buf = [0u8; 2048];
+            while seen.len() < 5 {
+                let Ok((len, from)) = sock.recv_from(&mut buf) else { continue };
+                let arrived_ms = started.elapsed().as_millis();
+                tee.on_tun_frame(
+                    TunFrameDir::FromOs,
+                    &udp_frame(
+                        [127, 0, 0, 1],
+                        [127, 0, 0, 1],
+                        from.port(),
+                        addr.port(),
+                        &buf[..len],
+                    ),
+                );
+                seen.push((buf[..len].to_vec(), arrived_ms));
+            }
+            seen
+        });
+        // the ordering witness: hold the tee's own table, then let the burst run
+        let table = win.tee.inner.lock_poison();
+        let sender = {
+            let win = win.clone();
+            std::thread::spawn(move || {
+                let mut notes = Vec::new();
+                let probes = build_posctl(&win, &mut notes);
+                (probes, notes)
+            })
+        };
+        // a fifth of a second of silence is orders of magnitude more than the
+        // microseconds between a send and its own registration
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let released_ms = started.elapsed().as_millis();
+        drop(table);
+        let (probes, notes) = sender.join().expect("the burst thread");
+        let seen = reader.join().expect("the TUN reader thread");
+        assert_eq!(seen.len(), 5, "five datagrams really left the process");
+        assert!(
+            seen.iter().all(|(_, arrived_ms)| *arrived_ms >= released_ms),
+            "a probe datagram was on the wire while its marker could not be registered \
+             (arrivals={:?} ms, the table was released at {released_ms} ms): register must \
+             run BEFORE send_posctl",
+            seen.iter().map(|(_, at)| *at).collect::<Vec<u128>>()
+        );
+        let a2b: Vec<&PosctlProbe> = probes.iter().filter(|p| p.direction == "a2b").collect();
+        assert_eq!(a2b.len(), 5, "{probes:?} {notes:?}");
+        assert!(a2b.iter().all(|p| p.sent), "every probe left: {a2b:?}");
+        let ids: std::collections::BTreeSet<&str> =
+            a2b.iter().map(|p| p.probe_id.as_str()).collect();
+        assert_eq!(ids.len(), 5, "five unique probe ids: {ids:?}");
+        let on_wire: std::collections::BTreeSet<&str> = seen
+            .iter()
+            .map(|(payload, _)| posctl_marker(payload).expect("a legal posctl payload"))
+            .collect();
+        assert_eq!(on_wire, ids, "each probe's OWN frame was read off the wire");
+        let snap = win.tee.snapshot();
+        assert_eq!(snap.frames_scanned, 5, "every frame went through the tee");
+        for id in ids.iter().copied() {
+            assert!(
+                win.tee.directed_hit(id, TunFrameDir::FromOs).is_some(),
+                "0034: probe {id} was read mid-burst and must be attributed"
+            );
+        }
+        println!(
+            "[probe] posctl in-flight scan: {} frames attributed to {} probes, table released \
+             at {released_ms} ms, arrivals={:?} ms",
+            snap.frames_scanned,
+            ids.len(),
+            seen.iter().map(|(_, at)| *at).collect::<Vec<u128>>()
         );
     }
 
@@ -8679,8 +8845,6 @@ mod tests {
     fn protect_probe_tee_hits_are_violations_for_the_protect_arm_and_captures_for_the_control() {
         let _guard = protect_handoff_guard();
         drop(PROBE_HANDOFF.lock_poison().take());
-        let (addr, resolver) = spawn_dns_echo_resolver(4);
-        let target = ([127, 0, 0, 1], addr.port());
 
         // ---- the protected arm: a tunnel hit IS the falsification ----------
         let opened = protect_probe_open_json();
@@ -8689,6 +8853,13 @@ mod tests {
             json_bool(&protect_probe_commit_json(fd, PROTECT_RESULT_PROTECTED), "ok"),
             "the protected arm's fd must be committed"
         );
+        // [0034] The TUN reader holds THIS window's tee and scans the first
+        // probe's own wire frame BEFORE answering it: the frame is read while
+        // the probe that sent it is still in flight, never after the burst
+        // returned. The pre-fix order registered only once the round trip was
+        // over, so it could not attribute this frame at all.
+        let resolver_sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
+        let target = ([127, 0, 0, 1], resolver_sock.local_addr().expect("resolver addr").port());
         let win = window_with(ArmOptions {
             protect_probe: Some(ProtectProbeOption {
                 target,
@@ -8697,26 +8868,16 @@ mod tests {
             }),
             ..ArmOptions::default()
         });
+        let reader = spawn_tun_reader(resolver_sock, win.tee.clone(), 2, 1, true);
         let mut notes = Vec::new();
         *win.probe_handoff.lock_poison() = resolve_probe_handoff(&win.options, &mut notes);
         let burst = send_protect_probes(&win, &mut notes).expect("the protected arm runs");
         let lines = take_protect_probe_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
         let ids: Vec<String> = lines.iter().map(|l| field_of(l, "probe_id")).collect();
-        // the first probe's QNAME LABEL shows up INSIDE the tunnel: the
-        // protected socket did not stay off the tunnel path. The frame carries
-        // the bytes as they travel on the wire (lowercase), which is exactly
-        // what the tee registered.
-        win.tee.on_tun_frame(
-            TunFrameDir::FromOs,
-            &udp_frame(
-                [127, 0, 0, 1],
-                [100, 108, 0, 2],
-                40_000,
-                40_001,
-                protect_probe_wire_label(&ids[0]).as_bytes(),
-            ),
-        );
+        // the first probe's QNAME LABEL showed up INSIDE the tunnel — scanned
+        // from the very bytes that travelled on the wire (lowercase, exactly
+        // what the tee registered), not from a hand-built stand-in.
         assert_eq!(win.tee.outer_hit_count(), 1, "positive=false ⇒ a violation");
         let snap = win.tee.snapshot();
         assert_eq!(snap.outer_hits.len(), 1);
@@ -8745,30 +8906,23 @@ mod tests {
         assert_eq!(block.probes[0].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
         assert!(!block.probes[1].tun_observed, "per-probe judgement");
 
-        // ---- the control arm: the SAME frame is an observation, not a leak --
+        // ---- the control arm: the SAME in-flight frame is an observation ---
+        let resolver_sock2 = std::net::UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
+        let target2 = ([127, 0, 0, 1], resolver_sock2.local_addr().expect("resolver addr").port());
         let win2 = window_with(ArmOptions {
             protect_probe: Some(ProtectProbeOption {
-                target,
+                target: target2,
                 count: 2,
                 mode: ProtectProbeMode::None,
             }),
             ..ArmOptions::default()
         });
+        let reader2 = spawn_tun_reader(resolver_sock2, win2.tee.clone(), 2, 1, true);
         let mut notes2 = Vec::new();
         let burst2 = send_protect_probes(&win2, &mut notes2).expect("the control arm runs");
         let lines2 = take_protect_probe_lines();
         assert_eq!(lines2.len(), 2, "{lines2:?}");
         let ids2: Vec<String> = lines2.iter().map(|l| field_of(l, "probe_id")).collect();
-        win2.tee.on_tun_frame(
-            TunFrameDir::FromOs,
-            &udp_frame(
-                [127, 0, 0, 1],
-                [100, 108, 0, 2],
-                40_000,
-                40_001,
-                protect_probe_wire_label(&ids2[0]).as_bytes(),
-            ),
-        );
         assert_eq!(win2.tee.outer_hit_count(), 0, "the capture is the EXPECTED outcome");
         assert!(win2.tee.directed_hit(&ids2[0], TunFrameDir::FromOs).is_some());
         let snap2 = win2.tee.snapshot();
@@ -8783,13 +8937,135 @@ mod tests {
         let block2 = evidence2.protect_probe.as_ref().expect("the block is present when armed");
         assert!(block2.probes[0].tun_observed, "the control arm's capture IS recorded");
         assert!(!block2.probes[1].tun_observed);
-        assert_eq!(resolver.join().expect("resolver thread").len(), 4, "2 + 2 queries left");
+        let queries = reader.join().expect("resolver thread");
+        assert_eq!(queries.len(), 2, "one query per probe left the process");
+        assert_eq!(
+            queries[0],
+            build_dns_a_query(&protect_probe_qname(&ids[0])).expect("the real query builder"),
+            "the reader scanned build_dns_a_query's own bytes for the first probe"
+        );
+        let queries2 = reader2.join().expect("resolver thread");
+        assert_eq!(queries2.len(), 2, "one query per probe left the process");
+        assert_eq!(
+            queries2[0],
+            build_dns_a_query(&protect_probe_qname(&ids2[0])).expect("the real query builder")
+        );
         println!(
             "[probe] tee semantics: protect-arm hit ⇒ verdict={} hits={}, control hit ⇒ verdict={} hits={}",
             evidence.verdict,
             evidence.tun_negative.hits.len(),
             evidence2.verdict,
             evidence2.tun_negative.hits.len()
+        );
+    }
+
+    /// [0034] The concurrent shape the device really has, on BOTH arms: the TUN
+    /// read thread hands the frame to the tee the instant the kernel delivers
+    /// it, while the probe that sent it is still in flight. Nothing ever answers
+    /// here (the P0/P2 `reply=timeout` shape), so the reply wait's entire
+    /// 1500 ms bound separates that scan from the burst's return: an
+    /// implementation that registers only after the round trip cannot attribute
+    /// the frame at all and reports `tun_observed=false` on both arms.
+    #[test]
+    fn protect_probe_frames_read_in_flight_are_attributed_on_both_arms() {
+        let _guard = protect_handoff_guard();
+        drop(PROBE_HANDOFF.lock_poison().take());
+
+        // ---- mode=none: the probe's own frame is the EXPECTED capture ------
+        let hole = std::net::UdpSocket::bind("127.0.0.1:0").expect("black hole bind");
+        let target = ([127, 0, 0, 1], hole.local_addr().expect("hole addr").port());
+        let win = window_with(ArmOptions {
+            protect_probe: Some(ProtectProbeOption {
+                target,
+                count: 1,
+                mode: ProtectProbeMode::None,
+            }),
+            ..ArmOptions::default()
+        });
+        let reader = spawn_tun_reader(hole, win.tee.clone(), 1, 1, false);
+        let mut notes = Vec::new();
+        let burst = send_protect_probes(&win, &mut notes).expect("the control arm runs");
+        let lines = take_protect_probe_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let id = field_of(&lines[0], "probe_id");
+        assert_eq!(burst.probes[0].send_errno, 0, "{notes:?}");
+        assert_eq!(burst.probes[0].reply, PROTECT_REPLY_TIMEOUT, "a bound socket stays silent");
+        let queries = reader.join().expect("the TUN reader thread");
+        assert_eq!(queries.len(), 1, "the query really left the process");
+        assert_eq!(
+            queries[0],
+            build_dns_a_query(&protect_probe_qname(&id)).expect("the real query builder"),
+            "the scanned frame carries build_dns_a_query's own wire bytes"
+        );
+        let snap = win.tee.snapshot();
+        assert_eq!(snap.frames_scanned, 1, "the frame went through the tee mid-flight");
+        let mut material = clean_material();
+        material.scan = snap.clone();
+        material.protect_probe = Some(protect_probe_evidence(burst, &snap));
+        let evidence = assemble_device_evidence(material);
+        let block = evidence.protect_probe.as_ref().expect("the block is present when armed");
+        assert!(
+            block.probes[0].tun_observed,
+            "0034: a frame read while its probe was still in flight must be attributed"
+        );
+        assert_eq!(block.probes[0].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
+        assert!(!evidence.tun_negative.hit, "the control arm's capture is the expected outcome");
+        assert_ne!(evidence.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence.reasons);
+
+        // ---- mode=protect: the very same in-flight shape IS the leak -------
+        let hole2 = std::net::UdpSocket::bind("127.0.0.1:0").expect("black hole bind");
+        let target2 = ([127, 0, 0, 1], hole2.local_addr().expect("hole addr").port());
+        let opened = protect_probe_open_json();
+        let fd = json_u64(&opened, "fd") as crate::sys::c_int;
+        assert!(
+            json_bool(&protect_probe_commit_json(fd, PROTECT_RESULT_PROTECTED), "ok"),
+            "the protected arm's fd must be committed"
+        );
+        let win2 = window_with(ArmOptions {
+            protect_probe: Some(ProtectProbeOption {
+                target: target2,
+                count: 1,
+                mode: ProtectProbeMode::Protect,
+            }),
+            ..ArmOptions::default()
+        });
+        let reader2 = spawn_tun_reader(hole2, win2.tee.clone(), 1, 1, false);
+        let mut notes2 = Vec::new();
+        *win2.probe_handoff.lock_poison() = resolve_probe_handoff(&win2.options, &mut notes2);
+        let burst2 = send_protect_probes(&win2, &mut notes2).expect("the protected arm runs");
+        let lines2 = take_protect_probe_lines();
+        assert_eq!(lines2.len(), 1, "{lines2:?}");
+        let id2 = field_of(&lines2[0], "probe_id");
+        let queries2 = reader2.join().expect("the TUN reader thread");
+        assert_eq!(queries2.len(), 1, "the query really left the process");
+        assert_eq!(
+            queries2[0],
+            build_dns_a_query(&protect_probe_qname(&id2)).expect("the real query builder")
+        );
+        let snap2 = win2.tee.snapshot();
+        assert_eq!(
+            snap2.outer_hits.len(),
+            1,
+            "positive=false ⇒ the in-flight frame is a violation"
+        );
+        assert_eq!(snap2.outer_hits[0].probe_id, id2);
+        let mut material2 = clean_material();
+        material2.scan = snap2.clone();
+        material2.protect_probe = Some(protect_probe_evidence(burst2, &snap2));
+        let evidence2 = assemble_device_evidence(material2);
+        let block2 = evidence2.protect_probe.as_ref().expect("the block is present when armed");
+        assert!(block2.probes[0].tun_observed, "the protect arm's leak is recorded too");
+        assert_eq!(block2.probes[0].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
+        assert!(evidence2.tun_negative.hit, "a protected probe in the tunnel is the leak");
+        assert_eq!(evidence2.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence2.reasons);
+        println!(
+            "[probe] in-flight scan: mode=none observed={} verdict={}; mode=protect \
+             observed={} leak={} verdict={}",
+            block.probes[0].tun_observed,
+            evidence.verdict,
+            block2.probes[0].tun_observed,
+            evidence2.tun_negative.hit,
+            evidence2.verdict
         );
     }
 

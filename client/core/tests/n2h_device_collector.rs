@@ -2423,9 +2423,17 @@ fn the_production_host_takes_the_arm_time_peer_announcement_and_keeps_the_counte
 /// `open → protect → commit` hand-off (this test stands in for the shell)
 /// followed by the SHIPPED arm entry with the `protect_probe` option ⇒ the
 /// window really runs `count` DNS round trips out of the COMMITTED fd to the
-/// arm's resolver target, the document's notes record the burst, the
-/// `protect_probe` block records every probe, and — no protect-probe frame
-/// having entered this harness's tunnel — `tun_negative` stays untouched.
+/// arm's resolver target, the document's notes record the burst, and the
+/// `protect_probe` block records every probe.
+///
+/// [0034] The harness's TUN read thread now hands each probe's OWN query frame
+/// to the tee WHILE the burst is still running, and the resolver answers only
+/// after that scan — so the device's ordering ("the frame is in the tunnel
+/// before the round trip returns") is exact here, not raced. This arm is
+/// `mode:"protect"`, so each observed protect-probe frame is the leak the arm
+/// exists to catch: both probes must be attributed AND reach `tun_negative`
+/// (verdict FAIL). An implementation that registers the marker only after the
+/// round trip cannot attribute either frame.
 ///
 /// The default (no `protect_probe` option) is covered by every other scenario
 /// in this file: they must be byte-for-byte the pre-increment ones.
@@ -2442,22 +2450,39 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
     // be a physical receipt endpoint, so the probe's receipt is the DNS answer
     // it echoes back with the QNAME (a mirrored NXDOMAIN, as a real resolver
     // would answer for a `.invalid` name).
+    //
+    // [0034] Each query is published for the harness's TUN read thread and the
+    // answer leaves only after that thread reports the frame scanned: the scan
+    // then provably precedes the round trip's return, which is the ordering the
+    // device has and the pre-fix code got wrong.
     let phys = UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
     phys.set_read_timeout(Some(Duration::from_secs(10))).expect("read timeout");
     let phys_addr = phys.local_addr().expect("resolver addr");
-    let resolver = std::thread::spawn(move || {
-        let mut got: Vec<Vec<u8>> = Vec::new();
-        let mut buf = [0u8; 2048];
-        while got.len() < 2 {
-            let Ok((n, from)) = phys.recv_from(&mut buf) else { break };
-            got.push(buf[..n].to_vec());
-            let mut answer = buf[..n].to_vec();
-            answer[2] = 0x81; // QR | RD
-            answer[3] = 0x83; // RA | RCODE = NXDOMAIN
-            let _ = phys.send_to(&answer, from);
-        }
-        got
-    });
+    let published: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (scanned_tx, scanned_rx) = std::sync::mpsc::channel::<()>();
+    let resolver = {
+        let published = published.clone();
+        std::thread::spawn(move || {
+            let mut got: Vec<Vec<u8>> = Vec::new();
+            let mut buf = [0u8; 2048];
+            while got.len() < 2 {
+                let Ok((n, from)) = phys.recv_from(&mut buf) else { break };
+                got.push(buf[..n].to_vec());
+                published
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(buf[..n].to_vec());
+                if scanned_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    break;
+                }
+                let mut answer = buf[..n].to_vec();
+                answer[2] = 0x81; // QR | RD
+                answer[3] = 0x83; // RA | RCODE = NXDOMAIN
+                let _ = phys.send_to(&answer, from);
+            }
+            got
+        })
+    };
 
     // the shell's side of the hand-off, verbatim (the shell must NOT close fd)
     let opened = parse_json(&nc::protect_probe_open_json());
@@ -2482,7 +2507,31 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
             ),
         ),
     );
-    wait_closed(&host, true, 20_000);
+    // [0034] The window runs now: pump the peer side AND play the TUN read
+    // thread — every query the probe put on the wire is scanned the moment it is
+    // read off the resolver's side, i.e. while the burst is still in flight, and
+    // only then is the resolver released to answer.
+    let mut scanned = 0usize;
+    wait_until(20_000, "the collector window closes", || {
+        host.pump_peer(true);
+        if let Some(tee) = host.tee_handle() {
+            let queries = published.lock().unwrap_or_else(|e| e.into_inner());
+            while scanned < queries.len() {
+                tee.on_tun_frame(
+                    TunFrameDir::FromOs,
+                    &ipv4_udp_frame(DEV, PEER, 40_000, phys_addr.port(), &queries[scanned]),
+                );
+                scanned += 1;
+                let _ = scanned_tx.send(());
+            }
+        }
+        status().at("phase").str_of() == Some("closed")
+    });
+    let closed_status = status();
+    assert_eq!(
+        scanned, 2,
+        "both probes' frames went through the harness's TUN read thread"
+    );
 
     // two UNIQUE probes really reached the resolver, each carrying its own
     // lowercased `<id>.n2h-probe.invalid` question
@@ -2496,7 +2545,9 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
         assert!(qname.ends_with(".n2h-probe.invalid"), "{qname}");
     }
 
-    // the document carries the burst record and no tunnel violation
+    // the document carries the burst record AND the leak this arm exists to
+    // catch: both probes' own frames were read by the TUN reader while their
+    // round trips were still open
     let (doc, _text) = closed_document();
     let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
     assert!(
@@ -2505,8 +2556,8 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
         ))),
         "the burst must be recorded with its fd and count: {notes:?}"
     );
-    // [adjustment] the `protect_probe` block records BOTH arms' truth; here the
-    // protected arm answered on every probe and no frame entered the tunnel.
+    // [0034] the `protect_probe` block records what the TUN really saw, per
+    // probe: the frame of each probe was read mid-flight and attributed to it.
     let block = doc.at("protect_probe");
     assert_eq!(block.at("mode").str_of(), Some("protect"), "{block:?}");
     assert_eq!(block.at("target").str_of(), Some(phys_addr.to_string().as_str()), "{block:?}");
@@ -2524,15 +2575,34 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
         assert_eq!(p.at("send_errno").uint_of(), Some(0), "{p:?}");
         assert_eq!(p.at("reply").str_of(), Some("echo"), "the resolver echoed the QNAME: {p:?}");
         assert!(p.at("reply_ms").uint_of().is_some(), "a real round trip: {p:?}");
-        assert_eq!(p.at("tun_observed").bool_of(), Some(false), "{p:?}");
-        assert!(p.at("tun_sides").arr_of().is_empty(), "{p:?}");
+        assert_eq!(
+            p.at("tun_observed").bool_of(),
+            Some(true),
+            "0034: the frame was read while its round trip was open: {p:?}"
+        );
+        assert_eq!(p.at("tun_sides").arr_of().len(), 1, "{p:?}");
+        assert_eq!(
+            p.at("tun_sides").arr_of()[0].str_of(),
+            Some(nc::TUN_IFACE_NAME),
+            "{p:?}"
+        );
     }
-    assert_eq!(doc.at("tun_negative").at("hit").bool_of(), Some(false));
-    assert!(doc.at("tun_negative").at("hits").arr_of().is_empty());
+    // `mode:"protect"` ⇒ a protect-probe frame inside the tunnel IS the leak
+    // (the pre-fix order registered too late to see either one)
+    assert_eq!(
+        doc.at("tun_negative").at("hit").bool_of(),
+        Some(true),
+        "the observed protect-probe frames are the leak: {:?}",
+        doc.at("reasons")
+    );
+    assert_eq!(doc.at("tun_negative").at("hits").arr_of().len(), 2, "one hit per probe");
+    assert_eq!(doc.at("verdict").str_of(), Some(VERDICT_FAIL), "reasons: {:?}", doc.at("reasons"));
+    assert_eq!(closed_status.at("verdict").str_of(), Some(VERDICT_FAIL), "{closed_status:?}");
     println!(
         "[protect] arm→window: hand-off {handoff_id} fd={fd} ⇒ {} DNS round trips on {phys_addr}; \
-         block + notes record the burst",
-        qnames.len()
+         both frames read in flight ⇒ observed=2, hits=2, verdict={}",
+        qnames.len(),
+        doc.at("verdict").str_of().unwrap()
     );
 }
 
