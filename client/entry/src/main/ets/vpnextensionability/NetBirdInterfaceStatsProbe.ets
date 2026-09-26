@@ -193,6 +193,53 @@ export async function runInterfaceStatsWindowClose(requestId: string): Promise<v
 }
 
 // ---------------------------------------------------------------------------
+// N2-H iface-bytes BURST (2026-09-26, diagnostic-only). Default OFF.
+//
+// What this is: the SURVEY half of the C7 same-source calibration plan
+// (n2h-kit/c7-same-source-plan-20260926.md §3 mechanism a / §6.1). The window
+// two-edge read above gives exactly TWO readings, one watcher period (5 s)
+// apart — too sparse to pair against the host's /proc time series inside the
+// <1 s window the v4 preregistration §4 (ii) requires. This export is ONE
+// tick of a denser series on the SAME official per-NIC byte API and the SAME
+// `vpn-tun` name: the extension arms a bounded 500 ms interval behind the
+// default-OFF `diag_iface_bytes_burst` arm-ticket switch and calls this once
+// per tick, so the host can later pair each line against the nearest earlier
+// /proc reading by the device clock (`startedUnixMs` / `finishedUnixMs`).
+//
+// The INTERVAL lives in the extension, not here, on purpose: the burst must
+// be stopped and its handle cleared the moment the window closes, the ability
+// is destroyed or the watcher is stopped — a timer owned by this module could
+// not be cancelled by those paths. So this function carries no timer, no
+// loop, no await beyond its own sample, and no state of its own; `seq` is the
+// caller's monotone tick index and is rendered verbatim.
+//
+// What this is NOT: NOT evidence, NOT a C7 counting input, NOT a packet
+// count. The negative-control name is deliberately NOT read here (v4 §4: the
+// fixed `n2h-none0` control is read once per window by the open round; a
+// negative control repeated at 500 ms would add calls without adding a
+// question). Same field discipline as every other line in this file: a
+// rejection prints `unavailable` + the BusinessError CODE token only — never
+// an exception message, never a payload, never a fabricated number. Every
+// line is `diag=true|is_evidence=false`, joins no Evidence.counters/notes and
+// never feeds the judge.
+//
+// The `N2H_IFACE_BYTES_BURST|` prefix is deliberately NEW and distinct from
+// `N2H_IFACE_BYTES_WINDOW|`: the selfcheck pins the window prefix at exactly
+// one line per window, and a burst line reusing it would break that invariant
+// (plan §6.4).
+export async function readInterfaceStatsBurst(requestId: string,
+  seq: number): Promise<void> {
+  const sample: IfaceSample = await sampleIfaceBytes(requestId, PROBE_IFACE);
+  hilog.info(PROBE_DOMAIN, PROBE_TAG,
+    'N2H_IFACE_BYTES_BURST|requestId=%{public}s|seq=%{public}s|interface=%{public}s|' +
+    'rxBytes=%{public}s|txBytes=%{public}s|rxError=%{public}s|txError=%{public}s|' +
+    'startedUnixMs=%{public}s|finishedUnixMs=%{public}s|diag=true|is_evidence=false',
+    requestId, String(seq), PROBE_IFACE, renderBytes(sample.rxBytes),
+    renderBytes(sample.txBytes), sample.rxError, sample.txError,
+    String(sample.startedUnixMs), String(sample.finishedUnixMs));
+}
+
+// ---------------------------------------------------------------------------
 // N2-H network-context snapshot (2026-09-20, diagnostic-only).
 //
 // What this is: ONE one-shot metadata read of the PUBLIC connection-module

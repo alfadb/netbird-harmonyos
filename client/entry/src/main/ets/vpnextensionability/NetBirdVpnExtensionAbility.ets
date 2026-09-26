@@ -10,7 +10,8 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
-import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose } from
+import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose,
+  readInterfaceStatsBurst } from
   './NetBirdInterfaceStatsProbe';
 import { resolveVpnTunNetId, VpnNetIdResolution } from './NetBirdInterfaceStatsProbe';
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
@@ -131,6 +132,28 @@ const N2H_PROBE_WAIT_MS_DEFAULT: number = 800;
 const N2H_DIAG_BLOCKED_SELF_KEY: string = 'diag_blocked_self';
 const N2H_DIAG_PROTECT_PROCESS_NET_KEY: string = 'diag_protect_process_net';
 const N2H_DIAG_POSCTL_UNBOUND_KEY: string = 'diag_posctl_unbound';
+// S5 (2026-09-26, default OFF): `diag_iface_bytes_burst`. The SAME arm-ticket
+// mechanism as S2-S4 (readDiagSwitch: literal JSON boolean true only, an
+// absent key is off and silent, a wrong-typed value is off plus the one
+// N2H_DIAG_OPTION_IGNORED line). It changes no gate and adds no evidence: when
+// it is true, the arm SUCCESS branch (the N2H_COLLECTOR_ARMED line, where the
+// iface-bytes availability probe already runs) additionally starts a BOUNDED
+// 500 ms series of vpn-tun byte reads on the SAME official per-NIC API — the
+// survey half of the C7 same-source calibration plan
+// (n2h-kit/c7-same-source-plan-20260926.md §3 mechanism a / §6.1), whose
+// criterion needs the two window edges to be pairable against the host's
+// /proc time series within <1 s (v4 §4 (ii)). The new
+// `N2H_IFACE_BYTES_BURST|` prefix is deliberately distinct from
+// `N2H_IFACE_BYTES_WINDOW|` (plan §6.4: the window prefix is pinned at exactly
+// one line per window by the selfcheck).
+const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';
+// The burst cadence (plan §0/§6.1: 500 ms) and its hard cap: the nominal
+// collector window is one watcher period (STATUS_POLL_MS = 5000), so 24 ticks
+// at 500 ms span 12 s — twice the nominal window — while staying far below the
+// plan's ≤120-read ceiling. The cap is a floor-independent fuse, not the stop
+// condition: the ordinary stop is the window close edge / teardown.
+const N2H_IFACE_BURST_INTERVAL_MS: number = 500;
+const N2H_IFACE_BURST_MAX_TICKS: number = 24;
 // The ONLY reason token of the S2-S4 ignored-key line: the key was present in
 // the ticket document but its value was not a JSON boolean (string / number /
 // null / object). Never printed for an absent key, never for a boolean false.
@@ -461,6 +484,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // neither latch touches the arm/WAITING semantics above.
   private n2hIfaceWindowOpenSeen: boolean = false;
   private n2hIfaceWindowCloseDone: boolean = false;
+  // S5 iface-bytes BURST (2026-09-26, default OFF): the handle of the bounded
+  // 500 ms survey interval and its monotone tick index. -1 = no interval
+  // running; the tick body refuses to emit anything once the handle is back to
+  // -1, so a cleared timer cannot print even if a stray callback survives the
+  // cancellation. Both are written ONLY by startInterfaceStatsBurst /
+  // interfaceStatsBurstTick / stopInterfaceStatsBurst — nothing else, and
+  // nothing about them reaches a gate or Evidence.
+  private n2hIfaceBurstTimer: number = -1;
+  private n2hIfaceBurstSeq: number = 0;
   // N2-H I3a (v3.1 §2.1 C2 (1)/(2)): the generation counter of THIS ability
   // instance. requestId is fixed for the instance's whole lifetime (onCreate
   // runs before any create()), so a per-instance counter IS the frozen
@@ -482,7 +514,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // only reached after an accepted create); it is forwarded as "no
   // generation", never fabricated into a value.
   private n2hAcceptedExclusionGeneration: number = -1;
-  // S2-S4 diagnostic switches (see the constants above). Read ONCE per start
+  // S2-S5 diagnostic switches (see the constants above). Read ONCE per start
   // flow from the arm ticket (readDiagSwitches) and defaulted to false here,
   // so an instance that never read a ticket — or read an absent/unreadable/
   // malformed one — is inert in every path below. Nothing else writes them.
@@ -490,6 +522,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private diagBlockedSelf: boolean = false;
   private diagProtectProcessNet: boolean = false;
   private diagPosctlUnbound: boolean = false;
+  private diagIfaceBytesBurst: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -1506,6 +1539,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
             this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
             clean(error.name || 'Error'));
         });
+        // S5 iface-bytes BURST (2026-09-26, default OFF): same arm SUCCESS
+        // branch, same official API, same `vpn-tun` name — the 500 ms survey
+        // series the C7 same-source calibration needs (n2h-kit plan §3 a).
+        // Gated by the ticket switch; when it is off this is one boolean test
+        // and NOTHING else happens (no timer, no line, byte-identical
+        // behaviour). Fire-and-forget like the two probes above: the arm path
+        // gains no await and no unbounded wait, and every rejection inside a
+        // tick is caught by the tick's own last-resort catch.
+        if (this.diagIfaceBytesBurst) {
+          this.startInterfaceStatsBurst();
+        }
       } else {
         hilog.error(DOMAIN, TAG,
           'N2H_COLLECTOR_ARM_FAILED|requestId=%{public}s|error=%{public}s|' +
@@ -1536,6 +1580,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.n2hIfaceWindowCloseDone = true;
+    // S5: the window is CLOSING here — the app-side boundary of the collector
+    // window whose native N2H_COLLECTOR_CLOSE line the core emits and this
+    // shell cannot observe — so the optional burst survey series ends with it.
+    this.stopInterfaceStatsBurst();
     runInterfaceStatsWindowClose(this.requestId).catch((error: Error): void => {
       hilog.warn(DOMAIN, TAG,
         'N2H_IFACE_BYTES_WINDOW_CLOSE_ABORTED|requestId=%{public}s|code=%{public}s|' +
@@ -1543,6 +1591,64 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
         clean(error.name || 'Error'));
     });
+  }
+
+  // S5 iface-bytes BURST (2026-09-26, default OFF) — the start/stop pair. ONE
+  // bounded interval behind the `diag_iface_bytes_burst` ticket switch: while
+  // it runs, every N2H_IFACE_BURST_INTERVAL_MS one vpn-tun sample is emitted
+  // as a `N2H_IFACE_BYTES_BURST|` line by the probe module (the read stays
+  // there — this shell owns only the cadence, because the cadence must be
+  // cancellable from the close edge and the teardown paths). Hard cap:
+  // N2H_IFACE_BURST_MAX_TICKS. Starting twice is impossible: the handle guard
+  // below plus the one-shot arm attempt (n2hArmAttempted) both refuse.
+  private startInterfaceStatsBurst(): void {
+    if (this.n2hIfaceBurstTimer >= 0 || this.destroyRequested) {
+      return;
+    }
+    this.n2hIfaceBurstSeq = 0;
+    this.n2hIfaceBurstTimer = setInterval((): void => {
+      this.interfaceStatsBurstTick();
+    }, N2H_IFACE_BURST_INTERVAL_MS);
+  }
+
+  // ONE burst tick. Every exit that is not an emission goes through
+  // stopInterfaceStatsBurst, so a tick that arrives after the cap, after the
+  // window close or after destroyRequested can neither print a line nor leave
+  // a live handle behind (the -1 handle is checked first, so even a callback
+  // that somehow survived cancellation is inert). Fire-and-forget: no await
+  // added anywhere, and the last-resort catch keeps an unhandled rejection
+  // impossible (code/name tokens only — the line itself already carries the
+  // per-direction CODE tokens).
+  private interfaceStatsBurstTick(): void {
+    if (this.n2hIfaceBurstTimer < 0 || this.destroyRequested ||
+      this.n2hIfaceBurstSeq >= N2H_IFACE_BURST_MAX_TICKS) {
+      this.stopInterfaceStatsBurst();
+      return;
+    }
+    const seq: number = this.n2hIfaceBurstSeq;
+    this.n2hIfaceBurstSeq++;
+    readInterfaceStatsBurst(this.requestId, seq).catch((error: Error): void => {
+      hilog.warn(DOMAIN, TAG,
+        'N2H_IFACE_BYTES_BURST_ABORTED|requestId=%{public}s|seq=%{public}d|code=%{public}s|' +
+        'name=%{public}s|diag=true|is_evidence=false',
+        this.requestId, seq, String((error as BusinessFailure).code ?? 'no-code'),
+        clean(error.name || 'Error'));
+    });
+  }
+
+  // Stop the burst survey series and CLEAR the interval handle. Called by
+  // (a) the window close edge (maybeCloseInterfaceStatsWindow — the app-side
+  // boundary of the collector window; the native N2H_COLLECTOR_CLOSE line is
+  // emitted by the core and is not observable here), (b) stopStatusAndNetcfgWatcher
+  // — the stop/teardown paths: connector death, fail-closed recreate teardown,
+  // onDestroy — and (c) the tick itself on the cap or on destroyRequested.
+  // Idempotent: -1 is a no-op, so repeat calls print nothing and clear nothing
+  // twice.
+  private stopInterfaceStatsBurst(): void {
+    if (this.n2hIfaceBurstTimer >= 0) {
+      clearInterval(this.n2hIfaceBurstTimer);
+      this.n2hIfaceBurstTimer = -1;
+    }
   }
 
   // The arm ticket's path under THIS process's own filesDir: the same
@@ -1563,6 +1669,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagBlockedSelf = false;
     this.diagProtectProcessNet = false;
     this.diagPosctlUnbound = false;
+    this.diagIfaceBytesBurst = false;
     let text: string = '';
     try {
       text = fs.readTextSync(this.n2hArmFilePath()).trim();
@@ -1584,6 +1691,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagBlockedSelf = this.readDiagSwitch(doc, N2H_DIAG_BLOCKED_SELF_KEY);
     this.diagProtectProcessNet = this.readDiagSwitch(doc, N2H_DIAG_PROTECT_PROCESS_NET_KEY);
     this.diagPosctlUnbound = this.readDiagSwitch(doc, N2H_DIAG_POSCTL_UNBOUND_KEY);
+    this.diagIfaceBytesBurst = this.readDiagSwitch(doc, N2H_DIAG_IFACE_BYTES_BURST_KEY);
   }
 
   // ONE switch key of the ticket document: literal boolean true = ON. An
@@ -2183,6 +2291,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       clearInterval(this.watcherTimer);
       this.watcherTimer = -1;
     }
+    // S5: with the watcher stopped there is no tick left that could issue the
+    // window close edge, so the optional burst survey series stops here too
+    // (connector death, fail-closed recreate teardown, onDestroy).
+    this.stopInterfaceStatsBurst();
   }
 
   private logConfigApplied(config: VpnTunnelConfig): void {

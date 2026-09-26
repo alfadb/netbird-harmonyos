@@ -176,6 +176,28 @@
 //      source pins (getter-only module — no bindSocket/setAppNet, no
 //      .message, still byte-only; call order inside the ok-branch; aborted
 //      guard literal).
+//   IB1-IB8 (2026-09-26 iface-bytes BURST, the C7 same-source calibration's
+//      survey half — n2h-kit/c7-same-source-plan-20260926.md §3 mechanism a):
+//      the arm ticket's DEFAULT-OFF `diag_iface_bytes_burst` switch starts a
+//      bounded 500 ms series of vpn-tun reads in the arm SUCCESS branch, one
+//      `N2H_IFACE_BYTES_BURST|requestId=…|seq=…|interface=vpn-tun|rxBytes=…|
+//      txBytes=…|rxError=…|txError=…|startedUnixMs=…|finishedUnixMs=…|
+//      diag=true|is_evidence=false` line per tick (a NEW prefix: the window and
+//      probe line counts stay exactly one). IB1 the key ABSENT (the default):
+//      the arm still arms, with ZERO burst lines and ZERO intervals; IB2 ON
+//      (literal true): exactly ONE 500 ms interval, seq from 0, the fixed
+//      field order and the two vpn-tun calls per tick (never the negative
+//      control), the key never reaching the core arm options, and no
+//      PROBE/WINDOW line from a burst tick; IB3 the hard cap (24 = 12 s, twice
+//      the nominal window): seq 0..23 then the interval is cleared and a
+//      further callback emits nothing; IB4 the window CLOSE edge clears it;
+//      IB5 stopStatusAndNetcfgWatcher clears it; IB6 onDestroy clears it; IB7
+//      the shared readDiagSwitch type discipline (string/number/null ⇒ OFF
+//      plus the ONE ignored-key line, literal false ⇒ OFF and silent); IB8
+//      source pins (one shared switch read, the start inside the ok-branch
+//      after the ARMED literal behind its own gate, the 500 ms/24 constants,
+//      the three stop call sites, the new prefix and the timer-free probe
+//      module).
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -206,6 +228,10 @@ const ARM_TICKET_NAME = 'netbird-n2h-arm';
 const PROBE_PREFIX = 'N2H_IFACE_BYTES_PROBE|';
 // The 2026-09-20 iface-bytes WINDOW two-edge marker (the W group below).
 const WINDOW_PREFIX = 'N2H_IFACE_BYTES_WINDOW|';
+// The 2026-09-26 iface-bytes BURST marker (the IB group below) — a NEW prefix
+// on purpose: the W/P assertions pin the window/probe prefixes at an exact
+// line count, so the 500 ms survey series must never reuse them.
+const BURST_PREFIX = 'N2H_IFACE_BYTES_BURST|';
 // The 2026-09-20 network-context snapshot marker (the NC group below).
 const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 
@@ -1555,7 +1581,7 @@ try {
   check('P8 the probe call sits INSIDE the arm success branch (ok -> ARMED literal -> probe -> else)',
     okBranchAt > 0 && armedLit > okBranchAt && probeCall > armedLit && elseAt > probeCall &&
     extSource.indexOf(
-      "import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose } from\n  './NetBirdInterfaceStatsProbe';") > 0,
+      "import { runInterfaceStatsProbe, runNetworkContextProbe, runInterfaceStatsWindowClose,\n  readInterfaceStatsBurst } from\n  './NetBirdInterfaceStatsProbe';") > 0,
     JSON.stringify({ okBranchAt, armedLit, probeCall, elseAt }));
   check('P8 the probe module pins the two fixed names, the marker, and the byte-only scope',
     probeSource.indexOf("const PROBE_IFACE: string = 'vpn-tun';") > 0 &&
@@ -1813,7 +1839,12 @@ try {
     'if (this.n2hArmAttempted || this.destroyRequested) {', armHookAt);
   const armHookHead = armEarlyReturnAt > armHookAt
     ? extSource.slice(armHookAt, armEarlyReturnAt) : '';
-  const setIntervalAt = extSource.indexOf('setInterval((): void => {');
+  // Since 2026-09-26 the extension carries a SECOND `setInterval((): void => {`
+  // (the default-OFF S5 iface-bytes burst, in the arm ok-branch ABOVE the
+  // watcher), so this anchor must say WHICH timer it means: the watcher's own,
+  // searched from the watcher's signature.
+  const watcherStartAt = extSource.indexOf('private startStatusAndNetcfgWatcher(): void {');
+  const setIntervalAt = extSource.indexOf('setInterval((): void => {', watcherStartAt);
   const closeHookAt = extSource.indexOf('this.maybeCloseInterfaceStatsWindow();');
   const statusReadAt = extSource.indexOf(
     'const status: ConnectorStatusResult | null = pollStatusOrNull();');
@@ -1839,11 +1870,12 @@ try {
     JSON.stringify({ closeFn: w6CloseFn.length, emitFn: w6EmitFn.length,
       closeExport: w6CloseExport.length }));
   check('W6 the close hook rides the watcher tick at its VERY TOP, before the status read and every early return',
-    setIntervalAt > 0 && closeHookAt > setIntervalAt && closeHookAt < statusReadAt &&
+    watcherStartAt > 0 && setIntervalAt > watcherStartAt && closeHookAt > setIntervalAt &&
+    closeHookAt < statusReadAt &&
     statusReadAt > closeHookAt && closeHookAt < terminalReturnAt &&
     terminalReturnAt > statusReadAt &&
     extSource.split('this.maybeCloseInterfaceStatsWindow();').length === 2,
-    JSON.stringify({ setIntervalAt, closeHookAt, statusReadAt, terminalReturnAt,
+    JSON.stringify({ watcherStartAt, setIntervalAt, closeHookAt, statusReadAt, terminalReturnAt,
       callSites: extSource.split('this.maybeCloseInterfaceStatsWindow();').length - 1 }));
   check('W6 the arm hook no longer carries the close hook (the early-return path cannot gate the close edge)',
     armHookAt > 0 && armEarlyReturnAt > armHookAt &&
@@ -1875,6 +1907,367 @@ try {
     probeSource.indexOf("emitWindowLine(requestId, 'close', PROBE_IFACE, sample)") > 0 &&
     probeSource.indexOf("'diag=true|is_evidence=false'") > 0,
     'window source pin');
+
+  // ---------------- IB (2026-09-26): the S5 iface-bytes BURST --------------
+  // The 500 ms survey series behind the arm ticket's DEFAULT-OFF
+  // `diag_iface_bytes_burst` switch (n2h-kit/c7-same-source-plan-20260926.md
+  // §3 mechanism a / §6.1): while it runs, every tick is ONE vpn-tun sample on
+  // the SAME official per-NIC byte API the window edges use, emitted on its own
+  // `N2H_IFACE_BYTES_BURST|` line. The timer belongs to the EXTENSION (it must
+  // be cancellable from the close edge and the teardown paths), so the tests
+  // below CAPTURE it — the watcherTick mechanism, no real timer is ever
+  // scheduled — and drive its handler by hand; clearInterval is captured too,
+  // so "the handle is really cleared" is an assertion about the REAL call site.
+  // The load-bearing half is the default: IB1/IB7 pin zero timers and zero
+  // BURST lines for an absent, a `false`, and a wrong-typed key, and IB2 pins
+  // that a burst tick emits no PROBE/WINDOW line.
+  const burstTimers: Array<{ id: number; handler: () => void; ms: number }> = [];
+  const burstCleared: number[] = [];
+  const previousSetInterval = G['setInterval'];
+  const previousClearInterval = G['clearInterval'];
+  function installBurstTimerSpy(): void {
+    burstTimers.length = 0;
+    burstCleared.length = 0;
+    G['setInterval'] = (handler: () => void, ms?: number): number => {
+      const id: number = 9100 + burstTimers.length;
+      burstTimers.push({ id: id, handler: handler, ms: ms ?? -1 });
+      return id;
+    };
+    G['clearInterval'] = (id: number): void => { burstCleared.push(id); };
+  }
+  function restoreBurstTimerSpy(): void {
+    G['setInterval'] = previousSetInterval;
+    if (previousClearInterval === undefined) {
+      delete G['clearInterval'];
+    } else {
+      G['clearInterval'] = previousClearInterval;
+    }
+  }
+  // The handler of the ONE captured burst interval (a no-op if none was
+  // scheduled, so a failed start surfaces as an assertion, never a TypeError).
+  function burstHandler(): () => void {
+    return burstTimers.length === 0
+      ? (): void => { /* nothing was scheduled */ }
+      : burstTimers[burstTimers.length - 1].handler;
+  }
+  // Drive ONE captured burst tick and let its async sample land.
+  async function burstTickOnce(): Promise<void> {
+    burstHandler()();
+    await drainProbe();
+  }
+  // The 500 ms cadence and the tick cap are read OFF the production source, so
+  // the assertions below follow the shipped numbers instead of restating them.
+  const burstMsMatch = /const N2H_IFACE_BURST_INTERVAL_MS: number = (\d+);/.exec(extSource);
+  const burstCapMatch = /const N2H_IFACE_BURST_MAX_TICKS: number = (\d+);/.exec(extSource);
+  const burstMs = burstMsMatch === null ? -1 : Number(burstMsMatch[1]);
+  const burstCap = burstCapMatch === null ? -1 : Number(burstCapMatch[1]);
+  // The same JSON-shape equality the D group's deepEq uses, declared HERE so
+  // this group never depends on a declaration that comes later in the file.
+  function ibEq(a: unknown, b: unknown): boolean {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  // IB1: the default. A ticket WITHOUT the key (the normal case: the launcher
+  // never sends it) reads OFF and starts nothing — zero new lines, zero
+  // intervals, and the handle stays -1.
+  installBurstTimerSpy();
+  const ibOff = freshAbility(mod, FIXTURE_FILESDIR);
+  ibOff['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1000, 'n2h-none0': 0 }, { 'vpn-tun': 2000, 'n2h-none0': 0 });
+  setArmFile(true, undefined, JSON.stringify({ posctl_port: 41000 }));
+  (ibOff['readDiagSwitches'] as () => void)();
+  resetLog();
+  tickArm(ibOff, WG_READY);
+  await drainProbe();
+  check('IB1 the burst key ABSENT (default): the arm still ARMS, but no BURST line and ' +
+    'no interval is created, and the handle stays -1',
+    linesWith('N2H_COLLECTOR_ARMED|').length === 1 &&
+    linesWith(BURST_PREFIX).length === 0 &&
+    burstTimers.length === 0 && ibOff['diagIfaceBytesBurst'] === false &&
+    ibOff['n2hIfaceBurstTimer'] === -1,
+    JSON.stringify({ burst: linesWith(BURST_PREFIX), timers: burstTimers.length,
+      field: ibOff['diagIfaceBytesBurst'], handle: ibOff['n2hIfaceBurstTimer'] }));
+
+  // IB2: the switch ON (literal JSON true) — the arm success branch starts
+  // EXACTLY ONE bounded 500 ms interval, and one tick = one BURST line with
+  // seq starting at 0, the fixed field order, the seeded values, digit
+  // begin/end and the diag tail. The negative-control name is NOT read (two
+  // calls per tick, both vpn-tun).
+  installBurstTimerSpy();
+  const ibOn = freshAbility(mod, FIXTURE_FILESDIR);
+  ibOn['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1000, 'n2h-none0': 7 }, { 'vpn-tun': 2000, 'n2h-none0': 7 });
+  setArmFile(true, undefined,
+    JSON.stringify({ diag_iface_bytes_burst: true, posctl_port: 41000 }));
+  (ibOn['readDiagSwitches'] as () => void)();
+  const ibCallsAtArm = statsCalls().length;
+  resetLog();
+  tickArm(ibOn, WG_READY);
+  await drainProbe();
+  const ibOptsRaw = String(G['__NB_ARM_OPTS'] ?? '');
+  check('IB2 the switch ON: the arm ARMS, starts exactly ONE 500 ms interval, and the ' +
+    'burst key never reaches the core arm options',
+    ibOn['diagIfaceBytesBurst'] === true &&
+    linesWith('N2H_COLLECTOR_ARMED|').length === 1 &&
+    burstTimers.length === 1 && burstTimers[0].ms === burstMs && burstMs === 500 &&
+    burstCleared.length === 0 && ibOn['n2hIfaceBurstTimer'] === burstTimers[0].id &&
+    statsCalls().length - ibCallsAtArm === 4 &&
+    ibOptsRaw.length > 0 && ibOptsRaw.indexOf('diag_iface_bytes_burst') < 0,
+    JSON.stringify({ ms: burstTimers.length === 0 ? -1 : burstTimers[0].ms, cap: burstCap,
+      handle: ibOn['n2hIfaceBurstTimer'], opts: ibOptsRaw }));
+  const ibCallsAtTick1 = statsCalls().length;
+  // The arm tick itself emits the open WINDOW edge and the two PROBE lines
+  // (IB2's arm above); what must stay flat is the BURST TICK's own output.
+  const ibWindowBeforeTick = linesWith(WINDOW_PREFIX).length;
+  const ibProbeBeforeTick = linesWith(PROBE_PREFIX).length;
+  await burstTickOnce();
+  const ib1Lines = linesWith(BURST_PREFIX);
+  const ib1Line = ib1Lines.length === 1 ? ib1Lines[0] : '';
+  const ib1Calls = statsCalls().slice(ibCallsAtTick1);
+  check('IB2 one tick = ONE BURST line: seq=0, fixed field order, seeded bytes, digit ' +
+    'begin/end, diag tail — and exactly the two vpn-tun calls (no negative control)',
+    ib1Lines.length === 1 &&
+    ib1Line === 'N2H_IFACE_BYTES_BURST|requestId=' + REQUEST_ID +
+    '|seq=0|interface=vpn-tun|rxBytes=1000|txBytes=2000|rxError=none|txError=none|' +
+    'startedUnixMs=' + fieldOf(ib1Line, 'startedUnixMs') +
+    '|finishedUnixMs=' + fieldOf(ib1Line, 'finishedUnixMs') +
+    '|diag=true|is_evidence=false' &&
+    /^\d+$/.test(fieldOf(ib1Line, 'startedUnixMs')) &&
+    /^\d+$/.test(fieldOf(ib1Line, 'finishedUnixMs')) &&
+    Number(fieldOf(ib1Line, 'finishedUnixMs')) >= Number(fieldOf(ib1Line, 'startedUnixMs')) &&
+    fieldOf(ib1Line, 'diag') === 'true' && fieldOf(ib1Line, 'is_evidence') === 'false' &&
+    ib1Calls.length === 2 &&
+    ib1Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
+    ib1Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0,
+    JSON.stringify({ line: ib1Line, calls: ib1Calls }));
+  check('IB2 the burst TICK emits no WINDOW and no PROBE line (the W/P line-count ' +
+    'assertions stay true)',
+    linesWith(WINDOW_PREFIX).length === ibWindowBeforeTick &&
+    linesWith(PROBE_PREFIX).length === ibProbeBeforeTick,
+    JSON.stringify({ window: linesWith(WINDOW_PREFIX).length,
+      probe: linesWith(PROBE_PREFIX).length,
+      before: [ibWindowBeforeTick, ibProbeBeforeTick] }));
+  await burstTickOnce();
+  check('IB2 seq increments per tick (0 then 1) and the interval is still armed',
+    linesWith(BURST_PREFIX).length === 2 && fieldOf(lastLine(BURST_PREFIX), 'seq') === '1' &&
+    burstCleared.length === 0 && ibOn['n2hIfaceBurstTimer'] === burstTimers[0].id,
+    JSON.stringify({ seqs: linesWith(BURST_PREFIX).map((l: string): string => fieldOf(l, 'seq')),
+      cleared: burstCleared }));
+
+  // IB3: the hard cap. The series stops itself after burstCap ticks (cap
+  // = 24 at 500 ms = 12 s, twice the nominal 5 s window) — the tick past the
+  // cap clears the interval and emits NOTHING, and a callback that somehow
+  // survived the cancellation is inert (the -1 handle is checked first). The
+  // log is NOT reset here: the assertion below is about the WHOLE series, so
+  // the two IB2 ticks are part of it.
+  let ibGuard = 0;
+  while (burstCleared.length === 0 && ibGuard < burstCap + 5) {
+    ibGuard++;
+    await burstTickOnce();
+  }
+  const ibCapLines = linesWith(BURST_PREFIX);
+  const ibCapSeqs = ibCapLines.map((l: string): string => fieldOf(l, 'seq'));
+  const ibOptsAfterCap = ibOn['n2hIfaceBurstTimer'];
+  check('IB3 the cap: the series emits tick 0 through cap-1 and stops (' + String(burstCap) +
+    ' lines, seq strictly increasing, one clearInterval of the armed handle)',
+    burstCap === 24 && ibCapLines.length === burstCap &&
+    ibEq(ibCapSeqs, Array.from({ length: burstCap },
+      (v: unknown, i: number): string => String(i))) &&
+    ibEq(burstCleared, [burstTimers[0].id]) && ibOptsAfterCap === -1,
+    JSON.stringify({ cap: burstCap, lines: ibCapLines.length, seqs: ibCapSeqs,
+      cleared: burstCleared, handle: ibOptsAfterCap }));
+  resetLog();
+  await burstTickOnce();
+  // The whole series emitted exactly burstCap lines, each with TWO vpn-tun
+  // reads: the arm round's four calls plus burstCap ticks at two calls each.
+  const ibExpectedCalls = ibCallsAtArm + 4 + burstCap * 2;
+  check('IB3 after the cap: a further (contradictory) callback emits nothing and clears ' +
+    'nothing twice',
+    linesWith(BURST_PREFIX).length === 0 && statsCalls().length === ibExpectedCalls &&
+    ibEq(burstCleared, [burstTimers[0].id]),
+    JSON.stringify({ burst: linesWith(BURST_PREFIX), cleared: burstCleared,
+      calls: statsCalls().length, expected: ibExpectedCalls }));
+
+  // IB4: the WINDOW CLOSE edge stops it. The close edge is issued on the first
+  // watcher TRIGGER after the open edge (W2) — the app-side boundary of the
+  // collector window (the native N2H_COLLECTOR_CLOSE line is emitted by the
+  // core and is not observable in this shell) — so a real replayed tick must
+  // clear the burst interval, and the captured handler must be inert after it.
+  installBurstTimerSpy();
+  const ibClose = freshAbility(mod, FIXTURE_FILESDIR);
+  ibClose['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1000, 'n2h-none0': 0 }, { 'vpn-tun': 2000, 'n2h-none0': 0 });
+  setArmFile(true, undefined, JSON.stringify({ diag_iface_bytes_burst: true }));
+  (ibClose['readDiagSwitches'] as () => void)();
+  resetLog();
+  tickArm(ibClose, WG_READY);
+  await drainProbe();
+  await burstTickOnce();
+  const ibCloseLinesBefore = linesWith(BURST_PREFIX).length;
+  G['__NB_STATUS'] = W_HEALTHY;
+  const ibCloseTick = watcherTick(ibClose);
+  resetLog();
+  ibCloseTick();
+  await drainProbe();
+  const ibCloseWindow = linesWith(WINDOW_PREFIX);
+  check('IB4 the window close edge fires exactly once AND clears the burst interval ' +
+    '(arming tick + one survey tick before it)',
+    ibCloseLinesBefore === 1 && burstTimers.length === 1 &&
+    ibCloseWindow.length === 1 && fieldOf(ibCloseWindow[0], 'phase') === 'close' &&
+    ibEq(burstCleared, [burstTimers[0].id]) && ibClose['n2hIfaceBurstTimer'] === -1,
+    JSON.stringify({ before: ibCloseLinesBefore, window: ibCloseWindow,
+      cleared: burstCleared, handle: ibClose['n2hIfaceBurstTimer'] }));
+  await burstTickOnce();
+  check('IB4 after the close edge: a further callback emits no BURST line at all',
+    linesWith(BURST_PREFIX).length === 0, JSON.stringify(linesWith(BURST_PREFIX)));
+
+  // IB5: the STOP path (stopStatusAndNetcfgWatcher — connector death,
+  // fail-closed recreate teardown, onDestroy) clears it too, even with no
+  // window close edge in sight.
+  installBurstTimerSpy();
+  const ibStop = freshAbility(mod, FIXTURE_FILESDIR);
+  ibStop['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1000, 'n2h-none0': 0 }, { 'vpn-tun': 2000, 'n2h-none0': 0 });
+  setArmFile(true, undefined, JSON.stringify({ diag_iface_bytes_burst: true }));
+  (ibStop['readDiagSwitches'] as () => void)();
+  resetLog();
+  tickArm(ibStop, WG_READY);
+  await drainProbe();
+  await burstTickOnce();
+  (ibStop['stopStatusAndNetcfgWatcher'] as () => void)();
+  resetLog();
+  await burstTickOnce();
+  check('IB5 stopStatusAndNetcfgWatcher stops the burst: the armed handle is cleared, the ' +
+    'field is -1 and the next callback emits nothing',
+    burstTimers.length === 1 && ibEq(burstCleared, [burstTimers[0].id]) &&
+    ibStop['n2hIfaceBurstTimer'] === -1 && linesWith(BURST_PREFIX).length === 0,
+    JSON.stringify({ cleared: burstCleared, handle: ibStop['n2hIfaceBurstTimer'],
+      burst: linesWith(BURST_PREFIX) }));
+
+  // IB6: onDestroy (the real lifecycle call) clears it as well.
+  installBurstTimerSpy();
+  const ibDestroy = freshAbility(mod, FIXTURE_FILESDIR);
+  ibDestroy['n2hAcceptedExclusionGeneration'] = 0;
+  seedStats({ 'vpn-tun': 1000, 'n2h-none0': 0 }, { 'vpn-tun': 2000, 'n2h-none0': 0 });
+  setArmFile(true, undefined, JSON.stringify({ diag_iface_bytes_burst: true }));
+  (ibDestroy['readDiagSwitches'] as () => void)();
+  resetLog();
+  tickArm(ibDestroy, WG_READY);
+  await drainProbe();
+  await burstTickOnce();
+  (ibDestroy['onDestroy'] as () => void)();
+  resetLog();
+  await burstTickOnce();
+  check('IB6 onDestroy stops the burst: the armed handle is cleared, the field is -1 and ' +
+    'the next callback emits nothing',
+    burstTimers.length === 1 && ibEq(burstCleared, [burstTimers[0].id]) &&
+    ibDestroy['n2hIfaceBurstTimer'] === -1 && ibDestroy['destroyRequested'] === true &&
+    linesWith(BURST_PREFIX).length === 0,
+    JSON.stringify({ cleared: burstCleared, handle: ibDestroy['n2hIfaceBurstTimer'],
+      burst: linesWith(BURST_PREFIX) }));
+
+  // IB7: the type discipline of the SAME readDiagSwitch every other switch
+  // uses. A string / a number / a JSON null is OFF, prints the ONE ignored-key
+  // line naming THIS key, and starts nothing; a literal `false` is a valid
+  // typed OFF and stays SILENT.
+  const ibTyped: Array<{ name: string; value: unknown; ignored: boolean }> = [
+    { name: 'a STRING "true"', value: 'true', ignored: true },
+    { name: 'a NUMBER 1', value: 1, ignored: true },
+    { name: 'a JSON null', value: null, ignored: true },
+    { name: 'a literal false', value: false, ignored: false }
+  ];
+  for (const ibCase of ibTyped) {
+    installBurstTimerSpy();
+    const ibAbility = freshAbility(mod, FIXTURE_FILESDIR);
+    ibAbility['n2hAcceptedExclusionGeneration'] = 0;
+    seedStats({ 'vpn-tun': 1000, 'n2h-none0': 0 }, { 'vpn-tun': 2000, 'n2h-none0': 0 });
+    setArmFile(true, undefined, JSON.stringify({ diag_iface_bytes_burst: ibCase.value }));
+    resetLog();
+    (ibAbility['readDiagSwitches'] as () => void)();
+    const ibIgnored = linesWith('N2H_DIAG_OPTION_IGNORED|');
+    tickArm(ibAbility, WG_READY);
+    await drainProbe();
+    check('IB7 ' + ibCase.name + ': the burst is OFF, nothing is started, and the ignored ' +
+      'line ' + (ibCase.ignored ? 'IS' : 'is NOT') + ' printed for this key',
+      ibAbility['diagIfaceBytesBurst'] === false && burstTimers.length === 0 &&
+      linesWith(BURST_PREFIX).length === 0 &&
+      (ibCase.ignored
+        ? ibEq(ibIgnored, [
+          'N2H_DIAG_OPTION_IGNORED|key=diag_iface_bytes_burst|reason=not-boolean|' +
+          'diag=true|is_evidence=false'])
+        : ibIgnored.length === 0),
+      JSON.stringify({ ignored: ibIgnored, timers: burstTimers.length,
+        field: ibAbility['diagIfaceBytesBurst'] }));
+  }
+  restoreBurstTimerSpy();
+
+  // IB8: source pins on the byte-identical sources. The switch is read through
+  // the ONE shared readDiagSwitch; the start sits INSIDE the arm success branch
+  // after the ARMED literal (the collector window's own boundary) and behind
+  // its own gate; the timer is a 500 ms one bounded by the cap; every stop path
+  // (close edge, watcher stop) calls the ONE stop helper; the burst prefix is
+  // the new one and the probe module still carries no timer.
+  const burstKeyAt = extSource.indexOf("const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';");
+  const burstReadAt = extSource.indexOf(
+    'this.diagIfaceBytesBurst = this.readDiagSwitch(doc, N2H_DIAG_IFACE_BYTES_BURST_KEY);');
+  const burstResetAt = extSource.indexOf('this.diagIfaceBytesBurst = false;');
+  const burstStartAt = extSource.indexOf('this.startInterfaceStatsBurst();');
+  const burstGateAt = extSource.indexOf('if (this.diagIfaceBytesBurst) {');
+  const burstTickAt = extSource.indexOf('private interfaceStatsBurstTick(): void {');
+  const burstStopFnAt = extSource.indexOf('private stopInterfaceStatsBurst(): void {');
+  const burstStopClearAt = extSource.indexOf('clearInterval(this.n2hIfaceBurstTimer);');
+  const burstStopAtClose = extSource.indexOf('this.stopInterfaceStatsBurst();');
+  const burstStopAtTick = extSource.indexOf('this.stopInterfaceStatsBurst();',
+    burstStopAtClose + 1);
+  const burstStopAtWatcherStop = extSource.indexOf('this.stopInterfaceStatsBurst();',
+    burstStopAtTick + 1);
+  const burstStopCallSites = extSource.split('this.stopInterfaceStatsBurst();').length - 1;
+  check('IB8 the burst is ONE shared readDiagSwitch key, re-defaulted OFF in readDiagSwitches, ' +
+    'after the other four switches',
+    burstKeyAt > 0 && burstResetAt > 0 && burstReadAt > burstResetAt &&
+    extSource.indexOf('this.diagPosctlUnbound = this.readDiagSwitch(') < burstReadAt,
+    JSON.stringify({ burstKeyAt, burstResetAt, burstReadAt }));
+  check('IB8 the start is INSIDE the arm success branch, after the ARMED literal, behind ' +
+    'its own switch gate, and the interval is the 500 ms bounded one',
+    okBranchAt > 0 && armedLit > okBranchAt && burstGateAt > armedLit &&
+    burstStartAt > burstGateAt && elseAt > burstStartAt &&
+    watcherStartAt > 0 && burstStartAt < watcherStartAt &&
+    burstTickAt > burstStartAt && extSource.indexOf(
+      '}, N2H_IFACE_BURST_INTERVAL_MS);') > burstStartAt &&
+    extSource.indexOf("const N2H_IFACE_BURST_INTERVAL_MS: number = 500;") > 0 &&
+    extSource.indexOf("const N2H_IFACE_BURST_MAX_TICKS: number = 24;") > 0 &&
+    extSource.indexOf('this.n2hIfaceBurstSeq >= N2H_IFACE_BURST_MAX_TICKS') > burstTickAt,
+    JSON.stringify({ armedLit, burstGateAt, burstStartAt, elseAt, burstTickAt }));
+  check('IB8 every stop path calls the ONE stop helper — the close edge (before the close ' +
+    'read it belongs to), the tick itself, and the watcher stop — and the helper clears the ' +
+    'handle under an idempotent -1 guard',
+    burstStopFnAt > 0 && burstStopClearAt > burstStopFnAt && burstStopCallSites === 3 &&
+    extSource.indexOf('private maybeCloseInterfaceStatsWindow(): void {') < burstStopAtClose &&
+    burstStopAtClose < extSource.indexOf('runInterfaceStatsWindowClose(this.requestId).catch(') &&
+    burstStopAtTick > burstTickAt && burstStopAtTick < burstStopFnAt &&
+    burstStopAtWatcherStop > extSource.indexOf(
+      'private stopStatusAndNetcfgWatcher(): void {') &&
+    burstStopAtWatcherStop < extSource.indexOf('private logConfigApplied(') &&
+    extSource.indexOf('if (this.n2hIfaceBurstTimer >= 0) {', burstStopFnAt) > burstStopFnAt &&
+    extSource.indexOf('this.n2hIfaceBurstTimer = -1;', burstStopFnAt) > burstStopFnAt,
+    JSON.stringify({ burstStopFnAt, burstStopClearAt, burstStopAtClose, burstStopAtTick,
+      burstStopAtWatcherStop, burstStopCallSites }));
+  check('IB8 the burst line carries the NEW prefix (never the window/probe one), the fixed ' +
+    'field order and the diag tail, and the probe module still owns the read with no timer',
+    probeSource.indexOf(
+      "'N2H_IFACE_BYTES_BURST|requestId=%{public}s|seq=%{public}s|interface=%{public}s|'") > 0 &&
+    probeSource.indexOf(
+      "'rxBytes=%{public}s|txBytes=%{public}s|rxError=%{public}s|txError=%{public}s|'") > 0 &&
+    probeSource.indexOf(
+      "'startedUnixMs=%{public}s|finishedUnixMs=%{public}s|diag=true|is_evidence=false'") > 0 &&
+    probeSource.indexOf(
+      'export async function readInterfaceStatsBurst(requestId: string,') > 0 &&
+    probeSource.indexOf('sampleIfaceBytes(requestId, PROBE_IFACE)') > 0 &&
+    probeSource.indexOf(WINDOW_PREFIX) < probeSource.indexOf(BURST_PREFIX) &&
+    probeSource.indexOf('setInterval') < 0 && probeSource.indexOf('setTimeout') < 0 &&
+    extSource.indexOf('n2hIfaceBurstTimer = setInterval(') > 0,
+    JSON.stringify({ burstInProbe: probeSource.indexOf(BURST_PREFIX),
+      windowInProbe: probeSource.indexOf(WINDOW_PREFIX) }));
 
   // ---------------- NC (2026-09-20): the network-context snapshot ----------
   // The PUBLIC connection getters are sampled ONCE per arm SUCCESS, in the
