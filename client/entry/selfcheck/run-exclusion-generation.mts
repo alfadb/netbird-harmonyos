@@ -201,6 +201,38 @@
 //      the TWO stop call sites with NO stop at the close edge, the new prefix
 //      and the timer-free probe module).
 //
+//   CR1-CR7 (2026-09-26 S6, protect-bypass plan §3.1 + §6 item 1②): the
+//      `diag_capture_route` arm-ticket switch. CR1 pins the wiring (ONE shared
+//      readDiagSwitch key + the target read off the ticket's own
+//      protect_probe object, TWO gated call sites in the tunnel-subnet entry's
+//      placement); CR2 the default (switch off, target present ⇒ the submitted
+//      VpnConfig is byte-identical and nothing is logged); CR3/CR4 the added
+//      non-excluded managed /32 on the initial AND recreate legs (appended after
+//      the tunnel-subnet entry, covered by the generation marker / route rows /
+//      validation gate, and the switch provably absent from the arm docs);
+//      CR5 an EXCLUDED target (a frozen endpoint /32) is refused with
+//      reason=target-excluded instead of shadowing the exclusion; CR6 the pure
+//      helper's strict `IPv4:port` mirror of the core's parse (skip tokens
+//      no-target / invalid-target / target-excluded, /24 containment, IPv6
+//      exclusions and non-excluded routes not counted, input never mutated);
+//      CR7 the switch on with no usable target.
+//   PP0-PP9 (2026-09-26 S7, protect-bypass plan §4/§6 item 5): the protect-probe
+//      fd hand-off. PP0 the verbatim passthrough of the two new arm keys
+//      (`posctl_probes` / `protect_probe`) with the pre-existing key set
+//      otherwise unchanged, wrong-typed values forwarded AS THEY ARE; PP1
+//      mode:none and an absent key are the ZERO-hand-off cases (no open, no
+//      protect, no commit, no line) with the arm untouched; PP2 the order
+//      open -> protect(fd) -> commit(fd,protected) -> arm on the fd open
+//      answered, plus the fixed line literal; PP3 the route-exclusion protect
+//      DEVIATION still calls the platform; PP4/PP5 rejected -> unprotected and
+//      synchronous throw -> error; PP6/PP6b the bounded 5 s box with a captured
+//      timer (timeout -> error with nothing re-armed or left behind; a settled
+//      call CLEARS the handle); PP7/PP7b a refused/unparseable open prints its
+//      own line (codes/names only) and the arm STILL runs; PP8 a refused commit
+//      lands verbatim in `commit=`; PP9 the fd-ownership pins (the hand-off's
+//      three methods call ONLY n2h_probe_socket_open/commit and carry no
+//      close/dup/fcntl on the fd — the core stays the ONE owner).
+//
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
 
@@ -260,7 +292,10 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig',
     // S1 diag switch (2026-09-23): the erased outcome interface the real
     // extension imports alongside withTunnelSubnetRoute
-    'TunnelSubnetRouteOutcome'],
+    'TunnelSubnetRouteOutcome',
+    // S6 diag capture route (2026-09-26): the second erased outcome interface
+    // the real extension now imports alongside withCaptureRoute
+    'CaptureRouteOutcome'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };
 
@@ -3404,6 +3439,625 @@ try {
     'isDefaultRoute entry)',
     ((d7Gated['routes'] ?? []) as unknown[]).length === 1,
     JSON.stringify(d7Gated));
+
+  // ---------------- CR (2026-09-26): the S6 capture route -------------------
+  // The protect-bypass plan's capture face (n2h-kit/protect-bypass-plan-
+  // 20260926.md §3.1 + §6 item 1②): with the DEFAULT-OFF arm-ticket switch
+  // `diag_capture_route` ON and a usable `protect_probe.target`, the shell
+  // appends ONE explicit NON-excluded `<target>/32` route on BOTH legs, in the
+  // same placement as the tunnel-subnet entry. Driven end-to-end through the
+  // REAL startConnectorThenCreate / performControlledRecreate, so "the
+  // submitted VpnConfig" is the FakeConnection's captured platform document.
+  // CR1 pins the wiring; CR2 the default (off, byte-identical, silent); CR3/CR4
+  // the added /32 on the initial and recreate legs; CR5 the excluded target
+  // (the anti-masking refusal); CR6 the pure helper's strict target acceptance;
+  // CR7 the switch on with no usable target.
+  const CAPTURE_LINE = 'N2H_DIAG_CAPTURE_ROUTE|';
+
+  function captureLines(): string[] {
+    return linesWith(CAPTURE_LINE);
+  }
+
+  function destinationAddresses(platformConfig: Record<string, unknown>): string[] {
+    return (((platformConfig ?? {})['routes'] ?? []) as Array<Record<string, unknown>>).map(
+      (r: Record<string, unknown>): string => String(
+        ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address']));
+  }
+
+  function routeRowsWith(config: Record<string, unknown>,
+    ip: string): Array<Record<string, unknown>> {
+    return ((config['routes'] ?? []) as Array<Record<string, unknown>>).filter(
+      (r: Record<string, unknown>): boolean =>
+        ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address']
+        === ip);
+  }
+
+  // The managed-route shape the capture row must have: vpn-tun, /32, the
+  // tunnel address as gateway, non-default, and — the load-bearing half —
+  // NO isExcludedRoute (the platform mapper omits the field for a non-excluded
+  // route, so its presence would mean the capture face silently became a
+  // masking exclusion).
+  function captureRow(ip: string, gateway: string): Record<string, unknown> {
+    return {
+      interface: 'vpn-tun',
+      destination: { address: { address: ip, family: 1 }, prefixLength: 32 },
+      gateway: { address: gateway, family: 1 },
+      hasGateway: true,
+      isDefaultRoute: false
+    };
+  }
+
+  // CR1: wiring pins on the byte-identical source.
+  const capKeyAt = extSource.indexOf(
+    "const N2H_DIAG_CAPTURE_ROUTE_KEY: string = 'diag_capture_route';");
+  const capResetAt = extSource.indexOf('this.diagCaptureRoute = false;');
+  const capReadAt = extSource.indexOf(
+    'this.diagCaptureRoute = this.readDiagSwitch(doc, N2H_DIAG_CAPTURE_ROUTE_KEY);');
+  const capTargetAt = extSource.indexOf(
+    'this.diagCaptureTarget = this.readProtectProbeTarget(doc);');
+  const capInitialAt = extSource.indexOf("this.injectCaptureRoute(merged, 'initial')");
+  const capRecreateAt = extSource.indexOf("this.injectCaptureRoute(merged, 'recreate')");
+  const runArmBodyMatch = /private async runN2hArm\([\s\S]*?\n  \}/.exec(extSource);
+  const runArmBodyAt = runArmBodyMatch === null ? -1 : (runArmBodyMatch.index ?? -1);
+  const runArmBody = runArmBodyMatch === null ? '' : runArmBodyMatch[0];
+  check('CR1 the switch + its target are read ONCE in readDiagSwitches (key read via the shared ' +
+    'readDiagSwitch, target from the ticket\'s protect_probe object), both re-defaulted first',
+    capKeyAt > 0 && capResetAt > 0 && capReadAt > capResetAt && capTargetAt > capReadAt,
+    JSON.stringify({ capKeyAt, capResetAt, capReadAt, capTargetAt }));
+  check('CR1 the capture route has exactly TWO call sites (initial + recreate), each behind the ' +
+    'switch gate, in the SAME placement as the tunnel-subnet entry',
+    extSource.split('this.injectCaptureRoute(merged,').length === 3 &&
+    extSource.split('if (this.diagCaptureRoute) {').length === 3 &&
+    capInitialAt > subnetInitialAt && capInitialAt < diagLogInitialAt &&
+    capRecreateAt > subnetRecreateAt && capRecreateAt < diagLogRecreateAt &&
+    extSource.indexOf(
+      "'N2H_DIAG_CAPTURE_ROUTE|requestId=%{public}s|target=%{public}s|leg=%{public}s|' +") > 0 &&
+    extSource.indexOf(
+      "'result=%{public}s|reason=%{public}s|diag=true|is_evidence=false',") > 0,
+    JSON.stringify({ capInitialAt, subnetInitialAt, diagLogInitialAt, capRecreateAt,
+      subnetRecreateAt, diagLogRecreateAt }));
+
+  // CR2: the default. A ticket that carries the target but NOT the switch
+  // (an explicit boolean false here — the deliberate-disable shape) must leave
+  // the submission byte-identical and print nothing.
+  const cr2 = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(JSON.stringify({
+    diag_capture_route: false,
+    protect_probe: { target: '203.0.113.9:53', count: 2, mode: 'none' }
+  }));
+  resetLog();
+  const cr2Submitted = await driveInitialLeg(cr2, NETCFG_0021);
+  const cr2Default = platformOf(injectedOf(legacyInitialTunnelConfig(cr2, NETCFG_0021))['config']);
+  check('CR2 switch OFF (explicit false) with a target present: the submitted VpnConfig is the ' +
+    'default composition BYTE-FOR-BYTE, no capture /32 exists and NO capture line is printed',
+    cr2Submitted.length === 1 && deepEq(cr2Submitted[0], cr2Default) &&
+    destinationAddresses(cr2Submitted[0]).indexOf('203.0.113.9') < 0 &&
+    cr2['diagCaptureRoute'] === false && cr2['diagCaptureTarget'] === '203.0.113.9:53' &&
+    captureLines().length === 0,
+    JSON.stringify({ submitted: cr2Submitted[0], capture: captureLines() }));
+
+  // CR3: the switch ON — the initial leg.
+  const cr3 = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(JSON.stringify({
+    diag_capture_route: true,
+    protect_probe: { target: '203.0.113.9:53', count: 2, mode: 'protect' }
+  }));
+  resetLog();
+  const cr3Submitted = await driveInitialLeg(cr3, NETCFG_0021);
+  const cr3Base = platformOf(injectedOf(legacyInitialTunnelConfig(cr3, NETCFG_0021))['config']);
+  const cr3Routes = (cr3Submitted[0] ?? {})['routes'] as Array<Record<string, unknown>>;
+  const cr3Cap = routeRowsWith(cr3Submitted[0] ?? {}, '203.0.113.9');
+  check('CR3 initial leg: exactly ONE extra route, appended AFTER the tunnel-subnet entry, and it ' +
+    'is the managed /32 capture shape (vpn-tun, gateway = the tunnel address, non-default, and ' +
+    'isExcludedRoute ABSENT)',
+    cr3Submitted.length === 1 && cr3Routes.length ===
+    ((cr3Base['routes'] ?? []) as unknown[]).length + 1 &&
+    deepEq(cr3Routes.slice(0, cr3Routes.length - 1), cr3Base['routes']) &&
+    cr3Cap.length === 1 && deepEq(cr3Cap[0], captureRow('203.0.113.9', '100.108.144.165')) &&
+    !('isExcludedRoute' in cr3Cap[0]),
+    JSON.stringify({ routes: cr3Routes, base: cr3Base['routes'] }));
+  check('CR3 initial leg: the capture line is the fixed literal (leg=initial, added/none, ' +
+    'diag tail) and exactly one is printed',
+    deepEq(captureLines(), ['N2H_DIAG_CAPTURE_ROUTE|requestId=' + REQUEST_ID +
+      '|target=203.0.113.9|leg=initial|result=added|reason=none|diag=true|is_evidence=false']),
+    JSON.stringify(captureLines()));
+  check('CR3 initial leg: the generation marker, the route rows and the fail-closed validation ' +
+    'gate all cover the capture row (it is announced and accepted, not smuggled in)',
+    fieldOf(lastLine('VPN_EXCLUSION_GENERATION|'), 'routes') === String(cr3Routes.length) &&
+    linesWith('VPN_ROUTE_ENTRY|').length === cr3Routes.length &&
+    linesWith('VPN_ROUTE_VIOLATION|').length === 0,
+    lastLine('VPN_EXCLUSION_GENERATION|') + ' rows=' +
+    String(linesWith('VPN_ROUTE_ENTRY|').length));
+  check('CR3 the capture-route switch is never read on the ARM path — it can only ever gate the ' +
+    'route injection, so it has no path into the opts document',
+    runArmBodyAt > 0 && runArmBody.indexOf('diagCaptureRoute') < 0 &&
+    runArmBody.indexOf('N2H_DIAG_CAPTURE_ROUTE_KEY') < 0,
+    JSON.stringify({ runArmBodyAt, len: runArmBody.length }));
+
+  // CR4: the switch ON — the recreate leg (the platform VpnConfig is fully
+  // replaced, so the capture entry must be re-declared there too).
+  const cr4 = freshAbility(mod, FIXTURE_FILESDIR);
+  cr4['frozenEndpointExclusions'] = derived;
+  cr4['diagCaptureRoute'] = true;
+  cr4['diagCaptureTarget'] = '203.0.113.44:53';
+  resetLog();
+  const cr4Submitted = await driveRecreateCapture(cr4, netcfgRecreate16());
+  const cr4Base = platformOf(
+    injectedOf(legacyRecreateTunnelConfig(derived, netcfgRecreate16()))['config']);
+  const cr4Routes = (cr4Submitted[0] ?? {})['routes'] as Array<Record<string, unknown>>;
+  const cr4Cap = routeRowsWith(cr4Submitted[0] ?? {}, '203.0.113.44');
+  check('CR4 recreate leg: the capture /32 is re-declared (managed shape, after the tunnel-subnet ' +
+    'entry, non-excluded) and the frozen endpoint exclusions are untouched',
+    cr4Submitted.length === 1 && cr4Routes.length ===
+    ((cr4Base['routes'] ?? []) as unknown[]).length + 1 &&
+    deepEq(cr4Routes.slice(0, cr4Routes.length - 1), cr4Base['routes']) &&
+    cr4Cap.length === 1 && deepEq(cr4Cap[0], captureRow('203.0.113.44', '100.108.144.165')) &&
+    !('isExcludedRoute' in cr4Cap[0]) &&
+    destinationAddresses(cr4Submitted[0]).filter(
+      (a: string): boolean => a === '203.0.113.7').length === 1,
+    JSON.stringify(cr4Routes));
+  check('CR4 recreate leg: the marker says leg=recreate and its counts match the submission',
+    deepEq(captureLines(), ['N2H_DIAG_CAPTURE_ROUTE|requestId=' + REQUEST_ID +
+      '|target=203.0.113.44|leg=recreate|result=added|reason=none|diag=true|is_evidence=false']) &&
+    fieldOf(lastLine('VPN_EXCLUSION_GENERATION|'), 'routes') === String(cr4Routes.length) &&
+    linesWith('VPN_ROUTE_ENTRY|').length === cr4Routes.length,
+    JSON.stringify(captureLines()));
+
+  // CR5: an EXCLUDED target is refused, never shadowed. The initial leg freezes
+  // the management endpoint's /32 (203.0.113.7) as an isExcludedRoute entry; a
+  // capture /32 for the same address would shadow that exclusion (longest
+  // prefix wins), which is exactly the masking the plan forbids.
+  const cr5 = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(JSON.stringify({
+    diag_capture_route: true,
+    protect_probe: { target: '203.0.113.7:53', count: 1, mode: 'none' }
+  }));
+  resetLog();
+  const cr5Submitted = await driveInitialLeg(cr5, NETCFG_0021);
+  const cr5Frozen = (cr5['frozenEndpointExclusions'] ?? []) as Array<Record<string, unknown>>;
+  const cr5Rows = routeRowsWith(cr5Submitted[0] ?? {}, '203.0.113.7');
+  check('CR5 premise: this leg really froze 203.0.113.7 as an endpoint exclusion',
+    cr5Frozen.filter((e: Record<string, unknown>): boolean =>
+      e['destination'] === '203.0.113.7' && e['isExcludedRoute'] === true).length === 1,
+    JSON.stringify(cr5Frozen));
+  check('CR5 an excluded target is NOT injected: the submission stays the default composition, ' +
+    'the single 203.0.113.7 entry stays the EXCLUDED one, and the line names target-excluded',
+    cr5Submitted.length === 1 &&
+    deepEq(cr5Submitted[0], platformOf(injectedOf(legacyInitialTunnelConfig(cr5, NETCFG_0021))['config'])) &&
+    cr5Rows.length === 1 && cr5Rows[0]['isExcludedRoute'] === true &&
+    deepEq(captureLines(), ['N2H_DIAG_CAPTURE_ROUTE|requestId=' + REQUEST_ID +
+      '|target=203.0.113.7|leg=initial|result=skipped|reason=target-excluded|' +
+      'diag=true|is_evidence=false']),
+    JSON.stringify({ capture: captureLines(), rows: cr5Rows }));
+
+  // CR6: the pure helper's strict acceptance (mirror of the core's
+  // parse_protect_target) and its skip tokens.
+  function capAt(target: unknown, routes: unknown[] = []): Record<string, unknown> {
+    return (cfg['withCaptureRoute'] as
+      (c: unknown, t: unknown) => Record<string, unknown>)(
+      tunCfg('100.108.144.165', 16, routes), target);
+  }
+  const cr6InputRoutes: unknown[] = [];
+  const cr6Added = capAt('203.0.113.9:53', cr6InputRoutes);
+  check('CR6 a valid IPv4:port target appends the managed /32 and reports target/reason',
+    cr6Added['added'] === true && cr6Added['target'] === '203.0.113.9' &&
+    cr6Added['reason'] === 'none' &&
+    deepEq(((cr6Added['config'] as Record<string, unknown>)['routes'] as unknown[]), [{
+      destination: '203.0.113.9', prefixLength: 32, gateway: '100.108.144.165',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: false
+    }]) && cr6InputRoutes.length === 0,
+    JSON.stringify(cr6Added));
+  check('CR6 no / non-string target -> no-target (never a guessed destination)',
+    capAt('')['reason'] === 'no-target' && capAt('')['target'] === '' &&
+    capAt(undefined)['reason'] === 'no-target' && capAt(null)['reason'] === 'no-target' &&
+    capAt(7)['reason'] === 'no-target',
+    JSON.stringify([capAt('')['reason'], capAt(undefined)['reason']]));
+  check('CR6 targets that the core would refuse are refused HERE too (invalid-target): no port, ' +
+    'empty/zero/overflow/non-numeric port, leading-zero port, non-IPv4 host, IPv6, leading-zero ' +
+    'octet, wrong octet count',
+    capAt('203.0.113.9')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:')['reason'] === 'invalid-target' &&
+    capAt(':53')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:0')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:65536')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:053')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:abc')['reason'] === 'invalid-target' &&
+    capAt('010.0.0.1:53')['reason'] === 'invalid-target' &&
+    capAt('256.1.1.1:53')['reason'] === 'invalid-target' &&
+    capAt('1.2.3.4.5:53')['reason'] === 'invalid-target' &&
+    capAt('mgmt.test:53')['reason'] === 'invalid-target' &&
+    capAt('2001:db8::1:53')['reason'] === 'invalid-target' &&
+    capAt('203.0.113.9:53')['added'] === true,
+    JSON.stringify([capAt('203.0.113.9')['reason'], capAt('2001:db8::1:53')['reason'],
+      capAt('010.0.0.1:53')['reason']]));
+  const cr6Excl32 = [{ destination: '203.0.113.9', prefixLength: 32, gateway: '10.99.0.1',
+    hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }];
+  const cr6Excl24 = [{ destination: '203.0.113.0', prefixLength: 24, gateway: '10.99.0.1',
+    hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }];
+  const cr6ExclOther = [{ destination: '198.51.100.0', prefixLength: 24, gateway: '10.99.0.1',
+    hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }];
+  const cr6ExclV6 = [{ destination: '2001:db8::10', prefixLength: 128, gateway: '10.99.0.1',
+    hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }];
+  const cr6NonExcl = [{ destination: '203.0.113.9', prefixLength: 32, gateway: '10.99.0.1',
+    hasGateway: true, isDefaultRoute: false, isExcludedRoute: false }];
+  const cr6Skip32 = capAt('203.0.113.9:53', cr6Excl32);
+  const cr6Skip24 = capAt('203.0.113.9:53', cr6Excl24);
+  check('CR6 an excluded /32 AND an excluded covering /24 both refuse the target ' +
+    '(target-excluded, config returned untouched), while another /24, an IPv6 /128 exclusion and ' +
+    'a NON-excluded /32 do not',
+    cr6Skip32['reason'] === 'target-excluded' && cr6Skip32['added'] === false &&
+    cr6Skip32['target'] === '203.0.113.9' &&
+    (cr6Skip32['config'] as Record<string, unknown>)['routes'] === cr6Excl32 &&
+    cr6Skip24['reason'] === 'target-excluded' && cr6Skip24['added'] === false &&
+    capAt('203.0.113.9:53', cr6ExclOther)['added'] === true &&
+    capAt('203.0.113.9:53', cr6ExclV6)['added'] === true &&
+    capAt('203.0.113.9:53', cr6NonExcl)['added'] === true &&
+    capAt('203.0.113.9:53', cr6NonExcl)['reason'] === 'none',
+    JSON.stringify({ a: cr6Skip32['reason'], b: cr6Skip24['reason'] }));
+
+  // CR7: the switch ON with no usable target — a logged skip, never a guess.
+  const cr7 = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(JSON.stringify({
+    diag_capture_route: true,
+    protect_probe: { count: 2, mode: 'none' }
+  }));
+  resetLog();
+  const cr7Submitted = await driveInitialLeg(cr7, NETCFG_0021);
+  check('CR7 switch ON but no string protect_probe.target: nothing is injected, the target field ' +
+    'is empty and the line says reason=no-target',
+    cr7Submitted.length === 1 &&
+    deepEq(cr7Submitted[0], platformOf(injectedOf(legacyInitialTunnelConfig(cr7, NETCFG_0021))['config'])) &&
+    cr7['diagCaptureTarget'] === '' &&
+    deepEq(captureLines(), ['N2H_DIAG_CAPTURE_ROUTE|requestId=' + REQUEST_ID +
+      '|target=|leg=initial|result=skipped|reason=no-target|diag=true|is_evidence=false']),
+    JSON.stringify(captureLines()));
+
+  // ---------------- PP (2026-09-26): the S7 protect-probe fd hand-off -------
+  // The bypass experiment's protected arm (plan §4/§6 item 5): BEFORE the native
+  // arm, `mode:"protect"` makes the shell run
+  //   core.n2h_probe_socket_open() -> protectProbeSocketWithBox(platform
+  //   connection.protect(fd), always) -> core.n2h_probe_socket_commit(fd,result)
+  // and only then n2h_collector_arm(...). The fd is CORE-owned: the shell never
+  // closes it, never duplicates it and never touches its flags. PP0 pins the
+  // verbatim option passthrough; PP1 the control / absent cases (zero hand-off);
+  // PP2 the settled order; PP3 that the route-exclusion protect DEVIATION does
+  // not void the experiment; PP4-PP6 the four outcome mappings and the bounded
+  // box (no residual timer); PP7 the open-failure path (still arms); PP8 the
+  // refused commit; PP9 the fd-ownership pins.
+  const PROTECT_PROBE_LINE = 'VPN_PROTECT_PROBE|';
+  const PROBE_HANDOFF_ID = 'N2H-protect-0123456789abcdef01234567';
+
+  function probeTrace(): string[] {
+    return (G['__NB_PROBE_TRACE'] ?? []) as string[];
+  }
+
+  function clearProbeCounters(): void {
+    G['__NB_PROBE_TRACE'] = [];
+    G['__NB_PROBE_OPEN_CALLS'] = 0;
+    G['__NB_PROBE_COMMIT_CALLS'] = 0;
+    G['__NB_PROBE_COMMIT_ARGS'] = [];
+    G['__NB_PROTECTED'] = 0;
+    G['__NB_ARM_CALLS'] = 0;
+    G['__NB_PROBE_OPEN_ANSWER'] = undefined;
+    G['__NB_PROBE_COMMIT_ANSWER'] = undefined;
+    G['__NB_PROBE_FD'] = undefined;
+    G['__NB_PROTECT_MODE'] = 'resolved';
+  }
+
+  function protectProbeTicket(mode: string, target: string = '203.0.113.9:53',
+    count: number = 3): Record<string, unknown> {
+    return { target: target, count: count, mode: mode };
+  }
+
+  function probeTicketJson(probe: unknown, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify(Object.assign({}, extra, { protect_probe: probe }));
+  }
+
+  async function driveProbeArm(ability: Record<string, unknown>): Promise<string[]> {
+    ability['connection'] = new FakeConnection();
+    seedNetCtx({});
+    resetLog();
+    tickArm(ability, WG_READY);
+    await drainProbe();
+    return probeTrace();
+  }
+
+  function probeOpenFailureLine(error: string): string {
+    return PROTECT_PROBE_LINE + 'requestId=' + REQUEST_ID +
+      '|fd=-1|handoff_id=|outcome=open-failed|elapsedMs=0|commit=none|error=' + error + '|' +
+      'diag=true|is_evidence=false';
+  }
+
+  // PP0: the verbatim passthrough of the two NEW arm keys, next to the
+  // pre-existing ones (the shell's options document is built field by field,
+  // so a missing forward would silently drop them — this is the assertion that
+  // it does not).
+  const pp0 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp0['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('none', '203.0.113.9:53', 5),
+    { posctl_port: 41000, posctl_probes: 4 }));
+  clearProbeCounters();
+  await driveProbeArm(pp0);
+  const pp0Opts = armOptsJson();
+  check('PP0 posctl_probes and protect_probe ride the opts document VERBATIM (values and key ' +
+    'order of the frozen set unchanged, no extra key invented)',
+    pp0Opts['posctl_probes'] === 4 && pp0Opts['posctl_port'] === 41000 &&
+    deepEq(pp0Opts['protect_probe'], protectProbeTicket('none', '203.0.113.9:53', 5)) &&
+    deepEq(Object.keys(pp0Opts).sort(), ['exclusion_generation', 'posctl_port', 'posctl_probes',
+      'probe_wait_ms', 'protect_probe', 'shell_exclusions']),
+    JSON.stringify(pp0Opts));
+  const pp0b = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(probeTicketJson(7, { posctl_probes: '4' }));
+  clearProbeCounters();
+  const pp0bTrace = await driveProbeArm(pp0b);
+  const pp0bOpts = armOptsJson();
+  check('PP0 wrong-typed values are forwarded AS THEY ARE (no coercion, no drop, no repair) and ' +
+    'trigger no hand-off — the core\'s strict checks are the authority',
+    pp0bOpts['posctl_probes'] === '4' && pp0bOpts['protect_probe'] === 7 &&
+    deepEq(pp0bTrace, ['arm']) && Number(G['__NB_PROBE_OPEN_CALLS']) === 0,
+    JSON.stringify({ opts: pp0bOpts, trace: pp0bTrace }));
+
+  // PP1: the two zero-behaviour cases — mode "none" (the control arm) and an
+  // absent protect_probe key.
+  const pp1 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp1['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('none')));
+  clearProbeCounters();
+  const pp1Trace = await driveProbeArm(pp1);
+  check('PP1 mode=none: ZERO open / protect / commit calls, no VPN_PROTECT_PROBE line, and the arm ' +
+    'still runs exactly once with the object forwarded verbatim',
+    deepEq(pp1Trace, ['arm']) && Number(G['__NB_PROBE_OPEN_CALLS']) === 0 &&
+    Number(G['__NB_PROBE_COMMIT_CALLS']) === 0 && Number(G['__NB_PROTECTED']) === 0 &&
+    Number(G['__NB_ARM_CALLS']) === 1 && pp1['n2hArmAttempted'] === true &&
+    deepEq(armOptsJson()['protect_probe'], protectProbeTicket('none')) &&
+    linesWith(PROTECT_PROBE_LINE).length === 0,
+    JSON.stringify({ trace: pp1Trace, opts: armOptsJson() }));
+  const pp1b = freshAbility(mod, FIXTURE_FILESDIR);
+  setSwitchTicket(JSON.stringify({ posctl_port: 41000 }));
+  clearProbeCounters();
+  const pp1bTrace = await driveProbeArm(pp1b);
+  check('PP1 no protect_probe key at all: both new keys stay ABSENT from the opts document and ' +
+    'the hand-off never runs',
+    deepEq(pp1bTrace, ['arm']) && !('protect_probe' in armOptsJson()) &&
+    !('posctl_probes' in armOptsJson()) && Number(G['__NB_PROBE_OPEN_CALLS']) === 0 &&
+    Number(G['__NB_PROBE_COMMIT_CALLS']) === 0,
+    JSON.stringify(armOptsJson()));
+
+  // PP2: the protected arm's order and outcome, on the very fd open returned.
+  const pp2 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp2['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROBE_FD'] = 71;
+  const pp2Trace = await driveProbeArm(pp2);
+  check('PP2 the hand-off order is EXACTLY open -> protect(fd) -> commit(fd,protected) -> arm, on ' +
+    'the fd n2h_probe_socket_open answered',
+    deepEq(pp2Trace, ['open', 'protect:71', 'commit:71:protected', 'arm']),
+    JSON.stringify(pp2Trace));
+  check('PP2 the committed outcome is the platform settle (protected), the fd is echoed unchanged ' +
+    'and the line is the fixed literal with the core\'s handoff_id',
+    deepEq(G['__NB_PROBE_COMMIT_ARGS'], [[71, 'protected']]) &&
+    Number(G['__NB_PROBE_OPEN_CALLS']) === 1 && Number(G['__NB_PROBE_COMMIT_CALLS']) === 1 &&
+    Number(G['__NB_PROTECTED']) === 1 && Number(G['__NB_ARM_CALLS']) === 1 &&
+    new RegExp('^VPN_PROTECT_PROBE\\|requestId=' + REQUEST_ID + '\\|fd=71\\|handoff_id=' +
+      PROBE_HANDOFF_ID + '\\|outcome=settled\\|elapsedMs=\\d+\\|commit=ok\\|diag=true\\|' +
+      'is_evidence=false$').test(lastLine(PROTECT_PROBE_LINE)) &&
+    linesWith(PROTECT_PROBE_LINE).length === 1,
+    JSON.stringify({ args: G['__NB_PROBE_COMMIT_ARGS'], line: lastLine(PROTECT_PROBE_LINE) }));
+
+  // PP3: the DEVIATION must not void the experiment. With
+  // protectDeviation=route-exclusion armed, protectSocketWithBox short-circuits
+  // to true WITHOUT calling the platform; the dedicated wrapper must not.
+  const pp3 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp3['n2hAcceptedExclusionGeneration'] = 0;
+  pp3['protectDeviationRouteExclusion'] = true;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROBE_FD'] = 73;
+  const pp3Trace = await driveProbeArm(pp3);
+  check('PP3 with protectDeviation=route-exclusion ARMED the dedicated wrapper STILL calls the ' +
+    'platform protect (counted, once) and settles — no deviation line, no silent no-op',
+    deepEq(pp3Trace, ['open', 'protect:73', 'commit:73:protected', 'arm']) &&
+    Number(G['__NB_PROTECTED']) === 1 && Number(G['__NB_PROBE_COMMIT_CALLS']) === 1 &&
+    new RegExp('\\|fd=73\\|handoff_id=' + PROBE_HANDOFF_ID +
+      '\\|outcome=settled\\|elapsedMs=\\d+\\|commit=ok\\|').test(lastLine(PROTECT_PROBE_LINE)) &&
+    linesWith('VPN_PROTECT_DEVIATION|').length === 0,
+    JSON.stringify({ trace: pp3Trace, line: lastLine(PROTECT_PROBE_LINE) }));
+
+  // PP4/PP5: rejected -> unprotected, synchronous throw -> error.
+  const pp4 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp4['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROTECT_MODE'] = 'rejected';
+  G['__NB_PROBE_FD'] = 81;
+  const pp4Trace = await driveProbeArm(pp4);
+  check('PP4 a REJECTED platform protect maps to outcome=rejected / commit result=unprotected, ' +
+    'and the arm still runs',
+    deepEq(pp4Trace, ['open', 'protect:81', 'commit:81:unprotected', 'arm']) &&
+    Number(G['__NB_ARM_CALLS']) === 1 &&
+    new RegExp('^VPN_PROTECT_PROBE\\|requestId=' + REQUEST_ID + '\\|fd=81\\|handoff_id=' +
+      PROBE_HANDOFF_ID + '\\|outcome=rejected\\|elapsedMs=\\d+\\|commit=ok\\|diag=true\\|' +
+      'is_evidence=false$').test(lastLine(PROTECT_PROBE_LINE)),
+    JSON.stringify({ trace: pp4Trace, line: lastLine(PROTECT_PROBE_LINE) }));
+  const pp5 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp5['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROTECT_MODE'] = 'throw';
+  G['__NB_PROBE_FD'] = 83;
+  const pp5Trace = await driveProbeArm(pp5);
+  check('PP5 a SYNCHRONOUS throw from the platform protect maps to outcome=throw / result=error ' +
+    '(never a hang, never a false protected) and the arm still runs',
+    deepEq(pp5Trace, ['open', 'protect:83', 'commit:83:error', 'arm']) &&
+    Number(G['__NB_ARM_CALLS']) === 1 &&
+    new RegExp('^VPN_PROTECT_PROBE\\|requestId=' + REQUEST_ID + '\\|fd=83\\|handoff_id=' +
+      PROBE_HANDOFF_ID + '\\|outcome=throw\\|elapsedMs=\\d+\\|commit=ok\\|diag=true\\|' +
+      'is_evidence=false$').test(lastLine(PROTECT_PROBE_LINE)),
+    JSON.stringify({ trace: pp5Trace, line: lastLine(PROTECT_PROBE_LINE) }));
+
+  // PP6: the bounded box, made deterministic. setTimeout/clearTimeout are
+  // captured (the IB burst-spy pattern) so the 5 s expiry can be fired by hand
+  // WITHOUT waiting, and so "the settled path cleared the handle" / "the timeout
+  // path leaves no further timer or line behind" are assertions about the REAL
+  // call sites. setImmediate is deliberately NOT captured: it is how the tests
+  // drain the real promise chain without a timer.
+  const ppTimers: Array<{ id: number; handler: () => void; ms: number; pending: boolean }> = [];
+  const ppCleared: number[] = [];
+  let ppNextTimer = 9000;
+  const ppPrevSetTimeout = G['setTimeout'];
+  const ppPrevClearTimeout = G['clearTimeout'];
+  async function drainImmediate(): Promise<void> {
+    await new Promise<void>((resolve: () => void): void => { setImmediate(resolve); });
+  }
+  G['setTimeout'] = (handler: () => void, ms?: number): number => {
+    const id = ++ppNextTimer;
+    ppTimers.push({ id: id, handler: handler, ms: ms ?? 0, pending: true });
+    return id;
+  };
+  G['clearTimeout'] = (id: number): void => {
+    ppCleared.push(id);
+    const hit = ppTimers.find((t: { id: number }): boolean => t.id === id);
+    if (hit !== undefined) {
+      hit.pending = false;
+    }
+  };
+  async function driveProbeArmTimed(ability: Record<string, unknown>): Promise<string[]> {
+    ability['connection'] = new FakeConnection();
+    seedNetCtx({});
+    resetLog();
+    tickArm(ability, WG_READY);
+    await drainImmediate();
+    return probeTrace();
+  }
+  const pp6 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp6['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  ppTimers.length = 0;
+  ppCleared.length = 0;
+  G['__NB_PROTECT_MODE'] = 'never';
+  G['__NB_PROBE_FD'] = 91;
+  const pp6TraceBefore = await driveProbeArmTimed(pp6);
+  check('PP6 a never-settling protect parks the hand-off on EXACTLY ONE bounded timer (boxMs=5000) ' +
+    'and the arm has not run yet',
+    ppTimers.length === 1 && ppTimers[0].ms === 5000 && ppTimers[0].pending === true &&
+    deepEq(pp6TraceBefore, ['open', 'protect:91']) &&
+    linesWith(PROTECT_PROBE_LINE).length === 0,
+    JSON.stringify({ timers: ppTimers.map((t): number => t.ms), trace: pp6TraceBefore }));
+  ppTimers[0].handler(); // the box expires
+  await drainImmediate();
+  await drainImmediate();
+  check('PP6 the expiry maps to outcome=timeout / commit result=error, the arm then runs, and ' +
+    'NOTHING is left behind: no timer was re-armed, no second line appears and no callback of ' +
+    'this hand-off can fire again',
+    deepEq(probeTrace(), ['open', 'protect:91', 'commit:91:error', 'arm']) &&
+    ppTimers.length === 1 &&
+    Number(G['__NB_ARM_CALLS']) === 1 &&
+    new RegExp('^VPN_PROTECT_PROBE\\|requestId=' + REQUEST_ID + '\\|fd=91\\|handoff_id=' +
+      PROBE_HANDOFF_ID + '\\|outcome=timeout\\|elapsedMs=\\d+\\|commit=ok\\|diag=true\\|' +
+      'is_evidence=false$').test(lastLine(PROTECT_PROBE_LINE)) &&
+    linesWith(PROTECT_PROBE_LINE).length === 1,
+    JSON.stringify({ trace: probeTrace(), timers: ppTimers.length,
+      lines: linesWith(PROTECT_PROBE_LINE) }));
+  // The settled half on the SAME spy: the box handle IS cleared, so the 5 s
+  // expiry cannot later print a second, false outcome.
+  const pp6b = freshAbility(mod, FIXTURE_FILESDIR);
+  pp6b['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  ppTimers.length = 0;
+  ppCleared.length = 0;
+  G['__NB_PROBE_FD'] = 92;
+  const pp6bTrace = await driveProbeArmTimed(pp6b);
+  check('PP6b a settled protect CLEARS its box handle (the 2026-09-25 fix): the one timer armed ' +
+    'for this hand-off is no longer pending, nothing is left to fire, and the outcome is settled',
+    deepEq(pp6bTrace, ['open', 'protect:92', 'commit:92:protected', 'arm']) &&
+    ppTimers.length === 1 && ppTimers[0].pending === false &&
+    deepEq(ppCleared, [ppTimers[0].id]) &&
+    new RegExp('\\|fd=92\\|handoff_id=' + PROBE_HANDOFF_ID +
+      '\\|outcome=settled\\|elapsedMs=\\d+\\|commit=ok\\|').test(lastLine(PROTECT_PROBE_LINE)),
+    JSON.stringify({ timers: ppTimers, cleared: ppCleared, trace: pp6bTrace }));
+  G['setTimeout'] = ppPrevSetTimeout;
+  G['clearTimeout'] = ppPrevClearTimeout;
+
+  // PP7: an open failure is logged and the arm STILL runs (the core records the
+  // never-committed hand-off itself); no protect and no commit may happen.
+  const pp7 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp7['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROBE_OPEN_ANSWER'] =
+    JSON.stringify({ ok: false, error: 'socket-open-failed', errno: 24 });
+  const pp7Trace = await driveProbeArm(pp7);
+  check('PP7 a refused open prints its own line (fd=-1, outcome=open-failed, commit=none, the ' +
+    'core\'s error token), calls NO protect and NO commit, and the arm still runs exactly once',
+    deepEq(pp7Trace, ['open', 'arm']) && Number(G['__NB_PROTECTED']) === 0 &&
+    Number(G['__NB_PROBE_COMMIT_CALLS']) === 0 && Number(G['__NB_ARM_CALLS']) === 1 &&
+    deepEq(linesWith(PROTECT_PROBE_LINE), [
+      probeOpenFailureLine('socket-open-failed')
+    ]) && armOptsJson()['protect_probe'] !== undefined,
+    JSON.stringify({ trace: pp7Trace, lines: linesWith(PROTECT_PROBE_LINE) }));
+  const pp7b = freshAbility(mod, FIXTURE_FILESDIR);
+  pp7b['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROBE_OPEN_ANSWER'] = 'not-a-json-body';
+  const pp7bTrace = await driveProbeArm(pp7b);
+  check('PP7b an unparseable open answer is the SAME open-failed shape with ' +
+    'error=open-rejected and codes/names only (never the raw body)',
+    deepEq(pp7bTrace, ['open', 'arm']) && Number(G['__NB_PROTECTED']) === 0 &&
+    linesWith(PROTECT_PROBE_LINE).length === 1 &&
+    deepEq(linesWith(PROTECT_PROBE_LINE), [
+      PROTECT_PROBE_LINE + 'requestId=' + REQUEST_ID + '|fd=-1|handoff_id=|outcome=open-failed|' +
+      'elapsedMs=0|commit=none|error=open-rejected|summary=code=no-code,name=SyntaxError|' +
+      'diag=true|is_evidence=false'
+    ]) &&
+    lastLine(PROTECT_PROBE_LINE).indexOf('not-a-json-body') < 0,
+    lastLine(PROTECT_PROBE_LINE));
+
+  // PP8: a REFUSED commit is recorded verbatim in `commit=` and the arm still
+  // runs (the core, not the shell, decides what a refusal means).
+  const pp8 = freshAbility(mod, FIXTURE_FILESDIR);
+  pp8['n2hAcceptedExclusionGeneration'] = 0;
+  setSwitchTicket(probeTicketJson(protectProbeTicket('protect')));
+  clearProbeCounters();
+  G['__NB_PROBE_FD'] = 95;
+  G['__NB_PROBE_COMMIT_ANSWER'] = JSON.stringify({ ok: false, error: 'fd-invalid' });
+  const pp8Trace = await driveProbeArm(pp8);
+  check('PP8 a refused commit lands verbatim in the line (commit=fd-invalid) and does NOT stop ' +
+    'the arm — the shell reports, the core judges',
+    deepEq(pp8Trace, ['open', 'protect:95', 'commit:95:protected', 'arm']) &&
+    Number(G['__NB_PROBE_COMMIT_CALLS']) === 1 && Number(G['__NB_ARM_CALLS']) === 1 &&
+    new RegExp('^VPN_PROTECT_PROBE\\|requestId=' + REQUEST_ID + '\\|fd=95\\|handoff_id=' +
+      PROBE_HANDOFF_ID + '\\|outcome=settled\\|elapsedMs=\\d+\\|commit=fd-invalid\\|diag=true\\|' +
+      'is_evidence=false$').test(lastLine(PROTECT_PROBE_LINE)),
+    JSON.stringify({ trace: pp8Trace, line: lastLine(PROTECT_PROBE_LINE) }));
+
+  // PP9: the fd-ownership pins. The three methods of the hand-off may only ever
+  // hand the fd to protect()/commit(): they hold no close, no duplicate and no
+  // flag call, so the core remains the ONE owner (a shell-side close would make
+  // the core's commit answer `fd-invalid` and silently turn the protected arm
+  // into a no-op).
+  const pp9HandoffMatch = /private async handOffProtectProbe\(\): Promise<void> \{[\s\S]*?\n  \}/
+    .exec(extSource);
+  const pp9WrapperMatch = /private async protectProbeSocketWithBox\([\s\S]*?\n  \}/.exec(extSource);
+  const pp9CommitMatch =
+    /private commitProtectProbe\(fd: number, result: string\): string \{[\s\S]*?\n  \}/
+      .exec(extSource);
+  const pp9Bodies = (pp9HandoffMatch === null ? '' : pp9HandoffMatch[0]) +
+    (pp9WrapperMatch === null ? '' : pp9WrapperMatch[0]) +
+    (pp9CommitMatch === null ? '' : pp9CommitMatch[0]);
+  const pp9CoreCalls = Array.from(new Set(pp9Bodies.match(/core\.[A-Za-z0-9_]+/g) ?? [])).sort();
+  check('PP9 the hand-off (open / protect wrapper / commit) exists, calls ONLY ' +
+    'n2h_probe_socket_open + n2h_probe_socket_commit on the native side, and carries no ' +
+    'close/dup/fcntl call on the fd',
+    pp9HandoffMatch !== null && pp9WrapperMatch !== null && pp9CommitMatch !== null &&
+    deepEq(pp9CoreCalls, ['core.n2h_probe_socket_commit', 'core.n2h_probe_socket_open']) &&
+    pp9Bodies.indexOf('closeSync(') < 0 && pp9Bodies.indexOf('fcntl') < 0 &&
+    !/close\(|dup\(/.test(pp9Bodies) &&
+    extSource.indexOf("'VPN_PROTECT_PROBE|requestId=%{public}s|fd=-1|handoff_id=|outcome=open-failed|'") > 0,
+    JSON.stringify({ calls: pp9CoreCalls, len: pp9Bodies.length }));
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

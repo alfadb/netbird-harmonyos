@@ -378,6 +378,152 @@ export function withTunnelSubnetRoute(config: VpnTunnelConfig): TunnelSubnetRout
   return { config: withRoute, added: true, network: network, reason: 'none' };
 }
 
+// ---------------------------------------------------------------------------
+// S6 diagnostic capture route (DEFAULT OFF; protect-bypass plan
+// n2h-kit/protect-bypass-plan-20260926.md §3.1 + §6 item 1②).
+//
+// The bypass experiment needs ONE destination that is captured by the tunnel
+// WITHOUT being masked by an endpoint exclusion, so the shell appends a single
+// explicit non-excluded `<target>/32` route for the arm ticket's
+// `protect_probe.target` while the `diag_capture_route` switch is on. Exactly
+// one destination is affected (no default route, no exclusion set edit), which
+// is what lets `/proc/net/route` decide whether the capture really landed.
+//
+// Pure function, no side effects, never throws: the caller logs the outcome
+// (`N2H_DIAG_CAPTURE_ROUTE|…`) and the returned config is the only input to the
+// downstream route logs / validation gate. It can only ADD one non-default,
+// non-excluded host route — it never removes, re-orders or relaxes an existing
+// entry, and it is never a gate pass.
+//
+// The entry is skipped (with a reason token, never silently) when:
+//   - no string target was carried (absent `protect_probe` / wrong type)
+//                                                          -> 'no-target',
+//   - the target is not the core's strict `IPv4:port` acceptance (bare
+//     dotted-quad without leading zeros + decimal 1..=65535 port without a
+//     leading zero — the SAME rules `parse_protect_target` applies, so a
+//     target the core would refuse never gets a capture route here)
+//                                                          -> 'invalid-target',
+//   - the target IP is ALREADY inside an isExcludedRoute entry (the derived
+//     endpoint /32|/128 freezes AND the base LAN /24 alike — a /24 exclusion
+//     puts the IP in the exclusion set just as much as a /32 does)
+//                                                          -> 'target-excluded'
+//     (the anti-masking precondition: an excluded target would re-create
+//     exactly the masking this experiment exists to remove, and a longer-prefix
+//     non-excluded /32 would silently shadow that exclusion).
+export interface CaptureRouteOutcome {
+  config: VpnTunnelConfig;
+  added: boolean;
+  // The bare target IPv4 the /32 was built from — '' when none could be
+  // derived (log truth only; never used to build a route in that case).
+  target: string;
+  // 'none' when added; otherwise one of the skip tokens above.
+  reason: string;
+}
+
+// The core's `parse_ipv4` acceptance (config.rs:408): 4 dot-separated parts,
+// 1-3 digits each, value <= 255, and NO leading zero (so '010.1.1.1' and the
+// short forms are refused on both sides alike).
+function isStrictTargetIpv4(address: string): boolean {
+  const octets: number[] = parseIpv4Octets(address);
+  if (octets.length !== 4) {
+    return false;
+  }
+  const parts: string[] = address.split('.');
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].length > 1 && parts[i].charCodeAt(0) === 0x30) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The core's port acceptance (parse_protect_target): decimal digits only,
+// 1..=65535, no leading zero.
+function isStrictTargetPort(port: string): boolean {
+  if (port.length === 0 || port.length > 5) {
+    return false;
+  }
+  if (port.length > 1 && port.charCodeAt(0) === 0x30) {
+    return false;
+  }
+  for (let i = 0; i < port.length; i++) {
+    const code: number = port.charCodeAt(i);
+    if (code < 0x30 || code > 0x39) {
+      return false;
+    }
+  }
+  const value: number = Number(port);
+  return value >= 1 && value <= 65535;
+}
+
+// Is `address` (a bare IPv4) inside `route`'s destination/prefix? Only the
+// two IPv4 shapes can contain an IPv4 target: a destination carrying ':' is an
+// IPv6 freeze and never matches, and a non-IPv4 destination is not a route this
+// helper can reason about (false = "not proven excluded", so the caller can
+// still refuse earlier on its own shape checks).
+function ipv4InRoute(address: string, route: VpnRouteConfig): boolean {
+  const prefix: number = route.prefixLength;
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return false;
+  }
+  const octets: number[] = parseIpv4Octets(address);
+  const destOctets: number[] = parseIpv4Octets(route.destination);
+  if (octets.length !== 4 || destOctets.length !== 4) {
+    return false;
+  }
+  const target: number =
+    ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+  const dest: number =
+    ((destOctets[0] << 24) | (destOctets[1] << 16) | (destOctets[2] << 8) | destOctets[3]) >>> 0;
+  const mask: number = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return ((target & mask) >>> 0) === ((dest & mask) >>> 0);
+}
+
+export function withCaptureRoute(config: VpnTunnelConfig, target: string): CaptureRouteOutcome {
+  const skipped = (ip: string, reason: string): CaptureRouteOutcome => {
+    return { config: config, added: false, target: ip, reason: reason };
+  };
+  if (typeof target !== 'string' || target.length === 0) {
+    return skipped('', 'no-target');
+  }
+  const sep: number = target.lastIndexOf(':');
+  if (sep <= 0 || sep === target.length - 1) {
+    return skipped('', 'invalid-target');
+  }
+  const address: string = target.slice(0, sep);
+  if (!isStrictTargetIpv4(address) || !isStrictTargetPort(target.slice(sep + 1))) {
+    return skipped('', 'invalid-target');
+  }
+  for (let i = 0; i < config.routes.length; i++) {
+    const route: VpnRouteConfig = config.routes[i];
+    if (route.isExcludedRoute === true && ipv4InRoute(address, route)) {
+      return skipped(address, 'target-excluded');
+    }
+  }
+  const route: VpnRouteConfig = {
+    destination: address,
+    prefixLength: 32,
+    // Same gateway/interface shape as every managed route (applyNetworkConfig)
+    // and the tunnel-subnet entry: explicitly non-default, non-excluded.
+    gateway: config.tunnelAddress,
+    hasGateway: true,
+    isDefaultRoute: false,
+    isExcludedRoute: false
+  };
+  const routes: VpnRouteConfig[] = config.routes.slice();
+  routes.push(route);
+  const withRoute: VpnTunnelConfig = {
+    tunnelAddress: config.tunnelAddress,
+    tunnelPrefixLength: config.tunnelPrefixLength,
+    interfaceName: config.interfaceName,
+    routes: routes,
+    dnsServers: config.dnsServers,
+    mtu: config.mtu,
+    peerEndpoint: config.peerEndpoint
+  };
+  return { config: withRoute, added: true, target: address, reason: 'none' };
+}
+
 // Maps the client configuration onto the platform VpnConfig exactly in the
 // spike-verified MR4 field shapes. Non-excluded routes omit isExcludedRoute
 // (platform default false) to stay byte-shape identical to the verified MR4

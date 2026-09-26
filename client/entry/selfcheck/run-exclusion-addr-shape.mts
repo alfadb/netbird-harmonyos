@@ -70,7 +70,10 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdVpnConfig: ['VpnRouteConfig', 'VpnTunnelConfig',
     // S1 diag switch (2026-09-23): the erased outcome interface the real
     // extension imports alongside withTunnelSubnetRoute
-    'TunnelSubnetRouteOutcome'],
+    'TunnelSubnetRouteOutcome',
+    // S6 diag capture route (2026-09-26): the second erased outcome interface
+    // the real extension now imports alongside withCaptureRoute
+    'CaptureRouteOutcome'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
 };
 

@@ -6,7 +6,8 @@ import vpnExtension from '@ohos.net.vpnExtension';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
-  TunnelSubnetRouteOutcome, withTunnelSubnetRoute } from './NetBirdVpnConfig';
+  CaptureRouteOutcome, TunnelSubnetRouteOutcome, withCaptureRoute,
+  withTunnelSubnetRoute } from './NetBirdVpnConfig';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -147,6 +148,27 @@ const N2H_DIAG_POSCTL_UNBOUND_KEY: string = 'diag_posctl_unbound';
 // `N2H_IFACE_BYTES_WINDOW|` (plan §6.4: the window prefix is pinned at exactly
 // one line per window by the selfcheck).
 const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';
+// S6 (2026-09-26, default OFF): `diag_capture_route`. The SAME arm-ticket
+// mechanism as S2-S5 (readDiagSwitch: literal JSON boolean true only, an absent
+// key is off and silent, a wrong-typed value is off plus the ONE
+// N2H_DIAG_OPTION_IGNORED line). When it is true AND the ticket carries a
+// usable `protect_probe.target`, the shell appends ONE explicit NON-excluded
+// `<target>/32` route to VpnConfig.routes on BOTH legs (withCaptureRoute,
+// same placement as the tunnel-subnet route) and logs one
+// N2H_DIAG_CAPTURE_ROUTE line per leg. This is the protect-bypass experiment's
+// capture face (plan §3.1 + §6 item 1②): without it the target would be
+// unreachable through the tunnel and the P0/P1/P2 arms would be meaningless.
+// The target is read from the SAME ticket object the arm forwards to the core
+// verbatim (`protect_probe`) — never from the want, never a second key. Off:
+// nothing is read into the config (byte-identical VpnConfig, no line).
+const N2H_DIAG_CAPTURE_ROUTE_KEY: string = 'diag_capture_route';
+// S7 (2026-09-26, opt-in): the protect-probe fd hand-off's trigger. The ticket
+// key is the SAME `protect_probe` object core parses (`{target, count,
+// mode:"protect"|"none"}`); ONLY `mode:"protect"` adds any shell behaviour
+// (open -> protect -> commit BEFORE the arm). `mode:"none"` and an absent key
+// are byte-identical to the pre-increment arm path.
+const N2H_PROTECT_PROBE_KEY: string = 'protect_probe';
+const N2H_PROTECT_PROBE_MODE_PROTECT: string = 'protect';
 // The burst cadence (plan §0/§6.1: 500 ms) and its hard cap. The app-side
 // window close edge lands about one watcher period after ARMED
 // (STATUS_POLL_MS = 5000) and must NOT cut the series short: the C7 same-source
@@ -233,6 +255,70 @@ interface N2hArmFileOptions {
   // it; whatever value the parsed JSON carries rides the opts verbatim and the
   // CORE's strict boolean check refuses a non-boolean (fail-closed).
   dns_nxdomain_echo?: boolean;
+  // 2026-09-26 (protect-bypass plan §5): the multi-probe positive-control count
+  // (`posctl_probes`, core default 1, cap 10). Forwarded ONLY when the control
+  // file carried the key — an absent key stays absent so the core's documented
+  // default keeps the single-probe window byte-identical. Same verbatim
+  // discipline as peer_overlay_ip: whatever value the parsed JSON carries rides
+  // the opts as-is (a wrong-typed value is forwarded AS THAT VALUE) and the
+  // core's strict u64 + range check refuses it.
+  posctl_probes?: number;
+  // 2026-09-26 (protect-bypass plan §4/§5): the opt-in protect probe arm
+  // (`{target:"IPv4:port", count, mode:"protect"|"none"}`). Forwarded ONLY when
+  // the file carried the key (absent stays absent: the core then opens no
+  // socket, sends nothing and adds no evidence byte). Never validated, trimmed
+  // or type-coerced here — the core's strict parse (bare IPv4:port, count
+  // 1..=10, frozen mode tokens) is the authority. The shell reads the SAME
+  // object once more for its two local triggers: the `diag_capture_route`
+  // target (readDiagSwitches) and the `mode:"protect"` fd hand-off
+  // (maybeArmN2hCollector).
+  protect_probe?: N2hProtectProbeTicket;
+}
+
+// 2026-09-26 (protect-bypass plan §4/§5): the ticket's `protect_probe` object
+// as the CORE defines it. The shell only ever reads `target` (string check) and
+// `mode` (strict literal compare); every other shape decision is core-side.
+interface N2hProtectProbeTicket {
+  target: string;
+  count: number;
+  mode: string;
+}
+
+// {ok,fd,handoff_id,bind_rc,bind_errno} JSON of the synchronous
+// core.n2h_probe_socket_open() NAPI export (the ice_socket_open hand-off shape):
+// ONE unbound, core-owned UDP fd the shell runs its protect wrapper on.
+// {ok:false,error,errno} on failure carries NO fd (a failed open answers
+// nothing usable rather than a -1 the caller might pass on).
+interface ProbeSocketOpenNative {
+  ok: boolean;
+  fd?: number;
+  handoff_id?: string;
+  bind_rc?: number;
+  bind_errno?: number;
+  error?: string;
+  errno?: number;
+}
+
+// {ok,fd,handoff_id,protect_result} / {ok:false,error} JSON of the synchronous
+// core.n2h_probe_socket_commit(fd, result) NAPI export: the shell reports ITS
+// protect outcome for the very fd it was handed. `error` is one of the core's
+// refusal tokens (`bad-result` / `no-pending-fd` / `fd-mismatch` /
+// `fd-invalid`).
+interface ProbeSocketCommitNative {
+  ok: boolean;
+  fd?: number;
+  handoff_id?: string;
+  protect_result?: string;
+  error?: string;
+}
+
+// The dedicated protect wrapper's four-way answer (plan §4): the `outcome`
+// token is the log's `outcome=` field and `result` is the commit token the core
+// records (`protected` / `unprotected` / `error`).
+interface ProtectProbeOutcome {
+  outcome: string;
+  result: string;
+  elapsedMs: number;
 }
 
 // N2-H I5: the `n2h_collector_arm` options document (§5.1).
@@ -278,6 +364,14 @@ interface N2hArmOptions {
   // Only set when exactly one vpn-tun handle was found; an absent key keeps
   // the probe byte-identical to the pre-binding behavior.
   probe_net_id?: number;
+  // 2026-09-26 (protect-bypass plan §5/§4): the multi-probe count and the
+  // opt-in protect probe, forwarded with the SAME present-only + verbatim
+  // discipline as peer_overlay_ip / dns_nxdomain_echo (see N2hArmFileOptions).
+  // An absent key must stay absent: the core's defaults (1 probe, no protect
+  // probe = no fd, no socket, no line, no evidence byte) are what the omission
+  // means.
+  posctl_probes?: number;
+  protect_probe?: N2hProtectProbeTicket;
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -526,6 +620,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private diagProtectProcessNet: boolean = false;
   private diagPosctlUnbound: boolean = false;
   private diagIfaceBytesBurst: boolean = false;
+  // S6 capture route (2026-09-26, default OFF): the switch itself plus the
+  // target it was given, both read ONCE per start flow from the SAME arm ticket
+  // (readDiagSwitches) — the target from the ticket's own `protect_probe.target`
+  // string, never from the want. '' means "no usable target was carried": with
+  // the switch on that is a logged skip, never a guessed destination. Nothing
+  // else writes them, and with the switch off the config path never reads them.
+  private diagCaptureRoute: boolean = false;
+  private diagCaptureTarget: string = '';
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -869,6 +971,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // 2026-09-26 (AUTH 0031 R0/R1): without this entry a packet sent to the
     // tunnel subnet from an unbound socket leaves over the physical network.
     merged = this.injectTunnelSubnetRoute(merged, 'initial');
+    // S6 (2026-09-26, default OFF): the diagnostic capture /32, in the SAME
+    // position as the tunnel-subnet entry (after the default-route gate,
+    // before the generation marker / route rows / validation gate) and on
+    // BOTH legs. Off: not called at all, so the submitted VpnConfig stays
+    // byte-identical.
+    if (this.diagCaptureRoute) {
+      merged = this.injectCaptureRoute(merged, 'initial');
+    }
     hilog.info(DOMAIN, TAG,
       'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
       'defaultRoutesInConfig=%{public}d',
@@ -1343,6 +1453,28 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // native call so a native failure is reported once (ARM_FAILED|REJECTED)
     // and never retried on later ticks.
     this.n2hArmAttempted = true;
+    // S7 (2026-09-26, opt-in; protect-bypass plan §4/§6 item 5): the arm body is
+    // ONE async step because the protect-probe hand-off must run
+    // open -> platform protect -> commit BEFORE the native arm call. Everything
+    // up to the first `await` still runs synchronously on THIS tick, so a ticket
+    // without `protect_probe.mode:"protect"` reaches `n2h_collector_arm` exactly
+    // as before (no await at all on that path). The last-resort catch keeps an
+    // unhandled rejection impossible and reports it in the pre-existing
+    // ARM_REJECTED shape.
+    this.runN2hArm(armPath).catch((error: Error): void => {
+      hilog.error(DOMAIN, TAG,
+        'N2H_COLLECTOR_ARM_REJECTED|requestId=%{public}s|summary=%{public}s|' +
+        'diag=true|is_evidence=false',
+        this.requestId, safeError(error));
+    });
+  }
+
+  // The gate-open half of the arm hook (the latch / gate / waiting semantics
+  // stay in maybeArmN2hCollector above): read the control file's options, build
+  // the options document, run the protect-probe fd hand-off when — and only
+  // when — the ticket asked for the protected arm, then call the ONE native
+  // arm entry.
+  private async runN2hArm(armPath: string): Promise<void> {
     // The control file carries only non-sensitive window options; a malformed
     // or absent body falls back to the §5.1 defaults (the core re-validates
     // and refuses anything it cannot understand).
@@ -1456,6 +1588,38 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (nxdomainEcho !== undefined) {
       opts.dns_nxdomain_echo = nxdomainEcho;
     }
+    // 2026-09-26 (protect-bypass plan §5/§4): the multi-probe count and the
+    // opt-in protect probe ride the same control file with the SAME
+    // present-only + verbatim discipline as the three keys above. The shell does
+    // NO semantic validation of either: whatever value the parsed JSON carries
+    // (a wrong type included) is forwarded AS THAT VALUE and the core's strict
+    // checks (u64 + 1..=10; bare `IPv4:port` target, count 1..=10, frozen mode
+    // tokens) decide. An absent key stays ABSENT — no default is injected, so
+    // the core's documented defaults (1 probe, no protect probe at all) remain
+    // exactly what an omission means. These two keys are the ONLY reason this
+    // shell ever hands the core a probe socket.
+    const posctlProbes: number | undefined = fileOpts.posctl_probes;
+    if (posctlProbes !== undefined) {
+      opts.posctl_probes = posctlProbes;
+    }
+    const protectProbe: N2hProtectProbeTicket | undefined = fileOpts.protect_probe;
+    if (protectProbe !== undefined) {
+      opts.protect_probe = protectProbe;
+    }
+    // S7 (2026-09-26): the hand-off trigger, read off the SAME object that was
+    // just forwarded verbatim. ONLY the exact string literal `protect` turns it
+    // on: `mode:"none"` (the control arm), an absent key, a wrong-typed value
+    // and a malformed object all leave the arm path byte-identical to the
+    // pre-increment behavior — no open call, no protect call, no commit, no
+    // line. The core still validates the object's real shape; this test only
+    // decides whether the shell runs its half of the hand-off.
+    let protectProbeMode: string = '';
+    if (protectProbe !== undefined && protectProbe !== null &&
+      typeof protectProbe === 'object') {
+      protectProbeMode = protectProbe.mode === N2H_PROTECT_PROBE_MODE_PROTECT
+        ? N2H_PROTECT_PROBE_MODE_PROTECT
+        : '';
+    }
     // 2026-09-20 (diagnostic-only): resolve the VPN network's netId via the
     // official read-only getters BEFORE the native arm, so the core can pin
     // the posctl probe's egress to the VPN network for this one diagnostic
@@ -1487,6 +1651,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     const optsJson: string = JSON.stringify(opts);
     const announcedLog: string = announcedPeer === undefined ? 'none' : clean(String(announcedPeer));
+    // S7 (2026-09-26, opt-in; plan §4): the protect-probe fd hand-off runs
+    // HERE — after the options document is final and BEFORE the native arm, so
+    // `n2h_collector_arm` consumes the fd this shell just had protected and
+    // committed. Awaited: the core's arm resolves the hand-off synchronously at
+    // its own entry, so "committed before the arm" is a real ordering, not a
+    // race. When the hand-off itself fails (open refused / malformed answer)
+    // the arm still runs — the core then records the never-committed hand-off
+    // in its own notes[].
+    if (protectProbeMode === N2H_PROTECT_PROBE_MODE_PROTECT) {
+      await this.handOffProtectProbe();
+    }
     try {
       const answer: N2hCollectorArmResult = JSON.parse(core.n2h_collector_arm(optsJson)) as
         N2hCollectorArmResult;
@@ -1565,6 +1740,129 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'diag=true|is_evidence=false',
         this.requestId, safeError(error as Error));
     }
+  }
+
+  // S7 (2026-09-26, opt-in; protect-bypass plan §4 + §6 item 5): the shell's
+  // half of the protect-probe fd hand-off, run BEFORE the native arm:
+  //   1. core.n2h_probe_socket_open()      — ONE unbound, core-owned UDP fd;
+  //   2. this.protectProbeSocketWithBox()  — the shell's protect call on that fd;
+  //   3. core.n2h_probe_socket_commit(fd, result) — the outcome for that fd;
+  //   4. (the caller then arms, and the arm consumes the committed fd.)
+  // fd ownership is the core's, unchanged: this method never closes the fd,
+  // never duplicates it and never touches its flags (an fd closed here would
+  // make the core's commit answer `fd-invalid` and the protected arm would
+  // silently become a no-op). Every outcome is logged on the ONE
+  // `VPN_PROTECT_PROBE|` prefix; an open failure prints its own line and
+  // returns, so the arm still runs and the core records the never-committed
+  // hand-off in its own notes.
+  private async handOffProtectProbe(): Promise<void> {
+    let opened: ProbeSocketOpenNative;
+    try {
+      opened = JSON.parse(core.n2h_probe_socket_open()) as ProbeSocketOpenNative;
+    } catch (error) {
+      // Codes/names only — the SAME discipline as the two diagnostic probes: a
+      // parse failure's message can quote the body it choked on, and this line
+      // must never echo a payload.
+      hilog.error(DOMAIN, TAG,
+        'VPN_PROTECT_PROBE|requestId=%{public}s|fd=-1|handoff_id=|outcome=open-failed|' +
+        'elapsedMs=0|commit=none|error=open-rejected|summary=code=%{public}s,name=%{public}s|' +
+        'diag=true|is_evidence=false',
+        this.requestId, String((error as BusinessFailure).code ?? 'no-code'),
+        clean((error as Error).name || 'Error'));
+      return;
+    }
+    if (opened.ok !== true || opened.fd === undefined || opened.fd < 0) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_PROTECT_PROBE|requestId=%{public}s|fd=-1|handoff_id=|outcome=open-failed|' +
+        'elapsedMs=0|commit=none|error=%{public}s|diag=true|is_evidence=false',
+        this.requestId, clean(String(opened.error ?? 'no-fd')));
+      return;
+    }
+    const fd: number = opened.fd as number;
+    // The hand-off id is the core's own `N2H-protect-<24 hex>` token: echoed
+    // verbatim into the line so the shell's outcome can be joined with the
+    // core's phase=open/commit lines (which carry the SAME id). A missing token
+    // is logged as `none`, never invented.
+    const handoffId: string = clean(String(opened.handoff_id ?? 'none'));
+    const connection: vpnExtension.VpnConnection | undefined = this.connection;
+    if (connection === undefined) {
+      // Unreachable on the real path (onCreate assigns this.connection before
+      // any watcher tick can reach the arm hook); honest, still-arming failure
+      // instead of a thrown-away rejected promise.
+      hilog.error(DOMAIN, TAG,
+        'VPN_PROTECT_PROBE|requestId=%{public}s|fd=%{public}d|handoff_id=%{public}s|' +
+        'outcome=no-connection|elapsedMs=0|commit=none|diag=true|is_evidence=false',
+        this.requestId, fd, handoffId);
+      return;
+    }
+    const protectedOutcome: ProtectProbeOutcome =
+      await this.protectProbeSocketWithBox(connection, fd);
+    const commit: string = this.commitProtectProbe(fd, protectedOutcome.result);
+    hilog.info(DOMAIN, TAG,
+      'VPN_PROTECT_PROBE|requestId=%{public}s|fd=%{public}d|handoff_id=%{public}s|' +
+      'outcome=%{public}s|elapsedMs=%{public}d|commit=%{public}s|diag=true|is_evidence=false',
+      this.requestId, fd, handoffId, protectedOutcome.outcome, protectedOutcome.elapsedMs, commit);
+  }
+
+  // The commit half of the hand-off: report THIS shell's protect outcome for the
+  // fd the core handed over. Returns the log line's `commit=` value: 'ok' on the
+  // core's acceptance, the core's own refusal token otherwise
+  // (`bad-result` / `no-pending-fd` / `fd-mismatch` / `fd-invalid`), and
+  // 'rejected' when the native call itself could not be parsed. Never throws and
+  // never retries: a refused commit is exactly what the experiment must see.
+  private commitProtectProbe(fd: number, result: string): string {
+    let commit: ProbeSocketCommitNative;
+    try {
+      commit = JSON.parse(core.n2h_probe_socket_commit(fd, result)) as ProbeSocketCommitNative;
+    } catch (error) {
+      return 'rejected';
+    }
+    if (commit.ok === true) {
+      return 'ok';
+    }
+    return clean(String(commit.error ?? 'unknown'));
+  }
+
+  // S7 (2026-09-26, plan §4): the DEDICATED protect wrapper for the probe fd.
+  // It ALWAYS calls the platform `connection.protect(fd)` — deliberately NOT
+  // routed through protectSocketWithBox, whose `protectDeviation=route-exclusion`
+  // short-circuit returns true WITHOUT calling the platform and would silently
+  // void this whole experiment (the deviation exists precisely to model
+  // "protect unavailable"). The 5 s wait is the house-standard bounded box and
+  // the handle is cleared as soon as the platform call settles (the 2026-09-25
+  // fix), so a resolved/rejected protect leaves no stale timeout behind.
+  // Four-way answer, never throws:
+  //   resolve    -> {outcome:'settled',  result:'protected'}
+  //   reject     -> {outcome:'rejected', result:'unprotected'}
+  //   box expiry -> {outcome:'timeout',  result:'error'}
+  //   sync throw -> {outcome:'throw',    result:'error'}
+  // No gate reads this value: it is recorded (via commit) and nothing else.
+  private async protectProbeSocketWithBox(connection: vpnExtension.VpnConnection,
+    fd: number): Promise<ProtectProbeOutcome> {
+    const t0: number = Date.now();
+    let boxTimer: number = -1;
+    const settled: Promise<ProtectProbeOutcome> = new Promise<ProtectProbeOutcome>(
+      (resolve: (value: ProtectProbeOutcome) => void): void => {
+        try {
+          connection.protect(fd).then((): void => {
+            clearTimeout(boxTimer);
+            resolve({ outcome: 'settled', result: 'protected', elapsedMs: Date.now() - t0 });
+          }).catch((): void => {
+            clearTimeout(boxTimer);
+            resolve({ outcome: 'rejected', result: 'unprotected', elapsedMs: Date.now() - t0 });
+          });
+        } catch (error) {
+          clearTimeout(boxTimer);
+          resolve({ outcome: 'throw', result: 'error', elapsedMs: Date.now() - t0 });
+        }
+      });
+    const box: Promise<ProtectProbeOutcome> = new Promise<ProtectProbeOutcome>(
+      (resolve: (value: ProtectProbeOutcome) => void): void => {
+        boxTimer = setTimeout((): void => {
+          resolve({ outcome: 'timeout', result: 'error', elapsedMs: Date.now() - t0 });
+        }, PROTECT_BOX_MS);
+      });
+    return await Promise.race([settled, box]);
   }
 
   // The iface-bytes WINDOW close edge: at most ONE vpn-tun re-read per
@@ -1677,6 +1975,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagProtectProcessNet = false;
     this.diagPosctlUnbound = false;
     this.diagIfaceBytesBurst = false;
+    this.diagCaptureRoute = false;
+    this.diagCaptureTarget = '';
     let text: string = '';
     try {
       text = fs.readTextSync(this.n2hArmFilePath()).trim();
@@ -1699,6 +1999,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagProtectProcessNet = this.readDiagSwitch(doc, N2H_DIAG_PROTECT_PROCESS_NET_KEY);
     this.diagPosctlUnbound = this.readDiagSwitch(doc, N2H_DIAG_POSCTL_UNBOUND_KEY);
     this.diagIfaceBytesBurst = this.readDiagSwitch(doc, N2H_DIAG_IFACE_BYTES_BURST_KEY);
+    // S6 (2026-09-26): the capture-route switch and its target. The target is
+    // the ticket's own `protect_probe.target` — the SAME object the arm
+    // forwards to the core verbatim — read here (EARLY) because the route must
+    // be in the FIRST VpnConfig, long before the arm hook runs.
+    this.diagCaptureRoute = this.readDiagSwitch(doc, N2H_DIAG_CAPTURE_ROUTE_KEY);
+    this.diagCaptureTarget = this.readProtectProbeTarget(doc);
+  }
+
+  // S6: the capture route's destination, taken from the ticket's `protect_probe`
+  // object. ONLY a JSON string `target` is ever used; an absent key, a
+  // non-object `protect_probe`, a non-string `target` or an empty string all
+  // answer '' — the switch then logs `reason=no-target` instead of inventing a
+  // destination. Nothing is validated here beyond "it is a string": the strict
+  // `IPv4:port` acceptance lives in the pure route helper (withCaptureRoute),
+  // which mirrors the core's own parse so a target the core would refuse never
+  // gets a route. Silent by construction (no log): the capture line is printed
+  // by injectCaptureRoute, only when the switch is on.
+  private readProtectProbeTarget(doc: Record<string, Object>): string {
+    const raw: Object | undefined = doc[N2H_PROTECT_PROBE_KEY];
+    if (raw === undefined || raw === null || typeof raw !== 'object') {
+      return '';
+    }
+    const target: Object | undefined = (raw as Record<string, Object>)['target'];
+    return typeof target === 'string' ? target : '';
   }
 
   // ONE switch key of the ticket document: literal boolean true = ON. An
@@ -1739,6 +2063,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'network=%{public}s|leg=%{public}s|result=%{public}s|reason=%{public}s',
       this.requestId, config.tunnelAddress, config.tunnelPrefixLength, outcome.network, leg,
       outcome.added ? 'added' : 'skipped', outcome.reason);
+    return outcome.config;
+  }
+
+  // S6 (diag, default off; protect-bypass plan §3.1/§6 ②): merge ONE explicit
+  // NON-excluded `<target>/32` capture route into `config.routes`, in the SAME
+  // position as the tunnel-subnet entry (after the default-route gate, before
+  // the generation marker / route rows / validation gate, on BOTH legs). Only
+  // called when the switch is on, so an off switch leaves the submitted
+  // VpnConfig byte-identical. The pure helper decides (withCaptureRoute); this
+  // method only logs the outcome — one line per leg, the derived /32 in
+  // `target=` ('' when none could be derived) and result=added|skipped plus the
+  // reason token. Never a gate: it can only append a non-default, non-excluded
+  // host route, and an excluded target is refused by the helper instead of
+  // re-creating the endpoint masking this experiment exists to remove.
+  private injectCaptureRoute(config: VpnTunnelConfig, leg: string): VpnTunnelConfig {
+    const outcome: CaptureRouteOutcome = withCaptureRoute(config, this.diagCaptureTarget);
+    hilog.info(DOMAIN, TAG,
+      'N2H_DIAG_CAPTURE_ROUTE|requestId=%{public}s|target=%{public}s|leg=%{public}s|' +
+      'result=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
+      this.requestId, outcome.target, leg, outcome.added ? 'added' : 'skipped', outcome.reason);
     return outcome.config;
   }
 
@@ -2078,6 +2422,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // initial leg: after the gate, before the generation marker / rows /
       // validation gate below.
       merged = this.injectTunnelSubnetRoute(merged, 'recreate');
+      // S6 (2026-09-26, default OFF): the capture /32 must be re-declared on
+      // the RECREATE leg too (the platform VpnConfig is fully REPLACED), in
+      // the same placement as the tunnel-subnet entry above.
+      if (this.diagCaptureRoute) {
+        merged = this.injectCaptureRoute(merged, 'recreate');
+      }
       // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
       // violates the SDK RouteInfo contract must never reach create().
       // Failing BEFORE the destroy leg keeps the current generation intact

@@ -43,10 +43,13 @@
 //                     globalThis.__NB_CREATE_FD (default 99) and records every
 //                     submitted config in globalThis.__NB_CREATED_CONFIGS;
 //                     destroy() resolves and is counted in __NB_DESTROYED;
-//                     protect() is counted in __NB_PROTECTED and driven by
-//                     globalThis.__NB_PROTECT_MODE — 'resolved' (default) /
-//                     'never' (a promise that never settles: the wedge shape
-//                     the per-fd bounded box reports as a timeout).
+//                     protect() is counted in __NB_PROTECTED, APPENDS to
+//                     __NB_PROBE_TRACE when the fixture seeded it, and is
+//                     driven by globalThis.__NB_PROTECT_MODE — 'resolved'
+//                     (default) / 'rejected' (Promise.reject) / 'throw'
+//                     (SYNCHRONOUS throw) / 'never' (a promise that never
+//                     settles: the wedge shape the per-fd bounded box reports
+//                     as a timeout).
 //                     protectProcessNet() (S3 diag switch,
 //                     API 22+, SDK d.ts:275) is driven by
 //                     globalThis.__NB_PROCESS_PROTECT_MODE —
@@ -62,6 +65,17 @@
 //                       __NB_NETCFG      connector_network_config() snapshot
 //                       __NB_STATUS      connector_status() document
 //                       __NB_ARM_OPTS    the arm options JSON the shell sent
+//                     Since 2026-09-26 the protect-probe fd hand-off's two
+//                     exports are functional too (S7 group):
+//                     n2h_probe_socket_open() and
+//                     n2h_probe_socket_commit(fd,result), driven by
+//                     __NB_PROBE_OPEN_ANSWER / __NB_PROBE_FD /
+//                     __NB_PROBE_COMMIT_ANSWER, counted in
+//                     __NB_PROBE_OPEN_CALLS / __NB_PROBE_COMMIT_CALLS and
+//                     recorded in __NB_PROBE_COMMIT_ARGS; together with the
+//                     FakeConnection's protect() they append the ORDERED
+//                     __NB_PROBE_TRACE (open / protect:<fd> / commit:<fd>:<r> /
+//                     arm) when the fixture seeds that array.
 //                     connector_stop / connector_wg_socket_feed /
 //                     connector_tun_fd_feed / connector_route_set_applied
 //                     answer success shapes (the ACK lands in __NB_ACK).
@@ -209,8 +223,20 @@ const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   '  }\n' +
   '  protect(fd) {\n' +
   '    g().__NB_PROTECTED = (g().__NB_PROTECTED || 0) + 1;\n' +
+  // 2026-09-26 (S7 protect-probe hand-off): an OPTIONAL ordered call trace
+  // (globalThis.__NB_PROBE_TRACE) the fixture seeds when it wants the
+  // open -> protect -> commit -> arm order as one observable sequence. Unset
+  // (the default for every pre-existing group) = not recorded at all.
+  '    if (g().__NB_PROBE_TRACE !== undefined) {\n' +
+  '      g().__NB_PROBE_TRACE.push("protect:" + fd);\n' +
+  '    }\n' +
   '    const mode = g().__NB_PROTECT_MODE || "resolved";\n' +
   '    if (mode === "never") { return new Promise(() => {}); }\n' +
+  // S7: the two failure shapes the dedicated probe wrapper maps to
+  // unprotected (reject) / error (SYNCHRONOUS throw). Additive: the default
+  // stays "resolved", so no pre-existing group changes shape.
+  '    if (mode === "rejected") { return Promise.reject(new Error("protect-rejected")); }\n' +
+  '    if (mode === "throw") { throw new Error("protect-throw"); }\n' +
   '    return Promise.resolve();\n' +
   '  }\n' +
   '  protectProcessNet() {\n' +
@@ -344,10 +370,48 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ ok: true, recreate: { count: 1 } });\n' +
   '  },\n' +
   '  n2h_collector_arm: (optsJson) => {\n' +
+  '    if (g().__NB_PROBE_TRACE !== undefined) { g().__NB_PROBE_TRACE.push("arm"); }\n' +
   '    g().__NB_ARM_CALLS = (g().__NB_ARM_CALLS || 0) + 1;\n' +
   '    g().__NB_ARM_OPTS = optsJson;\n' +
   '    if (typeof g().__NB_ARM_ANSWER === "string") { return g().__NB_ARM_ANSWER; }\n' +
   '    return JSON.stringify({ ok: true, armed: true, opened_mono: 4242 });\n' +
+  '  },\n' +
+  // 2026-09-26 (S7 protect-probe fd hand-off, plan §4/§6 item 5): the two NAPI
+  // exports the shell's half of the hand-off calls, with the ice_socket_open
+  // JSON shapes. Per-test globals, all defaulted to the happy path:
+  //   __NB_PROBE_OPEN_ANSWER   string|unset  -> an explicit open answer
+  //                                            (e.g. {ok:false,error:…,errno:…})
+  //                                            or a malformed body
+  //   __NB_PROBE_FD            number        -> the fd open answers (default 71)
+  //   __NB_PROBE_COMMIT_ANSWER string|unset  -> an explicit commit answer
+  //   __NB_PROBE_TRACE         array|unset   -> the ordered call trace the
+  //                                            fixture seeds ('open' /
+  //                                            'protect:<fd>' / 'commit:<fd>:
+  //                                            <result>' / 'arm')
+  //   __NB_PROBE_OPEN_CALLS / __NB_PROBE_COMMIT_CALLS / __NB_PROBE_COMMIT_ARGS
+  //                          -> the counters/arguments, so "no open" and "the
+  //                             commit got the very fd open returned" are
+  //                             behavioural assertions.
+  '  n2h_probe_socket_open: () => {\n' +
+  '    if (g().__NB_PROBE_TRACE !== undefined) { g().__NB_PROBE_TRACE.push("open"); }\n' +
+  '    g().__NB_PROBE_OPEN_CALLS = (g().__NB_PROBE_OPEN_CALLS || 0) + 1;\n' +
+  '    if (typeof g().__NB_PROBE_OPEN_ANSWER === "string") { return g().__NB_PROBE_OPEN_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: true,\n' +
+  '      fd: typeof g().__NB_PROBE_FD === "number" ? g().__NB_PROBE_FD : 71,\n' +
+  '      handoff_id: "N2H-protect-0123456789abcdef01234567",\n' +
+  '      bind_rc: 0, bind_errno: 0 });\n' +
+  '  },\n' +
+  '  n2h_probe_socket_commit: (fd, result) => {\n' +
+  '    if (g().__NB_PROBE_TRACE !== undefined) {\n' +
+  '      g().__NB_PROBE_TRACE.push("commit:" + fd + ":" + result);\n' +
+  '    }\n' +
+  '    g().__NB_PROBE_COMMIT_CALLS = (g().__NB_PROBE_COMMIT_CALLS || 0) + 1;\n' +
+  '    g().__NB_PROBE_COMMIT_ARGS = (g().__NB_PROBE_COMMIT_ARGS || []).concat([[fd, result]]);\n' +
+  '    if (typeof g().__NB_PROBE_COMMIT_ANSWER === "string") {\n' +
+  '      return g().__NB_PROBE_COMMIT_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: true, fd: fd,\n' +
+  '      handoff_id: "N2H-protect-0123456789abcdef01234567", protect_result: result });\n' +
   '  }\n' +
   '};');
 
