@@ -108,26 +108,30 @@ const N2H_ACCESS_ENOENT: string = '13900002';
 const N2H_POSCTL_PORT_DEFAULT: number = 40001;
 const N2H_PROBE_WAIT_MS_DEFAULT: number = 800;
 
-// S1-S4 diagnostic switches (2026-09-23, REAL-DEVICE diagnostic rounds only):
-// four ADDITIONAL keys of the SAME `netbird-n2h-arm` ticket EntryAbility writes
-// from the non-secret `n2h_arm_options` want parameter (and deletes on every
-// launch without it — the structural default-OFF guarantee). They are read
-// SEPARATELY and EARLIER than the arm options (startConnectorThenCreate: S1/S2
-// must be final before create()), they are NEVER forwarded to the core (the
-// arm opts document below is built field by field, so an extra ticket key has
-// no path into it), and each one is enabled ONLY by a literal JSON boolean
-// true. An ABSENT key is off and prints nothing; a key that is present with a
-// wrong type is off and prints exactly one
-// N2H_DIAG_OPTION_IGNORED|key=…|reason=… line (a ticket that says
-// "diag_tunnel_route":"true" must never be read as armed). No switch ever
-// changes a gate: they only add a route (S1), add one blocked-app entry (S2),
-// fire one diagnostic platform call (S3) or withhold one diagnostic probe
-// option (S4) — every result is `diag=true|is_evidence=false`.
-const N2H_DIAG_TUNNEL_ROUTE_KEY: string = 'diag_tunnel_route';
+// S2-S4 diagnostic switches (2026-09-23, REAL-DEVICE diagnostic rounds only):
+// three ADDITIONAL keys of the SAME `netbird-n2h-arm` ticket EntryAbility
+// writes from the non-secret `n2h_arm_options` want parameter (and deletes on
+// every launch without it — the structural default-OFF guarantee). They are
+// read SEPARATELY and EARLIER than the arm options (startConnectorThenCreate:
+// the blocked-app list must be final before create()), they are NEVER
+// forwarded to the core (the arm opts document below is built field by field,
+// so an extra ticket key has no path into it), and each one is enabled ONLY by
+// a literal JSON boolean true. An ABSENT key is off and prints nothing; a key
+// that is present with a wrong type is off and prints exactly one
+// N2H_DIAG_OPTION_IGNORED|key=…|reason=… line. No switch ever changes a gate:
+// they only add one blocked-app entry (S2), fire one diagnostic platform call
+// (S3) or withhold one diagnostic probe option (S4) — every result is
+// `diag=true|is_evidence=false`.
+//
+// The former S1 `diag_tunnel_route` key is RETIRED (2026-09-26): the tunnel
+// subnet is declared in VpnConfig.routes UNCONDITIONALLY (injectTunnelSubnetRoute
+// below / withTunnelSubnetRoute in NetBirdVpnConfig). The key is no longer read
+// at all, so a ticket that still carries it is handled like any other unknown
+// key: silently ignored, with no diagnostic line.
 const N2H_DIAG_BLOCKED_SELF_KEY: string = 'diag_blocked_self';
 const N2H_DIAG_PROTECT_PROCESS_NET_KEY: string = 'diag_protect_process_net';
 const N2H_DIAG_POSCTL_UNBOUND_KEY: string = 'diag_posctl_unbound';
-// The ONLY reason token of the S1-S4 ignored-key line: the key was present in
+// The ONLY reason token of the S2-S4 ignored-key line: the key was present in
 // the ticket document but its value was not a JSON boolean (string / number /
 // null / object). Never printed for an absent key, never for a boolean false.
 const N2H_DIAG_OPTION_IGNORED_REASON: string = 'not-boolean';
@@ -478,11 +482,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // only reached after an accepted create); it is forwarded as "no
   // generation", never fabricated into a value.
   private n2hAcceptedExclusionGeneration: number = -1;
-  // S1-S4 diagnostic switches (see the constants above). Read ONCE per start
+  // S2-S4 diagnostic switches (see the constants above). Read ONCE per start
   // flow from the arm ticket (readDiagSwitches) and defaulted to false here,
   // so an instance that never read a ticket — or read an absent/unreadable/
   // malformed one — is inert in every path below. Nothing else writes them.
-  private diagTunnelRoute: boolean = false;
+  // The tunnel-subnet route is NOT one of them: it is unconditional.
   private diagBlockedSelf: boolean = false;
   private diagProtectProcessNet: boolean = false;
   private diagPosctlUnbound: boolean = false;
@@ -593,12 +597,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId);
     }
 
-    // S1/S2 (default off): the diagnostic switches of the SAME arm ticket must
+    // S2-S4 (default off): the diagnostic switches of the SAME arm ticket must
     // be final BEFORE any VpnConfig is built in this flow, so they are read
     // here — early, on the SAME file the arm hook reads later — and never from
     // the want (Index.buildWant() does not forward launcher parameters). The
     // arm hook's own options read, the keys it forwards to the core and every
-    // pre-existing path stay untouched; these four keys never leave this
+    // pre-existing path stay untouched; these three keys never leave this
     // process. A missing ticket is the normal case: everything stays off and
     // NOTHING is logged.
     this.readDiagSwitches();
@@ -822,13 +826,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         : net.default_route.reason;
     }
     merged = gateDefaultRoutes(merged, gateAllowed);
-    // S1 (diag, default off): the tunnel subnet route is grafted AFTER the
-    // default-route gate (it is never an isDefaultRoute entry, so the gate can
-    // never swallow it) and BEFORE the generation marker / route rows / the
-    // fail-closed validation gate below, so all three describe THIS list.
-    if (this.diagTunnelRoute) {
-      merged = this.injectDiagTunnelRoute(merged, 'initial');
-    }
+    // The tunnel subnet route is grafted AFTER the default-route gate (it is
+    // never an isDefaultRoute entry, so the gate can never swallow it) and
+    // BEFORE the generation marker / route rows / the fail-closed validation
+    // gate below, so all three describe THIS list. UNCONDITIONAL since
+    // 2026-09-26 (AUTH 0031 R0/R1): without this entry a packet sent to the
+    // tunnel subnet from an unbound socket leaves over the physical network.
+    merged = this.injectTunnelSubnetRoute(merged, 'initial');
     hilog.info(DOMAIN, TAG,
       'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
       'defaultRoutesInConfig=%{public}d',
@@ -1548,7 +1552,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return `${this.context.filesDir}/${N2H_ARM_FILE_NAME}`;
   }
 
-  // S1-S4: read the four diagnostic switches out of the arm ticket. Called
+  // S2-S4: read the three diagnostic switches out of the arm ticket. Called
   // ONCE per start flow, BEFORE any VpnConfig is built. Never throws: a
   // missing / unreadable / empty / malformed ticket leaves every switch OFF
   // and prints nothing — the ticket's ABSENCE is the documented default (not
@@ -1556,7 +1560,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the parameter). Only a key PRESENT with a non-boolean value is logged, by
   // readDiagSwitch.
   private readDiagSwitches(): void {
-    this.diagTunnelRoute = false;
     this.diagBlockedSelf = false;
     this.diagProtectProcessNet = false;
     this.diagPosctlUnbound = false;
@@ -1578,7 +1581,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (doc === null) {
       return; // JSON 'null' parses but has no keys
     }
-    this.diagTunnelRoute = this.readDiagSwitch(doc, N2H_DIAG_TUNNEL_ROUTE_KEY);
     this.diagBlockedSelf = this.readDiagSwitch(doc, N2H_DIAG_BLOCKED_SELF_KEY);
     this.diagProtectProcessNet = this.readDiagSwitch(doc, N2H_DIAG_PROTECT_PROCESS_NET_KEY);
     this.diagPosctlUnbound = this.readDiagSwitch(doc, N2H_DIAG_POSCTL_UNBOUND_KEY);
@@ -1606,20 +1608,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return false;
   }
 
-  // S1 (diag, default off): merge the tunnel's own subnet into `config.routes`
-  // BEFORE the generation/route logs and the fail-closed validation gate (both
-  // legs), so the announced route count and the validation gate cover exactly
-  // the list that is submitted. The pure helper decides
-  // (withTunnelSubnetRoute); this method only logs the outcome — one line per
-  // leg, result=added|skipped plus the reason token, network='' when no
-  // network could be derived. Never a gate: it can only append a non-default,
-  // non-excluded route.
-  private injectDiagTunnelRoute(config: VpnTunnelConfig, leg: string): VpnTunnelConfig {
+  // Merge the tunnel's own subnet into `config.routes` BEFORE the
+  // generation/route logs and the fail-closed validation gate (both legs), so
+  // the announced route count and the validation gate cover exactly the list
+  // that is submitted. UNCONDITIONAL since 2026-09-26 (AUTH 0031 R0/R1):
+  // without the entry a packet to a tunnel address sent from an unbound socket
+  // never enters the VPN. The pure helper decides (withTunnelSubnetRoute); this
+  // method only logs the outcome — one line per leg, result=added|skipped plus
+  // the reason token, network='' when no network could be derived. Never a
+  // gate: it can only append a non-default, non-excluded route.
+  private injectTunnelSubnetRoute(config: VpnTunnelConfig, leg: string): VpnTunnelConfig {
     const outcome: TunnelSubnetRouteOutcome = withTunnelSubnetRoute(config);
     hilog.info(DOMAIN, TAG,
-      'N2H_DIAG_TUNNEL_ROUTE|requestId=%{public}s|addr=%{public}s|prefix=%{public}d|' +
-      'network=%{public}s|leg=%{public}s|result=%{public}s|reason=%{public}s|' +
-      'diag=true|is_evidence=false',
+      'VPN_TUNNEL_SUBNET_ROUTE|requestId=%{public}s|addr=%{public}s|prefix=%{public}d|' +
+      'network=%{public}s|leg=%{public}s|result=%{public}s|reason=%{public}s',
       this.requestId, config.tunnelAddress, config.tunnelPrefixLength, outcome.network, leg,
       outcome.added ? 'added' : 'skipped', outcome.reason);
     return outcome.config;
@@ -1955,14 +1957,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         ? net.default_route.allowed
         : false;
       merged = gateDefaultRoutes(merged, gateAllowed);
-      // S1 (diag, default off) on the RECREATE leg too: the rebuilt config
-      // must carry the tunnel subnet route whenever the first one did, or the
-      // recreate would silently DROP it (the platform VpnConfig is fully
-      // replaced). Same placement as the initial leg: after the gate, before
-      // the generation marker / rows / validation gate below.
-      if (this.diagTunnelRoute) {
-        merged = this.injectDiagTunnelRoute(merged, 'recreate');
-      }
+      // The RECREATE leg needs the tunnel subnet route too: the platform
+      // VpnConfig is fully REPLACED, so a rebuild without it would silently
+      // DROP the entry the first generation submitted. Same placement as the
+      // initial leg: after the gate, before the generation marker / rows /
+      // validation gate below.
+      merged = this.injectTunnelSubnetRoute(merged, 'recreate');
       // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
       // violates the SDK RouteInfo contract must never reach create().
       // Failing BEFORE the destroy leg keeps the current generation intact

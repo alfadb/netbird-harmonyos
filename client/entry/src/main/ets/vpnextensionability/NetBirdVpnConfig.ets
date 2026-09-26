@@ -244,22 +244,24 @@ export function gateDefaultRoutes(config: VpnTunnelConfig, allowed: boolean): Vp
 }
 
 // ---------------------------------------------------------------------------
-// S1 DIAGNOSTIC SWITCH (default OFF): the tunnel's own subnet as an explicit
-// managed route.
+// The tunnel's own subnet as an explicit managed route (DEFAULT behavior since
+// 2026-09-26; formerly the opt-in S1 diagnostic switch).
 //
 // Huawei support (docs/n2h-huawei-support-replies-20260923.md §3.1(a), row
 // 3.1(a)) states that whether a packet enters the VPN is decided ONLY by
 // matching VpnConfig.routes (+ the trusted/blocked application lists) — there
 // is NO implicit "the VPN app's own traffic / the tunnel subnet is handled
-// anyway" rule. The on-device session of 0021 therefore sent tunnel-subnet
-// traffic over the physical network: the submitted route list carried only
-// 192.168.50.0/24 + the /32 exclusions, never 100.108.0.0/16 (the kernel main
-// table had `vpn-tun 100.108.0.0/16` without a default route). This helper
+// anyway" rule. The on-device session of 0021 and the AUTH 0031 R0/R1 runs
+// confirmed both directions: with the tunnel subnet absent from the submitted
+// route list (0021: only 192.168.50.0/24 + the /32 exclusions, never
+// 100.108.0.0/16, while the kernel main table had `vpn-tun 100.108.0.0/16`),
+// a packet sent to a tunnel address from an unbound socket leaves over the
+// physical network; with the entry present, it enters the tunnel. This helper
 // derives exactly that one route from the tunnel address + prefix already
 // present in the config (100.108.144.165/16 -> 100.108.0.0/16).
 //
 // Pure function, no side effects, never throws: the caller logs the outcome
-// (`N2H_DIAG_TUNNEL_ROUTE|…`) and the returned config is the only input to
+// (`VPN_TUNNEL_SUBNET_ROUTE|…`) and the returned config is the only input to
 // the downstream route logs / validation gate. It can only ADD a non-default,
 // non-excluded route — it never removes, re-orders or relaxes an existing
 // entry, and it is never a gate pass.

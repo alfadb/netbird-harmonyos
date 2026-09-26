@@ -2174,12 +2174,15 @@ try {
       .indexOf('GET_NETWORK_STATS') < 0,
     'module.json5 pin');
 
-  // ---------------- D (2026-09-23): the S1-S4 diag switches ----------------
-  // Four DEFAULT-OFF diagnostic switches riding the SAME arm ticket
-  // (netbird-n2h-arm): S1 diag_tunnel_route (tunnel-subnet route), S2
-  // diag_blocked_self (blockedApplications = this bundle), S3
-  // diag_protect_process_net (one real protectProcessNet() call) and S4
-  // diag_posctl_unbound (the posctl probe gets no probe_net_id).
+  // ---------------- D (2026-09-23): the S2-S4 diag switches and the
+  // ---------------- DEFAULT tunnel-subnet route (2026-09-26) ---------------
+  // Three DEFAULT-OFF diagnostic switches riding the SAME arm ticket
+  // (netbird-n2h-arm): S2 diag_blocked_self (blockedApplications = this
+  // bundle), S3 diag_protect_process_net (one real protectProcessNet() call)
+  // and S4 diag_posctl_unbound (the posctl probe gets no probe_net_id). The
+  // former S1 diag_tunnel_route is RETIRED: the tunnel-subnet route is now
+  // declared in VpnConfig.routes UNCONDITIONALLY on BOTH legs, and a ticket
+  // that still carries the key is an unknown key — silently ignored.
   //
   // The D group drives the REAL code end-to-end:
   //   - the INITIAL leg through the REAL startConnectorThenCreate (credentials
@@ -2188,16 +2191,17 @@ try {
   //     buildPlatformVpnConfig and the FakeConnection's create()), so "the
   //     submitted VpnConfig" is a captured platform document, not a mirror:
   //     every capture is compared field-by-field (JSON.stringify equality)
-  //     against the SAME real pure composition WITHOUT the switch — that is
-  //     what "identical to the pre-switch behavior" means here;
+  //     against the SAME real pure composition — that is what "identical to
+  //     the documented default behavior" means here;
   //   - the RECREATE leg through the REAL performControlledRecreate
   //     (driveRecreate, now with a /16 netcfg variant);
   //   - the S3 call site through the REAL settleCreate;
   //   - the S4 branch through the REAL arm hook;
-  //   - the S1 network computation through the REAL pure function directly.
+  //   - the tunnel-subnet network computation through the REAL pure function
+  //     directly.
   const DIAG_PREFIX = 'N2H_DIAG_';
   const DIAG_IGNORED = 'N2H_DIAG_OPTION_IGNORED|';
-  const DIAG_TUNNEL_ROUTE = 'N2H_DIAG_TUNNEL_ROUTE|';
+  const TUNNEL_SUBNET_ROUTE = 'VPN_TUNNEL_SUBNET_ROUTE|';
   const DIAG_BLOCKED_APPS = 'N2H_DIAG_BLOCKED_APPS|';
   const DIAG_UNBOUND = 'N2H_DIAG_POSCTL_UNBOUND|';
   const PROCESS_NET = 'VPN_PROTECT_PROCESS_NET|';
@@ -2343,22 +2347,26 @@ try {
     return (G['__NB_CREATED_CONFIGS'] ?? []) as Record<string, unknown>[];
   }
 
-  // ---- D0: wiring pins + "the four keys never reach the core" -------------
+  // ---- D0: wiring pins + "the diag keys never reach the core" -------------
   const diagReadAt = extSource.indexOf('this.readDiagSwitches();');
-  const diagS1InitialAt = extSource.indexOf("this.injectDiagTunnelRoute(merged, 'initial')");
+  const subnetInitialAt = extSource.indexOf("this.injectTunnelSubnetRoute(merged, 'initial')");
   const diagLogInitialAt = extSource.indexOf(
     'this.logExclusionGeneration(EXCLUSION_GENERATION_INITIAL, merged.routes, 0);');
-  const diagS1RecreateAt = extSource.indexOf("this.injectDiagTunnelRoute(merged, 'recreate')");
+  const subnetRecreateAt = extSource.indexOf("this.injectTunnelSubnetRoute(merged, 'recreate')");
   const diagLogRecreateAt = extSource.indexOf(
     'this.logExclusionGeneration(EXCLUSION_GENERATION_RECREATE, merged.routes, 0);');
-  check('D0 the switches are read BEFORE the first config build and S1 lands before BOTH route dumps',
-    diagReadAt > 0 && diagReadAt < diagS1InitialAt && diagS1InitialAt < diagLogInitialAt &&
-    diagS1RecreateAt > 0 && diagS1RecreateAt < diagLogRecreateAt,
-    JSON.stringify({ diagReadAt, diagS1InitialAt, diagLogInitialAt, diagS1RecreateAt,
+  check('D0 the switches are read BEFORE the first config build and the tunnel-subnet route ' +
+    'lands before BOTH route dumps, on BOTH legs',
+    diagReadAt > 0 && diagReadAt < subnetInitialAt && subnetInitialAt < diagLogInitialAt &&
+    subnetRecreateAt > 0 && subnetRecreateAt < diagLogRecreateAt,
+    JSON.stringify({ diagReadAt, subnetInitialAt, diagLogInitialAt, subnetRecreateAt,
       diagLogRecreateAt }));
-  check('D0 S1 has exactly the TWO switch-guarded call sites (initial + recreate)',
-    extSource.split('this.injectDiagTunnelRoute(merged,').length === 3 &&
-    extSource.split('if (this.diagTunnelRoute) {').length === 3, 'S1 call-site pin');
+  check('D0 the tunnel-subnet route has exactly the TWO UNCONDITIONAL call sites ' +
+    '(initial + recreate) and every piece of the retired S1 switch is gone',
+    extSource.split('this.injectTunnelSubnetRoute(merged,').length === 3 &&
+    extSource.indexOf('if (this.diagTunnelRoute) {') < 0 &&
+    extSource.indexOf('diagTunnelRoute') < 0 &&
+    extSource.indexOf('N2H_DIAG_TUNNEL_ROUTE') < 0, 'tunnel-subnet call-site pin');
   check('D0 S2 rides buildPlatformVpnConfig at BOTH legs via the ONE list decider',
     extSource.split('this.diagBlockedApplicationList(').length === 3 &&
     extSource.split('buildPlatformVpnConfig(merged, this.diagBlockedApplicationList(').length === 3,
@@ -2379,7 +2387,9 @@ try {
     extSource.indexOf('N2H_DIAG_POSCTL_UNBOUND|requestId=%{public}s|diag=true|is_evidence=false') > 0,
     'S4 branch pin');
   // Behavioral: an ALL-ON ticket still forwards ONLY the documented arm keys
-  // (the four diag keys have no path into the opts document).
+  // (none of the diag keys has a path into the opts document). The retired
+  // `diag_tunnel_route` key is still carried here on purpose: it must leave no
+  // instance field and print nothing (unknown key, silent ignore).
   const d0 = freshAbility(mod, FIXTURE_FILESDIR);
   d0['n2hAcceptedExclusionGeneration'] = 0;
   setArmFile(true, undefined, JSON.stringify({
@@ -2392,25 +2402,45 @@ try {
   tickArm(d0, WG_READY);
   await drainProbe();
   const d0Opts = armOptsJson();
-  check('D0 an all-on ticket forwards NONE of the four keys to the core (opts = the documented set)',
+  check('D0 an all-on ticket forwards NONE of the diag keys to the core (opts = the documented set)',
     deepEq(Object.keys(d0Opts).sort(),
       ['exclusion_generation', 'posctl_port', 'probe_wait_ms', 'shell_exclusions']) &&
     d0Opts['probe_net_id'] === undefined &&
-    d0['diagTunnelRoute'] === true && d0['diagBlockedSelf'] === true &&
+    d0['diagTunnelRoute'] === undefined &&
+    d0['diagBlockedSelf'] === true &&
     d0['diagProtectProcessNet'] === true && d0['diagPosctlUnbound'] === true,
     JSON.stringify(d0Opts));
 
-  // ---- D1①: all four keys ABSENT = the pre-switch behavior, BOTH legs -----
+  // ---- D1①: NO ticket at all = the DEFAULT behavior, BOTH legs ------------
+  // The tunnel-subnet route is no longer a switch: with an absent ticket the
+  // submission is the legacy composition PLUS exactly that one route.
   const d1 = freshAbility(mod, FIXTURE_FILESDIR);
   setSwitchTicket(undefined);
   resetLog();
   const d1Submitted = await driveInitialLeg(d1, NETCFG_0021);
   const d1LegacyTunnel = legacyInitialTunnelConfig(d1, NETCFG_0021);
-  check('D1 initial leg: the switch-off drive really submitted ONE VpnConfig',
+  const d1Tunnel = injectedOf(d1LegacyTunnel);
+  check('D1 initial leg: the ticketless drive really submitted ONE VpnConfig',
     d1Submitted.length === 1, JSON.stringify(d1Submitted.length));
-  check('D1 initial leg: field-by-field identical to the pre-switch composition',
-    deepEq(d1Submitted[0], platformOf(d1LegacyTunnel)),
-    JSON.stringify({ submitted: d1Submitted[0], legacy: platformOf(d1LegacyTunnel) }));
+  check('D1 initial leg: field-by-field identical to the legacy composition PLUS the default ' +
+    'tunnel-subnet route (exactly one row more)',
+    deepEq(d1Submitted[0], platformOf(d1Tunnel['config'])) &&
+    ((d1Submitted[0] ?? {})['routes'] as unknown[]).length ===
+    ((d1LegacyTunnel['routes'] ?? []) as unknown[]).length + 1,
+    JSON.stringify({ submitted: d1Submitted[0], expected: platformOf(d1Tunnel['config']) }));
+  const d1Routes = (d1Submitted[0] ?? {})['routes'] as Array<Record<string, unknown>>;
+  const d1Subnet = d1Routes.filter((r: Record<string, unknown>): boolean =>
+    ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address'] ===
+    '100.108.0.0');
+  check('D1 initial leg: the default tunnel-subnet entry is exactly the managed shape ' +
+    '(100.108.0.0/16, gateway = the tunnel address, non-default, non-excluded, vpn-tun)',
+    d1Subnet.length === 1 && deepEq(d1Subnet[0], {
+      interface: 'vpn-tun',
+      destination: { address: { address: '100.108.0.0', family: 1 }, prefixLength: 16 },
+      gateway: { address: '100.108.144.165', family: 1 },
+      hasGateway: true,
+      isDefaultRoute: false
+    }), JSON.stringify(d1Routes));
   check('D1 initial leg: the submitted document has EXACTLY the four legacy fields ' +
     '(no blockedApplications / no trustedApplications / no fifth key)',
     deepEq(Object.keys(d1Submitted[0] ?? {}),
@@ -2418,6 +2448,11 @@ try {
     !('blockedApplications' in (d1Submitted[0] ?? {})) &&
     !('trustedApplications' in (d1Submitted[0] ?? {})),
     JSON.stringify(Object.keys(d1Submitted[0] ?? {})));
+  check('D1 initial leg: the tunnel-subnet marker is the fixed literal (leg=initial, ' +
+    'result=added, reason=none, no diag tail)',
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=initial|result=added|reason=none',
+    lastLine(TUNNEL_SUBNET_ROUTE));
   check('D1 initial leg: NOTHING diagnostic was logged (no N2H_DIAG_ line at all)',
     diagLines().length === 0 && Number(G['__NB_PROCESS_PROTECT_CALLS'] ?? 0) === 0,
     JSON.stringify(diagLines()));
@@ -2425,15 +2460,24 @@ try {
   const d1r = freshAbility(mod, FIXTURE_FILESDIR);
   d1r['frozenEndpointExclusions'] = derived;
   resetLog();
-  const d1rSubmitted = await driveRecreateCapture(d1r, netcfgJson());
-  check('D1 recreate leg: field-by-field identical to the pre-switch composition',
+  const d1rSubmitted = await driveRecreateCapture(d1r, netcfgRecreate16());
+  const d1rLegacyTunnel = legacyRecreateTunnelConfig(derived, netcfgRecreate16());
+  const d1rTunnel = injectedOf(d1rLegacyTunnel);
+  check('D1 recreate leg: field-by-field identical to the legacy composition PLUS the default ' +
+    'tunnel-subnet route (the rebuilt VpnConfig is fully replaced, so the entry must be ' +
+    're-declared)',
     d1rSubmitted.length === 1 &&
-    deepEq(d1rSubmitted[0], platformOf(legacyRecreateTunnelConfig(derived, netcfgJson()))),
-    JSON.stringify(d1rSubmitted[0]));
-  check('D1 recreate leg: no blockedApplications field, no N2H_DIAG_ line and no protectProcessNet call',
+    deepEq(d1rSubmitted[0], platformOf(d1rTunnel['config'])) &&
+    ((d1rSubmitted[0] ?? {})['routes'] as unknown[]).length ===
+    ((d1rLegacyTunnel['routes'] ?? []) as unknown[]).length + 1,
+    JSON.stringify({ submitted: d1rSubmitted[0], expected: platformOf(d1rTunnel['config']) }));
+  check('D1 recreate leg: no blockedApplications field, no N2H_DIAG_ line, no protectProcessNet ' +
+    'call, and the default marker says leg=recreate',
     !('blockedApplications' in (d1rSubmitted[0] ?? {})) &&
     !('trustedApplications' in (d1rSubmitted[0] ?? {})) &&
-    diagLines().length === 0 && Number(G['__NB_PROCESS_PROTECT_CALLS'] ?? 0) === 0,
+    diagLines().length === 0 && Number(G['__NB_PROCESS_PROTECT_CALLS'] ?? 0) === 0 &&
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=recreate|result=added|reason=none',
     JSON.stringify(diagLines()));
 
   // S4 default: with the switch ABSENT the probe_net_id still rides (PB1's
@@ -2451,16 +2495,24 @@ try {
     armOptsJson()['probe_net_id'] === 147 && diagLines().length === 0,
     JSON.stringify(armOptsJson()));
 
-  // ---- D2②: S1 on — the tunnel subnet route, BOTH legs -------------------
+  // ---- D2②: the DEFAULT tunnel-subnet route, BOTH legs --------------------
+  // The ticket still carries the RETIRED `diag_tunnel_route` key on purpose:
+  // it must be an inert unknown key, so this drive must submit bit-for-bit the
+  // SAME document as the ticketless D1 drive.
   const d2 = freshAbility(mod, FIXTURE_FILESDIR);
   setSwitchTicket(JSON.stringify({ diag_tunnel_route: true }));
   resetLog();
   const d2Submitted = await driveInitialLeg(d2, NETCFG_0021);
   const d2Gated = legacyInitialTunnelConfig(d2, NETCFG_0021);
   const d2Injected = injectedOf(d2Gated);
-  check('D2 initial leg: the submitted VpnConfig IS the pure composition (legacy config + the S1 route)',
+  check('D2 initial leg: the submitted VpnConfig IS the pure composition ' +
+    '(legacy config + the tunnel-subnet route)',
     d2Submitted.length === 1 && deepEq(d2Submitted[0], platformOf(d2Injected['config'])),
     JSON.stringify(d2Submitted[0]));
+  check('D2 a ticket carrying the RETIRED "diag_tunnel_route":true key behaves EXACTLY like no ' +
+    'ticket at all (same submitted document, no ignored-key line)',
+    deepEq(d2Submitted[0], d1Submitted[0]) && diagLines().length === 0,
+    JSON.stringify({ d2: d2Submitted[0], d1: d1Submitted[0], diag: diagLines() }));
   const d2Routes = (d2Submitted[0] ?? {})['routes'] as Array<Record<string, unknown>>;
   const d2Subnet = d2Routes.filter((r: Record<string, unknown>): boolean =>
     ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address'] ===
@@ -2480,15 +2532,16 @@ try {
     linesWith('VPN_ROUTE_ENTRY|').length === d2Routes.length,
     lastLine('VPN_EXCLUSION_GENERATION|') + ' rows=' +
     String(linesWith('VPN_ROUTE_ENTRY|').length));
-  check('D2 initial leg: the S1 marker is the fixed literal (added/none)',
-    lastLine(DIAG_TUNNEL_ROUTE) === 'N2H_DIAG_TUNNEL_ROUTE|requestId=' + REQUEST_ID +
-    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=initial|result=added|reason=none|' +
-    'diag=true|is_evidence=false', lastLine(DIAG_TUNNEL_ROUTE));
+  check('D2 initial leg: the tunnel-subnet marker is the fixed literal ' +
+    '(leg=initial, added/none, no diag tail)',
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=initial|result=added|reason=none',
+    lastLine(TUNNEL_SUBNET_ROUTE));
   const d2GatedAfter = (cfg['gateDefaultRoutes'] as
     (c: unknown, a: boolean) => Record<string, unknown>)(d2Injected['config'], false);
   const d2GatedRoutes = (d2GatedAfter['routes'] ?? []) as Array<Record<string, unknown>>;
-  check('D2 initial leg: gateDefaultRoutes(false) does NOT swallow the S1 entry and the ' +
-    'fail-closed validation gate accepted it (the create really ran)',
+  check('D2 initial leg: gateDefaultRoutes(false) does NOT swallow the tunnel-subnet entry and ' +
+    'the fail-closed validation gate accepted it (the create really ran)',
     d2GatedRoutes.length === ((d2Injected['config'] as Record<string, unknown>)['routes'] as
       unknown[]).length &&
     d2GatedRoutes.filter((r: Record<string, unknown>): boolean =>
@@ -2498,7 +2551,6 @@ try {
 
   const d2r = freshAbility(mod, FIXTURE_FILESDIR);
   d2r['frozenEndpointExclusions'] = derived;
-  d2r['diagTunnelRoute'] = true;
   resetLog();
   const d2rSubmitted = await driveRecreateCapture(d2r, netcfgRecreate16());
   const d2rInjected = injectedOf(legacyRecreateTunnelConfig(derived, netcfgRecreate16()));
@@ -2510,59 +2562,57 @@ try {
         ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address']
         === '100.108.0.0').length === 1),
     JSON.stringify(d2rSubmitted[0]));
-  check('D2 recreate leg: the S1 marker says leg=recreate and the marker counts match the submission',
-    lastLine(DIAG_TUNNEL_ROUTE) === 'N2H_DIAG_TUNNEL_ROUTE|requestId=' + REQUEST_ID +
-    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=recreate|result=added|reason=none|' +
-    'diag=true|is_evidence=false' &&
+  check('D2 recreate leg: the marker says leg=recreate and the marker counts match the submission',
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=100.108.144.165|prefix=16|network=100.108.0.0|leg=recreate|result=added|reason=none' &&
     fieldOf(lastLine('VPN_EXCLUSION_GENERATION|'), 'routes') ===
     String((d2rSubmitted[0]['routes'] as unknown[]).length) &&
     linesWith('VPN_ROUTE_ENTRY|').length === (d2rSubmitted[0]['routes'] as unknown[]).length,
-    lastLine(DIAG_TUNNEL_ROUTE));
+    lastLine(TUNNEL_SUBNET_ROUTE));
   const d2r32 = freshAbility(mod, FIXTURE_FILESDIR);
   d2r32['frozenEndpointExclusions'] = derived;
-  d2r32['diagTunnelRoute'] = true;
   resetLog();
   const d2r32Submitted = await driveRecreateCapture(d2r32, netcfgJson());
   check('D2 recreate leg with a /32 tunnel address: skipped with reason=prefix-32 and the ' +
     'submitted config stays the legacy one',
     d2r32Submitted.length === 1 &&
     deepEq(d2r32Submitted[0], platformOf(legacyRecreateTunnelConfig(derived, netcfgJson()))) &&
-    lastLine(DIAG_TUNNEL_ROUTE) === 'N2H_DIAG_TUNNEL_ROUTE|requestId=' + REQUEST_ID +
-    '|addr=10.99.0.1|prefix=32|network=10.99.0.1|leg=recreate|result=skipped|reason=prefix-32|' +
-    'diag=true|is_evidence=false', lastLine(DIAG_TUNNEL_ROUTE));
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=10.99.0.1|prefix=32|network=10.99.0.1|leg=recreate|result=skipped|reason=prefix-32',
+    lastLine(TUNNEL_SUBNET_ROUTE));
 
-  // S1 skip/duplicate paths through the REAL private call site (initial leg
+  // Skip/duplicate paths through the REAL private call site (initial leg
   // shape): the injected entry must never be a guess.
   const d2skip = freshAbility(mod, FIXTURE_FILESDIR);
-  d2skip['diagTunnelRoute'] = true;
   const d2SkipBase = legacyInitialTunnelConfig(d2, NETCFG_0021);
   resetLog();
-  const d2SkipOut = (d2skip['injectDiagTunnelRoute'] as
+  const d2SkipOut = (d2skip['injectTunnelSubnetRoute'] as
     (c: unknown, leg: string) => Record<string, unknown>)(
     Object.assign({}, d2SkipBase, { tunnelAddress: 'mgmt.test' }), 'initial');
   check('D2 a non-IPv4 tunnel address adds nothing and is logged as invalid-address',
     ((d2SkipOut['routes'] ?? []) as unknown[]).length ===
     (d2SkipBase['routes'] as unknown[]).length &&
-    lastLine(DIAG_TUNNEL_ROUTE) === 'N2H_DIAG_TUNNEL_ROUTE|requestId=' + REQUEST_ID +
-    '|addr=mgmt.test|prefix=16|network=|leg=initial|result=skipped|reason=invalid-address|' +
-    'diag=true|is_evidence=false', lastLine(DIAG_TUNNEL_ROUTE));
+    lastLine(TUNNEL_SUBNET_ROUTE) === 'VPN_TUNNEL_SUBNET_ROUTE|requestId=' + REQUEST_ID +
+    '|addr=mgmt.test|prefix=16|network=|leg=initial|result=skipped|reason=invalid-address',
+    lastLine(TUNNEL_SUBNET_ROUTE));
   resetLog();
-  (d2skip['injectDiagTunnelRoute'] as (c: unknown, leg: string) => Record<string, unknown>)(
+  (d2skip['injectTunnelSubnetRoute'] as (c: unknown, leg: string) => Record<string, unknown>)(
     Object.assign({}, d2SkipBase, { tunnelAddress: '2001:db8::1' }), 'initial');
   check('D2 an IPv6 tunnel address is refused as not-ipv4 (never parsed as a subnet)',
-    lastLine(DIAG_TUNNEL_ROUTE).indexOf('|network=|leg=initial|result=skipped|reason=not-ipv4|') > 0,
-    lastLine(DIAG_TUNNEL_ROUTE));
+    lastLine(TUNNEL_SUBNET_ROUTE).indexOf(
+      '|network=|leg=initial|result=skipped|reason=not-ipv4') > 0,
+    lastLine(TUNNEL_SUBNET_ROUTE));
   resetLog();
-  const d2DupOut = (d2skip['injectDiagTunnelRoute'] as
+  const d2DupOut = (d2skip['injectTunnelSubnetRoute'] as
     (c: unknown, leg: string) => Record<string, unknown>)(
     Object.assign({}, d2SkipBase, { tunnelAddress: '10.10.10.1', tunnelPrefixLength: 24 }),
     'initial');
   check('D2 an already-present destination+prefix is not duplicated (reason=duplicate)',
     ((d2DupOut['routes'] ?? []) as unknown[]).length ===
     (d2SkipBase['routes'] as unknown[]).length &&
-    lastLine(DIAG_TUNNEL_ROUTE).indexOf(
-      '|addr=10.10.10.1|prefix=24|network=10.10.10.0|leg=initial|result=skipped|reason=duplicate|') > 0,
-    lastLine(DIAG_TUNNEL_ROUTE));
+    lastLine(TUNNEL_SUBNET_ROUTE).indexOf(
+      '|addr=10.10.10.1|prefix=24|network=10.10.10.0|leg=initial|result=skipped|reason=duplicate') > 0,
+    lastLine(TUNNEL_SUBNET_ROUTE));
 
   // ---- D3③: S2 on — blockedApplications = the self bundle, BOTH legs ------
   const d3 = freshAbility(mod, FIXTURE_FILESDIR);
@@ -2571,13 +2621,14 @@ try {
   const d3Submitted = await driveInitialLeg(d3, NETCFG_0021);
   const d3Legacy = legacyInitialTunnelConfig(d3, NETCFG_0021);
   check('D3 initial leg: blockedApplications is EXACTLY [cn.alfadb.netbird], trustedApplications absent, ' +
-    'routes untouched (S1 off in this ticket)',
+    'routes = the default composition (legacy + the tunnel-subnet entry)',
     d3Submitted.length === 1 &&
     deepEq(d3Submitted[0]['blockedApplications'], [SELF_BUNDLE]) &&
     !('trustedApplications' in (d3Submitted[0] ?? {})) &&
     deepEq(Object.keys(d3Submitted[0]), ['addresses', 'routes', 'dnsAddresses', 'mtu',
       'blockedApplications']) &&
-    deepEq(d3Submitted[0]['routes'], platformOf(d3Legacy)['routes']),
+    deepEq(d3Submitted[0]['routes'],
+      platformOf(injectedOf(d3Legacy)['config'])['routes']),
     JSON.stringify(d3Submitted[0]));
   check('D3 initial leg: the S2 marker is the fixed literal',
     lastLine(DIAG_BLOCKED_APPS) === 'N2H_DIAG_BLOCKED_APPS|requestId=' + REQUEST_ID +
@@ -2800,16 +2851,15 @@ try {
   resetLog();
   (d6['readDiagSwitches'] as () => void)();
   const d6Ignored = linesWith(DIAG_IGNORED);
-  check('D6 three wrong-typed keys each print ONE ignored line naming their own key, ' +
-    'reason=not-boolean, in ticket order',
+  check('D6 each wrong-typed key prints ONE ignored line naming its own key, reason=not-boolean, ' +
+    'in ticket order — and the RETIRED "diag_tunnel_route" key prints NOTHING',
     deepEq(d6Ignored, [
-      'N2H_DIAG_OPTION_IGNORED|key=diag_tunnel_route|reason=not-boolean|diag=true|is_evidence=false',
       'N2H_DIAG_OPTION_IGNORED|key=diag_blocked_self|reason=not-boolean|diag=true|is_evidence=false',
       'N2H_DIAG_OPTION_IGNORED|key=diag_protect_process_net|reason=not-boolean|diag=true|is_evidence=false'
     ]), JSON.stringify(d6Ignored));
   check('D6 the wrong-typed keys are OFF — "true" the STRING / 1 / null never enable a switch, ' +
-    'an explicit false is a silent typed OFF',
-    d6['diagTunnelRoute'] === false && d6['diagBlockedSelf'] === false &&
+    'an explicit false is a silent typed OFF, and the retired S1 key leaves no field at all',
+    d6['diagTunnelRoute'] === undefined && d6['diagBlockedSelf'] === false &&
     d6['diagProtectProcessNet'] === false && d6['diagPosctlUnbound'] === false,
     JSON.stringify({ a: d6['diagTunnelRoute'], b: d6['diagBlockedSelf'],
       c: d6['diagProtectProcessNet'], d: d6['diagPosctlUnbound'] }));
@@ -2817,13 +2867,14 @@ try {
   setSwitchTicket(JSON.stringify({ diag_tunnel_route: 'true', diag_blocked_self: 1 }));
   resetLog();
   const d6Submitted = await driveInitialLeg(d6Drive, NETCFG_0021);
-  check('D6 a wrong-typed ticket changes NOTHING: the submission equals the legacy composition, ' +
-    'no blockedApplications, and the only N2H_DIAG_ lines are the two ignored-key lines',
+  check('D6 a wrong-typed ticket changes NOTHING beyond the default: the submission is the ' +
+    'legacy composition PLUS the default tunnel-subnet route, no blockedApplications, and the ' +
+    'only N2H_DIAG_ line is the one ignored-key line',
     d6Submitted.length === 1 &&
-    deepEq(d6Submitted[0], platformOf(legacyInitialTunnelConfig(d6Drive, NETCFG_0021))) &&
+    deepEq(d6Submitted[0],
+      platformOf(injectedOf(legacyInitialTunnelConfig(d6Drive, NETCFG_0021))['config'])) &&
     !('blockedApplications' in (d6Submitted[0] ?? {})) &&
     deepEq(diagLines(), [
-      'N2H_DIAG_OPTION_IGNORED|key=diag_tunnel_route|reason=not-boolean|diag=true|is_evidence=false',
       'N2H_DIAG_OPTION_IGNORED|key=diag_blocked_self|reason=not-boolean|diag=true|is_evidence=false'
     ]), JSON.stringify(diagLines()));
   const d6Silent = freshAbility(mod, FIXTURE_FILESDIR);
@@ -2838,17 +2889,17 @@ try {
   setSwitchTicket('null');
   resetLog();
   (d6Silent['readDiagSwitches'] as () => void)();
-  const d6NullSilent = diagLines().length === 0 && d6Silent['diagTunnelRoute'] === false;
+  const d6NullSilent = diagLines().length === 0 && d6Silent['diagTunnelRoute'] === undefined;
   setSwitchTicket(undefined);
   resetLog();
   (d6Silent['readDiagSwitches'] as () => void)();
   check('D6 absence, unrelated keys, malformed JSON and JSON null are ALL silent and off',
     d6OtherKeysSilent && d6MalformedSilent && d6NullSilent && diagLines().length === 0 &&
-    d6Silent['diagTunnelRoute'] === false && d6Silent['diagBlockedSelf'] === false &&
+    d6Silent['diagTunnelRoute'] === undefined && d6Silent['diagBlockedSelf'] === false &&
     d6Silent['diagProtectProcessNet'] === false && d6Silent['diagPosctlUnbound'] === false,
     JSON.stringify(diagLines()));
 
-  // ---- D7⑦: the S1 pure function (unit) ----------------------------------
+  // ---- D7⑦: the tunnel-subnet pure function (unit) ------------------------
   function tunCfg(address: string, prefix: number,
     routes: unknown[]): Record<string, unknown> {
     return { tunnelAddress: address, tunnelPrefixLength: prefix, interfaceName: 'vpn-tun',
@@ -2905,7 +2956,8 @@ try {
     JSON.stringify(d7Dup));
   const d7Gated = (cfg['gateDefaultRoutes'] as
     (c: unknown, a: boolean) => Record<string, unknown>)(d7P16['config'], false);
-  check('D7 gateDefaultRoutes(false) keeps the S1 entry (it is never an isDefaultRoute entry)',
+  check('D7 gateDefaultRoutes(false) keeps the tunnel-subnet entry (it is never an ' +
+    'isDefaultRoute entry)',
     ((d7Gated['routes'] ?? []) as unknown[]).length === 1,
     JSON.stringify(d7Gated));
 
