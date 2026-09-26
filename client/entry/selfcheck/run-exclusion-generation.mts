@@ -2765,6 +2765,17 @@ try {
   // never-settling call) while a never-settling call still reports exactly
   // ONE timeout line after the unchanged 5 s box.
   const PROTECT_TIMEOUT = 'VPN_PROTECT_TIMEOUT|';
+  // The elapsed witness below only proves that the 5 s deadline PASSED inside
+  // this window (a timer that survived cancellation would have fired in it) —
+  // it is never an assertion about exact milliseconds. The box fires 5000 ms
+  // after it is armed, and the settled call before it resolves in microtasks,
+  // so `Date.now()` at expiry can still be the SAME millisecond the witness
+  // was sampled in: the difference is then exactly 5000 and a strict `>` fails
+  // on the boundary. The comparison carries a small tolerance instead; the
+  // load-bearing assertions stay the line sets (NO timeout line for the
+  // settled call, EXACTLY one for the never-settling one).
+  const D4B_BOX_MS = 5000;
+  const D4B_BOX_TOLERANCE_MS = 50;
   function processNetTimeouts(): string[] {
     return linesWith(PROCESS_NET)
       .filter((l: string): boolean => l.indexOf('|result=timeout|') >= 0);
@@ -2793,7 +2804,7 @@ try {
   check('D4b protect never settles: the WHOLE box still answers false with exactly ONE ' +
     'stillPending=true timeout line (fd=43) after boxMs=5000, and the resolved fd=42 above — ' +
     'its 5 s deadline having passed inside this window — left no line at all',
-    d4bNeverOk === false && Date.now() - d4bResolvedAt > 5000 &&
+    d4bNeverOk === false && Date.now() - d4bResolvedAt >= D4B_BOX_MS - D4B_BOX_TOLERANCE_MS &&
     deepEq(linesWith(PROTECT_TIMEOUT), [
       'VPN_PROTECT_TIMEOUT|requestId=' + REQUEST_ID + '|fd=43|boxMs=5000|stillPending=true'
     ]), JSON.stringify(linesWith(PROTECT_TIMEOUT)));
@@ -2817,7 +2828,7 @@ try {
   check('D4b protectProcessNet never settles: the WHOLE box still answers false with exactly ' +
     'ONE result=timeout line after boxMs=5000, and the resolved call above — its 5 s deadline ' +
     'having passed inside this window — left no stale line',
-    d4cNeverOk === false && Date.now() - d4cResolvedAt > 5000 &&
+    d4cNeverOk === false && Date.now() - d4cResolvedAt >= D4B_BOX_MS - D4B_BOX_TOLERANCE_MS &&
     deepEq(processNetTimeouts(), [
       'VPN_PROTECT_PROCESS_NET|requestId=' + REQUEST_ID +
       '|result=timeout|boxMs=5000|switch=s3|diag=true|is_evidence=false'
