@@ -207,10 +207,12 @@ export async function runInterfaceStatsWindowClose(requestId: string): Promise<v
 // /proc reading by the device clock (`startedUnixMs` / `finishedUnixMs`).
 //
 // The INTERVAL lives in the extension, not here, on purpose: the burst must
-// be stopped and its handle cleared the moment the window closes, the ability
-// is destroyed or the watcher is stopped — a timer owned by this module could
-// not be cancelled by those paths. So this function carries no timer, no
-// loop, no await beyond its own sample, and no state of its own; `seq` is the
+// be stopped and its handle cleared when the ability is destroyed, when the
+// watcher is stopped, or when its own tick cap is reached — a timer owned by
+// this module could not be cancelled by those paths. (The app-side window
+// close edge deliberately does NOT stop it: the C7 pairing needs two sample
+// points ≥10 s apart.) So this function carries no timer, no loop, no await
+// beyond its own sample, and no state of its own; `seq` is the
 // caller's monotone tick index and is rendered verbatim.
 //
 // What this is NOT: NOT evidence, NOT a C7 counting input, NOT a packet

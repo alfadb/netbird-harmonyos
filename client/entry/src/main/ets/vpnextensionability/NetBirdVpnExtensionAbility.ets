@@ -147,13 +147,16 @@ const N2H_DIAG_POSCTL_UNBOUND_KEY: string = 'diag_posctl_unbound';
 // `N2H_IFACE_BYTES_WINDOW|` (plan §6.4: the window prefix is pinned at exactly
 // one line per window by the selfcheck).
 const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';
-// The burst cadence (plan §0/§6.1: 500 ms) and its hard cap: the nominal
-// collector window is one watcher period (STATUS_POLL_MS = 5000), so 24 ticks
-// at 500 ms span 12 s — twice the nominal window — while staying far below the
-// plan's ≤120-read ceiling. The cap is a floor-independent fuse, not the stop
-// condition: the ordinary stop is the window close edge / teardown.
+// The burst cadence (plan §0/§6.1: 500 ms) and its hard cap. The app-side
+// window close edge lands about one watcher period after ARMED
+// (STATUS_POLL_MS = 5000) and must NOT cut the series short: the C7 same-source
+// calibration pairs two sample points ≥10 s apart and depends only on the
+// peer's steady one-frame-per-second traffic, not on the app window being open.
+// So 40 ticks at 500 ms span 20 s — comfortably past that ≥10 s pairing gap —
+// while staying far below the plan's ≤120-read ceiling. The cap is the ordinary
+// stop; the other one is teardown (stopStatusAndNetcfgWatcher).
 const N2H_IFACE_BURST_INTERVAL_MS: number = 500;
-const N2H_IFACE_BURST_MAX_TICKS: number = 24;
+const N2H_IFACE_BURST_MAX_TICKS: number = 40;
 // The ONLY reason token of the S2-S4 ignored-key line: the key was present in
 // the ticket document but its value was not a JSON boolean (string / number /
 // null / object). Never printed for an absent key, never for a boolean false.
@@ -1580,10 +1583,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.n2hIfaceWindowCloseDone = true;
-    // S5: the window is CLOSING here — the app-side boundary of the collector
-    // window whose native N2H_COLLECTOR_CLOSE line the core emits and this
-    // shell cannot observe — so the optional burst survey series ends with it.
-    this.stopInterfaceStatsBurst();
+    // S5: the burst survey series is deliberately NOT stopped here. This edge
+    // is the app-side boundary of the collector WINDOW (the native
+    // N2H_COLLECTOR_CLOSE line is emitted by the core and is not observable in
+    // this shell) and it lands only ~5 s after ARMED, while the C7 same-source
+    // calibration needs two sample points ≥10 s apart from a steady peer
+    // stream: the series runs on to its own tick cap instead.
     runInterfaceStatsWindowClose(this.requestId).catch((error: Error): void => {
       hilog.warn(DOMAIN, TAG,
         'N2H_IFACE_BYTES_WINDOW_CLOSE_ABORTED|requestId=%{public}s|code=%{public}s|' +
@@ -1598,9 +1603,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // it runs, every N2H_IFACE_BURST_INTERVAL_MS one vpn-tun sample is emitted
   // as a `N2H_IFACE_BYTES_BURST|` line by the probe module (the read stays
   // there — this shell owns only the cadence, because the cadence must be
-  // cancellable from the close edge and the teardown paths). Hard cap:
-  // N2H_IFACE_BURST_MAX_TICKS. Starting twice is impossible: the handle guard
-  // below plus the one-shot arm attempt (n2hArmAttempted) both refuse.
+  // cancellable from the teardown paths). Hard cap: N2H_IFACE_BURST_MAX_TICKS,
+  // reached by the series itself (the window close edge does not stop it).
+  // Starting twice is impossible: the handle guard below plus the one-shot arm
+  // attempt (n2hArmAttempted) both refuse.
   private startInterfaceStatsBurst(): void {
     if (this.n2hIfaceBurstTimer >= 0 || this.destroyRequested) {
       return;
@@ -1612,8 +1618,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   // ONE burst tick. Every exit that is not an emission goes through
-  // stopInterfaceStatsBurst, so a tick that arrives after the cap, after the
-  // window close or after destroyRequested can neither print a line nor leave
+  // stopInterfaceStatsBurst, so a tick that arrives after the cap or after
+  // destroyRequested can neither print a line nor leave
   // a live handle behind (the -1 handle is checked first, so even a callback
   // that somehow survived cancellation is inert). Fire-and-forget: no await
   // added anywhere, and the last-resort catch keeps an unhandled rejection
@@ -1637,11 +1643,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   // Stop the burst survey series and CLEAR the interval handle. Called by
-  // (a) the window close edge (maybeCloseInterfaceStatsWindow — the app-side
-  // boundary of the collector window; the native N2H_COLLECTOR_CLOSE line is
-  // emitted by the core and is not observable here), (b) stopStatusAndNetcfgWatcher
-  // — the stop/teardown paths: connector death, fail-closed recreate teardown,
-  // onDestroy — and (c) the tick itself on the cap or on destroyRequested.
+  // (a) stopStatusAndNetcfgWatcher — the stop/teardown paths: connector death,
+  // fail-closed recreate teardown, onDestroy — and (b) the tick itself on the
+  // cap or on destroyRequested. Deliberately NOT called by the window close
+  // edge (maybeCloseInterfaceStatsWindow): the app window closing ~5 s after
+  // ARMED must not truncate a series whose calibration needs ≥10 s of steady
+  // peer traffic.
   // Idempotent: -1 is a no-op, so repeat calls print nothing and clear nothing
   // twice.
   private stopInterfaceStatsBurst(): void {
@@ -2291,9 +2298,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       clearInterval(this.watcherTimer);
       this.watcherTimer = -1;
     }
-    // S5: with the watcher stopped there is no tick left that could issue the
-    // window close edge, so the optional burst survey series stops here too
-    // (connector death, fail-closed recreate teardown, onDestroy).
+    // S5: this is teardown (connector death, fail-closed recreate teardown,
+    // onDestroy), so the optional burst survey series is cancelled and its
+    // handle cleared here — independently of the app window close edge, which
+    // no longer stops it.
     this.stopInterfaceStatsBurst();
   }
 

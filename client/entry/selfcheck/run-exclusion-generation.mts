@@ -188,16 +188,18 @@
 //      (literal true): exactly ONE 500 ms interval, seq from 0, the fixed
 //      field order and the two vpn-tun calls per tick (never the negative
 //      control), the key never reaching the core arm options, and no
-//      PROBE/WINDOW line from a burst tick; IB3 the hard cap (24 = 12 s, twice
-//      the nominal window): seq 0..23 then the interval is cleared and a
-//      further callback emits nothing; IB4 the window CLOSE edge clears it;
-//      IB5 stopStatusAndNetcfgWatcher clears it; IB6 onDestroy clears it; IB7
-//      the shared readDiagSwitch type discipline (string/number/null ⇒ OFF
-//      plus the ONE ignored-key line, literal false ⇒ OFF and silent); IB8
+//      PROBE/WINDOW line from a burst tick; IB3 the hard cap (40 = 20 s, past
+//      the ≥10 s gap the C7 pairing needs): seq 0..39 then the interval is
+//      cleared and a further callback emits nothing; IB4 the window CLOSE edge
+//      does NOT clear it — the series keeps emitting past that edge and only
+//      the cap stops it; IB5 stopStatusAndNetcfgWatcher clears it immediately;
+//      IB6 onDestroy clears it immediately; IB7 the shared readDiagSwitch type
+//      discipline (string/number/null ⇒ OFF plus the ONE ignored-key line,
+//      literal false ⇒ OFF and silent); IB8
 //      source pins (one shared switch read, the start inside the ok-branch
-//      after the ARMED literal behind its own gate, the 500 ms/24 constants,
-//      the three stop call sites, the new prefix and the timer-free probe
-//      module).
+//      after the ARMED literal behind its own gate, the 500 ms/40 constants,
+//      the TWO stop call sites with NO stop at the close edge, the new prefix
+//      and the timer-free probe module).
 //
 // Run: node client/entry/selfcheck/run-exclusion-generation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -1914,7 +1916,7 @@ try {
   // §3 mechanism a / §6.1): while it runs, every tick is ONE vpn-tun sample on
   // the SAME official per-NIC byte API the window edges use, emitted on its own
   // `N2H_IFACE_BYTES_BURST|` line. The timer belongs to the EXTENSION (it must
-  // be cancellable from the close edge and the teardown paths), so the tests
+  // be cancellable from the teardown paths), so the tests
   // below CAPTURE it — the watcherTick mechanism, no real timer is ever
   // scheduled — and drive its handler by hand; clearInterval is captured too,
   // so "the handle is really cleared" is an assertion about the REAL call site.
@@ -2055,8 +2057,10 @@ try {
       cleared: burstCleared }));
 
   // IB3: the hard cap. The series stops itself after burstCap ticks (cap
-  // = 24 at 500 ms = 12 s, twice the nominal 5 s window) — the tick past the
-  // cap clears the interval and emits NOTHING, and a callback that somehow
+  // = 40 at 500 ms = 20 s: the C7 same-source pairing needs two sample points
+  // ≥10 s apart, and the app-side window close edge — ~5 s after ARMED — is no
+  // longer a stop condition) — the tick past the cap clears the interval and
+  // emits NOTHING, and a callback that somehow
   // survived the cancellation is inert (the -1 handle is checked first). The
   // log is NOT reset here: the assertion below is about the WHOLE series, so
   // the two IB2 ticks are part of it.
@@ -2070,7 +2074,7 @@ try {
   const ibOptsAfterCap = ibOn['n2hIfaceBurstTimer'];
   check('IB3 the cap: the series emits tick 0 through cap-1 and stops (' + String(burstCap) +
     ' lines, seq strictly increasing, one clearInterval of the armed handle)',
-    burstCap === 24 && ibCapLines.length === burstCap &&
+    burstCap === 40 && ibCapLines.length === burstCap &&
     ibEq(ibCapSeqs, Array.from({ length: burstCap },
       (v: unknown, i: number): string => String(i))) &&
     ibEq(burstCleared, [burstTimers[0].id]) && ibOptsAfterCap === -1,
@@ -2088,11 +2092,15 @@ try {
     JSON.stringify({ burst: linesWith(BURST_PREFIX), cleared: burstCleared,
       calls: statsCalls().length, expected: ibExpectedCalls }));
 
-  // IB4: the WINDOW CLOSE edge stops it. The close edge is issued on the first
-  // watcher TRIGGER after the open edge (W2) — the app-side boundary of the
-  // collector window (the native N2H_COLLECTOR_CLOSE line is emitted by the
-  // core and is not observable in this shell) — so a real replayed tick must
-  // clear the burst interval, and the captured handler must be inert after it.
+  // IB4: the WINDOW CLOSE edge must NOT stop it. The close edge is issued on
+  // the first watcher TRIGGER after the open edge (W2) — the app-side boundary
+  // of the collector WINDOW (the native N2H_COLLECTOR_CLOSE line is emitted by
+  // the core and is not observable in this shell). The C7 same-source
+  // calibration pairs two sample points ≥10 s apart and depends only on the
+  // peer's steady one-frame-per-second traffic, NOT on the app window being
+  // open — and this edge lands only ~5 s after ARMED — so a real replayed tick
+  // must leave the burst interval ARMED, the series must keep emitting past it,
+  // and only the tick cap may clear the handle.
   installBurstTimerSpy();
   const ibClose = freshAbility(mod, FIXTURE_FILESDIR);
   ibClose['n2hAcceptedExclusionGeneration'] = 0;
@@ -2110,20 +2118,44 @@ try {
   ibCloseTick();
   await drainProbe();
   const ibCloseWindow = linesWith(WINDOW_PREFIX);
-  check('IB4 the window close edge fires exactly once AND clears the burst interval ' +
-    '(arming tick + one survey tick before it)',
+  check('IB4 the window close edge fires exactly once and leaves the burst interval ' +
+    'ARMED (arming tick + one survey tick before it)',
     ibCloseLinesBefore === 1 && burstTimers.length === 1 &&
     ibCloseWindow.length === 1 && fieldOf(ibCloseWindow[0], 'phase') === 'close' &&
-    ibEq(burstCleared, [burstTimers[0].id]) && ibClose['n2hIfaceBurstTimer'] === -1,
+    burstCleared.length === 0 && ibClose['n2hIfaceBurstTimer'] === burstTimers[0].id,
     JSON.stringify({ before: ibCloseLinesBefore, window: ibCloseWindow,
       cleared: burstCleared, handle: ibClose['n2hIfaceBurstTimer'] }));
   await burstTickOnce();
-  check('IB4 after the close edge: a further callback emits no BURST line at all',
-    linesWith(BURST_PREFIX).length === 0, JSON.stringify(linesWith(BURST_PREFIX)));
+  check('IB4 after the close edge the series still emits: the next tick is seq=1 and the ' +
+    'armed handle is unchanged',
+    linesWith(BURST_PREFIX).length === 1 &&
+    fieldOf(lastLine(BURST_PREFIX), 'seq') === '1' &&
+    burstCleared.length === 0 && ibClose['n2hIfaceBurstTimer'] === burstTimers[0].id,
+    JSON.stringify({ burst: linesWith(BURST_PREFIX), cleared: burstCleared,
+      handle: ibClose['n2hIfaceBurstTimer'] }));
+  // Drive the series (which survived the close edge) on to its cap: it must
+  // emit seq 1..cap-1 — the pre-close seq=0 tick had its log reset away above —
+  // and only THEN clear the interval, exactly once.
+  let ibCloseGuard = 0;
+  while (burstCleared.length === 0 && ibCloseGuard < burstCap + 5) {
+    ibCloseGuard++;
+    await burstTickOnce();
+  }
+  const ibCloseCapLines = linesWith(BURST_PREFIX);
+  check('IB4 past the close edge the series runs to the cap and only then clears the ' +
+    'interval (' + String(burstCap - 1) + ' post-close lines, seq 1..cap-1, one ' +
+    'clearInterval of the armed handle)',
+    ibCloseCapLines.length === burstCap - 1 &&
+    ibEq(ibCloseCapLines.map((l: string): string => fieldOf(l, 'seq')),
+      Array.from({ length: burstCap - 1 }, (v: unknown, i: number): string => String(i + 1))) &&
+    ibEq(burstCleared, [burstTimers[0].id]) && ibClose['n2hIfaceBurstTimer'] === -1,
+    JSON.stringify({ lines: ibCloseCapLines.length, cap: burstCap,
+      seqs: ibCloseCapLines.map((l: string): string => fieldOf(l, 'seq')),
+      cleared: burstCleared, handle: ibClose['n2hIfaceBurstTimer'] }));
 
-  // IB5: the STOP path (stopStatusAndNetcfgWatcher — connector death,
-  // fail-closed recreate teardown, onDestroy) clears it too, even with no
-  // window close edge in sight.
+  // IB5: the TEARDOWN path (stopStatusAndNetcfgWatcher — connector death,
+  // fail-closed recreate teardown, onDestroy) stops it IMMEDIATELY: no waiting
+  // for the cap, and independently of the window close edge.
   installBurstTimerSpy();
   const ibStop = freshAbility(mod, FIXTURE_FILESDIR);
   ibStop['n2hAcceptedExclusionGeneration'] = 0;
@@ -2204,9 +2236,10 @@ try {
   // IB8: source pins on the byte-identical sources. The switch is read through
   // the ONE shared readDiagSwitch; the start sits INSIDE the arm success branch
   // after the ARMED literal (the collector window's own boundary) and behind
-  // its own gate; the timer is a 500 ms one bounded by the cap; every stop path
-  // (close edge, watcher stop) calls the ONE stop helper; the burst prefix is
-  // the new one and the probe module still carries no timer.
+  // its own gate; the timer is a 500 ms one bounded by the cap; the stop paths
+  // (watcher stop, tick cap) call the ONE stop helper and the CLOSE EDGE is
+  // pinned NOT to; the burst prefix is the new one and the probe module still
+  // carries no timer.
   const burstKeyAt = extSource.indexOf("const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';");
   const burstReadAt = extSource.indexOf(
     'this.diagIfaceBytesBurst = this.readDiagSwitch(doc, N2H_DIAG_IFACE_BYTES_BURST_KEY);');
@@ -2216,12 +2249,17 @@ try {
   const burstTickAt = extSource.indexOf('private interfaceStatsBurstTick(): void {');
   const burstStopFnAt = extSource.indexOf('private stopInterfaceStatsBurst(): void {');
   const burstStopClearAt = extSource.indexOf('clearInterval(this.n2hIfaceBurstTimer);');
-  const burstStopAtClose = extSource.indexOf('this.stopInterfaceStatsBurst();');
-  const burstStopAtTick = extSource.indexOf('this.stopInterfaceStatsBurst();',
-    burstStopAtClose + 1);
+  const burstStopAtTick = extSource.indexOf('this.stopInterfaceStatsBurst();');
   const burstStopAtWatcherStop = extSource.indexOf('this.stopInterfaceStatsBurst();',
     burstStopAtTick + 1);
   const burstStopCallSites = extSource.split('this.stopInterfaceStatsBurst();').length - 1;
+  // The close edge must NOT be one of those call sites: the body of
+  // maybeCloseInterfaceStatsWindow (up to the next method) still issues its own
+  // close read, but carries no stop call.
+  const closeFnAt = extSource.indexOf('private maybeCloseInterfaceStatsWindow(): void {');
+  const burstStartFnAt = extSource.indexOf('private startInterfaceStatsBurst(): void {');
+  const closeFnBody = closeFnAt > 0 && burstStartFnAt > closeFnAt
+    ? extSource.slice(closeFnAt, burstStartFnAt) : '';
   check('IB8 the burst is ONE shared readDiagSwitch key, re-defaulted OFF in readDiagSwitches, ' +
     'after the other four switches',
     burstKeyAt > 0 && burstResetAt > 0 && burstReadAt > burstResetAt &&
@@ -2235,23 +2273,25 @@ try {
     burstTickAt > burstStartAt && extSource.indexOf(
       '}, N2H_IFACE_BURST_INTERVAL_MS);') > burstStartAt &&
     extSource.indexOf("const N2H_IFACE_BURST_INTERVAL_MS: number = 500;") > 0 &&
-    extSource.indexOf("const N2H_IFACE_BURST_MAX_TICKS: number = 24;") > 0 &&
+    extSource.indexOf("const N2H_IFACE_BURST_MAX_TICKS: number = 40;") > 0 &&
     extSource.indexOf('this.n2hIfaceBurstSeq >= N2H_IFACE_BURST_MAX_TICKS') > burstTickAt,
     JSON.stringify({ armedLit, burstGateAt, burstStartAt, elseAt, burstTickAt }));
-  check('IB8 every stop path calls the ONE stop helper — the close edge (before the close ' +
-    'read it belongs to), the tick itself, and the watcher stop — and the helper clears the ' +
-    'handle under an idempotent -1 guard',
-    burstStopFnAt > 0 && burstStopClearAt > burstStopFnAt && burstStopCallSites === 3 &&
-    extSource.indexOf('private maybeCloseInterfaceStatsWindow(): void {') < burstStopAtClose &&
-    burstStopAtClose < extSource.indexOf('runInterfaceStatsWindowClose(this.requestId).catch(') &&
+  check('IB8 the stop helper has exactly TWO call sites — the tick itself (the cap / ' +
+    'destroyRequested) and the watcher stop — the close edge is pinned NOT to be one of ' +
+    'them, and the helper clears the handle under an idempotent -1 guard',
+    burstStopFnAt > 0 && burstStopClearAt > burstStopFnAt && burstStopCallSites === 2 &&
     burstStopAtTick > burstTickAt && burstStopAtTick < burstStopFnAt &&
     burstStopAtWatcherStop > extSource.indexOf(
       'private stopStatusAndNetcfgWatcher(): void {') &&
     burstStopAtWatcherStop < extSource.indexOf('private logConfigApplied(') &&
+    closeFnBody.length > 0 &&
+    closeFnBody.indexOf('this.stopInterfaceStatsBurst();') < 0 &&
+    closeFnBody.indexOf('this.n2hIfaceWindowCloseDone = true;') > 0 &&
+    closeFnBody.indexOf('runInterfaceStatsWindowClose(this.requestId).catch(') > 0 &&
     extSource.indexOf('if (this.n2hIfaceBurstTimer >= 0) {', burstStopFnAt) > burstStopFnAt &&
     extSource.indexOf('this.n2hIfaceBurstTimer = -1;', burstStopFnAt) > burstStopFnAt,
-    JSON.stringify({ burstStopFnAt, burstStopClearAt, burstStopAtClose, burstStopAtTick,
-      burstStopAtWatcherStop, burstStopCallSites }));
+    JSON.stringify({ burstStopFnAt, burstStopClearAt, burstStopAtTick,
+      burstStopAtWatcherStop, burstStopCallSites, closeFnLen: closeFnBody.length }));
   check('IB8 the burst line carries the NEW prefix (never the window/probe one), the fixed ' +
     'field order and the diag tail, and the probe module still owns the read with no timer',
     probeSource.indexOf(
