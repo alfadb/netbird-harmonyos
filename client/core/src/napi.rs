@@ -120,6 +120,8 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
     reg!("n2h_collector_disarm", napi_n2h_collector_disarm);
+    reg!("n2h_probe_socket_open", napi_n2h_probe_socket_open);
+    reg!("n2h_probe_socket_commit", napi_n2h_probe_socket_commit);
     exports
 }
 
@@ -383,6 +385,8 @@ mod tests {
             "n2h_collector_status",
             "n2h_collector_evidence",
             "n2h_collector_disarm",
+            "n2h_probe_socket_open",
+            "n2h_probe_socket_commit",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -624,4 +628,25 @@ unsafe extern "C" fn napi_n2h_collector_evidence(env: NapiEnv, info: NapiCallbac
 
 unsafe extern "C" fn napi_n2h_collector_disarm(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::n2h_collector::disarm_json())
+}
+
+// 2026-09-26 protect-probe seam (protect-bypass plan §4/§6, DIAGNOSTIC-ONLY,
+// opt-in): the ice_socket_open hand-off shape applied to the protected arm.
+//   `n2h_probe_socket_open()` -> {ok,fd,handoff_id}: ONE unbound, native-owned
+//     UDP fd for the shell to run ITS protect wrapper on;
+//   `n2h_probe_socket_commit(fd, result)` with result in
+//     "protected"/"unprotected"/"error": the shell's protect outcome for that
+//     very fd, so the core's probe line can carry it. The shell must NOT close
+//     the fd (the core owns and closes it) and must call both BEFORE
+//     `n2h_collector_arm` with the `protect_probe` option.
+unsafe extern "C" fn napi_n2h_probe_socket_open(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::n2h_collector::protect_probe_open_json())
+}
+
+unsafe extern "C" fn napi_n2h_probe_socket_commit(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(
+        env,
+        crate::n2h_collector::protect_probe_commit_json(a.i32_at(0, -1), &a.string_at(1)),
+    )
 }

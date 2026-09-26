@@ -2415,6 +2415,89 @@ fn the_production_host_takes_the_arm_time_peer_announcement_and_keeps_the_counte
     );
 }
 
+// ---------------------------------------------------------------------------
+// 2026-09-26 protect-bypass increment — the protect-probe arm, end to end
+// ---------------------------------------------------------------------------
+
+/// protect-bypass plan §4/§5 (Stage 1): the shell's `open → protect → commit`
+/// hand-off (this test stands in for the shell) followed by the SHIPPED arm
+/// entry with the `protect_probe` option ⇒ the window really sends `count`
+/// unique-marker datagrams out of the COMMITTED fd to the arm's target, the
+/// document's notes record the burst, and — no protect-probe frame having
+/// entered this harness's tunnel — `tun_negative` stays untouched.
+///
+/// The default (no `protect_probe` option) is covered by every other scenario
+/// in this file: they must be byte-for-byte the pre-increment ones.
+#[test]
+fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
+    let _guard = serial();
+    reset_collector();
+    let sinks = SinkSet::bind();
+    let addrs = sinks.addrs();
+    let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
+    nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
+
+    // the physical receipt sink: the protect datagrams go OUTSIDE the tunnel
+    let phys = UdpSocket::bind("127.0.0.1:0").expect("physical sink bind");
+    phys.set_read_timeout(Some(Duration::from_secs(10))).expect("read timeout");
+    let phys_addr = phys.local_addr().expect("physical sink addr");
+
+    // the shell's side of the hand-off, verbatim (the shell must NOT close fd)
+    let opened = parse_json(&nc::protect_probe_open_json());
+    let fd = opened.at("fd").uint_of().expect("the opened fd") as i32;
+    assert!(fd > 0, "{opened:?}");
+    let handoff_id = opened.at("handoff_id").str_of().expect("hand-off id").to_string();
+    assert!(handoff_id.starts_with("N2H-protect-"), "{handoff_id}");
+    let commit = parse_json(&nc::protect_probe_commit_json(fd, "protected"));
+    assert_eq!(commit.at("ok").bool_of(), Some(true), "commit: {commit:?}");
+    assert_eq!(commit.at("fd").uint_of(), Some(fd as u64));
+
+    arm_ok(
+        &host,
+        &offline_opts_with_extra(
+            &addrs,
+            true,
+            200,
+            &format!(
+                "\"protect_probe\":{{\"target\":\"127.0.0.1:{}\",\"count\":2,\
+                 \"mode\":\"protect\"}}",
+                phys_addr.port()
+            ),
+        ),
+    );
+    wait_closed(&host, true, 20_000);
+
+    // two UNIQUE probes really reached the physical target
+    let mut got: Vec<Vec<u8>> = Vec::new();
+    let mut buf = [0u8; 2048];
+    while got.len() < 2 {
+        let (n, _from) = phys.recv_from(&mut buf).expect("the physical receipt");
+        got.push(buf[..n].to_vec());
+    }
+    let markers: std::collections::BTreeSet<String> = got
+        .iter()
+        .map(|p| nc::posctl_marker(p).expect("the frozen posctl wire form").to_string())
+        .collect();
+    assert_eq!(markers.len(), 2, "two unique probe ids: {markers:?}");
+
+    // the document carries the burst record and no tunnel violation
+    let (doc, _text) = closed_document();
+    let notes: Vec<&str> = doc.at("notes").arr_of().iter().filter_map(|n| n.str_of()).collect();
+    assert!(
+        notes.iter().any(|n| n.contains(&format!(
+            "protect probe burst complete: mode=protect|fd={fd}|target={phys_addr}|sent=2/2"
+        ))),
+        "the burst must be recorded with its fd and count: {notes:?}"
+    );
+    assert_eq!(doc.at("tun_negative").at("hit").bool_of(), Some(false));
+    assert!(doc.at("tun_negative").at("hits").arr_of().is_empty());
+    println!(
+        "[protect] arm→window: hand-off {handoff_id} fd={fd} ⇒ {} datagrams on {phys_addr}; \
+         notes record the burst",
+        markers.len()
+    );
+}
+
 // silence the unused-import warning for the evidence type used in helpers
 #[allow(dead_code)]
 fn _evidence_marker(_e: &Evidence) {}
