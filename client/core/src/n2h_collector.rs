@@ -2001,8 +2001,8 @@ pub struct ArmOptions {
     /// protected-socket probe. `None` (the DEFAULT) turns the whole seam off —
     /// no fd is taken, no socket is opened, no [`MARK_PROTECT_PROBE`] line is
     /// emitted, no tee entry is registered and no evidence byte changes.
-    /// `Some(..)` sends `count` unique-marker datagrams on ONE unbound UDP
-    /// socket: the fd the shell handed in through `n2h_probe_socket_open` /
+    /// `Some(..)` runs `count` DNS round trips on ONE unbound UDP socket: the
+    /// fd the shell handed in through `n2h_probe_socket_open` /
     /// `n2h_probe_socket_commit` for `mode:"protect"`, or a socket this core
     /// opens itself for the `mode:"none"` control arm.
     pub protect_probe: Option<ProtectProbeOption>,
@@ -2679,8 +2679,8 @@ fn run_window(win: Arc<Window>) {
     // 2026-09-26 (plan §4/§5): the opt-in protect probe, sent in the SAME
     // pre-observe position as the a2b positive control so its TUN frames are
     // scanned inside this window. With no `protect_probe` option this call is a
-    // no-op: no fd, no socket, no line, no tee entry.
-    send_protect_probes(&win, &mut notes);
+    // no-op: no fd, no socket, no line, no tee entry, no evidence byte.
+    let protect_burst = send_protect_probes(&win, &mut notes);
     observe(&win, &probes, &mut receipts, &mut posctl, peer_baseline, &mut notes);
 
     // -- window CLOSE (§2.2): the `after` edge FIRST, then the tee detach
@@ -2704,6 +2704,10 @@ fn run_window(win: Arc<Window>) {
         return;
     }
     let scan = win.tee.snapshot();
+    // [adjustment 2026-09-26] the protect-probe records are completed by the
+    // CLOSED tee snapshot (what the tunnel saw, per probe) — so the evidence
+    // document carries both arms' observation truthfully.
+    let protect_probe = protect_burst.map(|b| protect_probe_evidence(b, &scan));
     let evidence = assemble_device_evidence(WindowMaterial {
         freeze: win.freeze.clone(),
         probes,
@@ -2715,6 +2719,7 @@ fn run_window(win: Arc<Window>) {
         opened_mono: win.state.lock_poison().opened_mono,
         closed_mono: close_mono,
         generated_unix: win.clock.unix_s(),
+        protect_probe,
     });
     let document = with_collector_block(
         &evidence.to_json(),
@@ -3337,8 +3342,17 @@ fn emit_bind_net(line: &str) {
 //      experiment, plan §4) and reports the outcome back with
 //      `n2h_probe_socket_commit(fd, result)`;
 //   3. the arm that carries `protect_probe` consumes the committed hand-off at
-//      `arm_json` and the window sends `count` unique-marker datagrams on that
+//      `arm_json` and the window sends `count` unique DNS A queries on that
 //      SAME fd number to the arm's target.
+//
+// [adjustment 2026-09-26] Each probe is a DNS ROUND TRIP, not a bare datagram:
+// the target is a public resolver `IPv4:53` and the host side (behind a NAT)
+// cannot be a physical receipt endpoint, so the RECEIPT is the resolver's
+// reply on the same fd — `reply=echo` iff the answer carries this probe's
+// QNAME back. A probe that gets nothing inside the bound is `timeout`; a
+// datagram that is not ours is `other`. Both arms are recorded in the
+// document's `protect_probe` block, so `mode:"none"` is readable from the
+// evidence alone.
 //
 // fd ownership (the shell spec's contract): the fd is native-created and
 // native-owned. The shell must NOT close it; it is only ever handed back so
@@ -3373,14 +3387,37 @@ pub const PROTECT_PROBE_MAX: usize = 10;
 /// Probe-id kind token of the hand-off socket itself — `N2H-protect-<nonce>`.
 pub const PROTECT_HANDOFF_KIND_TOKEN: &str = "protect";
 
+/// [adjustment 2026-09-26] The QNAME suffix of one protect probe's A query: the
+/// probe id — LOWERCASED, because that is the form that travels on the wire —
+/// is the query name's first label, so a resolver echoing the QNAME back
+/// proves it saw THIS probe and the TUN scanner can match the same bytes.
+pub const PROTECT_PROBE_QNAME_SUFFIX: &str = ".n2h-probe.invalid";
+/// [adjustment 2026-09-26] The bounded per-probe reply wait. The probe is a DNS
+/// round trip now (the operator's public resolver is the only observable
+/// endpoint when the host side sits behind a NAT), so each probe WAITS for a
+/// reply on the very fd it sent on — at most this long.
+pub const PROTECT_PROBE_REPLY_WAIT_MS: u64 = 1_500;
+/// The `poll` beat of that bounded wait: 10 ms is the crate's bounded-poll
+/// slice, so the wait never occupies the fd for longer than one beat at a time.
+pub const PROTECT_PROBE_POLL_SLICE_MS: crate::sys::c_int = 10;
+/// The reply verdict of one probe — three tokens and only three.
+pub const PROTECT_REPLY_ECHO: &str = "echo";
+pub const PROTECT_REPLY_TIMEOUT: &str = "timeout";
+pub const PROTECT_REPLY_OTHER: &str = "other";
+/// What `reply_ms` says when the bounded wait ended without a reply: there is
+/// no round-trip time to report.
+pub const PROTECT_REPLY_MS_NA: &str = "na";
+
 /// Plan §4's opt-in protected-socket probe: ONE unbound UDP socket, `count`
-/// unique-marker datagrams, ONE external `IPv4:port` target.
+/// DNS round trips, ONE external `IPv4:port` target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectProbeOption {
-    /// The external target as a bare dotted-quad IPv4 + port (plan §3's T-A/T-B
-    /// candidates). Strictly parsed; a hostname or IPv6 literal refuses the arm.
+    /// [adjustment 2026-09-26] The PUBLIC DNS RESOLVER to query, as a bare
+    /// dotted-quad IPv4 + port (normally `:53`) — the host side is behind a NAT
+    /// and cannot receive the probe physically, so the resolver's reply is the
+    /// receipt. Strictly parsed; a hostname or IPv6 literal refuses the arm.
     pub target: ([u8; 4], u16),
-    /// How many unique-probe datagrams leave on that ONE fd.
+    /// How many unique-probe DNS round trips run on that ONE fd.
     pub count: usize,
     /// Which matrix arm this window is.
     pub mode: ProtectProbeMode,
@@ -3610,12 +3647,16 @@ fn take_protect_probe_lines() -> Vec<String> {
     PROTECT_LINES.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
-/// ONE datagram's frozen line (plan §4's verbatim field contract):
+/// ONE probe's frozen line (plan §4's verbatim field contract, plus the
+/// adjustment's reply fields):
 /// `N2H_PROTECT_PROBE|probe_id=…|fd=…|mode=…|protect_result=…|target=…|
-/// send_len=…|send_errno=…|diag=true|is_evidence=false`. Metadata only: the
-/// marker, the fd number, the mode/outcome tokens, the target and the send
-/// result — no payload, no key material. `send_len` is the real `sendto`
-/// return (0 on failure) and `send_errno` the real errno (0 on success).
+/// send_len=…|send_errno=…|reply=echo|timeout|other|reply_ms=…|diag=true|
+/// is_evidence=false`. Metadata only: the id, the fd number, the mode/outcome
+/// tokens, the resolver target, the send result and the reply verdict — no
+/// payload, no key material. `send_len` is the real `sendto` return (0 on
+/// failure), `send_errno` the real errno (0 on success), `reply_ms` the
+/// observed round trip or [`PROTECT_REPLY_MS_NA`].
+#[allow(clippy::too_many_arguments)]
 fn protect_probe_line(
     probe_id: &str,
     fd: crate::sys::c_int,
@@ -3624,12 +3665,158 @@ fn protect_probe_line(
     target: ([u8; 4], u16),
     send_len: usize,
     send_errno: crate::sys::c_int,
+    reply: &str,
+    reply_ms: &str,
 ) -> String {
     format!(
         "{MARK_PROTECT_PROBE}|probe_id={probe_id}|fd={fd}|mode={mode}|\
          protect_result={protect_result}|target={}|send_len={send_len}|\
-         send_errno={send_errno}|diag=true|is_evidence=false",
+         send_errno={send_errno}|reply={reply}|reply_ms={reply_ms}|diag=true|is_evidence=false",
         protect_target_display(target)
+    )
+}
+
+/// The QNAME of one protect probe's A query: `<probe id, lowercased>` as the
+/// first label, then the frozen suffix. The id is lowercased because DNS names
+/// are case-insensitive (a real resolver may case-fold) and the TUN scanner's
+/// verbatim byte match must look for the form that is actually on the wire.
+pub fn protect_probe_qname(probe_id: &str) -> String {
+    format!("{}{}", protect_probe_wire_label(probe_id), PROTECT_PROBE_QNAME_SUFFIX)
+}
+
+/// The bytes that carry one probe's identity INSIDE the query frame (and in a
+/// resolver's answer): the probe id lowercased, i.e. the QNAME's first label.
+/// This — not the pre-adjustment posctl payload form — is the marker the TUN
+/// tee registers for a protect probe.
+pub fn protect_probe_wire_label(probe_id: &str) -> String {
+    probe_id.to_ascii_lowercase()
+}
+
+/// The verdict of ONE protect probe's bounded reply wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtectReply {
+    /// The answer carried this probe's QNAME back, verbatim (the SAME
+    /// [`dns_echo_receipt`] caliber the dns-nxdomain-echo path registered).
+    Echo(u64),
+    /// Datagram(s) arrived but none carried this probe's QNAME.
+    Other(u64),
+    /// Nothing arrived inside the bound.
+    Timeout,
+}
+
+impl ProtectReply {
+    fn token(self) -> &'static str {
+        match self {
+            ProtectReply::Echo(_) => PROTECT_REPLY_ECHO,
+            ProtectReply::Other(_) => PROTECT_REPLY_OTHER,
+            ProtectReply::Timeout => PROTECT_REPLY_TIMEOUT,
+        }
+    }
+
+    fn ms(self) -> Option<u64> {
+        match self {
+            ProtectReply::Echo(ms) | ProtectReply::Other(ms) => Some(ms),
+            ProtectReply::Timeout => None,
+        }
+    }
+}
+
+/// ONE protect probe's DNS round trip on the EXACT fd the arm sends on: a
+/// standard A query for `qname` (the same [`build_dns_a_query`] the
+/// dns-nxdomain-echo path uses), then a bounded wait for an answer ON THAT
+/// SAME fd.
+///
+/// THIS IS THE ONE PLACE THE COLLECTOR READS A SOCKET, and it is the
+/// diagnostic seam's deliberate exception to the "core 侧只用原始 sendto、不做
+/// 阻塞读" discipline: the whole question of this arm is whether a reply comes
+/// back on the socket the shell protected, so the reply must be read. The read
+/// is NON-BLOCKING by construction — `poll(POLLIN, 10 ms)` beats against a
+/// monotonic deadline and every `recvfrom` carries `MSG_DONTWAIT` (the fd's own
+/// flags are never touched, so the shell's socket is handed back unchanged) —
+/// so no other thread is ever held up and a silent resolver costs exactly the
+/// bound, never more. `stop()` is the window's own disarm/deadline check, so a
+/// wait can never outlive the window.
+///
+/// Verdict (a datagram that ECHOES this qname wins immediately; datagrams with
+/// another name are remembered and only decide `other` once the bound ends
+/// without an echo — a late answer to an earlier probe on the same fd is a
+/// truthful `other`, not a fabricated `echo`).
+fn protect_probe_round_trip(
+    fd: crate::sys::c_int,
+    target: ([u8; 4], u16),
+    qname: &str,
+    stop: &dyn Fn() -> bool,
+) -> (Result<usize, crate::sys::c_int>, ProtectReply) {
+    // Unreachable for the generated id alphabet (`[A-Za-z0-9-]` + the two
+    // frozen suffix labels); a None is still handled as a refused SEND, so the
+    // line reports a real errno instead of an invented reply.
+    let Some(query) = build_dns_a_query(qname) else {
+        return (Err(crate::sys::EINVAL), ProtectReply::Timeout);
+    };
+    let sent_len = match send_protect_datagram(fd, target, &query) {
+        Ok(n) => n,
+        Err(errno) => return (Err(errno), ProtectReply::Timeout),
+    };
+    let sent_at = crate::sys::mono_ms();
+    let deadline = sent_at.saturating_add(PROTECT_PROBE_REPLY_WAIT_MS);
+    let mut saw_other_ms: Option<u64> = None;
+    let mut buf = [0u8; 2048];
+    while crate::sys::mono_ms() < deadline {
+        if stop() {
+            break;
+        }
+        let (ret, errno, revents) =
+            crate::sys::poll1(fd, crate::sys::POLLIN, PROTECT_PROBE_POLL_SLICE_MS);
+        if ret < 0 {
+            if errno == crate::sys::EINTR {
+                continue;
+            }
+            break; // a poll failure cannot yield an answer: the truth is timeout
+        }
+        if ret == 0 {
+            continue; // an empty beat
+        }
+        if (revents & crate::sys::POLLNVAL) != 0 {
+            break; // the fd is no longer usable: no answer can ever arrive
+        }
+        // POLLIN — or POLLERR/POLLHUP, which also make poll return immediately
+        // and MUST be consumed here, or the loop would spin on a pending socket
+        // error until the deadline. One non-blocking `recvfrom` consumes
+        // whichever it is.
+        let mut from = crate::sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut from_len = core::mem::size_of::<crate::sys::sockaddr_in>() as u32;
+        let n = unsafe {
+            crate::sys::recvfrom(
+                fd,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                crate::sys::MSG_DONTWAIT,
+                &mut from,
+                &mut from_len,
+            )
+        };
+        if n < 0 {
+            // EAGAIN/EINTR after a spurious wakeup, or a consumed pending error
+            // (e.g. ECONNREFUSED from an ICMP port-unreachable): NOT an answer
+            // to this QNAME, so poll again — the honest `timeout` this bound
+            // ends with is the verdict, never an invented `echo`.
+            continue;
+        }
+        let now = crate::sys::mono_ms();
+        let ms = now.saturating_sub(sent_at);
+        if dns_echo_receipt(&buf[..n as usize], qname) {
+            return (Ok(sent_len), ProtectReply::Echo(ms));
+        }
+        if saw_other_ms.is_none() {
+            saw_other_ms = Some(ms);
+        }
+    }
+    (
+        Ok(sent_len),
+        match saw_other_ms {
+            Some(ms) => ProtectReply::Other(ms),
+            None => ProtectReply::Timeout,
+        },
     )
 }
 
@@ -3720,10 +3907,20 @@ fn resolve_probe_handoff(options: &ArmOptions, notes: &mut Vec<String>) -> Optio
     }
 }
 
-/// Plan §5's protected/control probe: `count` unique-marker datagrams on ONE
-/// fd, [`POSCTL_PROBE_INTERVAL_MS`] apart, one [`MARK_PROTECT_PROBE`] line
-/// each, and — on a successful send only — one tee registration whose
-/// `positive` flag IS the arm's semantics:
+/// One window's protect-probe burst, BEFORE the closed tee snapshot is folded
+/// in: the arm's identity plus one record per attempted datagram (see
+/// [`protect_probe_evidence`] for the TUN half).
+struct ProtectProbeBurst {
+    mode: String,
+    target: String,
+    count: usize,
+    probes: Vec<crate::n2h::ProtectProbeRecord>,
+}
+
+/// Plan §5's protected/control probe: `count` DNS round trips on ONE fd,
+/// [`POSCTL_PROBE_INTERVAL_MS`] apart, one [`MARK_PROTECT_PROBE`] line each, and
+/// — on a successful send only — one tee registration whose `positive` flag IS
+/// the arm's semantics:
 /// - `mode:"protect"` → `positive = false`: a hit in the tunnel is the
 ///   negative-evidence violation (`tun_negative.hits[]`, verdict `n2h-fail`),
 ///   i.e. the protect did not take the socket off the tunnel path;
@@ -3731,18 +3928,25 @@ fn resolve_probe_handoff(options: &ArmOptions, notes: &mut Vec<String>) -> Optio
 ///   (the P0/P2 positive control), so the hit is recorded as a directed
 ///   observation and never as a violation.
 ///
-/// The datagram payload is the frozen posctl wire form ([`posctl_payload`]),
-/// so the same strict [`posctl_marker`] receipt test the host side already
-/// uses validates these probes too (plan §4's `n2h-rx`); only the fd, the
-/// target and the `positive` flag differ from the a2b positive control.
+/// [adjustment 2026-09-26] The datagram is a standard DNS A query for
+/// `<probe id, lowercased>.n2h-probe.invalid` to the arm's resolver target, and
+/// each probe WAITS for an answer on that same fd (`reply=echo|timeout|other`,
+/// see [`protect_probe_round_trip`]). The TUN tee registers the QNAME LABEL
+/// bytes — the id as it actually travels on the wire — so a frame that carries
+/// the query (or a resolver's answer to it) is attributed to this probe. The
+/// burst's records go into the document's `protect_probe` block, which is how
+/// the CONTROL arm is judged from the evidence alone.
 ///
 /// The fd used is the window's handed-in one for `mode:"protect"`; for
 /// `mode:"none"` a socket is opened here and closed on return. In BOTH cases
-/// the fd is owned by this crate and closed exactly once. No fd ⇒ no line and
-/// no datagram (the reason is already in `notes[]`, recorded at arm time):
-/// absence of the lines IS the record.
-fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
-    let Some(opt) = win.options.protect_probe.as_ref() else { return };
+/// the fd is owned by this crate and closed exactly once. No fd ⇒ `None`, no
+/// line and no datagram (the reason is already in `notes[]`, recorded at arm
+/// time): absence of the lines IS the record.
+fn send_protect_probes(
+    win: &Arc<Window>,
+    notes: &mut Vec<String>,
+) -> Option<ProtectProbeBurst> {
+    let opt = win.options.protect_probe.as_ref()?;
     let target = opt.target;
     let count = opt.count;
     let mode = opt.mode;
@@ -3757,7 +3961,7 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
                 let result = h.protect_result.unwrap_or(PROTECT_RESULT_NOT_REQUESTED);
                 (h.fd, result, h)
             }
-            None => return,
+            None => return None,
         },
         ProtectProbeMode::None => match ProbeHandoff::open() {
             Ok(h) => (h.fd, PROTECT_RESULT_NOT_REQUESTED, h),
@@ -3765,13 +3969,14 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
                 notes.push(format!(
                     "protect probe not sent (mode=none): unbound UDP socket() failed errno={errno}"
                 ));
-                return;
+                return None;
             }
         },
     };
     // `positive = false` for the protected arm: a tunnel hit is the violation.
     let positive = mode == ProtectProbeMode::None;
     let mut sent = 0usize;
+    let mut records: Vec<crate::n2h::ProtectProbeRecord> = Vec::with_capacity(count);
     for i in 0..count {
         if win.disarmed() {
             notes.push(format!(
@@ -3794,13 +3999,17 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
         let nonce = crate::n2h::fresh_nonce_hex()
             .unwrap_or_else(|_| "000000000000000000000000".to_string());
         let id = probe_id(POSCTL_KIND_TOKEN, &nonce);
-        let payload = posctl_payload(&id);
-        let (send_len, send_errno) = match send_protect_datagram(fd, target, payload.as_bytes()) {
+        let qname = protect_probe_qname(&id);
+        // The round trip honours the same two bounds the burst loop does, so
+        // its ≤1500 ms wait can never outlive the window.
+        let stop = || win.disarmed() || win.clock.mono_ms() >= win.state.lock_poison().deadline_mono;
+        let (send, reply) = protect_probe_round_trip(fd, target, &qname, &stop);
+        let (send_len, send_errno) = match send {
             Ok(n) => (n, 0),
             Err(errno) => (0, errno),
         };
         if send_errno == 0 {
-            win.tee.register(&id, WireMarker::Ascii(id.clone()), positive);
+            win.tee.register(&id, WireMarker::Ascii(protect_probe_wire_label(&id)), positive);
             sent += 1;
         } else {
             notes.push(format!(
@@ -3809,6 +4018,16 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
                 protect_target_display(target)
             ));
         }
+        if reply == ProtectReply::Timeout && stop() {
+            notes.push(format!(
+                "protect probe {id} reply wait ended on the window's own bound (disarm or \
+                 deadline), not on a silent resolver: reply=timeout is the state at the cut"
+            ));
+        }
+        let reply_ms_text = match reply.ms() {
+            Some(ms) => ms.to_string(),
+            None => PROTECT_REPLY_MS_NA.to_string(),
+        };
         emit_protect_probe(&protect_probe_line(
             &id,
             fd,
@@ -3817,7 +4036,20 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
             target,
             send_len,
             send_errno,
+            reply.token(),
+            &reply_ms_text,
         ));
+        records.push(crate::n2h::ProtectProbeRecord {
+            probe_id: id,
+            fd,
+            protect_result: protect_result.to_string(),
+            sent: send_errno == 0,
+            send_errno,
+            reply: reply.token().to_string(),
+            reply_ms: reply.ms(),
+            tun_observed: false,
+            tun_sides: Vec::new(),
+        });
     }
     drop(owner);
     notes.push(format!(
@@ -3825,6 +4057,47 @@ fn send_protect_probes(win: &Arc<Window>, notes: &mut Vec<String>) {
          protect_result={protect_result}",
         protect_target_display(target)
     ));
+    Some(ProtectProbeBurst {
+        mode: mode_token.to_string(),
+        target: protect_target_display(target),
+        count,
+        probes: records,
+    })
+}
+
+/// Fold one window's protect-probe burst together with its CLOSED tee snapshot
+/// into the document's `protect_probe` block. `tun_observed` is read off the
+/// tee's per-(probe, direction) table, so BOTH arms carry the same truthful
+/// record of what the tunnel saw. A `mode:"protect"` observation is ALSO in
+/// `tun_negative.hits[]` (its tee entries registered as negative evidence →
+/// the leak signature), while the control arm's entries registered as positive
+/// ones and never enter that list.
+fn protect_probe_evidence(
+    burst: ProtectProbeBurst,
+    scan: &TeeSnapshot,
+) -> crate::n2h::ProtectProbeEvidence {
+    let probes = burst
+        .probes
+        .into_iter()
+        .map(|mut rec| {
+            let mut sides: Vec<String> = Vec::new();
+            for d in scan.directed.iter().filter(|d| d.probe_id == rec.probe_id) {
+                rec.tun_observed = true;
+                if !sides.contains(&d.hit.side) {
+                    sides.push(d.hit.side.clone());
+                }
+            }
+            rec.tun_sides = sides;
+            rec
+        })
+        .collect();
+    crate::n2h::ProtectProbeEvidence {
+        mode: burst.mode,
+        target: burst.target,
+        count: burst.count,
+        probes,
+        frames_scanned: scan.frames_scanned,
+    }
 }
 
 /// Send one positive-control datagram from a fresh WILDCARD socket (§4.2's
@@ -4161,6 +4434,9 @@ pub struct WindowMaterial {
     pub opened_mono: u64,
     pub closed_mono: u64,
     pub generated_unix: i64,
+    /// 2026-09-26 [adjustment]: the opt-in protect-probe block, already folded
+    /// with the closed tee snapshot. `None` (the default) adds no document byte.
+    pub protect_probe: Option<crate::n2h::ProtectProbeEvidence>,
 }
 
 /// Assemble the device document and judge it — with the TWO rules the frozen
@@ -4237,6 +4513,7 @@ pub fn assemble_device_evidence(m: WindowMaterial) -> Evidence {
         endpoint_side: m.receipts,
         counters,
         notes,
+        protect_probe: m.protect_probe,
         ..Evidence::default()
     };
     let (mut verdict, mut reasons) = evidence.judge();
@@ -6539,6 +6816,7 @@ mod tests {
             opened_mono: 1,
             closed_mono: 9,
             generated_unix: 1_756_000_009,
+            protect_probe: None,
         }
     }
 
@@ -7893,6 +8171,72 @@ mod tests {
         (addr, handle)
     }
 
+    /// A bounded FAKE DNS RESOLVER on 127.0.0.1: answers up to `n` A queries by
+    /// mirroring each question back as an NXDOMAIN response (`mirror_as_nxdomain`
+    /// — the same shape the dns-nxdomain-echo tests use), so a protect probe's
+    /// `reply=echo` verdict is a REAL round trip against a real socket. Returns
+    /// the resolver's address and the queries it saw, verbatim.
+    fn spawn_dns_echo_resolver(
+        n: usize,
+    ) -> (SocketAddr, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+        let addr = sock.local_addr().expect("resolver addr");
+        let handle = std::thread::spawn(move || {
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            let mut buf = [0u8; 2048];
+            while seen.len() < n {
+                let Ok((len, from)) = sock.recv_from(&mut buf) else { break };
+                seen.push(buf[..len].to_vec());
+                let _ = sock.send_to(&mirror_as_nxdomain(&buf[..len]), from);
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    /// A fake resolver that answers every query with a DIFFERENT probe's
+    /// question: the `reply=other` case (a datagram arrives, none of it is ours).
+    fn spawn_dns_wrong_name_resolver(
+        n: usize,
+    ) -> (SocketAddr, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        let other = build_dns_a_query(&protect_probe_qname("N2H-posctl-ffffffffffffffffffffffff"))
+            .expect("the foreign qname is encodable");
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("read timeout");
+        let addr = sock.local_addr().expect("resolver addr");
+        let handle = std::thread::spawn(move || {
+            let mut seen: Vec<Vec<u8>> = Vec::new();
+            let mut buf = [0u8; 2048];
+            while seen.len() < n {
+                let Ok((len, from)) = sock.recv_from(&mut buf) else { break };
+                seen.push(buf[..len].to_vec());
+                let _ = sock.send_to(&mirror_as_nxdomain(&other), from);
+            }
+            seen
+        });
+        (addr, handle)
+    }
+
+    /// The QNAME text of one DNS query, parsed back out of the question section
+    /// (the length-prefixed labels, as they travel on the wire).
+    fn dns_qname_text(query: &[u8]) -> String {
+        let mut out = String::new();
+        let mut i = 12usize;
+        while i < query.len() {
+            let len = query[i] as usize;
+            if len == 0 {
+                break;
+            }
+            if !out.is_empty() {
+                out.push('.');
+            }
+            out.push_str(std::str::from_utf8(&query[i + 1..i + 1 + len]).expect("label utf8"));
+            i += 1 + len;
+        }
+        out
+    }
+
     /// One field of a small core-emitted JSON object (the in-crate strict
     /// reader) — the protect-probe hand-off JSON's own shape is under test here.
     fn json_field(json: &str, key: &str) -> Json {
@@ -8083,7 +8427,9 @@ mod tests {
     fn protect_probe_mode_none_opens_its_own_socket_and_emits_the_frozen_line() {
         let _guard = protect_handoff_guard();
         drop(PROBE_HANDOFF.lock_poison().take());
-        let (addr, sink) = spawn_udp_sink(2);
+        // [adjustment] the target is a fake DNS resolver that echoes the QNAME
+        // back, so each probe is a real round trip (reply=echo).
+        let (addr, resolver) = spawn_dns_echo_resolver(2);
         let target = ([127, 0, 0, 1], addr.port());
         let win = window_with(ArmOptions {
             protect_probe: Some(ProtectProbeOption {
@@ -8095,7 +8441,7 @@ mod tests {
         });
         let mut notes = Vec::new();
         let started = std::time::Instant::now();
-        send_protect_probes(&win, &mut notes);
+        let burst = send_protect_probes(&win, &mut notes).expect("the control arm opens its own fd");
         let elapsed = started.elapsed();
         let lines = take_protect_probe_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
@@ -8113,28 +8459,64 @@ mod tests {
             assert!(line.contains("|protect_result=not-requested|"), "{line}");
             assert!(line.contains(&format!("|target={target_text}|")), "{line}");
             assert!(line.contains("|send_errno=0|"), "{line}");
+            // the adjustment's two new fields: the resolver answered with our
+            // QNAME, and the round trip is a real measured number
+            assert!(line.contains("|reply=echo|"), "{line}");
+            let ms: u64 = field_of(line, "reply_ms").parse().expect("a numeric reply_ms");
+            assert!(ms < PROTECT_PROBE_REPLY_WAIT_MS, "a real round trip: {ms} ms");
             assert!(line.ends_with("|diag=true|is_evidence=false"), "{line}");
         }
-        let received = sink.join().expect("sink thread");
-        assert_eq!(received.len(), 2, "both datagrams really left");
-        for (payload, _src) in &received {
-            let marker = posctl_marker(payload).expect("the frozen posctl wire form");
+        let received = resolver.join().expect("resolver thread");
+        assert_eq!(received.len(), 2, "both queries really left");
+        let ids: Vec<String> = lines.iter().map(|l| field_of(l, "probe_id")).collect();
+        for query in &received {
+            // the id is on the wire as the QNAME's first label, LOWERCASED
+            let qname = dns_qname_text(query);
+            let id = ids
+                .iter()
+                .find(|id| qname == protect_probe_qname(id))
+                .unwrap_or_else(|| panic!("no probe for qname '{qname}': {ids:?}"));
+            assert!(qname.starts_with("n2h-posctl-"), "the on-wire case: {qname}");
+            assert!(qname.ends_with(PROTECT_PROBE_QNAME_SUFFIX), "{qname}");
+            assert_eq!(qname, qname.to_ascii_lowercase(), "the QNAME is lowercased on the wire");
+            assert!(
+                !qname.contains(id.as_str()),
+                "'{id}' travels lowercased, never in its pre-adjustment case"
+            );
             let line = lines
                 .iter()
-                .find(|l| field_of(l, "probe_id") == marker)
-                .unwrap_or_else(|| panic!("no line for {marker}: {lines:?}"));
+                .find(|l| field_of(l, "probe_id") == *id)
+                .unwrap_or_else(|| panic!("no line for {id}: {lines:?}"));
             assert_eq!(
                 field_of(line, "send_len"),
-                payload.len().to_string(),
-                "the recorded length is the real datagram length"
+                query.len().to_string(),
+                "the recorded length is the real DNS query length"
             );
         }
+        assert_eq!(burst.probes.len(), 2, "one evidence record per probe");
+        for (i, rec) in burst.probes.iter().enumerate() {
+            assert_eq!(rec.probe_id, ids[i]);
+            assert_eq!(rec.fd, fds[0].parse::<i32>().unwrap());
+            assert_eq!(rec.protect_result, PROTECT_RESULT_NOT_REQUESTED);
+            assert!(rec.sent, "{rec:?}");
+            assert_eq!(rec.send_errno, 0);
+            assert_eq!(rec.reply, PROTECT_REPLY_ECHO);
+            assert!(rec.reply_ms.is_some(), "{rec:?}");
+            assert!(!rec.tun_observed, "the record is completed with the tee at close");
+        }
         // the control arm is POSITIVE evidence: a tunnel hit is the EXPECTED
-        // capture (an observation), never a negative-evidence violation
-        let first = posctl_marker(&received[0].0).expect("marker").to_string();
+        // capture (an observation), never a negative-evidence violation. The
+        // frame carries the QNAME LABEL bytes as they travel on the wire.
+        let first = ids[0].clone();
         win.tee.on_tun_frame(
             TunFrameDir::FromOs,
-            &udp_frame([127, 0, 0, 1], [192, 168, 50, 6], 40_000, addr.port(), first.as_bytes()),
+            &udp_frame(
+                [127, 0, 0, 1],
+                [192, 168, 50, 6],
+                40_000,
+                addr.port(),
+                protect_probe_wire_label(&first).as_bytes(),
+            ),
         );
         assert_eq!(win.tee.outer_hit_count(), 0, "a mode=none hit is not a violation");
         assert!(
@@ -8143,7 +8525,7 @@ mod tests {
         );
         assert!(
             elapsed >= std::time::Duration::from_millis(250),
-            "the two datagrams are spaced by the interval: {elapsed:?}"
+            "the two probes are spaced by the interval: {elapsed:?}"
         );
         assert!(
             notes.iter().any(|n| n.contains("protect probe burst complete")
@@ -8201,7 +8583,7 @@ mod tests {
         assert!(json_bool(&protect_probe_commit_json(fd, PROTECT_RESULT_PROTECTED), "ok"));
 
         // ---- the arm resolves the hand-off, the window sends on THAT fd ----
-        let (addr, sink) = spawn_udp_sink(1);
+        let (addr, resolver) = spawn_dns_echo_resolver(1);
         let target = ([127, 0, 0, 1], addr.port());
         let win = window_with(ArmOptions {
             protect_probe: Some(ProtectProbeOption {
@@ -8216,19 +8598,28 @@ mod tests {
         assert!(win.probe_handoff.lock_poison().is_some(), "the committed hand-off is taken");
         assert!(notes.is_empty(), "a clean hand-off records nothing: {notes:?}");
         let closes_before = PROTECT_HANDOFF_CLOSES.load(Ordering::Relaxed);
-        send_protect_probes(&win, &mut notes);
+        let burst = send_protect_probes(&win, &mut notes).expect("the committed arm runs");
         let lines = take_protect_probe_lines();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(field_of(&lines[0], "fd"), fd.to_string(), "the SAME fd: {}", lines[0]);
         assert!(lines[0].contains("|mode=protect|"), "{}", lines[0]);
         assert!(lines[0].contains("|protect_result=protected|"), "{}", lines[0]);
         assert!(lines[0].contains(&format!("|target={}|", protect_target_display(target))));
-        let received = sink.join().expect("sink thread");
-        assert_eq!(received.len(), 1, "the datagram really left on the handed-in fd");
-        let marker = posctl_marker(&received[0].0).expect("the frozen posctl wire form");
-        assert_eq!(field_of(&lines[0], "probe_id"), marker);
-        assert_eq!(field_of(&lines[0], "send_len"), received[0].0.len().to_string());
+        // [adjustment] the probe is a DNS round trip on that very fd
+        assert!(lines[0].contains("|reply=echo|"), "{}", lines[0]);
+        assert!(field_of(&lines[0], "reply_ms").parse::<u64>().is_ok(), "{}", lines[0]);
+        let received = resolver.join().expect("resolver thread");
+        assert_eq!(received.len(), 1, "the query really left on the handed-in fd");
+        let id = field_of(&lines[0], "probe_id");
+        assert_eq!(dns_qname_text(&received[0]), protect_probe_qname(&id));
+        assert_eq!(field_of(&lines[0], "send_len"), received[0].len().to_string());
         assert_eq!(field_of(&lines[0], "send_errno"), "0");
+        assert_eq!(burst.probes.len(), 1);
+        assert_eq!(burst.probes[0].probe_id, id);
+        assert_eq!(burst.probes[0].reply, PROTECT_REPLY_ECHO);
+        assert_eq!(burst.mode, PROTECT_MODE_PROTECT);
+        assert_eq!(burst.target, protect_target_display(target));
+        assert_eq!(burst.count, 1);
         // the fd is core-owned: the window's slot is empty, the ONE owner went
         // through its close path, and the number was never handed anywhere else
         assert!(win.probe_handoff.lock_poison().is_none());
@@ -8261,7 +8652,7 @@ mod tests {
             PROTECT_HANDOFF_CLOSES.load(Ordering::Relaxed) > closes_before2,
             "the refused fd is closed, not leaked"
         );
-        send_protect_probes(&win2, &mut notes2);
+        let _ = send_protect_probes(&win2, &mut notes2);
         assert!(take_protect_probe_lines().is_empty(), "no line without a committed fd");
 
         // ---- no hand-off at all: the reason is recorded, nothing is sent ---
@@ -8279,16 +8670,16 @@ mod tests {
             notes3.iter().any(|n| n.contains("no protected fd was handed in")),
             "{notes3:?}"
         );
-        send_protect_probes(&win3, &mut notes3);
+        let _ = send_protect_probes(&win3, &mut notes3);
         assert!(take_protect_probe_lines().is_empty());
-        println!("[probe] mode=protect: fd={fd} hand-off → one datagram, refused paths clean");
+        println!("[probe] mode=protect: fd={fd} hand-off → one DNS round trip, refused paths clean");
     }
 
     #[test]
     fn protect_probe_tee_hits_are_violations_for_the_protect_arm_and_captures_for_the_control() {
         let _guard = protect_handoff_guard();
         drop(PROBE_HANDOFF.lock_poison().take());
-        let (addr, sink) = spawn_udp_sink(4);
+        let (addr, resolver) = spawn_dns_echo_resolver(4);
         let target = ([127, 0, 0, 1], addr.port());
 
         // ---- the protected arm: a tunnel hit IS the falsification ----------
@@ -8308,24 +8699,34 @@ mod tests {
         });
         let mut notes = Vec::new();
         *win.probe_handoff.lock_poison() = resolve_probe_handoff(&win.options, &mut notes);
-        send_protect_probes(&win, &mut notes);
+        let burst = send_protect_probes(&win, &mut notes).expect("the protected arm runs");
         let lines = take_protect_probe_lines();
         assert_eq!(lines.len(), 2, "{lines:?}");
         let ids: Vec<String> = lines.iter().map(|l| field_of(l, "probe_id")).collect();
-        // the first probe's marker shows up INSIDE the tunnel: the protected
-        // socket did not stay off the tunnel path
+        // the first probe's QNAME LABEL shows up INSIDE the tunnel: the
+        // protected socket did not stay off the tunnel path. The frame carries
+        // the bytes as they travel on the wire (lowercase), which is exactly
+        // what the tee registered.
         win.tee.on_tun_frame(
             TunFrameDir::FromOs,
-            &udp_frame([127, 0, 0, 1], [100, 108, 0, 2], 40_000, 40_001, ids[0].as_bytes()),
+            &udp_frame(
+                [127, 0, 0, 1],
+                [100, 108, 0, 2],
+                40_000,
+                40_001,
+                protect_probe_wire_label(&ids[0]).as_bytes(),
+            ),
         );
         assert_eq!(win.tee.outer_hit_count(), 1, "positive=false ⇒ a violation");
         let snap = win.tee.snapshot();
         assert_eq!(snap.outer_hits.len(), 1);
         assert_eq!(snap.outer_hits[0].probe_id, ids[0]);
         assert!(snap.outer_hits.iter().all(|h| h.probe_id != ids[1]), "per-probe judgement");
-        // and it reaches the document's tun_negative block as falsification
+        // and it reaches the document's tun_negative block as falsification,
+        // while the protect_probe block records the observation truthfully
         let mut material = clean_material();
         material.scan = snap.clone();
+        material.protect_probe = Some(protect_probe_evidence(burst, &snap));
         let evidence = assemble_device_evidence(material);
         assert!(evidence.tun_negative.hit);
         assert_eq!(evidence.tun_negative.hits.len(), 1);
@@ -8339,6 +8740,10 @@ mod tests {
             "{:?}",
             evidence.reasons
         );
+        let block = evidence.protect_probe.as_ref().expect("the block is present when armed");
+        assert!(block.probes[0].tun_observed, "the protect arm's leak is in the block too");
+        assert_eq!(block.probes[0].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
+        assert!(!block.probes[1].tun_observed, "per-probe judgement");
 
         // ---- the control arm: the SAME frame is an observation, not a leak --
         let win2 = window_with(ArmOptions {
@@ -8350,25 +8755,35 @@ mod tests {
             ..ArmOptions::default()
         });
         let mut notes2 = Vec::new();
-        send_protect_probes(&win2, &mut notes2);
+        let burst2 = send_protect_probes(&win2, &mut notes2).expect("the control arm runs");
         let lines2 = take_protect_probe_lines();
         assert_eq!(lines2.len(), 2, "{lines2:?}");
         let ids2: Vec<String> = lines2.iter().map(|l| field_of(l, "probe_id")).collect();
         win2.tee.on_tun_frame(
             TunFrameDir::FromOs,
-            &udp_frame([127, 0, 0, 1], [100, 108, 0, 2], 40_000, 40_001, ids2[0].as_bytes()),
+            &udp_frame(
+                [127, 0, 0, 1],
+                [100, 108, 0, 2],
+                40_000,
+                40_001,
+                protect_probe_wire_label(&ids2[0]).as_bytes(),
+            ),
         );
         assert_eq!(win2.tee.outer_hit_count(), 0, "the capture is the EXPECTED outcome");
         assert!(win2.tee.directed_hit(&ids2[0], TunFrameDir::FromOs).is_some());
         let snap2 = win2.tee.snapshot();
         assert!(snap2.outer_hits.is_empty());
         let mut material2 = clean_material();
-        material2.scan = snap2;
+        material2.scan = snap2.clone();
+        material2.protect_probe = Some(protect_probe_evidence(burst2, &snap2));
         let evidence2 = assemble_device_evidence(material2);
         assert!(!evidence2.tun_negative.hit, "{:?}", evidence2.reasons);
         assert!(evidence2.tun_negative.hits.is_empty());
         assert_ne!(evidence2.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence2.reasons);
-        assert_eq!(sink.join().expect("sink thread").len(), 4, "2 + 2 datagrams left");
+        let block2 = evidence2.protect_probe.as_ref().expect("the block is present when armed");
+        assert!(block2.probes[0].tun_observed, "the control arm's capture IS recorded");
+        assert!(!block2.probes[1].tun_observed);
+        assert_eq!(resolver.join().expect("resolver thread").len(), 4, "2 + 2 queries left");
         println!(
             "[probe] tee semantics: protect-arm hit ⇒ verdict={} hits={}, control hit ⇒ verdict={} hits={}",
             evidence.verdict,
@@ -8376,5 +8791,259 @@ mod tests {
             evidence2.verdict,
             evidence2.tun_negative.hits.len()
         );
+    }
+
+    /// [adjustment 2026-09-26] The probe is a DNS round trip now, so its three
+    /// verdicts are exercised against three REAL local resolvers: one echoing
+    /// the QNAME back (`echo`), one black hole (`timeout`, and the bound really
+    /// runs), one answering a different question (`other`).
+    #[test]
+    fn protect_probe_dns_round_trip_classifies_echo_timeout_and_other() {
+        let _guard = protect_handoff_guard();
+        drop(PROBE_HANDOFF.lock_poison().take());
+        let arm = |target: ([u8; 4], u16)| {
+            window_with(ArmOptions {
+                protect_probe: Some(ProtectProbeOption {
+                    target,
+                    count: 1,
+                    mode: ProtectProbeMode::None,
+                }),
+                ..ArmOptions::default()
+            })
+        };
+
+        // ---- echo: the resolver mirrors our QNAME back ----------------------
+        let (echo_addr, echo_resolver) = spawn_dns_echo_resolver(1);
+        let win = arm(([127, 0, 0, 1], echo_addr.port()));
+        let mut notes = Vec::new();
+        let burst = send_protect_probes(&win, &mut notes).expect("the echo arm runs");
+        let lines = take_protect_probe_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("|reply=echo|"), "{}", lines[0]);
+        let echo_ms: u64 = field_of(&lines[0], "reply_ms").parse().expect("a numeric reply_ms");
+        assert!(echo_ms < PROTECT_PROBE_REPLY_WAIT_MS, "{echo_ms}");
+        assert_eq!(burst.probes[0].reply, PROTECT_REPLY_ECHO);
+        assert_eq!(burst.probes[0].reply_ms, Some(echo_ms));
+        let queries = echo_resolver.join().expect("resolver thread");
+        assert_eq!(queries.len(), 1, "the query really left");
+        assert_eq!(dns_qname_text(&queries[0]), protect_probe_qname(&burst.probes[0].probe_id));
+        println!("[probe] reply=echo in {echo_ms} ms on qname {}", dns_qname_text(&queries[0]));
+
+        // ---- timeout: a BOUND socket that answers nothing -------------------
+        // (bound on purpose: no ICMP port-unreachable can stand in for a reply)
+        let (hole_addr, hole) = spawn_udp_sink(1);
+        let win = arm(([127, 0, 0, 1], hole_addr.port()));
+        let mut notes = Vec::new();
+        let started = std::time::Instant::now();
+        let burst = send_protect_probes(&win, &mut notes).expect("the timeout arm runs");
+        let elapsed = started.elapsed();
+        let lines = take_protect_probe_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("|reply=timeout|"), "{}", lines[0]);
+        assert!(
+            lines[0].contains(&format!("|reply_ms={PROTECT_REPLY_MS_NA}|")),
+            "no reply ⇒ no round trip to report: {}",
+            lines[0]
+        );
+        assert_eq!(burst.probes[0].reply, PROTECT_REPLY_TIMEOUT);
+        assert_eq!(burst.probes[0].reply_ms, None);
+        assert!(
+            elapsed >= std::time::Duration::from_millis(PROTECT_PROBE_REPLY_WAIT_MS - 100),
+            "the bounded wait really ran: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(PROTECT_PROBE_REPLY_WAIT_MS + 1_000),
+            "and it did not outlive its bound: {elapsed:?}"
+        );
+        assert_eq!(hole.join().expect("hole thread").len(), 1, "the query really arrived");
+        println!("[probe] reply=timeout after {elapsed:?} (bound {PROTECT_PROBE_REPLY_WAIT_MS} ms)");
+
+        // ---- other: a resolver answering a DIFFERENT question ---------------
+        let (wrong_addr, wrong_resolver) = spawn_dns_wrong_name_resolver(1);
+        let win = arm(([127, 0, 0, 1], wrong_addr.port()));
+        let mut notes = Vec::new();
+        let burst = send_protect_probes(&win, &mut notes).expect("the other arm runs");
+        let lines = take_protect_probe_lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("|reply=other|"), "{}", lines[0]);
+        assert!(field_of(&lines[0], "reply_ms").parse::<u64>().is_ok(), "{}", lines[0]);
+        assert_eq!(burst.probes[0].reply, PROTECT_REPLY_OTHER);
+        assert!(burst.probes[0].reply_ms.is_some(), "the wrong answer's round trip is real");
+        assert_eq!(wrong_resolver.join().expect("resolver thread").len(), 1);
+        println!("[probe] reply=other in {:?}", burst.probes[0].reply_ms);
+    }
+
+    /// [adjustment 2026-09-26] The document's `protect_probe` block: BOTH arms
+    /// record `tun_observed` truthfully, the protect arm's hit is a violation in
+    /// `tun_negative` while the control arm's identical capture is not, and the
+    /// TUN match follows the QNAME label bytes as they travel on the wire.
+    #[test]
+    fn protect_probe_evidence_block_carries_both_arms_and_the_tun_truth() {
+        let _guard = protect_handoff_guard();
+        drop(PROBE_HANDOFF.lock_poison().take());
+        let (addr, resolver) = spawn_dns_echo_resolver(3);
+        let target = ([127, 0, 0, 1], addr.port());
+
+        // ---- the PROTECT arm: two probes, one of them seen in the tunnel ----
+        let opened = protect_probe_open_json();
+        let fd = json_u64(&opened, "fd") as crate::sys::c_int;
+        assert!(
+            json_bool(&protect_probe_commit_json(fd, PROTECT_RESULT_UNPROTECTED), "ok"),
+            "the handed-in fd must be committed"
+        );
+        let win = window_with(ArmOptions {
+            protect_probe: Some(ProtectProbeOption {
+                target,
+                count: 2,
+                mode: ProtectProbeMode::Protect,
+            }),
+            ..ArmOptions::default()
+        });
+        let mut notes = Vec::new();
+        *win.probe_handoff.lock_poison() = resolve_probe_handoff(&win.options, &mut notes);
+        let burst = send_protect_probes(&win, &mut notes).expect("the protect arm runs");
+        let ids: Vec<String> =
+            take_protect_probe_lines().iter().map(|l| field_of(l, "probe_id")).collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        // the SECOND probe is the one the tunnel sees, and the frame carries the
+        // on-wire (lowercase) label. The first is fed its pre-adjustment
+        // UPPERCASE form instead: the wire form must decide.
+        win.tee.on_tun_frame(
+            TunFrameDir::FromOs,
+            &udp_frame([127, 0, 0, 1], [100, 108, 0, 2], 40_000, 40_001, ids[0].as_bytes()),
+        );
+        win.tee.on_tun_frame(
+            TunFrameDir::FromOs,
+            &udp_frame(
+                [127, 0, 0, 1],
+                [100, 108, 0, 2],
+                40_000,
+                40_001,
+                protect_probe_wire_label(&ids[1]).as_bytes(),
+            ),
+        );
+        let snap = win.tee.snapshot();
+        assert_eq!(snap.frames_scanned, 2, "both frames were scanned");
+        assert_eq!(snap.outer_hits.len(), 1, "only the on-wire form is attributed: {:?}", snap.outer_hits);
+        assert_eq!(snap.outer_hits[0].probe_id, ids[1]);
+        assert!(
+            win.tee.directed_hit(&ids[0], TunFrameDir::FromOs).is_none(),
+            "the uppercase id is NOT the wire form"
+        );
+        let mut material = clean_material();
+        material.scan = snap.clone();
+        material.protect_probe = Some(protect_probe_evidence(burst, &snap));
+        let evidence = assemble_device_evidence(material);
+        let block = evidence.protect_probe.as_ref().expect("the block is present when armed");
+        assert_eq!(block.mode, PROTECT_MODE_PROTECT);
+        assert_eq!(block.target, protect_target_display(target));
+        assert_eq!(block.count, 2);
+        assert_eq!(block.probes.len(), 2, "one record per attempted probe");
+        assert_eq!(block.frames_scanned, snap.frames_scanned);
+        for (i, rec) in block.probes.iter().enumerate() {
+            assert_eq!(rec.probe_id, ids[i]);
+            assert_eq!(rec.fd, fd, "the protected arm's records carry the shell's fd");
+            assert_eq!(rec.protect_result, PROTECT_RESULT_UNPROTECTED);
+            assert!(rec.sent, "{rec:?}");
+            assert_eq!(rec.send_errno, 0);
+            assert_eq!(rec.reply, PROTECT_REPLY_ECHO);
+            assert!(rec.reply_ms.is_some(), "{rec:?}");
+        }
+        assert!(!block.probes[0].tun_observed, "no wire-form frame carried probe 0");
+        assert!(block.probes[0].tun_sides.is_empty());
+        assert!(block.probes[1].tun_observed);
+        assert_eq!(block.probes[1].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
+        // the protect arm's observation IS the violation, and it is unchanged
+        assert_eq!(evidence.tun_negative.hits.len(), 1);
+        assert_eq!(evidence.tun_negative.hits[0].probe_id, ids[1]);
+        assert_eq!(evidence.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence.reasons);
+        let json = evidence.to_json();
+        crate::config::parse_document(&json).expect("the document stays strict JSON");
+        for needle in [
+            "\"protect_probe\":{\"mode\":\"protect\"",
+            "\"target\":\"127.0.0.1:",
+            "\"count\":2",
+            "\"tun_observed\":true",
+            "\"tun_sides\":[\"vpn-tun\"]",
+            "\"reply\":\"echo\"",
+            "\"frames_scanned\":2",
+        ] {
+            assert!(json.contains(needle), "the block must carry '{needle}': {json}");
+        }
+
+        // ---- the CONTROL arm: the SAME capture is not a violation -----------
+        let win2 = window_with(ArmOptions {
+            protect_probe: Some(ProtectProbeOption {
+                target,
+                count: 1,
+                mode: ProtectProbeMode::None,
+            }),
+            ..ArmOptions::default()
+        });
+        let mut notes2 = Vec::new();
+        let burst2 = send_protect_probes(&win2, &mut notes2).expect("the control arm runs");
+        let id2 = field_of(&take_protect_probe_lines()[0], "probe_id");
+        win2.tee.on_tun_frame(
+            TunFrameDir::FromOs,
+            &udp_frame(
+                [127, 0, 0, 1],
+                [100, 108, 0, 2],
+                40_000,
+                40_001,
+                protect_probe_wire_label(&id2).as_bytes(),
+            ),
+        );
+        let snap2 = win2.tee.snapshot();
+        let mut material2 = clean_material();
+        material2.scan = snap2.clone();
+        material2.protect_probe = Some(protect_probe_evidence(burst2, &snap2));
+        let evidence2 = assemble_device_evidence(material2);
+        let block2 = evidence2.protect_probe.as_ref().expect("the block is present when armed");
+        assert_eq!(block2.mode, PROTECT_MODE_NONE);
+        assert_eq!(block2.count, 1);
+        assert_eq!(block2.probes[0].protect_result, PROTECT_RESULT_NOT_REQUESTED);
+        assert!(block2.probes[0].tun_observed, "the control arm's capture IS recorded");
+        assert_eq!(block2.probes[0].tun_sides, vec![TUN_IFACE_NAME.to_string()]);
+        assert!(
+            evidence2.tun_negative.hits.is_empty(),
+            "the expected capture never enters tun_negative: {:?}",
+            evidence2.tun_negative.hits
+        );
+        assert_ne!(evidence2.verdict, crate::n2h::VERDICT_FAIL, "{:?}", evidence2.reasons);
+        let json2 = evidence2.to_json();
+        crate::config::parse_document(&json2).expect("the document stays strict JSON");
+        assert!(json2.contains("\"protect_probe\":{\"mode\":\"none\""), "{json2}");
+        assert!(json2.contains("\"tun_observed\":true"), "{json2}");
+        assert_eq!(resolver.join().expect("resolver thread").len(), 3, "2 + 1 queries left");
+        println!(
+            "[probe] evidence block: protect arm tun_observed={} (verdict {}), control arm \
+             tun_observed={} hits={}",
+            block.probes[1].tun_observed,
+            evidence.verdict,
+            block2.probes[0].tun_observed,
+            evidence2.tun_negative.hits.len()
+        );
+    }
+
+    /// [adjustment 2026-09-26] The adjustment must be INERT without the arm
+    /// option: the document's bytes are the PRE-adjustment ones. The length and
+    /// hash below were captured from the tree before this change, through this
+    /// very fixture and code path — an inserted byte (even a sibling comma from
+    /// the new block) would break them.
+    #[test]
+    fn the_device_document_is_byte_identical_without_the_protect_probe_block() {
+        let json = assemble_device_evidence(clean_material()).to_json();
+        assert_eq!(json.len(), 9_169, "the pre-adjustment document length");
+        assert_eq!(
+            crate::util::sha256_hex(json.as_bytes()),
+            "d5c9b7aaccc8f1f806c58df6692a1f9589280d4a9ca502423659720cdca5a2da",
+            "the pre-adjustment document hash"
+        );
+        assert!(
+            !json.contains("protect_probe"),
+            "no block, no key, not one byte without the option"
+        );
+        crate::config::parse_document(&json).expect("still the strict device document");
+        println!("[probe] document without the option: {} bytes, pre-adjustment sha kept", json.len());
     }
 }

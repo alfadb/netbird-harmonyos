@@ -183,6 +183,10 @@ pub const POLLOUT: i16 = 0x004;
 pub const POLLERR: i16 = 0x008;
 pub const POLLHUP: i16 = 0x010;
 pub const POLLNVAL: i16 = 0x020;
+// send/recv flag (asm-generic/socket.h). One caller only: the protect-probe
+// seam's bounded reply read (n2h_collector) — a single non-blocking `recvfrom`
+// after `poll` readiness, so the fd's own flags are never touched.
+pub const MSG_DONTWAIT: c_int = 0x40;
 pub const F_GETFD: c_int = 1;
 pub const F_SETFD: c_int = 2;
 pub const F_GETFL: c_int = 3;
@@ -198,6 +202,7 @@ pub const RTLD_LOCAL: c_int = 0;
 pub const EAGAIN: c_int = 11;
 pub const EBADF: c_int = 9;
 pub const EINTR: c_int = 4;
+pub const EINVAL: c_int = 22; // the protect-probe seam's "query not encodable" send refusal
 pub const EMSGSIZE: c_int = 90;
 pub const ESRCH: c_int = 3;
 pub const EISCONN: c_int = 106; // N3-7: adopt an already-connected provided socket

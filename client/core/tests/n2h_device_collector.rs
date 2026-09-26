@@ -2419,12 +2419,13 @@ fn the_production_host_takes_the_arm_time_peer_announcement_and_keeps_the_counte
 // 2026-09-26 protect-bypass increment — the protect-probe arm, end to end
 // ---------------------------------------------------------------------------
 
-/// protect-bypass plan §4/§5 (Stage 1): the shell's `open → protect → commit`
-/// hand-off (this test stands in for the shell) followed by the SHIPPED arm
-/// entry with the `protect_probe` option ⇒ the window really sends `count`
-/// unique-marker datagrams out of the COMMITTED fd to the arm's target, the
-/// document's notes record the burst, and — no protect-probe frame having
-/// entered this harness's tunnel — `tun_negative` stays untouched.
+/// protect-bypass plan §4/§5, [adjustment 2026-09-26]: the shell's
+/// `open → protect → commit` hand-off (this test stands in for the shell)
+/// followed by the SHIPPED arm entry with the `protect_probe` option ⇒ the
+/// window really runs `count` DNS round trips out of the COMMITTED fd to the
+/// arm's resolver target, the document's notes record the burst, the
+/// `protect_probe` block records every probe, and — no protect-probe frame
+/// having entered this harness's tunnel — `tun_negative` stays untouched.
 ///
 /// The default (no `protect_probe` option) is covered by every other scenario
 /// in this file: they must be byte-for-byte the pre-increment ones.
@@ -2437,10 +2438,26 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
     let host = OfflineHost::new(offline_facts(&addrs, true), sinks, true);
     nc::install_host(host.clone() as Arc<dyn nc::CollectorHost>);
 
-    // the physical receipt sink: the protect datagrams go OUTSIDE the tunnel
-    let phys = UdpSocket::bind("127.0.0.1:0").expect("physical sink bind");
+    // The resolver stand-in: the host side sits behind a NAT and can no longer
+    // be a physical receipt endpoint, so the probe's receipt is the DNS answer
+    // it echoes back with the QNAME (a mirrored NXDOMAIN, as a real resolver
+    // would answer for a `.invalid` name).
+    let phys = UdpSocket::bind("127.0.0.1:0").expect("resolver bind");
     phys.set_read_timeout(Some(Duration::from_secs(10))).expect("read timeout");
-    let phys_addr = phys.local_addr().expect("physical sink addr");
+    let phys_addr = phys.local_addr().expect("resolver addr");
+    let resolver = std::thread::spawn(move || {
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        let mut buf = [0u8; 2048];
+        while got.len() < 2 {
+            let Ok((n, from)) = phys.recv_from(&mut buf) else { break };
+            got.push(buf[..n].to_vec());
+            let mut answer = buf[..n].to_vec();
+            answer[2] = 0x81; // QR | RD
+            answer[3] = 0x83; // RA | RCODE = NXDOMAIN
+            let _ = phys.send_to(&answer, from);
+        }
+        got
+    });
 
     // the shell's side of the hand-off, verbatim (the shell must NOT close fd)
     let opened = parse_json(&nc::protect_probe_open_json());
@@ -2467,18 +2484,17 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
     );
     wait_closed(&host, true, 20_000);
 
-    // two UNIQUE probes really reached the physical target
-    let mut got: Vec<Vec<u8>> = Vec::new();
-    let mut buf = [0u8; 2048];
-    while got.len() < 2 {
-        let (n, _from) = phys.recv_from(&mut buf).expect("the physical receipt");
-        got.push(buf[..n].to_vec());
+    // two UNIQUE probes really reached the resolver, each carrying its own
+    // lowercased `<id>.n2h-probe.invalid` question
+    let got = resolver.join().expect("resolver thread");
+    assert_eq!(got.len(), 2, "both queries really left");
+    let qnames: std::collections::BTreeSet<String> =
+        got.iter().map(|q| dns_qname_of(q)).collect();
+    assert_eq!(qnames.len(), 2, "two unique probe ids: {qnames:?}");
+    for qname in &qnames {
+        assert!(qname.starts_with("n2h-posctl-"), "the lowercased on-wire id: {qname}");
+        assert!(qname.ends_with(".n2h-probe.invalid"), "{qname}");
     }
-    let markers: std::collections::BTreeSet<String> = got
-        .iter()
-        .map(|p| nc::posctl_marker(p).expect("the frozen posctl wire form").to_string())
-        .collect();
-    assert_eq!(markers.len(), 2, "two unique probe ids: {markers:?}");
 
     // the document carries the burst record and no tunnel violation
     let (doc, _text) = closed_document();
@@ -2489,13 +2505,54 @@ fn protect_probe_arm_sends_the_burst_on_the_committed_fd_end_to_end() {
         ))),
         "the burst must be recorded with its fd and count: {notes:?}"
     );
+    // [adjustment] the `protect_probe` block records BOTH arms' truth; here the
+    // protected arm answered on every probe and no frame entered the tunnel.
+    let block = doc.at("protect_probe");
+    assert_eq!(block.at("mode").str_of(), Some("protect"), "{block:?}");
+    assert_eq!(block.at("target").str_of(), Some(phys_addr.to_string().as_str()), "{block:?}");
+    assert_eq!(block.at("count").uint_of(), Some(2), "{block:?}");
+    assert!(
+        block.at("frames_scanned").uint_of().unwrap_or(0) > 0,
+        "the scan face must be alive: {block:?}"
+    );
+    let probes = block.at("probes").arr_of();
+    assert_eq!(probes.len(), 2, "one record per attempted probe: {block:?}");
+    for p in probes {
+        assert_eq!(p.at("fd").uint_of(), Some(fd as u64), "{p:?}");
+        assert_eq!(p.at("protect_result").str_of(), Some("protected"), "{p:?}");
+        assert_eq!(p.at("sent").bool_of(), Some(true), "{p:?}");
+        assert_eq!(p.at("send_errno").uint_of(), Some(0), "{p:?}");
+        assert_eq!(p.at("reply").str_of(), Some("echo"), "the resolver echoed the QNAME: {p:?}");
+        assert!(p.at("reply_ms").uint_of().is_some(), "a real round trip: {p:?}");
+        assert_eq!(p.at("tun_observed").bool_of(), Some(false), "{p:?}");
+        assert!(p.at("tun_sides").arr_of().is_empty(), "{p:?}");
+    }
     assert_eq!(doc.at("tun_negative").at("hit").bool_of(), Some(false));
     assert!(doc.at("tun_negative").at("hits").arr_of().is_empty());
     println!(
-        "[protect] arm→window: hand-off {handoff_id} fd={fd} ⇒ {} datagrams on {phys_addr}; \
-         notes record the burst",
-        markers.len()
+        "[protect] arm→window: hand-off {handoff_id} fd={fd} ⇒ {} DNS round trips on {phys_addr}; \
+         block + notes record the burst",
+        qnames.len()
     );
+}
+
+/// The QNAME text of one DNS query, parsed back out of the question section
+/// (the length-prefixed labels, as they travel on the wire).
+fn dns_qname_of(query: &[u8]) -> String {
+    let mut out = String::new();
+    let mut i = 12usize;
+    while i < query.len() {
+        let len = query[i] as usize;
+        if len == 0 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('.');
+        }
+        out.push_str(std::str::from_utf8(&query[i + 1..i + 1 + len]).expect("label utf8"));
+        i += 1 + len;
+    }
+    out
 }
 
 // silence the unused-import warning for the evidence type used in helpers

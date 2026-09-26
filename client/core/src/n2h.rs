@@ -423,6 +423,98 @@ impl PosctlEvidence {
 }
 
 // ---------------------------------------------------------------------------
+// 2026-09-26 [adjustment] protect-probe evidence block
+// ---------------------------------------------------------------------------
+
+/// ONE datagram of the opt-in `protect_probe` seam, as the document records
+/// it: what left the socket, what came back on that SAME socket, and whether
+/// the TUN observed the probe's QNAME label.
+///
+/// The probe is a DNS A query to a public resolver now (`<probe id,
+/// lowercased>.n2h-probe.invalid`), because the host side sits behind a NAT
+/// and cannot be a physical receipt endpoint — the resolver's reply is the
+/// receipt instead.
+#[derive(Debug, Clone)]
+pub struct ProtectProbeRecord {
+    pub probe_id: String,
+    pub fd: i32,
+    /// What `n2h_probe_socket_commit` reported (`not-requested` for the
+    /// `mode:"none"` control arm's own socket).
+    pub protect_result: String,
+    pub sent: bool,
+    /// The real `sendto` errno (0 on success).
+    pub send_errno: i32,
+    /// `echo` (the reply carried this probe's QNAME back verbatim), `other` (a
+    /// datagram arrived but not ours) or `timeout` (nothing arrived).
+    pub reply: String,
+    /// The observed round trip in ms; `None` = no reply arrived, rendered `na`.
+    pub reply_ms: Option<u64>,
+    /// TRUE iff a TUN frame carried this probe's QNAME label — recorded for
+    /// BOTH arms. For `mode:"protect"` it is ALSO a `tun_negative.hits[]`
+    /// violation (the leak); for the `mode:"none"` control arm it is the
+    /// expected capture and never enters that list.
+    pub tun_observed: bool,
+    /// The TUN sides that observed it (deduped, in observation order).
+    pub tun_sides: Vec<String>,
+}
+
+impl ProtectProbeRecord {
+    fn to_json(&self) -> String {
+        let sides: Vec<String> =
+            self.tun_sides.iter().map(|s| format!("\"{}\"", json_escape(s))).collect();
+        // `reply_ms` is the observed round trip, or the `na` token when the
+        // bounded wait ended without a reply (the same token the line uses).
+        let reply_ms = match self.reply_ms {
+            Some(ms) => jinum("reply_ms", ms as i64),
+            None => jstr("reply_ms", "na"),
+        };
+        format!(
+            "{{{},{},{},{},{},{},{},{},{}}}",
+            jstr("probe_id", &self.probe_id),
+            jinum("fd", self.fd as i64),
+            jstr("protect_result", &self.protect_result),
+            jbool("sent", self.sent),
+            jinum("send_errno", self.send_errno as i64),
+            jstr("reply", &self.reply),
+            reply_ms,
+            jbool("tun_observed", self.tun_observed),
+            format!("\"tun_sides\":[{}]", sides.join(",")),
+        )
+    }
+}
+
+/// The document's `protect_probe` block: which arm ran, at which target, and
+/// one record per attempted datagram. It appears ONLY when the arm option was
+/// given (the default document is byte-identical).
+#[derive(Debug, Clone)]
+pub struct ProtectProbeEvidence {
+    /// `protect` (the protected arm) or `none` (the control arm).
+    pub mode: String,
+    /// The arm's resolver target, `a.b.c.d:port`.
+    pub target: String,
+    /// The arm option's requested probe count (see `notes[]` for a burst that
+    /// ended early on a disarm or the window deadline).
+    pub count: usize,
+    pub probes: Vec<ProtectProbeRecord>,
+    /// Frames the tee scanned in the window (`tun_negative.frames_scanned`).
+    pub frames_scanned: u64,
+}
+
+impl ProtectProbeEvidence {
+    fn to_json(&self) -> String {
+        let probes: Vec<String> = self.probes.iter().map(|p| p.to_json()).collect();
+        format!(
+            "{{{},{},{},{},{}}}",
+            jstr("mode", &self.mode),
+            jstr("target", &self.target),
+            jinum("count", self.count as i64),
+            format!("\"probes\":[{}]", probes.join(",")),
+            jnum("frames_scanned", self.frames_scanned),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // endpoint-side receipts
 // ---------------------------------------------------------------------------
 
@@ -788,6 +880,11 @@ pub struct Evidence {
     pub tun_negative: TunScanResult,
     pub endpoint_side: Vec<EndpointReceipt>,
     pub counters: Vec<WindowCounters>,
+    /// 2026-09-26 [adjustment]: the opt-in protect-probe seam's own record, so
+    /// the CONTROL arm (`mode:"none"`) can be read straight out of the
+    /// evidence document. `None` (the default: no `protect_probe` arm option)
+    /// adds no block and not one byte to the document.
+    pub protect_probe: Option<ProtectProbeEvidence>,
     /// Computed by [`Evidence::judge`] at build time; kept in the document.
     pub verdict: String,
     pub reasons: Vec<String>,
@@ -925,6 +1022,17 @@ impl Evidence {
         }
     }
 
+    /// The OPTIONAL `protect_probe` block, rendered as a leading comma so it
+    /// can be spliced after `tun_negative`. With no `protect_probe` arm option
+    /// this is the EMPTY string: the document keeps its exact pre-adjustment
+    /// bytes (pinned by the golden-hash test in `n2h_collector`).
+    fn protect_probe_json(&self) -> String {
+        match &self.protect_probe {
+            Some(p) => format!(",\"protect_probe\":{}", p.to_json()),
+            None => String::new(),
+        }
+    }
+
     /// Full JSON document (`n2h-isolation-evidence.json` shape). Parseable by
     /// the crate's strict reader; contains NO secret material (probe ids,
     /// addresses, counters, public tokens only).
@@ -959,7 +1067,7 @@ impl Evidence {
             format!("\"frozen_endpoints\":[{}]", frozen.join(",")),
             format!("\"probes\":[{}]", probes.join(",")),
             format!("\"tunnel_positive_control\":{}", self.tunnel_positive_control.to_json()),
-            format!("\"tun_negative\":{}", self.tun_negative.to_json()),
+            format!("\"tun_negative\":{}{}", self.tun_negative.to_json(), self.protect_probe_json()),
             format!("\"endpoint_side\":[{}]", receipts.join(",")),
             format!("\"counters\":[{}]", counters.join(",")),
             jstr("verdict", &self.verdict),
