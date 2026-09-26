@@ -2690,10 +2690,10 @@ try {
     /^VPN_PROTECT_PROCESS_NET\|requestId=req-i3a\|result=throw\|summary=code=none,name=Error,message=process-protect-throw\|switch=s3\|diag=true\|is_evidence=false$/
       .test(String(d4throw['line'])), String(d4throw['line']));
   const d4never = await s3Outcome('never');
-  // The 5 s wait of THIS case also proves the stale-box honesty: the box
-  // timers of the resolved / rejected / throw calls above fire during it and
-  // must print NOTHING (they did not decide their race), so the single line
-  // below can only be the real timeout.
+  // The 5 s wait of THIS case also covers the settled-box honesty: the box
+  // timers of the resolved / rejected / throw calls above are CLEARED when
+  // their platform call settles, so none of them can reach the log at all and
+  // the single line below can only be the real timeout.
   check('D4 outcome never-settles (the device-observed wedge): the bounded box answers ' +
     'result=timeout after boxMs=5000, the wrapper reports false, and the settled calls ' +
     'above leave no stale timeout line behind',
@@ -2701,6 +2701,76 @@ try {
     String(d4never['line']) === 'VPN_PROTECT_PROCESS_NET|requestId=' + REQUEST_ID +
     '|result=timeout|boxMs=5000|switch=s3|diag=true|is_evidence=false',
     String(d4never['line']) + ' count=' + String(d4never['count']));
+
+  // ---- D4④b: the bounded box timer is CANCELLED once the call settles -----
+  // Found 2026-09-25: both wrappers armed their 5 s box with setTimeout and
+  // never cleared the handle, so a SUCCESSFUL protect() printed a second,
+  // false VPN_PROTECT_TIMEOUT line (stillPending=true) five seconds later —
+  // indistinguishable from a real wedge in the device evidence.
+  // protectProcessNetWithBox was saved by its `raceSettled` log gate;
+  // protectSocketWithBox had no gate and printed the lie. The assertions
+  // below pin BOTH wrappers: a settled call leaves NO timeout line (checked
+  // after a FULL box window, carried past its own deadline by the next,
+  // never-settling call) while a never-settling call still reports exactly
+  // ONE timeout line after the unchanged 5 s box.
+  const PROTECT_TIMEOUT = 'VPN_PROTECT_TIMEOUT|';
+  function processNetTimeouts(): string[] {
+    return linesWith(PROCESS_NET)
+      .filter((l: string): boolean => l.indexOf('|result=timeout|') >= 0);
+  }
+  const d4b = freshAbility(mod, FIXTURE_FILESDIR);
+  G['__NB_PROTECT_MODE'] = 'resolved';
+  G['__NB_PROTECTED'] = 0;
+  resetLog();
+  const d4bResolvedAt = Date.now();
+  const d4bOk = await (d4b['protectSocketWithBox'] as
+    (c: unknown, fd: number) => Promise<boolean>)(new FakeConnection(), 42);
+  check('D4b protect resolved: the real platform call DID happen (counted once), the wrapper ' +
+    'returns true with ONE SETTLED line and NO timeout line',
+    d4bOk === true && G['__NB_PROTECTED'] === 1 &&
+    linesWith('VPN_PROTECT_SETTLED|').length === 1 &&
+    linesWith(PROTECT_TIMEOUT).length === 0,
+    JSON.stringify({ ok: d4bOk, calls: G['__NB_PROTECTED'],
+      timeouts: linesWith(PROTECT_TIMEOUT) }));
+  G['__NB_PROTECT_MODE'] = 'never';
+  const d4bNeverOk = await (d4b['protectSocketWithBox'] as
+    (c: unknown, fd: number) => Promise<boolean>)(new FakeConnection(), 43);
+  // Restore the mode BEFORE asserting: the D5/D6/D7 groups below drive the
+  // REAL initial leg, whose fail-closed protect gate must not inherit the
+  // wedge shape.
+  G['__NB_PROTECT_MODE'] = 'resolved';
+  check('D4b protect never settles: the WHOLE box still answers false with exactly ONE ' +
+    'stillPending=true timeout line (fd=43) after boxMs=5000, and the resolved fd=42 above — ' +
+    'its 5 s deadline having passed inside this window — left no line at all',
+    d4bNeverOk === false && Date.now() - d4bResolvedAt > 5000 &&
+    deepEq(linesWith(PROTECT_TIMEOUT), [
+      'VPN_PROTECT_TIMEOUT|requestId=' + REQUEST_ID + '|fd=43|boxMs=5000|stillPending=true'
+    ]), JSON.stringify(linesWith(PROTECT_TIMEOUT)));
+  const d4c = freshAbility(mod, FIXTURE_FILESDIR);
+  G['__NB_PROCESS_PROTECT_MODE'] = 'resolved';
+  resetLog();
+  const d4cResolvedAt = Date.now();
+  const d4cOk = await (d4c['protectProcessNetWithBox'] as
+    (c: unknown) => Promise<boolean>)(new FakeConnection());
+  check('D4b protectProcessNet resolved: returns true with ONE result=resolved line and NO ' +
+    'timeout line',
+    d4cOk === true && linesWith(PROCESS_NET).length === 1 &&
+    /^VPN_PROTECT_PROCESS_NET\|requestId=req-i3a\|result=resolved\|elapsedMs=\d+\|switch=s3\|diag=true\|is_evidence=false$/
+      .test(lastLine(PROCESS_NET)) &&
+    processNetTimeouts().length === 0,
+    JSON.stringify({ ok: d4cOk, lines: linesWith(PROCESS_NET) }));
+  G['__NB_PROCESS_PROTECT_MODE'] = 'never';
+  const d4cNeverOk = await (d4c['protectProcessNetWithBox'] as
+    (c: unknown) => Promise<boolean>)(new FakeConnection());
+  G['__NB_PROCESS_PROTECT_MODE'] = 'resolved';
+  check('D4b protectProcessNet never settles: the WHOLE box still answers false with exactly ' +
+    'ONE result=timeout line after boxMs=5000, and the resolved call above — its 5 s deadline ' +
+    'having passed inside this window — left no stale line',
+    d4cNeverOk === false && Date.now() - d4cResolvedAt > 5000 &&
+    deepEq(processNetTimeouts(), [
+      'VPN_PROTECT_PROCESS_NET|requestId=' + REQUEST_ID +
+      '|result=timeout|boxMs=5000|switch=s3|diag=true|is_evidence=false'
+    ]), JSON.stringify(processNetTimeouts()));
 
   // ---- D5⑤: S4 on — the probe gets NO probe_net_id -----------------------
   const d5 = freshAbility(mod, FIXTURE_FILESDIR);

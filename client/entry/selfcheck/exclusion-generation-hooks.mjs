@@ -42,8 +42,12 @@
 //                     connection whose create() resolves to
 //                     globalThis.__NB_CREATE_FD (default 99) and records every
 //                     submitted config in globalThis.__NB_CREATED_CONFIGS;
-//                     destroy()/protect() resolve (counted in __NB_DESTROYED /
-//                     __NB_PROTECTED). protectProcessNet() (S3 diag switch,
+//                     destroy() resolves and is counted in __NB_DESTROYED;
+//                     protect() is counted in __NB_PROTECTED and driven by
+//                     globalThis.__NB_PROTECT_MODE — 'resolved' (default) /
+//                     'never' (a promise that never settles: the wedge shape
+//                     the per-fd bounded box reports as a timeout).
+//                     protectProcessNet() (S3 diag switch,
 //                     API 22+, SDK d.ts:275) is driven by
 //                     globalThis.__NB_PROCESS_PROTECT_MODE —
 //                     'resolved' (default) / 'rejected' (Promise.reject) /
@@ -205,6 +209,8 @@ const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   '  }\n' +
   '  protect(fd) {\n' +
   '    g().__NB_PROTECTED = (g().__NB_PROTECTED || 0) + 1;\n' +
+  '    const mode = g().__NB_PROTECT_MODE || "resolved";\n' +
+  '    if (mode === "never") { return new Promise(() => {}); }\n' +
   '    return Promise.resolve();\n' +
   '  }\n' +
   '  protectProcessNet() {\n' +

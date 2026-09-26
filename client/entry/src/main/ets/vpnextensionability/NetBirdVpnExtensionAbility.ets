@@ -2731,13 +2731,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, fd);
       return true;
     }
+    // The box timer is a bounded WAIT, not a scheduled event: once the platform
+    // call settles (resolve or reject) the handle is cleared, so a successful
+    // protect() no longer prints a second, false VPN_PROTECT_TIMEOUT line 5 s
+    // later. The box itself is unchanged — it still resolves false on expiry,
+    // and an expiry that decided the race is still reported as failure.
+    let boxTimer: number = -1;
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       connection.protect(fd).then((): void => {
+        clearTimeout(boxTimer);
         hilog.info(DOMAIN, TAG,
           'VPN_PROTECT_SETTLED|requestId=%{public}s|fd=%{public}d|elapsedMs=%{public}d',
           this.requestId, fd, Date.now() - t0);
         resolve(true);
       }).catch((error: Error): void => {
+        clearTimeout(boxTimer);
         hilog.warn(DOMAIN, TAG,
           'VPN_PROTECT_REJECTED|requestId=%{public}s|fd=%{public}d|elapsedMs=%{public}d|summary=%{public}s',
           this.requestId, fd, Date.now() - t0, safeError(error));
@@ -2745,7 +2753,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       });
     });
     const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
-      setTimeout((): void => {
+      boxTimer = setTimeout((): void => {
         hilog.warn(DOMAIN, TAG,
           'VPN_PROTECT_TIMEOUT|requestId=%{public}s|fd=%{public}d|boxMs=%{public}d|stillPending=true',
           this.requestId, fd, PROTECT_BOX_MS);
@@ -2773,20 +2781,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // a gate — it is recorded and nothing else.
   private async protectProcessNetWithBox(connection: vpnExtension.VpnConnection): Promise<boolean> {
     const t0: number = Date.now();
-    // The box timer is NOT cancelled when the platform call settles (the
-    // original shape), so its callback can run up to 5 s AFTER a resolved /
-    // rejected / thrown outcome. `raceSettled` makes the timeout line mean
-    // "the box decided this race" instead of "a timer went off": without it a
-    // RESOLVED call would print a second, false `result=timeout` line 5 s
-    // later — indistinguishable from a real wedge in the device evidence, and
-    // reachable now that S3 actually calls this wrapper. The race outcome
-    // itself is unchanged (the box still resolves false; a settled race simply
-    // ignores it).
+    // The box timer is cancelled as soon as the platform call settles —
+    // resolve, reject or the synchronous throw below — so a settled call
+    // leaves no pending 5 s callback behind. `raceSettled` stays as the
+    // independent second guard: it makes the timeout line mean "the box
+    // decided this race" instead of "a timer went off", so even a callback
+    // that somehow survived cancellation can never print a second, false
+    // `result=timeout` line — indistinguishable from a real wedge in the
+    // device evidence. The race outcome itself is unchanged (the box still
+    // resolves false; a settled race simply ignores it).
     let raceSettled: boolean = false;
+    let boxTimer: number = -1;
     const settled: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
       try {
         connection.protectProcessNet().then((): void => {
           raceSettled = true;
+          clearTimeout(boxTimer);
           hilog.info(DOMAIN, TAG,
             'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=resolved|elapsedMs=%{public}d|' +
             'switch=s3|diag=true|is_evidence=false',
@@ -2794,6 +2804,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           resolve(true);
         }).catch((error: Error): void => {
           raceSettled = true;
+          clearTimeout(boxTimer);
           hilog.warn(DOMAIN, TAG,
             'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=rejected|elapsedMs=%{public}d|' +
             'summary=%{public}s|switch=s3|diag=true|is_evidence=false',
@@ -2802,6 +2813,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         });
       } catch (error) {
         raceSettled = true;
+        clearTimeout(boxTimer);
         hilog.warn(DOMAIN, TAG,
           'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=throw|summary=%{public}s|' +
           'switch=s3|diag=true|is_evidence=false',
@@ -2810,7 +2822,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
     });
     const box: Promise<boolean> = new Promise<boolean>((resolve: (value: boolean) => void) => {
-      setTimeout((): void => {
+      boxTimer = setTimeout((): void => {
         if (!raceSettled) {
           hilog.warn(DOMAIN, TAG,
             'VPN_PROTECT_PROCESS_NET|requestId=%{public}s|result=timeout|boxMs=%{public}d|' +
