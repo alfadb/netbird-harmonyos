@@ -105,3 +105,49 @@
 - 代码：项目仓提交 `0834c2f`（当时的 `NetBirdVpnExtensionAbility.ets:295-309`、`:1158-1177`）、`fd5f71c`（`:2506-2556`）、`b3e7b81`（盒子计时器清理）。
 - 口径依据：**独立盲审 2026-09-26（openai/gpt-5.6-sol，干净上下文、只读）**，逐条见 §2。
 - 仓B 登记：`records/n2h-preregistration-v4-addendum-20260923.json` 的 `amendment_events[2]` 与 `B_vendor_statements.B8_protect_requirement_conflict.superseded_by_amendment`。
+
+---
+
+## 6. 晚间两轮（0033、0034）
+
+> 本节于 2026-09-26 晚间收尾时追加；除本节外未改动本文任何字节。两轮均为**诊断观察**（仓B 各授权件 `is_evidence=false`、`not_a_gate_pass=true`），**不构成任何门结论**，不改变 §3 的 C7／DNS 状态表与 §5 待办的编号。
+
+### 6.1 0033：C7 同源标定单轮——仍 `not-completed`，但首次取得两侧同刻对数据
+
+- **结果**：`conclusion=not-completed`（判定工具 `analyze0033.py` `dc500dd8…e6f3`；`result-0033.json` sha256 `5802de70…6eb7`）。冻结配对 A=seq0（API `rxBytes=3280`）／B=seq17（`4536`），相隔 11.024 s；增量 API rx **+1256**／tx 0，`/proc` RX **+1840**（23 包，整 80 倍）／TX +80（1 包）；对端 b2a 账本 n ∈ [10,12]；5 个原因 token。`not-completed` 只是「原始数据未满足判据前提」的缺口标记，**不是失败**，不得据此推翻既有结论或放宽任何门。
+- **新增观测**（仓B 该轮 `STAGE-RECORD.md` §6，**只作观测、不参与判定**）：17 个 API 取值**全部逐字出现在同期 `/proc` 的 RX 阶梯中**（无需任何基差修正）⇒ 两侧就本轮数据而言是**同一计数器的离散采样**；刷新周期只能给**量级 ≈1 s**（16 次取值变化的定位窗口 174–603 ms、中位 336 ms；首读间隔中位 1030 ms；按固定周期网格拟合无解）；相对 `/proc` 的同值首达滞后中位约 **215 ms**；≥2 s 的同值驻留只有 3 段（2517／2061／2085 ms），且这 3 段期间 `/proc` RX **全程不变**（是内核侧平台期，不构成刷新周期的证据）。
+- **由此更正两处口径**（此前写法缺乏数据支持）：①「statistics API 读数按约 2–2.5 s 的周期阶梯刷新」；②「BURST 节拍约 600 ms」——40 拍平均 **601.2 ms**、逐拍间隔中位 **507 ms**、含 3 个 **1.6–2.2 s** 空档，「600 ms」只在平均值意义上成立。两处已按仓B 该件 `AMEND-0033-20260926-03`（`type=record-correction`）登记更正后的读法，**`consumption_events` 原文字符逐字未改**。
+- **对 C7 的含义**：C7 **仍未完成**（§3 状态表保持不变），0032／0033 两轮都**不得**写成 C7 完成或任何门通过；但「同一计数器」与「量级 ≈1 s 采样」这两点从此有真机观测支持，可作为 §5 待办 2 复测设计的输入。
+
+### 6.2 0034：protect 绕开语义——判定器 `uncertain`，观测层面强
+
+- **结果**：冻结判定器 `judge0034.py`（`8982f7a4…9c5e`）判 **uncertain**（`verdict.json` sha256 `5ff6bf31…e611`）。七行 V1–V11（按各行适用项）**全部机械有效**；D0（无捕获、不 protect）TUN 0/5、echo 5/5（**72–161 ms**）；P0/P2（捕获路由 `N2H_DIAG_CAPTURE_ROUTE|result=added`、目标 `119.29.29.29/32` 进 `VPN_ROUTE_ENTRY`（`interface=vpn-tun`）、不 protect）echo **0/5**、timeout 5/5，但 **TUN 0/5** ⇒ 正控 C4b（≥4/5）**未满足** ⇒ 只记 uncertain；P1（`VPN_PROTECT_PROBE|outcome=settled|commit=ok|protect_result=protected`）TUN 0/5、echo 5/5（66–157 ms）⇒ C4a/C4c 满足、C5 不成立（无 `p1-tun-leak`）。
+- **观测层面（并列登记，不作因果）**：同一捕获路由下，不 protect 回复**全丢**、真 protect 后**全部往返成功** ⇒ 「protect 绕开」在本设备本固件上具备**强观测证据**；缺的只是**捕获正控所需的 TUN 侧观测**。
+- **复测三行与 0031 一致**：R0' **4/5**（`consistent-with-0031-r1`）、R2' **0/5**（`-r2`）、R4' **0/5** 且 `VPN_PROTECT_PROCESS_NET|result=resolved|elapsedMs=11`（`-r4`）⇒ 0031 的负结果在 **5 个唯一探针**下方向一致；其「提示性证据」定位（§2 盲审第 5 条）**不因本轮复测升级**——复测只做「方向是否一致」。
+
+### 6.3 根因：tee 标签「先发后登记」（漏报方向）
+
+- **根因**（收尾后确定；仓外报告 `/home/worker/n2h-kit/round-0034/tee-miss-rootcause-20260926.md`，只读）：`client/core/src/n2h_collector.rs` 的 `send_protect_probes` 在 `:4006` 发送并**等完整个 DNS 往返**（最多 `PROTECT_PROBE_REPLY_WAIT_MS = 1500 ms`）之后，才在 `:4011-4012` 调 `win.tee.register(...)`；查询帧被 TUN 读线程扫过时扫描表里还没有它的标签——帧确实被读了（`frames_scanned` 计入，P0/P2 = 23）却**永远匹配不上** ⇒ 七行 `tun_observed` 全 false。**100% 可复现的顺序缺陷，不是 TUN 观测通路故障**：同一窗口同一 tee 的 a2b posctl 帧 31 ms 内命中；离线 1:1 复现（先扫后登记 0 命中），把 `register` 前移后转 true。
+- **同类缺陷**：posctl a2b 亦「先发后登记」（`:2986` `send_posctl` → `:2993` register），窗口仅微秒级，R0' 已实测丢 1/5。
+- **影响方向是漏报**：在 `mode=protect`（判泄漏那一臂）上会把真泄漏读成 look-clean ⇒ **R2'/R4' 在修复前不能用来否定泄漏**。最小修复＝把 `register` 移到发送之前（建议同批加固 posctl）；**不要**用「延长 tee 生命周期／加 tail」修（帧被扫时条目根本不存在，detach 时机无关）。
+- **网卡计数旁证**（同 arm 的 `N2H_IFACE_BYTES_WINDOW|interface=vpn-tun`）：tx 增量 D0 **+80**、P1 **+80**、P0 **+476**、P2 **+476**；476 = 80（被 tee 看到的那 1 个 a2b posctl 帧，`frame_len=80`）＋ **4×99**（99 = `send_len 71` ＋ 20 IP ＋ 8 UDP）⇒ 实测前 4 个查询帧确已按 99 B/帧写进隧道接口，两个独立 arm 数值一致；第 5 个在计数之后，属推断不属直测。该旁证**不改变**判定器结论（仍 uncertain）。
+
+### 6.4 局限与更正
+
+1. **0031 判据第 3 条的局限（本轮新发现）**：三行对端 `n2h-peer.log` 的 `a2b_seen` 均 **0 → 5**（各 5 条 `n2h-peer-receipt`），但 `last_a2b_from` 不同——R0' = **100.108.144.165**（手机隧道地址），R2'／R4' = **100.108.171.38**（另一 NetBird 节点）；同时 vpn-tun txBytes：R0' 576→976（**+400**）、R2' 576→576（**+0**）、R4' 464→464（**+0**）。⇒ R2'／R4' 的探针**没进手机隧道**（网卡计数不变），却经另一 NetBird 节点（据 `last_a2b_from` 推测为局域网内转发）到达对端。故 0031 `interpretation_rules` 第 3 条「对端 `a2b_seen` 增加 ⇒ 进隧道」**在该网络环境下不可靠**：今后判断「是否进隧道」以**网卡计数（`N2H_IFACE_BYTES_WINDOW`）／TUN 观测**为准，不以对端 `a2b_seen` 单独作准。**0031 当时 `a2b_seen` 未增加，其结论不因本条改变。**
+2. **两处口径更正已登记**（仓B 各件 `type=record-correction`，原件 `consumption_events` 原文字符均未改）：0033——「API 约 2–2.5 s 周期」与「节拍约 600 ms」（见 §6.1）；0034——D0 的 echo 区间应为 **72–161 ms**（原写 66–161 ms；`66` 出现在 P1，P1 实测 66–157 ms 与原文相符）、会话时长应为 **626 s**（原写「约 10.5 分钟」；`preflight 18:59:45 → restore 19:10:11` = 626 s）。两处均为描述性文字，**不改变任何计数或结论**。
+3. **`uncertain` 不等于「没有泄漏」**：本轮 `uncertain` 是判据口径的结论（C4b 正控未取得），不是对泄漏的否定；叠加 §6.3 的漏报缺陷，`mode=protect` 臂在修复前对泄漏问题**无判别力**。
+4. **证据边界不变**：0033／0034 均不改 C7、DNS 回执、沙箱写入与 N2-H 的任何状态；两轮 `is_evidence=false`、`not_a_gate_pass=true`，不产生任何门级 verdict。
+
+### 6.5 后续（对 §5 待办的增补）
+
+1. **修 tee 登记时序后重跑 P0/P1/P2**：把 protect_probe 的 `register` 移到发送之前（`n2h_collector.rs:4006` 之前；建议同批加固 posctl `:2993` 之前的同类顺序），并补根因报告 §4 所列单测（其中并发形状测试**必须在旧顺序下失败**）；随后以**同一 arm** 重跑 P0/P1/P2，目标是取得 **C4b 的 TUN ≥4/5 正控**。修复前 R2'／R4' 不得用于否定泄漏。
+2. **改配对规则的 C7 复测**：0033 的 `not-completed` 主要来自冻结配对规则把 A 点落在一次 **800 B 突增**中段（`proc_delta_RX=1840` 为最保守括界）。下一轮应在**配对规则层面**改掉（例如按 API 取值级对齐、或 A／B 各取「最近一次 `/proc` 读」的同刻对），并保持 §5 待办 2 的要求：两侧间隔 <1 s、A／B 两点都必须有 `vpn-tun` 的**两侧**读数。
+3. **判据层面**：把「对端 `a2b_seen`」从进隧道的判据降为辅助观测，主判据改为网卡计数／TUN 观测（§6.4 第 1 条）。
+
+### 本节引用
+
+- 0033：仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0033.json`（`consumption_semantics.consumption_events[0]`、`amendment_events` `-01/-02/-03`）与其证据目录（`STAGE-RECORD.md` §4／§5／§6.2／§6.3／§10 第 8／9 条、`result-0033.json`、`MANIFEST.sha256` 72/72 OK）。
+- 0034：仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0034.json`（`consumption_semantics.consumption_events[0]`、`amendment_events` `-01/-02`）与其证据目录（`STAGE-RECORD.md` §3.1–§3.6／§4／§5／§7 第 6 条、`verdict.json`、`counters.json`、`D0/P0/P1/P2` 的 `N2H_IFACE_BYTES_WINDOW` 行、`R0p|R2p|R4p/n2h-peer.log`、`MANIFEST.sha256` 504/504 OK）。
+- 根因报告（仓外只读）：`/home/worker/n2h-kit/round-0034/tee-miss-rootcause-20260926.md`。
+- 登记：仓B `records/n2h-preregistration-v4-addendum-20260923.json` 的 `amendment_events[3]`（`AMEND-N2H-V4-ADDENDUM-20260923-04`）。
