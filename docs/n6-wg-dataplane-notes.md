@@ -361,3 +361,13 @@ create 时闸必然 HOLD ⇒ 默认路由永远装不上（除非重建连接）
   `RouteInfo` 目的串的一致性（`10.99.0.0/24` 形态）需真机比对；
 - 重建后 WG 会话在真实内核 TUN 上的无缝续流（宿主 socketpair 上已证明
   逻辑无缝，真实 TUN 的缓冲/MTU 行为未验证）。
+
+---
+
+## 更正记录：生产 WG feed 已接线（2026-09-27，只追加不改写）
+
+> §4 第 78–81 行「生产默认仍为 `WgPeerRegistry`、缺 WG fd feed」为当时的历史描述，现已过期；原文保留，不作为当前接线状态引用。
+
+- 当前 `client/core/src/connector.rs:4244,4291-4317,4349,4418-4449` 两个生产 start 入口均构造 `WgDeviceFeed` 并交给 connector，缺 feed 时继续 fail-closed。
+- 当前 ArkTS 壳 `client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:2792-2813,2894-2946,2956-2998` 在 `create()` 成功后先 `protect` WG 外层 UDP socket，再依次 feed WG UDP fd 与 TUN fd；入口见同目录 `NetBirdConnector.ets:486-502`。
+- **剩余缺口是真机物理闭环**（实际 UDP/TUN 报文、重连及重建等），不是生产接线；不据代码接线宣称 N6 或 N2 通过。

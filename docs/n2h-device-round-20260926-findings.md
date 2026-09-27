@@ -192,3 +192,7 @@
 
 - 仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0035`、`…-0036`、`…-0037`、`…-0038` 的同名 `.json` 授权件和证据目录；各轮 `STAGE-RECORD.md`，0036–0038 的 `verdict.md`／C7 判定产物。
 - 主机侧只读参考：`/home/worker/n2h-kit/round-0037/analysis-c7-rx-mismatch/REPORT.md`、`/home/worker/n2h-kit/round-0037/README-0037-changes.md`、`/home/worker/n2h-kit/round-0038/README-c7-v5.md`、`/home/worker/n2h-kit/round-0038/README-0038-changes.md`。
+
+### 7.5 后续决定：N2-H 休眠（2026-09-27 追加）
+
+N2-H 因适用前提不成立转为**休眠**，材料与结论冻结存档；后续回到 §二 第 4 条逐 socket `protect` 的 N2 原路径。适用事实更正、重开条件、证据边界、前置取证与评审/用户批准记录见 [`native-nx-governance.md`](native-nx-governance.md)「追加登记：N2-H 休眠与 N2 原路径恢复（2026-09-27）」；本节与 0037 的 `is_evidence=false` 诊断观察均不构成 N2 门结论。

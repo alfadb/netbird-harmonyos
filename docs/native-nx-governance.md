@@ -151,3 +151,13 @@ E1（stock Go loader/runtime 门）转为 dormant，既有判定保持原绑定�
 8. 不可测即停止：设备时间不可读、时区未知、AUTH 文件与其 .sha256 sidecar 校验不通过、同一 AUTH 存在多份内容不一致副本——任一成立即停止上报，按窗口外处理。执行硬门所需的只读时间查询命令必须在该 AUTH 的 allowed 白名单内显式列出；未列出即不得执行设备操作（读时间不得作为"未授权但必要"的例外）。
 9. 绝对时刻与单调性：一切比较在带时区的绝对时刻（epoch）上进行，禁止墙钟字符串比较。本次比对记录的主机时刻不得早于同一 AUTH 上一次已登记的 checked_at；出现倒退即视为时钟不可信，按停止条件处理。禁止为通过比对而修改主机或设备系统时间。
 10. 并行与单会话：同一 AUTH 同一时刻只允许一个执行者持有设备操作权；并行执行、跨会话续用须新签。
+
+## 追加登记：N2-H 休眠与 N2 原路径恢复（2026-09-27，只追加不改写）
+
+> 本节 2026-09-27 追加：上文 §二、§五及 N2-H 原登记一字未改。此处仅登记事实更正、适用状态与后续取证边界；既有诊断观察不追认为门证据。
+
+1. **旧事实与适用前提**：N2-H 登记第 118–123 行所载「`protect(fd)` / `protectProcessNet()` 均被 `MANAGE_VPN` 拦住、Promise 不 settle、声明权限安装失败，故无普通第三方逐 socket bypass API」不再是现行事实。主要依据是 [`n2h-device-round-20260926-findings.md`](n2h-device-round-20260926-findings.md) 第 61–67 行的 09-26 独立盲审：`protect(fd)` **40/40 resolved**；旧超时来自应用计时器未清；线程卡死、安装失败均无留存原始日志。补充观察是仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0037/verdict.md` 第 7–24、88–92 行：在该设备该固件上一次 `protect-bypass-effective` 观测。两者均 `is_evidence=false`，**不构成 N2、N2-H 或任何 N2 门结论**。因此原 N2-H 第 126 行「普通第三方公开逐 socket bypass 不可用时」与第 129 行「仅在逐 socket bypass 无公开 API 结论成立的平台上适用；官方 SDK 一旦出现逐 socket 机制，优先回到 §二 第 4 条原路径」的适用前提在当前目标平台不成立。
+2. **N2-H 休眠**：N2-H 材料与结论冻结存档，不再沿用其替代判据取证。仅遇以下任一情形才可提出重开，且须 **T0 + 用户批准**：(a) 某类外层流量由系统解析器等本进程无法持有的 socket 发出，且无法改为受保护 socket（主要是 DNS）；(b) 证实 `protect` 在 `VpnConfig.create` 之前、recreate 之后或切网之后不能持续生效；(c) 在目标冻结元组上 `protect` 绕开效果被证伪。触发不自动重开、不改变门状态。
+3. **回到 N2 原路径**：按 §二 第 4 条逐 socket `protect`、流量 oracle 与 fail-closed 判据取证。混合方案以 `protect` 为主；路由排除等仅可作 §五 第 70 行规定的纵深附加，**N2 证据必须在关闭附加机制时取得**。某类别若只能依赖 `protectProcessNet` 或路由排除，登记该类别 `deviation/UNSAT`，返回 **T0 + 用户批准**，不得写 `N2 pass`。
+4. **前置取证待办**：§二 第 3 条前置取证门的后一半尚未书面闭合：须论证壳侧异步「open → protect resolve → 才 feed 给 native」顺序，与上游 `ControlProtectSocket` 在 `RawConn.Control` 内 connect/bind 前同步返回的语义等价，并经独立审查；调用成功及上述诊断观察不能代替该论证。
+5. **评审与批准记录**：2026-09-27 T0 评审（`anthropic/claude-opus-5-5`）有条件同意，七项条件为：①完成本登记；②书面闭合上述等价论证并独立审查；③relay 改用受保护 fd、DNS 提出 N2 可证方案，不预设混合判据；④N2 证据轮关闭端点排除、`protectProcessNet`、`blockedApplications` 与开发偏离开关；⑤实现重连与切网的按需受保护 socket 补给；⑥N2 预注册覆盖全部外层流量类别 × 首连/重连/切网/recreate/撤销/fail-closed 注入，先审后测，使用 campaign 类授权；⑦N6 与 N2 合并实现、分门判定，默认路由放开前全部外层 socket 已 `protect`。DeepSeek 第二席两次派发均失败、无输出；经用户同意不补第二席，不记为第二席评审意见。用户在 DSH Web GUI（2026-09-27）原文批准：「全部同意你的意见，但是我现在出门了，设备等我回来再测试」；对「第二席不补、按任务顺序开工」回复：「1. 可以 2. 同意」。本登记不授权上机，设备测试待用户回来后另按授权流程执行。
