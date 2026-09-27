@@ -157,6 +157,7 @@ pub mod n2h_collector;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
 // consumption + tonic connector service) — fail-closed gap 1 fix.
 pub mod mgmtsock;
+pub mod socket_supply;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;
 pub mod napi;

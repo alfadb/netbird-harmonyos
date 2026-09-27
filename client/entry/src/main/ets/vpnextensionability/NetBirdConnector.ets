@@ -475,6 +475,28 @@ export function connectorSignalFeed(fd: number, connectAddr: string): SocketFeed
     SocketFeedResult;
 }
 
+export interface SocketSupplyRequest {
+  id: string;
+  kind?: string;
+  purpose?: string;
+}
+
+export function socketSupplyPoll(): SocketSupplyRequest {
+  return JSON.parse(core.socket_supply_poll()) as SocketSupplyRequest;
+}
+
+export function socketSupplyReply(id: string, fd: number, result: string): SocketFeedResult {
+  return JSON.parse(core.socket_supply_reply(id, fd, result)) as SocketFeedResult;
+}
+
+export function socketSupplyCloseFd(fd: number): void {
+  core.socket_supply_close_fd(fd);
+}
+
+export function socketSupplyShutdown(): void {
+  core.socket_supply_shutdown();
+}
+
 // N7 feed results: {ok:true,device_up:bool} — device_up flips true once BOTH
 // the WG socket and the TUN fd have been fed (the data plane is pumping).
 export interface WgFeedResult {

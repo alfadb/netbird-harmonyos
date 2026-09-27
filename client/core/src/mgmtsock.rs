@@ -55,7 +55,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,6 +83,7 @@ pub enum SocketSeamError {
     BadFd { errno: i32 },
     /// `F_SETFL(O_NONBLOCK)` failed on the dup copy.
     NonBlock { errno: i32 },
+    Supply(&'static str),
 }
 
 impl SocketSeamError {
@@ -92,12 +93,13 @@ impl SocketSeamError {
             SocketSeamError::NoSocket => "no-protected-socket",
             SocketSeamError::BadFd { .. } => "socket-fd-invalid",
             SocketSeamError::NonBlock { .. } => "socket-nonblock-failed",
+            SocketSeamError::Supply(reason) => reason,
         }
     }
 
     pub fn errno(&self) -> i32 {
         match self {
-            SocketSeamError::NoSocket => 0,
+            SocketSeamError::NoSocket | SocketSeamError::Supply(_) => 0,
             SocketSeamError::BadFd { errno } | SocketSeamError::NonBlock { errno } => *errno,
         }
     }
@@ -120,6 +122,24 @@ impl std::error::Error for SocketSeamError {}
 /// "no protected socket available": the caller must fail the dial.
 pub trait ManagementSocketProvider: Send + Sync + 'static {
     fn take_fd(&self) -> Result<i32, SocketSeamError>;
+
+    fn take_for_dial(&self) -> Pin<Box<dyn Future<Output = Result<SocketLease, SocketSeamError>> + Send + '_>> {
+        Box::pin(async { self.take_fd().map(SocketLease::Borrowed) })
+    }
+}
+
+pub enum SocketLease {
+    Borrowed(i32),
+    Owned(OwnedFd),
+}
+
+impl SocketLease {
+    fn fd(&self) -> i32 {
+        match self {
+            Self::Borrowed(fd) => *fd,
+            Self::Owned(fd) => fd.as_raw_fd(),
+        }
+    }
 }
 
 /// Production provider: a FIFO queue of protected sockets seeded by
@@ -131,6 +151,7 @@ pub trait ManagementSocketProvider: Send + Sync + 'static {
 pub struct ProtectedSocketFdSource {
     queue: Mutex<VecDeque<i32>>,
     taken: AtomicU64,
+    supply: std::sync::OnceLock<(Arc<crate::socket_supply::SocketSupply>, crate::socket_supply::Purpose)>,
 }
 
 impl ProtectedSocketFdSource {
@@ -140,7 +161,11 @@ impl ProtectedSocketFdSource {
         if fd >= 0 {
             q.push_back(fd);
         }
-        ProtectedSocketFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0) }
+        ProtectedSocketFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), supply: std::sync::OnceLock::new() }
+    }
+
+    pub fn attach_supply(&self, supply: Arc<crate::socket_supply::SocketSupply>, purpose: crate::socket_supply::Purpose) {
+        let _ = self.supply.set((supply, purpose));
     }
 
     /// Shell-side resupply: push another fresh protected socket fd.
@@ -173,6 +198,21 @@ impl ManagementSocketProvider for ProtectedSocketFdSource {
             }
             None => Err(SocketSeamError::NoSocket),
         }
+    }
+
+    fn take_for_dial(&self) -> Pin<Box<dyn Future<Output = Result<SocketLease, SocketSeamError>> + Send + '_>> {
+        Box::pin(async move {
+            match self.take_fd() {
+                Ok(fd) => Ok(SocketLease::Borrowed(fd)),
+                Err(SocketSeamError::NoSocket) => {
+                    let (supply, purpose) = self.supply.get().ok_or(SocketSeamError::NoSocket)?;
+                    let owned = supply.request(*purpose).await?;
+                    self.taken.fetch_add(1, Ordering::AcqRel);
+                    Ok(SocketLease::Owned(owned))
+                }
+                Err(err) => Err(err),
+            }
+        })
     }
 }
 
@@ -287,7 +327,8 @@ pub async fn connect_protected(
     source: &dyn ManagementSocketProvider,
     connect_addr: SocketAddr,
 ) -> Result<tokio::net::TcpStream, SocketDialError> {
-    let provided = source.take_fd().map_err(SocketDialError::Seam)?;
+    let lease = source.take_for_dial().await.map_err(SocketDialError::Seam)?;
+    let provided = lease.fd();
     let dup = dup_socket_fd(provided).map_err(SocketDialError::Seam)?;
     if let Err(e) = set_nonblock(dup) {
         unsafe { sys::close(dup) };

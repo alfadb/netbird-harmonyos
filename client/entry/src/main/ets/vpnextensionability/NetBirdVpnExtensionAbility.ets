@@ -30,6 +30,7 @@ import {
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
+  socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown, SocketSupplyRequest,
   countPemCertificates, derivePlatformDnsEndpoints,
   formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
@@ -507,6 +508,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private iceSocketFd: number = -1;
   private iceProtected: boolean = false;
   private iceTopUpTimer: number = -1;
+  private socketSupplyTimer: number = -1;
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
   private iceQueueDepth: number = 0;
@@ -866,6 +868,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // seed ONE spare protected socket so a single reconnect dial can
     // re-protect; further resupply policy is an N4+ increment (a starved
     // queue fails dials CLOSED — never unprotected)
+    this.startSocketSupply(connection);
     this.feedSpareProtectedSocket(connection);
     hilog.info(DOMAIN, TAG, 'VPN_CONNECTOR_STARTED|requestId=%{public}s|state=%{public}s|' +
       'mgmtSocket=protected|connectAddr=%{public}s',
@@ -2601,6 +2604,83 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     });
   }
 
+  private startSocketSupply(connection: vpnExtension.VpnConnection): void {
+    if (this.socketSupplyTimer >= 0) {
+      return;
+    }
+    this.socketSupplyTimer = setInterval((): void => {
+      if (this.destroyRequested || this.destroyPromise !== undefined) {
+        return;
+      }
+      try {
+        const request: SocketSupplyRequest = socketSupplyPoll();
+        if (request.id.length > 0) {
+          this.fulfillSocketRequest(connection, request).catch((error: Error): void => {
+            hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_ERROR|id=%{public}s|summary=%{public}s',
+              request.id, safeError(error));
+          });
+        }
+      } catch (error) {
+        hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_POLL_FAILED|summary=%{public}s',
+          safeError(error as Error));
+      }
+    }, 100);
+  }
+
+  private async fulfillSocketRequest(connection: vpnExtension.VpnConnection,
+    request: SocketSupplyRequest): Promise<void> {
+    let fd: number = -1;
+    let result: string = 'rejected';
+    const t0: number = Date.now();
+    try {
+      if (this.destroyRequested || this.destroyPromise !== undefined ||
+        this.protectDeviationRouteExclusion) {
+        return;
+      }
+      if (request.kind !== 'tcp' || (request.purpose !== 'management' &&
+        request.purpose !== 'signal')) {
+        return;
+      }
+      const opened: NativeTcpSocketOpen = mgmtSocketOpen();
+      fd = opened.fd;
+      if (fd < 0 || opened.bind_rc !== 0) {
+        return;
+      }
+      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+      if (protectedOk && !this.protectDeviationRouteExclusion && !this.destroyRequested &&
+        this.destroyPromise === undefined) {
+        result = 'protected';
+      } else {
+        result = 'protect-failed';
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_FAILED|id=%{public}s|summary=%{public}s',
+        request.id, safeError(error as Error));
+    } finally {
+      try {
+        const reply: SocketFeedResult = socketSupplyReply(request.id, result === 'protected' ? fd : -1,
+          result);
+        hilog.info(DOMAIN, TAG,
+          'VPN_SOCKET_SUPPLY|id=%{public}s|purpose=%{public}s|kind=%{public}s|fd=%{public}d|' +
+          'protect=%{public}s|elapsedMs=%{public}d|accepted=%{public}s',
+          request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
+          result, Date.now() - t0, String(reply.ok));
+      } finally {
+        if (fd >= 0) {
+          socketSupplyCloseFd(fd);
+        }
+      }
+    }
+  }
+
+  private stopSocketSupply(): void {
+    if (this.socketSupplyTimer >= 0) {
+      clearInterval(this.socketSupplyTimer);
+      this.socketSupplyTimer = -1;
+    }
+    socketSupplyShutdown();
+  }
+
   // N3-7: seed ONE spare protected management socket into the core queue so
   // a single reconnect dial can re-protect without new shell involvement.
   // Best-effort: failures are logged, never fatal (a starved queue fails
@@ -2638,6 +2718,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private stopStatusAndNetcfgWatcher(): void {
+    this.stopSocketSupply();
     if (this.watcherTimer >= 0) {
       clearInterval(this.watcherTimer);
       this.watcherTimer = -1;
@@ -3397,6 +3478,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private destroyOnce(trigger: string): Promise<void> {
+    this.stopSocketSupply();
     if (this.destroyPromise !== undefined) {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_ALREADY|requestId=%{public}s|firstTrigger=%{public}s|requestedTrigger=%{public}s',

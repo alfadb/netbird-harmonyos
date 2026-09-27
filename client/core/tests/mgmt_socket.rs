@@ -897,3 +897,118 @@ impl ConfigApplier for Recorder {
     }
     fn clear(&self) {}
 }
+
+async fn next_supply_request(supply: &netbird_core::socket_supply::SocketSupply) -> (u64, netbird_core::socket_supply::Purpose) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) = supply.poll_request() { return request; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("supply request")
+}
+
+#[tokio::test]
+async fn on_demand_management_and_signal_redials_use_separate_protected_fds() {
+    use netbird_core::mgmtsock::connect_protected;
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    let management = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    let signal = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    management.attach_supply(supply.clone(), Purpose::Management);
+    signal.attach_supply(supply.clone(), Purpose::Signal);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut ids = std::collections::HashSet::new();
+    for (source, purpose) in [(&management, Purpose::Management), (&signal, Purpose::Signal),
+        (&management, Purpose::Management), (&signal, Purpose::Signal)] {
+        let source = source.clone();
+        let dial = tokio::spawn(async move { connect_protected(source.as_ref(), addr).await });
+        let (id, requested) = next_supply_request(&supply).await;
+        assert_eq!(requested, purpose);
+        assert!(ids.insert(id), "each request must have a unique ID");
+        let fd = open_fd();
+        assert!(supply.reply(id, fd, "protected").contains("\"ok\":true"));
+        assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+        let stream = dial.await.unwrap().unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), accepted.local_addr().unwrap());
+        drop(stream);
+        drop(accepted);
+    }
+    assert_eq!(management.taken(), 2);
+    assert_eq!(signal.taken(), 2);
+}
+
+#[tokio::test]
+async fn on_demand_rejection_and_stale_reply_never_dial() {
+    use netbird_core::mgmtsock::connect_protected;
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    source.attach_supply(supply.clone(), Purpose::Management);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dial = tokio::spawn(async move { connect_protected(source.as_ref(), addr).await });
+    let (id, _) = next_supply_request(&supply).await;
+    let fd = open_fd();
+    assert!(supply.reply(id, fd, "protect-failed").contains("\"ok\":false"));
+    assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+    assert_eq!(dial.await.unwrap().unwrap_err().token(), "socket-protect-failed");
+    let late = open_fd();
+    assert!(supply.reply(id, late, "protected").contains("request-expired"));
+    assert!(netbird_core::socket_supply::close_fd_json(late).contains("\"ok\":true"));
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn shutdown_cancels_concurrent_requests_and_rejects_late_delivery() {
+    use netbird_core::mgmtsock::connect_protected;
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    source.attach_supply(supply.clone(), Purpose::Signal);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut dials = Vec::new();
+    for _ in 0..2 {
+        let source = source.clone();
+        dials.push(tokio::spawn(async move { connect_protected(source.as_ref(), addr).await }));
+    }
+    let first = next_supply_request(&supply).await.0;
+    let second = next_supply_request(&supply).await.0;
+    assert_ne!(first, second);
+    supply.close();
+    for dial in dials {
+        assert_eq!(dial.await.unwrap().unwrap_err().token(), "socket-supply-closed");
+    }
+    let fd = open_fd();
+    assert!(supply.reply(first, fd, "protected").contains("request-expired"));
+    assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+    assert!(tokio::time::timeout(Duration::from_millis(50), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
+async fn cancelled_supply_request_rejects_delivery() {
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    let request = tokio::spawn({ let supply = supply.clone(); async move { supply.request(Purpose::Signal).await } });
+    let (id, _) = next_supply_request(&supply).await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    let fd = open_fd();
+    assert!(supply.reply(id, fd, "protected").contains("request-expired"));
+    assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+}
+
+#[tokio::test]
+async fn unanswered_supply_times_out_fail_closed() {
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    let request = tokio::spawn({ let supply = supply.clone(); async move { supply.request(Purpose::Management).await } });
+    let (id, _) = next_supply_request(&supply).await;
+    let result = request.await.unwrap();
+    assert_eq!(result.unwrap_err().token(), "socket-supply-timeout");
+    let fd = open_fd();
+    assert!(supply.reply(id, fd, "protected").contains("request-expired"));
+    assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+}

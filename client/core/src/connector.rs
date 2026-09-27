@@ -3687,6 +3687,12 @@ impl ConnectorHandle {
         // (the link itself starts lazily — see apply_update / signal feed).
         let stop_flag = Arc::new(AtomicBool::new(false));
         let mut signal_sockets: Option<Arc<ProtectedSocketFdSource>> = None;
+        let socket_supply = socket_source.as_ref().map(|source| {
+            let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+            source.attach_supply(supply.clone(), crate::socket_supply::Purpose::Management);
+            crate::socket_supply::install(supply.clone());
+            supply
+        });
         let ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>;
         let ice = match ice {
             Some(orch) => {
@@ -3702,6 +3708,9 @@ impl ConnectorHandle {
                             // created here and shared by the orchestrator
                             // seam (send side) and the worker (queue side).
                             let src = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+                            if let Some(supply) = socket_supply.as_ref() {
+                                src.attach_supply(supply.clone(), crate::socket_supply::Purpose::Signal);
+                            }
                             signal_sockets = Some(src.clone());
                             let (exchange, rx) = RealSignalExchange::new();
                             let rt = Arc::new(SignalRuntime::new(
@@ -4853,6 +4862,7 @@ pub fn connector_stop_json() -> String {
     // ARMED window keeps its own host handle: its document stays cached for
     // the §2.4-R2 replay.
     crate::n2h_collector::uninstall_host();
+    crate::socket_supply::shutdown();
     match slot.as_ref() {
         Some(handle) => {
             let json = handle.stop_json();

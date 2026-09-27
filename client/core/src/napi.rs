@@ -110,6 +110,10 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
+    reg!("socket_supply_poll", napi_socket_supply_poll);
+    reg!("socket_supply_reply", napi_socket_supply_reply);
+    reg!("socket_supply_close_fd", napi_socket_supply_close_fd);
+    reg!("socket_supply_shutdown", napi_socket_supply_shutdown);
     reg!("connector_wg_socket_feed", napi_connector_wg_socket_feed);
     reg!("connector_tun_fd_feed", napi_connector_tun_fd_feed);
     reg!("connector_route_set_applied", napi_connector_route_set_applied);
@@ -538,6 +542,25 @@ unsafe extern "C" fn napi_connector_signal_socket_feed(
     let fd = a.i32_at(0, -1);
     let addr = a.string_at(1);
     ret_json(env, crate::connector::connector_signal_socket_feed_json(fd, &addr))
+}
+
+unsafe extern "C" fn napi_socket_supply_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::socket_supply::poll_json())
+}
+
+unsafe extern "C" fn napi_socket_supply_reply(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::socket_supply::reply_json(&a.string_at(0), a.i32_at(1, -1), &a.string_at(2)))
+}
+
+unsafe extern "C" fn napi_socket_supply_close_fd(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::socket_supply::close_fd_json(a.i32_at(0, -1)))
+}
+
+unsafe extern "C" fn napi_socket_supply_shutdown(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    crate::socket_supply::shutdown();
+    ret_json(env, "{\"ok\":true}".into())
 }
 
 // N7: shell-side feed of the PROTECTED WG outer UDP socket (wg_fwd_open +
