@@ -53,22 +53,15 @@
       // ohos.permission.GET_NETWORK_INFO.
       // Level/mode: availableLevel normal, grantMode system_grant (since API 8)
       // — the same level and mode as the INTERNET permission above, so this
-      // needs no ACL entry in the AGC profile (unlike MANAGE_VPN, see below).
+      // needs no ACL entry in the AGC profile.
       // Without the declaration every call throws BusinessError 201 and the
       // derivation records a dns required-class gap instead of freezing.
       {
         name: 'ohos.permission.GET_NETWORK_INFO'
       }
-      // NOTE (device-verified 2026-09-13/14): per-fd VpnConnection.protect()
-      // performs an internal ohos.permission.MANAGE_VPN check, and that
-      // permission is a restricted ACL that is NOT appliable in our AGC ACL
-      // list. Declaring it here without the profile grant makes the INSTALL
-      // fail (code 9568289 "grant request permissions failed"), so it must
-      // NOT be declared. The shell therefore uses the public process-level
-      // API (protectProcessNet, API 22+, no permission tag) instead — see
-      // NetBirdVpnExtensionAbility.protectSocketWithBox.
-      // docs/e3-physical-preflight.md:39 already forbids MANAGE_VPN for this
-      // project; that constraint now matches platform reality.
+      // MANAGE_VPN is not declared. On the tested device, per-fd
+      // VpnConnection.protect(fd) resolves despite MANAGE_VPN check-failure
+      // log lines; outer sockets are protected before entering the core.
     ]
   }
 }

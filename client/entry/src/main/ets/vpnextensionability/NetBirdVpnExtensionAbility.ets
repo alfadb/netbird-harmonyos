@@ -518,9 +518,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // once per session; its result does not establish per-socket bypass semantics.
   private processProtectAttempted: boolean = false;
   private processProtected: boolean = false;
-  // DEV-ONLY (user-approved 2026-09-14): see onCreate — when armed, an
-  // unavailable protect (MANAGE_VPN gated) is recorded as a deviation and the
-  // flow continues on route exclusion. NEVER a gate pass.
+  // DEV-ONLY: when armed, skip per-socket protect and record a route-exclusion
+  // deviation. The normal path protects each outer socket before core handoff.
   private protectDeviationRouteExclusion: boolean = false;
   // N3-6 control-plane wiring state. destroyRequested latches onDestroy so
   // the (async) start flow never creates a VPN after teardown began.
@@ -2851,14 +2850,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // the box expiring is not a failure of this flow (the per-socket gate
     // below is still the deciding one).
     //
-    // WARNING (device-verified 2026-09-14, see protectSocketWithBox): the
-    // platform call may WEDGE this extension thread outright — protect() and
-    // protectProcessNet() have both been observed never to settle, with the
-    // box unable to resume. Therefore this call is deliberately NOT routed
-    // through the protect-deviation short-circuit: the switch exists to make
-    // the REAL platform call on a diagnostic round. It is fire-and-forget, so
-    // a wedged call blocks this async flow (never the created VPN's own
-    // threads) — arm it only on an attended diagnostic round.
+    // On the tested device, protectProcessNet() resolved in the diagnostic
+    // round. This switch remains diagnostic; the per-socket gate decides.
     if (this.diagProtectProcessNet && !this.processProtectAttempted) {
       const processConnection: vpnExtension.VpnConnection | undefined = this.connection;
       if (processConnection !== undefined) {
@@ -3268,17 +3261,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // best-effort treatment, per governance item 4.
   private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
     const t0: number = Date.now();
-    // Device-verified 2026-09-14: on this platform a per-fd protect() whose
-    // internal ohos.permission.MANAGE_VPN check fails WEDGES the ArkTS thread
-    // outright — observed twice: the extension's main thread went permanently
-    // silent right after the call (not even the box below could resume, so the
-    // fail-closed teardown never ran either). protectProcessNet() was tried as
-    // a public alternative and also never settles.
-    //
-    // Therefore, when the user-approved dev opt-in is armed, the platform call
-    // is NOT attempted at all — "treat protect as unavailable" is precisely
-    // what the deviation says, and calling it would only wedge the shell. The
-    // deviation is recorded per socket; it is never a gate pass.
+    // On the tested device, per-fd protect() resolved despite MANAGE_VPN
+    // check-failure log lines. The dev-only deviation skips this call when
+    // armed; the normal path protects each outer socket before core handoff.
     if (this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
