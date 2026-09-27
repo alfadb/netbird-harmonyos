@@ -108,6 +108,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_start", napi_connector_start);
     reg!("connector_start_with_socket", napi_connector_start_with_socket);
     reg!("connector_physical_network_changed", napi_connector_physical_network_changed);
+    reg!("connector_management_address_update", napi_connector_management_address_update);
     reg!("connector_protected_dns_start", napi_connector_protected_dns_start);
     reg!("connector_protected_dns_poll", napi_connector_protected_dns_poll);
     reg!("connector_socket_feed", napi_connector_socket_feed);
@@ -519,6 +520,11 @@ unsafe extern "C" fn napi_connector_start_with_socket(
 unsafe extern "C" fn napi_connector_physical_network_changed(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::connector_physical_network_changed_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_connector_management_address_update(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::connector_management_address_update_json(&a.string_at(0)))
 }
 
 unsafe extern "C" fn napi_connector_protected_dns_start(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

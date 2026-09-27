@@ -26,6 +26,18 @@ try {
   check('different physical netId is a switch', policy.isPhysicalNetworkSwitch(101, 202));
   check('no network to physical network is a switch', policy.isPhysicalNetworkSwitch(0, 101));
   check('physical network lost is a switch', policy.isPhysicalNetworkSwitch(101, 0));
+  const ability = readFileSync(join(here, '..', 'src', 'main', 'ets', 'vpnextensionability',
+    'NetBirdVpnExtensionAbility.ets'), 'utf8');
+  const notifyCalls = [...ability.matchAll(/connectorPhysicalNetworkChanged\(/g)].length;
+  check('physical recovery has exactly one core network-change call site', notifyCalls === 1 &&
+    ability.includes('connectorManagementAddressUpdate(addr)'));
+  let netId = 101;
+  let notifications = 0;
+  for (const next of [101, 101, 202, 202, 0, 0, 303]) {
+    if (policy.isPhysicalNetworkSwitch(netId, next)) { notifications++; }
+    netId = next;
+  }
+  check('one notification per distinct physical netId transition', notifications === 3);
   const gate = {
     networkDirty: true, networkRecoveryReady: false, networkRecoveryActive: false,
     isDns: false, destroyRequested: false, destroyInFlight: false,

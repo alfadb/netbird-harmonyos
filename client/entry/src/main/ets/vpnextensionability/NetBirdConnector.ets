@@ -465,6 +465,11 @@ export function connectorPhysicalNetworkChanged(connectAddr: string): SocketFeed
     connectAddr.length === 0 ? JSON.stringify('') : JSON.stringify(address))) as SocketFeedResult;
 }
 
+export function connectorManagementAddressUpdate(connectAddr: string): SocketFeedResult {
+  const address: Record<string, Object> = { 'connect_addr': connectAddr };
+  return JSON.parse(core.connector_management_address_update(JSON.stringify(address))) as SocketFeedResult;
+}
+
 export interface ProtectedDnsResult {
   ok: boolean;
   id?: number;

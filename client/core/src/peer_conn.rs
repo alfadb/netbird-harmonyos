@@ -890,6 +890,16 @@ impl PeerIceOrchestrator {
             }
         }
         self.maybe_start(idx);
+        let peer = &self.peers[idx];
+        crate::hilog::emit(&format!(
+            "N5c_ICE|signal-rx|kind={}|peer={}|round={}",
+            match kind {
+                PeerSignalKind::Offer => "offer", PeerSignalKind::Answer => "answer",
+                PeerSignalKind::Candidate => "candidate",
+            },
+            peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
+            peer.session_at_ms,
+        ));
         Ok(())
     }
 
@@ -1106,7 +1116,9 @@ impl PeerIceOrchestrator {
             // ever pair — a zero/low count means the socket pool or the
             // interface enumeration starved, not the peer.
             crate::hilog::emit(&format!(
-                "N5c_ICE|locals-gathered|added={added}|srflx={}|advertised={}",
+                "N5c_ICE|locals-gathered|peer={}|round={}|added={added}|srflx={}|advertised={}",
+                peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
+                peer.session_at_ms,
                 srflx_list.len(),
                 self.advertised_candidates.len()
             ));
@@ -1299,6 +1311,8 @@ impl PeerIceOrchestrator {
     /// 冷却后允许重新发起。`reason` 只进日志（公开诊断材料）。
     fn drop_session_rearm(&mut self, idx: usize, now_ms: u64, reason: &str) {
         let peer = &mut self.peers[idx];
+        let round = peer.session_at_ms;
+        let peer_prefix = peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>();
         peer.state = PeerIceState::Failed;
         peer.endpoint_applied = false;
         peer.selected_remote = None;
@@ -1320,7 +1334,7 @@ impl PeerIceOrchestrator {
         // The payload carries WHY the session died — device run 3
         // needed exactly this and the marker alone said nothing.
         crate::hilog::emit(&format!(
-            "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}"
+            "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}|peer={peer_prefix}|round={round}"
         ));
     }
 

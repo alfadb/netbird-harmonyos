@@ -1507,6 +1507,19 @@ impl ConnectorShared {
         };
         let mut slot = self.relay.lock_poison();
         match slot.client.as_ref() {
+            Some(client) if slot.urls == relay.urls && client.state() == crate::relay_client::RelayState::Dead => {
+                slot.client = None;
+                slot.urls = relay.urls.clone();
+                match Self::relay_start(attach, relay, token) {
+                    Ok(new) => {
+                        slot.client = Some(new);
+                        hilog::emit("connector: dead relay client restarted (same urls)");
+                    }
+                    Err(e) => hilog::emit(&format!(
+                        "connector: dead relay restart failed ({e:?}) — relay unavailable (fail-closed)"
+                    )),
+                }
+            }
             Some(client) if slot.urls == relay.urls => {
                 client.update_token(token);
                 hilog::emit(&format!(
@@ -3510,11 +3523,39 @@ fn route_signal_message(orch: &Mutex<PeerIceOrchestrator>, m: &SignalMessage) {
     ));
     let mut guard = orch.lock_poison();
     if let Err(e) = guard.handle_signal(&m.from_key, kind, &m.payload, now) {
-        // 畸形 payload（坏凭证/坏候选）：分类记录，不断流
-        hilog::emit(&format!(
-            "connector: signal frame rejected ({})",
-            ErrorClass::from_management(&e).as_str()
-        ));
+        if kind == PeerSignalKind::Candidate {
+            let fields: Vec<&str> = m.payload.split_whitespace().take(9).collect();
+            let candidate_type = match fields.get(7).copied() {
+                Some("host") => "host", Some("srflx") => "srflx",
+                Some("prflx") => "prflx", Some("relay") => "relay", _ => "unknown",
+            };
+            let transport = match fields.get(2).map(|s| s.to_ascii_lowercase()).as_deref() {
+                Some("udp") => "udp", Some("tcp") => "tcp", _ => "unknown",
+            };
+            let family = match fields.get(4).and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+                Some(std::net::IpAddr::V4(_)) => "ipv4",
+                Some(std::net::IpAddr::V6(_)) => "ipv6",
+                None => "unknown",
+            };
+            let reason = match &e {
+                ManagementError::Parse(text) => text.strip_prefix("candidate:")
+                    .and_then(|s| s.split_once(' ')).map(|(token, _)| token)
+                    .filter(|s| matches!(*s, "missing-prefix" | "empty" | "bad-field" |
+                        "short" | "transport" | "address" | "port" | "no-typ" |
+                        "no-type" | "type" | "raddr" | "rport" | "related-pair"))
+                    .unwrap_or("unknown"),
+                _ => "unknown",
+            };
+            hilog::emit(&format!(
+                "connector: candidate rejected|reason={reason}|type={candidate_type}|transport={transport}|family={family}|peer={}",
+                m.from_key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>()
+            ));
+        } else {
+            hilog::emit(&format!(
+                "connector: signal frame rejected ({})|peer={}",
+                ErrorClass::from_management(&e).as_str(), m.from_key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>()
+            ));
+        }
     }
 }
 
@@ -3845,6 +3886,17 @@ impl ConnectorHandle {
         })
     }
 
+    /// The network-change event already ran; update only its resolved dial target.
+    pub fn update_management_address(&self, addr: SocketAddr) -> Result<(), &'static str> {
+        if !self.is_running() { return Err("connector-stopped"); }
+        self.management_factory.update_dial_address(addr);
+        if let Some(source) = &self.ice_sockets {
+            let servers = self.ice.lock_poison().stuns().to_vec();
+            source.refresh_stun_dns(&servers);
+        }
+        Ok(())
+    }
+
     /// Called only after the replacement WG socket has been protected and fed.
     /// Old queued sockets belong to the previous physical network and must not
     /// be used for any new management, signal or ICE dial.
@@ -4107,7 +4159,6 @@ async fn worker_supervisor(
             changed = changes.changed() => {
                 if changed.is_err() { return; }
                 shared.transition(ConnEvent::Lost);
-                shared.stop_relay();
                 *logout_slot.lock_poison() = None;
                 hilog::emit("connector: physical network changed; management redialing");
             }
@@ -4649,6 +4700,21 @@ pub fn connector_protected_dns_poll_json(id: u64) -> String {
                 _ => "{\"ok\":false,\"error\":\"dns-resolution-failed\"}".into(),
             }
         }
+    }
+}
+
+pub fn connector_management_address_update_json(addr_json: &str) -> String {
+    let addr = match parse_connect_addr(addr_json) {
+        Ok(addr) => addr,
+        Err(_) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid")),
+    };
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    match handle.update_management_address(addr) {
+        Ok(()) => format!("{{{}}}", jbool("ok", true)),
+        Err(error) => format!("{{{},{}}}", jbool("ok", false), jstr("error", error)),
     }
 }
 
@@ -6863,6 +6929,13 @@ mod tests {
         assert_eq!(accepted, 2, "initial + post-refresh session, never more");
         assert!(!shared.relay_ready(), "Dead relay is not ready");
         assert_eq!(shared.relay_handle().unwrap().state(), RelayState::Dead);
+        let dead = shared.relay_handle().expect("dead handle");
+        shared.relay_apply(&relay_servers(urls, RELAY_TEST_EPOCH + 700 + 7_200));
+        relay_wait(Duration::from_secs(5), || shared.relay_ready(),
+            "same-URL sync replaces dead relay handle").await;
+        assert!(!dead.same_client(&shared.relay_handle().expect("replacement")));
+        assert_eq!(server.stats().connections_accepted, 3);
+        shared.stop_relay();
         server.shutdown().await;
     }
 

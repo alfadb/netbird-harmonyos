@@ -30,7 +30,8 @@ import {
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
-  connectorSocketFeed, connectorPhysicalNetworkChanged, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
+  connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
+  connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
   resolveProtectedIp,
@@ -60,18 +61,14 @@ const PROTECT_BOX_MS: number = 5000;
 // gather after the first round (device-verified 2026-09-14).
 const ICE_SOCKET_POOL_SIZE: number = 8;
 // A failed ICE session is re-negotiated after a cooldown, and every retry
-// consumes fresh sockets again (the pool is one-shot). Top it up on a bounded
-// cadence while the dev deviation is armed — but only while the core's queue
-// is actually draining (the feed reports its depth): a core that is not
-// gathering must not make the shell pile up fds (device run 3 reached
-// queue=26 while nothing consumed them).
+// consumes fresh sockets again (the pool is one-shot). Refill when status
+// reports a drained queue, with a periodic retry while the VPN is armed; a
+// core that is not gathering must not make the shell pile up fds (device run 3
+// reached queue=26 while nothing consumed them).
 const ICE_SOCKET_TOPUP_MS: number = 4000;
-const ICE_SOCKET_TOPUP_MAX: number = 2000;
 // Keep a full pool queued, not a trickle: ONE gather round binds one socket
-// per IPv4 interface and the round's checks take more, so a queue of 2-3
-// drains mid-round and the core reports "protected-udp: no-protected-socket"
-// while the shell still believes it is fine (device run 5, queue=3 > high).
-const ICE_QUEUE_HIGH_WATER: number = 8;
+// per IPv4 interface, so a queue of 2-3 drains mid-round and the core reports
+// "protected-udp: no-protected-socket" (device run 5).
 const ICE_TOPUP_BATCH: number = 4;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
@@ -522,6 +519,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
   private iceQueueDepth: number = 0;
+  private iceTopUpActive: boolean = false;
   // Process-level protect (protectProcessNet, API 22+) — diagnostic attempt
   // once per session; its result does not establish per-socket bypass semantics.
   private processProtectAttempted: boolean = false;
@@ -799,7 +797,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         } finally {
           if (!adopted) { socketSupplyCloseFd(opened.fd); }
         }
-        const restarted: SocketFeedResult = connectorPhysicalNetworkChanged(addr);
+        const restarted: SocketFeedResult = connectorManagementAddressUpdate(addr);
         if (!restarted.ok) { break; }
         const updated: SocketFeedResult = socketSupplyDnsServers(dns);
         if (!updated.ok) { break; }
@@ -2430,6 +2428,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // shell gate had the same flaw).
         if (status.ice_sockets !== undefined && status.ice_sockets !== null) {
           this.iceQueueDepth = status.ice_sockets.queued;
+          if (this.iceQueueDepth < ICE_SOCKET_POOL_SIZE && !this.networkDirty && this.connection !== undefined) {
+            this.topUpIceBatch(this.connection).catch((error: Error): void => {
+              hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|rejected|summary=%{public}s', safeError(error));
+            });
+          }
         }
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
@@ -3366,20 +3369,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     let given: number = 0;
     this.iceTopUpTimer = setInterval((): void => {
-      if (given >= ICE_SOCKET_TOPUP_MAX || this.destroyRequested) {
+      if (this.destroyRequested) {
         clearInterval(this.iceTopUpTimer);
         this.iceTopUpTimer = -1;
-        hilog.warn(DOMAIN, TAG,
-          'VPN_ICE_TOPUP|stopped|given=%{public}d|max=%{public}d', given, ICE_SOCKET_TOPUP_MAX);
+        return;
+      }
+      if (this.iceQueueDepth >= ICE_SOCKET_POOL_SIZE || this.iceTopUpActive || this.networkDirty) {
         return;
       }
       this.topUpIceBatch(connection).then((fed: number): void => {
         given += fed;
-        if (fed === 0 && this.iceQueueDepth > ICE_QUEUE_HIGH_WATER) {
-          hilog.warn(DOMAIN, TAG,
-            'VPN_ICE_TOPUP|satisfied|queue=%{public}d|given=%{public}d',
-            this.iceQueueDepth, given);
-        } else if (fed === 0) {
+        if (fed === 0) {
           hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|feed-failed|given=%{public}d', given);
         }
       }).catch((error: Error): void => {
@@ -3388,17 +3388,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }, ICE_SOCKET_TOPUP_MS);
   }
 
-  // Feed up to ICE_TOPUP_BATCH sockets while the live queue depth is at or
-  // below the high-water mark (one gather round needs one socket per IPv4
-  // interface, so a trickle starves it mid-round).
+  // Feed up to ICE_TOPUP_BATCH sockets while the live queue is below target.
+  // One gather round needs one socket per IPv4 interface.
   private async topUpIceBatch(connection: vpnExtension.VpnConnection): Promise<number> {
+    if (this.iceTopUpActive || this.networkDirty || this.destroyRequested) { return 0; }
+    this.iceTopUpActive = true;
     let fed: number = 0;
-    for (let n = 0; n < ICE_TOPUP_BATCH && this.iceQueueDepth <= ICE_QUEUE_HIGH_WATER; n++) {
-      const ok: boolean = await this.feedOneIceSocket(connection);
-      if (!ok) {
-        break;
+    try {
+      for (let n = 0; n < ICE_TOPUP_BATCH && this.iceQueueDepth < ICE_SOCKET_POOL_SIZE; n++) {
+        const ok: boolean = await this.feedOneIceSocket(connection);
+        if (!ok) { break; }
+        fed++;
       }
-      fed++;
+    } finally {
+      this.iceTopUpActive = false;
     }
     return fed;
   }

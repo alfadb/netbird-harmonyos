@@ -1263,7 +1263,6 @@ enum SessionCmd {
     SendTransport { peer: PeerId, payload: Vec<u8> },
     Subscribe { peer: PeerId, reply: oneshot::Sender<Result<(), RelayClientError>> },
     GracefulClose,
-    NetworkChanged,
 }
 
 /// Reader-task → session-loop message.
@@ -1295,6 +1294,7 @@ struct Shared {
     token: Mutex<Option<AuthToken>>,
     token_epoch_tx: watch::Sender<u64>,
     stop_tx: watch::Sender<bool>,
+    network_tx: watch::Sender<u64>,
     /// Live session's command sender (`None` between sessions).
     session: Mutex<Option<mpsc::Sender<SessionCmd>>>,
     /// Peer presence cache from `PeersOnline`/`PeersWentOffline` (cleared on
@@ -1417,10 +1417,12 @@ impl RelayClient {
         let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CAP);
         let (token_epoch_tx, _token_epoch_rx) = watch::channel(0u64);
         let (stop_tx, _stop_rx) = watch::channel(false);
+        let (network_tx, _network_rx) = watch::channel(0u64);
         let shared = Arc::new(Shared {
             token: Mutex::new(Some(cfg.token.clone())),
             token_epoch_tx,
             stop_tx,
+            network_tx,
             stats: Mutex::new(RelayStats {
                 state_history: vec![RelayState::Disconnected],
                 ..RelayStats::default()
@@ -1437,9 +1439,7 @@ impl RelayClient {
     /// Discard an old-network session but keep the worker and current token.
     /// The next dial still requires a fresh protected socket from the supply.
     pub fn network_changed(&self) {
-        if let Some(sender) = self.shared.session.lock().expect("relay session lock").clone() {
-            let _ = sender.try_send(SessionCmd::NetworkChanged);
-        }
+        self.shared.network_tx.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 
     /// Current state (single source of truth: the stats snapshot).
@@ -1704,6 +1704,7 @@ fn clear_presence(shared: &Shared) {
 async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<u8>)>) {
     let mut token_epoch = shared.token_epoch_tx.subscribe();
     let mut stop = shared.stop_tx.subscribe();
+    let mut network = shared.network_tx.subscribe();
     let mut round: u32 = 0;
     // Last URL that COMPLETED auth — the fast-reconnect target (§6.2).
     let mut last_good: Option<RelayUrl> = None;
@@ -1756,6 +1757,8 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
                 }
             });
             tokio::select! {
+                biased;
+                _ = network.changed() => { round = 0; last_good = None; continue 'worker; }
                 _ = shared.clock().sleep_until(shared.clock().now() + delay) => {}
                 _ = stop.changed() => {}
             }
@@ -1769,6 +1772,8 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
         let round_anchor = shared.clock().now();
         shared.bump(|s| s.dial_attempts += set.len() as u64);
         let dialed = tokio::select! {
+            biased;
+            _ = network.changed() => { round = 0; last_good = None; continue 'worker; }
             outcome = dial_first_win(&shared, &set, round_anchor) => outcome,
             _ = stop.changed() => break,
         };
@@ -1789,7 +1794,16 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CAP);
         *shared.session.lock().expect("relay session lock") = Some(cmd_tx.clone());
         let mut join = tokio::spawn(run_session(ctx, cmd_rx));
+        let mut network_reset = false;
         let (class, was_ready) = tokio::select! {
+            biased;
+            _ = network.changed() => {
+                let was_ready = shared.stats.lock().expect("relay stats lock").state == RelayState::Ready;
+                join.abort();
+                let _ = join.await;
+                network_reset = true;
+                (RelayErrorClass::ConnectionLost, was_ready)
+            }
             res = &mut join => res.unwrap_or((RelayErrorClass::ConnectionLost, false)),
             _ = stop.changed() => {
                 // Graceful first (relay Close frame, §4.2), hard bound
@@ -1813,19 +1827,24 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
                 s.reconnects += 1;
             }
         });
-        if was_ready {
+        if was_ready && !network_reset {
             last_good = Some(url);
         }
         // §6.2: after an ESTABLISHED session ends, the next attempt is the
         // fast one; failed attempts (dial or auth) advance the backoff.
-        round = if was_ready { 0 } else { round + 1 };
+        round = if was_ready || network_reset { 0 } else { round + 1 };
+        if network_reset {
+            last_good = None;
+        }
         shared.set_state(RelayState::Reconnecting);
         if *stop.borrow() {
             break;
         }
     }
     // Terminal state; dropping inbound_tx below releases `recv()` waiters.
+    let reason = if *stop.borrow() { "stopped" } else { "worker-ended" };
     shared.set_state(RelayState::Dead);
+    emit(&format!("relay: dead (first-cause={reason})"));
 }
 
 fn first_wave(urls: &[RelayUrl]) -> Vec<RelayUrl> {
@@ -2145,7 +2164,6 @@ async fn run_session(
             },
             cmd = cmd_rx.recv() => match cmd {
                 None => break RelayErrorClass::ConnectionLost,
-                Some(SessionCmd::NetworkChanged) => break RelayErrorClass::ConnectionLost,
                 Some(SessionCmd::GracefulClose) => {
                     // §4.2: relay Close = graceful exit of the WHOLE
                     // connection. Acked by the reader AFTER the frame is on
@@ -3295,6 +3313,7 @@ mod tests {
         assert_eq!(cfg.urls, urls);
         let (in_tx, in_rx) = mpsc::channel(1);
         let (epoch_tx, _epoch_rx) = watch::channel(0u64);
+        let (network_tx, _network_rx) = watch::channel(0u64);
         let (stop_tx, _stop_rx) = watch::channel(false);
         let client = RelayClient {
             shared: Arc::new(Shared {
@@ -3302,6 +3321,7 @@ mod tests {
                 stats: Mutex::new(RelayStats::default()),
                 token: Mutex::new(Some(token)),
                 token_epoch_tx: epoch_tx,
+                network_tx,
                 stop_tx,
                 session: Mutex::new(None),
                 presence: Mutex::new(HashMap::new()),

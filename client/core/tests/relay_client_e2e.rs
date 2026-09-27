@@ -256,6 +256,40 @@ async fn protected_relay_handshake_data_and_reconnect_take_fresh_fds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn network_change_reconnects_ready_relay_without_sync_and_discards_old_dial() {
+    use netbird_core::relay_client::ProtectedRelayDialer;
+    use netbird_core::socket_supply::SocketSupply;
+    let server = start_default().await;
+    let supply = std::sync::Arc::new(SocketSupply::new());
+    let client_clock = VirtualClock::new(EPOCH);
+    let cfg = RelayClientConfig::new(&[loopback_url(server.addr().port())],
+        "network-change-relay-key", valid_token()).unwrap()
+        .with_clock(std::sync::Arc::new(client_clock))
+        .with_dialer(std::sync::Arc::new(ProtectedRelayDialer::new(Some(supply.clone()))));
+    let client = RelayClient::start(cfg).unwrap();
+    let first = next_relay_request(&supply).await;
+    supply_relay_fd(&supply, first);
+    wait_for(FUSE, || client.state() == RelayState::Ready, "initial ready").await;
+
+    supply.cancel_pending_for_network_change();
+    client.network_changed();
+    let stale = next_relay_request(&supply).await;
+    assert_ne!(first, stale);
+    assert_eq!(server.stats().connections_accepted, 1);
+
+    supply.cancel_pending_for_network_change();
+    client.network_changed();
+    let fresh = next_relay_request(&supply).await;
+    assert_ne!(stale, fresh);
+    assert!(supply.reply(stale, -1, "rejected").contains("request-expired"));
+    supply_relay_fd(&supply, fresh);
+    wait_for(FUSE, || client.state() == RelayState::Ready &&
+        server.stats().connections_accepted == 2, "ready again without sync").await;
+    assert_eq!(client.stats().auth_successes, 2);
+    client.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn protected_relay_rejection_and_timeout_never_connect() {
     use netbird_core::relay_client::{ProtectedRelayDialer, RelayDialer, RelayUrl};
     use netbird_core::socket_supply::SocketSupply;
