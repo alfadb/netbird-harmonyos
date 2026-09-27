@@ -1116,6 +1116,19 @@ mod feed_ownership_tests {
     use std::os::fd::{FromRawFd, IntoRawFd};
 
     #[test]
+    fn protected_stun_dns_cache_is_used_and_refresh_discards_old_address() {
+        let source = ProtectedUdpFdSource::new_with_fd(-1).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        source.attach_dns(std::sync::Arc::new(crate::socket_supply::SocketSupply::new()), runtime.handle().clone());
+        assert!(source.resolve_ipv4("stun.example.invalid").is_err());
+        source.resolved.lock().unwrap().insert("stun.example.invalid".into(), [192, 0, 2, 9]);
+        assert_eq!(source.resolve_ipv4("stun.example.invalid").unwrap(), [192, 0, 2, 9]);
+        source.refresh_stun_dns(&[]);
+        assert!(source.resolve_ipv4("stun.example.invalid").is_err());
+        assert_eq!(source.resolve_ipv4("192.0.2.10").unwrap(), [192, 0, 2, 10]);
+    }
+
+    #[test]
     fn ice_feed_survives_shell_close_and_fd_number_reuse() {
         unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
         let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

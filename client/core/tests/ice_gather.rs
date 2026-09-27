@@ -336,6 +336,26 @@ impl Drop for ProviderFixture {
 
 // --- tests -----------------------------------------------------------------
 
+#[tokio::test(flavor = "multi_thread")]
+async fn protected_stun_dns_without_shell_reply_does_not_block_gather() {
+    use std::time::Instant;
+    let provider = ProviderFixture::with_fds(1);
+    let supply = Arc::new(netbird_core::socket_supply::SocketSupply::new());
+    supply.set_dns_servers(vec!["127.0.0.1".parse().unwrap()]);
+    provider.source.attach_dns(supply, tokio::runtime::Handle::current());
+    let servers = vec![netbird_core::ice::parse_stun_uri("stun:stun.example.invalid:3478").unwrap()];
+    provider.source.refresh_stun_dns(&servers);
+    let ifaces = StaticInterfaces(vec![iface("eth0", [127, 0, 0, 1])]);
+    let cfg = GatherConfig { blacklist: &DEFAULT_INTERFACE_BLACKLIST, servers: &servers, timeout_ms: 100 };
+    let start = Instant::now();
+    let result = gather_candidates(&cfg, &ifaces, &provider.source).unwrap();
+    assert!(start.elapsed() < Duration::from_secs(1), "gather must not await the 8s supply deadline");
+    assert_eq!(result.host.len(), 1);
+    assert!(result.srflx.is_empty(), "unresolved STUN host cannot produce a candidate");
+    assert_eq!(provider.source.taken(), 1);
+    assert!(result.errors.iter().any(|(ctx, _)| ctx == "-/stun.example.invalid"));
+}
+
 /// Full happy path: one interface, one STUN server — srflx mapping parses,
 /// traffic provably rides the PROVIDED protected fd (proofs 1–3 in the
 /// module docs), and the srflx candidate references its base.

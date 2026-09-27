@@ -4591,6 +4591,14 @@ fn dns_lookups() -> &'static Mutex<HashMap<u64, tokio::sync::oneshot::Receiver<D
     DNS_LOOKUPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn start_dns_lookup(runtime: &tokio::runtime::Handle, lookup: impl std::future::Future<Output = DnsResult> + Send + 'static) -> u64 {
+    let id = NEXT_DNS_LOOKUP.fetch_add(1, Ordering::Relaxed) + 1;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dns_lookups().lock_poison().insert(id, rx);
+    runtime.spawn(async move { let _ = tx.send(lookup.await); });
+    id
+}
+
 pub fn connector_protected_dns_start_json(host: &str) -> String {
     let Some(handle) = connector_slot().as_ref().cloned() else {
         return "{\"ok\":false}".into();
@@ -4601,26 +4609,23 @@ pub fn connector_protected_dns_start_json(host: &str) -> String {
     if supply.dns_servers().is_empty() || host.is_empty() || host.len() > 253 {
         return "{\"ok\":false}".into();
     }
-    let id = NEXT_DNS_LOOKUP.fetch_add(1, Ordering::Relaxed) + 1;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    dns_lookups().lock_poison().insert(id, rx);
     let name = host.to_string();
-    handle.runtime.spawn(async move {
-        let _ = tx.send(crate::protected_dns::resolve(&name, &supply).await);
+    let id = start_dns_lookup(&handle.runtime, async move {
+        crate::protected_dns::resolve(&name, &supply).await
     });
     format!("{{\"ok\":true,\"id\":{id}}}")
 }
 
 pub fn connector_protected_dns_poll_json(id: u64) -> String {
     let mut requests = dns_lookups().lock_poison();
-    let Some(rx) = requests.get_mut(&id) else { return "{\"ok\":false}".into() };
+    let Some(rx) = requests.get_mut(&id) else { return "{\"ok\":false,\"error\":\"dns-lookup-not-found\"}".into() };
     match rx.try_recv() {
         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => "{\"ok\":true,\"pending\":true}".into(),
         result => {
             requests.remove(&id);
             match result {
                 Ok(Ok(ip)) => format!("{{\"ok\":true,{}}}", jstr("ip", &ip.to_string())),
-                _ => "{\"ok\":false}".into(),
+                _ => "{\"ok\":false,\"error\":\"dns-resolution-failed\"}".into(),
             }
         }
     }
@@ -5077,6 +5082,43 @@ fn field_bool(val: &Json, field: &'static str) -> Result<bool, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn protected_dns_start_poll_success_failure_timeout_and_invalidation() {
+        // The task completion is controlled here; protected_dns has separate
+        // fake-server tests for the actual protected UDP exchange.
+        for (outcome, expected) in [
+            (Ok(std::net::Ipv4Addr::new(192, 0, 2, 19)), "{\"ok\":true,\"ip\":\"192.0.2.19\"}"),
+            (Err(std::io::Error::other("dns:invalid-response")), "{\"ok\":false,\"error\":\"dns-resolution-failed\"}"),
+            (Err(std::io::Error::other("socket-supply-timeout")), "{\"ok\":false,\"error\":\"dns-resolution-failed\"}"),
+        ] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let id = start_dns_lookup(&tokio::runtime::Handle::current(), async move {
+                rx.await.expect("test completion")
+            });
+            assert_eq!(connector_protected_dns_poll_json(id), "{\"ok\":true,\"pending\":true}");
+            tx.send(outcome).expect("send DNS result");
+            let final_state = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    let state = connector_protected_dns_poll_json(id);
+                    if !state.contains("\"pending\"") { break state; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("DNS task completion");
+            assert_eq!(final_state, expected);
+            assert_eq!(connector_protected_dns_poll_json(id), "{\"ok\":false,\"error\":\"dns-lookup-not-found\"}");
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = start_dns_lookup(&tokio::runtime::Handle::current(), async move {
+            rx.await.expect("test completion")
+        });
+        assert_eq!(connector_protected_dns_poll_json(id), "{\"ok\":true,\"pending\":true}");
+        // physical_network_changed clears this same map before cancelling supply.
+        dns_lookups().lock_poison().remove(&id);
+        assert_eq!(connector_protected_dns_poll_json(id), "{\"ok\":false,\"error\":\"dns-lookup-not-found\"}");
+        drop(tx);
+    }
 
     const SENTINEL_KEY: &str = "SENTINEL-SETUP-KEY-n3-5-DO-NOT-LOG";
     const SENTINEL_JWT: &str = "SENTINEL-JWT-header.payload.sig";

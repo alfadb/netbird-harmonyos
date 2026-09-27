@@ -526,6 +526,8 @@ fn tun_replacement_keeps_sessions_and_carries_bidirectional_payload() {
         .dataplane_status()
         .expect("status")
         .handshakes;
+    let wg_port_before = slot_end.port();
+    assert!(fd_open(slot_end.wg_raw));
 
     // Phase 1 — "VpnConnection.destroy()": the PLATFORM closes the raw TUN
     // fd (fd contract). The device must keep running on its own dup. NOTE:
@@ -544,6 +546,8 @@ fn tun_replacement_keeps_sessions_and_carries_bidirectional_payload() {
     // a re-handshake (session preserved — the WG keys never touched the TUN).
     slot_end.recreate_tun();
     assert!(slot_end.slot.device_up(), "replacement keeps the device up");
+    assert_eq!(slot_end.port(), wg_port_before, "TUN replacement must retain the adopted WG socket");
+    assert!(fd_open(slot_end.wg_raw), "the shell-owned WG socket stays open");
     assert!(
         slot_end.ready(),
         "session must survive the TUN swap (no re-handshake)"

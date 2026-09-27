@@ -58,7 +58,7 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'WgFeedResult'],
+    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     // v3.1 dns branch order: the erased interface names the real
@@ -172,6 +172,25 @@ try {
     Record<string, unknown>;
   const exclusionPure = await import(
     pathToFileURL(join(dir, 'NetBirdEndpointExclusion.ts')).href) as Record<string, unknown>;
+  const connector = await import(pathToFileURL(join(dir, 'NetBirdConnector.ts')).href) as
+    { physicalDefaultNetId: () => number; forgetPhysicalDefaultDns: () => void };
+  const dns = (address: string): Array<Record<string, unknown>> =>
+    [{ address: address, family: 1, port: 53 }];
+  setNetTables(101, [101, 202], { 101: physicalCaps(), 202: physicalCaps() },
+    { 101: dns('192.0.2.53'), 202: dns('198.51.100.53') });
+  check('physical default selection prefers a qualifying default',
+    connector.physicalDefaultNetId() === 101);
+  connector.forgetPhysicalDefaultDns();
+  setNetTables(900, [101, 202], { 900: { networkCap: [], bearerTypes: [VPN_BEARER] },
+    101: physicalCaps(), 202: physicalCaps() },
+  { 101: dns('192.0.2.53'), 202: dns('198.51.100.53') });
+  check('physical fallback refuses ambiguous candidates', connector.physicalDefaultNetId() === 0);
+  setNetTables(900, [101, 202], { 900: { networkCap: [], bearerTypes: [VPN_BEARER] },
+    101: physicalCaps(), 202: physicalCaps() }, { 202: dns('198.51.100.53') });
+  check('physical fallback selects the single resolver-bearing network',
+    connector.physicalDefaultNetId() === 202);
+  connector.forgetPhysicalDefaultDns();
+  setNetTables(0, [], {}, {});
 
   const relaySection = (urls: string[]): Record<string, unknown> =>
     ({ enabled: urls.length > 0, state: urls.length > 0 ? 'disconnected' : 'disabled',
@@ -597,7 +616,7 @@ try {
   // derivation's 5th argument; the marker formats carry the verbatim tokens the
   // checks above assert on the real derivation.
   check('arm wiring: the announced stuns ride net.stuns into the derivation call',
-    extSource.indexOf('baseTemplate.tunnelAddress, net !== null ? net.stuns : null);') > 0,
+    extSource.indexOf('baseTemplate.tunnelAddress, net !== null ? net.stuns : null)') > 0,
     'stun wiring pin');
   check('arm wiring: the stun marker formats carry the verbatim token names',
     extSource.indexOf("'N2H_STUN_ENDPOINTS|requestId=%{public}s|stuns=%{public}d|usable=%{public}d|'")
