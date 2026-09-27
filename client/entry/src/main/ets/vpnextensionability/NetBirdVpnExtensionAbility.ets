@@ -510,9 +510,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
   private iceQueueDepth: number = 0;
-  // Process-level protect (protectProcessNet, API 22+) — attempted once per
-  // session; when it resolves it covers every socket of this process, which
-  // is the whole outer-socket set (management/signal/ICE/WG).
+  // Process-level protect (protectProcessNet, API 22+) — diagnostic attempt
+  // once per session; its result does not establish per-socket bypass semantics.
   private processProtectAttempted: boolean = false;
   private processProtected: boolean = false;
   // DEV-ONLY (user-approved 2026-09-14): see onCreate — when armed, an
@@ -704,16 +703,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // traffic black hole until a peer tunnel actually works.
     const forceDefaultRoute: boolean =
       String(want.parameters?.['forceDefaultRoute'] ?? 'false') === 'true';
-    // DEV-ONLY DEVIATION (user-approved 2026-09-14; T0 ruling in flight):
-    // on this platform BOTH VpnConnection.protect(fd) AND protectProcessNet()
-    // are gated internally by the restricted ohos.permission.MANAGE_VPN
-    // (netmanager: "Caller is not allowed, need sys permissive"), the
-    // permission is not appliable in the AGC ACL list, and merely DECLARING
-    // it makes the install fail (9568289 "grant request permissions failed").
-    // With this opt-in the shell treats protect as UNAVAILABLE and leans on
-    // the VpnConfig isExcludedRoute entry that keeps the outer endpoints out
-    // of the tunnel. It is loudly logged, recorded as a deviation and is
-    // NEVER a gate pass; the default (flag absent) stays fail-closed.
+    // DEV-ONLY DEVIATION (user-approved 2026-09-14): when armed, skip
+    // protect(fd) and rely on endpoint route exclusion. Device observations
+    // since then show protect(fd) resolves; MANAGE_VPN log lines do not prove
+    // it is blocked. This deviation is not a gate pass; the default path
+    // remains fail-closed.
     // Handed over through filesDir by EntryAbility (see its
     // PROTECT_DEVIATION_FILE): Index.buildWant() builds the extension want
     // itself and does NOT forward the launcher's --ps parameters, so reading

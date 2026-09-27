@@ -1,14 +1,11 @@
 // N2-H endpoint-derived route-exclusion set — PURE module (zero imports).
 //
-// Governance basis (docs/native-nx-governance.md 追加登记 2026-09-14): this
-// platform cannot use the per-socket protect path (ohos.permission.MANAGE_VPN
-// is gated and not appliable), so the approved substitute criterion N2-H
-// applies: the outer endpoints (management, signal, relay, ICE/STUN, WG peer,
-// DNS) must be FROZEN and EXCLUDED via host routes before VpnConnection.create
-// (routes are fixed at create time); resolution failure / endpoint change is
-// fail-closed. docs/n13-relay-increment-plan-20260914.md §3.4/§5 add the hard
-// precondition: enabling relay (`relay_enabled`) REQUIRES the relay TCP
-// endpoint to be part of that frozen exclusion set first.
+// Per-socket protect(fd) resolves on the tested device; MANAGE_VPN log lines
+// do not establish that it is blocked. The N2-H route-exclusion plan is dormant,
+// and a successful protect return alone does not prove traffic bypasses the VPN.
+// This module derives frozen outer-endpoint host routes when that plan is used;
+// resolution failure / endpoint change is fail-closed. Relay enablement
+// (`relay_enabled`) requires the relay TCP endpoint in the frozen set first.
 //
 // This module owns the testable core of that derivation:
 //   - parseRelayUrl: rel:// / rels:// authority extraction, a structural

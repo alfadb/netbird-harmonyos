@@ -716,13 +716,18 @@ export async function resolveManagementIp(endpoint: ManagementEndpoint,
       }
       throw new Error('dns-failed');
     });
+  let boxTimer: number = -1;
   const box: Promise<string> = new Promise<string>((resolve: (value: string) => void,
     reject: (e: Error) => void) => {
-    setTimeout((): void => {
+    boxTimer = setTimeout((): void => {
       reject(new Error('dns-failed'));
     }, timeoutMs);
   });
-  return Promise.race([resolution, box]);
+  try {
+    return await Promise.race([resolution, box]);
+  } finally {
+    clearTimeout(boxTimer);
+  }
 }
 
 // Bare IPv4 dotted-quad literal check (digits only, 0-255 per octet) — same
@@ -780,13 +785,18 @@ export async function resolveExclusionEndpointIp(host: string, timeoutMs: number
       }
       throw new Error('dns-failed');
     });
+  let boxTimer: number = -1;
   const box: Promise<string> = new Promise<string>((resolve: (value: string) => void,
     reject: (e: Error) => void) => {
-    setTimeout((): void => {
+    boxTimer = setTimeout((): void => {
       reject(new Error('dns-failed'));
     }, timeoutMs);
   });
-  return Promise.race([resolution, box]);
+  try {
+    return await Promise.race([resolution, box]);
+  } finally {
+    clearTimeout(boxTimer);
+  }
 }
 
 // N2-H v3.1 C1 dns: gather the PLATFORM FACTS the dns freeze caliber needs,

@@ -806,11 +806,8 @@ pub trait RelayDialer: Send + Sync + 'static {
 
 /// Production TCP dialer (plain `TcpStream::connect`).
 ///
-/// TODO(increment D / device path): before ANY device use this must be
-/// replaced by the protected-socket seam (`VpnConnection.protect` fd feed,
-/// the N3-7 `mgmtsock` pattern) — an unprotected relay TCP connection
-/// violates the N2-H endpoint-exclusion governance. Nothing in the
-/// connector references this module yet, so no device path exists.
+/// Used by the connector when `relay_enabled`; its TCP socket is currently
+/// unprotected (known N2 gap). Replace this dial with a shell-protected fd.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TcpDialer;
 
