@@ -53,12 +53,12 @@ const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
 // fixture needs the byte-identical helper.
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
-  'NetBirdInterfaceStatsProbe'];
+  'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'WgFeedResult'],
+    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     // v3.1 dns branch order: the erased interface names the real

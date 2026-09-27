@@ -43,6 +43,8 @@ import {
   resolveManagementIp, sleep
 } from './NetBirdConnector';
 
+import { isPhysicalNetworkSwitch, socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
+
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const MAX_NATIVE_FD: number = 2147483647;
@@ -689,6 +691,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // -> connection.create() -> fd contract + fail-closed protect gate.
     // The map is applied at create() time because the platform VpnConfig is
     // fixed then; later map changes are logged as NOT applied.
+    this.networkNetId = physicalDefaultNetId();
+    hilog.info(DOMAIN, TAG, 'VPN_NETWORK_BASELINE|requestId=%{public}s|netId=%{public}d',
+      this.requestId, this.networkNetId);
     this.watchPhysicalNetwork();
     this.startConnectorThenCreate(want, connection).catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
@@ -706,19 +711,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
       });
       observer.on('netLost', (net: connection.NetHandle): void => {
-        if (net.netId === this.networkNetId) {
-          this.networkNetId = 0;
-          this.networkDirty = true;
-          this.networkEpoch++;
-          connectorPhysicalNetworkChanged('');
-          this.schedulePhysicalNetworkCheck();
-        }
+        this.schedulePhysicalNetworkCheck('netLost', net.netId);
       });
-      observer.on('netAvailable', (_net: connection.NetHandle): void => {
-        this.schedulePhysicalNetworkCheck();
+      observer.on('netAvailable', (net: connection.NetHandle): void => {
+        this.schedulePhysicalNetworkCheck('netAvailable', net.netId);
       });
-      observer.on('netCapabilitiesChange', (_info: connection.NetCapabilityInfo): void => {
-        this.schedulePhysicalNetworkCheck();
+      observer.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
+        this.schedulePhysicalNetworkCheck('netCapabilitiesChange', info.netHandle.netId);
       });
       this.networkObserver = observer;
     } catch (error) {
@@ -726,25 +725,39 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
-  private schedulePhysicalNetworkCheck(): void {
+  private schedulePhysicalNetworkCheck(event: string, eventNetId: number): void {
+    const physicalNetId: number = physicalDefaultNetId();
+    hilog.info(DOMAIN, TAG,
+      'VPN_NETWORK_EVENT|event=%{public}s|netId=%{public}d|physicalDefault=%{public}s|' +
+      'physicalNetId=%{public}d|switched=pending|action=debounce',
+      event, eventNetId, String(eventNetId === physicalNetId && physicalNetId !== 0), physicalNetId);
     if (this.networkDebounceTimer !== -1) { clearTimeout(this.networkDebounceTimer); }
     this.networkDebounceTimer = setTimeout((): void => {
       this.networkDebounceTimer = -1;
-      this.physicalNetworkAvailable(physicalDefaultNetId());
+      this.physicalNetworkAvailable(event, eventNetId, physicalDefaultNetId());
     }, 250);
   }
 
-  private physicalNetworkAvailable(netId: number): void {
-    if (this.destroyRequested || netId === 0 ||
-      (netId === this.networkNetId && !this.networkDirty) ||
-      physicalDefaultDnsServers(netId).length === 0) { return; }
+  private physicalNetworkAvailable(event: string, eventNetId: number, netId: number): void {
+    const switched: boolean = !this.destroyRequested &&
+      isPhysicalNetworkSwitch(this.networkNetId, netId);
+    const action: string = this.destroyRequested ? 'destroy' : switched ?
+      (netId === 0 ? 'network-lost' : 'redial') : 'unchanged';
+    hilog.info(DOMAIN, TAG,
+      'VPN_NETWORK_EVENT|event=%{public}s|netId=%{public}d|physicalDefault=%{public}s|' +
+      'physicalNetId=%{public}d|switched=%{public}s|action=%{public}s',
+      event, eventNetId, String(eventNetId === netId && netId !== 0), netId,
+      String(switched), action);
+    if (!switched) { return; }
     this.networkNetId = netId;
     this.networkDirty = true;
     this.networkEpoch++;
     connectorPhysicalNetworkChanged('');
-    this.recoverPhysicalNetwork().catch((error: Error): void => {
-      hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
-    });
+    if (netId !== 0) {
+      this.recoverPhysicalNetwork().catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+      });
+    }
   }
 
   private async recoverPhysicalNetwork(): Promise<void> {
@@ -2821,41 +2834,61 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     request: SocketSupplyRequest): Promise<void> {
     let fd: number = -1;
     let result: string = 'rejected';
+    let reason: string = 'none';
     const t0: number = Date.now();
     const epoch: number = this.networkEpoch;
     try {
       const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
-      if ((this.networkDirty && !(isDns && this.networkRecoveryActive)) ||
-        this.destroyRequested || this.destroyPromise !== undefined ||
-        this.protectDeviationRouteExclusion) {
-        return;
-      }
+      reason = socketSupplyRejectionReason({
+        networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
+        networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
+        destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
+        recreateInFlight: this.recreateInFlight, hasConnection: this.connection === connection,
+        protectDeviation: this.protectDeviationRouteExclusion
+      });
+      if (reason.length > 0) { return; }
       if (!isDns && (request.kind !== 'tcp' || (request.purpose !== 'management' &&
         request.purpose !== 'signal' && request.purpose !== 'relay'))) {
+        reason = 'unsupported-request';
         return;
       }
       if (isDns) {
         const servers: string[] = physicalDefaultDnsServers(this.networkNetId || undefined);
         const updated: SocketFeedResult = socketSupplyDnsServers(servers);
         if (!updated.ok || servers.length === 0) {
+          reason = 'no-physical-dns';
           return;
         }
       }
       const opened: NativeTcpSocketOpen = isDns ? iceSocketOpen() : mgmtSocketOpen();
       fd = opened.fd;
       if (fd < 0 || opened.bind_rc !== 0) {
+        reason = 'socket-open';
         return;
       }
       const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
       if (protectedOk && epoch === this.networkEpoch &&
-        (!this.networkDirty || isDns && this.networkRecoveryActive) &&
-        !this.protectDeviationRouteExclusion && !this.destroyRequested &&
-        this.destroyPromise === undefined && this.connection === connection) {
+        socketSupplyRejectionReason({
+          networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
+          networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
+          destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
+          recreateInFlight: this.recreateInFlight, hasConnection: this.connection === connection,
+          protectDeviation: this.protectDeviationRouteExclusion
+        }).length === 0) {
         result = 'protected';
       } else {
         result = 'protect-failed';
+        reason = !protectedOk ? 'protect-failed' : epoch !== this.networkEpoch ?
+          'network-epoch' : socketSupplyRejectionReason({
+            networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
+            networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
+            destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
+            recreateInFlight: this.recreateInFlight, hasConnection: this.connection === connection,
+            protectDeviation: this.protectDeviationRouteExclusion
+          });
       }
     } catch (error) {
+      reason = 'exception';
       hilog.warn(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_FAILED|id=%{public}s|summary=%{public}s',
         request.id, safeError(error as Error));
     } finally {
@@ -2864,9 +2897,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           result);
         hilog.info(DOMAIN, TAG,
           'VPN_SOCKET_SUPPLY|id=%{public}s|purpose=%{public}s|kind=%{public}s|fd=%{public}d|' +
-          'protect=%{public}s|elapsedMs=%{public}d|accepted=%{public}s',
+          'protect=%{public}s|reason=%{public}s|elapsedMs=%{public}d|accepted=%{public}s',
           request.id, request.purpose ?? 'unknown', request.kind ?? 'unknown', fd,
-          result, Date.now() - t0, String(reply.ok));
+          result, reason, Date.now() - t0, String(reply.ok));
       } finally {
         if (fd >= 0) {
           socketSupplyCloseFd(fd);

@@ -153,7 +153,8 @@ const SHIMS = {
   './NetBirdEndpointExclusion': 'NetBirdEndpointExclusion.shim.ts',
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
-  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts'
+  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
+  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts'
 };
 
 export function resolve(specifier, context, next) {

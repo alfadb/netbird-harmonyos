@@ -363,6 +363,8 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    JSON.stringify({ started: true, state: "running" }),\n' +
   '  connector_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
   '  connector_stop: () => JSON.stringify({ already_stopped: true, state: "stopped" }),\n' +
+  '  socket_supply_shutdown: () => JSON.stringify({ ok: true }),\n' +
+  '  socket_supply_close_fd: () => JSON.stringify({ ok: true }),\n' +
   '  connector_wg_socket_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
   '  connector_tun_fd_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
   '  connector_route_set_applied: (payload, isRecreate) => {\n' +
@@ -446,7 +448,8 @@ const SHIMS = {
   './NetBirdEndpointExclusion': 'NetBirdEndpointExclusion.shim.ts',
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
-  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts'
+  './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
+  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts'
 };
 
 export function resolve(specifier, context, next) {

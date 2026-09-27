@@ -53,7 +53,7 @@ const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
 // extension imports only its one exported function).
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
-  'NetBirdInterfaceStatsProbe'];
+  'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',

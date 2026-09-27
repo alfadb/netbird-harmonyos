@@ -278,12 +278,12 @@ const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 // no shim needed).
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
-  'NetBirdInterfaceStatsProbe'];
+  'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'WgFeedResult'],
+    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
