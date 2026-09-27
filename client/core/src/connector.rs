@@ -1690,6 +1690,18 @@ impl ConnectorShared {
         self.ice.get().map(|ice| ice.lock_poison().stuns().to_vec()).unwrap_or_default()
     }
 
+    fn remember_login_signal(&self, response: &crate::grpc::proto::LoginResponse) {
+        if let Some(uri) = response.netbird_config.as_ref()
+            .and_then(|cfg| cfg.signal.as_ref()).map(|signal| signal.uri.as_str())
+            .filter(|uri| !uri.is_empty())
+        {
+            if let Some(rt) = self.signal.get() {
+                rt.set_uri(uri);
+                hilog::emit("connector: signal URI received from login");
+            }
+        }
+    }
+
     /// Apply one decoded Sync update to the internal state and the data
     /// plane. Snapshot ordering follows upstream engine.go:1572-1576: a
     /// NetworkMap with a serial STRICTLY BELOW the last applied one is
@@ -1798,6 +1810,11 @@ impl ConnectorShared {
             signal_uri = self.lock().net_config.as_ref().and_then(|c| c.signal.clone());
             // …and the previously announced stun set (see `stun_uris` above)
             stun_uris = self.lock().net_config.as_ref().map(|c| c.stuns.clone());
+        }
+        // LoginResponse can carry signal even when later Sync updates omit it.
+        // Preserve it in the runtime so config-less NetworkMaps expose the URI.
+        if signal_uri.is_none() {
+            signal_uri = self.signal.get().and_then(|rt| rt.uri.lock_poison().clone());
         }
         if let Some(uri) = signal_uri.as_ref() {
             if let Some(rt) = self.signal.get() {
@@ -3857,7 +3874,10 @@ impl ConnectorHandle {
             rt.shutdown();
             *rt.connect_addr.lock_poison() = None;
         }
-        self.shared.stop_relay();
+        // The relay worker owns its reconnect loop. Tear down its old-network
+        // session without stopping the worker; its next dial goes through the
+        // protected socket supply and its current DNS/network generation.
+        if let Some(client) = self.shared.relay_handle() { client.network_changed(); }
         self.network_change.send_modify(|generation| *generation = generation.wrapping_add(1));
         Ok(())
     }
@@ -4141,6 +4161,7 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                 // anchor the 3-state deadline from LoginResponse
                 // (engine_authsession.go:17-62 semantics)
                 shared.lock().deadline.apply_wire(outcome.session_deadline_unix);
+                shared.remember_login_signal(&outcome.response);
                 if outcome.peer_address.is_some() {
                     hilog::emit("connector: login ok (peer address assigned)");
                 } else {
@@ -6061,6 +6082,47 @@ mod tests {
             .routes
             .iter()
             .any(|r| r.network == "0.0.0.0/0"));
+    }
+
+    #[tokio::test]
+    async fn login_signal_survives_configless_sync_into_first_shell_snapshot() {
+        let shared = ConnectorShared::new(false, None);
+        let (exchange, rx) = RealSignalExchange::new();
+        let rt = Arc::new(SignalRuntime::new(
+            SignalLinkMaterials {
+                runtime: tokio::runtime::Handle::current(),
+                transport: GrpcTransport::Plaintext,
+                connect_timeout: Duration::from_secs(1),
+                request_timeout: Duration::from_secs(1),
+                keys: EnvelopeKeyPair::from_secret_bytes(&[7u8; 32]),
+                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1).expect("empty source")),
+            },
+            exchange,
+            rx,
+        ));
+        let _ = shared.signal.set(rt);
+        let login = crate::grpc::proto::LoginResponse {
+            netbird_config: Some(crate::grpc::proto::NetbirdConfig {
+                signal: Some(crate::grpc::proto::HostConfig {
+                    uri: "https://signal.example:443".into(),
+                    protocol: 1,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        shared.remember_login_signal(&login);
+        shared.apply_update(
+            &WgPeerRegistry::new(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let json = shared.network_config_json();
+        assert!(json.contains("\"signal\":\"https://signal.example:443\""), "{json}");
     }
 
     #[test]

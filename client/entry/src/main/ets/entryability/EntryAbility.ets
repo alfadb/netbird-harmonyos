@@ -86,9 +86,13 @@ export default class EntryAbility extends UIAbility {
       if (typeof setupKey === 'string' && setupKey.length > 0) {
         this.writeFile(SETUP_KEY_FILE, `${setupKey}\n`);
       }
-      if (typeof deviation === 'string' && deviation.length > 0) {
+      if (typeof deviation === 'string' && deviation === 'route-exclusion') {
         this.writeFile(PROTECT_DEVIATION_FILE, `${deviation}\n`);
+      } else {
+        this.removeProtectDeviation();
       }
+    } else {
+      this.removeProtectDeviation();
     }
     // N2-H arm private channel: an EXPLICIT non-secret parameter writes the
     // ticket; every launch without it clears a leftover ticket from a
@@ -100,6 +104,18 @@ export default class EntryAbility extends UIAbility {
       this.writeArmTicketFile(armOptions);
     } else {
       this.removeArmTicket('default-no-arm');
+    }
+  }
+
+  private removeProtectDeviation(): void {
+    const path: string = `${this.context.filesDir}/${PROTECT_DEVIATION_FILE}`;
+    try {
+      if (!fs.accessSync(path)) { return; }
+      fs.unlinkSync(path);
+      hilog.info(DOMAIN, TAG, 'PROTECT_DEVIATION_REMOVED|file=%{public}s', PROTECT_DEVIATION_FILE);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'PROTECT_DEVIATION_REMOVE_FAILED|file=%{public}s|code=%{public}s',
+        PROTECT_DEVIATION_FILE, String((error as BusinessFailure).code ?? 'none'));
     }
   }
 

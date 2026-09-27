@@ -534,6 +534,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Serial of the network-config snapshot merged into the platform
   // VpnConfig at create() time (-1 = none applied).
   private appliedNetSerial: number = -1;
+  private lastUnappliedNetSerial: number = -1;
+  private lastUnappliedNetLogAtMs: number = 0;
+  private lastStatusLogSignature: string = '';
+  private lastStatusLogAtMs: number = 0;
   // N3-7 gap 3: consecutive connector_status() native-call failures and the
   // one-shot latch for the connector-death teardown (idempotent on top of
   // the destroyOnce latch).
@@ -879,8 +883,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // process. A missing ticket is the normal case: everything stays off and
     // NOTHING is logged.
     this.readDiagSwitches();
-    if (this.protectDeviationRouteExclusion ||
-      (!this.endpointExclusionsEnabled && this.diagCaptureRoute)) {
+    if (!this.endpointExclusionsEnabled &&
+      (this.protectDeviationRouteExclusion || this.diagCaptureRoute)) {
       hilog.error(DOMAIN, TAG, 'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dev-switch-conflict',
         this.requestId);
       return;
@@ -1057,9 +1061,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
     } else {
-      hilog.warn(DOMAIN, TAG,
-        'VPN_SIGNAL_NOT_PROVISIONED|requestId=%{public}s|reason=%{public}s',
+      hilog.error(DOMAIN, TAG,
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-uri|' +
+        'errorClass=%{public}s|action=connector-stopped-no-vpn',
         this.requestId, net === null ? 'no-network-map' : 'no-signal-uri-in-config');
+      connectorStop();
+      return;
     }
 
     // N2-H outer-endpoint freeze (docs/native-nx-governance.md 追加登记;
@@ -2378,22 +2385,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           status.wg !== undefined && status.wg !== null ? (status.wg.rx_bytes_to_tun ?? -1) : -1;
         const wgTxBytes: number =
           status.wg !== undefined && status.wg !== null ? (status.wg.tx_bytes ?? -1) : -1;
-        hilog.info(DOMAIN, TAG,
-          'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
-          'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
-          'terminal=%{public}s|signalRegistered=%{public}s|signalReconnects=%{public}d|' +
-          'signalLastError=%{public}s|wgDeviceUp=%{public}s|wgReady=%{public}s|wgSessions=%{public}d|' +
-          'wgRxToTun=%{public}d|wgTxBytes=%{public}d',
-          this.requestId, String(status.running), status.state, status.peer_count,
-          status.route_count, status.reconnects, errorClass, String(status.terminal),
-          signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions,
-          wgRxToTun, wgTxBytes);
-        // Relay observability: the status line above carries no relay
-        // segment, so a live relay's counters (frames/bytes/reconnects) were
-        // unreadable on-device. One lenient grep-able line from the SAME
-        // snapshot — never throws, never token material (urls = COUNT only).
-        hilog.info(DOMAIN, TAG, '%{public}s',
-          formatRelayStatusLine(this.requestId, status));
+        const statusSignature: string = `${status.state}|${status.peer_count}|${status.route_count}|` +
+          `${errorClass}|${signalRegistered}|${signalReconnects}|${signalError}|` +
+          `${wgDeviceUp}|${wgReady}|${wgSessions}|${status.relay?.state ?? 'none'}`;
+        const now: number = Date.now();
+        if (statusSignature !== this.lastStatusLogSignature || now - this.lastStatusLogAtMs >= 60000) {
+          this.lastStatusLogSignature = statusSignature;
+          this.lastStatusLogAtMs = now;
+          hilog.info(DOMAIN, TAG,
+            'VPN_CONNECTOR_STATUS|requestId=%{public}s|running=%{public}s|state=%{public}s|' +
+            'peers=%{public}d|routes=%{public}d|reconnects=%{public}d|lastError=%{public}s|' +
+            'terminal=%{public}s|signalRegistered=%{public}s|signalReconnects=%{public}d|' +
+            'signalLastError=%{public}s|wgDeviceUp=%{public}s|wgReady=%{public}s|wgSessions=%{public}d|' +
+            'wgRxToTun=%{public}d|wgTxBytes=%{public}d',
+            this.requestId, String(status.running), status.state, status.peer_count,
+            status.route_count, status.reconnects, errorClass, String(status.terminal),
+            signalRegistered, signalReconnects, signalError, wgDeviceUp, wgReady, wgSessions,
+            wgRxToTun, wgTxBytes);
+          hilog.info(DOMAIN, TAG, '%{public}s',
+            formatRelayStatusLine(this.requestId, status));
+        }
         // Cross-process status bridge (device-verified defect 2026-09-14): the
         // UI ability lives in ITS OWN process, so its NAPI status reads hit an
         // empty connector slot and the UI showed "disconnected / wg sessions: 0"
@@ -2448,7 +2459,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       try {
         const net: CoreNetworkConfig = connectorNetworkConfig();
         const serial: number = net.available && net.serial !== undefined ? net.serial : -1;
-        if (serial >= 0 && serial !== this.appliedNetSerial) {
+        if (serial >= 0 && serial !== this.appliedNetSerial &&
+          serial !== this.lastUnappliedNetSerial &&
+          Date.now() - this.lastUnappliedNetLogAtMs >= 60000) {
+          this.lastUnappliedNetSerial = serial;
+          this.lastUnappliedNetLogAtMs = Date.now();
           hilog.warn(DOMAIN, TAG,
             'VPN_NETCFG_CHANGED_NOT_APPLIED|requestId=%{public}s|appliedSerial=%{public}d|' +
             'newSerial=%{public}d|reason=platform-vpnconfig-fixed-at-create',

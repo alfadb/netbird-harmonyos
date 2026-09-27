@@ -13,9 +13,8 @@ interface BusinessFailure extends Error {
   code?: number;
 }
 
-// Minimal trigger + status surface (promoted from the n1b skeleton, extended
-// in N3-6): one click-gated start and one click-gated stop request per
-// attempt; each latch never resets (reject does not re-issue, no retry).
+// One in-flight start and stop request at a time; rejected requests and
+// successful stops release the latch for an explicit user retry.
 // Status: the platform DOES run the VpnExtensionAbility in a separate process,
 // so this page reads the live document the extension publishes into the shared
 // filesDir (device-verified 2026-09-14 — direct NAPI polling here rendered a
@@ -107,9 +106,11 @@ struct Index {
     }).catch((error: Error) => {
       const code: string = String((error as BusinessFailure).code ?? 'none');
       this.statusText = `ERR:${code}`;
-      this.detailText = 'start promise rejected (no retry)';
+      this.detailText = 'start request rejected';
+      this.requestSent = false;
       hilog.error(DOMAIN, TAG, 'UI_START_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
+      this.requestId = `ui-${Date.now()}`;
     });
   }
 
@@ -126,12 +127,16 @@ struct Index {
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {
       this.statusText = 'STOPPED';
       this.detailText = 'stop promise resolved';
+      this.requestSent = false;
+      this.stopSent = false;
       hilog.info(DOMAIN, TAG, 'UI_STOP_RESOLVED|bundle=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, this.requestId);
+      this.requestId = `ui-${Date.now()}`;
     }).catch((error: Error) => {
       const code: string = String((error as BusinessFailure).code ?? 'none');
       this.statusText = `ERR:${code}`;
-      this.detailText = 'stop promise rejected (no retry)';
+      this.detailText = 'stop request rejected';
+      this.stopSent = false;
       hilog.error(DOMAIN, TAG, 'UI_STOP_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
     });

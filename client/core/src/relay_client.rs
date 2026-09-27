@@ -1263,6 +1263,7 @@ enum SessionCmd {
     SendTransport { peer: PeerId, payload: Vec<u8> },
     Subscribe { peer: PeerId, reply: oneshot::Sender<Result<(), RelayClientError>> },
     GracefulClose,
+    NetworkChanged,
 }
 
 /// Reader-task → session-loop message.
@@ -1431,6 +1432,14 @@ impl RelayClient {
         });
         tokio::spawn(worker_main(shared.clone(), inbound_tx));
         Ok(RelayClient { shared })
+    }
+
+    /// Discard an old-network session but keep the worker and current token.
+    /// The next dial still requires a fresh protected socket from the supply.
+    pub fn network_changed(&self) {
+        if let Some(sender) = self.shared.session.lock().expect("relay session lock").clone() {
+            let _ = sender.try_send(SessionCmd::NetworkChanged);
+        }
     }
 
     /// Current state (single source of truth: the stats snapshot).
@@ -2136,6 +2145,7 @@ async fn run_session(
             },
             cmd = cmd_rx.recv() => match cmd {
                 None => break RelayErrorClass::ConnectionLost,
+                Some(SessionCmd::NetworkChanged) => break RelayErrorClass::ConnectionLost,
                 Some(SessionCmd::GracefulClose) => {
                     // §4.2: relay Close = graceful exit of the WHOLE
                     // connection. Acked by the reader AFTER the frame is on
@@ -2947,6 +2957,24 @@ mod tests {
     }
 
     // ---- full state machine over the scripted server ------------------------
+
+    #[tokio::test]
+    async fn network_change_reconnects_without_stopping_client() {
+        let clock = VirtualClock::new(1_770_000_000);
+        let dialer = Arc::new(ScriptedDialer::new(PeerId::from_wg_pubkey_string(WG_PUBKEY)));
+        dialer.plan("switch", [DialPlan::Serve(ScriptMode::Silent), DialPlan::Serve(ScriptMode::Silent)]);
+        let client = started(&["rel://switch:1"], unit_token(1_770_003_600), &dialer, &clock);
+        wait_for(Duration::from_secs(5), || client.state() == RelayState::Ready, "first ready").await;
+        client.network_changed();
+        wait_for(
+            Duration::from_secs(5),
+            || client.stats().reconnects == 1 && client.stats().auth_successes == 2,
+            "ready after network change",
+        ).await;
+        assert_eq!(client.state(), RelayState::Ready);
+        assert_eq!(client.stats().dial_attempts, 2);
+        client.stop();
+    }
 
     #[tokio::test]
     async fn state_transitions_scripted_reach_ready_then_keepalive_death() {
