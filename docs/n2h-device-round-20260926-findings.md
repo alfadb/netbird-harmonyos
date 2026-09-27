@@ -151,3 +151,44 @@
 - 0034：仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0034.json`（`consumption_semantics.consumption_events[0]`、`amendment_events` `-01/-02`）与其证据目录（`STAGE-RECORD.md` §3.1–§3.6／§4／§5／§7 第 6 条、`verdict.json`、`counters.json`、`D0/P0/P1/P2` 的 `N2H_IFACE_BYTES_WINDOW` 行、`R0p|R2p|R4p/n2h-peer.log`、`MANIFEST.sha256` 504/504 OK）。
 - 根因报告（仓外只读）：`/home/worker/n2h-kit/round-0034/tee-miss-rootcause-20260926.md`。
 - 登记：仓B `records/n2h-preregistration-v4-addendum-20260923.json` 的 `amendment_events[3]`（`AMEND-N2H-V4-ADDENDUM-20260923-04`）。
+
+---
+
+## 7. 后续真机轮（0035–0038）与 C7 标定收口
+
+> 本节追加记录 2026-09-26 至 27 日的诊断观察及后续操作规则，不回写前述各轮冻结判据或原始证据。四轮授权均为 `is_evidence=false`、`not_a_gate_pass=true`；以下的 protect 结论只限本设备本固件一次诊断观测，**不是任何门的通过**；N2-H 仍为 `n2h-inconclusive`。本节所称仓B `diagnostics/` 目录与 §0 相同。
+
+### 7.1 0035／0036：四行 protect 与 C7 的首轮、重跑
+
+- **0035**：preflight 初次因设备断连失败；手动 `tconn` 后重启，D0／P0 的布局均为控制中心 `com.ohos.sceneboard`，未找到本应用与 `Connect VPN`、未建立 VPN；两行无效，执行器拒绝 P1，P2／C7 未执行，恢复成功。结果 `INVALID`，不能把这一轮当作四行或 C7 的有效数据（`0035/STAGE-RECORD.md` §布局与无效性）。
+- **0036 protect**：D0 TUN 0/5、echo 5/5；P0 TUN 5/5、timeout 5/5；P1 TUN 0/5、echo 5/5；P2 的 `evidence.json` 无法重组、该行无效。P2 的 CLOSE 在 `23:08:18.039`，完整导出约在 `23:09:05` 才开始（约 47 s）；全量日志只余 3/34 个证据分块，缺 ticket／create／ARMED，窄查询见到 ticket 不可替代全量证据。前段被环形缓冲覆盖是受证据支持的推断，**具体覆盖源和发生时刻未证实**。冻结判定为 `uncertain`（P2 正控缺失），不是 protect 生效或泄漏结论（`0036/STAGE-RECORD.md` §3–5、`P2/cmd-011-hilog-close-01.txt`、`P2/cmd-012-hilog-x-full.txt`、`verdict.md`）。
+- **0036 C7 v3**：`not-completed`；精确同值覆盖 39/40，seq4 的 RX／TX 组合未在同一 `/proc` 拍出现。A=seq0、B=seq19，API 与 `/proc` 的 RX 增量同为 1656、TX 同为 640；增量相等**不能抵消**同值缺口（`0036/STAGE-RECORD.md` §6、`verdict.md` §2）。
+
+### 7.2 0037：protect 获得完整判读，C7 v4 仍未完成
+
+- 执行器改为每 5 s 窄查询 CLOSE；精确 CLOSE 后立即备份本应用日志，再导出全量 hilog。四行 CLOSE 到备份启动相差 2.248／2.452／4.821／2.172 s；全量与备份均有 ticket、create、ARMED、34 个证据分块及 CLOSE，四行各自由完整全量日志一次解码成功，没有使用备份回退（`0037/STAGE-RECORD.md` §1–2；主机侧 `round-0037/README-0037-changes.md`）。
+- 冻结判定 `protect-bypass-effective`：D0 TUN 0/5、echo 5/5；P0 和 P2 均 TUN 5/5、timeout 5/5；P1 protect 后 TUN 0/5、echo 5/5。这仅是 PLA-AL10 本固件本次诊断条件的绕开语义观测，**不等于逐 socket 的通则，也不是 N2-H/N6 或其他门的通过**（`0037/verdict.md` §1、§5）。
+- C7 v4：130 拍序列与 40 条 BURST 均可用，但 ARMED 比首拍晚 **11.961 s**，超过冻结的 10 s 上限；RX 精确 37/40、TX 40/40，seq0／1／3 的 RX 值不在序列中，位于相邻多包跳变两拍之间。A=seq2、B=seq17 的 RX 增量两侧均 1416、TX 均 400；结论仍为 `not-completed`，不以 A/B 相等或离线解释替换冻结结论（`0037/STAGE-RECORD.md` §3、`C7/result-c7-v4.json`；主机侧 `round-0037/analysis-c7-rx-mismatch/REPORT.md` §0037 三个缺口）。
+
+### 7.3 v5 规则与 0038：只登记夹逼值，仍 `not-completed`
+
+- 经独立评审有条件同意的 **v5 主机侧规则**：无窗口内精确同值时，只有相邻可用拍满足 `D_k < s <= D_(k+1)`、数值严格夹住 API 值，且该方向 `ΔPKTS >= 2`，才登记 `same-value-bracketed` **观测**；两拍本身还须处于同一窗口内。夹逼不计精确覆盖，也不能充当 A/B。A/B 两向仍须窗口内精确同值、间隔至少 10 s，增量检验不变；序列须覆盖首条至末条 BURST 的完整窗口，ARMED 不得晚于 seq0，取代旧的「ARMED 距首拍 <=10 s」前提。`--expected-ticks` 固定本轮预期采样拍数。对 0033／0036／0037 的三次 v5 回放仅为**事后主机分析**，不是当轮新证据或历史裁决（主机侧 `round-0038/README-c7-v5.md` §Rule changes／§Retrospective comparisons）。
+- **0038 仅执行 C7**：430 拍 `/proc`、`sleep 0.08`，按 `--expected-ticks 430` 判读。第一次 preflight 因无线调试断连停在时钟门（执行器先读设备时间、后 `tconn`），按用户指示手动 `tconn` 一次后第二次 preflight／install／C7／restore 成功；首次空轮保全，不作第二次 C7 证据，protect 本轮未执行（`0038/STAGE-RECORD.md` §阶段与恢复）。
+- **0038 v5**：RX 精确同值 **38/40**、TX **40/40**。seq38 RX=4544 被第 238／239 拍的 4248→4624（`ΔPKTS=5`）按时间和数值夹逼，**只登记、不计覆盖**。seq31 RX=4008 虽在第 205／206 拍 3632→4088 之间，API 时刻却比第 206 拍 `date` 时间戳晚约 **10.722 ms**，不满足冻结的时间夹逼；TX seq31 有精确同值。A=seq0／B=seq17，两侧 RX 增量均 **1736**、TX 均 **640**；v5 最终 **`not-completed`**，唯一阻断为 `api-value-not-in-kernel-series`。`date` 后才 `grep`，真实读取时刻可能更晚，但现存证据无法量出延迟，不能据此倒置时间顺序或改判（`0038/STAGE-RECORD.md` §C7 独立复核、`C7/result-c7-v5.json`）。
+- **授权限额疑点保留**：两次 preflight 各核对制品 SHA 6 次，跨尝试合计 **12/6**（授权 `artifact_sha_rechecks=6` 字面总额）；重跑修订只增加了 `tconn` 限额，未显式增加 SHA 总额。执行器按单次 6/6 放行、`limit_stops=[]`，不能称跨两次尝试全项未超限（`0038/STAGE-RECORD.md` §计数及限额）。
+
+### 7.4 C7 收口与后续授权／执行器规则
+
+- **C7 标定到此为止，按冻结规则登记 `not-completed`**。0033、0036、0037 三轮的 A/B 增量在 RX／TX 两方向均与 `/proc` 精确相等（0033 TX 双侧均为 0）；0037 和 0038 的未命中值均出现在相邻多包跳变处。数据支持同源解释，**但未按当轮冻结规则完成**，不得借事后 v5 回放改写历史判定。即使今后 C7 同源标定通过，也不等于门级 C7 的通过，不解除 `n2h-inconclusive`。若未来确需再测，应在每拍 `grep` 前后各记一次时间，测准实际读取时刻，先冻结规则并做独立评审，然后才申请上机；当前不再为标定追加真机轮。
+- **以下五条是用户新定的后续轮次授权模板与执行器要求，尚未在脚本实现；待下一次上机前实现并用假设备验证。** 此处登记不构成新的真机授权，不追改 0035–0038 的既有授权或计数。
+
+1. **准备阶段连接**：先查手机是否在线；不在线自动 `tconn`，最多 10 次。10 次均无法连接则停下并告知用户；授权不因此作废，用户回来后续连，连上后继续原轮次。
+2. **中途断线**：保留已采集数据，将该行登记为传输中断；重连后仅允许该行重跑一次，原尝试和重跑尝试都如实登记，不覆盖旧证据。
+3. **授权期限**：取消固定有效期；授权自签发起有效，直到用完或用户明确说作废。上机前仍须回读确认、核对制品哈希并检查手机与电脑时钟差；未确认前不操作设备。
+4. **固件版本**：仅小版本号更新时不作废授权，在证据中登记实测版本；大版本变化则停止并询问用户，不自行沿用授权。
+5. **重试额度**：签发时把重连／重跑会连带增加的全部计数（包括设备时间读取、制品哈希核对等）计入跨尝试总额并留足授权上限，执行器按累计值守限，避免再次出现 0038 的 **12/6**。
+
+### 本节引用
+
+- 仓B `diagnostics/AUTH-DIAG-DEVICE-VALIDATION-20260926-0035`、`…-0036`、`…-0037`、`…-0038` 的同名 `.json` 授权件和证据目录；各轮 `STAGE-RECORD.md`，0036–0038 的 `verdict.md`／C7 判定产物。
+- 主机侧只读参考：`/home/worker/n2h-kit/round-0037/analysis-c7-rx-mismatch/REPORT.md`、`/home/worker/n2h-kit/round-0037/README-0037-changes.md`、`/home/worker/n2h-kit/round-0038/README-c7-v5.md`、`/home/worker/n2h-kit/round-0038/README-0038-changes.md`。
