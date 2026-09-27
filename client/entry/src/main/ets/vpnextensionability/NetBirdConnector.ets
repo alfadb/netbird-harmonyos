@@ -459,6 +459,11 @@ export function connectorStartWithSocket(fd: number, configJson: string,
 // N3-7: feed a fresh protected socket (open + protect first) so reconnect
 // dials can re-protect. Fail-closed without resupply: dials error, they
 // never fall back to an unprotected direct connection.
+export function connectorPhysicalNetworkChanged(connectAddr: string): SocketFeedResult {
+  const address: Record<string, Object> = { 'connect_addr': connectAddr };
+  return JSON.parse(core.connector_physical_network_changed(JSON.stringify(address))) as SocketFeedResult;
+}
+
 export function connectorSocketFeed(fd: number): SocketFeedResult {
   return JSON.parse(core.connector_socket_feed(fd)) as SocketFeedResult;
 }
@@ -728,11 +733,18 @@ export function parseSignalEndpoint(uri: string, defaultPort: number): Managemen
 // NOT start the connector (fail-closed: an unresolved host would make native
 // fall back to its own resolution, i.e. un-protected DNS through the tunnel).
 export async function resolveManagementIp(endpoint: ManagementEndpoint,
-  timeoutMs: number): Promise<string> {
+  timeoutMs: number, netId?: number): Promise<string> {
   if (endpoint.ip.length > 0) {
     return `${endpoint.ip}:${endpoint.port}`;
   }
-  const resolution: Promise<string> = connection.getAddressesByName(endpoint.host)
+  const handles: connection.NetHandle[] = netId === undefined ? [] : connection.getAllNetsSync();
+  const physical: connection.NetHandle | undefined = handles.find((h: connection.NetHandle): boolean =>
+    h.netId === netId);
+  if (netId !== undefined && physical === undefined) {
+    throw new Error('dns-failed');
+  }
+  const resolution: Promise<string> = (physical === undefined ?
+    connection.getAddressesByName(endpoint.host) : physical.getAddressesByName(endpoint.host))
     .then((addresses: connection.NetAddress[]): string => {
       for (let i = 0; i < addresses.length; i++) {
         // prefer IPv4 (this client has no IPv6 data plane yet)
@@ -831,9 +843,16 @@ export function forgetPhysicalDefaultDns(): void {
   physicalDefaultDnsNetId = 0;
 }
 
-export function physicalDefaultDnsServers(): string[] {
+export function physicalDefaultDnsServers(netId?: number): string[] {
   try {
     let handle: connection.NetHandle = connection.getDefaultNetSync();
+    if (netId !== undefined) {
+      const handles: connection.NetHandle[] = connection.getAllNetsSync();
+      const selected: connection.NetHandle | undefined = handles.find((h: connection.NetHandle): boolean =>
+        h.netId === netId);
+      if (selected === undefined) { return []; }
+      handle = selected;
+    }
     if (handle === undefined || handle === null || handle.netId === 0) {
       return [];
     }
@@ -844,7 +863,7 @@ export function physicalDefaultDnsServers(): string[] {
     probe.bearerTypes = caps.bearerTypes ?? [];
     probe.capsOk = true;
     if (!isPhysicalNetEvidence(probe)) {
-      if (physicalDefaultDnsNetId === 0) {
+      if (netId !== undefined || physicalDefaultDnsNetId === 0) {
         return [];
       }
       const handles: connection.NetHandle[] = connection.getAllNetsSync();

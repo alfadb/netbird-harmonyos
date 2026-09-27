@@ -390,7 +390,18 @@ pub fn spawn_signal_link(
     rx: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
     on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync>,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_signal_link_shared(runtime, cfg, exchange, Arc::new(tokio::sync::Mutex::new(rx)), on_event)
+}
+
+pub fn spawn_signal_link_shared(
+    runtime: tokio::runtime::Handle,
+    cfg: SignalLinkConfig,
+    exchange: Arc<RealSignalExchange>,
+    rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>>>,
+    on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync>,
+) -> tokio::task::JoinHandle<()> {
     runtime.spawn(async move {
+        let mut rx = rx.lock().await;
         // 初始拨号退避：与会话重连同参（上游 defaultBackoff，
         // grpc.go:173-183）；OS 随机源 + 单调时钟（无 sleep 参数断言）。
         let mut dial_backoff = ExponentialBackoff::upstream_stream_default();
@@ -427,7 +438,7 @@ pub fn spawn_signal_link(
         let sink = on_event.clone();
         let mut session = SignalSession::new(client);
         let result = session
-            .run_events_with_outbox(rx, move |ev| match ev {
+            .run_events_with_outbox_ref(&mut rx, move |ev| match ev {
                 SignalLoopEvent::Registered => {
                     registered.store(true, Ordering::Release);
                     sink(SignalLinkEvent::Registered);
@@ -1341,6 +1352,15 @@ impl PeerIceOrchestrator {
         };
         if zombie {
             self.drop_session_rearm(idx, now_ms, "negotiation-start-timeout");
+        }
+    }
+
+    /// Force fresh ICE credentials, candidates and protected sockets after an
+    /// outer-network change; the next pump renegotiates each known peer.
+    pub fn restart_for_network_change(&mut self, now_ms: u64) {
+        for idx in 0..self.peers.len() {
+            self.drop_session_rearm(idx, now_ms, "physical-network-change");
+            self.peers[idx].cooldown_until = now_ms;
         }
     }
 

@@ -150,7 +150,7 @@ use std::collections::VecDeque;
 
 use crate::ice::{priority_for, seam_to_management, set_nonblock, Candidate, CandidateType, UdpSocketSource};
 use crate::management::ManagementError;
-use crate::mgmtsock::dup_socket_fd;
+use std::os::fd::IntoRawFd;
 use crate::stun::{
     self, decode_address, TransactionId, BINDING_ERROR, BINDING_REQUEST, BINDING_SUCCESS,
     HEADER_LEN, MAGIC_COOKIE,
@@ -887,8 +887,7 @@ impl IceSession {
         let addr = parse_ipv4(&cand.address).ok_or_else(|| {
             ManagementError::Parse(format!("ice:local-candidate-not-ipv4 '{}'", cand.address))
         })?;
-        let provided = socks.take_fd().map_err(seam_to_management)?;
-        let dup = dup_socket_fd(provided).map_err(seam_to_management)?;
+        let dup = socks.take_owned().map_err(seam_to_management)?.into_raw_fd();
         let cleanup = |fd: sys::c_int| unsafe { sys::close(fd) };
         if let Err(e) = set_nonblock(dup) {
             cleanup(dup);

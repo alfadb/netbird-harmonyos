@@ -34,10 +34,9 @@
 //!   its session (no half state), and the shell-side teardown path
 //!   (`clear()`) drops everything back to the N7 cold state (feeds gone,
 //!   `tunnel_ready=false`, default route HELD).
-//! - SOCKET SWAP RULE: while the device is up a WG-socket feed is an
-//!   idempotent no-op for the SAME number (session preserved — a rebuild
-//!   would have dropped it) and refused (`socket-fd-conflict`) for a
-//!   DIFFERENT number; the protected outer socket is never swapped.
+//! - SOCKET SWAP RULE: a live WG-socket feed owns its own duplicate and
+//!   reattaches the device socket. Raw fd-number equality is not used as an
+//!   identity check; a closed raw number can be reused for another socket.
 //!
 //! The recreate REQUEST state machine (gate flip → `recreate.required`
 //! exactly once, budget + cooldown bounds) is pinned by the `connector.rs`
@@ -183,7 +182,23 @@ fn key_b() -> &'static str {
     K.get_or_init(|| b64(&pub_key_raw(&SECRET_B)))
 }
 
-/// Quick device-clock policy (injected ms; loopback delivery is synchronous
+#[test]
+fn pending_wg_feed_survives_shell_fd_reuse_before_tun_arrives() {
+    unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
+    let slot = WgDeviceFeed::new(recreate_config(&SECRET_A));
+    let (wg, port) = udp_socket_lo();
+    slot.feed_wg_socket(wg).unwrap();
+    unsafe { sys::close(wg) };
+    let (replacement, replacement_port) = udp_socket_lo();
+    if replacement != wg { assert_eq!(unsafe { dup2(replacement, wg) }, wg); }
+    let (tun, end) = tun_socketpair();
+    slot.feed_tun(tun).unwrap();
+    assert_eq!(slot.with_device(|d| d.local_addr()).unwrap().1, port);
+    if port != replacement_port { assert_ne!(slot.with_device(|d| d.local_addr()).unwrap().1, replacement_port); }
+    unsafe { sys::close(tun); sys::close(end); sys::close(wg); }
+    if replacement != wg { unsafe { sys::close(replacement) }; }
+}
+
 /// within the process — same as tests/wg_feed_n7.rs).
 fn recreate_config(secret: &[u8; 32]) -> WgDeviceConfig {
     let mut cfg = WgDeviceConfig::new(b64(secret));
@@ -662,12 +677,12 @@ fn recreate_dead_fd_refused_no_half_state_then_fail_closed_teardown() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. socket swap rule: same-fd feed idempotent (session preserved), a
-//    different outer socket refused while the device is up
+// 3. socket swap rule: same-fd idempotent, failed replacement preserves
+//    the old session, successful replacement carries traffic both ways
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wg_socket_feed_idempotent_same_fd_and_refuses_swap_while_device_up() {
+fn wg_socket_feed_replaces_live_socket_and_carries_bidirectional_payload() {
     let peer = Peer::build(&SECRET_B, key_a(), vec![(ADDR_A, 32)]);
     let slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
     let mut now = 3000u64;
@@ -682,15 +697,32 @@ fn wg_socket_feed_idempotent_same_fd_and_refuses_swap_while_device_up() {
     assert!(slot_end.slot.device_up());
     assert!(slot_end.ready(), "idempotent re-feed must not rebuild the device");
 
-    // a DIFFERENT bound socket: refused fail-closed (the protected outer
-    // socket is not swappable in N8), device untouched
-    let (other_raw, _other_port) = udp_socket_lo();
-    let err = slot_end.slot.feed_wg_socket(other_raw).unwrap_err();
-    assert_eq!(err.token(), "socket-fd-conflict");
-    assert!(slot_end.slot.device_up() && slot_end.ready(), "refusal changes nothing");
+    // An invalid replacement must retain the established session and old path.
+    assert_eq!(slot_end.slot.feed_wg_socket(1 << 30).unwrap_err().token(), "socket-fd-invalid");
+    assert!(slot_end.ready());
+    let old_pkt = ip_udp_packet(ADDR_A, ADDR_B, 40101, 5353, b"before-replacement");
+    assert_eq!(carry_frame(&slot_end, &peer, &mut now, &old_pkt), old_pkt);
 
-    // while the device is DOWN the old N7 rules still hold: a fresh pair
-    // builds a fresh device (cold start path unchanged)
+    let (other_raw, other_port) = udp_socket_lo();
+    slot_end.slot.feed_wg_socket(other_raw).expect("replace protected socket");
+    slot_end.raws.lock().unwrap().push(other_raw);
+    assert!(slot_end.slot.device_up() && slot_end.ready(), "socket swap retains sessions");
+    assert_eq!(slot_end.port(), other_port);
+    peer.app.with_device(|d| d.set_endpoint(key_a(), [127, 0, 0, 1], other_port, now))
+        .expect("move peer to new physical path");
+    assert!(pump_until(&slot_end, &peer, &mut now, 10_000, |s, p| s.ready() && p.ready()));
+    let pkt = ip_udp_packet(ADDR_A, ADDR_B, 40102, 5353, b"after-replacement-a2b");
+    assert_eq!(carry_frame(&slot_end, &peer, &mut now, &pkt), pkt);
+    let reverse = ip_udp_packet(ADDR_B, ADDR_A, 5353, 40102, b"after-replacement-b2a");
+    write_tun(peer.tun_test_end, &reverse);
+    let got = std::cell::RefCell::new(None);
+    assert!(pump_until(&slot_end, &peer, &mut now, 5_000, |_s, _p| {
+        if got.borrow().is_none() { *got.borrow_mut() = read_tun(slot_end.tun_test_end); }
+        got.borrow().is_some()
+    }));
+    assert_eq!(got.into_inner().expect("reverse frame"), reverse);
+
+    // Cold-start behavior remains unchanged after teardown.
     slot_end.slot.clear();
     assert!(!slot_end.slot.device_up());
     let (wg2, _p2) = udp_socket_lo();
@@ -699,7 +731,7 @@ fn wg_socket_feed_idempotent_same_fd_and_refuses_swap_while_device_up() {
     slot_end.slot.feed_wg_socket(wg2).expect("cold socket feed");
     assert!(slot_end.slot.device_up(), "cold rebuild works after clear");
     assert!(!slot_end.slot.tunnel_ready(), "fresh device: no session yet");
-    for fd in [other_raw, wg2, tun2, tun2_end] {
+    for fd in [wg2, tun2, tun2_end] {
         unsafe { sys::close(fd) };
     }
 }

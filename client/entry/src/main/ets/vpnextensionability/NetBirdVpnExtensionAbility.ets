@@ -3,6 +3,7 @@ import Want from '@ohos.app.ability.Want';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
+import connection from '@ohos.net.connection';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
@@ -29,7 +30,7 @@ import {
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
-  connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
+  connectorSocketFeed, connectorPhysicalNetworkChanged, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplyDnsServers, physicalDefaultDnsServers, forgetPhysicalDefaultDns,
   SocketSupplyRequest,
@@ -165,6 +166,7 @@ const N2H_DIAG_IFACE_BYTES_BURST_KEY: string = 'diag_iface_bytes_burst';
 // verbatim (`protect_probe`) — never from the want, never a second key. Off:
 // nothing is read into the config (byte-identical VpnConfig, no line).
 const N2H_DIAG_CAPTURE_ROUTE_KEY: string = 'diag_capture_route';
+const N2H_ENDPOINT_EXCLUSIONS_KEY: string = 'endpoint_exclusions_enabled';
 // S7 (2026-09-26, opt-in): the protect-probe fd hand-off's trigger. The ticket
 // key is the SAME `protect_probe` object core parses (`{target, count,
 // mode:"protect"|"none"}`); ONLY `mode:"protect"` adds any shell behaviour
@@ -498,19 +500,21 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // never stored nor closed by native).
   private tunFd: number = -1;
   private fdConfirmedOpenAfterCreate: boolean = false;
-  // Native-owned tunnel-outer UDP socket fd, opened for the protect gate and
-  // (N7) fed to the WG data plane after the protect gate passes. Native owns
-  // its lifecycle (dup-consumed by the WG device; no close export in core
-  // yet — TODO/未验证); the shell only audits it read-only via core.fd_status.
+  // Shell-owned current WG UDP raw fd; the device owns a separate duplicate.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
-  // N5c/N7 device gap: the ICE UDP socket (core-opened, shell-protected,
-  // fed via connectorIceSocketFeed). Without it candidate gathering fails
-  // closed and ICE never leaves idle (device run 1: 61x "pump error").
-  private iceSocketFd: number = -1;
+  // ICE UDP sockets are protected before the native queue duplicates them.
   private iceProtected: boolean = false;
   private iceTopUpTimer: number = -1;
   private socketSupplyTimer: number = -1;
+  private networkObserver: connection.NetConnection | undefined = undefined;
+  private networkEpoch: number = 0;
+  private networkNetId: number = 0;
+  private networkDirty: boolean = false;
+  private networkRecoveryActive: boolean = false;
+  private networkRecoveryReady: boolean = false;
+  private managementEndpoint: ManagementEndpoint | undefined = undefined;
+  private signalUri: string = '';
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
   private iceQueueDepth: number = 0;
@@ -549,6 +553,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // default-routed) tunnel. A fresh freeze (re-resolution) happens on the
   // next full start, never from a cached cross-session set.
   private frozenEndpointExclusions: ExcludedRouteEntry[] = [];
+  private endpointExclusionsEnabled: boolean = true;
   // N2-H I5 (§5.3-2): the SHELL exclusion set retention for the device-side
   // evidence collector — the same derivation's endpoints (kind/host/port) and
   // per-endpoint resolutions, kept on this instance so `n2h_collector_arm` can
@@ -678,11 +683,130 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // -> connection.create() -> fd contract + fail-closed protect gate.
     // The map is applied at create() time because the platform VpnConfig is
     // fixed then; later map changes are logged as NOT applied.
+    this.watchPhysicalNetwork();
     this.startConnectorThenCreate(want, connection).catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
         'VPN_START_FLOW_REJECTED|requestId=%{public}s|summary=%{public}s',
         this.requestId, safeError(error));
     });
+  }
+
+  private watchPhysicalNetwork(): void {
+    try {
+      const observer: connection.NetConnection = connection.createNetConnection();
+      observer.register((error: Error | undefined): void => {
+        if (error !== undefined) {
+          hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_WATCH_FAIL|summary=%{public}s', safeError(error));
+        }
+      });
+      observer.on('netLost', (net: connection.NetHandle): void => {
+        if (net.netId === this.networkNetId) {
+          this.networkNetId = 0;
+          this.networkDirty = true;
+          this.networkEpoch++;
+        }
+      });
+      observer.on('netAvailable', (net: connection.NetHandle): void => {
+        this.physicalNetworkAvailable(net.netId);
+      });
+      observer.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
+        this.physicalNetworkAvailable(info.netHandle.netId);
+      });
+      this.networkObserver = observer;
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_WATCH_FAIL|summary=%{public}s', safeError(error as Error));
+    }
+  }
+
+  private physicalNetworkAvailable(netId: number): void {
+    if (this.destroyRequested || netId === 0 ||
+      (netId === this.networkNetId && !this.networkDirty) ||
+      physicalDefaultDnsServers(netId).length === 0) { return; }
+    this.networkNetId = netId;
+    this.networkDirty = true;
+    this.networkEpoch++;
+    this.recoverPhysicalNetwork().catch((error: Error): void => {
+      hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+    });
+  }
+
+  private async recoverPhysicalNetwork(): Promise<void> {
+    if (this.networkRecoveryActive || !this.networkRecoveryReady || this.destroyRequested) { return; }
+    this.networkRecoveryActive = true;
+    let attemptEpoch: number = 0;
+    try {
+      do {
+        attemptEpoch = this.networkEpoch;
+        const epoch: number = attemptEpoch;
+        const netId: number = this.networkNetId;
+        const vpn: vpnExtension.VpnConnection | undefined = this.connection;
+        if (vpn === undefined || this.recreateInFlight || netId === 0 || this.managementEndpoint === undefined) { break; }
+        forgetPhysicalDefaultDns();
+        const dns: string[] = physicalDefaultDnsServers(netId);
+        if (dns.length === 0) { break; }
+        let addr: string;
+        try {
+          addr = await resolveManagementIp(this.managementEndpoint, DNS_RESOLVE_BOX_MS, netId);
+        } catch (error) { break; }
+        if (epoch !== this.networkEpoch || this.destroyRequested) { continue; }
+        const opened: NativeSocketOpen = JSON.parse(core.wg_fwd_open()) as NativeSocketOpen;
+        if (opened.fd < 0 || opened.bind_rc !== 0) {
+          if (opened.fd >= 0) { socketSupplyCloseFd(opened.fd); }
+          break;
+        }
+        let adopted: boolean = false;
+        try {
+          if (!await this.protectSocketWithBox(vpn, opened.fd)) { break; }
+          if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
+            this.connection !== vpn) { continue; }
+          const fed: WgFeedResult = connectorWgSocketFeed(opened.fd);
+          if (!fed.ok || fed.device_up !== true) { break; }
+          adopted = true;
+          const oldFd: number = this.outboundSocketFd;
+          this.outboundSocketFd = -1;
+          this.outboundProtected = true;
+          socketSupplyCloseFd(opened.fd);
+          if (oldFd >= 0 && oldFd !== opened.fd) { socketSupplyCloseFd(oldFd); }
+        } finally {
+          if (!adopted) { socketSupplyCloseFd(opened.fd); }
+        }
+        const restarted: SocketFeedResult = connectorPhysicalNetworkChanged(addr);
+        if (!restarted.ok) { break; }
+        const updated: SocketFeedResult = socketSupplyDnsServers(dns);
+        if (!updated.ok) { break; }
+        this.iceQueueDepth = 0;
+        if (this.iceTopUpTimer !== -1) {
+          clearInterval(this.iceTopUpTimer);
+          this.iceTopUpTimer = -1;
+        }
+        if (!await this.protectAndFeedIceSocket()) { break; }
+        if (epoch !== this.networkEpoch || this.destroyRequested) { continue; }
+        if (this.signalUri.length > 0) {
+          const endpoint: ManagementEndpoint = parseSignalEndpoint(this.signalUri, 443);
+          const signalAddr: string = await resolveManagementIp(endpoint, DNS_RESOLVE_BOX_MS, netId);
+          const sock: NativeTcpSocketOpen = mgmtSocketOpen();
+          if (sock.fd < 0 || sock.bind_rc !== 0) {
+            if (sock.fd >= 0) { socketSupplyCloseFd(sock.fd); }
+            break;
+          }
+          let signalFed: boolean = false;
+          try {
+            if (await this.protectSocketWithBox(vpn, sock.fd) &&
+              epoch === this.networkEpoch && !this.destroyRequested && !this.recreateInFlight &&
+              this.connection === vpn) {
+              signalFed = connectorSignalFeed(sock.fd, signalAddr).ok;
+            }
+          } finally { socketSupplyCloseFd(sock.fd); }
+          if (!signalFed) { break; }
+        }
+        if (!await this.feedSpareProtectedSocket(vpn, epoch)) { break; }
+        this.networkDirty = false;
+        hilog.info(DOMAIN, TAG, 'VPN_NETWORK_RECOVERED|requestId=%{public}s|netId=%{public}d',
+          this.requestId, netId);
+      } while (attemptEpoch !== this.networkEpoch && !this.destroyRequested && this.networkNetId !== 0);
+    } finally {
+      this.networkRecoveryActive = false;
+    }
   }
 
   // N3-6/N3-7 start flow. Abort paths leave the VPN un-created and report a
@@ -820,6 +944,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const opened = mgmtSocketOpen();
       mgmtFd = opened.fd;
       if (mgmtFd < 0 || opened.bind_rc !== 0) {
+        if (mgmtFd >= 0) { socketSupplyCloseFd(mgmtFd); }
         hilog.error(DOMAIN, TAG,
           'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=mgmt-socket-open|' +
           'errorClass=mgmt-socket-open-failed|fd=%{public}d|bindRc=%{public}d|bindErrno=%{public}d',
@@ -841,6 +966,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // (N2b) — this box treats any failure/timeout as fail-closed abort.
     const mgmtProtected: boolean = await this.protectSocketWithBox(connection, mgmtFd);
     if (!mgmtProtected) {
+      socketSupplyCloseFd(mgmtFd);
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=mgmt-protect|' +
         'errorClass=protect-fail-closed|fd=%{public}d',
@@ -851,9 +977,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // 4. start the connector over the protected socket (Rust dup-consumes
     // the fd per dial; the original number stays shell-owned — fd contract)
     const creds: Record<string, Object> = { 'setup_key': setupKey };
-    const start: ConnectorStartResult =
-      connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
+    let start: ConnectorStartResult;
+    try {
+      start = connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
         JSON.stringify(creds), connectAddr, physicalDefaultDnsServers());
+    } finally {
+      socketSupplyCloseFd(mgmtFd);
+    }
     if (!start.started) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
@@ -866,6 +996,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'warning=data-plane-not-ready-black-hole-risk|optIn=forceDefaultRoute',
         this.requestId);
     }
+    this.managementEndpoint = mgmtEndpoint;
     // seed ONE spare protected socket so a single reconnect dial can
     // re-protect; further resupply policy is an N4+ increment (a starved
     // queue fails dials CLOSED — never unprotected)
@@ -896,6 +1027,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let signalProvisioned: SignalProvisionResult | null = null;
     if (net !== null && net.signal !== undefined && net.signal !== null && net.signal.length > 0) {
       signalProvisioned = await this.provisionSignalSocket(connection, net.signal);
+      if (signalProvisioned !== null) { this.signalUri = net.signal; }
       if (signalProvisioned === null) {
         hilog.error(DOMAIN, TAG,
           'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-provision|' +
@@ -933,9 +1065,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // (addr.slice(0, addr.lastIndexOf(':'))) — stripDialPort is the shared,
     // IPv6-safe implementation, and buildExcludedRouteEntries re-applies it
     // as the builder-side defense.
-    const exclusion: EndpointExclusionOutcome = await this.deriveEndpointExclusions(
-      mgmtEndpoint, stripDialPort(connectAddr), signalProvisioned,
-      baseTemplate.tunnelAddress, net !== null ? net.stuns : null);
+    const exclusion: EndpointExclusionOutcome = this.endpointExclusionsEnabled
+      ? await this.deriveEndpointExclusions(mgmtEndpoint, stripDialPort(connectAddr),
+        signalProvisioned, baseTemplate.tunnelAddress, net !== null ? net.stuns : null)
+      : { fatal: false, routes: [] };
+    if (!this.endpointExclusionsEnabled) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ENDPOINT_EXCLUSIONS_DISABLED|requestId=%{public}s|mode=diagnostic|routes=0',
+        this.requestId);
+      this.n2hExclusionEndpoints = [];
+      this.n2hExclusionResolutions = [];
+    }
     if (exclusion.fatal) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=endpoint-exclusion|' +
@@ -1117,6 +1257,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const opened = mgmtSocketOpen();
       fd = opened.fd;
       if (fd < 0 || opened.bind_rc !== 0) {
+        if (fd >= 0) { socketSupplyCloseFd(fd); }
         hilog.error(DOMAIN, TAG,
           'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=open|fd=%{public}d|' +
           'bindRc=%{public}d', this.requestId, fd, opened.bind_rc);
@@ -1128,25 +1269,28 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, safeError(error as Error));
       return null;
     }
-    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
-    if (!protectedOk) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d|' +
-        'errorClass=protect-fail-closed', this.requestId, fd);
-      return null;
+    try {
+      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+      if (!protectedOk || this.connection !== connection || this.recreateInFlight) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d|' +
+          'errorClass=protect-fail-closed', this.requestId, fd);
+        return null;
+      }
+      const fed = connectorSignalFeed(fd, addr);
+      if (!fed.ok) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|' +
+          'error=%{public}s', this.requestId, fd, fed.error ?? 'no-message');
+        return null;
+      }
+      hilog.info(DOMAIN, TAG,
+        'VPN_SIGNAL_FED|requestId=%{public}s|fd=%{public}d|addr=%{public}s|queued=%{public}s',
+        this.requestId, fd, addr, String(fed.queued ?? -1));
+      return { endpoint: endpoint, dialIp: addr.slice(0, addr.lastIndexOf(':')) };
+    } finally {
+      socketSupplyCloseFd(fd);
     }
-    // 4. feed the protected socket + the resolved address to the core
-    const fed = connectorSignalFeed(fd, addr);
-    if (!fed.ok) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|' +
-        'error=%{public}s', this.requestId, fd, fed.error ?? 'no-message');
-      return null;
-    }
-    hilog.info(DOMAIN, TAG,
-      'VPN_SIGNAL_FED|requestId=%{public}s|fd=%{public}d|addr=%{public}s|queued=%{public}s',
-      this.requestId, fd, addr, String(fed.queued ?? -1));
-    return { endpoint: endpoint, dialIp: addr.slice(0, addr.lastIndexOf(':')) };
   }
 
   // N2-H endpoint-freeze derivation (docs/native-nx-governance.md 追加登记
@@ -1975,6 +2119,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.diagIfaceBytesBurst = false;
     this.diagCaptureRoute = false;
     this.diagCaptureTarget = '';
+    this.endpointExclusionsEnabled = true;
     let text: string = '';
     try {
       text = fs.readTextSync(this.n2hArmFilePath()).trim();
@@ -2002,6 +2147,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // forwards to the core verbatim — read here (EARLY) because the route must
     // be in the FIRST VpnConfig, long before the arm hook runs.
     this.diagCaptureRoute = this.readDiagSwitch(doc, N2H_DIAG_CAPTURE_ROUTE_KEY);
+    const exclusionSetting: Object | undefined = doc[N2H_ENDPOINT_EXCLUSIONS_KEY];
+    if (exclusionSetting !== undefined) {
+      if (typeof exclusionSetting === 'boolean') {
+        this.endpointExclusionsEnabled = exclusionSetting;
+      } else {
+        hilog.warn(DOMAIN, TAG,
+          'N2H_DIAG_OPTION_IGNORED|key=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
+          N2H_ENDPOINT_EXCLUSIONS_KEY, N2H_DIAG_OPTION_IGNORED_REASON);
+      }
+    }
     this.diagCaptureTarget = this.readProtectProbeTarget(doc);
   }
 
@@ -2633,8 +2788,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let fd: number = -1;
     let result: string = 'rejected';
     const t0: number = Date.now();
+    const epoch: number = this.networkEpoch;
     try {
-      if (this.destroyRequested || this.destroyPromise !== undefined ||
+      if (this.networkDirty || this.destroyRequested || this.destroyPromise !== undefined ||
         this.protectDeviationRouteExclusion) {
         return;
       }
@@ -2644,7 +2800,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       if (isDns) {
-        const servers: string[] = physicalDefaultDnsServers();
+        const servers: string[] = physicalDefaultDnsServers(this.networkNetId || undefined);
         const updated: SocketFeedResult = socketSupplyDnsServers(servers);
         if (!updated.ok || servers.length === 0) {
           return;
@@ -2656,7 +2812,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
-      if (protectedOk && !this.protectDeviationRouteExclusion && !this.destroyRequested &&
+      if (protectedOk && epoch === this.networkEpoch && !this.networkDirty &&
+        !this.protectDeviationRouteExclusion && !this.destroyRequested &&
         this.destroyPromise === undefined) {
         result = 'protected';
       } else {
@@ -2691,11 +2848,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     forgetPhysicalDefaultDns();
   }
 
-  // N3-7: seed ONE spare protected management socket into the core queue so
-  // a single reconnect dial can re-protect without new shell involvement.
-  // Best-effort: failures are logged, never fatal (a starved queue fails
-  // dials CLOSED — never unprotected); systematic resupply is N4+ work.
-  private feedSpareProtectedSocket(connection: vpnExtension.VpnConnection): void {
+  // Startup seed; subsequent transport dials also use on-demand protected supply.
+  private async feedSpareProtectedSocket(connection: vpnExtension.VpnConnection,
+    epoch: number = this.networkEpoch): Promise<boolean> {
     let fd: number = -1;
     try {
       const opened = mgmtSocketOpen();
@@ -2704,27 +2859,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.warn(DOMAIN, TAG,
           'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=open|fd=%{public}d',
           this.requestId, fd);
-        return;
+        return false;
       }
-    } catch (error) {
-      hilog.warn(DOMAIN, TAG,
-        'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=open-throw|summary=%{public}s',
-        this.requestId, safeError(error as Error));
-      return;
-    }
-    this.protectSocketWithBox(connection, fd).then((ok: boolean): void => {
-      if (!ok) {
+      if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
+        this.destroyRequested || this.networkDirty && this.networkRecoveryReady &&
+        !this.networkRecoveryActive) {
         hilog.warn(DOMAIN, TAG,
           'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=protect|fd=%{public}d',
           this.requestId, fd);
-        return;
+        return false;
       }
       const fed = connectorSocketFeed(fd);
       hilog.info(DOMAIN, TAG,
         'VPN_MGMT_SOCKET_FED|requestId=%{public}s|fd=%{public}d|ok=%{public}s|queued=%{public}s|' +
         'error=%{public}s',
         this.requestId, fd, String(fed.ok), String(fed.queued ?? -1), fed.error ?? 'none');
-    });
+      return fed.ok;
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=throw|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return false;
+    } finally {
+      if (fd >= 0) { socketSupplyCloseFd(fd); }
+    }
   }
 
   private stopStatusAndNetcfgWatcher(): void {
@@ -2952,6 +3110,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // logged as NOT applied (platform VpnConfig fixed at create — see the
     // watcher); a desired-route-set CHANGE goes through the controlled
     // recreate below.
+    this.networkRecoveryReady = true;
+    if (this.networkEpoch > 0) {
+      this.recoverPhysicalNetwork().catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+      });
+    }
     this.ackAppliedRoutesInitial();
     this.startStatusAndNetcfgWatcher();
     return {
@@ -2965,33 +3129,40 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // mandatory: the outer UDP socket must ALREADY be protected here (§二.4 —
   // protect before any datagram flows; the WG device sends the handshake the
   // moment the endpoint lands), and the TUN fd is the second of the two
-  // feeds. Both numbers cross as BORROWED fd numbers — native dups them
-  // (F_DUPFD_CLOEXEC) at device construction and never uses/closes the
-  // originals: the raw TUN fd keeps belonging to connection.destroy(), the
-  // raw WG socket stays native-opened for audits. Returns true only when the
-  // core reports device_up (both feeds landed and the device is pumping).
+  // feeds. Native duplicates and owns the WG socket at feed time; the shell
+  // closes its original immediately. The platform owns the original TUN fd,
+  // which native duplicates when constructing or replacing the device.
+  // Returns true only when the core reports device_up.
   private feedWgDataplane(): boolean {
     if (this.outboundSocketFd < 0 || !this.outboundProtected || this.tunFd < 0) {
       hilog.error(DOMAIN, TAG,
         'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=precondition|wgFd=%{public}d|' +
         'protected=%{public}s|tunFd=%{public}d',
         this.requestId, this.outboundSocketFd, String(this.outboundProtected), this.tunFd);
+      if (this.outboundSocketFd >= 0) {
+        socketSupplyCloseFd(this.outboundSocketFd);
+        this.outboundSocketFd = -1;
+      }
       return false;
     }
     // 1. the protected WG outer socket (data plane feed #1)
+    const wgFd: number = this.outboundSocketFd;
     let sock: WgFeedResult;
     try {
-      sock = connectorWgSocketFeed(this.outboundSocketFd);
+      sock = connectorWgSocketFeed(wgFd);
     } catch (error) {
       hilog.error(DOMAIN, TAG,
         'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=wg-socket-throw|fd=%{public}d|summary=%{public}s',
-        this.requestId, this.outboundSocketFd, safeError(error as Error));
+        this.requestId, wgFd, safeError(error as Error));
       return false;
+    } finally {
+      socketSupplyCloseFd(wgFd);
+      this.outboundSocketFd = -1;
     }
     if (!sock.ok) {
       hilog.error(DOMAIN, TAG,
         'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=wg-socket|fd=%{public}d|error=%{public}s',
-        this.requestId, this.outboundSocketFd, sock.error ?? 'no-message');
+        this.requestId, wgFd, sock.error ?? 'no-message');
       return false;
     }
     // 2. the platform TUN fd (data plane feed #2) — device comes up here
@@ -3016,12 +3187,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // the pair) — treat anything but an explicit device_up as failure
       hilog.error(DOMAIN, TAG,
         'VPN_WG_FEED_FAIL|requestId=%{public}s|stage=device-not-up|wgFd=%{public}d|tunFd=%{public}d',
-        this.requestId, this.outboundSocketFd, this.tunFd);
+        this.requestId, wgFd, this.tunFd);
       return false;
     }
     hilog.info(DOMAIN, TAG,
       'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true',
-      this.requestId, this.outboundSocketFd, this.tunFd);
+      this.requestId, wgFd, this.tunFd);
     return true;
   }
 
@@ -3055,6 +3226,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return false;
     }
     if (fd < 0 || bindRc !== 0) {
+      if (fd >= 0) { socketSupplyCloseFd(fd); }
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=outbound-open|fd=%{public}d|' +
         'bindRc=%{public}d|bindErrno=%{public}d',
@@ -3067,6 +3239,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
     const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
     if (!protectedOk) {
+      socketSupplyCloseFd(fd);
+      this.outboundSocketFd = -1;
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=protect|fd=%{public}d', this.requestId, fd);
       return false;
@@ -3224,42 +3398,50 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open|fd=%{public}d', this.requestId, fd);
       return false;
     }
-    if (this.iceSocketFd < 0) {
-      this.iceSocketFd = fd;
-    }
-    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
-    if (!protectedOk) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d', this.requestId, fd);
-      return false;
-    }
-    this.iceProtected = true;
-    let fed: SocketFeedResult;
+    const epoch: number = this.networkEpoch;
     try {
-      fed = connectorIceSocketFeed(fd);
-    } catch (error) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed-throw|fd=%{public}d|summary=%{public}s',
-        this.requestId, fd, safeError(error as Error));
-      return false;
+      if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
+        this.destroyRequested || this.networkDirty && this.networkRecoveryReady &&
+        !this.networkRecoveryActive) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect-or-stale|fd=%{public}d',
+          this.requestId, fd);
+        return false;
+      }
+      this.iceProtected = true;
+      let fed: SocketFeedResult;
+      try {
+        fed = connectorIceSocketFeed(fd);
+      } catch (error) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed-throw|fd=%{public}d|summary=%{public}s',
+          this.requestId, fd, safeError(error as Error));
+        return false;
+      }
+      if (!fed.ok) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|error=%{public}s',
+          this.requestId, fd, fed.error ?? 'no-message');
+        return false;
+      }
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ICE_FEED|fed|fd=%{public}d|queue=%{public}d', fd, fed.queued ?? -1);
+      this.iceQueueDepth = fed.queued ?? this.iceQueueDepth;
+      return true;
+    } finally {
+      socketSupplyCloseFd(fd);
     }
-    if (!fed.ok) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|error=%{public}s',
-        this.requestId, fd, fed.error ?? 'no-message');
-      return false;
-    }
-    hilog.warn(DOMAIN, TAG,
-      'VPN_ICE_FEED|fed|fd=%{public}d|queue=%{public}d', fd, fed.queued ?? -1);
-    this.iceQueueDepth = fed.queued ?? this.iceQueueDepth;
-    return true;
   }
 
   // Bounded VpnConnection.protect() box (same shape as the verified spike
   // helper protectSocketWithBox, e8e2cf9). Never throws. Box expiry is
   // reported as failure (fail-closed) — stricter than the spike's
   // best-effort treatment, per governance item 4.
-  private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
+  private async protectSocketWithBox(_connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
+    const connection: vpnExtension.VpnConnection | undefined = this.connection;
+    if (connection === undefined || this.recreateInFlight || this.destroyRequested) {
+      return false;
+    }
     const t0: number = Date.now();
     // On the tested device, per-fd protect() resolved despite MANAGE_VPN
     // check-failure log lines. The dev-only deviation skips this call when
@@ -3270,7 +3452,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'reason=manage-vpn-permission-missing|platform_call=not-attempted|' +
         'is_evidence=false|not_a_gate_pass=true',
         this.requestId, fd);
-      return true;
+      return this.connection === connection && !this.recreateInFlight && !this.destroyRequested;
     }
     // The box timer is a bounded WAIT, not a scheduled event: once the platform
     // call settles (resolve or reject) the handle is cleared, so a successful
@@ -3307,9 +3489,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
         'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
         this.requestId, fd);
-      return true;
+      return this.connection === connection && !this.recreateInFlight && !this.destroyRequested;
     }
-    return outcome;
+    return outcome && this.connection === connection && !this.recreateInFlight && !this.destroyRequested;
   }
 
   // Bounded process-level protect (protectProcessNet, API 22+ / SDK
@@ -3474,6 +3656,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private destroyOnce(trigger: string): Promise<void> {
+    this.networkRecoveryReady = false;
+    if (this.networkObserver !== undefined) {
+      try {
+        this.networkObserver.unregister((error: Error | undefined): void => {
+          if (error !== undefined) {
+            hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_UNWATCH_FAIL|summary=%{public}s', safeError(error));
+          }
+        });
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_UNWATCH_FAIL|summary=%{public}s', safeError(error as Error));
+      }
+      this.networkObserver = undefined;
+    }
     this.stopSocketSupply();
     if (this.destroyPromise !== undefined) {
       hilog.info(DOMAIN, TAG,
@@ -3540,20 +3735,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.auditOutboundSocketAfterDestroy();
   }
 
-  // Post-destroy lifecycle audit of the protected tunnel-outer socket. The
-  // fd is native-owned; core has no close export yet (TODO/未验证, Rust side
-  // in flight), so the shell only verifies its state read-only and reports.
+  // Normally feed closes the shell's WG original immediately. An abort before
+  // feed may leave it pending; retire that socket here, never the TUN fd.
   private auditOutboundSocketAfterDestroy(): void {
     const fd: number = this.outboundSocketFd;
     if (fd < 0) {
       hilog.info(DOMAIN, TAG,
-        'VPN_OUTBOUND_AUDIT|requestId=%{public}s|socket=never-opened', this.requestId);
+        'VPN_OUTBOUND_AUDIT|requestId=%{public}s|socket=already-closed', this.requestId);
       return;
     }
-    const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
+    this.outboundSocketFd = -1;
+    socketSupplyCloseFd(fd);
     hilog.info(DOMAIN, TAG,
-      'VPN_OUTBOUND_AUDIT|requestId=%{public}s|fd=%{public}d|protected=%{public}s|open=%{public}s|' +
-      'errno=%{public}d|owner=native-close-export-pending',
-      this.requestId, fd, String(this.outboundProtected), String(snapshot.open), snapshot.errno);
+      'VPN_OUTBOUND_AUDIT|requestId=%{public}s|fd=%{public}d|owner=shell|closed=true',
+      this.requestId, fd);
   }
 }

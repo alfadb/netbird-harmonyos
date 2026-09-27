@@ -772,6 +772,17 @@ impl SignalSession {
     pub async fn run_events_with_outbox<E>(
         &mut self,
         mut outbox: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
+        on_event: E,
+    ) -> Result<(), ManagementError>
+    where
+        E: for<'a> FnMut(SignalLoopEvent<'a>),
+    {
+        self.run_events_with_outbox_ref(&mut outbox, on_event).await
+    }
+
+    pub async fn run_events_with_outbox_ref<E>(
+        &mut self,
+        outbox: &mut tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
         mut on_event: E,
     ) -> Result<(), ManagementError>
     where

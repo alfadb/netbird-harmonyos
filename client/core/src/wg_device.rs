@@ -87,8 +87,8 @@
 //!   触碰任何握手/密钥状态——peer 会话原样存活，重建后载荷立即双向可通，
 //!   不需要重新握手。
 //! - feed seam：设备在位时 `feed_tun` = 替换（[`WgDeviceFeed::feed_tun`]）；
-//!   `feed_wg_socket` 同号为幂等 no-op、异号拒绝（`socket-fd-conflict`）——
-//!   受保护外层 socket 不可换。
+//!   `feed_wg_socket` 同号为幂等 no-op、异号在新 fd 验证成功后替换外层 socket；
+//!   失败时旧 socket 不变。
 
 //! ## N11：WG 骑 ICE 选中连接（egress 让渡 + 入向分用）
 //!
@@ -155,6 +155,7 @@
 //!   ——本模块（含载体路径）只经 [`TunFd`]/dup 副本接触 fd，载体挂载/
 //!   拆除/`connector_stop()` 都不会触碰那个号码。
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -1462,6 +1463,9 @@ fn getsockname(fd: i32) -> Result<([u8; 4], u16), String> {
     if unsafe { sys::getsockname(fd, &mut addr, &mut len) } == -1 {
         return Err(format!("wg-device-socket-name-failed (errno={})", sys::errno()));
     }
+    if addr.sin_family != sys::AF_INET as u16 {
+        return Err("wg-device-socket-family-invalid".to_string());
+    }
     Ok((addr.sin_addr, u16::from_be(addr.sin_port)))
 }
 
@@ -1800,12 +1804,11 @@ impl WgFeedRefusal {
 ///
 /// ## fd 合同（§二.4）
 ///
-/// Fed fd numbers are BORROWED: stored raw numbers stay owned by the shell
-/// (protect/`VpnConnection` lifecycle); at device construction native takes
-/// dup copies ONLY (`dup_socket_fd` for the socket, `TunFd::dup_from_raw`
-/// for the TUN) and never uses/closes the originals. When construction fails
-/// (e.g. an fd died between feed and adopt), both stored numbers are dropped
-/// and the data plane stays down — a fresh matching feed pair retries.
+/// WG socket feeds duplicate the shell fd immediately and retain an owned
+/// copy until device adoption; the shell closes its original after feeding.
+/// The platform TUN fd remains borrowed and is duplicated only at device
+/// construction (`TunFd::dup_from_raw`). Build failure drops the owned WG
+/// copy and forgets the borrowed TUN number; a fresh pair can retry.
 ///
 /// ## buffering + replay
 ///
@@ -1821,8 +1824,11 @@ pub struct WgDeviceFeed {
 
 #[derive(Default)]
 struct FeedInner {
-    /// Shell-fed RAW fd numbers (borrowed; native dup-only at adopt time).
+    /// Last supplied shell number, retained only for diagnostics.
     wg_socket_raw: Option<i32>,
+    /// Native-owned copy of the protected outer socket until device adoption.
+    wg_socket_owned: Option<OwnedFd>,
+    /// Platform TUN number stays borrowed; its owner is VpnConnection.
     tun_raw: Option<i32>,
     /// Buffered peer set (full-snapshot semantics, as received).
     peers: Vec<crate::connector::WgPeerEntry>,
@@ -1855,8 +1861,9 @@ impl WgDeviceFeed {
     }
 
     /// Shell feed #1: the (protected) WG outer UDP socket fd. The number is
-    /// validated by an immediate dup probe (fail-closed at the boundary) and
-    /// stored raw; the device dups it again at adopt time.
+    /// duplicated immediately into an owned pending fd. The raw number is
+    /// retained only for diagnostics; the device duplicates the owned fd
+    /// again at adoption.
     pub fn feed_wg_socket(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
         self.feed_fd(raw_fd, FeedWhich::WgSocket)
     }
@@ -1865,7 +1872,7 @@ impl WgDeviceFeed {
     /// rules; `TunFd::dup_from_raw` carries the executable fd contract).
     /// N8: while the device is up this REPLACES the platform TUN fd
     /// (controlled recreate — [`WgDevice::replace_tun`]); the WG socket feed
-    /// stays first-write-wins and is idempotent while up.
+    /// likewise accepts a validated replacement while the device is up.
     pub fn feed_tun(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
         self.feed_fd(raw_fd, FeedWhich::Tun)
     }
@@ -1874,35 +1881,29 @@ impl WgDeviceFeed {
         if raw_fd < 0 {
             return Err(WgFeedRefusal::FdMissing);
         }
-        // boundary validation: refuse dead fds BEFORE storing. The probe dup
-        // is closed immediately (fd discipline: nothing leaks, the number is
-        // stored raw and the device takes its own dup at adopt time).
-        match crate::mgmtsock::dup_socket_fd(raw_fd) {
-            Ok(probe) => {
-                unsafe { sys::close(probe) };
-            }
+        // Retain the protected outer socket before the shell can close its fd.
+        // The TUN still belongs to VpnConnection and is duped at adoption.
+        let owned = match crate::mgmtsock::dup_socket_fd(raw_fd) {
+            Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
             Err(e) => return Err(WgFeedRefusal::FdInvalid { errno: e.errno() }),
-        }
+        };
         let built = {
             let mut g = self.inner.lock_poison();
             match which {
                 FeedWhich::WgSocket => {
-                    // N8: while a device is up the protected WG outer socket
-                    // is NOT swappable. Same number = idempotent no-op (the
-                    // controlled recreate re-feeds nothing); a DIFFERENT
-                    // number is refused fail-closed (the running device keeps
-                    // its dup of the original protected socket).
-                    if let Some(stored) = g.wg_socket_raw {
-                        if g.device.is_some() {
-                            if raw_fd == stored {
-                                g.feeds_accepted += 1;
-                                emit("N8_WG_FEED|socket-feed-idempotent|device-kept");
-                                return Ok(());
-                            }
+                    if g.device.is_some() {
+                        if let Some(Err(_)) = g.device.as_ref().map(|dev| {
+                            dev.with_device(|d| d.reattach_socket(owned.as_raw_fd()))
+                        }) {
                             return Err(WgFeedRefusal::SocketSwapUnsupported);
                         }
+                        g.wg_socket_raw = Some(raw_fd);
+                        g.feeds_accepted += 1;
+                        emit("N8_WG_FEED|socket-replaced|device-kept");
+                        return Ok(());
                     }
                     g.wg_socket_raw = Some(raw_fd);
+                    g.wg_socket_owned = Some(owned);
                 }
                 FeedWhich::Tun => {
                     if let Some(dev) = g.device.as_ref() {
@@ -1975,7 +1976,7 @@ impl WgDeviceFeed {
         if g.device.is_some() {
             return false;
         }
-        let (Some(wg_raw), Some(tun_raw)) = (g.wg_socket_raw, g.tun_raw) else {
+        let (Some(wg_raw), Some(tun_raw)) = (g.wg_socket_owned.as_ref().map(AsRawFd::as_raw_fd), g.tun_raw) else {
             return false; // still missing a feed — the buffered state is kept
         };
         let tun = match TunFd::dup_from_raw(tun_raw) {
@@ -2023,6 +2024,7 @@ impl WgDeviceFeed {
             g.endpoints.len()
         ));
         g.device = Some(app);
+        g.wg_socket_owned = None;
         true
     }
 
@@ -2032,6 +2034,7 @@ impl WgDeviceFeed {
     fn build_failed(g: &mut FeedInner, reason: &str) -> bool {
         g.build_failures += 1;
         g.wg_socket_raw = None;
+        g.wg_socket_owned = None;
         g.tun_raw = None;
         emit(&format!("N7_WG_FEED|build-failed|reason={reason}"));
         false
@@ -2066,6 +2069,7 @@ impl WgPeerApplier for WgDeviceFeed {
         g.egress.clear();
         g.carriers.clear();
         g.wg_socket_raw = None;
+        g.wg_socket_owned = None;
         g.tun_raw = None;
         if let Some(d) = g.device.take() {
             d.clear();
@@ -2395,6 +2399,26 @@ mod feed_tests {
         let unknown = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
         let err = slot.apply_endpoint(&unknown, [127, 0, 0, 1], 1).unwrap_err();
         assert!(err.contains("not registered"), "{err}");
+    }
+
+    #[test]
+    fn feed_slot_replaces_live_wg_socket_and_keeps_old_on_failure() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        slot.feed_tun(tun_raw).unwrap();
+        slot.feed_wg_socket(wg_raw).unwrap();
+        let old = slot.with_device(|d| (d.fd.unwrap(), d.local_addr())).unwrap();
+        assert_eq!(slot.feed_wg_socket(1 << 30).unwrap_err().token(), "socket-fd-invalid");
+        assert_eq!(slot.feed_wg_socket(tun_raw).unwrap_err().token(), "socket-fd-conflict");
+        assert_eq!(slot.with_device(|d| (d.fd.unwrap(), d.local_addr())).unwrap(), old);
+        let (replacement, unused_tun, unused_end) = fed_fds();
+        slot.feed_wg_socket(replacement).unwrap();
+        let current = slot.with_device(|d| (d.fd.unwrap(), d.local_addr())).unwrap();
+        assert_ne!(current.0, old.0);
+        assert_ne!(current.1, old.1);
+        assert!(slot.device_up());
+        for fd in [wg_raw, tun_raw, tun_end, replacement, unused_tun, unused_end] {
+            unsafe { sys::close(fd) };
+        }
     }
 
     #[test]

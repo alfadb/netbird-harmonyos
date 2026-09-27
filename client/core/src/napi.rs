@@ -107,6 +107,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("ice_socket_open", napi_ice_socket_open);
     reg!("connector_start", napi_connector_start);
     reg!("connector_start_with_socket", napi_connector_start_with_socket);
+    reg!("connector_physical_network_changed", napi_connector_physical_network_changed);
     reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
@@ -511,6 +512,11 @@ unsafe extern "C" fn napi_connector_start_with_socket(
         env,
         crate::connector::connector_start_with_socket_json(fd, &config, &credentials, &connect_addr),
     )
+}
+
+unsafe extern "C" fn napi_connector_physical_network_changed(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::connector_physical_network_changed_json(&a.string_at(0)))
 }
 
 // N3-7: shell-side resupply of fresh protected sockets (reconnect dials).

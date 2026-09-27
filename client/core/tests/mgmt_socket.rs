@@ -547,16 +547,15 @@ async fn dial_consumes_a_dup_original_stays_owner_owned() {
     assert_eq!(unsafe { sys::close(fd) }, 0, "owner close must succeed");
 
     // --- variant B: pre-connected socket (host-test shape): the dial must
-    // ADOPT it (EISCONN path), again without touching the original.
+    // ADOPT it (EISCONN path) after the shell closes its original fd.
     let std_client = std::net::TcpStream::connect(addr).expect("pre-connect");
     let pre_fd = std_client.into_raw_fd();
     let source2 = Arc::new(ProtectedSocketFdSource::new_with_fd(pre_fd));
+    assert_eq!(unsafe { sys::close(pre_fd) }, 0, "shell closes original after feed");
     let factory2 = factory_over(addr, source2.clone());
     let mut client2 = factory2.connect().await.expect("adopted pre-connected socket");
     client2.get_server_key().await.expect("rpc over adopted socket");
     assert_eq!(source2.taken(), 1);
-    assert!(fd_open(pre_fd), "pre-connected original still owner-owned");
-    unsafe { sys::close(pre_fd) };
 
     // two dials total reached the server (one per variant) — the adopted
     // variant did NOT let native self-dial a second connection
@@ -1011,4 +1010,43 @@ async fn unanswered_supply_times_out_fail_closed() {
     let fd = open_fd();
     assert!(supply.reply(id, fd, "protected").contains("request-expired"));
     assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+}
+
+#[tokio::test]
+async fn physical_network_change_cancels_stale_requests_and_uses_fresh_transport_sockets_and_dns() {
+    use netbird_core::socket_supply::{Purpose, SocketSupply};
+    let supply = Arc::new(SocketSupply::new());
+    supply.set_dns_servers(vec![[192, 0, 2, 1].into()]);
+    let pending = tokio::spawn({
+        let supply = supply.clone();
+        async move { supply.request(Purpose::Management).await }
+    });
+    let (old_id, _) = next_supply_request(&supply).await;
+    supply.cancel_pending_for_network_change();
+    supply.set_dns_servers(Vec::new());
+    assert!(supply.dns_servers().is_empty(), "old physical DNS is removed");
+    assert_eq!(pending.await.unwrap().unwrap_err().token(), "physical-network-changed");
+    let stale_fd = open_fd();
+    assert!(supply.reply(old_id, stale_fd, "protected").contains("request-expired"));
+    assert!(netbird_core::socket_supply::close_fd_json(stale_fd).contains("\"ok\":true"));
+
+    supply.set_dns_servers(vec![[198, 51, 100, 53].into()]);
+    assert_eq!(supply.dns_servers(), vec![std::net::Ipv4Addr::new(198, 51, 100, 53)]);
+    let mut ids = std::collections::HashSet::from([old_id]);
+    for purpose in [Purpose::Management, Purpose::Signal, Purpose::Relay] {
+        let request = tokio::spawn({
+            let supply = supply.clone();
+            async move { supply.request_with_id(purpose).await }
+        });
+        let (id, kind) = next_supply_request(&supply).await;
+        assert_eq!(kind, purpose);
+        assert!(ids.insert(id), "every transport gets a new request ID");
+        let raw = open_fd();
+        assert!(supply.reply(id, raw, "protected").contains("\"ok\":true"));
+        let (delivered_id, owned) = request.await.unwrap().unwrap();
+        assert_eq!(delivered_id, id);
+        assert_ne!(owned.as_raw_fd(), raw, "native owns a duplicate");
+        assert!(netbird_core::socket_supply::close_fd_json(raw).contains("\"ok\":true"));
+        assert!(unsafe { sys::fcntl(owned.as_raw_fd(), sys::F_GETFD) } >= 0);
+    }
 }

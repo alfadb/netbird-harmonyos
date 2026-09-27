@@ -154,6 +154,14 @@ impl SocketSupply {
         format!("{{\"ok\":{}}}", ok && delivered)
     }
 
+    pub fn cancel_pending_for_network_change(&self) {
+        let mut state = self.state.lock().expect("socket supply");
+        state.queue.clear();
+        for (_, pending) in state.pending.drain() {
+            let _ = pending.sender.send(Err(SocketSeamError::Supply("physical-network-changed")));
+        }
+    }
+
     pub fn close(&self) {
         let mut state = self.state.lock().expect("socket supply");
         state.closed = true;

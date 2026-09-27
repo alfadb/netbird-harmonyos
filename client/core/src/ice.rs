@@ -51,11 +51,11 @@
 //! the [`crate::mgmtsock::ManagementSocketProvider`] provider pattern
 //! generalized to UDP: the SHELL creates a fresh AF_INET/SOCK_DGRAM socket,
 //! protects it (HarmonyOS `VpnConnection.protect`), and hands the fd number
-//! over ([`ProtectedUdpFdSource`]; empty → fail-closed
-//! [`ManagementError::Network`], never an unprotected dial). The consumer
-//! dups the number (`crate::mgmtsock::dup_socket_fd`, the mgmtsock/tun
-//! contract: the provided number is BORROWED, never read/written/closed
-//! here) and binds/uses/closes exactly its own dup; each interface round
+//! over to [`ProtectedUdpFdSource`]; empty means fail-closed
+//! [`ManagementError::Network`], never an unprotected dial). The feed
+//! immediately duplicates the number and retains an owned copy; the shell
+//! closes its original. Gathering transfers the queued fd to the bound
+//! socket, which closes it on drop. Each interface round
 //! takes a FRESH fd — auditable via `ProtectedUdpFdSource::taken()`
 //! (the mgmt `taken == attempts` contract). One socket per host candidate
 //! interface (upstream mobile shape is one shared UDPMux socket,
@@ -75,6 +75,7 @@
 //! repo-external probe `refs/ice-probe` (exit 0, aarch64-unknown-linux-ohos).
 
 use std::collections::VecDeque;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -614,12 +615,18 @@ pub fn interface_allowed(name: &str, blacklist: &[&str]) -> bool {
 /// Source of pre-protected UDP sockets — the UDP twin of
 /// [`crate::mgmtsock::ManagementSocketProvider`]. Contract: ONE call = ONE
 /// fresh, UNBOUND, AF_INET/SOCK_DGRAM socket the shell created AND
-/// protected; the fd number is BORROWED (consumer dups it and never closes
-/// the original); `Err` = fail-closed, the gather records the error and
-/// produces NO candidate on that path (governance §二.4 — STUN/ICE sockets
-/// protect before use, and there is no unprotected fallback).
+/// protected; production feeds duplicate immediately and own the queued
+/// copy while the shell closes its original. Borrowed test providers use the
+/// default `take_owned()` implementation to duplicate on demand; `Err` =
+/// fail-closed, the gather records the error and produces NO candidate on
+/// that path (governance §二.4 — STUN/ICE sockets protect before use, and
+/// there is no unprotected fallback).
 pub trait UdpSocketSource: Send + Sync {
     fn take_fd(&self) -> Result<i32, SocketSeamError>;
+    fn take_owned(&self) -> Result<OwnedFd, SocketSeamError> {
+        let fd = self.take_fd()?;
+        Ok(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) })
+    }
     fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
         resolve_ipv4(host)
     }
@@ -630,7 +637,7 @@ pub trait UdpSocketSource: Send + Sync {
 /// audited against attempts in tests).
 #[derive(Debug)]
 pub struct ProtectedUdpFdSource {
-    queue: Mutex<VecDeque<i32>>,
+    queue: Mutex<VecDeque<OwnedFd>>,
     taken: AtomicU64,
     dns: OnceLock<(Arc<crate::socket_supply::SocketSupply>, tokio::runtime::Handle)>,
 }
@@ -639,7 +646,7 @@ impl ProtectedUdpFdSource {
     pub fn new_with_fd(fd: i32) -> Self {
         let mut q = VecDeque::with_capacity(2);
         if fd >= 0 {
-            q.push_back(fd);
+            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd).expect("seed udp socket fd")) });
         }
         ProtectedUdpFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), dns: OnceLock::new() }
     }
@@ -648,11 +655,16 @@ impl ProtectedUdpFdSource {
         let _ = self.dns.set((supply, runtime));
     }
 
-    /// Shell-side resupply: push another fresh protected UDP socket fd.
-    pub fn feed(&self, fd: i32) {
-        if fd >= 0 {
-            self.queue.lock().expect("udp fd queue").push_back(fd);
-        }
+    /// Shell-side resupply: retain a protected UDP socket duplicate now.
+    pub fn feed(&self, fd: i32) -> Result<(), SocketSeamError> {
+        let owned = unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) };
+        self.queue.lock().expect("udp fd queue").push_back(owned);
+        Ok(())
+    }
+
+    /// Discard owned pending sockets from the previous physical network.
+    pub fn clear_pending(&self) {
+        self.queue.lock().expect("udp fd queue").clear();
     }
 
     /// Sockets currently queued (observability, mgmt parity).
@@ -676,6 +688,10 @@ impl UdpSocketSource for ProtectedUdpFdSource {
     }
 
     fn take_fd(&self) -> Result<i32, SocketSeamError> {
+        self.take_owned().map(IntoRawFd::into_raw_fd)
+    }
+
+    fn take_owned(&self) -> Result<OwnedFd, SocketSeamError> {
         let fd = self.queue.lock().expect("udp fd queue").pop_front();
         match fd {
             Some(fd) => {
@@ -808,8 +824,7 @@ fn gather_interface(
     srflx_out: &mut Vec<Candidate>,
     errors_out: &mut Vec<(String, ManagementError)>,
 ) -> Result<(), ManagementError> {
-    let provided = socks.take_fd().map_err(seam_to_management)?;
-    let dup = dup_socket_fd(provided).map_err(seam_to_management)?;
+    let dup = socks.take_owned().map_err(seam_to_management)?.into_raw_fd();
     let cleanup_and = |dup: i32, e: ManagementError, errors_out: &mut Vec<(String, ManagementError)>| {
         unsafe { sys::close(dup) };
         errors_out.push((iface.name.clone(), e));
@@ -1058,5 +1073,42 @@ pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
 // candidate pairs), prflx derivation, pair nomination/selection, the agent
 // state machine (4s keepalive / 6s disconnected / 6s failed), WG endpoint
 // configuration (`ConfigureWGEndpoint`, conn.go:477), TURN/relay candidates,
-// offer/answer signaling + ufrag/pwd credentials, renegotiation.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod feed_ownership_tests {
+    use super::{ProtectedUdpFdSource, UdpSocketSource};
+    use crate::sys;
+    use std::os::fd::{FromRawFd, IntoRawFd};
+
+    #[test]
+    fn ice_feed_survives_shell_close_and_fd_number_reuse() {
+        unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
+        let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = original.local_addr().unwrap().port();
+        let raw = original.into_raw_fd();
+        let source = ProtectedUdpFdSource::new_with_fd(-1);
+        source.feed(raw).unwrap();
+        unsafe { sys::close(raw) };
+        let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
+        assert!(replacement >= 0);
+        if replacement != raw { assert_eq!(unsafe { dup2(replacement, raw) }, raw); }
+        let fed = unsafe { std::net::UdpSocket::from_raw_fd(source.take_owned().unwrap().into_raw_fd()) };
+        assert_eq!(fed.local_addr().unwrap().port(), port);
+        unsafe { sys::close(raw) };
+        if replacement != raw { unsafe { sys::close(replacement) }; }
+    }
+
+    #[test]
+    fn ice_clear_pending_discards_owned_copy() {
+        let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let source = ProtectedUdpFdSource::new_with_fd(-1);
+        let raw = original.into_raw_fd();
+        source.feed(raw).unwrap();
+        unsafe { sys::close(raw) };
+        assert_eq!(source.pending(), 1);
+        source.clear_pending();
+        assert_eq!(source.pending(), 0);
+        assert!(source.take_owned().is_err());
+    }
+}

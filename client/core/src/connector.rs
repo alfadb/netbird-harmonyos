@@ -122,10 +122,10 @@ use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::{GrpcTransport, LoginParams, ManagementGrpcClient, PeerMeta};
 use crate::hilog;
 use crate::management::ManagementError;
-use crate::mgmtsock::{dup_socket_fd, ManagementSocketProvider, ProtectedSocketFdSource};
+use crate::mgmtsock::{ManagementSocketProvider, ProtectedSocketFdSource};
 use crate::network_map::NetworkMap;
 use crate::peer_conn::{
-    ice_ready_for_default_route, spawn_signal_link, IceOrchestratorSummary, LoggingSignalExchange,
+    ice_ready_for_default_route, spawn_signal_link_shared, IceOrchestratorSummary, LoggingSignalExchange,
     PeerIceDeps, PeerIceOrchestrator, PeerSignalKind, RealSignalExchange, SignalLinkConfig,
     SignalLinkEvent,
 };
@@ -548,6 +548,8 @@ pub trait ManagementFactory: Send + Sync + 'static {
     /// `None` = no fixed dial address (the unprotected opt-in dev dial, or a
     /// test stub): the N2-H collector then records a reasoned freeze gap
     /// instead of inventing an address. Diagnostics only — this never dials.
+    /// Update the protected dial target after shell-side re-resolution.
+    fn update_dial_address(&self, _addr: SocketAddr) {}
     fn dial_address(&self) -> Option<SocketAddr> {
         None
     }
@@ -569,7 +571,7 @@ pub struct GrpcManagementFactory {
     keys: EnvelopeKeyPair,
     /// `(protected socket source, shell-resolved connect address)`. `None`
     /// means the (DANGEROUS, opt-in) unprotected direct dial.
-    socket: Option<(Arc<dyn ManagementSocketProvider>, SocketAddr)>,
+    socket: Option<(Arc<dyn ManagementSocketProvider>, Arc<Mutex<SocketAddr>>)>,
 }
 
 impl core::fmt::Debug for GrpcManagementFactory {
@@ -613,7 +615,7 @@ impl GrpcManagementFactory {
             connect_timeout: config.connect_timeout,
             request_timeout: config.request_timeout,
             keys,
-            socket: Some((source, connect_addr)),
+            socket: Some((source, Arc::new(Mutex::new(connect_addr)))),
         }
     }
 }
@@ -623,8 +625,12 @@ impl ManagementFactory for GrpcManagementFactory {
     /// `socket.1` of the protected-socket variant, i.e. the address core
     /// actually connects to on every (re)dial. `None` on the unprotected
     /// dev dial, whose address core resolves itself.
+    fn update_dial_address(&self, addr: SocketAddr) {
+        if let Some((_, target)) = &self.socket { *target.lock_poison() = addr; }
+    }
+
     fn dial_address(&self) -> Option<SocketAddr> {
-        self.socket.as_ref().map(|(_source, addr)| *addr)
+        self.socket.as_ref().map(|(_source, addr)| *addr.lock_poison())
     }
 
     fn connect(
@@ -640,6 +646,7 @@ impl ManagementFactory for GrpcManagementFactory {
         Box::pin(async move {
             match socket {
                 Some((source, connect_addr)) => {
+                    let target = *connect_addr.lock_poison();
                     ManagementGrpcClient::connect_with_socket_source(
                         &endpoint,
                         transport,
@@ -647,7 +654,7 @@ impl ManagementFactory for GrpcManagementFactory {
                         request_timeout,
                         keys,
                         source,
-                        connect_addr,
+                        target,
                     )
                     .await
                 }
@@ -3309,7 +3316,7 @@ struct SignalRuntime {
     /// 编排 seam 持有的同一适配器（registered 闸的真源）。
     exchange: Arc<RealSignalExchange>,
     /// 出帧队列接收端（maybe_start 时交给 worker；已取走即已启动）。
-    outbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>>>,
+    outbox: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>>>,
     state: Arc<Mutex<SignalLinkStatus>>,
 }
 
@@ -3330,7 +3337,7 @@ impl SignalRuntime {
             connect_addr: Mutex::new(None),
             link: Mutex::new(None),
             exchange,
-            outbox: Mutex::new(Some(outbox)),
+            outbox: Arc::new(tokio::sync::Mutex::new(outbox)),
             state: Arc::new(Mutex::new(SignalLinkStatus::default())),
         }
     }
@@ -3356,10 +3363,7 @@ impl SignalRuntime {
 
     /// 壳侧 feed 的已解析地址（首次生效）。
     fn set_connect_addr(&self, addr: SocketAddr) {
-        let mut g = self.connect_addr.lock_poison();
-        if g.is_none() {
-            *g = Some(addr);
-        }
+        *self.connect_addr.lock_poison() = Some(addr);
     }
 
     /// URI 与 connect_addr 齐备且尚未启动 → 启动 worker（幂等）。返回
@@ -3378,9 +3382,7 @@ impl SignalRuntime {
         if link.is_some() {
             return false;
         }
-        let Some(rx) = self.outbox.lock_poison().take() else {
-            return false; // 队列已被并发启动取走：link guard 保证不再重复
-        };
+        let rx = self.outbox.clone();
         // endpoint 派生失败（如 https URI 但无 TLS 材料）→ 显式失败，不启动
         let (endpoint, transport) = match derive_signal_endpoint(&uri, &materials.transport) {
             Ok(t) => t,
@@ -3428,7 +3430,7 @@ impl SignalRuntime {
                 hilog::emit("connector: signal worker ended");
             }
         });
-        let handle = spawn_signal_link(
+        let handle = spawn_signal_link_shared(
             materials.runtime.clone(),
             SignalLinkConfig {
                 endpoint,
@@ -3528,6 +3530,9 @@ pub struct ConnectorHandle {
     shared: Arc<ConnectorShared>,
     wg: Arc<dyn WgPeerApplier>,
     host: Arc<dyn ConfigApplier>,
+    /// Network-change generation watched by the management worker.
+    network_change: tokio::sync::watch::Sender<u64>,
+    management_factory: Arc<dyn ManagementFactory>,
     /// Latest logged-in management client, taken by stop() for logout.
     logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>>,
     stop_flag: Arc<AtomicBool>,
@@ -3785,8 +3790,10 @@ impl ConnectorHandle {
         // the start transition happens synchronously so the very first
         // status poll already reports `connecting` (no spawn race)
         shared.transition(ConnEvent::Connect);
-        let worker = runtime.spawn(worker_main(worker_deps, logout_slot.clone()));
+        let (network_change, network_rx) = tokio::sync::watch::channel(0u64);
+        let worker = runtime.spawn(worker_supervisor(worker_deps, logout_slot.clone(), network_rx));
 
+        let worker_factory = factory.clone();
         let renewal = runtime.spawn(renewal_main(
             shared.clone(),
             factory,
@@ -3798,6 +3805,8 @@ impl ConnectorHandle {
         ));
 
         Arc::new(ConnectorHandle {
+            management_factory: worker_factory,
+            network_change,
             shared,
             wg,
             host,
@@ -3813,6 +3822,31 @@ impl ConnectorHandle {
             renewal: Mutex::new(Some(renewal)),
             runtime,
         })
+    }
+
+    /// Called only after the replacement WG socket has been protected and fed.
+    /// Old queued sockets belong to the previous physical network and must not
+    /// be used for any new management, signal or ICE dial.
+    pub fn physical_network_changed(&self, management_addr: SocketAddr) -> Result<(), &'static str> {
+        if !self.is_running() { return Err("connector-stopped"); }
+        self.management_factory.update_dial_address(management_addr);
+        if let Some(source) = &self.socket_source {
+            if let Some(supply) = source.socket_supply() {
+                supply.cancel_pending_for_network_change();
+                supply.set_dns_servers(Vec::new());
+            }
+            source.clear_pending();
+        }
+        if let Some(source) = &self.signal_sockets { source.clear_pending(); }
+        if let Some(source) = &self.ice_sockets { source.clear_pending(); }
+        self.ice.lock_poison().restart_for_network_change(crate::sys::mono_ms());
+        if let Some(rt) = self.shared.signal.get() {
+            rt.shutdown();
+            *rt.connect_addr.lock_poison() = None;
+        }
+        self.shared.stop_relay();
+        self.network_change.send_modify(|generation| *generation = generation.wrapping_add(1));
+        Ok(())
     }
 
     /// Current status snapshot. N7: refreshes the default-route gate
@@ -4012,6 +4046,40 @@ fn spawn_ice_pump(ice: Arc<Mutex<PeerIceOrchestrator>>, stop_flag: Arc<AtomicBoo
             }
         }
     });
+}
+
+async fn worker_supervisor(
+    initial: WorkerDeps,
+    logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
+) {
+    let shared = initial.shared.clone();
+    let factory = initial.factory.clone();
+    let wg = initial.wg.clone();
+    let host = initial.host.clone();
+    let secrets = initial.secrets.clone();
+    let meta = initial.meta.clone();
+    let policy_backoff = initial.policy_backoff.clone();
+    let sync_backoff = initial.sync_backoff.clone();
+    let mut first = Some(initial);
+    loop {
+        let deps = first.take().unwrap_or_else(|| WorkerDeps {
+            shared: shared.clone(), factory: factory.clone(), wg: wg.clone(), host: host.clone(),
+            secrets: secrets.clone(), meta: meta.clone(), policy_backoff: policy_backoff.clone(),
+            sync_backoff: sync_backoff.clone(), sync_rng: Box::new(OsRandom),
+            sync_clock: Box::new(MonotonicClock),
+        });
+        tokio::select! {
+            _ = worker_main(deps, logout_slot.clone()) => return,
+            changed = changes.changed() => {
+                if changed.is_err() { return; }
+                shared.transition(ConnEvent::Lost);
+                shared.stop_relay();
+                *logout_slot.lock_poison() = None;
+                hilog::emit("connector: physical network changed; management redialing");
+            }
+        }
+    }
 }
 
 /// The connection worker: connect → login → Sync session (internal
@@ -4407,7 +4475,7 @@ pub fn connector_start_with_socket_json(
             jstr("error", "socket-fd-missing")
         );
     }
-    if let Err(e) = dup_socket_fd(fd) {
+    if let Err(e) = crate::mgmtsock::probe_fd_dupable(fd) {
         hilog::emit(&format!(
             "connector: start refused ({} errno={}) — protect gate failed or fd dead",
             e.token(),
@@ -4499,6 +4567,21 @@ pub fn connector_start_with_socket_json(
     )
 }
 
+pub fn connector_physical_network_changed_json(addr_json: &str) -> String {
+    let addr = match parse_connect_addr(addr_json) {
+        Ok(addr) => addr,
+        Err(_) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid")),
+    };
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    match handle.physical_network_changed(addr) {
+        Ok(()) => format!("{{{}}}", jbool("ok", true)),
+        Err(error) => format!("{{{},{}}}", jbool("ok", false), jstr("error", error)),
+    }
+}
+
 /// The `connector_socket_feed(fd)` implementation — shell-side resupply of
 /// fresh protected sockets for reconnect dials. The shell opens a NEW
 /// socket (`mgmt_socket_open`), protects it, and feeds it here; the queue is
@@ -4527,14 +4610,13 @@ pub fn connector_socket_feed_json(fd: i32) -> String {
             jstr("error", "socket-fd-missing")
         );
     }
-    if let Err(e) = dup_socket_fd(fd) {
+    if let Err(e) = source.feed(fd) {
         return format!(
             "{{{},{}}}",
             jbool("ok", false),
             jstr("error", e.token())
         );
     }
-    source.feed(fd);
     format!(
         "{{{},{}}}",
         jbool("ok", true),
@@ -4560,10 +4642,9 @@ pub fn connector_ice_socket_feed_json(fd: i32) -> String {
     if fd < 0 {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-fd-missing"));
     }
-    if let Err(e) = dup_socket_fd(fd) {
+    if let Err(e) = source.feed(fd) {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token()));
     }
-    source.feed(fd);
     format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
 }
 
@@ -4604,10 +4685,9 @@ pub fn connector_signal_socket_feed_json(fd: i32, connect_addr_json: &str) -> St
             return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid"))
         }
     };
-    if let Err(e) = dup_socket_fd(fd) {
+    if let Err(e) = source.feed(fd) {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token()));
     }
-    source.feed(fd);
     rt.set_connect_addr(connect_addr);
     // the link starts once BOTH the sync-delivered URI and this address
     // exist (whichever arrives last triggers the start); if the connector

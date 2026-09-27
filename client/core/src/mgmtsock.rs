@@ -26,21 +26,15 @@
 //!
 //! ## fd contract (this module's part of governance §二 item 2)
 //!
-//! The fd number crossing this seam stays OWNED BY THE PROVIDER SIDE
-//! (production: the shell boundary that opened it via [`mgmt_socket_open`]
-//! and protected it via `VpnConnection.protect`). Consumers here dup it
-//! (`F_DUPFD_CLOEXEC`, `dup()`+`F_SETFD` fallback — the [`crate::tun`]
-//! idiom) and NEVER read, write, ioctl or close the provided number: the
-//! original remains usable/closeable by its owner, and its only sanctioned
-//! closer is the platform side (`VpnConnection.destroy()` for the platform
-//! TUN fd; these native-opened sockets are retired by their provider —
-//! retirement policy is an N4+ increment, see the notes doc).
+//! Production feeds duplicate the shell-owned fd immediately and retain the
+//! copy in the provider queue. The shell closes its original after feed;
+//! subsequent dial takes ownership of the queued copy until connect/adoption.
+//! The provider never reads, writes or closes the shell's original fd. TUN
+//! ownership is separate: its original remains with `VpnConnection.destroy()`.
 //!
-//! One documented side effect: the dup shares the open-file description, so
-//! the `O_NONBLOCK` set on the dup below flips the flag for the provided
-//! number too. Provider sides must not do blocking I/O on a socket after
-//! handing it over (governance item 2 lists this exact OFD question as a
-//! registered obligation).
+//! A duplicate shares the open-file description, so `O_NONBLOCK` set at dial
+//! also affects other surviving references to the same socket. Providers
+//! must not do blocking I/O on a socket after handing it over.
 //!
 //! ## Per-dial re-acquire (never reuse an old fd)
 //!
@@ -55,7 +49,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -149,7 +143,7 @@ impl SocketLease {
 /// shell feeds a fresh protected socket (see the notes doc for the policy).
 #[derive(Debug)]
 pub struct ProtectedSocketFdSource {
-    queue: Mutex<VecDeque<i32>>,
+    queue: Mutex<VecDeque<OwnedFd>>,
     taken: AtomicU64,
     supply: std::sync::OnceLock<(Arc<crate::socket_supply::SocketSupply>, crate::socket_supply::Purpose)>,
 }
@@ -159,7 +153,7 @@ impl ProtectedSocketFdSource {
     pub fn new_with_fd(fd: i32) -> Self {
         let mut q = VecDeque::with_capacity(2);
         if fd >= 0 {
-            q.push_back(fd);
+            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd).expect("seed socket fd")) });
         }
         ProtectedSocketFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), supply: std::sync::OnceLock::new() }
     }
@@ -172,11 +166,16 @@ impl ProtectedSocketFdSource {
         self.supply.get().map(|(supply, _)| supply.clone())
     }
 
-    /// Shell-side resupply: push another fresh protected socket fd.
-    pub fn feed(&self, fd: i32) {
-        if fd >= 0 {
-            self.queue.lock().expect("fd queue").push_back(fd);
-        }
+    /// Shell-side resupply: retain an owned duplicate immediately.
+    pub fn feed(&self, fd: i32) -> Result<(), SocketSeamError> {
+        let owned = unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) };
+        self.queue.lock().expect("fd queue").push_back(owned);
+        Ok(())
+    }
+
+    /// Drop unconsumed owned copies after their physical network is lost.
+    pub fn clear_pending(&self) {
+        self.queue.lock().expect("fd queue").clear();
     }
 
     /// Sockets currently queued (observability; crosses into
@@ -198,7 +197,7 @@ impl ManagementSocketProvider for ProtectedSocketFdSource {
         match fd {
             Some(fd) => {
                 self.taken.fetch_add(1, Ordering::AcqRel);
-                Ok(fd)
+                Ok(fd.into_raw_fd())
             }
             None => Err(SocketSeamError::NoSocket),
         }
@@ -206,16 +205,15 @@ impl ManagementSocketProvider for ProtectedSocketFdSource {
 
     fn take_for_dial(&self) -> Pin<Box<dyn Future<Output = Result<SocketLease, SocketSeamError>> + Send + '_>> {
         Box::pin(async move {
-            match self.take_fd() {
-                Ok(fd) => Ok(SocketLease::Borrowed(fd)),
-                Err(SocketSeamError::NoSocket) => {
-                    let (supply, purpose) = self.supply.get().ok_or(SocketSeamError::NoSocket)?;
-                    let owned = supply.request(*purpose).await?;
-                    self.taken.fetch_add(1, Ordering::AcqRel);
-                    Ok(SocketLease::Owned(owned))
-                }
-                Err(err) => Err(err),
+            let queued = self.queue.lock().expect("fd queue").pop_front();
+            if let Some(fd) = queued {
+                self.taken.fetch_add(1, Ordering::AcqRel);
+                return Ok(SocketLease::Owned(fd));
             }
+            let (supply, purpose) = self.supply.get().ok_or(SocketSeamError::NoSocket)?;
+            let owned = supply.request(*purpose).await?;
+            self.taken.fetch_add(1, Ordering::AcqRel);
+            Ok(SocketLease::Owned(owned))
         })
     }
 }
@@ -318,15 +316,13 @@ impl std::error::Error for SocketDialError {}
 /// One protected dial, from a freshly-taken socket to a connected
 /// [`tokio::net::TcpStream`]:
 ///
-/// 1. `source.take_fd()` — a socket the shell protected BEFORE this dial
-///    (upstream `Dialer.Control` ordering, protectsocket_android.go:22-46);
-///    `Err` fails the dial (fail-closed, no unprotected fallback);
-/// 2. dup (`F_DUPFD_CLOEXEC`) — the ONLY use of the provided number; the
-///    original is never read nor closed (fd contract);
+/// 1. `source.take_for_dial()` obtains a lease on a socket the shell protected
+///    BEFORE this dial (production queue owns a feed-time duplicate);
+///    `Err` fails closed;
+/// 2. dup (`F_DUPFD_CLOEXEC`) for Tokio connect while the lease stays live;
 /// 3. `O_NONBLOCK` on the dup;
-/// 4. `connect(2)` to `connect_addr` — AFTER protect, on the dup. An already
-///    connected provided socket (`EISCONN`: host-test pre-connected sockets /
-///    socketpairs) is adopted via a second dup instead.
+/// 4. `connect(2)` to `connect_addr` AFTER protect. An already connected
+///    socket (`EISCONN`) is adopted via another dup of the live lease.
 pub async fn connect_protected(
     source: &dyn ManagementSocketProvider,
     connect_addr: SocketAddr,
@@ -410,10 +406,9 @@ impl Service<Uri> for ProtectedSocketConnector {
 /// first connect AND before every reconnect). The connect itself happens on
 /// a dup copy in [`connect_protected`], after the protect.
 ///
-/// fd ownership: native-created, native-owned until handed back through
-/// `connector_start_with_socket` / `connector_socket_feed`; from that point
-/// the seam treats the number as provider-owned (dup-only, never closed —
-/// fd contract in the module docs).
+/// fd ownership: shell receives the opened original and closes it after a
+/// successful feed or on failure. The feed synchronously duplicates the fd;
+/// core owns only that duplicate.
 pub fn mgmt_socket_open() -> String {
     let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM | sys::SOCK_CLOEXEC, 0) };
     if fd < 0 {
@@ -441,9 +436,8 @@ pub fn mgmt_socket_open() -> String {
 /// (see `ice.rs` module docs). Binding here would pick the port before the
 /// interface is known.
 ///
-/// fd ownership identical to the TCP opener: native-created, native-owned
-/// until handed to `connector_ice_socket_feed`, then provider-owned (dup-only,
-/// never closed by the consumer).
+/// fd ownership is identical to the TCP opener: shell closes the original
+/// after `connector_ice_socket_feed` duplicates it or on feed failure.
 pub fn udp_socket_open() -> String {
     let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0) };
     if fd < 0 {
@@ -491,16 +485,60 @@ mod tests {
 
     #[test]
     fn source_is_fifo_and_counts_take() {
-        let src = ProtectedSocketFdSource::new_with_fd(21);
-        src.feed(22);
-        src.feed(23);
+        let raw: Vec<i32> = (0..3).map(|_| unsafe {
+            sys::socket(sys::AF_INET, sys::SOCK_STREAM | sys::SOCK_CLOEXEC, 0)
+        }).collect();
+        assert!(raw.iter().all(|fd| *fd >= 0));
+        let src = ProtectedSocketFdSource::new_with_fd(raw[0]);
+        src.feed(raw[1]).unwrap();
+        src.feed(raw[2]).unwrap();
         assert_eq!(src.pending(), 3);
-        assert_eq!(src.take_fd().unwrap(), 21);
-        assert_eq!(src.take_fd().unwrap(), 22);
-        assert_eq!(src.take_fd().unwrap(), 23);
+        for fd in raw {
+            unsafe { sys::close(fd) };
+        }
+        for _ in 0..3 {
+            let owned = src.take_fd().unwrap();
+            assert!(unsafe { sys::fcntl(owned, sys::F_GETFD) } >= 0);
+            unsafe { sys::close(owned) };
+        }
         assert_eq!(src.take_fd().unwrap_err(), SocketSeamError::NoSocket);
         assert_eq!(src.taken(), 3, "one take per handed-out socket");
         assert_eq!(src.pending(), 0);
+    }
+
+    #[test]
+    fn management_and_signal_feeds_keep_original_socket_when_number_is_reused() {
+        unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; fn listen(fd: i32, backlog: i32) -> i32; }
+        for _purpose in ["management", "signal"] {
+            let original = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
+            assert!(original >= 0);
+            let source = ProtectedSocketFdSource::new_with_fd(-1);
+            source.feed(original).unwrap();
+            unsafe { sys::close(original) };
+            let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(replacement >= 0);
+            if replacement != original {
+                assert_eq!(unsafe { dup2(replacement, original) }, original);
+            }
+            let fed = source.take_fd().unwrap();
+            assert_ne!(fed, original);
+            assert_eq!(unsafe { listen(fed, 1) }, 0, "queued TCP must not become replacement UDP");
+            unsafe { sys::close(fed); sys::close(original); }
+            if replacement != original { unsafe { sys::close(replacement) }; }
+        }
+    }
+
+    #[test]
+    fn clear_pending_discards_management_and_signal_copies() {
+        let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let source = ProtectedSocketFdSource::new_with_fd(-1);
+        source.feed(fd).unwrap();
+        unsafe { sys::close(fd) };
+        assert_eq!(source.pending(), 1);
+        source.clear_pending();
+        assert_eq!(source.pending(), 0);
+        assert_eq!(source.take_fd().unwrap_err(), SocketSeamError::NoSocket);
     }
 
     #[test]
