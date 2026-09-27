@@ -41,7 +41,8 @@ try {
   const gate = {
     networkDirty: true, networkRecoveryReady: false, networkRecoveryActive: false,
     isDns: false, destroyRequested: false, destroyInFlight: false,
-    recreateInFlight: false, hasConnection: true, protectDeviation: false
+    recreateInFlight: false, hasConnection: true, connectionUnchanged: true,
+    protectDeviation: false
   };
   check('startup physical switch permits protected management resupply',
     policy.socketSupplyRejectionReason(gate) === '');
@@ -60,6 +61,29 @@ try {
     policy.socketSupplyRejectionReason({ ...gate, destroyRequested: true }) === 'destroy');
   check('protect deviation never supplies a socket',
     policy.socketSupplyRejectionReason({ ...gate, protectDeviation: true }) === 'deviation');
+  const firstConnection = {};
+  const nextConnection = {};
+  const supplyFor = (current: object | undefined, selected: object,
+    recreateInFlight: boolean = false, destroyRequested: boolean = false): string =>
+    policy.socketSupplyRejectionReason({ ...gate, networkDirty: false,
+      hasConnection: current !== undefined, connectionUnchanged: current === selected,
+      recreateInFlight, destroyRequested });
+  check('first connection accepts supply', supplyFor(firstConnection, firstConnection) === '');
+  check('recreate in progress rejects supply',
+    supplyFor(firstConnection, firstConnection, true) === 'recreate');
+  check('recreate complete accepts supply on new connection',
+    supplyFor(nextConnection, nextConnection) === '');
+  check('destroy rejects supply', supplyFor(nextConnection, nextConnection, false, true) === 'destroy');
+  check('replacement during async protect rejects delivery',
+    supplyFor(nextConnection, firstConnection) === 'connection-changed');
+  check('ICE top-up uses the same lifecycle gate',
+    policy.protectedConnectionRejectionReason({ ...gate, hasConnection: true,
+      connectionUnchanged: false }) === 'connection-changed');
+  check('socket supply timer does not capture a connection',
+    ability.includes('this.startSocketSupply();') &&
+    ability.includes('this.fulfillSocketRequest(request)') &&
+    ability.includes('this.startIceSocketTopUp();') &&
+    ability.includes('this.topUpIceBatch()'));
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
