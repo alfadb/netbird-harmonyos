@@ -183,12 +183,98 @@ fn start_client(
 ) -> RelayClient {
     let cfg = RelayClientConfig::new(urls, &format!("e2e-relay-client-{seed}-wgkey"), tok)
         .expect("e2e urls parse")
+        .with_dialer(std::sync::Arc::new(netbird_core::relay_client::TcpDialer))
         .with_clock(std::sync::Arc::new(clock.clone()));
     RelayClient::start(cfg).expect("client starts")
 }
 
 fn loopback_url(port: u16) -> String {
     format!("rel://127.0.0.1:{port}")
+}
+
+async fn next_relay_request(supply: &netbird_core::socket_supply::SocketSupply) -> u64 {
+    timeout(FUSE, async {
+        loop {
+            if let Some((id, purpose)) = supply.poll_request() {
+                assert_eq!(purpose, netbird_core::socket_supply::Purpose::Relay);
+                return id;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("relay supply request")
+}
+
+fn open_relay_fd() -> i32 {
+    let opened = netbird_core::mgmtsock::mgmt_socket_open();
+    let fd = opened.split("\"fd\":").nth(1).expect("fd key")
+        .split(',').next().expect("fd number").parse::<i32>().expect("numeric fd");
+    assert!(fd >= 0, "socket opened: {opened}");
+    fd
+}
+
+fn supply_relay_fd(supply: &netbird_core::socket_supply::SocketSupply, id: u64) {
+    let fd = open_relay_fd();
+    assert!(supply.reply(id, fd, "protected").contains("\"ok\":true"));
+    assert!(netbird_core::socket_supply::close_fd_json(fd).contains("\"ok\":true"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protected_relay_handshake_data_and_reconnect_take_fresh_fds() {
+    use netbird_core::relay_client::ProtectedRelayDialer;
+    use netbird_core::socket_supply::SocketSupply;
+    let server = start_default().await;
+    let supply = std::sync::Arc::new(SocketSupply::new());
+    let clock = VirtualClock::new(EPOCH);
+    let cfg = RelayClientConfig::new(&[loopback_url(server.addr().port())],
+        "protected-relay-test-key", valid_token()).unwrap()
+        .with_clock(std::sync::Arc::new(clock.clone()))
+        .with_dialer(std::sync::Arc::new(ProtectedRelayDialer::new(Some(supply.clone()))));
+    let client = RelayClient::start(cfg).unwrap();
+    let first = next_relay_request(&supply).await;
+    supply_relay_fd(&supply, first);
+    wait_for(FUSE, || client.state() == RelayState::Ready, "protected relay ready").await;
+    assert_eq!(server.stats().connections_accepted, 1);
+    assert_eq!(client.stats().frames_rx[MSG_AUTH_RESPONSE as usize], 1);
+
+    // A real protocol frame traverses the protected TCP socket.
+    let peer = remote_peer(7);
+    client.send_to_peer(&peer, b"protected-relay-payload").expect("send accepted");
+    wait_for(FUSE, || server.stats().frames_rx(MSG_TRANSPORT) == 1,
+        "protected relay Transport frame").await;
+
+    // 35 seconds without inbound frames ends the first session. Fast
+    // reconnect must request a distinct protected descriptor and ID.
+    clock.advance(Duration::from_secs(35));
+    let second = next_relay_request(&supply).await;
+    assert_ne!(first, second);
+    assert_eq!(server.stats().connections_accepted, 1, "no connect before protect reply");
+    supply_relay_fd(&supply, second);
+    wait_for(FUSE, || client.state() == RelayState::Ready &&
+        server.stats().connections_accepted == 2, "protected relay reconnected").await;
+    assert_eq!(client.stats().auth_successes, 2);
+    client.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protected_relay_rejection_and_timeout_never_connect() {
+    use netbird_core::relay_client::{ProtectedRelayDialer, RelayDialer, RelayUrl};
+    use netbird_core::socket_supply::SocketSupply;
+    let server = start_default().await;
+    let url = RelayUrl::parse(&loopback_url(server.addr().port())).unwrap();
+    let supply = std::sync::Arc::new(SocketSupply::new());
+    let dialer = ProtectedRelayDialer::new(Some(supply.clone()));
+    let rejected = tokio::spawn(dialer.dial(&url));
+    let first = next_relay_request(&supply).await;
+    assert!(supply.reply(first, -1, "rejected").contains("\"ok\":false"));
+    assert!(rejected.await.unwrap().is_err());
+    assert_eq!(server.stats().connections_accepted, 0);
+
+    let unanswered = tokio::spawn(dialer.dial(&url));
+    let second = next_relay_request(&supply).await;
+    assert_ne!(first, second);
+    assert!(unanswered.await.unwrap().is_err(), "8s unanswered supply must fail");
+    assert_eq!(server.stats().connections_accepted, 0, "no bare fallback connect");
+    assert!(supply.reply(second, -1, "protected").contains("request-expired"));
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +767,7 @@ async fn rels_url_fails_closed_without_tls_and_uses_the_connector_when_given() {
     let cfg = RelayClientConfig::new(&[rels_url.clone()], "e2e-relay-client-tls-wgkey", valid_token())
         .unwrap()
         .with_clock(std::sync::Arc::new(clock.clone()))
+        .with_dialer(std::sync::Arc::new(netbird_core::relay_client::TcpDialer))
         .with_tls(tls.clone());
     let client = RelayClient::start(cfg).unwrap();
     wait_for(FUSE, || client.state() == RelayState::Ready, "ready through the TLS seam").await;

@@ -2638,7 +2638,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       if (request.kind !== 'tcp' || (request.purpose !== 'management' &&
-        request.purpose !== 'signal')) {
+        request.purpose !== 'signal' && request.purpose !== 'relay')) {
         return;
       }
       const opened: NativeTcpSocketOpen = mgmtSocketOpen();

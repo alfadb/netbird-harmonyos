@@ -991,8 +991,8 @@ pub struct RelayMaterials {
     /// Time source for token expiry and every relay deadline (injected in
     /// tests; [`SystemClock`] in production).
     pub clock: Arc<dyn crate::relay_client::RelayClock>,
-    /// Transport seam ([`crate::relay_client::TcpDialer`] in production;
-    /// the D2 protected-socket seam replaces it on the device path).
+    /// Transport seam ([`crate::relay_client::ProtectedRelayDialer`] in
+    /// production; host tests may explicitly inject a bare TCP dialer).
     pub dialer: Arc<dyn crate::relay_client::RelayDialer>,
     /// TLS connector for `rels://`. `None` = `rels://` is refused typed
     /// (`TlsRequired`) BEFORE any wire byte — never plaintext-downgraded.
@@ -1000,13 +1000,14 @@ pub struct RelayMaterials {
 }
 
 impl RelayMaterials {
-    /// Production materials derived from the SAME parsed connector config
-    /// the management/signal paths use: system clock, plain TCP dialer and
+    /// Production materials: system clock, per-dial protected TCP socket and
     /// — when the management transport carries an injected CA (`ca_pem`) —
-    /// a rustls connector trusting exactly those roots. With a plaintext
-    /// management transport there is no root material, so `tls` stays
-    /// `None` and `rels://` relay URLs fail closed.
-    pub fn from_connector_transport(transport: &GrpcTransport) -> Self {
+    /// a rustls connector trusting exactly those roots. Without a socket
+    /// supply, the relay dialer refuses to connect.
+    pub fn from_connector_transport(
+        transport: &GrpcTransport,
+        supply: Option<Arc<crate::socket_supply::SocketSupply>>,
+    ) -> Self {
         let tls = match transport {
             GrpcTransport::Tls(tls_cfg) => {
                 // A root set the TLS connector cannot use (empty/unparseable
@@ -1026,7 +1027,7 @@ impl RelayMaterials {
         };
         RelayMaterials {
             clock: Arc::new(crate::relay_client::SystemClock),
-            dialer: Arc::new(crate::relay_client::TcpDialer),
+            dialer: Arc::new(crate::relay_client::ProtectedRelayDialer::new(supply)),
             tls,
         }
     }
@@ -3688,8 +3689,11 @@ impl ConnectorHandle {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let mut signal_sockets: Option<Arc<ProtectedSocketFdSource>> = None;
         let socket_supply = socket_source.as_ref().map(|source| {
-            let supply = Arc::new(crate::socket_supply::SocketSupply::new());
-            source.attach_supply(supply.clone(), crate::socket_supply::Purpose::Management);
+            let supply = source.socket_supply().unwrap_or_else(|| {
+                let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+                source.attach_supply(supply.clone(), crate::socket_supply::Purpose::Management);
+                supply
+            });
             crate::socket_supply::install(supply.clone());
             supply
         });
@@ -4326,11 +4330,12 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         Some(wg_feed.clone()), // N7: device-backed WG seam + data-plane pump
         HostIceTuning::from_config(&config), // N12a HOST-ONLY tuning
         // N13-D1: relay opt-in (DEFAULT FALSE — see ConnectorConfig).
-        // The relay TLS root is the SAME injected ca_pem as management.
+        // No socket broker in this explicit unprotected-management path:
+        // relay itself still fails closed.
         config.relay_enabled,
         config.relay_enabled.then(|| RelayAttach {
             wg_pubkey_b64: config.keys.public_key_base64(),
-            materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport)),
+            materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport, None)),
         }),
     );
     let state = handle.status().state;
@@ -4422,6 +4427,8 @@ pub fn connector_start_with_socket_json(
         }
     };
     let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
+    let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+    source.attach_supply(supply.clone(), crate::socket_supply::Purpose::Management);
     // N7: the PRODUCTION WG seam — the shell-fed device slot (same as
     // connector_start; the feeds arrive later, after create()+protect)
     let wg_feed = Arc::new(crate::wg_device::WgDeviceFeed::new(
@@ -4462,7 +4469,9 @@ pub fn connector_start_with_socket_json(
         config.relay_enabled,
         config.relay_enabled.then(|| RelayAttach {
             wg_pubkey_b64: config.keys.public_key_base64(),
-            materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport)),
+            materials: Arc::new(RelayMaterials::from_connector_transport(
+                &config.transport, Some(supply),
+            )),
         }),
     );
     let state = handle.status().state;
@@ -6459,9 +6468,9 @@ mod tests {
         // tests/relay_connector_e2e.rs TLS round-trip.
         let ca = vec![b"-----BEGIN CERTIFICATE-----\nMII garbage\n-----END CERTIFICATE-----".to_vec()];
         let tls_transport = GrpcTransport::Tls(crate::grpc::GrpcTlsConfig::new(ca.clone()));
-        let mats = RelayMaterials::from_connector_transport(&tls_transport);
+        let mats = RelayMaterials::from_connector_transport(&tls_transport, None);
         assert!(mats.tls.is_none(), "unparseable roots fail closed (no TLS connector)");
-        let plain = RelayMaterials::from_connector_transport(&GrpcTransport::Plaintext);
+        let plain = RelayMaterials::from_connector_transport(&GrpcTransport::Plaintext, None);
         assert!(plain.tls.is_none(), "no root material → no TLS connector (fail-closed)");
 
         // and an EMPTY root set is refused at the connector itself
@@ -7101,7 +7110,8 @@ mod tests {
                 token,
             )
             .expect("relay config")
-            .with_clock(clock.clone()),
+            .with_clock(clock.clone())
+            .with_dialer(Arc::new(crate::relay_client::TcpDialer)),
         )
         .expect("relay client starts");
         assert!(
@@ -7430,7 +7440,8 @@ mod tests {
                 token,
             )
             .expect("relay config")
-            .with_clock(clock.clone()),
+            .with_clock(clock.clone())
+            .with_dialer(Arc::new(crate::relay_client::TcpDialer)),
         )
         .expect("relay client starts");
         assert!(
@@ -7610,7 +7621,8 @@ mod tests {
                 relay_fabricated_token(1_800_003_600),
             )
             .expect("relay config 2")
-            .with_clock(clock2),
+            .with_clock(clock2)
+            .with_dialer(Arc::new(crate::relay_client::TcpDialer)),
         )
         .expect("second relay client starts");
 

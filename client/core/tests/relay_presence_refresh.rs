@@ -236,6 +236,7 @@ fn start_client(server: &RelayTestServer, clock: &VirtualClock) -> RelayClient {
         token_valid(),
     )
     .expect("relay config parses")
+    .with_dialer(Arc::new(netbird_core::relay_client::TcpDialer))
     .with_clock(Arc::new(clock.clone()));
     RelayClient::start(cfg).expect("relay client starts")
 }

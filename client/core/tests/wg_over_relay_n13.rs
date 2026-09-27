@@ -416,7 +416,8 @@ fn start_relay_client(server: &RelayTestServer, local_pub_b64: &str) -> RelayCli
         local_pub_b64,
         token_valid_now(),
     )
-    .expect("relay config");
+    .expect("relay config")
+    .with_dialer(Arc::new(netbird_core::relay_client::TcpDialer));
     RelayClient::start(cfg).expect("relay client starts")
 }
 

@@ -94,12 +94,11 @@
 //!    id, §4.2 receive-side semantics);
 //! 4. `client.state()` / `client.stats()` for the connector snapshot;
 //!    `client.update_token(...)` from every new Sync `RelayServers`.
-//! TODO(increment D): device-path dialing must go through a
-//! protected-socket seam (`VpnConnection.protect` fd feed, the N3-7
-//! `mgmtsock` pattern) instead of the plain [`TcpDialer`], and the real
-//! [`RelayTlsConnector`] (rustls + management-injected CA) is provided
-//! there too. Presence/subscription state does NOT survive a reconnect —
-//! D must re-`open_conn` after observing `state() == Ready` again.
+//! TODO(increment D): real [`RelayTlsConnector`] (rustls + management-injected
+//! CA) is provided by the connector. Presence/subscription state does NOT
+//! survive a reconnect — D must re-`open_conn` after observing Ready again.
+//! Relay TCP now uses a per-dial shell-protected fd. Relay host resolution
+//! still uses the platform resolver; protected-socket DNS is a later task.
 //!
 //! ## Increment-D2: the WG bearer (shipped — `RelayWgCarrier`)
 //!
@@ -132,6 +131,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{ready, Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_env = "ohos"))]
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -795,8 +795,8 @@ pub type BoxStream = Box<dyn RelayStream>;
 /// Dial seam: open the raw transport stream for one parsed URL (TCP today;
 /// TLS wrapping for `rels://` is applied by the caller-supplied
 /// [`RelayTlsConnector`]). The returned future must own its inputs
-/// (`'static`). Production: [`TcpDialer`]; tests: scripted/in-memory
-/// dialers.
+/// (`'static`). Production: [`ProtectedRelayDialer`]; host tests may inject
+/// scripted/in-memory dialers or [`TcpDialer`].
 pub trait RelayDialer: Send + Sync + 'static {
     fn dial(
         &self,
@@ -804,13 +804,51 @@ pub trait RelayDialer: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<BoxStream, RelayClientError>> + Send>>;
 }
 
-/// Production TCP dialer (plain `TcpStream::connect`).
-///
-/// Used by the connector when `relay_enabled`; its TCP socket is currently
-/// unprotected (known N2 gap). Replace this dial with a shell-protected fd.
+/// Production dialer. Every attempt requests a fresh TCP fd with
+/// `purpose=relay`; a missing, rejected or timed-out supply fails closed.
+#[derive(Clone, Default)]
+pub struct ProtectedRelayDialer {
+    supply: Option<Arc<crate::socket_supply::SocketSupply>>,
+}
+
+impl ProtectedRelayDialer {
+    pub fn new(supply: Option<Arc<crate::socket_supply::SocketSupply>>) -> Self {
+        Self { supply }
+    }
+}
+
+impl RelayDialer for ProtectedRelayDialer {
+    fn dial(
+        &self,
+        url: &RelayUrl,
+    ) -> Pin<Box<dyn Future<Output = Result<BoxStream, RelayClientError>> + Send>> {
+        let supply = self.supply.clone();
+        let host = url.host.clone();
+        let port = url.port;
+        Box::pin(async move {
+            let supply = supply.ok_or_else(|| RelayClientError::Dial(io::Error::other("no-protected-socket")))?;
+            // Keep the existing platform DNS resolution for relay hostnames.
+            // DNS over a protected socket is a separate, follow-up task.
+            let mut addrs = tokio::net::lookup_host((host.as_str(), port))
+                .await.map_err(RelayClientError::Dial)?;
+            let addr = addrs.next().ok_or_else(|| RelayClientError::Dial(io::Error::other("relay-address-empty")))?;
+            let source = crate::mgmtsock::ProtectedSocketFdSource::new_with_fd(-1);
+            source.attach_supply(supply, crate::socket_supply::Purpose::Relay);
+            crate::mgmtsock::connect_protected(&source, addr)
+                .await
+                .map(|stream| Box::new(stream) as BoxStream)
+                .map_err(|err| RelayClientError::Dial(io::Error::other(err)))
+        })
+    }
+}
+
+/// Bare TCP dialer for explicit host-test injection only. Never injected by
+/// the production connector or by `RelayClientConfig::new`.
+#[cfg(not(target_env = "ohos"))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TcpDialer;
 
+#[cfg(not(target_env = "ohos"))]
 impl RelayDialer for TcpDialer {
     fn dial(
         &self,
@@ -1298,8 +1336,8 @@ impl Shared {
 }
 
 /// Configuration for [`RelayClient::start`]. Defaults: [`SystemClock`] +
-/// [`TcpDialer`], no TLS connector — so `rels://` fails closed until one is
-/// injected (see [`RelayTlsConnector`]).
+/// [`ProtectedRelayDialer`] without a broker (fail closed until injected), no
+/// TLS connector — so `rels://` fails closed until one is injected.
 pub struct RelayClientConfig {
     pub urls: Vec<RelayUrl>,
     /// Local peer id, derived from OUR WireGuard public key (§3.2).
@@ -1328,7 +1366,7 @@ impl RelayClientConfig {
             peer_id: PeerId::from_wg_pubkey_string(wg_pubkey_b64),
             token,
             clock: Arc::new(SystemClock),
-            dialer: Arc::new(TcpDialer),
+            dialer: Arc::new(ProtectedRelayDialer::default()),
             tls: None,
         })
     }

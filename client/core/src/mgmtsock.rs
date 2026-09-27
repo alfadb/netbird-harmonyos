@@ -168,6 +168,10 @@ impl ProtectedSocketFdSource {
         let _ = self.supply.set((supply, purpose));
     }
 
+    pub fn socket_supply(&self) -> Option<Arc<crate::socket_supply::SocketSupply>> {
+        self.supply.get().map(|(supply, _)| supply.clone())
+    }
+
     /// Shell-side resupply: push another fresh protected socket fd.
     pub fn feed(&self, fd: i32) {
         if fd >= 0 {
