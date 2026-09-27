@@ -362,6 +362,7 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  connector_start_with_socket: () =>\n' +
   '    JSON.stringify({ started: true, state: "running" }),\n' +
   '  connector_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
+  '  connector_signal_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
   '  connector_stop: () => JSON.stringify({ already_stopped: true, state: "stopped" }),\n' +
   '  socket_supply_shutdown: () => JSON.stringify({ ok: true }),\n' +
   '  socket_supply_close_fd: () => JSON.stringify({ ok: true }),\n' +

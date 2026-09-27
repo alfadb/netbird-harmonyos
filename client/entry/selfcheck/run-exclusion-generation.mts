@@ -1112,8 +1112,8 @@ try {
   check('C2 a present ticket produces NO skip line',
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 0, JSON.stringify(logs()));
 
-  // C3: default no arm — a launch WITHOUT the parameter deletes a leftover
-  // ticket; credential/config/deviation files stay byte-identical.
+  // C3: a launch without diagnostic parameters deletes both stale diagnostic
+  // files; credentials and device config remain byte-identical.
   const SETUP_PATH = `${FIXTURE_FILESDIR}/netbird-setup-key`;
   const DEVCFG_PATH = `${FIXTURE_FILESDIR}/netbird-device-config.json`;
   const DEVIATION_PATH = `${FIXTURE_FILESDIR}/netbird-protect-deviation`;
@@ -1130,10 +1130,11 @@ try {
     linesWith('N2H_ARM_TICKET_REMOVED|').length === 1 &&
     lastLine('N2H_ARM_TICKET_REMOVED|') === 'N2H_ARM_TICKET_REMOVED|file=' + ARM_TICKET_NAME +
     '|note=default-no-arm', JSON.stringify(logs()));
-  check('C3 the credential/config/deviation files are NOT touched by the cleanup',
+  check('C3 a parameter-less launch clears stale deviation, preserving credentials/config',
     fileOf(SETUP_PATH) === 'setup-key-body-untouched' &&
     fileOf(DEVCFG_PATH) === '{"management_url":"http://m","private_key":"pk-body"}' &&
-    fileOf(DEVIATION_PATH) === 'route-exclusion', 'private files pin');
+    fileOf(DEVIATION_PATH) === undefined &&
+    linesWith('PROTECT_DEVIATION_REMOVED|').length === 1, JSON.stringify(logs()));
   const cleanAbility = freshAbility(mod, FIXTURE_FILESDIR);
   G['__NB_ARM_OPTS'] = undefined;
   resetLog();
@@ -1152,9 +1153,18 @@ try {
       parameters: { 'netbird_setup_key': 'K2', 'netbird_config': '{"a":1}' } }, {});
   check('C3 a credential launch without the arm param also clears the ticket, credentials intact',
     fileOf(ARM_TICKET_PATH) === undefined && fileOf(SETUP_PATH) === 'K2\n' &&
-    fileOf(DEVCFG_PATH) === '{"a":1}' && fileOf(DEVIATION_PATH) === 'route-exclusion',
+    fileOf(DEVCFG_PATH) === '{"a":1}' && fileOf(DEVIATION_PATH) === undefined,
     JSON.stringify({ setup: fileOf(SETUP_PATH), devcfg: fileOf(DEVCFG_PATH),
       arm: fileOf(ARM_TICKET_PATH) }));
+  const deviationEntry = newEntry();
+  resetLog();
+  (deviationEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { protectDeviation: 'route-exclusion' } }, {});
+  check('C3 explicit route-exclusion launch writes the opt-in deviation file',
+    fileOf(DEVIATION_PATH) === 'route-exclusion\n' &&
+    fileOf(ARM_TICKET_PATH) === undefined &&
+    fileOf(SETUP_PATH) === 'K2\n' && fileOf(DEVCFG_PATH) === '{"a":1}',
+    JSON.stringify({ deviation: fileOf(DEVIATION_PATH), arm: fileOf(ARM_TICKET_PATH) }));
 
   // C4: an invalid-JSON payload keeps the ORIGINAL convention — the file is
   // written verbatim, the extension logs ARM_OPTS_IGNORED and falls back to
@@ -1204,8 +1214,8 @@ try {
   // previous round's ticket) and the WRITE then threw: the on-disk file is an
   // empty ticket the extension would parse into the §5.1 defaults and ARM.
   // The failure path must REMOVE exactly this one diagnostic ticket (logged
-  // independently), never touch the credentials, and the extension must then
-  // SKIP with no native arm call.
+  // independently), never touch the credentials; the separate deviation
+  // cleanup still runs because its opt-in parameter is absent.
   resetFs();
   seedFile(ARM_TICKET_PATH, '{"posctl_port":41000}'); // the previous ticket, now TRUNC-wiped
   seedFile(SETUP_PATH, 'setup-key-body-untouched');
@@ -1223,6 +1233,11 @@ try {
     ARM_TICKET_NAME + '|code=13900001|note=no-ticket-no-arm' &&
     lastLine('N2H_ARM_TICKET_REMOVED|') === 'N2H_ARM_TICKET_REMOVED|file=' + ARM_TICKET_NAME +
     '|note=failed-write-cleanup', JSON.stringify(logs()));
+  check('C5b credentials/config survive failed arm write; stale deviation is cleared',
+    fileOf(SETUP_PATH) === 'setup-key-body-untouched' &&
+    fileOf(DEVCFG_PATH) === '{"management_url":"http://m","private_key":"pk-body"}' &&
+    fileOf(DEVIATION_PATH) === undefined &&
+    linesWith('PROTECT_DEVIATION_REMOVED|').length === 1, JSON.stringify(logs()));
   const halfAbility = freshAbility(mod, FIXTURE_FILESDIR);
   G['__NB_ARM_OPTS'] = undefined;
   resetLog();
@@ -1231,11 +1246,6 @@ try {
     linesWith('N2H_COLLECTOR_ARM_SKIPPED|').length === 1 &&
     lastLine('N2H_COLLECTOR_ARM_SKIPPED|').indexOf('|reason=arm-file-absent|') > 0 &&
     G['__NB_ARM_OPTS'] === undefined, JSON.stringify(logs()));
-  check('C5b the credential/config/deviation files are byte-identical',
-    fileOf(SETUP_PATH) === 'setup-key-body-untouched' &&
-    fileOf(DEVCFG_PATH) === '{"management_url":"http://m","private_key":"pk-body"}' &&
-    fileOf(DEVIATION_PATH) === 'route-exclusion', 'private files pin');
-
   // C5c: if even the CLEANUP fails, the surviving (truncated) file is reported
   // as what it is — REMOVE_FAILED with its code — and never as removed.
   resetFs();
@@ -2621,14 +2631,16 @@ try {
     pb5Markers[0].indexOf('reason=not-found|code=none|') > 0,
     JSON.stringify(pb5Markers));
 
-  // PB6: source pins — the shell NEVER binds: the byte-identical extension
-  // source has no connection-module import at all (netId facts flow ONLY
-  // through the sibling getter-only module, whose own NC5 pins already hold),
-  // the resolution sits BEFORE the native arm call, the only opts write is
+  // PB6: source pins — the extension imports connection to observe physical
+  // network changes, but never binds sockets or samples netId facts directly:
+  // those still flow through the sibling getter-only module (NC5 pins).
+  // The resolution sits BEFORE the native arm call, the only opts write is
   // the found branch, and the marker prints codes only.
-  check('PB6 the extension source has no connection-module import (facts via the getter-only sibling)',
-    extSource.indexOf('@ohos.net.connection') < 0 &&
-    extSource.indexOf('resolveVpnTunNetId') > 0,
+  check('PB6 connection import is observer-only; netId facts stay in the getter sibling',
+    extSource.includes("import connection from '@ohos.net.connection';") &&
+    extSource.includes('connection.createNetConnection()') &&
+    extSource.includes('resolveVpnTunNetId') &&
+    !/connection\.(?:getDefaultNetSync|getAppNetSync|getAllNetsSync|getNetCapabilitiesSync|getConnectionPropertiesSync|bindSocket|bindAppNetwork)\s*\(/.test(extSource),
     'extension netId pin');
   const pbResolveAt = extSource.indexOf('resolveVpnTunNetId()');
   const pbArmAt = extSource.indexOf('core.n2h_collector_arm(optsJson)');
@@ -2699,8 +2711,7 @@ try {
 
   // The 0021-shaped initial map: tunnel address 100.108.144.165/16 (a REAL
   // device prefix — the S1 network of the register is 100.108.0.0/16), one
-  // managed /24, no default route released, no signal URI (so the signal leg
-  // is skipped exactly as before).
+  // managed /24, no default route released, and a protected signal endpoint.
   function initialNetcfg(routes: Array<Record<string, unknown>>): string {
     return JSON.stringify({
       available: true,
@@ -2710,7 +2721,7 @@ try {
       routes: routes,
       dns: { service_enable: true, servers: [{ ip: '9.9.9.9', port: 53 }] },
       default_route: { allowed: false, reason: 'data-plane-not-ready' },
-      signal: '',
+      signal: 'https://mgmt.test:443',
       stuns: []
     });
   }
@@ -2889,7 +2900,7 @@ try {
   const d1LegacyTunnel = legacyInitialTunnelConfig(d1, NETCFG_0021);
   const d1Tunnel = injectedOf(d1LegacyTunnel);
   check('D1 initial leg: the ticketless drive really submitted ONE VpnConfig',
-    d1Submitted.length === 1, JSON.stringify(d1Submitted.length));
+    d1Submitted.length === 1, JSON.stringify({ count: d1Submitted.length, logs: logs() }));
   check('D1 initial leg: field-by-field identical to the legacy composition PLUS the default ' +
     'tunnel-subnet route (exactly one row more)',
     deepEq(d1Submitted[0], platformOf(d1Tunnel['config'])) &&
@@ -2897,7 +2908,7 @@ try {
     ((d1LegacyTunnel['routes'] ?? []) as unknown[]).length + 1,
     JSON.stringify({ submitted: d1Submitted[0], expected: platformOf(d1Tunnel['config']) }));
   const d1Routes = (d1Submitted[0] ?? {})['routes'] as Array<Record<string, unknown>>;
-  const d1Subnet = d1Routes.filter((r: Record<string, unknown>): boolean =>
+  const d1Subnet = (d1Routes ?? []).filter((r: Record<string, unknown>): boolean =>
     ((r['destination'] as Record<string, unknown>)['address'] as Record<string, unknown>)['address'] ===
     '100.108.0.0');
   check('D1 initial leg: the default tunnel-subnet entry is exactly the managed shape ' +
@@ -3249,12 +3260,14 @@ try {
       .filter((l: string): boolean => l.indexOf('|result=timeout|') >= 0);
   }
   const d4b = freshAbility(mod, FIXTURE_FILESDIR);
+  const d4bConnection = new FakeConnection();
+  d4b['connection'] = d4bConnection;
   G['__NB_PROTECT_MODE'] = 'resolved';
   G['__NB_PROTECTED'] = 0;
   resetLog();
   const d4bResolvedAt = Date.now();
   const d4bOk = await (d4b['protectSocketWithBox'] as
-    (c: unknown, fd: number) => Promise<boolean>)(new FakeConnection(), 42);
+    (c: unknown, fd: number) => Promise<boolean>)(d4bConnection, 42);
   check('D4b protect resolved: the real platform call DID happen (counted once), the wrapper ' +
     'returns true with ONE SETTLED line and NO timeout line',
     d4bOk === true && G['__NB_PROTECTED'] === 1 &&
@@ -3264,7 +3277,7 @@ try {
       timeouts: linesWith(PROTECT_TIMEOUT) }));
   G['__NB_PROTECT_MODE'] = 'never';
   const d4bNeverOk = await (d4b['protectSocketWithBox'] as
-    (c: unknown, fd: number) => Promise<boolean>)(new FakeConnection(), 43);
+    (c: unknown, fd: number) => Promise<boolean>)(d4bConnection, 43);
   // Restore the mode BEFORE asserting: the D5/D6/D7 groups below drive the
   // REAL initial leg, whose fail-closed protect gate must not inherit the
   // wedge shape.
