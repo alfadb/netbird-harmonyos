@@ -56,7 +56,23 @@ interface BusinessFailure extends Error {
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'ENTRY_ONCREATE|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
+    this.removePreviousStatus();
     this.persistCredentialOverrides(want);
+  }
+
+  // A fresh UI process cannot infer liveness from a previous process's file:
+  // force-stop leaves its last connected snapshot behind. A live extension
+  // publishes again on its next tick.
+  private removePreviousStatus(): void {
+    const path: string = `${this.context.filesDir}/netbird-status.json`;
+    try {
+      if (fs.accessSync(path)) {
+        fs.unlinkSync(path);
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'ENTRY_STATUS_REMOVE_FAILED|code=%{public}s',
+        String((error as BusinessFailure).code ?? 'none'));
+    }
   }
 
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {

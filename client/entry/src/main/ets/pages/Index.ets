@@ -2,6 +2,7 @@ import Want from '@ohos.app.ability.Want';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import { PublishedStatus, readPublishedStatus } from '../vpnextensionability/NetBirdConnector';
+import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -38,6 +39,7 @@ struct Index {
   @State wgReady: boolean = false;
   @State wgSessions: number = 0;
   private requestId: string = `ui-${Date.now()}`;
+  private observedPublishedStatus: boolean = false;
   private pollTimer: number = -1;
 
   aboutToAppear(): void {
@@ -58,10 +60,37 @@ struct Index {
     // The connector runs in the VpnExtension process: read the document that
     // process publishes into the shared filesDir (a NAPI call here would read
     // an empty slot and show a dead "disconnected" state).
-    const status: PublishedStatus | null = readPublishedStatus(getContext(this).filesDir);
+    const status: PublishedStatus | null = currentPublishedStatus(
+      readPublishedStatus(getContext(this).filesDir), Date.now());
     if (status === null) {
       this.connectorState = 'unavailable';
+      this.peerCount = 0;
+      this.routeCount = 0;
+      this.lastErrorClass = 'none';
+      this.signalRegistered = false;
+      this.signalReconnects = 0;
+      this.wgReady = false;
+      this.wgSessions = 0;
+      if (this.observedPublishedStatus) {
+        this.requestSent = false;
+        this.stopSent = false;
+        this.statusText = 'READY';
+        this.detailText = 'VPN not running';
+        this.requestId = `ui-${Date.now()}`;
+        this.observedPublishedStatus = false;
+      }
       return;
+    }
+    this.observedPublishedStatus = true;
+    if (status.state === 'stopped') {
+      this.requestSent = false;
+      this.stopSent = false;
+      this.requestId = `ui-${Date.now()}`;
+    } else {
+      this.requestSent = true;
+      if (status.request_id !== undefined && status.request_id.length > 0) {
+        this.requestId = status.request_id;
+      }
     }
     this.connectorState = status.state;
     this.peerCount = status.peer_count;

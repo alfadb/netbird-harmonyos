@@ -3426,6 +3426,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         status.wg !== undefined && status.wg !== null ? status.wg.peers_with_session : 0;
       const doc: Record<string, Object> = {
         'updated_at_ms': Date.now(),
+        'request_id': this.requestId,
         'state': status.state,
         'peer_count': status.peer_count,
         'route_count': status.route_count,
@@ -3731,7 +3732,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return 'FD_NOT_OPEN_AFTER_DESTROY';
   }
 
+  private removeStatusForUi(): void {
+    const path: string = `${this.context.filesDir}/netbird-status.json`;
+    try {
+      if (fs.accessSync(path)) {
+        fs.unlinkSync(path);
+      }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_STATUS_REMOVE_FAIL|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    }
+  }
+
   private destroyOnce(trigger: string): Promise<void> {
+    this.removeStatusForUi();
     this.networkRecoveryReady = false;
     if (this.networkObserver !== undefined) {
       try {

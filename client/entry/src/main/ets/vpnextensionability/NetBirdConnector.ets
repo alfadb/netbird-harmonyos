@@ -588,7 +588,9 @@ export function connectorRouteSetApplied(routes: string[], isRecreate: boolean):
 // the UI process reads an empty slot and shows "disconnected / wg sessions: 0"
 // while the tunnel is live. The extension publishes these fields into the
 // shared filesDir instead; the UI reads that document.
-export interface PublishedStatus {  updated_at_ms: number;
+export interface PublishedStatus {
+  updated_at_ms: number;
+  request_id?: string;
   state: string;
   peer_count: number;
   route_count: number;
@@ -601,7 +603,7 @@ export interface PublishedStatus {  updated_at_ms: number;
 
 // Read the published status. A missing, unreadable, malformed or STALE
 // document returns null so the caller can render "unavailable" rather than
-// passing off默 zeroes as live state.
+// passing off stale values as live state.
 export function readPublishedStatus(filesDir: string): PublishedStatus | null {
   const path: string = `${filesDir}/netbird-status.json`;
   try {
