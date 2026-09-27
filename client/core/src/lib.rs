@@ -158,6 +158,7 @@ pub mod n2h_collector;
 // consumption + tonic connector service) — fail-closed gap 1 fix.
 pub mod mgmtsock;
 pub mod socket_supply;
+pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;
 pub mod napi;

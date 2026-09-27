@@ -114,6 +114,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("socket_supply_reply", napi_socket_supply_reply);
     reg!("socket_supply_close_fd", napi_socket_supply_close_fd);
     reg!("socket_supply_shutdown", napi_socket_supply_shutdown);
+    reg!("socket_supply_dns_servers", napi_socket_supply_dns_servers);
     reg!("connector_wg_socket_feed", napi_connector_wg_socket_feed);
     reg!("connector_tun_fd_feed", napi_connector_tun_fd_feed);
     reg!("connector_route_set_applied", napi_connector_route_set_applied);
@@ -561,6 +562,11 @@ unsafe extern "C" fn napi_socket_supply_close_fd(env: NapiEnv, info: NapiCallbac
 unsafe extern "C" fn napi_socket_supply_shutdown(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     crate::socket_supply::shutdown();
     ret_json(env, "{\"ok\":true}".into())
+}
+
+unsafe extern "C" fn napi_socket_supply_dns_servers(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::socket_supply::set_dns_servers_json(&a.string_at(0)))
 }
 
 // N7: shell-side feed of the PROTECTED WG outer UDP socket (wg_fwd_open +

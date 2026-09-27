@@ -827,11 +827,9 @@ impl RelayDialer for ProtectedRelayDialer {
         let port = url.port;
         Box::pin(async move {
             let supply = supply.ok_or_else(|| RelayClientError::Dial(io::Error::other("no-protected-socket")))?;
-            // Keep the existing platform DNS resolution for relay hostnames.
-            // DNS over a protected socket is a separate, follow-up task.
-            let mut addrs = tokio::net::lookup_host((host.as_str(), port))
+            let ip = crate::protected_dns::resolve(&host, &supply)
                 .await.map_err(RelayClientError::Dial)?;
-            let addr = addrs.next().ok_or_else(|| RelayClientError::Dial(io::Error::other("relay-address-empty")))?;
+            let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip, port));
             let source = crate::mgmtsock::ProtectedSocketFdSource::new_with_fd(-1);
             source.attach_supply(supply, crate::socket_supply::Purpose::Relay);
             crate::mgmtsock::connect_protected(&source, addr)

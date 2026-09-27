@@ -30,7 +30,9 @@ import {
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
-  socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown, SocketSupplyRequest,
+  socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
+  socketSupplyDnsServers, physicalDefaultDnsServers, forgetPhysicalDefaultDns,
+  SocketSupplyRequest,
   countPemCertificates, derivePlatformDnsEndpoints,
   formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
@@ -852,7 +854,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const creds: Record<string, Object> = { 'setup_key': setupKey };
     const start: ConnectorStartResult =
       connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
-        JSON.stringify(creds), connectAddr);
+        JSON.stringify(creds), connectAddr, physicalDefaultDnsServers());
     if (!start.started) {
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
@@ -2637,11 +2639,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.protectDeviationRouteExclusion) {
         return;
       }
-      if (request.kind !== 'tcp' || (request.purpose !== 'management' &&
-        request.purpose !== 'signal' && request.purpose !== 'relay')) {
+      const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
+      if (!isDns && (request.kind !== 'tcp' || (request.purpose !== 'management' &&
+        request.purpose !== 'signal' && request.purpose !== 'relay'))) {
         return;
       }
-      const opened: NativeTcpSocketOpen = mgmtSocketOpen();
+      if (isDns) {
+        const servers: string[] = physicalDefaultDnsServers();
+        const updated: SocketFeedResult = socketSupplyDnsServers(servers);
+        if (!updated.ok || servers.length === 0) {
+          return;
+        }
+      }
+      const opened: NativeTcpSocketOpen = isDns ? iceSocketOpen() : mgmtSocketOpen();
       fd = opened.fd;
       if (fd < 0 || opened.bind_rc !== 0) {
         return;
@@ -2679,6 +2689,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       this.socketSupplyTimer = -1;
     }
     socketSupplyShutdown();
+    forgetPhysicalDefaultDns();
   }
 
   // N3-7: seed ONE spare protected management socket into the core queue so

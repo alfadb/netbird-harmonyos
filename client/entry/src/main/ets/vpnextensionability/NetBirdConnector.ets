@@ -450,8 +450,8 @@ export function connectorStart(configJson: string, setupKeyJson: string): Connec
 // and ALREADY VpnConnection.protect'ed by the shell) plus the shell-resolved
 // management address. Fail-closed: any refusal keeps the VPN un-created.
 export function connectorStartWithSocket(fd: number, configJson: string,
-  setupKeyJson: string, connectAddr: string): ConnectorStartResult {
-  const addrJson: Record<string, Object> = { 'connect_addr': connectAddr };
+  setupKeyJson: string, connectAddr: string, dnsServers: string[] = []): ConnectorStartResult {
+  const addrJson: Record<string, Object> = { 'connect_addr': connectAddr, 'dns_servers': dnsServers };
   return JSON.parse(core.connector_start_with_socket(fd, configJson, setupKeyJson,
     JSON.stringify(addrJson))) as ConnectorStartResult;
 }
@@ -491,6 +491,10 @@ export function socketSupplyReply(id: string, fd: number, result: string): Socke
 
 export function socketSupplyCloseFd(fd: number): void {
   core.socket_supply_close_fd(fd);
+}
+
+export function socketSupplyDnsServers(servers: string[]): SocketFeedResult {
+  return JSON.parse(core.socket_supply_dns_servers(JSON.stringify(servers))) as SocketFeedResult;
 }
 
 export function socketSupplyShutdown(): void {
@@ -818,6 +822,69 @@ export async function resolveExclusionEndpointIp(host: string, timeoutMs: number
     return await Promise.race([resolution, box]);
   } finally {
     clearTimeout(boxTimer);
+  }
+}
+
+let physicalDefaultDnsNetId: number = 0;
+
+export function forgetPhysicalDefaultDns(): void {
+  physicalDefaultDnsNetId = 0;
+}
+
+export function physicalDefaultDnsServers(): string[] {
+  try {
+    let handle: connection.NetHandle = connection.getDefaultNetSync();
+    if (handle === undefined || handle === null || handle.netId === 0) {
+      return [];
+    }
+    let caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+    let probe: DnsNetProbe = emptyDnsNetProbe();
+    probe.handleId = handle.netId;
+    probe.networkCap = caps.networkCap ?? [];
+    probe.bearerTypes = caps.bearerTypes ?? [];
+    probe.capsOk = true;
+    if (!isPhysicalNetEvidence(probe)) {
+      if (physicalDefaultDnsNetId === 0) {
+        return [];
+      }
+      const handles: connection.NetHandle[] = connection.getAllNetsSync();
+      let found: boolean = false;
+      for (let i = 0; i < handles.length; i++) {
+        if (handles[i].netId === physicalDefaultDnsNetId) {
+          handle = handles[i];
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        return [];
+      }
+      caps = connection.getNetCapabilitiesSync(handle);
+      probe = emptyDnsNetProbe();
+      probe.handleId = handle.netId;
+      probe.networkCap = caps.networkCap ?? [];
+      probe.bearerTypes = caps.bearerTypes ?? [];
+      probe.capsOk = true;
+      if (!isPhysicalNetEvidence(probe)) {
+        return [];
+      }
+    } else {
+      physicalDefaultDnsNetId = handle.netId;
+    }
+    readDnsResolvers(handle, probe);
+    if (!probe.propertiesOk) {
+      return [];
+    }
+    const derived: DnsDerivationResult = deriveDnsEndpointExclusions({
+      defaultNet: probe, allNets: [], allNetsRead: false, apiError: ''
+    });
+    const servers: string[] = [];
+    for (let i = 0; i < derived.endpoints.length; i++) {
+      servers.push(derived.endpoints[i].host);
+    }
+    return servers;
+  } catch (error) {
+    return [];
   }
 }
 

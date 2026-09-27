@@ -3705,6 +3705,9 @@ impl ConnectorHandle {
             }
             None => {
                 let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+                if let Some(supply) = socket_supply.as_ref() {
+                    socks.attach_dns(supply.clone(), runtime.clone());
+                }
                 let seam: Arc<dyn crate::peer_conn::SignalExchange> =
                     match signal_material.as_ref() {
                         Some(mat) => {
@@ -4428,6 +4431,17 @@ pub fn connector_start_with_socket_json(
     };
     let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
     let supply = Arc::new(crate::socket_supply::SocketSupply::new());
+    if let Ok(crate::config::Json::Obj(fields)) = crate::config::parse_document(connect_addr_json) {
+        if let Some((_, servers)) = fields.iter().find(|(key, _)| key == "dns_servers") {
+            if let crate::config::Json::Arr(items) = servers {
+                let addresses: Vec<_> = items.iter().filter_map(|item| match item {
+                    crate::config::Json::Str(ip) => ip.parse::<std::net::Ipv4Addr>().ok(),
+                    _ => None,
+                }).collect();
+                supply.set_dns_servers(addresses);
+            }
+        }
+    }
     source.attach_supply(supply.clone(), crate::socket_supply::Purpose::Management);
     // N7: the PRODUCTION WG seam — the shell-fed device slot (same as
     // connector_start; the feeds arrive later, after create()+protect)

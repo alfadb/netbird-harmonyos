@@ -76,7 +76,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::management::ManagementError;
 use crate::mgmtsock::{dup_socket_fd, SocketSeamError};
@@ -620,6 +620,9 @@ pub fn interface_allowed(name: &str, blacklist: &[&str]) -> bool {
 /// protect before use, and there is no unprotected fallback).
 pub trait UdpSocketSource: Send + Sync {
     fn take_fd(&self) -> Result<i32, SocketSeamError>;
+    fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
+        resolve_ipv4(host)
+    }
 }
 
 /// Queue-backed production source — same shape, counters and audit surface
@@ -629,6 +632,7 @@ pub trait UdpSocketSource: Send + Sync {
 pub struct ProtectedUdpFdSource {
     queue: Mutex<VecDeque<i32>>,
     taken: AtomicU64,
+    dns: OnceLock<(Arc<crate::socket_supply::SocketSupply>, tokio::runtime::Handle)>,
 }
 
 impl ProtectedUdpFdSource {
@@ -637,7 +641,11 @@ impl ProtectedUdpFdSource {
         if fd >= 0 {
             q.push_back(fd);
         }
-        ProtectedUdpFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0) }
+        ProtectedUdpFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), dns: OnceLock::new() }
+    }
+
+    pub fn attach_dns(&self, supply: Arc<crate::socket_supply::SocketSupply>, runtime: tokio::runtime::Handle) {
+        let _ = self.dns.set((supply, runtime));
     }
 
     /// Shell-side resupply: push another fresh protected UDP socket fd.
@@ -660,6 +668,13 @@ impl ProtectedUdpFdSource {
 }
 
 impl UdpSocketSource for ProtectedUdpFdSource {
+    fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
+        let Some((supply, runtime)) = self.dns.get() else { return resolve_ipv4(host) };
+        runtime.block_on(crate::protected_dns::resolve(host, supply))
+            .map(|ip| ip.octets())
+            .map_err(|e| ManagementError::Network(e.to_string()))
+    }
+
     fn take_fd(&self) -> Result<i32, SocketSeamError> {
         let fd = self.queue.lock().expect("udp fd queue").pop_front();
         match fd {
@@ -752,7 +767,7 @@ pub fn gather_candidates(
     // is a recorded per-server error, not a gather failure.
     let mut resolved: Vec<([u8; 4], u16, &StunServer)> = Vec::new();
     for server in cfg.servers {
-        match resolve_ipv4(&server.host) {
+        match socks.resolve_ipv4(&server.host) {
             Ok(ip) => resolved.push((ip, server.port, server)),
             Err(e) => errors.push((format!("-/{}", server.host), e)),
         }

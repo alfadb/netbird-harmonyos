@@ -5,6 +5,7 @@
 //! transfers a dup into the dial; the shell always closes its original fd.
 
 use std::collections::{HashMap, VecDeque};
+use std::net::Ipv4Addr;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -61,6 +62,7 @@ struct State {
 #[derive(Default, Debug)]
 pub struct SocketSupply {
     state: Mutex<State>,
+    dns_servers: Mutex<Vec<Ipv4Addr>>,
 }
 
 struct RequestCleanup<'a> {
@@ -77,7 +79,19 @@ impl Drop for RequestCleanup<'_> {
 impl SocketSupply {
     pub fn new() -> Self { Self::default() }
 
+    pub fn set_dns_servers(&self, servers: Vec<Ipv4Addr>) {
+        *self.dns_servers.lock().expect("dns servers") = servers;
+    }
+
+    pub fn dns_servers(&self) -> Vec<Ipv4Addr> {
+        self.dns_servers.lock().expect("dns servers").clone()
+    }
+
     pub async fn request(&self, purpose: Purpose) -> Result<OwnedFd, SocketSeamError> {
+        self.request_with_id(purpose).await.map(|(_, fd)| fd)
+    }
+
+    pub async fn request_with_id(&self, purpose: Purpose) -> Result<(u64, OwnedFd), SocketSeamError> {
         let (sender, receiver) = oneshot::channel();
         let id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed) + 1;
         {
@@ -91,7 +105,7 @@ impl SocketSupply {
         let _cleanup = RequestCleanup { supply: self, id };
         hilog::emit(&format!("socket-supply: request id={id} purpose={} kind={}", purpose.name(), purpose.kind()));
         match tokio::time::timeout(WAIT, receiver).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => result.map(|fd| (id, fd)),
             Ok(Err(_)) => Err(SocketSeamError::Supply("socket-supply-closed")),
             Err(_) => {
                 self.state.lock().expect("socket supply").pending.remove(&id);
@@ -174,6 +188,20 @@ pub fn reply_json(id: &str, fd: i32, result: &str) -> String {
     slot().lock().expect("socket supply slot").as_ref()
         .map(|s| s.reply(id, fd, result))
         .unwrap_or_else(|| "{\"ok\":false,\"error\":\"socket-supply-closed\"}".into())
+}
+
+pub fn set_dns_servers_json(json: &str) -> String {
+    let Some(supply) = slot().lock().expect("socket supply slot").as_ref().cloned() else {
+        return "{\"ok\":false,\"error\":\"socket-supply-closed\"}".into();
+    };
+    match crate::protected_dns::parse_servers(json) {
+        Ok(servers) => {
+            let count = servers.len();
+            supply.set_dns_servers(servers);
+            format!("{{\"ok\":true,\"count\":{count}}}")
+        }
+        Err(_) => "{\"ok\":false,\"error\":\"invalid-dns-servers\"}".into(),
+    }
 }
 
 pub fn close_fd_json(fd: i32) -> String {
