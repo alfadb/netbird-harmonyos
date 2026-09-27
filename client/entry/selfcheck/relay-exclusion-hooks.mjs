@@ -158,6 +158,13 @@ const SHIMS = {
 };
 
 export function resolve(specifier, context, next) {
+  if (specifier === './NetBirdN2Evidence') {
+    return { url: 'data:text/javascript,' + encodeURIComponent(
+      'export const N2EvidenceOptions = undefined; export const N2EvidenceDecision = undefined; ' +
+      'export const parseN2Evidence = () => ({ options: undefined }); ' +
+      'export const withN2EvidenceRoutes = (config) => config; ' +
+      'export const withoutN2ExcludedRoutes = (config) => config;'), shortCircuit: true };
+  }
   if (Object.prototype.hasOwnProperty.call(STUBS, specifier)) {
     return { url: STUBS[specifier], shortCircuit: true };
   }

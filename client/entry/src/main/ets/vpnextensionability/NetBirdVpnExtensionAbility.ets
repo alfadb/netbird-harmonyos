@@ -9,6 +9,8 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
   CaptureRouteOutcome, TunnelSubnetRouteOutcome, withCaptureRoute,
   withTunnelSubnetRoute } from './NetBirdVpnConfig';
+import { N2EvidenceDecision, N2EvidenceOptions, parseN2Evidence, withN2EvidenceRoutes,
+  withoutN2ExcludedRoutes } from './NetBirdN2Evidence';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -378,6 +380,7 @@ interface N2hArmOptions {
   // means.
   posctl_probes?: number;
   protect_probe?: N2hProtectProbeTicket;
+  n2_capture_32?: string[];
 }
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
@@ -643,6 +646,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // else writes them, and with the switch off the config path never reads them.
   private diagCaptureRoute: boolean = false;
   private diagCaptureTarget: string = '';
+  private n2Evidence?: N2EvidenceOptions;
+  private n2EvidenceError: string = '';
+  private n2ForceDefaultRoute: boolean = false;
 
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
@@ -910,7 +916,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // pre-existing path stay untouched; these three keys never leave this
     // process. A missing ticket is the normal case: everything stays off and
     // NOTHING is logged.
+    this.n2ForceDefaultRoute = forceDefaultRoute;
     this.readDiagSwitches();
+    if ((this.n2EvidenceError ?? '').length > 0) {
+      hilog.error(DOMAIN, TAG,
+        'N2_EVIDENCE_REFUSED|requestId=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
+        this.requestId, this.n2EvidenceError);
+      return;
+    }
+    if (this.n2Evidence !== undefined) {
+      this.probeN2ProcNet();
+      hilog.warn(DOMAIN, TAG,
+        'N2_EVIDENCE_ARMED|requestId=%{public}s|trusted=%{public}s|capture32=%{public}s|' +
+        'endpointExclusions=false|hdcControl=%{public}s|allowHdcOverlap=%{public}s|' +
+        'diag=true|is_evidence=false',
+        this.requestId, SELF_BUNDLE_NAME, this.n2Evidence.capture32.join(','),
+        this.n2Evidence.hdcControlIp || 'not-supplied', String(this.n2Evidence.allowHdcOverlap));
+    }
     if (!this.endpointExclusionsEnabled &&
       (this.protectDeviationRouteExclusion || this.diagCaptureRoute)) {
       hilog.error(DOMAIN, TAG, 'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dev-switch-conflict',
@@ -1109,7 +1131,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // "exclude BEFORE enable" precondition: an advertised relay endpoint is
     // excluded even when relay_enabled=false (harmless and required), and
     // only an enabled relay turns its resolution failures fatal.
-    const baseTemplate: VpnTunnelConfig = loadVpnTunnelConfig();
+    const baseTemplate: VpnTunnelConfig = this.n2Evidence !== undefined
+      ? withoutN2ExcludedRoutes(loadVpnTunnelConfig()) : loadVpnTunnelConfig();
     // The exclusion `address` field must be a BARE IP — NEVER 'IP:port'.
     // resolveManagementIp returns the 'ip:port' DIAL address (needed
     // verbatim by connectorStartWithSocket above); passing it through
@@ -1156,6 +1179,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         ? 'default-route-forced:debug-opt-in-black-hole-risk'
         : net.default_route.reason;
     }
+    if (this.n2Evidence !== undefined) {
+      gateAllowed = false;
+      gateReason = 'n2-evidence-no-default-route';
+    }
     merged = gateDefaultRoutes(merged, gateAllowed);
     // The tunnel subnet route is grafted AFTER the default-route gate (it is
     // never an isDefaultRoute entry, so the gate can never swallow it) and
@@ -1171,6 +1198,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // byte-identical.
     if (this.diagCaptureRoute) {
       merged = this.injectCaptureRoute(merged, 'initial');
+    }
+    if (this.n2Evidence !== undefined) {
+      try {
+        merged = withN2EvidenceRoutes(merged, this.n2Evidence.capture32);
+        if (merged.routes.some((route: VpnRouteConfig): boolean => route.isDefaultRoute)) {
+          throw new Error('default-route-present');
+        }
+      } catch (error) {
+        hilog.error(DOMAIN, TAG,
+          'N2_EVIDENCE_REFUSED|requestId=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
+          this.requestId, safeError(error as Error));
+        connectorStop();
+        return;
+      }
+      hilog.info(DOMAIN, TAG,
+        'N2_EVIDENCE_ROUTES|requestId=%{public}s|leg=initial|capture32=%{public}s|' +
+          'defaultRoutes=0|excludedRoutes=0|diag=true|is_evidence=false',
+        this.requestId, this.n2Evidence.capture32.join(','));
     }
     hilog.info(DOMAIN, TAG,
       'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
@@ -1222,7 +1267,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     const config: vpnExtension.VpnConfig =
-      buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('initial'));
+      buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('initial'),
+        this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
     // N8: stash the managed route set actually merged into the platform
     // VpnConfig, for the initial-create ACK once create() + the WG feed
     // succeed (settleCreate). Only a real core snapshot qualifies — the
@@ -1803,6 +1849,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (protectProbe !== undefined) {
       opts.protect_probe = protectProbe;
     }
+    if (this.n2Evidence !== undefined) {
+      opts.n2_capture_32 = this.n2Evidence.capture32;
+    }
     // S7 (2026-09-26): the hand-off trigger, read off the SAME object that was
     // just forwarded verbatim. ONLY the exact string literal `protect` turns it
     // on: `mode:"none"` (the control arm), an absent key, a wrong-typed value
@@ -2168,6 +2217,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the parameter). Only a key PRESENT with a non-boolean value is logged, by
   // readDiagSwitch.
   private readDiagSwitches(): void {
+    this.n2Evidence = undefined;
+    this.n2EvidenceError = '';
     this.diagBlockedSelf = false;
     this.diagProtectProcessNet = false;
     this.diagPosctlUnbound = false;
@@ -2213,6 +2264,44 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
     }
     this.diagCaptureTarget = this.readProtectProbeTarget(doc);
+    const decision: N2EvidenceDecision = parseN2Evidence(doc['n2_evidence'],
+      this.diagBlockedSelf, this.diagCaptureRoute, this.n2ForceDefaultRoute === true, exclusionSetting);
+    this.n2EvidenceError = decision.error;
+    this.n2Evidence = decision.options;
+    if (this.n2Evidence !== undefined) {
+      this.endpointExclusionsEnabled = false;
+    }
+  }
+
+  private probeN2ProcNet(): void {
+    let uid: string = 'unknown';
+    try {
+      const status: string = fs.readTextSync('/proc/self/status');
+      const row: string | undefined = status.split('\n').find((line: string): boolean =>
+        line.startsWith('Uid:'));
+      if (row !== undefined) {
+        uid = row.trim().split(/\s+/)[1] || 'unknown';
+      }
+    } catch (error) { /* probe below records each file separately */ }
+    const names: string[] = ['tcp', 'udp', 'tcp6', 'udp6'];
+    const roots: string[] = ['/proc/net/', '/proc/self/net/'];
+    for (let i = 0; i < roots.length; i++) {
+      for (let j = 0; j < names.length; j++) {
+        const path: string = roots[i] + names[j];
+        try {
+          const text: string = fs.readTextSync(path);
+          const lines: number = text.length === 0 ? 0 : text.trimEnd().split('\n').length;
+          hilog.info(DOMAIN, TAG,
+            'N2_PROC_NET|path=%{public}s|readable=true|lines=%{public}d|uid=%{public}s|' +
+            'diag=true|is_evidence=false', path, lines, uid);
+        } catch (error) {
+          hilog.warn(DOMAIN, TAG,
+            'N2_PROC_NET|path=%{public}s|readable=false|lines=0|uid=%{public}s|' +
+            'code=%{public}s|diag=true|is_evidence=false',
+            path, uid, String((error as BusinessFailure).code ?? 'no-code'));
+        }
+      }
+    }
   }
 
   // S6: the capture route's destination, taken from the ticket's `protect_probe`
@@ -2618,6 +2707,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'VPN_RECREATE_BEGIN|requestId=%{public}s|reason=%{public}s', this.requestId, reason);
     let stage: string = 'snapshot';
     try {
+      if (this.n2Evidence !== undefined) {
+        hilog.warn(DOMAIN, TAG,
+          'N2_EVIDENCE_RECREATE_DETECTED|requestId=%{public}s|reason=%{public}s|' +
+          'diag=true|is_evidence=false', this.requestId, clean(reason));
+      }
       // 1. the DESIRED config, fresh from the core (live gate state)
       const net: CoreNetworkConfig = connectorNetworkConfig();
       if (!net.available || net.routes === undefined || net.routes === null ||
@@ -2630,13 +2724,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // The frozen set is reused verbatim (no DNS inside the bounded
       // recreate leg); the next full start re-freezes with fresh
       // resolutions.
-      const base: VpnTunnelConfig = withEndpointExclusions(loadVpnTunnelConfig(),
+      const recreateTemplate: VpnTunnelConfig = this.n2Evidence !== undefined
+        ? withoutN2ExcludedRoutes(loadVpnTunnelConfig()) : loadVpnTunnelConfig();
+      const base: VpnTunnelConfig = withEndpointExclusions(recreateTemplate,
         this.frozenEndpointExclusions);
       let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
       const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
         ? net.default_route.allowed
         : false;
-      merged = gateDefaultRoutes(merged, gateAllowed);
+      merged = gateDefaultRoutes(merged, this.n2Evidence !== undefined ? false : gateAllowed);
       // The RECREATE leg needs the tunnel subnet route too: the platform
       // VpnConfig is fully REPLACED, so a rebuild without it would silently
       // DROP the entry the first generation submitted. Same placement as the
@@ -2648,6 +2744,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // the same placement as the tunnel-subnet entry above.
       if (this.diagCaptureRoute) {
         merged = this.injectCaptureRoute(merged, 'recreate');
+      }
+      if (this.n2Evidence !== undefined) {
+        merged = withN2EvidenceRoutes(merged, this.n2Evidence.capture32);
+        if (merged.routes.some((route: VpnRouteConfig): boolean => route.isDefaultRoute)) {
+          throw new Error('n2-evidence-default-route-present');
+        }
+        hilog.info(DOMAIN, TAG,
+          'N2_EVIDENCE_ROUTES|requestId=%{public}s|leg=recreate|capture32=%{public}s|' +
+            'defaultRoutes=0|excludedRoutes=0|diag=true|is_evidence=false',
+          this.requestId, this.n2Evidence.capture32.join(','));
       }
       // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
       // violates the SDK RouteInfo contract must never reach create().
@@ -2701,7 +2807,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
       this.connection = conn;
       const config: vpnExtension.VpnConfig =
-        buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'));
+        buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
+          this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
       const fd: number = await this.createConnectionBounded(conn, config);
 
       // 4. the same fd contract as the initial create

@@ -87,6 +87,9 @@ export function resolve(specifier, context, next) {
     return next(specifier, context);
   }
   const dir = new URL('.', context.parentURL);
+  if (specifier === './NetBirdVpnConfig') {
+    return { url: new URL('NetBirdVpnConfig.dep.ts', dir).href, shortCircuit: true };
+  }
   if (specifier === './NetBirdConnector') {
     return {
       url: 'data:text/javascript,' + encodeURIComponent(

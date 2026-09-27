@@ -1578,7 +1578,17 @@ struct TeeEntry {
     positive: bool,
 }
 
+struct N2DestinationCount {
+    dst: [u8; 4],
+    port: u16,
+    proto: u8,
+    frames: u64,
+    sources: Vec<[u8; 4]>,
+}
+
 struct TeeInner {
+    n2_targets: Vec<[u8; 4]>,
+    n2_counts: Vec<N2DestinationCount>,
     totals: TunTeeTotals,
     scanner: TunnelScanner,
     entries: Vec<TeeEntry>,
@@ -1589,6 +1599,8 @@ impl CollectorTee {
     pub fn new(clock: Arc<dyn CollectorClock>) -> Self {
         CollectorTee {
             inner: Mutex::new(TeeInner {
+                n2_targets: Vec::new(),
+                n2_counts: Vec::new(),
                 totals: TunTeeTotals::default(),
                 scanner: TunnelScanner::default(),
                 entries: Vec::new(),
@@ -1596,6 +1608,29 @@ impl CollectorTee {
             }),
             clock,
         }
+    }
+
+    pub fn set_n2_targets(&self, targets: Vec<[u8; 4]>) {
+        self.inner.lock_poison().n2_targets = targets;
+    }
+
+    pub fn n2_summary_lines(&self) -> Vec<String> {
+        let g = self.inner.lock_poison();
+        g.n2_targets.iter().flat_map(|dst| {
+            let matches: Vec<String> = g.n2_counts.iter().filter(|row| row.dst == *dst)
+                .map(|row| format!(
+                    "N2_TUN_DEST|dst={}|proto={}|port={}|frames={}|sources={}|diag=true|is_evidence=false",
+                    std::net::Ipv4Addr::from(row.dst), row.proto, row.port, row.frames,
+                    row.sources.iter().map(|src| std::net::Ipv4Addr::from(*src).to_string())
+                        .collect::<Vec<_>>().join(",")
+                )).collect();
+            if matches.is_empty() {
+                vec![format!("N2_TUN_DEST|dst={}|proto=any|port=any|frames=0|sources=|diag=true|is_evidence=false",
+                    std::net::Ipv4Addr::from(*dst))]
+            } else {
+                matches
+            }
+        }).collect()
     }
 
     /// Register one probe marker for the window (design §4.1: registered at
@@ -1655,6 +1690,42 @@ impl TunFrameTee for CollectorTee {
             TunFrameDir::FromOs => {
                 g.totals.from_os_frames += 1;
                 g.totals.from_os_bytes += frame.len() as u64;
+                if !g.n2_targets.is_empty() {
+                    if let Some(packet) = crate::n2h::parse_ipv4_frame(frame) {
+                        if g.n2_targets.contains(&packet.dst) {
+                            let port = packet.dport;
+                            let proto = packet.proto;
+                            let dst = packet.dst;
+                            let src = packet.src;
+                            let index = g.n2_counts.iter().position(|row|
+                                row.dst == dst && row.port == port && row.proto == proto);
+                            let index = match index {
+                                Some(index) => index,
+                                None => {
+                                    // 64 rows per address; the last row folds excess ports.
+                                    let count = g.n2_counts.iter().filter(|row| row.dst == dst).count();
+                                    let port = if count >= 64 { 0 } else { port };
+                                    let proto = if count >= 64 { 0 } else { proto };
+                                    match g.n2_counts.iter().position(|row|
+                                        row.dst == dst && row.port == port && row.proto == proto) {
+                                        Some(index) => index,
+                                        None => {
+                                            g.n2_counts.push(N2DestinationCount {
+                                                dst, port, proto, frames: 0, sources: Vec::new()
+                                            });
+                                            g.n2_counts.len() - 1
+                                        }
+                                    }
+                                }
+                            };
+                            let row = &mut g.n2_counts[index];
+                            row.frames = row.frames.saturating_add(1);
+                            if row.sources.len() < 8 && !row.sources.contains(&src) {
+                                row.sources.push(src);
+                            }
+                        }
+                    }
+                }
             }
             TunFrameDir::ToOs => {
                 g.totals.to_os_frames += 1;
@@ -2006,6 +2077,7 @@ pub struct ArmOptions {
     /// `n2h_probe_socket_commit` for `mode:"protect"`, or a socket this core
     /// opens itself for the `mode:"none"` control arm.
     pub protect_probe: Option<ProtectProbeOption>,
+    pub n2_capture_32: Vec<[u8; 4]>,
 }
 
 impl Default for ArmOptions {
@@ -2023,6 +2095,7 @@ impl Default for ArmOptions {
             probe_net_id: None,
             posctl_probes: 1,
             protect_probe: None,
+            n2_capture_32: Vec::new(),
         }
     }
 }
@@ -2121,6 +2194,23 @@ impl ArmOptions {
                 ));
             }
             opts.posctl_probes = n as usize;
+        }
+        if let Some(v) = obj_get(fields, "n2_capture_32") {
+            let Json::Arr(items) = v else {
+                return Err("n2_capture_32 must be an array".to_string());
+            };
+            if items.is_empty() || items.len() > 32 {
+                return Err("n2_capture_32 count must be within 1..=32".to_string());
+            }
+            for item in items {
+                let raw = as_str(item).ok_or("n2_capture_32 entries must be strings")?;
+                let parsed = crate::config::parse_ipv4(raw)
+                    .ok_or("n2_capture_32 entries must be IPv4 addresses")?;
+                if opts.n2_capture_32.contains(&parsed) {
+                    return Err("n2_capture_32 duplicate destination".to_string());
+                }
+                opts.n2_capture_32.push(parsed);
+            }
         }
         if let Some(v) = obj_get(fields, "protect_probe") {
             // 2026-09-26 (plan §4/§5): the opt-in protected-socket probe. The
@@ -2362,6 +2452,9 @@ pub fn arm_json(opts_json: &str) -> String {
     };
     let freeze = assemble_freezes(&sources);
     let tee = Arc::new(CollectorTee::new(clock.clone()));
+    if !options.n2_capture_32.is_empty() {
+        tee.set_n2_targets(options.n2_capture_32.clone());
+    }
     if let Err(e) = host.attach_tee(tee.clone() as Arc<dyn TunFrameTee>) {
         return arm_err(ARM_ERR_NO_CONNECTOR, &format!("tee attach failed: {e}"));
     }
@@ -2702,6 +2795,11 @@ fn run_window(win: Arc<Window>) {
     }
     if win.disarmed() {
         return;
+    }
+    if !win.options.n2_capture_32.is_empty() {
+        for line in win.tee.n2_summary_lines() {
+            hilog::emit(&line);
+        }
     }
     let scan = win.tee.snapshot();
     // [adjustment 2026-09-26] the protect-probe records are completed by the
@@ -6644,6 +6742,28 @@ mod tests {
             assert!(ArmOptions::parse_json(bad).is_err(), "'{bad}' must be refused");
         }
         println!("[I3a] arm opts exclusion_generation: parsed verbatim, absent stays None, malformed refused");
+    }
+
+    #[test]
+    fn n2_destination_counts_only_from_os_and_does_not_change_snapshot() {
+        assert!(ArmOptions::default().n2_capture_32.is_empty());
+        for bad in ["{\"n2_capture_32\":[]}",
+            "{\"n2_capture_32\":[\"1.2.3.4\",\"1.2.3.4\"]}",
+            "{\"n2_capture_32\":[\"1.2.3.999\"]}"] {
+            assert!(ArmOptions::parse_json(bad).is_err());
+        }
+        let opts = ArmOptions::parse_json("{\"n2_capture_32\":[\"119.29.29.119\"]}")
+            .expect("valid opt-in destination");
+        let tee = CollectorTee::new(fixed_clock(77));
+        assert!(tee.n2_summary_lines().is_empty());
+        tee.set_n2_targets(opts.n2_capture_32);
+        let frame = udp_frame([10, 77, 0, 1], [119, 29, 29, 119], 40000, 53, b"dns");
+        tee.on_tun_frame(TunFrameDir::ToOs, &frame);
+        assert!(tee.n2_summary_lines()[0].contains("frames=0"));
+        tee.on_tun_frame(TunFrameDir::FromOs, &frame);
+        tee.on_tun_frame(TunFrameDir::FromOs, &frame);
+        assert!(tee.n2_summary_lines()[0].contains("dst=119.29.29.119|proto=17|port=53|frames=2|sources=10.77.0.1"));
+        assert_eq!(tee.snapshot().totals.from_os_frames, 2);
     }
 
     #[test]

@@ -537,7 +537,11 @@ export function withCaptureRoute(config: VpnTunnelConfig, target: string): Captu
 // Huawei-supported use is the SELF bundle name, see the caller
 // (NetBirdVpnExtensionAbility.diagBlockedApplicationList).
 export function buildPlatformVpnConfig(config: VpnTunnelConfig,
-  blockedApplications?: string[]): vpnExtension.VpnConfig {
+  blockedApplications?: string[], trustedApplications?: string[]): vpnExtension.VpnConfig {
+  if (blockedApplications !== undefined && blockedApplications.length > 0 &&
+    trustedApplications !== undefined && trustedApplications.length > 0) {
+    throw new Error('trusted-and-blocked-applications-conflict');
+  }
   const address: vpnExtension.LinkAddress = {
     address: { address: config.tunnelAddress, family: 1 },
     prefixLength: config.tunnelPrefixLength
@@ -573,6 +577,9 @@ export function buildPlatformVpnConfig(config: VpnTunnelConfig,
   // S2 (see the doc comment): present ONLY when a non-empty list was passed.
   if (blockedApplications !== undefined && blockedApplications.length > 0) {
     vpnConfig.blockedApplications = blockedApplications;
+  }
+  if (trustedApplications !== undefined && trustedApplications.length > 0) {
+    vpnConfig.trustedApplications = trustedApplications;
   }
   return vpnConfig;
 }
