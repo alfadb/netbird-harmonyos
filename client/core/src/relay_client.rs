@@ -830,7 +830,8 @@ impl RelayDialer for ProtectedRelayDialer {
             let ip = crate::protected_dns::resolve(&host, &supply)
                 .await.map_err(RelayClientError::Dial)?;
             let addr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip, port));
-            let source = crate::mgmtsock::ProtectedSocketFdSource::new_with_fd(-1);
+            let source = crate::mgmtsock::ProtectedSocketFdSource::new_with_fd(-1)
+                .expect("empty tcp source");
             source.attach_supply(supply, crate::socket_supply::Purpose::Relay);
             crate::mgmtsock::connect_protected(&source, addr)
                 .await

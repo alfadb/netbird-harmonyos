@@ -1012,7 +1012,7 @@ impl FedSocks {
             assert!(fd >= 0);
             raws.push(fd);
         }
-        let source = Arc::new(ProtectedUdpFdSource::new_with_fd(-1));
+        let source = Arc::new(ProtectedUdpFdSource::new_with_fd(-1).unwrap());
         for &fd in &raws {
             source.feed(fd);
         }

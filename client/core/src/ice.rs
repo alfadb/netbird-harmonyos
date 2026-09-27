@@ -74,7 +74,7 @@
 //! (`stun::random_transaction_id`). Cross-compile surface verified by the
 //! repo-external probe `refs/ice-probe` (exit 0, aarch64-unknown-linux-ohos).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -640,19 +640,47 @@ pub struct ProtectedUdpFdSource {
     queue: Mutex<VecDeque<OwnedFd>>,
     taken: AtomicU64,
     dns: OnceLock<(Arc<crate::socket_supply::SocketSupply>, tokio::runtime::Handle)>,
+    resolved: Arc<Mutex<HashMap<String, [u8; 4]>>>,
+    dns_epoch: Arc<AtomicU64>,
 }
 
 impl ProtectedUdpFdSource {
-    pub fn new_with_fd(fd: i32) -> Self {
+    pub fn new_with_fd(fd: i32) -> Result<Self, SocketSeamError> {
         let mut q = VecDeque::with_capacity(2);
         if fd >= 0 {
-            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd).expect("seed udp socket fd")) });
+            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) });
         }
-        ProtectedUdpFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), dns: OnceLock::new() }
+        Ok(ProtectedUdpFdSource {
+            queue: Mutex::new(q), taken: AtomicU64::new(0), dns: OnceLock::new(),
+            resolved: Arc::new(Mutex::new(HashMap::new())), dns_epoch: Arc::new(AtomicU64::new(0)),
+        })
     }
 
     pub fn attach_dns(&self, supply: Arc<crate::socket_supply::SocketSupply>, runtime: tokio::runtime::Handle) {
         let _ = self.dns.set((supply, runtime));
+    }
+
+    pub fn refresh_stun_dns(&self, servers: &[StunServer]) {
+        let generation = self.dns_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.resolved.lock().expect("stun dns cache").clear();
+        let Some((supply, runtime)) = self.dns.get() else { return };
+        for server in servers {
+            let host = server.host.clone();
+            if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+                self.resolved.lock().expect("stun dns cache").insert(host, ip.octets());
+                continue;
+            }
+            let cache = self.resolved.clone();
+            let epoch = self.dns_epoch.clone();
+            let supply = supply.clone();
+            runtime.spawn(async move {
+                if let Ok(ip) = crate::protected_dns::resolve(&host, &supply).await {
+                    if epoch.load(Ordering::Acquire) == generation {
+                        cache.lock().expect("stun dns cache").insert(host, ip.octets());
+                    }
+                }
+            });
+        }
     }
 
     /// Shell-side resupply: retain a protected UDP socket duplicate now.
@@ -681,10 +709,13 @@ impl ProtectedUdpFdSource {
 
 impl UdpSocketSource for ProtectedUdpFdSource {
     fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
-        let Some((supply, runtime)) = self.dns.get() else { return resolve_ipv4(host) };
-        runtime.block_on(crate::protected_dns::resolve(host, supply))
-            .map(|ip| ip.octets())
-            .map_err(|e| ManagementError::Network(e.to_string()))
+        if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() { return Ok(ip.octets()); }
+        if self.dns.get().is_none() {
+            #[cfg(not(target_env = "ohos"))]
+            return resolve_ipv4(host);
+        }
+        self.resolved.lock().expect("stun dns cache").get(host).copied()
+            .ok_or_else(|| ManagementError::Network("stun:protected-dns-pending".into()))
     }
 
     fn take_fd(&self) -> Result<i32, SocketSeamError> {
@@ -1021,6 +1052,9 @@ pub fn resolve_ipv4(host: &str) -> Result<[u8; 4], ManagementError> {
             return Ok(addr);
         }
     }
+    #[cfg(target_env = "ohos")]
+    return Err(fail("stun:protected-dns-required".into()));
+    #[cfg(not(target_env = "ohos"))]
     unsafe {
         let libc = dlopen_libc();
         if libc.is_null() {
@@ -1087,7 +1121,7 @@ mod feed_ownership_tests {
         let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = original.local_addr().unwrap().port();
         let raw = original.into_raw_fd();
-        let source = ProtectedUdpFdSource::new_with_fd(-1);
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
         source.feed(raw).unwrap();
         unsafe { sys::close(raw) };
         let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
@@ -1100,9 +1134,14 @@ mod feed_ownership_tests {
     }
 
     #[test]
+    fn invalid_seed_fd_is_fallible() {
+        assert!(ProtectedUdpFdSource::new_with_fd(i32::MAX).is_err());
+    }
+
+    #[test]
     fn ice_clear_pending_discards_owned_copy() {
         let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let source = ProtectedUdpFdSource::new_with_fd(-1);
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
         let raw = original.into_raw_fd();
         source.feed(raw).unwrap();
         unsafe { sys::close(raw) };

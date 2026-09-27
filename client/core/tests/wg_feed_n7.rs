@@ -645,7 +645,7 @@ async fn connector_status_reflects_fed_device_and_stop_tears_it_down() {
 #[test]
 fn missing_feed_fails_closed_and_takes_no_unprotected_socket() {
     let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let ice_sockets = Arc::new(ProtectedUdpFdSource::new_with_fd(-1)); // shell never feeds ICE
+    let ice_sockets = Arc::new(ProtectedUdpFdSource::new_with_fd(-1).unwrap()); // shell never feeds ICE
 
     // case 1: only the TUN fd fed (WG socket missing)
     let (wg_raw, _port) = udp_socket_lo();

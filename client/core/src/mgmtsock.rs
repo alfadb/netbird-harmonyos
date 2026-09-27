@@ -150,12 +150,12 @@ pub struct ProtectedSocketFdSource {
 
 impl ProtectedSocketFdSource {
     /// Seed with the first protected socket.
-    pub fn new_with_fd(fd: i32) -> Self {
+    pub fn new_with_fd(fd: i32) -> Result<Self, SocketSeamError> {
         let mut q = VecDeque::with_capacity(2);
         if fd >= 0 {
-            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd).expect("seed socket fd")) });
+            q.push_back(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) });
         }
-        ProtectedSocketFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), supply: std::sync::OnceLock::new() }
+        Ok(ProtectedSocketFdSource { queue: Mutex::new(q), taken: AtomicU64::new(0), supply: std::sync::OnceLock::new() })
     }
 
     pub fn attach_supply(&self, supply: Arc<crate::socket_supply::SocketSupply>, purpose: crate::socket_supply::Purpose) {
@@ -476,11 +476,16 @@ mod tests {
 
     #[test]
     fn empty_source_fails_closed_with_no_socket() {
-        let src = ProtectedSocketFdSource::new_with_fd(-1);
+        let src = ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source");
         assert_eq!(src.pending(), 0);
         let err = src.take_fd().unwrap_err();
         assert_eq!(err, SocketSeamError::NoSocket);
         assert_eq!(src.taken(), 0);
+    }
+
+    #[test]
+    fn invalid_seed_fd_is_fallible() {
+        assert!(ProtectedSocketFdSource::new_with_fd(i32::MAX).is_err());
     }
 
     #[test]
@@ -489,7 +494,7 @@ mod tests {
             sys::socket(sys::AF_INET, sys::SOCK_STREAM | sys::SOCK_CLOEXEC, 0)
         }).collect();
         assert!(raw.iter().all(|fd| *fd >= 0));
-        let src = ProtectedSocketFdSource::new_with_fd(raw[0]);
+        let src = ProtectedSocketFdSource::new_with_fd(raw[0]).unwrap();
         src.feed(raw[1]).unwrap();
         src.feed(raw[2]).unwrap();
         assert_eq!(src.pending(), 3);
@@ -512,7 +517,7 @@ mod tests {
         for _purpose in ["management", "signal"] {
             let original = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
             assert!(original >= 0);
-            let source = ProtectedSocketFdSource::new_with_fd(-1);
+            let source = ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source");
             source.feed(original).unwrap();
             unsafe { sys::close(original) };
             let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
@@ -532,7 +537,7 @@ mod tests {
     fn clear_pending_discards_management_and_signal_copies() {
         let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
         assert!(fd >= 0);
-        let source = ProtectedSocketFdSource::new_with_fd(-1);
+        let source = ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source");
         source.feed(fd).unwrap();
         unsafe { sys::close(fd) };
         assert_eq!(source.pending(), 1);

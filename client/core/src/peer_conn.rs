@@ -1579,7 +1579,7 @@ mod tests {
         extern "C" {
             fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
         }
-        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         for _ in 0..4 {
             let fd = unsafe { socket(2, 2, 0) };
             assert!(fd >= 0, "socket() failed");
@@ -1635,7 +1635,7 @@ mod tests {
     fn set_peers_reconciles_add_remove_and_counts_unknown_signal() {
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: Some(7),
@@ -1679,7 +1679,7 @@ mod tests {
             }
         }
         let signal = Arc::new(CountingSignal::default());
-        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
                 name: "eth0".into(),
@@ -1720,7 +1720,7 @@ mod tests {
     fn set_stuns_parses_netbird_config_uris() {
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: None,
@@ -1745,7 +1745,7 @@ mod tests {
         // trickle 早到（无会话）：候选暂存不丢、不 panic、不 start。
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: noop_wg(),
             tie_breaker: Some(7),
@@ -1801,7 +1801,7 @@ mod tests {
         }
 
         let port = grab_free_udp_port();
-        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         for _ in 0..2 {
             let fd = unsafe { sys::socket(2, 2, 0) };
             assert!(fd >= 0, "socket() failed");
@@ -1889,7 +1889,7 @@ mod tests {
             fd
         };
         let signal = Arc::new(CountingSignal::default());
-        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         let fd = unsafe { sys::socket(2, 2, 0) };
         assert!(fd >= 0);
         socks.feed(fd);

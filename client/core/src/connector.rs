@@ -110,8 +110,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -1714,6 +1714,10 @@ impl ConnectorShared {
         if let Some(cfg) = update.netbird_config.as_ref() {
             if let Some(ice) = self.ice.get() {
                 ice.lock_poison().set_stuns(&cfg.stuns);
+                if let Some(sockets) = self.ice_sockets.get() {
+                    let stuns = ice.lock_poison().stuns().to_vec();
+                    sockets.refresh_stun_dns(&stuns);
+                }
             }
             stun_uris = Some(cfg.stuns.clone());
             if let Some(uri) = cfg.signal.as_ref() {
@@ -3709,7 +3713,7 @@ impl ConnectorHandle {
                 orch
             }
             None => {
-                let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1));
+                let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
                 if let Some(supply) = socket_supply.as_ref() {
                     socks.attach_dns(supply.clone(), runtime.clone());
                 }
@@ -3719,7 +3723,7 @@ impl ConnectorHandle {
                             // N5d: real link materials — ONE exchange is
                             // created here and shared by the orchestrator
                             // seam (send side) and the worker (queue side).
-                            let src = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+                            let src = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source"));
                             if let Some(supply) = socket_supply.as_ref() {
                                 src.attach_supply(supply.clone(), crate::socket_supply::Purpose::Signal);
                             }
@@ -3827,19 +3831,28 @@ impl ConnectorHandle {
     /// Called only after the replacement WG socket has been protected and fed.
     /// Old queued sockets belong to the previous physical network and must not
     /// be used for any new management, signal or ICE dial.
-    pub fn physical_network_changed(&self, management_addr: SocketAddr) -> Result<(), &'static str> {
+    pub fn physical_network_changed(&self, management_addr: Option<SocketAddr>) -> Result<(), &'static str> {
         if !self.is_running() { return Err("connector-stopped"); }
-        self.management_factory.update_dial_address(management_addr);
+        dns_lookups().lock_poison().clear();
+        if let Some(addr) = management_addr {
+            self.management_factory.update_dial_address(addr);
+        }
         if let Some(source) = &self.socket_source {
             if let Some(supply) = source.socket_supply() {
                 supply.cancel_pending_for_network_change();
-                supply.set_dns_servers(Vec::new());
+                if management_addr.is_none() { supply.set_dns_servers(Vec::new()); }
             }
             source.clear_pending();
         }
         if let Some(source) = &self.signal_sockets { source.clear_pending(); }
         if let Some(source) = &self.ice_sockets { source.clear_pending(); }
         self.ice.lock_poison().restart_for_network_change(crate::sys::mono_ms());
+        if let Some(source) = &self.ice_sockets {
+            let servers = if management_addr.is_some() {
+                self.ice.lock_poison().stuns().to_vec()
+            } else { Vec::new() };
+            source.refresh_stun_dns(&servers);
+        }
         if let Some(rt) = self.shared.signal.get() {
             rt.shutdown();
             *rt.connect_addr.lock_poison() = None;
@@ -4497,7 +4510,10 @@ pub fn connector_start_with_socket_json(
             )
         }
     };
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
+    let source = match ProtectedSocketFdSource::new_with_fd(fd) {
+        Ok(source) => Arc::new(source),
+        Err(error) => return format!("{{{},{}}}", jbool("started", false), jstr("error", error.token())),
+    };
     let supply = Arc::new(crate::socket_supply::SocketSupply::new());
     if let Ok(crate::config::Json::Obj(fields)) = crate::config::parse_document(connect_addr_json) {
         if let Some((_, servers)) = fields.iter().find(|(key, _)| key == "dns_servers") {
@@ -4567,10 +4583,57 @@ pub fn connector_start_with_socket_json(
     )
 }
 
+type DnsResult = Result<std::net::Ipv4Addr, std::io::Error>;
+static DNS_LOOKUPS: OnceLock<Mutex<HashMap<u64, tokio::sync::oneshot::Receiver<DnsResult>>>> = OnceLock::new();
+static NEXT_DNS_LOOKUP: AtomicU64 = AtomicU64::new(0);
+
+fn dns_lookups() -> &'static Mutex<HashMap<u64, tokio::sync::oneshot::Receiver<DnsResult>>> {
+    DNS_LOOKUPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub fn connector_protected_dns_start_json(host: &str) -> String {
+    let Some(handle) = connector_slot().as_ref().cloned() else {
+        return "{\"ok\":false}".into();
+    };
+    let Some(supply) = handle.socket_source.as_ref().and_then(|s| s.socket_supply()) else {
+        return "{\"ok\":false}".into();
+    };
+    if supply.dns_servers().is_empty() || host.is_empty() || host.len() > 253 {
+        return "{\"ok\":false}".into();
+    }
+    let id = NEXT_DNS_LOOKUP.fetch_add(1, Ordering::Relaxed) + 1;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    dns_lookups().lock_poison().insert(id, rx);
+    let name = host.to_string();
+    handle.runtime.spawn(async move {
+        let _ = tx.send(crate::protected_dns::resolve(&name, &supply).await);
+    });
+    format!("{{\"ok\":true,\"id\":{id}}}")
+}
+
+pub fn connector_protected_dns_poll_json(id: u64) -> String {
+    let mut requests = dns_lookups().lock_poison();
+    let Some(rx) = requests.get_mut(&id) else { return "{\"ok\":false}".into() };
+    match rx.try_recv() {
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => "{\"ok\":true,\"pending\":true}".into(),
+        result => {
+            requests.remove(&id);
+            match result {
+                Ok(Ok(ip)) => format!("{{\"ok\":true,{}}}", jstr("ip", &ip.to_string())),
+                _ => "{\"ok\":false}".into(),
+            }
+        }
+    }
+}
+
 pub fn connector_physical_network_changed_json(addr_json: &str) -> String {
-    let addr = match parse_connect_addr(addr_json) {
-        Ok(addr) => addr,
-        Err(_) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid")),
+    let addr = if addr_json == "\"\"" {
+        None
+    } else {
+        match parse_connect_addr(addr_json) {
+            Ok(addr) => Some(addr),
+            Err(_) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-addr-invalid")),
+        }
     };
     let slot = connector_slot();
     let Some(handle) = slot.as_ref() else {
@@ -5542,7 +5605,7 @@ mod tests {
         let shared = ConnectorShared::new(false, None);
         let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
             wg: Arc::new(ReadyWg),
             tie_breaker: Some(7),
@@ -5611,7 +5674,7 @@ mod tests {
         assert!(shared.stuns().is_empty());
         let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
             wg: Arc::new(NoIceWg),
             tie_breaker: None,
@@ -5650,7 +5713,7 @@ mod tests {
         let protected = GrpcManagementFactory::with_socket_source(
             &cfg,
             cfg.keys.clone(),
-            Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+            Arc::new(ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source")),
             "198.51.100.7:443".parse().expect("dial address"),
         );
         let expected: Option<SocketAddr> = Some("198.51.100.7:443".parse().expect("addr"));
@@ -6311,7 +6374,7 @@ mod tests {
         let shared = Arc::new(ConnectorShared::new(false, None));
         let orch = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(LoggingSignalExchange::default()),
             wg: Arc::new(WgPeerRegistry::new()),
             tie_breaker: Some(7),
@@ -6330,7 +6393,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(1),
                 request_timeout: Duration::from_secs(1),
                 keys: EnvelopeKeyPair::from_secret_bytes(&[9u8; 32]),
-                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source")),
             },
             exchange.clone(),
             rx,
@@ -6726,7 +6789,7 @@ mod tests {
         // peers=1, reachable=0 → the ICE view is NOT nominated.
         let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1)),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
             signal: Arc::new(crate::peer_conn::LoggingSignalExchange::default()),
             wg: Arc::new(ReadyWg),
             tie_breaker: Some(7),
@@ -6958,7 +7021,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(1),
                 request_timeout: Duration::from_secs(1),
                 keys: EnvelopeKeyPair::from_secret_bytes(&[7u8; 32]),
-                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1)),
+                sockets: Arc::new(ProtectedSocketFdSource::new_with_fd(-1).expect("empty tcp source")),
             },
             exchange.clone(),
             rx,

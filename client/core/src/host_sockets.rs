@@ -1196,7 +1196,8 @@ fn ice_stun_offline_check() -> Result<String, String> {
     }
 
     let fd = open_udp_unbound().map_err(|e| format!("udp socket: {e}"))?;
-    let source = ProtectedUdpFdSource::new_with_fd(fd);
+    let source = ProtectedUdpFdSource::new_with_fd(fd)
+        .map_err(|e| format!("seed udp socket: {e:?}"))?;
     let cfg = GatherConfig {
         blacklist: &DEFAULT_INTERFACE_BLACKLIST,
         servers: &[],

@@ -142,7 +142,7 @@ struct TestPeer {
 impl TestPeer {
     fn new(creds: IceCredentials, controlling: bool, tie_breaker: u64) -> Self {
         let session = IceSession::new(creds, controlling, Some(tie_breaker)).expect("session");
-        TestPeer { session, provider: ProtectedUdpFdSource::new_with_fd(-1), raw_fds: Vec::new(), local: None }
+        TestPeer { session, provider: ProtectedUdpFdSource::new_with_fd(-1).unwrap(), raw_fds: Vec::new(), local: None }
     }
 
     fn add_local(&mut self) -> Candidate {
@@ -386,7 +386,7 @@ fn silent_peer_fails_after_seven_attempts() {
 /// provider handed out nothing).
 #[test]
 fn empty_provider_fails_closed() {
-    let provider = ProtectedUdpFdSource::new_with_fd(-1);
+    let provider = ProtectedUdpFdSource::new_with_fd(-1).unwrap();
     let mut session = IceSession::new(creds(A), true, Some(0x1111)).expect("session");
 
     let err = session

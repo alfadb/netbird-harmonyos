@@ -461,7 +461,28 @@ export function connectorStartWithSocket(fd: number, configJson: string,
 // never fall back to an unprotected direct connection.
 export function connectorPhysicalNetworkChanged(connectAddr: string): SocketFeedResult {
   const address: Record<string, Object> = { 'connect_addr': connectAddr };
-  return JSON.parse(core.connector_physical_network_changed(JSON.stringify(address))) as SocketFeedResult;
+  return JSON.parse(core.connector_physical_network_changed(
+    connectAddr.length === 0 ? JSON.stringify('') : JSON.stringify(address))) as SocketFeedResult;
+}
+
+export interface ProtectedDnsResult {
+  ok: boolean;
+  id?: number;
+  pending?: boolean;
+  ip?: string;
+}
+
+export async function resolveProtectedIp(host: string): Promise<string> {
+  if (isIPv4Literal(host)) { return host; }
+  const started: ProtectedDnsResult = JSON.parse(core.connector_protected_dns_start(host)) as ProtectedDnsResult;
+  if (!started.ok || started.id === undefined) { return ''; }
+  for (let attempt = 0; attempt < 50; attempt++) {
+    await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 100); });
+    const result: ProtectedDnsResult = JSON.parse(core.connector_protected_dns_poll(started.id)) as ProtectedDnsResult;
+    if (!result.ok) { return ''; }
+    if (!result.pending) { return result.ip ?? ''; }
+  }
+  return '';
 }
 
 export function connectorSocketFeed(fd: number): SocketFeedResult {
@@ -841,6 +862,37 @@ let physicalDefaultDnsNetId: number = 0;
 
 export function forgetPhysicalDefaultDns(): void {
   physicalDefaultDnsNetId = 0;
+}
+
+export function physicalDefaultNetId(): number {
+  try {
+    const handle: connection.NetHandle = connection.getDefaultNetSync();
+    if (handle !== undefined && handle !== null && handle.netId !== 0) {
+      const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+      const probe: DnsNetProbe = emptyDnsNetProbe();
+      probe.handleId = handle.netId;
+      probe.networkCap = caps.networkCap ?? [];
+      probe.bearerTypes = caps.bearerTypes ?? [];
+      probe.capsOk = true;
+      if (isPhysicalNetEvidence(probe) && physicalDefaultDnsServers(handle.netId).length > 0) {
+        return handle.netId;
+      }
+    }
+    // Once the VPN is default, only a single physical candidate is unambiguous.
+    const handles: connection.NetHandle[] = connection.getAllNetsSync();
+    let candidate: number = 0;
+    for (let i = 0; i < handles.length; i++) {
+      const id: number = handles[i].netId;
+      if (id !== 0 && physicalDefaultDnsServers(id).length > 0) {
+        if (candidate !== 0 && candidate !== id) {
+          forgetPhysicalDefaultDns();
+          return 0;
+        }
+        candidate = id;
+      }
+    }
+    return candidate;
+  } catch (error) { return 0; }
 }
 
 export function physicalDefaultDnsServers(netId?: number): string[] {

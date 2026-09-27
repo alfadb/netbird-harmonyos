@@ -526,7 +526,7 @@ async fn spawn_over(
 /// that exists), plus a fresh fd source seeded with `count` protected
 /// sockets (pre-opened, unconnected, bound — the production shell shape).
 pub fn socket_source(count: usize) -> Arc<ProtectedSocketFdSource> {
-    let source = ProtectedSocketFdSource::new_with_fd(-1);
+    let source = ProtectedSocketFdSource::new_with_fd(-1).unwrap();
     for _ in 0..count {
         source.feed(parse_open_fd());
     }

@@ -401,7 +401,7 @@ async fn wait_dead(stream: &mut Streaming<EncryptedMessage>) {
 async fn empty_provider_fails_closed_with_no_unprotected_dial() {
     let mock = SignalMock::default();
     let (addr, counter) = spawn_signal_mock(mock).await;
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap());
     let err = SignalClient::connect_with_socket_source(
         &format!("http://{addr}"),
         GrpcTransport::Plaintext,

@@ -312,7 +312,7 @@ struct ProviderFixture {
 
 impl ProviderFixture {
     fn with_fds(count: usize) -> Self {
-        let mut fixture = ProviderFixture { source: ProtectedUdpFdSource::new_with_fd(-1), fds: Vec::new() };
+        let mut fixture = ProviderFixture { source: ProtectedUdpFdSource::new_with_fd(-1).unwrap(), fds: Vec::new() };
         fixture.refill(count);
         fixture
     }
@@ -386,7 +386,7 @@ fn srflx_gather_rides_the_protected_socket() {
 #[test]
 fn empty_provider_fails_closed() {
     let mock = MockStun::spawn(MockMode::Echo);
-    let provider = ProtectedUdpFdSource::new_with_fd(-1);
+    let provider = ProtectedUdpFdSource::new_with_fd(-1).unwrap();
     let ifaces = StaticInterfaces(vec![iface("eth0", [127, 0, 0, 1])]);
     let servers = vec![netbird_core::ice::parse_stun_uri(&mock.uri()).expect("uri")];
     let cfg = GatherConfig { blacklist: &DEFAULT_INTERFACE_BLACKLIST, servers: &servers, timeout_ms: 300 };

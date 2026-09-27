@@ -1714,9 +1714,34 @@ pub fn wg_fwd_probe(fd_dup: i32, mb1: bool) -> String {
     j
 }
 
+#[cfg(test)]
+mod protected_open_tests {
+    #[test]
+    fn replacement_open_keeps_old_socket_bound() {
+        let first = super::wg_fwd_open();
+        let second = super::wg_fwd_open();
+        let parse_fd = |json: &str| -> i32 {
+            json.split("\"fd\":").nth(1).unwrap().split(',').next().unwrap().parse().unwrap()
+        };
+        let old = parse_fd(&first);
+        let new = parse_fd(&second);
+        assert!(old >= 0, "{first}");
+        assert!(new >= 0, "{second}");
+        let mut old_addr = super::sys::sockaddr_in::new([0; 4], 0);
+        let mut new_addr = super::sys::sockaddr_in::new([0; 4], 0);
+        let mut old_len = std::mem::size_of_val(&old_addr) as u32;
+        let mut new_len = std::mem::size_of_val(&new_addr) as u32;
+        assert_eq!(unsafe { super::sys::getsockname(old, &mut old_addr, &mut old_len) }, 0);
+        assert_eq!(unsafe { super::sys::getsockname(new, &mut new_addr, &mut new_len) }, 0);
+        assert_ne!(old_addr.sin_port, 0);
+        assert_ne!(new_addr.sin_port, 0);
+        assert_ne!(old_addr.sin_port, new_addr.sin_port);
+        unsafe { super::sys::close(old); super::sys::close(new); }
+    }
+}
+
 /// `wg_fwd_open() -> string` (JSON `{fd, bind_rc, bind_errno}`). Split-variant
-/// stage 1 (added 2026-09-12): create the WG UDP socket and bind
-/// `0.0.0.0:47010` WITHOUT running anything, so ArkTS can call
+/// stage 1: create the WG UDP socket and bind `0.0.0.0:0` WITHOUT running anything, so ArkTS can call
 /// `VpnConnection.protect(fd)` on it before a single datagram flows. Marker
 /// semantics mirror run_fwd exactly — `N1BDISC_WG_FWD_BIND` with truthful
 /// rc/errno whenever socket() succeeded, silence on socket() failure; no new
@@ -1729,20 +1754,23 @@ pub fn wg_fwd_open() -> String {
         let e = sys::errno();
         return format!("{{\"fd\":-1,\"bind_rc\":-1,\"bind_errno\":{}}}", e);
     }
-    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], NET_PORT);
+    // The old device owns its socket dup until replacement succeeds; a fresh
+    // ephemeral port permits make-before-break. ICE peers must renegotiate
+    // their candidate addresses after the physical network changes.
+    let bind_sa = sys::sockaddr_in::new([0, 0, 0, 0], 0);
     let bind_rc =
         unsafe { sys::bind(fd, &bind_sa, core::mem::size_of::<sys::sockaddr_in>() as u32) };
     let bind_errno = if bind_rc == -1 { sys::errno() } else { 0 };
     emit(&format!(
-        "N1BDISC_WG_FWD_BIND|port={}|rc={}|errno={}",
-        NET_PORT, bind_rc, bind_errno
+        "N1BDISC_WG_FWD_BIND|port=0|rc={}|errno={}",
+        bind_rc, bind_errno
     ));
     if bind_rc != 0 {
         unsafe { sys::close(fd) };
     }
     format!(
         "{{\"fd\":{},\"bind_rc\":{},\"bind_errno\":{}}}",
-        fd, bind_rc, bind_errno
+        if bind_rc == 0 { fd } else { -1 }, bind_rc, bind_errno
     )
 }
 

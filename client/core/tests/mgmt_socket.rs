@@ -523,7 +523,7 @@ async fn dial_consumes_a_dup_original_stays_owner_owned() {
     // --- variant A: production shape — native pre-opens (unconnected), the
     // dial (Rust) connects it AFTER the (simulated) shell protect.
     let fd = open_fd();
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd).unwrap());
     let factory = factory_over(addr, source.clone());
     let mut client = factory.connect().await.expect("protected dial");
     client.get_server_key().await.expect("rpc over the protected socket");
@@ -550,7 +550,7 @@ async fn dial_consumes_a_dup_original_stays_owner_owned() {
     // ADOPT it (EISCONN path) after the shell closes its original fd.
     let std_client = std::net::TcpStream::connect(addr).expect("pre-connect");
     let pre_fd = std_client.into_raw_fd();
-    let source2 = Arc::new(ProtectedSocketFdSource::new_with_fd(pre_fd));
+    let source2 = Arc::new(ProtectedSocketFdSource::new_with_fd(pre_fd).unwrap());
     assert_eq!(unsafe { sys::close(pre_fd) }, 0, "shell closes original after feed");
     let factory2 = factory_over(addr, source2.clone());
     let mut client2 = factory2.connect().await.expect("adopted pre-connected socket");
@@ -577,7 +577,7 @@ async fn grpc_channel_runs_only_over_the_protected_socket() {
     let peer = std_client.peer_addr().expect("peer addr");
     let fd = std_client.into_raw_fd();
 
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd).unwrap());
     let factory = factory_over(addr, source.clone());
     let mut client = factory.connect().await.expect("connect via provided socket");
     let key = client.get_server_key().await.expect("GetServerKey over provided socket");
@@ -679,7 +679,7 @@ async fn every_redial_takes_a_fresh_fd_matching_attempts() {
     // two fresh native-opened sockets = two protected dials available
     let fd_a = open_fd();
     let fd_b = open_fd();
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd_a));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(fd_a).unwrap());
     source.feed(fd_b);
     let factory = factory_over(addr, source.clone());
 
@@ -911,8 +911,8 @@ async fn on_demand_management_and_signal_redials_use_separate_protected_fds() {
     use netbird_core::mgmtsock::connect_protected;
     use netbird_core::socket_supply::{Purpose, SocketSupply};
     let supply = Arc::new(SocketSupply::new());
-    let management = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
-    let signal = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    let management = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap());
+    let signal = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap());
     management.attach_supply(supply.clone(), Purpose::Management);
     signal.attach_supply(supply.clone(), Purpose::Signal);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -943,7 +943,7 @@ async fn on_demand_rejection_and_stale_reply_never_dial() {
     use netbird_core::mgmtsock::connect_protected;
     use netbird_core::socket_supply::{Purpose, SocketSupply};
     let supply = Arc::new(SocketSupply::new());
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap());
     source.attach_supply(supply.clone(), Purpose::Management);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -964,7 +964,7 @@ async fn shutdown_cancels_concurrent_requests_and_rejects_late_delivery() {
     use netbird_core::mgmtsock::connect_protected;
     use netbird_core::socket_supply::{Purpose, SocketSupply};
     let supply = Arc::new(SocketSupply::new());
-    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1));
+    let source = Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap());
     source.attach_supply(supply.clone(), Purpose::Signal);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -32,7 +32,8 @@ import {
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
-  socketSupplyDnsServers, physicalDefaultDnsServers, forgetPhysicalDefaultDns,
+  socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
+  resolveProtectedIp,
   SocketSupplyRequest,
   countPemCertificates, derivePlatformDnsEndpoints,
   formatRelayStatusLine,
@@ -508,6 +509,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private iceTopUpTimer: number = -1;
   private socketSupplyTimer: number = -1;
   private networkObserver: connection.NetConnection | undefined = undefined;
+  private networkDebounceTimer: number = -1;
   private networkEpoch: number = 0;
   private networkNetId: number = 0;
   private networkDirty: boolean = false;
@@ -704,18 +706,28 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.networkNetId = 0;
           this.networkDirty = true;
           this.networkEpoch++;
+          connectorPhysicalNetworkChanged('');
+          this.schedulePhysicalNetworkCheck();
         }
       });
-      observer.on('netAvailable', (net: connection.NetHandle): void => {
-        this.physicalNetworkAvailable(net.netId);
+      observer.on('netAvailable', (_net: connection.NetHandle): void => {
+        this.schedulePhysicalNetworkCheck();
       });
-      observer.on('netCapabilitiesChange', (info: connection.NetCapabilityInfo): void => {
-        this.physicalNetworkAvailable(info.netHandle.netId);
+      observer.on('netCapabilitiesChange', (_info: connection.NetCapabilityInfo): void => {
+        this.schedulePhysicalNetworkCheck();
       });
       this.networkObserver = observer;
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_WATCH_FAIL|summary=%{public}s', safeError(error as Error));
     }
+  }
+
+  private schedulePhysicalNetworkCheck(): void {
+    if (this.networkDebounceTimer !== -1) { clearTimeout(this.networkDebounceTimer); }
+    this.networkDebounceTimer = setTimeout((): void => {
+      this.networkDebounceTimer = -1;
+      this.physicalNetworkAvailable(physicalDefaultNetId());
+    }, 250);
   }
 
   private physicalNetworkAvailable(netId: number): void {
@@ -725,6 +737,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.networkNetId = netId;
     this.networkDirty = true;
     this.networkEpoch++;
+    connectorPhysicalNetworkChanged('');
     this.recoverPhysicalNetwork().catch((error: Error): void => {
       hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
     });
@@ -743,11 +756,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (vpn === undefined || this.recreateInFlight || netId === 0 || this.managementEndpoint === undefined) { break; }
         forgetPhysicalDefaultDns();
         const dns: string[] = physicalDefaultDnsServers(netId);
-        if (dns.length === 0) { break; }
-        let addr: string;
-        try {
-          addr = await resolveManagementIp(this.managementEndpoint, DNS_RESOLVE_BOX_MS, netId);
-        } catch (error) { break; }
+        if (dns.length === 0 || !socketSupplyDnsServers(dns).ok) { break; }
+        const managementIp: string = await resolveProtectedIp(this.managementEndpoint.host);
+        if (managementIp.length === 0) { break; }
+        const addr: string = `${managementIp}:${this.managementEndpoint.port}`;
         if (epoch !== this.networkEpoch || this.destroyRequested) { continue; }
         const opened: NativeSocketOpen = JSON.parse(core.wg_fwd_open()) as NativeSocketOpen;
         if (opened.fd < 0 || opened.bind_rc !== 0) {
@@ -783,7 +795,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (epoch !== this.networkEpoch || this.destroyRequested) { continue; }
         if (this.signalUri.length > 0) {
           const endpoint: ManagementEndpoint = parseSignalEndpoint(this.signalUri, 443);
-          const signalAddr: string = await resolveManagementIp(endpoint, DNS_RESOLVE_BOX_MS, netId);
+          const signalIp: string = await resolveProtectedIp(endpoint.host);
+          if (signalIp.length === 0 || epoch !== this.networkEpoch) { break; }
+          const signalAddr: string = `${signalIp}:${endpoint.port}`;
           const sock: NativeTcpSocketOpen = mgmtSocketOpen();
           if (sock.fd < 0 || sock.bind_rc !== 0) {
             if (sock.fd >= 0) { socketSupplyCloseFd(sock.fd); }
@@ -865,6 +879,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // process. A missing ticket is the normal case: everything stays off and
     // NOTHING is logged.
     this.readDiagSwitches();
+    if (this.protectDeviationRouteExclusion ||
+      (!this.endpointExclusionsEnabled && this.diagCaptureRoute)) {
+      hilog.error(DOMAIN, TAG, 'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=dev-switch-conflict',
+        this.requestId);
+      return;
+    }
 
     let setupKey: string;
     let device: DeviceConfigFile;
@@ -2659,13 +2679,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_RECREATE_RESOLVED|requestId=%{public}s|gen=%{public}d|accepted=true',
         this.requestId, gen);
 
-      // 5. feed the data plane: the protected outer socket FIRST (SAME
-      // native socket — an idempotent no-op while the device is up; a fresh
-      // pair if the device somehow went down), then the NEW TUN fd (the
-      // core replaces its TUN in place and keeps the WG sessions).
-      stage = 'wg-feed';
-      if (!this.feedWgDataplane()) {
-        throw new Error('recreate-wg-feed-failed');
+      // 5. replace only the TUN dup. The live core device already owns the
+      // protected WG socket dup and retains its sessions across TUN replacement.
+      stage = 'tun-feed';
+      const tunFeed: WgFeedResult = connectorTunFdFeed(fd);
+      if (!tunFeed.ok || tunFeed.device_up !== true) {
+        throw new Error(`recreate-tun-feed-failed:${tunFeed.error ?? 'device-not-up'}`);
       }
 
       // 6. ACK the newly applied route set — completes the recreate (counts
@@ -2790,11 +2809,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const t0: number = Date.now();
     const epoch: number = this.networkEpoch;
     try {
-      if (this.networkDirty || this.destroyRequested || this.destroyPromise !== undefined ||
+      const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
+      if ((this.networkDirty && !(isDns && this.networkRecoveryActive)) ||
+        this.destroyRequested || this.destroyPromise !== undefined ||
         this.protectDeviationRouteExclusion) {
         return;
       }
-      const isDns: boolean = request.kind === 'udp' && request.purpose === 'dns';
       if (!isDns && (request.kind !== 'tcp' || (request.purpose !== 'management' &&
         request.purpose !== 'signal' && request.purpose !== 'relay'))) {
         return;
@@ -2812,9 +2832,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
-      if (protectedOk && epoch === this.networkEpoch && !this.networkDirty &&
+      if (protectedOk && epoch === this.networkEpoch &&
+        (!this.networkDirty || isDns && this.networkRecoveryActive) &&
         !this.protectDeviationRouteExclusion && !this.destroyRequested &&
-        this.destroyPromise === undefined) {
+        this.destroyPromise === undefined && this.connection === connection) {
         result = 'protected';
       } else {
         result = 'protect-failed';
@@ -2862,7 +2883,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return false;
       }
       if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
-        this.destroyRequested || this.networkDirty && this.networkRecoveryReady &&
+        this.destroyRequested || this.connection !== connection ||
+        this.networkDirty && this.networkRecoveryReady &&
         !this.networkRecoveryActive) {
         hilog.warn(DOMAIN, TAG,
           'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=protect|fd=%{public}d',
@@ -3233,18 +3255,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, fd, bindRc, bindErrno);
       return false;
     }
-    this.outboundSocketFd = fd;
+    // Keep this original local across await: destroy audits only published fds.
+    // A late protect result after teardown must never publish an orphan fd.
     hilog.info(DOMAIN, TAG,
       'VPN_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d', this.requestId, fd);
 
     const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
-    if (!protectedOk) {
+    if (!protectedOk || this.destroyRequested || this.destroyPromise !== undefined ||
+      this.connection !== connection) {
       socketSupplyCloseFd(fd);
-      this.outboundSocketFd = -1;
       hilog.error(DOMAIN, TAG,
         'VPN_PROTECT_FAIL_CLOSED|requestId=%{public}s|stage=protect|fd=%{public}d', this.requestId, fd);
       return false;
     }
+    this.outboundSocketFd = fd;
     this.outboundProtected = true;
     hilog.info(DOMAIN, TAG,
       'VPN_PROTECT_RESOLVED|requestId=%{public}s|fd=%{public}d|datagramsFlown=none-yet', this.requestId, fd);
@@ -3401,7 +3425,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const epoch: number = this.networkEpoch;
     try {
       if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
-        this.destroyRequested || this.networkDirty && this.networkRecoveryReady &&
+        this.destroyRequested || this.connection !== connection ||
+        this.networkDirty && this.networkRecoveryReady &&
         !this.networkRecoveryActive) {
         hilog.error(DOMAIN, TAG,
           'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect-or-stale|fd=%{public}d',

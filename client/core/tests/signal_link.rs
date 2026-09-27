@@ -64,7 +64,7 @@ struct FedSocks {
 
 impl FedSocks {
     fn new(n: usize) -> Self {
-        let source = Arc::new(ProtectedUdpFdSource::new_with_fd(-1));
+        let source = Arc::new(ProtectedUdpFdSource::new_with_fd(-1).unwrap());
         let fed = FedSocks { source, raw_fds: Mutex::new(Vec::new()) };
         fed.add(n);
         fed
@@ -210,7 +210,7 @@ fn spawn_node(
     let signal_source: Arc<ProtectedSocketFdSource> = if signal_fds > 0 {
         signal_mock::socket_source(signal_fds)
     } else {
-        Arc::new(ProtectedSocketFdSource::new_with_fd(-1))
+        Arc::new(ProtectedSocketFdSource::new_with_fd(-1).unwrap())
     };
 
     let cb_orch = orch.clone();
