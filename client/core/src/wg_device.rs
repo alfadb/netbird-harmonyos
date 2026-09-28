@@ -155,6 +155,7 @@
 //!   ——本模块（含载体路径）只经 [`TunFd`]/dup 副本接触 fd，载体挂载/
 //!   拆除/`connector_stop()` 都不会触碰那个号码。
 
+use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -1229,8 +1230,14 @@ impl WgDevice {
 
     /// Poll + recvfrom + `handle_udp`. Non-blocking, at most `DRAIN_MAX`
     /// datagrams per call.
+    ///
+    /// N2 v4.1 P7: when the outer-source receipt is armed, every datagram read
+    /// here ALSO produces a `n2h-outer-receipt` line (the post-NAT source of
+    /// the WG outer socket). Unarmed this is one `armed()` load, so the
+    /// pre-P7 behaviour and output are unchanged.
     pub fn service_udp(&mut self, now_ms: u64) -> usize {
         let Some(fd) = self.fd else { return 0 };
+        let receipt = crate::n2_outer_receipt::armed();
         let mut n = 0usize;
         while n < DRAIN_MAX {
             let (ret, _e, rev) = sys::poll1(fd, sys::POLLIN, 0);
@@ -1253,10 +1260,39 @@ impl WgDevice {
             if rn <= 0 {
                 break;
             }
-            self.handle_udp(&buf[..rn as usize], (from.sin_addr, u16::from_be(from.sin_port)), now_ms);
+            let src = (from.sin_addr, u16::from_be(from.sin_port));
+            if receipt {
+                let (lip, lport) = self.local;
+                crate::n2_outer_receipt::note_udp(
+                    Some(SocketAddr::from((Ipv4Addr::from(lip), lport))),
+                    SocketAddr::from((Ipv4Addr::from(src.0), src.1)),
+                    &buf[..rn as usize],
+                    &self.outer_peer_label(src),
+                );
+            }
+            self.handle_udp(&buf[..rn as usize], src, now_ms);
             n += 1;
         }
         n
+    }
+
+    /// N2 v4.1 P7: the `peer=` field of an outer-source receipt — the
+    /// registered peer whose endpoint equals `src`, as the N5c 8-char
+    /// alphanumeric public-key short prefix. Any other source is `unknown`
+    /// (never invented; the off-path probe drop is exactly the receipt the
+    /// cellular legs need).
+    fn outer_peer_label(&self, src: ([u8; 4], u16)) -> String {
+        self.peers
+            .iter()
+            .find(|p| p.endpoint == Some(src))
+            .map(|p| {
+                p.key_b64
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .take(8)
+                    .collect()
+            })
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     /// One device-clock tick: session-expiry check, handshake retries,
@@ -2873,6 +2909,109 @@ mod feed_tests {
         slot.with_device(|d| assert_eq!(d.peer_count(), 0, "cleared peers stay cleared"))
             .expect("device access");
         for fd in [wg_raw, tun_end, wg2, tun2_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // N2 v4.1 P7: the outer-source receipt of the WG outer socket
+    // -----------------------------------------------------------------------
+
+    /// One loopback UDP socket: `(fd, bound port)`. The caller closes the fd.
+    fn loopback_udp() -> (i32, u16) {
+        let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(fd >= 0);
+        let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        assert_eq!(
+            unsafe { sys::bind(fd, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) },
+            0
+        );
+        let mut name = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        assert_eq!(unsafe { sys::getsockname(fd, &mut name, &mut len) }, 0);
+        (fd, u16::from_be(name.sin_port))
+    }
+
+    /// A real loopback datagram to `port` — the "device behind NAT" stand-in.
+    fn send_loopback_udp(from: i32, port: u16, payload: &[u8]) {
+        let dst = sys::sockaddr_in::new([127, 0, 0, 1], port);
+        let n = unsafe {
+            sys::sendto(
+                from,
+                payload.as_ptr() as *const core::ffi::c_void,
+                payload.len(),
+                0,
+                &dst,
+                core::mem::size_of::<sys::sockaddr_in>() as u32,
+            )
+        };
+        assert_eq!(n, payload.len() as isize);
+    }
+
+    #[test]
+    fn outer_receipt_reports_known_and_unknown_sources_and_stays_silent_when_off() {
+        let _g = crate::n2_outer_receipt::global_lock();
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let key = base64::engine::general_purpose::STANDARD.encode([0x7Au8; 32]);
+        let prefix: String = key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+        slot.apply_peers(&[peer_entry(&key, [10, 7, 0, 2])]).expect("peers");
+        slot.feed_tun(tun_raw).expect("tun");
+        slot.feed_wg_socket(wg_raw).expect("wg");
+        let (dev_ip, dev_port) = slot.with_device(|d| d.local_addr()).expect("device up");
+        assert_eq!(dev_ip, [127, 0, 0, 1]);
+
+        // the registered peer (endpoint match) + a stranger (off-path source)
+        let (peer_fd, peer_port) = loopback_udp();
+        let (stranger_fd, stranger_port) = loopback_udp();
+        slot.apply_endpoint(&key, [127, 0, 0, 1], peer_port).expect("endpoint");
+
+        // DISARMED negative control: the datagram IS consumed by the device
+        // (unknown_peer_drops moves) and produces NO line at all.
+        let drops_before = slot.with_device(|d| d.stats.unknown_peer_drops).expect("stats");
+        send_loopback_udp(stranger_fd, dev_port, &[4u8; 32]);
+        assert_eq!(slot.with_device(|d| d.service_udp(sys::mono_ms())).expect("device"), 1);
+        assert_eq!(slot.with_device(|d| d.stats.unknown_peer_drops).expect("stats"), drops_before + 1);
+        assert!(crate::n2_outer_receipt::emitted_lines().is_empty(), "switch off ⇒ zero output");
+
+        // ARMED: the registered endpoint is named, the stranger is `unknown`
+        crate::n2_outer_receipt::arm(true);
+        send_loopback_udp(peer_fd, dev_port, &[1u8; 32]);
+        assert_eq!(slot.with_device(|d| d.service_udp(sys::mono_ms())).expect("device"), 1);
+        let lines = crate::n2_outer_receipt::emitted_lines();
+        let known: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains(&format!("|src=127.0.0.1:{peer_port}|")))
+            .collect();
+        assert_eq!(known.len(), 1, "{lines:?}");
+        assert!(known[0].starts_with("n2h-outer-receipt|first|"), "{}", known[0]);
+        assert!(known[0].contains(&format!("|local=127.0.0.1:{dev_port}|")), "{}", known[0]);
+        assert!(known[0].contains("|type=wg-init|"), "{}", known[0]);
+        assert!(known[0].contains(&format!("|peer={prefix}|")), "{}", known[0]);
+
+        send_loopback_udp(stranger_fd, dev_port, &[4u8; 32]);
+        assert_eq!(slot.with_device(|d| d.service_udp(sys::mono_ms())).expect("device"), 1);
+        let lines = crate::n2_outer_receipt::emitted_lines();
+        let unknown: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains(&format!("|src=127.0.0.1:{stranger_port}|")))
+            .collect();
+        assert_eq!(unknown.len(), 1, "{lines:?}");
+        assert!(unknown[0].contains("|type=wg-data|"), "{}", unknown[0]);
+        assert!(unknown[0].contains("|peer=unknown|"), "{}", unknown[0]);
+
+        // throttle: a second datagram of the same type inside the 5 s window
+        // produces nothing new for that source
+        send_loopback_udp(stranger_fd, dev_port, &[4u8; 32]);
+        assert_eq!(slot.with_device(|d| d.service_udp(sys::mono_ms())).expect("device"), 1);
+        let after_lines = crate::n2_outer_receipt::emitted_lines();
+        let after: Vec<&String> = after_lines
+            .iter()
+            .filter(|l| l.contains(&format!("|src=127.0.0.1:{stranger_port}|")))
+            .collect();
+        assert_eq!(after.len(), 1, "no per-packet spam: {after:?}");
+
+        crate::n2_outer_receipt::arm(false);
+        for fd in [wg_raw, tun_raw, tun_end, peer_fd, stranger_fd] {
             unsafe { sys::close(fd) };
         }
     }

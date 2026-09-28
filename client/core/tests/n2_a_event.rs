@@ -19,8 +19,13 @@
 //! 3. **D follows Q1**: the first D event of an armed session dispatches the
 //!    requery primitive once; any prior A event (or prior `n2_stimulus`)
 //!    refuses with `prior-stimulus`.
-//! 4. **S is refused by name** (`no-side-effect-free-production-send`), and an
-//!    UNARMED session refuses before any trigger call / records nothing.
+//! 4. **S triggers the production receive-watchdog HEARTBEAT** through the
+//!    connector's trigger seam: without a live `S` registration it is an
+//!    honest error, with one it reports `sent` on the SAME `fd`/`dup_fd` pair
+//!    the `N2_SOCK` receipts carry (the end-to-end frame/connection assertion
+//!    lives in `tests/signal_watchdog.rs`, where the probe handle — one live
+//!    signal stream per process — is owned by that binary). An UNARMED session
+//!    refuses before any trigger call / records nothing.
 //! 5. **P5 ordering** against the REAL armed destination tee: the pre control's
 //!    HIT (consumed by `N2DestinationTee::consume_control`) precedes the first
 //!    production send, a first send before the attach anchor is the frozen
@@ -241,6 +246,7 @@ async fn spawn_key_server() -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) 
 struct TestTrigger {
     rpc: Mutex<Option<Box<dyn Fn() -> Result<(), String> + Send>>>,
     requery: Arc<AtomicUsize>,
+    probes: Arc<AtomicUsize>,
     watches: Mutex<Vec<(String, u64, u64)>>,
 }
 
@@ -254,6 +260,11 @@ impl n2_a_event::Trigger for TestTrigger {
 
     fn dns_requery(&self) -> Result<(), String> {
         self.requery.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn signal_probe(&self) -> Result<(), String> {
+        self.probes.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -321,6 +332,7 @@ async fn m_runs_one_real_rpc_on_the_existing_connection_only() {
             }
         }))),
         requery: Arc::new(AtomicUsize::new(0)),
+        probes: Arc::new(AtomicUsize::new(0)),
         watches: Mutex::new(Vec::new()),
     });
     n2_a_event::install_trigger(trigger.clone());
@@ -376,6 +388,7 @@ fn r_arms_the_documented_watch_and_completes_observed_or_timeout() {
     let trigger = Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: requery.clone(),
+        probes: Arc::new(AtomicUsize::new(0)),
         watches: Mutex::new(Vec::new()),
     });
     n2_a_event::install_trigger(trigger.clone());
@@ -420,7 +433,51 @@ fn r_arms_the_documented_watch_and_completes_observed_or_timeout() {
 }
 
 #[test]
-fn d_q1_and_s_refusals_through_the_json_surface() {
+fn s_event_reports_sent_and_refuses_without_a_live_socket() {
+    let _guard = serial();
+    n2_socket_trace::arm(false);
+    n2_a_event::reset();
+    n2_socket_trace::arm(true);
+
+    let probes = Arc::new(AtomicUsize::new(0));
+    n2_a_event::install_trigger(Arc::new(TestTrigger {
+        rpc: Mutex::new(None),
+        requery: Arc::new(AtomicUsize::new(0)),
+        probes: probes.clone(),
+        watches: Mutex::new(Vec::new()),
+    }));
+
+    // Armed but with NO live S registration: there is no production signal
+    // socket this event could be attributed to — an honest error, no probe.
+    let s_none = netbird_core::connector::n2_a_event_json("S", "a-S-0");
+    assert!(s_none.contains("\"result\":\"error\""), "{s_none}");
+    assert!(s_none.contains("\"reason\":\"no-live-signal-connection\""), "{s_none}");
+    assert_eq!(probes.load(Ordering::Acquire), 0);
+
+    // With the live S registration the event triggers the production watchdog
+    // HEARTBEAT and reports that socket's fd/dup pair.
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("udp");
+    let s_fd = sock.as_raw_fd();
+    n2_socket_trace::protect(s_fd, "S", "req-a-event", 0, 31, 4, true);
+    n2_socket_trace::io_begin(s_fd, "192.0.2.9:443".parse().expect("addr"));
+    n2_socket_trace::first_io(s_fd, "192.0.2.9:443".parse().expect("addr"), "connected", "connect");
+    let s = netbird_core::connector::n2_a_event_json("S", "a-S-1");
+    assert!(s.contains("\"result\":\"sent\"") && s.contains("\"ok\":true"), "{s}");
+    assert!(s.contains(&format!("\"fd\":{s_fd}")), "{s}");
+    assert_eq!(probes.load(Ordering::Acquire), 1);
+    assert!(
+        n2_a_event::last_line().expect("line").contains("|detail=self-addressed-heartbeat|"),
+        "the core line names the production frame"
+    );
+    assert_eq!(n2_a_event::a_events(), 1, "a dispatched S event counts as an A event");
+
+    n2_socket_trace::closed(s_fd);
+    n2_socket_trace::arm(false);
+    n2_a_event::reset();
+}
+
+#[test]
+fn d_q1_and_the_json_surface_refusals() {
     let _guard = serial();
     n2_socket_trace::arm(false);
     n2_a_event::reset();
@@ -430,13 +487,9 @@ fn d_q1_and_s_refusals_through_the_json_surface() {
     n2_a_event::install_trigger(Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: requery.clone(),
+        probes: Arc::new(AtomicUsize::new(0)),
         watches: Mutex::new(Vec::new()),
     }));
-
-    // S: no side-effect-free production send exists -> always refused by name.
-    let s = netbird_core::connector::n2_a_event_json("S", "a-S-1");
-    assert!(s.contains("\"result\":\"rejected\""), "{s}");
-    assert!(s.contains("\"reason\":\"no-side-effect-free-production-send\""), "{s}");
 
     // D: the first A event of the session dispatches the requery once.
     let d1 = netbird_core::connector::n2_a_event_json("D", "a-D-1");
@@ -593,6 +646,7 @@ fn a_live_relay_socket_reports_its_own_fd_pair_after_the_shell_close() {
     n2_a_event::install_trigger(Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: Arc::new(AtomicUsize::new(0)),
+        probes: Arc::new(AtomicUsize::new(0)),
         watches: Mutex::new(Vec::new()),
     }));
     let armed = n2_a_event::apply("R", "a-R-9");

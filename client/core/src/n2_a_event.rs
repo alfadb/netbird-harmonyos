@@ -25,11 +25,16 @@
 //!   session wins; only when this session has NO earlier `n2_stimulus` and NO
 //!   earlier A event may the existing requery primitive fire ONCE
 //!   (`force_protected_dns_requery`). Otherwise `rejected|reason=prior-stimulus`.
-//! * `S` — **not implemented**. `signal.rs`'s self-addressed HEARTBEAT has no
-//!   caller yet (the receive watchdog is N5/P8) and the peer-directed frames
-//!   have peer-side side effects, so there is no side-effect-free production
-//!   send to trigger: every `S` request is answered
-//!   `rejected|reason=no-side-effect-free-production-send`.
+//! * `S` — ONE **self-addressed HEARTBEAT** (`Body.HEARTBEAT = 6`,
+//!   `signal.rs`'s `send_heartbeat` = upstream `sendReceiveProbe`,
+//!   grpc.go:555-566) sent by the **registered receive watchdog** on the
+//!   SAME signal stream/connection. It is a frame the production client sends
+//!   anyway (the P8 watchdog probes after 20 s of silence); this trigger only
+//!   moves its SEND TIME (`signal::request_receive_probe`), it cannot invent a
+//!   frame kind and it has no peer/server state side effect (the server routes
+//!   it straight back to the sender). `fd`/`dup_fd` are the live `S` pair the
+//!   `N2_SOCK` receipts report; the authoritative send receipt stays
+//!   `N2_SOCK|phase=subsequent_io|kind=S` (the socket wrapper), not this line.
 //!
 //! ## Gating
 //!
@@ -55,9 +60,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use crate::hilog;
 use crate::sys;
 
-/// The four kinds this primitive accepts. `M`/`R`/`D` are triggers; `S` is a
-/// fixed refusal (see the module docs). The closed list mirrors the frozen
-/// A-column rows that have a side-effect-free production send.
+/// The four kinds this primitive accepts. `M`/`R`/`D`/`S` are the frozen
+/// A-column rows that have a side-effect-free production send: `M` a read-only
+/// management RPC, `R` the server-driven HealthCheck echo, `D` the protected
+/// DNS requery, `S` the self-addressed watchdog HEARTBEAT.
 pub const KINDS: [&str; 4] = ["M", "R", "D", "S"];
 
 /// The frozen R wait bound (`§4` R row: "等待上限写入 AUTH（建议 ≤ 90 s…）").
@@ -68,6 +74,14 @@ pub const R_WAIT_MS: u64 = 90_000;
 /// box bounds the operator-visible wait without inventing a new timeout for
 /// the production RPC.
 pub const M_RPC_WAIT_MS: u64 = 5_000;
+
+/// The bounded synchronous `S` wait: the shell thread blocks until the
+/// registered receive watchdog reports that its self-addressed HEARTBEAT send
+/// call returned. The probe is one unary `SignalExchange/Send` on the existing
+/// connection (client-side deadline `request_timeout`, 5 s in production), so
+/// this box bounds the operator-visible wait without inventing a new timeout
+/// for the production frame.
+pub const S_PROBE_WAIT_MS: u64 = 5_000;
 
 /// The fd/dup identity chain of the live outer socket the trigger reuses:
 /// `fd` = shell ORIGINAL, `dup_fd` = core-owned descriptor (exactly the
@@ -94,6 +108,12 @@ pub trait Trigger: Send + Sync + 'static {
     fn management_round_trip(&self) -> Result<(), String>;
     /// The existing D requery primitive (one fresh protected query).
     fn dns_requery(&self) -> Result<(), String>;
+    /// ONE self-addressed HEARTBEAT from the registered receive watchdog, on
+    /// the SAME signal stream/connection (`signal::request_receive_probe`,
+    /// bounded by [`S_PROBE_WAIT_MS`]). `Err(token)` is reported verbatim
+    /// (`no-registered-signal-stream`, `signal-heartbeat-<class>`,
+    /// `signal-heartbeat-timeout`, `no-connector`).
+    fn signal_probe(&self) -> Result<(), String>;
     /// Arm the [`R_WAIT_MS`] timeout for the watch `id` (the session's own
     /// runtime sleeps and then calls [`r_watch_timeout`] with the SAME `seq`,
     /// so a stale timer from a previous watch can never time out a later one).
@@ -217,12 +237,6 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
     if static_kind(kind).is_none() {
         return record(kind, id, &FdPair::unknown(), "rejected", "invalid-kind", "gate");
     }
-    // `S` has no side-effect-free production send (frozen §4 S row (iii)):
-    // refused by name whatever else the request carries.
-    if kind == "S" {
-        return record(kind, id, &FdPair::unknown(), "rejected",
-            "no-side-effect-free-production-send", "no-production-frame");
-    }
     if !valid_id(id) {
         return record(kind, id, &FdPair::unknown(), "rejected", "invalid-id", "gate");
     }
@@ -257,6 +271,27 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
                     record(kind, id, &pair, "sent", "ok", "get-server-key")
                 }
                 Err(reason) => record(kind, id, &pair, "error", &reason, "get-server-key-failed"),
+            }
+        }
+        "S" => {
+            // The frozen §4 `S` row: the event is the production
+            // self-addressed HEARTBEAT on the SAME signal fd/dup. Without a
+            // live `S` registration there is no production socket this event
+            // could be attributed to (same rule as `M`).
+            let pair = live_pair("S");
+            if pair.dup_fd < 0 {
+                return record(kind, id, &pair, "error", "no-live-signal-connection",
+                    "no-n2-sock-registration");
+            }
+            match trigger.signal_probe() {
+                Ok(()) => {
+                    {
+                        let mut state = state();
+                        state.a_events = state.a_events.saturating_add(1);
+                    }
+                    record(kind, id, &pair, "sent", "ok", "self-addressed-heartbeat")
+                }
+                Err(reason) => record(kind, id, &pair, "error", &reason, "heartbeat-send-failed"),
             }
         }
         "D" => {
@@ -380,6 +415,7 @@ mod tests {
     struct Counting {
         rpc: AtomicUsize,
         requery: AtomicUsize,
+        probe: AtomicUsize,
         watch: AtomicUsize,
         fail: Mutex<Option<&'static str>>,
         watches: Mutex<Vec<(String, u64, u64)>>,
@@ -395,6 +431,13 @@ mod tests {
         }
         fn dns_requery(&self) -> Result<(), String> {
             self.requery.fetch_add(1, Ordering::SeqCst);
+            match *self.fail.lock().unwrap() {
+                Some(token) => Err(token.to_string()),
+                None => Ok(()),
+            }
+        }
+        fn signal_probe(&self) -> Result<(), String> {
+            self.probe.fetch_add(1, Ordering::SeqCst);
             match *self.fail.lock().unwrap() {
                 Some(token) => Err(token.to_string()),
                 None => Ok(()),
@@ -439,17 +482,43 @@ mod tests {
     }
 
     #[test]
-    fn kind_s_is_always_refused_with_its_named_reason() {
+    fn kind_s_needs_a_live_signal_socket_and_reports_the_probe_outcome() {
         let _guard = test_guard();
         reset_all();
-        install_trigger(Arc::new(Counting::default()));
+        // Production order: the ticket arms the trace (which clears any
+        // previous seam), then the connector installs its trigger.
         crate::n2_socket_trace::arm(true);
-        let out = apply("S", "a-S-1");
-        assert_eq!(out.result, "rejected");
-        assert_eq!(out.reason, "no-side-effect-free-production-send");
-        assert!(out.line.contains("|kind=S|fd=-1|dup_fd=-1|"));
-        // even with an id the marker rule would refuse, `S` keeps its own name
-        assert_eq!(apply("S", "a b").reason, "no-side-effect-free-production-send");
+        let counting = Arc::new(Counting::default());
+        install_trigger(counting.clone());
+        // armed but no S registration: the event cannot be attributed, and no
+        // probe is requested.
+        let none = apply("S", "a-S-0");
+        assert_eq!(none.result, "error");
+        assert_eq!(none.reason, "no-live-signal-connection");
+        assert_eq!(counting.probe.load(Ordering::SeqCst), 0, "no probe without a live fd");
+        // a real registered S socket: fd/dup come FROM the trace, exactly as
+        // the `N2_SOCK` receipts report them.
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+        register("S", fd);
+        let sent = apply("S", "a-S-1");
+        assert_eq!(sent.result, "sent", "{}", sent.line);
+        assert_eq!(sent.reason, "ok");
+        assert_eq!(sent.fd, fd);
+        assert_eq!(sent.dup_fd, fd);
+        assert!(sent.line.contains(&format!("|fd={fd}|dup_fd={fd}|remote=192.0.2.9:443|")));
+        assert!(sent.line.contains("|detail=self-addressed-heartbeat|"), "{}", sent.line);
+        assert_eq!(counting.probe.load(Ordering::SeqCst), 1);
+        assert_eq!(a_events(), 1);
+        // a refused/failed probe is reported as an error, never as sent
+        *counting.fail.lock().unwrap() = Some("no-registered-signal-stream");
+        let failed = apply("S", "a-S-2");
+        assert_eq!(failed.result, "error");
+        assert_eq!(failed.reason, "no-registered-signal-stream");
+        assert_eq!(a_events(), 1, "a failed probe is not an A event");
+        *counting.fail.lock().unwrap() = None;
+        // the marker rule is enforced for S like for every other kind
+        assert_eq!(apply("S", "a b").reason, "invalid-id");
         assert_eq!(apply("Z", "a-Z-1").reason, "invalid-kind");
         assert_eq!(apply("M", "with space").reason, "invalid-id");
         reset_all();

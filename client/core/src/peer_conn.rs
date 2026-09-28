@@ -552,6 +552,12 @@ pub fn ice_ready_for_default_route(summary: &IceOrchestratorSummary) -> bool {
     summary.peers == 0 || summary.reachable > 0
 }
 
+/// N2 v4.1 P7: the 8-char public-key short prefix this module's log lines use
+/// (the N5c shape) — the `peer=` label of an outer-source receipt.
+fn peer_short(key: &str) -> String {
+    key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
+}
+
 // ---------------------------------------------------------------------------
 // per-peer 内部状态
 // ---------------------------------------------------------------------------
@@ -848,6 +854,9 @@ impl PeerIceOrchestrator {
                     // 冲突由 N5b tie-breaker 修复）。
                     let local = IceCredentials::generate()?;
                     let mut session = IceSession::new(local.clone(), false, self.tie_breaker)?;
+                    // N2 v4.1 P7: the session's outer-source receipts name
+                    // THIS peer (same short prefix as the N5c lines).
+                    session.set_peer_label(&peer_short(&self.peers[idx].key));
                     session.set_remote_credentials(creds.clone())?;
                     let peer = &mut self.peers[idx];
                     peer.creds = Some(local);
@@ -1048,7 +1057,9 @@ impl PeerIceOrchestrator {
         if self.peers[idx].session.is_none() {
             let creds = IceCredentials::generate()?;
             let controlling = self.peers[idx].initiated;
-            let session = IceSession::new(creds.clone(), controlling, self.tie_breaker)?;
+            let mut session = IceSession::new(creds.clone(), controlling, self.tie_breaker)?;
+            // N2 v4.1 P7: the session's outer-source receipts name THIS peer.
+            session.set_peer_label(&peer_short(&self.peers[idx].key));
             self.peers[idx].creds = Some(creds);
             self.peers[idx].session = Some(session);
             self.peers[idx].session_at_ms = now_ms;

@@ -454,3 +454,205 @@ async fn armed_signal_session_records_post_connect_writes() {
     let _ = on_task.await;
     netbird_core::n2_socket_trace::arm(false);
 }
+
+// ---------------------------------------------------------------------------
+// N2 P8: the signal receive watchdog (product behaviour) and its outside
+// trigger (the A-column `S` event's "move only the send time" seam)
+// ---------------------------------------------------------------------------
+
+/// The watchdog parameters are the documented pair: probe after 20 s of
+/// silence, give the stream up after 30 s — i.e. the upstream 10 s
+/// probe-return window (`shared/signal/client/grpc.go:29-41`, `:522-553`).
+#[test]
+fn watchdog_thresholds_are_the_documented_pair() {
+    use std::time::Duration as D;
+    assert_eq!(netbird_core::signal::RECEIVE_PROBE_AFTER, D::from_secs(20));
+    assert_eq!(netbird_core::signal::RECEIVE_DEAD_AFTER, D::from_secs(30));
+    assert!(
+        netbird_core::signal::RECEIVE_PROBE_AFTER < netbird_core::signal::RECEIVE_DEAD_AFTER,
+        "the probe-return window must be positive"
+    );
+}
+
+/// One registered session over the mock with the given watchdog thresholds;
+/// returns its recorded events and the task handle.
+async fn watchdog_session(
+    addr: std::net::SocketAddr,
+    keys: EnvelopeKeyPair,
+    probe_after: Duration,
+    dead_after: Duration,
+    fds: usize,
+) -> (
+    Arc<std::sync::Mutex<Vec<Rec>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let client = connect_client(TestTransport::Plain, addr, keys, socket_source(fds)).await;
+    let mut session = SignalSession::new(client)
+        .with_policy(
+            quick_policy(None),
+            FixedRng::filled(64, 0.5),
+            Box::new(netbird_core::backoff::MonotonicClock),
+        )
+        .with_receive_watchdog(probe_after, dead_after);
+    let recs = Arc::new(std::sync::Mutex::new(Vec::<Rec>::new()));
+    let loop_recs = recs.clone();
+    let handle = tokio::spawn(async move {
+        let _ =
+            session.run_events(move |ev| loop_recs.lock().expect("recs").push(record(ev))).await;
+    });
+    wait_for("signal session Registered", || {
+        recs.lock().expect("recs").iter().any(|r| r == &Rec::Registered)
+    })
+    .await;
+    (recs, handle)
+}
+
+fn has_broken(recs: &Arc<std::sync::Mutex<Vec<Rec>>>) -> bool {
+    recs.lock().expect("recs").iter().any(|r| matches!(r, Rec::Broken(_)))
+}
+
+fn registered_count(recs: &Arc<std::sync::Mutex<Vec<Rec>>>) -> usize {
+    recs.lock().expect("recs").iter().filter(|r| r == &&Rec::Registered).count()
+}
+
+/// Silence reaches the probe threshold: ONE self-addressed HEARTBEAT goes out
+/// on the SAME connection, the server echo is delivered back as a Heartbeat
+/// frame, and the stream is never declared broken.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_probes_after_silence_and_the_echo_keeps_the_stream_up() {
+    let mock = SignalMock::default();
+    let (addr, counter) = spawn_signal_mock(mock.clone()).await;
+    let keys_a = EnvelopeKeyPair::generate().expect("keys A");
+    let (recs, handle) = watchdog_session(
+        addr,
+        keys_a,
+        Duration::from_millis(400),
+        Duration::from_millis(4_000),
+        2,
+    )
+    .await;
+
+    assert_eq!(
+        mock.self_addressed_sends(),
+        0,
+        "no probe before the silence window is reached"
+    );
+    wait_for("the watchdog's self-addressed HEARTBEAT", || {
+        mock.self_addressed_sends() >= 1
+    })
+    .await;
+    wait_for("the echoed heartbeat delivered as a Heartbeat frame", || {
+        recs.lock().expect("recs").iter().any(
+            |r| matches!(r, Rec::Message { kind, .. } if *kind == body::Type::Heartbeat as i32),
+        )
+    })
+    .await;
+
+    assert!(!has_broken(&recs), "the echo proves liveness — no reconnect: {recs:?}");
+    assert_eq!(registered_count(&recs), 1, "the stream was never re-registered");
+    assert_eq!(counter.accepted(), 1, "the probe rode the SAME connection");
+    assert_eq!(mock.stream_frames_seen(), 0, "the probe is a unary Send, never a stream frame");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// A received frame restarts the silence window: the probe cannot fire any
+/// earlier than one full window AFTER that frame.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_received_frame_restarts_the_watchdog_silence_window() {
+    let mock = SignalMock::default();
+    let (addr, _counter) = spawn_signal_mock(mock.clone()).await;
+    let keys_a = EnvelopeKeyPair::generate().expect("keys A");
+    let (recs, handle) = watchdog_session(
+        addr,
+        keys_a.clone(),
+        Duration::from_millis(1_500),
+        Duration::from_millis(6_000),
+        2,
+    )
+    .await;
+
+    // Let more than a THIRD of the window pass with no traffic, then deliver a
+    // real frame: a watchdog that did not reset would probe ~1.2 s after it.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mock.self_addressed_sends(), 0, "window not reached yet");
+    let keys_b = EnvelopeKeyPair::generate().expect("keys B");
+    let mut client_b =
+        connect_client(TestTransport::Plain, addr, keys_b.clone(), socket_source(1)).await;
+    client_b
+        .send(&client_b.build_message(
+            &keys_a.public_key_base64(),
+            body::Type::Candidate,
+            "reset-candidate",
+            0,
+            None,
+        ))
+        .await
+        .expect("B sends candidate");
+    wait_for("candidate received", || {
+        recs.lock().expect("recs").iter().any(
+            |r| matches!(r, Rec::Message { payload, .. } if payload == "reset-candidate"),
+        )
+    })
+    .await;
+    let frame_at = std::time::Instant::now();
+    wait_for("the watchdog probes after the frame's own window", || {
+        mock.self_addressed_sends() >= 1
+    })
+    .await;
+    let since_frame = frame_at.elapsed();
+    assert!(
+        since_frame >= Duration::from_millis(1_200),
+        "the received frame restarted the silence window (probe {since_frame:?} after it)"
+    );
+    assert!(!has_broken(&recs), "a live stream is never declared dead: {recs:?}");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// The probe goes unanswered (the echo knob is off): the watchdog takes the
+/// EXISTING break/backoff/re-register path.
+#[tokio::test(flavor = "multi_thread")]
+async fn watchdog_reconnects_when_the_probe_is_never_echoed() {
+    let mock = SignalMock::default();
+    mock.drop_self_heartbeat.store(true, Ordering::SeqCst);
+    let (addr, _counter) = spawn_signal_mock(mock.clone()).await;
+    let (recs, handle) = watchdog_session(
+        addr,
+        EnvelopeKeyPair::generate().expect("keys"),
+        Duration::from_millis(150),
+        Duration::from_millis(400),
+        4,
+    )
+    .await;
+
+    wait_for("the watchdog probe went out", || mock.self_addressed_sends() >= 1).await;
+    wait_for("Broken after the probe return window", || has_broken(&recs)).await;
+    let broken = recs
+        .lock()
+        .expect("recs")
+        .iter()
+        .find_map(|r| match r {
+            Rec::Broken(e) => Some(e.clone()),
+            _ => None,
+        })
+        .expect("a Broken event");
+    assert!(
+        broken.contains("watchdog"),
+        "the break names the watchdog, got {broken}"
+    );
+    wait_for("re-registered through the existing reconnect path", || {
+        registered_count(&recs) >= 2
+    })
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+// The outside trigger (the A-column `S` seam) is exercised in
+// `tests/signal_watchdog.rs`: the probe handle is a process-global singleton
+// (one live signal stream), so that assertion needs a test binary of its own.
+// The watchdog's own silence/probe/echo/dead behaviour is covered above.

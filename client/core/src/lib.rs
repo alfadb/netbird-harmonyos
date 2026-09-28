@@ -160,6 +160,11 @@ pub mod n2_control;
 pub mod mgmtsock;
 pub mod socket_supply;
 pub mod n2_socket_trace;
+// N2 v4.1 P7: host-side outer-UDP source receipts (`nbinterop --outer-receipt`).
+// AUXILIARY, APPLICATION-LAYER ONLY — an app-level recvfrom view, never an
+// independent network-side oracle (frozen v4.1 Q2 ruling); default off, and
+// unarmed every seam is one atomic load.
+pub mod n2_outer_receipt;
 // N2 T5a「B 断流刺激」: default-off, evidence-switch-gated outer-stream
 // stimulus (M/S/R socket close, I/Wb/Ws endpoint-directed break, D fresh
 // protected query). Diagnostic only — every line is `is_evidence=false`.

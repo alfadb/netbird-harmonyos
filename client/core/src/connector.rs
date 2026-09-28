@@ -5362,6 +5362,11 @@ pub fn n2_stimulus_json(kind: &str, id: &str) -> String {
 /// * `R` — arms the [`crate::n2_a_event::R_WAIT_MS`] timeout on the session's
 ///   own runtime; the relay reader calls back when the server-driven
 ///   HealthCheck is answered.
+/// * `S` — asks the registered signal receive watchdog (`crate::signal::
+///   request_receive_probe`) for ONE self-addressed HEARTBEAT on the SAME
+///   signal stream/connection, bounded by
+///   [`crate::n2_a_event::S_PROBE_WAIT_MS`]. Only the send TIME of the
+///   production frame moves; no new dial and no other frame is created.
 struct ConnectorATrigger;
 
 impl crate::n2_a_event::Trigger for ConnectorATrigger {
@@ -5399,6 +5404,31 @@ impl crate::n2_a_event::Trigger for ConnectorATrigger {
             return Err("no-target".into());
         }
         Ok(())
+    }
+
+    fn signal_probe(&self) -> Result<(), String> {
+        // Never hold the connector slot across the wait.
+        let handle = { connector_slot().as_ref().cloned() };
+        let Some(handle) = handle else { return Err("no-connector".into()) };
+        let runtime = handle.runtime.clone();
+        // The registered receive watchdog owns the signal client: this asks it
+        // for ONE self-addressed HEARTBEAT on the SAME stream/connection and
+        // waits (bounded) for that send call to return. No new dial, no other
+        // frame, no server-side state change.
+        let waited = runtime.block_on(async {
+            tokio::time::timeout(
+                core::time::Duration::from_millis(crate::n2_a_event::S_PROBE_WAIT_MS),
+                crate::signal::request_receive_probe(),
+            )
+            .await
+        });
+        match waited {
+            Ok(Ok(())) => Ok(()),
+            // Sanitized tokens only (`no-registered-signal-stream`,
+            // `signal-heartbeat-<class>`) — never server text.
+            Ok(Err(reason)) => Err(reason),
+            Err(_) => Err("signal-heartbeat-timeout".into()),
+        }
     }
 
     fn arm_healthcheck_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {

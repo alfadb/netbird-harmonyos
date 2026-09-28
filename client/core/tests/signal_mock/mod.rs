@@ -311,6 +311,11 @@ pub struct SignalMock {
     /// Knob: flip a byte in every forwarded `body` (envelope authentication
     /// must fail client-side WITHOUT killing the stream).
     pub corrupt_forwarded_bodies: Arc<AtomicBool>,
+    /// Knob (P8 watchdog tests): do NOT forward a frame addressed to the
+    /// SENDER itself — i.e. the self-addressed HEARTBEAT `sendReceiveProbe`
+    /// leaves and no echo comes back, the shape a silent/black-holed stream
+    /// has (the real v0.78.1 server always routes it back, signal.go:95-104).
+    pub drop_self_heartbeat: Arc<AtomicBool>,
     /// Frames the mock observed ON the `ConnectStream` request body. The
     /// v0.78.1 server never reads them (never forwards them either) — a
     /// client that still pushes frames onto the stream body shows up here
@@ -319,6 +324,10 @@ pub struct SignalMock {
     /// Frames delivered through the unary `Send` RPC — the ONLY path the
     /// real server forwards (signal.go:95-104).
     unary_sends: Arc<AtomicU64>,
+    /// Self-addressed frames (`key == remote_key`): the receive watchdog's
+    /// liveness probe (`sendReceiveProbe`), counted by KIND of address so a
+    /// test can name the probe even while other peers are sending.
+    self_addressed: Arc<AtomicU64>,
     /// The decrypting sink peer (optionally also registered as a
     /// forwarding destination under its public key).
     pub sink: Arc<Mutex<Option<SinkPeer>>>,
@@ -333,8 +342,10 @@ impl Default for SignalMock {
             fail_registration_unavailable: Arc::new(AtomicBool::new(false)),
             omit_registered_header: Arc::new(AtomicBool::new(false)),
             corrupt_forwarded_bodies: Arc::new(AtomicBool::new(false)),
+            drop_self_heartbeat: Arc::new(AtomicBool::new(false)),
             stream_frames_seen: Arc::new(AtomicU64::new(0)),
             unary_sends: Arc::new(AtomicU64::new(0)),
+            self_addressed: Arc::new(AtomicU64::new(0)),
             sink: Arc::new(Mutex::new(None)),
         }
     }
@@ -354,6 +365,12 @@ impl SignalMock {
     /// Frames delivered via the unary `Send` RPC (the forwarding path).
     pub fn unary_sends(&self) -> u64 {
         self.unary_sends.load(Ordering::Acquire)
+    }
+
+    /// Self-addressed frames seen on the unary `Send` RPC (`key ==
+    /// remote_key`): the receive watchdog's heartbeat probe.
+    pub fn self_addressed_sends(&self) -> u64 {
+        self.self_addressed.load(Ordering::Acquire)
     }
 
     fn record_if_sink(&self, env: &EncryptedMessage) {
@@ -380,6 +397,14 @@ impl SignalMock {
             let last = env.body.len() - 1;
             env.body[last] ^= 0x01;
         }
+        if self.drop_self_heartbeat.load(Ordering::SeqCst)
+            && env.remote_key == env.key
+        {
+            // self-addressed frame (the receive watchdog's liveness probe): the
+            // real server routes it back, this knob models a stream that
+            // delivers nothing.
+            return;
+        }
         let dest = self
             .registry
             .lock()
@@ -402,6 +427,9 @@ impl SignalExchange for SignalMock {
     ) -> Result<Response<EncryptedMessage>, Status> {
         let env = request.into_inner();
         self.unary_sends.fetch_add(1, Ordering::AcqRel);
+        if env.remote_key == env.key {
+            self.self_addressed.fetch_add(1, Ordering::AcqRel);
+        }
         self.record_if_sink(&env);
         self.forward(&env);
         // upstream returns an EMPTY EncryptedMessage (signal.go:100)

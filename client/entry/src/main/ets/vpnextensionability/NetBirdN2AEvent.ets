@@ -6,25 +6,30 @@
 //
 // Two halves:
 //   * `parseN2AEvent` validates one launch payload
-//     (`{"kind":"M|R|D","id":"a-M-1"}`) — kind ∈ the four kinds the core
-//     accepts (`M`/`R`/`D` triggers, `S` the fixed refusal), id = the same
-//     `[A-Za-z0-9_-]{1,64}` marker rule as the stimulus/control ids. A
-//     malformed request is REFUSED here (never handed to the core); the core
-//     refuses it again, independently.
+//     (`{"kind":"M|R|D|S","id":"a-M-1"}`) — kind ∈ the four kinds the core
+//     accepts (all four are frozen A-column triggers: `M` a read-only
+//     management RPC, `R` the server-driven HealthCheck echo, `D` the
+//     protected DNS requery, `S` the signal receive watchdog's self-addressed
+//     HEARTBEAT), id = the same `[A-Za-z0-9_-]{1,64}` marker rule as the
+//     stimulus/control ids. A malformed request is REFUSED here (never handed
+//     to the core); the core refuses it again, independently.
 //   * the formatters render the shell's own receipt line. The CORE line
 //     (`N2_A_EVENT|…`) is the authoritative one (it carries the real fd/dup of
 //     the existing production socket); the shell line only proves the delivery
 //     path and is `diag=true|is_evidence=false` like every other diagnostic.
 //
-// `S` is accepted by the SHAPE (so the operator gets the core's named refusal
-// instead of a parse error) and always answers
-// `rejected|reason=no-side-effect-free-production-send`.
+// `S` is accepted by the SHAPE and dispatched like the other three: the core
+// asks the registered signal receive watchdog for ONE self-addressed HEARTBEAT
+// on the SAME stream (the P8 product watchdog sends it anyway; this only moves
+// its send time) and answers `result=sent`, or an honest
+// `result=error|reason=no-live-signal-connection|no-registered-signal-stream|
+// signal-heartbeat-<class>|signal-heartbeat-timeout` — never a fabricated send.
 
 export const N2_A_EVENT_FILE_NAME: string = 'netbird-n2-a-event';
 
-// The four kinds this channel accepts. `M`/`R`/`D` are the frozen A-column
-// triggers; `S` is the row with no side-effect-free production send, kept in
-// the list so its refusal is the CORE's named one, not a parse error.
+// The four kinds this channel accepts. `M`/`R`/`D`/`S` are the frozen
+// A-column triggers (see the header); the list is closed so an unknown kind is
+// a parse-level refusal and a known one always reaches the core's own verdict.
 export const N2_A_EVENT_KINDS: string[] = ['M', 'R', 'D', 'S'];
 
 export interface N2AEventRequest {

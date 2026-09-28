@@ -143,10 +143,10 @@ try {
     aShellLine('req-1', 'M', 'a-M-1', goodReply));
   check('P7 a rejected delivery is never reported as a dispatch',
     aShellLine('req-2', 'S', 'a-S-1',
-      { ok: false, result: 'rejected', reason: 'no-side-effect-free-production-send',
+      { ok: false, result: 'error', reason: 'no-live-signal-connection',
         fd: -1, dup_fd: -1 }) ===
       'N2_A_EVENT_SHELL|requestId=req-2|id=a-S-1|kind=S|core_ok=false|' +
-      'core_result=rejected|reason=no-side-effect-free-production-send|fd=-1|dup_fd=-1|' +
+      'core_result=error|reason=no-live-signal-connection|fd=-1|dup_fd=-1|' +
       'diag=true|is_evidence=false');
   check('P8 the rejection line names the reason and invents no result',
     aShellReject('req-3', 'invalid-kind') ===
@@ -337,6 +337,7 @@ try {
   const wg = rust('wg_device.rs');
   const relay = rust('relay_client.rs');
   const connector = rust('connector.rs');
+  const signal = rust('signal.rs');
 
   check('R1 the four new NAPI exports are registered and reach their modules',
     napi.includes('reg!("n2_a_event", napi_n2_a_event);') &&
@@ -349,9 +350,28 @@ try {
     aEvent.includes('"N2_A_EVENT|id={}|kind={}|fd={}|dup_fd={}|remote={}|result={}|reason={}|detail={}|' +
       'mono_ms={}|diag=true|is_evidence=false"'),
     'line');
-  check('R3 S is refused by name and D refuses after a prior stimulus (Q1)',
-    aEvent.includes('"no-side-effect-free-production-send"') &&
-    aEvent.includes('"prior-stimulus"') && aEvent.includes('n2_stimulus::applied() > 0'));
+  check('R3 S triggers the production watchdog probe and D refuses after a prior stimulus (Q1)',
+    aEvent.includes('fn signal_probe(&self) -> Result<(), String>;') &&
+    aEvent.includes('"self-addressed-heartbeat"') &&
+    aEvent.includes('"no-live-signal-connection"') &&
+    aEvent.includes('pub const S_PROBE_WAIT_MS: u64 = 5_000;') &&
+    aEvent.includes('"prior-stimulus"') && aEvent.includes('n2_stimulus::applied() > 0'),
+    'S trigger + Q1');
+  check('R3b the connector S seam asks the registered signal watchdog for ONE heartbeat, bounded',
+    connector.includes('crate::signal::request_receive_probe()') &&
+    connector.includes('crate::n2_a_event::S_PROBE_WAIT_MS') &&
+    connector.includes('"signal-heartbeat-timeout"') &&
+    !connector.includes('signal.send_heartbeat') &&
+    !connector.includes('SignalClient::connect_with_socket_source'),
+    'S seam');
+  check('R3c the receive watchdog is the product default (20 s probe / 30 s dead) on the SAME stream',
+    signal.includes('pub const RECEIVE_PROBE_AFTER: core::time::Duration = core::time::Duration::from_secs(20);') &&
+    signal.includes('pub const RECEIVE_DEAD_AFTER: core::time::Duration = core::time::Duration::from_secs(30);') &&
+    signal.includes('probe_after: RECEIVE_PROBE_AFTER,') &&
+    signal.includes('dead_after: RECEIVE_DEAD_AFTER,') &&
+    signal.includes('self.client.send_heartbeat().await') &&
+    signal.includes('pub async fn request_receive_probe() -> Result<(), String>'),
+    'watchdog');
   check('R4 the R wait is the frozen bound and the trigger goes through the connector seam',
     aEvent.includes('pub const R_WAIT_MS: u64 = 90_000;') &&
     aEvent.includes('fn management_round_trip(&self) -> Result<(), String>;') &&

@@ -147,6 +147,7 @@
 //! tests meaningful.
 
 use std::collections::VecDeque;
+use std::net::{Ipv4Addr, SocketAddr};
 
 use crate::ice::{priority_for, seam_to_management, set_nonblock, Candidate, CandidateType, UdpSocketSource};
 use crate::management::ManagementError;
@@ -763,6 +764,10 @@ pub struct IceSession {
     remote: Option<IceCredentials>,
     controlling: bool,
     tie_breaker: u64,
+    /// N2 v4.1 P7: the peer this session belongs to, as its 8-char public-key
+    /// short prefix (`unknown` until the orchestrator names it). It only labels
+    /// outer-source receipt lines — never a protocol decision.
+    peer_label: String,
     local_socks: Vec<LocalSock>,
     remote_cands: Vec<Candidate>,
     pairs: Vec<Pair>,
@@ -812,6 +817,7 @@ impl IceSession {
             remote: None,
             controlling,
             tie_breaker: tb,
+            peer_label: "unknown".to_string(),
             local_socks: Vec::new(),
             remote_cands: Vec::new(),
             pairs: Vec::new(),
@@ -837,6 +843,12 @@ impl IceSession {
         remote.validate()?;
         self.remote = Some(remote);
         Ok(())
+    }
+
+    /// N2 v4.1 P7: name the peer that owns this session for the outer-source
+    /// receipt (`peer=`). Purely a log label — no protocol decision reads it.
+    pub fn set_peer_label(&mut self, label: &str) {
+        self.peer_label = label.to_string();
     }
 
     /// Add a local candidate and give it its long-lived check socket: a
@@ -1223,6 +1235,17 @@ impl IceSession {
             }
             let addr = src.sin_addr;
             let port = u16::from_be(src.sin_port);
+            // N2 v4.1 P7: the outer-source receipt of THIS ICE socket — the
+            // one that carries the connectivity checks and, after nomination,
+            // the Ws/Wb WG datagrams. Unarmed this is one atomic load.
+            if crate::n2_outer_receipt::armed() {
+                crate::n2_outer_receipt::note_udp(
+                    crate::n2_socket_trace::local_addr(fd),
+                    SocketAddr::from((Ipv4Addr::from(addr), port)),
+                    &buf[..n as usize],
+                    &self.peer_label,
+                );
+            }
             self.demux_inbound(idx, &buf[..n as usize], addr, port, now);
         }
     }

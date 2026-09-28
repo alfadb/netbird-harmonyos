@@ -72,9 +72,23 @@
 //!   watchdog fires it after 30s of stream silence and reconnects if the
 //!   probe does not return within 10s (constants L29-41, watchdog
 //!   L522-553). Transport keepalive: `dialer.go:53-56` (Time 30s / Timeout
-//!   10s). The watchdog itself is an N5 increment; the [`SignalClient::
-//!   send_heartbeat`] primitive is provided so it can be added without
-//!   protocol work.
+//!   10s).
+//! - **Receive watchdog (implemented, P8)**: the registered receive loop
+//!   measures silence from the newest received frame and sends ONE
+//!   self-addressed HEARTBEAT through [`SignalClient::send_heartbeat`] after
+//!   [`RECEIVE_PROBE_AFTER`]; an echo (any frame, the probe included) resets
+//!   the silence window, and total silence until [`RECEIVE_DEAD_AFTER`] takes
+//!   the SAME break/backoff/re-register path every other receive failure
+//!   takes. Parameters: 20 s probe / 30 s dead. Upstream probes at 30 s
+//!   silence and reconnects when the probe has not returned within 10 s, so
+//!   the probe-return window this implementation allows is exactly upstream's
+//!   10 s (`RECEIVE_DEAD_AFTER - RECEIVE_PROBE_AFTER`); probing ten seconds
+//!   earlier keeps the ALREADY documented 30 s silence→reconnect boundary as
+//!   the outer edge instead of moving it to 40 s. The probe rides the SAME
+//!   stream/connection (unary `SignalExchange/Send` on the pooled channel) —
+//!   no new connection, no other message changed — and
+//!   [`request_receive_probe`] lets an outside caller (the N2 A-column `S`
+//!   trigger) move only the SEND TIME of that same production frame.
 //! - **Reconnect semantics**: upstream retries the whole stream-open+receive
 //!   with `defaultBackoff` — 800ms initial / randomization 1 / multiplier
 //!   1.7 / max 10s / 3-month budget (`shared/signal/client/grpc.go:173-183`)
@@ -211,6 +225,105 @@ pub const HEADER_REGISTERED: &str = "x-wiretrustee-peer-registered";
 /// `netBirdVersion` stamped into outgoing `Body`s (upstream
 /// `version.NetbirdVersion()`, client.go:79).
 pub const SIGNAL_CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// ---------------------------------------------------------------------------
+// receive watchdog (P8; preregistration v4.1 §4 A-column `S` row)
+// ---------------------------------------------------------------------------
+
+/// Silence (no received frame) after which the registered watchdog sends ONE
+/// self-addressed HEARTBEAT — upstream's `sendReceiveProbe`.
+///
+/// Upstream (`shared/signal/client/grpc.go:29-41` constants, `:522-553`
+/// watchdog) probes after 30 s of stream silence and reconnects when the probe
+/// has not returned within 10 s. This implementation probes at 20 s so that the
+/// 30 s silence→reconnect boundary the module already documented stays the
+/// outer edge (10 s probe-return window, measured from the frame that started
+/// the silence window, exactly like upstream's return window).
+pub const RECEIVE_PROBE_AFTER: core::time::Duration = core::time::Duration::from_secs(20);
+
+/// Total silence after which the watchdog gives the stream up and takes the
+/// existing `Broken` → backoff → re-register path (upstream: reconnect when
+/// `sendReceiveProbe` does not return within its 10 s window). The probe
+/// return window is therefore `RECEIVE_DEAD_AFTER - RECEIVE_PROBE_AFTER`.
+pub const RECEIVE_DEAD_AFTER: core::time::Duration = core::time::Duration::from_secs(30);
+
+/// One pending outside probe request: the watchdog answers on this oneshot
+/// with the heartbeat send's outcome (`Err` = a sanitized
+/// `signal-heartbeat-<class>` token, never server text).
+type ProbeRequest = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+/// The probe handle of the CURRENTLY registered stream (`None` = no registered
+/// signal stream, so nothing could carry a production frame). Held with the
+/// registration's monotonic sequence so a drop can only withdraw its own.
+static PROBE_HANDLE: std::sync::Mutex<Option<(u64, tokio::sync::mpsc::UnboundedSender<ProbeRequest>)>> =
+    std::sync::Mutex::new(None);
+
+static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Publishes a registered stream's probe handle; dropping it withdraws the
+/// handle again (unless a NEWER registration replaced it in the meantime).
+struct ProbeRegistration {
+    seq: u64,
+}
+
+impl ProbeRegistration {
+    fn install(tx: tokio::sync::mpsc::UnboundedSender<ProbeRequest>) -> Self {
+        let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        *PROBE_HANDLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((seq, tx));
+        ProbeRegistration { seq }
+    }
+}
+
+impl Drop for ProbeRegistration {
+    fn drop(&mut self) {
+        let mut slot = PROBE_HANDLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|(seq, _)| *seq == self.seq) {
+            *slot = None;
+        }
+    }
+}
+
+/// Whether a watchdog is registered right now (a live signal stream exists).
+pub fn receive_probe_registered() -> bool {
+    PROBE_HANDLE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_some()
+}
+
+/// Ask the registered receive watchdog for ONE self-addressed HEARTBEAT right
+/// now, on the SAME stream/connection, instead of waiting for
+/// [`RECEIVE_PROBE_AFTER`]: this only moves the SEND TIME of the production
+/// frame the watchdog sends anyway (preregistration v4.1 §4 通用原则).
+///
+/// `Err` = no registered stream, or the watchdog disappeared before the send
+/// completed. The reply arrives when the unary send call has returned, so a
+/// successful reply IS the production send completion (the authoritative
+/// `N2_SOCK|phase=subsequent_io|kind=S` receipt comes from the socket wrapper).
+pub async fn request_receive_probe() -> Result<(), String> {
+    let tx = PROBE_HANDLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|(_, tx)| tx.clone())
+        .ok_or_else(|| "no-registered-signal-stream".to_string())?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(reply_tx).map_err(|_| "no-registered-signal-stream".to_string())?;
+    reply_rx.await.map_err(|_| "watchdog-gone".to_string())?
+}
+
+/// Sanitized failure class of a watchdog heartbeat send — the same token
+/// discipline as the management seam's `management-rpc-<class>` (never server
+/// text, never key bytes).
+fn heartbeat_failure_token(error: &ManagementError) -> String {
+    let class = match error {
+        ManagementError::Network(_) => "network",
+        ManagementError::Timeout => "timeout",
+        ManagementError::Auth { .. } => "auth",
+        ManagementError::Request { .. } => "request",
+        ManagementError::Server { .. } => "server",
+        ManagementError::Parse(_) => "parse",
+        ManagementError::UnsupportedUrl(_) => "unsupported-url",
+    };
+    format!("signal-heartbeat-{class}")
+}
 
 // ---------------------------------------------------------------------------
 // models
@@ -590,6 +703,12 @@ pub struct SignalSession {
     reconnects: u64,
     observed_delays: std::sync::Mutex<Vec<core::time::Duration>>,
     last_stream_error: Option<ManagementError>,
+    /// Receive-watchdog thresholds (P8): silence that triggers the
+    /// self-addressed HEARTBEAT, and total silence that takes the existing
+    /// break/reconnect path. Production uses [`RECEIVE_PROBE_AFTER`] /
+    /// [`RECEIVE_DEAD_AFTER`]; tests override them.
+    probe_after: core::time::Duration,
+    dead_after: core::time::Duration,
 }
 
 /// Event emitted by [`SignalSession::run_events`] (the signal counterpart
@@ -627,7 +746,24 @@ impl SignalSession {
             reconnects: 0,
             observed_delays: std::sync::Mutex::new(Vec::new()),
             last_stream_error: None,
+            probe_after: RECEIVE_PROBE_AFTER,
+            dead_after: RECEIVE_DEAD_AFTER,
         }
+    }
+
+    /// Test/owner override of the P8 receive-watchdog thresholds (production
+    /// callers keep [`RECEIVE_PROBE_AFTER`]/[`RECEIVE_DEAD_AFTER`]). Shrinking
+    /// them keeps the watchdog assertions free of 20 s real-time sleeps without
+    /// changing the algorithm under test; `probe_after < dead_after` is the
+    /// only contract.
+    pub fn with_receive_watchdog(
+        mut self,
+        probe_after: core::time::Duration,
+        dead_after: core::time::Duration,
+    ) -> Self {
+        self.probe_after = probe_after;
+        self.dead_after = dead_after;
+        self
     }
 
     /// Test/owner overrides: exact backoff policy, deterministic RNG and
@@ -726,6 +862,21 @@ impl SignalSession {
         }
     }
 
+    /// The receive-break step the P8 watchdog paths share with the rest of the
+    /// loop: store the error, count the stream break and let the owner see
+    /// `Broken`; the caller then breaks, and the outer loop takes the existing
+    /// backoff and re-registers.
+    fn note_stream_broken<E>(&mut self, error: ManagementError, on_event: &mut E)
+    where
+        E: for<'a> FnMut(SignalLoopEvent<'a>),
+    {
+        self.last_stream_error = Some(error);
+        self.reconnects += 1;
+        on_event(SignalLoopEvent::Broken(
+            self.last_stream_error.as_ref().expect("error just stored"),
+        ));
+    }
+
     /// Run the session until a FATAL error or backoff exhaustion — the
     /// [`crate::sync::SyncSession::run_events`] shape, with the signal
     /// event set ([`SignalLoopEvent`]):
@@ -791,21 +942,49 @@ impl SignalSession {
         enum Step {
             Inbound(Result<IncomingFrame, SignalStreamError>),
             Outbound(Option<SignalOutgoing>),
+            /// P8: an outside probe request (`request_receive_probe` — the N2
+            /// A-column `S` trigger): send one self-addressed HEARTBEAT on the
+            /// SAME registered stream, now. `None` only if the request channel
+            /// ended, which cannot happen while this call owns a sender.
+            Probe(Option<ProbeRequest>),
+            /// P8: the receive watchdog's silence deadline expired.
+            Silence,
         }
+        // P8: the receive watchdog's outside-probe channel. One channel per
+        // session (it survives reconnects); the handle below publishes it only
+        // while a stream is registered.
+        let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<ProbeRequest>();
         loop {
             match self.connect().await {
                 Ok(()) => {
                     on_event(SignalLoopEvent::Registered);
+                    // Published for exactly this registration.
+                    let _probe_registration = ProbeRegistration::install(probe_tx.clone());
+                    // P8 silence clock: registration counts as the newest
+                    // receive; every received frame restarts it (a received
+                    // frame, malformed or not, is liveness).
+                    let mut last_inbound = tokio::time::Instant::now();
+                    let mut probed = false;
                     loop {
+                        // 20 s of silence → ONE heartbeat probe; still silent
+                        // 10 s later → the existing break/reconnect path.
+                        let deadline = last_inbound
+                            + if probed { self.dead_after } else { self.probe_after };
                         let step = tokio::select! {
                             frame = self.next_frame() => Step::Inbound(frame),
                             out = outbox.recv() => Step::Outbound(out),
+                            probe = probe_rx.recv() => Step::Probe(probe),
+                            _ = tokio::time::sleep_until(deadline) => Step::Silence,
                         };
                         match step {
                             Step::Inbound(Ok(IncomingFrame::Message(msg))) => {
+                                last_inbound = tokio::time::Instant::now();
+                                probed = false;
                                 on_event(SignalLoopEvent::Message(&msg));
                             }
                             Step::Inbound(Ok(IncomingFrame::Malformed(e))) => {
+                                last_inbound = tokio::time::Instant::now();
+                                probed = false;
                                 on_event(SignalLoopEvent::Malformed(&e));
                             }
                             Step::Inbound(Err(SignalStreamError::Fatal(e))) => return Err(e),
@@ -849,6 +1028,78 @@ impl SignalSession {
                                     break;
                                 }
                             },
+                            Step::Probe(reply) => {
+                                // P8 / frozen v4.1 §4 `S` row: the only frame
+                                // this path sends is the production
+                                // self-addressed HEARTBEAT, on this same stream
+                                // (unary Send on the pooled channel) — no new
+                                // connection, no other message touched.
+                                match self.client.send_heartbeat().await {
+                                    Ok(()) => {
+                                        probed = true;
+                                        crate::hilog::emit(
+                                            "signal: receive watchdog heartbeat sent (triggered)",
+                                        );
+                                        if let Some(reply) = reply {
+                                            let _ = reply.send(Ok(()));
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if let Some(reply) = reply {
+                                            let _ = reply
+                                                .send(Err(heartbeat_failure_token(&error)));
+                                        }
+                                        // A heartbeat is always well-formed and
+                                        // self-addressed: any failure is
+                                        // transport-level, so it takes the same
+                                        // break/reconnect path as a failed
+                                        // outbound frame.
+                                        crate::hilog::emit(
+                                            "signal: receive watchdog heartbeat failed (triggered)",
+                                        );
+                                        self.note_stream_broken(error, &mut on_event);
+                                        break;
+                                    }
+                                }
+                            }
+                            Step::Silence if !probed => {
+                                // 20 s of silence: ONE self-addressed
+                                // HEARTBEAT on this stream (upstream
+                                // `sendReceiveProbe`).
+                                match self.client.send_heartbeat().await {
+                                    Ok(()) => {
+                                        probed = true;
+                                        crate::hilog::emit(
+                                            "signal: receive watchdog heartbeat sent (silence)",
+                                        );
+                                    }
+                                    Err(error) => {
+                                        crate::hilog::emit(
+                                            "signal: receive watchdog heartbeat failed (silence)",
+                                        );
+                                        self.note_stream_broken(error, &mut on_event);
+                                        break;
+                                    }
+                                }
+                            }
+                            Step::Silence => {
+                                // The probe went out and the stream STILL
+                                // delivered nothing: give it up through the
+                                // EXISTING break/backoff/re-register path
+                                // (upstream reconnects when the probe does not
+                                // return within its 10 s window).
+                                crate::hilog::emit(
+                                    "signal: receive watchdog declared the stream dead after its probe",
+                                );
+                                self.note_stream_broken(
+                                    ManagementError::Network(format!(
+                                        "signal receive watchdog: no frame within {} ms of the liveness probe",
+                                        self.dead_after.as_millis()
+                                    )),
+                                    &mut on_event,
+                                );
+                                break;
+                            }
                         }
                     }
                 }

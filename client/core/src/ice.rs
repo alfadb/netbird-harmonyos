@@ -989,6 +989,22 @@ fn gather_interface(
             continue; // EAGAIN / spurious wakeup — the deadline decides
         }
         let datagram = &buf[..n as usize];
+        // N2 v4.1 P7: the one-shot STUN gather socket's outer-source receipt.
+        // STUN servers are not WG peers, so `peer=` is `unknown` here by
+        // construction (the address of the server we asked is a different
+        // fact, already on the `N2_SOCK_STUN` receipt). Fixed `--ice-port`
+        // mode never gathers, so this seam is reachable in ephemeral mode.
+        if crate::n2_outer_receipt::armed() {
+            crate::n2_outer_receipt::note_udp(
+                crate::n2_socket_trace::local_addr(dup),
+                std::net::SocketAddr::from((
+                    std::net::Ipv4Addr::from(src.sin_addr),
+                    u16::from_be(src.sin_port),
+                )),
+                datagram,
+                "unknown",
+            );
+        }
         // Which outstanding transaction does this datagram answer? Unknown
         // or duplicate ids are dropped (stale datagrams are normal on a
         // reused port range).

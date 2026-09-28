@@ -120,6 +120,15 @@
 //!                               this process runs behind a port mapping:
 //!                               its own interface addresses are not
 //!                               reachable from the peer
+//!        --outer-receipt        N2 v4.1 P7: ON by switch only, default OFF —
+//!                               print one `nbinterop: n2h-outer-receipt|…`
+//!                               line per NEW outer-UDP source (WG socket +
+//!                               ICE/STUN sockets), then a 5 s/changed
+//!                               per-source summary. AUXILIARY EVIDENCE,
+//!                               APPLICATION LAYER: an app-level recvfrom
+//!                               view, NOT a network-side oracle (see
+//!                               `docs/n2-evidence-switch-20260928.md`).
+//!                               OFF = byte-identical pre-P7 output
 //!        --verbose              forward HiLog markers to stderr
 //!        --json                 accepted on selftest (report is JSON anyway)
 //!        --help                 this text
@@ -384,6 +393,16 @@ HOST-ONLY port-mapping switches (N12a; no effect on the device path):
                           process's own interface addresses are unreachable from
                           the peer (e.g. a k8s pod behind a host port mapping)
 
+HOST-ONLY evidence switch (N2 v4.1 P7; default OFF):
+    --outer-receipt       print one `nbinterop: n2h-outer-receipt|first|…` line
+                          per NEW outer-UDP source (WG outer socket + the
+                          ICE/STUN sockets), then a `|summary|…` line per source
+                          every 5 s or as soon as a new datagram type appears.
+                          AUXILIARY EVIDENCE, APPLICATION LAYER ONLY (the peer
+                          process's own recvfrom view) — it never replaces
+                          host-side capture and never fills a missing capture
+                          cell. Omitted = unchanged output
+
 Credentials (management URL / private key / setup key / CA) come ONLY from
 the config file or the environment — never the command line.
 
@@ -412,6 +431,9 @@ struct RunOpts {
     ice_port: Option<u16>,
     /// HOST-ONLY (N12a): externally reachable candidates to advertise.
     advertise: Vec<String>,
+    /// N2 v4.1 P7: arm the host-side outer-UDP source receipt. Default OFF —
+    /// the pre-P7 output stays byte-identical.
+    outer_receipt: bool,
     /// N2-H I6: set by `n2h-peer`'s own flags ONLY (any other subcommand
     /// rejects them, so the mode cannot be entered by accident).
     n2h_peer: Option<N2hPeerOpts>,
@@ -431,6 +453,7 @@ impl Default for RunOpts {
             wg_port: None,
             ice_port: None,
             advertise: Vec::new(),
+            outer_receipt: false,
             n2h_peer: None,
         }
     }
@@ -704,6 +727,7 @@ fn parse_flags(args: &[String]) -> Result<(RunOpts, bool), i32> {
                 }
                 o.advertise.push(v);
             }
+            "--outer-receipt" => o.outer_receipt = true,
             "--overlay" => {
                 let v = value("--overlay")?;
                 match parse_overlay_endpoint(&v) {
@@ -1831,6 +1855,18 @@ fn cmd_engine(mode: &'static str, args: &[String]) -> i32 {
 
 fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32 {
     let mut bag = hs::FdBag::new();
+
+    // N2 v4.1 P7: arm the outer-UDP source receipt BEFORE the first socket is
+    // created, so the very first outer datagram is recordable. Only modes
+    // that run the engine reach this; without the flag every receipt seam is
+    // one `armed()` atomic load and the output is byte-identical.
+    if o.outer_receipt {
+        netbird_core::n2_outer_receipt::arm(true);
+        eprintln!(
+            "[nbinterop] outer-source receipt ARMED (auxiliary, application-layer: the peer's \
+             own recvfrom view — NOT an independent network-side oracle)"
+        );
+    }
 
     // ---- resolve + start over a host-created management socket ----
     let (_, mhost, mport) = match hs::parse_management_endpoint(&loaded.summary.management_url) {

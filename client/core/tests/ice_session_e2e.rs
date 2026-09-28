@@ -511,3 +511,64 @@ fn unknown_txn_success_response_is_ignored() {
     );
     a.session.stop();
 }
+
+/// N2 v4.1 P7: the ICE socket's outer-source receipt (`--ice-port` mode feeds
+/// exactly this socket). A REAL loopback convergence emits one
+/// `n2h-outer-receipt|first` line per remote source on the socket that carried
+/// the checks, tagged with the session's peer label — and the very same run
+/// emits NOTHING while the switch is off.
+#[test]
+fn outer_receipt_reports_the_ice_socket_source_and_stays_silent_when_off() {
+    // (1) switch OFF: a full real convergence produces zero receipt lines.
+    let (a_creds, b_creds) = (creds(A), creds(B));
+    let mut a = TestPeer::new(a_creds.clone(), true, 0x1111);
+    let mut b = TestPeer::new(b_creds.clone(), false, 0x2222);
+    a.add_local();
+    b.add_local();
+    connect_peers(&mut a, &mut b, &a_creds, &b_creds);
+    let mut now = 1000u64;
+    assert!(
+        pump_until(&mut a.session, &mut b.session, &mut now, 10_000, |a, b| {
+            a.selected_pair().is_some() && b.selected_pair().is_some()
+        }),
+        "convergence is this receipt test's precondition"
+    );
+    assert!(
+        netbird_core::n2_outer_receipt::emitted_lines().is_empty(),
+        "switch off ⇒ zero receipt output"
+    );
+    a.session.stop();
+    b.session.stop();
+
+    // (2) switch ON: the same real checks report the remote source + label.
+    let (a_creds, b_creds) = (creds(A), creds(B));
+    let mut a = TestPeer::new(a_creds.clone(), true, 0x1111);
+    let mut b = TestPeer::new(b_creds.clone(), false, 0x2222);
+    a.add_local();
+    b.add_local();
+    let a_addr = a.addr();
+    let b_port = b.local.as_ref().expect("B local candidate").port;
+    connect_peers(&mut a, &mut b, &a_creds, &b_creds);
+    // the label peer_conn installs on a session (P7's peer= attribution)
+    b.session.set_peer_label("cafebabe");
+    netbird_core::n2_outer_receipt::arm(true);
+    let mut now = 1000u64;
+    assert!(pump_until(&mut a.session, &mut b.session, &mut now, 10_000, |a, b| {
+        a.selected_pair().is_some() && b.selected_pair().is_some()
+    }));
+    let lines = netbird_core::n2_outer_receipt::emitted_lines();
+    let from_a = format!("|src=127.0.0.1:{}|", a_addr.port());
+    let hit = lines
+        .iter()
+        .find(|l| l.contains(&from_a))
+        .unwrap_or_else(|| panic!("no receipt for {from_a}: {lines:?}"));
+    assert!(hit.starts_with("n2h-outer-receipt|first|"), "{hit}");
+    assert!(hit.contains("|type=stun|"), "{hit}");
+    assert!(hit.contains("|peer=cafebabe|"), "{hit}");
+    assert!(hit.contains(&format!("|local=127.0.0.1:{b_port}|")), "{hit}");
+    // one first line per source, never one per packet
+    assert_eq!(lines.iter().filter(|l| l.contains(&from_a)).count(), 1, "{lines:?}");
+    netbird_core::n2_outer_receipt::arm(false);
+    a.session.stop();
+    b.session.stop();
+}

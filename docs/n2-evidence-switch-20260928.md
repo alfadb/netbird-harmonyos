@@ -307,7 +307,7 @@ stream.
 | **M** | ONE read-only idempotent real `GetServerKey` (`grpc.rs:430`) on the **EXISTING** logged-in management client — the `logout_slot` clone whose tonic `Channel` is the same connection the Sync stream runs over. **No new dial, no second `Sync` stream.** | `result=sent` / `result=error|reason=management-rpc-<class>` (sanitized class only, never server text) |
 | **R** | NO active send: arm a watcher for the next **server-driven** `HealthCheck` and record the production echo (`relay_client.rs:2117-2120`). Wait bound `R_WAIT_MS = 90_000` ms on the session runtime. | `result=armed|detail=wait_ms=90000`, then `result=observed|reason=server-healthcheck-answered` or `result=timeout|reason=healthcheck-wait-exceeded` |
 | **D** | Q1: the first A event of the session calls the existing requery primitive ONCE (`force_protected_dns_requery`, one fresh protected fd). Any prior `n2_stimulus` application or prior A event refuses. | `result=requery|detail=receipt-in-N2_DNS` / `result=rejected|reason=prior-stimulus` |
-| **S** | **not implemented** (no side-effect-free production send exists: the self-addressed HEARTBEAT has no caller yet, N5/P8) | `result=rejected|reason=no-side-effect-free-production-send` |
+| **S** | ONE self-addressed `HEARTBEAT` (`Body.type = 6`) asked of the **registered signal receive watchdog** (P8 product watchdog in `SignalSession`), which sends it on the SAME signal stream/connection — the production frame upstream's `sendReceiveProbe` sends; the trigger only moves its SEND TIME. `fd`/`dup_fd` are the live `S` pair the `N2_SOCK` receipts report, taken from the armed trace. Wait bound `S_PROBE_WAIT_MS = 5_000` ms on the session runtime. | `result=sent` / `result=error\|reason=no-live-signal-connection`, `no-registered-signal-stream`, `signal-heartbeat-<class>`, `signal-heartbeat-timeout` |
 
 Unarmed: `result=rejected|reason=not-armed` before any RPC/syscall. Unknown kind
 → `invalid-kind`; malformed id → `invalid-id`. Every request emits exactly one
@@ -426,3 +426,158 @@ point is a **silent no-op** (no state, no line, no control).
 No device measurement was made here. On-device use still requires the
 separately authorized campaign and the T7a conformance review the frozen record
 demands.
+
+## Peer-side outer-UDP source receipt (P7, 2026-09-28)
+
+Implementation prerequisite **P7** of frozen v4.1. The Q2 ruling admits the peer
+process's own `recvfrom` view as **辅助证据（应用层，非独立网络侧 oracle）**:
+it may strengthen the cellular `Wb` negative evidence and the peer-side receipt
+of `Ws`, and it **never replaces host-side capture and never fills a cell whose
+capture is missing** (v4.1 §4 Wb/Ws substitute-oracle rules are unchanged —
+this section adds no oracle).
+
+### Interface
+
+* Switch: `nbinterop --outer-receipt` (**host-only, default OFF**). Without it
+  every seam is one `armed()` atomic load that returns before reading any clock,
+  socket name or peer table, so the pre-P7 output is byte-identical.
+* Core: `netbird_core::n2_outer_receipt` (`arm(bool)` / `armed()` /
+  `note_udp(local, src, datagram, peer)`), armed by the CLI **before the first
+  socket is created**, so the very first outer datagram is recordable. This is
+  an operator/CLI switch, not an ArkTS `n2_evidence` ticket: it is a host-side
+  diagnostic that changes no device behaviour.
+* Seams (every outer UDP receive point of the host path):
+  * `wg_device.rs::WgDevice::service_udp` — the WG outer socket
+    (`--wg-port` / ephemeral). The peer label is the registered peer whose
+    `endpoint` equals the source, as the N5c 8-char public-key short prefix;
+    any other source is `peer=unknown` — the off-path case the cellular legs
+    need, recorded, never dropped from the log;
+  * `ice_session.rs::IceSession::drain_socket` — the ICE socket carrying the
+    connectivity checks and, after nomination, the `Ws`/`Wb` WG datagrams
+    (`peer=` = the session's owning peer, set by `peer_conn.rs`);
+  * `ice.rs::gather_interface` (the `gather_candidates` path) — the one-shot
+    STUN gather socket (ephemeral mode only; the fixed `--ice-port` path never
+    gathers). STUN servers are not WG peers, so `peer=unknown` there by
+    construction.
+* Not covered (honest gap): no physical-interface path, no loss before the
+  socket, no exclusion of same-host injection, and no datagram the kernel never
+  delivered to these sockets.
+
+### Log lines
+
+```
+nbinterop: n2h-outer-receipt|first|src=<ip:port>|local=<ip:port>|type=<stun|wg-init|wg-resp|wg-cookie|wg-data|other>|peer=<known peer short prefix|unknown>|mono_ms=…|unix_ms=…
+nbinterop: n2h-outer-receipt|summary|src=<ip:port>|packets=…|bytes=…|types=…|local=<ip:port>|peer=…|mono_ms=…|unix_ms=…
+```
+
+* One `first` line per **new** `(local, src)` pair — including `peer=unknown`
+  sources and any datagram type; then per source one `summary` line every 5 s,
+  or immediately when a NEW datagram type appears for that source (`types=`
+  lists only the non-zero types, in `stun,wg-init,wg-resp,wg-cookie,wg-data,
+  other` order). No per-packet lines.
+* `type` is decided by the RFC 5389 §6 magic cookie `0x2112A442` at bytes 4..8
+  FIRST, then by the WG message type in the first byte (1–4); everything else
+  is `other`.
+* `local` is this socket's own bound name (`unknown` only if `getsockname`
+  failed); `mono_ms` is the injected monotonic clock the datagram was handled
+  on, `unix_ms` the host wall clock of the same receipt.
+
+### Evidence level
+
+`n2h-outer-receipt` lines are **auxiliary application-layer evidence
+(`diag`/diagnostic, not an oracle)**: they live on stderr with the other
+`nbinterop:` host lines, carry no `is_evidence` promotion of their own, and must
+be quoted in the campaign record only alongside (a) the device's own physical
+interface send metadata and (b) the host-side capture. A `Wb`/`Ws` cell whose
+capture is missing stays missing.
+
+### Host verification (no device)
+
+* `cargo test --offline --locked` (client/core): unit tests in
+  `client/core/src/n2_outer_receipt.rs`
+  (`classify_uses_the_stun_cookie_first_then_the_wg_message_type`,
+  `first_datagram_of_a_new_source_prints_one_line_and_unknown_peers_are_recorded`,
+  `summaries_are_throttled_to_five_seconds_or_a_new_type`,
+  `a_late_known_peer_attribution_is_reported_on_the_next_summary`,
+  `disarmed_note_udp_emits_nothing`), the WG-socket seam test
+  `wg_device.rs::feed_tests::outer_receipt_reports_known_and_unknown_sources_and_stays_silent_when_off`,
+  and the end-to-end process test
+  `tests/outer_receipt_p7.rs::outer_receipt_reports_a_real_outer_udp_source_end_to_end`,
+  which sends a REAL loopback UDP datagram to the fed nbinterop WG listening
+  port: switch OFF ⇒ the device counts the drop but no line is emitted; switch
+  ON ⇒ the `first` line names that source. It lives in its own test binary on
+  purpose: `tests/host_interop_n9.rs` carries an fd-NUMBER assertion that any
+  concurrently running socket-opening test can steal, so widening that file's
+  race was avoided rather than papered over.
+* `tests/ice_session_e2e.rs::outer_receipt_reports_the_ice_socket_source_and_stays_silent_when_off`
+  — the ICE/STUN socket seam (`--ice-port` feeds exactly this socket): a REAL
+  loopback ICE convergence emits the `first` line with `type=stun`, the
+  session's `peer=` label and this socket's own `local=`, and the identical
+  convergence under the switch OFF emits nothing.
+
+No device measurement was made here.
+
+## Signal receive watchdog and the S A-event (P8, 2026-09-28)
+
+Implementation prerequisite **P8** of frozen v4.1 §4「A 列生产事件的操作性定义」
+(`S` row) — and, first of all, a **product** behaviour: the signal receive
+watchdog is default-on, independent of `n2_evidence`.
+
+### The watchdog (product)
+
+`SignalSession`'s registered receive loop measures silence from the newest
+received frame (registration counts as one) and
+
+* at **20 s** of silence (`RECEIVE_PROBE_AFTER`) sends ONE self-addressed
+  `HEARTBEAT` (`SignalClient::send_heartbeat` = upstream `sendReceiveProbe`)
+  through the unary `SignalExchange/Send` on the **SAME** pooled
+  stream/connection — no new dial, no other message changed;
+* treats **any** received frame (the echo included; a malformed frame is
+  liveness too) as the restart of that window;
+* at **30 s** of silence (`RECEIVE_DEAD_AFTER`) gives the stream up through the
+  **existing** `Broken` → backoff → re-register path. The probe-return window
+  is therefore `30 − 20 = 10 s`, exactly upstream's
+  (`shared/signal/client/grpc.go:29-41` constants, `:522-553` watchdog: probe
+  after 30 s silence, reconnect if it does not return within 10 s). Probing ten
+  seconds earlier keeps the 30 s silence→reconnect boundary the module already
+  documented as the outer edge instead of moving it to 40 s.
+* a heartbeat send FAILURE is transport-level by construction (the frame is a
+  self-addressed, always well-formed body) and takes the same
+  break/reconnect path.
+
+Only the send time of that production frame is controllable:
+`signal::request_receive_probe()` (async, one reply per request, answered when
+the unary send call returned) is the seam the A-column `S` event uses. The
+handle is process-global — the CURRENTLY registered signal stream (one connector
+session per process) — and is withdrawn with its registration; with no
+registered stream the call answers `Err("no-registered-signal-stream")` and
+nothing is sent. The authoritative send receipt stays the socket wrapper's
+`N2_SOCK|phase=subsequent_io|kind=S`; the `N2_A_EVENT|kind=S` line only reports
+the dispatch plus the live `fd`/`dup_fd` pair from the armed trace.
+
+### Host verification (no device)
+
+* `cargo test --offline --locked` (client/core):
+  * `tests/signal_session.rs` — the product behaviour against the real mock
+    server: `watchdog_thresholds_are_the_documented_pair`,
+    `watchdog_probes_after_silence_and_the_echo_keeps_the_stream_up`,
+    `a_received_frame_restarts_the_watchdog_silence_window`,
+    `watchdog_reconnects_when_the_probe_is_never_echoed` (the echo knob off ⇒
+    `Broken` naming the watchdog, then a fresh registration on the same
+    connection).
+  * `tests/signal_watchdog.rs` (own binary: the probe handle is a process
+    singleton) — `an_external_probe_request_sends_one_heartbeat_immediately`
+    (one request ⇒ one self-addressed probe, same connection; no stream frame;
+    unregistered refuses) and
+    `s_a_event_triggers_the_watchdog_heartbeat_on_the_existing_signal_stream`
+    (the frozen `S` event through `Trigger::signal_probe`: `result=sent`, the
+    `fd`/`dup_fd` pair byte-identical to `N2_SOCK`, ONE accepted connection,
+    the decrypted frame is `Body.type = 6` and no OFFER/ANSWER/CANDIDATE is
+    created, a refused probe is `result=error` and sends nothing).
+  * `n2_a_event.rs` unit tests (`kind_s_needs_a_live_signal_socket_and_reports_the_probe_outcome`)
+    and `tests/n2_a_event.rs::s_event_reports_sent_and_refuses_without_a_live_socket`.
+  * `client/entry/selfcheck/run-n2-a-event.mts` — pins the `S` contract and the
+    20 s/30 s watchdog constants on the shipped sources.
+* On-device use of `n2_a_event kind=S` still requires the separately authorized
+  campaign; the frozen `S(A)` row is what it feeds (the natural heartbeat, now
+  triggerable in send time only).
