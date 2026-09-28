@@ -1,33 +1,60 @@
-# N2 预注册 v4 修订提案（Wb 行 / Wb·Ws 物理 oracle / A 列操作性定义）
+# N2 预注册 v4 修订提案（r2，按 T0 评审意见修订）
 
-> **状态：修订提案**。不是冻结文件、不是 AUTH、不是证据、不授权任何设备/服务器/抓包操作。本文件只新建自身；未修改[冻结预注册](n2-device-evidence-preregistration-draft-v2-20260928.md)（下称 **v4**，行号指该文件）、未修改[治理](native-nx-governance.md)、未修改 `client/`、未 commit、未操作设备、未联网。
-> 起草：执行层（`deepseek/deepseek-flash`）。依据：v4 冻结文本、治理文末追加登记、只读可行性分析 [`N2-BATCH1-FEASIBILITY.md`](../../../../n2h-kit/status-20260927/N2-BATCH1-FEASIBILITY.md)（下称 **可行性报告**，行号指该文件）。
-> 本提案的全部代码位置与行号引用均来自可行性报告的只读分析；本提案执笔者未独立复核代码，落地前须由 T0/T7a 独立验证。
+> **状态：修订提案（r2）**。不是冻结文件、不是 AUTH、不是证据、不授权任何设备/服务器/抓包操作。本文件只修订自身；未修改[冻结预注册](n2-device-evidence-preregistration-draft-v2-20260928.md)（下称 **v4**，行号指该文件）、未修改[治理](native-nx-governance.md)、未修改 `client/`（另有并行执行者在改 `client/core/`）、未 commit、未操作设备、未联网、未 SSH、未抓包。文末「修订记录 r2」逐条登记本次按 T0 评审意见（`anthropic/claude-opus-5-5`，2026-09-28，结论「有条件」）的 8 项必改。
+>
+> **用户批准状态（显著声明，须先读）**：用户此前对本提案第 1/2 项方向的回复（原文 `1. 可以`、`2. 已添加公钥，用户名alfadb`、`3. 可以`）是**对方向的同意**，不是对 v4.1 最终文本的批准。**§1.4 的 v4.1 修订记录与 §1.5 的治理登记拟稿在本轮按 T0 意见修订后，必须由用户对最终文本重新批准，才可写入冻结文件/治理并冻结**；未获重新批准前 **v4.1 不成立、不冻结**，任何测量不得按 v4.1 执行。
+>
+> 起草：执行层（`deepseek/deepseek-flash`）。依据：v4 冻结文本、治理文末追加登记、只读可行性分析 [`N2-BATCH1-FEASIBILITY.md`](../../../../n2h-kit/status-20260927/N2-BATCH1-FEASIBILITY.md)（下称 **可行性报告**，行号指该文件）、T0 评审意见（2026-09-28，结论「有条件」，8 项必改）。
+> r2 已由本执笔者**只读复核** T0 指定的四处代码事实：`wg_device.rs:2285-2302`（`try_build` 重放顺序）、`wg_device.rs:713`/`:771`（`adopt`/`reattach` 的 dup 登记）、`n2_socket_trace.rs:103-106`（`receipt_due`）、`signal.rs:533`（自寻址 HEARTBEAT 原语）；其余代码位置与行号仍转引自可行性报告，落地前须由 T7a 独立验证。
 
 ## 0. 提案范围与用户已决
 
 ### 0.1 三项变更（其余不动）
 
-1. **Wb 行判据 + 四格豁免登记**：采用可行性报告 §2.6 选项 (i)。Wb 从「证明 base socket 真实出包」改为证明「`wg_fwd_open` 原 fd/dup 已 open+protect settle、且全 campaign 零发送」——身份与 protect 登记 + 显式无发送负证据；Wb 的 A/B/C/D 四格按 v4:11 的测前逐格豁免机制登记（经 T0 + 用户）。**不改产品回落路径**，保留 `peer_conn.rs:1224-1239`「绝不回退到旧 socket 发握手」的 round-7 结构性堵法。
-2. **Wb/Ws 独立网络侧 oracle 地点**：由 v4:64 的「peer 自有主机物理外侧」改为 **k8s 宿主机 `192.168.50.3`（peer 的 SNAT/DNAT 点，用户 `alfadb`）限时只读抓包**；写清过滤、限时、限量、脱敏、原件 sha256、与设备 `N2_SOCK` 的配对规则。
-3. **A 列「生产事件」操作性定义澄清**（逐行 M/S/R/D/I/Ws）。**澄清，不改判据**——v4:26、v4:36、v4:39、v4:42、v4:52-58 的判据文字一字不改。
+1. **Wb 行判据 + 四格豁免登记**：采用可行性报告 §2.6 选项 (i)。Wb 从「证明 base socket 真实出包」改为证明「`wg_fwd_open` 原 fd/dup 已 open+protect settle、且全 campaign 零发送」——身份与 protect 登记 + 显式无发送负证据；Wb 的 A/B/C/D 四格按 v4:11 的测前逐格豁免机制登记（经 T0 + 用户）。**不改产品回落路径**，保留 `peer_conn.rs:1224-1239`「绝不回退到旧 socket 发握手」的 round-7 结构性堵法。**「永不发包」有唯一例外**（`try_build` 重放：`wg_device.rs:2285-2302`），已写成 fail/回 T0 触发条件并配一个另行实现与评审的失败关闭小修（§1.1）。
+   - **本次只改 Wb 行的 A–D 四格**：**E/F/G 三格的判据文字保持 v4:57 原文，不在本次变更范围**（第二批判据已随 v4 冻结）。
+2. **Wb/Ws 独立网络侧 oracle 地点**：由 v4:64 的「peer 自有主机物理外侧」改为 **k8s 宿主机 `192.168.50.3`（peer 的 SNAT/DNAT 点，用户 `alfadb`）限时只读抓包**；过滤器**锚定 peer 侧目的**（`udp and dst host <节点/Pod IP> and dst port in {冻结 --wg-port,--ice-port}`），两个抓包点（上联/vmbr0 与 Pod 侧 veth/cni，NAT 前后），setcap 持久特权变更的授予与撤销登记，以及限时、限量、snaplen、脱敏、原件 sha256/存放/删除、与设备 `N2_SOCK` 的配对与类型分流规则（§1.2）。
+3. **A 列「生产事件」操作性定义澄清**（逐行 M/S/R/D/I/Ws），并把 T0 已裁定的 Q1/Q2 口径写入（§0.3）。**澄清，不改判据**——v4:26、v4:36、v4:39、v4:42、v4:52-58 的判据文字一字不改。通用原则：**触发只能改变发送时刻，不能造出生产不会发的报文种类**。
 
-### 0.2 用户已决原文与本提案的对应
+### 0.1.1 本提案不触碰的范围（r2 收敛）
 
-本会话（2026-09-28 晚）用户对主会话三个问题回复 `1. 可以`、`2. 已添加公钥，用户名alfadb`、`3. 可以`：
+- **Wb 行的 E/F/G 三格**：v4:57 原文逐字保留（第二批已冻结）。
+- **其余六行（M/S/R/D/I/Ws）的全部刺激与 oracle 判据文字**：不动；§1.3 只补「生产事件是什么 + 触发方式」的操作性澄清。
+- **§3 阈值/§2 配置冻结/治理标签定义文字**：不动。适用集**计数口径**按 §2 改写为「24 适用格 + 4 豁免格」。
 
-| 用户回复 | 含义 | 本提案对应 |
+### 0.2 用户已决原文与本提案的对应（**方向同意**，非最终文本批准）
+
+本会话（2026-09-28 晚）用户对主会话三个问题回复 `1. 可以`、`2. 已添加公钥，用户名alfadb`、`3. 可以`。下表「含义」列只是**方向**，不构成对 v4.1 文本的批准：
+
+| 用户回复 | 方向含义（**不是**对最终文本的批准） | 本提案对应 |
 | --- | --- | --- |
-| `1. 可以` | Wb 行采用方案 A（身份+protect 登记 + 显式无发送负证据）；Wb 四格按 v4:11 逐格豁免登记；不改产品回落路径 | §1.1 |
-| `2. 已添加公钥，用户名alfadb` | Wb/Ws 物理 oracle 用宿主机 `192.168.50.3`（`alfadb`）限时只读抓包；过滤限设备 `192.168.50.199`/设备蜂窝出口与对端 UDP 端口、限时、限量、只存头部或最小截断 | §1.2 |
-| `3. 可以` | A 列按可行性报告**不改判据、只补实现**；但 A 列「生产事件」的操作性定义须经 T0 确认与 v4 冻结文本一致 | §1.3 |
+| `1. 可以` | 方向上接受 Wb 行方案 A（身份+protect 登记 + 显式无发送负证据；A–D 四格按 v4:11 逐格豁免登记；不改产品回落路径） | §1.1 |
+| `2. 已添加公钥，用户名alfadb` | 方向上接受 Wb/Ws 物理 oracle 改用宿主机 `192.168.50.3`（`alfadb`）限时只读抓包；**过滤/限时/限量/snaplen/脱敏细节以 T0 评审后的 §1.2 冻结文本为准** | §1.2 |
+| `3. 可以` | 方向上接受 A 列**不改判据、只补实现**，其操作性定义须与 v4 冻结文本一致并由 T0 确认（T0 结论见 §0.3、§4.1） | §1.3 |
 
-主会话已记录：宿主机可 SSH 登录、有 `tcpdump`；**抓包所需权限另行解决**（v4 未授权，本提案亦不授权）。可行性报告 §0.2 记录：peer 所在 Pod 内 `CapEff=0`、`AF_PACKET/SOCK_RAW` 实测 `errno=1 (EPERM)`，故 Pod 内抓包不可能；宿主机是 NAT 发生处，是当前可得的最贴近 v4:64 措辞的 vantage。
+主会话已记录：宿主机可 SSH 登录、有 `tcpdump`。可行性报告 §0.2 记录：peer 所在 Pod 内 `CapEff=0`、`AF_PACKET/SOCK_RAW` 实测 `errno=1 (EPERM)`，故 Pod 内抓包不可能；宿主机是 NAT 发生处，是当前可得的最贴近 v4:64 措辞的 vantage。
 
-### 0.3 待 T0 一并表态的两个口径问题（本提案不单方面裁定）
+**宿主机抓包权限（宿主持久特权变更，如实登记）**：2026-09-28 晚用户在宿主机以 `sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump` 授予（主会话已核 `getcap` 结果）；这是**宿主机上的持久特权变更**，撤销方式为 campaign 结束后 `sudo setcap -r /usr/bin/tcpdump`，授予与撤销时刻均入当批 AUTH 证据（§1.2）。本提案**不**执行、不重复授予、不 SSH。
 
-- **Q1（A(D) 的 A/B 口径）**：`n2_stimulus kind=D` 的 `force_protected_dns_requery` 已被 switch 文档:117 登记为 **B 列**刺激（v4:55 的 B 描述）。A(D) 若复用同一原语须划清界限（建议：A(D) = attach 锚点后首次受执行者触发的受保护查询；B(D) = 已授权断流/超时后的新查询/新 fd）。可行性报告 §5 第 8 项同指此点。
-- **Q2（peer 应用层收件回执是否作可选补充）**：宿主机抓包在本 Pod 的 SNAT/DNAT 点看到「到达宿主映射端口」，比 Pod 内强，但严格意义上仍差「到达 pod 外层 socket」最后一步。可行性报告 §3.2 给出低成本选项：在 `wg_device.rs:1111-1120` 的 `handle_udp` 加开关门控的外层 UDP `recvfrom` 回执（约 20–40 行 + 单测）。它是**应用层回执**、不是物理外侧抓包（可行性报告 §3.2），v4:64 未给 Wb/Ws 类似 D 的替代 oracle 条款，故**若采用须 T0 + 用户一并批准并写明其证据等级**；不采用不影响本次 §1.2 的改动成立。
+### 0.3 T0 已裁定的两个口径（r2 写入，不再是待表态项）
+
+- **Q1（A(D)/B(D) 口径）——裁决**：**A(D)** = 每个**独立首连会话**里 **attach 之后**的**第一次受保护查询**；**优先取自然发生的那一次**，没有自然发生才用 requery 原语在该会话内触发**一次**；**该会话此前不得有任何刺激**；**3 次 A(D) 事件必须来自 3 个独立首连会话**。**B(D)** = **同一会话中先有成功查询、再经已授权扰动后的新查询/新 fd**。原语（`force_protected_dns_requery`）**可两列共用，但事件不跨列**；每条记录必须写明所属会话与前置刺激。**B(D) 不外推网络侧超时**（沿用 v4:60 的本地路径限制）。
+- **Q2（peer 应用层收件回执）——裁决：采用，但限定为「辅助证据（应用层，非独立网络侧 oracle）」**：`wg_device.rs:1111-1120` 的 `handle_udp` 外层 UDP `recvfrom` 回执（开关门控，约 20–40 行 + 单测）**采用**为辅助证据，**证据等级随 v4.1 冻结**；它**不替代宿主抓包**、**不补救抓包缺失的格**（抓包缺失或 vantage 失效的格仍 `UNSAT`）。其实现列入 §0.4 前置项。
+
+### 0.4 实现前置项清单（r2 逐项；全部**默认关**，须先实现并经 T7a 独立符合性审查）
+
+> 下列前置项**未完成前不得按 v4.1 执行测量**；「T0?」列写「是」的项变更冻结判据/oracle/范围，须先回 T0 + 用户。
+
+| # | 前置项 | 内容 | 落地范围 | T0? |
+| --- | --- | --- | --- | --- |
+| P1 | **try_build 失败关闭小修** | egress 未重放成功则**不重放该 peer 的 endpoint**，与 `peer_conn.rs:1224-1239`「先挂 egress 再落 endpoint」一致，**只收紧**（主会话已另派实现） | 产品 `wg_device.rs` | 是（涉及 Wb fail 条件） |
+| P2 | **按 fd 的发送计数** | 现有 `WgDeviceStats` 为设备全局、不区分 fd；须新增开关门控的按 fd `sendto` 计数（E3） | 产品 `wg_device.rs` | 否（实现符合性） |
+| P3 | **M/S/R post-connect TCP 发送回执** | `n2_socket_trace` 为已连接 TCP fd 记 `phase=subsequent_io`（写完成回执；首次 + 每 128 次或 30 s；fd 保留至关闭）（原 `first_io` 后即从表移除，`n2_socket_trace.rs:121`），并在 gRPC/signal/relay 写路径挂钩——**已实现（`mgmtsock.rs` `ProtectedTcpStream`，待 T7a 复核）** | 产品 `core` | 否（实现符合性） |
+| P4 | **A 列触发原语** | M/S/R 的「证据开关下、attach 之后触发一次真实生产发送」原语（M 用只读幂等 RPC；S 见 §1.3；R 用服务端驱动的 HealthCheck 应答，不主动发） | 产品 core+shell+napi | 否（口径已由 T0 裁定） |
+| P5 | **`withN2Sandwich` 落点** | I/Ws 的 App 侧夹心编排（I 包住 `protectAndFeedIceSocket`；Ws 在**保持先挂 egress 再落 endpoint** 的前提下延后 `apply_endpoint`） | 产品 ArkTS | 否 |
+| P6 | **执行器 A 列时序** | `run_campaign.py` 的 A 列必须先等 attach 锚点再发前控（现 `:786-795` 后 `:829` 立即发前控必然 `not-armed-or-no-tun`）；`production()`（`:819`）换成真实触发调用并记事件 id | 执行器 | 否 |
+| P7 | **peer `recvfrom` 回执** | `handle_udp` 的开关门控外层 UDP `recvfrom` 回执（Q2 的辅助证据） | 产品 `wg_device.rs` | 是（新增证据来源，Q2 已裁定为辅助） |
+| P8 | **S 心跳/接收看门狗（可选）** | 若采用自寻址 HEARTBEAT 作 S(A) 事件，须先实现 30 s 接收看门狗（现仅有原语 `signal.rs:533`、无调用者）；未实现则 S(A) 走 §1.3 的服务端驱动替代或 `UNSAT` | 产品 `signal.rs` | 否 |
 
 ---
 
@@ -41,33 +68,45 @@
 - v4:11：`**第一批适用集固定为 28 格全体**，仅可在测量前经 T0 + 用户批准、在冻结登记中逐格写明豁免及依据后缩减`（豁免机制已存在，本变更只是**使用**它）。
 - v4:103：治理登记标签定义已含「仅测前逐格登记且经 T0 + 用户批准的具体豁免除外」。
 
-**冲突事实（可行性报告 §2.6，六条代码证据）**：v4:57 的 A 生产事件在当前实现中**不存在**——`wg_fwd_open` 的 base socket 在 N11「WG 骑 ICE 选中连接」架构下是**永不发包的回落位**：出向一律优先 egress（`wg_device.rs:99-102`）、唯一裁决点 `dispatch` 在无 endpoint 时走 carrier 或 fail-closed（`:1399-1420`）、`egress_fd_of = egress_fd.or(self.fd)`（`:1591-1593`）只有「有 endpoint 但无 egress」才会用 base，而生产 `apply_endpoint` 唯一调用者先 `attach_egress_socket` 成功才落配、失败不落配（`peer_conn.rs:1230-1239`）。故 Wb 四格按原判据必然 `not exercised` → 按 v4:1/v4:11/v4:103 阻止授予。
+**冲突事实（可行性报告 §2.6，六条代码证据 + r2 补一条）**：v4:57 的 A 生产事件在当前实现中**不存在**——`wg_fwd_open` 的 base socket 在 N11「WG 骑 ICE 选中连接」架构下是**永不发包的回落位**：出向一律优先 egress（`wg_device.rs:99-102`）、唯一裁决点 `dispatch` 在无 endpoint 时走 carrier 或 fail-closed（`:1399-1420`）、`egress_fd_of = egress_fd.or(self.fd)`（`:1591-1593`）只有「有 endpoint 但无 egress」才会用 base，而生产 `apply_endpoint` 唯一调用者先 `attach_egress_socket` 成功才落配、失败不落配（`peer_conn.rs:1230-1239`）。故 Wb 四格按原判据必然 `not exercised` → 按 v4:1/v4:11/v4:103 阻止授予。
 
-**拟改文字（§4 表 Wb 行整行替换为，v4.1）**
+**「永不发包」的唯一例外（r2，T0 必改项 2；`wg_device.rs:2285-2302`）**：`try_build` 重放缓冲控制面状态时**先重放 egress**（`:2285-2288`），但 egress 重放失败**只打 `N11_WG_FEED|replay-egress-failed`，随后仍无条件重放 endpoint**（`:2295-2302`）。于是可能出现「有 endpoint 无 egress」，`egress_fd_of` 便返回 base fd，握手从 base fd 发出。该状态**仅在设备建好前 ICE 已选中路径**（`egress`/`endpoints` 已被缓冲）时可达，概率低但**可达**，故「base socket 永不发包」不再是无条件结论。**据此写成 Wb 的 fail/回 T0 触发条件**：
 
-`| **Wb WG base UDP**；宿主 `192.168.50.3` 限时只读抓包（v4.1 变更 2）；A/B/C/D 四格为 v4.1 豁免登记格 | **豁免登记格（替代证据）**：\`wg_fwd_open\` 原 fd/dup 的 open→protect_settle(success) 身份链齐备、protect 完成时刻早于 tee attach 锚点、全 fd 生命周期零发送（§1.1 替代证据 E1–E6）；**不要求**真实出包 | 同左；断链刺激后 base fd 仍零发送 | 同左；新网络下 base fd 仍零发送 | 同左；跨方向反转 base fd 仍零发送 | 存活 base fd 的 protect 代际 + 零发送；必要的新受保护 fd 按 Ws 行裁决 | 停 WG 发送/关 fd，撤销后无旧 WG 包（以关闭顺序 + 零发送计数为准） | base 保护/feed 失败销毁 VPN、无裸 WG（**不改产品回落路径**） |`
+- 出现 `N11_WG_FEED|replay-egress-failed`；或
+- `N7_WG_FEED|adopted|endpoints=N` 且 `N>0` 时，对应 peer 的 egress **未重放成功**（即该 peer 处于「有 endpoint 无 egress」）。
 
-**拟在 v4:11 句末追加一句（v4.1）**：`（v4.1：Wb 行的 A/B/C/D 四格已于 2026-09-28 测前逐格登记豁免，豁免依据、替代证据与仍须 fail 的条件见文末「v4.1 追加修订记录」。）`
+任一出现即**该格 `fail`、停该格、回 T0 + 用户重新裁决**（不得现场改判据、不得测后追认）。**实现前置项 P1「失败关闭小修」**（另行实现与评审，主会话已另派实现）：**egress 未重放成功则不重放该 peer 的 endpoint**——与 `peer_conn.rs:1224-1239`「先挂 egress 再落 endpoint」规则一致，**只收紧**、不新增任何发送能力。该小修须先落地并经 T7a 独立审查，才可在正式测量中依赖「base fd 永不发包」；未落地时 Wb 四格的豁免裁决**不得**仅凭静态论证成立，须以运行期事件（E1/E2/E3/E4）证伪或确认。
+
+**拟改文字（§4 表 Wb 行，v4.1；「只有 A/B/C/D 四格替换，E/F/G 三格与 oracle 文字保持 v4 原文」）**
+
+`| **Wb WG base UDP**；真实 peer 自有主机外侧 UDP 抓包（v4:64；v4.1 变更 2 把本行 **A–D 四格**的 vantage 改为宿主 `192.168.50.3` 限时只读抓包，见 §1.2；**E/F/G 的判据与 oracle 文字按 v4 原文不动，其 vantage 是否同为宿主须在第二批 AUTH 前另行确认**） | **豁免登记格（替代证据）**：\`wg_fwd_open\` 原 fd/dup 的 open→protect_settle(success) 身份链齐备、protect 完成时刻早于 tee attach 锚点、全 fd 生命周期零发送（替代证据 E1–E6）；**不要求**真实出包 | 同左；断链刺激后 base fd 仍零发送 | 同左；新网络下 base fd 仍零发送 | 同左；跨方向反转 base fd 仍零发送 | 存活 base fd 与必要的新受保护 fd | 停 WG 发送/关 fd，撤销后无旧 WG 包 | base 保护/feed 失败销毁 VPN、无裸 WG |`
+
+> E/F/G 三格自「存活 base fd 与必要的新受保护 fd」起即 v4:57 原文逐字（本次不改）。第二批判据已随 v4 冻结，不在本次变更范围。
+
+**拟在 v4:11 句末追加一句（v4.1）**：`（v4.1：Wb 行的 A/B/C/D 四格已于 2026-09-28 测前逐格登记豁免。适用集为 24 格（M/S/R/D/I/Ws × A/B/C/D）；另有 Wb × A–D 4 个豁免格，其替代证据齐备且未触发任何 fail 条件，是授予标签的附加必要条件。豁免依据、替代证据与仍须 fail 的条件见文末「v4.1 追加修订记录」。）`
 
 **四格豁免登记表（v4.1 追加修订记录正文，逐格写明豁免及依据）**
 
 | 格 | 豁免的判据 | 豁免依据 | 替代证据（必须齐备，缺一即该格 `UNSAT`） | 仍须 fail 的条件 |
 | --- | --- | --- | --- | --- |
-| **Wb × A 首连** | v4:36「3 次独立可归属的**真实生产发送事件**」与 v4:57「原 fd/dup 出包，create 后继续」 | 可行性报告 §2.6 六条代码证据：base socket 永不发包；制造发送路径与 `peer_conn.rs:1224-1229` 的 fail-closed 设计直接相反（round-7 bug 形态） | E1 身份/protect 链；E2 发送点零回执；E3 门控 sendto 计数=0；E4 四表对账；E5 宿主抓包零命中 + 覆盖证明；E6 窗口覆盖 | 任何 Wb fd 出现发送；或 base fd 未 protect；或 TUN 命中 |
-| **Wb × B 断流/重试** | v4:57 B 列「真实断链后握手/包，换 fd 重保护」 | 同上；且 switch 文档:116 明记 `reset_peer_paths` **有意保留 base device socket 且无 core 侧重建路径**，base-only peer 在重选前保持无路径（可行性报告 §4.3） | E1 断链刺激前后 base fd 身份/代际不变；E2/E3 刺激后零发送；E4 对账；E5 零命中 + 覆盖证明；E6 窗口含刺激点 | 同上 |
-| **Wb × C Wi-Fi→蜂窝** | v4:57 C 列「新网络的 base 包与 peer 收件」 | 同上；切网只重解析/重 feed ICE 池（`ets:777-784,797,812,835`），不触碰 base fd | E1 新网络下 base fd protect 代际/`net_id` 登记；E2/E3 零发送；E4 新网络下四表对账；E5 零命中 + 覆盖证明（蜂窝源用当轮实测，不预填 v4:113 的 `223.153.208.166`）；E6 窗口含切网点 | 同上 |
-| **Wb × D 蜂窝→Wi-Fi** | v4:57 D 列「同向反转」 | 同 C，方向反转 | 同 C，源地址按 Wi-Fi 实测（`192.168.50.199` 或当轮实测 LAN/NAT 源） | 同上 |
+| **Wb × A 首连** | v4:36「3 次独立可归属的**真实生产发送事件**」与 v4:57「原 fd/dup 出包，create 后继续」 | 可行性报告 §2.6 六条代码证据：base socket 结构性不发包（唯一例外见上）；制造发送路径与 `peer_conn.rs:1224-1229` 的 fail-closed 设计直接相反（round-7 bug 形态） | E1 身份/protect 链；E2 发送点零回执；E3 按 fd 发送计数=0；E4 四表在册对账；E5 宿主抓包覆盖证明（LAN 零命中／蜂窝来源闭合）；E6 窗口覆盖 | 任何 Wb fd 出现发送；或 base fd 未 protect；或 TUN 命中；**或出现 `N11_WG_FEED\|replay-egress-failed`；或 adopted 时 `endpoints>0` 而该 peer 的 egress 未重放成功** |
+| **Wb × B 断流/重试** | v4:57 B 列「真实断链后握手/包，换 fd 重保护」 | 同上；且 switch 文档:116 明记 `reset_peer_paths` **有意保留 base device socket 且无 core 侧重建路径**，base-only peer 在重选前保持无路径（可行性报告 §4.3） | E1 断链刺激前后 base fd 身份/代际不变；E2/E3 刺激后零发送；E4 对账；E5 覆盖证明；E6 窗口含刺激点 | 同 A |
+| **Wb × C Wi-Fi→蜂窝** | v4:57 C 列「新网络的 base 包与 peer 收件」 | 同上；切网只重解析/重 feed ICE 池（`ets:777-784,797,812,835`），不触碰 base fd | E1 新网络下 base fd protect 代际/`net_id` 登记；E2/E3 零发送；E4 新网络下四表对账；E5 蜂窝**来源闭合**（源用当轮实测，不预填 v4:113 的 `223.153.208.166`）；E6 窗口含切网点 | 同 A |
+| **Wb × D 蜂窝→Wi-Fi** | v4:57 D 列「同向反转」 | 同 C，方向反转 | 同 C，LAN 直连下 E5 用**五元组零命中**（源按 Wi-Fi 实测 `192.168.50.199` 或当轮实测 LAN/NAT 源） | 同 A |
 
-**替代证据 E1–E6（「显式无发送负证据」的完整定义）**
+**替代证据 E1–E6（「显式无发送负证据」的完整定义，r2 按 T0 必改项 3 修订 E2–E5）**
 
 - **E1 身份与 protect 登记**：`N2_SOCK|kind=Wb|fd=…|dup_fd=…|proto=17` 的 `phase=open`、`phase=protect_begin`、`phase=protect_settle|status=success`、`protect_generation`、`net_id`、`local`（`getsockname` 的物理 IP:port）齐全；且 **`protect_settle` 时刻严格早于 tee attach 锚点**（`N2_TUN_GAP|reason=before-tun-attach`，`wg_device.rs:2269-2271` / `N7_WG_FEED|adopted`，`:2303`；`ets:3331,3506-3563` 的 protect 在 `:3350,3452,3471` 的 attach 之前）。`local` 出现 `100.108.0.0/16`（`N2_SOCK_OVERLAY_LOCAL`）即 fail。
-- **E2 发送点零回执**：WG 出向发送点（`wg_device.rs:1556-1580` 的 `io_begin`/`first_io`/`subsequent_io` + `detail=wg_sendto`）在该 fd/dup 上**全窗口零发送回执**。T7a 须先审查该插桩是否覆盖 `egress_fd_of` 返回 base fd 的分支；若只覆盖 egress 分支，须补齐（**实现符合性，不改判据**）。
-- **E3 门控 sendto 计数=0**：证据开关下对 Wb base fd 的 `sendto` 调用次数计数，全窗口为 0 并周期落盘（与 E2 双通道互证：日志可能被丢帧/日志级别过滤，进程内计数弥补「没写日志 ≠ 没发」）。若现有实现无此计数，补一条开关门控计数（**实现符合性，不改判据**；默认关）。
-- **E4 四表对账**：按 v4:32/L109-110 每轮 `hdc shell cat /proc/net/udp`（及需要的 `udp6`）经 `bm dump` 当轮复核 uid 后过滤，确认 Wb fd/dup 的 inode/tuple 在册且其发送相关统计（若可得）无增长；fd 对不上、四表不可读、uid 未核 → `UNSAT`。
-- **E5 宿主抓包零命中 + 覆盖证明**：见 §1.2。**零命中必须与「同会话同过滤器内 Ws 生产包命中」同时成立**；整窗零包或覆盖缺口即不构成负证据。
-- **E6 窗口覆盖**：负证据窗口定义为**该 base fd 的生命周期** `open → close/destroy`（由 E1 的 open 与关闭/`destroy` 日志界定），且必须完整包含 v4:39 的「create+tee attach → destroy」全 campaign 可观测窗口与所有格间时段；窗口有缺口且缺口与 base fd 可能发送的时段重叠 → `UNSAT`。
+- **E2 发送点零回执（r2：覆盖性已核实，由 T7a 复核）**：WG 出向唯一发送点是 `send_to`，它对传入 fd **一视同仁**——`wg_device.rs:1556-1580` 先 `io_begin(fd, …)`、`sendto` 后 `first_io(fd, …, "wg_sendto")`，不区分 egress 还是 base；而 base socket 的 core 侧 dup 已由 `WgDevice::adopt`／`reattach_socket` 经 `n2_socket_trace::duplicated()` **登记进追踪表**（`wg_device.rs:713`、`:771`；注册实现 `n2_socket_trace.rs:50-57`），且 `receipt_due` **保证「首包必出回执」**（`n2_socket_trace.rs:103-106`）。故该 fd/dup 上**全窗口零回执**即零发送。**抽样说明**：`receipt_due` 对 `Wb`/`Ws` 只保留「首包 + 其后每 128 包」，因此回执是「有发送」的**充分信号**、不是完整计数；完整计数由 E3 提供（二者互证）。**属实现符合性，由 T7a 独立复核该覆盖链与抽样语义，不改判据。**
+- **E3 按 fd 的发送计数=0（r2：实现前置项 P2）**：证据开关下**按 fd** 累计 `sendto` 调用次数（**现有 `WgDeviceStats` 是设备全局计数、不区分 fd，故须新增按 fd 计数**），全窗口为 0 并周期落盘。与 E2 双通道互证：日志可能被丢帧/日志级别过滤或被抽样跳过，按 fd 计数弥补「回执抽样/没写日志 ≠ 没发」。**实现前置项（默认关，须 T7a 审查）**。
+- **E4 四表在册对账（r2：删去「发送统计无增长」）**：按 v4:32/L109-110 每轮 `hdc shell cat /proc/net/udp`（及需要的 `udp6`）经 `bm dump` 当轮复核 uid 后过滤，确认 Wb fd/dup 的 inode/tuple **在册**且与 E1 的 `local` 一致。**不要求、也不使用任何「发送统计无增长」**（`/proc/net/udp` 没有按 fd 发送计数，全局统计无法归属到该 fd）；fd 对不上、四表不可读、uid 未核 → `UNSAT`。
+- **E5 vantage 覆盖证明与来源闭合（r2 重写；见 §1.2）**：
+  - **LAN 直连（五元组零命中）**：同一抓包会话、同一过滤器（锚定 peer 侧目的 IP:port）、同一时间窗内**必须先命中 Ws 生产包**（证明 vantage 与过滤器非盲），而 Wb 注册 tuple（E1 的 `getsockname` 本地 IP:port）零命中，才构成物理侧负证据；整窗零包或覆盖缺口不构成负证据。
+  - **蜂窝下改为「来源闭合」**：宿主看到的、**来自设备**（当轮实测的设备 LAN IP 或当轮蜂窝 NAT 后公网源）**到 peer 冻结端口**的**每一条流**，其 NAT 后源地址须能归到**已登记的 I/Ws 映射**（`XOR-MAPPED-ADDRESS`；v4:64 允许 Ws 继承同一选中 socket 的已证映射）；**出现任何归不上的源映射即 fail 候选并回 T0**——不得当作 Wb 零发送的负证据，不得现场改判据，也不得把该流记成别的行。
+  - **E5 只覆盖测试 peer**：**peer 集合须冻结**（测试 peer 身份/地址入 §2 冻结登记）；**其余 peer 只靠 E2/E3**，E5 不为其提供零发送覆盖，登记中不得把「测试 peer 零命中」外推为「全部 peer 零命中」。
+- **E6 窗口覆盖**：负证据窗口定义为**该 base fd 的生命周期** `open → close/destroy`（由 E1 的 open 与关闭/`destroy` 日志界定），且必须完整包含 v4:39 的「create+tee attach → destroy」全 campaign 可观测窗口与所有格间时段；**窗口必须覆盖 `try_build` 重放点**（`N7_WG_FEED|adopted` 及其前后的 `replay-*-failed` 行）。窗口有缺口且缺口与 base fd 可能发送的时段重叠 → `UNSAT`。
 
-**豁免不等于 pass，且不可回退式放宽**：四格裁决登记为 `exempted-with-substitute-evidence`，**不得**写 pass、不得计入「已证明生产外发」；E1–E6 任一缺件即该格 `UNSAT` 并阻止授予标签（豁免的是「必须有真实生产发送」这条判据，不是证据门槛）。若正式测量中出现「Wb fd 有发送」，本豁免依据（base socket 永不发包）即被证伪：该格 `fail`、停该格、回 T0 + 用户重新裁决（不得现场改判据、不得测后追认）。
+**豁免不等于 pass，且不可回退式放宽**：四格裁决登记为 `exempted-with-substitute-evidence`，**不得**写 pass、不得计入「已证明生产外发」、不得作为任何门结论输入；E1–E6 任一缺件即该格 `UNSAT` 并阻止授予标签（豁免的是「必须有真实生产发送」这条判据，不是证据门槛）。若正式测量中出现「Wb fd 有发送」，**或**出现 §1.1 的 `replay-egress-failed` / 「有 endpoint 无 egress」触发条件，本豁免依据即被证伪：该格 `fail`、停该格、回 T0 + 用户重新裁决（不得现场改判据、不得测后追认）。
 
 ### 1.2 变更 2：Wb/Ws 物理 oracle 地点改为宿主机抓包
 
@@ -75,15 +114,20 @@
 
 **拟改文字（v4.1）**：
 
-> Wb/Ws 的独立网络侧 oracle 地点改为 **k8s 宿主机 `192.168.50.3`（peer 所在 Pod 的 SNAT/DNAT 点；用户 `alfadb`）限时只读抓包**（`tcpdump`；**抓包所需权限另行授权解决，本稿不授权**）。
+> Wb/Ws 的独立网络侧 oracle 地点改为 **k8s 宿主机 `192.168.50.3`（peer 所在 Pod 的 SNAT/DNAT 点；用户 `alfadb`）限时只读抓包**（`tcpdump`；**抓包权限是宿主机上的持久特权变更，见下「权限」；本稿不授权、不执行**）。
 >
-> **过滤条件（固定，不得现场放宽）**：`udp and (host 192.168.50.199 or host <当轮实测设备蜂窝 NAT 后公网源>) and (port <peer 外层 wg-port> or portrange <冻结的 ICE/STUN 端口>)`；IPv6 无经预审捕获方案则 Wb/Ws 对应格 `UNSAT`。过滤器只覆盖设备↔peer 的外层 UDP；hdc 控制端（TCP）与 relay/coturn 流量不在过滤内，不得采集。
-> **限时**：抓包起止必须覆盖「create+tee attach → destroy」全 campaign 窗口**含格与格之间**（v4:39），并登记丢帧计数与采样缺口；抓包权限/命令列入该批 AUTH 的操作员白名单（argv 逐条、间隔/次数/预算）。
-> **限量**：`-c` 包数上限与总预算写入 AUTH；`-s` 取最小截断（只保留 IP/UDP 头与 WG/STUN 头，不落载荷）；超出预算即停并如实登记，不得为「抓全」临时放宽。
-> **脱敏**：只取白名单元数据（源/目的 IP:port、协议、长度、时刻、NAT 前后映射）；不进凭据、JWT、setup key、证书/密钥或敏感载荷（v4:78）；宿主侧不得读取 hdc/relay 内容。
-> **原件**：pcap 原件 + `sha256` + 过滤条件原文 + 丢帧/缺口报告 + 起止时刻 + 执行者与授权编号入证据；原件保留与删除按当批 AUTH 规定。
-> **与设备 `N2_SOCK` 配对规则**：Ws 生产包以设备 `N2_SOCK|kind=Ws|fd|dup_fd|local|remote` 加发送回执（`detail=wg_sendto`；`first_mono_ms`/`first_wall_ms` 是完成时刻而非线上时刻）为设备侧锚点，经宿主侧记录的 NAT 前后映射（设备 LAN `192.168.50.199` 或当轮蜂窝实测源 → 宿主 `192.168.50.3` → Pod `10.98.0.142`/映射端口）按目的 IP:port、协议、源端口与 v4:44 的 **±2000 ms** 唯一配对；两端时钟校准与误差上界入证据，超界/多候选/时钟跳变按 v4:44 停格 `UNSAT`。同 LAN direct 取设备 LAN 源或实测 LAN NAT 源、家宽公网 hairpin 依冻结映射消歧、蜂窝以当轮实测运营商 NAT 后公网源配对（**不预填** v4:113 的 `223.153.208.166`、`8.139.6.47`、`175.10.221.251`、`192.168.50.6`）。Wb 的配对是**零命中规则**：同一抓包会话、同一过滤器、同一时间窗内**必须先命中 Ws 生产包**（证明 vantage 与过滤器非盲），而 Wb 注册 tuple（E1 的 `getsockname` 本地 IP:port）零命中，才构成「不发」的物理侧负证据；整窗零包或有覆盖缺口 → Wb 替代证据不成立（`UNSAT`）。
-> **语义差异必须如实登记**：宿主是 peer 的 NAT 点，不是设备物理接口；「设备物理接口发送元数据」仍按 v4:40 由设备侧独立留存，宿主抓包承担「独立网络侧」角色。须测前确认能建立 direct P2P；只有 relay 路径则 Ws 的直达 peer 收件格记 `not exercised`（Wb 四格按 v4.1 豁免登记裁决），不得用 coturn、内层 peer echo 或 relay 收件替代。可选补充见 §0.3 Q2。
+> **过滤条件（锚定 peer 侧，固定，不得现场放宽）**：`udp and dst host <节点 IP 或 Pod IP> and dst port in {冻结的 --wg-port, 冻结的 --ice-port}`。**只按目的（peer 侧）锚定**：删除一切按设备源/蜂窝源过滤，也删除 ICE/STUN `portrange` 形式；两个端口取**冻结值**（`nbinterop --wg-port/--ice-port` 或 DNAT/hostPort 的等价冻结映射，见下「测前只读冻结」）。IPv6 无经预审捕获方案则 Wb/Ws 对应格 `UNSAT`。过滤器只覆盖设备↔peer 的外层 UDP；hdc 控制端（TCP）、relay/coturn 流量与 **conntrack 表读取**均**不在本授权内**，不得采集。
+> **两个抓包点（NAT 前后各一）**：① 上联/`vmbr0`（**DNAT 前**，目的为节点 `192.168.50.3` 的 hostPort/DNAT 端口）；② Pod 侧 `veth`/`cni`（**DNAT 后**，目的为 Pod `10.98.0.142` 的外层端口）。两点必须同时开、同一冻结过滤器与同一时间窗，分别落原件；只在单点看到或两点时间/五元组无法对齐即不构成覆盖证明。**不读 `conntrack`**：NAT 前后映射只以两点 pcap + 冻结的 DNAT/hostPort 规则与设备侧 `N2_SOCK` 对齐，不调用 `conntrack -L`/`ss` 等额外通道。
+> **测前只读冻结（缺一即相关格 `UNSAT`，不得测后补）**：Pod 固定在节点 `192.168.50.3`（`10.98.0.142` 的 SNAT/DNAT 归属须实测确认）；`--wg-port`/`--ice-port` 冻结值与节点的 DNAT/hostPort 规则（或路由器的端口映射、或 peer-reflexive 反射地址路径）**实测**并逐条留证；**蜂窝下入站流量必须只经此节点**到达 peer（若蜂窝路径存在不经该节点的旁路，则蜂窝格 `UNSAT`）。直连 P2P 可达性按 v4:64 测前确认；只有 relay 路径则 Ws 的直达 peer 收件格 `not exercised`（Wb 四格按 v4.1 豁免登记裁决）。
+> **snaplen**：`-s 96`。理由：链路层 14 + IPv4 20 + UDP 8 = 42 字节头部，余 54 字节载荷足以覆盖 **STUN 头 20 字节**（消息类型/长度 + 4 字节 magic cookie + 96 位 transaction ID，可与 coturn 侧按 ID 配对）与 **WG 消息类型判读所需的首字节**（1 字节类型 + 3 字节保留），并为单个 802.1Q tag（4 字节）与 IPv4 选项留余量；96 字节**不落任何 DNS 内容、凭据或完整加密载荷**（超出部分由内核截断丢弃）。snaplen 不得现场放宽。
+> **类型分流（同一五元组）**：同一五元组上先有 ICE check（STUN）后有 WG 握手/数据，故原件须**按类型分流**——用 STUN magic cookie `0x2112A442`（载荷偏移 4–8）识别 STUN、用载荷首字节消息类型（1/2/4）识别 WG；**只配对首包**（每类第一次出现的包），后续包仅计数与登记，不参与唯一配对。同一五元组上同时出现两类首包而无法按冻结目的/时间区分即 `invalid/UNSAT`。
+> **权限（宿主持久特权变更，如实登记）**：2026-09-28 晚用户以 `sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump` 授予（主会话已核 `getcap`）；**授予时刻、命令原文、`getcap` 回读结果**入当批 AUTH 证据。撤销方式为 **campaign 结束后** `sudo setcap -r /usr/bin/tcpdump`；**撤销时刻与 `getcap` 空结果**同样入证据。**这是宿主机上的持久权限变更**，不是设备授权；本提案不执行授予/撤销，也不 SSH。
+> **限时**：抓包起止必须覆盖「create+tee attach → destroy」全 campaign 窗口**含格与格之间**（v4:39），并登记丢帧计数与采样缺口；抓包命令列入该批 AUTH 的操作员白名单（argv 逐条、间隔/次数/预算）。
+> **限量**：`-c` 包数上限与总预算写入 AUTH；超出预算即停并如实登记，不得为「抓全」临时放宽。
+> **脱敏**：只取白名单元数据（源/目的 IP:port、协议、长度、时刻、NAT 前后映射、消息类型）；不进凭据、JWT、setup key、证书/密钥或敏感载荷（v4:78）；宿主侧不得读取 hdc/relay 内容。
+> **原件与删除**：两个抓包点各留 pcap 原件，存放路径、`sha256`（现算并 sidecar）、过滤条件原文、snaplen、丢帧/缺口报告、起止时刻、执行者与授权编号入当批 AUTH 证据；**原件按当批 AUTH 规定的保留期保存，期满用授权白名单内的删除命令删除并登记删除时刻与删除后复核**（不得在 campaign 中途删除，不得留无 hash 的副本）。
+> **与设备 `N2_SOCK` 配对规则**：Ws 生产包以设备 `N2_SOCK|kind=Ws|fd|dup_fd|local|remote` 加发送回执（`detail=wg_sendto`；`first_mono_ms`/`first_wall_ms` 是完成时刻而非线上时刻）为设备侧锚点，经宿主侧记录的 NAT 前后映射（设备 LAN `192.168.50.199` 或当轮蜂窝实测源 → 宿主 `192.168.50.3` → Pod `10.98.0.142`/映射端口）按目的 IP:port、协议、源端口与 v4:44 的 **±2000 ms** 唯一配对；两端时钟校准与误差上界入证据，超界/多候选/时钟跳变按 v4:44 停格 `UNSAT`。同 LAN direct 取设备 LAN 源或实测 LAN NAT 源、家宽公网 hairpin 依冻结映射消歧、蜂窝以当轮实测运营商 NAT 后公网源配对（**不预填** v4:113 的 `223.153.208.166`、`8.139.6.47`、`175.10.221.251`、`192.168.50.6`）。**Wb 的裁决规则**：LAN 直连下用 **Wb 注册 tuple 零命中**（同会话/同过滤器/同窗内先命中 Ws 生产包，证明 vantage 非盲）；**蜂窝下改用 E5 的来源闭合**（每一条来自设备到 peer 冻结端口的流，其 NAT 后源地址须能归到已登记的 I/Ws 映射，归不上即 fail 候选并回 T0）；整窗零包或有覆盖缺口 → Wb 替代证据不成立（`UNSAT`）。
+> **语义差异必须如实登记**：宿主是 peer 的 NAT 点，不是设备物理接口；「设备物理接口发送元数据」仍按 v4:40 由设备侧独立留存，宿主抓包承担「独立网络侧」角色。**peer 应用层 `recvfrom` 回执按 Q2（§0.3）只作辅助证据（应用层，非独立网络侧 oracle）**，不替代宿主抓包、不补救抓包缺失的格。
 
 ### 1.3 变更 3：A 列「生产事件」操作性定义（**澄清，不改判据**）
 
@@ -93,34 +137,37 @@
 
 > **共同锚点（全行适用）**：每个 A 事件的**夹心前控最早时刻** = TUN tee **attach 锚点之后**，即 `N2_TUN_GAP|reason=before-tun-attach`（`wg_device.rs:2269-2271`）或 `N7_WG_FEED|adopted`（`:2303`）之后，且 `VPN_WG_DATAPLANE_FED|deviceUp=true`（`ets:3493`）之后；前控必须以 `N2_CONTROL_HIT` 命中为准。attach 之前 tee 未挂载，`n2_control_tee()` 在 device 未起时返回 `None`（`wg_device.rs:2119-2123`）、`n2_control_send_json` 回 `not-armed-or-no-tun`（`connector.rs:5207-5215`），且 `n2_tun_dest_configure` 只创建 tee 与目标集合、**不挂载**（`wg_device.rs:2102-2117`）；因此 attach 前的前控不可能命中。v4:26 已明言 attach 之前的帧不可见，本澄清只是把「最早可夹时刻」写成可判定的锚点，不新增门槛。
 > **触发须走生产路径**：每次 A 事件必须是同一 App 进程、同一代 `VpnConfig`、同一当前网络下，**沿用 pre-create 已保护的生产 fd/dup**（同 `mgmtsock::connect_protected`/`iceSocketOpen` 开口等价）发出的一次真实生产发送；不得新开未保护 socket，不得用 `n2_stimulus` 的重拨路径（那是 B 列，v4:60），不得用正控 marker 充当生产事件。触发通道默认关闭（v4:32），仅在对应格 AUTH 白名单内开启。
+> **通用原则（r2，T0 必改项 6）**：**触发只能改变发送时刻，不能造出生产客户端本就不会发的报文种类**。每行的触发发送都必须是生产代码本来就会发的**真实 RPC/帧**、走**同一 fd**、**无测试载荷**、**无服务端状态副作用**（不写认证服务、不替换既有流、不触发服务端重推网络图或 recreate）。
+> **计数口径（r2）**：v4:36 的「A 为三个独立首连会话」按**会话**计数——每个独立首连会话只计 **1 次** A 事件；**不得**用同一会话内的两个 STUN 目标（I 行）或两个方向凑两次事件；3 次必须来自 3 个独立首连会话。
 
 | 行 | A 事件的「事件是什么」 | 触发方式（如何造出这一次真实发送） | 标注 |
 | --- | --- | --- | --- |
-| **M** TCP | create+attach 后，**同一 pre-create 已保护 M fd/dup** 上的首个真实管理 RPC 发送（非裸 TCP ACK） | 证据开关下、前控 HIT 之后，在产品侧对 live M 连接发起一次真实管理请求（例如同连接再开一条 Sync 流或一次真实管理 RPC；同一 TCP 连接即同一 fd） | **澄清，不改判据** |
-| **S** TCP | create+attach 后，**同一 pre-create 已保护 S fd/dup** 上的首个真实 signal 出站帧 | 同 M：证据开关下在前控 HIT 之后，于 live signal 流上发送一次真实出站帧（同 opener），不重拨 | **澄清，不改判据** |
-| **R** TCP | create+attach 后，**同一真实 relay TLS/WSS 会话**上的首个真实外层发送 | 证据开关下在前控 HIT 之后由客户端主动发一次真实 relay `Frame`（受控主动 keepalive/HealthCheck 应答）；不得用 `n2_stimulus kind=R`（`shutdown`+重拨属 B，switch 文档:114） | **澄清，不改判据** |
-| **D** UDP | attach 后**受保护 DNS fd**（`Purpose::Dns` 新 fd）上的一次真实新查询，并记录发出查询与**同 ID 响应**（`protected_dns.rs:151-168` + 工作区 `N2_DNS\|query_id=…\|response=matched` 回执） | 证据开关下在前控 HIT 之后强制一次受保护重查；**A/B 口径见 §0.3 Q1，须 T0 确认**：A 取 attach 后首个受执行者触发的查询，B 取已授权断流/超时后的新查询/新 fd（v4:55、switch 文档:117） | **澄清，不改判据**（口径待 T0 确认） |
-| **I** UDP | attach 后 ICE 池在冻结接口 fd 上的一次真实 Binding（`detail=stun_txn_<hex>` + `XOR-MAPPED-ADDRESS`） | **App 侧夹心编排（最省）**：在 `settleCreate` 的 `protectAndFeedIceSocket()`（`ets:3381,3564-3588`）处用 `withN2Sandwich` 包住 ICE 池馈入——attach（`ets:3350`）已在其之前，时序天然成立；两个冻结 STUN 目标 = 两个事件 | **澄清，不改判据**（只补实现） |
-| **Ws** UDP | ICE 选中并把本地 socket 的 dup 交 WG 后，**从该 dup 实际发出的首个 WG 外层包**（`detail=wg_sendto`；类别由 `n2_socket_trace.rs:58-66` 从 I 改判为 Ws） | 证据开关下在 egress 挂接/首包时机做夹心编排（例如把 `apply_endpoint` 延后到前控 HIT 之后），或提供「在 live 选中路径上发一次真实 WG keepalive/handshake」的主机触发原语 | **澄清，不改判据**（只补实现） |
+| **M** TCP | create+attach 后，**同一 pre-create 已保护 M fd/dup** 上的首个真实管理 RPC 发送（非裸 TCP ACK） | 证据开关下、前控 HIT 之后，在同一 live M 连接上发起一次**只读幂等**的真实管理 RPC（**例如 `GetServerKey`**，`grpc.rs:430`，登录流程本就会调用、无服务端状态副作用；同一 TCP 连接即同一 fd）。**不得「再开一条 Sync 流」**——服务端可能替换原流/重推网络图，有 recreate 风险（r2） | **澄清，不改判据** |
+| **S** TCP | create+attach 后，**同一 pre-create 已保护 S fd/dup** 上的首个真实 signal 出站帧 | **核对 signal 协议后（r2）**：本实现里 signal 出站帧只有两类——(a) 对特定 peer 的 `OFFER/ANSWER/CANDIDATE`（`signal.rs:130`，会有**对端状态副作用**），(b) **自寻址 HEARTBEAT**（`signal.rs:533` `send_heartbeat`，上游 `sendReceiveProbe` 的对等物，服务端直回发送者，无对端/服务端状态副作用）。**本仓库尚未接线**（`:70-77` 记 30 s 接收看门狗属 N5 增量，原语存在但无调用者），故：(i) 若测量前实现该看门狗，则用自然发生的自寻址 HEARTBEAT 作 S(A) 生产事件（前控 HIT 后等待其发出）；(ii) 否则等**服务端驱动**的下一次需要应答的入站帧，用生产客户端本就会发的应答作事件；(iii) 两者都不可得 → **S(A) `UNSAT`**，不得现场造帧 | **澄清，不改判据** |
+| **R** TCP | create+attach 后，**同一真实 relay TLS/WSS 会话**上的首个真实外层发送 | **r2 更正**：生产代码**从不主动发 HealthCheck**（客户端只在收到服务端 `HealthCheck` 时回一个 `Frame`，`relay_client.rs:2117-2120,2357`），故「客户端主动发 HealthCheck」是**诊断构造、不得使用**。改为：前控 HIT 后**等待服务端驱动的下一次 HealthCheck 应答**作为生产事件，应答发出后再发后控。**等待上限写入 AUTH（建议 ≤ 90 s，须 > 服务端心跳周期）**；超时未观测到即该事件 `UNSAT`（不得改判、不得自己造帧）。不得用 `n2_stimulus kind=R`（`shutdown`+重拨属 B，switch 文档:114） | **澄清，不改判据** |
+| **D** UDP | **每个独立首连会话**里 attach 之后**第一次**受保护 DNS 查询（`Purpose::Dns` fd），并记录发出查询与**同 ID 响应**（`protected_dns.rs:151-168` + 工作区 `N2_DNS\|query_id=…\|response=matched` 回执） | **Q1 口径（§0.3，T0 已裁定）**：优先取**自然发生**的那次查询；没有自然发生时，才用 requery 原语在该会话内**触发一次**（`n2_stimulus kind=D` 的 `force_protected_dns_requery`）；**该会话此前不得有任何刺激**；3 次须来自 3 个会话。B(D) = 同一会话中先有成功查询、再经已授权扰动后的新查询/新 fd；**原语两列共用但事件不跨列**，每条记录写明会话与前置刺激 | **澄清，不改判据**（口径已由 T0 裁定） |
+| **I** UDP | attach 后 ICE 池在冻结接口 fd 上的一次真实 Binding（`detail=stun_txn_<hex>` + `XOR-MAPPED-ADDRESS`） | **App 侧夹心编排（最省）**：在 `settleCreate` 的 `protectAndFeedIceSocket()`（`ets:3381,3564-3588`）处用 `withN2Sandwich` 包住 ICE 池馈入——attach（`ets:3350`）已在其之前，时序天然成立；**两个冻结 STUN 目标仍按 v4:56 逐一登记是否实际发送**，但**只计 1 次 A 事件**（不得凑两次，见上文计数口径） | **澄清，不改判据**（只补实现） |
+| **Ws** UDP | ICE 选中并把本地 socket 的 dup 交 WG 后，**从该 dup 实际发出的首个 WG 外层包**（`detail=wg_sendto`；类别由 `n2_socket_trace.rs:58-66` 从 I 改判为 Ws） | 证据开关下在 egress 挂接/首包时机做夹心编排（例如把 `apply_endpoint` 延后到前控 HIT 之后），或提供「在 live 选中路径上发一次真实 WG keepalive/handshake」的主机触发原语。**r2 约束**：延后 `apply_endpoint` 时**必须保持 `peer_conn.rs:1230-1239`「先挂 egress 再落 endpoint」的顺序**（先 `attach_egress_socket` 成功、再落 endpoint），**不得**造出「有 endpoint 无 egress」——那正是 §1.1 例外的失败形态；与 P1 失败关闭小修一致 | **澄清，不改判据**（只补实现） |
 | **Wb** UDP | —— | 不适用：见 §1.1 豁免登记（**不生产事件**） | —— |
 
-**配套实现（不改判据；须 T7a 独立符合性审查，全部默认关）**：
+**配套实现（不改判据；须 T7a 独立符合性审查，全部默认关；对应 §0.4 前置项）**：
 
-1. 产品：为 M/S/R 提供「证据开关下、在 attach 之后由执行者触发一次真实生产发送」的原语；I/Ws 用 App 侧编排；D 按 §0.3 Q1 口径实现（可行性报告 §5 第 2 项）。
-2. 产品：为已连接 TCP fd 补 `phase=subsequent_io_begin`/`subsequent_io` 回执（现 `n2_socket_trace.rs:121` 对非 I/Wb/Ws 用完即删；`mgmtsock.rs:355-380` 只记 `first_io`），并在 gRPC/signal/relay 写路径挂钩——否则 §3 第 1 条对 A 列永远缺「后续发送」证据（v4:38）。
-3. 产品：E3 门控 sendto 计数与 E2 插桩对 base fd 分支的覆盖（§1.1）。
-4. 执行器：`run_campaign.py` 的 A 列必须先等 attach 锚点再发前控（现 `:786-795` 后 `:829` 立即发前控，VPN 尚未 create/attach，必然 `not-armed-or-no-tun` → 按 §3 记 `UNSAT`）；`production()`（`:819`）的「observed from the armed session」换成真实触发调用并记录事件 id。
-5. 判定器：登记 A 的 attach 锚点与事件 id，避免把 attach 前的平凡区窗口当 A 的观测窗。
+1. 产品：为 M/S/R 提供「证据开关下、在 attach 之后由执行者触发一次真实生产发送」的原语（M 用 `GetServerKey` 类只读幂等 RPC；S 见上表 (i)/(ii)/(iii)；R 只等服务端驱动的 HealthCheck 应答）；I/Ws 用 App 侧编排；D 按 Q1 口径实现（可行性报告 §5 第 2 项；§0.4 P4/P5/P8）。
+2. 产品：为已连接 TCP fd 补 `phase=subsequent_io`（写完成）回执（现 `n2_socket_trace.rs:121` 对非 I/Wb/Ws 用完即删；`mgmtsock.rs:355-380` 只记 `first_io`），并在 gRPC/signal/relay 写路径挂钩——否则 §3 第 1 条对 A 列永远缺「后续发送」证据（v4:38）。**§0.4 P3**。
+3. 产品：E3 **按 fd** 的 sendto 计数（现有 `WgDeviceStats` 为全局）与 E2 覆盖链的 T7a 复核（§1.1）。**§0.4 P2**。
+4. 执行器：`run_campaign.py` 的 A 列必须先等 attach 锚点再发前控（现 `:786-795` 后 `:829` 立即发前控，VPN 尚未 create/attach，必然 `not-armed-or-no-tun` → 按 §3 记 `UNSAT`）；`production()`（`:819`）的「observed from the armed session」换成真实触发调用并记录事件 id。**§0.4 P6**。
+5. 判定器：登记 A 的 attach 锚点与事件 id，避免把 attach 前的平凡区窗口当 A 的观测窗；并登记 D 的会话归属与前置刺激（Q1）。
 6. AUTH 模板：`trigger_surface.positive_control.host_triggerable`、`production.A.host_triggerable` 按落地结果更新，且须独立验证后才置真。
 
 ### 1.4 拟追加的 v4.1 修订记录文本（落冻结文件文末，只追加不改写）
 
 > ## v4.1 追加修订记录（2026-09-28，只追加不改写）
 >
-> 依据 2026-09-28 晚用户对三项修订的明确批准（原文：`1. 可以`、`2. 已添加公钥，用户名alfadb`、`3. 可以`）与 T0（Anthropic 席）评审，对 v4 作三项测前修订，**均不改变 §3 阈值、§2 配置冻结、适用范围口径与治理标签定义**：
-> 1. §4 表 Wb 行改为豁免登记格，A/B/C/D 四格逐格登记豁免（依据：`wg_fwd_open` base socket 在当前 N11 架构下永不发包，六条代码证据见可行性报告 §2.6），替代证据 E1–E6 与仍须 fail 的条件（任何 Wb fd 出现发送 / base fd 未 protect / TUN 命中）见本提案 §1.1；不改产品回落路径。
-> 2. §4 L64 的 Wb/Ws 独立网络侧 oracle 地点改为 k8s 宿主机 `192.168.50.3`（`alfadb`）限时只读抓包，过滤/限时/限量/脱敏/原件 sha256/与 `N2_SOCK` 配对规则见本提案 §1.2。
-> 3. §4 增补「A 列生产事件的操作性定义（v4.1 澄清，不改判据）」：逐行 M/S/R/D/I/Ws 的事件、夹心前控最早时刻（TUN tee attach 锚点之后）与触发方式，见本提案 §1.3；配套产品/执行器/判定器实现属实现符合性，须 T7a 审查，全部默认关。
+> 依据 T0（`anthropic/claude-opus-5-5` 席，干净上下文）2026-09-28 评审意见（结论「**有条件**」，8 项必改）与用户对三项修订**方向**的回复（原文：`1. 可以`、`2. 已添加公钥，用户名alfadb`、`3. 可以`），对 v4 作三项测前修订。**本记录只有在用户对 v4.1 最终文本重新批准后才成立并冻结**；未获重新批准前，v4.1 不成立、不得据以测量。修订**不改变 §3 阈值、§2 配置冻结与治理标签定义文字**；**适用集计数口径按本记录第 1 项写明**。
+> 1. §4 表 Wb 行的 **A/B/C/D 四格**改为豁免登记格（依据：`wg_fwd_open` base socket 在当前 N11 架构下结构性不发包；唯一例外见下）——**E/F/G 三格与行内 oracle 文字保持 v4:57 原文，第二批已冻结判据不在本次变更范围**。替代证据 E1–E6 与仍须 fail 的条件见本提案 §1.1；其中 **fail/回 T0 触发条件**为：任何 Wb fd 出现发送 / base fd 未 protect / TUN 命中 / **出现 `N11_WG_FEED\|replay-egress-failed` / adopted 时 `endpoints>0` 而该 peer 的 egress 未重放成功**（`wg_device.rs:2285-2302` 的重放顺序例外）。配一个**另行实现与评审的失败关闭小修**（egress 未重放成功则不重放该 peer 的 endpoint，只收紧；主会话已另派实现），落地并审查前不得仅凭静态论证依赖「永不发包」。**适用集 = 24 格**（M/S/R/D/I/Ws × A/B/C/D）；**另有 Wb × A–D 4 个豁免格**，其替代证据齐备且未触发任何 fail 条件，是授予标签的**附加必要条件**。不改产品回落路径。
+> 2. §4 L64 的 Wb/Ws 独立网络侧 oracle 地点改为 k8s 宿主机 `192.168.50.3`（`alfadb`）限时只读抓包：过滤器**锚定 peer 侧目的**（`udp and dst host <节点/Pod IP> and dst port in {冻结 --wg-port,--ice-port}`）、**两个抓包点**（上联/`vmbr0` 与 Pod 侧 veth/cni，NAT 前后）、**不读 conntrack**、测前只读冻结 DNAT/hostPort 与蜂窝入站只经此节点（否则 `UNSAT`）、`-s 96` 及其理由、同一五元组按类型分流且只配对首包、setcap 授予/撤销登记、原件存放/sha256/删除规则、与 `N2_SOCK` 的 ±2000 ms 配对见本提案 §1.2。
+> 3. §4 增补「A 列生产事件的操作性定义（v4.1 澄清，不改判据）」：逐行 M/S/R/D/I/Ws 的事件、夹心前控最早时刻（TUN tee attach 锚点之后）、触发方式与**通用原则（触发只能改变发送时刻，不能造出生产不会发的报文种类）**，见本提案 §1.3；M/S/R 的触发均为生产本来就会发的真实 RPC/帧（M：`GetServerKey` 类只读幂等 RPC；S：见 §1.3；R：等服务端驱动的 HealthCheck 应答），D 按 Q1 口径（§0.3）。配套产品/执行器/判定器实现属实现符合性，须 T7a 审查，全部默认关。
+> 4. 采纳 T0 对 Q1/Q2 的裁定（§0.3）：A(D)/B(D) 事件口径；peer 应用层 `recvfrom` 回执作为**辅助证据（应用层，非独立网络侧 oracle）**采用，不替代宿主抓包、不补救抓包缺失的格。
 > 本记录不授予 `N2 第一阶段通过`、不签发 AUTH、不追认 0045–0047 或任何诊断记录为证据，不授权设备/服务器/抓包操作。两批 AUTH 仍须分别签发并回读确认。
 
 ### 1.5 拟追加的治理文字（落治理文末，只追加不改写）
@@ -129,31 +176,32 @@
 >
 > > 本节随[`n2-device-evidence-preregistration-draft-v2-20260928.md`](n2-device-evidence-preregistration-draft-v2-20260928.md) v4.1 于测前追加，只追加不改写旧治理条款（含本节之前「N2 第一阶段标签定义」一字未动）。登记豁免不等于授予标签、不签发 AUTH、不追认任何诊断记录为门证据。
 >
-> 1. **Wb 四格豁免登记**：第一批 A/B/C/D 中 Wb 行的 **A、B、C、D 四格**登记为逐格豁免（v4:11 机制），豁免「必须有 3 次真实生产发送」这一判据；依据是 base socket 在当前架构下永不发包（`peer_conn.rs:1224-1239` 的 fail-closed 结构性堵法，不改动）。四格按替代证据 E1–E6（身份/protect 登记、发送点零回执、门控 sendto 计数=0、四表对账、宿主抓包零命中 + 覆盖证明、fd 全生命周期窗口覆盖）裁决，登记为 `exempted-with-substitute-evidence`，**不得写 pass**。任何 Wb fd 出现发送、或 base fd 未 protect、或 from-OS TUN 命中，即该格 `fail` 并回 T0 + 用户重新裁决。任一替代证据缺件即 `UNSAT` 并阻止授予。
-> 2. **「28 格全体」在豁免后的口径**：第一批适用集维持 28 格不变；授予条件 = **24 格**（M/S/R/D/I/Ws × A/B/C/D）按 v4 原判据全体达标 **且 4 格**（Wb × A/B/C/D）豁免已逐格登记、替代证据齐备、三条 fail 条件均未触发。豁免格不计入「已证明生产外发」，也不得作为任何门结论输入。
-> 3. **Wb/Ws oracle 地点**：独立网络侧由「peer 自有主机物理外侧」改为 k8s 宿主机 `192.168.50.3`（`alfadb`）限时只读抓包；这是操作员侧 vantage 变更，不是设备授权；过滤/限时/限量/脱敏/原件与配对规则随 v4.1 冻结。设备物理接口发送元数据仍按 v4:40 独立留存；采用 peer 应用层 `recvfrom` 回执作补充须另行 T0 + 用户批准。
-> 4. **评审与批准记录**：T0（`anthropic/claude-opus-5-5` 席，干净上下文）评审意见：____；用户批准原文：`1. 可以` / `2. 已添加公钥，用户名alfadb` / `3. 可以`。本登记不授权上机、不授权抓包、不授权登录服务器。
+> 1. **Wb 四格豁免登记**：第一批 A/B/C/D 中 Wb 行的 **A、B、C、D 四格**登记为逐格豁免（v4:11 机制），豁免「必须有 3 次真实生产发送」这一判据；依据是 base socket 在当前架构下结构性不发包（`peer_conn.rs:1224-1239` 的 fail-closed 结构性堵法，不改动），**唯一例外**是 `try_build` 重放中 egress 重放失败后仍无条件重放 endpoint（`wg_device.rs:2285-2302`）。四格按替代证据 E1–E6（身份/protect 登记、发送点零回执、**按 fd** 发送计数=0、四表**在册**对账、宿主抓包覆盖证明/LAN 零命中·蜂窝来源闭合、fd 全生命周期窗口覆盖）裁决，登记为 `exempted-with-substitute-evidence`，**不得写 pass**。任何 Wb fd 出现发送、或 base fd 未 protect、或 from-OS TUN 命中、**或出现 `N11_WG_FEED\|replay-egress-failed`、或 adopted 时 `endpoints>0` 而该 peer 的 egress 未重放成功**，即该格 `fail` 并回 T0 + 用户重新裁决。任一替代证据缺件即 `UNSAT` 并阻止授予。**配套失败关闭小修（egress 未重放成功则不重放该 peer 的 endpoint，只收紧）另行实现与评审**，落地前不得仅凭静态论证依赖「永不发包」。
+> 2. **适用集与豁免格的口径（修订）**：第一批**适用集 = 24 格**（M/S/R/D/I/Ws × A/B/C/D，按 v4 原判据全体达标）；**另有 Wb × A–D 4 个豁免格**，其替代证据齐备且未触发任何 fail 条件，是授予标签的**附加必要条件**（不是「适用集仍为 28 格」）。豁免格不计入「已证明生产外发」，也不得作为任何门结论输入。
+> 3. **引用该标签的注记与主张边界（新增，须逐条遵守）**：① 今后**凡引用该标签**（任何文档、判决、汇报、台账）**必须附注记**「**Wb×A–D 以零发送替代证据豁免**」；② 该标签**不主张 Wb 行有真实生产发送受保护的证据**——Wb 四格只有身份/protect 登记与零发送负证据，任何表述不得暗示 Wb 曾真实出包并被保护；③ 本登记**不影响治理 §二.4 对 N2 门的枚举要求**，且**第二批 Wb 行的判据按 v4 原文**（E/F/G 不因本登记改变，也不因此通过）。
+> 4. **Wb/Ws oracle 地点**：独立网络侧由「peer 自有主机物理外侧」改为 k8s 宿主机 `192.168.50.3`（`alfadb`）限时只读抓包；这是操作员侧 vantage 变更，不是设备授权；过滤（锚定 peer 侧目的）/两个抓包点/不读 conntrack/测前只读冻结/`-s 96`/类型分流/限时/限量/脱敏/原件 sha256 与删除规则/配对规则随 v4.1 冻结。设备物理接口发送元数据仍按 v4:40 独立留存。peer 应用层 `recvfrom` 回执按 Q2 采用为**辅助证据（应用层，非独立网络侧 oracle）**，不替代宿主抓包、不补救抓包缺失的格。宿主机 `setcap` 是持久特权变更：授予时刻/命令/`getcap` 回读与 campaign 结束后的 `setcap -r` 撤销时刻均入证据。
+> 5. **评审与批准记录**：T0（`anthropic/claude-opus-5-5` 席，干净上下文，2026-09-28）评审意见：**「有条件」——8 项必改已逐条落实于本提案 r2（见文末「修订记录 r2」）**。用户对方向回复原文：`1. 可以` / `2. 已添加公钥，用户名alfadb` / `3. 可以`；**该回复不是对 v4.1 最终文本的批准，最终文本须经用户重新批准后方可落入冻结文件与治理并冻结**。本登记不授权上机、不授权抓包、不授权登录服务器。
 
 ---
 
-## 2. 不变声明与 28 格口径
+## 2. 不变声明与适用集口径（**24 适用格 + 4 豁免格**）
 
 ### 2.1 明确不变（本提案不触碰）
 
 - **§3 全部判据与阈值**：每格 ≥3 次真实生产发送（v4:36）、三证（设备逐 fd 身份链 / 本机 TUN / 物理出口+独立网络侧，v4:38-40）、正控夹心「前控命中→生产包→后控命中」与 3/3（v4:39）、全 campaign 生产外层 TUN 零命中（v4:39、v4:44）、±2000 ms 配对与非唯一即 `invalid/UNSAT`（v4:44）。**Wb 四格是唯一例外，且已登记豁免。**
 - **§2 配置/路由/清点冻结**：`trustedApplications=[本 App]`（v4:17、v4:24）、双网预发现并集 `/32`（v4:15）、无 exit node、`endpoint_exclusions_enabled=false`、S2-S6 关、`/proc/net` 四表白名单与 uid 当轮复核（v4:32、L109-110）、干净进程前置（v4:32）。
-- **§1 适用集与豁免机制**：28 格全体、不得测后扣格、任一 `not exercised`/`UNSAT`/`invalid/UNSAT` 阻止授予（v4:9、v4:11）；豁免仍须**测前**逐格登记 + T0 + 用户批准。
-- **§4 其余六行（M/S/R/D/I/Ws）的全部刺激与 oracle**、§5 停测与 fail-closed 注入规则、§6 两份独立 AUTH 与制品流程、§7 实施任务清单、治理文末标签定义文字（已含豁免条款，故本次只追加登记、不改定义）。
+- **§1 豁免机制**：不得测后扣格、任一适用格 `not exercised`/`UNSAT`/`invalid/UNSAT` 阻止授予（v4:9、v4:11）；豁免仍须**测前**逐格登记 + T0 + 用户批准。适用集**计数**按 §2.2 为 24 格 + Wb×A–D 4 豁免格（不是「适用集仍为 28 格」）。
+- **§4 其余六行（M/S/R/D/I/Ws）的全部刺激与 oracle 判据文字**、**Wb 行 E/F/G 三格的判据文字（v4:57 原文）**、§5 停测与 fail-closed 注入规则、§6 两份独立 AUTH 与制品流程、§7 实施任务清单、治理文末标签定义文字（已含豁免条款，故本次只追加登记、不改定义）。
 - **不外推规则**：Wi-Fi 不外推蜂窝、第一批不外推 E/F/G、证据配置不外推产品全局 VPN/默认路由（v4:72）、不得用 `protectProcessNet`/端点排除/业务成功/N6 内层流量替代逐 fd protect（v4:72）。
 
-### 2.2 豁免后「28 格全体」如何计入
+### 2.2 豁免后适用集如何计入
 
 | 组成 | 格数 | 裁决方式 | 是否可写 pass |
 | --- | --- | --- | --- |
-| M/S/R/D/I/Ws × A/B/C/D | 24 | v4 原判据（3 次真实生产发送 + 三证 + 夹心 + 全窗零泄漏 + ±2000 ms） | 是（达标格） |
-| Wb × A/B/C/D | 4 | v4.1 豁免登记 + E1–E6 替代证据；三条 fail 条件任一触发即 fail | **否**（登记为 `exempted-with-substitute-evidence`） |
+| M/S/R/D/I/Ws × A/B/C/D（**适用集**） | 24 | v4 原判据（3 次真实生产发送 + 三证 + 夹心 + 全窗零泄漏 + ±2000 ms） | 是（达标格） |
+| Wb × A/B/C/D（**豁免格**，授予的附加必要条件） | 4 | v4.1 豁免登记 + E1–E6 替代证据；任一 fail 条件（含 `replay-egress-failed` / 「有 endpoint 无 egress」）触发即 fail | **否**（登记为 `exempted-with-substitute-evidence`） |
 
-授予 `N2 第一阶段通过` 的必要条件（全部满足才可，且仍须第一批工具/原件独立复核 + T0 + 用户批准）：**24 格全体达标** 且 **4 格 Wb 豁免已逐格登记** 且 **4 格替代证据齐备** 且 **无任一格的 fail 条件被触发** 且 **无任一适用格为 `not exercised`/`UNSAT`/`invalid/UNSAT`**。豁免**不减少**证据门槛：E1–E6 缺一即该格 `UNSAT` → 阻止授予。若 T0 判定豁免不成立或替代证据不足，则回到 v4 原文，Wb 四格必然 `not exercised` → 标签不能授予（即方案 A 是「以登记豁免 + 替代证据换取可授予」，不是放宽）。
+授予 `N2 第一阶段通过` 的必要条件（全部满足才可，且仍须第一批工具/原件独立复核 + T0 + 用户批准）：**适用集 24 格全体达标** 且 **Wb×A–D 4 个豁免格已逐格登记** 且 **4 格替代证据齐备** 且 **无任一格的 fail 条件被触发** 且 **无任一适用格为 `not exercised`/`UNSAT`/`invalid/UNSAT`**。豁免**不减少**证据门槛：E1–E6 缺一即该格 `UNSAT` → 阻止授予。`try_build` 失败关闭小修（§0.4 P1）未落地并审查前，「永不发包」只有静态论证支撑，不得据此单独成立豁免。若 T0 判定豁免不成立或替代证据不足，则回到 v4 原文，Wb 四格必然 `not exercised` → 标签不能授予（即方案 A 是「以登记豁免 + 替代证据换取可授予」，不是放宽）。
 
 ---
 
@@ -161,79 +209,104 @@
 
 ### 3.1 为什么方案 A 不削弱 N2 的安全目标
 
-- **N2 的安全目标**是：每个外层 socket 在可能发包前已逐 fd `protect`；无未保护首发（裸发）；任何真实生产外层包不得进入 from-OS TUN（v4:38-39、v4:72）。Wb 行的**正向**判据「base socket 真实出包」只是「该 fd 是一条真实外层流量路径且受保护」的**代理指标**。在当前 N11 架构里 base socket 是结构性永不发包的回落位，因此「证明它会发」既非安全目标的必要条件、也不比替代证据更强。
-- 对该 fd，安全目标等价于三条：**(a) 它一旦可能发包就已 protect**；**(b) 它从不发送，因而不可能泄漏**；**(c) 若它发送，必须受保护且不得被 TUN 捕获**。E1（protect settle 早于 attach 锚点 + 身份链）覆盖 (a)；E2/E3/E4/E6 覆盖 (b)；E5 + 全窗 TUN 扫描与三条 fail 条件覆盖 (c)。**原判据会抓到的四类失败模式一个都没丢**：
+- **N2 的安全目标**是：每个外层 socket 在可能发包前已逐 fd `protect`；无未保护首发（裸发）；任何真实生产外层包不得进入 from-OS TUN（v4:38-39、v4:72）。Wb 行的**正向**判据「base socket 真实出包」只是「该 fd 是一条真实外层流量路径且受保护」的**代理指标**。在当前 N11 架构里 base socket 是结构性不发包的回落位，因此「证明它会发」既非安全目标的必要条件、也不比替代证据更强。
+- 对该 fd，安全目标等价于三条：**(a) 它一旦可能发包就已 protect**；**(b) 它从不发送，因而不可能泄漏**；**(c) 若它发送，必须受保护且不得被 TUN 捕获**。E1（protect settle 早于 attach 锚点 + 身份链）覆盖 (a)；E2/E3/E4/E6 覆盖 (b)；E5（LAN 零命中／蜂窝来源闭合）+ 全窗 TUN 扫描与 fail 条件覆盖 (c)。**原判据会抓到的失败模式一个都没丢，且多了 r2 补上的一类**：
   1. base fd 发包时未 protect → 由 E1 + v4:32 的逐 fd protect 前置拦截；
   2. 未保护首发/裸发 → v4:38 身份链 + §5 未保护首发即 fail；
   3. base 发送进入 TUN → v4:39 全窗不论源扫描 + 「TUN 命中」fail 条件；
-  4. 回归到 round-7 回落形态（egress 挂接失败后改由 base 发握手）→ 「**任何 Wb fd 出现发送**」即 fail 并回 T0：base 一发就正是 round-7 形态本身。
-- **不改产品回落路径**是本次修订的安全前提：`peer_conn.rs:1224-1239` 的「egress 先挂、失败不落配、绝不回退旧 socket 发握手」保持原样，v4:72 的 fail-closed 与治理条件⑦不变。方案 A 不新增任何发送能力，只把 Wb 的裁决从「要求发送」改成「证明不发」。
+  4. 回归到 round-7 回落形态（egress 挂接失败后改由 base 发握手）→ 「**任何 Wb fd 出现发送**」即 fail 并回 T0：base 一发就正是 round-7 形态本身；
+  5. **（r2 新增）`try_build` 重放中 egress 重放失败后仍无条件重放 endpoint**（`wg_device.rs:2285-2302`）→ 由「出现 `replay-egress-failed`」或「adopted 时 `endpoints>0` 而该 peer 的 egress 未重放成功」即 **fail 并回 T0**；并由 §0.4 P1 的失败关闭小修（只收紧）闭合该分支。
+- **不改产品回落路径**是本次修订的安全前提：`peer_conn.rs:1224-1239` 的「egress 先挂、失败不落配、绝不回退旧 socket 发握手」保持原样，v4:72 的 fail-closed 与治理条件⑦不变。方案 A 不新增任何发送能力，只把 Wb 的裁决从「要求发送」改成「证明不发」。**注意 P1 小修不是「改回落路径」，而是把 `try_build` 的重放顺序对齐同一规则（egress 未成功则不落 endpoint），只收紧。**
 
 ### 3.2 负证据如何证明「不发」而非「没观察到」
 
-单一通道都无法区分这两者（只读代码是静态论证；只读日志会因丢帧/日志级别过滤漏记；只读抓包会因 vantage/过滤器失效而「零包」）。因此 **必须取 E1–E6 的合取**，且每一路都要求可判定：
+单一通道都无法区分这两者（只读代码是静态论证；只读日志会因丢帧/日志级别过滤/**回执抽样**漏记；只读抓包会因 vantage/过滤器失效而「零包」）。因此 **必须取 E1–E6 的合取**，且每一路都要求可判定：
 
-1. **代码路径不变量（静态 + 运行期事件）**：`dispatch` 是唯一出向裁决点、无 endpoint 时进 carrier/fail-closed（`wg_device.rs:1399-1420`）；走 base 的**唯一**条件是「有 endpoint 但无 egress」（`:1591-1593`），而 `apply_endpoint` 的唯一生产调用者要求 egress 挂接成功（`peer_conn.rs:1230-1239`）。→ 运行期须登记每格每次 endpoint/egress 挂接事件，证明「有 endpoint 无 egress」状态未出现；出现即 `UNSAT` 并回 T0。
-2. **发送点回执零条（E2）**：WG 出向唯一发送点（`wg_device.rs:1556-1580`）在该 fd/dup 上零回执。**前提**：T7a 审查确认该插桩覆盖 base fd 分支；否则须补齐后再测（实现符合性，不改判据）。
-3. **进程内计数=0（E3）**：回执可能丢，进程内 `sendto` 计数不会因日志级别丢失（周期落盘快照）。回执与计数双通道互证，覆盖「日志没写 ≠ 没发」。
-4. **四表对账（E4）**：fd/dup 在册、inode/tuple 与 E1 一致、发送统计无增长；不可读/未核 uid/对不上 → `UNSAT`。
-5. **物理 vantage 活跃性证明（E5）**：同一抓包会话、同一过滤器、同一窗口内**先命中 Ws 生产包**（设备同网、同 UDP 端口族、同一 ±2000 ms 体系），再要求 Wb 注册 tuple 零命中。「整窗零包」不作负证据——那正是「没观察到」。
-6. **窗口完整（E6）**：负证据窗口 = base fd 全生命周期（open→close/destroy）且完整包含 v4:39 的全 campaign 可观测窗口（含格间）；抓包与计数快照都要有连续性记录，缺口与可能发送时段重叠即 `UNSAT`。
+1. **代码路径不变量（静态 + 运行期事件）**：`dispatch` 是唯一出向裁决点、无 endpoint 时进 carrier/fail-closed（`wg_device.rs:1399-1420`）；走 base 的**唯一**条件是「有 endpoint 但无 egress」（`:1591-1593`），而 `apply_endpoint` 的唯一生产调用者要求 egress 挂接成功（`peer_conn.rs:1230-1239`）——**但 `try_build` 重放例外**（`:2285-2302`）。→ 运行期须登记每格每次 endpoint/egress 挂接与**重放**事件（含 `N11_WG_FEED|replay-egress-failed`、`N7_WG_FEED|adopted|endpoints=N`），证明「有 endpoint 无 egress」状态未出现；出现即 `fail` 并回 T0（不是 `UNSAT`）。
+2. **发送点回执零条（E2，r2 已核实覆盖链）**：`send_to` 对 fd 一视同仁（`wg_device.rs:1556-1580`），base fd 的 core dup 由 `adopt`/`reattach` 经 `duplicated()` 登记（`:713`、`:771`），`receipt_due` 保证首包必出回执（`n2_socket_trace.rs:103-106`）；**Wb/Ws 回执为首包 + 每 128 包抽样**，故零回执是零发送的充分信号，完整计数另由 E3 提供。**由 T7a 复核该覆盖链**（实现符合性，不改判据）。
+3. **按 fd 计数=0（E3，r2）**：现有 `WgDeviceStats` 为设备**全局**计数、不区分 fd，故须新增**按 fd** 的 `sendto` 计数；进程内计数不会因日志级别/回执抽样丢失（周期落盘快照）。回执与计数双通道互证，覆盖「日志没写/被抽样跳过 ≠ 没发」。
+4. **四表在册对账（E4，r2 删去「发送统计无增长」）**：fd/dup 在册、inode/tuple 与 E1 的 `local` 一致；**不要求也不使用内核发送统计**（`/proc/net/udp` 无按 fd 发送计数，全局统计无法归属该 fd）；不可读/未核 uid/对不上 → `UNSAT`。
+5. **物理 vantage 覆盖证明（E5，r2）**：LAN 直连下同一抓包会话/过滤器/窗口内**先命中 Ws 生产包**，再要求 Wb 注册 tuple 零命中；**蜂窝下改用来源闭合**（来自设备到 peer 冻结端口的每一条流，其 NAT 后源地址须能归到已登记的 I/Ws 映射，归不上即 fail 候选并回 T0）；**E5 只覆盖冻结的测试 peer**，其它 peer 只靠 E2/E3。「整窗零包」不作负证据——那正是「没观察到」。
+6. **窗口完整（E6）**：负证据窗口 = base fd 全生命周期（open→close/destroy）且完整包含 v4:39 的全 campaign 可观测窗口（含格间）与 **`try_build` 重放点**；抓包与计数快照都要有连续性记录，缺口与可能发送时段重叠即 `UNSAT`。
 
-**结论口径**：「证明不发」= 「结构性不可达（1）+ 发送点零回执（2）+ 进程内计数零（3）+ 清点在册（4）+ 活跃 vantage 下零命中（5）+ 全生命周期覆盖（6）」；缺任一路只能得出「没观察到」，按 `UNSAT` 处理，不得写 pass、不得写 fail-pass 折中。
+**结论口径**：「证明不发」= 「结构性不可达（1，含重放例外登记）+ 发送点零回执（2）+ 按 fd 计数零（3）+ 清点在册（4）+ 活跃 vantage 覆盖证明/来源闭合（5）+ 全生命周期覆盖（6）」；缺任一路只能得出「没观察到」，按 `UNSAT` 处理，不得写 pass、不得写 fail-pass 折中。任何 fail 条件触发则**不是 `UNSAT` 而是 `fail` + 回 T0**。
 
 ### 3.3 残余风险与缓解
 
 | 风险 | 缓解 |
 | --- | --- |
-| 豁免被误读为「Wb 通过」 | 裁决状态字固定为 `exempted-with-substitute-evidence`；治理文字写明**不得写 pass**、不计入已证明生产外发、不作门结论输入；判定器须区分 `pass` / `exempted` / `UNSAT`（实现符合性） |
-| 静态「永不发包」结论过期（未来新增 endpoint 注入/relay 回落路径） | 每次 campaign 当轮以运行期事件（E1/E2/E4）复核；出现任一 Wb 发送即 fail 并回 T0；可行性报告附录 B.3 已列为残余不确定性 |
-| 宿主抓包扩大授权面（新 vantage、新账号） | 只读、限时、限量、过滤器固定、无 `iptables`/无配置变更、不进载荷；宿主同时是 hdc 控制端（v4:21），过滤器限 UDP 设备↔peer，**不得**采集 hdc 方向；命令列入 AUTH/操作员白名单并逐条授权 |
-| 宿主 vantage 看不到设备物理口本身 | §1.2 语义差异如实登记；设备物理接口发送元数据按 v4:40 独立留存；宿主抓包只承担「独立网络侧」角色 |
-| A 列触发原语污染 campaign 或冒充 B 列 | 全部默认关（v4:32）、须 AUTH 白名单、只走生产 opener/fd（同 fd/dup 身份链）、不用 `n2_stimulus` 重拨路径、触发发送本身计入该格 TUN 全窗扫描；主机假设备验收 + T7a 审查 |
-| 新增 TCP 后续发送回执/计数引入行为变化 | 全部开关门控、默认关；假设备与离线原件验收；不改判据、不改 Wb 回落路径 |
+| 豁免被误读为「Wb 通过」 | 裁决状态字固定为 `exempted-with-substitute-evidence`；治理文字写明**不得写 pass**、不计入已证明生产外发、不作门结论输入，且引用标签须附「Wb×A–D 以零发送替代证据豁免」注记；判定器须区分 `pass` / `exempted` / `UNSAT`（实现符合性） |
+| 静态「不发包」结论过期（`try_build` 重放例外、未来新增 endpoint 注入/relay 回落路径） | 运行期登记重放事件并以「`replay-egress-failed` / 有 endpoint 无 egress」为 **fail + 回 T0** 触发条件；§0.4 P1 失败关闭小修（只收紧）另行实现与评审，未落地前豁免不得仅凭静态论证成立；可行性报告附录 B.3 已列为残余不确定性 |
+| 宿主抓包扩大授权面（新 vantage、新账号、**持久 setcap 权限**） | 只读、限时、限量、过滤器**锚定 peer 侧目的**、无 `iptables`/无配置变更、不进载荷、**不读 conntrack**；宿主机同时是 hdc 控制端（v4:21），过滤器限 UDP 设备↔peer，**不得**采集 hdc 方向；`setcap` 的授予/撤销时刻与 `getcap` 回读入证据，campaign 结束后 `setcap -r` 撤销；命令列入 AUTH/操作员白名单并逐条授权 |
+| 宿主 vantage 看不到设备物理口本身、蜂窝来源无法闭合 | §1.2 语义差异如实登记；设备物理接口发送元数据按 v4:40 独立留存；蜂窝下按 E5 **来源闭合**，出现归不上的源映射即 fail 候选并回 T0；E5 只覆盖冻结的测试 peer，其它 peer 只靠 E2/E3 |
+| peer 应用层 `recvfrom` 回执被当成独立网络侧 oracle | Q2 已裁定其为**辅助证据（应用层，非独立网络侧 oracle）**，随 v4.1 冻结；不替代宿主抓包、不补救抓包缺失的格；登记与判定器须标出其证据等级（实现符合性） |
+| A 列触发原语污染 campaign、冒充 B 列或造出生产不会发的报文 | 全部默认关（v4:32）、须 AUTH 白名单、只走生产 opener/fd（同 fd/dup 身份链）、**通用原则：只改发送时刻不改报文种类**、不用 `n2_stimulus` 重拨路径、M 用只读幂等 RPC（`GetServerKey` 类）、R 等服务端驱动应答、S 无生产可达只读帧时 `UNSAT`；触发发送本身计入该格 TUN 全窗扫描；主机假设备验收 + T7a 审查 |
+| 新增 TCP 后续发送回执/**按 fd 计数**/`recvfrom` 回执引入行为变化 | 全部开关门控、默认关；假设备与离线原件验收；不改判据、不改 Wb 回落路径 |
 
 ---
 
 ## 4. 需要的批准
 
-### 4.1 T0 评审（Anthropic 席）
+### 4.1 T0 评审（Anthropic 席）——**已出具：结论「有条件」**
 
 - **席位**：`anthropic/claude-opus-5-5`（Anthropic T0 判断席），**干净上下文**（spawn，不带本提案执笔者的推理与结论）——满足盲审。
-- **独立性说明**：本提案由执行层（`deepseek/deepseek-flash`）起草，故 **DeepSeek 家族已占用该产物的执行者席，不得再担任本产物的 T0 评审席**。第二席（跨厂商）仅在首席结论与主会话判断冲突或用户要求时加；需要两票以上的 T0 盲审时取跨厂商席位。
-- **评审要点（可直接成题）**：① 方案 A 是否仍覆盖 §3.1 列的四类失败模式；② E1–E6 是否足以把「不发」与「没观察到」分开；③ §1.2 的宿主抓包是否可替代 v4:64 的物理外侧措辞（含 NAT 点 vs 设备物理口、覆盖证明设计）；④ §0.3 Q1/Q2 两个口径问题（A(D) 与 B(D) 的界限；peer 应用层 `recvfrom` 回执是否作为可选补充、证据等级如何写）；⑤ 豁免登记是否满足 v4:11「测前逐格写明豁免及依据」；⑥ §1.3 是否确为澄清（未改判据）。
+- **独立性说明**：本提案由执行层（`deepseek/deepseek-flash`）起草，故 **DeepSeek 家族已占用该产物的执行者席，不得再担任本产物的 T0 评审席**。第二席（跨厂商）仅在首席结论与主会话判断冲突或用户要求时加。
+- **评审结论**：2026-09-28 **「有条件」**，8 项必改（r2 已逐条落实，见文末「修订记录 r2」）：① 只改 Wb 行 A–D，E/F/G 保持 v4 原文；② 补 `try_build` 重放例外并写成 fail 触发条件 + 失败关闭小修前置；③ E2/E3/E4/E5 改写（覆盖链、按 fd 计数、删「发送统计无增长」、蜂窝来源闭合、只覆盖测试 peer、Ws 回执抽样）；④ 适用集口径改为 24 格 + 4 豁免格为附加必要条件，并写治理三项注记/边界；⑤ 宿主抓包改为 peer 侧锚定过滤、两抓包点、snaplen 定值、类型分流、setcap 授予/撤销登记；⑥ A 列 I/Ws 澄清、M/S 用生产真实只读幂等 RPC、R 改为等服务端驱动 HealthCheck 应答、通用原则；⑦ Q1/Q2 裁决写入；⑧ 用户回复只是方向同意，最终文本须重新批准 + 前置项清单。
+- **复核要点（T7a/后续）**：① 方案 A 是否仍覆盖 §3.1 列的五类失败模式；② E1–E6 是否足以把「不发」与「没观察到」分开；③ §1.2 的宿主抓包是否可替代 v4:64 的物理外侧措辞（NAT 点 vs 设备物理口、两抓包点覆盖证明、蜂窝来源闭合）；④ Q1/Q2 裁决的落地（§0.3）；⑤ 豁免登记是否满足 v4:11「测前逐格写明豁免及依据」；⑥ §1.3 是否确为澄清（未改判据）。
 
-### 4.2 用户批准清单（逐项）
+### 4.2 用户批准清单（逐项；**须对 v4.1 最终文本重新批准**）
 
-1. 同意 §1.1：Wb 四格按 v4:11 逐格登记豁免 + E1–E6 替代证据，三条 fail 条件；不改产品回落路径。
-2. 同意 §1.2：Wb/Ws oracle 地点改为宿主机 `192.168.50.3`（`alfadb`）限时只读抓包，及其中过滤/限时/限量/脱敏/原件 sha256/配对规则（**抓包权限另行授权解决**）。
-3. 同意 §1.3：A 列操作性定义作为**澄清**落入 v4.1；同意 §0.3 Q1/Q2 由 T0 裁定后再落笔。
-4. 批准以 **v4.1 追加修订记录**方式落入冻结文件与治理（§1.4、§1.5 拟稿）；确认两批 AUTH 仍未签发、未授权任何设备/服务器/抓包操作。
+1. 同意 §1.1：Wb 行 **A–D 四格**按 v4:11 逐格登记豁免 + E1–E6 替代证据 + fail 条件（含 `replay-egress-failed` / 有 endpoint 无 egress）；**E/F/G 保持 v4 原文**；不改产品回落路径；同意 §0.4 **P1** 失败关闭小修另行实现与评审。
+2. 同意 §1.2：Wb/Ws oracle 地点改为宿主机 `192.168.50.3`（`alfadb`）限时只读抓包，及 peer 侧锚定过滤/两抓包点/不读 conntrack/测前只读冻结/`-s 96`/类型分流/限时/限量/脱敏/原件 sha256 与删除/配对规则；**同意登记 `setcap` 的授予与撤销**（宿主持久特权变更，另行授权执行，本提案不执行）。
+3. 同意 §1.3：A 列操作性定义作为**澄清**落入 v4.1（含通用原则与计数口径）；**Q1/Q2 已由 T0 裁定（§0.3）**，用户一并确认。
+4. 批准以 **v4.1 追加修订记录**方式落入冻结文件与治理（§1.4、§1.5 拟稿），并接受治理登记的三项边界（引用须附注记 / 不主张 Wb 有真实生产发送证据 / 不影响 §二.4 与第二批 Wb 按 v4 原文）；确认两批 AUTH 仍未签发、未授权任何设备/服务器/抓包操作。
+5. 确认**适用集 = 24 格 + Wb×A–D 4 豁免格（附加必要条件）**，不再是「28 格全体」。
 
 ### 4.3 批准后落地步骤（顺序）
 
-1. T0（Anthropic 席）出具评审意见，处理 §0.3 Q1/Q2。
-2. 按 §1.4 追加 v4.1 修订记录到冻结文件（**只追加**，正文判据文字除 §1.1、§1.2、§1.3 外不动），按 §1.5 追加治理登记并填「评审与批准记录」。
-3. 登记新冻结版本的 sha256 与治理同版登记（v4 冻结记录要求「重新冻结并登记」；豁免须**测前**完成）。
-4. A 列配套实现（产品/执行器/判定器/AUTH 模板）继续按 T1-T7a 实施与独立符合性审查；**仍不签发 AUTH**。
+1. T0 评审**已完成**（结论「有条件」）；r2 已逐条落实 8 项必改（文末「修订记录 r2」）。
+2. **用户对 v4.1 最终文本重新批准**（§4.2 逐项）；**未获重新批准前不得进入第 3 步**。
+3. 按 §1.4 追加 v4.1 修订记录到冻结文件（**只追加**，正文判据文字除 §1.1、§1.2、§1.3 外不动），按 §1.5 追加治理登记并填「评审与批准记录」。
+4. 登记新冻结版本的 sha256 与治理同版登记（v4 冻结记录要求「重新冻结并登记」；豁免须**测前**完成）。
+5. **实现前置项**（§0.4 P1–P8）先行落地并经 T7a 独立符合性审查；A 列配套实现（产品/执行器/判定器/AUTH 模板）继续按 T1-T7a 实施；**仍不签发 AUTH**。
 
 ### 4.4 本提案明确不做的事
 
-不修改冻结文件正文与治理（只提交提案）；不改 `client/` 任何文件（另有并行执行者）；不 commit；不操作设备、不 SSH 宿主机、不抓包、不联网；不签发 AUTH；不追认 0045–0047 或任何诊断记录为证据；不授予 `N2 第一阶段通过` 或任何门结论。
+不修改冻结文件正文与治理（只提交提案）；不改 `client/` 任何文件（另有并行执行者）；不 commit；不操作设备、不 SSH 宿主机、不抓包、不联网、不执行任何 `setcap`；不签发 AUTH；不追认 0045–0047 或任何诊断记录为证据；不授予 `N2 第一阶段通过` 或任何门结论。
 
 ---
 
 ## 附录 A：本提案引用的关键位置索引
 
-**v4 冻结文本**：v4:1（七行定义）｜v4:7（Ws 才算 exercised、未实现记 `UNSAT`）｜v4:11（28 格全体、测前逐格豁免 + T0 + 用户、任一未执行阻止授予）｜v4:15、v4:17、v4:21、v4:24（路由/trustedApplications/hdc 重合/方案 A）｜v4:26（attach 前平凡区、A 必须 attach 后沿用 pre-create fd 真实出包、否则 `UNSAT`）｜v4:32（干净进程、逐 fd protect、四表白名单）｜v4:36-40（3 次事件、三证、夹心、TUN 全窗、物理+独立网络侧）｜v4:39（夹心顺序与全 campaign 窗口）｜v4:42（正控同 opener、少一次 protect）｜v4:44（±2000 ms）｜v4:52-58（七行 A 列）｜v4:60（B 刺激与不外推）｜v4:62-64（oracle 细则；L64 Wb/Ws 物理外侧）｜v4:72（立即 fail 与不外推）｜v4:76、v4:78（AUTH/白名单、脱敏）｜v4:103（治理阶段标签定义含豁免）｜v4:109-110（四表 hdc 白名单）｜v4:113（历史 IP 不预填、同出口客户端）。
-**治理**：文末「追加登记：N2 第一阶段标签定义（随 N2 预注册 v4 冻结，2026-09-28）」全文；「追加登记：真机授权连接、期限与重试规则（2026-09-27）」第 3、4 条；「2026-09-15 授权窗口时钟硬前置」第 1、5 条。
+**v4 冻结文本**：v4:1（七行定义）｜v4:7（Ws 才算 exercised、未实现记 `UNSAT`）｜v4:11（原文「28 格全体」+ 测前逐格豁免 + T0 + 用户、任一未执行阻止授予；**v4.1 只改计数口径为 24 适用格 + 4 豁免格**）｜v4:15、v4:17、v4:21、v4:24（路由/trustedApplications/hdc 重合/方案 A）｜v4:26（attach 前平凡区、A 必须 attach 后沿用 pre-create fd 真实出包、否则 `UNSAT`）｜v4:32（干净进程、逐 fd protect、四表白名单）｜v4:36-40（3 次事件/三个独立首连会话、三证、夹心、TUN 全窗、物理+独立网络侧）｜v4:39（夹心顺序与全 campaign 窗口）｜v4:42（正控同 opener、少一次 protect）｜v4:44（±2000 ms）｜v4:52-58（七行 A 列；**Wb 行 v4:57 的 E/F/G 三格按原文不动**）｜v4:60（B 刺激与不外推）｜v4:62-64（oracle 细则；L64 Wb/Ws 物理外侧）｜v4:72（立即 fail 与不外推）｜v4:76、v4:78（AUTH/白名单、脱敏）｜v4:103（治理阶段标签定义含豁免，**定义文字不改**）｜v4:109-110（四表 hdc 白名单）｜v4:113（历史 IP 不预填、同出口客户端）。
+**治理**：文末「追加登记：N2 第一阶段标签定义（随 N2 预注册 v4 冻结，2026-09-28）」全文（**引用须附「Wb×A–D 以零发送替代证据豁免」注记**）；「追加登记：真机授权连接、期限与重试规则（2026-09-27）」第 3、4 条；「2026-09-15 授权窗口时钟硬前置」第 1、5 条；**§二.4（N2 门枚举要求）不被本次登记修改**。
 **可行性报告**：§0.1（A 列结论表）｜§0.2（Pod 无抓包能力）｜§0.3（工作区现状）｜§1（TUN tee 挂载时刻与最早可夹点）｜§2.6（Wb 冲突六条证据、三选项、推荐 (i)）｜§2.1-2.5、§2.7（M/S/R/D/I/Ws 的 A 事件与所需改动）｜§3.1-3.3（宿主抓包、应用层回执、直连 P2P）｜§4.1-4.3（R/I 的 C/D、B/C/D 归属）｜§5（改动清单）｜§6（需回 T0 的最小修订）｜附录 B（残余不确定性）。
-**代码位置**（均转引可行性报告，未独立复核）：`wg_device.rs:99-102,355-357,1111-1120,1399-1420,1556-1580,1591-1593,2102-2117,2119-2123,2255-2272,2269-2271,2303`｜`n2_socket_trace.rs:58-66,121`｜`mgmtsock.rs:341-386`｜`protected_dns.rs:151-168`｜`ice.rs:849-948`｜`peer_conn.rs:1224-1239`｜`connector.rs:5207-5215,5281`｜`NetBirdVpnExtensionAbility.ets:3331,3350,3381,3452,3471,3493,3506-3563,3564-3588`｜`run_campaign.py:786-795,801-819,829`｜`AUTH-TEMPLATE-n2-batch1.json`。
+**代码位置**：**r2 已独立只读复核**——`wg_device.rs:713`、`:771`（`adopt`/`reattach` 的 `n2_socket_trace::duplicated`）、`:1556-1580`（`send_to` 对 fd 一视同仁）、`:1591-1593`（`egress_fd_of`）、`:2285-2302`（`try_build` 先重放 egress、失败仍重放 endpoint）、`:2303`（adopted）、`n2_socket_trace.rs:50-57`（`duplicated` 注册）、`:103-106`（`receipt_due`：Wb/Ws 首包 + 每 128 包）、`signal.rs:70-77`、`:533`（自寻址 HEARTBEAT 原语，无调用者）；`grpc.rs:430`（`get_server_key`）。**其余转引可行性报告、未独立复核**：`wg_device.rs:99-102,355-357,1111-1120,1399-1420,2102-2117,2119-2123,2255-2272,2269-2271`｜`n2_socket_trace.rs:58-66,121`｜`mgmtsock.rs:341-386`｜`protected_dns.rs:151-168`｜`ice.rs:849-948`｜`peer_conn.rs:1224-1239`｜`relay_client.rs:2117-2120,2357`｜`connector.rs:5207-5215,5281`｜`NetBirdVpnExtensionAbility.ets:3331,3350,3381,3452,3471,3493,3506-3563,3564-3588`｜`run_campaign.py:786-795,801-819,829`｜`AUTH-TEMPLATE-n2-batch1.json`。
 
 ## 附录 B：本提案的残余不确定性（不得当作已验证）
 
-1. 本提案除输入文件阅读外**未做任何独立代码复核、未运行、未上机**；全部代码行号与行为结论转引自可行性报告的只读分析。
-2. 宿主机 `192.168.50.3` 的抓包**权限、可用接口、SNAT/DNAT 实际形态、Pod 端口映射与直连 P2P 可达性均未实测**（主会话仅验证可 SSH 登录且有 `tcpdump`）；E5 的覆盖证明设计依赖「同一过滤器内可见 Ws 生产包」，该前提须在测前发现阶段实测确认。
-3. 「base socket 永不发包」是静态结论（可行性报告附录 B.3）：若存在未覆盖的 endpoint 注入路径，豁免依据失效——已用「任何 Wb fd 出现发送即 fail + 回 T0」兜底，但仍须当轮运行期事件复核。
-4. E2/E3 所需的插桩覆盖与门控计数**尚未实现**（可行性报告 §0.3），须先实现并经 T7a 审查。
-5. 用户决定 2 的蜂窝过滤条件依赖当轮实测的设备蜂窝 NAT 后公网源；历史 `223.153.208.166` 等按 v4:113 不预填。
+1. 本提案除输入文件阅读外**未做任何独立代码复核、未运行、未上机**；除附录 A 标为「r2 已独立只读复核」的四处外，全部代码行号与行为结论转引自可行性报告的只读分析。
+2. 宿主机 `192.168.50.3` 的抓包**可用接口、`vmbr0`/veth 实际名称、SNAT/DNAT 实际形态、Pod 端口映射、两抓包点是否都能落包、蜂窝入站是否只经该节点、直连 P2P 可达性均未实测**（主会话仅验证可 SSH 登录、有 `tcpdump`、`getcap` 已生效）；E5 的覆盖证明设计依赖「同一过滤器内可见 Ws 生产包」，该前提须在测前发现阶段实测确认。**本提案不执行任何宿主机命令。**
+3. 「base socket 结构性不发包」是静态结论（可行性报告附录 B.3），且**已知唯一例外**是 `try_build` 重放顺序（`wg_device.rs:2285-2302`，r2 已复核）：已用「出现 `replay-egress-failed` / 有 endpoint 无 egress 即 fail + 回 T0」兜底，并配 §0.4 P1 失败关闭小修；仍须当轮运行期事件复核，且 P1 未落地前豁免不得仅凭静态论证成立。
+4. E2 覆盖链已由 r2 复核（`send_to` + `duplicated` + `receipt_due`），但 **E3 的按 fd 计数、P3 的 TCP 后续回执、P7 的 `recvfrom` 回执均尚未实现**（可行性报告 §0.3），须先实现并经 T7a 审查。
+5. **S(A) 目前无生产可达的只读幂等 signal 帧**（自寻址 HEARTBEAT 原语存在但未接线，`signal.rs:533`）；若测量前不实现 30 s 接收看门狗，S(A) 只能走服务端驱动应答或记 `UNSAT`（§1.3）。
+6. 蜂窝过滤/来源闭合依赖当轮实测的设备蜂窝 NAT 后公网源与已登记 I/Ws 映射；历史 `223.153.208.166` 等按 v4:113 不预填。`setcap` 的撤销时刻须在 campaign 结束后执行并留证，**本提案不执行**。
+
+---
+
+## 修订记录 r2（2026-09-28，就地修订，只追加不改写上文）
+
+**驱动**：T0（`anthropic/claude-opus-5-5`，干净上下文，2026-09-28）评审结论「**有条件**」的 8 项必改。**本次只修改本文件**：未改 `docs/n2-device-evidence-preregistration-draft-v2-20260928.md`、未改 `docs/native-nx-governance.md`、未改 `client/`（另有并行执行者）、未 commit、未操作设备、未 SSH、未抓包、未联网、未执行 `setcap`。
+
+| # | T0 必改项 | 落实位置（本文件） |
+| --- | --- | --- |
+| 1 | 删掉对 Wb 行 E/F/G 三格的改写（第二批已冻结判据保持 v4:57 原文） | §0.1（新增「本次只改 A–D」）、§1.1「拟改文字」（E/F/G 逐字 v4:57，并注明其 vantage 待第二批确认）、§2.1 不变声明、附录 A |
+| 2 | 「Wb 永不发包」的 `try_build` 重放例外，写成 fail/回 T0 触发条件 + 登记失败关闭小修前置项 | §1.1「唯一例外」段、§1.1 四格表「仍须 fail 的条件」（含 `N11_WG_FEED\|replay-egress-failed` / 「有 endpoint 无 egress」）、E6 窗口含重放点、§1.1 豁免段、§2.2 末句、§3.1 失败模式 5、§3.2 第 1/6 点、§3.3 风险行、§0.4 **P1**、§1.4 第 1 项、§1.5 第 1 项、附录 B.3 |
+| 3 | 替代证据：E2 改「覆盖链已核实，由 T7a 复核」（`send_to` 一视同仁 + `duplicated` 登记 `:713`/`:771` + `receipt_due` `:103-106`）；E3 新增「按 fd 发送计数」为实现前置；E4 删「发送统计无增长」只留四表在册；E5 蜂窝改「来源闭合」、LAN 仍五元组零命中、只覆盖测试 peer；注明 Ws 回执为首包 + 每 128 包抽样 | §1.1 E2/E3/E4/E5（含抽样说明）、§1.1 四格表替代证据列、§0.4 **P2**、§3.2 第 2/3/4/5 点、§1.5 第 1 项 |
+| 4 | 适用集口径改「24 格 + Wb×A–D 4 豁免格是授予的附加必要条件」；删去旧的「全量格数不变 / 适用范围口径不变」表述；治理登记写入三项边界 | §1.1 v4:11 追加句、§1.4 第 1 项与开头「不改变…」句、§1.5 第 2/3 项、§2 标题/§2.1/§2.2、§4.2 第 5 项、§4.3 第 3 步、附录 A |
+| 5 | 宿主抓包：过滤锚定 peer 侧 `udp and dst host … and dst port in {--wg-port,--ice-port}`；两个抓包点（上联/vmbr0 与 Pod 侧 veth/cni，NAT 前后），不读 conntrack；测前只读冻结（Pod 固定 192.168.50.3、DNAT/hostPort、蜂窝入站只经此节点否则 `UNSAT`）；snaplen `-s 96` 及理由；同一五元组按类型分流、只配对首包；setcap 授予（2026-09-28 晚，`sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump`，主会话已核 `getcap`）与撤销（`sudo setcap -r /usr/bin/tcpdump`，campaign 结束后）、pcap 原件存放/sha256/删除规则 | §1.2 全节（过滤/两抓包点/测前冻结/snaplen/类型分流/权限/原件与删除）、§0.2 权限段、§0.4 **P7**、§1.4 第 2 项、§1.5 第 4 项、§3.3 风险行、§4.2 第 2 项、§4.4、附录 B.2/B.6 |
+| 6 | 写入通用原则「触发只能改变发送时刻，不能造出生产不会发的报文种类」；I/Ws 属澄清并写明 v4:36 会话计数、不得以两个 STUN 目标凑两次、Ws 延后 `apply_endpoint` 保持先挂 egress 再落 endpoint；M/S 用生产真实只读幂等 RPC（M 例 `GetServerKey`；S 核对 signal 协议后给出，无则说明）；R 改为等服务端驱动的 HealthCheck 应答（写明等待上限，超时 `UNSAT`） | §1.3 通用原则/计数口径段、§1.3 表 M/S/R/D/I/Ws 行、§0.4 **P3/P4/P5/P6/P8**、§1.4 第 3 项 |
+| 7 | Q1/Q2 裁决写入 | §0.3（Q1/Q2 全文）、§1.3 D 行、§1.2 末段（Q2 辅助证据）、§1.4 第 4 项、§3.3 风险行、§4.2 第 3 项 |
+| 8 | 显著位置写明用户回复只是方向同意、最终文本须用户重新批准；实现前置项清单逐项列出 | 首部「用户批准状态」段、§0.2 表头与「方向含义」列、**§0.4 前置项清单 P1–P8**、§1.4 开头、§1.5 第 5 项、§4.2/§4.3 |
+
+**r2 自查**：① 只修改本文件；② 未触碰 `client/`、冻结预注册、治理（仅拟稿，未落盘）；③ Wb 行 E/F/G 三格文字与 v4:57 一致；④ 全文无行尾空白（`grep -n ' $'` 为空）；⑤ 文中 `28 格` 仅出现在「引用 v4 原文/描述旧口径」的语境（§1.1 v4:11 引文、§1.5 旧口径说明、附录 A 索引），不再作为本提案的口径主张；⑥ 未 commit、未联网、未 SSH、未操作设备。
