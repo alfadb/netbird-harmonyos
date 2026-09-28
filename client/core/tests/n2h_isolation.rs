@@ -140,8 +140,8 @@ fn show_panics() {
     });
 }
 
-/// The evidence document must never carry the forbidden record tokens (原义务
-/// 记 UNSAT, never waived/N/A) and must carry the fixed governance fields.
+/// The diagnostic document must never carry forbidden acceptance tokens and
+/// must carry the current neutral note and fixed governance fields.
 /// (Strict-reader parseability is pinned by the lib unit test
 /// `n2h::tests::evidence_json_is_parseable_and_forbidden_word_free` —
 /// `config::parse_document` is crate-private.)
@@ -150,7 +150,9 @@ fn assert_document_wellformed(ev: &Evidence) {
     for forbidden in ["protect pass", "N2 pass", "等同逐 socket protect", "waived", "N/A"] {
         assert!(!json.contains(forbidden), "forbidden token '{forbidden}' in evidence");
     }
-    assert!(json.contains("UNSAT/未满足"), "unsat_note must be present");
+    assert!(json.contains("is_evidence=false"), "unsat_note must state diagnostic scope");
+    assert!(!json.contains("MANAGE_VPN 受限"));
+    assert!(!json.contains("promise 不 settle"));
     assert!(json.contains("route-exclusion"));
     assert!(json.contains("residual_scope"));
     assert!(json.contains("\"verdict\":"));

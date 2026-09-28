@@ -125,6 +125,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
+    reg!("n2_tun_dest_configure", napi_n2_tun_dest_configure);
     reg!("n2h_collector_arm", napi_n2h_collector_arm);
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
@@ -390,6 +391,7 @@ mod tests {
             "connector_status",
             "connector_network_config",
             "connector_stop",
+            "n2_tun_dest_configure",
             "n2h_collector_arm",
             "n2h_collector_status",
             "n2h_collector_evidence",
@@ -656,6 +658,11 @@ unsafe extern "C" fn napi_connector_network_config(env: NapiEnv, _info: NapiCall
 
 unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::connector::connector_stop_json())
+}
+
+unsafe extern "C" fn napi_n2_tun_dest_configure(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_tun_dest_configure_json(&a.string_at(0)))
 }
 
 // I5 N2-H device-side evidence collector (design

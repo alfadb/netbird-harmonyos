@@ -385,6 +385,11 @@ interface N2hArmOptions {
 
 // N2-H I5: the `n2h_collector_arm` answer (§5.1) — `{ok:true,armed:true,
 // opened_mono}` or `{ok:false,error:"<token>"}`.
+interface N2TunDestConfigureResult {
+  ok: boolean;
+  error?: string;
+}
+
 interface N2hCollectorArmResult {
   ok: boolean;
   armed?: boolean;
@@ -904,7 +909,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION_ARMED|requestId=%{public}s|mode=route-exclusion|' +
-        'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
+        'reason=operator-opt-in|is_evidence=false|not_a_gate_pass=true',
         this.requestId);
     }
 
@@ -1063,6 +1068,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
         this.requestId, start.error ?? 'start-failed');
       return;
+    }
+    if (this.n2Evidence !== undefined) {
+      const result: N2TunDestConfigureResult = JSON.parse(core.n2_tun_dest_configure(
+        JSON.stringify({ n2_capture_32: this.n2Evidence.capture32 }))) as N2TunDestConfigureResult;
+      if (!result.ok) {
+        hilog.error(DOMAIN, TAG,
+          'N2_TUN_DEST_CONFIG_FAILED|requestId=%{public}s|error=%{public}s|diag=true|is_evidence=false',
+          this.requestId, result.error ?? 'unknown');
+        connectorStop();
+        return;
+      }
     }
     if (forceDefaultRoute) {
       hilog.warn(DOMAIN, TAG,
@@ -3670,7 +3686,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
-        'reason=manage-vpn-permission-missing|platform_call=not-attempted|' +
+        'reason=operator-opt-in|platform_call=not-attempted|' +
         'is_evidence=false|not_a_gate_pass=true',
         this.requestId, fd);
       return this.connection === connection && !this.recreateInFlight && !this.destroyRequested &&
@@ -3709,7 +3725,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (!outcome && this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +
-        'reason=manage-vpn-permission-missing|is_evidence=false|not_a_gate_pass=true',
+        'reason=operator-opt-in|is_evidence=false|not_a_gate_pass=true',
         this.requestId, fd);
       return this.connection === connection && !this.recreateInFlight && !this.destroyRequested &&
         this.destroyPromise === undefined;

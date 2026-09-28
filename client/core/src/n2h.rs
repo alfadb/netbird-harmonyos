@@ -4,20 +4,13 @@
 //! # n2h — N2-H route-exclusion ISOLATION EVIDENCE tool (host-side)
 //!
 //! Turns "外层流量未入隧道" from an inference into OBSERVABLE evidence for one
-//! connection session, per the cross-vendor T0 ruling (2026-09-14, gpt-5.6-sol
-//! seat) and its draft clause **N2-H**: when per-socket bypass is unavailable
-//! (on this platform `VpnConnection.protect(fd)` / `protectProcessNet()` are
-//! both blocked by the non-requestable `ohos.permission.MANAGE_VPN` —
-//! install error 9568289), a minimal endpoint-derived route exclusion may be
-//! evaluated using PACKAGE-LEVEL NEGATIVE TUN EVIDENCE + a TUNNEL POSITIVE
-//! CONTROL + ENDPOINT-SIDE DELIVERY PROOF + COUNTER RECONCILIATION.
+//! connection session. Historical N2-H route-exclusion diagnostics evaluate
+//! PACKAGE-LEVEL NEGATIVE TUN EVIDENCE + a TUNNEL POSITIVE CONTROL +
+//! ENDPOINT-SIDE DELIVERY PROOF + COUNTER RECONCILIATION; protect status and
+//! acceptance criteria are defined by the current preregistration.
 //!
-//! **Governance scope (binding):** this module is an evidence COLLECTOR, not
-//! a policy change. It does not satisfy the original §二.4 per-socket-protect
-//! clause (recorded as UNSAT, see [`UNSAT_NOTE`]); `n2h-pass` is NOT a pass of
-//! the original N2 criteria, and N2-H itself only takes effect after explicit
-//! user approval and a formal governance-document revision. See
-//! `docs/n2h-isolation-evidence-notes.md`.
+//! **Governance scope:** this module is a diagnostic COLLECTOR, not a policy
+//! change. Its `n2h-pass` is not an N2 acceptance result (see [`UNSAT_NOTE`]).
 //!
 //! ## What the evidence covers (T0 requirements → fields)
 //!
@@ -74,10 +67,10 @@ pub const VERDICT_FAIL: &str = "n2h-fail";
 /// control, missing endpoint-side receipt, counter mismatch). Never a pass.
 pub const VERDICT_INCONCLUSIVE: &str = "n2h-inconclusive";
 
-/// The fixed UNSAT record. The original per-socket-protect obligation is NOT
-/// met on this platform; route exclusion is a DIFFERENT mechanism awaiting
-/// formal approval, and `n2h-pass` must never be read as the original N2 pass.
-pub const UNSAT_NOTE: &str = "逐 socket protect: UNSAT/未满足（MANAGE_VPN 受限 + promise 不 settle）；替代: route-exclusion；非原 N2 判据 pass";
+/// Diagnostic context for the N2-H document. Protect semantics and the N2
+/// acceptance criteria are governed by the current preregistration, not this
+/// collector's bounded observation window.
+pub const UNSAT_NOTE: &str = "诊断记录：is_evidence=false；逐 socket protect 状态与 N2 判据见当前预注册；本工具仅评估当前窗口的 route-exclusion";
 
 /// Fixed residual scope: what this tool does NOT cover (rendered into every
 /// evidence document; extends the verdict's meaning, never shrinks it).
@@ -2456,7 +2449,8 @@ mod tests {
             assert!(!json.contains(forbidden), "forbidden record token '{forbidden}' in evidence");
         }
         assert!(json.contains("\"verdict\":\"n2h-pass\""), "{json}");
-        assert!(json.contains("UNSAT/未满足"), "{json}");
+        assert!(json.contains("is_evidence=false"), "{json}");
+        assert!(!json.contains("MANAGE_VPN 受限"), "{json}");
         assert!(json.contains("route-exclusion"), "{json}");
         assert!(json.contains("\"hit\":false"), "{json}");
         // probe id format

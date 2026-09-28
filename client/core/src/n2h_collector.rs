@@ -50,13 +50,10 @@
 //! and the device collector, so the design §3 field order cannot drift between
 //! them (frozen JSON discipline).
 //!
-//! **Governance scope (binding, same clauses as `n2h.rs` — design §6.1):** this module
-//! is an evidence COLLECTOR, not a policy change. It does not satisfy the
-//! original §二.4 per-socket-protect clause (recorded as UNSAT, see
-//! [`crate::n2h::UNSAT_NOTE`]); `n2h-pass` is NOT a pass of the original N2
-//! criteria, and N2-H itself only takes effect after explicit user approval
-//! and a formal governance-document revision. See
-//! `docs/n2h-isolation-evidence-notes.md`.
+//! **Governance scope (design §6.1):** this module is a diagnostic COLLECTOR,
+//! not a policy change. `n2h-pass` does not establish N2 acceptance; the
+//! current preregistration governs protect status and acceptance criteria
+//! ([`crate::n2h::UNSAT_NOTE`]).
 //!
 //! **Isolation:** compiled into the cdylib (like `n2h`, `client/core/src/lib.rs`),
 //! but INERT — nothing calls into this module unless the collector entry points
@@ -6745,6 +6742,42 @@ mod tests {
     }
 
     #[test]
+    fn n2_session_destination_survives_collector_close_and_reports_deltas() {
+        let target = [119, 29, 29, 119];
+        let session = crate::wg_device::N2DestinationTee::new(vec![target], 0);
+        let collector = CollectorTee::new(fixed_clock(77));
+        collector.set_n2_targets(vec![target]);
+        let frame = udp_frame([10, 77, 0, 1], target, 40000, 53, b"dns");
+        session.on_tun_frame(TunFrameDir::ToOs, &frame);
+        session.on_tun_frame(TunFrameDir::FromOs, &frame);
+        collector.on_tun_frame(TunFrameDir::FromOs, &frame);
+        let first = session.due_lines(5_000);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("scope=session|mono_ms=5000|dst=119.29.29.119|proto=17|port=53|frames=1|delta=1|sources=10.77.0.1"));
+        // The collector's window is closed; the session observer remains mounted.
+        session.on_tun_frame(TunFrameDir::FromOs, &frame);
+        assert!(collector.n2_summary_lines()[0].contains("frames=1"));
+        let second = session.due_lines(10_000);
+        assert!(second[0].contains("frames=2|delta=1"));
+        assert!(session.due_lines(15_000).is_empty());
+        assert!(session.due_lines(35_000).is_empty());
+        let idle = session.due_lines(40_000);
+        assert!(idle[0].contains("frames=2|delta=0"));
+    }
+
+    #[test]
+    fn n2_session_destination_zero_hit_heartbeat_and_five_second_gate() {
+        let session = crate::wg_device::N2DestinationTee::new(vec![[119, 29, 29, 119]], 0);
+        assert!(session.due_lines(4_999).is_empty());
+        assert!(session.due_lines(5_000).is_empty());
+        assert!(session.due_lines(25_000).is_empty());
+        let lines = session.due_lines(30_000);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("mono_ms=30000|dst=119.29.29.119|proto=any|port=any|frames=0|delta=0"));
+        assert!(session.due_lines(30_001).is_empty());
+    }
+
+    #[test]
     fn n2_destination_counts_only_from_os_and_does_not_change_snapshot() {
         assert!(ArmOptions::default().n2_capture_32.is_empty());
         for bad in ["{\"n2_capture_32\":[]}",
@@ -9421,17 +9454,17 @@ mod tests {
         );
     }
 
-    /// [adjustment 2026-09-26] The adjustment must be INERT without the arm
-    /// option: the document's bytes are the PRE-adjustment ones. The length and
-    /// hash below were captured from the tree before this change, through this
-    /// very fixture and code path — an inserted byte (even a sibling comma from
-    /// the new block) would break them.
+    /// Without the probe option, only the explicitly revised governance note
+    /// may differ from the pre-adjustment document.
     #[test]
     fn the_device_document_is_byte_identical_without_the_protect_probe_block() {
         let json = assemble_device_evidence(clean_material()).to_json();
-        assert_eq!(json.len(), 9_169, "the pre-adjustment document length");
+        let old_note = "逐 socket protect: UNSAT/未满足（MANAGE_VPN 受限 + promise 不 settle）；替代: route-exclusion；非原 N2 判据 pass";
+        assert!(json.contains(crate::n2h::UNSAT_NOTE));
+        let baseline = json.replace(crate::n2h::UNSAT_NOTE, old_note);
+        assert_eq!(baseline.len(), 9_169, "the pre-adjustment document length");
         assert_eq!(
-            crate::util::sha256_hex(json.as_bytes()),
+            crate::util::sha256_hex(baseline.as_bytes()),
             "d5c9b7aaccc8f1f806c58df6692a1f9589280d4a9ca502423659720cdca5a2da",
             "the pre-adjustment document hash"
         );

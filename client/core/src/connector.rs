@@ -5109,6 +5109,21 @@ pub fn core_freeze_inputs() -> CoreFreezeInputs {
     }
 }
 
+/// Enable diagnostic destination counts for this connector session. The same
+/// bounded destination parser used by the collector validates the ticket.
+pub fn n2_tun_dest_configure_json(options_json: &str) -> String {
+    let options = match crate::n2h_collector::ArmOptions::parse_json(options_json) {
+        Ok(options) if !options.n2_capture_32.is_empty() => options,
+        _ => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-targets")),
+    };
+    let slot = connector_slot();
+    let Some(feed) = slot.as_ref().and_then(|handle| handle.wg_feed.as_ref()) else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    feed.set_n2_destination_targets(options.n2_capture_32);
+    format!("{{{}}}", jbool("ok", true))
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {

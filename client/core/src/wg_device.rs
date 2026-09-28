@@ -420,6 +420,101 @@ impl TunFrameTee for TunTeeCounts {
     }
 }
 
+/// Diagnostic-only, session-wide from-OS destination counts, independent of
+/// the collector's short-lived marker scanner.
+pub struct N2DestinationTee {
+    inner: Mutex<N2DestinationState>,
+}
+
+struct N2DestinationState {
+    targets: Vec<[u8; 4]>,
+    rows: Vec<N2DestinationRow>,
+    last_tick_ms: u64,
+    last_emit_ms: u64,
+}
+
+struct N2DestinationRow {
+    dst: [u8; 4],
+    proto: u8,
+    port: u16,
+    frames: u64,
+    reported: u64,
+    sources: Vec<[u8; 4]>,
+}
+
+impl N2DestinationTee {
+    pub fn new(targets: Vec<[u8; 4]>, now_ms: u64) -> Self {
+        Self { inner: Mutex::new(N2DestinationState {
+            targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
+        }) }
+    }
+
+    pub fn due_lines(&self, now_ms: u64) -> Vec<String> {
+        let mut state = self.inner.lock_poison();
+        if now_ms.saturating_sub(state.last_tick_ms) < 5_000 {
+            return Vec::new();
+        }
+        state.last_tick_ms = now_ms;
+        let changed = state.rows.iter().any(|row| row.frames != row.reported);
+        if !changed && now_ms.saturating_sub(state.last_emit_ms) < 30_000 {
+            return Vec::new();
+        }
+        state.last_emit_ms = now_ms;
+        let mut lines = Vec::new();
+        for dst in state.targets.clone() {
+            let mut found = false;
+            for row in state.rows.iter_mut().filter(|row| row.dst == dst) {
+                found = true;
+                lines.push(format!(
+                    "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto={}|port={}|frames={}|delta={}|sources={}|diag=true|is_evidence=false",
+                    std::net::Ipv4Addr::from(dst), row.proto, row.port, row.frames,
+                    row.frames.saturating_sub(row.reported),
+                    row.sources.iter().map(|src| std::net::Ipv4Addr::from(*src).to_string())
+                        .collect::<Vec<_>>().join(",")
+                ));
+                row.reported = row.frames;
+            }
+            if !found {
+                lines.push(format!(
+                    "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false",
+                    std::net::Ipv4Addr::from(dst)
+                ));
+            }
+        }
+        lines
+    }
+}
+
+impl TunFrameTee for N2DestinationTee {
+    fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
+        if dir != TunFrameDir::FromOs { return; }
+        let Some(packet) = crate::n2h::parse_ipv4_frame(frame) else { return; };
+        let mut state = self.inner.lock_poison();
+        if !state.targets.contains(&packet.dst) { return; }
+        let dst = packet.dst;
+        let count = state.rows.iter().filter(|row| row.dst == dst).count();
+        let existing = state.rows.iter().position(|row|
+            row.dst == dst && row.proto == packet.proto && row.port == packet.dport);
+        let (proto, port) = if existing.is_none() && count >= 64 {
+            (0, 0)
+        } else {
+            (packet.proto, packet.dport)
+        };
+        let index = state.rows.iter().position(|row|
+            row.dst == dst && row.proto == proto && row.port == port).unwrap_or_else(|| {
+                state.rows.push(N2DestinationRow {
+                    dst, proto, port, frames: 0, reported: 0, sources: Vec::new(),
+                });
+                state.rows.len() - 1
+            });
+        let row = &mut state.rows[index];
+        row.frames = row.frames.saturating_add(1);
+        if row.sources.len() < 8 && !row.sources.contains(&packet.src) {
+            row.sources.push(packet.src);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // N13-D2: non-UDP egress carrier seam (the relay bearer injection point)
 // ---------------------------------------------------------------------------
@@ -536,6 +631,7 @@ pub struct WgDevice {
     /// armed) = the pre-I2 data path: the two feed points test this handle
     /// and do nothing else — no copy, no scan, no counter.
     tun_tee: Option<Arc<dyn TunFrameTee>>,
+    n2_dest_tee: Option<Arc<N2DestinationTee>>,
 }
 
 /// Local index seed for the first peer tunnel of a device (nonzero; each
@@ -573,6 +669,7 @@ impl WgDevice {
             next_index: INDEX_BASE,
             stats: WgDeviceStats::default(),
             tun_tee: None,
+            n2_dest_tee: None,
         })
     }
 
@@ -659,6 +756,10 @@ impl WgDevice {
     /// I2 — is a tee attached right now (the arm-state read).
     pub fn tun_tee_attached(&self) -> bool {
         self.tun_tee.is_some()
+    }
+
+    pub fn attach_n2_dest_tee(&mut self, tee: Arc<N2DestinationTee>) {
+        self.n2_dest_tee = Some(tee);
     }
 
     /// Peer count.
@@ -990,6 +1091,9 @@ impl WgDevice {
         if let Some(tee) = &self.tun_tee {
             tee.on_tun_frame(dir, frame);
         }
+        if let Some(tee) = &self.n2_dest_tee {
+            tee.on_tun_frame(dir, frame);
+        }
     }
 
     /// Poll + read + `send_from_tun` (device-originated frames). Non-blocking:
@@ -1053,6 +1157,11 @@ impl WgDevice {
     /// keepalives, plus one boringtun `update_timers` per peer (rekey/cookie
     /// housekeeping on boringtun's own real clock). Returns datagrams sent.
     pub fn tick(&mut self, now_ms: u64) -> usize {
+        if let Some(tee) = &self.n2_dest_tee {
+            for line in tee.due_lines(now_ms) {
+                emit(&line);
+            }
+        }
         let mut sent = 0usize;
         let cfg = self.cfg.clone();
         for idx in 0..self.peers.len() {
@@ -1848,6 +1957,7 @@ struct FeedInner {
     carriers: Vec<(String, Arc<dyn WgEgressCarrier>)>,
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
+    n2_dest_tee: Option<Arc<N2DestinationTee>>,
     /// Audit counters (tests + honest observation; not in the status JSON).
     feeds_accepted: u64,
     build_failures: u64,
@@ -1858,6 +1968,15 @@ impl WgDeviceFeed {
     /// injected-clock timer policy).
     pub fn new(cfg: WgDeviceConfig) -> WgDeviceFeed {
         WgDeviceFeed { cfg, inner: Mutex::new(FeedInner::default()) }
+    }
+
+    pub fn set_n2_destination_targets(&self, targets: Vec<[u8; 4]>) {
+        let mut g = self.inner.lock_poison();
+        let tee = Arc::new(N2DestinationTee::new(targets, sys::mono_ms()));
+        if let Some(device) = &g.device {
+            device.with_device(|d| d.attach_n2_dest_tee(tee.clone()));
+        }
+        g.n2_dest_tee = Some(tee);
     }
 
     /// Shell feed #1: the (protected) WG outer UDP socket fd. The number is
@@ -1988,6 +2107,9 @@ impl WgDeviceFeed {
             Err(e) => return Self::build_failed(g, &e),
         };
         let app = Arc::new(WgDeviceApplier::new(dev));
+        if let Some(tee) = &g.n2_dest_tee {
+            app.with_device(|d| d.attach_n2_dest_tee(tee.clone()));
+        }
         // replay the buffered control-plane state; peer-set errors here mean
         // buffered entries the device rejects — fail the build (the map is
         // re-synced with the same content, so a persistent error stays loud
@@ -2071,6 +2193,7 @@ impl WgPeerApplier for WgDeviceFeed {
         g.wg_socket_raw = None;
         g.wg_socket_owned = None;
         g.tun_raw = None;
+        g.n2_dest_tee = None;
         if let Some(d) = g.device.take() {
             d.clear();
         }
@@ -2305,6 +2428,40 @@ mod feed_tests {
         let (wg_raw, tun_raw, tun_test_end) = fed_fds();
         let slot = WgDeviceFeed::new(WgDeviceConfig::new(test_secret_b64(0xA5)));
         (slot, wg_raw, tun_raw, tun_test_end)
+    }
+
+    #[test]
+    fn session_destination_observes_tun_after_collector_detach() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let destination = [119, 29, 29, 119];
+        slot.set_n2_destination_targets(vec![destination]);
+        slot.feed_wg_socket(wg_raw).expect("wg feed");
+        slot.feed_tun(tun_raw).expect("tun feed");
+        let observer = slot.inner.lock_poison().n2_dest_tee.as_ref().unwrap().clone();
+        let mut packet = [0u8; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(28u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 1]);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&40000u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&53u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&8u16.to_be_bytes());
+        slot.with_device(|d| {
+            d.attach_tun_tee(Arc::new(TunTeeCounts::default()));
+            assert_eq!(unsafe { sys::write(tun_end, packet.as_ptr().cast(), packet.len()) }, 28);
+            d.service_tun(1);
+            d.detach_tun_tee();
+            assert!(!d.tun_tee_attached());
+            assert_eq!(unsafe { sys::write(tun_end, packet.as_ptr().cast(), packet.len()) }, 28);
+            d.service_tun(2);
+        }).expect("live device");
+        let lines = observer.due_lines(sys::mono_ms().saturating_add(5_000));
+        assert!(lines[0].contains("frames=2|delta=2"), "{lines:?}");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
     }
 
     #[test]
