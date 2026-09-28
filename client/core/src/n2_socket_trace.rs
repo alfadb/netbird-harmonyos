@@ -11,6 +11,13 @@ use crate::{hilog, sys};
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static SOCKETS: OnceLock<Mutex<HashMap<RawFd, Protect>>> = OnceLock::new();
+/// The most recent SUCCESSFUL registration of each class, as
+/// `(dup_fd, original_fd, remote)` — the `N2_SOCK` join keys of the socket
+/// production code is currently using. The P4 A-event trigger and the P5
+/// sandwich read their fd/dup identity from HERE, so an event can never be
+/// attributed to a descriptor no `N2_SOCK` receipt describes.
+static LIVE: OnceLock<Mutex<HashMap<&'static str, (RawFd, RawFd, SocketAddr)>>> =
+    OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct Protect {
@@ -53,6 +60,10 @@ const POST_CONNECT_RECEIPT_MS: u64 = 30_000;
 const FD_SEND_TICK_MS: u64 = 5_000;
 const FD_SEND_PERIOD_MS: u64 = 30_000;
 
+/// The seven frozen outer classes (preregistration v4 §1). The closed list
+/// behind `protect`'s acceptance and the live-socket registry.
+pub const KINDS: [&str; 7] = ["M", "S", "R", "D", "I", "Wb", "Ws"];
+
 /// N2 P2 cadence state (armed-only; reset on every arming change).
 #[derive(Default)]
 struct FdSendState {
@@ -71,20 +82,36 @@ fn fd_send_state() -> &'static Mutex<FdSendState> {
     FD_SEND_STATE.get_or_init(|| Mutex::new(FdSendState::default()))
 }
 
+fn live_map() -> &'static Mutex<HashMap<&'static str, (RawFd, RawFd, SocketAddr)>> {
+    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The live outer socket of a class: `(dup_fd, original_fd, remote)`. `None`
+/// until a successful `first_io` of that class registered one, and again after
+/// that descriptor closes (a closed number is never reported).
+pub fn live_of(kind: &str) -> Option<(RawFd, RawFd, SocketAddr)> {
+    live_map().lock().expect("live sockets").get(kind).copied()
+}
+
 pub fn armed() -> bool { ARMED.load(Ordering::Acquire) }
 
 pub fn arm(enabled: bool) {
     ARMED.store(enabled, Ordering::Release);
     sockets().lock().expect("socket trace").clear();
+    live_map().lock().expect("live sockets").clear();
     *fd_send_state().lock().expect("fd send state") = FdSendState::default();
     // N2 T5a: the stimulus registry (and its connector sink) lives exactly as
     // long as one arming — a disarm leaves no fd and no endpoint behind.
     crate::n2_stimulus::reset();
+    // N2 P4/P5: the A-event counters/trigger and the sandwich state live
+    // exactly as long as one arming too.
+    crate::n2_a_event::reset();
+    crate::n2_sandwich::reset();
 }
 
 pub fn protect(fd: RawFd, kind: &str, request: &str, generation: u64, net_id: u64, elapsed_ms: u64, ok: bool) {
     if !armed() { return; }
-    if !matches!(kind, "M" | "S" | "R" | "D" | "I" | "Wb" | "Ws") { return; }
+    if !KINDS.contains(&kind) { return; }
     sockets().lock().expect("socket trace").insert(fd, Protect {
         kind: kind.into(), request: request.into(), original_fd: fd,
         generation, net_id, elapsed_ms, ok, io_count: 0,
@@ -118,6 +145,9 @@ pub fn selected_wg(fd: RawFd) {
 /// last send.
 pub fn closed(fd: RawFd) {
     if !armed() { return; }
+    // N2 P4/P5: a closed descriptor is no longer a live outer socket — the
+    // A-event trigger must never report a number that has been reused.
+    live_map().lock().expect("live sockets").retain(|_, (dup, _, _)| *dup != fd);
     let line = {
         let mut map = sockets().lock().expect("socket trace");
         let line = map
@@ -206,6 +236,14 @@ pub fn first_io(fd: RawFd, remote: SocketAddr, status: &str, detail: &str) {
     // nothing. (The trace lock is already released here.)
     if status != "failed" {
         crate::n2_stimulus::observe(&meta.kind, fd, remote);
+        // N2 P4/P5: THIS same call site feeds the live-socket registry (the
+        // fd/dup identity the `N2_A_EVENT`/`N2_SANDWICH` lines report) and the
+        // sandwich's first I/Ws send observation — so "the `N2_SOCK` receipt
+        // exists" and "the A trigger has an fd" are one and the same fact.
+        if let Some(key) = KINDS.iter().copied().find(|known| *known == meta.kind) {
+            live_map().lock().expect("live sockets").insert(key, (fd, meta.original_fd, remote));
+        }
+        crate::n2_sandwich::observe_io(&meta.kind, fd, meta.original_fd, remote, status);
     }
     if !emit_receipt { return; }
     // Failed connect may already have closed the owned fd; never inspect a reused number.

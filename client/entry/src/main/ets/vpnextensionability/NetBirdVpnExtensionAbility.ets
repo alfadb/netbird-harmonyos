@@ -11,13 +11,18 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   withTunnelSubnetRoute } from './NetBirdVpnConfig';
 import { N2EvidenceDecision, N2EvidenceOptions, parseN2Evidence, withN2EvidenceRoutes,
   withoutN2ExcludedRoutes } from './NetBirdN2Evidence';
-import { N2ControlProtocol, sendN2Control } from './NetBirdN2Control';
+import { N2ControlProtocol, sendAndWaitN2Control, sendN2Control } from './NetBirdN2Control';
 import { N2_CONTROL_FILE_NAME, N2ControlDecision,
   formatN2ControlShellLine, formatN2ControlShellReject,
   parseN2ControlRequest } from './NetBirdN2ControlRequest';
 import { N2_STIMULUS_FILE_NAME, N2StimulusDecision, N2StimulusReply,
   formatN2StimulusShellLine, formatN2StimulusShellReject, parseN2Stimulus,
   parseN2StimulusReply } from './NetBirdN2Stimulus';
+import { N2_A_EVENT_FILE_NAME, N2AEventDecision, N2AEventReply,
+  formatN2AEventShellLine, formatN2AEventShellReject, parseN2AEvent,
+  parseN2AEventReply } from './NetBirdN2AEvent';
+import { N2SandwichPost, formatN2SandwichLegMarker, formatN2SandwichShellLine,
+  parseN2SandwichPoll, selectN2SandwichTarget } from './NetBirdN2Sandwich';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -661,6 +666,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private n2Evidence?: N2EvidenceOptions;
   private n2EvidenceError: string = '';
   private n2ForceDefaultRoute: boolean = false;
+  // N2 P5: one automatic I/Ws sandwich is in flight in the watcher tick at a
+  // time (the post controls are async; a slow send must not stack up).
+  private n2SandwichBusy: boolean = false;
+  // N2 P5: the I leg's marker (registered before the ICE pool feed). The post
+  // control is offered by the core once the first real I send is observed.
+  private n2IceSandwichMarker: string = '';
+  // N2 P5: the Ws leg's marker (registered before Ws selection).
+  private n2WsSandwichMarker: string = '';
 
   sendN2PositiveControl(target: string, protocol: N2ControlProtocol, id: string): void {
     sendN2Control(this.n2Evidence, target, protocol, id);
@@ -2606,6 +2619,202 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  // N2 P4「A 列生产事件触发原语」(v4.1 §4 A 列操作性定义): the shell's
+  // armed-only private-channel entry. ONE file = ONE trigger: the request file
+  // is deleted in `finally`, so the 5 s watcher tick can never replay it, and
+  // the core's own `N2_A_EVENT|…` line stays the authoritative record (it
+  // carries the real fd/dup of the EXISTING production socket).
+  //
+  // Trigger (documented in docs/n2-evidence-switch-20260928.md): the operator
+  // writes ONE request through the existing non-secret want-parameter channel —
+  //   aa start -b cn.alfadb.netbird -a EntryAbility \
+  //     --ps n2h_arm_options '<the same arm ticket>' \
+  //     --ps n2_a_event '{"kind":"M","id":"a-M-1"}'
+  // `kind` is M (one read-only GetServerKey on the existing management
+  // connection), R (wait for the next server-driven HealthCheck echo), D (the
+  // Q1 requery) or S (always refused by name). UNARMED: the request is still
+  // consumed and answered `rejected|reason=not-armed` WITHOUT any core call.
+  private pollN2AEvent(): void {
+    if (this.destroyRequested) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${N2_A_EVENT_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_A_EVENT_READ_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
+        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      return;
+    }
+    try {
+      const decision: N2AEventDecision = parseN2AEvent(text);
+      if (decision.request === undefined) {
+        hilog.warn(DOMAIN, TAG, '%{public}s',
+          formatN2AEventShellReject(this.requestId, decision.error));
+        return;
+      }
+      const request = decision.request;
+      if (this.n2Evidence === undefined) {
+        hilog.warn(DOMAIN, TAG, '%{public}s',
+          formatN2AEventShellLine(this.requestId, request.kind, request.id,
+            { ok: false, result: 'rejected', reason: 'not-armed' }));
+        return;
+      }
+      let reply: N2AEventReply = { ok: false, result: 'rejected', reason: 'core-throw' };
+      try {
+        reply = parseN2AEventReply(core.n2_a_event(request.kind, request.id));
+      } catch (error) {
+        // the core refuses a non-armed call; a thrown call is reported as its
+        // own reason, never as a dispatched trigger
+        reply = { ok: false, result: 'rejected', reason: 'core-throw' };
+      }
+      hilog.info(DOMAIN, TAG, '%{public}s',
+        formatN2AEventShellLine(this.requestId, request.kind, request.id, reply));
+    } finally {
+      // consume exactly once, whatever happened above
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'N2_A_EVENT_CONSUME_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
+          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      }
+    }
+  }
+
+  // N2 P5「I/Ws 的 App 侧夹心编排」(v4.1 §4 A 列 I/Ws 行): register ONE leg with
+  // the core's sandwich state machine and send its PRE control, waiting
+  // (bounded by the core's own control window) for the HIT. Returns the
+  // marker actually registered, or '' when the leg could not be set up — the
+  // core's own `N2_SANDWICH|…|phase=pre` line carries the reason.
+  //
+  // Ordering the frozen text requires: the caller invokes this AFTER the TUN
+  // tee attach (the core refuses with `no-attach-anchor` otherwise) and BEFORE
+  // the first production send of that kind. Nothing here changes the ICE/WG
+  // send content or order.
+  private async n2SandwichPre(kind: string): Promise<string> {
+    const armed: N2EvidenceOptions | undefined = this.n2Evidence;
+    if (armed === undefined || this.destroyRequested) {
+      return '';
+    }
+    const target: string = selectN2SandwichTarget(armed.outerDestinations);
+    if (target.length === 0) {
+      hilog.warn(DOMAIN, TAG, '%{public}s',
+        formatN2SandwichShellLine(kind, 'pre', 'none', 'none', 'no-target',
+          'no-ice-destination'));
+      return '';
+    }
+    const marker: string = formatN2SandwichLegMarker(kind, this.requestId, 'pre');
+    if (marker.length === 0) {
+      hilog.warn(DOMAIN, TAG, '%{public}s',
+        formatN2SandwichShellLine(kind, 'pre', 'none', target, 'rejected', 'invalid-marker'));
+      return '';
+    }
+    let registered: boolean = false;
+    try {
+      const reply: Record<string, Object> =
+        JSON.parse(core.n2_sandwich_pre(kind, marker)) as Record<string, Object>;
+      registered = reply['ok'] === true;
+    } catch (error) {
+      registered = false;
+    }
+    if (!registered) {
+      // the core already logged the exact unsat/rejected reason
+      hilog.warn(DOMAIN, TAG, '%{public}s',
+        formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat', 'core-refused'));
+      return '';
+    }
+    try {
+      await sendAndWaitN2Control(armed, target, 'udp', marker);
+    } catch (error) {
+      // the pre control MISSed (or its send threw): close the leg honestly so
+      // the first production send can never be reported as sandwiched
+      try {
+        core.n2_sandwich_post(kind, marker, 'unsat', 'pre-control-miss');
+      } catch (postError) { /* the core logs nothing for a refused post */ }
+      hilog.warn(DOMAIN, TAG, '%{public}s',
+        formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat',
+          (error as Error).message ?? 'pre-control-miss'));
+      return '';
+    }
+    hilog.info(DOMAIN, TAG, '%{public}s',
+      formatN2SandwichShellLine(kind, 'pre', marker, target, 'sent', 'pre-control-hit'));
+    return marker;
+  }
+
+  // N2 P5: the I leg, called between the WG data-plane feed (the attach) and
+  // the first ICE pool feed / gather — the frozen "首轮 ICE 池馈入之前".
+  private async n2IceSandwichPre(): Promise<string> {
+    this.n2IceSandwichMarker = await this.n2SandwichPre('I');
+    return this.n2IceSandwichMarker;
+  }
+
+  // N2 P5: the Ws leg, called right after the ICE pool feed and therefore
+  // before any ICE nomination can select the egress socket ("Ws 选中前").
+  private async n2WsSandwichPre(): Promise<string> {
+    this.n2WsSandwichMarker = await this.n2SandwichPre('Ws');
+    return this.n2WsSandwichMarker;
+  }
+
+  // N2 P5: one watcher-tick step of the sandwich. The core decides when a leg
+  // is ready (its first real send was observed after a pre HIT) and hands back
+  // the marker; the shell sends the POST control and reports the outcome. The
+  // call is a no-op (not even a core call) unless the session is armed.
+  private pollN2Sandwich(): void {
+    if (this.n2Evidence === undefined || this.destroyRequested || this.n2SandwichBusy) {
+      return;
+    }
+    let raw: string = '';
+    try {
+      raw = core.n2_sandwich_poll();
+    } catch (error) {
+      return;
+    }
+    const posts: N2SandwichPost[] = parseN2SandwichPoll(raw);
+    if (posts.length === 0) {
+      return;
+    }
+    this.n2SandwichBusy = true;
+    this.runN2SandwichPosts(posts)
+      .catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG, 'N2_SANDWICH_POST_FAILED|reason=%{public}s|diag=true|is_evidence=false',
+          safeError(error));
+      })
+      .then((): void => {
+        this.n2SandwichBusy = false;
+      });
+  }
+
+  private async runN2SandwichPosts(posts: N2SandwichPost[]): Promise<void> {
+    for (let i = 0; i < posts.length; i++) {
+      const post: N2SandwichPost = posts[i];
+      const armed: N2EvidenceOptions | undefined = this.n2Evidence;
+      if (armed === undefined || this.destroyRequested) {
+        return;
+      }
+      const target: string = selectN2SandwichTarget(armed.outerDestinations);
+      let result: string = 'observed';
+      let reason: string = 'post-control-hit';
+      try {
+        await sendAndWaitN2Control(armed, target, 'udp', post.marker);
+      } catch (error) {
+        result = 'unsat';
+        reason = 'post-control-miss';
+      }
+      try {
+        core.n2_sandwich_post(post.kind, post.marker, result, reason);
+      } catch (error) { /* a refused post is the core's own named line */ }
+      hilog.info(DOMAIN, TAG, '%{public}s',
+        formatN2SandwichShellLine(post.kind, 'post', post.marker, target, result, reason));
+    }
+  }
+
+
   // Runtime watch (while the VPN is up): poll connector_status (state /
   // counts / last error class) and connector_network_config. Platform
   // conclusion baked in here: VpnConnection has NO runtime route/DNS update
@@ -2646,6 +2855,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // No new timer, no loop, no await; ARM/latch/WAITING semantics
       // untouched; C7 counting input only, never Evidence/judge.
       this.maybeCloseInterfaceStatsWindow();
+      // N2 P4: the A-column trigger poll — one-shot + self-consuming like the
+      // other private channels, no-op unless armed (and then still a bare stat
+      // when nothing is pending). It rides BEFORE the control/stimulus polls
+      // because it is independent of their fixed combination order.
+      this.pollN2AEvent();
+      // N2 P5: the automatic sandwich's POST step. The core offers a leg only
+      // once its first real production send was observed after the pre HIT;
+      // this is a bare core call (no file probe, no control send) unless the
+      // session is armed and a leg is ready.
+      this.pollN2Sandwich();
       // N2 T3/T5a private channels: the COMBINATION RULE of the two pending
       // requests is fixed HERE — within one tick the positive-control poll runs
       // BEFORE the stimulus poll, so if both files are somehow pending (two
@@ -3474,6 +3693,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // without a fed socket the core's candidate gathering fails CLOSED and
     // ICE stays idle (device run 1: 61x "peer-conn: pump error (network)").
     // Failure here is the same fail-closed teardown as the WG feed.
+    //
+    // N2 P5 (v4.1 §4 I row): when the evidence arm is on, the PRE control of
+    // the I leg must HIT BEFORE this first ICE pool feed / gather — the TUN
+    // tee is already attached (feedWgDataplane above), so the frozen anchor
+    // holds. `n2IceSandwichPre` never throws and never changes the ICE send
+    // content/order; it only waits (bounded by the core's 3 s control window)
+    // for the pre marker's HIT, and the core records the verdict itself.
+    if (this.n2Evidence !== undefined) {
+      await this.n2IceSandwichPre();
+    }
     const iceOk: boolean = await this.protectAndFeedIceSocket();
     if (!iceOk) {
       try {
@@ -3497,6 +3726,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         accepted: true,
         reason: 'ice-socket-feed-fail-closed'
       };
+    }
+
+    // N2 P5 (v4.1 §4 Ws row): the Ws PRE control must be in place BEFORE the
+    // selected egress socket is ever handed to WG. The ICE pool was just fed,
+    // so no nomination can have happened yet; the core refuses honestly if one
+    // somehow did (`first-send-before-pre-control`). The POST control is
+    // offered later by the watcher tick, once the core has observed the first
+    // real `wg_sendto`. NOTHING here defers or reorders `peer_conn.rs`'s
+    // "attach egress, then apply endpoint" sequence.
+    if (this.n2Evidence !== undefined) {
+      await this.n2WsSandwichPre();
     }
 
     // VPN is up (create accepted + protect passed + WG data plane fed):

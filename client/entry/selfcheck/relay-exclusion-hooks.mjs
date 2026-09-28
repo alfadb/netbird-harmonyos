@@ -113,7 +113,16 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   // never arm the evidence switch, so the poll never reaches it; the export
   // exists so an accidental call fails loudly with the honest not-armed answer
   // instead of a TypeError.
-  '  n2_stimulus: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed", target_fd: -1 })\n' +
+  '  n2_stimulus: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed", target_fd: -1 }),\n' +
+  // N2 P4/P5 (2026-09-28): the same loud-refusal rule for the A-column trigger
+  // and the sandwich seams — these suites never arm either.
+  '  n2_a_event: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    kind: "none", fd: -1, dup_fd: -1 }),\n' +
+  '  n2_sandwich_pre: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    kind: "none", marker: "none" }),\n' +
+  '  n2_sandwich_post: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    kind: "none", marker: "none" }),\n' +
+  '  n2_sandwich_poll: () => JSON.stringify({ ok: true, posts: [] })\n' +
   '};');
 
 const VPN_ABILITY = 'data:text/javascript,' + encodeURIComponent(
@@ -165,7 +174,10 @@ const SHIMS = {
   './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts',
   // N2 T3 §3 (2026-09-28): the positive-control request pure module, staged and
   // shimmed exactly like the stimulus module above.
-  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts'
+  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts',
+  // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules.
+  './NetBirdN2AEvent': 'NetBirdN2AEvent.shim.ts',
+  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts'
 };
 
 export function resolve(specifier, context, next) {
@@ -182,6 +194,10 @@ export function resolve(specifier, context, next) {
       '  if ((g.__NB_CONTROL_MODE || "sent") === "throw") {\n' +
       '    throw new Error(g.__NB_CONTROL_ERROR || "n2-control-send-failed");\n' +
       '  }\n' +
+      '  return undefined;\n' +
+      '};\n' +
+      'export const sendAndWaitN2Control = async (armed, target, protocol, id) => {\n' +
+      '  sendN2Control(armed, target, protocol, id);\n' +
       '  return undefined;\n' +
       '};'), shortCircuit: true };
   }

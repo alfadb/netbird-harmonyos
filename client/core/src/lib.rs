@@ -164,6 +164,14 @@ pub mod n2_socket_trace;
 // stimulus (M/S/R socket close, I/Wb/Ws endpoint-directed break, D fresh
 // protected query). Diagnostic only — every line is `is_evidence=false`.
 pub mod n2_stimulus;
+// N2 P4 (v4.1 §4 A 列操作性定义): the A-column production-event trigger
+// primitive (M `GetServerKey` on the EXISTING management connection, R wait for
+// the server-driven HealthCheck echo, D Q1 requery, S named refusal). Default
+// off; armed-only.
+pub mod n2_a_event;
+// N2 P5 (v4.1 §4 I/Ws rows): the App-side sandwich state machine that judges
+// "pre control HIT → first production send" against the TUN tee attach anchor.
+pub mod n2_sandwich;
 pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;

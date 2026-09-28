@@ -56,6 +56,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports.
   'NetBirdN2Stimulus',
+  // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules.
+  'NetBirdN2AEvent',
+  'NetBirdN2Sandwich',
   // N2 T3 §3 (2026-09-28): the positive-control request pure module.
   'NetBirdN2ControlRequest'];
 const SHIM_TYPES: Record<string, string[]> = {
@@ -81,6 +84,9 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation'],
   // N2 T5a: the erased stimulus request/reply shapes the extension names.
   NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply'],
+  // N2 P4/P5: the erased trigger and sandwich shapes the extension names.
+  NetBirdN2AEvent: ['N2AEventDecision', 'N2AEventRequest', 'N2AEventReply'],
+  NetBirdN2Sandwich: ['N2SandwichPost'],
   // N2 T3 §3: the erased positive-control request/decision shapes.
   NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
 };

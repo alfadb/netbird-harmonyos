@@ -477,6 +477,11 @@ impl N2DestinationTee {
     pub fn consume_control(&self, frame: &[u8], now: u64) -> bool {
         if let Some(line) = self.control.lock_poison().scan(frame, now) {
             emit(&line);
+            // N2 P5: the sandwich ordering is judged on when the PRE control
+            // really HIT (`control_hit` is inert while unarmed).
+            if let Some(marker) = crate::n2_control::hit_marker(&line) {
+                crate::n2_sandwich::control_hit(marker, now);
+            }
             return true;
         }
         false
@@ -2282,6 +2287,11 @@ impl WgDeviceFeed {
             if let Some(from) = g.n2_gap_start.take() {
                 tee.gap(from, sys::mono_ms(), "before-tun-attach");
             }
+            // N2 P5: the frozen common anchor — the PRE control's earliest
+            // legal moment is AFTER this attach/gap pair (v4.1 §4). Recorded
+            // here, at the attach itself, so the sandwich state machine judges
+            // "first send before attach" against the real anchor.
+            crate::n2_sandwich::attach_anchor(sys::mono_ms());
         }
         // replay the buffered control-plane state; peer-set errors here mean
         // buffered entries the device rejects — fail the build (the map is

@@ -119,6 +119,13 @@ fn tcp_syn(frame: &[u8]) -> bool {
 
 fn proto_name(proto: u8) -> &'static str { if proto == 6 { "tcp" } else { "udp" } }
 
+/// The marker of an `N2_CONTROL_HIT` line (N2 P5: the sandwich ordering is
+/// judged on when the PRE control really HIT, not on when the shell sent it).
+pub fn hit_marker(line: &str) -> Option<&str> {
+    if !line.starts_with("N2_CONTROL_HIT|") { return None; }
+    line.split("|marker=").nth(1)?.split('|').next()
+}
+
 fn local_port(fd: i32) -> Result<u16, &'static str> {
     let mut sa = sys::sockaddr_in::new([0; 4], 0);
     let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
@@ -228,5 +235,18 @@ mod tests {
         s.register("x", [203, 0, 113, 1], 80, 6, 1234, 0).unwrap();
         assert!(s.due(3001)[0].contains("N2_CONTROL_MISS|marker=x"));
         assert!(s.scan(&frame([203, 0, 113, 1], 6, 1234, 80, b""), 3002).is_none());
+    }
+
+    // N2 P5: the HIT line carries the marker the sandwich ordering is judged
+    // on; a non-HIT line (or a malformed one) yields no marker.
+    #[test]
+    fn hit_marker_is_read_back_from_the_hit_line_only() {
+        let mut s = ControlState::new(vec![[203, 0, 113, 1]]);
+        s.register("n2s-I-pre", [203, 0, 113, 1], 53, 17, 0, 100).unwrap();
+        let line = s.scan(&frame([203, 0, 113, 1], 17, 1000, 53, b"N2CTRL:n2s-I-pre"), 101)
+            .expect("hit");
+        assert_eq!(hit_marker(&line), Some("n2s-I-pre"));
+        assert_eq!(hit_marker("N2_CONTROL_MISS|marker=x|diag=true"), None);
+        assert_eq!(hit_marker("N2_CONTROL_HIT|dst=1.2.3.4:53"), None);
     }
 }

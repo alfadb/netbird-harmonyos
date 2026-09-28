@@ -28,7 +28,7 @@ The existing `protect_probe` works independently of S6. Run separate authorized 
 
 `n2_evidence.outer_destinations` is required when armed: a nonempty list (maximum 128) of unique `tcp/IP:port` or `udp/IP:port` targets, each IP in `capture_32`. The core refuses missing/invalid targets before TUN attach, freezes the exact protocol/IP/port set for this session, and emits `N2_TUN_LEAK|verdict=fail` immediately on a matching *non-control* from-OS frame regardless of source IP. The shell and core keep default-unarmed behavior unchanged. An incomplete outer set is **not** proof of absence; compare it with every observed production endpoint throughout the campaign and stop as `UNSAT` on drift.
 
-`NetBirdN2Control.ets` exports the explicit `withN2Sandwich(capture32, target, proto, eventId, production)` convention. Only an already-armed session may call it, and `production` must be one real production send callback, not a synthetic substitute. It sends and waits for a **pre** HIT, invokes and awaits that callback, then sends and waits for a **post** HIT; exceptions or MISS abort that event. No production path invokes this automatically. Each `sendN2Control` opens an unprotected fd through the same production shell opener (`mgmtSocketOpen` for TCP, `iceSocketOpen` for UDP), registers before I/O, and closes the shell fd in `finally`. TCP matches a registered local-port SYN during a bounded window; UDP matches the exact `N2CTRL:<marker>` payload and destination. Neither needs a listener or a special test port. Native `service_tun` consumes a matched frame before either the collector tee or WG encryption, logs `N2_CONTROL_HIT`/`N2_CONTROL_MISS`, and maintains independent `N2_TUN_FRAMES` control/production counts. `n2_control_status` reports cumulative `leaks`; the sandwich aborts when it sees a nonzero value. A negative/protected socket observation cannot be accepted without both ordered HITs for that event and independent send receipts.
+`NetBirdN2Control.ets` exports the explicit `withN2Sandwich(capture32, target, proto, eventId, production)` convention. Only an already-armed session may call it, and `production` must be one real production send callback, not a synthetic substitute. It sends and waits for a **pre** HIT, invokes and awaits that callback, then sends and waits for a **post** HIT; exceptions or MISS abort that event. No production path invokes `withN2Sandwich` automatically; the armed-only **P5** orchestration below uses the same pre → production → post ordering through the exported `sendAndWaitN2Control` leg primitive (see「I/Ws sandwich orchestration (P5)」). Each `sendN2Control` opens an unprotected fd through the same production shell opener (`mgmtSocketOpen` for TCP, `iceSocketOpen` for UDP), registers before I/O, and closes the shell fd in `finally`. TCP matches a registered local-port SYN during a bounded window; UDP matches the exact `N2CTRL:<marker>` payload and destination. Neither needs a listener or a special test port. Native `service_tun` consumes a matched frame before either the collector tee or WG encryption, logs `N2_CONTROL_HIT`/`N2_CONTROL_MISS`, and maintains independent `N2_TUN_FRAMES` control/production counts. `n2_control_status` reports cumulative `leaks`; the sandwich aborts when it sees a nonzero value. A negative/protected socket observation cannot be accepted without both ordered HITs for that event and independent send receipts.
 
 `N2_TUN_GAP` records the pre-attach period and TUN replacements (monotonic bounds). A recorded gap overlapping a production event, a failed read/decode, missing control, unknown source attribution, unmatched target or independently observed packet loss makes the relevant interval `invalid/UNSAT`; a zero counter is not a pass. The core does not prove kernel queue integrity or physical receipt, and the bounded per-event control window cannot substitute for independent full-campaign capture/drop accounting. T3 tests use fake TUN frames only and perform no device/network campaign.
 
@@ -171,7 +171,11 @@ diagnostic code (`diag=true|is_evidence=false`) and creates no authorization.
   and `n2_control` present `EntryAbility` writes NEITHER (one
   `N2_CONTROL_COMBO_REJECTED|stimulus=…|control=…|note=one-pending-request-per-launch`
   line) and removes both leftovers; a launch with only one of them removes the
-  other's leftover. If two SEPARATE launches leave both files pending, the
+  other's leftover. N2 P4 extends the SAME rule to a third channel
+  (`n2_a_event`): any combination of two or three writes none of them, and a
+  refusal involving the A-event channel extends the line with `|a_event=` (see
+  「A-column production-event trigger (P4)」). If two SEPARATE launches leave
+  both files pending, the
   watcher tick submits the **control before the stimulus** (fixed by call order
   in the tick body), so the "pre-control → event → post-control" three-call
   shape is unambiguous.
@@ -274,3 +278,151 @@ every documented field for the matched / mismatched / timeout verdicts, plus
 the registered shell original) and in `client/core/src/protected_dns.rs` (the
 four verdicts, and the id/RCODE/ANCOUNT header decoding including the truncated
 cases). No device measurement was made here.
+
+## A-column production-event trigger (P4, 2026-09-28)
+
+Preregistration v4.1 §4「A 列生产事件的操作性定义」/ 实现前置项 **P4**. This is
+the **default-off, evidence-switch-gated** trigger primitive for the A column:
+inert and unreachable until an accepted `n2_evidence` ticket armed the socket
+trace, and every line it emits is `diag=true|is_evidence=false`. It performs no
+server-side state change, opens no new connection and creates no new `Sync`
+stream.
+
+### Interface
+
+* Core (NAPI, synchronous, JSON string in/out): `n2_a_event(kind, id)` with
+  `kind ∈ {M, R, D, S}` and `id` = the same `[A-Za-z0-9_-]{1,64}` marker rule
+  as the stimulus/control ids. Answer:
+  `{ok,result,reason,kind,fd,dup_fd,line}`; `ok` is true only for
+  `sent`/`armed`/`requery`/`observed`.
+* Shell entry: `NetBirdVpnExtensionAbility.pollN2AEvent()` — the analogue of
+  `pollN2Control`. It reads exactly one request, calls the core once, logs the
+  shell receipt and **deletes the request file in `finally`** (one launch = one
+  trigger). The pure parse/format half is `NetBirdN2AEvent.ets` (zero imports).
+
+### Per-kind contract (frozen v4.1 §4, unchanged criteria)
+
+| kind | action | emitted |
+| --- | --- | --- |
+| **M** | ONE read-only idempotent real `GetServerKey` (`grpc.rs:430`) on the **EXISTING** logged-in management client — the `logout_slot` clone whose tonic `Channel` is the same connection the Sync stream runs over. **No new dial, no second `Sync` stream.** | `result=sent` / `result=error|reason=management-rpc-<class>` (sanitized class only, never server text) |
+| **R** | NO active send: arm a watcher for the next **server-driven** `HealthCheck` and record the production echo (`relay_client.rs:2117-2120`). Wait bound `R_WAIT_MS = 90_000` ms on the session runtime. | `result=armed|detail=wait_ms=90000`, then `result=observed|reason=server-healthcheck-answered` or `result=timeout|reason=healthcheck-wait-exceeded` |
+| **D** | Q1: the first A event of the session calls the existing requery primitive ONCE (`force_protected_dns_requery`, one fresh protected fd). Any prior `n2_stimulus` application or prior A event refuses. | `result=requery|detail=receipt-in-N2_DNS` / `result=rejected|reason=prior-stimulus` |
+| **S** | **not implemented** (no side-effect-free production send exists: the self-addressed HEARTBEAT has no caller yet, N5/P8) | `result=rejected|reason=no-side-effect-free-production-send` |
+
+Unarmed: `result=rejected|reason=not-armed` before any RPC/syscall. Unknown kind
+→ `invalid-kind`; malformed id → `invalid-id`. Every request emits exactly one
+line, plus the later R completion.
+
+### Log line
+
+```
+N2_A_EVENT|id=…|kind=…|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|mono_ms=…|diag=true|is_evidence=false
+```
+
+`fd` is the shell ORIGINAL and `dup_fd` the core-owned descriptor of the live
+outer socket — the **same pair the `N2_SOCK` receipts report**, taken from the
+armed trace itself (`n2_socket_trace::live_of`), so an A event can never be
+attributed to a socket no `N2_SOCK` line describes. D claims no fd here: its
+authoritative device record is the `N2_DNS` receipt the requery emits.
+
+### How the operator triggers it
+
+```bash
+aa start -b cn.alfadb.netbird -a EntryAbility \
+  --ps n2h_arm_options '<the same arm ticket that armed this session>' \
+  --ps n2_a_event '{"kind":"M","id":"a-M-1"}'
+```
+
+`EntryAbility` writes the payload verbatim to `<filesDir>/netbird-n2-a-event`
+(UTF-8 byte count only, never the payload). A launch without the parameter
+deletes a leftover. The **one-pending-request-per-launch** combination rule now
+spans THREE channels (`n2_stimulus`, `n2_control`, `n2_a_event`): a launch
+carrying more than one writes NONE of them and removes every leftover — the
+pre-existing `stimulus`+`control` refusal keeps its exact line, and a refusal
+involving the A-event channel extends it with `|a_event=`. `N2_A_EVENT_SHELL|…`
+is the shell delivery receipt; the core's line stays authoritative.
+
+### Host verification (no device)
+
+* `cargo test --offline --locked` (client/core): unit tests in
+  `client/core/src/n2_a_event.rs` (gating, the S refusal, the D Q1 gate, the R
+  watch completion/timeout, one-trigger-one-line) and the integration test
+  `tests/n2_a_event.rs::m_runs_one_real_rpc_on_the_existing_connection_only`,
+  which runs the REAL protected dial path against an in-process tonic server
+  and asserts: exactly ONE accepted connection across the whole test, the
+  `N2_A_EVENT|kind=M` fd/dup pair byte-identical to the `N2_SOCK` pair, and the
+  live registration unchanged after two `GetServerKey` calls.
+
+## I/Ws sandwich orchestration (P5, 2026-09-28)
+
+Preregistration v4.1 §4 A 列 I/Ws 行 + §3 第 2 条 / 实现前置项 **P5**. Armed
+only; the shell inserts the control markers at wait points AFTER the TUN tee
+attach and **never changes the ICE/WG send content or order**.
+
+* **Core state machine** `client/core/src/n2_sandwich.rs` owns the ordering
+  verdict: `attach_anchor` is called at the real tee attach
+  (`wg_device.rs` `try_build`, right after the `before-tun-attach` gap), the
+  first successful I/Ws send is observed at the single `n2_socket_trace::first_io`
+  call site, and the pre control's HIT is recorded by the armed tee itself
+  (`N2DestinationTee::consume_control` → `n2_sandwich::control_hit`).
+* **Shell orchestration** in `settleCreate`: `n2IceSandwichPre()` runs between
+  the WG data-plane feed (the attach) and `protectAndFeedIceSocket()` — the
+  frozen「首轮 ICE 池馈入之前」; `n2WsSandwichPre()` runs right after the pool
+  feed and therefore before any ICE nomination can select the egress socket.
+  Each sends its PRE control through `sendAndWaitN2Control`
+  (`NetBirdN2Control.ets`) and waits for the HIT. The POST controls are sent by
+  the watcher tick (`pollN2Sandwich`) once the core has observed the first real
+  production send.
+* **Wait bounds** (written down, not tunable at the call site): the pre-HIT
+  wait before the first send is the core control window `PRE_WAIT_MS = 3_000`
+  ms; the first-send wait before the post is `POST_WAIT_MS = 90_000` ms. A leg
+  that never sees its send is closed as `result=timeout`.
+* **`Ws` keeps the frozen order**: `peer_conn.rs`'s "attach the egress socket
+  FIRST, land the endpoint only then" (`:1230-1239`) is untouched — the shell
+  never defers or reorders `apply_endpoint`.
+* **UNSAT**: a first I/Ws send observed BEFORE the attach anchor emits
+  `result=unsat|reason=first-send-before-attach`, whether or not a leg was ever
+  requested; a first send after the attach but before the pre control (or
+  before its HIT) is `result=unsat|reason=first-send-before-pre-control` /
+  `pre-control-not-before-first-send`. A missed pre control closes the leg as
+  `result=unsat|reason=pre-control-miss`.
+
+### Log line
+
+```
+N2_SANDWICH|kind=I|Ws|phase=pre|post|first-send|marker=…|event_ref=…|result=…|reason=…|fd=…|dup_fd=…|remote=…|wait_ms=…|mono_ms=…|diag=true|is_evidence=false
+```
+
+`N2_SANDWICH_SHELL|…` is the shell's delivery receipt. Unarmed, every entry
+point is a **silent no-op** (no state, no line, no control).
+
+### Interface (NAPI)
+
+* `n2_sandwich_pre(kind, marker)` → `{ok,result,reason,kind,marker}`; the shell
+  calls it BEFORE sending the pre control and skips the send when `ok` is false
+  (the core already logged the exact `unsat`/`rejected` reason).
+* `n2_sandwich_poll()` → `{ok,posts:[{kind,marker}]}`; one entry per leg whose
+  first production send was observed after the pre HIT. Also closes timed-out
+  legs.
+* `n2_sandwich_post(kind, marker, result, reason)` → closes one leg with the
+  shell's post verdict (`observed` = the post marker HIT, `unsat` = it MISSed).
+
+### Host verification (no device)
+
+* `cargo test --offline --locked` (client/core): unit tests in
+  `client/core/src/n2_sandwich.rs` (attach-anchor gating, pre→HIT→send
+  ordering, the frozen `first-send-before-attach` token, the pre-MISS close, the
+  `POST_WAIT_MS` timeout, unarmed zero-output) and the integration test
+  `tests/n2_a_event.rs::sandwich_pre_hit_precedes_the_first_send_and_unarmed_is_silent`,
+  which drives the REAL `N2DestinationTee::consume_control` to mark the pre HIT
+  and then the first send.
+* `node client/entry/selfcheck/run-n2-a-event.mts` — both new pure modules as
+  code (parsers, target selection, marker rule, poll parsing, every formatter)
+  plus source pins on the extension / EntryAbility / core wiring.
+* `run-exclusion-generation.mts` N group — the REAL `EntryAbility` three-way
+  combination rule through the path-aware fake fs and the REAL armed
+  `pollN2AEvent` / `pollN2Sandwich` against the recording core seams.
+
+No device measurement was made here. On-device use still requires the
+separately authorized campaign and the T7a conformance review the frozen record
+demands.

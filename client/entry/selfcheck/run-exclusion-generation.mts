@@ -282,6 +282,10 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its two erased interfaces are re-declared by its shim below.
   'NetBirdN2Stimulus',
+  // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules the
+  // REAL extension imports; their erased interfaces are re-declared by shims.
+  'NetBirdN2AEvent',
+  'NetBirdN2Sandwich',
   // N2 T3 §3 (2026-09-28): the positive-control request pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdN2ControlRequest'];
@@ -305,6 +309,9 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation'],
   // N2 T5a: the erased stimulus request/reply shapes the extension names.
   NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply'],
+  // N2 P4/P5: the erased trigger and sandwich shapes the extension names.
+  NetBirdN2AEvent: ['N2AEventDecision', 'N2AEventRequest', 'N2AEventReply'],
+  NetBirdN2Sandwich: ['N2SandwichPost'],
   // N2 T3 §3: the erased positive-control request/decision shapes.
   NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
 };
@@ -1339,6 +1346,16 @@ try {
     G['__NB_CONTROL_ERROR'] = undefined;
     G['__NB_STIMULUS_CALLS'] = undefined;
     G['__NB_STIMULUS_ANSWER'] = undefined;
+    G['__NB_A_EVENT_CALLS'] = undefined;
+    G['__NB_A_EVENT_LAST'] = undefined;
+    G['__NB_A_EVENT_ANSWER'] = undefined;
+    G['__NB_SANDWICH_PRE_CALLS'] = undefined;
+    G['__NB_SANDWICH_PRE_LAST'] = undefined;
+    G['__NB_SANDWICH_PRE_ANSWER'] = undefined;
+    G['__NB_SANDWICH_POST_CALLS'] = undefined;
+    G['__NB_SANDWICH_POST_LAST'] = undefined;
+    G['__NB_SANDWICH_POLL_CALLS'] = undefined;
+    G['__NB_SANDWICH_POLL_ANSWER'] = undefined;
   };
   const controlCalls = (): number => Number(G['__NB_CONTROL_CALLS'] ?? 0);
   const armedAbility = (): Record<string, unknown> => {
@@ -1502,6 +1519,173 @@ try {
   check('N8 within one tick the CONTROL is submitted BEFORE the stimulus',
     controlAt >= 0 && stimulusAt >= 0 && controlAt < stimulusAt,
     JSON.stringify({ controlAt, stimulusAt }));
+
+  // ---------------- N9-N15 (N2 P4/P5, 2026-09-28): the A-column trigger
+  // ---------------- private channel and the automatic I/Ws sandwich polls.
+  //
+  // SAME three-file mechanism as the arm ticket / stimulus / control, now with
+  // a THIRD pending-request channel: EntryAbility writes
+  // <filesDir>/netbird-n2-a-event from the non-secret `n2_a_event` want
+  // parameter, the REAL extension's `pollN2AEvent` consumes it once through
+  // the recording core seam, and the REAL watcher tick drives the sandwich
+  // poll/post step. The core's own `N2_A_EVENT|…` / `N2_SANDWICH|…` lines stay
+  // authoritative.
+  const AEVENT_PATH = `${FIXTURE_FILESDIR}/netbird-n2-a-event`;
+  const AEVENT_NAME = 'netbird-n2-a-event';
+  const AEVENT_PAYLOAD = '{"kind":"M","id":"a-M-1"}';
+  const aEventCalls = (): number => Number(G['__NB_A_EVENT_CALLS'] ?? 0);
+
+  // N9: the explicit non-secret want lands byte-verbatim in filesDir, logged
+  // as file name + real UTF-8 byte count, payload never printed.
+  resetFs();
+  const aEventEntry = newEntry();
+  resetLog();
+  (aEventEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_a_event': AEVENT_PAYLOAD } }, {});
+  check('N9 the A-event want payload is written VERBATIM to <filesDir>/netbird-n2-a-event',
+    fileOf(AEVENT_PATH) === AEVENT_PAYLOAD, JSON.stringify(fileOf(AEVENT_PATH)));
+  check('N9 the write is logged as file name + UTF-8 byte count only',
+    linesWith('N2_A_EVENT_FILE_WRITTEN|').length === 1 &&
+    lastLine('N2_A_EVENT_FILE_WRITTEN|') === 'N2_A_EVENT_FILE_WRITTEN|file=' + AEVENT_NAME +
+    '|bytes=' + String(Buffer.byteLength(AEVENT_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret' &&
+    logs().join('\n').indexOf('a-M-1') < 0,
+    linesWith('N2_A_EVENT_FILE_WRITTEN|').join('\n'));
+
+  // N10: an a-event-only launch clears the OTHER two leftovers — one launch
+  // carries at most one pending request.
+  seedFile(STIMULUS_PATH, STIMULUS_PAYLOAD);
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  resetLog();
+  (aEventEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_a_event': AEVENT_PAYLOAD } }, {});
+  check('N10 an a-event-only launch clears the stimulus and control leftovers',
+    fileOf(STIMULUS_PATH) === undefined && fileOf(CONTROL_PATH) === undefined &&
+    fileOf(AEVENT_PATH) === AEVENT_PAYLOAD &&
+    lastLine('N2_STIMULUS_FILE_REMOVED|') === 'N2_STIMULUS_FILE_REMOVED|file=netbird-n2-stimulus' +
+    '|note=default-no-stimulus' &&
+    lastLine('N2_CONTROL_FILE_REMOVED|') === 'N2_CONTROL_FILE_REMOVED|file=' + CONTROL_NAME +
+    '|note=default-no-control',
+    JSON.stringify({ stimulus: fileOf(STIMULUS_PATH), control: fileOf(CONTROL_PATH) }));
+
+  // N10b: a launch without the parameter clears a leftover A-event request
+  // (the structural default-off rule every channel shares).
+  seedFile(AEVENT_PATH, AEVENT_PAYLOAD);
+  resetLog();
+  (aEventEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('N10b a launch without n2_a_event deletes the leftover request',
+    fileOf(AEVENT_PATH) === undefined &&
+    lastLine('N2_A_EVENT_FILE_REMOVED|') === 'N2_A_EVENT_FILE_REMOVED|file=' + AEVENT_NAME +
+    '|note=default-no-a-event',
+    JSON.stringify({ file: fileOf(AEVENT_PATH), log: lastLine('N2_A_EVENT_FILE_REMOVED|') }));
+
+  // N11: a launch carrying TWO of the three requests still writes NEITHER; the
+  // refusal line now names the third file.
+  seedFile(AEVENT_PATH, AEVENT_PAYLOAD);
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  resetLog();
+  (aEventEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_control': CONTROL_PAYLOAD,
+        'n2_a_event': AEVENT_PAYLOAD } }, {});
+  check('N11 control + a_event write NEITHER and remove both leftovers',
+    fileOf(AEVENT_PATH) === undefined && fileOf(CONTROL_PATH) === undefined &&
+    linesWith('N2_A_EVENT_FILE_WRITTEN|').length === 0 &&
+    linesWith('N2_CONTROL_FILE_WRITTEN|').length === 0);
+  check('N11 the extended refusal names all three request files',
+    linesWith('N2_CONTROL_COMBO_REJECTED|').length === 1 &&
+    lastLine('N2_CONTROL_COMBO_REJECTED|') === 'N2_CONTROL_COMBO_REJECTED|stimulus=netbird-n2-stimulus' +
+    '|control=' + CONTROL_NAME + '|a_event=' + AEVENT_NAME +
+    '|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+    lastLine('N2_CONTROL_COMBO_REJECTED|'));
+
+  // N12: the ARMED poll consumes the request once and calls the core with
+  // exactly the parsed kind/id, then logs its own delivery receipt.
+  resetFs();
+  resetRequestState();
+  seedFile(AEVENT_PATH, AEVENT_PAYLOAD);
+  G['__NB_A_EVENT_ANSWER'] = JSON.stringify({ ok: true, result: 'sent', reason: 'ok',
+    kind: 'M', fd: 21, dup_fd: 22, line: 'N2_A_EVENT|id=a-M-1|kind=M|result=sent' });
+  const armedForAEvent = armedAbility();
+  resetLog();
+  (armedForAEvent['pollN2AEvent'] as () => void)();
+  check('N12 the armed poll calls the core exactly ONCE with the parsed request',
+    aEventCalls() === 1 &&
+    JSON.stringify(G['__NB_A_EVENT_LAST']) === JSON.stringify({ kind: 'M', id: 'a-M-1' }),
+    JSON.stringify(G['__NB_A_EVENT_LAST']));
+  check('N12 the shell receipt names the core result, the fd pair, and consumes the file',
+    lastLine('N2_A_EVENT_SHELL|') === 'N2_A_EVENT_SHELL|requestId=' + REQUEST_ID +
+    '|id=a-M-1|kind=M|core_ok=true|core_result=sent|reason=ok|fd=21|dup_fd=22|diag=true|is_evidence=false' &&
+    fileOf(AEVENT_PATH) === undefined,
+    lastLine('N2_A_EVENT_SHELL|'));
+
+  // N13: an UNARMED session refuses by name, never calls the core, and still
+  // consumes the file (nothing can fire after a later arming).
+  resetFs();
+  resetRequestState();
+  seedFile(AEVENT_PATH, AEVENT_PAYLOAD);
+  const unarmedForAEvent = freshAbility(mod, FIXTURE_FILESDIR);
+  resetLog();
+  (unarmedForAEvent['pollN2AEvent'] as () => void)();
+  check('N13 an unarmed session refuses (not-armed), calls the core ZERO times, consumes the file',
+    aEventCalls() === 0 && fileOf(AEVENT_PATH) === undefined &&
+    lastLine('N2_A_EVENT_SHELL|') === 'N2_A_EVENT_SHELL|requestId=' + REQUEST_ID +
+    '|id=a-M-1|kind=M|core_ok=false|core_result=rejected|reason=not-armed|' +
+    'fd=-1|dup_fd=-1|diag=true|is_evidence=false',
+    JSON.stringify({ calls: aEventCalls(), line: lastLine('N2_A_EVENT_SHELL|') }));
+
+  // N14: a malformed payload (an unknown kind) is refused by name BEFORE any
+  // core call and is consumed.
+  resetFs();
+  resetRequestState();
+  seedFile(AEVENT_PATH, '{"kind":"W","id":"x"}');
+  const malformedForAEvent = armedAbility();
+  resetLog();
+  (malformedForAEvent['pollN2AEvent'] as () => void)();
+  check('N14 a malformed request is refused by name with no core call and is consumed',
+    aEventCalls() === 0 && fileOf(AEVENT_PATH) === undefined &&
+    lastLine('N2_A_EVENT_SHELL|') === 'N2_A_EVENT_SHELL|requestId=' + REQUEST_ID +
+    '|id=none|kind=none|core_ok=false|core_result=rejected|reason=invalid-kind|' +
+    'fd=-1|dup_fd=-1|diag=true|is_evidence=false',
+    JSON.stringify({ calls: aEventCalls(), line: lastLine('N2_A_EVENT_SHELL|') }));
+
+  // N15: the sandwich polls ride the REAL armed watcher tick. Nothing ready =
+  // one bare core poll, no control send; a ready leg = that leg's POST control
+  // plus the core verdict report.
+  resetFs();
+  resetRequestState();
+  G['__NB_STATUS'] = watcherStatus;
+  const sandwichAbility = armedAbility();
+  resetLog();
+  const sandwichTick = watcherTick(sandwichAbility);
+  sandwichTick();
+  await drainProbe();
+  await drainProbe();
+  check('N15 an armed tick polls the sandwich core surface once and sends NO control',
+    Number(G['__NB_SANDWICH_POLL_CALLS'] ?? 0) === 1 && controlCalls() === 0 &&
+    Number(G['__NB_SANDWICH_POST_CALLS'] ?? 0) === 0,
+    JSON.stringify({ poll: G['__NB_SANDWICH_POLL_CALLS'], controls: controlCalls() }));
+  G['__NB_SANDWICH_POLL_ANSWER'] = JSON.stringify({ ok: true,
+    posts: [{ kind: 'I', marker: 'n2s-' + REQUEST_ID + '-I-pre' }] });
+  sandwichTick();
+  await drainProbe();
+  await drainProbe();
+  const postLast = (G['__NB_SANDWICH_POST_LAST'] ?? {}) as Record<string, unknown>;
+  check('N15 a ready leg sends its POST control and reports the verdict to the core',
+    controlCalls() === 1 &&
+    JSON.stringify(G['__NB_CONTROL_LAST']) === JSON.stringify({ armed: N2_EVIDENCE_OPTIONS,
+      target: '119.29.29.119:53', protocol: 'udp', id: 'n2s-' + REQUEST_ID + '-I-pre' }) &&
+    postLast['kind'] === 'I' && postLast['marker'] === 'n2s-' + REQUEST_ID + '-I-pre' &&
+    postLast['result'] === 'observed' && postLast['reason'] === 'post-control-hit',
+    JSON.stringify({ control: G['__NB_CONTROL_LAST'], post: postLast }));
+  check('N15 the post step logs its own shell receipt',
+    lastLine('N2_SANDWICH_SHELL|') === 'N2_SANDWICH_SHELL|kind=I|phase=post|marker=n2s-' +
+    REQUEST_ID + '-I-pre|target=119.29.29.119:53|result=observed|reason=post-control-hit|' +
+    'diag=true|is_evidence=false',
+    lastLine('N2_SANDWICH_SHELL|'));
 
   // ---------------- C8 (2026-09-18): peer_overlay_ip verbatim bridging -----
   // The parallel posctl-target fix adds the optional non-secret

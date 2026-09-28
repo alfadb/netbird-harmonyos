@@ -428,6 +428,43 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    }\n' +
   '    return JSON.stringify({ ok: true, fd: fd,\n' +
   '      handoff_id: "N2H-protect-0123456789abcdef01234567", protect_result: result });\n' +
+  '  },\n' +
+  // N2 P4 (2026-09-28): the A-column trigger entry. Functional and recording
+  // like the other seams: every call is counted and the request lands in
+  // __NB_A_EVENT_LAST; __NB_A_EVENT_ANSWER overrides the answer. The default
+  // is the honest not-armed refusal, never a fabricated dispatch.
+  '  n2_a_event: (kind, id) => {\n' +
+  '    g().__NB_A_EVENT_CALLS = (g().__NB_A_EVENT_CALLS || 0) + 1;\n' +
+  '    g().__NB_A_EVENT_LAST = { kind: kind, id: id };\n' +
+  '    if (typeof g().__NB_A_EVENT_ANSWER === "string") { return g().__NB_A_EVENT_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '      kind: kind, fd: -1, dup_fd: -1 });\n' +
+  '  },\n' +
+  // N2 P5 (2026-09-28): the automatic sandwich orchestration seams. `pre`
+  // defaults to the honest refusal (an unarmed/unattached session), `post`
+  // records the shell's verdict and `poll` answers "nothing ready".
+  '  n2_sandwich_pre: (kind, marker) => {\n' +
+  '    g().__NB_SANDWICH_PRE_CALLS = (g().__NB_SANDWICH_PRE_CALLS || 0) + 1;\n' +
+  '    g().__NB_SANDWICH_PRE_LAST = { kind: kind, marker: marker };\n' +
+  '    if (typeof g().__NB_SANDWICH_PRE_ANSWER === "string") {\n' +
+  '      return g().__NB_SANDWICH_PRE_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '      kind: kind, marker: marker });\n' +
+  '  },\n' +
+  '  n2_sandwich_post: (kind, marker, result, reason) => {\n' +
+  '    g().__NB_SANDWICH_POST_CALLS = (g().__NB_SANDWICH_POST_CALLS || 0) + 1;\n' +
+  '    g().__NB_SANDWICH_POST_LAST = { kind: kind, marker: marker, result: result,\n' +
+  '      reason: reason };\n' +
+  '    return JSON.stringify({ ok: true, result: result, reason: reason, kind: kind,\n' +
+  '      marker: marker });\n' +
+  '  },\n' +
+  '  n2_sandwich_poll: () => {\n' +
+  '    g().__NB_SANDWICH_POLL_CALLS = (g().__NB_SANDWICH_POLL_CALLS || 0) + 1;\n' +
+  '    if (typeof g().__NB_SANDWICH_POLL_ANSWER === "string") {\n' +
+  '      return g().__NB_SANDWICH_POLL_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: true, posts: [] });\n' +
   '  }\n' +
   '};');
 
@@ -472,7 +509,13 @@ const SHIMS = {
   // N2 T3 §3 (2026-09-28): the positive-control request module is staged the
   // same way; its erased N2ControlDecision / N2ControlRequest interfaces are
   // re-declared by its shim.
-  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts'
+  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts',
+  // N2 P4 (2026-09-28): the A-column trigger pure module, staged and shimmed
+  // like the stimulus module above.
+  './NetBirdN2AEvent': 'NetBirdN2AEvent.shim.ts',
+  // N2 P5 (2026-09-28): the sandwich pure module (its one erased interface
+  // N2SandwichPost is re-declared by the shim).
+  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts'
 };
 
 export function resolve(specifier, context, next) {
@@ -496,6 +539,10 @@ export function resolve(specifier, context, next) {
       '  if ((g.__NB_CONTROL_MODE || "sent") === "throw") {\n' +
       '    throw new Error(g.__NB_CONTROL_ERROR || "n2-control-send-failed");\n' +
       '  }\n' +
+      '  return undefined;\n' +
+      '};\n' +
+      'export const sendAndWaitN2Control = async (armed, target, protocol, id) => {\n' +
+      '  sendN2Control(armed, target, protocol, id);\n' +
       '  return undefined;\n' +
       '};'), shortCircuit: true };
   }

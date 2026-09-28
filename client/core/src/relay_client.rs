@@ -2118,6 +2118,10 @@ async fn run_session(
                             // Fire and forget: the echo is best effort; a
                             // dying reader ends the session anyway.
                             let _ = send_io(&io_tx, &shared, Frame::HealthCheck).await;
+                            // N2 P4 (frozen §4 R row): the production answer
+                            // to a SERVER-driven HealthCheck is the R A-event.
+                            // Armed-only; no-op otherwise.
+                            let _ = crate::n2_a_event::healthcheck_answered();
                         }
                         InboundAction::DeliverTransport { sender, payload } => {
                             shared.bump(|s| s.transport_rx_bytes += payload.len() as u64);

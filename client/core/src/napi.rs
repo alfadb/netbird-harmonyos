@@ -131,6 +131,10 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("n2_control_send", napi_n2_control_send);
     reg!("n2_control_status", napi_n2_control_status);
     reg!("n2_stimulus", napi_n2_stimulus);
+    reg!("n2_a_event", napi_n2_a_event);
+    reg!("n2_sandwich_pre", napi_n2_sandwich_pre);
+    reg!("n2_sandwich_post", napi_n2_sandwich_post);
+    reg!("n2_sandwich_poll", napi_n2_sandwich_poll);
     reg!("n2h_collector_arm", napi_n2h_collector_arm);
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
@@ -400,6 +404,10 @@ mod tests {
             "n2_control_send",
             "n2_control_status",
             "n2_stimulus",
+            "n2_a_event",
+            "n2_sandwich_pre",
+            "n2_sandwich_post",
+            "n2_sandwich_poll",
             "n2h_collector_arm",
             "n2h_collector_status",
             "n2h_collector_evidence",
@@ -716,6 +724,33 @@ unsafe extern "C" fn napi_n2_control_status(env: NapiEnv, info: NapiCallbackInfo
 unsafe extern "C" fn napi_n2_stimulus(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::n2_stimulus_json(&a.string_at(0), &a.string_at(1)))
+}
+
+// N2 P4「A 列生产事件触发原语」(v4.1 §4 A 列操作性定义): the shell's armed-only
+// entry (`--ps n2_a_event '{"kind":"M|R|D","id":"…"}'`). One call = one
+// trigger; it never probes the connector unless an accepted evidence ticket
+// armed the trace. `S` is always refused with its frozen reason.
+unsafe extern "C" fn napi_n2_a_event(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_a_event_json(&a.string_at(0), &a.string_at(1)))
+}
+
+// N2 P5 (v4.1 §4 I/Ws rows): the shell's automatic sandwich orchestration —
+// register a PRE leg before sending the pre control, poll for the legs whose
+// first production send was observed, and close a leg with the post outcome.
+unsafe extern "C" fn napi_n2_sandwich_pre(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_sandwich_pre_json(&a.string_at(0), &a.string_at(1)))
+}
+
+unsafe extern "C" fn napi_n2_sandwich_post(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_sandwich_post_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2), &a.string_at(3)))
+}
+
+unsafe extern "C" fn napi_n2_sandwich_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::n2_sandwich_poll_json())
 }
 
 unsafe extern "C" fn napi_n2h_collector_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

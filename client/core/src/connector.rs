@@ -4521,6 +4521,10 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
     // call time and is removed by `connector_stop_json`, so it can never
     // outlive the session it belongs to.
     crate::n2_stimulus::install_sink(Arc::new(ConnectorStimulusSink));
+    // N2 P4: the session's A-column trigger seam (M on the EXISTING
+    // management connection, D requery, R timeout arm). Same lifetime rule:
+    // removed by `connector_stop_json`.
+    crate::n2_a_event::install_trigger(Arc::new(ConnectorATrigger));
     format!("{{{}, {}}}", jbool("started", true), jstr("state", state.as_str()))
 }
 
@@ -4674,6 +4678,10 @@ pub fn connector_start_with_socket_json(
     hilog::emit("connector: started over protected management socket (fd dup-consumed per dial)");
     // N2 T5a: see `connector_start_json` — one sink per session.
     crate::n2_stimulus::install_sink(Arc::new(ConnectorStimulusSink));
+    // N2 P4: the session's A-column trigger seam (M on the EXISTING
+    // management connection, D requery, R timeout arm). Same lifetime rule:
+    // removed by `connector_stop_json`.
+    crate::n2_a_event::install_trigger(Arc::new(ConnectorATrigger));
     format!(
         "{{{},{},{}}}",
         jbool("started", true),
@@ -5336,6 +5344,135 @@ pub fn n2_stimulus_json(kind: &str, id: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// N2 P4「A 列生产事件触发原语」(v4.1 §4 A 列操作性定义) + P5 夹心编排
+// ---------------------------------------------------------------------------
+
+/// The connector-side seam of the A-column trigger (P4). It resolves the live
+/// connector through the slot at call time (never holds one), so it can never
+/// outlive its session.
+///
+/// * `M` — ONE `GetServerKey` on the EXISTING logged-in management client
+///   (`logout_slot` holds a clone whose tonic `Channel` is the same connection
+///   the Sync stream runs over). NO new dial and NO new `Sync` stream: a fresh
+///   stream is exactly the recreate-risk shape the frozen text forbids.
+/// * `D` — the existing D requery primitive (`force_protected_dns_requery`),
+///   one fresh protected query on a new protected fd; the `N2_DNS` receipt it
+///   emits is the authoritative device record of the query.
+/// * `R` — arms the [`crate::n2_a_event::R_WAIT_MS`] timeout on the session's
+///   own runtime; the relay reader calls back when the server-driven
+///   HealthCheck is answered.
+struct ConnectorATrigger;
+
+impl crate::n2_a_event::Trigger for ConnectorATrigger {
+    fn management_round_trip(&self) -> Result<(), String> {
+        // Never hold the connector slot across the RPC.
+        let (handle, client) = {
+            let slot = connector_slot();
+            let Some(handle) = slot.as_ref().cloned() else { return Err("no-connector".into()) };
+            let client = handle.logout_slot.lock_poison().clone();
+            (handle, client)
+        };
+        let Some(mut client) = client else {
+            return Err("no-live-management-connection".into());
+        };
+        let runtime = handle.runtime.clone();
+        let waited = runtime.block_on(async {
+            tokio::time::timeout(
+                core::time::Duration::from_millis(crate::n2_a_event::M_RPC_WAIT_MS),
+                client.get_server_key(),
+            )
+            .await
+        });
+        match waited {
+            Ok(Ok(_key)) => Ok(()),
+            // Sanitized class token only — never server text, never key bytes.
+            Ok(Err(error)) => Err(format!("management-rpc-{}", ErrorClass::from_management(&error).as_str())),
+            Err(_) => Err("management-rpc-timeout".into()),
+        }
+    }
+
+    fn dns_requery(&self) -> Result<(), String> {
+        let handle = { connector_slot().as_ref().cloned() };
+        let Some(handle) = handle else { return Err("no-connector".into()) };
+        if force_protected_dns_requery(&handle) == 0 {
+            return Err("no-target".into());
+        }
+        Ok(())
+    }
+
+    fn arm_healthcheck_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {
+        let handle = { connector_slot().as_ref().cloned() };
+        let Some(handle) = handle else { return Err("no-connector".into()) };
+        let id = id.to_string();
+        handle.runtime.spawn(async move {
+            tokio::time::sleep(core::time::Duration::from_millis(wait_ms)).await;
+            // The (id, seq) pair makes a stale timer harmless: it can only
+            // complete the watch it was armed for.
+            let _ = crate::n2_a_event::r_watch_timeout(&id, seq);
+        });
+        Ok(())
+    }
+}
+
+/// N2 P4: apply one A-column trigger and answer the shell. See
+/// [`crate::n2_a_event`] for the frozen scope, the gating and the marker.
+pub fn n2_a_event_json(kind: &str, id: &str) -> String {
+    let outcome = crate::n2_a_event::apply(kind, id);
+    let ok = matches!(outcome.result, "sent" | "armed" | "requery" | "observed");
+    format!(
+        "{{{},{},{},{},{},{},{}}}",
+        jbool("ok", ok),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jstr("kind", &outcome.kind),
+        jinum("fd", outcome.fd as i64),
+        jinum("dup_fd", outcome.dup_fd as i64),
+        jstr("line", &outcome.line)
+    )
+}
+
+/// N2 P5: register one PRE sandwich leg (called by the shell BEFORE it sends
+/// the pre control). The core keeps the ordering verdict.
+pub fn n2_sandwich_pre_json(kind: &str, marker: &str) -> String {
+    let outcome = crate::n2_sandwich::pre(kind, marker);
+    format!(
+        "{{{},{},{},{},{}}}",
+        jbool("ok", outcome.result == "registered"),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jstr("kind", &outcome.kind),
+        jstr("marker", &outcome.marker)
+    )
+}
+
+/// N2 P5: close one leg with the shell's post outcome (`observed` = the post
+/// control HIT, `unsat` = one of the named misses).
+pub fn n2_sandwich_post_json(kind: &str, marker: &str, result: &str, reason: &str) -> String {
+    let outcome = crate::n2_sandwich::post(kind, marker, result, reason);
+    format!(
+        "{{{},{},{},{},{}}}",
+        jbool("ok", outcome.result != "rejected"),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jstr("kind", &outcome.kind),
+        jstr("marker", &outcome.marker)
+    )
+}
+
+/// N2 P5: which legs are ready for their POST control right now. Called on
+/// every shell watcher tick while armed; also closes legs whose first
+/// production send never arrived within the documented bound.
+pub fn n2_sandwich_poll_json() -> String {
+    let posts = crate::n2_sandwich::poll(crate::sys::mono_ms());
+    let items = posts
+        .iter()
+        .map(|post| format!("{{{},{}}}", jstr("kind", &post.kind), jstr("marker", &post.marker)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{},\"posts\":[{}]}}", jbool("ok", true), items)
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {
@@ -5351,6 +5488,7 @@ pub fn connector_stop_json() -> String {
     // connector through the slot, which is cleared below). Dropping it here
     // means no stimulus can act on a stopped session.
     crate::n2_stimulus::clear_sink();
+    crate::n2_a_event::clear_trigger();
     *last_dns_host().lock_poison() = String::new();
     crate::socket_supply::shutdown();
     match slot.as_ref() {

@@ -73,6 +73,17 @@ const N2_STIMULUS_FILE: string = 'netbird-n2-stimulus';
 // The payload is never logged.
 const N2_CONTROL_PARAM: string = 'n2_control';
 const N2_CONTROL_FILE: string = 'netbird-n2-control';
+// N2 P4「A 列生产事件触发原语」(2026-09-28): the SAME non-secret
+// want-parameter mechanism again, with its own payload file. The basename must
+// match the extension's `N2_A_EVENT_FILE_NAME` (NetBirdN2AEvent.ets) exactly.
+// The combination rule now spans THREE channels: a launch carrying more than
+// one of {n2_stimulus, n2_control, n2_a_event} writes NEITHER and removes all
+// leftovers (the two-channel refusal keeps its exact pre-existing line; a
+// refusal involving the A-event channel adds `|a_event=`), and a launch with
+// exactly one writes it while removing the other two leftovers. The payload is
+// never logged.
+const N2_A_EVENT_PARAM: string = 'n2_a_event';
+const N2_A_EVENT_FILE: string = 'netbird-n2-a-event';
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -146,34 +157,72 @@ export default class EntryAbility extends UIAbility {
     } else {
       this.removeArmTicket('default-no-arm');
     }
-    // N2 T5a / T3 private channels: same discipline as the arm ticket above.
-    // ONE launch carries at most ONE pending request (stimulus or positive
-    // control): an explicit non-secret parameter writes it, a launch without
-    // it removes that channel's leftover, and a launch carrying BOTH writes
-    // neither (the combination is refused, not ordered) while removing both
-    // leftovers. The payloads are never logged.
+    // N2 T5a / T3 / P4 private channels: same discipline as the arm ticket
+    // above. ONE launch carries at most ONE pending request (stimulus,
+    // positive control or A-column trigger): an explicit non-secret parameter
+    // writes it, a launch without it removes that channel's leftover, and a
+    // launch carrying MORE THAN ONE writes none of them (the combination is
+    // refused, not ordered) while removing every leftover. The payloads are
+    // never logged.
     const stimulus: Object | undefined =
       params === undefined || params === null ? undefined : params[N2_STIMULUS_PARAM];
     const control: Object | undefined =
       params === undefined || params === null ? undefined : params[N2_CONTROL_PARAM];
+    const aEvent: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_A_EVENT_PARAM];
     const stimulusText: string = typeof stimulus === 'string' ? stimulus : '';
     const controlText: string = typeof control === 'string' ? control : '';
+    const aEventText: string = typeof aEvent === 'string' ? aEvent : '';
     if (stimulusText.length > 0 && controlText.length > 0) {
-      hilog.warn(DOMAIN, TAG,
-        'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
-        'note=one-pending-request-per-launch|diag=true|is_evidence=false',
-        N2_STIMULUS_FILE, N2_CONTROL_FILE);
+      // The pre-existing two-channel refusal keeps its exact line; a THIRD
+      // pending request (the A-event trigger) extends the same refusal with
+      // `|a_event=` — the combination rule now spans three channels.
+      if (aEventText.length > 0) {
+        hilog.warn(DOMAIN, TAG,
+          'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
+          'a_event=%{public}s|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+          N2_STIMULUS_FILE, N2_CONTROL_FILE, N2_A_EVENT_FILE);
+      } else {
+        hilog.warn(DOMAIN, TAG,
+          'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
+          'note=one-pending-request-per-launch|diag=true|is_evidence=false',
+          N2_STIMULUS_FILE, N2_CONTROL_FILE);
+      }
       this.removeStimulusFile('combo-rejected');
       this.removeControlFile('combo-rejected');
+      this.removeAEventFile('combo-rejected');
+    } else if (stimulusText.length > 0 && aEventText.length > 0) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
+        'a_event=%{public}s|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+        N2_STIMULUS_FILE, N2_CONTROL_FILE, N2_A_EVENT_FILE);
+      this.removeStimulusFile('combo-rejected');
+      this.removeControlFile('combo-rejected');
+      this.removeAEventFile('combo-rejected');
+    } else if (controlText.length > 0 && aEventText.length > 0) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
+        'a_event=%{public}s|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+        N2_STIMULUS_FILE, N2_CONTROL_FILE, N2_A_EVENT_FILE);
+      this.removeStimulusFile('combo-rejected');
+      this.removeControlFile('combo-rejected');
+      this.removeAEventFile('combo-rejected');
     } else if (stimulusText.length > 0) {
       this.writeStimulusFile(stimulusText);
       this.removeControlFile('default-no-control');
+      this.removeAEventFile('default-no-a-event');
     } else if (controlText.length > 0) {
       this.writeControlFile(controlText);
       this.removeStimulusFile('default-no-stimulus');
+      this.removeAEventFile('default-no-a-event');
+    } else if (aEventText.length > 0) {
+      this.writeAEventFile(aEventText);
+      this.removeStimulusFile('default-no-stimulus');
+      this.removeControlFile('default-no-control');
     } else {
       this.removeStimulusFile('default-no-stimulus');
       this.removeControlFile('default-no-control');
+      this.removeAEventFile('default-no-a-event');
     }
   }
 
@@ -409,8 +458,8 @@ export default class EntryAbility extends UIAbility {
 
   // Delete THE ONE positive-control request file (basename above) — from the
   // default no-control launch path, from the combination refusal, and from a
-  // failed write. Credential / config / deviation / arm-ticket / stimulus
-  // files are NEVER touched here.
+  // failed write. Credential / config / deviation / arm-ticket / stimulus /
+  // A-event files are NEVER touched here.
   private removeControlFile(note: string): void {
     const path: string = `${this.context.filesDir}/${N2_CONTROL_FILE}`;
     try {
@@ -424,6 +473,73 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, TAG,
         'N2_CONTROL_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
         N2_CONTROL_FILE, String((error as BusinessFailure).code ?? 'none'), note);
+    }
+  }
+
+  // N2 P4「A 列生产事件触发原语」private channel (2026-09-28). The SAME write
+  // honesty as writeStimulusFile / writeControlFile above: the open's TRUNC
+  // already wiped any previous request, so a failed/short WRITE must not leave
+  // an empty or partial file the extension could parse into a trigger — the
+  // failure path removes exactly this one file (logged independently, with its
+  // own error code; a removal failure is never reported as a removal). The
+  // payload is never logged, and `bytes=` is the real UTF-8 byte count.
+  private writeAEventFile(text: string): void {
+    const path: string = `${this.context.filesDir}/${N2_A_EVENT_FILE}`;
+    let file: fs.File | undefined = undefined;
+    let writeFailed: boolean = false;
+    let failureCode: string = 'none';
+    let expectedBytes: number = 0;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      const written: number = fs.writeSync(file.fd, text);
+      expectedBytes = new util.TextEncoder().encode(text).byteLength;
+      if (written !== expectedBytes) {
+        writeFailed = true;
+        failureCode = `short-write:${written}of${expectedBytes}`;
+      }
+    } catch (error) {
+      writeFailed = true;
+      failureCode = String((error as BusinessFailure).code ?? 'none');
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG,
+            'N2_A_EVENT_FILE_CLOSE_FAILED|file=%{public}s|code=%{public}s',
+            N2_A_EVENT_FILE, String((closeError as BusinessFailure).code ?? 'none'));
+        }
+      }
+    }
+    if (!writeFailed) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_A_EVENT_FILE_WRITTEN|file=%{public}s|bytes=%{public}d|note=diagnostic-only-non-secret',
+        N2_A_EVENT_FILE, expectedBytes);
+      return;
+    }
+    hilog.error(DOMAIN, TAG,
+      'N2_A_EVENT_FILE_WRITE_FAILED|file=%{public}s|code=%{public}s|note=no-a-event',
+      N2_A_EVENT_FILE, failureCode);
+    this.removeAEventFile('failed-write-cleanup');
+  }
+
+  // Delete THE ONE A-event request file (basename above) — from the default
+  // no-a-event launch path, from the combination refusal, and from a failed
+  // write. Credential / config / deviation / arm-ticket / stimulus / control
+  // files are NEVER touched here.
+  private removeAEventFile(note: string): void {
+    const path: string = `${this.context.filesDir}/${N2_A_EVENT_FILE}`;
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      fs.unlinkSync(path);
+      hilog.info(DOMAIN, TAG,
+        'N2_A_EVENT_FILE_REMOVED|file=%{public}s|note=%{public}s', N2_A_EVENT_FILE, note);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'N2_A_EVENT_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
+        N2_A_EVENT_FILE, String((error as BusinessFailure).code ?? 'none'), note);
     }
   }
 }

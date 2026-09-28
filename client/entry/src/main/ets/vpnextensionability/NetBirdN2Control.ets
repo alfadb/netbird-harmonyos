@@ -42,6 +42,16 @@ async function waitN2ControlHit(id: string): Promise<void> {
   throw new Error('n2-control-timeout');
 }
 
+// Send ONE control marker and wait (bounded, the core's own control window)
+// for its HIT before returning. This is the leg primitive the automatic
+// I/Ws sandwich orchestration uses (N2 P5): the pre leg must be HIT before the
+// first production send is allowed to go, the post leg must be HIT after it.
+export async function sendAndWaitN2Control(armed: N2EvidenceOptions | undefined,
+  target: string, protocol: N2ControlProtocol, id: string): Promise<void> {
+  sendN2Control(armed, target, protocol, id);
+  await waitN2ControlHit(id);
+}
+
 // Explicit invocation only around a real production send. A clean sandwich
 // requires pre HIT before invoking sendProduction and post HIT afterwards;
 // this does not itself claim a network-side receipt or a campaign pass.
@@ -50,12 +60,10 @@ export async function withN2Sandwich<T>(armed: N2EvidenceOptions | undefined,
   sendProduction: () => Promise<T>): Promise<T> {
   const pre = `${eventId}-pre`;
   const post = `${eventId}-post`;
-  sendN2Control(armed, target, protocol, pre);
-  await waitN2ControlHit(pre);
+  await sendAndWaitN2Control(armed, target, protocol, pre);
   try {
     return await sendProduction();
   } finally {
-    sendN2Control(armed, target, protocol, post);
-    await waitN2ControlHit(post);
+    await sendAndWaitN2Control(armed, target, protocol, post);
   }
 }
