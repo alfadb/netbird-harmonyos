@@ -67,6 +67,16 @@ extern "C" {
     ) -> isize;
     // N5a: local (addr, port) of a bound dup — host-candidate port source.
     pub fn getsockname(fd: c_int, addr: *mut sockaddr_in, addrlen: *mut u32) -> c_int;
+    // N2 T5a (2026-09-28) deviation from this table's read-only posture:
+    // `shutdown` on a socket THIS crate already holds a duplicate of (see
+    // `n2_stimulus`). It writes no data and sets no socket option; it only
+    // makes the shared open-file description unusable so the socket's OWNER
+    // (hyper/tonic, the signal link, the relay client) sees the error and
+    // takes its existing re-dial path. Reachable only through the default-off,
+    // evidence-switch-gated `n2_stimulus` entry (no arm ⇒ refused before any
+    // syscall), and the target fd always comes from this crate's own
+    // outer-socket registry — never from the shell.
+    pub fn shutdown(fd: c_int, how: c_int) -> c_int;
 
     // clock: CLOCK_MONOTONIC only; clock_nanosleep only 10 ms / 50 ms (A4)
     pub fn clock_gettime(clk_id: c_int, tp: *mut timespec) -> c_int;
@@ -206,6 +216,9 @@ pub const EINVAL: c_int = 22; // the protect-probe seam's "query not encodable" 
 pub const EMSGSIZE: c_int = 90;
 pub const ESRCH: c_int = 3;
 pub const EISCONN: c_int = 106; // N3-7: adopt an already-connected provided socket
+// shutdown(2) "how" values (asm-generic/socket.h). One caller only: the N2 T5a
+// evidence-switch-gated `n2_stimulus` socket close.
+pub const SHUT_RDWR: c_int = 2;
 // socket option levels/names (asm-generic/socket.h per the OHOS SDK)
 pub const SOL_SOCKET: c_int = 1;
 pub const SO_MARK: c_int = 36;

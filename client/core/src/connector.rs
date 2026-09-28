@@ -378,6 +378,16 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     /// device must not send anything for the peer (fail-closed; no silent
     /// riding of a dead path).
     fn recycle_endpoint(&self, _pub_key_b64: &str) {}
+    /// N2 T5a (§4 B column, Wb/Ws row): drop EVERY peer's currently selected
+    /// WG path — endpoint cleared, the selected egress duplicate closed, the
+    /// handshake campaign reset — so the next ICE nomination re-attaches a
+    /// fresh selected socket and re-handshakes over it. Returns how many peers
+    /// were acted on; `0` = nothing to break (or a seam that cannot drop a
+    /// path — a seam must never pretend it broke one).
+    fn reset_peer_paths(&self) -> usize {
+        0
+    }
+
     /// N13-D2: attach the peer's NON-UDP egress carrier — the relay bearer
     /// (upstream wgProxy equivalent). The carrier is a pure Rust handle
     /// (`crate::relay_client::RelayWgCarrier` → `send_to_peer`); no fd
@@ -494,6 +504,16 @@ impl WgPeerApplier for WgPeerRegistry {
     /// the registry seam — the honest mirror of the device-side recycle).
     fn recycle_endpoint(&self, pub_key_b64: &str) {
         self.endpoints.lock_poison().retain(|(k, _, _)| k != pub_key_b64);
+    }
+
+    /// N2 T5a: the registry seam has no sockets to close; dropping every
+    /// recorded endpoint is the honest whole of what it can do. Counts the
+    /// peers that actually had one.
+    fn reset_peer_paths(&self) -> usize {
+        let mut endpoints = self.endpoints.lock_poison();
+        let acted = endpoints.len();
+        endpoints.clear();
+        acted
     }
 }
 
@@ -4496,6 +4516,11 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
     );
     let state = handle.status().state;
     *slot = Some(handle);
+    // N2 T5a: the session's stimulus sink (I/Wb/Ws endpoint break + D fresh
+    // protected query). It resolves the live connector through the slot at
+    // call time and is removed by `connector_stop_json`, so it can never
+    // outlive the session it belongs to.
+    crate::n2_stimulus::install_sink(Arc::new(ConnectorStimulusSink));
     format!("{{{}, {}}}", jbool("started", true), jstr("state", state.as_str()))
 }
 
@@ -4647,6 +4672,8 @@ pub fn connector_start_with_socket_json(
     let state = handle.status().state;
     *slot = Some(handle);
     hilog::emit("connector: started over protected management socket (fd dup-consumed per dial)");
+    // N2 T5a: see `connector_start_json` — one sink per session.
+    crate::n2_stimulus::install_sink(Arc::new(ConnectorStimulusSink));
     format!(
         "{{{},{},{}}}",
         jbool("started", true),
@@ -4681,6 +4708,11 @@ pub fn connector_protected_dns_start_json(host: &str) -> String {
     if supply.dns_servers().is_empty() || host.is_empty() || host.len() > 253 {
         return "{\"ok\":false}".into();
     }
+    // N2 T5a: the D stimulus re-queries the class's OWN current hostname; this
+    // is the only place a protected-resolution hostname is remembered. It is
+    // the public routing material `protected-dns:` already logs — never key
+    // material.
+    *last_dns_host().lock_poison() = host.to_string();
     let name = host.to_string();
     let id = start_dns_lookup(&handle.runtime, async move {
         crate::protected_dns::resolve(&name, &supply).await
@@ -5203,6 +5235,107 @@ pub fn n2_control_status_json(id: &str) -> String {
         jnum("leaks", tee.leak_count()))
 }
 
+// ---------------------------------------------------------------------------
+// N2 T5a「B 断流刺激」(preregistration v4 §4 B column / §7 T5a)
+// ---------------------------------------------------------------------------
+
+/// The hostname of the last protected DNS resolution the shell asked for.
+/// The D stimulus re-queries exactly this host (the class's own current
+/// query); with none there is nothing to re-query and D answers `no-target`
+/// instead of inventing a name.
+fn last_dns_host() -> &'static Mutex<String> {
+    static LAST_DNS_HOST: OnceLock<Mutex<String>> = OnceLock::new();
+    LAST_DNS_HOST.get_or_init(|| Mutex::new(String::new()))
+}
+
+/// The connector-side half of the stimulus: the classes no socket-level
+/// syscall can break.
+///
+/// * `I` — drop every peer's current ICE session and rearm negotiation
+///   (`PeerIceOrchestrator::break_ice`): the session's dup sockets are closed
+///   and the next pump re-gathers/re-checks. That is the frozen
+///   "endpoint-directed break → re-check" for the ICE class.
+/// * `Wb` / `Ws` — drop every peer's currently selected WG path
+///   (`WgPeerApplier::reset_peer_paths`): endpoint cleared, the selected
+///   egress duplicate closed, the handshake campaign reset, so the next ICE
+///   nomination re-attaches a fresh selected socket and re-handshakes over it.
+///   LIMIT: this does NOT close the base device socket (`wg_fwd_open` dup) —
+///   that fd has no core-side rebuild path (the shell re-feeds it via
+///   `connector_wg_socket_feed`), so a Wb-only peer stays pathless until ICE
+///   nominates again.
+/// * `D` — force ONE fresh protected DNS query for the remembered host (new
+///   protected fd, new `N2_SOCK` registration, own receipt line).
+struct ConnectorStimulusSink;
+
+impl crate::n2_stimulus::Sink for ConnectorStimulusSink {
+    fn act(&self, kind: &str) -> usize {
+        // Never hold the connector slot while locking the orchestrator/WG
+        // seam (the stop path takes them in this order too).
+        let handle = {
+            let slot = connector_slot();
+            slot.as_ref().cloned()
+        };
+        let Some(handle) = handle else { return 0 };
+        match kind {
+            "I" => handle.ice.lock_poison().break_ice(crate::sys::mono_ms()),
+            "Wb" | "Ws" => handle.wg.reset_peer_paths(),
+            "D" => force_protected_dns_requery(&handle),
+            _ => 0,
+        }
+    }
+}
+
+/// D: one fresh protected query on the SAME hostname the session last
+/// resolved. `0` = nothing to act on (no remembered host, no protected socket
+/// supply, no resolver) — the caller records `no-target`, never a fake apply.
+fn force_protected_dns_requery(handle: &Arc<ConnectorHandle>) -> usize {
+    let host = last_dns_host().lock_poison().clone();
+    if host.is_empty() {
+        return 0;
+    }
+    let Some(supply) = handle.socket_source.as_ref().and_then(|source| source.socket_supply()) else {
+        return 0;
+    };
+    if supply.dns_servers().is_empty() {
+        return 0;
+    }
+    let runtime = handle.runtime.clone();
+    // NOT `start_dns_lookup`: nothing polls that id, so the receipt is emitted
+    // here instead and the lookup map stays free of orphan entries.
+    runtime.spawn(async move {
+        let started = std::time::Instant::now();
+        let outcome = crate::protected_dns::resolve(&host, &supply).await;
+        let (result, detail) = match outcome {
+            Ok(ip) => ("ok", ip.to_string()),
+            Err(error) => ("failed", error.to_string()),
+        };
+        hilog::emit(&format!(
+            "N2_STIMULUS_DNS|host={host}|result={result}|detail={}|elapsed_ms={}|diag=true|is_evidence=false",
+            detail.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }).collect::<String>(),
+            started.elapsed().as_millis()));
+    });
+    1
+}
+
+/// N2 T5a: apply one outer-stream stimulus and answer the shell. See
+/// [`crate::n2_stimulus`] for the frozen scope, the gating and the marker.
+pub fn n2_stimulus_json(kind: &str, id: &str) -> String {
+    let outcome = crate::n2_stimulus::apply(kind, id);
+    format!(
+        "{{{},{},{},{},{},{}}}",
+        jbool("ok", outcome.result == "applied"),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jinum("target_fd", outcome.target_fd as i64),
+        jstr("remote", &outcome.remote),
+        jstr("line", &outcome.line)
+    )
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {
@@ -5214,6 +5347,11 @@ pub fn connector_stop_json() -> String {
     // ARMED window keeps its own host handle: its document stays cached for
     // the §2.4-R2 replay.
     crate::n2h_collector::uninstall_host();
+    // N2 T5a: the stimulus sink is per-session too (it resolves the live
+    // connector through the slot, which is cleared below). Dropping it here
+    // means no stimulus can act on a stopped session.
+    crate::n2_stimulus::clear_sink();
+    *last_dns_host().lock_poison() = String::new();
     crate::socket_supply::shutdown();
     match slot.as_ref() {
         Some(handle) => {

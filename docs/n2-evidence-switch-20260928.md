@@ -1,4 +1,4 @@
-# N2 evidence switch: preregistration v4 T3 (2026-09-28)
+# N2 evidence switch: preregistration v4 T3/T5a (2026-09-28)
 
 The N2 preregistration v4 is frozen, but this implementation is diagnostic code, not a device authorization or a completed N2 verdict. No device measurement was made here. Production results require the separately authorized campaign, independent receipts and the frozen `n2-device-evidence-preregistration-draft-v2-20260928.md` gates.
 
@@ -40,3 +40,102 @@ Pair M/S TCP with the matching server access log using destination IP:port, devi
 
 
 Under a separate diagnostic authorization, retain original logs and network-side receipts for (a) an actual unprotected App socket entering TUN, (b) the same destination from a protected App socket not entering TUN while physical/remote receipt confirms send, (c) an actual nonlisted app or hdcd send not entering TUN with receipt and capture positive control, and (d) successful platform create with S2/S6 off. If hdc and peer/relay overlap, (c) must specifically exercise hdcd. Log route rows, applied generations, `trustedApplications`, `N2_TUN_DEST`, `N2_PROC_NET`, collector output and the target-side results for each arm. The code does not emit trustedApplications as an SDK-returned applied-list receipt; verify on-device behavior and config creation rather than treating an intention log as acceptance. Recreate, route drift, missing physical receipts or unobserved sends cannot be promoted to a pass. No device command is authorized by this document.
+
+## B-stream stimulus (T5a, 2026-09-28)
+
+Preregistration v4 §4 B column / §7 T5a, frozen decision 4. This is the
+**default-off, evidence-switch-gated outer-stream stimulus**: it is inert and
+unreachable until an accepted `n2_evidence` ticket armed the socket trace, and
+every line it emits is `diag=true|is_evidence=false`. It performs **no server
+operation and no Wi-Fi change** (neither may stand in for B), and it does not by
+itself produce any AUTH, observation or verdict.
+
+### Interface
+
+* Core (NAPI, synchronous, JSON string in/out): `n2_stimulus(kind, id)` with
+  `kind ∈ {M, S, R, I, Wb, Ws, D}` and `id` = the stimulus id (1..64 chars of
+  `[A-Za-z0-9_-]`, the same rule as the positive-control marker ids). Answer:
+  `{ok,result,reason,target_fd,remote,line}` where `result` is `applied`,
+  `rejected` or `no-target` and `ok` is true only for `applied`.
+* Shell entry: `NetBirdVpnExtensionAbility.pollN2Stimulus()` — the analogue of
+  `NetBirdN2Control.sendN2Control`. It returns immediately (not even a file
+  probe) unless `this.n2Evidence !== undefined`, reads exactly one request,
+  calls the core once, logs the shell receipt and **deletes the request file in
+  `finally`** (one launch = one stimulus; the 5 s watcher tick can never replay
+  it). The pure parse/format half is `NetBirdN2Stimulus.ets` (zero imports).
+
+### How the operator triggers it
+
+The existing non-secret `n2h_arm_options` private channel, extended with one
+more want parameter. No new permission, no new device command family:
+
+```bash
+aa start -b cn.alfadb.netbird -a EntryAbility \
+  --ps n2h_arm_options '<the same arm ticket that armed this session>' \
+  --ps n2_stimulus '{"kind":"M","id":"b-M-1"}'
+```
+
+`EntryAbility` writes the payload verbatim to `<filesDir>/netbird-n2-stimulus`
+(same filesDir mechanism and basename discipline as the arm ticket); a launch
+**without** `n2_stimulus` deletes a leftover request, exactly like the arm
+ticket's default-no-arm rule, so a stale stimulus cannot fire later. The
+already-running, already-armed extension picks the file up on its next status
+watcher tick (≤ `STATUS_POLL_MS` = 5 s) and consumes it. The arm ticket must be
+passed along: a launch without it clears the arm ticket (unchanged default
+rule), so a later extension restart would not be armed. Three repetitions = the
+same command three times with a fresh `id` each time. The trigger needs the
+extension instance that is already armed; a force-stop or a new VPN session
+requires a fresh arm first.
+
+### Log lines
+
+* `N2_STIMULUS|id=…|kind=…|target_fd=…|remote=…|mono_ms=…|result=…|reason=…|diag=true|is_evidence=false`
+  — one line per call, whatever the outcome. `target_fd`/`remote` are the outer
+  socket (or selected endpoint) the class last registered, `-1`/`unknown` when
+  there is none. `result` is `applied` / `rejected` / `no-target`; `reason`
+  names the exact branch (`shutdown-socket`, `endpoint-drop`, `dns-requery`,
+  `not-armed`, `invalid-kind`, `invalid-id`, `no-outer-socket`,
+  `shutdown-failed-errno-<n>`, `no-sink`, `no-live-endpoint`).
+* `N2_STIMULUS_SHELL|…` — the shell's delivery receipt (request id, kind, id,
+  the core's result/reason); the core's line stays authoritative.
+* `N2_STIMULUS_DNS|host=…|result=…|detail=…|elapsed_ms=…` — D's forced query.
+* `N2_STIMULUS_FILE_WRITTEN|bytes=` / `_WRITE_FAILED|code=` / `_REMOVED|note=` /
+  `_REMOVE_FAILED|code=` / `_CLOSE_FAILED|code=` — the EntryAbility write path
+  (file name + UTF-8 byte count only; the payload is never logged).
+* Correlation with `N2_SOCK`: the registry records a class's outer socket inside
+  the **same `first_io` completion that emits that socket's `N2_SOCK` receipt**,
+  so `target_fd` is the fd those receipts report, `target_fd` becomes the next
+  `N2_SOCK` `dup_fd` after the re-dial, and `remote` is the same endpoint.
+
+### Per-class coverage and limits
+
+| kind | action | covered | NOT covered / limits |
+| --- | --- | --- | --- |
+| M, S, R | `shutdown(SHUT_RDWR)` on the one outer socket of that class (a private duplicate of the core-owned fd, so a reused fd number can never be hit); the owner takes its existing re-dial path | the **local close/error → re-dial** path, exactly once per socket; only that class is touched; the peer observes the FIN | **no** network-side RST / half-open / blackhole / timeout claim; no AP-side blocking; no server disconnect; one stimulus consumes one registration, so a repeat needs the re-dial's fresh socket |
+| I | drop every peer's current ICE session and rearm negotiation with the cooldown cleared (`PeerIceOrchestrator::break_ice`): the session's dup sockets are closed and the next pump re-gathers/re-checks/re-signals | the "endpoint-directed break → re-check" equivalent of the frozen I row | it re-negotiates **all** peers with a live session, not a single host candidate; a transient (gathering) socket is not a target |
+| Wb, Ws | drop every peer's currently selected WG path (`reset_peer_paths`: endpoint cleared, the selected egress dup closed, the handshake campaign reset) so the next ICE nomination re-attaches a fresh selected socket and re-handshakes over it | the "endpoint-directed break → re-handshake" equivalent of the frozen W row | **the base device socket (`wg_fwd_open` dup) is deliberately kept** — it has no core-side rebuild path (the shell re-feeds it via `connector_wg_socket_feed`), so a Wb-only peer stays pathless until ICE nominates again; no relay-carrier teardown is implied |
+| D | force ONE fresh protected DNS query for the hostname the session last resolved over a protected fd (`force_protected_dns_requery`), on a new protected fd, with its own `N2_STIMULUS_DNS` receipt | the frozen "new query / new fd, response" D stimulus | it does not invent a hostname (`no-target` when the session never resolved one), does not bypass the protected-socket supply, and does not use the system resolver; the alternative "make the next query time out" is **not used** |
+
+`applied` means the syscall returned 0 (or the sink acted on at least one live
+endpoint) — never a prediction that a re-dial has already completed. A class
+with no registered socket answers `no-target`, and a call outside an armed
+session answers `rejected|reason=not-armed` before any syscall.
+
+### Host verification (no device)
+
+* `cargo test --offline --locked` (client/core): unit tests for the registry,
+  the action table, the marker shape and the gating; the integration test
+  `tests/n2_stimulus.rs` runs the REAL protected dial path on loopback per
+  class — per-class isolation against live witness sockets, the peer-observed
+  close, a new registration per re-dial, three repetitions, `no-target` and the
+  unarmed refusal — plus the sink delegation for I/Wb/Ws/D.
+* `node client/entry/selfcheck/run-n2-stimulus.mts`: the pure module as code
+  (parse refusals, reply parsing, receipt formatting) and source pins on the
+  three-file private channel and on the core surface. The existing loader mocks
+  (`exclusion-generation-hooks.mjs`, `relay-exclusion-hooks.mjs`) carry the
+  `n2_stimulus` stub and the stimulus module, so the real-extension fixtures
+  still link and their suites are unchanged.
+* No device measurement was made here. On-device use still requires the
+  separately authorized campaign: the AUTH must list this stimulus, its
+  per-class limits above and the repetition count, and a network-side
+  (AP-blocked) path remains a separate authorization.

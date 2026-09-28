@@ -108,7 +108,12 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  connector_status: () => {\n' +
   '    const s = globalThis.__NB_FAKE_STATUS;\n' +
   '    return typeof s === "string" ? s : JSON.stringify(s === undefined ? {} : s);\n' +
-  '  }\n' +
+  '  },\n' +
+  // N2 T5a (2026-09-28): the shell's armed-only stimulus entry. These suites
+  // never arm the evidence switch, so the poll never reaches it; the export
+  // exists so an accidental call fails loudly with the honest not-armed answer
+  // instead of a TypeError.
+  '  n2_stimulus: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed", target_fd: -1 })\n' +
   '};');
 
 const VPN_ABILITY = 'data:text/javascript,' + encodeURIComponent(
@@ -154,7 +159,10 @@ const SHIMS = {
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
-  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts'
+  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
+  // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
+  // its erased request/reply interfaces are re-declared by the shim.
+  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts'
 };
 
 export function resolve(specifier, context, next) {

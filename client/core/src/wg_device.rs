@@ -964,6 +964,14 @@ impl WgDevice {
         let Some(idx) = self.peers.iter().position(|p| p.key_b64 == pub_key_b64) else {
             return;
         };
+        self.recycle_endpoint_at(idx);
+    }
+
+    /// The index-scoped body of [`Self::recycle_endpoint`]; `true` when the
+    /// peer actually had a path to drop. Split out for N2 T5a's whole-peer-set
+    /// reset (`WgPeerApplier::reset_peer_paths`), which must not re-look-up
+    /// keys while iterating.
+    fn recycle_endpoint_at(&mut self, idx: usize) -> bool {
         let p = &mut self.peers[idx];
         let had_path = p.endpoint.is_some() || p.egress_fd.is_some();
         p.endpoint = None;
@@ -977,6 +985,25 @@ impl WgDevice {
         if had_path {
             emit("N11_WG|endpoint-recycled");
         }
+        had_path
+    }
+
+    /// N2 T5a (§4 B column, Wb/Ws): drop EVERY peer's currently selected
+    /// path (endpoint cleared, the selected egress dup closed, the handshake
+    /// campaign reset) and count the peers that had one. The next ICE
+    /// nomination re-attaches a fresh selected socket and a fresh handshake
+    /// leaves by it. LIMIT (documented): the base device socket (`self.fd`,
+    /// the `wg_fwd_open` dup) is deliberately KEPT — there is no core-side
+    /// rebuild path for it; the shell re-feeds it via
+    /// `connector_wg_socket_feed`.
+    pub fn reset_peer_paths(&mut self) -> usize {
+        let mut acted = 0;
+        for idx in 0..self.peers.len() {
+            if self.recycle_endpoint_at(idx) {
+                acted += 1;
+            }
+        }
+        acted
     }
 
     /// N13-D2 — inject the peer's non-UDP egress carrier (relay bearer, the
@@ -1900,6 +1927,11 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
         self.device.lock_poison().recycle_endpoint(pub_key_b64);
     }
 
+    /// N2 T5a: drop every peer's selected path (Wb/Ws stimulus).
+    fn reset_peer_paths(&self) -> usize {
+        self.device.lock_poison().reset_peer_paths()
+    }
+
     /// N13-D2: inject the peer's relay carrier into the live device.
     fn attach_carrier(
         &self,
@@ -2415,6 +2447,20 @@ impl WgPeerApplier for WgDeviceFeed {
         g.egress.retain(|(k, _)| k != pub_key_b64);
         if let Some(d) = g.device.as_ref() {
             d.recycle_endpoint(pub_key_b64);
+        }
+    }
+
+    /// N2 T5a: drop every peer's selected path on the live device, and the
+    /// buffered endpoint/egress records with it (pre-device the buffer IS the
+    /// only path state). Returns the peers that actually had a path.
+    fn reset_peer_paths(&self) -> usize {
+        let mut g = self.inner.lock_poison();
+        let buffered = g.endpoints.len();
+        g.endpoints.clear();
+        g.egress.clear();
+        match g.device.as_mut() {
+            Some(d) => d.reset_peer_paths(),
+            None => buffered,
         }
     }
 

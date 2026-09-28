@@ -349,6 +349,17 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   'export default {\n' +
   '  n2_socket_trace_arm: () => JSON.stringify({ ok: true }),\n' +
   '  n2_socket_trace_protect: () => JSON.stringify({ ok: true }),\n' +
+  // N2 T5a「B 断流刺激」(2026-09-28): the shell's armed-only stimulus entry.
+  // Functional and recording like the other seams — every call is counted and
+  // the answer is overridable per test (`__NB_STIMULUS_ANSWER`), so a fixture
+  // can drive the REAL poll path and assert the request that reached the core.
+  // Default answer = the honest not-armed refusal, never a fabricated applied.
+  '  n2_stimulus: (kind, id) => {\n' +
+  '    g().__NB_STIMULUS_CALLS = (g().__NB_STIMULUS_CALLS || 0) + 1;\n' +
+  '    g().__NB_STIMULUS_LAST = { kind: kind, id: id };\n' +
+  '    if (typeof g().__NB_STIMULUS_ANSWER === "string") { return g().__NB_STIMULUS_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-armed", target_fd: -1 });\n' +
+  '  },\n' +
   '  fd_status: () => j(g().__NB_FD_STATUS, { open: false, errno: 9 }),\n' +
   '  connector_status: () => j(g().__NB_STATUS, {}),\n' +
   '  connector_network_config: () =>\n' +
@@ -452,7 +463,12 @@ const SHIMS = {
   './NetBirdRouteValidation': 'NetBirdRouteValidation.shim.ts',
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
-  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts'
+  './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
+  // N2 T5a (2026-09-28): the stimulus module is staged byte-identically; the
+  // extension imports it by an extensionless specifier and names its erased
+  // interfaces (N2StimulusDecision / N2StimulusReply), so it resolves to the
+  // shim that re-declares them.
+  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts'
 };
 
 export function resolve(specifier, context, next) {

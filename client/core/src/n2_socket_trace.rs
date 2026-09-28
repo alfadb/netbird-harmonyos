@@ -33,6 +33,9 @@ pub fn armed() -> bool { ARMED.load(Ordering::Acquire) }
 pub fn arm(enabled: bool) {
     ARMED.store(enabled, Ordering::Release);
     sockets().lock().expect("socket trace").clear();
+    // N2 T5a: the stimulus registry (and its connector sink) lives exactly as
+    // long as one arming — a disarm leaves no fd and no endpoint behind.
+    crate::n2_stimulus::reset();
 }
 
 pub fn protect(fd: RawFd, kind: &str, request: &str, generation: u64, net_id: u64, elapsed_ms: u64, ok: bool) {
@@ -118,6 +121,14 @@ pub fn first_io(fd: RawFd, remote: SocketAddr, status: &str, detail: &str) {
         if meta.kind != "I" && meta.kind != "Wb" && meta.kind != "Ws" { map.remove(&fd); }
         (copy, subsequent, emit_receipt)
     };
+    // N2 T5a: the SAME completion that produces the `N2_SOCK` receipt is the
+    // stimulus registry's registration point for this class — one call site,
+    // so "the re-dial produced a new N2_SOCK registration" and "the stimulus
+    // has a new target" are the same observation. Failed I/O registers
+    // nothing. (The trace lock is already released here.)
+    if status != "failed" {
+        crate::n2_stimulus::observe(&meta.kind, fd, remote);
+    }
     if !emit_receipt { return; }
     // Failed connect may already have closed the owned fd; never inspect a reused number.
     let local = if status == "failed" { None } else { local_addr(fd) };
@@ -149,6 +160,9 @@ mod tests {
 
     #[test]
     fn protected_udp_dup_retains_identity_after_shell_close() {
+        // The arming flag (and, through it, the N2 T5a stimulus registry) is
+        // process-global: serialize against the other lib tests that mutate it.
+        let _guard = crate::n2_stimulus::test_guard();
         use std::net::UdpSocket;
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         let original = UdpSocket::bind("127.0.0.1:0").unwrap();

@@ -160,6 +160,10 @@ pub mod n2_control;
 pub mod mgmtsock;
 pub mod socket_supply;
 pub mod n2_socket_trace;
+// N2 T5a「B 断流刺激」: default-off, evidence-switch-gated outer-stream
+// stimulus (M/S/R socket close, I/Wb/Ws endpoint-directed break, D fresh
+// protected query). Diagnostic only — every line is `is_evidence=false`.
+pub mod n2_stimulus;
 pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;

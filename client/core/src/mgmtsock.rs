@@ -227,6 +227,20 @@ impl ManagementSocketProvider for ProtectedSocketFdSource {
 /// [`crate::tun::TunFd::dup_from_raw`] idiom). The provided number is never
 /// closed here.
 pub fn dup_socket_fd(raw: i32) -> Result<i32, SocketSeamError> {
+    let fd_dup = dup_fd_untraced(raw)?;
+    crate::n2_socket_trace::duplicated(raw, fd_dup);
+    Ok(fd_dup)
+}
+
+/// The same dup contract WITHOUT the N2 socket-trace mirror. One caller only:
+/// [`crate::n2_stimulus`]'s outer-socket registry, which holds its OWN dup of
+/// a socket that is already in the trace and must not add a second,
+/// never-closed copy of that fd to the trace map.
+pub fn dup_socket_fd_untraced(raw: i32) -> Result<i32, SocketSeamError> {
+    dup_fd_untraced(raw)
+}
+
+fn dup_fd_untraced(raw: i32) -> Result<i32, SocketSeamError> {
     if unsafe { sys::fcntl(raw, sys::F_GETFD) } == -1 {
         return Err(SocketSeamError::BadFd { errno: sys::errno() });
     }
@@ -247,7 +261,6 @@ pub fn dup_socket_fd(raw: i32) -> Result<i32, SocketSeamError> {
     if !via_dupfd {
         unsafe { sys::fcntl(fd_dup, sys::F_SETFD, sys::FD_CLOEXEC) };
     }
-    crate::n2_socket_trace::duplicated(raw, fd_dup);
     Ok(fd_dup)
 }
 

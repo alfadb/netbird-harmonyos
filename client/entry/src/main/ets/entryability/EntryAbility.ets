@@ -48,6 +48,17 @@ const PROTECT_DEVIATION_FILE: string = 'netbird-protect-deviation';
 // logged — file name + byte count on success, error CODE on failure.
 const N2H_ARM_OPTIONS_PARAM: string = 'n2h_arm_options';
 const N2H_ARM_OPTIONS_FILE: string = 'netbird-n2h-arm';
+// N2 T5a「B 断流刺激」private channel (2026-09-28): the SAME non-secret
+// want-parameter mechanism as `n2h_arm_options`, with its own payload file. The
+// basename must match the extension's `N2_STIMULUS_FILE_NAME`
+// (NetBirdN2Stimulus.ets) exactly — the two abilities share filesDir, not
+// imports (the same literal-basename convention as the arm ticket above).
+// An EXPLICIT parameter writes the one pending stimulus; every launch without
+// it deletes a leftover so a normal start cannot fire a stale stimulus. The
+// extension consumes (deletes) the file when it applies it, so one launch =
+// one stimulus.
+const N2_STIMULUS_PARAM: string = 'n2_stimulus';
+const N2_STIMULUS_FILE: string = 'netbird-n2-stimulus';
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -120,6 +131,16 @@ export default class EntryAbility extends UIAbility {
       this.writeArmTicketFile(armOptions);
     } else {
       this.removeArmTicket('default-no-arm');
+    }
+    // N2 T5a private channel: same discipline as the arm ticket above — an
+    // explicit non-secret parameter writes the ONE pending stimulus request,
+    // every other launch removes a leftover. The payload is never logged.
+    const stimulus: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_STIMULUS_PARAM];
+    if (typeof stimulus === 'string' && stimulus.length > 0) {
+      this.writeStimulusFile(stimulus);
+    } else {
+      this.removeStimulusFile('default-no-stimulus');
     }
   }
 
@@ -234,6 +255,73 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, TAG,
         'N2H_ARM_TICKET_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
         N2H_ARM_OPTIONS_FILE, code, note);
+    }
+  }
+
+  // N2 T5a「B 断流刺激」private channel (2026-09-28). Same write honesty as
+  // writeArmTicketFile above: the open's TRUNC already wiped any previous
+  // request, so a failed/short WRITE must not leave an empty or partial file
+  // that the extension could parse into a stimulus — the failure path removes
+  // exactly this one file (logged independently, with its own error code; a
+  // removal failure is never reported as a removal). The payload is never
+  // logged, and `bytes=` is the real UTF-8 byte count (never the UTF-16
+  // code-unit `text.length`).
+  private writeStimulusFile(text: string): void {
+    const path: string = `${this.context.filesDir}/${N2_STIMULUS_FILE}`;
+    let file: fs.File | undefined = undefined;
+    let writeFailed: boolean = false;
+    let failureCode: string = 'none';
+    let expectedBytes: number = 0;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      const written: number = fs.writeSync(file.fd, text);
+      expectedBytes = new util.TextEncoder().encode(text).byteLength;
+      if (written !== expectedBytes) {
+        writeFailed = true;
+        failureCode = `short-write:${written}of${expectedBytes}`;
+      }
+    } catch (error) {
+      writeFailed = true;
+      failureCode = String((error as BusinessFailure).code ?? 'none');
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG,
+            'N2_STIMULUS_FILE_CLOSE_FAILED|file=%{public}s|code=%{public}s',
+            N2_STIMULUS_FILE, String((closeError as BusinessFailure).code ?? 'none'));
+        }
+      }
+    }
+    if (!writeFailed) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_STIMULUS_FILE_WRITTEN|file=%{public}s|bytes=%{public}d|note=diagnostic-only-non-secret',
+        N2_STIMULUS_FILE, expectedBytes);
+      return;
+    }
+    hilog.error(DOMAIN, TAG,
+      'N2_STIMULUS_FILE_WRITE_FAILED|file=%{public}s|code=%{public}s|note=no-stimulus',
+      N2_STIMULUS_FILE, failureCode);
+    this.removeStimulusFile('failed-write-cleanup');
+  }
+
+  // Delete THE ONE stimulus request file (basename above) — from the default
+  // no-stimulus launch path and from a failed write. Credential / config /
+  // deviation / arm-ticket files are NEVER touched here.
+  private removeStimulusFile(note: string): void {
+    const path: string = `${this.context.filesDir}/${N2_STIMULUS_FILE}`;
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      fs.unlinkSync(path);
+      hilog.info(DOMAIN, TAG,
+        'N2_STIMULUS_FILE_REMOVED|file=%{public}s|note=%{public}s', N2_STIMULUS_FILE, note);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'N2_STIMULUS_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
+        N2_STIMULUS_FILE, String((error as BusinessFailure).code ?? 'none'), note);
     }
   }
 }

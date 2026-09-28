@@ -1378,6 +1378,25 @@ impl PeerIceOrchestrator {
         }
     }
 
+    /// N2 T5a（§4 B 列 I 行）：端点定向断链。每个有会话/已选端点的 peer 都被
+    /// 拆除当前会话（`drop_session_rearm`：`peer.session = None` 由 `IceSession`
+    /// 的 `Drop` 关闭其全部 dup socket），并清掉冷却，使下一次 pump 立即重新
+    /// gather/check/signal —— 即冻结的「关闭该 ICE 外层 socket 触发重建」。
+    /// 返回实际被处理的 peer 数（0 = 无可断的会话 → `no-target`）。
+    pub fn break_ice(&mut self, now_ms: u64) -> usize {
+        let mut acted = 0;
+        for idx in 0..self.peers.len() {
+            let live = self.peers[idx].session.is_some() || self.peers[idx].selected_remote.is_some();
+            if !live {
+                continue;
+            }
+            self.drop_session_rearm(idx, now_ms, "n2-stimulus-I");
+            self.peers[idx].cooldown_until = now_ms;
+            acted += 1;
+        }
+        acted
+    }
+
     /// 停止全部会话（关闭各自 dup socket）；connector stop() 调用。
     pub fn stop_all(&mut self) {
         for p in self.peers.iter_mut() {

@@ -130,6 +130,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("n2_tun_dest_configure", napi_n2_tun_dest_configure);
     reg!("n2_control_send", napi_n2_control_send);
     reg!("n2_control_status", napi_n2_control_status);
+    reg!("n2_stimulus", napi_n2_stimulus);
     reg!("n2h_collector_arm", napi_n2h_collector_arm);
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
@@ -398,6 +399,7 @@ mod tests {
             "n2_tun_dest_configure",
             "n2_control_send",
             "n2_control_status",
+            "n2_stimulus",
             "n2h_collector_arm",
             "n2h_collector_status",
             "n2h_collector_evidence",
@@ -705,6 +707,15 @@ unsafe extern "C" fn napi_n2_control_send(env: NapiEnv, info: NapiCallbackInfo) 
 unsafe extern "C" fn napi_n2_control_status(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::n2_control_status_json(&a.string_at(0)))
+}
+
+// N2 T5a「B 断流刺激」(preregistration v4 §4 B / §7 T5a): `kind` in
+// {M,S,R,I,Wb,Ws,D} + the stimulus id. Refused (and still logged) unless the
+// evidence ticket armed the socket trace; every call emits one
+// `N2_STIMULUS|…` line with the fixed `diag=true|is_evidence=false` tail.
+unsafe extern "C" fn napi_n2_stimulus(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_stimulus_json(&a.string_at(0), &a.string_at(1)))
 }
 
 unsafe extern "C" fn napi_n2h_collector_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

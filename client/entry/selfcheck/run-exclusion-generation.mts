@@ -278,7 +278,10 @@ const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 // no shim needed).
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
-  'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy'];
+  'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
+  // its two erased interfaces are re-declared by its shim below.
+  'NetBirdN2Stimulus'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
@@ -296,7 +299,9 @@ const SHIM_TYPES: Record<string, string[]> = {
     // S6 diag capture route (2026-09-26): the second erased outcome interface
     // the real extension now imports alongside withCaptureRoute
     'CaptureRouteOutcome'],
-  NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation']
+  NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation'],
+  // N2 T5a: the erased stimulus request/reply shapes the extension names.
+  NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply']
 };
 
 const REQUEST_ID = 'req-i3a';
