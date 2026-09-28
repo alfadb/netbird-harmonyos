@@ -368,3 +368,89 @@ async fn backoff_exhaustion_ends_the_session_with_the_pending_error() {
     // the pooled transport stayed alive (dials were not the failing part)
     assert_eq!(counter.accepted(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// N2 P3: post-connect signal writes are receipted (armed) / silent (off)
+// ---------------------------------------------------------------------------
+
+/// `mgmt_socket_open()` JSON → the shell's pre-opened (unconnected, bound)
+/// TCP fd, owned so the test closes it on drop (production shell shape).
+fn shell_signal_fd() -> std::os::fd::OwnedFd {
+    let opened = netbird_core::mgmtsock::mgmt_socket_open();
+    let i = opened.find("\"fd\":").expect("fd key") + "\"fd\":".len();
+    let rest = &opened[i..];
+    let end = rest.find(',').unwrap_or(rest.len());
+    let fd: i32 = rest[..end].parse().expect("numeric fd");
+    assert!(fd >= 0, "signal socket opened: {opened}");
+    // SAFETY: `mgmt_socket_open` hands out a fresh socket owned by the caller.
+    unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) }
+}
+
+/// One REAL signal session over `raw_fd` (fed protected): connect, run the
+/// session loop until the server confirmed `Registered`, and hand the task
+/// back so the caller asserts while the stream is still alive.
+async fn registered_session(addr: std::net::SocketAddr, raw_fd: i32) -> tokio::task::JoinHandle<()> {
+    let source = Arc::new(
+        netbird_core::mgmtsock::ProtectedSocketFdSource::new_with_fd(-1).expect("source"),
+    );
+    source.feed(raw_fd).expect("feed");
+    let keys = EnvelopeKeyPair::generate().expect("keys");
+    let client = connect_client(TestTransport::Plain, addr, keys, source).await;
+    let mut session = SignalSession::new(client).with_policy(
+        quick_policy(None),
+        FixedRng::filled(64, 0.5),
+        Box::new(netbird_core::backoff::MonotonicClock),
+    );
+    let recs = Arc::new(std::sync::Mutex::new(Vec::<Rec>::new()));
+    let loop_recs = recs.clone();
+    let handle = tokio::spawn(async move {
+        let _ = session.run_events(move |ev| loop_recs.lock().expect("recs").push(record(ev))).await;
+    });
+    wait_for("signal session Registered", || {
+        recs.lock().expect("recs").iter().any(|r| r == &Rec::Registered)
+    })
+    .await;
+    handle
+}
+
+// N2 P3: the real signal session's outbound frames ride the pre-protected
+// outer TCP socket. Armed, the first completed write after connect produces
+// `phase=subsequent_io` (readable through the receipt counter); unarmed the
+// very same session registers nothing at all, so no receipt can exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn armed_signal_session_records_post_connect_writes() {
+    use std::os::fd::AsRawFd;
+
+    let (addr, _counter) = spawn_signal_mock(SignalMock::default()).await;
+
+    // Unarmed control: a full registration really happened (the wait below
+    // blocks on `Registered`), yet nothing is registered and no receipt is
+    // produced.
+    netbird_core::n2_socket_trace::arm(false);
+    let off = shell_signal_fd();
+    assert_eq!(netbird_core::n2_socket_trace::original_fd(off.as_raw_fd()), None);
+    let off_task = registered_session(addr, off.as_raw_fd()).await;
+    assert_eq!(
+        netbird_core::n2_socket_trace::subsequent_receipts_for_original(off.as_raw_fd()),
+        0,
+        "unarmed signal session must emit no post-connect receipt"
+    );
+    off_task.abort();
+    let _ = off_task.await;
+
+    // Armed: the S-class fd is registered before the feed, so the dup chain
+    // (and the receipt) is attributable to it.
+    netbird_core::n2_socket_trace::arm(true);
+    let on = shell_signal_fd();
+    netbird_core::n2_socket_trace::protect(
+        on.as_raw_fd(), "S", "req-signal-io", 1, 31, 2, true,
+    );
+    let on_task = registered_session(addr, on.as_raw_fd()).await;
+    assert!(
+        netbird_core::n2_socket_trace::subsequent_receipts_for_original(on.as_raw_fd()) >= 1,
+        "the armed signal registration write must emit phase=subsequent_io"
+    );
+    on_task.abort();
+    let _ = on_task.await;
+    netbird_core::n2_socket_trace::arm(false);
+}

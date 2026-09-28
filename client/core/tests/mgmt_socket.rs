@@ -1050,3 +1050,50 @@ async fn physical_network_change_cancels_stale_requests_and_uses_fresh_transport
         assert!(unsafe { sys::fcntl(owned.as_raw_fd(), sys::F_GETFD) } >= 0);
     }
 }
+
+// N2 P3: the protected management dial keeps its trace registration after
+// `connect` and records the FIRST post-connect write as
+// `phase=subsequent_io`; an unarmed dial registers nothing (zero output).
+#[tokio::test]
+async fn armed_protected_management_dial_records_post_connect_writes() {
+    use netbird_core::mgmtsock::connect_protected;
+    use netbird_core::n2_socket_trace;
+    use tokio::io::AsyncWriteExt;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Unarmed control: the identical dial + write leaves no registration and
+    // therefore no receipt (the counter's zero is not "no write happened").
+    n2_socket_trace::arm(false);
+    let off = open_fd();
+    assert_eq!(n2_socket_trace::original_fd(off), None, "unarmed ⇒ no registration");
+    let source = ProtectedSocketFdSource::new_with_fd(off).unwrap();
+    let mut off_stream = connect_protected(&source, addr).await.expect("dial");
+    off_stream.write_all(b"mgmt-post-connect").await.expect("write");
+    off_stream.flush().await.expect("flush");
+    assert_eq!(n2_socket_trace::subsequent_receipts_for_original(off), 0);
+
+    // Armed: connect receipt, then the write receipt on the same fd chain.
+    n2_socket_trace::arm(true);
+    let on = open_fd();
+    n2_socket_trace::protect(on, "M", "req-m-io", 1, 31, 2, true);
+    let source = ProtectedSocketFdSource::new_with_fd(on).unwrap();
+    let mut on_stream = connect_protected(&source, addr).await.expect("dial");
+    assert_eq!(n2_socket_trace::original_fd(on), Some(on), "connected TCP fd stays registered");
+    on_stream.write_all(b"mgmt-post-connect").await.expect("write");
+    on_stream.flush().await.expect("flush");
+    assert!(
+        n2_socket_trace::subsequent_receipts_for_original(on) >= 1,
+        "the armed first post-connect write must emit phase=subsequent_io"
+    );
+    // The close removes the registration; the counter can no longer be read
+    // (that is the fd-reuse guard, not a lost receipt).
+    drop(on_stream);
+    assert_eq!(n2_socket_trace::subsequent_receipts_for_original(on), 0);
+    drop(off_stream);
+    // Shell-side close of both borrowed originals (production shape).
+    assert!(netbird_core::socket_supply::close_fd_json(on).contains("\"ok\":true"));
+    assert!(netbird_core::socket_supply::close_fd_json(off).contains("\"ok\":true"));
+    n2_socket_trace::arm(false);
+}

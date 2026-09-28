@@ -48,14 +48,17 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
+use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::ops::Deref;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::Uri;
 use tower_service::Service;
 
@@ -328,8 +331,143 @@ impl core::fmt::Display for SocketDialError {
 
 impl std::error::Error for SocketDialError {}
 
+/// A connected protected outer TCP stream (M/S/R) carrying the N2 P3
+/// post-connect receipt.
+///
+/// ## Why a wrapper
+///
+/// `N2_SOCK|phase=first_io` is recorded when `connect` returns; the socket's
+/// later writes (gRPC/HTTP-2 frames, the signal stream, relay WS frames) are
+/// what the A-column evidence needs, and they happen deep inside
+/// hyper/tonic/rustls where the fd is no longer visible. This type is the
+/// single place every production consumer (the tonic connector, the signal
+/// client, the relay dialer) receives its stream from
+/// [`connect_protected`], so one wrapper covers all three classes.
+///
+/// ## Contract
+///
+/// - It is a transparent pass-through: reads, writes, flush and shutdown
+///   delegate unchanged, byte-for-byte and in order. The ONLY added work is
+///   one `armed()` atomic load per completed write (plus, when a receipt is
+///   due, the trace lock and one log line).
+/// - The first completed write after connect emits `phase=subsequent_io`
+///   with the `N2_SOCK` join keys and `bytes`; later writes are throttled
+///   (first + every 128 + every 30 s) by [`crate::n2_socket_trace`].
+/// - On drop the descriptor leaves the trace table (`closed`), so a number
+///   reused later can never inherit this socket's counters.
+pub struct ProtectedTcpStream {
+    inner: tokio::net::TcpStream,
+    remote: SocketAddr,
+}
+
+impl ProtectedTcpStream {
+    fn new(inner: tokio::net::TcpStream, remote: SocketAddr) -> Self {
+        ProtectedTcpStream { inner, remote }
+    }
+
+    /// The core-owned descriptor (the `dup_fd` of the receipts).
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.peer_addr()
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    /// One completed write: the receipt (armed-only, throttled) is produced
+    /// AFTER the bytes went out and never alters them.
+    fn receipt_after_write(&self, bytes: usize) {
+        if bytes == 0 || !crate::n2_socket_trace::armed() {
+            return;
+        }
+        if let Some(line) =
+            crate::n2_socket_trace::post_connect_write(self.inner.as_raw_fd(), self.remote, bytes)
+        {
+            hilog::emit(&line);
+        }
+    }
+}
+
+impl Deref for ProtectedTcpStream {
+    type Target = tokio::net::TcpStream;
+    fn deref(&self) -> &tokio::net::TcpStream {
+        &self.inner
+    }
+}
+
+impl core::fmt::Debug for ProtectedTcpStream {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl AsyncRead for ProtectedTcpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ProtectedTcpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let n = match Pin::new(&mut this.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(n)) => n,
+            other => return other,
+        };
+        this.receipt_after_write(n);
+        Poll::Ready(Ok(n))
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let n = match Pin::new(&mut this.inner).poll_write_vectored(cx, bufs) {
+            Poll::Ready(Ok(n)) => n,
+            other => return other,
+        };
+        this.receipt_after_write(n);
+        Poll::Ready(Ok(n))
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl Drop for ProtectedTcpStream {
+    fn drop(&mut self) {
+        // N2 P3: the fd leaves the trace table exactly when it is closed
+        // (the tokio stream still owns the number here) — never earlier.
+        crate::n2_socket_trace::closed(self.inner.as_raw_fd());
+    }
+}
+
 /// One protected dial, from a freshly-taken socket to a connected
-/// [`tokio::net::TcpStream`]:
+/// [`ProtectedTcpStream`] (a transparent [`tokio::net::TcpStream`] carrying
+/// the N2 P3 post-connect receipt):
 ///
 /// 1. `source.take_for_dial()` obtains a lease on a socket the shell protected
 ///    BEFORE this dial (production queue owns a feed-time duplicate);
@@ -341,7 +479,7 @@ impl std::error::Error for SocketDialError {}
 pub async fn connect_protected(
     source: &dyn ManagementSocketProvider,
     connect_addr: SocketAddr,
-) -> Result<tokio::net::TcpStream, SocketDialError> {
+) -> Result<ProtectedTcpStream, SocketDialError> {
     let lease = source.take_for_dial().await.map_err(SocketDialError::Seam)?;
     let provided = lease.fd();
     let dup = dup_socket_fd(provided).map_err(SocketDialError::Seam)?;
@@ -356,7 +494,7 @@ pub async fn connect_protected(
     match unsafe { tokio::net::TcpSocket::from_raw_fd(dup) }.connect(connect_addr).await {
         Ok(stream) => {
             crate::n2_socket_trace::first_io(stream.as_raw_fd(), connect_addr, "connected", "connect");
-            Ok(stream)
+            Ok(ProtectedTcpStream::new(stream, connect_addr))
         },
         Err(e) if e.raw_os_error() == Some(sys::EISCONN) => {
             // Already-connected socket handed to us (host tests): adopt it
@@ -371,7 +509,7 @@ pub async fn connect_protected(
             let std_stream = unsafe { std::net::TcpStream::from_raw_fd(dup2) };
             tokio::net::TcpStream::from_std(std_stream).map(|stream| {
                 crate::n2_socket_trace::first_io(stream.as_raw_fd(), connect_addr, "connected", "already_connected");
-                stream
+                ProtectedTcpStream::new(stream, connect_addr)
             }).map_err(|e| {
                 SocketDialError::Connect { errno: e.raw_os_error().unwrap_or(0) }
             })
@@ -400,7 +538,7 @@ impl ProtectedSocketConnector {
 }
 
 impl Service<Uri> for ProtectedSocketConnector {
-    type Response = TokioIo<tokio::net::TcpStream>;
+    type Response = TokioIo<ProtectedTcpStream>;
     type Error = SocketDialError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 

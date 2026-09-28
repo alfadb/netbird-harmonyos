@@ -829,5 +829,71 @@ async fn stop_sends_the_relay_close_frame_and_reaches_dead() {
 }
 
 // ---------------------------------------------------------------------------
+// 13. N2 P3: post-connect relay writes are receipted (armed) / silent (off)
+// ---------------------------------------------------------------------------
+
+/// One protected relay dial through the PRODUCTION dialer plus one write on
+/// the returned transport (the receipt's trigger), returning the stream (kept
+/// alive so the registration is still readable) and the shell fd the supply
+/// was fed with. `protect` is armed-gated, so the same helper is the unarmed
+/// control too.
+async fn protected_relay_dial_and_write(
+    url: &netbird_core::relay_client::RelayUrl,
+) -> (netbird_core::relay_client::BoxStream, i32) {
+    use netbird_core::relay_client::{ProtectedRelayDialer, RelayDialer};
+    use netbird_core::socket_supply::SocketSupply;
+    use tokio::io::AsyncWriteExt;
+
+    let supply = std::sync::Arc::new(SocketSupply::new());
+    let dialer = ProtectedRelayDialer::new(Some(supply.clone()));
+    let dial = tokio::spawn({
+        let dialer = dialer.clone();
+        let url = url.clone();
+        async move { dialer.dial(&url).await }
+    });
+    let id = next_relay_request(&supply).await;
+    let fd = open_relay_fd();
+    netbird_core::n2_socket_trace::protect(fd, "R", "req-relay-io", 1, 31, 2, true);
+    assert!(supply.reply(id, fd, "protected").contains("\"ok\":true"));
+    let mut stream = dial.await.unwrap().expect("protected relay dial");
+    stream.write_all(b"relay-post-connect").await.expect("write");
+    stream.flush().await.expect("flush");
+    (stream, fd)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn armed_protected_relay_dial_records_post_connect_writes() {
+    use netbird_core::n2_socket_trace;
+    use netbird_core::relay_client::RelayUrl;
+
+    let server = start_default().await;
+    let url = RelayUrl::parse(&loopback_url(server.addr().port())).unwrap();
+
+    // Unarmed control: the identical dial + write registers nothing, so no
+    // receipt exists (the zero is "trace off", not "no write happened").
+    n2_socket_trace::arm(false);
+    let (off_stream, off) = protected_relay_dial_and_write(&url).await;
+    wait_for(FUSE, || server.stats().connections_accepted >= 1, "relay accepted").await;
+    assert_eq!(n2_socket_trace::original_fd(off), None, "unarmed ⇒ no registration");
+    assert_eq!(n2_socket_trace::subsequent_receipts_for_original(off), 0);
+    drop(off_stream);
+    assert!(netbird_core::socket_supply::close_fd_json(off).contains("\"ok\":true"));
+
+    // Armed: the first completed write after connect produces the receipt.
+    n2_socket_trace::arm(true);
+    let (on_stream, on) = protected_relay_dial_and_write(&url).await;
+    wait_for(FUSE, || server.stats().connections_accepted >= 2, "second relay accepted").await;
+    assert!(
+        n2_socket_trace::subsequent_receipts_for_original(on) >= 1,
+        "the armed relay write must emit phase=subsequent_io"
+    );
+    // The registration lives exactly as long as the stream.
+    drop(on_stream);
+    assert_eq!(n2_socket_trace::subsequent_receipts_for_original(on), 0);
+    assert!(netbird_core::socket_supply::close_fd_json(on).contains("\"ok\":true"));
+    n2_socket_trace::arm(false);
+}
+
+// ---------------------------------------------------------------------------
 // helpers shared by the transport test
 // ---------------------------------------------------------------------------

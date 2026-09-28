@@ -898,3 +898,116 @@ async fn status_json_attributes_the_session_to_the_right_peer() {
 
     handle.stop();
 }
+
+// ---------------------------------------------------------------------------
+// N2 P1/P2: replay fail-closed (egress failure ⇒ no endpoint ⇒ base fd zero
+// sends) and the per-fd send counter of the selected path
+// ---------------------------------------------------------------------------
+
+/// The replay-failure witness: the buffered egress number can no longer be
+/// adopted by the device at build time (a non-socket descriptor stands in for
+/// the "ICE session closed meanwhile" stale number — deterministic, no
+/// fd-number reuse race). The fix under test must then SKIP that peer's
+/// endpoint (no path at all) instead of landing it and letting the handshake
+/// leave from the base device socket — and the per-fd counter must show the
+/// base at exactly zero sends.
+#[test]
+fn replay_egress_failure_skips_endpoint_and_base_fd_stays_at_zero_sends() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use netbird_core::n2_socket_trace;
+    use std::os::fd::AsRawFd;
+    show_panics();
+
+    // Dup-able at buffer time (the buffered probe passes), NOT adoptable at
+    // replay time (the device's getsockname fails) — the replay failure.
+    let stale = std::fs::File::open("/dev/null").expect("dev-null");
+    let stale_fd = stale.as_raw_fd();
+    let slot = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], 51820);
+    slot.slot.attach_egress_socket(key_b(), stale_fd).expect("buffer egress");
+
+    n2_socket_trace::arm(true);
+    // The shell registers the base WG fd as `Wb` BEFORE the feed (the real
+    // protect handoff); the device's own dup inherits that registration.
+    n2_socket_trace::protect(slot.wg_raw, "Wb", "wg-base", 1, 31, 2, true);
+    slot.feed_both();
+
+    let peers = slot.slot.with_device(|d| d.peers()).expect("device up");
+    assert_eq!(peers.len(), 1);
+    assert_eq!(
+        peers[0].endpoint, None,
+        "an egress replay failure must NOT be followed by the endpoint landing"
+    );
+    assert!(peers[0].egress_local.is_none(), "no egress was attached either");
+
+    // Drive the device for a while: with no path it must not send anything.
+    let mut now = 0u64;
+    for _ in 0..30 {
+        slot.slot.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+        now += 10;
+    }
+
+    let base = n2_socket_trace::fd_send_totals_for_original(slot.wg_raw);
+    assert!(!base.is_empty(), "the base registration chain must be in the trace table");
+    assert!(
+        base.iter().all(|(_, packets, bytes)| *packets == 0 && *bytes == 0),
+        "base fd must record ZERO sends, got {base:?}"
+    );
+    n2_socket_trace::arm(false);
+}
+
+/// The unchanged success path: a VALID buffered egress replays, the endpoint
+/// lands, and the replayed handshake leaves on the SELECTED fd (counted
+/// there) while the base fd stays at zero.
+#[test]
+fn replay_egress_success_lands_endpoint_and_counts_the_selected_fd() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    use netbird_core::n2_socket_trace;
+    show_panics();
+
+    let (egress_raw, _egress_port) = udp_socket_lo();
+    let slot = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], 51820);
+    n2_socket_trace::arm(true);
+    // The ICE-selected local socket is registered as `I` (the shell's ICE
+    // protect); handing it to WG re-classes the device dup as `Ws`.
+    n2_socket_trace::protect(egress_raw, "I", "ice-selected", 1, 31, 2, true);
+    slot.slot.attach_egress_socket(key_b(), egress_raw).expect("buffer egress");
+    n2_socket_trace::protect(slot.wg_raw, "Wb", "wg-base", 1, 31, 2, true);
+    slot.feed_both();
+
+    let peers = slot.slot.with_device(|d| d.peers()).expect("device up");
+    assert_eq!(
+        peers[0].endpoint,
+        Some(([127, 0, 0, 1], 51820)),
+        "a successful egress replay keeps the endpoint landing (unchanged behavior)"
+    );
+
+    // The endpoint landing fired the handshake immediately, on the selected
+    // dup — never on the base socket.
+    let selected = n2_socket_trace::fd_send_totals_for_original(egress_raw);
+    assert!(
+        selected.iter().any(|(_, packets, bytes)| *packets >= 1 && *bytes > 0),
+        "the replayed handshake must be counted on the selected fd, got {selected:?}"
+    );
+    let base = n2_socket_trace::fd_send_totals_for_original(slot.wg_raw);
+    assert!(
+        base.iter().all(|(_, packets, bytes)| *packets == 0 && *bytes == 0),
+        "the base fd must stay at zero sends, got {base:?}"
+    );
+    // …and the session-period report lists the base explicitly at zero.
+    let lines = n2_socket_trace::fd_send_due_lines(60_000);
+    assert!(
+        lines.iter().any(|line| line.starts_with("N2_FD_SEND|kind=Wb|")
+            && line.contains("|packets=0|bytes=0|")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("N2_FD_SEND|kind=Ws|")
+            && !line.contains("|packets=0|")),
+        "{lines:?}"
+    );
+    n2_socket_trace::arm(false);
+}

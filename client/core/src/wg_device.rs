@@ -1258,6 +1258,14 @@ impl WgDevice {
     /// keepalives, plus one boringtun `update_timers` per peer (rekey/cookie
     /// housekeeping on boringtun's own real clock). Returns datagrams sent.
     pub fn tick(&mut self, now_ms: u64) -> usize {
+        // N2 P2 (E3): the session-period per-fd send report, on the same
+        // rhythm as the N2_TUN_DEST block below (armed-only, so an unarmed
+        // session does only this one atomic load).
+        if crate::n2_socket_trace::armed() {
+            for line in crate::n2_socket_trace::fd_send_due_lines(now_ms) {
+                emit(&line);
+            }
+        }
         if let Some(tee) = &self.n2_dest_tee {
             for line in tee.control_due_lines(now_ms) { emit(&line); }
             let dest_lines = tee.due_lines(now_ms);
@@ -1582,6 +1590,11 @@ impl WgDevice {
         if n < 0 {
             self.stats.send_errors += 1;
             return false;
+        }
+        // N2 P2 (E3): the per-fd counter behind `N2_FD_SEND` — only a
+        // completed sendto moves it, and only while armed.
+        if crate::n2_socket_trace::armed() {
+            crate::n2_socket_trace::wg_sent(fd, n as u64);
         }
         true
     }
@@ -2282,9 +2295,18 @@ impl WgDeviceFeed {
         // which must leave via the path `dispatch` selects. A stale buffered
         // fd (session closed meanwhile) surfaces as a replay failure; the
         // next ICE selection re-attaches.
+        // FAIL-CLOSED (P1): a peer whose egress replay FAILED must not get its
+        // endpoint replayed either — otherwise the handshake would leave from
+        // the base device socket, the exact "endpoint without egress" shape
+        // `peer_conn.rs` (SelectedPair landing: attach, and only then apply
+        // the endpoint) structurally forbids. The peer simply keeps no path
+        // and waits for the next ICE selection. This holds whether or not the
+        // n2_evidence switch is armed.
+        let mut egress_failed: Vec<&str> = Vec::new();
         for (key, fd) in &g.egress {
             if let Err(e) = app.attach_egress_socket(key, *fd) {
                 emit(&format!("N11_WG_FEED|replay-egress-failed|{}", e));
+                egress_failed.push(key.as_str());
             }
         }
         for (key, carrier) in &g.carriers {
@@ -2293,6 +2315,12 @@ impl WgDeviceFeed {
             }
         }
         for (key, addr, port) in &g.endpoints {
+            if egress_failed.contains(&key.as_str()) {
+                emit(&format!(
+                    "N11_WG_FEED|replay-endpoint-skipped|peer={key}|reason=egress-replay-failed"
+                ));
+                continue;
+            }
             // individually validated at buffer time; a replay failure would
             // mean the peer vanished from the just-applied set — logged (the
             // key is PUBLIC material), the next ICE re-selection re-lands it
@@ -2307,7 +2335,14 @@ impl WgDeviceFeed {
         ));
         g.device = Some(app);
         crate::n2_socket_trace::closed(wg_raw);
-        g.wg_socket_owned = None;
+        // The pending feed-time dup is consumed by the adoption: close it AND
+        // drop its trace registration, so its number can never be reused by a
+        // later socket while a stale `Wb`/`Ws` entry still carries its
+        // per-fd send counter (the N2 P2 zero-send evidence must not be
+        // attributable to a recycled number).
+        if let Some(pending) = g.wg_socket_owned.take() {
+            crate::n2_socket_trace::closed(pending.as_raw_fd());
+        }
         true
     }
 

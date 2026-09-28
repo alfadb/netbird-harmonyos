@@ -32,7 +32,6 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::fd::AsRawFd;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -136,7 +135,7 @@ mod host_link_stubs {
     }
 }
 
-use netbird_core::mgmtsock::{connect_protected, ProtectedSocketFdSource};
+use netbird_core::mgmtsock::{connect_protected, ProtectedSocketFdSource, ProtectedTcpStream};
 use netbird_core::{n2_socket_trace, n2_stimulus, sys};
 
 /// The stimulus registry and the arming flag are process-wide, so the tests in
@@ -233,7 +232,7 @@ fn observe_send(kind: &str, fd: i32, remote: &str) {
 /// One protected dial of `kind` through the production seam: annotate the
 /// shell fd, feed it, connect, then close the shell's original (ownership has
 /// passed to the source's duplicate).
-async fn protected_dial(kind: &str, server: &ClassServer, rep: usize) -> tokio::net::TcpStream {
+async fn protected_dial(kind: &str, server: &ClassServer, rep: usize) -> ProtectedTcpStream {
     let fd = shell_tcp_fd();
     n2_socket_trace::protect(fd, kind, &format!("req-{kind}-{rep}"), rep as u64, 31, 1, true);
     let source = ProtectedSocketFdSource::new_with_fd(fd).expect("source");
@@ -280,7 +279,7 @@ async fn tcp_classes_isolate_and_repeat_three_times() {
     for kind in ["M", "S", "R"] {
         // The other two classes: one live socket each, dialed once here and
         // never stimulated — they are the isolation witnesses.
-        let mut witnesses: Vec<(&str, tokio::net::TcpStream, TcpStream)> = Vec::new();
+        let mut witnesses: Vec<(&str, ProtectedTcpStream, TcpStream)> = Vec::new();
         for other in ["M", "S", "R"] {
             if other == kind {
                 continue;
