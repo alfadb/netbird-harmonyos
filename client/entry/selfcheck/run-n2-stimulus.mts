@@ -168,9 +168,11 @@ try {
       '      try {\n' +
       '        fs.unlinkSync(path);'),
     'finally');
-  check('S7 the poll rides the watcher tick right after the window close edge',
-    ability.includes('      this.maybeCloseInterfaceStatsWindow();\n' +
-      '      // N2 T5a: the private-channel stimulus poll rides every watcher trigger\n') &&
+  check('S7 the stimulus poll rides the watcher tick after the window close edge and AFTER the control poll',
+    ability.indexOf('      this.maybeCloseInterfaceStatsWindow();') > 0 &&
+    ability.indexOf('      this.pollN2Control();') >
+      ability.indexOf('      this.maybeCloseInterfaceStatsWindow();') &&
+    ability.indexOf('      this.pollN2Stimulus();') > ability.indexOf('      this.pollN2Control();') &&
     ability.includes('      this.pollN2Stimulus();\n      const status: ConnectorStatusResult | null = pollStatusOrNull();'),
     'tick');
   check('S8 the operator trigger is documented at the call site (aa start --ps n2_stimulus)',
@@ -182,8 +184,9 @@ try {
     'entry constants');
   check('S10 an explicit parameter writes the request; every other launch clears a leftover',
     entry.includes("params[N2_STIMULUS_PARAM];") &&
-    entry.includes('this.writeStimulusFile(stimulus);') &&
-    entry.includes("this.removeStimulusFile('default-no-stimulus');"));
+    entry.includes('this.writeStimulusFile(stimulusText);') &&
+    entry.includes("this.removeStimulusFile('default-no-stimulus');") &&
+    entry.includes("this.removeControlFile('default-no-control');"));
   check('S11 the write is honest about a failed/short write (no usable request left behind)',
     entry.includes('N2_STIMULUS_FILE_WRITE_FAILED') &&
     entry.includes('short-write:${written}of${expectedBytes}') &&

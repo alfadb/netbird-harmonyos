@@ -80,6 +80,13 @@ pub fn local_addr(fd: RawFd) -> Option<SocketAddr> {
     Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr.sin_addr)), u16::from_be(addr.sin_port)))
 }
 
+/// The shell ORIGINAL fd registered for a core-owned descriptor (`dup_fd` in
+/// the `N2_SOCK` receipts). `None` = the armed trace has no registration for
+/// this descriptor, so no original can be reported for it.
+pub fn original_fd(fd: RawFd) -> Option<RawFd> {
+    sockets().lock().expect("socket trace").get(&fd).map(|meta| meta.original_fd)
+}
+
 fn clean(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_') { c } else { '_' }).collect()
 }
@@ -140,6 +147,44 @@ pub fn first_io(fd: RawFd, remote: SocketAddr, status: &str, detail: &str) {
         hilog::emit(&format!("N2_SOCK_OVERLAY_LOCAL|kind={}|request_id={}|fd={}|dup_fd={fd}|local={local}|remote={remote}|diag=true|is_evidence=false",
             meta.kind, clean(&meta.request), meta.original_fd));
     }
+}
+
+/// One production protected DNS query's D-row receipt facts (preregistration
+/// v4 §4 D row: "the protected fd records the sent query and a same-ID
+/// response"). `fd`/`dup_fd` follow the `N2_SOCK` convention: the shell
+/// original and the core-owned descriptor.
+#[derive(Clone, Debug)]
+pub struct DnsReceipt {
+    pub query_id: u16,
+    pub qname: String,
+    pub server: SocketAddr,
+    pub fd: RawFd,
+    pub dup_fd: RawFd,
+    pub sent_mono_ms: u64,
+    /// `matched` / `mismatched` / `timeout` / `error` (the query-id vs
+    /// response-id comparison result; `mismatched` means a datagram arrived
+    /// whose transaction id differs from the one that was sent).
+    pub response: &'static str,
+    /// Response header RCODE, `-1` when no response body was decoded.
+    pub rcode: i32,
+    /// Response header ANCOUNT, `-1` when no response body was decoded. The
+    /// ANSWER CONTENT (addresses) is deliberately never logged.
+    pub answer_count: i32,
+    pub elapsed_ms: u128,
+}
+
+pub fn dns_receipt_line(r: &DnsReceipt) -> String {
+    format!("N2_DNS|query_id={}|qname={}|server={}|fd={}|dup_fd={}|sent_mono_ms={}|response={}|rcode={}|answer_count={}|elapsed_ms={}|diag=true|is_evidence=false",
+        r.query_id, clean(&r.qname), r.server, r.fd, r.dup_fd, r.sent_mono_ms,
+        clean(r.response), r.rcode, r.answer_count, r.elapsed_ms)
+}
+
+/// The D-row receipt, gated exactly like every other `N2_` diagnostic: an
+/// UNARMED session produces ZERO output for a production DNS query (`None`),
+/// and the caller emits nothing.
+pub fn dns_receipt(r: &DnsReceipt) -> Option<String> {
+    if !armed() { return None; }
+    Some(dns_receipt_line(r))
 }
 
 #[cfg(test)]
@@ -218,5 +263,77 @@ mod tests {
         assert!(overlay_local("100.108.255.1:53".parse().unwrap()));
         assert!(!overlay_local("100.109.0.1:53".parse().unwrap()));
         assert!(!overlay_local("192.168.0.1:53".parse().unwrap()));
+    }
+
+    fn dns_receipt_for(response: &'static str, rcode: i32, answer_count: i32) -> DnsReceipt {
+        DnsReceipt {
+            query_id: 0x1234,
+            qname: "relay.example".into(),
+            server: "203.0.113.53:53".parse().unwrap(),
+            fd: 41,
+            dup_fd: 42,
+            sent_mono_ms: 900,
+            response,
+            rcode,
+            answer_count,
+            elapsed_ms: 12,
+        }
+    }
+
+    // N2 D-row (§4 D): the receipt is armed-only — an unarmed session must
+    // produce ZERO output for a production query.
+    #[test]
+    fn dns_receipt_is_armed_only() {
+        let _guard = crate::n2_stimulus::test_guard();
+        arm(false);
+        assert!(dns_receipt(&dns_receipt_for("matched", 0, 1)).is_none());
+        assert!(dns_receipt(&dns_receipt_for("timeout", -1, -1)).is_none());
+        arm(false);
+    }
+
+    // N2 D-row (§4 D): every documented field of a MATCHED query, including
+    // the descriptor pair and the diagnostic tail.
+    #[test]
+    fn dns_receipt_matched_carries_every_field() {
+        let _guard = crate::n2_stimulus::test_guard();
+        arm(true);
+        let line = dns_receipt(&dns_receipt_for("matched", 0, 2)).expect("armed");
+        assert!(line.starts_with("N2_DNS|"), "{line}");
+        for field in ["query_id=4660", "qname=relay.example", "server=203.0.113.53:53",
+            "fd=41", "dup_fd=42", "sent_mono_ms=900", "response=matched", "rcode=0",
+            "answer_count=2", "elapsed_ms=12", "diag=true|is_evidence=false"] {
+            assert!(line.contains(field), "{field} in {line}");
+        }
+        arm(false);
+    }
+
+    // N2 D-row (§4 D): a datagram whose transaction id differs from the sent
+    // one is `mismatched`; a silent server is `timeout`. Neither may be
+    // rendered as a match, and a missing body keeps rcode/ANCOUNT honest (-1).
+    #[test]
+    fn dns_receipt_reports_mismatched_and_timeout_verdicts() {
+        let _guard = crate::n2_stimulus::test_guard();
+        arm(true);
+        let mismatched = dns_receipt(&dns_receipt_for("mismatched", 0, 1)).expect("armed");
+        assert!(mismatched.contains("|response=mismatched|rcode=0|answer_count=1|"), "{mismatched}");
+        let timeout = dns_receipt(&dns_receipt_for("timeout", -1, -1)).expect("armed");
+        assert!(timeout.contains("|response=timeout|rcode=-1|answer_count=-1|"), "{timeout}");
+        assert!(!timeout.contains("response=matched"));
+        arm(false);
+    }
+
+    // N2 D-row join key: the core-owned DNS descriptor reports the shell
+    // original that the armed protect receipt registered for it.
+    #[test]
+    fn dns_descriptor_reports_the_registered_shell_original() {
+        let _guard = crate::n2_stimulus::test_guard();
+        arm(true);
+        protect(7, "D", "42", 0, 31, 9, true);
+        assert_eq!(original_fd(7), Some(7));
+        duplicated(7, 8);
+        assert_eq!(original_fd(8), Some(7));
+        assert_eq!(original_fd(9), None);
+        closed(8);
+        arm(false);
     }
 }

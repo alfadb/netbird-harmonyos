@@ -281,7 +281,10 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its two erased interfaces are re-declared by its shim below.
-  'NetBirdN2Stimulus'];
+  'NetBirdN2Stimulus',
+  // N2 T3 §3 (2026-09-28): the positive-control request pure module the REAL
+  // extension imports; its two erased interfaces are re-declared by its shim.
+  'NetBirdN2ControlRequest'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
@@ -301,7 +304,9 @@ const SHIM_TYPES: Record<string, string[]> = {
     'CaptureRouteOutcome'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation'],
   // N2 T5a: the erased stimulus request/reply shapes the extension names.
-  NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply']
+  NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply'],
+  // N2 T3 §3: the erased positive-control request/decision shapes.
+  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
 };
 
 const REQUEST_ID = 'req-i3a';
@@ -1308,6 +1313,195 @@ try {
     readFileSync(join(dir, 'NetBirdConnector.ts')).toString()
       .indexOf('DEV_CREDENTIAL_DIR') > 0,
     'credential override pin');
+
+  // ---------------- N (N2 T3 §3, 2026-09-28): the positive-control private
+  // ---------------- channel — the REAL EntryAbility write/cleanup/combo rule
+  // ---------------- and the REAL armed-only poll + tick ordering.
+  //
+  // The channel is the SAME three-file mechanism as the arm ticket / stimulus:
+  // EntryAbility writes <filesDir>/netbird-n2-control from the non-secret
+  // `n2_control` want parameter, the REAL extension's `pollN2Control` consumes
+  // it once and calls `sendN2PositiveControl` (the recording seam above), and
+  // the core's `N2_CONTROL_SENT`/`_HIT`/`_MISS` lines stay authoritative.
+  const CONTROL_PATH = `${FIXTURE_FILESDIR}/netbird-n2-control`;
+  const CONTROL_NAME = 'netbird-n2-control';
+  const STIMULUS_PATH = `${FIXTURE_FILESDIR}/netbird-n2-stimulus`;
+  const CONTROL_PAYLOAD = '{"target":"119.29.29.119:53","proto":"udp","id":"evt1-pre"}';
+  const STIMULUS_PAYLOAD = '{"kind":"M","id":"b-M-1"}';
+  const N2_EVIDENCE_OPTIONS: Record<string, unknown> = {
+    trustedSelf: true, capture32: ['119.29.29.119'],
+    outerDestinations: ['udp/119.29.29.119:53'], hdcControlIp: '', allowHdcOverlap: false
+  };
+  const resetRequestState = (): void => {
+    G['__NB_CONTROL_CALLS'] = undefined;
+    G['__NB_CONTROL_LAST'] = undefined;
+    G['__NB_CONTROL_MODE'] = undefined;
+    G['__NB_CONTROL_ERROR'] = undefined;
+    G['__NB_STIMULUS_CALLS'] = undefined;
+    G['__NB_STIMULUS_ANSWER'] = undefined;
+  };
+  const controlCalls = (): number => Number(G['__NB_CONTROL_CALLS'] ?? 0);
+  const armedAbility = (): Record<string, unknown> => {
+    const ability = freshAbility(mod, FIXTURE_FILESDIR);
+    ability['n2Evidence'] = N2_EVIDENCE_OPTIONS;
+    return ability;
+  };
+
+  // N1: the explicit non-secret want lands byte-verbatim in filesDir, logged
+  // as file name + real UTF-8 byte count, payload never printed.
+  resetFs();
+  const controlEntry = newEntry();
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_control': CONTROL_PAYLOAD } }, {});
+  check('N1 the control want payload is written VERBATIM to <filesDir>/netbird-n2-control',
+    fileOf(CONTROL_PATH) === CONTROL_PAYLOAD, JSON.stringify(fileOf(CONTROL_PATH)));
+  check('N1 the write is logged as file name + UTF-8 byte count only',
+    linesWith('N2_CONTROL_FILE_WRITTEN|').length === 1 &&
+    lastLine('N2_CONTROL_FILE_WRITTEN|') === 'N2_CONTROL_FILE_WRITTEN|file=' + CONTROL_NAME +
+    '|bytes=' + String(Buffer.byteLength(CONTROL_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret',
+    linesWith('N2_CONTROL_FILE_WRITTEN|').join('\n'));
+  check('N1 the payload never reaches the log (no target string in any line)',
+    logs().join('\n').indexOf('119.29.29.119') < 0, JSON.stringify(logs()));
+
+  // N2: a launch WITHOUT the parameter deletes a leftover control request (the
+  // structural default-off rule the arm ticket and the stimulus share).
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD } }, {});
+  check('N2 a launch without n2_control deletes the leftover request',
+    fileOf(CONTROL_PATH) === undefined &&
+    lastLine('N2_CONTROL_FILE_REMOVED|') === 'N2_CONTROL_FILE_REMOVED|file=' + CONTROL_NAME +
+    '|note=default-no-control',
+    JSON.stringify({ file: fileOf(CONTROL_PATH), log: lastLine('N2_CONTROL_FILE_REMOVED|') }));
+
+  // N2b: the control-only launch also clears a STIMULUS leftover — one launch
+  // carries at most ONE pending request, so an older request can never fire
+  // behind the operator's back.
+  seedFile(STIMULUS_PATH, STIMULUS_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_control': CONTROL_PAYLOAD } }, {});
+  check('N2b a control-only launch clears the stimulus leftover and writes only the control',
+    fileOf(STIMULUS_PATH) === undefined && fileOf(CONTROL_PATH) === CONTROL_PAYLOAD &&
+    lastLine('N2_STIMULUS_FILE_REMOVED|') === 'N2_STIMULUS_FILE_REMOVED|file=netbird-n2-stimulus' +
+    '|note=default-no-stimulus',
+    JSON.stringify({ stimulus: fileOf(STIMULUS_PATH), control: fileOf(CONTROL_PATH) }));
+
+  // N3: a SINGLE launch carrying both parameters writes NEITHER (the
+  // combination is refused, not ordered) and removes both leftovers.
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  seedFile(STIMULUS_PATH, STIMULUS_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD,
+        'n2_stimulus': STIMULUS_PAYLOAD, 'n2_control': CONTROL_PAYLOAD } }, {});
+  check('N3 one launch carrying BOTH requests writes NEITHER and removes both leftovers',
+    fileOf(CONTROL_PATH) === undefined && fileOf(STIMULUS_PATH) === undefined &&
+    linesWith('N2_CONTROL_FILE_WRITTEN|').length === 0 &&
+    linesWith('N2_STIMULUS_FILE_WRITTEN|').length === 0,
+    JSON.stringify({ control: fileOf(CONTROL_PATH), stimulus: fileOf(STIMULUS_PATH) }));
+  check('N3 the refusal is one explicit line naming both files',
+    linesWith('N2_CONTROL_COMBO_REJECTED|').length === 1 &&
+    lastLine('N2_CONTROL_COMBO_REJECTED|') === 'N2_CONTROL_COMBO_REJECTED|stimulus=netbird-n2-stimulus' +
+    '|control=' + CONTROL_NAME + '|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+    lastLine('N2_CONTROL_COMBO_REJECTED|'));
+
+  // N4: the ARMED poll consumes the request once and calls the
+  // positive-control entry with exactly the parsed target/proto/id.
+  resetFs();
+  resetRequestState();
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  const armedForControl = armedAbility();
+  resetLog();
+  (armedForControl['pollN2Control'] as () => void)();
+  const controlLast = (G['__NB_CONTROL_LAST'] ?? {}) as Record<string, unknown>;
+  check('N4 the armed poll calls the positive-control entry exactly ONCE with the parsed request',
+    controlCalls() === 1 && controlLast['armed'] === N2_EVIDENCE_OPTIONS &&
+    controlLast['target'] === '119.29.29.119:53' && controlLast['protocol'] === 'udp' &&
+    controlLast['id'] === 'evt1-pre', JSON.stringify(controlLast));
+  check('N4 the shell receipt says sent and the request is consumed exactly once',
+    lastLine('N2_CONTROL_SHELL|') === 'N2_CONTROL_SHELL|requestId=' + REQUEST_ID +
+    '|id=evt1-pre|target=119.29.29.119:53|proto=udp|result=sent|reason=ok|diag=true|is_evidence=false' &&
+    fileOf(CONTROL_PATH) === undefined,
+    lastLine('N2_CONTROL_SHELL|'));
+
+  // N5: an UNARMED session refuses by name, never calls the core, and still
+  // consumes the file (nothing can fire after a later arming).
+  resetFs();
+  resetRequestState();
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  const unarmedAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  resetLog();
+  (unarmedAbility['pollN2Control'] as () => void)();
+  check('N5 an unarmed session refuses (not-armed), calls the core ZERO times, and consumes the file',
+    controlCalls() === 0 && fileOf(CONTROL_PATH) === undefined &&
+    lastLine('N2_CONTROL_SHELL|') === 'N2_CONTROL_SHELL|requestId=' + REQUEST_ID +
+    '|id=evt1-pre|target=119.29.29.119:53|proto=udp|result=rejected|reason=not-armed|' +
+    'diag=true|is_evidence=false',
+    JSON.stringify({ calls: controlCalls(), line: lastLine('N2_CONTROL_SHELL|') }));
+
+  // N6: an armed send refusal (the shell's capture-32 check / a core error) is
+  // REJECTED with its own reason — never reported as sent.
+  resetFs();
+  resetRequestState();
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  const sendRefusedAbility = armedAbility();
+  G['__NB_CONTROL_MODE'] = 'throw';
+  G['__NB_CONTROL_ERROR'] = 'target-not-captured';
+  resetLog();
+  (sendRefusedAbility['pollN2Control'] as () => void)();
+  check('N6 an armed send refusal is rejected with its reason and the file is consumed',
+    controlCalls() === 1 && fileOf(CONTROL_PATH) === undefined &&
+    lastLine('N2_CONTROL_SHELL|') === 'N2_CONTROL_SHELL|requestId=' + REQUEST_ID +
+    '|id=evt1-pre|target=119.29.29.119:53|proto=udp|result=rejected|reason=target-not-captured|' +
+    'diag=true|is_evidence=false',
+    lastLine('N2_CONTROL_SHELL|'));
+
+  // N7: a malformed payload is refused by name BEFORE any core call.
+  resetFs();
+  resetRequestState();
+  seedFile(CONTROL_PATH, '{"target":"119.29.29.119:53","proto":"sctp","id":"x"}');
+  const malformedAbility = armedAbility();
+  resetLog();
+  (malformedAbility['pollN2Control'] as () => void)();
+  check('N7 a malformed request is refused by name with no core call and is consumed',
+    controlCalls() === 0 && fileOf(CONTROL_PATH) === undefined &&
+    lastLine('N2_CONTROL_SHELL|') === 'N2_CONTROL_SHELL|requestId=' + REQUEST_ID +
+    '|id=none|target=none|proto=none|result=rejected|reason=invalid-protocol|' +
+    'diag=true|is_evidence=false',
+    JSON.stringify({ calls: controlCalls(), line: lastLine('N2_CONTROL_SHELL|') }));
+
+  // N8: the COMBINATION RULE through the REAL watcher tick — two separate
+  // launches left both files pending, and one tick submits the CONTROL before
+  // the stimulus, consuming both exactly once.
+  resetFs();
+  resetRequestState();
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  seedFile(STIMULUS_PATH, STIMULUS_PAYLOAD);
+  G['__NB_STATUS'] = watcherStatus;
+  G['__NB_CONTROL_MODE'] = 'sent';
+  G['__NB_STIMULUS_ANSWER'] = JSON.stringify({ ok: true, result: 'applied',
+    reason: 'shutdown-socket', target_fd: 31, remote: '203.0.113.7:443' });
+  const orderAbility = armedAbility();
+  resetLog();
+  const orderTick = watcherTick(orderAbility);
+  orderTick();
+  const controlAt: number = logs().findIndex((l: string): boolean => l.indexOf('N2_CONTROL_SHELL|') >= 0);
+  const stimulusAt: number = logs().findIndex((l: string): boolean => l.indexOf('N2_STIMULUS_SHELL|') >= 0);
+  check('N8 one tick consumes BOTH pending requests (one line each)',
+    linesWith('N2_CONTROL_SHELL|').length === 1 && linesWith('N2_STIMULUS_SHELL|').length === 1 &&
+    fileOf(CONTROL_PATH) === undefined && fileOf(STIMULUS_PATH) === undefined,
+    JSON.stringify(linesWith('N2_CONTROL_SHELL|').concat(linesWith('N2_STIMULUS_SHELL|'))));
+  check('N8 within one tick the CONTROL is submitted BEFORE the stimulus',
+    controlAt >= 0 && stimulusAt >= 0 && controlAt < stimulusAt,
+    JSON.stringify({ controlAt, stimulusAt }));
 
   // ---------------- C8 (2026-09-18): peer_overlay_ip verbatim bridging -----
   // The parallel posctl-target fix adds the optional non-secret

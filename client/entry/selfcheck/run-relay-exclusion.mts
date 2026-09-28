@@ -55,7 +55,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports.
-  'NetBirdN2Stimulus'];
+  'NetBirdN2Stimulus',
+  // N2 T3 §3 (2026-09-28): the positive-control request pure module.
+  'NetBirdN2ControlRequest'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
@@ -78,7 +80,9 @@ const SHIM_TYPES: Record<string, string[]> = {
     'CaptureRouteOutcome'],
   NetBirdRouteValidation: ['RouteCheckResult', 'RouteViolation'],
   // N2 T5a: the erased stimulus request/reply shapes the extension names.
-  NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply']
+  NetBirdN2Stimulus: ['N2StimulusDecision', 'N2StimulusReply'],
+  // N2 T3 §3: the erased positive-control request/decision shapes.
+  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
 };
 
 let passed: number = 0;

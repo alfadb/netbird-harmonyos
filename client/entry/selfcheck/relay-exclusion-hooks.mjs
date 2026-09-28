@@ -162,14 +162,28 @@ const SHIMS = {
   './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its erased request/reply interfaces are re-declared by the shim.
-  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts'
+  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts',
+  // N2 T3 §3 (2026-09-28): the positive-control request pure module, staged and
+  // shimmed exactly like the stimulus module above.
+  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts'
 };
 
 export function resolve(specifier, context, next) {
   if (specifier === './NetBirdN2Control') {
+    // N2 T3 §3 (2026-09-28): functional and recording like the other seams —
+    // the REAL extension's armed-only `pollN2Control` imports this sender.
     return { url: 'data:text/javascript,' + encodeURIComponent(
-      'export const N2ControlProtocol = undefined; ' +
-      'export const sendN2Control = () => { throw new Error("n2-not-armed"); };'), shortCircuit: true };
+      'export const N2ControlProtocol = undefined;\n' +
+      'export const sendN2Control = (armed, target, protocol, id) => {\n' +
+      '  const g = globalThis;\n' +
+      '  g.__NB_CONTROL_CALLS = (g.__NB_CONTROL_CALLS || 0) + 1;\n' +
+      '  g.__NB_CONTROL_LAST = { armed: armed, target: target, protocol: protocol, id: id };\n' +
+      '  if (armed === undefined) { throw new Error("n2-not-armed"); }\n' +
+      '  if ((g.__NB_CONTROL_MODE || "sent") === "throw") {\n' +
+      '    throw new Error(g.__NB_CONTROL_ERROR || "n2-control-send-failed");\n' +
+      '  }\n' +
+      '  return undefined;\n' +
+      '};'), shortCircuit: true };
   }
   if (specifier === './NetBirdN2Evidence') {
     return { url: 'data:text/javascript,' + encodeURIComponent(

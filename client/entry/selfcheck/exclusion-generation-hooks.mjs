@@ -468,14 +468,36 @@ const SHIMS = {
   // extension imports it by an extensionless specifier and names its erased
   // interfaces (N2StimulusDecision / N2StimulusReply), so it resolves to the
   // shim that re-declares them.
-  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts'
+  './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts',
+  // N2 T3 §3 (2026-09-28): the positive-control request module is staged the
+  // same way; its erased N2ControlDecision / N2ControlRequest interfaces are
+  // re-declared by its shim.
+  './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts'
 };
 
 export function resolve(specifier, context, next) {
   if (specifier === './NetBirdN2Control') {
+    // N2 T3 §3 (2026-09-28): the positive-control sender the REAL extension now
+    // calls from its armed-only `pollN2Control` (the control channel's missing
+    // caller). FUNCTIONAL and recording like the other seams: every call is
+    // counted and the arguments land in __NB_CONTROL_LAST, so a fixture can
+    // drive the REAL poll path and assert exactly what reached the core. The
+    // default is the armed happy path (returns void, like the real module);
+    // __NB_CONTROL_MODE='throw' with __NB_CONTROL_ERROR makes it throw the
+    // shell/core refusal a real send would raise, and an undefined `armed`
+    // throws the real module's own `n2-not-armed`.
     return { url: 'data:text/javascript,' + encodeURIComponent(
-      'export const N2ControlProtocol = undefined; ' +
-      'export const sendN2Control = () => { throw new Error("n2-not-armed"); };'), shortCircuit: true };
+      'export const N2ControlProtocol = undefined;\n' +
+      'export const sendN2Control = (armed, target, protocol, id) => {\n' +
+      '  const g = globalThis;\n' +
+      '  g.__NB_CONTROL_CALLS = (g.__NB_CONTROL_CALLS || 0) + 1;\n' +
+      '  g.__NB_CONTROL_LAST = { armed: armed, target: target, protocol: protocol, id: id };\n' +
+      '  if (armed === undefined) { throw new Error("n2-not-armed"); }\n' +
+      '  if ((g.__NB_CONTROL_MODE || "sent") === "throw") {\n' +
+      '    throw new Error(g.__NB_CONTROL_ERROR || "n2-control-send-failed");\n' +
+      '  }\n' +
+      '  return undefined;\n' +
+      '};'), shortCircuit: true };
   }
   if (specifier === './NetBirdN2Evidence') {
     return { url: 'data:text/javascript,' + encodeURIComponent(

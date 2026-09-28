@@ -12,6 +12,9 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
 import { N2EvidenceDecision, N2EvidenceOptions, parseN2Evidence, withN2EvidenceRoutes,
   withoutN2ExcludedRoutes } from './NetBirdN2Evidence';
 import { N2ControlProtocol, sendN2Control } from './NetBirdN2Control';
+import { N2_CONTROL_FILE_NAME, N2ControlDecision,
+  formatN2ControlShellLine, formatN2ControlShellReject,
+  parseN2ControlRequest } from './NetBirdN2ControlRequest';
 import { N2_STIMULUS_FILE_NAME, N2StimulusDecision, N2StimulusReply,
   formatN2StimulusShellLine, formatN2StimulusShellReject, parseN2Stimulus,
   parseN2StimulusReply } from './NetBirdN2Stimulus';
@@ -2455,6 +2458,90 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       : { present: false, skipReason: N2H_ARM_FILE_ABSENT, accessError: 'none' };
   }
 
+  // N2 T3 §3「正控」private channel (2026-09-28): the shell's armed-only entry,
+  // the missing caller of `sendN2PositiveControl` / NetBirdN2Control's
+  // `sendN2Control`. ONE file = ONE control: the request file is deleted in
+  // `finally`, so the 5 s watcher tick can never replay it; the core's own
+  // `N2_CONTROL_SENT` / `N2_CONTROL_HIT` / `N2_CONTROL_MISS` lines stay the
+  // authoritative record of what the marker did.
+  //
+  // Trigger (documented in docs/n2-evidence-switch-20260928.md): the operator
+  // writes ONE request through the existing non-secret want-parameter private
+  // channel, which needs no new permission —
+  //   aa start -b cn.alfadb.netbird -a EntryAbility \
+  //     --ps n2h_arm_options '<the same arm ticket>' \
+  //     --ps n2_control '{"target":"119.29.29.119:53","proto":"udp","id":"evt1-pre"}'
+  // EntryAbility writes it to <filesDir>/netbird-n2-control; this poll picks it
+  // up on the next watcher tick and consumes it. The sandwich is three separate
+  // launches (pre-control -> production event -> post-control) with a fresh
+  // `id` per leg, because a reused marker id is refused by the core
+  // (`duplicate-control`). `target` must be one frozen outer destination inside
+  // the armed ticket's `capture_32`; a target outside it is refused by name
+  // (`target-not-captured`) and never sent.
+  //
+  // UNARMED: the request is still consumed (one stat per tick, no line unless
+  // the file exists) and answered `result=rejected|reason=not-armed` WITHOUT
+  // any send — the core is never called, and the leftover cannot survive to
+  // fire after a later arming.
+  private pollN2Control(): void {
+    if (this.destroyRequested) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${N2_CONTROL_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_READ_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
+        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      return;
+    }
+    try {
+      const decision: N2ControlDecision = parseN2ControlRequest(text);
+      if (decision.request === undefined) {
+        hilog.warn(DOMAIN, TAG, '%{public}s',
+          formatN2ControlShellReject(this.requestId, decision.error));
+        return;
+      }
+      const request = decision.request;
+      if (this.n2Evidence === undefined) {
+        hilog.warn(DOMAIN, TAG, '%{public}s',
+          formatN2ControlShellLine(this.requestId, request, 'rejected', 'not-armed'));
+        return;
+      }
+      let result: string = 'rejected';
+      let reason: string = 'none';
+      try {
+        this.sendN2PositiveControl(request.target, request.proto, request.id);
+        result = 'sent';
+        reason = 'ok';
+      } catch (error) {
+        // the shell's own armed/refusal branches (target-not-captured,
+        // invalid-marker, n2-control-open-failed, …) or a core refusal — never
+        // reported as sent
+        result = 'rejected';
+        reason = (error as Error).message !== undefined && (error as Error).message.length > 0
+          ? (error as Error).message
+          : 'send-throw';
+      }
+      hilog.info(DOMAIN, TAG, '%{public}s',
+        formatN2ControlShellLine(this.requestId, request, result, reason));
+    } finally {
+      // consume exactly once, whatever happened above
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'N2_CONTROL_CONSUME_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
+          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      }
+    }
+  }
+
   // N2 T5a「B 断流刺激」(preregistration v4 §4 B / §7 T5a): the shell's
   // armed-only private-channel entry — the analogue of NetBirdN2Control's
   // `sendN2Control`. ONE file = ONE stimulus: the request file is deleted in
@@ -2559,6 +2646,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // No new timer, no loop, no await; ARM/latch/WAITING semantics
       // untouched; C7 counting input only, never Evidence/judge.
       this.maybeCloseInterfaceStatsWindow();
+      // N2 T3/T5a private channels: the COMBINATION RULE of the two pending
+      // requests is fixed HERE — within one tick the positive-control poll runs
+      // BEFORE the stimulus poll, so if both files are somehow pending (two
+      // separate launches before a tick) the control is always submitted first.
+      // A SINGLE launch carrying both parameters writes neither (EntryAbility's
+      // N2_CONTROL_COMBO_REJECTED), so this order only covers the two-launch
+      // shape. Both polls are one-shot + self-consuming, and the control poll
+      // is a bare stat (no line, no core call) when nothing is pending.
+      this.pollN2Control();
       // N2 T5a: the private-channel stimulus poll rides every watcher trigger
       // at the same place as the window close edge — BEFORE the status read
       // and the terminal/recreate early returns, so an armed session picks up

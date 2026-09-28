@@ -139,3 +139,138 @@ session answers `rejected|reason=not-armed` before any syscall.
   separately authorized campaign: the AUTH must list this stimulus, its
   per-class limits above and the repetition count, and a network-side
   (AP-blocked) path remains a separate authorization.
+
+## Positive-control private channel (T3 §3, 2026-09-28)
+
+The frozen T3 sandwich (`NetBirdN2Control.ets`) had **no host trigger**: only
+the ArkTS export existed, so an authorized operator could not fire a pre/post
+control without a rebuilt App. The `n2_control` private channel closes that gap
+with the same non-secret want-parameter mechanism as `n2_stimulus`; it is still
+diagnostic code (`diag=true|is_evidence=false`) and creates no authorization.
+
+### Interface
+
+* Shell entry: `NetBirdVpnExtensionAbility.pollN2Control()` — reads exactly one
+  request, calls the existing `sendN2PositiveControl(target, proto, id)`
+  (`sendN2Control` → the production opener `mgmtSocketOpen` for `tcp` /
+  `iceSocketOpen` for `udp`, no protect, no net-handle bind), logs the shell
+  receipt and **deletes the request file in `finally`** (one launch = one
+  control; the 5 s watcher tick can never replay it). The pure parse/format half
+  is `NetBirdN2ControlRequest.ets` (zero imports).
+* Payload: `{"target":"<ip:port>","proto":"udp|tcp","id":"<marker id>"}`.
+  `target` must be one frozen outer destination **inside the armed ticket's
+  `capture_32`**; the shape is checked in the shell, the capture membership and
+  the core's own rules answer `target-not-captured` / `invalid-control` /
+  `duplicate-control` / `control-send-failed` and are reported verbatim.
+  `id` uses the same `[A-Za-z0-9_-]{1,64}` marker rule; the core refuses a
+  REUSED id, so every sandwich leg needs a fresh one.
+* **Batching is NOT implemented**: a `{"controls":[...]}` payload is refused by
+  name (`batch-not-implemented`) — three separate launches are the supported
+  shape.
+* One launch carries at most ONE pending request: with **both** `n2_stimulus`
+  and `n2_control` present `EntryAbility` writes NEITHER (one
+  `N2_CONTROL_COMBO_REJECTED|stimulus=…|control=…|note=one-pending-request-per-launch`
+  line) and removes both leftovers; a launch with only one of them removes the
+  other's leftover. If two SEPARATE launches leave both files pending, the
+  watcher tick submits the **control before the stimulus** (fixed by call order
+  in the tick body), so the "pre-control → event → post-control" three-call
+  shape is unambiguous.
+* Unarmed: a pending request is still consumed (this is the one deliberate
+  difference from the stimulus, which never probes the file when unarmed) and
+  answered `result=rejected|reason=not-armed` with **no** core call — so a
+  leftover can neither fire later nor be silently dropped.
+
+### How the operator triggers it
+
+```bash
+aa start -b cn.alfadb.netbird -a EntryAbility \
+  --ps n2h_arm_options '<the same arm ticket that armed this session>' \
+  --ps n2_control '{"target":"119.29.29.119:53","proto":"udp","id":"evt1-pre"}'
+```
+
+`EntryAbility` writes the payload verbatim to `<filesDir>/netbird-n2-control`
+(UTF-8 byte count only, never the payload), and a launch without the parameter
+deletes a leftover. The already-running, already-armed extension picks the file
+up on its next status watcher tick (≤ `STATUS_POLL_MS` = 5 s) and consumes it.
+The arm ticket must be passed along: a launch without it clears the arm ticket
+(unchanged default rule), so a later extension restart would not be armed. The
+sandwich itself stays three separate launches with a fresh `id` per leg (the
+production event happens between the pre- and the post-control), and
+`withN2Sandwich` remains the explicit in-process convention.
+
+### Log lines
+
+* `N2_CONTROL_SHELL|requestId=…|id=…|target=…|proto=…|result=sent|rejected|reason=…|diag=true|is_evidence=false`
+  — one line per consumed request. `result=sent` means the send call returned
+  without throwing; `rejected` carries the exact branch
+  (`not-armed`, `target-not-captured`, `invalid-marker`,
+  `n2-control-open-failed`, `control-send-failed`, …). The CORE's own
+  `N2_CONTROL_SENT` / `N2_CONTROL_HIT` / `N2_CONTROL_MISS` / `N2_TUN_LEAK`
+  lines stay authoritative for what the marker actually did.
+* `N2_CONTROL_SHELL|…|id=none|target=none|proto=none|result=rejected|reason=…` —
+  a payload that never became a request (`empty-request`, `invalid-json`,
+  `invalid-request`, `batch-not-implemented`, `invalid-target`,
+  `invalid-protocol`, `invalid-id`, `request-too-long`).
+* `N2_CONTROL_FILE_WRITTEN|bytes=` / `_WRITE_FAILED|code=` / `_REMOVED|note=` /
+  `_REMOVE_FAILED|code=` / `_CLOSE_FAILED|code=` / `N2_CONTROL_COMBO_REJECTED|…`
+  — the EntryAbility write path (file name + UTF-8 byte count only).
+* `N2_CONTROL_READ_FAILED|code=` / `N2_CONTROL_CONSUME_FAILED|code=` — the
+  extension's read/consume path (codes only).
+
+### Host verification (no device)
+
+* `node client/entry/selfcheck/run-n2-control.mts` — the pure module as code
+  (accepted udp/tcp, every refusal by name incl. `batch-not-implemented`, the
+  two receipt formatters, pipeline-character cleaning) plus source pins on the
+  three-file private channel, the loader mocks and the `N2_DNS` core surface.
+* `run-exclusion-generation.mts` N group — the REAL `EntryAbility` write /
+  leftover-removal / combo refusal through the path-aware fake fs, and the REAL
+  armed `pollN2Control`: one send call with the parsed request, `result=sent`,
+  the unarmed `result=rejected|reason=not-armed` with ZERO core calls, an armed
+  send refusal, a malformed request, and the tick ordering
+  (control consumed before stimulus in one tick).
+* The two loader mocks (`exclusion-generation-hooks.mjs`,
+  `relay-exclusion-hooks.mjs`) carry the recording `n2_control` sender stub and
+  the staged `NetBirdN2ControlRequest` shim, so every real-extension fixture
+  still links.
+
+## D-row same-ID response receipt (`N2_DNS`, §4 D, 2026-09-28)
+
+Frozen §4 D uses the protected DNS fd's sent query and same-ID response as the
+substitute oracle when no independent resolver log exists. The production path
+(`client/core/src/protected_dns.rs`, all callers: management/signal resolution,
+relay, ICE, and the D stimulus re-query) now emits one receipt per production
+query while the `n2_evidence` arm holds the socket trace — **zero output while
+unarmed**:
+
+```
+N2_DNS|query_id=…|qname=…|server=…|fd=…|dup_fd=…|sent_mono_ms=…|response=matched|mismatched|timeout|error|rcode=…|answer_count=…|elapsed_ms=…|diag=true|is_evidence=false
+```
+
+* `query_id` is the transaction id actually sent; `qname` is the queried
+  hostname (a name, never the answer); `server` is the resolver `IP:port` the
+  query went to.
+* `fd` / `dup_fd` follow the `N2_SOCK` convention: the shell original the armed
+  protect receipt registered for this descriptor and the core-owned descriptor.
+  If the armed trace has no registration for the descriptor, `fd` falls back to
+  the same value as `dup_fd` (no invented original).
+* `sent_mono_ms` is the monotonic time the send call returned; `elapsed_ms` is
+  the whole per-server query box.
+* `response` is the query-id vs response-id verdict: `matched` (a response
+  arrived, its id equals the sent id and the A-record validation passed),
+  `mismatched` (a datagram arrived whose transaction id differs),
+  `timeout` (no datagram within the query timeout) or `error` (send/recv
+  failure, or a same-id response the parser rejected).
+* `rcode` is the response header RCODE and `answer_count` its ANCOUNT — both
+  `-1` when no response body was decoded. **Answer content is never logged.**
+* `rcode`/`answer_count`/`response` describe this App's own protected fd only;
+  they are a diagnostic receipt, not the authoritative byte and not a pass on
+  their own. Pair it with the frozen §3 evidence (device fd chain, sandwich
+  controls, campaign-wide TUN zero-hit) as §4 D requires.
+
+Host verification: unit tests in `client/core/src/n2_socket_trace.rs` (the
+receipt is armed-only — `None`, i.e. zero output, when unarmed — and carries
+every documented field for the matched / mismatched / timeout verdicts, plus
+the registered shell original) and in `client/core/src/protected_dns.rs` (the
+four verdicts, and the id/RCODE/ANCOUNT header decoding including the truncated
+cases). No device measurement was made here.

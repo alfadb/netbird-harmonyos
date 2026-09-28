@@ -59,6 +59,20 @@ const N2H_ARM_OPTIONS_FILE: string = 'netbird-n2h-arm';
 // one stimulus.
 const N2_STIMULUS_PARAM: string = 'n2_stimulus';
 const N2_STIMULUS_FILE: string = 'netbird-n2-stimulus';
+// N2 T3 §3 positive-control private channel (2026-09-28): the SAME
+// non-secret want-parameter mechanism as `n2_stimulus`, with its own payload
+// file. The basename must match the extension's `N2_CONTROL_FILE_NAME`
+// (NetBirdN2ControlRequest.ets) exactly — the two abilities share filesDir,
+// not imports (the same literal-basename convention as the arm ticket and the
+// stimulus above). ONE launch carries at most ONE pending request: a launch
+// with BOTH `n2_stimulus` and `n2_control` writes NEITHER (logged as
+// N2_CONTROL_COMBO_REJECTED) and removes both leftovers, and a launch with
+// only one of them removes the other's leftover — so a stale request can
+// never fire later and the executor's three separate calls (pre-control ->
+// production event -> post-control) each carry exactly the request they mean.
+// The payload is never logged.
+const N2_CONTROL_PARAM: string = 'n2_control';
+const N2_CONTROL_FILE: string = 'netbird-n2-control';
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -132,15 +146,34 @@ export default class EntryAbility extends UIAbility {
     } else {
       this.removeArmTicket('default-no-arm');
     }
-    // N2 T5a private channel: same discipline as the arm ticket above — an
-    // explicit non-secret parameter writes the ONE pending stimulus request,
-    // every other launch removes a leftover. The payload is never logged.
+    // N2 T5a / T3 private channels: same discipline as the arm ticket above.
+    // ONE launch carries at most ONE pending request (stimulus or positive
+    // control): an explicit non-secret parameter writes it, a launch without
+    // it removes that channel's leftover, and a launch carrying BOTH writes
+    // neither (the combination is refused, not ordered) while removing both
+    // leftovers. The payloads are never logged.
     const stimulus: Object | undefined =
       params === undefined || params === null ? undefined : params[N2_STIMULUS_PARAM];
-    if (typeof stimulus === 'string' && stimulus.length > 0) {
-      this.writeStimulusFile(stimulus);
+    const control: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_CONTROL_PARAM];
+    const stimulusText: string = typeof stimulus === 'string' ? stimulus : '';
+    const controlText: string = typeof control === 'string' ? control : '';
+    if (stimulusText.length > 0 && controlText.length > 0) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
+        'note=one-pending-request-per-launch|diag=true|is_evidence=false',
+        N2_STIMULUS_FILE, N2_CONTROL_FILE);
+      this.removeStimulusFile('combo-rejected');
+      this.removeControlFile('combo-rejected');
+    } else if (stimulusText.length > 0) {
+      this.writeStimulusFile(stimulusText);
+      this.removeControlFile('default-no-control');
+    } else if (controlText.length > 0) {
+      this.writeControlFile(controlText);
+      this.removeStimulusFile('default-no-stimulus');
     } else {
       this.removeStimulusFile('default-no-stimulus');
+      this.removeControlFile('default-no-control');
     }
   }
 
@@ -307,8 +340,9 @@ export default class EntryAbility extends UIAbility {
   }
 
   // Delete THE ONE stimulus request file (basename above) — from the default
-  // no-stimulus launch path and from a failed write. Credential / config /
-  // deviation / arm-ticket files are NEVER touched here.
+  // no-stimulus launch path, from the combination refusal, and from a failed
+  // write. Credential / config / deviation / arm-ticket / control-request files
+  // are NEVER touched here.
   private removeStimulusFile(note: string): void {
     const path: string = `${this.context.filesDir}/${N2_STIMULUS_FILE}`;
     try {
@@ -322,6 +356,74 @@ export default class EntryAbility extends UIAbility {
       hilog.error(DOMAIN, TAG,
         'N2_STIMULUS_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
         N2_STIMULUS_FILE, String((error as BusinessFailure).code ?? 'none'), note);
+    }
+  }
+
+  // N2 T3 §3 positive-control private channel (2026-09-28). The SAME write
+  // honesty as writeStimulusFile above: the open's TRUNC already wiped any
+  // previous request, so a failed/short WRITE must not leave an empty or
+  // partial file the extension could parse into a control — the failure path
+  // removes exactly this one file (logged independently, with its own error
+  // code; a removal failure is never reported as a removal). The payload is
+  // never logged, and `bytes=` is the real UTF-8 byte count (never the UTF-16
+  // code-unit `text.length`).
+  private writeControlFile(text: string): void {
+    const path: string = `${this.context.filesDir}/${N2_CONTROL_FILE}`;
+    let file: fs.File | undefined = undefined;
+    let writeFailed: boolean = false;
+    let failureCode: string = 'none';
+    let expectedBytes: number = 0;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      const written: number = fs.writeSync(file.fd, text);
+      expectedBytes = new util.TextEncoder().encode(text).byteLength;
+      if (written !== expectedBytes) {
+        writeFailed = true;
+        failureCode = `short-write:${written}of${expectedBytes}`;
+      }
+    } catch (error) {
+      writeFailed = true;
+      failureCode = String((error as BusinessFailure).code ?? 'none');
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG,
+            'N2_CONTROL_FILE_CLOSE_FAILED|file=%{public}s|code=%{public}s',
+            N2_CONTROL_FILE, String((closeError as BusinessFailure).code ?? 'none'));
+        }
+      }
+    }
+    if (!writeFailed) {
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_FILE_WRITTEN|file=%{public}s|bytes=%{public}d|note=diagnostic-only-non-secret',
+        N2_CONTROL_FILE, expectedBytes);
+      return;
+    }
+    hilog.error(DOMAIN, TAG,
+      'N2_CONTROL_FILE_WRITE_FAILED|file=%{public}s|code=%{public}s|note=no-control',
+      N2_CONTROL_FILE, failureCode);
+    this.removeControlFile('failed-write-cleanup');
+  }
+
+  // Delete THE ONE positive-control request file (basename above) — from the
+  // default no-control launch path, from the combination refusal, and from a
+  // failed write. Credential / config / deviation / arm-ticket / stimulus
+  // files are NEVER touched here.
+  private removeControlFile(note: string): void {
+    const path: string = `${this.context.filesDir}/${N2_CONTROL_FILE}`;
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      fs.unlinkSync(path);
+      hilog.info(DOMAIN, TAG,
+        'N2_CONTROL_FILE_REMOVED|file=%{public}s|note=%{public}s', N2_CONTROL_FILE, note);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'N2_CONTROL_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
+        N2_CONTROL_FILE, String((error as BusinessFailure).code ?? 'none'), note);
     }
   }
 }

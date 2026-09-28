@@ -137,6 +137,82 @@ pub async fn resolve(host: &str, supply: &Arc<SocketSupply>) -> io::Result<Ipv4A
     resolve_on_servers(host, supply, &servers).await
 }
 
+// N2 D-row (preregistration v4 §3 evidence 3 / §4 D): the facts of ONE
+// production protected query that the armed `N2_DNS` receipt reports. The
+// ANSWER CONTENT is deliberately not carried here — the receipt exposes the
+// transaction id, the resolver, the descriptor pair, the timing and the
+// id-comparison verdict only.
+#[derive(Clone, Copy, Debug)]
+struct DnsFacts {
+    sent_mono_ms: u64,
+    response_id: i32,
+    rcode: i32,
+    answer_count: i32,
+    has_response: bool,
+}
+
+impl DnsFacts {
+    fn new() -> Self {
+        Self { sent_mono_ms: 0, response_id: -1, rcode: -1, answer_count: -1, has_response: false }
+    }
+}
+
+/// The response header fields as received (id / RCODE / ANCOUNT); a datagram
+/// too short to carry a header keeps `-1` for what could not be decoded.
+fn response_facts(packet: &[u8]) -> (i32, i32, i32) {
+    let response_id = if packet.len() >= 2 {
+        u16::from_be_bytes([packet[0], packet[1]]) as i32
+    } else { -1 };
+    let (rcode, answer_count) = if packet.len() >= 12 {
+        ((packet[3] & 0x0f) as i32, u16::from_be_bytes([packet[6], packet[7]]) as i32)
+    } else { (-1, -1) };
+    (response_id, rcode, answer_count)
+}
+
+/// The D-row verdict of one production query — the query-id vs response-id
+/// comparison the frozen §4 D row asks for:
+///   * `matched`    — a response arrived, its id EQUALS the sent id, and the
+///                    full A-record validation passed;
+///   * `mismatched` — a datagram arrived whose transaction id differs from the
+///                    sent id (never a match, whatever its body says);
+///   * `timeout`    — no datagram within the query timeout;
+///   * `error`      — anything else (send/recv failure, or a same-id response
+///                    the parser rejected: bad question, no A record, …).
+fn dns_response_class(ok: bool, facts: &DnsFacts, query_id: u16, error: &str) -> &'static str {
+    if ok { return "matched"; }
+    if error == "dns:timeout" { return "timeout"; }
+    if facts.has_response && facts.response_id >= 0 && facts.response_id != query_id as i32 {
+        return "mismatched";
+    }
+    "error"
+}
+
+fn emit_dns_facts(host: &str, addr: SocketAddrV4, query_id: u16, request_fd: i32,
+    facts: &DnsFacts, outcome: &io::Result<Ipv4Addr>, elapsed_ms: u128) {
+    if request_fd < 0 { return; }
+    let error_token = outcome.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+    let receipt = crate::n2_socket_trace::DnsReceipt {
+        query_id,
+        qname: host.to_string(),
+        server: addr.into(),
+        // `fd` follows the N2_SOCK convention (the shell original); when the
+        // armed trace has no registration for this descriptor there is no
+        // original to report, so the core-owned descriptor is reported for both
+        // fields rather than an invented number.
+        fd: crate::n2_socket_trace::original_fd(request_fd).unwrap_or(request_fd),
+        dup_fd: request_fd,
+        sent_mono_ms: facts.sent_mono_ms,
+        response: dns_response_class(outcome.is_ok(), facts, query_id, &error_token),
+        rcode: facts.rcode,
+        answer_count: facts.answer_count,
+        elapsed_ms,
+    };
+    // Armed-only: `None` (zero output) whenever the evidence switch is off.
+    if let Some(line) = crate::n2_socket_trace::dns_receipt(&receipt) {
+        crate::hilog::emit(&line);
+    }
+}
+
 async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[SocketAddrV4]) -> io::Result<Ipv4Addr> {
     if servers.is_empty() { return Err(io::Error::other("dns:no-physical-server")); }
     let mut last = io::Error::other("dns:no-answer");
@@ -144,9 +220,11 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
         let started = Instant::now();
         let mut id = [0u8; 2];
         crypto_box::aead::OsRng.fill_bytes(&mut id);
-        let query = question(host, u16::from_be_bytes(id))?;
+        let query_id = u16::from_be_bytes(id);
+        let query = question(host, query_id)?;
         let mut request_id = 0;
         let mut request_fd = -1;
+        let mut facts = DnsFacts::new();
         let outcome: io::Result<Ipv4Addr> = async {
             let (id, fd) = supply.request_with_id(Purpose::Dns).await.map_err(|e| io::Error::other(e.token()))?;
             request_id = id;
@@ -158,14 +236,24 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
                 socket.connect(addr).await?;
                 crate::n2_socket_trace::io_begin(socket.as_raw_fd(), addr.into());
                 let sent = socket.send(&query).await;
+                facts.sent_mono_ms = crate::sys::mono_ms();
                 crate::n2_socket_trace::first_io(socket.as_raw_fd(), addr.into(),
                     if sent.is_ok() { "sent" } else { "failed" }, "dns_query");
                 sent?;
                 let mut buf = [0u8; 1500];
                 let size = socket.recv(&mut buf).await?;
+                facts.has_response = true;
+                let (response_id, rcode, answer_count) = response_facts(&buf[..size]);
+                facts.response_id = response_id;
+                facts.rcode = rcode;
+                facts.answer_count = answer_count;
                 response(&buf[..size], &query)
             }).await.map_err(|_| io::Error::other("dns:timeout"))?
         }.await;
+        // N2 D-row: one armed-only `N2_DNS` receipt per production query, before
+        // the (unchanged) `protected-dns:` result line below.
+        emit_dns_facts(host, addr, query_id, request_fd, &facts, &outcome,
+            started.elapsed().as_millis());
         match outcome {
             Ok(ip) => {
                 crate::hilog::emit(&format!("protected-dns: id={request_id} host={host} fd={request_fd} server={addr} elapsed_ms={} result={ip}", started.elapsed().as_millis()));
@@ -276,5 +364,63 @@ mod tests {
         provider.await.unwrap();
         let mut buf = [0u8; 512];
         assert!(tokio::time::timeout(Duration::from_millis(50), server.recv_from(&mut buf)).await.is_err());
+    }
+
+    // ---------------- N2_DNS (preregistration v4 §4 D row) -----------------
+
+    fn facts_for(packet: Option<&[u8]>) -> DnsFacts {
+        let mut facts = DnsFacts::new();
+        if let Some(packet) = packet {
+            facts.has_response = true;
+            let (response_id, rcode, answer_count) = response_facts(packet);
+            facts.response_id = response_id;
+            facts.rcode = rcode;
+            facts.answer_count = answer_count;
+        }
+        facts
+    }
+
+    #[test]
+    fn dns_verdict_matched_mismatched_timeout_and_error() {
+        let query_id = 0x1234;
+        let q = question("relay.example", query_id).unwrap();
+        let good = answer(&q, [192, 0, 2, 7]);
+
+        // A full A-record answer with the sent id is the ONLY `matched`.
+        let matched = facts_for(Some(&good));
+        assert_eq!(dns_response_class(true, &matched, query_id, ""), "matched");
+        // A same-id body the parser rejected is never a match.
+        assert_eq!(dns_response_class(false, &matched, query_id, "dns:no-a-record"), "error");
+
+        // A datagram whose transaction id differs from the sent one.
+        let mut wrong = good.clone();
+        wrong[1] ^= 1;
+        let mismatched = facts_for(Some(&wrong));
+        assert_eq!(mismatched.response_id, (query_id as i32) ^ 1);
+        assert_eq!(dns_response_class(false, &mismatched, query_id, "dns:id-mismatch"), "mismatched");
+        // Even if the body happened to parse, the id verdict still rules.
+        assert_eq!(dns_response_class(false, &mismatched, query_id, "dns:question-mismatch"), "mismatched");
+
+        // A silent resolver.
+        let timeout = facts_for(None);
+        assert_eq!(dns_response_class(false, &timeout, query_id, "dns:timeout"), "timeout");
+        // A send/recv failure that is not a timeout.
+        assert_eq!(dns_response_class(false, &timeout, query_id, "dns:no-physical-server"), "error");
+    }
+
+    #[test]
+    fn dns_response_facts_decode_header_and_stay_honest_when_short() {
+        let q = question("relay.example", 0x1234).unwrap();
+        let good = answer(&q, [192, 0, 2, 7]);
+        assert_eq!(response_facts(&good), (0x1234, 0, 1));
+        // A datagram too short for a header: the id is only reported when the
+        // two bytes are there, and rcode/ANCOUNT stay -1.
+        assert_eq!(response_facts(&[0x12]), (-1, -1, -1));
+        assert_eq!(response_facts(&[0x12, 0x34, 0x81]), (0x1234, -1, -1));
+        // RCODE is the low nibble of byte 3 (NXDOMAIN = 3, no answers).
+        let mut nx = good.clone();
+        nx[3] = 0x83;
+        nx[7] = 0;
+        assert_eq!(response_facts(&nx), (0x1234, 3, 0));
     }
 }
