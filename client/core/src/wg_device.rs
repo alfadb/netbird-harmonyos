@@ -424,6 +424,7 @@ impl TunFrameTee for TunTeeCounts {
 /// the collector's short-lived marker scanner.
 pub struct N2DestinationTee {
     inner: Mutex<N2DestinationState>,
+    control: Mutex<crate::n2_control::ControlState>,
 }
 
 struct N2DestinationState {
@@ -444,9 +445,60 @@ struct N2DestinationRow {
 
 impl N2DestinationTee {
     pub fn new(targets: Vec<[u8; 4]>, now_ms: u64) -> Self {
-        Self { inner: Mutex::new(N2DestinationState {
-            targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
-        }) }
+        Self {
+            control: Mutex::new(crate::n2_control::ControlState::new(targets.clone())),
+            inner: Mutex::new(N2DestinationState {
+                targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
+            }),
+        }
+    }
+
+    pub fn configure_outer(&self, targets: Vec<([u8; 4], u8, u16)>) {
+        let count = targets.len();
+        self.control.lock_poison().set_outer(targets);
+        emit(&format!("N2_TUN_OUTER_SET|count={count}|frozen={}|diag=true|is_evidence=false", count != 0));
+    }
+
+    pub fn leak_count(&self) -> u64 { self.control.lock_poison().leaks() }
+
+    pub fn outer_count(&self) -> usize { self.control.lock_poison().outer_count() }
+
+    pub fn register_control(&self, id: &str, dst: [u8; 4], port: u16,
+                            proto: u8, sport: u16, now: u64) -> Result<(), &'static str> {
+        self.control.lock_poison().register(id, dst, port, proto, sport, now)
+    }
+
+    pub fn cancel_control(&self, id: &str) {
+        self.control.lock_poison().cancel(id);
+    }
+
+    /// Called before WG and before the destination counter, so controls never
+    /// become production leakage and never enter the encryption path.
+    pub fn consume_control(&self, frame: &[u8], now: u64) -> bool {
+        if let Some(line) = self.control.lock_poison().scan(frame, now) {
+            emit(&line);
+            return true;
+        }
+        false
+    }
+
+    pub fn gap(&self, from: u64, to: u64, reason: &str) {
+        emit(&format!("N2_TUN_GAP|from={from}|to={to}|reason={reason}|diag=true|is_evidence=false"));
+    }
+
+    pub fn control_totals(&self) -> (u64, u64, u64) {
+        self.control.lock_poison().totals()
+    }
+
+    pub fn control_due_lines(&self, now: u64) -> Vec<String> {
+        self.control.lock_poison().due(now)
+    }
+
+    pub fn control_status(&self, id: &str) -> &'static str {
+        let now = sys::mono_ms();
+        let mut control = self.control.lock_poison();
+        for line in control.due(now) { emit(&line); }
+        control.status(id)
     }
 
     pub fn due_lines(&self, now_ms: u64) -> Vec<String> {
@@ -582,6 +634,7 @@ impl Drop for WgPeer {
         // N11 fd contract: exactly our egress dup; provider/ICE-session fds
         // are never touched here.
         if let Some(fd) = self.egress_fd.take() {
+            crate::n2_socket_trace::closed(fd);
             unsafe { sys::close(fd) };
         }
     }
@@ -652,10 +705,12 @@ impl WgDevice {
         let local = match getsockname(fd) {
             Ok(l) => l,
             Err(e) => {
+                crate::n2_socket_trace::closed(fd);
                 unsafe { sys::close(fd) };
                 return Err(e);
             }
         };
+        crate::n2_socket_trace::duplicated(wg_socket_raw, fd);
         emit(&format!(
             "N6_WG_DEVICE|adopt|local={}.{}.{}.{}:{}|peers=0",
             local.0[0], local.0[1], local.0[2], local.0[3], local.1
@@ -709,10 +764,13 @@ impl WgDevice {
         let fd = crate::mgmtsock::dup_socket_fd(wg_socket_raw)
             .map_err(|e| format!("wg-device-socket-bad-fd (errno={})", e.errno()))?;
         let local = getsockname(fd).map_err(|e| {
+            crate::n2_socket_trace::closed(fd);
             unsafe { sys::close(fd) };
             e
         })?;
+        crate::n2_socket_trace::duplicated(wg_socket_raw, fd);
         if let Some(old) = self.fd.take() {
+            crate::n2_socket_trace::closed(old);
             unsafe { sys::close(old) };
         }
         self.fd = Some(fd);
@@ -874,11 +932,15 @@ impl WgDevice {
         let local = match getsockname(fd) {
             Ok(l) => l,
             Err(e) => {
+                crate::n2_socket_trace::closed(fd);
                 unsafe { sys::close(fd) };
                 return Err(e);
             }
         };
+        crate::n2_socket_trace::duplicated(raw_fd, fd);
+        crate::n2_socket_trace::selected_wg(fd);
         if let Some(old) = self.peers[idx].egress_fd.replace(fd) {
+            crate::n2_socket_trace::closed(old);
             unsafe { sys::close(old) }; // replaced attach: close OUR old dup only
         }
         self.peers[idx].egress_local = Some(local);
@@ -906,6 +968,7 @@ impl WgDevice {
         let had_path = p.endpoint.is_some() || p.egress_fd.is_some();
         p.endpoint = None;
         if let Some(fd) = p.egress_fd.take() {
+            crate::n2_socket_trace::closed(fd);
             unsafe { sys::close(fd) };
         }
         p.egress_local = None;
@@ -1099,23 +1162,34 @@ impl WgDevice {
     /// Poll + read + `send_from_tun` (device-originated frames). Non-blocking:
     /// poll timeout 0, at most `DRAIN_MAX` frames per call.
     pub fn service_tun(&mut self, now_ms: u64) -> usize {
-        let Some(fd) = self.tun.fd() else { return 0 };
+        let Some(fd) = self.tun.fd() else {
+            if let Some(tee) = &self.n2_dest_tee { tee.gap(now_ms, now_ms, "tun-fd-missing"); }
+            return 0;
+        };
         let mut n = 0usize;
         while n < DRAIN_MAX {
             let (ret, _e, rev) = sys::poll1(fd, sys::POLLIN, 0);
-            if ret <= 0 || (rev & sys::POLLIN) == 0 {
+            if ret < 0 || (rev & (sys::POLLERR | sys::POLLHUP | sys::POLLNVAL)) != 0 {
+                if let Some(tee) = &self.n2_dest_tee { tee.gap(now_ms, sys::mono_ms(), "tun-poll-error"); }
                 break;
             }
+            if ret == 0 || (rev & sys::POLLIN) == 0 { break; }
             let mut buf = [0u8; WG_BUF];
             match self.tun.read_frame(&mut buf) {
                 Ok(len) => {
-                    // I2 from-os feed: AFTER the successful read, BEFORE the
-                    // route decision — an unrouteable frame is observed too.
+                    if self.n2_dest_tee.as_ref().is_some_and(|tee|
+                        tee.consume_control(&buf[..len], now_ms)) {
+                        n += 1;
+                        continue;
+                    }
                     self.feed_tun_tee(TunFrameDir::FromOs, &buf[..len]);
                     self.send_from_tun(&buf[..len], now_ms);
                     n += 1;
                 }
-                Err(_) => break, // Closed/Eof/BadFd: stop draining this round
+                Err(_) => {
+                    if let Some(tee) = &self.n2_dest_tee { tee.gap(now_ms, sys::mono_ms(), "tun-read-error"); }
+                    break;
+                }
             }
         }
         n
@@ -1158,7 +1232,13 @@ impl WgDevice {
     /// housekeeping on boringtun's own real clock). Returns datagrams sent.
     pub fn tick(&mut self, now_ms: u64) -> usize {
         if let Some(tee) = &self.n2_dest_tee {
-            for line in tee.due_lines(now_ms) {
+            for line in tee.control_due_lines(now_ms) { emit(&line); }
+            let dest_lines = tee.due_lines(now_ms);
+            if !dest_lines.is_empty() {
+                let (seen, control, production) = tee.control_totals();
+                emit(&format!("N2_TUN_FRAMES|scope=session|mono_ms={now_ms}|seen={seen}|control={control}|production={production}|leaks={}|diag=true|is_evidence=false", tee.leak_count()));
+            }
+            for line in dest_lines {
                 emit(&line);
             }
         }
@@ -1455,6 +1535,9 @@ impl WgDevice {
             return false;
         };
         let sa = sys::sockaddr_in::new(dst.0, dst.1);
+        if crate::n2_socket_trace::armed() {
+            crate::n2_socket_trace::io_begin(fd, std::net::SocketAddr::from((dst.0, dst.1)));
+        }
         let n = unsafe {
             sys::sendto(
                 fd,
@@ -1465,6 +1548,10 @@ impl WgDevice {
                 core::mem::size_of::<sys::sockaddr_in>() as u32,
             )
         };
+        if crate::n2_socket_trace::armed() {
+            crate::n2_socket_trace::first_io(fd, std::net::SocketAddr::from((dst.0, dst.1)),
+                if n < 0 { "failed" } else { "sent" }, "wg_sendto");
+        }
         if n < 0 {
             self.stats.send_errors += 1;
             return false;
@@ -1493,6 +1580,7 @@ impl Drop for WgDevice {
         // fd contract: ONLY our dup is closed here; the raw socket belongs to
         // the shell/provider. TunFd closes its own dup via its Drop.
         if let Some(fd) = self.fd.take() {
+            crate::n2_socket_trace::closed(fd);
             unsafe { sys::close(fd) };
         }
     }
@@ -1958,9 +2046,18 @@ struct FeedInner {
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
     n2_dest_tee: Option<Arc<N2DestinationTee>>,
+    n2_gap_start: Option<u64>,
     /// Audit counters (tests + honest observation; not in the status JSON).
     feeds_accepted: u64,
     build_failures: u64,
+}
+
+impl Drop for FeedInner {
+    fn drop(&mut self) {
+        if let Some(fd) = self.wg_socket_owned.as_ref() {
+            crate::n2_socket_trace::closed(fd.as_raw_fd());
+        }
+    }
 }
 
 impl WgDeviceFeed {
@@ -1970,13 +2067,27 @@ impl WgDeviceFeed {
         WgDeviceFeed { cfg, inner: Mutex::new(FeedInner::default()) }
     }
 
-    pub fn set_n2_destination_targets(&self, targets: Vec<[u8; 4]>) {
+    pub fn set_n2_destination_targets(&self, targets: Vec<[u8; 4]>) -> bool {
         let mut g = self.inner.lock_poison();
+        if g.device.is_some() || g.n2_dest_tee.is_some() { return false; }
         let tee = Arc::new(N2DestinationTee::new(targets, sys::mono_ms()));
-        if let Some(device) = &g.device {
-            device.with_device(|d| d.attach_n2_dest_tee(tee.clone()));
-        }
+        g.n2_gap_start = Some(sys::mono_ms());
         g.n2_dest_tee = Some(tee);
+        true
+    }
+
+    pub fn set_n2_outer_targets(&self, targets: Vec<([u8; 4], u8, u16)>) -> bool {
+        let g = self.inner.lock_poison();
+        if g.device.is_some() { return false; }
+        let Some(tee) = &g.n2_dest_tee else { return false; };
+        tee.configure_outer(targets);
+        true
+    }
+
+    pub fn n2_control_tee(&self) -> Option<Arc<N2DestinationTee>> {
+        let g = self.inner.lock_poison();
+        if g.device.is_none() { return None; }
+        g.n2_dest_tee.clone()
     }
 
     /// Shell feed #1: the (protected) WG outer UDP socket fd. The number is
@@ -2003,7 +2114,12 @@ impl WgDeviceFeed {
         // Retain the protected outer socket before the shell can close its fd.
         // The TUN still belongs to VpnConnection and is duped at adoption.
         let owned = match crate::mgmtsock::dup_socket_fd(raw_fd) {
-            Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
+            Ok(fd) => {
+                if matches!(which, FeedWhich::WgSocket) {
+                    crate::n2_socket_trace::duplicated(raw_fd, fd);
+                }
+                unsafe { OwnedFd::from_raw_fd(fd) }
+            }
             Err(e) => return Err(WgFeedRefusal::FdInvalid { errno: e.errno() }),
         };
         let built = {
@@ -2014,14 +2130,19 @@ impl WgDeviceFeed {
                         if let Some(Err(_)) = g.device.as_ref().map(|dev| {
                             dev.with_device(|d| d.reattach_socket(owned.as_raw_fd()))
                         }) {
+                            crate::n2_socket_trace::closed(owned.as_raw_fd());
                             return Err(WgFeedRefusal::SocketSwapUnsupported);
                         }
+                        crate::n2_socket_trace::closed(owned.as_raw_fd());
                         g.wg_socket_raw = Some(raw_fd);
                         g.feeds_accepted += 1;
                         emit("N8_WG_FEED|socket-replaced|device-kept");
                         return Ok(());
                     }
                     g.wg_socket_raw = Some(raw_fd);
+                    if let Some(old) = g.wg_socket_owned.as_ref() {
+                        crate::n2_socket_trace::closed(old.as_raw_fd());
+                    }
                     g.wg_socket_owned = Some(owned);
                 }
                 FeedWhich::Tun => {
@@ -2031,8 +2152,12 @@ impl WgDeviceFeed {
                         // dup, deactivate the old; sessions kept). On failure
                         // the old TUN stays active (no half state) and the
                         // refusal surfaces to the shell's fail-closed path.
+                        let replace_begin = sys::mono_ms();
                         if let Err(e) = dev.with_device(|d| d.replace_tun(raw_fd)) {
                             return Err(WgFeedRefusal::TunReplaceFailed { errno: e.errno() });
+                        }
+                        if let Some(tee) = &g.n2_dest_tee {
+                            tee.gap(replace_begin, sys::mono_ms(), "tun-replaced");
                         }
                         g.tun_raw = Some(raw_fd);
                         g.feeds_accepted += 1;
@@ -2107,8 +2232,11 @@ impl WgDeviceFeed {
             Err(e) => return Self::build_failed(g, &e),
         };
         let app = Arc::new(WgDeviceApplier::new(dev));
-        if let Some(tee) = &g.n2_dest_tee {
+        if let Some(tee) = g.n2_dest_tee.clone() {
             app.with_device(|d| d.attach_n2_dest_tee(tee.clone()));
+            if let Some(from) = g.n2_gap_start.take() {
+                tee.gap(from, sys::mono_ms(), "before-tun-attach");
+            }
         }
         // replay the buffered control-plane state; peer-set errors here mean
         // buffered entries the device rejects — fail the build (the map is
@@ -2146,6 +2274,7 @@ impl WgDeviceFeed {
             g.endpoints.len()
         ));
         g.device = Some(app);
+        crate::n2_socket_trace::closed(wg_raw);
         g.wg_socket_owned = None;
         true
     }
@@ -2156,6 +2285,9 @@ impl WgDeviceFeed {
     fn build_failed(g: &mut FeedInner, reason: &str) -> bool {
         g.build_failures += 1;
         g.wg_socket_raw = None;
+        if let Some(fd) = g.wg_socket_owned.as_ref() {
+            crate::n2_socket_trace::closed(fd.as_raw_fd());
+        }
         g.wg_socket_owned = None;
         g.tun_raw = None;
         emit(&format!("N7_WG_FEED|build-failed|reason={reason}"));
@@ -2191,9 +2323,16 @@ impl WgPeerApplier for WgDeviceFeed {
         g.egress.clear();
         g.carriers.clear();
         g.wg_socket_raw = None;
+        if let Some(fd) = g.wg_socket_owned.as_ref() {
+            crate::n2_socket_trace::closed(fd.as_raw_fd());
+        }
         g.wg_socket_owned = None;
         g.tun_raw = None;
+        if let Some(tee) = &g.n2_dest_tee {
+            tee.gap(sys::mono_ms(), sys::mono_ms(), "connector-stop");
+        }
         g.n2_dest_tee = None;
+        g.n2_gap_start = None;
         if let Some(d) = g.device.take() {
             d.clear();
         }
@@ -2428,6 +2567,49 @@ mod feed_tests {
         let (wg_raw, tun_raw, tun_test_end) = fed_fds();
         let slot = WgDeviceFeed::new(WgDeviceConfig::new(test_secret_b64(0xA5)));
         (slot, wg_raw, tun_raw, tun_test_end)
+    }
+
+    #[test]
+    fn control_marker_drops_before_wg_and_production_still_routes() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let dst = [119, 29, 29, 119];
+        assert!(slot.set_n2_destination_targets(vec![dst]));
+        assert!(!slot.set_n2_destination_targets(vec![dst]));
+        assert!(slot.set_n2_outer_targets(vec![(dst, 17, 53)]));
+        slot.feed_wg_socket(wg_raw).unwrap();
+        slot.feed_tun(tun_raw).unwrap();
+        assert!(!slot.set_n2_destination_targets(vec![dst]));
+        assert!(!slot.set_n2_outer_targets(vec![(dst, 17, 53)]));
+        let tee = slot.n2_control_tee().unwrap();
+        let now = sys::mono_ms();
+        tee.register_control("pre", dst, 53, 17, 0, now).unwrap();
+        let mut packet = vec![0u8; 28 + b"N2CTRL:pre".len()];
+        packet[0] = 0x45;
+        let len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&len.to_be_bytes());
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 1]);
+        packet[16..20].copy_from_slice(&dst);
+        packet[20..22].copy_from_slice(&40000u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&53u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&(len - 20).to_be_bytes());
+        packet[28..].copy_from_slice(b"N2CTRL:pre");
+        slot.with_device(|d| {
+            assert_eq!(unsafe { sys::write(tun_end, packet.as_ptr().cast(), packet.len()) }, packet.len() as isize);
+            assert_eq!(d.service_tun(now), 1);
+            assert_eq!(d.stats.no_route_drops, 0);
+        }).unwrap();
+        assert_eq!(tee.control_status("pre"), "hit");
+        assert_eq!(tee.control_totals(), (1, 1, 0));
+        packet[28..].copy_from_slice(b"PRODUCTION");
+        slot.with_device(|d| {
+            assert_eq!(unsafe { sys::write(tun_end, packet.as_ptr().cast(), packet.len()) }, packet.len() as isize);
+            assert_eq!(d.service_tun(now + 1), 1);
+            assert_eq!(d.stats.no_route_drops, 1);
+        }).unwrap();
+        assert_eq!(tee.control_totals(), (2, 1, 1));
+        assert_eq!(tee.leak_count(), 1);
+        for fd in [wg_raw, tun_raw, tun_end] { unsafe { sys::close(fd) }; }
     }
 
     #[test]

@@ -857,6 +857,7 @@ fn gather_interface(
 ) -> Result<(), ManagementError> {
     let dup = socks.take_owned().map_err(seam_to_management)?.into_raw_fd();
     let cleanup_and = |dup: i32, e: ManagementError, errors_out: &mut Vec<(String, ManagementError)>| {
+        crate::n2_socket_trace::closed(dup);
         unsafe { sys::close(dup) };
         errors_out.push((iface.name.clone(), e));
     };
@@ -884,6 +885,7 @@ fn gather_interface(
     host_out.push(base.clone());
 
     if servers.is_empty() {
+        crate::n2_socket_trace::closed(dup);
         unsafe { sys::close(dup) };
         return Ok(());
     }
@@ -909,6 +911,11 @@ fn gather_interface(
     for (idx, addr, txn) in &targets {
         let req = stun::build_binding_request(*txn);
         let mut sent = false;
+        if crate::n2_socket_trace::armed() {
+            let remote = std::net::SocketAddrV4::new(std::net::Ipv4Addr::from(addr.sin_addr),
+                u16::from_be(addr.sin_port));
+            crate::n2_socket_trace::io_begin(dup, remote.into());
+        }
         for _retry in 0..3 {
             let n = unsafe {
                 sys::sendto(
@@ -921,6 +928,12 @@ fn gather_interface(
                 )
             };
             if n >= 0 {
+                if crate::n2_socket_trace::armed() {
+                    let remote = std::net::SocketAddrV4::new(std::net::Ipv4Addr::from(addr.sin_addr),
+                        u16::from_be(addr.sin_port));
+                    let txn_id: String = txn.0.iter().map(|b| format!("{b:02x}")).collect();
+                    crate::n2_socket_trace::first_io(dup, remote.into(), "sent", &format!("stun_txn_{txn_id}"));
+                }
                 sent = true;
                 break;
             }
@@ -929,6 +942,11 @@ fn gather_interface(
             }
         }
         if !sent {
+            if crate::n2_socket_trace::armed() {
+                let remote = std::net::SocketAddrV4::new(std::net::Ipv4Addr::from(addr.sin_addr),
+                    u16::from_be(addr.sin_port));
+                crate::n2_socket_trace::first_io(dup, remote.into(), "failed", "stun_send");
+            }
             let errno = sys::errno();
             outstanding.retain(|(i, _)| i != idx);
             errors_out.push((
@@ -986,6 +1004,13 @@ fn gather_interface(
         let ctx = format!("{}/{}:{}", iface.name, server.host, server.port);
         match stun::parse_binding_response(datagram, &txn) {
             Ok(StunReply::Mapped { addr, port }) => {
+                if crate::n2_socket_trace::armed() {
+                    let txn_id: String = txn.0.iter().map(|b| format!("{b:02x}")).collect();
+                    let local = crate::n2_socket_trace::local_addr(dup).map_or_else(|| "unknown".into(), |a| a.to_string());
+                    crate::hilog::emit(&format!("N2_SOCK_STUN|dup_fd={dup}|txn_id={txn_id}|server={}:{}|local={local}|mapped={}:{}|mono_ms={}|diag=true|is_evidence=false",
+                        std::net::Ipv4Addr::from(servers[idx].0), servers[idx].1,
+                        std::net::Ipv4Addr::from(addr), port, sys::mono_ms()));
+                }
                 srflx_out.push(Candidate::srflx_candidate(&base, addr, port));
             }
             Ok(StunReply::Error(code)) => {
@@ -1001,6 +1026,7 @@ fn gather_interface(
             ManagementError::Timeout,
         ));
     }
+    crate::n2_socket_trace::closed(dup);
     unsafe { sys::close(dup) };
     Ok(())
 }

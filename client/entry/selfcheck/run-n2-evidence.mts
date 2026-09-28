@@ -23,7 +23,9 @@ try {
   const cfg = await import(pathToFileURL(join(dir, 'NetBirdVpnConfig.ts')).href);
   const decide = (n2data: unknown, blocked = false, s6 = false, force = false,
     exclusions?: unknown) => n2.parseN2Evidence(n2data, blocked, s6, force, exclusions);
-  const req = { trusted_self: true, capture_32: ['119.29.29.119'], hdc_control_ip: '192.168.50.1' };
+  const req = { trusted_self: true, capture_32: ['119.29.29.119'],
+    outer_destinations: ['tcp/119.29.29.119:443', 'udp/119.29.29.119:53'],
+    hdc_control_ip: '192.168.50.1' };
   const assert = (ok: boolean, label: string) => {
     if (!ok) throw new Error(label);
     console.log('ok ' + label);
@@ -33,7 +35,10 @@ try {
     [req, true, false, false, undefined], [req, false, true, false, undefined],
     [req, false, false, true, undefined], [req, false, false, false, true],
     [{ ...req, hdc_control_ip: '119.29.29.119' }, false, false, false, undefined],
-    [{ ...req, capture_32: ['119.29.29.999'] }, false, false, false, undefined]
+    [{ ...req, capture_32: ['119.29.29.999'] }, false, false, false, undefined],
+    [{ ...req, outer_destinations: [] }, false, false, false, undefined],
+    [{ ...req, outer_destinations: ['udp/119.29.29.120:53'] }, false, false, false, undefined],
+    [{ ...req, outer_destinations: ['udp/119.29.29.119:53', 'udp/119.29.29.119:53'] }, false, false, false, undefined]
   ] as const) {
     assert(decide(data, blocked, s6, force, exclusions).options === undefined,
       'refuses conflict or invalid address');
@@ -55,6 +60,14 @@ try {
     'default config unchanged');
   assert(JSON.stringify(n2.withN2EvidenceRoutes(routed, accepted.capture32)) === JSON.stringify(routed),
     'recreate route idempotence');
+  assert(n2.validateN2Control(accepted.capture32, '119.29.29.119:53', 'event-pre') === '',
+    'control accepts armed captured endpoint');
+  assert(n2.validateN2Control(accepted.capture32, '119.29.29.120:53', 'event-pre') ===
+    'target-not-captured', 'control rejects destination outside capture');
+  assert(n2.validateN2Control(accepted.capture32, '119.29.29.119:65536', 'event-pre') ===
+    'target-not-captured', 'control rejects invalid port');
+  assert(n2.validateN2Control(accepted.capture32, '119.29.29.119:53', 'unsafe|marker') ===
+    'invalid-marker', 'control rejects unsafe marker');
   let refused = false;
   try {
     n2.withN2EvidenceRoutes({ ...routed, routes: [...routed.routes,

@@ -11,6 +11,7 @@ import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRou
   withTunnelSubnetRoute } from './NetBirdVpnConfig';
 import { N2EvidenceDecision, N2EvidenceOptions, parseN2Evidence, withN2EvidenceRoutes,
   withoutN2ExcludedRoutes } from './NetBirdN2Evidence';
+import { N2ControlProtocol, sendN2Control } from './NetBirdN2Control';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -655,6 +656,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private n2EvidenceError: string = '';
   private n2ForceDefaultRoute: boolean = false;
 
+  sendN2PositiveControl(target: string, protocol: N2ControlProtocol, id: string): void {
+    sendN2Control(this.n2Evidence, target, protocol, id);
+  }
+
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
     if (wantRequestId.length > 0 && wantRequestId.length <= 96) {
@@ -801,7 +806,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
         let adopted: boolean = false;
         try {
-          if (!await this.protectSocketWithBox(vpn, opened.fd)) { break; }
+          if (!await this.protectSocketWithBox(vpn, opened.fd, 'Wb')) { break; }
           if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
             this.connection !== vpn) { continue; }
           const fed: WgFeedResult = connectorWgSocketFeed(opened.fd);
@@ -839,7 +844,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           }
           let signalFed: boolean = false;
           try {
-            if (await this.protectSocketWithBox(vpn, sock.fd) &&
+            if (await this.protectSocketWithBox(vpn, sock.fd, 'S') &&
               epoch === this.networkEpoch && !this.destroyRequested && !this.recreateInFlight &&
               this.connection === vpn) {
               signalFed = connectorSignalFeed(sock.fd, signalAddr).ok;
@@ -1043,7 +1048,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // TODO(未验证): protect() on a VpnConnection before create() is the
     // required shape here; the on-device behavior is physical-gate work
     // (N2b) — this box treats any failure/timeout as fail-closed abort.
-    const mgmtProtected: boolean = await this.protectSocketWithBox(connection, mgmtFd);
+    const mgmtProtected: boolean = await this.protectSocketWithBox(connection, mgmtFd, 'M');
     if (!mgmtProtected) {
       socketSupplyCloseFd(mgmtFd);
       hilog.error(DOMAIN, TAG,
@@ -1071,7 +1076,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     if (this.n2Evidence !== undefined) {
       const result: N2TunDestConfigureResult = JSON.parse(core.n2_tun_dest_configure(
-        JSON.stringify({ n2_capture_32: this.n2Evidence.capture32 }))) as N2TunDestConfigureResult;
+        JSON.stringify({ n2_capture_32: this.n2Evidence.capture32,
+          n2_outer_destinations: this.n2Evidence.outerDestinations }))) as N2TunDestConfigureResult;
       if (!result.ok) {
         hilog.error(DOMAIN, TAG,
           'N2_TUN_DEST_CONFIG_FAILED|requestId=%{public}s|error=%{public}s|diag=true|is_evidence=false',
@@ -1387,7 +1393,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return null;
     }
     try {
-      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd, 'S');
       if (!protectedOk || this.connection !== connection || this.recreateInFlight) {
         hilog.error(DOMAIN, TAG,
           'VPN_SIGNAL_PROVISION_FAIL|requestId=%{public}s|stage=protect|fd=%{public}d|' +
@@ -2233,6 +2239,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the parameter). Only a key PRESENT with a non-boolean value is logged, by
   // readDiagSwitch.
   private readDiagSwitches(): void {
+    core.n2_socket_trace_arm(false);
     this.n2Evidence = undefined;
     this.n2EvidenceError = '';
     this.diagBlockedSelf = false;
@@ -2285,6 +2292,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.n2EvidenceError = decision.error;
     this.n2Evidence = decision.options;
     if (this.n2Evidence !== undefined) {
+      core.n2_socket_trace_arm(true);
       this.endpointExclusionsEnabled = false;
     }
   }
@@ -3015,7 +3023,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         reason = 'socket-open';
         return;
       }
-      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+      const protectedOk: boolean = await this.protectSocketWithBox(connection, fd,
+        isDns ? 'D' : request.purpose === 'relay' ? 'R' : request.purpose === 'signal' ? 'S' : 'M', request.id);
       const postReason: string = socketSupplyRejectionReason({
         networkDirty: this.networkDirty, networkRecoveryReady: this.networkRecoveryReady,
         networkRecoveryActive: this.networkRecoveryActive, isDns: isDns,
@@ -3074,7 +3083,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.requestId, fd);
         return false;
       }
-      if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
+      if (!await this.protectSocketWithBox(connection, fd, 'M') || epoch !== this.networkEpoch ||
         protectedConnectionRejectionReason({
           destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
           recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
@@ -3456,7 +3465,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.info(DOMAIN, TAG,
       'VPN_PROTECT_BEGIN|requestId=%{public}s|fd=%{public}d', this.requestId, fd);
 
-    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd);
+    const protectedOk: boolean = await this.protectSocketWithBox(connection, fd, 'Wb');
     if (!protectedOk || this.destroyRequested || this.destroyPromise !== undefined ||
       this.connection !== connection) {
       socketSupplyCloseFd(fd);
@@ -3632,7 +3641,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     const epoch: number = this.networkEpoch;
     try {
-      if (!await this.protectSocketWithBox(connection, fd) || epoch !== this.networkEpoch ||
+      if (!await this.protectSocketWithBox(connection, fd, 'I') || epoch !== this.networkEpoch ||
         protectedConnectionRejectionReason({
           destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
           recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
@@ -3674,12 +3683,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // helper protectSocketWithBox, e8e2cf9). Never throws. Box expiry is
   // reported as failure (fail-closed) — stricter than the spike's
   // best-effort treatment, per governance item 4.
-  private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number): Promise<boolean> {
+  private async protectSocketWithBox(connection: vpnExtension.VpnConnection, fd: number,
+    traceKind: string = '', traceId: string = this.requestId): Promise<boolean> {
     if (this.connection !== connection || this.recreateInFlight || this.destroyRequested ||
       this.destroyPromise !== undefined) {
       return false;
     }
     const t0: number = Date.now();
+    if (this.n2Evidence !== undefined && traceKind.length > 0) {
+      hilog.info(DOMAIN, TAG,
+        'N2_SOCK|phase=open|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
+        'generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
+        traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
+      hilog.info(DOMAIN, TAG,
+        'N2_SOCK|phase=protect_begin|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
+        'generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
+        traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
+    }
     // On the tested device, per-fd protect() resolved despite MANAGE_VPN
     // check-failure log lines. The dev-only deviation skips this call when
     // armed; the normal path protects each outer socket before core handoff.
@@ -3722,6 +3742,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }, PROTECT_BOX_MS);
     });
     const outcome: boolean = await Promise.race([settled, box]);
+    if (this.n2Evidence !== undefined && traceKind.length > 0) {
+      const elapsed: number = Date.now() - t0;
+      hilog.info(DOMAIN, TAG,
+        'N2_SOCK|phase=protect_settle|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
+        'result=%{public}s|elapsed_ms=%{public}d|generation=%{public}d|net_id=%{public}d|' +
+        'wall_ms=%{public}d|diag=true|is_evidence=false',
+        traceKind, traceId, fd, outcome ? 'success' : 'failed', elapsed,
+        this.networkEpoch, this.networkNetId, Date.now());
+      core.n2_socket_trace_protect(fd, traceKind,
+        `${traceId},${this.networkEpoch},${this.networkNetId},${elapsed}`, outcome);
+    }
     if (!outcome && this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
         'VPN_PROTECT_DEVIATION|requestId=%{public}s|fd=%{public}d|mode=route-exclusion|' +

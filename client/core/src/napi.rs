@@ -125,7 +125,11 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
+    reg!("n2_socket_trace_arm", napi_n2_socket_trace_arm);
+    reg!("n2_socket_trace_protect", napi_n2_socket_trace_protect);
     reg!("n2_tun_dest_configure", napi_n2_tun_dest_configure);
+    reg!("n2_control_send", napi_n2_control_send);
+    reg!("n2_control_status", napi_n2_control_status);
     reg!("n2h_collector_arm", napi_n2h_collector_arm);
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
@@ -392,6 +396,8 @@ mod tests {
             "connector_network_config",
             "connector_stop",
             "n2_tun_dest_configure",
+            "n2_control_send",
+            "n2_control_status",
             "n2h_collector_arm",
             "n2h_collector_status",
             "n2h_collector_evidence",
@@ -660,6 +666,24 @@ unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) 
     ret_json(env, crate::connector::connector_stop_json())
 }
 
+unsafe extern "C" fn napi_n2_socket_trace_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    crate::n2_socket_trace::arm(cb_args(env, info).bool_at(0, false));
+    ret_json(env, "{\"ok\":true}".into())
+}
+
+unsafe extern "C" fn napi_n2_socket_trace_protect(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let fields: Vec<_> = a.string_at(2).split(',').map(str::to_owned).collect();
+    if fields.len() == 4 {
+        if let (Ok(generation), Ok(net_id), Ok(elapsed_ms)) = (
+            fields[1].parse::<u64>(), fields[2].parse::<u64>(), fields[3].parse::<u64>()) {
+            crate::n2_socket_trace::protect(a.i32_at(0, -1), &a.string_at(1), &fields[0],
+                generation, net_id, elapsed_ms, a.bool_at(3, false));
+        }
+    }
+    ret_json(env, "{\"ok\":true}".into())
+}
+
 unsafe extern "C" fn napi_n2_tun_dest_configure(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::n2_tun_dest_configure_json(&a.string_at(0)))
@@ -672,6 +696,17 @@ unsafe extern "C" fn napi_n2_tun_dest_configure(env: NapiEnv, info: NapiCallback
 // the control file arms them (§6.1): no arm ⇒ every export answers the
 // documented not-armed / no-evidence shape and `connector_status()` — the
 // frozen document — is untouched (§5.2).
+unsafe extern "C" fn napi_n2_control_send(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_control_send_json(a.i32_at(0, -1),
+        &a.string_at(1), &a.string_at(2), &a.string_at(3)))
+}
+
+unsafe extern "C" fn napi_n2_control_status(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_control_status_json(&a.string_at(0)))
+}
+
 unsafe extern "C" fn napi_n2h_collector_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::n2h_collector::arm_json(&a.string_at(0)))

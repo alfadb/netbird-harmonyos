@@ -154,10 +154,12 @@ pub mod n2h;
 // without a host installed (`n2h_collector::install_host`, the production side
 // being `WgFeedHost`) the arm is refused `no-connector`.
 pub mod n2h_collector;
+pub mod n2_control;
 // N3-7: protected management socket seam (fd provider + per-dial dup-only
 // consumption + tonic connector service) — fail-closed gap 1 fix.
 pub mod mgmtsock;
 pub mod socket_supply;
+pub mod n2_socket_trace;
 pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;

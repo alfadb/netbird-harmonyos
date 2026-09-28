@@ -214,5 +214,6 @@ pub fn set_dns_servers_json(json: &str) -> String {
 
 pub fn close_fd_json(fd: i32) -> String {
     if fd < 0 { return "{\"ok\":false}".into(); }
+    crate::n2_socket_trace::closed(fd);
     format!("{{\"ok\":{}}}", unsafe { crate::sys::close(fd) } == 0)
 }

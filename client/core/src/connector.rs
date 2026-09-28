@@ -5116,12 +5116,91 @@ pub fn n2_tun_dest_configure_json(options_json: &str) -> String {
         Ok(options) if !options.n2_capture_32.is_empty() => options,
         _ => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-targets")),
     };
+    let outer = match config::parse_document(options_json) {
+        Ok(Json::Obj(fields)) => {
+            let Some((_, value)) = fields.iter().find(|(key, _)| key == "n2_outer_destinations") else {
+                return format!("{{{},{}}}", jbool("ok", false), jstr("error", "outer-destinations-required"));
+            };
+            let Json::Arr(items) = value else {
+                return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+            };
+            if items.is_empty() || items.len() > 128 {
+                return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+            }
+            let mut outer = Vec::new();
+            for item in items {
+                let Json::Str(text) = item else {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                };
+                let Some((proto_text, destination)) = text.split_once('/') else {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                };
+                let proto = match proto_text { "tcp" => 6, "udp" => 17, _ => {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                } };
+                let Some((ip_text, port_text)) = destination.rsplit_once(':') else {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                };
+                let Ok(ip) = ip_text.parse::<std::net::Ipv4Addr>() else {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                };
+                let Ok(port) = port_text.parse::<u16>() else {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                };
+                let tuple = (ip.octets(), proto, port);
+                if port == 0 || !options.n2_capture_32.contains(&tuple.0) || outer.contains(&tuple) {
+                    return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations"));
+                }
+                outer.push(tuple);
+            }
+            outer
+        }
+        _ => return format!("{{{},{}}}", jbool("ok", false), jstr("error", "invalid-outer-destinations")),
+    };
     let slot = connector_slot();
     let Some(feed) = slot.as_ref().and_then(|handle| handle.wg_feed.as_ref()) else {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
     };
-    feed.set_n2_destination_targets(options.n2_capture_32);
+    if !feed.set_n2_destination_targets(options.n2_capture_32) {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "tun-already-attached"));
+    }
+    if !feed.set_n2_outer_targets(outer) {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "tun-already-attached"));
+    }
     format!("{{{}}}", jbool("ok", true))
+}
+
+/// A control is only possible while the N2 diagnostic destination tee and
+/// data plane are live. The caller owns fd and must close it after this call.
+pub fn n2_control_send_json(fd: i32, destination: &str, proto: &str, id: &str) -> String {
+    let tee = {
+        let slot = connector_slot();
+        slot.as_ref().and_then(|handle| handle.wg_feed.as_ref())
+            .and_then(|feed| feed.n2_control_tee())
+    };
+    let Some(tee) = tee else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "not-armed-or-no-tun"));
+    };
+    match crate::n2_control::send(&tee, fd, destination, proto, id) {
+        Ok(line) => {
+            crate::hilog::emit(&line);
+            format!("{{{},{}}}", jbool("ok", true), jstr("status", tee.control_status(id)))
+        }
+        Err(error) => format!("{{{},{}}}", jbool("ok", false), jstr("error", error)),
+    }
+}
+
+pub fn n2_control_status_json(id: &str) -> String {
+    let tee = {
+        let slot = connector_slot();
+        slot.as_ref().and_then(|handle| handle.wg_feed.as_ref())
+            .and_then(|feed| feed.n2_control_tee())
+    };
+    let Some(tee) = tee else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "not-armed-or-no-tun"));
+    };
+    format!("{{{},{},{}}}", jbool("ok", true), jstr("status", tee.control_status(id)),
+        jnum("leaks", tee.leak_count()))
 }
 
 /// The `connector_stop()` implementation (idempotent; safe with no
@@ -5972,7 +6051,6 @@ mod tests {
         }
     }
 
-    #[test]
     #[test]
     fn shell_address_strips_the_cidr_suffix_and_uses_its_prefix() {
         // Device-verified 2026-09-13 (device run 1): management delivers the

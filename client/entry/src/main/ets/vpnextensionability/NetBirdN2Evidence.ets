@@ -3,6 +3,7 @@ import { CaptureRouteOutcome, VpnTunnelConfig, withCaptureRoute } from './NetBir
 export interface N2EvidenceOptions {
   trustedSelf: boolean;
   capture32: string[];
+  outerDestinations: string[];
   hdcControlIp: string;
   allowHdcOverlap: boolean;
 }
@@ -47,6 +48,23 @@ export function parseN2Evidence(raw: Object | undefined, blockedSelf: boolean,
     }
     capture32.push(ip);
   }
+  const rawOuter: Object | undefined = input['outer_destinations'];
+  if (!Array.isArray(rawOuter) || rawOuter.length === 0 || rawOuter.length > 128) {
+    return { error: 'invalid-outer-destinations' };
+  }
+  const outerDestinations: string[] = [];
+  for (const item of rawOuter as Object[]) {
+    if (typeof item !== 'string') { return { error: 'invalid-outer-destinations' }; }
+    const slash: number = item.indexOf('/');
+    const proto: string = item.substring(0, slash);
+    const target: string = item.substring(slash + 1);
+    if ((proto !== 'tcp' && proto !== 'udp') ||
+      validateN2Control(capture32, target, 'outer') !== '' ||
+      outerDestinations.indexOf(item) >= 0) {
+      return { error: 'invalid-outer-destinations' };
+    }
+    outerDestinations.push(item);
+  }
   const hdc: Object | undefined = input['hdc_control_ip'];
   if (hdc !== undefined && (typeof hdc !== 'string' ||
     !/^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$/.test(hdc) ||
@@ -61,7 +79,20 @@ export function parseN2Evidence(raw: Object | undefined, blockedSelf: boolean,
     return { error: 'hdc-overlap' };
   }
   return { error: '', options: { trustedSelf: true, capture32: capture32,
+    outerDestinations: outerDestinations,
     hdcControlIp: typeof hdc === 'string' ? hdc : '', allowHdcOverlap: allow === true } };
+}
+
+export function validateN2Control(capture32: string[], target: string, id: string): string {
+  const match = /^((?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}):([1-9][0-9]{0,4})$/.exec(target);
+  if (match === null || match[1].split('.').some((part: string): boolean => Number(part) > 255) ||
+    Number(match[2]) > 65535 || capture32.indexOf(match[1]) < 0) {
+    return 'target-not-captured';
+  }
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+    return 'invalid-marker';
+  }
+  return '';
 }
 
 export function withoutN2ExcludedRoutes(config: VpnTunnelConfig): VpnTunnelConfig {

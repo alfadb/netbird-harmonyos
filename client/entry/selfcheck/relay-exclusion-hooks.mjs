@@ -158,6 +158,11 @@ const SHIMS = {
 };
 
 export function resolve(specifier, context, next) {
+  if (specifier === './NetBirdN2Control') {
+    return { url: 'data:text/javascript,' + encodeURIComponent(
+      'export const N2ControlProtocol = undefined; ' +
+      'export const sendN2Control = () => { throw new Error("n2-not-armed"); };'), shortCircuit: true };
+  }
   if (specifier === './NetBirdN2Evidence') {
     return { url: 'data:text/javascript,' + encodeURIComponent(
       'export const N2EvidenceOptions = undefined; export const N2EvidenceDecision = undefined; ' +

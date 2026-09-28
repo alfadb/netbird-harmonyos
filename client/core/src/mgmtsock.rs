@@ -247,6 +247,7 @@ pub fn dup_socket_fd(raw: i32) -> Result<i32, SocketSeamError> {
     if !via_dupfd {
         unsafe { sys::fcntl(fd_dup, sys::F_SETFD, sys::FD_CLOEXEC) };
     }
+    crate::n2_socket_trace::duplicated(raw, fd_dup);
     Ok(fd_dup)
 }
 
@@ -255,6 +256,7 @@ pub fn dup_socket_fd(raw: i32) -> Result<i32, SocketSeamError> {
 pub fn probe_fd_dupable(fd: i32) -> Result<(), SocketSeamError> {
     match dup_socket_fd(fd) {
         Ok(dup) => {
+            crate::n2_socket_trace::closed(dup);
             unsafe { sys::close(dup) };
             Ok(())
         }
@@ -337,8 +339,12 @@ pub async fn connect_protected(
     // TcpSocket owns the dup from here: on the error paths below it is
     // dropped (closing exactly the dup — the provided number is untouched).
     // SAFETY: `dup` is a fresh, owned descriptor from dup_socket_fd above.
+    crate::n2_socket_trace::io_begin(dup, connect_addr);
     match unsafe { tokio::net::TcpSocket::from_raw_fd(dup) }.connect(connect_addr).await {
-        Ok(stream) => Ok(stream),
+        Ok(stream) => {
+            crate::n2_socket_trace::first_io(stream.as_raw_fd(), connect_addr, "connected", "connect");
+            Ok(stream)
+        },
         Err(e) if e.raw_os_error() == Some(sys::EISCONN) => {
             // Already-connected socket handed to us (host tests): adopt it
             // through a fresh dup of the still-open provided number.
@@ -350,13 +356,17 @@ pub async fn connect_protected(
             // from_std panics on a blocking fd; O_NONBLOCK is already set.
             // SAFETY: `dup2` is a fresh, owned descriptor from dup_socket_fd.
             let std_stream = unsafe { std::net::TcpStream::from_raw_fd(dup2) };
-            tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
+            tokio::net::TcpStream::from_std(std_stream).map(|stream| {
+                crate::n2_socket_trace::first_io(stream.as_raw_fd(), connect_addr, "connected", "already_connected");
+                stream
+            }).map_err(|e| {
                 SocketDialError::Connect { errno: e.raw_os_error().unwrap_or(0) }
             })
         }
-        Err(e) => Err(SocketDialError::Connect {
-            errno: e.raw_os_error().unwrap_or(0),
-        }),
+        Err(e) => {
+            crate::n2_socket_trace::first_io(dup, connect_addr, "failed", "connect");
+            Err(SocketDialError::Connect { errno: e.raw_os_error().unwrap_or(0) })
+        },
     }
 }
 

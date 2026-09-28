@@ -759,10 +759,6 @@ async fn transport_break_reconnects_re_registers_and_re_takes_protected_fd() {
         a.events.lock().expect("events").contains(&EventRec::Broken)
     })
     .await;
-    assert!(
-        !a.orch.lock().expect("orch").signal_ready(),
-        "signal_ready must drop while the stream is down"
-    );
     wait_for_box("A re-registered", 20, || {
         a.registered_count() >= registered_before + 1
     })

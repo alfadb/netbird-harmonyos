@@ -156,7 +156,11 @@ async fn resolve_on_servers(host: &str, supply: &Arc<SocketSupply>, servers: &[S
             let socket = tokio::net::UdpSocket::from_std(UdpSocket::from(fd))?;
             tokio::time::timeout(QUERY_TIMEOUT, async {
                 socket.connect(addr).await?;
-                socket.send(&query).await?;
+                crate::n2_socket_trace::io_begin(socket.as_raw_fd(), addr.into());
+                let sent = socket.send(&query).await;
+                crate::n2_socket_trace::first_io(socket.as_raw_fd(), addr.into(),
+                    if sent.is_ok() { "sent" } else { "failed" }, "dns_query");
+                sent?;
                 let mut buf = [0u8; 1500];
                 let size = socket.recv(&mut buf).await?;
                 response(&buf[..size], &query)
