@@ -120,8 +120,8 @@ N2_TUN_FRAMES|scope=session|mono_ms=…|seen=…|control=…|production=…|leak
 
 ## 4/5. `N2_A_EVENT` — the A-column event (T7a items 4 and 5)
 
-`client/core/src/n2_a_event.rs::format_line:245-251` (emitted by
-`record_begin:273-277` and `record:263-267`).
+`client/core/src/n2_a_event.rs::format_line:265-271` (emitted by
+`record_begin:294-298` and `record:283-287`).
 
 ```
 N2_A_EVENT|phase=begin|id=…|kind=M|R|D|S|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|event_id=…|mono_ms=…|diag=true|is_evidence=false
@@ -138,32 +138,86 @@ Field sets are identical on both phases; field order is fixed as above.
 | `fd` / `dup_fd` | the live outer socket pair, taken from the armed trace (`n2_socket_trace::live_of`) — exactly the pair `N2_SOCK` reports; `-1` for a gate refusal or a D event (D's authoritative record is the `N2_DNS` receipt) |
 | `remote` | `ip:port`, or `unknown` |
 | `result` | `begin` (immediate kinds M/D at begin), `armed` (R/S at begin), `sent` / `error` / `requery` / `rejected` (end), `observed` / `timeout` (end of an R/S watch) |
-| `reason` | `management-rpc`, `get-server-key`…, `healthcheck-watch`, `signal-heartbeat-watch`, `dns-requery`, `ok`, `server-healthcheck-answered`, `watchdog-heartbeat-sent`, `healthcheck-wait-exceeded`, `heartbeat-wait-exceeded`, `watch-already-armed`, `watch-arm-refused`, `no-live-management-connection`, `no-live-signal-connection`, `no-live-relay-connection`, `no-connector`, `prior-stimulus`, `not-armed`, `invalid-kind`, `invalid-id` |
-| `detail` | `get-server-key`, `get-server-key-failed`, `receipt-in-N2_DNS`, `requery-refused`, `production-echo`, `natural-heartbeat`, `wait_ms=90000` (R), `wait_ms=45000` (S), `gate`, `one-watch-per-session`, `no-n2-sock-registration`, `no-trigger-seam`, `prior-n2-stimulus`, `prior-a-event` |
+| `reason` | one of the complete set enumerated under「`reason` — the complete value set」below; a token the `Trigger` seam returned is emitted verbatim |
+| `detail` | `get-server-key`, `get-server-key-failed`, `receipt-in-N2_DNS`, `requery-refused`, `production-echo`, `natural-heartbeat`, `wait_ms=90000` (R), `wait_ms=45000` (S), `gate`, `one-watch-per-session`, `watch-arm-refused`, `no-n2-sock-registration`, `no-trigger-seam`, `prior-n2-stimulus`, `prior-a-event` |
 | `mono_ms` | monotonic ms at emission |
 
-**Event window (item 4).** `phase=begin` opens the event window on that
-`dup_fd` (`n2_socket_trace::event_window_begin`, `n2_socket_trace.rs:74-79`) and
-the matching `phase=end` closes it. EVERY write completed on that descriptor
-inside the window is receipted unconditionally, with `event_id=<id>` (see §6) —
-so the one production write a trigger causes can never be swallowed by the
-post-connect receipt throttle. For R the window stays open until
-`healthcheck_answered()` (`relay_client.rs` EchoHealthCheck branch, called AFTER
-the echo write) and for S until the natural heartbeat is observed, so the
-response write is inside its window by construction.
+**Event window (item 4).** The window covers exactly the write the event IS.
+For the immediate kinds (M/D) it is opened together with the `phase=begin` line
+by `begin_event` (`n2_a_event.rs:307-311`) and the matching `phase=end` closes
+it. EVERY write completed on that descriptor inside the window is receipted
+unconditionally, with `event_id=<id>` (see §6) — so the one production write a
+trigger causes can never be swallowed by the post-connect receipt throttle. For
+R the window opens with the arm and stays open until `healthcheck_answered()`
+(`relay_client.rs` EchoHealthCheck branch, called AFTER the echo write) or the
+90 s box: the server may send its `HealthCheck` at any moment, so only an
+already-open window can contain the response write. For `S` the arm opens NO
+window — see the `S` paragraph below.
 
 **`S` (item 5, frozen v4.1 §4 S row (i)).** `kind=S` sends NOTHING: it arms a
 watcher (`Trigger::arm_s_watch`) whose box is `S_WAIT_MS = 45000` ms
-(`n2_a_event.rs:97`; arm path `apply:297-427`). The registered receive watchdog
-calls
-`n2_a_event::natural_heartbeat_about_to_send()` (`n2_a_event.rs:468-482`) /
-`natural_heartbeat_sent()` (`:484-500`) right around its own silence-triggered
-`send_heartbeat()` (`signal.rs:1074-1100`, `Step::Silence if !probed`), so only a
-production frame the client would have sent anyway can complete the event:
+(`n2_a_event.rs:110`; arm path `apply:330-471`, S branch `:376-416`). The arm
+emits `phase=begin|result=armed|reason=signal-heartbeat-watch|detail=wait_ms=45000`
+through `record_begin` and **opens no event window** (N2 T7a round 3, P1-6):
+the heartbeat it waits for is self-scheduled, so an arm-time window would stand
+open for the whole 45 s box and hand this event's `event_id` to every other
+write on the signal socket, which no judge could then bind to the HEARTBEAT.
+The registered receive watchdog calls
+`n2_a_event::natural_heartbeat_about_to_send()` (`n2_a_event.rs:519-536`) —
+which opens the window on the CURRENT live `S` descriptor — immediately before
+its own silence-triggered `send_heartbeat()` (`signal.rs:1074-1110`,
+`Step::Silence if !probed`), and `natural_heartbeat_sent()`
+(`n2_a_event.rs:567-581`) closes it and completes the event right after that
+send returned, so only the write of a production frame the client would have
+sent anyway is inside the window:
 `phase=end|result=observed|reason=watchdog-heartbeat-sent|detail=natural-heartbeat`,
 or `phase=end|result=timeout|reason=heartbeat-wait-exceeded|detail=wait_ms=45000`.
+A FAILED heartbeat write closes the window without completing the watch
+(`natural_heartbeat_not_sent()`, `n2_a_event.rs:546-560`, called on the
+transport-error branch of `signal.rs`): nothing was sent, so nothing may carry
+the event id and nothing may be reported as observed. The watch itself stays
+armed until that write succeeds or the box expires.
 `signal::request_receive_probe()` is kept as a product-internal seam and is NOT
 called by the N2 path.
+
+### `reason` — the complete value set (verbatim)
+
+Every possible `reason=` value of an `N2_A_EVENT` line, exactly as it appears on
+the wire. `format_line` sanitizes the token (`[A-Za-z0-9._:-]` kept, anything
+else replaced by `_`), so the listed spellings are the emitted ones. Tokens
+returned by the installed `Trigger` seam are reported verbatim; the shipped
+seam is `ConnectorATrigger` (`connector.rs:5379-5441`), whose possible tokens
+are all listed here.
+
+| value | phase / result | when |
+| --- | --- | --- |
+| `not-armed` | end / `rejected` (`detail=gate`) | the N2 evidence switch is not armed — refused before any RPC/syscall |
+| `invalid-kind` | end / `rejected` (`detail=gate`) | `kind` is not one of `M`/`R`/`D`/`S` |
+| `invalid-id` | end / `rejected` (`detail=gate`) | `id` is empty, longer than 64 bytes, or outside `[A-Za-z0-9_-]` |
+| `prior-stimulus` | end / `rejected` (`detail=prior-n2-stimulus` or `prior-a-event`) | D's Q1 gate: an earlier `n2_stimulus` application, or an earlier A event |
+| `no-connector` | end / `error` (`detail=no-trigger-seam`) | no `Trigger` seam is installed; also the seam's own token when no connector session exists |
+| `no-live-management-connection` | end / `error` (`detail=no-n2-sock-registration`) | M: the armed trace has no live `M` descriptor; also the seam's token when there is no logged-in management client |
+| `no-live-signal-connection` | end / `error` (`detail=no-n2-sock-registration`) | S: the armed trace has no live `S` descriptor |
+| `no-live-relay-connection` | end / `error` (`detail=no-n2-sock-registration`) | R: the armed trace has no live `R` descriptor |
+| `watch-already-armed` | end / `rejected` (`detail=one-watch-per-session`) | R or S while that kind's single watch is still open |
+| `management-rpc` | begin / `begin` (`detail=get-server-key`) | M's begin line: the read-only `GetServerKey` is about to run |
+| `management-rpc-<class>` | end / `error` (`detail=get-server-key-failed`) | M's RPC failed; `<class>` is `network`, `timeout`, `auth`, `request`, `server`, `parse` or `unsupported_url` (`ErrorClass::from_management`, `connector.rs:240-250`) |
+| `management-rpc-timeout` | end / `error` (`detail=get-server-key-failed`) | M's RPC exceeded `M_RPC_WAIT_MS`; the same spelling the `timeout` class token has |
+| `no-target` | end / `error` (`detail=requery-refused`) | D: the requery primitive had no target |
+| `dns-requery` | begin / `begin` (`detail=receipt-in-N2_DNS`) | D's begin line: the protected requery is about to run |
+| `ok` | end / `sent` (M, `detail=get-server-key`) or end / `requery` (D, `detail=receipt-in-N2_DNS`) | the trigger completed |
+| `signal-heartbeat-watch` | begin / `armed` (`detail=wait_ms=45000`) | S's arm line: observer armed, no window, nothing sent |
+| `healthcheck-watch` | begin / `armed` (`detail=wait_ms=90000`) | R's arm line: window open |
+| `server-healthcheck-answered` | end / `observed` (`detail=production-echo`) | R: the production echo answered a server-driven `HealthCheck` |
+| `watchdog-heartbeat-sent` | end / `observed` (`detail=natural-heartbeat`) | S: the watchdog sent its natural silence-triggered HEARTBEAT |
+| `healthcheck-wait-exceeded` | end / `timeout` (`detail=wait_ms=90000`) | R's 90 s box expired |
+| `heartbeat-wait-exceeded` | end / `timeout` (`detail=wait_ms=45000`) | S's 45 s box expired |
+
+Two tokens that look like reasons are **`detail`s**, never reasons:
+`watch-arm-refused` is the `detail` of an `error` line whose `reason` is the
+`arm_s_watch`/`arm_healthcheck_watch` error token verbatim (in the shipped
+connector: `no-connector`), and `get-server-key`/`receipt-in-N2_DNS` are the
+`detail`s of the M/D trigger lines.
 
 Shell receipt (not producible from Rust):
 `N2_A_EVENT_SHELL|requestId=…|id=…|kind=…|core_ok=…|core_result=…|reason=…|fd=…|dup_fd=…|diag=true|is_evidence=false`

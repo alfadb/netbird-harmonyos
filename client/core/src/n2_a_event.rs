@@ -51,13 +51,26 @@
 //! N2 T7a (item 4): one request emits a `phase=begin` line at the start of its
 //! trigger (M/D before the call, R/S as soon as the arm returned) and a
 //! `phase=end` line when its outcome is known; a gate refusal emits only the
-//! `phase=end` line (no trigger ever began). Both lines share the request `id`
-//! and the window between them is the event window
-//! ([`crate::n2_socket_trace::event_window_begin`]): EVERY write completed on
-//! that core-owned descriptor inside the window is receipted unconditionally,
-//! with `event_id=<id>` (see [`crate::n2_socket_trace::post_connect_write`]),
-//! so the one production write a trigger causes can never be swallowed by the
-//! post-connect receipt throttle. `fd` is the shell ORIGINAL and `dup_fd` the
+//! `phase=end` line (no trigger ever began). Both lines share the request `id`.
+//!
+//! The event window ([`crate::n2_socket_trace::event_window_begin`]) covers
+//! exactly the write the event IS: EVERY write completed on that core-owned
+//! descriptor inside the window is receipted unconditionally, with
+//! `event_id=<id>` (see [`crate::n2_socket_trace::post_connect_write`]), so the
+//! one production write a trigger causes can never be swallowed by the
+//! post-connect receipt throttle. For the immediate kinds (M/D) that window is
+//! the trigger call itself; for `R` it must be open before the arm returns,
+//! because the server may send its `HealthCheck` at any moment and the echo the
+//! event records is the answer to it. The `S` arm deliberately opens NO window
+//! (N2 T7a round 3, P1-6): the heartbeat it waits for is self-scheduled, so an
+//! arm-time window would stand open for the whole 45 s box and hand this
+//! event's `event_id` to every OTHER write on the signal socket, which no judge
+//! could then bind to the HEARTBEAT. Instead the window opens in
+//! [`natural_heartbeat_about_to_send`] — immediately before the production
+//! `send_heartbeat` — and closes in [`natural_heartbeat_sent`], so the window
+//! holds exactly that one write (`natural_heartbeat_not_sent` closes it when
+//! that write fails, so a broken attempt cannot leak it either). `fd` is the
+//! shell ORIGINAL and `dup_fd` the
 //! core-owned descriptor of the live outer socket — the same pair the
 //! `N2_SOCK` receipts report, taken from the armed trace itself, so an A event
 //! can never be attributed to a socket no `N2_SOCK` line describes.
@@ -168,6 +181,13 @@ struct SWatch {
     id: String,
     seq: u64,
     pair: FdPair,
+    /// N2 T7a round 3 (P1-6): the descriptor whose forced-receipt event window
+    /// is currently OPEN for this watch, `None` until
+    /// [`natural_heartbeat_about_to_send`] runs. The arm itself opens nothing.
+    /// Kept next to (not inside) `pair` because a signal reconnect can have
+    /// moved the live registration since the arm: the window must be closed on
+    /// the number it was actually opened on, whatever happened to `pair`.
+    window_fd: Option<RawFd>,
 }
 
 #[derive(Default)]
@@ -267,18 +287,23 @@ fn record(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &st
 }
 
 /// N2 T7a (item 4): the `phase=begin` line, emitted immediately before the
-/// trigger of an accepted request. `result` is `begin` for an immediate
-/// trigger (M/D) and `armed` for a watch arm (R/S), whose window stays open
-/// until the watch completes.
+/// trigger of an accepted request, or — for a watch (R/S) — as soon as the arm
+/// returned. `result` is `begin` for an immediate trigger (M/D) and `armed`
+/// for a watch arm. This function does NOT open the event window: the `S` arm
+/// needs its begin line without a window (see [`begin_event`]).
 fn record_begin(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
     detail: &str) -> Outcome {
     let line = format_line(kind, id, pair, "begin", result, reason, detail, sys::mono_ms());
     record_line(line, result, reason, kind, pair)
 }
 
-/// N2 T7a (item 4/5): open the event window of an accepted trigger and emit
-/// its `phase=begin` line — one call site, so "the window is open" and "the
-/// begin line exists" are the same fact.
+/// N2 T7a (item 4): open the event window of an accepted trigger and emit its
+/// `phase=begin` line — one call site, so "the window is open" and "the begin
+/// line exists" are the same fact. Used by the immediate kinds (M/D) and by
+/// the `R` arm; the `S` arm deliberately does NOT use it (round 3, P1-6) —
+/// its window is opened and closed by
+/// [`natural_heartbeat_about_to_send`]/[`natural_heartbeat_sent`] around the
+/// one natural heartbeat write.
 fn begin_event(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
     detail: &str) -> Outcome {
     crate::n2_socket_trace::event_window_begin(pair.dup_fd, id);
@@ -287,6 +312,14 @@ fn begin_event(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason
 
 fn close_window(pair: &FdPair) {
     crate::n2_socket_trace::event_window_end(pair.dup_fd);
+}
+
+/// Close the forced-receipt window of an S watch on the number it was actually
+/// opened on, if one is open.
+fn close_watch_window(watch: &SWatch) {
+    if let Some(fd) = watch.window_fd {
+        crate::n2_socket_trace::event_window_end(fd);
+    }
 }
 
 /// Apply one A-column trigger. An accepted request emits its `phase=begin`
@@ -368,9 +401,17 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
             {
                 let mut state = state();
                 state.a_events = state.a_events.saturating_add(1);
-                state.s_watch = Some(SWatch { id: id.to_string(), seq, pair: pair.clone() });
+                state.s_watch = Some(SWatch { id: id.to_string(), seq, pair: pair.clone(),
+                    window_fd: None });
             }
-            begin_event(kind, id, &pair, "armed", "signal-heartbeat-watch",
+            // N2 T7a round 3 (P1-6): the arm ARMS THE OBSERVER ONLY. Opening
+            // the event window here would keep it open for the whole 45 s box
+            // (`S_WAIT_MS`), so every write on the signal socket in that box —
+            // not just the HEARTBEAT — would carry this event's `event_id` and
+            // no judge could bind a forced receipt to the event. The window
+            // opens in `natural_heartbeat_about_to_send`, immediately before
+            // the one production write the watch exists for.
+            record_begin(kind, id, &pair, "armed", "signal-heartbeat-watch",
                 &format!("wait_ms={S_WAIT_MS}"))
         }
         "D" => {
@@ -468,27 +509,61 @@ pub fn r_watch_timeout(id: &str, seq: u64) -> Option<Outcome> {
 }
 
 /// N2 T7a (item 5): the registered receive watchdog is about to send its
-/// NATURAL (silence-triggered) production HEARTBEAT. Arms the forced-receipt
-/// window on the CURRENT live `S` descriptor so the write this observer waits
-/// for can never be throttled away — including across a signal reconnect that
-/// changed the core-owned descriptor number since the arm. Inert (one atomic
-/// load) while unarmed or with no S watch.
+/// NATURAL (silence-triggered) production HEARTBEAT. OPENS the forced-receipt
+/// event window on the CURRENT live `S` descriptor, so the write this observer
+/// waits for can never be throttled away — including across a signal reconnect
+/// that changed the core-owned descriptor number since the arm. This is the
+/// only place an `S` window is opened: the arm opens none (round 3, P1-6), so
+/// the window that carries `event_id` holds exactly this one write. Inert (one
+/// atomic load) while unarmed or with no S watch.
 pub fn natural_heartbeat_about_to_send() {
     if !crate::n2_socket_trace::armed() {
         return;
     }
-    let armed = state().s_watch.as_ref().map(|watch| (watch.id.clone(), watch.pair.clone()));
-    let Some((id, armed_pair)) = armed else { return };
     let live = live_pair("S");
-    let pair = if live.dup_fd >= 0 { live } else { armed_pair };
-    crate::n2_socket_trace::event_window_begin(pair.dup_fd, &id);
+    let (id, fd, previous) = {
+        let mut state = state();
+        let Some(watch) = state.s_watch.as_mut() else { return };
+        let pair = if live.dup_fd >= 0 { live } else { watch.pair.clone() };
+        (watch.id.clone(), pair.dup_fd, watch.window_fd.replace(pair.dup_fd))
+    };
+    // A window a previous attempt left open is closed before the new one opens,
+    // so exactly one descriptor ever carries this event's id.
+    if let Some(previous) = previous {
+        crate::n2_socket_trace::event_window_end(previous);
+    }
+    crate::n2_socket_trace::event_window_begin(fd, &id);
+}
+
+/// N2 T7a (round 3, P1-6): the watchdog's natural HEARTBEAT write did NOT
+/// complete — a transport failure, which takes the existing break/reconnect
+/// path. Closes the window [`natural_heartbeat_about_to_send`] opened, so a
+/// later write on that descriptor NUMBER (possibly another socket's, after fd
+/// reuse) can never inherit this event's `event_id`. The watch stays armed —
+/// the [`S_WAIT_MS`] box still completes it, or the next registration's natural
+/// heartbeat observes it — and NO line is emitted, because nothing happened to
+/// the event.
+pub fn natural_heartbeat_not_sent() {
+    if !crate::n2_socket_trace::armed() {
+        return;
+    }
+    let previous = {
+        let mut state = state();
+        match state.s_watch.as_mut() {
+            Some(watch) => watch.window_fd.take(),
+            None => None,
+        }
+    };
+    if let Some(fd) = previous {
+        crate::n2_socket_trace::event_window_end(fd);
+    }
 }
 
 /// N2 T7a (item 5): the registered receive watchdog DID send its natural
 /// production HEARTBEAT on the live signal stream — the frozen `S` A-event the
-/// armed watch waited for. Emits the `phase=end|result=observed` line and
-/// closes the watch. No-op while unarmed, with no S watch, or after the
-/// [`S_WAIT_MS`] box already completed it.
+/// armed watch waited for. Emits the `phase=end|result=observed` line, closes
+/// the write's event window and closes the watch. No-op while unarmed, with no
+/// S watch, or after the [`S_WAIT_MS`] box already completed it.
 pub fn natural_heartbeat_sent() -> Option<Outcome> {
     if !crate::n2_socket_trace::armed() {
         return None;
@@ -500,6 +575,7 @@ pub fn natural_heartbeat_sent() -> Option<Outcome> {
     };
     close_window(&watch.pair);
     close_window(&pair);
+    close_watch_window(&watch);
     Some(record("S", &watch.id, &pair, "observed", "watchdog-heartbeat-sent",
         "natural-heartbeat"))
 }
@@ -519,6 +595,7 @@ pub fn s_watch_timeout(id: &str, seq: u64) -> Option<Outcome> {
         }
     }?;
     close_window(&watch.pair);
+    close_watch_window(&watch);
     Some(record("S", &watch.id, &watch.pair, "timeout", "heartbeat-wait-exceeded",
         &format!("wait_ms={S_WAIT_MS}")))
 }
@@ -679,14 +756,27 @@ mod tests {
         assert_eq!(a_events(), 1);
         // a second watch while one is armed is refused by name
         assert_eq!(apply("S", "a-S-1b").reason, "watch-already-armed");
-        // the event window is open: ANY write on the fd is forced with event_id
+        // N2 T7a round 3 (P1-6): the ARM opens NO event window — it only arms
+        // the observer. Every other S write inside the 45 s box must therefore
+        // stay an ordinary receipt, so a judge can bind `event_id` to the one
+        // HEARTBEAT write.
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None,
+            "the S arm must not open the event window");
         crate::n2_socket_trace::protect(fd, "S", "req-1", 0, 31, 5, true);
-        let forced = crate::n2_socket_trace::post_connect_write(fd, "192.0.2.9:443".parse().unwrap(), 12)
-            .expect("forced write inside the S event window");
-        assert!(forced.contains("|event_id=a-S-1|"), "{forced}");
-        // the NATURAL watchdog heartbeat completes the watch: the production
-        // path calls the hook around its own send_heartbeat, never a trigger.
+        let ordinary = crate::n2_socket_trace::post_connect_write(fd, "192.0.2.9:443".parse().unwrap(), 12)
+            .expect("the first write after connect is receipted by the throttle itself");
+        assert!(ordinary.contains("|event_id=none|"), "{ordinary}");
+        assert!(crate::n2_socket_trace::post_connect_write(fd, "192.0.2.9:443".parse().unwrap(), 12)
+            .is_none(), "an S write outside the heartbeat window is not forced");
+        // the NATURAL watchdog heartbeat opens the window for exactly that one
+        // write: the production path calls the hook right before its own
+        // send_heartbeat, never a trigger.
         natural_heartbeat_about_to_send();
+        assert_eq!(crate::n2_socket_trace::event_window(fd).as_deref(), Some("a-S-1"),
+            "the heartbeat hook opens the window");
+        let forced = crate::n2_socket_trace::post_connect_write(fd, "192.0.2.9:443".parse().unwrap(), 12)
+            .expect("forced write inside the heartbeat window");
+        assert!(forced.contains("|event_id=a-S-1|"), "{forced}");
         let observed = natural_heartbeat_sent().expect("armed S watch");
         assert_eq!(observed.result, "observed");
         assert_eq!(observed.reason, "watchdog-heartbeat-sent");
@@ -721,6 +811,48 @@ mod tests {
         assert_eq!(apply("S", "a b").reason, "invalid-id");
         assert_eq!(apply("Z", "a-Z-1").reason, "invalid-kind");
         assert_eq!(apply("M", "with space").reason, "invalid-id");
+        reset_all();
+    }
+
+    /// N2 T7a round 3 (P1-6): the S window exists for the ONE heartbeat write.
+    /// A failed write (the transport-error branch of the watchdog) must close
+    /// it again instead of leaving it open on a descriptor number that a later
+    /// socket could reuse — while the 45 s box still owns the watch.
+    #[test]
+    fn s_window_covers_the_heartbeat_write_and_closes_when_that_write_fails() {
+        let _guard = test_guard();
+        reset_all();
+        crate::n2_socket_trace::arm(true);
+        let counting = Arc::new(Counting::default());
+        install_trigger(counting.clone());
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let fd = sock.as_raw_fd();
+        register("S", fd);
+        assert_eq!(apply("S", "a-S-w1").result, "armed");
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None, "arm opens no window");
+        // The window is opened for the write the watchdog is about to make …
+        natural_heartbeat_about_to_send();
+        assert_eq!(crate::n2_socket_trace::event_window(fd).as_deref(), Some("a-S-w1"));
+        // … and a FAILED write closes it without completing (or dropping) the
+        // watch: nothing was sent, so nothing may be observed.
+        natural_heartbeat_not_sent();
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None,
+            "a failed heartbeat write must not leak the window");
+        assert!(s_watch_open(), "a failed write is not an observation");
+        assert_eq!(last_result(), Some("armed"));
+        // The box still completes the watch honestly.
+        let seq = counting.s_watches.lock().unwrap().last().expect("watch").2;
+        let timed_out = s_watch_timeout("a-S-w1", seq).expect("armed S watch");
+        assert_eq!(timed_out.result, "timeout");
+        assert_eq!(timed_out.reason, "heartbeat-wait-exceeded");
+        // A second attempt re-opens the window on the live descriptor and the
+        // successful write closes it with the observation.
+        assert_eq!(apply("S", "a-S-w2").result, "armed");
+        natural_heartbeat_about_to_send();
+        assert_eq!(crate::n2_socket_trace::event_window(fd).as_deref(), Some("a-S-w2"));
+        let observed = natural_heartbeat_sent().expect("armed S watch");
+        assert_eq!(observed.result, "observed");
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None);
         reset_all();
     }
 

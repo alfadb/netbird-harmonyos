@@ -387,6 +387,20 @@ try {
     // the product-internal probe seam is kept (no N2 caller)
     signal.includes('pub async fn request_receive_probe() -> Result<(), String>'),
     'watchdog');
+  check('R3d the S arm arms the observer WITHOUT opening the event window; only the natural heartbeat ' +
+    'opens and closes it (T7a round 3, P1-6)',
+    // the arm emits its begin line through `record_begin` — NOT `begin_event`,
+    // which would open the window for the whole 45 s box
+    aEvent.includes('record_begin(kind, id, &pair, "armed", "signal-heartbeat-watch",') &&
+    !aEvent.includes('begin_event(kind, id, &pair, "armed", "signal-heartbeat-watch"') &&
+    // the window is opened immediately before the heartbeat write and closed
+    // again by the completion hook — or, on a failed write, by the failure hook
+    // that closes it without completing the watch
+    aEvent.includes('crate::n2_socket_trace::event_window_begin(fd, &id);') &&
+    aEvent.includes('pub fn natural_heartbeat_not_sent()') &&
+    aEvent.includes('fn close_watch_window(watch: &SWatch)') &&
+    signal.includes('crate::n2_a_event::natural_heartbeat_not_sent();'),
+    'S window');
   check('R4 the R wait is the frozen bound and the trigger goes through the connector seam',
     aEvent.includes('pub const R_WAIT_MS: u64 = 90_000;') &&
     aEvent.includes('fn management_round_trip(&self) -> Result<(), String>;') &&

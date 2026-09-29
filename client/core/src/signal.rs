@@ -1078,12 +1078,16 @@ impl SignalSession {
                                 //
                                 // N2 T7a (item 5): this NATURAL production
                                 // frame is what the frozen v4.1 §4 `S` A-event
-                                // observes. Both hooks are one atomic load
-                                // while the N2 evidence switch is unarmed; the
-                                // "about to send" hook re-points the event's
-                                // forced-receipt window at THIS registration's
-                                // descriptor, the "sent" hook completes the
-                                // armed watch. Neither touches the frame.
+                                // observes. Every hook is one atomic load while
+                                // the N2 evidence switch is unarmed. The "about
+                                // to send" hook OPENS the event's forced-receipt
+                                // window on THIS registration's descriptor (the
+                                // arm itself opens none, N2 T7a round 3/P1-6, so
+                                // the window holds exactly this write), the
+                                // "sent" hook closes it and completes the armed
+                                // watch, and a failed write closes the window
+                                // without completing anything. None of them
+                                // touches the frame.
                                 crate::n2_a_event::natural_heartbeat_about_to_send();
                                 match self.client.send_heartbeat().await {
                                     Ok(()) => {
@@ -1097,6 +1101,7 @@ impl SignalSession {
                                         crate::hilog::emit(
                                             "signal: receive watchdog heartbeat failed (silence)",
                                         );
+                                        crate::n2_a_event::natural_heartbeat_not_sent();
                                         self.note_stream_broken(error, &mut on_event);
                                         break;
                                     }

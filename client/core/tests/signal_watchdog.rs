@@ -256,8 +256,11 @@ async fn s_a_event_observes_the_natural_watchdog_heartbeat_on_the_existing_strea
         json.contains("\"reason\":\"watch-already-armed\""), "{json}");
     assert_eq!(trigger.calls.load(Ordering::Acquire), 1, "one watch arm");
     assert!(n2_a_event::s_watch_open(), "the observer is waiting");
-    assert_eq!(n2_socket_trace::event_window(dup_fd).as_deref(), Some("a-S-1"),
-        "the forced-receipt window is open on the live S descriptor");
+    // N2 T7a round 3 (P1-6): the arm opens NO event window — it would stand
+    // open for the whole 45 s box and hand this event's id to every other S
+    // write. The window appears only around the natural heartbeat write.
+    assert_eq!(n2_socket_trace::event_window(dup_fd), None,
+        "the S arm arms the observer only; no forced-receipt window yet");
 
     // The NATURAL watchdog heartbeat fires on its own silence window (no N2
     // request), and the armed observer completes with `result=observed`.

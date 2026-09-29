@@ -480,6 +480,13 @@ fn s_event_arms_the_natural_heartbeat_watch_and_refuses_without_a_live_socket() 
     assert!(armed.contains("|detail=wait_ms=45000|"), "the frozen S box is written down: {armed}");
     assert_eq!(n2_a_event::a_events(), 1, "a dispatched S event counts as an A event");
 
+    // N2 T7a round 3 (P1-6): the ARM opens no event window — the window exists
+    // only around the natural heartbeat write the watchdog is about to make, so
+    // every other S write in the 45 s box stays an unforced receipt.
+    assert_eq!(n2_socket_trace::event_window(s_fd), None, "the S arm opens no window");
+    n2_a_event::natural_heartbeat_about_to_send();
+    assert_eq!(n2_socket_trace::event_window(s_fd).as_deref(), Some("a-S-1"),
+        "the heartbeat hook opens the window");
     // The natural watchdog heartbeat completes it: `phase=end|result=observed`
     // with the event id, and the forced-receipt window is closed.
     let observed = n2_a_event::natural_heartbeat_sent().expect("armed S watch");

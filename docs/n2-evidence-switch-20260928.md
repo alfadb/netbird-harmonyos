@@ -322,7 +322,8 @@ Unknown kind → `invalid-kind`; malformed id → `invalid-id`. An accepted requ
 emits its `phase=begin` line when its trigger starts (M/D just before the call,
 R/S as soon as the watch arm returned) and its `phase=end` line when the outcome
 is known; a request refused by a gate emits the single `phase=end` line, because
-no trigger ever began.
+no trigger ever began. The begin LINE and the event WINDOW are separate facts
+for S: its arm emits the line without opening a window (P1-6, below).
 
 ### Log line
 
@@ -338,15 +339,17 @@ armed trace itself (`n2_socket_trace::live_of`), so an A event can never be
 attributed to a socket no `N2_SOCK` line describes. D claims no fd here: its
 authoritative device record is the `N2_DNS` receipt the requery emits.
 
-**Event window (T7a item 4).** `phase=begin` opens an event window on that
-`dup_fd`; the matching `phase=end` closes it. EVERY write completed on that
-descriptor inside the window is receipted **unconditionally** — the post-connect
-receipt throttle is bypassed — with `event_id=<id>` on the
+**Event window (T7a item 4).** For the immediate kinds (M/D) `phase=begin` opens
+an event window on that `dup_fd`; the matching `phase=end` closes it. EVERY write
+completed on that descriptor inside the window is receipted **unconditionally** —
+the post-connect receipt throttle is bypassed — with `event_id=<id>` on the
 `N2_SOCK|phase=subsequent_io|…` line (see「Outer-socket lifecycle receipts」).
 The one production write an event causes therefore always has a receipt, even
-when it is not the first / every-128th / 30-s write of its descriptor. For R and
-S the window stays open across the wait, so the response write is inside it by
-construction.
+when it is not the first / every-128th / 30-s write of its descriptor. For R the
+window opens with the arm — the server may send its `HealthCheck` at any moment,
+so only an already-open window can contain the response write. For S the arm
+opens NO window (N2 T7a round 3, P1-6): its window exists only around the one
+natural heartbeat write, see below.
 
 ### How the operator triggers it
 
@@ -600,11 +603,26 @@ NEXT silence-triggered `HEARTBEAT` the watchdog sends on its own, and
 frame the production client would have sent anyway can complete the event:
 `N2_A_EVENT|kind=S|phase=end|result=observed|reason=watchdog-heartbeat-sent|detail=natural-heartbeat|event_id=<id>`,
 or `…|phase=end|result=timeout|reason=heartbeat-wait-exceeded|detail=wait_ms=45000`.
-Because the observer's event window covers the send, that heartbeat write is
-forced into an `N2_SOCK|phase=subsequent_io|kind=S|…|event_id=<id>` receipt
-whatever the throttle says. `signal::request_receive_probe()` is kept as a
-**product-internal** seam (the watchdog's own probe capability) and is no longer
-called by any N2 path.
+
+**The `S` arm opens NO event window (N2 T7a round 3, P1-6).** The arm emits
+`phase=begin|result=armed|reason=signal-heartbeat-watch|detail=wait_ms=45000` and
+nothing else. Before this fix the window was opened at arm time and therefore
+stood open for the whole 45 s box: EVERY write on the signal socket in that box
+— an outgoing control frame, a reconnect handshake, any other S write — was
+forced into a receipt carrying this event's `event_id`, so a judge could not
+bind a forced receipt to the HEARTBEAT the event is about. Now the window is
+opened by `natural_heartbeat_about_to_send()` (immediately before the
+`send_heartbeat()` that is the event) and closed by `natural_heartbeat_sent()`
+(it emits the `phase=end|result=observed` line) — both in `src/signal.rs`,
+`Step::Silence if !probed`. A FAILED heartbeat write closes the window through
+`natural_heartbeat_not_sent()` without completing the watch, so a broken attempt
+leaves neither an open window on a soon-to-be-reused descriptor number nor an
+`observed` claim. Consequence for the executor/judge: an
+`N2_SOCK|phase=subsequent_io|kind=S|…|event_id=<id>` receipt now means the
+HEARTBEAT write of that event, and the absence of `event_id` on other `kind=S`
+receipts inside the same box is expected, not a missing receipt.
+`signal::request_receive_probe()` is kept as a **product-internal** seam (the
+watchdog's own probe capability) and is no longer called by any N2 path.
 
 ### Host verification (no device)
 
@@ -622,17 +640,21 @@ called by any N2 path.
     connection; no stream frame; unregistered refuses) and
     `s_a_event_observes_the_natural_watchdog_heartbeat_on_the_existing_stream`
     (N2 T7a item 5: the `S` event only ARMS the observer — `result=armed`,
-    the `fd`/`dup_fd` pair byte-identical to `N2_SOCK`, the forced-receipt
-    window open on that descriptor — then the NATURAL silence-triggered
-    heartbeat completes it as `phase=end|result=observed|event_id=…`, ONE
+    the `fd`/`dup_fd` pair byte-identical to `N2_SOCK`, and NO event window yet
+    (round 3, P1-6) — then the NATURAL silence-triggered heartbeat completes it
+    as `phase=end|result=observed|event_id=…` and closes the window, ONE
     accepted connection, the decrypted frame is `Body.type = 6`, no
     OFFER/ANSWER/CANDIDATE created; a refused arm is `result=error` and sends
     nothing).
   * `n2_a_event.rs` unit tests
-    (`kind_s_needs_a_live_signal_socket_and_observes_the_natural_heartbeat`)
+    (`kind_s_needs_a_live_signal_socket_and_observes_the_natural_heartbeat`,
+    round 3: the arm leaves the window closed and only the heartbeat hook opens
+    it; `s_window_covers_the_heartbeat_write_and_closes_when_that_write_fails`)
     and `tests/n2_a_event.rs::s_event_arms_the_natural_heartbeat_watch_and_refuses_without_a_live_socket`.
   * `client/entry/selfcheck/run-n2-a-event.mts` — pins the `S` observer
-    contract and the 20 s/30 s watchdog constants on the shipped sources.
+    contract (including「the arm opens no window」), the
+    `natural_heartbeat_not_sent` failure hook and the 20 s/30 s watchdog
+    constants on the shipped sources.
 * On-device use of `n2_a_event kind=S` still requires the separately authorized
   campaign; the frozen `S(A)` row is what it feeds (the natural heartbeat,
   observed rather than triggered).
@@ -661,7 +683,8 @@ half is `client/core/tests/n2_log_samples.rs` +
    `phase=end` with the outcome, and an unconditional
    `N2_SOCK|phase=subsequent_io|…|event_id=<id>` for every write inside the
    window (see「A-column production-event trigger (P4)」and「Outer-socket
-   lifecycle receipts」).
+   lifecycle receipts」). The S window holds exactly the natural heartbeat
+   write, not the 45 s box (round 3, P1-6).
 5. **`S` observes the natural watchdog heartbeat** (45 s box) instead of asking
    for an immediate probe (see「Signal receive watchdog and the S A-event
    (P8)」).
