@@ -4943,9 +4943,14 @@ fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
     };
     match fed {
         Ok(()) => format!(
-            "{{{},{}}}",
+            "{{{},{},{}}}",
             jbool("ok", true),
-            jbool("device_up", feed.device_up())
+            jbool("device_up", feed.device_up()),
+            // N2 T7a (item 6): the core's monotonic instant of this feed — the
+            // shell logs it as `mono_ms=` on `VPN_WG_DATAPLANE_FED`, so that
+            // shell line is alignable with the core's own
+            // `N7_WG_FEED|adopted|…|mono_ms=` from the same call.
+            jinum("mono_ms", crate::sys::mono_ms() as i64)
         ),
         Err(e) => format!(
             "{{{},{}}}",
@@ -5362,11 +5367,13 @@ pub fn n2_stimulus_json(kind: &str, id: &str) -> String {
 /// * `R` — arms the [`crate::n2_a_event::R_WAIT_MS`] timeout on the session's
 ///   own runtime; the relay reader calls back when the server-driven
 ///   HealthCheck is answered.
-/// * `S` — asks the registered signal receive watchdog (`crate::signal::
-///   request_receive_probe`) for ONE self-addressed HEARTBEAT on the SAME
-///   signal stream/connection, bounded by
-///   [`crate::n2_a_event::S_PROBE_WAIT_MS`]. Only the send TIME of the
-///   production frame moves; no new dial and no other frame is created.
+/// * `S` — N2 T7a (item 5, frozen v4.1 §4 S row (i)): arms the
+///   [`crate::n2_a_event::S_WAIT_MS`] timeout on the session's own runtime and
+///   sends NOTHING. The registered signal receive watchdog calls back when it
+///   sends its NEXT natural silence-triggered HEARTBEAT
+///   ([`crate::n2_a_event::natural_heartbeat_about_to_send`] /
+///   `natural_heartbeat_sent` from `signal.rs`), so only a production frame
+///   the client would have sent anyway can complete the event.
 struct ConnectorATrigger;
 
 impl crate::n2_a_event::Trigger for ConnectorATrigger {
@@ -5406,29 +5413,17 @@ impl crate::n2_a_event::Trigger for ConnectorATrigger {
         Ok(())
     }
 
-    fn signal_probe(&self) -> Result<(), String> {
-        // Never hold the connector slot across the wait.
+    fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {
         let handle = { connector_slot().as_ref().cloned() };
         let Some(handle) = handle else { return Err("no-connector".into()) };
-        let runtime = handle.runtime.clone();
-        // The registered receive watchdog owns the signal client: this asks it
-        // for ONE self-addressed HEARTBEAT on the SAME stream/connection and
-        // waits (bounded) for that send call to return. No new dial, no other
-        // frame, no server-side state change.
-        let waited = runtime.block_on(async {
-            tokio::time::timeout(
-                core::time::Duration::from_millis(crate::n2_a_event::S_PROBE_WAIT_MS),
-                crate::signal::request_receive_probe(),
-            )
-            .await
+        let id = id.to_string();
+        handle.runtime.spawn(async move {
+            tokio::time::sleep(core::time::Duration::from_millis(wait_ms)).await;
+            // The (id, seq) pair makes a stale timer harmless: it can only
+            // complete the watch it was armed for.
+            let _ = crate::n2_a_event::s_watch_timeout(&id, seq);
         });
-        match waited {
-            Ok(Ok(())) => Ok(()),
-            // Sanitized tokens only (`no-registered-signal-stream`,
-            // `signal-heartbeat-<class>`) — never server text.
-            Ok(Err(reason)) => Err(reason),
-            Err(_) => Err("signal-heartbeat-timeout".into()),
-        }
+        Ok(())
     }
 
     fn arm_healthcheck_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {
@@ -5463,9 +5458,11 @@ pub fn n2_a_event_json(kind: &str, id: &str) -> String {
 }
 
 /// N2 P5: register one PRE sandwich leg (called by the shell BEFORE it sends
-/// the pre control). The core keeps the ordering verdict.
-pub fn n2_sandwich_pre_json(kind: &str, marker: &str) -> String {
-    let outcome = crate::n2_sandwich::pre(kind, marker);
+/// the pre control). `marker` is the pre control's id and `post_marker` the
+/// POST control's own (different) id — N2 T7a item 1. The core keeps the
+/// ordering verdict.
+pub fn n2_sandwich_pre_json(kind: &str, marker: &str, post_marker: &str) -> String {
+    let outcome = crate::n2_sandwich::pre(kind, marker, post_marker);
     format!(
         "{{{},{},{},{},{}}}",
         jbool("ok", outcome.result == "registered"),
@@ -5477,7 +5474,9 @@ pub fn n2_sandwich_pre_json(kind: &str, marker: &str) -> String {
 }
 
 /// N2 P5: close one leg with the shell's post outcome (`observed` = the post
-/// control HIT, `unsat` = one of the named misses).
+/// control HIT, `unsat` = one of the named misses). `marker` is the POST
+/// control's own marker (N2 T7a item 1), exactly the one `n2_sandwich_poll`
+/// handed back.
 pub fn n2_sandwich_post_json(kind: &str, marker: &str, result: &str, reason: &str) -> String {
     let outcome = crate::n2_sandwich::post(kind, marker, result, reason);
     format!(

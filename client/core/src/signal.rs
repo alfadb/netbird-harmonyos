@@ -87,8 +87,9 @@
 //!   the outer edge instead of moving it to 40 s. The probe rides the SAME
 //!   stream/connection (unary `SignalExchange/Send` on the pooled channel) —
 //!   no new connection, no other message changed — and
-//!   [`request_receive_probe`] lets an outside caller (the N2 A-column `S`
-//!   trigger) move only the SEND TIME of that same production frame.
+//!   [`request_receive_probe`] lets a PRODUCT-internal caller move only the
+//!   SEND TIME of that same production frame (the N2 A-column `S` event
+//!   observes the natural silence probe instead; N2 T7a item 5).
 //! - **Reconnect semantics**: upstream retries the whole stream-open+receive
 //!   with `defaultBackoff` — 800ms initial / randomization 1 / multiplier
 //!   1.7 / max 10s / 3-month budget (`shared/signal/client/grpc.go:173-183`)
@@ -292,6 +293,12 @@ pub fn receive_probe_registered() -> bool {
 /// now, on the SAME stream/connection, instead of waiting for
 /// [`RECEIVE_PROBE_AFTER`]: this only moves the SEND TIME of the production
 /// frame the watchdog sends anyway (preregistration v4.1 §4 通用原则).
+///
+/// N2 T7a (item 5): this is a **product-internal** seam — the N2 A-column `S`
+/// event no longer calls it (the frozen v4.1 §4 `S` row (i) requires the
+/// NATURAL, silence-triggered heartbeat, observed by
+/// [`crate::n2_a_event::natural_heartbeat_sent`]). It is kept, unused by the
+/// N2 path, so the watchdog's probe capability is not silently removed.
 ///
 /// `Err` = no registered stream, or the watchdog disappeared before the send
 /// completed. The reply arrives when the unary send call has returned, so a
@@ -942,10 +949,12 @@ impl SignalSession {
         enum Step {
             Inbound(Result<IncomingFrame, SignalStreamError>),
             Outbound(Option<SignalOutgoing>),
-            /// P8: an outside probe request (`request_receive_probe` — the N2
-            /// A-column `S` trigger): send one self-addressed HEARTBEAT on the
-            /// SAME registered stream, now. `None` only if the request channel
-            /// ended, which cannot happen while this call owns a sender.
+            /// P8: an outside probe request (`request_receive_probe` — a
+            /// PRODUCT-internal seam since N2 T7a item 5; the N2 `S` A-event
+            /// observes the natural silence probe instead): send one
+            /// self-addressed HEARTBEAT on the SAME registered stream, now.
+            /// `None` only if the request channel ended, which cannot happen
+            /// while this call owns a sender.
             Probe(Option<ProbeRequest>),
             /// P8: the receive watchdog's silence deadline expired.
             Silence,
@@ -1066,12 +1075,23 @@ impl SignalSession {
                                 // 20 s of silence: ONE self-addressed
                                 // HEARTBEAT on this stream (upstream
                                 // `sendReceiveProbe`).
+                                //
+                                // N2 T7a (item 5): this NATURAL production
+                                // frame is what the frozen v4.1 §4 `S` A-event
+                                // observes. Both hooks are one atomic load
+                                // while the N2 evidence switch is unarmed; the
+                                // "about to send" hook re-points the event's
+                                // forced-receipt window at THIS registration's
+                                // descriptor, the "sent" hook completes the
+                                // armed watch. Neither touches the frame.
+                                crate::n2_a_event::natural_heartbeat_about_to_send();
                                 match self.client.send_heartbeat().await {
                                     Ok(()) => {
                                         probed = true;
                                         crate::hilog::emit(
                                             "signal: receive watchdog heartbeat sent (silence)",
                                         );
+                                        let _ = crate::n2_a_event::natural_heartbeat_sent();
                                     }
                                     Err(error) => {
                                         crate::hilog::emit(

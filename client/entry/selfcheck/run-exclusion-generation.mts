@@ -1430,6 +1430,45 @@ try {
     '|control=' + CONTROL_NAME + '|note=one-pending-request-per-launch|diag=true|is_evidence=false',
     lastLine('N2_CONTROL_COMBO_REJECTED|'));
 
+  // N3b (T7a item 7): the ARM TICKET is protected across a request launch. The
+  // documented executor flow is "arm once, then one launch per request", so a
+  // launch that carries an N2 request but NO arm ticket must KEEP the existing
+  // ticket — deleting it would leave the already-running extension armed but a
+  // later extension restart unarmed (the arm would be silently lost).
+  seedFile(ARM_TICKET_PATH, ARM_PAYLOAD);
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2_control': CONTROL_PAYLOAD } }, {});
+  check('N3b a request launch WITHOUT the arm ticket keeps the ticket and logs KEPT',
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD && fileOf(CONTROL_PATH) === CONTROL_PAYLOAD &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 0 &&
+    linesWith('N2H_ARM_TICKET_WRITTEN|').length === 0 &&
+    lastLine('N2H_ARM_TICKET_KEPT|') === 'N2H_ARM_TICKET_KEPT|file=' + ARM_TICKET_NAME +
+    '|note=request-launch-without-arm-ticket|diag=true|is_evidence=false',
+    JSON.stringify({ arm: fileOf(ARM_TICKET_PATH), kept: lastLine('N2H_ARM_TICKET_KEPT|') }));
+  // …the SAME rule for the other request channels, and the ORIGINAL
+  // default-no-arm rule still holds for a launch with no N2 request at all.
+  seedFile(ARM_TICKET_PATH, ARM_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2_stimulus': STIMULUS_PAYLOAD } }, {});
+  check('N3b a stimulus launch without the arm ticket keeps the ticket too',
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD && fileOf(STIMULUS_PATH) === STIMULUS_PAYLOAD &&
+    linesWith('N2H_ARM_TICKET_KEPT|').length === 1 &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 0,
+    JSON.stringify({ arm: fileOf(ARM_TICKET_PATH), logs: linesWith('N2H_ARM_TICKET_KEPT|') }));
+  seedFile(ARM_TICKET_PATH, ARM_PAYLOAD);
+  resetLog();
+  (controlEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird' }, {});
+  check('N3b a launch with no N2 request at all still clears the ticket (default: no arm)',
+    fileOf(ARM_TICKET_PATH) === undefined &&
+    linesWith('N2H_ARM_TICKET_KEPT|').length === 0 &&
+    lastLine('N2H_ARM_TICKET_REMOVED|') === 'N2H_ARM_TICKET_REMOVED|file=' + ARM_TICKET_NAME +
+    '|note=default-no-arm',
+    JSON.stringify({ arm: fileOf(ARM_TICKET_PATH), logs: logs() }));
+
   // N4: the ARMED poll consumes the request once and calls the
   // positive-control entry with exactly the parsed target/proto/id.
   resetFs();

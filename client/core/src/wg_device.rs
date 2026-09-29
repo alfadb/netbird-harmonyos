@@ -433,6 +433,14 @@ struct N2DestinationState {
     rows: Vec<N2DestinationRow>,
     last_tick_ms: u64,
     last_emit_ms: u64,
+    /// N2 T7a (item 3) — tee continuity counters, for the session-period
+    /// `N2_TUN_TEE_STATS` line (`wg_device.rs`): every from-OS frame handed to
+    /// this tee, the ones whose IPv4 header did not decode, and the ones that
+    /// decoded but were dropped by the frozen capture set. The invariant is
+    /// `tee_frames == decode_fail + dropped + sum(rows[].frames)`.
+    tee_frames: u64,
+    decode_fail: u64,
+    dropped: u64,
 }
 
 struct N2DestinationRow {
@@ -450,6 +458,7 @@ impl N2DestinationTee {
             control: Mutex::new(crate::n2_control::ControlState::new(targets.clone())),
             inner: Mutex::new(N2DestinationState {
                 targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
+                tee_frames: 0, decode_fail: 0, dropped: 0,
             }),
         }
     }
@@ -489,7 +498,30 @@ impl N2DestinationTee {
     }
 
     pub fn gap(&self, from: u64, to: u64, reason: &str) {
-        emit(&format!("N2_TUN_GAP|from={from}|to={to}|reason={reason}|diag=true|is_evidence=false"));
+        emit(&gap_line(from, to, reason));
+    }
+
+    /// N2 T7a (item 3) — the session-period tee continuity line:
+    ///
+    /// ```text
+    /// N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false
+    /// ```
+    ///
+    /// `frames` counts every from-OS frame handed to this tee since the arm
+    /// (the direction the destination tee exists for; to-OS frames belong to
+    /// the collector tee and are not counted here). `decode_fail` counts the
+    /// frames `parse_ipv4_frame` refused — a non-zero value means an interval
+    /// can NOT be treated as complete (an undecodable frame could have been a
+    /// marker or a capture-target frame). `dropped` counts the frames that
+    /// decoded but were not attributed to any frozen capture destination (the
+    /// tee's own filter, not silent loss). The exact invariant is
+    /// `frames = decode_fail + dropped + the sum of the per-destination
+    /// frames` (`N2_TUN_DEST`).
+    pub fn stats_line(&self, now_ms: u64) -> String {
+        let state = self.inner.lock_poison();
+        format!(
+            "N2_TUN_TEE_STATS|frames={}|decode_fail={}|dropped={}|mono_ms={now_ms}|diag=true|is_evidence=false",
+            state.tee_frames, state.decode_fail, state.dropped)
     }
 
     pub fn control_totals(&self) -> (u64, u64, u64) {
@@ -523,32 +555,80 @@ impl N2DestinationTee {
             let mut found = false;
             for row in state.rows.iter_mut().filter(|row| row.dst == dst) {
                 found = true;
-                lines.push(format!(
-                    "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto={}|port={}|frames={}|delta={}|sources={}|diag=true|is_evidence=false",
-                    std::net::Ipv4Addr::from(dst), row.proto, row.port, row.frames,
-                    row.frames.saturating_sub(row.reported),
-                    row.sources.iter().map(|src| std::net::Ipv4Addr::from(*src).to_string())
-                        .collect::<Vec<_>>().join(",")
-                ));
+                let sources = row.sources.iter()
+                    .map(|src| std::net::Ipv4Addr::from(*src).to_string())
+                    .collect::<Vec<_>>().join(",");
+                lines.push(dest_line(now_ms, dst, row.proto, row.port, row.frames,
+                    row.frames.saturating_sub(row.reported), &sources));
                 row.reported = row.frames;
             }
             if !found {
-                lines.push(format!(
-                    "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false",
-                    std::net::Ipv4Addr::from(dst)
-                ));
+                lines.push(dest_zero_line(now_ms, dst));
             }
         }
         lines
     }
 }
 
+/// One session-period `N2_TUN_DEST` row (its exact format is part of the N2
+/// log baseline; `wg_device.rs` is the only producer).
+pub fn dest_line(now_ms: u64, dst: [u8; 4], proto: u8, port: u16, frames: u64, delta: u64,
+    sources: &str) -> String {
+    format!(
+        "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto={proto}|port={port}|frames={frames}|delta={delta}|sources={sources}|diag=true|is_evidence=false",
+        std::net::Ipv4Addr::from(dst))
+}
+
+/// The zero-hit heartbeat row of a frozen destination with no observed frame
+/// (`proto=any|port=any|frames=0|delta=0`; never a sent/received receipt).
+pub fn dest_zero_line(now_ms: u64, dst: [u8; 4]) -> String {
+    format!(
+        "N2_TUN_DEST|scope=session|mono_ms={now_ms}|dst={}|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false",
+        std::net::Ipv4Addr::from(dst))
+}
+
+/// The session-period control/production totals (emitted on the same cadence as
+/// `N2_TUN_DEST`).
+pub fn frames_line(now_ms: u64, seen: u64, control: u64, production: u64, leaks: u64) -> String {
+    format!(
+        "N2_TUN_FRAMES|scope=session|mono_ms={now_ms}|seen={seen}|control={control}|production={production}|leaks={leaks}|diag=true|is_evidence=false")
+}
+
+/// One `N2_TUN_GAP` marker (N2 T7a item 3): the interval `from_mono..=to_mono`
+/// in which this tee observed NOTHING. A tee mount closes the preceding
+/// interval (`reason=before-tun-attach`), a TUN fd replacement closes the swap
+/// (`reason=tun-replaced`), and a detach opens a new one
+/// (`reason=connector-stop`, a zero-width marker at the close instant because
+/// the unobserved interval then extends to the next mount).
+pub fn gap_line(from: u64, to: u64, reason: &str) -> String {
+    format!("N2_TUN_GAP|from_mono={from}|to_mono={to}|reason={reason}|diag=true|is_evidence=false")
+}
+
+/// The data plane's adoption report (N2 T7a item 6): the peer/endpoint counts
+/// the device carries, the number of buffered egress sockets actually replayed
+/// and the monotonic instant of the adoption.
+pub fn wg_feed_adopted_line(peers: usize, endpoints: usize, egress_replayed: usize,
+    mono_ms: u64) -> String {
+    format!("N7_WG_FEED|adopted|peers={peers}|endpoints={endpoints}|egress_replayed={egress_replayed}|mono_ms={mono_ms}")
+}
+
 impl TunFrameTee for N2DestinationTee {
     fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
         if dir != TunFrameDir::FromOs { return; }
-        let Some(packet) = crate::n2h::parse_ipv4_frame(frame) else { return; };
         let mut state = self.inner.lock_poison();
-        if !state.targets.contains(&packet.dst) { return; }
+        state.tee_frames = state.tee_frames.saturating_add(1);
+        let Some(packet) = crate::n2h::parse_ipv4_frame(frame) else {
+            // N2 T7a (item 3): an undecodable frame is a named continuity
+            // hole, never a silent `return`.
+            state.decode_fail = state.decode_fail.saturating_add(1);
+            return;
+        };
+        if !state.targets.contains(&packet.dst) {
+            // Decoded but outside the frozen capture set: counted as dropped
+            // (the tee's own filter) so `frames` always reconciles.
+            state.dropped = state.dropped.saturating_add(1);
+            return;
+        }
         let dst = packet.dst;
         let count = state.rows.iter().filter(|row| row.dst == dst).count();
         let existing = state.rows.iter().position(|row|
@@ -1312,7 +1392,11 @@ impl WgDevice {
             let dest_lines = tee.due_lines(now_ms);
             if !dest_lines.is_empty() {
                 let (seen, control, production) = tee.control_totals();
-                emit(&format!("N2_TUN_FRAMES|scope=session|mono_ms={now_ms}|seen={seen}|control={control}|production={production}|leaks={}|diag=true|is_evidence=false", tee.leak_count()));
+                emit(&frames_line(now_ms, seen, control, production, tee.leak_count()));
+                // N2 T7a (item 3): the same cadence carries the tee
+                // continuity line, so an interval can be judged complete
+                // (`decode_fail=0`) instead of merely unreported.
+                emit(&tee.stats_line(now_ms));
             }
             for line in dest_lines {
                 emit(&line);
@@ -2374,11 +2458,12 @@ impl WgDeviceFeed {
                 emit(&format!("N7_WG_FEED|replay-endpoint-failed|{}", e));
             }
         }
-        emit(&format!(
-            "N7_WG_FEED|adopted|peers={}|endpoints={}",
-            g.peers.len(),
-            g.endpoints.len()
-        ));
+        emit(&wg_feed_adopted_line(g.peers.len(), g.endpoints.len(),
+            // N2 T7a (item 6): the number of buffered egress sockets that were
+            // actually re-attached (a failed replay is counted out), so the
+            // adopted line states how much of the selected-transport state the
+            // data plane really carries.
+            g.egress.len().saturating_sub(egress_failed.len()), crate::sys::mono_ms()));
         g.device = Some(app);
         crate::n2_socket_trace::closed(wg_raw);
         // The pending feed-time dup is consumed by the adoption: close it AND
@@ -2768,6 +2853,62 @@ mod feed_tests {
         }).expect("live device");
         let lines = observer.due_lines(sys::mono_ms().saturating_add(5_000));
         assert!(lines[0].contains("frames=2|delta=2"), "{lines:?}");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    #[test]
+    fn session_destination_reports_tee_continuity_counters_and_gap_fields() {
+        // N2 T7a (item 3): the tee's own continuity is reported, so an
+        // interval can be judged complete (`decode_fail=0`) instead of merely
+        // unreported, and the gap lines carry the `from_mono`/`to_mono` names.
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let destination = [119, 29, 29, 119];
+        slot.set_n2_destination_targets(vec![destination]);
+        slot.feed_wg_socket(wg_raw).expect("wg feed");
+        slot.feed_tun(tun_raw).expect("tun feed");
+        let observer = slot.inner.lock_poison().n2_dest_tee.as_ref().unwrap().clone();
+        let mut target = [0u8; 28];
+        target[0] = 0x45;
+        target[2..4].copy_from_slice(&(28u16).to_be_bytes());
+        target[8] = 64;
+        target[9] = 17;
+        target[12..16].copy_from_slice(&[10, 77, 0, 1]);
+        target[16..20].copy_from_slice(&destination);
+        target[20..22].copy_from_slice(&40000u16.to_be_bytes());
+        target[22..24].copy_from_slice(&53u16.to_be_bytes());
+        target[24..26].copy_from_slice(&8u16.to_be_bytes());
+        // a decodable frame outside the frozen capture set
+        let mut other = target;
+        other[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        // an undecodable frame (shorter than any IPv4 header)
+        let garbage = [0u8; 5];
+        slot.with_device(|d| {
+            assert_eq!(unsafe { sys::write(tun_end, target.as_ptr().cast(), target.len()) }, 28);
+            assert_eq!(unsafe { sys::write(tun_end, other.as_ptr().cast(), other.len()) }, 28);
+            assert_eq!(unsafe { sys::write(tun_end, garbage.as_ptr().cast(), garbage.len()) }, 5);
+            d.service_tun(1);
+        }).expect("live device");
+        assert_eq!(observer.stats_line(4_242),
+            "N2_TUN_TEE_STATS|frames=3|decode_fail=1|dropped=1|mono_ms=4242|diag=true|is_evidence=false");
+        // the invariant reconciles: 3 = 1 decoded-target + 1 dropped + 1 decode failure
+        let dest = observer.due_lines(sys::mono_ms().saturating_add(5_000));
+        assert_eq!(dest.len(), 1, "{dest:?}");
+        assert!(dest[0].contains("|frames=1|delta=1|"), "{dest:?}");
+        for line in [gap_line(10, 20, "before-tun-attach"), gap_line(30, 30, "connector-stop"),
+            gap_line(40, 55, "tun-replaced")] {
+            assert!(line.starts_with("N2_TUN_GAP|from_mono="), "{line}");
+            assert!(line.ends_with("|diag=true|is_evidence=false"), "{line}");
+        }
+        assert_eq!(gap_line(10, 20, "before-tun-attach"),
+            "N2_TUN_GAP|from_mono=10|to_mono=20|reason=before-tun-attach|diag=true|is_evidence=false");
+        assert_eq!(dest_zero_line(9, destination),
+            "N2_TUN_DEST|scope=session|mono_ms=9|dst=119.29.29.119|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false");
+        assert_eq!(frames_line(9, 3, 0, 2, 0),
+            "N2_TUN_FRAMES|scope=session|mono_ms=9|seen=3|control=0|production=2|leaks=0|diag=true|is_evidence=false");
+        assert_eq!(wg_feed_adopted_line(2, 1, 1, 77),
+            "N7_WG_FEED|adopted|peers=2|endpoints=1|egress_replayed=1|mono_ms=77");
         for fd in [wg_raw, tun_raw, tun_end] {
             unsafe { sys::close(fd) };
         }

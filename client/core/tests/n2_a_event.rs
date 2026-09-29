@@ -241,12 +241,12 @@ async fn spawn_key_server() -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) 
     (addr, accepts, calls)
 }
 
-/// A trigger seam whose three actions are recorded; `rpc` runs the REAL client
+/// A trigger seam whose actions are recorded; `rpc` runs the REAL client
 /// `GetServerKey` handed to it by the test.
 struct TestTrigger {
     rpc: Mutex<Option<Box<dyn Fn() -> Result<(), String> + Send>>>,
     requery: Arc<AtomicUsize>,
-    probes: Arc<AtomicUsize>,
+    s_watches: Mutex<Vec<(String, u64, u64)>>,
     watches: Mutex<Vec<(String, u64, u64)>>,
 }
 
@@ -263,8 +263,8 @@ impl n2_a_event::Trigger for TestTrigger {
         Ok(())
     }
 
-    fn signal_probe(&self) -> Result<(), String> {
-        self.probes.fetch_add(1, Ordering::AcqRel);
+    fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {
+        self.s_watches.lock().expect("s watches").push((id.to_string(), wait_ms, seq));
         Ok(())
     }
 
@@ -332,7 +332,7 @@ async fn m_runs_one_real_rpc_on_the_existing_connection_only() {
             }
         }))),
         requery: Arc::new(AtomicUsize::new(0)),
-        probes: Arc::new(AtomicUsize::new(0)),
+        s_watches: Mutex::new(Vec::new()),
         watches: Mutex::new(Vec::new()),
     });
     n2_a_event::install_trigger(trigger.clone());
@@ -351,9 +351,16 @@ async fn m_runs_one_real_rpc_on_the_existing_connection_only() {
     assert_eq!(outcome.reason, "ok");
     assert_eq!(outcome.fd, original_fd);
     assert_eq!(outcome.dup_fd, dup_fd);
-    assert!(outcome.line.starts_with("N2_A_EVENT|id=a-M-1|kind=M|fd="), "{}", outcome.line);
+    // N2 T7a (item 4): the returned line is the `phase=end` outcome, carrying
+    // the fd pair and the event id; the `phase=begin` line was emitted before
+    // the RPC (visible in the captured log above).
+    assert!(outcome.line.starts_with("N2_A_EVENT|phase=end|id=a-M-1|kind=M|fd="),
+        "{}", outcome.line);
+    assert!(outcome.line.contains("|event_id=a-M-1|"), "{}", outcome.line);
     assert!(outcome.line.contains(&format!("|fd={original_fd}|dup_fd={dup_fd}|remote={remote}|")));
     assert!(outcome.line.ends_with("|diag=true|is_evidence=false"), "{}", outcome.line);
+    assert_eq!(n2_socket_trace::event_window(dup_fd), None,
+        "the M event window closes with its end line");
 
     // The RPC really happened, on the SAME connection: one accept and the
     // live registration did not move (a re-dial would replace it).
@@ -388,7 +395,7 @@ fn r_arms_the_documented_watch_and_completes_observed_or_timeout() {
     let trigger = Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: requery.clone(),
-        probes: Arc::new(AtomicUsize::new(0)),
+        s_watches: Mutex::new(Vec::new()),
         watches: Mutex::new(Vec::new()),
     });
     n2_a_event::install_trigger(trigger.clone());
@@ -433,43 +440,55 @@ fn r_arms_the_documented_watch_and_completes_observed_or_timeout() {
 }
 
 #[test]
-fn s_event_reports_sent_and_refuses_without_a_live_socket() {
+fn s_event_arms_the_natural_heartbeat_watch_and_refuses_without_a_live_socket() {
     let _guard = serial();
     n2_socket_trace::arm(false);
     n2_a_event::reset();
     n2_socket_trace::arm(true);
 
-    let probes = Arc::new(AtomicUsize::new(0));
-    n2_a_event::install_trigger(Arc::new(TestTrigger {
+    let trigger = Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: Arc::new(AtomicUsize::new(0)),
-        probes: probes.clone(),
+        s_watches: Mutex::new(Vec::new()),
         watches: Mutex::new(Vec::new()),
-    }));
+    });
+    n2_a_event::install_trigger(trigger.clone());
 
     // Armed but with NO live S registration: there is no production signal
-    // socket this event could be attributed to — an honest error, no probe.
+    // socket this event could be attributed to — an honest error, no watch.
     let s_none = netbird_core::connector::n2_a_event_json("S", "a-S-0");
     assert!(s_none.contains("\"result\":\"error\""), "{s_none}");
     assert!(s_none.contains("\"reason\":\"no-live-signal-connection\""), "{s_none}");
-    assert_eq!(probes.load(Ordering::Acquire), 0);
+    assert!(trigger.s_watches.lock().expect("sw").is_empty());
 
-    // With the live S registration the event triggers the production watchdog
-    // HEARTBEAT and reports that socket's fd/dup pair.
+    // With the live S registration the event ARMS the observer of the next
+    // natural watchdog HEARTBEAT (N2 T7a item 5) and reports that socket's
+    // fd/dup pair; nothing is sent by the trigger.
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("udp");
     let s_fd = sock.as_raw_fd();
     n2_socket_trace::protect(s_fd, "S", "req-a-event", 0, 31, 4, true);
     n2_socket_trace::io_begin(s_fd, "192.0.2.9:443".parse().expect("addr"));
     n2_socket_trace::first_io(s_fd, "192.0.2.9:443".parse().expect("addr"), "connected", "connect");
     let s = netbird_core::connector::n2_a_event_json("S", "a-S-1");
-    assert!(s.contains("\"result\":\"sent\"") && s.contains("\"ok\":true"), "{s}");
+    assert!(s.contains("\"result\":\"armed\"") && s.contains("\"ok\":true"), "{s}");
     assert!(s.contains(&format!("\"fd\":{s_fd}")), "{s}");
-    assert_eq!(probes.load(Ordering::Acquire), 1);
-    assert!(
-        n2_a_event::last_line().expect("line").contains("|detail=self-addressed-heartbeat|"),
-        "the core line names the production frame"
-    );
+    assert_eq!(trigger.s_watches.lock().expect("sw").as_slice(),
+        [("a-S-1".to_string(), n2_a_event::S_WAIT_MS, 1)]);
+    assert!(n2_a_event::s_watch_open());
+    let armed = n2_a_event::last_line().expect("line");
+    assert!(armed.contains("|phase=begin|") && armed.contains("|result=armed|"), "{armed}");
+    assert!(armed.contains("|detail=wait_ms=45000|"), "the frozen S box is written down: {armed}");
     assert_eq!(n2_a_event::a_events(), 1, "a dispatched S event counts as an A event");
+
+    // The natural watchdog heartbeat completes it: `phase=end|result=observed`
+    // with the event id, and the forced-receipt window is closed.
+    let observed = n2_a_event::natural_heartbeat_sent().expect("armed S watch");
+    assert_eq!(observed.result, "observed");
+    assert_eq!(observed.reason, "watchdog-heartbeat-sent");
+    assert!(observed.line.starts_with("N2_A_EVENT|phase=end|id=a-S-1|kind=S|"), "{}", observed.line);
+    assert!(observed.line.contains("|detail=natural-heartbeat|"), "{}", observed.line);
+    assert!(!n2_a_event::s_watch_open());
+    assert_eq!(n2_socket_trace::event_window(s_fd), None);
 
     n2_socket_trace::closed(s_fd);
     n2_socket_trace::arm(false);
@@ -487,7 +506,7 @@ fn d_q1_and_the_json_surface_refusals() {
     n2_a_event::install_trigger(Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: requery.clone(),
-        probes: Arc::new(AtomicUsize::new(0)),
+        s_watches: Mutex::new(Vec::new()),
         watches: Mutex::new(Vec::new()),
     }));
 
@@ -541,7 +560,7 @@ fn sandwich_pre_hit_precedes_the_first_send_and_unarmed_is_silent() {
 
     // UNARMED: every entry point is a silent no-op.
     n2_sandwich::attach_anchor(1_000);
-    assert_eq!(n2_sandwich::pre("I", "n2s-I-pre").line, "");
+    assert_eq!(n2_sandwich::pre("I", "n2s-I-pre", "n2s-I-post").line, "");
     n2_sandwich::observe_io("I", 7, 6, "192.0.2.9:3478".parse().expect("addr"), "sent");
     assert!(n2_sandwich::poll(netbird_core::sys::mono_ms()).is_empty());
     assert_eq!(n2_sandwich::attach_ms(), None);
@@ -553,13 +572,13 @@ fn sandwich_pre_hit_precedes_the_first_send_and_unarmed_is_silent() {
     let tee = N2DestinationTee::new(vec![dst], netbird_core::sys::mono_ms());
 
     // NO attach anchor yet: the frozen pre gate refuses by name.
-    let early = n2_sandwich::pre("I", "n2s-I-pre");
+    let early = n2_sandwich::pre("I", "n2s-I-pre", "n2s-I-post");
     assert_eq!(early.result, "unsat");
     assert_eq!(early.reason, "no-attach-anchor");
 
     // The tee attach anchor (wg_device's try_build) is what legalises the pre.
     n2_sandwich::attach_anchor(netbird_core::sys::mono_ms());
-    let pre = n2_sandwich::pre("I", "n2s-I-pre");
+    let pre = n2_sandwich::pre("I", "n2s-I-pre", "n2s-I-post");
     assert_eq!(pre.result, "registered", "{}", pre.line);
     assert!(pre.line.contains("|phase=pre|marker=n2s-I-pre|event_ref=attach@"));
     assert!(pre.line.contains("|wait_ms=3000|"), "{}", pre.line);
@@ -577,21 +596,26 @@ fn sandwich_pre_hit_precedes_the_first_send_and_unarmed_is_silent() {
     n2_sandwich::observe_io("I", 7, 6, "192.0.2.9:3478".parse().expect("addr"), "sent");
     assert!(n2_sandwich::first_send_ms("I").is_some());
 
-    // The shell is offered the post control exactly once…
+    // The shell is offered the post control exactly once… with the POST leg's
+    // OWN marker (N2 T7a item 1), never the pre one.
     let posts = n2_sandwich::poll(netbird_core::sys::mono_ms());
     assert_eq!(posts.len(), 1, "{posts:?}");
     assert_eq!(posts[0].kind, "I");
-    assert_eq!(posts[0].marker, "n2s-I-pre");
+    assert_eq!(posts[0].marker, "n2s-I-post");
     assert!(n2_sandwich::poll(netbird_core::sys::mono_ms()).is_empty(), "offered once");
     // …and the JSON surface carries it.
     let poll_json = netbird_core::connector::n2_sandwich_poll_json();
     assert!(poll_json.contains("\"posts\":[]"), "no second offer: {poll_json}");
-    let pre_json = netbird_core::connector::n2_sandwich_pre_json("Ws", "n2s-Ws-pre2");
+    let pre_json = netbird_core::connector::n2_sandwich_pre_json("Ws", "n2s-Ws-pre2", "n2s-Ws-post2");
     assert!(pre_json.contains("\"result\":\"registered\""), "{pre_json}");
+    // A post leg WITHOUT its own (different) marker is refused by name: the
+    // control registry would refuse a reused id, so the core refuses first.
+    let dup_marker = netbird_core::connector::n2_sandwich_pre_json("Ws", "n2s-Ws-pre3", "n2s-Ws-pre3");
+    assert!(dup_marker.contains("\"reason\":\"invalid-post-marker\""), "{dup_marker}");
 
-    let post = n2_sandwich::post("I", "n2s-I-pre", "observed", "ok");
+    let post = n2_sandwich::post("I", "n2s-I-post", "observed", "ok");
     assert_eq!(post.result, "observed", "{}", post.line);
-    assert!(post.line.contains("|phase=post|marker=n2s-I-pre|event_ref=first-send@"));
+    assert!(post.line.contains("|phase=post|marker=n2s-I-post|event_ref=first-send@"));
     assert!(post.line.contains("|result=observed|reason=control-hit-after-first-send|"));
     assert!(post.line.contains("|fd=6|dup_fd=7|remote=192.0.2.9:3478|"), "{}", post.line);
 
@@ -618,7 +642,7 @@ fn first_send_after_attach_but_before_the_pre_control_is_unsat() {
     // The production send happened first…
     n2_sandwich::observe_io("I", 7, 6, "192.0.2.9:3478".parse().expect("addr"), "sent");
     // …so the leg can never be a valid sandwich.
-    let pre = n2_sandwich::pre("I", "n2s-I-late");
+    let pre = n2_sandwich::pre("I", "n2s-I-late", "n2s-I-late-post");
     assert_eq!(pre.result, "unsat", "{}", pre.line);
     assert_eq!(pre.reason, "first-send-before-pre-control");
     assert_eq!(n2_sandwich::leg_count(), 0, "no leg survives an unsat pre");
@@ -646,7 +670,7 @@ fn a_live_relay_socket_reports_its_own_fd_pair_after_the_shell_close() {
     n2_a_event::install_trigger(Arc::new(TestTrigger {
         rpc: Mutex::new(None),
         requery: Arc::new(AtomicUsize::new(0)),
-        probes: Arc::new(AtomicUsize::new(0)),
+        s_watches: Mutex::new(Vec::new()),
         watches: Mutex::new(Vec::new()),
     }));
     let armed = n2_a_event::apply("R", "a-R-9");

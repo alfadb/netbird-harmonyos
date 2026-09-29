@@ -28,13 +28,13 @@ The existing `protect_probe` works independently of S6. Run separate authorized 
 
 `n2_evidence.outer_destinations` is required when armed: a nonempty list (maximum 128) of unique `tcp/IP:port` or `udp/IP:port` targets, each IP in `capture_32`. The core refuses missing/invalid targets before TUN attach, freezes the exact protocol/IP/port set for this session, and emits `N2_TUN_LEAK|verdict=fail` immediately on a matching *non-control* from-OS frame regardless of source IP. The shell and core keep default-unarmed behavior unchanged. An incomplete outer set is **not** proof of absence; compare it with every observed production endpoint throughout the campaign and stop as `UNSAT` on drift.
 
-`NetBirdN2Control.ets` exports the explicit `withN2Sandwich(capture32, target, proto, eventId, production)` convention. Only an already-armed session may call it, and `production` must be one real production send callback, not a synthetic substitute. It sends and waits for a **pre** HIT, invokes and awaits that callback, then sends and waits for a **post** HIT; exceptions or MISS abort that event. No production path invokes `withN2Sandwich` automatically; the armed-only **P5** orchestration below uses the same pre → production → post ordering through the exported `sendAndWaitN2Control` leg primitive (see「I/Ws sandwich orchestration (P5)」). Each `sendN2Control` opens an unprotected fd through the same production shell opener (`mgmtSocketOpen` for TCP, `iceSocketOpen` for UDP), registers before I/O, and closes the shell fd in `finally`. TCP matches a registered local-port SYN during a bounded window; UDP matches the exact `N2CTRL:<marker>` payload and destination. Neither needs a listener or a special test port. Native `service_tun` consumes a matched frame before either the collector tee or WG encryption, logs `N2_CONTROL_HIT`/`N2_CONTROL_MISS`, and maintains independent `N2_TUN_FRAMES` control/production counts. `n2_control_status` reports cumulative `leaks`; the sandwich aborts when it sees a nonzero value. A negative/protected socket observation cannot be accepted without both ordered HITs for that event and independent send receipts.
+`NetBirdN2Control.ets` exports the explicit `withN2Sandwich(capture32, target, proto, eventId, production)` convention. Only an already-armed session may call it, and `production` must be one real production send callback, not a synthetic substitute. It sends and waits for a **pre** HIT, invokes and awaits that callback, then sends and waits for a **post** HIT; exceptions or MISS abort that event. No production path invokes `withN2Sandwich` automatically; the armed-only **P5** orchestration below uses the same pre → production → post ordering through the exported `sendAndWaitN2Control` leg primitive (see「I/Ws sandwich orchestration (P5)」). Each `sendN2Control` opens an unprotected fd through the same production shell opener (`mgmtSocketOpen` for TCP, `iceSocketOpen` for UDP), registers before I/O, and closes the shell fd in `finally`. TCP matches a registered local-port SYN during a bounded window; UDP matches the exact `N2CTRL:<marker>` payload and destination. Neither needs a listener or a special test port. Native `service_tun` consumes a matched frame before either the collector tee or WG encryption, logs `N2_CONTROL_HIT`/`N2_CONTROL_MISS`, and maintains independent `N2_TUN_FRAMES` control/production counts. Every `N2_CONTROL_HIT`/`_MISS`/`_SENT` line carries both the REQUEST `id=` and the matched `marker=` (identical by construction, N2 T7a item 2), so a hit can be looked up by the id the operator asked for. `n2_control_status` reports cumulative `leaks`; the sandwich aborts when it sees a nonzero value. A negative/protected socket observation cannot be accepted without both ordered HITs for that event and independent send receipts.
 
-`N2_TUN_GAP` records the pre-attach period and TUN replacements (monotonic bounds). A recorded gap overlapping a production event, a failed read/decode, missing control, unknown source attribution, unmatched target or independently observed packet loss makes the relevant interval `invalid/UNSAT`; a zero counter is not a pass. The core does not prove kernel queue integrity or physical receipt, and the bounded per-event control window cannot substitute for independent full-campaign capture/drop accounting. T3 tests use fake TUN frames only and perform no device/network campaign.
+`N2_TUN_GAP` records the pre-attach period, TUN replacements and the tee detach (monotonic bounds as `from_mono=`/`to_mono=`, N2 T7a item 3). The session-period `N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…` line reports the tee's own continuity (`frames = decode_fail + dropped + Σ N2_TUN_DEST.frames`): a non-zero `decode_fail` makes the interval incomplete. A recorded gap overlapping a production event, a failed read/decode, missing control, unknown source attribution, unmatched target or independently observed packet loss makes the relevant interval `invalid/UNSAT`; a zero counter is not a pass. The core does not prove kernel queue integrity or physical receipt, and the bounded per-event control window cannot substitute for independent full-campaign capture/drop accounting. T3 tests use fake TUN frames only and perform no device/network campaign.
 
 ## Outer-socket lifecycle receipts (T2/T4)
 
-Only an accepted `n2_evidence` ticket arms `N2_SOCK|` logging; an absent or refused ticket leaves the old log stream unchanged. `phase=open` and `phase=protect_begin` are emitted by the ArkTS protect wrapper for an opened fd, `phase=protect_settle` records the bounded result and `elapsed_ms`. `phase=first_io_begin` is recorded immediately before TCP `connect` or UDP `send`; the core's `phase=first_io|status=connected|sent|failed` receipt is recorded after that call returns. A reused ICE/WG fd records later sends as `phase=subsequent_io_begin` and `phase=subsequent_io` with the same original/dup fd chain and a new destination and completion time. `first_mono_ms` and `first_wall_ms` on completion receipts are **completion timestamps**, not wire timestamps. `fd` is the shell original, `dup_fd` is the core-owned descriptor. `request_id` is the monotonic supply ID for on-demand sockets; initial and spare sockets use the extension request ID. `protect_generation` and `net_id` reflect the shell snapshot at protect completion; `net_id=0` means unavailable, not a verified network. The receipt also gives `local` from `getsockname` after the call, `remote` as numeric address and port, `proto`, `kind` (`M` management, `S` signal, `R` relay, `D` DNS, `I` ICE, `Wb` WG bound socket, `Ws` WG supplied socket), and `detail`. `local=unknown` is not evidence of a physical source. The logs are `diag=true|is_evidence=false` and do not establish a successful protect independently of the platform's actual behavior. A local IPv4 in `100.108.0.0/16` additionally emits `N2_SOCK_OVERLAY_LOCAL`; it is a stop/fail signal, not a substitute for network-side observations.
+Only an accepted `n2_evidence` ticket arms `N2_SOCK|` logging; an absent or refused ticket leaves the old log stream unchanged. `phase=open` and `phase=protect_begin` are emitted by the ArkTS protect wrapper for an opened fd, `phase=protect_settle` records the bounded result and `elapsed_ms`. N2 T7a item 6: the shell `phase=open`/`phase=protect_begin`/`phase=protect_settle` lines now spell the generation field `protect_generation=` (the frozen E1 name), and `protect_settle` carries `status=success|failed` instead of `result=`, plus `local=` (the socket's own `getsockname` name, returned by `n2_socket_trace_protect`; `unknown` when the number cannot be inspected — never an invented address). The `status`/`protect_generation` vocabulary is therefore the core `N2_SOCK` one and matches the frozen criterion `phase=protect_settle|status=success`. `phase=first_io_begin` is recorded immediately before TCP `connect` or UDP `send`; the core's `phase=first_io|status=connected|sent|failed` receipt is recorded after that call returns. A reused ICE/WG fd records later sends as `phase=subsequent_io_begin` and `phase=subsequent_io` with the same original/dup fd chain and a new destination and completion time. N2 T7a item 4: every `phase=subsequent_io` completion carries `event_id=<id>` — the A-column event the write belongs to while an event window is open (`none` outside every window) — and a write inside an open window is ALWAYS receipted, bypassing the first/every-128th/30-s throttle, so the one production write an A event causes can never be missing from the log. `first_mono_ms` and `first_wall_ms` on completion receipts are **completion timestamps**, not wire timestamps. `fd` is the shell original, `dup_fd` is the core-owned descriptor. `request_id` is the monotonic supply ID for on-demand sockets; initial and spare sockets use the extension request ID. `protect_generation` and `net_id` reflect the shell snapshot at protect completion; `net_id=0` means unavailable, not a verified network. The receipt also gives `local` from `getsockname` after the call, `remote` as numeric address and port, `proto`, `kind` (`M` management, `S` signal, `R` relay, `D` DNS, `I` ICE, `Wb` WG bound socket, `Ws` WG supplied socket), and `detail`. `local=unknown` is not evidence of a physical source. The logs are `diag=true|is_evidence=false` and do not establish a successful protect independently of the platform's actual behavior. A local IPv4 in `100.108.0.0/16` additionally emits `N2_SOCK_OVERLAY_LOCAL`; it is a stop/fail signal, not a substitute for network-side observations. The shell's `VPN_WG_DATAPLANE_FED` line (T7a item 6) carries `mono_ms=` from the core's `connector_tun_fd_feed` reply and `wall_ms=Date.now()`, so it is alignable with the core's `N7_WG_FEED|adopted|…|mono_ms=` from the same call; `N7_WG_FEED|adopted` itself now also reports `endpoints=` and `egress_replayed=`, and `N2_FD_SEND` keeps exactly `packets`/`bytes`/`mono_ms`.
 
 Pair M/S TCP with the matching server access log using destination IP:port, device local source IP:port after connect, event time and a bounded clock error; if NAT intervenes, require the frozen router/AP mapping to bridge the before/after tuple. Pair R only with an enabled relay access log and its actual destination, not a guessed peer address. For D, require the protected DNS fd's sent query and same-ID response, adjacent from-OS positive-control hit, campaign-wide zero leakage, physical handle and actual resolver destination under the frozen no-exit-node condition; an independently available resolver query log strengthens this but is not mandatory. The ordinary `protected-dns` line has the hostname; `N2_SOCK` does not log it. For I, `detail=stun_txn_<hex>` identifies the 96-bit STUN transaction; `N2_SOCK_STUN` records the decoded XOR-MAPPED-ADDRESS, server, local tuple and the same transaction ID. Verify whether coturn actually records transaction IDs before pairing by ID; absent that field, uniquely pair using destination, time window, response-side ID and independent metadata, or mark `invalid/UNSAT`. Once uniquely paired, a coturn remote tuple differing from XOR-MAPPED-ADDRESS is `UNSAT` and a risk event, not a negative-packet pass. The mapped address is a NAT observation, **not** a claimed device local IP. Public-side tuples alone are insufficient on shared LAN/hairpin/cellular NAT: preserve the AP/router or operator mapping and both sides' clock calibration. Three-way attribution needs the device fd/dup chain, physical-interface/network-side send and independent target receipt, together with the required TUN positive control. Missing required access logs for M/S/R or Wb/Ws, unmatched I transactions, ambiguous NAT, unknown local tuple, or absent per-socket protect/first-send logs make the corresponding cell `invalid/UNSAT`, never a negative-packet pass. Wb/Ws send completion requires the WG data-plane path; shell protect alone is not a send receipt.
 
@@ -80,12 +80,18 @@ aa start -b cn.alfadb.netbird -a EntryAbility \
 **without** `n2_stimulus` deletes a leftover request, exactly like the arm
 ticket's default-no-arm rule, so a stale stimulus cannot fire later. The
 already-running, already-armed extension picks the file up on its next status
-watcher tick (≤ `STATUS_POLL_MS` = 5 s) and consumes it. The arm ticket must be
-passed along: a launch without it clears the arm ticket (unchanged default
-rule), so a later extension restart would not be armed. Three repetitions = the
-same command three times with a fresh `id` each time. The trigger needs the
-extension instance that is already armed; a force-stop or a new VPN session
-requires a fresh arm first.
+watcher tick (≤ `STATUS_POLL_MS` = 5 s) and consumes it. N2 T7a item 7 changes
+the ARM TICKET rule this paragraph used to depend on: a launch that carries an
+N2 request parameter (`n2_stimulus` / `n2_control` / `n2_a_event`) but **no**
+`n2h_arm_options` now **KEEPS** the existing ticket (one
+`N2H_ARM_TICKET_KEPT|file=netbird-n2h-arm|note=request-launch-without-arm-ticket`
+line) instead of deleting it, so the documented「先 arm，再逐条发请求」flow can
+no longer silently disarm a later extension restart. A launch with **no** N2
+request parameter keeps the original default-no-arm deletion rule (a stale
+ticket still cannot survive an unrelated launch), and an explicit ticket is
+always written verbatim. Three repetitions = the same command three times with a
+fresh `id` each time. The trigger needs the extension instance that is already
+armed; a force-stop or a new VPN session requires a fresh arm first.
 
 ### Log lines
 
@@ -196,11 +202,13 @@ aa start -b cn.alfadb.netbird -a EntryAbility \
 (UTF-8 byte count only, never the payload), and a launch without the parameter
 deletes a leftover. The already-running, already-armed extension picks the file
 up on its next status watcher tick (≤ `STATUS_POLL_MS` = 5 s) and consumes it.
-The arm ticket must be passed along: a launch without it clears the arm ticket
-(unchanged default rule), so a later extension restart would not be armed. The
-sandwich itself stays three separate launches with a fresh `id` per leg (the
-production event happens between the pre- and the post-control), and
-`withN2Sandwich` remains the explicit in-process convention.
+N2 T7a item 7: a launch that carries `n2_control` but not `n2h_arm_options`
+KEEPS the existing arm ticket (`N2H_ARM_TICKET_KEPT`), so the operator no longer
+has to repeat the ticket on every request launch; a launch with no N2 request
+parameter still clears a leftover ticket. The sandwich itself stays three
+separate launches with a fresh `id` per leg (the production event happens
+between the pre- and the post-control), and `withN2Sandwich` remains the
+explicit in-process convention.
 
 ### Log lines
 
@@ -304,26 +312,41 @@ stream.
 
 | kind | action | emitted |
 | --- | --- | --- |
-| **M** | ONE read-only idempotent real `GetServerKey` (`grpc.rs:430`) on the **EXISTING** logged-in management client — the `logout_slot` clone whose tonic `Channel` is the same connection the Sync stream runs over. **No new dial, no second `Sync` stream.** | `result=sent` / `result=error|reason=management-rpc-<class>` (sanitized class only, never server text) |
-| **R** | NO active send: arm a watcher for the next **server-driven** `HealthCheck` and record the production echo (`relay_client.rs:2117-2120`). Wait bound `R_WAIT_MS = 90_000` ms on the session runtime. | `result=armed|detail=wait_ms=90000`, then `result=observed|reason=server-healthcheck-answered` or `result=timeout|reason=healthcheck-wait-exceeded` |
-| **D** | Q1: the first A event of the session calls the existing requery primitive ONCE (`force_protected_dns_requery`, one fresh protected fd). Any prior `n2_stimulus` application or prior A event refuses. | `result=requery|detail=receipt-in-N2_DNS` / `result=rejected|reason=prior-stimulus` |
-| **S** | ONE self-addressed `HEARTBEAT` (`Body.type = 6`) asked of the **registered signal receive watchdog** (P8 product watchdog in `SignalSession`), which sends it on the SAME signal stream/connection — the production frame upstream's `sendReceiveProbe` sends; the trigger only moves its SEND TIME. `fd`/`dup_fd` are the live `S` pair the `N2_SOCK` receipts report, taken from the armed trace. Wait bound `S_PROBE_WAIT_MS = 5_000` ms on the session runtime. | `result=sent` / `result=error\|reason=no-live-signal-connection`, `no-registered-signal-stream`, `signal-heartbeat-<class>`, `signal-heartbeat-timeout` |
+| **M** | ONE read-only idempotent real `GetServerKey` (`grpc.rs:430`) on the **EXISTING** logged-in management client — the `logout_slot` clone whose tonic `Channel` is the same connection the Sync stream runs over. **No new dial, no second `Sync` stream.** | `phase=begin|result=begin`, then `phase=end|result=sent` / `phase=end|result=error|reason=management-rpc-<class>` (sanitized class only, never server text) |
+| **R** | NO active send: arm a watcher for the next **server-driven** `HealthCheck` and record the production echo (`relay_client.rs:2117-2120`). Wait bound `R_WAIT_MS = 90_000` ms on the session runtime. | `phase=begin|result=armed|reason=healthcheck-watch|detail=wait_ms=90000`, then `phase=end|result=observed|reason=server-healthcheck-answered` or `phase=end|result=timeout|reason=healthcheck-wait-exceeded` |
+| **D** | Q1: the first A event of the session calls the existing requery primitive ONCE (`force_protected_dns_requery`, one fresh protected fd). Any prior `n2_stimulus` application or prior A event refuses. | `phase=begin` then `phase=end|result=requery|detail=receipt-in-N2_DNS` / `phase=end|result=rejected|reason=prior-stimulus` |
+| **S** | **NO active send** (N2 T7a item 5, frozen §4 S row (i)): arm a watcher for the NEXT **natural** silence-triggered `HEARTBEAT` (`Body.type = 6`) the registered receive watchdog sends anyway (after `RECEIVE_PROBE_AFTER` = 20 s of stream silence), on the SAME signal stream/connection. Wait bound `S_WAIT_MS = 45_000` ms on the session runtime. `fd`/`dup_fd` are the live `S` pair the `N2_SOCK` receipts report, taken from the armed trace. | `phase=begin|result=armed|reason=signal-heartbeat-watch|detail=wait_ms=45000`, then `phase=end|result=observed|reason=watchdog-heartbeat-sent|detail=natural-heartbeat` or `phase=end|result=timeout|reason=heartbeat-wait-exceeded` |
 
-Unarmed: `result=rejected|reason=not-armed` before any RPC/syscall. Unknown kind
-→ `invalid-kind`; malformed id → `invalid-id`. Every request emits exactly one
-line, plus the later R completion.
+Unarmed: `phase=end|result=rejected|reason=not-armed` before any RPC/syscall.
+Unknown kind → `invalid-kind`; malformed id → `invalid-id`. An accepted request
+emits its `phase=begin` line when its trigger starts (M/D just before the call,
+R/S as soon as the watch arm returned) and its `phase=end` line when the outcome
+is known; a request refused by a gate emits the single `phase=end` line, because
+no trigger ever began.
 
 ### Log line
 
 ```
-N2_A_EVENT|id=…|kind=…|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|mono_ms=…|diag=true|is_evidence=false
+N2_A_EVENT|phase=begin|end|id=…|kind=M|R|D|S|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|event_id=…|mono_ms=…|diag=true|is_evidence=false
 ```
 
+Both phases carry the identical field set and order. `id` and `event_id` are
+the same request id (`event_id` is the join name the forced write receipt uses).
 `fd` is the shell ORIGINAL and `dup_fd` the core-owned descriptor of the live
 outer socket — the **same pair the `N2_SOCK` receipts report**, taken from the
 armed trace itself (`n2_socket_trace::live_of`), so an A event can never be
 attributed to a socket no `N2_SOCK` line describes. D claims no fd here: its
 authoritative device record is the `N2_DNS` receipt the requery emits.
+
+**Event window (T7a item 4).** `phase=begin` opens an event window on that
+`dup_fd`; the matching `phase=end` closes it. EVERY write completed on that
+descriptor inside the window is receipted **unconditionally** — the post-connect
+receipt throttle is bypassed — with `event_id=<id>` on the
+`N2_SOCK|phase=subsequent_io|…` line (see「Outer-socket lifecycle receipts」).
+The one production write an event causes therefore always has a receipt, even
+when it is not the first / every-128th / 30-s write of its descriptor. For R and
+S the window stays open across the wait, so the response write is inside it by
+construction.
 
 ### How the operator triggers it
 
@@ -393,19 +416,31 @@ attach and **never changes the ICE/WG send content or order**.
 N2_SANDWICH|kind=I|Ws|phase=pre|post|first-send|marker=…|event_ref=…|result=…|reason=…|fd=…|dup_fd=…|remote=…|wait_ms=…|mono_ms=…|diag=true|is_evidence=false
 ```
 
+**The pre and post controls carry DIFFERENT markers (N2 T7a item 1).** The shell
+derives both from the instance request id (`n2s-<kind>-<id>-pre` /
+`n2s-<kind>-<id>-post`) and registers both with
+`n2_sandwich_pre(kind, pre_marker, post_marker)`; the core hands the POST
+marker back through `n2_sandwich_poll()` and every `phase=post` line records
+THAT marker (`marker=` is the marker of its own phase), so the post control can
+never be refused as a reused id (`duplicate-control`) the way reusing the pre
+marker would force. `event_ref` is the observation the phase is anchored to
+(`attach@<mono_ms>` / `first-send@<mono_ms>` / `pre@<mono_ms>` / `none`).
+
 `N2_SANDWICH_SHELL|…` is the shell's delivery receipt. Unarmed, every entry
 point is a **silent no-op** (no state, no line, no control).
 
 ### Interface (NAPI)
 
-* `n2_sandwich_pre(kind, marker)` → `{ok,result,reason,kind,marker}`; the shell
-  calls it BEFORE sending the pre control and skips the send when `ok` is false
-  (the core already logged the exact `unsat`/`rejected` reason).
+* `n2_sandwich_pre(kind, pre_marker, post_marker)` → `{ok,result,reason,kind,marker}`;
+  the shell calls it BEFORE sending the pre control and skips the send when
+  `ok` is false (the core already logged the exact `unsat`/`rejected` reason).
+  A missing/reused post marker is refused by name (`invalid-post-marker`).
 * `n2_sandwich_poll()` → `{ok,posts:[{kind,marker}]}`; one entry per leg whose
-  first production send was observed after the pre HIT. Also closes timed-out
-  legs.
+  first production send was observed after the pre HIT, where `marker` is the
+  POST control's own marker the shell must send. Also closes timed-out legs.
 * `n2_sandwich_post(kind, marker, result, reason)` → closes one leg with the
-  shell's post verdict (`observed` = the post marker HIT, `unsat` = it MISSed).
+  shell's post verdict (`observed` = the post marker HIT, `unsat` = it MISSed);
+  `marker` is the POST control's marker (the leg is located by it).
 
 ### Host verification (no device)
 
@@ -555,6 +590,22 @@ nothing is sent. The authoritative send receipt stays the socket wrapper's
 `N2_SOCK|phase=subsequent_io|kind=S`; the `N2_A_EVENT|kind=S` line only reports
 the dispatch plus the live `fd`/`dup_fd` pair from the armed trace.
 
+**The `S` A-event observes the NATURAL heartbeat (N2 T7a item 5, frozen §4 S row
+(i)).** `n2_a_event::apply("S", …)` no longer asks the watchdog for a probe: it
+arms an observer (`Trigger::arm_s_watch`, box `S_WAIT_MS = 45_000` ms) for the
+NEXT silence-triggered `HEARTBEAT` the watchdog sends on its own, and
+`signal.rs` calls
+`n2_a_event::natural_heartbeat_about_to_send()` /
+`natural_heartbeat_sent()` immediately around that `send_heartbeat()`. So only a
+frame the production client would have sent anyway can complete the event:
+`N2_A_EVENT|kind=S|phase=end|result=observed|reason=watchdog-heartbeat-sent|detail=natural-heartbeat|event_id=<id>`,
+or `…|phase=end|result=timeout|reason=heartbeat-wait-exceeded|detail=wait_ms=45000`.
+Because the observer's event window covers the send, that heartbeat write is
+forced into an `N2_SOCK|phase=subsequent_io|kind=S|…|event_id=<id>` receipt
+whatever the throttle says. `signal::request_receive_probe()` is kept as a
+**product-internal** seam (the watchdog's own probe capability) and is no longer
+called by any N2 path.
+
 ### Host verification (no device)
 
 * `cargo test --offline --locked` (client/core):
@@ -567,17 +618,64 @@ the dispatch plus the live `fd`/`dup_fd` pair from the armed trace.
     connection).
   * `tests/signal_watchdog.rs` (own binary: the probe handle is a process
     singleton) — `an_external_probe_request_sends_one_heartbeat_immediately`
-    (one request ⇒ one self-addressed probe, same connection; no stream frame;
-    unregistered refuses) and
-    `s_a_event_triggers_the_watchdog_heartbeat_on_the_existing_signal_stream`
-    (the frozen `S` event through `Trigger::signal_probe`: `result=sent`, the
-    `fd`/`dup_fd` pair byte-identical to `N2_SOCK`, ONE accepted connection,
-    the decrypted frame is `Body.type = 6` and no OFFER/ANSWER/CANDIDATE is
-    created, a refused probe is `result=error` and sends nothing).
-  * `n2_a_event.rs` unit tests (`kind_s_needs_a_live_signal_socket_and_reports_the_probe_outcome`)
-    and `tests/n2_a_event.rs::s_event_reports_sent_and_refuses_without_a_live_socket`.
-  * `client/entry/selfcheck/run-n2-a-event.mts` — pins the `S` contract and the
-    20 s/30 s watchdog constants on the shipped sources.
+    (the product-internal seam: one request ⇒ one self-addressed probe, same
+    connection; no stream frame; unregistered refuses) and
+    `s_a_event_observes_the_natural_watchdog_heartbeat_on_the_existing_stream`
+    (N2 T7a item 5: the `S` event only ARMS the observer — `result=armed`,
+    the `fd`/`dup_fd` pair byte-identical to `N2_SOCK`, the forced-receipt
+    window open on that descriptor — then the NATURAL silence-triggered
+    heartbeat completes it as `phase=end|result=observed|event_id=…`, ONE
+    accepted connection, the decrypted frame is `Body.type = 6`, no
+    OFFER/ANSWER/CANDIDATE created; a refused arm is `result=error` and sends
+    nothing).
+  * `n2_a_event.rs` unit tests
+    (`kind_s_needs_a_live_signal_socket_and_observes_the_natural_heartbeat`)
+    and `tests/n2_a_event.rs::s_event_arms_the_natural_heartbeat_watch_and_refuses_without_a_live_socket`.
+  * `client/entry/selfcheck/run-n2-a-event.mts` — pins the `S` observer
+    contract and the 20 s/30 s watchdog constants on the shipped sources.
 * On-device use of `n2_a_event kind=S` still requires the separately authorized
-  campaign; the frozen `S(A)` row is what it feeds (the natural heartbeat, now
-  triggerable in send time only).
+  campaign; the frozen `S(A)` row is what it feeds (the natural heartbeat,
+  observed rather than triggered).
+
+## T7a conformance fixes (2026-09-28)
+
+The product-side diagnostic issues the T7a independent review named are fixed
+here; every change is arm-gated diagnostic output (except item 7, which is an
+EntryAbility launch-time ticket rule). The **exact** field list, order, value
+sets and units of every line below, with the source function that formats it,
+is [`n2-log-formats-20260928.md`](n2-log-formats-20260928.md); its executable
+half is `client/core/tests/n2_log_samples.rs` +
+`client/core/tests/fixtures/n2-log-samples.txt` (byte-for-byte assertion).
+
+1. **Sandwich post control marker** — the post leg has its OWN marker
+   (`n2_sandwich_pre(kind, pre, post)`), the poll hands it back, and every
+   `phase=post` line records it (see「I/Ws sandwich orchestration (P5)」).
+   Before this fix the shell sent the post control with the PRE marker, which
+   the control registry refuses as `duplicate-control`.
+2. **Control requests are findable by request id** — `id=` and `marker=` on
+   `N2_CONTROL_HIT`/`_MISS`/`_SENT` (see「T3 positive controls and sandwich」).
+3. **TUN tee continuity** — `N2_TUN_TEE_STATS` (frames/decode_fail/dropped) on
+   the session cadence, and `N2_TUN_GAP|from_mono=|to_mono=` for tee
+   mount / TUN replacement / tee detach (see the T3 paragraph above).
+4. **A-event begin/end + forced receipts** — `phase=begin` before the trigger,
+   `phase=end` with the outcome, and an unconditional
+   `N2_SOCK|phase=subsequent_io|…|event_id=<id>` for every write inside the
+   window (see「A-column production-event trigger (P4)」and「Outer-socket
+   lifecycle receipts」).
+5. **`S` observes the natural watchdog heartbeat** (45 s box) instead of asking
+   for an immediate probe (see「Signal receive watchdog and the S A-event
+   (P8)」).
+6. **Field completion** — `N7_WG_FEED|adopted` carries
+   `endpoints=`/`egress_replayed=`/`mono_ms=`; `VPN_WG_DATAPLANE_FED` carries
+   `mono_ms=` (from the core clock, alignable with that same call's
+   `N7_WG_FEED|adopted`) and `wall_ms=`; `phase=protect_settle` carries
+   `status=`/`protect_generation=`/`local=`; `N2_FD_SEND` is unchanged
+   (`packets`/`bytes`/`mono_ms`).
+7. **Arm ticket protection** — a launch that carries an N2 request parameter
+   (`n2_control`/`n2_stimulus`/`n2_a_event`) but no `n2h_arm_options` KEEPS the
+   existing ticket (`N2H_ARM_TICKET_KEPT`) instead of deleting it; a launch with
+   no N2 request keeps the original default-no-arm deletion rule (see the
+   operator-trigger sections above). Self-checked through the REAL EntryAbility
+   in `run-exclusion-generation.mts` (`N3b`).
+8. **Format baseline** — the doc + the generated sample file + the test that
+   keeps them identical.

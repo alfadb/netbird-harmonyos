@@ -28,13 +28,15 @@
 //! * `S` — ONE **self-addressed HEARTBEAT** (`Body.HEARTBEAT = 6`,
 //!   `signal.rs`'s `send_heartbeat` = upstream `sendReceiveProbe`,
 //!   grpc.go:555-566) sent by the **registered receive watchdog** on the
-//!   SAME signal stream/connection. It is a frame the production client sends
-//!   anyway (the P8 watchdog probes after 20 s of silence); this trigger only
-//!   moves its SEND TIME (`signal::request_receive_probe`), it cannot invent a
-//!   frame kind and it has no peer/server state side effect (the server routes
-//!   it straight back to the sender). `fd`/`dup_fd` are the live `S` pair the
-//!   `N2_SOCK` receipts report; the authoritative send receipt stays
-//!   `N2_SOCK|phase=subsequent_io|kind=S` (the socket wrapper), not this line.
+//!   SAME signal stream/connection. N2 T7a (item 5, frozen v4.1 §4 S row (i)):
+//!   the trigger does NOT ask for the probe any more — it arms a watcher for
+//!   the **next natural watchdog HEARTBEAT** (the one the product sends after
+//!   [`crate::signal::RECEIVE_PROBE_AFTER`] = 20 s of silence), bounded by
+//!   [`S_WAIT_MS`] = 45 s. So only the OBSERVED production frame counts, and
+//!   `request_receive_probe` stays a product-internal seam with no N2 caller.
+//!   `fd`/`dup_fd` are the live `S` pair the `N2_SOCK` receipts report; the
+//!   authoritative send receipt stays `N2_SOCK|phase=subsequent_io|kind=S`
+//!   (the socket wrapper), not this line.
 //!
 //! ## Gating
 //!
@@ -42,17 +44,28 @@
 //! (`n2_socket_trace_arm(true)`): every request answers
 //! `rejected|reason=not-armed` without a single syscall or RPC. A disarm
 //! ([`reset`], called from [`crate::n2_socket_trace::arm`]) drops the session
-//! counters and any armed R watch.
+//! counters and any armed R/S watch.
 //!
 //! ## Evidence discipline
 //!
-//! Exactly one
-//! `N2_A_EVENT|id=…|kind=…|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|mono_ms=…|diag=true|is_evidence=false`
-//! line per request (plus the later `observed`/`timeout` completion of an
-//! armed R watch). `fd` is the shell ORIGINAL and `dup_fd` the core-owned
-//! descriptor of the live outer socket — the same pair the `N2_SOCK` receipts
-//! report, taken from the armed trace itself, so an A event can never be
-//! attributed to a socket no `N2_SOCK` line describes.
+//! N2 T7a (item 4): one request emits a `phase=begin` line at the start of its
+//! trigger (M/D before the call, R/S as soon as the arm returned) and a
+//! `phase=end` line when its outcome is known; a gate refusal emits only the
+//! `phase=end` line (no trigger ever began). Both lines share the request `id`
+//! and the window between them is the event window
+//! ([`crate::n2_socket_trace::event_window_begin`]): EVERY write completed on
+//! that core-owned descriptor inside the window is receipted unconditionally,
+//! with `event_id=<id>` (see [`crate::n2_socket_trace::post_connect_write`]),
+//! so the one production write a trigger causes can never be swallowed by the
+//! post-connect receipt throttle. `fd` is the shell ORIGINAL and `dup_fd` the
+//! core-owned descriptor of the live outer socket — the same pair the
+//! `N2_SOCK` receipts report, taken from the armed trace itself, so an A event
+//! can never be attributed to a socket no `N2_SOCK` line describes.
+//!
+//! ```text
+//! N2_A_EVENT|phase=begin|id=…|kind=…|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|event_id=…|mono_ms=…|diag=true|is_evidence=false
+//! N2_A_EVENT|phase=end|id=…|kind=…|fd=…|dup_fd=…|remote=…|result=…|reason=…|detail=…|event_id=…|mono_ms=…|diag=true|is_evidence=false
+//! ```
 
 use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -63,7 +76,7 @@ use crate::sys;
 /// The four kinds this primitive accepts. `M`/`R`/`D`/`S` are the frozen
 /// A-column rows that have a side-effect-free production send: `M` a read-only
 /// management RPC, `R` the server-driven HealthCheck echo, `D` the protected
-/// DNS requery, `S` the self-addressed watchdog HEARTBEAT.
+/// DNS requery, `S` the natural self-addressed watchdog HEARTBEAT.
 pub const KINDS: [&str; 4] = ["M", "R", "D", "S"];
 
 /// The frozen R wait bound (`§4` R row: "等待上限写入 AUTH（建议 ≤ 90 s…）").
@@ -75,13 +88,13 @@ pub const R_WAIT_MS: u64 = 90_000;
 /// the production RPC.
 pub const M_RPC_WAIT_MS: u64 = 5_000;
 
-/// The bounded synchronous `S` wait: the shell thread blocks until the
-/// registered receive watchdog reports that its self-addressed HEARTBEAT send
-/// call returned. The probe is one unary `SignalExchange/Send` on the existing
-/// connection (client-side deadline `request_timeout`, 5 s in production), so
-/// this box bounds the operator-visible wait without inventing a new timeout
-/// for the production frame.
-pub const S_PROBE_WAIT_MS: u64 = 5_000;
+/// N2 T7a (item 5) — the bounded wait for the NEXT **natural** watchdog
+/// HEARTBEAT (the frozen v4.1 §4 `S` row (i) shape). The product watchdog
+/// probes after [`crate::signal::RECEIVE_PROBE_AFTER`] = 20 s of stream
+/// silence; the observer is boxed at 45 s so an actively-chatty stream (whose
+/// silence window keeps restarting) ends as an honest `result=timeout`
+/// instead of holding the operator's wait open.
+pub const S_WAIT_MS: u64 = 45_000;
 
 /// The fd/dup identity chain of the live outer socket the trigger reuses:
 /// `fd` = shell ORIGINAL, `dup_fd` = core-owned descriptor (exactly the
@@ -108,12 +121,12 @@ pub trait Trigger: Send + Sync + 'static {
     fn management_round_trip(&self) -> Result<(), String>;
     /// The existing D requery primitive (one fresh protected query).
     fn dns_requery(&self) -> Result<(), String>;
-    /// ONE self-addressed HEARTBEAT from the registered receive watchdog, on
-    /// the SAME signal stream/connection (`signal::request_receive_probe`,
-    /// bounded by [`S_PROBE_WAIT_MS`]). `Err(token)` is reported verbatim
-    /// (`no-registered-signal-stream`, `signal-heartbeat-<class>`,
-    /// `signal-heartbeat-timeout`, `no-connector`).
-    fn signal_probe(&self) -> Result<(), String>;
+    /// N2 T7a (item 5): arm the [`S_WAIT_MS`] timeout for the S watch `id` (the
+    /// session's own runtime sleeps and then calls [`s_watch_timeout`] with the
+    /// SAME `seq`). NO frame is sent here: the caller observes the NEXT natural
+    /// watchdog HEARTBEAT ([`natural_heartbeat_about_to_send`] /
+    /// [`natural_heartbeat_sent`]). `Err(token)` is reported verbatim.
+    fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String>;
     /// Arm the [`R_WAIT_MS`] timeout for the watch `id` (the session's own
     /// runtime sleeps and then calls [`r_watch_timeout`] with the SAME `seq`,
     /// so a stale timer from a previous watch can never time out a later one).
@@ -148,6 +161,15 @@ struct RWatch {
     pair: FdPair,
 }
 
+/// One armed S watch (N2 T7a item 5): the request id, its arming sequence and
+/// the signal fd/dup identity, exactly like [`RWatch`]. The watch completes on
+/// the NEXT natural watchdog HEARTBEAT or at [`S_WAIT_MS`].
+struct SWatch {
+    id: String,
+    seq: u64,
+    pair: FdPair,
+}
+
 #[derive(Default)]
 struct State {
     /// A events this arming actually dispatched (`sent`/`requery`/`armed`) —
@@ -156,6 +178,9 @@ struct State {
     r_watch: Option<RWatch>,
     /// Monotonic R-watch arming sequence (never reused inside one arming).
     r_seq: u64,
+    s_watch: Option<SWatch>,
+    /// Monotonic S-watch arming sequence (same discipline as [`State::r_seq`]).
+    s_seq: u64,
     last_line: Option<String>,
     last_result: Option<&'static str>,
 }
@@ -211,14 +236,22 @@ fn live_pair(kind: &str) -> FdPair {
     }
 }
 
-fn record(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
-    detail: &str) -> Outcome {
-    // `detail` is built internally (never operator text), so it is emitted
-    // verbatim — the `wait_ms=90000` shape is part of the documented line.
-    let line = format!(
-        "N2_A_EVENT|id={}|kind={}|fd={}|dup_fd={}|remote={}|result={}|reason={}|detail={}|mono_ms={}|diag=true|is_evidence=false",
-        clean(id), clean(kind), pair.fd, pair.dup_fd, clean(&pair.remote), result,
-        clean(reason), detail, sys::mono_ms());
+/// One `N2_A_EVENT` line (N2 T7a item 4): `phase` is `begin` (immediately
+/// before the trigger / watch arm) or `end` (the request's outcome). `id` is
+/// the request id and `event_id` the same value under the join name the forced
+/// `N2_SOCK|phase=subsequent_io` receipt carries. `detail` is built internally
+/// (never operator text), so it is emitted verbatim — the `wait_ms=90000`
+/// shape is part of the documented line.
+pub fn format_line(kind: &str, id: &str, pair: &FdPair, phase: &str, result: &str, reason: &str,
+    detail: &str, mono_ms: u64) -> String {
+    format!(
+        "N2_A_EVENT|phase={phase}|id={}|kind={}|fd={}|dup_fd={}|remote={}|result={result}|reason={}|detail={detail}|event_id={}|mono_ms={mono_ms}|diag=true|is_evidence=false",
+        clean(id), clean(kind), pair.fd, pair.dup_fd, clean(&pair.remote),
+        clean(reason), clean(id))
+}
+
+fn record_line(line: String, result: &'static str, reason: &str, kind: &str,
+    pair: &FdPair) -> Outcome {
     hilog::emit(&line);
     let mut state = state();
     state.last_line = Some(line.clone());
@@ -227,9 +260,40 @@ fn record(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &st
         fd: pair.fd, dup_fd: pair.dup_fd, line }
 }
 
-/// Apply one A-column trigger. Always emits exactly one `N2_A_EVENT` line,
-/// whatever the outcome (the R watch's `observed`/`timeout` completion emits a
-/// second line later).
+fn record(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
+    detail: &str) -> Outcome {
+    let line = format_line(kind, id, pair, "end", result, reason, detail, sys::mono_ms());
+    record_line(line, result, reason, kind, pair)
+}
+
+/// N2 T7a (item 4): the `phase=begin` line, emitted immediately before the
+/// trigger of an accepted request. `result` is `begin` for an immediate
+/// trigger (M/D) and `armed` for a watch arm (R/S), whose window stays open
+/// until the watch completes.
+fn record_begin(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
+    detail: &str) -> Outcome {
+    let line = format_line(kind, id, pair, "begin", result, reason, detail, sys::mono_ms());
+    record_line(line, result, reason, kind, pair)
+}
+
+/// N2 T7a (item 4/5): open the event window of an accepted trigger and emit
+/// its `phase=begin` line — one call site, so "the window is open" and "the
+/// begin line exists" are the same fact.
+fn begin_event(kind: &str, id: &str, pair: &FdPair, result: &'static str, reason: &str,
+    detail: &str) -> Outcome {
+    crate::n2_socket_trace::event_window_begin(pair.dup_fd, id);
+    record_begin(kind, id, pair, result, reason, detail)
+}
+
+fn close_window(pair: &FdPair) {
+    crate::n2_socket_trace::event_window_end(pair.dup_fd);
+}
+
+/// Apply one A-column trigger. An accepted request emits its `phase=begin`
+/// line before the trigger (or watch arm) and its `phase=end` line when the
+/// outcome is known; a request refused by a gate emits the single `phase=end`
+/// line, because no trigger ever began. The R/S completions emit their own
+/// `phase=end` line later.
 pub fn apply(kind: &str, id: &str) -> Outcome {
     if !crate::n2_socket_trace::armed() {
         return record(kind, id, &FdPair::unknown(), "rejected", "not-armed", "gate");
@@ -261,7 +325,8 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
                 return record(kind, id, &pair, "error", "no-live-management-connection",
                     "no-n2-sock-registration");
             }
-            match trigger.management_round_trip() {
+            begin_event(kind, id, &pair, "begin", "management-rpc", "get-server-key");
+            let outcome = match trigger.management_round_trip() {
                 Ok(()) => {
                     // std Mutex is NOT reentrant: one guard per statement.
                     {
@@ -271,31 +336,46 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
                     record(kind, id, &pair, "sent", "ok", "get-server-key")
                 }
                 Err(reason) => record(kind, id, &pair, "error", &reason, "get-server-key-failed"),
-            }
+            };
+            close_window(&pair);
+            outcome
         }
         "S" => {
-            // The frozen §4 `S` row: the event is the production
-            // self-addressed HEARTBEAT on the SAME signal fd/dup. Without a
-            // live `S` registration there is no production socket this event
-            // could be attributed to (same rule as `M`).
+            // The frozen §4 `S` row (i), N2 T7a item 5: the event is the NEXT
+            // **natural** production self-addressed HEARTBEAT on the SAME
+            // signal fd/dup — the trigger only arms an observer, it never asks
+            // the watchdog to probe. Without a live `S` registration there is
+            // no production socket this event could be attributed to (same
+            // rule as `M`).
             let pair = live_pair("S");
             if pair.dup_fd < 0 {
                 return record(kind, id, &pair, "error", "no-live-signal-connection",
                     "no-n2-sock-registration");
             }
-            match trigger.signal_probe() {
-                Ok(()) => {
-                    {
-                        let mut state = state();
-                        state.a_events = state.a_events.saturating_add(1);
-                    }
-                    record(kind, id, &pair, "sent", "ok", "self-addressed-heartbeat")
-                }
-                Err(reason) => record(kind, id, &pair, "error", &reason, "heartbeat-send-failed"),
+            // std Mutex is NOT reentrant: read the flag, release, then record.
+            if state().s_watch.is_some() {
+                return record(kind, id, &pair, "rejected", "watch-already-armed",
+                    "one-watch-per-session");
             }
+            let seq = {
+                let mut state = state();
+                state.s_seq = state.s_seq.saturating_add(1);
+                state.s_seq
+            };
+            if let Err(reason) = trigger.arm_s_watch(id, S_WAIT_MS, seq) {
+                return record(kind, id, &pair, "error", &reason, "watch-arm-refused");
+            }
+            {
+                let mut state = state();
+                state.a_events = state.a_events.saturating_add(1);
+                state.s_watch = Some(SWatch { id: id.to_string(), seq, pair: pair.clone() });
+            }
+            begin_event(kind, id, &pair, "armed", "signal-heartbeat-watch",
+                &format!("wait_ms={S_WAIT_MS}"))
         }
         "D" => {
-            match trigger.dns_requery() {
+            begin_event(kind, id, &FdPair::unknown(), "begin", "dns-requery", "receipt-in-N2_DNS");
+            let outcome = match trigger.dns_requery() {
                 Ok(()) => {
                     {
                         let mut state = state();
@@ -309,7 +389,9 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
                 }
                 Err(reason) => record(kind, id, &FdPair::unknown(), "error", &reason,
                     "requery-refused"),
-            }
+            };
+            close_window(&FdPair::unknown());
+            outcome
         }
         "R" => {
             // std Mutex is NOT reentrant: read the flag, release, then record.
@@ -331,7 +413,9 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
                 let mut state = state();
                 state.a_events = state.a_events.saturating_add(1);
                 state.r_watch = Some(RWatch { id: id.to_string(), seq, pair: pair.clone() });
-            }            record(kind, id, &pair, "armed", "healthcheck-watch", &format!("wait_ms={R_WAIT_MS}"))
+            }
+            begin_event(kind, id, &pair, "armed", "healthcheck-watch",
+                &format!("wait_ms={R_WAIT_MS}"))
         }
         _ => record(kind, id, &FdPair::unknown(), "rejected", "invalid-kind", "gate"),
     }
@@ -339,7 +423,8 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
 
 /// The relay client observed a server-driven `HealthCheck` and the production
 /// code answered it (`relay_client.rs` EchoHealthCheck branch). Emits the
-/// frozen `observed` completion ONCE for the armed watch.
+/// frozen `observed` completion ONCE for the armed watch (and closes that
+/// watch's event window, N2 T7a item 4).
 pub fn healthcheck_answered() -> Option<Outcome> {
     if !crate::n2_socket_trace::armed() {
         return None;
@@ -347,8 +432,10 @@ pub fn healthcheck_answered() -> Option<Outcome> {
     let watch = state().r_watch.take()?;
     let pair = {
         let live = live_pair("R");
-        if live.dup_fd >= 0 { live } else { watch.pair }
+        if live.dup_fd >= 0 { live } else { watch.pair.clone() }
     };
+    close_window(&watch.pair);
+    close_window(&pair);
     Some(record("R", &watch.id, &pair, "observed", "server-healthcheck-answered",
         "production-echo"))
 }
@@ -367,8 +454,65 @@ pub fn r_watch_timeout(id: &str, seq: u64) -> Option<Outcome> {
             _ => None,
         }
     }?;
+    close_window(&watch.pair);
     Some(record("R", &watch.id, &watch.pair, "timeout", "healthcheck-wait-exceeded",
         &format!("wait_ms={R_WAIT_MS}")))
+}
+
+/// N2 T7a (item 5): the registered receive watchdog is about to send its
+/// NATURAL (silence-triggered) production HEARTBEAT. Arms the forced-receipt
+/// window on the CURRENT live `S` descriptor so the write this observer waits
+/// for can never be throttled away — including across a signal reconnect that
+/// changed the core-owned descriptor number since the arm. Inert (one atomic
+/// load) while unarmed or with no S watch.
+pub fn natural_heartbeat_about_to_send() {
+    if !crate::n2_socket_trace::armed() {
+        return;
+    }
+    let armed = state().s_watch.as_ref().map(|watch| (watch.id.clone(), watch.pair.clone()));
+    let Some((id, armed_pair)) = armed else { return };
+    let live = live_pair("S");
+    let pair = if live.dup_fd >= 0 { live } else { armed_pair };
+    crate::n2_socket_trace::event_window_begin(pair.dup_fd, &id);
+}
+
+/// N2 T7a (item 5): the registered receive watchdog DID send its natural
+/// production HEARTBEAT on the live signal stream — the frozen `S` A-event the
+/// armed watch waited for. Emits the `phase=end|result=observed` line and
+/// closes the watch. No-op while unarmed, with no S watch, or after the
+/// [`S_WAIT_MS`] box already completed it.
+pub fn natural_heartbeat_sent() -> Option<Outcome> {
+    if !crate::n2_socket_trace::armed() {
+        return None;
+    }
+    let watch = state().s_watch.take()?;
+    let pair = {
+        let live = live_pair("S");
+        if live.dup_fd >= 0 { live } else { watch.pair.clone() }
+    };
+    close_window(&watch.pair);
+    close_window(&pair);
+    Some(record("S", &watch.id, &pair, "observed", "watchdog-heartbeat-sent",
+        "natural-heartbeat"))
+}
+
+/// The [`S_WAIT_MS`] box expired with no natural heartbeat. Emits the
+/// `phase=end|result=timeout` completion; a stale `(id, seq)` is a no-op, so a
+/// timer armed for an earlier watch can never complete a later one.
+pub fn s_watch_timeout(id: &str, seq: u64) -> Option<Outcome> {
+    if !crate::n2_socket_trace::armed() {
+        return None;
+    }
+    let watch = {
+        let mut state = state();
+        match state.s_watch.as_ref() {
+            Some(watch) if watch.id == id && watch.seq == seq => state.s_watch.take(),
+            _ => None,
+        }
+    }?;
+    close_window(&watch.pair);
+    Some(record("S", &watch.id, &watch.pair, "timeout", "heartbeat-wait-exceeded",
+        &format!("wait_ms={S_WAIT_MS}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +527,11 @@ pub fn a_events() -> u64 {
 /// Whether an R watch is armed and not yet completed.
 pub fn r_watch_open() -> bool {
     state().r_watch.is_some()
+}
+
+/// Whether an S watch (N2 T7a item 5) is armed and not yet completed.
+pub fn s_watch_open() -> bool {
+    state().s_watch.is_some()
 }
 
 /// The last `N2_A_EVENT` line this process emitted (`None` = none yet).
@@ -415,10 +564,11 @@ mod tests {
     struct Counting {
         rpc: AtomicUsize,
         requery: AtomicUsize,
-        probe: AtomicUsize,
+        s_watch: AtomicUsize,
         watch: AtomicUsize,
         fail: Mutex<Option<&'static str>>,
         watches: Mutex<Vec<(String, u64, u64)>>,
+        s_watches: Mutex<Vec<(String, u64, u64)>>,
     }
 
     impl Trigger for Counting {
@@ -436,8 +586,9 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn signal_probe(&self) -> Result<(), String> {
-            self.probe.fetch_add(1, Ordering::SeqCst);
+        fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {
+            self.s_watch.fetch_add(1, Ordering::SeqCst);
+            self.s_watches.lock().unwrap().push((id.to_string(), wait_ms, seq));
             match *self.fail.lock().unwrap() {
                 Some(token) => Err(token.to_string()),
                 None => Ok(()),
@@ -482,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn kind_s_needs_a_live_signal_socket_and_reports_the_probe_outcome() {
+    fn kind_s_needs_a_live_signal_socket_and_observes_the_natural_heartbeat() {
         let _guard = test_guard();
         reset_all();
         // Production order: the ticket arms the trace (which clears any
@@ -491,31 +642,72 @@ mod tests {
         let counting = Arc::new(Counting::default());
         install_trigger(counting.clone());
         // armed but no S registration: the event cannot be attributed, and no
-        // probe is requested.
+        // watch is armed.
         let none = apply("S", "a-S-0");
         assert_eq!(none.result, "error");
         assert_eq!(none.reason, "no-live-signal-connection");
-        assert_eq!(counting.probe.load(Ordering::SeqCst), 0, "no probe without a live fd");
+        assert_eq!(counting.s_watch.load(Ordering::SeqCst), 0, "no watch without a live fd");
         // a real registered S socket: fd/dup come FROM the trace, exactly as
         // the `N2_SOCK` receipts report them.
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let fd = sock.as_raw_fd();
         register("S", fd);
-        let sent = apply("S", "a-S-1");
-        assert_eq!(sent.result, "sent", "{}", sent.line);
-        assert_eq!(sent.reason, "ok");
-        assert_eq!(sent.fd, fd);
-        assert_eq!(sent.dup_fd, fd);
-        assert!(sent.line.contains(&format!("|fd={fd}|dup_fd={fd}|remote=192.0.2.9:443|")));
-        assert!(sent.line.contains("|detail=self-addressed-heartbeat|"), "{}", sent.line);
-        assert_eq!(counting.probe.load(Ordering::SeqCst), 1);
+        let armed = apply("S", "a-S-1");
+        // N2 T7a (item 5): the trigger only ARMS the observer of the next
+        // natural watchdog heartbeat — it sends nothing (result=armed).
+        assert_eq!(armed.result, "armed", "{}", armed.line);
+        assert_eq!(armed.reason, "signal-heartbeat-watch");
+        assert_eq!(armed.fd, fd);
+        assert_eq!(armed.dup_fd, fd);
+        assert!(armed.line.starts_with("N2_A_EVENT|phase=begin|id=a-S-1|kind=S|"), "{}", armed.line);
+        assert!(armed.line.contains(&format!("|fd={fd}|dup_fd={fd}|remote=192.0.2.9:443|")));
+        assert!(armed.line.contains("|detail=wait_ms=45000|"), "{}", armed.line);
+        assert_eq!(armed.line.split("|event_id=").nth(1).map(|rest| rest.split('|').next()),
+            Some(Some("a-S-1")), "{}", armed.line);
+        assert_eq!(counting.s_watch.load(Ordering::SeqCst), 1);
+        assert_eq!(counting.s_watches.lock().unwrap().as_slice(),
+            [("a-S-1".to_string(), S_WAIT_MS, 1)]);
+        assert!(s_watch_open());
         assert_eq!(a_events(), 1);
-        // a refused/failed probe is reported as an error, never as sent
-        *counting.fail.lock().unwrap() = Some("no-registered-signal-stream");
-        let failed = apply("S", "a-S-2");
+        // a second watch while one is armed is refused by name
+        assert_eq!(apply("S", "a-S-1b").reason, "watch-already-armed");
+        // the event window is open: ANY write on the fd is forced with event_id
+        crate::n2_socket_trace::protect(fd, "S", "req-1", 0, 31, 5, true);
+        let forced = crate::n2_socket_trace::post_connect_write(fd, "192.0.2.9:443".parse().unwrap(), 12)
+            .expect("forced write inside the S event window");
+        assert!(forced.contains("|event_id=a-S-1|"), "{forced}");
+        // the NATURAL watchdog heartbeat completes the watch: the production
+        // path calls the hook around its own send_heartbeat, never a trigger.
+        natural_heartbeat_about_to_send();
+        let observed = natural_heartbeat_sent().expect("armed S watch");
+        assert_eq!(observed.result, "observed");
+        assert_eq!(observed.reason, "watchdog-heartbeat-sent");
+        assert!(observed.line.starts_with("N2_A_EVENT|phase=end|id=a-S-1|kind=S|"), "{}", observed.line);
+        assert!(observed.line.contains("|result=observed|reason=watchdog-heartbeat-sent|"));
+        assert!(observed.line.contains("|detail=natural-heartbeat|"), "{}", observed.line);
+        assert!(!s_watch_open(), "one observation per watch");
+        assert!(natural_heartbeat_sent().is_none(), "no second observation");
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None, "window closed at the end");
+        assert_eq!(a_events(), 1);
+        // the 45 s box completes a watch that never saw a natural heartbeat,
+        // and a stale (id, seq) is a no-op
+        assert_eq!(apply("S", "a-S-3").result, "armed");
+        let seq = counting.s_watches.lock().unwrap().last().expect("watch").2;
+        assert!(s_watch_timeout("a-S-other", seq).is_none());
+        assert!(s_watch_timeout("a-S-3", seq + 99).is_none(), "stale timer");
+        let timed_out = s_watch_timeout("a-S-3", seq).expect("armed S watch");
+        assert_eq!(timed_out.result, "timeout");
+        assert_eq!(timed_out.reason, "heartbeat-wait-exceeded");
+        assert!(timed_out.line.contains("|detail=wait_ms=45000|"), "{}", timed_out.line);
+        assert!(!s_watch_open());
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None);
+        // a refused watch arm is an error, never a dispatch
+        *counting.fail.lock().unwrap() = Some("no-connector");
+        let failed = apply("S", "a-S-4");
         assert_eq!(failed.result, "error");
-        assert_eq!(failed.reason, "no-registered-signal-stream");
-        assert_eq!(a_events(), 1, "a failed probe is not an A event");
+        assert_eq!(failed.reason, "no-connector");
+        assert_eq!(failed.line.split("|result=").nth(1).map(|rest| rest.split('|').next()),
+            Some(Some("error")), "{}", failed.line);
         *counting.fail.lock().unwrap() = None;
         // the marker rule is enforced for S like for every other kind
         assert_eq!(apply("S", "a b").reason, "invalid-id");
@@ -546,7 +738,14 @@ mod tests {
         assert_eq!(some.result, "sent");
         assert_eq!(some.fd, fd);
         assert_eq!(some.dup_fd, fd);
+        // N2 T7a (item 4): the outcome line is `phase=end` and carries the
+        // event id; the begin line was emitted before the RPC (last_line is
+        // the end line).
+        assert!(some.line.starts_with("N2_A_EVENT|phase=end|id=a-M-1|kind=M|"), "{}", some.line);
+        assert!(some.line.contains("|event_id=a-M-1|"), "{}", some.line);
         assert!(some.line.contains(&format!("|fd={fd}|dup_fd={fd}|remote=192.0.2.9:443|")));
+        assert_eq!(crate::n2_socket_trace::event_window(fd), None,
+            "the M event window closes with its end line");
         assert_eq!(counting.rpc.load(Ordering::SeqCst), 1);
         assert_eq!(a_events(), 1);
         // a failing RPC is reported as an error, never as sent
@@ -611,6 +810,8 @@ mod tests {
         let armed = apply("R", "a-R-1");
         assert_eq!(armed.result, "armed");
         assert_eq!(armed.reason, "healthcheck-watch");
+        assert!(armed.line.starts_with("N2_A_EVENT|phase=begin|id=a-R-1|kind=R|"), "{}", armed.line);
+        assert!(armed.line.contains("|result=armed|reason=healthcheck-watch|"));
         assert!(armed.line.contains("|detail=wait_ms=90000|"), "{}", armed.line);
         assert!(r_watch_open());
         assert_eq!(counting.watches.lock().unwrap().as_slice(),

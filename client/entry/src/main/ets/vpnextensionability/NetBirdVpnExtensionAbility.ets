@@ -2709,8 +2709,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'no-ice-destination'));
       return '';
     }
+    // N2 T7a (item 1): the PRE and POST controls need DIFFERENT markers — the
+    // core's control registry refuses a reused id, so a post control sent with
+    // the pre leg's marker would be structurally unreachable. Both are derived
+    // here from the instance request id and registered together, so the core
+    // hands back the exact post marker to send (`n2_sandwich_poll`).
     const marker: string = formatN2SandwichLegMarker(kind, this.requestId, 'pre');
-    if (marker.length === 0) {
+    const postMarker: string = formatN2SandwichLegMarker(kind, this.requestId, 'post');
+    if (marker.length === 0 || postMarker.length === 0 || marker === postMarker) {
       hilog.warn(DOMAIN, TAG, '%{public}s',
         formatN2SandwichShellLine(kind, 'pre', 'none', target, 'rejected', 'invalid-marker'));
       return '';
@@ -2718,7 +2724,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let registered: boolean = false;
     try {
       const reply: Record<string, Object> =
-        JSON.parse(core.n2_sandwich_pre(kind, marker)) as Record<string, Object>;
+        JSON.parse(core.n2_sandwich_pre(kind, marker, postMarker)) as Record<string, Object>;
       registered = reply['ok'] === true;
     } catch (error) {
       registered = false;
@@ -2733,9 +2739,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       await sendAndWaitN2Control(armed, target, 'udp', marker);
     } catch (error) {
       // the pre control MISSed (or its send threw): close the leg honestly so
-      // the first production send can never be reported as sandwiched
+      // the first production send can never be reported as sandwiched. No post
+      // control was sent, so the leg is closed by its POST marker (the id the
+      // post control would have used) — the core's line says
+      // `result=unsat|reason=pre-control-miss`.
       try {
-        core.n2_sandwich_post(kind, marker, 'unsat', 'pre-control-miss');
+        core.n2_sandwich_post(kind, postMarker, 'unsat', 'pre-control-miss');
       } catch (postError) { /* the core logs nothing for a refused post */ }
       hilog.warn(DOMAIN, TAG, '%{public}s',
         formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat',
@@ -3827,8 +3836,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return false;
     }
     hilog.info(DOMAIN, TAG,
-      'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true',
-      this.requestId, wgFd, this.tunFd);
+      'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true|' +
+      'mono_ms=%{public}d|wall_ms=%{public}d',
+      this.requestId, wgFd, this.tunFd,
+      typeof tun.mono_ms === 'number' ? tun.mono_ms : -1, Date.now());
     return true;
   }
 
@@ -4100,13 +4111,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     const t0: number = Date.now();
     if (this.n2Evidence !== undefined && traceKind.length > 0) {
+      // N2 T7a (item 6): `protect_generation=` is the frozen E1 field name (the
+      // earlier `generation=` spelling was unified with the core's `N2_SOCK`
+      // receipts).
       hilog.info(DOMAIN, TAG,
         'N2_SOCK|phase=open|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
+        'protect_generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
         traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
       hilog.info(DOMAIN, TAG,
         'N2_SOCK|phase=protect_begin|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
+        'protect_generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
         traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
     }
     // On the tested device, per-fd protect() resolved despite MANAGE_VPN
@@ -4153,14 +4167,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const outcome: boolean = await Promise.race([settled, box]);
     if (this.n2Evidence !== undefined && traceKind.length > 0) {
       const elapsed: number = Date.now() - t0;
+      // N2 T7a (item 6): register with the core FIRST and take the socket's own
+      // bound name from its reply, so the `phase=protect_settle` line can carry
+      // `local=` (`unknown` when the number cannot be inspected — never an
+      // invented address). The field names and the outcome vocabulary are the
+      // core `N2_SOCK` ones (`status=success|failed`, `protect_generation=`,
+      // `net_id=`, `elapsed_ms=`), matching the frozen E1 criterion
+      // (`phase=protect_settle|status=success`).
+      let local: string = 'unknown';
+      try {
+        const traced: Record<string, Object> = JSON.parse(core.n2_socket_trace_protect(fd,
+          traceKind, `${traceId},${this.networkEpoch},${this.networkNetId},${elapsed}`,
+          outcome)) as Record<string, Object>;
+        if (typeof traced['local'] === 'string' && (traced['local'] as string).length > 0) {
+          local = traced['local'] as string;
+        }
+      } catch (error) {
+        local = 'unknown';
+      }
       hilog.info(DOMAIN, TAG,
         'N2_SOCK|phase=protect_settle|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'result=%{public}s|elapsed_ms=%{public}d|generation=%{public}d|net_id=%{public}d|' +
-        'wall_ms=%{public}d|diag=true|is_evidence=false',
+        'status=%{public}s|elapsed_ms=%{public}d|protect_generation=%{public}d|net_id=%{public}d|' +
+        'local=%{public}s|wall_ms=%{public}d|diag=true|is_evidence=false',
         traceKind, traceId, fd, outcome ? 'success' : 'failed', elapsed,
-        this.networkEpoch, this.networkNetId, Date.now());
-      core.n2_socket_trace_protect(fd, traceKind,
-        `${traceId},${this.networkEpoch},${this.networkNetId},${elapsed}`, outcome);
+        this.networkEpoch, this.networkNetId, local, Date.now());
     }
     if (!outcome && this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,

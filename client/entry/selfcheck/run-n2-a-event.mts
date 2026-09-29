@@ -248,13 +248,14 @@ try {
       '      try {\n' +
       '        fs.unlinkSync(path);'),
     'finally');
-  check('S7 the pre leg registers with the core BEFORE sending its control',
-    ability.indexOf('core.n2_sandwich_pre(kind, marker)') > 0 &&
-    ability.indexOf('core.n2_sandwich_pre(kind, marker)') <
-      ability.indexOf("await sendAndWaitN2Control(armed, target, 'udp', marker)"),
+  check('S7 the pre leg registers BOTH markers with the core BEFORE sending its control (T7a item 1)',
+    ability.indexOf('core.n2_sandwich_pre(kind, marker, postMarker)') > 0 &&
+    ability.indexOf('core.n2_sandwich_pre(kind, marker, postMarker)') <
+      ability.indexOf("await sendAndWaitN2Control(armed, target, 'udp', marker)") &&
+    ability.includes("const postMarker: string = formatN2SandwichLegMarker(kind, this.requestId, 'post');"),
     'pre order');
-  check('S7 a pre miss closes the leg honestly so no send can be reported as sandwiched',
-    ability.includes("core.n2_sandwich_post(kind, marker, 'unsat', 'pre-control-miss');"));
+  check('S7 a pre miss closes the leg honestly with the POST marker so no send can be reported as sandwiched',
+    ability.includes("core.n2_sandwich_post(kind, postMarker, 'unsat', 'pre-control-miss');"));
   check('S8 the Ws path never defers or reorders the egress/endpoint landing',
     !ability.includes('apply_endpoint') && !ability.includes('attach_egress_socket') &&
     rust('peer_conn.rs').includes('Some(fd) => self.wg.attach_egress_socket(&peer.key, fd),') &&
@@ -346,30 +347,44 @@ try {
     napi.includes('reg!("n2_sandwich_poll", napi_n2_sandwich_poll);') &&
     napi.includes('crate::connector::n2_a_event_json(&a.string_at(0), &a.string_at(1))') &&
     napi.includes('crate::connector::n2_sandwich_poll_json()'));
-  check('R2 the A-event line carries the fd/dup pair and the frozen tail',
-    aEvent.includes('"N2_A_EVENT|id={}|kind={}|fd={}|dup_fd={}|remote={}|result={}|reason={}|detail={}|' +
-      'mono_ms={}|diag=true|is_evidence=false"'),
+  check('R2 the A-event line is phase-tagged and carries the fd/dup pair, the event id and the frozen tail',
+    // N2 T7a item 4: `phase=begin` before the trigger, `phase=end` with the
+    // outcome; `event_id` is the join field of the forced write receipt.
+    aEvent.includes('pub fn format_line(kind: &str, id: &str, pair: &FdPair, phase: &str, result: &str, reason: &str,') &&
+    aEvent.includes('"N2_A_EVENT|phase={phase}|id={}|kind={}|fd={}|dup_fd={}|remote={}|result={result}|reason={}|' +
+      'detail={detail}|event_id={}|mono_ms={mono_ms}|diag=true|is_evidence=false"') &&
+    aEvent.includes('crate::n2_socket_trace::event_window_begin(pair.dup_fd, id);') &&
+    aEvent.includes('pub fn natural_heartbeat_sent() -> Option<Outcome>'),
     'line');
-  check('R3 S triggers the production watchdog probe and D refuses after a prior stimulus (Q1)',
-    aEvent.includes('fn signal_probe(&self) -> Result<(), String>;') &&
-    aEvent.includes('"self-addressed-heartbeat"') &&
+  check('R3 S arms the NATURAL watchdog-heartbeat observer (T7a item 5) and D refuses after a prior stimulus (Q1)',
+    aEvent.includes('fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String>;') &&
+    aEvent.includes('pub const S_WAIT_MS: u64 = 45_000;') &&
+    aEvent.includes('"signal-heartbeat-watch"') &&
+    aEvent.includes('"watchdog-heartbeat-sent"') &&
+    aEvent.includes('"heartbeat-wait-exceeded"') &&
     aEvent.includes('"no-live-signal-connection"') &&
-    aEvent.includes('pub const S_PROBE_WAIT_MS: u64 = 5_000;') &&
+    // the immediate-probe seam is GONE from the N2 path (kept product-internal)
+    !aEvent.includes('fn signal_probe(&self)') &&
+    !aEvent.includes('S_PROBE_WAIT_MS') &&
     aEvent.includes('"prior-stimulus"') && aEvent.includes('n2_stimulus::applied() > 0'),
-    'S trigger + Q1');
-  check('R3b the connector S seam asks the registered signal watchdog for ONE heartbeat, bounded',
-    connector.includes('crate::signal::request_receive_probe()') &&
-    connector.includes('crate::n2_a_event::S_PROBE_WAIT_MS') &&
-    connector.includes('"signal-heartbeat-timeout"') &&
+    'S observer + Q1');
+  check('R3b the connector S seam only arms the 45 s box — it sends nothing',
+    connector.includes('fn arm_s_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String> {') &&
+    connector.includes('crate::n2_a_event::s_watch_timeout(&id, seq)') &&
+    !connector.includes('crate::signal::request_receive_probe()') &&
     !connector.includes('signal.send_heartbeat') &&
     !connector.includes('SignalClient::connect_with_socket_source'),
     'S seam');
-  check('R3c the receive watchdog is the product default (20 s probe / 30 s dead) on the SAME stream',
+  check('R3c the receive watchdog is the product default (20 s probe / 30 s dead) on the SAME stream ' +
+    'and reports its natural probe to the observer (T7a item 5)',
     signal.includes('pub const RECEIVE_PROBE_AFTER: core::time::Duration = core::time::Duration::from_secs(20);') &&
     signal.includes('pub const RECEIVE_DEAD_AFTER: core::time::Duration = core::time::Duration::from_secs(30);') &&
     signal.includes('probe_after: RECEIVE_PROBE_AFTER,') &&
     signal.includes('dead_after: RECEIVE_DEAD_AFTER,') &&
     signal.includes('self.client.send_heartbeat().await') &&
+    signal.includes('crate::n2_a_event::natural_heartbeat_about_to_send();') &&
+    signal.includes('crate::n2_a_event::natural_heartbeat_sent();') &&
+    // the product-internal probe seam is kept (no N2 caller)
     signal.includes('pub async fn request_receive_probe() -> Result<(), String>'),
     'watchdog');
   check('R4 the R wait is the frozen bound and the trigger goes through the connector seam',
@@ -397,9 +412,15 @@ try {
   check('R6 the relay reader reports the server-driven HealthCheck answer',
     relay.includes('let _ = crate::n2_a_event::healthcheck_answered();') &&
     aEvent.includes('pub fn healthcheck_answered()'));
-  check('R7 the sandwich line is the documented literal',
+  check('R7 the sandwich line is the documented literal and the post leg has its OWN marker (T7a item 1)',
     sandwich.includes('"N2_SANDWICH|kind={}|phase={}|marker={}|event_ref={}|result={}|reason={}|' +
-      'fd={fd}|dup_fd={dup_fd}|remote={}|wait_ms={wait_ms}|mono_ms={}|diag=true|is_evidence=false"'),
+      'fd={fd}|dup_fd={dup_fd}|remote={}|wait_ms={wait_ms}|mono_ms={mono_ms}|diag=true|is_evidence=false"') &&
+    sandwich.includes('pub fn pre(kind: &str, marker: &str, post_marker: &str) -> Outcome {') &&
+    sandwich.includes('ready.push(Post { kind: (*key).to_string(), marker: leg.post_marker.clone() });') &&
+    sandwich.includes('if leg.as_ref().filter(|leg| leg.post_marker == marker).is_none() {') &&
+    // the post line records the marker argument (the POST id), not leg.marker
+    sandwich.includes('record(key, "post", marker, &event_ref, result, reason, fd, dup_fd, &remote, POST_WAIT_MS)') &&
+    sandwich.includes('"invalid-post-marker"'),
     'line');
   check('R8 the frozen unsat token and the two documented wait bounds exist',
     sandwich.includes('"first-send-before-attach"') &&

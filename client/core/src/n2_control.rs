@@ -68,14 +68,18 @@ impl ControlState {
             let p = self.pending.remove(index);
             self.complete(p.id.clone(), "hit");
             self.controls = self.controls.saturating_add(1);
-            return Some(format!("N2_CONTROL_HIT|marker={}|dst={}:{}|proto={}|mono_ms={now}|diag=true|is_evidence=false",
-                p.id, Ipv4Addr::from(p.dst), p.port, proto_name(p.proto)));
+            // N2 T7a (item 2): `id` is the request id the operator asked for
+            // (`N2_CONTROL_SHELL|id=…`, `n2_control_send`'s `id`); `marker` is
+            // the marker this control registry matched. The registry keys a
+            // control by exactly the request id, so the two are ALWAYS the same
+            // value here — both fields are emitted so a judge can look the
+            // request up by id without knowing the marker convention.
+            return Some(hit_line(&p.id, p.dst, p.port, p.proto, now));
         }
         if self.targets.contains(&packet.dst) { self.production = self.production.saturating_add(1); }
         if self.outer.contains(&(packet.dst, packet.proto, packet.dport)) {
             self.leaks = self.leaks.saturating_add(1);
-            crate::hilog::emit(&format!("N2_TUN_LEAK|verdict=fail|dst={}:{}|proto={}|mono_ms={now}|leaks={}|diag=true|is_evidence=false",
-                Ipv4Addr::from(packet.dst), packet.dport, proto_name(packet.proto), self.leaks));
+            crate::hilog::emit(&leak_line(packet.dst, packet.dport, packet.proto, self.leaks, now));
         }
         None
     }
@@ -85,8 +89,7 @@ impl ControlState {
         let mut expired = Vec::new();
         self.pending.retain(|p| {
             if now.saturating_sub(p.registered_ms) <= WAIT_MS { return true; }
-            lines.push(format!("N2_CONTROL_MISS|marker={}|dst={}:{}|proto={}|mono_ms={now}|diag=true|is_evidence=false",
-                p.id, Ipv4Addr::from(p.dst), p.port, proto_name(p.proto)));
+            lines.push(miss_line(&p.id, p.dst, p.port, p.proto, now));
             expired.push(p.id.clone());
             false
         });
@@ -118,6 +121,32 @@ fn tcp_syn(frame: &[u8]) -> bool {
 
 
 fn proto_name(proto: u8) -> &'static str { if proto == 6 { "tcp" } else { "udp" } }
+
+/// One `N2_CONTROL_HIT` line (N2 T7a item 2: the request `id` and the matched
+/// `marker` are both present; they are the same value by construction).
+pub fn hit_line(id: &str, dst: [u8; 4], port: u16, proto: u8, now: u64) -> String {
+    format!("N2_CONTROL_HIT|id={id}|marker={id}|dst={}:{port}|proto={}|mono_ms={now}|diag=true|is_evidence=false",
+        Ipv4Addr::from(dst), proto_name(proto))
+}
+
+/// One `N2_CONTROL_MISS` line (the bounded control window expired).
+pub fn miss_line(id: &str, dst: [u8; 4], port: u16, proto: u8, now: u64) -> String {
+    format!("N2_CONTROL_MISS|id={id}|marker={id}|dst={}:{port}|proto={}|mono_ms={now}|diag=true|is_evidence=false",
+        Ipv4Addr::from(dst), proto_name(proto))
+}
+
+/// One `N2_CONTROL_SENT` line (the marker was registered and the send call
+/// returned; the HIT/MISS lines stay authoritative for what happened next).
+pub fn sent_line(id: &str, destination: &str, proto: &str, source_port: u16, now: u64) -> String {
+    format!("N2_CONTROL_SENT|id={id}|marker={id}|dst={destination}|proto={proto}|source_port={source_port}|mono_ms={now}|diag=true|is_evidence=false")
+}
+
+/// One `N2_TUN_LEAK|verdict=fail` line: a NON-control from-OS frame matched a
+/// frozen outer destination tuple.
+pub fn leak_line(dst: [u8; 4], dport: u16, proto: u8, leaks: u64, now: u64) -> String {
+    format!("N2_TUN_LEAK|verdict=fail|dst={}:{dport}|proto={}|mono_ms={now}|leaks={leaks}|diag=true|is_evidence=false",
+        Ipv4Addr::from(dst), proto_name(proto))
+}
 
 /// The marker of an `N2_CONTROL_HIT` line (N2 P5: the sandwich ordering is
 /// judged on when the PRE control really HIT, not on when the shell sent it).
@@ -168,8 +197,8 @@ pub fn send(control: &crate::wg_device::N2DestinationTee, fd: i32, destination: 
         control.cancel_control(id);
         return Err("control-send-failed");
     }
-    Ok(format!("N2_CONTROL_SENT|marker={id}|dst={destination}|proto={proto_name_arg}|source_port={}|mono_ms={now}|diag=true|is_evidence=false",
-        if proto == 6 { source_port } else { local_port(fd).unwrap_or(0) }))
+    Ok(sent_line(id, destination, proto_name_arg,
+        if proto == 6 { source_port } else { local_port(fd).unwrap_or(0) }, now))
 }
 
 extern "C" {
@@ -200,7 +229,10 @@ mod tests {
     fn udp_marker_hit_and_production_are_separate() {
         let mut s = ControlState::new(vec![[203, 0, 113, 1]]);
         s.register("pre-1", [203, 0, 113, 1], 53, 17, 0, 100).unwrap();
-        assert!(s.scan(&frame([203, 0, 113, 1], 17, 1000, 53, b"N2CTRL:pre-1"), 101).unwrap().contains("N2_CONTROL_HIT"));
+        let hit = s.scan(&frame([203, 0, 113, 1], 17, 1000, 53, b"N2CTRL:pre-1"), 101).unwrap();
+        // N2 T7a (item 2): the request id and the matched marker are both
+        // present (identical by construction) so the hit is findable by id.
+        assert!(hit.contains("N2_CONTROL_HIT|id=pre-1|marker=pre-1|"), "{hit}");
         assert!(s.scan(&frame([203, 0, 113, 1], 17, 1000, 53, b"production"), 102).is_none());
         assert_eq!(s.totals(), (2, 1, 1));
     }
@@ -233,7 +265,9 @@ mod tests {
         let mut s = ControlState::new(vec![[203, 0, 113, 1]]);
         assert_eq!(s.register("x", [203, 0, 113, 2], 80, 6, 1234, 0), Err("target-not-captured"));
         s.register("x", [203, 0, 113, 1], 80, 6, 1234, 0).unwrap();
-        assert!(s.due(3001)[0].contains("N2_CONTROL_MISS|marker=x"));
+        let miss = s.due(3001);
+        assert_eq!(miss.len(), 1);
+        assert!(miss[0].contains("N2_CONTROL_MISS|id=x|marker=x|"), "{}", miss[0]);
         assert!(s.scan(&frame([203, 0, 113, 1], 6, 1234, 80, b""), 3002).is_none());
     }
 

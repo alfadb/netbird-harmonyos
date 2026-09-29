@@ -247,10 +247,14 @@ try {
     napi.includes('reg!("n2_control_send", napi_n2_control_send);') &&
     napi.includes('reg!("n2_control_status", napi_n2_control_status);') &&
     napi.includes('crate::connector::n2_control_send_json(a.i32_at(0, -1),'));
-  check('R2 the core emits the authoritative SENT and HIT/MISS lines',
-    control.includes('"N2_CONTROL_SENT|marker={id}|dst={destination}|proto={proto_name_arg}|') &&
-    control.includes('"N2_CONTROL_HIT|marker={}|dst={}:{}|proto={}|mono_ms={now}|diag=true|is_evidence=false"') &&
-    control.includes('"N2_CONTROL_MISS|marker={}|dst={}:{}|proto={}|mono_ms={now}|diag=true|is_evidence=false"'));
+  check('R2 the core emits the authoritative SENT and HIT/MISS lines, each with id= and marker=',
+    // N2 T7a item 2: every HIT/MISS/SENT line carries the REQUEST `id` and the
+    // matched `marker` (identical by construction) so a judge can look the
+    // request up by id without knowing the marker convention.
+    control.includes('pub fn sent_line(id: &str, destination: &str, proto: &str, source_port: u16, now: u64) -> String {') &&
+    control.includes('"N2_CONTROL_SENT|id={id}|marker={id}|dst={destination}|proto={proto}|source_port={source_port}|mono_ms={now}|diag=true|is_evidence=false"') &&
+    control.includes('"N2_CONTROL_HIT|id={id}|marker={id}|dst={}:{port}|proto={}|mono_ms={now}|diag=true|is_evidence=false"') &&
+    control.includes('"N2_CONTROL_MISS|id={id}|marker={id}|dst={}:{port}|proto={}|mono_ms={now}|diag=true|is_evidence=false"'));
   check('R3 a reused marker id / uncaptured target is refused in the core',
     control.includes('return Err("target-not-captured");') &&
     control.includes('return Err("duplicate-control");'));

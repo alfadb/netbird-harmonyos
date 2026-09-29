@@ -532,12 +532,16 @@ export function socketSupplyShutdown(): void {
   core.socket_supply_shutdown();
 }
 
-// N7 feed results: {ok:true,device_up:bool} — device_up flips true once BOTH
-// the WG socket and the TUN fd have been fed (the data plane is pumping).
+// N7 feed results: {ok:true,device_up:bool,mono_ms:int} — device_up flips true
+// once BOTH the WG socket and the TUN fd have been fed (the data plane is
+// pumping). N2 T7a (item 6): `mono_ms` is the CORE's monotonic instant of this
+// feed, the clock the core's own `N7_WG_FEED|adopted|…|mono_ms=` line uses, so
+// the shell's `VPN_WG_DATAPLANE_FED` line can be aligned with it.
 export interface WgFeedResult {
   ok: boolean;
   device_up?: boolean;
   error?: string;
+  mono_ms?: number;
 }
 
 // N7: feed the PROTECTED WG outer UDP socket (native-opened via

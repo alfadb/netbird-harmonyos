@@ -684,14 +684,26 @@ unsafe extern "C" fn napi_n2_socket_trace_arm(env: NapiEnv, info: NapiCallbackIn
 unsafe extern "C" fn napi_n2_socket_trace_protect(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
     let fields: Vec<_> = a.string_at(2).split(',').map(str::to_owned).collect();
+    let fd = a.i32_at(0, -1);
     if fields.len() == 4 {
         if let (Ok(generation), Ok(net_id), Ok(elapsed_ms)) = (
             fields[1].parse::<u64>(), fields[2].parse::<u64>(), fields[3].parse::<u64>()) {
-            crate::n2_socket_trace::protect(a.i32_at(0, -1), &a.string_at(1), &fields[0],
+            crate::n2_socket_trace::protect(fd, &a.string_at(1), &fields[0],
                 generation, net_id, elapsed_ms, a.bool_at(3, false));
         }
     }
-    ret_json(env, "{\"ok\":true}".into())
+    // N2 T7a (item 6): the armed protect wrapper logs `local=` on its
+    // `phase=protect_settle` line, so this reply carries the socket's own
+    // bound name (`getsockname`; `unknown` when the trace is unarmed or the
+    // number cannot be inspected — never an invented address).
+    let local = if crate::n2_socket_trace::armed() {
+        crate::n2_socket_trace::local_addr(fd).map(|addr| addr.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "unknown".to_string()
+    };
+    ret_json(env, format!("{{{},{}}}", crate::util::jbool("ok", true),
+        crate::util::jstr("local", &local)))
 }
 
 unsafe extern "C" fn napi_n2_tun_dest_configure(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
@@ -736,11 +748,13 @@ unsafe extern "C" fn napi_n2_a_event(env: NapiEnv, info: NapiCallbackInfo) -> Na
 }
 
 // N2 P5 (v4.1 §4 I/Ws rows): the shell's automatic sandwich orchestration —
-// register a PRE leg before sending the pre control, poll for the legs whose
-// first production send was observed, and close a leg with the post outcome.
+// register a PRE leg (with its own pre AND post control markers, N2 T7a item
+// 1) before sending the pre control, poll for the legs whose first production
+// send was observed, and close a leg with the post outcome.
 unsafe extern "C" fn napi_n2_sandwich_pre(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let a = cb_args(env, info);
-    ret_json(env, crate::connector::n2_sandwich_pre_json(&a.string_at(0), &a.string_at(1)))
+    ret_json(env, crate::connector::n2_sandwich_pre_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2)))
 }
 
 unsafe extern "C" fn napi_n2_sandwich_post(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

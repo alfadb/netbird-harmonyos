@@ -31,6 +31,13 @@
 //!
 //! `N2_SANDWICH|kind=I|Ws|phase=pre|post|first-send|marker=…|event_ref=…|result=…|reason=…|fd=…|dup_fd=…|remote=…|wait_ms=…|mono_ms=…|diag=true|is_evidence=false`
 //!
+//! `marker` is the marker of THAT phase: the pre control's own id on a
+//! `phase=pre`/`phase=first-send` line and the POST control's own (different)
+//! id on a `phase=post` line — N2 T7a item 1, so the shell's post control can
+//! never be refused as a reused id. `event_ref` is the observation the phase is
+//! anchored to (`attach@<mono_ms>` for a pre line, `first-send@<mono_ms>` /
+//! `pre@<mono_ms>` / `none` for a post line).
+//!
 //! ## Gating
 //!
 //! Inert until the N2 evidence ticket arms the socket trace: unarmed, every
@@ -71,7 +78,14 @@ struct FirstSend {
 
 #[derive(Clone, Debug)]
 struct Leg {
+    /// The PRE control's marker (the leg's registration key: the pre control
+    /// HIT is matched on this one).
     marker: String,
+    /// N2 T7a (item 1): the POST control's marker — a DIFFERENT id (the
+    /// control registry refuses a reused one), handed in by the shell at
+    /// registration and handed back by [`poll`] as the marker to send. Every
+    /// `phase=post` line carries THIS marker, never the pre one.
+    post_marker: String,
     pre_ms: u64,
     pre_hit: bool,
     pre_hit_ms: u64,
@@ -130,24 +144,37 @@ fn silent(result: &'static str, reason: &str, kind: &str, marker: &str) -> Outco
 }
 
 /// One post control the shell must send: the leg's kind and the marker the
-/// core expects to see HIT (the SAME marker the pre leg used — the control
-/// registry refuses a reused id, so the shell derives a fresh `-post` marker
-/// from this one; see the shell module `NetBirdN2Sandwich`).
+/// core expects to see HIT.
+///
+/// N2 T7a (item 1): this is the POST control's OWN marker (a fresh
+/// `[A-Za-z0-9_-]{1,64}` id the shell derived for the post leg and handed in
+/// at [`pre`] time) — never the pre leg's marker. The control registry refuses
+/// a reused id (`duplicate-control`), so reusing the pre marker here would make
+/// every post control structurally unreachable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Post {
     pub kind: String,
     pub marker: String,
 }
 
+/// The exact `N2_SANDWICH` line (N2 T7a item 1 — `marker` is the marker of
+/// THAT phase: the pre id on `phase=pre`, the post id on `phase=post`).
+/// `phase`/`result`/`reason` are fixed internal tokens and `event_ref` is built
+/// internally (`attach@…` / `first-send@…` / `pre@…`), so the documented literal
+/// line is preserved; the operator-supplied marker is cleaned.
+pub fn format_line(kind: &str, phase: &str, marker: &str, event_ref: &str, result: &str,
+    reason: &str, fd: RawFd, dup_fd: RawFd, remote: &str, wait_ms: u64,
+    mono_ms: u64) -> String {
+    format!(
+        "N2_SANDWICH|kind={}|phase={}|marker={}|event_ref={}|result={}|reason={}|fd={fd}|dup_fd={dup_fd}|remote={}|wait_ms={wait_ms}|mono_ms={mono_ms}|diag=true|is_evidence=false",
+        clean(kind), clean(phase), clean(marker), event_ref, result, clean(reason),
+        clean(remote))
+}
+
 fn record(kind: &str, phase: &str, marker: &str, event_ref: &str, result: &'static str,
     reason: &str, fd: RawFd, dup_fd: RawFd, remote: &str, wait_ms: u64) -> Outcome {
-    // `phase`/`result`/`reason` are fixed internal tokens and `event_ref` is
-    // built internally (`attach@…` / `first-send@…`), so the documented
-    // literal line is preserved; the operator-supplied marker is cleaned.
-    let line = format!(
-        "N2_SANDWICH|kind={}|phase={}|marker={}|event_ref={}|result={}|reason={}|fd={fd}|dup_fd={dup_fd}|remote={}|wait_ms={wait_ms}|mono_ms={}|diag=true|is_evidence=false",
-        clean(kind), clean(phase), clean(marker), event_ref, result, clean(reason),
-        clean(remote), sys::mono_ms());
+    let line = format_line(kind, phase, marker, event_ref, result, reason, fd, dup_fd, remote,
+        wait_ms, sys::mono_ms());
     hilog::emit(&line);
     state().last_line = Some(line.clone());
     Outcome { result, reason: reason.to_string(), kind: kind.to_string(),
@@ -193,12 +220,14 @@ pub fn observe_io(kind: &str, dup_fd: RawFd, fd: RawFd, remote: SocketAddr, stat
         }
         Some(_) => {
             // A leg that was already registered but whose pre control has not
-            // HIT (or HIT after this send) cannot be a valid sandwich.
+            // HIT (or HIT after this send) cannot be a valid sandwich. The
+            // closing line is a `phase=post` line, so it carries the POST
+            // marker (N2 T7a item 1).
             let marker = {
                 let mut state = state();
                 match state.legs.get(key) {
                     Some(leg) if !leg.pre_hit || leg.pre_hit_ms > now => {
-                        let marker = leg.marker.clone();
+                        let marker = leg.post_marker.clone();
                         state.legs.remove(key);
                         Some(marker)
                     }
@@ -214,9 +243,12 @@ pub fn observe_io(kind: &str, dup_fd: RawFd, fd: RawFd, remote: SocketAddr, stat
 }
 
 /// Register the PRE leg of one kind: called by the shell BEFORE it sends the
-/// pre control. Refuses honestly (`unsat`) when the frozen ordering cannot
-/// hold any more.
-pub fn pre(kind: &str, marker: &str) -> Outcome {
+/// pre control. `marker` is the PRE control's own id and `post_marker` the
+/// POST control's own (different) id — both are part of the leg, so every later
+/// `phase=post` line and the [`poll`] answer carry the post marker while the
+/// pre HIT is matched on the pre marker. Refuses honestly (`unsat`) when the
+/// frozen ordering cannot hold any more.
+pub fn pre(kind: &str, marker: &str, post_marker: &str) -> Outcome {
     if !crate::n2_socket_trace::armed() {
         // Zero behavior while unarmed: no state, no line.
         return silent("rejected", "not-armed", kind, marker);
@@ -227,6 +259,13 @@ pub fn pre(kind: &str, marker: &str) -> Outcome {
     };
     if !valid_marker(marker) {
         return record(kind, "pre", marker, "none", "rejected", "invalid-marker", -1, -1,
+            "unknown", PRE_WAIT_MS);
+    }
+    if !valid_marker(post_marker) || post_marker == marker {
+        // N2 T7a (item 1): the post leg needs its OWN marker; without one the
+        // leg cannot be registered (a reused id would be refused later by the
+        // control registry and reported as a miss).
+        return record(kind, "pre", marker, "none", "rejected", "invalid-post-marker", -1, -1,
             "unknown", PRE_WAIT_MS);
     }
     // std Mutex is NOT reentrant: every guard is released before `record`
@@ -258,7 +297,8 @@ pub fn pre(kind: &str, marker: &str) -> Outcome {
     let now = sys::mono_ms();
     {
         let mut state = state();
-        state.legs.insert(key, Leg { marker: marker.to_string(), pre_ms: now, pre_hit: false,
+        state.legs.insert(key, Leg { marker: marker.to_string(),
+            post_marker: post_marker.to_string(), pre_ms: now, pre_hit: false,
             pre_hit_ms: 0, post_issued: false });
     }
     record(kind, "pre", marker, &format!("attach@{attach_ms}"), "registered", "ok", -1, -1,
@@ -298,11 +338,13 @@ pub fn poll(now: u64) -> Vec<Post> {
             }
             match state.first.get(key) {
                 Some(first) if leg.pre_hit && leg.pre_hit_ms <= first.ms => {
-                    ready.push(Post { kind: (*key).to_string(), marker: leg.marker.clone() });
+                    // N2 T7a (item 1): the shell is handed the POST leg's own
+                    // marker — the id its post control must use.
+                    ready.push(Post { kind: (*key).to_string(), marker: leg.post_marker.clone() });
                 }
                 Some(_) => {} // the ordering failure is reported by observe_io
                 None if now.saturating_sub(leg.pre_ms) >= POST_WAIT_MS => {
-                    timed_out.push(((*key).to_string(), leg.marker.clone(), leg.pre_ms));
+                    timed_out.push(((*key).to_string(), leg.post_marker.clone(), leg.pre_ms));
                 }
                 None => {}
             }
@@ -313,7 +355,7 @@ pub fn poll(now: u64) -> Vec<Post> {
         {
             let mut state = state();
             if let Some(leg) = state.legs.get_mut(kind.as_str()) {
-                if leg.marker == marker {
+                if leg.marker == marker || leg.post_marker == marker {
                     leg.post_issued = true;
                 }
             }
@@ -330,9 +372,11 @@ pub fn poll(now: u64) -> Vec<Post> {
     ready
 }
 
-/// Close one leg with the shell's post outcome. `result` is the shell's
-/// verdict of the post control (`observed` = the post marker HIT, `unsat` =
-/// it MISSed), `reason` names the exact branch.
+/// Close one leg with the shell's post outcome. `marker` is the POST control's
+/// OWN marker (the id the shell sent, from [`poll`]) — N2 T7a item 1: the leg
+/// is located by it and the line carries it, never the pre leg's marker.
+/// `result` is the shell's verdict of the post control (`observed` = the post
+/// marker HIT, `unsat` = it MISSed), `reason` names the exact branch.
 pub fn post(kind: &str, marker: &str, result: &str, reason: &str) -> Outcome {
     if !crate::n2_socket_trace::armed() {
         // Zero behavior while unarmed: no state, no line.
@@ -342,13 +386,17 @@ pub fn post(kind: &str, marker: &str, result: &str, reason: &str) -> Outcome {
         return record(kind, "post", marker, "none", "rejected", "invalid-kind", -1, -1,
             "unknown", POST_WAIT_MS);
     };
+    if !valid_marker(marker) {
+        return record(kind, "post", marker, "none", "rejected", "invalid-marker", -1, -1,
+            "unknown", POST_WAIT_MS);
+    }
     let leg = state().legs.get(key).cloned();
-    let Some(leg) = leg.filter(|leg| leg.marker == marker) else {
+    if leg.as_ref().filter(|leg| leg.post_marker == marker).is_none() {
         // No such leg: never fabricate an outcome for an event that was not
         // registered by `pre`.
         return record(kind, "post", marker, "none", "rejected", "no-registered-leg", -1, -1,
             "unknown", POST_WAIT_MS);
-    };
+    }
     state().legs.remove(key);
     let first = state().first.get(key).cloned();
     let (fd, dup_fd, remote, event_ref) = match &first {
@@ -370,7 +418,8 @@ pub fn post(kind: &str, marker: &str, result: &str, reason: &str) -> Outcome {
         ("rejected", _) => "invalid-result",
         _ => "control-miss",
     };
-    record(key, "post", &leg.marker, &event_ref, result, reason, fd, dup_fd, &remote, POST_WAIT_MS)
+    // N2 T7a (item 1): the POST leg's own marker (`marker`), not the pre one.
+    record(key, "post", marker, &event_ref, result, reason, fd, dup_fd, &remote, POST_WAIT_MS)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,11 +477,11 @@ mod tests {
         reset_all();
         attach_anchor(1_000);
         observe_io("I", 7, 6, remote(), "sent");
-        let pre = pre("I", "n2s-I-pre");
+        let pre = pre("I", "n2s-I-pre", "n2s-I-post");
         assert_eq!(pre.result, "rejected");
         assert_eq!(pre.reason, "not-armed");
         assert!(pre.line.is_empty(), "unarmed emits no line");
-        let post = post("I", "n2s-I-pre", "observed", "ok");
+        let post = post("I", "n2s-I-post", "observed", "ok");
         assert_eq!(post.result, "rejected");
         assert_eq!(post.reason, "not-armed");
         assert!(post.line.is_empty());
@@ -450,7 +499,7 @@ mod tests {
         reset_all();
         crate::n2_socket_trace::arm(true);
         attach_anchor(1_000);
-        let pre = pre("I", "n2s-I-pre");
+        let pre = pre("I", "n2s-I-pre", "n2s-I-post");
         assert_eq!(pre.result, "registered");
         assert_eq!(pre.reason, "ok");
         assert!(pre.line.contains("|phase=pre|marker=n2s-I-pre|event_ref=attach@1000|"));
@@ -464,12 +513,13 @@ mod tests {
         let posts = poll(crate::sys::mono_ms());
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].kind, "I");
-        assert_eq!(posts[0].marker, "n2s-I-pre");
+        // N2 T7a (item 1): the shell is handed the POST leg's own marker.
+        assert_eq!(posts[0].marker, "n2s-I-post");
         assert!(poll(crate::sys::mono_ms()).is_empty(), "offered once");
-        let post = post("I", "n2s-I-pre", "observed", "ok");
+        let post = post("I", "n2s-I-post", "observed", "ok");
         assert_eq!(post.result, "observed");
         assert_eq!(post.reason, "control-hit-after-first-send");
-        assert!(post.line.contains("|phase=post|marker=n2s-I-pre|event_ref=first-send@"));
+        assert!(post.line.contains("|phase=post|marker=n2s-I-post|event_ref=first-send@"));
         assert!(post.line.contains("|result=observed|reason=control-hit-after-first-send|"));
         assert!(post.line.contains("|fd=6|dup_fd=7|remote=192.0.2.9:3478|"), "{}", post.line);
         assert_eq!(leg_count(), 0);
@@ -491,7 +541,7 @@ mod tests {
         let anchor = crate::sys::mono_ms().saturating_add(1_000);
         attach_anchor(anchor);
         assert_eq!(attach_ms(), Some(anchor));
-        let late = pre("Ws", "n2s-Ws-pre");
+        let late = pre("Ws", "n2s-Ws-pre", "n2s-Ws-post");
         assert_eq!(late.result, "unsat");
         assert_eq!(late.reason, "first-send-before-attach");
         reset_all();
@@ -504,7 +554,7 @@ mod tests {
         crate::n2_socket_trace::arm(true);
         attach_anchor(1_000);
         observe_io("I", 7, 6, remote(), "sent");
-        let pre = pre("I", "n2s-I-pre");
+        let pre = pre("I", "n2s-I-pre", "n2s-I-post");
         assert_eq!(pre.result, "unsat", "{}", pre.line);
         assert_eq!(pre.reason, "first-send-before-pre-control");
         reset_all();
@@ -516,10 +566,10 @@ mod tests {
         reset_all();
         crate::n2_socket_trace::arm(true);
         attach_anchor(1_000);
-        assert_eq!(pre("Ws", "n2s-Ws-pre").result, "registered");
+        assert_eq!(pre("Ws", "n2s-Ws-pre", "n2s-Ws-post").result, "registered");
         observe_io("Ws", 9, 8, remote(), "sent");
         let line = last_line().expect("unsat line");
-        assert!(line.contains("|phase=post|marker=n2s-Ws-pre|event_ref=first-send@"), "{line}");
+        assert!(line.contains("|phase=post|marker=n2s-Ws-post|event_ref=first-send@"), "{line}");
         assert!(line.contains("|result=unsat|reason=pre-control-not-before-first-send|"), "{line}");
         assert_eq!(leg_count(), 0);
         reset_all();
@@ -531,8 +581,8 @@ mod tests {
         reset_all();
         crate::n2_socket_trace::arm(true);
         attach_anchor(1_000);
-        assert_eq!(pre("I", "n2s-I-pre").result, "registered");
-        let post = post("I", "n2s-I-pre", "unsat", "pre-control-miss");
+        assert_eq!(pre("I", "n2s-I-pre", "n2s-I-post").result, "registered");
+        let post = post("I", "n2s-I-post", "unsat", "pre-control-miss");
         assert_eq!(post.result, "unsat");
         assert_eq!(post.reason, "pre-control-miss");
         assert_eq!(leg_count(), 0);
@@ -549,13 +599,13 @@ mod tests {
         reset_all();
         crate::n2_socket_trace::arm(true);
         attach_anchor(1_000);
-        assert_eq!(pre("I", "n2s-I-pre").result, "registered");
+        assert_eq!(pre("I", "n2s-I-pre", "n2s-I-post").result, "registered");
         let base = crate::sys::mono_ms();
         assert!(poll(base.saturating_add(POST_WAIT_MS).saturating_sub(1)).is_empty());
         let ready = poll(base.saturating_add(POST_WAIT_MS).saturating_add(5_000));
         assert!(ready.is_empty(), "no post control without a production send");
         let line = last_line().expect("timeout line");
-        assert!(line.contains("|phase=post|marker=n2s-I-pre|event_ref=pre@"), "{line}");
+        assert!(line.contains("|phase=post|marker=n2s-I-post|event_ref=pre@"), "{line}");
         assert!(line.contains("|result=timeout|reason=first-send-wait-exceeded|"), "{line}");
         assert!(line.contains(&format!("|wait_ms={POST_WAIT_MS}|")), "{line}");
         assert_eq!(leg_count(), 0);
@@ -568,15 +618,21 @@ mod tests {
         reset_all();
         crate::n2_socket_trace::arm(true);
         // no attach anchor yet
-        let no_attach = pre("I", "n2s-I-pre");
+        let no_attach = pre("I", "n2s-I-pre", "n2s-I-post");
         assert_eq!(no_attach.result, "unsat");
         assert_eq!(no_attach.reason, "no-attach-anchor");
         attach_anchor(1_000);
-        assert_eq!(pre("I", "n2s-I-pre").result, "registered");
-        assert_eq!(pre("I", "n2s-I-pre2").reason, "leg-already-registered");
-        assert_eq!(pre("Wb", "n2s-Wb-pre").reason, "invalid-kind");
-        assert_eq!(pre("I", "bad marker").reason, "invalid-marker");
+        assert_eq!(pre("I", "n2s-I-pre", "n2s-I-post").result, "registered");
+        assert_eq!(pre("I", "n2s-I-pre2", "n2s-I-post2").reason, "leg-already-registered");
+        assert_eq!(pre("Wb", "n2s-Wb-pre", "n2s-Wb-post").reason, "invalid-kind");
+        assert_eq!(pre("I", "bad marker", "n2s-I-post").reason, "invalid-marker");
+        // N2 T7a (item 1): a leg without its own (different, valid) post
+        // marker is refused by name instead of registering a post control
+        // that the control registry would later refuse as a reused id.
+        assert_eq!(pre("Ws", "n2s-Ws-pre", "n2s-Ws-pre").reason, "invalid-post-marker");
+        assert_eq!(pre("Ws", "n2s-Ws-pre", "").reason, "invalid-post-marker");
         assert_eq!(post("Wb", "n2s-Wb-pre", "observed", "ok").reason, "invalid-kind");
+        assert_eq!(post("I", "n2s-I-pre", "observed", "ok").reason, "no-registered-leg");
         reset_all();
     }
 

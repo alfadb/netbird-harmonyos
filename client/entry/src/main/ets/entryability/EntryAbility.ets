@@ -147,16 +147,12 @@ export default class EntryAbility extends UIAbility {
       this.removeProtectDeviation();
     }
     // N2-H arm private channel: an EXPLICIT non-secret parameter writes the
-    // ticket; every launch without it clears a leftover ticket from a
-    // previous diagnostic round (default: no arm). The credential writes
-    // above are untouched.
+    // ticket. Whether a launch WITHOUT it clears a leftover is decided further
+    // below, AFTER the N2 request parameters are read (N2 T7a item 7: a launch
+    // that carries one request but no arm ticket must NOT disarm the running
+    // session). The credential writes above are untouched.
     const armOptions: Object | undefined =
       params === undefined || params === null ? undefined : params[N2H_ARM_OPTIONS_PARAM];
-    if (typeof armOptions === 'string' && armOptions.length > 0) {
-      this.writeArmTicketFile(armOptions);
-    } else {
-      this.removeArmTicket('default-no-arm');
-    }
     // N2 T5a / T3 / P4 private channels: same discipline as the arm ticket
     // above. ONE launch carries at most ONE pending request (stimulus,
     // positive control or A-column trigger): an explicit non-secret parameter
@@ -173,6 +169,25 @@ export default class EntryAbility extends UIAbility {
     const stimulusText: string = typeof stimulus === 'string' ? stimulus : '';
     const controlText: string = typeof control === 'string' ? control : '';
     const aEventText: string = typeof aEvent === 'string' ? aEvent : '';
+    // N2 T7a (item 7) — arm ticket protection. The documented operator flow is
+    // "aa start WITH the arm ticket, then one launch per request"; a launch
+    // that carries an N2 request parameter but NO arm ticket must therefore
+    // KEEP the existing ticket instead of deleting it (deleting it would leave
+    // the already-running extension armed but a later extension restart
+    // unarmed — the executor's "arm once, then send" shape would silently lose
+    // its arm). A launch with NO N2 request parameter keeps the original
+    // default-no-arm rule, so a stale ticket still cannot survive an unrelated
+    // launch. An explicit ticket always wins and is written verbatim.
+    if (typeof armOptions === 'string' && armOptions.length > 0) {
+      this.writeArmTicketFile(armOptions);
+    } else if (stimulusText.length > 0 || controlText.length > 0 || aEventText.length > 0) {
+      hilog.info(DOMAIN, TAG,
+        'N2H_ARM_TICKET_KEPT|file=%{public}s|note=request-launch-without-arm-ticket|' +
+        'diag=true|is_evidence=false',
+        N2H_ARM_OPTIONS_FILE);
+    } else {
+      this.removeArmTicket('default-no-arm');
+    }
     if (stimulusText.length > 0 && controlText.length > 0) {
       // The pre-existing two-channel refusal keeps its exact line; a THIRD
       // pending request (the A-event trigger) extends the same refusal with

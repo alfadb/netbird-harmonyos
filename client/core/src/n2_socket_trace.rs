@@ -55,6 +55,40 @@ struct Protect {
 const POST_CONNECT_RECEIPT_EVERY: u64 = 128;
 /// N2 P3: …or one post-connect receipt every 30 s of an active write stream.
 const POST_CONNECT_RECEIPT_MS: u64 = 30_000;
+
+/// N2 T7a (item 4): the fd → event-id windows of in-flight A-column events.
+/// A write landing inside an open window is receipted UNCONDITIONALLY (the
+/// throttle below is bypassed) and its receipt carries `event_id=<id>`, so the
+/// one production write a trigger causes is always provable even when it is
+/// not the first/every-128th/30-s write of its descriptor.
+static EVENT_WINDOWS: OnceLock<Mutex<HashMap<RawFd, String>>> = OnceLock::new();
+
+fn event_windows() -> &'static Mutex<HashMap<RawFd, String>> {
+    EVENT_WINDOWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Open the event window of `fd` under the A-event id `id`. Keyed by the
+/// CORE-OWNED descriptor (the `dup_fd` of the receipts), the same number the
+/// write wrapper passes to [`post_connect_write`]. A negative fd (no live
+/// registration) opens nothing.
+pub fn event_window_begin(fd: RawFd, id: &str) {
+    if fd < 0 || id.is_empty() { return; }
+    event_windows().lock().expect("event windows").insert(fd, id.to_string());
+}
+
+/// Close the event window of `fd` (called after the event's trigger returned
+/// or its watch completed/timed out).
+pub fn event_window_end(fd: RawFd) {
+    if fd < 0 { return; }
+    event_windows().lock().expect("event windows").remove(&fd);
+}
+
+/// The event id of `fd` while a window is open (`None` = outside every event
+/// window).
+pub fn event_window(fd: RawFd) -> Option<String> {
+    event_windows().lock().expect("event windows").get(&fd).cloned()
+}
+
 /// N2 P2: session-period `N2_FD_SEND` lines share the `N2_TUN_DEST` rhythm —
 /// a 5 s tick gate, then "counters changed or 30 s elapsed".
 const FD_SEND_TICK_MS: u64 = 5_000;
@@ -99,6 +133,7 @@ pub fn arm(enabled: bool) {
     ARMED.store(enabled, Ordering::Release);
     sockets().lock().expect("socket trace").clear();
     live_map().lock().expect("live sockets").clear();
+    event_windows().lock().expect("event windows").clear();
     *fd_send_state().lock().expect("fd send state") = FdSendState::default();
     // N2 T5a: the stimulus registry (and its connector sink) lives exactly as
     // long as one arming — a disarm leaves no fd and no endpoint behind.
@@ -182,13 +217,38 @@ fn clean(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_') { c } else { '_' }).collect()
 }
 
+/// The completion receipt line with every volatile input explicit — the pure
+/// formatter behind [`format_receipt`], exported for the N2 log-format baseline
+/// (N2 T7a item 8).
+#[allow(clippy::too_many_arguments)]
+pub fn sock_receipt_line(kind: &str, request_id: &str, fd: RawFd, dup_fd: RawFd, protect_ok: bool,
+    protect_ms: u64, protect_generation: u64, mono_ms: u64, wall_ms: u128, local: &str,
+    remote: &str, proto: &str, net_id: u64, status: &str, detail: &str, phase: &str) -> String {
+    format!("N2_SOCK|phase={phase}|kind={kind}|request_id={}|fd={fd}|dup_fd={dup_fd}|protect={}|protect_ms={protect_ms}|protect_generation={protect_generation}|first_mono_ms={mono_ms}|first_wall_ms={wall_ms}|local={local}|remote={remote}|proto={proto}|net_id={net_id}|status={}|detail={}|diag=true|is_evidence=false",
+        clean(request_id), if protect_ok { "success" } else { "failed" },
+        clean(status), clean(detail))
+}
+
+/// The `phase=subsequent_io` post-connect write receipt with every volatile
+/// input explicit — the pure formatter behind [`post_connect_write`] (N2 T7a
+/// items 4/6/8): `event_id` is the A-event id while a window is open (`none`
+/// outside every window).
+#[allow(clippy::too_many_arguments)]
+pub fn subsequent_io_line(kind: &str, request_id: &str, fd: RawFd, dup_fd: RawFd, protect_ok: bool,
+    protect_ms: u64, protect_generation: u64, local: &str, remote: &str, net_id: u64, bytes: usize,
+    mono_ms: u64, wall_ms: u128, event_id: &str) -> String {
+    format!("N2_SOCK|phase=subsequent_io|kind={kind}|request_id={}|fd={fd}|dup_fd={dup_fd}|protect={}|protect_ms={protect_ms}|protect_generation={protect_generation}|local={local}|remote={remote}|proto=tcp|net_id={net_id}|bytes={bytes}|mono_ms={mono_ms}|wall_ms={wall_ms}|status=sent|detail=post_connect_write|event_id={event_id}|diag=true|is_evidence=false",
+        clean(request_id), if protect_ok { "success" } else { "failed" })
+}
+
 fn format_receipt(meta: &Protect, dup: RawFd, remote: SocketAddr, local: Option<SocketAddr>,
     mono_ms: u64, wall_ms: u128, status: &str, detail: &str, phase: &str) -> String {
-    format!("N2_SOCK|phase={phase}|kind={}|request_id={}|fd={}|dup_fd={dup}|protect={}|protect_ms={}|protect_generation={}|first_mono_ms={mono_ms}|first_wall_ms={wall_ms}|local={}|remote={remote}|proto={}|net_id={}|status={}|detail={}|diag=true|is_evidence=false",
-        meta.kind, clean(&meta.request), meta.original_fd, if meta.ok { "success" } else { "failed" },
-        meta.elapsed_ms, meta.generation, local.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+    sock_receipt_line(&meta.kind, &meta.request, meta.original_fd, dup, meta.ok, meta.elapsed_ms,
+        meta.generation, mono_ms, wall_ms,
+        &local.map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+        &remote.to_string(),
         if meta.kind == "M" || meta.kind == "S" || meta.kind == "R" { "tcp" } else { "udp" },
-        meta.net_id, clean(status), clean(detail))
+        meta.net_id, status, detail, phase)
 }
 
 fn receipt_due(meta: &Protect) -> bool {
@@ -263,15 +323,19 @@ pub fn first_io(fd: RawFd, remote: SocketAddr, status: &str, detail: &str) {
 ///
 /// Emits the FIRST write after connect, then every
 /// [`POST_CONNECT_RECEIPT_EVERY`] completed writes or every
-/// [`POST_CONNECT_RECEIPT_MS`] (whichever comes first). Returns `None` — the
-/// caller emits NOTHING — when unarmed, when `fd` has no registration, when
-/// the class is not an outer TCP socket, or when the throttle says not due.
+/// [`POST_CONNECT_RECEIPT_MS`] (whichever comes first). N2 T7a: a write inside
+/// an open A-event window ([`event_window_begin`]) is ALWAYS emitted — the
+/// throttle is bypassed and the line carries `event_id=<id>`. Returns `None` —
+/// the caller emits NOTHING — when unarmed, when `fd` has no registration,
+/// when the class is not an outer TCP socket, or when the throttle says not
+/// due.
 ///
 /// The line keeps the `N2_SOCK` join keys (`kind`, `fd` = shell original,
 /// `dup_fd` = core-owned descriptor, `request_id`, `protect*`, `net_id`,
 /// `local`, `remote`, `proto=tcp`, `diag`/`is_evidence`) and adds the fields
-/// this receipt exists for: `bytes`, `mono_ms`, `wall_ms`. The bytes and the
-/// order of the write itself are NOT touched by the receipt.
+/// this receipt exists for: `bytes`, `mono_ms`, `wall_ms`, `event_id`
+/// (`none` outside every event window). The bytes and the order of the write
+/// itself are NOT touched by the receipt.
 pub fn post_connect_write(fd: RawFd, remote: SocketAddr, bytes: usize) -> Option<String> {
     if !armed() { return None; }
     let now = sys::mono_ms();
@@ -279,7 +343,10 @@ pub fn post_connect_write(fd: RawFd, remote: SocketAddr, bytes: usize) -> Option
     let meta = map.get_mut(&fd)?;
     if !matches!(meta.kind.as_str(), "M" | "S" | "R") { return None; }
     meta.post_connect_writes = meta.post_connect_writes.saturating_add(1);
-    let due = meta.post_connect_writes == 1
+    // N2 T7a (item 4): inside an A-event window the receipt is MANDATORY.
+    let event_id = event_window(fd);
+    let due = event_id.is_some()
+        || meta.post_connect_writes == 1
         || meta.post_connect_writes % POST_CONNECT_RECEIPT_EVERY == 0
         || now.saturating_sub(meta.last_receipt_ms) >= POST_CONNECT_RECEIPT_MS;
     if !due { return None; }
@@ -288,12 +355,11 @@ pub fn post_connect_write(fd: RawFd, remote: SocketAddr, bytes: usize) -> Option
     let copy = meta.clone();
     drop(map);
     let wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis());
-    Some(format!(
-        "N2_SOCK|phase=subsequent_io|kind={}|request_id={}|fd={}|dup_fd={fd}|protect={}|protect_ms={}|protect_generation={}|local={}|remote={remote}|proto=tcp|net_id={}|bytes={bytes}|mono_ms={now}|wall_ms={wall_ms}|status=sent|detail=post_connect_write|diag=true|is_evidence=false",
-        copy.kind, clean(&copy.request), copy.original_fd,
-        if copy.ok { "success" } else { "failed" }, copy.elapsed_ms, copy.generation,
-        local_addr(fd).map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
-        copy.net_id))
+    Some(subsequent_io_line(&copy.kind, &copy.request, copy.original_fd, fd, copy.ok,
+        copy.elapsed_ms, copy.generation,
+        &local_addr(fd).map(|a| a.to_string()).unwrap_or_else(|| "unknown".into()),
+        &remote.to_string(), copy.net_id, bytes, now, wall_ms,
+        &event_id.unwrap_or_else(|| "none".to_string())))
 }
 
 /// N2 P3: how many `phase=subsequent_io` receipts were emitted for the
@@ -327,10 +393,19 @@ pub fn wg_sent(fd: RawFd, bytes: u64) {
 }
 
 /// One `N2_FD_SEND` line for a WG-class descriptor (see [`fd_send_due_lines`]).
+/// The fields stay exactly `packets`/`bytes`/`mono_ms` (N2 T7a item 6: the
+/// judge aligns on this shape).
 fn fd_send_line(meta: &Protect, dup: RawFd, mono_ms: u64) -> String {
+    fd_send_fields_line(&meta.kind, meta.original_fd, dup, meta.send_packets,
+        meta.send_bytes, mono_ms)
+}
+
+/// The same line with every field explicit — the pure formatter behind
+/// [`fd_send_line`] (N2 T7a item 8).
+pub fn fd_send_fields_line(kind: &str, fd: RawFd, dup_fd: RawFd, packets: u64, bytes: u64,
+    mono_ms: u64) -> String {
     format!(
-        "N2_FD_SEND|kind={}|fd={}|dup_fd={dup}|packets={}|bytes={}|mono_ms={mono_ms}|diag=true|is_evidence=false",
-        meta.kind, meta.original_fd, meta.send_packets, meta.send_bytes)
+        "N2_FD_SEND|kind={kind}|fd={fd}|dup_fd={dup_fd}|packets={packets}|bytes={bytes}|mono_ms={mono_ms}|diag=true|is_evidence=false")
 }
 
 /// N2 P2 — the session-period `N2_FD_SEND` lines, one per REGISTERED WG-class
@@ -640,18 +715,37 @@ mod tests {
         for field in ["|kind=M|", "|request_id=7|", "|fd=", "|dup_fd=", "|protect=success|",
             "|protect_generation=1|", "|remote=192.0.2.1:443|", "|proto=tcp|", "|net_id=31|",
             "|bytes=64|", "|mono_ms=", "|wall_ms=", "|status=sent|",
-            "|detail=post_connect_write|", "|diag=true|is_evidence=false"] {
+            "|detail=post_connect_write|", "|event_id=none|", "|diag=true|is_evidence=false"] {
             assert!(first.contains(field), "{field} in {first}");
         }
         assert!(post_connect_write(fd, remote, 1).is_none(), "throttled");
         assert_eq!(subsequent_receipts(fd), 1);
-        // writes 3..=127 stay silent; the 128th completed write is due again
-        for _ in 0..125 {
+        // N2 T7a (item 4): a write INSIDE an open event window is mandatory —
+        // the throttle is bypassed and the receipt names the event id.
+        event_window_begin(fd, "a-M-1");
+        assert_eq!(event_window(fd).as_deref(), Some("a-M-1"));
+        let forced = post_connect_write(fd, remote, 3).expect("forced inside the window");
+        assert!(forced.contains("|bytes=3|"), "{forced}");
+        assert!(forced.contains("|event_id=a-M-1|"), "{forced}");
+        assert_eq!(subsequent_receipts(fd), 2);
+        event_window_end(fd);
+        assert_eq!(event_window(fd), None);
+        assert!(post_connect_write(fd, remote, 1).is_none(), "throttle resumes");
+        // writes 5..=127 stay silent; the 128th completed write is due again
+        for _ in 0..123 {
             assert!(post_connect_write(fd, remote, 1).is_none());
         }
         let again = post_connect_write(fd, remote, 2).expect("128th completed write");
         assert!(again.contains("|bytes=2|"), "{again}");
-        assert_eq!(subsequent_receipts_for_original(fd), 2);
+        assert!(again.contains("|event_id=none|"), "{again}");
+        assert_eq!(subsequent_receipts_for_original(fd), 3);
+
+        // N2 T7a: a disarm drops every open window (no event outlives its arming).
+        event_window_begin(fd, "a-M-2");
+        arm(false);
+        assert_eq!(event_window(fd), None);
+        arm(true);
+        assert_eq!(event_window(fd), None);
 
         // A class that is not an outer TCP socket never gets this receipt.
         protect(4_000_001, "Wb", "wg", 1, 31, 3, true);
