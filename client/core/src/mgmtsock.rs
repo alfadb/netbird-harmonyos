@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn management_and_signal_feeds_keep_original_socket_when_number_is_reused() {
-        unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; fn listen(fd: i32, backlog: i32) -> i32; }
+        unsafe extern "C" { fn listen(fd: i32, backlog: i32) -> i32; }
         for _purpose in ["management", "signal"] {
             let original = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
             assert!(original >= 0);
@@ -683,14 +683,21 @@ mod tests {
             unsafe { sys::close(original) };
             let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
             assert!(replacement >= 0);
-            if replacement != original {
-                assert_eq!(unsafe { dup2(replacement, original) }, original);
-            }
+            // Occupy the freed number ATOMICALLY. `F_DUPFD_CLOEXEC` allocates
+            // the lowest FREE descriptor >= `original`: `original` itself while
+            // it is still free (exactly the reuse this test is about), else the
+            // next free number. `dup2` would instead force that number and
+            // close whatever a parallel libtest thread had grabbed in the
+            // window — fd numbers are process-global, and the robbed thread
+            // later drops an `OwnedFd` on a number that is gone (std aborts the
+            // process) or reads EBADF. Same atomic-allocation idiom as the
+            // fd-reuse assertions in `host_sockets.rs`.
+            let pinned = unsafe { sys::fcntl(replacement, sys::F_DUPFD_CLOEXEC, original) };
+            assert!(pinned >= 0, "pin the replacement at/above {original}: errno={}", sys::errno());
             let fed = source.take_fd().unwrap();
             assert_ne!(fed, original);
             assert_eq!(unsafe { listen(fed, 1) }, 0, "queued TCP must not become replacement UDP");
-            unsafe { sys::close(fed); sys::close(original); }
-            if replacement != original { unsafe { sys::close(replacement) }; }
+            unsafe { sys::close(fed); sys::close(pinned); sys::close(replacement); }
         }
     }
 

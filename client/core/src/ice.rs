@@ -1172,7 +1172,6 @@ mod feed_ownership_tests {
 
     #[test]
     fn ice_feed_survives_shell_close_and_fd_number_reuse() {
-        unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
         let original = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = original.local_addr().unwrap().port();
         let raw = original.into_raw_fd();
@@ -1181,11 +1180,16 @@ mod feed_ownership_tests {
         unsafe { sys::close(raw) };
         let replacement = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM, 0) };
         assert!(replacement >= 0);
-        if replacement != raw { assert_eq!(unsafe { dup2(replacement, raw) }, raw); }
+        // Occupy the freed number ATOMICALLY (the mgmtsock twin test carries
+        // the full rationale): `F_DUPFD_CLOEXEC` never closes a descriptor a
+        // parallel libtest thread grabbed in the window, while `dup2` would —
+        // and the robbed thread's `OwnedFd` drop aborts the whole process with
+        // "IO Safety violation: owned file descriptor already closed".
+        let pinned = unsafe { sys::fcntl(replacement, sys::F_DUPFD_CLOEXEC, raw) };
+        assert!(pinned >= 0, "pin the replacement at/above {raw}: errno={}", sys::errno());
         let fed = unsafe { std::net::UdpSocket::from_raw_fd(source.take_owned().unwrap().into_raw_fd()) };
         assert_eq!(fed.local_addr().unwrap().port(), port);
-        unsafe { sys::close(raw) };
-        if replacement != raw { unsafe { sys::close(replacement) }; }
+        unsafe { sys::close(pinned); sys::close(replacement); }
     }
 
     #[test]

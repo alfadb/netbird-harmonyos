@@ -261,10 +261,18 @@ async fn s_a_event_observes_the_natural_watchdog_heartbeat_on_the_existing_strea
 
     // The NATURAL watchdog heartbeat fires on its own silence window (no N2
     // request), and the armed observer completes with `result=observed`.
+    //
+    // The mock counts the frame on the SERVER side (as soon as it decrypts
+    // it), while the client-side completion `natural_heartbeat_sent` is
+    // recorded only AFTER `send_heartbeat().await` returns (src/signal.rs):
+    // the server count alone does not yet imply the A-event line exists. Wait
+    // for the completion this test asserts on — bounded, so a heartbeat that
+    // really never completes the watch still fails loudly.
     let deadline = std::time::Instant::now() + Duration::from_secs(8);
-    while mock.self_addressed_sends() == 0 {
+    while mock.self_addressed_sends() == 0 || n2_a_event::last_result() != Some("observed") {
         assert!(std::time::Instant::now() <= deadline,
-            "the natural watchdog heartbeat never fired");
+            "the natural watchdog heartbeat never completed the watch: sends={} last={:?}",
+            mock.self_addressed_sends(), n2_a_event::last_line());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(n2_a_event::last_result(), Some("observed"),

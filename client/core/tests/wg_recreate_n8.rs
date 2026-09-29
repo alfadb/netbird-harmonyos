@@ -184,19 +184,23 @@ fn key_b() -> &'static str {
 
 #[test]
 fn pending_wg_feed_survives_shell_fd_reuse_before_tun_arrives() {
-    unsafe extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
     let slot = WgDeviceFeed::new(recreate_config(&SECRET_A));
     let (wg, port) = udp_socket_lo();
     slot.feed_wg_socket(wg).unwrap();
     unsafe { sys::close(wg) };
     let (replacement, replacement_port) = udp_socket_lo();
-    if replacement != wg { assert_eq!(unsafe { dup2(replacement, wg) }, wg); }
+    // Occupy the freed number ATOMICALLY (the twin of the rationale in
+    // `src/mgmtsock.rs`): `F_DUPFD_CLOEXEC` allocates the lowest free number
+    // >= `wg` and never closes a descriptor a parallel test thread grabbed in
+    // the window, while `dup2` would — and the robbed thread later drops an
+    // `OwnedFd` whose number is gone (the process aborts).
+    let pinned = unsafe { sys::fcntl(replacement, sys::F_DUPFD_CLOEXEC, wg) };
+    assert!(pinned >= 0, "pin the replacement at/above {wg}: errno={}", sys::errno());
     let (tun, end) = tun_socketpair();
     slot.feed_tun(tun).unwrap();
     assert_eq!(slot.with_device(|d| d.local_addr()).unwrap().1, port);
     if port != replacement_port { assert_ne!(slot.with_device(|d| d.local_addr()).unwrap().1, replacement_port); }
-    unsafe { sys::close(tun); sys::close(end); sys::close(wg); }
-    if replacement != wg { unsafe { sys::close(replacement) }; }
+    unsafe { sys::close(tun); sys::close(end); sys::close(pinned); sys::close(replacement); }
 }
 
 /// within the process — same as tests/wg_feed_n7.rs).
