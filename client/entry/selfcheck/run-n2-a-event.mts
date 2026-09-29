@@ -391,6 +391,10 @@ try {
     aEvent.includes('pub const R_WAIT_MS: u64 = 90_000;') &&
     aEvent.includes('fn management_round_trip(&self) -> Result<(), String>;') &&
     aEvent.includes('fn arm_healthcheck_watch(&self, id: &str, wait_ms: u64, seq: u64) -> Result<(), String>;'));
+  check('R4a the R row is refused without a live relay socket, like M and S',
+    aEvent.includes('let pair = live_pair("R");') &&
+    aEvent.includes('"no-live-relay-connection"') &&
+    aEvent.includes('"no-n2-sock-registration"'));
   check('R4b the R timeout timer is keyed on (id, seq), so a stale timer cannot complete a later watch',
     aEvent.includes('pub fn r_watch_timeout(id: &str, seq: u64) -> Option<Outcome>') &&
     connector.includes('crate::n2_a_event::r_watch_timeout(&id, seq)'));

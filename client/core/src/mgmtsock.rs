@@ -484,6 +484,10 @@ pub async fn connect_protected(
     let provided = lease.fd();
     let dup = dup_socket_fd(provided).map_err(SocketDialError::Seam)?;
     if let Err(e) = set_nonblock(dup) {
+        // `dup_socket_fd` mirrored the provider's registration onto this
+        // number: it leaves the trace table exactly when it is closed, so a
+        // freed number can never be reported as this socket's successor.
+        crate::n2_socket_trace::closed(dup);
         unsafe { sys::close(dup) };
         return Err(SocketDialError::Seam(e));
     }
@@ -512,6 +516,10 @@ pub async fn connect_protected(
             drop(registration);
             let dup2 = dup_socket_fd(provided).map_err(SocketDialError::Seam)?;
             if let Err(e) = set_nonblock(dup2) {
+                // Same registry contract as the first failure branch above:
+                // `dup_socket_fd` mirrored the provided registration onto
+                // `dup2`, so deregister before closing the number.
+                crate::n2_socket_trace::closed(dup2);
                 unsafe { sys::close(dup2) };
                 return Err(SocketDialError::Seam(e));
             }

@@ -58,6 +58,28 @@ try {
   const ordinary = cfg.buildPlatformVpnConfig(cfg.loadVpnTunnelConfig());
   assert(!('trustedApplications' in ordinary) && !('blockedApplications' in ordinary),
     'default config unchanged');
+  // N2 evidence DNS decision (a): the evidence generation declares no platform
+  // DNS server, so the submitted VpnConfig omits dnsAddresses entirely.
+  assert(routed.dnsServers.length === 0, 'evidence config declares no platform DNS server');
+  assert(!('dnsAddresses' in trusted), 'evidence VpnConfig omits dnsAddresses');
+  assert(JSON.stringify(Object.keys(ordinary)) ===
+    JSON.stringify(['addresses', 'routes', 'dnsAddresses', 'mtu']),
+    'ordinary VpnConfig field order stays addresses/routes/dnsAddresses/mtu');
+  assert(JSON.stringify(ordinary.dnsAddresses) === JSON.stringify(['8.8.8.8']),
+    'ordinary config keeps the deployment DNS default');
+  // The real create order is applyNetworkConfig(base, net) BEFORE the evidence
+  // transform: a management-advertised nameserver must not reappear through
+  // the core snapshot (this is why (b)'s arm-time collision check is fragile
+  // — the DNS set is only final at create()).
+  const coreNet = { available: true, address: '10.99.0.1', address_prefix_len: 32,
+    routes: [], dns: { service_enable: true, servers: [{ ip: '223.5.5.5', port: 53 }] } };
+  const refilled = cfg.applyNetworkConfig(base, coreNet);
+  assert(refilled.dnsServers.length === 1 && refilled.dnsServers[0] === '223.5.5.5',
+    'core snapshot does carry a platform DNS server');
+  const evidence = n2.withN2EvidenceRoutes(refilled, accepted.capture32);
+  assert(evidence.dnsServers.length === 0, 'evidence transform drops the core-snapshot DNS too');
+  assert(!('dnsAddresses' in cfg.buildPlatformVpnConfig(evidence, undefined,
+    ['com.netbird.harmonyos'])), 'submitted evidence VpnConfig carries no dnsAddresses');
   assert(JSON.stringify(n2.withN2EvidenceRoutes(routed, accepted.capture32)) === JSON.stringify(routed),
     'recreate route idempotence');
   assert(n2.validateN2Control(accepted.capture32, '119.29.29.119:53', 'event-pre') === '',

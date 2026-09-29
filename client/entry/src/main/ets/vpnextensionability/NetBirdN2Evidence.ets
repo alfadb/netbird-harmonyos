@@ -120,5 +120,28 @@ export function withN2EvidenceRoutes(config: VpnTunnelConfig, ips: string[]): Vp
       next = outcome.config;
     }
   }
-  return next;
+  // N2 evidence DNS decision (a), 2026-09-28: the evidence generation declares
+  // NO platform DNS server. The App's own outer-endpoint resolution does not
+  // use it — initial management/signal names resolve BEFORE create() on the
+  // physical network (resolveManagementIp) and every post-create /relay /STUN
+  // lookup goes through the core's protected-DNS fd path (resolveProtectedIp,
+  // `purpose=dns`), while the D row itself forces a protected query and never
+  // the system resolver. Keeping `dnsServers` therefore buys the evidence run
+  // nothing, but a declared resolver IP that is also a `capture_32`
+  // destination (e.g. the Wi-Fi resolver, or 223.5.5.5 listed as the D-row
+  // destination) would let the platform route the App's own resolver query
+  // into the TUN, where the campaign-wide from-OS destination scan counts it
+  // as an outer frame to a frozen destination — a false hit. (b) was rejected:
+  // the DNS set is only final at create() (the core network-map snapshot is
+  // applied after the ticket is armed), so an arm-time collision check over
+  // the deployment default would not cover a management-advertised server.
+  return {
+    tunnelAddress: next.tunnelAddress,
+    tunnelPrefixLength: next.tunnelPrefixLength,
+    interfaceName: next.interfaceName,
+    routes: next.routes,
+    dnsServers: [],
+    mtu: next.mtu,
+    peerEndpoint: next.peerEndpoint
+  };
 }

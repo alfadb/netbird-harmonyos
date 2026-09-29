@@ -394,13 +394,21 @@ pub fn apply(kind: &str, id: &str) -> Outcome {
             outcome
         }
         "R" => {
+            // The frozen §4 `R` row: the event is a server-driven HealthCheck
+            // the PRODUCTION relay connection answers. Without a live `R`
+            // registration there is no production relay socket this event
+            // could be attributed to (same rule as `M`/`S`).
+            let pair = live_pair("R");
+            if pair.dup_fd < 0 {
+                return record(kind, id, &pair, "error", "no-live-relay-connection",
+                    "no-n2-sock-registration");
+            }
             // std Mutex is NOT reentrant: read the flag, release, then record.
             let watch_open = state().r_watch.is_some();
             if watch_open {
-                return record(kind, id, &FdPair::unknown(), "rejected",
+                return record(kind, id, &pair, "rejected",
                     "watch-already-armed", "one-watch-per-session");
             }
-            let pair = live_pair("R");
             let seq = {
                 let mut state = state();
                 state.r_seq = state.r_seq.saturating_add(1);
@@ -804,6 +812,15 @@ mod tests {
         crate::n2_socket_trace::arm(true);
         let counting = Arc::new(Counting::default());
         install_trigger(counting.clone());
+        // armed but no R registration: the event cannot be attributed, and no
+        // watch is armed (the R row is guarded like M and S).
+        let none = apply("R", "a-R-0");
+        assert_eq!(none.result, "error");
+        assert_eq!(none.reason, "no-live-relay-connection");
+        assert_eq!(none.fd, -1);
+        assert_eq!(none.dup_fd, -1);
+        assert!(none.line.contains("|detail=no-n2-sock-registration|"), "{}", none.line);
+        assert_eq!(counting.watch.load(Ordering::SeqCst), 0, "no watch without a live fd");
         let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let fd = sock.as_raw_fd();
         register("R", fd);
@@ -849,6 +866,10 @@ mod tests {
         clear_trigger();
         // arming change drops counters, any armed watch and the last line
         install_trigger(Arc::new(Counting::default()));
+        // R is refused without a live relay socket (the guard added with the
+        // `no-live-relay-connection` reason), so register one first.
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        register("R", sock.as_raw_fd());
         assert_eq!(apply("R", "a-R-1").result, "armed");
         assert!(last_line().is_some());
         crate::n2_socket_trace::arm(false);

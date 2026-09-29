@@ -46,7 +46,9 @@ export interface VpnTunnelConfig {
   interfaceName: string;
   // Ordered route list; must contain the default route (isDefaultRoute).
   routes: VpnRouteConfig[];
-  // DNS servers declared to the platform (VpnConfig.dnsAddresses).
+  // DNS servers declared to the platform (VpnConfig.dnsAddresses). An EMPTY
+  // list means "declare none" (the mapper then omits the field): the N2
+  // evidence generation uses that (NetBirdN2Evidence decision (a)).
   // TODO(未验证): placeholder until the control plane supplies real values;
   // on-device DNS behavior never verified in a spike.
   dnsServers: string[];
@@ -568,12 +570,21 @@ export function buildPlatformVpnConfig(config: VpnTunnelConfig,
     }
     routes.push(route);
   }
+  // Field insertion order is the submitted-document shape the host checks
+  // pin (addresses, routes, dnsAddresses, mtu, …): declare the two mandatory
+  // fields, then add `dnsAddresses` only when the config actually carries a
+  // server. The N2 evidence generation carries none (NetBirdN2Evidence
+  // decision (a)), so the field stays ABSENT there instead of submitting an
+  // empty array; every ordinary config keeps at least the deployment default
+  // (`8.8.8.8`), so its byte shape is unchanged.
   const vpnConfig: vpnExtension.VpnConfig = {
     addresses: [address],
-    routes: routes,
-    dnsAddresses: config.dnsServers,
-    mtu: config.mtu
+    routes: routes
   };
+  if (config.dnsServers.length > 0) {
+    vpnConfig.dnsAddresses = config.dnsServers;
+  }
+  vpnConfig.mtu = config.mtu;
   // S2 (see the doc comment): present ONLY when a non-empty list was passed.
   if (blockedApplications !== undefined && blockedApplications.length > 0) {
     vpnConfig.blockedApplications = blockedApplications;

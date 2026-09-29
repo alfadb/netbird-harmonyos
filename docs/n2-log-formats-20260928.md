@@ -8,7 +8,7 @@ a field name.
 
 Machine-checkable half: `client/core/tests/n2_log_samples.rs` calls the real
 formatters once per Rust-side line and asserts the result byte-for-byte against
-[`n2-log-samples.txt`](n2-log-samples.txt) (one sample per line, with a
+[`n2-log-samples.txt`](../client/core/tests/fixtures/n2-log-samples.txt) (one sample per line, with a
 `# label` comment above each). Regenerate after an intentional format change
 with `N2_LOG_SAMPLES_REGEN=1 cargo test --offline --locked --test n2_log_samples`.
 
@@ -138,7 +138,7 @@ Field sets are identical on both phases; field order is fixed as above.
 | `fd` / `dup_fd` | the live outer socket pair, taken from the armed trace (`n2_socket_trace::live_of`) — exactly the pair `N2_SOCK` reports; `-1` for a gate refusal or a D event (D's authoritative record is the `N2_DNS` receipt) |
 | `remote` | `ip:port`, or `unknown` |
 | `result` | `begin` (immediate kinds M/D at begin), `armed` (R/S at begin), `sent` / `error` / `requery` / `rejected` (end), `observed` / `timeout` (end of an R/S watch) |
-| `reason` | `management-rpc`, `get-server-key`…, `healthcheck-watch`, `signal-heartbeat-watch`, `dns-requery`, `ok`, `server-healthcheck-answered`, `watchdog-heartbeat-sent`, `healthcheck-wait-exceeded`, `heartbeat-wait-exceeded`, `watch-already-armed`, `watch-arm-refused`, `no-live-management-connection`, `no-live-signal-connection`, `no-connector`, `prior-stimulus`, `not-armed`, `invalid-kind`, `invalid-id` |
+| `reason` | `management-rpc`, `get-server-key`…, `healthcheck-watch`, `signal-heartbeat-watch`, `dns-requery`, `ok`, `server-healthcheck-answered`, `watchdog-heartbeat-sent`, `healthcheck-wait-exceeded`, `heartbeat-wait-exceeded`, `watch-already-armed`, `watch-arm-refused`, `no-live-management-connection`, `no-live-signal-connection`, `no-live-relay-connection`, `no-connector`, `prior-stimulus`, `not-armed`, `invalid-kind`, `invalid-id` |
 | `detail` | `get-server-key`, `get-server-key-failed`, `receipt-in-N2_DNS`, `requery-refused`, `production-echo`, `natural-heartbeat`, `wait_ms=90000` (R), `wait_ms=45000` (S), `gate`, `one-watch-per-session`, `no-n2-sock-registration`, `no-trigger-seam`, `prior-n2-stimulus`, `prior-a-event` |
 | `mono_ms` | monotonic ms at emission |
 
