@@ -679,3 +679,16 @@ half is `client/core/tests/n2_log_samples.rs` +
    in `run-exclusion-generation.mts` (`N3b`).
 8. **Format baseline** — the doc + the generated sample file + the test that
    keeps them identical.
+
+## fd-reuse evidence integrity (2026-09-28)
+
+Two registration-table gaps in the outer-socket receipts are closed: the
+pre-device WG-egress dup probe now drops its trace registration BEFORE closing
+the probe number (`probe_fd_dupable`'s discipline), and a FAILED protected
+management dial completes from the registration captured while the descriptor
+was still valid (`n2_socket_trace::detach`/`dial_failed`) instead of looking the
+already-released number up again — a descriptor number reused in either window
+can no longer inherit a stale `kind`/`request_id`/`original_fd`, nor lose its
+own registration to another socket's failed receipt. Negative-tested by
+`wg_device::feed_tests::pre_device_egress_probe_leaves_no_registration_behind`
+and `mgmtsock::tests::failed_dial_completion_reads_only_its_own_detached_registration`.

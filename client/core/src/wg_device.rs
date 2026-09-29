@@ -2577,10 +2577,14 @@ impl WgPeerApplier for WgDeviceFeed {
         if let Some(d) = g.device.as_ref() {
             return d.attach_egress_socket(pub_key_b64, raw_fd);
         }
-        // pre-device: validate the fd is alive, then buffer (latest wins)
-        match crate::mgmtsock::dup_socket_fd(raw_fd) {
-            Ok(probe) => unsafe { sys::close(probe); }
-            Err(e) => return Err(format!("wg-egress-fd-invalid (errno={})", e.errno())),
+        // pre-device: validate the fd is alive, then buffer (latest wins).
+        // `probe_fd_dupable` drops the probe's trace registration BEFORE it
+        // closes the probe number — otherwise the freed number keeps a
+        // registration pointing at a closed fd, and whatever socket the
+        // kernel hands that number to next inherits its kind/request_id/
+        // original_fd (the N2 fd-reuse contract).
+        if let Err(e) = crate::mgmtsock::probe_fd_dupable(raw_fd) {
+            return Err(format!("wg-egress-fd-invalid (errno={})", e.errno()));
         }
         if !g.peers.iter().any(|p| p.pub_key_b64 == pub_key_b64) {
             return Err(format!("peer '{pub_key_b64}' is not registered"));
@@ -2779,6 +2783,36 @@ mod feed_tests {
         let (wg_raw, tun_raw, tun_test_end) = fed_fds();
         let slot = WgDeviceFeed::new(WgDeviceConfig::new(test_secret_b64(0xA5)));
         (slot, wg_raw, tun_raw, tun_test_end)
+    }
+
+    // N2 fd-reuse contract: the pre-device egress probe is a DUP, and its
+    // registration must be gone from the armed trace table BEFORE its number
+    // is closed — otherwise the freed number keeps an entry pointing at a
+    // closed fd, and whatever socket the kernel hands that number to next
+    // inherits this probe's kind/request_id/original_fd. Observed through the
+    // public per-original view (the residue is a SECOND registration against
+    // the same shell original), so the test needs no fd-number assumption.
+    #[test]
+    fn pre_device_egress_probe_leaves_no_registration_behind() {
+        let _guard = crate::n2_stimulus::test_guard();
+        let slot = WgDeviceFeed::new(WgDeviceConfig::new(test_secret_b64(0xA5)));
+        slot.apply_peers(&[peer_entry("peer-egress", [10, 77, 0, 2])]).expect("buffered peers");
+        let egress = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0) };
+        assert!(egress >= 0, "errno={}", sys::errno());
+
+        crate::n2_socket_trace::arm(true);
+        // The selected egress socket at the WG boundary (Ws = selected WG).
+        crate::n2_socket_trace::protect(egress, "Ws", "ice-selected", 1, 31, 2, true);
+        slot.attach_egress_socket("peer-egress", egress).expect("buffered egress");
+
+        let rows = crate::n2_socket_trace::fd_send_totals_for_original(egress);
+        assert_eq!(
+            rows,
+            vec![(egress, 0, 0)],
+            "the closed probe must leave no second registration against the same original"
+        );
+        crate::n2_socket_trace::arm(false);
+        unsafe { sys::close(egress) };
     }
 
     #[test]

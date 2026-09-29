@@ -491,14 +491,25 @@ pub async fn connect_protected(
     // dropped (closing exactly the dup — the provided number is untouched).
     // SAFETY: `dup` is a fresh, owned descriptor from dup_socket_fd above.
     crate::n2_socket_trace::io_begin(dup, connect_addr);
+    // N2 fd-reuse window: `connect()` CONSUMES the socket, so a failed dial
+    // releases this number before the future resumes — another socket may
+    // already own it by then. Lift the registration out of the trace table
+    // while the number is still ours; the failure completion below then never
+    // looks the number up again (a lookup would emit a `failed` receipt for,
+    // and remove the registration of, the number's new owner).
+    let registration = crate::n2_socket_trace::detach(dup);
     match unsafe { tokio::net::TcpSocket::from_raw_fd(dup) }.connect(connect_addr).await {
         Ok(stream) => {
+            crate::n2_socket_trace::reattach(registration);
             crate::n2_socket_trace::first_io(stream.as_raw_fd(), connect_addr, "connected", "connect");
             Ok(ProtectedTcpStream::new(stream, connect_addr))
         },
         Err(e) if e.raw_os_error() == Some(sys::EISCONN) => {
             // Already-connected socket handed to us (host tests): adopt it
-            // through a fresh dup of the still-open provided number.
+            // through a fresh dup of the still-open provided number. The
+            // consumed socket closed `dup`, so its detached registration goes
+            // with the number (never inspect it again).
+            drop(registration);
             let dup2 = dup_socket_fd(provided).map_err(SocketDialError::Seam)?;
             if let Err(e) = set_nonblock(dup2) {
                 unsafe { sys::close(dup2) };
@@ -515,7 +526,7 @@ pub async fn connect_protected(
             })
         }
         Err(e) => {
-            crate::n2_socket_trace::first_io(dup, connect_addr, "failed", "connect");
+            crate::n2_socket_trace::dial_failed(registration, connect_addr, "connect");
             Err(SocketDialError::Connect { errno: e.raw_os_error().unwrap_or(0) })
         },
     }
@@ -743,6 +754,96 @@ mod tests {
         );
         let e = dup_socket_fd(-1).unwrap_err();
         assert_eq!(e.token(), "socket-fd-invalid");
+    }
+
+    // N2 fd-reuse window: a FAILED dial completes its failure bookkeeping from
+    // the registration captured while the descriptor was still valid.
+    // `TcpSocket::connect` CONSUMES the socket, so the number is released
+    // before the dialer resumes. The window is driven at the trace TABLE —
+    // keyed by the descriptor NUMBER — with a REAL number: `dial` is an
+    // `F_DUPFD_CLOEXEC` copy of `holder`, by the same atomic allocator
+    // `dup_socket_fd` uses for the dial's dup (`dup2` would instead SQUAT the
+    // number and close whatever a parallel libtest thread had grabbed in the
+    // window — the abort cause the fd-reuse tests are written around). The
+    // holder keeps `dial` OPEN for the whole test, exactly like the number's
+    // next owner in the hazard, so no sibling test can take the number and
+    // sweep the entries parked on it (`duplicated` removes the DESTINATION
+    // entry unconditionally while the trace is armed). What the failed dial
+    // must not do is look the number up again, and that is exactly what this
+    // drives: the dial's registration is detached while the number is still
+    // ours (production's consumed socket then closes it, and the next socket
+    // takes it), and the number's NEW owner registers itself at the same key.
+    // The pre-fix code called `first_io(dial, …)` here, which found — and tore
+    // out — that new owner's registration, emitting a `failed` receipt that
+    // named it (`request_id=reused-9`).
+    #[test]
+    fn failed_dial_completion_reads_only_its_own_detached_registration() {
+        use crate::n2_socket_trace as trace;
+        let _guard = crate::n2_stimulus::test_guard();
+        let holder = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM | sys::SOCK_CLOEXEC, 0) };
+        assert!(holder >= 0, "errno={}", sys::errno());
+        // the core-owned dial number: a real F_DUPFD_CLOEXEC copy, held open
+        let dial = unsafe { sys::fcntl(holder, sys::F_DUPFD_CLOEXEC, 0) };
+        assert!(dial >= 0, "dup the holder: errno={}", sys::errno());
+        assert_ne!(dial, holder);
+        trace::arm(true);
+        trace::protect(dial, "M", "dial-7", 1, 31, 3, true);
+
+        // the descriptor is consumed by the connect: the registration is taken
+        // out while the number is still ours
+        let detached = trace::detach(dial).expect("the dial's registration");
+
+        // the reused number now belongs to another socket, which registers
+        // itself at the same key exactly like a real feed does
+        trace::protect(dial, "M", "reused-9", 1, 31, 3, true);
+
+        let line = trace::dial_failed(Some(detached), "192.0.2.1:443".parse().unwrap(), "connect")
+            .expect("the failed-dial receipt");
+        for field in ["|status=failed|", "|phase=first_io|", "|detail=connect|",
+            "|request_id=dial-7|", "|protect_generation=1|", "|net_id=31|"] {
+            assert!(line.contains(field), "{field} in {line}");
+        }
+        assert!(line.contains(&format!("|fd={dial}|dup_fd={dial}|")), "{line}");
+
+        // the number's NEW owner is untouched: still registered under its own
+        // request, never marked failed, never receipted
+        assert_eq!(trace::original_fd(dial), Some(dial), "the reused registration must survive");
+        assert_eq!(trace::subsequent_receipts(dial), 0, "the reused socket was never dialed");
+        assert_eq!(trace::live_of("M"), None, "a failed dial registers no live socket");
+
+        trace::closed(dial);
+        trace::arm(false);
+        unsafe { sys::close(dial); sys::close(holder); }
+    }
+
+    // N2: the production refused-dial path runs through the detached
+    // registration (no fd-table lookup after the number is released) and
+    // still fails closed with the connect token.
+    #[tokio::test]
+    async fn refused_protected_dial_fails_closed_through_the_detached_registration() {
+        use crate::n2_socket_trace as trace;
+        struct Fixed(i32);
+        impl ManagementSocketProvider for Fixed {
+            fn take_fd(&self) -> Result<i32, SocketSeamError> { Ok(self.0) }
+        }
+        let _guard = crate::n2_stimulus::test_guard();
+        // a real loopback port with nothing listening (bind, then let it go)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+        let refused = listener.local_addr().expect("addr");
+        drop(listener);
+
+        let raw = unsafe { sys::socket(sys::AF_INET, sys::SOCK_STREAM | sys::SOCK_CLOEXEC, 0) };
+        assert!(raw >= 0, "errno={}", sys::errno());
+        trace::arm(true);
+        trace::protect(raw, "M", "refused-1", 1, 31, 3, true);
+        let err = connect_protected(&Fixed(raw), refused)
+            .await
+            .expect_err("the refused dial must fail closed");
+        assert_eq!(err.token(), "socket-connect-failed");
+        assert_eq!(trace::original_fd(raw), Some(raw), "the provided original stays registered");
+        assert_eq!(trace::live_of("M"), None, "a failed dial registers no live socket");
+        trace::arm(false);
+        unsafe { sys::close(raw) };
     }
 
     #[test]

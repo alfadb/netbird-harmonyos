@@ -318,6 +318,59 @@ pub fn first_io(fd: RawFd, remote: SocketAddr, status: &str, detail: &str) {
     }
 }
 
+/// N2 fd-reuse window: a registration lifted OUT of the fd table by
+/// [`detach`] while its number is still ours. `TcpSocket::connect` consumes
+/// the socket, so a failed dial releases the number before the dialer
+/// resumes; the failure completion ([`dial_failed`]) and the success path
+/// ([`reattach`]) therefore work from this snapshot and never look the number
+/// up again.
+pub struct Detached {
+    fd: RawFd,
+    meta: Protect,
+}
+
+/// Remove and return the registration of `fd` (`None` while unarmed or when
+/// the number holds no registration). The descriptor itself is untouched —
+/// the caller still owns it and must close it.
+pub fn detach(fd: RawFd) -> Option<Detached> {
+    if !armed() { return None; }
+    sockets().lock().expect("socket trace").remove(&fd).map(|meta| Detached { fd, meta })
+}
+
+/// Put a [`Detached`] registration back under its number: the dial SUCCEEDED
+/// and the returned stream owns exactly that descriptor.
+pub fn reattach(detached: Option<Detached>) {
+    if !armed() { return; }
+    if let Some(Detached { fd, meta }) = detached {
+        sockets().lock().expect("socket trace").insert(fd, meta);
+    }
+}
+
+/// Complete a FAILED dial from the registration [`detach`]ed before the
+/// descriptor was released: emit exactly the `status=failed` receipt the
+/// fd-keyed [`first_io`] would have emitted for it, and return that line
+/// (the unit test's observation point — the production caller ignores it).
+/// A failed I/O registers nothing: no stimulus, no live socket, no sandwich
+/// observation, and the registration is already gone (it was detached while
+/// the number was still ours).
+///
+/// The fd TABLE is deliberately never read here — the number is free again
+/// and may already belong to another socket, so a lookup could mark THAT
+/// socket failed and tear its registration out (`first_io`'s fd-keyed
+/// removal).
+pub fn dial_failed(detached: Option<Detached>, remote: SocketAddr, detail: &str) -> Option<String> {
+    let Detached { fd, meta } = detached?;
+    if !armed() || !receipt_due(&meta) { return None; }
+    let phase = if meta.io_count > 0 { "subsequent_io" } else { "first_io" };
+    // A failed connect never inspects the (already closed) number for a local
+    // address — same rule as the fd-keyed path.
+    let mono_ms = sys::mono_ms();
+    let wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |t| t.as_millis());
+    let line = format_receipt(&meta, fd, remote, None, mono_ms, wall_ms, "failed", detail, phase);
+    hilog::emit(&line);
+    Some(line)
+}
+
 /// N2 P3 — one COMPLETED write after `connect` on a connected outer TCP
 /// socket (M/S/R: gRPC/HTTP-2 frames, the signal stream, the relay WS).
 ///
