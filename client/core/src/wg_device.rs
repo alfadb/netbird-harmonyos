@@ -441,6 +441,59 @@ struct N2DestinationState {
     tee_frames: u64,
     decode_fail: u64,
     dropped: u64,
+    /// diag-0048 (2026-09-30): the FIRST `decode_fail` frame's witness (length
+    /// + at most the first 4 header bytes, never payload), plus the refused
+    /// frames bucketed by byte 0's IP-version nibble. Diagnostic only:
+    /// `decode_fail` keeps its frozen meaning and the invariant above is
+    /// unchanged.
+    first_fail: DecodeFailWitness,
+}
+
+/// diag-0048 — the first-decode-failure witness and the per-version failure
+/// buckets (`N2_TUN_TEE_STATS` tail fields; see `stats_line`).
+#[derive(Debug, Default, Clone, Copy)]
+struct DecodeFailWitness {
+    /// `None` until the first refusal (`len=0` is a real, recorded failure).
+    len: Option<usize>,
+    /// Leading bytes of that first refusal, at most `prefix.len()` of them.
+    prefix: [u8; 4],
+    prefix_len: usize,
+    fail_v4: u64,
+    fail_v6: u64,
+    fail_other: u64,
+}
+
+impl DecodeFailWitness {
+    /// Record one refused frame: bucket it by byte 0's IP-version nibble, and
+    /// keep the FIRST frame's length + leading header bytes as the witness.
+    fn record(&mut self, frame: &[u8]) {
+        match frame.first().map(|byte| byte >> 4) {
+            Some(4) => self.fail_v4 = self.fail_v4.saturating_add(1),
+            Some(6) => self.fail_v6 = self.fail_v6.saturating_add(1),
+            _ => self.fail_other = self.fail_other.saturating_add(1),
+        }
+        if self.len.is_none() {
+            let n = frame.len().min(self.prefix.len());
+            self.len = Some(frame.len());
+            self.prefix_len = n;
+            self.prefix[..n].copy_from_slice(&frame[..n]);
+        }
+    }
+
+    /// `first_fail_prefix`'s value: lowercase hex of the recorded bytes (empty
+    /// before the first failure, or for a zero-length frame).
+    fn prefix_hex(&self) -> String {
+        self.prefix[..self.prefix_len].iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// `first_fail_byte0`'s value: the first recorded byte in hex, or empty
+    /// when the first failure carried no byte at all.
+    fn byte0_hex(&self) -> String {
+        match self.prefix_len {
+            0 => String::new(),
+            _ => format!("0x{:02x}", self.prefix[0]),
+        }
+    }
 }
 
 struct N2DestinationRow {
@@ -459,6 +512,7 @@ impl N2DestinationTee {
             inner: Mutex::new(N2DestinationState {
                 targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
                 tee_frames: 0, decode_fail: 0, dropped: 0,
+                first_fail: DecodeFailWitness::default(),
             }),
         }
     }
@@ -509,7 +563,7 @@ impl N2DestinationTee {
     /// N2 T7a (item 3) — the session-period tee continuity line:
     ///
     /// ```text
-    /// N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false
+    /// N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…
     /// ```
     ///
     /// `frames` counts every from-OS frame handed to this tee since the arm
@@ -522,11 +576,26 @@ impl N2DestinationTee {
     /// tee's own filter, not silent loss). The exact invariant is
     /// `frames = decode_fail + dropped + the sum of the per-destination
     /// frames` (`N2_TUN_DEST`).
+    ///
+    /// diag-0048 (2026-09-30): the fields appended at the line tail make a
+    /// `decode_fail` attributable without any payload capture. The FOUR
+    /// pre-existing fields keep their names and order. `first_fail_len` /
+    /// `first_fail_byte0` / `first_fail_prefix` witness the FIRST refused frame
+    /// (`prefix` is the lowercase hex of at most its first 4 header bytes;
+    /// all three are empty until the first failure); `fail_v4` / `fail_v6` /
+    /// `fail_other` bucket every refused frame by byte 0's IP-version nibble.
+    /// Only leading header bytes are ever recorded, never the payload.
     pub fn stats_line(&self, now_ms: u64) -> String {
         let state = self.inner.lock_poison();
+        let witness = state.first_fail;
+        let first_fail_len = witness.len.map(|len| len.to_string()).unwrap_or_default();
         format!(
-            "N2_TUN_TEE_STATS|frames={}|decode_fail={}|dropped={}|mono_ms={now_ms}|diag=true|is_evidence=false",
-            state.tee_frames, state.decode_fail, state.dropped)
+            "N2_TUN_TEE_STATS|frames={}|decode_fail={}|dropped={}|mono_ms={now_ms}|diag=true|is_evidence=false|\
+             first_fail_len={first_fail_len}|first_fail_byte0={}|first_fail_prefix={}|\
+             fail_v4={}|fail_v6={}|fail_other={}",
+            state.tee_frames, state.decode_fail, state.dropped,
+            witness.byte0_hex(), witness.prefix_hex(),
+            witness.fail_v4, witness.fail_v6, witness.fail_other)
     }
 
     pub fn control_totals(&self) -> (u64, u64, u64) {
@@ -624,8 +693,10 @@ impl TunFrameTee for N2DestinationTee {
         state.tee_frames = state.tee_frames.saturating_add(1);
         let Some(packet) = crate::n2h::parse_ipv4_frame(frame) else {
             // N2 T7a (item 3): an undecodable frame is a named continuity
-            // hole, never a silent `return`.
+            // hole, never a silent `return`. diag-0048: the refusal is also
+            // witnessed (first frame's header bytes + per-version buckets).
             state.decode_fail = state.decode_fail.saturating_add(1);
+            state.first_fail.record(frame);
             return;
         };
         if !state.targets.contains(&packet.dst) {
@@ -2933,15 +3004,31 @@ mod feed_tests {
         other[16..20].copy_from_slice(&[10, 0, 0, 1]);
         // an undecodable frame (shorter than any IPv4 header)
         let garbage = [0u8; 5];
+        // diag-0048: two more undecodable shapes, one per version bucket — a
+        // version-6 frame (byte0 0x6x) and a version-4 frame whose IHL is
+        // below 5 (byte0 0x44).
+        let mut v6 = [0u8; 22];
+        v6[0] = 0x60;
+        let mut bad_ihl = [0u8; 24];
+        bad_ihl[0] = 0x44;
         slot.with_device(|d| {
             assert_eq!(unsafe { sys::write(tun_end, target.as_ptr().cast(), target.len()) }, 28);
             assert_eq!(unsafe { sys::write(tun_end, other.as_ptr().cast(), other.len()) }, 28);
             assert_eq!(unsafe { sys::write(tun_end, garbage.as_ptr().cast(), garbage.len()) }, 5);
+            assert_eq!(unsafe { sys::write(tun_end, v6.as_ptr().cast(), v6.len()) }, 22);
+            assert_eq!(unsafe { sys::write(tun_end, bad_ihl.as_ptr().cast(), bad_ihl.len()) }, 24);
             d.service_tun(1);
         }).expect("live device");
+        // diag-0048: the frozen fields keep their names/order; the new witness
+        // fields are appended at the line tail. The witness is the FIRST
+        // failure (len 5, byte0 0x00), never overwritten by the later ones.
         assert_eq!(observer.stats_line(4_242),
-            "N2_TUN_TEE_STATS|frames=3|decode_fail=1|dropped=1|mono_ms=4242|diag=true|is_evidence=false");
-        // the invariant reconciles: 3 = 1 decoded-target + 1 dropped + 1 decode failure
+            "N2_TUN_TEE_STATS|frames=5|decode_fail=3|dropped=1|mono_ms=4242|diag=true|is_evidence=false|first_fail_len=5|first_fail_byte0=0x00|first_fail_prefix=00000000|fail_v4=1|fail_v6=1|fail_other=1");
+        // no failure yet: the witness fields are present but empty, so a parser
+        // keyed on the field names never special-cases their absence.
+        assert_eq!(N2DestinationTee::new(vec![destination], 0).stats_line(7),
+            "N2_TUN_TEE_STATS|frames=0|decode_fail=0|dropped=0|mono_ms=7|diag=true|is_evidence=false|first_fail_len=|first_fail_byte0=|first_fail_prefix=|fail_v4=0|fail_v6=0|fail_other=0");
+        // the invariant reconciles: 5 = 1 decoded-target + 1 dropped + 3 decode failures
         let dest = observer.due_lines(sys::mono_ms().saturating_add(5_000));
         assert_eq!(dest.len(), 1, "{dest:?}");
         assert!(dest[0].contains("|frames=1|delta=1|"), "{dest:?}");

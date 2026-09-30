@@ -2171,6 +2171,50 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_frame_parser_rejects_prefixed_ipv6_and_bad_header_shapes() {
+        // diag-0048 follow-up: the four refusal shapes that feed the 0048
+        // `N2_TUN_TEE_STATS.decode_fail` counter are frozen here, so a later
+        // loosening of `parse_ipv4_frame` can never silently turn them into
+        // "decoded" frames.
+        let good = frame([10, 1, 2, 3], [10, 4, 5, 6], 1234, 5678, b"hello-marker");
+        // ① a 4-byte AF_INET prefix (either endianness) shifts the IP header:
+        // `frame[0]` is then 0x00 / 0x02, never a version-4 nibble.
+        let mut big_endian = vec![0x00, 0x00, 0x00, 0x02];
+        big_endian.extend_from_slice(&good);
+        assert!(parse_ipv4_frame(&big_endian).is_none());
+        let mut little_endian = vec![0x02, 0x00, 0x00, 0x00];
+        little_endian.extend_from_slice(&good);
+        assert!(parse_ipv4_frame(&little_endian).is_none());
+        // ② a plain IPv6 neighbor-solicitation frame (version 6 in byte 0).
+        let mut nd = vec![0x60, 0, 0, 0];
+        nd.extend_from_slice(&32u16.to_be_bytes()); // payload length
+        nd.extend_from_slice(&[58, 255]); // next header = ICMPv6, hop limit
+        nd.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // src
+        nd.extend_from_slice(&[0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1]); // dst
+        nd.extend_from_slice(&[135, 0, 0, 0, 0, 0, 0, 0]); // NS type/code/checksum/reserved
+        nd.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]); // target
+        nd.extend_from_slice(&[1, 1, 0x02, 0, 0, 0, 0, 1]); // source link-layer option
+        assert!(parse_ipv4_frame(&nd).is_none());
+        // ③ IHL < 5 (0x44 = version 4 with a 16-byte "header").
+        let mut short_ihl = good.clone();
+        short_ihl[0] = 0x44;
+        assert!(parse_ipv4_frame(&short_ihl).is_none());
+        // ④ the frame is shorter than the declared header length (0x4f = IHL 15).
+        let mut over_ihl = good.clone();
+        over_ihl[0] = 0x4f;
+        assert!(parse_ipv4_frame(&over_ihl).is_none());
+        // ... and the plain IPv4 frame is still accepted, including one whose
+        // declared total length is misaligned: the parser clamps, never refuses.
+        let v = parse_ipv4_frame(&good).expect("plain IPv4 frame parses");
+        assert_eq!((v.src, v.dst, v.sport, v.dport, v.payload),
+            ([10, 1, 2, 3], [10, 4, 5, 6], 1234, 5678, &b"hello-marker"[..]));
+        let mut misaligned = good.clone();
+        misaligned[2..4].copy_from_slice(&1000u16.to_be_bytes());
+        let v = parse_ipv4_frame(&misaligned).expect("clamped total length still parses");
+        assert_eq!(v.payload, b"hello-marker");
+    }
+
+    #[test]
     fn marker_matching_is_verbatim_substring() {
         let f = frame([10, 0, 0, 1], [10, 0, 0, 2], 1, 2, b"xN2H-signal-abc");
         assert!(frame_contains_marker(&f, b"N2H-signal-abc"));

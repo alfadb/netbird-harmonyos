@@ -80,7 +80,7 @@ N2_TUN_LEAK|verdict=fail|dst=…|proto=udp|tcp|mono_ms=…|leaks=…|diag=true|i
 ## 3. TUN tee continuity (T7a item 3)
 
 ```
-N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false
+N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…
 N2_TUN_GAP|from_mono=…|to_mono=…|reason=…|diag=true|is_evidence=false
 N2_TUN_DEST|scope=session|mono_ms=…|dst=…|proto=…|port=…|frames=…|delta=…|sources=…|diag=true|is_evidence=false
 N2_TUN_DEST|scope=session|mono_ms=…|dst=…|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false
@@ -99,6 +99,13 @@ N2_TUN_FRAMES|scope=session|mono_ms=…|seen=…|control=…|production=…|leak
   capture destination (the tee's own filter, not silent loss). Exact invariant:
   `frames = decode_fail + dropped + Σ N2_TUN_DEST.frames`. **A non-zero
   `decode_fail` makes the interval incomplete → `invalid/UNSAT`.**
+  diag-0048 (2026-09-30) appends the tail fields after `is_evidence=false`: the
+  FIRST refused frame's `first_fail_len` / `first_fail_byte0` /
+  `first_fail_prefix` (lowercase hex of at most its first 4 header bytes; all
+  three empty until the first failure) and the per-IP-version refusal buckets
+  `fail_v4` / `fail_v6` / `fail_other` (byte 0's high nibble). Only leading
+  header bytes are recorded, never the payload; the four pre-existing fields
+  keep their names and order.
 * `N2_TUN_GAP` — `wg_device.rs::gap_line:608-610` (thin `N2DestinationTee::gap:505-507`).
   `from_mono`/`to_mono` are the
   monotonic bounds of an interval in which the tee observed NOTHING. Reasons:

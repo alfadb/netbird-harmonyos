@@ -267,6 +267,169 @@ pub fn resolve_ipv4_host(host: &str, port: u16) -> Result<SocketAddr, HostSocket
 }
 
 // ---------------------------------------------------------------------------
+// host-side socket supply (the shell's poll/reply role, host flavor)
+// ---------------------------------------------------------------------------
+//
+// The protected seams do not only consume fed queues: `Purpose::Management` /
+// `Signal` / `Relay` (fresh protected TCP per dial) and `Purpose::Dns` (one
+// protected UDP per query) are requested THROUGH `socket_supply` and answered
+// by the ArkTS shell on the device. The host harness fed the management/ICE/
+// signal queues but never answered those requests, so the RELAY dial could
+// never open a socket on the host side (diag-0048: 83/83 status lines
+// `last_error_class=dial`). These helpers play the same shell role with PLAIN
+// host sockets — there is no VpnExtension on the host and nothing to protect
+// (module docs §"Known host-side divergences"); every seam still validates and
+// dup-consumes fds exactly as before, and no device-path code references this
+// section.
+
+/// Parse `resolv.conf` text for IPv4 `nameserver` lines: first token after the
+/// keyword, IPv4 only, source order preserved, duplicates dropped. Pure so it
+/// is unit-testable without touching the real file.
+#[cfg(not(target_env = "ohos"))]
+pub fn parse_resolv_conf(text: &str) -> Vec<std::net::Ipv4Addr> {
+    let mut out: Vec<std::net::Ipv4Addr> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        // `nameserver` requires a separator: "nameserver6" is not a match.
+        let Some(rest) = line.strip_prefix("nameserver") else { continue };
+        if !rest.starts_with([' ', '\t']) {
+            continue;
+        }
+        let Some(first) = rest.split_whitespace().next() else { continue };
+        let Ok(ip) = first.parse::<std::net::Ipv4Addr>() else { continue };
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// The host's own DNS servers — the host analog of the shell's
+/// `socket_supply_dns_servers` input. Empty when `/etc/resolv.conf` is
+/// unreadable or lists no IPv4 nameserver; the protected-DNS path then stays
+/// unavailable (typed `dns:no-physical-server`), never silently unprotected.
+#[cfg(not(target_env = "ohos"))]
+pub fn host_dns_servers() -> Vec<std::net::Ipv4Addr> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .map(|text| parse_resolv_conf(&text))
+        .unwrap_or_default()
+}
+
+/// Install `servers` on the connector's LIVE socket supply (the host analog of
+/// the shell's `socket_supply_dns_servers` NAPI call). Call after the
+/// connector start seam returned — before that there is no supply installed.
+#[cfg(not(target_env = "ohos"))]
+pub fn feed_dns_servers(servers: &[std::net::Ipv4Addr]) -> Result<(), String> {
+    let listed: Vec<String> = servers.iter().map(|ip| format!("\"{ip}\"")).collect();
+    let out = crate::socket_supply::set_dns_servers_json(&format!("[{}]", listed.join(",")));
+    if out.contains("\"ok\":true") {
+        Ok(())
+    } else {
+        Err(out)
+    }
+}
+
+/// Host-side socket-supply responder: the shell's `poll`/`reply` loop, host
+/// flavor. Every request the protected seams raise is answered with a PLAIN
+/// socket of the requested kind (`udp` → fresh unbound UDP, anything else →
+/// pre-bound unconnected TCP); the reply duplicates it into the waiting dial
+/// and the provider's original closes immediately (the device-shell contract,
+/// minus protect). One thread per CLI run; [`HostSocketSupplier::stop`] (or
+/// Drop) ends it. `served`/`failed` are the observability counters.
+#[cfg(not(target_env = "ohos"))]
+pub struct HostSocketSupplier {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    served: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_env = "ohos"))]
+impl HostSocketSupplier {
+    /// Start the responder against the connector's INSTALLED supply.
+    pub fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+        let stop = Arc::new(AtomicBool::new(false));
+        let served = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicU64::new(0));
+        let thread = {
+            let (stop, served, failed) = (stop.clone(), served.clone(), failed.clone());
+            std::thread::Builder::new()
+                .name("host-socket-supply".into())
+                .spawn(move || supply_loop(&stop, &served, &failed))
+                .ok()
+        };
+        HostSocketSupplier { stop, served, failed, thread }
+    }
+
+    /// Ask the responder to exit and wait for its thread.
+    pub fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+
+    /// Requests answered with a real fd.
+    pub fn served(&self) -> u64 {
+        self.served.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Requests that could not be answered (socket open failed, or the waiter
+    /// had already given up).
+    pub fn failed(&self) -> u64 {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(not(target_env = "ohos"))]
+impl Drop for HostSocketSupplier {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(not(target_env = "ohos"))]
+fn supply_loop(
+    stop: &std::sync::atomic::AtomicBool,
+    served: &std::sync::atomic::AtomicU64,
+    failed: &std::sync::atomic::AtomicU64,
+) {
+    use std::sync::atomic::Ordering;
+    while !stop.load(Ordering::Relaxed) {
+        let request = crate::socket_supply::poll_json();
+        let doc = parse_document(&request).ok();
+        let id = doc.as_ref().and_then(|d| doc_str(d, "id")).unwrap_or_default();
+        if id.is_empty() {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        let kind = doc.as_ref().and_then(|d| doc_str(d, "kind")).unwrap_or_default();
+        let opened = if kind == "udp" { open_udp_unbound() } else { open_tcp_prebound() };
+        match opened {
+            Ok(fd) => {
+                let reply = crate::socket_supply::reply_json(&id, fd, "protected");
+                // The supply duplicated the fd into the waiting dial; the
+                // provider's original closes here (same as the device shell).
+                let _ = crate::socket_supply::close_fd_json(fd);
+                if reply.contains("\"ok\":true") {
+                    served.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(_) => {
+                // Answer with a rejection so the waiter fails NOW instead of
+                // burning the full 8 s supply timeout.
+                let _ = crate::socket_supply::reply_json(&id, -1, "protect-failed");
+                failed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // minimal JSON response helpers (crate-internal strict reader)
 // ---------------------------------------------------------------------------
 

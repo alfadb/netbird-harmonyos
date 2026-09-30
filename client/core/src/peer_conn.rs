@@ -869,6 +869,13 @@ impl PeerIceOrchestrator {
                         let peer = &mut self.peers[idx];
                         peer.last_error = Some(ErrorClass::from_management(&e));
                         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                        // 应答方收集失败同样不得静默：`answer_owed` 仍在，
+                        // `want_locals` 冷却后会重试补 ANSWER。
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|locals-failed|peer={}|round={}|phase=answer|reason={e}",
+                            peer_short(&peer.key),
+                            peer.session_at_ms
+                        ));
                     }
                 } else {
                     // glare（双方同时 OFFER）：已有会话，采纳对端凭证、
@@ -939,10 +946,36 @@ impl PeerIceOrchestrator {
                             peer.outbox.push_back((PeerSignalKind::Offer, payload));
                         }
                         Err(e) => {
+                            // 0048：`ensure_locals` 只在会话已建后才可能失败
+                            // （gather/绑定，`take_owned` 队列空即 NoSocket）。
+                            // 半成品会话必须整段回滚：`want_initiate` 的门是
+                            // `session.is_none()`，留下 `session = Some` 会让
+                            // 这次谈判永久沉默——`want_locals` 之后只补发候选、
+                            // 永不补发凭据，对端因缺远端凭证永不 `start()`。
+                            // 回滚后冷却期满重新走完整发起；期间对端 OFFER
+                            // 到达则落入正常应答路径（`answer_owed` 语义不变，
+                            // 也不会出现「同时发 OFFER 又发 ANSWER」）。
                             let peer = &mut self.peers[idx];
+                            let round = peer.session_at_ms;
+                            let peer_prefix = peer_short(&peer.key);
                             peer.last_error = Some(ErrorClass::from_management(&e));
                             peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
                             peer.initiated = false; // 冷却后重试
+                            peer.session = None; // Drop 关闭半成品会话的 dup socket
+                            peer.creds = None;
+                            peer.remote_creds = None;
+                            peer.locals_done = false;
+                            peer.started = false;
+                            peer.remote_cands_seen = 0;
+                            peer.pending_remote.clear();
+                            peer.signaled.clear();
+                            peer.outbox.clear(); // 半成品候选帧不得替死会话发出
+                            peer.retry_at_ms = 0;
+                            peer.answer_owed = false;
+                            peer.session_at_ms = 0;
+                            crate::hilog::emit(&format!(
+                                "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
+                            ));
                             if first_err.is_none() {
                                 first_err = Some(e);
                             }
@@ -959,6 +992,12 @@ impl PeerIceOrchestrator {
                         let peer = &mut self.peers[idx];
                         peer.last_error = Some(ErrorClass::from_management(&e));
                         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                        // 失败分支的观测面（0048：这条路径此前完全无日志）。
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|locals-failed|peer={}|round={}|phase=retry|reason={e}",
+                            peer_short(&peer.key),
+                            peer.session_at_ms
+                        ));
                         if first_err.is_none() {
                             first_err = Some(e);
                         }
@@ -1208,8 +1247,18 @@ impl PeerIceOrchestrator {
                 }
             }
             if let Some(session) = peer.session.as_mut() {
-                if session.start().is_ok() {
-                    peer.started = true;
+                match session.start() {
+                    Ok(()) => peer.started = true,
+                    Err(e) => {
+                        // 0048：`start()` 失败此前被 `is_ok()` 静默吞掉，现场
+                        // 完全没有可观测面——至少记一行稳定 token（含原因）。
+                        peer.last_error = Some(ErrorClass::from_management(&e));
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|start-refused|peer={}|round={}|reason={e}",
+                            peer_short(&peer.key),
+                            peer.session_at_ms
+                        ));
+                    }
                 }
             }
         }
@@ -1350,8 +1399,10 @@ impl PeerIceOrchestrator {
     }
 
     /// 僵尸谈判拆除（H3 修复，[`START_DEADLINE_MS`]）：会话已建、本地
-    /// 候选已发，但远端凭证/候选始终没有凑齐（`started == false`）——
-    /// 典型：对端仍持有旧会话、自认 Connected、不再发 Offer/Answer。
+    /// 候选已发，但**远端凭证**始终没有到达（`started == false`）——
+    /// 典型：对端仍持有旧会话、自认 Connected、不再发 Offer/Answer；
+    /// 0048 形态：对端只 trickle 候选、从不发凭据（本端候选照收，
+    /// 凭证为零，`maybe_start` 永远不会满足）。
     /// 不拆除则本端永久沉默（want_initiate 要 `session.is_none()`，
     /// want_locals 要 `!locals_done`，无事件可拆会话）。到期即拆除重
     /// 武装：冷却后以全新凭证重新发起，对端（其旧会话仍活着）会把新
@@ -1369,11 +1420,14 @@ impl PeerIceOrchestrator {
                 // ~15-30 s (gather → signal → checks → nomination), so
                 // expiring on the deadline alone tore down sessions that were
                 // still converging (and, in the host's fixed-port mode, wedged
-                // the port). Any progress — remote credentials or a single
-                // remote candidate — hands the session over to its own honest
-                // failure paths (all-pairs-failed / disconnected / keepalive).
+                // the port). Remote CREDENTIALS are the discriminator: without
+                // them `maybe_start` can never fire (`remote_creds` is one of
+                // its preconditions), so a single remote candidate is NOT
+                // progress — device run 0048: the host peer held 64 remote
+                // candidates and 0 credentials and sat `idle` forever. A
+                // started session's death is left to its own honest paths
+                // (all-pairs-failed / disconnected / keepalive).
                 && p.remote_creds.is_none()
-                && p.remote_cands_seen == 0
         };
         if zombie {
             self.drop_session_rearm(idx, now_ms, "negotiation-start-timeout");

@@ -1911,6 +1911,35 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
     };
     eprintln!("[nbinterop] connector started (state={state}) over host-fed management socket");
 
+    // ---- host-side socket supply: the shell's poll/reply role, host flavor ----
+    // N2-H / diag-0048 R2: the protected seams ask the SHELL for a fresh socket
+    // (management re-dials, signal link, `Purpose::Relay` per relay dial, and
+    // `Purpose::Dns` for the protected resolver). On the device the ArkTS shell
+    // answers with a protected fd. On the host the supply IS attached
+    // (`connector_start_with_socket_json` passes it into `RelayMaterials`) but
+    // nothing answered it, and no DNS server was ever installed — so every
+    // relay dial of a hostname relay URL died at the protected resolver and the
+    // relay-carrier fallback was dead for the whole run (83/83 status lines
+    // `last_error_class=dial`, zero `socket-supply: request` lines). The
+    // harness now plays the same role with PLAIN sockets (nothing to protect on
+    // the host) through the SAME poll/reply seam. Device path: this bin is
+    // behind `required-features = ["cli"]` and the module is never called by
+    // the cdylib, so the shell's own protect/reply loop is unchanged.
+    let host_dns = hs::host_dns_servers();
+    if host_dns.is_empty() {
+        eprintln!(
+            "[nbinterop] socket supply: no IPv4 nameserver in /etc/resolv.conf — the \
+             protected resolver stays unavailable (relay hostnames cannot resolve)"
+        );
+    } else {
+        eprintln!("[nbinterop] socket supply: host dns servers {host_dns:?}");
+    }
+    if let Err(e) = hs::feed_dns_servers(&host_dns) {
+        eprintln!("[nbinterop] socket supply: dns servers not installed ({e})");
+    }
+    let socket_supplier = hs::HostSocketSupplier::start();
+    eprintln!("[nbinterop] socket supply: host responder started (plain sockets, no protect on host)");
+
     // ---- data-plane feeds: WG outer UDP socket + TUN stand-in ----
     // N12a HOST-ONLY: --wg-port binds a FIXED port (the mapped outer port);
     // the default stays ephemeral (unchanged behavior).
@@ -2003,6 +2032,9 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
     let start = Instant::now();
     let mut last_print: u128 = 0;
     let mut last_maint: u128 = 0;
+    // Host socket-supply counters, re-reported only when they move (the relay
+    // dial / protected DNS requests are the ones diag-0048 never got answered).
+    let mut last_supply = (0u64, 0u64);
     let mut last_probe: u128 = 0;
     let mut printed = false;
     // N13 D2: sent/acked probe receipts (see `ProbeStats`).
@@ -2044,6 +2076,11 @@ fn run_engine(mode: &'static str, o: &RunOpts, loaded: &hs::LoadedConfig) -> i32
                 &mut own_addr,
                 ice_shared,
             );
+            let supply = (socket_supplier.served(), socket_supplier.failed());
+            if supply != last_supply {
+                eprintln!("[nbinterop] socket supply: served={} failed={}", supply.0, supply.1);
+                last_supply = supply;
+            }
         }
 
         // N13 D2: the send tick is also the stats tick — ONE `probe-stats`

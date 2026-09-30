@@ -116,7 +116,7 @@ mod host_link_stubs {
 use std::sync::{Arc, Mutex};
 
 use netbird_core::config;
-use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
+use netbird_core::connector::{ErrorClass, ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::peer_conn::{
     ice_ready_for_default_route, parse_ufrag_pwd, PeerIceDeps, PeerIceOrchestrator,
@@ -242,9 +242,21 @@ impl FedSocks {
         }
         let source = Arc::new(ProtectedUdpFdSource::new_with_fd(-1).unwrap());
         for &fd in &raw_fds {
-            source.feed(fd);
+            source.feed(fd).expect("feed");
         }
         FedSocks { source, raw_fds }
+    }
+
+    /// Feed `n` fresh loopback UDP fds LATER than construction — the device
+    /// run 0048 timeline (session created ~2 ms before the first
+    /// `VPN_ICE_FEED|fed` reaches the provider).
+    fn feed_lo_sockets(&mut self, n: usize) {
+        for _ in 0..n {
+            let fd = unsafe { socket(2, 2, 0) };
+            assert!(fd >= 0, "socket() failed");
+            self.raw_fds.push(fd);
+            self.source.feed(fd).expect("feed");
+        }
     }
 
     fn taken(&self) -> u64 {
@@ -271,7 +283,19 @@ struct TestOrch {
 
 impl TestOrch {
     fn new(me: &'static str, peers: &[&str], tie_breaker: u64, bus: Arc<SignalBus>) -> Self {
-        let socks = FedSocks::with_lo_sockets(8);
+        TestOrch::new_with_sockets(me, peers, tie_breaker, bus, 8)
+    }
+
+    /// `socket_count = 0` models the device run 0048 race: the initiate beat
+    /// runs while the protected ICE socket queue is still empty.
+    fn new_with_sockets(
+        me: &'static str,
+        peers: &[&str],
+        tie_breaker: u64,
+        bus: Arc<SignalBus>,
+        socket_count: usize,
+    ) -> Self {
+        let socks = FedSocks::with_lo_sockets(socket_count);
         let wg = Arc::new(RecordingWg::default());
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(StaticInterfaces(vec![InterfaceAddr {
@@ -819,4 +843,228 @@ fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
         "two gather rounds must have consumed provider sockets, got {}",
         a.socks.taken()
     );
+}
+
+// ---------------------------------------------------------------------------
+// device run 0048 regressions: the ICE socket supply arriving AFTER the
+// initiate beat (the real device created peer FyLw4PSB's session 2 ms before
+// the first `VPN_ICE_FEED|fed` landed) must not wedge the negotiation into a
+// "candidates but no credentials" zombie.
+// ---------------------------------------------------------------------------
+
+/// 0048 requirement 4 regression: the zombie criterion must not be fooled by
+/// remote CANDIDATES alone. A remote that trickles candidates but never sends
+/// credentials can never satisfy `maybe_start` (`remote_creds` is mandatory),
+/// so the session must still expire at [`netbird_core::peer_conn::START_DEADLINE_MS`]
+/// and re-initiate with fresh credentials. The pre-fix `remote_cands_seen == 0`
+/// clause kept such a peer `idle` forever (device run 0048: the host peer held
+/// 64 remote candidates and 0 credentials).
+#[test]
+fn candidate_only_remote_still_times_out_and_reinitiates() {
+    let bus = Arc::new(SignalBus::default());
+    let mut a = TestOrch::new(KEY_A, &[KEY_B], 0x1111, bus.clone());
+
+    let mut now = 1000u64;
+    let _ = a.orch.run_once(now);
+    now += 10;
+    deliver(&bus, now, &mut a, None);
+    let first_offer = bus
+        .seen()
+        .iter()
+        .find(|f| f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload.clone())
+        .expect("initial offer");
+
+    // The remote trickles a candidate but never credentials.
+    let ghost = Candidate::host_candidate([127, 0, 0, 1], 51820);
+    a.orch
+        .handle_signal(KEY_B, PeerSignalKind::Candidate, &ghost.marshal(), now)
+        .expect("remote candidate");
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no credentials → never starts");
+
+    // Before the deadline nothing is torn down.
+    while now < 1000 + netbird_core::peer_conn::START_DEADLINE_MS - 500 {
+        let _ = a.orch.run_once(now);
+        now += 100;
+        deliver(&bus, now, &mut a, None);
+    }
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle, "no teardown before the deadline");
+
+    // At the deadline the candidate-only negotiation is a zombie: tear down
+    // and re-initiate with FRESH credentials.
+    let mut fresh = None;
+    while now <= 1000 + netbird_core::peer_conn::START_DEADLINE_MS + 15_000 {
+        let _ = a.orch.run_once(now);
+        now += 100;
+        deliver(&bus, now, &mut a, None);
+        if let Some(f) = bus.seen().iter().rev().find(|f| f.kind == PeerSignalKind::Offer) {
+            if f.payload != first_offer {
+                fresh = Some(f.payload.clone());
+                break;
+            }
+        }
+    }
+    let fresh = fresh.expect("the candidate-only negotiation must re-arm with a fresh offer");
+    assert_ne!(
+        parse_ufrag_pwd(&fresh).expect("fresh offer wire form"),
+        parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
+        "the re-initiation must carry NEW credentials"
+    );
+}
+
+/// 0048 R3 regression: initiate ran while the protected-socket pool was still
+/// empty (`take_owned` is non-blocking → `NoSocket` → `ensure_locals` fails).
+/// The pre-fix failure branch kept `session = Some`, so `want_initiate` (which
+/// demands `session.is_none()`) never fired again and the later
+/// `want_locals` retry trickled ONLY candidates — the remote never received a
+/// credential frame and could never `start()`. Fix: the half-built session is
+/// rolled back, the post-cooldown retry offers credentials, and both sides
+/// reach started (Checking → Connected here).
+#[test]
+fn initiate_before_socket_supply_still_offers_credentials() {
+    let bus = Arc::new(SignalBus::default());
+    // A is the default initiator and starts with an EMPTY socket pool.
+    let mut a = TestOrch::new_with_sockets(KEY_A, &[KEY_B], 0x1111, bus.clone(), 0);
+    let mut b = TestOrch::new_with_sockets(KEY_B, &[KEY_A], 0x2222, bus.clone(), 8);
+    b.orch.set_initiator(KEY_A, false); // deterministic role split: only A offers
+
+    let mut now = 1000u64;
+    // Beat 1: the initiate gather fails closed on the empty pool.
+    assert!(a.orch.run_once(now).is_err(), "empty pool must fail the gather");
+    assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle);
+    assert_eq!(a.status_of(KEY_B).last_error, Some(ErrorClass::Network));
+    assert!(bus.queue.lock().expect("queue").is_empty(), "fail-closed: no frame may leave");
+
+    // The remote trickles candidates while A still has no credentials (the
+    // 0048 host-peer shape: 64 candidates, 0 offer/answer). The pre-fix
+    // zombie criterion (`remote_cands_seen == 0`) therefore never expired it.
+    let ghost = Candidate::host_candidate([127, 0, 0, 1], 51820);
+    a.orch
+        .handle_signal(KEY_B, PeerSignalKind::Candidate, &ghost.marshal(), now)
+        .expect("remote candidate is buffered");
+
+    // 2 ms later the first protected ICE socket is supplied (0048 timeline).
+    now += 2;
+    a.socks.feed_lo_sockets(8);
+
+    let converged = pump_until(&bus, &mut a, &mut b, &mut now, 40_000, |a, b| {
+        a.status_of(KEY_B).state == PeerIceState::Connected
+            && b.status_of(KEY_A).state == PeerIceState::Connected
+    });
+    assert!(
+        converged,
+        "after the late socket supply the initiation must complete: A={:?} B={:?}",
+        a.status_of(KEY_B).state,
+        b.status_of(KEY_A).state
+    );
+
+    // The credential frame finally left the initiator (pre-fix: candidates
+    // only, forever). Exactly one distinct OFFER, legal ufrag:pwd shape.
+    let offers: std::collections::HashSet<String> = bus
+        .seen()
+        .into_iter()
+        .filter(|f| f.from == KEY_A && f.to == KEY_B && f.kind == PeerSignalKind::Offer)
+        .map(|f| f.payload)
+        .collect();
+    assert_eq!(offers.len(), 1, "exactly one distinct OFFER must be signaled, got {offers:?}");
+    let creds = parse_ufrag_pwd(offers.iter().next().expect("offer")).expect("offer wire form");
+    assert_eq!(creds.ufrag.len(), 16);
+    assert_eq!(creds.pwd.len(), 32);
+
+    // Started on both sides (Checking → Connected came from a real start()).
+    let sa = a.status_of(KEY_B);
+    let sb = b.status_of(KEY_A);
+    assert_eq!(sa.controlling, Some(true), "the late initiator stays controlling");
+    assert_eq!(sb.controlling, Some(false), "the answerer is controlled");
+    assert!(sa.endpoint_applied && sb.endpoint_applied, "both endpoints landed");
+    assert!(sa.reachable && sb.reachable);
+}
+
+/// 0048 glare regression (requirement 2): the local side attempted to
+/// initiate while its socket pool was empty and therefore never signaled
+/// credentials. The remote's OFFER then arrived and, pre-fix, hit the glare
+/// branch (existing session → adopt remote credentials, `answer_owed` stays
+/// false) — the local side owed no ANSWER and the remote never got our
+/// credentials, so the pair sat `idle` with 0 offer / 0 answer forever.
+/// With the rollback fix the failed initiate leaves NO session, so the remote
+/// OFFER takes the normal answerer path: the ANSWER leaves as soon as the
+/// socket supply lands and both sides converge.
+#[test]
+fn remote_offer_after_failed_initiate_is_answered() {
+    let bus = Arc::new(SignalBus::default());
+    // Both sides are initiators (the default); A's pool is still empty.
+    let mut a = TestOrch::new_with_sockets(KEY_A, &[KEY_B], 0x1111, bus.clone(), 0);
+    let mut b = TestOrch::new_with_sockets(KEY_B, &[KEY_A], 0x2222, bus.clone(), 8);
+
+    let mut now = 1000u64;
+    assert!(a.orch.run_once(now).is_err(), "empty pool must fail the initiate gather");
+
+    // B offers (with candidates) while A's pool is still empty.
+    now += 2;
+    let _ = b.orch.run_once(now);
+    deliver(&bus, now, &mut a, Some(&mut b));
+    assert!(
+        bus.seen().iter().any(|f| f.from == KEY_B && f.kind == PeerSignalKind::Offer),
+        "precondition: B's OFFER reached A"
+    );
+    assert!(
+        !bus.seen().iter().any(|f| f.from == KEY_A && f.kind != PeerSignalKind::Candidate),
+        "A must not have signaled credentials before the socket supply"
+    );
+
+    // The socket supply lands AFTER the remote OFFER.
+    now += 2;
+    let supply_at = now;
+    a.socks.feed_lo_sockets(8);
+
+    // Pump observing WHEN the ANSWER leaves: the remote OFFER is unanswered
+    // until the socket supply arrives, and the fix must answer it on the next
+    // local-candidate collection — not after a whole failed negotiation cycle.
+    let mut answer_at = None;
+    let mut converged = false;
+    while now <= 40_000 {
+        let _ = a.orch.run_once(now);
+        let _ = b.orch.run_once(now);
+        now += 10;
+        deliver(&bus, now, &mut a, Some(&mut b));
+        if answer_at.is_none()
+            && bus.seen().iter().any(|f| f.from == KEY_A && f.kind == PeerSignalKind::Answer)
+        {
+            answer_at = Some(now);
+        }
+        if a.status_of(KEY_B).state == PeerIceState::Connected
+            && b.status_of(KEY_A).state == PeerIceState::Connected
+        {
+            converged = true;
+            break;
+        }
+    }
+    assert!(
+        converged,
+        "A must answer B's OFFER and both must converge: A={:?} B={:?}",
+        a.status_of(KEY_B).state,
+        b.status_of(KEY_A).state
+    );
+    let answer_at = answer_at.expect("A must signal an ANSWER");
+    assert!(
+        answer_at <= supply_at + 3_000,
+        "the ANSWER must follow the socket supply promptly (answer at +{} ms after supply), \
+         not after a failed negotiation cycle",
+        answer_at - supply_at
+    );
+
+    let answers: std::collections::HashSet<String> = bus
+        .seen()
+        .into_iter()
+        .filter(|f| f.from == KEY_A && f.to == KEY_B && f.kind == PeerSignalKind::Answer)
+        .map(|f| f.payload)
+        .collect();
+    assert_eq!(answers.len(), 1, "A must send exactly one distinct ANSWER, got {answers:?}");
+    assert!(parse_ufrag_pwd(answers.iter().next().expect("answer")).is_ok());
+    assert!(
+        !bus.seen().iter().any(|f| f.from == KEY_A && f.kind == PeerSignalKind::Offer),
+        "A answered the remote OFFER; it must not also offer"
+    );
+    assert_eq!(a.status_of(KEY_B).controlling, Some(false), "A answered → controlled");
+    assert_eq!(b.status_of(KEY_A).controlling, Some(true), "B offered → controlling");
 }

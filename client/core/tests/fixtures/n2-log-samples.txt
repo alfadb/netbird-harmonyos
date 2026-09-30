@@ -19,7 +19,7 @@ N2_CONTROL_MISS|id=n2s-I-evt1-post|marker=n2s-I-evt1-post|dst=119.29.29.119:3478
 # N2_TUN_LEAK
 N2_TUN_LEAK|verdict=fail|dst=119.29.29.119:3478|proto=udp|mono_ms=4100|leaks=1|diag=true|is_evidence=false
 # N2_TUN_TEE_STATS
-N2_TUN_TEE_STATS|frames=3|decode_fail=1|dropped=1|mono_ms=5000|diag=true|is_evidence=false
+N2_TUN_TEE_STATS|frames=3|decode_fail=1|dropped=1|mono_ms=5000|diag=true|is_evidence=false|first_fail_len=5|first_fail_byte0=0x00|first_fail_prefix=00000000|fail_v4=0|fail_v6=0|fail_other=1
 # N2_TUN_GAP
 N2_TUN_GAP|from_mono=1000|to_mono=2000|reason=before-tun-attach|diag=true|is_evidence=false
 # N2_TUN_DEST
