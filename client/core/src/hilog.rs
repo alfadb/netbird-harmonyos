@@ -27,6 +27,14 @@ extern "C" {
 /// Emit one marker line on the frozen HiLog channel.
 /// Strips interior NUL bytes (cannot cross the C string boundary) and drops
 /// the trailing NUL. Safe to call from any thread, including the D-W worker.
+///
+/// N2 C/D first batch (2026-09-29): this SAME call is the write point of the
+/// armed-only app-internal evidence ring (`crate::n2_ring::append`), so every
+/// core `N2_*` / `N7_WG_FEED` / `N2_TUN_*` line survives a cellular-phase HiLog
+/// rotation or flow control. The ring is inert until the armed session
+/// configured it, and the platform call's result is deliberately NOT wired
+/// into it: a failed `OH_LOG_Print` (or a platform throttle) never changes what
+/// the ring records.
 pub fn emit(line: &str) {
     // Device (aarch64-unknown-linux-ohos): the frozen HiLog channel.
     // Everything else (host CLI, harness, tests): the SAME marker text on
@@ -52,6 +60,83 @@ pub fn emit(line: &str) {
                 buf.as_ptr(),
             );
         }
+    }
+    tee_append(line);
+}
+
+/// The ring tee (see [`emit`]). Host tests wrap it in the re-entrant
+/// [`tee_lock`] so a test that deliberately breaks the ring's destination sees
+/// ONLY its own records; the device build appends directly.
+#[cfg(test)]
+fn tee_append(line: &str) {
+    let _held = tee_lock::lock();
+    crate::n2_ring::append(line);
+}
+
+#[cfg(not(test))]
+fn tee_append(line: &str) {
+    crate::n2_ring::append(line);
+}
+
+/// Host-test mutual exclusion of the ring tee.
+///
+/// The ring is a PROCESS-GLOBAL file, so any other test thread that emits while
+/// one test has configured it appends into THAT test's ring. A test which
+/// deliberately breaks the destination (to observe write failures and their seq
+/// span) must exclude concurrent emitters from its window instead of counting
+/// their records as its own. Such a test holds [`lock`] for its whole body,
+/// while [`tee_append`] takes the same **re-entrant** lock around every append:
+/// the emitters only serialize for the length of one append, and the holding
+/// test's own nested emits (an announcement during a failing write) do not
+/// deadlock.
+#[cfg(test)]
+pub(crate) mod tee_lock {
+    use std::cell::{Cell, RefCell};
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    thread_local! {
+        /// The underlying guard of the outermost acquisition on this thread
+        /// (dropped — and so unlocking — when the last nested guard goes away).
+        static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) };
+        static DEPTH: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// A re-entrant guard: the outermost acquisition on a thread holds the
+    /// mutex, a nested one only counts.
+    pub(crate) struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let left = DEPTH.with(|depth| {
+                let left = depth.get().saturating_sub(1);
+                depth.set(left);
+                left
+            });
+            if left == 0 {
+                HELD.with(|held| {
+                    let _ = held.borrow_mut().take();
+                });
+            }
+        }
+    }
+
+    /// Take the tee lock, re-entrantly for the calling thread.
+    pub(crate) fn lock() -> Guard {
+        let first = DEPTH.with(|depth| {
+            let before = depth.get();
+            depth.set(before + 1);
+            before == 0
+        });
+        if first {
+            let guard = LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            HELD.with(|held| *held.borrow_mut() = Some(guard));
+        }
+        Guard
     }
 }
 

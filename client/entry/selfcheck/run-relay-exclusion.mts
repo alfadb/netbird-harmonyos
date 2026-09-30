@@ -60,12 +60,18 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdN2AEvent',
   'NetBirdN2Sandwich',
   // N2 T3 §3 (2026-09-28): the positive-control request pure module.
-  'NetBirdN2ControlRequest'];
+  'NetBirdN2ControlRequest',
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich and
+  // ring-dump pure modules the REAL extension imports.
+  'NetBirdN2CdPlan',
+  'NetBirdN2Ring'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult'],
+    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult',
+    // N2 first batch C/D columns: the erased bearer-facts shape.
+    'PhysicalBearerFacts'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     // v3.1 dns branch order: the erased interface names the real
@@ -88,7 +94,13 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdN2AEvent: ['N2AEventDecision', 'N2AEventRequest', 'N2AEventReply'],
   NetBirdN2Sandwich: ['N2SandwichPost'],
   // N2 T3 §3: the erased positive-control request/decision shapes.
-  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
+  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest'],
+  // N2 first batch C/D columns (2026-09-29): the erased shapes of the
+  // switching-sandwich and ring-dump pure modules.
+  NetBirdN2CdPlan: ['N2CdPlanDecision', 'N2CdPlanRequest', 'N2BearerFacts'],
+  NetBirdN2Ring: ['N2RingDumpDecision', 'N2RingDumpRequest',
+    // 2026-09-29 (explicit host ACK): the erased ACK request/decision shapes.
+    'N2RingAckDecision', 'N2RingAckRequest']
 };
 
 let passed: number = 0;

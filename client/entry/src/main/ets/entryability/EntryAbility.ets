@@ -84,6 +84,29 @@ const N2_CONTROL_FILE: string = 'netbird-n2-control';
 // never logged.
 const N2_A_EVENT_PARAM: string = 'n2_a_event';
 const N2_A_EVENT_FILE: string = 'netbird-n2-a-event';
+// N2 first batch C/D columns (2026-09-29): the SAME non-secret want-parameter
+// mechanism again, with its own payload file. The basename must match the
+// extension's `N2_CD_FILE_NAME` (NetBirdN2CdPlan.ets) exactly. This is the
+// channel the HOST uses while it still has a live link (Wi-Fi) to hand the App
+// one switching-sandwich plan (`{"column":"C","kind":"M","rep":1,"id":"…"}`),
+// which the App then executes alone during the cellular phase.
+const N2_CD_PLAN_PARAM: string = 'n2_cd_plan';
+const N2_CD_PLAN_FILE: string = 'netbird-n2-cd-plan';
+// N2 first batch C/D columns (2026-09-29): the ring FETCH fallback channel
+// (`{"start":0,"count":64}`) — the extension re-emits a bounded window of the
+// armed-only app-internal evidence ring on HiLog. The basename must match
+// `N2_RING_DUMP_FILE_NAME` (NetBirdN2Ring.ets).
+const N2_RING_DUMP_PARAM: string = 'n2_ring_dump';
+const N2_RING_DUMP_FILE: string = 'netbird-n2-ring-dump';
+// N2 first batch C/D columns (2026-09-29): the EXPLICIT host ACK channel
+// (`{"session":"<arm token>","up_to_seq":<durable seq>}`) — the ONLY thing that
+// may advance the ring's retrieved watermark, and therefore the only thing that
+// can release the oldest segment to rotation. The host sends it only AFTER it
+// has persisted the fetched ring bytes and verified the window is complete; the
+// extension forwards the document verbatim and the CORE binds it to the current
+// arm. The basename must match `N2_RING_ACK_FILE_NAME` (NetBirdN2Ring.ets).
+const N2_RING_ACK_PARAM: string = 'n2_ring_ack';
+const N2_RING_ACK_FILE: string = 'netbird-n2-ring-ack';
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -166,9 +189,18 @@ export default class EntryAbility extends UIAbility {
       params === undefined || params === null ? undefined : params[N2_CONTROL_PARAM];
     const aEvent: Object | undefined =
       params === undefined || params === null ? undefined : params[N2_A_EVENT_PARAM];
+    const cdPlan: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_CD_PLAN_PARAM];
+    const ringDump: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_RING_DUMP_PARAM];
+    const ringAck: Object | undefined =
+      params === undefined || params === null ? undefined : params[N2_RING_ACK_PARAM];
     const stimulusText: string = typeof stimulus === 'string' ? stimulus : '';
     const controlText: string = typeof control === 'string' ? control : '';
     const aEventText: string = typeof aEvent === 'string' ? aEvent : '';
+    const cdPlanText: string = typeof cdPlan === 'string' ? cdPlan : '';
+    const ringDumpText: string = typeof ringDump === 'string' ? ringDump : '';
+    const ringAckText: string = typeof ringAck === 'string' ? ringAck : '';
     // N2 T7a (item 7) — arm ticket protection. The documented operator flow is
     // "aa start WITH the arm ticket, then one launch per request"; a launch
     // that carries an N2 request parameter but NO arm ticket must therefore
@@ -180,7 +212,8 @@ export default class EntryAbility extends UIAbility {
     // launch. An explicit ticket always wins and is written verbatim.
     if (typeof armOptions === 'string' && armOptions.length > 0) {
       this.writeArmTicketFile(armOptions);
-    } else if (stimulusText.length > 0 || controlText.length > 0 || aEventText.length > 0) {
+    } else if (stimulusText.length > 0 || controlText.length > 0 || aEventText.length > 0 ||
+      cdPlanText.length > 0 || ringDumpText.length > 0 || ringAckText.length > 0) {
       hilog.info(DOMAIN, TAG,
         'N2H_ARM_TICKET_KEPT|file=%{public}s|note=request-launch-without-arm-ticket|' +
         'diag=true|is_evidence=false',
@@ -188,6 +221,26 @@ export default class EntryAbility extends UIAbility {
     } else {
       this.removeArmTicket('default-no-arm');
     }
+    // N2 first batch C/D columns (2026-09-29): the one-pending-request-per-launch
+    // rule now spans SIX channels. The pre-existing refusals (stimulus+control,
+    // and every two-of-three combination involving the A-event channel) keep
+    // their exact line shapes; a combination that involves one of the THREE NEW
+    // channels (cd_plan, ring_dump, ring_ack) and is not already covered emits
+    // the generic `pending=` shape naming exactly the file of each channel that
+    // is actually present, in the fixed order stimulus, control, a_event,
+    // cd_plan, ring_dump, ring_ack.
+    const pendingCount: number = (stimulusText.length > 0 ? 1 : 0) +
+      (controlText.length > 0 ? 1 : 0) + (aEventText.length > 0 ? 1 : 0) +
+      (cdPlanText.length > 0 ? 1 : 0) + (ringDumpText.length > 0 ? 1 : 0) +
+      (ringAckText.length > 0 ? 1 : 0);
+    const removeEveryPendingRequest = (note: string): void => {
+      this.removeStimulusFile(note);
+      this.removeControlFile(note);
+      this.removeAEventFile(note);
+      this.removeCdPlanFile(note);
+      this.removeRingDumpFile(note);
+      this.removeRingAckFile(note);
+    };
     if (stimulusText.length > 0 && controlText.length > 0) {
       // The pre-existing two-channel refusal keeps its exact line; a THIRD
       // pending request (the A-event trigger) extends the same refusal with
@@ -206,6 +259,9 @@ export default class EntryAbility extends UIAbility {
       this.removeStimulusFile('combo-rejected');
       this.removeControlFile('combo-rejected');
       this.removeAEventFile('combo-rejected');
+      this.removeCdPlanFile('combo-rejected');
+      this.removeRingDumpFile('combo-rejected');
+      this.removeRingAckFile('combo-rejected');
     } else if (stimulusText.length > 0 && aEventText.length > 0) {
       hilog.warn(DOMAIN, TAG,
         'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
@@ -214,6 +270,9 @@ export default class EntryAbility extends UIAbility {
       this.removeStimulusFile('combo-rejected');
       this.removeControlFile('combo-rejected');
       this.removeAEventFile('combo-rejected');
+      this.removeCdPlanFile('combo-rejected');
+      this.removeRingDumpFile('combo-rejected');
+      this.removeRingAckFile('combo-rejected');
     } else if (controlText.length > 0 && aEventText.length > 0) {
       hilog.warn(DOMAIN, TAG,
         'N2_CONTROL_COMBO_REJECTED|stimulus=%{public}s|control=%{public}s|' +
@@ -222,22 +281,75 @@ export default class EntryAbility extends UIAbility {
       this.removeStimulusFile('combo-rejected');
       this.removeControlFile('combo-rejected');
       this.removeAEventFile('combo-rejected');
+      this.removeCdPlanFile('combo-rejected');
+      this.removeRingDumpFile('combo-rejected');
+      this.removeRingAckFile('combo-rejected');
+    } else if (pendingCount > 1) {
+      // A combination the pre-existing branches do not cover. It always
+      // involves `n2_cd_plan`, `n2_ring_dump` or `n2_ring_ack` (those are the
+      // only channels left once the three branches above did not match), so the
+      // line names exactly the pending channels by file.
+      let pending: string = '';
+      if (stimulusText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_STIMULUS_FILE; }
+      if (controlText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_CONTROL_FILE; }
+      if (aEventText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_A_EVENT_FILE; }
+      if (cdPlanText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_CD_PLAN_FILE; }
+      if (ringDumpText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_RING_DUMP_FILE; }
+      if (ringAckText.length > 0) { pending += (pending.length > 0 ? ',' : '') + N2_RING_ACK_FILE; }
+      hilog.warn(DOMAIN, TAG,
+        'N2_CONTROL_COMBO_REJECTED|pending=%{public}s|' +
+        'note=one-pending-request-per-launch|diag=true|is_evidence=false',
+        pending);
+      removeEveryPendingRequest('combo-rejected');
     } else if (stimulusText.length > 0) {
       this.writeStimulusFile(stimulusText);
       this.removeControlFile('default-no-control');
       this.removeAEventFile('default-no-a-event');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingDumpFile('default-no-ring-dump');
+      this.removeRingAckFile('default-no-ring-ack');
     } else if (controlText.length > 0) {
       this.writeControlFile(controlText);
       this.removeStimulusFile('default-no-stimulus');
       this.removeAEventFile('default-no-a-event');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingDumpFile('default-no-ring-dump');
+      this.removeRingAckFile('default-no-ring-ack');
     } else if (aEventText.length > 0) {
       this.writeAEventFile(aEventText);
       this.removeStimulusFile('default-no-stimulus');
       this.removeControlFile('default-no-control');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingDumpFile('default-no-ring-dump');
+      this.removeRingAckFile('default-no-ring-ack');
+    } else if (cdPlanText.length > 0) {
+      this.writeCdPlanFile(cdPlanText);
+      this.removeStimulusFile('default-no-stimulus');
+      this.removeControlFile('default-no-control');
+      this.removeAEventFile('default-no-a-event');
+      this.removeRingDumpFile('default-no-ring-dump');
+      this.removeRingAckFile('default-no-ring-ack');
+    } else if (ringDumpText.length > 0) {
+      this.writeRingDumpFile(ringDumpText);
+      this.removeStimulusFile('default-no-stimulus');
+      this.removeControlFile('default-no-control');
+      this.removeAEventFile('default-no-a-event');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingAckFile('default-no-ring-ack');
+    } else if (ringAckText.length > 0) {
+      this.writeRingAckFile(ringAckText);
+      this.removeStimulusFile('default-no-stimulus');
+      this.removeControlFile('default-no-control');
+      this.removeAEventFile('default-no-a-event');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingDumpFile('default-no-ring-dump');
     } else {
       this.removeStimulusFile('default-no-stimulus');
       this.removeControlFile('default-no-control');
       this.removeAEventFile('default-no-a-event');
+      this.removeCdPlanFile('default-no-cd-plan');
+      this.removeRingDumpFile('default-no-ring-dump');
+      this.removeRingAckFile('default-no-ring-ack');
     }
   }
 
@@ -556,5 +668,92 @@ export default class EntryAbility extends UIAbility {
         'N2_A_EVENT_FILE_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
         N2_A_EVENT_FILE, String((error as BusinessFailure).code ?? 'none'), note);
     }
+  }
+
+  // N2 first batch C/D columns (2026-09-29): the three NEW request channels
+  // (`n2_cd_plan`, `n2_ring_dump`, `n2_ring_ack`). ONE parameterized helper
+  // carries the SAME write
+  // honesty and removal discipline as the three channels above — open TRUNC +
+  // write + close, a failed or SHORT write removes exactly this one file (the
+  // open's TRUNC would otherwise leave an empty payload the extension could
+  // parse), and the payload is never logged: only the file name, the real
+  // UTF-8 byte count and an error CODE. `marker` is the channel's own log
+  // marker prefix (`N2_CD_PLAN_FILE` / `N2_RING_DUMP_FILE` / `N2_RING_ACK_FILE`).
+  private writeN2RequestFile(marker: string, name: string, note: string, text: string): void {
+    const path: string = `${this.context.filesDir}/${name}`;
+    let file: fs.File | undefined = undefined;
+    let writeFailed: boolean = false;
+    let failureCode: string = 'none';
+    let expectedBytes: number = 0;
+    try {
+      file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      const written: number = fs.writeSync(file.fd, text);
+      expectedBytes = new util.TextEncoder().encode(text).byteLength;
+      if (written !== expectedBytes) {
+        writeFailed = true;
+        failureCode = `short-write:${written}of${expectedBytes}`;
+      }
+    } catch (error) {
+      writeFailed = true;
+      failureCode = String((error as BusinessFailure).code ?? 'none');
+    } finally {
+      if (file !== undefined) {
+        try {
+          fs.closeSync(file);
+        } catch (closeError) {
+          hilog.error(DOMAIN, TAG, marker + '_CLOSE_FAILED|file=%{public}s|code=%{public}s',
+            name, String((closeError as BusinessFailure).code ?? 'none'));
+        }
+      }
+    }
+    if (!writeFailed) {
+      hilog.warn(DOMAIN, TAG,
+        marker + '_WRITTEN|file=%{public}s|bytes=%{public}d|note=diagnostic-only-non-secret',
+        name, expectedBytes);
+      return;
+    }
+    hilog.error(DOMAIN, TAG, marker + '_WRITE_FAILED|file=%{public}s|code=%{public}s|note=' + note,
+      name, failureCode);
+    this.removeN2RequestFile(marker, name, 'failed-write-cleanup');
+  }
+
+  private removeN2RequestFile(marker: string, name: string, note: string): void {
+    const path: string = `${this.context.filesDir}/${name}`;
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      fs.unlinkSync(path);
+      hilog.info(DOMAIN, TAG,
+        marker + '_REMOVED|file=%{public}s|note=%{public}s', name, note);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        marker + '_REMOVE_FAILED|file=%{public}s|code=%{public}s|note=%{public}s',
+        name, String((error as BusinessFailure).code ?? 'none'), note);
+    }
+  }
+
+  private writeCdPlanFile(text: string): void {
+    this.writeN2RequestFile('N2_CD_PLAN_FILE', N2_CD_PLAN_FILE, 'no-cd-plan', text);
+  }
+
+  private removeCdPlanFile(note: string): void {
+    this.removeN2RequestFile('N2_CD_PLAN_FILE', N2_CD_PLAN_FILE, note);
+  }
+
+  private writeRingDumpFile(text: string): void {
+    this.writeN2RequestFile('N2_RING_DUMP_FILE', N2_RING_DUMP_FILE, 'no-ring-dump', text);
+  }
+
+  private removeRingDumpFile(note: string): void {
+    this.removeN2RequestFile('N2_RING_DUMP_FILE', N2_RING_DUMP_FILE, note);
+  }
+
+  private writeRingAckFile(text: string): void {
+    this.writeN2RequestFile('N2_RING_ACK_FILE', N2_RING_ACK_FILE, 'no-ring-ack', text);
+  }
+
+  private removeRingAckFile(note: string): void {
+    this.removeN2RequestFile('N2_RING_ACK_FILE', N2_RING_ACK_FILE, note);
   }
 }

@@ -151,7 +151,7 @@ try {
     'import block');
   check('S2 the armed guard is consulted BEFORE the send and refused by name',
     ability.includes('      if (this.n2Evidence === undefined) {\n' +
-      '        hilog.warn(DOMAIN, TAG, \'%{public}s\',\n' +
+      '        this.n2WarnAndRing(\n' +
       '          formatN2ControlShellLine(this.requestId, request, \'rejected\', \'not-armed\'));\n' +
       '        return;\n' +
       '      }'),
@@ -230,12 +230,12 @@ try {
       hookName);
   }
   check('H3 both staging harnesses stage the control request module and its erased types',
-    readText(join(HERE, 'run-exclusion-generation.mts')).includes("'NetBirdN2ControlRequest'];") &&
-    readText(join(HERE, 'run-relay-exclusion.mts')).includes("'NetBirdN2ControlRequest'];") &&
+    readText(join(HERE, 'run-exclusion-generation.mts')).includes("'NetBirdN2ControlRequest',") &&
+    readText(join(HERE, 'run-relay-exclusion.mts')).includes("'NetBirdN2ControlRequest',") &&
     readText(join(HERE, 'run-exclusion-generation.mts')).includes(
-      "NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']") &&
+      "NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest'],") &&
     readText(join(HERE, 'run-relay-exclusion.mts')).includes(
-      "NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']"));
+      "NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest'],"));
 
   // ---------------- R: the core surface ----------------------------------
   const napi = rust('napi.rs');

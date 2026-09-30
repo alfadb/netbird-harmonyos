@@ -875,6 +875,65 @@ export function forgetPhysicalDefaultDns(): void {
   physicalDefaultDnsNetId = 0;
 }
 
+// N2 first batch C/D columns (2026-09-29): the RAW platform facts the pure
+// `classifyN2Bearer` needs to judge a column's direction — the physical default
+// network's `bearerTypes` and the string form of its link addresses. This
+// function performs the two synchronous reads and NOTHING else: the
+// classification (and every refusal token) lives in the pure module, so the
+// host selfcheck drives exactly the shipped decision through the stubbed
+// platform. A platform error answers empty facts, never an invented bearer.
+//
+// B5: the handle is the SAME one `physicalDefaultNetId()` selected, NOT
+// whatever `getDefaultNetSync()` answers. Once this App's VPN is the default
+// network, the raw default handle is the VPN: its `bearerTypes` is `[vpn]` and
+// its link addresses can be the overlay, which would make every C/D direction
+// read `bearer-unknown` (or the local address an overlay one). Resolving the
+// already-selected physical netId back to its own handle keeps the direction
+// judgement and the switch judgement on one and the same network.
+export interface PhysicalBearerFacts {
+  bearerTypes: number[];
+  linkAddresses: string[];
+}
+
+export function physicalDefaultBearerFacts(): PhysicalBearerFacts {
+  try {
+    const netId: number = physicalDefaultNetId();
+    if (netId === 0) {
+      return { bearerTypes: [], linkAddresses: [] };
+    }
+    const handles: connection.NetHandle[] = connection.getAllNetsSync();
+    let handle: connection.NetHandle | undefined = handles.find(
+      (candidate: connection.NetHandle): boolean => candidate.netId === netId);
+    if (handle === undefined || handle === null) {
+      // The platform could not enumerate it: fall back to the default handle
+      // ONLY when that IS the selected network. A default handle of a DIFFERENT
+      // netId (the VPN) is never used — that is exactly the B5 defect.
+      const fallback: connection.NetHandle = connection.getDefaultNetSync();
+      if (fallback === undefined || fallback === null || fallback.netId !== netId) {
+        return { bearerTypes: [], linkAddresses: [] };
+      }
+      handle = fallback;
+    }
+    const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+    const props: connection.ConnectionProperties =
+      connection.getConnectionPropertiesSync(handle);
+    const linkAddresses: string[] = [];
+    const links: connection.LinkAddress[] | undefined = props.linkAddresses;
+    if (links !== undefined && links !== null) {
+      for (let i = 0; i < links.length; i++) {
+        const address: connection.NetAddress | undefined = links[i].address;
+        if (address !== undefined && address !== null && typeof address.address === 'string' &&
+          address.address.length > 0) {
+          linkAddresses.push(address.address);
+        }
+      }
+    }
+    return { bearerTypes: caps.bearerTypes ?? [], linkAddresses: linkAddresses };
+  } catch (error) {
+    return { bearerTypes: [], linkAddresses: [] };
+  }
+}
+
 export function physicalDefaultNetId(): number {
   try {
     const handle: connection.NetHandle = connection.getDefaultNetSync();

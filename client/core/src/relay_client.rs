@@ -57,6 +57,18 @@
 //!   the session (increment-A decision inherited from `ws.rs`, not silently
 //!   dropped); outbound payloads exceeding the Transport ceiling are
 //!   rejected at the handle BEFORE any wire byte.
+//! - **Network switch**: [`RelayClient::network_changed`] synchronously bumps
+//!   the network generation AND retires the live session's submission entry,
+//!   under the SAME mutex that [`RelayClient::send_to_peer`] re-checks
+//!   readiness and enqueues under — so once it returns, no new WG datagram
+//!   can enter the old session, even while the reported state still says
+//!   `Ready` (the worker's abort/redial runs later). Already-enqueued
+//!   commands are NOT recalled: this is an entry-point fence, not a drain
+//!   (bytes already in the old session's queue or on the kernel path are out
+//!   of scope — no byte-level retraction). The next session accepts traffic
+//!   only once it is really Ready, and it is published under the generation
+//!   its dial round started in, so a stale (old-network or superseded)
+//!   publisher can neither reopen an old sender nor clear a newer session.
 //! - **Offline destinations**: `PeersWentOffline` marks the peer offline; a
 //!   `send_to_peer` to a known-offline peer is refused LOCALLY
 //!   (`PeerOffline`) so it is never misreported as delivered. The relay
@@ -1288,6 +1300,25 @@ enum IoReq {
     WriteCloseAndStop(Frame, oneshot::Sender<()>),
 }
 
+/// The live-session slot: the network generation AND the installed
+/// session's command sender behind ONE mutex. Every path that may change
+/// "which session accepts new submissions" shares this single synchronous
+/// boundary — [`RelayClient::network_changed`] (bump + retire),
+/// [`RelayClient::send_to_peer`] / [`RelayClient::open_conn`] (readiness
+/// re-check + enqueue) and the worker's publish/retire. A send can therefore
+/// never straddle a network switch: it either enqueues strictly before the
+/// switch, or it is refused typed.
+#[derive(Default)]
+struct SessionSlot {
+    /// Network generation, bumped in place by `network_changed`. The worker
+    /// snapshots it BEFORE a dial round and only publishes under that same
+    /// snapshot.
+    generation: u64,
+    /// Live session: `(generation it was published under, command sender)`.
+    /// `None` between sessions and immediately after a network switch.
+    live: Option<(u64, mpsc::Sender<SessionCmd>)>,
+}
+
 struct Shared {
     cfg: RelayClientConfig,
     stats: Mutex<RelayStats>,
@@ -1295,8 +1326,9 @@ struct Shared {
     token_epoch_tx: watch::Sender<u64>,
     stop_tx: watch::Sender<bool>,
     network_tx: watch::Sender<u64>,
-    /// Live session's command sender (`None` between sessions).
-    session: Mutex<Option<mpsc::Sender<SessionCmd>>>,
+    /// Single boundary for "which session may accept new submissions"
+    /// (see [`SessionSlot`]); also carries the network generation.
+    session: Mutex<SessionSlot>,
     /// Peer presence cache from `PeersOnline`/`PeersWentOffline` (cleared on
     /// every session end — server state is unknown after a reconnect).
     presence: Mutex<HashMap<PeerId, bool>>,
@@ -1332,6 +1364,38 @@ impl Shared {
 
     fn is_offline(&self, peer: &PeerId) -> bool {
         self.presence.lock().expect("relay presence lock").get(peer) == Some(&false)
+    }
+
+    /// Network generation as of now. The worker snapshots this before a dial
+    /// round: a session dialed under generation N must not be published if a
+    /// switch moved the slot to N+1 meanwhile (its stream was dialed on the
+    /// old network).
+    fn network_generation(&self) -> u64 {
+        self.session.lock().expect("relay session lock").generation
+    }
+
+    /// Publish `sender` as the live session, but ONLY if the network
+    /// generation still equals the `seen` snapshot the dial round started
+    /// under. `false` = a switch landed in between: the caller must drop the
+    /// session (never reopen the old sender, never install a session whose
+    /// socket predates the switch).
+    fn publish_session(&self, seen: u64, sender: mpsc::Sender<SessionCmd>) -> bool {
+        let mut slot = self.session.lock().expect("relay session lock");
+        if slot.generation != seen {
+            return false;
+        }
+        slot.live = Some((seen, sender));
+        true
+    }
+
+    /// Retire the live session, but only if `generation` still owns it. A
+    /// late worker whose session a switch already superseded can therefore
+    /// never clear a NEWER session's entry (nor re-open an older sender).
+    fn retire_session(&self, generation: u64) {
+        let mut slot = self.session.lock().expect("relay session lock");
+        if matches!(&slot.live, Some((g, _)) if *g == generation) {
+            slot.live = None;
+        }
     }
 }
 
@@ -1427,7 +1491,7 @@ impl RelayClient {
                 state_history: vec![RelayState::Disconnected],
                 ..RelayStats::default()
             }),
-            session: Mutex::new(None),
+            session: Mutex::new(SessionSlot::default()),
             presence: Mutex::new(HashMap::new()),
             inbound: tokio::sync::Mutex::new(inbound_rx),
             cfg,
@@ -1438,8 +1502,27 @@ impl RelayClient {
 
     /// Discard an old-network session but keep the worker and current token.
     /// The next dial still requires a fresh protected socket from the supply.
+    ///
+    /// SYNCHRONOUS fence: under the very mutex `send_to_peer` re-checks
+    /// readiness and enqueues under, the network generation is bumped and the
+    /// live sender is retired. Once this returns, NO new submission can reach
+    /// the old session — even while the reported state still says `Ready`
+    /// (the worker only aborts/redials when it is next scheduled). Commands
+    /// already in the old session's queue are NOT recalled and bytes already
+    /// on the kernel path are not un-sent: this closes the entry point, it
+    /// does not promise byte-level retraction.
     pub fn network_changed(&self) {
-        self.shared.network_tx.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+        let generation = {
+            let mut slot = self.shared.session.lock().expect("relay session lock");
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.live = None;
+            slot.generation
+        };
+        // Wake the worker. The watch value mirrors the slot generation (the
+        // worker subscribes only for the wake-up; the slot is authoritative).
+        // `send_modify` notifies unconditionally, so repeated switches are
+        // each observed.
+        self.shared.network_tx.send_modify(|epoch| *epoch = generation);
     }
 
     /// Current state (single source of truth: the stats snapshot).
@@ -1479,26 +1562,37 @@ impl RelayClient {
     /// ack, so this is never a delivery confirmation. Known-offline peers
     /// are refused typed (`PeerOffline`) instead of being silently
     /// black-holed; oversized payloads are rejected before any wire byte.
+    ///
+    /// The readiness check, the presence check and the actual enqueue all
+    /// happen inside ONE critical section on the session slot — the same
+    /// section [`RelayClient::network_changed`] takes. A switch therefore
+    /// either lands strictly before the enqueue (sender already retired ⇒
+    /// typed refusal) or strictly after it (the command was accepted before
+    /// the fence); there is no window in which a stale state snapshot lets a
+    /// datagram into a retired sender. `try_send` is synchronous, so no
+    /// `.await` ever happens under the lock.
     pub fn send_to_peer(&self, peer: &PeerId, payload: &[u8]) -> Result<(), RelayClientError> {
         let total = TRANSPORT_FRAME_OVERHEAD + payload.len();
         if total > MAX_MESSAGE_SIZE {
             return Err(RelayClientError::FrameTooLarge { limit: MAX_MESSAGE_SIZE, got: total });
         }
-        let state = self.state();
+        let slot = self.shared.session.lock().expect("relay session lock");
+        // Readiness is re-read INSIDE the switch's critical section: the
+        // reported `Ready` may belong to a session the fence just retired.
+        let state = self.shared.stats.lock().expect("relay stats lock").state;
         if state != RelayState::Ready {
             return Err(RelayClientError::NotReady { state });
         }
+        let Some((_, sender)) = slot.live.as_ref() else {
+            // No session may accept a submission: either between sessions or
+            // a switch already retired the sender while the worker has not
+            // yet moved the reported state off `Ready`.
+            return Err(RelayClientError::NotReady { state });
+        };
         if self.shared.is_offline(peer) {
             self.shared.bump(|s| s.send_rejected_offline += 1);
             return Err(RelayClientError::PeerOffline(peer.clone()));
         }
-        let sender = self
-            .shared
-            .session
-            .lock()
-            .expect("relay session lock")
-            .clone()
-            .ok_or(RelayClientError::NotReady { state })?;
         match sender
             .try_send(SessionCmd::SendTransport { peer: peer.clone(), payload: payload.to_vec() })
         {
@@ -1514,21 +1608,26 @@ impl RelayClient {
     /// stop. TODO(increment D): call when a WG peer needs the relay
     /// carrier, then keep pumping via [`RelayClient::recv`]/`send_to_peer`.
     pub async fn open_conn(&self, peer: &PeerId) -> Result<(), RelayClientError> {
-        let state = self.state();
-        if state != RelayState::Ready {
-            return Err(RelayClientError::NotReady { state });
-        }
         let (reply_tx, reply_rx) = oneshot::channel();
-        let sender = self
-            .shared
-            .session
-            .lock()
-            .expect("relay session lock")
-            .clone()
-            .ok_or(RelayClientError::NotReady { state })?;
-        sender
-            .try_send(SessionCmd::Subscribe { peer: peer.clone(), reply: reply_tx })
-            .map_err(|_| RelayClientError::Backpressured)?;
+        {
+            // Same single boundary as `send_to_peer`: readiness re-check and
+            // enqueue cannot straddle a network switch (a subscribe must not
+            // enter a sender the switch retired).
+            let slot = self.shared.session.lock().expect("relay session lock");
+            let state = self.shared.stats.lock().expect("relay stats lock").state;
+            if state != RelayState::Ready {
+                return Err(RelayClientError::NotReady { state });
+            }
+            let Some((_, sender)) = slot.live.as_ref() else {
+                return Err(RelayClientError::NotReady { state });
+            };
+            if sender
+                .try_send(SessionCmd::Subscribe { peer: peer.clone(), reply: reply_tx })
+                .is_err()
+            {
+                return Err(RelayClientError::Backpressured);
+            }
+        }
         match reply_rx.await {
             Ok(res) => res,
             // Session aborted without resolving (hard-stop path).
@@ -1767,6 +1866,11 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
             }
         }
         shared.set_state(RelayState::Dialing);
+        // Network generation this round dials under: the session may only be
+        // published while the slot is still on this generation. A switch that
+        // lands mid-dial therefore cannot install a stream dialed on the old
+        // network into the (already retired) slot.
+        let generation = shared.network_generation();
         // Anchor the whole round's dial budgets at round start (§1.5: one
         // connection budget, not per-restart).
         let round_anchor = shared.clock().now();
@@ -1792,7 +1896,15 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
             inbound_tx: inbound_tx.clone(),
         };
         let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CAP);
-        *shared.session.lock().expect("relay session lock") = Some(cmd_tx.clone());
+        if !shared.publish_session(generation, cmd_tx.clone()) {
+            // A switch landed between the generation snapshot and this
+            // publish: the dialed stream belongs to the old network. Drop it
+            // and re-round — never reopen the retired sender.
+            shared.set_state(RelayState::Reconnecting);
+            round = 0;
+            last_good = None;
+            continue 'worker;
+        }
         let mut join = tokio::spawn(run_session(ctx, cmd_rx));
         let mut network_reset = false;
         let (class, was_ready) = tokio::select! {
@@ -1819,7 +1931,10 @@ async fn worker_main(shared: Arc<Shared>, inbound_tx: mpsc::Sender<(PeerId, Vec<
                 }
             }
         };
-        *shared.session.lock().expect("relay session lock") = None;
+        // Retire only OUR generation: if a switch already superseded this
+        // session and the worker published a newer one, a late arrival here
+        // must not clear that newer entry.
+        shared.retire_session(generation);
         clear_presence(&shared);
         shared.bump(|s| {
             s.last_error_class = Some(class);
@@ -2381,6 +2496,7 @@ mod tests {
     use super::*;
     use crate::relay::{MSG_HEALTH_CHECK, MSG_TRANSPORT};
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     // Trait-scope imports for poll-method syntax on the duplex helpers.
     use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -2736,6 +2852,11 @@ mod tests {
         peer_id: PeerId,
         plans: Mutex<HashMap<String, VecDeque<DialPlan>>>,
         calls: Mutex<Vec<String>>,
+        /// Per `Serve` dial (in dial-attempt order) count of Transport frames
+        /// the scripted server actually READ off the wire. Receiver-side
+        /// evidence: it is independent of every client-side counter, so it
+        /// proves what the peer really got, not what the client believes.
+        transport_rx: Mutex<Vec<Arc<AtomicUsize>>>,
     }
 
     enum DialPlan {
@@ -2766,7 +2887,9 @@ mod tests {
                 DialPlan::Serve(mode) => {
                     let (client_end, server_end) = duplex_pair();
                     let expect_peer = self.peer_id.clone();
-                    tokio::spawn(scripted_server(server_end, expect_peer, mode));
+                    let transport_rx = Arc::new(AtomicUsize::new(0));
+                    self.transport_rx.lock().unwrap().push(transport_rx.clone());
+                    tokio::spawn(scripted_server(server_end, expect_peer, mode, transport_rx));
                     Box::pin(async move { Ok(Box::new(client_end) as BoxStream) })
                 }
             }
@@ -2779,6 +2902,7 @@ mod tests {
                 peer_id,
                 plans: Mutex::new(HashMap::new()),
                 calls: Mutex::new(Vec::new()),
+                transport_rx: Mutex::new(Vec::new()),
             }
         }
 
@@ -2793,12 +2917,29 @@ mod tests {
         fn called(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
+
+        /// Transport frames each served connection really read, in dial order.
+        fn session_rx_counts(&self) -> Vec<usize> {
+            self.transport_rx
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.load(Ordering::SeqCst))
+                .collect()
+        }
     }
 
     /// The minimal WS server side over the duplex: upgrade + Auth check +
     /// AuthResponse, then behave per script. Hand-rolled framing is small
     /// because client frames are always masked and our tests are small.
-    async fn scripted_server(mut io: DuplexEnd, expect_peer: PeerId, mode: ScriptMode) {
+    /// `transport_rx` counts the Transport frames this connection really
+    /// read off the wire (receiver-side evidence).
+    async fn scripted_server(
+        mut io: DuplexEnd,
+        expect_peer: PeerId,
+        mode: ScriptMode,
+        transport_rx: Arc<AtomicUsize>,
+    ) {
         // -- read the HTTP head --
         let mut head: Vec<u8> = Vec::new();
         loop {
@@ -2861,6 +3002,9 @@ mod tests {
                 *b ^= mask[i & 3];
             }
             let relay = Frame::decode(&payload).expect("client sends valid relay frames");
+            if matches!(relay, Frame::Transport { .. }) {
+                transport_rx.fetch_add(1, Ordering::SeqCst);
+            }
             if let Frame::Auth { peer_id, .. } = relay {
                 assert_eq!(peer_id, expect_peer, "auth carries OUR derived peer id");
                 if mode != ScriptMode::StallAuth {
@@ -2996,6 +3140,249 @@ mod tests {
         assert_eq!(client.state(), RelayState::Ready);
         assert_eq!(client.stats().dial_attempts, 2);
         client.stop();
+    }
+
+    // ---- network-switch submission fence ------------------------------------
+
+    /// A direct `Shared` with a settable reported state: exercises the REAL
+    /// [`RelayClient::send_to_peer`] entry point while the test holds the
+    /// receiving half of the command channel, so every counted submission is
+    /// the actual command a live session would have consumed.
+    fn fenced_client(state: RelayState) -> (RelayClient, Arc<Shared>) {
+        let cfg = RelayClientConfig::new(
+            &["rel://fence.test:1".to_string()],
+            WG_PUBKEY,
+            unit_token(1_770_003_600),
+        )
+        .expect("unit urls parse");
+        let (in_tx, in_rx) = mpsc::channel(1);
+        let (epoch_tx, _epoch_rx) = watch::channel(0u64);
+        let (network_tx, _network_rx) = watch::channel(0u64);
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        let shared = Arc::new(Shared {
+            cfg,
+            stats: Mutex::new(RelayStats { state, ..RelayStats::default() }),
+            token: Mutex::new(None),
+            token_epoch_tx: epoch_tx,
+            network_tx,
+            stop_tx,
+            session: Mutex::new(SessionSlot::default()),
+            presence: Mutex::new(HashMap::new()),
+            inbound: tokio::sync::Mutex::new(in_rx),
+        });
+        drop(in_tx);
+        (RelayClient { shared: shared.clone() }, shared)
+    }
+
+    fn set_reported_state(shared: &Shared, state: RelayState) {
+        shared.stats.lock().expect("relay stats lock").state = state;
+    }
+
+    /// Drain the test-side session receiver: the payloads a session really
+    /// would have consumed, in order.
+    fn drained_transports(rx: &mut mpsc::Receiver<SessionCmd>, peer: &PeerId) -> Vec<Vec<u8>> {
+        let mut got = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                SessionCmd::SendTransport { peer: p, payload } => {
+                    assert_eq!(&p, peer, "fenced send must target the requested peer");
+                    got.push(payload);
+                }
+                SessionCmd::Subscribe { .. } => panic!("a send must submit a Transport"),
+                SessionCmd::GracefulClose => panic!("a send must submit a Transport"),
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn network_switch_fences_old_sender_entry_point_synchronously() {
+        let peer = fixture_peer(21);
+        let (client, shared) = fenced_client(RelayState::Ready);
+
+        // No session published yet: typed refusal, nothing enqueued anywhere.
+        assert!(matches!(
+            client.send_to_peer(&peer, b"no-session").unwrap_err(),
+            RelayClientError::NotReady { .. }
+        ));
+
+        // Session A, published under generation 0 (the initial generation).
+        let (tx_a, mut rx_a) = mpsc::channel::<SessionCmd>(CMD_CAP);
+        assert!(shared.publish_session(0, tx_a.clone()), "gen-0 publish");
+        assert!(client.send_to_peer(&peer, b"before-1").is_ok());
+        assert!(client.send_to_peer(&peer, b"before-2").is_ok());
+
+        // THE FENCE: once this returns, nothing new may enter session A.
+        client.network_changed();
+        // The fence deliberately does NOT touch the reported state (the
+        // worker moves it when it is next scheduled), so the refusals below
+        // can only come from the retired sender — not from a state display.
+        assert_eq!(client.state(), RelayState::Ready, "state display untouched by the fence");
+        for i in 0..8u8 {
+            let err = client.send_to_peer(&peer, &[i]).unwrap_err();
+            assert!(
+                matches!(err, RelayClientError::NotReady { state: RelayState::Ready }),
+                "post-switch send must be refused by the retired slot, got {err:?}"
+            );
+        }
+        // Pre-switch commands are NOT recalled: exactly the two accepted
+        // before the fence, and zero new ones.
+        assert_eq!(
+            drained_transports(&mut rx_a, &peer),
+            vec![b"before-1".to_vec(), b"before-2".to_vec()],
+            "old session holds exactly its pre-switch commands"
+        );
+
+        // A stale (old-generation) publisher cannot re-open the old sender …
+        assert!(!shared.publish_session(0, tx_a.clone()), "stale publish must be refused");
+        assert!(shared.session.lock().expect("relay session lock").live.is_none());
+        // … and a late retire of a superseded generation is a no-op.
+        shared.retire_session(0);
+        assert!(shared.session.lock().expect("relay session lock").live.is_none());
+        assert!(client.send_to_peer(&peer, b"still-fenced").is_err());
+        assert!(
+            drained_transports(&mut rx_a, &peer).is_empty(),
+            "zero new enqueues on the old sender"
+        );
+
+        // The NEXT session accepts only once it is really Ready.
+        let (tx_b, mut rx_b) = mpsc::channel::<SessionCmd>(CMD_CAP);
+        assert!(shared.publish_session(1, tx_b.clone()), "current-generation publish");
+        set_reported_state(&shared, RelayState::Dialing);
+        let err = client.send_to_peer(&peer, b"too-early").unwrap_err();
+        assert!(
+            matches!(err, RelayClientError::NotReady { state: RelayState::Dialing }),
+            "{err:?}"
+        );
+        set_reported_state(&shared, RelayState::Ready);
+        assert!(client.send_to_peer(&peer, b"after-ready").is_ok());
+        assert_eq!(drained_transports(&mut rx_b, &peer), vec![b"after-ready".to_vec()]);
+
+        // Repeated notifications: each one re-fences (generation 1 → 3 here),
+        // and only the newest generation may publish.
+        client.network_changed();
+        client.network_changed();
+        assert_eq!(shared.network_generation(), 3, "one bump per notification");
+        assert_eq!(client.state(), RelayState::Ready, "still the same reported state");
+        assert!(client.send_to_peer(&peer, b"after-repeat").is_err());
+        assert!(
+            drained_transports(&mut rx_b, &peer).is_empty(),
+            "no new enqueue on the superseded sender"
+        );
+        assert!(!shared.publish_session(0, tx_a.clone()));
+        assert!(!shared.publish_session(1, tx_b.clone()));
+        assert!(!shared.publish_session(2, tx_b.clone()));
+        let (tx_c, mut rx_c) = mpsc::channel::<SessionCmd>(CMD_CAP);
+        assert!(shared.publish_session(3, tx_c.clone()), "gen-3 publish");
+
+        // A late worker retiring generation 1 must not clear the NEW state.
+        shared.retire_session(1);
+        assert!(
+            shared.session.lock().expect("relay session lock").live.is_some(),
+            "late retire must not clear a newer session"
+        );
+        assert!(client.send_to_peer(&peer, b"newer").is_ok());
+        assert_eq!(drained_transports(&mut rx_c, &peer), vec![b"newer".to_vec()]);
+
+        // Disconnected: refused typed, nothing enqueued.
+        set_reported_state(&shared, RelayState::Disconnected);
+        let err = client.send_to_peer(&peer, b"gone").unwrap_err();
+        assert!(
+            matches!(err, RelayClientError::NotReady { state: RelayState::Disconnected }),
+            "{err:?}"
+        );
+        // Reconnected: the same gen-3 session accepts again, exactly once.
+        set_reported_state(&shared, RelayState::Ready);
+        assert!(client.send_to_peer(&peer, b"reconnected").is_ok());
+        assert_eq!(drained_transports(&mut rx_c, &peer), vec![b"reconnected".to_vec()]);
+        assert!(drained_transports(&mut rx_a, &peer).is_empty(), "old sender frozen");
+        assert!(drained_transports(&mut rx_b, &peer).is_empty(), "superseded sender frozen");
+    }
+
+    #[tokio::test]
+    async fn network_switch_blocks_new_wire_traffic_until_the_next_session_is_ready() {
+        let clock = VirtualClock::new(1_770_000_000);
+        let dialer = Arc::new(ScriptedDialer::new(PeerId::from_wg_pubkey_string(WG_PUBKEY)));
+        dialer.plan(
+            "switch",
+            [
+                DialPlan::Serve(ScriptMode::Silent),
+                DialPlan::Serve(ScriptMode::Silent),
+                DialPlan::Serve(ScriptMode::Silent),
+            ],
+        );
+        let client = started(&["rel://switch:1"], unit_token(1_770_003_600), &dialer, &clock);
+        let peer = fixture_peer(31);
+        wait_for(Duration::from_secs(5), || client.state() == RelayState::Ready, "session 1 ready")
+            .await;
+
+        // A datagram accepted before the switch is REAL wire traffic on
+        // session 1 (receiver-side count, not a client-side boolean).
+        client.send_to_peer(&peer, b"pre-switch").expect("session 1 accepts");
+        wait_for(
+            Duration::from_secs(5),
+            || dialer.session_rx_counts() == vec![1],
+            "session 1 really read the pre-switch datagram",
+        )
+        .await;
+
+        // THE FENCE on the real client: this returns while the worker has not
+        // been scheduled yet (current-thread runtime), so the reported state
+        // still says Ready …
+        client.network_changed();
+        assert_eq!(client.state(), RelayState::Ready, "state display still Ready");
+        // … and every new submission is refused anyway.
+        for i in 0..8u8 {
+            let err = client.send_to_peer(&peer, &[i]).expect_err("post-switch send");
+            assert!(matches!(err, RelayClientError::NotReady { .. }), "{err:?}");
+        }
+
+        // The worker aborts session 1, dials, and session 2 reaches Ready.
+        wait_for(
+            Duration::from_secs(5),
+            || client.stats().auth_successes == 2 && client.state() == RelayState::Ready,
+            "session 2 ready",
+        )
+        .await;
+        client.send_to_peer(&peer, b"post-switch").expect("session 2 accepts");
+        wait_for(
+            Duration::from_secs(5),
+            || dialer.session_rx_counts() == vec![1, 1],
+            "session 2 really read the post-switch datagram",
+        )
+        .await;
+
+        // A repeated notification behaves identically; both old sessions stay
+        // frozen at exactly the one byte each admitted before its fence.
+        client.network_changed();
+        for i in 0..4u8 {
+            assert!(client.send_to_peer(&peer, &[i]).is_err(), "post-switch send");
+        }
+        wait_for(
+            Duration::from_secs(5),
+            || client.stats().auth_successes == 3 && client.state() == RelayState::Ready,
+            "session 3 ready",
+        )
+        .await;
+        client.send_to_peer(&peer, b"third").expect("session 3 accepts");
+        wait_for(
+            Duration::from_secs(5),
+            || dialer.session_rx_counts() == vec![1, 1, 1],
+            "session 3 really read its datagram",
+        )
+        .await;
+        assert_eq!(
+            dialer.session_rx_counts(),
+            vec![1, 1, 1],
+            "one datagram per session: none was admitted after that session's fence"
+        );
+
+        // Disconnect: the terminal client refuses typed and enqueues nothing.
+        client.stop();
+        wait_for(Duration::from_secs(5), || client.state() == RelayState::Dead, "dead").await;
+        let err = client.send_to_peer(&peer, b"after-stop").unwrap_err();
+        assert!(matches!(err, RelayClientError::NotReady { .. }), "{err:?}");
+        assert_eq!(dialer.session_rx_counts(), vec![1, 1, 1], "no wire traffic after stop");
     }
 
     #[tokio::test]
@@ -3327,7 +3714,7 @@ mod tests {
                 token_epoch_tx: epoch_tx,
                 network_tx,
                 stop_tx,
-                session: Mutex::new(None),
+                session: Mutex::new(SessionSlot::default()),
                 presence: Mutex::new(HashMap::new()),
                 inbound: tokio::sync::Mutex::new(in_rx),
             }),

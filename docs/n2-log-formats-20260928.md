@@ -38,7 +38,7 @@ N2_SANDWICH|kind=I|Ws|phase=pre|post|first-send|marker=…|event_ref=…|result=
 | `mono_ms` | monotonic ms at emission (`sys::mono_ms()`) |
 
 The core registers BOTH markers at `pre` time (`n2_sandwich.rs::pre:251-306`,
-NAPI `n2_sandwich_pre(kind, marker, post_marker)`, `napi.rs:754-758`) and hands
+NAPI `n2_sandwich_pre(kind, marker, post_marker)`, `napi.rs:788-793`) and hands
 the post marker back through `n2_sandwich_poll()`
 (`connector.rs::n2_sandwich_poll_json:5495-5504`, `n2_sandwich.rs::poll:327-375`),
 so the shell sends the POST control
@@ -87,31 +87,31 @@ N2_TUN_DEST|scope=session|mono_ms=…|dst=…|proto=any|port=any|frames=0|delta=
 N2_TUN_FRAMES|scope=session|mono_ms=…|seen=…|control=…|production=…|leaks=…|diag=true|is_evidence=false
 ```
 
-* `N2_TUN_TEE_STATS` — `wg_device.rs::N2DestinationTee::stats_line:520-524`,
-  emitted on the `N2_TUN_DEST` session cadence (`wg_device.rs::tick:1381-1404`,
+* `N2_TUN_TEE_STATS` — `wg_device.rs::N2DestinationTee::stats_line:525-530`,
+  emitted on the `N2_TUN_DEST` session cadence (`wg_device.rs::tick:1386-1469`,
   5 s tick
   gate then "counters changed or 30 s elapsed"). `frames` counts every **from-OS**
   frame handed to this tee since the arm (to-OS frames belong to the collector
   tee and are not counted here); `decode_fail` counts the frames
   `n2h::parse_ipv4_frame` refused
-  (`wg_device.rs`'s `impl TunFrameTee for N2DestinationTee::on_tun_frame:616-653`);
+  (`wg_device.rs`'s `impl TunFrameTee for N2DestinationTee::on_tun_frame:621-658`);
   `dropped` counts the frames that decoded but were not attributed to a frozen
   capture destination (the tee's own filter, not silent loss). Exact invariant:
   `frames = decode_fail + dropped + Σ N2_TUN_DEST.frames`. **A non-zero
   `decode_fail` makes the interval incomplete → `invalid/UNSAT`.**
-* `N2_TUN_GAP` — `wg_device.rs::gap_line:603-605` (thin `N2DestinationTee::gap:500-502`).
+* `N2_TUN_GAP` — `wg_device.rs::gap_line:608-610` (thin `N2DestinationTee::gap:505-507`).
   `from_mono`/`to_mono` are the
   monotonic bounds of an interval in which the tee observed NOTHING. Reasons:
   `before-tun-attach` (the tee mount; the pre-attach interval, bounds
-  `n2_gap_start` → attach, `wg_device.rs:2408`), `tun-replaced` (a TUN fd
-  replacement, `:2330`), `connector-stop` (the tee detach; a zero-width marker
-  at the close instant, `:2530` — the unobserved interval then extends to the
+  `n2_gap_start` → attach, `wg_device.rs:2412`), `tun-replaced` (a TUN fd
+  replacement, `:2335`), `connector-stop` (the tee detach; a zero-width marker
+  at the close instant, `:2535` — the unobserved interval then extends to the
   next mount), plus the fault tokens `tun-fd-missing` / `tun-poll-error` /
-  `tun-read-error` (`:1279,1286,1303`). The frozen anchor
+  `tun-read-error` (`:1284,1291,1308`). The frozen anchor
   `N2_TUN_GAP|reason=before-tun-attach` is unchanged (only the two field names
   became `from_mono`/`to_mono`).
-* `N2_TUN_DEST` / `N2_TUN_FRAMES` — `wg_device.rs::dest_line:575-582` /
-  `dest_zero_line:584-589` / `frames_line:592-594`. `proto`/`port` are the IP
+* `N2_TUN_DEST` / `N2_TUN_FRAMES` — `wg_device.rs::dest_line:580-585` /
+  `dest_zero_line:589-593` / `frames_line:597-600`. `proto`/`port` are the IP
   protocol number
   and destination port (`proto=0|port=0` is the ≥64-group overflow row);
   `sources` is up to 8 distinct source IPv4 addresses, comma separated;
@@ -201,7 +201,7 @@ are all listed here.
 | `no-live-relay-connection` | end / `error` (`detail=no-n2-sock-registration`) | R: the armed trace has no live `R` descriptor |
 | `watch-already-armed` | end / `rejected` (`detail=one-watch-per-session`) | R or S while that kind's single watch is still open |
 | `management-rpc` | begin / `begin` (`detail=get-server-key`) | M's begin line: the read-only `GetServerKey` is about to run |
-| `management-rpc-<class>` | end / `error` (`detail=get-server-key-failed`) | M's RPC failed; `<class>` is `network`, `timeout`, `auth`, `request`, `server`, `parse` or `unsupported_url` (`ErrorClass::from_management`, `connector.rs:240-250`) |
+| `management-rpc-<class>` | end / `error` (`detail=get-server-key-failed`) | M's RPC failed; `<class>` is `network`, `timeout`, `auth`, `request`, `server`, `parse` or `unsupported_url` (`ErrorClass::from_management`, `connector.rs:228-238`) |
 | `management-rpc-timeout` | end / `error` (`detail=get-server-key-failed`) | M's RPC exceeded `M_RPC_WAIT_MS`; the same spelling the `timeout` class token has |
 | `no-target` | end / `error` (`detail=requery-refused`) | D: the requery primitive had no target |
 | `dns-requery` | begin / `begin` (`detail=receipt-in-N2_DNS`) | D's begin line: the protected requery is about to run |
@@ -227,37 +227,62 @@ Shell receipt (not producible from Rust):
 
 ```
 N2_SOCK|phase=subsequent_io|kind=M|S|R|request_id=…|fd=…|dup_fd=…|protect=success|failed|protect_ms=…|protect_generation=…|local=…|remote=…|proto=tcp|net_id=…|bytes=…|mono_ms=…|wall_ms=…|status=sent|detail=post_connect_write|event_id=…|diag=true|is_evidence=false
+N2_SOCK|phase=protect_settle|kind=Wb|request_id=…|fd=…|dup_fd=…|protect=success|failed|protect_ms=…|protect_generation=…|protect_mono_ms=…|local=…|remote=unknown|proto=17|net_id=…|status=success|failed|detail=core-adopt|diag=true|is_evidence=false
 N2_FD_SEND|kind=Wb|Ws|fd=…|dup_fd=…|packets=…|bytes=…|mono_ms=…|diag=true|is_evidence=false
 N7_WG_FEED|adopted|peers=…|endpoints=…|egress_replayed=…|mono_ms=…
 ```
 
 * `N2_SOCK|phase=subsequent_io` —
-  `n2_socket_trace.rs::subsequent_io_line:237-246` (via `post_connect_write:339-365`).
+  `n2_socket_trace.rs::subsequent_io_line:276-281` (via `post_connect_write:442-482`).
   `event_id` is the A-event id while an event window is open and `none`
   otherwise; the `fd` is always the shell ORIGINAL and `dup_fd` the core-owned
   descriptor. `mono_ms`/`wall_ms` are the completion instants. The field set is
   unchanged from the pre-T7a receipt except for the added `event_id`.
-* `N2_FD_SEND` — `n2_socket_trace.rs::fd_send_fields_line:405-410` (via the
-  private `fd_send_line:398-403`). Fields stay exactly `packets`/`bytes`/`mono_ms`
+* `N2_SOCK|phase=protect_settle` (**core-emitted, `Wb` only**, added
+  2026-09-30) — `n2_socket_trace.rs::sock_receipt_line:382` via the takeover
+  behind `adopted:235` (`takeover:266`), called from `wg_device.rs`'s
+  `adopt`/`reattach_socket` AFTER the duplicated descriptor was validated. One
+  row per `Wb` takeover, **whether or not** a C/D plan measures the class — this
+  is the row the frozen E1 substitute evidence reads. `fd` is the shell
+  ORIGINAL, `dup_fd` the validated core-owned descriptor, `proto=17` (the IP
+  protocol number, as frozen E1 spells it — the I/O receipts spell `udp`),
+  `protect`/`status` the ACTUAL shell protect verdict (`success` only when the
+  protect call succeeded; a FAILED protect reports `failed` and publishes no
+  live identity), `protect_generation`/`net_id`/`local` the registration's own
+  (`local` is `getsockname` of the core descriptor), `protect_ms` the shell's
+  measured protect elapsed and `remote=unknown` (the base socket is
+  unconnected).
+  **Time fields**: `protect_mono_ms` is the core's `sys::mono_ms()` at the
+  protect VERDICT (`protect:195`) — the instant the frozen E1 ordering compares
+  against `N2_TUN_GAP|reason=before-tun-attach` and `N7_WG_FEED|adopted|mono_ms`
+  (both core `sys::mono_ms`). The row carries NO wall field by design: the only
+  wall the core could name at emission is the LATER takeover clock, and it must
+  never be presented as the protect wall (the SHELL's own `phase=protect_settle`
+  line carries the protect wall as `wall_ms`). The chain with the shell's three
+  phases is bound by `fd`/`request_id`/`protect_generation`; the core row adds
+  the `dup_fd` that only the validated takeover can name.
+* `N2_FD_SEND` — `n2_socket_trace.rs::fd_send_fields_line:552-556` (via the
+  private `fd_send_line:545-548`). Fields stay exactly `packets`/`bytes`/`mono_ms`
   (the judge
   aligns on this shape); `packets=0|bytes=0` on the base descriptor is the
   no-send negative evidence.
-* `N7_WG_FEED|adopted` — `wg_device.rs::wg_feed_adopted_line:610-614` (emitted at
-  `wg_device.rs:2461-2466`). `peers` /
+* `N7_WG_FEED|adopted` — `wg_device.rs::wg_feed_adopted_line:615-618` (emitted at
+  `wg_device.rs:2466-2481`). `peers` /
   `endpoints` are the counts the device carries, `egress_replayed` the number of
   buffered egress sockets actually re-attached at adoption (a failed replay is
   counted out), `mono_ms` the adoption instant.
 * Shell-side line (not producible from Rust):
   `VPN_WG_DATAPLANE_FED|requestId=…|wgFd=…|tunFd=…|deviceUp=true|mono_ms=…|wall_ms=…`
-  (`NetBirdVpnExtensionAbility.ets:3839-3842`, `feedWgDataPlane`) — `mono_ms` comes from
-  the core's `connector_tun_fd_feed` reply (`connector.rs::wg_feed_json:4932-4970`,
+  (`NetBirdVpnExtensionAbility.ets:4534` `feedWgDataplane`, the line at
+  `:4591-4593`) — `mono_ms` comes from
+  the core's `connector_tun_fd_feed` reply (`connector.rs::wg_feed_json:4932-4961`,
   `mono=True`), the same clock the core's `N7_WG_FEED|adopted|…|mono_ms=` uses
   on that very call, so the two lines are alignable; `wall_ms` is
   `Date.now()`.
 * Shell-side `N2_SOCK` protect lines (not producible from Rust),
-  `NetBirdVpnExtensionAbility.ets::protectSocketWithBox:4106` (`phase=open` at
-  `:4118-4121`, `phase=protect_begin` at `:4122-4125`, `phase=protect_settle`
-  at `:4176-4195`):
+  `NetBirdVpnExtensionAbility.ets::protectSocketWithBox:4859-4963` (`phase=open` at
+  `:4872-4875`, `phase=protect_begin` at `:4877-4880`, `phase=protect_settle`
+  at `:4945-4949`):
   * `N2_SOCK|phase=open|kind=…|request_id=…|fd=…|protect_generation=…|net_id=…|wall_ms=…|diag=true|is_evidence=false`
   * `N2_SOCK|phase=protect_begin|…` (same fields as `open`)
   * `N2_SOCK|phase=protect_settle|kind=…|request_id=…|fd=…|status=success|failed|elapsed_ms=…|protect_generation=…|net_id=…|local=…|wall_ms=…|diag=true|is_evidence=false`
@@ -266,8 +291,13 @@ N7_WG_FEED|adopted|peers=…|endpoints=…|egress_replayed=…|mono_ms=…
   name are the core `N2_SOCK` ones, and match the frozen E1 criterion
   (`phase=protect_settle|status=success`); the earlier `result=`/`generation=`
   spellings were unified to them. `local` is the socket's own `getsockname`
-  name returned by `n2_socket_trace_protect` (`napi.rs:684-707`), `unknown` when the
-  number cannot be inspected — never an invented address.
+  name returned by `n2_socket_trace_protect` (`napi.rs:718-741`), `unknown` when the
+  number cannot be inspected — never an invented address. These three shell
+  rows are the protect-side half of the identity chain (`fd` + `request_id` +
+  `protect_generation`); the CORE's own takeover row (§6,
+  `phase=protect_settle|kind=Wb`, 2026-09-30) is the half that can name the
+  validated `dup_fd` and the shared monotonic clock, and it is emitted whether
+  or not a C/D plan measures the class.
 
 ## 7. Arm-ticket channel (`N2H_ARM_TICKET_*`)
 
@@ -275,7 +305,7 @@ N7_WG_FEED|adopted|peers=…|endpoints=…|egress_replayed=…|mono_ms=…
 (the arm decision block is at `:172-192`; `N2H_ARM_TICKET_KEPT` at `:183-189`).
 
 * `N2H_ARM_TICKET_WRITTEN|file=netbird-n2h-arm|bytes=…|note=diagnostic-only-non-secret`
-  (`EntryAbility.ets:322-326`)
+  (`EntryAbility.ets:404-405`)
 * `N2H_ARM_TICKET_REMOVED|file=netbird-n2h-arm|note=…` — `note` is
   `default-no-arm`, `failed-write-cleanup`, or another named branch
 * `N2H_ARM_TICKET_KEPT|file=netbird-n2h-arm|note=request-launch-without-arm-ticket|diag=true|is_evidence=false`
@@ -288,8 +318,196 @@ N7_WG_FEED|adopted|peers=…|endpoints=…|egress_replayed=…|mono_ms=…
 
 ## What is NOT in the sample file
 
-`N2_*_SHELL`, the shell `N2_SOCK` phases (`open`/`protect_begin`/
-`protect_settle`), `VPN_WG_DATAPLANE_FED`, the `N2H_ARM_TICKET_*` lines and
-`N2_STIMULUS*` are produced by ArkTS, not by a Rust formatter, so they cannot
-appear in `n2-log-samples.txt`; their exact shapes are listed above and in
-`n2-evidence-switch-20260928.md`.
+`N2_*_SHELL`, the SHELL-side `N2_SOCK` phases (`open`/`protect_begin`/
+`protect_settle` — the CORE's own `phase=protect_settle|kind=Wb` row IS in the
+sample, §6), `VPN_WG_DATAPLANE_FED`, `VPN_NETWORK_BASELINE` /
+`VPN_NETWORK_RECOVERED` / `VPN_NETWORK_RECOVERY_FAIL`, the `N2H_ARM_TICKET_*`
+lines, `N2_STIMULUS*`, `N2_CD_SANDWICH_SHELL` and the `n2_ring_dump` receipts
+(`N2_RING_DUMP_SHELL`) are produced by ArkTS, not by a Rust formatter, so they
+cannot appear in `n2-log-samples.txt`; their exact shapes are
+listed above and in `n2-evidence-switch-20260928.md` / the design doc
+`n2-cd-app-sandwich-20260929.md`. (`N2_RING_CHUNK` / `N2_RING_DUMP` ARE core
+formatters — see §9.)
+
+## 8. `N2_CD_SANDWICH` — the App-side switching sandwich (2026-09-29)
+
+N2 first batch C/D columns. There are TWO formatters in
+`client/core/src/n2_cd.rs`:
+
+* `format_line_ext:421-432` is what the **state machine actually emits**
+  (via `plan_line:434-440` → `record:442-449` / `close:452-464`);
+* `format_line:405-414` is the **compat/baseline** form: the same field
+  sequence up to `mono_ms`, without the identity block. It exists so
+  `client/core/tests/n2_log_samples.rs` can render the frozen fixture
+  (`tests/fixtures/n2-log-samples.txt`) without pinning one run's clocks, and
+  its shape must not move.
+
+Design, lifecycle and the T0 questions in
+[`n2-cd-app-sandwich-20260929.md`](n2-cd-app-sandwich-20260929.md).
+
+```
+N2_CD_SANDWICH|id=…|column=C|D|kind=M|S|R|D|I|Wb|Ws|rep=…|phase=plan|prepare|switch|pre|receipt|post|marker=…|result=…|reason=…|net_before=…|net_after=…|local_before=…|local_after=…|fd=…|dup_fd=…|remote=…|wait_ms=…|mono_ms=…|net_id=…|protect_generation=…|identity=fd:dup_fd:generation|event_mono_ms=…|local=…|request_id=…|target=…|proto=…|detail=…|diag=true|is_evidence=false
+```
+
+The baseline form stops after `mono_ms`:
+
+```
+N2_CD_SANDWICH|id=…|column=…|kind=…|rep=…|phase=…|marker=…|result=…|reason=…|net_before=…|net_after=…|local_before=…|local_after=…|fd=…|dup_fd=…|remote=…|wait_ms=…|mono_ms=…|diag=true|is_evidence=false
+```
+
+| field | values / unit |
+| --- | --- |
+| `id` | the plan id the operator sent (`[A-Za-z0-9_-]{1,59}`, `MAX_ID`; the two control markers are derived from it as `<id>-pre` / `<id>-post`, which is why the bound is 59 and not 64) |
+| `column` | `C` (Wi-Fi → cellular) or `D` (cellular → Wi-Fi) |
+| `kind` | the seven frozen outer classes |
+| `rep` | the repetition index, `1..999` |
+| `phase` | `plan` / `prepare` / `switch` / `pre` / `receipt` / `post` |
+| `marker` | **the marker of THAT phase**: `none` on `plan`/`prepare`/`switch`/`receipt`, `<id>-pre` on `pre`, `<id>-post` on `post` |
+| `result` | `plan`: `planned` / `rejected`; `prepare`: `prepared` / `ready` / `rejected` / `unsat`; `switch`: `switched` / `rejected` / `unsat`; `pre`: `hit` / `rejected` / `unsat`; `receipt`: `receipt` / `exempted` / `rejected` / `unsat`; `post`: `observed` / `rejected` / `unsat` |
+| `reason` | the full set the state machine can answer, per phase — `plan`: `ok`, `await-start-bearer`, `invalid-column`, `invalid-kind`, `invalid-rep`, `invalid-id`, `invalid-target`, `start-bearer-not-wifi`, `plan-already-active`, `plan-already-used`, plus the shell's own `start_verdict` token (`bearer-unknown` / `start-network-mismatch` / `no-target`) and the shell's `not-armed`; `prepare`: `not-a-d-measurement`, `preparation-recovered`, `not-a-d-column`, `prepare-not-owed`, `recovery-not-owed`, `prepare-wait-exceeded`, `prepare-recovery-wait-exceeded`, plus the shell's `bearer-unknown` / `direction-mismatch`; `switch`: `ok`, `switch-already-reported`, `switch-wait-exceeded`, `prepare-hop-required`, `switch-before-preparation-complete`, `dwell-min-not-reached`, `switch-identity-required`, `switch-identity-missing`, `switch-net-id-unmeasured`, `switch-generation-unmeasured`, plus the shell's `direction-mismatch` / `bearer-unknown`; `pre`: `gate-open`, `pre-hit-timeout`, `pre-control-miss`, `pre-hit-unobserved`, `pre-hit-before-switch`, `pre-before-switch`, `pre-already-reported`, `pre-wait-exceeded`, `invalid-result`, plus the shell's own verbatim control-send error token; `receipt`: `ok`, `wb-protect-settle-success`, `receipt-before-pre-hit`, `receipt-before-formal-switch`, `receipt-already-issued`, `invalid-fd`, `generation-unchanged`, `identity-unchanged`, `generation-unmeasured`, `net-id-unmeasured`, `net-id-mismatch`, `protect-failed`, `io-time-unmeasured`, `io-before-pre-hit`, `connect-only`, `wb-protect-settle-missing`, `receipt-wait-exceeded`; `post`: `control-hit-after-receipt`, `post-hit-unobserved`, `post-before-receipt`, `post-control-miss`, `post-wait-exceeded`, `invalid-result`. Every refusal that is NOT a terminal `close()` is a non-terminal `rejected`: the plan keeps waiting. Unarmed entries answer `not-armed` with an EMPTY line (nothing is emitted) |
+| `net_before` / `net_after` | the measured physical bearer (`wifi` / `cellular` / `ethernet` / `bluetooth` / `unknown`); `net_after` is `unknown` until a phase measures it |
+| `local_before` / `local_after` | the measured network's own link address (`unknown` when the platform could not tell — never an invented address) |
+| `fd` / `dup_fd` | the shell ORIGINAL / the core-owned descriptor of the receipt leg on `receipt`/`post` (`-1` before one exists) — the same pair `N2_SOCK` reports; `switch`/`pre` carry `-1` |
+| `remote` | `ip:port` of that receipt, or `unknown` |
+| `wait_ms` | the phase's written bound: `plan` → `300000` (`SWITCH_WAIT_MS`) or `300000` for D (`PREPARE_WAIT_MS`); `prepare` → `300000` (`PREPARE_WAIT_MS`) / `300000` (`SWITCH_WAIT_MS`) on `ready`; `switch` → `90000` (`RECEIPT_WAIT_MS`) on terminal, `30000` (`PRE_WAIT_MS`) on a non-terminal refusal; `pre` → `30000` (`PRE_WAIT_MS`) terminal, `90000` (`RECEIPT_WAIT_MS`) on `hit`; `receipt` → `90000` (`RECEIPT_WAIT_MS`) refused, `90000` (`POST_WAIT_MS`) issued; `post` → `90000` (`POST_WAIT_MS`) |
+| `mono_ms` | monotonic ms at emission; the phases are ordered by these values (plus the tee's own HIT instants) |
+| `net_id` | the NEW network's platform net id measured at the switch (`0` = not measured); the receipt must match it |
+| `protect_generation` | the shell's `networkEpoch` of the identity the line carries (`0` = not measured) |
+| `identity` | `fd:dup_fd:generation` of that identity, or `none` |
+| `event_mono_ms` | the monotonic instant of the fact this line reports (switch instant, pre-HIT, receipt I/O, post-HIT…); `0` = not measured |
+| `local` | `local` with an empty value spelled `none` (the receipt's own `getsockname` name on receipt/post) |
+| `request_id` | the private channel's `requestId`, or `none` |
+| `target` / `proto` | the frozen pre-registration (frozen:L42): the control marker's frozen destination and the kind's own protocol (`tcp` for M/S/R, `udp` for the rest), fixed BEFORE any control is sent; `none` when empty |
+| `detail` | the receipt's own detail (`stun_txn_…`, `wg_sendto`, `dns`, `protect_settle`, `post_connect_write`), recorded verbatim for the per-kind judge; `none` when empty |
+
+The receipt criteria (all of them enforced in `receipt:787-857`, each refusal
+named): the new identity's `generation` must differ from the switch baseline and
+so must the `(fd, dup_fd)` pair; `net_id` must equal the switch measurement;
+`protect` must have succeeded; the receipt's I/O instant must be LATER than the
+pre control's tee HIT; `M`/`S`/`R` must be a real `phase=subsequent_io` business
+write (a completed `connect` is `connect-only`); `Wb` needs the NEW generation's
+`phase=protect_settle|status=success` (`wb-protect-settle-missing` otherwise)
+and closes `result=exempted|reason=wb-protect-settle-success`. The `Wb` receipt
+is fed by the CORE TAKEOVER of the validated dup (`n2_socket_trace::adopted`,
+called from `wg_device.rs`'s `adopt`/`reattach_socket`): its `dup_fd` is the
+taken-over core-owned descriptor and its `event_mono_ms` is that registration's
+OWN protect-settle instant, never the takeover clock — so a socket protected
+before the pre HIT stays refused `io-before-pre-hit` however late it is adopted.
+`Wb` is NOT
+exempt from the pre/post controls any more. The six wait bounds are source
+constants (`PREPARE_WAIT_MS`/`DWELL_MIN_MS`/`PRE_WAIT_MS`/`RECEIPT_WAIT_MS`/
+`POST_WAIT_MS`/`SWITCH_WAIT_MS`); an unarmed session emits nothing at all.
+
+Shell receipt (not producible from Rust):
+`N2_CD_SANDWICH_SHELL|requestId=…|id=…|column=…|kind=…|rep=…|phase=…|marker=…|result=…|reason=…|diag=true|is_evidence=false`
+(`NetBirdN2CdPlan.ets::formatN2CdPlanShellLine:247-255`); the rejection variant
+is `…|id=none|column=none|kind=none|rep=0|phase=plan|marker=none|result=rejected|reason=…`
+(`:259-263`). The shell's `phase` mirrors the core's own phase for a terminal
+step (`n2_cd_poll`'s `phase` field), so both logs join on the same phase.
+
+## 9. `N2_RING_*` — the armed-only app-internal evidence ring (2026-09-29)
+
+`client/core/src/n2_ring.rs::armed_line:1158-1161`, `stats_line:1164-1168`,
+`fail_line:1170-1173`, `recovered_line:1175-1177`, `rotated_line:1179-1181`,
+`rotated_span_line:1186-1189`, `lost_line:1192-1196`, `overflow_line:1199-1202`,
+`manifest_line:1208-1217`, `chunk_line:1221-1223`, `dump_summary_line:1226-1231`.
+
+```
+N2_RING_ARMED|file=…|max_bytes=…|segments=…|bytes=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_STATS|file=…|enabled=…|bytes=…|max_bytes=…|segments=…|writes=…|failures=…|rotations=…|last_error=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_WRITE_FAILED|failures=…|code=errno-<n>|io|mono_ms=…|diag=true|is_evidence=false
+N2_RING_RECOVERED|failures=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_ROTATED|segments=…|bytes=…|dropped_from_seq=…|dropped_to_seq=…|dropped_records=…|acked_seq=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_LOST|from_seq=…|to_seq=…|records=…|reason=…|code=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_OVERFLOW|dropped_records=…|from_seq=…|to_seq=…|acked_seq=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_MANIFEST|file=…|sess=…|enabled=…|segments=…|max_bytes=…|bytes=…|records=…|first_seq=…|last_seq=…|frozen_tail_seq=…|next_seq=…|acked_seq=…|writes=…|failures=…|rotations=…|lost_records=…|lost_from=…|lost_to=…|lost_reason=…|dropped_by_ack=…|overflow=…|overflow_events=…|gaps=…|gap_from=…|gap_to=…|malformed=…|tail_open=…|last_error=…|mono_ms=…|diag=true|is_evidence=false
+N2_RING_CHUNK|seq=<持久 seq>|of=<count>|line=<原件逐字>
+N2_RING_DUMP|from_seq=…|to_seq=…|count=…|emitted=…|frozen_tail_seq=…|first_seq=…|last_seq=…|records=…|bytes=…|malformed=…|lost_records=…|overflow=…|acked_seq=…|result=dumped|rejected|reason=…|diag=true|is_evidence=false
+N2_RING_ACK_SHELL|requestId=…|sess=…|up_to_seq=…|acked_seq=…|advanced=true|false|result=acked|rejected|reason=…|diag=true|is_evidence=false
+```
+
+* Every persisted record is `N2R|sess=…|seq=…|mono_ms=…|wall_ms=…|line=<原件>`
+  (`encode_record:1110-1113`), so a page is addressed by its **durable `seq`**
+  (across appends, rotation and restarts) and never by a line index over
+  concatenated segments.
+* `file` is the **basename** only (the absolute sandbox path is never logged);
+  `bytes` is the current segment's size; `max_bytes`/`segments` are the
+  configured bounds (defaults 4 MiB / 3, `N2_RING_ARMED` reports them).
+* **The ROTATED line the product writes is `rotated_span_line`**, not the bare
+  `rotated_line`: it names the seq span that left the ring
+  (`dropped_from_seq`/`dropped_to_seq`/`dropped_records`) plus the ACK watermark
+  the rotation was gated on. `rotated_line` remains only as the terse form.
+* `N2_RING_STATS` is emitted at configuration, **every 60 s while armed**
+  (shell-side `N2_RING_STATS_MS = 60000`, core-formatted), at teardown
+  (`onDestroy`, after `connectorStop`/`destroyOnce`) and on demand; it IS
+  recorded in the ring. `N2_RING_ROTATED` is the FIRST record of the new
+  segment; `N2_RING_WRITE_FAILED` (the FIRST failure only) rides hilog with the
+  ring tee suppressed — appending it could exceed the cap and rotate again,
+  which would announce again. `N2_RING_RECOVERED` (the first success after ≥1
+  failure) IS recorded. `N2_RING_LOST` / `N2_RING_OVERFLOW` carry the seq span
+  of what was NOT persisted, so a gap can be attributed instead of only counted.
+  `N2_RING_MANIFEST` is the head/tail/gap/failure inventory (the shell asks for
+  it with `n2_ring_manifest()` before a fetch); it IS recorded.
+* `code` is an errno-style token (`errno-<n>`, `io`) — never a path and never
+  the OS message text.
+* The replay fallback (`n2_ring_dump`, shell-side) re-emits the ring on hilog,
+  one `N2_RING_CHUNK|seq=<durable>|of=<count>|line=<verbatim>` per record
+  (`line=` is the LAST field; its content may contain `|`) plus ONE
+  `N2_RING_DUMP|from_seq=…|to_seq=…|…|emitted=…|…|result=dumped|rejected|reason=…|…`
+  summary. Both go to **HiLog only** — neither is written back into the ring.
+  The shell's own receipt IS written back:
+  `N2_RING_DUMP_SHELL|requestId=…|from_seq=…|to_seq=…|count=…|emitted=…|ack_watermark=…|result=…|reason=…|diag=true|is_evidence=false`
+  (`NetBirdN2Ring.ets::formatN2RingDumpShellLine`; the refusal variant
+  `…|from_seq=0|to_seq=0|count=0|emitted=0|ack_watermark=-1|result=rejected|reason=…`).
+  **A dump NEVER advances the ACK**: `ack_watermark=` is the core's `acked_seq` AS
+  IT STANDS at serve time (`-1` when the core refused the page), so re-emitting a
+  window proves the App READ it, not that the host persisted and verified it.
+  The legacy line-index document (`{"start":…}`) is refused
+  `legacy-start-index-unsupported` by both the shell and the core.
+* The retrieved watermark moves ONLY through the EXPLICIT host ACK channel
+  (`n2_ring_ack`, request document `{"session":…,"up_to_seq":…}` — BOTH keys
+  required; shell parser `NetBirdN2Ring.ets::parseN2RingAck`, core parser
+  `n2_ring::parse_ack_request`). The shell forwards the document VERBATIM and the
+  CORE binds it to the CURRENT arm inside the ring's own lock, so
+  `not-configured` / `not-armed` / `invalid-session` / `session-mismatch` (a stale
+  arm) / `seq-beyond-tail` are refused with the watermark UNCHANGED, and a repeat
+  is idempotent (`advanced=false`). The shell's receipt
+  `N2_RING_ACK_SHELL|requestId=…|sess=…|up_to_seq=…|acked_seq=…|advanced=…|result=acked|rejected|reason=…|diag=true|is_evidence=false`
+  is the ONLY line that reports an advancement; a document the shell refuses
+  never reaches the core and answers
+  `…|sess=-|up_to_seq=-1|acked_seq=-1|advanced=false|result=rejected|reason=…`.
+
+
+## 10. What changed for the pre-existing lines (2026-09-29)
+
+The C/D implementation composes the shell's own `N2_*` lines as template
+literals so the SAME string is logged and handed to the ring
+(`n2RingAppend`). The emitted text is unchanged; the two lines whose source shape
+was pinned by a selfcheck (`N2_SOCK|phase=protect_settle`, `VPN_WG_DATAPLANE_FED`)
+keep their exact field set and order.
+
+## 11. The core `Wb` protect-settle row (2026-09-30, frozen E1 substitute evidence)
+
+`n2_socket_trace::adopted` (the takeover behind `WgDevice::adopt` /
+`reattach_socket`) now emits the class's OWN `N2_SOCK|phase=protect_settle` row
+for every armed `Wb` takeover, via the existing `sock_receipt_line` and
+unconditionally of any C/D plan. The row, its field semantics and the
+deliberate absence of a wall field are specified in §6. Two consequences for a
+judge:
+
+* the frozen E1 identity chain no longer depends on the CD substitute receipt:
+  the row is on hilog (and, being a core `hilog::emit`, in the armed-only ring)
+  even when no C/D plan is active, so `phase=open` / `phase=protect_begin`
+  (shell) → `phase=protect_settle` (shell, original fd) → the core row (same
+  `fd`/`request_id`/`protect_generation`, plus the validated `dup_fd`) is
+  complete from the log alone;
+* the row's `protect_mono_ms` is comparable with the tee anchors
+  (`N2_TUN_GAP|reason=before-tun-attach`, `N7_WG_FEED|adopted|mono_ms`), which is
+  what the frozen E1 ordering ("`protect_settle` strictly before tee attach")
+  needs; the shell's `wall_ms` cannot be compared with those `sys::mono_ms`
+  values, and the core row does NOT pretend otherwise.
+
+The two field sets the SHELL emits for `open`/`protect_begin`/`protect_settle`
+are untouched, and so are the zero-send counters: the takeover row is a
+diagnostic only, `N2_FD_SEND` keeps reporting `packets`/`bytes` for the same
+registration.

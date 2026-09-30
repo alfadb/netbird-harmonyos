@@ -25,7 +25,9 @@
 use std::path::PathBuf;
 
 use netbird_core::n2_a_event;
+use netbird_core::n2_cd;
 use netbird_core::n2_control;
+use netbird_core::n2_ring;
 use netbird_core::n2_sandwich;
 use netbird_core::n2_socket_trace;
 use netbird_core::wg_device::{self, N2DestinationTee, TunFrameDir, TunFrameTee};
@@ -206,9 +208,72 @@ fn samples() -> Vec<(&'static str, String)> {
         ("N2_SOCK phase=first_io", n2_socket_trace::sock_receipt_line("I", "42", 7, 8, true,
             9, 2, 123, 456, "192.168.1.2:5000", "192.0.2.1:3478", "udp", 31, "sent",
             "stun_txn_abcd", "first_io")),
+        // N2 frozen E1 (Wb substitute evidence, 2026-09-30): the row the CORE
+        // emits on every takeover of a protected base socket — `proto=17`, the
+        // validated core dup and the protect-settle instant (`protect_mono_ms`);
+        // it deliberately carries NO wall field, because the only wall the core
+        // could name at emission is the later takeover clock.
+        ("N2_SOCK phase=protect_settle (Wb core takeover)",
+            n2_socket_trace::sock_receipt_line("Wb", "wg_12", 21, 22, true, 2, 4, 1_234, 0,
+                "192.168.50.199:51820", "unknown", "17", 21, "success", "core-adopt",
+                "protect_settle")),
         ("N2_FD_SEND", n2_socket_trace::fd_send_fields_line("Ws", 7, 8, 2, 288, 6_001)),
         // ---- item 6: the data-plane adoption -------------------------------
         ("N7_WG_FEED adopted", wg_device::wg_feed_adopted_line(2, 1, 1, 2_377)),
+        // ---- N2 first batch C/D columns (2026-09-29): the App-side switching
+        // sandwich — one sample per phase. The Wb row is NO LONGER an exemption
+        // from the controls: its receipt is the new generation's protect settle -
+        ("N2_CD_SANDWICH phase=plan", n2_cd::format_line("cd-C-M-1", "C", "M", 1, "plan",
+            "none", "planned", "ok", "wifi", "unknown", "192.168.50.199:0", "unknown",
+            -1, -1, "unknown", n2_cd::SWITCH_WAIT_MS, 1_000)),
+        ("N2_CD_SANDWICH phase=plan (D, pre-set on Wi-Fi)",
+            n2_cd::format_line("cd-D-M-1", "D", "M", 1, "plan", "none", "planned",
+                "await-start-bearer", "wifi", "unknown", "192.168.50.199:0", "unknown",
+                -1, -1, "unknown", n2_cd::PREPARE_WAIT_MS, 1_010)),
+        ("N2_CD_SANDWICH phase=prepare prepared (D, the Wi-Fi -> cellular hop)",
+            n2_cd::format_line("cd-D-M-1", "D", "M", 1, "prepare", "none", "prepared",
+                "not-a-d-measurement", "wifi", "cellular", "192.168.50.199:0", "10.77.0.5:0",
+                -1, -1, "unknown", n2_cd::PREPARE_WAIT_MS, 1_050)),
+        ("N2_CD_SANDWICH phase=prepare ready (D, the cellular-side recovery)",
+            n2_cd::format_line("cd-D-M-1", "D", "M", 1, "prepare", "none", "ready",
+                "preparation-recovered", "wifi", "cellular", "192.168.50.199:0",
+                "10.77.0.5:0", -1, -1, "unknown", n2_cd::SWITCH_WAIT_MS, 1_080)),
+        ("N2_CD_SANDWICH phase=pre", n2_cd::format_line("cd-C-M-1", "C", "M", 1, "pre",
+            "cd-C-M-1-pre", "hit", "ok", "wifi", "unknown", "192.168.50.199:0", "unknown",
+            -1, -1, "unknown", 3_000, 1_100)),
+        ("N2_CD_SANDWICH phase=switch", n2_cd::format_line("cd-C-M-1", "C", "M", 1, "switch",
+            "none", "switched", "ok", "wifi", "cellular", "192.168.50.199:0", "10.77.0.5:0",
+            -1, -1, "unknown", n2_cd::RECEIPT_WAIT_MS, 1_200)),
+        ("N2_CD_SANDWICH phase=receipt", n2_cd::format_line("cd-C-M-1", "C", "M", 1, "receipt",
+            "none", "receipt", "ok", "wifi", "cellular", "192.168.50.199:0", "10.77.0.5:0",
+            21, 22, "192.0.2.9:443", n2_cd::RECEIPT_WAIT_MS, 1_400)),
+        ("N2_CD_SANDWICH phase=post", n2_cd::format_line("cd-C-M-1", "C", "M", 1, "post",
+            "cd-C-M-1-post", "observed", "control-hit-after-receipt", "wifi", "cellular",
+            "192.168.50.199:0", "10.77.0.5:0", 21, 22, "192.0.2.9:443", n2_cd::POST_WAIT_MS,
+            1_600)),
+        ("N2_CD_SANDWICH phase=receipt exempted (Wb, its new-generation protect settle)",
+            n2_cd::format_line("cd-C-Wb-1", "C", "Wb", 1, "receipt", "none", "exempted",
+                "wb-protect-settle-success", "wifi", "cellular", "192.168.50.199:0",
+                "10.77.0.5:0", 31, 32, "unknown", n2_cd::POST_WAIT_MS, 1_800)),
+        // ---- N2 first batch C/D columns (2026-09-29): the evidence ring ----
+        ("N2_RING_ARMED", n2_ring::armed_line(n2_ring::DEFAULT_FILE_NAME,
+            n2_ring::DEFAULT_MAX_BYTES, n2_ring::DEFAULT_SEGMENTS, 0, 1_000)),
+        ("N2_RING_STATS", n2_ring::stats_line(n2_ring::DEFAULT_FILE_NAME, true, 4_096,
+            n2_ring::DEFAULT_MAX_BYTES, n2_ring::DEFAULT_SEGMENTS, 12, 3, 1, "errno-28",
+            2_000)),
+        ("N2_RING_WRITE_FAILED", n2_ring::fail_line(1, "errno-28", 1_500)),
+        ("N2_RING_RECOVERED", n2_ring::recovered_line(2, 2_500)),
+        ("N2_RING_ROTATED (terse form)", n2_ring::rotated_line(3, 4_194_304, 3_000)),
+        ("N2_RING_ROTATED (the span the product writes)", n2_ring::rotated_span_line(
+            3, 4_194_304, 11, 40, 30, 40, 3_000)),
+        ("N2_RING_LOST", n2_ring::lost_line(5, 6, 2, "write-failed", "errno-28", 1_500)),
+        ("N2_RING_OVERFLOW", n2_ring::overflow_line(7, 5, 11, 4, 1_500)),
+        ("N2_RING_CHUNK", n2_ring::chunk_line(7, 2, "N2_TUN_DEST|scope=session|frames=3")),
+        ("N2_RING_DUMP", n2_ring::dump_summary_line(&n2_ring::DumpPage {
+            result: "dumped", reason: "ok", from_seq: 0, to_seq: 9, count: 2,
+            frozen_tail_seq: 12, first_seq: 1, last_seq: 12, records: 12, bytes: 512,
+            malformed: 0, lost_records: 0, overflow: false, acked_seq: 4,
+            session: Some("arm-1".into()), lines: Vec::new() }, 2)),
     ]
 }
 
@@ -219,8 +284,10 @@ fn render() -> String {
          # client/core/tests/n2_log_samples.rs from the REAL formatters.\n\
          # One sample per Rust-side N2 line; volatile inputs are fixed arguments.\n\
          # Shell-side lines (N2_*_SHELL, phase=open/protect_begin/protect_settle,\n\
-         # VPN_WG_DATAPLANE_FED, the arm-ticket lines) are NOT producible from Rust\n\
-         # and are documented in docs/n2-log-formats-20260928.md instead.\n");
+         # VPN_WG_DATAPLANE_FED, VPN_NETWORK_*, N2_RING_DUMP_SHELL, the arm-ticket lines)\n\
+         # are NOT producible from Rust and are documented in docs/n2-log-formats-20260928.md.\n\
+         # N2_RING_MANIFEST embeds the live clock (manifest_line_now) and therefore has no\n\
+         # fixed-argument formatter; its field sequence is listed in that doc §9.\n");
     for (label, line) in samples() {
         out.push_str(&format!("# {label}\n{line}\n"));
     }
@@ -257,7 +324,10 @@ fn the_fixture_covers_every_rust_side_n2_line() {
     let rendered = render();
     for needle in ["N2_SANDWICH|", "N2_CONTROL_SENT|", "N2_CONTROL_HIT|", "N2_CONTROL_MISS|",
         "N2_TUN_LEAK|", "N2_TUN_TEE_STATS|", "N2_TUN_GAP|", "N2_TUN_DEST|", "N2_TUN_FRAMES|",
-        "N2_A_EVENT|", "N2_SOCK|", "N2_FD_SEND|", "N7_WG_FEED|adopted|"] {
+        "N2_A_EVENT|", "N2_SOCK|", "N2_FD_SEND|", "N7_WG_FEED|adopted|",
+        "N2_CD_SANDWICH|", "N2_RING_ARMED|", "N2_RING_STATS|", "N2_RING_WRITE_FAILED|",
+        "N2_RING_RECOVERED|", "N2_RING_ROTATED|", "N2_RING_LOST|", "N2_RING_OVERFLOW|",
+        "N2_RING_CHUNK|", "N2_RING_DUMP|"] {
         assert!(rendered.contains(needle), "the baseline is missing {needle}");
     }
     // item 1 + item 4: the two fields the review asked for are actually there.
@@ -271,6 +341,19 @@ fn the_fixture_covers_every_rust_side_n2_line() {
         "the gap field names");
     assert!(rendered.contains("N7_WG_FEED|adopted|peers=2|endpoints=1|egress_replayed=1|mono_ms=2377"),
         "the adopted line fields");
+    // N2 frozen E1 (Wb substitute evidence, 2026-09-30): the core's own
+    // protect-settle row is pinned — the frozen E1 join fields, `proto=17`, the
+    // protect instant, and NO wall field (an adopt-time wall must never be
+    // presented as the protect wall).
+    let settle = rendered
+        .lines()
+        .find(|line| line.starts_with("N2_SOCK|phase=protect_settle|"))
+        .expect("the core protect-settle row is in the baseline");
+    assert!(settle.contains(
+        "|kind=Wb|request_id=wg_12|fd=21|dup_fd=22|protect=success|protect_ms=2|protect_generation=4|protect_mono_ms=1234|local=192.168.50.199:51820|remote=unknown|proto=17|net_id=21|status=success|detail=core-adopt|diag=true|is_evidence=false"),
+        "the frozen E1 Wb protect-settle row: {settle}");
+    assert!(!settle.contains("wall_ms") && !settle.contains("first_mono_ms"),
+        "the protect-settle row claims no wall clock: {settle}");
     // the shell-side lines are named in the header (they cannot be produced by
     // a Rust formatter) so the baseline states the boundary explicitly
     assert!(rendered.contains("# Shell-side lines (N2_*_SHELL, phase=open/protect_begin/protect_settle,"),

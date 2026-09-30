@@ -135,6 +135,21 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("n2_sandwich_pre", napi_n2_sandwich_pre);
     reg!("n2_sandwich_post", napi_n2_sandwich_post);
     reg!("n2_sandwich_poll", napi_n2_sandwich_poll);
+    reg!("n2_cd_plan", napi_n2_cd_plan);
+    reg!("n2_cd_prepare", napi_n2_cd_prepare);
+    reg!("n2_cd_ready", napi_n2_cd_ready);
+    reg!("n2_cd_pre", napi_n2_cd_pre);
+    reg!("n2_cd_switch_identified", napi_n2_cd_switch_identified);
+    reg!("n2_cd_identity", napi_n2_cd_identity);
+    reg!("n2_cd_poll", napi_n2_cd_poll);
+    reg!("n2_cd_post", napi_n2_cd_post);
+    reg!("n2_ring_configure", napi_n2_ring_configure);
+    reg!("n2_ring_append", napi_n2_ring_append);
+    reg!("n2_ring_disable", napi_n2_ring_disable);
+    reg!("n2_ring_status", napi_n2_ring_status);
+    reg!("n2_ring_dump", napi_n2_ring_dump);
+    reg!("n2_ring_manifest", napi_n2_ring_manifest);
+    reg!("n2_ring_ack", napi_n2_ring_ack);
     reg!("n2h_collector_arm", napi_n2h_collector_arm);
     reg!("n2h_collector_status", napi_n2h_collector_status);
     reg!("n2h_collector_evidence", napi_n2h_collector_evidence);
@@ -167,15 +182,19 @@ static REGISTER_MODULE_FN: unsafe extern "C" fn() = register_module;
 // argument helpers
 // ---------------------------------------------------------------------------
 
+/// The exported-argument view. `argv` must be able to hold the LONGEST export
+/// signature: `n2_cd_plan` / `n2_cd_switch_identified` take EIGHT arguments
+/// (`napi_get_cb_info` never writes more than the capacity it is handed, so a
+/// smaller array silently reads the tail as "missing").
 struct Args {
     env: NapiEnv,
-    argv: [NapiValue; 4],
+    argv: [NapiValue; 8],
     argc: usize,
 }
 
 fn cb_args(env: NapiEnv, info: NapiCallbackInfo) -> Args {
-    let mut argv: [NapiValue; 4] = [core::ptr::null_mut(); 4];
-    let mut argc: usize = 4;
+    let mut argv: [NapiValue; 8] = [core::ptr::null_mut(); 8];
+    let mut argc: usize = 8;
     unsafe {
         napi_get_cb_info(
             env,
@@ -408,6 +427,21 @@ mod tests {
             "n2_sandwich_pre",
             "n2_sandwich_post",
             "n2_sandwich_poll",
+            "n2_cd_plan",
+            "n2_cd_prepare",
+            "n2_cd_ready",
+            "n2_cd_pre",
+            "n2_cd_switch_identified",
+            "n2_cd_identity",
+            "n2_cd_poll",
+            "n2_cd_post",
+            "n2_ring_configure",
+            "n2_ring_append",
+            "n2_ring_disable",
+            "n2_ring_status",
+            "n2_ring_dump",
+            "n2_ring_manifest",
+            "n2_ring_ack",
             "n2h_collector_arm",
             "n2h_collector_status",
             "n2h_collector_evidence",
@@ -765,6 +799,108 @@ unsafe extern "C" fn napi_n2_sandwich_post(env: NapiEnv, info: NapiCallbackInfo)
 
 unsafe extern "C" fn napi_n2_sandwich_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::connector::n2_sandwich_poll_json())
+}
+
+// N2 first batch C/D columns (2026-09-29): the App-side switching sandwich. The
+// host issues the plan while Wi-Fi is up; the shell then drives the D
+// preparation (`prepare`/`ready`), the pre control, the IDENTIFIED switch
+// report, the receipt poll and the post control. Every entry is inert (silent)
+// while unarmed.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn napi_n2_cd_plan(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_plan_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2), a.i32_at(3, 0), &a.string_at(4), &a.string_at(5), &a.string_at(6),
+        &a.string_at(7)))
+}
+
+// D column: the Wi-Fi → cellular preparation hop (recorded, never the D
+// measurement) and its recovery on the cellular side.
+unsafe extern "C" fn napi_n2_cd_prepare(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_prepare_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2), &a.string_at(3)))
+}
+
+unsafe extern "C" fn napi_n2_cd_ready(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_ready_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_n2_cd_pre(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_pre_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2)))
+}
+
+// The switch report WITH the identity baseline: `(net_id_after, fd, dup_fd,
+// generation)` of the OLD network's live registration, as the `N2_SOCK` receipt
+// names them (`fd=` shell original, `dup_fd=` core-owned copy,
+// `protect_generation=`). -1 in the fd/dup pair = not measured (fail-closed).
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn napi_n2_cd_switch_identified(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_switch_identified_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2), &a.string_at(3), a.i32_at(4, -1) as i64, a.i32_at(5, -1),
+        a.i32_at(6, -1), a.i32_at(7, -1) as i64))
+}
+
+// N2 C/D: the identity of the live registration of one outer class, as the
+// `N2_SOCK` receipts name it (`{ok,fd,dup_fd,generation,net_id}`). Read-only:
+// the shell fills the switch report's `identity_fd`/`identity_dup_fd`/
+// `identity_generation` from it and passes `-1` for every field while the
+// answer is not `ok` (the core then fail-closes the plan by name).
+unsafe extern "C" fn napi_n2_cd_identity(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_identity_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_n2_cd_poll(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::n2_cd_poll_json())
+}
+
+unsafe extern "C" fn napi_n2_cd_post(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_cd_post_json(&a.string_at(0), &a.string_at(1),
+        &a.string_at(2)))
+}
+
+// N2 first batch C/D columns (2026-09-29): the armed-only app-internal evidence
+// ring file (configure / forward one shell line / disable / counters) plus the
+// B4 retrieval surface: the seq-paged dump, the manifest, and the EXPLICIT
+// session-bound host ACK (`{"session":…,"up_to_seq":…}`) that alone moves the
+// retrieved watermark gating rotation.
+unsafe extern "C" fn napi_n2_ring_configure(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_ring_configure_json(&a.string_at(0), a.i32_at(1, 0) as i64,
+        a.i32_at(2, 0) as i64))
+}
+
+unsafe extern "C" fn napi_n2_ring_append(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_ring_append_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_n2_ring_disable(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::n2_ring_disable_json())
+}
+
+unsafe extern "C" fn napi_n2_ring_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::n2_ring_status_json())
+}
+
+unsafe extern "C" fn napi_n2_ring_dump(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_ring_dump_json(&a.string_at(0)))
+}
+
+unsafe extern "C" fn napi_n2_ring_manifest(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::n2_ring_manifest_json())
+}
+
+unsafe extern "C" fn napi_n2_ring_ack(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::n2_ring_ack_json(&a.string_at(0)))
 }
 
 unsafe extern "C" fn napi_n2h_collector_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

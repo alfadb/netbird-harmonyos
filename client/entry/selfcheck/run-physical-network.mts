@@ -42,7 +42,7 @@ try {
     networkDirty: true, networkRecoveryReady: false, networkRecoveryActive: false,
     isDns: false, destroyRequested: false, destroyInFlight: false,
     recreateInFlight: false, hasConnection: true, connectionUnchanged: true,
-    protectDeviation: false
+    protectDeviation: false, productionGateBlocked: false
   };
   check('startup physical switch permits protected management resupply',
     policy.socketSupplyRejectionReason(gate) === '');
@@ -61,6 +61,34 @@ try {
     policy.socketSupplyRejectionReason({ ...gate, destroyRequested: true }) === 'destroy');
   check('protect deviation never supplies a socket',
     policy.socketSupplyRejectionReason({ ...gate, protectDeviation: true }) === 'deviation');
+  // N2 first batch C/D columns (2026-09-30): the formal-switch production gate.
+  // It refuses a production socket for EVERY kind of supply — including the
+  // protected-DNS one and including while the recovery is active, because the
+  // pre control the gate waits for is sent by the shell's own opener.
+  check('a closed formal-switch gate refuses a management supply',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true }) ===
+      'production-gate');
+  check('a closed formal-switch gate refuses the protected-DNS supply too',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      isDns: true, networkRecoveryReady: true, networkRecoveryActive: true }) ===
+      'production-gate');
+  check('the gate wins over the network-dirty rule (it is checked first)',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      networkRecoveryReady: true }) === 'production-gate');
+  check('the gate still loses to the lifecycle reasons (destroy/recreate/connection)',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      destroyRequested: true }) === 'destroy' &&
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      recreateInFlight: true }) === 'recreate' &&
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      hasConnection: false }) === 'no-connection' &&
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: true,
+      protectDeviation: true }) === 'deviation');
+  check('an OPEN gate changes nothing (the pre-existing rules still decide)',
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: false,
+      networkRecoveryReady: true }) === 'network-dirty' &&
+    policy.socketSupplyRejectionReason({ ...gate, productionGateBlocked: false,
+      networkRecoveryReady: true, networkRecoveryActive: true, isDns: true }) === '');
   const firstConnection = {};
   const nextConnection = {};
   const supplyFor = (current: object | undefined, selected: object,

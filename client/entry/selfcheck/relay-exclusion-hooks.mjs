@@ -92,7 +92,11 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '  },\n' +
   '  getConnectionPropertiesSync: (handle) => {\n' +
   '    if (netThrowing("getConnectionPropertiesSync")) { netBoom("getConnectionPropertiesSync"); }\n' +
-  '    return { interfaceName: "wlan0", dnses: netDnses(handle.netId) };\n' +
+  // N2 C/D first batch: `linkAddresses` is the raw platform fact the pure
+  // `classifyN2Bearer` records as `local=`; an unseeded netId answers none.
+  '    const props = (netG().__NB_NET_PROPS_BY_ID || {})[handle.netId] || {};\n' +
+  '    return { interfaceName: "wlan0", dnses: netDnses(handle.netId),\n' +
+  '      linkAddresses: props.linkAddresses || [] };\n' +
   '  },\n' +
   '  getAllNetsSync: () => {\n' +
   '    if (netThrowing("getAllNetsSync")) { netBoom("getAllNetsSync"); }\n' +
@@ -122,7 +126,38 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    kind: "none", marker: "none" }),\n' +
   '  n2_sandwich_post: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
   '    kind: "none", marker: "none" }),\n' +
-  '  n2_sandwich_poll: () => JSON.stringify({ ok: true, posts: [] })\n' +
+  '  n2_sandwich_poll: () => JSON.stringify({ ok: true, posts: [] }),\n' +
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich seams and
+  // the evidence ring. These suites never arm the evidence switch, so the plan
+  // poll never reaches the core; the exports exist so an accidental call fails
+  // loudly with the honest refusal instead of a TypeError. The ring calls are
+  // silent no-ops (an unarmed session configures no ring).
+  '  n2_cd_plan: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    id: "none", pre_marker: "none", post_marker: "none" }),\n' +
+  '  n2_cd_pre: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    id: "none" }),\n' +
+  '  n2_cd_prepare: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    id: "none" }),\n' +
+  '  n2_cd_ready: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    id: "none" }),\n' +
+  '  n2_cd_identity: () => JSON.stringify({ ok: false, fd: -1, dup_fd: -1, generation: -1,\n' +
+  '    net_id: 0 }),\n' +
+  '  n2_cd_switch_identified: () => JSON.stringify({ ok: false, result: "rejected",\n' +
+  '    reason: "not-armed", id: "none" }),\n' +
+  '  n2_cd_post: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    id: "none" }),\n' +
+  '  n2_cd_poll: () => JSON.stringify({ ok: true, step: "idle", phase: "", id: "", kind: "",\n' +
+  '    column: "", fd: -1, dup_fd: -1, remote: "unknown", marker: "", result: "", line: "" }),\n' +
+  '  n2_ring_configure: () => JSON.stringify({ ok: true }),\n' +
+  '  n2_ring_append: () => JSON.stringify({ ok: true, enabled: false }),\n' +
+  '  n2_ring_disable: () => JSON.stringify({ ok: true }),\n' +
+  '  n2_ring_status: () => JSON.stringify({ ok: true, enabled: false, line: "" }),\n' +
+  '  n2_ring_manifest: () => JSON.stringify({ ok: true, line: "" }),\n' +
+  '  n2_ring_dump: () => JSON.stringify({ ok: false, result: "rejected",\n' +
+  '    reason: "not-configured", from_seq: 0, to_seq: 0, count: 0, emitted: 0,\n' +
+  '    lines: [], summary: "" }),\n' +
+  '  n2_ring_ack: () => JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '    session: "", up_to_seq: 0, acked_seq: 0, previous_acked_seq: 0, advanced: false })\n' +
   '};');
 
 const VPN_ABILITY = 'data:text/javascript,' + encodeURIComponent(
@@ -177,7 +212,11 @@ const SHIMS = {
   './NetBirdN2ControlRequest': 'NetBirdN2ControlRequest.shim.ts',
   // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules.
   './NetBirdN2AEvent': 'NetBirdN2AEvent.shim.ts',
-  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts'
+  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts',
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich pure module
+  // and the ring pure module, staged and shimmed like the modules above.
+  './NetBirdN2CdPlan': 'NetBirdN2CdPlan.shim.ts',
+  './NetBirdN2Ring': 'NetBirdN2Ring.shim.ts'
 };
 
 export function resolve(specifier, context, next) {

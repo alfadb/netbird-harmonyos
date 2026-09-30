@@ -288,12 +288,20 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdN2Sandwich',
   // N2 T3 §3 (2026-09-28): the positive-control request pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
-  'NetBirdN2ControlRequest'];
+  'NetBirdN2ControlRequest',
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich pure module
+  // (plan parse + bearer classification + direction verdict + target choice)
+  // and the ring-dump pure module the REAL extension imports.
+  'NetBirdN2CdPlan',
+  'NetBirdN2Ring'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult'],
+    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult',
+    // N2 first batch C/D columns: the erased bearer-facts shape
+    // `physicalDefaultBearerFacts` answers.
+    'PhysicalBearerFacts'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     'DnsDerivationInput', 'DnsDerivationResult', 'DnsNetProbe',
@@ -313,7 +321,13 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdN2AEvent: ['N2AEventDecision', 'N2AEventRequest', 'N2AEventReply'],
   NetBirdN2Sandwich: ['N2SandwichPost'],
   // N2 T3 §3: the erased positive-control request/decision shapes.
-  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest']
+  NetBirdN2ControlRequest: ['N2ControlDecision', 'N2ControlRequest'],
+  // N2 first batch C/D columns (2026-09-29): the erased shapes of the
+  // switching-sandwich and ring-dump pure modules.
+  NetBirdN2CdPlan: ['N2CdPlanDecision', 'N2CdPlanRequest', 'N2BearerFacts'],
+  NetBirdN2Ring: ['N2RingDumpDecision', 'N2RingDumpRequest',
+    // 2026-09-29 (explicit host ACK): the erased ACK request/decision shapes.
+    'N2RingAckDecision', 'N2RingAckRequest']
 };
 
 const REQUEST_ID = 'req-i3a';
@@ -1337,11 +1351,13 @@ try {
   const STIMULUS_PAYLOAD = '{"kind":"M","id":"b-M-1"}';
   const N2_EVIDENCE_OPTIONS: Record<string, unknown> = {
     trustedSelf: true, capture32: ['119.29.29.119'],
-    outerDestinations: ['udp/119.29.29.119:53'], hdcControlIp: '', allowHdcOverlap: false
+    outerDestinations: ['udp/119.29.29.119:53', 'tcp/119.29.29.119:443'],
+    hdcControlIp: '', allowHdcOverlap: false
   };
   const resetRequestState = (): void => {
     G['__NB_CONTROL_CALLS'] = undefined;
     G['__NB_CONTROL_LAST'] = undefined;
+    G['__NB_CONTROL_IDS'] = undefined;
     G['__NB_CONTROL_MODE'] = undefined;
     G['__NB_CONTROL_ERROR'] = undefined;
     G['__NB_STIMULUS_CALLS'] = undefined;
@@ -1356,6 +1372,96 @@ try {
     G['__NB_SANDWICH_POST_LAST'] = undefined;
     G['__NB_SANDWICH_POLL_CALLS'] = undefined;
     G['__NB_SANDWICH_POLL_ANSWER'] = undefined;
+    // N2 first batch C/D columns (2026-09-29): the switching-sandwich and ring
+    // seams of the SAME recording core stub.
+    G['__NB_CD_PLAN_CALLS'] = undefined;
+    G['__NB_CD_PLAN_LAST'] = undefined;
+    G['__NB_CD_PLAN_ANSWER'] = undefined;
+    G['__NB_CD_PRE_CALLS'] = undefined;
+    G['__NB_CD_PRE_LAST'] = undefined;
+    G['__NB_CD_PRE_ANSWER'] = undefined;
+    G['__NB_CD_PREPARE_CALLS'] = undefined;
+    G['__NB_CD_PREPARE_LAST'] = undefined;
+    G['__NB_CD_PREPARE_ANSWER'] = undefined;
+    G['__NB_CD_READY_CALLS'] = undefined;
+    G['__NB_CD_READY_LAST'] = undefined;
+    G['__NB_CD_READY_ANSWER'] = undefined;
+    G['__NB_CD_IDENTITY_CALLS'] = undefined;
+    G['__NB_CD_IDENTITY_LAST'] = undefined;
+    G['__NB_CD_IDENTITY_ANSWER'] = undefined;
+    G['__NB_CD_SWITCH_CALLS'] = undefined;
+    G['__NB_CD_SWITCH_LAST'] = undefined;
+    G['__NB_CD_SWITCH_ANSWER'] = undefined;
+    G['__NB_CD_POST_CALLS'] = undefined;
+    G['__NB_CD_POST_LAST'] = undefined;
+    G['__NB_CD_POST_ANSWER'] = undefined;
+    G['__NB_CD_POLL_CALLS'] = undefined;
+    G['__NB_CD_POLL_ANSWER'] = undefined;
+    G['__NB_CD_POLL_ANSWER_QUEUE'] = undefined;
+    G['__NB_RING'] = undefined;
+    G['__NB_RING_CONFIG'] = undefined;
+    G['__NB_RING_DISABLED'] = undefined;
+    G['__NB_RING_STATUS_CALLS'] = undefined;
+    G['__NB_RING_CONFIGURE_ANSWER'] = undefined;
+    G['__NB_RING_MANIFEST_CALLS'] = undefined;
+    G['__NB_RING_MANIFEST_ANSWER'] = undefined;
+    G['__NB_RING_DUMP_CALLS'] = undefined;
+    G['__NB_RING_DUMP_LAST'] = undefined;
+    G['__NB_RING_DUMP_ANSWER'] = undefined;
+    G['__NB_RING_ACK_CALLS'] = undefined;
+    G['__NB_RING_ACK_LAST'] = undefined;
+    G['__NB_RING_ACK_ANSWER'] = undefined;
+    // 2026-09-29 (explicit host ACK): the throw switch of the ACK seam.
+    G['__NB_CORE_ACK_THROW'] = undefined;
+    // 2026-09-30 (formal-switch production-recovery gate): the production-supply
+    // counters/records the hook bumps at the core seams, the parked-DNS answer,
+    // the simulated core clock and the minimal C/D core-plan mirror.
+    resetSupply();
+    G['__NB_DNS_POLL'] = undefined;
+    G['__NB_CD_CORE'] = undefined;
+    G['__NB_CD_CORE_NOW'] = undefined;
+    G['__NB_SOCKET_SUPPLY_REQUEST'] = undefined;
+    G['__NB_WG_FD'] = undefined;
+    G['__NB_ICE_FD'] = undefined;
+    G['__NB_ORDER'] = undefined;
+  };
+  // Every core seam that hands the core a production socket, one counter each
+  // (exclusion-generation-hooks.mjs). `supplyTotal()` is the SINGLE number the
+  // gate assertions read: "the gate let nothing through" = 0.
+  const SUPPLY_KEYS: string[] = ['__NB_SUPPLY_DNS', '__NB_SUPPLY_DNS_RESOLVE',
+    '__NB_SUPPLY_WG_OPEN', '__NB_SUPPLY_WG_FEED', '__NB_SUPPLY_MGMT_OPEN',
+    '__NB_SUPPLY_MGMT_ADDR', '__NB_SUPPLY_MGMT_FEED', '__NB_SUPPLY_SIGNAL_FEED',
+    '__NB_SUPPLY_ICE_OPEN', '__NB_SUPPLY_ICE_FEED'];
+  const resetSupply = (): void => {
+    for (const key of SUPPLY_KEYS) { G[key] = undefined; }
+    G['__NB_SUPPLY_REPLY'] = undefined;
+    G['__NB_SUPPLY_REPLY_LAST'] = undefined;
+  };
+  const supplyOf = (key: string): number => Number(G[key] ?? 0);
+  const supplyTotal = (): number => {
+    let total: number = 0;
+    for (const key of SUPPLY_KEYS) { total += supplyOf(key); }
+    return total;
+  };
+  const supplyLine = (): string => JSON.stringify({
+    dns: supplyOf('__NB_SUPPLY_DNS'), resolve: supplyOf('__NB_SUPPLY_DNS_RESOLVE'),
+    wgOpen: supplyOf('__NB_SUPPLY_WG_OPEN'), wgFeed: supplyOf('__NB_SUPPLY_WG_FEED'),
+    mgmtOpen: supplyOf('__NB_SUPPLY_MGMT_OPEN'), mgmtAddr: supplyOf('__NB_SUPPLY_MGMT_ADDR'),
+    mgmtFeed: supplyOf('__NB_SUPPLY_MGMT_FEED'), signalFeed: supplyOf('__NB_SUPPLY_SIGNAL_FEED'),
+    iceOpen: supplyOf('__NB_SUPPLY_ICE_OPEN'), iceFeed: supplyOf('__NB_SUPPLY_ICE_FEED')
+  });
+  const sleepMs = async (ms: number): Promise<void> => {
+    await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, ms); });
+  };
+  // Cancel the ability's own real timers, so a later 4 s ICE top-up tick can
+  // never land inside another scenario's supply counts.
+  const stopAbilityTimers = (ability: Record<string, unknown>): void => {
+    const ice: unknown = ability['iceTopUpTimer'];
+    if (typeof ice === 'number' && ice !== -1) { clearInterval(ice); }
+    ability['iceTopUpTimer'] = -1;
+    const supply: unknown = ability['socketSupplyTimer'];
+    if (typeof supply === 'number' && supply !== -1) { clearInterval(supply); }
+    ability['socketSupplyTimer'] = -1;
   };
   const controlCalls = (): number => Number(G['__NB_CONTROL_CALLS'] ?? 0);
   const armedAbility = (): Record<string, unknown> => {
@@ -1725,6 +1831,713 @@ try {
     REQUEST_ID + '-I-pre|target=119.29.29.119:53|result=observed|reason=post-control-hit|' +
     'diag=true|is_evidence=false',
     lastLine('N2_SANDWICH_SHELL|'));
+
+  // ---------------- N16-N25 (N2 first batch C/D columns, 2026-09-29) --------
+  // The App-side switching sandwich and the app-internal evidence ring, driven
+  // through the REAL EntryAbility (the 5-channel rule) and the REAL armed
+  // extension polls against the recording core seams.
+  const CD_PATH = `${FIXTURE_FILESDIR}/netbird-n2-cd-plan`;
+  const CD_NAME = 'netbird-n2-cd-plan';
+  const RING_DUMP_PATH = `${FIXTURE_FILESDIR}/netbird-n2-ring-dump`;
+  const RING_DUMP_NAME = 'netbird-n2-ring-dump';
+  // 2026-09-29 (explicit host ACK): the SEPARATE channel that alone may advance
+  // the retrieved watermark.
+  const RING_ACK_PATH = `${FIXTURE_FILESDIR}/netbird-n2-ring-ack`;
+  const RING_ACK_NAME = 'netbird-n2-ring-ack';
+  const RING_ACK_PAYLOAD = '{"session":"auto-1-2-3","up_to_seq":9}';
+  const RING_PATH = `${FIXTURE_FILESDIR}/netbird-n2-evidence-ring.log`;
+  const CD_PAYLOAD = '{"column":"C","kind":"M","rep":1,"id":"cd-C-M-1"}';
+  const RING_DUMP_PAYLOAD = '{"from_seq":0,"to_seq":9,"count":2}';
+  const cdEntry = newEntry();
+
+  // N16: the explicit non-secret want lands byte-verbatim in filesDir, logged as
+  // file name + real UTF-8 byte count, and clears the other five leftovers.
+  resetFs();
+  resetRequestState();
+  seedFile(STIMULUS_PATH, STIMULUS_PAYLOAD);
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  seedFile(AEVENT_PATH, AEVENT_PAYLOAD);
+  seedFile(RING_DUMP_PATH, RING_DUMP_PAYLOAD);
+  seedFile(RING_ACK_PATH, RING_ACK_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_cd_plan': CD_PAYLOAD } }, {});
+  check('N16 the plan want payload is written VERBATIM to <filesDir>/netbird-n2-cd-plan',
+    fileOf(CD_PATH) === CD_PAYLOAD, JSON.stringify(fileOf(CD_PATH)));
+  check('N16 the write is logged as file name + UTF-8 byte count only, payload never printed',
+    linesWith('N2_CD_PLAN_FILE_WRITTEN|').length === 1 &&
+    lastLine('N2_CD_PLAN_FILE_WRITTEN|') === 'N2_CD_PLAN_FILE_WRITTEN|file=' + CD_NAME +
+    '|bytes=' + String(Buffer.byteLength(CD_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret' &&
+    logs().join('\n').indexOf('cd-C-M-1') < 0,
+    linesWith('N2_CD_PLAN_FILE_WRITTEN|').join('\n'));
+  check('N16 a plan-only launch clears the other five channel leftovers',
+    fileOf(STIMULUS_PATH) === undefined && fileOf(CONTROL_PATH) === undefined &&
+    fileOf(AEVENT_PATH) === undefined && fileOf(RING_DUMP_PATH) === undefined &&
+    fileOf(RING_ACK_PATH) === undefined &&
+    lastLine('N2_STIMULUS_FILE_REMOVED|') === 'N2_STIMULUS_FILE_REMOVED|file=netbird-n2-stimulus' +
+    '|note=default-no-stimulus' &&
+    lastLine('N2_A_EVENT_FILE_REMOVED|') === 'N2_A_EVENT_FILE_REMOVED|file=' + AEVENT_NAME +
+    '|note=default-no-a-event' &&
+    lastLine('N2_RING_DUMP_FILE_REMOVED|') === 'N2_RING_DUMP_FILE_REMOVED|file=' + RING_DUMP_NAME +
+    '|note=default-no-ring-dump' &&
+    lastLine('N2_RING_ACK_FILE_REMOVED|') === 'N2_RING_ACK_FILE_REMOVED|file=' + RING_ACK_NAME +
+    '|note=default-no-ring-ack',
+    JSON.stringify({ stimulus: fileOf(STIMULUS_PATH), control: fileOf(CONTROL_PATH),
+      aEvent: fileOf(AEVENT_PATH), ringDump: fileOf(RING_DUMP_PATH),
+      ringAck: fileOf(RING_ACK_PATH) }));
+
+  // N16b: the arm ticket is KEPT for a plan-only launch (the T7a item 7 rule now
+  // spans the six request channels).
+  seedFile(ARM_TICKET_PATH, ARM_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird', parameters: { 'n2_cd_plan': CD_PAYLOAD } }, {});
+  check('N16b a plan launch WITHOUT the arm ticket keeps the ticket and logs KEPT',
+    fileOf(ARM_TICKET_PATH) === ARM_PAYLOAD && fileOf(CD_PATH) === CD_PAYLOAD &&
+    linesWith('N2H_ARM_TICKET_REMOVED|').length === 0 &&
+    lastLine('N2H_ARM_TICKET_KEPT|') === 'N2H_ARM_TICKET_KEPT|file=' + ARM_TICKET_NAME +
+    '|note=request-launch-without-arm-ticket|diag=true|is_evidence=false',
+    JSON.stringify({ arm: fileOf(ARM_TICKET_PATH), kept: lastLine('N2H_ARM_TICKET_KEPT|') }));
+
+  // N17: the one-pending-request-per-launch rule now spans SIX channels. A
+  // combination the pre-existing branches do not cover names exactly the
+  // pending channels; the legacy two/three-channel shapes keep their exact
+  // lines (N3/N11 above).
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedFile(CONTROL_PATH, CONTROL_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_cd_plan': CD_PAYLOAD,
+        'n2_control': CONTROL_PAYLOAD } }, {});
+  check('N17 a plan + control launch writes NEITHER and removes both leftovers',
+    fileOf(CD_PATH) === undefined && fileOf(CONTROL_PATH) === undefined &&
+    linesWith('N2_CD_PLAN_FILE_WRITTEN|').length === 0 &&
+    linesWith('N2_CONTROL_FILE_WRITTEN|').length === 0);
+  check('N17 the refusal names exactly the pending channels by file',
+    linesWith('N2_CONTROL_COMBO_REJECTED|').length === 1 &&
+    lastLine('N2_CONTROL_COMBO_REJECTED|') === 'N2_CONTROL_COMBO_REJECTED|pending=' +
+    CONTROL_NAME + ',' + CD_NAME + '|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+    lastLine('N2_CONTROL_COMBO_REJECTED|'));
+
+  // N17b: a ring-dump-only launch writes its own file and clears the others.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_ring_dump': RING_DUMP_PAYLOAD } }, {});
+  check('N17b a ring-dump-only launch writes the dump request and clears the plan leftover',
+    fileOf(RING_DUMP_PATH) === RING_DUMP_PAYLOAD && fileOf(CD_PATH) === undefined &&
+    lastLine('N2_RING_DUMP_FILE_WRITTEN|') === 'N2_RING_DUMP_FILE_WRITTEN|file=' + RING_DUMP_NAME +
+    '|bytes=' + String(Buffer.byteLength(RING_DUMP_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret' &&
+    lastLine('N2_CD_PLAN_FILE_REMOVED|') === 'N2_CD_PLAN_FILE_REMOVED|file=' + CD_NAME +
+    '|note=default-no-cd-plan',
+    JSON.stringify({ ringDump: fileOf(RING_DUMP_PATH), plan: fileOf(CD_PATH) }));
+
+  // N17c: a ring-ACK-only launch writes its own file and clears the others — a
+  // launch carrying BOTH ring channels writes NEITHER (the generic refusal names
+  // exactly the pending files, in the fixed channel order).
+  resetFs();
+  resetRequestState();
+  seedFile(RING_DUMP_PATH, RING_DUMP_PAYLOAD);
+  seedFile(CD_PATH, CD_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_ring_ack': RING_ACK_PAYLOAD } }, {});
+  check('N17c a ring-ACK-only launch writes the ACK request and clears the other leftovers',
+    fileOf(RING_ACK_PATH) === RING_ACK_PAYLOAD && fileOf(RING_DUMP_PATH) === undefined &&
+    fileOf(CD_PATH) === undefined &&
+    lastLine('N2_RING_ACK_FILE_WRITTEN|') === 'N2_RING_ACK_FILE_WRITTEN|file=' + RING_ACK_NAME +
+    '|bytes=' + String(Buffer.byteLength(RING_ACK_PAYLOAD, 'utf8')) +
+    '|note=diagnostic-only-non-secret' &&
+    lastLine('N2_RING_DUMP_FILE_REMOVED|') === 'N2_RING_DUMP_FILE_REMOVED|file=' + RING_DUMP_NAME +
+    '|note=default-no-ring-dump',
+    JSON.stringify({ ringAck: fileOf(RING_ACK_PATH), ringDump: fileOf(RING_DUMP_PATH),
+      plan: fileOf(CD_PATH) }));
+  resetFs();
+  resetRequestState();
+  seedFile(RING_DUMP_PATH, RING_DUMP_PAYLOAD);
+  resetLog();
+  (cdEntry['onCreate'] as (w: unknown, l: unknown) => void)(
+    { bundleName: 'cn.alfadb.netbird',
+      parameters: { 'n2h_arm_options': ARM_PAYLOAD, 'n2_ring_dump': RING_DUMP_PAYLOAD,
+        'n2_ring_ack': RING_ACK_PAYLOAD } }, {});
+  check('N17c a dump + ACK launch writes NEITHER and names both pending files',
+    fileOf(RING_DUMP_PATH) === undefined && fileOf(RING_ACK_PATH) === undefined &&
+    linesWith('N2_RING_DUMP_FILE_WRITTEN|').length === 0 &&
+    linesWith('N2_RING_ACK_FILE_WRITTEN|').length === 0 &&
+    lastLine('N2_CONTROL_COMBO_REJECTED|') === 'N2_CONTROL_COMBO_REJECTED|pending=' +
+    RING_DUMP_NAME + ',' + RING_ACK_NAME +
+    '|note=one-pending-request-per-launch|diag=true|is_evidence=false',
+    JSON.stringify({ ringDump: fileOf(RING_DUMP_PATH), ringAck: fileOf(RING_ACK_PATH),
+      line: lastLine('N2_CONTROL_COMBO_REJECTED|') }));
+
+  // N18: the ARMED plan poll measures the starting bearer, hands the parsed plan
+  // to the core with the shell's verdict and target and logs its plan receipt.
+  // The NEW orchestration sends NO control here: acceptance only REGISTERS the
+  // plan (both controls belong to the plan's own network — the pre is owed on
+  // the NEW network after the formal switch). The bearer facts need the SAME
+  // handle `physicalDefaultNetId()` selected: a NOT_VPN capability (15) and at
+  // least one IPv4 resolver, plus the net in `getAllNetsSync`.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedNetCtx({
+    __NB_NET_DEFAULT_ID: 101,
+    __NB_NET_ALL_IDS: [101],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] } },
+    __NB_NET_PROPS_BY_ID: { 101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+      linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] } }
+  });
+  G['__NB_CD_PLAN_ANSWER'] = JSON.stringify({ ok: true, result: 'planned', reason: 'ok',
+    id: 'cd-C-M-1', pre_marker: 'cd-C-M-1-pre', post_marker: 'cd-C-M-1-post', line: '' });
+  const cdAbility = armedAbility();
+  resetLog();
+  (cdAbility['pollN2CdPlan'] as () => void)();
+  const cdPlanLast = (G['__NB_CD_PLAN_LAST'] ?? {}) as Record<string, unknown>;
+  check('N18 the armed poll calls the core exactly ONCE with the parsed plan, the measured ' +
+    'bearer facts, the tcp target of its kind and the shell start verdict',
+    Number(G['__NB_CD_PLAN_CALLS'] ?? 0) === 1 && cdPlanLast['id'] === 'cd-C-M-1' &&
+    cdPlanLast['column'] === 'C' && cdPlanLast['kind'] === 'M' && cdPlanLast['rep'] === 1 &&
+    cdPlanLast['target'] === '119.29.29.119:443' && cdPlanLast['netBefore'] === 'wifi' &&
+    cdPlanLast['localBefore'] === '192.168.50.199' && cdPlanLast['startVerdict'] === '',
+    JSON.stringify(cdPlanLast));
+  check('N18 the plan receipt names the marker the core handed back, and the file is consumed once',
+    linesWith('N2_CD_SANDWICH_SHELL|').length === 1 &&
+    linesWith('N2_CD_SANDWICH_SHELL|')[0] === 'N2_CD_SANDWICH_SHELL|requestId=' + REQUEST_ID +
+    '|id=cd-C-M-1|column=C|kind=M|rep=1|phase=plan|marker=cd-C-M-1-pre|result=planned|reason=ok|' +
+    'diag=true|is_evidence=false' && fileOf(CD_PATH) === undefined,
+    JSON.stringify(linesWith('N2_CD_SANDWICH_SHELL|')));
+  check('N18 acceptance sends NO control: the pre belongs to the NEW network, not the old one',
+    controlCalls() === 0 && (G['__NB_CD_PRE_CALLS'] ?? 0) === 0 &&
+    (G['__NB_CD_POLL_CALLS'] ?? 0) === 0 && cdAbility['n2CdActive'] === 'cd-C-M-1',
+    JSON.stringify({ controls: controlCalls(), pre: G['__NB_CD_PRE_CALLS'],
+      polls: G['__NB_CD_POLL_CALLS'], active: cdAbility['n2CdActive'] }));
+
+  // N19: the SWITCH hook. The observer reports the plan switch BEFORE the
+  // re-feed, with the direction verdict the pure module computed from the
+  // measured bearer transition (column C: wifi -> cellular is the valid one)
+  // AND the identity of the OLD network's live registration of the kind. The
+  // core's own poll then drives the PRE control on the NEW network and, once
+  // the tee HIT it, opens the recovery gate.
+  seedNetCtx({
+    __NB_NET_DEFAULT_ID: 202,
+    __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: {
+      101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] },
+      202: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '10.77.0.5', family: 1 } }] }
+    }
+  });
+  cdAbility['networkNetId'] = 101;
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 31, dup_fd: 32,
+    generation: 5, net_id: 101 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    JSON.stringify({ ok: true, step: 'pre', phase: '', id: 'cd-C-M-1', kind: 'M', column: 'C',
+      fd: -1, dup_fd: -1, remote: 'unknown', marker: 'cd-C-M-1-pre', result: 'pre',
+      reason: 'send-pre-now', line: '' }),
+    JSON.stringify({ ok: true, step: 'recover', phase: '', id: 'cd-C-M-1', kind: 'M',
+      column: 'C', fd: -1, dup_fd: -1, remote: 'unknown', marker: '', result: 'recover',
+      reason: 'pre-hit-observed', line: '' })
+  ];
+  resetLog();
+  (cdAbility['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 202, 202);
+  const cdSwitchLast = (G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>;
+  check('N19 the identified switch report carries the after-facts, the new netId and the OLD ' +
+    'identity triple',
+    Number(G['__NB_CD_SWITCH_CALLS'] ?? 0) === 1 && cdSwitchLast['id'] === 'cd-C-M-1' &&
+    cdSwitchLast['verdict'] === '' && cdSwitchLast['netAfter'] === 'cellular' &&
+    cdSwitchLast['localAfter'] === '10.77.0.5' && cdSwitchLast['netId'] === 202 &&
+    cdSwitchLast['fd'] === 31 && cdSwitchLast['dupFd'] === 32 &&
+    cdSwitchLast['generation'] === 5,
+    JSON.stringify(cdSwitchLast));
+  check('N19 the identity baseline is read from the core for the plan\'s OWN kind',
+    Number(G['__NB_CD_IDENTITY_CALLS'] ?? 0) === 1 &&
+    JSON.stringify(G['__NB_CD_IDENTITY_LAST']) === JSON.stringify({ kind: 'M' }));
+  check('N19 the switch receipt is a phase line of its own',
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=switch|marker=none|result=switched|reason=ok|') > 0,
+    lastLine('N2_CD_SANDWICH_SHELL|'));
+  check('N19 the switch evidence reaches the ring verbatim (same text as hilog)',
+    ((G['__NB_RING'] as string[] ?? []).indexOf(lastLine('VPN_NETWORK_EVENT|')) >= 0) &&
+    lastLine('VPN_NETWORK_EVENT|').indexOf('|switched=true|action=redial') > 0,
+    JSON.stringify({ ring: G['__NB_RING'], log: lastLine('VPN_NETWORK_EVENT|') }));
+  await drainProbe();
+  await drainProbe();
+  check('N19 the switch-instant step poll sends the PRE control on the NEW network and reports ' +
+    'the tee\'s HIT to the core',
+    controlCalls() === 1 &&
+    JSON.stringify(G['__NB_CONTROL_LAST']) === JSON.stringify({ armed: N2_EVIDENCE_OPTIONS,
+      target: '119.29.29.119:443', protocol: 'tcp', id: 'cd-C-M-1-pre' }) &&
+    JSON.stringify(G['__NB_CD_PRE_LAST']) === JSON.stringify({ id: 'cd-C-M-1', result: 'hit',
+      reason: 'ok' }),
+    JSON.stringify({ control: G['__NB_CONTROL_LAST'], pre: G['__NB_CD_PRE_LAST'] }));
+  check('N19 the core\'s step=recover opens the recovery gate exactly once',
+    cdAbility['n2CdGateState'] === 'released' &&
+    cdAbility['n2CdGatePlan'] === 'cd-C-M-1' &&
+    cdAbility['n2CdGateEpoch'] === cdAbility['networkEpoch'] &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=pre|marker=cd-C-M-1-pre|result=hit|') > 0,
+    JSON.stringify({ gate: cdAbility['n2CdGateState'],
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // N19b: the WRONG direction is refused by name. Column C expects
+  // wifi -> cellular; the measured transition here is wifi -> wifi, so the
+  // pure module answers `direction-mismatch`, the shell hands that token to the
+  // core, and the terminal line says `unsat` with it.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedNetCtx({
+    __NB_NET_DEFAULT_ID: 202,
+    __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [1] } },
+    __NB_NET_PROPS_BY_ID: {
+      101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] },
+      202: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '192.168.50.240', family: 1 } }] }
+    }
+  });
+  G['__NB_CD_PLAN_ANSWER'] = JSON.stringify({ ok: true, result: 'planned', reason: 'ok',
+    id: 'cd-C-M-1', pre_marker: 'cd-C-M-1-pre', post_marker: 'cd-C-M-1-post', line: '' });
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 33, dup_fd: 34,
+    generation: 5, net_id: 101 });
+  G['__NB_CD_SWITCH_ANSWER'] = JSON.stringify({ ok: false, result: 'unsat',
+    reason: 'direction-mismatch', id: 'cd-C-M-1', line: '' });
+  const mismatchAbility = armedAbility();
+  resetLog();
+  (mismatchAbility['pollN2CdPlan'] as () => void)();
+  await drainProbe();
+  await drainProbe();
+  mismatchAbility['networkNetId'] = 101;
+  resetLog();
+  (mismatchAbility['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 202, 202);
+  check('N19b a wrong-direction transition is refused by name and passed to the core',
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['verdict'] ===
+      'direction-mismatch' &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['fd'] === 33 &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['generation'] === 5 &&
+    lastLine('N2_CD_SANDWICH_SHELL|') === 'N2_CD_SANDWICH_SHELL|requestId=' + REQUEST_ID +
+    '|id=cd-C-M-1|column=C|kind=M|rep=1|phase=switch|marker=none|result=unsat|' +
+    'reason=direction-mismatch|diag=true|is_evidence=false',
+    JSON.stringify({ switch: G['__NB_CD_SWITCH_LAST'],
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+  check('N19b a terminal UNSAT drops the shell latch and sends NO control',
+    mismatchAbility['n2CdActive'] === '' && controlCalls() === 0,
+    JSON.stringify({ active: mismatchAbility['n2CdActive'], controls: controlCalls() }));
+
+  // N20: an UNARMED session refuses the plan by name, calls the core ZERO times
+  // and still consumes the file.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  const unarmedCd = freshAbility(mod, FIXTURE_FILESDIR);
+  resetLog();
+  (unarmedCd['pollN2CdPlan'] as () => void)();
+  check('N20 an unarmed session refuses (not-armed), calls the core ZERO times, consumes the file',
+    Number(G['__NB_CD_PLAN_CALLS'] ?? 0) === 0 && fileOf(CD_PATH) === undefined &&
+    lastLine('N2_CD_SANDWICH_SHELL|') === 'N2_CD_SANDWICH_SHELL|requestId=' + REQUEST_ID +
+    '|id=cd-C-M-1|column=C|kind=M|rep=1|phase=plan|marker=none|result=rejected|reason=not-armed|' +
+    'diag=true|is_evidence=false',
+    JSON.stringify({ calls: G['__NB_CD_PLAN_CALLS'], line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // N21: a malformed payload is refused by name BEFORE any core call.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, '{"column":"E","kind":"M","rep":1,"id":"x"}');
+  const malformedCd = armedAbility();
+  resetLog();
+  (malformedCd['pollN2CdPlan'] as () => void)();
+  check('N21 a malformed plan is refused by name with no core call and is consumed',
+    Number(G['__NB_CD_PLAN_CALLS'] ?? 0) === 0 && fileOf(CD_PATH) === undefined &&
+    lastLine('N2_CD_SANDWICH_SHELL|') === 'N2_CD_SANDWICH_SHELL|requestId=' + REQUEST_ID +
+    '|id=none|column=none|kind=none|rep=0|phase=plan|marker=none|result=rejected|' +
+    'reason=invalid-column|diag=true|is_evidence=false',
+    JSON.stringify({ calls: G['__NB_CD_PLAN_CALLS'], line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // N21b: Wb is NOT exempt any more. The core's revised state machine owes the
+  // base socket a PRE and a POST control like every other class; its RECEIPT is
+  // the new generation's `protect_settle` and the switch hands out no
+  // `exempted`. The shell half measured here: acceptance registers without a
+  // control, the switch-instant poll sends the pre, the receipt step sends the
+  // post — TWO controls, both on the new network, both reported to the core.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, '{"column":"C","kind":"Wb","rep":1,"id":"cd-C-Wb-1"}');
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 101, __NB_NET_ALL_IDS: [101],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] } },
+    __NB_NET_PROPS_BY_ID: { 101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+      linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] } } });
+  G['__NB_CD_PLAN_ANSWER'] = JSON.stringify({ ok: true, result: 'planned', reason: 'ok',
+    id: 'cd-C-Wb-1', pre_marker: 'cd-C-Wb-1-pre', post_marker: 'cd-C-Wb-1-post', line: '' });
+  const wbAbility = armedAbility();
+  resetLog();
+  (wbAbility['pollN2CdPlan'] as () => void)();
+  check('N21b a Wb plan is registered and acceptance still sends NO control',
+    Number(G['__NB_CD_PLAN_CALLS'] ?? 0) === 1 && controlCalls() === 0 &&
+    (G['__NB_CD_PRE_CALLS'] ?? 0) === 0 &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=plan|marker=cd-C-Wb-1-pre|result=planned|') > 0,
+    JSON.stringify({ calls: G['__NB_CD_PLAN_CALLS'], controls: controlCalls(),
+      pre: G['__NB_CD_PRE_CALLS'], line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: {
+      101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] },
+      202: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '10.77.0.5', family: 1 } }] } } });
+  wbAbility['networkNetId'] = 101;
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 41, dup_fd: 42,
+    generation: 2, net_id: 101 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    JSON.stringify({ ok: true, step: 'pre', phase: '', id: 'cd-C-Wb-1', kind: 'Wb', column: 'C',
+      fd: -1, dup_fd: -1, remote: 'unknown', marker: 'cd-C-Wb-1-pre', result: 'pre',
+      reason: 'send-pre-now', line: '' }),
+    JSON.stringify({ ok: true, step: 'receipt', phase: 'receipt', id: 'cd-C-Wb-1', kind: 'Wb',
+      column: 'C', fd: 41, dup_fd: 42, remote: '192.0.2.9:53', marker: 'cd-C-Wb-1-post',
+      result: 'exempted', reason: 'wb-protect-settle-success', line: '' })
+  ];
+  resetLog();
+  (wbAbility['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 202, 202);
+  check('N21b its switch is still measured and the plan switches with the identity baseline',
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['id'] === 'cd-C-Wb-1' &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['verdict'] === '' &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['netAfter'] === 'cellular' &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['fd'] === 41 &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=switch|marker=none|result=switched|') > 0,
+    JSON.stringify({ switch: G['__NB_CD_SWITCH_LAST'],
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+  await drainProbe();
+  await drainProbe();
+  const wbPreLast = (G['__NB_CD_PRE_LAST'] ?? {}) as Record<string, unknown>;
+  check('N21b the Wb row now gets its PRE control on the new network (udp, its own opener)',
+    controlCalls() === 2 &&
+    JSON.stringify(G['__NB_CONTROL_IDS']) === JSON.stringify(['cd-C-Wb-1-pre', 'cd-C-Wb-1-post']) &&
+    wbPreLast['id'] === 'cd-C-Wb-1' && wbPreLast['result'] === 'hit',
+    JSON.stringify({ ids: G['__NB_CONTROL_IDS'], pre: wbPreLast }));
+  const wbPostLast = (G['__NB_CD_POST_LAST'] ?? {}) as Record<string, unknown>;
+  check('N21b the Wb row now gets its POST control too: TWO controls, both reported to the core',
+    controlCalls() === 2 &&
+    JSON.stringify(G['__NB_CONTROL_LAST']) === JSON.stringify({ armed: N2_EVIDENCE_OPTIONS,
+      target: '119.29.29.119:53', protocol: 'udp', id: 'cd-C-Wb-1-post' }) &&
+    wbPostLast['id'] === 'cd-C-Wb-1' && wbPostLast['result'] === 'observed' &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=post|marker=cd-C-Wb-1-post|result=observed|') > 0,
+    JSON.stringify({ controls: controlCalls(), control: G['__NB_CONTROL_LAST'], post: wbPostLast,
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // N22: the two control legs of ONE plan, in the new orchestration's order.
+  // Acceptance registers only; the SWITCH-instant step poll sends the PRE on the
+  // new network; the core's `step=receipt` then sends the POST with the marker
+  // the CORE handed back. `step=closed` is a terminal line the core already
+  // emitted (the wait expiries arrive this way) and only clears the shell latch.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 101, __NB_NET_ALL_IDS: [101],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] } },
+    __NB_NET_PROPS_BY_ID: { 101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+      linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] } } });
+  G['__NB_CD_PLAN_ANSWER'] = JSON.stringify({ ok: true, result: 'planned', reason: 'ok',
+    id: 'cd-C-M-1', pre_marker: 'cd-C-M-1-pre', post_marker: 'cd-C-M-1-post', line: '' });
+  const stepAbility = armedAbility();
+  resetLog();
+  (stepAbility['pollN2CdPlan'] as () => void)();
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: {
+      101: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '192.168.50.199', family: 1 } }] },
+      202: { dnses: [{ address: '119.29.29.29', family: 1 }],
+        linkAddresses: [{ address: { address: '10.77.0.5', family: 1 } }] } } });
+  stepAbility['networkNetId'] = 101;
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 21, dup_fd: 22,
+    generation: 3, net_id: 101 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    JSON.stringify({ ok: true, step: 'pre', phase: '', id: 'cd-C-M-1', kind: 'M', column: 'C',
+      fd: -1, dup_fd: -1, remote: 'unknown', marker: 'cd-C-M-1-pre', result: 'pre',
+      reason: 'send-pre-now', line: '' }),
+    JSON.stringify({ ok: true, step: 'receipt', phase: 'receipt',
+      id: 'cd-C-M-1', kind: 'M', column: 'C', fd: 21, dup_fd: 22, remote: '192.0.2.9:443',
+      marker: 'cd-C-M-1-post', result: 'receipt', reason: 'ok', line: '' })
+  ];
+  resetLog();
+  (stepAbility['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netAvailable', 202, 202);
+  await drainProbe();
+  await drainProbe();
+  const cdPreLast = (G['__NB_CD_PRE_LAST'] ?? {}) as Record<string, unknown>;
+  check('N22 the switch-instant step poll sends the PRE control on the new network first',
+    controlCalls() === 2 && cdPreLast['id'] === 'cd-C-M-1' && cdPreLast['result'] === 'hit' &&
+    JSON.stringify(G['__NB_CONTROL_IDS']) === JSON.stringify(['cd-C-M-1-pre', 'cd-C-M-1-post']) &&
+    lastLine('N2_CD_SANDWICH_SHELL|').length > 0,
+    JSON.stringify({ ids: G['__NB_CONTROL_IDS'], pre: cdPreLast }));
+  const cdPostLast = (G['__NB_CD_POST_LAST'] ?? {}) as Record<string, unknown>;
+  check('N22 a receipt step sends the POST control with the core\'s marker and reports the verdict',
+    controlCalls() === 2 &&
+    JSON.stringify(G['__NB_CONTROL_LAST']) === JSON.stringify({ armed: N2_EVIDENCE_OPTIONS,
+      target: '119.29.29.119:443', protocol: 'tcp', id: 'cd-C-M-1-post' }) &&
+    cdPostLast['id'] === 'cd-C-M-1' && cdPostLast['result'] === 'observed' &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=post|marker=cd-C-M-1-post|result=observed|') > 0,
+    JSON.stringify({ calls: controlCalls(), control: G['__NB_CONTROL_LAST'], post: cdPostLast,
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // N22b: a `closed` step is a terminal line the CORE already emitted (the
+  // receipt timeout and the Wb exemption arrive this way); the shell mirrors the
+  // core's phase and result and only clears its latch.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 101,
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [], bearerTypes: [1] } } });
+  G['__NB_CD_PLAN_ANSWER'] = JSON.stringify({ ok: true, result: 'planned', reason: 'ok',
+    id: 'cd-C-M-1', pre_marker: 'cd-C-M-1-pre', post_marker: 'cd-C-M-1-post', line: '' });
+  const timeoutAbility = armedAbility();
+  resetLog();
+  (timeoutAbility['pollN2CdPlan'] as () => void)();
+  await drainProbe();
+  await drainProbe();
+  G['__NB_CD_POLL_ANSWER'] = JSON.stringify({ ok: true, step: 'closed', phase: 'receipt',
+    id: 'cd-C-M-1', kind: 'M', column: 'C', fd: -1, dup_fd: -1, remote: 'unknown',
+    marker: '', result: 'unsat', reason: 'receipt-wait-exceeded', line: '' });
+  resetLog();
+  (timeoutAbility['pollN2CdStep'] as () => void)();
+  check('N22b a closed step mirrors the core\'s phase and result (a receipt timeout is UNSAT)',
+    lastLine('N2_CD_SANDWICH_SHELL|') === 'N2_CD_SANDWICH_SHELL|requestId=' + REQUEST_ID +
+    '|id=cd-C-M-1|column=C|kind=M|rep=1|phase=receipt|marker=none|result=unsat|' +
+    'reason=receipt-wait-exceeded|diag=true|is_evidence=false',
+    lastLine('N2_CD_SANDWICH_SHELL|'));
+
+  // N23: the shell's ring half. An armed session forwards its own line families
+  // verbatim; an unarmed one forwards nothing (the ring does not exist before
+  // the arm and is stopped by every arming change).
+  resetFs();
+  resetRequestState();
+  const ringAbility = armedAbility();
+  (ringAbility['n2RingAppend'] as (l: string) => void)('N2_FIXTURE|line=1');
+  check('N23 an armed session forwards a shell line to the ring verbatim',
+    JSON.stringify(G['__NB_RING']) === JSON.stringify(['N2_FIXTURE|line=1']),
+    JSON.stringify(G['__NB_RING']));
+  const unarmedRing = freshAbility(mod, FIXTURE_FILESDIR);
+  (unarmedRing['n2RingAppend'] as (l: string) => void)('N2_FIXTURE|line=2');
+  check('N23 an unarmed session forwards NOTHING (the ring is armed-only)',
+    JSON.stringify(G['__NB_RING']) === JSON.stringify(['N2_FIXTURE|line=1']),
+    JSON.stringify(G['__NB_RING']));
+  check('N23 every arming change stops the ring and the teardown reports its counters',
+    (() => {
+      resetFs();
+      resetRequestState();
+      setArmFile(false, undefined);
+      const disarmAbility = freshAbility(mod, FIXTURE_FILESDIR);
+      disarmAbility['context'] = { filesDir: FIXTURE_FILESDIR };
+      resetLog();
+      (disarmAbility['readDiagSwitches'] as () => void)();
+      return Number(G['__NB_RING_DISABLED'] ?? 0) === 1;
+    })(),
+    JSON.stringify(G['__NB_RING_DISABLED']));
+
+  // N24: the ring FETCH fallback (`n2_ring_dump`), now SEQ-addressed. The shell
+  // validates the document, asks the CORE for the manifest first, forwards the
+  // document VERBATIM, re-emits exactly what the core answered (chunk records +
+  // one summary, both to HiLog only), ADVANCES NOTHING (the receipt mirrors the
+  // core's watermark as `ack_watermark=` and no ACK call is made), and writes
+  // only its own `N2_RING_DUMP_SHELL` receipt back into the ring.
+  resetFs();
+  resetRequestState();
+  const RING_PAGE = JSON.stringify({ ok: true, result: 'dumped', reason: 'ok', from_seq: 0,
+    to_seq: 9, count: 2, emitted: 2, frozen_tail_seq: 12, first_seq: 1, last_seq: 12,
+    records: 12, bytes: 512, malformed: 0, lost_records: 0, overflow: false, acked_seq: 4,
+    lines: ['N2_RING_CHUNK|seq=7|of=2|line=N2_A|1', 'N2_RING_CHUNK|seq=9|of=2|line=N2_B|2'],
+    summary: 'N2_RING_DUMP|from_seq=0|to_seq=9|count=2|emitted=2|frozen_tail_seq=12|' +
+      'first_seq=1|last_seq=12|records=12|bytes=512|malformed=0|lost_records=0|overflow=false|' +
+      'acked_seq=4|result=dumped|reason=ok|diag=true|is_evidence=false' });
+  seedFile(RING_DUMP_PATH, RING_DUMP_PAYLOAD);
+  G['__NB_RING_DUMP_ANSWER'] = RING_PAGE;
+  const dumpAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  dumpAbility['requestId'] = REQUEST_ID;
+  resetLog();
+  (dumpAbility['pollN2RingDump'] as () => void)();
+  check('N24 the dump re-emits the core\'s chunk records verbatim, in durable seq order',
+    JSON.stringify(linesWith('N2_RING_CHUNK|')) === JSON.stringify([
+      'N2_RING_CHUNK|seq=7|of=2|line=N2_A|1',
+      'N2_RING_CHUNK|seq=9|of=2|line=N2_B|2'
+    ]),
+    JSON.stringify(linesWith('N2_RING_CHUNK|')));
+  check('N24 the manifest is asked for FIRST and the document is forwarded VERBATIM, then consumed',
+    Number(G['__NB_RING_MANIFEST_CALLS'] ?? 0) === 1 &&
+    JSON.stringify(G['__NB_RING_DUMP_LAST']) === JSON.stringify({ request: RING_DUMP_PAYLOAD }) &&
+    lastLine('N2_RING_DUMP|').indexOf('N2_RING_DUMP|from_seq=0|to_seq=9|') === 0 &&
+    fileOf(RING_DUMP_PATH) === undefined,
+    JSON.stringify({ manifest: G['__NB_RING_MANIFEST_CALLS'], dump: G['__NB_RING_DUMP_LAST'],
+      line: lastLine('N2_RING_DUMP|'), file: fileOf(RING_DUMP_PATH) }));
+  check('N24 the dump NEVER advances the ACK: it reports the watermark and calls no ACK',
+    Number(G['__NB_RING_ACK_CALLS'] ?? 0) === 0 &&
+    lastLine('N2_RING_DUMP_SHELL|') === 'N2_RING_DUMP_SHELL|requestId=' + REQUEST_ID +
+    '|from_seq=0|to_seq=9|count=2|emitted=2|ack_watermark=4|result=dumped|reason=ok|' +
+    'diag=true|is_evidence=false',
+    JSON.stringify({ ack: G['__NB_RING_ACK_CALLS'], ackLast: G['__NB_RING_ACK_LAST'],
+      line: lastLine('N2_RING_DUMP_SHELL|') }));
+  check('N24 while armed ONLY the shell receipt enters the ring (never a chunk, never the summary)',
+    (() => {
+      resetFs();
+      resetRequestState();
+      seedFile(RING_DUMP_PATH, RING_DUMP_PAYLOAD);
+      G['__NB_RING_DUMP_ANSWER'] = RING_PAGE;
+      const armedDump = armedAbility();
+      resetLog();
+      (armedDump['pollN2RingDump'] as () => void)();
+      const ring = (G['__NB_RING'] as string[] ?? []);
+      return ring.length === 1 &&
+        ring[0] === 'N2_RING_DUMP_SHELL|requestId=' + REQUEST_ID +
+          '|from_seq=0|to_seq=9|count=2|emitted=2|ack_watermark=4|result=dumped|reason=ok|' +
+          'diag=true|is_evidence=false' &&
+        logs().join('\n').indexOf('N2_RING_CHUNK|') >= 0;
+    })(),
+    JSON.stringify(G['__NB_RING']));
+  check('N24 a legacy line-index document is refused by name, consumed and never reaches the core',
+    (() => {
+      resetFs();
+      resetRequestState();
+      seedFile(RING_DUMP_PATH, '{"start":0,"count":2}');
+      resetLog();
+      (dumpAbility['pollN2RingDump'] as () => void)();
+      return Number(G['__NB_RING_MANIFEST_CALLS'] ?? 0) === 0 &&
+        Number(G['__NB_RING_DUMP_CALLS'] ?? 0) === 0 &&
+        Number(G['__NB_RING_ACK_CALLS'] ?? 0) === 0 &&
+        lastLine('N2_RING_DUMP_SHELL|') === 'N2_RING_DUMP_SHELL|requestId=' + REQUEST_ID +
+        '|from_seq=0|to_seq=0|count=0|emitted=0|ack_watermark=-1|result=rejected|' +
+        'reason=legacy-start-index-unsupported|diag=true|is_evidence=false' &&
+        linesWith('N2_RING_CHUNK|').length === 0 && fileOf(RING_DUMP_PATH) === undefined;
+    })(),
+    lastLine('N2_RING_DUMP_SHELL|'));
+
+  // N25: the EXPLICIT host ACK channel (`n2_ring_ack`) — the ONLY path that may
+  // advance the retrieved watermark. The host writes the document through the
+  // private channel after it has persisted the fetched bytes; the shell parses
+  // it (both keys required), forwards it VERBATIM and mirrors the core's answer
+  // (`advanced=`). A refusal / a throw reports `advanced=false` and can never
+  // read as a confirmation.
+  resetFs();
+  resetRequestState();
+  const RING_ACK_OK = JSON.stringify({ ok: true, result: 'acked', reason: 'ok',
+    session: 'auto-1-2-3', up_to_seq: 9, acked_seq: 9, previous_acked_seq: 0, advanced: true });
+  seedFile(RING_ACK_PATH, RING_ACK_PAYLOAD);
+  G['__NB_RING_ACK_ANSWER'] = RING_ACK_OK;
+  const ackAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  ackAbility['requestId'] = REQUEST_ID;
+  resetLog();
+  (ackAbility['pollN2RingAck'] as () => void)();
+  check('N25 the ACK document is forwarded VERBATIM and the request consumed exactly once',
+    JSON.stringify(G['__NB_RING_ACK_LAST']) === JSON.stringify({ request: RING_ACK_PAYLOAD }) &&
+    fileOf(RING_ACK_PATH) === undefined,
+    JSON.stringify({ ack: G['__NB_RING_ACK_LAST'], file: fileOf(RING_ACK_PATH) }));
+  check('N25 the accepted ACK receipt names the arm, the watermark and the advancement',
+    lastLine('N2_RING_ACK_SHELL|') === 'N2_RING_ACK_SHELL|requestId=' + REQUEST_ID +
+    '|sess=auto-1-2-3|up_to_seq=9|acked_seq=9|advanced=true|result=acked|reason=ok|' +
+    'diag=true|is_evidence=false',
+    lastLine('N2_RING_ACK_SHELL|'));
+  check('N25 while armed the ACK receipt enters the ring (it is an ACK event)',
+    (() => {
+      resetFs();
+      resetRequestState();
+      seedFile(RING_ACK_PATH, RING_ACK_PAYLOAD);
+      G['__NB_RING_ACK_ANSWER'] = RING_ACK_OK;
+      const armedAck = armedAbility();
+      resetLog();
+      (armedAck['pollN2RingAck'] as () => void)();
+      const ring = (G['__NB_RING'] as string[] ?? []);
+      return ring.length === 1 && ring[0] === 'N2_RING_ACK_SHELL|requestId=' + REQUEST_ID +
+        '|sess=auto-1-2-3|up_to_seq=9|acked_seq=9|advanced=true|result=acked|reason=ok|' +
+        'diag=true|is_evidence=false';
+    })(),
+    JSON.stringify(G['__NB_RING']));
+  check('N25 a REFUSED core answer reports no advancement and the untouched watermark',
+    (() => {
+      resetFs();
+      resetRequestState();
+      seedFile(RING_ACK_PATH, '{"session":"arm-dead","up_to_seq":9}');
+      G['__NB_RING_ACK_ANSWER'] = JSON.stringify({ ok: false, result: 'rejected',
+        reason: 'session-mismatch', session: 'arm-dead', up_to_seq: 9, acked_seq: 0,
+        previous_acked_seq: 0, advanced: false });
+      resetLog();
+      (ackAbility['pollN2RingAck'] as () => void)();
+      return lastLine('N2_RING_ACK_SHELL|') === 'N2_RING_ACK_SHELL|requestId=' + REQUEST_ID +
+        '|sess=arm-dead|up_to_seq=9|acked_seq=0|advanced=false|result=rejected|' +
+        'reason=session-mismatch|diag=true|is_evidence=false' &&
+        fileOf(RING_ACK_PATH) === undefined;
+    })(),
+    lastLine('N2_RING_ACK_SHELL|'));
+  check('N25 a malformed / session-less document is refused by name and never reaches the core',
+    (() => {
+      const cases: string[] = ['{"up_to_seq":9}', '{"session":""}', '', 'not json',
+        '{"session":"a"}', '{"session":"a","up_to_seq":-1}'];
+      const expected: string[] = ['invalid-session', 'invalid-session', 'empty-request',
+        'invalid-json', 'invalid-request', 'invalid-request'];
+      for (let i = 0; i < cases.length; i++) {
+        resetFs();
+        resetRequestState();
+        seedFile(RING_ACK_PATH, cases[i]);
+        resetLog();
+        (ackAbility['pollN2RingAck'] as () => void)();
+        const line = lastLine('N2_RING_ACK_SHELL|');
+        const refused = line === 'N2_RING_ACK_SHELL|requestId=' + REQUEST_ID +
+          '|sess=-|up_to_seq=-1|acked_seq=-1|advanced=false|result=rejected|reason=' +
+          expected[i] + '|diag=true|is_evidence=false';
+        if (!refused || Number(G['__NB_RING_ACK_CALLS'] ?? 0) !== 0 ||
+          fileOf(RING_ACK_PATH) !== undefined) {
+          return false;
+        }
+      }
+      return true;
+    })(),
+    JSON.stringify({ calls: G['__NB_RING_ACK_CALLS'],
+      line: lastLine('N2_RING_ACK_SHELL|') }));
+  check('N25 a core THROW is reported as rejected with no watermark and consumes the request',
+    (() => {
+      resetFs();
+      resetRequestState();
+      seedFile(RING_ACK_PATH, RING_ACK_PAYLOAD);
+      const throwing = freshAbility(mod, FIXTURE_FILESDIR);
+      throwing['requestId'] = REQUEST_ID;
+      const original = G['__NB_CORE_ACK_THROW'];
+      G['__NB_CORE_ACK_THROW'] = true;
+      resetLog();
+      try {
+        (throwing['pollN2RingAck'] as () => void)();
+      } finally {
+        G['__NB_CORE_ACK_THROW'] = original;
+      }
+      return lastLine('N2_RING_ACK_SHELL|') === 'N2_RING_ACK_SHELL|requestId=' + REQUEST_ID +
+        '|sess=auto-1-2-3|up_to_seq=9|acked_seq=-1|advanced=false|result=rejected|' +
+        'reason=core-throw|diag=true|is_evidence=false' &&
+        fileOf(RING_ACK_PATH) === undefined;
+    })(),
+    lastLine('N2_RING_ACK_SHELL|'));
+  check('N25 an untouched ACK channel is a silent no-op (no file, no call, no line)',
+    (() => {
+      resetFs();
+      resetRequestState();
+      resetLog();
+      (ackAbility['pollN2RingAck'] as () => void)();
+      return linesWith('N2_RING_ACK_SHELL|').length === 0 &&
+        Number(G['__NB_RING_ACK_CALLS'] ?? 0) === 0;
+    })(),
+    JSON.stringify(linesWith('N2_RING_ACK_SHELL|')));
 
   // ---------------- C8 (2026-09-18): peer_overlay_ip verbatim bridging -----
   // The parallel posctl-target fix adds the optional non-secret
@@ -4493,6 +5306,483 @@ try {
     !/close\(|dup\(/.test(pp9Bodies) &&
     extSource.indexOf("'VPN_PROTECT_PROBE|requestId=%{public}s|fd=-1|handoff_id=|outcome=open-failed|'") > 0,
     JSON.stringify({ calls: pp9CoreCalls, len: pp9Bodies.length }));
+
+  // ---------------- N26-N30 (2026-09-30): the N2 C/D FORMAL-switch ----------
+  // ---------------- production-recovery gate -------------------------------
+  //
+  // What is under test is ONE shell-side invariant, driven through the REAL
+  // methods (pollN2CdPlan / physicalNetworkAvailable / pollN2CdStep /
+  // recoverPhysicalNetwork / fulfillSocketRequest / performControlledRecreate /
+  // readDiagSwitches / onDestroy) and measured by CALL COUNTS at the core seams
+  // (`__NB_SUPPLY_*`, bumped by exclusion-generation-hooks.mjs):
+  //
+  //   after a C/D plan's FORMAL switch is reported, and until the core's own
+  //   poll answers `step=recover` for THAT plan at THAT switch epoch, no
+  //   recovery / new-connection supply entry may hand the core a production
+  //   connection of the new network. Control markers are still sent (the shell
+  //   opens them itself, never through a supply entry), the D preparation hop
+  //   still recovers ordinarily, and an unarmed session has no gate at all.
+  //
+  // The CORE half (`n2_cd.rs`) is untouched; the hook's default C/D answers
+  // mirror only the core preconditions the shell cannot see (D preparation
+  // before the formal switch, DWELL_MIN_MS), so a fixture can never "switch" a
+  // plan the real core would refuse.
+
+  const D_PAYLOAD = '{"column":"D","kind":"M","rep":1,"id":"cd-D-M-1"}';
+  const CD_ORDER = (): string => JSON.stringify(G['__NB_ORDER'] ?? []);
+  const cdStepDoc = (step: string, phase: string, id: string, kind: string, column: string,
+    marker: string, result: string, reason: string): string => JSON.stringify({
+      ok: true, step: step, phase: phase, id: id, kind: kind, column: column,
+      fd: -1, dup_fd: -1, remote: 'unknown', marker: marker, result: result,
+      reason: reason, line: ''
+    });
+  const cdPlanDoc = (id: string): string => JSON.stringify({ ok: true, result: 'planned',
+    reason: 'ok', id: id, pre_marker: id + '-pre', post_marker: id + '-post', line: '' });
+  // The measured physical networks of this group. Wi-Fi 101 is the acceptance
+  // link, 202 the D preparation (cellular) link, 303 the Wi-Fi the D column
+  // returns to, 404 another Wi-Fi.
+  const WiFiLink = (address: string): Record<string, unknown> => ({
+    dnses: [{ address: '119.29.29.29', family: 1 }],
+    linkAddresses: [{ address: { address: address, family: 1 } }]
+  });
+  const seedWifi = (netId: number, address: string, others: number[] = []): void => {
+    const caps: Record<string, unknown> = {};
+    const props: Record<string, unknown> = {};
+    for (const id of others) {
+      caps[id] = { networkCap: [15], bearerTypes: [1] };
+      props[id] = WiFiLink('192.168.50.' + String(200 + (id % 50)));
+    }
+    caps[netId] = { networkCap: [15], bearerTypes: [1] };
+    props[netId] = WiFiLink(address);
+    seedNetCtx({ __NB_NET_DEFAULT_ID: netId,
+      __NB_NET_ALL_IDS: others.concat([netId]), __NB_NET_CAPS_BY_ID: caps,
+      __NB_NET_PROPS_BY_ID: props });
+  };
+  // The ability wired the way the create() flow leaves it (an accepted
+  // generation with a live connection and the frozen management endpoint), so
+  // recoverPhysicalNetwork can really run.
+  const gateReadyAbility = (netId: number): Record<string, unknown> => {
+    const ability = armedAbility();
+    ability['networkRecoveryReady'] = true;
+    ability['networkNetId'] = netId;
+    ability['connection'] = new FakeConnection();
+    ability['managementEndpoint'] = { host: 'mgmt.test', port: 33073, ip: '' };
+    ability['signalUri'] = '';
+    return ability;
+  };
+  const switchTo = (ability: Record<string, unknown>, eventNetId: number,
+    netId: number): void => {
+    (ability['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+      'netAvailable', eventNetId, netId);
+  };
+
+  // ---- N26: the D column, legal order, end to end ------------------------
+  // prepare -> ready (+ DWELL_MIN_MS) -> a REAL in-flight recovery of the
+  // preparation epoch (parked at the shell-side DNS await, with the
+  // pending-retry path armed) -> the formal cellular -> Wi-Fi switch -> the old
+  // await released. Before the core's `step=recover` the gate must let NOTHING
+  // through; after it, exactly one recovery.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, D_PAYLOAD);
+  seedWifi(101, '192.168.50.199');
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  G['__NB_CD_PLAN_ANSWER'] = cdPlanDoc('cd-D-M-1');
+  const dGate = gateReadyAbility(101);
+  resetLog();
+  (dGate['pollN2CdPlan'] as () => void)();
+  check('N26 the D plan is accepted as a PRE-SET plan (await-start-bearer) on the Wi-Fi link',
+    Number(G['__NB_CD_PLAN_CALLS'] ?? 0) === 1 &&
+    ((G['__NB_CD_PLAN_LAST'] ?? {}) as Record<string, unknown>)['column'] === 'D' &&
+    ((G['__NB_CD_CORE'] ?? {}) as Record<string, unknown>)['phase'] === 'await-start-bearer' &&
+    dGate['n2CdGateState'] === '' &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=plan|marker=cd-D-M-1-pre|result=planned|') > 0,
+    JSON.stringify({ plan: G['__NB_CD_PLAN_LAST'], core: G['__NB_CD_CORE'],
+      line: lastLine('N2_CD_SANDWICH_SHELL|') }));
+
+  // The preparation hop (Wi-Fi -> cellular): recorded, NO control, and the
+  // ordinary recovery runs and lands — this is what puts the plan in position.
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: { 101: WiFiLink('192.168.50.199'),
+      202: WiFiLink('10.77.0.5') } });
+  resetLog();
+  switchTo(dGate, 202, 202);
+  await sleepMs(250);
+  check('N26 the preparation hop recovers ORDINARILY (no gate, no control) and reports ready',
+    dGate['n2CdPreparePending'] === false && controlCalls() === 0 &&
+    ((G['__NB_CD_PREPARE_LAST'] ?? {}) as Record<string, unknown>)['verdict'] === '' &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf(
+      '|phase=prepare|marker=none|result=ready|reason=preparation-recovered|') > 0 &&
+    lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=202') > 0 &&
+    supplyTotal() > 0,
+    JSON.stringify({ prepare: G['__NB_CD_PREPARE_LAST'], supply: supplyLine(),
+      line: lastLine('N2_CD_SANDWICH_SHELL|'), recovered: lastLine('VPN_NETWORK_RECOVERED|') }));
+  const dReadyMs = Number(((G['__NB_CD_CORE'] ?? {}) as Record<string, unknown>)['readyMs'] ?? 0);
+  check('N26 the preparation recovery really handed the core n2_cd_ready',
+    Number(G['__NB_CD_READY_CALLS'] ?? 0) === 1 && dReadyMs > 0,
+    JSON.stringify({ ready: G['__NB_CD_READY_LAST'], readyMs: dReadyMs }));
+
+  // The DWELL_MIN_MS is satisfied, and a REAL in-flight recovery of the
+  // preparation epoch is arranged: its shell-side DNS resolve is parked, and a
+  // second entry (the same one the pending-retry / recreate-finally paths use)
+  // arms the pending flag. Note WHY this needs the entry call: once a D plan is
+  // Ready, every further MEASURED transition of that plan is either the formal
+  // cellular -> Wi-Fi switch or a direction refusal, so the "older attempt still
+  // in flight when the switch lands" state can only be reached through the real
+  // recovery entry itself — exactly the state the pending-retry and
+  // recreate-finally callers create in production.
+  G['__NB_CD_CORE_NOW'] = dReadyMs + 3001;
+  G['__NB_DNS_POLL'] = { ok: true, pending: true };
+  resetSupply();
+  (dGate['recoverPhysicalNetwork'] as () => Promise<void>)().catch(() => {});
+  (dGate['recoverPhysicalNetwork'] as () => Promise<void>)().catch(() => {});
+  await sleepMs(150);
+  check('N26 a REAL recovery of the preparation epoch is genuinely in flight (parked at the ' +
+    'DNS await) with the pending-retry path armed',
+    dGate['networkRecoveryActive'] === true && dGate['networkRecoveryPending'] === true &&
+    supplyOf('__NB_SUPPLY_DNS_RESOLVE') >= 1 && supplyOf('__NB_SUPPLY_WG_FEED') === 0,
+    JSON.stringify({ active: dGate['networkRecoveryActive'],
+      pending: dGate['networkRecoveryPending'], supply: supplyLine() }));
+
+  // The FORMAL switch: the gate is armed, the old registration's identity is
+  // captured and reported, the core's cleanup runs, and only THEN the pre.
+  resetSupply();
+  resetLog();
+  G['__NB_ORDER'] = undefined;
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 31, dup_fd: 32,
+    generation: 5, net_id: 202 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    cdStepDoc('pre', '', 'cd-D-M-1', 'M', 'D', 'cd-D-M-1-pre', 'pre', 'send-pre-now'),
+    cdStepDoc('wait', '', 'cd-D-M-1', 'M', 'D', '', 'wait', 'await-switch')
+  ];
+  seedWifi(303, '192.168.50.240', [101, 202]);
+  const changedBefore = Number(G['__NB_PHYSICAL_CHANGED'] ?? 0);
+  switchTo(dGate, 303, 303);
+  check('N26 the formal switch arms the gate for THIS plan and THIS epoch, and reports the ' +
+    'measured old-network identity',
+    dGate['n2CdGateState'] === 'blocked' && dGate['n2CdGatePlan'] === 'cd-D-M-1' &&
+    dGate['n2CdGateEpoch'] === dGate['networkEpoch'] &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['verdict'] === '' &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['netId'] === 303 &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['fd'] === 31 &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['dupFd'] === 32 &&
+    ((G['__NB_CD_SWITCH_LAST'] ?? {}) as Record<string, unknown>)['generation'] === 5,
+    JSON.stringify({ gate: [dGate['n2CdGateState'], dGate['n2CdGateEpoch'],
+      dGate['networkEpoch']], sw: G['__NB_CD_SWITCH_LAST'] }));
+  check('N26 the gate opens NO core supply at the switch instant',
+    supplyTotal() === 0 && linesWith('VPN_NETWORK_RECOVERED|').length === 0 &&
+    dGate['networkRecoveryActive'] === true,
+    JSON.stringify({ supply: supplyLine(), recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+  check('N26 the core\'s own old-connection cleanup still runs synchronously (it is not deferred)',
+    Number(G['__NB_PHYSICAL_CHANGED'] ?? 0) === changedBefore + 1 && CD_ORDER().indexOf(
+      '"physical-changed"') > CD_ORDER().indexOf('"identity"'), CD_ORDER());
+
+  // The pre control is owed on the NEW network and must leave AFTER that
+  // cleanup; the queued `wait` keeps the gate closed.
+  await drainProbe();
+  await drainProbe();
+  check('N26 the pre control is still sent on the new network while the gate is CLOSED, and the ' +
+    'core cleanup preceded it',
+    controlCalls() === 1 &&
+    JSON.stringify(G['__NB_CONTROL_IDS']) === JSON.stringify(['cd-D-M-1-pre']) &&
+    ((G['__NB_CD_PRE_LAST'] ?? {}) as Record<string, unknown>)['result'] === 'hit' &&
+    CD_ORDER() === JSON.stringify(['identity', 'physical-changed', 'control:cd-D-M-1-pre']),
+    JSON.stringify({ control: G['__NB_CONTROL_LAST'], order: CD_ORDER() }));
+  check('N26 the core\'s standing pre HIT alone releases NOTHING (no step=recover yet)',
+    dGate['n2CdGateState'] === 'blocked' && supplyTotal() === 0 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 0,
+    JSON.stringify({ gate: dGate['n2CdGateState'], supply: supplyLine() }));
+
+  // The on-demand supply entry is refused for BOTH a DNS and a management
+  // socket while the gate is closed — the legacy `isDns && networkRecoveryActive`
+  // carve-out must not bypass it.
+  resetSupply();
+  await (dGate['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'gate-supply-m', kind: 'tcp', purpose: 'management' });
+  await (dGate['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'gate-supply-d', kind: 'udp', purpose: 'dns' });
+  const gateSupplyLines = linesWith('VPN_SOCKET_SUPPLY|');
+  check('N26b while the gate is closed the on-demand supply entry refuses BOTH the management ' +
+    'and the protected-DNS socket (reason=production-gate)',
+    gateSupplyLines.length === 2 &&
+    gateSupplyLines.every((l: string): boolean => l.indexOf('|reason=production-gate|') > 0) &&
+    supplyOf('__NB_SUPPLY_MGMT_OPEN') === 0 && supplyOf('__NB_SUPPLY_ICE_OPEN') === 0 &&
+    supplyOf('__NB_SUPPLY_DNS') === 0 && supplyTotal() === 0,
+    JSON.stringify({ lines: gateSupplyLines, supply: supplyLine() }));
+
+  // Release the OLD await. The in-flight attempt is now stale; the gate must
+  // stop it from chasing the new epoch, and the finally's pending retry must be
+  // refused too. This is the exact defect the independent review found.
+  resetSupply();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  await sleepMs(300);
+  check('N26 after the old await is released the in-flight recovery ABANDONS the gated epoch: ' +
+    'zero new-network supply, no RECOVERED, gate still CLOSED',
+    dGate['networkRecoveryActive'] === false && dGate['networkRecoveryPending'] === false &&
+    dGate['n2CdGateState'] === 'blocked' && supplyTotal() === 0 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 0,
+    JSON.stringify({ supply: supplyLine(), gate: dGate['n2CdGateState'],
+      recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+
+  // The ONLY release: the core's own poll naming this plan at this epoch.
+  resetSupply();
+  resetLog();
+  G['__NB_CD_POLL_ANSWER'] = cdStepDoc('recover', 'released', 'cd-D-M-1', 'M', 'D', '',
+    'recover', 'pre-hit-observed');
+  (dGate['pollN2CdStep'] as () => void)();
+  await sleepMs(300);
+  check('N26 the core\'s step=recover releases the gate for its own epoch and drives EXACTLY ' +
+    'one production recovery',
+    dGate['n2CdGateState'] === 'released' &&
+    supplyOf('__NB_SUPPLY_DNS_RESOLVE') === 1 && supplyOf('__NB_SUPPLY_WG_OPEN') === 1 &&
+    supplyOf('__NB_SUPPLY_WG_FEED') === 1 && supplyOf('__NB_SUPPLY_MGMT_FEED') === 1 &&
+    supplyOf('__NB_SUPPLY_ICE_FEED') >= 1 && supplyOf('__NB_SUPPLY_DNS') >= 1 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 1 &&
+    lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=303') > 0,
+    JSON.stringify({ gate: dGate['n2CdGateState'], supply: supplyLine(),
+      recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+  check('N26 the released recovery ran AFTER the pre control (the sandwich order holds)',
+    CD_ORDER() === JSON.stringify(['identity', 'physical-changed', 'control:cd-D-M-1-pre',
+      'recover-feed']), CD_ORDER());
+  stopAbilityTimers(dGate);
+
+  // ---- N27: a formal switch BEFORE the preparation recovery landed ---------
+  // The core closes the plan `unsat|switch-before-preparation-complete`. The
+  // shell must NOT drop the latch and let the ordinary recovery pollute the
+  // failed epoch: the gate goes to HELD and stays there until the evidence
+  // session is explicitly terminated.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, D_PAYLOAD);
+  seedWifi(101, '192.168.50.199');
+  G['__NB_CD_PLAN_ANSWER'] = cdPlanDoc('cd-D-M-1');
+  G['__NB_DNS_POLL'] = { ok: true, pending: true };
+  const dHeld = gateReadyAbility(101);
+  (dHeld['pollN2CdPlan'] as () => void)();
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: { 101: WiFiLink('192.168.50.199'), 202: WiFiLink('10.77.0.5') } });
+  resetLog();
+  switchTo(dHeld, 202, 202);
+  await sleepMs(150);
+  check('N27 the preparation hop is recorded and its recovery is genuinely in flight',
+    Number(G['__NB_CD_PREPARE_CALLS'] ?? 0) === 1 && dHeld['n2CdPreparePending'] === true &&
+    dHeld['networkRecoveryActive'] === true,
+    JSON.stringify({ prepare: G['__NB_CD_PREPARE_LAST'],
+      active: dHeld['networkRecoveryActive'] }));
+
+  resetSupply();
+  resetLog();
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 41, dup_fd: 42,
+    generation: 6, net_id: 202 });
+  seedWifi(303, '192.168.50.240', [101, 202]);
+  switchTo(dHeld, 303, 303);
+  check('N27 the formal switch before the preparation recovery is refused by the core by name, ' +
+    'drops the shell latch, and HOLDS the gate',
+    Number(G['__NB_CD_SWITCH_CALLS'] ?? 0) === 1 &&
+    dHeld['n2CdActive'] === '' && dHeld['n2CdGateState'] === 'held' &&
+    lastLine('N2_CD_SANDWICH_SHELL|').indexOf('|phase=switch|marker=none|result=unsat|' +
+      'reason=switch-before-preparation-complete|') > 0 &&
+    supplyTotal() === 0,
+    JSON.stringify({ gate: dHeld['n2CdGateState'], active: dHeld['n2CdActive'],
+      line: lastLine('N2_CD_SANDWICH_SHELL|'), supply: supplyLine() }));
+
+  resetSupply();
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  await sleepMs(300);
+  check('N27 releasing the old await cannot make the failed epoch recover (held gate, no supply)',
+    dHeld['networkRecoveryActive'] === false && dHeld['n2CdGateState'] === 'held' &&
+    supplyTotal() === 0 && linesWith('VPN_NETWORK_RECOVERED|').length === 0,
+    JSON.stringify({ supply: supplyLine(), gate: dHeld['n2CdGateState'] }));
+
+  // A LATER switch and direct recovery entries must not release it either.
+  resetSupply();
+  seedWifi(404, '192.168.50.77', [101, 202, 303]);
+  switchTo(dHeld, 404, 404);
+  await sleepMs(150);
+  (dHeld['recoverPhysicalNetwork'] as () => Promise<void>)().catch(() => {});
+  await sleepMs(150);
+  check('N27 the terminal UNSAT does NOT self-release: a later switch and a direct recovery ' +
+    'entry leave the gate HELD and supply nothing',
+    dHeld['n2CdGateState'] === 'held' && supplyTotal() === 0 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 0 &&
+    (dHeld['n2CdProductionBlocked'] as () => boolean)() === true,
+    JSON.stringify({ gate: dHeld['n2CdGateState'], supply: supplyLine(),
+      recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+
+  // The EXPLICIT termination: a fresh start flow without the arm ticket
+  // (readDiagSwitches) resets the gate; the product recovers again.
+  setArmFile(false, undefined);
+  (dHeld['readDiagSwitches'] as () => void)();
+  check('N28 the evidence session\'s explicit termination (readDiagSwitches) clears the gate',
+    dHeld['n2CdGateState'] === '' && dHeld['n2Evidence'] === undefined &&
+    (dHeld['n2CdProductionBlocked'] as () => boolean)() === false,
+    JSON.stringify({ gate: dHeld['n2CdGateState'], evidence: dHeld['n2Evidence'] }));
+  resetSupply();
+  resetLog();
+  dHeld['networkDirty'] = true;
+  (dHeld['recoverPhysicalNetwork'] as () => Promise<void>)().catch(() => {});
+  await sleepMs(300);
+  check('N28 after the reset an ordinary recovery supplies normally again (the product is not ' +
+    'blocked by a terminated session)',
+    supplyOf('__NB_SUPPLY_WG_FEED') === 1 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 1,
+    JSON.stringify({ supply: supplyLine(), recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+
+  // Teardown is NEVER gated: the stop latches and the destroy leg runs.
+  (dHeld['onDestroy'] as () => void)();
+  await drainProbe();
+  resetSupply();
+  await (dHeld['fulfillSocketRequest'] as (r: unknown) => Promise<void>)(
+    { id: 'stop-supply', kind: 'tcp', purpose: 'management' });
+  check('N28 teardown is not gated: onDestroy latches the stop, the destroy leg runs, and the ' +
+    'supply refusal is the teardown one (destroy), not a gate',
+    dHeld['destroyRequested'] === true &&
+    lastLine('VPN_DESTROY_SKIPPED|').length > 0 &&
+    lastLine('VPN_SOCKET_SUPPLY|').indexOf('|reason=destroy|') > 0,
+    JSON.stringify({ requested: dHeld['destroyRequested'],
+      destroy: lastLine('VPN_DESTROY_SKIPPED|'), supply: lastLine('VPN_SOCKET_SUPPLY|') }));
+  stopAbilityTimers(dHeld);
+
+  // ---- N29: the recreate-finally retry is a supply entry too --------------
+  // A real C plan switch arms the gate; networkDirty stays true (the gated
+  // re-feed never ran). The controlled recreate completes — its TUN feed is not
+  // a network supply — but its finally retry must NOT recover while the gate is
+  // closed, and must recover once the core releases the epoch.
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedWifi(101, '192.168.50.199');
+  G['__NB_CD_PLAN_ANSWER'] = cdPlanDoc('cd-C-M-1');
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  const recGate = gateReadyAbility(101);
+  (recGate['pollN2CdPlan'] as () => void)();
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: { 101: WiFiLink('192.168.50.199'), 202: WiFiLink('10.77.0.5') } });
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 51, dup_fd: 52,
+    generation: 7, net_id: 101 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    cdStepDoc('pre', '', 'cd-C-M-1', 'M', 'C', 'cd-C-M-1-pre', 'pre', 'send-pre-now'),
+    cdStepDoc('wait', '', 'cd-C-M-1', 'M', 'C', '', 'wait', 'await-switch')
+  ];
+  switchTo(recGate, 202, 202);
+  await drainProbe();
+  await drainProbe();
+  check('N29 the C plan\'s formal switch arms the gate and blocks the re-feed',
+    recGate['n2CdGateState'] === 'blocked' && recGate['networkDirty'] === true &&
+    supplyTotal() === 0,
+    JSON.stringify({ gate: recGate['n2CdGateState'], dirty: recGate['networkDirty'],
+      supply: supplyLine() }));
+
+  resetSupply();
+  resetLog();
+  await driveRecreate(recGate);
+  check('N29 the recreate leg itself completes while the gate is closed (its TUN feed is not a ' +
+    'new-network supply), and its finally retry is GATED OFF',
+    ((G['__NB_ACK'] ?? {}) as Record<string, unknown>)['isRecreate'] === true &&
+    recGate['recreateInFlight'] === false && recGate['networkRecoveryActive'] === false &&
+    supplyTotal() === 0 && linesWith('VPN_NETWORK_RECOVERED|').length === 0,
+    JSON.stringify({ ack: G['__NB_ACK'], supply: supplyLine(),
+      recovered: linesWith('VPN_NETWORK_RECOVERED|') }));
+
+  // Positive control: the same path DOES recover once the core released it.
+  G['__NB_CD_POLL_ANSWER'] = cdStepDoc('recover', 'released', 'cd-C-M-1', 'M', 'C', '',
+    'recover', 'pre-hit-observed');
+  resetSupply();
+  resetLog();
+  (recGate['pollN2CdStep'] as () => void)();
+  await sleepMs(300);
+  check('N29 control: once the core answers step=recover the very same recreate-finally path ' +
+    'recovers (so the zero above is the GATE, not an unrelated failure)',
+    recGate['n2CdGateState'] === 'released' && supplyOf('__NB_SUPPLY_WG_FEED') === 1 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 1,
+    JSON.stringify({ gate: recGate['n2CdGateState'], supply: supplyLine() }));
+  stopAbilityTimers(recGate);
+
+  // ---- N30: the release is bound to plan AND epoch ------------------------
+  resetFs();
+  resetRequestState();
+  seedFile(CD_PATH, CD_PAYLOAD);
+  seedWifi(101, '192.168.50.199');
+  G['__NB_CD_PLAN_ANSWER'] = cdPlanDoc('cd-C-M-1');
+  G['__NB_DNS_POLL'] = { ok: true, pending: false, ip: '203.0.113.7' };
+  const bindGate = gateReadyAbility(101);
+  (bindGate['pollN2CdPlan'] as () => void)();
+  seedNetCtx({ __NB_NET_DEFAULT_ID: 202, __NB_NET_ALL_IDS: [101, 202],
+    __NB_NET_CAPS_BY_ID: { 101: { networkCap: [15], bearerTypes: [1] },
+      202: { networkCap: [15], bearerTypes: [0] } },
+    __NB_NET_PROPS_BY_ID: { 101: WiFiLink('192.168.50.199'), 202: WiFiLink('10.77.0.5') } });
+  G['__NB_CD_IDENTITY_ANSWER'] = JSON.stringify({ ok: true, fd: 61, dup_fd: 62,
+    generation: 8, net_id: 101 });
+  G['__NB_CD_POLL_ANSWER_QUEUE'] = [
+    cdStepDoc('pre', '', 'cd-C-M-1', 'M', 'C', 'cd-C-M-1-pre', 'pre', 'send-pre-now'),
+    cdStepDoc('wait', '', 'cd-C-M-1', 'M', 'C', '', 'wait', 'await-switch')
+  ];
+  switchTo(bindGate, 202, 202);
+  await drainProbe();
+  await drainProbe();
+  const bindEpoch = Number(bindGate['networkEpoch']);
+  check('N30 the binding fixture arms the gate at one epoch',
+    bindGate['n2CdGateState'] === 'blocked' && bindGate['n2CdGateEpoch'] === bindEpoch,
+    JSON.stringify({ gate: bindGate['n2CdGateState'], epoch: bindEpoch }));
+
+  // (a) a standing permission naming ANOTHER plan releases nothing.
+  resetSupply();
+  G['__NB_CD_POLL_ANSWER'] = cdStepDoc('recover', 'released', 'cd-C-M-9', 'M', 'C', '',
+    'recover', 'pre-hit-observed');
+  (bindGate['pollN2CdStep'] as () => void)();
+  await drainProbe();
+  check('N30 a step=recover naming ANOTHER plan releases nothing (no recovery, zero supply)',
+    bindGate['n2CdGateState'] === 'blocked' && bindGate['networkRecoveryActive'] === false &&
+    supplyTotal() === 0,
+    JSON.stringify({ gate: bindGate['n2CdGateState'], supply: supplyLine() }));
+
+  // (b) the epoch moves (a measured network loss bumps it) and the SAME plan's
+  // standing permission must still not release the NEW epoch.
+  (bindGate['physicalNetworkAvailable'] as (e: string, en: number, n: number) => void)(
+    'netLost', 0, 0);
+  const movedEpoch = Number(bindGate['networkEpoch']);
+  resetSupply();
+  G['__NB_CD_POLL_ANSWER'] = cdStepDoc('recover', 'released', 'cd-C-M-1', 'M', 'C', '',
+    'recover', 'pre-hit-observed');
+  (bindGate['pollN2CdStep'] as () => void)();
+  await drainProbe();
+  check('N30 a standing step=recover that arrives AFTER another measured switch releases ' +
+    'nothing (the release is bound to the switch epoch)',
+    movedEpoch === bindEpoch + 1 && bindGate['n2CdGateState'] === 'blocked' &&
+    bindGate['networkRecoveryActive'] === false && supplyTotal() === 0,
+    JSON.stringify({ epochs: [bindEpoch, movedEpoch], gate: bindGate['n2CdGateState'],
+      supply: supplyLine() }));
+  stopAbilityTimers(bindGate);
+
+  // ---- N30b: unarmed / startup leaves NO gate -----------------------------
+  resetFs();
+  resetRequestState();
+  seedWifi(505, '192.168.50.88');
+  const startupAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  startupAbility['networkRecoveryReady'] = true;
+  startupAbility['networkNetId'] = 505;
+  startupAbility['connection'] = new FakeConnection();
+  startupAbility['managementEndpoint'] = { host: 'mgmt.test', port: 33073, ip: '' };
+  startupAbility['signalUri'] = '';
+  startupAbility['networkDirty'] = true;
+  resetSupply();
+  resetLog();
+  (startupAbility['recoverPhysicalNetwork'] as () => Promise<void>)().catch(() => {});
+  await sleepMs(300);
+  check('N30b an unarmed session carries no gate and its (startup) recovery supplies normally',
+    startupAbility['n2CdGateState'] === '' &&
+    (startupAbility['n2CdProductionBlocked'] as () => boolean)() === false &&
+    supplyOf('__NB_SUPPLY_WG_FEED') === 1 &&
+    linesWith('VPN_NETWORK_RECOVERED|').length === 1,
+    JSON.stringify({ gate: startupAbility['n2CdGateState'], supply: supplyLine() }));
+  stopAbilityTimers(startupAbility);
+  resetSupply();
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

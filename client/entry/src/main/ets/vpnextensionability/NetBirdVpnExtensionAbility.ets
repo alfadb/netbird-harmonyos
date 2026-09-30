@@ -23,6 +23,14 @@ import { N2_A_EVENT_FILE_NAME, N2AEventDecision, N2AEventReply,
   parseN2AEventReply } from './NetBirdN2AEvent';
 import { N2SandwichPost, formatN2SandwichLegMarker, formatN2SandwichShellLine,
   parseN2SandwichPoll, selectN2SandwichTarget } from './NetBirdN2Sandwich';
+import { N2_CD_FILE_NAME, N2BearerFacts, N2CdPlanDecision, N2CdPlanRequest,
+  classifyN2Bearer, formatN2CdPlanShellLine, formatN2CdPlanShellReject, n2CdDirectionVerdict,
+  n2CdPrepareVerdict, n2CdProtocol, n2CdStartVerdict, n2CdTransitionStep, parseN2CdPlan,
+  selectN2CdTarget } from './NetBirdN2CdPlan';
+import { N2_RING_ACK_FILE_NAME, N2_RING_DUMP_FILE_NAME, N2_RING_FILE_NAME, N2_RING_MAX_BYTES,
+  N2_RING_SEGMENTS, N2RingAckDecision, N2RingAckRequest, N2RingDumpDecision, N2RingDumpRequest,
+  formatN2RingAckShellLine, formatN2RingAckShellReject, formatN2RingDumpShellLine,
+  formatN2RingDumpShellReject, parseN2RingAck, parseN2RingDump } from './NetBirdN2Ring';
 import { RouteCheckResult, RouteViolation, EXCLUSION_GENERATION_INITIAL,
   EXCLUSION_GENERATION_RECREATE, formatExclusionGeneration, formatRouteTable,
   formatRouteViolation, validateRouteEntries } from './NetBirdRouteValidation';
@@ -54,6 +62,7 @@ import {
   formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
   parseSignalEndpoint,
+  PhysicalBearerFacts, physicalDefaultBearerFacts,
   pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveExclusionEndpointIp,
   resolveManagementIp, sleep
 } from './NetBirdConnector';
@@ -208,6 +217,13 @@ const N2H_DIAG_OPTION_IGNORED_REASON: string = 'not-boolean';
 // exists in the UI half (EntryAbility.ets BUNDLE_NAME, Index.ets) and the
 // extension must not import a UI page/ability module for a name.
 const SELF_BUNDLE_NAME: string = 'cn.alfadb.netbird';
+// N2 first batch C/D columns: the armed session's ring cadence. While the
+// evidence ring is configured, one `N2_RING_STATS` line is emitted every
+// minute — by the CORE (`n2_ring_status`), so the line name, every field and
+// the ring membership are the core's own status formatter. A session that is
+// killed mid-cellular therefore leaves a ring tail whose counters are at most
+// one minute old. No timer exists while the ring is unconfigured.
+const N2_RING_STATS_MS: number = 60000;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -217,6 +233,62 @@ interface CreateOutcome {
   destroyRequired: boolean;
   accepted: boolean;
   reason: string;
+}
+
+// N2 first batch C/D columns: the core's own `n2_ring_dump` answer, parsed
+// verbatim. `lines` are ready-made `N2_RING_CHUNK|seq=<durable>|of=<count>|
+// line=<原件>` records (each `seq` is a durable ring sequence, not a line
+// index) and `summary` is the single `N2_RING_DUMP` line the core formatted.
+interface N2RingDumpPage {
+  ok: boolean;
+  result: string;
+  reason: string;
+  from_seq: number;
+  to_seq: number;
+  count: number;
+  emitted: number;
+  frozen_tail_seq: number;
+  first_seq: number;
+  last_seq: number;
+  records: number;
+  bytes: number;
+  malformed: number;
+  lost_records: number;
+  overflow: boolean;
+  acked_seq: number;
+  lines: string[];
+  summary: string;
+}
+
+// The inert page a failed `n2_ring_dump` call is treated as: nothing is
+// re-emitted, no watermark is reported (the `catch` branch returns before
+// either). A dump never advances the watermark anyway.
+function emptyN2RingDumpPage(): N2RingDumpPage {
+  return { ok: false, result: 'rejected', reason: 'core-throw', from_seq: 0, to_seq: 0, count: 0,
+    emitted: 0, frozen_tail_seq: 0, first_seq: 0, last_seq: 0, records: 0, bytes: 0, malformed: 0,
+    lost_records: 0, overflow: false, acked_seq: 0, lines: [], summary: '' };
+}
+
+// N2 first batch C/D columns: the core's own `n2_ring_ack` answer, parsed
+// verbatim. `result=acked` with `ok=true` is the only accepted shape;
+// `advanced` says whether THIS request moved the watermark (a repeat of an
+// already-acknowledged watermark answers `advanced=false`).
+interface N2RingAckReply {
+  ok: boolean;
+  result: string;
+  reason: string;
+  session: string;
+  up_to_seq: number;
+  acked_seq: number;
+  previous_acked_seq: number;
+  advanced: boolean;
+}
+
+// The inert reply a failed `n2_ring_ack` call is treated as: no watermark, no
+// advancement (the `catch` branch returns before the receipt anyway).
+function emptyN2RingAckReply(): N2RingAckReply {
+  return { ok: false, result: 'rejected', reason: 'core-throw', session: '', up_to_seq: 0,
+    acked_seq: -1, previous_acked_seq: -1, advanced: false };
 }
 
 // N2-H: outcome of the signal provisioning leg, extended to carry the parsed
@@ -530,7 +602,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private socketSupplyTimer: number = -1;
   private networkObserver: connection.NetConnection | undefined = undefined;
   private networkDebounceTimer: number = -1;
-  private networkEpoch: number = 0;
+  // The network generation the sockets of the CURRENT network were protected
+  // under; it is bumped by every measured switch. ONE-based on purpose: it is
+  // the `protect_generation` the `N2_SOCK` receipts carry, and the core's C/D
+  // receipt verdict treats generation 0 as "not measured" and REFUSES it — with
+  // a zero-based counter the very first switch could never name a baseline.
+  private networkEpoch: number = 1;
   private networkNetId: number = 0;
   private networkDirty: boolean = false;
   private networkRecoveryActive: boolean = false;
@@ -674,6 +751,61 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private n2IceSandwichMarker: string = '';
   // N2 P5: the Ws leg's marker (registered before Ws selection).
   private n2WsSandwichMarker: string = '';
+  // N2 first batch C/D columns (2026-09-29): the in-flight switching-sandwich
+  // plan's id ('' = none). The core owns the whole plan state machine; this is
+  // the shell's own latch so the network observer knows a switch belongs to a
+  // plan and the tick polls only while one is in flight.
+  private n2CdActive: string = '';
+  // …one plan step at a time (the pre/post controls are async).
+  private n2CdBusy: boolean = false;
+  // The plan's measured STARTING bearer (recorded at plan time, reported to the
+  // core with the switch so the ordering verdict has it even if the platform
+  // reading changes between ticks).
+  private n2CdBeforeBearer: string = 'unknown';
+  // The in-flight plan's column/kind/rep (the id alone is not enough to compute
+  // the column's direction verdict at switch time).
+  private n2CdColumn: string = '';
+  private n2CdKind: string = '';
+  private n2CdRep: number = 0;
+  // The shell's own view of the plan's progress. The CORE owns every verdict
+  // (phase/latch are mirrored, never decided here):
+  //   * `n2CdPreparePending` — D column: the Wi-Fi → cellular preparation hop
+  //     was reported and the cellular-side recovery must still hand the core
+  //     `n2_cd_ready` before the plan is in position.
+  private n2CdPreparePending: boolean = false;
+  // N2 first batch C/D columns: the FORMAL-switch production-recovery gate.
+  // It is the ONE switch that keeps every recovery / new-connection supply
+  // entry from handing the core a production connection of the newly measured
+  // network before the core's OWN poll answers `step=recover` (its tee HIT the
+  // pre control on that network — see n2CdGateRelease). The pre control itself
+  // is sent by the shell's own opener (mgmtSocketOpen/iceSocketOpen +
+  // n2_control_send), never through a supply entry, so the gate can never block
+  // its own release.
+  //   * `''`         — no gate: unarmed, no active plan, the D column's
+  //                    preparation hop (which must recover ordinarily), or a
+  //                    plan that never reported a formal switch;
+  //   * `'blocked'`  — the formal switch was reported and the core has not
+  //                    released it yet: every epoch is refused, so an in-flight
+  //                    recovery of an older epoch cannot `continue` into the new
+  //                    one and a later switch cannot slip past;
+  //   * `'released'` — the core's poll answered `step=recover` for THIS plan at
+  //                    THIS epoch: supply is allowed for `n2CdGateEpoch` ONLY —
+  //                    an async answer that lands after another switch must
+  //                    never release that other epoch;
+  //   * `'held'`     — the formal switch (or the plan) ended UNSAT: the gate
+  //                    stays CLOSED for every epoch until the evidence session is
+  //                    explicitly terminated (the next start flow's
+  //                    readDiagSwitches / teardown), so a later recovery can
+  //                    never overwrite the failed epoch's record. This is
+  //                    deliberate: the frozen criteria must not be relaxed, so
+  //                    "the plan is gone" is NOT a release.
+  private n2CdGateState: string = '';
+  // The `networkEpoch` the gate was armed for at the formal switch.
+  private n2CdGateEpoch: number = 0;
+  // The plan id the gate belongs to: a release must name it.
+  private n2CdGatePlan: string = '';
+  // The armed session's ring statistics timer (-1 = no ring configured).
+  private n2RingStatsTimer: number = -1;
 
   sendN2PositiveControl(target: string, protocol: N2ControlProtocol, id: string): void {
     sendN2Control(this.n2Evidence, target, protocol, id);
@@ -727,8 +859,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // The map is applied at create() time because the platform VpnConfig is
     // fixed then; later map changes are logged as NOT applied.
     this.networkNetId = physicalDefaultNetId();
-    hilog.info(DOMAIN, TAG, 'VPN_NETWORK_BASELINE|requestId=%{public}s|netId=%{public}d',
-      this.requestId, this.networkNetId);
+    const baselineLine: string = `VPN_NETWORK_BASELINE|requestId=${this.requestId}|` +
+      `netId=${String(this.networkNetId)}`;
+    hilog.info(DOMAIN, TAG, '%{public}s', baselineLine);
+    this.n2RingAppend(baselineLine);
     this.watchPhysicalNetwork();
     this.startConnectorThenCreate(want, connection).catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
@@ -762,10 +896,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   private schedulePhysicalNetworkCheck(event: string, eventNetId: number): void {
     const physicalNetId: number = physicalDefaultNetId();
-    hilog.info(DOMAIN, TAG,
-      'VPN_NETWORK_EVENT|event=%{public}s|netId=%{public}d|physicalDefault=%{public}s|' +
-      'physicalNetId=%{public}d|switched=pending|action=debounce',
-      event, eventNetId, String(eventNetId === physicalNetId && physicalNetId !== 0), physicalNetId);
+    // N2 first batch C/D columns: the switch evidence is exactly what the host
+    // cannot read while the device is on cellular, so the line is appended to
+    // the armed-only app-internal ring verbatim (same text as hilog).
+    const pendingLine: string = `VPN_NETWORK_EVENT|event=${event}|netId=${eventNetId}|` +
+      `physicalDefault=${String(eventNetId === physicalNetId && physicalNetId !== 0)}|` +
+      `physicalNetId=${physicalNetId}|switched=pending|action=debounce`;
+    hilog.info(DOMAIN, TAG, '%{public}s', pendingLine);
+    this.n2RingAppend(pendingLine);
     if (this.networkDebounceTimer !== -1) { clearTimeout(this.networkDebounceTimer); }
     this.networkDebounceTimer = setTimeout((): void => {
       this.networkDebounceTimer = -1;
@@ -778,25 +916,59 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       isPhysicalNetworkSwitch(this.networkNetId, netId);
     const action: string = this.destroyRequested ? 'destroy' : switched ?
       (netId === 0 ? 'network-lost' : 'redial') : 'unchanged';
-    hilog.info(DOMAIN, TAG,
-      'VPN_NETWORK_EVENT|event=%{public}s|netId=%{public}d|physicalDefault=%{public}s|' +
-      'physicalNetId=%{public}d|switched=%{public}s|action=%{public}s',
-      event, eventNetId, String(eventNetId === netId && netId !== 0), netId,
-      String(switched), action);
+    const eventLine: string = `VPN_NETWORK_EVENT|event=${event}|netId=${eventNetId}|` +
+      `physicalDefault=${String(eventNetId === netId && netId !== 0)}|` +
+      `physicalNetId=${netId}|switched=${String(switched)}|action=${action}`;
+    hilog.info(DOMAIN, TAG, '%{public}s', eventLine);
+    this.n2RingAppend(eventLine);
     if (!switched) { return; }
     this.networkNetId = netId;
     this.networkDirty = true;
     this.networkEpoch++;
+    // N2 first batch C/D columns: advance the plan BEFORE the re-feed starts,
+    // so the core records the OLD live registration of the kind (the baseline
+    // the new-network receipt must differ from). `gated` is the plan's own
+    // answer: it OWNS the production-recovery gate of this switch, and the
+    // recovery must then wait for the core's `step=recover` (its tee HIT the
+    // pre control on the NEW network). A net-lost transition (netId 0) measures
+    // no new network at all, so the plan keeps waiting for the real switch
+    // instead of reporting an unmeasured one (the core's SWITCH_WAIT_MS bounds
+    // that wait). The gate itself is armed SYNCHRONOUSLY inside n2CdOnSwitch,
+    // before the identity capture and before the switch report.
+    const gated: boolean = netId !== 0 && this.n2CdOnSwitch(netId);
     connectorPhysicalNetworkChanged('');
-    if (netId !== 0) {
+    // The pre control is owed on the NEW network, and the core's own
+    // old-connection cleanup above must have happened first: a control sent
+    // before it could still leave on the OLD registration. Nothing else is
+    // needed here — the plan's next step (the recovery) is driven by the core's
+    // `step=recover`, which the gate only accepts for this plan and this epoch.
+    if (gated) {
+      this.pollN2CdStep();
+    }
+    if (netId !== 0 && !gated) {
       this.recoverPhysicalNetwork().catch((error: Error): void => {
-        hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+        this.n2NetworkRecoveryFail(error);
       });
     }
   }
 
+  // The one teardown-path line for a failed physical-network recovery, logged
+  // AND forwarded to the armed ring verbatim (same string, no drift).
+  private n2NetworkRecoveryFail(error: Error): void {
+    const line: string = `VPN_NETWORK_RECOVERY_FAIL|summary=${safeError(error)}`;
+    hilog.warn(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+  }
+
   private async recoverPhysicalNetwork(): Promise<void> {
     if (!this.networkRecoveryReady || this.destroyRequested) { return; }
+    // N2 first batch C/D columns: the formal-switch gate. Checked at the ENTRY
+    // (the outer !gated path, the finally retry and the recreate-finally retry
+    // all funnel through here) and again at EVERY round of the chase loop below,
+    // so an in-flight attempt of an older epoch can never `continue` into a
+    // gated one. A gated call returns WITHOUT touching networkRecoveryActive or
+    // networkRecoveryPending: nothing about the plan's epoch has been attempted.
+    if (this.n2CdProductionBlocked()) { return; }
     if (this.networkRecoveryActive) {
       this.networkRecoveryPending = true;
       return;
@@ -806,6 +978,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     try {
       do {
         attemptEpoch = this.networkEpoch;
+        if (this.n2CdProductionBlocked(attemptEpoch)) { break; }
         const epoch: number = attemptEpoch;
         const netId: number = this.networkNetId;
         const vpn: vpnExtension.VpnConnection | undefined = this.connection;
@@ -817,7 +990,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (managementIp.length === 0) { break; }
         const addr: string = `${managementIp}:${this.managementEndpoint.port}`;
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
-          this.connection !== vpn) { continue; }
+          this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         const opened: NativeSocketOpen = JSON.parse(core.wg_fwd_open()) as NativeSocketOpen;
         if (opened.fd < 0 || opened.bind_rc !== 0) {
           if (opened.fd >= 0) { socketSupplyCloseFd(opened.fd); }
@@ -850,7 +1023,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
         if (!await this.protectAndFeedIceSocket()) { break; }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
-          this.connection !== vpn) { continue; }
+          this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         if (this.signalUri.length > 0) {
           const endpoint: ManagementEndpoint = parseSignalEndpoint(this.signalUri, 443);
           const signalIp: string = await resolveProtectedIp(endpoint.host);
@@ -865,7 +1038,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           try {
             if (await this.protectSocketWithBox(vpn, sock.fd, 'S') &&
               epoch === this.networkEpoch && !this.destroyRequested && !this.recreateInFlight &&
-              this.connection === vpn) {
+              this.connection === vpn && !this.n2CdProductionBlocked(epoch)) {
               signalFed = connectorSignalFeed(sock.fd, signalAddr).ok;
             }
           } finally { socketSupplyCloseFd(sock.fd); }
@@ -873,18 +1046,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
         if (!await this.feedSpareProtectedSocket(vpn, epoch)) { break; }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
-          this.connection !== vpn) { continue; }
+          this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         this.networkDirty = false;
-        hilog.info(DOMAIN, TAG, 'VPN_NETWORK_RECOVERED|requestId=%{public}s|netId=%{public}d',
-          this.requestId, netId);
-      } while (attemptEpoch !== this.networkEpoch && !this.destroyRequested && this.networkNetId !== 0);
+        const recoveredLine: string = `VPN_NETWORK_RECOVERED|requestId=${this.requestId}|` +
+          `netId=${String(netId)}`;
+        hilog.info(DOMAIN, TAG, '%{public}s', recoveredLine);
+        this.n2RingAppend(recoveredLine);
+        // N2 first batch C/D columns: on the D column this recovery IS the
+        // preparation's landing — the pre-set plan is only in position for its
+        // formal 蜂窝 → Wi-Fi switch after the core recorded it.
+        this.n2CdReadyAfterRecovery();
+      } while (attemptEpoch !== this.networkEpoch && !this.destroyRequested &&
+        this.networkNetId !== 0 && !this.n2CdProductionBlocked());
     } finally {
       this.networkRecoveryActive = false;
       const retry: boolean = this.networkRecoveryPending;
       this.networkRecoveryPending = false;
-      if (retry && this.networkDirty && !this.recreateInFlight && !this.destroyRequested) {
+      if (retry && this.networkDirty && !this.recreateInFlight && !this.destroyRequested &&
+        !this.n2CdProductionBlocked()) {
         this.recoverPhysicalNetwork().catch((error: Error): void => {
-          hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+          this.n2NetworkRecoveryFail(error);
         });
       }
     }
@@ -948,19 +1129,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.n2ForceDefaultRoute = forceDefaultRoute;
     this.readDiagSwitches();
     if ((this.n2EvidenceError ?? '').length > 0) {
-      hilog.error(DOMAIN, TAG,
-        'N2_EVIDENCE_REFUSED|requestId=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
-        this.requestId, this.n2EvidenceError);
+      this.n2ErrorAndRing(`N2_EVIDENCE_REFUSED|requestId=${this.requestId}|` +
+        `reason=${this.n2EvidenceError}|diag=true|is_evidence=false`);
       return;
     }
     if (this.n2Evidence !== undefined) {
       this.probeN2ProcNet();
-      hilog.warn(DOMAIN, TAG,
-        'N2_EVIDENCE_ARMED|requestId=%{public}s|trusted=%{public}s|capture32=%{public}s|' +
-        'endpointExclusions=false|hdcControl=%{public}s|allowHdcOverlap=%{public}s|' +
-        'diag=true|is_evidence=false',
-        this.requestId, SELF_BUNDLE_NAME, this.n2Evidence.capture32.join(','),
-        this.n2Evidence.hdcControlIp || 'not-supplied', String(this.n2Evidence.allowHdcOverlap));
+      const armedLine: string = `N2_EVIDENCE_ARMED|requestId=${this.requestId}|` +
+        `trusted=${SELF_BUNDLE_NAME}|capture32=${this.n2Evidence.capture32.join(',')}|` +
+        `endpointExclusions=false|hdcControl=${this.n2Evidence.hdcControlIp || 'not-supplied'}|` +
+        `allowHdcOverlap=${String(this.n2Evidence.allowHdcOverlap)}|diag=true|is_evidence=false`;
+      hilog.warn(DOMAIN, TAG, '%{public}s', armedLine);
+      this.n2RingAppend(armedLine);
     }
     if (!this.endpointExclusionsEnabled &&
       (this.protectDeviationRouteExclusion || this.diagCaptureRoute)) {
@@ -1098,9 +1278,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         JSON.stringify({ n2_capture_32: this.n2Evidence.capture32,
           n2_outer_destinations: this.n2Evidence.outerDestinations }))) as N2TunDestConfigureResult;
       if (!result.ok) {
-        hilog.error(DOMAIN, TAG,
-          'N2_TUN_DEST_CONFIG_FAILED|requestId=%{public}s|error=%{public}s|diag=true|is_evidence=false',
-          this.requestId, result.error ?? 'unknown');
+        const failedLine: string = `N2_TUN_DEST_CONFIG_FAILED|requestId=${this.requestId}|` +
+          `error=${result.error ?? 'unknown'}|diag=true|is_evidence=false`;
+        hilog.error(DOMAIN, TAG, '%{public}s', failedLine);
+        this.n2RingAppend(failedLine);
         connectorStop();
         return;
       }
@@ -1247,16 +1428,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           throw new Error('default-route-present');
         }
       } catch (error) {
-        hilog.error(DOMAIN, TAG,
-          'N2_EVIDENCE_REFUSED|requestId=%{public}s|reason=%{public}s|diag=true|is_evidence=false',
-          this.requestId, safeError(error as Error));
+        this.n2ErrorAndRing(`N2_EVIDENCE_REFUSED|requestId=${this.requestId}|` +
+          `reason=${safeError(error as Error)}|diag=true|is_evidence=false`);
         connectorStop();
         return;
       }
-      hilog.info(DOMAIN, TAG,
-        'N2_EVIDENCE_ROUTES|requestId=%{public}s|leg=initial|capture32=%{public}s|' +
-          'defaultRoutes=0|excludedRoutes=0|diag=true|is_evidence=false',
-        this.requestId, this.n2Evidence.capture32.join(','));
+      const routesLine: string = `N2_EVIDENCE_ROUTES|requestId=${this.requestId}|leg=initial|` +
+        `capture32=${this.n2Evidence.capture32.join(',')}|defaultRoutes=0|excludedRoutes=0|` +
+        `diag=true|is_evidence=false`;
+      hilog.info(DOMAIN, TAG, '%{public}s', routesLine);
+      this.n2RingAppend(routesLine);
     }
     hilog.info(DOMAIN, TAG,
       'VPN_DEFAULT_ROUTE_GATE|requestId=%{public}s|allowed=%{public}s|reason=%{public}s|' +
@@ -2259,6 +2440,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // readDiagSwitch.
   private readDiagSwitches(): void {
     core.n2_socket_trace_arm(false);
+    // N2 first batch C/D columns: the app-internal evidence ring is armed-only —
+    // an arming change stops it (the FILE stays for the operator to fetch) and
+    // stops its 60 s statistics cadence with it.
+    core.n2_ring_disable();
+    this.n2RingStopStats();
+    this.n2CdClearLatch();
+    // N2 first batch C/D columns: this is the EXPLICIT termination of the
+    // previous evidence collection (a fresh start flow — the only in-process
+    // release of a held production gate, alongside the teardown paths): an
+    // unarmed/new session must never inherit the previous session's block.
+    this.n2CdGateReset();
     this.n2Evidence = undefined;
     this.n2EvidenceError = '';
     this.diagBlockedSelf = false;
@@ -2313,6 +2505,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.n2Evidence !== undefined) {
       core.n2_socket_trace_arm(true);
       this.endpointExclusionsEnabled = false;
+      // N2 first batch C/D columns: the accepted evidence arm also opens the
+      // app-internal evidence ring, so the lines of this armed session survive
+      // the cellular-phase HiLog rotation/flow control.
+      this.n2RingConfigure();
     }
   }
 
@@ -2334,15 +2530,838 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         try {
           const text: string = fs.readTextSync(path);
           const lines: number = text.length === 0 ? 0 : text.trimEnd().split('\n').length;
-          hilog.info(DOMAIN, TAG,
-            'N2_PROC_NET|path=%{public}s|readable=true|lines=%{public}d|uid=%{public}s|' +
-            'diag=true|is_evidence=false', path, lines, uid);
+          const readableLine: string = `N2_PROC_NET|path=${path}|readable=true|` +
+            `lines=${lines}|uid=${uid}|diag=true|is_evidence=false`;
+          hilog.info(DOMAIN, TAG, '%{public}s', readableLine);
+          this.n2RingAppend(readableLine);
         } catch (error) {
-          hilog.warn(DOMAIN, TAG,
-            'N2_PROC_NET|path=%{public}s|readable=false|lines=0|uid=%{public}s|' +
-            'code=%{public}s|diag=true|is_evidence=false',
-            path, uid, String((error as BusinessFailure).code ?? 'no-code'));
+          const unreadableLine: string = `N2_PROC_NET|path=${path}|readable=false|lines=0|` +
+            `uid=${uid}|code=${String((error as BusinessFailure).code ?? 'no-code')}|` +
+            `diag=true|is_evidence=false`;
+          hilog.warn(DOMAIN, TAG, '%{public}s', unreadableLine);
+          this.n2RingAppend(unreadableLine);
         }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // N2 first batch C/D columns (2026-09-29): the armed-only app-internal
+  // evidence ring, and the App-side switching sandwich.
+  // -------------------------------------------------------------------------
+
+  // The ring's SHELL half. The core appends every line IT emits (`N2_TUN_*`,
+  // `N7_WG_FEED`, most `N2_*`) inside `hilog::emit`; the lines THIS process
+  // formats for the armed session are forwarded here, verbatim, at the same
+  // call sites that log them. Armed-only: the ring is configured by the
+  // accepted `n2_evidence` arm and disabled on every arming change, so an
+  // unarmed extension forwards nothing (and the core would drop it anyway).
+  private n2RingAppend(line: string): void {
+    if (this.n2Evidence === undefined) {
+      return;
+    }
+    try {
+      core.n2_ring_append(line);
+    } catch (error) {
+      // The core counts its own write failures and reports them through
+      // N2_RING_STATS / N2_RING_WRITE_FAILED; a thrown forward is swallowed
+      // here on purpose so HiLog output can never change the ring's writers.
+    }
+  }
+
+  // One `N2_*` line at WARN level, logged and forwarded VERBATIM to the ring.
+  // The failure paths of the private channels use this so the ring copy can
+  // never drift from the hilog text (there is exactly one string).
+  private n2WarnAndRing(line: string): void {
+    hilog.warn(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+  }
+
+  private n2ErrorAndRing(line: string): void {
+    hilog.error(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+  }
+
+  // Configure the ring for this armed session. The file lives in the App's own
+  // sandbox (the ONLY place the App can write: /data/local/tmp is not in its
+  // visible view and the hdc shell domain cannot read the sandbox), so the
+  // fetch path is the bundle-scoped transfer — `hdc file recv -b
+  // cn.alfadb.netbird ./data/storage/el2/base/files/<file> <host>` on a
+  // DEBUG-signed, launched App — with the `n2_ring_dump` private channel as the
+  // fallback when `-b` is unavailable (the OpenHarmony hdc contract refuses the
+  // bundle transfer with E003001 for a non-debug-signed App and E005004 on an
+  // SDK/ROM that does not support `-b`), and E005102 for a path outside the app
+  // data directory. See docs/n2-cd-app-sandwich-20260929.md.
+  private n2RingConfigure(): void {
+    const path: string = `${this.context.filesDir}/${N2_RING_FILE_NAME}`;
+    try {
+      const reply: Record<string, Object> = JSON.parse(
+        core.n2_ring_configure(path, N2_RING_MAX_BYTES, N2_RING_SEGMENTS)) as
+        Record<string, Object>;
+      if (reply['ok'] !== true) {
+        this.n2ErrorAndRing(`N2_RING_CONFIGURE_FAILED|file=${N2_RING_FILE_NAME}|` +
+          `error=${String(reply['error'] ?? 'unknown')}|diag=true|is_evidence=false`);
+      }
+    } catch (error) {
+      this.n2ErrorAndRing(`N2_RING_CONFIGURE_FAILED|file=${N2_RING_FILE_NAME}|` +
+        `error=core-throw|diag=true|is_evidence=false`);
+    }
+    this.n2RingStartStats();
+  }
+
+  // The ring's own 60 s cadence. The line is emitted BY THE CORE
+  // (`n2_ring_status`), so its name, every counter field and its membership in
+  // the ring are the core's own status formatter — the shell adds no second
+  // vocabulary. Started by the accepted arm (the only place the ring is
+  // configured) and stopped by every arming change and by the teardown.
+  private n2RingStartStats(): void {
+    this.n2RingStopStats();
+    this.n2RingStatsTimer = setInterval((): void => {
+      if (this.n2Evidence === undefined || this.destroyRequested) {
+        return;
+      }
+      try {
+        core.n2_ring_status();
+      } catch (error) { /* the core owns its counters; a throw is not fatal here */ }
+    }, N2_RING_STATS_MS);
+  }
+
+  private n2RingStopStats(): void {
+    if (this.n2RingStatsTimer !== -1) {
+      clearInterval(this.n2RingStatsTimer);
+      this.n2RingStatsTimer = -1;
+    }
+  }
+
+  // N2 first batch C/D columns: the `n2_cd_plan` private channel. ONE launch =
+  // ONE plan (the request file is deleted in `finally`), and the host issues it
+  // while it still has a live link (Wi-Fi). The App then does everything else
+  // alone: measure the starting bearer, wait for the switch, send the pre
+  // control on the NEW network, wait for the kind's production receipt there,
+  // send the post control.
+  //
+  // Trigger (documented in docs/n2-cd-app-sandwich-20260929.md):
+  //   aa start -b cn.alfadb.netbird -a EntryAbility \
+  //     --ps n2h_arm_options '<the same arm ticket that armed this session>' \
+  //     --ps n2_cd_plan '{"column":"C","kind":"M","rep":1,"id":"cd-C-M-1"}'
+  // EntryAbility writes it to <filesDir>/netbird-n2-cd-plan; this poll picks it
+  // up on the next watcher tick (≤ STATUS_POLL_MS = 5 s) and consumes it. The
+  // operator is then free to switch networks; the plan is executed on-device.
+  private pollN2CdPlan(): void {
+    if (this.destroyRequested) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${N2_CD_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      this.n2WarnAndRing(`N2_CD_PLAN_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
+      return;
+    }
+    try {
+      const decision: N2CdPlanDecision = parseN2CdPlan(text);
+      if (decision.request === undefined) {
+        const reject: string = formatN2CdPlanShellReject(this.requestId, decision.error);
+        hilog.warn(DOMAIN, TAG, '%{public}s', reject);
+        this.n2RingAppend(reject);
+        return;
+      }
+      const request: N2CdPlanRequest = decision.request;
+      const armed: N2EvidenceOptions | undefined = this.n2Evidence;
+      if (armed === undefined) {
+        const refused: string = formatN2CdPlanShellLine(this.requestId, request, 'plan', 'none',
+          'rejected', 'not-armed');
+        hilog.warn(DOMAIN, TAG, '%{public}s', refused);
+        return;
+      }
+      if (this.n2CdActive.length > 0 || this.n2CdBusy) {
+        const busy: string = formatN2CdPlanShellLine(this.requestId, request, 'plan', 'none',
+          'rejected', 'plan-already-active');
+        hilog.warn(DOMAIN, TAG, '%{public}s', busy);
+        this.n2RingAppend(busy);
+        return;
+      }
+      const target: string = selectN2CdTarget(armed.outerDestinations, request.kind);
+      const facts: PhysicalBearerFacts = physicalDefaultBearerFacts();
+      const bearer: N2BearerFacts = classifyN2Bearer(facts.bearerTypes, facts.linkAddresses);
+      this.n2CdBeforeBearer = bearer.bearer;
+      const startVerdict: string = target.length === 0
+        ? 'no-target'
+        : n2CdStartVerdict(request.column, bearer.bearer);
+      let reply: Record<string, Object> = {};
+      try {
+        reply = JSON.parse(core.n2_cd_plan(request.id, request.column, request.kind,
+          request.rep, target, bearer.bearer, bearer.local, startVerdict)) as
+          Record<string, Object>;
+      } catch (error) {
+        // ArkTS refuses an untyped object literal assigned to a Record, so the
+        // thrown-call branch re-parses the same fixed refusal document.
+        reply = JSON.parse('{"ok":false,"result":"rejected","reason":"core-throw"}') as
+          Record<string, Object>;
+      }
+      const accepted: boolean = reply['ok'] === true;
+      const line: string = formatN2CdPlanShellLine(this.requestId, request, 'plan',
+        accepted ? String(reply['pre_marker'] ?? '') : 'none',
+        accepted ? 'planned' : 'rejected',
+        String(reply['reason'] ?? 'none'));
+      hilog.info(DOMAIN, TAG, '%{public}s', line);
+      this.n2RingAppend(line);
+      if (!accepted || target.length === 0) {
+        return;
+      }
+      this.n2CdActive = request.id;
+      this.n2CdColumn = request.column;
+      this.n2CdKind = request.kind;
+      this.n2CdRep = request.rep;
+      this.n2CdPreparePending = false;
+      // The gate is deliberately NOT touched here: a terminal hold outlives any
+      // later plan of the same armed session (see n2CdGateArm / n2CdGateHold) —
+      // accepting a new plan is not the explicit termination the hold waits for.
+      // Nothing else happens here ON PURPOSE: acceptance only REGISTERS the
+      // plan. Both controls belong to the plan's own network — the pre control
+      // is owed on the NEW network after the formal switch (n2CdOnSwitch /
+      // pollN2CdStep), and a control sent at acceptance time would sit on the
+      // OLD one, which the core refuses by name (`pre-before-switch`). The Wb
+      // row is NOT exempt: the core's revised state machine owes it a pre and a
+      // post control too (its receipt is the new generation's protect settle).
+    } finally {
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        this.n2WarnAndRing(`N2_CD_PLAN_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
+      }
+    }
+  }
+
+  // The plan's own view of ONE measured network transition. Called from
+  // `physicalNetworkAvailable` at the switch instant and BEFORE
+  // `connectorPhysicalNetworkChanged`/the re-feed, so the core records the OLD
+  // network's live registration as the baseline its new-network receipt must
+  // differ from. Returns true when the plan OWNS the production-recovery gate of
+  // this transition: the shell must then NOT recover before the core's own poll
+  // answers `step=recover` (its tee HIT the pre control on the NEW network).
+  //
+  // D column: the Wi-Fi → 非-Wi-Fi hop is the PREPARATION hop, never the D
+  // measurement — recorded, no control, no gate. The formal 蜂窝 → Wi-Fi switch
+  // is reported only after the cellular-side recovery handed the core
+  // `n2_cd_ready`; anything earlier is refused by the core's own state machine.
+  //
+  // N2 first batch C/D columns: on a FORMAL switch the gate is armed
+  // SYNCHRONOUSLY here — before the identity capture and before the switch
+  // report, and therefore before `connectorPhysicalNetworkChanged` and any
+  // async continuation of an older recovery can run. The pre control is NOT
+  // sent from here any more: it is owed on the new network only AFTER the core's
+  // own old-connection cleanup (`physicalNetworkAvailable`), which is where the
+  // step poll now runs.
+  private n2CdOnSwitch(netId: number): boolean {
+    const armed: N2EvidenceOptions | undefined = this.n2Evidence;
+    const id: string = this.n2CdActive;
+    if (id.length === 0 || armed === undefined || this.destroyRequested) {
+      return false;
+    }
+    const facts: PhysicalBearerFacts = physicalDefaultBearerFacts();
+    const bearer: N2BearerFacts = classifyN2Bearer(facts.bearerTypes, facts.linkAddresses);
+    const before: string = this.n2CdBeforeBearer;
+    const after: string = bearer.bearer;
+    const request: N2CdPlanRequest = { column: this.n2CdColumn, kind: this.n2CdKind,
+      rep: this.n2CdRep, id: id };
+    const step: string = n2CdTransitionStep(this.n2CdColumn, before, after);
+    if (step === 'none') {
+      // Not this plan's transition at all (D, still on Wi-Fi, another Wi-Fi
+      // network): the plan keeps waiting and the ordinary recovery runs.
+      return false;
+    }
+    if (step === 'prepare') {
+      const verdict: string = n2CdPrepareVerdict(after);
+      let coreResult: string = 'rejected';
+      let coreReason: string = 'core-throw';
+      try {
+        const reply: Record<string, Object> = JSON.parse(core.n2_cd_prepare(id, verdict, after,
+          bearer.local)) as Record<string, Object>;
+        coreResult = String(reply['result'] ?? 'rejected');
+        coreReason = String(reply['reason'] ?? 'none');
+      } catch (error) { /* the core's own line carries its refusal */ }
+      this.n2CdBeforeBearer = after;
+      this.n2CdPreparePending = coreResult === 'prepared';
+      const line: string = formatN2CdPlanShellLine(this.requestId, request, 'prepare', 'none',
+        coreResult === 'prepared' ? 'prepared' : (coreResult === 'unsat' ? 'unsat' : 'rejected'),
+        coreReason);
+      hilog.info(DOMAIN, TAG, '%{public}s', line);
+      this.n2RingAppend(line);
+      this.n2CdLatchAfter(coreResult);
+      return false;
+    }
+    // THE GATE, armed before anything else can observe this epoch: the formal
+    // switch below is about to make `networkDirty` true and to have the core
+    // drop the OLD registrations; from this instant no supply entry may hand the
+    // core a production connection of the new network until the core's own poll
+    // answers `step=recover` for THIS plan at THIS epoch. Fail-closed on EVERY
+    // outcome of the report below: a terminal refusal holds it (n2CdLatchAfter),
+    // a non-terminal one leaves it closed.
+    this.n2CdGateArm();
+    const direction: string = n2CdDirectionVerdict(this.n2CdColumn, before, after);
+    // The receipt's baseline: the identity of the kind's LIVE registration on
+    // the OLD network, exactly as the `N2_SOCK` receipts name it — `fd` = the
+    // shell's original descriptor, `dup_fd` = the core-owned copy,
+    // `protect_generation` = the shell's network epoch. The `dup_fd` is core
+    // owned, so it can only come from the core's own registry; -1 for every
+    // field while it has no live registration of this kind, and the core then
+    // closes the plan by name instead of receiving an invented baseline.
+    let identityFd: number = -1;
+    let identityDup: number = -1;
+    let identityGeneration: number = -1;
+    try {
+      const identity: Record<string, Object> = JSON.parse(core.n2_cd_identity(this.n2CdKind)) as
+        Record<string, Object>;
+      if (identity['ok'] === true) {
+        identityFd = Number(identity['fd'] ?? -1);
+        identityDup = Number(identity['dup_fd'] ?? -1);
+        identityGeneration = Number(identity['generation'] ?? -1);
+      }
+    } catch (error) { /* not measured: every field stays -1 (fail-closed) */ }
+    let result: string = 'rejected';
+    let reason: string = 'core-throw';
+    try {
+      const reply: Record<string, Object> = JSON.parse(core.n2_cd_switch_identified(id, direction,
+        after, bearer.local, netId, identityFd, identityDup, identityGeneration)) as
+        Record<string, Object>;
+      result = String(reply['result'] ?? 'rejected');
+      reason = String(reply['reason'] ?? 'none');
+    } catch (error) { /* the core's own line carries its refusal */ }
+    const line: string = formatN2CdPlanShellLine(this.requestId, request, 'switch', 'none',
+      result === 'switched' ? 'switched' : (result === 'unsat' ? 'unsat' : 'rejected'), reason);
+    hilog.info(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+    this.n2CdLatchAfter(result);
+    if (result !== 'switched') {
+      // A terminal refusal already closed the core's plan AND (through
+      // n2CdLatchAfter) HELD the gate armed above: the outer `!gated` path must
+      // not recover, or the failed epoch would be polluted by a recovery the
+      // core never released. A non-terminal one (`switch-already-reported`)
+      // keeps BOTH the plan and the shell latch, and the gate keeps whatever it
+      // held before (its release stays bound to its own plan and epoch).
+      return false;
+    }
+    this.n2CdBeforeBearer = after;
+    // The gate stays 'blocked' here; the pre control is owed on the NEW network
+    // and is sent by `physicalNetworkAvailable` AFTER the core's own
+    // old-connection cleanup (`connectorPhysicalNetworkChanged`). See there.
+    return true;
+  }
+
+  // D column: the cellular-side recovery completed, so the PRE-SET plan is now
+  // in position for its formal 蜂窝 → Wi-Fi switch. Reported once per
+  // preparation hop; the core's own PREPARE_WAIT_MS bounds the wait when the
+  // recovery never lands.
+  private n2CdReadyAfterRecovery(): void {
+    if (!this.n2CdPreparePending || this.n2CdActive.length === 0) {
+      return;
+    }
+    const id: string = this.n2CdActive;
+    const request: N2CdPlanRequest = { column: this.n2CdColumn, kind: this.n2CdKind,
+      rep: this.n2CdRep, id: id };
+    let result: string = 'rejected';
+    let reason: string = 'core-throw';
+    try {
+      const reply: Record<string, Object> = JSON.parse(core.n2_cd_ready(id)) as
+        Record<string, Object>;
+      result = String(reply['result'] ?? 'rejected');
+      reason = String(reply['reason'] ?? 'none');
+    } catch (error) { /* the core's own line carries its refusal */ }
+    this.n2CdPreparePending = false;
+    const line: string = formatN2CdPlanShellLine(this.requestId, request, 'prepare', 'none',
+      result === 'ready' ? 'ready' : (result === 'unsat' ? 'unsat' : 'rejected'), reason);
+    hilog.info(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+    this.n2CdLatchAfter(result);
+  }
+
+  // The shell's latch follows the CORE's plan, never the shell's own hope:
+  //   * `unsat` is every terminal `close()` of the core's state machine — the
+  //     plan is gone, so the latch drops AND the gate (if this plan armed one)
+  //     is HELD: "the plan is gone" must never be a release, or the failed
+  //     epoch would be overwritten by an immediate recovery;
+  //   * `observed` is the post leg's own terminal outcome — the sandwich
+  //     completed, so a gate this plan armed is released for good and the
+  //     product recovers normally from here on;
+  //   * everything else — including a NON-terminal `rejected` such as
+  //     `pre-already-reported` / `switch-already-reported` / `invalid-result` —
+  //     keeps the latch, because the core's plan is STILL ACTIVE. Dropping it
+  //     there would leak the plan for the rest of the arming: nobody polls it
+  //     any more and every later plan is refused `plan-already-active`.
+  private n2CdLatchAfter(result: string): void {
+    if (result === 'observed') {
+      this.n2CdGateReset();
+    } else if (result === 'unsat') {
+      this.n2CdGateHold();
+    }
+    if (result === 'unsat' || result === 'observed') {
+      this.n2CdClearLatch();
+    }
+  }
+
+  private n2CdClearLatch(): void {
+    this.n2CdActive = '';
+    this.n2CdBeforeBearer = 'unknown';
+    this.n2CdPreparePending = false;
+    this.n2CdBusy = false;
+  }
+
+  // ---- N2 first batch C/D columns: the formal-switch production gate -------
+  //
+  // True while the gate forbids handing the core a production connection for
+  // `epoch`. Every recovery / new-connection supply entry consults this:
+  // recoverPhysicalNetwork (entry + every chase round), fulfillSocketRequest,
+  // feedSpareProtectedSocket, feedOneIceSocket, topUpIceBatch and the
+  // recreate-finally retry. `'blocked'` and `'held'` refuse EVERY epoch (so an
+  // in-flight attempt of an older epoch cannot continue into a newer one, and a
+  // later switch cannot slip past); `'released'` allows ONLY the epoch the gate
+  // was armed for.
+  private n2CdProductionBlocked(epoch: number = this.networkEpoch): boolean {
+    if (this.n2CdGateState.length === 0) {
+      return false;
+    }
+    if (this.n2CdGateState === 'released') {
+      return epoch !== this.n2CdGateEpoch;
+    }
+    return true;
+  }
+
+  // Arm the gate for the plan's FORMAL switch at the current network epoch.
+  // A 'held' gate is NEVER re-armed: once a formal switch failed, the block
+  // outlives any later plan of the same armed session and only the explicit
+  // termination paths clear it (readDiagSwitches / teardown). Otherwise a plan
+  // that already owns a gate keeps it — a second switch of the same plan must
+  // not re-arm a gate that was already released for its own epoch, because that
+  // would release the newer epoch.
+  private n2CdGateArm(): void {
+    if (this.n2CdGateState === 'held') {
+      return;
+    }
+    if (this.n2CdGateState.length > 0 && this.n2CdGatePlan === this.n2CdActive) {
+      return;
+    }
+    this.n2CdGateState = 'blocked';
+    this.n2CdGateEpoch = this.networkEpoch;
+    this.n2CdGatePlan = this.n2CdActive;
+  }
+
+  // The core's own `step=recover` (its tee HIT the new network's pre control)
+  // is the ONLY release. It is bound to BOTH the plan the gate belongs to and
+  // the epoch the switch armed: an async answer that arrives after another
+  // switch, or for another plan, releases nothing.
+  private n2CdGateRelease(id: string): boolean {
+    if (this.n2CdGateState !== 'blocked' || this.n2CdGatePlan !== id ||
+      this.networkEpoch !== this.n2CdGateEpoch) {
+      return false;
+    }
+    this.n2CdGateState = 'released';
+    return true;
+  }
+
+  // Terminal failure of a gated plan: keep blocking every epoch until the
+  // evidence session is explicitly terminated (readDiagSwitches on the next
+  // start flow, or teardown). A no-op when this plan never armed a gate (e.g.
+  // the D preparation hop's failures), which is what keeps ordinary product
+  // recovery unaffected.
+  private n2CdGateHold(): void {
+    if (this.n2CdGateState.length === 0) {
+      return;
+    }
+    this.n2CdGateState = 'held';
+  }
+
+  // Explicit termination / success: no gate at all (unarmed sessions never had
+  // one, and a completed plan must not keep blocking the product).
+  private n2CdGateReset(): void {
+    this.n2CdGateState = '';
+    this.n2CdGateEpoch = 0;
+    this.n2CdGatePlan = '';
+  }
+
+  // One watcher-tick (or switch-instant) step of the plan. The CORE owns every
+  // verdict; this carries out the step it answers:
+  //   * `pre`     — send the PRE control on the NEW network NOW (the production
+  //                 recovery stays blocked);
+  //   * `recover` — the core's tee HIT the pre: release the gate for THIS plan
+  //                 at THIS epoch and recover the production connections. The
+  //                 core re-states this standing permission on every tick until
+  //                 the receipt arrives, so the shell latches it: one plan
+  //                 drives the recovery once;
+  //   * `receipt` — send the POST control with the core's own marker;
+  //   * `closed`  — the core already emitted the terminal line (`unsat` /
+  //                 `observed`): mirror it, drop the shell latch, and
+  //                 release/hold the gate by that terminal result;
+  //   * `idle`    — the core has no plan at all (arming change / already
+  //                 closed): drop the shell latch so it can never stick, and
+  //                 HOLD any armed gate — a plan that vanished can never
+  //                 release it.
+  private pollN2CdStep(): void {
+    if (this.destroyRequested || this.n2CdBusy || this.n2CdActive.length === 0) {
+      return;
+    }
+    let step: string = '';
+    let phase: string = '';
+    let id: string = '';
+    let kind: string = '';
+    let marker: string = '';
+    let remote: string = 'unknown';
+    let result: string = '';
+    let reason: string = '';
+    try {
+      const reply: Record<string, Object> = JSON.parse(core.n2_cd_poll()) as
+        Record<string, Object>;
+      step = String(reply['step'] ?? '');
+      phase = String(reply['phase'] ?? '');
+      id = String(reply['id'] ?? '');
+      kind = String(reply['kind'] ?? '');
+      marker = String(reply['marker'] ?? '');
+      remote = String(reply['remote'] ?? 'unknown');
+      result = String(reply['result'] ?? '');
+      reason = String(reply['reason'] ?? '');
+    } catch (error) {
+      return;
+    }
+    if (step === 'idle') {
+      this.n2CdGateHold();
+      this.n2CdClearLatch();
+      return;
+    }
+    if (step === 'closed') {
+      const request: N2CdPlanRequest = { column: this.n2CdColumn, kind: this.n2CdKind,
+        rep: this.n2CdRep, id: id };
+      const terminal: string = result.length > 0 ? result : 'unsat';
+      const line: string = formatN2CdPlanShellLine(this.requestId, request,
+        phase.length > 0 ? phase : 'result', 'none', terminal, reason);
+      hilog.info(DOMAIN, TAG, '%{public}s', line);
+      this.n2RingAppend(line);
+      // The core already emitted the terminal line: a success lets the product
+      // recover, anything else holds the gate (never a silent release).
+      if (terminal === 'observed') {
+        this.n2CdGateReset();
+      } else {
+        this.n2CdGateHold();
+      }
+      this.n2CdClearLatch();
+      return;
+    }
+    const armed: N2EvidenceOptions | undefined = this.n2Evidence;
+    if (armed === undefined) {
+      return;
+    }
+    if (step === 'recover') {
+      // The standing permission is accepted ONCE, and only when it names the
+      // plan the gate belongs to AND the network is still the epoch the formal
+      // switch armed. Anything else (another id, a later epoch) leaves the gate
+      // exactly as it is: an async answer must never release another epoch.
+      if (!this.n2CdGateRelease(id)) {
+        return;
+      }
+      this.recoverPhysicalNetwork().catch((error: Error): void => {
+        this.n2NetworkRecoveryFail(error);
+      });
+      return;
+    }
+    const request: N2CdPlanRequest = { column: this.n2CdColumn, kind: kind,
+      rep: this.n2CdRep, id: id };
+    const target: string = selectN2CdTarget(armed.outerDestinations, kind);
+    const protocol: N2ControlProtocol = n2CdProtocol(kind) === 'tcp' ? 'tcp' : 'udp';
+    if (step === 'pre' && marker.length > 0) {
+      if (target.length === 0) {
+        return;
+      }
+      this.n2CdBusy = true;
+      this.n2CdSendPreControl(armed, request, target, protocol, marker)
+        .then((observed: boolean): void => {
+          this.n2CdBusy = false;
+          // Only a HIT reported back to the core moves the plan to its released
+          // phase; ask for the next step at once so the recovery is not delayed
+          // by a whole watcher tick. A failed pre is retried by the next tick
+          // (the core's PRE_WAIT_MS bounds it), never in a tight loop.
+          if (observed) {
+            this.pollN2CdStep();
+          }
+        })
+        .catch((error: Error): void => {
+          this.n2CdBusy = false;
+          this.n2WarnAndRing(`N2_CD_SANDWICH_PRE_FAILED|id=${id}|` +
+            `reason=${safeError(error)}|diag=true|is_evidence=false`);
+        });
+      return;
+    }
+    if (step !== 'receipt' || marker.length === 0 || target.length === 0) {
+      return;
+    }
+    this.n2CdBusy = true;
+    this.n2CdSendPostControl(armed, request, target, protocol, marker, remote)
+      .then((): void => { this.n2CdBusy = false; })
+      .catch((error: Error): void => {
+        this.n2CdBusy = false;
+        this.n2WarnAndRing(`N2_CD_SANDWICH_POST_FAILED|id=${id}|` +
+          `reason=${safeError(error)}|diag=true|is_evidence=false`);
+      });
+  }
+
+  // The PRE leg: the core asks for it (`step=pre`) only AFTER the formal
+  // switch, and it must go through the kind's OWN production opener. Answers
+  // true only when the control registry itself saw the HIT — the shell then asks
+  // for the next step immediately instead of waiting for a tick.
+  private async n2CdSendPreControl(armed: N2EvidenceOptions, request: N2CdPlanRequest,
+    target: string, protocol: N2ControlProtocol, marker: string): Promise<boolean> {
+    let result: string = 'rejected';
+    let reason: string = 'none';
+    try {
+      await sendAndWaitN2Control(armed, target, protocol, marker);
+      result = 'hit';
+      reason = 'ok';
+    } catch (error) {
+      result = 'rejected';
+      reason = (error as Error).message !== undefined && (error as Error).message.length > 0
+        ? (error as Error).message
+        : 'control-send-throw';
+    }
+    let coreResult: string = 'rejected';
+    try {
+      const reply: Record<string, Object> = JSON.parse(core.n2_cd_pre(request.id, result, reason)) as
+        Record<string, Object>;
+      coreResult = String(reply['result'] ?? 'rejected');
+    } catch (coreError) { /* the core's own line carries its refusal */ }
+    const line: string = formatN2CdPlanShellLine(this.requestId, request, 'pre', marker, result,
+      reason);
+    hilog.info(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+    this.n2CdLatchAfter(coreResult);
+    return result === 'hit';
+  }
+
+  private async n2CdSendPostControl(armed: N2EvidenceOptions, request: N2CdPlanRequest,
+    target: string, protocol: N2ControlProtocol, marker: string, remote: string): Promise<void> {
+    let result: string = 'observed';
+    let reason: string = 'ok';
+    try {
+      await sendAndWaitN2Control(armed, target, protocol, marker);
+    } catch (error) {
+      result = 'unsat';
+      reason = 'post-control-miss';
+    }
+    let coreAnswered: boolean = false;
+    let coreResult: string = '';
+    try {
+      const reply: Record<string, Object> = JSON.parse(core.n2_cd_post(request.id, result, reason)) as
+        Record<string, Object>;
+      coreAnswered = typeof reply['result'] === 'string';
+      coreResult = coreAnswered ? String(reply['result']) : '';
+    } catch (coreError) { /* the core's own line carries its refusal */ }
+    const line: string = formatN2CdPlanShellLine(this.requestId, request, 'post', marker, result,
+      reason);
+    hilog.info(DOMAIN, TAG, '%{public}s', line);
+    this.n2RingAppend(line);
+    // EVERY branch of the core's `post` either closes the plan (observed /
+    // unsat / invalid-result) or answers `no-active-plan` / `not-armed`: once it
+    // ANSWERED, no core plan is left behind, so the shell latch drops — and a
+    // gate this plan armed is released only by an `observed` terminal, never by
+    // "the plan is gone". When the call itself failed the latch is KEPT — the
+    // core's plan is still active then, and only its own poll can still close it
+    // (`post-wait-exceeded`).
+    if (coreAnswered) {
+      if (coreResult === 'observed') {
+        this.n2CdGateReset();
+      } else {
+        this.n2CdGateHold();
+      }
+      this.n2CdClearLatch();
+    }
+  }
+
+  // N2 first batch C/D columns: the ring FETCH fallback (`n2_ring_dump`). One
+  // launch re-emits a bounded, SEQ-ADDRESSED window of the ring on HiLog, which
+  // the host reads live after returning to Wi-Fi — the path for a device where
+  // the bundle transfer (`hdc file recv -b …`) is unavailable or the HAP is not
+  // debug-signed. The core owns the ring file and does ALL the reading and
+  // pagination (`{"from_seq":…,"to_seq":…,"count":…,"session":…}` over durable
+  // seqs); the shell only validates the private-channel document, forwards it
+  // verbatim, re-emits the records it answers and mirrors the watermark the
+  // core reports. NOTHING the core returns here is written
+  // back into the ring: the chunk records duplicate ring content and the
+  // `N2_RING_DUMP` summary is not ring content at all.
+  //
+  // A DUMP ADVANCES NOTHING: the receipt mirrors the core's `acked_seq` as
+  // `ack_watermark=` — the watermark AS IT STANDS. The retrieved watermark moves
+  // ONLY through the explicit host ACK channel below (`N2_RING_ACK_SHELL`):
+  // re-emitting a page proves the App READ it, not that the host PERSISTED it
+  // and verified the window is complete.
+  private pollN2RingDump(): void {
+    if (this.destroyRequested) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${N2_RING_DUMP_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      this.n2WarnAndRing(`N2_RING_DUMP_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
+      return;
+    }
+    try {
+      const decision: N2RingDumpDecision = parseN2RingDump(text);
+      if (decision.request === undefined) {
+        const reject: string = formatN2RingDumpShellReject(this.requestId, decision.error);
+        hilog.warn(DOMAIN, TAG, '%{public}s', reject);
+        // The shell's own refusal is a fetch event too: it belongs in the ring.
+        this.n2RingAppend(reject);
+        return;
+      }
+      const request: N2RingDumpRequest = decision.request;
+      // -1 in the receipt's `to_seq` = the request did not freeze a tail: the
+      // core then serves up to whatever the tail is at serve time. Printing the
+      // parsed placeholder 0 would read as a real (empty) window.
+      const wantedToSeq: number = request.hasToSeq ? request.toSeq : -1;
+      // The manifest FIRST (a bare core call, the same shape the teardown uses
+      // for the counters): the core formats and emits the `N2_RING_MANIFEST`
+      // line ITSELF (HiLog + ring), so a fetch is always bracketed by the
+      // ring's head/tail state, and the call rescans the kept segments — which
+      // is also what makes the dump below see the file's real tail right after
+      // a re-arm. Whether a ring exists is the CORE's answer (`not-configured`),
+      // never a shell guess.
+      try {
+        core.n2_ring_manifest();
+      } catch (error) { /* the dump below answers `not-configured` itself */ }
+      // The document is forwarded verbatim: the CORE's parser is the only
+      // authority on the window (`legacy-start-index-unsupported`,
+      // `invalid-session`, …), so the shell never re-encodes it.
+      let page: N2RingDumpPage = emptyN2RingDumpPage();
+      try {
+        page = JSON.parse(core.n2_ring_dump(text.trim())) as N2RingDumpPage;
+      } catch (error) {
+        const failed: string = formatN2RingDumpShellLine(this.requestId, request.fromSeq,
+          wantedToSeq, request.count, 0, -1, 'rejected', 'core-throw');
+        hilog.warn(DOMAIN, TAG, '%{public}s', failed);
+        this.n2RingAppend(failed);
+        return;
+      }
+      const records: string[] = Array.isArray(page.lines) ? page.lines : [];
+      for (let i = 0; i < records.length; i++) {
+        hilog.info(DOMAIN, TAG, '%{public}s', records[i]);
+      }
+      if (typeof page.summary === 'string' && page.summary.length > 0) {
+        hilog.info(DOMAIN, TAG, '%{public}s', page.summary);
+      }
+      // The receipt reports the watermark AS IT STANDS (`ack_watermark=`), never
+      // a confirmation: this call confirms nothing and never touches the core's
+      // ACK surface, so a page that was re-emitted to a host which did NOT
+      // persist it cannot release the segment it lives in. A refused page
+      // answers no watermark (-1).
+      let ackWatermark: number = -1;
+      if (page.result === 'dumped' && typeof page.acked_seq === 'number') {
+        ackWatermark = page.acked_seq;
+      }
+      const line: string = formatN2RingDumpShellLine(this.requestId, request.fromSeq, wantedToSeq,
+        request.count, records.length, ackWatermark,
+        page.result === 'dumped' ? 'dumped' : 'rejected',
+        typeof page.reason === 'string' ? page.reason : 'none');
+      hilog.info(DOMAIN, TAG, '%{public}s', line);
+      // The shell's OWN receipt is a fetch event and belongs in the ring; the
+      // core's `N2_RING_DUMP` summary and its chunk records do NOT (they are not
+      // ring content — the chunks duplicate records already in it).
+      this.n2RingAppend(line);
+    } finally {
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        this.n2WarnAndRing(`N2_RING_DUMP_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
+      }
+    }
+  }
+
+  // N2 first batch C/D columns: the EXPLICIT host ACK channel (`n2_ring_ack`).
+  // This is the ONLY path that may advance the ring's retrieved watermark, and
+  // therefore the only thing that can release the oldest segment to rotation.
+  // The host may send it ONLY after it has persisted the fetched ring bytes and
+  // verified the window is complete:
+  //
+  //   aa start -b cn.alfadb.netbird -a EntryAbility \
+  //     --ps n2h_arm_options '<the same arm ticket that armed this session>' \
+  //     --ps n2_ring_ack '{"session":"<sess= from N2_RING_MANIFEST>","up_to_seq":<last verified durable seq>}'
+  //
+  // The shell validates the document (both keys required; the same named
+  // refusals the core answers), forwards it VERBATIM and mirrors the outcome in
+  // its own `N2_RING_ACK_SHELL` receipt. The BINDING is the core's: `n2_ring_ack`
+  // re-parses the document and checks the session against the CURRENT arm
+  // inside the ring's own lock, so a stale session / a seq beyond the tail / an
+  // unarmed ring are refused there — the shell never reads the session once and
+  // then acks unconditionally. `advanced=` is the core's answer; a repeat of an
+  // already-acknowledged watermark is idempotent (`advanced=false`).
+  private pollN2RingAck(): void {
+    if (this.destroyRequested) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${N2_RING_ACK_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      this.n2WarnAndRing(`N2_RING_ACK_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
+      return;
+    }
+    try {
+      const decision: N2RingAckDecision = parseN2RingAck(text);
+      if (decision.request === undefined) {
+        const reject: string = formatN2RingAckShellReject(this.requestId, decision.error);
+        hilog.warn(DOMAIN, TAG, '%{public}s', reject);
+        // A refused ACK document is an ACK event too: it belongs in the ring.
+        this.n2RingAppend(reject);
+        return;
+      }
+      const request: N2RingAckRequest = decision.request;
+      // The document is forwarded verbatim: the CORE's parser and its
+      // session/range checks are the only authority on whether the watermark
+      // moves.
+      let reply: N2RingAckReply = emptyN2RingAckReply();
+      try {
+        reply = JSON.parse(core.n2_ring_ack(text.trim())) as N2RingAckReply;
+      } catch (error) {
+        const failed: string = formatN2RingAckShellLine(this.requestId, request.session,
+          request.upToSeq, -1, false, 'rejected', 'core-throw');
+        hilog.warn(DOMAIN, TAG, '%{public}s', failed);
+        this.n2RingAppend(failed);
+        return;
+      }
+      const ackedSeq: number = typeof reply.acked_seq === 'number' ? reply.acked_seq : -1;
+      // `advanced` is reported ONLY for an accepted answer, and only as the
+      // core's own bit: a refusal can never read as a confirmation.
+      const accepted: boolean = reply.ok === true && reply.result === 'acked';
+      const line: string = formatN2RingAckShellLine(this.requestId, request.session,
+        request.upToSeq, ackedSeq, accepted && reply.advanced === true,
+        accepted ? 'acked' : 'rejected',
+        typeof reply.reason === 'string' ? reply.reason : 'none');
+      if (accepted) {
+        hilog.info(DOMAIN, TAG, '%{public}s', line);
+      } else {
+        hilog.warn(DOMAIN, TAG, '%{public}s', line);
+      }
+      // The shell's OWN receipt is an ACK event and belongs in the ring.
+      this.n2RingAppend(line);
+    } finally {
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        this.n2WarnAndRing(`N2_RING_ACK_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       }
     }
   }
@@ -2508,21 +3527,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       text = fs.readTextSync(path);
     } catch (error) {
-      hilog.warn(DOMAIN, TAG,
-        'N2_CONTROL_READ_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      this.n2WarnAndRing(`N2_CONTROL_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       return;
     }
     try {
       const decision: N2ControlDecision = parseN2ControlRequest(text);
       if (decision.request === undefined) {
-        hilog.warn(DOMAIN, TAG, '%{public}s',
-          formatN2ControlShellReject(this.requestId, decision.error));
+        this.n2WarnAndRing(formatN2ControlShellReject(this.requestId, decision.error));
         return;
       }
       const request = decision.request;
       if (this.n2Evidence === undefined) {
-        hilog.warn(DOMAIN, TAG, '%{public}s',
+        this.n2WarnAndRing(
           formatN2ControlShellLine(this.requestId, request, 'rejected', 'not-armed'));
         return;
       }
@@ -2541,16 +3558,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           ? (error as Error).message
           : 'send-throw';
       }
-      hilog.info(DOMAIN, TAG, '%{public}s',
-        formatN2ControlShellLine(this.requestId, request, result, reason));
+      const controlLine: string =
+        formatN2ControlShellLine(this.requestId, request, result, reason);
+      hilog.info(DOMAIN, TAG, '%{public}s', controlLine);
+      this.n2RingAppend(controlLine);
     } finally {
       // consume exactly once, whatever happened above
       try {
         fs.unlinkSync(path);
       } catch (error) {
-        hilog.warn(DOMAIN, TAG,
-          'N2_CONTROL_CONSUME_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+        this.n2WarnAndRing(`N2_CONTROL_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       }
     }
   }
@@ -2583,16 +3601,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       text = fs.readTextSync(path);
     } catch (error) {
-      hilog.warn(DOMAIN, TAG,
-        'N2_STIMULUS_READ_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      this.n2WarnAndRing(`N2_STIMULUS_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       return;
     }
     try {
       const decision: N2StimulusDecision = parseN2Stimulus(text);
       if (decision.request === undefined) {
-        hilog.warn(DOMAIN, TAG, '%{public}s',
-          formatN2StimulusShellReject(this.requestId, decision.error));
+        this.n2WarnAndRing(formatN2StimulusShellReject(this.requestId, decision.error));
         return;
       }
       const kind: string = decision.request.kind;
@@ -2605,16 +3621,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // own reason, never as applied
         reply = { ok: false, result: 'rejected', reason: 'core-throw' };
       }
-      hilog.info(DOMAIN, TAG, '%{public}s',
-        formatN2StimulusShellLine(this.requestId, kind, id, reply));
+      const stimulusLine: string = formatN2StimulusShellLine(this.requestId, kind, id, reply);
+      hilog.info(DOMAIN, TAG, '%{public}s', stimulusLine);
+      this.n2RingAppend(stimulusLine);
     } finally {
       // consume exactly once, whatever happened above
       try {
         fs.unlinkSync(path);
       } catch (error) {
-        hilog.warn(DOMAIN, TAG,
-          'N2_STIMULUS_CONSUME_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+        this.n2WarnAndRing(`N2_STIMULUS_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       }
     }
   }
@@ -2646,23 +3662,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       text = fs.readTextSync(path);
     } catch (error) {
-      hilog.warn(DOMAIN, TAG,
-        'N2_A_EVENT_READ_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      this.n2WarnAndRing(`N2_A_EVENT_READ_FAILED|requestId=${this.requestId}|` +
+        `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       return;
     }
     try {
       const decision: N2AEventDecision = parseN2AEvent(text);
       if (decision.request === undefined) {
-        hilog.warn(DOMAIN, TAG, '%{public}s',
-          formatN2AEventShellReject(this.requestId, decision.error));
+        this.n2WarnAndRing(formatN2AEventShellReject(this.requestId, decision.error));
         return;
       }
       const request = decision.request;
       if (this.n2Evidence === undefined) {
-        hilog.warn(DOMAIN, TAG, '%{public}s',
-          formatN2AEventShellLine(this.requestId, request.kind, request.id,
-            { ok: false, result: 'rejected', reason: 'not-armed' }));
+        this.n2WarnAndRing(formatN2AEventShellLine(this.requestId, request.kind, request.id,
+          { ok: false, result: 'rejected', reason: 'not-armed' }));
         return;
       }
       let reply: N2AEventReply = { ok: false, result: 'rejected', reason: 'core-throw' };
@@ -2673,16 +3686,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // own reason, never as a dispatched trigger
         reply = { ok: false, result: 'rejected', reason: 'core-throw' };
       }
-      hilog.info(DOMAIN, TAG, '%{public}s',
-        formatN2AEventShellLine(this.requestId, request.kind, request.id, reply));
+      const aEventLine: string =
+        formatN2AEventShellLine(this.requestId, request.kind, request.id, reply);
+      hilog.info(DOMAIN, TAG, '%{public}s', aEventLine);
+      this.n2RingAppend(aEventLine);
     } finally {
       // consume exactly once, whatever happened above
       try {
         fs.unlinkSync(path);
       } catch (error) {
-        hilog.warn(DOMAIN, TAG,
-          'N2_A_EVENT_CONSUME_FAILED|requestId=%{public}s|code=%{public}s|diag=true|is_evidence=false',
-          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+        this.n2WarnAndRing(`N2_A_EVENT_CONSUME_FAILED|requestId=${this.requestId}|` +
+          `code=${String((error as BusinessFailure).code ?? 'none')}|diag=true|is_evidence=false`);
       }
     }
   }
@@ -2704,9 +3718,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     const target: string = selectN2SandwichTarget(armed.outerDestinations);
     if (target.length === 0) {
-      hilog.warn(DOMAIN, TAG, '%{public}s',
-        formatN2SandwichShellLine(kind, 'pre', 'none', 'none', 'no-target',
-          'no-ice-destination'));
+      this.n2WarnAndRing(formatN2SandwichShellLine(kind, 'pre', 'none', 'none', 'no-target',
+        'no-ice-destination'));
       return '';
     }
     // N2 T7a (item 1): the PRE and POST controls need DIFFERENT markers — the
@@ -2717,7 +3730,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const marker: string = formatN2SandwichLegMarker(kind, this.requestId, 'pre');
     const postMarker: string = formatN2SandwichLegMarker(kind, this.requestId, 'post');
     if (marker.length === 0 || postMarker.length === 0 || marker === postMarker) {
-      hilog.warn(DOMAIN, TAG, '%{public}s',
+      this.n2WarnAndRing(
         formatN2SandwichShellLine(kind, 'pre', 'none', target, 'rejected', 'invalid-marker'));
       return '';
     }
@@ -2731,7 +3744,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     if (!registered) {
       // the core already logged the exact unsat/rejected reason
-      hilog.warn(DOMAIN, TAG, '%{public}s',
+      this.n2WarnAndRing(
         formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat', 'core-refused'));
       return '';
     }
@@ -2746,13 +3759,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       try {
         core.n2_sandwich_post(kind, postMarker, 'unsat', 'pre-control-miss');
       } catch (postError) { /* the core logs nothing for a refused post */ }
-      hilog.warn(DOMAIN, TAG, '%{public}s',
-        formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat',
-          (error as Error).message ?? 'pre-control-miss'));
+      this.n2WarnAndRing(formatN2SandwichShellLine(kind, 'pre', marker, target, 'unsat',
+        (error as Error).message ?? 'pre-control-miss'));
       return '';
     }
-    hilog.info(DOMAIN, TAG, '%{public}s',
-      formatN2SandwichShellLine(kind, 'pre', marker, target, 'sent', 'pre-control-hit'));
+    const preSandwichLine: string =
+      formatN2SandwichShellLine(kind, 'pre', marker, target, 'sent', 'pre-control-hit');
+    hilog.info(DOMAIN, TAG, '%{public}s', preSandwichLine);
+    this.n2RingAppend(preSandwichLine);
     return marker;
   }
 
@@ -2791,8 +3805,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.n2SandwichBusy = true;
     this.runN2SandwichPosts(posts)
       .catch((error: Error): void => {
-        hilog.warn(DOMAIN, TAG, 'N2_SANDWICH_POST_FAILED|reason=%{public}s|diag=true|is_evidence=false',
-          safeError(error));
+        this.n2WarnAndRing(`N2_SANDWICH_POST_FAILED|reason=${safeError(error)}|` +
+          `diag=true|is_evidence=false`);
       })
       .then((): void => {
         this.n2SandwichBusy = false;
@@ -2818,8 +3832,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       try {
         core.n2_sandwich_post(post.kind, post.marker, result, reason);
       } catch (error) { /* a refused post is the core's own named line */ }
-      hilog.info(DOMAIN, TAG, '%{public}s',
-        formatN2SandwichShellLine(post.kind, 'post', post.marker, target, result, reason));
+      const postSandwichLine: string =
+        formatN2SandwichShellLine(post.kind, 'post', post.marker, target, result, reason);
+      hilog.info(DOMAIN, TAG, '%{public}s', postSandwichLine);
+      this.n2RingAppend(postSandwichLine);
     }
   }
 
@@ -2864,6 +3880,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // No new timer, no loop, no await; ARM/latch/WAITING semantics
       // untouched; C7 counting input only, never Evidence/judge.
       this.maybeCloseInterfaceStatsWindow();
+      // N2 first batch C/D columns: the ring channels first (the FETCH fallback
+      // works even with no armed session — the operator fetches the ring AFTER
+      // returning to Wi-Fi, when the plan may already be over — while the
+      // explicit ACK is accepted only by an ARMED ring: the core refuses it
+      // `not-armed` otherwise, so a request that outlives the session releases
+      // nothing). Then the plan channel and its step poll; the plan poll
+      // consumes at most ONE plan per tick and the step poll is a bare core call
+      // while no plan is in flight.
+      this.pollN2RingDump();
+      this.pollN2RingAck();
+      this.pollN2CdPlan();
+      this.pollN2CdStep();
       // N2 P4: the A-column trigger poll — one-shot + self-consuming like the
       // other private channels, no-op unless armed (and then still a bare stat
       // when nothing is pending). It rides BEFORE the control/stimulus polls
@@ -3129,9 +4157,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     let stage: string = 'snapshot';
     try {
       if (this.n2Evidence !== undefined) {
-        hilog.warn(DOMAIN, TAG,
-          'N2_EVIDENCE_RECREATE_DETECTED|requestId=%{public}s|reason=%{public}s|' +
-          'diag=true|is_evidence=false', this.requestId, clean(reason));
+        const recreateLine: string = `N2_EVIDENCE_RECREATE_DETECTED|requestId=${this.requestId}|` +
+          `reason=${clean(reason)}|diag=true|is_evidence=false`;
+        hilog.warn(DOMAIN, TAG, '%{public}s', recreateLine);
+        this.n2RingAppend(recreateLine);
       }
       // 1. the DESIRED config, fresh from the core (live gate state)
       const net: CoreNetworkConfig = connectorNetworkConfig();
@@ -3171,10 +4200,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (merged.routes.some((route: VpnRouteConfig): boolean => route.isDefaultRoute)) {
           throw new Error('n2-evidence-default-route-present');
         }
-        hilog.info(DOMAIN, TAG,
-          'N2_EVIDENCE_ROUTES|requestId=%{public}s|leg=recreate|capture32=%{public}s|' +
-            'defaultRoutes=0|excludedRoutes=0|diag=true|is_evidence=false',
-          this.requestId, this.n2Evidence.capture32.join(','));
+        const recreateRoutesLine: string = `N2_EVIDENCE_ROUTES|requestId=${this.requestId}|` +
+          `leg=recreate|capture32=${this.n2Evidence.capture32.join(',')}|defaultRoutes=0|` +
+          `excludedRoutes=0|diag=true|is_evidence=false`;
+        hilog.info(DOMAIN, TAG, '%{public}s', recreateRoutesLine);
+        this.n2RingAppend(recreateRoutesLine);
       }
       // H1 fail-closed gate on the RECREATE leg too: a snapshot entry that
       // violates the SDK RouteInfo contract must never reach create().
@@ -3291,9 +4321,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       this.failRecreate(stage, error as Error);
     } finally {
       this.recreateInFlight = false;
-      if (this.networkDirty && !this.destroyRequested && this.networkNetId !== 0) {
+      // N2 first batch C/D columns: the recreate leg's own retry is a supply
+      // entry like any other — a formal-switch gate (or a held one) must block
+      // it, or the rebuild's tail would refill the core on a network the plan
+      // never released.
+      if (this.networkDirty && !this.destroyRequested && this.networkNetId !== 0 &&
+        !this.n2CdProductionBlocked()) {
         this.recoverPhysicalNetwork().catch((error: Error): void => {
-          hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+          this.n2NetworkRecoveryFail(error);
         });
       }
     }
@@ -3398,7 +4433,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
-        protectDeviation: this.protectDeviationRouteExclusion
+        protectDeviation: this.protectDeviationRouteExclusion,
+        productionGateBlocked: this.n2CdProductionBlocked()
       });
       if (reason.length > 0 || connection === undefined) { return; }
       if (!isDns && (request.kind !== 'tcp' || (request.purpose !== 'management' &&
@@ -3428,7 +4464,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
         connectionUnchanged: this.connection === connection,
-        protectDeviation: this.protectDeviationRouteExclusion
+        protectDeviation: this.protectDeviationRouteExclusion,
+        productionGateBlocked: this.n2CdProductionBlocked()
       });
       if (protectedOk && epoch === this.networkEpoch && postReason.length === 0) {
         result = 'protected';
@@ -3487,7 +4524,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           connectionUnchanged: this.connection === connection
         }).length > 0 ||
         this.networkDirty && this.networkRecoveryReady &&
-        !this.networkRecoveryActive) {
+        !this.networkRecoveryActive ||
+        // N2 first batch C/D columns: the formal-switch gate, checked AFTER the
+        // protect await and immediately BEFORE the actual core feed.
+        this.n2CdProductionBlocked(epoch)) {
         hilog.warn(DOMAIN, TAG,
           'VPN_MGMT_SOCKET_FEED_SKIPPED|requestId=%{public}s|stage=protect|fd=%{public}d',
           this.requestId, fd);
@@ -3756,9 +4796,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // watcher); a desired-route-set CHANGE goes through the controlled
     // recreate below.
     this.networkRecoveryReady = true;
-    if (this.networkEpoch > 0) {
+    // `networkEpoch` is one-based (the sockets' protect generation), so "a
+    // switch already happened while this session was starting" is `> 1`.
+    if (this.networkEpoch > 1) {
       this.recoverPhysicalNetwork().catch((error: Error): void => {
-        hilog.warn(DOMAIN, TAG, 'VPN_NETWORK_RECOVERY_FAIL|summary=%{public}s', safeError(error));
+        this.n2NetworkRecoveryFail(error);
       });
     }
     this.ackAppliedRoutesInitial();
@@ -3835,11 +4877,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, wgFd, this.tunFd);
       return false;
     }
-    hilog.info(DOMAIN, TAG,
-      'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true|' +
-      'mono_ms=%{public}d|wall_ms=%{public}d',
-      this.requestId, wgFd, this.tunFd,
-      typeof tun.mono_ms === 'number' ? tun.mono_ms : -1, Date.now());
+    const fedLine: string = `VPN_WG_DATAPLANE_FED|requestId=${this.requestId}|wgFd=${wgFd}|` +
+      `tunFd=${this.tunFd}|deviceUp=true|` +
+      `mono_ms=${typeof tun.mono_ms === 'number' ? tun.mono_ms : -1}|wall_ms=${Date.now()}`;
+    hilog.info(DOMAIN, TAG, '%{public}s', fedLine);
+    this.n2RingAppend(fedLine);
     return true;
   }
 
@@ -3966,7 +5008,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // One gather round needs one socket per IPv4 interface.
   private async topUpIceBatch(): Promise<number> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;
-    if (this.iceTopUpActive || this.networkDirty ||
+    // N2 first batch C/D columns: the formal-switch gate blocks the whole
+    // top-up funnel (the watcher's own call site and the interval's callback
+    // both land here), so a HELD gate cannot keep topping the pool up after the
+    // recovery it blocked.
+    if (this.iceTopUpActive || this.networkDirty || this.n2CdProductionBlocked() ||
       protectedConnectionRejectionReason({
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: connection !== undefined,
@@ -4068,7 +5114,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           connectionUnchanged: this.connection === connection
         }).length > 0 ||
         this.networkDirty && this.networkRecoveryReady &&
-        !this.networkRecoveryActive) {
+        !this.networkRecoveryActive ||
+        // N2 first batch C/D columns: the formal-switch gate, checked AFTER the
+        // protect await and immediately BEFORE connectorIceSocketFeed.
+        this.n2CdProductionBlocked(epoch)) {
         hilog.error(DOMAIN, TAG,
           'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect-or-stale|fd=%{public}d',
           this.requestId, fd);
@@ -4113,15 +5162,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.n2Evidence !== undefined && traceKind.length > 0) {
       // N2 T7a (item 6): `protect_generation=` is the frozen E1 field name (the
       // earlier `generation=` spelling was unified with the core's `N2_SOCK`
-      // receipts).
-      hilog.info(DOMAIN, TAG,
-        'N2_SOCK|phase=open|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'protect_generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
-        traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
-      hilog.info(DOMAIN, TAG,
-        'N2_SOCK|phase=protect_begin|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'protect_generation=%{public}d|net_id=%{public}d|wall_ms=%{public}d|diag=true|is_evidence=false',
-        traceKind, traceId, fd, this.networkEpoch, this.networkNetId, t0);
+      // receipts). N2 C/D first batch: the three shell protect phases also go to
+      // the armed-only evidence ring (this is the fd-identity evidence of the
+      // re-fed sockets during the cellular phase).
+      const openLine: string = `N2_SOCK|phase=open|kind=${traceKind}|request_id=${traceId}|` +
+        `fd=${fd}|protect_generation=${this.networkEpoch}|net_id=${this.networkNetId}|` +
+        `wall_ms=${t0}|diag=true|is_evidence=false`;
+      hilog.info(DOMAIN, TAG, '%{public}s', openLine);
+      this.n2RingAppend(openLine);
+      const beginLine: string = `N2_SOCK|phase=protect_begin|kind=${traceKind}|` +
+        `request_id=${traceId}|fd=${fd}|protect_generation=${this.networkEpoch}|` +
+        `net_id=${this.networkNetId}|wall_ms=${t0}|diag=true|is_evidence=false`;
+      hilog.info(DOMAIN, TAG, '%{public}s', beginLine);
+      this.n2RingAppend(beginLine);
     }
     // On the tested device, per-fd protect() resolved despite MANAGE_VPN
     // check-failure log lines. The dev-only deviation skips this call when
@@ -4185,12 +5238,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       } catch (error) {
         local = 'unknown';
       }
-      hilog.info(DOMAIN, TAG,
-        'N2_SOCK|phase=protect_settle|kind=%{public}s|request_id=%{public}s|fd=%{public}d|' +
-        'status=%{public}s|elapsed_ms=%{public}d|protect_generation=%{public}d|net_id=%{public}d|' +
-        'local=%{public}s|wall_ms=%{public}d|diag=true|is_evidence=false',
-        traceKind, traceId, fd, outcome ? 'success' : 'failed', elapsed,
-        this.networkEpoch, this.networkNetId, local, Date.now());
+      const settleLine: string = `N2_SOCK|phase=protect_settle|kind=${traceKind}|` +
+        `request_id=${traceId}|fd=${fd}|status=${outcome ? 'success' : 'failed'}|` +
+        `elapsed_ms=${elapsed}|protect_generation=${this.networkEpoch}|` +
+        `net_id=${this.networkNetId}|local=${local}|wall_ms=${Date.now()}|` +
+        `diag=true|is_evidence=false`;
+      hilog.info(DOMAIN, TAG, '%{public}s', settleLine);
+      this.n2RingAppend(settleLine);
     }
     if (!outcome && this.protectDeviationRouteExclusion) {
       hilog.warn(DOMAIN, TAG,
@@ -4276,6 +5330,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // destroy semantics and fd contract are unchanged.
     this.destroyRequested = true;
     this.stopStatusAndNetcfgWatcher();
+    this.n2RingStopStats();
     try {
       const stop = connectorStop();
       hilog.info(DOMAIN, TAG,
@@ -4286,10 +5341,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
         this.requestId, safeError(error as Error));
     }
+    // N2 first batch C/D columns: the ring must outlive the WHOLE teardown, or
+    // the closing lines are lost — `connectorStop` (the TUN gap), the destroy
+    // itself and the descriptors it closes (the final `N2_SOCK` / `N2_FD_SEND`
+    // lines of the session). The counters are therefore reported and the ring
+    // disabled only AFTER the destroy settled; the FILE always stays for the
+    // operator to fetch after returning to Wi-Fi.
     this.destroyOnce('onDestroy').catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=unexpected|summary=%{public}s',
         this.requestId, safeError(error));
+    }).then((): void => {
+      try {
+        core.n2_ring_status();
+      } catch (error) { /* no ring configured: nothing to report */ }
+      try {
+        core.n2_ring_disable();
+      } catch (error) { /* the file is already on disk */ }
     });
   }
 

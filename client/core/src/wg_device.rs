@@ -491,6 +491,11 @@ impl N2DestinationTee {
             // really HIT (`control_hit` is inert while unarmed).
             if let Some(marker) = crate::n2_control::hit_marker(&line) {
                 crate::n2_sandwich::control_hit(marker, now);
+                // N2 C/D first batch (2026-09-29): the SAME tee observation is
+                // the C/D switching sandwich's authoritative pre/post HIT
+                // (`n2_cd` is inert while unarmed, so an unarmed session keeps
+                // zero output).
+                crate::n2_cd::control_hit(marker, now);
             }
             return true;
         }
@@ -796,7 +801,12 @@ impl WgDevice {
                 return Err(e);
             }
         };
-        crate::n2_socket_trace::duplicated(wg_socket_raw, fd);
+        // N2 C/D (Wb): the takeover itself — the mirrored registration PLUS the
+        // base socket's live identity and its protect-settle substitute receipt
+        // (this is the only liveness point `Wb` has: it never sends). Reached
+        // only after the duplicated descriptor was validated above, so a failed
+        // adopt leaves no identity and no receipt behind.
+        crate::n2_socket_trace::adopted(wg_socket_raw, fd);
         emit(&format!(
             "N6_WG_DEVICE|adopt|local={}.{}.{}.{}:{}|peers=0",
             local.0[0], local.0[1], local.0[2], local.0[3], local.1
@@ -854,7 +864,12 @@ impl WgDevice {
             unsafe { sys::close(fd) };
             e
         })?;
-        crate::n2_socket_trace::duplicated(wg_socket_raw, fd);
+        // N2 C/D (Wb): replacing the base socket IS the next takeover — the new
+        // descriptor becomes the class's live identity (and feeds its
+        // protect-settle substitute receipt); the old one's close below then
+        // drops the old registration, and a live entry keyed on the NEW
+        // descriptor survives that close.
+        crate::n2_socket_trace::adopted(wg_socket_raw, fd);
         if let Some(old) = self.fd.take() {
             crate::n2_socket_trace::closed(old);
             unsafe { sys::close(old) };

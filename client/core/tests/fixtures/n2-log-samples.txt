@@ -2,8 +2,10 @@
 # client/core/tests/n2_log_samples.rs from the REAL formatters.
 # One sample per Rust-side N2 line; volatile inputs are fixed arguments.
 # Shell-side lines (N2_*_SHELL, phase=open/protect_begin/protect_settle,
-# VPN_WG_DATAPLANE_FED, the arm-ticket lines) are NOT producible from Rust
-# and are documented in docs/n2-log-formats-20260928.md instead.
+# VPN_WG_DATAPLANE_FED, VPN_NETWORK_*, N2_RING_DUMP_SHELL, the arm-ticket lines)
+# are NOT producible from Rust and are documented in docs/n2-log-formats-20260928.md.
+# N2_RING_MANIFEST embeds the live clock (manifest_line_now) and therefore has no
+# fixed-argument formatter; its field sequence is listed in that doc §9.
 # N2_SANDWICH phase=pre
 N2_SANDWICH|kind=I|phase=pre|marker=n2s-I-evt1-pre|event_ref=attach@1000|result=registered|reason=ok|fd=-1|dup_fd=-1|remote=unknown|wait_ms=3000|mono_ms=1001|diag=true|is_evidence=false
 # N2_SANDWICH phase=post
@@ -44,7 +46,47 @@ N2_SOCK|phase=subsequent_io|kind=M|request_id=42|fd=21|dup_fd=22|protect=success
 N2_SOCK|phase=subsequent_io|kind=S|request_id=7|fd=21|dup_fd=22|protect=success|protect_ms=3|protect_generation=1|local=192.168.1.2:51000|remote=192.0.2.1:443|proto=tcp|net_id=31|bytes=12|mono_ms=27000|wall_ms=1700000000000|status=sent|detail=post_connect_write|event_id=none|diag=true|is_evidence=false
 # N2_SOCK phase=first_io
 N2_SOCK|phase=first_io|kind=I|request_id=42|fd=7|dup_fd=8|protect=success|protect_ms=9|protect_generation=2|first_mono_ms=123|first_wall_ms=456|local=192.168.1.2:5000|remote=192.0.2.1:3478|proto=udp|net_id=31|status=sent|detail=stun_txn_abcd|diag=true|is_evidence=false
+# N2_SOCK phase=protect_settle (Wb core takeover)
+N2_SOCK|phase=protect_settle|kind=Wb|request_id=wg_12|fd=21|dup_fd=22|protect=success|protect_ms=2|protect_generation=4|protect_mono_ms=1234|local=192.168.50.199:51820|remote=unknown|proto=17|net_id=21|status=success|detail=core-adopt|diag=true|is_evidence=false
 # N2_FD_SEND
 N2_FD_SEND|kind=Ws|fd=7|dup_fd=8|packets=2|bytes=288|mono_ms=6001|diag=true|is_evidence=false
 # N7_WG_FEED adopted
 N7_WG_FEED|adopted|peers=2|endpoints=1|egress_replayed=1|mono_ms=2377
+# N2_CD_SANDWICH phase=plan
+N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=plan|marker=none|result=planned|reason=ok|net_before=wifi|net_after=unknown|local_before=192.168.50.199:0|local_after=unknown|fd=-1|dup_fd=-1|remote=unknown|wait_ms=300000|mono_ms=1000|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=plan (D, pre-set on Wi-Fi)
+N2_CD_SANDWICH|id=cd-D-M-1|column=D|kind=M|rep=1|phase=plan|marker=none|result=planned|reason=await-start-bearer|net_before=wifi|net_after=unknown|local_before=192.168.50.199:0|local_after=unknown|fd=-1|dup_fd=-1|remote=unknown|wait_ms=300000|mono_ms=1010|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=prepare prepared (D, the Wi-Fi -> cellular hop)
+N2_CD_SANDWICH|id=cd-D-M-1|column=D|kind=M|rep=1|phase=prepare|marker=none|result=prepared|reason=not-a-d-measurement|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=-1|dup_fd=-1|remote=unknown|wait_ms=300000|mono_ms=1050|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=prepare ready (D, the cellular-side recovery)
+N2_CD_SANDWICH|id=cd-D-M-1|column=D|kind=M|rep=1|phase=prepare|marker=none|result=ready|reason=preparation-recovered|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=-1|dup_fd=-1|remote=unknown|wait_ms=300000|mono_ms=1080|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=pre
+N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=pre|marker=cd-C-M-1-pre|result=hit|reason=ok|net_before=wifi|net_after=unknown|local_before=192.168.50.199:0|local_after=unknown|fd=-1|dup_fd=-1|remote=unknown|wait_ms=3000|mono_ms=1100|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=switch
+N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=switch|marker=none|result=switched|reason=ok|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=-1|dup_fd=-1|remote=unknown|wait_ms=90000|mono_ms=1200|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=receipt
+N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=receipt|marker=none|result=receipt|reason=ok|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=21|dup_fd=22|remote=192.0.2.9:443|wait_ms=90000|mono_ms=1400|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=post
+N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=post|marker=cd-C-M-1-post|result=observed|reason=control-hit-after-receipt|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=21|dup_fd=22|remote=192.0.2.9:443|wait_ms=90000|mono_ms=1600|diag=true|is_evidence=false
+# N2_CD_SANDWICH phase=receipt exempted (Wb, its new-generation protect settle)
+N2_CD_SANDWICH|id=cd-C-Wb-1|column=C|kind=Wb|rep=1|phase=receipt|marker=none|result=exempted|reason=wb-protect-settle-success|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=31|dup_fd=32|remote=unknown|wait_ms=90000|mono_ms=1800|diag=true|is_evidence=false
+# N2_RING_ARMED
+N2_RING_ARMED|file=netbird-n2-evidence-ring.log|max_bytes=4194304|segments=3|bytes=0|mono_ms=1000|diag=true|is_evidence=false
+# N2_RING_STATS
+N2_RING_STATS|file=netbird-n2-evidence-ring.log|enabled=true|bytes=4096|max_bytes=4194304|segments=3|writes=12|failures=3|rotations=1|last_error=errno-28|mono_ms=2000|diag=true|is_evidence=false
+# N2_RING_WRITE_FAILED
+N2_RING_WRITE_FAILED|failures=1|code=errno-28|mono_ms=1500|diag=true|is_evidence=false
+# N2_RING_RECOVERED
+N2_RING_RECOVERED|failures=2|mono_ms=2500|diag=true|is_evidence=false
+# N2_RING_ROTATED (terse form)
+N2_RING_ROTATED|segments=3|bytes=4194304|mono_ms=3000|diag=true|is_evidence=false
+# N2_RING_ROTATED (the span the product writes)
+N2_RING_ROTATED|segments=3|bytes=4194304|dropped_from_seq=11|dropped_to_seq=40|dropped_records=30|acked_seq=40|mono_ms=3000|diag=true|is_evidence=false
+# N2_RING_LOST
+N2_RING_LOST|from_seq=5|to_seq=6|records=2|reason=write-failed|code=errno-28|mono_ms=1500|diag=true|is_evidence=false
+# N2_RING_OVERFLOW
+N2_RING_OVERFLOW|dropped_records=7|from_seq=5|to_seq=11|acked_seq=4|mono_ms=1500|diag=true|is_evidence=false
+# N2_RING_CHUNK
+N2_RING_CHUNK|seq=7|of=2|line=N2_TUN_DEST|scope=session|frames=3
+# N2_RING_DUMP
+N2_RING_DUMP|from_seq=0|to_seq=9|count=2|emitted=2|frozen_tail_seq=12|first_seq=1|last_seq=12|records=12|bytes=512|malformed=0|lost_records=0|overflow=false|acked_seq=4|result=dumped|reason=ok|diag=true|is_evidence=false

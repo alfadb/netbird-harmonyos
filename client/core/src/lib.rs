@@ -177,6 +177,19 @@ pub mod n2_a_event;
 // N2 P5 (v4.1 §4 I/Ws rows): the App-side sandwich state machine that judges
 // "pre control HIT → first production send" against the TUN tee attach anchor.
 pub mod n2_sandwich;
+// N2 first batch C/D columns (2026-09-29): the App-side switching sandwich —
+// the host issues a plan (column, kind, rep, id) through the `n2_cd_plan`
+// private channel while Wi-Fi is up, the App fires the pre control, waits for
+// the operator's network switch, waits for the kind's production receipt on the
+// NEW network, fires the post control, and records every phase as one
+// `N2_CD_SANDWICH` line. Default off; inert while unarmed.
+pub mod n2_cd;
+// N2 first batch C/D columns (2026-09-29): the armed-only app-internal evidence
+// ring file — a verbatim copy of every core `N2_*`/`N7_WG_FEED`/`N2_TUN_*` line
+// (plus the shell-side lines the extension forwards) in the App's private
+// directory, so the cellular-phase C/D logs survive HiLog rotation/flow control
+// and can be fetched after returning to Wi-Fi. Default off.
+pub mod n2_ring;
 pub mod protected_dns;
 // N3-4: minimal NetworkMap model decoded from Sync frames.
 pub mod network_map;

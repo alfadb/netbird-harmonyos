@@ -33,11 +33,15 @@ assert(rust('protected_dns.rs').includes('n2_socket_trace::first_io(socket.as_ra
   'DNS and ICE record completed UDP sends');
 assert(rust('socket_supply.rs').includes('n2_socket_trace::closed(fd);'),
   'shell original fd is removed on close');
-assert(rust('wg_device.rs').includes('n2_socket_trace::duplicated(wg_socket_raw, fd)') &&
+// N2 C/D (Wb): the base socket's liveness is the CORE TAKEOVER (`adopted`,
+// which mirrors the registration AND registers the live identity / feeds the
+// protect-settle substitute receipt), because the base socket never sends.
+assert(rust('wg_device.rs').includes('n2_socket_trace::adopted(wg_socket_raw, fd)') &&
   rust('wg_device.rs').includes('n2_socket_trace::duplicated(raw_fd, fd)') &&
   rust('wg_device.rs').includes('n2_socket_trace::selected_wg(fd)') &&
   rust('wg_device.rs').includes('n2_socket_trace::first_io(fd, std::net::SocketAddr::from((dst.0, dst.1))') &&
-  rust('wg_device.rs').includes('"wg_sendto"'), 'WG base and selected sends retain identity and outcome');
+  rust('wg_device.rs').includes('"wg_sendto"'),
+  'WG base takeover + selected sends retain identity and outcome');
 assert(shell.includes("from './NetBirdN2Control'") &&
   shell.includes('sendN2Control(this.n2Evidence, target, protocol, id);'),
   'extension exposes armed-only positive control sender');
@@ -65,15 +69,41 @@ assert(rust('n2_socket_trace.rs').includes(
 assert(rust('n2_socket_trace.rs').includes('let event_id = event_window(fd);') &&
   rust('n2_socket_trace.rs').includes('let due = event_id.is_some()'),
   'a write inside an event window bypasses the throttle (item 4)');
-assert(shell.includes(
-  "'status=%{public}s|elapsed_ms=%{public}d|protect_generation=%{public}d|net_id=%{public}d|' +") &&
-  shell.includes("'local=%{public}s|wall_ms=%{public}d|diag=true|is_evidence=false',"),
+// N2 first batch C/D columns (2026-09-29): the field set is unchanged, but the
+// line is now composed as a template literal so the SAME string can be handed
+// to the armed-only evidence ring (`n2RingAppend`) — one literal, no drift.
+assert(shell.includes("|status=${outcome ? 'success' : 'failed'}|` +") &&
+  shell.includes("|local=${local}|wall_ms=${Date.now()}|` +") &&
+  shell.includes("`diag=true|is_evidence=false`;"),
   'protect_settle carries status/protect_generation/local (item 6)');
-assert(!shell.includes("'result=%{public}s|elapsed_ms=%{public}d|generation=%{public}d|"),
-  'protect_settle no longer uses result=/generation= (item 6)');
+assert(!shell.includes("'result=%{public}s|elapsed_ms=%{public}d|generation=%{public}d|") &&
+  !shell.includes("|generation=${"),
+  'protect_settle no longer uses result=/a bare generation= (item 6)');
+assert(shell.includes("this.n2RingAppend(settleLine);"),
+  'the protect_settle line is also recorded in the armed-only evidence ring');
+// N2 frozen E1 (Wb substitute evidence, 2026-09-30): the CORE takeover emits its
+// OWN real protect-settle row on EVERY Wb takeover (plan or not) — the validated
+// core dup, proto=17 and the protect-settle instant (never the later takeover
+// clock, never a wall field), with a failed protect reported as failed.
+assert(rust('n2_socket_trace.rs').includes('if let Some(line) = takeover(from, to) {') &&
+  rust('n2_socket_trace.rs').includes(
+    'meta.net_id, if meta.ok { "success" } else { "failed" }, "core-adopt",') &&
+  rust('n2_socket_trace.rs').includes('if phase == "protect_settle" {') &&
+  rust('n2_socket_trace.rs').includes('format!("protect_mono_ms={mono_ms}")'),
+  'the core Wb takeover emits its own protect-settle row (frozen E1)');
+const sampleFixture = readFileSync(join(here, '..', '..', 'core', 'tests', 'fixtures',
+  'n2-log-samples.txt'), 'utf8');
+const settleRow = sampleFixture.split('\n')
+  .find((line) => line.startsWith('N2_SOCK|phase=protect_settle|'));
+assert(settleRow !== undefined &&
+  settleRow.includes('|kind=Wb|request_id=wg_12|fd=21|dup_fd=22|protect=success|') &&
+  settleRow.includes('|protect_mono_ms=1234|') &&
+  settleRow.includes('|proto=17|net_id=21|status=success|detail=core-adopt|') &&
+  !settleRow.includes('wall_ms'),
+  'the core protect-settle sample carries the E1 fields and no wall clock');
 assert(shell.includes(
-  "'VPN_WG_DATAPLANE_FED|requestId=%{public}s|wgFd=%{public}d|tunFd=%{public}d|deviceUp=true|' +") &&
-  shell.includes("'mono_ms=%{public}d|wall_ms=%{public}d',"),
+  "`VPN_WG_DATAPLANE_FED|requestId=${this.requestId}|wgFd=${wgFd}|` +") &&
+  shell.includes("`mono_ms=${typeof tun.mono_ms === 'number' ? tun.mono_ms : -1}|wall_ms=${Date.now()}`;"),
   'VPN_WG_DATAPLANE_FED carries an alignable mono_ms and wall_ms (item 6)');
 assert(rust('connector.rs').includes('jinum("mono_ms", crate::sys::mono_ms() as i64)'),
   'the core feed reply supplies that mono_ms from its own clock (item 6)');

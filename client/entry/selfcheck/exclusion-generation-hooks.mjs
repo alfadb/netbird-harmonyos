@@ -305,7 +305,13 @@ const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
   '    if (p !== undefined && p !== null && p.error !== undefined) {\n' +
   '      const e = new Error("props rejected"); e.code = p.error; throw e;\n' +
   '    }\n' +
-  '    return { interfaceName: (p && p.interfaceName !== undefined && p.interfaceName !== null) ? p.interfaceName : "wlan0", dnses: [], routes: (p && p.routes) || [] };\n' +
+  // N2 first batch C/D columns (2026-09-29): `linkAddresses` is the raw
+  // platform fact the pure `classifyN2Bearer` records as `local=`; an unseeded
+  // netId answers none (never an invented address). `dnses` is passed through
+  // for the same reason: `physicalDefaultNetId()` only calls a network physical
+  // when it has a usable IPv4 resolver, so a fixture that wants a MEASURED
+  // bearer must seed one — an unseeded network still answers [].
+  '    return { interfaceName: (p && p.interfaceName !== undefined && p.interfaceName !== null) ? p.interfaceName : "wlan0", dnses: (p && p.dnses) || [], routes: (p && p.routes) || [], linkAddresses: (p && p.linkAddresses) || [] };\n' +
   '  },\n' +
   '  getAllNetsSync: () => {\n' +
   '    netThrow("getAllNetsSync");\n' +
@@ -346,6 +352,13 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  if (typeof v === "string") { return v; }\n' +
   '  return JSON.stringify(v === undefined ? fallback : v);\n' +
   '}\n' +
+  // 2026-09-30 (formal-switch production-recovery gate): the CORE-side wall
+  // clock the C/D default answers read. A fixture may advance it
+  // (`__NB_CD_CORE_NOW`) instead of sleeping 3 s, which is how "the D column's
+  // DWELL_MIN_MS was satisfied" is expressed deterministically.
+  'function coreNow() {\n' +
+  '  return typeof g().__NB_CD_CORE_NOW === "number" ? g().__NB_CD_CORE_NOW : Date.now();\n' +
+  '}\n' +
   'export default {\n' +
   '  n2_socket_trace_arm: () => JSON.stringify({ ok: true }),\n' +
   '  n2_socket_trace_protect: () => JSON.stringify({ ok: true }),\n' +
@@ -369,17 +382,89 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   // socket seams it walks are functional here. All three are additive — no
   // pre-existing group reached them (the arm/config groups drive the private
   // build/arm methods, never the start flow), so nothing else changes shape.
-  '  mgmt_socket_open: () =>\n' +
-  '    JSON.stringify({ fd: typeof g().__NB_MGMT_FD === "number" ? g().__NB_MGMT_FD : 21,\n' +
-  '      bind_rc: 0, bind_errno: 0 }),\n' +
+  '  mgmt_socket_open: () => {\n' +
+  '    g().__NB_SUPPLY_MGMT_OPEN = (g().__NB_SUPPLY_MGMT_OPEN || 0) + 1;\n' +
+  '    return JSON.stringify({ fd: typeof g().__NB_MGMT_FD === "number" ? g().__NB_MGMT_FD : 21,\n' +
+  '      bind_rc: 0, bind_errno: 0 });\n' +
+  '  },\n' +
   '  connector_start_with_socket: () =>\n' +
   '    JSON.stringify({ started: true, state: "running" }),\n' +
-  '  connector_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
-  '  connector_signal_socket_feed: () => JSON.stringify({ ok: true, queued: 1 }),\n' +
+  '  connector_socket_feed: () => {\n' +
+  '    g().__NB_SUPPLY_MGMT_FEED = (g().__NB_SUPPLY_MGMT_FEED || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true, queued: 1 });\n' +
+  '  },\n' +
+  '  connector_signal_socket_feed: () => {\n' +
+  '    g().__NB_SUPPLY_SIGNAL_FEED = (g().__NB_SUPPLY_SIGNAL_FEED || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true, queued: 1 });\n' +
+  '  },\n' +
   '  connector_stop: () => JSON.stringify({ already_stopped: true, state: "stopped" }),\n' +
+  // N2 first batch C/D columns (2026-09-29): the observer's switch path calls
+  // the connector's "the physical network changed" seam; the N19/N22 fixtures
+  // drive `physicalNetworkAvailable` directly, so it must exist and be counted.
+  '  connector_physical_network_changed: () => {\n' +
+  '    g().__NB_PHYSICAL_CHANGED = (g().__NB_PHYSICAL_CHANGED || 0) + 1;\n' +
+  // 2026-09-30: the ordered trace the gate's own sequence is judged on (the
+  // core cleanup must precede the new network's pre control).
+  '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["physical-changed"]);\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  // 2026-09-30 (formal-switch production-recovery gate): every seam that hands
+  // the core a production socket is now COUNTED (`__NB_SUPPLY_*`, one counter
+  // per entry), so a fixture can assert "the gate let NOTHING through" as a
+  // call count on the REAL shell path instead of static text. The answers stay
+  // the happy path so an ungated drive behaves exactly as before.
+  '  wg_fwd_open: () => {\n' +
+  '    g().__NB_SUPPLY_WG_OPEN = (g().__NB_SUPPLY_WG_OPEN || 0) + 1;\n' +
+  '    return JSON.stringify({ fd: typeof g().__NB_WG_FD === "number" ? g().__NB_WG_FD : 61,\n' +
+  '      bind_rc: 0, bind_errno: 0 });\n' +
+  '  },\n' +
+  '  ice_socket_open: () => {\n' +
+  '    g().__NB_SUPPLY_ICE_OPEN = (g().__NB_SUPPLY_ICE_OPEN || 0) + 1;\n' +
+  '    return JSON.stringify({ fd: typeof g().__NB_ICE_FD === "number" ? g().__NB_ICE_FD : 62,\n' +
+  '      bind_rc: 0, bind_errno: 0 });\n' +
+  '  },\n' +
+  '  socket_supply_dns_servers: () => {\n' +
+  '    g().__NB_SUPPLY_DNS = (g().__NB_SUPPLY_DNS || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  '  connector_management_address_update: () => {\n' +
+  '    g().__NB_SUPPLY_MGMT_ADDR = (g().__NB_SUPPLY_MGMT_ADDR || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  '  connector_ice_socket_feed: () => {\n' +
+  '    g().__NB_SUPPLY_ICE_FEED = (g().__NB_SUPPLY_ICE_FEED || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true, queued: 1 });\n' +
+  '  },\n' +
+  // The on-demand supply channel (the 100 ms timer): the request is whatever
+  // the fixture queued (`__NB_SOCKET_SUPPLY_REQUEST`, default = nothing
+  // pending), the reply is recorded so "refused with which reason" is
+  // observable at the core seam too.
+  '  socket_supply_poll: () => {\n' +
+  '    g().__NB_SUPPLY_POLL = (g().__NB_SUPPLY_POLL || 0) + 1;\n' +
+  '    return JSON.stringify(g().__NB_SOCKET_SUPPLY_REQUEST ||\n' +
+  '      { id: "", kind: "", purpose: "" });\n' +
+  '  },\n' +
+  '  socket_supply_reply: (id, fd, result) => {\n' +
+  '    g().__NB_SUPPLY_REPLY = (g().__NB_SUPPLY_REPLY || 0) + 1;\n' +
+  '    g().__NB_SUPPLY_REPLY_LAST = { id: id, fd: fd, result: result };\n' +
+  '    return JSON.stringify({ ok: result === "protected" });\n' +
+  '  },\n' +
+  // The shell-side protected-DNS resolution the recovery awaits. Parked by
+  // default on the fixture answer (`__NB_DNS_POLL`), so a fixture can hold a
+  // REAL in-flight recovery at this await and release it later.
+  '  connector_protected_dns_start: () => {\n' +
+  '    g().__NB_SUPPLY_DNS_RESOLVE = (g().__NB_SUPPLY_DNS_RESOLVE || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true, id: 1, pending: true });\n' +
+  '  },\n' +
+  '  connector_protected_dns_poll: () => JSON.stringify(g().__NB_DNS_POLL ||\n' +
+  '    { ok: true, pending: false, ip: "203.0.113.7" }),\n' +
   '  socket_supply_shutdown: () => JSON.stringify({ ok: true }),\n' +
   '  socket_supply_close_fd: () => JSON.stringify({ ok: true }),\n' +
-  '  connector_wg_socket_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
+  '  connector_wg_socket_feed: () => {\n' +
+  '    g().__NB_SUPPLY_WG_FEED = (g().__NB_SUPPLY_WG_FEED || 0) + 1;\n' +
+  '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["recover-feed"]);\n' +
+  '    return JSON.stringify({ ok: true, device_up: true });\n' +
+  '  },\n' +
   '  connector_tun_fd_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
   '  connector_route_set_applied: (payload, isRecreate) => {\n' +
   '    g().__NB_ACK = { payload: payload, isRecreate: isRecreate };\n' +
@@ -465,6 +550,173 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '      return g().__NB_SANDWICH_POLL_ANSWER;\n' +
   '    }\n' +
   '    return JSON.stringify({ ok: true, posts: [] });\n' +
+  '  },\n' +
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich seams and
+  // the armed-only evidence ring. Functional and recording like the other N2
+  // seams, so a fixture can drive the REAL plan/switch/step path and assert
+  // exactly what reached the core; every answer is overridable per test and the
+  // defaults are the honest refusals (never a fabricated acceptance).
+  '  n2_cd_plan: (id, column, kind, rep, target, netBefore, localBefore, startVerdict) => {\n' +
+  '    g().__NB_CD_PLAN_CALLS = (g().__NB_CD_PLAN_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_PLAN_LAST = { id: id, column: column, kind: kind, rep: rep, target: target,\n' +
+  '      netBefore: netBefore, localBefore: localBefore, startVerdict: startVerdict };\n' +
+  // The MINIMAL core-side plan mirror the default answers below consult, so a
+  // default `switched` can never be handed back for a state the real core would
+  // refuse (D before its preparation recovery, or before DWELL_MIN_MS). It
+  // records only what the shell reports; an explicit `__NB_CD_*_ANSWER` always
+  // wins and is never second-guessed.
+  '    g().__NB_CD_CORE = { id: id, column: column,\n' +
+  '      phase: column === "D" ? "await-start-bearer" : "ready", readyMs: 0 };\n' +
+  '    if (typeof g().__NB_CD_PLAN_ANSWER === "string") { return g().__NB_CD_PLAN_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-armed", id: id,\n' +
+  '      pre_marker: id + "-pre", post_marker: id + "-post", line: "" });\n' +
+  '  },\n' +
+  '  n2_cd_pre: (id, result, reason) => {\n' +
+  '    g().__NB_CD_PRE_CALLS = (g().__NB_CD_PRE_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_PRE_LAST = { id: id, result: result, reason: reason };\n' +
+  '    if (typeof g().__NB_CD_PRE_ANSWER === "string") { return g().__NB_CD_PRE_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: true, result: result, reason: reason, id: id, line: "" });\n' +
+  '  },\n' +
+  // D column: the Wi-Fi -> cellular preparation hop and its cellular-side
+  // recovery. Recorded like the rest; the defaults are the honest recorded
+  // answers of the core's own state machine.
+  '  n2_cd_prepare: (id, verdict, netAfter, localAfter) => {\n' +
+  '    g().__NB_CD_PREPARE_CALLS = (g().__NB_CD_PREPARE_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_PREPARE_LAST = { id: id, verdict: verdict, netAfter: netAfter,\n' +
+  '      localAfter: localAfter };\n' +
+  '    if (typeof g().__NB_CD_PREPARE_ANSWER === "string") { return g().__NB_CD_PREPARE_ANSWER; }\n' +
+  // A non-empty shell verdict is a terminal refusal in the real core; the
+  // mirror follows the report only on the honest path.
+  '    if (verdict !== "") {\n' +
+  '      return JSON.stringify({ ok: false, result: "unsat", reason: verdict, id: id, line: "" });\n' +
+  '    }\n' +
+  '    const st = g().__NB_CD_CORE;\n' +
+  '    if (st && st.id === id) { st.phase = "preparation"; }\n' +
+  '    return JSON.stringify({ ok: true, result: "prepared", reason: "not-a-d-measurement",\n' +
+  '      id: id, line: "" });\n' +
+  '  },\n' +
+  '  n2_cd_ready: (id) => {\n' +
+  '    g().__NB_CD_READY_CALLS = (g().__NB_CD_READY_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_READY_LAST = { id: id };\n' +
+  '    if (typeof g().__NB_CD_READY_ANSWER === "string") { return g().__NB_CD_READY_ANSWER; }\n' +
+  '    const st = g().__NB_CD_CORE;\n' +
+  '    if (!st || st.id !== id || st.phase !== "preparation") {\n' +
+  '      return JSON.stringify({ ok: false, result: "rejected", reason: "recovery-not-owed",\n' +
+  '        id: id, line: "" });\n' +
+  '    }\n' +
+  '    st.phase = "ready";\n' +
+  '    st.readyMs = coreNow();\n' +
+  '    return JSON.stringify({ ok: true, result: "ready", reason: "preparation-recovered",\n' +
+  '      id: id, line: "" });\n' +
+  '  },\n' +
+  // The identity baseline the switch report carries. Default = the honest
+  // "no live registration of this kind" (every field -1 / 0), so a test that
+  // wants a measured baseline must say so with `__NB_CD_IDENTITY_ANSWER`.
+  '  n2_cd_identity: (kind) => {\n' +
+  '    g().__NB_CD_IDENTITY_CALLS = (g().__NB_CD_IDENTITY_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_IDENTITY_LAST = { kind: kind };\n' +
+  '    g().__NB_ORDER = (g().__NB_ORDER || []).concat(["identity"]);\n' +
+  '    if (typeof g().__NB_CD_IDENTITY_ANSWER === "string") {\n' +
+  '      return g().__NB_CD_IDENTITY_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: false, fd: -1, dup_fd: -1, generation: -1, net_id: 0 });\n' +
+  '  },\n' +
+  // The IDENTIFIED switch report (the five-argument `n2_cd_switch` was removed):
+  // the identity triple rides the same call.
+  '  n2_cd_switch_identified: (id, verdict, netAfter, localAfter, netId, fd, dupFd, generation) => {\n' +
+  '    g().__NB_CD_SWITCH_CALLS = (g().__NB_CD_SWITCH_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_SWITCH_LAST = { id: id, verdict: verdict, netAfter: netAfter,\n' +
+  '      localAfter: localAfter, netId: netId, fd: fd, dupFd: dupFd, generation: generation };\n' +
+  '    if (typeof g().__NB_CD_SWITCH_ANSWER === "string") { return g().__NB_CD_SWITCH_ANSWER; }\n' +
+  // The default answer follows the real core's own preconditions, so a fixture
+  // can never "switch" a D plan the core would refuse (see `__NB_CD_CORE`).
+  '    const st = g().__NB_CD_CORE;\n' +
+  '    if (verdict !== "") {\n' +
+  '      return JSON.stringify({ ok: false, result: "unsat", reason: verdict, id: id, line: "" });\n' +
+  '    }\n' +
+  '    if (st && st.id === id) {\n' +
+  '      if (st.phase === "await-start-bearer") {\n' +
+  '        return JSON.stringify({ ok: false, result: "unsat", reason: "prepare-hop-required",\n' +
+  '          id: id, line: "" });\n' +
+  '      }\n' +
+  '      if (st.phase === "preparation") {\n' +
+  '        return JSON.stringify({ ok: false, result: "unsat",\n' +
+  '          reason: "switch-before-preparation-complete", id: id, line: "" });\n' +
+  '      }\n' +
+  '      if (st.column === "D" && coreNow() - st.readyMs < 3000) {\n' +
+  '        return JSON.stringify({ ok: false, result: "unsat", reason: "dwell-min-not-reached",\n' +
+  '          id: id, line: "" });\n' +
+  '      }\n' +
+  '      st.phase = "switched";\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: true, result: "switched", reason: "ok", id: id, line: "" });\n' +
+  '  },\n' +
+  '  n2_cd_post: (id, result, reason) => {\n' +
+  '    g().__NB_CD_POST_CALLS = (g().__NB_CD_POST_CALLS || 0) + 1;\n' +
+  '    g().__NB_CD_POST_LAST = { id: id, result: result, reason: reason };\n' +
+  '    if (typeof g().__NB_CD_POST_ANSWER === "string") { return g().__NB_CD_POST_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: true, result: result, reason: reason, id: id, line: "" });\n' +
+  '  },\n' +
+  // The answer may be a string (one fixed step) or an ARRAY (a queue: the
+  // n-th poll answers the n-th element, later polls fall back to the idle
+  // default). A queue is what makes the REAL switch-instant chain
+  // (step=pre -> step=recover -> step=receipt) deterministic.
+  '  n2_cd_poll: () => {\n' +
+  '    g().__NB_CD_POLL_CALLS = (g().__NB_CD_POLL_CALLS || 0) + 1;\n' +
+  '    if (typeof g().__NB_CD_POLL_ANSWER === "string") { return g().__NB_CD_POLL_ANSWER; }\n' +
+  '    const queue = g().__NB_CD_POLL_ANSWER_QUEUE;\n' +
+  '    if (Array.isArray(queue) && queue.length > 0) { return String(queue.shift()); }\n' +
+  '    return JSON.stringify({ ok: true, step: "idle", phase: "", id: "", kind: "",\n' +
+  '      column: "", fd: -1, dup_fd: -1, remote: "unknown", marker: "", result: "", line: "" });\n' +
+  '  },\n' +
+  '  n2_ring_configure: (path, maxBytes, segments) => {\n' +
+  '    g().__NB_RING_CONFIG = { path: path, maxBytes: maxBytes, segments: segments };\n' +
+  '    if (typeof g().__NB_RING_CONFIGURE_ANSWER === "string") {\n' +
+  '      return g().__NB_RING_CONFIGURE_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  '  n2_ring_append: (line) => {\n' +
+  '    g().__NB_RING = (g().__NB_RING || []).concat([String(line)]);\n' +
+  '    return JSON.stringify({ ok: true, enabled: true });\n' +
+  '  },\n' +
+  '  n2_ring_disable: () => {\n' +
+  '    g().__NB_RING_DISABLED = (g().__NB_RING_DISABLED || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true });\n' +
+  '  },\n' +
+  '  n2_ring_status: () => {\n' +
+  '    g().__NB_RING_STATUS_CALLS = (g().__NB_RING_STATUS_CALLS || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true, enabled: true,\n' +
+  '      line: "N2_RING_STATS|file=netbird-n2-evidence-ring.log|enabled=true|bytes=0|" +\n' +
+  '        "max_bytes=4194304|segments=3|writes=1|failures=0|rotations=0|last_error=none|" +\n' +
+  '        "mono_ms=1|diag=true|is_evidence=false" });\n' +
+  '  },\n' +
+  // The B4 retrieval surface: the CORE owns the file and all the seq
+  // pagination. The defaults are the honest "no ring configured" answers; the
+  // manifest and the ACK are bare calls the shell makes around the dump.
+  '  n2_ring_manifest: () => {\n' +
+  '    g().__NB_RING_MANIFEST_CALLS = (g().__NB_RING_MANIFEST_CALLS || 0) + 1;\n' +
+  '    if (typeof g().__NB_RING_MANIFEST_ANSWER === "string") {\n' +
+  '      return g().__NB_RING_MANIFEST_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: true, line: "" });\n' +
+  '  },\n' +
+  '  n2_ring_dump: (request) => {\n' +
+  '    g().__NB_RING_DUMP_CALLS = (g().__NB_RING_DUMP_CALLS || 0) + 1;\n' +
+  '    g().__NB_RING_DUMP_LAST = { request: request };\n' +
+  '    if (typeof g().__NB_RING_DUMP_ANSWER === "string") {\n' +
+  '      return g().__NB_RING_DUMP_ANSWER;\n' +
+  '    }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-configured",\n' +
+  '      from_seq: 0, to_seq: 0, count: 0, emitted: 0, lines: [], summary: "" });\n' +
+  '  },\n' +
+  '  n2_ring_ack: (request) => {\n' +
+  '    g().__NB_RING_ACK_CALLS = (g().__NB_RING_ACK_CALLS || 0) + 1;\n' +
+  '    g().__NB_RING_ACK_LAST = { request: request };\n' +
+  '    if (g().__NB_CORE_ACK_THROW === true) { throw new Error("ack-seam-throw"); }\n' +
+  '    if (typeof g().__NB_RING_ACK_ANSWER === "string") { return g().__NB_RING_ACK_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: false, result: "rejected", reason: "not-armed",\n' +
+  '      session: "", up_to_seq: 0, acked_seq: 0, previous_acked_seq: 0, advanced: false });\n' +
   '  }\n' +
   '};');
 
@@ -515,7 +767,12 @@ const SHIMS = {
   './NetBirdN2AEvent': 'NetBirdN2AEvent.shim.ts',
   // N2 P5 (2026-09-28): the sandwich pure module (its one erased interface
   // N2SandwichPost is re-declared by the shim).
-  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts'
+  './NetBirdN2Sandwich': 'NetBirdN2Sandwich.shim.ts',
+  // N2 first batch C/D columns (2026-09-29): the switching-sandwich pure module
+  // (erased shapes N2CdPlanDecision / N2CdPlanRequest / N2BearerFacts) and the
+  // ring pure module (N2RingDumpDecision / N2RingDumpRequest).
+  './NetBirdN2CdPlan': 'NetBirdN2CdPlan.shim.ts',
+  './NetBirdN2Ring': 'NetBirdN2Ring.shim.ts'
 };
 
 export function resolve(specifier, context, next) {
@@ -535,6 +792,13 @@ export function resolve(specifier, context, next) {
       '  const g = globalThis;\n' +
       '  g.__NB_CONTROL_CALLS = (g.__NB_CONTROL_CALLS || 0) + 1;\n' +
       '  g.__NB_CONTROL_LAST = { armed: armed, target: target, protocol: protocol, id: id };\n' +
+      // N2 first batch C/D columns (2026-09-29): the ORDER of the two legs of
+      // one plan's sandwich is what the pre/post separation is judged on, so the
+      // ids are also recorded as an ordered list.
+      '  g.__NB_CONTROL_IDS = (g.__NB_CONTROL_IDS || []).concat([String(id)]);\n' +
+      // 2026-09-30: the gate's ordering trace — the new network's control must
+      // leave AFTER the core\'s own old-connection cleanup.
+      '  g.__NB_ORDER = (g.__NB_ORDER || []).concat(["control:" + String(id)]);\n' +
       '  if (armed === undefined) { throw new Error("n2-not-armed"); }\n' +
       '  if ((g.__NB_CONTROL_MODE || "sent") === "throw") {\n' +
       '    throw new Error(g.__NB_CONTROL_ERROR || "n2-control-send-failed");\n' +

@@ -34,7 +34,7 @@ The existing `protect_probe` works independently of S6. Run separate authorized 
 
 ## Outer-socket lifecycle receipts (T2/T4)
 
-Only an accepted `n2_evidence` ticket arms `N2_SOCK|` logging; an absent or refused ticket leaves the old log stream unchanged. `phase=open` and `phase=protect_begin` are emitted by the ArkTS protect wrapper for an opened fd, `phase=protect_settle` records the bounded result and `elapsed_ms`. N2 T7a item 6: the shell `phase=open`/`phase=protect_begin`/`phase=protect_settle` lines now spell the generation field `protect_generation=` (the frozen E1 name), and `protect_settle` carries `status=success|failed` instead of `result=`, plus `local=` (the socket's own `getsockname` name, returned by `n2_socket_trace_protect`; `unknown` when the number cannot be inspected — never an invented address). The `status`/`protect_generation` vocabulary is therefore the core `N2_SOCK` one and matches the frozen criterion `phase=protect_settle|status=success`. `phase=first_io_begin` is recorded immediately before TCP `connect` or UDP `send`; the core's `phase=first_io|status=connected|sent|failed` receipt is recorded after that call returns. A reused ICE/WG fd records later sends as `phase=subsequent_io_begin` and `phase=subsequent_io` with the same original/dup fd chain and a new destination and completion time. N2 T7a item 4: every `phase=subsequent_io` completion carries `event_id=<id>` — the A-column event the write belongs to while an event window is open (`none` outside every window) — and a write inside an open window is ALWAYS receipted, bypassing the first/every-128th/30-s throttle, so the one production write an A event causes can never be missing from the log. `first_mono_ms` and `first_wall_ms` on completion receipts are **completion timestamps**, not wire timestamps. `fd` is the shell original, `dup_fd` is the core-owned descriptor. `request_id` is the monotonic supply ID for on-demand sockets; initial and spare sockets use the extension request ID. `protect_generation` and `net_id` reflect the shell snapshot at protect completion; `net_id=0` means unavailable, not a verified network. The receipt also gives `local` from `getsockname` after the call, `remote` as numeric address and port, `proto`, `kind` (`M` management, `S` signal, `R` relay, `D` DNS, `I` ICE, `Wb` WG bound socket, `Ws` WG supplied socket), and `detail`. `local=unknown` is not evidence of a physical source. The logs are `diag=true|is_evidence=false` and do not establish a successful protect independently of the platform's actual behavior. A local IPv4 in `100.108.0.0/16` additionally emits `N2_SOCK_OVERLAY_LOCAL`; it is a stop/fail signal, not a substitute for network-side observations. The shell's `VPN_WG_DATAPLANE_FED` line (T7a item 6) carries `mono_ms=` from the core's `connector_tun_fd_feed` reply and `wall_ms=Date.now()`, so it is alignable with the core's `N7_WG_FEED|adopted|…|mono_ms=` from the same call; `N7_WG_FEED|adopted` itself now also reports `endpoints=` and `egress_replayed=`, and `N2_FD_SEND` keeps exactly `packets`/`bytes`/`mono_ms`.
+Only an accepted `n2_evidence` ticket arms `N2_SOCK|` logging; an absent or refused ticket leaves the old log stream unchanged. `phase=open` and `phase=protect_begin` are emitted by the ArkTS protect wrapper for an opened fd, `phase=protect_settle` records the bounded result and `elapsed_ms`. N2 T7a item 6: the shell `phase=open`/`phase=protect_begin`/`phase=protect_settle` lines now spell the generation field `protect_generation=` (the frozen E1 name), and `protect_settle` carries `status=success|failed` instead of `result=`, plus `local=` (the socket's own `getsockname` name, returned by `n2_socket_trace_protect`; `unknown` when the number cannot be inspected — never an invented address). The `status`/`protect_generation` vocabulary is therefore the core `N2_SOCK` one and matches the frozen criterion `phase=protect_settle|status=success`. Since 2026-09-30 the CORE also emits its own `N2_SOCK|phase=protect_settle|kind=Wb` row on every armed `Wb` takeover (`n2_socket_trace::adopted`, i.e. only after the duplicated descriptor was validated; whether or not a C/D plan measures the class): `fd` is the shell original, `dup_fd` the validated core-owned descriptor, `proto=17` (the frozen E1 spelling), `protect`/`status` the ACTUAL protect verdict (a failed protect reports `failed` and publishes no live identity), and `protect_mono_ms` the core's `sys::mono_ms()` at the protect verdict — the field comparable with the tee anchors for the frozen E1 ordering; the row deliberately carries NO wall field, because the only wall available at emission is the later takeover clock and it must not be presented as the protect wall. `phase=first_io_begin` is recorded immediately before TCP `connect` or UDP `send`; the core's `phase=first_io|status=connected|sent|failed` receipt is recorded after that call returns. A reused ICE/WG fd records later sends as `phase=subsequent_io_begin` and `phase=subsequent_io` with the same original/dup fd chain and a new destination and completion time. N2 T7a item 4: every `phase=subsequent_io` completion carries `event_id=<id>` — the A-column event the write belongs to while an event window is open (`none` outside every window) — and a write inside an open window is ALWAYS receipted, bypassing the first/every-128th/30-s throttle, so the one production write an A event causes can never be missing from the log. `first_mono_ms` and `first_wall_ms` on completion receipts are **completion timestamps**, not wire timestamps. `fd` is the shell original, `dup_fd` is the core-owned descriptor. `request_id` is the monotonic supply ID for on-demand sockets; initial and spare sockets use the extension request ID. `protect_generation` and `net_id` reflect the shell snapshot at protect completion; `net_id=0` means unavailable, not a verified network. The receipt also gives `local` from `getsockname` after the call, `remote` as numeric address and port, `proto`, `kind` (`M` management, `S` signal, `R` relay, `D` DNS, `I` ICE, `Wb` WG bound socket, `Ws` WG supplied socket), and `detail`. `local=unknown` is not evidence of a physical source. The logs are `diag=true|is_evidence=false` and do not establish a successful protect independently of the platform's actual behavior. A local IPv4 in `100.108.0.0/16` additionally emits `N2_SOCK_OVERLAY_LOCAL`; it is a stop/fail signal, not a substitute for network-side observations. The shell's `VPN_WG_DATAPLANE_FED` line (T7a item 6) carries `mono_ms=` from the core's `connector_tun_fd_feed` reply and `wall_ms=Date.now()`, so it is alignable with the core's `N7_WG_FEED|adopted|…|mono_ms=` from the same call; `N7_WG_FEED|adopted` itself now also reports `endpoints=` and `egress_replayed=`, and `N2_FD_SEND` keeps exactly `packets`/`bytes`/`mono_ms`.
 
 Pair M/S TCP with the matching server access log using destination IP:port, device local source IP:port after connect, event time and a bounded clock error; if NAT intervenes, require the frozen router/AP mapping to bridge the before/after tuple. Pair R only with an enabled relay access log and its actual destination, not a guessed peer address. For D, require the protected DNS fd's sent query and same-ID response, adjacent from-OS positive-control hit, campaign-wide zero leakage, physical handle and actual resolver destination under the frozen no-exit-node condition; an independently available resolver query log strengthens this but is not mandatory. The ordinary `protected-dns` line has the hostname; `N2_SOCK` does not log it. For I, `detail=stun_txn_<hex>` identifies the 96-bit STUN transaction; `N2_SOCK_STUN` records the decoded XOR-MAPPED-ADDRESS, server, local tuple and the same transaction ID. Verify whether coturn actually records transaction IDs before pairing by ID; absent that field, uniquely pair using destination, time window, response-side ID and independent metadata, or mark `invalid/UNSAT`. Once uniquely paired, a coturn remote tuple differing from XOR-MAPPED-ADDRESS is `UNSAT` and a risk event, not a negative-packet pass. The mapped address is a NAT observation, **not** a claimed device local IP. Public-side tuples alone are insufficient on shared LAN/hairpin/cellular NAT: preserve the AP/router or operator mapping and both sides' clock calibration. Three-way attribution needs the device fd/dup chain, physical-interface/network-side send and independent target receipt, together with the required TUN positive control. Missing required access logs for M/S/R or Wb/Ws, unmatched I transactions, ambiguous NAT, unknown local tuple, or absent per-socket protect/first-send logs make the corresponding cell `invalid/UNSAT`, never a negative-packet pass. Wb/Ws send completion requires the WG data-plane path; shell protect alone is not a send receipt.
 
@@ -715,3 +715,147 @@ can no longer inherit a stale `kind`/`request_id`/`original_fd`, nor lose its
 own registration to another socket's failed receipt. Negative-tested by
 `wg_device::feed_tests::pre_device_egress_probe_leaves_no_registration_behind`
 and `mgmtsock::tests::failed_dial_completion_reads_only_its_own_detached_registration`.
+
+## C/D App-side switching sandwich + app-internal evidence ring (2026-09-29)
+
+The first batch's C column (Wi-Fi → cellular) and D column (cellular → Wi-Fi)
+have a structural problem the A/B columns do not: during the cellular phase the
+host has **no live channel at all** — the `hdc` link is on Wi-Fi, and the HiLog
+buffer can rotate or flow-control, dropping `N2_*` evidence lines (or the leak
+warning itself). Frozen §3, however, requires a pre control, the production
+packet and a post control for **every** production event, with both HITs in the
+vpn-tun from-OS tee. The user's decision is implemented here: the App keeps its
+own verbatim copy of the logs and fires the controls itself; the host issues one
+plan while it still has a live link and fetches everything after returning to
+Wi-Fi.
+
+Full design, basis, operator runbook and what a re-review still has to settle:
+[`n2-cd-app-sandwich-20260929.md`](n2-cd-app-sandwich-20260929.md).
+Line formats: [`n2-log-formats-20260928.md`](n2-log-formats-20260928.md) §8–§10.
+
+* **Plan channel** `n2_cd_plan` — the fifth want parameter
+  (`--ps n2_cd_plan '{"column":"C"|"D","kind":"M|S|R|D|I|Wb|Ws","rep":n,"id":"…"}'`),
+  same filesDir private channel and same one-pending-request-per-launch rule as
+  `n2_control`/`n2_stimulus`/`n2_a_event` (a launch carrying more than one of
+  the SIX writes none; a combination the three legacy branches do not cover
+  emits `N2_CONTROL_COMBO_REJECTED|pending=<file,…>`). Default off: unarmed is a
+  silent no-op.
+* **Acceptance only REGISTERS the plan.** Both columns are accepted while the
+  App is on Wi-Fi (`net_before` must be `wifi`, else
+  `unsat|start-bearer-not-wifi`); `C` is then in position, `D` is PRE-SET
+  (`reason=await-start-bearer`) and reaches its cellular start through its own
+  **preparation hop**: the Wi-Fi → cellular transition is recorded with
+  `n2_cd_prepare` (`phase=prepare|result=prepared|reason=not-a-d-measurement` —
+  no control, no recovery gate, NOT the D measurement), and only the
+  cellular-side `VPN_NETWORK_RECOVERED` hands the core `n2_cd_ready`
+  (`phase=prepare|result=ready`). No control is sent at acceptance: a control
+  sent then would sit on the OLD network and the core refuses it
+  `pre-before-switch`.
+* **The FORMAL switch carries the identity baseline.** `n2_cd_identity(kind)`
+  (read-only, `{ok,fd,dup_fd,generation,net_id}`, no live registration and
+  `ok=false` + `no-live-registration` when the armed trace has none) supplies
+  the OLD network's `(fd, dup_fd, protect_generation)`; the shell reports it
+  with `n2_cd_switch_identified`. A missing/negative field is passed as `-1` and
+  the core fail-closes by name (`switch-identity-required` /
+  `switch-identity-missing` / `switch-net-id-unmeasured` /
+  `switch-generation-unmeasured`); D additionally requires the minimum dwell
+  `DWELL_MIN_MS = 3_000` on the prepared bearer.
+* **The pre control goes out on the NEW network, and it gates the re-feed.**
+  Once the switch is `switched`, the core's own poll asks for it (`step=pre`);
+  the shell sends `<id>-pre` through the kind's own production opener and only a
+  tee-observed HIT (`step=recover`) lets `recoverPhysicalNetwork()` run. So the
+  pre is on the SAME current network as the event and precedes the re-feed.
+* **The receipt is a NEW identity, not a changed counter.** `receipt` requires
+  the `protect_generation` to differ from the switch baseline AND the
+  `(fd, dup_fd)` pair to differ, `net_id` to equal the switch measurement,
+  `protect` success, the I/O instant to be LATER than the pre HIT, and for
+  `M`/`S`/`R` a real `phase=subsequent_io` business write (a completed connect is
+  `connect-only`). The process-global registration counter is no longer part of
+  any verdict.
+* **Wb is NOT exempt from the controls any more.** The base socket has no
+  production write, so its receipt is the NEW generation's
+  `phase=protect_settle|status=success` (`wb-protect-settle-missing` otherwise);
+  it is fed by the CORE TAKEOVER of the validated dup
+  (`n2_socket_trace::adopted`, called from `wg_device.rs`'s
+  `adopt`/`reattach_socket`), bound to the taken-over `dup_fd` and to that
+  registration's OWN protect-settle instant (never the takeover clock), and a
+  failed protect / dup / feed / adopt produces no `exempted`; the plan still
+  sends BOTH controls (frozen:L39 requires ≥3 attributable positive controls per
+  cell, and v4.1's exemption covers only the "real production send" criterion).
+* **Direction judgement** — the pure module classifies the measured bearer
+  (`bearerTypes` + link addresses); column C requires Wi-Fi → cellular and D the
+  reverse. A mismatch is `unsat|direction-mismatch`, an unmeasurable bearer is
+  `unsat|bearer-unknown` (never a guess). The carrier facts are read through the
+  SAME handle `physicalDefaultNetId()` selected (`physicalDefaultBearerFacts`,
+  B5), so the direction and the switch judgement can never disagree about which
+  network is being measured.
+* **Ring file** — an armed-only app-internal ring in the App's own sandbox:
+  every core `N2_*`/`N7_WG_FEED`/`N2_TUN_*` line (the tee lives in
+  `hilog::emit`) plus the shell-side lines of those families the extension
+  forwards (one string, logged and forwarded together), including
+  `VPN_NETWORK_BASELINE` / `VPN_NETWORK_RECOVERED` / `VPN_NETWORK_RECOVERY_FAIL`.
+  Each persisted record carries a **durable** `seq` and the session token
+  (`N2R|sess=…|seq=…|mono_ms=…|wall_ms=…|line=…`), so a page is addressed by seq
+  and not by a line index over concatenated segments. Capped at 4 MiB × 3
+  segments; rotation is ACK-gated (an un-retrieved oldest segment is never
+  deleted), records the dropped seq span in `N2_RING_ROTATED`, reports what was
+  NOT persisted as `N2_RING_LOST`/`N2_RING_OVERFLOW` with their seq range, and
+  the head/tail/gap inventory is one `N2_RING_MANIFEST` line. The ring never
+  lets a HiLog failure or throttle change what it records.
+* **Teardown order** — `onDestroy` runs `connectorStop()` → `destroyOnce()` and
+  only THEN `n2_ring_status()` + `n2_ring_disable()`, so the closing lines (the
+  TUN gap and the descriptors the destroy closes) still enter the ring; a
+  `N2_RING_STATS` line is also emitted every 60 s while armed, by the core.
+* **Fetch** — the vendor-documented bundle transfer
+  (`hdc file recv -b cn.alfadb.netbird ./data/storage/el2/base/files/<file> …`,
+  debug-signed + launched App; `E003001`/`E005004`/`E005102`), with the
+  `n2_ring_dump` private channel as the fallback. The fallback is
+  **seq-paged**: the shell asks for `n2_ring_manifest()` first, forwards the
+  request document verbatim (`{"from_seq":…,"to_seq":…,"count":…,"session":…}`;
+  a legacy `{"start":…}` document is refused
+  `legacy-start-index-unsupported` by BOTH sides), re-emits the core's
+  `N2_RING_CHUNK` records and one `N2_RING_DUMP` summary **on HiLog only** (the
+  chunk records duplicate ring content and the summary is not ring content at
+  all). **A dump never advances the ACK**: its `N2_RING_DUMP_SHELL` receipt
+  reports the core's watermark as `ack_watermark=` and calls no ACK; only the
+  shell's own receipt is written back into the ring. The retrieved watermark
+  moves ONLY through the **explicit host ACK channel** (`n2_ring_ack`, a
+  SEPARATE sixth want parameter with the document
+  `{"session":"<the arm token the records carry>","up_to_seq":<durable seq>}`),
+  which the host may send only after it has PERSISTED the fetched bytes and
+  verified the window is complete; the core binds it to the CURRENT arm under
+  its own lock (`not-armed` / `session-mismatch` / `seq-beyond-tail` refused,
+  repeats idempotent), and `N2_RING_ACK_SHELL|…|advanced=…` is the only line
+  that reports an advancement. The dump channel is
+  consumed by the RUNNING extension's watcher tick, so it needs a live VPN
+  session — it does not work after teardown. `hdc shell cat` cannot read the
+  sandbox and the App cannot write `/data/local/tmp`; the basis is recorded in
+  the design doc §5.4.
+* **Host verification (no device)** — `cargo test --offline --locked` in
+  `client/core`: the `n2_cd`/`n2_ring` unit tests, the integration test
+  `tests/n2_cd.rs` (which drives the REAL `N2DestinationTee::consume_control`
+  and the real socket-trace receipts end to end:
+  `the_real_tee_hits_drive_the_sandwich_and_the_core_owns_the_receipt`,
+  `the_switch_baseline_is_read_from_the_cores_own_live_registration`,
+  `a_d_plan_is_pre_set_on_wifi_and_advances_through_prepare_ready_and_the_identified_switch`,
+  `a_wb_base_identity_exists_only_after_the_real_protect_dup_adopt_chain`,
+  `a_wb_plan_takes_its_substitute_receipt_from_the_real_takeover`,
+  `a_wb_protect_before_the_pre_hit_cannot_be_rescued_by_a_late_takeover`,
+  `a_wb_exempted_receipt_needs_a_successful_protect_and_a_validated_takeover`,
+  `a_shell_hit_without_the_tee_is_unsat_and_a_missing_receipt_times_out`), plus
+  `tests/n2_cd_state_revision.rs` (8 cases) and `tests/n2_ring_integrity.rs`
+  (12 cases) for the rewritten state machine and the ring's durable-seq / ACK /
+  rotation integrity (including the explicit ACK's session binding, its
+  `not-armed` / `seq-beyond-tail` refusals, idempotency and the fact that every
+  read path leaves the watermark alone); the log-format baseline
+  (`N2_CD_SANDWICH` phases + `N2_RING_*`); and the shell selfchecks
+  `run-n2-cd.mts`, `run-n2-ring.mts` and the N16–N25 group of
+  `run-exclusion-generation.mts` (the REAL EntryAbility six-channel rule, the
+  REAL armed plan poll + identity + switch hook, the switch-instant step poll,
+  the ring forwarding, the seq-paged fetch with manifest — which advances
+  nothing — and the explicit ACK channel with all of its named refusals).
+* **Not proven** — no device measurement was made. The on-device readability of
+  `bearerTypes`/link addresses (B5 is fixed in code, unverified on hardware), the
+  availability of `hdc file recv -b` on the target ROM, and whether the rewritten
+  orchestration satisfies the frozen「紧前」wording are open for a re-review
+  (design doc §4); the affected cells stay `UNSAT` until then.

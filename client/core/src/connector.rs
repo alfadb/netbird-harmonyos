@@ -5502,6 +5502,302 @@ pub fn n2_sandwich_poll_json() -> String {
     format!("{{{},\"posts\":[{}]}}", jbool("ok", true), items)
 }
 
+// ---------------------------------------------------------------------------
+// N2 第一批 C/D 列「App 侧切网夹心」(2026-09-29)
+// ---------------------------------------------------------------------------
+//
+// The host issues the plan over the `n2_cd_plan` private channel while it still
+// has a live link (Wi-Fi). Everything after that happens on the device, inside
+// the armed session: the shell sends the pre control through the production
+// opener, the network observer reports the switch, the core observes the kind's
+// production receipt (a NEW live registration of that class) and the shell
+// sends the post control. The core owns the ordering verdict; the shell owns
+// the platform I/O.
+
+/// Accept one C/D switching-sandwich plan. `start_verdict` is the SHELL's
+/// start-network classification (empty = the column's expected starting bearer
+/// was measured). Answers `{ok,result,reason,id,pre_marker,post_marker,line}`.
+#[allow(clippy::too_many_arguments)]
+pub fn n2_cd_plan_json(id: &str, column: &str, kind: &str, rep: i32, target: &str,
+    net_before: &str, local_before: &str, start_verdict: &str) -> String {
+    let rep = if rep < 0 { 0 } else { rep as u32 };
+    let outcome = crate::n2_cd::plan(crate::sys::mono_ms(), id, column, kind, rep, target,
+        net_before, local_before, start_verdict);
+    format!(
+        "{{{},{},{},{},{},{},{}}}",
+        jbool("ok", outcome.result == "planned"),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jstr("id", &outcome.id),
+        jstr("pre_marker", &format!("{id}-pre")),
+        jstr("post_marker", &format!("{id}-post")),
+        jstr("line", &outcome.line)
+    )
+}
+
+/// The shell's verdict of the PRE control (`hit` only when its bounded wait saw
+/// the core tee's HIT).
+pub fn n2_cd_pre_json(id: &str, result: &str, reason: &str) -> String {
+    let outcome = crate::n2_cd::pre(crate::sys::mono_ms(), id, result, reason);
+    cd_outcome_json(&outcome)
+}
+
+/// D column: the Wi-Fi → cellular PREPARATION hop (`verdict` = the shell's
+/// named refusal token, empty when the hop was measured). Recorded, never the D
+/// measurement: no control is sent for it and it does not open the recovery
+/// gate.
+pub fn n2_cd_prepare_json(id: &str, verdict: &str, net_after: &str, local_after: &str) -> String {
+    let outcome = crate::n2_cd::prepare(crate::sys::mono_ms(), id, verdict, net_after,
+        local_after);
+    cd_outcome_json(&outcome)
+}
+
+/// D column: the preparation's recovery on the cellular side (the shell's
+/// `VPN_NETWORK_RECOVERED`). Only then is the plan in position for the FORMAL
+/// switch back to Wi-Fi.
+pub fn n2_cd_ready_json(id: &str) -> String {
+    let outcome = crate::n2_cd::ready(crate::sys::mono_ms(), id);
+    cd_outcome_json(&outcome)
+}
+
+/// The shell's switch report WITH the identity baseline the receipt verdict
+/// needs: `verdict` is the pure module's direction verdict (empty = the
+/// measured transition matches the column), `net_id_after` the NEW network's
+/// platform net id, and `identity_at_switch` the OLD network's live
+/// registration of this kind as the `N2_SOCK` receipt names it —
+/// `(fd = shell original, dup_fd = core-owned descriptor, generation =
+/// protect_generation)`. A missing/negative pair is `None`: the core then
+/// closes the plan `unsat|switch-identity-required` (fail-closed) instead of
+/// falling back to the process-global registration counter.
+#[allow(clippy::too_many_arguments)]
+pub fn n2_cd_switch_identified_json(id: &str, verdict: &str, net_after: &str, local_after: &str,
+    net_id_after: i64, identity_fd: i32, identity_dup_fd: i32, identity_generation: i64) -> String {
+    let net_id_after = if net_id_after < 0 { 0 } else { net_id_after as u64 };
+    let generation = if identity_generation < 0 { 0 } else { identity_generation as u64 };
+    let identity = if identity_fd >= 0 && identity_dup_fd >= 0 && identity_generation >= 0 {
+        Some(crate::n2_cd::Identity::new(identity_fd, identity_dup_fd, generation))
+    } else {
+        None
+    };
+    let outcome = crate::n2_cd::switch_identified(crate::sys::mono_ms(), id, verdict, net_after,
+        local_after, net_id_after, identity);
+    cd_outcome_json(&outcome)
+}
+
+/// N2 C/D: the identity of the LIVE registration of one outer class, as the
+/// `N2_SOCK` receipts name it — `{ok,fd,dup_fd,generation,net_id}` where `fd`
+/// is the shell's original descriptor, `dup_fd` the core-owned copy and
+/// `generation` the shell's `protect_generation`.
+///
+/// This is the read-only seam the switch report is fed from: the platform net
+/// id is the shell's own measurement, but the `dup_fd`/generation of the
+/// registration the receipt must differ from can only come from the armed
+/// trace. Nothing is emitted and no state is created — an unarmed session (or a
+/// class without a live registration) answers `{ok:false,error:"no-live-registration"}`,
+/// and the shell then reports `-1`/`-1`/`-1` so the core fail-closes by name.
+pub fn n2_cd_identity_json(kind: &str) -> String {
+    match crate::n2_socket_trace::live_identity(kind) {
+        Some((fd, dup_fd, generation, net_id)) => format!(
+            "{{{},{},{},{},{}}}",
+            jbool("ok", true),
+            jinum("fd", fd as i64),
+            jinum("dup_fd", dup_fd as i64),
+            jnum("generation", generation),
+            jnum("net_id", net_id)
+        ),
+        None => format!("{{{},{}}}", jbool("ok", false),
+            jstr("error", "no-live-registration")),
+    }
+}
+
+/// One watcher-tick step of the plan. `{ok,step,phase,id,kind,column,fd,dup_fd,remote,
+/// marker,result,reason,line}`; `step=receipt` means "send the POST control with
+/// `marker` now", `step=pre` "send the PRE control with `marker` now",
+/// `step=recover` "the tee HIT the pre: recover the production connections".
+pub fn n2_cd_poll_json() -> String {
+    let step = crate::n2_cd::poll(crate::sys::mono_ms());
+    format!(
+        "{{{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+        jbool("ok", true),
+        jstr("step", step.step),
+        jstr("phase", &step.phase),
+        jstr("id", &step.id),
+        jstr("kind", &step.kind),
+        jstr("column", &step.column),
+        jinum("fd", step.fd as i64),
+        jinum("dup_fd", step.dup_fd as i64),
+        jstr("remote", &step.remote),
+        jstr("marker", &step.marker),
+        jstr("result", &step.result),
+        jstr("reason", &step.reason),
+        jstr("line", &step.line)
+    )
+}
+
+/// Close the plan with the shell's post-control verdict (`observed` requires the
+/// core tee's HIT and it must follow the receipt).
+pub fn n2_cd_post_json(id: &str, result: &str, reason: &str) -> String {
+    let outcome = crate::n2_cd::post(crate::sys::mono_ms(), id, result, reason);
+    cd_outcome_json(&outcome)
+}
+
+fn cd_outcome_json(outcome: &crate::n2_cd::Outcome) -> String {
+    format!(
+        "{{{},{},{},{},{}}}",
+        jbool("ok", outcome.result != "rejected"),
+        jstr("result", outcome.result),
+        jstr("reason", &outcome.reason),
+        jstr("id", &outcome.id),
+        jstr("line", &outcome.line)
+    )
+}
+
+/// N2 C/D: configure the armed-only app-internal evidence ring. Validation
+/// only; `{ok}` / `{ok:false,error}`.
+pub fn n2_ring_configure_json(path: &str, max_bytes: i64, segments: i64) -> String {
+    let max_bytes = if max_bytes < 0 { 0 } else { max_bytes as u64 };
+    let segments = if segments < 0 { 0 } else { segments as u32 };
+    match crate::n2_ring::configure(path, max_bytes, segments) {
+        Ok(()) => format!("{{{}}}", jbool("ok", true)),
+        Err(error) => format!("{{{},{}}}", jbool("ok", false), jstr("error", error)),
+    }
+}
+
+/// N2 C/D: append ONE shell-side line verbatim to the ring. Silent no-op while
+/// the ring is unconfigured (the core's own lines ride `hilog::emit`).
+pub fn n2_ring_append_json(line: &str) -> String {
+    crate::n2_ring::append(line);
+    format!("{{{},{}}}", jbool("ok", true), jbool("enabled", crate::n2_ring::enabled()))
+}
+
+/// N2 C/D: disable the ring (every arming change / teardown). The FILE stays —
+/// the operator still has to fetch it.
+pub fn n2_ring_disable_json() -> String {
+    crate::n2_ring::disable();
+    format!("{{{}}}", jbool("ok", true))
+}
+
+/// N2 C/D: the current ring counters as one `N2_RING_STATS` line (emitted here,
+/// so the line is itself recorded in the ring) plus the machine-readable view.
+pub fn n2_ring_status_json() -> String {
+    let line = crate::n2_ring::status_line_now();
+    crate::hilog::emit(&line);
+    format!("{{{},{},{}}}", jbool("ok", true), jbool("enabled", crate::n2_ring::enabled()),
+        jstr("line", &line))
+}
+
+/// N2 C/D: the ring's head/tail/failure/gap MANIFEST as one `N2_RING_MANIFEST`
+/// line. Like the status line it is emitted through [`crate::hilog::emit`], so
+/// the manifest request is itself recorded in the ring, and the same line comes
+/// back in the reply: `{ok,enabled,line}`.
+pub fn n2_ring_manifest_json() -> String {
+    let line = crate::n2_ring::manifest_line_now();
+    crate::hilog::emit(&line);
+    format!("{{{},{},{}}}", jbool("ok", true), jbool("enabled", crate::n2_ring::enabled()),
+        jstr("line", &line))
+}
+
+/// N2 C/D: one seq-paged dump. The request document is the core's own
+/// (`{"from_seq":N,"to_seq":N,"count":N,"session":"…"}`; the legacy
+/// `{"start":<line index>}` form is refused with
+/// `legacy-start-index-unsupported`) and the reply is
+/// `{ok,result,reason,from_seq,to_seq,count,emitted,frozen_tail_seq,first_seq,
+/// last_seq,records,bytes,malformed,lost_records,overflow,acked_seq,
+/// lines:[…],"summary":"…"}`.
+///
+/// `acked_seq` is the retrieved watermark AS IT STANDS (the shell mirrors it in
+/// its receipt, which therefore never claims an advancement): a dump moves
+/// nothing — only [`n2_ring_ack_json`] can.
+///
+/// `lines` are the `N2_RING_CHUNK` records ([`crate::n2_ring::chunk_line`], one
+/// durable `seq` each, `line=` verbatim and LAST) and `summary` is the single
+/// `N2_RING_DUMP` line ([`crate::n2_ring::dump_summary_line`]). NOTHING is
+/// emitted on HiLog here: the caller decides where the chunk lines go, and the
+/// SUMMARY MUST NOT be written back into the ring (it is not ring content).
+pub fn n2_ring_dump_json(request_json: &str) -> String {
+    let page = crate::n2_ring::dump_page(request_json);
+    let lines: Vec<String> = page.lines.iter()
+        .map(|(seq, line)| crate::n2_ring::chunk_line(*seq, page.count, line))
+        .collect();
+    let emitted = lines.len();
+    let summary = crate::n2_ring::dump_summary_line(&page, emitted);
+    let body = lines.iter()
+        .map(|line| format!("\"{}\"", crate::util::json_escape(line)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\"lines\":[{}],{}}}",
+        jbool("ok", page.result != "rejected"),
+        jstr("result", page.result),
+        jstr("reason", page.reason),
+        jnum("from_seq", page.from_seq),
+        jnum("to_seq", page.to_seq),
+        jnum("count", page.count as u64),
+        jnum("emitted", emitted as u64),
+        jnum("frozen_tail_seq", page.frozen_tail_seq),
+        jnum("first_seq", page.first_seq),
+        jnum("last_seq", page.last_seq),
+        jnum("records", page.records),
+        jnum("bytes", page.bytes),
+        jnum("malformed", page.malformed),
+        jnum("lost_records", page.lost_records),
+        jbool("overflow", page.overflow),
+        jnum("acked_seq", page.acked_seq),
+        body,
+        jstr("summary", &summary)
+    )
+}
+
+/// N2 C/D: the EXPLICIT host ACK — confirm that every record with
+/// `seq <= up_to_seq` of the arm named by `session` was retrieved and persisted
+/// by the host. This is the ONLY call that moves the retrieved watermark, and
+/// therefore the only thing that lets the next rotation drop the oldest
+/// segment; the dump/manifest/status surfaces never move it.
+///
+/// The request document is the core's own
+/// (`{"session":"<arm token>","up_to_seq":<durable seq>}`; BOTH keys required).
+/// Answers `{ok,result,reason,session,up_to_seq,acked_seq,previous_acked_seq,
+/// advanced}`; a refusal keeps `advanced=false` and the untouched watermark.
+pub fn n2_ring_ack_json(request_json: &str) -> String {
+    let request = match crate::n2_ring::parse_ack_request(request_json) {
+        Ok(request) => request,
+        Err(reason) => {
+            return format!(
+                "{{{},{},{},\"session\":\"\",\"up_to_seq\":0,\"acked_seq\":0,\
+                 \"previous_acked_seq\":0,\"advanced\":false}}",
+                jbool("ok", false), jstr("result", "rejected"), jstr("reason", reason)
+            )
+        }
+    };
+    match crate::n2_ring::ack_seq(request.up_to_seq, &request.session) {
+        Ok(outcome) => format!(
+            "{{{},{},{},{},{},{},{},{}}}",
+            jbool("ok", true),
+            jstr("result", "acked"),
+            jstr("reason", "ok"),
+            jstr("session", &outcome.session),
+            jnum("up_to_seq", outcome.up_to_seq),
+            jnum("acked_seq", outcome.acked_seq),
+            jnum("previous_acked_seq", outcome.previous_acked_seq),
+            jbool("advanced", outcome.advanced)
+        ),
+        Err(reason) => {
+            let unchanged = crate::n2_ring::acked_seq();
+            format!(
+                "{{{},{},{},{},{},{},{},{}}}",
+                jbool("ok", false),
+                jstr("result", "rejected"),
+                jstr("reason", reason),
+                jstr("session", &request.session),
+                jnum("up_to_seq", request.up_to_seq),
+                jnum("acked_seq", unchanged),
+                jnum("previous_acked_seq", unchanged),
+                jbool("advanced", false)
+            )
+        }
+    }
+}
+
 /// The `connector_stop()` implementation (idempotent; safe with no
 /// connector at all).
 pub fn connector_stop_json() -> String {
