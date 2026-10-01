@@ -198,7 +198,20 @@ fn connector_installed_supply_is_answered_by_the_host_responder() {
         "127.0.0.1:1".parse().expect("addr"),
     )
     .expect("host-path start must succeed with a REAL fd");
-    assert_eq!(state, "connecting");
+    // `start` returns the state at the instant `handle.status()` is read. The
+    // `Connect` transition is applied synchronously in `spawn`
+    // (connector.rs:3874), but the worker runs on the multi-thread runtime and
+    // dials the deliberately dead management address `127.0.0.1:1`; its first
+    // failed attempt applies `ConnEvent::Lost` (connector.rs:4256), which the
+    // state machine defines as a legal `connecting -> reconnecting` transition
+    // ("handshake timed out; retry scheduled", state.rs:131-133). Which of the
+    // two is observed is pure thread scheduling, not connector behaviour: both
+    // mean "started, waiting to dial management". The supply wiring below is
+    // the assertion; the state check only guards against a terminal state.
+    assert!(
+        state == "connecting" || state == "reconnecting",
+        "started connector must be connecting or retrying, got {state}"
+    );
 
     // The connector installed its supply globally (connector.rs `install`): a
     // reply for an unknown id reaches an INSTALLED supply ("request-expired"),
