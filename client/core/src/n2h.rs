@@ -732,6 +732,193 @@ pub fn parse_ipv4_frame(frame: &[u8]) -> Option<Ipv4FrameView<'_>> {
     Some(Ipv4FrameView { src, dst, proto, sport, dport, payload })
 }
 
+// ---------------------------------------------------------------------------
+// IPv6 header view + protocol-chain walk (approved amendment R1)
+//
+// IPv6 is explicitly OUT of the frozen negative-scan scope (`RESIDUAL_SCOPE`);
+// nothing here widens that. The view exists only so the TUN tee can CLASSIFY
+// the version-6 frames `parse_ipv4_frame` refuses: the kernel's own link-scoped
+// control frames are registered as out-of-scope, every other version-6 frame
+// stays a named defect. Header bytes only, never payload.
+// ---------------------------------------------------------------------------
+
+/// Destination-scope bucket of a refused IPv6 frame (`ipv6_scope` histogram;
+/// R1): link-local `fe80::/10`, link-scoped multicast `ff02::/16`, and
+/// everything else (other multicast, loopback, unspecified, global) as `other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv6Scope {
+    LinkLocal,
+    Multicast,
+    Other,
+}
+
+impl Ipv6Scope {
+    /// Stable token as it appears in `ipv6_scope` (and in the tee stats line).
+    pub fn name(self) -> &'static str {
+        match self {
+            Ipv6Scope::LinkLocal => "linklocal",
+            Ipv6Scope::Multicast => "multicast",
+            Ipv6Scope::Other => "other",
+        }
+    }
+}
+
+/// Protocol-chain bucket of a refused IPv6 frame (`ipv6_next` histogram; R1).
+/// `Hbh` covers a chain that ends on another Hop-by-Hop header AND one that
+/// could not be walked through at all (another extension header, a truncated
+/// or overrunning Hop-by-Hop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv6Next {
+    Icmp6,
+    Hbh,
+    Udp,
+    Tcp,
+    Other,
+}
+
+impl Ipv6Next {
+    /// Stable token as it appears in `ipv6_next` (and in the tee stats line).
+    pub fn name(self) -> &'static str {
+        match self {
+            Ipv6Next::Icmp6 => "icmp6",
+            Ipv6Next::Hbh => "hbh",
+            Ipv6Next::Udp => "udp",
+            Ipv6Next::Tcp => "tcp",
+            Ipv6Next::Other => "other",
+        }
+    }
+}
+
+/// The R1 ICMPv6 control whitelist with its mandatory hop limit: 133/135/136
+/// (RS / NS / NA) require 255, 131/132/143 (MLD report / done / MLDv2 report)
+/// require 1. Anything else is not control class.
+fn icmpv6_control_hop_limit(kind: u8) -> Option<u8> {
+    match kind {
+        131 | 132 | 143 => Some(1),
+        133 | 135 | 136 => Some(255),
+        _ => None,
+    }
+}
+
+/// Is `proto` an IPv6 extension header this walk does NOT traverse? The IANA
+/// set (RFC 8200 §4.1 and the registry): Hop-by-Hop 0, Routing 43, Fragment 44,
+/// ESP 50, AH 51, Destination Options 60, Mobility 135, HIP 139, Shim6 140 and
+/// the experimental 253/254. Everything else is an upper-layer protocol, i.e.
+/// the chain tail itself.
+fn is_ipv6_extension_header(proto: u8) -> bool {
+    matches!(proto, 0 | 43 | 44 | 50 | 51 | 60 | 135 | 139 | 140 | 253 | 254)
+}
+
+/// Header-only view of one IPv6 frame (R1). Never carries payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ipv6FrameView {
+    /// Frame length in bytes.
+    pub len: usize,
+    /// Chain head: `frame[6]` (58 = ICMPv6, 0 = Hop-by-Hop, or any other).
+    pub next_header: u8,
+    /// `frame[7]`.
+    pub hop_limit: u8,
+    /// `frame[24..40]`.
+    pub dst: [u8; 16],
+    /// Protocol number at the end of the walked chain; `None` when the chain
+    /// was NOT walked through — another extension header, a Hop-by-Hop whose
+    /// declared length leaves the frame, or a missing length byte.
+    pub chain_tail: Option<u8>,
+    /// `frame[t]` when the chain tail is ICMPv6 and the type byte is inside the
+    /// frame, where `t = 40` for a bare ICMPv6 chain and `t = 40 + (n+1)*8` for
+    /// a chain through a Hop-by-Hop header.
+    pub icmpv6_type: Option<u8>,
+    /// Destination port when the chain tail is UDP(17)/TCP(6) and the 4-byte
+    /// L4 prefix is inside the frame (the `first_v6_other_dport` witness).
+    pub dport: Option<u16>,
+}
+
+impl Ipv6FrameView {
+    /// `ipv6_scope` bucket of the destination address.
+    pub fn scope(&self) -> Ipv6Scope {
+        if self.dst[0] == 0xfe && (self.dst[1] & 0xc0) == 0x80 {
+            Ipv6Scope::LinkLocal
+        } else if self.dst[0] == 0xff && self.dst[1] == 0x02 {
+            Ipv6Scope::Multicast
+        } else {
+            Ipv6Scope::Other
+        }
+    }
+
+    /// `ipv6_next` bucket of the chain tail.
+    pub fn next_bucket(&self) -> Ipv6Next {
+        match self.chain_tail {
+            Some(58) => Ipv6Next::Icmp6,
+            Some(17) => Ipv6Next::Udp,
+            Some(6) => Ipv6Next::Tcp,
+            // a tail that is itself an extension header (e.g. a second HBH) and
+            // an unwalkable chain both mean "did not walk through"
+            Some(proto) if is_ipv6_extension_header(proto) => Ipv6Next::Hbh,
+            None => Ipv6Next::Hbh,
+            Some(_) => Ipv6Next::Other,
+        }
+    }
+
+    /// R1 control class — all four conditions at once: a link-local or
+    /// link-scoped-multicast destination, a chain whose tail is ICMPv6(58), a
+    /// whitelisted ICMPv6 type, and that type's mandatory hop limit. Anything
+    /// else (other multicast, loopback, unspecified, global, another extension
+    /// chain, echo 128/129, a mismatched hop limit) is NOT control class.
+    pub fn is_control_class(&self) -> bool {
+        if !matches!(self.scope(), Ipv6Scope::LinkLocal | Ipv6Scope::Multicast) {
+            return false;
+        }
+        if self.chain_tail != Some(58) {
+            return false;
+        }
+        match self.icmpv6_type {
+            Some(kind) => icmpv6_control_hop_limit(kind) == Some(self.hop_limit),
+            None => false,
+        }
+    }
+}
+
+/// Parse one IPv6 frame: version 6 with at least a 40-byte header. `None` for
+/// short / non-IPv6 frames. Never panics and never reads past the buffer, so a
+/// hostile frame can only ever be classified as non-control.
+pub fn parse_ipv6_frame(frame: &[u8]) -> Option<Ipv6FrameView> {
+    if frame.len() < 40 || frame[0] >> 4 != 6 {
+        return None;
+    }
+    let next_header = frame[6];
+    let hop_limit = frame[7];
+    let mut dst = [0u8; 16];
+    dst.copy_from_slice(&frame[24..40]);
+    // Protocol-chain walk (R1): only a single Hop-by-Hop header is traversed
+    // (its length byte is `frame[41]`, its total length `(n+1)*8`, its own next
+    // header `frame[40]`); an overrun leaves the chain unwalkable, and every
+    // other extension header is not walked at all.
+    let (chain_tail, l4_offset) = match next_header {
+        0 => {
+            if frame.len() < 42 {
+                (None, 40)
+            } else {
+                let total = (frame[41] as usize + 1) * 8;
+                if 40 + total > frame.len() {
+                    (None, 40)
+                } else {
+                    (Some(frame[40]), 40 + total)
+                }
+            }
+        }
+        proto if is_ipv6_extension_header(proto) => (None, 40),
+        proto => (Some(proto), 40),
+    };
+    let icmpv6_type = if chain_tail == Some(58) { frame.get(l4_offset).copied() } else { None };
+    let dport = match chain_tail {
+        Some(17) | Some(6) if frame.len() >= l4_offset + 4 => {
+            Some(u16::from_be_bytes([frame[l4_offset + 2], frame[l4_offset + 3]]))
+        }
+        _ => None,
+    };
+    Some(Ipv6FrameView { len: frame.len(), next_header, hop_limit, dst, chain_tail, icmpv6_type, dport })
+}
+
 /// Verbatim substring test: does `frame` contain `marker` anywhere?
 pub fn frame_contains_marker(frame: &[u8], marker: &[u8]) -> bool {
     !marker.is_empty() && frame.len() >= marker.len() && frame.windows(marker.len()).any(|w| w == marker)
@@ -2212,6 +2399,146 @@ mod tests {
         misaligned[2..4].copy_from_slice(&1000u16.to_be_bytes());
         let v = parse_ipv4_frame(&misaligned).expect("clamped total length still parses");
         assert_eq!(v.payload, b"hello-marker");
+    }
+
+    // ---- R1 (approved n2-tun-ipv6-decode-amendment): the IPv6 header view, the
+    // protocol-chain walk and the control-class definition ---------------------
+
+    /// One IPv6 frame: 40-byte header + `body`. The source address is
+    /// irrelevant to the classification; the destination is what matters.
+    fn ipv6_frame(next_header: u8, hop_limit: u8, dst: [u8; 16], body: &[u8]) -> Vec<u8> {
+        let mut f = vec![0x60, 0, 0, 0];
+        f.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        f.push(next_header);
+        f.push(hop_limit);
+        f.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(body);
+        f
+    }
+
+    /// An ICMPv6 message of `len` bytes whose type byte is `kind`.
+    fn icmpv6(kind: u8, len: usize) -> Vec<u8> {
+        let mut body = vec![0u8; len];
+        body[0] = kind;
+        body
+    }
+
+    /// An 8-byte Hop-by-Hop header whose own next header is `tail`, followed by
+    /// `body` (which then starts at offset 48).
+    fn hbh(tail: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tail, 0, 0, 0, 0, 0, 0, 0];
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// An 8-byte UDP header with destination port `dport`.
+    fn udp(dport: u16) -> Vec<u8> {
+        let mut l4 = vec![0u8; 8];
+        l4[2..4].copy_from_slice(&dport.to_be_bytes());
+        l4
+    }
+
+    const SOLICITED_NODE: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1];
+    const ALL_NODES: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const ALL_ROUTERS: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    const MLDV2: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16];
+    const LINK_LOCAL_ONE: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const GLOBAL_ONE: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    #[test]
+    fn ipv6_view_walks_the_chain_and_extracts_header_metadata() {
+        let ns = ipv6_frame(58, 255, SOLICITED_NODE, &icmpv6(135, 32));
+        let v = parse_ipv6_frame(&ns).expect("plain IPv6 header parses");
+        assert_eq!(v.len, 40 + 32);
+        assert_eq!((v.next_header, v.hop_limit, v.dst), (58, 255, SOLICITED_NODE));
+        assert_eq!((v.chain_tail, v.icmpv6_type), (Some(58), Some(135)));
+        assert_eq!((v.scope(), v.next_bucket()), (Ipv6Scope::Multicast, Ipv6Next::Icmp6));
+        // the 76 B first-frame shape: 40 B header + 8 B HBH + 28 B MLDv2 report
+        let mld = ipv6_frame(0, 1, MLDV2, &hbh(58, &icmpv6(143, 28)));
+        assert_eq!(mld.len(), 76);
+        let v = parse_ipv6_frame(&mld).expect("HBH chain parses");
+        assert_eq!((v.next_header, v.hop_limit), (0, 1));
+        assert_eq!((v.chain_tail, v.icmpv6_type, v.dst), (Some(58), Some(143), MLDV2));
+        assert_eq!(v.scope(), Ipv6Scope::Multicast);
+        assert_eq!(v.next_bucket(), Ipv6Next::Icmp6);
+        // a bare UDP tail and a Hop-by-Hop UDP tail both carry the dport
+        let v = parse_ipv6_frame(&ipv6_frame(17, 64, GLOBAL_ONE, &udp(53))).expect("UDP parses");
+        assert_eq!((v.chain_tail, v.dport, v.icmpv6_type), (Some(17), Some(53), None));
+        assert_eq!((v.scope(), v.next_bucket()), (Ipv6Scope::Other, Ipv6Next::Udp));
+        let v = parse_ipv6_frame(&ipv6_frame(0, 1, MLDV2, &hbh(17, &udp(53))))
+            .expect("HBH UDP tail parses");
+        assert_eq!((v.chain_tail, v.dport, v.icmpv6_type), (Some(17), Some(53), None));
+        // a short frame or a version-4 frame is not an IPv6 view at all
+        assert!(parse_ipv6_frame(&[0x60u8; 39]).is_none());
+        assert!(parse_ipv6_frame(&frame([10, 1, 2, 3], [10, 4, 5, 6], 1, 2, b"v4")).is_none());
+    }
+
+    #[test]
+    fn ipv6_control_class_needs_link_scope_icmpv6_type_and_hop_limit() {
+        let control = |f: &[u8]| parse_ipv6_frame(f).expect("parses").is_control_class();
+        // ① the kernel's own link-scoped control shapes: DAD NS, NA, RS, MLD done
+        assert!(control(&ipv6_frame(58, 255, SOLICITED_NODE, &icmpv6(135, 32))));
+        assert!(control(&ipv6_frame(58, 255, LINK_LOCAL_ONE, &icmpv6(136, 24))));
+        assert!(control(&ipv6_frame(58, 255, ALL_ROUTERS, &icmpv6(133, 8))));
+        assert!(control(&ipv6_frame(58, 1, ALL_NODES, &icmpv6(132, 24))));
+        assert!(control(&ipv6_frame(58, 1, ALL_NODES, &icmpv6(131, 24))));
+        // ② the 76 B MLDv2 report shape: ff02::16 + HBH(next 58) + type 143 + hop 1
+        assert!(control(&ipv6_frame(0, 1, MLDV2, &hbh(58, &icmpv6(143, 28)))));
+        // ③ a Hop-by-Hop chain whose own next header is UDP is NOT control class
+        let v = parse_ipv6_frame(&ipv6_frame(0, 1, MLDV2, &hbh(17, &udp(53)))).expect("parses");
+        assert!(!v.is_control_class());
+        assert_eq!((v.chain_tail, v.next_bucket(), v.dport), (Some(17), Ipv6Next::Udp, Some(53)));
+        // ④ echo request/reply (128/129) is never control class
+        assert!(!control(&ipv6_frame(58, 64, SOLICITED_NODE, &icmpv6(128, 8))));
+        assert!(!control(&ipv6_frame(58, 64, SOLICITED_NODE, &icmpv6(129, 8))));
+        // ⑤ a hop limit that is not the type's mandatory one
+        assert!(!control(&ipv6_frame(58, 64, SOLICITED_NODE, &icmpv6(135, 32))));
+        assert!(!control(&ipv6_frame(58, 255, ALL_NODES, &icmpv6(143, 28))));
+        assert!(!control(&ipv6_frame(0, 255, MLDV2, &hbh(58, &icmpv6(143, 28)))));
+        // ⑥ only fe80::/10 and ff02::/16 are link scope: site multicast, ::1, ::
+        // and a global destination are all NOT control class
+        let off_scope = [
+            [0xff, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0u8; 16],
+            GLOBAL_ONE,
+        ];
+        for dst in off_scope {
+            let v = parse_ipv6_frame(&ipv6_frame(58, 255, dst, &icmpv6(135, 32))).expect("parses");
+            assert_eq!(v.scope(), Ipv6Scope::Other, "{dst:?}");
+            assert!(!v.is_control_class(), "{dst:?}");
+        }
+        // ⑦ a chain that cannot be walked through is not control class:
+        // (a) a Hop-by-Hop whose declared length overruns the frame ...
+        let mut overrun = ipv6_frame(0, 1, MLDV2, &hbh(58, &icmpv6(143, 28)));
+        overrun[41] = 0xff;
+        let v = parse_ipv6_frame(&overrun).expect("parses");
+        assert_eq!((v.chain_tail, v.next_bucket()), (None, Ipv6Next::Hbh));
+        assert!(!v.is_control_class());
+        // (b) ... a second Hop-by-Hop (the tail stays 0) ...
+        let v = parse_ipv6_frame(&ipv6_frame(0, 1, MLDV2, &hbh(0, &[0u8; 8]))).expect("parses");
+        assert_eq!((v.chain_tail, v.next_bucket()), (Some(0), Ipv6Next::Hbh));
+        assert!(!v.is_control_class());
+        // (c) ... another extension header (Routing 43) ...
+        let v = parse_ipv6_frame(&ipv6_frame(43, 1, MLDV2, &icmpv6(143, 28))).expect("parses");
+        assert_eq!((v.chain_tail, v.next_bucket()), (None, Ipv6Next::Hbh));
+        assert!(!v.is_control_class());
+        // (d) ... and a chain that ends exactly at the frame end, with no
+        // ICMPv6 type byte inside the frame.
+        let exact = ipv6_frame(0, 1, MLDV2, &hbh(58, &[]));
+        assert_eq!(exact.len(), 48);
+        let v = parse_ipv6_frame(&exact).expect("parses");
+        assert_eq!((v.chain_tail, v.icmpv6_type), (Some(58), None));
+        assert!(!v.is_control_class());
+        // ⑧ a version-6 fragment too short to carry a header is not control class
+        assert!(parse_ipv6_frame(&[0x60, 0x00, 0x00, 0x00]).is_none());
+        // ⑨ this addition leaves the IPv4 verdicts untouched: the IPv4 parser
+        // still accepts plain IPv4 and still refuses every IPv6 shape.
+        let good = frame([10, 1, 2, 3], [10, 4, 5, 6], 1234, 5678, b"hello-marker");
+        assert!(parse_ipv4_frame(&good).is_some());
+        assert!(parse_ipv4_frame(&ipv6_frame(58, 255, SOLICITED_NODE, &icmpv6(135, 32))).is_none());
+        assert!(parse_ipv4_frame(&ipv6_frame(0, 1, MLDV2, &hbh(58, &icmpv6(143, 28)))).is_none());
     }
 
     #[test]

@@ -447,6 +447,12 @@ struct N2DestinationState {
     /// `decode_fail` keeps its frozen meaning and the invariant above is
     /// unchanged.
     first_fail: DecodeFailWitness,
+    /// R1 (approved n2-tun-ipv6-decode-amendment, 2026-10-01): the refused
+    /// version-6 frames classified into the explicitly out-of-scope link-scoped
+    /// control frames and everything else, with their scope / chain-tail
+    /// histograms and header-only witnesses. Diagnostic only: `decode_fail`
+    /// keeps its frozen meaning and the invariant above is unchanged.
+    ipv6: Ipv6FailWitness,
 }
 
 /// diag-0048 — the first-decode-failure witness and the per-version failure
@@ -496,6 +502,152 @@ impl DecodeFailWitness {
     }
 }
 
+/// R1 (approved n2-tun-ipv6-decode-amendment, 2026-10-01) — the refused
+/// version-6 frames. `parse_ipv4_frame` refuses every non-IPv4 frame, IPv6
+/// included, so this witness makes the refusal attributable WITHOUT widening
+/// any scope: the kernel's own link-scoped control frames (`out_of_scope`) are
+/// registered as out of scope, every other version-6 frame (`other`) stays a
+/// named defect. Header metadata only, never payload.
+///
+/// `fail_v6 == out_of_scope + other` and every version-6 refusal lands in
+/// exactly one `ipv6_scope` and one `ipv6_next` bucket, so the R2(i) four-sum
+/// reconciliation `Σipv6_scope == Σipv6_next == fail_v6 ==
+/// out_of_scope + other` holds by construction.
+#[derive(Debug, Default, Clone, Copy)]
+struct Ipv6FailWitness {
+    out_of_scope: u64,
+    other: u64,
+    scope_linklocal: u64,
+    scope_multicast: u64,
+    scope_other: u64,
+    next_icmp6: u64,
+    next_hbh: u64,
+    next_udp: u64,
+    next_tcp: u64,
+    next_other: u64,
+    /// `first_v6_len` / `first_v6_dst_prefix`: the FIRST refused version-6 frame
+    /// (empty before one; the prefix is at most the destination's first 8
+    /// bytes, and only the bytes the frame actually carries).
+    first_len: Option<usize>,
+    first_dst_prefix: [u8; 8],
+    first_dst_prefix_len: usize,
+    /// `first_v6_other_*` (R4 observability): the FIRST refused version-6 frame
+    /// that is NOT control class — full 16-byte destination (only the bytes the
+    /// frame actually carries), chain-tail protocol number and, for a UDP/TCP
+    /// tail, the destination port. All four are empty until such a frame.
+    first_other_len: Option<usize>,
+    first_other_dst: [u8; 16],
+    first_other_dst_len: usize,
+    /// Chain-tail protocol number; `None` when the chain was not walked through
+    /// (printed as `-`).
+    first_other_next: Option<u8>,
+    /// Destination port of a UDP(17)/TCP(6) chain tail; `None` otherwise
+    /// (printed as `-`).
+    first_other_dport: Option<u16>,
+}
+
+impl Ipv6FailWitness {
+    /// Classify one refused frame. Only version-6 frames (byte 0's high nibble)
+    /// are touched; every other refusal returns at once. A version-6 frame too
+    /// short to carry the 40-byte header has no destination and no walkable
+    /// chain, so it is `other` with an `other` scope and an `hbh` bucket — it
+    /// still counts in `fail_v6`, so the four sums keep reconciling.
+    fn record(&mut self, frame: &[u8]) {
+        if frame.first().map(|byte| byte >> 4) != Some(6) {
+            return;
+        }
+        let view = crate::n2h::parse_ipv6_frame(frame);
+        let scope = view.as_ref().map(|v| v.scope()).unwrap_or(crate::n2h::Ipv6Scope::Other);
+        let next = view.as_ref().map(|v| v.next_bucket()).unwrap_or(crate::n2h::Ipv6Next::Hbh);
+        match scope {
+            crate::n2h::Ipv6Scope::LinkLocal => self.scope_linklocal = self.scope_linklocal.saturating_add(1),
+            crate::n2h::Ipv6Scope::Multicast => self.scope_multicast = self.scope_multicast.saturating_add(1),
+            crate::n2h::Ipv6Scope::Other => self.scope_other = self.scope_other.saturating_add(1),
+        }
+        match next {
+            crate::n2h::Ipv6Next::Icmp6 => self.next_icmp6 = self.next_icmp6.saturating_add(1),
+            crate::n2h::Ipv6Next::Hbh => self.next_hbh = self.next_hbh.saturating_add(1),
+            crate::n2h::Ipv6Next::Udp => self.next_udp = self.next_udp.saturating_add(1),
+            crate::n2h::Ipv6Next::Tcp => self.next_tcp = self.next_tcp.saturating_add(1),
+            crate::n2h::Ipv6Next::Other => self.next_other = self.next_other.saturating_add(1),
+        }
+        let control = view.as_ref().map(|v| v.is_control_class()).unwrap_or(false);
+        if control {
+            self.out_of_scope = self.out_of_scope.saturating_add(1);
+        } else {
+            self.other = self.other.saturating_add(1);
+        }
+        if self.first_len.is_none() {
+            self.first_len = Some(frame.len());
+            let n = header_bytes(frame, 24, &mut self.first_dst_prefix);
+            self.first_dst_prefix_len = n;
+        }
+        if self.first_other_len.is_none() && !control {
+            self.first_other_len = Some(frame.len());
+            let n = header_bytes(frame, 24, &mut self.first_other_dst);
+            self.first_other_dst_len = n;
+            self.first_other_next = view.as_ref().and_then(|v| v.chain_tail);
+            self.first_other_dport = view.as_ref().and_then(|v| v.dport);
+        }
+    }
+
+    /// `first_v6_dst_prefix`: lowercase hex of the first recorded destination
+    /// bytes (empty before the first version-6 refusal).
+    fn first_dst_prefix_hex(&self) -> String {
+        hex_bytes(&self.first_dst_prefix[..self.first_dst_prefix_len])
+    }
+
+    /// The four `first_v6_other_*` values, all empty until a non-control
+    /// version-6 frame was refused.
+    fn first_other_fields(&self) -> (String, String, String, String) {
+        match self.first_other_len {
+            None => (String::new(), String::new(), String::new(), String::new()),
+            Some(len) => (
+                len.to_string(),
+                hex_bytes(&self.first_other_dst[..self.first_other_dst_len]),
+                self.first_other_next.map(|proto| proto.to_string()).unwrap_or_else(|| "-".into()),
+                self.first_other_dport.map(|port| port.to_string()).unwrap_or_else(|| "-".into()),
+            ),
+        }
+    }
+
+    /// `ipv6_scope=linklocal:…,multicast:…,other:…`
+    fn scope_histogram(&self) -> String {
+        use crate::n2h::Ipv6Scope;
+        format!("{}:{},{}:{},{}:{}",
+            Ipv6Scope::LinkLocal.name(), self.scope_linklocal,
+            Ipv6Scope::Multicast.name(), self.scope_multicast,
+            Ipv6Scope::Other.name(), self.scope_other)
+    }
+
+    /// `ipv6_next=icmp6:…,hbh:…,udp:…,tcp:…,other:…`
+    fn next_histogram(&self) -> String {
+        use crate::n2h::Ipv6Next;
+        format!("{}:{},{}:{},{}:{},{}:{},{}:{}",
+            Ipv6Next::Icmp6.name(), self.next_icmp6,
+            Ipv6Next::Hbh.name(), self.next_hbh,
+            Ipv6Next::Udp.name(), self.next_udp,
+            Ipv6Next::Tcp.name(), self.next_tcp,
+            Ipv6Next::Other.name(), self.next_other)
+    }
+}
+
+/// Copy at most `out.len()` of the `offset`-prefixed header bytes the frame
+/// actually carries (a shorter frame yields fewer bytes, never a panic).
+fn header_bytes(frame: &[u8], offset: usize, out: &mut [u8]) -> usize {
+    if frame.len() <= offset {
+        return 0;
+    }
+    let n = (frame.len() - offset).min(out.len());
+    out[..n].copy_from_slice(&frame[offset..offset + n]);
+    n
+}
+
+/// Lowercase hex of `bytes` (empty for an empty slice).
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 struct N2DestinationRow {
     dst: [u8; 4],
     proto: u8,
@@ -513,6 +665,7 @@ impl N2DestinationTee {
                 targets, rows: Vec::new(), last_tick_ms: now_ms, last_emit_ms: now_ms,
                 tee_frames: 0, decode_fail: 0, dropped: 0,
                 first_fail: DecodeFailWitness::default(),
+                ipv6: Ipv6FailWitness::default(),
             }),
         }
     }
@@ -563,7 +716,7 @@ impl N2DestinationTee {
     /// N2 T7a (item 3) — the session-period tee continuity line:
     ///
     /// ```text
-    /// N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…
+    /// N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…|ipv6_out_of_scope=…|ipv6_other=…|ipv6_scope=…|ipv6_next=…|first_v6_len=…|first_v6_dst_prefix=…|first_v6_other_len=…|first_v6_other_dst=…|first_v6_other_next=…|first_v6_other_dport=…
     /// ```
     ///
     /// `frames` counts every from-OS frame handed to this tee since the arm
@@ -585,17 +738,48 @@ impl N2DestinationTee {
     /// all three are empty until the first failure); `fail_v4` / `fail_v6` /
     /// `fail_other` bucket every refused frame by byte 0's IP-version nibble.
     /// Only leading header bytes are ever recorded, never the payload.
+    ///
+    /// R1 (approved n2-tun-ipv6-decode-amendment, 2026-10-01): ten fields are
+    /// appended AFTER `fail_other`; every field above keeps its name, order and
+    /// meaning. `ipv6_out_of_scope` counts the refused version-6 frames that are
+    /// the kernel's own link-scoped control frames (link-local `fe80::/10` or
+    /// link-scoped multicast `ff02::/16` destination, a protocol chain ending at
+    /// ICMPv6, a whitelisted ICMPv6 type and its mandatory hop limit);
+    /// `ipv6_other` counts every other refused version-6 frame, so
+    /// `fail_v6 == ipv6_out_of_scope + ipv6_other` always holds. `ipv6_scope`
+    /// (`linklocal` / `multicast` / `other`) and `ipv6_next`
+    /// (`icmp6` / `hbh` / `udp` / `tcp` / `other`, the CHAIN-TAIL protocol) are
+    /// histograms over all refused version-6 frames, so `Σipv6_scope ==
+    /// Σipv6_next == fail_v6`. `first_v6_len` / `first_v6_dst_prefix` witness
+    /// the FIRST refused version-6 frame (the destination's first at most 8
+    /// bytes, empty before one); `first_v6_other_*` witness the FIRST refused
+    /// version-6 frame that is NOT control class — its length, its FULL 16-byte
+    /// destination, its chain-tail protocol number and, for a UDP/TCP tail, its
+    /// destination port (`-` when the chain was not walked through, or when the
+    /// tail is neither UDP nor TCP). All four are empty while `ipv6_other=0`.
+    /// Only header bytes are recorded, never payload. None of these fields
+    /// widens the negative-scan scope: IPv6 stays IPv4-only out of scope.
     pub fn stats_line(&self, now_ms: u64) -> String {
         let state = self.inner.lock_poison();
         let witness = state.first_fail;
         let first_fail_len = witness.len.map(|len| len.to_string()).unwrap_or_default();
+        let ipv6 = state.ipv6;
+        let first_v6_len = ipv6.first_len.map(|len| len.to_string()).unwrap_or_default();
+        let (first_other_len, first_other_dst, first_other_next, first_other_dport) =
+            ipv6.first_other_fields();
         format!(
             "N2_TUN_TEE_STATS|frames={}|decode_fail={}|dropped={}|mono_ms={now_ms}|diag=true|is_evidence=false|\
              first_fail_len={first_fail_len}|first_fail_byte0={}|first_fail_prefix={}|\
-             fail_v4={}|fail_v6={}|fail_other={}",
+             fail_v4={}|fail_v6={}|fail_other={}|\
+             ipv6_out_of_scope={}|ipv6_other={}|ipv6_scope={}|ipv6_next={}|\
+             first_v6_len={first_v6_len}|first_v6_dst_prefix={}|\
+             first_v6_other_len={first_other_len}|first_v6_other_dst={first_other_dst}|\
+             first_v6_other_next={first_other_next}|first_v6_other_dport={first_other_dport}",
             state.tee_frames, state.decode_fail, state.dropped,
             witness.byte0_hex(), witness.prefix_hex(),
-            witness.fail_v4, witness.fail_v6, witness.fail_other)
+            witness.fail_v4, witness.fail_v6, witness.fail_other,
+            ipv6.out_of_scope, ipv6.other, ipv6.scope_histogram(), ipv6.next_histogram(),
+            ipv6.first_dst_prefix_hex())
     }
 
     pub fn control_totals(&self) -> (u64, u64, u64) {
@@ -718,6 +902,10 @@ impl TunFrameTee for N2DestinationTee {
             // witnessed (first frame's header bytes + per-version buckets).
             state.decode_fail = state.decode_fail.saturating_add(1);
             state.first_fail.record(frame);
+            // R1 (approved n2-tun-ipv6-decode-amendment): a version-6 refusal is
+            // additionally classified (control class out of scope vs `other`).
+            // `decode_fail` and the frozen invariant are untouched.
+            state.ipv6.record(frame);
             return;
         };
         if !state.targets.contains(&packet.dst) {
@@ -3043,12 +3231,16 @@ mod feed_tests {
         // diag-0048: the frozen fields keep their names/order; the new witness
         // fields are appended at the line tail. The witness is the FIRST
         // failure (len 5, byte0 0x00), never overwritten by the later ones.
+        // R1: the 22-byte version-6 frame is too short to carry a header, so it
+        // is `ipv6_other` (scope `other`, chain bucket `hbh`) with a header
+        // witness of the bytes the frame actually carries — none at the
+        // destination offset.
         assert_eq!(observer.stats_line(4_242),
-            "N2_TUN_TEE_STATS|frames=5|decode_fail=3|dropped=1|mono_ms=4242|diag=true|is_evidence=false|first_fail_len=5|first_fail_byte0=0x00|first_fail_prefix=00000000|fail_v4=1|fail_v6=1|fail_other=1");
+            "N2_TUN_TEE_STATS|frames=5|decode_fail=3|dropped=1|mono_ms=4242|diag=true|is_evidence=false|first_fail_len=5|first_fail_byte0=0x00|first_fail_prefix=00000000|fail_v4=1|fail_v6=1|fail_other=1|ipv6_out_of_scope=0|ipv6_other=1|ipv6_scope=linklocal:0,multicast:0,other:1|ipv6_next=icmp6:0,hbh:1,udp:0,tcp:0,other:0|first_v6_len=22|first_v6_dst_prefix=|first_v6_other_len=22|first_v6_other_dst=|first_v6_other_next=-|first_v6_other_dport=-");
         // no failure yet: the witness fields are present but empty, so a parser
         // keyed on the field names never special-cases their absence.
         assert_eq!(N2DestinationTee::new(vec![destination], 0).stats_line(7),
-            "N2_TUN_TEE_STATS|frames=0|decode_fail=0|dropped=0|mono_ms=7|diag=true|is_evidence=false|first_fail_len=|first_fail_byte0=|first_fail_prefix=|fail_v4=0|fail_v6=0|fail_other=0");
+            "N2_TUN_TEE_STATS|frames=0|decode_fail=0|dropped=0|mono_ms=7|diag=true|is_evidence=false|first_fail_len=|first_fail_byte0=|first_fail_prefix=|fail_v4=0|fail_v6=0|fail_other=0|ipv6_out_of_scope=0|ipv6_other=0|ipv6_scope=linklocal:0,multicast:0,other:0|ipv6_next=icmp6:0,hbh:0,udp:0,tcp:0,other:0|first_v6_len=|first_v6_dst_prefix=|first_v6_other_len=|first_v6_other_dst=|first_v6_other_next=|first_v6_other_dport=");
         // the invariant reconciles: 5 = 1 decoded-target + 1 dropped + 3 decode failures
         let dest = observer.due_lines(sys::mono_ms().saturating_add(5_000));
         assert_eq!(dest.len(), 1, "{dest:?}");
@@ -3066,6 +3258,170 @@ mod feed_tests {
             "N2_TUN_FRAMES|scope=session|mono_ms=9|seen=3|control=0|production=2|leaks=0|diag=true|is_evidence=false");
         assert_eq!(wg_feed_adopted_line(2, 1, 1, 77),
             "N7_WG_FEED|adopted|peers=2|endpoints=1|egress_replayed=1|mono_ms=77");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    // ---- R1 (approved n2-tun-ipv6-decode-amendment, 2026-10-01) --------------
+
+    /// Build one IPv6 frame: 40-byte header + `body`.
+    fn ipv6_frame(next_header: u8, hop_limit: u8, dst: [u8; 16], body: &[u8]) -> Vec<u8> {
+        let mut f = vec![0x60, 0, 0, 0];
+        f.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        f.push(next_header);
+        f.push(hop_limit);
+        f.extend_from_slice(&[0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(body);
+        f
+    }
+
+    /// An ICMPv6 message of `len` bytes whose type byte is `kind`.
+    fn icmpv6(kind: u8, len: usize) -> Vec<u8> {
+        let mut body = vec![0u8; len];
+        body[0] = kind;
+        body
+    }
+
+    /// An 8-byte Hop-by-Hop header whose own next header is `tail`, followed by
+    /// `body` (which then starts at offset 48).
+    fn hbh(tail: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tail, 0, 0, 0, 0, 0, 0, 0];
+        out.extend_from_slice(body);
+        out
+    }
+
+    const SOLICITED_NODE_DST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1];
+    const ALL_ROUTERS_DST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+    const MLDV2_DST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x16];
+    const LINK_LOCAL_ONE_DST: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const GLOBAL_ONE_DST: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    /// One `key=value` field of a `N2_TUN_TEE_STATS` line.
+    fn stats_field(line: &str, key: &str) -> String {
+        let prefix = format!("{key}=");
+        line.split('|')
+            .find_map(|field| field.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("no {key} in {line}"))
+            .to_string()
+    }
+
+    /// Σ of a histogram value such as `icmp6:3,hbh:1,udp:0,tcp:0,other:0`.
+    fn histogram_sum(value: &str) -> u64 {
+        value
+            .split(',')
+            .map(|bucket| {
+                bucket
+                    .rsplit_once(':')
+                    .unwrap_or_else(|| panic!("no count in {bucket}"))
+                    .1
+                    .parse::<u64>()
+                    .expect("histogram count")
+            })
+            .sum()
+    }
+
+    /// R2(i) — the four sums must be equal on every stats line:
+    /// `Σipv6_scope == Σipv6_next == fail_v6 == ipv6_out_of_scope + ipv6_other`.
+    fn assert_tee_stats_reconcile(line: &str) {
+        let fail_v6: u64 = stats_field(line, "fail_v6").parse().expect("fail_v6");
+        let out_of_scope: u64 =
+            stats_field(line, "ipv6_out_of_scope").parse().expect("ipv6_out_of_scope");
+        let other: u64 = stats_field(line, "ipv6_other").parse().expect("ipv6_other");
+        let scope = histogram_sum(&stats_field(line, "ipv6_scope"));
+        let next = histogram_sum(&stats_field(line, "ipv6_next"));
+        assert_eq!(scope, next, "Σipv6_scope != Σipv6_next: {line}");
+        assert_eq!(next, fail_v6, "Σipv6_next != fail_v6: {line}");
+        assert_eq!(fail_v6, out_of_scope + other, "fail_v6 != out_of_scope + other: {line}");
+    }
+
+    /// Five version-6 control frames — the 76 B Hop-by-Hop + MLDv2 shape seen on
+    /// the device (diag-0048/0049/0050/0051) plus NS / RS / NA — must be
+    /// registered as out of scope while `decode_fail` keeps its frozen meaning
+    /// and the frozen invariant `frames = decode_fail + dropped + Σ N2_TUN_DEST`
+    /// still holds.
+    #[test]
+    fn session_tee_stats_registers_link_scoped_ipv6_control_frames_out_of_scope() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let destination = [119, 29, 29, 119];
+        slot.set_n2_destination_targets(vec![destination]);
+        slot.feed_wg_socket(wg_raw).expect("wg feed");
+        slot.feed_tun(tun_raw).expect("tun feed");
+        let observer = slot.inner.lock_poison().n2_dest_tee.as_ref().unwrap().clone();
+        let mldv2 = ipv6_frame(0, 1, MLDV2_DST, &hbh(58, &icmpv6(143, 28)));
+        assert_eq!(mldv2.len(), 76, "the observed first-frame shape");
+        let frames = [
+            mldv2.clone(),
+            mldv2.clone(),
+            ipv6_frame(58, 255, SOLICITED_NODE_DST, &icmpv6(135, 32)),
+            ipv6_frame(58, 255, ALL_ROUTERS_DST, &icmpv6(133, 8)),
+            ipv6_frame(58, 255, LINK_LOCAL_ONE_DST, &icmpv6(136, 32)),
+        ];
+        slot.with_device(|d| {
+            for f in &frames {
+                assert_eq!(
+                    unsafe { sys::write(tun_end, f.as_ptr().cast(), f.len()) },
+                    f.len() as isize
+                );
+            }
+            d.service_tun(1);
+        }).expect("live device");
+        let line = observer.stats_line(4_242);
+        // four multicast destinations (2×ff02::16, solicited-node, ff02::2) and
+        // one link-local unicast destination, all with an ICMPv6 chain tail; the
+        // FIRST refused frame is the 76 B one, so `first_fail_*` and `first_v6_*`
+        // witness the same frame and `first_v6_other_*` (no non-control frame in
+        // this interval) stays empty.
+        assert_eq!(line,
+            "N2_TUN_TEE_STATS|frames=5|decode_fail=5|dropped=0|mono_ms=4242|diag=true|is_evidence=false|first_fail_len=76|first_fail_byte0=0x60|first_fail_prefix=60000000|fail_v4=0|fail_v6=5|fail_other=0|ipv6_out_of_scope=5|ipv6_other=0|ipv6_scope=linklocal:1,multicast:4,other:0|ipv6_next=icmp6:5,hbh:0,udp:0,tcp:0,other:0|first_v6_len=76|first_v6_dst_prefix=ff02000000000000|first_v6_other_len=|first_v6_other_dst=|first_v6_other_next=|first_v6_other_dport=");
+        assert_tee_stats_reconcile(&line);
+        // the frozen invariant: 5 = decode_fail(5) + dropped(0) + Σ N2_TUN_DEST(0)
+        let dest = observer.due_lines(sys::mono_ms().saturating_add(60_000));
+        assert_eq!(dest.len(), 1, "{dest:?}");
+        assert!(dest[0].contains("|frames=0|delta=0|"), "{dest:?}");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// A version-6 UDP datagram to a GLOBAL destination is NOT a control frame:
+    /// it stays `ipv6_other` and the R4 witness carries its FULL 16-byte
+    /// destination, its chain-tail protocol number and its destination port.
+    #[test]
+    fn session_tee_stats_names_a_non_control_ipv6_frame_with_a_full_destination() {
+        let (slot, wg_raw, tun_raw, tun_end) = test_slot();
+        let destination = [119, 29, 29, 119];
+        slot.set_n2_destination_targets(vec![destination]);
+        slot.feed_wg_socket(wg_raw).expect("wg feed");
+        slot.feed_tun(tun_raw).expect("tun feed");
+        let observer = slot.inner.lock_poison().n2_dest_tee.as_ref().unwrap().clone();
+        let mut udp = vec![0u8; 8];
+        udp[2..4].copy_from_slice(&53u16.to_be_bytes());
+        let frame = ipv6_frame(17, 64, GLOBAL_ONE_DST, &udp);
+        assert_eq!(frame.len(), 48);
+        slot.with_device(|d| {
+            assert_eq!(
+                unsafe { sys::write(tun_end, frame.as_ptr().cast(), frame.len()) },
+                frame.len() as isize
+            );
+            d.service_tun(1);
+        }).expect("live device");
+        let line = observer.stats_line(4_242);
+        assert!(line.contains("|frames=1|decode_fail=1|dropped=0|"), "{line}");
+        assert!(line.contains("|fail_v4=0|fail_v6=1|fail_other=0|"), "{line}");
+        assert!(line.contains("|ipv6_out_of_scope=0|ipv6_other=1|"), "{line}");
+        assert!(line.contains("|ipv6_scope=linklocal:0,multicast:0,other:1|"), "{line}");
+        assert!(line.contains("|ipv6_next=icmp6:0,hbh:0,udp:1,tcp:0,other:0|"), "{line}");
+        assert!(line.contains("|first_v6_len=48|first_v6_dst_prefix=20010db800000000|"), "{line}");
+        assert!(line.contains("|first_v6_other_len=48|"), "{line}");
+        // the destination is recorded in FULL: 16 bytes = 32 lowercase hex chars
+        let dst_hex = stats_field(&line, "first_v6_other_dst");
+        assert_eq!(dst_hex, "20010db8000000000000000000000001");
+        assert_eq!(dst_hex.len(), 32);
+        assert_eq!(stats_field(&line, "first_v6_other_next"), "17");
+        assert_eq!(stats_field(&line, "first_v6_other_dport"), "53");
+        assert_tee_stats_reconcile(&line);
         for fd in [wg_raw, tun_raw, tun_end] {
             unsafe { sys::close(fd) };
         }
