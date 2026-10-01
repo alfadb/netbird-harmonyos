@@ -195,6 +195,12 @@ export interface RelayAdvertisedView {
 export interface IceSocketDepth {
   queued: number;
   taken: number;
+  // 0051 §7 item 3: the CORE's per-peer protected-socket demand for the current
+  // interface set (allowed interfaces × 2), so the shell can size its pool from
+  // core's real need instead of assuming 4. -1 = the core could not enumerate
+  // its interfaces (the shell then keeps its ICE_SOCKET_PER_PEER fallback).
+  // Optional on purpose: an older core / the no-connector snapshot omits it.
+  need_per_peer?: number;
 }
 
 export interface ConnectorStatusResult {

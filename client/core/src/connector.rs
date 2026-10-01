@@ -4004,10 +4004,13 @@ impl ConnectorHandle {
             Some(s) => (s.pending() as i64, s.taken() as i64),
             None => (-1, -1),
         };
-        format!(
-            "{},\"ice_sockets\":{{\"queued\":{queued},\"taken\":{taken}}}}}",
-            &base[..base.len() - 1]
-        )
+        // 0051 §7 item 3 (demand-sized pool): the per-peer socket demand the
+        // CORE will actually require (`allowed_ifaces × 2`), so the shell can
+        // size the pool from core's real need instead of assuming 4. -1 =
+        // interface enumeration failed → the shell keeps its own constant.
+        let need_per_peer =
+            self.ice.lock_poison().need_per_peer().map(|n| n as i64).unwrap_or(-1);
+        with_ice_sockets_section(&base, queued, taken, need_per_peer)
     }
 
     /// The `connector_network_config()` JSON document (read-only snapshot of
@@ -5098,6 +5101,33 @@ pub fn connector_status_json() -> String {
     }
 }
 
+/// The N5c socket-pool section appended to `connector_status()`.
+///
+/// `queued`/`taken` are the queue observables (see [`ConnectorHandle::status_json`]);
+/// `need_per_peer` is the CORE's per-peer demand for THIS interface set
+/// ([`crate::peer_conn::PeerIceOrchestrator::need_per_peer`] = allowed ifaces × 2),
+/// `-1` when it cannot be enumerated. The shell sizes its pool from
+/// `peers × need_per_peer` and falls back to its own constant on `-1`
+/// (0051 §7 item 3: `need=6` × 6 peers = 36 exceeded the old 24 target).
+fn ice_sockets_section(queued: i64, taken: i64, need_per_peer: i64) -> String {
+    format!(
+        "\"ice_sockets\":{{\"queued\":{queued},\"taken\":{taken},\"need_per_peer\":{need_per_peer}}}"
+    )
+}
+
+/// The full `connector_status()` text: `base` with the N5c socket-pool section
+/// appended INSIDE its root object (the base document's trailing `}` is
+/// replaced by `,<section>}`). Extracted so the unit test exercises the SAME
+/// brace dance the status surface uses — a hand-assembled fixture in the test
+/// would not have caught a missing closing brace.
+fn with_ice_sockets_section(base: &str, queued: i64, taken: i64, need_per_peer: i64) -> String {
+    format!(
+        "{},{}}}",
+        &base[..base.len() - 1],
+        ice_sockets_section(queued, taken, need_per_peer)
+    )
+}
+
 /// The `connector_network_config()` implementation: read-only snapshot of
 /// the shell-applicable subset of the last applied NetworkMap (tunnel
 /// address/prefix, managed routes with the default-route mark, DNS servers,
@@ -6146,6 +6176,43 @@ mod tests {
         assert_eq!(d.as_str(), "set");
         assert_eq!(SessionDeadline::Unknown.as_str(), "unknown");
         assert_eq!(SessionDeadline::Disabled.as_str(), "disabled");
+    }
+
+    /// 0051 §7 item 3：`connector_status()` 的 `ice_sockets` 段带 core 的每
+    /// peer 需求（`need_per_peer` = 允许接口数 × 2；-1 = 枚举失败，壳层回退）。
+    /// 逐字冻结：壳层按 `peers × need_per_peer` 定池，改字段名就是改协议。
+    #[test]
+    fn ice_sockets_section_carries_the_core_per_peer_demand() {
+        assert_eq!(
+            ice_sockets_section(7, 12, 6),
+            "\"ice_sockets\":{\"queued\":7,\"taken\":12,\"need_per_peer\":6}"
+        );
+        assert_eq!(
+            ice_sockets_section(-1, -1, -1),
+            "\"ice_sockets\":{\"queued\":-1,\"taken\":-1,\"need_per_peer\":-1}",
+            "-1 on all three = no shell-fed source and no enumerable interface set"
+        );
+        // 接进一份状态文档后仍须被严格读取器接受（尾段追加，前文字段不动，
+        // 且与生产路径同一段拼接代码——缺右花括号这类错误必须在这里就暴露）
+        let doc = with_ice_sockets_section(
+            "{\"running\":true,\"state\":\"disconnected\"}",
+            3,
+            4,
+            6,
+        );
+        assert_eq!(
+            doc,
+            "{\"running\":true,\"state\":\"disconnected\",\
+             \"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"
+        );
+        assert!(
+            matches!(config::parse_document(&doc), Ok(Json::Obj(_))),
+            "the strict reader accepts the full appended document: {doc}"
+        );
+        assert!(
+            doc.ends_with(",\"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"),
+            "the section is appended last, inside the root object: {doc}"
+        );
     }
 
     #[test]

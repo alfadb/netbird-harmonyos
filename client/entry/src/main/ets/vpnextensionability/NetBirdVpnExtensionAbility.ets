@@ -70,7 +70,7 @@ import {
 import { isPhysicalNetworkSwitch, protectedConnectionRejectionReason,
   socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
 
-import { ICE_SOCKET_POOL_MIN, iceSocketTargetDepth,
+import { ICE_SOCKET_POOL_MIN, iceSocketNeedPerPeer, iceSocketTargetDepth,
   iceSocketTopUpCount } from './NetBirdIceSocketPool';
 
 const DOMAIN: number = 0x2900;
@@ -86,9 +86,13 @@ const PROTECT_BOX_MS: number = 5000;
 // IPv4 interface round (dups share the socket object, so a bound copy cannot
 // be re-bound), and a device has several interfaces — one socket starves the
 // gather after the first round (device-verified 2026-09-14). The pool target is
-// DEMAND-SIZED (peers × 4, clamped 8..32, see NetBirdIceSocketPool.ets): the
-// fixed 8 of smoke 0050 starved 2 of 6 peers every round. ICE_SOCKET_POOL_MIN is
-// the target until a peer count is known.
+// DEMAND-SIZED from the CORE's own per-peer need (peers × core need_per_peer,
+// clamped 8..48, see NetBirdIceSocketPool.ets): smoke 0050 measured 6 peers ×
+// need 4 = 24 against a fixed 8 (2 peers starved every round), and smoke 0051
+// saw need=6 (3 allowed interfaces) → 36, which the old 32 cap did not cover.
+// The core reports the need in connector_status().ice_sockets.need_per_peer;
+// when that field is absent or -1 the shell falls back to its 4-per-peer
+// constant. ICE_SOCKET_POOL_MIN is the target until a peer count is known.
 // A failed ICE session is re-negotiated after a cooldown, and every retry
 // consumes fresh sockets again (the pool is one-shot). Refill when status
 // reports a drained queue, with a periodic retry while the VPN is armed; a
@@ -3982,12 +3986,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // while THIS process had a live WG session. Publish the same fields to
         // filesDir, which both processes share.
         this.publishStatusForUi(status);
-        // Demand-sized ICE pool target from the LIVE peer count (peers × 4,
-        // clamped 8..32 — smoke 0050: 6 peers × need 4 = 24 against a fixed 8,
-        // 2 peers starved on every round). Re-derived on every sample, also when
-        // no ice_sockets section is present, so the timer below never acts on a
-        // target from an older peer count.
-        this.iceTargetDepth = iceSocketTargetDepth(status.peer_count);
+        // Demand-sized ICE pool target from the LIVE peer count and the CORE's
+        // own per-peer need (peers × need_per_peer, clamped 8..48 — smoke 0050:
+        // 6 peers × need 4 = 24 against a fixed 8, 2 peers starved on every
+        // round; smoke 0051: need 6 with 3 allowed interfaces → 36). A status
+        // document without the field, or need_per_peer=-1 (interfaces not
+        // enumerable), falls back to the shell's 4-per-peer constant. Re-derived
+        // on every sample, also when no ice_sockets section is present, so the
+        // timer below never acts on a target from an older peer count.
+        this.iceTargetDepth =
+          iceSocketTargetDepth(status.peer_count, iceSocketNeedPerPeer(status.ice_sockets?.need_per_peer));
         // Refresh the ICE queue depth from the LIVE status: a depth learned
         // only from our own feed calls goes stale and stops resupply exactly
         // when the queue has drained (the host CLI starved that way, and the
@@ -4970,12 +4978,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     // Size the pool from a LIVE status read: at this point the watcher has not
     // necessarily sampled the peer count yet (first feed / post-switch
-    // recovery), and the fixed 8 of smoke 0050 starved 2 of 6 peers. A missing
-    // sample keeps the target the watcher last derived (never below the 8
-    // minimum). No new timer — this is one status read per pool feed.
+    // recovery), and the fixed 8 of smoke 0050 starved 2 of 6 peers. The same
+    // read carries the core's per-peer need (smoke 0051: need 6 with 3 allowed
+    // interfaces); a missing sample keeps the target the watcher last derived
+    // (never below the 8 minimum), and a missing need_per_peer field falls back
+    // to the shell's 4-per-peer constant. No new timer — this is one status
+    // read per pool feed.
     const live: ConnectorStatusResult | null = pollStatusOrNull();
     if (live !== null) {
-      this.iceTargetDepth = iceSocketTargetDepth(live.peer_count);
+      this.iceTargetDepth =
+        iceSocketTargetDepth(live.peer_count, iceSocketNeedPerPeer(live.ice_sockets?.need_per_peer));
     }
     const target: number = this.iceTargetDepth;
     let fedCount: number = 0;

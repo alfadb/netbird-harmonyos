@@ -6,9 +6,9 @@
 // type-stripping) cannot load the .ets extension directly, so this harness
 // copies the REAL file byte-for-byte into an OS-temp fixture (.ts) at run
 // time — the code under test is the shipped code, never a hand-held mirror —
-// and then pins the two call sites in the shipped extension source that make
-// this math effective (target refresh from the live peer count; no fixed pool
-// cap left).
+// and then pins the call sites in the shipped extension source that make this
+// math effective (target refresh from the live peer count AND the core's live
+// `need_per_peer`; no fixed pool cap left).
 //
 // Run: node client/entry/selfcheck/run-ice-socket-pool.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -47,24 +47,48 @@ try {
 
   // ---- constants ----------------------------------------------------------
   check('pool minimum is the pre-0050 size 8', mod.ICE_SOCKET_POOL_MIN === 8);
-  check('pool maximum is the fd-budget cap 32', mod.ICE_SOCKET_POOL_MAX === 32);
-  check('per-peer demand is 4 (0050 Wi-Fi leg: 2 interfaces x 2)',
+  check('pool maximum is the 0051 fd-budget cap 48', mod.ICE_SOCKET_POOL_MAX === 48);
+  check('fallback per-peer demand is 4 (0050 Wi-Fi leg: 2 interfaces x 2)',
     mod.ICE_SOCKET_PER_PEER === 4);
   check('one refill pass may feed up to 8 (was 4)', mod.ICE_TOPUP_BATCH === 8);
 
+  // ---- iceSocketNeedPerPeer (the core's live demand, 0051 §7 item 3) ------
+  check('the core demand 6 passes through', mod.iceSocketNeedPerPeer(6) === 6);
+  check('the core demand 2 passes through', mod.iceSocketNeedPerPeer(2) === 2);
+  check('a fractional core demand is floored', mod.iceSocketNeedPerPeer(5.5) === 5);
+  check('a missing field (undefined) falls back to 4',
+    mod.iceSocketNeedPerPeer(undefined) === 4);
+  check('a missing section (null) falls back to 4', mod.iceSocketNeedPerPeer(null) === 4);
+  check('the core -1 (interfaces not enumerable) falls back to 4',
+    mod.iceSocketNeedPerPeer(-1) === 4);
+  check('0 falls back to 4', mod.iceSocketNeedPerPeer(0) === 4);
+  check('NaN falls back to 4', mod.iceSocketNeedPerPeer(Number.NaN) === 4);
+  check('Infinity falls back to 4', mod.iceSocketNeedPerPeer(Number.POSITIVE_INFINITY) === 4);
+
   // ---- iceSocketTargetDepth (the smoke-0050 case first) -------------------
-  check('6 peers target 24 sockets (0050: 8 pooled vs 24 needed)',
+  check('6 peers with no core field target 24 sockets (0050 fallback formula)',
     mod.iceSocketTargetDepth(6) === 24, `got ${mod.iceSocketTargetDepth(6)}`);
+  check('6 peers x core need 6 target 36 sockets (0051: 3 interfaces)',
+    mod.iceSocketTargetDepth(6, 6) === 36, `got ${mod.iceSocketTargetDepth(6, 6)}`);
+  check('6 peers x core need 2 target 12 sockets (single-interface window)',
+    mod.iceSocketTargetDepth(6, 2) === 12);
+  check('8 peers x core need 6 hit the 48 cap',
+    mod.iceSocketTargetDepth(8, 6) === 48, `got ${mod.iceSocketTargetDepth(8, 6)}`);
+  check('100 peers x core need 6 stay at the 48 cap',
+    mod.iceSocketTargetDepth(100, 6) === 48);
   check('1 peer clamps up to the 8 minimum', mod.iceSocketTargetDepth(1) === 8);
   check('2 peers clamp up to the 8 minimum', mod.iceSocketTargetDepth(2) === 8);
   check('3 peers target 12', mod.iceSocketTargetDepth(3) === 12);
   check('5 peers target 20', mod.iceSocketTargetDepth(5) === 20);
   check('7 peers target 28', mod.iceSocketTargetDepth(7) === 28);
-  check('8 peers hit the 32 cap', mod.iceSocketTargetDepth(8) === 32);
-  check('100 peers stay at the 32 cap', mod.iceSocketTargetDepth(100) === 32);
+  check('8 peers target 32 (no longer the cap)', mod.iceSocketTargetDepth(8) === 32);
+  check('12 peers reach the 48 cap', mod.iceSocketTargetDepth(12) === 48);
+  check('100 peers stay at the 48 cap', mod.iceSocketTargetDepth(100) === 48);
   check('0 peers (unknown map) keep the 8 minimum', mod.iceSocketTargetDepth(0) === 8);
   check('negative peers keep the 8 minimum', mod.iceSocketTargetDepth(-6) === 8);
   check('NaN peers keep the 8 minimum', mod.iceSocketTargetDepth(Number.NaN) === 8);
+  check('a missing core need keeps the pre-0051 formula',
+    mod.iceSocketTargetDepth(6, undefined) === 24);
 
   // ---- iceSocketTopUpCount ------------------------------------------------
   check('a drained 6-peer pool wants a full 8-socket pass',
@@ -99,6 +123,21 @@ try {
       mod.iceSocketTopUpCount(queued, target, false) === 0);
   }
   {
+    // The core's 0051 demand (need=6, 6 peers → 36) must also converge.
+    const target: number = mod.iceSocketTargetDepth(6, 6);
+    check('the 0051 target is 36', target === 36);
+    let queued: number = 0;
+    let passes: number = 0;
+    while (mod.iceSocketTopUpCount(queued, target, false) > 0 && passes < 12) {
+      queued += mod.iceSocketTopUpCount(queued, target, false);
+      passes++;
+    }
+    check('the 36-socket target converges in 5 passes of 8',
+      queued === 36 && passes === 5, `queued=${queued} passes=${passes}`);
+    check('converged 36-socket pool needs no further supply',
+      mod.iceSocketTopUpCount(queued, target, false) === 0);
+  }
+  {
     // The core consumes mid-pass: after each fed socket the shell re-reads the
     // depth. A queue that drained between samples must still be filled within
     // ONE pass (8 sockets = 2 peers of need 4 in 0050).
@@ -110,10 +149,12 @@ try {
   }
 
   // ---- shipped-extension wiring ------------------------------------------
-  check('the watcher derives the target from the live peer count',
-    shell.includes('this.iceTargetDepth = iceSocketTargetDepth(status.peer_count);'));
-  check('the pool feed sizes itself from a live status read',
-    shell.includes('this.iceTargetDepth = iceSocketTargetDepth(live.peer_count);'));
+  check('the watcher derives the target from the live peer count AND the core need',
+    shell.includes('iceSocketTargetDepth(status.peer_count, iceSocketNeedPerPeer(status.ice_sockets?.need_per_peer))'));
+  check('the pool feed sizes itself from a live status read (count + core need)',
+    shell.includes('iceSocketTargetDepth(live.peer_count, iceSocketNeedPerPeer(live.ice_sockets?.need_per_peer))'));
+  check('the shell imports the core-need reader from the pool module',
+    shell.includes('iceSocketNeedPerPeer'));
   check('no fixed pool-size constant is left in the extension',
     !shell.includes('ICE_SOCKET_POOL_SIZE'));
   check('no fixed top-up batch constant is left in the extension',

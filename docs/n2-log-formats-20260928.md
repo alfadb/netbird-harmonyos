@@ -563,3 +563,49 @@ handshake-campaign lines are unchanged: `adopt`/`reattach` are socket-level
 (they belong to no single peer), and `handshake-campaign-deadline` still names
 no peer.
 
+## 13. Silent-peer initiate backoff + `ice_sockets.need_per_peer` (2026-10-01, device 0051)
+
+Two additions from 0051 §7, both core-authored and both pinned by their
+producers' tests (`peer_conn::tests` for the lines, `connector::tests` for the
+status section).
+
+**`N5c_ICE|initiate-backoff` / `N5c_ICE|backoff-reset` — the unresponsive-peer
+retry backoff.** 0051 §3.4: two peers whose remote end sent ZERO signal frames
+(`TrBfURPG`, `ai4IGfaf`) were re-initiated every ~11 s
+(`START_DEADLINE_MS` + `RETRY_COOLDOWN_MS`) forever — 24 identical
+`negotiation-start-timeout` rounds in 4 min. The trigger stays the existing
+zombie-negotiation verdict (`remote_creds` never arrived within the deadline);
+what changes is only WHEN the next initiate may start:
+
+```text
+N5c_ICE|initiate-backoff|peer=<p>|misses=<n>|next_ms=<ms>
+N5c_ICE|backoff-reset|peer=<p>|reason=<signal|network-change|signal-reconnect>
+```
+
+| field | values / unit |
+| --- | --- |
+| `misses` | consecutive `negotiation-start-timeout` rounds in which the peer sent NO signal frame at all (offer/answer/candidate). A single received frame clears the count (`reason=signal`); one remote frame is progress, never silence |
+| `next_ms` | the delay from this timeout to the next initiate: `min(9000 << (misses − 3), 300000)` → `9000/18000/36000/…/300000` (`INITIATE_BACKOFF_BASE_MS = START_DEADLINE_MS`, `INITIATE_BACKOFF_MAX_MS = 300000`). The observed initiate interval is `START_DEADLINE_MS + next_ms`, i.e. ≈18 s at the first level, ≈5 min at the cap |
+| `reason` | what invalidated the silence: `signal` (any frame from that peer, incl. a candidate), `network-change` (`restart_for_network_change`), `signal-reconnect` (the signal stream's false→true edge) |
+
+The backoff starts at `INITIATE_BACKOFF_MIN_MISSES = 3` consecutive silent
+timeouts (`misses` 1–2 keep the pre-0051 `RETRY_COOLDOWN_MS`). Entering and each
+escalation emit one `initiate-backoff` line; because every escalation doubles
+the interval, those lines are rate-limited by construction. `backoff-reset` is
+emitted at most once per active backoff (the reset clears the flag). Neither
+line changes the ANSWER path: a received OFFER is still answered in the same
+beat regardless of any backoff, and only the next locally-initiated attempt is
+delayed. Peers that never went silent (Connected, or answered by the remote at
+least once per round) never enter the backoff.
+
+**`connector_status().ice_sockets.need_per_peer` — the core's own per-peer
+socket demand** (a STATUS-document field, not a hilog line). It is
+`allowed_ifaces × 2`, the exact input of `peer_conn`'s
+`required_local_sockets()` (0051 measured 4 for 2 allowed interfaces and 6 for
+3), and `-1` when the interfaces cannot be enumerated. The shell sizes its pool
+as `clamp(peers × need_per_peer, 8, 48)` and falls back to its own 4-per-peer
+constant on a missing/`-1` field (`NetBirdIceSocketPool.ets`); the `48` cap
+covers 8 peers × need 6. The `queued`/`taken` fields and their meaning are
+unchanged, and the section is appended last — a reader of the earlier fields
+sees the same document.
+

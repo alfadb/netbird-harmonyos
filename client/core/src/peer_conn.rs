@@ -123,6 +123,77 @@ pub const HANDSHAKE_RETRY_MS: u64 = 3000;
 /// ——其死亡由 keepalive/断连/全对失败事件驱动，不由此超时判定。
 pub const START_DEADLINE_MS: u64 = 3 * HANDSHAKE_RETRY_MS;
 
+/// 「远端静默」退避的触发门槛（0051 §7 item 2）：连续这么多次
+/// `negotiation-start-timeout`、且**期间从未**收到该 peer 任何信令
+/// （offer/answer/candidate），才认为对端真的不应答，开始拉长下一次发起。
+/// 真机 0051：`TrBfURPG`/`ai4IGfaf` 各 12 次超时、两侧 0 条 `signal-rx`，
+/// 每 ~11 s（[`START_DEADLINE_MS`] + [`RETRY_COOLDOWN_MS`]）重发起一轮，
+/// 4 min 内 24 次全是同样的空转。
+pub const INITIATE_BACKOFF_MIN_MISSES: u32 = 3;
+
+/// 退避的基数 = 第一次进入退避时下一次发起前的延迟（9 s，与
+/// [`START_DEADLINE_MS`] 同量级）：延迟序列 9 s → 18 s → 36 s → … →
+/// [`INITIATE_BACKOFF_MAX_MS`]。实际发起间隔 = 谈判截止期（9 s，到期才判
+/// 「静默」）+ 本延迟。
+pub const INITIATE_BACKOFF_BASE_MS: u64 = START_DEADLINE_MS;
+
+/// 退避延迟上限（5 min）：静默 peer 的重发起频率不高于每 ~5 min 一次；
+/// 一旦收到该 peer 任何信令或网络切换/重连事件立即复位（见
+/// [`PeerIceOrchestrator::reset_initiate_backoff`]）。
+pub const INITIATE_BACKOFF_MAX_MS: u64 = 300_000;
+
+/// 第 `misses`（≥ [`INITIATE_BACKOFF_MIN_MISSES`]）次静默超时对应的下一次
+/// 发起延迟：指数增长、封顶 [`INITIATE_BACKOFF_MAX_MS`]。纯函数，供日志与
+/// 单测共用同一份算术。
+pub fn initiate_backoff_ms(misses: u32) -> u64 {
+    let steps = misses.saturating_sub(INITIATE_BACKOFF_MIN_MISSES).min(32);
+    INITIATE_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << steps)
+        .min(INITIATE_BACKOFF_MAX_MS)
+}
+
+/// 退避进入/升级行（进入时与每次升级各一行；升级间隔本身按指数增长，
+/// 无需额外限频）。字段顺序即格式：`peer=|misses=|next_ms=`。
+fn initiate_backoff_line(peer: &str, misses: u32, next_ms: u64) -> String {
+    format!("N5c_ICE|initiate-backoff|peer={peer}|misses={misses}|next_ms={next_ms}")
+}
+
+/// 退避复位行（每个活动退避周期至多一行，复位即清零，天然限频）。
+fn backoff_reset_line(peer: &str, reason: &str) -> String {
+    format!("N5c_ICE|backoff-reset|peer={peer}|reason={reason}")
+}
+
+/// 记一次 [`START_DEADLINE_MS`] 静默超时（`drop_session_rearm` 在
+/// `reason=negotiation-start-timeout` 时调用）：累计「连续静默」次数并按
+/// [`initiate_backoff_ms`] 把冷却拉长；返回需要输出的
+/// `initiate-backoff` 行参数 `(misses, next_ms)`（进入退避与每次升级各一行，
+/// 其余 `None`）。
+///
+/// 连续性的判据是 `rx_since_timeout`：上一拍超时之后收到过该 peer **任何**
+/// 信令（offer/answer/candidate，一条 candidate 也算远端还活着）就不是连续
+/// 静默，计数从零起算。收到 Offer 的应答路径从不经过这里。
+fn note_silent_timeout(peer: &mut PeerConn, now_ms: u64) -> Option<(u32, u64)> {
+    if peer.rx_since_timeout {
+        peer.backoff_misses = 0;
+        peer.backoff_logged_misses = 0;
+    } else {
+        peer.backoff_misses = peer.backoff_misses.saturating_add(1);
+    }
+    peer.rx_since_timeout = false;
+    if peer.backoff_misses < INITIATE_BACKOFF_MIN_MISSES {
+        return None;
+    }
+    let next_ms = initiate_backoff_ms(peer.backoff_misses);
+    peer.cooldown_until = now_ms.saturating_add(next_ms);
+    peer.backoff_active = true;
+    if peer.backoff_misses > peer.backoff_logged_misses {
+        peer.backoff_logged_misses = peer.backoff_misses;
+        Some((peer.backoff_misses, next_ms))
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 状态模型
 // ---------------------------------------------------------------------------
@@ -640,6 +711,19 @@ struct PeerConn {
     /// 上一次输出等待观测行的时刻（0 = 本段等待尚未记过行）；首行必记，
     /// 其后按 [`LOCALS_WAIT_LOG_MS`] 限频。
     locals_wait_log_ms: u64,
+    /// 连续「远端静默」的 [`START_DEADLINE_MS`] 超时次数（0051 §7 item 2）：
+    /// 期间收到该 peer 任何信令即清零；达到
+    /// [`INITIATE_BACKOFF_MIN_MISSES`] 后按 [`initiate_backoff_ms`] 退避。
+    backoff_misses: u32,
+    /// 上一次超时之后是否收到过该 peer 的信令（连续静默的判据：一条
+    /// candidate 也算「远端还活着」，不能算静默）。
+    rx_since_timeout: bool,
+    /// 当前是否处于退避（`backoff-reset` 行的去重标志：只在活动退避上记
+    /// 一行复位，绝不因每帧信令刷屏）。
+    backoff_active: bool,
+    /// 已按哪个 `misses` 值记过 `initiate-backoff` 行（进入 + 每次升级各
+    /// 一行；升级间隔按指数增长）。
+    backoff_logged_misses: u32,
 }
 
 impl PeerConn {
@@ -669,6 +753,10 @@ impl PeerConn {
             locals_wait_ms: 0,
             locals_wait_since_ms: 0,
             locals_wait_log_ms: 0,
+            backoff_misses: 0,
+            rx_since_timeout: false,
+            backoff_active: false,
+            backoff_logged_misses: 0,
         }
     }
 
@@ -743,6 +831,9 @@ pub struct PeerIceOrchestrator {
     blacklist: Vec<&'static str>,
     peers: Vec<PeerConn>,
     signal_ready: bool,
+    /// signal 流 false→true 的重连边沿（0051 §7 item 2）：下一拍 `run_once`
+    /// 复位全部 peer 的「远端静默」退避后清除。
+    signal_reconnected: bool,
     /// 非网络图 peer 的 signal 帧计数（观测，不作为错误）。
     unknown_signal: u64,
     /// HOST-ONLY（N12a）：固定绑定端口（None = 临时端口，默认）。
@@ -763,6 +854,7 @@ impl PeerIceOrchestrator {
             blacklist: DEFAULT_INTERFACE_BLACKLIST.to_vec(),
             peers: Vec::new(),
             signal_ready: false,
+            signal_reconnected: false,
             unknown_signal: 0,
             fixed_local_port: deps.fixed_local_port,
             advertised_candidates: deps.advertised_candidates,
@@ -806,8 +898,13 @@ impl PeerIceOrchestrator {
     }
 
     /// signal 流就绪（connector 持有注册好的 signal 流后置位；置位前
-    /// `run_once` 不发起任何东西）。
+    /// `run_once` 不发起任何东西）。0051 §7 item 2：false→true 的重连边沿
+    /// 记一个待复位标志，由 `run_once`（有注入时钟）在下一拍复位「远端静默」
+    /// 退避——断流期间的静默可能是本端收不到帧，不是对端不应答。
     pub fn set_signal_ready(&mut self, ready: bool) {
+        if ready && !self.signal_ready {
+            self.signal_reconnected = true;
+        }
         self.signal_ready = ready;
     }
 
@@ -860,6 +957,25 @@ impl PeerIceOrchestrator {
             }
         }
         s
+    }
+
+    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3）：**当前允许接口数 × 2**，
+    /// 与 [`PeerConn::required_local_sockets`] 同一份枚举/黑名单/去重规则
+    /// （两者都走 [`crate::ice::allowed_ifaces`]），因此壳层的池目标不会与
+    /// core 的实际预算漂移。真机 0051 观测到 `need` 有 4（2 接口）与 6
+    /// （3 接口）两档；`need_per_peer = 6` 时 6 peer 需要 36 枚。
+    ///
+    /// 接口枚举失败返回 `None`（状态文档写 `-1`）：壳层据此回退到自己的
+    /// 保守常量（每 peer 4），绝不把「测不出来」当成「需求为 0」。
+    pub fn need_per_peer(&self) -> Option<usize> {
+        let cfg = GatherConfig {
+            blacklist: &self.blacklist,
+            servers: &self.stuns,
+            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+        };
+        crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())
+            .ok()
+            .map(|ifaces| ifaces.len() * 2)
     }
 
     /// 收到一帧解密后的 signal 消息（`from_key` = 发送方 WG 公钥，
@@ -985,6 +1101,13 @@ impl PeerIceOrchestrator {
             peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
             peer.session_at_ms,
         ));
+        // 0051 §7 item 2：收到该 peer 任何信令（offer/answer/candidate）＝远端
+        // 不是静默的 → 退避立即复位、回到正常节奏；`rx_since_timeout` 同时
+        // 打断「连续静默」计数（一条 candidate 也算远端还活着）。应答路径
+        // 从不经过退避（上面的会话建立/收集是即时的），退避只影响**下一次
+        // 主动发起**的时刻。
+        self.peers[idx].rx_since_timeout = true;
+        self.reset_initiate_backoff(idx, now_ms, "signal");
         Ok(())
     }
 
@@ -997,6 +1120,14 @@ impl PeerIceOrchestrator {
     /// Connected（真机 12:00 成功连接后 ~7s `disconnected→failed` 的形态
     /// ：对端断流冻结，本端诚实超时）。`now_ms` 注入。
     pub fn run_once(&mut self, now_ms: u64) -> Result<(), ManagementError> {
+        // signal 流重连（false→true 的边沿）：断流期间的「远端静默」推断作废
+        // ——本端可能只是收不到帧。带注入时钟复位，避免退避延迟继续生效。
+        if self.signal_reconnected {
+            self.signal_reconnected = false;
+            for idx in 0..self.peers.len() {
+                self.reset_initiate_backoff(idx, now_ms, "signal-reconnect");
+            }
+        }
         let mut first_err: Option<ManagementError> = None;
         for idx in 0..self.peers.len() {
             if self.signal_ready {
@@ -1602,11 +1733,44 @@ impl PeerIceOrchestrator {
         peer.session_at_ms = 0;
         peer.locals_wait_ms = 0; // 等待账随会话作废（下一会话从零起算）
         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+        // 0051 §7 item 2：连续的「远端静默」超时→指数退避拉长下一次发起。
+        // 只统计 `negotiation-start-timeout`（会话已建、本地候选已发、远端
+        // 凭证/候选从未到达）：Failed 事件、网络切换、诊断断链都不是「对端
+        // 静默」的证据，不得计入。
+        let enter_backoff = if reason == "negotiation-start-timeout" {
+            note_silent_timeout(peer, now_ms)
+        } else {
+            None
+        };
         // The payload carries WHY the session died — device run 3
         // needed exactly this and the marker alone said nothing.
         crate::hilog::emit(&format!(
             "N11_ICE|failed|session-dropped|renegotiation-armed|reason={reason}|peer={peer_prefix}|round={round}"
         ));
+        if let Some((misses, next_ms)) = enter_backoff {
+            crate::hilog::emit(&initiate_backoff_line(&peer_prefix, misses, next_ms));
+        }
+    }
+
+    /// 复位「远端静默」退避（0051 §7 item 2）：收到该 peer 任何信令或网络
+    /// 切换/重连事件时调用。`backoff-reset` 行只在**活动**退避上记一行
+    /// （复位即清零，天然限频）；有活动退避时把冷却拉回正常节奏
+    /// （至多 `RETRY_COOLDOWN_MS`），否则不动既有的短冷却。
+    fn reset_initiate_backoff(&mut self, idx: usize, now_ms: u64, reason: &str) {
+        let peer = &mut self.peers[idx];
+        if !peer.backoff_active && peer.backoff_misses == 0 && peer.backoff_logged_misses == 0 {
+            return;
+        }
+        let was_active = peer.backoff_active;
+        peer.backoff_misses = 0;
+        peer.backoff_active = false;
+        peer.backoff_logged_misses = 0;
+        if was_active {
+            peer.cooldown_until =
+                peer.cooldown_until.min(now_ms.saturating_add(RETRY_COOLDOWN_MS));
+            let peer_prefix = peer_short(&peer.key);
+            crate::hilog::emit(&backoff_reset_line(&peer_prefix, reason));
+        }
     }
 
     /// 僵尸谈判拆除（H3 修复，[`START_DEADLINE_MS`]）：会话已建、本地
@@ -1651,10 +1815,15 @@ impl PeerIceOrchestrator {
 
     /// Force fresh ICE credentials, candidates and protected sockets after an
     /// outer-network change; the next pump renegotiates each known peer.
+    ///
+    /// 0051 §7 item 2：网络切换同样复位「远端静默」退避——切换后旧的静默
+    /// 推断作废（本端接口/端口全变，对端也没机会应答），必须立刻回到正常
+    /// 节奏重新尝试。
     pub fn restart_for_network_change(&mut self, now_ms: u64) {
         for idx in 0..self.peers.len() {
             self.drop_session_rearm(idx, now_ms, "physical-network-change");
             self.peers[idx].cooldown_until = now_ms;
+            self.reset_initiate_backoff(idx, now_ms, "network-change");
         }
     }
 
@@ -2493,6 +2662,317 @@ mod tests {
         assert!(
             orch.peers[0].session.is_none(),
             "after a full non-waiting deadline the zombie is still torn down (pause, not disable)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 0051 §7 item 2：无回应 peer 的指数退避
+    // -----------------------------------------------------------------------
+
+    /// 单接口（need=2）+ 指定深度 socket 池的编排器，一个静默 peer。
+    fn silent_peer_orch(pool: usize) -> PeerIceOrchestrator {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..pool {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        orch
+    }
+
+    /// 把静默 peer 驱动到 `target` 次 `negotiation-start-timeout`；返回最后
+    /// 一拍的注入时刻。返回每次静默超时后「本轮设置的下一次发起延迟」。
+    fn drive_silent_timeouts(
+        orch: &mut PeerIceOrchestrator,
+        start_now: u64,
+        target: u32,
+    ) -> (u64, Vec<(u32, u64)>) {
+        const TICK: u64 = 250;
+        let mut now = start_now;
+        let mut last_misses = orch.peers[0].backoff_misses;
+        let mut delays: Vec<(u32, u64)> = Vec::new();
+        while orch.peers[0].backoff_misses < target {
+            now += TICK;
+            assert!(now < 10_000_000, "the silent peer never timed out (misses={})", orch.peers[0].backoff_misses);
+            orch.run_once(now).expect("a silent beat is not an error");
+            let misses = orch.peers[0].backoff_misses;
+            if misses > last_misses {
+                delays.push((misses, orch.peers[0].cooldown_until.saturating_sub(now)));
+                last_misses = misses;
+            }
+        }
+        (now, delays)
+    }
+
+    /// 0051 §7 item 2 的算术与格式：延迟序列 9 s → 18 s → 36 s → … 封顶
+    /// 5 min；两行日志逐字冻结（真机判读依赖这两个 token）。
+    #[test]
+    fn initiate_backoff_arithmetic_and_lines_are_frozen() {
+        assert_eq!(INITIATE_BACKOFF_MIN_MISSES, 3);
+        assert_eq!(INITIATE_BACKOFF_BASE_MS, 9_000);
+        assert_eq!(INITIATE_BACKOFF_MAX_MS, 300_000);
+        assert_eq!(initiate_backoff_ms(3), 9_000);
+        assert_eq!(initiate_backoff_ms(4), 18_000);
+        assert_eq!(initiate_backoff_ms(5), 36_000);
+        assert_eq!(initiate_backoff_ms(6), 72_000);
+        assert_eq!(initiate_backoff_ms(8), 288_000);
+        assert_eq!(initiate_backoff_ms(9), 300_000, "9 s << 6 = 576 s is capped");
+        assert_eq!(initiate_backoff_ms(40), 300_000, "the cap also holds for absurd counts");
+        assert_eq!(initiate_backoff_ms(u32::MAX), 300_000, "no shift overflow at the extremes");
+        assert_eq!(
+            initiate_backoff_line("TrBfURPG", 3, 9_000),
+            "N5c_ICE|initiate-backoff|peer=TrBfURPG|misses=3|next_ms=9000"
+        );
+        assert_eq!(
+            backoff_reset_line("TrBfURPG", "signal"),
+            "N5c_ICE|backoff-reset|peer=TrBfURPG|reason=signal"
+        );
+    }
+
+    /// 远端静默 → 协商超时按退避增长：前两次仍是既有节奏
+    /// （[`RETRY_COOLDOWN_MS`]），第 3 次起延迟 9 s / 18 s / 36 s / 72 s，
+    /// 且实际发起间隔逐档变长；上限由 [`initiate_backoff_ms`] 钉住。
+    #[test]
+    fn silent_remote_grows_the_initiate_interval_up_to_the_cap() {
+        let mut orch = silent_peer_orch(64);
+        let mut initiate_at: Vec<u64> = Vec::new();
+        let (_, delays) = {
+            // 记录发起时刻：session_at_ms 每次发起被置为该拍注入时钟
+            const TICK: u64 = 250;
+            let mut now = 1_000u64;
+            let mut last_session = 0u64;
+            let mut delays: Vec<(u32, u64)> = Vec::new();
+            let mut last_misses = 0u32;
+            while orch.peers[0].backoff_misses < 6 {
+                now += TICK;
+                assert!(now < 10_000_000, "silent peer never timed out");
+                orch.run_once(now).expect("a silent beat is not an error");
+                let session = orch.peers[0].session_at_ms;
+                if session != 0 && session != last_session {
+                    initiate_at.push(session);
+                    last_session = session;
+                } else if session == 0 {
+                    last_session = 0;
+                }
+                let misses = orch.peers[0].backoff_misses;
+                if misses != last_misses {
+                    delays.push((misses, orch.peers[0].cooldown_until.saturating_sub(now)));
+                    last_misses = misses;
+                }
+            }
+            (now, delays)
+        };
+        assert_eq!(
+            delays,
+            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000), (4, 18_000),
+                 (5, 36_000), (6, 72_000)],
+            "the first 3 timeouts keep the normal pace, then 9/18/36/72 s"
+        );
+        assert!(orch.peers[0].backoff_active, "the 6th silent timeout is in backoff");
+        assert_eq!(orch.peers[0].backoff_misses, 6);
+        // 实际发起间隔：前几拍是既有的 ~11 s（9 s 截止期 + 2 s 冷却），进入
+        // 退避后逐档变长（9/18/36/72 s 的延迟叠加在 9 s 截止期上）。
+        assert!(initiate_at.len() >= 5, "expected several initiations, got {initiate_at:?}");
+        let gaps: Vec<u64> = initiate_at.windows(2).map(|w| w[1] - w[0]).collect();
+        let normal = START_DEADLINE_MS + RETRY_COOLDOWN_MS + 2 * 250;
+        assert!(gaps[0] <= normal && gaps[1] <= normal, "no backoff before the 3rd miss: {gaps:?}");
+        for pair in gaps.windows(2).skip(1) {
+            assert!(pair[1] > pair[0], "the interval must grow in backoff: {gaps:?}");
+        }
+        assert!(
+            gaps[gaps.len() - 1] >= 45_000,
+            "the last interval must carry the 36 s delay of miss 5 (9 s deadline + 36 s): {gaps:?}"
+        );
+    }
+
+    /// 收到该 peer 任何信令 → 退避立即复位、回到正常节奏，且**应答不受退避
+    /// 影响**：Offer 到手当拍即建会话、收集本地候选并欠下 ANSWER，下一拍就
+    /// 把 ANSWER 发出去（0051 的静默 peer 从不发 Offer，但这条语义必须钉死，
+    /// 否则退避会变成「对端终于说话了也不理」）。
+    #[test]
+    fn remote_signal_resets_backoff_and_is_answered_immediately() {
+        #[derive(Default)]
+        struct RecordingSignal {
+            frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
+        }
+        impl SignalExchange for RecordingSignal {
+            fn send(
+                &self,
+                to_key: &str,
+                kind: PeerSignalKind,
+                payload: &str,
+                _port: u32,
+            ) -> Result<(), ManagementError> {
+                self.frames
+                    .lock()
+                    .expect("frames")
+                    .push((to_key.to_string(), kind, payload.to_string()));
+                Ok(())
+            }
+        }
+        let signal = Arc::new(RecordingSignal::default());
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..64 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        let (now, delays) = drive_silent_timeouts(&mut orch, 1_000, 4);
+        assert_eq!(
+            delays,
+            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000), (4, 18_000)]
+        );
+        assert!(orch.peers[0].backoff_active, "the 4th silent timeout is in backoff");
+        let armed_until = orch.peers[0].cooldown_until;
+        assert!(armed_until > now + 10_000, "the next initiate is held off by the backoff");
+
+        // 远端 Offer 到达（退避期内）：立即建会话 + 收集 + 欠 ANSWER，退避复位
+        let answer_at = now + 1;
+        orch.handle_signal("P", PeerSignalKind::Offer, "abcd:0123456789012345678901", answer_at)
+            .expect("offer accepted");
+        assert!(!orch.peers[0].backoff_active, "any remote signal resets the backoff");
+        assert_eq!(orch.peers[0].backoff_misses, 0);
+        assert!(orch.peers[0].session.is_some(), "the offer is answered in the same beat");
+        assert!(
+            orch.peers[0].outbox.iter().any(|(kind, _)| *kind == PeerSignalKind::Answer),
+            "the ANSWER is queued in the same beat the offer arrived"
+        );
+        assert!(
+            orch.peers[0].cooldown_until <= answer_at + RETRY_COOLDOWN_MS,
+            "the backoff delay is replaced by the normal cooldown"
+        );
+        // 下一拍：ANSWER 照常发出（退避从未挡住应答路径）
+        orch.run_once(answer_at + 2).expect("beat");
+        let frames = signal.frames.lock().expect("frames");
+        assert!(
+            frames.iter().any(|(k, kind, _)| k == "P" && *kind == PeerSignalKind::Answer),
+            "the ANSWER must go out on the next beat: {frames:?}"
+        );
+        drop(frames);
+
+        // 反向：一条 candidate 也打断「连续静默」——新的静默 peer 攒到 2 次
+        // 超时后插一条 candidate，再超时时计数从零重新起算（要再走 3 次才
+        // 进入退避），因此不会把「远端只 trickle 候选」误判成离线。
+        let mut fresh = silent_peer_orch(64);
+        let (now2, first) = drive_silent_timeouts(&mut fresh, 1_000, 2);
+        assert_eq!(first, vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS)]);
+        assert_eq!(fresh.peers[0].backoff_misses, 2);
+        fresh
+            .handle_signal(
+                "P",
+                PeerSignalKind::Candidate,
+                "candidate:1 1 udp 1 127.0.0.1 9 typ host",
+                now2 + 1,
+            )
+            .expect("candidate accepted");
+        let (_, after) = drive_silent_timeouts(&mut fresh, now2 + 1, 3);
+        assert_eq!(
+            after,
+            vec![(1, RETRY_COOLDOWN_MS), (2, RETRY_COOLDOWN_MS), (3, 9_000)],
+            "a candidate between timeouts restarts the silent streak"
+        );
+    }
+
+    /// 网络切换与 signal 流重连（false→true 边沿）同样复位退避：切换后的静默
+    /// 推断作废，立即回到正常节奏。
+    #[test]
+    fn network_change_and_signal_reconnect_reset_backoff() {
+        let mut orch = silent_peer_orch(64);
+        let (now, _) = drive_silent_timeouts(&mut orch, 1_000, 3);
+        assert!(orch.peers[0].backoff_active);
+        orch.restart_for_network_change(now + 1_000);
+        assert!(!orch.peers[0].backoff_active, "a network change clears the backoff");
+        assert_eq!(orch.peers[0].backoff_misses, 0);
+        assert_eq!(orch.peers[0].cooldown_until, now + 1_000, "normal pace restored");
+        // signal 重连边沿：先重新攒到退避，再 false→true，复位落在下一拍
+        let (now, _) = drive_silent_timeouts(&mut orch, now + 1_000, 3);
+        assert!(orch.peers[0].backoff_active);
+        assert!(orch.peers[0].cooldown_until > now + 5_000, "backoff armed before the reconnect");
+        orch.set_signal_ready(false);
+        orch.set_signal_ready(true);
+        orch.run_once(now + 1).expect("the reconnect beat resets the backoff");
+        assert!(!orch.peers[0].backoff_active, "a signal reconnect clears the backoff");
+        assert_eq!(orch.peers[0].backoff_misses, 0);
+    }
+
+    /// 0051 §7 item 3 的 core 侧事实源：`need_per_peer` = 允许接口数 × 2
+    /// （与 `required_local_sockets` 同一份 `allowed_ifaces` 规则），接口枚举
+    /// 失败才是 `None`（壳层据此回退）。overlay 接口（`vpn-tun`）被黑名单挡住，
+    /// 因此 3 个物理接口 + overlay 仍是 6 —— 正是 0051 观测到的 `need=6`。
+    #[test]
+    fn need_per_peer_counts_the_gather_budget_of_allowed_ifaces() {
+        fn orch_with(ifaces: Vec<crate::ice::InterfaceAddr>) -> PeerIceOrchestrator {
+            PeerIceOrchestrator::new(PeerIceDeps {
+                ifaces: Arc::new(crate::ice::StaticInterfaces(ifaces)),
+                socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
+                signal: Arc::new(LoggingSignalExchange::default()),
+                wg: noop_wg(),
+                tie_breaker: Some(7),
+                fixed_local_port: None,
+                advertised_candidates: Vec::new(),
+            })
+        }
+        let i = |name: &str, addr: [u8; 4]| crate::ice::InterfaceAddr { name: name.into(), addr };
+        assert_eq!(orch_with(vec![]).need_per_peer(), Some(0));
+        assert_eq!(orch_with(vec![i("wlan0", [192, 168, 1, 2])]).need_per_peer(), Some(2));
+        assert_eq!(
+            orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("rmnet0", [10, 0, 0, 2])]).need_per_peer(),
+            Some(4),
+            "0051 round 1: 2 allowed interfaces → need=4"
+        );
+        assert_eq!(
+            orch_with(vec![
+                i("wlan0", [192, 168, 1, 2]),
+                i("rmnet0", [10, 0, 0, 2]),
+                i("vpn-tun", [100, 108, 144, 165]),
+                i("eth1", [172, 17, 1, 1]),
+            ])
+            .need_per_peer(),
+            Some(6),
+            "0051 round 2: 3 allowed interfaces (overlay blacklisted) → need=6"
+        );
+        // 与 PeerConn 的实际预算同源：同一个接口集下 required_local_sockets 相等
+        let mut orch = orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("eth1", [172, 17, 1, 1])]);
+        orch.set_stuns(&[]);
+        let cfg = GatherConfig {
+            blacklist: &orch.blacklist,
+            servers: &orch.stuns,
+            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+        };
+        assert_eq!(
+            orch.need_per_peer(),
+            Some(crate::ice::allowed_ifaces(&cfg, orch.ifaces.as_ref()).expect("enumerate").len() * 2),
+            "need_per_peer is exactly the gather budget's input"
         );
     }
 }
