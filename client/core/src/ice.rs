@@ -584,9 +584,19 @@ impl InterfaceSource for SystemInterfaces {
 /// (`client/internal/profilemanager/config.go:56-59`): the tunnel interface
 /// (`wt0` first — `client/iface/configurer/name.go:6`) plus the usual
 /// virtual/tunnel/docker names. Prefix-matched by [`interface_allowed`].
-pub const DEFAULT_INTERFACE_BLACKLIST: [&str; 14] = [
+///
+/// `vpn-tun` is the HarmonyOS platform tunnel interface and carries the
+/// device's OWN overlay address, so leaving it out made the tunnel a host
+/// candidate: one extra gather socket + one extra long-lived bind socket per
+/// peer (a third of a 6-socket budget, 0049 diagnostics report
+/// `diag-0049/locals-failed.md` §5.1-4) plus a useless overlay candidate
+/// advertised to the peer. Name is not a guess: `client/entry/src/main/ets/
+/// vpnextensionability/NetBirdVpnConfig.ets:45-46,:89` pins the platform VPN
+/// interface name to `'vpn-tun'`, and `/proc/net/dev` on the device shows
+/// exactly that (`docs/n2h-device-round-20260926-findings.md:10`).
+pub const DEFAULT_INTERFACE_BLACKLIST: [&str; 15] = [
     "wt0", "wt", "utun", "tun0", "zt", "ZeroTier", "wg", "ts",
-    "Tailscale", "tailscale", "docker", "veth", "br-", "lo",
+    "Tailscale", "tailscale", "docker", "veth", "br-", "lo", "vpn-tun",
 ];
 
 /// Upstream `stdnet.InterfaceFilter` prefix semantics
@@ -626,6 +636,17 @@ pub trait UdpSocketSource: Send + Sync {
     fn take_owned(&self) -> Result<OwnedFd, SocketSeamError> {
         let fd = self.take_fd()?;
         Ok(unsafe { OwnedFd::from_raw_fd(dup_socket_fd(fd)?) })
+    }
+    /// How many sockets a `take_owned` would succeed on right now, when the
+    /// source can count them up front. `None` = unknown: the caller must
+    /// proceed and rely on the per-take `NoSocket` fail-closed path (the
+    /// default keeps every borrowed/test provider working). Production
+    /// overrides it so the orchestrator can size a gather round BEFORE
+    /// consuming anything — one gather round takes `2 × interfaces` sockets
+    /// and a half-fed attempt burns the batch it was given (see
+    /// `PeerIceOrchestrator::ensure_locals`).
+    fn available(&self) -> Option<usize> {
+        None
     }
     fn resolve_ipv4(&self, host: &str) -> Result<[u8; 4], ManagementError> {
         resolve_ipv4(host)
@@ -718,6 +739,13 @@ impl UdpSocketSource for ProtectedUdpFdSource {
             .ok_or_else(|| ManagementError::Network("stun:protected-dns-pending".into()))
     }
 
+    /// Exact count of queued (already protected, unbound) sockets — the
+    /// orchestrator's starvation guard reads this instead of probing the
+    /// queue with a doomed `take_owned`.
+    fn available(&self) -> Option<usize> {
+        Some(self.pending())
+    }
+
     fn take_fd(&self) -> Result<i32, SocketSeamError> {
         self.take_owned().map(IntoRawFd::into_raw_fd)
     }
@@ -791,6 +819,36 @@ pub struct GatherResult {
     pub errors: Vec<(String, ManagementError)>,
 }
 
+/// The interface entries ONE gather round will actually visit: blacklist
+/// prefix filter (same [`interface_allowed`] the gather applies) plus the
+/// `(name, addr)` dedup for `getifaddrs`' repeated multi-flag entries, in
+/// enumeration order.
+///
+/// Shared with the caller's socket budget on purpose: a gather round takes
+/// ONE socket per entry here (`gather_interface`) plus one more per bound
+/// candidate, so any caller that must decide *before* consuming whether the
+/// protected-socket pool can pay for the round has to count exactly what the
+/// gather will walk — two implementations would drift.
+pub fn allowed_ifaces(
+    cfg: &GatherConfig,
+    ifaces: &dyn InterfaceSource,
+) -> Result<Vec<InterfaceAddr>, ManagementError> {
+    let all = ifaces.list()?;
+    let mut out = Vec::new();
+    let mut seen: Vec<(String, [u8; 4])> = Vec::new();
+    for iface in all {
+        if !interface_allowed(&iface.name, cfg.blacklist) {
+            continue;
+        }
+        if seen.iter().any(|(n, a)| *n == iface.name && *a == iface.addr) {
+            continue; // getifaddrs repeats entries (multi-flag)
+        }
+        seen.push((iface.name.clone(), iface.addr));
+        out.push(iface);
+    }
+    Ok(out)
+}
+
 /// Gather host + srflx candidates.
 ///
 /// Fail-closed points, in order: interface enumeration unavailable → hard
@@ -805,7 +863,7 @@ pub fn gather_candidates(
     ifaces: &dyn InterfaceSource,
     socks: &dyn UdpSocketSource,
 ) -> Result<GatherResult, ManagementError> {
-    let all = ifaces.list()?;
+    let all = allowed_ifaces(cfg, ifaces)?;
     let mut host = Vec::new();
     let mut srflx = Vec::new();
     let mut errors: Vec<(String, ManagementError)> = Vec::new();
@@ -820,15 +878,7 @@ pub fn gather_candidates(
         }
     }
 
-    let mut seen: Vec<(String, [u8; 4])> = Vec::new();
     for iface in all {
-        if !interface_allowed(&iface.name, cfg.blacklist) {
-            continue;
-        }
-        if seen.iter().any(|(n, a)| *n == iface.name && *a == iface.addr) {
-            continue; // getifaddrs repeats entries (multi-flag)
-        }
-        seen.push((iface.name.clone(), iface.addr));
         if let Err(e) =
             gather_interface(&iface, &resolved, socks, cfg.timeout_ms, &mut host, &mut srflx, &mut errors)
         {
@@ -1208,5 +1258,100 @@ mod feed_ownership_tests {
         source.clear_pending();
         assert_eq!(source.pending(), 0);
         assert!(source.take_owned().is_err());
+    }
+}
+
+#[cfg(test)]
+mod interface_filter_tests {
+    use super::{
+        allowed_ifaces, gather_candidates, interface_allowed, GatherConfig, InterfaceAddr,
+        ProtectedUdpFdSource, StaticInterfaces, DEFAULT_INTERFACE_BLACKLIST,
+        DEFAULT_STUN_TIMEOUT_MS,
+    };
+    use crate::sys;
+
+    /// 0049 §5.1-4：设备 overlay 接口必须不进 host 候选。`vpn-tun` 曾不在
+    /// 黑名单里 → 设备自己的 overlay 地址（100.108.144.165）被当第三个
+    /// 「可用接口」：每 peer 多烧 2 枚 socket（gather 1 + 绑定长留 1），
+    /// 并对外 advertise 一个隧道内候选。命名证据见
+    /// [`DEFAULT_INTERFACE_BLACKLIST`] 的文档（ets 常量 + 设备
+    /// `/proc/net/dev`），不是猜测。
+    #[test]
+    fn overlay_tun_interface_never_becomes_a_host_candidate() {
+        // 前缀匹配语义（上游 filter.go:19-24）：`vpn-tun` 同时挡住
+        // `vpn-tun0` 一类变体；物理接口不受影响。
+        assert!(!interface_allowed("vpn-tun", &DEFAULT_INTERFACE_BLACKLIST));
+        assert!(!interface_allowed("vpn-tun0", &DEFAULT_INTERFACE_BLACKLIST));
+        assert!(interface_allowed("wlan0", &DEFAULT_INTERFACE_BLACKLIST));
+
+        let ifaces = StaticInterfaces(vec![
+            // 物理接口用本机可绑定的回环地址代位（gather 按接口地址 bind；
+            // 这里只验证「谁进候选」，不验证具体网卡）。tun 项刻意也用**可
+            // 绑定**地址（设备上 overlay 地址 100.108.144.165 在本机不可
+            // 绑定），这样「它没进候选」只能归因于接口名黑名单，而不是
+            // bind 失败。
+            InterfaceAddr { name: "wlan0".into(), addr: [127, 0, 0, 1] },
+            InterfaceAddr { name: "vpn-tun".into(), addr: [127, 0, 0, 3] },
+        ]);
+        // 预算两枚（每个接口一枚），只为证明 overlay 那枚不会被取走。
+        let socks = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) }; // 源留住 dup；原 fd 归测试，喂完即关
+        }
+        let cfg = GatherConfig {
+            blacklist: &DEFAULT_INTERFACE_BLACKLIST,
+            servers: &[],
+            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+        };
+        assert_eq!(allowed_ifaces(&cfg, &ifaces).expect("enumerate").len(), 1);
+
+        let got = gather_candidates(&cfg, &ifaces, &socks).expect("gather");
+        assert_eq!(got.host.len(), 1, "only the physical interface may host: {:?}", got.host);
+        assert_eq!(got.host[0].address, "127.0.0.1");
+        assert!(
+            got.host.iter().all(|c| c.address != "127.0.0.3"),
+            "the tun interface's (overlay-range) address must never be advertised"
+        );
+        // 黑名单接口不消耗任何 socket（这正是 0049 每 peer 少烧 2 枚的来源）。
+        assert_eq!(socks.taken(), 1, "blacklisted interface must not take a socket");
+        assert_eq!(socks.pending(), 1);
+    }
+
+    /// 预算函数必须与 gather 真正走的接口清单逐项一致（否则「先算后取」
+    /// 的守护会算错账）。
+    #[test]
+    fn allowed_ifaces_matches_the_gather_walk() {
+        let ifaces = StaticInterfaces(vec![
+            InterfaceAddr { name: "wlan0".into(), addr: [127, 0, 0, 1] },
+            InterfaceAddr { name: "wlan0".into(), addr: [127, 0, 0, 1] }, // getifaddrs 重复项
+            InterfaceAddr { name: "vpn-tun".into(), addr: [100, 108, 144, 165] },
+            InterfaceAddr { name: "lo".into(), addr: [127, 0, 0, 1] },
+            InterfaceAddr { name: "eth0".into(), addr: [127, 0, 0, 2] },
+        ]);
+        let cfg = GatherConfig {
+            blacklist: &DEFAULT_INTERFACE_BLACKLIST,
+            servers: &[],
+            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+        };
+        let listed = allowed_ifaces(&cfg, &ifaces).expect("enumerate");
+        assert_eq!(
+            listed.iter().map(|i| (i.name.as_str(), i.addr)).collect::<Vec<_>>(),
+            vec![("wlan0", [127, 0, 0, 1]), ("eth0", [127, 0, 0, 2])]
+        );
+
+        let socks = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let got = gather_candidates(&cfg, &ifaces, &socks).expect("gather");
+        // gather 每接口恰好一枚（servers 为空时用完即关）→ 枚数 == 预算数。
+        assert_eq!(socks.taken() as usize, listed.len());
+        assert_eq!(got.host.len(), listed.len());
     }
 }

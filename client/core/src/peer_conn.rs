@@ -1104,6 +1104,35 @@ impl PeerIceOrchestrator {
             self.peers[idx].session_at_ms = now_ms;
         }
         let fixed_port = self.fixed_local_port;
+        // 0049 §5.1-2（活锁，关键）：受保护 UDP socket 池由壳层单向补给（池
+        // 目标 8、每批 ≤4），而一次成功收集要 `2 × 接口数` 枚（每接口
+        // gather 一枚、每个 host 候选再绑一枚长留）。失败路径是「先消耗再
+        // 失败、不回流」，于是池里 1..need-1 枚的尝试会把它们全部取走仍然
+        // `Err` —— 每批补给都被注定失败的尝试吃掉，池**永远攒不到 need**：
+        // 实测切网后 18 s 补给 20 枚、0 次成功。这里在任何 `take_owned`
+        // 之前先按「gather 将要走的接口清单」算本次预算，不足即**一枚都不
+        // 消耗**地返回可重试错误（沿用既有 cooldown 重试节奏，不新增定时
+        // 器），把池让给后续批次去攒；补给方（壳层定时器/状态轮询）与
+        // 消费方（pump / signal worker）共用同一把 orchestrator 锁，所以
+        // 「先算」与「后取」之间没有第二个 peer 插入。
+        //
+        // 为什么不选「失败时归还已取出的 socket」：池的契约是「FRESH
+        // UNBOUND 受保护 socket」（`ice.rs` 的 trait 契约与 `add_local_
+        // candidate_on` 的注释：dup 共享 socket 对象，已绑定的副本不能再
+        // 绑），gather 用掉的那几枚当场 `close`、绑定阶段的几枚已绑到候选
+        // 地址，两者都不能合法回流；能归还的只有本来就还没被取走的部分。
+        let required = match fixed_port {
+            // 固定端口路径整个收集阶段只消耗一枚（首个候选的通配绑定）。
+            Some(_) => usize::from(self.allowed_iface_addrs()?.first().is_some()),
+            None => self.required_local_sockets()?,
+        };
+        if let Some(have) = self.socks.available() {
+            if have < required {
+                return Err(ManagementError::Network(format!(
+                    "ice:insufficient-sockets|need={required}|have={have}"
+                )));
+            }
+        }
         let (host_list, srflx_list) = match fixed_port {
             Some(port) => {
                 let addrs = self.allowed_iface_addrs()?;
@@ -1186,6 +1215,23 @@ impl PeerIceOrchestrator {
         }
         self.maybe_start(idx);
         Ok(())
+    }
+
+    /// 一次成功收集的 socket 预算（默认路径）＝ `2 ×` gather 将要访问的
+    /// 接口数——每接口一枚（gather）+ 每个 host 候选一枚（绑定长留，
+    /// `add_local_candidate`）。接口清单与 [`crate::ice::allowed_ifaces`]
+    /// 同源，绝不与 gather 的实际遍历漂移。
+    ///
+    /// 上限（0049 残余风险）：壳层池目标 8、每批 ≤4，池深实际封顶在 8，
+    /// 所以 `required > 8`（同时有 ≥5 个允许接口）时守护会一直等待。本项
+    /// 修复后设备侧接口数由 3 降到 2（overlay 被黑名单挡掉）→ required=4。
+    fn required_local_sockets(&self) -> Result<usize, ManagementError> {
+        let cfg = GatherConfig {
+            blacklist: &self.blacklist,
+            servers: &self.stuns,
+            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+        };
+        Ok(crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())?.len() * 2)
     }
 
     /// 允许接口的 IPv4 地址列表（固定端口路径专用）：与 gather 相同的
@@ -2012,5 +2058,139 @@ mod tests {
         );
         assert_eq!(orch.peer_status("P").expect("peer").state, PeerIceState::Idle);
         unsafe { sys::close(holder) };
+    }
+
+    /// 0049 §5.1-2 活锁回归钉子 + socket 账本：**池容量小于 N 个 peer 的
+    /// 总需求、按批补给**（现场：池 8、每批 4、每 peer 6）。修复前失败路径
+    /// 「先消耗再失败、不回流」会把每批补给吃光——池永远攒不到 6 枚，切网
+    /// 后 18 s 补给的 20 枚 0 次成功；修复后供给不足的 peer 在任何 `take`
+    /// 之前就被挡住（`insufficient-sockets|need=6|have=…`），池得以跨批次
+    /// 攒够，3 个 peer 最终全部完成本地收集，且被挡住的尝试一枚 socket 都
+    /// 不消耗。
+    ///
+    /// fd 账本（现有 harness 方式）：`LedgeredSocks` 把 `take_owned` 的每一
+    /// 枚记进 `handed` 并当场用 `F_GETFD` 证明取到的是有效 fd；于是可断言
+    /// ①`handed == 3 × need`（没有一枚被失败尝试白烧）、②`taken == handed`、
+    /// ③`fed == pending + handed`（喂进来的每一枚 dup 都有归属，既不凭空
+    /// 消失也不重复计入）。本修复是纯前置检查：不 take / 不 close / 不 dup，
+    /// 因此不存在重复关闭或泄漏的新路径——被挡住的拍位零消耗即其直接证据。
+    #[test]
+    fn starvation_waits_for_topup_instead_of_burning_it() {
+        use std::os::fd::{AsRawFd, OwnedFd};
+
+        /// 受保护池 + 逐枚 handed-out 账本。
+        struct LedgeredSocks {
+            inner: crate::ice::ProtectedUdpFdSource,
+            handed: Mutex<Vec<i32>>,
+        }
+        impl LedgeredSocks {
+            /// 壳层 `feedOneIceSocket` 的测试等价物：真实 UDP fd，喂给源之后
+            /// 原 fd 归测试并立即关闭（源留住自己的 dup）。
+            fn feed_batch(&self, n: usize) {
+                for _ in 0..n {
+                    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+                    assert!(fd >= 0, "socket() failed");
+                    self.inner.feed(fd).expect("feed");
+                    unsafe { sys::close(fd) };
+                }
+            }
+        }
+        impl UdpSocketSource for LedgeredSocks {
+            fn take_fd(&self) -> Result<i32, crate::mgmtsock::SocketSeamError> {
+                self.inner.take_fd()
+            }
+            fn take_owned(&self) -> Result<OwnedFd, crate::mgmtsock::SocketSeamError> {
+                let owned = self.inner.take_owned()?;
+                let fd = owned.as_raw_fd();
+                assert!(
+                    unsafe { sys::fcntl(fd, sys::F_GETFD) } >= 0,
+                    "a handed-out socket must be an open fd"
+                );
+                self.handed.lock().expect("handed").push(fd);
+                Ok(owned)
+            }
+            /// 只有生产源会报告可用量；这里转发它，守护才生效（把这一行临时
+            /// 改成 `None` 即复现修复前的活锁）。
+            fn available(&self) -> Option<usize> {
+                Some(self.inner.pending())
+            }
+        }
+
+        // 3 个允许接口 ⇒ 每 peer 需要 6 枚（gather 3 + 绑定长留 3），与 0049
+        // 的 `added=3` 同型；壳层池目标 8、每批 4 枚（ICE_TOPUP_BATCH）。
+        const NEED: usize = 6;
+        let socks = Arc::new(LedgeredSocks {
+            inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            handed: Mutex::new(Vec::new()),
+        });
+        socks.feed_batch(8); // 启动一次性灌池（ICE_SOCKET_POOL_SIZE）
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![
+                crate::ice::InterfaceAddr { name: "eth0".into(), addr: [127, 0, 0, 1] },
+                crate::ice::InterfaceAddr { name: "eth1".into(), addr: [127, 0, 0, 2] },
+                crate::ice::InterfaceAddr { name: "eth2".into(), addr: [127, 0, 0, 3] },
+            ])),
+            socks: socks.clone(),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P1".into(), "P2".into(), "P3".into()]);
+        orch.set_signal_ready(true);
+
+        let mut fed = 8usize;
+        let mut starved_rounds = 0usize;
+        let mut now = 1000u64;
+        let mut rounds = 0usize;
+        while !orch.peers.iter().all(|p| p.locals_done) && rounds < 40 {
+            let taken_before = socks.inner.taken();
+            let done_before = orch.peers.iter().filter(|p| p.locals_done).count();
+            let round = orch.run_once(now);
+            if let Err(e) = &round {
+                let msg = format!("{e}");
+                if msg.contains("insufficient-sockets") {
+                    starved_rounds += 1;
+                    assert!(msg.contains(&format!("need={NEED}")), "reason must name the budget: {msg}");
+                    // 打断活锁的全部机制：被挡住的尝试一枚 socket 都不消耗。
+                    // 同一拍里别的 peer 可能刚好成功（那是它自己的预算），
+                    // 所以逐拍只断言「消耗量 == 本拍成功数 × need」。
+                    let newly_done = orch.peers.iter().filter(|p| p.locals_done).count() - done_before;
+                    assert_eq!(
+                        socks.inner.taken() - taken_before,
+                        (newly_done * NEED) as u64,
+                        "a starved attempt must not consume any socket: {msg}"
+                    );
+                }
+            }
+            // 壳层补给等价物：池深 < 8 时补一批 4 枚（4 s 定时器 + 5 s 状态
+            // 轮询两个驱动的合并节奏）；重试节奏沿用 RETRY_COOLDOWN_MS。
+            if socks.inner.pending() < 8 {
+                socks.feed_batch(4);
+                fed += 4;
+            }
+            now += RETRY_COOLDOWN_MS + 1;
+            rounds += 1;
+        }
+
+        for (i, p) in orch.peers.iter().enumerate() {
+            assert!(
+                p.locals_done,
+                "peer {i} must converge after top-ups (rounds={rounds}, taken={}, pending={}, \
+                 starved={starved_rounds})",
+                socks.inner.taken(),
+                socks.inner.pending()
+            );
+        }
+        assert!(starved_rounds > 0, "the scenario must actually exercise the starvation guard");
+        let handed = socks.handed.lock().expect("handed").len();
+        assert_eq!(handed, 3 * NEED, "no socket may be spent outside a successful gather+bind");
+        assert_eq!(socks.inner.taken() as usize, handed);
+        assert_eq!(
+            socks.inner.pending() + handed,
+            fed,
+            "fd ledger must balance: every fed socket is either queued or handed out"
+        );
     }
 }
