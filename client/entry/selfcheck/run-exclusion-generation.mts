@@ -279,6 +279,9 @@ const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
+  // N5c demand-sized ICE pool (2026-10-02): the sizing pure module the REAL
+  // extension imports; zero imports and no erased types, so no shim.
+  'NetBirdIceSocketPool',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its two erased interfaces are re-declared by its shim below.
   'NetBirdN2Stimulus',

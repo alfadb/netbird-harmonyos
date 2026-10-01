@@ -686,6 +686,27 @@ pub fn wg_feed_adopted_line(peers: usize, endpoints: usize, egress_replayed: usi
     format!("N7_WG_FEED|adopted|peers={peers}|endpoints={endpoints}|egress_replayed={egress_replayed}|mono_ms={mono_ms}")
 }
 
+/// `N6_WG_DEVICE|session-established|peer=<公钥前8位>` —— 哪个 peer 的 WG
+/// 会话建成（0050 §8 item 2：真机上这条行不带 peer 标识，`wgSessions=4`
+/// 时无从知道是哪 4 个 peer；观测缺口，不是「其余 2 个没建成」的证据）。
+/// `peer=` 一律**追加在行尾**，已有字段顺序不变，格式与 N5c_ICE 行同源
+/// （同一个 [`crate::peer_conn::peer_short`]）。
+pub fn session_established_line(pub_key_b64: &str) -> String {
+    format!(
+        "N6_WG_DEVICE|session-established|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
+/// `N6_WG_DEVICE|session-expired|peer=<公钥前8位>` —— 同一个 peer 的 WG
+/// 会话到期（会话结束侧，与 [`session_established_line`] 同源同格式）。
+pub fn session_expired_line(pub_key_b64: &str) -> String {
+    format!(
+        "N6_WG_DEVICE|session-expired|peer={}",
+        crate::peer_conn::peer_short(pub_key_b64)
+    )
+}
+
 impl TunFrameTee for N2DestinationTee {
     fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
         if dir != TunFrameDir::FromOs { return; }
@@ -1337,7 +1358,7 @@ impl WgDevice {
                 self.peers[idx].expired = false;
                 self.peers[idx].session_established_ms = now_ms;
                 self.peers[idx].first_init_ms = None; // campaign done
-                emit("N6_WG_DEVICE|session-established");
+                emit(&session_established_line(&self.peers[idx].key_b64));
             } else if fresh {
                 // rekey completed: refresh the expiry anchor
                 self.peers[idx].session_established_ms = now_ms;
@@ -1498,7 +1519,7 @@ impl WgDevice {
                     >= cfg.session_max_ms
             {
                 self.peers[idx].expired = true;
-                emit("N6_WG_DEVICE|session-expired");
+                emit(&session_expired_line(&self.peers[idx].key_b64));
             }
             // handshake campaign (a path exists — ICE endpoint or relay
             // carrier (N13-D2) — but no live session)
@@ -3291,5 +3312,47 @@ mod feed_tests {
         for fd in [wg_raw, tun_raw, tun_end, peer_fd, stranger_fd] {
             unsafe { sys::close(fd) };
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests: the WG session-lifecycle line format (0050 §8 item 2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod lifecycle_line_tests {
+    use super::*;
+
+    /// 0050 §8 item 2 的格式钉子：`session-established` / `session-expired`
+    /// 必须带 `peer=<公钥前8位>`，且**追加在行尾**、已有字段顺序不变、与
+    /// N5c_ICE 行同一个短前缀规则（`peer_conn::peer_short`）。
+    ///
+    /// 这两行不是 N2 行、不进 `n2-log-samples.txt`（那个夹具只钉 Rust 侧
+    /// N2 行），所以格式断言落在它们的生产者模块里：`wg_device` 的会话生命
+    /// 周期行此前是裸标记（`N6_WG_DEVICE|session-established`），真机上 6 个
+    /// peer 都建/拆会话时无法判定是哪几个。
+    #[test]
+    fn session_lifecycle_lines_name_the_peer_last() {
+        // 真机形态的公钥（base64）：`peer_short` 只取字母数字，`+`/`/`/`=`
+        // 跳过——与 N5c_ICE 行的短 id 逐字同规则（0050 证据里
+        // `FyLw4PSBg1hjr…` 的行内短 id 就是 `FyLw4PSB`）。
+        let key = "FyLw4PSBg1hjr+9/x0=";
+        assert_eq!(
+            session_established_line(key),
+            "N6_WG_DEVICE|session-established|peer=FyLw4PSB"
+        );
+        assert_eq!(
+            session_expired_line(key),
+            "N6_WG_DEVICE|session-expired|peer=FyLw4PSB"
+        );
+        for line in [session_established_line(key), session_expired_line(key)] {
+            let parts: Vec<&str> = line.split('|').collect();
+            assert_eq!(parts[0], "N6_WG_DEVICE");
+            assert_eq!(parts.len(), 3, "既有字段顺序不变、peer= 在行尾: {line}");
+            assert!(parts.last().expect("last field").starts_with("peer="), "{line}");
+        }
+        // 短/空 key 不 panic（前缀就是它自己的字母数字前缀）。
+        assert_eq!(session_established_line("ab"), "N6_WG_DEVICE|session-established|peer=ab");
+        assert_eq!(session_established_line(""), "N6_WG_DEVICE|session-established|peer=");
     }
 }

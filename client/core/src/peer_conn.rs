@@ -96,6 +96,15 @@ use crate::util::jnum;
 /// 发起/应答失败后的重试冷却（注入时钟衡量；避免熵/收集失败时热循环）。
 pub const RETRY_COOLDOWN_MS: u64 = 2000;
 
+/// 「受保护 socket 池不足」等待行的限频周期（注入时钟衡量；0050 残余项 3）。
+///
+/// 池不足不是错误，而是**等待补给**：每一次被挡住的尝试都记一行
+/// `N5c_ICE|locals-waiting` 会把 6 个 peer × 每 2 s 重试变成刷屏（真机
+/// 0050 的 `locals-failed` 3.5 min 内 39 行 / 25 个去重事件）。等待的**首行
+/// 必记**（进入等待的时刻必须可观测），其后每个 peer 每个周期至多一行，
+/// 行内 `waited_ms` 给出已等待时长，因此「等了多久」不因限频丢失。
+pub const LOCALS_WAIT_LOG_MS: u64 = 5000;
+
 /// 握手重发周期（注入时钟衡量）：signal 服务端对未注册目的地的转发是
 /// best-effort 丢弃（signal.go forwardMessageToPeer 的 not-connected
 /// 路径，"todo respond to the sender?"），先发方的 OFFER/候选可能在
@@ -554,8 +563,27 @@ pub fn ice_ready_for_default_route(summary: &IceOrchestratorSummary) -> bool {
 
 /// N2 v4.1 P7: the 8-char public-key short prefix this module's log lines use
 /// (the N5c shape) — the `peer=` label of an outer-source receipt.
-fn peer_short(key: &str) -> String {
+///
+/// `pub(crate)` since 0050 (§8 item 2): `wg_device`'s session-lifecycle lines
+/// carry the SAME label, and reusing this one function is what makes "同源同
+/// 格式" a property of the code instead of a convention.
+pub(crate) fn peer_short(key: &str) -> String {
     key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
+}
+
+/// [`PeerIceOrchestrator::ensure_locals`] 的本次结果。
+///
+/// 池不足**不是错误**（0050 §2.6/§8 item 3）：现场把它当成 `Network` 错误
+/// 上抛，于是每一拍都冒出 `peer-conn: pump error (network)`，而 ICE pump 被
+/// 设计成「逐 tick 打印错误类并继续运行」→「等待」被实现成了「刷错误日志 +
+/// 重试」。等待态必须：①不进 `run_once` 的 `first_err`（不冒 pump error）；
+/// ②不消耗 [`START_DEADLINE_MS`]（饿死不是「对端不应答」，不能拿它拆会话，
+/// 见 [`PeerConn::negotiation_age_ms`]）。
+enum LocalsRun {
+    /// 本地候选已收集并绑定（`locals_done` 已置位）。
+    Gathered,
+    /// 受保护 socket 池不足：本次**一枚都没取**（可重试），peer 进入等待。
+    WaitingForSockets { need: usize, have: usize, waited_ms: u64, log: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +630,16 @@ struct PeerConn {
     /// 当前会话的创建时刻（注入时钟；0 = 无会话）。[`START_DEADLINE_MS`]
     /// 的计时起点：创建后始终未 `start()` 的谈判到期拆除重发起。
     session_at_ms: u64,
+    /// 本会话内「等受保护 socket 补给」已累计的时长（[`LocalsRun::
+    /// WaitingForSockets`]）：[`START_DEADLINE_MS`] 的计时只算**非等待**的
+    /// 龄期（`negotiation_age_ms`），会话重建时归零。
+    locals_wait_ms: u64,
+    /// 最近一次进入等待的时刻（0 = 当前不在等待）。跨会话重建保持连续，
+    /// 因此 `waited_ms` 报的是「池饿了多久」，不是「本会话饿了多久」。
+    locals_wait_since_ms: u64,
+    /// 上一次输出等待观测行的时刻（0 = 本段等待尚未记过行）；首行必记，
+    /// 其后按 [`LOCALS_WAIT_LOG_MS`] 限频。
+    locals_wait_log_ms: u64,
 }
 
 impl PeerConn {
@@ -628,7 +666,24 @@ impl PeerConn {
             signaled: Vec::new(),
             retry_at_ms: 0,
             session_at_ms: 0,
+            locals_wait_ms: 0,
+            locals_wait_since_ms: 0,
+            locals_wait_log_ms: 0,
         }
+    }
+
+    /// [`START_DEADLINE_MS`] 判据使用的「龄期」：从 `session_at_ms` 起算，
+    /// 扣掉本会话等受保护 socket 补给的全部时长（含**正在**等待的这一段，
+    /// 其归属从 `max(等待起点, 会话起点)` 算起，不把会话之前的等待算进
+    /// 本会话）。等待不是谈判没有进展的证据——池不足时本端连候选都绑不
+    /// 出来，拿这段时间去拆会话只会「饿死 → 拆 → 重新收集 → 再饿死」。
+    fn negotiation_age_ms(&self, now_ms: u64) -> u64 {
+        let mut age = now_ms.saturating_sub(self.session_at_ms);
+        if self.locals_wait_since_ms != 0 {
+            let wait_start = self.locals_wait_since_ms.max(self.session_at_ms);
+            age = age.saturating_sub(now_ms.saturating_sub(wait_start));
+        }
+        age.saturating_sub(self.locals_wait_ms)
     }
 
     fn status(&self) -> PeerIceStatus {
@@ -847,6 +902,7 @@ impl PeerIceOrchestrator {
                     peer.signaled.clear();
                     peer.retry_at_ms = 0;
                     peer.session_at_ms = 0;
+                    peer.locals_wait_ms = 0; // 新会话的等待账从零起算
                 }
                 let had_session = self.peers[idx].session.is_some();
                 if !had_session {
@@ -865,17 +921,30 @@ impl PeerIceOrchestrator {
                     peer.state = PeerIceState::Gathering;
                     peer.answer_owed = true;
                     peer.session_at_ms = now_ms;
-                    if let Err(e) = self.ensure_locals(idx, now_ms) {
-                        let peer = &mut self.peers[idx];
-                        peer.last_error = Some(ErrorClass::from_management(&e));
-                        peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                        // 应答方收集失败同样不得静默：`answer_owed` 仍在，
-                        // `want_locals` 冷却后会重试补 ANSWER。
-                        crate::hilog::emit(&format!(
-                            "N5c_ICE|locals-failed|peer={}|round={}|phase=answer|reason={e}",
-                            peer_short(&peer.key),
-                            peer.session_at_ms
-                        ));
+                    peer.locals_wait_ms = 0; // 新会话的等待账从零起算
+                    match self.ensure_locals(idx, now_ms) {
+                        Ok(LocalsRun::Gathered) => {}
+                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
+                            // 池不足＝等待（0050 §8 item 3）：不进 `last_error`
+                            // （它不是错误），只按既有冷却节奏重试；`answer_owed`
+                            // 仍在，补给到达后 `want_locals` 会补 ANSWER。
+                            self.peers[idx].cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                            if log {
+                                self.emit_locals_waiting(idx, "answer", need, have, waited_ms);
+                            }
+                        }
+                        Err(e) => {
+                            let peer = &mut self.peers[idx];
+                            peer.last_error = Some(ErrorClass::from_management(&e));
+                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                            // 应答方收集失败同样不得静默：`answer_owed` 仍在，
+                            // `want_locals` 冷却后会重试补 ANSWER。
+                            crate::hilog::emit(&format!(
+                                "N5c_ICE|locals-failed|peer={}|round={}|phase=answer|reason={e}",
+                                peer_short(&peer.key),
+                                peer.session_at_ms
+                            ));
+                        }
                     }
                 } else {
                     // glare（双方同时 OFFER）：已有会话，采纳对端凭证、
@@ -939,11 +1008,37 @@ impl PeerIceOrchestrator {
                 if want_initiate {
                     self.peers[idx].initiated = true;
                     match self.ensure_locals(idx, now_ms) {
-                        Ok(()) => {
+                        Ok(LocalsRun::Gathered) => {
                             let peer = &mut self.peers[idx];
                             let creds = peer.creds.as_ref().expect("creds after locals");
                             let payload = format!("{}:{}", creds.ufrag, creds.pwd);
                             peer.outbox.push_back((PeerSignalKind::Offer, payload));
+                        }
+                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
+                            // 池不足＝等待（0050 §2.6/§8 item 3）：现场把这里
+                            // 当成 `Network` 错误上抛，每一拍冒一条
+                            // `peer-conn: pump error (network)`；等待态不该
+                            // 有错误面。清场照旧、`last_error` 不置位、
+                            // 不进 `first_err`、冷却期满按既有节奏重试。
+                            if log {
+                                self.emit_locals_waiting(idx, "initiate", need, have, waited_ms);
+                            }
+                            let peer = &mut self.peers[idx];
+                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                            peer.initiated = false; // 冷却后重试
+                            peer.session = None; // Drop 关闭半成品会话的 dup socket
+                            peer.creds = None;
+                            peer.remote_creds = None;
+                            peer.locals_done = false;
+                            peer.started = false;
+                            peer.remote_cands_seen = 0;
+                            peer.pending_remote.clear();
+                            peer.signaled.clear();
+                            peer.outbox.clear(); // 半成品候选帧不得替死会话发出
+                            peer.retry_at_ms = 0;
+                            peer.answer_owed = false;
+                            peer.session_at_ms = 0;
+                            peer.locals_wait_ms = 0;
                         }
                         Err(e) => {
                             // 0048：`ensure_locals` 只在会话已建后才可能失败
@@ -973,6 +1068,7 @@ impl PeerIceOrchestrator {
                             peer.retry_at_ms = 0;
                             peer.answer_owed = false;
                             peer.session_at_ms = 0;
+                            peer.locals_wait_ms = 0;
                             crate::hilog::emit(&format!(
                                 "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
                             ));
@@ -988,18 +1084,29 @@ impl PeerIceOrchestrator {
                     p.session.is_some() && !p.locals_done && now_ms >= p.cooldown_until
                 };
                 if want_locals {
-                    if let Err(e) = self.ensure_locals(idx, now_ms) {
-                        let peer = &mut self.peers[idx];
-                        peer.last_error = Some(ErrorClass::from_management(&e));
-                        peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                        // 失败分支的观测面（0048：这条路径此前完全无日志）。
-                        crate::hilog::emit(&format!(
-                            "N5c_ICE|locals-failed|peer={}|round={}|phase=retry|reason={e}",
-                            peer_short(&peer.key),
-                            peer.session_at_ms
-                        ));
-                        if first_err.is_none() {
-                            first_err = Some(e);
+                    match self.ensure_locals(idx, now_ms) {
+                        Ok(LocalsRun::Gathered) => {}
+                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
+                            // 同上：等待不是错误，会话保留（`want_locals` 的
+                            // 门只看 `session`/`locals_done`），冷却后重试。
+                            self.peers[idx].cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                            if log {
+                                self.emit_locals_waiting(idx, "retry", need, have, waited_ms);
+                            }
+                        }
+                        Err(e) => {
+                            let peer = &mut self.peers[idx];
+                            peer.last_error = Some(ErrorClass::from_management(&e));
+                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
+                            // 失败分支的观测面（0048：这条路径此前完全无日志）。
+                            crate::hilog::emit(&format!(
+                                "N5c_ICE|locals-failed|peer={}|round={}|phase=retry|reason={e}",
+                                peer_short(&peer.key),
+                                peer.session_at_ms
+                            ));
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
                         }
                     }
                 }
@@ -1089,9 +1196,9 @@ impl PeerIceOrchestrator {
     ///   候选保留接口地址 + 固定端口（getsockname 回填校验）。
     ///   之后 [`advertised_candidates`] 逐个以既有 wire 形态追加进 outbox
     ///   （extra host 候选，随握手重发语义一起重发）。
-    fn ensure_locals(&mut self, idx: usize, now_ms: u64) -> Result<(), ManagementError> {
+    fn ensure_locals(&mut self, idx: usize, now_ms: u64) -> Result<LocalsRun, ManagementError> {
         if self.peers[idx].locals_done {
-            return Ok(());
+            return Ok(LocalsRun::Gathered);
         }
         if self.peers[idx].session.is_none() {
             let creds = IceCredentials::generate()?;
@@ -1102,6 +1209,8 @@ impl PeerIceOrchestrator {
             self.peers[idx].creds = Some(creds);
             self.peers[idx].session = Some(session);
             self.peers[idx].session_at_ms = now_ms;
+            // 新会话的等待账从零起算：`negotiation_age_ms` 只扣本会话内的等待。
+            self.peers[idx].locals_wait_ms = 0;
         }
         let fixed_port = self.fixed_local_port;
         // 0049 §5.1-2（活锁，关键）：受保护 UDP socket 池由壳层单向补给（池
@@ -1111,9 +1220,10 @@ impl PeerIceOrchestrator {
         // `Err` —— 每批补给都被注定失败的尝试吃掉，池**永远攒不到 need**：
         // 实测切网后 18 s 补给 20 枚、0 次成功。这里在任何 `take_owned`
         // 之前先按「gather 将要走的接口清单」算本次预算，不足即**一枚都不
-        // 消耗**地返回可重试错误（沿用既有 cooldown 重试节奏，不新增定时
-        // 器），把池让给后续批次去攒；补给方（壳层定时器/状态轮询）与
-        // 消费方（pump / signal worker）共用同一把 orchestrator 锁，所以
+        // 消耗**地进入等待（0050 §8 item 3 把原来的可重试**错误**改成
+        // `LocalsRun::WaitingForSockets`——沿用既有 cooldown 重试节奏，不
+        // 新增定时器），把池让给后续批次去攒；补给方（壳层定时器/状态轮询）
+        // 与消费方（pump / signal worker）共用同一把 orchestrator 锁，所以
         // 「先算」与「后取」之间没有第二个 peer 插入。
         //
         // 为什么不选「失败时归还已取出的 socket」：池的契约是「FRESH
@@ -1128,9 +1238,11 @@ impl PeerIceOrchestrator {
         };
         if let Some(have) = self.socks.available() {
             if have < required {
-                return Err(ManagementError::Network(format!(
-                    "ice:insufficient-sockets|need={required}|have={have}"
-                )));
+                // 池不足 = **等待补给**，不是错误（0050 §8 item 3）：一枚都
+                // 不取，记等待账（供 `negotiation_age_ms` 扣除），把池让给
+                // 后续批次去攒。
+                let (waited_ms, log) = self.note_locals_wait(idx, now_ms);
+                return Ok(LocalsRun::WaitingForSockets { need: required, have, waited_ms, log });
             }
         }
         let (host_list, srflx_list) = match fixed_port {
@@ -1214,7 +1326,59 @@ impl PeerIceOrchestrator {
             peer.answer_owed = false;
         }
         self.maybe_start(idx);
-        Ok(())
+        // 供给到了：本次等待结束，把它记进本会话的等待账（`negotiation_age_ms`
+        // 扣除的就是这笔账），并让下一段等待的首行重新可记。
+        self.clear_locals_wait(idx, now_ms);
+        Ok(LocalsRun::Gathered)
+    }
+
+    /// 记录 peer 进入「池不足，等补给」：返回 `(已等待时长, 本拍是否记观测
+    /// 行)`。`waited_ms` 自**本次等待的起点**连续累计（跨会话重建不重置，
+    /// 见 [`PeerConn::locals_wait_since_ms`]），所以它报的是池饿了多久。首行
+    /// 必记，其后按 [`LOCALS_WAIT_LOG_MS`] 限频。
+    fn note_locals_wait(&mut self, idx: usize, now_ms: u64) -> (u64, bool) {
+        let p = &mut self.peers[idx];
+        if p.locals_wait_since_ms == 0 {
+            p.locals_wait_since_ms = now_ms;
+        }
+        let waited = now_ms.saturating_sub(p.locals_wait_since_ms);
+        let due = p.locals_wait_log_ms == 0
+            || now_ms.saturating_sub(p.locals_wait_log_ms) >= LOCALS_WAIT_LOG_MS;
+        if due {
+            p.locals_wait_log_ms = now_ms;
+        }
+        (waited, due)
+    }
+
+    /// 等待结束（本次收集成功）：把这一段等待归入本会话的等待账。
+    fn clear_locals_wait(&mut self, idx: usize, now_ms: u64) {
+        let p = &mut self.peers[idx];
+        if p.locals_wait_since_ms != 0 {
+            // 只把落在**本会话**内的等待记进账（会话之前的等待不算本会话的）。
+            let wait_start = p.locals_wait_since_ms.max(p.session_at_ms);
+            p.locals_wait_ms = p.locals_wait_ms.saturating_add(now_ms.saturating_sub(wait_start));
+            p.locals_wait_since_ms = 0;
+        }
+        p.locals_wait_log_ms = 0;
+    }
+
+    /// 「池不足，等补给」的观测行（三处调用点共用同一字段顺序；行尾
+    /// `reason=insufficient-sockets` 让既有的 token 检索仍然命中——它只是
+    /// 不再是错误、不再走 `locals-failed`）。
+    fn emit_locals_waiting(
+        &self,
+        idx: usize,
+        phase: &str,
+        need: usize,
+        have: usize,
+        waited_ms: u64,
+    ) {
+        let peer = &self.peers[idx];
+        crate::hilog::emit(&format!(
+            "N5c_ICE|locals-waiting|peer={}|round={}|phase={phase}|need={need}|have={have}|waited_ms={waited_ms}|reason=insufficient-sockets",
+            peer_short(&peer.key),
+            peer.session_at_ms
+        ));
     }
 
     /// 一次成功收集的 socket 预算（默认路径）＝ `2 ×` gather 将要访问的
@@ -1436,6 +1600,7 @@ impl PeerIceOrchestrator {
         peer.initiated = false;
         peer.answer_owed = false; // 死会话不欠 ANSWER：重发起走 Offer 路径
         peer.session_at_ms = 0;
+        peer.locals_wait_ms = 0; // 等待账随会话作废（下一会话从零起算）
         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
         // The payload carries WHY the session died — device run 3
         // needed exactly this and the marker alone said nothing.
@@ -1454,13 +1619,17 @@ impl PeerIceOrchestrator {
     /// 武装：冷却后以全新凭证重新发起，对端（其旧会话仍活着）会把新
     /// 凭证的 Offer 采纳为新谈判并应答。已 start 的会话不适用——其
     /// 死亡由 keepalive/断连/全对失败事件诚实驱动。
+    ///
+    /// 计时用 [`PeerConn::negotiation_age_ms`] 而不是裸的
+    /// `now - session_at_ms`（0050 §8 item 3）：等受保护 socket 补给的
+    /// 时间不算「对端不应答」，不能拿它去拆会话。
     fn expire_dead_negotiation(&mut self, idx: usize, now_ms: u64) {
         let zombie = {
             let p = &self.peers[idx];
             p.session.is_some()
                 && !p.started
                 && p.session_at_ms != 0
-                && now_ms.saturating_sub(p.session_at_ms) >= START_DEADLINE_MS
+                && p.negotiation_age_ms(now_ms) >= START_DEADLINE_MS
                 // Only a negotiation the remote NEVER answered is a zombie.
                 // Device run 5: a HEALTHY negotiation legitimately needs
                 // ~15-30 s (gather → signal → checks → nomination), so
@@ -1800,9 +1969,16 @@ mod tests {
         assert_eq!(orch.peer_status("GHOST"), None);
     }
 
+    /// 0050 §8 item 3：**池不足 = 等待，不是错误**。
+    ///
+    /// 旧语义（至 f5ae3d8）把池不足当 `Network` 错误上抛，于是 ICE pump 每拍
+    /// 冒一条 `peer-conn: pump error (network)`（真机 0050 discover 14 行）。
+    /// 新语义：`run_once` 保持 `Ok`、不置 `last_error`、一枚 socket 都不取、
+    /// 不发任何帧（fail-closed 不变），冷却期满按既有节奏重试，补给一到即
+    /// 完成收集并发 OFFER。
     #[test]
-    fn empty_socket_source_fails_closed_without_signaling() {
-        // 空 provider：发起在候选收集处 fail-closed，绝不发出任何帧
+    fn empty_socket_pool_waits_instead_of_failing_closed() {
+        // 空 provider：发起停在池预检处（等待），绝不发出任何帧
         #[derive(Default)]
         struct CountingSignal {
             frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
@@ -1839,25 +2015,54 @@ mod tests {
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
         let mut now = 1000u64;
-        // 第一拍：发起在候选收集处 fail-closed（Network 错误上抛）
-        assert!(orch.run_once(now).is_err(), "empty provider must surface a Network error");
+        // 第一拍：池空 → 等待（Ok、无 pump error、无 last_error），半成品
+        // 会话照旧整段回滚（0048：留着会让 `want_initiate` 永久沉默）。
+        assert!(orch.run_once(now).is_ok(), "an empty pool is WAITING, not a pump error");
+        {
+            let p = &orch.peers[0];
+            assert!(p.locals_wait_since_ms != 0, "the peer must be recorded as waiting for supply");
+            assert_eq!(p.session_at_ms, 0, "the half-built session is rolled back (0048)");
+            assert_eq!(p.locals_wait_ms, 0, "no session → no session-scoped wait accounting");
+        }
         // 冷却窗口内的后续拍不重试、不再报错（退避语义）
         for _ in 0..4 {
             now += 100;
             assert!(orch.run_once(now).is_ok(), "cooldown window must suppress the retry");
         }
-        // 冷却结束：重试再次 fail-closed
+        // 冷却结束：仍不报错，仍在等待（同一段等待记账）
         now += RETRY_COOLDOWN_MS;
-        assert!(orch.run_once(now).is_err(), "retry after cooldown must fail closed again");
+        assert!(orch.run_once(now).is_ok(), "a starved retry must stay a wait, not an error");
+        assert!(orch.peers[0].locals_wait_since_ms != 0, "still waiting");
         assert!(
             signal.frames.lock().expect("frames").is_empty(),
             "no frame may leave without candidates"
         );
-        assert_eq!(socks.taken(), 0, "empty provider must hand out nothing");
+        assert_eq!(socks.taken(), 0, "a waited-out attempt must hand out nothing");
         let st = orch.peer_status("P").expect("peer");
         assert_eq!(st.state, PeerIceState::Idle, "never leaves Idle without candidates");
-        assert_eq!(st.last_error, Some(ErrorClass::Network), "fail-closed error recorded");
+        assert_eq!(st.last_error, None, "waiting is not an error (0050)");
         assert!(!ice_ready_for_default_route(&orch.summary()), "unreachable peer must not arm the gate");
+        // 补给到达（`need = 2 × 1` 个允许接口）：下一次尝试完成收集并发 OFFER。
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        now += RETRY_COOLDOWN_MS;
+        assert!(orch.run_once(now).is_ok(), "the supplied peer must converge");
+        assert!(orch.peers[0].locals_done, "the top-up must complete local gathering");
+        assert_eq!(socks.taken(), 2, "a successful gather+bind spends exactly `need` sockets");
+        assert_eq!(orch.peers[0].locals_wait_since_ms, 0, "supply ends the waiting state");
+        assert!(
+            signal
+                .frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .any(|(_, k, _)| *k == PeerSignalKind::Offer),
+            "the supplied peer must signal an OFFER"
+        );
     }
 
     #[test]
@@ -2064,9 +2269,10 @@ mod tests {
     /// 总需求、按批补给**（现场：池 8、每批 4、每 peer 6）。修复前失败路径
     /// 「先消耗再失败、不回流」会把每批补给吃光——池永远攒不到 6 枚，切网
     /// 后 18 s 补给的 20 枚 0 次成功；修复后供给不足的 peer 在任何 `take`
-    /// 之前就被挡住（`insufficient-sockets|need=6|have=…`），池得以跨批次
-    /// 攒够，3 个 peer 最终全部完成本地收集，且被挡住的尝试一枚 socket 都
-    /// 不消耗。
+    /// 之前就被挡住（0050 起是**等待**：`N5c_ICE|locals-waiting|…|need=6|
+    /// have=…|reason=insufficient-sockets`，不再是 `Err`/pump error），池得以
+    /// 跨批次攒够，3 个 peer 最终全部完成本地收集，且被挡住的尝试一枚 socket
+    /// 都不消耗。
     ///
     /// fd 账本（现有 harness 方式）：`LedgeredSocks` 把 `take_owned` 的每一
     /// 枚记进 `handed` 并当场用 `F_GETFD` 证明取到的是有效 fd；于是可断言
@@ -2147,23 +2353,31 @@ mod tests {
         while !orch.peers.iter().all(|p| p.locals_done) && rounds < 40 {
             let taken_before = socks.inner.taken();
             let done_before = orch.peers.iter().filter(|p| p.locals_done).count();
-            let round = orch.run_once(now);
-            if let Err(e) = &round {
-                let msg = format!("{e}");
-                if msg.contains("insufficient-sockets") {
-                    starved_rounds += 1;
-                    assert!(msg.contains(&format!("need={NEED}")), "reason must name the budget: {msg}");
-                    // 打断活锁的全部机制：被挡住的尝试一枚 socket 都不消耗。
-                    // 同一拍里别的 peer 可能刚好成功（那是它自己的预算），
-                    // 所以逐拍只断言「消耗量 == 本拍成功数 × need」。
-                    let newly_done = orch.peers.iter().filter(|p| p.locals_done).count() - done_before;
-                    assert_eq!(
-                        socks.inner.taken() - taken_before,
-                        (newly_done * NEED) as u64,
-                        "a starved attempt must not consume any socket: {msg}"
-                    );
-                }
+            // 0050 §8 item 3：池不足是**等待**——被挡住的拍绝不冒 pump error
+            // （修复前这里是 `Err(Network("…insufficient-sockets…"))`，ICE pump
+            // 每拍打印一条 `peer-conn: pump error (network)`）。
+            assert!(
+                orch.run_once(now).is_ok(),
+                "a starved beat must stay a wait, never a pump error (round {rounds})"
+            );
+            let waiting = orch.peers.iter().filter(|p| p.locals_wait_since_ms != 0).count();
+            if waiting > 0 {
+                starved_rounds += 1;
             }
+            // 打断活锁的全部机制：被挡住的尝试一枚 socket 都不消耗。同一拍里
+            // 别的 peer 可能刚好成功（那是它自己的预算），所以逐拍只断言
+            // 「消耗量 == 本拍成功数 × need」。
+            let newly_done = orch.peers.iter().filter(|p| p.locals_done).count() - done_before;
+            assert_eq!(
+                socks.inner.taken() - taken_before,
+                (newly_done * NEED) as u64,
+                "a starved attempt must not consume any socket (round {rounds})"
+            );
+            // 等待不是错误：`last_error` 不得被等待拍写脏。
+            assert!(
+                orch.peers.iter().all(|p| p.last_error.is_none()),
+                "waiting must not record an error (round {rounds})"
+            );
             // 壳层补给等价物：池深 < 8 时补一批 4 枚（4 s 定时器 + 5 s 状态
             // 轮询两个驱动的合并节奏）；重试节奏沿用 RETRY_COOLDOWN_MS。
             if socks.inner.pending() < 8 {
@@ -2184,6 +2398,9 @@ mod tests {
             );
         }
         assert!(starved_rounds > 0, "the scenario must actually exercise the starvation guard");
+        // 每次成功收集的预算仍是 `need`（旧断言 `insufficient-sockets|need=6`
+        // 的等价物：等待行里的 `need=` 就是这个数）。
+        assert_eq!(orch.required_local_sockets().expect("budget"), NEED);
         let handed = socks.handed.lock().expect("handed").len();
         assert_eq!(handed, 3 * NEED, "no socket may be spent outside a successful gather+bind");
         assert_eq!(socks.inner.taken() as usize, handed);
@@ -2191,6 +2408,91 @@ mod tests {
             socks.inner.pending() + handed,
             fed,
             "fd ledger must balance: every fed socket is either queued or handed out"
+        );
+    }
+
+    /// 0050 §8 item 3 的第二半：**等补给的时间不得计入
+    /// [`START_DEADLINE_MS`]**（「等待期间暂停计时」）。
+    ///
+    /// 真机形态：会话已建、本地候选还没收集（池补给尚未到达），远端凭证也
+    /// 没来。修复前每一拍都会把 `now - session_at_ms` 喂给僵尸判据，于是饿死
+    /// 3 个 deadline 周期后会话被当「对端不应答」拆掉（真机 0050 观测到
+    /// TrBfURPG 12 次 / ai4IGfaf 11 次 `negotiation-start-timeout`，见汇总
+    /// §2.6 的推测链）。本用例钉死两点：①等待期间会话既不被拆、计时起点也
+    /// 不被重排；②等待结束后计时**恢复**——再走满一个 deadline（期间无等待）
+    /// 仍然诚实拆除，暂停不是禁用。
+    ///
+    /// 状态用字段级构造：公开路径在发起侧被挡住时会回滚会话（0048 修复），
+    /// 而本用例要的正是「会话还在时饿死」这一形态（答方在池补给前已建会话）。
+    #[test]
+    fn starved_session_does_not_burn_the_negotiation_deadline() {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks: socks.clone(),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        const T0: u64 = 1000;
+        {
+            let p = &mut orch.peers[0];
+            let creds = IceCredentials::generate().expect("creds");
+            p.session = Some(IceSession::new(creds.clone(), true, Some(7)).expect("session"));
+            p.creds = Some(creds);
+            p.state = PeerIceState::Gathering;
+            p.session_at_ms = T0;
+        }
+        // 饿死超过 3 个 deadline：会话必须还在，计时起点不被重排，`run_once`
+        // 全程 `Ok`（无 pump error），peer 状态里也没有错误。
+        let mut now = T0;
+        let mut first_wait_at = 0u64;
+        while now < T0 + 3 * START_DEADLINE_MS {
+            now += 500;
+            assert!(orch.run_once(now).is_ok(), "a starved beat is a wait, not an error ({now})");
+            assert!(orch.peers[0].session.is_some(), "starvation must not tear the session down ({now})");
+            assert_eq!(orch.peers[0].session_at_ms, T0, "the timer must not be re-armed ({now})");
+            assert!(orch.peers[0].locals_wait_since_ms != 0, "the peer is waiting for supply ({now})");
+            assert_eq!(orch.peers[0].last_error, None, "waiting is not an error ({now})");
+            if first_wait_at == 0 {
+                first_wait_at = now;
+            }
+        }
+        // 补给到达：收集完成（同一个会话，`negotiation_age_ms` 里只留下等待
+        // 开始之前那一小段非等待龄期）。等过最后一次冷却，走既有重试节奏。
+        for _ in 0..2 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        now += RETRY_COOLDOWN_MS + 1;
+        assert!(orch.run_once(now).is_ok(), "the supplied peer gathers");
+        assert!(orch.peers[0].locals_done, "the top-up must complete the gathering");
+        assert_eq!(orch.peers[0].session_at_ms, T0, "the SAME session finished gathering");
+        assert_eq!(orch.peers[0].locals_wait_since_ms, 0, "supply ends the waiting state");
+        let age_at_supply = orch.peers[0].negotiation_age_ms(now);
+        assert_eq!(
+            age_at_supply,
+            first_wait_at - T0,
+            "the whole waiting span is excluded from the deadline"
+        );
+        // 计时恢复：deadline 只剩最后 1 ms 时不拆；走满剩余的非等待量才拆。
+        let remaining = START_DEADLINE_MS - age_at_supply;
+        assert!(remaining > 0, "the supply beat must leave some deadline to run");
+        assert!(orch.run_once(now + remaining - 1).is_ok());
+        assert!(orch.peers[0].session.is_some(), "a paused timer must not expire on the old total");
+        assert!(orch.run_once(now + remaining).is_ok());
+        assert!(
+            orch.peers[0].session.is_none(),
+            "after a full non-waiting deadline the zombie is still torn down (pause, not disable)"
         );
     }
 }

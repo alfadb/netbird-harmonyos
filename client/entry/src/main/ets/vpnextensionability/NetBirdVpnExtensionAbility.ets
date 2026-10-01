@@ -70,6 +70,9 @@ import {
 import { isPhysicalNetworkSwitch, protectedConnectionRejectionReason,
   socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
 
+import { ICE_SOCKET_POOL_MIN, iceSocketTargetDepth,
+  iceSocketTopUpCount } from './NetBirdIceSocketPool';
+
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const MAX_NATIVE_FD: number = 2147483647;
@@ -82,18 +85,16 @@ const PROTECT_BOX_MS: number = 5000;
 // ICE socket pool: the ICE gather consumes one FRESH unbound UDP socket per
 // IPv4 interface round (dups share the socket object, so a bound copy cannot
 // be re-bound), and a device has several interfaces — one socket starves the
-// gather after the first round (device-verified 2026-09-14).
-const ICE_SOCKET_POOL_SIZE: number = 8;
+// gather after the first round (device-verified 2026-09-14). The pool target is
+// DEMAND-SIZED (peers × 4, clamped 8..32, see NetBirdIceSocketPool.ets): the
+// fixed 8 of smoke 0050 starved 2 of 6 peers every round. ICE_SOCKET_POOL_MIN is
+// the target until a peer count is known.
 // A failed ICE session is re-negotiated after a cooldown, and every retry
 // consumes fresh sockets again (the pool is one-shot). Refill when status
 // reports a drained queue, with a periodic retry while the VPN is armed; a
 // core that is not gathering must not make the shell pile up fds (device run 3
 // reached queue=26 while nothing consumed them).
 const ICE_SOCKET_TOPUP_MS: number = 4000;
-// Keep a full pool queued, not a trickle: ONE gather round binds one socket
-// per IPv4 interface, so a queue of 2-3 drains mid-round and the core reports
-// "protected-udp: no-protected-socket" (device run 5).
-const ICE_TOPUP_BATCH: number = 4;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
@@ -617,6 +618,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
   private iceQueueDepth: number = 0;
+  // Demand-sized pool target (peers × 4, clamped 8..32): refreshed from every
+  // status sample and from the live status read taken at pool-feed time, so a
+  // 6-peer map targets 24 sockets instead of the fixed 8 of smoke 0050.
+  private iceTargetDepth: number = ICE_SOCKET_POOL_MIN;
   private iceTopUpActive: boolean = false;
   // Process-level protect (protectProcessNet, API 22+) — diagnostic attempt
   // once per session; its result does not establish per-socket bypass semantics.
@@ -3977,13 +3982,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // while THIS process had a live WG session. Publish the same fields to
         // filesDir, which both processes share.
         this.publishStatusForUi(status);
+        // Demand-sized ICE pool target from the LIVE peer count (peers × 4,
+        // clamped 8..32 — smoke 0050: 6 peers × need 4 = 24 against a fixed 8,
+        // 2 peers starved on every round). Re-derived on every sample, also when
+        // no ice_sockets section is present, so the timer below never acts on a
+        // target from an older peer count.
+        this.iceTargetDepth = iceSocketTargetDepth(status.peer_count);
         // Refresh the ICE queue depth from the LIVE status: a depth learned
         // only from our own feed calls goes stale and stops resupply exactly
         // when the queue has drained (the host CLI starved that way, and the
         // shell gate had the same flaw).
         if (status.ice_sockets !== undefined && status.ice_sockets !== null) {
           this.iceQueueDepth = status.ice_sockets.queued;
-          if (this.iceQueueDepth < ICE_SOCKET_POOL_SIZE && !this.networkDirty && this.connection !== undefined) {
+          if (this.iceQueueDepth < this.iceTargetDepth && !this.networkDirty && this.connection !== undefined) {
             this.topUpIceBatch().catch((error: Error): void => {
               hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|rejected|summary=%{public}s', safeError(error));
             });
@@ -4957,8 +4968,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=connection-missing', this.requestId);
       return false;
     }
+    // Size the pool from a LIVE status read: at this point the watcher has not
+    // necessarily sampled the peer count yet (first feed / post-switch
+    // recovery), and the fixed 8 of smoke 0050 starved 2 of 6 peers. A missing
+    // sample keeps the target the watcher last derived (never below the 8
+    // minimum). No new timer — this is one status read per pool feed.
+    const live: ConnectorStatusResult | null = pollStatusOrNull();
+    if (live !== null) {
+      this.iceTargetDepth = iceSocketTargetDepth(live.peer_count);
+    }
+    const target: number = this.iceTargetDepth;
     let fedCount: number = 0;
-    for (let i = 0; i < ICE_SOCKET_POOL_SIZE; i++) {
+    for (let i = 0; i < target; i++) {
       const ok: boolean = await this.feedOneIceSocket(connection);
       if (ok) {
         fedCount++;
@@ -4967,11 +4988,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (fedCount === 0) {
       hilog.error(DOMAIN, TAG,
         'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=pool|fed=0|size=%{public}d',
-        this.requestId, ICE_SOCKET_POOL_SIZE);
+        this.requestId, target);
       return false;
     }
     hilog.warn(DOMAIN, TAG,
-      'VPN_ICE_POOL|fed=%{public}d|size=%{public}d', fedCount, ICE_SOCKET_POOL_SIZE);
+      'VPN_ICE_POOL|fed=%{public}d|size=%{public}d', fedCount, target);
     this.startIceSocketTopUp();
     return true;
   }
@@ -4990,7 +5011,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.iceTopUpTimer = -1;
         return;
       }
-      if (this.iceQueueDepth >= ICE_SOCKET_POOL_SIZE || this.iceTopUpActive || this.networkDirty) {
+      if (this.iceQueueDepth >= this.iceTargetDepth || this.iceTopUpActive || this.networkDirty) {
         return;
       }
       this.topUpIceBatch().then((fed: number): void => {
@@ -5004,24 +5025,35 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }, ICE_SOCKET_TOPUP_MS);
   }
 
-  // Feed up to ICE_TOPUP_BATCH sockets while the live queue is below target.
-  // One gather round needs one socket per IPv4 interface.
+  // Feed enough sockets to close the gap to the demand-sized target, in one
+  // bounded pass of at most ICE_TOPUP_BATCH (8). One gather round needs one
+  // socket per IPv4 interface, so the pre-0050 batch of 4 served only ONE peer
+  // per cycle.
   private async topUpIceBatch(): Promise<number> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;
+    if (this.iceTopUpActive) { return 0; }
     // N2 first batch C/D columns: the formal-switch gate blocks the whole
     // top-up funnel (the watcher's own call site and the interval's callback
     // both land here), so a HELD gate cannot keep topping the pool up after the
     // recovery it blocked.
-    if (this.iceTopUpActive || this.networkDirty || this.n2CdProductionBlocked() ||
+    const paused: boolean = this.networkDirty || this.n2CdProductionBlocked() ||
       protectedConnectionRejectionReason({
         destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
         recreateInFlight: this.recreateInFlight, hasConnection: connection !== undefined,
         connectionUnchanged: this.connection === connection
-      }).length > 0 || connection === undefined) { return 0; }
+      }).length > 0 || connection === undefined;
+    // The gap comes from the LATEST queued depth the shell knows: every status
+    // sample and every accepted feed refreshes it (feedOneIceSocket writes the
+    // core's own post-feed `queued` back), and the loop below re-reads it after
+    // each socket, so a queue that drained since the last sample is still
+    // resupplied in full instead of on a stale reading.
+    const want: number = iceSocketTopUpCount(this.iceQueueDepth, this.iceTargetDepth, paused);
+    if (connection === undefined || want === 0) { return 0; }
     this.iceTopUpActive = true;
     let fed: number = 0;
     try {
-      for (let n = 0; n < ICE_TOPUP_BATCH && this.iceQueueDepth < ICE_SOCKET_POOL_SIZE; n++) {
+      for (let n = 0; n < want; n++) {
+        if (iceSocketTopUpCount(this.iceQueueDepth, this.iceTargetDepth, paused) === 0) { break; }
         const ok: boolean = await this.feedOneIceSocket(connection);
         if (!ok) { break; }
         fed++;

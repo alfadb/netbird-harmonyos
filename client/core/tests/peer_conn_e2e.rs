@@ -116,7 +116,7 @@ mod host_link_stubs {
 use std::sync::{Arc, Mutex};
 
 use netbird_core::config;
-use netbird_core::connector::{ErrorClass, ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
+use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::peer_conn::{
     ice_ready_for_default_route, parse_ufrag_pwd, PeerIceDeps, PeerIceOrchestrator,
@@ -913,13 +913,18 @@ fn candidate_only_remote_still_times_out_and_reinitiates() {
 }
 
 /// 0048 R3 regression: initiate ran while the protected-socket pool was still
-/// empty (`take_owned` is non-blocking → `NoSocket` → `ensure_locals` fails).
-/// The pre-fix failure branch kept `session = Some`, so `want_initiate` (which
-/// demands `session.is_none()`) never fired again and the later
+/// empty. The pre-fix failure branch kept `session = Some`, so `want_initiate`
+/// (which demands `session.is_none()`) never fired again and the later
 /// `want_locals` retry trickled ONLY candidates — the remote never received a
 /// credential frame and could never `start()`. Fix: the half-built session is
 /// rolled back, the post-cooldown retry offers credentials, and both sides
 /// reach started (Checking → Connected here).
+///
+/// 0050 §8 item 3 updated the SHAPE of the empty-pool beat: it is now a
+/// wait (`run_once` stays `Ok`, no `last_error`) instead of a `Network` error
+/// surfacing as `peer-conn: pump error (network)`. The 0048 contract this test
+/// pins is unchanged: nothing is signaled, nothing is consumed, and the
+/// post-supply retry still offers credentials.
 #[test]
 fn initiate_before_socket_supply_still_offers_credentials() {
     let bus = Arc::new(SignalBus::default());
@@ -929,10 +934,11 @@ fn initiate_before_socket_supply_still_offers_credentials() {
     b.orch.set_initiator(KEY_A, false); // deterministic role split: only A offers
 
     let mut now = 1000u64;
-    // Beat 1: the initiate gather fails closed on the empty pool.
-    assert!(a.orch.run_once(now).is_err(), "empty pool must fail the gather");
+    // Beat 1: the initiate gather waits for supply on the empty pool (0050:
+    // a wait, not a pump error — and no error recorded on the peer).
+    assert!(a.orch.run_once(now).is_ok(), "an empty pool is a wait, not a failure");
     assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle);
-    assert_eq!(a.status_of(KEY_B).last_error, Some(ErrorClass::Network));
+    assert_eq!(a.status_of(KEY_B).last_error, None, "waiting is not an error (0050)");
     assert!(bus.queue.lock().expect("queue").is_empty(), "fail-closed: no frame may leave");
 
     // The remote trickles candidates while A still has no credentials (the
@@ -986,9 +992,10 @@ fn initiate_before_socket_supply_still_offers_credentials() {
 /// branch (existing session → adopt remote credentials, `answer_owed` stays
 /// false) — the local side owed no ANSWER and the remote never got our
 /// credentials, so the pair sat `idle` with 0 offer / 0 answer forever.
-/// With the rollback fix the failed initiate leaves NO session, so the remote
+/// With the rollback fix the starved initiate leaves NO session, so the remote
 /// OFFER takes the normal answerer path: the ANSWER leaves as soon as the
-/// socket supply lands and both sides converge.
+/// socket supply lands and both sides converge. (0050 §8 item 3: that starved
+/// initiate is a WAIT — `Ok`, no `last_error` — but the rollback is unchanged.)
 #[test]
 fn remote_offer_after_failed_initiate_is_answered() {
     let bus = Arc::new(SignalBus::default());
@@ -997,7 +1004,8 @@ fn remote_offer_after_failed_initiate_is_answered() {
     let mut b = TestOrch::new_with_sockets(KEY_B, &[KEY_A], 0x2222, bus.clone(), 8);
 
     let mut now = 1000u64;
-    assert!(a.orch.run_once(now).is_err(), "empty pool must fail the initiate gather");
+    // 0050 §8 item 3: the empty pool is a WAIT (`Ok`), not a pump error.
+    assert!(a.orch.run_once(now).is_ok(), "an empty pool is a wait, not a failure");
 
     // B offers (with candidates) while A's pool is still empty.
     now += 2;

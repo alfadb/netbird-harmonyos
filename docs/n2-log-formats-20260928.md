@@ -518,3 +518,48 @@ The two field sets the SHELL emits for `open`/`protect_begin`/`protect_settle`
 are untouched, and so are the zero-send counters: the takeover row is a
 diagnostic only, `N2_FD_SEND` keeps reporting `packets`/`bytes` for the same
 registration.
+
+## 12. `peer=` on the ICE / WG session-lifecycle lines (2026-10-01, device 0050)
+
+Two families of CORE diagnostic lines carry the same 8-character peer label
+(`peer_conn::peer_short`: the public key's first eight alphanumeric characters,
+so `+`/`/`/`=` from the base64 form are skipped — `FyLw4PSBg1hjr…` →
+`FyLw4PSB`). Neither family is in the sample file (both are core diagnostics,
+not N2 evidence rows); the exact strings are pinned by their producers' tests
+(`peer_conn` for `N5c_ICE`, `wg_device::lifecycle_line_tests` for
+`N6_WG_DEVICE`).
+
+**`N5c_ICE` — the local-candidate collection outcome.** Field order is stable;
+the `reason=` field is last:
+
+```text
+N5c_ICE|locals-gathered|peer=<p>|round=<session-at-ms>|added=<n>|srflx=<n>|advertised=<n>
+N5c_ICE|locals-waiting|peer=<p>|round=<session-at-ms>|phase=<initiate|retry|answer>|need=<n>|have=<n>|waited_ms=<n>|reason=insufficient-sockets
+N5c_ICE|locals-failed|peer=<p>|round=<session-at-ms>|phase=<initiate|retry|answer>|reason=<error>
+```
+
+`locals-waiting` (new in 0050) is the protected-socket pool being SHORT of the
+attempt's budget: it is a **wait**, not an error — no `peer-conn: pump error`
+line follows it, the peer records no `last_error`, and the waiting time is
+excluded from the ICE negotiation start deadline. The first `locals-waiting`
+line of a wait is always emitted; the rest are rate-limited to one per 5 s per
+peer (`peer_conn::LOCALS_WAIT_LOG_MS`), and `waited_ms` carries how long the
+pool has been short, so the throttling loses no timing. The
+`reason=insufficient-sockets` token is kept as the last field so a token search
+still finds the cause.
+`locals-failed` is now reserved for genuine errors (gather/bind/DNS failures).
+
+**`N6_WG_DEVICE` — the WG session lifecycle.** `peer=` is appended at the END
+of the line; the earlier fields keep their order (device 0050 could observe
+`wgSessions=4` but not WHICH peers those were):
+
+```text
+N6_WG_DEVICE|session-established|peer=<p>
+N6_WG_DEVICE|session-expired|peer=<p>
+```
+
+`N6_WG_DEVICE|adopt|…` / `reattach|…` / `peers=<n>` / `cleared` and the
+handshake-campaign lines are unchanged: `adopt`/`reattach` are socket-level
+(they belong to no single peer), and `handshake-campaign-deadline` still names
+no peer.
+

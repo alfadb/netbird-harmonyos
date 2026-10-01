@@ -753,6 +753,9 @@ const SHIMS = {
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
   './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
+  // N5c demand-sized ICE pool (2026-10-02): zero imports, no erased types —
+  // plain extension resolution like NetBirdInterfaceStatsProbe above.
+  './NetBirdIceSocketPool': 'NetBirdIceSocketPool.ts',
   // N2 T5a (2026-09-28): the stimulus module is staged byte-identically; the
   // extension imports it by an extensionless specifier and names its erased
   // interfaces (N2StimulusDecision / N2StimulusReply), so it resolves to the

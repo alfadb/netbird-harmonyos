@@ -359,7 +359,11 @@ try {
     ability.includes('this.networkNetId !== 0 && !this.n2CdProductionBlocked());') &&
     ability.includes('productionGateBlocked: this.n2CdProductionBlocked()') &&
     ability.includes('this.n2CdProductionBlocked(epoch)) {') &&
-    ability.includes('this.iceTopUpActive || this.networkDirty || this.n2CdProductionBlocked() ||') &&
+    // N5c demand-sized pool (2026-10-02): the top-up's gate check moved from the
+    // single early-return chain into the `paused` decision the sizing math and
+    // the per-feed re-check both consume — the gate is still consulted on every
+    // supply attempt.
+    ability.includes('const paused: boolean = this.networkDirty || this.n2CdProductionBlocked() ||') &&
     ability.includes('if (this.networkDirty && !this.destroyRequested && this.networkNetId !== 0 &&\n' +
       '        !this.n2CdProductionBlocked()) {'),
     'supply entries');
