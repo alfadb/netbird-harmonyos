@@ -80,7 +80,7 @@ N2_TUN_LEAK|verdict=fail|dst=…|proto=udp|tcp|mono_ms=…|leaks=…|diag=true|i
 ## 3. TUN tee continuity (T7a item 3)
 
 ```
-N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…
+N2_TUN_TEE_STATS|frames=…|decode_fail=…|dropped=…|mono_ms=…|diag=true|is_evidence=false|first_fail_len=…|first_fail_byte0=0x…|first_fail_prefix=…|fail_v4=…|fail_v6=…|fail_other=…|ipv6_out_of_scope=…|ipv6_other=…|ipv6_scope=linklocal:…,multicast:…,other:…|ipv6_next=icmp6:…,hbh:…,udp:…,tcp:…,other:…|first_v6_len=…|first_v6_dst_prefix=…|first_v6_other_len=…|first_v6_other_dst=…|first_v6_other_next=…|first_v6_other_dport=…
 N2_TUN_GAP|from_mono=…|to_mono=…|reason=…|diag=true|is_evidence=false
 N2_TUN_DEST|scope=session|mono_ms=…|dst=…|proto=…|port=…|frames=…|delta=…|sources=…|diag=true|is_evidence=false
 N2_TUN_DEST|scope=session|mono_ms=…|dst=…|proto=any|port=any|frames=0|delta=0|sources=|diag=true|is_evidence=false
@@ -98,7 +98,16 @@ N2_TUN_FRAMES|scope=session|mono_ms=…|seen=…|control=…|production=…|leak
   `dropped` counts the frames that decoded but were not attributed to a frozen
   capture destination (the tee's own filter, not silent loss). Exact invariant:
   `frames = decode_fail + dropped + Σ N2_TUN_DEST.frames`. **A non-zero
-  `decode_fail` makes the interval incomplete → `invalid/UNSAT`.**
+  `decode_fail` makes the interval incomplete → `invalid/UNSAT`**，**唯一例外**：当被拒帧**全部**由控制类 IPv6 解释时。区间完整的充分必要条件见下两条，**缺一即不完整**。
+
+  **（i）逐行自洽对账**：**每一条** `N2_TUN_TEE_STATS` 行（计数均为**自挂载起累计**）都必须满足四个和两两相等——`Σ ipv6_scope == Σ ipv6_next`、`== fail_v6`、`== ipv6_out_of_scope + ipv6_other`，即：`Σipv6_scope == Σipv6_next == fail_v6 == ipv6_out_of_scope + ipv6_other`。任何一个等号不成立 ⇒ 该区间 **`invalid/UNSAT`**。
+
+  **（ii）完整性条件**：**`decode_fail == ipv6_out_of_scope`**（等价于 `fail_v4 + fail_other + ipv6_other == 0`）。
+
+  **字段缺失（本修订之前的构建）或任一对账不成立即回到原判据**（`decode_fail ≠ 0 ⇒ invalid/UNSAT`，fail-closed）。`ipv6_out_of_scope` 帧只被**登记**：既不计为生产命中、也不构成覆盖或 pass；负扫描覆盖仍是 IPv4-only（`n2h.rs:85`）。
+
+  以上「唯一例外」与（i）（ii）两段**逐字登记**获批提案 §4 R2（`docs/n2-tun-ipv6-decode-amendment-proposal.md`，sha256 `b1c9758752fd092d57cae4938b65c2e3fa82e052a045da500244e4442efd4cb7`）的中文文本；`Exact invariant` 一句与既有字段名、顺序、语义一字未动。
+
   diag-0048 (2026-09-30) appends the tail fields after `is_evidence=false`: the
   FIRST refused frame's `first_fail_len` / `first_fail_byte0` /
   `first_fail_prefix` (lowercase hex of at most its first 4 header bytes; all
@@ -106,6 +115,31 @@ N2_TUN_FRAMES|scope=session|mono_ms=…|seen=…|control=…|production=…|leak
   `fail_v4` / `fail_v6` / `fail_other` (byte 0's high nibble). Only leading
   header bytes are recorded, never the payload; the four pre-existing fields
   keep their names and order.
+
+  R1 (`docs/n2-tun-ipv6-decode-amendment-proposal.md` §4 R1, same approved
+  snapshot): ten fields are **appended** after `fail_other=…` — every field
+  above keeps its name and order. The 追加字段 and their 口径, 逐字登记 below.
+
+  - `ipv6_out_of_scope`：被判为**控制类 IPv6** 的 from-OS 帧数。控制类定义（四条**同时**成立）：
+    1. 版本半字节 6 且 `len ≥ 40`；
+    2. 目的地址（`frame[24..40]`）∈ **link-local `fe80::/10`** ∪ **组播 `ff02::/16`（仅链路范围组播）**。`ff00::/8` 的其余组播（如 `ff05::`/`ff0e::`）、`::1`、`::` **一律不算控制类**；`fe80::/10` 保留；
+    3. **协议链（不能只看 `frame[6]`）**：以 `next_header = frame[6]` 为链首，
+       - 链首 `== 0`（Hop-by-Hop）⇒ 取 HBH 长度字节 `frame[41] = n`，HBH 总长 `(n+1)×8`，**链尾协议 = `frame[40]`（HBH 自身的 next header）**，且**链尾必须 `== 58`（ICMPv6）**；
+       - 链首 `== 58` ⇒ 链尾 = 58；
+       - **其他扩展头（43 Routing / 44 Fragment / 60 Destination Options 等）或链尾 ≠ 58 ⇒ 非控制类**（`ipv6_other`）。越界（HBH 长度越过帧尾）⇒ 非控制类；
+    4. ICMPv6 类型白名单与跳数限制：链尾为 58 时，令 ICMPv6 起始偏移 `t = (链首 == 0) ? 40 + (n+1)×8 : 40`，要求 `frame[t]`（ICMPv6 type）**∈ {131 MLD report, 132 MLD done, 133 RS, 135 NS, 136 NA, 143 MLDv2 report}**，且跳数限制 `frame[7]` 满足：**133/135/136（RS/ND）= 255**、**131/132/143（MLD）= 1**。**echo request/reply（128/129）及任何其他类型、或跳数限制不符 ⇒ 非控制类**（`ipv6_other`）。
+  - `ipv6_other`：版本 6 但**不满足**上述控制类定义的被拒帧数（短帧；目的不在 `fe80::/10`/`ff02::/16`，含其余组播、回环、未指定、全局；扩展链非 HBH 或**链尾 ≠ 58**；ICMPv6 类型不在白名单；跳数限制不符）。恒有 **`fail_v6 == ipv6_out_of_scope + ipv6_other`**。
+  - `ipv6_scope` / `ipv6_next`：对**全部**版本 6 被拒帧的目的 scope 与 **next header 链尾协议**直方图——`ipv6_scope` 只分 `linklocal`(`fe80::/10`)/`multicast`(`ff02::/16`)/`other`（含其余组播、回环、未指定、全局）；`ipv6_next` 记**链尾协议**（`icmp6`=链尾 58、`hbh`=链尾仍为 0（连续 HBH）或其他扩展头/越界而未走通、`udp`=17、`tcp`=6、`other`）。用于证明「全部 5 帧都是链路本地或链路范围组播、且链尾是 ICMPv6」，而不是只信首帧。
+  - `first_v6_len` / `first_v6_dst_prefix`：**首个**版本 6 被拒帧的长度与目的地址**最多前 8 字节**小写 hex（空值语义同既有 `first_fail_*`：首帧出现前为空）。**只记头部元数据，永不记载荷**。
+  - `first_v6_other_*`（**R4 可观测性，只为非控制类帧**）：`first_v6_other_len` = 首个 `ipv6_other` 帧长度；`first_v6_other_dst` = 该帧目的地址**完整 16 字节**小写 hex（32 字符，**不省略**）；`first_v6_other_next` = 该帧**链尾协议号**（十进制）；`first_v6_other_dport` = 链尾为 UDP(17)/TCP(6) 时的目的端口（十进制），否则 `-`。**只记头部，不记载荷**；无 `ipv6_other` 帧时四个字段同既有空值语义。这些字段是 R4 默认 `UNSAT` 的**可核见证**，本身不是归属结论。
+  - `decode_fail` 仍 = 「`parse_ipv4_frame` 拒绝的全部帧」；上面的不变式 `frames = decode_fail + dropped + Σ N2_TUN_DEST.frames` **不变**；`fail_v4`/`fail_v6`/`fail_other`/`first_fail_*` 语义**不变**。
+
+  **实现偏差登记（按实现记录，非改写提案正文）**：提交 `438c83c`（`feat(core): classify IPv6 TUN frames …`）的实现与上述提案文本的偏差如下。上面的口径文本是**获批原文**；字段拼写与短帧取值**以实现为准**，凡与实现不一致处**按本节**；机器可核的样例是 `client/core/tests/fixtures/n2-log-samples.txt`（由 `client/core/tests/n2_log_samples.rs` 逐字节断言，`cargo test --offline --locked --test n2_log_samples` 通过）。实现位置：`client/core/src/n2h.rs::parse_ipv6_frame:884`、`is_control_class:867`；`client/core/src/wg_device.rs::Ipv6FailWitness:517`、`stats_line:762`）：
+  1. `first_v6_other_next` 在**链未走通**时记 `-`（链尾不可用：非 HBH 扩展头、HBH 长度越界或缺长度字节、帧 `< 42 B`）；提案只为 `first_v6_other_dport` 的非 UDP/TCP 情形写明 `-`，未写明 `next` 的该情形。按实现：`-`。
+  2. `first_v6_dst_prefix` / `first_v6_other_dst` 只记帧**实际携带**的偏移 24 起字节的小写 hex：帧 `≤ 24 B` 时为空串，`< 40 B` 时不足 16 字节（`first_v6_other_dst` 不补零到 32 字符）。提案对 `first_v6_other_dst` 写「完整 16 字节（32 字符，不省略）」、对前缀写「最多前 8 字节」，未写明短帧。按实现：按实际字节数 hex。
+  3. 「其他扩展头」按 IANA 集合判定：`0/43/44/50/51/60/135/139/140/253/254` 视为不穿越的扩展头（连同 HBH 越界/缺长度字节 ⇒ 非控制类，且计入 `ipv6_next` 的 `hbh` 桶）；提案只列举 `43/44/60 等`。按实现：IANA 集合。
+  4. 帧 `< 40 B` 的版本 6 帧（`parse_ipv6_frame` 返回 `None`）：`ipv6_scope` 记 `other`、`ipv6_next` 记 `hbh`，以保证 `Σipv6_scope == Σipv6_next == fail_v6` 恒成立；提案未单列此情形，与「越界而未走通」一致。
+  5. `first_v6_other_dport` 仅在 UDP/TCP 链尾且 L4 前 4 字节在帧内时给出，否则 `-`（与提案一致）。
 * `N2_TUN_GAP` — `wg_device.rs::gap_line:608-610` (thin `N2DestinationTee::gap:505-507`).
   `from_mono`/`to_mono` are the
   monotonic bounds of an interval in which the tee observed NOTHING. Reasons:
