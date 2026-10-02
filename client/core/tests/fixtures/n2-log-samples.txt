@@ -72,6 +72,8 @@ N2_CD_SANDWICH|id=cd-C-M-1|column=C|kind=M|rep=1|phase=post|marker=cd-C-M-1-post
 N2_CD_SANDWICH|id=cd-C-Wb-1|column=C|kind=Wb|rep=1|phase=receipt|marker=none|result=exempted|reason=wb-protect-settle-success|net_before=wifi|net_after=cellular|local_before=192.168.50.199:0|local_after=10.77.0.5:0|fd=31|dup_fd=32|remote=unknown|wait_ms=90000|mono_ms=1800|diag=true|is_evidence=false
 # N2_RING_ARMED
 N2_RING_ARMED|file=netbird-n2-evidence-ring.log|max_bytes=4194304|segments=3|bytes=0|mono_ms=1000|diag=true|is_evidence=false
+# N2_RING_SEGMENT_BYTES
+N2_RING_SEGMENT_BYTES|segment_bytes=65536|default_bytes=4194304|mono_ms=1100|diag=true|is_evidence=false
 # N2_RING_STATS
 N2_RING_STATS|file=netbird-n2-evidence-ring.log|enabled=true|bytes=4096|max_bytes=4194304|segments=3|writes=12|failures=3|rotations=1|last_error=errno-28|mono_ms=2000|diag=true|is_evidence=false
 # N2_RING_WRITE_FAILED

@@ -2603,9 +2603,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // data directory. See docs/n2-cd-app-sandwich-20260929.md.
   private n2RingConfigure(): void {
     const path: string = `${this.context.filesDir}/${N2_RING_FILE_NAME}`;
+    // The segment cap comes from the ACCEPTED ticket
+    // (`n2_evidence.ring_segment_bytes`, validated by parseN2Evidence,
+    // shrink-only 64 KiB..4 MiB); an absent key keeps the 4 MiB default.
+    // Diagnostics-only — the campaign executor never sends it
+    // (docs/n2-cd-app-sandwich-20260929.md).
+    const segmentBytes: number = this.n2Evidence !== undefined ?
+      this.n2Evidence.ringSegmentBytes : N2_RING_MAX_BYTES;
     try {
       const reply: Record<string, Object> = JSON.parse(
-        core.n2_ring_configure(path, N2_RING_MAX_BYTES, N2_RING_SEGMENTS)) as
+        core.n2_ring_configure(path, segmentBytes, N2_RING_SEGMENTS)) as
         Record<string, Object>;
       if (reply['ok'] !== true) {
         this.n2ErrorAndRing(`N2_RING_CONFIGURE_FAILED|file=${N2_RING_FILE_NAME}|` +

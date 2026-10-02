@@ -73,6 +73,7 @@ try {
   const dumpFileName = mod['N2_RING_DUMP_FILE_NAME'] as string;
   const ackFileName = mod['N2_RING_ACK_FILE_NAME'] as string;
   const maxBytes = mod['N2_RING_MAX_BYTES'] as number;
+  const minBytes = mod['N2_RING_MIN_BYTES'] as number;
   const segments = mod['N2_RING_SEGMENTS'] as number;
   const maxLines = mod['N2_RING_MAX_DUMP_LINES'] as number;
   const maxRequest = mod['N2_RING_MAX_DUMP_REQUEST'] as number;
@@ -87,9 +88,10 @@ try {
   check('P1 the ring identity and bounds are the documented literals',
     fileName === 'netbird-n2-evidence-ring.log' && dumpFileName === 'netbird-n2-ring-dump' &&
     ackFileName === 'netbird-n2-ring-ack' &&
-    maxBytes === 4 * 1024 * 1024 && segments === 3 && maxLines === 256 &&
+    maxBytes === 4 * 1024 * 1024 && minBytes === 64 * 1024 && segments === 3 &&
+    maxLines === 256 &&
     maxRequest === 512 && maxAckRequest === 512 && defaultCount === 64,
-    JSON.stringify({ fileName, dumpFileName, ackFileName, maxBytes, segments, maxLines,
+    JSON.stringify({ fileName, dumpFileName, ackFileName, maxBytes, minBytes, segments, maxLines,
       maxRequest, maxAckRequest, defaultCount }));
 
   // The request is SEQ-addressed: `from_seq` / `to_seq` / `count` / `session`.
@@ -215,11 +217,24 @@ try {
     ability.includes('formatN2RingAckShellReject') &&
     !ability.includes('n2RingChunkSeq'),
     'import block');
-  check('S2 the ring is configured with the documented path/cap/segments by the armed arm',
+  check('S2 the ring is configured with the documented path/segments by the armed arm, and its ' +
+    'cap comes from the accepted ticket (absent ⇒ the documented 4 MiB default)',
     ability.includes('const path: string = `${this.context.filesDir}/${N2_RING_FILE_NAME}`;') &&
-    ability.includes('core.n2_ring_configure(path, N2_RING_MAX_BYTES, N2_RING_SEGMENTS)') &&
+    ability.includes('const segmentBytes: number = this.n2Evidence !== undefined ?\n' +
+      '      this.n2Evidence.ringSegmentBytes : N2_RING_MAX_BYTES;') &&
+    ability.includes('core.n2_ring_configure(path, segmentBytes, N2_RING_SEGMENTS)') &&
     ability.includes('      this.n2RingConfigure();'),
     'configure');
+  check('S2b the diagnostic shrink key is validated by the SAME fail-closed ticket parser',
+    (() => {
+      const evidence = readText(join(ETS, 'vpnextensionability', 'NetBirdN2Evidence.ets'));
+      return evidence.includes("import { N2_RING_MAX_BYTES, N2_RING_MIN_BYTES } from './NetBirdN2Ring';") &&
+        evidence.includes("const rawRing: Object | undefined = input['ring_segment_bytes'];") &&
+        evidence.includes("return { error: 'invalid-ring-segment-bytes' };") &&
+        evidence.includes('(rawRing as number) < N2_RING_MIN_BYTES || (rawRing as number) > N2_RING_MAX_BYTES') &&
+        evidence.includes('ringSegmentBytes: ringSegmentBytes } };');
+    })(),
+    'the ticket key');
   check('S3 every arming change stops the ring AND its 60 s cadence (the FILE survives)',
     ability.includes('    core.n2_ring_disable();\n    this.n2RingStopStats();\n' +
       '    this.n2CdClearLatch();') &&
@@ -372,6 +387,12 @@ try {
     ring.includes('pub const DEFAULT_SEGMENTS: u32 = 3;') &&
     ring.includes('pub const DEFAULT_FILE_NAME: &str = "netbird-n2-evidence-ring.log";') &&
     ring.includes('fn rotate_current_segment(state: &mut State) -> Result<RotatedInfo, String> {'));
+  check('R3b a shrunk cap is announced by its own line and the default arm emits nothing extra',
+    ring.includes('const MIN_MAX_BYTES: u64 = 64 * 1024;') &&
+    ring.includes('pub fn segment_line(segment_bytes: u64, mono_ms: u64) -> String {') &&
+    ring.includes('N2_RING_SEGMENT_BYTES|segment_bytes={segment_bytes}|default_bytes={DEFAULT_MAX_BYTES}|mono_ms={mono_ms}|diag=true|is_evidence=false') &&
+    ring.includes('    if max_bytes != DEFAULT_MAX_BYTES {\n' +
+      '        hilog::emit(&segment_line(max_bytes, sys::mono_ms()));\n    }'));
   check('R4 write failures are counted, the first is announced and the recovery is reported',
     ring.includes('fn announce_failure(code: &str) {') &&
     ring.includes('fn announce_recovery() {') &&

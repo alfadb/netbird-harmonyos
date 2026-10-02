@@ -258,6 +258,11 @@ fn samples() -> Vec<(&'static str, String)> {
         // ---- N2 first batch C/D columns (2026-09-29): the evidence ring ----
         ("N2_RING_ARMED", n2_ring::armed_line(n2_ring::DEFAULT_FILE_NAME,
             n2_ring::DEFAULT_MAX_BYTES, n2_ring::DEFAULT_SEGMENTS, 0, 1_000)),
+        // The diagnostic shrink announcement (2026-10-01): emitted only when the
+        // arm ticket's `ring_segment_bytes` is below the 4 MiB default. NOT part
+        // of the frozen `docs/n2-log-formats-20260928.md` §9 list; documented in
+        // `docs/n2-cd-app-sandwich-20260929.md`.
+        ("N2_RING_SEGMENT_BYTES", n2_ring::segment_line(64 * 1024, 1_100)),
         ("N2_RING_STATS", n2_ring::stats_line(n2_ring::DEFAULT_FILE_NAME, true, 4_096,
             n2_ring::DEFAULT_MAX_BYTES, n2_ring::DEFAULT_SEGMENTS, 12, 3, 1, "errno-28",
             2_000)),
@@ -325,7 +330,8 @@ fn the_fixture_covers_every_rust_side_n2_line() {
     for needle in ["N2_SANDWICH|", "N2_CONTROL_SENT|", "N2_CONTROL_HIT|", "N2_CONTROL_MISS|",
         "N2_TUN_LEAK|", "N2_TUN_TEE_STATS|", "N2_TUN_GAP|", "N2_TUN_DEST|", "N2_TUN_FRAMES|",
         "N2_A_EVENT|", "N2_SOCK|", "N2_FD_SEND|", "N7_WG_FEED|adopted|",
-        "N2_CD_SANDWICH|", "N2_RING_ARMED|", "N2_RING_STATS|", "N2_RING_WRITE_FAILED|",
+        "N2_CD_SANDWICH|", "N2_RING_ARMED|", "N2_RING_SEGMENT_BYTES|", "N2_RING_STATS|",
+        "N2_RING_WRITE_FAILED|",
         "N2_RING_RECOVERED|", "N2_RING_ROTATED|", "N2_RING_LOST|", "N2_RING_OVERFLOW|",
         "N2_RING_CHUNK|", "N2_RING_DUMP|"] {
         assert!(rendered.contains(needle), "the baseline is missing {needle}");

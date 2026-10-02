@@ -104,5 +104,11 @@ export function resolve(specifier, context, next) {
       shortCircuit: true
     };
   }
+  // NetBirdN2Evidence imports the ring bounds from the REAL pure module (it has
+  // zero imports of its own): the harness stages it byte-for-byte as
+  // `NetBirdN2Ring.ts`.
+  if (specifier === './NetBirdN2Ring') {
+    return { url: new URL('NetBirdN2Ring.ts', dir).href, shortCircuit: true };
+  }
   return next(specifier, context);
 }

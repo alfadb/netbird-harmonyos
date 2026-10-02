@@ -62,6 +62,10 @@ export const N2_RING_ACK_FILE_NAME: string = 'netbird-n2-ring-ack';
 // `n2_ring_configure`; the core validates and can only tighten).
 export const N2_RING_MAX_BYTES: number = 4 * 1024 * 1024;
 export const N2_RING_SEGMENTS: number = 3;
+// The smallest segment cap the core accepts (`n2_ring::MIN_MAX_BYTES`). The
+// diagnostic `ring_segment_bytes` arm-ticket key may SHRINK the ring between
+// this bound and `N2_RING_MAX_BYTES`; the core re-validates the same bound.
+export const N2_RING_MIN_BYTES: number = 64 * 1024;
 // One launch re-emits at most this many records (bounded hilog traffic); the
 // core's own `MAX_DUMP_LINES` is the same bound.
 export const N2_RING_MAX_DUMP_LINES: number = 256;

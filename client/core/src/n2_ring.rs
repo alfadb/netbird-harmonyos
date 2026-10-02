@@ -41,6 +41,11 @@
 //! * `max_bytes` (default [`DEFAULT_MAX_BYTES`] = 4 MiB) caps the CURRENT
 //!   segment; `segments` (default [`DEFAULT_SEGMENTS`] = 3) is the number of
 //!   files kept: `<path>`, `<path>.1`, … `<path>.(segments-1)`, oldest first.
+//!   A diagnostic arm ticket may SHRINK the cap (never below `MIN_MAX_BYTES`
+//!   = 64 KiB, never above the default) so that rotation actually happens in a
+//!   short run; the shrink is announced once by [`segment_line`]
+//!   (`N2_RING_SEGMENT_BYTES`) and leaves the frozen `N2_RING_ARMED` line
+//!   untouched. The default arm emits no extra line at all.
 //! * Rotation is **ACK-GATED**: the oldest segment is dropped ONLY when its
 //!   last seq is `<= acked_seq`, and `acked_seq` moves ONLY through an
 //!   EXPLICIT host ACK request ([`ack_seq`] over [`parse_ack_request`]) that
@@ -320,6 +325,12 @@ pub fn configure_session(path: &str, max_bytes: u64, segments: u32,
     ENABLED.store(true, Ordering::Release);
     // The armed line IS the ring's first record (the tee appends it).
     hilog::emit(&armed_line(&file, max_bytes, segments, scan.current_bytes, sys::mono_ms()));
+    // A shrunk cap (the diagnostic `ring_segment_bytes` arm ticket) gets its own
+    // record: the frozen N2_RING_ARMED line keeps its documented field list, and
+    // the default arm emits NOTHING extra (byte-identical default behavior).
+    if max_bytes != DEFAULT_MAX_BYTES {
+        hilog::emit(&segment_line(max_bytes, sys::mono_ms()));
+    }
     persist_now();
     Ok(())
 }
@@ -1261,6 +1272,16 @@ fn gaps(state: &State) -> (u64, u64, u64) {
 pub fn armed_line(file: &str, max_bytes: u64, segments: u32, bytes: u64, mono_ms: u64) -> String {
     format!("N2_RING_ARMED|file={}|max_bytes={max_bytes}|segments={segments}|bytes={bytes}|mono_ms={mono_ms}|diag=true|is_evidence=false",
         clean(file))
+}
+
+/// The diagnostic shrink announcement, emitted (right after `N2_RING_ARMED`)
+/// ONLY when the effective segment cap differs from [`DEFAULT_MAX_BYTES`] — the
+/// default arm therefore stays byte-identical. The frozen `N2_RING_ARMED` line
+/// keeps its documented field list; this is the explicit marker for a
+/// `ring_segment_bytes` arm ticket that shrank the ring
+/// (docs/n2-cd-app-sandwich-20260929.md). Never an evidence line.
+pub fn segment_line(segment_bytes: u64, mono_ms: u64) -> String {
+    format!("N2_RING_SEGMENT_BYTES|segment_bytes={segment_bytes}|default_bytes={DEFAULT_MAX_BYTES}|mono_ms={mono_ms}|diag=true|is_evidence=false")
 }
 
 #[allow(clippy::too_many_arguments)]

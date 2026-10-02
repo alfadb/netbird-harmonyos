@@ -413,6 +413,75 @@ fn rotation_keeps_the_shifted_older_segments() {
 }
 
 // ---------------------------------------------------------------------------
+// 4b. the diagnostic shrink switch (2026-10-01)
+// ---------------------------------------------------------------------------
+
+/// The `ring_segment_bytes` ticket path: a cap below the default is announced by
+/// its OWN `N2_RING_SEGMENT_BYTES` record (the frozen `N2_RING_ARMED` line keeps
+/// its documented field list), and the small cap still rotates only under the
+/// explicit ACK gate while the unacked capacity reports overflow/lost records.
+#[test]
+fn a_shrunk_cap_is_announced_and_rotates_under_the_ack_gate() {
+    let _guard = serial();
+    n2_ring::disable();
+    let dir = TempDir::new("shrink");
+    let path = ring_path(&dir);
+    assert_eq!(n2_ring::configure_session(&path, SMALL_CAP, 2, Some("arm-shrink")), Ok(()));
+    let records = records_of(&dir.file("ring.log"));
+    assert_eq!(records.len(), 2, "armed + the shrink announcement: {:?}", dir.text("ring.log"));
+    assert!(records[0].2.starts_with("N2_RING_ARMED|"), "{}", records[0].2);
+    assert!(records[0].2.contains("|max_bytes=65536|segments=2|"),
+        "the frozen armed line already reports the effective cap: {}", records[0].2);
+    assert!(records[1].2.starts_with(
+        "N2_RING_SEGMENT_BYTES|segment_bytes=65536|default_bytes=4194304|mono_ms="),
+        "{}", records[1].2);
+    assert!(records[1].2.ends_with("|diag=true|is_evidence=false"), "{}", records[1].2);
+    // the small cap OVERFLOWS without an ACK (it deletes nothing) …
+    for index in 0..800 {
+        n2_ring::append(&payload(index));
+    }
+    let manifest = n2_ring::manifest_line_now();
+    assert!(manifest_bool(&manifest, "overflow="), "{manifest}");
+    assert!(manifest_u64(&manifest, "lost_records=") > 0, "{manifest}");
+    assert_eq!(manifest_u64(&manifest, "acked_seq="), 0, "nothing was acked: {manifest}");
+    assert!(dir.file("ring.log.1").exists(), "the unacked older segment survives");
+    // … and rotation resumes ONLY after the explicit ACK of the retrieved tail
+    let tail = manifest_u64(&n2_ring::manifest_line_now(), "last_seq=");
+    assert_eq!(n2_ring::ack_seq(tail, "arm-shrink").expect("ack the tail").acked_seq, tail);
+    n2_ring::append(&payload(801));
+    let manifest = n2_ring::manifest_line_now();
+    assert!(manifest_u64(&manifest, "rotations=") >= 1, "rotation resumed: {manifest}");
+    assert!(!manifest_bool(&manifest, "overflow="), "the overflow episode closed: {manifest}");
+    assert!(manifest_u64(&manifest, "dropped_by_ack=") > 0, "{manifest}");
+    n2_ring::disable();
+}
+
+/// The default arm is byte-identical (no shrink line at all), the lower bound
+/// itself is accepted, and anything below it is refused by name.
+#[test]
+fn the_default_cap_emits_no_shrink_line_and_an_illegal_cap_is_refused() {
+    let _guard = serial();
+    n2_ring::disable();
+    let dir = TempDir::new("capbounds");
+    let path = ring_path(&dir);
+    assert_eq!(n2_ring::configure_session(&path, 0, 0, Some("arm-default")), Ok(()));
+    let text = dir.text("ring.log");
+    assert!(text.contains("|max_bytes=4194304|segments=3|"), "{text}");
+    assert!(!text.contains("N2_RING_SEGMENT_BYTES"),
+        "the default arm emits nothing extra: {text}");
+    // the lower bound itself is accepted and announced …
+    assert_eq!(n2_ring::configure_session(&path, 64 * 1024, 3, Some("arm-min")), Ok(()));
+    assert!(dir.text("ring.log").contains("N2_RING_SEGMENT_BYTES|segment_bytes=65536|"),
+        "{}", dir.text("ring.log"));
+    // … one byte below it is refused (and an explicit 0 is the documented default)
+    assert_eq!(n2_ring::configure_session(&path, 64 * 1024 - 1, 3, Some("arm-low")),
+        Err("invalid-max-bytes"));
+    assert_eq!(n2_ring::configure_session(&path, 1, 3, Some("arm-one")),
+        Err("invalid-max-bytes"));
+    n2_ring::disable();
+}
+
+// ---------------------------------------------------------------------------
 // 5. write failure + torn tail
 // ---------------------------------------------------------------------------
 

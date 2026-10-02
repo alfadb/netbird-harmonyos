@@ -10,7 +10,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const real = join(here, '..', 'src', 'main', 'ets', 'vpnextensionability');
 const dir = mkdtempSync(join(tmpdir(), 'nb-n2-evidence-'));
 try {
-  for (const name of ['NetBirdN2Evidence', 'NetBirdVpnConfig', 'NetBirdEndpointExclusion']) {
+  for (const name of ['NetBirdN2Evidence', 'NetBirdVpnConfig', 'NetBirdEndpointExclusion',
+    'NetBirdN2Ring']) {
     writeFileSync(join(dir, `${name}.ts`), readFileSync(join(real, `${name}.ets`)));
   }
   writeFileSync(join(dir, 'NetBirdVpnConfig.dep.ts'),
@@ -45,6 +46,22 @@ try {
   }
   const accepted = decide(req).options;
   assert(accepted?.capture32[0] === '119.29.29.119', 'valid arm');
+  // The diagnostic ring cap (`ring_segment_bytes`, 2026-10-01): ABSENT keeps the
+  // documented 4 MiB default; a present whole number inside the shrink-only
+  // 64 KiB..4 MiB window rides the options verbatim; anything else refuses the
+  // WHOLE evidence ticket by name (fail-closed — no VPN, no ring).
+  assert(accepted?.ringSegmentBytes === 4 * 1024 * 1024, 'ring cap absent ⇒ 4 MiB default');
+  assert(decide({ ...req, ring_segment_bytes: 64 * 1024 }).options?.ringSegmentBytes === 65536,
+    'ring cap accepts the 64 KiB lower bound');
+  assert(decide({ ...req, ring_segment_bytes: 256 * 1024 }).options?.ringSegmentBytes === 262144,
+    'ring cap accepts a shrunk value verbatim');
+  assert(decide({ ...req, ring_segment_bytes: 4 * 1024 * 1024 }).options?.ringSegmentBytes ===
+    4 * 1024 * 1024, 'ring cap accepts exactly the 4 MiB default');
+  for (const bad of [64 * 1024 - 1, 4 * 1024 * 1024 + 1, 0, -1, 1.5, '65536', null, true]) {
+    const decision = decide({ ...req, ring_segment_bytes: bad });
+    assert(decision.options === undefined && decision.error === 'invalid-ring-segment-bytes',
+      'ring cap refuses ' + JSON.stringify(bad));
+  }
   const base = n2.withoutN2ExcludedRoutes(cfg.loadVpnTunnelConfig());
   const routed = n2.withN2EvidenceRoutes(base, accepted.capture32);
   assert(routed.routes.some((r: {destination: string; prefixLength: number; isExcludedRoute: boolean}) =>

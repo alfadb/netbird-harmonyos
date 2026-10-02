@@ -362,6 +362,46 @@ T0 审查（2026-09-29）§3 已判定：下面第 1–5 条属**实现缺口的
   （`n2_ring.rs:1208-1217`）是头/尾/缺口/失败的一次性清单；取回时先要它
   （`n2_ring_manifest`，`ext.ets:3037`），清单行由核心自己发出并入环。
 
+### 5.2.1 诊断用的段大小缩小开关（2026-10-01）
+
+0048–0052 的真机记录里 `rotations=0`：默认 4 MiB 的段在试跑窗口内写不满，
+「旧日志前缀被删除时有记录」这一证明点因此不可考。为让**诊断试跑**真的走到轮转，
+arm 票据的 `n2_evidence` 对象新增**可选**键 `ring_segment_bytes`（该对象正是被接受的
+证据票据，也是唯一配置环的路径）：
+
+* 键**缺失** ⇒ 与改动前**逐字节相同**的 4 MiB 默认（不新增任何行；`N2_RING_ARMED`
+  的 `max_bytes` 仍是 `4194304`，环的第一个记录仍只有 `N2_RING_ARMED`）。
+* 键**存在** ⇒ 必须是整数字节数，范围 `[64 KiB, 4 MiB]`（**只能缩小，不能放大**）。
+  越界 / 非整数 / 非数字 ⇒ **整张证据票据按名拒绝**：`parseN2Evidence` 返回
+  `invalid-ring-segment-bytes`，start flow 在建立 VPN 之前返回，日志里是
+  `N2_EVIDENCE_REFUSED|requestId=…|reason=invalid-ring-segment-bytes|diag=true|is_evidence=false`。
+  这与既有票据风格一致（`NetBirdN2Evidence.ets` 的其它 `invalid-*` 错误：present but
+  malformed request must not start a VPN）。核心 `n2_ring_configure` 用同一个下界
+  （`n2_ring.rs` 的 `MIN_MAX_BYTES = 64 KiB`，壳侧常量 `N2_RING_MIN_BYTES`）再校验一次。
+* 生效的段大小由**新增的一行**显式记录——冻结文档 `docs/n2-log-formats-20260928.md` §9
+  的 `N2_RING_ARMED` 字段表**不改**，因此不往那一行追加字段（`N2_RING_ARMED` 的
+  `max_bytes` 本来就等于生效的段大小，新行是显式标记）：
+
+  `N2_RING_SEGMENT_BYTES|segment_bytes=65536|default_bytes=4194304|mono_ms=…|diag=true|is_evidence=false`
+
+  该行**只在段大小小于默认值时**发出（默认 arm 一行都不多发），紧随 `N2_RING_ARMED`
+  之后，是环的第 2 条记录。它**不在**冻结文档 §9 的 `N2_RING_*` 清单内，格式以本文件
+  与 `client/core/tests/fixtures/n2-log-samples.txt` 为准（核心格式化函数
+  `n2_ring::segment_line`）。
+
+诊断触发方式（`n2_evidence` 里带该键）：
+
+```
+aa start -b cn.alfadb.netbird -a EntryAbility --ps n2h_arm_options \
+  '{"endpoint_exclusions_enabled":false,"n2_evidence":{"trusted_self":true,
+   "capture_32":[…],"outer_destinations":[…],"hdc_control_ip":"…",
+   "allow_hdc_overlap":false,"ring_segment_bytes":65536}}'
+```
+
+**正式取证不得使用该键。** 正式执行器 `n2-campaign/run_campaign.py::arm_ticket()`
+生成的 `n2_evidence` 对象**不含** `ring_segment_bytes`（恒缺失 ⇒ 正式路径行为不变）；
+要在诊断模式中启用，须由执行器在生成票据时显式加入该键——属 kit 侧改动，不在本次范围。
+
 ### 5.3 与 hilog 失败/流控的关系
 
 环的写入**不依赖** `OH_LOG_Print` 的返回值：tee 在 hilog 打印之后无条件执行，平台

@@ -1,4 +1,5 @@
 import { CaptureRouteOutcome, VpnTunnelConfig, withCaptureRoute } from './NetBirdVpnConfig';
+import { N2_RING_MAX_BYTES, N2_RING_MIN_BYTES } from './NetBirdN2Ring';
 
 export interface N2EvidenceOptions {
   trustedSelf: boolean;
@@ -6,6 +7,11 @@ export interface N2EvidenceOptions {
   outerDestinations: string[];
   hdcControlIp: string;
   allowHdcOverlap: boolean;
+  // The diagnostics-only segment cap handed to `n2_ring_configure`. Absent
+  // `ring_segment_bytes` ⇒ `N2_RING_MAX_BYTES` (the documented 4 MiB default,
+  // byte-identical to the pre-existing arm); a present value must be a whole
+  // number of bytes in [N2_RING_MIN_BYTES, N2_RING_MAX_BYTES] (shrink-only).
+  ringSegmentBytes: number;
 }
 
 export interface N2EvidenceDecision {
@@ -78,9 +84,25 @@ export function parseN2Evidence(raw: Object | undefined, blockedSelf: boolean,
   if (hdc !== undefined && capture32.indexOf(hdc as string) >= 0 && allow !== true) {
     return { error: 'hdc-overlap' };
   }
+  // Diagnostic-only (2026-10-01): the ring segment cap. An ABSENT key keeps the
+  // documented 4 MiB default (the pre-existing arm is unchanged); a PRESENT key
+  // must be a whole number of bytes inside the shrink-only window, otherwise the
+  // whole evidence ticket is refused by name (fail-closed: a half-understood
+  // diagnostic request must not start a VPN). The core re-validates the same
+  // lower bound in `n2_ring_configure`.
+  const rawRing: Object | undefined = input['ring_segment_bytes'];
+  let ringSegmentBytes: number = N2_RING_MAX_BYTES;
+  if (rawRing !== undefined) {
+    if (typeof rawRing !== 'number' || !Number.isInteger(rawRing) ||
+      (rawRing as number) < N2_RING_MIN_BYTES || (rawRing as number) > N2_RING_MAX_BYTES) {
+      return { error: 'invalid-ring-segment-bytes' };
+    }
+    ringSegmentBytes = rawRing as number;
+  }
   return { error: '', options: { trustedSelf: true, capture32: capture32,
     outerDestinations: outerDestinations,
-    hdcControlIp: typeof hdc === 'string' ? hdc : '', allowHdcOverlap: allow === true } };
+    hdcControlIp: typeof hdc === 'string' ? hdc : '', allowHdcOverlap: allow === true,
+    ringSegmentBytes: ringSegmentBytes } };
 }
 
 export function validateN2Control(capture32: string[], target: string, id: string): string {
