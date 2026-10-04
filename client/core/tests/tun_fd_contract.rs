@@ -284,12 +284,18 @@ fn roundtrip_read_write_through_the_dup() {
 fn nonblock_eagain_and_shared_ofd_side_effect() {
     let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sv = sp();
+    // fresh socketpair starts BLOCKING — the stand-in for the platform fd
+    // (the recreate leg of roam-1005-0014 arrived exactly like this)
+    assert!(!fd_is_nonblock(sv[0]), "fresh socketpair starts blocking");
     let t = TunFd::dup_from_raw(sv[0]).expect("dup");
     let fd_dup = t.fd().unwrap();
-    assert!(!t.nonblock_ofd(), "fresh socketpair starts blocking");
-    set_nonblock(fd_dup);
+    // the open path FORCES O_NONBLOCK on its dup — the pump's bounded-wait
+    // contract requires it and neither generation may depend on platform
+    // luck (roam-1005-0014: first attach nonblock=true, recreate false)
+    assert!(t.nonblock_ofd(), "dup_from_raw must force O_NONBLOCK");
+    assert!(fd_is_nonblock(fd_dup), "the dup is non-blocking");
     // O_NONBLOCK is an open-file-description property: the dup and the raw
-    // fd flip TOGETHER — exactly why TunFd never writes flags itself.
+    // fd flip TOGETHER — intended here, native is the fd's only I/O side.
     assert!(fd_is_nonblock(sv[0]), "shared ofd: raw fd flipped too");
     let mut buf = [0u8; 64];
     assert_eq!(
@@ -553,7 +559,7 @@ fn json_surface_roundtrip_and_error_shapes() {
     let j = tun_open_json(sv[0]);
     assert!(j.contains("\"ok\":true"), "{j}");
     let id = json_num(&j, "session").expect("session id in open result") as i32;
-    assert!(j.contains("\"nonblock_ofd\":false"), "{j}");
+    assert!(j.contains("\"nonblock_ofd\":true"), "{j}");
     // write through hex, read it back on the peer
     let jw = tun_write_json(id, "680101"); // "h\x01\x01"
     assert!(jw.contains("\"ok\":true") && jw.contains("\"n\":3"), "{jw}");

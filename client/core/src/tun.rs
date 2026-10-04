@@ -15,9 +15,20 @@
 //! - every dup create/close is a ledger transition (`Role::FdDup`); the
 //!   observed platform fd is registered once as `Role::FdOrig` (create-only —
 //!   its close belongs to destroy() and is never emitted by native);
-//! - O_NONBLOCK is a property of the SHARED open-file description: setting it
-//!   on our dup would silently flip the platform fd too, so TunFd never writes
-//!   flags — it only reports the observed state (`nonblock_ofd`);
+//! - O_NONBLOCK is a property of the SHARED open-file description, so the
+//!   dup FORCES it once at open time (F_SETFL on the dup copy only — the
+//!   sys-table "F_SETFL on the dup copy only" policy): the data pump's
+//!   bounded-wait contract (poll-sliced reads, budget-bounded writes) only
+//!   holds on a non-blocking fd, and native is the fd's ONLY I/O side (the
+//!   shell just closes the raw number in destroy(), it never reads/writes
+//!   it). Both the first attach and the recreate/replace go through the
+//!   SAME `TunFd::dup_from_raw`, so neither generation may depend on the
+//!   platform handing us a non-blocking fd by luck — roam-1005-0014: the
+//!   platform's recreated TUN fd arrived BLOCKING (nonblock_ofd=false) and
+//!   the pump wedged after tun-replaced (wgRxToTun=0/wgTxBytes=0 until a
+//!   manual reconnect); `nonblock_ofd` now reports the state AFTER the
+//!   forced set (always true) and the marker carries `nonblock_forced` for
+//!   whether the platform fd needed the flip;
 //! - no unbounded blocking wait exists: reads poll in <=50 ms slices and
 //!   writes carry a total poll-wait budget, so shutdown/destroy/close is
 //!   observed within one slice (EAGAIN / short writes / backpressure are
@@ -122,9 +133,9 @@ pub struct TunFd {
     /// the close BY INSTANCE (`emit_close_inst`): a role+fd lookup alone is
     /// ambiguous once a foreign close left a stale same-number entry open.
     ledger_inst: u32,
-    /// O_NONBLOCK observed on the shared open-file description at dup time
-    /// (F_GETFL read-only). Informative only: flipping it here would flip the
-    /// platform fd too, which is why TunFd never writes file flags.
+    /// O_NONBLOCK state of the shared open-file description AFTER the forced
+    /// set at dup time (always `true` on success; the raw fd flipped too —
+    /// shared ofd, and native is the only I/O side, see module docs).
     nonblock_ofd: bool,
 }
 
@@ -136,7 +147,13 @@ impl TunFd {
     /// 2. after the dup, the raw fd must STILL be open — a dup that consumed
     ///    the caller's fd fails closed (and the fresh dup is closed again);
     /// 3. the copy carries FD_CLOEXEC;
-    /// 4. the copy and the observed platform fd enter the ledger ownership
+    /// 4. the copy is FORCED O_NONBLOCK (F_SETFL on the dup copy; a failure
+    ///    fails closed — the fresh dup is closed again). The flag is shared
+    ///    with the raw fd (same open-file description), which is REQUIRED
+    ///    here: the pump's bounded-wait contract only holds on a
+    ///    non-blocking fd and the first-attach and recreate paths must be
+    ///    identical (roam-1005-0014 — see module docs);
+    /// 5. the copy and the observed platform fd enter the ledger ownership
     ///    table (FdOrig once per process, create-only; FdDup create).
     pub fn dup_from_raw(fd_raw: i32) -> Result<TunFd, TunError> {
         if unsafe { sys::fcntl(fd_raw, sys::F_GETFD) } == -1 {
@@ -159,8 +176,29 @@ impl TunFd {
         if !via_dupfd {
             unsafe { sys::fcntl(fd_dup, sys::F_SETFD, sys::FD_CLOEXEC) };
         }
+        // Force O_NONBLOCK on OUR dup (F_SETFL on the dup copy only). The
+        // flag lives on the SHARED open-file description, so the platform raw
+        // flips together with the copy — deliberate and required (module
+        // docs): the pump's bounded-wait contract only holds on a
+        // non-blocking fd, and the platform fd's arrival state is luck (the
+        // first create() of roam-1005-0014 arrived non-blocking, the recreate
+        // leg arrived blocking and wedged the pump). F_SETFL failure fails
+        // closed: the fresh dup is closed again, no TunFd is handed out.
         let fl = unsafe { sys::fcntl(fd_dup, sys::F_GETFL) };
-        let nonblock_ofd = fl != -1 && (fl & sys::O_NONBLOCK) != 0;
+        if fl == -1 {
+            let e = sys::errno();
+            unsafe { sys::close(fd_dup) };
+            return Err(map_errno(e));
+        }
+        let nonblock_forced = (fl & sys::O_NONBLOCK) == 0;
+        if nonblock_forced
+            && unsafe { sys::fcntl(fd_dup, sys::F_SETFL, fl | sys::O_NONBLOCK) } == -1
+        {
+            let e = sys::errno();
+            unsafe { sys::close(fd_dup) };
+            return Err(map_errno(e));
+        }
+        let nonblock_ofd = true;
 
         // ownership table: the platform fd is registered once (observed,
         // never to be closed by native); every dup is its own entry. The
@@ -172,7 +210,7 @@ impl TunFd {
         }
         let ledger_inst = crate::ledger::emit_create(crate::ledger::Role::FdDup, fd_dup);
         emit(&format!(
-            "N1BDISC_TUN_OPEN|raw={fd_raw}|dup={fd_dup}|via={}|nonblock_ofd={nonblock_ofd}",
+            "N1BDISC_TUN_OPEN|raw={fd_raw}|dup={fd_dup}|via={}|nonblock_ofd={nonblock_ofd}|nonblock_forced={nonblock_forced}",
             if via_dupfd { "dupfd_cloexec" } else { "dup_setfd" }
         ));
         Ok(TunFd {
@@ -187,7 +225,8 @@ impl TunFd {
         self.fd
     }
 
-    /// O_NONBLOCK state of the shared open-file description at dup time.
+    /// O_NONBLOCK state of the shared open-file description (forced at dup
+    /// time — always `true` on a live TunFd).
     pub fn nonblock_ofd(&self) -> bool {
         self.nonblock_ofd
     }

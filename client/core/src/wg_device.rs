@@ -90,6 +90,9 @@
 //! - [`WgDevice::replace_tun`]：先为新 fd 取 dup（失败则旧 TUN 原样保留，
 //!   无半状态），再换入新 [`TunFd`]；旧 [`TunFd`] 的 Drop 只关**旧 dup**，
 //!   壳侧原号永远只归 `VpnConnection.destroy()` 关（fd 合同不变）。
+//!   新 dup 与首次 attach 走**同一个** `TunFd::dup_from_raw`，强制
+//!   O_NONBLOCK（roam-1005-0014：重建代 fd 到手是阻塞的，泵在此后冻结，
+//!   wgRxToTun=0/wgTxBytes=0 直到手动重连）。
 //! - **会话保留是零成本的**：BoringTun tunnel 是纯字节层状态机，从不引用
 //!   TUN fd；WG 外层 UDP socket（`self.fd`）在重建中不变。因此换 TUN 不
 //!   触碰任何握手/密钥状态——peer 会话原样存活，重建后载荷立即双向可通，
@@ -1162,9 +1165,12 @@ impl WgDevice {
     /// platform TUN fd and deactivate the old one, keeping peers, tunnels
     /// AND established WG sessions (the session-preserving choice, see the
     /// module docs N8 section). Semantics:
-    /// - the new fd is validated by `TunFd::dup_from_raw` FIRST; on any
-    ///   failure the OLD [`TunFd`] stays active untouched (no half state —
-    ///   the caller sees the error and runs its fail-closed teardown);
+    /// - the new fd is validated by `TunFd::dup_from_raw` FIRST — the SAME
+    ///   open function as the first attach, including the forced O_NONBLOCK
+    ///   (a blocking platform fd would wedge the pump: roam-1005-0014); on
+    ///   any failure the OLD [`TunFd`] stays active untouched (no half
+    ///   state — the caller sees the error and runs its fail-closed
+    ///   teardown);
     /// - the swap drops the old [`TunFd`], whose Drop closes ONLY the old
     ///   native dup (fd contract: the shell-side raw fd keeps belonging to
     ///   `VpnConnection.destroy()`; native never closes that number);

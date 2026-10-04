@@ -743,3 +743,96 @@ fn wg_socket_feed_replaces_live_socket_and_carries_bidirectional_payload() {
         unsafe { sys::close(fd) };
     }
 }
+
+// ---------------------------------------------------------------------------
+// 4. roam-1005-0014 regression: the recreated TUN dup must be FORCED
+//    non-blocking (same open function as the first attach) and the pump must
+//    transceive on the new fd
+// ---------------------------------------------------------------------------
+
+/// F_GETFL O_NONBLOCK probe on `fd` (false on F_GETFL failure too).
+fn fd_is_nonblock(fd: i32) -> bool {
+    let fl = unsafe { sys::fcntl(fd, sys::F_GETFL) };
+    fl != -1 && (fl & sys::O_NONBLOCK) != 0
+}
+
+#[test]
+fn recreated_tun_dup_forced_nonblocking_pump_transceives_on_new_fd() {
+    let peer = Peer::build(&SECRET_B, key_a(), vec![(ADDR_A, 32)]);
+    let mut slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
+    let mut now = 4000u64;
+    slot_end.feed_both();
+    establish(&slot_end, &peer, &mut now);
+    assert!(slot_end.ready());
+
+    // The recreate legs exactly as the shell runs them: destroy() closes the
+    // platform raw, create() hands a NEW raw through the same feed entry.
+    // A fresh socketpair is BLOCKING — the stand-in for the platform fd the
+    // device handed back on the recreate leg of roam-1005-0014
+    // (N1BDISC_TUN_OPEN|nonblock_ofd=false).
+    slot_end.platform_destroy_tun();
+    slot_end.recreate_tun();
+    assert!(slot_end.slot.device_up() && slot_end.ready(), "replacement keeps the session");
+
+    // THE regression pin: the open path behind the replace must FORCE
+    // O_NONBLOCK on its dup — the pump's bounded-wait contract (poll-sliced
+    // reads, budget-bounded writes) only holds on a non-blocking fd, and the
+    // first-attach generation must not depend on the platform handing us a
+    // non-blocking fd by luck. These flag asserts come FIRST deliberately:
+    // before the fix they fail cleanly here, while the empty read further
+    // below would instead WEDGE on the blocking fd — the exact on-device
+    // pump freeze (wgRxToTun=0, wgTxBytes=0 after tun-replaced).
+    let dev_tun_fd = slot_end
+        .slot
+        .with_device(|d| d.tun_fd())
+        .expect("device up")
+        .expect("tun fd open");
+    assert!(
+        fd_is_nonblock(dev_tun_fd),
+        "recreated TUN dup must be forced O_NONBLOCK (roam-1005-0014)"
+    );
+    // O_NONBLOCK is an open-file-description property: forcing it on our dup
+    // flips the platform raw too — intended and safe: native is the fd's
+    // ONLY I/O side, the shell just closes the number in destroy().
+    assert!(
+        fd_is_nonblock(slot_end.tun_raw),
+        "shared ofd: the platform raw flips together with the dup"
+    );
+
+    // The non-blocking semantics are LIVE on the new fd: an empty read is
+    // EAGAIN, never a blocking wedge.
+    let mut probe = [0u8; 16];
+    assert_eq!(
+        sys::read_fd(dev_tun_fd, &mut probe),
+        (-1, sys::EAGAIN),
+        "empty read on the replaced fd must be EAGAIN"
+    );
+
+    // ...and the pump really transceives on the NEW fd (bidirectional,
+    // byte-exact) with the WG session kept — no re-handshake.
+    let handshakes = slot_end.slot.dataplane_status().expect("status").handshakes;
+    let pkt = ip_udp_packet(ADDR_A, ADDR_B, 40201, 5353, b"n8-nb-a2b");
+    assert_eq!(
+        carry_frame(&slot_end, &peer, &mut now, &pkt),
+        pkt,
+        "A→B over the forced-nonblock fd"
+    );
+    let back = ip_udp_packet(ADDR_B, ADDR_A, 5353, 40201, b"n8-nb-b2a");
+    write_tun(peer.tun_test_end, &back);
+    let got = std::cell::RefCell::new(None);
+    assert!(
+        pump_until(&slot_end, &peer, &mut now, 5_000, |_s, _p| {
+            if got.borrow().is_none() {
+                *got.borrow_mut() = read_tun(slot_end.tun_test_end);
+            }
+            got.borrow().is_some()
+        }),
+        "B→A must cross over the forced-nonblock fd"
+    );
+    assert_eq!(got.into_inner().expect("frame"), back);
+    assert_eq!(
+        slot_end.slot.dataplane_status().expect("status").handshakes,
+        handshakes,
+        "no re-handshake for the nonblocking replace"
+    );
+}
