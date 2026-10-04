@@ -41,10 +41,13 @@ import { resolveVpnTunNetId, VpnNetIdResolution } from './NetBirdInterfaceStatsP
 import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, ExclusionEndpoint,
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
-  RelayEndpoint, buildExcludedRouteEntries, deriveStunEndpointExclusions,
+  RelayEndpoint, buildExcludedRouteEntries, deriveLanExclusion, deriveStunEndpointExclusions,
   isExclusionFailClosed, parseRelayUrl,
   stripDialPort
 } from './NetBirdEndpointExclusion';
+// type-only: erased at runtime, so the host selfcheck fixtures that stage
+// this file byte-identically never resolve the sibling module
+import type { LanExclusionProbe, LanExclusionResult } from './NetBirdEndpointExclusion';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
   DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
@@ -56,6 +59,7 @@ import {
   connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
+  physicalDefaultLanProbe,
   resolveProtectedIp,
   SocketSupplyRequest,
   countPemCertificates, derivePlatformDnsEndpoints,
@@ -1397,7 +1401,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.frozenEndpointExclusions = exclusion.routes;
-    const base: VpnTunnelConfig = withEndpointExclusions(baseTemplate, exclusion.routes);
+    // 动态 LAN 排除先于端点冻结集 graft（与旧静态项相同的落位：managed 路由
+    // 之后、端点 /32 之前；mergeExcludedRouteEntries 对同 destination+prefix
+    // 去重，端点 /32 与 LAN /24 不会冲突）
+    const lan: LanExclusionResult =
+      this.lanExclusionForConfig(baseTemplate.tunnelAddress, 'initial');
+    const lanRoutes: ExcludedRouteEntry[] = lan.entry !== null ? [lan.entry] : [];
+    const base: VpnTunnelConfig = withEndpointExclusions(baseTemplate,
+      lanRoutes.concat(exclusion.routes));
     let merged: VpnTunnelConfig = net !== null ? applyNetworkConfig(base, net) : base;
     // N3-7 default-route safety gate (shell half): hold 0.0.0.0/0 unless the
     // core gate allowed it (usable peers + WG tunnel ready) or the explicit
@@ -1625,6 +1636,32 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     } finally {
       socketSupplyCloseFd(fd);
     }
+  }
+
+  // 动态基础 LAN 排除 (scenario-A roaming fix, LAN-ROUTE-ROAMING-ANALYSIS.md
+  // §4 step 1): the base host-LAN exclusion is no longer a static constant in
+  // DEFAULT_VPN_TUNNEL_CONFIG — each config assembly leg (the initial
+  // create() AND every recreate) derives it from the local IPv4 prefix of the
+  // CURRENT physical default network (physicalDefaultLanProbe +
+  // deriveLanExclusion): home Wi-Fi 192.168.50.x/24 reproduces the retired
+  // static 192.168.50.0/24 entry verbatim, while cellular (or a probe with no
+  // usable local prefix) adds NO LAN exclusion — the managed route to the
+  // home subnet then reaches the tunnel, which is the whole point of remote
+  // access over cellular. The N2 evidence mode keeps its own baseline
+  // (withoutN2ExcludedRoutes strips the base exclusions; the LAN piece is not
+  // grafted there either).
+  private lanExclusionForConfig(gateway: string, leg: string): LanExclusionResult {
+    if (this.n2Evidence !== undefined) {
+      return { entry: null, network: '', prefixLength: 0, reason: 'n2-evidence-diag' };
+    }
+    const probe: LanExclusionProbe = physicalDefaultLanProbe();
+    const outcome: LanExclusionResult = deriveLanExclusion(probe, gateway);
+    hilog.info(DOMAIN, TAG,
+      'VPN_LAN_EXCLUSION|requestId=%{public}s|leg=%{public}s|reason=%{public}s|' +
+      'network=%{public}s|prefix=%{public}d|linkAddresses=%{public}d',
+      this.requestId, leg, outcome.reason, outcome.network, outcome.prefixLength,
+      probe.linkAddresses.length);
+    return outcome;
   }
 
   // N2-H endpoint-freeze derivation (docs/native-nx-governance.md 追加登记
@@ -4201,11 +4238,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // the outer endpoints into the fresh (often default-routed) tunnel.
       // The frozen set is reused verbatim (no DNS inside the bounded
       // recreate leg); the next full start re-freezes with fresh
-      // resolutions.
+      // resolutions. The base host-LAN exclusion, in contrast, is RE-DERIVED
+      // here (scenario-A fix): a recreate happening after a network switch
+      // must not drag the OLD network's LAN prefix into the new config.
       const recreateTemplate: VpnTunnelConfig = this.n2Evidence !== undefined
         ? withoutN2ExcludedRoutes(loadVpnTunnelConfig()) : loadVpnTunnelConfig();
+      const lanRecreate: LanExclusionResult =
+        this.lanExclusionForConfig(recreateTemplate.tunnelAddress, 'recreate');
+      const lanRoutesRecreate: ExcludedRouteEntry[] =
+        lanRecreate.entry !== null ? [lanRecreate.entry] : [];
       const base: VpnTunnelConfig = withEndpointExclusions(recreateTemplate,
-        this.frozenEndpointExclusions);
+        lanRoutesRecreate.concat(this.frozenEndpointExclusions));
       let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
       const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
         ? net.default_route.allowed

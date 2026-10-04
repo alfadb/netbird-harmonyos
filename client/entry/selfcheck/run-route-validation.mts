@@ -338,8 +338,6 @@ try {
       { destination: '0.0.0.0', prefixLength: 0, gateway: '10.99.0.1',
         hasGateway: true, isDefaultRoute: true, isExcludedRoute: false,
         source: 'managed' },
-      { destination: '192.168.50.0', prefixLength: 24, gateway: '10.99.0.1',
-        hasGateway: true, isDefaultRoute: false, isExcludedRoute: true },
       { destination: '203.0.113.7', prefixLength: 32, gateway: '10.99.0.1',
         hasGateway: true, isDefaultRoute: false, isExcludedRoute: true }
     ]), JSON.stringify(merged.routes));
@@ -353,9 +351,6 @@ try {
     '{"interface":"vpn-tun","destination":{"address":{"address":"0.0.0.0","family":1},' +
     '"prefixLength":0},"gateway":{"address":"10.99.0.1","family":1},' +
     '"hasGateway":true,"isDefaultRoute":true},' +
-    '{"interface":"vpn-tun","destination":{"address":{"address":"192.168.50.0","family":1},' +
-    '"prefixLength":24},"gateway":{"address":"10.99.0.1","family":1},' +
-    '"hasGateway":true,"isDefaultRoute":false,"isExcludedRoute":true},' +
     '{"interface":"vpn-tun","destination":{"address":{"address":"203.0.113.7","family":1},' +
     '"prefixLength":32},"gateway":{"address":"10.99.0.1","family":1},' +
     '"hasGateway":true,"isDefaultRoute":false,"isExcludedRoute":true}],' +
@@ -396,7 +391,7 @@ try {
     vMixed.ok === false && vMixed.violations.length === 1 &&
     vMixed.violations[0].index === 1, JSON.stringify(vMixed));
   check('T6 end-to-end: no entry silently skipped (list kept intact for the dump)',
-    mergedMixed.routes.length === 4 &&
+    mergedMixed.routes.length === 3 &&
     mergedMixed.routes[0].destination === '10.50.0.0' &&
     mergedMixed.routes[1].destination === '10.60.0.0',
     JSON.stringify(mergedMixed.routes));
@@ -404,7 +399,7 @@ try {
   // fallback path unchanged: no snapshot -> base EXCLUDED entries kept
   // verbatim (existing behavior: managed list empty leaves only the base
   // isExcludedRoute entries — diagnosis §6-3), everything untagged.
-  const base2 = cfg.withEndpointExclusions(cfg.loadVpnTunnelConfig(), []);
+  const base2 = cfg.withEndpointExclusions(cfg.loadVpnTunnelConfig(), [derived32]);
   const mergedFallback = cfg.applyNetworkConfig(base2,
     JSON.parse('{"available":false}') as never);
   check('fallback keeps base exclusion entries verbatim (same object references)',
@@ -416,7 +411,7 @@ try {
     JSON.stringify(mergedFallback.routes));
   const gated = cfg.gateDefaultRoutes(merged, false);
   check('gateDefaultRoutes strips only isDefaultRoute entries; rest stays valid',
-    gated.routes.length === 3 && v.validateRouteEntries(gated.routes, gated.interfaceName).ok === true,
+    gated.routes.length === 2 && v.validateRouteEntries(gated.routes, gated.interfaceName).ok === true,
     JSON.stringify(gated.routes));
 } catch (error) {
   failedCount++;

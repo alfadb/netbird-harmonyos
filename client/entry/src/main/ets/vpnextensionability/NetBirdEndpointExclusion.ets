@@ -31,6 +31,13 @@
 //     `connector_network_config()`, parsed with the core's OWN `stun:` rules
 //     (default port 3478), `turn:` refused by name (no turn path in this
 //     build) and a recorded gap when nothing was announced.
+//   - deriveLanExclusion: the DYNAMIC base host-LAN exclusion (the scenario-A
+//     roaming fix, LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 1) — the physical
+//     default network's local IPv4 prefix becomes the base isExcludedRoute
+//     entry (home Wi-Fi 192.168.50.x/24 => the same 192.168.50.0/24 the old
+//     static constant carried); a cellular bearer or no usable local prefix
+//     yields NO LAN exclusion, so managed routes may reach the remote subnet
+//     through the tunnel while away from home.
 //
 // Log discipline: callers log hostnames/ports/counts only — never tokens, and
 // this module holds no credential-shaped data at all.
@@ -810,4 +817,131 @@ export function deriveStunEndpointExclusions(stuns: StunUriEntry[] | null | unde
   }
   return { endpoints: endpoints, rejected: rejected, turnRejected: turnRejected,
     announced: announced, gap: gapReason.length > 0, gapReason: gapReason };
+}
+
+// ---------------------------------------------------------------------------
+// 动态基础 LAN 排除 (scenario-A roaming fix, LAN-ROUTE-ROAMING-ANALYSIS.md
+// §4 step 1)
+// ---------------------------------------------------------------------------
+//
+// The base host-LAN exclusion is NOT a static deployment constant anymore: it
+// is derived, at config assembly time (the initial create() AND every
+// recreate leg), from the local IPv4 prefix of the platform's current
+// PHYSICAL default network — the network `physicalDefaultNetId()` selected
+// (never the raw default handle once our own VPN is default):
+//
+//   - home Wi-Fi (local 192.168.50.x/24) -> the SAME 192.168.50.0/24
+//     isExcludedRoute entry the retired static constant carried, so on-LAN
+//     traffic keeps leaving over the physical network (behavior unchanged);
+//   - cellular bearer, or no usable local IPv4 prefix -> NO LAN exclusion,
+//     so the managed route to the home subnet is not masked and remote
+//     access over cellular works.
+//
+// This module owns ONLY the decision (pure, total, never throws); the
+// collector (NetBirdConnector.physicalDefaultLanProbe) performs the platform
+// reads and hands the facts in. Fail-open BY SPEC for this fix (取不到 -> 无):
+// a probe that cannot prove a local prefix yields no exclusion — this is the
+// task's completion criterion, deliberately NOT the dns section's recorded
+// gap discipline.
+
+/// `NetBearType.BEARER_CELLULAR` (`@ohos.net.connection.d.ts`, @since 8): a
+/// cellular bearer never yields a LAN exclusion — its local prefix is the
+/// carrier's, not a LAN behind which home-local traffic must stay physical.
+export const BEARER_CELLULAR: number = 0;
+
+// One `getConnectionPropertiesSync().linkAddresses[]` entry, as far as this
+// decision needs it: the bare address literal plus its prefix length.
+export interface LanLinkAddress {
+  address: string;
+  prefixLength: number;
+}
+
+// The fact bundle the collector hands in (mirrors the DnsNetProbe pattern:
+// the collector never decides, this module never reads the platform).
+export interface LanExclusionProbe {
+  bearerTypes: number[];
+  linkAddresses: LanLinkAddress[];
+}
+
+export interface LanExclusionResult {
+  // The derived base LAN exclusion (same shape as the retired static entry),
+  // or null when this network yields none.
+  entry: ExcludedRouteEntry | null;
+  // The masked network address ('' with a null entry) — log truth only.
+  network: string;
+  prefixLength: number;
+  // 'lan' | 'cellular' | 'no-usable-link-address' (stable, greppable).
+  reason: string;
+}
+
+export const LAN_EXCLUSION_REASON_LAN: string = 'lan';
+export const LAN_EXCLUSION_REASON_CELLULAR: string = 'cellular';
+export const LAN_EXCLUSION_REASON_NO_USABLE_LINK: string = 'no-usable-link-address';
+
+export function emptyLanExclusionProbe(): LanExclusionProbe {
+  return { bearerTypes: [], linkAddresses: [] };
+}
+
+// PURE: the physical default network's facts -> the base LAN exclusion (or
+// none). First usable IPv4 link address wins (a Wi-Fi link usually carries an
+// IPv6 beside it); the network address is the address masked by its own
+// prefix, so host bits never leak into the destination (192.168.50.199/24 ->
+// 192.168.50.0/24).
+export function deriveLanExclusion(probe: LanExclusionProbe,
+  gateway: string): LanExclusionResult {
+  const none = (reason: string): LanExclusionResult => {
+    return { entry: null, network: '', prefixLength: 0, reason: reason };
+  };
+  if (probe === undefined || probe === null) {
+    return none(LAN_EXCLUSION_REASON_NO_USABLE_LINK);
+  }
+  if (probe.bearerTypes !== undefined && probe.bearerTypes !== null &&
+    probe.bearerTypes.indexOf(BEARER_CELLULAR) >= 0) {
+    return none(LAN_EXCLUSION_REASON_CELLULAR);
+  }
+  const addresses: LanLinkAddress[] = probe.linkAddresses !== undefined &&
+    probe.linkAddresses !== null ? probe.linkAddresses : [];
+  for (let i = 0; i < addresses.length; i++) {
+    const link: LanLinkAddress = addresses[i];
+    if (link === undefined || link === null ||
+      typeof link.address !== 'string' || !isIPv4LiteralStr(link.address)) {
+      continue;
+    }
+    const prefix: number = link.prefixLength;
+    // Prefix 0 (0.0.0.0/0) would exclude EVERYTHING from the tunnel and an
+    // out-of-range/non-integer prefix is unusable — both skip (the next
+    // entry may still be a usable IPv4).
+    if (!Number.isInteger(prefix) || prefix < 1 || prefix > 32) {
+      continue;
+    }
+    const network: string = ipv4NetworkOfLan(link.address, prefix);
+    return {
+      entry: {
+        destination: network,
+        prefixLength: prefix,
+        gateway: gateway,
+        hasGateway: true,
+        isDefaultRoute: false,
+        isExcludedRoute: true
+      },
+      network: network,
+      prefixLength: prefix,
+      reason: LAN_EXCLUSION_REASON_LAN
+    };
+  }
+  return none(LAN_EXCLUSION_REASON_NO_USABLE_LINK);
+}
+
+// Masked network address of a strict IPv4 literal under prefix 1..32 (same
+// arithmetic as NetBirdVpnConfig's tunnel-subnet helper — local copy because
+// this module stays zero-import).
+function ipv4NetworkOfLan(address: string, prefix: number): string {
+  const octets: string[] = address.split('.');
+  const value: number =
+    ((Number(octets[0]) << 24) | (Number(octets[1]) << 16) | (Number(octets[2]) << 8) |
+      Number(octets[3])) >>> 0;
+  const mask: number = (0xffffffff << (32 - prefix)) >>> 0;
+  const network: number = (value & mask) >>> 0;
+  return `${(network >>> 24) & 0xff}.${(network >>> 16) & 0xff}.` +
+    `${(network >>> 8) & 0xff}.${network & 0xff}`;
 }

@@ -7,6 +7,7 @@ import core from 'libnetbird_core.so';
 // type-only: erased at runtime, so the host selfcheck fixtures that stage
 // this file byte-identically never resolve the sibling module
 import type { UiPeerEntry } from './NetBirdUiModel';
+import type { LanExclusionProbe, LanLinkAddress } from './NetBirdEndpointExclusion';
 import { DnsDerivationInput, DnsDerivationResult, DnsNetProbe, DnsPlatformNetAddress,
   StunUriEntry,
   deriveDnsEndpointExclusions, emptyDnsNetProbe, isPhysicalNetEvidence
@@ -1007,6 +1008,54 @@ export function physicalDefaultNetId(): number {
     }
     return candidate;
   } catch (error) { return 0; }
+}
+
+// 动态基础 LAN 排除 (scenario-A roaming fix, LAN-ROUTE-ROAMING-ANALYSIS.md
+// §4 step 1): the RAW platform facts the pure `deriveLanExclusion`
+// (NetBirdEndpointExclusion) needs — the physical default network's
+// `bearerTypes` and its link addresses WITH the prefix length (the string-only
+// `physicalDefaultBearerFacts` view drops it, and the LAN exclusion needs the
+// masked network, not the host address). Same B5 handle rule as
+// physicalDefaultBearerFacts: the handle is the one `physicalDefaultNetId()`
+// selected, NEVER the raw default handle (once this App's VPN is the default
+// network that is the VPN, whose link address would be the overlay). A
+// platform error answers an empty probe, never an invented prefix — the pure
+// module turns that into "no LAN exclusion".
+export function physicalDefaultLanProbe(): LanExclusionProbe {
+  try {
+    const netId: number = physicalDefaultNetId();
+    if (netId === 0) {
+      return { bearerTypes: [], linkAddresses: [] };
+    }
+    const handles: connection.NetHandle[] = connection.getAllNetsSync();
+    let handle: connection.NetHandle | undefined = handles.find(
+      (candidate: connection.NetHandle): boolean => candidate.netId === netId);
+    if (handle === undefined || handle === null) {
+      const fallback: connection.NetHandle = connection.getDefaultNetSync();
+      if (fallback === undefined || fallback === null || fallback.netId !== netId) {
+        return { bearerTypes: [], linkAddresses: [] };
+      }
+      handle = fallback;
+    }
+    const caps: connection.NetCapabilities = connection.getNetCapabilitiesSync(handle);
+    const props: connection.ConnectionProperties =
+      connection.getConnectionPropertiesSync(handle);
+    const linkAddresses: LanLinkAddress[] = [];
+    const links: connection.LinkAddress[] | undefined = props.linkAddresses;
+    if (links !== undefined && links !== null) {
+      for (let i = 0; i < links.length; i++) {
+        const address: connection.NetAddress | undefined = links[i].address;
+        const prefix: number = links[i].prefixLength;
+        if (address !== undefined && address !== null && typeof address.address === 'string' &&
+          address.address.length > 0) {
+          linkAddresses.push({ address: address.address, prefixLength: prefix });
+        }
+      }
+    }
+    return { bearerTypes: caps.bearerTypes ?? [], linkAddresses: linkAddresses };
+  } catch (error) {
+    return { bearerTypes: [], linkAddresses: [] };
+  }
 }
 
 export function physicalDefaultDnsServers(netId?: number): string[] {

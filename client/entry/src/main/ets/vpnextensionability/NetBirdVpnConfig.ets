@@ -63,21 +63,29 @@ export interface VpnTunnelConfig {
 
 // MR4-verified default-route shape (e8e2cf9), expressed as configuration:
 // route 1: tunnel subnet 10.99.0.0/24 (plain route);
-// route 2: IPv4 default 0.0.0.0/0 with isDefaultRoute: true;
-// route 3: host-LAN exclusion 192.168.50.0/24 with isExcludedRoute: true
-// (keeps the outer path — management/signal/WG endpoint traffic — out of our
-// own tunnel; the exclusion network is deployment-specific and stays
-// configurable).
+// route 2: IPv4 default 0.0.0.0/0 with isDefaultRoute: true.
+//
+// The base host-LAN exclusion (previously the static route 3
+// 192.168.50.0/24) is NOT part of this template anymore: it is DERIVED per
+// create() from the physical default network's local IPv4 prefix
+// (NetBirdEndpointExclusion.deriveLanExclusion +
+// NetBirdConnector.physicalDefaultLanProbe; scenario-A roaming fix,
+// LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 1). Home Wi-Fi (local
+// 192.168.50.x/24) reproduces exactly the retired static entry; cellular or
+// an unusable probe yields NO LAN exclusion, so the managed route to the
+// home subnet is not masked while away. The extension grafts it at assembly
+// time (initial create AND every recreate leg) ahead of the frozen endpoint
+// set via withEndpointExclusions — see NetBirdVpnExtensionAbility.
 //
 // N2-H (docs/native-nx-governance.md 追加登记; docs/n13-relay-increment-plan
-// §3.4/§5): route 3 alone is NOT a sufficient outer-endpoint exclusion set.
+// §3.4/§5): route 2 alone is NOT a sufficient outer-endpoint exclusion set.
 // The remaining outer endpoints (management, signal, relay — all DDNS-able)
 // are FROZEN and EXCLUDED per start at runtime: deriveEndpointExclusions
 // (NetBirdVpnExtensionAbility) resolves the real endpoints shell-side and
 // withEndpointExclusions below grafts the derived /32|/128 entries onto this
-// base BEFORE create() (routes are fixed at create time). This static LAN
-// entry is only the deployment-specific local piece and is preserved
-// verbatim by the graft.
+// base BEFORE create() (routes are fixed at create time). The N2 evidence
+// mode strips every isExcludedRoute entry from this base
+// (withoutN2ExcludedRoutes) and also goes without the derived LAN piece.
 //
 // N3-7: route 2 is a TEMPLATE entry only. The default-route safety gate
 // (`gateDefaultRoutes` below + the core-side snapshot gate) decides whether
@@ -103,14 +111,6 @@ const DEFAULT_VPN_TUNNEL_CONFIG: VpnTunnelConfig = {
       hasGateway: true,
       isDefaultRoute: true,
       isExcludedRoute: false
-    },
-    {
-      destination: '192.168.50.0',
-      prefixLength: 24,
-      gateway: '10.99.0.1',
-      hasGateway: true,
-      isDefaultRoute: false,
-      isExcludedRoute: true
     }
   ],
   dnsServers: ['8.8.8.8'],
@@ -130,10 +130,11 @@ export function loadVpnTunnelConfig(): VpnTunnelConfig {
 // time and VpnConnection has no route/DNS update API, so later map changes
 // CANNOT be applied at runtime (the extension logs them as explicitly
 // NOT applied — see NetBirdVpnExtensionAbility watch loop). Empty/absent
-// snapshot fields fall back to the base deployment values. The
-// deployment-specific host-LAN exclusions from the base config are kept —
-// the outer path (management/WG endpoint traffic) must stay out of our own
-// tunnel regardless of what the map routes.
+// snapshot fields fall back to the base deployment values. The base config's
+// isExcludedRoute entries are kept (the dynamically derived host-LAN entry
+// the extension grafted at assembly time, plus the frozen outer-endpoint
+// /32|/128 set) — the outer path (management/WG endpoint traffic) must stay
+// out of our own tunnel regardless of what the map routes.
 export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig): VpnTunnelConfig {
   const address: string =
     net.address !== undefined && net.address !== null && net.address.length > 0

@@ -290,13 +290,25 @@ export function vpnActiveState(state: string): boolean {
 // 主页 status card text for the connector state. pendingStart/pendingStop are
 // the page's in-flight request latches (no live document yet / stop in
 // flight), so the card never shows a stale '未连接' while a request runs.
+// hasOverlayIp is the document's own overlay address (the network map arrived
+// and carried one): '已连接' requires the CORE state connected AND that
+// address. A tunnel that is already up while management has not delivered the
+// map yet (no own IP, no peers) shows the honest '连接中…' — or
+// '无法连接服务器' when the error hint is one of the server-unreachable
+// classes (timeout / network — the SAME classes lastErrorText renders as
+// server-unreachable), so the card and the red error line can no longer
+// disagree ('已连接' + an unreachable-server hint).
 export function homeStateText(state: string, pendingStart: boolean,
-  pendingStop: boolean): string {
+  pendingStop: boolean, hasOverlayIp: boolean, errorClass: string): string {
   if (pendingStop) {
     return '正在断开…';
   }
   if (state === 'connected') {
-    return '已连接';
+    if (hasOverlayIp === true) {
+      return '已连接';
+    }
+    return errorClass === 'timeout' || errorClass === 'network'
+      ? '无法连接服务器' : '连接中…';
   }
   if (state === 'connecting' || state === 'reconnecting') {
     return '连接中…';

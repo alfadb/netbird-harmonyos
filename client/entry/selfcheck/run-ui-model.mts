@@ -150,16 +150,28 @@ try {
   check('dead states are inactive', !m.vpnActiveState('disconnected') &&
     !m.vpnActiveState('failed') && !m.vpnActiveState('stopped') &&
     !m.vpnActiveState('') && !m.vpnActiveState('closed'));
-  check('home text: connected', m.homeStateText('connected', false, false) === '已连接');
+  check('home text: connected WITH the overlay ip',
+    m.homeStateText('connected', false, false, true, 'none') === '已连接');
+  check('home text: connected but no map yet is honest (连接中)',
+    m.homeStateText('connected', false, false, false, 'none') === '连接中…');
+  check('home text: connected, no map, server-unreachable error class',
+    m.homeStateText('connected', false, false, false, 'timeout') === '无法连接服务器' &&
+    m.homeStateText('connected', false, false, false, 'network') === '无法连接服务器');
+  check('home text: auth error is NOT server-unreachable (stays 连接中)',
+    m.homeStateText('connected', false, false, false, 'auth') === '连接中…');
   check('home text: connecting/reconnecting',
-    m.homeStateText('connecting', false, false) === '连接中…' &&
-    m.homeStateText('reconnecting', false, false) === '连接中…');
-  check('home text: failed', m.homeStateText('failed', false, false) === '连接失败');
-  check('home text: disconnected', m.homeStateText('disconnected', false, false) === '未连接');
+    m.homeStateText('connecting', false, false, false, 'none') === '连接中…' &&
+    m.homeStateText('reconnecting', false, false, false, 'none') === '连接中…');
+  check('home text: failed',
+    m.homeStateText('failed', false, false, false, 'none') === '连接失败');
+  check('home text: disconnected',
+    m.homeStateText('disconnected', false, false, false, 'none') === '未连接');
   check('home text: pending start without a document',
-    m.homeStateText('', true, false) === '连接中…');
+    m.homeStateText('', true, false, false, 'none') === '连接中…');
   check('home text: pending stop wins',
-    m.homeStateText('connected', true, true) === '正在断开…');
+    m.homeStateText('connected', true, true, true, 'none') === '正在断开…');
+  check('home text: pending stop wins even without the map',
+    m.homeStateText('connected', false, true, false, 'network') === '正在断开…');
   check('connection labels', m.connectionLabel('direct') === '直连' &&
     m.connectionLabel('relay') === '中继' && m.connectionLabel('unknown') === '未知');
   check('handshake texts', m.lastHandshakeText(null) === '—' &&

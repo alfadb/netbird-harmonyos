@@ -563,8 +563,10 @@ try {
 
   // The merged config of the INITIAL generation, built by the REAL mapper:
   // base template + two frozen endpoint /32 exclusions, the core snapshot
-  // applied, default route HELD (the evidence-round discipline). 4 rows, 3 of
-  // them excluded.
+  // applied, default route HELD (the evidence-round discipline). 3 rows, 2 of
+  // them excluded (the base template carries NO static LAN exclusion anymore
+  // — that piece is derived per create from the physical default network,
+  // and this composition has no network world, so none is grafted).
   const derived = [
     { destination: '203.0.113.7', prefixLength: 32, gateway: '10.99.0.1',
       hasGateway: true, isDefaultRoute: false, isExcludedRoute: true },
@@ -592,16 +594,16 @@ try {
     marker0.length === 1 && gen0 === 0, JSON.stringify(marker0));
   check('G1 marker literal (requestId|gen|kind|exclusions|wgPeerEndpoints|routes)',
     marker0[0] === 'VPN_EXCLUSION_GENERATION|requestId=' + REQUEST_ID +
-    '|gen=0|kind=initial|exclusions=3|wgPeerEndpoints=0|routes=4', marker0.join('\n'));
+    '|gen=0|kind=initial|exclusions=2|wgPeerEndpoints=0|routes=3', marker0.join('\n'));
   const rows0 = linesWith('VPN_ROUTE_ENTRY|');
   check('G1 row count == the announced routes= (§2.1 (2a)①)',
-    rows0.length === 4 && String(rows0.length) === fieldOf(marker0[0], 'routes'),
+    rows0.length === 3 && String(rows0.length) === fieldOf(marker0[0], 'routes'),
     JSON.stringify(rows0));
   check('G1 index uniquely covers 0..r-1 (§2.1 (2a)②)',
     JSON.stringify(rows0.map((l: string): string => fieldOf(l, 'index'))) ===
-    JSON.stringify(['0', '1', '2', '3']), JSON.stringify(rows0));
+    JSON.stringify(['0', '1', '2']), JSON.stringify(rows0));
   check('G1 excluded rows == the announced exclusions= (§2.1 (2a)③)',
-    rows0.filter((l: string): boolean => fieldOf(l, 'isExcludedRoute') === 'true').length === 3 &&
+    rows0.filter((l: string): boolean => fieldOf(l, 'isExcludedRoute') === 'true').length === 2 &&
     String(rows0.filter((l: string): boolean =>
       fieldOf(l, 'isExcludedRoute') === 'true').length) === fieldOf(marker0[0], 'exclusions'),
     JSON.stringify(rows0));
@@ -642,15 +644,15 @@ try {
   check('G3 the recreate leg announces exactly one generation, kind=recreate',
     marker1.length === 1 && fieldOf(marker1[0], 'kind') === 'recreate' &&
     fieldOf(marker1[0], 'gen') === '1', marker1.join('\n'));
-  check('G3 recreate marker counts match its OWN submitted config (5 rows / 3 excluded)',
+  check('G3 recreate marker counts match its OWN submitted config (4 rows / 2 excluded)',
     marker1[0] === 'VPN_EXCLUSION_GENERATION|requestId=' + REQUEST_ID +
-    '|gen=1|kind=recreate|exclusions=3|wgPeerEndpoints=0|routes=5', marker1.join('\n'));
+    '|gen=1|kind=recreate|exclusions=2|wgPeerEndpoints=0|routes=4', marker1.join('\n'));
   const rows1 = linesWith('VPN_ROUTE_ENTRY|');
   check('G3 recreate rows: count/index/excluded match the marker, all gen=1',
-    rows1.length === 5 &&
+    rows1.length === 4 &&
     JSON.stringify(rows1.map((l: string): string => fieldOf(l, 'index'))) ===
-    JSON.stringify(['0', '1', '2', '3', '4']) &&
-    rows1.filter((l: string): boolean => fieldOf(l, 'isExcludedRoute') === 'true').length === 3 &&
+    JSON.stringify(['0', '1', '2', '3']) &&
+    rows1.filter((l: string): boolean => fieldOf(l, 'isExcludedRoute') === 'true').length === 2 &&
     rows1.every((l: string): boolean => fieldOf(l, 'gen') === '1'), JSON.stringify(rows1));
   const recreateAnchor = lastLine('VPN_RECREATE_RESOLVED|');
   check('G3 recreate acceptance anchor literal (§2.1 (4))',
@@ -667,9 +669,9 @@ try {
     JSON.stringify(logs()));
   check('G3 the pre-existing recreate lines coexist unchanged',
     linesWith('VPN_RECREATE_SNAPSHOT|').length === 1 &&
-    fieldOf(lastLine('VPN_RECREATE_SNAPSHOT|'), 'routes') === '5' &&
+    fieldOf(lastLine('VPN_RECREATE_SNAPSHOT|'), 'routes') === '4' &&
     fieldOf(lastLine('VPN_RECREATE_SNAPSHOT|'), 'frozenEndpointExclusions') === '2' &&
-    fieldOf(lastLine('VPN_RECREATE_DONE|'), 'routes') === '5' &&
+    fieldOf(lastLine('VPN_RECREATE_DONE|'), 'routes') === '4' &&
     fieldOf(lastLine('VPN_RECREATE_DONE|'), 'defaultRoutes') === '1',
     linesWith('VPN_RECREATE_SNAPSHOT|').join('\n') + '\n' +
     linesWith('VPN_RECREATE_DONE|').join('\n'));

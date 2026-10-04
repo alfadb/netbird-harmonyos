@@ -140,7 +140,16 @@ struct Index {
 
   private stateText(): string {
     const state: string = this.published !== null ? this.published.state : '';
-    return homeStateText(state, this.requestSent, this.stopSent);
+    // 已连接 requires the core state connected AND the own overlay IP (the
+    // network map arrived); a live tunnel without the map yet is 连接中… /
+    // 无法连接服务器 (与红字错误提示一致, see NetBirdUiModel.homeStateText).
+    const hasOverlayIp: boolean = this.published !== null &&
+      this.published.address !== undefined && this.published.address !== null &&
+      this.published.address.length > 0;
+    const errorClass: string = this.published !== null &&
+      this.published.last_error_class !== undefined &&
+      this.published.last_error_class !== null ? this.published.last_error_class : 'none';
+    return homeStateText(state, this.requestSent, this.stopSent, hasOverlayIp, errorClass);
   }
 
   private stateColor(): string {
@@ -151,7 +160,7 @@ struct Index {
     if (text === '连接中…' || text === '正在断开…') {
       return '#8A6D1A';
     }
-    if (text === '连接失败') {
+    if (text === '连接失败' || text === '无法连接服务器') {
       return '#A12622';
     }
     return '#3D4A55';
