@@ -220,6 +220,14 @@ impl TunFd {
         })
     }
 
+    /// The released placeholder: a TunFd that owns NO descriptor. The N8
+    /// recreate release path swaps this in when the device lets go of its
+    /// dup ahead of the platform destroy() — every I/O method answers
+    /// `Closed` (the pump's TUN half pauses; WG sessions and peers stay).
+    pub fn closed() -> TunFd {
+        TunFd { fd: None, ledger_inst: 0, nonblock_ofd: false }
+    }
+
     /// The dup fd number while open (`None` once closed).
     pub fn fd(&self) -> Option<i32> {
         self.fd

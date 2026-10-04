@@ -432,6 +432,13 @@ impl SlotEnd {
         self.tun_test_end = new_end;
     }
 
+    /// The "pre-destroy release" leg of the recreate (roam-1005-0124): the
+    /// core closes ITS OWN TUN dup BEFORE the platform destroy() — the exact
+    /// NAPI entry `connector_tun_release()` backs.
+    fn release_tun(&self) -> Result<Option<i32>, &'static str> {
+        self.slot.release_tun()
+    }
+
     fn port(&self) -> u16 {
         self.slot.with_device(|d| d.local_addr()).expect("device up").1
     }
@@ -835,4 +842,98 @@ fn recreated_tun_dup_forced_nonblocking_pump_transceives_on_new_fd() {
         handshakes,
         "no re-handshake for the nonblocking replace"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 5. roam-1005-0124 regression: release the TUN dup BEFORE the platform
+//    destroy — sessions kept while released, data plane recovers on the new
+//    fd, no re-handshake
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tun_release_before_destroy_keeps_sessions_and_recovers_on_new_tun() {
+    let peer = Peer::build(&SECRET_B, key_a(), vec![(ADDR_A, 32)]);
+    let mut slot_end = SlotEnd::build(&SECRET_A, key_b(), vec![(ADDR_B, 32)], peer.port());
+    let mut now = 5000u64;
+    slot_end.feed_both();
+    establish(&slot_end, &peer, &mut now);
+    assert!(slot_end.ready());
+
+    let handshakes_before = slot_end.slot.dataplane_status().expect("status").handshakes;
+    assert!(slot_end.slot.dataplane_status().expect("status").fed_tun);
+
+    // Phase 1 — the pre-destroy release (the new recreate step): the core
+    // closes its own dup. The device STAYS UP with its WG session, the TUN
+    // half of the pump pauses, and nothing reads the (still-open) platform
+    // raw anymore.
+    let released = slot_end.release_tun().expect("release on a live device");
+    assert!(released.is_some(), "a fed device must close exactly its dup");
+    assert!(slot_end.slot.device_up(), "the device stays up across the release");
+    assert!(slot_end.ready(), "the WG session survives the release");
+    assert_eq!(
+        slot_end.slot.with_device(|d| d.tun_fd()).expect("device up"),
+        None,
+        "no TUN dup may remain open after the release"
+    );
+    // honest status: with the dup gone the seam reports no TUN attached
+    let st = slot_end.slot.dataplane_status().expect("status");
+    assert!(!st.fed_tun && st.device_up && st.ready);
+    // idempotent: a second release reports nothing-to-release, not an error
+    assert_eq!(slot_end.release_tun().expect("re-release"), None);
+    assert!(fd_open(slot_end.tun_raw), "fd contract: the raw stays the platform's");
+
+    // the paused pump does NOT touch the platform raw: a frame parked on the
+    // TUN half is neither read nor routed while released
+    let parked = ip_udp_packet(ADDR_A, ADDR_B, 40301, 5353, b"n8-parked-while-released");
+    write_tun(slot_end.tun_test_end, &parked);
+    let tx_before = slot_end.slot.dataplane_status().expect("status").tx_packets;
+    step(&slot_end, &peer, now);
+    now += 10;
+    assert_eq!(
+        slot_end.slot.dataplane_status().expect("status").tx_packets,
+        tx_before,
+        "the released TUN half must not route anything"
+    );
+
+    // Phase 2 — the platform destroy() now actually removes the interface
+    // (with the dup gone, the raw close is the LAST fd over the netdev) ...
+    slot_end.platform_destroy_tun();
+
+    // Phase 3 — the new create(): a fresh platform TUN fd re-attaches via
+    // the SAME feed entry; the data plane recovers with the session kept.
+    slot_end.recreate_tun();
+    assert!(slot_end.slot.device_up());
+    assert!(slot_end.ready(), "session must survive release + re-attach");
+    assert_eq!(
+        slot_end.slot.dataplane_status().expect("status").handshakes,
+        handshakes_before,
+        "no re-handshake across release + re-attach"
+    );
+    let st = slot_end.slot.dataplane_status().expect("status");
+    assert!(st.fed_tun && st.device_up && st.ready);
+
+    // the parked frame belonged to the DEAD generation: the platform-side
+    // queue died with the raw, and the fresh fd carries live payload both
+    // ways byte-exact (data-plane RECOVERY, not just liveness).
+    let pkt = ip_udp_packet(ADDR_A, ADDR_B, 40302, 5353, b"n8-rel-a2b");
+    assert_eq!(
+        carry_frame(&slot_end, &peer, &mut now, &pkt),
+        pkt,
+        "A→B must cross over the re-attached fd"
+    );
+    let back = ip_udp_packet(ADDR_B, ADDR_A, 5353, 40302, b"n8-rel-b2a");
+    write_tun(peer.tun_test_end, &back);
+    let got = std::cell::RefCell::new(None);
+    assert!(
+        pump_until(&slot_end, &peer, &mut now, 5_000, |_s, _p| {
+            if got.borrow().is_none() {
+                *got.borrow_mut() = read_tun(slot_end.tun_test_end);
+            }
+            got.borrow().is_some()
+        }),
+        "B→A must cross over the re-attached fd"
+    );
+    assert_eq!(got.into_inner().expect("frame"), back);
+    let st = slot_end.slot.dataplane_status().expect("status");
+    assert!(st.ready && st.peers_with_session == 1 && st.decrypt_errors == 0);
 }

@@ -466,6 +466,14 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ ok: true, device_up: true });\n' +
   '  },\n' +
   '  connector_tun_fd_feed: () => JSON.stringify({ ok: true, device_up: true }),\n' +
+  // roam-1005-0124: the recreate leg's pre-destroy TUN release. Counted and
+  // overridable per test like the other seams; the default is the happy
+  // path (a live device's dup closed).
+  '  connector_tun_release: () => {\n' +
+  '    g().__NB_TUN_RELEASE_CALLS = (g().__NB_TUN_RELEASE_CALLS || 0) + 1;\n' +
+  '    if (typeof g().__NB_TUN_RELEASE_ANSWER === "string") { return g().__NB_TUN_RELEASE_ANSWER; }\n' +
+  '    return JSON.stringify({ ok: true, released: true, fd: 63, device_up: true });\n' +
+  '  },\n' +
   '  connector_route_set_applied: (payload, isRecreate) => {\n' +
   '    g().__NB_ACK = { payload: payload, isRecreate: isRecreate };\n' +
   '    return JSON.stringify({ ok: true, recreate: { count: 1 } });\n' +

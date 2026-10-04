@@ -63,10 +63,32 @@ try {
     p.ifaceLostDecision('unknown', false, true) === 'ignore');
   check('lost: absent without a live generation is ignored (rebuild in flight)',
     p.ifaceLostDecision('absent', false, false) === 'ignore');
-  check('lost: first loss of a live generation rebuilds',
-    p.ifaceLostDecision('absent', false, true) === 'rebuild');
-  check('lost: a second loss (budget spent) fails closed',
-    p.ifaceLostDecision('absent', true, true) === 'fail-closed');
+  check('lost: first loss of a live generation rebuilds (budget available)',
+    p.ifaceLostDecision('absent', true, true) === 'rebuild');
+  check('lost: a spent budget fails closed',
+    p.ifaceLostDecision('absent', false, true) === 'fail-closed');
+
+  // ---- ifaceLostRetryAllowed (roam-1005-0124: per-EVENT budget + storm cap) -
+  // an empty log always allows: every recreate event re-arms the rebuild
+  check('budget: empty log allows the rebuild',
+    p.ifaceLostRetryAllowed([], 100000, 60000, 3) === true);
+  // a rebuild started inside the window counts against the cap
+  check('budget: under the cap allows (2 of 3 spent)',
+    p.ifaceLostRetryAllowed([95000, 98000], 100000, 60000, 3) === true);
+  check('budget: at the cap denies (3 of 3 spent)',
+    p.ifaceLostRetryAllowed([95000, 98000, 99999], 100000, 60000, 3) === false);
+  // a rebuild started OUTSIDE the window no longer counts — the window slides
+  check('budget: an aged-out rebuild frees budget again',
+    p.ifaceLostRetryAllowed([10000, 20000, 30000], 100000, 60000, 3) === true);
+  // boundary: exactly windowMs old is OUT of the window (strictly-greater
+  // comparison) — one ms newer is IN
+  check('budget: the window edge is exclusive',
+    p.ifaceLostRetryAllowed([40000, 40000, 40000], 100000, 60000, 3) === true &&
+    p.ifaceLostRetryAllowed([40001, 40001, 40001], 100000, 60000, 3) === false);
+  // the SECOND network switch gets its retry: one earlier rebuild (from the
+  // first switch) does not exhaust the per-event budget
+  check('budget: one prior rebuild still allows the next event\'s retry',
+    p.ifaceLostRetryAllowed([70000], 130000, 60000, 3) === true);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

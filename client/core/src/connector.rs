@@ -4990,6 +4990,40 @@ pub fn connector_tun_fd_feed_json(fd: i32) -> String {
     wg_feed_json(fd, FeedFdKind::Tun)
 }
 
+/// The `connector_tun_release()` implementation (roam-1005-0124) — the
+/// shell's pre-destroy leg of a controlled recreate: while the device is up,
+/// close its current TUN dup so the platform can actually remove the OLD
+/// vpn-tun netdev (the kernel keeps a netdev alive until its last fd closes;
+/// a dup held across destroy() is exactly what made the old teardown land
+/// AFTER the new create and kill the same-named fresh interface). The TUN
+/// half of the data plane pauses; peers, tunnels and WG sessions stay — the
+/// subsequent `connector_tun_fd_feed(new_fd)` re-attaches via the N8 replace
+/// path.
+///
+/// Failure tokens: `no-connector`, `no-wg-device` (same meaning as the feed
+/// seams), `device-not-up` (no device — nothing to release; the shell logs
+/// it and proceeds with the recreate). Success:
+/// `{"ok":true,"released":<bool>,"fd":<closed dup or -1>,"device_up":<bool>}`.
+pub fn connector_tun_release_json() -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let Some(feed) = handle.wg_feed.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-wg-device"));
+    };
+    match feed.release_tun() {
+        Ok(fd) => format!(
+            "{{{},{},{},{}}}",
+            jbool("ok", true),
+            jbool("released", fd.is_some()),
+            jinum("fd", fd.unwrap_or(-1) as i64),
+            jbool("device_up", feed.device_up())
+        ),
+        Err(token) => format!("{{{},{}}}", jbool("ok", false), jstr("error", token)),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum FeedFdKind {
     WgSocket,

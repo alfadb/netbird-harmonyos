@@ -78,7 +78,7 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult',
+    'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape.
     'PhysicalBearerFacts'],
   // UI phase 1: the erased input/document shapes buildUiStatusDocument names.

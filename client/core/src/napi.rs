@@ -121,6 +121,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("socket_supply_dns_servers", napi_socket_supply_dns_servers);
     reg!("connector_wg_socket_feed", napi_connector_wg_socket_feed);
     reg!("connector_tun_fd_feed", napi_connector_tun_fd_feed);
+    reg!("connector_tun_release", napi_connector_tun_release);
     reg!("connector_route_set_applied", napi_connector_route_set_applied);
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
@@ -415,6 +416,7 @@ mod tests {
             "connector_signal_socket_feed",
             "connector_wg_socket_feed",
             "connector_tun_fd_feed",
+            "connector_tun_release",
             "connector_route_set_applied",
             "connector_status",
             "connector_network_config",
@@ -668,6 +670,12 @@ unsafe extern "C" fn napi_connector_tun_fd_feed(
     let a = cb_args(env, info);
     let fd = a.i32_at(0, -1);
     ret_json(env, crate::connector::connector_tun_fd_feed_json(fd))
+}
+
+// roam-1005-0124: shell-side pre-destroy TUN release (the recreate leg's
+// first step) — closes the device's current TUN dup, sessions kept.
+unsafe extern "C" fn napi_connector_tun_release(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_tun_release_json())
 }
 
 // N8: shell ACK of the route set applied to the platform VpnConfig at

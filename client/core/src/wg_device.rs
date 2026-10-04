@@ -1185,6 +1185,35 @@ impl WgDevice {
         Ok(())
     }
 
+    /// roam-1005-0124 — pre-destroy TUN release: close the CURRENT TUN dup
+    /// and swap in the closed placeholder, keeping peers, tunnels AND
+    /// established WG sessions (the pump's TUN half pauses — `service_tun`
+    /// no-ops on a closed TunFd; UDP/tick keep running, so keepalives and
+    /// session state survive the release window). Returns the closed dup's
+    /// fd number, or `None` when the device held no open dup (idempotent).
+    ///
+    /// Why this exists: until the LAST fd over the platform TUN closes, the
+    /// kernel/platform keeps the old vpn-tun netdev alive — the recreate
+    /// settle leg then never sees the old interface disappear, and when the
+    /// swap-time close finally lands it tears down the SAME-NAMED fresh
+    /// interface (device run 1005-0124: settle cap 3839 ms → new create →
+    /// old dup closed at replace → iface lost ~1 s later). Releasing BEFORE
+    /// the platform destroy() lets the old netdev go the moment destroy()
+    /// closes the raw fd.
+    pub fn release_tun(&mut self) -> Option<i32> {
+        if self.tun.fd().is_none() {
+            return None;
+        }
+        let old = core::mem::replace(&mut self.tun, TunFd::closed());
+        match old.close() {
+            Ok(fd) => {
+                emit("N8_WG_DEVICE|tun-released|sessions-kept");
+                Some(fd)
+            }
+            Err(_) => None, // AlreadyClosed: a racing release already ran
+        }
+    }
+
     /// Our current TUN dup fd number (`None` if the TunFd were closed —
     /// observability only; always distinct from the shell-side raw numbers).
     pub fn tun_fd(&self) -> Option<i32> {
@@ -2801,6 +2830,26 @@ impl WgDeviceFeed {
     /// likewise accepts a validated replacement while the device is up.
     pub fn feed_tun(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
         self.feed_fd(raw_fd, FeedWhich::Tun)
+    }
+
+    /// roam-1005-0124: the shell's pre-destroy TUN release — while the
+    /// device is up, close its current TUN dup ([`WgDevice::release_tun`]),
+    /// pausing the TUN half of the data plane while peers, tunnels and WG
+    /// sessions stay live. The next `feed_tun` (the new connection's fd)
+    /// re-attaches via the N8 replace path. `Err("device-not-up")` when no
+    /// device exists (nothing to release — the shell logs and proceeds);
+    /// `Ok(None)` when the device held no open dup (idempotent re-release).
+    pub fn release_tun(&self) -> Result<Option<i32>, &'static str> {
+        let mut g = self.inner.lock_poison();
+        let Some(dev) = g.device.as_ref() else {
+            return Err("device-not-up");
+        };
+        let released = dev.with_device(|d| d.release_tun());
+        if released.is_some() {
+            g.tun_raw = None; // honest status: no TUN attached right now
+            emit("N8_WG_FEED|tun-released|device-kept");
+        }
+        Ok(released)
     }
 
     fn feed_fd(&self, raw_fd: i32, which: FeedWhich) -> Result<(), WgFeedRefusal> {

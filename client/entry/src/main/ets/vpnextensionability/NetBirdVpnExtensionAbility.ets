@@ -52,12 +52,12 @@ import type { LanExclusionProbe, LanExclusionResult } from './NetBirdEndpointExc
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
   DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
-  RouteSetAppliedResult, SocketFeedResult, WgFeedResult,
+  RouteSetAppliedResult, SocketFeedResult, TunReleaseResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
-  connectorStatus, connectorStop, connectorTunFdFeed, connectorWgSocketFeed,
+  connectorStatus, connectorStop, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
   physicalDefaultLanProbe,
@@ -73,7 +73,8 @@ import {
 } from './NetBirdConnector';
 
 import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
-import { ifaceLostDecision, ifaceVerifyOutcome, settleWaitAction } from './NetBirdRecreatePolicy';
+import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
+  from './NetBirdRecreatePolicy';
 
 import { isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
@@ -144,6 +145,14 @@ const RECREATE_SETTLE_POLL_MS: number = 250;
 const RECREATE_IFACE_VERIFY_TRIES: number = 3;
 const RECREATE_IFACE_VERIFY_GAP_MS: number = 500;
 const RECREATE_IFACE_RECHECK_MS: number = 5000;
+// roam-1005-0124: the iface-loss rebuild budget — per RECREATE EVENT (every
+// loss of a live generation re-arms the automatic full rebuild; the old
+// per-session latch starved the second network switch of its retry and
+// fail-closed a healthy session), bounded by this anti-storm sliding
+// window: at most 3 rebuild STARTS within any 60 s. Past the cap the honest
+// fail-closed disconnect applies until the window slides.
+const IFACE_LOST_RETRY_WINDOW_MS: number = 60000;
+const IFACE_LOST_RETRY_WINDOW_MAX: number = 3;
 // 场景B roaming fix (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the stability
 // window a switched physical default network must hold before the shell
 // re-derives the LAN exclusion and compares it with the live config. The
@@ -349,10 +358,13 @@ interface SignalProvisionResult {
 
 // N2-H: outcome of the endpoint-exclusion derivation. `fatal=true` is the
 // fail-closed verdict (relay required but some endpoint could not be frozen):
-// the caller must NOT create the VPN.
+// the caller must NOT create the VPN. `dnsRoutes` is the RESOLVER (/32)
+// subset of `routes` — roam-1005-0124: the one piece a recreate must
+// re-derive from the current physical network instead of reusing frozen.
 interface EndpointExclusionOutcome {
   fatal: boolean;
   routes: ExcludedRouteEntry[];
+  dnsRoutes: ExcludedRouteEntry[];
 }
 
 // N2-H I5: one shell-exclusion entry of the arm options (§5.1
@@ -703,12 +715,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // core-side budget/cooldown bounds).
   private recreateInFlight: boolean = false;
   // roam-1005-0014: the delayed post-recreate interface recheck timer handle
-  // (one shot per completed recreate; cleared on teardown), and the ONE-SHOT
-  // session budget for an automatic full rebuild after a watchdog-detected
-  // interface loss — a second loss fails closed (honest disconnect) instead
-  // of looping rebuilds.
+  // (one shot per completed recreate; cleared on teardown), and the
+  // interface-loss rebuild budget (roam-1005-0124): per-EVENT, not per
+  // session — every recreate event re-arms the automatic full rebuild, and
+  // the sliding-window cap (IFACE_LOST_RETRY_* below) is the anti-storm
+  // bound. `ifaceLostRetryLogMs` holds the Date.now() of each rebuild
+  // START.
   private ifaceRecheckTimer: number = -1;
-  private ifaceLostRetryUsed: boolean = false;
+  private ifaceLostRetryLogMs: number[] = [];
   // VPN_UI_STATUS diagnostic dedup (change-or-60 s, same discipline as the
   // VPN_CONNECTOR_STATUS signature gate).
   private lastUiStatusLogSignature: string = '';
@@ -742,6 +756,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // default-routed) tunnel. A fresh freeze (re-resolution) happens on the
   // next full start, never from a cached cross-session set.
   private frozenEndpointExclusions: ExcludedRouteEntry[] = [];
+  // roam-1005-0124: the RESOLVER (/32) subset of the frozen set — the one
+  // piece that must NOT cross a network switch frozen (the home Wi-Fi DNS
+  // /32 stayed excluded over cellular and broke 192.168.50.1 access). The
+  // recreate leg re-derives it from the CURRENT physical network and grafts
+  // the remainder (management/signal/relay/stun /32) frozen, as before.
+  private frozenDnsEndpointExclusions: ExcludedRouteEntry[] = [];
   private endpointExclusionsEnabled: boolean = true;
   // N2-H I5 (§5.3-2): the SHELL exclusion set retention for the device-side
   // evidence collector — the same derivation's endpoints (kind/host/port) and
@@ -1526,7 +1546,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const exclusion: EndpointExclusionOutcome = this.endpointExclusionsEnabled
       ? await this.deriveEndpointExclusions(mgmtEndpoint, stripDialPort(connectAddr),
         signalProvisioned, baseTemplate.tunnelAddress, net !== null ? net.stuns : null)
-      : { fatal: false, routes: [] };
+      : { fatal: false, routes: [], dnsRoutes: [] };
     if (!this.endpointExclusionsEnabled) {
       hilog.warn(DOMAIN, TAG,
         'VPN_ENDPOINT_EXCLUSIONS_DISABLED|requestId=%{public}s|mode=diagnostic|routes=0',
@@ -1544,6 +1564,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.frozenEndpointExclusions = exclusion.routes;
+    this.frozenDnsEndpointExclusions = exclusion.dnsRoutes;
     // 动态 LAN 排除先于端点冻结集 graft（与旧静态项相同的落位：managed 路由
     // 之后、端点 /32 之前；mergeExcludedRouteEntries 对同 destination+prefix
     // 去重，端点 /32 与 LAN /24 不会冲突）
@@ -2016,6 +2037,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     const build: ExclusionBuildResult = buildExcludedRouteEntries(resolutions, gateway);
+    // roam-1005-0124: mark the RESOLVER subset of the built set. A recreate
+    // after a network switch re-derives exactly this subset from the
+    // then-current physical network (cross-network DNS /32 exclusions broke
+    // on-device 192.168.50.1 reachability over cellular); the remaining
+    // endpoint /32s stay frozen as before. A resolver address that also
+    // appears as another kind's resolved IP collapses into one route and is
+    // classified here as dns — the recreate then treats it as re-derivable.
+    const dnsAddresses: string[] = [];
+    for (let i = 0; i < dns.endpoints.length; i++) {
+      const address: string = stripDialPort(dns.endpoints[i].host);
+      if (dnsAddresses.indexOf(address) < 0) {
+        dnsAddresses.push(address);
+      }
+    }
+    const dnsRoutes: ExcludedRouteEntry[] = build.routes.filter(
+      (route: ExcludedRouteEntry): boolean => dnsAddresses.indexOf(route.destination) >= 0);
     for (let i = 0; i < build.failed.length; i++) {
       hilog.warn(DOMAIN, TAG,
         'VPN_ENDPOINT_EXCLUSION_SKIPPED|requestId=%{public}s|kind=%{public}s|host=%{public}s|' +
@@ -2046,7 +2083,65 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // untouched.
     this.n2hExclusionEndpoints = endpoints;
     this.n2hExclusionResolutions = resolutions;
-    return { fatal: fatal, routes: build.routes };
+    return { fatal: fatal, routes: build.routes, dnsRoutes: dnsRoutes };
+  }
+
+  // roam-1005-0124: the frozen endpoint /32s MINUS the resolver subset — the
+  // pieces a recreate grafts verbatim (management/signal/relay/stun
+  // resolutions are session-stable; only DNS follows the live network). The
+  // N2 evidence leg keeps the WHOLE frozen set (no split, byte-identical to
+  // the pre-existing behavior — its capture discipline is fixed at session
+  // start).
+  private frozenRoutesWithoutResolvers(): ExcludedRouteEntry[] {
+    if (this.n2Evidence !== undefined) {
+      return this.frozenEndpointExclusions;
+    }
+    const dnsRoutes: ExcludedRouteEntry[] = this.frozenDnsEndpointExclusions;
+    const frozen: ExcludedRouteEntry[] = [];
+    for (let i = 0; i < this.frozenEndpointExclusions.length; i++) {
+      const route: ExcludedRouteEntry = this.frozenEndpointExclusions[i];
+      let isDns: boolean = false;
+      for (let j = 0; j < dnsRoutes.length; j++) {
+        if (dnsRoutes[j].destination === route.destination &&
+          dnsRoutes[j].prefixLength === route.prefixLength) {
+          isDns = true;
+          break;
+        }
+      }
+      if (!isDns) {
+        frozen.push(route);
+      }
+    }
+    return frozen;
+  }
+
+  // roam-1005-0124: the recreate leg's resolver (/32) exclusions, derived
+  // from the CURRENT physical default network — the same platform facts and
+  // pure branch order the initial freeze used (derivePlatformDnsEndpoints),
+  // with the resolver addresses short-circuiting the literal classification
+  // (a resolver IS an IPv4 literal — no DNS leg runs inside the bounded
+  // recreate). A derivation gap (API error / no physical net / no usable
+  // resolver) yields NO resolver exclusions, honestly logged — never the
+  // stale cross-network set (cellular must not keep excluding the home
+  // Wi-Fi resolver). The N2 evidence leg returns nothing here (the whole
+  // frozen set, resolvers included, was grafted above).
+  private recreateResolverExclusionRoutes(gateway: string): ExcludedRouteEntry[] {
+    if (this.n2Evidence !== undefined) {
+      return [];
+    }
+    const dns: DnsDerivationResult = derivePlatformDnsEndpoints();
+    const resolutions: EndpointResolution[] = [];
+    for (let i = 0; i < dns.endpoints.length; i++) {
+      resolutions.push({ kind: 'dns', host: dns.endpoints[i].host, ok: true,
+        address: dns.endpoints[i].host });
+    }
+    const build: ExclusionBuildResult = buildExcludedRouteEntries(resolutions, gateway);
+    hilog.info(DOMAIN, TAG,
+      'VPN_RECREATE_DNS_EXCLUSIONS|requestId=%{public}s|dns-branch=%{public}s|' +
+      'resolvers=%{public}d|routes=%{public}d|dnsGap=%{public}s|diag=true|is_evidence=false',
+      this.requestId, dns.branch, dns.endpoints.length, build.routes.length,
+      dns.gap ? dns.gapReason : 'none');
+    return build.routes;
   }
 
   // N2-H I5 (§5.3-1): the device-side evidence collector's arm hook. Runs at
@@ -4421,14 +4516,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // resolutions. The base host-LAN exclusion, in contrast, is RE-DERIVED
       // here (scenario-A fix): a recreate happening after a network switch
       // must not drag the OLD network's LAN prefix into the new config.
+      // roam-1005-0124: the RESOLVER (/32) subset is re-derived here too,
+      // from the CURRENT physical network (same timing as the LAN exclusion)
+      // — the startup DNS freeze must not cross a network switch (the home
+      // Wi-Fi resolver 192.168.50.1/32 stayed excluded over cellular and
+      // broke on-device access to the gateway). The remaining endpoint /32s
+      // (management/signal/relay/stun) are grafted frozen, as before.
       const recreateTemplate: VpnTunnelConfig = this.n2Evidence !== undefined
         ? withoutN2ExcludedRoutes(loadVpnTunnelConfig()) : loadVpnTunnelConfig();
       const lanRecreate: LanExclusionResult =
         this.lanExclusionForConfig(recreateTemplate.tunnelAddress, 'recreate');
       const lanRoutesRecreate: ExcludedRouteEntry[] =
         lanRecreate.entry !== null ? [lanRecreate.entry] : [];
+      const frozenRoutesRecreate: ExcludedRouteEntry[] = this.frozenRoutesWithoutResolvers();
+      const dnsRoutesRecreate: ExcludedRouteEntry[] =
+        this.recreateResolverExclusionRoutes(recreateTemplate.tunnelAddress);
       const base: VpnTunnelConfig = withEndpointExclusions(recreateTemplate,
-        lanRoutesRecreate.concat(this.frozenEndpointExclusions));
+        lanRoutesRecreate.concat(frozenRoutesRecreate).concat(dnsRoutesRecreate));
       let merged: VpnTunnelConfig = applyNetworkConfig(base, net);
       const gateAllowed: boolean = net.default_route !== undefined && net.default_route !== null
         ? net.default_route.allowed
@@ -4501,6 +4605,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const RECREATE_IFACE_MAX_ATTEMPTS: number = 2;
       let acceptedFd: number = -1;
       for (let attempt: number = 1; attempt <= RECREATE_IFACE_MAX_ATTEMPTS; attempt++) {
+        // roam-1005-0124: release the core's TUN dup FIRST (idempotent —
+        // attempt 2 finds nothing left to release). The platform cannot
+        // remove the OLD vpn-tun netdev while our dup is the last open fd
+        // over it: the settle leg below then never sees the old iface
+        // disappear (cap 3839 ms), and the dup close at replace time makes
+        // the OLD teardown land and take the same-named NEW interface down
+        // with it (~1 s after VERIFY ok). Releasing here lets the destroy()
+        // below actually remove the netdev. The TUN half of the data plane
+        // pauses; peers, WG sessions and the protected WG socket stay, and
+        // the post-loop feed re-attaches the new fd.
+        stage = 'tun-release';
+        const release: TunReleaseResult = connectorTunRelease();
+        const releaseResult: string = !release.ok
+          ? `error:${release.error ?? 'unknown'}`
+          : (release.released === true ? 'ok' : 'ok-nothing-to-release');
+        hilog.info(DOMAIN, TAG,
+          'VPN_RECREATE_TUN_RELEASE|requestId=%{public}s|attempt=%{public}d|result=%{public}s|' +
+          'released=%{public}s|dup=%{public}d|deviceUp=%{public}s',
+          this.requestId, attempt, releaseResult, String(release.released === true),
+          release.fd !== undefined && release.fd !== null ? release.fd : -1,
+          String(release.device_up === true));
+        if (!release.ok && release.error !== 'device-not-up') {
+          throw new Error(`recreate-tun-release-failed:${release.error ?? 'unknown'}`);
+        }
         // destroy the OLD connection — the raw TUN fd dies here (fd
         // contract: its close belongs exclusively to VpnConnection.destroy());
         // the data plane keeps running on its own dups until the replacement
@@ -4806,15 +4934,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   // The watchdog tick (A.4): a settled, live generation whose vpn-tun the
   // registry definitively no longer lists — while the user did NOT stop —
-  // gets the honest handling. ONE automatic full rebuild per session; a
-  // second loss (or a loss after the retry budget is spent) is the existing
-  // fail-closed teardown (connector stopped + generation destroyed + status
-  // document removed → the UI shows 未连接 / VPN 已断开，请重新连接).
+  // gets the honest handling. EVERY loss re-arms the automatic full rebuild
+  // (roam-1005-0124: per recreate EVENT, not per session — the session latch
+  // starved the second network switch of its retry and fail-closed a
+  // healthy session); the sliding-window cap is the anti-storm bound, and
+  // past it the existing fail-closed teardown applies (connector stopped +
+  // generation destroyed + status document removed → the UI shows
+  // 未连接 / VPN 已断开，请重新连接).
   private checkVpnInterfaceAlive(presence: string): void {
     const generationLive: boolean = !this.destroyRequested && !this.connectorDeathHandled &&
       !this.recreateInFlight && this.destroyPromise === undefined &&
       this.connection !== undefined && this.createSettled && this.tunFd >= 0;
-    const decision: string = ifaceLostDecision(presence, this.ifaceLostRetryUsed, generationLive);
+    const retryAllowed: boolean = ifaceLostRetryAllowed(this.ifaceLostRetryLogMs, Date.now(),
+      IFACE_LOST_RETRY_WINDOW_MS, IFACE_LOST_RETRY_WINDOW_MAX);
+    const decision: string = ifaceLostDecision(presence, retryAllowed, generationLive);
     if (decision === 'ignore') {
       return;
     }
@@ -4830,16 +4963,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.connection === undefined || !this.createSettled) {
       return;
     }
+    const nowMs: number = Date.now();
+    const retryAllowed: boolean = ifaceLostRetryAllowed(this.ifaceLostRetryLogMs, nowMs,
+      IFACE_LOST_RETRY_WINDOW_MS, IFACE_LOST_RETRY_WINDOW_MAX);
     hilog.error(DOMAIN, TAG,
       'VPN_IFACE_LOST|requestId=%{public}s|source=%{public}s|retryUsed=%{public}s|' +
       'action=%{public}s',
-      this.requestId, source, String(this.ifaceLostRetryUsed),
-      this.ifaceLostRetryUsed ? 'teardown-vpn-fail-closed' : 'full-recreate-retry');
-    if (this.ifaceLostRetryUsed) {
+      this.requestId, source, String(!retryAllowed),
+      retryAllowed ? 'full-recreate-retry' : 'teardown-vpn-fail-closed');
+    if (!retryAllowed) {
       this.failRecreate(`iface-lost:${source}`, new Error('vpn-iface-absent-after-retry'));
       return;
     }
-    this.ifaceLostRetryUsed = true;
+    this.ifaceLostRetryLogMs.push(nowMs);
     this.performControlledRecreate(`vpn-iface-lost:${source}`).catch((error: Error): void => {
       hilog.error(DOMAIN, TAG,
         'VPN_RECREATE_REJECTED|requestId=%{public}s|summary=%{public}s',

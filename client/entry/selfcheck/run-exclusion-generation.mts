@@ -307,7 +307,7 @@ const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
     'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
-    'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult',
+    'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape
     // `physicalDefaultBearerFacts` answers.
     'PhysicalBearerFacts'],
@@ -710,6 +710,79 @@ try {
     [fieldOf(marker0[0], 'kind'), fieldOf(marker1[0], 'kind'),
       fieldOf(marker2[0], 'kind')].join(',') === 'initial,recreate,recreate',
     [marker0[0], marker1[0], marker2[0]].join('\n'));
+
+  // ---------------- R group (roam-1005-0124): pre-destroy TUN release, -----
+  // ---------------- per-event resolver exclusion re-derivation -------------
+  // A fresh ability with the frozen sets staged as the start flow would have
+  // retained them on a HOME Wi-Fi boot: one management /32 (session-stable)
+  // plus the home resolver 192.168.50.1/32. The network world is now the
+  // PHYSICAL CELLULAR net the recreate runs on (its own resolver 10.64.64.64).
+  {
+    const cellAbility = freshAbility(mod, FIXTURE_FILESDIR);
+    const frozenMgmt = { destination: '203.0.113.7', prefixLength: 32, gateway: '10.99.0.1',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: true };
+    const frozenHomeDns = { destination: '192.168.50.1', prefixLength: 32, gateway: '10.99.0.1',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: true };
+    cellAbility['frozenEndpointExclusions'] = [frozenMgmt, frozenHomeDns];
+    cellAbility['frozenDnsEndpointExclusions'] = [frozenHomeDns];
+    seedNetCtx({
+      __NB_NET_DEFAULT_ID: 100,
+      __NB_NET_CAPS_BY_ID: { 100: { networkCap: [15], bearerTypes: [0] } },
+      __NB_NET_PROPS_BY_ID: {
+        100: { dnses: [{ address: '10.64.64.64', family: 1, port: 53 }] }
+      }
+    });
+    G['__NB_TUN_RELEASE_CALLS'] = 0;
+    resetLog();
+    await driveRecreate(cellAbility);
+    // the release happens BEFORE the destroy→settle leg (its line precedes
+    // the settle line) and the seam fired exactly once for the attempt
+    const releaseLine = lastLine('VPN_RECREATE_TUN_RELEASE|');
+    const logTextR = logs().join('\n');
+    check('R1 the recreate releases the core TUN dup before the settle leg',
+      releaseLine.indexOf('|result=ok|') > 0 &&
+      releaseLine.indexOf('|released=true|') > 0 &&
+      logTextR.indexOf('VPN_RECREATE_TUN_RELEASE|') <
+      logTextR.indexOf('VPN_RECREATE_SETTLE|'),
+      releaseLine);
+    check('R1 the release seam fired exactly once for the accepted attempt',
+      Number(G['__NB_TUN_RELEASE_CALLS'] ?? 0) === 1, String(G['__NB_TUN_RELEASE_CALLS']));
+    // resolver re-derivation: the CURRENT network's resolvers replace the
+    // crossed-network home /32; the frozen management /32 stays
+    const dnsLine = lastLine('VPN_RECREATE_DNS_EXCLUSIONS|');
+    check('R2 the recreate re-derives resolver exclusions from the CURRENT network',
+      fieldOf(dnsLine, 'dns-branch') === 'default' &&
+      fieldOf(dnsLine, 'resolvers') === '1' && fieldOf(dnsLine, 'routes') === '1' &&
+      fieldOf(dnsLine, 'dnsGap') === 'none',
+      dnsLine);
+    const destsR = linesWith('VPN_ROUTE_ENTRY|').map(
+      (l: string): string => fieldOf(l, 'dest'));
+    check('R2 the fresh cellular resolver /32 is excluded',
+      destsR.indexOf('10.64.64.64') >= 0, JSON.stringify(destsR));
+    check('R2 the crossed-network home resolver /32 is NOT carried over',
+      destsR.indexOf('192.168.50.1') < 0, JSON.stringify(destsR));
+    check('R2 the frozen management /32 stays excluded',
+      destsR.indexOf('203.0.113.7') >= 0, JSON.stringify(destsR));
+
+    // a dns GAP (no physical net at all) drops the stale resolver set
+    // honestly — never silently keeps the crossed-network freeze
+    const gapAbility = freshAbility(mod, FIXTURE_FILESDIR);
+    gapAbility['frozenEndpointExclusions'] = [frozenHomeDns];
+    gapAbility['frozenDnsEndpointExclusions'] = [frozenHomeDns];
+    seedNetCtx({});
+    G['__NB_TUN_RELEASE_CALLS'] = 0;
+    resetLog();
+    await driveRecreate(gapAbility);
+    const dnsLineGap = lastLine('VPN_RECREATE_DNS_EXCLUSIONS|');
+    const destsGap = linesWith('VPN_ROUTE_ENTRY|').map(
+      (l: string): string => fieldOf(l, 'dest'));
+    check('R3 a dns gap yields NO resolver exclusion (never the stale set)',
+      fieldOf(dnsLineGap, 'resolvers') === '0' &&
+      fieldOf(dnsLineGap, 'routes') === '0' &&
+      destsGap.indexOf('192.168.50.1') < 0,
+      dnsLineGap + ' ' + JSON.stringify(destsGap));
+    seedNetCtx({});
+  }
 
   // ---------------- G5: three-way R-2 consistency via the REAL arm hook ----
   setArmFile(true, undefined);

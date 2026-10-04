@@ -597,6 +597,26 @@ export function connectorTunFdFeed(fd: number): WgFeedResult {
   return JSON.parse(core.connector_tun_fd_feed(fd)) as WgFeedResult;
 }
 
+// roam-1005-0124: the pre-destroy TUN release result —
+// {ok:true,released:bool,fd:number,device_up:bool} / {ok:false,error}.
+export interface TunReleaseResult {
+  ok: boolean;
+  released?: boolean;
+  fd?: number;
+  device_up?: boolean;
+  error?: string;
+}
+
+// roam-1005-0124: BEFORE the recreate's destroy(), have the core close its
+// current TUN dup (TUN half of the data plane pauses; peers/WG sessions
+// kept) — the platform cannot remove the OLD vpn-tun netdev while our dup
+// is the last open fd over it, which is what made the old teardown land
+// AFTER the new create() and kill the same-named fresh interface.
+// `device-not-up` (nothing to release) is a NON-fatal answer.
+export function connectorTunRelease(): TunReleaseResult {
+  return JSON.parse(core.connector_tun_release()) as TunReleaseResult;
+}
+
 // N8: connector_route_set_applied result —
 // {ok:true,recreate:{required,count,exhausted,cooling_down,reason}} /
 // {ok:false,error}.
