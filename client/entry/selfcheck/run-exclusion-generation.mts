@@ -285,6 +285,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdUiModel',
+  // roam-1005-0014: the recreate lifecycle policy pure module the REAL
+  // extension imports; zero imports and no erased types, so no shim.
+  'NetBirdRecreatePolicy',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its two erased interfaces are re-declared by its shim below.
   'NetBirdN2Stimulus',
@@ -2806,6 +2809,10 @@ try {
   // W group pins its shape — here only that it is the one extra thing, then
   // silence): no new PROBE line, exactly one close round (two statistics
   // calls), and the REAL tick after that repeats nothing at all.
+  // roam-1005-0014: the production per-tick vpn-tun PRESENCE probe adds ONE
+  // getIfaceRxBytes call per live-status tick (never a WINDOW/PROBE line, and
+  // never a tx call — the close round stays provable by its single
+  // getIfaceTxBytes), so the expected counts carry that +1.
   G['__NB_STATUS'] = {
     running: true, state: 'connected', peer_count: 1, route_count: 2,
     reconnects: 0, terminal: false, wg: { device_up: true, ready: true }
@@ -2820,13 +2827,13 @@ try {
     linesWith(PROBE_PREFIX).length === 0 &&
     linesWith(WINDOW_PREFIX).length === 1 &&
     fieldOf(linesWith(WINDOW_PREFIX)[0], 'phase') === 'close' &&
-    p6CloseCalls === 2,
+    p6CloseCalls === 3,
     JSON.stringify({ window: linesWith(WINDOW_PREFIX), calls: p6CloseCalls }));
   resetLog();
   p6Tick();
   await drainProbe();
   check('P6 the tick after the close edge repeats nothing: no line, no statistics call',
-    statsCalls().length === callsAtP6 + p6CloseCalls &&
+    statsCalls().length === callsAtP6 + p6CloseCalls + 1 &&
     linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0,
     JSON.stringify({ window: linesWith(WINDOW_PREFIX), probe: linesWith(PROBE_PREFIX) }));
 
@@ -2967,7 +2974,10 @@ try {
     fieldOf(w2Close, 'rxBytes') === '2400' && fieldOf(w2Close, 'txBytes') === '3600' &&
     fieldOf(w2Close, 'rxError') === 'none' && fieldOf(w2Close, 'txError') === 'none' &&
     fieldOf(w2Close, 'diag') === 'true' && fieldOf(w2Close, 'is_evidence') === 'false' &&
-    w2Calls.length === 2 &&
+    // roam-1005-0014: 3 = close rx+tx PLUS the production presence probe's
+    // one rx (this tick's status was live); the close round itself stays
+    // pinned by the single getIfaceTxBytes call.
+    w2Calls.length === 3 &&
     w2Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
     w2Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0,
     JSON.stringify({ window: w2Lines, calls: w2Calls }));
@@ -2977,8 +2987,10 @@ try {
       closeStarted: fieldOf(w2Close, 'startedUnixMs') }));
 
   // W3: one-shot — the ticks after the close edge repeat nothing (no new
-  // WINDOW/PROBE line, no statistics call; the per-tick status lines are the
-  // pre-existing watcher chatter, not window output).
+  // WINDOW/PROBE line; the per-tick status lines are the pre-existing watcher
+  // chatter, not window output). roam-1005-0014: the only statistics traffic
+  // left is the production presence probe's ONE rx per live-status tick (the
+  // two replayed ticks below), never a WINDOW/PROBE line nor a tx call.
   const callsAtW3 = statsCalls().length;
   resetLog();
   w2Tick();
@@ -2986,7 +2998,7 @@ try {
   await drainProbe();
   check('W3 ticks after the close edge repeat nothing: no WINDOW/PROBE line, no statistics call',
     linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0 &&
-    statsCalls().length === callsAtW3,
+    statsCalls().length === callsAtW3 + 2,
     JSON.stringify({ window: linesWith(WINDOW_PREFIX), probe: linesWith(PROBE_PREFIX) }));
 
   // W4: a REJECTED close read prints unavailable + that direction's raw code,
@@ -3025,7 +3037,9 @@ try {
   await drainProbe();
   check('W4 the diagnostic flow continues: the next tick repeats nothing (one-shot consumed at issue)',
     linesWith(WINDOW_PREFIX).length === 0 && linesWith(PROBE_PREFIX).length === 0 &&
-    statsCalls().length === callsAtW4 + 2,
+    // roam-1005-0014: 4 = the close round's rx+tx (this snapshot predates the
+    // close tick) PLUS one presence-probe rx on each of the two live ticks.
+    statsCalls().length === callsAtW4 + 4,
     JSON.stringify({ window: linesWith(WINDOW_PREFIX), calls: statsCalls().slice(callsAtW4) }));
 
   // W5: NO native ARM success ⇒ zero close reads. Three shapes, mirroring P5,
@@ -3059,7 +3073,9 @@ try {
     check(w5Case.name + ' -> zero WINDOW lines, zero close read',
       linesWith(WINDOW_PREFIX).length === 0 &&
       linesWith(PROBE_PREFIX).length === 0 &&
-      statsCalls().length === callsAtW5, JSON.stringify(linesWith(WINDOW_PREFIX)));
+      // roam-1005-0014: the two live-status ticks carry only the production
+      // presence probe's one rx each — no WINDOW/PROBE line, no close read.
+      statsCalls().length === callsAtW5 + 2, JSON.stringify(linesWith(WINDOW_PREFIX)));
   }
 
   // W7 (2026-09-20 fix): the close edge is NOT bypassed by the tick forms that
@@ -3105,14 +3121,19 @@ try {
     await drainProbe();
     check(w7Form.name + ': the open edge only on the arming tick',
       w7Armed.length === 1 && fieldOf(w7Armed[0], 'phase') === 'open' &&
-      w7OpenCalls === 4,
+      // roam-1005-0014: 5 = the open round's four calls PLUS the arming
+      // tick's one presence-probe rx (its status was live for every form).
+      w7OpenCalls === 5,
       JSON.stringify({ window: w7Armed,
         calls: statsCalls().slice(callsAtW7Open, callsAtW7Open + w7OpenCalls) }));
     check(w7Form.name + ' still issues the close edge EXACTLY once (top of the tick, before the early return)',
       w7CloseLines.length === 1 && fieldOf(w7Close, 'phase') === 'close' &&
       fieldOf(w7Close, 'requestId') === REQUEST_ID &&
       fieldOf(w7Close, 'pairRequestId') === REQUEST_ID &&
-      w7Calls.length === 2 &&
+      // roam-1005-0014: a live-status form tick adds one presence-probe rx to
+      // the close round's rx+tx; the status-UNREACHABLE form (W7c) never
+      // reaches the status branch, so it adds none.
+      w7Calls.length === (w7Form.status === null ? 2 : 3) &&
       w7Calls.indexOf('getIfaceRxBytes:vpn-tun') >= 0 &&
       w7Calls.indexOf('getIfaceTxBytes:vpn-tun') >= 0,
       JSON.stringify({ window: w7CloseLines, calls: w7Calls }));

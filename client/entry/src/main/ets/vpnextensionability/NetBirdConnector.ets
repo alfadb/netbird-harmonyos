@@ -648,6 +648,10 @@ export interface PublishedStatus {
   reconnects?: number;
   // per-peer merged view (name/ip/online/connection/handshake)
   peers?: UiPeerEntry[];
+  // 2026-10-05: the extension's vpn-tun interface probe (true/false); omitted
+  // when the probe could not read the counter or the document predates the
+  // field. '已连接' requires this not to be false.
+  iface_present?: boolean;
 }
 
 // Read the published status. A missing, unreadable, malformed or STALE
@@ -667,7 +671,9 @@ export function readPublishedStatus(filesDir: string): PublishedStatus | null {
     if (doc.updated_at_ms === undefined || doc.updated_at_ms === null) {
       return null;
     }
-    if (Date.now() - doc.updated_at_ms > STATUS_POLL_MS * 3) {
+    // Same staleness rule as NetBirdStatusPolicy (two extension publish
+    // ticks): a document the extension stopped refreshing is not live state.
+    if (Date.now() - doc.updated_at_ms > STATUS_POLL_MS * 2) {
       return null;
     }
     return doc;

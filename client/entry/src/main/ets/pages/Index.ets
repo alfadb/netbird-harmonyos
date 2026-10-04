@@ -35,11 +35,17 @@ interface BusinessFailure extends Error {
 @Entry
 @Component
 struct Index {
-  // ---- live status (published document, fresh within 15 s) ----
+  // ---- live status (published document, fresh within 10 s) ----
   @State published: PublishedStatus | null = null;
   @State requestSent: boolean = false;
   @State stopSent: boolean = false;
   @State actionError: string = '';
+  // roam-1005-0014 A.3: shown when the status document VANISHES while the
+  // last live snapshot was in an active state and no user stop is in flight
+  // — the extension fail-closed (interface lost) or died; either way the
+  // tunnel is down and the user must reconnect explicitly. Cleared by a new
+  // start request.
+  @State disconnectNotice: string = '';
   // ---- navigation ----
   @State activeTab: number = 0;
   @State selectedPeer: UiPeerEntry | null = null;
@@ -59,6 +65,10 @@ struct Index {
   @State formHint: string = '';
   private requestId: string = `ui-${Date.now()}`;
   private observedPublishedStatus: boolean = false;
+  // The state of the last LIVE document (drives the disappearance notice:
+  // active → null without a user stop = the extension fail-closed / died).
+  private lastLiveState: string = '';
+  private lastUserStopAtMs: number = 0;
   private pollTimer: number = -1;
 
   aboutToAppear(): void {
@@ -96,22 +106,34 @@ struct Index {
   private pollConnectorStatus(): void {
     // The connector runs in the VpnExtension process: read the document that
     // process publishes into the shared filesDir (a NAPI call here would read
-    // an empty slot and show a dead "disconnected" state).
+    // an empty slot and show a dead "disconnected" state). A document older
+    // than two publish ticks counts as NOT running (B.3) — the page then
+    // shows 未连接 instead of passing off a stale snapshot as live state.
     const status: PublishedStatus | null = currentPublishedStatus(
       readPublishedStatus(getContext(this).filesDir), Date.now());
     if (status === null) {
       if (this.observedPublishedStatus) {
         // the document disappeared = the extension is gone (stopped or
         // destroyed): release the request latches for an explicit retry
+        // roam-1005-0014 A.3: if the last live state was ACTIVE and no user
+        // stop just resolved, the tunnel ended without the user asking —
+        // surface the reconnect notice (the extension's fail-closed path
+        // removed the document after its VPN_RECREATE_VERIFY failure).
+        if (vpnActiveState(this.lastLiveState) && !this.stopSent &&
+          Date.now() - this.lastUserStopAtMs > 8000) {
+          this.disconnectNotice = 'VPN 已断开，请重新连接';
+        }
         this.requestSent = false;
         this.stopSent = false;
         this.requestId = `ui-${Date.now()}`;
         this.observedPublishedStatus = false;
+        this.lastLiveState = '';
       }
       this.published = null;
       return;
     }
     this.observedPublishedStatus = true;
+    this.lastLiveState = status.state;
     if (vpnActiveState(status.state)) {
       this.requestSent = true;
       if (status.request_id !== undefined && status.request_id.length > 0) {
@@ -141,15 +163,51 @@ struct Index {
   private stateText(): string {
     const state: string = this.published !== null ? this.published.state : '';
     // 已连接 requires the core state connected AND the own overlay IP (the
-    // network map arrived); a live tunnel without the map yet is 连接中… /
-    // 无法连接服务器 (与红字错误提示一致, see NetBirdUiModel.homeStateText).
+    // network map arrived) AND the vpn-tun interface actually existing
+    // (roam-1005-0014: the interface was removed while the core kept
+    // self-reporting connected); a live tunnel without the map or without the
+    // interface is 连接中… / 无法连接服务器 (与红字错误提示一致, see
+    // NetBirdUiModel.homeStateText).
     const hasOverlayIp: boolean = this.published !== null &&
       this.published.address !== undefined && this.published.address !== null &&
       this.published.address.length > 0;
+    const ifacePresent: boolean = this.published === null ||
+      this.published.iface_present !== false;
     const errorClass: string = this.published !== null &&
       this.published.last_error_class !== undefined &&
       this.published.last_error_class !== null ? this.published.last_error_class : 'none';
-    return homeStateText(state, this.requestSent, this.stopSent, hasOverlayIp, errorClass);
+    return homeStateText(state, this.requestSent, this.stopSent, hasOverlayIp,
+      ifacePresent, errorClass);
+  }
+
+  // The FULLY connected gate (B.2): core state connected + own overlay IP +
+  // interface listed. While this holds, the core's last_error is HISTORY
+  // (it never self-clears — the device log carried lastError=network through
+  // a healthy connected phase), so the red error line is suppressed.
+  private fullyConnected(): boolean {
+    return this.published !== null && this.published.state === 'connected' &&
+      this.published.address !== undefined && this.published.address !== null &&
+      this.published.address.length > 0 && this.published.iface_present !== false;
+  }
+
+  // Home-card row values (roam-1005-0014 B.1): these MUST be method calls on
+  // observed state evaluated at the Text node — the previous fieldRow(...)
+  // @Builder calls passed BY-VALUE expression arguments, which ArkUI never
+  // re-renders on state change, so the rows froze at their mount-time '—'/'0/0'
+  // values while the status text kept updating (the device symptom:
+  // 已连接 + NetBird IP — + 对端 0/0).
+  private homeAddressText(): string {
+    return this.published !== null && this.published.address !== undefined &&
+      this.published.address !== null ? this.published.address : '';
+  }
+
+  private homeFqdnText(): string {
+    return this.published !== null && this.published.fqdn !== undefined &&
+      this.published.fqdn !== null ? this.published.fqdn : '';
+  }
+
+  private homePeersText(): string {
+    return `${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`;
   }
 
   private stateColor(): string {
@@ -214,7 +272,16 @@ struct Index {
     if (this.actionError.length > 0) {
       return this.actionError;
     }
+    // A vanished document after an active state: the reconnect notice (the
+    // extension fail-closed or died mid-connection).
     if (this.published === null) {
+      return this.disconnectNotice;
+    }
+    // B.2: while fully connected the core's last_error is a HISTORICAL
+    // record (it does not self-clear) — showing it as a live red line was
+    // the "已连接 + 网络不可用红字" device symptom. Only a NOT-fully-connected
+    // card may surface it.
+    if (this.fullyConnected()) {
       return '';
     }
     const errorClass: string = this.published.last_error_class !== undefined &&
@@ -411,6 +478,7 @@ struct Index {
     }
     this.requestSent = true;
     this.actionError = '';
+    this.disconnectNotice = '';
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
     vpnExtension.startVpnExtensionAbility(this.buildWant()).then(() => {
@@ -439,6 +507,10 @@ struct Index {
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {
       this.requestSent = false;
       this.stopSent = false;
+      // the document disappears a moment AFTER this resolves — mark the stop
+      // so the disappearance is not misread as a fail-closed disconnect
+      this.lastUserStopAtMs = Date.now();
+      this.disconnectNotice = '';
       hilog.info(DOMAIN, TAG, 'UI_STOP_RESOLVED|bundle=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, this.requestId);
       this.requestId = `ui-${Date.now()}`;
@@ -542,6 +614,11 @@ struct Index {
             }
           })
         // 状态卡片：已连接/连接中/未连接 + 本机 NetBird IP 与域名 + 在线对端数。
+        // The rows are INLINE (not fieldRow calls): a @Builder by-value
+        // expression argument never re-renders on state change in ArkUI, and
+        // the frozen rows were the B.1 device defect — the Text values below
+        // are method calls on observed state, the same proven-fresh pattern
+        // as the status text above (主页与对端页同读 this.published 一份数据).
         Column({ space: 4 }) {
           Row({ space: 10 }) {
             this.statusDot(this.stateColor(), 12)
@@ -551,11 +628,48 @@ struct Index {
               .fontColor(this.stateColor())
           }
           .margin({ bottom: 6 })
-          this.fieldRow('NetBird IP', this.published !== null && this.published.address !== undefined &&
-            this.published.address !== null ? this.published.address : '')
-          this.fieldRow('域名', this.published !== null && this.published.fqdn !== undefined &&
-            this.published.fqdn !== null ? this.published.fqdn : '')
-          this.fieldRow('对端', `${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`)
+          Row({ space: 8 }) {
+            Text('NetBird IP')
+              .fontSize(13)
+              .fontColor('#8A9AA6')
+              .width(96)
+            Text(this.homeAddressText().length > 0 ? this.homeAddressText() : '—')
+              .fontSize(14)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 6, bottom: 6 })
+          Row({ space: 8 }) {
+            Text('域名')
+              .fontSize(13)
+              .fontColor('#8A9AA6')
+              .width(96)
+            Text(this.homeFqdnText().length > 0 ? this.homeFqdnText() : '—')
+              .fontSize(14)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 6, bottom: 6 })
+          Row({ space: 8 }) {
+            Text('对端')
+              .fontSize(13)
+              .fontColor('#8A9AA6')
+              .width(96)
+            Text(this.homePeersText())
+              .fontSize(14)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+              .maxLines(3)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 6, bottom: 6 })
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
               .fontSize(13)
@@ -851,22 +965,71 @@ struct Index {
       .width('100%')
       .margin({ top: 8, bottom: 8 })
       Column({ space: 4 }) {
-        this.fieldRow('状态', this.published !== null ? this.published.state : '（未运行）')
-        this.fieldRow('信号', this.published !== null
-          ? (this.published.signal_registered ? 'registered' : 'not registered') : '—')
-        this.fieldRow('信号重连', this.published !== null ? `${this.published.signal_reconnects}` : '—')
-        this.fieldRow('隧道', this.published !== null
-          ? (this.published.wg_ready ? 'ready' : 'not ready') : '—')
-        this.fieldRow('WG 会话', this.published !== null ? `${this.published.wg_sessions}` : '—')
-        this.fieldRow('对端/路由', this.published !== null
-          ? `${this.published.peer_count} / ${this.published.route_count}` : '—')
-        this.fieldRow('管理重连', this.published !== null && this.published.reconnects !== undefined
-          ? `${this.published.reconnects}` : '—')
-        this.fieldRow('中继', this.published !== null && this.published.relay_state !== undefined &&
-          this.published.relay_state !== null ? this.published.relay_state : '—')
-        this.fieldRow('最近错误', this.published !== null ? this.published.last_error_class : '—')
-        this.fieldRow('请求 ID', this.published !== null && this.published.request_id !== undefined
-          ? this.published.request_id : '—')
+        // INLINE rows (same B.1 fix as the home card): fieldRow's by-value
+        // expression args never re-render, and a diagnostics page that froze
+        // at （未运行） forever is the same defect.
+        Row({ space: 8 }) {
+          Text('状态').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null ? this.published.state : '（未运行）')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('信号').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null
+            ? (this.published.signal_registered ? 'registered' : 'not registered') : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('信号重连').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null ? `${this.published.signal_reconnects}` : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('隧道').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null
+            ? (this.published.wg_ready ? 'ready' : 'not ready') : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('WG 会话').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null ? `${this.published.wg_sessions}` : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('对端/路由').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null
+            ? `${this.published.peer_count} / ${this.published.route_count}` : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('管理重连').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null && this.published.reconnects !== undefined
+            ? `${this.published.reconnects}` : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('中继').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null && this.published.relay_state !== undefined &&
+            this.published.relay_state !== null ? this.published.relay_state : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('接口').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published === null ? '—' : (this.published.iface_present === undefined
+            ? '未知' : (this.published.iface_present ? 'vpn-tun 在' : 'vpn-tun 不存在')))
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('最近错误').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null ? this.published.last_error_class : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
+        Row({ space: 8 }) {
+          Text('请求 ID').fontSize(13).fontColor('#8A9AA6').width(96)
+          Text(this.published !== null && this.published.request_id !== undefined
+            ? this.published.request_id : '—')
+            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
+        }.width('100%').padding({ top: 6, bottom: 6 })
       }
       .width('100%')
       .padding(16)

@@ -4,6 +4,7 @@ import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import vpnExtension from '@ohos.net.vpnExtension';
 import connection from '@ohos.net.connection';
+import statistics from '@ohos.net.statistics';
 import core from 'libnetbird_core.so';
 import { VpnRouteConfig, VpnTunnelConfig, buildPlatformVpnConfig, gateDefaultRoutes,
   loadVpnTunnelConfig, applyNetworkConfig, withEndpointExclusions,
@@ -72,6 +73,7 @@ import {
 } from './NetBirdConnector';
 
 import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
+import { ifaceLostDecision, ifaceVerifyOutcome, settleWaitAction } from './NetBirdRecreatePolicy';
 
 import { isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
@@ -121,6 +123,27 @@ const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
 // fail-closed teardown (never a half-configured tunnel).
 const RECREATE_DESTROY_BOX_MS: number = 5000;
 const RECREATE_CREATE_BOX_MS: number = 5000;
+// roam-1005-0014 fix (RECREATE-LIFECYCLE-ANALYSIS.md §4): the destroy→create
+// settle window. The device-proven race: system-side teardown (netdev removal
+// + VPN unregister) landed ~168 ms AFTER the new create() and hit the SAME
+// global VPN slot, killing the fresh vpn-tun while the fd stayed open
+// in-process. SETTLE floor waits that window out before the new create; the
+// CAP is a fuse (proceed and let the post-create verification decide, never
+// block the recreate forever); POLL is the registry re-check cadence while
+// waiting for the OLD vpn-tun to disappear.
+const RECREATE_SETTLE_MIN_MS: number = 800;
+const RECREATE_SETTLE_RETRY_MIN_MS: number = 1600;
+const RECREATE_SETTLE_CAP_MS: number = 3000;
+const RECREATE_SETTLE_POLL_MS: number = 250;
+// Post-create interface verification: the new vpn-tun must REALLY be listed
+// by the network registry (fd-open in-process proves nothing — the device
+// defect kept an open fd over a removed netdev). Short bounded re-tries ride
+// out registry propagation lag; the delayed RECHECK a few seconds after
+// RECREATE_DONE catches a teardown that landed late and killed the fresh
+// interface.
+const RECREATE_IFACE_VERIFY_TRIES: number = 3;
+const RECREATE_IFACE_VERIFY_GAP_MS: number = 500;
+const RECREATE_IFACE_RECHECK_MS: number = 5000;
 // 场景B roaming fix (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the stability
 // window a switched physical default network must hold before the shell
 // re-derives the LAN exclusion and compares it with the live config. The
@@ -679,6 +702,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // recreate completes; this is the shell-side serialization on top of the
   // core-side budget/cooldown bounds).
   private recreateInFlight: boolean = false;
+  // roam-1005-0014: the delayed post-recreate interface recheck timer handle
+  // (one shot per completed recreate; cleared on teardown), and the ONE-SHOT
+  // session budget for an automatic full rebuild after a watchdog-detected
+  // interface loss — a second loss fails closed (honest disconnect) instead
+  // of looping rebuilds.
+  private ifaceRecheckTimer: number = -1;
+  private ifaceLostRetryUsed: boolean = false;
+  // VPN_UI_STATUS diagnostic dedup (change-or-60 s, same discipline as the
+  // VPN_CONNECTOR_STATUS signature gate).
+  private lastUiStatusLogSignature: string = '';
+  private lastUiStatusLogAtMs: number = 0;
   private networkRecoveryPending: boolean = false;
   // 场景B roaming (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the
   // LAN-exclusion signature merged into the LIVE platform VpnConfig —
@@ -4146,7 +4180,26 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // empty connector slot and the UI showed "disconnected / wg sessions: 0"
         // while THIS process had a live WG session. Publish the same fields to
         // filesDir, which both processes share.
-        this.publishStatusForUi(status);
+        // roam-1005-0014 A.2/A.4: the async vpn-tun statistics probe is taken
+        // ONCE per tick; the continuation publishes the document (the UI's
+        // 已连接 gate rides iface_present) and then runs the interface
+        // watchdog — the core's self-reported state can no longer paper over
+        // a system-removed interface. The guards inside re-check the
+        // teardown/rebuild latches, so a tick that already triggered a
+        // recreate (its settle EXPECTS the interface absent) is excluded by
+        // state, not by ordering.
+        this.probeVpnIfacePresence().then((ifacePresence: string): void => {
+          this.publishStatusForUi(status, ifacePresence);
+          if (this.destroyRequested || this.connectorDeathHandled || this.watcherTimer < 0) {
+            return;
+          }
+          this.checkVpnInterfaceAlive(ifacePresence);
+        }).catch((probeError: Error): void => {
+          hilog.warn(DOMAIN, TAG,
+            'VPN_IFACE_PROBE_REJECTED|requestId=%{public}s|summary=%{public}s',
+            this.requestId, safeError(probeError));
+          this.publishStatusForUi(status, 'unknown');
+        });
         // Demand-sized ICE pool target from the LIVE peer count and the CORE's
         // own per-peer need (peers × need_per_peer, clamped 8..48 — smoke 0050:
         // 6 peers × need 4 = 24 against a fixed 8, 2 peers starved on every
@@ -4194,6 +4247,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           });
           return;
         }
+        // roam-1005-0014 A.4: the interface watchdog no longer lives HERE —
+        // it runs in this tick's probe continuation right after the publish
+        // above, so it sees the same vpn-tun presence the document carries
+        // and its guards exclude an already-triggered rebuild by state.
         // N2-H I5 (§5.3-1): one-shot development-channel arm check. It never
         // changes a product path — the collector stays inert per §6.1, and an
         // absent/unreadable arm file now costs exactly ONE grep-able
@@ -4430,59 +4487,104 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, String(net.serial ?? -1), merged.routes.length, defaultRoutes,
         String(gateAllowed), this.frozenEndpointExclusions.length);
 
-      // 2. destroy the OLD connection — the raw TUN fd dies here (fd
-      // contract: its close belongs exclusively to VpnConnection.destroy());
-      // the data plane keeps running on its own dups until the replacement
-      // lands (no route-less window worse than the old config).
-      stage = 'destroy';
-      const oldConnection: vpnExtension.VpnConnection = this.connection;
-      const destroyed: boolean = await this.destroyConnectionBounded(oldConnection);
-      if (!destroyed) {
-        throw new Error('recreate-destroy-failed');
-      }
-      if (this.destroyRequested || this.connectorDeathHandled) {
-        throw new Error('recreate-interrupted-by-teardown');
-      }
-      this.connection = undefined;
-      this.tunFd = -1;
-      this.fdConfirmedOpenAfterCreate = false;
+      // 2.–4. (roam-1005-0014 fix) up to RECREATE_IFACE_MAX_ATTEMPTS full
+      // destroy → settle → create → fd-contract → registry-verify passes.
+      // The SETTLE window between destroy() and the new create() is the
+      // device-proven race fix (the old ~168 ms gap let the system-side
+      // teardown land after the new create and kill the fresh vpn-tun); the
+      // registry verification replaces the fd probe as the truth about the
+      // interface (an open in-process fd survived a removed netdev). A
+      // verified generation breaks the loop; an absent interface consumes
+      // one attempt (the retry waits a LONGER settle floor) and the last
+      // attempt's absence throws — the shared catch below is the existing
+      // fail-closed teardown.
+      const RECREATE_IFACE_MAX_ATTEMPTS: number = 2;
+      let acceptedFd: number = -1;
+      for (let attempt: number = 1; attempt <= RECREATE_IFACE_MAX_ATTEMPTS; attempt++) {
+        // destroy the OLD connection — the raw TUN fd dies here (fd
+        // contract: its close belongs exclusively to VpnConnection.destroy());
+        // the data plane keeps running on its own dups until the replacement
+        // lands (no route-less window worse than the old config).
+        stage = 'destroy';
+        const oldConnection: vpnExtension.VpnConnection | undefined = this.connection;
+        if (oldConnection !== undefined) {
+          const destroyed: boolean = await this.destroyConnectionBounded(oldConnection);
+          if (!destroyed) {
+            throw new Error('recreate-destroy-failed');
+          }
+        }
+        if (this.destroyRequested || this.connectorDeathHandled) {
+          throw new Error('recreate-interrupted-by-teardown');
+        }
+        this.connection = undefined;
+        this.tunFd = -1;
+        this.fdConfirmedOpenAfterCreate = false;
 
-      // 3. a FRESH VpnConnection + create() with the desired route set
-      stage = 'create';
-      const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
-      this.connection = conn;
-      const config: vpnExtension.VpnConfig =
-        buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
-          this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
-      // 场景B roaming: this leg's re-derived exclusion becomes the
-      // live-config truth the moment this create() lands (a failed leg tears
-      // the whole session down fail-closed, so the recording can never
-      // describe a generation that is not live).
-      this.appliedLanExclusion = lanExclusionSignature(lanRecreate.entry);
-      const fd: number = await this.createConnectionBounded(conn, config);
+        // settle: give the system-side teardown (netdev removal, VPN
+        // unregister) the window to land BEFORE the new create() re-occupies
+        // the global VPN slot. Bounded by floor + cap; see
+        // waitRecreateSettle for the exit conditions and its log line.
+        stage = 'settle';
+        await this.waitRecreateSettle(attempt);
 
-      // 4. the same fd contract as the initial create
-      stage = 'fd-contract';
-      const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
-      if (!(snapshot.integer && snapshot.nonnegative && snapshot.probed && snapshot.open)) {
-        throw new Error('recreate-invalid-fd');
+        if (this.destroyRequested || this.connectorDeathHandled) {
+          throw new Error('recreate-interrupted-by-teardown');
+        }
+
+        // a FRESH VpnConnection + create() with the desired route set
+        stage = 'create';
+        const conn: vpnExtension.VpnConnection = vpnExtension.createVpnConnection(this.context);
+        this.connection = conn;
+        const config: vpnExtension.VpnConfig =
+          buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
+            this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
+        // 场景B roaming: this leg's re-derived exclusion becomes the
+        // live-config truth the moment this create() lands (a failed leg tears
+        // the whole session down fail-closed, so the recording can never
+        // describe a generation that is not live).
+        this.appliedLanExclusion = lanExclusionSignature(lanRecreate.entry);
+        const fd: number = await this.createConnectionBounded(conn, config);
+
+        // the same fd contract as the initial create
+        stage = 'fd-contract';
+        const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
+        if (!(snapshot.integer && snapshot.nonnegative && snapshot.probed && snapshot.open)) {
+          throw new Error('recreate-invalid-fd');
+        }
+        this.logFdSnapshot('recreate-post-create', snapshot, 'RECREATE_FD_ACCEPTED');
+
+        // registry verification: the new vpn-tun must REALLY exist. An open
+        // fd proves nothing (the device defect kept an open fd over a
+        // removed netdev); the fd is NOT fed to the core and the generation
+        // NOT accepted until the registry lists the interface.
+        stage = 'iface-verify';
+        const verifyOutcome: string =
+          await this.verifyRecreatedIface(attempt, RECREATE_IFACE_MAX_ATTEMPTS);
+        if (verifyOutcome !== 'ok') {
+          continue;
+        }
+        acceptedFd = fd;
+        this.tunFd = fd;
+        this.fdConfirmedOpenAfterCreate = true;
+        // N2-H I3a (v3.1 §2.1 C2 (4)): the recreate leg's ACCEPTANCE ANCHOR —
+        // this generation's create() was accepted, with the SAME fd-contract
+        // acceptance semantics as the initial leg's
+        // `VPN_CREATE_RESOLVED|accepted=true`. It is logged after the
+        // generation line and every gen==G route row (rule (4)'s ordering)
+        // and before the wg-feed/ACK legs (a failure there is the same
+        // fail-closed teardown as the initial leg's protect gate). The record
+        // of the accepted generation is made at this anchor, so the anchor
+        // and the value the arm reports cannot drift (R-2③).
+        this.n2hAcceptedExclusionGeneration = gen;
+        hilog.info(DOMAIN, TAG,
+          'VPN_RECREATE_RESOLVED|requestId=%{public}s|gen=%{public}d|accepted=true',
+          this.requestId, gen);
+        break;
       }
-      this.tunFd = fd;
-      this.fdConfirmedOpenAfterCreate = true;
-      this.logFdSnapshot('recreate-post-create', snapshot, 'RECREATE_FD_ACCEPTED');
-      // N2-H I3a (v3.1 §2.1 C2 (4)): the recreate leg's ACCEPTANCE ANCHOR —
-      // this generation's create() was accepted, with the SAME fd-contract
-      // acceptance semantics as the initial leg's
-      // `VPN_CREATE_RESOLVED|accepted=true`. It is logged after the
-      // generation line and every gen==G route row (rule (4)'s ordering) and
-      // before the wg-feed/ACK legs (a failure there is the same fail-closed
-      // teardown as the initial leg's protect gate). The record of the
-      // accepted generation is made at this anchor, so the anchor and the
-      // value the arm reports cannot drift (R-2③).
-      this.n2hAcceptedExclusionGeneration = gen;
-      hilog.info(DOMAIN, TAG,
-        'VPN_RECREATE_RESOLVED|requestId=%{public}s|gen=%{public}d|accepted=true',
-        this.requestId, gen);
+      if (acceptedFd < 0) {
+        throw new Error('recreate-iface-absent');
+      }
+      const fd: number = acceptedFd;
 
       // 5. replace only the TUN dup. The live core device already owns the
       // protected WG socket dup and retains its sessions across TUN replacement.
@@ -4514,6 +4616,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'defaultRoutes=%{public}d|recreateCount=%{public}s',
         this.requestId, fd, merged.routes.length, defaultRoutes,
         String(ack.recreate !== undefined && ack.recreate !== null ? ack.recreate.count : -1));
+      // roam-1005-0014 A.2: one delayed recheck a few seconds after DONE —
+      // the observed teardown race could land AFTER the immediate
+      // verification passed (the device lost the interface somewhere inside
+      // the first minute). scheduleIfaceRecheck owns the timer lifecycle.
+      this.scheduleIfaceRecheck();
       // 场景B roaming: the roam trigger's follow-up VPN_LAN_ROAM line reads
       // this (log truth only — no gate, no behavior).
       this.lastRecreateOutcome = 'ok';
@@ -4568,6 +4675,177 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }, RECREATE_CREATE_BOX_MS);
     });
     return Promise.race([settled, box]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // roam-1005-0014: vpn-tun interface presence (settle / verify / watchdog).
+  // PRIMARY probe: the official @ohos.net.statistics per-NIC byte counter —
+  // device run 0032 (2026-09-26) proved it DISTINGUISHES existence:
+  // getIfaceRxBytes('vpn-tun') resolved 1040/520 while the tunnel was up, and
+  // the same call for a nonexistent name rejected with BusinessError code
+  // 2103012 (never a silent 0). That is exactly the observable the device
+  // defect hid: an open in-process fd over a REMOVED netdev. (/proc/net/dev
+  // is Permission denied for the app — run 0017; /sys/class/net is
+  // unverified.) Classification is code-exact on purpose: only 2103012 says
+  // 'absent'; any other rejection or a non-numeric resolution is 'unknown'
+  // and every consumer treats 'unknown' leniently — an unreadable counter
+  // must never tear down a working tunnel, it only cannot save a broken one.
+  // ---------------------------------------------------------------------------
+  private async probeVpnIfacePresence(): Promise<string> {
+    try {
+      const rx: number = await statistics.getIfaceRxBytes('vpn-tun');
+      return Number.isFinite(rx) && rx >= 0 ? 'present' : 'unknown';
+    } catch (error) {
+      const code: string = String((error as BusinessFailure).code ?? 'none');
+      return code === '2103012' ? 'absent' : 'unknown';
+    }
+  }
+
+  // The settle wait between a bounded destroy() and the next create():
+  // at least the floor (800 ms first attempt / 1600 ms on the retry — the
+  // system-side teardown window), then until the OLD vpn-tun's statistics
+  // counter says the interface is gone, with floor+cap as the fuse. One
+  // summary line carries what was waited and why it exited (gone /
+  // still-present / unknown / cap).
+  private async waitRecreateSettle(attempt: number): Promise<void> {
+    const floorMs: number = attempt <= 1 ? RECREATE_SETTLE_MIN_MS : RECREATE_SETTLE_RETRY_MIN_MS;
+    const startedAtMs: number = Date.now();
+    let presence: string = await this.probeVpnIfacePresence();
+    let elapsedMs: number = 0;
+    while (true) {
+      elapsedMs = Date.now() - startedAtMs;
+      if (settleWaitAction(elapsedMs, floorMs, RECREATE_SETTLE_CAP_MS, presence) === 'proceed') {
+        break;
+      }
+      await sleep(RECREATE_SETTLE_POLL_MS);
+      presence = await this.probeVpnIfacePresence();
+    }
+    const exitReason: string = presence !== 'present'
+      ? (presence === 'absent' ? 'gone' : 'unknown')
+      : (elapsedMs >= floorMs + RECREATE_SETTLE_CAP_MS ? 'cap' : 'still-present');
+    hilog.info(DOMAIN, TAG,
+      'VPN_RECREATE_SETTLE|requestId=%{public}s|attempt=%{public}d|floorMs=%{public}d|' +
+      'waitedMs=%{public}d|result=%{public}s',
+      this.requestId, attempt, floorMs, elapsedMs, exitReason);
+  }
+
+  // Post-create registry verification with bounded short retries (registry
+  // propagation lag). Logs the task-mandated VPN_RECREATE_VERIFY line per
+  // try; returns 'ok' (interface listed / registry unreadable — lenient),
+  // 'retry' (absent, another full attempt remains) or 'fail' (absent on the
+  // last attempt — the caller's shared catch runs the fail-closed teardown).
+  private async verifyRecreatedIface(attempt: number, maxAttempts: number): Promise<string> {
+    let outcome: string = 'fail';
+    for (let tryIndex: number = 1; tryIndex <= RECREATE_IFACE_VERIFY_TRIES; tryIndex++) {
+      const presence: string = await this.probeVpnIfacePresence();
+      outcome = ifaceVerifyOutcome(presence, attempt, maxAttempts);
+      if (outcome === 'ok') {
+        hilog.info(DOMAIN, TAG,
+          'VPN_RECREATE_VERIFY|requestId=%{public}s|attempt=%{public}d|try=%{public}d|' +
+          'iface=%{public}s|result=%{public}s',
+          this.requestId, attempt, tryIndex, presence, 'ok');
+        return 'ok';
+      }
+      if (tryIndex < RECREATE_IFACE_VERIFY_TRIES) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_RECREATE_VERIFY|requestId=%{public}s|attempt=%{public}d|try=%{public}d|' +
+          'iface=%{public}s|result=%{public}s',
+          this.requestId, attempt, tryIndex, presence, 'recheck');
+        await sleep(RECREATE_IFACE_VERIFY_GAP_MS);
+      } else {
+        hilog.error(DOMAIN, TAG,
+          'VPN_RECREATE_VERIFY|requestId=%{public}s|attempt=%{public}d|try=%{public}d|' +
+          'iface=%{public}s|result=%{public}s',
+          this.requestId, attempt, tryIndex, presence, outcome);
+      }
+    }
+    return outcome;
+  }
+
+  // One delayed recheck after a COMPLETED recreate: if the registry dropped
+  // the fresh vpn-tun inside the recheck window (the late-teardown race the
+  // immediate verification cannot see), route it through the same
+  // one-retry-then-fail-closed handler as the watchdog. One shot per
+  // completed recreate; the timer is owned here and cleared on teardown.
+  private scheduleIfaceRecheck(): void {
+    if (this.ifaceRecheckTimer >= 0) {
+      clearTimeout(this.ifaceRecheckTimer);
+      this.ifaceRecheckTimer = -1;
+    }
+    this.ifaceRecheckTimer = setTimeout((): void => {
+      this.ifaceRecheckTimer = -1;
+      this.ifaceRecheckProbe().catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_IFACE_PROBE_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(error));
+      });
+    }, RECREATE_IFACE_RECHECK_MS);
+  }
+
+  // The recheck's async body (the timer callback itself is synchronous):
+  // probe, then — only for a definitive absence on a still-live generation —
+  // log the task-mandated VPN_RECREATE_VERIFY line and route the loss into
+  // the one-retry-then-fail-closed handler.
+  private async ifaceRecheckProbe(): Promise<void> {
+    const presence: string = await this.probeVpnIfacePresence();
+    if (presence !== 'absent') {
+      return;
+    }
+    if (this.destroyRequested || this.connectorDeathHandled || this.recreateInFlight) {
+      return;
+    }
+    if (this.connection === undefined || !this.createSettled || this.tunFd < 0) {
+      return;
+    }
+    hilog.error(DOMAIN, TAG,
+      'VPN_RECREATE_VERIFY|requestId=%{public}s|attempt=recheck|try=1|iface=%{public}s|' +
+      'result=%{public}s',
+      this.requestId, presence, 'lost');
+    this.handleVpnInterfaceLost('recheck');
+  }
+
+  // The watchdog tick (A.4): a settled, live generation whose vpn-tun the
+  // registry definitively no longer lists — while the user did NOT stop —
+  // gets the honest handling. ONE automatic full rebuild per session; a
+  // second loss (or a loss after the retry budget is spent) is the existing
+  // fail-closed teardown (connector stopped + generation destroyed + status
+  // document removed → the UI shows 未连接 / VPN 已断开，请重新连接).
+  private checkVpnInterfaceAlive(presence: string): void {
+    const generationLive: boolean = !this.destroyRequested && !this.connectorDeathHandled &&
+      !this.recreateInFlight && this.destroyPromise === undefined &&
+      this.connection !== undefined && this.createSettled && this.tunFd >= 0;
+    const decision: string = ifaceLostDecision(presence, this.ifaceLostRetryUsed, generationLive);
+    if (decision === 'ignore') {
+      return;
+    }
+    this.handleVpnInterfaceLost('watcher');
+  }
+
+  private handleVpnInterfaceLost(source: string): void {
+    // re-check the guards INSIDE the same tick (the decision was taken just
+    // above, but a concurrent recreate entry must still be impossible).
+    if (this.destroyRequested || this.connectorDeathHandled || this.recreateInFlight) {
+      return;
+    }
+    if (this.connection === undefined || !this.createSettled) {
+      return;
+    }
+    hilog.error(DOMAIN, TAG,
+      'VPN_IFACE_LOST|requestId=%{public}s|source=%{public}s|retryUsed=%{public}s|' +
+      'action=%{public}s',
+      this.requestId, source, String(this.ifaceLostRetryUsed),
+      this.ifaceLostRetryUsed ? 'teardown-vpn-fail-closed' : 'full-recreate-retry');
+    if (this.ifaceLostRetryUsed) {
+      this.failRecreate(`iface-lost:${source}`, new Error('vpn-iface-absent-after-retry'));
+      return;
+    }
+    this.ifaceLostRetryUsed = true;
+    this.performControlledRecreate(`vpn-iface-lost:${source}`).catch((error: Error): void => {
+      hilog.error(DOMAIN, TAG,
+        'VPN_RECREATE_REJECTED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error));
+      this.failRecreate('unexpected-throw', error);
+    });
   }
 
   // N8 recreate failure = the N3-7 fail-closed teardown: stop the watcher,
@@ -4760,6 +5038,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.watcherTimer >= 0) {
       clearInterval(this.watcherTimer);
       this.watcherTimer = -1;
+    }
+    // roam-1005-0014: the delayed iface recheck belongs to the watcher's
+    // lifecycle — teardown cancels it (a firing recheck after teardown would
+    // hit the guards, but the timer itself must not leak either).
+    if (this.ifaceRecheckTimer >= 0) {
+      clearTimeout(this.ifaceRecheckTimer);
+      this.ifaceRecheckTimer = -1;
     }
     // S5: this is teardown (connector death, fail-closed recreate teardown,
     // onDestroy), so the optional burst survey series is cancelled and its
@@ -5282,7 +5567,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // never render 已连接.
   private lastGoodNetwork: CoreNetworkConfig | null = null;
 
-  private publishStatusForUi(status: ConnectorStatusResult): void {
+  // ifacePresence is the vpn-tun statistics-counter probe computed once per
+  // watcher tick by the caller: 'present' publishes iface_present=true,
+  // 'absent' publishes iface_present=false (the UI's 已连接 gate), 'unknown'
+  // OMITS the field (an unreadable counter must not flip the UI to a fake
+  // disconnected). The VPN_UI_STATUS diagnostic line (change-or-60 s, same
+  // dedup discipline as VPN_CONNECTOR_STATUS) pins, per publish, exactly the
+  // three fields the home card renders — the 2026-10-04 defect investigation
+  // had no such line, so document content vs UI display could not be told
+  // apart from the device log.
+  private publishStatusForUi(status: ConnectorStatusResult, ifacePresence: string): void {
+    // Teardown guard: the probe continuation calling this runs one microtask
+    // behind its tick — a recreate triggered by that same tick may have
+    // already failed closed (or the connector died) and REMOVED the document
+    // by now. A late publish would resurrect a stale "connected" document no
+    // one will ever refresh or remove again; the dead watcher latches make
+    // that impossible.
+    if (this.destroyRequested || this.connectorDeathHandled || this.watcherTimer < 0) {
+      return;
+    }
     const path: string = `${this.context.filesDir}/netbird-status.json`;
     let file: fs.File | undefined = undefined;
     try {
@@ -5299,10 +5602,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       } else {
         this.lastGoodNetwork = null;
       }
+      const ifacePresent: boolean | undefined = ifacePresence === 'present'
+        ? true : (ifacePresence === 'absent' ? false : undefined);
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
-        this.requestId, Date.now());
+        this.requestId, Date.now(), ifacePresent);
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
+      const uiSignature: string = `${doc.state}|${doc.address !== null}|` +
+        `${doc.peers.length}|${doc.iface_present === true}`;
+      const now: number = Date.now();
+      if (uiSignature !== this.lastUiStatusLogSignature ||
+        now - this.lastUiStatusLogAtMs >= 60000) {
+        this.lastUiStatusLogSignature = uiSignature;
+        this.lastUiStatusLogAtMs = now;
+        hilog.info(DOMAIN, TAG,
+          'VPN_UI_STATUS|requestId=%{public}s|has_address=%{public}s|peers=%{public}d|' +
+          'state=%{public}s|iface=%{public}s',
+          this.requestId, String(doc.address !== null && doc.address !== undefined &&
+            doc.address.length > 0), doc.peers.length, doc.state, ifacePresence);
+      }
     } catch (error) {
       hilog.warn(DOMAIN, TAG,
         'VPN_STATUS_PUBLISH_FAIL|requestId=%{public}s|summary=%{public}s',

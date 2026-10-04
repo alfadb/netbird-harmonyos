@@ -59,6 +59,13 @@ export interface UiStatusDocument {
   relay_state: string | null;
   reconnects: number;
   peers: UiPeerEntry[];
+  // 2026-10-05 (roam-1005-0014): does the vpn-tun interface really exist
+  // right now? Published only when the extension's probe is definitive
+  // (true = the per-NIC counter resolves, false = it rejects with the
+  // not-exist code); omitted when the probe could not read the counter — an
+  // older document omits it too, and the UI gate treats "not false" as
+  // lenient-pass.
+  iface_present?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +177,13 @@ export function mergePeers(network: CoreNetworkConfig | null,
 }
 
 // Build the WHOLE published document. The legacy fields carry the exact
-// pre-phase-1 meaning; the appended fields ride the tail.
+// pre-phase-1 meaning; the appended fields ride the tail. ifacePresent is
+// the extension's vpn-tun interface probe (true/false); undefined leaves
+// the field out of the JSON (probe unreadable / legacy caller) — the UI
+// gate then stays lenient instead of failing a live tunnel.
 export function buildUiStatusDocument(status: ConnectorStatusResult,
   network: CoreNetworkConfig | null, requestId: string,
-  nowMs: number): UiStatusDocument {
+  nowMs: number, ifacePresent?: boolean): UiStatusDocument {
   const errorClass: string =
     status.last_error !== undefined && status.last_error !== null
       ? status.last_error.class
@@ -223,7 +233,8 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
     peers: network !== null && network.available
       ? mergePeers(network, status.wg !== undefined && status.wg !== null
         ? status.wg.wg_peers : undefined)
-      : []
+      : [],
+    iface_present: ifacePresent
   };
   return doc;
 }
@@ -291,20 +302,24 @@ export function vpnActiveState(state: string): boolean {
 // the page's in-flight request latches (no live document yet / stop in
 // flight), so the card never shows a stale '未连接' while a request runs.
 // hasOverlayIp is the document's own overlay address (the network map arrived
-// and carried one): '已连接' requires the CORE state connected AND that
-// address. A tunnel that is already up while management has not delivered the
-// map yet (no own IP, no peers) shows the honest '连接中…' — or
-// '无法连接服务器' when the error hint is one of the server-unreachable
-// classes (timeout / network — the SAME classes lastErrorText renders as
-// server-unreachable), so the card and the red error line can no longer
-// disagree ('已连接' + an unreachable-server hint).
+// and carried one); ifacePresent is the document's vpn-tun interface probe
+// (false = the interface no longer exists — the fake-connected defect of
+// roam-1005-0014). '已连接' requires the CORE state connected AND
+// the address AND the interface. A tunnel that is already up while management
+// has not delivered the map yet (no own IP, no peers), or whose interface
+// disappeared (being rebuilt / torn down), shows the honest
+// '连接中…' — or '无法连接服务器' when the error hint is one of the
+// server-unreachable classes (timeout / network — the SAME classes
+// lastErrorText renders as server-unreachable), so the card and the red error
+// line can no longer disagree ('已连接' + an unreachable-server hint).
 export function homeStateText(state: string, pendingStart: boolean,
-  pendingStop: boolean, hasOverlayIp: boolean, errorClass: string): string {
+  pendingStop: boolean, hasOverlayIp: boolean, ifacePresent: boolean,
+  errorClass: string): string {
   if (pendingStop) {
     return '正在断开…';
   }
   if (state === 'connected') {
-    if (hasOverlayIp === true) {
+    if (hasOverlayIp === true && ifacePresent === true) {
       return '已连接';
     }
     return errorClass === 'timeout' || errorClass === 'network'

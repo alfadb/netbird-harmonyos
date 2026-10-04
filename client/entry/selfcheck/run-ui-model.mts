@@ -130,24 +130,42 @@ try {
   // the published document must survive a JSON round trip
   check('doc JSON round trip keeps peers',
     JSON.parse(JSON.stringify(doc)).peers[0].name === 'peer-a.netbird.cloud');
+  // roam-1005-0014: the registry-probe field rides the tail — true/false
+  // when definitive, OMITTED (dropped by JSON.stringify) when the probe
+  // could not read the registry, so a legacy/unknown document reads lenient.
+  check('doc iface_present rides the tail verbatim',
+    m.buildUiStatusDocument(status, net, 'ui-1', 1, true).iface_present === true &&
+    m.buildUiStatusDocument(status, net, 'ui-1', 1, false).iface_present === false);
+  check('doc iface_present omitted when the probe was unreadable',
+    !('iface_present' in JSON.parse(
+      JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-1', 1)))) &&
+    !('iface_present' in JSON.parse(
+      JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-1', 1, undefined)))));
 
   // ---- home-card/document consistency (defect 2026-10-04) -----------------
   // The SAME document feeds the home card and the peers tab. 已连接 must
   // require the document's OWN overlay IP (the network map arrived and
-  // carried one): a map-less document renders 连接中… / 无法连接服务器,
+  // carried one) AND the vpn-tun interface being listed (roam-1005-0014: the
+  // interface was system-removed while the core kept reporting connected):
+  // a map-less / interface-less document renders 连接中… / 无法连接服务器,
   // never 已连接 — and its peers list is empty in the same breath, so the
   // home card's 对端 row and the peers tab can never disagree.
   const homeHasIp = (d: { address?: string | null }): boolean =>
     d.address !== undefined && d.address !== null && d.address.length > 0;
   check('home: 已连接 requires the document address',
-    m.homeStateText(doc.state, false, false, homeHasIp(doc), 'none') === '已连接' &&
+    m.homeStateText(doc.state, false, false, homeHasIp(doc), true, 'none') === '已连接' &&
     homeHasIp(doc) === true);
   check('home: a map-less document (state connected!) is never 已连接',
     noMap.state === 'connected' && homeHasIp(noMap) === false &&
     noMap.peers.length === 0 &&
-    m.homeStateText(noMap.state, false, false, homeHasIp(noMap), 'none') === '连接中…');
+    m.homeStateText(noMap.state, false, false, homeHasIp(noMap), true, 'none') === '连接中…');
   check('home: map-less + server-unreachable error class stays consistent',
-    m.homeStateText('connected', false, false, homeHasIp(noMap), 'network') === '无法连接服务器');
+    m.homeStateText('connected', false, false, homeHasIp(noMap), true, 'network') === '无法连接服务器');
+  check('home: interface removed (roam-1005-0014) is never 已连接',
+    m.homeStateText('connected', false, false, true, false, 'none') === '连接中…' &&
+    m.homeStateText('connected', false, false, true, false, 'network') === '无法连接服务器');
+  check('home: interface present + map is 已连接',
+    m.homeStateText('connected', false, false, true, true, 'none') === '已连接');
 
   // ---- filterPeers / sortPeers / onlinePeerCount ----------------------------
   check('filter by name (case-insensitive)',
@@ -169,27 +187,27 @@ try {
     !m.vpnActiveState('failed') && !m.vpnActiveState('stopped') &&
     !m.vpnActiveState('') && !m.vpnActiveState('closed'));
   check('home text: connected WITH the overlay ip',
-    m.homeStateText('connected', false, false, true, 'none') === '已连接');
+    m.homeStateText('connected', false, false, true, true, 'none') === '已连接');
   check('home text: connected but no map yet is honest (连接中)',
-    m.homeStateText('connected', false, false, false, 'none') === '连接中…');
+    m.homeStateText('connected', false, false, false, true, 'none') === '连接中…');
   check('home text: connected, no map, server-unreachable error class',
-    m.homeStateText('connected', false, false, false, 'timeout') === '无法连接服务器' &&
-    m.homeStateText('connected', false, false, false, 'network') === '无法连接服务器');
+    m.homeStateText('connected', false, false, false, true, 'timeout') === '无法连接服务器' &&
+    m.homeStateText('connected', false, false, false, true, 'network') === '无法连接服务器');
   check('home text: auth error is NOT server-unreachable (stays 连接中)',
-    m.homeStateText('connected', false, false, false, 'auth') === '连接中…');
+    m.homeStateText('connected', false, false, false, true, 'auth') === '连接中…');
   check('home text: connecting/reconnecting',
-    m.homeStateText('connecting', false, false, false, 'none') === '连接中…' &&
-    m.homeStateText('reconnecting', false, false, false, 'none') === '连接中…');
+    m.homeStateText('connecting', false, false, false, false, 'none') === '连接中…' &&
+    m.homeStateText('reconnecting', false, false, false, false, 'none') === '连接中…');
   check('home text: failed',
-    m.homeStateText('failed', false, false, false, 'none') === '连接失败');
+    m.homeStateText('failed', false, false, false, false, 'none') === '连接失败');
   check('home text: disconnected',
-    m.homeStateText('disconnected', false, false, false, 'none') === '未连接');
+    m.homeStateText('disconnected', false, false, false, false, 'none') === '未连接');
   check('home text: pending start without a document',
-    m.homeStateText('', true, false, false, 'none') === '连接中…');
+    m.homeStateText('', true, false, false, false, 'none') === '连接中…');
   check('home text: pending stop wins',
-    m.homeStateText('connected', true, true, true, 'none') === '正在断开…');
+    m.homeStateText('connected', true, true, true, true, 'none') === '正在断开…');
   check('home text: pending stop wins even without the map',
-    m.homeStateText('connected', false, true, false, 'network') === '正在断开…');
+    m.homeStateText('connected', false, true, false, true, 'network') === '正在断开…');
   check('connection labels', m.connectionLabel('direct') === '直连' &&
     m.connectionLabel('relay') === '中继' && m.connectionLabel('unknown') === '未知');
   check('handshake texts', m.lastHandshakeText(null) === '—' &&

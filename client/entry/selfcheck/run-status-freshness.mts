@@ -23,10 +23,12 @@ try {
     peer_count: 1, route_count: 1, last_error_class: 'none', signal_registered: true,
     signal_reconnects: 0, wg_ready: true, wg_sessions: 1 };
   check('fresh connected stays connected', policy.currentPublishedStatus(connected, now)?.state === 'connected');
-  check('boundary at three poll cycles stays connected',
-    policy.currentPublishedStatus({ ...connected, updated_at_ms: now - 15000 }, now)?.state === 'connected');
+  check('boundary at two poll cycles stays connected',
+    policy.currentPublishedStatus({ ...connected, updated_at_ms: now - 10000 }, now)?.state === 'connected');
   check('expired connected is not running',
-    policy.currentPublishedStatus({ ...connected, updated_at_ms: now - 15001 }, now) === null);
+    policy.currentPublishedStatus({ ...connected, updated_at_ms: now - 10001 }, now) === null);
+  check('three ticks old (the pre-2026-10-05 boundary) is not running',
+    policy.currentPublishedStatus({ ...connected, updated_at_ms: now - 15000 }, now) === null);
   check('stopped stays stopped', policy.currentPublishedStatus({ ...connected, state: 'stopped' }, now)?.state === 'stopped');
   check('missing file means not running', policy.currentPublishedStatus(null, now) === null);
   check('legacy snapshot without timestamp is not running',

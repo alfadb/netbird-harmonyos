@@ -210,6 +210,10 @@ const SHIMS = {
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',
+  // roam-1005-0014: the recreate lifecycle policy pure module the REAL
+  // extension imports; zero imports and no erased types — plain extension
+  // resolution like NetBirdIceSocketPool above.
+  './NetBirdRecreatePolicy': 'NetBirdRecreatePolicy.ts',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its erased request/reply interfaces are re-declared by the shim.
   './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts',
