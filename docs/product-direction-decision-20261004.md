@@ -20,3 +20,7 @@
 ## 声明
 
 本记录不修改任何冻结 N2 规则文本（含 `docs/n2-device-evidence-preregistration-draft-v2-20260928.md`、`docs/n2-log-formats-20260928.md`），不追认任何诊断记录为证据。`docs/native-nx-governance.md` 与 `docs/r0-charter.md` 本次仅文末追加登记小节，原文一字未动。
+
+## 补充决定（2026-10-04T22:10+08:00）
+
+官方功能基线调研指出：上述决定只纳入 SSO 与出口节点，`docs/r0-charter.md`（约 :102）中“system VPN / always-on VPN”仍为排除项。主会话建议按“与官方 App 相同能力”一并纳入“始终开启 VPN / 开机自动连接”，与后台常驻同期实现；用户回复“可以”（渠道：本会话 DSH Web GUI 用户消息）。自此该项纳入产品范围，章程原文不改，以本记录为准。
