@@ -57,6 +57,9 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // N5c demand-sized ICE pool (2026-10-02): the sizing pure module the REAL
   // extension imports; zero imports and no erased types, so no shim.
   'NetBirdIceSocketPool',
+  // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
+  // extension imports; its two erased interfaces are re-declared by its shim.
+  'NetBirdUiModel',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports.
   'NetBirdN2Stimulus',
   // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules.
@@ -75,6 +78,8 @@ const SHIM_TYPES: Record<string, string[]> = {
     'SocketFeedResult', 'SocketSupplyRequest', 'WgFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape.
     'PhysicalBearerFacts'],
+  // UI phase 1: the erased input/document shapes buildUiStatusDocument names.
+  NetBirdUiModel: ['UiNetworkConfig', 'UiStatusDocument'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
     'ExclusionBuildResult', 'ExclusionEndpoint', 'RelayEndpoint',
     // v3.1 dns branch order: the erased interface names the real

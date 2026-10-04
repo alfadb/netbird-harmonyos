@@ -67,6 +67,8 @@ import {
   resolveManagementIp, sleep
 } from './NetBirdConnector';
 
+import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
+
 import { isPhysicalNetworkSwitch, protectedConnectionRejectionReason,
   socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
 
@@ -5084,35 +5086,24 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   // Publish the live connector status for the UI process (see the call site).
-  // Best-effort: a failure here must never disturb the VPN.
+  // UI phase 1: the document is built by the pure NetBirdUiModel module from
+  // this status snapshot PLUS one connector_network_config read (own
+  // fqdn/address + the per-peer merged view). Best-effort: a failure here
+  // must never disturb the VPN.
   private publishStatusForUi(status: ConnectorStatusResult): void {
     const path: string = `${this.context.filesDir}/netbird-status.json`;
     let file: fs.File | undefined = undefined;
     try {
-      const errorClass: string =
-        status.last_error !== undefined && status.last_error !== null
-          ? status.last_error.class
-          : 'none';
-      const signalRegistered: boolean =
-        status.signal !== undefined && status.signal !== null ? status.signal.registered : false;
-      const signalReconnects: number =
-        status.signal !== undefined && status.signal !== null ? status.signal.reconnects : 0;
-      const wgReady: boolean =
-        status.wg !== undefined && status.wg !== null ? status.wg.ready : false;
-      const wgSessions: number =
-        status.wg !== undefined && status.wg !== null ? status.wg.peers_with_session : 0;
-      const doc: Record<string, Object> = {
-        'updated_at_ms': Date.now(),
-        'request_id': this.requestId,
-        'state': status.state,
-        'peer_count': status.peer_count,
-        'route_count': status.route_count,
-        'last_error_class': errorClass,
-        'signal_registered': signalRegistered,
-        'signal_reconnects': signalReconnects,
-        'wg_ready': wgReady,
-        'wg_sessions': wgSessions
-      };
+      let network: CoreNetworkConfig | null = null;
+      try {
+        network = connectorNetworkConfig();
+      } catch (netError) {
+        // no map yet (or a rejected read): the appended fields publish
+        // their honest nulls/empty — the legacy fields are unaffected
+        network = null;
+      }
+      const doc: UiStatusDocument = buildUiStatusDocument(status, network,
+        this.requestId, Date.now());
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
     } catch (error) {

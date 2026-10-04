@@ -2759,6 +2759,9 @@ pub struct ShellPeerSummary {
     /// address lives here). Public runtime material — the interop CLI reads
     /// this for probe targeting (`--probe-dst`); nothing secret.
     pub vpn_addresses: Vec<String>,
+    /// Peer FQDN (`PeerInfo.fqdn`, e.g. "host-1.netbird.cloud") — the UI's
+    /// peer NAME. `None` when management sent none. Public material.
+    pub fqdn: Option<String>,
 }
 
 /// Read-only snapshot of the shell-applicable subset of the LAST APPLIED
@@ -2806,6 +2809,9 @@ pub struct ShellNetworkConfig {
     /// honest gap, never an invented endpoint. Public routing material — no
     /// secret crosses this boundary.
     pub stuns: Vec<String>,
+    /// Own peer FQDN (`PeerConfig.fqdn`, e.g. "me.netbird.cloud") — the Home
+    /// screen's domain line. `None` when management sent none. Public material.
+    pub fqdn: Option<String>,
 }
 
 /// Canonical dotted-quad/prefix rendering of a parsed route network.
@@ -2921,6 +2927,7 @@ impl ShellNetworkConfig {
                     .iter()
                     .map(route_network_string)
                     .collect(),
+                fqdn: p.fqdn.clone(),
             })
             .collect();
         ShellNetworkConfig {
@@ -2941,6 +2948,7 @@ impl ShellNetworkConfig {
             // N2-H I2 (design §13.13): same stamping discipline for the
             // announced `stuns[]` URIs (they ride the sync config too).
             stuns: Vec::new(),
+            fqdn: map.peer.as_ref().and_then(|p| p.fqdn.clone()),
         }
     }
 
@@ -2981,11 +2989,18 @@ impl ShellNetworkConfig {
                 .map(|a| format!("\"{a}\""))
                 .collect::<Vec<String>>()
                 .join(",");
+            // Tail-append discipline (UI phase 1): `fqdn` comes AFTER the
+            // pre-existing fields — the entry head keeps its order/shape.
+            let fqdn = match p.fqdn.as_ref() {
+                Some(f) => jstr("fqdn", f),
+                None => "\"fqdn\":null".to_string(),
+            };
             peers.push_str(&format!(
-                "{{{},{},\"vpn_addresses\":[{}]}}",
+                "{{{},{},\"vpn_addresses\":[{}],{}}}",
                 jstr("pub_key", &p.pub_key_b64),
                 jnum("allowed_ips", p.allowed_ips as u64),
-                vpn
+                vpn,
+                fqdn
             ));
         }
         let address = match self.address.as_ref() {
@@ -3016,8 +3031,14 @@ impl ShellNetworkConfig {
             }
             stuns.push_str(&format!("{{{}}}", jstr("uri", uri)));
         }
+        // Own FQDN (UI phase 1): the Home screen's domain line. Tail-appended
+        // AFTER `stuns` — every pre-existing field keeps its order and shape.
+        let fqdn = match self.fqdn.as_ref() {
+            Some(f) => jstr("fqdn", f),
+            None => "\"fqdn\":null".to_string(),
+        };
         format!(
-            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}},\"stuns\":[{}]}}",
+            "{{{},{},{},{},{},{},\"routes\":[{}],\"dns\":{{{},{}}},{},\"peers\":[{}],\"default_route\":{{{},{}}},\"stuns\":[{}],{}}}",
             jbool("available", true),
             jnum("serial", self.serial),
             address,
@@ -3032,6 +3053,7 @@ impl ShellNetworkConfig {
             jbool("allowed", self.default_route_allowed),
             jstr("reason", &self.default_route_reason),
             stuns,
+            fqdn,
         )
     }
 }
@@ -6654,7 +6676,7 @@ mod tests {
                         config::Route { addr: [10, 30, 30, 1], prefix_len: 32 },
                         config::Route { addr: [192, 168, 7, 0], prefix_len: 24 },
                     ],
-                    fqdn: None,
+                    fqdn: Some("peer-a.netbird.cloud".into()),
                 },
                 PeerInfo {
                     wg_pub_key: "UEVFUjE=".into(),
@@ -6783,7 +6805,7 @@ mod tests {
             ]
         );
         assert!(snap.dns_service_enable);
-        // peers = remote + offline, public key + allowed-ips count only
+        // peers = remote + offline, public key + allowed-ips count + fqdn
         assert_eq!(snap.peers.len(), 3);
         assert_eq!(snap.peers[0].pub_key_b64, "UEVFUjA=");
         assert_eq!(snap.peers[0].allowed_ips, 2);
@@ -6791,8 +6813,12 @@ mod tests {
             snap.peers[0].vpn_addresses,
             vec!["10.30.30.1/32".to_string(), "192.168.7.0/24".to_string()]
         );
+        assert_eq!(snap.peers[0].fqdn.as_deref(), Some("peer-a.netbird.cloud"));
+        assert_eq!(snap.peers[1].fqdn, None);
         assert_eq!(snap.peers[2].pub_key_b64, "T0ZGTElORQ==");
         assert_eq!(snap.peers[2].allowed_ips, 1);
+        // own fqdn (UI phase 1): the Home screen's domain line
+        assert_eq!(snap.fqdn.as_deref(), Some("me.netbird.cloud"));
 
         let json = snap.to_json();
         for fragment in [
@@ -6807,7 +6833,9 @@ mod tests {
             "{\"ip\":\"8.8.8.8\",\"port\":853}",
             "\"peer_count\":3",
             "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2,\
-              \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"]}",
+              \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"],\"fqdn\":\"peer-a.netbird.cloud\"}",
+            // a peer without fqdn renders an explicit null (never invented)
+            "\"fqdn\":null",
             // N3-7 gate markers
             "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
             // N2-H I2: the tail-appended stun section (nothing announced on a
@@ -6816,9 +6844,10 @@ mod tests {
         ] {
             assert!(json.contains(fragment), "missing {fragment} in {json}");
         }
-        // N2-H I2 tail-append discipline: the stun section is the LAST field —
-        // every pre-existing field keeps its order and shape
-        assert!(json.ends_with(",\"stuns\":[]}"), "{json}");
+        // N2-H I2 tail-append discipline + UI phase 1: the own-fqdn section is
+        // the NEW last field — every pre-existing field keeps its order and
+        // shape (stuns stays directly before it)
+        assert!(json.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\"}"), "{json}");
         // the held default route must NOT appear as an installable route
         assert!(
             !json.contains("{\"network\":\"0.0.0.0/0\""),
@@ -7014,7 +7043,7 @@ mod tests {
             assert!(json.contains(&format!("{{\"uri\":\"{uri}\"}}")), "{uri} in {json}");
         }
         assert!(json.contains(&format!(
-            "\"stuns\":[{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}}]}}",
+            "\"stuns\":[{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}},{{\"uri\":\"{}\"}}],\"fqdn\":\"me.netbird.cloud\"}}",
             announced[0], announced[1], announced[2], announced[3]
         )), "announced order + tail position: {json}");
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
@@ -7060,7 +7089,7 @@ mod tests {
             },
         );
         let cleared = shared.network_config_json();
-        assert!(cleared.ends_with(",\"stuns\":[]}"), "{cleared}");
+        assert!(cleared.ends_with(",\"stuns\":[],\"fqdn\":\"me.netbird.cloud\"}"), "{cleared}");
         assert!(!cleared.contains("stun.netbird.io"), "{cleared}");
     }
 

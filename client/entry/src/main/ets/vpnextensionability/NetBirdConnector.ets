@@ -4,6 +4,9 @@ import connection from '@ohos.net.connection';
 import resourceManager from '@ohos.resourceManager';
 import util from '@ohos.util';
 import core from 'libnetbird_core.so';
+// type-only: erased at runtime, so the host selfcheck fixtures that stage
+// this file byte-identically never resolve the sibling module
+import type { UiPeerEntry } from './NetBirdUiModel';
 import { DnsDerivationInput, DnsDerivationResult, DnsNetProbe, DnsPlatformNetAddress,
   StunUriEntry,
   deriveDnsEndpointExclusions, emptyDnsNetProbe, isPhysicalNetEvidence
@@ -131,6 +134,22 @@ export interface WgDataplaneStatus {
   rx_bytes_to_tun?: number;
   dropped_no_route: number;
   decrypt_errors: number;
+  // N13-D1 per-peer session attribution (tail-appended by the core after the
+  // carrier_* counters; read by name). UI phase 1: the peers tab's
+  // online/direct-relay/handshake source.
+  wg_peers?: WgPeerStatusEntry[];
+}
+
+// One connector_status().wg.wg_peers[] entry (N13-D1).
+export interface WgPeerStatusEntry {
+  pub_key_b64: string;
+  endpoint?: string | null;
+  session_established: boolean;
+  expired: boolean;
+  last_handshake_s?: number | null;
+  egress_local?: string | null;
+  carrier_attached?: boolean;
+  on_carrier?: boolean;
 }
 
 // N8: core.connector_status().recreate — controlled-recreate state. The
@@ -258,6 +277,11 @@ export interface CoreDnsConfig {
 export interface CorePeerSummary {
   pub_key: string;
   allowed_ips: number;
+  // vpn_addresses (dotted-quad/prefix strings) — the peer's overlay address
+  // lives here. UI phase 1: tail-appended by the core.
+  vpn_addresses?: string[];
+  // peer fqdn (the UI's peer NAME); null when management sent none.
+  fqdn?: string | null;
 }
 
 // N3-7 default-route safety gate verdict on the snapshot: 0.0.0.0/0 is
@@ -292,6 +316,9 @@ export interface CoreNetworkConfig {
   // refuses `turn:` by name). Absent/empty = nothing announced — an honest
   // gap, never a fabricated endpoint.
   stuns?: StunUriEntry[] | null;
+  // UI phase 1: own peer fqdn (the Home screen's domain line); null when
+  // management sent none. Tail-appended by the core after `stuns`.
+  fqdn?: string | null;
 }
 
 // netbird-device-config.json shape (app-private dir, development-time —
@@ -609,6 +636,17 @@ export interface PublishedStatus {
   signal_reconnects: number;
   wg_ready: boolean;
   wg_sessions: number;
+  // ---- UI phase 1 appended fields (optional: an older document omits
+  //      them; the UI degrades gracefully) ----
+  // own peer fqdn / overlay IP from the network map (null when unknown)
+  fqdn?: string | null;
+  address?: string | null;
+  // relay client state token (null when no relay section)
+  relay_state?: string | null;
+  // management reconnect count (diagnostics page)
+  reconnects?: number;
+  // per-peer merged view (name/ip/online/connection/handshake)
+  peers?: UiPeerEntry[];
 }
 
 // Read the published status. A missing, unreadable, malformed or STALE

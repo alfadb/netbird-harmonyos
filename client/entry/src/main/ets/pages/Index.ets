@@ -3,9 +3,12 @@ import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import cryptoFramework from '@ohos.security.cryptoFramework';
 import util from '@ohos.util';
+import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
 import { PublishedStatus, readPublishedStatus } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
+import { UiPeerEntry, connectionLabel, filterPeers, homeStateText, lastErrorText,
+  lastHandshakeText, onlinePeerCount, sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
   readStoredManagementUrl, readStoredPrivateKey, KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
@@ -26,29 +29,26 @@ interface BusinessFailure extends Error {
 // so this page reads the live document the extension publishes into the shared
 // filesDir (device-verified 2026-09-14 — direct NAPI polling here rendered a
 // dead "disconnected / wg sessions: 0" while the tunnel was up).
-// UI scope: beyond the status texts, the only UI is the first-run
-// setup/login card — it writes the SAME filesDir credential files as the
-// development-only --ps channel, so the extension's reader is unchanged.
+// UI scope (phase 1: 主页/对端/设置): the ONLY credential writes stay in the
+// setup card (settings tab) — the SAME filesDir files as the development-only
+// --ps channel, so the extension's reader is unchanged.
 @Entry
 @Component
 struct Index {
-  @State statusText: string = 'READY';
-  @State detailText: string = 'tap to send one start request';
+  // ---- live status (published document, fresh within 15 s) ----
+  @State published: PublishedStatus | null = null;
   @State requestSent: boolean = false;
   @State stopSent: boolean = false;
-  @State connectorState: string = 'unknown';
-  @State peerCount: number = 0;
-  @State routeCount: number = 0;
-  @State lastErrorClass: string = 'none';
-  // N5d: real signal link state.
-  @State signalRegistered: boolean = false;
-  @State signalReconnects: number = 0;
-  // N7: real WG data-plane state (device-backed seam).
-  @State wgReady: boolean = false;
-  @State wgSessions: number = 0;
-  // First-run setup / login card: unconfigured shows the form; configured
-  // shows the current server + 重新配置 / 注销. Writes go to the SAME
-  // credential files as the --ps channel (see NetBirdSetupConfig.ets).
+  @State actionError: string = '';
+  // ---- navigation ----
+  @State activeTab: number = 0;
+  @State selectedPeer: UiPeerEntry | null = null;
+  @State peerQuery: string = '';
+  @State showDiagnostics: boolean = false;
+  @State versionName: string = '';
+  // ---- first-run setup / login card (settings tab): unconfigured shows the
+  // form; configured shows the current server + 重新配置 / 注销. Writes go to
+  // the SAME credential files as the --ps channel (see NetBirdSetupConfig).
   @State configured: boolean = false;
   @State configuredUrl: string = '';
   @State keyStored: boolean = false;
@@ -63,6 +63,12 @@ struct Index {
 
   aboutToAppear(): void {
     this.refreshSetupState();
+    // First open without credentials: guide straight to configuration
+    // (设置 tab owns the first-run form since phase 1).
+    if (!this.configured) {
+      this.activeTab = 2;
+    }
+    this.readVersionName();
     this.pollConnectorStatus();
     this.pollTimer = setInterval((): void => {
       this.pollConnectorStatus();
@@ -76,6 +82,17 @@ struct Index {
     }
   }
 
+  private readVersionName(): void {
+    try {
+      const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
+        bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      this.versionName = info.versionName !== undefined && info.versionName !== null
+        ? info.versionName : '';
+    } catch (error) {
+      this.versionName = '';
+    }
+  }
+
   private pollConnectorStatus(): void {
     // The connector runs in the VpnExtension process: read the document that
     // process publishes into the shared filesDir (a NAPI call here would read
@@ -83,51 +100,120 @@ struct Index {
     const status: PublishedStatus | null = currentPublishedStatus(
       readPublishedStatus(getContext(this).filesDir), Date.now());
     if (status === null) {
-      this.connectorState = 'unavailable';
-      this.peerCount = 0;
-      this.routeCount = 0;
-      this.lastErrorClass = 'none';
-      this.signalRegistered = false;
-      this.signalReconnects = 0;
-      this.wgReady = false;
-      this.wgSessions = 0;
       if (this.observedPublishedStatus) {
+        // the document disappeared = the extension is gone (stopped or
+        // destroyed): release the request latches for an explicit retry
         this.requestSent = false;
         this.stopSent = false;
-        this.statusText = 'READY';
-        this.detailText = 'VPN not running';
         this.requestId = `ui-${Date.now()}`;
         this.observedPublishedStatus = false;
       }
+      this.published = null;
       return;
     }
     this.observedPublishedStatus = true;
-    if (status.state === 'stopped') {
-      this.requestSent = false;
-      this.stopSent = false;
-      this.requestId = `ui-${Date.now()}`;
-    } else {
+    if (vpnActiveState(status.state)) {
       this.requestSent = true;
       if (status.request_id !== undefined && status.request_id.length > 0) {
         this.requestId = status.request_id;
       }
+    } else {
+      // A live document in a dead state (failed/disconnected/closed/stopped):
+      // the tunnel is not coming back on its own — re-arm the switch.
+      this.requestSent = false;
+      this.stopSent = false;
+      this.requestId = `ui-${Date.now()}`;
     }
-    this.connectorState = status.state;
-    this.peerCount = status.peer_count;
-    this.routeCount = status.route_count;
-    this.lastErrorClass =
-      status.last_error_class !== undefined && status.last_error_class !== null
-        ? status.last_error_class
-        : 'none';
-    // N5d: the real signal link (registered = offer/answer/candidate path up)
-    this.signalRegistered = status.signal_registered;
-    this.signalReconnects = status.signal_reconnects;
-    // N7: the real WG data plane (device fed + tunnel_ready + live sessions)
-    this.wgReady = status.wg_ready;
-    this.wgSessions = status.wg_sessions;
+    this.published = status;
   }
 
-  // ---- first-run setup / login card --------------------------------------
+  // ---- derived view state -------------------------------------------------
+
+  private peersList(): UiPeerEntry[] {
+    return this.published !== null && this.published.peers !== undefined &&
+      this.published.peers !== null ? this.published.peers : [];
+  }
+
+  private visiblePeers(): UiPeerEntry[] {
+    return sortPeers(filterPeers(this.peersList(), this.peerQuery));
+  }
+
+  private stateText(): string {
+    const state: string = this.published !== null ? this.published.state : '';
+    return homeStateText(state, this.requestSent, this.stopSent);
+  }
+
+  private stateColor(): string {
+    const text: string = this.stateText();
+    if (text === '已连接') {
+      return '#176B3A';
+    }
+    if (text === '连接中…' || text === '正在断开…') {
+      return '#8A6D1A';
+    }
+    if (text === '连接失败') {
+      return '#A12622';
+    }
+    return '#3D4A55';
+  }
+
+  private toggleOn(): boolean {
+    return this.published !== null && vpnActiveState(this.published.state);
+  }
+
+  private toggleBusy(): boolean {
+    if (this.stopSent) {
+      return true;
+    }
+    return this.requestSent && this.published === null;
+  }
+
+  private toggleLabel(): string {
+    if (this.stopSent) {
+      return '正在断开…';
+    }
+    if (this.toggleOn()) {
+      return '断开';
+    }
+    return this.requestSent ? '连接中…' : '连接';
+  }
+
+  private toggleColor(): string {
+    if (this.toggleOn()) {
+      return '#176B3A';
+    }
+    if (this.toggleBusy()) {
+      return '#8A9AA6';
+    }
+    return '#17324D';
+  }
+
+  private toggleEnabled(): boolean {
+    if (!this.configured) {
+      return false;
+    }
+    if (this.stopSent) {
+      return false;
+    }
+    if (this.toggleOn()) {
+      return true;
+    }
+    return !this.requestSent;
+  }
+
+  private lastErrorLine(): string {
+    if (this.actionError.length > 0) {
+      return this.actionError;
+    }
+    if (this.published === null) {
+      return '';
+    }
+    const errorClass: string = this.published.last_error_class !== undefined &&
+      this.published.last_error_class !== null ? this.published.last_error_class : 'none';
+    return lastErrorText(errorClass);
+  }
+
+  // ---- first-run setup / login card (settings tab) -------------------------
   // configured = device config parses with a management URL AND the
   // setup-key file exists (both under the shared filesDir); anything else
   // shows the first-run form. The --ps channel keeps working on the same
@@ -297,6 +383,8 @@ struct Index {
     }
   }
 
+  // ---- VPN start / stop (single toggle on the home tab) --------------------
+
   private buildWant(): Want {
     const params: Record<string, Object> = { 'requestId': this.requestId };
     const want: Want = {
@@ -313,19 +401,17 @@ struct Index {
       return;
     }
     this.requestSent = true;
-    this.statusText = 'SENT';
-    this.detailText = 'awaiting system vpn authorization';
+    this.actionError = '';
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
     vpnExtension.startVpnExtensionAbility(this.buildWant()).then(() => {
-      this.statusText = 'STARTED';
-      this.detailText = 'start promise resolved';
+      // The extension accepted the start; the published status document now
+      // drives everything the home tab shows.
       hilog.info(DOMAIN, TAG, 'UI_START_RESOLVED|bundle=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, this.requestId);
     }).catch((error: Error) => {
       const code: string = String((error as BusinessFailure).code ?? 'none');
-      this.statusText = `ERR:${code}`;
-      this.detailText = 'start request rejected';
+      this.actionError = `连接请求未成功（错误码 ${code}），请重试`;
       this.requestSent = false;
       hilog.error(DOMAIN, TAG, 'UI_START_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
@@ -339,13 +425,9 @@ struct Index {
       return;
     }
     this.stopSent = true;
-    this.statusText = 'STOP_SENT';
-    this.detailText = 'stop request in flight';
     hilog.info(DOMAIN, TAG, 'UI_STOP_REQUEST|bundle=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, this.requestId);
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {
-      this.statusText = 'STOPPED';
-      this.detailText = 'stop promise resolved';
       this.requestSent = false;
       this.stopSent = false;
       hilog.info(DOMAIN, TAG, 'UI_STOP_RESOLVED|bundle=%{public}s|requestId=%{public}s',
@@ -353,169 +435,530 @@ struct Index {
       this.requestId = `ui-${Date.now()}`;
     }).catch((error: Error) => {
       const code: string = String((error as BusinessFailure).code ?? 'none');
-      this.statusText = `ERR:${code}`;
-      this.detailText = 'stop request rejected';
+      this.actionError = `断开请求未成功（错误码 ${code}），请重试`;
       this.stopSent = false;
       hilog.error(DOMAIN, TAG, 'UI_STOP_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
     });
   }
 
-  build() {
-    Column({ space: 18 }) {
-      Text('NetBird HarmonyOS client')
-        .fontSize(24)
-        .fontWeight(FontWeight.Bold)
-        .fontColor('#17324D')
-      Text(BUNDLE_NAME)
+  // ---- shared small widgets -------------------------------------------------
+
+  @Builder
+  fieldRow(label: string, value: string) {
+    Row({ space: 8 }) {
+      Text(label)
+        .fontSize(13)
+        .fontColor('#8A9AA6')
+        .width(96)
+      Text(value.length > 0 ? value : '—')
         .fontSize(14)
-        .fontColor('#3D4A55')
-        .textAlign(TextAlign.Center)
-      // ---- 首次配置 / 登录 --------------------------------------------------
-      // 未配置（或点击「重新配置」）时显示表单；已配置显示当前服务器与
-      // 重新配置/注销入口。写入的凭据文件与 --ps 调试通道完全相同。
-      if (this.showSetupForm || !this.configured) {
-        Text(this.configured ? '重新配置' : '首次配置 / 登录')
-          .fontSize(18)
-          .fontWeight(FontWeight.Medium)
+        .fontColor('#17324D')
+        .layoutWeight(1)
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .padding({ top: 6, bottom: 6 })
+  }
+
+  @Builder
+  sectionTitle(title: string) {
+    Text(title)
+      .fontSize(15)
+      .fontWeight(FontWeight.Medium)
+      .fontColor('#3D4A55')
+      .width('100%')
+      .margin({ top: 18, bottom: 6 })
+  }
+
+  @Builder
+  statusDot(color: string, size: number) {
+    Circle({ width: size, height: size })
+      .fill(color)
+  }
+
+  // ---- 主页 -------------------------------------------------------------------
+
+  @Builder
+  homeTab() {
+    Scroll() {
+      Column({ space: 16 }) {
+        Text('NetBird')
+          .fontSize(28)
+          .fontWeight(FontWeight.Bold)
           .fontColor('#17324D')
-        TextInput({ text: this.urlInput, placeholder: '管理服务器地址（https://…）' })
-          .fontSize(16)
-          .height(44)
-          .width('100%')
-          .onChange((value: string): void => {
-            this.urlInput = value;
-          })
-        TextInput({ text: this.keyInput, placeholder: 'Setup Key（形如 6dc45f77-5f0d-4a0f-8a75-9df5b6a04bbb）' })
-          .fontSize(16)
-          .height(44)
-          .width('100%')
-          .type(InputType.Password)
-          .onChange((value: string): void => {
-            this.keyInput = value;
-          })
-        if (this.formError.length > 0) {
-          Text(this.formError)
-            .fontSize(13)
-            .fontColor('#A12622')
-            .textAlign(TextAlign.Center)
-        }
-        if (this.formHint.length > 0) {
-          Text(this.formHint)
-            .fontSize(13)
-            .fontColor('#8A6D1A')
-            .textAlign(TextAlign.Center)
-            .maxLines(2)
-        }
-        Row({ space: 12 }) {
-          Button('保存')
-            .fontSize(16)
-            .height(40)
-            .backgroundColor('#17324D')
-            .onClick(() => {
-              hilog.info(DOMAIN, TAG, 'UI_SETUP_SAVE_CLICKED|configured=%{public}s',
-                String(this.configured));
-              this.saveSetup();
-            })
-          if (this.configured) {
-            Button('取消')
+          .margin({ top: 12 })
+        if (!this.configured) {
+          Column({ space: 10 }) {
+            Text('尚未配置服务器')
+              .fontSize(17)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#8A6D1A')
+            Text('请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
+              .fontSize(14)
+              .fontColor('#3D4A55')
+              .textAlign(TextAlign.Center)
+            Button('去设置')
               .fontSize(16)
               .height(40)
-              .backgroundColor('#8A9AA6')
+              .backgroundColor('#17324D')
               .onClick(() => {
-                this.showSetupForm = false;
-                this.formError = '';
-                this.formHint = '';
+                this.activeTab = 2;
               })
           }
+          .width('100%')
+          .padding(16)
+          .borderRadius(16)
+          .backgroundColor('#FFFFFF')
+          .alignItems(HorizontalAlign.Center)
         }
-      } else {
-        Text('当前服务器')
-          .fontSize(16)
+        // 大号连接开关：单一按钮切换连接/断开（含连接中状态）。
+        Button(this.toggleLabel())
+          .fontSize(22)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#17324D')
-        Text(`${this.configuredUrl}（Setup Key：${this.keyStored ? '已保存' : '未保存'}）`)
-          .fontSize(14)
-          .fontColor('#3D4A55')
-          .textAlign(TextAlign.Center)
-          .maxLines(2)
-        Row({ space: 12 }) {
-          Button('重新配置')
-            .fontSize(16)
-            .height(40)
-            .backgroundColor('#5A3A6E')
-            .onClick(() => {
-              this.urlInput = this.configuredUrl;
-              this.keyInput = '';
-              this.formError = '';
-              this.formHint = '';
-              this.showSetupForm = true;
-            })
-          Button('注销')
-            .fontSize(16)
-            .height(40)
-            .backgroundColor('#A12622')
-            .onClick(() => {
-              hilog.info(DOMAIN, TAG, 'UI_SETUP_LOGOUT_CLICKED');
-              this.requestLogout();
-            })
+          .fontColor('#FFFFFF')
+          .width(132)
+          .height(132)
+          .borderRadius(66)
+          .backgroundColor(this.toggleColor())
+          .enabled(this.toggleEnabled())
+          .onClick(() => {
+            if (this.toggleOn()) {
+              hilog.info(DOMAIN, TAG, 'UI_STOP_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
+              this.requestStop();
+            } else {
+              hilog.info(DOMAIN, TAG, 'UI_START_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
+              this.requestStart();
+            }
+          })
+        // 状态卡片：已连接/连接中/未连接 + 本机 NetBird IP 与域名 + 在线对端数。
+        Column({ space: 4 }) {
+          Row({ space: 10 }) {
+            this.statusDot(this.stateColor(), 12)
+            Text(this.stateText())
+              .fontSize(20)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.stateColor())
+          }
+          .margin({ bottom: 6 })
+          this.fieldRow('NetBird IP', this.published !== null && this.published.address !== undefined &&
+            this.published.address !== null ? this.published.address : '')
+          this.fieldRow('域名', this.published !== null && this.published.fqdn !== undefined &&
+            this.published.fqdn !== null ? this.published.fqdn : '')
+          this.fieldRow('对端', `${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`)
+          if (this.lastErrorLine().length > 0) {
+            Text(this.lastErrorLine())
+              .fontSize(13)
+              .fontColor('#A12622')
+              .width('100%')
+              .margin({ top: 6 })
+              .maxLines(3)
+          }
         }
+        .width('100%')
+        .padding(16)
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+        .alignItems(HorizontalAlign.Start)
       }
-      // Minimal connector status rows (control plane state, peer count,
-      // route count, last error classification). Data: core.connector_status.
-      Text(`state: ${this.connectorState}`)
-        .fontSize(16)
-        .fontColor('#17324D')
-      Text(`peers: ${this.peerCount}   routes: ${this.routeCount}`)
-        .fontSize(16)
-        .fontColor('#17324D')
-      // N5d: signal channel status — registered / reconnect count.
-      Text(`signal: ${this.signalRegistered ? 'registered' : 'not registered'}   ` +
-        `reconnects: ${this.signalReconnects}`)
-        .fontSize(16)
-        .fontColor(this.signalRegistered ? '#176B3A' : '#8A6D1A')
-      // N7: WG data-plane status — tunnel_ready + peers with a live session.
-      Text(`tunnel: ${this.wgReady ? 'ready' : 'not ready'}   ` +
-        `wg sessions: ${this.wgSessions}`)
-        .fontSize(16)
-        .fontColor(this.wgReady ? '#176B3A' : '#8A6D1A')
-      Text(`last error: ${this.lastErrorClass}`)
-        .fontSize(16)
-        .fontColor(this.lastErrorClass === 'none' ? '#176B3A' : '#A12622')
-      Button(this.requestSent ? 'Request sent' : 'Connect VPN')
-        .fontSize(17)
-        .width(220)
-        .height(48)
-        .backgroundColor(this.requestSent || !this.configured ? '#8A9AA6' : '#17324D')
-        .enabled(!this.requestSent && this.configured)
-        .onClick(() => {
-          hilog.info(DOMAIN, TAG, 'UI_START_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
-          this.requestStart();
-        })
-      Text(this.statusText)
-        .fontSize(19)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.statusText.startsWith('ERR') ? '#A12622' : '#176B3A')
-      Button(this.stopSent ? 'Stop requested' : 'Stop VPN')
-        .fontSize(17)
-        .width(220)
-        .height(44)
-        .backgroundColor(this.stopSent || !this.requestSent ? '#8A9AA6' : '#5A3A6E')
-        .enabled(this.requestSent && !this.stopSent)
-        .onClick(() => {
-          hilog.info(DOMAIN, TAG, 'UI_STOP_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
-          this.requestStop();
-        })
-      Text(this.detailText)
-        .fontSize(13)
-        .fontColor('#3D4A55')
-        .textAlign(TextAlign.Center)
-        .maxLines(2)
+      .width('100%')
+      .padding(20)
     }
     .width('100%')
     .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .padding(24)
     .backgroundColor('#F2F6F8')
+    .align(Alignment.Top)
+    .scrollBar(BarState.Off)
+  }
+
+  // ---- 对端 -------------------------------------------------------------------
+
+  @Builder
+  peerRow(peer: UiPeerEntry) {
+    Row({ space: 12 }) {
+      Column({ space: 2 }) {
+        Text(peer.name)
+          .fontSize(16)
+          .fontColor('#17324D')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(peer.ip.length > 0 ? peer.ip : '无 IP')
+          .fontSize(13)
+          .fontColor('#8A9AA6')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      Row({ space: 6 }) {
+        if (peer.online) {
+          Text(connectionLabel(peer.connection))
+            .fontSize(12)
+            .fontColor(peer.connection === 'direct' ? '#176B3A' : '#8A6D1A')
+            .padding({ left: 8, right: 8, top: 3, bottom: 3 })
+            .borderRadius(10)
+            .backgroundColor(peer.connection === 'direct' ? '#E3EFE7' : '#F5EBCF')
+        }
+        this.statusDot(peer.online ? '#176B3A' : '#8A9AA6', 10)
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ top: 12, bottom: 12 })
+    .onClick(() => {
+      this.selectedPeer = peer;
+    })
+  }
+
+  @Builder
+  peersTab() {
+    if (this.selectedPeer !== null) {
+      // 对端详情：展示可得的全部字段。
+      Column({ space: 8 }) {
+        Row({ space: 12 }) {
+          Button('返回')
+            .fontSize(15)
+            .height(36)
+            .backgroundColor('#8A9AA6')
+            .onClick(() => {
+              this.selectedPeer = null;
+            })
+          Text('对端详情')
+            .fontSize(20)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#17324D')
+        }
+        .width('100%')
+        .margin({ top: 8 })
+        Column({ space: 4 }) {
+          Row({ space: 10 }) {
+            this.statusDot(this.selectedPeer.online ? '#176B3A' : '#8A9AA6', 12)
+            Text(this.selectedPeer.name)
+              .fontSize(19)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .margin({ bottom: 6 })
+          this.fieldRow('域名', this.selectedPeer.fqdn !== null ? this.selectedPeer.fqdn : '')
+          this.fieldRow('NetBird IP', this.selectedPeer.ip)
+          this.fieldRow('状态', this.selectedPeer.online ? '在线' : '离线')
+          this.fieldRow('连接方式', this.selectedPeer.online ? connectionLabel(this.selectedPeer.connection) : '')
+          this.fieldRow('最近握手', lastHandshakeText(this.selectedPeer.last_handshake_s))
+          this.fieldRow('公钥', this.selectedPeer.pub_key)
+        }
+        .width('100%')
+        .padding(16)
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .height('100%')
+      .padding(20)
+      .backgroundColor('#F2F6F8')
+    } else {
+      Column({ space: 12 }) {
+        Row({ space: 10 }) {
+          Text('对端')
+            .fontSize(24)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#17324D')
+            .layoutWeight(1)
+          Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`)
+            .fontSize(14)
+            .fontColor('#3D4A55')
+        }
+        .width('100%')
+        .margin({ top: 8 })
+        TextInput({ text: this.peerQuery, placeholder: '搜索对端名称或 IP' })
+          .fontSize(15)
+          .height(42)
+          .width('100%')
+          .backgroundColor('#FFFFFF')
+          .onChange((value: string): void => {
+            this.peerQuery = value;
+          })
+        if (this.published === null) {
+          Text('VPN 未连接，对端信息在连接后可用')
+            .fontSize(14)
+            .fontColor('#8A9AA6')
+            .margin({ top: 32 })
+        } else if (this.visiblePeers().length === 0) {
+          Text(this.peerQuery.length > 0 ? '没有匹配的对端' : '暂无对端')
+            .fontSize(14)
+            .fontColor('#8A9AA6')
+            .margin({ top: 32 })
+        } else {
+          List({ space: 0 }) {
+            ForEach(this.visiblePeers(), (peer: UiPeerEntry) => {
+              ListItem() {
+                this.peerRow(peer)
+              }
+            }, (peer: UiPeerEntry) => peer.pub_key)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .backgroundColor('#FFFFFF')
+          .borderRadius(16)
+          .padding({ left: 16, right: 16 })
+          .scrollBar(BarState.Off)
+        }
+      }
+      .width('100%')
+      .height('100%')
+      .padding(20)
+      .backgroundColor('#F2F6F8')
+    }
+  }
+
+  // ---- 设置 -------------------------------------------------------------------
+
+  @Builder
+  setupFormCard() {
+    Column({ space: 12 }) {
+      Text(this.configured ? '重新配置' : '首次配置 / 登录')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#17324D')
+        .width('100%')
+      TextInput({ text: this.urlInput, placeholder: '管理服务器地址（https://…）' })
+        .fontSize(15)
+        .height(44)
+        .width('100%')
+        .onChange((value: string): void => {
+          this.urlInput = value;
+        })
+      TextInput({ text: this.keyInput, placeholder: 'Setup Key（形如 6dc45f77-5f0d-4a0f-8a75-9df5b6a04bbb）' })
+        .fontSize(15)
+        .height(44)
+        .width('100%')
+        .type(InputType.Password)
+        .onChange((value: string): void => {
+          this.keyInput = value;
+        })
+      if (this.formError.length > 0) {
+        Text(this.formError)
+          .fontSize(13)
+          .fontColor('#A12622')
+          .width('100%')
+      }
+      if (this.formHint.length > 0) {
+        Text(this.formHint)
+          .fontSize(13)
+          .fontColor('#8A6D1A')
+          .width('100%')
+          .maxLines(2)
+      }
+      Row({ space: 12 }) {
+        Button('保存')
+          .fontSize(16)
+          .height(40)
+          .backgroundColor('#17324D')
+          .onClick(() => {
+            hilog.info(DOMAIN, TAG, 'UI_SETUP_SAVE_CLICKED|configured=%{public}s',
+              String(this.configured));
+            this.saveSetup();
+          })
+        if (this.configured) {
+          Button('取消')
+            .fontSize(16)
+            .height(40)
+            .backgroundColor('#8A9AA6')
+            .onClick(() => {
+              this.showSetupForm = false;
+              this.formError = '';
+              this.formHint = '';
+            })
+        }
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .borderRadius(16)
+    .backgroundColor('#FFFFFF')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  serverConfigCard() {
+    Column({ space: 10 }) {
+      Text('当前服务器')
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#17324D')
+        .width('100%')
+      Text(`${this.configuredUrl}（Setup Key：${this.keyStored ? '已保存' : '未保存'}）`)
+        .fontSize(14)
+        .fontColor('#3D4A55')
+        .width('100%')
+        .maxLines(2)
+      Row({ space: 12 }) {
+        Button('重新配置')
+          .fontSize(15)
+          .height(38)
+          .backgroundColor('#5A3A6E')
+          .onClick(() => {
+            this.urlInput = this.configuredUrl;
+            this.keyInput = '';
+            this.formError = '';
+            this.formHint = '';
+            this.showSetupForm = true;
+          })
+        Button('注销')
+          .fontSize(15)
+          .height(38)
+          .backgroundColor('#A12622')
+          .onClick(() => {
+            hilog.info(DOMAIN, TAG, 'UI_SETUP_LOGOUT_CLICKED');
+            this.requestLogout();
+          })
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .borderRadius(16)
+    .backgroundColor('#FFFFFF')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  diagnosticsView() {
+    Column({ space: 8 }) {
+      Row({ space: 12 }) {
+        Button('返回')
+          .fontSize(15)
+          .height(36)
+          .backgroundColor('#8A9AA6')
+          .onClick(() => {
+            this.showDiagnostics = false;
+          })
+        Text('诊断信息')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#17324D')
+      }
+      .width('100%')
+      .margin({ top: 8, bottom: 8 })
+      Column({ space: 4 }) {
+        this.fieldRow('状态', this.published !== null ? this.published.state : '（未运行）')
+        this.fieldRow('信号', this.published !== null
+          ? (this.published.signal_registered ? 'registered' : 'not registered') : '—')
+        this.fieldRow('信号重连', this.published !== null ? `${this.published.signal_reconnects}` : '—')
+        this.fieldRow('隧道', this.published !== null
+          ? (this.published.wg_ready ? 'ready' : 'not ready') : '—')
+        this.fieldRow('WG 会话', this.published !== null ? `${this.published.wg_sessions}` : '—')
+        this.fieldRow('对端/路由', this.published !== null
+          ? `${this.published.peer_count} / ${this.published.route_count}` : '—')
+        this.fieldRow('管理重连', this.published !== null && this.published.reconnects !== undefined
+          ? `${this.published.reconnects}` : '—')
+        this.fieldRow('中继', this.published !== null && this.published.relay_state !== undefined &&
+          this.published.relay_state !== null ? this.published.relay_state : '—')
+        this.fieldRow('最近错误', this.published !== null ? this.published.last_error_class : '—')
+        this.fieldRow('请求 ID', this.published !== null && this.published.request_id !== undefined
+          ? this.published.request_id : '—')
+      }
+      .width('100%')
+      .padding(16)
+      .borderRadius(16)
+      .backgroundColor('#FFFFFF')
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .height('100%')
+    .padding(20)
+    .backgroundColor('#F2F6F8')
+  }
+
+  @Builder
+  settingsTab() {
+    Scroll() {
+      Column({ space: 0 }) {
+        Text('设置')
+          .fontSize(24)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#17324D')
+          .width('100%')
+          .margin({ top: 8, bottom: 4 })
+        if (this.showDiagnostics) {
+          this.diagnosticsView()
+        } else {
+          this.sectionTitle('服务器配置')
+          if (this.showSetupForm || !this.configured) {
+            this.setupFormCard()
+          } else {
+            this.serverConfigCard()
+          }
+          this.sectionTitle('关于')
+          Column() {
+            this.fieldRow('版本', this.versionName.length > 0 ? this.versionName : '未知')
+          }
+          .width('100%')
+          .padding(16)
+          .borderRadius(16)
+          .backgroundColor('#FFFFFF')
+          .alignItems(HorizontalAlign.Start)
+          this.sectionTitle('诊断')
+          Row({ space: 8 }) {
+            Text('诊断信息')
+              .fontSize(16)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+            Text('›')
+              .fontSize(18)
+              .fontColor('#8A9AA6')
+          }
+          .width('100%')
+          .padding(16)
+          .borderRadius(16)
+          .backgroundColor('#FFFFFF')
+          .onClick(() => {
+            this.showDiagnostics = true;
+          })
+        }
+      }
+      .width('100%')
+      .padding(20)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F2F6F8')
+    .align(Alignment.Top)
+    .scrollBar(BarState.Off)
+  }
+
+  build() {
+    Column() {
+      Tabs({ barPosition: BarPosition.End, index: this.activeTab }) {
+        TabContent() {
+          this.homeTab()
+        }
+        .tabBar('主页')
+
+        TabContent() {
+          this.peersTab()
+        }
+        .tabBar('对端')
+
+        TabContent() {
+          this.settingsTab()
+        }
+        .tabBar('设置')
+      }
+      .scrollable(true)
+      .barMode(BarMode.Fixed)
+      .onChange((index: number) => {
+        this.activeTab = index;
+        if (index !== 1) {
+          // leaving the peers tab drops the drill-down selection
+          this.selectedPeer = null;
+        }
+      })
+      .width('100%')
+      .layoutWeight(1)
+    }
+    .width('100%')
+    .height('100%')
   }
 }
