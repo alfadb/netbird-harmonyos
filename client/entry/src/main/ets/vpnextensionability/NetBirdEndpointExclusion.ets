@@ -932,6 +932,20 @@ export function deriveLanExclusion(probe: LanExclusionProbe,
   return none(LAN_EXCLUSION_REASON_NO_USABLE_LINK);
 }
 
+// Stable identity of a derived LAN exclusion for comparison and logs
+// (场景B roaming, LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): 'a.b.c.d/prefix',
+// or 'none' when the network yields no exclusion (cellular, or nothing
+// usable). The gateway never distinguishes two exclusions — it is the base
+// template's tunnel address on every assembly leg. Lives HERE (not in the
+// roam policy module) because ArkTS forbids structural typing: the parameter
+// must be the very ExcludedRouteEntry type deriveLanExclusion returns.
+export function lanExclusionSignature(entry: ExcludedRouteEntry | null): string {
+  if (entry === null || entry === undefined) {
+    return 'none';
+  }
+  return `${entry.destination}/${entry.prefixLength}`;
+}
+
 // Masked network address of a strict IPv4 literal under prefix 1..32 (same
 // arithmetic as NetBirdVpnConfig's tunnel-subnet helper — local copy because
 // this module stays zero-import).

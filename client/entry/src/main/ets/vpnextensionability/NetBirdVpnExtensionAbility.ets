@@ -42,7 +42,7 @@ import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, Exclusion
   DnsDerivationResult,
   StunDerivationResult, StunUriEntry,
   RelayEndpoint, buildExcludedRouteEntries, deriveLanExclusion, deriveStunEndpointExclusions,
-  isExclusionFailClosed, parseRelayUrl,
+  isExclusionFailClosed, lanExclusionSignature, parseRelayUrl,
   stripDialPort
 } from './NetBirdEndpointExclusion';
 // type-only: erased at runtime, so the host selfcheck fixtures that stage
@@ -73,8 +73,12 @@ import {
 
 import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
 
-import { isPhysicalNetworkSwitch, protectedConnectionRejectionReason,
+import { isPhysicalNetworkSwitch, lanRoamCheckDue,
+  lanRoamDecision, protectedConnectionRejectionReason,
   socketSupplyRejectionReason } from './NetBirdPhysicalNetworkPolicy';
+// type-only: erased at runtime (same rule as the endpoint shapes above), so
+// the staging selfchecks never need a shim for the policy module.
+import type { LanRoamDecision } from './NetBirdPhysicalNetworkPolicy';
 
 import { ICE_SOCKET_POOL_MIN, iceSocketNeedPerPeer, iceSocketTargetDepth,
   iceSocketTopUpCount } from './NetBirdIceSocketPool';
@@ -117,6 +121,16 @@ const CONNECTOR_POLL_FAILURE_LIMIT: number = 3;
 // fail-closed teardown (never a half-configured tunnel).
 const RECREATE_DESTROY_BOX_MS: number = 5000;
 const RECREATE_CREATE_BOX_MS: number = 5000;
+// 场景B roaming fix (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the stability
+// window a switched physical default network must hold before the shell
+// re-derives the LAN exclusion and compares it with the live config. The
+// 250 ms networkDebounceTimer above already collapses one event storm into a
+// single switch; this window (2–3 s per the fix plan) additionally rides out
+// a flapping Wi-Fi <-> cellular handover, so a roam rebuild runs at most
+// once, on the network that actually stayed. The check itself rides the
+// status watcher tick (STATUS_POLL_MS cadence, no new timer): it fires on
+// the first tick at least this many ms after the LAST switch.
+const LAN_ROAM_STABLE_MS: number = 2500;
 // N2-H I5 (§5.3-1): the development-channel arm trigger of the device-side
 // evidence collector. The file only carries NON-SENSITIVE window options; its
 // EXISTENCE is the arm request. No arm file ⇒ the collector stays inert.
@@ -666,6 +680,27 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // core-side budget/cooldown bounds).
   private recreateInFlight: boolean = false;
   private networkRecoveryPending: boolean = false;
+  // 场景B roaming (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): the
+  // LAN-exclusion signature merged into the LIVE platform VpnConfig —
+  // recorded at each create() submit point (initial AND recreate legs), so a
+  // later network switch compares against what is REALLY live. '' = nothing
+  // submitted yet; a roam decision needs a settled connection first, so the
+  // value at decision time is always a real signature ('none' included =
+  // "this config carries no LAN exclusion", e.g. a cellular create).
+  private appliedLanExclusion: string = '';
+  // The armed debounce window: set by every measured physical-network
+  // switch, consumed once by the first watcher tick that finds the network
+  // stable for LAN_ROAM_STABLE_MS (lanRoamCheckDue). A newer switch while
+  // armed only refreshes the timestamp — the window restarts, it never
+  // stacks. false = no roam check pending.
+  private lanRoamArmed: boolean = false;
+  private lanRoamLastSwitchAtMs: number = 0;
+  // Outcome of the most recent performControlledRecreate ('ok' |
+  // 'fail:<stage>' | 'skip:<reason>'), set by the recreate path itself and
+  // read by the roam trigger's follow-up VPN_LAN_ROAM line so the roam trail
+  // carries the rebuild's result (and failure reason) without duplicating
+  // the recreate's own logging.
+  private lastRecreateOutcome: string = 'none';
   // N2-H: the endpoint-derived exclusion set frozen at THIS session's start
   // (before the first create()). The controlled recreate grafts the SAME
   // frozen set onto its rebuilt config — a recreate that dropped the
@@ -940,6 +975,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.networkNetId = netId;
     this.networkDirty = true;
     this.networkEpoch++;
+    // 场景B roaming (§4 step 2): (re)arm the LAN-exclusion check window for
+    // THIS switch. The check itself fires from the status watcher tick once
+    // the network has held for LAN_ROAM_STABLE_MS (checkLanRoamRecreate); a
+    // net-lost transition arms too, so the lost->available hop collapses
+    // into ONE window ending on the network that stayed.
+    this.lanRoamArmed = true;
+    this.lanRoamLastSwitchAtMs = Date.now();
     // N2 first batch C/D columns: advance the plan BEFORE the re-feed starts,
     // so the core records the OLD live registration of the kind (the baseline
     // the new-network receipt must differ from). `gated` is the plan's own
@@ -965,6 +1007,73 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.n2NetworkRecoveryFail(error);
       });
     }
+  }
+
+  // 场景B roaming fix (LAN-ROUTE-ROAMING-ANALYSIS.md §4 step 2): after a
+  // physical default-network switch has held stable for LAN_ROAM_STABLE_MS,
+  // re-derive the LAN exclusion from the CURRENT network and compare it with
+  // the one merged into the live platform VpnConfig. Only a CHANGE walks the
+  // EXISTING N8 controlled-recreate path (performControlledRecreate — no
+  // parallel rebuild): that leg re-derives the exclusion for the current
+  // network at its own assembly (lanExclusionForConfig leg=recreate), keeps
+  // the core session (only the platform connection is rebuilt and the fresh
+  // TUN fd re-fed — no re-login), and fails closed on any leg. Unchanged =>
+  // nothing is touched. Called from the status watcher tick; the armed flag
+  // makes it one-shot per switch.
+  private checkLanRoamRecreate(): void {
+    if (!this.lanRoamArmed) {
+      return;
+    }
+    if (!lanRoamCheckDue(Date.now(), this.lanRoamLastSwitchAtMs, LAN_ROAM_STABLE_MS)) {
+      return; // still inside the stability window — a later tick decides
+    }
+    this.lanRoamArmed = false;
+    // Re-derive through the SAME collector + pure derivation both config
+    // assembly legs use, so the comparison can never drift from what a
+    // rebuild would actually graft.
+    const probe: LanExclusionProbe = physicalDefaultLanProbe();
+    const current: LanExclusionResult =
+      deriveLanExclusion(probe, loadVpnTunnelConfig().tunnelAddress);
+    const fromSignature: string = this.appliedLanExclusion;
+    const toSignature: string = lanExclusionSignature(current.entry);
+    const decision: LanRoamDecision = lanRoamDecision({
+      evidenceMode: this.n2Evidence !== undefined,
+      destroyRequested: this.destroyRequested,
+      recreateInFlight: this.recreateInFlight,
+      hasSettledConnection:
+        this.connection !== undefined && this.createSettled && this.tunFd >= 0,
+      networkLost: physicalDefaultNetId() === 0,
+      productionGateBlocked: this.n2CdProductionBlocked(),
+      appliedSignature: fromSignature,
+      currentSignature: toSignature
+    });
+    // One line per settled roam check: from/to = live vs re-derived exclusion
+    // signature, action = recreate|skip, result = 'triggered' for a rebuild
+    // (the follow-up line below carries its outcome) or the skip token.
+    hilog.info(DOMAIN, TAG,
+      'VPN_LAN_ROAM|requestId=%{public}s|from=%{public}s|to=%{public}s|' +
+      'action=%{public}s|result=%{public}s',
+      this.requestId, fromSignature, toSignature, decision.action,
+      decision.action === 'recreate' ? 'triggered' : decision.reason);
+    if (decision.action !== 'recreate') {
+      return;
+    }
+    // The follow-up line records the rebuild's outcome ('ok' | 'fail:<stage>'
+    // | 'skip:<reason>' — lastRecreateOutcome) on the roam trail; the
+    // recreate's own lines keep the full per-leg truth.
+    this.performControlledRecreate(decision.reason).then((): void => {
+      hilog.info(DOMAIN, TAG,
+        'VPN_LAN_ROAM|requestId=%{public}s|from=%{public}s|to=%{public}s|' +
+        'action=recreate|result=%{public}s',
+        this.requestId, fromSignature, toSignature, this.lastRecreateOutcome);
+    }).catch((error: Error): void => {
+      // performControlledRecreate never rejects (it catches internally and
+      // fails closed); this belt only guards an unexpected throw.
+      hilog.error(DOMAIN, TAG,
+        'VPN_LAN_ROAM|requestId=%{public}s|from=%{public}s|to=%{public}s|' +
+        'action=recreate|result=fail:unexpected-throw|summary=%{public}s',
+        this.requestId, fromSignature, toSignature, safeError(error));
+    });
   }
 
   // The one teardown-path line for a failed physical-network recovery, logged
@@ -1521,6 +1630,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       net !== null && net.routes !== undefined && net.routes !== null && net.routes.length > 0
         ? net.routes.map((r: CoreRouteEntry): string => r.network)
         : null;
+    // 场景B roaming: the exclusion actually being submitted — the
+    // live-config truth a later network switch compares against
+    // (checkLanRoamRecreate). Recorded at the submit point (not at
+    // derivation) so an aborted leg can never leave a signature that was
+    // never created behind.
+    this.appliedLanExclusion = lanExclusionSignature(lan.entry);
     hilog.info(DOMAIN, TAG,
       'VPN_CREATE_BEGIN|requestId=%{public}s|address=%{public}s|prefixLength=%{public}d',
       this.requestId, merged.tunnelAddress, merged.tunnelPrefixLength);
@@ -4058,6 +4173,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.handleConnectorDeath(`terminal-state:${status.state}`);
           return;
         }
+        // 场景B roaming (§4 step 2): the debounced LAN-exclusion check rides
+        // the same tick as the N8 trigger below — a triggered roam rebuild
+        // sets recreateInFlight synchronously, so the N8 block behind it
+        // skips exactly like it does behind any in-flight recreate.
+        this.checkLanRoamRecreate();
         // N8 controlled recreate (the platform-VpnConfig-is-fixed gap): when
         // the core's desired route set diverges from the set the shell last
         // ACKed as applied, it raises recreate.required (bounded core-side:
@@ -4203,14 +4323,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
   private async performControlledRecreate(reason: string): Promise<void> {
     if (this.recreateInFlight) {
+      this.lastRecreateOutcome = 'skip:already-in-flight';
       hilog.info(DOMAIN, TAG,
         'VPN_RECREATE_SKIP|requestId=%{public}s|reason=already-in-flight', this.requestId);
       return;
     }
     if (this.destroyRequested || this.connectorDeathHandled) {
+      this.lastRecreateOutcome = 'skip:teardown-latched';
       return; // teardown already latched — nothing to rebuild
     }
     if (this.connection === undefined || !this.createSettled || this.tunFd < 0) {
+      this.lastRecreateOutcome = 'skip:initial-generation-not-settled';
       hilog.warn(DOMAIN, TAG,
         'VPN_RECREATE_SKIP|requestId=%{public}s|reason=initial-generation-not-settled',
         this.requestId);
@@ -4331,6 +4454,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       const config: vpnExtension.VpnConfig =
         buildPlatformVpnConfig(merged, this.diagBlockedApplicationList('recreate'),
           this.n2Evidence !== undefined ? [SELF_BUNDLE_NAME] : undefined);
+      // 场景B roaming: this leg's re-derived exclusion becomes the
+      // live-config truth the moment this create() lands (a failed leg tears
+      // the whole session down fail-closed, so the recording can never
+      // describe a generation that is not live).
+      this.appliedLanExclusion = lanExclusionSignature(lanRecreate.entry);
       const fd: number = await this.createConnectionBounded(conn, config);
 
       // 4. the same fd contract as the initial create
@@ -4386,6 +4514,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'defaultRoutes=%{public}d|recreateCount=%{public}s',
         this.requestId, fd, merged.routes.length, defaultRoutes,
         String(ack.recreate !== undefined && ack.recreate !== null ? ack.recreate.count : -1));
+      // 场景B roaming: the roam trigger's follow-up VPN_LAN_ROAM line reads
+      // this (log truth only — no gate, no behavior).
+      this.lastRecreateOutcome = 'ok';
     } catch (error) {
       // fail-closed: ANY failed leg leaves no half-configured device — the
       // connector is stopped and whatever generation is current is destroyed
@@ -4443,6 +4574,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // stop the connector (idempotent), destroy whatever generation is current
   // (latched destroyOnce — the final teardown latch).
   private failRecreate(stage: string, error: Error): void {
+    // 场景B roaming: record WHY the rebuild died, so the roam trigger's
+    // follow-up VPN_LAN_ROAM line carries the failure stage (log truth only
+    // — the fail-closed teardown below is unchanged).
+    this.lastRecreateOutcome = `fail:${stage}`;
     hilog.error(DOMAIN, TAG,
       'VPN_RECREATE_FAIL|requestId=%{public}s|stage=%{public}s|' +
       'action=teardown-vpn-fail-closed|summary=%{public}s',
