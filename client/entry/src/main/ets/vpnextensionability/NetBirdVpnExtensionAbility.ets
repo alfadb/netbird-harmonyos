@@ -5133,6 +5133,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // this status snapshot PLUS one connector_network_config read (own
   // fqdn/address + the per-peer merged view). Best-effort: a failure here
   // must never disturb the VPN.
+  //
+  // Defect 2026-10-04 (home card "NetBird IP —、域名 —、对端 0/0 在线" while
+  // the peers tab listed 6): a TRANSIENT connector_network_config failure
+  // used to overwrite the document with the honest-empty merge (null
+  // address/fqdn, empty peers) while state stayed connected — the home card
+  // and the peers tab then disagreed until the next good tick. The map does
+  // not vanish because one read hiccupped: keep the LAST GOOD network
+  // snapshot and republish it (an explicit available:false — no map yet /
+  // connector stopped — still publishes the honest empties and drops the
+  // cache). 已连接 itself already requires the document's own address
+  // (NetBirdUiModel.homeStateText), so a genuinely map-less document can
+  // never render 已连接.
+  private lastGoodNetwork: CoreNetworkConfig | null = null;
+
   private publishStatusForUi(status: ConnectorStatusResult): void {
     const path: string = `${this.context.filesDir}/netbird-status.json`;
     let file: fs.File | undefined = undefined;
@@ -5141,9 +5155,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       try {
         network = connectorNetworkConfig();
       } catch (netError) {
-        // no map yet (or a rejected read): the appended fields publish
-        // their honest nulls/empty — the legacy fields are unaffected
-        network = null;
+        // read hiccup: reuse the last good map instead of wiping the
+        // identity/peers fields the UI already shows
+        network = this.lastGoodNetwork;
+      }
+      if (network !== null && network.available) {
+        this.lastGoodNetwork = network;
+      } else {
+        this.lastGoodNetwork = null;
       }
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
         this.requestId, Date.now());

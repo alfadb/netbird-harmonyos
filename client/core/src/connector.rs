@@ -425,6 +425,19 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn handle_carrier_inbound(&self, _datagram: &[u8], _pub_key_b64: &str, _now_ms: u64) -> usize {
         0
     }
+    /// N6: apply the management-issued network routes (map `routes`) to the
+    /// WG routing table — the device groups them into HA sets and assigns
+    /// each network to ONE routing peer's allowed_ips (see
+    /// `crate::wg_device` module docs, managed route overlay). Without this,
+    /// LAN destinations behind routing peers hit `no-route`. Default: an
+    /// honest no-op for seams with no WG routing table (the registry/test
+    /// seams — same discipline as `recycle_endpoint`).
+    fn apply_managed_routes(
+        &self,
+        _routes: &[crate::network_map::ManagedRoute],
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// In-process WG peer registry — the N3-5..N6 production default, kept as
@@ -437,6 +450,9 @@ pub struct WgPeerRegistry {
     peers: Mutex<Vec<WgPeerEntry>>,
     /// N5c: per-peer endpoint landed from the ICE selected pair.
     endpoints: Mutex<Vec<(String, [u8; 4], u16)>>,
+    /// N6: last apply_managed_routes payload (observability/test assert —
+    /// the registry has no WG routing table to install it into).
+    managed_routes: Mutex<Vec<crate::network_map::ManagedRoute>>,
 }
 
 impl WgPeerRegistry {
@@ -470,6 +486,11 @@ impl WgPeerRegistry {
     pub fn endpoints(&self) -> Vec<(String, [u8; 4], u16)> {
         self.endpoints.lock_poison().clone()
     }
+
+    /// N6: the last recorded apply_managed_routes payload (snapshot).
+    pub fn managed_routes(&self) -> Vec<crate::network_map::ManagedRoute> {
+        self.managed_routes.lock_poison().clone()
+    }
 }
 
 impl WgPeerApplier for WgPeerRegistry {
@@ -478,9 +499,19 @@ impl WgPeerApplier for WgPeerRegistry {
         Ok(())
     }
 
+    /// N6: record-only (no WG routing table exists on this seam).
+    fn apply_managed_routes(
+        &self,
+        routes: &[crate::network_map::ManagedRoute],
+    ) -> Result<(), String> {
+        *self.managed_routes.lock_poison() = routes.to_vec();
+        Ok(())
+    }
+
     fn clear(&self) {
         self.peers.lock_poison().clear();
         self.endpoints.lock_poison().clear();
+        self.managed_routes.lock_poison().clear();
     }
 
     /// N5c: record/replace the endpoint for the peer. Unknown peers are
@@ -1959,6 +1990,17 @@ impl ConnectorShared {
                 g.wg_apply_failed = true;
                 g.wg_apply_errors += 1;
             }
+        }
+        // N6: management-issued network routes → WG routing table. The map's
+        // peer allowed_ips only carry the overlay /32s; the routed subnets
+        // (e.g. 192.168.50.0/24 behind routing peers, HA = two entries with
+        // the same network) would otherwise hit `no-route`. System-side
+        // routing is untouched (the shell installs managed routes into the
+        // platform VpnConfig).
+        if wg.apply_managed_routes(&map.routes).is_err() {
+            let mut g = self.lock();
+            g.wg_apply_failed = true;
+            g.wg_apply_errors += 1;
         }
         // Routes / DNS / own address go to the shell side.
         host.apply(map);
@@ -6567,6 +6609,50 @@ mod tests {
             ready_json.contains("\"default_route\":{\"allowed\":true"),
             "peers==0 must not change N3-7 semantics (ReadyWg is ready): {ready_json}"
         );
+    }
+
+    /// N6 wiring: `apply_update` must hand the map's managed routes to the WG
+    /// seam (the registry RECORDS them; the real device installs them into
+    /// its routing table — `wg_device::route_overlay_tests` pins the data
+    /// plane). Full-snapshot semantics: a later map without routes clears
+    /// the seam's route set.
+    #[test]
+    fn apply_update_hands_managed_routes_to_the_wg_seam() {
+        let shared = ConnectorShared::new(false, None);
+        let registry = Arc::new(WgPeerRegistry::default());
+        shared.apply_update(
+            registry.as_ref(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let routes = registry.managed_routes();
+        assert_eq!(routes.len(), 2, "both map routes must reach the WG seam");
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.network.prefix_len == 0 && r.peer == "relay" && r.metric == 9999)
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.network.addr == [172, 16, 0, 0] && r.network.prefix_len == 12 && r.metric == 10)
+        );
+        assert_eq!(registry.len(), 3, "peers ride the same snapshot");
+        // a later snapshot without routes clears the seam's route set
+        shared.apply_update(
+            registry.as_ref(),
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(NetworkMap { routes: vec![], ..shell_test_map() }),
+            },
+        );
+        assert!(registry.managed_routes().is_empty(), "route set is full-snapshot");
     }
 
     /// N2-H (design §4.0 stun + management rows): the collector's freeze

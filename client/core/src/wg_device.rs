@@ -20,6 +20,14 @@
 //!   （boringtun-0.7.1 `noise/mod.rs::encapsulate`——排队包在会话建立后由
 //!   `decapsulate(空)` 冲出，设备在检测到会话建立时执行该冲刷）；密文经
 //!   受保护 socket `sendto` 发往该 peer 的 endpoint。
+//! - **管理端下发网段（managed route overlay）**：map `routes` 里的网段
+//!   （如 `192.168.50.0/24`）不进任何 peer 的 map allowed_ips——没有这一
+//!   层，去往该网段的包一律 `no-route` 丢弃（真机缺陷 2026-10-04）。
+//!   [`WgDevice::set_managed_routes`] 把每个网段指派给一个路由 peer 并
+//!   并入其 allowed_ips；HA（同网段多个路由 peer）按「活会话优先 →
+//!   metric 小者优先 → 公钥稳定序」选择，选中 peer 会话失效即切换，
+//!   每次变更一行 `N6_WG_DEVICE|route-peer|…`。系统侧路由（TUN 里进什么）
+//!   仍由壳层按 managed 路由安装，本层不改。
 //! - **入向**：UDP 收包 → **按来源地址匹配 peer**（握手包同规则；来源不
 //!   属于任何 peer 的 endpoint → 丢弃并计 `unknown_peer_drops`）→ 送该
 //!   peer 的 tunnel 解封装 → 明文写 TUN（dup 副本，[`TunFd`] 合同）。解密
@@ -891,6 +899,22 @@ pub fn session_expired_line(pub_key_b64: &str) -> String {
     )
 }
 
+/// `N6_WG_DEVICE|route-peer|net=<cidr>|peer=<公钥前8位>|reason=<token>` ——
+/// 一个管理端下发网段（managed route）被指派给哪个路由 peer（首次选中 /
+/// HA 切换 / 释放各一行；`peer=none` = 该网段当前无可用候选，出向按
+/// `no-route` 丢弃）。与 [`session_established_line`] 同一 `peer_short` 源。
+pub fn route_peer_line(net: ([u8; 4], u8), pub_key_b64: Option<&str>, reason: &str) -> String {
+    let (addr, plen) = net;
+    let peer = match pub_key_b64 {
+        Some(k) if !k.is_empty() => crate::peer_conn::peer_short(k).to_string(),
+        _ => "none".to_string(),
+    };
+    format!(
+        "N6_WG_DEVICE|route-peer|net={}.{}.{}.{}/{}|peer={peer}|reason={reason}",
+        addr[0], addr[1], addr[2], addr[3], plen
+    )
+}
+
 impl TunFrameTee for N2DestinationTee {
     fn on_tun_frame(&self, dir: TunFrameDir, frame: &[u8]) {
         if dir != TunFrameDir::FromOs { return; }
@@ -971,6 +995,13 @@ struct WgPeer {
     key_b64: String,
     /// Stored MASKED (host bits cleared) so the LPM compares masked==masked.
     allowed_ips: Vec<([u8; 4], u8)>,
+    /// The map-provided allowed_ips (`set_peers` input) WITHOUT the managed
+    /// route overlay — `allowed_ips` above is the EFFECTIVE set (base + the
+    /// managed nets currently assigned to this peer by
+    /// [`WgDevice::rebuild_route_overlay`]). Kept separately so a route-set
+    /// or session-state change can re-derive the overlay without the next
+    /// `set_peers` re-adding stale nets.
+    base_allowed_ips: Vec<([u8; 4], u8)>,
     tunnel: Tunnel,
     endpoint: Option<([u8; 4], u16)>,
     /// N11: OUR dup of the peer's ICE-selected local socket (egress). The
@@ -1036,6 +1067,21 @@ impl WgPeer {
 // device
 // ---------------------------------------------------------------------------
 
+/// One managed-route network with its HA candidate set (derived from the
+/// map's [`crate::network_map::ManagedRoute`] list — same network from
+/// several route entries = same net with several candidates; per candidate
+/// the distribution peer key and that route entry's metric, smallest wins).
+/// `selected` is the CURRENT routing peer for the net (exactly one, or
+/// `None` when no candidate is currently registered).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedRouteEntry {
+    /// Masked network + prefix length (the allowed-ips shape).
+    net: ([u8; 4], u8),
+    /// (peer public key base64, best metric for that peer) in arrival order.
+    candidates: Vec<(String, i64)>,
+    selected: Option<String>,
+}
+
 /// Multi-peer WireGuard device: one protected UDP socket (dup copy) + one
 /// [`TunFd`] + per-peer BoringTun tunnels. Single-threaded pump model: the
 /// owner calls `service_tun` / `service_udp` / `tick` with an injected
@@ -1049,6 +1095,13 @@ pub struct WgDevice {
     local: ([u8; 4], u16),
     tun: TunFd,
     peers: Vec<WgPeer>,
+    /// Managed-route overlay (N6 路由表缺陷修复): management-issued network
+    /// routes grouped by network, each with its HA candidate routing peers
+    /// and the CURRENT selection. [`WgDevice::set_managed_routes`] replaces
+    /// the set; [`WgDevice::rebuild_route_overlay`] re-derives assignments
+    /// (and the peers' effective `allowed_ips`) whenever the route set, the
+    /// peer set or a session state changes.
+    managed_routes: Vec<ManagedRouteEntry>,
     next_index: u32,
     stats: WgDeviceStats,
     /// I2 (N2-H): the collector's TUN frame tee. `None` (default, never
@@ -1097,6 +1150,7 @@ impl WgDevice {
             local,
             tun,
             peers: Vec::new(),
+            managed_routes: Vec::new(),
             next_index: INDEX_BASE,
             stats: WgDeviceStats::default(),
             tun_tee: None,
@@ -1227,7 +1281,10 @@ impl WgDevice {
             let masked: Vec<([u8; 4], u8)> =
                 s.allowed_ips.iter().map(|&(a, pl)| (mask(a, pl), pl)).collect();
             match self.peers.iter_mut().find(|p| p.key_b64 == s.pub_key_b64) {
-                Some(p) => p.allowed_ips = masked,
+                Some(p) => {
+                    p.base_allowed_ips = masked.clone();
+                    p.allowed_ips = masked;
+                }
                 None => {
                     let index = self.alloc_index()?;
                     let tunnel = Tunnel::new_with(
@@ -1241,7 +1298,8 @@ impl WgDevice {
                     .ok_or_else(|| "wg-device-tunnel-create-failed".to_string())?;
                     self.peers.push(WgPeer {
                         key_b64: s.pub_key_b64.clone(),
-                        allowed_ips: masked,
+                        allowed_ips: masked.clone(),
+                        base_allowed_ips: masked,
                         tunnel,
                         endpoint: None,
                         egress_fd: None,
@@ -1258,15 +1316,164 @@ impl WgDevice {
                 }
             }
         }
+        // the peer set / base allowed_ips changed: re-derive the managed
+        // route overlay (assignments follow the peers; vanished peers drop
+        // their nets, new peers become HA candidates).
+        self.rebuild_route_overlay("peers-updated");
         emit(&format!("N6_WG_DEVICE|peers={}", self.peers.len()));
         Ok(())
     }
 
+    /// Replace the managed-route overlay from a network map's `routes`
+    /// (management-issued network routes: LAN subnets behind routing peers,
+    /// HA = several route entries sharing one network with different
+    /// distribution peers). Grouping by (masked) network builds the HA
+    /// candidate sets; selection happens in [`Self::rebuild_route_overlay`].
+    /// Invalid prefixes are rejected before any mutation (no partial apply).
+    ///
+    /// Exit-node routes (`0.0.0.0/0`) take the SAME path: the selected
+    /// routing peer receives `0.0.0.0/0` in its WG allowed_ips, so whatever
+    /// the SYSTEM already routed into the TUN (the shell's N3-7 gate owns
+    /// that decision and is NOT touched here) is carried by the exit peer.
+    pub fn set_managed_routes(
+        &mut self,
+        routes: &[crate::network_map::ManagedRoute],
+    ) -> Result<(), String> {
+        let mut grouped: Vec<ManagedRouteEntry> = Vec::new();
+        for r in routes {
+            if r.network.prefix_len > 32 {
+                return Err(format!(
+                    "wg-device-managed-route-prefix-invalid (/{})",
+                    r.network.prefix_len
+                ));
+            }
+            let net = (mask(r.network.addr, r.network.prefix_len), r.network.prefix_len);
+            let entry = match grouped.iter_mut().find(|e| e.net == net) {
+                Some(e) => e,
+                None => {
+                    grouped.push(ManagedRouteEntry {
+                        net,
+                        candidates: Vec::new(),
+                        selected: None,
+                    });
+                    grouped.last_mut().expect("just pushed")
+                }
+            };
+            match entry.candidates.iter_mut().find(|(k, _)| *k == r.peer) {
+                // same peer listed twice for one net: keep the better metric
+                Some((_, m)) => {
+                    if r.metric < *m {
+                        *m = r.metric;
+                    }
+                }
+                None => entry.candidates.push((r.peer.clone(), r.metric)),
+            }
+        }
+        // carry the previous selections over (same net ⇒ same HA set): a
+        // route-set refresh that changes nothing must not re-log every net
+        // (the map re-syncs with equal content on every reconnect).
+        for entry in grouped.iter_mut() {
+            if let Some(prev) = self
+                .managed_routes
+                .iter()
+                .find(|e| e.net == entry.net)
+                .and_then(|e| e.selected.clone())
+            {
+                entry.selected = Some(prev);
+            }
+        }
+        self.managed_routes = grouped;
+        self.rebuild_route_overlay("routes-updated");
+        Ok(())
+    }
+
+    /// Current overlay assignments (net → selected routing peer), snapshot
+    /// for status/tests. Order follows the managed route set.
+    pub fn managed_route_selections(&self) -> Vec<(([u8; 4], u8), Option<String>)> {
+        self.managed_routes
+            .iter()
+            .map(|e| (e.net, e.selected.clone()))
+            .collect()
+    }
+
+    /// Re-derive the overlay: for every managed net pick ONE routing peer
+    /// (a net can only ever sit on one peer's allowed_ips — WireGuard source
+    /// selection is ambiguous otherwise) and rebuild each peer's effective
+    /// `allowed_ips = base_allowed_ips + assigned nets`.
+    ///
+    /// HA selection rule (minimal form of upstream's route-manager behavior:
+    /// prefer lower metric, fail over when the chosen peer's session dies):
+    ///
+    /// 1. a candidate must be a REGISTERED peer; a peer whose session has
+    ///    EXPIRED (`session_established && expired`) is skipped — it just
+    ///    failed, keep the traffic on the HA partner until it re-handshakes
+    ///    (the `session-established` rebuild re-admits it);
+    /// 2. among the rest, a peer with a LIVE session wins over one without;
+    /// 3. then the smaller route metric wins;
+    /// 4. then the smaller public key (stable, deterministic).
+    ///
+    /// Recomputed on every route-set change (`set_managed_routes`), peer-set
+    /// change (`set_peers`) and session-state change (establish / expire);
+    /// each actual selection change logs one [`route_peer_line`].
+    fn rebuild_route_overlay(&mut self, reason: &str) {
+        // pass 1 (immutable): pick per net
+        let picks: Vec<Option<String>> = self
+            .managed_routes
+            .iter()
+            .map(|entry| {
+                entry
+                    .candidates
+                    .iter()
+                    .filter(|(k, _)| {
+                        self.peers.iter().any(|p| {
+                            p.key_b64 == *k && !(p.session_established && p.expired)
+                        })
+                    })
+                    .min_by(|a, b| {
+                        let alive = |k: &String| {
+                            self.peers
+                                .iter()
+                                .any(|p| p.key_b64 == *k && p.session_established && !p.expired)
+                        };
+                        // live session first (true > false), then metric,
+                        // then key — `min_by` keeps the FIRST minimal element,
+                        // so candidate order (management arrival) never
+                        // decides a tie the rule does not cover.
+                        alive(&b.0)
+                            .cmp(&alive(&a.0))
+                            .then(a.1.cmp(&b.1))
+                            .then(a.0.cmp(&b.0))
+                    })
+                    .map(|(k, _)| k.clone())
+            })
+            .collect();
+        // pass 2: apply + log the transitions (one line per change)
+        for (entry, pick) in self.managed_routes.iter_mut().zip(picks) {
+            if entry.selected != pick {
+                emit(&route_peer_line(entry.net, pick.as_deref(), reason));
+                entry.selected = pick;
+            }
+        }
+        // pass 3: rebuild effective allowed_ips from the base set
+        for peer in self.peers.iter_mut() {
+            let mut ips = peer.base_allowed_ips.clone();
+            for entry in &self.managed_routes {
+                if entry.selected.as_deref() == Some(peer.key_b64.as_str()) {
+                    ips.push(entry.net);
+                }
+            }
+            peer.allowed_ips = ips;
+        }
+    }
+
     /// Drop the whole peer set (connector stop semantics); sockets/tunnels
-    /// owned by the device stay until the device is dropped.
+    /// owned by the device stay until the device is dropped. The managed
+    /// route overlay goes with it (stop semantics — a later map re-applies).
     pub fn clear(&mut self) {
-        if !self.peers.is_empty() {
-            self.peers.clear();
+        let had = !self.peers.is_empty() || !self.managed_routes.is_empty();
+        self.peers.clear();
+        self.managed_routes.clear();
+        if had {
             emit("N6_WG_DEVICE|cleared");
         }
     }
@@ -1547,6 +1754,9 @@ impl WgDevice {
                 self.peers[idx].session_established_ms = now_ms;
                 self.peers[idx].first_init_ms = None; // campaign done
                 emit(&session_established_line(&self.peers[idx].key_b64));
+                // managed-route overlay: a live session re-ranks this peer in
+                // every HA set it belongs to (may switch nets onto it)
+                self.rebuild_route_overlay("session-established");
             } else if fresh {
                 // rekey completed: refresh the expiry anchor
                 self.peers[idx].session_established_ms = now_ms;
@@ -1708,6 +1918,9 @@ impl WgDevice {
             {
                 self.peers[idx].expired = true;
                 emit(&session_expired_line(&self.peers[idx].key_b64));
+                // managed-route overlay: the peer just failed — fail its nets
+                // over to another HA candidate (if any)
+                self.rebuild_route_overlay("session-expired");
             }
             // handshake campaign (a path exists — ICE endpoint or relay
             // carrier (N13-D2) — but no live session)
@@ -2324,6 +2537,15 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
         self.device.lock_poison().set_peers(&specs)
     }
 
+    /// N6: management-issued network routes → device routing table (HA
+    /// selection + allowed_ips overlay, see `set_managed_routes`).
+    fn apply_managed_routes(
+        &self,
+        routes: &[crate::network_map::ManagedRoute],
+    ) -> Result<(), String> {
+        self.device.lock_poison().set_managed_routes(routes)
+    }
+
     fn clear(&self) {
         self.device.lock_poison().clear();
     }
@@ -2494,6 +2716,9 @@ struct FeedInner {
     tun_raw: Option<i32>,
     /// Buffered peer set (full-snapshot semantics, as received).
     peers: Vec<crate::connector::WgPeerEntry>,
+    /// N6: buffered managed-route set (as received; replayed AFTER the peer
+    /// set at adoption — HA selection needs the peers registered).
+    managed_routes: Vec<crate::network_map::ManagedRoute>,
     /// Latest endpoint per peer (upsert; replay order deterministic).
     endpoints: Vec<(String, [u8; 4], u16)>,
     /// N11: buffered egress attach per peer (key → BORROWED raw fd of the
@@ -2715,6 +2940,12 @@ impl WgDeviceFeed {
         if let Err(e) = app.apply_peers(&g.peers) {
             return Self::build_failed(g, &format!("replay-peers-{e}"));
         }
+        // N6: managed-route overlay replays after the peer set (selection
+        // ranks only REGISTERED peers); a rejection fails the build like a
+        // peer rejection — the map re-syncs with the same content.
+        if let Err(e) = app.apply_managed_routes(&g.managed_routes) {
+            return Self::build_failed(g, &format!("replay-managed-routes-{e}"));
+        }
         // N11: egress FIRST (the selected transport), then the N13-D2 relay
         // carriers, then endpoints — a replayed endpoint fires its handshake,
         // which must leave via the path `dispatch` selects. A stale buffered
@@ -2804,6 +3035,20 @@ impl WgPeerApplier for WgDeviceFeed {
         }
     }
 
+    /// N6: buffered pre-device, applied live after adoption (the overlay
+    /// follows every map update — selection re-runs on the new HA sets).
+    fn apply_managed_routes(
+        &self,
+        routes: &[crate::network_map::ManagedRoute],
+    ) -> Result<(), String> {
+        let mut g = self.inner.lock_poison();
+        g.managed_routes = routes.to_vec();
+        match g.device.as_ref() {
+            Some(d) => d.apply_managed_routes(routes),
+            None => Ok(()), // buffered: control plane stays alive pre-feed
+        }
+    }
+
     fn clear(&self) {
         let mut g = self.inner.lock_poison();
         // full stop semantics: buffers, endpoints, egress, carriers, fed fds
@@ -2815,6 +3060,7 @@ impl WgPeerApplier for WgDeviceFeed {
         g.endpoints.clear();
         g.egress.clear();
         g.carriers.clear();
+        g.managed_routes.clear();
         g.wg_socket_raw = None;
         if let Some(fd) = g.wg_socket_owned.as_ref() {
             crate::n2_socket_trace::closed(fd.as_raw_fd());
@@ -3710,5 +3956,196 @@ mod lifecycle_line_tests {
         // 短/空 key 不 panic（前缀就是它自己的字母数字前缀）。
         assert_eq!(session_established_line("ab"), "N6_WG_DEVICE|session-established|peer=ab");
         assert_eq!(session_established_line(""), "N6_WG_DEVICE|session-established|peer=");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests: the managed-route overlay (N6 route table defect, 2026-10-04:
+// LAN dst hit `no-route` because managed networks never entered any peer's
+// allowed_ips — hilog: dst=192.168.50.x|peers=6|routes=[…/32 only])
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod route_overlay_tests {
+    use super::*;
+    use crate::config;
+    use crate::network_map::ManagedRoute;
+
+    extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut [i32; 2]) -> i32;
+    }
+
+    /// The HA routed network of the field defect (192.168.50.0/24 behind two
+    /// routing peers).
+    const LAN_NET: ([u8; 4], u8) = ([192, 168, 50, 0], 24);
+
+    fn key32(seed: u8) -> String {
+        base64::engine::general_purpose::STANDARD.encode([seed; 32])
+    }
+
+    fn peer_entry(key: &str, addr: [u8; 4]) -> crate::connector::WgPeerEntry {
+        crate::connector::WgPeerEntry {
+            pub_key_b64: key.to_string(),
+            allowed_ips: vec![config::Route { addr, prefix_len: 32 }],
+        }
+    }
+
+    fn lan_route(peer: &str, metric: i64) -> ManagedRoute {
+        ManagedRoute {
+            id: format!("r-lan-{peer}"),
+            network: config::Route { addr: LAN_NET.0, prefix_len: LAN_NET.1 },
+            domains: vec![],
+            net_id: "net-lan".into(),
+            network_type: 1,
+            peer: peer.into(),
+            metric,
+            masquerade: true,
+            keep_route: false,
+            skip_auto_apply: false,
+        }
+    }
+
+    /// Fed slot (device up) + the raw fds the caller closes at the end.
+    fn fed_slot() -> (WgDeviceFeed, i32, i32, i32) {
+        let wg = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(wg >= 0);
+        let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        assert_eq!(
+            unsafe { sys::bind(wg, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) },
+            0
+        );
+        let mut sv = [-1i32; 2];
+        assert_eq!(unsafe { socketpair(1, 2, 0, &mut sv) }, 0);
+        let slot = WgDeviceFeed::new(
+            WgDeviceConfig::new(base64::engine::general_purpose::STANDARD.encode([0xA5u8; 32])),
+        );
+        slot.feed_wg_socket(wg).expect("wg feed");
+        slot.feed_tun(sv[0]).expect("tun feed");
+        (slot, wg, sv[0], sv[1])
+    }
+
+    /// The defect itself: with the map's allowed_ips ONLY (overlay /32s) the
+    /// LAN destination hits `no-route`; with the managed routes applied the
+    /// WG routing table carries 192.168.50.0/24 on ONE routing peer (smaller
+    /// metric wins when no session exists) and 192.168.50.1 routes to it.
+    /// A route-set change back to empty removes the overlay again.
+    #[test]
+    fn managed_route_overlay_routes_lan_dst_to_the_metric_peer() {
+        let (slot, wg_raw, tun_raw, tun_end) = fed_slot();
+        let key_a = key32(0x11);
+        let key_b = key32(0x22);
+        slot.apply_peers(&[
+            peer_entry(&key_a, [100, 108, 1, 1]),
+            peer_entry(&key_b, [100, 108, 2, 2]),
+        ])
+        .expect("peers");
+        // pre-fix shape: nothing matches the LAN dst
+        slot.with_device(|d| assert!(d.route([192, 168, 50, 1]).is_none()))
+            .expect("device");
+        // HA: the same network from two route entries (two routing peers).
+        slot.apply_managed_routes(&[lan_route(&key_a, 10), lan_route(&key_b, 20)])
+            .expect("managed routes");
+        slot.with_device(|d| {
+            assert_eq!(d.managed_route_selections(), vec![(LAN_NET, Some(key_a.clone()))]);
+            let idx = d.route([192, 168, 50, 1]).expect("192.168.50.1 must route now");
+            assert_eq!(d.peers[idx].key_b64, key_a);
+            assert!(d.peers[idx].allowed_ips.contains(&LAN_NET));
+            assert!(
+                !d.peers
+                    .iter()
+                    .any(|p| p.key_b64 == key_b && p.allowed_ips.contains(&LAN_NET)),
+                "the same net must sit on exactly one peer"
+            );
+            // the map /32s stay untouched beside the overlay net
+            assert!(d.peers[idx].allowed_ips.contains(&([100, 108, 1, 1], 32)));
+        })
+        .expect("device");
+        // route-set change: the overlay leaves with the routes
+        slot.apply_managed_routes(&[]).expect("clear managed routes");
+        slot.with_device(|d| {
+            assert!(d.managed_route_selections().is_empty());
+            assert!(d.route([192, 168, 50, 1]).is_none());
+            assert!(d.peers.iter().all(|p| !p.allowed_ips.contains(&LAN_NET)));
+            // the map /32s survive the overlay removal untouched
+            let a = d.peers.iter().position(|p| p.key_b64 == key_a).expect("peer a");
+            assert_eq!(d.peers[a].allowed_ips, vec![([100, 108, 1, 1], 32)]);
+        })
+        .expect("device");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// HA failover: B holds the smaller metric (wins while idle); A's LIVE
+    /// session outranks the metric; when A's session EXPIRES (the real `tick`
+    /// path) the net fails over to B; A re-establishing wins it back.
+    #[test]
+    fn managed_route_ha_prefers_live_session_and_fails_over_on_expiry() {
+        let (slot, wg_raw, tun_raw, tun_end) = fed_slot();
+        let key_a = key32(0x11);
+        let key_b = key32(0x22);
+        slot.apply_peers(&[
+            peer_entry(&key_a, [100, 108, 1, 1]),
+            peer_entry(&key_b, [100, 108, 2, 2]),
+        ])
+        .expect("peers");
+        slot.apply_managed_routes(&[lan_route(&key_a, 20), lan_route(&key_b, 10)])
+            .expect("managed routes");
+        // idle: the smaller metric (B) wins
+        slot.with_device(|d| {
+            assert_eq!(d.managed_route_selections(), vec![(LAN_NET, Some(key_b.clone()))]);
+        })
+        .expect("device");
+        // A establishes a WG session: live session > metric
+        slot.with_device(|d| {
+            let a = d.peers.iter().position(|p| p.key_b64 == key_a).expect("peer a");
+            d.peers[a].session_established = true;
+            d.peers[a].expired = false;
+            d.peers[a].session_established_ms = 1;
+            d.rebuild_route_overlay("session-established");
+            assert_eq!(d.managed_route_selections(), vec![(LAN_NET, Some(key_a.clone()))]);
+            let idx = d.route([192, 168, 50, 1]).expect("routes via A");
+            assert_eq!(d.peers[idx].key_b64, key_a);
+        })
+        .expect("device");
+        // A's session expires on the injected clock (the production trigger):
+        // the net fails over to B
+        slot.with_device(|d| {
+            let max = d.cfg.session_max_ms;
+            d.tick(max + 2);
+            assert_eq!(
+                d.managed_route_selections(),
+                vec![(LAN_NET, Some(key_b.clone()))],
+                "the expired peer must lose the net to its HA partner"
+            );
+            let idx = d.route([192, 168, 50, 1]).expect("routes via B");
+            assert_eq!(d.peers[idx].key_b64, key_b);
+        })
+        .expect("device");
+        // A re-establishes (ingest resets `expired`): it wins the net back
+        slot.with_device(|d| {
+            let a = d.peers.iter().position(|p| p.key_b64 == key_a).expect("peer a");
+            d.peers[a].expired = false;
+            d.rebuild_route_overlay("session-established");
+            assert_eq!(d.managed_route_selections(), vec![(LAN_NET, Some(key_a.clone()))]);
+        })
+        .expect("device");
+        for fd in [wg_raw, tun_raw, tun_end] {
+            unsafe { sys::close(fd) };
+        }
+    }
+
+    /// Line-format pin: `route-peer` carries net + peer short + reason, and
+    /// an empty candidate renders `peer=none` (never a bare `peer=`).
+    #[test]
+    fn route_peer_line_names_net_peer_and_reason() {
+        assert_eq!(
+            route_peer_line(LAN_NET, Some("FyLw4PSBg1hjr+9/x0="), "session-expired"),
+            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=FyLw4PSB|reason=session-expired"
+        );
+        assert_eq!(
+            route_peer_line(LAN_NET, None, "routes-updated"),
+            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=none|reason=routes-updated"
+        );
     }
 }

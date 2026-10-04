@@ -131,6 +131,24 @@ try {
   check('doc JSON round trip keeps peers',
     JSON.parse(JSON.stringify(doc)).peers[0].name === 'peer-a.netbird.cloud');
 
+  // ---- home-card/document consistency (defect 2026-10-04) -----------------
+  // The SAME document feeds the home card and the peers tab. 已连接 must
+  // require the document's OWN overlay IP (the network map arrived and
+  // carried one): a map-less document renders 连接中… / 无法连接服务器,
+  // never 已连接 — and its peers list is empty in the same breath, so the
+  // home card's 对端 row and the peers tab can never disagree.
+  const homeHasIp = (d: { address?: string | null }): boolean =>
+    d.address !== undefined && d.address !== null && d.address.length > 0;
+  check('home: 已连接 requires the document address',
+    m.homeStateText(doc.state, false, false, homeHasIp(doc), 'none') === '已连接' &&
+    homeHasIp(doc) === true);
+  check('home: a map-less document (state connected!) is never 已连接',
+    noMap.state === 'connected' && homeHasIp(noMap) === false &&
+    noMap.peers.length === 0 &&
+    m.homeStateText(noMap.state, false, false, homeHasIp(noMap), 'none') === '连接中…');
+  check('home: map-less + server-unreachable error class stays consistent',
+    m.homeStateText('connected', false, false, homeHasIp(noMap), 'network') === '无法连接服务器');
+
   // ---- filterPeers / sortPeers / onlinePeerCount ----------------------------
   check('filter by name (case-insensitive)',
     m.filterPeers(merged, 'PEER-A').length === 1);
