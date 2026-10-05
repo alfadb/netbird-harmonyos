@@ -38,6 +38,14 @@ export interface UiPeerEntry {
   connection: string;
   // seconds since the last WireGuard handshake, null when no session yet
   last_handshake_s: number | null;
+  // 2026-10-06 peer-online semantics: management's own online verdict
+  // (remotePeers = true, offlinePeers = false). A peer can be
+  // management-online while this device has no WG session with it yet.
+  mgmt_online: boolean;
+  // 2026-10-06 three-state peer status: 'connected' (local WG session),
+  // 'idle' (management-online, no local session — 空闲, NOT offline),
+  // 'offline' (management lists it under offlinePeers).
+  status: string;
 }
 
 export interface UiStatusDocument {
@@ -66,6 +74,10 @@ export interface UiStatusDocument {
   // older document omits it too, and the UI gate treats "not false" as
   // lenient-pass.
   iface_present?: boolean;
+  // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
+  // last live) relay session (relay.current_url), falling back to the first
+  // configured relay url; null when neither is known.
+  relay_url?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +139,21 @@ export function peerConnection(entry: WgPeerStatusEntry | undefined): string {
   return 'unknown';
 }
 
+// The peer's three-state status (2026-10-06, official-client semantics):
+// 'connected' when THIS device has a live WG session with the peer;
+// 'idle' when management lists the peer as online (remotePeers) but no
+// local session exists yet — 空闲, deliberately NOT 离线 (a peer can be
+// reachable for others while our phone simply has no traffic/session with
+// it); 'offline' only when management itself moved the peer to
+// offlinePeers. `mgmtOnline` missing (older core/document) is read as
+// management-online, never a silent 离线.
+export function peerStatusOf(online: boolean, mgmtOnline: boolean): string {
+  if (online) {
+    return 'connected';
+  }
+  return mgmtOnline ? 'idle' : 'offline';
+}
+
 // Merge the network map's peer list with the WG per-peer session view into
 // the published peers[] array. Order: management order (remote then offline,
 // exactly what connector_network_config exports); unknown keys in the WG view
@@ -162,6 +189,7 @@ export function mergePeers(network: CoreNetworkConfig | null,
     }
     const online: boolean = wg !== undefined && wg.session_established === true &&
       wg.expired !== true;
+    const mgmtOnline: boolean = peer.mgmt_online !== false;
     const entry: UiPeerEntry = {
       pub_key: peer.pub_key,
       name: fqdn !== null ? fqdn : peerShortKey(peer.pub_key),
@@ -169,7 +197,9 @@ export function mergePeers(network: CoreNetworkConfig | null,
       ip: peerOverlayIp(peer.vpn_addresses),
       online: online,
       connection: online ? peerConnection(wg) : 'unknown',
-      last_handshake_s: handshake
+      last_handshake_s: handshake,
+      mgmt_online: mgmtOnline,
+      status: peerStatusOf(online, mgmtOnline)
     };
     merged.push(entry);
   }
@@ -209,6 +239,19 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
       typeof status.relay.state === 'string' && status.relay.state.length > 0
       ? status.relay.state
       : null;
+  // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
+  // last live) session; the first CONFIGURED url is the fallback (what the
+  // next session will dial), null when neither is known — never invented.
+  let relayUrl: string | null = null;
+  if (status.relay !== undefined && status.relay !== null) {
+    if (typeof status.relay.current_url === 'string' &&
+      status.relay.current_url.length > 0) {
+      relayUrl = status.relay.current_url;
+    } else if (status.relay.urls !== undefined && status.relay.urls !== null &&
+      status.relay.urls.length > 0) {
+      relayUrl = status.relay.urls[0];
+    }
+  }
   const ownFqdn: string | null = network !== null && network.available &&
     typeof network.fqdn === 'string' && network.fqdn.length > 0 ? network.fqdn : null;
   const ownAddress: string | null = network !== null && network.available &&
@@ -234,7 +277,8 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
       ? mergePeers(network, status.wg !== undefined && status.wg !== null
         ? status.wg.wg_peers : undefined)
       : [],
-    iface_present: ifacePresent
+    iface_present: ifacePresent,
+    relay_url: relayUrl
   };
   return doc;
 }
@@ -262,13 +306,26 @@ export function filterPeers(peers: UiPeerEntry[], query: string): UiPeerEntry[] 
   return kept;
 }
 
-// Display order: online peers first (stable within the group), then by name
-// (plain code-point compare — deterministic on host and device alike).
+// Display order (2026-10-06): connected peers first, then idle
+// (management-online), then offline — stable within the group, then by
+// name (plain code-point compare — deterministic on host and device alike).
+export function peerStatusRank(status: string): number {
+  if (status === 'connected') {
+    return 0;
+  }
+  if (status === 'idle') {
+    return 1;
+  }
+  return 2;
+}
+
 export function sortPeers(peers: UiPeerEntry[]): UiPeerEntry[] {
   const list: UiPeerEntry[] = peers.slice();
   list.sort((a: UiPeerEntry, b: UiPeerEntry): number => {
-    if (a.online !== b.online) {
-      return a.online ? -1 : 1;
+    const rankA: number = peerStatusRank(a.status);
+    const rankB: number = peerStatusRank(b.status);
+    if (rankA !== rankB) {
+      return rankA - rankB;
     }
     if (a.name !== b.name) {
       return a.name < b.name ? -1 : 1;
@@ -312,11 +369,19 @@ export function vpnActiveState(state: string): boolean {
 // server-unreachable classes (timeout / network — the SAME classes
 // lastErrorText renders as server-unreachable), so the card and the red error
 // line can no longer disagree ('已连接' + an unreachable-server hint).
+// connectFailed (2026-10-06, optional — older callers omit it): the
+// extension recorded a terminal connect failure (login fatal auth / retry
+// budget exhausted / startup abort before the VPN existed) and no live
+// document is around to carry state 'failed' — the card then shows
+// '连接失败' instead of a stale '连接中…' forever.
 export function homeStateText(state: string, pendingStart: boolean,
   pendingStop: boolean, hasOverlayIp: boolean, ifacePresent: boolean,
-  errorClass: string): string {
+  errorClass: string, connectFailed?: boolean): string {
   if (pendingStop) {
     return '正在断开…';
+  }
+  if (connectFailed === true) {
+    return '连接失败';
   }
   if (state === 'connected') {
     if (hasOverlayIp === true && ifacePresent === true) {
@@ -337,15 +402,41 @@ export function homeStateText(state: string, pendingStart: boolean,
   return '未连接';
 }
 
-// 连接方式 label for the peers list/detail.
+// 连接方式 label for the peers list/detail (2026-10-06: '经中继' — the
+// relayed path goes THROUGH the relay server, 直连 is point-to-point).
 export function connectionLabel(connection: string): string {
   if (connection === 'direct') {
     return '直连';
   }
   if (connection === 'relay') {
-    return '中继';
+    return '经中继';
   }
   return '未知';
+}
+
+// 对端 three-state status text (2026-10-06): a management-online peer
+// without a local WG session is 空闲 — gray, but never called 离线; only
+// management's own offlinePeers verdict is 离线.
+export function peerStatusText(status: string): string {
+  if (status === 'connected') {
+    return '已连接';
+  }
+  if (status === 'idle') {
+    return '空闲';
+  }
+  return '离线';
+}
+
+// 对端 three-state dot/text color: connected = green, idle = neutral gray
+// (present but not connected), offline = the muted light gray.
+export function peerStatusColor(status: string): string {
+  if (status === 'connected') {
+    return '#176B3A';
+  }
+  if (status === 'idle') {
+    return '#8A9AA6';
+  }
+  return '#C0C8D0';
 }
 
 // Relative text for the last WireGuard handshake ('—' when none).
@@ -378,7 +469,7 @@ export function lastErrorText(errorClass: string): string {
     return '';
   }
   if (errorClass === 'auth') {
-    return '登录凭据被拒绝，请检查 Setup Key 或重新配置';
+    return '设备未注册或 Setup Key 无效，请到设置重新配置';
   }
   if (errorClass === 'timeout') {
     return '连接管理服务器超时，请检查网络后重试';
@@ -387,4 +478,23 @@ export function lastErrorText(errorClass: string): string {
     return '网络不可用或服务器无法访问，请检查网络';
   }
   return `连接出现问题（${errorClass}），请重试`;
+}
+
+// 2026-10-06 登录失败可见性: the Chinese reason shown under a '连接失败'
+// card. `errorClass` comes from the persistent connect-failure notice —
+// the connector's own last_error class (auth/timeout/network/...) or an
+// extension abort-stage token. The none/empty case is the honest generic
+// server-unreachable line (the map never arrived, no finer class exists).
+export function connectFailureText(errorClass: string): string {
+  if (errorClass === 'credentials-missing') {
+    return '缺少登录凭据（Setup Key 或设备配置），请到设置重新配置';
+  }
+  if (errorClass === 'no-signal-uri') {
+    return '管理端配置缺少 Signal 服务器，无法建立对端连接';
+  }
+  const mapped: string = lastErrorText(errorClass);
+  if (mapped.length > 0) {
+    return mapped;
+  }
+  return '无法连接管理服务器，请检查网络或服务器配置';
 }

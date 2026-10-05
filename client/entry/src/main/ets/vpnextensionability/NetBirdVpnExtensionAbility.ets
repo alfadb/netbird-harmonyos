@@ -298,6 +298,15 @@ const LOGOUT_FILE_NAME: string = 'netbird-logout';
 const LOGOUT_RESULT_FILE_NAME: string = 'netbird-logout-result';
 const LOGOUT_TICKET_MAX_AGE_MS: number = 30000;
 
+// 2026-10-06 登录失败可见性: the persistent connect-failure notice file
+// (same shared-filesDir channel as the logout ticket; reader + shape live
+// in NetBirdConnector.ets — CONNECT_FAILURE_FILE / ConnectFailureNotice).
+// Written when the connector canNOT reach a live tunnel (login fatal auth,
+// retry budget exhausted, startup abort before create()) so the home card
+// shows 连接失败 + a Chinese reason instead of a stale 连接中…; the UI
+// deletes it when it sends a fresh start request.
+const CONNECT_FAILURE_FILE_NAME: string = 'netbird-connect-failure';
+
 interface BusinessFailure extends Error {
   code?: number;
 }
@@ -1372,6 +1381,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       setupKey = readCredentialFileText(filesDir, setupKeyFile);
       device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
     } catch (error) {
+      // 2026-10-06 登录失败可见性: no credentials = no VPN, but the user
+      // still sees a stuck 连接中… without the persistent notice.
+      this.writeConnectFailureForUi('credentials-missing');
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=credentials|' +
         'errorClass=credentials-missing|summary=%{public}s',
@@ -1480,6 +1492,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       socketSupplyCloseFd(mgmtFd);
     }
     if (!start.started) {
+      // 2026-10-06 登录失败可见性: the connector refused the start (config /
+      // credential class) — persist the class so the home card shows
+      // 连接失败 + reason instead of a stale 连接中….
+      this.writeConnectFailureForUi(
+        start.error !== undefined && start.error !== null && start.error.length > 0
+          ? start.error : 'none');
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=start|errorClass=%{public}s',
         this.requestId, start.error ?? 'start-failed');
@@ -1545,6 +1563,28 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
     } else {
+      // 2026-10-06 登录失败可见性: the map never arrived inside the box — in
+      // practice the LOGIN failed (fatal auth or still retrying against an
+      // unreachable/wrong server). Persist the connector's OWN last error
+      // class BEFORE the stop wipes the live status channel, so the home
+      // card renders 连接失败 + the matching Chinese reason (e.g.
+      // 设备未注册或 Setup Key 无效) instead of a stale 连接中…. The rare
+      // map-but-no-signal-uri case records the config token instead.
+      let failureClass: string = net === null ? 'none' : 'no-signal-uri';
+      if (net === null) {
+        try {
+          const loginStatus: ConnectorStatusResult | null = pollStatusOrNull();
+          if (loginStatus !== null && loginStatus.last_error !== null &&
+            loginStatus.last_error !== undefined &&
+            typeof loginStatus.last_error.class === 'string' &&
+            loginStatus.last_error.class.length > 0) {
+            failureClass = loginStatus.last_error.class;
+          }
+        } catch (statusError) {
+          failureClass = 'none';
+        }
+      }
+      this.writeConnectFailureForUi(failureClass);
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-uri|' +
         'errorClass=%{public}s|action=connector-stopped-no-vpn',
@@ -4462,7 +4502,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           }
         }
         if (status.terminal === true) {
-          this.handleConnectorDeath(`terminal-state:${status.state}`);
+          this.handleConnectorDeath(`terminal-state:${status.state}`, errorClass);
           return;
         }
         // 场景B roaming (§4 step 2): the debounced LAN-exclusion check rides
@@ -4545,7 +4585,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // turn this into a traffic black hole). Idempotent: the
   // connectorDeathHandled latch short-circuits repeat watcher ticks, and the
   // underlying connectorStop()/destroyOnce() are independently idempotent.
-  private handleConnectorDeath(reason: string): void {
+  private handleConnectorDeath(reason: string, errorClass: string = 'none'): void {
     if (this.connectorDeathHandled || this.destroyRequested) {
       return;
     }
@@ -4553,6 +4593,15 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.error(DOMAIN, TAG,
       'VPN_CONNECTOR_DEAD|requestId=%{public}s|reason=%{public}s|action=teardown-vpn',
       this.requestId, reason);
+    // 2026-10-06 登录失败可见性: a TERMINAL connector (login fatal auth /
+    // retry budget exhausted) leaves no live status document once the
+    // teardown below removes it — persist the failure class first so the
+    // home card can show 连接失败 + reason instead of snapping back to
+    // 未连接 / a stale 连接中…. Non-terminal deaths (status unreachable)
+    // keep the document-vanish notice path.
+    if (reason.indexOf('terminal-state:') === 0) {
+      this.writeConnectFailureForUi(errorClass);
+    }
     this.stopStatusAndNetcfgWatcher();
     try {
       const stop = connectorStop();
@@ -6268,6 +6317,31 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return 'FD_CLOSED_CONFIRMED';
     }
     return 'FD_NOT_OPEN_AFTER_DESTROY';
+  }
+
+  // 2026-10-06 登录失败可见性: persist ONE connect-failure notice into the
+  // shared filesDir (channel/shape: NetBirdConnector.CONNECT_FAILURE_FILE /
+  // ConnectFailureNotice). Written BEFORE the teardown removes the live
+  // status document (or when the document never existed — a startup abort).
+  // Class tokens only, never a server message, never key material (the
+  // class discipline of every other cross-process surface). Best-effort:
+  // a failed write only costs the reason detail, the teardown continues.
+  private writeConnectFailureForUi(errorClass: string): void {
+    const path: string = `${this.context.filesDir}/${CONNECT_FAILURE_FILE_NAME}`;
+    try {
+      const token: string = clean(errorClass.length > 0 ? errorClass : 'none');
+      const file: fs.File = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, `{"at_ms":${Date.now()},"error_class":"${token}"}`);
+      fs.closeSync(file);
+      hilog.warn(DOMAIN, TAG,
+        'VPN_CONNECT_FAILURE_NOTICE|requestId=%{public}s|errorClass=%{public}s',
+        this.requestId, token);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_CONNECT_FAILURE_NOTICE_WRITE_FAILED|requestId=%{public}s|code=%{public}s',
+        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+    }
   }
 
   private removeStatusForUi(): void {

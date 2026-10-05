@@ -197,6 +197,11 @@ export interface RelayStatus {
   transport_bytes: number;
   token_valid: boolean;
   last_error_class: string | null;
+  // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
+  // last live) session — the address every relayed peer's carrier traffic
+  // flows through. Tail-appended by the core after `last_error_class`;
+  // null while nothing was ever dialed. Read leniently.
+  current_url?: string | null;
 }
 
 // N13 loop-dependency fix (core 95f6c02): the MANAGEMENT-ADVERTISED relay url
@@ -295,6 +300,11 @@ export interface CorePeerSummary {
   vpn_addresses?: string[];
   // peer fqdn (the UI's peer NAME); null when management sent none.
   fqdn?: string | null;
+  // 2026-10-06 peer-online semantics: TRUE when management listed the peer
+  // in remotePeers (management-online), FALSE when it came from
+  // offlinePeers. Tail-appended by the core after `fqdn`; read leniently
+  // (missing = treated management-online, never a silent 离线).
+  mgmt_online?: boolean;
 }
 
 // N3-7 default-route safety gate verdict on the snapshot: 0.0.0.0/0 is
@@ -690,6 +700,10 @@ export interface PublishedStatus {
   // when the probe could not read the counter or the document predates the
   // field. '已连接' requires this not to be false.
   iface_present?: boolean;
+  // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
+  // last live) relay session — relay.current_url when set, else the first
+  // configured url; null when neither is known. Read leniently.
+  relay_url?: string | null;
 }
 
 // Read the published status. A missing, unreadable, malformed or STALE
@@ -717,6 +731,70 @@ export function readPublishedStatus(filesDir: string): PublishedStatus | null {
     return doc;
   } catch (error) {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-06 登录失败可见性 (connect-failure notice): the VPN extension writes
+// ONE persistent notice when the connector never reaches a live tunnel —
+// login fatal (auth), login retry budget exhausted, or a startup abort
+// before the VPN was created (the 15 s network-map box expired without a
+// map, the connector start was refused, the credentials are missing).
+// Without it the home card stays at a stale '连接中…' forever: the status
+// document either never appeared or was removed by the teardown. Same
+// shared-filesDir channel as the published status / logout ticket; the UI
+// deletes the file when it sends a fresh start request.
+// ---------------------------------------------------------------------------
+
+export const CONNECT_FAILURE_FILE: string = 'netbird-connect-failure';
+// A notice older than this is not shown (returning to the app much later
+// renders the honest 未连接 instead of a stale failure banner).
+export const CONNECT_FAILURE_MAX_AGE_MS: number = 600000;
+
+export interface ConnectFailureNotice {
+  at_ms: number;
+  // stable class token: the connector's own last_error class
+  // (auth/timeout/network/request/server/...) or a stage token written by
+  // the extension ('credentials-missing', 'no-signal-uri', ...).
+  error_class: string;
+}
+
+// Read the connect-failure notice; null when absent, malformed or older
+// than CONNECT_FAILURE_MAX_AGE_MS. Never throws.
+export function readConnectFailure(filesDir: string): ConnectFailureNotice | null {
+  const path: string = `${filesDir}/${CONNECT_FAILURE_FILE}`;
+  try {
+    if (!fs.accessSync(path)) {
+      return null;
+    }
+    const text: string = fs.readTextSync(path);
+    if (text.length === 0) {
+      return null;
+    }
+    const notice: ConnectFailureNotice = JSON.parse(text) as ConnectFailureNotice;
+    if (notice.at_ms === undefined || notice.at_ms === null || notice.at_ms <= 0) {
+      return null;
+    }
+    if (Date.now() - notice.at_ms > CONNECT_FAILURE_MAX_AGE_MS) {
+      return null;
+    }
+    return notice;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Remove the notice (fresh start attempt / cleanup). Best-effort, never
+// throws — a leftover file only survives until the next failure overwrites
+// it.
+export function removeConnectFailure(filesDir: string): void {
+  const path: string = `${filesDir}/${CONNECT_FAILURE_FILE}`;
+  try {
+    if (fs.accessSync(path)) {
+      fs.unlinkSync(path);
+    }
+  } catch (error) {
+    // best-effort: ignore
   }
 }
 

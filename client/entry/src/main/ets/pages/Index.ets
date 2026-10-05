@@ -5,10 +5,12 @@ import cryptoFramework from '@ohos.security.cryptoFramework';
 import util from '@ohos.util';
 import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
-import { PublishedStatus, readPublishedStatus, sleep } from '../vpnextensionability/NetBirdConnector';
+import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
+  removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
-import { UiPeerEntry, connectionLabel, filterPeers, homeStateText, lastErrorText,
-  lastHandshakeText, onlinePeerCount, sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
+import { UiPeerEntry, connectFailureText, connectionLabel, filterPeers, homeStateText,
+  lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusColor, peerStatusText,
+  sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
   readStoredManagementUrl, readStoredPrivateKey, readStoredRelayEnabled,
@@ -64,6 +66,12 @@ struct Index {
   // tunnel is down and the user must reconnect explicitly. Cleared by a new
   // start request.
   @State disconnectNotice: string = '';
+  // 2026-10-06 登录失败可见性: the error class of the persistent
+  // connect-failure notice (extension aborted before the VPN existed /
+  // connector ended terminally — e.g. login fatal auth, retry budget
+  // exhausted). Non-empty turns the home card into 连接失败 + the matching
+  // Chinese reason instead of a stale 连接中…; cleared by a fresh start.
+  @State connectFailureClass: string = '';
   // ---- navigation ----
   @State activeTab: number = 0;
   @State selectedPeer: UiPeerEntry | null = null;
@@ -87,6 +95,10 @@ struct Index {
   // active → null without a user stop = the extension fail-closed / died).
   private lastLiveState: string = '';
   private lastUserStopAtMs: number = 0;
+  // When the current/last start request was sent — gates the persistent
+  // failure notice to THIS attempt (a leftover from an earlier attempt is
+  // never shown as the live verdict).
+  private lastStartAtMs: number = 0;
   // Explicit logout in flight (ticket written): masks the extension's
   // teardown-driven status-document disappearance so the logout the user
   // just asked for is not reported as an unexpected "VPN 已断开".
@@ -154,12 +166,19 @@ struct Index {
         this.lastLiveState = '';
       }
       this.published = null;
+      // 2026-10-06 登录失败可见性: no live document AND a matching failure
+      // notice = the attempt ended in a recorded failure (login fatal /
+      // retry exhausted / startup abort) — the card shows 连接失败.
+      this.refreshConnectFailure();
       return;
     }
     this.observedPublishedStatus = true;
     this.lastLiveState = status.state;
     if (vpnActiveState(status.state)) {
       this.requestSent = true;
+      // a live session means any recorded failure belongs to a PREVIOUS
+      // attempt — never render it over a running connection
+      this.connectFailureClass = '';
       if (status.request_id !== undefined && status.request_id.length > 0) {
         this.requestId = status.request_id;
       }
@@ -173,6 +192,23 @@ struct Index {
     this.published = status;
   }
 
+  // 2026-10-06 登录失败可见性: read the extension's persistent
+  // connect-failure notice. Honored only when it belongs to the
+  // current/last start attempt (at_ms not older than the request we sent,
+  // 2 s clock margin) and is not stale (readConnectFailure age-bounds it).
+  // A matching notice also releases the start latch — the attempt is over,
+  // the user may retry or go fix the settings.
+  private refreshConnectFailure(): void {
+    const notice: ConnectFailureNotice | null =
+      readConnectFailure(getContext(this).filesDir);
+    if (notice !== null && notice.at_ms >= this.lastStartAtMs - 2000) {
+      this.connectFailureClass = notice.error_class;
+      this.requestSent = false;
+    } else if (this.connectFailureClass.length > 0) {
+      this.connectFailureClass = '';
+    }
+  }
+
   // ---- derived view state -------------------------------------------------
 
   private peersList(): UiPeerEntry[] {
@@ -182,6 +218,13 @@ struct Index {
 
   private visiblePeers(): UiPeerEntry[] {
     return sortPeers(filterPeers(this.peersList(), this.peerQuery));
+  }
+
+  // 详情页中继地址 (2026-10-06): the effective relay URL of the live (or
+  // last live) session from the published document — '' when not known.
+  private relayUrlText(): string {
+    return this.published !== null && this.published.relay_url !== undefined &&
+      this.published.relay_url !== null ? this.published.relay_url : '';
   }
 
   private stateText(): string {
@@ -201,7 +244,8 @@ struct Index {
       this.published.last_error_class !== undefined &&
       this.published.last_error_class !== null ? this.published.last_error_class : 'none';
     return homeStateText(state, this.requestSent, this.stopSent, hasOverlayIp,
-      ifacePresent, errorClass);
+      ifacePresent, errorClass,
+      this.connectFailureClass.length > 0 && this.published === null);
   }
 
   // The FULLY connected gate (B.2): core state connected + own overlay IP +
@@ -231,7 +275,7 @@ struct Index {
   }
 
   private homePeersText(): string {
-    return `${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`;
+    return `${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`;
   }
 
   private stateColor(): string {
@@ -296,9 +340,15 @@ struct Index {
     if (this.actionError.length > 0) {
       return this.actionError;
     }
-    // A vanished document after an active state: the reconnect notice (the
-    // extension fail-closed or died mid-connection).
+    // 2026-10-06 登录失败可见性: a recorded terminal failure carries its own
+    // Chinese reason — it beats the generic disconnect notice (and there is
+    // no live document to read a class from).
     if (this.published === null) {
+      if (this.connectFailureClass.length > 0) {
+        return connectFailureText(this.connectFailureClass);
+      }
+      // A vanished document after an active state: the reconnect notice (the
+      // extension fail-closed or died mid-connection).
       return this.disconnectNotice;
     }
     // B.2: while fully connected the core's last_error is a HISTORICAL
@@ -595,6 +645,11 @@ struct Index {
     this.requestSent = true;
     this.actionError = '';
     this.disconnectNotice = '';
+    // 2026-10-06 登录失败可见性: a fresh attempt starts from a clean
+    // failure slate — drop the old notice file and the rendered verdict.
+    this.connectFailureClass = '';
+    this.lastStartAtMs = Date.now();
+    removeConnectFailure(getContext(this).filesDir);
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
     vpnExtension.startVpnExtensionAbility(this.buildWant()).then(() => {
@@ -837,7 +892,12 @@ struct Index {
             .borderRadius(10)
             .backgroundColor(peer.connection === 'direct' ? '#E3EFE7' : '#F5EBCF')
         }
-        this.statusDot(peer.online ? '#176B3A' : '#8A9AA6', 10)
+        // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机
+        // 暂无 WG 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。
+        Text(peerStatusText(peer.status))
+          .fontSize(12)
+          .fontColor(peerStatusColor(peer.status))
+        this.statusDot(peerStatusColor(peer.status), 10)
       }
       .alignItems(VerticalAlign.Center)
     }
@@ -870,7 +930,7 @@ struct Index {
         .margin({ top: 8 })
         Column({ space: 4 }) {
           Row({ space: 10 }) {
-            this.statusDot(this.selectedPeer.online ? '#176B3A' : '#8A9AA6', 12)
+            this.statusDot(peerStatusColor(this.selectedPeer.status), 12)
             Text(this.selectedPeer.name)
               .fontSize(19)
               .fontWeight(FontWeight.Medium)
@@ -882,8 +942,11 @@ struct Index {
           .margin({ bottom: 6 })
           this.fieldRow('域名', this.selectedPeer.fqdn !== null ? this.selectedPeer.fqdn : '')
           this.fieldRow('NetBird IP', this.selectedPeer.ip)
-          this.fieldRow('状态', this.selectedPeer.online ? '在线' : '离线')
+          this.fieldRow('状态', peerStatusText(this.selectedPeer.status))
           this.fieldRow('连接方式', this.selectedPeer.online ? connectionLabel(this.selectedPeer.connection) : '')
+          if (this.selectedPeer.connection === 'relay') {
+            this.fieldRow('中继地址', this.relayUrlText())
+          }
           this.fieldRow('最近握手', lastHandshakeText(this.selectedPeer.last_handshake_s))
           this.fieldRow('公钥', this.selectedPeer.pub_key)
         }
@@ -905,7 +968,7 @@ struct Index {
             .fontWeight(FontWeight.Bold)
             .fontColor('#17324D')
             .layoutWeight(1)
-          Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 在线`)
+          Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
             .fontSize(14)
             .fontColor('#3D4A55')
         }

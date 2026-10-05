@@ -273,6 +273,42 @@ impl ErrorClass {
     }
 }
 
+/// Redacted management error detail for the DEVICE LOG only (2026-10-06,
+/// login-failure visibility): the numeric gRPC/HTTP status plus the
+/// server-sent message with secret material scrubbed — any occurrence of
+/// the setup key or JWT becomes `[redacted]`, control characters collapse
+/// to spaces (single-line log discipline) and the text is capped so a
+/// chatty server cannot flood the log. The STATUS/ERROR JSON surfaces stay
+/// class-only (credential discipline is unchanged); this is the diagnostic
+/// log channel, where the message is the thing the operator actually needs
+/// ("invalid setup key" vs "permission denied" ...). Empty for classes
+/// that carry no server message (network/timeout/parse/...).
+fn redacted_login_detail(err: &ManagementError, secrets: &ConnectorSecrets) -> String {
+    let (status, message) = match err {
+        ManagementError::Auth { status, message }
+        | ManagementError::Request { status, message } => (*status, message.as_str()),
+        ManagementError::Server { status } => (*status, ""),
+        _ => return String::new(),
+    };
+    let mut text = message.to_string();
+    for secret in [&secrets.setup_key, &secrets.jwt] {
+        if secret.len() >= 8 && text.contains(secret.as_str()) {
+            text = text.replace(secret.as_str(), "[redacted]");
+        }
+    }
+    let flat = text.replace(['\n', '\r', '\t'], " ");
+    const CAP: usize = 160;
+    let mut capped: String = flat.chars().take(CAP).collect();
+    if capped.chars().count() < flat.chars().count() {
+        capped.push('…');
+    }
+    if capped.is_empty() {
+        format!("status {status}")
+    } else {
+        format!("status {status}: {capped}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // session deadline (3-state, upstream ApplySessionDeadline semantics)
 // ---------------------------------------------------------------------------
@@ -1743,6 +1779,7 @@ impl ConnectorShared {
                 crate::relay_client::TokenValidity::Valid { .. }
             ),
             last_error_class: stats.last_error_class.map(|c| relay_error_class_token(c).to_string()),
+            current_url: stats.current_url.clone(),
         }
     }
 
@@ -2812,6 +2849,14 @@ pub struct ShellPeerSummary {
     /// Peer FQDN (`PeerInfo.fqdn`, e.g. "host-1.netbird.cloud") — the UI's
     /// peer NAME. `None` when management sent none. Public material.
     pub fqdn: Option<String>,
+    /// UI phase 1 (2026-10-06, peer online semantics): TRUE when management
+    /// listed the peer in `NetworkMap.remotePeers` (online per management —
+    /// it has a recent signal/management presence), FALSE when it came from
+    /// `offlinePeers`. This is the management-side online verdict, kept
+    /// SEPARATE from the local WG session state (`connector_status().wg`):
+    /// a management-online peer without a local session is 空闲/idle, NOT
+    /// offline — official-client peer-list semantics.
+    pub mgmt_online: bool,
 }
 
 /// Read-only snapshot of the shell-applicable subset of the LAST APPLIED
@@ -2968,8 +3013,9 @@ impl ShellNetworkConfig {
         let peers = map
             .peers
             .iter()
-            .chain(map.offline_peers.iter())
-            .map(|p| ShellPeerSummary {
+            .map(|p| (p, true))
+            .chain(map.offline_peers.iter().map(|p| (p, false)))
+            .map(|(p, mgmt_online)| ShellPeerSummary {
                 pub_key_b64: p.wg_pub_key.clone(),
                 allowed_ips: p.allowed_ips.len(),
                 vpn_addresses: p
@@ -2978,6 +3024,7 @@ impl ShellNetworkConfig {
                     .map(route_network_string)
                     .collect(),
                 fqdn: p.fqdn.clone(),
+                mgmt_online,
             })
             .collect();
         ShellNetworkConfig {
@@ -3045,12 +3092,16 @@ impl ShellNetworkConfig {
                 Some(f) => jstr("fqdn", f),
                 None => "\"fqdn\":null".to_string(),
             };
+            // 2026-10-06 peer-online semantics: `mgmt_online` tail-appends
+            // AFTER `fqdn` (same discipline) — the management-side online
+            // verdict, read leniently by the shell (missing = remote).
             peers.push_str(&format!(
-                "{{{},{},\"vpn_addresses\":[{}],{}}}",
+                "{{{},{},\"vpn_addresses\":[{}],{},\"mgmt_online\":{}}}",
                 jstr("pub_key", &p.pub_key_b64),
                 jnum("allowed_ips", p.allowed_ips as u64),
                 vpn,
-                fqdn
+                fqdn,
+                p.mgmt_online
             ));
         }
         let address = match self.address.as_ref() {
@@ -3219,6 +3270,12 @@ pub struct RelayStatus {
     pub token_valid: bool,
     /// Last failure class token (never a message).
     pub last_error_class: Option<String>,
+    /// UI phase 1 (2026-10-06, 详情页中继地址): the effective relay URL of
+    /// the live (or last live) session, `rel://`/`rels://` form — the
+    /// address every relayed peer's carrier traffic actually flows through
+    /// (one live session serves all relayed peers). `None` while nothing
+    /// was ever dialed. Public routing material, same class as `urls`.
+    pub current_url: Option<String>,
 }
 
 impl RelayStatus {
@@ -3248,6 +3305,7 @@ impl RelayStatus {
             transport_bytes: 0,
             token_valid: false,
             last_error_class: None,
+            current_url: None,
         }
     }
 
@@ -3255,6 +3313,9 @@ impl RelayStatus {
     /// `relay` object carries the RUNTIME view only — the advertised view
     /// renders separately via [`RelayStatus::advertised_to_json`] so an
     /// advertised url can never be misread as a relay session in use.
+    /// (2026-10-06 additive exception, a1947b9 tail-append discipline:
+    /// `current_url` rides AFTER `last_error_class` — the one field added
+    /// since the freeze; every pre-existing field keeps order and shape.)
     pub fn to_json(&self) -> String {
         let urls = self
             .urls
@@ -3267,8 +3328,15 @@ impl RelayStatus {
             .as_ref()
             .map(|c| format!("\"{c}\""))
             .unwrap_or_else(|| "null".to_string());
+        // 2026-10-06: `current_url` tail-appends AFTER `last_error_class`
+        // (a1947b9 tail-append discipline — every pre-existing field keeps
+        // its order and shape; consumers read by name).
+        let current_url = match self.current_url.as_ref() {
+            Some(u) => jstr("current_url", u),
+            None => "\"current_url\":null".to_string(),
+        };
         format!(
-            "{{{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{}}}",
             jbool("enabled", self.enabled),
             jstr("state", &self.state),
             format!("\"urls\":[{urls}]"),
@@ -3278,6 +3346,7 @@ impl RelayStatus {
             jnum("transport_bytes", self.transport_bytes),
             jbool("token_valid", self.token_valid),
             format!("\"last_error_class\":{last_error}"),
+            current_url,
         )
     }
 
@@ -4382,15 +4451,27 @@ async fn worker_main(deps: WorkerDeps, logout_slot: Arc<Mutex<Option<ManagementG
                     shared.record_error(&e);
                     shared.transition(ConnEvent::FatalError);
                     shared.set_running(false);
-                    hilog::emit("connector: login fatal (auth), giving up");
+                    // 2026-10-06: the device log carries the server's own
+                    // verdict (status + redacted message) — the status/error
+                    // surfaces stay class-only.
+                    hilog::emit(&format!(
+                        "connector: login fatal (auth), giving up ({})",
+                        redacted_login_detail(&e, &secrets)
+                    ));
                     return;
                 }
                 shared.record_error(&e);
                 shared.count_retryable_failure();
                 shared.transition(ConnEvent::Lost);
+                let detail = redacted_login_detail(&e, &secrets);
                 hilog::emit(&format!(
-                    "connector: login attempt failed ({}), will retry",
-                    ErrorClass::from_management(&e).as_str()
+                    "connector: login attempt failed ({}), will retry{}",
+                    ErrorClass::from_management(&e).as_str(),
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({detail})")
+                    }
                 ));
             }
         }
@@ -6343,6 +6424,70 @@ mod tests {
         );
     }
 
+    /// 2026-10-06 login-failure visibility: the redacted device-log detail
+    /// carries the numeric status + the server message with secrets
+    /// scrubbed, flattened and capped — and stays empty for classes
+    /// without a server message.
+    #[test]
+    fn redacted_login_detail_scrubs_and_caps() {
+        let secrets = ConnectorSecrets {
+            setup_key: SENTINEL_KEY.into(),
+            jwt: SENTINEL_JWT.into(),
+        };
+        // plain server message: status + text verbatim
+        let d = redacted_login_detail(
+            &ManagementError::Auth { status: 401, message: "invalid setup key".into() },
+            &secrets,
+        );
+        assert_eq!(d, "status 401: invalid setup key");
+        // a server echoing the setup key: scrubbed, never logged
+        let d = redacted_login_detail(
+            &ManagementError::Request {
+                status: 400,
+                message: format!("bad key {SENTINEL_KEY} rejected"),
+            },
+            &secrets,
+        );
+        assert_eq!(d, "status 400: bad key [redacted] rejected");
+        assert!(!d.contains(SENTINEL_KEY));
+        // jwt likewise
+        let d = redacted_login_detail(
+            &ManagementError::Auth { status: 403, message: format!("token {SENTINEL_JWT} expired") },
+            &secrets,
+        );
+        assert_eq!(d, "status 403: token [redacted] expired");
+        // newlines collapse (single-line log discipline)
+        let d = redacted_login_detail(
+            &ManagementError::Auth { status: 401, message: "line1\nline2".into() },
+            &secrets,
+        );
+        assert_eq!(d, "status 401: line1 line2");
+        // over-long message: capped with an ellipsis
+        let d = redacted_login_detail(
+            &ManagementError::Server { status: 500 },
+            &ConnectorSecrets::default(),
+        );
+        assert_eq!(d, "status 500");
+        let long = "x".repeat(300);
+        let d = redacted_login_detail(
+            &ManagementError::Auth { status: 401, message: long.clone() },
+            &ConnectorSecrets::default(),
+        );
+        assert!(d.starts_with("status 401: "), "{d}");
+        assert!(d.ends_with('…') && d.chars().count() < long.chars().count() + 16, "{d}");
+        // classes without a server message stay empty (no invented text)
+        assert!(redacted_login_detail(&ManagementError::Timeout, &secrets).is_empty());
+        assert!(redacted_login_detail(&ManagementError::Network("refused".into()), &secrets).is_empty());
+        // short secrets (under the scrub floor) are not loop-replaced, but
+        // real setup keys/jwts are far longer than the floor
+        let tiny = ConnectorSecrets { setup_key: "abc".into(), jwt: String::new() };
+        let d = redacted_login_detail(
+            &ManagementError::Auth { status: 401, message: "abcd".into() },
+            &tiny,
+        );
+        assert_eq!(d, "status 401: abcd");
+    }
+
     /// 3-state deadline application (upstream ApplySessionDeadline,
     /// engine_authsession.go:17-62): unset keeps, zero disables, value sets.
     #[test]
@@ -7024,6 +7169,10 @@ mod tests {
         assert_eq!(snap.peers[1].fqdn, None);
         assert_eq!(snap.peers[2].pub_key_b64, "T0ZGTElORQ==");
         assert_eq!(snap.peers[2].allowed_ips, 1);
+        // 2026-10-06 peer-online semantics: remote peers carry the
+        // management-online verdict, offlinePeers do not
+        assert!(snap.peers[0].mgmt_online && snap.peers[1].mgmt_online);
+        assert!(!snap.peers[2].mgmt_online);
         // own fqdn (UI phase 1): the Home screen's domain line
         assert_eq!(snap.fqdn.as_deref(), Some("me.netbird.cloud"));
 
@@ -7040,9 +7189,13 @@ mod tests {
             "{\"ip\":\"8.8.8.8\",\"port\":853}",
             "\"peer_count\":3",
             "{\"pub_key\":\"UEVFUjA=\",\"allowed_ips\":2,\
-              \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"],\"fqdn\":\"peer-a.netbird.cloud\"}",
+              \"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"],\"fqdn\":\"peer-a.netbird.cloud\",\
+              \"mgmt_online\":true}",
             // a peer without fqdn renders an explicit null (never invented)
             "\"fqdn\":null",
+            // the offline peer carries its management verdict verbatim
+            "{\"pub_key\":\"T0ZGTElORQ==\",\"allowed_ips\":1,\
+              \"vpn_addresses\":[\"10.9.9.9/32\"],\"fqdn\":null,\"mgmt_online\":false}",
             // N3-7 gate markers
             "\"default_route\":{\"allowed\":false,\"reason\":\"default-route-held:data-plane-not-ready\"}",
             // N2-H I2: the tail-appended stun section (nothing announced on a
@@ -8007,7 +8160,7 @@ mod tests {
         let st = plain.relay_status();
         assert!(!st.enabled);
         assert_eq!(st.state, "disabled");
-        assert_eq!(st.to_json(), "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\"last_error_class\":null}");
+        assert_eq!(st.to_json(), "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\"last_error_class\":null,\"current_url\":null}");
         assert!(matches!(config::parse_document(&st.to_json()), Ok(Json::Obj(_))));
         server.shutdown().await;
     }
@@ -8108,8 +8261,8 @@ mod tests {
         assert!(shared.relay_handle().is_none(), "no relay client exists (nothing to dial with)");
 
         // the advertised view renders in its own section, the frozen runtime
-        // object is byte-identical to the pre-change shape, and NO token
-        // material appears anywhere
+        // object keeps its pre-change field order (current_url is the one
+        // tail-appended addition), and NO token material appears anywhere
         let adv = st.advertised_to_json();
         assert_eq!(
             adv,
@@ -8120,7 +8273,7 @@ mod tests {
             runtime_json,
             "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\
              \"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\
-             \"last_error_class\":null}"
+             \"last_error_class\":null,\"current_url\":null}"
         );
         assert!(!runtime_json.contains("4242424242"), "token payload leaked: {runtime_json}");
         assert!(!runtime_json.contains(RELAY_TEST_SIG_B64), "token signature leaked");
@@ -8275,9 +8428,9 @@ mod tests {
             json.contains(
                 "\"relay\":{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\
                  \"reconnects\":0,\"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\
-                 \"token_valid\":false,\"last_error_class\":null}"
+                 \"token_valid\":false,\"last_error_class\":null,\"current_url\":null}"
             ),
-            "frozen relay object must stay byte-identical: {json}"
+            "frozen relay object keeps its field order (current_url tail-appended): {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
     }

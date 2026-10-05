@@ -456,11 +456,13 @@ fn test_relay_attach(clock: &VirtualClock) -> RelayAttach {
 }
 
 /// The frozen pre-change shape of the disabled `relay` runtime object —
-/// every test below pins that it is byte-identical (additive-only change).
+/// every test below pins that it keeps its field order. (2026-10-06:
+/// `current_url` is the one tail-appended addition since the freeze,
+/// a1947b9 tail-append discipline — every pre-existing field unchanged.)
 fn frozen_disabled_relay_json() -> String {
     "{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\
      \"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\
-     \"last_error_class\":null}"
+     \"last_error_class\":null,\"current_url\":null}"
     .to_string()
 }
 

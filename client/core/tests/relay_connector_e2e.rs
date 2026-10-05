@@ -589,13 +589,14 @@ async fn relay_disabled_is_the_default_and_never_touches_relay() {
     .await;
     assert_eq!(relay_server.stats().connections_accepted, 0);
 
-    // the status document renders the frozen disabled shape
+    // the status document renders the frozen disabled shape (current_url is
+    // the one 2026-10-06 tail-appended addition — nothing was ever dialed)
     let json = handle.status_json();
     assert!(
         json.contains(
             "\"relay\":{\"enabled\":false,\"state\":\"disabled\",\"urls\":[],\"reconnects\":0,\
              \"frames_tx\":0,\"frames_rx\":0,\"transport_bytes\":0,\"token_valid\":false,\
-             \"last_error_class\":null}"
+             \"last_error_class\":null,\"current_url\":null}"
         ),
         "{json}"
     );
@@ -707,13 +708,15 @@ async fn relay_optin_reaches_ready_and_round_trips_bytes_byte_exact() {
     assert!(relay.token_valid);
     assert_eq!(relay.last_error_class, None);
 
-    // the frozen JSON shape (exact substring), and it stays valid JSON
+    // the frozen JSON shape (exact substring), and it stays valid JSON.
+    // 2026-10-06: current_url tail-appends — the LIVE session's effective
+    // URL (same string the advertised set carried).
     let json = handle.status_json();
+    let live_url = loopback_url(relay_server.addr().port());
     let want_relay = format!(
-        "\"relay\":{{\"enabled\":true,\"state\":\"ready\",\"urls\":[\"{}\"],\"reconnects\":0,\
+        "\"relay\":{{\"enabled\":true,\"state\":\"ready\",\"urls\":[\"{live_url}\"],\"reconnects\":0,\
          \"frames_tx\":4,\"frames_rx\":4,\"transport_bytes\":3000,\"token_valid\":true,\
-         \"last_error_class\":null}}",
-        loopback_url(relay_server.addr().port())
+         \"last_error_class\":null,\"current_url\":\"{live_url}\"}}"
     );
     assert!(json.contains(&want_relay), "want {want_relay} in {json}");
 
