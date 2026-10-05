@@ -290,7 +290,10 @@ impl Candidate {
     /// `candidate:<foundation> <component> udp <priority> <address> <port>
     /// typ <type> [raddr <addr> rport <port>] generation 0` — the RFC 8839
     /// candidate-attribute grammar; trailing extension attributes are legal
-    /// and parsers ignore what they do not need.
+    /// and parsers ignore what they do not need. Official pion Marshal omits
+    /// the leading `candidate:`, and its UnmarshalCandidate parses this
+    /// prefixed form all the same (the prefix rides in the opaque
+    /// foundation), so this shape interops in both directions.
     pub fn marshal(&self) -> String {
         let mut s = format!(
             "candidate:{} {} {} {} {} {} typ {}",
@@ -304,18 +307,26 @@ impl Candidate {
         s
     }
 
-    /// Inverse of [`Candidate::marshal`]; also accepts the `a=`-prefixed and
-    /// prefix-less forms and ignores unknown extension attributes. Anything
-    /// else is a [`ManagementError::Parse`] with a stable `candidate:*`
-    /// token (remote peers can send arbitrary bytes; a bad candidate drops,
-    /// nothing panics).
+    /// Inverse of [`Candidate::marshal`]. The `candidate:` prefix is
+    /// OPTIONAL: upstream signaler.go forwards `candidate.Marshal()` verbatim
+    /// and pion's Marshal (candidate_base.go, v2/v4 alike) emits the bare
+    /// RFC 8839 attribute body — `42765714 1 udp 2130706431 192.168.50.3
+    /// 51820 typ host` — with no prefix, so official peers arrive
+    /// prefix-less (the device run rejected every one as `missing-prefix`).
+    /// Also accepts the `a=`-prefixed form and ignores unknown extension
+    /// attributes. Anything else is a [`ManagementError::Parse`] with a
+    /// stable `candidate:*` token (remote peers can send arbitrary bytes;
+    /// a bad candidate drops, nothing panics).
     pub fn unmarshal(payload: &str) -> Result<Self, ManagementError> {
         let bad = |tok: &'static str, detail: String| {
             ManagementError::Parse(format!("candidate:{tok} '{detail}'"))
         };
         let s = payload.trim();
         let s = s.strip_prefix("a=").unwrap_or(s);
-        let s = s.strip_prefix("candidate:").ok_or_else(|| bad("missing-prefix", payload.to_string()))?;
+        // Optional per the official wire format above. Symmetric on the send
+        // side: pion's UnmarshalCandidate parses our prefixed form too (the
+        // prefix rides in the opaque, space-free foundation token).
+        let s = s.strip_prefix("candidate:").unwrap_or(s);
         let mut toks = s.split_whitespace();
         let foundation = toks.next().ok_or_else(|| bad("empty", payload.to_string()))?.to_string();
         let take_u32 = |t: Option<&str>, what: &str| {
@@ -1353,5 +1364,137 @@ mod interface_filter_tests {
         // gather 每接口恰好一枚（servers 为空时用完即关）→ 枚数 == 预算数。
         assert_eq!(socks.taken() as usize, listed.len());
         assert_eq!(got.host.len(), listed.len());
+    }
+}
+
+/// Candidate wire-form interop with the official stack. The official format
+/// is pion `Candidate.Marshal()` forwarded verbatim by signaler.go
+/// (`Payload: candidate.Marshal()`), and pion's Marshal (candidate_base.go,
+/// v2.3.x and v4.0.x identical here) emits the RFC 8839 attribute body
+/// WITHOUT a `candidate:` prefix — `<foundation> <component> <net> <prio>
+/// <addr> <port> typ <type> [tcptype ..] [raddr .. rport ..]`. The
+/// prefix-less samples below are that grammar; prefixed samples are our own
+/// [`Candidate::marshal`] shape. Basis: the device run logged every official
+/// candidate as `reason=missing-prefix` while its diagnostic field positions
+/// (transport=2nd, address=5th, typ=8th token) matched this layout exactly.
+#[cfg(test)]
+mod candidate_wire_tests {
+    use super::{Candidate, CandidateType};
+
+    #[test]
+    fn pion_host_candidate_without_prefix_parses() {
+        let c = Candidate::unmarshal("42765714 1 udp 2130706431 192.168.50.3 51820 typ host")
+            .expect("prefix-less host candidate must parse");
+        assert_eq!(c.foundation, "42765714");
+        assert_eq!(c.component, 1);
+        assert_eq!(c.transport, "udp");
+        assert_eq!(c.priority, 2130706431);
+        assert_eq!((c.address.as_str(), c.port), ("192.168.50.3", 51820));
+        assert_eq!(c.typ, CandidateType::Host);
+        assert!(c.related_address.is_none() && c.related_port.is_none());
+    }
+
+    /// pion appends `raddr <addr> rport <port>` for srflx (the base).
+    #[test]
+    fn pion_srflx_candidate_with_raddr_rport_parses() {
+        let c = Candidate::unmarshal(
+            "3711056448 1 udp 1694498815 203.0.113.7 51820 typ srflx raddr 192.168.50.3 rport 51820",
+        )
+        .expect("prefix-less srflx candidate must parse");
+        assert_eq!(c.typ, CandidateType::Srflx);
+        assert_eq!(c.address, "203.0.113.7");
+        assert_eq!(
+            (c.related_address.as_deref(), c.related_port),
+            (Some("192.168.50.3"), Some(51820))
+        );
+    }
+
+    /// RFC 8839 extension attributes (`ufrag`, `network-id`, `network-cost`,
+    /// `generation`, …) are legal trailers — ignored, with or without the
+    /// prefix, and under the `a=` SDP form.
+    #[test]
+    fn extension_attributes_are_ignored_with_and_without_prefix() {
+        for wire in [
+            "42765714 1 udp 2130706431 192.168.50.3 51820 typ host ufrag FRzs network-id 3 network-cost 50",
+            "candidate:42765714 1 udp 2130706431 192.168.50.3 51820 typ host ufrag FRzs generation 0 network-id 3 network-cost 50",
+            "a=candidate:42765714 1 udp 2130706431 192.168.50.3 51820 typ host generation 0",
+        ] {
+            let c = Candidate::unmarshal(wire).unwrap_or_else(|e| panic!("'{wire}': {e:?}"));
+            assert_eq!((c.address.as_str(), c.typ), ("192.168.50.3", CandidateType::Host));
+        }
+    }
+
+    /// relay/prflx round-trip losslessly at the wire layer (the session
+    /// layer decides separately what to pair).
+    #[test]
+    fn relay_and_prflx_types_parse() {
+        let c = Candidate::unmarshal(
+            "97046741 1 udp 50331391 198.51.100.2 3478 typ relay raddr 203.0.113.7 rport 51820",
+        )
+        .expect("relay candidate");
+        assert_eq!(c.typ, CandidateType::Relay);
+        let c = Candidate::unmarshal(
+            "61170560 1 udp 1845501695 203.0.113.9 40000 typ prflx raddr 192.168.50.3 rport 51820",
+        )
+        .expect("prflx candidate");
+        assert_eq!(c.typ, CandidateType::Prflx);
+    }
+
+    /// Official peers are dual-stack and send IPv6 host candidates without a
+    /// zone id (pion strips it in Marshal). The wire layer accepts them;
+    /// UDP4-only pairing in ice_session is a separate, deliberate cut.
+    #[test]
+    fn ipv6_candidate_parses_at_the_wire_layer() {
+        let c = Candidate::unmarshal("489324071 1 udp 2130706431 fe80::a1b2:c3d4:e5f6 51820 typ host")
+            .expect("IPv6 host candidate");
+        assert_eq!(c.address, "fe80::a1b2:c3d4:e5f6");
+        assert_eq!(c.typ, CandidateType::Host);
+    }
+
+    /// Both accepted forms must describe the SAME candidate — the prefix
+    /// carries no information.
+    #[test]
+    fn prefixed_and_prefix_less_forms_agree() {
+        let prefixed =
+            "candidate:42765714 1 udp 2130706431 192.168.50.3 51820 typ host generation 0";
+        let bare = "42765714 1 udp 2130706431 192.168.50.3 51820 typ host";
+        assert_eq!(
+            Candidate::unmarshal(prefixed).expect("prefixed"),
+            Candidate::unmarshal(bare).expect("bare")
+        );
+    }
+
+    /// Our own marshal output keeps round-tripping through the same grammar.
+    #[test]
+    fn marshal_round_trips() {
+        let c = Candidate::host_candidate([192, 168, 50, 3], 51820);
+        assert_eq!(Candidate::unmarshal(&c.marshal()).unwrap(), c);
+        let base = Candidate::host_candidate([192, 168, 50, 3], 51820);
+        let s = Candidate::srflx_candidate(&base, [203, 0, 113, 7], 51820);
+        assert_eq!(Candidate::unmarshal(&s.marshal()).unwrap(), s);
+    }
+
+    /// Truly malformed input is still rejected (each with a stable
+    /// `candidate:*` token — asserted as plain failure here).
+    #[test]
+    fn malformed_candidates_are_rejected() {
+        for bad in [
+            "",
+            "   ",
+            "candidate:",                                            // prefix, no body
+            "nonsense",                                              // single token
+            "42765714 1",                                            // truncated
+            "42765714 1 udp",                                        // truncated
+            "42765714 1 udp 2130706431",                             // no address/port
+            "42765714 1 udp 2130706431 192.168.50.3",                // no port/typ
+            "42765714 1 udp 2130706431 192.168.50.3 51820",          // no typ
+            "42765714 1 udp 2130706431 192.168.50.3 51820 typ galaxy", // unknown type
+            "42765714 1 tcp 2130706431 192.168.50.3 51820 typ host",   // non-udp
+            "42765714 1 udp 2130706431 192.168.50.3 99999 typ host",   // port > 65535
+            "42765714 x udp 2130706431 192.168.50.3 51820 typ host",   // component NaN
+            "42765714 1 udp 2130706431 192.168.50.3 51820 typ srflx raddr 192.168.50.3", // raddr w/o rport
+        ] {
+            assert!(Candidate::unmarshal(bad).is_err(), "must be rejected: '{bad}'");
+        }
     }
 }
