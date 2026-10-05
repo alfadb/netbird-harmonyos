@@ -11,7 +11,8 @@ import { UiPeerEntry, connectionLabel, filterPeers, homeStateText, lastErrorText
   lastHandshakeText, onlinePeerCount, sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
-  readStoredManagementUrl, readStoredPrivateKey, KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
+  readStoredManagementUrl, readStoredPrivateKey, readStoredRelayEnabled,
+  KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -356,7 +357,8 @@ struct Index {
       this.formError = '生成设备私钥失败，请重试';
       return;
     }
-    const configText: string = buildDeviceConfigJson(urlCheck.url, privateKey);
+    const configText: string = buildDeviceConfigJson(urlCheck.url, privateKey,
+      this.deviceRelayEnabled());
     const keyText: string = buildSetupKeyFileText(this.keyInput);
     if (!this.writeSetupFile(SETUP_CONFIG_FILE, configText) ||
       !this.writeSetupFile(SETUP_KEY_FILE, keyText)) {
@@ -396,6 +398,22 @@ struct Index {
         String((error as BusinessFailure).code ?? 'none'));
       return '';
     }
+  }
+
+  // Relay switch carried across reconfigure: read the stored config's
+  // relay_enabled BEFORE the file is overwritten — false only on the exact
+  // explicit opt-out; a missing/unreadable value keeps the enabled default
+  // (a fresh configure writes true via the parameter default).
+  private deviceRelayEnabled(): boolean {
+    try {
+      const configPath: string = `${getContext(this).filesDir}/${SETUP_CONFIG_FILE}`;
+      if (fs.accessSync(configPath)) {
+        return readStoredRelayEnabled(fs.readTextSync(configPath));
+      }
+    } catch (error) {
+      // unreadable/missing config = enabled default below
+    }
+    return true;
   }
 
   // Same write honesty as the N2 request writers in EntryAbility: the open's

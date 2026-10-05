@@ -82,18 +82,48 @@ try {
 
   // --- credential file content construction (same shapes as --ps channel) ---
   const cfgText = mod.buildDeviceConfigJson('https://m.example:443', 'AAECAwQFBgcICQ==');
-  const cfg = JSON.parse(cfgText) as Record<string, string>;
+  const cfg = JSON.parse(cfgText) as Record<string, unknown>;
   check('device config json keeps management_url', cfg['management_url'] === 'https://m.example:443');
   check('device config json keeps private_key', cfg['private_key'] === 'AAECAwQFBgcICQ==');
-  check('device config json has the two required fields only',
-    Object.keys(cfg).length === 2 && cfg['management_url'] !== undefined && cfg['private_key'] !== undefined);
+  check('device config json has the three written fields only',
+    Object.keys(cfg).length === 3 && cfg['management_url'] !== undefined &&
+    cfg['private_key'] !== undefined && cfg['relay_enabled'] !== undefined);
+  check('fresh configure defaults relay_enabled to true',
+    cfg['relay_enabled'] === true);
+  const cfgOff = JSON.parse(mod.buildDeviceConfigJson('https://m.example:443',
+    'AAECAwQFBgcICQ==', false)) as Record<string, unknown>;
+  check('explicit relayEnabled=false is written through',
+    cfgOff['relay_enabled'] === false);
   check('setup key file text matches the --ps channel shape',
     mod.buildSetupKeyFileText('abc-123') === 'abc-123\n');
   check('setup key file text trims surrounding whitespace',
     mod.buildSetupKeyFileText('  abc-123 \n') === 'abc-123\n');
 
-  // --- stored config read-back (display + identity reuse) ---
+  // --- stored relay switch read-back (reconfigure preservation) ---
   const storedText = '{"management_url":"https://x.example","private_key":"pk-1"}';
+  check('stored relay: missing flag reads back true',
+    mod.readStoredRelayEnabled(storedText) === true);
+  check('stored relay: explicit false reads back false',
+    mod.readStoredRelayEnabled('{"management_url":"https://x.example","relay_enabled":false}') === false);
+  check('stored relay: explicit true reads back true',
+    mod.readStoredRelayEnabled('{"management_url":"https://x.example","relay_enabled":true}') === true);
+  check('stored relay: malformed flag reads back true',
+    mod.readStoredRelayEnabled('{"management_url":"https://x.example","relay_enabled":"no"}') === true);
+  check('stored relay: garbage config text reads back true',
+    mod.readStoredRelayEnabled('{oops') === true);
+  // The reconfigure round-trip the page performs: read the old value, feed
+  // it into the rewrite — an explicit opt-out survives, a flagless legacy
+  // config upgrades to the enabled default.
+  const reoff = JSON.parse(mod.buildDeviceConfigJson('https://x.example', 'pk-1',
+    mod.readStoredRelayEnabled('{"management_url":"https://x.example","private_key":"pk-1","relay_enabled":false}'))) as Record<string, unknown>;
+  check('reconfigure preserves an explicit relay_enabled:false',
+    reoff['relay_enabled'] === false);
+  const reon = JSON.parse(mod.buildDeviceConfigJson('https://x.example', 'pk-1',
+    mod.readStoredRelayEnabled(storedText))) as Record<string, unknown>;
+  check('reconfigure of a flagless legacy config writes relay_enabled:true',
+    reon['relay_enabled'] === true);
+
+  // --- stored config read-back (display + identity reuse) ---
   check('stored management url read back', mod.readStoredManagementUrl(storedText) === 'https://x.example');
   check('stored private key read back', mod.readStoredPrivateKey(storedText) === 'pk-1');
   check('garbage config text yields empty url', mod.readStoredManagementUrl('{oops') === '');

@@ -11,10 +11,11 @@
 // unnecessary here).
 //
 // Asserts the relay_enabled branch of buildConnectorConfigJson +
-// parseDeviceConfig:
-//   (1) missing/false  -> output JSON has NO 'relay_enabled' key
-//   (2) true           -> output JSON has 'relay_enabled': true
-//   (3) malformed (string/number) -> treated as false, no throw
+// parseDeviceConfig (default-ON semantics, official client parity):
+//   (1) missing/true  -> output JSON has 'relay_enabled': true
+//   (2) false         -> output JSON has 'relay_enabled': false
+//   (3) malformed (string/number/null) -> treated as the enabled default,
+//       no throw
 //
 // Run: node client/entry/selfcheck/run-relay-flag.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -76,17 +77,17 @@ function device(overrides: Record<string, unknown>): Record<string, unknown> {
 try {
   const mod = await import(pathToFileURL(fixture).href);
 
-  // (1) missing relay_enabled -> key absent
+  // (1) missing relay_enabled -> enabled default written explicitly
   const absent = JSON.parse(mod.buildConnectorConfigJson(device({}) as never,
     false)) as Record<string, unknown>;
-  check('missing flag -> no relay_enabled key',
-    !('relay_enabled' in absent), JSON.stringify(absent));
+  check('missing flag -> relay_enabled is true',
+    absent['relay_enabled'] === true, JSON.stringify(absent));
 
-  // (1b) explicit false -> key absent
+  // (1b) explicit false -> the only opt-out
   const off = JSON.parse(mod.buildConnectorConfigJson(
     device({ relay_enabled: false }) as never, false)) as Record<string, unknown>;
-  check('false flag -> no relay_enabled key',
-    !('relay_enabled' in off), JSON.stringify(off));
+  check('false flag -> relay_enabled is false',
+    off['relay_enabled'] === false, JSON.stringify(off));
 
   // (2) true -> relay_enabled: true written
   const on = JSON.parse(mod.buildConnectorConfigJson(
@@ -98,8 +99,8 @@ try {
   check('true flag keeps management_url',
     on['management_url'] === 'https://mgmt.example:443', JSON.stringify(on));
 
-  // (3) malformed values -> treated as false, no throw
-  for (const bad of ['true', 1, null]) {
+  // (3) malformed values -> treated as the enabled default, no throw
+  for (const bad of ['false', 0, null]) {
     let threw: boolean = false;
     let parsed: Record<string, unknown> = {};
     try {
@@ -108,19 +109,24 @@ try {
     } catch (error) {
       threw = true;
     }
-    check(`malformed flag (${JSON.stringify(bad)}) -> no throw and no key`,
-      !threw && !('relay_enabled' in parsed), JSON.stringify(parsed));
+    check(`malformed flag (${JSON.stringify(bad)}) -> no throw and enabled default`,
+      !threw && parsed['relay_enabled'] === true, JSON.stringify(parsed));
   }
 
-  // parseDeviceConfig normalizes the flag the same way (no throw on garbage).
+  // parseDeviceConfig normalizes the flag the same way (no throw on garbage):
+  // undefined = enabled default, false = the only opt-out.
   const normOff = mod.parseDeviceConfig(
-    JSON.stringify(device({ relay_enabled: 'yes' }))) as Record<string, unknown>;
-  check('parseDeviceConfig: malformed flag normalized off',
+    JSON.stringify(device({ relay_enabled: 'no' }))) as Record<string, unknown>;
+  check('parseDeviceConfig: malformed flag normalized to enabled default',
     normOff['relay_enabled'] === undefined, JSON.stringify(normOff));
-  const normOn = mod.parseDeviceConfig(
+  const normTrue = mod.parseDeviceConfig(
     JSON.stringify(device({ relay_enabled: true }))) as Record<string, unknown>;
-  check('parseDeviceConfig: true kept',
-    normOn['relay_enabled'] === true, JSON.stringify(normOn));
+  check('parseDeviceConfig: true normalized to enabled default',
+    normTrue['relay_enabled'] === undefined, JSON.stringify(normTrue));
+  const normFalse = mod.parseDeviceConfig(
+    JSON.stringify(device({ relay_enabled: false }))) as Record<string, unknown>;
+  check('parseDeviceConfig: false kept as the explicit opt-out',
+    normFalse['relay_enabled'] === false, JSON.stringify(normFalse));
 } catch (error) {
   failedCount++;
   console.log(`FAIL harness — ${(error as Error).message}`);

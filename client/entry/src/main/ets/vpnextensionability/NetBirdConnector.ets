@@ -343,9 +343,10 @@ export interface DeviceConfigFile {
   ca_pem?: string;
   server_name?: string;
   hostname?: string;
-  // N13-D1: opt-in relay client switch (core ConnectorConfig JSON key
-  // 'relay_enabled', default false). Parsed leniently below: only the exact
-  // boolean true enables it; missing/false/non-boolean stays disabled.
+  // N13-D1: relay client switch (core ConnectorConfig JSON key
+  // 'relay_enabled'). DEFAULT TRUE — official client parity: relay is always
+  // on unless explicitly opted out. Parsed leniently below: only the exact
+  // boolean false disables it; missing/true/non-boolean stays enabled.
   relay_enabled?: boolean;
 }
 
@@ -401,10 +402,12 @@ export function parseDeviceConfig(text: string): DeviceConfigFile {
   if (device.private_key === undefined || device.private_key.length === 0) {
     throw new Error('device config: private_key missing');
   }
-  // N13-D1 lenient relay opt-in: only the exact boolean true enables; a
-  // missing/false/non-boolean value (e.g. string/number) stays disabled and
-  // NEVER throws — a malformed flag must not abort the existing start flow.
-  if (device.relay_enabled !== true) {
+  // N13-D1 lenient relay switch: relay is ON by default (official client
+  // parity — cellular deployments depend on it); only the exact boolean
+  // false opts out. A missing/true/non-boolean value (e.g. string/number)
+  // normalizes to the enabled default and NEVER throws — a malformed flag
+  // must not abort the existing start flow.
+  if (device.relay_enabled !== false) {
     device.relay_enabled = undefined;
   }
   return device;
@@ -479,10 +482,13 @@ export function buildConnectorConfigJson(device: DeviceConfigFile,
   if (forceDefaultRoute) {
     cfg['force_default_route'] = true;
   }
-  // N13-D1: opt-in relay switch — written ONLY when true (core default is
-  // false); enabling on a device requires the N2-H endpoint exclusion set
-  // to be ready for the relay URLs.
-  if (device.relay_enabled === true) {
+  // N13-D1: relay switch — the core's own default is false, so the shell
+  // must write the resolved value explicitly: true (the enabled default,
+  // official client parity) unless the device config opted out with an
+  // exact relay_enabled:false.
+  if (device.relay_enabled === false) {
+    cfg['relay_enabled'] = false;
+  } else {
     cfg['relay_enabled'] = true;
   }
   return JSON.stringify(cfg);
