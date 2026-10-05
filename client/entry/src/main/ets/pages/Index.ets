@@ -5,7 +5,7 @@ import cryptoFramework from '@ohos.security.cryptoFramework';
 import util from '@ohos.util';
 import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
-import { PublishedStatus, readPublishedStatus } from '../vpnextensionability/NetBirdConnector';
+import { PublishedStatus, readPublishedStatus, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
 import { UiPeerEntry, connectionLabel, filterPeers, homeStateText, lastErrorText,
   lastHandshakeText, onlinePeerCount, sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
@@ -18,9 +18,26 @@ const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 const EXTENSION_ABILITY: string = 'NetBirdVpnExtensionAbility';
 const STATUS_POLL_MS: number = 2000;
+// Explicit logout channel (stop-time Logout defect, 2026-10-01): the UI
+// process has NO connector (it lives in the VPN extension process), so the
+// management Logout goes through the extension's one-shot ticket file and
+// its answer file — the same shared-filesDir channel as the setup files.
+// Budget: one extension watcher tick (5 s) + the native logout bound
+// (8 s) + margin.
+const LOGOUT_FILE_NAME: string = 'netbird-logout';
+const LOGOUT_RESULT_FILE_NAME: string = 'netbird-logout-result';
+const LOGOUT_WAIT_MS: number = 15000;
+const LOGOUT_POLL_MS: number = 250;
 
 interface BusinessFailure extends Error {
   code?: number;
+}
+
+// The extension's `netbird-logout-result` answer body.
+interface LogoutResultFile {
+  ok: boolean;
+  reason?: string;
+  ticket_ms: number;
 }
 
 // One in-flight start and stop request at a time; rejected requests and
@@ -69,6 +86,11 @@ struct Index {
   // active → null without a user stop = the extension fail-closed / died).
   private lastLiveState: string = '';
   private lastUserStopAtMs: number = 0;
+  // Explicit logout in flight (ticket written): masks the extension's
+  // teardown-driven status-document disappearance so the logout the user
+  // just asked for is not reported as an unexpected "VPN 已断开".
+  private lastLogoutAtMs: number = 0;
+  private logoutTicketMs: number = 0;
   private pollTimer: number = -1;
 
   aboutToAppear(): void {
@@ -120,7 +142,8 @@ struct Index {
         // surface the reconnect notice (the extension's fail-closed path
         // removed the document after its VPN_RECREATE_VERIFY failure).
         if (vpnActiveState(this.lastLiveState) && !this.stopSent &&
-          Date.now() - this.lastUserStopAtMs > 8000) {
+          Date.now() - this.lastUserStopAtMs > 8000 &&
+          Date.now() - this.lastLogoutAtMs > 25000) {
           this.disconnectNotice = 'VPN 已断开，请重新连接';
         }
         this.requestSent = false;
@@ -414,11 +437,18 @@ struct Index {
   }
 
   // 注销 (logout): delete the local credentials + device config — only after
-  // an explicit second confirmation.
+  // an explicit second confirmation. When the VPN is LIVE, the management
+  // Logout is attempted FIRST through the extension (the only process with
+  // the connector + its logged-in management client): a one-shot
+  // `netbird-logout` ticket answered by `netbird-logout-result` (bounded
+  // wait — a Logout failure or timeout never blocks the local deletion).
+  // When the VPN is not running there is no live management session to
+  // logout with: only the local files go, and the hint points the user at
+  // the management console.
   private requestLogout(): void {
     AlertDialog.show({
       title: '注销确认',
-      message: '注销将删除本机的 Setup Key 与设备配置（含设备私钥），删除后需要重新配置才能连接。确定删除吗？',
+      message: '注销将删除本机的 Setup Key 与设备配置（含设备私钥）；若当前已连接，还会通知管理端删除本设备记录。确定注销吗？',
       primaryButton: {
         value: '取消',
         action: (): void => {
@@ -435,12 +465,80 @@ struct Index {
   }
 
   private performLogout(): void {
+    const vpnLive: boolean = this.published !== null && vpnActiveState(this.published.state);
+    if (!vpnLive) {
+      hilog.info(DOMAIN, TAG, 'UI_LOGOUT_LOCAL_ONLY|reason=vpn-not-running');
+      this.finishLogout(false);
+      return;
+    }
+    this.lastLogoutAtMs = Date.now();
+    this.writeLogoutTicket();
+    this.waitForLogoutResult().then((ok: boolean) => {
+      this.finishLogout(ok);
+    });
+  }
+
+  private writeLogoutTicket(): void {
+    // fresh answer channel: drop a stale result file from an earlier logout
+    this.removeSetupFile(LOGOUT_RESULT_FILE_NAME);
+    const issuedAtMs: number = Date.now();
+    this.logoutTicketMs = issuedAtMs;
+    const written: boolean =
+      this.writeSetupFile(LOGOUT_FILE_NAME, `{"issued_at_ms":${issuedAtMs}}`);
+    if (written) {
+      hilog.info(DOMAIN, TAG, 'UI_LOGOUT_TICKET_WRITTEN|file=%{public}s|ticketMs=%{public}d',
+        LOGOUT_FILE_NAME, issuedAtMs);
+    } else {
+      hilog.error(DOMAIN, TAG, 'UI_LOGOUT_TICKET_WRITE_FAILED|file=%{public}s', LOGOUT_FILE_NAME);
+    }
+  }
+
+  private async waitForLogoutResult(): Promise<boolean> {
+    const deadline: number = Date.now() + LOGOUT_WAIT_MS;
+    while (Date.now() < deadline) {
+      await sleep(LOGOUT_POLL_MS);
+      const ok: boolean | null = this.readLogoutResult();
+      if (ok !== null) {
+        return ok;
+      }
+    }
+    hilog.warn(DOMAIN, TAG, 'UI_LOGOUT_RESULT_TIMEOUT|waitMs=%{public}d', LOGOUT_WAIT_MS);
+    return false;
+  }
+
+  // The extension's answer: `{"ok":bool,"reason":str,"ticket_ms":ms}`.
+  // `null` while no MATCHING answer exists (still pending / a stale answer
+  // from an earlier logout — matched on the ticket stamp).
+  private readLogoutResult(): boolean | null {
+    const path: string = `${getContext(this).filesDir}/${LOGOUT_RESULT_FILE_NAME}`;
+    try {
+      if (!fs.accessSync(path)) {
+        return null;
+      }
+      const parsed: LogoutResultFile = JSON.parse(fs.readTextSync(path)) as LogoutResultFile;
+      if (parsed.ticket_ms !== this.logoutTicketMs) {
+        return null;
+      }
+      this.removeSetupFile(LOGOUT_RESULT_FILE_NAME);
+      hilog.info(DOMAIN, TAG, 'UI_LOGOUT_RESULT|ok=%{public}s|reason=%{public}s',
+        String(parsed.ok), parsed.reason !== undefined ? parsed.reason : 'none');
+      return parsed.ok === true;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private finishLogout(serverLogoutConfirmed: boolean): void {
     this.removeSetupFile(SETUP_CONFIG_FILE);
     this.removeSetupFile(SETUP_KEY_FILE);
+    // a ticket that was never consumed (extension gone before its tick)
+    this.removeSetupFile(LOGOUT_FILE_NAME);
     this.urlInput = DEFAULT_MANAGEMENT_URL;
     this.keyInput = '';
     this.formError = '';
-    this.formHint = '';
+    this.formHint = serverLogoutConfirmed
+      ? '已注销：本机凭据已删除，管理端已删除本设备。'
+      : '已删除本机凭据。如需从管理端移除本设备，请在管理后台删除。';
     this.showSetupForm = false;
     this.refreshSetupState();
   }

@@ -138,6 +138,14 @@ use crate::util::{jbool, jinum, jnum, jstr};
 /// as [`crate::grpc::UPSTREAM_COMMIT`]).
 pub const UPSTREAM_COMMIT: &str = crate::grpc::UPSTREAM_COMMIT;
 
+/// Outer bound for the EXPLICIT user logout RPC
+/// ([`ConnectorHandle::logout_json`]). Each RPC already carries the
+/// client-wide `request_timeout` (default 10 s; logout = GetServerKey +
+/// Logout, so worst case two of them) — this fuse keeps the NAPI caller
+/// (the shell's watcher tick) bounded instead of frozen for that whole
+/// span; past it the honest outcome is `reason=timeout`.
+pub const EXPLICIT_LOGOUT_WAIT_MS: u64 = 8_000;
+
 // ---------------------------------------------------------------------------
 // N8: controlled-recreate state (platform VpnConfig is fixed at create())
 // ---------------------------------------------------------------------------
@@ -3679,7 +3687,12 @@ pub struct ConnectorHandle {
     /// Network-change generation watched by the management worker.
     network_change: tokio::sync::watch::Sender<u64>,
     management_factory: Arc<dyn ManagementFactory>,
-    /// Latest logged-in management client, taken by stop() for logout.
+    /// Latest logged-in management client. Held for the N2 A-trigger M
+    /// column ([`ConnectorATrigger::management_round_trip`], frozen design
+    /// §4 M: ONE `GetServerKey` on the SAME tonic channel the Sync stream
+    /// runs over) and for the EXPLICIT user logout
+    /// ([`ConnectorHandle::logout_json`]). NEVER consumed by `stop()` —
+    /// stopping a connection is not deregistration.
     logout_slot: Arc<Mutex<Option<ManagementGrpcClient>>>,
     stop_flag: Arc<AtomicBool>,
     /// N3-7: the protected-socket source behind the management factory, when
@@ -4086,10 +4099,18 @@ impl ConnectorHandle {
         self.shared.network_config_json()
     }
 
-    /// Stop the connector: close the Sync stream (worker abort), logout
-    /// with the last logged-in client (failure does NOT block the stop),
-    /// clear the data-plane seams. Idempotent: a second call reports
-    /// `already_stopped` and does nothing.
+    /// Stop the connector: close the Sync stream (worker abort), clear the
+    /// data-plane seams. Idempotent: a second call reports `already_stopped`
+    /// and does nothing.
+    ///
+    /// NO management `Logout` is sent on ANY stop path (user disconnect,
+    /// automatic fail-closed, extension destroy, reconnect failure): the
+    /// Logout RPC deregisters and DELETES the peer server-side (upstream
+    /// client/server/server.go), so a stop-time Logout turned automatic
+    /// disconnects into device deletion (device audit 2026-10-01: a
+    /// fail-closed recreate at 01:34:08 ended with the management System
+    /// deleting the peer). Upstream clients call Logout ONLY on the user's
+    /// explicit logout — that lives in [`ConnectorHandle::logout_json`].
     pub fn stop(&self) -> StopOutcome {
         let worker = self.worker.lock_poison().take();
         let already = worker.is_none();
@@ -4130,15 +4151,9 @@ impl ConnectorHandle {
             g.last_recreate_ms = None;
             g.recreate = RecreateStatus::default();
         }
-        // logout is best-effort and must never block the stop
-        if let Some(mut client) = self.logout_slot.lock_poison().take() {
-            let shared = self.shared.clone();
-            self.runtime.spawn(async move {
-                let ok = client.logout().await.is_ok();
-                shared.set_logout_ok(ok);
-                hilog::emit(&format!("connector: logout ok={ok}"));
-            });
-        }
+        // NO Logout here: stopping a connection is not deregistration (see
+        // the method doc). The logged-in client stays in `logout_slot` for
+        // the N2 A-trigger M column and the explicit `connector_logout()`.
         hilog::emit("connector: stopped");
         StopOutcome { already_stopped: false, state: self.shared.state() }
     }
@@ -4152,6 +4167,58 @@ impl ConnectorHandle {
             jbool("already_stopped", outcome.already_stopped),
             jstr("state", outcome.state.as_str()),
         )
+    }
+
+    /// The `connector_logout()` JSON document: ONE explicit user logout —
+    /// send the management `Logout` RPC on the CURRENT logged-in client
+    /// (from `logout_slot`: the same tonic channel the Sync stream runs
+    /// over, no new dial, no new stream) and report the sanitized outcome.
+    /// This is the ONLY Logout call in the client — `stop()` never logs
+    /// out (stopping a connection is not deregistration; see
+    /// [`ConnectorHandle::stop`]).
+    ///
+    /// The client is TAKEN from the slot (one shot): a Logout deletes the
+    /// peer server-side, so the channel is spent either way and a repeat
+    /// call reports `no-live-management-connection` instead of firing a
+    /// second RPC. Bounded by [`EXPLICIT_LOGOUT_WAIT_MS`] even though each
+    /// RPC already carries the client-wide `request_timeout` — the caller
+    /// (the shell, on its watcher tick) must not be frozen longer.
+    ///
+    /// `NotFound` counts as success ("peer already gone" — upstream
+    /// logoutPeerGone, client/server/server.go:1602-1611). The outcome is
+    /// recorded in the status field `logout_ok` (which `stop()` leaves
+    /// untouched at `null`).
+    pub fn logout_json(&self) -> String {
+        let Some(mut client) = self.logout_slot.lock_poison().take() else {
+            return format!(
+                "{{{},{},{}}}",
+                jbool("ok", false),
+                jstr("error", "no-live-management-connection"),
+                jstr("reason", "login-not-completed-or-already-logged-out"),
+            );
+        };
+        let waited = self.runtime.block_on(async {
+            tokio::time::timeout(
+                core::time::Duration::from_millis(EXPLICIT_LOGOUT_WAIT_MS),
+                client.logout(),
+            )
+            .await
+        });
+        let (ok, reason) = match waited {
+            Ok(Ok(())) => (true, "ok"),
+            // upstream logoutPeerGone: NotFound = the peer is already gone
+            // (tonic Code::NotFound = 5 → ManagementError::Request)
+            Ok(Err(e))
+                if matches!(ErrorClass::from_management(&e), ErrorClass::Request { status: 5 }) =>
+            {
+                (true, "peer-already-gone")
+            }
+            Ok(Err(e)) => (false, ErrorClass::from_management(&e).as_str()),
+            Err(_) => (false, "timeout"),
+        };
+        self.shared.set_logout_ok(ok);
+        hilog::emit(&format!("connector: explicit logout ok={ok} reason={reason}"));
+        format!("{{{},{}}}", jbool("ok", ok), jstr("reason", reason))
     }
 
     pub fn is_running(&self) -> bool {
@@ -5956,6 +6023,26 @@ pub fn connector_stop_json() -> String {
             jbool("ok", true),
             jbool("already_stopped", true),
             jstr("state", ConnState::Disconnected.as_str()),
+        ),
+    }
+}
+
+/// The `connector_logout()` implementation: the EXPLICIT user logout —
+/// ONE management `Logout` RPC on the live connector's logged-in client
+/// (the server deregisters and DELETES the peer, upstream
+/// client/server/server.go). This is the ONLY Logout entry in the client:
+/// `connector_stop()` never logs out, on any stop path. Safe with no
+/// connector at all (honest refusal — the shell then just drops the local
+/// credentials and points the user at the management console).
+pub fn connector_logout_json() -> String {
+    let slot = connector_slot();
+    match slot.as_ref() {
+        Some(handle) => handle.logout_json(),
+        None => format!(
+            "{{{},{},{}}}",
+            jbool("ok", false),
+            jstr("error", "no-connector"),
+            jstr("reason", "not-running"),
         ),
     }
 }

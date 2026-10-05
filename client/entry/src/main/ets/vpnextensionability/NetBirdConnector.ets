@@ -72,11 +72,23 @@ export interface ConnectorStartResult {
   error?: string;
 }
 
-// {ok,already_stopped,state} — core.connector_stop (idempotent).
+// {ok,already_stopped,state} — core.connector_stop (idempotent; NEVER sends
+// a management Logout — stopping a connection is not deregistration).
 export interface ConnectorStopResult {
   ok: boolean;
   already_stopped: boolean;
   state: string;
+}
+
+// {ok,reason} / {ok:false,error,reason} — core.connector_logout: the
+// EXPLICIT user logout (ONE Logout RPC on the live logged-in client; the
+// server deregisters and deletes the peer). reason: 'ok' |
+// 'peer-already-gone' | '<error-class>' | 'timeout' |
+// 'not-running' | 'login-not-completed-or-already-logged-out'.
+export interface ConnectorLogoutResult {
+  ok: boolean;
+  reason?: string;
+  error?: string;
 }
 
 // {open,errno} shape of core.fd_status.
@@ -1421,6 +1433,10 @@ export function connectorNetworkConfig(): CoreNetworkConfig {
 
 export function connectorStop(): ConnectorStopResult {
   return JSON.parse(core.connector_stop()) as ConnectorStopResult;
+}
+
+export function connectorLogout(): ConnectorLogoutResult {
+  return JSON.parse(core.connector_logout()) as ConnectorLogoutResult;
 }
 
 export function sleep(ms: number): Promise<void> {

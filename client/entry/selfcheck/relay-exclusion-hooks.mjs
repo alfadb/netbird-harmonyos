@@ -113,6 +113,10 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    const s = globalThis.__NB_FAKE_STATUS;\n' +
   '    return typeof s === "string" ? s : JSON.stringify(s === undefined ? {} : s);\n' +
   '  },\n' +
+  // Explicit logout (2026-10-01): same loud-refusal rule — these suites never
+  // write a `netbird-logout` ticket, so the poll never reaches the seam.
+  '  connector_logout: () => JSON.stringify({ ok: false, error: "no-connector",\n' +
+  '    reason: "not-running" }),\n' +
   // N2 T5a (2026-09-28): the shell's armed-only stimulus entry. These suites
   // never arm the evidence switch, so the poll never reaches it; the export
   // exists so an accidental call fails loudly with the honest not-armed answer

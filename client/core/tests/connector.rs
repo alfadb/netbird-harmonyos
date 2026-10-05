@@ -22,7 +22,9 @@
 //!    [`netbird_core::connector::ManagementFactory`] → bounded attempts
 //!    (exactly one), `Failed` with a sanitized class
 //! 5. `stop()` idempotency + cleanup (WG registry cleared, host applier
-//!    cleared, best-effort logout — including the logout-failure path)
+//!    cleared) — and NO management Logout on any stop path; the EXPLICIT
+//!    `logout_json()` is the only Logout caller (fires exactly once, one
+//!    shot; NotFound = "peer already gone", upstream logoutPeerGone)
 //! 6. sentinel setup key / JWT / private key NEVER appear in
 //!    `connector_status()` / `connector_stop()` JSON or `Debug` output
 //!    (they DO reach the server — the mock captures them)
@@ -819,11 +821,15 @@ async fn retry_budget_exhaustion_is_bounded_and_sanitized() {
     handle.stop();
 }
 
-/// stop() closes the stream, clears the data-plane seams and logs out
-/// (best-effort). A second stop() is a no-op. The logout-FAILURE path does
-/// not block the stop either.
+/// stop() closes the stream and clears the data-plane seams and NEVER
+/// calls management Logout — upstream Logout is the USER-driven
+/// deregistration (the server deletes the peer); a stop-time Logout turned
+/// the automatic fail-closed recreate of 2026-10-01 01:34:08 into a device
+/// deletion. Even with a logged-in client parked in the slot and the mock
+/// ready to answer (both the success and the failure script), zero Logout
+/// RPCs may arrive. A second stop() is a no-op.
 #[tokio::test(flavor = "multi_thread")]
-async fn stop_is_idempotent_and_cleans_up_even_when_logout_fails() {
+async fn stop_is_idempotent_cleans_up_and_never_logs_out() {
     for logout_fail_status in [None, Some(Status::internal("logout boom"))] {
         let mock = MgmtMock::default();
         *mock.logout_fail.lock().expect("fail") = logout_fail_status.clone();
@@ -863,32 +869,95 @@ async fn stop_is_idempotent_and_cleans_up_even_when_logout_fails() {
         assert!(host.cleared.load(Ordering::Acquire), "host applier cleared");
         wait_for("wg registry cleared", || wg.is_empty()).await;
 
-        // logout fired (exactly once), success or failure must not block
-        wait_for("logout called once", || {
-            mock.logout_calls.lock().expect("logout").len() == 1
-        })
-        .await;
-        match logout_fail_status {
-            None => {
-                wait_for("logout_ok=true", || handle.status().logout_ok == Some(true)).await;
-            }
-            Some(_) => {
-                wait_for("logout_ok=false recorded, stop unaffected", || {
-                    handle.status().logout_ok == Some(false)
-                })
-                .await;
-            }
-        }
+        // NO logout on the stop path: settle window for any would-be
+        // spawned logout task (the removed implementation fired within
+        // microseconds), then the count must still be zero
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            mock.logout_calls.lock().expect("logout").is_empty(),
+            "stop() must never call management Logout"
+        );
+        assert_eq!(handle.status().logout_ok, None, "stop leaves logout_ok untouched");
+        assert!(handle.status_json().contains("\"logout_ok\":null"));
 
         // idempotent second stop
         let json2 = handle.stop_json();
         assert!(json2.contains("\"already_stopped\":true"), "{json2}");
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.logout_calls.lock().expect("logout").is_empty(),
+            "no logout on the second stop either"
+        );
+    }
+}
+
+/// The EXPLICIT logout (`connector_logout()` / `logout_json()`) is the only
+/// Logout path: it fires exactly ONE RPC on the logged-in client, reports
+/// the sanitized outcome (success; NotFound = "peer already gone" per
+/// upstream logoutPeerGone; a server failure = its class), spends the
+/// client (a second call refuses without another RPC) and a subsequent
+/// stop() stays silent. `logout_json()` blocks on the connector runtime —
+/// the NAPI shape — so the tokio test drives it from a blocking thread,
+/// exactly like the shell's watcher tick would.
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_logout_fires_once_and_stop_after_it_stays_silent() {
+    for (logout_fail_status, want_ok, want_reason) in [
+        (None, true, "ok"),
+        (Some(Status::not_found("peer gone")), true, "peer-already-gone"),
+        (Some(Status::internal("logout boom")), false, "server"),
+    ] {
+        let mock = MgmtMock::default();
+        *mock.logout_fail.lock().expect("fail") = logout_fail_status.clone();
+        mock.sync_script.lock().expect("script").push_back(SyncStep::UpdatesThen(
+            vec![snapshot(5, 2, 1, None)],
+            None,
+        ));
+        let addr = spawn_mock(mock.clone()).await;
+
+        let handle = spawn_connector(
+            addr,
+            ConnectorSecrets { setup_key: "SETUP-KEY-OK".into(), jwt: String::new() },
+            Duration::from_secs(600),
+            Duration::from_secs(30),
+            None,
+            Arc::new(WgPeerRegistry::new()),
+            Arc::new(RecordingHost::default()),
+            None,
+        );
+
+        wait_for("snapshot applied", || handle.status().peer_count == 2).await;
+
+        // one explicit logout: exactly one RPC, outcome + logout_ok recorded
+        let caller = handle.clone();
+        let json = tokio::task::spawn_blocking(move || caller.logout_json())
+            .await
+            .expect("logout_json join");
+        assert!(json.contains(&format!("\"ok\":{want_ok}")), "{json}");
+        assert!(json.contains(&format!("\"reason\":\"{want_reason}\"")), "{json}");
+        assert_eq!(mock.logout_calls.lock().expect("logout").len(), 1);
+        assert_eq!(handle.status().logout_ok, Some(want_ok));
+
+        // the client is spent: a second explicit logout refuses, no new RPC
+        let caller = handle.clone();
+        let json2 = tokio::task::spawn_blocking(move || caller.logout_json())
+            .await
+            .expect("logout_json join 2");
+        assert!(
+            json2.contains("\"error\":\"no-live-management-connection\""),
+            "{json2}"
+        );
+        assert_eq!(mock.logout_calls.lock().expect("logout").len(), 1);
+
+        // stop after the explicit logout: still exactly one Logout total
+        let stop_json = handle.stop_json();
+        assert!(stop_json.contains("\"ok\":true"), "{stop_json}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(
             mock.logout_calls.lock().expect("logout").len(),
             1,
-            "no second logout"
+            "stop() adds no Logout on top of the explicit one"
         );
+        assert_eq!(handle.status().logout_ok, Some(want_ok), "logout_ok survives the stop");
     }
 }
 
@@ -1031,16 +1100,21 @@ async fn secrets_never_leak_into_status_errors_or_debug() {
 
     let status = handle.status_json();
     let stop = handle.stop_json();
-    wait_for("logout fired", || {
-        mock.logout_calls.lock().expect("logout").len() == 1
-    })
-    .await;
+    // the RPC-rich path that used to ride stop() is the EXPLICIT logout
+    // now (stop never logs out) — drive it once and keep the same
+    // secret-leak assertions over its JSON too
+    let caller = handle.clone();
+    let logout = tokio::task::spawn_blocking(move || caller.logout_json())
+        .await
+        .expect("logout_json join");
+    assert_eq!(mock.logout_calls.lock().expect("logout").len(), 1);
     let status_after_stop = handle.status_json();
     let debug = format!("{:?}", handle);
     let registry_debug = format!("{:?}", wg.snapshot());
     for s in &sentinels {
         assert!(!status.contains(s.as_str()), "secret leaked into status JSON: {s}");
         assert!(!stop.contains(s.as_str()), "secret leaked into stop JSON: {s}");
+        assert!(!logout.contains(s.as_str()), "secret leaked into logout JSON: {s}");
         assert!(
             !status_after_stop.contains(s.as_str()),
             "secret leaked into status JSON: {s}"

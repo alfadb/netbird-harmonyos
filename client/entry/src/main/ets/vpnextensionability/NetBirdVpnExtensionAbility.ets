@@ -51,13 +51,13 @@ import { ExcludedRouteEntry, EndpointResolution, ExclusionBuildResult, Exclusion
 import type { LanExclusionProbe, LanExclusionResult } from './NetBirdEndpointExclusion';
 import {
   ConnectorStatusResult, CoreNetworkConfig, CoreRouteEntry, ConnectorStartResult,
-  DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
+  ConnectorLogoutResult, DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
   RouteSetAppliedResult, SocketFeedResult, TunReleaseResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
   connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
-  connectorStatus, connectorStop, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
+  connectorStatus, connectorStop, connectorLogout, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
   socketSupplyDnsServers, physicalDefaultDnsServers, physicalDefaultNetId, forgetPhysicalDefaultDns,
   physicalDefaultLanProbe,
@@ -281,6 +281,22 @@ const SELF_BUNDLE_NAME: string = 'cn.alfadb.netbird';
 // killed mid-cellular therefore leaves a ring tail whose counters are at most
 // one minute old. No timer exists while the ring is unconfigured.
 const N2_RING_STATS_MS: number = 60000;
+
+// Explicit user logout (stop-time Logout defect, 2026-10-01): the UI writes
+// ONE `netbird-logout` ticket into the shared filesDir AFTER the user
+// confirms 注销; THIS process — the only one holding the live connector —
+// picks it up on the next watcher tick, sends ONE management Logout through
+// core.connector_logout() (the server deregisters and DELETES the peer),
+// writes the `netbird-logout-result` answer the UI is bounded-waiting for,
+// then tears the session down (connectorStop + destroyOnce): a logged-out
+// peer must not live on, and the dying Sync stream must not reconnect and
+// re-register the peer that was just deleted server-side. The ticket is
+// consumed exactly once (`finally` unlink) and freshness-bounded, so a
+// leftover from a session that died before its tick can never tear a LATER
+// session down.
+const LOGOUT_FILE_NAME: string = 'netbird-logout';
+const LOGOUT_RESULT_FILE_NAME: string = 'netbird-logout-result';
+const LOGOUT_TICKET_MAX_AGE_MS: number = 30000;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -589,6 +605,24 @@ function safeError(error: Error): string {
   const name: string = clean(error.name || 'Error');
   const message: string = clean(error.message || 'no-message');
   return `code=${code},name=${name},message=${message}`;
+}
+
+// The `netbird-logout` ticket body is `{"issued_at_ms":<ms>}` — the UI's
+// wall-clock stamp used only for the freshness bound (a leftover ticket must
+// never tear a LATER session down). Anything that does not parse to a
+// positive number is refused by name.
+function parseLogoutTicketIssuedAtMs(text: string): number {
+  try {
+    const parsed: object = JSON.parse(text) as object;
+    const record: Record<string, Object> = parsed as Record<string, Object>;
+    const value: Object | undefined = record['issued_at_ms'];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  } catch (error) {
+    // refused below
+  }
+  return -1;
 }
 
 // VPN extension shell, config-driven (promoted from the verified e3 physical
@@ -3934,6 +3968,110 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
+  // Explicit user logout (stop-time Logout defect, 2026-10-01): the UI's
+  // one-shot `netbird-logout` ticket, consumed on the watcher tick. This
+  // process is the ONLY one that can send the Logout (the live connector
+  // and its logged-in management client live here, not in the UI process).
+  // Order is fixed: (1) ONE core.connector_logout() — best-effort, a failure
+  // is logged and NEVER blocks; (2) the `netbird-logout-result` answer the
+  // UI is bounded-waiting for; (3) the teardown — stop the watcher, stop
+  // the connector (which itself never logs out), destroy the VPN
+  // generation. A logged-out peer must not live on, and the dying Sync
+  // stream must not reconnect and re-register the peer the Logout just
+  // deleted server-side. Like the N2 private channels: consumed exactly
+  // once (`finally` unlink), and a stale ticket (older than
+  // LOGOUT_TICKET_MAX_AGE_MS) is refused so a leftover from a session that
+  // died before its tick can never tear a LATER session down.
+  private pollLogoutTicket(): void {
+    if (this.destroyRequested || this.destroyPromise !== undefined) {
+      return;
+    }
+    const path: string = `${this.context.filesDir}/${LOGOUT_FILE_NAME}`;
+    let text: string = '';
+    try {
+      if (!fs.accessSync(path)) {
+        return;
+      }
+      text = fs.readTextSync(path);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'VPN_LOGOUT_READ_FAILED|requestId=%{public}s|code=%{public}s',
+        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      return;
+    }
+    try {
+      const issuedAtMs: number = parseLogoutTicketIssuedAtMs(text);
+      if (issuedAtMs <= 0) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_LOGOUT_TICKET_REJECTED|requestId=%{public}s|reason=invalid-ticket', this.requestId);
+        return;
+      }
+      const ageMs: number = Date.now() - issuedAtMs;
+      if (ageMs > LOGOUT_TICKET_MAX_AGE_MS) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_LOGOUT_TICKET_REJECTED|requestId=%{public}s|reason=stale-ticket|ageMs=%{public}d',
+          this.requestId, ageMs);
+        return;
+      }
+      // (1) the ONE explicit Logout (bounded native-side by
+      // EXPLICIT_LOGOUT_WAIT_MS); failure is logged, never blocking
+      let ok: boolean = false;
+      let reason: string = 'none';
+      try {
+        const result: ConnectorLogoutResult = connectorLogout();
+        ok = result.ok;
+        reason = result.reason !== undefined && result.reason !== null && result.reason.length > 0
+          ? result.reason
+          : (result.error !== undefined && result.error !== null ? result.error : 'none');
+      } catch (error) {
+        ok = false;
+        reason = 'native-throw';
+      }
+      hilog.info(DOMAIN, TAG,
+        'VPN_LOGOUT_TICKET|requestId=%{public}s|ok=%{public}s|reason=%{public}s|ticketMs=%{public}d',
+        this.requestId, String(ok), reason, issuedAtMs);
+      // (2) answer the UI BEFORE the teardown ends this process's work
+      try {
+        const file: fs.File = fs.openSync(`${this.context.filesDir}/${LOGOUT_RESULT_FILE_NAME}`,
+          fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+        fs.writeSync(file.fd,
+          `{"ok":${ok},"reason":"${clean(reason)}","ticket_ms":${issuedAtMs}}`);
+        fs.closeSync(file);
+      } catch (error) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_LOGOUT_RESULT_WRITE_FAILED|requestId=%{public}s|code=%{public}s',
+          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      }
+      // (3) the teardown (same shape as failRecreate): the connector's own
+      // stop never logs out — the Logout above was the whole point
+      this.stopStatusAndNetcfgWatcher();
+      try {
+        const stop = connectorStop();
+        hilog.info(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOPPED|requestId=%{public}s|alreadyStopped=%{public}s|state=%{public}s|' +
+          'cause=explicit-logout',
+          this.requestId, String(stop.already_stopped), stop.state);
+      } catch (err) {
+        hilog.error(DOMAIN, TAG,
+          'VPN_CONNECTOR_STOP_REJECTED|requestId=%{public}s|summary=%{public}s',
+          this.requestId, safeError(err as Error));
+      }
+      this.destroyOnce('explicit-logout').catch((err: Error): void => {
+        hilog.error(DOMAIN, TAG,
+          'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=explicit-logout|summary=%{public}s',
+          this.requestId, safeError(err));
+      });
+    } finally {
+      // consume exactly once, whatever happened above
+      try {
+        fs.unlinkSync(path);
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG,
+          'VPN_LOGOUT_CONSUME_FAILED|requestId=%{public}s|code=%{public}s',
+          this.requestId, String((error as BusinessFailure).code ?? 'none'));
+      }
+    }
+  }
+
   // N2 P4「A 列生产事件触发原语」(v4.1 §4 A 列操作性定义): the shell's
   // armed-only private-channel entry. ONE file = ONE trigger: the request file
   // is deleted in `finally`, so the 5 s watcher tick can never replay it, and
@@ -4201,6 +4339,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // this is a bare core call (no file probe, no control send) unless the
       // session is armed and a leg is ready.
       this.pollN2Sandwich();
+      // Explicit user logout: the one-shot `netbird-logout` ticket rides the
+      // same top-of-tick slot as the N2 private channels (BEFORE the status
+      // read and the terminal/recreate early returns) so a pending logout is
+      // picked up within one 5 s tick in every tick form. No-op (not even a
+      // file probe) unless the UI wrote the ticket.
+      this.pollLogoutTicket();
       // N2 T3/T5a private channels: the COMBINATION RULE of the two pending
       // requests is fixed HERE — within one tick the positive-control poll runs
       // BEFORE the stimulus poll, so if both files are somehow pending (two

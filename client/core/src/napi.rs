@@ -126,6 +126,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_status", napi_connector_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
+    reg!("connector_logout", napi_connector_logout);
     reg!("n2_socket_trace_arm", napi_n2_socket_trace_arm);
     reg!("n2_socket_trace_protect", napi_n2_socket_trace_protect);
     reg!("n2_tun_dest_configure", napi_n2_tun_dest_configure);
@@ -716,6 +717,13 @@ unsafe extern "C" fn napi_connector_network_config(env: NapiEnv, _info: NapiCall
 
 unsafe extern "C" fn napi_connector_stop(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
     ret_json(env, crate::connector::connector_stop_json())
+}
+
+// Explicit user logout: ONE management Logout RPC on the live connector's
+// logged-in client (deregisters + deletes the peer server-side). The ONLY
+// Logout entry — connector_stop never logs out on any stop path.
+unsafe extern "C" fn napi_connector_logout(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_logout_json())
 }
 
 unsafe extern "C" fn napi_n2_socket_trace_arm(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {

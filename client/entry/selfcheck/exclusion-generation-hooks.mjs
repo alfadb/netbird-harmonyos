@@ -398,6 +398,12 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ ok: true, queued: 1 });\n' +
   '  },\n' +
   '  connector_stop: () => JSON.stringify({ already_stopped: true, state: "stopped" }),\n' +
+  // Explicit logout (2026-10-01): these suites never write a `netbird-logout`
+  // ticket, so the poll never reaches the seam; the export exists so an
+  // accidental call fails loudly with the honest no-connector refusal
+  // instead of a TypeError.
+  '  connector_logout: () => JSON.stringify({ ok: false, error: "no-connector",\n' +
+  '    reason: "not-running" }),\n' +
   // N2 first batch C/D columns (2026-09-29): the observer's switch path calls
   // the connector's "the physical network changed" seam; the N19/N22 fixtures
   // drive `physicalNetworkAvailable` directly, so it must exist and be counted.

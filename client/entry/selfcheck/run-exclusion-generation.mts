@@ -305,7 +305,7 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdN2Ring'];
 const SHIM_TYPES: Record<string, string[]> = {
   NetBirdConnector: ['ConnectorStatusResult', 'CoreNetworkConfig', 'CoreRouteEntry',
-    'ConnectorStartResult', 'DeviceConfigFile', 'ManagementEndpoint',
+    'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape
