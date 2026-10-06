@@ -476,10 +476,11 @@ fn dual_peer_signal_exchange_reaches_connected_and_lands_wg_endpoints() {
     assert_eq!(summary.reachable, 1);
     assert!(ice_ready_for_default_route(&summary), "a reachable peer arms the ICE gate input");
 
-    // Protected sockets: 1 gather round + 1 session candidate = 2 taken,
-    // nothing left queued — every fd came from the provider.
-    assert_eq!(a.socks.taken(), 2, "A: gather socket + check socket");
-    assert_eq!(b.socks.taken(), 2, "B: gather socket + check socket");
+    // Protected sockets: ONE per peer — the gather's bound socket is handed to
+    // the session and adopted there (0052: no second socket, no closed socket
+    // behind the advertised port), nothing left queued.
+    assert_eq!(a.socks.taken(), 1, "A: the adopted gather socket");
+    assert_eq!(b.socks.taken(), 1, "B: the adopted gather socket");
 }
 
 /// Glare: BOTH peers initiate (both send OFFER, both start controlling).
@@ -839,8 +840,8 @@ fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
         "the zombie teardown must re-initiate with NEW credentials"
     );
     assert!(
-        a.socks.taken() >= 4,
-        "two gather rounds must have consumed provider sockets, got {}",
+        a.socks.taken() >= 2,
+        "two gather rounds (one adopted socket each, 0052) must have consumed provider sockets, got {}",
         a.socks.taken()
     );
 }

@@ -187,6 +187,494 @@ try {
   const noRelayDoc = m.buildUiStatusDocument({ ...status, relay: null }, net, 'ui-7', 1);
   check('doc relay_url null without a relay section', noRelayDoc.relay_url === null);
 
+  // ---- 2026-10-07 client-detail increment ---------------------------------
+  // Per-peer WG-view detail: endpoint/egress_local/carrier flags/allowed_ips
+  // come from the core's wg_peers entry; a map-only peer carries
+  // carrier_known=false so the UI cannot read its absent flags as 直连/off.
+  const detailWgPeers = [
+    { pub_key_b64: 'KEYA', session_established: true, expired: false,
+      endpoint: '203.0.113.9:40000', egress_local: '192.168.1.5:51820',
+      allowed_ips: ['10.30.30.1/32', '10.30.30.0/24'],
+      carrier_attached: true, on_carrier: false, last_handshake_s: 42 },
+    { pub_key_b64: 'KEYB', session_established: true, expired: false,
+      endpoint: null, egress_local: null, on_carrier: true }
+  ];
+  const detailNet = {
+    available: true,
+    address: '10.64.0.7',
+    address_prefix_len: 16,
+    interface_dns: '100.100.0.1',
+    signal: 'signal.netbird.io:10000',
+    fqdn: 'me.netbird.cloud',
+    routes: [
+      { network: '10.30.30.0/24', is_default: false },
+      { network: '0.0.0.0/0', is_default: true }
+    ],
+    dns: { service_enable: true, servers: [
+      { ip: '100.100.0.1', port: 53 }, { ip: '8.8.8.8', port: 53 }
+    ] },
+    default_route: { allowed: true,
+      reason: 'default-route-allowed:peers-registered-and-tunnel-ready' },
+    peers: [
+      { pub_key: 'KEYA', fqdn: 'peer-a.netbird.cloud', vpn_addresses: ['10.30.30.1/32'] },
+      { pub_key: 'KEYB', fqdn: 'peer-b.netbird.cloud', vpn_addresses: ['10.30.30.2/32'] },
+      { pub_key: 'KEYC', fqdn: 'peer-c.netbird.cloud', vpn_addresses: [] }
+    ]
+  };
+  const detailStatus = {
+    running: true, state: 'connected', peer_count: 3, route_count: 2, reconnects: 4,
+    last_error: null,
+    signal: { registered: true, reconnects: 2 },
+    wg: { ready: true, peers_with_session: 2, tx_packets: 11, tx_bytes: 1100,
+      rx_packets: 9, rx_bytes_to_tun: 900, dropped_no_route: 3, decrypt_errors: 1,
+      wg_peers: detailWgPeers },
+    relay: { enabled: true, state: 'ready', current_url: 'rels://live.relay:443',
+      urls: ['rels://cfg.relay:443', 'rel://cfg2.relay:80'], reconnects: 2,
+      transport_bytes: 4096, token_valid: true, last_error_class: null },
+    session_expiry: 'set', session_expires_at_unix: 1800003600
+  };
+  const detail = m.buildUiStatusDocument(detailStatus, detailNet, 'ui-8', 1,
+    true, 'https://user:pw@mgmt.example:443/?token=SECRET',
+    { host: 'mgmt.example', port: 443, ip: '' });
+  check('detail: own overlay prefix carries the core prefix length',
+    detail.network.available === true && detail.network.prefix === '10.64.0.7/16');
+  check('detail: interface dns + signal uri verbatim',
+    detail.network.interface_dns === '100.100.0.1' &&
+    detail.network.signal_uri === 'signal.netbird.io:10000');
+  check('detail: dns servers in management order',
+    detail.network.dns_servers.length === 2 &&
+    detail.network.dns_servers[0].ip === '100.100.0.1' &&
+    detail.network.dns_servers[1].ip === '8.8.8.8');
+  check('detail: configured routes + default-route gate verdict',
+    detail.network.routes.length === 2 &&
+    detail.network.routes[1].network === '0.0.0.0/0' &&
+    detail.network.routes[1].is_default === true &&
+    detail.network.default_route.allowed === true &&
+    detail.network.default_route.reason.indexOf('allowed') >= 0);
+  check('detail: wg traffic counters aggregated verbatim',
+    detail.wg_traffic.tx_packets === 11 && detail.wg_traffic.tx_bytes === 1100 &&
+    detail.wg_traffic.rx_packets === 9 && detail.wg_traffic.rx_bytes_to_tun === 900 &&
+    detail.wg_traffic.dropped_no_route === 3 && detail.wg_traffic.decrypt_errors === 1);
+  check('detail: relay view carries urls/current/counters/error',
+    detail.relay.enabled === true && detail.relay.state === 'ready' &&
+    detail.relay.current_url === 'rels://live.relay:443' &&
+    detail.relay.urls.length === 2 && detail.relay.reconnects === 2 &&
+    detail.relay.transport_bytes === 4096 && detail.relay.token_valid === true &&
+    detail.relay.last_error_class === null);
+  check('detail: session expiry token + unix seconds',
+    detail.session_expiry === 'set' && detail.session_expires_at_s === 1800003600);
+  check('detail: management authority only, never the url string',
+    detail.management.scheme === 'https' && detail.management.host === 'mgmt.example' &&
+    detail.management.port === 443 &&
+    JSON.stringify(detail).indexOf('SECRET') < 0 &&
+    JSON.stringify(detail).indexOf('user:pw') < 0);
+  check('detail: peer wg-view fields ride the entry',
+    detail.peers[0].endpoint === '203.0.113.9:40000' &&
+    detail.peers[0].egress_local === '192.168.1.5:51820' &&
+    detail.peers[0].allowed_ips[1] === '10.30.30.0/24' &&
+    detail.peers[0].carrier_known === true &&
+    detail.peers[0].carrier_attached === true &&
+    detail.peers[0].on_carrier === false);
+  check('detail: a null endpoint is the honest empty string, not a value',
+    detail.peers[1].endpoint === '' && detail.peers[1].egress_local === '' &&
+    detail.peers[1].on_carrier === true && detail.peers[1].carrier_attached === false &&
+    detail.peers[1].carrier_known === true && detail.peers[1].allowed_ips.length === 0);
+  check('detail: a map-only peer is carrier_known=false with empty detail',
+    detail.peers[2].carrier_known === false && detail.peers[2].endpoint === '' &&
+    detail.peers[2].egress_local === '' && detail.peers[2].on_carrier === false &&
+    detail.peers[2].allowed_ips.length === 0 &&
+    detail.peers[2].last_handshake_s === null);
+  check('detail: held default route keeps the gate reason and drops the route',
+    m.buildUiStatusDocument({ ...detailStatus, wg: null }, {
+      ...detailNet,
+      routes: [{ network: '10.30.30.0/24', is_default: false }],
+      default_route: { allowed: false, reason: 'default-route-held:no-usable-peer' }
+    }, 'ui-9', 1).network.default_route.reason === 'default-route-held:no-usable-peer' &&
+    m.buildUiStatusDocument({ ...detailStatus, wg: null }, {
+      ...detailNet,
+      routes: [{ network: '10.30.30.0/24', is_default: false }],
+      default_route: { allowed: false, reason: 'default-route-held:no-usable-peer' }
+    }, 'ui-9', 1).network.routes.length === 1);
+  // absent source ⇒ absent field (never a fabricated zero/success). The
+  // PUBLISHED JSON is the contract the UI reads: JSON.stringify drops an
+  // undefined member, so the round-tripped document is what a missing
+  // section looks like on disk.
+  const sparse = m.buildUiStatusDocument({
+    running: true, state: 'connecting', peer_count: 0, route_count: 0,
+    reconnects: 0, last_error: null, signal: null, wg: null, relay: null,
+    session_expiry: 'unknown'
+  }, { available: true, peers: [] }, 'ui-10', 1);
+  const sparseJson = JSON.parse(JSON.stringify(sparse));
+  check('detail: no relay/wg sections ⇒ no relay/wg_traffic blocks',
+    !('relay' in sparseJson) && !('wg_traffic' in sparseJson) &&
+    sparse.relay === undefined && sparse.wg_traffic === undefined);
+  check('detail: unknown deadline has no unix value',
+    sparse.session_expiry === 'unknown' && !('session_expires_at_s' in sparseJson) &&
+    sparse.session_expires_at_s === undefined);
+  // `management` is explicit on disk: null = this document's producer had not
+  // parsed a management url (the key ABSENT = a pre-upgrade document).
+  check('detail: no management endpoint ⇒ management null, never a host',
+    sparse.management === null && sparseJson.management === null &&
+    JSON.parse(JSON.stringify(m.buildUiStatusDocument(status, net, 'ui-11', 1)))
+      .management === null);
+  check('detail: a map-less document has no network block',
+    !('network' in JSON.parse(
+      JSON.stringify(m.buildUiStatusDocument(status, null, 'ui-12', 1)))) &&
+    !('network' in JSON.parse(JSON.stringify(m.buildUiStatusDocument(status,
+      { available: false, reason: 'no-network-map' }, 'ui-13', 1)))));
+  check('detail: unavailable map is authoritative over stray peer fields',
+    m.buildUiStatusDocument(status, { available: false,
+      peers: [{ pub_key: 'X', vpn_addresses: [] }] }, 'ui-14', 1).peers.length === 0);
+  // backward compatibility: a document written before `available`/the new
+  // fields still publishes its map content (no upgrade-time data loss)
+  const legacyDoc = m.buildUiStatusDocument(status,
+    { address: '10.64.0.7', peers: [
+      { pub_key: 'KEYA', fqdn: 'peer-a.netbird.cloud', vpn_addresses: ['10.30.30.1/32'] }
+    ] }, 'ui-15', 1);
+  check('detail: legacy map (no `available` key) keeps its address and peers',
+    legacyDoc.address === '10.64.0.7' && legacyDoc.peers.length === 1 &&
+    legacyDoc.network !== undefined && legacyDoc.network.prefix === null);
+
+  // ---- 2026-10-07 per-peer traffic counters (PLAINTEXT, attributed) --------
+  // wg_peers[].tx_bytes/rx_bytes are plaintext inner-IP bytes per peer,
+  // cumulative since that peer's tunnel was created. Zero vs missing is the
+  // whole point: a delivered 0 is a real value (no traffic yet) and must be
+  // published as 0, while an absent/null counter must stay ABSENT (undefined,
+  // dropped by JSON.stringify) so the UI renders 未知 instead of 0 B.
+  check('bytes: a delivered counter is kept, a delivered 0 stays a real 0',
+    m.peerByteCounter(1234) === 1234 && m.peerByteCounter(0) === 0);
+  check('bytes: absent/null/wrong-type/negative counters are undefined',
+    m.peerByteCounter(undefined) === undefined && m.peerByteCounter(null) === undefined &&
+    m.peerByteCounter(-1) === undefined && m.peerByteCounter(Number.NaN) === undefined &&
+    m.peerByteCounter(Number.POSITIVE_INFINITY) === undefined &&
+    m.peerByteCounter('1234' as unknown as number) === undefined);
+  const byteWgPeers = [
+    // KEYA: both counters delivered, rx is a real zero
+    { pub_key_b64: 'KEYA', session_established: true, expired: false,
+      tx_bytes: 1234, rx_bytes: 0 },
+    // KEYB: an older core — no counters at all
+    { pub_key_b64: 'KEYB', session_established: true, expired: false },
+    // KEYC: tx delivered, rx explicitly null
+    { pub_key_b64: 'KEYC', session_established: true, expired: false,
+      tx_bytes: 7, rx_bytes: null },
+    // KEYD: has counters but is NOT in the map — the map is the identity source
+    { pub_key_b64: 'KEYD', session_established: true, expired: false,
+      tx_bytes: 5000, rx_bytes: 6000 }
+  ];
+  const byteNet = {
+    available: true,
+    address: '10.64.0.7',
+    peers: [
+      { pub_key: 'KEYA', fqdn: 'peer-a.netbird.cloud', vpn_addresses: ['10.30.30.1/32'] },
+      { pub_key: 'KEYB', fqdn: 'peer-b.netbird.cloud', vpn_addresses: ['10.30.30.2/32'] },
+      { pub_key: 'KEYC', fqdn: 'peer-c.netbird.cloud', vpn_addresses: ['10.30.30.3/32'] }
+    ]
+  };
+  // Device-level counters stay ENCAPSULATED (tx_bytes) / TUN-delivered
+  // (rx_bytes_to_tun == Σ peer rx_bytes core-side); the per-peer values are
+  // plaintext and MUST NOT be presented as, or derived from, those.
+  const byteStatus = {
+    ...detailStatus,
+    wg: { ready: true, peers_with_session: 4, tx_packets: 11, tx_bytes: 8000,
+      rx_packets: 9, rx_bytes_to_tun: 6000, dropped_no_route: 0, decrypt_errors: 0,
+      wg_peers: byteWgPeers }
+  };
+  const byteDoc = m.buildUiStatusDocument(byteStatus, byteNet, 'ui-16', 1);
+  const byteJson = JSON.parse(JSON.stringify(byteDoc));
+  check('bytes: counters are attributed to their own peer, zero kept as 0',
+    byteDoc.peers[0].tx_bytes === 1234 && byteDoc.peers[0].rx_bytes === 0 &&
+    byteJson.peers[0].tx_bytes === 1234 && byteJson.peers[0].rx_bytes === 0);
+  check('bytes: a peer without counters carries NO keys, never a 0',
+    byteDoc.peers[1].tx_bytes === undefined && byteDoc.peers[1].rx_bytes === undefined &&
+    !('tx_bytes' in byteJson.peers[1]) && !('rx_bytes' in byteJson.peers[1]));
+  check('bytes: the two directions are independent (null rx stays absent)',
+    byteDoc.peers[2].tx_bytes === 7 && byteDoc.peers[2].rx_bytes === undefined &&
+    !('rx_bytes' in byteJson.peers[2]));
+  check('bytes: no cross-peer leakage and no map-invisible peer in the list',
+    byteDoc.peers.length === 3 &&
+    byteDoc.peers[0].tx_bytes !== byteDoc.peers[2].tx_bytes &&
+    byteDoc.peers.every((p: { tx_bytes?: number; rx_bytes?: number }): boolean =>
+      p.tx_bytes !== 5000 && p.rx_bytes !== 6000));
+  check('bytes: a map-only peer gets no counters from another peer\'s session',
+    m.mergePeers(byteNet, [{ pub_key_b64: 'KEYA', session_established: true,
+      expired: false, tx_bytes: 5, rx_bytes: 5 }])[1].tx_bytes === undefined);
+  check('bytes: the device aggregate keeps its own (encapsulated) semantics',
+    byteDoc.wg_traffic.tx_bytes === 8000 && byteDoc.wg_traffic.rx_bytes_to_tun === 6000 &&
+    byteDoc.peers[0].tx_bytes === 1234 &&
+    byteDoc.peers[0].tx_bytes !== byteDoc.wg_traffic.tx_bytes);
+
+  // ---- 2026-10-07 per-peer ACTUAL relay lane (core `peer_relays`) ----------
+  // `peer_relays` is the ACTUAL attached-lane table (public key -> the
+  // rel:///rels:// URL the lane REALLY rides) — never the remote's
+  // advertisement and never the local/global home URL. Three states:
+  //   null/absent source      -> 未知 (known=false, key ABSENT in the JSON)
+  //   delivered [] / no entry -> no attached lane (null, known=true)
+  //   entry                   -> the actual lane URL
+  const laneNet = {
+    available: true,
+    address: '10.64.0.7',
+    peers: [
+      { pub_key: 'KEYA', fqdn: 'peer-a.netbird.cloud', vpn_addresses: ['10.30.30.1/32'] },
+      { pub_key: 'KEYB', fqdn: 'peer-b.netbird.cloud', vpn_addresses: ['10.30.30.2/32'] },
+      { pub_key: 'KEYC', fqdn: 'peer-c.netbird.cloud', vpn_addresses: [] }
+    ]
+  };
+  const laneWg = [
+    { pub_key_b64: 'KEYA', session_established: true, expired: false,
+      on_carrier: true, last_handshake_s: 3 },
+    { pub_key_b64: 'KEYB', session_established: true, expired: false,
+      on_carrier: true, last_handshake_s: 4 }
+  ];
+  // TWO DIFFERENT actual relays for two peers of the SAME device: KEYA's lane
+  // rides the home relay, KEYB's lane really rides a foreign one (the
+  // controller rule picks the meeting point per peer). Each published peer
+  // must carry its OWN lane URL.
+  const lanes = m.mergePeers(laneNet, laneWg, [
+    { pub_key_b64: 'KEYA', relay_url: 'rels://home.relay:443' },
+    { pub_key_b64: 'KEYB', relay_url: 'rel://foreign.relay:33000' }
+  ]);
+  check('relay lane: different peers keep their own home vs foreign actual url',
+    lanes[0].actual_relay_known === true &&
+    lanes[0].actual_relay_url === 'rels://home.relay:443' &&
+    lanes[1].actual_relay_known === true &&
+    lanes[1].actual_relay_url === 'rel://foreign.relay:33000' &&
+    lanes[0].actual_relay_url !== lanes[1].actual_relay_url);
+  check('relay lane: a delivered table with no entry is "no attached lane" (null), not 未知',
+    lanes[2].actual_relay_known === true && lanes[2].actual_relay_url === null &&
+    'actual_relay_url' in JSON.parse(JSON.stringify(lanes[2])));
+  const laneEmpty = m.mergePeers(laneNet, laneWg, []);
+  check('relay lane: an empty table (carrier armed, no lane) is "no attached lane" for all',
+    laneEmpty.every((p: { actual_relay_known: boolean;
+      actual_relay_url?: string | null }): boolean =>
+      p.actual_relay_known === true && p.actual_relay_url === null));
+  const laneNull = m.mergePeers(laneNet, laneWg, null);
+  const laneNullJson = JSON.parse(JSON.stringify(laneNull));
+  const laneAbsent = m.mergePeers(laneNet, laneWg);
+  check('relay lane: a null/absent source is 未知 — the key is OMITTED, never null',
+    laneNull[0].actual_relay_known === false && laneNull[0].actual_relay_url === undefined &&
+    !('actual_relay_url' in laneNullJson[0]) &&
+    laneAbsent[0].actual_relay_known === false &&
+    laneAbsent[0].actual_relay_url === undefined &&
+    !('actual_relay_url' in JSON.parse(JSON.stringify(laneAbsent))[0]));
+  const laneMalformed = m.mergePeers(laneNet, laneWg,
+    [{ pub_key_b64: 'KEYA', relay_url: '' }]);
+  check('relay lane: an unusable entry stays 未知, never "no attached lane"',
+    laneMalformed[0].actual_relay_known === false &&
+    laneMalformed[0].actual_relay_url === undefined &&
+    laneMalformed[1].actual_relay_known === true &&
+    laneMalformed[1].actual_relay_url === null);
+  check('relay lane: a lane URL never fabricates a connection label',
+    laneEmpty[2].connection === 'unknown' && laneEmpty[2].carrier_known === false &&
+    m.mergePeers({ available: true, peers: [{ pub_key: 'KEYX', vpn_addresses: [] }] },
+      [], [{ pub_key_b64: 'KEYX', relay_url: 'rels://home.relay:443' }])[0]
+      .connection === 'unknown' &&
+    m.mergePeers({ available: true, peers: [{ pub_key: 'KEYX', vpn_addresses: [] }] },
+      [], [{ pub_key_b64: 'KEYX', relay_url: 'rels://home.relay:443' }])[0]
+      .actual_relay_url === 'rels://home.relay:443');
+  // The legacy document-level `relay_url` is the LOCAL relay session (the
+  // configured home URL when nothing is dialed). It must NEVER be copied onto
+  // a peer: with no `peer_relays` table the peers stay 未知, and the home URL
+  // appears only as the document field (the UI's 本机中继地址 row).
+  const homeDoc = m.buildUiStatusDocument({
+    ...status,
+    relay: { enabled: true, state: 'ready', current_url: 'rels://home.relay:443',
+      urls: ['rels://home.relay:443'] },
+    peer_relays: null
+  }, net, 'ui-21', 1);
+  check('relay lane: the local/home relay_url is never substituted for a peer actual url',
+    homeDoc.relay_url === 'rels://home.relay:443' &&
+    homeDoc.peers.every((p: { actual_relay_known: boolean;
+      actual_relay_url?: string | null }): boolean => p.actual_relay_known === false &&
+      p.actual_relay_url === undefined) &&
+    JSON.stringify(homeDoc.peers).indexOf('rels://home.relay:443') < 0);
+  const laneJoined = m.buildUiStatusDocument({
+    ...status,
+    relay: { enabled: true, state: 'ready', current_url: 'rels://home.relay:443',
+      urls: ['rels://home.relay:443'] },
+    peer_relays: [
+      { pub_key_b64: 'KEYA', relay_url: 'rels://home.relay:443' },
+      { pub_key_b64: 'KEYB', relay_url: 'rel://foreign.relay:33000' },
+      { pub_key_b64: 'KEYD', relay_url: 'rel://not-in-map:1' }
+    ]
+  }, net, 'ui-22', 1);
+  check('relay lane: peer_relays joins onto the published peers by public key',
+    laneJoined.peers[0].actual_relay_url === 'rels://home.relay:443' &&
+    laneJoined.peers[1].actual_relay_url === 'rel://foreign.relay:33000' &&
+    laneJoined.peers[2].actual_relay_known === true &&
+    laneJoined.peers[2].actual_relay_url === null &&
+    laneJoined.peers.length === 4 &&
+    JSON.stringify(laneJoined.peers).indexOf('not-in-map') < 0);
+
+  // ---- 2026-10-07 per-peer ICE detail (core `ice_peers`) -------------------
+  // `ice_peers` is the per-peer ICE table (one detail per ICE-orchestrator
+  // peer, public-key sorted) whose published shape is pinned by the core's
+  // connector.rs ice_detail_json / ice_endpoint_json: pub_key, state token,
+  // controlling (bool|null), selected_local/selected_remote (endpoint|null),
+  // endpoint_applied, reachable, last_error ({class,status}|null). The shell
+  // joins it by public key. Three states:
+  //   null/absent table, or no entry for the peer -> ICE 未知, key OMITTED
+  //   readable entry with null endpoints          -> no pair selected yet
+  //   readable entry with endpoints               -> that pair was selected
+  const iceNet = {
+    available: true,
+    address: '10.64.0.7',
+    peers: [
+      { pub_key: 'KEYA', fqdn: 'peer-a.netbird.cloud', vpn_addresses: ['10.30.30.1/32'] },
+      { pub_key: 'KEYB', fqdn: 'peer-b.netbird.cloud', vpn_addresses: ['10.30.30.2/32'] },
+      { pub_key: 'KEYC', fqdn: 'peer-c.netbird.cloud', vpn_addresses: ['10.30.30.3/32'] }
+    ]
+  };
+  const iceWg = [
+    { pub_key_b64: 'KEYA', session_established: true, expired: false,
+      endpoint: '203.0.113.9:40000', last_handshake_s: 3 },
+    { pub_key_b64: 'KEYB', session_established: true, expired: false,
+      on_carrier: true, last_handshake_s: 4 }
+    // KEYC: no local WG session — its ICE detail must not label the connection
+  ];
+  const icePeers = [
+    { pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: { type: 'srflx', address: '198.51.100.7', port: 51820 },
+      selected_remote: { type: 'prflx', address: '203.0.113.9', port: 40000 },
+      endpoint_applied: true, reachable: true, last_error: null },
+    { pub_key: 'KEYB', state: 'disconnected', controlling: false,
+      selected_local: { type: 'host', address: '192.168.1.5', port: 51820 },
+      selected_remote: { type: 'relay', address: '198.51.100.20', port: 3478 },
+      endpoint_applied: true, reachable: false,
+      last_error: { class: 'timeout', status: 0 } },
+    { pub_key: 'KEYC', state: 'gathering', controlling: null,
+      selected_local: null, selected_remote: null,
+      endpoint_applied: false, reachable: false, last_error: null }
+  ];
+  const iced = m.mergePeers(iceNet, iceWg, null, icePeers);
+  check('ice: the selected pair is published per peer with both endpoints',
+    iced[0].ice.state === 'connected' && iced[0].ice.controlling === true &&
+    iced[0].ice.selected_local.type === 'srflx' &&
+    iced[0].ice.selected_local.address === '198.51.100.7' &&
+    iced[0].ice.selected_local.port === 51820 &&
+    iced[0].ice.selected_remote.type === 'prflx' &&
+    iced[0].ice.selected_remote.address === '203.0.113.9' &&
+    iced[0].ice.selected_remote.port === 40000 &&
+    iced[0].ice.endpoint_applied === true && iced[0].ice.reachable === true &&
+    iced[0].ice.last_error_class === null);
+  check('ice: a disconnected peer RETAINS its selected endpoints but is unreachable',
+    iced[1].ice.state === 'disconnected' && iced[1].ice.reachable === false &&
+    iced[1].ice.endpoint_applied === true && iced[1].ice.controlling === false &&
+    iced[1].ice.selected_local.address === '192.168.1.5' &&
+    iced[1].ice.selected_remote.type === 'relay' &&
+    iced[1].ice.selected_remote.address === '198.51.100.20' &&
+    iced[1].ice.last_error_class === 'timeout');
+  check('ice: no selected pair yet keeps both endpoints null and the role unknown',
+    iced[2].ice.state === 'gathering' && iced[2].ice.controlling === null &&
+    iced[2].ice.selected_local === null && iced[2].ice.selected_remote === null &&
+    iced[2].ice.endpoint_applied === false && iced[2].ice.reachable === false);
+  check('ice: endpoint presence never fabricates the connection label',
+    iced[0].connection === 'direct' && iced[1].connection === 'relay' &&
+    iced[2].connection === 'unknown' && iced[2].online === false &&
+    iced[1].ice.reachable === false && iced[1].ice.state === 'disconnected');
+  check('ice: details are attributed per peer, never shared or substituted',
+    iced[0].ice.selected_remote.address !== iced[1].ice.selected_remote.address &&
+    iced[1].ice.state !== iced[0].ice.state && iced[2].ice.state === 'gathering' &&
+    iced[2].ice.selected_local === null);
+  // unknown / missing source: NO fabricated state, the `ice` key is omitted
+  const iceAbsent = m.mergePeers(iceNet, iceWg);
+  const iceNull = m.mergePeers(iceNet, iceWg, null, null);
+  const iceEmpty = m.mergePeers(iceNet, iceWg, null, []);
+  check('ice: a null/absent table leaves every peer ICE 未知 — the key is OMITTED',
+    iceAbsent[0].ice === undefined && iceNull[0].ice === undefined &&
+    !('ice' in JSON.parse(JSON.stringify(iceAbsent))[0]) &&
+    !('ice' in JSON.parse(JSON.stringify(iceNull))[1]));
+  check('ice: a delivered table with no entry for a peer is 未知, not a default',
+    iceEmpty[0].ice === undefined && iceEmpty[2].ice === undefined &&
+    !('ice' in JSON.parse(JSON.stringify(iceEmpty))[0]));
+  const iceExtra = m.mergePeers(iceNet, iceWg, null, [{ pub_key: 'KEYD',
+    state: 'connected', controlling: true,
+    selected_local: { type: 'host', address: '10.99.99.99', port: 1 },
+    selected_remote: { type: 'host', address: '10.99.99.98', port: 2 },
+    endpoint_applied: true, reachable: true, last_error: null }]);
+  check('ice: an entry for a key outside the map creates no peer and leaks nowhere',
+    iceExtra.length === 3 && JSON.stringify(iceExtra).indexOf('10.99.99.99') < 0 &&
+    iceExtra[0].ice === undefined);
+  // an entry that cannot be read as the documented contract is 未知 too —
+  // never partially published, never a made-up state/endpoint/role
+  const iceOf = (entry: object): unknown =>
+    (m.mergePeers(iceNet, iceWg, null, [entry])[0] as { ice?: unknown }).ice;
+  check('ice: an unknown state token is 未知, never a made-up state',
+    iceOf({ pub_key: 'KEYA', state: 'weird', controlling: true,
+      selected_local: null, selected_remote: null, endpoint_applied: false,
+      reachable: false, last_error: null }) === undefined);
+  check('ice: an unreadable endpoint (type/address/port) makes the detail 未知',
+    iceOf({ pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: { type: 'stun', address: '198.51.100.7', port: 51820 },
+      selected_remote: null, endpoint_applied: true, reachable: true,
+      last_error: null }) === undefined &&
+    iceOf({ pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: { type: 'host', address: '', port: 51820 },
+      selected_remote: null, endpoint_applied: true, reachable: true,
+      last_error: null }) === undefined &&
+    iceOf({ pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: null,
+      selected_remote: { type: 'host', address: '1.2.3.4', port: 70000 },
+      endpoint_applied: true, reachable: true, last_error: null }) === undefined);
+  check('ice: missing landing/reachability booleans or a bad error class is 未知',
+    iceOf({ pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: null, selected_remote: null, endpoint_applied: true,
+      last_error: null }) === undefined &&
+    iceOf({ pub_key: 'KEYA', state: 'connected', controlling: true,
+      selected_local: null, selected_remote: null, endpoint_applied: true,
+      reachable: true, last_error: { status: 7 } }) === undefined);
+  check('ice: an unreadable entry never degrades the rest of the peer',
+    m.mergePeers(iceNet, iceWg, null, [{ pub_key: 'KEYA', state: 'weird' }])[0]
+      .connection === 'direct' &&
+    m.mergePeers(iceNet, iceWg, null, [{ pub_key: 'KEYA', state: 'weird' }])[0]
+      .endpoint === '203.0.113.9:40000' &&
+    m.mergePeers(iceNet, iceWg, null, [{ pub_key: 'KEYA', state: 'weird' }])[0]
+      .carrier_known === true);
+  // the whole pipeline: connector_status().ice_peers -> published document
+  const iceDoc = m.buildUiStatusDocument({ ...status, ice_peers: icePeers },
+    iceNet, 'ui-23', 1);
+  const iceDocJson = JSON.parse(JSON.stringify(iceDoc));
+  check('ice: connector_status().ice_peers joins onto the published peers',
+    iceDoc.peers.length === 3 && iceDoc.peers[0].ice.state === 'connected' &&
+    iceDoc.peers[1].ice.state === 'disconnected' &&
+    iceDoc.peers[2].ice.state === 'gathering' &&
+    iceDocJson.peers[1].ice.selected_remote.port === 3478);
+  check('ice: the published detail carries exactly the documented public keys',
+    Object.keys(iceDocJson.peers[0].ice).sort().join(',') ===
+      'controlling,endpoint_applied,last_error_class,reachable,selected_local,' +
+      'selected_remote,state' &&
+    Object.keys(iceDocJson.peers[0].ice.selected_local).sort().join(',') ===
+      'address,port,type' &&
+    iceDocJson.peers[2].ice.selected_local === null &&
+    'selected_local' in iceDocJson.peers[2].ice &&
+    JSON.stringify(iceDocJson.peers).indexOf('ufrag') < 0 &&
+    JSON.stringify(iceDocJson.peers).indexOf('pwd') < 0);
+  check('ice: a status without the table publishes no ice member',
+    !('ice' in JSON.parse(JSON.stringify(
+      m.buildUiStatusDocument(status, iceNet, 'ui-24', 1))).peers[0]));
+
+  // ---- 2026-10-07 core uptime stamps (verified shape: Unix SECONDS | null) --
+  const uptimeDoc = m.buildUiStatusDocument({ ...byteStatus, started_at_unix: 1799999000,
+    last_update_unix: 1800000000 }, byteNet, 'ui-17', 1);
+  check('uptime: core process stamps ride the document verbatim (Unix seconds)',
+    uptimeDoc.started_at_unix === 1799999000 && uptimeDoc.last_update_unix === 1800000000 &&
+    JSON.parse(JSON.stringify(uptimeDoc)).started_at_unix === 1799999000);
+  const noUptimeDoc = m.buildUiStatusDocument(byteStatus, byteNet, 'ui-18', 1);
+  const noUptimeJson = JSON.parse(JSON.stringify(noUptimeDoc));
+  check('uptime: no core stamps ⇒ both fields omitted, never an uptime from 1970',
+    noUptimeDoc.started_at_unix === undefined && noUptimeDoc.last_update_unix === undefined &&
+    !('started_at_unix' in noUptimeJson) && !('last_update_unix' in noUptimeJson));
+  const nullUptime = m.buildUiStatusDocument({ ...byteStatus, started_at_unix: null,
+    last_update_unix: null }, byteNet, 'ui-19', 1);
+  const zeroUptime = m.buildUiStatusDocument({ ...byteStatus, started_at_unix: 0,
+    last_update_unix: -5 }, byteNet, 'ui-20', 1);
+  check('uptime: null / zero / negative stamps are omitted, not published',
+    nullUptime.started_at_unix === undefined && nullUptime.last_update_unix === undefined &&
+    zeroUptime.started_at_unix === undefined && zeroUptime.last_update_unix === undefined &&
+    !('started_at_unix' in JSON.parse(JSON.stringify(zeroUptime))));
+  check('uptime: the stamp is a process time, not a management state verdict',
+    uptimeDoc.started_at_unix !== undefined && uptimeDoc.signal_registered ===
+      detailStatus.signal.registered && uptimeDoc.state === detailStatus.state);
+
   // ---- home-card/document consistency (defect 2026-10-04) -----------------
   // The SAME document feeds the home card and the peers tab. 已连接 must
   // require the document's OWN overlay IP (the network map arrived and

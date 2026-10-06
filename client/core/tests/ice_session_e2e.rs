@@ -572,3 +572,152 @@ fn outer_receipt_reports_the_ice_socket_source_and_stays_silent_when_off() {
     a.session.stop();
     b.session.stop();
 }
+
+// ---------------------------------------------------------------------------
+// NetBird wire shape (live capture): MI + FP followed by a comprehension-
+// optional 0x8100 attribute, value exactly 65 bytes + 3 padding bytes, with
+// the transmitted header length covering the suffix (Binding Request body
+// 164 = 92 through FP + 72; Binding Success body 116 = 44 + 72). The
+// FINGERPRINT on that wire is the CRC-32 of the header THROUGH the FP
+// attribute (RFC 5389 §15.5); bytes after FP are not in the CRC input. A
+// verifier that hashes to `msg.len()` rejects these valid messages at the
+// FINGERPRINT gate, so the check is silently dropped / the response ignored.
+// ---------------------------------------------------------------------------
+
+const NETBIRD_TRAILING_ATTR: u16 = 0x8100;
+const NETBIRD_TRAILING_VALUE_LEN: usize = 65;
+/// 4-byte attribute header + 65-byte value + 3 zero padding bytes.
+const NETBIRD_TRAILING_BYTES: usize = 72;
+
+/// Extend an already-sealed message with the captured trailing-attribute
+/// shape: 0x8100, exactly 65 DETERMINISTIC THROWAWAY value bytes (never
+/// captured payload), zero padding to 4-byte alignment, header length widened
+/// to cover it. MI/FP values are untouched, exactly as on the captured wire.
+fn append_netbird_trailing_attr(sealed: &[u8], filler: u8) -> Vec<u8> {
+    let mut out = sealed.to_vec();
+    out.extend_from_slice(&NETBIRD_TRAILING_ATTR.to_be_bytes());
+    out.extend_from_slice(&(NETBIRD_TRAILING_VALUE_LEN as u16).to_be_bytes());
+    for i in 0..NETBIRD_TRAILING_VALUE_LEN {
+        out.push(filler.wrapping_add(i as u8));
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    let body_len = (out.len() - 20) as u16;
+    out[2..4].copy_from_slice(&body_len.to_be_bytes());
+    out
+}
+
+/// REQUEST direction, real UDP receive → response: a genuine check (MI keyed
+/// with B's password) carrying the captured trailing 0x8100 attribute must be
+/// answered with a verifiable Binding Success Response. The identical check
+/// WITHOUT the suffix is the control that already verifies, so the suffix is
+/// the only difference between answered and silently dropped.
+#[test]
+fn netbird_shaped_check_request_is_answered() {
+    let (a_creds, b_creds) = (creds(A), creds(B));
+    let mut b = TestPeer::new(b_creds.clone(), false, 0x2222);
+    b.add_local();
+    let fake = UdpSocket::bind("127.0.0.1:0").expect("fake bind");
+    fake.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout");
+    let fake_addr = fake.local_addr().expect("addr");
+    let (fip, fport) = match fake_addr {
+        SocketAddr::V4(v4) => (v4.ip().octets(), v4.port()),
+        _ => panic!("ipv4 only"),
+    };
+    b.session
+        .add_remote_candidate(Candidate::unmarshal(&Candidate::host_candidate(fip, fport).marshal()).expect("payload"));
+    b.session.set_remote_credentials(a_creds).expect("remote creds");
+    b.session.start().expect("start");
+
+    let clean = build_check_request(
+        &CheckRequest {
+            username: format!("{}:{}", b_creds.ufrag, A.0),
+            priority: 1,
+            controlling: true,
+            tie_breaker: 42,
+            use_candidate: false,
+            // RFC 8445 §7.2.2: keyed with the REMOTE (B's) password.
+            integrity_key: B.1.into(),
+        },
+        TransactionId([0x5b; 12]),
+    );
+    let cp = parse_stun(&clean).expect("clean check parses");
+    assert!(verify_message_integrity(&clean, &cp, &b_creds.pwd), "control MI verifies");
+    assert!(verify_fingerprint(&clean, &cp), "FP-last positive control must verify");
+
+    // Drain B's own outbound check so the socket is empty before the probe.
+    b.session.run_once(1000).expect("pump");
+    let own = recv_one(&fake);
+    assert_eq!(parse_stun(&own).expect("own check parses").msg_type, 0x0001);
+
+    // The same sealed check, now carrying the captured trailing attribute.
+    let shaped = append_netbird_trailing_attr(&clean, 0x30);
+    assert_eq!(shaped.len(), clean.len() + NETBIRD_TRAILING_BYTES);
+    fake.send_to(&shaped, b.addr()).expect("send shaped check");
+    b.session.run_once(1010).expect("pump");
+    b.session.run_once(1020).expect("pump");
+
+    let mut buf = [0u8; 1500];
+    let (n, _) = fake.recv_from(&mut buf).unwrap_or_else(|e| {
+        panic!(
+            "a valid NetBird-shaped check (MI ok, trailing 0x8100) must be ANSWERED, \
+             not dropped at the FINGERPRINT gate: {e}"
+        )
+    });
+    let resp = &buf[..n];
+    let pr = parse_stun(resp).expect("response parses");
+    assert_eq!(pr.msg_type, 0x0101);
+    assert_eq!(pr.txn, TransactionId([0x5b; 12]));
+    assert_eq!(pr.xor_mapped, Some((fip, fport)));
+    assert!(verify_message_integrity(resp, &pr, &b_creds.pwd), "response MI keyed with responder pwd");
+    assert!(verify_fingerprint(resp, &pr));
+    b.session.stop();
+}
+
+/// RESPONSE direction, real UDP receive → pair success: a Binding Success
+/// Response matching A's in-flight transaction, keyed with the remote
+/// password and carrying the captured trailing 0x8100 attribute, must succeed
+/// the pair. The same response without the suffix is the verifying control.
+#[test]
+fn netbird_shaped_success_response_succeeds_the_pair() {
+    let (a_creds, b_creds) = (creds(A), creds(B));
+    let mut a = TestPeer::new(a_creds, true, 0x1111);
+    a.add_local();
+    let fake = UdpSocket::bind("127.0.0.1:0").expect("fake bind");
+    fake.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout");
+    let fake_addr = fake.local_addr().expect("addr");
+    let (fip, fport) = match fake_addr {
+        SocketAddr::V4(v4) => (v4.ip().octets(), v4.port()),
+        _ => panic!("ipv4 only"),
+    };
+    a.session
+        .add_remote_candidate(Candidate::unmarshal(&Candidate::host_candidate(fip, fport).marshal()).expect("payload"));
+    a.session.set_remote_credentials(b_creds).expect("remote creds");
+    a.session.start().expect("start");
+
+    a.session.run_once(1000).expect("pump");
+    let req = recv_one(&fake);
+    let parsed = parse_stun(&req).expect("request parses");
+    assert_eq!(parsed.msg_type, 0x0001);
+    assert!(verify_fingerprint(&req, &parsed), "our own outbound check is FP-last");
+    let txn = parsed.txn;
+
+    let clean = build_success_response(txn, (fip, fport), B.1);
+    let cp = parse_stun(&clean).expect("clean response parses");
+    assert!(verify_message_integrity(&clean, &cp, B.1), "control MI verifies");
+    assert!(verify_fingerprint(&clean, &cp), "FP-last positive control must verify");
+
+    let shaped = append_netbird_trailing_attr(&clean, 0x60);
+    assert_eq!(shaped.len(), clean.len() + NETBIRD_TRAILING_BYTES);
+    fake.send_to(&shaped, a.addr()).expect("send shaped response");
+    a.session.run_once(1010).expect("pump");
+
+    let events = a.session.take_events();
+    assert!(
+        events.iter().any(|e| matches!(e, IceEvent::CheckSucceeded { .. })),
+        "a valid NetBird-shaped success response (trailing 0x8100) must succeed the \
+         in-flight pair, not be ignored at the FINGERPRINT gate: {events:?}"
+    );
+    a.session.stop();
+}

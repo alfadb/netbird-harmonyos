@@ -890,7 +890,8 @@ async fn status_json_attributes_the_session_to_the_right_peer() {
         json.contains(&format!(
             "{{\"pub_key_b64\":\"{}\",\"endpoint\":null,\"allowed_ips\":[\"10.77.0.3/32\"],\
              \"session_established\":false,\"expired\":false,\"last_handshake_s\":null,\
-             \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false}}]}}",
+             \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false,\
+             \"tx_bytes\":0,\"rx_bytes\":0}}]}}",
             key_c()
         )),
         "{json}"

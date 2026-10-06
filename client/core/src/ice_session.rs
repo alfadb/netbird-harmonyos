@@ -58,10 +58,13 @@
 //!   transaction (RFC 5245 §16 `Rc` default), then the pair is Failed
 //!   (RFC 8445 §7.2.5.2.3).
 //! - **Pair state machine** (RFC 8445 §6.1.2.6/§8.1.2): Frozen → Waiting →
-//!   InProgress → Succeeded | Failed. Frozen here = pair formed but the
-//!   session not started (single component, single check list — the
-//!   multi-list thaw of §6.1.1 never applies). Checks run serially in pair-
-//!   priority order (`Ta` pacing = one outstanding check per pump), pair
+//!   InProgress → Succeeded | Failed. Frozen here = pair formed while the
+//!   check list is NOT Running, i.e. before `start()` (single component,
+//!   single check list — the multi-list thaw of §6.1.1 never applies); a
+//!   pair formed while Running (a candidate trickled after `start()`, a
+//!   late prflx) is born Waiting and is checked like any other. Checks run
+//!   in pair-priority order (the first round is a parallel burst over every
+//!   Waiting pair; each pair then retransmits on its own RTO), pair
 //!   priority = RFC 8445 §6.1.2.3 `2^32*MIN + 2*MAX + (G>D)`.
 //! - **Nomination**: regular nomination (RFC 8445 §8.1.1) — the CONTROLLING
 //!   agent re-runs the check of the best Succeeded pair with USE-CANDIDATE;
@@ -113,7 +116,13 @@
 //! dup. Empty provider → [`ManagementError::Network`] fail-closed; there is
 //! NO unprotected fallback and no `socket(2)` call anywhere in this module.
 //! The provided fd number stays borrowed (never read/written/closed here),
-//! the mgmtsock/ice borrow contract.
+//! the mgmtsock/ice borrow contract. The ONE exception is the gather
+//! hand-over: [`IceSession::add_local_candidate_bound`] adopts a socket the
+//! caller ALREADY bound and owns ([`crate::ice::GatheredSocket`]), so the
+//! advertised host/base port and the srflx mapping derived from it are the
+//! same still-live socket the session then sends/receives on. The gather
+//! and the session's receive path run sequentially under the orchestrator
+//! lock, so there is never a competing reader on that socket.
 //!
 //! ## N11 — WG rides the selected socket: packet demux (upstream shape)
 //!
@@ -151,7 +160,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use crate::ice::{priority_for, seam_to_management, set_nonblock, Candidate, CandidateType, UdpSocketSource};
 use crate::management::ManagementError;
-use std::os::fd::IntoRawFd;
+use std::os::fd::{IntoRawFd, OwnedFd};
 use crate::stun::{
     self, decode_address, TransactionId, BINDING_ERROR, BINDING_REQUEST, BINDING_SUCCESS,
     HEADER_LEN, MAGIC_COOKIE,
@@ -546,6 +555,16 @@ pub struct ParsedStun {
 /// magic cookie, declared length within the datagram) and bounds-checked
 /// attribute walk; unknown attributes are skipped. Parse success does NOT
 /// imply authenticity — that is what MI/FP verification decide.
+///
+/// RFC 5389 §15.4/§15.5 ordering is enforced: MESSAGE-INTEGRITY is the last
+/// attribute before FINGERPRINT, and its HMAC input ends at MI while FP's
+/// CRC input ends at FP. Attributes after the first MI are therefore NOT
+/// authenticated, so honoring them would let an appended attribute override
+/// an authenticated USERNAME / PRIORITY / role / USE-CANDIDATE (an earlier
+/// last-wins walk did exactly that). After MI every attribute is skipped —
+/// bounds still checked, length still padded — except the first well-formed
+/// FINGERPRINT, at which the walk stops: a trailer past FP (the official ice
+/// v4 candidate-pair id 0x8100) and duplicate attributes are never parsed.
 pub fn parse_stun(msg: &[u8]) -> Result<ParsedStun, ManagementError> {
     let bad = |tok: &'static str| ManagementError::Parse(format!("stun-check:{tok}"));
     if msg.len() < HEADER_LEN {
@@ -580,6 +599,12 @@ pub fn parse_stun(msg: &[u8]) -> Result<ParsedStun, ManagementError> {
     };
     let body = &msg[HEADER_LEN..HEADER_LEN + mlen];
     let mut off = 0usize;
+    // MESSAGE-INTEGRITY ends the authenticated range (§15.4): once it has
+    // been seen, only the first well-formed FINGERPRINT is still accepted
+    // (§15.5) and the walk stops there. Everything after MI is outside the
+    // HMAC and everything after FP is outside the CRC, so parsing it would
+    // only allow an appended attribute to override authenticated values.
+    let mut after_mi = false;
     while off + 4 <= body.len() {
         let atype = u16::from_be_bytes([body[off], body[off + 1]]);
         let alen = u16::from_be_bytes([body[off + 2], body[off + 3]]) as usize;
@@ -588,40 +613,49 @@ pub fn parse_stun(msg: &[u8]) -> Result<ParsedStun, ManagementError> {
             return Err(bad("attr-overrun"));
         }
         let val = &body[off..off + alen];
-        match atype {
-            ATTR_USERNAME => {
-                p.username = Some(String::from_utf8_lossy(val).trim_end_matches('\0').to_string());
-            }
-            ATTR_PRIORITY if alen == 4 => {
-                p.priority = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
-            }
-            ATTR_ICE_CONTROLLING if alen == 8 => {
-                p.controlling = Some(u64::from_be_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]));
-            }
-            ATTR_ICE_CONTROLLED if alen == 8 => {
-                p.controlled = Some(u64::from_be_bytes([
-                    val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
-                ]));
-            }
-            ATTR_USE_CANDIDATE => p.use_candidate = true,
-            ATTR_ERROR_CODE if alen >= 4 => {
-                let class = (val[2] & 0x07) as u16;
-                p.error_code = Some(class * 100 + val[3] as u16);
-            }
-            stun::ATTR_XOR_MAPPED => p.xor_mapped = decode_address(val, true),
-            ATTR_MESSAGE_INTEGRITY if alen == 20 => {
-                let mut mac = [0u8; 20];
-                mac.copy_from_slice(val);
-                p.mi_off = Some(HEADER_LEN + off - 4); // start of the MI attribute
-                p.mi_value = Some(mac);
-            }
-            ATTR_FINGERPRINT if alen == 4 => {
+        if after_mi {
+            if atype == ATTR_FINGERPRINT && alen == 4 {
                 p.fp_off = Some(HEADER_LEN + off - 4);
                 p.fp_value = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
+                break;
             }
-            _ => {} // SOFTWARE, unknown comprehension-optional, ...
+        } else {
+            match atype {
+                ATTR_USERNAME => {
+                    p.username = Some(String::from_utf8_lossy(val).trim_end_matches('\0').to_string());
+                }
+                ATTR_PRIORITY if alen == 4 => {
+                    p.priority = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
+                }
+                ATTR_ICE_CONTROLLING if alen == 8 => {
+                    p.controlling = Some(u64::from_be_bytes([
+                        val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                    ]));
+                }
+                ATTR_ICE_CONTROLLED if alen == 8 => {
+                    p.controlled = Some(u64::from_be_bytes([
+                        val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7],
+                    ]));
+                }
+                ATTR_USE_CANDIDATE => p.use_candidate = true,
+                ATTR_ERROR_CODE if alen >= 4 => {
+                    let class = (val[2] & 0x07) as u16;
+                    p.error_code = Some(class * 100 + val[3] as u16);
+                }
+                stun::ATTR_XOR_MAPPED => p.xor_mapped = decode_address(val, true),
+                ATTR_MESSAGE_INTEGRITY if alen == 20 => {
+                    let mut mac = [0u8; 20];
+                    mac.copy_from_slice(val);
+                    p.mi_off = Some(HEADER_LEN + off - 4); // start of the MI attribute
+                    p.mi_value = Some(mac);
+                    after_mi = true;
+                }
+                ATTR_FINGERPRINT if alen == 4 => {
+                    p.fp_off = Some(HEADER_LEN + off - 4);
+                    p.fp_value = Some(u32::from_be_bytes([val[0], val[1], val[2], val[3]]));
+                }
+                _ => {} // SOFTWARE, unknown comprehension-optional, ...
+            }
         }
         off += (alen + 3) & !3;
     }
@@ -647,10 +681,12 @@ pub fn verify_message_integrity(msg: &[u8], parsed: &ParsedStun, password: &str)
 }
 
 /// FINGERPRINT verification (RFC 5389 §15.5): CRC-32 over the message up to
-/// the FP attribute with the header length field equal to the FULL message
-/// length INCLUDING the FP attribute (pinned by RFC 5769 §2.1/§2.2:
-/// CRC-input lengths 0x58/0x3c — the transmitted lengths), ⊕ "STUN".
-/// False when FP is absent or wrong.
+/// the FP attribute with the header length field pointing at the END of the
+/// FINGERPRINT attribute — i.e. the STUN message length, EXCLUSIVE of any
+/// bytes transmitted after FINGERPRINT (the official ice v4 candidate-pair id
+/// trailer, `candidatepair.go`). Pinned by RFC 5769 §2.1/§2.2 (CRC-input
+/// lengths 0x58/0x3c — the transmitted lengths, which end at FP when FP is
+/// last), ⊕ "STUN". False when FP is absent or wrong.
 pub fn verify_fingerprint(msg: &[u8], parsed: &ParsedStun) -> bool {
     let (Some(off), Some(want)) = (parsed.fp_off, parsed.fp_value) else {
         return false;
@@ -659,7 +695,7 @@ pub fn verify_fingerprint(msg: &[u8], parsed: &ParsedStun) -> bool {
         return false;
     }
     let mut input = msg[..off].to_vec();
-    let full_len = (msg.len() - HEADER_LEN) as u16;
+    let full_len = (off + 8 - HEADER_LEN) as u16;
     set_msg_len(&mut input, full_len);
     crc32_ieee(&input) ^ FINGERPRINT_XOR == want
 }
@@ -668,9 +704,10 @@ pub fn verify_fingerprint(msg: &[u8], parsed: &ParsedStun) -> bool {
 // pair state machine (RFC 8445 §6.1.2.6/§8.1.2)
 // ---------------------------------------------------------------------------
 
-/// RFC 8445 §6.1.2.6 pair states. `Frozen` here = formed but the session
-/// not started (single component / single check list — the multi-list thaw
-/// of §6.1.1 never applies to this protocol path).
+/// RFC 8445 §6.1.2.6 pair states. `Frozen` = formed while the check list is
+/// not Running, i.e. before [`IceSession::start`] (single component / single
+/// check list — the multi-list thaw of §6.1.1 never applies to this protocol
+/// path); a pair formed after `start()` is born `Waiting`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairState {
     Frozen,
@@ -725,6 +762,14 @@ pub struct PairSnapshot {
 struct LocalSock {
     cand: Candidate,
     fd: sys::c_int,
+    /// `true` = the fd was adopted from a gather hand-over
+    /// ([`IceSession::add_local_candidate_bound`]) and therefore carries the
+    /// N2 socket-trace registration the shell's `protect` put on it; the
+    /// gather used to emit `n2_socket_trace::closed` when it closed the fd
+    /// itself, so this session — now the owner — emits it instead.
+    /// Provider-taken sockets (`add_local_candidate*`) were never traced here,
+    /// so their close path stays byte-identical to before.
+    traced: bool,
 }
 
 /// Cap of the outbound-of-ICE queue ([`IceSession::take_data_rx`]): non-STUN
@@ -734,6 +779,18 @@ struct LocalSock {
 /// ([`IceSession::data_dropped`]) — a stalled consumer is a failure the
 /// pump must observe, not a silent unbounded buffer.
 const DATA_RX_CAP: usize = 64;
+
+/// Aggregate receive budget of ONE [`IceSession::run_once`] — datagrams read
+/// across ALL of this session's local sockets, not per socket. The previous
+/// shape drained 8 per socket per pump, so a session with several candidate
+/// sockets multiplied the read cap and a 100 ms pump capped the selected
+/// direction at ~80 pps (≈0.9 Mbps at 1400 MTU). The budget is also clamped
+/// to the data queue's free room ([`DATA_RX_CAP`] − queued), so a supported
+/// burst is never read into a full queue and counted as a synthetic
+/// [`IceSession::data_dropped`]; anything left unread stays in the kernel
+/// socket buffer and is served by the next pump (bounded memory either way).
+/// STUN checks/keepalives ride the same budget and are never dropped by it.
+const RECV_BUDGET_PER_RUN: usize = 64;
 
 struct Pair {
     local: usize,
@@ -789,6 +846,33 @@ pub struct IceSession {
     /// ice_bind.go:279-303).
     data_rx: VecDeque<([u8; 4], u16, Vec<u8>)>,
     data_dropped: u64,
+    /// Rotating start index of the per-run socket scan ([`IceSession::pump_recv`]):
+    /// after a socket consumes the whole run budget the next run starts at the
+    /// FOLLOWING socket, so one flooded socket cannot own the budget and the
+    /// other local sockets still progress (fair multi-socket servicing without
+    /// a thread or a scheduler).
+    recv_cursor: usize,
+    /// §5 observability counters (one line per 10 s via the orchestrator's
+    /// health summary): outbound checks actually handed to sendto, checks
+    /// that got a valid matched success response, inbound Binding Requests
+    /// seen (any auth outcome), inbound requests that passed the MI gate.
+    checks_sent: u64,
+    checks_matched: u64,
+    inbound_reqs: u64,
+    inbound_ok: u64,
+    /// Per-source rate limiting of the inbound-request log line (§5 item 2):
+    /// first request from each source is logged, then every 32nd — a healthy
+    /// peer's check stream must not flood the log.
+    inbound_log: std::collections::HashMap<([u8; 4], u16), u32>,
+}
+
+/// §5 observability counters snapshot ([`IceSession::health`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IceHealth {
+    pub checks_sent: u64,
+    pub checks_matched: u64,
+    pub inbound_reqs: u64,
+    pub inbound_ok: u64,
 }
 
 impl IceSession {
@@ -833,6 +917,12 @@ impl IceSession {
             emitted_all_pairs_failed: false,
             data_rx: VecDeque::new(),
             data_dropped: 0,
+            recv_cursor: 0,
+            checks_sent: 0,
+            checks_matched: 0,
+            inbound_reqs: 0,
+            inbound_ok: 0,
+            inbound_log: std::collections::HashMap::new(),
         })
     }
 
@@ -943,7 +1033,75 @@ impl IceSession {
             cleanup(dup);
             return Err(ManagementError::Network("ice-bind-port-mismatch".into()));
         }
-        self.local_socks.push(LocalSock { cand: cand.clone(), fd: dup });
+        self.local_socks.push(LocalSock { cand: cand.clone(), fd: dup, traced: false });
+        self.rebuild_pairs();
+        self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
+        Ok(cand)
+    }
+
+    /// Adopt an ALREADY-BOUND protected socket as a local candidate (the
+    /// gather hand-over path: [`crate::ice::GatheredSocket`]). Unlike
+    /// [`IceSession::add_local_candidate`] this takes NO new socket from the
+    /// provider — the fd IS the socket the gather bound and used for its
+    /// STUN exchanges, so the candidate's host/base port and every srflx
+    /// mapping derived from it point at the same live socket this session
+    /// then sends/receives on.
+    ///
+    /// Validation (fail-closed, fd closed exactly once on every error):
+    /// the socket must be bound (`getsockname` port ≠ 0); `cand.port` 0 is
+    /// filled from the bound port, a non-zero `cand.port` must equal it; the
+    /// bound address must be the candidate's address or the wildcard
+    /// `0.0.0.0` (fixed-port mode binds `0.0.0.0:<port>` while the candidate
+    /// keeps its interface address — upstream's single shared
+    /// `0.0.0.0:NET_PORT` socket shape). `O_NONBLOCK` is re-asserted (the
+    /// gather already set it on the shared open-file description).
+    ///
+    /// Emits [`IceEvent::LocalCandidateReady`] exactly like
+    /// [`IceSession::add_local_candidate`].
+    pub fn add_local_candidate_bound(
+        &mut self,
+        mut cand: Candidate,
+        fd: OwnedFd,
+    ) -> Result<Candidate, ManagementError> {
+        if self.stopped {
+            // `fd` drops here → closed exactly once.
+            return Err(ManagementError::Request { status: 0, message: "ice:session-closed".into() });
+        }
+        let addr = parse_ipv4(&cand.address).ok_or_else(|| {
+            ManagementError::Parse(format!("ice:local-candidate-not-ipv4 '{}'", cand.address))
+        })?;
+        let dup = fd.into_raw_fd(); // from here on every error path closes `dup`
+        let cleanup = |fd: sys::c_int| {
+            crate::n2_socket_trace::closed(fd);
+            unsafe { sys::close(fd) }
+        };
+        let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut name_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        if unsafe { sys::getsockname(dup, &mut name_addr, &mut name_len) } == -1 {
+            cleanup(dup);
+            return Err(ManagementError::Network("ice-bound-getsockname-failed".into()));
+        }
+        let bound_addr = name_addr.sin_addr;
+        let bound_port = u16::from_be(name_addr.sin_port);
+        if bound_port == 0 {
+            cleanup(dup);
+            return Err(ManagementError::Network("ice-bound-socket-unbound".into()));
+        }
+        if bound_addr != [0, 0, 0, 0] && bound_addr != addr {
+            cleanup(dup);
+            return Err(ManagementError::Network("ice-bound-address-mismatch".into()));
+        }
+        if cand.port == 0 {
+            cand.port = bound_port;
+        } else if cand.port != bound_port {
+            cleanup(dup);
+            return Err(ManagementError::Network("ice-bound-port-mismatch".into()));
+        }
+        if let Err(e) = set_nonblock(dup) {
+            cleanup(dup);
+            return Err(seam_to_management(e));
+        }
+        self.local_socks.push(LocalSock { cand: cand.clone(), fd: dup, traced: true });
         self.rebuild_pairs();
         self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
         Ok(cand)
@@ -979,7 +1137,15 @@ impl IceSession {
     /// sorted descending. Existing pair state survives re-forms (role
     /// switches, late prflx candidates). The G/D operands swap with the
     /// role, which is exactly what re-sorting after a role conflict does.
+    ///
+    /// Initial state follows the check list's own state: a pair formed while
+    /// the list is Running (`started`) is born `Waiting` — RFC 8445 §6.1.2.6
+    /// freezes a pair only while the checklist is not Running, and the
+    /// candidate trickled after `start()` must be probed exactly like the
+    /// ones already in the list. `start()` is the single thaw for the pairs
+    /// formed before it.
     fn rebuild_pairs(&mut self) {
+        let formed_state = if self.started { PairState::Waiting } else { PairState::Frozen };
         let mut remotes: Vec<(usize, u32)> =
             self.remote_cands.iter().enumerate().map(|(i, c)| (i, c.priority)).collect();
         remotes.sort_by(|a, b| b.1.cmp(&a.1)); // high-priority remote first wins dedup
@@ -1001,7 +1167,7 @@ impl IceSession {
                 next.push(Pair {
                     local: li,
                     remote: *ri,
-                    state: PairState::Frozen,
+                    state: formed_state,
                     priority,
                     nominated: false,
                     txn: None,
@@ -1092,6 +1258,7 @@ impl IceSession {
                 let fd = self.local_socks[self.pairs[i].local].fd;
                 let target = self.remote_target(&self.pairs[i]);
                 if !send_to(fd, &target, &msg) {
+                    self.log_pair_failed(i, "send-error");
                     self.pairs[i].state = PairState::Failed;
                     self.pairs[i].txn = None;
                     continue;
@@ -1100,29 +1267,42 @@ impl IceSession {
                 self.pairs[i].attempts += 1;
             } else {
                 // RFC 8445 §7.2.5.2.3: transaction timed out → pair Failed
+                self.log_pair_failed(i, "rto-exhausted");
                 self.pairs[i].state = PairState::Failed;
                 self.pairs[i].txn = None;
             }
         }
 
-        // start the next check (serial pacing — one outstanding check)
-        let has_in_progress = self.pairs.iter().any(|p| p.state == PairState::InProgress);
-        if !has_in_progress {
-            if let Some(i) = self.pairs.iter().position(|p| p.state == PairState::Waiting) {
-                let txn = stun::random_transaction_id()?;
-                let msg = self.build_check(txn, false)?;
-                let fd = self.local_socks[self.pairs[i].local].fd;
-                let target = self.remote_target(&self.pairs[i]);
-                if send_to(fd, &target, &msg) {
-                    let p = &mut self.pairs[i];
-                    p.state = PairState::InProgress;
-                    p.txn = Some(txn);
-                    p.attempts = 1;
-                    p.first_send_ms = now;
-                    p.last_send_ms = now;
-                } else {
-                    self.pairs[i].state = PairState::Failed;
-                }
+        // start checks for ALL Waiting pairs concurrently (§6.5: the pion
+        // `pingAllCandidates` shape) — the pre-fix serial pacing (one
+        // outstanding check globally) spent 3.5 s per dead pair
+        // (7 × 500ms RTO), so with 2 local interfaces × (host+srflx) remote
+        // candidates a dead pair ahead of the live one in priority order
+        // could eat the whole complementary-credentials window before the
+        // live pair was ever probed. Retransmission stays per-pair (each
+        // pair re-sends its own transaction id after CHECK_RTO_MS), so this
+        // changes only the FIRST round into a parallel burst; new pairs
+        // formed by late trickle candidates are born Waiting (rebuild_pairs)
+        // and get their probe on the next pump.
+        for i in 0..self.pairs.len() {
+            if self.pairs[i].state != PairState::Waiting {
+                continue;
+            }
+            let txn = stun::random_transaction_id()?;
+            let msg = self.build_check(txn, false)?;
+            let fd = self.local_socks[self.pairs[i].local].fd;
+            let target = self.remote_target(&self.pairs[i]);
+            if send_to(fd, &target, &msg) {
+                self.log_check_tx(i, false);
+                let p = &mut self.pairs[i];
+                p.state = PairState::InProgress;
+                p.txn = Some(txn);
+                p.attempts = 1;
+                p.first_send_ms = now;
+                p.last_send_ms = now;
+            } else {
+                self.log_pair_failed(i, "send-error");
+                self.pairs[i].state = PairState::Failed;
             }
         }
 
@@ -1149,6 +1329,7 @@ impl IceSession {
                     let fd = self.local_socks[self.pairs[i].local].fd;
                     let target = self.remote_target(&self.pairs[i]);
                     if send_to(fd, &target, &msg) {
+                        self.log_check_tx(i, true);
                         let p = &mut self.pairs[i];
                         p.nominated = true;
                         p.state = PairState::InProgress;
@@ -1161,6 +1342,40 @@ impl IceSession {
             }
         }
         Ok(())
+    }
+
+    /// §5 item 1: one `check-tx` line per pair on its FIRST send (and on the
+    /// nomination check, `uc=1`). Retransmits are deliberately silent (the
+    /// same pair re-sends every CHECK_RTO_MS; logging them would flood).
+    /// Counts into [`IceSession::health`] `checks_sent`.
+    fn log_check_tx(&mut self, pi: usize, use_candidate: bool) {
+        self.checks_sent += 1;
+        let (l, r) = self.pair_candidates(pi);
+        crate::hilog::emit(&format!(
+            "N5d_ICE|check-tx|peer={}|local={}:{}|remote={}:{}|uc={}|role={}",
+            self.peer_label,
+            l.address,
+            l.port,
+            r.address,
+            r.port,
+            u8::from(use_candidate),
+            if self.controlling { "controlling" } else { "controlled" },
+        ));
+    }
+
+    /// §5 item 1: `check-timeout` when a pair dies (retransmission exhausted
+    /// or the socket refused the send) — once per pair per state transition.
+    fn log_pair_failed(&self, pi: usize, reason: &str) {
+        let (l, r) = self.pair_candidates(pi);
+        crate::hilog::emit(&format!(
+            "N5d_ICE|check-timeout|peer={}|local={}:{}|remote={}:{}|attempts={}|reason={reason}",
+            self.peer_label,
+            l.address,
+            l.port,
+            r.address,
+            r.port,
+            self.pairs[pi].attempts,
+        ));
     }
 
     fn pump_keepalive(&mut self, now: u64) -> Result<(), ManagementError> {
@@ -1204,20 +1419,39 @@ impl IceSession {
         if ret <= 0 {
             return Ok(());
         }
-        for i in 0..fds.len() {
+        // ONE aggregate read budget for this run, shared by every local
+        // socket (see [`RECV_BUDGET_PER_RUN`]); clamped to the data queue's
+        // free room so the run cannot read more data than the queue accepts.
+        let mut budget =
+            RECV_BUDGET_PER_RUN.min(DATA_RX_CAP.saturating_sub(self.data_rx.len()));
+        let n = self.local_socks.len();
+        let start = self.recv_cursor % n;
+        for k in 0..n {
+            if budget == 0 {
+                break;
+            }
+            let i = (start + k) % n;
             if fds[i].revents & sys::POLLIN == 0 {
                 continue;
             }
-            self.drain_socket(i, now);
+            if self.drain_socket(i, now, &mut budget) {
+                // Saturated: this socket ate the whole run budget. The next
+                // run starts at the FOLLOWING socket (rotating scan) so a
+                // flood on one candidate cannot starve the others.
+                self.recv_cursor = (i + 1) % n;
+            }
         }
         Ok(())
     }
 
-    fn drain_socket(&mut self, idx: usize, now: u64) {
+    /// Drain one socket until it reports EAGAIN or `budget` hits 0. Returns
+    /// `true` when the run budget (not the socket) stopped the drain, i.e.
+    /// datagrams are likely still queued.
+    fn drain_socket(&mut self, idx: usize, now: u64, budget: &mut usize) -> bool {
         let fd = self.local_socks[idx].fd;
         let mut buf = [0u8; 1500];
-        for _ in 0..8 {
-            // bounded drain per pump: a flood cannot starve the timers
+        while *budget > 0 {
+            // bounded drain per run: a flood cannot starve the timers
             let mut src = sys::sockaddr_in::new([0, 0, 0, 0], 0);
             let mut src_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
             let n = unsafe {
@@ -1231,8 +1465,9 @@ impl IceSession {
                 )
             };
             if n <= 0 {
-                return; // EAGAIN — drained
+                return false; // EAGAIN — drained
             }
+            *budget -= 1;
             let addr = src.sin_addr;
             let port = u16::from_be(src.sin_port);
             // N2 v4.1 P7: the outer-source receipt of THIS ICE socket — the
@@ -1248,6 +1483,7 @@ impl IceSession {
             }
             self.demux_inbound(idx, &buf[..n as usize], addr, port, now);
         }
+        true
     }
 
     /// N11 demux — upstream `ICEBind` receive shape (ice_bind.go:279-345):
@@ -1312,16 +1548,46 @@ impl IceSession {
             .and_then(|u| u.split_once(':'))
             .map(|(local_part, _)| local_part == self.local.ufrag)
             .unwrap_or(false);
+        // MESSAGE-INTEGRITY: keyed with OUR password (RFC 8445 §7.2.2 —
+        // the request was keyed with "the password for the remote agent",
+        // which is us). Wrong → 401.
+        let mi_ok = username_ok && verify_message_integrity(datagram, parsed, &self.local.pwd);
+        // §5 item 2 — one rate-limited line per inbound request that names
+        // src / auth outcome / role attribute / action. This is THE line that
+        // answers "did the peer's checks arrive at all" (H1 vs H4) on the
+        // next device run. Computed BEFORE any state mutation so the logged
+        // role is the one that decided the outcome.
+        self.inbound_reqs += 1;
+        let reply_487 = (parsed.controlling.is_some() && self.controlling
+            && self.tie_breaker >= parsed.controlling.unwrap_or(0))
+            || (parsed.controlled.is_some()
+                && !self.controlling
+                && self.tie_breaker < parsed.controlled.unwrap_or(0));
+        let action = if !username_ok || !mi_ok {
+            "401"
+        } else if reply_487 {
+            "487"
+        } else {
+            "responded"
+        };
+        let role_attr = if parsed.controlling.is_some() {
+            "controlling"
+        } else if parsed.controlled.is_some() {
+            "controlled"
+        } else {
+            "none"
+        };
+        if action == "responded" {
+            self.inbound_ok += 1;
+        }
+        self.log_inbound_check(src, src_port, username_ok, mi_ok, role_attr, parsed.use_candidate, action);
         if !username_ok {
             let resp = build_error_response(parsed.txn, ERR_UNAUTHORIZED, None);
             let target = sys::sockaddr_in::new(src, src_port);
             let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
             return;
         }
-        // MESSAGE-INTEGRITY: keyed with OUR password (RFC 8445 §7.2.2 —
-        // the request was keyed with "the password for the remote agent",
-        // which is us). Wrong → 401.
-        if !verify_message_integrity(datagram, parsed, &self.local.pwd) {
+        if !mi_ok {
             let resp = build_error_response(parsed.txn, ERR_UNAUTHORIZED, None);
             let target = sys::sockaddr_in::new(src, src_port);
             let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
@@ -1388,6 +1654,42 @@ impl IceSession {
         }
     }
 
+    /// §5 item 2: rate-limited inbound-request line — the 1st request from
+    /// each source, then every 32nd (a healthy peer's check stream is
+    /// ~constant; per-request lines would flood the log). Map bounded at 32
+    /// sources (prflx explosions can't grow it without limit).
+    fn log_inbound_check(
+        &mut self,
+        src: [u8; 4],
+        src_port: u16,
+        user_ok: bool,
+        mi_ok: bool,
+        role_attr: &str,
+        use_candidate: bool,
+        action: &str,
+    ) {
+        if self.inbound_log.len() > 32 {
+            self.inbound_log.clear();
+        }
+        let n = self.inbound_log.entry((src, src_port)).or_insert(0);
+        *n += 1;
+        if *n != 1 && *n % 32 != 0 {
+            return;
+        }
+        crate::hilog::emit(&format!(
+            "N5d_ICE|check-rx-req|peer={}|src={}.{}.{}.{}:{}|user={}|mi={}|role={role_attr}|uc={}|action={action}|seen={n}",
+            self.peer_label,
+            src[0],
+            src[1],
+            src[2],
+            src[3],
+            src_port,
+            if user_ok { "ok" } else { "bad" },
+            if mi_ok { "ok" } else { "bad" },
+            u8::from(use_candidate),
+        ));
+    }
+
     /// Success response to one of OUR checks (RFC 8445 §7.2.5.3): FINGERPRINT
     /// and MESSAGE-INTEGRITY (remote password) gates, then the pair
     /// succeeds; a succeeded NOMINATION check selects the pair.
@@ -1413,10 +1715,25 @@ impl IceSession {
         };
         let rtt = now.saturating_sub(self.pairs[pi].first_send_ms);
         let was_nominated = self.pairs[pi].nominated;
+        let first_success = self.pairs[pi].state != PairState::Succeeded;
         self.pairs[pi].state = PairState::Succeeded;
         self.pairs[pi].txn = None;
         self.last_inbound_ms = Some(now);
+        self.checks_matched += 1;
         let (local, remote) = self.pair_candidates(pi);
+        // §5 item 1: one `check-rx` line per pair on its first matched
+        // success (re-matches / nomination confirmations are silent).
+        if first_success {
+            crate::hilog::emit(&format!(
+                "N5d_ICE|check-rx|peer={}|local={}:{}|remote={}:{}|rtt_ms={rtt}|uc={}",
+                self.peer_label,
+                local.address,
+                local.port,
+                remote.address,
+                remote.port,
+                u8::from(was_nominated),
+            ));
+        }
         self.events.push_back(IceEvent::CheckSucceeded { local, remote, rtt_ms: rtt });
         // Controlling: the NOMINATION check concluded → selected
         // (§8.1.1). Controlled: a nominated pair that SUCCEEDED becomes
@@ -1613,6 +1930,31 @@ impl IceSession {
         self.data_dropped
     }
 
+    /// 006 resource snapshot: how many local candidate sockets still hold a
+    /// LIVE fd (`fd >= 0`). Counted on the fd, NOT on `local_socks.len()`:
+    /// [`IceSession::stop`] drains the vec, so a stopped-but-retained session
+    /// reports 0 here — and the `fd >= 0` rule keeps that true even if a
+    /// future path ever retains a closed sentinel. Pure read: nothing is
+    /// taken, dup'd or closed.
+    pub fn live_local_socket_count(&self) -> usize {
+        self.local_socks.iter().filter(|s| s.fd >= 0).count()
+    }
+
+    /// 006 resource snapshot: connectivity checks were started
+    /// ([`IceSession::start`]) — distinct from "stopped" and from "session
+    /// object merely constructed" (Gathering, not yet started).
+    pub fn is_started(&self) -> bool {
+        self.started
+    }
+
+    /// 006 resource snapshot: [`IceSession::stop`] already closed this
+    /// session's dup sockets. The OBJECT may still be retained by its peer
+    /// entry (`PeerIceOrchestrator::stop_all` keeps it), so "stopped" is not
+    /// the same fact as "not present".
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
     /// Current role (tests/inspection).
     pub fn is_controlling(&self) -> bool {
         self.controlling
@@ -1630,12 +1972,33 @@ impl IceSession {
             .collect()
     }
 
+    /// §5 observability counters (health summary input).
+    pub fn health(&self) -> IceHealth {
+        IceHealth {
+            checks_sent: self.checks_sent,
+            checks_matched: self.checks_matched,
+            inbound_reqs: self.inbound_reqs,
+            inbound_ok: self.inbound_ok,
+        }
+    }
+
+    /// The FINAL bound local candidates (address:port as signaled). Used by
+    /// the orchestrator's glare branch to re-trickle our candidates when the
+    /// peer restarts its agent (its candidate cache died with the agent;
+    /// official re-gathers and re-signals on agent recreation).
+    pub fn local_candidates(&self) -> Vec<Candidate> {
+        self.local_socks.iter().map(|s| s.cand.clone()).collect()
+    }
+
     /// Stop the session: close exactly our dup sockets, emit `Closed`.
     pub fn stop(&mut self) {
         if self.stopped {
             return;
         }
         for s in self.local_socks.drain(..) {
+            if s.traced {
+                crate::n2_socket_trace::closed(s.fd);
+            }
             unsafe { sys::close(s.fd) };
         }
         self.stopped = true;
@@ -1647,6 +2010,9 @@ impl Drop for IceSession {
     fn drop(&mut self) {
         if !self.stopped {
             for s in self.local_socks.drain(..) {
+                if s.traced {
+                    crate::n2_socket_trace::closed(s.fd);
+                }
                 unsafe { sys::close(s.fd) };
             }
             self.stopped = true;
@@ -1906,6 +2272,152 @@ mod tests {
         assert_eq!(drained.len(), DATA_RX_CAP);
         assert_eq!(drained[0].2[0], 4, "oldest kept (arrival order)");
         assert!(session.take_data_rx().is_empty(), "drain empties");
+    }
+
+    /// ICE late-candidate lifecycle: a remote candidate trickled AFTER
+    /// `start()` must join the Running check list and actually be probed.
+    ///
+    /// Behavioral, not state equality: the late candidate is a real bound
+    /// 127.0.0.1 UDP socket and the assertion is the Binding Request that
+    /// physically arrives on it (destination = the late candidate, source =
+    /// our bound check socket, keyed for this session). Device evidence of
+    /// the pre-fix shape: `rebuild_pairs` formed every pair `Frozen`,
+    /// `start()` is the only thaw and runs once, so a candidate arriving
+    /// after the first one sat Frozen forever — health `pairs=0/0/0/2/2`
+    /// ("2 Failed + 2 Frozen") and `all-pairs-failed` could never fire.
+    ///
+    /// Also pinned: a candidate added before `start()` stays Frozen and is
+    /// never probed, and the already in-flight pair keeps its state /
+    /// transaction / attempt count (only the late pair gains a check).
+    #[test]
+    fn late_remote_candidate_is_checked_after_start_without_resetting_in_flight_pair() {
+        use crate::ice::ProtectedUdpFdSource;
+        use std::net::UdpSocket;
+        use std::os::fd::AsRawFd;
+
+        let remote_pwd = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+
+        // Local check socket: a real bound socket fed to the provider (the
+        // session consumes the dup; the original stays alive in the test).
+        let local_sock = UdpSocket::bind("127.0.0.1:0").expect("bind local");
+        let local_port = local_sock.local_addr().expect("local addr").port();
+        let provider = ProtectedUdpFdSource::new_with_fd(-1).expect("fd provider");
+        provider.feed(local_sock.as_raw_fd()).expect("feed");
+
+        let mut session = IceSession::new(
+            IceCredentials { ufrag: "LOCALufragXXXXXX".into(), pwd: "0123456789012345678901".into() },
+            true,
+            Some(0x0102_0304_0506_0708),
+        )
+        .expect("session");
+        session
+            .set_remote_credentials(IceCredentials {
+                ufrag: "REMOTEufragXXXXX".into(),
+                pwd: remote_pwd.into(),
+            })
+            .expect("remote credentials");
+        let bound = session
+            .add_local_candidate(Candidate::host_candidate([127, 0, 0, 1], 0), &provider)
+            .expect("local candidate");
+        assert_eq!(bound.port, local_port);
+
+        let first_peer = UdpSocket::bind("127.0.0.1:0").expect("first peer");
+        first_peer.set_nonblocking(true).expect("nonblocking");
+        let late_peer = UdpSocket::bind("127.0.0.1:0").expect("late peer");
+        late_peer.set_nonblocking(true).expect("nonblocking");
+        let peer_cand = |s: &UdpSocket| match s.local_addr().expect("peer addr") {
+            SocketAddr::V4(v4) => Candidate::host_candidate(v4.ip().octets(), v4.port()),
+            _ => panic!("ipv4 only"),
+        };
+        let first_port = first_peer.local_addr().expect("first addr").port();
+        let late_port = late_peer.local_addr().expect("late addr").port();
+        session.add_remote_candidate(peer_cand(&first_peer));
+
+        // Before start(): the pair is formed, Frozen, and NOTHING goes out.
+        assert_eq!(session.pair_snapshots().len(), 1);
+        assert_eq!(session.pair_snapshots()[0].state, PairState::Frozen, "pre-start pair is Frozen");
+        session.run_once(1_000).expect("pre-start pump");
+        assert!(recv_checks(&first_peer).is_empty(), "no check before start()");
+
+        // start() thaws the check list; the first candidate is really probed.
+        session.start().expect("start");
+        assert_eq!(session.pair_snapshots()[0].state, PairState::Waiting, "start thaws");
+        session.run_once(1_010).expect("pump");
+        let first_checks = recv_checks(&first_peer);
+        assert_eq!(first_checks.len(), 1, "the pre-start candidate is probed after start()");
+        assert_eq!(
+            first_checks[0].0,
+            SocketAddr::from(([127, 0, 0, 1], local_port)),
+            "the check came from our bound check socket"
+        );
+        let first_pi = pair_index_for_port(&session, first_port);
+        let (txn0, attempts0, last_send0) = {
+            let p = &session.pairs[first_pi];
+            (p.txn, p.attempts, p.last_send_ms)
+        };
+        assert_eq!(attempts0, 1);
+        assert_eq!(last_send0, 1_010);
+        assert_eq!(session.pairs[first_pi].state, PairState::InProgress);
+
+        // Trickle the SECOND remote candidate AFTER start().
+        session.add_remote_candidate(peer_cand(&late_peer));
+        let late_snap = session
+            .pair_snapshots()
+            .into_iter()
+            .find(|p| p.remote.port == late_port)
+            .expect("pair formed for the late candidate");
+        assert_eq!(late_snap.state, PairState::Waiting, "the late pair must be checkable, not Frozen");
+
+        // Next pump, still before any RTO: the LATE CANDIDATE itself must
+        // receive the check — the datagram is the evidence, not the state.
+        session.run_once(1_020).expect("pump");
+        let late_checks = recv_checks(&late_peer);
+        assert_eq!(late_checks.len(), 1, "the late candidate must actually be probed");
+        assert_eq!(late_checks[0].0, SocketAddr::from(([127, 0, 0, 1], local_port)));
+        let parsed = parse_stun(&late_checks[0].1).expect("late check parses");
+        assert_eq!(parsed.msg_type, BINDING_REQUEST);
+        assert_eq!(parsed.username.as_deref(), Some("REMOTEufragXXXXX:LOCALufragXXXXXX"));
+        assert!(!parsed.use_candidate, "a first-round check carries no USE-CANDIDATE");
+        assert!(verify_message_integrity(&late_checks[0].1, &parsed, remote_pwd));
+
+        // The in-flight pair is untouched: no re-send, same transaction,
+        // same attempt count, same send timestamp.
+        assert!(recv_checks(&first_peer).is_empty(), "the in-flight pair must not be re-probed");
+        let first_pi = pair_index_for_port(&session, first_port);
+        let p = &session.pairs[first_pi];
+        assert_eq!(p.state, PairState::InProgress, "existing pair state preserved");
+        assert_eq!(p.txn, txn0, "existing transaction preserved");
+        assert_eq!(p.attempts, attempts0, "existing attempt count preserved");
+        assert_eq!(p.last_send_ms, last_send0, "existing send time preserved");
+    }
+
+    /// Index of the pair whose remote candidate uses `port` (the list is
+    /// re-sorted by priority on every rebuild, so index 0 is not stable).
+    fn pair_index_for_port(session: &IceSession, port: u16) -> usize {
+        session
+            .pairs
+            .iter()
+            .position(|p| session.remote_cands[p.remote].port == port)
+            .expect("pair for port")
+    }
+
+    /// Drain every valid STUN Binding Request read on a test peer socket:
+    /// `(source address, datagram)`.
+    fn recv_checks(sock: &std::net::UdpSocket) -> Vec<(SocketAddr, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 1500];
+        loop {
+            match sock.recv_from(&mut buf) {
+                Ok((n, src)) => {
+                    if let Ok(p) = parse_stun(&buf[..n]) {
+                        if p.msg_type == BINDING_REQUEST {
+                            out.push((src, buf[..n].to_vec()));
+                        }
+                    }
+                }
+                Err(_) => return out,
+            }
+        }
     }
 
     fn hex20(s: &str) -> [u8; 20] {

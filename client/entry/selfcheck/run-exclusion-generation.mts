@@ -310,7 +310,10 @@ const SHIM_TYPES: Record<string, string[]> = {
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape
     // `physicalDefaultBearerFacts` answers.
-    'PhysicalBearerFacts'],
+    'PhysicalBearerFacts',
+    // 2026-10-08 diagnostics wiring: the erased phone_log result/summary shapes
+    // the real extension now imports alongside the four phoneLog* functions.
+    'PhoneLogConfigureResult', 'PhoneLogSummary'],
   // UI phase 1: the erased input/document shapes buildUiStatusDocument names.
   NetBirdUiModel: ['UiNetworkConfig', 'UiStatusDocument'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
@@ -549,7 +552,8 @@ try {
       readFileSync(join(REAL_DIR, name + '.ets'))); // byte-identical real file
   }
   // The fixture EntryAbility (arm private channel, C group): byte-identical
-  // real file, no sibling imports, no shim needed.
+  // real file; its diagnostics/system-event sibling imports are bridged below
+  // (they are not part of route-exclusion generation).
   writeFileSync(join(dir, 'EntryAbility.ts'),
     readFileSync(join(REAL_ENTRY_DIR, 'EntryAbility.ets')));
   for (const name of Object.keys(SHIM_TYPES)) {
@@ -558,6 +562,24 @@ try {
       SHIM_TYPES[name].map((t: string): string => 'export const ' + t + ' = undefined;')
         .join('\n') + '\n');
   }
+  // Diagnostics wiring (2026-10-08): the REAL extension and the REAL
+  // EntryAbility now import the diagnostics writer (start/event/stop, plus
+  // appendSystemEvent for the UI's watcher sink) and the system-event watcher
+  // (start/stop). Neither takes any part in route-exclusion generation, and
+  // both need platform IO (hidebug / hiAppEvent) that this host fixture cannot
+  // run, so each specifier is bridged by a no-op module carrying the same named
+  // exports the real files import by value (their type-only imports are erased
+  // by node's type stripping). The two modules' own behaviour is host-checked
+  // by run-diagnostics.mts / run-system-events.mts, never here.
+  writeFileSync(join(dir, 'NetBirdDiagnostics.shim.ts'),
+    'export const start = () => undefined;\n' +
+    'export const event = () => false;\n' +
+    'export const appendSystemEvent = () => false;\n' +
+    'export const stop = () => undefined;\n');
+  writeFileSync(join(dir, 'NetBirdSystemEvents.shim.ts'),
+    'export const start = () => false;\n' +
+    'export const stop = () => undefined;\n' +
+    'export const isRunning = () => false;\n');
 
   const mod = await import(pathToFileURL(join(dir, 'NetBirdVpnExtensionAbility.ts')).href) as
     Record<string, unknown>;
@@ -1043,9 +1065,14 @@ try {
   const pathLines = (stage: string): string[] => linesWith('N2H_COLLECTOR_PATH|')
     .filter((l: string): boolean => fieldOf(l, 'stage') === stage);
 
-  // B1: the onCreate beacon through the REAL onCreate (normal path, its async
-  // start flow aborts on the fixture's absent context — caught by onCreate).
-  const bornAbility = freshAbility(mod);
+  // B1: the onCreate beacon through the REAL onCreate (normal path; the async
+  // start flow aborts on the fixture's missing credentials and never reaches the
+  // watcher). The context is present — the production shape, and required by
+  // onCreate's diagnostics tee (2026-10-08: `startDiagnosticsLogTee` reads
+  // `this.context.filesDir` synchronously), which is why this instance is no
+  // longer created context-free; no timer or watcher beacon is produced either
+  // way, so B2/B3 below observe exactly the previous shape.
+  const bornAbility = freshAbility(mod, FIXTURE_FILESDIR);
   resetLog();
   (bornAbility['onCreate'] as (w: unknown) => void)(
     { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });

@@ -18,6 +18,8 @@
 #   4. verification          — HAP contains libs/arm64-v8a/libnetbird_core.so
 #                              with sha256 identical to the core artifact;
 #                              pack.info apiVersion target/compatible == 26;
+#                              pack.info version code/name == build-profile.json5
+#                              (authoritative) and AppScope/app.json5;
 #                              prints HAP path / size / sha256
 set -euo pipefail
 
@@ -57,10 +59,11 @@ SDK_ROOT="${DEVECO_SDK_HOME:-/home/worker/harmonyos/command-line-tools/current}/
 STRIPPED="$(mktemp)"
 cp "$SO_DST" "$STRIPPED"
 "$SDK_ROOT/llvm/bin/llvm-strip" "$STRIPPED"
-python3 - "$HAP" "$STRIPPED" <<'PYEOF'
-import hashlib, json, struct, sys, zipfile
+python3 - "$HAP" "$STRIPPED" "$ROOT/build-profile.json5" "$ROOT/AppScope/app.json5" <<'PYEOF'
+import hashlib, json, json5, struct, sys, zipfile
 
 hap_path, so_ref = sys.argv[1], sys.argv[2]
+profile_path, app_scope_path = sys.argv[3], sys.argv[4]
 MEMBER = 'libs/arm64-v8a/libnetbird_core.so'
 
 def sha256(data: bytes) -> str:
@@ -91,11 +94,31 @@ with zipfile.ZipFile(hap_path) as z:
     if api.get('target') != 26 or api.get('compatible') != 26:
         print(f'FAIL: pack.info apiVersion != 26: {api}', file=sys.stderr)
         sys.exit(1)
+    # version identity: packaged pack.info vs the two JSON5 configs. The
+    # authoritative value is build-profile.json5 app.products[name=default];
+    # AppScope/app.json5 must agree (drift between the two is a real defect,
+    # so it fails here instead of silently shipping one of them).
+    product = next(p for p in json5.load(open(profile_path, encoding='utf-8'))
+                   ['app']['products'] if p.get('name') == 'default')
+    want_code, want_name = product['versionCode'], product['versionName']
+    app_scope = json5.load(open(app_scope_path, encoding='utf-8'))['app']
+    if (app_scope.get('versionCode') != want_code or
+            app_scope.get('versionName') != want_name):
+        print(f"FAIL: AppScope/app.json5 version {app_scope.get('versionCode')}/"
+              f"{app_scope.get('versionName')} != build-profile.json5 "
+              f"{want_code}/{want_name}", file=sys.stderr)
+        sys.exit(1)
+    app_ver = pack['summary']['app']['version']
+    if app_ver.get('code') != want_code or app_ver.get('name') != want_name:
+        print(f"FAIL: packaged version {app_ver} != configured "
+              f"{want_code}/{want_name}", file=sys.stderr)
+        sys.exit(1)
 
 print(f'VERIFY OK: {MEMBER} present, sha256 identical to llvm-strip\'d core artifact')
 print(f'VERIFY OK: sha256={got}')
 print('VERIFY OK: member is ELF64 ET_DYN AArch64')
 print(f"VERIFY OK: pack.info apiVersion target={api.get('target')} compatible={api.get('compatible')} releaseType={api.get('releaseType')}")
+print(f"VERIFY OK: pack.info version code={app_ver.get('code')} name={app_ver.get('name')} == build-profile.json5/AppScope/app.json5")
 PYEOF
 rm -f "$STRIPPED"
 

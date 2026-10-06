@@ -7,8 +7,10 @@
 //!
 //! - §2.1 sample request: USERNAME/PRIORITY/ICE-CONTROLLED + MI + FP, key
 //!   `VOkJxbRl1RmTxUk/WvJxBt`; MI input = message up to MI with the header
-//!   length covering MI **plus the FINGERPRINT length** (RFC 5389 §15.4);
-//!   FP input = message up to FP with the length EXCLUDING FP (§15.5).
+//!   length pointing at the END of the MI attribute (0x50, RFC 5389 §15.4 —
+//!   no FINGERPRINT term); FP input = message up to FP with the header length
+//!   INCLUDING the FP attribute itself (0x58, §15.5), which here equals the
+//!   transmitted length only because FP is the last attribute.
 //! - §2.2 sample IPv4 response: XOR-MAPPED-ADDRESS decodes to
 //!   192.0.2.1:32853 with MI + FP riding along.
 //!
@@ -262,6 +264,214 @@ fn built_responses_roundtrip() {
     assert_eq!(p4.error_code, Some(401));
     assert!(!verify_message_integrity(&err401, &p4, "x"), "unkeyed 401 has no MI");
     assert!(verify_fingerprint(&err401, &p4));
+}
+
+// ---------------------------------------------------------------------------
+// NetBird wire shape: a comprehension-optional 0x8100 attribute (value
+// exactly 65 bytes + 3 padding bytes) rides AFTER FINGERPRINT and the
+// transmitted header length covers it — live captures show Binding Request
+// body 164 = 92 through FP + 72 suffix and Binding Success body
+// 116 = 44 + 72. The FINGERPRINT value on that wire is byte-exactly the
+// CRC-32 of the message UP TO (excluding) the FINGERPRINT attribute with the
+// header length field set to the through-FP length — never the transmitted
+// length. RFC 5389 §15.5 requires FINGERPRINT to be the LAST attribute, so a
+// message with anything after FP is NOT RFC-conformant; accepting this shape
+// is NetBird/pion compatibility normalization of an off-spec wire message,
+// not an RFC requirement. `msg.len() - HEADER_LEN` is therefore only equal to
+// the CRC-input length while FINGERPRINT is the LAST attribute, which the
+// captured NetBird shape is not.
+// ---------------------------------------------------------------------------
+
+const NETBIRD_TRAILING_ATTR: u16 = 0x8100;
+const NETBIRD_TRAILING_VALUE_LEN: usize = 65;
+/// 4-byte attribute header + 65-byte value + 3 zero padding bytes.
+const NETBIRD_TRAILING_BYTES: usize = 72;
+
+/// Extend an already-sealed message with the captured NetBird trailing
+/// attribute shape: type 0x8100, exactly 65 DETERMINISTIC THROWAWAY value
+/// bytes (never captured payload), zero padding to 4-byte alignment, and the
+/// header length widened to cover it ("updated header"). The sealed
+/// MESSAGE-INTEGRITY/FINGERPRINT values are untouched — exactly what the
+/// captured peer transmits, since both cover only bytes before their own
+/// attribute.
+fn append_netbird_trailing_attr(sealed: &[u8], filler: u8) -> Vec<u8> {
+    let mut out = sealed.to_vec();
+    out.extend_from_slice(&NETBIRD_TRAILING_ATTR.to_be_bytes());
+    out.extend_from_slice(&(NETBIRD_TRAILING_VALUE_LEN as u16).to_be_bytes());
+    for i in 0..NETBIRD_TRAILING_VALUE_LEN {
+        out.push(filler.wrapping_add(i as u8));
+    }
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    let body_len = (out.len() - 20) as u16;
+    out[2..4].copy_from_slice(&body_len.to_be_bytes());
+    out
+}
+
+fn declared_len(msg: &[u8]) -> usize {
+    u16::from_be_bytes([msg[2], msg[3]]) as usize
+}
+
+/// Deterministic throwaway ICE check input — never a real credential.
+fn netbird_shape_request() -> CheckRequest {
+    CheckRequest {
+        username: "REMOTEufragXXXXXX:LOCALufragXXXXX".into(),
+        priority: 0x6e00_01ff,
+        controlling: true,
+        tie_breaker: 0x0bad_c0de_dead_beef,
+        use_candidate: true,
+        integrity_key: "throwaway-ice-pwd-0123456789abcdef".into(),
+    }
+}
+
+/// REQUEST direction: the NetBird-shaped Binding Request (valid MI, FP, then
+/// the 0x8100 suffix, header length covering the suffix) must verify its
+/// FINGERPRINT — the suffix is outside the CRC-32 input by NetBird/pion
+/// compatibility normalization (RFC 5389 §15.5 keeps FP last, so this shape
+/// is non-conformant). The FP-last message the same builder emits is the
+/// positive control.
+#[test]
+fn netbird_trailing_attr_request_fingerprint_verifies() {
+    let req = netbird_shape_request();
+    let txn = TransactionId([0x11; 12]);
+    let sealed = build_check_request(&req, txn);
+
+    // Positive control: FINGERPRINT last ⇒ transmitted length == CRC-input
+    // length, so this verifies under both the transmitted-length and the
+    // FP-boundary computation.
+    let clean = parse_stun(&sealed).expect("clean request parses");
+    assert_eq!(declared_len(&sealed), sealed.len() - 20, "clean: header length covers the body");
+    assert!(verify_message_integrity(&sealed, &clean, &req.integrity_key));
+    assert!(verify_fingerprint(&sealed, &clean), "FP-last positive control must verify");
+
+    // NetBird wire shape: identical sealed bytes + trailing 0x8100, header
+    // length widened to 164 (= 92 through FP + 72 suffix), like the capture.
+    let shaped = append_netbird_trailing_attr(&sealed, 0x40);
+    assert_eq!(shaped.len(), sealed.len() + NETBIRD_TRAILING_BYTES);
+    assert_eq!(declared_len(&shaped), shaped.len() - 20, "header length covers the trailing attribute");
+    assert_eq!(declared_len(&shaped), declared_len(&sealed) + NETBIRD_TRAILING_BYTES);
+
+    let p = parse_stun(&shaped).expect("NetBird-shaped request parses");
+    assert_eq!(p.msg_type, 0x0001);
+    assert_eq!(p.txn, txn);
+    assert_eq!(p.username.as_deref(), Some(req.username.as_str()));
+    assert_eq!(p.priority, Some(req.priority));
+    assert_eq!(p.controlling, Some(req.tie_breaker));
+    assert!(p.use_candidate);
+    assert!(
+        verify_message_integrity(&shaped, &p, &req.integrity_key),
+        "a trailing attribute must not disturb the authenticated prefix"
+    );
+    assert!(
+        verify_fingerprint(&shaped, &p),
+        "NetBird/pion compatibility normalization: FINGERPRINT covers the header \
+         through the FP attribute (CRC-input length 92), so the NetBird trailing \
+         0x8100 attribute must not enter the CRC input; RFC 5389 §15.5 keeps FP \
+         last, but using msg.len()-HEADER_LEN (164) rejects this non-conformant \
+         yet interoperable check"
+    );
+}
+
+/// RESPONSE direction: the same NetBird wire shape on a Binding Success
+/// Response (body 116) must verify — MI keyed with the responder password and
+/// the FP suffix-tolerant.
+#[test]
+fn netbird_trailing_attr_success_response_fingerprint_verifies() {
+    let key = "throwaway-ice-pwd-0123456789abcdef";
+    let txn = TransactionId([0x22; 12]);
+    let src = ([192, 0, 2, 44], 51820);
+    let sealed = build_success_response(txn, src, key);
+
+    let clean = parse_stun(&sealed).expect("clean response parses");
+    assert_eq!(declared_len(&sealed), sealed.len() - 20);
+    assert_eq!(clean.xor_mapped, Some(src));
+    assert!(verify_message_integrity(&sealed, &clean, key));
+    assert!(verify_fingerprint(&sealed, &clean), "FP-last positive control must verify");
+
+    let shaped = append_netbird_trailing_attr(&sealed, 0x80);
+    assert_eq!(shaped.len(), sealed.len() + NETBIRD_TRAILING_BYTES);
+    assert_eq!(declared_len(&shaped), declared_len(&sealed) + NETBIRD_TRAILING_BYTES);
+
+    let p = parse_stun(&shaped).expect("NetBird-shaped response parses");
+    assert_eq!(p.msg_type, 0x0101);
+    assert_eq!(p.txn, txn);
+    assert_eq!(p.xor_mapped, Some(src));
+    assert!(verify_message_integrity(&shaped, &p, key));
+    assert!(
+        verify_fingerprint(&shaped, &p),
+        "a NetBird-shaped (trailing 0x8100) success response must verify its \
+         FINGERPRINT over the header through FP, not over the whole datagram"
+    );
+}
+
+/// The trailing attribute is OUTSIDE FINGERPRINT coverage: flipping a byte
+/// INSIDE the 0x8100 value must not invalidate the FINGERPRINT (nor MI),
+/// while the message still parses. This pins the CRC input to the header
+/// through FP — not "everything except a known suffix length".
+#[test]
+fn netbird_trailing_attr_is_outside_fingerprint_coverage() {
+    let req = netbird_shape_request();
+    let sealed = build_check_request(&req, TransactionId([0x33; 12]));
+    let shaped = append_netbird_trailing_attr(&sealed, 0x20);
+
+    // First byte of the 0x8100 value: sealed body, then 4-byte attr header.
+    let mut flipped = shaped.clone();
+    let value_start = sealed.len() + 4;
+    flipped[value_start] ^= 0x01;
+    assert_ne!(flipped, shaped);
+
+    let p = parse_stun(&flipped).expect("still parses");
+    assert!(
+        verify_message_integrity(&flipped, &p, &req.integrity_key),
+        "the trailing attribute is not part of the MI input"
+    );
+    assert!(
+        verify_fingerprint(&flipped, &p),
+        "the trailing attribute is not part of the FINGERPRINT input either"
+    );
+}
+
+/// Tamper negatives on the NetBird shape: bytes INSIDE the authenticated
+/// prefix (message prefix / MI value) still flip the MI verdict, and an FP
+/// value flip still flips the FP verdict. No acceptance is hardcoded.
+#[test]
+fn netbird_trailing_attr_tampering_still_rejects() {
+    let req = netbird_shape_request();
+    let sealed = build_check_request(&req, TransactionId([0x44; 12]));
+    let shaped = append_netbird_trailing_attr(&sealed, 0x55);
+    // FP is the last attribute of the SEALED message, so these offsets are
+    // stable under the appended suffix.
+    let fp_off = sealed.len() - 8;
+    let mi_value_start = sealed.len() - 28; // FP(8) + MI value(20)
+
+    // 1. Flip one byte of the authenticated prefix (first USERNAME value byte
+    //    at body offset 4 = datagram offset 24).
+    let mut bad_prefix = shaped.clone();
+    bad_prefix[24] ^= 0x01;
+    let pp = parse_stun(&bad_prefix).expect("still parses");
+    assert!(
+        !verify_message_integrity(&bad_prefix, &pp, &req.integrity_key),
+        "a tampered authenticated prefix must fail MESSAGE-INTEGRITY"
+    );
+    assert!(!verify_fingerprint(&bad_prefix, &pp), "the prefix is inside FP coverage");
+
+    // 2. Flip the MI value itself.
+    let mut bad_mi = shaped.clone();
+    bad_mi[mi_value_start] ^= 0x01;
+    let pm = parse_stun(&bad_mi).expect("still parses");
+    assert!(!verify_message_integrity(&bad_mi, &pm, &req.integrity_key), "a flipped MI byte must fail");
+    assert!(!verify_fingerprint(&bad_mi, &pm), "MI is inside FP coverage");
+
+    // 3. Flip the FP value.
+    let mut bad_fp = shaped.clone();
+    bad_fp[fp_off + 4] ^= 0x80;
+    let pf = parse_stun(&bad_fp).expect("still parses");
+    assert!(!verify_fingerprint(&bad_fp, &pf), "a flipped FP byte must fail");
+    assert!(
+        verify_message_integrity(&bad_fp, &pf, &req.integrity_key),
+        "the FP byte is not part of the MI input"
+    );
 }
 
 /// Hostile shapes are Parse errors with a stable token — never a panic and

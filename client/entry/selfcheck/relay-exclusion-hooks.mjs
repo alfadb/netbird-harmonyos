@@ -183,6 +183,32 @@ const STATISTICS = 'data:text/javascript,' + encodeURIComponent(
   '  getIfaceTxBytes: (nic) => boom(nic)\n' +
   '};');
 
+// 2026-10-08 diagnostics wiring: the REAL extension imports the shell-side
+// diagnostics writer (start/event/stop) and the system-event watcher
+// (start/stop). Neither takes any part in the endpoint/relay exclusion
+// derivation this fixture drives, and both need platform IO (@ohos.hidebug /
+// @ohos.hiviewdfx.hiAppEvent) that this host fixture cannot run — so each
+// specifier resolves to a no-op data module carrying exactly the named exports
+// the extension imports by value (its PHONE_LOG result/summary interfaces are
+// type-only and therefore erased by node's type stripping; the modules' own
+// behaviour is host-checked by run-diagnostics.mts / run-system-events.mts and
+// run-phone-log.mts, never here).
+const DIAG_NOOP = 'data:text/javascript,' + encodeURIComponent(
+  'export const start = () => undefined;\n' +
+  'export const stop = () => undefined;\n' +
+  'export const event = () => false;\n' +
+  'export const appendSystemEvent = () => false;\n' +
+  'export const isRunning = () => false;\n');
+
+const ACCOUNT_MODE = 'data:text/javascript,' + encodeURIComponent(
+  'export const ACCOUNT_MODE_ACCOUNT = "account";\n' +
+  'export const ACCOUNT_MODE_FILE_NAME = "netbird-auth-mode";\n' +
+  'export const ACCOUNT_MODE_SETUP_KEY = "setup-key";\n' +
+  'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
+  ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
+  'export const decideAccountCredentialMode = () => "account-login-required";');
+const ACCOUNT_STORE = 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D';
+
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,
   '@ohos.app.ability.Want': EMPTY,
@@ -193,7 +219,11 @@ const STUBS = {
   '@ohos.net.vpnExtension': EMPTY,
   '@ohos.resourceManager': EMPTY,
   '@ohos.util': EMPTY,
-  'libnetbird_core.so': CORE
+  'libnetbird_core.so': CORE,
+  './NetBirdDiagnostics': DIAG_NOOP,
+  './NetBirdSystemEvents': DIAG_NOOP,
+  '../login/NetBirdAccountMode': ACCOUNT_MODE,
+  '../login/NetBirdAccountStore': ACCOUNT_STORE
 };
 
 // Sibling modules of the extension: the ESM link would fail on the erased

@@ -68,13 +68,26 @@ import {
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
   parseSignalEndpoint,
   PhysicalBearerFacts, physicalDefaultBearerFacts,
-  pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, resolveExclusionEndpointIp,
-  resolveManagementIp, sleep
+  pollStatusOrNull, readCredentialFileText, readPackagedCaRootsPem, readPrivateFileText,
+  resolveExclusionEndpointIp,
+  resolveManagementIp, sleep,
+  phoneLogAppend, phoneLogConfigure, phoneLogStatus, phoneLogSummary,
+  connectorResourceStatus, nativeResourceSample
 } from './NetBirdConnector';
+// type-only: erased at runtime (same rule as the endpoint/policy shapes above),
+// so the host selfcheck fixtures that stage this file byte-identically need no
+// shim const for the phone_log result/summary interfaces — nor for the 006
+// native-resource sample shape.
+import type { PhoneLogConfigureResult, PhoneLogSummary, NativeResourceSample }
+  from './NetBirdConnector';
 
 import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
+import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
+  decideAccountCredentialMode, parseAuthMode }
+  from '../login/NetBirdAccountMode';
+import { loadAccountCredentials } from '../login/NetBirdAccountStore';
 
 import { isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
@@ -85,6 +98,25 @@ import type { LanRoamDecision } from './NetBirdPhysicalNetworkPolicy';
 
 import { ICE_SOCKET_POOL_MIN, iceSocketNeedPerPeer, iceSocketTargetDepth,
   iceSocketTopUpCount } from './NetBirdIceSocketPool';
+
+// 2026-10-08 shell-side diagnostics wiring. The native core already tees its
+// OWN events into filesDir/netbird-vpn.log; these two modules must NEVER
+// re-forward a native line (that would double every record). They carry the
+// facts the core cannot see — the shell's own lifecycle/network/recreate
+// milestones (NetBirdDiagnostics, role 'vpn': marker + 60 s memory samples +
+// the bounded milestone queue) and the platform's system events
+// (NetBirdSystemEvents: APP_CRASH / APP_FREEZE / RESOURCE_OVERLIMIT /
+// APP_KILLED) — into the SAME phone_log sink. Both are started with the SAME
+// safe sink and both are fail-soft: a platform refusal or an IO error is
+// logged and the VPN flow is untouched.
+import { event as diagEvent, start as startDiagnostics, stop as stopDiagnostics }
+  from './NetBirdDiagnostics';
+// type-only: erased at runtime. `DiagFields` is the diagnostics writer's own
+// field-bag type — every milestone below declares its bag with THIS name (an
+// object literal against a Record-typed parameter is rejected by ArkTS:
+// arkts-no-untyped-obj-literals), so the declaration form is the only one used.
+import type { DiagFields } from './NetBirdDiagnostics';
+import { start as startSystemEvents, stop as stopSystemEvents } from './NetBirdSystemEvents';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -306,6 +338,19 @@ const LOGOUT_TICKET_MAX_AGE_MS: number = 30000;
 // shows 连接失败 + a Chinese reason instead of a stale 连接中…; the UI
 // deletes it when it sends a fresh start request.
 const CONNECT_FAILURE_FILE_NAME: string = 'netbird-connect-failure';
+
+// 2026-10-08 shell-side diagnostics wiring:
+//   VPN_LOG_FILE_NAME — the native phone_log tee target under filesDir. The
+//     native module rotates it itself (netbird-vpn.log, .1 … .3, 2 MiB each)
+//     and opens it in APPEND mode, so a re-entered extension keeps the older
+//     records and marks the new run with its own `sess=` token.
+//   PHONE_LOG_STATUS_SAMPLE_MS — the writer-health summary cadence. It rides
+//     the EXISTING 5 s status watcher tick behind this gate: one native status
+//     read + one enqueued record per minute (never a second timer, never a
+//     per-tick write storm), and it is independent of every early return in
+//     that tick so it survives an unreachable connector too.
+const VPN_LOG_FILE_NAME: string = 'netbird-vpn.log';
+const PHONE_LOG_STATUS_SAMPLE_MS: number = 60000;
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -716,6 +761,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private networkRecoveryActive: boolean = false;
   private networkRecoveryReady: boolean = false;
   private managementEndpoint: ManagementEndpoint | undefined = undefined;
+  // 2026-10-07 client-detail increment: the configured management_url string
+  // (NOT published verbatim — buildUiStatusDocument publishes scheme+host+port
+  // only, via managementEndpointView). Kept so the status document can name
+  // the server the connector was started against; '' before the first start.
+  private managementUrl: string = '';
   private signalUri: string = '';
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
@@ -748,6 +798,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the destroyOnce latch).
   private statusPollFailures: number = 0;
   private connectorDeathHandled: boolean = false;
+  // 2026-10-08 diagnostics wiring: the native tee is installed once per
+  // PROCESS (the path is idempotent, see startDiagnosticsLogTee), and the
+  // writer-health summary rides the status watcher behind a 60 s gate.
+  private logTeeConfigured: boolean = false;
+  private lastPhoneLogStatusAtMs: number = 0;
   // N8: route networks destined for the initial-create ACK (the managed
   // subset actually merged into the platform VpnConfig; core-visible form =
   // canonical 'a.b.c.d/p' strings exactly as connector_network_config
@@ -987,6 +1042,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     this.connectionCreationAttempted = true;
 
+    // 2026-10-08 diagnostics wiring (as early as the extension lifecycle
+    // allows): install the persistent VPN log tee and arm the two shell-side
+    // diagnostic modules BEFORE anything else in the start flow can be
+    // recorded or can fail. Fail-soft throughout — a refused tee or a refused
+    // system-event watcher is logged and the VPN flow below is untouched.
+    this.startDiagnosticsLogTee();
+
     let connection: vpnExtension.VpnConnection;
     try {
       connection = vpnExtension.createVpnConnection(this.context);
@@ -1010,12 +1072,181 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       `netId=${String(this.networkNetId)}`;
     hilog.info(DOMAIN, TAG, '%{public}s', baselineLine);
     this.n2RingAppend(baselineLine);
+    const milestoneFields: DiagFields = { 'stage': 'onCreate', 'net': this.networkNetId };
+    this.diagMilestone('vpn_ext_start', milestoneFields);
     this.watchPhysicalNetwork();
     this.startConnectorThenCreate(want, connection).catch((error: Error) => {
       hilog.error(DOMAIN, TAG,
         'VPN_START_FLOW_REJECTED|requestId=%{public}s|summary=%{public}s',
         this.requestId, safeError(error));
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-08 diagnostics wiring (shell side)
+  //
+  // WHY the native writer is left alone: phone_log is a PROCESS-LIFETIME log
+  // destination. The core tees its own events into netbird-vpn.log; this shell
+  // only appends its own milestones + the system-watcher lines through the same
+  // tee. The writer is never shut down (no phone_log_shutdown call): a stop
+  // request could only race the closing records of Diagnostics.stop(), whose
+  // drain is asynchronous by contract, and the OS closes the file when the
+  // extension process ends anyway. A re-entered extension re-configures the
+  // SAME path idempotently (the native module answers `idempotent:true` and
+  // starts no second writer), so the file keeps its earlier records and gains a
+  // new `sess=` token. There is NO keep-alive, NO timer re-arm and no claim of
+  // process immortality here — this is a log destination, nothing more.
+  //
+  // START ORDER: native tee first (nothing can be appended before it exists),
+  // then the diagnostics helper (marker + 60 s memory samples + the bounded
+  // milestone queue), then the system-event watcher (its subscription boundary
+  // is its own `sys_event_watcher_started` line — an event that already
+  // happened before it cannot be reconstructed, and APP_KILLED only ever
+  // arrives on a later launch). Both modules share ONE safe sink.
+  //
+  // STOP ORDER (see onDestroy): the system-event subscription is removed in
+  // onDestroy; the diagnostics helper is stopped LATE, only after destroyOnce
+  // has settled, because stop() drains the queued records through a promise
+  // chain and the teardown's own closing records must still be enqueued first.
+  // The native writer is never stopped.
+  //
+  // SYSTEM EVENTS ARE BEST-EFFORT: when the platform refuses the watcher,
+  // SystemEvents.start() returns false and emits its own
+  // `sys_event_watcher_unavailable` line through the sink. This extension does
+  // NOT promise crash / freeze / resource-over-limit / APP_KILLED records for
+  // this process, and nothing in the VPN flow changes on that refusal.
+  // ---------------------------------------------------------------------------
+
+  // Idempotent by construction: the configure latch is per PROCESS, while the
+  // two module starts are safe to repeat (each is a no-op while running and can
+  // arm again after a stop, e.g. a later extension instance in the same
+  // process). Never throws: every leg is a defensive wrapper.
+  private startDiagnosticsLogTee(): void {
+    // Fail-soft even here: a diagnostics tee must never throw out of a
+    // lifecycle callback, and `context` is the one platform read on this path
+    // that can be absent. Without a filesDir there is no log destination at
+    // all, so nothing is configured and nothing is recorded (Diagnostics.start
+    // would reject the empty filesDir by its own contract anyway).
+    let filesDir: string = '';
+    try {
+      filesDir = this.context.filesDir;
+    } catch (error) {
+      filesDir = '';
+    }
+    if (filesDir.length === 0) {
+      return;
+    }
+    let configured: PhoneLogConfigureResult | null = null;
+    if (!this.logTeeConfigured) {
+      this.logTeeConfigured = true;
+      configured = phoneLogConfigure(`${filesDir}/${VPN_LOG_FILE_NAME}`);
+      if (!configured.ok) {
+        // The tee IS the destination: a refused configure means no shell record
+        // can land (the vpn_log_tee milestone below is dropped with everything
+        // else), so this one HiLog/hdc line is the only place the failure stays
+        // visible. Never fatal — the VPN flow is untouched.
+        hilog.warn(DOMAIN, TAG, 'VPN_LOG_TEE_FAILED|requestId=%{public}s|code=%{public}s',
+          this.requestId, configured.error ?? 'configure-failed');
+      }
+    }
+    startDiagnostics(filesDir, 'vpn', (line: string): void => { this.diagSink(line); });
+    startSystemEvents('vpn', (line: string): void => { this.diagSink(line); });
+    if (configured !== null) {
+      // Recorded AFTER the helper started (else the queue would not accept it)
+      // and after the tee was configured (else the append would be refused):
+      // the one record that says whether the persistent log really works.
+      const detail: string = configured.ok
+        ? (configured.idempotent === true ? 'idempotent' : 'installed')
+        : (configured.error ?? 'configure-failed');
+      const milestoneFields: DiagFields = {
+        'stage': 'native', 'result': configured.ok ? 'ok' : 'fail', 'detail': detail
+      };
+      this.diagMilestone('vpn_log_tee', milestoneFields);
+    }
+  }
+
+  // The ONE sink both diagnostic modules share. Cheap and non-throwing by
+  // contract (it runs inside the diagnostics drain loop and on the
+  // system-event callback thread); the wrapper answers a code on any native
+  // failure, so a broken log can never reach the VPN path.
+  private diagSink(line: string): void {
+    try {
+      phoneLogAppend(line);
+    } catch (error) {
+      // unreachable through the wrapper; belt only, never into the VPN path
+    }
+  }
+
+  // One shell milestone. Enqueue-only (bounded queue inside the helper): no
+  // disk IO on this stack and no throw. The native core already tees every
+  // NATIVE event, so only the shell facts it cannot see are recorded here.
+  // `fields` is the diagnostics writer's own DiagFields bag; call sites declare
+  // it in a typed constant (ArkTS rejects a bare object literal passed
+  // straight into a Record-typed parameter).
+  private diagMilestone(name: string, fields: DiagFields): void {
+    try {
+      diagEvent(name, fields);
+    } catch (error) {
+      // never into the VPN path
+    }
+  }
+
+  // Writer health ONCE per minute, riding the EXISTING 5 s watcher tick (no
+  // second timer, no per-tick write). The native counters are the only view of
+  // records the file itself cannot show: refused at ingress (dropped, named
+  // separately as rate_suppressed) and accepted-but-not-written (pending /
+  // failed). Only the counters leave this function — never the raw path or the
+  // session token.
+  private samplePhoneLogStatus(): void {
+    const now: number = Date.now();
+    if (now - this.lastPhoneLogStatusAtMs < PHONE_LOG_STATUS_SAMPLE_MS) {
+      return;
+    }
+    this.lastPhoneLogStatusAtMs = now;
+    const summary: PhoneLogSummary = phoneLogSummary(phoneLogStatus());
+    const milestoneFields: DiagFields = {
+      'stage': 'native', 'state': summary.state, 'detail': summary.detail
+    };
+    this.diagMilestone('phone_log_status', milestoneFields);
+    // 006: the native resource snapshot rides the SAME 60 s gate and the SAME
+    // tick (one extra native read, no second timer, nothing per 5 s tick): the
+    // counts are correlated with the sample above by the records' own ts/pid.
+    this.sampleNativeResourceStatus();
+  }
+
+  // 006 native resource snapshot, ONCE per 60 s and ONLY as the tail of the
+  // writer-health window above (same gate, same tick instant). The native
+  // document is read through the defensive NetBirdConnector wrapper: a missing
+  // export, a throw or an unparseable/malformed document answers null and every
+  // leaf then renders the explicit `na` — the probe can neither invent a zero
+  // nor break the watcher.
+  //
+  // TWO records, not one: the 22 scalar leaves do not fit one bounded
+  // (< MAX_LINE_CHARS) line, and the record builder would SILENTLY cut the
+  // tail. `stage` labels the group and `seq` its order, so no leaf is dropped;
+  // an extra interval or a per-5 s write is deliberately NOT added.
+  private sampleNativeResourceStatus(): void {
+    const sample: NativeResourceSample = nativeResourceSample(connectorResourceStatus());
+    const connectorFields: DiagFields = {
+      'stage': 'connector', 'seq': 1,
+      'conn_present': sample.conn_present, 'conn_gen': sample.conn_gen,
+      'conn_running': sample.conn_running, 'conn_state': sample.conn_state,
+      'conn_starts': sample.conn_starts, 'conn_stops': sample.conn_stops,
+      'ice_available': sample.ice_available, 'ice_sessions': sample.ice_sessions,
+      'ice_live': sample.ice_live, 'ice_stopped': sample.ice_stopped,
+      'ice_fds': sample.ice_fds
+    };
+    this.diagMilestone('native_resource_sample', connectorFields);
+    const transportFields: DiagFields = {
+      'stage': 'transport', 'seq': 2,
+      'icesock_ready': sample.icesock_ready, 'icesock_queued': sample.icesock_queued,
+      'icesock_taken': sample.icesock_taken, 'supply_installed': sample.supply_installed,
+      'supply_pending': sample.supply_pending, 'supply_queued': sample.supply_queued,
+      'relay_ready': sample.relay_ready, 'relay_lanes': sample.relay_lanes,
+      'relay_opens': sample.relay_opens, 'relay_foreign': sample.relay_foreign,
+      'dns_pending': sample.dns_pending
+    };
+    this.diagMilestone('native_resource_sample', transportFields);
   }
 
   private watchPhysicalNetwork(): void {
@@ -1072,6 +1303,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.networkNetId = netId;
     this.networkDirty = true;
     this.networkEpoch++;
+    // 2026-10-08: the physical loss/switch edge as ONE persistent record
+    // (mode=network-lost|redial). The shell hilog line above is not part of
+    // netbird-vpn.log (only the NATIVE funnel is teed), so this is the copy
+    // that survives without a host channel.
+    const milestoneFields: DiagFields = { 'net': netId, 'mode': action, 'trigger': event };
+    this.diagMilestone('vpn_net_switch', milestoneFields);
     // 场景B roaming (§4 step 2): (re)arm the LAN-exclusion check window for
     // THIS switch. The check itself fires from the status watcher tick once
     // the network has held for LAN_ROAM_STABLE_MS (checkLanRoamRecreate); a
@@ -1179,6 +1416,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const line: string = `VPN_NETWORK_RECOVERY_FAIL|summary=${safeError(error)}`;
     hilog.warn(DOMAIN, TAG, '%{public}s', line);
     this.n2RingAppend(line);
+    // Persistent copy WITHOUT the error summary (that carries a message; the
+    // record stays a fixed token plus the stage).
+    const milestoneFields: DiagFields = { 'stage': 'physical-recovery', 'result': 'fail' };
+    this.diagMilestone('vpn_net_recovery_failed', milestoneFields);
   }
 
   private async recoverPhysicalNetwork(): Promise<void> {
@@ -1273,6 +1514,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           `netId=${String(netId)}`;
         hilog.info(DOMAIN, TAG, '%{public}s', recoveredLine);
         this.n2RingAppend(recoveredLine);
+        const milestoneFields: DiagFields = { 'net': netId };
+        this.diagMilestone('vpn_net_recovered', milestoneFields);
         // N2 first batch C/D columns: on the D column this recovery IS the
         // preparation's landing — the pre-set plan is only in position for its
         // formal 蜂窝 → Wi-Fi switch after the core recorded it.
@@ -1370,24 +1613,40 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
-    let setupKey: string;
+    let setupKey: string = '';
+    let accountJwt: string = '';
+    let authMode: string = ACCOUNT_MODE_SETUP_KEY;
     let device: DeviceConfigFile;
+    let credentialFailure: string = 'credentials-missing';
     try {
-      // DEVELOPMENT-TIME credential source, NOT secure storage (module doc
-      // + docs/n3-shell-integration-notes.md): filesDir files, with the
-      // development-only /data/local/tmp same-name override (device
-      // validation aid — hdc cannot write into the app sandbox). Missing
-      // in BOTH locations still aborts here: no credentials, no VPN.
-      setupKey = readCredentialFileText(filesDir, setupKeyFile);
-      device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
+      const modePath: string = `${filesDir}/${ACCOUNT_MODE_FILE_NAME}`;
+      if (fs.accessSync(modePath)) {
+        authMode = parseAuthMode(fs.readTextSync(modePath));
+      }
+      if (authMode === ACCOUNT_MODE_SETUP_KEY) {
+        // Preserve the existing development-time /data/local/tmp override for
+        // the legacy Setup Key and device-config files.
+        setupKey = readCredentialFileText(filesDir, setupKeyFile);
+        device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
+      } else if (authMode === ACCOUNT_MODE_ACCOUNT) {
+        credentialFailure = 'account-login-required';
+        device = parseDeviceConfig(readPrivateFileText(filesDir, deviceFile));
+        const stored = await loadAccountCredentials(filesDir, device.management_url);
+        const decision: string = decideAccountCredentialMode(authMode, stored !== null,
+          stored?.jwt ?? '', stored?.expiresAtMs ?? 0, Date.now());
+        if (decision !== ACCOUNT_MODE_ACCOUNT || stored === null) {
+          throw new Error('account-login-required');
+        }
+        accountJwt = stored.jwt;
+      } else {
+        credentialFailure = 'account-login-required';
+        throw new Error('account-login-required');
+      }
     } catch (error) {
-      // 2026-10-06 登录失败可见性: no credentials = no VPN, but the user
-      // still sees a stuck 连接中… without the persistent notice.
-      this.writeConnectFailureForUi('credentials-missing');
+      this.writeConnectFailureForUi(credentialFailure);
       hilog.error(DOMAIN, TAG,
-        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=credentials|' +
-        'errorClass=credentials-missing|summary=%{public}s',
-        this.requestId, safeError(error as Error));
+        'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=credentials|errorClass=%{public}s',
+        this.requestId, credentialFailure);
       return;
     }
 
@@ -1483,7 +1742,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
     // 4. start the connector over the protected socket (Rust dup-consumes
     // the fd per dial; the original number stays shell-owned — fd contract)
-    const creds: Record<string, Object> = { 'setup_key': setupKey };
+    const creds: Record<string, Object> = authMode === ACCOUNT_MODE_ACCOUNT
+      ? { 'jwt': accountJwt } : { 'setup_key': setupKey };
     let start: ConnectorStartResult;
     try {
       start = connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
@@ -1523,6 +1783,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId);
     }
     this.managementEndpoint = mgmtEndpoint;
+    // 2026-10-07 client-detail increment: remember the server this start
+    // dialed so the published document can name it (authority only).
+    this.managementUrl = device.management_url;
     // seed ONE spare protected socket so a single reconnect dial can
     // re-protect; further resupply policy is an N4+ increment (a starved
     // queue fails dials CLOSED — never unprotected)
@@ -4338,6 +4601,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
     this.watcherTimer = setInterval((): void => {
+      // 2026-10-08: the persistent-log writer's own health, ONCE per 60 s on
+      // this existing tick (see samplePhoneLogStatus). Deliberately the FIRST
+      // statement: it must survive every early return below, including an
+      // unreachable connector and a pending teardown.
+      this.samplePhoneLogStatus();
       // N2-H iface-bytes WINDOW close edge (v4 preregistration §4 (ii), C7
       // same-source calibration prerequisite): rides EVERY watcher trigger,
       // at the VERY TOP of the tick — BEFORE the status read and before the
@@ -4593,6 +4861,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     hilog.error(DOMAIN, TAG,
       'VPN_CONNECTOR_DEAD|requestId=%{public}s|reason=%{public}s|action=teardown-vpn',
       this.requestId, reason);
+    // 2026-10-08: "the core ended by itself" as the persistent record (fatal
+    // auth error / retry budget exhausted on `terminal-state:*`, or this
+    // shell's own repeated status-poll failures). Fixed token only.
+    const milestoneFields: DiagFields = { 'reason': reason, 'result': 'teardown-vpn' };
+    this.diagMilestone('vpn_core_dead', milestoneFields);
     // 2026-10-06 登录失败可见性: a TERMINAL connector (login fatal auth /
     // retry budget exhausted) leaves no live status document once the
     // teardown below removes it — persist the failure class first so the
@@ -4687,6 +4960,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.recreateInFlight = true;
     hilog.info(DOMAIN, TAG,
       'VPN_RECREATE_BEGIN|requestId=%{public}s|reason=%{public}s', this.requestId, reason);
+    const milestoneFields: DiagFields = { 'reason': reason };
+    this.diagMilestone('vpn_recreate_begin', milestoneFields);
     let stage: string = 'snapshot';
     try {
       if (this.n2Evidence !== undefined) {
@@ -4937,6 +5212,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'defaultRoutes=%{public}d|recreateCount=%{public}s',
         this.requestId, fd, merged.routes.length, defaultRoutes,
         String(ack.recreate !== undefined && ack.recreate !== null ? ack.recreate.count : -1));
+      const recreateFields: DiagFields = { 'result': 'ok', 'count': merged.routes.length };
+      this.diagMilestone('vpn_recreate_done', recreateFields);
       // roam-1005-0014 A.2: one delayed recheck a few seconds after DONE —
       // the observed teardown race could land AFTER the immediate
       // verification passed (the device lost the interface somewhere inside
@@ -5189,6 +5466,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'VPN_RECREATE_FAIL|requestId=%{public}s|stage=%{public}s|' +
       'action=teardown-vpn-fail-closed|summary=%{public}s',
       this.requestId, stage, safeError(error));
+    const milestoneFields: DiagFields = { 'stage': stage, 'result': 'fail' };
+    this.diagMilestone('vpn_recreate_failed', milestoneFields);
     this.stopStatusAndNetcfgWatcher();
     try {
       const stop = connectorStop();
@@ -5933,8 +6212,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       const ifacePresent: boolean | undefined = ifacePresence === 'present'
         ? true : (ifacePresence === 'absent' ? false : undefined);
+      // 2026-10-07 client-detail increment: the management authority (host +
+      // port + scheme) rides the published document when this process has
+      // parsed a management url; the URL string itself is never published.
       const doc: UiStatusDocument = buildUiStatusDocument(status, network,
-        this.requestId, Date.now(), ifacePresent);
+        this.requestId, Date.now(), ifacePresent, this.managementUrl,
+        this.managementEndpoint);
       file = fs.openSync(path, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, JSON.stringify(doc));
       const uiSignature: string = `${doc.state}|${doc.address !== null}|` +
@@ -6217,6 +6500,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.destroyRequested = true;
     this.stopStatusAndNetcfgWatcher();
     this.n2RingStopStats();
+    const milestoneFields: DiagFields = { 'stage': 'onDestroy', 'state': 'latched' };
+    this.diagMilestone('vpn_lifecycle_stop', milestoneFields);
+    // 2026-10-08: the system-event subscription dies with the extension
+    // lifecycle; its closing line (and the suppressed-duplicate count of its
+    // dedup window) goes through the SAME sink while the native tee is up.
+    // The DIAGNOSTICS helper is stopped LATER on purpose — in the destroyOnce
+    // continuation below, because its stop() drains the queue through a
+    // promise chain and the teardown's closing records must be enqueued first.
+    // The native writer itself is never stopped (process lifetime).
+    stopSystemEvents();
     try {
       const stop = connectorStop();
       hilog.info(DOMAIN, TAG,
@@ -6233,17 +6526,40 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // lines of the session). The counters are therefore reported and the ring
     // disabled only AFTER the destroy settled; the FILE always stays for the
     // operator to fetch after returning to Wi-Fi.
+    // 006 observational lifecycle probe (NO stop-marker semantics change): the
+    // destroy leg is entered, and the EXISTING continuations report whether it
+    // settled or failed. Only `phase`/`stage` of the already-whitelisted field
+    // set leave here — no error summary, no "clean" marking (the marker is
+    // still written by the late stopDiagnostics() only, after cleanup).
+    const destroyRequestedFields: DiagFields = { 'phase': 'requested', 'stage': 'destroy' };
+    this.diagMilestone('vpn_destroy_phase', destroyRequestedFields);
+    let destroyFailed: boolean = false;
     this.destroyOnce('onDestroy').catch((error: Error) => {
+      destroyFailed = true;
+      const destroyFailedFields: DiagFields = { 'phase': 'failed', 'stage': 'destroy' };
+      this.diagMilestone('vpn_destroy_phase', destroyFailedFields);
       hilog.error(DOMAIN, TAG,
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=unexpected|summary=%{public}s',
         this.requestId, safeError(error));
     }).then((): void => {
+      if (!destroyFailed) {
+        const destroySettledFields: DiagFields = { 'phase': 'settled', 'stage': 'destroy' };
+        this.diagMilestone('vpn_destroy_phase', destroySettledFields);
+      }
       try {
         core.n2_ring_status();
       } catch (error) { /* no ring configured: nothing to report */ }
       try {
         core.n2_ring_disable();
       } catch (error) { /* the file is already on disk */ }
+      // 2026-10-08 LATE diagnostics stop — deliberately AFTER destroyOnce has
+      // settled: every record the teardown enqueued (destroy, fd, connector
+      // stop) is already in the queue, so stop() writes the clean marker and
+      // drains them through its own promise chain. The native phone_log writer
+      // is NOT shut down here: it keeps the process's log open until the OS
+      // ends the extension process (a shutdown request would only race this
+      // asynchronous drain and could lose the closing records).
+      stopDiagnostics();
     });
   }
 
@@ -6330,6 +6646,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     const path: string = `${this.context.filesDir}/${CONNECT_FAILURE_FILE_NAME}`;
     try {
       const token: string = clean(errorClass.length > 0 ? errorClass : 'none');
+      // 2026-10-08: the ONE funnel every "the VPN never reached a live tunnel"
+      // abort goes through (missing credentials, refused connector start, the
+      // network-map box expiring without a map, a terminal connector death) —
+      // so the persistent log carries the same class the UI notice carries,
+      // next to the reason the core itself logged.
+      const milestoneFields: DiagFields = { 'stage': 'connect-failure', 'reason': token };
+      this.diagMilestone('vpn_start_failed', milestoneFields);
       const file: fs.File = fs.openSync(path,
         fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       fs.writeSync(file.fd, `{"at_ms":${Date.now()},"error_class":"${token}"}`);
@@ -6424,6 +6747,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       hilog.info(DOMAIN, TAG,
         'VPN_DESTROY_RESOLVED|requestId=%{public}s|fdOpen=%{public}s|fdMarker=%{public}s',
         this.requestId, String(postDestroy.open), marker);
+      // 2026-10-08: the teardown's own outcome, recorded from INSIDE
+      // runDestroyOnce so it covers every trigger (onDestroy, connector death,
+      // recreate fail-closed, invalid create) — and so it is enqueued before
+      // onDestroy's late Diagnostics.stop() drains the queue.
+      const milestoneFields: DiagFields = {
+        'result': 'ok', 'stage': 'destroy', 'trigger': this.destroyTrigger
+      };
+      this.diagMilestone('vpn_destroy_done', milestoneFields);
     } catch (error) {
       const postDestroy: FdSnapshot = this.captureFdStatus();
       const marker: string = this.postDestroyMarker(postDestroy);
@@ -6432,6 +6763,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_DESTROY_REJECTED|requestId=%{public}s|phase=destroy|fdOpen=%{public}s|' +
         'fdMarker=%{public}s|summary=%{public}s',
         this.requestId, String(postDestroy.open), marker, safeError(error as Error));
+      const milestoneFields: DiagFields = {
+        'result': 'fail', 'stage': 'destroy', 'trigger': this.destroyTrigger
+      };
+      this.diagMilestone('vpn_destroy_done', milestoneFields);
     }
 
     this.auditOutboundSocketAfterDestroy();

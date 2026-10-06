@@ -12,7 +12,11 @@
 //!    the gather dups + binds the dup, and the dup shares the open-file
 //!    description with the original (an own-socket cheat would leave the
 //!    provided fd unbound);
-//! 3. the mock only ever sees datagrams sourced from that port.
+//! 3. the mock only ever sees datagrams sourced from that port;
+//! 4. the bound socket is handed over ALIVE (`GatheredSocket`) and the session
+//!    that adopts it advertises/sends/receives on that same socket — the 0052
+//!    fix (see `gathered_socket_stays_live_and_carries_the_session_on_the_
+//!    advertised_port`).
 //!
 //! All timings are deadlines under test (150 ms timeout case), never sleeps
 //! as assertions. Offline: loopback + literal IPs only, no DNS.
@@ -29,6 +33,12 @@ use netbird_core::ice::{
 };
 use netbird_core::management::ManagementError;
 use netbird_core::stun::MAGIC_COOKIE;
+
+use netbird_core::ice_session::{
+    build_check_request, parse_stun, verify_message_integrity, CheckRequest, IceCredentials,
+    IceSession,
+};
+use netbird_core::stun::{random_transaction_id, BINDING_REQUEST, BINDING_SUCCESS};
 
 // --- host-test link surface (same as tests/management_grpc.rs): the test
 // --- binary links the whole crate rlib on the host triple, where
@@ -135,6 +145,7 @@ extern "C" {
     fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
     fn close(fd: i32) -> i32;
     fn getsockname(fd: i32, addr: *mut SockAddrIn, len: *mut u32) -> i32;
+    fn bind(fd: i32, addr: *const SockAddrIn, len: u32) -> i32;
 }
 
 #[repr(C)]
@@ -159,6 +170,21 @@ fn fd_port(fd: i32) -> u16 {
     let mut len = std::mem::size_of::<SockAddrIn>() as u32;
     assert_eq!(unsafe { getsockname(fd, &mut a, &mut len) }, 0, "getsockname");
     u16::from_be(a.port)
+}
+
+/// `sockaddr_in` for the raw bind probe (AF_INET, big-endian port).
+fn sa(addr: [u8; 4], port: u16) -> SockAddrIn {
+    SockAddrIn { family: 2, port: port.to_be(), addr, zero: [0; 8] }
+}
+
+/// Can a fresh socket take `addr:port` RIGHT NOW? `false` = a live socket
+/// (ours) currently owns the address — the ownership probe the 0052 tests use.
+/// No `SO_REUSEADDR` anywhere, so a held `addr:port` is an honest EADDRINUSE.
+fn port_is_free(addr: [u8; 4], port: u16) -> bool {
+    let fd = unbound_udp_fd();
+    let rc = unsafe { bind(fd, &sa(addr, port), std::mem::size_of::<SockAddrIn>() as u32) };
+    unsafe { close(fd) };
+    rc == 0
 }
 
 // --- mock STUN server ------------------------------------------------------
@@ -615,4 +641,189 @@ fn system_interfaces_list_works_on_this_host() {
 fn resolve_ipv4_hostname_loads_libc_on_this_host() {
     let got = netbird_core::ice::resolve_ipv4("localhost").expect("getaddrinfo via libc fallback");
     assert_eq!(got, [127, 0, 0, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// 0052: gathered-socket ownership — the advertised host/base port and the
+// STUN mapping must belong to the SAME still-live socket the session uses.
+// ---------------------------------------------------------------------------
+
+/// THE 0052 regression: the socket the gather binds AND uses for its STUN
+/// exchange is handed to the session alive (`GatheredSocket` →
+/// `add_local_candidate_bound`), so the advertised host port and the srflx
+/// mapping's base are that same socket — and it really carries the session's
+/// checks in both directions.
+///
+/// Pre-fix shape this test rejects: the gather closed its socket before
+/// returning; `ensure_locals` then bound a SECOND socket on a fresh ephemeral
+/// port, so the signaled host port was never used by any STUN exchange and
+/// `srflx.related_port` pointed at a dead mapping — the peer's checks to the
+/// advertised srflx address landed on a closed socket.
+#[test]
+fn gathered_socket_stays_live_and_carries_the_session_on_the_advertised_port() {
+    let mock = MockStun::spawn(MockMode::Echo);
+    let mut provider = ProviderFixture::with_fds(1);
+    let ifaces = StaticInterfaces(vec![iface("eth0", [127, 0, 0, 1])]);
+    let servers = vec![netbird_core::ice::parse_stun_uri(&mock.uri()).expect("uri")];
+    let cfg = GatherConfig { blacklist: &DEFAULT_INTERFACE_BLACKLIST, servers: &servers, timeout_ms: 1500 };
+
+    let mut result = gather_candidates(&cfg, &ifaces, &provider.source).expect("gather ok");
+    assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
+    assert_eq!(result.host.len(), 1);
+    assert_eq!(result.srflx.len(), 1);
+    assert_eq!(result.sockets.len(), 1, "the gather must hand its bound socket over");
+
+    let host = result.host[0].clone();
+    let srflx = result.srflx[0].clone();
+    let sock = result.sockets.remove(0);
+    assert_eq!(sock.cand, host, "the handed-over socket backs exactly this host candidate");
+    assert_ne!(host.port, 0, "the host candidate carries the bound port");
+    // The STUN exchange that produced the mapping rode THIS socket.
+    assert_eq!(mock.seen_source_ports(), vec![host.port]);
+    // The mapping's base is the host candidate — and therefore this socket.
+    assert_eq!(srflx.related_address.as_deref(), Some(host.address.as_str()));
+    assert_eq!(srflx.related_port, Some(host.port));
+
+    // The fixture's ORIGINAL descriptor shares the socket object with the
+    // gather's dup; close it so the port probe below observes EXACTLY the
+    // gathered socket's ownership (pre-fix nothing was left holding the
+    // object, so the advertised port was free again).
+    let original = provider.fds.remove(0);
+    unsafe { close(original) };
+
+    // REGRESSION PROOF: right after the gather the advertised port is STILL
+    // HELD by the gathered socket. Pre-fix the gather had closed it, so this
+    // probe succeeded.
+    assert!(
+        !port_is_free([127, 0, 0, 1], host.port),
+        "the gather must keep its bound socket alive (port {} must still be held)",
+        host.port
+    );
+
+    // Session adopts the transferred socket — NO second protected socket.
+    let local_creds = IceCredentials {
+        ufrag: "LOCALufragXXXXXX".into(),
+        pwd: "0123456789012345678901".into(),
+    };
+    let remote_creds = IceCredentials {
+        ufrag: "REMOTEufragXXXXX".into(),
+        pwd: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef".into(),
+    };
+    let mut session =
+        IceSession::new(local_creds.clone(), true, Some(0x0102_0304_0506_0708)).expect("session");
+    session.set_remote_credentials(remote_creds.clone()).expect("remote creds");
+    let bound = session
+        .add_local_candidate_bound(sock.cand.clone(), sock.fd)
+        .expect("adopt the bound socket");
+    assert_eq!(bound, host, "the session's local candidate IS the gathered candidate");
+    assert_eq!(provider.source.taken(), 1, "adoption must not take a second socket");
+
+    // Remote peer = a real loopback socket (the remote candidate).
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("peer bind");
+    peer.set_read_timeout(Some(Duration::from_millis(500))).expect("read timeout");
+    let peer_port = peer.local_addr().expect("peer addr").port();
+    session.add_remote_candidate(Candidate::host_candidate([127, 0, 0, 1], peer_port));
+    session.start().expect("start");
+
+    // (1) SENDING: the check physically leaves from the advertised port.
+    session.run_once(1_000).expect("pump");
+    let mut buf = [0u8; 1500];
+    let (n, src) = peer.recv_from(&mut buf).expect("the peer must receive our check");
+    assert_eq!(src.port(), host.port, "checks must be sourced from the advertised host port");
+    assert_eq!(src.port(), srflx.related_port.unwrap(), "…which is the srflx base port");
+    let parsed = parse_stun(&buf[..n]).expect("check parses");
+    assert_eq!(parsed.msg_type, BINDING_REQUEST);
+    assert!(verify_message_integrity(&buf[..n], &parsed, &remote_creds.pwd));
+
+    // (2) RECEIVING on the srflx MAPPED address/port: a valid Binding Request
+    // to the mapping must reach the session on that same socket and be
+    // answered. Pre-fix the mapping pointed at a closed socket — no listener,
+    // no answer, ever.
+    let txn = random_transaction_id().expect("entropy");
+    let req = build_check_request(
+        &CheckRequest {
+            username: format!("{}:{}", local_creds.ufrag, remote_creds.ufrag),
+            priority: 1,
+            controlling: false,
+            tie_breaker: 7,
+            use_candidate: false,
+            integrity_key: local_creds.pwd.clone(),
+        },
+        txn,
+    );
+    let mapped: SocketAddr = format!("{}:{}", srflx.address, srflx.port).parse().expect("mapped addr");
+    peer.send_to(&req, mapped).expect("send to the mapped address");
+    let mut answered = None;
+    for i in 0..100 {
+        session.run_once(2_000 + i as u64).expect("pump");
+        match peer.recv_from(&mut buf) {
+            Ok((n, src)) => {
+                // Retransmitted checks may arrive first (RTO fired); only the
+                // matching success response is the answer under test.
+                if let Ok(p) = parse_stun(&buf[..n]) {
+                    if p.msg_type == BINDING_SUCCESS && p.txn == txn {
+                        answered = Some((n, src));
+                        break;
+                    }
+                }
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    let (n, _src) = answered.expect("the session must answer on the mapped srflx address");
+    let resp = parse_stun(&buf[..n]).expect("response parses");
+    assert_eq!(resp.msg_type, BINDING_SUCCESS);
+    assert_eq!(resp.txn, txn);
+    assert!(
+        verify_message_integrity(&buf[..n], &resp, &local_creds.pwd),
+        "the answer is keyed with our own password"
+    );
+    assert_eq!(session.health().inbound_reqs, 1);
+    assert_eq!(session.health().inbound_ok, 1);
+
+    // (3) OWNERSHIP CLEANUP: stop() closes exactly the adopted fd — the port
+    // is released (and was still held a moment ago).
+    assert!(!port_is_free([127, 0, 0, 1], host.port), "still owned before stop");
+    session.stop();
+    assert!(
+        port_is_free([127, 0, 0, 1], host.port),
+        "session stop() must close the adopted socket (port {} released)",
+        host.port
+    );
+}
+
+/// 0052 ownership on the FAILURE path: an interface round whose bind fails
+/// closes the socket it took exactly once (no leak) and hands nothing over.
+///
+/// Deterministic and fd-number-free: the fed socket is ALREADY bound, so the
+/// gather's re-bind fails with EINVAL; the test's own original descriptor is
+/// closed first, which leaves the gather's copy as the ONLY descriptor of
+/// that socket object — the port probe therefore observes exactly its
+/// lifetime (a leak keeps the port held, one close releases it).
+#[test]
+fn failed_interface_round_closes_the_taken_socket() {
+    use std::os::fd::IntoRawFd;
+
+    let owned = std::net::UdpSocket::bind("127.0.0.1:0").expect("pre-bound socket");
+    let port = owned.local_addr().expect("addr").port();
+    let raw = owned.into_raw_fd();
+    let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+    source.feed(raw).expect("feed");
+    unsafe { close(raw) }; // only the provider's dup remains
+
+    let ifaces = StaticInterfaces(vec![iface("eth0", [127, 0, 0, 1])]);
+    let cfg = GatherConfig { blacklist: &DEFAULT_INTERFACE_BLACKLIST, servers: &[], timeout_ms: 100 };
+
+    let err = gather_candidates(&cfg, &ifaces, &source)
+        .expect_err("re-binding an already-bound socket must fail closed");
+    assert!(
+        matches!(&err, ManagementError::Network(t) if t.contains("stun-bind-failed")),
+        "wrong failure: {err:?}"
+    );
+    assert_eq!(source.taken(), 1, "exactly one socket attempted for one interface");
+    assert_eq!(source.pending(), 0, "the taken socket is never recycled into the pool");
+    assert!(
+        port_is_free([127, 0, 0, 1], port),
+        "the failed gather must close the socket it took (port {port} released; a leak holds it)"
+    );
 }

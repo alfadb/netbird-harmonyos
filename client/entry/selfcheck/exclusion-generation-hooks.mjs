@@ -752,7 +752,15 @@ const STUBS = {
   '@ohos.net.vpnExtension': VPN_EXT,
   '@ohos.resourceManager': EMPTY,
   '@ohos.util': UTIL,
-  'libnetbird_core.so': CORE
+  'libnetbird_core.so': CORE,
+  '../login/NetBirdAccountMode': 'data:text/javascript,' + encodeURIComponent(
+    'export const ACCOUNT_MODE_ACCOUNT = "account";\n' +
+    'export const ACCOUNT_MODE_FILE_NAME = "netbird-auth-mode";\n' +
+    'export const ACCOUNT_MODE_SETUP_KEY = "setup-key";\n' +
+    'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
+    ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
+    'export const decideAccountCredentialMode = () => "account-login-required";'),
+  '../login/NetBirdAccountStore': 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D'
 };
 
 // Sibling modules of the extension: the ESM link would fail on the erased
@@ -796,7 +804,19 @@ const SHIMS = {
   // (erased shapes N2CdPlanDecision / N2CdPlanRequest / N2BearerFacts) and the
   // ring pure module (N2RingDumpDecision / N2RingDumpRequest).
   './NetBirdN2CdPlan': 'NetBirdN2CdPlan.shim.ts',
-  './NetBirdN2Ring': 'NetBirdN2Ring.shim.ts'
+  './NetBirdN2Ring': 'NetBirdN2Ring.shim.ts',
+  // Diagnostics wiring (2026-10-08): the REAL extension and the REAL
+  // EntryAbility now import the diagnostics writer (start/event/stop, plus
+  // appendSystemEvent for the UI's watcher sink) and the system-event watcher
+  // (start/stop). Neither module takes any part in route-exclusion generation —
+  // their platform IO (hidebug / hiAppEvent) is exactly what this host fixture
+  // cannot run — so each specifier resolves to a no-op bridge staged next to
+  // the byte-identical fixtures. The two modules' own behaviour is host-checked
+  // by run-diagnostics.mts and run-system-events.mts, never here.
+  './NetBirdDiagnostics': 'NetBirdDiagnostics.shim.ts',
+  './NetBirdSystemEvents': 'NetBirdSystemEvents.shim.ts',
+  '../vpnextensionability/NetBirdDiagnostics': 'NetBirdDiagnostics.shim.ts',
+  '../vpnextensionability/NetBirdSystemEvents': 'NetBirdSystemEvents.shim.ts'
 };
 
 export function resolve(specifier, context, next) {

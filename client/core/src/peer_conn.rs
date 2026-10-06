@@ -38,11 +38,19 @@
 //!   `client/internal/peer/conn.go:444-478`）。
 //! - **keepalive 4s / 断连回落 relay**：`conn.go:489-520` —— 本增量不做
 //!   relay：Disconnected/Failed 的 peer 标记不可达（绝不静默当作可用）。
-//! - **角色**：RFC 8445 的 controlling/controlled 不在 signal 报文里；
-//!   本编排的初始角色是**本地决策**——主动发 OFFER 的一方 controlling、
-//!   应答方 controlled；双方同时 OFFER（glare）时两边都 controlling，
-//!   由 N5b 已实现的 §7.3.1.1/§7.2.5.1 tie-breaker 修复收敛
-//!   （`crate::ice_session` 模块文档「Role conflict」节，N5b 已测）。
+//! - **角色**：RFC 8445 的 controlling/controlled 不在 signal 报文里。
+//!   官方客户端的角色是**公钥比较**的本地决策（`client/internal/peer/
+//!   conn.go` `isController = LocalKey > Key`；worker_ice.go `agentDial`
+//!   在收到 Offer 或 Answer 后按同一比较选 `Dial`(controlling)/
+//!   `Accept`(controlled)）。本编排复制同一语义（
+//!   [`deterministic_controlling`]）：本端公钥大 → controlling，与谁
+//!   发 Offer 无关 —— 双侧独立计算同一反称比较，任意时刻角色互补，
+//!   glare（双方同时 OFFER）不再依赖 tie-breaker 收敛（官方对端的
+//!   pion/ice 不实现 RFC 8445 §7.3.1.1：静默丢弃角色冲突检查、不回
+//!   487，"双方都 controlling"即永久死锁）。tie-breaker 语义保留为
+//!   防御性兜底（ice_session 已测）。本端公钥未注入（无 signal 材料
+//!   的构造）时回退旧规则：主动发 OFFER 的一方 controlling、应答方
+//!   controlled。
 //!
 //! ## 受保护 socket（治理 §二.4，fail-closed）
 //!
@@ -84,10 +92,10 @@ use crate::connector::{ErrorClass, WgPeerApplier};
 use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::GrpcTransport;
 use crate::ice::{
-    Candidate, GatherConfig, InterfaceSource, StunServer, UdpSocketSource,
+    Candidate, CandidateType, GatherConfig, InterfaceSource, StunServer, UdpSocketSource,
     DEFAULT_INTERFACE_BLACKLIST, DEFAULT_STUN_TIMEOUT_MS,
 };
-use crate::ice_session::{IceCredentials, IceEvent, IceSession};
+use crate::ice_session::{IceCredentials, IceEvent, IceSession, PairState};
 use crate::management::ManagementError;
 use crate::mgmtsock::ManagementSocketProvider;
 use crate::signal::{SignalClient, SignalLoopEvent, SignalMessage, SignalOutgoing, SignalSession};
@@ -122,6 +130,19 @@ pub const HANDSHAKE_RETRY_MS: u64 = 3000;
 /// worker_ice.go:584-593 / conn.go:495-534）。已 `start()` 的会话不适用
 /// ——其死亡由 keepalive/断连/全对失败事件驱动，不由此超时判定。
 pub const START_DEADLINE_MS: u64 = 3 * HANDSHAKE_RETRY_MS;
+
+/// Checking 看门狗（注入时钟衡量）：会话已 `start()` 进入 Checking 后，
+/// 这么长时间内没有任何检查成功（无 selected pair、无 [`IceEvent::
+/// CheckSucceeded`]）即判 failed、拆除会话并允许全新协商。
+///
+/// 为什么需要它（ICE-DIRECT-FAILURE-ANALYSIS §2.3，真机 2026-10-05）：
+/// `all-pairs-failed` 会被"新候选持续流入 → 新 pair 进 Waiting"永久掩盖，
+/// `Disconnected` 只在收到过有效入站后才可能触发 —— start 后永不成功的
+/// 会话没有任何终态信号，能僵死数小时（对端显示我们一直 Connecting）。
+pub const CHECKING_WATCHDOG_MS: u64 = 18_000;
+
+/// 周期性健康摘要的间隔（每个有会话的 peer 一行，§5 item 5）。
+pub const HEALTH_SUMMARY_MS: u64 = 10_000;
 
 /// 「远端静默」退避的触发门槛（0051 §7 item 2）：连续这么多次
 /// `negotiation-start-timeout`、且**期间从未**收到该 peer 任何信令
@@ -574,6 +595,64 @@ pub struct PeerIceStatus {
     pub last_error: Option<ErrorClass>,
 }
 
+/// selected pair 的一个端点（公开摘要：候选类型 + ip:port）。
+///
+/// 只投影 [`Candidate`] 中与状态展示有关的三个字段：`foundation` /
+/// `priority` / `related_address` 属检查内部材料，与状态无关，不进暴露面。
+/// 无凭证、无 fd、无口令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IceCandidateEndpoint {
+    /// 候选类型（host/srflx/prflx/relay，与 signal 线上的 [`CandidateType::as_str`] 同名）。
+    pub typ: CandidateType,
+    /// 点分四段 IPv4 字符串（与 [`Candidate::address`] 同一编码域）。
+    pub address: String,
+    pub port: u16,
+}
+
+impl IceCandidateEndpoint {
+    fn of(cand: &Candidate) -> Self {
+        IceCandidateEndpoint { typ: cand.typ, address: cand.address.clone(), port: cand.port }
+    }
+}
+
+/// 单 peer 的 ICE 细节快照（`connector_status()` 的 per-peer 明细输入；
+/// 全公开材料，无凭证/ufrag/口令/fd）。
+///
+/// 与 [`PeerIceStatus`] 的分工：`PeerIceStatus` 是默认路由闸/可用性判定的
+/// 输入（`selected_remote` 是落配用的 `[u8;4] + port`），本类型是**展示**
+/// 面——同一个 selected pair 连同候选类型一起给出，供 status JSON 直接
+/// 投影。可用性/落配两个事实与 `PeerIceStatus` 同源（`PeerConn::status`）。
+///
+/// 数据源是**调用时的活会话**（[`IceSession::selected_pair`]），不是缓存：
+/// 迟到候选、重选 pair、会话拆除都在下一次调用如实反映；未选出 selected
+/// pair 时两个端点都是 `None`（未选中就是未知，绝不回退到第一个候选）。
+///
+/// 刻意不含的两项（本增量不做，避免编造）：
+/// - 检查 RTT：会话与 pair 都不保留它（只随 [`IceEvent::CheckSucceeded`] /
+///   [`IceEvent::SelectedPair`] 瞬时出现并被日志消费），要展示须先在会话/
+///   编排里如实留存；
+/// - 状态变更时刻：没有这样的既有字段（`session_at_ms` 是会话建立时刻，
+///   `checking_since_ms` 是 Checking 看门狗的计时起点、每次检查成功都滑动
+///   重置），两者都不是「上一次状态变更」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIceDetail {
+    /// 远端 peer 的 base64 WG 公钥（公开材料）。
+    pub pub_key: String,
+    pub state: PeerIceState,
+    /// 当前会话角色（`None` = 会话未建立）。
+    pub controlling: Option<bool>,
+    /// selected pair 的本地端点（类型 + ip:port）；`None` = 尚无 selected pair。
+    pub selected_local: Option<IceCandidateEndpoint>,
+    /// selected pair 的对端端点；`None` 语义同上。
+    pub selected_remote: Option<IceCandidateEndpoint>,
+    /// WG endpoint 落配已成功（与 [`PeerIceStatus::endpoint_applied`] 同一事实）。
+    pub endpoint_applied: bool,
+    /// 可用 = Connected 且 endpoint 落配成功（与 [`PeerIceStatus::reachable`] 同一事实）。
+    pub reachable: bool,
+    /// 最后一次错误的分类（无消息文本，密钥纪律同 connector）。
+    pub last_error: Option<ErrorClass>,
+}
+
 /// 全体 peer 的 ICE 汇总（`connector_status()` 的 `ice` 字段）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IceOrchestratorSummary {
@@ -640,6 +719,35 @@ pub fn ice_ready_for_default_route(summary: &IceOrchestratorSummary) -> bool {
 /// 格式" a property of the code instead of a convention.
 pub(crate) fn peer_short(key: &str) -> String {
     key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
+}
+
+/// ICE controlling 角色的确定性决胜（官方语义，`client/internal/peer/conn.go`：
+/// `isController(config) = config.LocalKey > config.Key` —— 本端 WG 公钥的
+/// base64 字符串**大于**对端公钥 → 本端 controlling；否则 controlled。
+/// worker_ice.go `agentDial` 在收到 Offer **或** Answer 后按同一比较选择
+/// `Dial`（controlling）/`Accept`（controlled）—— 即角色与"谁发的 Offer"
+/// 完全无关，双方独立计算同一反称比较，结果必然互补。
+///
+/// 为什么必须复制这一语义而不是依赖 RFC 8445 §7.3.1.1 的 tie-breaker
+/// （ICE-DIRECT-FAILURE-ANALYSIS §2.2，H1 根因）：官方对端用的 pion/ice
+/// **不实现**角色冲突修复 —— 入站 Binding Request 带冲突角色属性时被
+/// **静默丢弃**（不回 487），ErrorResponse（487）也被丢弃，`isControlling`
+/// 在 start 后永不改变。若两侧从 t0 起都 controlling（双方都主动发
+/// Offer 的 glare 场景），检查双向被丢、我方 487 被丢 → 永久死锁。角色
+/// 在会话创建时即由公钥比较确定，任意时刻双侧互补，检查层的
+/// tie-breaker 退化为防御性兜底而不再是收敛的必要条件。
+///
+/// `local = None`（本端公钥未知，仅测试/无 signal 材料的构造）返回
+/// `None`，调用方回退旧规则（发起方 controlling、应答方 controlled）；
+/// 生产两条 start 路径都带 signal 材料（= WG 密钥对），永不落入回退。
+pub fn deterministic_controlling(local: Option<&str>, remote: &str) -> Option<bool> {
+    local.map(|l| l > remote)
+}
+
+/// [`PeerIceOrchestrator`] 的角色决策（见 [`deterministic_controlling`]）：
+/// 已知本端公钥 → 公钥比较；未知 → `fallback`（调用方传入旧规则）。
+fn session_role(local_key: Option<&str>, remote_key: &str, fallback: bool) -> bool {
+    deterministic_controlling(local_key, remote_key).unwrap_or(fallback)
 }
 
 /// [`PeerIceOrchestrator::ensure_locals`] 的本次结果。
@@ -724,6 +832,14 @@ struct PeerConn {
     /// 已按哪个 `misses` 值记过 `initiate-backoff` 行（进入 + 每次升级各
     /// 一行；升级间隔按指数增长）。
     backoff_logged_misses: u32,
+    /// Checking 看门狗的计时起点（注入时钟；0 = 未在计时，即会话未 start
+    /// 或已终态）。[`CHECKING_WATCHDOG_MS`] 内没有任何检查成功（无
+    /// [`IceEvent::CheckSucceeded`]/selected pair）→ 判 failed 重协商；
+    /// 每次检查成功滑动重置。会话拆除/回滚时清零。
+    checking_since_ms: u64,
+    /// 上一次输出健康摘要行的时刻（0 = 尚未输出过；见
+    /// [`HEALTH_SUMMARY_MS`]）。
+    last_health_ms: u64,
 }
 
 impl PeerConn {
@@ -757,6 +873,8 @@ impl PeerConn {
             rx_since_timeout: false,
             backoff_active: false,
             backoff_logged_misses: 0,
+            checking_since_ms: 0,
+            last_health_ms: 0,
         }
     }
 
@@ -784,6 +902,37 @@ impl PeerConn {
             endpoint_applied: self.endpoint_applied,
             reachable: self.state == PeerIceState::Connected && self.endpoint_applied,
             last_error: self.last_error,
+        }
+    }
+
+    /// [`PeerIceDetail`] 快照：selected pair 的两个端点取自**活会话**
+    /// [`IceSession::selected_pair`]（没有会话或尚未选中 → 都是 `None`），
+    /// 角色/落配/可用三个事实复用 [`Self::status`] 的同一份派生。
+    ///
+    /// 纯读：不 take / dup / close 任何 socket，也不改会话——收集到的
+    /// socket 归属（[`IceSession`] 持有、`Drop`/`stop` 关闭）不受影响。
+    fn detail(&self) -> PeerIceDetail {
+        let status = self.status();
+        let (selected_local, selected_remote) = match self
+            .session
+            .as_ref()
+            .and_then(|s| s.selected_pair())
+        {
+            Some((local, remote)) => (
+                Some(IceCandidateEndpoint::of(&local)),
+                Some(IceCandidateEndpoint::of(&remote)),
+            ),
+            None => (None, None),
+        };
+        PeerIceDetail {
+            pub_key: status.pub_key,
+            state: status.state,
+            controlling: status.controlling,
+            selected_local,
+            selected_remote,
+            endpoint_applied: status.endpoint_applied,
+            reachable: status.reachable,
+            last_error: status.last_error,
         }
     }
 }
@@ -816,6 +965,26 @@ pub struct PeerIceDeps {
     pub advertised_candidates: Vec<Candidate>,
 }
 
+/// 006 resource snapshot: scalar-only view of the orchestrator's live ICE
+/// resources. Every field is a COUNT — no peer key, no fd, no socket, no
+/// URL — so the document built from it can never leak routing or credential
+/// material.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IceResourceCounts {
+    /// Peer entries currently holding an [`IceSession`] OBJECT, including one
+    /// [`PeerIceOrchestrator::stop_all`] already stopped (the object is
+    /// retained until the next renegotiation / peer removal drops it).
+    pub sessions_present: usize,
+    /// Sessions with [`IceSession::start`] done and no `stop` yet — the
+    /// sessions actually being pumped.
+    pub sessions_live: usize,
+    /// Sessions already stopped whose object is still retained.
+    pub sessions_stopped: usize,
+    /// Sum of [`IceSession::live_local_socket_count`] over all retained
+    /// sessions: fds this core still owns (0 after `stop_all`).
+    pub live_local_sockets: usize,
+}
+
 /// Per-peer ICE 编排器：`set_peers`（网络图）→ 发起/应答（signal seam）→
 /// `run_once`（注入时钟泵检查/keepalive/超时）→ SelectedPair 落配 WG
 /// endpoint。所有会话共享同一 [`crate::ice::UdpSocketSource`]（fd 供给方
@@ -840,6 +1009,11 @@ pub struct PeerIceOrchestrator {
     fixed_local_port: Option<u16>,
     /// HOST-ONLY（N12a）：显式对外候选（默认空 = 不通告）。
     advertised_candidates: Vec<Candidate>,
+    /// 本端 WG 公钥（base64）—— 官方 isController 角色决胜的输入（见
+    /// [`deterministic_controlling`]）。connector 在两条生产 start 路径
+    /// 都注入（signal 材料 = WG 密钥对）；None = 未知 → 会话角色回退
+    /// 旧规则（发起方 controlling、应答方 controlled）。
+    local_key: Option<String>,
 }
 
 impl PeerIceOrchestrator {
@@ -858,7 +1032,16 @@ impl PeerIceOrchestrator {
             unknown_signal: 0,
             fixed_local_port: deps.fixed_local_port,
             advertised_candidates: deps.advertised_candidates,
+            local_key: None,
         }
+    }
+
+    /// 注入本端 WG 公钥（base64，与网络图 peer `wg_pub_key` 同一编码域）：
+    /// 启用官方 isController 语义的角色决胜（[`deterministic_controlling`]）。
+    /// connector 在 orchestrator 构造后、任何会话建立前调用（生产两条
+    /// start 路径必经 signal 材料 → 必然注入）。
+    pub fn set_local_key(&mut self, key: String) {
+        self.local_key = Some(key);
     }
 
     /// `netbird_config.stuns[].uri` → 解析后的 STUN 服务器集
@@ -931,6 +1114,25 @@ impl PeerIceOrchestrator {
         self.peers.iter().find(|p| p.key == key).map(|p| p.status())
     }
 
+    /// 单个 peer 的 ICE 细节快照（[`PeerIceDetail`]；未知 key → `None`）。
+    ///
+    /// 只读、owned：不 take/dup/close 任何 socket、不改会话状态，因此受保护
+    /// socket 的归属（[`IceSession`] 持有、`Drop`/`stop` 关闭）不变；迟到
+    /// 候选与重选出的 selected pair 在每次调用时如实反映（无缓存）。
+    pub fn peer_ice_detail(&self, key: &str) -> Option<PeerIceDetail> {
+        self.peers.iter().find(|p| p.key == key).map(|p| p.detail())
+    }
+
+    /// 全部 peer 的 ICE 细节快照，按 `pub_key` 排序（与 `peer_relays` 同一
+    /// 约定：JSON 输出与网络图刷新顺序无关，逐次调用稳定）。
+    ///
+    /// `connector_status()` 的 per-peer 明细字段直接消费本返回值。
+    pub fn ice_details(&self) -> Vec<PeerIceDetail> {
+        let mut details: Vec<PeerIceDetail> = self.peers.iter().map(|p| p.detail()).collect();
+        details.sort_by(|a, b| a.pub_key.cmp(&b.pub_key));
+        details
+    }
+
     pub fn summary(&self) -> IceOrchestratorSummary {
         let mut s = IceOrchestratorSummary {
             peers: self.peers.len(),
@@ -959,11 +1161,31 @@ impl PeerIceOrchestrator {
         s
     }
 
-    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3）：**当前允许接口数 × 2**，
-    /// 与 [`PeerConn::required_local_sockets`] 同一份枚举/黑名单/去重规则
-    /// （两者都走 [`crate::ice::allowed_ifaces`]），因此壳层的池目标不会与
-    /// core 的实际预算漂移。真机 0051 观测到 `need` 有 4（2 接口）与 6
-    /// （3 接口）两档；`need_per_peer = 6` 时 6 peer 需要 36 枚。
+    /// 006 resource snapshot: ONE scalar copy of the live ICE resources
+    /// ([`IceResourceCounts`]). Pure read under the caller's orchestrator
+    /// lock — no socket is taken, dup'd or closed, no session state moves,
+    /// and no peer key leaves this call.
+    pub fn resource_counts(&self) -> IceResourceCounts {
+        let mut counts = IceResourceCounts::default();
+        for p in &self.peers {
+            let Some(session) = p.session.as_ref() else { continue };
+            counts.sessions_present += 1;
+            if session.is_stopped() {
+                counts.sessions_stopped += 1;
+            } else if session.is_started() {
+                counts.sessions_live += 1;
+            }
+            counts.live_local_sockets += session.live_local_socket_count();
+        }
+        counts
+    }
+
+    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3）：**当前允许接口数
+    /// × 1**（0052 起：gather 的绑定 socket 被会话直接接管，不再另取第二
+    /// 枚），与 [`PeerConn::required_local_sockets`] 同一份枚举/黑名单/去重
+    /// 规则（两者都走 [`crate::ice::allowed_ifaces`]），因此壳层的池目标不会
+    /// 与 core 的实际预算漂移。2 个允许接口 → `need_per_peer = 2`；
+    /// 3 个 → 3。
     ///
     /// 接口枚举失败返回 `None`（状态文档写 `-1`）：壳层据此回退到自己的
     /// 保守常量（每 peer 4），绝不把「测不出来」当成「需求为 0」。
@@ -975,7 +1197,7 @@ impl PeerIceOrchestrator {
         };
         crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())
             .ok()
-            .map(|ifaces| ifaces.len() * 2)
+            .map(|ifaces| ifaces.len())
     }
 
     /// 收到一帧解密后的 signal 消息（`from_key` = 发送方 WG 公钥，
@@ -992,6 +1214,9 @@ impl PeerIceOrchestrator {
             self.unknown_signal += 1; // 非网络图 peer：丢弃，不报错
             return Ok(());
         };
+        // signal-rx 行的 kind 相关附加字段（§5 item 3：candidate 记解析后
+        // 的类型/地址）。
+        let mut rx_extra = String::new();
         match kind {
             PeerSignalKind::Offer => {
                 let creds = parse_ufrag_pwd(payload)?;
@@ -1019,17 +1244,30 @@ impl PeerIceOrchestrator {
                     peer.retry_at_ms = 0;
                     peer.session_at_ms = 0;
                     peer.locals_wait_ms = 0; // 新会话的等待账从零起算
+                    peer.checking_since_ms = 0; // 新会话的看门狗从零起算
+                    peer.last_health_ms = 0;
                 }
                 let had_session = self.peers[idx].session.is_some();
                 if !had_session {
-                    // 应答方：controlled 起始（上游 signal 无角色字段；
-                    // 冲突由 N5b tie-breaker 修复）。
+                    // 应答方：角色按官方 isController 语义由公钥比较确定
+                    //（上游 signal 无角色字段；本端公钥未注入时回退
+                    // controlled —— 见 [`deterministic_controlling`]）。
                     let local = IceCredentials::generate()?;
-                    let mut session = IceSession::new(local.clone(), false, self.tie_breaker)?;
+                    let controlling =
+                        session_role(self.local_key.as_deref(), &self.peers[idx].key, false);
+                    let mut session =
+                        IceSession::new(local.clone(), controlling, self.tie_breaker)?;
                     // N2 v4.1 P7: the session's outer-source receipts name
                     // THIS peer (same short prefix as the N5c lines).
                     session.set_peer_label(&peer_short(&self.peers[idx].key));
                     session.set_remote_credentials(creds.clone())?;
+                    crate::hilog::emit(&format!(
+                        "N5c_ICE|session|peer={}|round={}|role={}|rule={}",
+                        peer_short(&self.peers[idx].key),
+                        now_ms,
+                        if controlling { "controlling" } else { "controlled" },
+                        if self.local_key.is_some() { "key-cmp" } else { "legacy-answerer" },
+                    ));
                     let peer = &mut self.peers[idx];
                     peer.creds = Some(local);
                     peer.remote_creds = Some(creds);
@@ -1038,6 +1276,7 @@ impl PeerIceOrchestrator {
                     peer.answer_owed = true;
                     peer.session_at_ms = now_ms;
                     peer.locals_wait_ms = 0; // 新会话的等待账从零起算
+                    peer.checking_since_ms = 0;
                     match self.ensure_locals(idx, now_ms) {
                         Ok(LocalsRun::Gathered) => {}
                         Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
@@ -1063,11 +1302,80 @@ impl PeerIceOrchestrator {
                         }
                     }
                 } else {
-                    // glare（双方同时 OFFER）：已有会话，采纳对端凭证、
-                    // 保留本端角色，冲突交给检查层的 tie-breaker。
-                    let peer = &mut self.peers[idx];
-                    peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
-                    peer.remote_creds = Some(creds);
+                    // glare / 对端（重）发 Offer 时本端已有会话。官方语义
+                    // （worker_ice.go OnNewOffer + handshaker.Listen）：
+                    // ①角色由公钥比较在会话创建时确定，与 Offer 方向无关
+                    //   —— 本会话的角色已按 [`deterministic_controlling`]
+                    //   算出，双侧互补，无需也不应在这里改变（修复前
+                    //   "保留本端角色（发起方必 controlling）"在双方都主动
+                    //   时两侧同 controlling，pion 静默丢弃全部冲突检查且
+                    //   不回 487 → 永久死锁，H1 根因）；
+                    // ②每个收到的 Offer 都要回 ANSWER（handshaker.Listen
+                    //   无条件 sendAnswer）—— 修复前 glare 分支不回
+                    //   ANSWER，对端挂起的 Dial 永远等不到应答；
+                    // ③对端换了凭证（其 agent 重启，凭证每会话随机）→
+                    //   采纳新凭证；官方 worker 重启 agent 时本地凭证
+                    //   （localUfrag/localPwd）不变，我方同理保持本地
+                    //   凭证/候选/端口，重发本地候选让对端新 agent 配对。
+                    let same_creds =
+                        self.peers[idx].remote_creds.as_ref() == Some(&creds);
+                    if !same_creds {
+                        let local_cands = {
+                            let peer = &mut self.peers[idx];
+                            peer.session
+                                .as_mut()
+                                .expect("session checked")
+                                .set_remote_credentials(creds.clone())?;
+                            peer.remote_creds = Some(creds);
+                            peer.session.as_ref().expect("session checked").local_candidates()
+                        };
+                        let peer = &mut self.peers[idx];
+                        for cand in &local_cands {
+                            peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+                        }
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|glare-rx|peer={}|round={}|creds=new|role={}|cands={}",
+                            peer_short(&peer.key),
+                            peer.session_at_ms,
+                            if peer.session.as_ref().expect("session checked").is_controlling() {
+                                "controlling"
+                            } else {
+                                "controlled"
+                            },
+                            local_cands.len(),
+                        ));
+                    } else {
+                        let peer = &self.peers[idx];
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|glare-rx|peer={}|round={}|creds=same|role={}|cands=0",
+                            peer_short(&peer.key),
+                            peer.session_at_ms,
+                            if peer.session.as_ref().expect("session checked").is_controlling() {
+                                "controlling"
+                            } else {
+                                "controlled"
+                            },
+                        ));
+                    }
+                    // 回 ANSWER（幂等：`signaled` 母本按内容去重，重复
+                    // Offer 只会把同一 ANSWER 重新入列）。本地候选未就绪
+                    // （`answer_owed` 仍欠着）时跳过 —— ensure_locals 完成
+                    // 时统一补发。
+                    if self.peers[idx].locals_done && self.peers[idx].creds.is_some() {
+                        let (ufrag, pwd) = {
+                            let c = self.peers[idx].creds.as_ref().expect("checked");
+                            (c.ufrag.clone(), c.pwd.clone())
+                        };
+                        let peer = &mut self.peers[idx];
+                        peer.outbox.push_back((
+                            PeerSignalKind::Answer,
+                            format!("{}:{}", ufrag, pwd),
+                        ));
+                    }
+                    // Offer 使命已完成（对端凭证在手 + ANSWER 已回）：
+                    // 停止重发 OFFER，避免周期性重摆对端状态（§2.4 的
+                    // 160 次/8 min offer 风暴的 glare 半边）。
+                    self.peers[idx].signaled.retain(|(k, _)| *k != PeerSignalKind::Offer);
                 }
             }
             PeerSignalKind::Answer => {
@@ -1079,9 +1387,21 @@ impl PeerIceOrchestrator {
                 let peer = &mut self.peers[idx];
                 peer.session.as_mut().expect("session checked").set_remote_credentials(creds.clone())?;
                 peer.remote_creds = Some(creds);
+                // 对端已应答我方的 OFFER：停止重发 OFFER，只保留候选
+                // trickle（任务 §6.4 —— 修复前 HANDSHAKE_RETRY_MS 把
+                // OFFER 一并重发，8 min 发出 ~160 次，对端逐条幂等应答，
+                // 每轮重摆 glare/凭证状态）。ANSWER/候选帧的重发语义
+                // 不变（对端 answer 路径按 Offer 幂等）。
+                peer.signaled.retain(|(k, _)| *k != PeerSignalKind::Offer);
             }
             PeerSignalKind::Candidate => {
                 let cand = Candidate::unmarshal(payload)?;
+                rx_extra = format!(
+                    "|cand={}/{}:{}",
+                    cand.typ.as_str(),
+                    cand.address,
+                    cand.port
+                );
                 let peer = &mut self.peers[idx];
                 peer.remote_cands_seen += 1;
                 match peer.session.as_mut() {
@@ -1090,10 +1410,10 @@ impl PeerIceOrchestrator {
                 }
             }
         }
-        self.maybe_start(idx);
+        self.maybe_start(idx, now_ms);
         let peer = &self.peers[idx];
         crate::hilog::emit(&format!(
-            "N5c_ICE|signal-rx|kind={}|peer={}|round={}",
+            "N5c_ICE|signal-rx|kind={}|peer={}|round={}{rx_extra}",
             match kind {
                 PeerSignalKind::Offer => "offer", PeerSignalKind::Answer => "answer",
                 PeerSignalKind::Candidate => "candidate",
@@ -1277,6 +1597,11 @@ impl PeerIceOrchestrator {
             // 不再应答）——到期拆除，冷却后重新发起。signal 无关的本地
             // 策略，不受断流影响。
             self.expire_dead_negotiation(idx, now_ms);
+            // Checking 看门狗（§6.3）：start 后 [`CHECKING_WATCHDOG_MS`]
+            // 无任何检查成功 → 判 failed、拆除、冷却后全新协商。覆盖
+            // "all-pairs-failed 被持续流入的候选掩盖、Disconnected 永不
+            // 触发"的僵尸 Checking（真机 2026-10-05 形态）。
+            self.expire_dead_checking(idx, now_ms);
             // 会话泵（无条件）：收包/检查/keepalive/超时不依赖 signal 流。
             {
                 let peer = &mut self.peers[idx];
@@ -1290,6 +1615,12 @@ impl PeerIceOrchestrator {
                 }
             }
             self.drain_events(idx, now_ms);
+            // 周期性健康摘要（§5 item 5）：每个有已 start 会话的 peer 每
+            // [`HEALTH_SUMMARY_MS`] 一行 —— 检查收发/入站/候选对状态计数。
+            // `pair_snapshots()` 自 N5b 起就存在而无人调用，真机
+            // 2026-10-05 的日志完全没有 per-check 观测，这一行是下次
+            // 判读 H1/H3/H4 的最低配证据。
+            self.emit_health_summary(idx, now_ms);
             // N11: WG 数据面入向 —— ICE 会话分用出的非 STUN（WG）包喂给
             // 设备（上游：共享接收循环把非 STUN 包交给 WG，
             // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
@@ -1317,8 +1648,13 @@ impl PeerIceOrchestrator {
     ///
     /// 两条收集路径：
     /// - **默认**（`fixed_local_port = None`，设备与既有主机行为）：
-    ///   [`crate::ice::gather_candidates`]——每接口一枚受保护 socket、
-    ///   临时端口，候选端口交给内核重分（gather 的 socket 已关）；
+    ///   [`crate::ice::gather_candidates`]——每接口一枚受保护 socket、临时
+    ///   端口；gather **不再关闭**这枚已绑定的 socket，而是随
+    ///   [`crate::ice::GatheredSocket`] 交回，由
+    ///   [`IceSession::add_local_candidate_bound`] 直接接管为本地候选。
+    ///   于是 advertise 出去的 host 端口与 srflx 的 `raddr/rport`（base）
+    ///   就是会话真正收发会话包的那枚 socket——修复「gather 关 socket +
+    ///   ensure_locals 另绑新端口，srflx 指向死映射」的 0052 缺陷；
     /// - **固定端口**（HOST-ONLY，N12a）：不做 per-interface 收集也不做
     ///   STUN（端口映射场景里显式对外候选取代 srflx），取**首个允许
     ///   接口地址**一枚候选、以 [`IceSession::add_local_candidate_fixed_port`]
@@ -1333,7 +1669,20 @@ impl PeerIceOrchestrator {
         }
         if self.peers[idx].session.is_none() {
             let creds = IceCredentials::generate()?;
-            let controlling = self.peers[idx].initiated;
+            // 发起方角色同样按官方 isController 公钥比较（官方的 Offer
+            // 发送方完全可能是 Accept/controlled 侧）；本端公钥未注入时
+            // 回退旧规则（发起方 controlling）。
+            let fallback = self.peers[idx].initiated;
+            let remote_key = self.peers[idx].key.clone();
+            let controlling =
+                session_role(self.local_key.as_deref(), &remote_key, fallback);
+            crate::hilog::emit(&format!(
+                "N5c_ICE|session|peer={}|round={}|role={}|rule={}",
+                peer_short(&self.peers[idx].key),
+                now_ms,
+                if controlling { "controlling" } else { "controlled" },
+                if self.local_key.is_some() { "key-cmp" } else { "legacy-initiator" },
+            ));
             let mut session = IceSession::new(creds.clone(), controlling, self.tie_breaker)?;
             // N2 v4.1 P7: the session's outer-source receipts name THIS peer.
             session.set_peer_label(&peer_short(&self.peers[idx].key));
@@ -1342,12 +1691,14 @@ impl PeerIceOrchestrator {
             self.peers[idx].session_at_ms = now_ms;
             // 新会话的等待账从零起算：`negotiation_age_ms` 只扣本会话内的等待。
             self.peers[idx].locals_wait_ms = 0;
+            self.peers[idx].checking_since_ms = 0;
         }
         let fixed_port = self.fixed_local_port;
         // 0049 §5.1-2（活锁，关键）：受保护 UDP socket 池由壳层单向补给（池
-        // 目标 8、每批 ≤4），而一次成功收集要 `2 × 接口数` 枚（每接口
-        // gather 一枚、每个 host 候选再绑一枚长留）。失败路径是「先消耗再
-        // 失败、不回流」，于是池里 1..need-1 枚的尝试会把它们全部取走仍然
+        // 目标 8、每批 ≤4），而一次成功收集要「允许接口数」枚（每接口
+        // gather 一枚；那枚已绑定的 socket 由会话直接接管，不再另取第二枚
+        // 绑定长留——0052 修复把每接口 2 枚降到 1 枚）。失败路径仍是「先消耗
+        // 再失败、不回流」，于是池里 1..need-1 枚的尝试会把它们全部取走仍然
         // `Err` —— 每批补给都被注定失败的尝试吃掉，池**永远攒不到 need**：
         // 实测切网后 18 s 补给 20 枚、0 次成功。这里在任何 `take_owned`
         // 之前先按「gather 将要走的接口清单」算本次预算，不足即**一枚都不
@@ -1358,10 +1709,10 @@ impl PeerIceOrchestrator {
         // 「先算」与「后取」之间没有第二个 peer 插入。
         //
         // 为什么不选「失败时归还已取出的 socket」：池的契约是「FRESH
-        // UNBOUND 受保护 socket」（`ice.rs` 的 trait 契约与 `add_local_
-        // candidate_on` 的注释：dup 共享 socket 对象，已绑定的副本不能再
-        // 绑），gather 用掉的那几枚当场 `close`、绑定阶段的几枚已绑到候选
-        // 地址，两者都不能合法回流；能归还的只有本来就还没被取走的部分。
+        // UNBOUND 受保护 socket」（`ice.rs` 的 trait 契约）：gather 用掉的
+        // 那枚现在**不再关闭**，而是已绑到候选地址、随 `GatheredSocket`
+        // 交给会话长留（`add_local_candidate_bound`），不能合法回流；能归还
+        // 的只有本来就还没被取走的部分。
         let required = match fixed_port {
             // 固定端口路径整个收集阶段只消耗一枚（首个候选的通配绑定）。
             Some(_) => usize::from(self.allowed_iface_addrs()?.first().is_some()),
@@ -1376,55 +1727,60 @@ impl PeerIceOrchestrator {
                 return Ok(LocalsRun::WaitingForSockets { need: required, have, waited_ms, log });
             }
         }
-        let (host_list, srflx_list) = match fixed_port {
-            Some(port) => {
-                let addrs = self.allowed_iface_addrs()?;
-                (addrs.first().map(|a| Candidate::host_candidate(*a, port)).into_iter().collect::<Vec<_>>(), Vec::new())
-            }
+        // 默认路径：先收集，**把仍然活着的绑定 socket 一并带走**（0052：
+        // gather 不再关闭已绑定的 socket）。固定端口路径不收集。
+        let mut gathered = match fixed_port {
+            Some(_) => None,
             None => {
-                let gathered = {
-                    // 共享借用收敛在块内：gather 用 seam/配置（字段级
-                    // disjoint），结果 owned，块后 peers[idx] 可再独占借用。
-                    let cfg = GatherConfig {
-                        blacklist: &self.blacklist,
-                        servers: &self.stuns,
-                        timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
-                    };
-                    crate::ice::gather_candidates(&cfg, self.ifaces.as_ref(), self.socks.as_ref())?
+                // 共享借用收敛在块内：gather 用 seam/配置（字段级 disjoint），
+                // 结果 owned（含 socket 所有权），块后 peers[idx] 可再独占借用。
+                let cfg = GatherConfig {
+                    blacklist: &self.blacklist,
+                    servers: &self.stuns,
+                    timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
                 };
-                (gathered.host, gathered.srflx)
+                Some(crate::ice::gather_candidates(&cfg, self.ifaces.as_ref(), self.socks.as_ref())?)
             }
         };
+        let fixed_addr = match fixed_port {
+            Some(_) => self.allowed_iface_addrs()?.first().copied(),
+            None => None,
+        };
+        let srflx_count = gathered.as_ref().map(|g| g.srflx.len()).unwrap_or(0);
         let added = {
             let peer = &mut self.peers[idx];
             let session = peer.session.as_mut().expect("session just ensured");
             let mut added = 0usize;
-            for cand in &host_list {
-                let addr = parse_ipv4(&cand.address)?;
-                let fresh = match fixed_port {
-                    // 固定端口：候选保留指定端口（绑定失败 = 端口被占，
-                    // fail-closed 硬错误——绝不静默回落临时端口）。
-                    Some(_) => Candidate::host_candidate(addr, cand.port),
-                    // 默认：端口交给内核重分（gather 的 socket 已关，避免
-                    // 端口复用竞态）；add_local_candidate 返回 FINAL 候选
-                    // （getsockname 回填后的端口），直接以其线格式入 outbox
-                    //（signaler.go:32-41 形态）。
-                    None => Candidate::host_candidate(addr, 0),
-                };
-                let bound = if fixed_port.is_some() {
-                    session.add_local_candidate_fixed_port(fresh, self.socks.as_ref())?
-                } else {
-                    session.add_local_candidate(fresh, self.socks.as_ref())?
-                };
-                peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
-                peer.locals_signaled += 1;
-                added += 1;
+            if let Some(port) = fixed_port {
+                // 固定端口：候选保留指定端口（绑定失败 = 端口被占，
+                // fail-closed 硬错误——绝不静默回落临时端口）。
+                if let Some(addr) = fixed_addr {
+                    let fresh = Candidate::host_candidate(addr, port);
+                    let bound =
+                        session.add_local_candidate_fixed_port(fresh, self.socks.as_ref())?;
+                    peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
+                    peer.locals_signaled += 1;
+                    added += 1;
+                }
+            } else if let Some(g) = gathered.as_mut() {
+                // 普通路径：把 gather 的绑定 socket 直接交给会话接管。同一枚
+                // socket 既是 host 候选、又是该接口 srflx 的 base，所以 advertise
+                // 出去的端口/base 映射与后续真正收发会话包的 socket 必然同一
+                //（getsockname 端口校验在 add_local_candidate_bound 内完成）。
+                for sock in g.sockets.drain(..) {
+                    let bound = session.add_local_candidate_bound(sock.cand, sock.fd)?;
+                    peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
+                    peer.locals_signaled += 1;
+                    added += 1;
+                }
             }
-            // srflx：N5a 的收集 socket 是一次性的（模块文档「未做项」），候选
-            // 仍按上游 signaler 语义 trickle 出去；NAT 拓扑下其 pair 可能
-            // 不通，host pair 才是本设计的承载路径。
-            for cand in &srflx_list {
-                peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+            // srflx：与上面 host 候选同一枚 socket（现已由会话长留）的 STUN
+            // 映射，base = raddr/rport。socket 活着 → 映射有背书；修复前
+            // gather socket 已关，这个映射指向死端口。
+            if let Some(g) = gathered.as_mut() {
+                for cand in g.srflx.drain(..) {
+                    peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+                }
             }
             // HOST-ONLY（N12a）：显式对外候选——额外的 host 型候选，wire
             // 形态与本地 host 候选一致（[`Candidate::advertised_host_candidate`]，
@@ -1436,13 +1792,23 @@ impl PeerIceOrchestrator {
             // Device diagnostics (run 3 was blind here): how many local
             // candidates the gather actually bound decides whether ICE can
             // ever pair — a zero/low count means the socket pool or the
-            // interface enumeration starved, not the peer.
+            // interface enumeration starved, not the peer. §5 item 3: also
+            // list the ACTUAL bound candidate addresses (ip:port, bounded to
+            // the first 4) — the count alone couldn't answer "which port is
+            // the peer seeing".
+            let bound_addrs: Vec<String> = session
+                .local_candidates()
+                .iter()
+                .take(4)
+                .map(|c| format!("{}:{}", c.address, c.port))
+                .collect();
             crate::hilog::emit(&format!(
-                "N5c_ICE|locals-gathered|peer={}|round={}|added={added}|srflx={}|advertised={}",
+                "N5c_ICE|locals-gathered|peer={}|round={}|added={added}|srflx={}|advertised={}|cands={}",
                 peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
                 peer.session_at_ms,
-                srflx_list.len(),
-                self.advertised_candidates.len()
+                srflx_count,
+                self.advertised_candidates.len(),
+                bound_addrs.join(",")
             ));
             added
         };
@@ -1456,7 +1822,7 @@ impl PeerIceOrchestrator {
             peer.outbox.push_back((PeerSignalKind::Answer, format!("{}:{}", creds.ufrag, creds.pwd)));
             peer.answer_owed = false;
         }
-        self.maybe_start(idx);
+        self.maybe_start(idx, now_ms);
         // 供给到了：本次等待结束，把它记进本会话的等待账（`negotiation_age_ms`
         // 扣除的就是这笔账），并让下一段等待的首行重新可记。
         self.clear_locals_wait(idx, now_ms);
@@ -1512,21 +1878,26 @@ impl PeerIceOrchestrator {
         ));
     }
 
-    /// 一次成功收集的 socket 预算（默认路径）＝ `2 ×` gather 将要访问的
-    /// 接口数——每接口一枚（gather）+ 每个 host 候选一枚（绑定长留，
-    /// `add_local_candidate`）。接口清单与 [`crate::ice::allowed_ifaces`]
+    /// 一次成功收集的 socket 预算（默认路径）＝ gather 将要访问的接口数——
+    /// 每接口**恰好一枚**：gather 绑定的那枚 socket 不再关闭，而是随
+    /// [`crate::ice::GatheredSocket`] 交给会话接管
+    /// （[`IceSession::add_local_candidate_bound`]），所以不再需要「每个
+    /// host 候选再取一枚绑定长留」。接口清单与 [`crate::ice::allowed_ifaces`]
     /// 同源，绝不与 gather 的实际遍历漂移。
     ///
+    /// 旧账（0052 修复前）：每接口 2 枚 = gather 1 + 绑定长留 1；那第二枚绑
+    /// 到**新**的临时端口，正是「srflx 映射指向死 socket」缺陷的一半。
+    ///
     /// 上限（0049 残余风险）：壳层池目标 8、每批 ≤4，池深实际封顶在 8，
-    /// 所以 `required > 8`（同时有 ≥5 个允许接口）时守护会一直等待。本项
-    /// 修复后设备侧接口数由 3 降到 2（overlay 被黑名单挡掉）→ required=4。
+    /// 所以 `required > 8`（同时有 ≥9 个允许接口）时守护会一直等待。本项
+    /// 修复后设备侧接口数由 3 降到 2（overlay 被黑名单挡掉）→ required=2。
     fn required_local_sockets(&self) -> Result<usize, ManagementError> {
         let cfg = GatherConfig {
             blacklist: &self.blacklist,
             servers: &self.stuns,
             timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
         };
-        Ok(crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())?.len() * 2)
+        Ok(crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())?.len())
     }
 
     /// 允许接口的 IPv4 地址列表（固定端口路径专用）：与 gather 相同的
@@ -1569,7 +1940,8 @@ impl PeerIceOrchestrator {
     }
 
     /// 会话启动前置：远端凭证 + 本地候选 + 至少一个远端候选。
-    fn maybe_start(&mut self, idx: usize) {
+    /// `now_ms`（注入时钟）用于武装 Checking 看门狗（[`CHECKING_WATCHDOG_MS`]）。
+    fn maybe_start(&mut self, idx: usize, now_ms: u64) {
         if self.peers[idx].started || self.peers[idx].session.is_none() {
             return;
         }
@@ -1604,10 +1976,19 @@ impl PeerIceOrchestrator {
             }
         }
         if self.peers[idx].started
-            && (self.peers[idx].state == PeerIceState::Idle
-                || self.peers[idx].state == PeerIceState::Gathering)
+            && matches!(
+                self.peers[idx].state,
+                PeerIceState::Idle | PeerIceState::Gathering | PeerIceState::Failed
+            )
         {
+            // Failed→Checking：拆除后的重谈判也要如实回到 Checking——
+            // 否则状态永远停在上一会话的 Failed（观测面失真），且
+            // Checking 看门狗（`expire_dead_checking`）永远不再覆盖
+            // 重谈判出来的会话。
             self.peers[idx].state = PeerIceState::Checking;
+        }
+        if self.peers[idx].started && self.peers[idx].checking_since_ms == 0 {
+            self.peers[idx].checking_since_ms = now_ms;
         }
     }
 
@@ -1699,7 +2080,21 @@ impl PeerIceOrchestrator {
                     self.drop_session_rearm(idx, now_ms, &reason);
                 }
                 IceEvent::Closed => {}
-                IceEvent::CheckSucceeded { .. } => {}
+                IceEvent::CheckSucceeded { remote, rtt_ms, .. } => {
+                    // 修复前这里是 `=> {}`（§1.3：最大的观测盲区——整份真机
+                    // 日志无法区分"检查从未发出"还是"发出未回应"）。一行
+                    // 简摘 + 滑动重置 Checking 看门狗（有检查在成功 = 会话
+                    // 没有僵死，不能按看门狗拆）。
+                    let peer = &mut self.peers[idx];
+                    peer.checking_since_ms = now_ms;
+                    crate::hilog::emit(&format!(
+                        "N5c_ICE|check-ok|peer={}|round={}|remote={}:{}|rtt_ms={rtt_ms}",
+                        peer_short(&peer.key),
+                        peer.session_at_ms,
+                        remote.address,
+                        remote.port
+                    ));
+                }
                 // 本地候选的最终形态已在 ensure_locals 里直接入 outbox。
                 IceEvent::LocalCandidateReady(_) => {}
             }
@@ -1732,6 +2127,8 @@ impl PeerIceOrchestrator {
         peer.answer_owed = false; // 死会话不欠 ANSWER：重发起走 Offer 路径
         peer.session_at_ms = 0;
         peer.locals_wait_ms = 0; // 等待账随会话作废（下一会话从零起算）
+        peer.checking_since_ms = 0; // 看门狗随会话作废
+        peer.last_health_ms = 0;
         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
         // 0051 §7 item 2：连续的「远端静默」超时→指数退避拉长下一次发起。
         // 只统计 `negotiation-start-timeout`（会话已建、本地候选已发、远端
@@ -1774,19 +2171,36 @@ impl PeerIceOrchestrator {
     }
 
     /// 僵尸谈判拆除（H3 修复，[`START_DEADLINE_MS`]）：会话已建、本地
-    /// 候选已发，但**远端凭证**始终没有到达（`started == false`）——
-    /// 典型：对端仍持有旧会话、自认 Connected、不再发 Offer/Answer；
-    /// 0048 形态：对端只 trickle 候选、从不发凭据（本端候选照收，
-    /// 凭证为零，`maybe_start` 永远不会满足）。
-    /// 不拆除则本端永久沉默（want_initiate 要 `session.is_none()`，
-    /// want_locals 要 `!locals_done`，无事件可拆会话）。到期即拆除重
-    /// 武装：冷却后以全新凭证重新发起，对端（其旧会话仍活着）会把新
-    /// 凭证的 Offer 采纳为新谈判并应答。已 start 的会话不适用——其
-    /// 死亡由 keepalive/断连/全对失败事件诚实驱动。
+    /// 候选已发，但 `start()` 始终没有发生 —— 判据只认「未 start」，
+    /// **不再区分远端有没有应答**：
+    ///
+    /// - 远端从未应答（`remote_creds` 为空）：典型是对端仍持有旧会话、
+    ///   自认 Connected、不再发 Offer/Answer；0048 形态：对端只 trickle
+    ///   候选、从不发凭据（本端候选照收、凭证为零，`maybe_start` 永远不
+    ///   满足）。
+    /// - **远端已应答但零候选**（`remote_creds` 有、`remote_cands_seen == 0`）：
+    ///   `maybe_start` 还要求 ≥1 个远端候选，于是会话永远停在
+    ///   `session = Some && started == false`，`IceSession::run_once` 因
+    ///   `!started` 立即返回、永不收包，socket 被永久占住。真机
+    ///   round-230622244：手机 07:09:03 发本地候选、07:09:04 收到 Answer、
+    ///   此后零候选，9 min 内没有任何重试。修复前的 `remote_creds.is_none()`
+    ///   守卫把「已应答」误当成健康，正是这条停摆。
+    ///
+    /// 两种情况都没有事件面可拆会话（`want_initiate` 要 `session.is_none()`，
+    /// `want_locals` 要 `!locals_done`），到期即拆除重武装：冷却后以全新
+    /// 凭证重新发起，对端会把新凭证的 Offer 采纳为新谈判并应答 + trickle
+    /// 候选。已 start 的会话不适用——其死亡由 keepalive/断连/全对失败/
+    /// [`CHECKING_WATCHDOG_MS`] 诚实驱动。
     ///
     /// 计时用 [`PeerConn::negotiation_age_ms`] 而不是裸的
     /// `now - session_at_ms`（0050 §8 item 3）：等受保护 socket 补给的
     /// 时间不算「对端不应答」，不能拿它去拆会话。
+    ///
+    /// 退避口径不变：`drop_session_rearm` 按
+    /// `reason=negotiation-start-timeout` 调用 `note_silent_timeout`，而
+    /// 后者只在**期间没有收到任何信令**（`rx_since_timeout` 为假）时才累计
+    /// 「远端静默」——已应答过的 peer 收到过 Answer，不计入退避，只走既有的
+    /// [`RETRY_COOLDOWN_MS`] 节奏。
     fn expire_dead_negotiation(&mut self, idx: usize, now_ms: u64) {
         let zombie = {
             let p = &self.peers[idx];
@@ -1794,23 +2208,86 @@ impl PeerIceOrchestrator {
                 && !p.started
                 && p.session_at_ms != 0
                 && p.negotiation_age_ms(now_ms) >= START_DEADLINE_MS
-                // Only a negotiation the remote NEVER answered is a zombie.
-                // Device run 5: a HEALTHY negotiation legitimately needs
-                // ~15-30 s (gather → signal → checks → nomination), so
-                // expiring on the deadline alone tore down sessions that were
-                // still converging (and, in the host's fixed-port mode, wedged
-                // the port). Remote CREDENTIALS are the discriminator: without
-                // them `maybe_start` can never fire (`remote_creds` is one of
-                // its preconditions), so a single remote candidate is NOT
-                // progress — device run 0048: the host peer held 64 remote
-                // candidates and 0 credentials and sat `idle` forever. A
-                // started session's death is left to its own honest paths
-                // (all-pairs-failed / disconnected / keepalive).
-                && p.remote_creds.is_none()
         };
         if zombie {
             self.drop_session_rearm(idx, now_ms, "negotiation-start-timeout");
         }
+    }
+
+    /// Checking 看门狗（§6.3，[`CHECKING_WATCHDOG_MS`]）：会话已 start、
+    /// 处于 Checking，但自 `checking_since_ms` 起没有任何检查成功——
+    /// 判 failed、拆除会话（`drop_session_rearm` → 冷却后全新协商）。
+    ///
+    /// 为什么 start 后的会话也需要拆除器（真机 2026-10-05，§2.3）：
+    /// - `all-pairs-failed` 要求**所有** pair 同时 Failed，而远端候选
+    ///   持续流入会不断产生新的 Waiting pair + 入站有效检查会把 Failed
+    ///   回暖为 Waiting —— 在线对端的会话**永不** all-failed；
+    /// - `Disconnected` 只在收到过有效入站后才可能触发
+    ///  （`last_inbound_ms = None` 时整个定时器块被跳过）；
+    /// - 于是 start 后永不成功的会话没有任何终态信号，只能靠外因
+    ///   （网络切换）拆除 —— 对端看到我们永远 "Connecting"。
+    ///
+    /// 每次检查成功（[`IceEvent::CheckSucceeded`]）滑动重置计时
+    /// （`drain_events`）：还在取得进展的慢会话不会被误杀。
+    fn expire_dead_checking(&mut self, idx: usize, now_ms: u64) {
+        let dead = {
+            let p = &self.peers[idx];
+            p.session.is_some()
+                && p.started
+                && p.state == PeerIceState::Checking
+                && p.checking_since_ms != 0
+                && now_ms.saturating_sub(p.checking_since_ms) >= CHECKING_WATCHDOG_MS
+        };
+        if dead {
+            self.drop_session_rearm(idx, now_ms, "checking-timeout");
+        }
+    }
+
+    /// 周期性健康摘要（§5 item 5，[`HEALTH_SUMMARY_MS`]）：一行包含
+    /// 检查收发计数（N5b 计数器）与候选对状态分布，会话进入终态
+    /// （Connected/拆除）后自然停发。
+    fn emit_health_summary(&mut self, idx: usize, now_ms: u64) {
+        let due = {
+            let p = &self.peers[idx];
+            p.session.is_some()
+                && p.started
+                && (p.last_health_ms == 0
+                    || now_ms.saturating_sub(p.last_health_ms) >= HEALTH_SUMMARY_MS)
+        };
+        if !due {
+            return;
+        }
+        let peer = &mut self.peers[idx];
+        peer.last_health_ms = now_ms;
+        let Some(session) = peer.session.as_ref() else { return };
+        let h = session.health();
+        let mut counts = [0usize; 5]; // waiting / in-progress / succeeded / failed / other
+        for snap in session.pair_snapshots() {
+            match snap.state {
+                PairState::Waiting => counts[0] += 1,
+                PairState::InProgress => counts[1] += 1,
+                PairState::Succeeded => counts[2] += 1,
+                PairState::Failed => counts[3] += 1,
+                PairState::Frozen => counts[4] += 1,
+            }
+        }
+        crate::hilog::emit(&format!(
+            "N5c_ICE|health|peer={}|round={}|age_ms={}|role={}|checks_tx={}|checks_ok={}|reqs_rx={}|reqs_ok={}|pairs={}/{}/{}/{}/{}|nom={}",
+            peer_short(&peer.key),
+            peer.session_at_ms,
+            now_ms.saturating_sub(peer.session_at_ms),
+            if session.is_controlling() { "ctrl" } else { "ctrl-d" },
+            h.checks_sent,
+            h.checks_matched,
+            h.inbound_reqs,
+            h.inbound_ok,
+            counts[0],
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[4],
+            session.selected_pair().is_some() as u8,
+        ));
     }
 
     /// Force fresh ICE credentials, candidates and protected sockets after an
@@ -2211,8 +2688,8 @@ mod tests {
         assert_eq!(st.state, PeerIceState::Idle, "never leaves Idle without candidates");
         assert_eq!(st.last_error, None, "waiting is not an error (0050)");
         assert!(!ice_ready_for_default_route(&orch.summary()), "unreachable peer must not arm the gate");
-        // 补给到达（`need = 2 × 1` 个允许接口）：下一次尝试完成收集并发 OFFER。
-        for _ in 0..2 {
+        // 补给到达（`need = 1 × 1` 个允许接口）：下一次尝试完成收集并发 OFFER。
+        for _ in 0..1 {
             let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
             assert!(fd >= 0, "socket() failed");
             socks.feed(fd).expect("feed");
@@ -2221,7 +2698,7 @@ mod tests {
         now += RETRY_COOLDOWN_MS;
         assert!(orch.run_once(now).is_ok(), "the supplied peer must converge");
         assert!(orch.peers[0].locals_done, "the top-up must complete local gathering");
-        assert_eq!(socks.taken(), 2, "a successful gather+bind spends exactly `need` sockets");
+        assert_eq!(socks.taken(), 1, "one interface → exactly one adopted gather socket");
         assert_eq!(orch.peers[0].locals_wait_since_ms, 0, "supply ends the waiting state");
         assert!(
             signal
@@ -2232,6 +2709,126 @@ mod tests {
                 .any(|(_, k, _)| *k == PeerSignalKind::Offer),
             "the supplied peer must signal an OFFER"
         );
+    }
+
+    /// 0052：默认路径 advertise 出去的 host 候选端口，必须由 **gather 绑定、
+    /// 会话直接接管**（[`IceSession::add_local_candidate_bound`]）的那枚仍活着
+    /// 的 socket 持有——修复前 gather 当场关掉它、ensure_locals 再取第二枚绑到
+    /// 新的临时端口，于是 signal 出去的是另一个 socket 的端口，srflx 的 base
+    /// 指向已关闭的映射。
+    #[test]
+    fn signaled_host_port_is_backed_by_the_live_adopted_socket() {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let signal = Arc::new(FrameLog::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks: socks.clone(),
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        orch.run_once(1000).expect("locals must converge");
+        assert!(orch.peers[0].locals_done);
+
+        // The candidate that was actually signaled.
+        let frames = signal.frames.lock().expect("frames").clone();
+        let cand = frames
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Candidate)
+            .map(|(_, _, p)| Candidate::unmarshal(p).expect("wire form"))
+            .next()
+            .expect("a candidate frame");
+        assert_ne!(cand.port, 0, "the signaled candidate carries the bound port");
+
+        // The session's local candidate IS that signaled candidate, and its
+        // socket still holds the advertised address:port right now.
+        let session = orch.peers[0].session.as_ref().expect("session");
+        assert_eq!(session.local_candidates(), vec![cand.clone()]);
+        let sa = sys::sockaddr_in::new([127, 0, 0, 1], cand.port);
+        let len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        let probe = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(probe >= 0, "socket() failed");
+        assert_eq!(
+            unsafe { sys::bind(probe, &sa, len) },
+            -1,
+            "the advertised port must still be held by the live adopted socket"
+        );
+        unsafe { sys::close(probe) };
+        // One interface = exactly ONE protected socket (the gather's), which
+        // the session adopted: no second bind.
+        assert_eq!(socks.taken(), 1, "no second socket for the same interface");
+
+        // stop() closes the adopted fd exactly once → the port is released.
+        orch.peers[0].session.as_mut().expect("session").stop();
+        let probe = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(probe >= 0, "socket() failed");
+        assert_eq!(
+            unsafe { sys::bind(probe, &sa, len) },
+            0,
+            "session stop must close the adopted fd (advertised port released)"
+        );
+        unsafe { sys::close(probe) };
+    }
+
+    /// 006: the resource counts must distinguish a RETAINED session OBJECT
+    /// from the fds it still owns — `stop_all` keeps the object but closes
+    /// every dup, so `live_local_sockets` drops to 0 while
+    /// `sessions_present` stays > 0.
+    #[test]
+    fn resource_counts_track_retained_sessions_and_live_sockets() {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks: socks.clone(),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+
+        // No peer at all: every count is a real zero (measured, not unknown).
+        assert_eq!(orch.resource_counts(), IceResourceCounts::default());
+
+        orch.set_peers(&["P".into()]);
+        orch.set_signal_ready(true);
+        orch.run_once(1000).expect("locals must converge");
+        assert!(orch.peers[0].locals_done);
+
+        let live = orch.resource_counts();
+        assert_eq!(live.sessions_present, 1, "the peer holds one session object");
+        assert_eq!(live.sessions_stopped, 0, "nothing was stopped yet");
+        assert_eq!(live.live_local_sockets, 1, "one interface → one adopted socket");
+
+        // stop_all: the OBJECT is retained by the peer entry, its fds are not.
+        orch.stop_all();
+        let stopped = orch.resource_counts();
+        assert_eq!(stopped.sessions_present, 1, "stop_all retains the session object");
+        assert_eq!(stopped.sessions_stopped, 1, "the retained session is stopped");
+        assert_eq!(stopped.sessions_live, 0, "a stopped session is not live");
+        assert_eq!(stopped.live_local_sockets, 0, "a stopped session owns no fd");
     }
 
     #[test]
@@ -2441,7 +3038,8 @@ mod tests {
     /// 之前就被挡住（0050 起是**等待**：`N5c_ICE|locals-waiting|…|need=6|
     /// have=…|reason=insufficient-sockets`，不再是 `Err`/pump error），池得以
     /// 跨批次攒够，3 个 peer 最终全部完成本地收集，且被挡住的尝试一枚 socket
-    /// 都不消耗。
+    /// 都不消耗。（0052 起每 peer 需求由 6 降到 3：gather 的绑定 socket 由
+    /// 会话接管，不再另取一枚——账本公式不变，`NEED` 变小。）
     ///
     /// fd 账本（现有 harness 方式）：`LedgeredSocks` 把 `take_owned` 的每一
     /// 枚记进 `handed` 并当场用 `F_GETFD` 证明取到的是有效 fd；于是可断言
@@ -2491,9 +3089,10 @@ mod tests {
             }
         }
 
-        // 3 个允许接口 ⇒ 每 peer 需要 6 枚（gather 3 + 绑定长留 3），与 0049
-        // 的 `added=3` 同型；壳层池目标 8、每批 4 枚（ICE_TOPUP_BATCH）。
-        const NEED: usize = 6;
+        // 3 个允许接口 ⇒ 每 peer 需要 3 枚（每接口一枚 gather socket，会话
+        // 直接接管），与 0049 的 `added=3` 同型；壳层池目标 8、每批 4 枚
+        //（ICE_TOPUP_BATCH）。
+        const NEED: usize = 3;
         let socks = Arc::new(LedgeredSocks {
             inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
             handed: Mutex::new(Vec::new()),
@@ -2925,10 +3524,11 @@ mod tests {
         assert_eq!(orch.peers[0].backoff_misses, 0);
     }
 
-    /// 0051 §7 item 3 的 core 侧事实源：`need_per_peer` = 允许接口数 × 2
-    /// （与 `required_local_sockets` 同一份 `allowed_ifaces` 规则），接口枚举
-    /// 失败才是 `None`（壳层据此回退）。overlay 接口（`vpn-tun`）被黑名单挡住，
-    /// 因此 3 个物理接口 + overlay 仍是 6 —— 正是 0051 观测到的 `need=6`。
+    /// 0051 §7 item 3 的 core 侧事实源：`need_per_peer` = 允许接口数 × 1
+    /// （与 `required_local_sockets` 同一份 `allowed_ifaces` 规则；0052 起
+    /// gather 的绑定 socket 由会话接管，不再每接口另取一枚），接口枚举
+    /// 失败才是 `None`（壳层据此回退）。overlay 接口（`vpn-tun`）被黑名单
+    /// 挡住，因此 3 个物理接口 + overlay 是 3。
     #[test]
     fn need_per_peer_counts_the_gather_budget_of_allowed_ifaces() {
         fn orch_with(ifaces: Vec<crate::ice::InterfaceAddr>) -> PeerIceOrchestrator {
@@ -2944,11 +3544,11 @@ mod tests {
         }
         let i = |name: &str, addr: [u8; 4]| crate::ice::InterfaceAddr { name: name.into(), addr };
         assert_eq!(orch_with(vec![]).need_per_peer(), Some(0));
-        assert_eq!(orch_with(vec![i("wlan0", [192, 168, 1, 2])]).need_per_peer(), Some(2));
+        assert_eq!(orch_with(vec![i("wlan0", [192, 168, 1, 2])]).need_per_peer(), Some(1));
         assert_eq!(
             orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("rmnet0", [10, 0, 0, 2])]).need_per_peer(),
-            Some(4),
-            "0051 round 1: 2 allowed interfaces → need=4"
+            Some(2),
+            "2 allowed interfaces → one adopted gather socket each"
         );
         assert_eq!(
             orch_with(vec![
@@ -2958,8 +3558,8 @@ mod tests {
                 i("eth1", [172, 17, 1, 1]),
             ])
             .need_per_peer(),
-            Some(6),
-            "0051 round 2: 3 allowed interfaces (overlay blacklisted) → need=6"
+            Some(3),
+            "3 allowed interfaces (overlay blacklisted) → need=3"
         );
         // 与 PeerConn 的实际预算同源：同一个接口集下 required_local_sockets 相等
         let mut orch = orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("eth1", [172, 17, 1, 1])]);
@@ -2971,8 +3571,717 @@ mod tests {
         };
         assert_eq!(
             orch.need_per_peer(),
-            Some(crate::ice::allowed_ifaces(&cfg, orch.ifaces.as_ref()).expect("enumerate").len() * 2),
+            Some(crate::ice::allowed_ifaces(&cfg, orch.ifaces.as_ref()).expect("enumerate").len()),
             "need_per_peer is exactly the gather budget's input"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // glare 角色决胜（官方 isController 公钥比较）+ Checking 看门狗
+    // -------------------------------------------------------------------
+
+    /// 模块级记录 signal seam（glare/角色测试共用；函数内同名局部定义
+    /// 各自遮蔽，互不影响）。
+    #[derive(Default)]
+    struct FrameLog {
+        frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
+    }
+    impl SignalExchange for FrameLog {
+        fn send(
+            &self,
+            to_key: &str,
+            kind: PeerSignalKind,
+            payload: &str,
+            _port: u32,
+        ) -> Result<(), ManagementError> {
+            self.frames
+                .lock()
+                .expect("frames")
+                .push((to_key.to_string(), kind, payload.to_string()));
+            Ok(())
+        }
+    }
+
+    /// 带 `pool` 枚受保护 socket、一个 loopback 接口、FrameLog signal 的
+    /// 编排器；`local_key` 注入官方角色决胜的输入。
+    fn glare_orch(local_key: Option<&str>, peer: &str, pool: usize) -> (PeerIceOrchestrator, Arc<FrameLog>) {
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..pool {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let signal = Arc::new(FrameLog::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        if let Some(k) = local_key {
+            orch.set_local_key(k.to_string());
+        }
+        orch.set_peers(&[peer.to_string()]);
+        orch.set_signal_ready(true);
+        (orch, signal)
+    }
+
+    /// 官方 `isController = LocalKey > Key` 的镜像语义（base64 字符串序，
+    /// 双侧独立计算同一反称比较 → 必然互补）。
+    #[test]
+    fn deterministic_controlling_matches_official_is_controller() {
+        // 大 → controlling，小 → controlled（两个方向是同一比较）
+        assert_eq!(deterministic_controlling(Some("zzzKey"), "aaaKey"), Some(true));
+        assert_eq!(deterministic_controlling(Some("aaaKey"), "zzzKey"), Some(false));
+        // base64 字符串序的比较语义（'A' < 'Z' < 'a'）
+        assert_eq!(deterministic_controlling(Some("AAA"), "ZZZ"), Some(false));
+        assert_eq!(deterministic_controlling(Some("a"), "Z"), Some(true));
+        // 相等（对端=自己，现实中不可能）：> 为假 → controlled
+        assert_eq!(deterministic_controlling(Some("same"), "same"), Some(false));
+        // 本端公钥未知（无 signal 材料的构造）：无决策，调用方回退旧规则
+        assert_eq!(deterministic_controlling(None, "any"), None);
+    }
+
+    /// 会话角色在**创建时**即按公钥比较确定，与 Offer 方向无关（官方
+    /// worker_ice.go `agentDial` 语义：发起方也可能是 Accept/controlled，
+    /// 应答方也可能是 Dial/controlling）。
+    #[test]
+    fn session_role_follows_public_key_comparison() {
+        // 发起方 + 本端公钥大 → controlling offerer
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        orch.run_once(1000).expect("initiate");
+        assert_eq!(
+            orch.peer_status("PPPPpeer").expect("peer").controlling,
+            Some(true),
+            "bigger local key → controlling offerer"
+        );
+        // 发起方 + 本端公钥小 → controlled offerer（官方 Accept 侧）
+        let (mut orch, _) = glare_orch(Some("AAAAlocal"), "PPPPpeer", 4);
+        orch.run_once(1000).expect("initiate");
+        assert_eq!(
+            orch.peer_status("PPPPpeer").expect("peer").controlling,
+            Some(false),
+            "smaller local key → controlled offerer (official Accept semantics)"
+        );
+        // 应答方 + 本端公钥大 → controlling ANSWERER（官方 Dial 侧）
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        orch.set_initiator("PPPPpeer", false);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "abcd:0123456789012345678901", 1000)
+            .expect("offer");
+        assert_eq!(
+            orch.peer_status("PPPPpeer").expect("peer").controlling,
+            Some(true),
+            "bigger local key → controlling answerer (role is key-based, not offer-direction-based)"
+        );
+        // 同一对密钥在两侧得到互补角色：本端 ZZZZlocal/对端 PPPPpeer=true 的
+        // 镜像 = 本端 PPPPpeer/对端 ZZZZlocal=false。
+        assert_eq!(
+            deterministic_controlling(Some("PPPPpeer"), "ZZZZlocal"),
+            Some(false),
+            "the mirrored comparison must be antisymmetric"
+        );
+    }
+
+    /// glare 死锁修复（H1）核心行为：我方已发起（Offer 已发）后收到对端
+    /// Offer —— ①必须回 ANSWER（修复前 glare 分支不回，对端 Dial 永久
+    /// 挂起）；②角色不变（公钥比较在创建时定死）；③对端换了凭证时采纳
+    /// 新凭证并重发本地候选；④此后停止重发 OFFER（§2.4 offer 风暴），
+    /// 只保留候选/ANSWER 重发。
+    #[test]
+    fn glare_offer_is_answered_and_offer_resend_stops() {
+        let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        orch.run_once(1000).expect("initiate beat sends offer+candidates");
+        {
+            let p = &orch.peers[0];
+            assert!(
+                p.signaled.iter().any(|(k, _)| *k == PeerSignalKind::Offer),
+                "precondition: our OFFER was signaled"
+            );
+            assert!(p.session.as_ref().expect("session").is_controlling());
+        }
+        let offers_before = signal
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
+            .count();
+        assert_eq!(offers_before, 1);
+
+        // 对端 Offer 到达（新凭证 = 其 agent 重启）：glare 分支。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678902", 1100)
+            .expect("glare offer");
+        {
+            let p = &orch.peers[0];
+            // ① ANSWER 已入列（本地凭证不变）
+            assert!(
+                p.outbox.iter().any(|(k, _)| *k == PeerSignalKind::Answer),
+                "the glare branch MUST queue an ANSWER (official: sendAnswer per offer)"
+            );
+            let answer_payload = &p
+                .outbox
+                .iter()
+                .find(|(k, _)| *k == PeerSignalKind::Answer)
+                .expect("answer queued")
+                .1;
+            let creds = parse_ufrag_pwd(answer_payload).expect("answer is ufrag:pwd");
+            assert_eq!(
+                creds,
+                p.creds.as_ref().expect("local creds").clone(),
+                "the answer carries OUR (unchanged) local credentials"
+            );
+            // ② 角色不变（公钥比较在创建时确定，不随 Offer 方向摆动）
+            assert!(p.session.as_ref().expect("session").is_controlling());
+            // ③ 对端新凭证已采纳 + 本地候选重新入列（对端新 agent 的
+            //    候选缓存已死）
+            assert_eq!(p.remote_creds.as_ref().expect("remote creds").ufrag, "wxyz");
+            assert!(
+                p.outbox.iter().any(|(k, _)| *k == PeerSignalKind::Candidate),
+                "local candidates must be re-trickled for the peer's fresh agent"
+            );
+            // ④ OFFER 不再重发（从重发母本移除）
+            assert!(
+                !p.signaled.iter().any(|(k, _)| *k == PeerSignalKind::Offer),
+                "the OFFER must leave the re-signal set once answered"
+            );
+        }
+        // 刷出 ANSWER，再走过两个重发周期：零新 OFFER、ANSWER/候选照常。
+        orch.run_once(1200).expect("flush the answer");
+        for t in [1200 + HANDSHAKE_RETRY_MS, 1200 + 2 * HANDSHAKE_RETRY_MS] {
+            orch.run_once(t).expect("retry beat");
+        }
+        let frames = signal.frames.lock().expect("frames").clone();
+        let offers_total = frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Offer).count();
+        assert_eq!(offers_total, 1, "no OFFER re-send after the glare answer");
+        assert!(
+            frames.iter().any(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Answer),
+            "the ANSWER must have left"
+        );
+
+        // 对端重发同一 Offer（同凭证，幂等）：再次应答、仍零新 OFFER。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Offer, "wxyz:0123456789012345678902", 1200 + 3 * HANDSHAKE_RETRY_MS)
+            .expect("duplicate offer");
+        orch.run_once(1200 + 3 * HANDSHAKE_RETRY_MS).expect("flush");
+        let offers_total = signal
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Offer)
+            .count();
+        assert_eq!(offers_total, 1, "duplicate offer re-answers but never re-offers");
+    }
+
+    /// 对端 ANSWER 到达（正常应答路径，非 glare）：OFFER 停止重发、候选
+    /// trickle 保持（§6.4 —— 修复前 3 s 周期把 OFFER 一并重发，8 min ~160
+    /// 次、对端逐条应答、每轮重摆 glare/凭证状态）。
+    #[test]
+    fn answer_receipt_stops_offer_resend_but_keeps_candidates() {
+        let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        orch.run_once(1000).expect("offer + candidates out");
+        // 对端 ANSWER 到达
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1100)
+            .expect("answer");
+        assert!(
+            !orch.peers[0]
+                .signaled
+                .iter()
+                .any(|(k, _)| *k == PeerSignalKind::Offer),
+            "the ANSWER retires the OFFER from the re-signal set"
+        );
+        assert!(
+            orch.peers[0]
+                .signaled
+                .iter()
+                .any(|(k, _)| *k == PeerSignalKind::Candidate),
+            "candidate frames keep trickling on retry"
+        );
+        for t in [1100 + HANDSHAKE_RETRY_MS, 1100 + 2 * HANDSHAKE_RETRY_MS] {
+            orch.run_once(t).expect("retry beat");
+        }
+        // 截止期前 1 ms：谈判仍在（Answer 不是候选），候选继续重发——本用例的
+        // 原意全在这个窗口内（修复前 3 s 周期把 OFFER 也一并重发）。
+        let edge = 1000 + START_DEADLINE_MS - 1;
+        orch.run_once(edge).expect("pre-deadline edge beat");
+        assert!(
+            orch.peers[0].session.is_some() && !orch.peers[0].started,
+            "1 ms before the deadline the answered negotiation still waits for a candidate"
+        );
+        let frames = signal.frames.lock().expect("frames").clone();
+        assert_eq!(
+            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Offer).count(),
+            1,
+            "exactly the ONE original offer, no re-sends after the answer"
+        );
+        assert!(
+            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Candidate).count() > 1,
+            "candidates continue to be re-signaled until Connected or the start deadline"
+        );
+        // 到截止期：这个「已应答但零候选」的谈判同样被拆除（round-230622244
+        // 停摆修复）——修复前它会永远占着会话与 socket、不再重试。
+        orch.run_once(1000 + START_DEADLINE_MS).expect("deadline beat");
+        assert!(
+            orch.peers[0].session.is_none(),
+            "an ANSWER without any candidate is still bounded by the start deadline"
+        );
+        assert_eq!(orch.peers[0].state, PeerIceState::Failed);
+    }
+
+    /// 真机 round-230622244 停摆回归：手机 07:09:03 发出本地候选、07:09:04
+    /// 收到 Answer，此后**零远端候选**、9 min 内没有任何重试。`maybe_start`
+    /// 要求「远端凭证 + 本地候选 + ≥1 远端候选」，Answer 只给凭证，于是
+    /// `started` 永远 false；修复前 [`PeerConn::expire_dead_negotiation`] 的
+    /// `remote_creds.is_none()` 守卫把「已应答」当成健康，会话永不拆除 ——
+    /// socket 被占住且 `IceSession::run_once` 因 `!started` 立即返回、永不收包。
+    ///
+    /// 修复后 [`START_DEADLINE_MS`] 约束**所有**未 start 的谈判：到期即
+    /// [`PeerIceOrchestrator::drop_session_rearm`]（Drop 关闭全部 dup socket、
+    /// 回收 WG 端点、按既有冷却重新武装），冷却期满以全新凭证重新发起；
+    /// 远端随后补齐候选即正常 start（恢复路径没被堵死）。远端**应答过**，
+    /// 因此不计入「远端静默」退避（`note_silent_timeout` 的 `rx_since_timeout`）。
+    #[test]
+    fn answered_but_candidateless_negotiation_still_expires_and_recovers() {
+        #[derive(Default)]
+        struct RecyclingWg {
+            recycled: Mutex<Vec<String>>,
+        }
+        impl WgPeerApplier for RecyclingWg {
+            fn apply_peers(&self, _peers: &[WgPeerEntry]) -> Result<(), String> {
+                Ok(())
+            }
+            fn clear(&self) {}
+            fn recycle_endpoint(&self, pub_key_b64: &str) {
+                self.recycled.lock().expect("recycled").push(pub_key_b64.to_string());
+            }
+        }
+
+        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
+        for _ in 0..4 {
+            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(fd >= 0, "socket() failed");
+            socks.feed(fd).expect("feed");
+            unsafe { sys::close(fd) };
+        }
+        let wg = Arc::new(RecyclingWg::default());
+        let signal = Arc::new(FrameLog::default());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks,
+            signal: signal.clone(),
+            wg: wg.clone(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_local_key("ZZZZlocal".to_string());
+        orch.set_peers(&["PPPPpeer".to_string()]);
+        orch.set_signal_ready(true);
+
+        const T0: u64 = 1000;
+        orch.run_once(T0).expect("offer + local candidates out");
+        assert!(orch.peers[0].session.is_some(), "precondition: the negotiation exists");
+        assert!(orch.peers[0].locals_done, "precondition: local candidates gathered");
+
+        // Answer 到达（远端凭证在手）但零远端候选——真机 round-230622244 形态。
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1100)
+            .expect("answer");
+        {
+            let p = &orch.peers[0];
+            assert!(p.remote_creds.is_some(), "the answer delivered remote credentials");
+            assert_eq!(p.remote_cands_seen, 0, "and no candidate ever followed");
+            assert!(!p.started, "credentials without a candidate can never start");
+        }
+
+        // 截止前 1 ms：仍在等待，不拆除、不置错。
+        orch.run_once(T0 + START_DEADLINE_MS - 1).expect("pre-deadline beat");
+        {
+            let p = &orch.peers[0];
+            assert!(p.session.is_some(), "1 ms before the deadline the negotiation is still alive");
+            assert!(!p.started, "still waiting for the first remote candidate");
+            assert_ne!(p.state, PeerIceState::Failed, "no teardown before the deadline");
+        }
+
+        // 到截止期：拆除 + 资源回收 + 冷却重武装。
+        let deadline = T0 + START_DEADLINE_MS;
+        orch.run_once(deadline).expect("deadline beat");
+        {
+            let p = &orch.peers[0];
+            assert!(p.session.is_none(), "the answered-but-stalled session must be torn down");
+            assert_eq!(p.state, PeerIceState::Failed, "the teardown is observable as Failed");
+            assert_eq!(p.remote_creds, None, "the dead negotiation's credentials are void");
+            assert!(!p.started && !p.locals_done, "the negotiation state is fully re-armed");
+            assert_eq!(p.cooldown_until, deadline + RETRY_COOLDOWN_MS, "re-armed after the cooldown");
+            assert_eq!(p.backoff_misses, 0, "an ANSWERED peer is not a silent remote (no backoff)");
+        }
+        assert_eq!(
+            wg.recycled.lock().expect("recycled").clone(),
+            vec!["PPPPpeer".to_string()],
+            "the WG endpoint/egress of the dead negotiation must be recycled"
+        );
+
+        // 冷却期满：全新凭证重新发起（自愈，无需对端重启）。
+        let restart = deadline + RETRY_COOLDOWN_MS;
+        orch.run_once(restart).expect("re-initiate after cooldown");
+        {
+            let p = &orch.peers[0];
+            assert!(p.session.is_some(), "a fresh negotiation must be armed");
+            assert!(!p.started, "the fresh negotiation is not started yet");
+            assert!(p.creds.is_some() && p.remote_creds.is_none(), "fresh credentials, no remote yet");
+            assert_eq!(p.session_at_ms, restart, "the fresh session starts its own deadline");
+        }
+        let offers: Vec<String> = signal
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Offer)
+            .map(|(_, _, payload)| payload.clone())
+            .collect();
+        assert_eq!(offers.len(), 2, "the retry offers again: {offers:?}");
+        assert_ne!(offers[0], offers[1], "the re-initiation carries NEW credentials");
+
+        // 重试后远端补齐「凭证 + 候选」：正常 start（恢复路径没被堵死）。
+        let cand = Candidate::host_candidate([127, 0, 0, 1], 51820);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "abcd:0123456789012345678903", restart)
+            .expect("fresh answer");
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &cand.marshal(), restart)
+            .expect("fresh candidate");
+        {
+            let p = &orch.peers[0];
+            assert!(p.started, "credentials + a candidate start the fresh negotiation");
+            assert_eq!(p.state, PeerIceState::Checking, "start moves the peer to Checking");
+        }
+    }
+
+    /// 正常路径不受新边界影响：Answer **和**候选都在截止期前到达 → 照常
+    /// start（进入 Checking）。已 start 的会话不归 [`START_DEADLINE_MS`] 管，
+    /// 其生死由 [`CHECKING_WATCHDOG_MS`] 与 N5b 事件诚实驱动——
+    /// `checking_watchdog_fails_stalled_session_and_renegotiates` 用已 start
+    /// 的会话走满 18 s 窗口即其证据。
+    #[test]
+    fn answer_with_candidate_before_deadline_starts_normally() {
+        let (mut orch, _signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        const T0: u64 = 1000;
+        orch.run_once(T0).expect("offer + local candidates out");
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Answer, "wxyz:0123456789012345678901", 1100)
+            .expect("answer");
+        let cand = Candidate::host_candidate([127, 0, 0, 1], 51820);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &cand.marshal(), 1100)
+            .expect("candidate");
+        let p = &orch.peers[0];
+        assert!(p.started, "credentials + a candidate start the negotiation");
+        assert_eq!(p.state, PeerIceState::Checking);
+        assert!(p.session.is_some());
+        assert_eq!(
+            p.checking_since_ms, 1100,
+            "the STARTED session is now governed by the Checking watchdog, not the start deadline"
+        );
+    }
+
+    /// Checking 看门狗：start 后 [`CHECKING_WATCHDOG_MS`] 无任何检查成功
+    /// → 判 failed、拆除会话、冷却后**全新协商**（重新发起 Offer）。
+    /// 覆盖 §2.3 的"僵尸 Checking"（all-pairs-failed 被候选流入掩盖、
+    /// Disconnected 永不触发 → 无终态信号）。
+    #[test]
+    fn checking_watchdog_fails_stalled_session_and_renegotiates() {
+        let (mut orch, signal) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 8);
+        const T0: u64 = 1000;
+        // 直接注入一个已 start、处于 Checking 的会话（字段级构造，同
+        // `starved_session_does_not_burn_the_negotiation_deadline` 的手法）：
+        // 远端候选指向一个无人监听的端口 → 检查永远无响应，也永不成功。
+        {
+            let p = &mut orch.peers[0];
+            let creds = IceCredentials::generate().expect("creds");
+            let mut session = IceSession::new(creds.clone(), true, Some(7)).expect("session");
+            session
+                .set_remote_credentials(IceCredentials {
+                    ufrag: "wxyz".into(),
+                    pwd: "0123456789012345678901".into(),
+                })
+                .expect("remote creds");
+            session.add_remote_candidate(Candidate::host_candidate([127, 0, 0, 1], 1));
+            p.session = Some(session);
+            p.creds = Some(creds);
+            p.remote_creds = Some(IceCredentials {
+                ufrag: "wxyz".into(),
+                pwd: "0123456789012345678901".into(),
+            });
+            p.state = PeerIceState::Checking;
+            p.started = true;
+            p.locals_done = true;
+            p.session_at_ms = T0;
+            p.checking_since_ms = T0;
+        }
+        // 截止前 1 ms：绝不拆。
+        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS - 1).is_ok());
+        assert!(
+            orch.peers[0].session.is_some(),
+            "a Checking session within the watchdog window must not be torn down"
+        );
+        // 到点：拆除 + Failed。
+        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS).is_ok());
+        assert!(
+            orch.peers[0].session.is_none(),
+            "the stalled Checking session must be dropped at the watchdog deadline"
+        );
+        assert_eq!(orch.peer_status("PPPPpeer").expect("peer").state, PeerIceState::Failed);
+        // 冷却期满：全新协商（Offer 路径重新发起）。
+        assert!(
+            orch.peers[0].cooldown_until <= T0 + CHECKING_WATCHDOG_MS + RETRY_COOLDOWN_MS,
+            "the watchdog drop arms the normal renegotiation cooldown"
+        );
+        orch.run_once(T0 + CHECKING_WATCHDOG_MS + RETRY_COOLDOWN_MS + 1).expect("re-initiate");
+        assert!(
+            orch.peers[0].session.is_some(),
+            "after the cooldown a FRESH negotiation must start"
+        );
+        assert!(
+            orch.peers[0].initiated,
+            "the re-negotiation goes through the offer path"
+        );
+        assert!(
+            signal
+                .frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .any(|(to, k, _)| to == "PPPPpeer" && *k == PeerSignalKind::Offer),
+            "the fresh negotiation signals an OFFER"
+        );
+    }
+
+    /// 看门狗的滑动重置：检查成功（[`IceEvent::CheckSucceeded`]）把计时
+    /// 起点推到成功时刻 —— 还在取得进展的慢会话不会被误杀。
+    #[test]
+    fn checking_watchdog_slides_on_check_success() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        const T0: u64 = 1000;
+        {
+            let p = &mut orch.peers[0];
+            let creds = IceCredentials::generate().expect("creds");
+            p.session = Some(IceSession::new(creds.clone(), true, Some(7)).expect("session"));
+            p.creds = Some(creds);
+            p.state = PeerIceState::Checking;
+            p.started = true;
+            p.locals_done = true;
+            p.session_at_ms = T0;
+            p.checking_since_ms = T0;
+        }
+        // T0+5000 检查成功（直接模拟 drain_events 的滑动重置）。
+        orch.peers[0].checking_since_ms = T0 + 5000;
+        // 原截止点（T0+WATCHDOG）：不拆（计时已被成功滑走）。
+        assert!(orch.run_once(T0 + CHECKING_WATCHDOG_MS).is_ok());
+        assert!(
+            orch.peers[0].session.is_some(),
+            "a session with recent check progress must survive the old deadline"
+        );
+        // 滑动后的截止点（成功时刻 + WATCHDOG）：拆除。
+        assert!(orch.run_once(T0 + 5000 + CHECKING_WATCHDOG_MS).is_ok());
+        assert!(
+            orch.peers[0].session.is_none(),
+            "the watchdog fires from the LAST check success, not from start"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // per-peer ICE 细节快照（connector_status 明细面）
+    // -------------------------------------------------------------------
+
+    /// 未选出 selected pair：细节两个端点都是 `None`，**绝不回退到第一个
+    /// 候选**。前置条件在同一用例里钉死：会话已有本地候选与 pair，所以
+    /// `None` 只可能来自「未选中」；状态是仍有信息量的 Checking，角色已定。
+    #[test]
+    fn ice_detail_reports_unknown_without_a_selected_pair() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        const T0: u64 = 1000;
+        orch.run_once(T0).expect("initiate beat gathers and creates the session");
+        // 远端凭证 + 一个无人应答的候选（黑洞端口）→ 会话 start（Checking）、
+        // pair 已存在，但永远没有成功检查 → 没有 selected pair。
+        let dead = Candidate::host_candidate([127, 0, 0, 1], 1);
+        orch.handle_signal(
+            "PPPPpeer",
+            PeerSignalKind::Answer,
+            "wxyz:0123456789012345678901",
+            T0 + 1,
+        )
+        .expect("answer accepted");
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &dead.marshal(), T0 + 2)
+            .expect("candidate accepted");
+        for beat in 1..=3u64 {
+            orch.run_once(T0 + 2 + beat * 100).expect("checking beat");
+        }
+        {
+            let p = orch.peers.iter().find(|p| p.key == "PPPPpeer").expect("peer");
+            let session = p.session.as_ref().expect("session");
+            assert_eq!(p.state, PeerIceState::Checking);
+            assert!(
+                !session.local_candidates().is_empty(),
+                "precondition: the session HAS local candidates (None must mean 'not selected')"
+            );
+            assert!(
+                !session.pair_snapshots().is_empty(),
+                "precondition: the session HAS pairs (None must not fall back to one of them)"
+            );
+            assert!(session.selected_pair().is_none(), "precondition: nothing succeeded yet");
+        }
+        let d = orch.peer_ice_detail("PPPPpeer").expect("detail");
+        assert_eq!(d.pub_key, "PPPPpeer");
+        assert_eq!(d.state, PeerIceState::Checking, "checking is a useful state, not a blank");
+        assert_eq!(d.controlling, Some(true), "ZZZZlocal > PPPPpeer → controlling");
+        assert_eq!(d.selected_local, None, "no selected pair → unknown local endpoint");
+        assert_eq!(d.selected_remote, None, "no selected pair → unknown remote endpoint");
+        assert!(!d.endpoint_applied);
+        assert!(!d.reachable, "Checking is never reachable");
+        assert_eq!(d.last_error, None);
+        // 无会话的 peer：角色未知（None，不是 false）、端点未知。
+        // 键序故意与网络图顺序相反（AAApeer 后注册、但排序在前），用来钉住
+        // `ice_details` 的稳定序。
+        orch.set_peers(&["PPPPpeer".to_string(), "AAApeer".to_string()]);
+        let idle = orch.peer_ice_detail("AAApeer").expect("idle detail");
+        assert_eq!(idle.state, PeerIceState::Idle);
+        assert_eq!(idle.controlling, None, "no session → role unknown");
+        assert_eq!(idle.selected_local, None);
+        assert_eq!(idle.selected_remote, None);
+        assert_eq!(orch.peer_ice_detail("nobody"), None, "unknown key → None");
+        assert_eq!(
+            orch.ice_details().iter().map(|d| d.pub_key.clone()).collect::<Vec<_>>(),
+            vec!["AAApeer".to_string(), "PPPPpeer".to_string()],
+            "ice_details: one owned detail per peer, sorted by pub_key (not network-map order)"
+        );
+    }
+
+    /// 选出 selected pair：细节带出两侧候选的**类型 + ip:port**（本端 host、
+    /// 对端 srflx），并与既有 `peer_status().selected_remote` 同一事实。
+    ///
+    /// 一枚真实 loopback UDP socket 当测试桩扮演对端：收到检查就按对端口令
+    /// 签名回 Binding Success（`on_check_response` 的门是 txn + MI + FP，
+    /// XOR-MAPPED 地址不参与判定）→ controlling 侧提名 → selected pair。
+    /// 这是 in-file 能做到的最小真实选择路径（无需第二个编排器/信令链路）。
+    #[test]
+    fn ice_detail_surfaces_the_selected_pair_types_and_addresses() {
+        let (mut orch, _) = glare_orch(Some("ZZZZlocal"), "PPPPpeer", 4);
+        const T0: u64 = 1000;
+        orch.run_once(T0).expect("initiate beat gathers and creates the session");
+
+        let stub = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+        assert!(stub >= 0, "socket() failed");
+        let any = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        assert_eq!(
+            unsafe { sys::bind(stub, &any, core::mem::size_of::<sys::sockaddr_in>() as u32) },
+            0,
+            "bind failed"
+        );
+        let mut bound = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut bound_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        assert_eq!(unsafe { sys::getsockname(stub, &mut bound, &mut bound_len) }, 0);
+        let stub_port = u16::from_be(bound.sin_port);
+        assert_ne!(stub_port, 0, "the stub socket must have a real port");
+
+        let peer_creds =
+            IceCredentials { ufrag: "wxyz".into(), pwd: "0123456789012345678901".into() };
+        orch.handle_signal(
+            "PPPPpeer",
+            PeerSignalKind::Answer,
+            &format!("{}:{}", peer_creds.ufrag, peer_creds.pwd),
+            T0 + 1,
+        )
+        .expect("answer accepted");
+        // 对端候选：srflx 型（地址就是桩），类型必须如实进细节。
+        let base = Candidate::host_candidate([127, 0, 0, 1], 40000);
+        let peer_cand = Candidate::srflx_candidate(&base, [127, 0, 0, 1], stub_port);
+        orch.handle_signal("PPPPpeer", PeerSignalKind::Candidate, &peer_cand.marshal(), T0 + 2)
+            .expect("candidate accepted");
+
+        let mut now = T0 + 2;
+        let mut replied = 0usize;
+        for _ in 0..32 {
+            now += 50;
+            orch.run_once(now).expect("checking beat");
+            let mut buf = [0u8; 1500];
+            loop {
+                let mut src = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+                let mut src_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+                let n = unsafe {
+                    sys::recvfrom(
+                        stub,
+                        buf.as_mut_ptr() as *mut core::ffi::c_void,
+                        buf.len(),
+                        sys::MSG_DONTWAIT,
+                        &mut src,
+                        &mut src_len,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+                let Ok(parsed) = crate::ice_session::parse_stun(&buf[..n as usize]) else {
+                    continue;
+                };
+                let reply = crate::ice_session::build_success_response(
+                    parsed.txn,
+                    (src.sin_addr, u16::from_be(src.sin_port)),
+                    &peer_creds.pwd,
+                );
+                let sent = unsafe {
+                    sys::sendto(
+                        stub,
+                        reply.as_ptr() as *const core::ffi::c_void,
+                        reply.len(),
+                        0,
+                        &src,
+                        src_len,
+                    )
+                };
+                assert!(sent > 0, "the stub must answer every check it receives");
+                replied += 1;
+            }
+            if orch.peer_status("PPPPpeer").expect("peer").state == PeerIceState::Connected {
+                break;
+            }
+        }
+        unsafe { sys::close(stub) };
+
+        assert!(
+            replied >= 2,
+            "the stub must answer the check AND the nomination check (answered {replied})"
+        );
+        let d = orch.peer_ice_detail("PPPPpeer").expect("detail");
+        assert_eq!(d.state, PeerIceState::Connected);
+        assert_eq!(d.controlling, Some(true));
+        let local = d.selected_local.clone().expect("selected local endpoint");
+        assert_eq!(local.typ, CandidateType::Host, "our gathered candidate is host-typed");
+        assert_eq!(local.address, "127.0.0.1");
+        assert_ne!(local.port, 0, "the local endpoint is the bound check socket");
+        let remote = d.selected_remote.clone().expect("selected remote endpoint");
+        assert_eq!(
+            remote.typ,
+            CandidateType::Srflx,
+            "the peer's signaled candidate keeps its type"
+        );
+        assert_eq!(remote.address, "127.0.0.1");
+        assert_eq!(remote.port, stub_port);
+        // 与既有 status 面同一事实（同一 selected pair 的 ip:port）。
+        let s = orch.peer_status("PPPPpeer").expect("status");
+        assert_eq!(s.selected_remote, Some(([127, 0, 0, 1], stub_port)));
+        assert_eq!(s.state, PeerIceState::Connected);
+        // NullWg 的 fail-closed 默认：ICE 选中（Connected）但 endpoint 未落配
+        // → 不可用；细节把「选中」与「落配」两个事实分开报。
+        assert!(!d.endpoint_applied, "NullWg cannot land endpoints (fail-closed default)");
+        assert!(!d.reachable);
+        // 会话仍持有它收集到的 socket（本快照是纯读，不动归属）。
+        assert_eq!(
+            orch.peers[0].session.as_ref().expect("session").local_candidates().len(),
+            1
         );
     }
 }

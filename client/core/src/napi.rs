@@ -1,12 +1,14 @@
 //! Handwritten NAPI bindings (no napi-rs dependency; promoted from
 //! spikes/n1b-disc-phys-hap/probe/src/napi.rs with the export surface trimmed
-//! to the product skeleton: version / abi_probe / fd_status / wg_* / tun_*).
+//! to the product skeleton: version / abi_probe / fd_status / wg_* / tun_* /
+//! phone_log_*).
 //! A1-clean: this file contains ZERO napi_create_threadsafe_function /
 //! napi_create_async_work — all exports are synchronous. Symbols resolve at
 //! load time from the host process's libace_napi.z.so (DT_NEEDED via
 //! .cargo/config.toml link args).
 
 use core::ffi::c_void;
+use core::time::Duration;
 
 pub type NapiEnv = *mut c_void;
 pub type NapiValue = *mut c_void;
@@ -124,6 +126,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_tun_release", napi_connector_tun_release);
     reg!("connector_route_set_applied", napi_connector_route_set_applied);
     reg!("connector_status", napi_connector_status);
+    reg!("connector_resource_status", napi_connector_resource_status);
     reg!("connector_network_config", napi_connector_network_config);
     reg!("connector_stop", napi_connector_stop);
     reg!("connector_logout", napi_connector_logout);
@@ -158,6 +161,13 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("n2h_collector_disarm", napi_n2h_collector_disarm);
     reg!("n2h_probe_socket_open", napi_n2h_probe_socket_open);
     reg!("n2h_probe_socket_commit", napi_n2h_probe_socket_commit);
+    reg!("phone_log_configure", napi_phone_log_configure);
+    reg!("phone_log_append", napi_phone_log_append);
+    reg!("phone_log_status", napi_phone_log_status);
+    reg!("phone_log_shutdown", napi_phone_log_shutdown);
+    reg!("account_auth_discovery_start", napi_account_auth_discovery_start);
+    reg!("account_auth_discovery_poll", napi_account_auth_discovery_poll);
+    reg!("account_auth_discovery_cancel", napi_account_auth_discovery_cancel);
     exports
 }
 
@@ -246,6 +256,30 @@ impl Args {
             String::from_utf8_lossy(&buf[..written]).into_owned()
         }
     }
+
+    /// Bounded `string_at`: `None` when the argument is missing, is not a
+    /// string, is empty, or is LONGER than `max_bytes`. The size probe runs
+    /// before the copy, so an oversized JS string is refused instead of being
+    /// copied into a Rust buffer (bounded argument validation for the
+    /// `phone_log_*` surface).
+    fn string_at_bounded(&self, idx: usize, max_bytes: usize) -> Option<String> {
+        if idx >= self.argc {
+            return None;
+        }
+        unsafe {
+            let mut written: usize = 0;
+            let rc = napi_get_value_string_utf8(self.env, self.argv[idx], core::ptr::null_mut(), 0, &mut written);
+            if rc != 0 || written == 0 || written > max_bytes {
+                return None;
+            }
+            let mut buf = vec![0u8; written + 1];
+            let rc = napi_get_value_string_utf8(self.env, self.argv[idx], buf.as_mut_ptr(), buf.len(), &mut written);
+            if rc != 0 {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&buf[..written]).into_owned())
+        }
+    }
 }
 
 fn ret_json(env: NapiEnv, json: String) -> NapiValue {
@@ -273,11 +307,21 @@ mod host_stubs {
         static FAKE_FUNCS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
         // (object, name, value) recorded by napi_set_named_property
         static SET_CALLS: RefCell<Vec<(usize, String, usize)>> = RefCell::new(Vec::new());
+        // NapiValue handle -> UTF-8 payload the string stub hands back
+        static FAKE_STRINGS: RefCell<HashMap<usize, Vec<u8>>> = RefCell::new(HashMap::new());
     }
 
     pub fn reset() {
         FAKE_FUNCS.with(|m| m.borrow_mut().clear());
         SET_CALLS.with(|c| c.borrow_mut().clear());
+        FAKE_STRINGS.with(|m| m.borrow_mut().clear());
+    }
+
+    /// Register a fake string argument for the `napi_get_value_string_utf8`
+    /// stub, so `Args::string_at*` (probe + copy + byte cap) can be driven on
+    /// the host without an NAPI runtime.
+    pub fn set_string(handle: usize, text: &str) {
+        FAKE_STRINGS.with(|m| m.borrow_mut().insert(handle, text.as_bytes().to_vec()));
     }
 
     pub fn fake_funcs() -> HashMap<String, usize> {
@@ -355,11 +399,24 @@ mod host_stubs {
     #[no_mangle]
     pub extern "C" fn napi_get_value_string_utf8(
         _env: NapiEnv,
-        _value: NapiValue,
-        _buf: *mut u8,
-        _bufsize: usize,
-        _result: *mut usize,
+        value: NapiValue,
+        buf: *mut u8,
+        bufsize: usize,
+        result: *mut usize,
     ) -> i32 {
+        let bytes = FAKE_STRINGS.with(|m| m.borrow().get(&(value as usize)).cloned());
+        // A handle with no registered payload is "not a string" (non-zero rc).
+        let Some(bytes) = bytes else { return 1 };
+        unsafe {
+            if buf.is_null() || bufsize == 0 {
+                *result = bytes.len();
+                return 0;
+            }
+            let n = bytes.len().min(bufsize - 1);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
+            *buf.add(n) = 0;
+            *result = n;
+        }
         0
     }
 
@@ -376,7 +433,7 @@ mod host_stubs {
 
 #[cfg(test)]
 mod tests {
-    use super::host_stubs::{fake_funcs, reset, set_calls};
+    use super::host_stubs::{fake_funcs, reset, set_calls, set_string};
     use super::*;
 
     // Real regression promoted from the probe: napi_init must attach the
@@ -420,6 +477,7 @@ mod tests {
             "connector_tun_release",
             "connector_route_set_applied",
             "connector_status",
+            "connector_resource_status",
             "connector_network_config",
             "connector_stop",
             "n2_tun_dest_configure",
@@ -451,6 +509,13 @@ mod tests {
             "n2h_collector_disarm",
             "n2h_probe_socket_open",
             "n2h_probe_socket_commit",
+            "phone_log_configure",
+            "phone_log_append",
+            "phone_log_status",
+            "phone_log_shutdown",
+            "account_auth_discovery_start",
+            "account_auth_discovery_poll",
+            "account_auth_discovery_cancel",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -460,6 +525,152 @@ mod tests {
             assert_ne!(fake, 0, "{} fake function must be non-null", name);
             assert_eq!(call.2, fake, "{} value must be the created function object", name);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // phone_log:* export surface
+    //
+    // The NAPI callbacks themselves cannot be driven end-to-end through the
+    // host stubs (`napi_get_cb_info` is a no-op here), so the bounded bodies
+    // they call are exercised directly, and `Args` itself is driven through the
+    // string stub. Registration of the four names is covered above.
+    // -----------------------------------------------------------------------
+
+    /// Read one flat `"key":value` field out of a reply document.
+    fn json_field(json: &str, key: &str) -> String {
+        let marker = format!("\"{key}\":");
+        let start = json
+            .find(&marker)
+            .unwrap_or_else(|| panic!("{key} missing in {json}"))
+            + marker.len();
+        let rest = &json[start..];
+        match rest.strip_prefix('"') {
+            Some(quoted) => quoted[..quoted.find('"').expect("closing quote")].to_string(),
+            None => rest[..rest.find(|c| c == ',' || c == '}').expect("value end")].to_string(),
+        }
+    }
+
+    #[test]
+    fn bounded_string_args_refuse_over_cap_and_non_string() {
+        reset();
+        set_string(0x51, "files/phone.log");
+        set_string(0x52, &"x".repeat(700));
+        let mut argv: [NapiValue; 8] = [core::ptr::null_mut(); 8];
+        argv[0] = 0x51 as NapiValue;
+        argv[1] = 0x52 as NapiValue;
+        argv[2] = 0x53 as NapiValue; // never registered = "not a string"
+        let args = Args { env: 0x1 as NapiEnv, argv, argc: 3 };
+
+        assert_eq!(args.string_at_bounded(0, PHONE_LOG_PATH_MAX).as_deref(), Some("files/phone.log"));
+        assert_eq!(
+            args.string_at_bounded(1, PHONE_LOG_PATH_MAX),
+            None,
+            "an over-cap string must be refused before the copy"
+        );
+        assert_eq!(
+            args.string_at_bounded(1, 4096).as_deref().map(str::len),
+            Some(700),
+            "the same value passes under a larger cap"
+        );
+        assert_eq!(args.string_at_bounded(2, PHONE_LOG_PATH_MAX), None, "non-string must be refused");
+        assert_eq!(args.string_at_bounded(3, PHONE_LOG_PATH_MAX), None, "missing argument must be refused");
+        assert_eq!(args.string_at_bounded(0, 0), None, "a zero cap refuses everything");
+    }
+
+    #[test]
+    fn phone_log_exports_shapes_and_lifecycle() {
+        // The phone log is PROCESS-GLOBAL and this is the only lib test that
+        // configures it (tests/phone_log.rs is a separate test binary).
+        let dir = std::env::temp_dir().join(format!(
+            "nb-napi-phone-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phone.log").to_string_lossy().into_owned();
+
+        // Error replies are a code only — never the argument, never config.
+        assert_eq!(
+            phone_log_configure_export("no-slash.log"),
+            "{\"ok\":false,\"error\":\"invalid-path\"}"
+        );
+        assert_eq!(phone_log_append_export(None), "{\"ok\":false,\"error\":\"invalid-line\"}");
+        assert_eq!(
+            phone_log_append_export(Some("before-configure")),
+            "{\"ok\":false,\"error\":\"not-configured\"}"
+        );
+
+        // Configure once: an install, not an idempotent hit.
+        let first = phone_log_configure_export(&path);
+        assert!(first.contains("\"ok\":true"), "{first}");
+        assert!(first.contains("\"configured\":true"), "{first}");
+        assert!(first.contains("\"idempotent\":false"), "{first}");
+        assert!(first.contains("\"enabled\":true"), "{first}");
+        assert!(first.contains("\"running\":true"), "{first}");
+        assert_eq!(json_field(&first, "path"), path, "{first}");
+        let session = json_field(&first, "session");
+        assert!(!session.is_empty(), "{first}");
+
+        // A repeat on the SAME path is idempotent: same session, no new writer.
+        let again = phone_log_configure_export(&path);
+        assert!(again.contains("\"idempotent\":true"), "{again}");
+        assert_eq!(json_field(&again, "session"), session, "{again}");
+
+        // One line handed to the tee must reach the file. The module's
+        // per-second admission budget is PROCESS-WIDE (concurrent lib tests
+        // share it), so a line can be refused by design (`rate_suppressed`);
+        // retry across fresh windows and fail only if no sentinel ever lands.
+        let mut sentinel = String::new();
+        let mut found = false;
+        for attempt in 0..12 {
+            sentinel = format!("NAPI_PHONE_LOG_SENTINEL_{attempt}|roundtrip");
+            assert_eq!(
+                phone_log_append_export(Some(&sentinel)),
+                "{\"ok\":true}",
+                "an enabled tee must accept the hand-off"
+            );
+            crate::phone_log::flush(Duration::from_millis(100));
+            found = std::fs::read_to_string(&path).is_ok_and(|text| text.contains(&sentinel));
+            if found {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(120));
+        }
+        assert!(found, "no sentinel record reached the file ({sentinel})");
+
+        let shutdown = phone_log_shutdown_export();
+        assert!(shutdown.contains("\"ok\":true"), "{shutdown}");
+        assert!(shutdown.contains("\"stopped\":"), "{shutdown}");
+        assert!(shutdown.contains("\"running\":"), "{shutdown}");
+        assert!(shutdown.contains("\"pending\":"), "{shutdown}");
+
+        // The bounded request may legitimately report stopped:false; the writer
+        // must still reach the stopped state without a 2 s block on the caller.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::phone_log::stats().running && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!crate::phone_log::stats().running, "writer never stopped: {shutdown}");
+
+        let status = phone_log_status_export();
+        assert!(status.contains("\"component\":\"phone_log\""), "{status}");
+        assert!(status.contains("\"enabled\":false"), "{status}");
+        assert!(status.contains("\"running\":false"), "{status}");
+
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(text.contains(&sentinel), "{text}");
+        assert!(text.contains(&format!("sess={session}")), "{text}");
+
+        // After the stop the tee is off: a late line is refused, not buffered.
+        assert_eq!(
+            phone_log_append_export(Some("after-shutdown")),
+            "{\"ok\":false,\"error\":\"not-configured\"}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -709,6 +920,17 @@ unsafe extern "C" fn napi_connector_status(env: NapiEnv, _info: NapiCallbackInfo
     ret_json(env, crate::connector::connector_status_json())
 }
 
+// 006: ADDITIVE read-only resource snapshot (separate function, separate
+// document). The frozen `connector_status` JSON/order is untouched; this one
+// reports only counts of resources core still owns (generation, ICE sessions /
+// live local sockets, protected-ICE queue, socket-supply pending/queued, relay
+// lanes/opens/foreign clients, pending DNS receivers) with `null` for any
+// value whose leaf lock was busy. Numeric counts only — never a peer key, a
+// relay URL, an fd number or a secret. Called by the shell bridge once/60 s.
+unsafe extern "C" fn napi_connector_resource_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_resource_status_json())
+}
+
 // N3-6: read-only shell snapshot of the last applied network map (tunnel
 // address, routes + default marks, DNS, peer summary — public keys only).
 unsafe extern "C" fn napi_connector_network_config(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
@@ -956,4 +1178,185 @@ unsafe extern "C" fn napi_n2h_probe_socket_commit(env: NapiEnv, info: NapiCallba
         env,
         crate::n2h_collector::protect_probe_commit_json(a.i32_at(0, -1), &a.string_at(1)),
     )
+}
+
+// ---------------------------------------------------------------------------
+// phone_log: phone-side persistent diagnostic log (crate::phone_log)
+//
+// The native module ALREADY tees every `hilog::emit` line into the file (native
+// logs need no shell involvement). These four exports are the ArkTS-facing
+// counterpart:
+//
+//   phone_log_configure(path) -> JSON  install/replace the file tee
+//   phone_log_append(line)    -> JSON  hand ONE shell line to the tee (never blocks)
+//   phone_log_status()        -> JSON  the module's own status document
+//   phone_log_shutdown()      -> JSON  bounded stop REQUEST, reports pending
+//
+// All four return a JSON string (this file's convention) and none of them ever
+// echoes the argument it was handed: an error is a code (`invalid-path`,
+// `shutdown-pending`, …), never the path, the line, or any config content. This
+// surface never reads configuration files.
+// ---------------------------------------------------------------------------
+
+/// Byte cap on the configure path argument. The module's own `valid_path` rule
+/// is `len() <= 512`; a longer argument is refused before it is copied.
+const PHONE_LOG_PATH_MAX: usize = 512;
+/// Byte cap on one append line. Generous — the module caps a persisted record
+/// at 16 Ki *characters* at ingress — but hard, so a pathological JS string is
+/// refused instead of copied and pushed through redaction.
+const PHONE_LOG_LINE_MAX: usize = 64 * 1024;
+/// How long `phone_log_shutdown` may wait for the writer's completion ack.
+/// Deliberately a few milliseconds: the call runs on the ArkTS event thread.
+/// In the normal case (idle queue) the writer acks in microseconds and the
+/// reply says `stopped:true`; when the queue is full or the writer is mid-write
+/// the reply says `stopped:false` and the caller reads `phone_log_status()`
+/// again later — it never parks the event thread on disk I/O.
+const PHONE_LOG_SHUTDOWN_WAIT: Duration = Duration::from_millis(5);
+
+/// `{"ok":false,"error":"<code>"}` — a code only, never the argument.
+fn phone_log_error(code: &str) -> String {
+    format!("{{{},{}}}", crate::util::jbool("ok", false), crate::util::jstr("error", code))
+}
+
+/// Success reply of `phone_log_configure`: the state read back from the module
+/// (never the argument echoed) plus whether the call was a same-path no-op.
+fn phone_log_configured_json(idempotent: bool) -> String {
+    let s = crate::phone_log::stats();
+    format!(
+        "{{{},{},{},{},{},{},{},{}}}",
+        crate::util::jbool("ok", true),
+        crate::util::jbool("configured", true),
+        crate::util::jbool("idempotent", idempotent),
+        crate::util::jbool("enabled", s.enabled),
+        crate::util::jbool("running", s.running),
+        crate::util::jstr("session", &s.session),
+        crate::util::jstr("path", &s.path),
+        crate::util::jnum("queue_capacity", s.queue_capacity as u64),
+    )
+}
+
+/// Bounded configure body (no NAPI types, so the unit test can drive it).
+///
+/// ONCE PER PATH: the module replaces a logger by installing the new writer
+/// first and only then draining the old one, so calling it again on the path
+/// that is already installed would briefly put TWO writers on the same file
+/// (interleaved records, racing rotation). When the installed path is exactly
+/// the requested one this answers from the live state and starts nothing:
+///   * tee enabled                   -> `idempotent:true`, running session kept;
+///   * tee disabled, writer draining -> refused (`shutdown-pending`), so no
+///     second writer is opened on that file. A caller that needs the tee again
+///     waits for `phone_log_status().running == false` (normally milliseconds,
+///     no busy polling) and retries this export.
+fn phone_log_configure_export(path: &str) -> String {
+    let current = crate::phone_log::stats();
+    if current.path == path {
+        if current.enabled {
+            return phone_log_configured_json(true);
+        }
+        if current.running {
+            return phone_log_error("shutdown-pending");
+        }
+    }
+    match crate::phone_log::configure(path) {
+        Ok(()) => phone_log_configured_json(false),
+        Err(code) => phone_log_error(code),
+    }
+}
+
+/// Bounded append body. `None` = missing / not a string / empty / over the byte
+/// cap; nothing is copied past the probe and the argument is never echoed.
+/// `{"ok":true}` means "handed to the tee at ingress", NOT "on disk": the
+/// module admits lines through a per-second budget and a bounded queue and
+/// DROPS the overflow by design (counted in `dropped`, the budget part in
+/// `rate_suppressed`; both visible via `phone_log_status()`), and an
+/// unconfigured/stopped tee answers `not-configured`.
+fn phone_log_append_export(line: Option<&str>) -> String {
+    let Some(line) = line else {
+        return phone_log_error("invalid-line");
+    };
+    if !crate::phone_log::enabled() {
+        return phone_log_error("not-configured");
+    }
+    crate::phone_log::append(line);
+    format!("{{{}}}", crate::util::jbool("ok", true))
+}
+
+/// Bounded, never-blocking shutdown REQUEST. `stopped:true` = the writer
+/// confirmed it drained, closed the file and exited. `stopped:false` = not
+/// confirmed inside the bounded wait: the request is either already queued
+/// behind the backlog or could not be enqueued yet — `running` says whether the
+/// writer is still alive and `pending` how many accepted records have not
+/// reached the OS. The caller does NOT busy-poll: it reads `phone_log_status()`
+/// later (or on its next lifecycle tick) and calls this export again only while
+/// `running` is still true.
+fn phone_log_shutdown_export() -> String {
+    let confirmed = crate::phone_log::shutdown(PHONE_LOG_SHUTDOWN_WAIT);
+    let s = crate::phone_log::stats();
+    // A writer that already exited (or exited while the ack was in flight) is
+    // stopped even when the bounded wait did not observe the ack.
+    let stopped = confirmed || !s.running;
+    format!(
+        "{{{},{},{},{}}}",
+        crate::util::jbool("ok", true),
+        crate::util::jbool("stopped", stopped),
+        crate::util::jbool("running", s.running),
+        crate::util::jnum("pending", s.pending),
+    )
+}
+
+/// The module's status document, verbatim: `component` / `enabled` / `running`
+/// / `session` / `path` / the counters (`offered`, `accepted`, `written`,
+/// `dropped`, `failed`, `pending`, `rotations`, …) / `last_error` (null or an
+/// errno-style code — never a path or content).
+fn phone_log_status_export() -> String {
+    crate::phone_log::status_json()
+}
+
+/// `phone_log_configure(path)` — install the phone log on `path` (the module's
+/// rotation/redaction rules apply; this call does not read any config).
+unsafe extern "C" fn napi_phone_log_configure(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    match a.string_at_bounded(0, PHONE_LOG_PATH_MAX) {
+        Some(path) => ret_json(env, phone_log_configure_export(&path)),
+        None => ret_json(env, phone_log_error("invalid-path")),
+    }
+}
+
+/// `phone_log_append(line)` — non-blocking hand-off; see the body docs.
+unsafe extern "C" fn napi_phone_log_append(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let a = cb_args(env, info);
+    let line = a.string_at_bounded(0, PHONE_LOG_LINE_MAX);
+    ret_json(env, phone_log_append_export(line.as_deref()))
+}
+
+/// `phone_log_status()` — the module's status document, verbatim.
+unsafe extern "C" fn napi_phone_log_status(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, phone_log_status_export())
+}
+
+/// `phone_log_shutdown()` — bounded stop request; see the body docs.
+unsafe extern "C" fn napi_phone_log_shutdown(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, phone_log_shutdown_export())
+}
+
+const ACCOUNT_AUTH_INPUT_MAX: usize = 16 * 1024;
+
+unsafe extern "C" fn napi_account_auth_discovery_start(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    match args.string_at_bounded(0, ACCOUNT_AUTH_INPUT_MAX) {
+        Some(request) => ret_json(env, crate::account_auth::account_auth_discovery_start_json(&request)),
+        None => ret_json(env, "{\"ok\":false,\"error\":\"invalid-input\"}".into()),
+    }
+}
+
+unsafe extern "C" fn napi_account_auth_discovery_poll(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_auth_discovery_poll_json(id.max(0) as u64))
+}
+
+unsafe extern "C" fn napi_account_auth_discovery_cancel(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_auth_discovery_cancel_json(id.max(0) as u64))
 }

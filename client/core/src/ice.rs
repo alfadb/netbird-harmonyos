@@ -54,8 +54,12 @@
 //! over to [`ProtectedUdpFdSource`]; empty means fail-closed
 //! [`ManagementError::Network`], never an unprotected dial). The feed
 //! immediately duplicates the number and retains an owned copy; the shell
-//! closes its original. Gathering transfers the queued fd to the bound
-//! socket, which closes it on drop. Each interface round
+//! closes its original. A SUCCESSFUL interface round no longer closes its
+//! bound socket: it leaves as a [`GatheredSocket`] whose `OwnedFd` the
+//! caller adopts (the session's `add_local_candidate_bound`), so the
+//! advertised host candidate AND the srflx mapping derived from it belong to
+//! the SAME still-live socket. Every failure path drops the taken fd exactly
+//! once. Each interface round
 //! takes a FRESH fd — auditable via `ProtectedUdpFdSource::taken()`
 //! (the mgmt `taken == attempts` contract). One socket per host candidate
 //! interface (upstream mobile shape is one shared UDPMux socket,
@@ -75,7 +79,7 @@
 //! repo-external probe `refs/ice-probe` (exit 0, aarch64-unknown-linux-ohos).
 
 use std::collections::{HashMap, VecDeque};
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -653,9 +657,10 @@ pub trait UdpSocketSource: Send + Sync {
     /// proceed and rely on the per-take `NoSocket` fail-closed path (the
     /// default keeps every borrowed/test provider working). Production
     /// overrides it so the orchestrator can size a gather round BEFORE
-    /// consuming anything — one gather round takes `2 × interfaces` sockets
-    /// and a half-fed attempt burns the batch it was given (see
-    /// `PeerIceOrchestrator::ensure_locals`).
+    /// consuming anything — one gather round takes exactly ONE socket per
+    /// interface and KEEPS it (the bound socket is handed to the session via
+    /// [`GatheredSocket`], not re-acquired), and a half-fed attempt burns the
+    /// batch it was given (see `PeerIceOrchestrator::ensure_locals`).
     fn available(&self) -> Option<usize> {
         None
     }
@@ -730,6 +735,27 @@ impl ProtectedUdpFdSource {
     /// Sockets currently queued (observability, mgmt parity).
     pub fn pending(&self) -> usize {
         self.queue.lock().expect("udp fd queue").len()
+    }
+
+    /// 006 resource probe: the same queue depth, but WITHOUT ever blocking.
+    /// `None` = a gather/feed/take holds the queue right now (WouldBlock), so
+    /// the probe reports the depth as unknown (`null`) instead of waiting on a
+    /// lock that the data plane may be using. Poison is recovered exactly like
+    /// [`Self::pending`] would (panic=abort in release, so poison is a
+    /// host/test artifact) — same rule as `connector::try_lock_poison`.
+    pub fn pending_try(&self) -> Option<usize> {
+        match self.queue.try_lock() {
+            Ok(guard) => Some(guard.len()),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner().len()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    /// 006 test seam: hold the queue lock so a concurrent probe observes the
+    /// busy (`None`) branch. Production code never calls this.
+    #[cfg(test)]
+    pub(crate) fn hold_queue_for_test(&self) -> std::sync::MutexGuard<'_, VecDeque<OwnedFd>> {
+        self.queue.lock().expect("udp fd queue")
     }
 
     /// How many sockets handed out — pinned to the gather's socket attempts
@@ -813,12 +839,40 @@ pub struct GatherConfig<'a> {
     pub timeout_ms: u64,
 }
 
+/// One live host candidate: the protected socket the gather bound and used
+/// for the interface's STUN exchanges, handed to the caller INSTEAD of being
+/// closed.
+///
+/// Ownership contract (the 0052 defect this type exists for): a successful
+/// interface round keeps its bound socket alive, so the advertised host
+/// candidate and every srflx mapping derived from it refer to the SAME
+/// socket. The pre-fix gather closed this fd before returning and
+/// `ensure_locals` then bound a SECOND socket on a fresh ephemeral port —
+/// the signaled host port belonged to a socket the STUN exchange never used,
+/// and the srflx `raddr/rport` base pointed at a dead mapping.
+///
+/// Dropping `fd` closes it (exactly once). [`crate::ice_session::
+/// IceSession::add_local_candidate_bound`] adopts it for the session's
+/// lifetime after validating the bound address/port.
+#[derive(Debug)]
+pub struct GatheredSocket {
+    /// The host candidate bound on `fd`: interface address + the
+    /// `getsockname` port.
+    pub cand: Candidate,
+    /// The live, bound, `O_NONBLOCK` socket. Its number is
+    /// `std::os::fd::AsRawFd::as_raw_fd` when a borrowed number is needed.
+    pub fd: OwnedFd,
+}
+
+
 /// Everything one gather round produced. Partial success IS success: one
 /// dead interface / server / provider slot must not sink the others
 /// (upstream pion logs per-candidate failures and keeps gathering) — but
 /// nothing is silently swallowed either, every failure is listed in
 /// [`GatherResult::errors`].
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Not `Clone`/`PartialEq`: [`GatheredSocket`] owns live sockets.
+#[derive(Debug)]
 pub struct GatherResult {
     /// Host candidates (one per usable interface address).
     pub host: Vec<Candidate>,
@@ -828,6 +882,13 @@ pub struct GatherResult {
     /// (context, error) for every failed interface / server attempt,
     /// context = `"<iface>"` or `"<iface>/<host>:<port>"`.
     pub errors: Vec<(String, ManagementError)>,
+    /// One live bound socket per successful interface round, in the same
+    /// order as the `host` candidates it produced (`sockets[i].cand ==
+    /// host[i]` for the host candidates; a round either yields both or
+    /// neither). The caller MUST adopt or drop them — dropping closes the
+    /// socket, which is exactly what the defect fix stops doing before the
+    /// session has taken it over.
+    pub sockets: Vec<GatheredSocket>,
 }
 
 /// The interface entries ONE gather round will actually visit: blacklist
@@ -836,10 +897,11 @@ pub struct GatherResult {
 /// enumeration order.
 ///
 /// Shared with the caller's socket budget on purpose: a gather round takes
-/// ONE socket per entry here (`gather_interface`) plus one more per bound
-/// candidate, so any caller that must decide *before* consuming whether the
-/// protected-socket pool can pay for the round has to count exactly what the
-/// gather will walk — two implementations would drift.
+/// exactly ONE socket per entry here (`gather_interface`) and KEEPS it (the
+/// bound socket leaves as a [`GatheredSocket`]), so any caller that must
+/// decide *before* consuming whether the protected-socket pool can pay for
+/// the round has to count exactly what the gather will walk — two
+/// implementations would drift.
 pub fn allowed_ifaces(
     cfg: &GatherConfig,
     ifaces: &dyn InterfaceSource,
@@ -878,6 +940,7 @@ pub fn gather_candidates(
     let mut host = Vec::new();
     let mut srflx = Vec::new();
     let mut errors: Vec<(String, ManagementError)> = Vec::new();
+    let mut sockets: Vec<GatheredSocket> = Vec::new();
 
     // Resolve STUN hostnames once per gather round (IPv4); a dead hostname
     // is a recorded per-server error, not a gather failure.
@@ -890,23 +953,38 @@ pub fn gather_candidates(
     }
 
     for iface in all {
-        if let Err(e) =
-            gather_interface(&iface, &resolved, socks, cfg.timeout_ms, &mut host, &mut srflx, &mut errors)
-        {
-            errors.push((iface.name.clone(), e));
+        match gather_interface(
+            &iface,
+            &resolved,
+            socks,
+            cfg.timeout_ms,
+            &mut host,
+            &mut srflx,
+            &mut errors,
+        ) {
+            Ok(Some(sock)) => sockets.push(sock),
+            // Per-interface failure already recorded by the callee; keep
+            // gathering the remaining interfaces.
+            Ok(None) => {}
+            Err(e) => errors.push((iface.name.clone(), e)),
         }
     }
 
     if host.is_empty() && srflx.is_empty() && !errors.is_empty() {
+        // No candidate at all: `sockets` is empty by construction (a
+        // successful round always pushes its host candidate), so nothing
+        // leaks on this return.
         return Err(errors.remove(0).1);
     }
-    Ok(GatherResult { host, srflx, errors })
+    Ok(GatherResult { host, srflx, errors, sockets })
 }
 
-/// One interface = one fresh protected fd = one bound dup = one host
-/// candidate + its STUN exchanges. Every failure path closes exactly the
-/// dup this function created and records an error — the provider's original
-/// number is never touched (borrowed-number contract).
+/// One interface = one fresh protected fd = one bound socket = one host
+/// candidate + its STUN exchanges. On SUCCESS the bound socket is handed
+/// back as a [`GatheredSocket`] (still live, so the advertised host port and
+/// the srflx base are backed by it); every failure path drops the fd exactly
+/// once and records an error — the provider's original number is never
+/// touched (borrowed-number contract).
 fn gather_interface(
     iface: &InterfaceAddr,
     servers: &[([u8; 4], u16, &StunServer)],
@@ -915,40 +993,55 @@ fn gather_interface(
     host_out: &mut Vec<Candidate>,
     srflx_out: &mut Vec<Candidate>,
     errors_out: &mut Vec<(String, ManagementError)>,
-) -> Result<(), ManagementError> {
-    let dup = socks.take_owned().map_err(seam_to_management)?.into_raw_fd();
-    let cleanup_and = |dup: i32, e: ManagementError, errors_out: &mut Vec<(String, ManagementError)>| {
-        crate::n2_socket_trace::closed(dup);
-        unsafe { sys::close(dup) };
+) -> Result<Option<GatheredSocket>, ManagementError> {
+    // The ONE owned copy for this round: syscalls go through its raw number,
+    // and ownership either leaves via the returned `GatheredSocket` or is
+    // dropped here (exactly one close).
+    let owned = socks.take_owned().map_err(seam_to_management)?;
+    let dup = owned.as_raw_fd();
+    let close_and_record = |owned: OwnedFd,
+                            e: ManagementError,
+                            errors_out: &mut Vec<(String, ManagementError)>| {
+        crate::n2_socket_trace::closed(owned.as_raw_fd());
+        drop(owned); // the single close for this failure path
         errors_out.push((iface.name.clone(), e));
     };
 
     if let Err(e) = set_nonblock(dup) {
-        cleanup_and(dup, seam_to_management(e), errors_out);
-        return Ok(());
+        close_and_record(owned, seam_to_management(e), errors_out);
+        return Ok(None);
     }
     // Bind to THE interface address (host candidate binding) with an
     // ephemeral port; getsockname is the port the host candidate carries
     // (the srflx base).
     let local = sys::sockaddr_in::new(iface.addr, 0);
     if unsafe { sys::bind(dup, &local, core::mem::size_of::<sys::sockaddr_in>() as u32) } == -1 {
-        cleanup_and(dup, ManagementError::Network(format!("stun-bind-failed (errno={})", sys::errno())), errors_out);
-        return Ok(());
+        close_and_record(
+            owned,
+            ManagementError::Network(format!("stun-bind-failed (errno={})", sys::errno())),
+            errors_out,
+        );
+        return Ok(None);
     }
     let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
     let mut name_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
     if unsafe { sys::getsockname(dup, &mut name_addr, &mut name_len) } == -1 {
-        cleanup_and(dup, ManagementError::Network(format!("stun-getsockname-failed (errno={})", sys::errno())), errors_out);
-        return Ok(());
+        close_and_record(
+            owned,
+            ManagementError::Network(format!("stun-getsockname-failed (errno={})", sys::errno())),
+            errors_out,
+        );
+        return Ok(None);
     }
     let bound_port = u16::from_be(name_addr.sin_port);
     let base = Candidate::host_candidate(iface.addr, bound_port);
     host_out.push(base.clone());
 
     if servers.is_empty() {
-        crate::n2_socket_trace::closed(dup);
-        unsafe { sys::close(dup) };
-        return Ok(());
+        // No STUN server: the socket is STILL the live base of the host
+        // candidate, so it must survive the gather (pre-fix it was closed
+        // here, which is what made the signaled port dead).
+        return Ok(Some(GatheredSocket { cand: base, fd: owned }));
     }
 
     // One transaction per server, all riding THIS interface's socket; the
@@ -1103,9 +1196,9 @@ fn gather_interface(
             ManagementError::Timeout,
         ));
     }
-    crate::n2_socket_trace::closed(dup);
-    unsafe { sys::close(dup) };
-    Ok(())
+    // STUN done (answers and/or recorded timeouts): the socket stays live
+    // and leaves with the host candidate it backs.
+    Ok(Some(GatheredSocket { cand: base, fd: owned }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1269,6 +1362,24 @@ mod feed_ownership_tests {
         source.clear_pending();
         assert_eq!(source.pending(), 0);
         assert!(source.take_owned().is_err());
+    }
+
+    /// 006: the resource probe's queue read must NEVER wait on the queue lock.
+    /// While a gather/feed holds it, `pending_try` answers `None` (unknown)
+    /// immediately; released, it answers the real depth again.
+    #[test]
+    fn ice_pending_try_does_not_block_on_a_held_queue() {
+        let source = ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source");
+        assert_eq!(source.pending_try(), Some(0));
+        let held = source.hold_queue_for_test();
+        let t0 = std::time::Instant::now();
+        assert_eq!(source.pending_try(), None, "a held queue is unknown, not 0");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "pending_try must not block on the queue lock"
+        );
+        drop(held);
+        assert_eq!(source.pending_try(), Some(0));
     }
 }
 

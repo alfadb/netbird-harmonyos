@@ -5,6 +5,11 @@ import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
 import util from '@ohos.util';
 import window from '@ohos.window';
+import { appendSystemEvent, event as diagnosticsEvent, start as startDiagnostics,
+  stop as stopDiagnostics } from '../vpnextensionability/NetBirdDiagnostics';
+import type { DiagFields } from '../vpnextensionability/NetBirdDiagnostics';
+import { start as startSystemEvents,
+  stop as stopSystemEvents } from '../vpnextensionability/NetBirdSystemEvents';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -113,10 +118,49 @@ interface BusinessFailure extends Error {
 }
 
 export default class EntryAbility extends UIAbility {
-  onCreate(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
+  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    // Diagnostics (earliest safe point): a fresh UI process opens its own
+    // observation run and its own marker before anything else in this callback
+    // can fail or return. Role 'ui' writes only netbird-ui.log* and
+    // netbird-diag-ui.marker; the helper never reads a want parameter, a
+    // credential or a status document.
+    startDiagnostics(this.context.filesDir, 'ui');
+    // System-event watcher (same role-consistent process): the platform delivers
+    // APP_CRASH / APP_FREEZE / RESOURCE_OVERLIMIT / APP_KILLED here, and every
+    // already-projected, bounded line is persisted through the diagnostics
+    // writer's validated ingress — NOT through event('x', {detail: line}),
+    // whose 48-char value bound would cut an APP_KILLED reason off the record.
+    // Subscribed after the writer is open so every line has a destination;
+    // start() never throws and a platform refusal is just one more line.
+    startSystemEvents('ui', (line: string): void => { appendSystemEvent(line); });
     hilog.info(DOMAIN, TAG, 'ENTRY_ONCREATE|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
+    this.recordLifecycle('onCreate');
+    // LaunchParam, SDK fields by their exact names: `lastExitReason` is the
+    // LastExitReason enum identifying how the PREVIOUS run of this UI process
+    // terminated. Only that bounded enum value is recorded (numeric, or a
+    // string enum token on a build that delivers one) — `lastExitMessage` is
+    // deliberately NEVER read or logged, because the SDK documents it as a
+    // free-form detailed message and this ability must not copy launcher/want
+    // text into its own log.
+    const lastExitReason: AbilityConstant.LastExitReason | undefined = launchParam.lastExitReason;
+    if (lastExitReason !== undefined && lastExitReason !== null) {
+      const exitFields: DiagFields = {};
+      exitFields['reason'] = lastExitReason;
+      diagnosticsEvent('ui_last_exit', exitFields);
+    }
     this.removePreviousStatus();
     this.persistCredentialOverrides(want);
+  }
+
+  // Lifecycle observations carry ONE whitelisted scalar field, `stage`, with
+  // the exact callback name. No want/URL/setup-key text is ever passed. The
+  // record is built as a typed Record plus a key write, the same shape the
+  // diagnostics module uses for its own fields: ArkTS rejects a bare object
+  // literal in this position (arkts-no-untyped-obj-literals).
+  private recordLifecycle(stage: string): void {
+    const fields: DiagFields = {};
+    fields['stage'] = stage;
+    diagnosticsEvent('ui_lifecycle', fields);
   }
 
   // A fresh UI process cannot infer liveness from a previous process's file:
@@ -136,6 +180,7 @@ export default class EntryAbility extends UIAbility {
 
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'ENTRY_ONNEWWANT|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
+    this.recordLifecycle('onNewWant');
     this.persistCredentialOverrides(want);
   }
 
@@ -147,6 +192,32 @@ export default class EntryAbility extends UIAbility {
       }
       hilog.info(DOMAIN, TAG, 'ENTRY_PAGE_READY|bundle=%{public}s', BUNDLE_NAME);
     });
+  }
+
+  onForeground(): void {
+    this.recordLifecycle('onForeground');
+  }
+
+  onBackground(): void {
+    this.recordLifecycle('onBackground');
+  }
+
+  // The ONLY stop() call site: the real ability-destroy callback. A page's
+  // aboutToDisappear / onPageHide fires while this process is still alive and
+  // is NOT a process exit, so it must never mark the run clean. The resulting
+  // `marker state=clean` means THIS callback was observed to run and the run's
+  // records were flushed — an observation of lifecycle cleanup, NOT proof that
+  // the process exited (a force-stop or OOM kill leaves the marker open, and
+  // the platform may end the process once onDestroy returns, before the
+  // helper's own async marker write lands).
+  onDestroy(): void {
+    this.recordLifecycle('onDestroy');
+    // The watcher goes FIRST, while the writer is still open: its stop() emits
+    // the sys_watcher_stopped line (and any suppressed-count report) through the
+    // sink, and the diagnostics stop() below flushes that queue. Stopping the
+    // writer first would make those last lines unwritable.
+    stopSystemEvents();
+    stopDiagnostics();
   }
 
   private persistCredentialOverrides(want: Want): void {

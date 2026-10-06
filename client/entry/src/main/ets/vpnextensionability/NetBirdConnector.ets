@@ -154,15 +154,29 @@ export interface WgDataplaneStatus {
 }
 
 // One connector_status().wg.wg_peers[] entry (N13-D1).
+// 2026-10-07 client-detail increment: `allowed_ips` was always emitted by the
+// core (`wg_peer_json`: masked prefixes, e.g. '10.30.30.2/32', '10.30.30.0/24')
+// but had no declaration here — read-only, never a secret.
 export interface WgPeerStatusEntry {
   pub_key_b64: string;
   endpoint?: string | null;
+  allowed_ips?: string[];
   session_established: boolean;
   expired: boolean;
   last_handshake_s?: number | null;
   egress_local?: string | null;
   carrier_attached?: boolean;
   on_carrier?: boolean;
+  // 2026-10-07 per-peer transfer counters (core N13-D4: tail-appended after
+  // the carrier_* peer fields, always as an integer — a delivered `0` is a
+  // real zero, not a missing value). PLAINTEXT inner-IP bytes, cumulative
+  // since THIS peer's tunnel was created: tx_bytes = frames this device
+  // delivered to the peer, rx_bytes = frames the peer delivered into this
+  // device's TUN. They are NOT the device-level `wg.tx_bytes` /
+  // `wg.rx_bytes_to_tun` (ENCAPSULATED wire bytes) — never mix the two.
+  // Optional here so an older core snapshot still parses.
+  tx_bytes?: number;
+  rx_bytes?: number;
 }
 
 // N8: core.connector_status().recreate — controlled-recreate state. The
@@ -217,6 +231,56 @@ export interface RelayAdvertisedStatus {
   advertised_urls: string[];
 }
 
+// 2026-10-07 per-peer ACTUAL relay lane (core `peer_relays` tail, appended
+// AFTER the runtime `relay` object — every pre-existing field keeps its
+// position). ONE entry per ATTACHED lane of the live relay carrier table:
+// `pub_key_b64` is the peer's PUBLIC WireGuard key in the SAME key namespace
+// as `wg.wg_peers[].pub_key_b64` (the shell joins them by key — a
+// management/fqdn lookup stays the shell's business), `relay_url` is the
+// canonical `rel://host:port` / `rels://host:port` that lane REALLY rides.
+// The remote's ADVERTISED relay and the local configured/home URL are NOT
+// evidence of an actual relay and never appear through this field. Public
+// routing material only — no token, no userinfo.
+export interface CorePeerRelayEntry {
+  pub_key_b64: string;
+  relay_url: string;
+}
+
+// One endpoint of a peer's SELECTED ICE pair (core `ice_peers[].selected_local`
+// / `.selected_remote`), as the core projects it: the candidate TYPE token
+// (host/srflx/prflx/relay — the same vocabulary as the signal wire) plus the
+// PUBLIC ip:port. `foundation` / `priority` / `related_address` are check
+// internals and deliberately absent; so are the ufrag/password credentials and
+// any socket fd — none of them crosses this boundary.
+export interface CoreIceEndpoint {
+  type: string;
+  address: string;
+  port: number;
+}
+
+// One per-peer ICE detail (core `ice_peers[]` tail, appended AFTER
+// `peer_relays` — every pre-existing field keeps its position; one entry per
+// peer of the ICE orchestrator, PUBLIC-KEY sorted, joined by `pub_key`).
+// `pub_key` is the peer's PUBLIC WireGuard key in the SAME namespace as
+// `wg.wg_peers[].pub_key_b64` (base64) and `peer_relays[].pub_key_b64`.
+// `selected_local` / `selected_remote` are BOTH null until a pair is really
+// selected — never the first collected candidate — and a retained pair does
+// NOT mean the peer is currently connected: `state` carries that verdict and
+// `reachable` is the core's own `Connected && endpoint_applied` derivation
+// (a `disconnected` peer can keep both endpoints and still be unreachable).
+// `last_error` is the connector's class-only error JSON
+// (`{class,status}`, never a server message).
+export interface CoreIcePeerEntry {
+  pub_key: string;
+  state: string;
+  controlling: boolean | null;
+  selected_local: CoreIceEndpoint | null;
+  selected_remote: CoreIceEndpoint | null;
+  endpoint_applied: boolean;
+  reachable: boolean;
+  last_error: ConnectorErrorClass | null;
+}
+
 // Lenient shell-side view of the `relay_advertised` section (see
 // parseRelayAdvertised): `advertised` is the USABLE verdict (valid string
 // urls present), `malformed` marks a type anomaly for the grep-able hint —
@@ -243,6 +307,14 @@ export interface IceSocketDepth {
 export interface ConnectorStatusResult {
   running: boolean;
   state: string;
+  // 2026-10-07 uptime increment: the connector process times the core emits in
+  // EVERY status directly after `state` (connector.rs `opt_unix_json`: an
+  // integer Unix SECONDS stamp, or null when the core has no stamp yet).
+  // Optional on purpose: an older core / the no-connector snapshot omits them.
+  // These are CORE PROCESS times for the UI uptime row — they say nothing
+  // about the management connection (that is signal_registered + state).
+  started_at_unix?: number | null;
+  last_update_unix?: number | null;
   peer_count: number;
   route_count: number;
   reconnects: number;
@@ -252,6 +324,11 @@ export interface ConnectorStatusResult {
   // The shell MUST read this instead of trusting its own last feed reading.
   ice_sockets?: IceSocketDepth;
   session_expiry: string;
+  // 2026-10-07 client-detail increment: the deadline token above carries no
+  // value; the core's `session_expires_at_unix` (Unix SECONDS, null for
+  // unknown/disabled) is the machine-readable half. Optional on purpose: an
+  // older core / the no-connector snapshot omits it.
+  session_expires_at_unix?: number | null;
   wg_apply_failed: boolean;
   wg_apply_errors: number;
   // N3-7: worker ENDED BY ITSELF (fatal / retry budget exhausted). This is
@@ -271,6 +348,24 @@ export interface ConnectorStatusResult {
   // source; consumed leniently (parseRelayAdvertised) — a missing/type-
   // anomalous section is treated as NOT advertised, never a throw.
   relay_advertised?: RelayAdvertisedStatus;
+  // 2026-10-07: the ACTUAL per-peer relay lane table (core `peer_relays`,
+  // the TAIL of the status document). The core emits: `null` = no relay
+  // carrier armed at all (an array would be an invented statement), `[]` =
+  // carrier armed with no lane attached, otherwise one entry per attached
+  // lane, public-key sorted. NEVER an advertised / configured / global home
+  // URL — only the live attached-lane table is evidence of a path. Absent on
+  // an older core: the shell then treats every peer's ACTUAL relay as
+  // UNKNOWN (never as "not relayed"). Public routing material only.
+  peer_relays?: CorePeerRelayEntry[] | null;
+  // 2026-10-07: the per-peer ICE DETAIL table (core `ice_peers`, the TAIL of
+  // the status document, after `peer_relays`). `null` = no ICE orchestrator
+  // at all (an array would assert one exists), `[]` = orchestrator armed with
+  // ZERO peers, otherwise one `CoreIcePeerEntry` per peer, public-key sorted.
+  // The shell joins it onto the published peers by `pub_key`; a peer with no
+  // entry (or a table that is null/absent) keeps its ICE state UNKNOWN — the
+  // UI must never invent a state, an endpoint or a role. Absent on an older
+  // core. Public material only (see CoreIcePeerEntry).
+  ice_peers?: CoreIcePeerEntry[] | null;
 }
 
 // One managed route from core.connector_network_config (canonical masked
@@ -703,7 +798,35 @@ export interface PublishedStatus {
   // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
   // last live) relay session — relay.current_url when set, else the first
   // configured url; null when neither is known. Read leniently.
+  // LOCAL session only (the configured home URL when nothing is dialed): it
+  // must NEVER be presented as, or copied into, a PEER's relay address — the
+  // per-peer ACTUAL lane is UiPeerEntry.actual_relay_url (core
+  // `peer_relays`), which stays 未知 when that table was not delivered.
   relay_url?: string | null;
+  // ---- 2026-10-07 client-detail increment (all optional: an older document
+  //      omits them and the UI must read "absent" as 未知, never as a
+  //      success or a zero) ----
+  // Local network view: own overlay address with prefix, interface resolver,
+  // configured DNS servers, managed routes + the default-route gate verdict,
+  // and the signal URI. Mirrors NetBirdUiModel.UiNetworkView.
+  network?: Object;
+  // Aggregate WireGuard data-plane counters (core `wg` names verbatim).
+  wg_traffic?: Object;
+  // Relay client view (counters + configured/current URLs, no token).
+  relay?: Object;
+  // Connector session deadline: the core's token ('unknown'|'disabled'|'set')
+  // and the Unix SECONDS value when the token is 'set'.
+  session_expiry?: string;
+  session_expires_at_s?: number;
+  // 2026-10-07 uptime increment: the core process's own Unix SECONDS stamps,
+  // passed through verbatim from the core status. Both are omitted when the
+  // core delivered no positive value, so the UI shows no uptime rather than
+  // one computed from 1970. Process times only — never a management
+  // connection verdict (that stays signal_registered + state).
+  started_at_unix?: number;
+  last_update_unix?: number;
+  // The management authority (scheme + host + port only — never the URL).
+  management?: Object;
 }
 
 // Read the published status. A missing, unreadable, malformed or STALE
@@ -1538,4 +1661,560 @@ export function pollStatusOrNull(): ConnectorStatusResult | null {
       (error as Error).message ?? 'no-message');
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-08 (006) native resource snapshot — the `connector_resource_status`
+// NAPI surface (client/core/src/connector.rs `connector_resource_status_json`;
+// NAPI wrapper `napi_connector_resource_status` in client/core/src/napi.rs).
+//
+// ADDITIVE and READ-ONLY: a SEPARATE document from `connector_status()` (whose
+// frozen JSON/order is NOT touched) reporting the counts core still OWNS. The
+// native probe takes every leaf with a NON-BLOCKING try_lock and renders a busy
+// leaf as JSON `null` (UNKNOWN), never a false 0; `present:false` is a KNOWN
+// disposed state in which every connector-owned count is an honest zero.
+//
+// EXACT native schema (copied field for field; counts only — no peer key,
+// relay URL, fd number, request id or secret):
+//   {"ok":true,
+//    "connector":{"present":bool|null,"generation":n|null,"running":bool|null,
+//                 "state":"connecting"|...|null,"starts_total":n,"stops_total":n},
+//    "ice":{"available":bool,"sessions_present":n|null,"sessions_live":n|null,
+//           "sessions_stopped":n|null,"live_local_sockets":n|null},
+//    "ice_sockets":{"available":bool,"queued":n|null,"taken":n|null},
+//    "socket_supply":{"installed":bool|null,"pending":n|null,"queued":n|null},
+//    "relay_carrier":{"available":bool,"attached_lanes":n|null,
+//                     "pending_opens":n|null,"foreign_clients":n|null},
+//    "dns_lookups":{"pending_receivers":n|null},
+//    "wg":{"available":false,"reason":"not-collected"}}
+//
+// DEFENSIVE BY CONTRACT — a diagnostics probe must never be able to break the
+// VPN: the wrapper is wrapped and answers `null` (never a throw) on a missing
+// export, a platform throw, an unparseable document or a structurally
+// malformed one. The projection builds a FRESH object out of the declared
+// fields, so an arbitrary extra field the native document may add is dropped
+// rather than carried through. `wg` is deliberately not declared: that native
+// section is the constant "not-collected" marker, not a resource count.
+// ---------------------------------------------------------------------------
+
+export interface NativeConnectorCounts {
+  // null = the global connector slot was busy (presence itself unknown).
+  // `false` = no connector installed — a KNOWN disposed state whose counts are
+  // honest zeros; `true` = a handle exists. Never conflated.
+  present: boolean | null;
+  // The handle's successful-start ordinal (an identity, NOT a live thread
+  // count); null = no handle exists.
+  generation: number | null;
+  running: boolean | null;
+  // The shared-state token ('connecting'|...); null = the leaf was busy (or no
+  // handle). A controlled class token only.
+  state: string | null;
+  // Native contract: always numbers (process-cumulative — they outlive the
+  // handle). Declared nullable like every other leaf so a type-anomalous
+  // document renders the explicit `na` instead of a fabricated 0.
+  starts_total: number | null;
+  stops_total: number | null;
+}
+
+export interface NativeIceCounts {
+  available: boolean | null;
+  sessions_present: number | null;
+  sessions_live: number | null;
+  sessions_stopped: number | null;
+  // fds (fd >= 0) the sessions still own, summed over all retained sessions.
+  live_local_sockets: number | null;
+}
+
+export interface NativeIceSocketCounts {
+  available: boolean | null;
+  // The protected-ICE queue depth (queued) and the cumulative handed-out
+  // count (taken) of the shell-fed UDP source.
+  queued: number | null;
+  taken: number | null;
+}
+
+export interface NativeSocketSupplyCounts {
+  installed: boolean | null;
+  // The GLOBAL per-dial bridge: requests awaiting a protect reply (pending)
+  // and requests not yet polled (queued).
+  pending: number | null;
+  queued: number | null;
+}
+
+export interface NativeRelayCarrierCounts {
+  available: boolean | null;
+  attached_lanes: number | null;
+  pending_opens: number | null;
+  foreign_clients: number | null;
+}
+
+export interface NativeDnsLookupCounts {
+  // DNS requests whose oneshot receiver is still registered (unpolled).
+  pending_receivers: number | null;
+}
+
+// The validated snapshot this side hands to callers: every section present,
+// every leaf of the schema's type (or null = UNKNOWN, rendered `na`).
+export interface ConnectorResourceStatus {
+  ok: boolean;
+  connector: NativeConnectorCounts;
+  ice: NativeIceCounts;
+  ice_sockets: NativeIceSocketCounts;
+  socket_supply: NativeSocketSupplyCounts;
+  relay_carrier: NativeRelayCarrierCounts;
+  dns_lookups: NativeDnsLookupCounts;
+}
+
+// The un-validated parse shape: a malformed document may omit any section, so
+// each is optional until the projection has checked it.
+interface RawConnectorResourceStatus {
+  ok?: boolean;
+  connector?: NativeConnectorCounts;
+  ice?: NativeIceCounts;
+  ice_sockets?: NativeIceSocketCounts;
+  socket_supply?: NativeSocketSupplyCounts;
+  relay_carrier?: NativeRelayCarrierCounts;
+  dns_lookups?: NativeDnsLookupCounts;
+}
+
+// A type-valid leaf kept as-is; a JSON null / absent / type-anomalous leaf is
+// the explicit UNKNOWN (null), never a fabricated value.
+function nativeFlagOrNull(value: boolean | null | undefined): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function nativeCountOrNull(value: number | null | undefined): number | null {
+  // A finite non-negative number is kept VERBATIM (never rounded): a value that
+  // is not a count at all stays visible as itself instead of being fabricated
+  // into a plausible integer.
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function nativeStateOrNull(value: string | null | undefined): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function projectConnectorResourceStatus(doc: RawConnectorResourceStatus):
+  ConnectorResourceStatus | null {
+  // The document identity itself is refused when it is not a boolean: without
+  // it the parse cannot be trusted at all.
+  if (doc === null || doc === undefined || typeof doc.ok !== 'boolean') {
+    return null;
+  }
+  const connector: NativeConnectorCounts | undefined = doc.connector;
+  const ice: NativeIceCounts | undefined = doc.ice;
+  const iceSockets: NativeIceSocketCounts | undefined = doc.ice_sockets;
+  const supply: NativeSocketSupplyCounts | undefined = doc.socket_supply;
+  const relay: NativeRelayCarrierCounts | undefined = doc.relay_carrier;
+  const dns: NativeDnsLookupCounts | undefined = doc.dns_lookups;
+  // A missing / non-object section is a structurally malformed document:
+  // refuse the whole snapshot instead of half-believing it.
+  if (connector === undefined || connector === null || typeof connector !== 'object' ||
+    ice === undefined || ice === null || typeof ice !== 'object' ||
+    iceSockets === undefined || iceSockets === null || typeof iceSockets !== 'object' ||
+    supply === undefined || supply === null || typeof supply !== 'object' ||
+    relay === undefined || relay === null || typeof relay !== 'object' ||
+    dns === undefined || dns === null || typeof dns !== 'object') {
+    return null;
+  }
+  return {
+    ok: doc.ok,
+    connector: {
+      present: nativeFlagOrNull(connector.present),
+      generation: nativeCountOrNull(connector.generation),
+      running: nativeFlagOrNull(connector.running),
+      state: nativeStateOrNull(connector.state),
+      starts_total: nativeCountOrNull(connector.starts_total),
+      stops_total: nativeCountOrNull(connector.stops_total)
+    },
+    ice: {
+      available: nativeFlagOrNull(ice.available),
+      sessions_present: nativeCountOrNull(ice.sessions_present),
+      sessions_live: nativeCountOrNull(ice.sessions_live),
+      sessions_stopped: nativeCountOrNull(ice.sessions_stopped),
+      live_local_sockets: nativeCountOrNull(ice.live_local_sockets)
+    },
+    ice_sockets: {
+      available: nativeFlagOrNull(iceSockets.available),
+      queued: nativeCountOrNull(iceSockets.queued),
+      taken: nativeCountOrNull(iceSockets.taken)
+    },
+    socket_supply: {
+      installed: nativeFlagOrNull(supply.installed),
+      pending: nativeCountOrNull(supply.pending),
+      queued: nativeCountOrNull(supply.queued)
+    },
+    relay_carrier: {
+      available: nativeFlagOrNull(relay.available),
+      attached_lanes: nativeCountOrNull(relay.attached_lanes),
+      pending_opens: nativeCountOrNull(relay.pending_opens),
+      foreign_clients: nativeCountOrNull(relay.foreign_clients)
+    },
+    dns_lookups: {
+      pending_receivers: nativeCountOrNull(dns.pending_receivers)
+    }
+  };
+}
+
+// null = the snapshot could not be read (missing export, platform throw,
+// unparseable document or structurally malformed one): callers render the
+// explicit `na` verdict instead of inventing zeroed counts.
+export function connectorResourceStatus(): ConnectorResourceStatus | null {
+  try {
+    const doc: RawConnectorResourceStatus =
+      JSON.parse(core.connector_resource_status()) as RawConnectorResourceStatus;
+    return projectConnectorResourceStatus(doc);
+  } catch (error) {
+    return null;
+  }
+}
+
+// The 22 scalar leaves of `connector_resource_status()`, each already rendered
+// as a diagnostics-safe token: a finite non-negative number keeps its decimal
+// value, `true`/`false` keep their boolean meaning, and a JSON null (the native
+// "busy leaf = unknown") renders `na` — never a fabricated 0 or false.
+export interface NativeResourceSample {
+  conn_present: string;
+  conn_gen: string;
+  conn_running: string;
+  conn_state: string;
+  conn_starts: string;
+  conn_stops: string;
+  ice_available: string;
+  ice_sessions: string;
+  ice_live: string;
+  ice_stopped: string;
+  ice_fds: string;
+  icesock_ready: string;
+  icesock_queued: string;
+  icesock_taken: string;
+  supply_installed: string;
+  supply_pending: string;
+  supply_queued: string;
+  relay_ready: string;
+  relay_lanes: string;
+  relay_opens: string;
+  relay_foreign: string;
+  dns_pending: string;
+}
+
+const NATIVE_RESOURCE_NA: string = 'na';
+
+function nativeCountText(value: number | null | undefined): string {
+  // A finite non-negative number is rendered VERBATIM (never rounded); every
+  // anomaly — JSON null (busy leaf), absent, wrong type, negative, non-finite —
+  // is the explicit `na`, never a fabricated 0.
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return String(value);
+  }
+  return NATIVE_RESOURCE_NA;
+}
+
+function nativeFlagText(value: boolean | null | undefined): string {
+  if (value === true) { return 'true'; }
+  if (value === false) { return 'false'; }
+  return NATIVE_RESOURCE_NA;
+}
+
+function nativeStateText(value: string | null | undefined): string {
+  if (typeof value === 'string' && value.length > 0) { return value; }
+  return NATIVE_RESOURCE_NA;
+}
+
+// Render the whole snapshot (or an unreadable null) into the flat token set
+// the `native_resource_sample` event carries. An unreadable snapshot renders
+// every leaf `na`: an explicit "not measured", never a row of fabricated
+// zeros.
+export function nativeResourceSample(status: ConnectorResourceStatus | null): NativeResourceSample {
+  const sample: NativeResourceSample = {
+    conn_present: NATIVE_RESOURCE_NA,
+    conn_gen: NATIVE_RESOURCE_NA,
+    conn_running: NATIVE_RESOURCE_NA,
+    conn_state: NATIVE_RESOURCE_NA,
+    conn_starts: NATIVE_RESOURCE_NA,
+    conn_stops: NATIVE_RESOURCE_NA,
+    ice_available: NATIVE_RESOURCE_NA,
+    ice_sessions: NATIVE_RESOURCE_NA,
+    ice_live: NATIVE_RESOURCE_NA,
+    ice_stopped: NATIVE_RESOURCE_NA,
+    ice_fds: NATIVE_RESOURCE_NA,
+    icesock_ready: NATIVE_RESOURCE_NA,
+    icesock_queued: NATIVE_RESOURCE_NA,
+    icesock_taken: NATIVE_RESOURCE_NA,
+    supply_installed: NATIVE_RESOURCE_NA,
+    supply_pending: NATIVE_RESOURCE_NA,
+    supply_queued: NATIVE_RESOURCE_NA,
+    relay_ready: NATIVE_RESOURCE_NA,
+    relay_lanes: NATIVE_RESOURCE_NA,
+    relay_opens: NATIVE_RESOURCE_NA,
+    relay_foreign: NATIVE_RESOURCE_NA,
+    dns_pending: NATIVE_RESOURCE_NA
+  };
+  if (status === null || status === undefined) {
+    return sample;
+  }
+  const c: NativeConnectorCounts = status.connector;
+  const ice: NativeIceCounts = status.ice;
+  const iceSockets: NativeIceSocketCounts = status.ice_sockets;
+  const supply: NativeSocketSupplyCounts = status.socket_supply;
+  const relay: NativeRelayCarrierCounts = status.relay_carrier;
+  const dns: NativeDnsLookupCounts = status.dns_lookups;
+  sample.conn_present = nativeFlagText(c.present);
+  sample.conn_gen = nativeCountText(c.generation);
+  sample.conn_running = nativeFlagText(c.running);
+  sample.conn_state = nativeStateText(c.state);
+  sample.conn_starts = nativeCountText(c.starts_total);
+  sample.conn_stops = nativeCountText(c.stops_total);
+  sample.ice_available = nativeFlagText(ice.available);
+  sample.ice_sessions = nativeCountText(ice.sessions_present);
+  sample.ice_live = nativeCountText(ice.sessions_live);
+  sample.ice_stopped = nativeCountText(ice.sessions_stopped);
+  sample.ice_fds = nativeCountText(ice.live_local_sockets);
+  sample.icesock_ready = nativeFlagText(iceSockets.available);
+  sample.icesock_queued = nativeCountText(iceSockets.queued);
+  sample.icesock_taken = nativeCountText(iceSockets.taken);
+  sample.supply_installed = nativeFlagText(supply.installed);
+  sample.supply_pending = nativeCountText(supply.pending);
+  sample.supply_queued = nativeCountText(supply.queued);
+  sample.relay_ready = nativeFlagText(relay.available);
+  sample.relay_lanes = nativeCountText(relay.attached_lanes);
+  sample.relay_opens = nativeCountText(relay.pending_opens);
+  sample.relay_foreign = nativeCountText(relay.foreign_clients);
+  sample.dns_pending = nativeCountText(dns.pending_receivers);
+  return sample;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-08 phone-side persistent log — the `phone_log_*` NAPI surface
+// (client/core/src/phone_log.rs; NAPI wrappers in client/core/src/napi.rs).
+//
+// The native module ALREADY tees every NATIVE event into
+// filesDir/netbird-vpn.log (2 MiB x 4 segments, its own rotation and its own
+// redaction); these four wrappers are the ArkTS-facing counterpart, not a
+// second forwarder:
+//   phone_log_configure(path) — install/replace the file tee. ONCE PER PATH:
+//     a repeat on the installed path answers `idempotent:true` and starts NO
+//     second writer (two writers on one file would interleave records and race
+//     the rotation); a disabled-but-draining writer answers
+//     `error:'shutdown-pending'` and must be retried later.
+//   phone_log_append(line)    — hand ONE shell line to the tee. NEVER blocks
+//     and does NO disk I/O on this stack. `ok:true` means "accepted at
+//     ingress", NOT "on disk": the native module admits lines through a
+//     per-second budget and a bounded queue and DROPS the overflow by design
+//     (counted in `dropped`; the budget part in `rate_suppressed`). An
+//     unconfigured/stopped tee answers `not-configured` instead of buffering.
+//   phone_log_status()        — the writer's own counters (the only view of
+//     records that were refused or never reached the OS).
+//   phone_log_shutdown()      — a bounded (<= 5 ms) stop REQUEST. Provided for
+//     completeness; the VPN shell deliberately does NOT call it (see the
+//     process-lifetime note in NetBirdVpnExtensionAbility): a stop request can
+//     only race the closing records of an asynchronous diagnostics drain.
+//
+// DEFENSIVE BY CONTRACT — a diagnostics log must never be able to break the
+// VPN: every wrapper is wrapped, answers `{ok:false,error:<code>}` / null on a
+// missing export, a platform throw or an unparseable reply, and NEVER throws
+// into its caller. No reply echoes the argument, so no path or line content is
+// logged from here.
+//
+// The native reply documents also carry `path` and `session`. They are
+// deliberately NOT declared below: nothing on this side needs the raw path or
+// the session token, and a field that is not declared cannot be printed by
+// accident.
+// ---------------------------------------------------------------------------
+
+export interface PhoneLogConfigureResult {
+  ok: boolean;
+  // true = the requested path was already installed: same writer, same session.
+  idempotent?: boolean;
+  enabled?: boolean;
+  running?: boolean;
+  // stable code only ('invalid-path' | 'shutdown-pending' | '<native code>'),
+  // never the path or the line
+  error?: string;
+}
+
+export interface PhoneLogAppendResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface PhoneLogShutdownResult {
+  ok: boolean;
+  // stopped = the writer confirmed it drained, closed and exited
+  stopped?: boolean;
+  running?: boolean;
+  // accepted records not yet handed to the OS at the time of the request
+  pending?: number;
+  error?: string;
+}
+
+// The counters the shell reads out of `phone_log_status()`. Same omission rule
+// as above: no `path`, no `session`.
+export interface PhoneLogStatusResult {
+  component: string;
+  enabled: boolean;
+  running: boolean;
+  offered: number;
+  accepted: number;
+  written: number;
+  dropped: number;
+  rate_suppressed: number;
+  failed: number;
+  pending: number;
+  rotations: number;
+  last_error: string | null;
+}
+
+// Stable token for a failed native call: the platform BusinessError code when
+// the platform reported one, else `native-unavailable` for a missing/absent
+// export (the .so without this surface) and a bare `native-throw` otherwise.
+// Never passes an error message through (log discipline).
+function phoneLogFailureToken(error: Error): string {
+  const code: number | undefined = (error as PlatformBusinessError).code;
+  if (code !== undefined && code !== null && Number.isFinite(code)) {
+    return `platform-error-${code}`;
+  }
+  if (error instanceof TypeError) {
+    return 'native-unavailable';
+  }
+  return 'native-throw';
+}
+
+export function phoneLogConfigure(path: string): PhoneLogConfigureResult {
+  try {
+    if (path.length === 0) {
+      return { ok: false, error: 'empty-path' };
+    }
+    const reply: PhoneLogConfigureResult =
+      JSON.parse(core.phone_log_configure(path)) as PhoneLogConfigureResult;
+    if (reply === null || reply === undefined || typeof reply.ok !== 'boolean') {
+      return { ok: false, error: 'malformed-reply' };
+    }
+    // PROJECTED onto the declared fields: the native document also carries
+    // `path` and `session`, and a value that never enters this object cannot be
+    // printed by accident (log discipline). A boolean that is absent stays
+    // absent — never normalized to a fabricated false.
+    const projected: PhoneLogConfigureResult = { ok: reply.ok };
+    if (typeof reply.idempotent === 'boolean') { projected.idempotent = reply.idempotent; }
+    if (typeof reply.enabled === 'boolean') { projected.enabled = reply.enabled; }
+    if (typeof reply.running === 'boolean') { projected.running = reply.running; }
+    if (typeof reply.error === 'string') { projected.error = reply.error; }
+    return projected;
+  } catch (error) {
+    return { ok: false, error: phoneLogFailureToken(error as Error) };
+  }
+}
+
+export function phoneLogAppend(line: string): PhoneLogAppendResult {
+  try {
+    const reply: PhoneLogAppendResult =
+      JSON.parse(core.phone_log_append(line)) as PhoneLogAppendResult;
+    if (reply === null || reply === undefined || typeof reply.ok !== 'boolean') {
+      return { ok: false, error: 'malformed-reply' };
+    }
+    return reply;
+  } catch (error) {
+    return { ok: false, error: phoneLogFailureToken(error as Error) };
+  }
+}
+
+// null = the writer's status could not be read (missing export, platform
+// throw, unparseable document): callers render the explicit `unavailable`
+// verdict instead of inventing zeroed counters. The reply is PROJECTED onto
+// the declared counters (no `path`, no `session`), and a type-anomalous counter
+// is carried through unchanged so the summary can render its explicit `na`
+// instead of a fabricated 0.
+export function phoneLogStatus(): PhoneLogStatusResult | null {
+  try {
+    const reply: PhoneLogStatusResult =
+      JSON.parse(core.phone_log_status()) as PhoneLogStatusResult;
+    if (reply === null || reply === undefined || typeof reply.component !== 'string' ||
+      reply.component.length === 0) {
+      return null;
+    }
+    const projected: PhoneLogStatusResult = {
+      component: reply.component,
+      enabled: reply.enabled,
+      running: reply.running,
+      offered: reply.offered,
+      accepted: reply.accepted,
+      written: reply.written,
+      dropped: reply.dropped,
+      rate_suppressed: reply.rate_suppressed,
+      failed: reply.failed,
+      pending: reply.pending,
+      rotations: reply.rotations,
+      last_error: reply.last_error
+    };
+    return projected;
+  } catch (error) {
+    return null;
+  }
+}
+
+export function phoneLogShutdown(): PhoneLogShutdownResult {
+  try {
+    const reply: PhoneLogShutdownResult =
+      JSON.parse(core.phone_log_shutdown()) as PhoneLogShutdownResult;
+    if (reply === null || reply === undefined || typeof reply.ok !== 'boolean') {
+      return { ok: false, error: 'malformed-reply' };
+    }
+    return reply;
+  } catch (error) {
+    return { ok: false, error: phoneLogFailureToken(error as Error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The once-per-minute `phone_log_status` summary a shell watcher logs.
+//
+// The value of this record is the ADMISSION/queue truth the persisted records
+// themselves cannot show: how many lines the native module refused at ingress
+// (`dropped`), how many accepted lines had not reached the OS yet (`pending`)
+// and how many were lost to write errors (`failed`). Only those three counters
+// plus a verdict leave this function — never the raw path or the session token
+// (neither is even declared on PhoneLogStatusResult).
+//
+// `state`: 'ok' | 'degraded' (a drop or a write failure was counted) |
+// 'stopped' (the tee is off or the writer is not running: nothing is being
+// recorded) | 'unavailable' (no usable status document). An unreadable counter
+// renders the explicit `na` token, never a fabricated 0.
+// ---------------------------------------------------------------------------
+
+const PHONE_LOG_NA: string = 'na';
+
+export interface PhoneLogSummary {
+  state: string;
+  detail: string;
+}
+
+function phoneLogCounterText(value: number | undefined | null): string {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return String(Math.floor(value));
+  }
+  return PHONE_LOG_NA;
+}
+
+function phoneLogDetail(dropped: string, pending: string, failed: string): string {
+  return `dropped=${dropped},pending=${pending},failed=${failed}`;
+}
+
+export function phoneLogSummary(status: PhoneLogStatusResult | null): PhoneLogSummary {
+  if (status === null || status === undefined) {
+    return { state: 'unavailable',
+      detail: phoneLogDetail(PHONE_LOG_NA, PHONE_LOG_NA, PHONE_LOG_NA) };
+  }
+  const dropped: string = phoneLogCounterText(status.dropped);
+  const pending: string = phoneLogCounterText(status.pending);
+  const failed: string = phoneLogCounterText(status.failed);
+  const detail: string = phoneLogDetail(dropped, pending, failed);
+  if (status.enabled !== true || status.running !== true) {
+    return { state: 'stopped', detail: detail };
+  }
+  const droppedCount: number = typeof status.dropped === 'number' ? status.dropped : 0;
+  const failedCount: number = typeof status.failed === 'number' ? status.failed : 0;
+  if (droppedCount > 0 || failedCount > 0) {
+    return { state: 'degraded', detail: detail };
+  }
+  return { state: 'ok', detail: detail };
 }

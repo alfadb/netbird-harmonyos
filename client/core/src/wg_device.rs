@@ -196,8 +196,11 @@ pub const DEFAULT_HS_DEADLINE_MS: u64 = 90_000;
 pub const DEFAULT_SESSION_MAX_MS: u64 = 540_000;
 /// Per-pump drain cap (frames per `service_tun` / datagrams per
 /// `service_udp`), so one burst cannot starve the other half of the loop
-/// (same shape as the probe's FWD_TUN_DRAIN).
-const DRAIN_MAX: usize = 8;
+/// (same shape as the probe's FWD_TUN_DRAIN). Raised 8 → 64 together with the
+/// 100 ms → 10 ms pump tick: the old pair capped the TUN direction at
+/// ~80 pps (≈0.9 Mbps at 1400 MTU) because a non-blocking drain read at most
+/// 8 frames per 100 ms cycle regardless of how much was queued.
+const DRAIN_MAX: usize = 64;
 /// TUN write budget for decapsulated plaintext (bounded, slice-polled —
 /// `TunFd::write_frame_budget` contract).
 const TUN_WRITE_BUDGET_MS: u64 = 200;
@@ -322,6 +325,25 @@ pub struct WgPeerStatus {
     /// N13-D2: the peer's outbound currently leaves via the carrier (last
     /// dispatch had no ICE endpoint) — the observable bearer source.
     pub on_carrier: bool,
+    // -- N13-D4 per-peer transfer counters (appended to the JSON AFTER the
+    //    N13-D1/D2 peer fields; consumers read the head positionally). UNIT:
+    //    PLAINTEXT (inner-IP) bytes, both directions — see each field. --
+    /// Plaintext (inner-IP) bytes of this peer's data frames that were
+    /// encapsulated AND handed to a WORKING bearer (UDP direct or the relay
+    /// carrier), cumulative since the peer's tunnel was created. Handshake and
+    /// keepalive packets carry no plaintext and contribute nothing; a datagram
+    /// the bearer REFUSED (`sendto` failure / typed carrier refusal) is
+    /// excluded — the unit is "transferred", not "encrypted". Frames queued
+    /// behind a handshake are counted when `flush_queued` really sends them.
+    /// NOT the device-level `tx_bytes`, which counts ENCAPSULATED wire bytes.
+    pub tx_bytes: u64,
+    /// Plaintext (inner-IP) bytes decapsulated from this peer and written into
+    /// the TUN — the same success branch and unit as the device-level
+    /// [`WgDeviceStats::rx_bytes_to_tun`] (a frame the TUN refused counts in
+    /// neither). While no peer has been replaced or removed since the device
+    /// came up, the registered peers' `rx_bytes` sum to that device counter;
+    /// a replaced peer restarts at zero (the device counter keeps running).
+    pub rx_bytes: u64,
 }
 
 /// One `handle_udp` outcome (observation surface for tests/pumps).
@@ -902,20 +924,38 @@ pub fn session_expired_line(pub_key_b64: &str) -> String {
     )
 }
 
-/// `N6_WG_DEVICE|route-peer|net=<cidr>|peer=<公钥前8位>|reason=<token>` ——
+/// `N6_WG_DEVICE|route-peer|net=<cidr>|peer=<完整公钥>|metric=<n>|live=<bool>|reason=<token>` ——
 /// 一个管理端下发网段（managed route）被指派给哪个路由 peer（首次选中 /
 /// HA 切换 / 释放各一行；`peer=none` = 该网段当前无可用候选，出向按
-/// `no-route` 丢弃）。与 [`session_established_line`] 同一 `peer_short` 源。
-pub fn route_peer_line(net: ([u8; 4], u8), pub_key_b64: Option<&str>, reason: &str) -> String {
+/// `no-route` 丢弃）。每次管理路由批次另发当前态 `route-selection` 摘要。
+pub fn route_peer_line(
+    net: ([u8; 4], u8),
+    pub_key_b64: Option<&str>,
+    metric: Option<i64>,
+    live: bool,
+    reason: &str,
+) -> String {
     let (addr, plen) = net;
     let peer = match pub_key_b64 {
-        Some(k) if !k.is_empty() => crate::peer_conn::peer_short(k).to_string(),
+        Some(k) if !k.is_empty() => k.to_string(),
         _ => "none".to_string(),
     };
     format!(
-        "N6_WG_DEVICE|route-peer|net={}.{}.{}.{}/{}|peer={peer}|reason={reason}",
-        addr[0], addr[1], addr[2], addr[3], plen
+        "N6_WG_DEVICE|route-peer|net={}.{}.{}.{}/{}|peer={peer}|metric={}|live={live}|reason={reason}",
+        addr[0], addr[1], addr[2], addr[3], plen,
+        metric.map_or_else(|| "none".to_string(), |value| value.to_string()),
     )
+}
+
+fn route_selection_line(
+    net: ([u8; 4], u8),
+    pub_key_b64: Option<&str>,
+    metric: Option<i64>,
+    live: bool,
+    reason: &str,
+) -> String {
+    let line = route_peer_line(net, pub_key_b64, metric, live, reason);
+    line.replacen("|route-peer|", "|route-selection|", 1)
 }
 
 impl TunFrameTee for N2DestinationTee {
@@ -1032,6 +1072,19 @@ struct WgPeer {
     /// N13-D2: the bearer the peer's outbound LAST left by (`true` = the
     /// carrier). Drives the takeover/restore switch counters in `dispatch`.
     on_carrier: bool,
+    /// N13-D4: plaintext bytes boringtun already counted as encapsulated for
+    /// this peer whose datagram the bearer then REFUSED (sendto failure /
+    /// typed carrier refusal). Published `tx_bytes` =
+    /// [`Tunnel::stats`]'s tunnel-lifetime plaintext TX − this, so a refused
+    /// send is never reported as transferred. Boringtun counts INSIDE
+    /// `encapsulate` (before the bearer sees the datagram), so the correction
+    /// has to be applied here, not in boringtun.
+    tx_undelivered_bytes: u64,
+    /// N13-D4: plaintext bytes decapsulated from this peer and written into
+    /// the TUN, counted on the same success branch as
+    /// [`WgDeviceStats::rx_bytes_to_tun`] (that branch is where the local
+    /// delivery — not merely the decryption — succeeds).
+    rx_bytes: u64,
 }
 
 impl Drop for WgPeer {
@@ -1051,7 +1104,7 @@ impl WgPeer {
     }
 
     fn status(&self) -> WgPeerStatus {
-        let (hs, _, _) = self.stats();
+        let (hs, bt_tx, _) = self.stats();
         WgPeerStatus {
             pub_key_b64: self.key_b64.clone(),
             endpoint: self.endpoint,
@@ -1062,6 +1115,11 @@ impl WgPeer {
             egress_local: self.egress_local,
             carrier_attached: self.carrier.is_some(),
             on_carrier: self.on_carrier,
+            // N13-D4: boringtun's tunnel-lifetime plaintext TX (handshakes /
+            // keepalives contribute 0) minus the encapsulations the bearer
+            // refused.
+            tx_bytes: bt_tx.saturating_sub(self.tx_undelivered_bytes),
+            rx_bytes: self.rx_bytes,
         }
     }
 }
@@ -1347,6 +1405,13 @@ impl WgDevice {
                         last_outbound_ms: None,
                         carrier: None,
                         on_carrier: false,
+                        // N13-D4: transfer counters start at zero with the
+                        // tunnel — peer replacement (key removed and
+                        // re-added, `clear()`) drops them with the old
+                        // `WgPeer`; a surviving key keeps its Tunn AND its
+                        // counters across endpoint/bearer changes and rekeys.
+                        tx_undelivered_bytes: 0,
+                        rx_bytes: 0,
                     });
                 }
             }
@@ -1419,7 +1484,23 @@ impl WgDevice {
         }
         self.managed_routes = grouped;
         self.rebuild_route_overlay("routes-updated");
+        self.emit_route_selections("routes-updated");
         Ok(())
+    }
+
+    fn emit_route_selections(&self, reason: &str) {
+        for entry in &self.managed_routes {
+            let selected = entry.selected.as_deref();
+            let metric = selected.and_then(|key| {
+                entry.candidates.iter().find(|(candidate, _)| candidate == key).map(|(_, metric)| *metric)
+            });
+            let live = selected.is_some_and(|key| {
+                self.peers.iter().any(|peer| {
+                    peer.key_b64 == key && peer.session_established && !peer.expired
+                })
+            });
+            emit(&route_selection_line(entry.net, selected, metric, live, reason));
+        }
     }
 
     /// Current overlay assignments (net → selected routing peer), snapshot
@@ -1485,7 +1566,15 @@ impl WgDevice {
         // pass 2: apply + log the transitions (one line per change)
         for (entry, pick) in self.managed_routes.iter_mut().zip(picks) {
             if entry.selected != pick {
-                emit(&route_peer_line(entry.net, pick.as_deref(), reason));
+                let metric = pick.as_deref().and_then(|key| {
+                    entry.candidates.iter().find(|(candidate, _)| candidate == key).map(|(_, metric)| *metric)
+                });
+                let live = pick.as_deref().is_some_and(|key| {
+                    self.peers.iter().any(|peer| {
+                        peer.key_b64 == key && peer.session_established && !peer.expired
+                    })
+                });
+                emit(&route_peer_line(entry.net, pick.as_deref(), metric, live, reason));
                 entry.selected = pick;
             }
         }
@@ -1779,8 +1868,9 @@ impl WgDevice {
         self.process_datagram(idx, datagram, path, out);
 
         // Session-establishment observation (boringtun stats flips to >= 0
-        // the moment a handshake completes) + queued-packet flush.
-        let (hs, _, _) = self.peers[idx].stats();
+        // the moment a handshake completes) + queued-packet flush. The TX
+        // reading is the N13-D4 correction baseline for `flush_queued`.
+        let (hs, bt_tx, _) = self.peers[idx].stats();
         if hs >= 0 {
             let fresh = hs == 0; // handshake observed within the last second
             if !self.peers[idx].session_established {
@@ -1796,7 +1886,7 @@ impl WgDevice {
                 // rekey completed: refresh the expiry anchor
                 self.peers[idx].session_established_ms = now_ms;
             }
-            out.sent += self.flush_queued(idx, now_ms);
+            out.sent += self.flush_queued(idx, now_ms, bt_tx);
         }
     }
 
@@ -2039,6 +2129,10 @@ impl WgDevice {
                 match self.tun.write_frame_budget(frame, TUN_WRITE_BUDGET_MS) {
                     Ok(_) => {
                         self.stats.rx_bytes_to_tun += len as u64;
+                        // N13-D4: per-peer attribution on the SAME success
+                        // branch/unit as the device counter above (Σ peers ==
+                        // device `rx_bytes_to_tun`).
+                        self.peers[idx].rx_bytes += len as u64;
                         // I2 to-os feed: same success branch as the counter —
                         // a TUN write the device refused is not an observation.
                         self.feed_tun_tee(TunFrameDir::ToOs, frame);
@@ -2149,6 +2243,16 @@ impl WgDevice {
         }
         let datagram = ct[..len].to_vec();
         if !self.dispatch(idx, &datagram) {
+            // N13-D4: boringtun counted this frame's plaintext INSIDE
+            // `encapsulate` (before the bearer saw it). The datagram was
+            // refused, so it is not transferred — undo that count for the
+            // published per-peer `tx_bytes`. Only a DATA message carries
+            // plaintext accounting: with no live session boringtun queues the
+            // frame and the datagram here is the initiation (type 1, 0 bytes
+            // counted), which must not be charged either.
+            if wg_message_is_data(&datagram) {
+                self.peers[idx].tx_undelivered_bytes += frame.len() as u64;
+            }
             return false;
         }
         self.stats.tx_packets += 1;
@@ -2210,8 +2314,18 @@ impl WgDevice {
     /// Flush boringtun's queued packets after session establishment
     /// (decapsulate-empty repeat-until-Done, bounded; ffi contract).
     /// The bearer is picked by `dispatch`.
-    fn flush_queued(&mut self, idx: usize, now_ms: u64) -> usize {
+    ///
+    /// N13-D4: `bt_tx_entry` is boringtun's plaintext TX counter read by the
+    /// caller just before this call (`ingest` reads stats anyway). A queued
+    /// packet is encrypted INSIDE boringtun, so its plaintext length is only
+    /// knowable through that counter — it is the baseline for correcting a
+    /// refused flush (`tx_undelivered_bytes`), keeping the published per-peer
+    /// `tx_bytes` a "delivered" count. On the empty-queue path (the common
+    /// one) the loop breaks on the first `OP_DONE` read and reads nothing
+    /// extra.
+    fn flush_queued(&mut self, idx: usize, now_ms: u64, bt_tx_entry: u64) -> usize {
         let mut sent = 0usize;
+        let mut bt_tx_baseline = bt_tx_entry;
         for _ in 0..FLUSH_MAX {
             let mut ct = [0u8; WG_BUF];
             let (op, len) = { self.peers[idx].tunnel.read(&[], &mut ct) };
@@ -2220,11 +2334,20 @@ impl WgDevice {
             }
             let datagram = ct[..len].to_vec();
             if !self.dispatch(idx, &datagram) {
+                // boringtun counted this flushed packet's plaintext before
+                // the bearer refused it: subtract exactly the delta since the
+                // last packet that WAS delivered.
+                let (_, bt_tx_now, _) = self.peers[idx].stats();
+                self.peers[idx].tx_undelivered_bytes +=
+                    bt_tx_now.saturating_sub(bt_tx_baseline);
                 break;
             }
             self.stats.tx_packets += 1;
             self.peers[idx].last_outbound_ms = Some(now_ms);
             sent += 1;
+            // advance the correction baseline (rare: only reached when
+            // boringtun really had a queued packet to flush)
+            bt_tx_baseline = self.peers[idx].stats().1;
         }
         sent
     }
@@ -2362,6 +2485,18 @@ fn ipv4_dst(frame: &[u8]) -> Option<[u8; 4]> {
     Some([frame[16], frame[17], frame[18], frame[19]])
 }
 
+/// N13-D4: is this WireGuard datagram a transport DATA message (type 4)? The
+/// first 4 wire bytes are the little-endian message type (boringtun
+/// `noise/mod.rs` message-type table: 1 init / 2 response / 3 cookie /
+/// 4 data). Only DATA encapsulations carry plaintext bytes in
+/// [`Tunnel::stats`], so this is the type test behind the refused-send
+/// correction in `encap_and_send` — a handshake datagram must never be
+/// charged to a peer's `tx_bytes`.
+fn wg_message_is_data(datagram: &[u8]) -> bool {
+    datagram.len() >= 4
+        && u32::from_le_bytes([datagram[0], datagram[1], datagram[2], datagram[3]]) == 4
+}
+
 fn getsockname(fd: i32) -> Result<([u8; 4], u16), String> {
     let mut addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
     let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
@@ -2426,8 +2561,9 @@ pub struct WgDataplaneStatus {
     //    carrier_* counters; consumers read the head positionally) --
     /// Read-only per-peer snapshots ([`WgPeerStatus`], registration order) —
     /// the attribution surface for `peers_with_session`: WHICH peer's
-    /// session is up, on which overlay prefixes and which bearer. Empty
-    /// while no device is up (nothing to attribute).
+    /// session is up, on which overlay prefixes and which bearer, plus its
+    /// per-peer plaintext transfer counters (N13-D4, trailing JSON fields).
+    /// Empty while no device is up (nothing to attribute).
     pub wg_peers: Vec<WgPeerStatus>,
 }
 
@@ -2491,6 +2627,12 @@ fn opt_handshake_json(key: &str, v: i64) -> String {
 /// One `wg_peers` entry (N13-D1): the per-peer session attribution surface —
 /// PUBLIC key, overlay prefixes (`masked`, the [`WgPeerStatus`] convention)
 /// and the bearer/session flags. No secret material.
+///
+/// N13-D4 appends the per-peer transfer counters LAST (`tx_bytes` then
+/// `rx_bytes`), after the N13-D1/D2 peer fields: positional readers of the
+/// head keep working, and the unit is PLAINTEXT (inner-IP) bytes in both
+/// directions ([`WgPeerStatus::tx_bytes`] / [`WgPeerStatus::rx_bytes`]) — NOT
+/// the device-level `wg.tx_bytes` (encapsulated wire bytes).
 fn wg_peer_json(p: &WgPeerStatus) -> String {
     let allowed_ips = p
         .allowed_ips
@@ -2501,7 +2643,7 @@ fn wg_peer_json(p: &WgPeerStatus) -> String {
         .collect::<Vec<String>>()
         .join(",");
     format!(
-        "{{{},{},\"allowed_ips\":[{}],{},{},{},{},{},{}}}",
+        "{{{},{},\"allowed_ips\":[{}],{},{},{},{},{},{},{},{}}}",
         crate::util::jstr("pub_key_b64", &p.pub_key_b64),
         opt_endpoint_json("endpoint", p.endpoint),
         allowed_ips,
@@ -2511,6 +2653,8 @@ fn wg_peer_json(p: &WgPeerStatus) -> String {
         opt_endpoint_json("egress_local", p.egress_local),
         crate::util::jbool("carrier_attached", p.carrier_attached),
         crate::util::jbool("on_carrier", p.on_carrier),
+        crate::util::jinum("tx_bytes", p.tx_bytes as i64),
+        crate::util::jinum("rx_bytes", p.rx_bytes as i64),
     )
 }
 
@@ -2660,7 +2804,10 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
 
 /// Pump cadence for the production data-plane thread (same shape as the ICE
 /// pump; the device itself is clock-injected — this loop only FEEDS it).
-pub const WG_PUMP_TICK_MS: u64 = 100;
+/// 100 ms → 10 ms (100 Hz) so `DRAIN_MAX` frames are actually available per
+/// second: 64 frames × 100 cycles/s. This is the loop's only idle cost (one
+/// wakeup per tick, each doing non-blocking poll/read work).
+pub const WG_PUMP_TICK_MS: u64 = 10;
 
 /// Why a [`WgDeviceFeed::feed_wg_socket`] / [`WgDeviceFeed::feed_tun`] call
 /// was refused (stable tokens only — they cross the NAPI error surface).
@@ -4195,12 +4342,451 @@ mod route_overlay_tests {
     #[test]
     fn route_peer_line_names_net_peer_and_reason() {
         assert_eq!(
-            route_peer_line(LAN_NET, Some("FyLw4PSBg1hjr+9/x0="), "session-expired"),
-            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=FyLw4PSB|reason=session-expired"
+            route_peer_line(LAN_NET, Some("FyLw4PSBg1hjr+9/x0="), Some(10), true, "session-expired"),
+            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=FyLw4PSBg1hjr+9/x0=|metric=10|live=true|reason=session-expired"
         );
         assert_eq!(
-            route_peer_line(LAN_NET, None, "routes-updated"),
-            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=none|reason=routes-updated"
+            route_peer_line(LAN_NET, None, None, false, "routes-updated"),
+            "N6_WG_DEVICE|route-peer|net=192.168.50.0/24|peer=none|metric=none|live=false|reason=routes-updated"
         );
+        assert_eq!(
+            route_selection_line(LAN_NET, Some("FyLw4PSBg1hjr+9/x0="), Some(10), false, "routes-updated"),
+            "N6_WG_DEVICE|route-selection|net=192.168.50.0/24|peer=FyLw4PSBg1hjr+9/x0=|metric=10|live=false|reason=routes-updated"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests (N13-D4 per-peer transfer counters: real traffic through TWO real
+// devices on loopback UDP + TUN socketpairs — same host-test pattern as
+// tests/wg_e2e.rs, kept in-crate so the counter semantics are pinned next to
+// the code that produces them)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::*;
+
+    extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut [i32; 2]) -> i32;
+    }
+
+    const ADDR_A: [u8; 4] = [10, 99, 0, 1];
+    const ADDR_B: [u8; 4] = [10, 99, 0, 2];
+    const ADDR_C: [u8; 4] = [10, 99, 0, 3];
+
+    /// boringtun's ffi installs a panic→SIGSEGV hook the first time a tunnel
+    /// is created (boringtun-0.7.1 `ffi/mod.rs` PANIC_HOOK), which would turn
+    /// a failed assertion in these real-tunnel tests into a silent signal-11
+    /// death. Re-install a PRINTING hook (the `tests/wg_e2e.rs` helper) AFTER
+    /// the first tunnel exists, so the hook wins.
+    fn show_panics() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            std::panic::set_hook(Box::new(|info| eprintln!("\nTEST PANIC: {info}")));
+        });
+    }
+
+    /// Deterministic identity: secret = base64(32 × `byte`); the public key is
+    /// derived through the SAME frozen `x25519_public_key` export the device's
+    /// tunnels use, so both ends of a pair agree by construction.
+    fn identity(byte: u8) -> (String, String) {
+        let secret = base64::engine::general_purpose::STANDARD.encode([byte; 32]);
+        let pub_key = x25519_public_b64(&secret).expect("public key");
+        (secret, pub_key)
+    }
+
+    /// Test clock policy (same shape as tests/wg_e2e.rs): fast handshake
+    /// retries, keepalive/expiry effectively off — no timer traffic can
+    /// pollute the transfer counters unless a test opts in.
+    fn test_cfg(secret_b64: &str) -> WgDeviceConfig {
+        let mut cfg = WgDeviceConfig::new(secret_b64);
+        cfg.hs_retry_ms = 100;
+        cfg.hs_deadline_ms = 10_000;
+        cfg.keepalive_ms = u64::MAX / 2;
+        cfg.session_max_ms = u64::MAX / 2;
+        cfg
+    }
+
+    /// One real device: a bound loopback UDP socket (its WG "cable end") + a
+    /// datagram socketpair playing the platform TUN half. The test owns the
+    /// raw fds; the device holds dups only (fd contract).
+    struct Dev {
+        dev: WgDevice,
+        /// This device's own public key (what peers register).
+        key: String,
+        wg_raw: i32,
+        tun_raw: i32,
+        tun_end: i32,
+    }
+
+    impl Drop for Dev {
+        fn drop(&mut self) {
+            for fd in [self.wg_raw, self.tun_raw, self.tun_end] {
+                unsafe { sys::close(fd) };
+            }
+        }
+    }
+
+    impl Dev {
+        /// Device over a fresh loopback socket, registering `peers`
+        /// (public key, /32) with NO endpoint yet.
+        fn new(byte: u8, peers: &[(&str, [u8; 4])]) -> Dev {
+            let (secret, pub_key) = identity(byte);
+            let wg_raw = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(wg_raw >= 0, "socket errno={}", sys::errno());
+            let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+            assert_eq!(
+                unsafe {
+                    sys::bind(wg_raw, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32)
+                },
+                0,
+                "bind errno={}",
+                sys::errno()
+            );
+            let mut sv = [-1i32; 2];
+            assert_eq!(unsafe { socketpair(1 /* AF_UNIX */, 2 /* SOCK_DGRAM */, 0, &mut sv) }, 0);
+            let tun = TunFd::dup_from_raw(sv[0]).expect("tun dup");
+            let mut dev = WgDevice::adopt(test_cfg(&secret), wg_raw, tun).expect("device adopt");
+            let specs: Vec<WgPeerSpec> =
+                peers.iter().map(|(k, addr)| peer_spec(k, *addr)).collect();
+            dev.set_peers(&specs).expect("set_peers");
+            show_panics();
+            Dev { dev, key: pub_key, wg_raw, tun_raw: sv[0], tun_end: sv[1] }
+        }
+
+        fn port(&self) -> u16 {
+            self.dev.local_addr().1
+        }
+
+        fn stats(&self) -> WgDeviceStats {
+            self.dev.stats()
+        }
+
+        fn peer(&self, key: &str) -> WgPeerStatus {
+            self.dev
+                .peers()
+                .into_iter()
+                .find(|p| p.pub_key_b64 == key)
+                .unwrap_or_else(|| panic!("peer {key} is registered"))
+        }
+
+        /// One pump round: TUN half + UDP half + tick, all on the injected
+        /// clock, poll timeout 0 (loopback delivery is synchronous).
+        fn step(&mut self, now_ms: u64) {
+            self.dev.service_tun(now_ms);
+            self.dev.service_udp(now_ms);
+            self.dev.tick(now_ms);
+        }
+
+        fn write_frame(&self, frame: &[u8]) {
+            let (n, e) = sys::write_fd(self.tun_end, frame);
+            assert_eq!((n as usize, e), (frame.len(), 0), "TUN-side test write");
+        }
+
+        /// Poll-then-read (the test end of the socketpair is blocking, so the
+        /// readiness check is what keeps this non-blocking).
+        fn read_frame(&self) -> Option<Vec<u8>> {
+            let (ret, _e, rev) = sys::poll1(self.tun_end, sys::POLLIN, 0);
+            if ret <= 0 || (rev & sys::POLLIN) == 0 {
+                return None;
+            }
+            let mut buf = [0u8; WG_BUF];
+            let (n, e) = sys::read_fd(self.tun_end, &mut buf);
+            assert!(n > 0, "TUN-side test read errno={e}");
+            Some(buf[..n as usize].to_vec())
+        }
+    }
+
+    fn peer_spec(key: &str, addr: [u8; 4]) -> WgPeerSpec {
+        WgPeerSpec::new(key.to_string(), vec![(addr, 32)])
+    }
+
+    /// Land endpoints both ways and pump until both sessions are established.
+    fn establish(devs: &mut [&mut Dev], a: usize, b: usize, now: &mut u64) {
+        let (pa, pb) = (devs[a].port(), devs[b].port());
+        let (ka, kb) = (devs[a].key.clone(), devs[b].key.clone());
+        devs[a].dev.set_endpoint(&kb, [127, 0, 0, 1], pb, *now).expect("endpoint a→b");
+        devs[b].dev.set_endpoint(&ka, [127, 0, 0, 1], pa, *now).expect("endpoint b→a");
+        let deadline = *now + 10_000;
+        loop {
+            for d in devs.iter_mut() {
+                d.step(*now);
+            }
+            if devs[a].dev.tunnel_ready() && devs[b].dev.tunnel_ready() {
+                return;
+            }
+            assert!(*now <= deadline, "handshake must establish within the sim deadline");
+            *now += 10;
+        }
+    }
+
+    /// Pump every device until a frame falls out of `to`'s TUN half (the read
+    /// IS the consumption, so the frame is captured here).
+    fn pump_until_delivery(devs: &mut [&mut Dev], to: usize, now: &mut u64) -> Vec<u8> {
+        let deadline = *now + 5_000;
+        loop {
+            for d in devs.iter_mut() {
+                d.step(*now);
+            }
+            if let Some(got) = devs[to].read_frame() {
+                return got;
+            }
+            assert!(*now <= deadline, "frame must cross the tunnel within the sim deadline");
+            *now += 10;
+        }
+    }
+
+    /// Write `frame` into `from`'s TUN half and pump until it comes out of
+    /// `to`'s TUN half.
+    fn carry(devs: &mut [&mut Dev], from: usize, to: usize, now: &mut u64, frame: &[u8]) -> Vec<u8> {
+        devs[from].write_frame(frame);
+        pump_until_delivery(devs, to, now)
+    }
+
+    /// One IPv4/UDP frame with an honest total-length field (boringtun derives
+    /// the received plaintext length from it, so tx and rx byte counts must
+    /// agree on exactly this length).
+    fn frame(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let total = (20 + 8 + payload.len()) as u16;
+        let mut f = vec![0x45, 0];
+        f.extend_from_slice(&total.to_be_bytes());
+        f.extend_from_slice(&[0, 1, 0, 0, 64, 17, 0, 0]); // id, flags, ttl, proto UDP, cksum
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&5555u16.to_be_bytes());
+        f.extend_from_slice(&5556u16.to_be_bytes());
+        f.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        f.extend_from_slice(&[0, 0]); // udp checksum (inner checksums are not validated)
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// Test carrier: records every datagram it is handed (whether it accepts
+    /// it or not), so a test can prove boringtun DID encapsulate while the
+    /// published counter still refuses to call it transferred.
+    struct TestCarrier {
+        accept: bool,
+        seen: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl TestCarrier {
+        fn new(accept: bool) -> Arc<TestCarrier> {
+            Arc::new(TestCarrier { accept, seen: Mutex::new(Vec::new()) })
+        }
+
+        fn seen(&self) -> Vec<Vec<u8>> {
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl WgEgressCarrier for TestCarrier {
+        fn send_datagram(&self, datagram: &[u8]) -> Result<(), String> {
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).push(datagram.to_vec());
+            if self.accept {
+                Ok(())
+            } else {
+                Err("carrier-backpressure".to_string())
+            }
+        }
+
+        fn kind(&self) -> &'static str {
+            "test-carrier"
+        }
+    }
+
+    /// Real traffic through two peers of ONE device: every counter moves by
+    /// exactly the transferred plaintext length, the handshake itself adds
+    /// nothing, and a second peer's counters stay untouched.
+    #[test]
+    fn peer_transfer_counters_follow_real_traffic_and_stay_isolated() {
+        let (_sa, ka) = identity(0x11);
+        let (_sb, kb) = identity(0x22);
+        let (_sc, kc) = identity(0x33);
+        let mut a = Dev::new(0x11, &[(kb.as_str(), ADDR_B), (kc.as_str(), ADDR_C)]);
+        let mut b = Dev::new(0x22, &[(ka.as_str(), ADDR_A)]);
+        let mut c = Dev::new(0x33, &[(ka.as_str(), ADDR_A)]);
+        let mut devs: Vec<&mut Dev> = vec![&mut a, &mut b, &mut c];
+        let mut now = 1_000u64;
+        establish(&mut devs, 0, 1, &mut now);
+        establish(&mut devs, 0, 2, &mut now);
+
+        // the handshake (init/response) carried no plaintext: both directions
+        // stay at zero on every peer
+        for (i, k) in [(0usize, &kb), (0, &kc), (1, &ka), (2, &ka)] {
+            let p = devs[i].peer(k);
+            assert_eq!(
+                (p.tx_bytes, p.rx_bytes),
+                (0, 0),
+                "handshake packets are not plaintext transfer ({k})"
+            );
+        }
+
+        // A → B: exactly the frame length, attributed to B only
+        let f1 = frame(ADDR_A, ADDR_B, &[0xA1; 24]);
+        assert_eq!(carry(&mut devs, 0, 1, &mut now, &f1), f1, "payload crosses unchanged");
+        assert_eq!(devs[0].peer(&kb).tx_bytes, f1.len() as u64, "A→B tx = the frame's plaintext bytes");
+        assert_eq!(devs[0].peer(&kb).rx_bytes, 0, "no return traffic");
+        assert_eq!(devs[0].peer(&kc).tx_bytes, 0, "peer isolation: C's tx untouched");
+        assert_eq!(devs[0].peer(&kc).rx_bytes, 0, "peer isolation: C's rx untouched");
+        assert_eq!(devs[1].peer(&ka).rx_bytes, f1.len() as u64, "B received f1 into its TUN");
+        assert_eq!(devs[1].peer(&ka).tx_bytes, 0, "B sent nothing");
+        assert_eq!(devs[2].peer(&ka).tx_bytes + devs[2].peer(&ka).rx_bytes, 0, "C saw nothing");
+
+        // C → A: the other peer's counters move, B's do not
+        let f2 = frame(ADDR_C, ADDR_A, &[0xC2; 40]);
+        assert_eq!(carry(&mut devs, 2, 0, &mut now, &f2), f2, "payload crosses unchanged");
+        assert_eq!(devs[2].peer(&ka).tx_bytes, f2.len() as u64, "C→A tx = f2's plaintext bytes");
+        assert_eq!(devs[0].peer(&kc).rx_bytes, f2.len() as u64, "A received f2 from C");
+        assert_eq!(devs[0].peer(&kb).tx_bytes, f1.len() as u64, "B's tx untouched by C's traffic");
+        assert_eq!(devs[0].peer(&kb).rx_bytes, 0, "B's rx untouched by C's traffic");
+
+        // the per-peer rx view is the device view, split by peer
+        let st = devs[0].stats();
+        assert_eq!(
+            devs[0].peer(&kb).rx_bytes + devs[0].peer(&kc).rx_bytes,
+            st.rx_bytes_to_tun,
+            "Σ peer rx_bytes == device rx_bytes_to_tun"
+        );
+        // unit cross-check: the per-peer PLAINTEXT count + the WG transport
+        // overhead is the device-level ENCAPSULATED byte counter — the two
+        // fields are different units on purpose, and this pins the difference
+        // (handshakes/keepalives add nothing to either)
+        assert_eq!(
+            st.tx_bytes,
+            f1.len() as u64 + 32,
+            "device tx_bytes is encapsulated (peer plaintext + 32B transport overhead)"
+        );
+    }
+
+    /// A frame handed to a peer with NO live session is queued inside boringtun
+    /// and flushed when the handshake completes: its plaintext bytes are
+    /// attributed on the flush (never lost, never counted twice, and the
+    /// initiation that carried it is not charged as plaintext).
+    #[test]
+    fn queued_pre_handshake_frame_is_counted_when_flushed() {
+        let (_sa, ka) = identity(0x44);
+        let (_sb, kb) = identity(0x55);
+        let mut a = Dev::new(0x44, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x55, &[(ka.as_str(), ADDR_A)]);
+        let mut devs: Vec<&mut Dev> = vec![&mut a, &mut b];
+        let mut now = 1_000u64;
+
+        // land the endpoints (each fires one initiation) but DO NOT pump yet
+        let (pa, pb) = (devs[0].port(), devs[1].port());
+        devs[0].dev.set_endpoint(&kb, [127, 0, 0, 1], pb, now).expect("endpoint A→B");
+        devs[1].dev.set_endpoint(&ka, [127, 0, 0, 1], pa, now).expect("endpoint B→A");
+
+        let f = frame(ADDR_A, ADDR_B, &[0x7E; 40]);
+        devs[0].write_frame(&f);
+        // ONE A step: no session ⇒ boringtun QUEUES the frame. The handshake
+        // started by the endpoint landing is already in progress, so this
+        // write emits no second initiation (boringtun only retries on its own
+        // timer): exactly the one endpoint-landing datagram goes out, with
+        // zero plaintext accounting.
+        devs[0].step(now);
+        assert!(!devs[0].peer(&kb).session_established, "no session yet");
+        assert_eq!(devs[0].stats().tx_packets, 1, "no initiation for an in-progress handshake");
+        assert_eq!(devs[0].peer(&kb).tx_bytes, 0, "a queued frame is not transferred yet");
+
+        // pump: the session comes up, the queued frame is flushed and arrives
+        assert_eq!(pump_until_delivery(&mut devs, 1, &mut now), f, "the queued frame arrives");
+        assert_eq!(
+            devs[0].peer(&kb).tx_bytes,
+            f.len() as u64,
+            "the flushed frame is counted exactly once"
+        );
+        assert_eq!(
+            devs[1].peer(&ka).rx_bytes,
+            f.len() as u64,
+            "the peer's rx view is the same plaintext length"
+        );
+    }
+
+    /// Both bearers and the refused-send rule: a carrier delivery counts the
+    /// plaintext as transferred; the SAME datagram refused by the carrier does
+    /// not (even though boringtun already encapsulated it).
+    #[test]
+    fn refused_bearer_send_is_not_counted_and_carrier_delivery_is() {
+        let (_sa, ka) = identity(0x66);
+        let (_sb, kb) = identity(0x77);
+        let mut a = Dev::new(0x66, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x77, &[(ka.as_str(), ADDR_A)]);
+        let mut devs: Vec<&mut Dev> = vec![&mut a, &mut b];
+        let mut now = 1_000u64;
+        establish(&mut devs, 0, 1, &mut now);
+        assert_eq!(devs[0].peer(&kb).tx_bytes, 0, "handshake only so far");
+
+        // ICE lost: the endpoint is recycled, a carrier that REFUSES is
+        // attached. The frame is encapsulated but never delivered.
+        let bad = TestCarrier::new(false);
+        devs[0].dev.recycle_endpoint(&kb);
+        devs[0].dev.set_carrier(&kb, bad.clone()).expect("carrier attach");
+        let before = devs[0].stats();
+        let f1 = frame(ADDR_A, ADDR_B, &[0x5A; 48]);
+        devs[0].write_frame(&f1);
+        devs[0].step(now);
+        let refused = bad.seen();
+        assert_eq!(refused.len(), 1, "the carrier really was handed the datagram");
+        assert_eq!(refused[0].len(), f1.len() + 32, "…as a WG DATA packet (+32B overhead)");
+        assert!(wg_message_is_data(&refused[0]), "…of transport type 4");
+        assert_eq!(devs[0].peer(&kb).tx_bytes, 0, "a refused datagram is NOT transferred");
+        assert_eq!(devs[0].peer(&kb).rx_bytes, 0, "nothing came back");
+        let after = devs[0].stats();
+        assert_eq!(after.carrier_rejects - before.carrier_rejects, 1, "typed refusal counted once");
+        assert_eq!(after.carrier_tx_bytes - before.carrier_tx_bytes, 0, "refused ⇒ no carrier bytes");
+        assert_eq!(after.tx_packets - before.tx_packets, 0, "refused ⇒ no tx packet counted");
+        assert_eq!(after.carrier_takeovers, 1, "the refusal happened on the carrier path");
+
+        // the carrier starts accepting: the same frame is now transferred
+        let good = TestCarrier::new(true);
+        devs[0].dev.set_carrier(&kb, good.clone()).expect("carrier swap");
+        let f2 = frame(ADDR_A, ADDR_B, &[0x6B; 16]);
+        devs[0].write_frame(&f2);
+        devs[0].step(now);
+        assert_eq!(devs[0].peer(&kb).tx_bytes, f2.len() as u64, "delivered carrier traffic counts");
+        let seen = good.seen();
+        assert_eq!(seen.len(), 1, "one datagram delivered");
+        assert_eq!(seen[0].len(), f2.len() + 32, "wire bytes = plaintext + 32B transport overhead");
+        assert_eq!(devs[0].stats().carrier_tx_bytes, (f2.len() + 32) as u64, "carrier_tx_bytes agrees");
+        assert_eq!(devs[0].stats().carrier_tx_packets, 1);
+        assert_eq!(
+            devs[0].stats().carrier_takeovers,
+            1,
+            "still the same carrier episode (no second takeover)"
+        );
+    }
+
+    /// Counter lifecycle: a surviving key keeps its tunnel AND its counters
+    /// across `set_peers` snapshots; a replaced key (removed, then re-added)
+    /// starts from zero.
+    #[test]
+    fn peer_transfer_counters_survive_resnapshot_and_reset_on_replacement() {
+        let (_sa, ka) = identity(0x88);
+        let (_sb, kb) = identity(0x99);
+        let mut a = Dev::new(0x88, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x99, &[(ka.as_str(), ADDR_A)]);
+        let mut devs: Vec<&mut Dev> = vec![&mut a, &mut b];
+        let mut now = 1_000u64;
+        establish(&mut devs, 0, 1, &mut now);
+        let f = frame(ADDR_A, ADDR_B, &[0xD3; 20]);
+        assert_eq!(carry(&mut devs, 0, 1, &mut now, &f), f);
+        assert_eq!(devs[0].peer(&kb).tx_bytes, f.len() as u64);
+
+        // the same key in the next map snapshot: tunnel (and counters) kept
+        devs[0].dev.set_peers(&[peer_spec(&kb, ADDR_B)]).expect("re-snapshot");
+        assert_eq!(devs[0].peer(&kb).tx_bytes, f.len() as u64, "same peer ⇒ same counters");
+        assert_eq!(devs[0].peer(&kb).rx_bytes, 0);
+
+        // peer replacement: the old WgPeer (and its Tunn) is dropped
+        devs[0].dev.set_peers(&[]).expect("peer removed");
+        assert!(devs[0].dev.peers().is_empty(), "peer gone");
+        devs[0].dev.set_peers(&[peer_spec(&kb, ADDR_B)]).expect("peer re-added");
+        let fresh = devs[0].peer(&kb);
+        assert_eq!((fresh.tx_bytes, fresh.rx_bytes), (0, 0), "a replaced peer starts at zero");
+        assert!(!fresh.session_established, "…with a fresh tunnel");
+
+        // and the OTHER side's counters are untouched by A's replacement
+        assert_eq!(devs[1].peer(&ka).rx_bytes, f.len() as u64);
     }
 }

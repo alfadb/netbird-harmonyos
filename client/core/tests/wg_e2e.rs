@@ -1132,15 +1132,21 @@ fn ice_selected_pair_lands_on_the_real_device_and_carries_payload() {
     // The SELECTED PAIRS landed on the devices via apply_endpoint. Now find,
     // per side, the raw candidate socket whose port is the endpoint the PEER
     // landed — i.e. OUR selected local end — and reattach the device to it:
-    // from here the WG socket IS the selected candidate socket. (The gather
-    // phase consumes one provider socket per round before the candidate
-    // sockets are bound, so the selected socket's index is not a priori; we
-    // locate it by port instead of assuming one.)
+    // from here the WG socket IS the selected candidate socket. 0052: the
+    // gather hands its bound socket to the session (no second bind), so the
+    // selected local socket IS the FIRST provider socket — the very one whose
+    // ownership moved into the Node as the provisional socket (`a.wg_raw` /
+    // `b.wg_raw`, removed from the FedSocks list to avoid a double close).
+    // Scan both sets by port instead of assuming an index.
     let a_sel = b.endpoint_of(key_a()).expect("B landed A's selected pair").1;
     let b_sel = a.endpoint_of(key_b()).expect("A landed B's selected pair").1;
-    let a_raw = *fed_a.raws.iter().find(|&&fd| sock_port(fd) == a_sel)
+    let a_raw = std::iter::once(a.wg_raw)
+        .chain(fed_a.raws.iter().copied())
+        .find(|&fd| sock_port(fd) == a_sel)
         .expect("A's selected candidate socket must be one of the fed raws");
-    let b_raw = *fed_b.raws.iter().find(|&&fd| sock_port(fd) == b_sel)
+    let b_raw = std::iter::once(b.wg_raw)
+        .chain(fed_b.raws.iter().copied())
+        .find(|&fd| sock_port(fd) == b_sel)
         .expect("B's selected candidate socket must be one of the fed raws");
     assert_eq!(sock_port(a_raw), a_sel);
     assert_eq!(sock_port(b_raw), b_sel);

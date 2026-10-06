@@ -64,18 +64,23 @@ pub fn emit(line: &str) {
     tee_append(line);
 }
 
-/// The ring tee (see [`emit`]). Host tests wrap it in the re-entrant
-/// [`tee_lock`] so a test that deliberately breaks the ring's destination sees
-/// ONLY its own records; the device build appends directly.
+/// The file tees (see [`emit`]): the armed-only evidence ring and the
+/// phone-side persistent log. Each is independently inert until configured;
+/// neither can re-enter `emit` (both only queue/write), so `emit` cannot
+/// recurse. Host tests wrap the ring tee in the re-entrant [`tee_lock`] so a
+/// test that deliberately breaks the ring's destination sees ONLY its own
+/// records; the device build appends directly.
 #[cfg(test)]
 fn tee_append(line: &str) {
     let _held = tee_lock::lock();
     crate::n2_ring::append(line);
+    crate::phone_log::append(line);
 }
 
 #[cfg(not(test))]
 fn tee_append(line: &str) {
     crate::n2_ring::append(line);
+    crate::phone_log::append(line);
 }
 
 /// Host-test mutual exclusion of the ring tee.

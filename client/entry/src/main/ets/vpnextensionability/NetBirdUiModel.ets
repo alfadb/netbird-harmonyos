@@ -17,11 +17,60 @@
 // hands its connector_status()/connector_network_config() results straight
 // through with no structural-typing cast (arkts-no-structural-typing).
 import type { ConnectorStatusResult, CoreNetworkConfig, CorePeerSummary,
-  WgPeerStatusEntry } from './NetBirdConnector';
+  CorePeerRelayEntry, CoreIcePeerEntry, CoreIceEndpoint, CoreRouteEntry,
+  CoreDnsServer, ManagementEndpoint,
+  WgDataplaneStatus, WgPeerStatusEntry } from './NetBirdConnector';
 
 // ---------------------------------------------------------------------------
 // published document (legacy fields + appended phase-1 fields)
 // ---------------------------------------------------------------------------
+
+// One endpoint of the peer's SELECTED ICE pair, published (public material
+// only: the candidate type token + the public ip:port). The core's check
+// internals (foundation/priority/related_address) and every credential
+// (ufrag/password) or fd stay on the core side and never reach here.
+export interface UiPeerIceEndpoint {
+  // 'host' | 'srflx' | 'prflx' | 'relay'
+  type: string;
+  address: string;
+  port: number;
+}
+
+// The peer's ICE detail, joined from the core's `ice_peers` table by public
+// key. This object EXISTS only when the core really delivered a readable
+// detail for THIS peer: an absent/null `ice_peers` source, a peer with no
+// entry, or an entry that cannot be read keeps `UiPeerEntry.ice` ABSENT (never
+// a default state, never a placeholder endpoint).
+//
+// The three-state reading the UI must respect:
+//   - `ice` absent                    -> ICE 未知 (nothing was observed);
+//   - `ice` present, endpoints null   -> the core did observe this peer and
+//     no pair is selected YET (e.g. gathering);
+//   - `ice` present, endpoints set    -> that pair was really selected.
+// The last case is NOT a statement about the current connection: a
+// `disconnected` peer retains its selected pair (see `reachable`), and the
+// endpoint presence never overrides the WG-session verdict in
+// `UiPeerEntry.connection` / `online`.
+export interface UiPeerIceDetail {
+  // 'idle' | 'gathering' | 'checking' | 'connected' | 'disconnected' | 'failed'
+  state: string;
+  // TRUE = this device is the controlling agent of the ICE session, FALSE =
+  // controlled, null = the core stated no role (no session established, or
+  // the value was not delivered) — an unknown role, never a default.
+  controlling: boolean | null;
+  // selected pair endpoints; null = no pair selected (never the first
+  // candidate), NOT "unknown": the detail itself was delivered.
+  selected_local: UiPeerIceEndpoint | null;
+  selected_remote: UiPeerIceEndpoint | null;
+  // the WG endpoint landing succeeded
+  endpoint_applied: boolean;
+  // the core's own usability verdict (Connected AND endpoint applied)
+  reachable: boolean;
+  // the class token of the last ICE/peer error ({class,status} flattened;
+  // the numeric status stays on the core side — see CoreIcePeerEntry);
+  // null when the core recorded none.
+  last_error_class: string | null;
+}
 
 // One peers[] entry of the published document.
 export interface UiPeerEntry {
@@ -46,6 +95,66 @@ export interface UiPeerEntry {
   // 'idle' (management-online, no local session — 空闲, NOT offline),
   // 'offline' (management lists it under offlinePeers).
   status: string;
+  // ---- 2026-10-07 client-detail increment (all optional, see the block
+  //      comment below) ----
+  // The peer's masked overlay prefixes from the WG session view
+  // (wg_peers[].allowed_ips, e.g. ['10.30.30.2/32']); EMPTY when the core
+  // reported none. The network map's own allowed-ip COUNT is not this list
+  // (the map exports no prefixes) — see peerPrefixes.
+  allowed_ips: string[];
+  // The peer's current WG endpoint (wg_peers[].endpoint, 'ip:port');
+  // '' when the core reported null (no endpoint known). Public.
+  endpoint: string;
+  // The local socket address the peer's traffic egresses from
+  // (wg_peers[].egress_local, 'ip:port'); '' when null. Public.
+  egress_local: string;
+  // Bearer flags verbatim from the WG session view; false when the core
+  // reported no value (the field is only meaningful WITH a live session —
+  // see peerCarrierKnown).
+  on_carrier: boolean;
+  carrier_attached: boolean;
+  // TRUE only when the WG session view really carried this peer (the
+  // booleans above then mean what they say). FALSE for a map-only peer —
+  // the UI must render 未知, never a fabricated 直连/off.
+  carrier_known: boolean;
+  // ---- 2026-10-07 per-peer ACTUAL relay lane (core `peer_relays`) ----
+  // The canonical rel://host:port / rels://host:port the peer's ACTUAL
+  // attached relay lane really rides, joined from the core's live
+  // attached-lane table by public key. Three states, and the UI must read
+  // them apart:
+  //   actual_relay_known=false, key ABSENT  -> the lane table was not
+  //     delivered (null/no carrier armed/older core): 未知;
+  //   actual_relay_known=true, value null   -> the table WAS delivered and
+  //     this peer has NO attached lane: 未走中继 — an observation, NOT the
+  //     same fact as 直连 (connection stays the WG-session verdict);
+  //   actual_relay_known=true, value string -> the actual lane URL.
+  // NEVER the document's local relay session url / the configured home url
+  // (`UiStatusDocument.relay_url`): a global or merely configured relay is
+  // not a path for this peer. Public routing material only.
+  actual_relay_known: boolean;
+  actual_relay_url?: string | null;
+  // PLAINTEXT inner-IP bytes transferred with THIS peer, cumulative since the
+  // peer's tunnel was created (they survive a resnapshot; the core resets them
+  // only when the peer is removed and re-added). tx_bytes: this device → peer,
+  // rx_bytes: peer → this device's TUN. Both are ABSENT (undefined — dropped
+  // by JSON.stringify) when the core did not deliver them (older core, or a
+  // map-only peer with no WG session view), while a delivered 0 stays a real
+  // 0 (no traffic yet) — so the UI can tell 未知 from 0 B.
+  // NOT the device-level aggregate UiWgTraffic.tx_bytes, which counts
+  // ENCAPSULATED wire bytes (inner frame + transport overhead): different
+  // accounting, never one label for both.
+  tx_bytes?: number;
+  rx_bytes?: number;
+  // ---- 2026-10-07 per-peer ICE detail (core `ice_peers`) ----
+  // The peer's ICE state/role + selected-pair endpoints, joined from the
+  // core's per-peer detail table by public key. OPTIONAL and ABSENT (undefined
+  // — dropped by JSON.stringify) whenever the core did not deliver a readable
+  // detail for THIS peer; the UI then renders ICE 未知. A present detail with
+  // null endpoints means "no pair selected yet". Endpoint presence is NOT a
+  // connection verdict: `connection`/`online`/`status` above stay sourced from
+  // the WG session view, and a `disconnected` peer keeps its retained pair
+  // with reachable=false.
+  ice?: UiPeerIceDetail;
 }
 
 export interface UiStatusDocument {
@@ -77,7 +186,154 @@ export interface UiStatusDocument {
   // 2026-10-06 (详情页中继地址): the effective relay URL of the live (or
   // last live) relay session (relay.current_url), falling back to the first
   // configured relay url; null when neither is known.
+  // LOCAL session only (the configured home URL when nothing is dialed): a
+  // PEER's relay address is a DIFFERENT fact — UiPeerEntry.actual_relay_url
+  // from the core's `peer_relays` lane table — and this field must never be
+  // presented as, or copied into, a peer's relay address.
   relay_url?: string | null;
+  // ---- 2026-10-07 client-detail increment ----
+  // Everything below is APPENDED and optional: an older document omits it,
+  // a field whose source the core has not delivered is OMITTED rather than
+  // defaulted (see buildUiStatusDocument) — the UI reads "absent" as 未知,
+  // never as a success or a zero. No secret material crosses this boundary:
+  // public keys / masked prefixes / public endpoint + relay addresses /
+  // signal URI / the management authority. The management URL is published
+  // as SCHEME + host + port only (never a URL string — a userinfo or query
+  // in a hand-written management_url must not survive into the document).
+  network?: UiNetworkView;
+  // Aggregate WireGuard data-plane counters from the core (omitted when the
+  // status carries no `wg` section — nothing observed, nothing invented).
+  wg_traffic?: UiWgTraffic;
+  // The relay client view (omitted when the status carries no `relay`
+  // section). Counters/URLs only — never the relay token.
+  relay?: UiRelayView;
+  // Connector session deadline: the core's token ('unknown' | 'disabled' |
+  // 'set') plus the Unix SECONDS deadline when the token is 'set'. Either
+  // half is omitted when the connector did not deliver it.
+  session_expiry?: string;
+  session_expires_at_s?: number;
+  // 2026-10-07 uptime increment: the CORE connector process's own timestamps,
+  // passed through verbatim as Unix SECONDS (core `started_at_unix` /
+  // `last_update_unix`, fields the core emits in every status). Either is
+  // OMITTED when the core delivered no positive value — the UI then shows no
+  // uptime. Process times only: they are NOT a management connection state
+  // (management reachability stays signal_registered / reconnect counters).
+  started_at_unix?: number;
+  last_update_unix?: number;
+  // The management authority the connector was started against, split into
+  // its parts: scheme + host + port only. The configured URL string is NEVER
+  // published — a hand-written management_url may carry userinfo or a query
+  // and only the authority survives. Emitted as null when the extension has
+  // not parsed a management url yet; the KEY ABSENT means a document written
+  // before this field existed.
+  management?: UiManagementEndpoint | null;
+}
+
+export interface UiManagementEndpoint {
+  // 'https' | 'http' (the scheme the connector dialed)
+  scheme: string;
+  // host as configured (DNS name or IPv4 literal) — public
+  host: string;
+  port: number;
+}
+
+// The management authority of a configured management_url, for publication.
+// The URL is parsed by NetBirdConnector.parseManagementEndpoint (scheme +
+// authority only, malformed input throws); the endpoint carries the already
+// validated host/port, so only the scheme is re-read here. NOTHING else from
+// the URL is copied: no userinfo, no path, no query — a hand-written
+// management_url must not leak credential material into the published
+// document. Returns null when the endpoint is missing or carries no host.
+export function managementEndpointView(url: string, endpoint: ManagementEndpoint |
+  null | undefined): UiManagementEndpoint | null {
+  if (endpoint === undefined || endpoint === null ||
+    typeof endpoint.host !== 'string' || endpoint.host.length === 0) {
+    return null;
+  }
+  const schemeSep: number = typeof url === 'string' ? url.indexOf('://') : -1;
+  const scheme: string = schemeSep > 0 ? url.substring(0, schemeSep).toLowerCase() : '';
+  const view: UiManagementEndpoint = {
+    scheme: scheme === 'http' || scheme === 'https' ? scheme : 'https',
+    host: endpoint.host,
+    port: typeof endpoint.port === 'number' && endpoint.port > 0 ? endpoint.port : 443
+  };
+  return view;
+}
+
+// The local half of the connector's network view (own overlay address, the
+// configured resolver/route set and the two server URIs the core exposes).
+// Every value is read from the map's own key and is present only when the
+// core delivered it (null / [] otherwise) — never a placeholder.
+export interface UiNetworkView {
+  // Always true in a published view: the object itself exists only when the
+  // core delivered a map (a map-less status omits `network` entirely, so the
+  // UI sees "no map" rather than an empty one).
+  available: boolean;
+  // Own overlay address with the prefix the core assigned
+  // (network.address + network.address_prefix_len), e.g. '10.64.0.7/16';
+  // null when the core sent no IPv4 address (IPv6 is not modelled yet).
+  prefix: string | null;
+  // Management's interface resolver (network.interface_dns); null when none.
+  interface_dns: string | null;
+  // The configured resolver set (network.dns.servers) in management order —
+  // priority order, verbatim. Empty when none.
+  dns_servers: UiDnsServer[];
+  // The managed route set as exported (network.routes). A held 0.0.0.0/0 is
+  // ABSENT here by contract, not by omission — see default_route.
+  routes: UiRouteEntry[];
+  // The core's default-route gate verdict with its stable reason token
+  // ('default-route-allowed:*' / '-held:*' / '-forced:*').
+  default_route: UiDefaultRoute | null;
+  // netbird_config.signal as announced (network.signal, host:port or with a
+  // scheme); null when no signal config was seen. A dial target, not a
+  // registration verdict (that is signal_registered).
+  signal_uri: string | null;
+}
+
+export interface UiDnsServer {
+  ip: string;
+  port: number;
+}
+
+export interface UiRouteEntry {
+  // canonical masked network, e.g. '172.16.0.0/12'
+  network: string;
+  // TRUE only for 0.0.0.0/0, and only when the gate exported it
+  is_default: boolean;
+}
+
+export interface UiDefaultRoute {
+  allowed: boolean;
+  reason: string;
+}
+
+// Aggregate WireGuard data-plane counters (core's `wg`, counter names kept
+// verbatim so a value can be traced back to the core field). All numbers
+// are cumulative since the device came up; `tx_bytes` is encapsulated
+// transport bytes, `rx_bytes_to_tun` plaintext bytes delivered to the TUN.
+export interface UiWgTraffic {
+  tx_packets: number;
+  tx_bytes: number;
+  rx_packets: number;
+  rx_bytes_to_tun: number;
+  dropped_no_route: number;
+  decrypt_errors: number;
+}
+
+// The relay client view (core's `relay`). `current_url` is the effective
+// address of the live (or last live) session; `urls` is the configured set
+// (what the next session dials). `state` is the runtime token already
+// published as relay_state; repeated here so a detail panel can read ONE
+// object. transport_bytes = outbound + inbound payload.
+export interface UiRelayView {
+  enabled: boolean;
+  state: string;
+  current_url: string | null;
+  urls: string[];
+  reconnects: number;
+  transport_bytes: number;
+  token_valid: boolean;
+  last_error_class: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +375,159 @@ export function peerShortKey(pubKey: string): string {
   return `${pubKey.substring(0, 10)}…`;
 }
 
+// One optional string from the WG session view: the value when the core
+// really sent a non-empty string, '' otherwise (null / absent / wrong type).
+// Never a placeholder: '' is the honest "the core reported none".
+function optionalText(value: string | null | undefined): string {
+  return typeof value === 'string' && value.length > 0 ? value : '';
+}
+
+// The peer's masked overlay prefixes from the WG session view
+// (wg_peers[].allowed_ips); [] when the core sent none. Only well-formed
+// strings are kept — no synthesised prefixes (the map carries a COUNT only,
+// see CorePeerSummary.allowed_ips, which is deliberately NOT expanded here).
+export function peerPrefixes(allowedIps: string[] | undefined): string[] {
+  if (allowedIps === undefined || allowedIps === null) {
+    return [];
+  }
+  const kept: string[] = [];
+  for (let i = 0; i < allowedIps.length; i++) {
+    const raw: string = allowedIps[i];
+    if (typeof raw === 'string' && raw.length > 0) {
+      kept.push(raw);
+    }
+  }
+  return kept;
+}
+
+// One optional cumulative byte counter from the WG per-peer view
+// (wg_peers[].tx_bytes / rx_bytes, PLAINTEXT inner-IP bytes): the number when
+// the core delivered a finite, non-negative value — a delivered 0 IS a value
+// (no traffic yet) — and undefined otherwise (absent / null / wrong type /
+// NaN / Infinity / negative). undefined is the honest "not delivered":
+// JSON.stringify drops the member, so the published peer carries no key at
+// all and the UI renders 未知 instead of a fabricated 0 B.
+export function peerByteCounter(value: number | null | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return value;
+}
+
+// The core's ICE state vocabulary (peer_conn PeerIceState::as_str). A state
+// token outside this set is not a state this module gives a meaning to: the
+// whole detail then reads as unknown (iceDetailView).
+const ICE_STATE_TOKENS: string[] = ['idle', 'gathering', 'checking', 'connected',
+  'disconnected', 'failed'];
+
+// The candidate-type vocabulary of a selected-pair endpoint
+// (ice CandidateType::as_str) — the same tokens the signal wire carries.
+const ICE_CANDIDATE_TYPES: string[] = ['host', 'srflx', 'prflx', 'relay'];
+
+// One selected-pair endpoint from a core `ice_peers` entry. null = the core
+// really sent null/absent (no pair selected — an observation); undefined =
+// the value cannot be read as an endpoint (unknown type / empty address /
+// impossible port), which makes the CALLER keep the whole detail unknown
+// rather than publish a half-invented endpoint.
+function iceEndpointView(endpoint: CoreIceEndpoint | null | undefined):
+  UiPeerIceEndpoint | null | undefined {
+  if (endpoint === undefined || endpoint === null) {
+    return null;
+  }
+  if (typeof endpoint.type !== 'string' ||
+    ICE_CANDIDATE_TYPES.indexOf(endpoint.type) < 0) {
+    return undefined;
+  }
+  if (typeof endpoint.address !== 'string' || endpoint.address.length === 0) {
+    return undefined;
+  }
+  if (typeof endpoint.port !== 'number' || !Number.isInteger(endpoint.port) ||
+    endpoint.port < 0 || endpoint.port > 65535) {
+    return undefined;
+  }
+  const view: UiPeerIceEndpoint = {
+    type: endpoint.type,
+    address: endpoint.address,
+    port: endpoint.port
+  };
+  return view;
+}
+
+// One peer's ICE detail as published, or undefined = ICE 未知 for this peer:
+// no source entry (the peer is absent from a delivered `ice_peers` table, or
+// the table itself is null/absent) or an entry that cannot be read as the
+// documented contract (unknown state token, unreadable endpoint, missing
+// landing/reachability boolean, malformed error class). NEVER upgraded into a
+// plausible-looking state/endpoint/role — and never interpreted as a current
+// connection: `state` and `reachable` are carried verbatim from the core, so
+// a `disconnected` peer that still holds its selected pair stays
+// reachable=false.
+export function iceDetailView(entry: CoreIcePeerEntry | null | undefined):
+  UiPeerIceDetail | undefined {
+  if (entry === undefined || entry === null) {
+    return undefined;
+  }
+  if (typeof entry.state !== 'string' ||
+    ICE_STATE_TOKENS.indexOf(entry.state) < 0) {
+    return undefined;
+  }
+  const local: UiPeerIceEndpoint | null | undefined =
+    iceEndpointView(entry.selected_local);
+  const remote: UiPeerIceEndpoint | null | undefined =
+    iceEndpointView(entry.selected_remote);
+  if (local === undefined || remote === undefined) {
+    return undefined;
+  }
+  if (typeof entry.endpoint_applied !== 'boolean' ||
+    typeof entry.reachable !== 'boolean') {
+    return undefined;
+  }
+  // Role: only the core's own boolean is a role. null (or anything else) is
+  // the honest "the core stated no role" — no session established yet.
+  let role: boolean | null = null;
+  if (entry.controlling === true) {
+    role = true;
+  } else if (entry.controlling === false) {
+    role = false;
+  }
+  // Class-only error: the numeric status stays on the core side (connector
+  // credential discipline — same choice as UiRelayView.last_error_class).
+  let errorClass: string | null = null;
+  if (entry.last_error !== undefined && entry.last_error !== null) {
+    if (typeof entry.last_error.class !== 'string' ||
+      entry.last_error.class.length === 0) {
+      return undefined;
+    }
+    errorClass = entry.last_error.class;
+  }
+  const view: UiPeerIceDetail = {
+    state: entry.state,
+    controlling: role,
+    selected_local: local,
+    selected_remote: remote,
+    endpoint_applied: entry.endpoint_applied,
+    reachable: entry.reachable,
+    last_error_class: errorClass
+  };
+  return view;
+}
+
+// Own overlay address with its prefix, as the core modelled it
+// (network.address + network.address_prefix_len). null unless BOTH are
+// present — a bare address without a prefix would state a /32 the core
+// never confirmed (IPv6 addresses arrive as null/None core-side).
+export function networkPrefix(address: string | null | undefined,
+  prefixLen: number | null | undefined): string | null {
+  if (typeof address !== 'string' || address.length === 0) {
+    return null;
+  }
+  if (typeof prefixLen !== 'number' || !Number.isInteger(prefixLen) ||
+    prefixLen < 0 || prefixLen > 128) {
+    return null;
+  }
+  return `${address}/${prefixLen}`;
+}
+
 // The peer's connection label: relay when the outbound bearer is the relay
 // carrier, direct when a UDP endpoint is set, unknown otherwise (also for
 // offline peers — no bearer to name).
@@ -158,8 +567,19 @@ export function peerStatusOf(online: boolean, mgmtOnline: boolean): string {
 // the published peers[] array. Order: management order (remote then offline,
 // exactly what connector_network_config exports); unknown keys in the WG view
 // (not in the map) are ignored — the map is the identity source.
+// peerRelays is the core's `peer_relays` tail (the ACTUAL attached-lane
+// table, same public key namespace as the WG view); omitted/null means the
+// core did not deliver the table, so every peer's actual relay stays 未知.
+// icePeers is the core's `ice_peers` tail (one detail per ICE-orchestrator
+// peer, public-key sorted): it is joined onto the SAME peers by public key.
+// A null/absent table, a peer with no entry in a delivered table, or an entry
+// that cannot be read leaves that peer's `ice` ABSENT — ICE 未知, never a
+// fabricated state/endpoint/role. Nothing here feeds `connection`/`online`:
+// endpoint presence is not a connection verdict.
 export function mergePeers(network: CoreNetworkConfig | null,
-  wgPeers: WgPeerStatusEntry[] | undefined): UiPeerEntry[] {
+  wgPeers: WgPeerStatusEntry[] | undefined,
+  peerRelays?: CorePeerRelayEntry[] | null,
+  icePeers?: CoreIcePeerEntry[] | null): UiPeerEntry[] {
   const byKey: Map<string, WgPeerStatusEntry> = new Map();
   if (wgPeers !== undefined && wgPeers !== null) {
     for (let i = 0; i < wgPeers.length; i++) {
@@ -167,6 +587,43 @@ export function mergePeers(network: CoreNetworkConfig | null,
       if (entry !== undefined && entry !== null &&
         typeof entry.pub_key_b64 === 'string' && entry.pub_key_b64.length > 0) {
         byKey.set(entry.pub_key_b64, entry);
+      }
+    }
+  }
+  // The ACTUAL attached relay lanes, keyed by the SAME public key namespace.
+  // A delivered table (even []) is an observation about every peer; a
+  // null/absent tail is not. An entry whose URL is not a usable string is
+  // kept as '' — that peer's lane is then 未知, never "not relayed".
+  const relayLanes: Map<string, string> = new Map();
+  const relaySourceDelivered: boolean =
+    peerRelays !== undefined && peerRelays !== null;
+  if (peerRelays !== undefined && peerRelays !== null) {
+    for (let i = 0; i < peerRelays.length; i++) {
+      const lane: CorePeerRelayEntry = peerRelays[i];
+      if (lane !== undefined && lane !== null &&
+        typeof lane.pub_key_b64 === 'string' && lane.pub_key_b64.length > 0) {
+        relayLanes.set(lane.pub_key_b64,
+          typeof lane.relay_url === 'string' && lane.relay_url.length > 0
+            ? lane.relay_url : '');
+      }
+    }
+  }
+  // The per-peer ICE details, keyed by the SAME public key namespace. Only a
+  // readable entry is stored (iceDetailView); an unreadable one is simply not
+  // there, so that peer's `ice` stays absent. A null/absent table and a
+  // delivered table without this peer's key are BOTH 未知 for that peer —
+  // nobody made a statement about it, so nothing is published.
+  const iceDetails: Map<string, UiPeerIceDetail> = new Map();
+  if (icePeers !== undefined && icePeers !== null) {
+    for (let i = 0; i < icePeers.length; i++) {
+      const ice: CoreIcePeerEntry = icePeers[i];
+      if (ice === undefined || ice === null ||
+        typeof ice.pub_key !== 'string' || ice.pub_key.length === 0) {
+        continue;
+      }
+      const detail: UiPeerIceDetail | undefined = iceDetailView(ice);
+      if (detail !== undefined) {
+        iceDetails.set(ice.pub_key, detail);
       }
     }
   }
@@ -190,6 +647,28 @@ export function mergePeers(network: CoreNetworkConfig | null,
     const online: boolean = wg !== undefined && wg.session_established === true &&
       wg.expired !== true;
     const mgmtOnline: boolean = peer.mgmt_online !== false;
+    // The WG-view half: present only when the core's wg_peers carried this
+    // key. carrier_known gates every flag below — a map-only peer must not
+    // read as a confirmed direct/off-carrier peer.
+    const carrierKnown: boolean = wg !== undefined && wg !== null;
+    // Per-peer plaintext byte counters: attributed by the peer's OWN key (the
+    // map lookup above), never summed or shared across peers; undefined when
+    // this peer has no WG view or the core did not deliver the counter.
+    const peerTxBytes: number | undefined = wg !== undefined && wg !== null
+      ? peerByteCounter(wg.tx_bytes) : undefined;
+    const peerRxBytes: number | undefined = wg !== undefined && wg !== null
+      ? peerByteCounter(wg.rx_bytes) : undefined;
+    // This peer's ACTUAL relay lane, resolved ONLY from the delivered lane
+    // table by public key (never from the local/home relay url). known=true
+    // means the resolution is definitive: a URL string, or a delivered table
+    // with no entry for this key (null = no attached lane). An unusable
+    // entry leaves the lane 未知 (known=false, key absent).
+    const lane: string | undefined = relaySourceDelivered
+      ? relayLanes.get(peer.pub_key) : undefined;
+    const relayLaneKnown: boolean = relaySourceDelivered &&
+      (lane === undefined || lane.length > 0);
+    const relayLaneUrl: string | null | undefined = relayLaneKnown
+      ? (lane !== undefined && lane.length > 0 ? lane : null) : undefined;
     const entry: UiPeerEntry = {
       pub_key: peer.pub_key,
       name: fqdn !== null ? fqdn : peerShortKey(peer.pub_key),
@@ -199,21 +678,140 @@ export function mergePeers(network: CoreNetworkConfig | null,
       connection: online ? peerConnection(wg) : 'unknown',
       last_handshake_s: handshake,
       mgmt_online: mgmtOnline,
-      status: peerStatusOf(online, mgmtOnline)
+      status: peerStatusOf(online, mgmtOnline),
+      allowed_ips: wg !== undefined && wg !== null
+        ? peerPrefixes(wg.allowed_ips) : [],
+      endpoint: wg !== undefined && wg !== null ? optionalText(wg.endpoint) : '',
+      egress_local: wg !== undefined && wg !== null
+        ? optionalText(wg.egress_local) : '',
+      on_carrier: wg !== undefined && wg !== null && wg.on_carrier === true,
+      carrier_attached: wg !== undefined && wg !== null && wg.carrier_attached === true,
+      carrier_known: carrierKnown,
+      actual_relay_known: relayLaneKnown,
+      actual_relay_url: relayLaneUrl,
+      tx_bytes: peerTxBytes,
+      rx_bytes: peerRxBytes,
+      // undefined when this peer has no readable ICE detail: JSON.stringify
+      // drops the member, so the published peer carries no `ice` key at all
+      // and the UI renders ICE 未知 instead of a fabricated state.
+      ice: iceDetails.get(peer.pub_key)
     };
     merged.push(entry);
   }
   return merged;
 }
 
+// Whether the network document counts as a delivered map. `available` is the
+// core's own verdict and is authoritative when present (`available:false` is
+// the explicit no-network-map answer — the peer list stays empty even if the
+// document happens to carry stray peer fields). A document written before
+// that key existed has no verdict at all, so its real map content counts —
+// otherwise a valid map would be dropped by an upgrade.
+function networkDelivered(network: CoreNetworkConfig | null): boolean {
+  if (network === null || network === undefined) {
+    return false;
+  }
+  if (network.available === true) {
+    return true;
+  }
+  if (network.available === false) {
+    return false;
+  }
+  return (typeof network.address === 'string' && network.address.length > 0) ||
+    (typeof network.fqdn === 'string' && network.fqdn.length > 0) ||
+    (network.peers !== undefined && network.peers !== null && network.peers.length > 0) ||
+    (network.routes !== undefined && network.routes !== null && network.routes.length > 0) ||
+    (network.dns !== undefined && network.dns !== null) ||
+    (typeof network.signal === 'string' && network.signal.length > 0);
+}
+
+// The local network view. Each field mirrors the core's own key; anything the
+// core did not deliver is left absent (null / empty / omitted section) —
+// never defaulted into a plausible-looking value.
+function buildNetworkView(network: CoreNetworkConfig): UiNetworkView {
+  const prefix: string | null = networkPrefix(network.address,
+    network.address_prefix_len);
+  const interfaceDns: string | null =
+    typeof network.interface_dns === 'string' && network.interface_dns.length > 0
+      ? network.interface_dns
+      : null;
+  const signalUri: string | null =
+    typeof network.signal === 'string' && network.signal.length > 0
+      ? network.signal
+      : null;
+  const dnsServers: UiDnsServer[] = [];
+  if (network.dns !== undefined && network.dns !== null &&
+    network.dns.servers !== undefined && network.dns.servers !== null) {
+    const listed: CoreDnsServer[] = network.dns.servers;
+    for (let i = 0; i < listed.length; i++) {
+      const server: CoreDnsServer = listed[i];
+      if (server !== undefined && server !== null &&
+        typeof server.ip === 'string' && server.ip.length > 0) {
+        dnsServers.push({
+          ip: server.ip,
+          port: typeof server.port === 'number' ? server.port : 0
+        });
+      }
+    }
+  }
+  const routes: UiRouteEntry[] = [];
+  if (network.routes !== undefined && network.routes !== null) {
+    const listed: CoreRouteEntry[] = network.routes;
+    for (let i = 0; i < listed.length; i++) {
+      const route: CoreRouteEntry = listed[i];
+      if (route !== undefined && route !== null &&
+        typeof route.network === 'string' && route.network.length > 0) {
+        routes.push({ network: route.network, is_default: route.is_default === true });
+      }
+    }
+  }
+  let defaultRoute: UiDefaultRoute | null = null;
+  if (network.default_route !== undefined && network.default_route !== null) {
+    defaultRoute = {
+      allowed: network.default_route.allowed === true,
+      reason: network.default_route.reason
+    };
+  }
+  const view: UiNetworkView = {
+    available: true,
+    prefix: prefix,
+    interface_dns: interfaceDns,
+    dns_servers: dnsServers,
+    routes: routes,
+    default_route: defaultRoute,
+    signal_uri: signalUri
+  };
+  return view;
+}
+
+// Aggregate WG counters. Present only when the status carried a `wg` section
+// (undefined otherwise — the caller omits the whole block).
+function buildWgTraffic(wg: WgDataplaneStatus): UiWgTraffic {
+  const traffic: UiWgTraffic = {
+    tx_packets: typeof wg.tx_packets === 'number' ? wg.tx_packets : 0,
+    tx_bytes: typeof wg.tx_bytes === 'number' ? wg.tx_bytes : 0,
+    rx_packets: typeof wg.rx_packets === 'number' ? wg.rx_packets : 0,
+    rx_bytes_to_tun: typeof wg.rx_bytes_to_tun === 'number' ? wg.rx_bytes_to_tun : 0,
+    dropped_no_route: typeof wg.dropped_no_route === 'number' ? wg.dropped_no_route : 0,
+    decrypt_errors: typeof wg.decrypt_errors === 'number' ? wg.decrypt_errors : 0
+  };
+  return traffic;
+}
+
 // Build the WHOLE published document. The legacy fields carry the exact
 // pre-phase-1 meaning; the appended fields ride the tail. ifacePresent is
 // the extension's vpn-tun interface probe (true/false); undefined leaves
 // the field out of the JSON (probe unreadable / legacy caller) — the UI
-// gate then stays lenient instead of failing a live tunnel.
+// gate then stays lenient instead of failing a live tunnel. managementUrl /
+// managementEndpoint are the extension's configured management url and its
+// parsed endpoint: host and port only are published, never the URL string
+// (see managementEndpointView — a hand-written management_url may carry
+// userinfo or a query and none of it may reach the document). The whole
+// `management` object is omitted unless the endpoint carries a host.
 export function buildUiStatusDocument(status: ConnectorStatusResult,
   network: CoreNetworkConfig | null, requestId: string,
-  nowMs: number, ifacePresent?: boolean): UiStatusDocument {
+  nowMs: number, ifacePresent?: boolean, managementUrl?: string,
+  managementEndpoint?: ManagementEndpoint | null): UiStatusDocument {
   const errorClass: string =
     status.last_error !== undefined && status.last_error !== null
       ? status.last_error.class
@@ -252,12 +850,67 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
       relayUrl = status.relay.urls[0];
     }
   }
-  const ownFqdn: string | null = network !== null && network.available &&
+  const mapDelivered: boolean = networkDelivered(network);
+  const ownFqdn: string | null = mapDelivered && network !== null &&
     typeof network.fqdn === 'string' && network.fqdn.length > 0 ? network.fqdn : null;
-  const ownAddress: string | null = network !== null && network.available &&
+  const ownAddress: string | null = mapDelivered && network !== null &&
     typeof network.address === 'string' && network.address.length > 0
       ? network.address
       : null;
+  // ---- 2026-10-07 client-detail increment ----
+  const networkView: UiNetworkView | undefined =
+    mapDelivered && network !== null ? buildNetworkView(network) : undefined;
+  const wgTraffic: UiWgTraffic | undefined =
+    status.wg !== undefined && status.wg !== null ? buildWgTraffic(status.wg) : undefined;
+  // The relay view mirrors the core's `relay` section 1:1; `current_url` is
+  // the live session's address (null while nothing was ever dialed), `urls`
+  // the configured set. Omitted entirely when the core sent no relay section.
+  let relayView: UiRelayView | undefined = undefined;
+  if (status.relay !== undefined && status.relay !== null) {
+    const configured: string[] = status.relay.urls !== undefined &&
+      status.relay.urls !== null ? status.relay.urls : [];
+    relayView = {
+      enabled: status.relay.enabled === true,
+      state: typeof status.relay.state === 'string' ? status.relay.state : '',
+      current_url: typeof status.relay.current_url === 'string' &&
+        status.relay.current_url.length > 0 ? status.relay.current_url : null,
+      urls: configured,
+      reconnects: typeof status.relay.reconnects === 'number'
+        ? status.relay.reconnects : 0,
+      transport_bytes: typeof status.relay.transport_bytes === 'number'
+        ? status.relay.transport_bytes : 0,
+      token_valid: status.relay.token_valid === true,
+      last_error_class: typeof status.relay.last_error_class === 'string' &&
+        status.relay.last_error_class.length > 0 ? status.relay.last_error_class : null
+    };
+  }
+  // Session deadline: the core's own token, plus the Unix SECONDS value it
+  // sends alongside (null for unknown/disabled) — omitted when absent, so an
+  // older core cannot be read as "expires at 0".
+  const sessionExpiry: string | undefined =
+    typeof status.session_expiry === 'string' && status.session_expiry.length > 0
+      ? status.session_expiry
+      : undefined;
+  const sessionExpiresAt: number | undefined =
+    typeof status.session_expires_at_unix === 'number' &&
+      status.session_expires_at_unix > 0 ? status.session_expires_at_unix : undefined;
+  // Core process times (Unix SECONDS), for the UI uptime row. Passed through
+  // verbatim and ONLY when the core really delivered a positive integer stamp:
+  // an absent/null/non-numeric/0 value is omitted, so the UI shows no uptime
+  // instead of computing one from 1970. Nothing is derived or invented here,
+  // and neither value is a management connection verdict.
+  const coreStartedAt: number | undefined =
+    typeof status.started_at_unix === 'number' &&
+      Number.isInteger(status.started_at_unix) && status.started_at_unix > 0
+      ? status.started_at_unix : undefined;
+  const coreLastUpdate: number | undefined =
+    typeof status.last_update_unix === 'number' &&
+      Number.isInteger(status.last_update_unix) && status.last_update_unix > 0
+      ? status.last_update_unix : undefined;
+  // Management authority: scheme + host + port, never the URL string.
+  const management: UiManagementEndpoint | null = managementEndpointView(
+    typeof managementUrl === 'string' ? managementUrl : '',
+    managementEndpoint);
   const doc: UiStatusDocument = {
     updated_at_ms: nowMs,
     request_id: requestId,
@@ -273,12 +926,20 @@ export function buildUiStatusDocument(status: ConnectorStatusResult,
     address: ownAddress,
     relay_state: relayState,
     reconnects: status.reconnects,
-    peers: network !== null && network.available
+    peers: mapDelivered && network !== null
       ? mergePeers(network, status.wg !== undefined && status.wg !== null
-        ? status.wg.wg_peers : undefined)
+        ? status.wg.wg_peers : undefined, status.peer_relays, status.ice_peers)
       : [],
     iface_present: ifacePresent,
-    relay_url: relayUrl
+    relay_url: relayUrl,
+    network: networkView,
+    wg_traffic: wgTraffic,
+    relay: relayView,
+    session_expiry: sessionExpiry,
+    session_expires_at_s: sessionExpiresAt,
+    started_at_unix: coreStartedAt,
+    last_update_unix: coreLastUpdate,
+    management: management
   };
   return doc;
 }

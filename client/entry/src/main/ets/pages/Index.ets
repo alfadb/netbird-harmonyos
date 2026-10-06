@@ -5,16 +5,33 @@ import cryptoFramework from '@ohos.security.cryptoFramework';
 import util from '@ohos.util';
 import bundleManager from '@ohos.bundle.bundleManager';
 import vpnExtension from '@ohos.net.vpnExtension';
+import common from '@ohos.app.ability.common';
 import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
   removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
-import { UiPeerEntry, connectFailureText, connectionLabel, filterPeers, homeStateText,
+import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
+  connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusColor, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
   readStoredManagementUrl, readStoredPrivateKey, readStoredRelayEnabled,
   KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
+import { NetBirdAccountWebView } from '../login/NetBirdAccountWebView';
+import { AccountLoginController } from '../login/NetBirdAccountLogin';
+import type { PreparedAccountLogin } from '../login/NetBirdAccountLogin';
+import type { AccountCredentials } from '../login/NetBirdAccountStoreCore';
+import { ACCOUNT_CREDENTIALS_FILE, saveAccountCredentials, clearAccountCredentials } from '../login/NetBirdAccountStore';
+import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
+  parseAuthMode } from '../login/NetBirdAccountMode';
+import { readPackagedCaRootsPem } from '../vpnextensionability/NetBirdConnector';
+// 诊断（2026-10-05 日志导出增量）：本页只发安全事件（事件名 + 计数），绝不带
+// Setup Key / 服务器地址 / 配置内容；日志导出的文件系统与上限逻辑全在
+// NetBirdLogExport 里，本页只取结果并如实渲染。
+import { DiagFields, event } from '../vpnextensionability/NetBirdDiagnostics';
+import { exportDiagnostics, LogExportFileReport, LogExportResult,
+  LOG_EXPORT_OUTCOME_CANCELLED, LOG_EXPORT_OUTCOME_EXPORTED,
+  LOG_EXPORT_OUTCOME_FAILED, LOG_EXPORT_OUTCOME_NO_LOGS } from '../vpnextensionability/NetBirdLogExport';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -41,6 +58,639 @@ interface LogoutResultFile {
   ok: boolean;
   reason?: string;
   ticket_ms: number;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-07 详细状态页 (the client-side counterpart of `netbird status -d`):
+// the published document carries the client-detail sections as loosely typed
+// Objects (NetBirdConnector.PublishedStatus), so these local mirrors are read
+// LENIENTLY: every field is type-checked at the read site, and an ABSENT
+// section/field renders the honest 未知 — never a fabricated zero, 直连,
+// 「已连接」 or 「未启用」. An older document (written before this increment)
+// simply omits the sections and the same 未知 wording applies.
+//
+// Timestamp units follow the document contract exactly:
+//   peers[].last_handshake_s  = AGE in seconds since the handshake (relative)
+//   session_expires_at_s      = absolute Unix SECONDS (epoch)
+//   updated_at_ms             = absolute Unix MILLISECONDS (epoch)
+// ---------------------------------------------------------------------------
+
+interface DetailManagementView {
+  scheme: string;
+  host: string;
+  port: number;
+}
+
+interface DetailDnsView {
+  ip: string;
+  port: number;
+}
+
+interface DetailRouteView {
+  network: string;
+  is_default: boolean;
+}
+
+interface DetailDefaultRouteView {
+  allowed: boolean;
+  reason: string;
+}
+
+interface DetailNetworkView {
+  available: boolean;
+  prefix: string | null;
+  interface_dns: string | null;
+  dns_servers: DetailDnsView[];
+  routes: DetailRouteView[];
+  default_route: DetailDefaultRouteView | null;
+  signal_uri: string | null;
+}
+
+interface DetailTrafficView {
+  tx_packets: number;
+  tx_bytes: number;
+  rx_packets: number;
+  rx_bytes_to_tun: number;
+  dropped_no_route: number;
+  decrypt_errors: number;
+}
+
+interface DetailRelayView {
+  enabled: boolean;
+  state: string;
+  current_url: string | null;
+  urls: string[];
+  reconnects: number;
+  transport_bytes: number;
+  token_valid: boolean;
+  last_error_class: string | null;
+}
+
+// One label/value line of the detail screen.
+interface DetailField {
+  label: string;
+  value: string;
+}
+
+// Wording for an absent section/field: the document either predates the field
+// or the core never delivered it — BOTH are 未知, never a default value.
+const UNKNOWN_DOC: string = '未知（状态文档未提供）';
+const UNKNOWN_CORE: string = '未知（核心未上报）';
+// The route row lists at most this many routes inline; past it the detail page
+// switches to one viewable row per route (nothing is silently hidden).
+const ROUTE_SUMMARY_LIMIT: number = 8;
+// Line cap for a DetailRow that carries a whole multi-line block (the per-peer
+// status / ICE blocks). The SDK accepts [0, INT32_MAX]; 0 shows nothing and
+// INT32_MAX risks layout arithmetic overflow, so this stays a large finite cap:
+// far past anything a phone screen (inside the page's outer Scroll) can render,
+// which is what "show the full block" means in practice.
+const DETAIL_BLOCK_MAX_LINES: number = 1000;
+
+// Lenient section readers: undefined/null (absent section or an explicit null)
+// return null; anything else is asserted to the local mirror and every field
+// read is guarded individually below. Never throws.
+function readNetworkView(raw: Object | null | undefined): DetailNetworkView | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  return raw as DetailNetworkView;
+}
+
+function readTrafficView(raw: Object | null | undefined): DetailTrafficView | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  return raw as DetailTrafficView;
+}
+
+function readRelayView(raw: Object | null | undefined): DetailRelayView | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  return raw as DetailRelayView;
+}
+
+// The management authority section: scheme + host + port only (the published
+// document never carries the configured URL string). null when absent OR when
+// the object carries no host — an endpoint without a host is not renderable
+// and must not print "://".
+function readManagementView(raw: Object | null | undefined): DetailManagementView | null {
+  if (raw === undefined || raw === null) {
+    return null;
+  }
+  const view: DetailManagementView = raw as DetailManagementView;
+  if (typeof view.host !== 'string' || view.host.length === 0) {
+    return null;
+  }
+  return view;
+}
+
+// Human-readable byte size for the aggregate counters (binary units). A
+// non-finite/negative value is 未知, not "0 B".
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '未知';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units: string[] = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  let value: number = bytes / 1024;
+  let index: number = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value = value / 1024;
+    index++;
+  }
+  return `${Math.round(value * 10) / 10} ${units[index]}`;
+}
+
+// Formatted size + the exact counter value (the diagnostics page is where the
+// byte-reconciliation numbers must stay readable verbatim).
+function byteText(bytes: number): string {
+  return `${formatBytes(bytes)}（${bytes} 字节）`;
+}
+
+function pad2(value: number): string {
+  return value < 10 ? `0${value}` : `${value}`;
+}
+
+// Absolute Unix SECONDS (epoch) rendered in the device's local zone. This is
+// NOT the handshake field: session_expires_at_s is a deadline, whereas
+// peers[].last_handshake_s is an age and is rendered by lastHandshakeText.
+function formatEpochSeconds(epochS: number): string {
+  const date: Date = new Date(epochS * 1000);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ` +
+    `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+}
+
+// Remaining time until an absolute Unix-SECONDS deadline ('已到期' once past).
+function remainingText(epochS: number): string {
+  const seconds: number = Math.floor(epochS - Date.now() / 1000);
+  if (seconds <= 0) {
+    return '已到期';
+  }
+  const days: number = Math.floor(seconds / 86400);
+  const hours: number = Math.floor((seconds % 86400) / 3600);
+  const minutes: number = Math.floor((seconds % 3600) / 60);
+  if (days > 0) {
+    return `剩余 ${days} 天 ${hours} 小时`;
+  }
+  if (hours > 0) {
+    return `剩余 ${hours} 小时 ${minutes} 分`;
+  }
+  if (minutes > 0) {
+    return `剩余 ${minutes} 分`;
+  }
+  return `剩余 ${seconds} 秒`;
+}
+
+// Relative age of a millisecond epoch stamp (the published document itself).
+function secondsAgoText(epochMs: number): string {
+  const seconds: number = Math.max(0, Math.floor((Date.now() - epochMs) / 1000));
+  if (seconds < 60) {
+    return `${seconds} 秒前`;
+  }
+  const minutes: number = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} 分钟前`;
+  }
+  return `${Math.floor(minutes / 60)} 小时前`;
+}
+
+// 运行时长 (2026-10-07): the CONNECTOR PROCESS's own age, computed from the
+// core's `started_at_unix` (Unix SECONDS, passed through the published
+// document, which carries it only for a positive integer stamp). It is a
+// process clock — never a management connection verdict (that stays 状态 /
+// 信号连接). An absent stamp is 未知, exactly like every other field the
+// document did not carry.
+function uptimeText(startedAtUnix: number | undefined): string {
+  if (typeof startedAtUnix !== 'number' || !Number.isInteger(startedAtUnix) ||
+    startedAtUnix <= 0) {
+    return UNKNOWN_DOC;
+  }
+  const seconds: number = Math.floor(Date.now() / 1000) - startedAtUnix;
+  return `已运行 ${durationText(seconds)}（核心启动于 ${formatEpochSeconds(startedAtUnix)}）`;
+}
+
+// Human duration for a second count. A sub-minute age — including a
+// clock-skewed negative one — reads 不足 1 分钟, never a negative duration.
+function durationText(seconds: number): string {
+  if (seconds < 60) {
+    return '不足 1 分钟';
+  }
+  const days: number = Math.floor(seconds / 86400);
+  const hours: number = Math.floor((seconds % 86400) / 3600);
+  const minutes: number = Math.floor((seconds % 3600) / 60);
+  if (days > 0) {
+    return `${days} 天 ${hours} 小时`;
+  }
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分`;
+  }
+  return `${minutes} 分钟`;
+}
+
+// The relay client's runtime state token (core relay_state_token contract:
+// disconnected | dialing | handshaking | authenticating | ready |
+// reconnecting | dead) rendered in Chinese; an unknown token prints verbatim
+// instead of being guessed into a plausible state.
+function relayStateText(state: string): string {
+  if (typeof state !== 'string' || state.length === 0) {
+    return UNKNOWN_DOC;
+  }
+  if (state === 'ready') {
+    return '已就绪（中继会话可用）';
+  }
+  if (state === 'dialing') {
+    return '拨号中';
+  }
+  if (state === 'handshaking') {
+    return '握手中';
+  }
+  if (state === 'authenticating') {
+    return '认证中';
+  }
+  if (state === 'reconnecting') {
+    return '重连中';
+  }
+  if (state === 'disconnected') {
+    return '未连接';
+  }
+  if (state === 'dead') {
+    return '已停止';
+  }
+  return state;
+}
+
+// One counter rendered as "N 包" — 未知 when the document did not carry a
+// number (never "undefined 包").
+function packetsText(packets: number): string {
+  return typeof packets === 'number' ? `${packets} 包` : UNKNOWN_DOC;
+}
+
+// 对端 bearer line. carrier_known=false means the core's WG session view did
+// not carry this peer (map-only peer): the two bearer booleans are then NOT
+// observations, so the honest answer is 未知 — never 直连 and never "未使用
+// 中继".
+function peerCarrierText(peer: UiPeerEntry): string {
+  if (!peer.carrier_known) {
+    return '未知（核心未上报该对端的会话信息）';
+  }
+  if (peer.on_carrier) {
+    return peer.carrier_attached ? '经中继承载（已附着）' : '经中继承载（未附着）';
+  }
+  return '未使用中继';
+}
+
+// 对端 status line: management-online is NOT the same fact as "this device
+// has a tunnel to the peer" — the three-state distinction is spelled out.
+function peerStatusDetailText(peer: UiPeerEntry): string {
+  if (peer.status === 'connected') {
+    return '已连接（本机隧道已建立）';
+  }
+  if (peer.status === 'idle') {
+    return '空闲（管理端在线，本机暂无隧道会话）';
+  }
+  return '离线（管理端标记为离线）';
+}
+
+// 中继通道地址 (2026-10-07): the peer's OWN actual ATTACHED relay lane from
+// the core's live attached-lane table (UiPeerEntry.actual_relay_url) — the
+// address that lane really rides, never the LOCAL relay session
+// (UiStatusDocument.relay_url) and never a merely configured relay. Three
+// states, read apart:
+//   actual_relay_known !== true (key absent / lane table not delivered) -> 未知;
+//   known true, value null -> the table WAS delivered and NO lane is attached
+//     to this peer: an observation about the lane table only. It does NOT say
+//     the peer is 直连 and does NOT say no relay transport exists — the
+//     selected bearer stays the connection/on_carrier verdict (承载 row);
+//   known true, value string -> the attached lane URL verbatim. An attached
+//     lane can coexist with a direct path as a standby, so an address here
+//     never means "this peer is being relayed right now".
+function peerRelayText(peer: UiPeerEntry): string {
+  if (peer.actual_relay_known !== true) {
+    return '未知（核心未上报该对端的中继通道）';
+  }
+  const url: string | null | undefined = peer.actual_relay_url;
+  if (typeof url === 'string' && url.length > 0) {
+    return url;
+  }
+  if (url === null || url === undefined) {
+    return '无已附着的中继通道（不代表直连）';
+  }
+  return '未知（核心未上报该对端的中继通道）';
+}
+
+// One per-peer payload byte counter (core wg_peers[] tx_bytes / rx_bytes: the
+// peer's PLAINTEXT inner-IP bytes, cumulative since THAT peer's tunnel was
+// created). The published peer view carries the number when the core delivered
+// one and OMITS the key for a map-only peer, so a missing key is 未知 while a
+// delivered 0 stays a real 0 B. These are NOT the aggregate 流量统计 rows:
+// 发送（加密后）there counts ENCAPSULATED wire bytes — the two must never share
+// a label.
+function peerPayloadBytesText(peer: UiPeerEntry, sent: boolean): string {
+  const value: number | undefined = sent ? peer.tx_bytes : peer.rx_bytes;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return UNKNOWN_CORE;
+  }
+  return byteText(value);
+}
+
+// ---- 2026-10-08 per-peer ICE 明细 (core `ice_peers`) -----------------------
+// Display helpers for UiPeerEntry.ice. `ice` ABSENT means the core delivered no
+// readable ICE detail for this peer: ICE 未知 (an observation, never a default
+// state and never a placeholder endpoint). A PRESENT detail with null endpoints
+// means no candidate pair was selected YET: 尚未选中 (never candidate #1).
+//
+// ICE is a CANDIDATE-PATH view only. It never overrides the WG-session verdict
+// (状态 / 连接方式 / 承载 / 中继通道地址), and "ICE 已连接" never means the
+// current traffic is direct — `reachable` is the core's own usability flag, and
+// a `disconnected` peer keeps its retained pair with reachable=false, so those
+// endpoints are labelled as the PREVIOUS selection instead of a live path.
+
+function iceStateText(state: string): string {
+  if (typeof state !== 'string' || state.length === 0) {
+    return '未知（核心未给出状态）';
+  }
+  if (state === 'idle') {
+    return '空闲（idle）';
+  }
+  if (state === 'gathering') {
+    return '收集中（gathering）';
+  }
+  if (state === 'checking') {
+    return '连通性检查中（checking）';
+  }
+  if (state === 'connected') {
+    return '已连接（connected）';
+  }
+  if (state === 'disconnected') {
+    return '已断开（disconnected）';
+  }
+  if (state === 'failed') {
+    return '失败（failed）';
+  }
+  return state;
+}
+
+// 主导 = this device controls the session, 响应 = the peer does. Only the
+// core's own boolean is a role; null (no session established, or not
+// delivered) is 未知 — never a default role.
+function iceRoleText(controlling: boolean | null): string {
+  if (controlling === true) {
+    return '主导（本机为控制方）';
+  }
+  if (controlling === false) {
+    return '响应（对端为控制方）';
+  }
+  return '未知（核心未给出角色）';
+}
+
+// The selected-pair candidate type in Chinese, token kept in parentheses; an
+// unexpected token prints verbatim instead of being guessed into a type.
+function iceCandidateTypeText(type: string): string {
+  if (typeof type !== 'string' || type.length === 0) {
+    return '未知类型';
+  }
+  if (type === 'host') {
+    return '主机（host）';
+  }
+  if (type === 'srflx') {
+    return '服务器反射（srflx）';
+  }
+  if (type === 'prflx') {
+    return '对端反射（prflx）';
+  }
+  if (type === 'relay') {
+    return '中继（relay）';
+  }
+  return type;
+}
+
+// How to read a selected pair the detail carries: a reachable detail is the
+// CURRENT selection; a disconnected/failed one may retain its last pair, which
+// is then labelled as the previous selection (never a live path); anything
+// else non-reachable is 已选中但当前不可用.
+function iceSelectionPrefixText(ice: UiPeerIceDetail): string {
+  if (ice.reachable === true) {
+    return '当前选中';
+  }
+  if (ice.state === 'disconnected' || ice.state === 'failed') {
+    return '上次选中（连接已断开，可能已失效）';
+  }
+  return '已选中（当前不可用）';
+}
+
+// One selected-pair endpoint: candidate type + address:port. null/absent is
+// 尚未选中 — an observation about THIS detail (it was delivered), never 未知
+// and never the first candidate standing in for a missing selection.
+function iceEndpointText(endpoint: UiPeerIceEndpoint | null | undefined,
+  ice: UiPeerIceDetail): string {
+  if (endpoint === null || endpoint === undefined) {
+    return '尚未选中';
+  }
+  const address: string = typeof endpoint.address === 'string' && endpoint.address.length > 0
+    ? endpoint.address : '地址未知';
+  const port: string = typeof endpoint.port === 'number' ? `${endpoint.port}` : '端口未知';
+  return `${iceSelectionPrefixText(ice)}：${iceCandidateTypeText(endpoint.type)} ${address}:${port}`;
+}
+
+// The core's usability verdict for this peer's ICE path (Connected AND the WG
+// endpoint was applied). It is NOT the WG connection verdict — that stays
+// 状态 / 连接方式 / 承载 / 中继通道地址.
+function iceReachText(ice: UiPeerIceDetail): string {
+  if (ice.reachable === true) {
+    return '可达（ICE 已连接且 WG 端点已应用）';
+  }
+  if (ice.endpoint_applied === true) {
+    return '不可达（WG 端点曾应用，当前不可用）';
+  }
+  return '不可达（尚未应用 WG 端点）';
+}
+
+function iceErrorText(ice: UiPeerIceDetail): string {
+  const errorClass: string | null = ice.last_error_class;
+  return typeof errorClass === 'string' && errorClass.length > 0 ? errorClass : '无';
+}
+
+// The per-peer ICE block of the detailed-status screen (6 lines, one block per
+// peer). An absent detail collapses to the single 未知 line.
+function peerIceBlockText(peer: UiPeerEntry): string {
+  const ice: UiPeerIceDetail | undefined = peer.ice;
+  if (ice === undefined || ice === null) {
+    return '未知（核心未上报该对端的 ICE 详情）';
+  }
+  const lines: string[] = [];
+  lines.push(`ICE 状态：${iceStateText(ice.state)}`);
+  lines.push(`ICE 角色：${iceRoleText(ice.controlling)}`);
+  lines.push(`ICE 本端：${iceEndpointText(ice.selected_local, ice)}`);
+  lines.push(`ICE 对端：${iceEndpointText(ice.selected_remote, ice)}`);
+  lines.push(`ICE 可达性：${iceReachText(ice)}`);
+  lines.push(`ICE 最近错误：${iceErrorText(ice)}`);
+  return lines.join('\n');
+}
+
+// The per-peer block of the detail screen: endpoint / local egress / overlay
+// networks, each with its honest unavailable wording. The 中继通道地址 line is
+// the peer's OWN actual attached lane (peerRelayText), kept apart from the
+// LOCAL relay session URL — the local relay URL is never presented as the
+// peer's.
+function peerBlockText(peer: UiPeerEntry): string {
+  const lines: string[] = [];
+  lines.push(`状态：${peerStatusDetailText(peer)}`);
+  lines.push(`连接方式：${peer.online ? connectionLabel(peer.connection) : '未知（无本机会话）'}`);
+  lines.push(`NetBird IP：${peer.ip.length > 0 ? peer.ip : '未知'}`);
+  lines.push(`对端端点：${peer.endpoint.length > 0 ? peer.endpoint : UNKNOWN_CORE}`);
+  lines.push(`本机出口：${peer.egress_local.length > 0 ? peer.egress_local : UNKNOWN_CORE}`);
+  lines.push(`对端网络：${peer.allowed_ips.length > 0 ? peer.allowed_ips.join('、') : UNKNOWN_CORE}`);
+  lines.push(`承载：${peerCarrierText(peer)}`);
+  lines.push(`中继通道地址：${peerRelayText(peer)}`);
+  lines.push(`最近握手：${lastHandshakeText(peer.last_handshake_s)}`);
+  lines.push(`发送（明文）：${peerPayloadBytesText(peer, true)}`);
+  lines.push(`接收（明文）：${peerPayloadBytesText(peer, false)}`);
+  return lines.join('\n');
+}
+
+// The configured resolver set in management order (priority order, verbatim).
+// Port 0 means the core reported no port — the bare IP is then printed rather
+// than a fabricated :0.
+function dnsServersText(network: DetailNetworkView): string {
+  if (network.dns_servers === undefined || network.dns_servers === null ||
+    network.dns_servers.length === 0) {
+    return '未配置';
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < network.dns_servers.length; i++) {
+    const server: DetailDnsView = network.dns_servers[i];
+    if (server === undefined || server === null || typeof server.ip !== 'string' ||
+      server.ip.length === 0) {
+      continue;
+    }
+    parts.push(typeof server.port === 'number' && server.port > 0
+      ? `${server.ip}:${server.port}` : server.ip);
+  }
+  return parts.length > 0 ? parts.join('、') : '未配置';
+}
+
+// The managed route set as exported (network.routes). A held 0.0.0.0/0 is
+// ABSENT here BY CONTRACT — it is reported by the default-route gate below,
+// never invented into this list. Up to ROUTE_SUMMARY_LIMIT routes are listed
+// inline; past that the row carries only the count and networkFields() renders
+// EVERY route as its own row — the detail page must not silently hide routes
+// beyond the old 8-entry summary.
+function routeLine(route: DetailRouteView): string {
+  return route.is_default === true ? `${route.network}（默认路由）` : route.network;
+}
+
+function routesText(network: DetailNetworkView): string {
+  if (network.routes === undefined || network.routes === null ||
+    network.routes.length === 0) {
+    return '未下发';
+  }
+  const total: number = network.routes.length;
+  if (total > ROUTE_SUMMARY_LIMIT) {
+    return `共 ${total} 条（下列逐条列出）`;
+  }
+  const listed: string[] = [];
+  for (let i = 0; i < total; i++) {
+    const route: DetailRouteView = network.routes[i];
+    if (route === undefined || route === null || typeof route.network !== 'string' ||
+      route.network.length === 0) {
+      continue;
+    }
+    listed.push(routeLine(route));
+  }
+  return listed.length > 0 ? `${listed.join('、')}（共 ${total} 条）` : `${total} 条（核心未给出网络）`;
+}
+
+// The default-route gate verdict: allowed=true means 0.0.0.0/0 was really
+// handed to the tunnel; allowed=false means it is HELD (the core's reason
+// token says why). A missing verdict is 未知 — never "held" or "allowed".
+function defaultRouteText(network: DetailNetworkView): string {
+  const gate: DetailDefaultRouteView | null = network.default_route;
+  if (gate === null || gate === undefined) {
+    return UNKNOWN_CORE;
+  }
+  if (gate.allowed === true) {
+    return '已下发（0.0.0.0/0 默认路由）';
+  }
+  const reason: string = typeof gate.reason === 'string' && gate.reason.length > 0
+    ? gate.reason : '核心未给出原因';
+  return `已保留未下发（原因：${reason}）`;
+}
+
+// One label/value row of the detail screens. A child @Component with @Prop —
+// NOT the old @Builder(fieldRow): a @Builder's by-value expression arguments
+// are frozen at mount in ArkUI (the B.1 device defect), while @Prop re-syncs
+// from the parent every time the observed published state re-renders.
+@Component
+struct DetailRow {
+  @Prop label: string = '';
+  @Prop value: string = '';
+  // 2026-10-08: parameterized line cap. 8 is right for the single-value rows
+  // (a wrapped endpoint/error line), but the per-peer status rows carry a
+  // WHOLE multi-line block (peerBlockText/peerIceBlockText: 11 / 6 logical
+  // lines plus wrapping), which .maxLines(8) truncated mid-block — the tail
+  // 最近握手 / 发送（明文）/ 接收（明文） lines never rendered. Block callers
+  // raise this (DETAIL_BLOCK_MAX_LINES); the detail page's outer Scroll carries
+  // the extra height, so nothing is clipped elsewhere.
+  @Prop maxLines: number = 8;
+
+  build() {
+    Row({ space: 8 }) {
+      Text(this.label)
+        .fontSize(13)
+        .fontColor('#8A9AA6')
+        .width(96)
+      // Truthiness (not .length): a value that slipped through as null or
+      // undefined renders '—' instead of throwing inside the render pass.
+      Text(this.value ? this.value : '—')
+        .fontSize(14)
+        .fontColor('#17324D')
+        .layoutWeight(1)
+        .maxLines(this.maxLines)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .padding({ top: 6, bottom: 6 })
+  }
+}
+
+// One collapsible section header. `expanded` and `summary` are @Prop, so the
+// arrow and the live summary follow the polled state; tapping calls back into
+// the page's own @State toggle.
+@Component
+struct DetailSectionHeader {
+  @Prop title: string = '';
+  @Prop summary: string = '';
+  @Prop expanded: boolean = false;
+  onToggle: () => void = (): void => {
+  };
+
+  build() {
+    Row({ space: 8 }) {
+      Text(this.title ? this.title : '')
+        .fontSize(15)
+        .fontWeight(FontWeight.Medium)
+        .fontColor('#3D4A55')
+      Text(this.summary ? this.summary : '')
+        .fontSize(12)
+        .fontColor('#8A9AA6')
+        .layoutWeight(1)
+        .maxLines(1)
+        .textAlign(TextAlign.End)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text(this.expanded ? '▾' : '▸')
+        .fontSize(14)
+        .fontColor('#8A9AA6')
+    }
+    .width('100%')
+    .padding({ top: 12, bottom: 8 })
+    .onClick(() => {
+      this.onToggle();
+    })
+  }
 }
 
 // One in-flight start and stop request at a time; rejected requests and
@@ -78,9 +728,17 @@ struct Index {
   @State peerQuery: string = '';
   @State showDiagnostics: boolean = false;
   @State versionName: string = '';
-  // ---- first-run setup / login card (settings tab): unconfigured shows the
-  // form; configured shows the current server + 重新配置 / 注销. Writes go to
-  // the SAME credential files as the --ps channel (see NetBirdSetupConfig).
+  @State versionCode: number = -1;
+  // 详细状态页 section toggles (all open by default: the detailed screen is
+  // the place where status must NOT be hidden; collapsing is the user's
+  // choice, and every header keeps carrying a live summary).
+  @State detailOverviewOpen: boolean = true;
+  @State detailNetworkOpen: boolean = true;
+  @State detailTrafficOpen: boolean = true;
+  @State detailRelayOpen: boolean = true;
+  @State detailPeersOpen: boolean = true;
+  // ---- first-run setup / login card (settings tab). `configured` mirrors
+  // persisted credentials; opening the editor never changes that fact.
   @State configured: boolean = false;
   @State configuredUrl: string = '';
   @State keyStored: boolean = false;
@@ -89,6 +747,16 @@ struct Index {
   @State keyInput: string = '';
   @State formError: string = '';
   @State formHint: string = '';
+  @State authMode: string = ACCOUNT_MODE_SETUP_KEY;
+  @State accountLoginOpen: boolean = false;
+  @State accountLoginBusy: boolean = false;
+  @State accountLoginCommitting: boolean = false;
+  @State accountLoginError: string = '';
+  @State accountAuthorizeUrl: string = '';
+  @State accountExpectedState: string = '';
+  @State accountRedirectUri: string = '';
+  private accountLoginController: AccountLoginController = new AccountLoginController();
+  private accountLoginGeneration: number = 0;
   private requestId: string = `ui-${Date.now()}`;
   private observedPublishedStatus: boolean = false;
   // The state of the last LIVE document (drives the disappearance notice:
@@ -105,6 +773,20 @@ struct Index {
   private lastLogoutAtMs: number = 0;
   private logoutTicketMs: number = 0;
   private pollTimer: number = -1;
+  // ---- 诊断日志导出（设置 → 诊断日志）--------------------------------------
+  // ONE user action at a time: the busy latch disables the button AND is
+  // re-checked at the handler, so a double tap cannot start two exports.
+  // tone/headline/body are the honest result text — a cap cut, a skipped file
+  // or a source read error renders 部分导出, never 导出成功. The picked URI is
+  // shown to the user only: it is NEVER hilog-ed (user data).
+  @State logExportBusy: boolean = false;
+  @State logExportTone: string = '';
+  @State logExportHeadline: string = '';
+  @State logExportBody: string = '';
+  @State logExportUri: string = '';
+  // Accepted (not latch-rejected) user connect/retry/disconnect actions of THIS
+  // session: the only number the page ever puts into a diagnostic record.
+  private diagActionCount: number = 0;
 
   aboutToAppear(): void {
     this.refreshSetupState();
@@ -113,7 +795,7 @@ struct Index {
     if (!this.configured) {
       this.activeTab = 2;
     }
-    this.readVersionName();
+    this.readVersionInfo();
     this.pollConnectorStatus();
     this.pollTimer = setInterval((): void => {
       this.pollConnectorStatus();
@@ -125,16 +807,21 @@ struct Index {
       clearInterval(this.pollTimer);
       this.pollTimer = -1;
     }
+    if (!this.accountLoginCommitting) {
+      this.cancelAccountLogin(false);
+    }
   }
 
-  private readVersionName(): void {
+  private readVersionInfo(): void {
     try {
       const info: bundleManager.BundleInfo = bundleManager.getBundleInfoForSelfSync(
         bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
       this.versionName = info.versionName !== undefined && info.versionName !== null
         ? info.versionName : '';
+      this.versionCode = info.versionCode;
     } catch (error) {
       this.versionName = '';
+      this.versionCode = -1;
     }
   }
 
@@ -221,10 +908,491 @@ struct Index {
   }
 
   // 详情页中继地址 (2026-10-06): the effective relay URL of the live (or
-  // last live) session from the published document — '' when not known.
+  // last live) LOCAL session from the published document — '' when not known.
+  // A peer's own attached lane is a DIFFERENT fact (peerRelayText), never this.
   private relayUrlText(): string {
     return this.published !== null && this.published.relay_url !== undefined &&
       this.published.relay_url !== null ? this.published.relay_url : '';
+  }
+
+  // ---- 详细状态页 derivations (all evaluated at render time on the polled
+  //      document — the same proven-fresh pattern as stateText/homeAddress) --
+
+  private networkView(): DetailNetworkView | null {
+    return this.published !== null ? readNetworkView(this.published.network) : null;
+  }
+
+  private trafficView(): DetailTrafficView | null {
+    return this.published !== null ? readTrafficView(this.published.wg_traffic) : null;
+  }
+
+  private relayView(): DetailRelayView | null {
+    return this.published !== null ? readRelayView(this.published.relay) : null;
+  }
+
+  private managementView(): DetailManagementView | null {
+    return this.published !== null ? readManagementView(this.published.management) : null;
+  }
+
+  private versionText(): string {
+    const name: string = this.versionName.length > 0 ? this.versionName : '未知';
+    const code: string = this.versionCode >= 0 ? this.versionCode.toString() : '未知';
+    return `${name}（版本号 ${code}）`;
+  }
+
+  // Management authority the connector was started against: scheme + host +
+  // port from the published document. NO connectivity verdict is derived from
+  // its presence — an endpoint is shown exactly as an endpoint.
+  private managementText(): string {
+    const endpoint: DetailManagementView | null = this.managementView();
+    if (endpoint === null) {
+      return UNKNOWN_DOC;
+    }
+    return `${endpoint.scheme}://${endpoint.host}:${endpoint.port}`;
+  }
+
+  // The signal dial target as configured (netbird_config.signal). It is NOT
+  // the registration verdict — that is the 信号连接 row (signal_registered).
+  private signalUriText(): string {
+    const network: DetailNetworkView | null = this.networkView();
+    if (network === null || network.signal_uri === null || network.signal_uri.length === 0) {
+      return UNKNOWN_CORE;
+    }
+    return network.signal_uri;
+  }
+
+  // Session deadline: the core's own token ('unknown' | 'disabled' | 'set')
+  // plus, only when it is 'set', the absolute Unix-SECONDS deadline.
+  private sessionExpiryText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      return UNKNOWN_DOC;
+    }
+    const token: string =
+      typeof status.session_expiry === 'string' ? status.session_expiry : '';
+    const atS: number = typeof status.session_expires_at_s === 'number' &&
+      status.session_expires_at_s > 0 ? status.session_expires_at_s : 0;
+    if (atS > 0) {
+      return `已设置 ${formatEpochSeconds(atS)}（${remainingText(atS)}）`;
+    }
+    if (token === 'set') {
+      return '已设置（核心未提供到期时间）';
+    }
+    if (token === 'disabled') {
+      return '未启用（管理端未下发会话期限）';
+    }
+    if (token === 'unknown') {
+      return '未知（尚未取得会话期限）';
+    }
+    return UNKNOWN_DOC;
+  }
+
+  // Age of the published document itself (updated_at_ms is epoch MILLISECONDS
+  // — not the epoch-seconds deadline above).
+  private statusAgeText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null || typeof status.updated_at_ms !== 'number') {
+      return UNKNOWN_DOC;
+    }
+    return secondsAgoText(status.updated_at_ms);
+  }
+
+  private lastErrorDetailText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      return '未知（状态文档不可用）';
+    }
+    const errorClass: string = status.last_error_class !== undefined &&
+      status.last_error_class !== null ? status.last_error_class : '';
+    if (errorClass.length === 0 || errorClass === 'none') {
+      return '无';
+    }
+    const hint: string = lastErrorText(errorClass);
+    return hint.length > 0 ? `${errorClass}：${hint}` : errorClass;
+  }
+
+  // ---- 详细状态页 rows ------------------------------------------------------
+
+  private overviewFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    const status: PublishedStatus | null = this.published;
+    rows.push({ label: '状态', value: this.stateText() });
+    if (status === null) {
+      rows.push({ label: '核心状态', value: '未知（VPN 未运行或状态文档已过期）' });
+    } else {
+      rows.push({ label: '核心状态', value: status.state });
+    }
+    rows.push({ label: '运行状态', value: this.overviewRunningText() });
+    rows.push({
+      label: '运行时长',
+      value: uptimeText(status !== null ? status.started_at_unix : undefined)
+    });
+    rows.push({
+      label: '隧道数据面',
+      value: status === null ? UNKNOWN_DOC : (status.wg_ready ? '已就绪' : '未就绪')
+    });
+    rows.push({
+      label: 'WG 会话',
+      value: status === null ? UNKNOWN_DOC : `${status.wg_sessions}`
+    });
+    rows.push({
+      label: '对端/路由',
+      value: status === null ? UNKNOWN_DOC : `${status.peer_count} / ${status.route_count}`
+    });
+    rows.push({ label: '管理服务器', value: this.managementText() });
+    rows.push({
+      label: '管理重连',
+      value: status !== null && typeof status.reconnects === 'number'
+        ? `${status.reconnects}` : UNKNOWN_DOC
+    });
+    rows.push({ label: '信号连接', value: this.signalText() });
+    rows.push({
+      label: '信号重连',
+      value: status !== null && typeof status.signal_reconnects === 'number'
+        ? `${status.signal_reconnects}` : UNKNOWN_DOC
+    });
+    rows.push({ label: '信号地址', value: this.signalUriText() });
+    rows.push({ label: '会话期限', value: this.sessionExpiryText() });
+    rows.push({ label: '最近错误', value: this.lastErrorDetailText() });
+    rows.push({ label: '客户端版本', value: this.versionText() });
+    rows.push({ label: '状态更新', value: this.statusAgeText() });
+    rows.push({
+      label: '请求 ID',
+      value: status !== null && typeof status.request_id === 'string' &&
+        status.request_id.length > 0 ? status.request_id : UNKNOWN_DOC
+    });
+    return rows;
+  }
+
+  private overviewRunningText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      return '未运行（无状态文档）';
+    }
+    const iface: string = status.iface_present === undefined
+      ? '未知（接口探测无结果）'
+      : (status.iface_present ? 'vpn-tun 存在' : 'vpn-tun 不存在');
+    const errorText: string = this.lastErrorLine();
+    if (errorText.length > 0) {
+      return `vpn-tun：${iface}；${errorText}`;
+    }
+    return `vpn-tun：${iface}`;
+  }
+
+  // 信号连接: the registration verdict (signal_registered) — the dial target
+  // lives in 信号地址.
+  private signalText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      return UNKNOWN_DOC;
+    }
+    return status.signal_registered ? '已连接（registered）' : '未连接';
+  }
+
+  private networkFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      rows.push({ label: '网络地图', value: '未知（VPN 未运行）' });
+      return rows;
+    }
+    const network: DetailNetworkView | null = this.networkView();
+    if (network === null) {
+      // Older document: the network map section is absent, but the legacy
+      // address/fqdn fields may still carry the last known own identity.
+      rows.push({ label: '网络地图', value: '未知（核心未上报网络配置）' });
+      rows.push({ label: '叠加地址', value: this.legacyAddressText() });
+      rows.push({ label: '本机域名', value: this.ownFqdnText() });
+      return rows;
+    }
+    rows.push({ label: '网络地图', value: network.available ? '可用' : '不可用' });
+    rows.push({ label: '叠加地址', value: this.networkPrefixText(network) });
+    rows.push({ label: '本机域名', value: this.ownFqdnText() });
+    rows.push({
+      label: '接口 DNS',
+      value: typeof network.interface_dns === 'string' && network.interface_dns.length > 0
+        ? network.interface_dns : '未配置'
+    });
+    rows.push({ label: 'DNS 服务器', value: dnsServersText(network) });
+    rows.push({ label: '路由', value: routesText(network) });
+    // 2026-10-07 follow-up: past the compact summary every managed route gets
+    // its OWN row, so the full list stays viewable (the old form silently
+    // dropped routes past 8). The ≤8 case keeps the previous rendering.
+    const routes: DetailRouteView[] = network.routes;
+    if (routes !== undefined && routes !== null && routes.length > ROUTE_SUMMARY_LIMIT) {
+      for (let i = 0; i < routes.length; i++) {
+        const route: DetailRouteView = routes[i];
+        if (route === undefined || route === null || typeof route.network !== 'string' ||
+          route.network.length === 0) {
+          continue;
+        }
+        rows.push({ label: `路由 ${i + 1}`, value: routeLine(route) });
+      }
+    }
+    rows.push({ label: '默认路由', value: defaultRouteText(network) });
+    return rows;
+  }
+
+  // Own overlay address WITH the prefix the core assigned (network.prefix);
+  // the legacy bare address is the fallback and is marked as prefix-less.
+  private networkPrefixText(network: DetailNetworkView): string {
+    if (typeof network.prefix === 'string' && network.prefix.length > 0) {
+      return network.prefix;
+    }
+    const legacy: string = this.legacyAddressText();
+    if (legacy.length > 0) {
+      return `${legacy}（核心未提供前缀）`;
+    }
+    return UNKNOWN_CORE;
+  }
+
+  private legacyAddressText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null || status.address === undefined || status.address === null ||
+      status.address.length === 0) {
+      return '';
+    }
+    return status.address;
+  }
+
+  private ownFqdnText(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null || status.fqdn === undefined || status.fqdn === null ||
+      status.fqdn.length === 0) {
+      return '未知';
+    }
+    return status.fqdn;
+  }
+
+  private trafficFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    const traffic: DetailTrafficView | null = this.trafficView();
+    if (traffic === null) {
+      rows.push({ label: '流量统计', value: '未知（核心未上报 wg 计数）' });
+      return rows;
+    }
+    rows.push({
+      label: '发送（加密后）',
+      value: `${byteText(traffic.tx_bytes)} · ${packetsText(traffic.tx_packets)}`
+    });
+    rows.push({
+      label: '接收（交付 TUN）',
+      value: `${byteText(traffic.rx_bytes_to_tun)} · ${packetsText(traffic.rx_packets)}`
+    });
+    rows.push({ label: '无路由丢弃', value: packetsText(traffic.dropped_no_route) });
+    rows.push({ label: '解密失败', value: packetsText(traffic.decrypt_errors) });
+    rows.push({
+      label: '说明',
+      value: '计数器为累计值（自设备启动以来）；发送为加密后的传输字节，接收为交付 TUN 的明文字节'
+    });
+    return rows;
+  }
+
+  private relayFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      rows.push({ label: '中继', value: '未知（VPN 未运行）' });
+      return rows;
+    }
+    const relay: DetailRelayView | null = this.relayView();
+    if (relay === null) {
+      rows.push({ label: '中继', value: '未知（状态文档无中继段）' });
+      if (status.relay_state !== undefined && status.relay_state !== null) {
+        rows.push({ label: '中继状态', value: relayStateText(status.relay_state) });
+      }
+      return rows;
+    }
+    rows.push({ label: '中继开关', value: relay.enabled === true ? '已启用' : '未启用' });
+    rows.push({ label: '中继状态', value: relayStateText(relay.state) });
+    rows.push({
+      label: '当前中继地址',
+      value: typeof relay.current_url === 'string' && relay.current_url.length > 0
+        ? relay.current_url : '未知（尚未建立中继会话）'
+    });
+    rows.push({
+      label: '已配置地址',
+      value: relay.urls !== undefined && relay.urls !== null && relay.urls.length > 0
+        ? relay.urls.join('、') : '无'
+    });
+    rows.push({
+      label: '中继重连',
+      value: typeof relay.reconnects === 'number' ? `${relay.reconnects}` : UNKNOWN_DOC
+    });
+    rows.push({
+      label: '中继流量',
+      value: typeof relay.transport_bytes === 'number'
+        ? byteText(relay.transport_bytes) : UNKNOWN_DOC
+    });
+    rows.push({ label: '中继令牌', value: relay.token_valid === true ? '有效' : '无效或未知' });
+    rows.push({
+      label: '中继最近错误',
+      value: typeof relay.last_error_class === 'string' && relay.last_error_class.length > 0
+        ? relay.last_error_class : '无'
+    });
+    rows.push({
+      label: '说明',
+      value: '当前中继地址是本机中继会话的地址；各对端自己实际附着的中继通道地址，' +
+        '见各对端的「中继通道地址」行'
+    });
+    return rows;
+  }
+
+  private peerFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    if (this.published === null) {
+      rows.push({ label: '对端', value: '未知（VPN 未运行）' });
+      return rows;
+    }
+    const list: UiPeerEntry[] = this.peersList();
+    if (list.length === 0) {
+      rows.push({ label: '对端', value: '无（管理端未下发对端列表）' });
+      return rows;
+    }
+    for (let i = 0; i < list.length; i++) {
+      rows.push({ label: `${i + 1}. ${list[i].name}`, value: peerBlockText(list[i]) });
+      // 2026-10-08: the ICE detail gets its OWN per-peer block row (the WG
+      // block above keeps its exact content) — candidate paths only; the note
+      // under this section states that the WG rows stay the actual bearer.
+      rows.push({
+        label: `${i + 1}. ${list[i].name} · ICE`,
+        value: peerIceBlockText(list[i])
+      });
+    }
+    return rows;
+  }
+
+  // ---- section summaries (the collapsed header still reports live state) ----
+
+  private overviewSummary(): string {
+    const status: PublishedStatus | null = this.published;
+    if (status === null) {
+      return this.stateText();
+    }
+    return `${this.stateText()} · 信号${status.signal_registered ? '已连接' : '未连接'}`;
+  }
+
+  private networkSummary(): string {
+    const network: DetailNetworkView | null = this.networkView();
+    if (network === null) {
+      return this.legacyAddressText().length > 0 ? this.legacyAddressText() : '未知';
+    }
+    return this.networkPrefixText(network);
+  }
+
+  private trafficSummary(): string {
+    const traffic: DetailTrafficView | null = this.trafficView();
+    if (traffic === null) {
+      return '未知';
+    }
+    return `发 ${formatBytes(traffic.tx_bytes)} / 收 ${formatBytes(traffic.rx_bytes_to_tun)}`;
+  }
+
+  private relaySummary(): string {
+    const relay: DetailRelayView | null = this.relayView();
+    if (relay === null) {
+      const status: PublishedStatus | null = this.published;
+      if (status !== null && status.relay_state !== undefined && status.relay_state !== null) {
+        return relayStateText(status.relay_state);
+      }
+      return '未知';
+    }
+    if (relay.enabled !== true) {
+      return '未启用';
+    }
+    return typeof relay.current_url === 'string' && relay.current_url.length > 0
+      ? relay.current_url : relayStateText(relay.state);
+  }
+
+  private peersSummary(): string {
+    return `${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`;
+  }
+
+  // Live view of the drilled-down peer: re-read from the polled peers[] by
+  // public key so the detail page keeps up with the status document; the
+  // tapped snapshot is the fallback once the peer left the map.
+  private selectedPeerLive(): UiPeerEntry | null {
+    const selected: UiPeerEntry | null = this.selectedPeer;
+    if (selected === null) {
+      return null;
+    }
+    const list: UiPeerEntry[] = this.peersList();
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].pub_key === selected.pub_key) {
+        return list[i];
+      }
+    }
+    return selected;
+  }
+
+  private selectedPeerName(): string {
+    const peer: UiPeerEntry | null = this.selectedPeerLive();
+    return peer !== null ? peer.name : '';
+  }
+
+  private selectedPeerColor(): string {
+    const peer: UiPeerEntry | null = this.selectedPeerLive();
+    return peer !== null ? peerStatusColor(peer.status) : '#8A9AA6';
+  }
+
+  private selectedPeerFields(): DetailField[] {
+    const rows: DetailField[] = [];
+    const peer: UiPeerEntry | null = this.selectedPeerLive();
+    if (peer === null) {
+      return rows;
+    }
+    rows.push({
+      label: '域名',
+      value: peer.fqdn !== null && peer.fqdn.length > 0 ? peer.fqdn : '未知'
+    });
+    rows.push({ label: 'NetBird IP', value: peer.ip.length > 0 ? peer.ip : '未知' });
+    rows.push({ label: '状态', value: peerStatusDetailText(peer) });
+    rows.push({
+      label: '连接方式',
+      value: peer.online ? connectionLabel(peer.connection) : '未知（无本机会话）'
+    });
+    rows.push({ label: '最近握手', value: lastHandshakeText(peer.last_handshake_s) });
+    rows.push({ label: '发送（明文）', value: peerPayloadBytesText(peer, true) });
+    rows.push({ label: '接收（明文）', value: peerPayloadBytesText(peer, false) });
+    rows.push({
+      label: '对端端点',
+      value: peer.endpoint.length > 0 ? peer.endpoint : UNKNOWN_CORE
+    });
+    rows.push({
+      label: '本机出口',
+      value: peer.egress_local.length > 0 ? peer.egress_local : UNKNOWN_CORE
+    });
+    rows.push({
+      label: '对端网络',
+      value: peer.allowed_ips.length > 0 ? peer.allowed_ips.join('、') : UNKNOWN_CORE
+    });
+    rows.push({ label: '承载', value: peerCarrierText(peer) });
+    rows.push({ label: '中继通道地址', value: peerRelayText(peer) });
+    // 2026-10-08 per-peer ICE 明细: candidate path only — the actual bearer
+    // stays the 连接方式 / 承载 / 中继通道地址 rows above.
+    const ice: UiPeerIceDetail | undefined = peer.ice;
+    if (ice === undefined || ice === null) {
+      rows.push({ label: 'ICE', value: '未知（核心未上报该对端的 ICE 详情）' });
+    } else {
+      rows.push({ label: 'ICE 状态', value: iceStateText(ice.state) });
+      rows.push({ label: 'ICE 角色', value: iceRoleText(ice.controlling) });
+      rows.push({ label: 'ICE 本端', value: iceEndpointText(ice.selected_local, ice) });
+      rows.push({ label: 'ICE 对端', value: iceEndpointText(ice.selected_remote, ice) });
+      rows.push({ label: 'ICE 可达性', value: iceReachText(ice) });
+      rows.push({ label: 'ICE 最近错误', value: iceErrorText(ice) });
+      rows.push({
+        label: 'ICE 说明',
+        value: 'ICE 只描述候选路径与端点应用情况；实际承载以「连接方式 / 承载 / 中继通道地址」' +
+          '为准，ICE 已连接不代表流量直连'
+      });
+    }
+    rows.push({
+      label: '本机中继会话',
+      value: this.relayUrlText().length > 0
+        ? this.relayUrlText() : '无（本机未建立中继会话）'
+    });
+    rows.push({ label: '公钥', value: peer.pub_key });
+    return rows;
   }
 
   private stateText(): string {
@@ -344,6 +1512,9 @@ struct Index {
     // Chinese reason — it beats the generic disconnect notice (and there is
     // no live document to read a class from).
     if (this.published === null) {
+      if (this.connectFailureClass === 'account-login-required') {
+        return '账户登录已过期，请重新登录';
+      }
       if (this.connectFailureClass.length > 0) {
         return connectFailureText(this.connectFailureClass);
       }
@@ -385,7 +1556,24 @@ struct Index {
     } catch (error) {
       keyStored = false;
     }
-    this.configured = url.length > 0 && keyStored;
+    let storedMode: string = ACCOUNT_MODE_SETUP_KEY;
+    try {
+      const modePath: string = `${filesDir}/${ACCOUNT_MODE_FILE_NAME}`;
+      if (fs.accessSync(modePath)) {
+        storedMode = parseAuthMode(fs.readTextSync(modePath));
+      }
+    } catch (error) {
+      storedMode = ACCOUNT_MODE_SETUP_KEY;
+    }
+    let accountStored: boolean = false;
+    try {
+      accountStored = fs.accessSync(`${filesDir}/${ACCOUNT_CREDENTIALS_FILE}`);
+    } catch (error) {
+      accountStored = false;
+    }
+    this.authMode = storedMode;
+    this.configured = storedMode === ACCOUNT_MODE_ACCOUNT
+      ? url.length > 0 && accountStored : url.length > 0 && keyStored;
     this.configuredUrl = url;
     this.keyStored = keyStored;
   }
@@ -395,6 +1583,13 @@ struct Index {
   // name + UTF-8 byte count are ever logged — never the setup key nor the
   // private key.
   private saveSetup(): void {
+    if (this.accountModeSwitchBlocked()) {
+      this.formError = '断开 VPN 后可更改配置';
+      return;
+    }
+    if (this.authMode !== ACCOUNT_MODE_SETUP_KEY) {
+      return;
+    }
     const urlCheck: UrlCheck = checkManagementUrl(this.urlInput);
     const keyCheck: KeyCheck = checkSetupKey(this.keyInput);
     this.formError = !urlCheck.ok ? urlCheck.error : (!keyCheck.ok ? keyCheck.error : '');
@@ -411,7 +1606,8 @@ struct Index {
       this.deviceRelayEnabled());
     const keyText: string = buildSetupKeyFileText(this.keyInput);
     if (!this.writeSetupFile(SETUP_CONFIG_FILE, configText) ||
-      !this.writeSetupFile(SETUP_KEY_FILE, keyText)) {
+      !this.writeSetupFile(SETUP_KEY_FILE, keyText) ||
+      !this.writeSetupFile(ACCOUNT_MODE_FILE_NAME, `${ACCOUNT_MODE_SETUP_KEY}\n`)) {
       this.formError = '保存失败，请重试';
       return;
     }
@@ -419,6 +1615,159 @@ struct Index {
     this.keyInput = '';
     this.showSetupForm = false;
     this.refreshSetupState();
+    this.formHint = '配置已保存，正在连接 VPN。';
+    this.requestStart();
+  }
+
+  private beginConfigurationEdit(): void {
+    if (this.accountModeSwitchBlocked()) {
+      return;
+    }
+    this.urlInput = this.configuredUrl;
+    this.keyInput = '';
+    this.formError = '';
+    this.formHint = '';
+    this.accountLoginError = '';
+    this.showSetupForm = true;
+  }
+
+  private cancelConfigurationEdit(): void {
+    if (!this.configured || this.accountLoginCommitting) {
+      return;
+    }
+    this.cancelAccountLogin(false);
+    this.refreshSetupState();
+    this.urlInput = this.configuredUrl;
+    this.keyInput = '';
+    this.formError = '';
+    this.formHint = '';
+    this.accountLoginError = '';
+    this.showSetupForm = false;
+  }
+
+  private selectAuthMode(mode: string): void {
+    if (this.accountModeSwitchBlocked() || this.accountLoginBusy) {
+      return;
+    }
+    this.authMode = mode;
+    this.keyInput = '';
+    this.formError = '';
+    this.formHint = '';
+    this.accountLoginError = '';
+  }
+
+  private accountModeSwitchBlocked(): boolean {
+    return this.requestSent || (this.published !== null && vpnActiveState(this.published.state));
+  }
+
+  private accountLoginErrorText(reason: string): string {
+    if (reason === 'cancelled') { return ''; }
+    if (reason === 'discovery_unavailable') { return '账户登录暂不可用，请更新应用后重试。'; }
+    if (reason === 'discovery_timeout') { return '连接管理服务器超时，请检查网络后重试。'; }
+    if (reason === 'unsupported' || reason === 'unavailable') { return '安全存储不可用，无法保存账户凭据。'; }
+    return '账户登录失败，请重试。';
+  }
+
+  private async beginAccountLogin(): Promise<void> {
+    if (this.accountLoginBusy || this.accountModeSwitchBlocked()) {
+      if (this.accountModeSwitchBlocked()) {
+        this.accountLoginError = '断开 VPN 后可切换登录方式';
+      }
+      return;
+    }
+    const urlCheck: UrlCheck = checkManagementUrl(this.urlInput);
+    if (!urlCheck.ok) {
+      this.formError = urlCheck.error;
+      return;
+    }
+    this.formError = '';
+    this.formHint = '';
+    this.accountLoginError = '';
+    this.accountLoginBusy = true;
+    const generation: number = ++this.accountLoginGeneration;
+    try {
+      const caPem: string = readPackagedCaRootsPem(getContext(this).resourceManager);
+      const prepared: PreparedAccountLogin = await this.accountLoginController.begin(urlCheck.url, caPem);
+      if (generation !== this.accountLoginGeneration) {
+        return;
+      }
+      this.accountAuthorizeUrl = prepared.authorizeUrl;
+      this.accountExpectedState = prepared.expectedState;
+      this.accountRedirectUri = prepared.redirectUri;
+      this.accountLoginOpen = true;
+    } catch (error) {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error.message : 'login_failed');
+      }
+    } finally {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginBusy = false;
+      }
+    }
+  }
+
+  private async finishAccountLogin(code: string): Promise<void> {
+    if (this.accountLoginBusy || this.accountModeSwitchBlocked()) {
+      this.cancelAccountLogin(true);
+      return;
+    }
+    const generation: number = this.accountLoginGeneration;
+    this.accountLoginBusy = true;
+    this.accountLoginOpen = false;
+    try {
+      const credentials: AccountCredentials = await this.accountLoginController.finish(code);
+      if (generation !== this.accountLoginGeneration) {
+        return;
+      }
+      this.accountLoginCommitting = true;
+      const privateKey: string = this.devicePrivateKey();
+      if (privateKey.length === 0) {
+        throw new Error('device_key_unavailable');
+      }
+      const configText: string = buildDeviceConfigJson(credentials.managementUrl, privateKey,
+        this.deviceRelayEnabled());
+      await saveAccountCredentials(getContext(this).filesDir, credentials);
+      if (generation !== this.accountLoginGeneration) {
+        return;
+      }
+      if (!this.writeSetupFile(SETUP_CONFIG_FILE, configText)) {
+        throw new Error('configuration_save_failed');
+      }
+      if (!this.writeSetupFile(ACCOUNT_MODE_FILE_NAME, `${ACCOUNT_MODE_ACCOUNT}\n`)) {
+        throw new Error('mode_save_failed');
+      }
+      this.urlInput = credentials.managementUrl;
+      this.showSetupForm = false;
+      this.accountLoginError = '';
+      this.formHint = '账户已登录，正在连接 VPN。';
+      this.refreshSetupState();
+      this.requestStart();
+    } catch (error) {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error.message : 'login_failed');
+      }
+    } finally {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginBusy = false;
+        this.accountLoginCommitting = false;
+      }
+    }
+  }
+
+  private cancelAccountLogin(showError: boolean): void {
+    if (this.accountLoginCommitting) {
+      return;
+    }
+    this.accountLoginGeneration++;
+    this.accountLoginController.cancel();
+    this.accountLoginBusy = false;
+    this.accountLoginOpen = false;
+    this.accountAuthorizeUrl = '';
+    this.accountExpectedState = '';
+    this.accountRedirectUri = '';
+    if (!showError) {
+      this.accountLoginError = '';
+    }
   }
 
   // Device identity for the config file: REUSE the stored private key on
@@ -514,16 +1863,19 @@ struct Index {
   // logout with: only the local files go, and the hint points the user at
   // the management console.
   private requestLogout(): void {
+    const vpnLive: boolean = this.logoutRemoteActive();
     AlertDialog.show({
-      title: '注销确认',
-      message: '注销将删除本机的 Setup Key 与设备配置（含设备私钥）；若当前已连接，还会通知管理端删除本设备记录。确定注销吗？',
+      title: vpnLive ? '注销确认' : '清除配置确认',
+      message: vpnLive
+        ? '断开连接并从管理端移除本设备，同时清除本机配置（含设备私钥）。确定继续？'
+        : '仅清除本机配置（含设备私钥），不会从管理端移除设备记录。确定继续？',
       primaryButton: {
         value: '取消',
         action: (): void => {
         }
       },
       secondaryButton: {
-        value: '删除并注销',
+        value: vpnLive ? '移除并清除' : '清除本机配置',
         fontColor: '#A12622',
         action: (): void => {
           this.performLogout();
@@ -533,7 +1885,7 @@ struct Index {
   }
 
   private performLogout(): void {
-    const vpnLive: boolean = this.published !== null && vpnActiveState(this.published.state);
+    const vpnLive: boolean = this.logoutRemoteActive();
     if (!vpnLive) {
       hilog.info(DOMAIN, TAG, 'UI_LOGOUT_LOCAL_ONLY|reason=vpn-not-running');
       this.finishLogout(false);
@@ -599,16 +1951,23 @@ struct Index {
   private finishLogout(serverLogoutConfirmed: boolean): void {
     this.removeSetupFile(SETUP_CONFIG_FILE);
     this.removeSetupFile(SETUP_KEY_FILE);
+    this.removeSetupFile(ACCOUNT_MODE_FILE_NAME);
     // a ticket that was never consumed (extension gone before its tick)
     this.removeSetupFile(LOGOUT_FILE_NAME);
     this.urlInput = DEFAULT_MANAGEMENT_URL;
     this.keyInput = '';
     this.formError = '';
-    this.formHint = serverLogoutConfirmed
-      ? '已注销：本机凭据已删除，管理端已删除本设备。'
-      : '已删除本机凭据。如需从管理端移除本设备，请在管理后台删除。';
+    this.formHint = '正在清除本机账户凭据…';
     this.showSetupForm = false;
-    this.refreshSetupState();
+    clearAccountCredentials(getContext(this).filesDir).then((): void => {
+      this.formHint = serverLogoutConfirmed
+        ? '已注销：本机凭据已删除，管理端已删除本设备。'
+        : '已删除本机凭据。如需从管理端移除本设备，请在管理后台删除。';
+      this.refreshSetupState();
+    }).catch((_error: Error): void => {
+      this.formHint = '本机账户凭据未能全部清除，请重试注销。';
+      this.refreshSetupState();
+    });
   }
 
   private removeSetupFile(name: string): void {
@@ -642,6 +2001,11 @@ struct Index {
       // Request already sent this attempt: no repeat click, no re-issue.
       return;
     }
+    // 诊断记录（用户「连接 / 重试」动作的集中处理点）：只记安全事件名 + 计数。
+    // 重试 = 上一次尝试留下了可见失败（连接失败通知或动作错误）；否则是普通连接。
+    this.diagActionCount = this.diagActionCount + 1;
+    this.diagEvent(this.connectFailureClass.length > 0 || this.actionError.length > 0
+      ? 'ui_connect_retry' : 'ui_connect', this.diagActionCount);
     this.requestSent = true;
     this.actionError = '';
     this.disconnectNotice = '';
@@ -672,6 +2036,9 @@ struct Index {
       // Stop is only meaningful after a start request; one attempt, no retry.
       return;
     }
+    // 诊断记录（用户「断开」动作，同一集中处理点）：只记安全事件名 + 计数。
+    this.diagActionCount = this.diagActionCount + 1;
+    this.diagEvent('ui_disconnect', this.diagActionCount);
     this.stopSent = true;
     hilog.info(DOMAIN, TAG, 'UI_STOP_REQUEST|bundle=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, this.requestId);
@@ -694,25 +2061,162 @@ struct Index {
     });
   }
 
-  // ---- shared small widgets -------------------------------------------------
+  // ---- 诊断日志导出（设置 → 诊断日志）-------------------------------------
+  //
+  // ONE user action: the system file picker chooses a destination and
+  // ../vpnextensionability/NetBirdLogExport copies this app's own logs there.
+  // That module owns the fixed candidate allowlist, the caps and the per-file
+  // report; the page only (a) hands over the host UIAbilityContext,
+  // (b) latches ONE export at a time and (c) renders the returned result
+  // WITHOUT inflation: a cap cut, a skipped file or a source read error is
+  // 部分导出, never 导出成功. The picked URI is shown to the user and is NEVER
+  // hilog-ed (only a boolean "has uri" flag goes to the log).
 
-  @Builder
-  fieldRow(label: string, value: string) {
-    Row({ space: 8 }) {
-      Text(label)
-        .fontSize(13)
-        .fontColor('#8A9AA6')
-        .width(96)
-      Text(value.length > 0 ? value : '—')
-        .fontSize(14)
-        .fontColor('#17324D')
-        .layoutWeight(1)
-        .maxLines(3)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-    }
-    .width('100%')
-    .padding({ top: 6, bottom: 6 })
+  // The ONE diagnostic-record exit of this page: a safe event name plus the
+  // session's action count. No caller-supplied value, no config, no key.
+  private diagEvent(name: string, count: number): void {
+    const fields: DiagFields = { 'count': count };
+    event(name, fields);
   }
+
+  private startLogExport(): void {
+    if (this.logExportBusy) {
+      return; // busy: no second export (the button is disabled too)
+    }
+    const host: common.Context | undefined = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      this.logExportTone = 'error';
+      this.logExportHeadline = '导出失败：当前页面拿不到应用上下文';
+      this.logExportBody = '';
+      this.logExportUri = '';
+      hilog.error(DOMAIN, TAG, 'UI_LOG_EXPORT_NO_CONTEXT');
+      return;
+    }
+    this.logExportBusy = true;
+    this.logExportTone = 'info';
+    this.logExportHeadline = '正在导出…（请在系统窗口里选择保存位置）';
+    this.logExportBody = '';
+    this.logExportUri = '';
+    hilog.info(DOMAIN, TAG, 'UI_LOG_EXPORT_STARTED');
+    exportDiagnostics(host as common.UIAbilityContext).then((result: LogExportResult): void => {
+      this.logExportBusy = false;
+      this.renderLogExportResult(result);
+    }).catch((error: Error): void => {
+      // exportDiagnostics folds every failure into its result and never
+      // throws; this net only keeps the busy latch from sticking forever.
+      this.logExportBusy = false;
+      this.logExportTone = 'error';
+      this.logExportHeadline = '导出失败：日志导出内部错误';
+      this.logExportBody = '';
+      this.logExportUri = '';
+      hilog.error(DOMAIN, TAG, 'UI_LOG_EXPORT_THREW|code=%{public}s',
+        String((error as BusinessFailure).code ?? 'none'));
+    });
+  }
+
+  // Honest rendering of the module's result: the outcome decides the headline,
+  // the per-file reports decide whether that headline may say 完成 at all, and
+  // every line carries the bytes that really came across.
+  private renderLogExportResult(result: LogExportResult): void {
+    let copiedFiles: number = 0;
+    let problemFiles: number = 0;
+    let skippedFiles: number = 0;
+    const fileLines: string[] = [];
+    for (let i = 0; i < result.files.length; i++) {
+      const report: LogExportFileReport = result.files[i];
+      if (report === undefined || report === null || !report.present) {
+        continue;
+      }
+      if (report.errorCode !== undefined) {
+        problemFiles++;
+        // A source can fail AFTER some bytes moved: the copied count is then
+        // real content in the document, so it is stated instead of "nothing".
+        fileLines.push(report.bytes > 0
+          ? `${report.name}：读取失败（错误码 ${report.errorCode}），已复制 ${byteText(report.bytes)} 后中断`
+          : `${report.name}：读取失败（错误码 ${report.errorCode}），该文件未能导出`);
+      } else if (report.skipped) {
+        problemFiles++;
+        skippedFiles++;
+        fileLines.push(`${report.name}：达到总量上限，未导出`);
+      } else if (report.truncated) {
+        problemFiles++;
+        copiedFiles++;
+        fileLines.push(`${report.name}：${byteText(report.bytes)}（已截断：达到导出上限，该文件还有更多内容）`);
+      } else {
+        copiedFiles++;
+        fileLines.push(`${report.name}：${byteText(report.bytes)}`);
+      }
+    }
+
+    const lines: string[] = [];
+    if (result.outcome === LOG_EXPORT_OUTCOME_EXPORTED) {
+      if (problemFiles > 0) {
+        this.logExportTone = 'warn';
+        this.logExportHeadline = copiedFiles > 0
+          ? `部分导出：${copiedFiles} 个日志文件已写入，共 ${byteText(result.bytes)}；有截断/跳过/读取失败`
+          : `部分导出：没有日志文件写入内容（共复制 ${byteText(result.bytes)}）；有截断/跳过/读取失败`;
+      } else {
+        this.logExportTone = 'ok';
+        this.logExportHeadline = `导出完成：${copiedFiles} 个日志文件，共 ${byteText(result.bytes)}`;
+      }
+      if (fileLines.length > 0) {
+        lines.push('本次存在的日志文件（候选共 8 个）：');
+        for (let i = 0; i < fileLines.length; i++) {
+          lines.push(`· ${fileLines[i]}`);
+        }
+      } else {
+        lines.push('没有任何候选日志文件可读。');
+      }
+      if (skippedFiles > 0) {
+        lines.push('达到总量上限：未复制的排在后面（顺序为界面日志族在前，族内由旧到新）。');
+      } else if (result.totalCapHit) {
+        lines.push('总量上限刚好用尽，没有整段跳过的日志文件。');
+      }
+    } else if (result.outcome === LOG_EXPORT_OUTCOME_CANCELLED) {
+      this.logExportTone = 'info';
+      this.logExportHeadline = '已取消：没有选择保存位置，未写入任何文件';
+      lines.push('日志仍完整留在本机。');
+    } else if (result.outcome === LOG_EXPORT_OUTCOME_NO_LOGS) {
+      this.logExportTone = 'info';
+      this.logExportHeadline = '没有可导出的日志：本机暂无日志文件';
+      lines.push('界面日志与 VPN 日志都还没有产生（连接并使用一段时间后就会有）。');
+    } else if (result.outcome === LOG_EXPORT_OUTCOME_FAILED) {
+      this.logExportTone = 'error';
+      const code: string = result.code !== undefined ? String(result.code) : '未知';
+      this.logExportHeadline = result.uri !== undefined && result.uri.length > 0
+        ? `导出失败（错误码 ${code}）：目标文档可能只写入了一部分`
+        : `导出失败（错误码 ${code}）：未写入文件`;
+      for (let i = 0; i < fileLines.length; i++) {
+        lines.push(`· ${fileLines[i]}`);
+      }
+    } else {
+      this.logExportTone = 'warn';
+      this.logExportHeadline = `导出结束：未识别的结果（${result.outcome}）`;
+    }
+    this.logExportBody = lines.join('\n');
+    this.logExportUri = result.uri !== undefined && result.uri.length > 0 ? result.uri : '';
+    // Numeric/boolean facts only — the URI itself never reaches hilog.
+    hilog.info(DOMAIN, TAG,
+      'UI_LOG_EXPORT_RESULT|outcome=%{public}s|bytes=%{public}d|files=%{public}d|problems=%{public}d|capHit=%{public}s|hasUri=%{public}s',
+      result.outcome, result.bytes, copiedFiles, problemFiles,
+      result.totalCapHit ? 'true' : 'false',
+      this.logExportUri.length > 0 ? 'true' : 'false');
+  }
+
+  private logExportToneColor(): string {
+    if (this.logExportTone === 'ok') {
+      return '#176B3A';
+    }
+    if (this.logExportTone === 'warn') {
+      return '#8A6D1A';
+    }
+    if (this.logExportTone === 'error') {
+      return '#A12622';
+    }
+    return '#17324D';
+  }
+
+  // ---- shared small widgets -------------------------------------------------
 
   @Builder
   sectionTitle(title: string) {
@@ -849,6 +2353,27 @@ struct Index {
               .margin({ top: 6 })
               .maxLines(3)
           }
+          // 2026-10-07: discoverable entry to the detailed status screen
+          // (netbird status -d equivalent) straight from the main card — the
+          // one-line rows above stay concise, the detail is one tap away.
+          Row({ space: 8 }) {
+            Text('详细状态')
+              .fontSize(14)
+              .fontColor('#17324D')
+              .layoutWeight(1)
+            Text('端点 / 中继 / 流量 / DNS / 路由 / 会话 ›')
+              .fontSize(12)
+              .fontColor('#8A9AA6')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 2 })
+          .onClick(() => {
+            hilog.info(DOMAIN, TAG, 'UI_DETAIL_STATUS_OPENED|from=home');
+            this.showDiagnostics = true;
+            this.activeTab = 2;
+          })
         }
         .width('100%')
         .padding(16)
@@ -928,33 +2453,43 @@ struct Index {
         }
         .width('100%')
         .margin({ top: 8 })
-        Column({ space: 4 }) {
-          Row({ space: 10 }) {
-            this.statusDot(peerStatusColor(this.selectedPeer.status), 12)
-            Text(this.selectedPeer.name)
-              .fontSize(19)
-              .fontWeight(FontWeight.Medium)
-              .fontColor('#17324D')
-              .layoutWeight(1)
-              .maxLines(2)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
+        // 2026-10-08: the detail card now holds ~16 rows and no longer fits a
+        // phone screen, so it lives in its own Scroll (the 返回/标题 row above
+        // stays OUTSIDE the Scroll and therefore always reachable). layoutWeight
+        // makes the Scroll take exactly the height left over inside the 100%
+        // column, instead of growing past it and clipping the tail rows.
+        Scroll() {
+          Column({ space: 4 }) {
+            Row({ space: 10 }) {
+              this.statusDot(this.selectedPeerColor(), 12)
+              Text(this.selectedPeerName())
+                .fontSize(19)
+                .fontWeight(FontWeight.Medium)
+                .fontColor('#17324D')
+                .layoutWeight(1)
+                .maxLines(2)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+            }
+            .margin({ bottom: 6 })
+            // 2026-10-07 client details: the rows are DetailRow @Prop children
+            // driven by selectedPeerFields() (re-read from the polled peers[] by
+            // public key), so the endpoint/egress/networks and their honest
+            // 未知 states follow the status document instead of freezing at the
+            // tap-time snapshot (the old fieldRow @Builder did freeze).
+            ForEach(this.selectedPeerFields(), (field: DetailField) => {
+              DetailRow({ label: field.label, value: field.value })
+            }, (field: DetailField) => `${field.label}=${field.value}`)
           }
-          .margin({ bottom: 6 })
-          this.fieldRow('域名', this.selectedPeer.fqdn !== null ? this.selectedPeer.fqdn : '')
-          this.fieldRow('NetBird IP', this.selectedPeer.ip)
-          this.fieldRow('状态', peerStatusText(this.selectedPeer.status))
-          this.fieldRow('连接方式', this.selectedPeer.online ? connectionLabel(this.selectedPeer.connection) : '')
-          if (this.selectedPeer.connection === 'relay') {
-            this.fieldRow('中继地址', this.relayUrlText())
-          }
-          this.fieldRow('最近握手', lastHandshakeText(this.selectedPeer.last_handshake_s))
-          this.fieldRow('公钥', this.selectedPeer.pub_key)
+          .width('100%')
+          .padding(16)
+          .borderRadius(16)
+          .backgroundColor('#FFFFFF')
+          .alignItems(HorizontalAlign.Start)
         }
         .width('100%')
-        .padding(16)
-        .borderRadius(16)
-        .backgroundColor('#FFFFFF')
-        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .align(Alignment.Top)
+        .scrollBar(BarState.Off)
       }
       .width('100%')
       .height('100%')
@@ -1020,26 +2555,75 @@ struct Index {
   @Builder
   setupFormCard() {
     Column({ space: 12 }) {
-      Text(this.configured ? '重新配置' : '首次配置 / 登录')
+      Text(this.configured ? '更改服务器配置' : '服务器配置')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
         .fontColor('#17324D')
         .width('100%')
-      TextInput({ text: this.urlInput, placeholder: '管理服务器地址（https://…）' })
+      TextInput({ text: this.urlInput, placeholder: '服务器地址（https://…）' })
         .fontSize(15)
         .height(44)
         .width('100%')
+        .enabled(!this.accountModeSwitchBlocked())
         .onChange((value: string): void => {
           this.urlInput = value;
         })
-      TextInput({ text: this.keyInput, placeholder: 'Setup Key（形如 6dc45f77-5f0d-4a0f-8a75-9df5b6a04bbb）' })
-        .fontSize(15)
-        .height(44)
-        .width('100%')
-        .type(InputType.Password)
-        .onChange((value: string): void => {
-          this.keyInput = value;
-        })
+      Row({ space: 12 }) {
+        Button('账户登录')
+          .fontSize(14)
+          .height(40)
+          .layoutWeight(1)
+          .backgroundColor(this.authMode === ACCOUNT_MODE_ACCOUNT ? '#17324D' : '#FFFFFF')
+          .fontColor(this.authMode === ACCOUNT_MODE_ACCOUNT ? '#FFFFFF' : '#17324D')
+          .border({ width: 1, color: '#17324D' })
+          .enabled(!this.accountModeSwitchBlocked() && !this.accountLoginBusy)
+          .onClick(() => this.selectAuthMode(ACCOUNT_MODE_ACCOUNT))
+        Button('Setup Key')
+          .fontSize(14)
+          .height(40)
+          .layoutWeight(1)
+          .backgroundColor(this.authMode === ACCOUNT_MODE_SETUP_KEY ? '#17324D' : '#FFFFFF')
+          .fontColor(this.authMode === ACCOUNT_MODE_SETUP_KEY ? '#FFFFFF' : '#17324D')
+          .border({ width: 1, color: '#17324D' })
+          .enabled(!this.accountModeSwitchBlocked() && !this.accountLoginBusy)
+          .onClick(() => this.selectAuthMode(ACCOUNT_MODE_SETUP_KEY))
+      }
+      .width('100%')
+      if (this.authMode === ACCOUNT_MODE_SETUP_KEY) {
+        TextInput({ text: this.keyInput, placeholder: 'Setup Key' })
+          .fontSize(15)
+          .height(44)
+          .width('100%')
+          .enabled(!this.accountModeSwitchBlocked())
+          .type(InputType.Password)
+          .onChange((value: string): void => {
+            this.keyInput = value;
+          })
+      } else if (this.accountLoginBusy) {
+        Text(this.accountLoginCommitting ? '正在保存账户凭据…' : '正在验证账户…')
+          .fontSize(13)
+          .fontColor('#52615B')
+          .width('100%')
+        if (!this.accountLoginCommitting) {
+          Button('取消登录')
+            .fontSize(14)
+            .height(36)
+            .backgroundColor('#8A9AA6')
+            .onClick((): void => this.cancelAccountLogin(false))
+        }
+      }
+      if (this.accountModeSwitchBlocked()) {
+        Text('断开 VPN 后可更改配置')
+          .fontSize(13)
+          .fontColor('#8A6D1A')
+          .width('100%')
+      }
+      if (this.accountLoginError.length > 0) {
+        Text(this.accountLoginError)
+          .fontSize(13)
+          .fontColor('#A12622')
+          .width('100%')
+      }
       if (this.formError.length > 0) {
         Text(this.formError)
           .fontSize(13)
@@ -1053,32 +2637,38 @@ struct Index {
           .width('100%')
           .maxLines(2)
       }
-      Row({ space: 12 }) {
-        Button('保存')
-          .fontSize(16)
-          .height(40)
-          .backgroundColor('#17324D')
-          .onClick(() => {
-            hilog.info(DOMAIN, TAG, 'UI_SETUP_SAVE_CLICKED|configured=%{public}s',
-              String(this.configured));
+      Button(this.authMode === ACCOUNT_MODE_ACCOUNT
+        ? (this.accountLoginBusy ? '正在登录…' : '登录并连接')
+        : '保存并连接')
+        .fontSize(15)
+        .height(42)
+        .width('100%')
+        .backgroundColor('#17324D')
+        .enabled(!this.accountLoginBusy && !this.accountModeSwitchBlocked())
+        .onClick(() => {
+          hilog.info(DOMAIN, TAG, 'UI_SETUP_SAVE_CLICKED|configured=%{public}s',
+            String(this.configured));
+          if (this.authMode === ACCOUNT_MODE_ACCOUNT) {
+            this.beginAccountLogin();
+          } else {
             this.saveSetup();
-          })
-        if (this.configured) {
-          Button('取消')
-            .fontSize(16)
-            .height(40)
-            .backgroundColor('#8A9AA6')
-            .onClick(() => {
-              this.showSetupForm = false;
-              this.formError = '';
-              this.formHint = '';
-            })
-        }
+          }
+        })
+      if (this.configured) {
+        Button('取消')
+          .fontSize(14)
+          .height(36)
+          .width('100%')
+          .backgroundColor('#FFFFFF')
+          .fontColor('#17324D')
+          .border({ width: 1, color: '#AAB5BC' })
+          .enabled(!this.accountLoginCommitting)
+          .onClick(() => this.cancelConfigurationEdit())
       }
     }
     .width('100%')
     .padding(16)
-    .borderRadius(16)
+    .borderRadius(8)
     .backgroundColor('#FFFFFF')
     .alignItems(HorizontalAlign.Start)
   }
@@ -1086,36 +2676,127 @@ struct Index {
   @Builder
   serverConfigCard() {
     Column({ space: 10 }) {
-      Text('当前服务器')
+      Text('当前配置')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
         .fontColor('#17324D')
         .width('100%')
-      Text(`${this.configuredUrl}（Setup Key：${this.keyStored ? '已保存' : '未保存'}）`)
+      Text('服务器地址')
+        .fontSize(12)
+        .fontColor('#8A9AA6')
+        .width('100%')
+      Text(this.configuredUrl)
         .fontSize(14)
         .fontColor('#3D4A55')
         .width('100%')
-        .maxLines(2)
-      Row({ space: 12 }) {
-        Button('重新配置')
-          .fontSize(15)
-          .height(38)
-          .backgroundColor('#5A3A6E')
-          .onClick(() => {
-            this.urlInput = this.configuredUrl;
-            this.keyInput = '';
-            this.formError = '';
-            this.formHint = '';
-            this.showSetupForm = true;
-          })
-        Button('注销')
-          .fontSize(15)
-          .height(38)
-          .backgroundColor('#A12622')
-          .onClick(() => {
-            hilog.info(DOMAIN, TAG, 'UI_SETUP_LOGOUT_CLICKED');
-            this.requestLogout();
-          })
+        .maxLines(3)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      Text('登录方式')
+        .fontSize(12)
+        .fontColor('#8A9AA6')
+        .width('100%')
+      Text(this.authMode === ACCOUNT_MODE_ACCOUNT ? '账户登录' : 'Setup Key')
+        .fontSize(14)
+        .fontColor('#3D4A55')
+        .width('100%')
+      if (this.authMode === ACCOUNT_MODE_ACCOUNT) {
+        Text('账户凭据过期时，可重新登录。')
+          .fontSize(13)
+          .fontColor('#52615B')
+          .width('100%')
+      }
+      Button('更改配置')
+        .fontSize(15)
+        .height(40)
+        .width('100%')
+        .backgroundColor('#17324D')
+        .enabled(!this.accountModeSwitchBlocked())
+        .onClick(() => this.beginConfigurationEdit())
+      if (this.accountModeSwitchBlocked()) {
+        Text('断开 VPN 后可更改配置')
+          .fontSize(13)
+          .fontColor('#8A6D1A')
+          .width('100%')
+      }
+    }
+    .width('100%')
+    .padding(16)
+    .borderRadius(8)
+    .backgroundColor('#FFFFFF')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  logoutAction() {
+    Text(this.logoutRemoteActive() ? '注销并从管理端移除本设备' : '清除本机配置')
+      .fontSize(14)
+      .fontColor('#A12622')
+      .width('100%')
+      .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+      .onClick(() => {
+        hilog.info(DOMAIN, TAG, 'UI_SETUP_LOGOUT_CLICKED');
+        this.requestLogout();
+      })
+  }
+
+  private logoutRemoteActive(): boolean {
+    return this.published !== null && vpnActiveState(this.published.state);
+  }
+
+  // 诊断日志 (settings tab, 2026-10-05): the local-only log families, their
+  // rotation, and the ONE export action. The wording below must stay tied to
+  // the real writers: the UI writer keeps 4 x 512 KiB ≈ 2 MiB (the diagnostics
+  // module's own cap), the native/VPN writer keeps 4 x 2 MiB ≈ 8 MiB, so the
+  // local total is about 10 MiB; the newest segment replaces the oldest. The
+  // export only COPIES: each file is read up to 2 MiB and the whole export up
+  // to 12 MiB, and a cut is marked in the document (and in the result below).
+  // A killed process can lose the records its writer had not flushed yet.
+  @Builder
+  diagnosticsLogCard() {
+    Column({ space: 10 }) {
+      Text('日志只写在本机应用目录，不会自动上传。')
+        .fontSize(13)
+        .fontColor('#3D4A55')
+        .width('100%')
+      Text('滚动保留：界面日志 4 段 × 512 KiB ≈ 2 MiB，VPN/原生日志 4 段 × 2 MiB ≈ 8 MiB，' +
+        '合计约 10 MiB；写满后最旧的段被覆盖，另外每 60 秒记录一次本进程内存采样。')
+        .fontSize(13)
+        .fontColor('#3D4A55')
+        .width('100%')
+      Text('导出只做复制（不改动本机日志）：导出期间日志仍在写，每个文件最多取 2 MiB、总量最多 12 MiB，' +
+        '超出部分在文件里标记为截断；系统强制结束进程时，还没落盘的日志尾部可能丢失。')
+        .fontSize(13)
+        .fontColor('#3D4A55')
+        .width('100%')
+      Button(this.logExportBusy ? '正在导出…' : '导出日志')
+        .fontSize(15)
+        .height(38)
+        .width('100%')
+        .backgroundColor(this.logExportBusy ? '#8A9AA6' : '#17324D')
+        .enabled(!this.logExportBusy)
+        .onClick(() => {
+          // The picked URI is user data: only this marker is logged.
+          hilog.info(DOMAIN, TAG, 'UI_LOG_EXPORT_BUTTON_CLICKED');
+          this.startLogExport();
+        })
+      if (this.logExportHeadline.length > 0) {
+        Text(this.logExportHeadline)
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.logExportToneColor())
+          .width('100%')
+      }
+      if (this.logExportBody.length > 0) {
+        Text(this.logExportBody)
+          .fontSize(12)
+          .fontColor('#3D4A55')
+          .width('100%')
+      }
+      if (this.logExportUri.length > 0) {
+        Text(`目标文档：${this.logExportUri}`)
+          .fontSize(12)
+          .fontColor('#8A9AA6')
+          .width('100%')
       }
     }
     .width('100%')
@@ -1125,9 +2806,17 @@ struct Index {
     .alignItems(HorizontalAlign.Start)
   }
 
+  // ---- 详细状态 (netbird status -d equivalent) ------------------------------
+  //
+  // Five collapsible sections, each one driven by a *method call* on the
+  // polled published document (never a frozen @Builder value argument) and
+  // rendered through DetailRow @Prop children. Content lives in the settings
+  // scroll: the page grows, the outer Scroll scrolls (no fixed height).
+  // Reachable from the home card (详细状态 ›) and from 设置 → 详细状态.
+
   @Builder
-  diagnosticsView() {
-    Column({ space: 8 }) {
+  detailStatusView() {
+    Column({ space: 4 }) {
       Row({ space: 12 }) {
         Button('返回')
           .fontSize(15)
@@ -1136,90 +2825,181 @@ struct Index {
           .onClick(() => {
             this.showDiagnostics = false;
           })
-        Text('诊断信息')
+        Text('详细状态')
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
           .fontColor('#17324D')
       }
       .width('100%')
       .margin({ top: 8, bottom: 8 })
-      Column({ space: 4 }) {
-        // INLINE rows (same B.1 fix as the home card): fieldRow's by-value
-        // expression args never re-render, and a diagnostics page that froze
-        // at （未运行） forever is the same defect.
-        Row({ space: 8 }) {
-          Text('状态').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null ? this.published.state : '（未运行）')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('信号').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null
-            ? (this.published.signal_registered ? 'registered' : 'not registered') : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('信号重连').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null ? `${this.published.signal_reconnects}` : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('隧道').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null
-            ? (this.published.wg_ready ? 'ready' : 'not ready') : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('WG 会话').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null ? `${this.published.wg_sessions}` : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('对端/路由').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null
-            ? `${this.published.peer_count} / ${this.published.route_count}` : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('管理重连').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null && this.published.reconnects !== undefined
-            ? `${this.published.reconnects}` : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('中继').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null && this.published.relay_state !== undefined &&
-            this.published.relay_state !== null ? this.published.relay_state : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('接口').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published === null ? '—' : (this.published.iface_present === undefined
-            ? '未知' : (this.published.iface_present ? 'vpn-tun 在' : 'vpn-tun 不存在')))
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('最近错误').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null ? this.published.last_error_class : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-        Row({ space: 8 }) {
-          Text('请求 ID').fontSize(13).fontColor('#8A9AA6').width(96)
-          Text(this.published !== null && this.published.request_id !== undefined
-            ? this.published.request_id : '—')
-            .fontSize(14).fontColor('#17324D').layoutWeight(1).maxLines(3)
-        }.width('100%').padding({ top: 6, bottom: 6 })
+
+      if (this.published === null) {
+        Column({ space: 4 }) {
+          Text('当前没有可用的状态文档（VPN 未运行，或状态已过期）。')
+            .fontSize(13)
+            .fontColor('#8A6D1A')
+            .width('100%')
+          if (this.lastErrorLine().length > 0) {
+            Text(this.lastErrorLine())
+              .fontSize(13)
+              .fontColor('#A12622')
+              .width('100%')
+              .maxLines(3)
+          }
+        }
+        .width('100%')
+        .padding(12)
+        .borderRadius(12)
+        .backgroundColor('#F5EBCF')
+        .alignItems(HorizontalAlign.Start)
       }
-      .width('100%')
-      .padding(16)
-      .borderRadius(16)
-      .backgroundColor('#FFFFFF')
-      .alignItems(HorizontalAlign.Start)
+
+      // ---- 连接概览 ----
+      DetailSectionHeader({
+        title: '连接概览',
+        summary: this.overviewSummary(),
+        expanded: this.detailOverviewOpen,
+        onToggle: () => {
+          this.detailOverviewOpen = !this.detailOverviewOpen;
+        }
+      })
+      if (this.detailOverviewOpen) {
+        Column({ space: 0 }) {
+          ForEach(this.overviewFields(), (field: DetailField) => {
+            DetailRow({ label: field.label, value: field.value })
+          }, (field: DetailField) => `ov|${field.label}=${field.value}`)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+      }
+
+      // ---- 本机网络 ----
+      DetailSectionHeader({
+        title: '本机网络（地址 / DNS / 路由）',
+        summary: this.networkSummary(),
+        expanded: this.detailNetworkOpen,
+        onToggle: () => {
+          this.detailNetworkOpen = !this.detailNetworkOpen;
+        }
+      })
+      if (this.detailNetworkOpen) {
+        Column({ space: 0 }) {
+          ForEach(this.networkFields(), (field: DetailField) => {
+            DetailRow({ label: field.label, value: field.value })
+          }, (field: DetailField) => `nw|${field.label}=${field.value}`)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+      }
+
+      // ---- 流量统计 ----
+      DetailSectionHeader({
+        title: '流量统计',
+        summary: this.trafficSummary(),
+        expanded: this.detailTrafficOpen,
+        onToggle: () => {
+          this.detailTrafficOpen = !this.detailTrafficOpen;
+        }
+      })
+      if (this.detailTrafficOpen) {
+        Column({ space: 0 }) {
+          ForEach(this.trafficFields(), (field: DetailField) => {
+            DetailRow({ label: field.label, value: field.value })
+          }, (field: DetailField) => `tf|${field.label}=${field.value}`)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+      }
+
+      // ---- 中继 ----
+      DetailSectionHeader({
+        title: '中继',
+        summary: this.relaySummary(),
+        expanded: this.detailRelayOpen,
+        onToggle: () => {
+          this.detailRelayOpen = !this.detailRelayOpen;
+        }
+      })
+      if (this.detailRelayOpen) {
+        Column({ space: 0 }) {
+          ForEach(this.relayFields(), (field: DetailField) => {
+            DetailRow({ label: field.label, value: field.value })
+          }, (field: DetailField) => `rl|${field.label}=${field.value}`)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+      }
+
+      // ---- 对端明细 ----
+      DetailSectionHeader({
+        title: '对端明细',
+        summary: this.peersSummary(),
+        expanded: this.detailPeersOpen,
+        onToggle: () => {
+          this.detailPeersOpen = !this.detailPeersOpen;
+        }
+      })
+      if (this.detailPeersOpen) {
+        Column({ space: 0 }) {
+          // 2026-10-08: every row here carries a WHOLE per-peer multi-line block
+          // (WG status block = 11 logical lines incl. 发送/接收（明文）, ICE block
+          // = 6), so the default 8-line cap truncated the tail of the WG block.
+          // The outer Scroll absorbs the extra height; other sections keep 8.
+          ForEach(this.peerFields(), (field: DetailField) => {
+            DetailRow({ label: field.label, value: field.value, maxLines: DETAIL_BLOCK_MAX_LINES })
+          }, (field: DetailField) => `pe|${field.label}=${field.value}`)
+          // 2026-10-07: the per-peer 发送/接收 lines above count the peer's
+          // PLAINTEXT inner-IP payload bytes — the aggregate 流量统计 发送 row
+          // counts ENCAPSULATED wire bytes, so the two must not be read as one.
+          Text('对端发送/接收为明文 IP 载荷字节（自该对端隧道建立以来累计）；' +
+            '「流量统计」的发送计加密后的传输字节，口径不同。')
+            .fontSize(12)
+            .fontColor('#8A9AA6')
+            .width('100%')
+            .padding({ top: 8 })
+          // 2026-10-08: the per-peer ICE blocks are candidate-path details —
+          // the WG-session rows above (状态 / 连接方式 / 承载 / 中继通道地址)
+          // stay the actual bearer, and ICE 已连接 never means 流量直连.
+          Text('ICE 明细只描述候选路径与端点应用情况（断开后仍可能保留上次选中的地址）；' +
+            '各对端实际承载以其「状态 / 连接方式 / 承载 / 中继通道地址」为准，' +
+            'ICE 已连接不代表当前流量直连。')
+            .fontSize(12)
+            .fontColor('#8A9AA6')
+            .width('100%')
+            .padding({ top: 8 })
+          Row({ space: 8 }) {
+            Text('点按「对端」标签页可查看并搜索单个对端')
+              .fontSize(12)
+              .fontColor('#8A9AA6')
+              .layoutWeight(1)
+            Text('前往 ›')
+              .fontSize(13)
+              .fontColor('#17324D')
+          }
+          .width('100%')
+          .padding({ top: 10, bottom: 2 })
+          .onClick(() => {
+            this.showDiagnostics = false;
+            this.activeTab = 1;
+          })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 12 })
+        .borderRadius(16)
+        .backgroundColor('#FFFFFF')
+      }
     }
     .width('100%')
-    .height('100%')
-    .padding(20)
-    .backgroundColor('#F2F6F8')
+    .padding({ bottom: 24 })
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -1233,26 +3013,30 @@ struct Index {
           .width('100%')
           .margin({ top: 8, bottom: 4 })
         if (this.showDiagnostics) {
-          this.diagnosticsView()
+          this.detailStatusView()
         } else {
           this.sectionTitle('服务器配置')
           if (this.showSetupForm || !this.configured) {
             this.setupFormCard()
           } else {
             this.serverConfigCard()
+            this.logoutAction()
           }
           this.sectionTitle('关于')
           Column() {
-            this.fieldRow('版本', this.versionName.length > 0 ? this.versionName : '未知')
+            DetailRow({ label: '版本', value: this.versionName.length > 0 ? this.versionName : '未知' })
+            DetailRow({ label: '版本号', value: this.versionCode >= 0 ? this.versionCode.toString() : '未知' })
           }
           .width('100%')
-          .padding(16)
+          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
           .borderRadius(16)
           .backgroundColor('#FFFFFF')
           .alignItems(HorizontalAlign.Start)
-          this.sectionTitle('诊断')
+          this.sectionTitle('诊断日志')
+          this.diagnosticsLogCard()
+          this.sectionTitle('详细状态')
           Row({ space: 8 }) {
-            Text('诊断信息')
+            Text('详细状态')
               .fontSize(16)
               .fontColor('#17324D')
               .layoutWeight(1)
@@ -1279,9 +3063,34 @@ struct Index {
     .scrollBar(BarState.Off)
   }
 
+  onBackPress(): boolean {
+    if (this.accountLoginOpen) {
+      this.cancelAccountLogin(false);
+      return true;
+    }
+    return false;
+  }
+
   build() {
-    Column() {
-      Tabs({ barPosition: BarPosition.End, index: this.activeTab }) {
+    if (this.accountLoginOpen) {
+      NetBirdAccountWebView({
+        authorizeUrl: this.accountAuthorizeUrl,
+        expectedState: this.accountExpectedState,
+        redirectUri: this.accountRedirectUri,
+        onCode: (code: string): void => {
+          this.finishAccountLogin(code);
+        },
+        onCancel: (): void => {
+          this.cancelAccountLogin(false);
+        },
+        onFailure: (reason: string): void => {
+          this.cancelAccountLogin(false);
+          this.accountLoginError = this.accountLoginErrorText(reason);
+        }
+      })
+    } else {
+      Column() {
+        Tabs({ barPosition: BarPosition.End, index: this.activeTab }) {
         TabContent() {
           this.homeTab()
         }
@@ -1308,8 +3117,9 @@ struct Index {
       })
       .width('100%')
       .layoutWeight(1)
+      }
+      .width('100%')
+      .height('100%')
     }
-    .width('100%')
-    .height('100%')
   }
 }

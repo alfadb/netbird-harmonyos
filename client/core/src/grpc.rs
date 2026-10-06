@@ -440,6 +440,38 @@ impl ManagementGrpcClient {
         EnvelopePublicKey::from_base64(&reply.key)
     }
 
+    /// Fetch the public provider configuration for initiating PKCE authorization.
+    /// The request and response bodies follow the encrypted management RPC envelope.
+    pub async fn get_pkce_authorization_flow(
+        &mut self,
+    ) -> Result<proto::PkceAuthorizationFlow, ManagementError> {
+        let server_key = self.get_server_key().await?;
+        let request = proto::PkceAuthorizationFlowRequest {};
+        let body = crate::envelope::seal(
+            &server_key,
+            &self.envelope_keys,
+            &request.encode_to_vec(),
+        )?;
+        let envelope = proto::EncryptedMessage {
+            wg_pub_key: self.envelope_keys.public_key_base64(),
+            body,
+            version: 0,
+        };
+        let reply = tokio::time::timeout(self.request_timeout, async {
+            self.stub
+                .get_pkce_authorization_flow(tonic::Request::new(envelope))
+                .await
+                .map_err(map_grpc_status)
+        })
+        .await
+        .map_err(|_| ManagementError::Timeout)??
+        .into_inner();
+        let plaintext = crate::envelope::open(&server_key, &self.envelope_keys, &reply.body)?;
+        proto::PkceAuthorizationFlow::decode(plaintext.as_slice()).map_err(|e| {
+            ManagementError::Parse(format!("PKCEAuthorizationFlow decode failed: {e}"))
+        })
+    }
+
     /// `ManagementService/Login` with the DEFAULT body mode
     /// ([`LoginBodyMode::Encrypted`] — the upstream wire behavior).
     pub async fn login(&mut self, params: LoginParams) -> Result<LoginOutcome, ManagementError> {
@@ -798,6 +830,29 @@ mod tests {
         let bytes = req.encode_to_vec();
         let decoded = proto::LoginRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded.setup_key, "SETUP-KEY-1");
+    }
+
+    #[test]
+    fn pkce_authorization_flow_decodes_public_provider_config() {
+        let flow = proto::PkceAuthorizationFlow {
+            provider_config: Some(proto::ProviderConfig {
+                client_id: "netbird-cli".into(),
+                device_auth_endpoint: "https://idp.example/device".into(),
+                token_endpoint: "https://idp.example/token".into(),
+                authorization_endpoint: "https://idp.example/authorize".into(),
+                use_id_token: false,
+                ..Default::default()
+            }),
+        };
+
+        let decoded = proto::PkceAuthorizationFlow::decode(flow.encode_to_vec().as_slice())
+            .expect("PKCE authorization flow decodes");
+        let provider = decoded.provider_config.expect("provider config set");
+        assert_eq!(provider.client_id, "netbird-cli");
+        assert_eq!(provider.device_auth_endpoint, "https://idp.example/device");
+        assert_eq!(provider.token_endpoint, "https://idp.example/token");
+        assert_eq!(provider.authorization_endpoint, "https://idp.example/authorize");
+        assert!(!provider.use_id_token);
     }
 
     #[test]

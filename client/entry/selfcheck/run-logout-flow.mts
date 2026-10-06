@@ -45,6 +45,8 @@ function sliceFrom(src: string, begin: string, end: string): string {
 
 // UI: performLogout .. waitForLogoutResult (the attempt half)
 const attemptHalf = sliceFrom(PAGE, 'private performLogout(): void', 'private readLogoutResult(): boolean | null');
+const confirmation = sliceFrom(PAGE, 'private requestLogout(): void', 'private performLogout(): void');
+const logoutAction = sliceFrom(PAGE, 'logoutAction() {', 'private logoutRemoteActive(): boolean');
 // UI: finishLogout (the deletion half)
 const deletionHalf = sliceFrom(PAGE, 'private finishLogout(serverLogoutConfirmed: boolean): void', 'private removeSetupFile(name: string): void');
 // EXT: pollLogoutTicket .. the next method
@@ -76,9 +78,14 @@ check('NetBirdConnector.ets wraps core.connector_logout',
 
 // ---- UI order: attempt BEFORE the credential deletion ----------------------
 
-check('UI performLogout gates on the live VPN state (vpnActiveState)',
-  attemptHalf.includes('vpnActiveState(this.published.state)') &&
-  attemptHalf.includes('UI_LOGOUT_LOCAL_ONLY|reason=vpn-not-running'));
+check('UI performLogout uses the existing live-VPN predicate for remote vs local cleanup',
+  attemptHalf.includes('this.logoutRemoteActive()') &&
+  attemptHalf.includes('UI_LOGOUT_LOCAL_ONLY|reason=vpn-not-running') &&
+  PAGE.includes('return this.published !== null && vpnActiveState(this.published.state);'));
+check('logout action and confirmation accurately describe remote and local effects',
+  logoutAction.includes('注销并从管理端移除本设备') && logoutAction.includes('清除本机配置') &&
+  confirmation.includes('断开连接并从管理端移除本设备，同时清除本机配置') &&
+  confirmation.includes('不会从管理端移除设备记录'));
 check('UI: the logout ticket is written BEFORE any credential file is deleted',
   attemptHalf.length > 0 && deletionHalf.length > 0 &&
   attemptHalf.indexOf('this.writeLogoutTicket();') >= 0 &&

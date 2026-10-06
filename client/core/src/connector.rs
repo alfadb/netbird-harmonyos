@@ -125,9 +125,9 @@ use crate::management::ManagementError;
 use crate::mgmtsock::{ManagementSocketProvider, ProtectedSocketFdSource};
 use crate::network_map::NetworkMap;
 use crate::peer_conn::{
-    ice_ready_for_default_route, spawn_signal_link_shared, IceOrchestratorSummary, LoggingSignalExchange,
-    PeerIceDeps, PeerIceOrchestrator, PeerSignalKind, RealSignalExchange, SignalLinkConfig,
-    SignalLinkEvent,
+    ice_ready_for_default_route, spawn_signal_link_shared, IceCandidateEndpoint,
+    IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps, PeerIceDetail, PeerIceOrchestrator,
+    PeerSignalKind, RealSignalExchange, SignalLinkConfig, SignalLinkEvent,
 };
 use crate::signal::{SignalMessage, SignalOutgoing};
 use crate::state::{ConnEvent, ConnState, StateMachine};
@@ -1284,6 +1284,16 @@ struct ConnectorShared {
     /// N13-D2: the runtime the carrier pump task spawns on (set at spawn,
     /// with the relay opt-in only).
     relay_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// N13-D3: per-peer relay URL ADVERTISED by the remote (signal
+    /// OFFER/ANSWER `relayServerAddress`), recorded by the signal receive
+    /// path ([`route_signal_message`]) and handed to the relay carrier as
+    /// its per-peer relay-server choice input
+    /// ([`RelayCarrier::new_with_ads`]). Created with the CONNECTOR, not with
+    /// the carrier: the receive path records advertisements for a carrier
+    /// that may not be armed (and a `relay_enabled:false` connector records
+    /// nothing — no signal link, no relay dial). Peer keys are public WG
+    /// material, URLs are public routing data.
+    relay_ads: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// N13-D1: relay slot contents (urls = the configured set, public routing
@@ -1339,6 +1349,7 @@ impl ConnectorShared {
             relay_carrier: std::sync::OnceLock::new(),
             relay_wg: std::sync::OnceLock::new(),
             relay_runtime: std::sync::OnceLock::new(),
+            relay_ads: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1713,7 +1724,14 @@ impl ConnectorShared {
     /// (called from the sync path; idempotent). No-op unless the WG seam is
     /// carrier-capable: a seam that cannot host lanes must never cause
     /// relay subscriptions it cannot use (fail-closed honesty).
-    fn relay_carrier_client_started(&self, client: crate::relay_client::RelayClient) {
+    /// N13-D3: the SAME call supplies the carrier's per-peer advertisement
+    /// map (shared with the receive path) and the foreign-relay spawn
+    /// context of this sync's relay set.
+    fn relay_carrier_client_started(
+        &self,
+        client: crate::relay_client::RelayClient,
+        relay: &crate::network_map::RelayServers,
+    ) {
         let (Some(wg), Some(rt)) = (self.relay_wg.get(), self.relay_runtime.get()) else {
             return;
         };
@@ -1721,13 +1739,60 @@ impl ConnectorShared {
             return;
         }
         if self.relay_carrier.get().is_none() {
-            let _ = self.relay_carrier.set(RelayCarrier::new(wg.clone()));
+            // N13-D3: the carrier reads the SAME advertisement map the signal
+            // receive path writes — created here, shared with the connector.
+            let _ = self
+                .relay_carrier
+                .set(RelayCarrier::new_with_ads(wg.clone(), self.relay_ads.clone()));
         }
         let carrier = self.relay_carrier.get().expect("carrier slot just set");
         if !carrier.has_client(&client) {
             carrier.attach_client(client);
             carrier.ensure_pump(rt);
         }
+        // N13-D3: the foreign-relay spawn context rides the SAME sync that
+        // (re)armed the home client (official manager.go `openConnVia` reuses
+        // one token store + peerID across home and foreign relay clients).
+        // Runs on EVERY relay sync — including the same-URL token refresh,
+        // where it rotates the token of every LIVE foreign client without
+        // reconnecting them (`update_token`).
+        self.relay_foreign_ctx(carrier, relay);
+    }
+
+    /// N13-D3: hand the carrier the foreign-relay spawn context derived from
+    /// this sync's relay set. Same fail-closed gate as
+    /// [`ConnectorShared::relay_apply`]: an empty URL set or an unusable
+    /// token leaves the PREVIOUS context in place — never a half-built one.
+    /// The URLs parse ALL-OR-NOTHING, mirroring
+    /// [`crate::relay_client::RelayClientConfig::new`]: a set the home client
+    /// would refuse can never become a foreign dial target.
+    fn relay_foreign_ctx(
+        &self,
+        carrier: &std::sync::Arc<RelayCarrier>,
+        relay: &crate::network_map::RelayServers,
+    ) {
+        let Some(attach) = self.relay_attach.as_ref() else {
+            return;
+        };
+        if relay.urls.is_empty() {
+            return;
+        }
+        let token = match crate::relay::AuthToken::from_management(
+            &relay.token_payload,
+            &relay.token_signature,
+        ) {
+            Ok(t) => t,
+            // relay_apply already reported this sync's token as unusable.
+            Err(_) => return,
+        };
+        let mut urls = Vec::with_capacity(relay.urls.len());
+        for url in &relay.urls {
+            match crate::relay_client::RelayUrl::parse(url) {
+                Ok(parsed) => urls.push(parsed),
+                Err(_) => return,
+            }
+        }
+        carrier.set_foreign_ctx(attach.clone(), urls, token);
     }
 
     /// The running relay client handle, if any (slot reader shared by the
@@ -1903,12 +1968,19 @@ impl ConnectorShared {
                     Some(r) => {
                         self.relay_apply(r);
                         if let Some(client) = self.relay_handle() {
-                            self.relay_carrier_client_started(client);
+                            self.relay_carrier_client_started(client, r);
                         }
                     }
                     None => {
                         self.relay_drop("relay-removed-from-sync");
                         if let Some(carrier) = self.relay_carrier.get() {
+                            // N13-D3: management revoked the relay — the
+                            // FOREIGN clients must go with the home one (no
+                            // orphan outbound relay connection). Before
+                            // `detach_all`: closing a foreign client takes
+                            // the lifecycle lock itself, so it must not run
+                            // under a holder (see [`RelayCarrier::shutdown`]).
+                            carrier.stop_foreign_all("relay-removed-from-sync");
                             carrier.detach_all();
                         }
                     }
@@ -1952,6 +2024,14 @@ impl ConnectorShared {
                 self.lock().last_update_unix = Some(unix_now());
                 return;
             }
+        }
+        for (index, route) in map.routes.iter().enumerate() {
+            hilog::emit(&crate::route_audit::managed_route_line(
+                map.serial,
+                index,
+                map.routes.len(),
+                route,
+            ));
         }
         let peers = map.peers.len() + map.offline_peers.len();
         // N5c: default-route gate input now includes the ICE view — the data
@@ -2016,8 +2096,21 @@ impl ConnectorShared {
         if let Some(ice) = self.ice.get() {
             ice.lock_poison().set_peers(&connectable_keys);
         }
-        if let Some(carrier) = self.relay_carrier.get() {
-            carrier.set_peers(&connectable_keys);
+        match self.relay_carrier.get() {
+            Some(carrier) => carrier.set_peers(&connectable_keys),
+            // N13-D3: no carrier (relay never armed / seam not carrier-capable)
+            // — the advertisement map is still the same per-peer routing
+            // record, so bound it to the connectable set exactly as
+            // `set_peers` does. The sender key of a signal frame is only as
+            // authenticated as its envelope (the server routes by RECIPIENT),
+            // so entries for keys outside the network map must never
+            // accumulate without bound.
+            None => {
+                self.relay_ads
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|k, _| connectable_keys.contains(k));
+            }
         }
         // WG data plane: register remote + offline peers (identity +
         // allowed_ips only — module limitation statement).
@@ -2088,6 +2181,12 @@ pub struct RelayCarrierStats {
     pub frames_in_unknown: u64,
     /// Last `open_conn` failure class (stable token, diagnostics only).
     pub last_open_error: Option<&'static str>,
+    /// Foreign relay clients started (one per distinct advertised URL,
+    /// official manager.go `relayClients` map entries).
+    pub foreign_opened: u64,
+    /// Foreign relay clients closed (idle sweep / revoked / teardown /
+    /// server disconnect).
+    pub foreign_closed: u64,
 }
 
 /// Retry backoff for a lane whose `open_conn` failed (e.g. the peer stays
@@ -2098,6 +2197,102 @@ pub struct RelayCarrierStats {
 /// window itself stays the dominant rate limiter). Cost: recovery after a
 /// FAILED open is delayed by up to one window.
 const LANE_OPEN_RETRY: Duration = Duration::from_secs(5);
+
+/// Foreign-relay idle policy — official `shared/relay/client/manager.go`:
+/// `relayCleanupInterval = 60s` (sweep cadence) and
+/// `keepUnusedServerTime = 5s` (grace before a foreign relay with NO live
+/// lane may be closed). Effective idle window is therefore 5–65s, exactly
+/// upstream's shape.
+const FOREIGN_RELAY_SWEEP: Duration = Duration::from_secs(60);
+const FOREIGN_RELAY_GRACE: Duration = Duration::from_secs(5);
+
+/// Which relay server a lane to a peer must ride — the official
+/// `WorkerRelay.OnNewOffer` → `Manager.OpenConn(serverAddress, peerKey)`
+/// decision (worker_relay.go:48-69 `preferredRelayServer` +
+/// manager.go:162-194). The CONTROLLER's home relay is the meet point:
+/// the controller (higher WG public key, upstream `isController =
+/// LocalKey > Key`) opens on its own home relay, the other side dials the
+/// controller's ADVERTISED URL (`relayServerAddress` of the received
+/// offer/answer) — as a foreign relay client when it differs from home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayChoice {
+    /// The lane rides our home relay client (also the fallback when the
+    /// remote advertises nothing — the pre-foreign behavior).
+    Home,
+    /// The lane rides a dedicated client to this remote-advertised URL.
+    Foreign(crate::relay_client::RelayUrl),
+}
+
+/// Upstream `isController(config) = config.LocalKey > config.Key`
+/// (conn.go:1040-1042, base64 WG public key STRING compare, lexicographic)
+/// — so the REMOTE is the controller (and its advertised relay the meet
+/// point) exactly when the peer's key sorts above ours. The same
+/// asymmetric comparison our ICE layer already replicates
+/// (`peer_conn::deterministic_controlling`); both sides compute it
+/// independently and agree.
+pub fn remote_is_controller(local_wg_pubkey: &str, peer_wg_pubkey: &str) -> bool {
+    peer_wg_pubkey > local_wg_pubkey
+}
+
+/// Canonical relay-URL comparison: parse both sides so scheme case and
+/// default ports normalize (`RELS://x` ≡ `rels://x:443`). An unparseable
+/// home string never equals a canonical form (mirrors upstream's plain
+/// string compare, which treats any mismatch as foreign).
+fn same_relay_url(candidate: &str, canonical: &str) -> bool {
+    match crate::relay_client::RelayUrl::parse(candidate) {
+        Ok(url) => url.config_string() == canonical,
+        Err(_) => candidate.trim() == canonical,
+    }
+}
+
+/// Decide the relay server for one peer's lane (pure — no client is
+/// created here; `RelayCarrier::lane_client` resolves the decision).
+///
+/// - We are the controller → [`RelayChoice::Home`] (upstream
+///   `preferredRelayServer` returns the controller's own address).
+/// - Remote is the controller: its advertised URL is the meet point —
+///   [`RelayChoice::Foreign`] unless it is (canonically) our home relay.
+///   No advertisement / an unparseable one falls back to Home (our
+///   long-standing single-relay behavior; upstream would skip the relay
+///   lane entirely for a non-advertising remote).
+/// - While the home client has no live session yet, an advertised URL
+///   that is INSIDE our configured set still counts as Home (the dial
+///   round may land there); once connected, only the live session URL is
+///   Home (upstream compares against the connected instance URL,
+///   manager.go:430-436).
+pub fn choose_relay_url(
+    advertised: Option<&str>,
+    remote_controller: bool,
+    home_current_url: Option<&str>,
+    configured: &[crate::relay_client::RelayUrl],
+) -> RelayChoice {
+    if !remote_controller {
+        return RelayChoice::Home;
+    }
+    let Some(advertised) = advertised else {
+        return RelayChoice::Home;
+    };
+    let Ok(url) = crate::relay_client::RelayUrl::parse(advertised) else {
+        return RelayChoice::Home;
+    };
+    let canonical = url.config_string();
+    match home_current_url {
+        Some(current) => {
+            if same_relay_url(current, &canonical) {
+                RelayChoice::Home
+            } else {
+                RelayChoice::Foreign(url)
+            }
+        }
+        None => {
+            if configured.iter().any(|u| u.config_string() == canonical) {
+                RelayChoice::Home
+            } else {
+                RelayChoice::Foreign(url)
+            }
+        }
+    }
+}
 
 /// N13-D2: the relay↔WG bridge for one connector — upstream's wgProxy
 /// orchestrator in minimal form. Duties:
@@ -2123,17 +2318,21 @@ const LANE_OPEN_RETRY: Duration = Duration::from_secs(5);
 /// platform TUN raw fd is never touched here (closed only by the shell's
 /// `VpnConnection.destroy()`).
 pub struct RelayCarrier {
-    /// The live relay client (set at the first start / refreshed when the
-    /// URL set changes — a swap aborts the old pump and detaches lanes:
+    /// The live HOME relay client (set at the first start / refreshed when
+    /// the URL set changes — a swap aborts the old pump and detaches lanes:
     /// presence does not survive a relay reconnect, D1 semantics).
     client: Mutex<Option<crate::relay_client::RelayClient>>,
     wg: std::sync::Arc<dyn WgPeerApplier>,
     /// Connectable peer keys ↔ their relay peer ids (the reverse map for
     /// the inbound pump; rebuilt from every network-map sync).
     peers: Mutex<Vec<(String, crate::relay::PeerId)>>,
-    /// Currently attached lanes: peer key → the carrier handle the WG seam
-    /// received (identity for idempotent attach/detach bookkeeping).
-    attached: Mutex<HashMap<String, std::sync::Arc<crate::relay_client::RelayWgCarrier>>>,
+    /// Currently attached lanes: peer key → (the carrier handle the WG
+    /// seam received, the relay URL the lane rides). The URL enables the
+    /// stale-lane reconcile: when a peer's advertised relay changes (or
+    /// the choice flips home/foreign), the old lane is detached and
+    /// re-opened on the new choice. Identity for idempotent attach/detach
+    /// bookkeeping remains the carrier handle.
+    attached: Mutex<HashMap<String, (std::sync::Arc<crate::relay_client::RelayWgCarrier>, String)>>,
     /// Per-peer earliest instant the next `open_conn` attempt is allowed
     /// ([`LANE_OPEN_RETRY`] backoff after a failed open; entries clear on
     /// success).
@@ -2148,9 +2347,9 @@ pub struct RelayCarrier {
     /// then removes it — a removed/stopped carrier can never be resurrected
     /// by a late open. `true` = armed (between attach_client and shutdown).
     /// LOCK ORDER: `lifecycle` first, then one leaf lock at a time
-    /// (client/peers/attached/pending_opens/open_retry_after/stats); never
-    /// held across an await; no leaf holder ever acquires `lifecycle` (no
-    /// ABBA).
+    /// (client/peers/attached/pending_opens/open_retry_after/ads/
+    /// foreign_ctx/foreign); never held across an await; no leaf holder
+    /// ever acquires `lifecycle` (no ABBA).
     lifecycle: Mutex<bool>,
     /// Per-peer in-flight lane-open task — at most ONE per peer (0018 fix:
     /// opens run as managed tasks so a peer that never comes online parks
@@ -2167,13 +2366,85 @@ pub struct RelayCarrier {
     stats: Mutex<RelayCarrierStats>,
     /// The production pump task (spawned on the connector runtime).
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Per-peer relay URL ADVERTISED by the remote (signal OFFER/ANSWER
+    /// `relayServerAddress`, recorded by the signal link). Shared with the
+    /// connector (written by the signal route, read here) so entries exist
+    /// even before the carrier is first armed. Peer keys are PUBLIC WG
+    /// material; URLs are public routing data — no secret ever enters.
+    ads: Arc<Mutex<HashMap<String, String>>>,
+    /// Spawn context for foreign relay clients (official manager.go
+    /// `openConnVia`: same token store + peerID + dial config for every
+    /// foreign URL). `None` = foreign lanes unavailable (carrier built
+    /// without a relay attach — host/test constructions; lanes then fall
+    /// back to the home relay).
+    foreign_ctx: Mutex<Option<ForeignRelayCtx>>,
+    /// Live foreign relay clients, keyed by CANONICAL URL string
+    /// (re-use per relay server, official `relayClients` map). Each entry
+    /// owns its inbound pump task feeding [`RelayCarrier::ingest`].
+    foreign: Mutex<HashMap<String, ForeignRelayEntry>>,
+    /// Idle policy for the foreign sweep (grace / sweep interval),
+    /// overridable for tests; see [`FOREIGN_RELAY_GRACE`].
+    foreign_timing: Mutex<(Duration, Duration)>,
+    /// Monotonic anchor of the last foreign sweep (pump tick gate).
+    last_foreign_sweep: Mutex<Option<std::time::Instant>>,
+}
+
+/// One foreign relay client + its inbound pump (official manager.go
+/// `RelayTrack`: the dialed client plus the reuse/cleanup bookkeeping).
+struct ForeignRelayEntry {
+    client: crate::relay_client::RelayClient,
+    pump: tokio::task::JoinHandle<()>,
+    created: std::time::Instant,
+}
+
+/// Everything needed to start a relay client for a FOREIGN URL: the SAME
+/// management-issued token as the home client (one token store upstream),
+/// the local WG public key (peerID derivation) and the injected seams.
+/// The token is SECRET: manual Debug redacts it (credential discipline).
+pub struct ForeignRelayCtx {
+    pub attach: RelayAttach,
+    pub token: crate::relay::AuthToken,
+    /// The HOME configured URL set (the home-match rule of
+    /// [`choose_relay_url`] while the home client has no live session).
+    pub urls: Vec<crate::relay_client::RelayUrl>,
+}
+
+impl Clone for ForeignRelayCtx {
+    fn clone(&self) -> Self {
+        ForeignRelayCtx {
+            attach: self.attach.clone(),
+            token: self.token.clone(),
+            urls: self.urls.clone(),
+        }
+    }
+}
+
+impl core::fmt::Debug for ForeignRelayCtx {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ForeignRelayCtx")
+            .field("urls", &self.urls.iter().map(|u| u.config_string()).collect::<Vec<_>>())
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RelayCarrier {
     /// An unarmed orchestrator over `wg` (host/test entry: arm it with
     /// [`RelayCarrier::attach_client`] once a relay client exists; the
-    /// connector arms it automatically from the sync path).
+    /// connector arms it automatically from the sync path). Carries its own
+    /// (empty) peer → advertised-relay-URL map — the connector shares the
+    /// signal link's map through [`RelayCarrier::new_with_ads`].
     pub fn new(wg: std::sync::Arc<dyn WgPeerApplier>) -> std::sync::Arc<Self> {
+        Self::new_with_ads(wg, Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    /// [`RelayCarrier::new`] with the connector's SHARED advertisement map:
+    /// `ads` is the peer → advertised-relay-URL map the signal link records
+    /// OFFER/ANSWER advertisements into (shared handle, may pre-date arming).
+    pub fn new_with_ads(
+        wg: std::sync::Arc<dyn WgPeerApplier>,
+        ads: Arc<Mutex<HashMap<String, String>>>,
+    ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(RelayCarrier {
             client: Mutex::new(None),
             wg,
@@ -2185,7 +2456,18 @@ impl RelayCarrier {
             next_open_gen: std::sync::atomic::AtomicU64::new(0),
             stats: Mutex::new(RelayCarrierStats::default()),
             task: Mutex::new(None),
+            ads,
+            foreign_ctx: Mutex::new(None),
+            foreign: Mutex::new(HashMap::new()),
+            foreign_timing: Mutex::new((FOREIGN_RELAY_GRACE, FOREIGN_RELAY_SWEEP)),
+            last_foreign_sweep: Mutex::new(None),
         })
+    }
+
+    /// Override the foreign idle policy (grace, sweep interval). Test seam
+    /// only — production keeps the official manager.go values.
+    pub fn set_foreign_idle_params(&self, grace: Duration, sweep_every: Duration) {
+        *self.foreign_timing.lock().unwrap_or_else(PoisonError::into_inner) = (grace, sweep_every);
     }
 
     fn bump(&self, f: impl FnOnce(&mut RelayCarrierStats)) {
@@ -2202,6 +2484,50 @@ impl RelayCarrier {
         self.attached.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 
+    /// 006 resource snapshot: attached lane count under a NON-BLOCKING probe
+    /// of the `attached` leaf. `None` = the leaf is busy → unknown. ONE leaf
+    /// is taken here and no other carrier lock is held, matching the field
+    /// docs' lock order (the caller must not hold a carrier lock either).
+    pub fn lane_count_try(&self) -> Option<usize> {
+        Some(try_lock_poison(&self.attached)?.len())
+    }
+
+    /// 006 resource snapshot: in-flight lane-open tasks under a NON-BLOCKING
+    /// probe of the `pending_opens` leaf. `None` = busy → unknown.
+    pub fn pending_open_count_try(&self) -> Option<usize> {
+        Some(try_lock_poison(&self.pending_opens)?.len())
+    }
+
+    /// 006 resource snapshot: live foreign relay client count under a
+    /// NON-BLOCKING probe of the `foreign` leaf. `None` = busy → unknown.
+    pub fn foreign_count_try(&self) -> Option<usize> {
+        Some(try_lock_poison(&self.foreign)?.len())
+    }
+
+    /// THE ACTUAL per-peer relay lane map for the status document: one
+    /// [`PeerRelayStatus`] per lane in [`RelayCarrier::attached`] — the peer
+    /// key → relay URL pairs the WG seam really received, in a deterministic
+    /// (public-key sorted) order. This is the ONLY honest per-peer relay
+    /// source: the remote's ADVERTISED URL ([`RelayCarrier::ads`]) and the
+    /// configured/home URL set say nothing about whether a path exists, and
+    /// a peer with no lane here has no entry. Takes exactly one leaf lock
+    /// (`attached`), holds it for the duration of the copy and takes no
+    /// other lock — callers must not hold a carrier lock (see the field
+    /// docs' lock order).
+    pub fn peer_relays(&self) -> Vec<PeerRelayStatus> {
+        let attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out: Vec<PeerRelayStatus> = attached
+            .iter()
+            .map(|(key, (_, via))| PeerRelayStatus {
+                pub_key_b64: key.clone(),
+                relay_url: via.clone(),
+            })
+            .collect();
+        // Deterministic document order (the attached table is a HashMap).
+        out.sort_by(|a, b| a.pub_key_b64.cmp(&b.pub_key_b64));
+        out
+    }
+
     /// Whether `client` is the client this orchestrator currently serves.
     fn has_client(&self, client: &crate::relay_client::RelayClient) -> bool {
         self.client
@@ -2210,6 +2536,23 @@ impl RelayCarrier {
             .as_ref()
             .map(|c| c.same_client(client))
             .unwrap_or(false)
+    }
+
+    /// Whether `client` is a client a lane may ride: the armed HOME client
+    /// or a LIVE foreign relay client (official manager.go keys per-peer
+    /// connections by relay instance). A lane open that resolves after its
+    /// foreign client was closed ([`RelayCarrier::close_foreign`] — idle
+    /// sweep / server disconnect / teardown) must NOT commit: the client is
+    /// gone from the table and the lane would be an orphan no sweep could
+    /// find. Lock order: caller holds `lifecycle`, this takes one leaf.
+    fn client_is_live(&self, client: &crate::relay_client::RelayClient) -> bool {
+        self.has_client(client)
+            || self
+                .foreign
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .any(|e| e.client.same_client(client))
     }
 
     /// (Re)arm with a relay client: detaches all lanes (presence does not
@@ -2282,6 +2625,13 @@ impl RelayCarrier {
             self.bump(|s| s.detach_ok += 1);
             hilog::emit("connector: relay carrier lane detached (peer left the map)");
         }
+        drop(attached);
+        // Advertisements of departed peers go with them (bounded memory; a
+        // returning peer re-advertises on its next OFFER/ANSWER).
+        self.ads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|k, _| keys.contains(k));
         drop(lifecycle);
     }
 
@@ -2298,9 +2648,17 @@ impl RelayCarrier {
     /// One `open_conn` + attach for `key` if no lane is attached yet.
     /// `true` = a lane is attached (maybe from an earlier pass).
     ///
+    /// Which RELAY SERVER the lane rides is decided per attempt
+    /// ([`RelayCarrier::lane_via`]: the controller's home relay — for a
+    /// remote-controller peer its ADVERTISED URL, dialed as a foreign
+    /// relay client when it differs from home, official
+    /// `Manager.OpenConn(serverAddress, peerKey)`).
+    ///
     /// Presence reconcile (upstream client lifecycle): an attached lane
     /// whose peer the server reported OFFLINE (`PeersWentOffline`) is
-    /// detached here. The relay server's came-online interest is ONE-SHOT
+    /// detached here — the offline check runs on the lane's OWN client
+    /// (foreign lanes report presence on the foreign client, not home).
+    /// The relay server's came-online interest is ONE-SHOT
     /// (consumed by the first `PeersOnline` delivery — only a NEW
     /// `SubscribePeerState` re-arms it), so a lane kept attached across the
     /// peer's offline window can never see the peer's return: this is the
@@ -2309,29 +2667,46 @@ impl RelayCarrier {
     /// fresh `open_conn`: it blocks in the §4.1 wait until the peer returns
     /// (fresh subscribe re-arms the interest → `PeersOnline` → presence
     /// restored → lane re-attached, egress accepted again), or fails typed
-    /// and backs off [`LANE_OPEN_RETRY`] before the next attempt.
+    /// and backs off [`LANE_OPEN_RETRY`] before the next attempt. The same
+    /// detach+re-open runs when the peer's advertised relay CHANGED (a
+    /// stale lane on the wrong server can never meet the peer).
     pub async fn ensure_lane(self: &std::sync::Arc<Self>, key: &str) -> bool {
-        let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
+        let Some(home) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
         else {
             return false;
         };
         let pid = crate::relay::PeerId::from_wg_pubkey_string(key);
-        if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(key) {
-            if !client.is_offline(&pid) {
-                return true;
+        // Resolve the lane's relay server (may START a foreign client —
+        // official manager.go `openConnVia` get-or-create).
+        let Some((client, via)) = self.lane_client(&home, key) else {
+            return false;
+        };
+        {
+            let attached = self.attached.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((lane, lane_via)) = attached.get(key) {
+                if lane_via == &via && !lane.client().is_offline(&pid) {
+                    return true;
+                }
             }
-            // PeersWentOffline after attach: the lane cannot serve the peer
-            // and cannot learn about its return — detach so the re-open
-            // below re-subscribes (idempotent: the attached table is keyed,
-            // open_conn guards duplicate pending subscribes, and the WG
-            // seam attach is an upsert).
-            self.attached
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(key);
+        }
+        // Stale lane (peer went offline on this client, or the choice moved
+        // to another relay): detach so the re-open below re-subscribes on
+        // the CURRENT server (idempotent: the attached table is keyed,
+        // open_conn guards duplicate pending subscribes, and the WG seam
+        // attach is an upsert).
+        if self
+            .attached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key)
+            .is_some()
+        {
             self.wg.detach_carrier(key);
             self.bump(|s| s.detach_ok += 1);
-            hilog::emit("connector: relay carrier lane detached (peer went offline)");
+            hilog::emit(&format!(
+                "connector: relay carrier lane detached (offline or relay changed)|peer={}|relay={}",
+                pid, via
+            ));
         }
         if self
             .open_retry_after
@@ -2342,13 +2717,20 @@ impl RelayCarrier {
         {
             return false;
         }
+        // The per-peer relay selection line (task requirement): which relay
+        // URL this peer's lane uses, and whether it is our home relay.
+        let is_home = client.same_client(&home);
+        hilog::emit(&format!(
+            "connector: relay lane opening|peer={}|relay={}|home={}",
+            pid, via, is_home
+        ));
         match client.open_conn(&pid).await {
             Ok(()) => {
                 self.open_retry_after
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(key);
-                self.commit_lane_open(key, pid, client)
+                self.commit_lane_open(key, pid, client, via)
             }
             Err(e) => {
                 self.open_retry_after
@@ -2360,12 +2742,328 @@ impl RelayCarrier {
                     s.last_open_error = Some(relay_error_class_token(e.class()));
                 });
                 hilog::emit(&format!(
-                    "connector: relay lane open failed|peer={} class={}",
+                    "connector: relay lane open failed|peer={} relay={} class={}",
                     pid,
+                    via,
                     relay_error_class_token(e.class())
                 ));
                 false
             }
+        }
+    }
+
+    /// The relay URL a lane to `key` must ride, as a canonical string
+    /// (decision only — NEVER starts a foreign client; safe under the
+    /// lifecycle guard). `None` = no home client armed.
+    fn lane_via(&self, home: &crate::relay_client::RelayClient, key: &str) -> Option<String> {
+        let advertised = self
+            .ads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned();
+        let ctx = self.foreign_ctx.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(ctx) = ctx.as_ref() else {
+            return home.stats().current_url;
+        };
+        let current = home.stats().current_url;
+        match choose_relay_url(
+            advertised.as_deref(),
+            remote_is_controller(&ctx.attach.wg_pubkey_b64, key),
+            current.as_deref(),
+            &ctx.urls,
+        ) {
+            RelayChoice::Home => current,
+            RelayChoice::Foreign(url) => Some(url.config_string()),
+        }
+    }
+
+    /// Resolve the lane's relay server to a LIVE client (home or foreign —
+    /// foreign is created here when missing, official manager.go
+    /// `openConnVia`: publish-then-dial, re-use per URL). `None` = carrier
+    /// unarmed or the foreign client could not be started.
+    fn lane_client(
+        self: &std::sync::Arc<Self>,
+        home: &crate::relay_client::RelayClient,
+        key: &str,
+    ) -> Option<(crate::relay_client::RelayClient, String)> {
+        let via = self.lane_via(home, key)?;
+        // The decision landed on our OWN live relay session (a Home choice,
+        // or an advertisement canonically equal to the connected URL): ride
+        // the home client — never dial a SECOND client to our own relay
+        // server (official manager.go reuses the connected instance,
+        // manager.go:430-436).
+        if home
+            .stats()
+            .current_url
+            .as_deref()
+            .is_some_and(|current| same_relay_url(&via, current))
+        {
+            return Some((home.clone(), via));
+        }
+        if let Some(url) = self
+            .foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&via)
+        {
+            return Some((url.client.clone(), via));
+        }
+        let Ok(parsed) = crate::relay_client::RelayUrl::parse(&via) else {
+            // Unparsable (no live home session either) — nothing to dial;
+            // ride the home client, fail-closed at its `open_conn`.
+            return Some((home.clone(), via));
+        };
+        match self.foreign_client(&parsed) {
+            Some(client) => Some((client, via)),
+            None => Some((home.clone(), via)),
+        }
+    }
+
+    /// Build + start ONE relay client for an explicit URL list from the
+    /// injected seams — the foreign twin of `ConnectorShared::relay_start`:
+    /// the SAME management token store, the SAME peerID (our WG public key)
+    /// and the SAME injected clock / dialer / TLS connector, so a foreign
+    /// client is indistinguishable from home on the wire (official
+    /// manager.go `openConnVia` reuses one config per relay instance).
+    /// Requires a running tokio runtime (called from the lane-open path).
+    fn start_relay_client(
+        attach: &RelayAttach,
+        urls: &[String],
+        token: crate::relay::AuthToken,
+    ) -> Result<crate::relay_client::RelayClient, crate::relay_client::RelayClientError> {
+        let mut cfg = crate::relay_client::RelayClientConfig::new(
+            urls,
+            &attach.wg_pubkey_b64,
+            token,
+        )?
+        .with_clock(attach.materials.clock.clone())
+        .with_dialer(attach.materials.dialer.clone());
+        if let Some(tls) = attach.materials.tls.as_ref() {
+            cfg = cfg.with_tls(tls.clone());
+        }
+        crate::relay_client::RelayClient::start(cfg)
+    }
+
+    /// Get-or-create the foreign relay client for `url` (keyed by the
+    /// CANONICAL URL string — re-use per relay server, official
+    /// `relayClients` map). The client uses the SAME management token and
+    /// injected seams as home (one token store) and gets its own inbound pump
+    /// feeding [`RelayCarrier::ingest`].
+    ///
+    /// Check → dial → insert run in ONE critical section under the documented
+    /// order (`lifecycle` first, then the `foreign` leaf): two peers whose
+    /// advertisements resolve to the same relay URL must never both dial it —
+    /// the loser's client would be untracked and no sweep could close it (an
+    /// orphan outbound relay connection, N13 plan §4). The `lifecycle` read is
+    /// what makes a DISARMED carrier refuse to create one at all:
+    /// [`RelayCarrier::shutdown`] drains the table while holding that guard,
+    /// so no client (and no pump task) can be born past teardown. Nothing here
+    /// awaits (`RelayClient::start` spawns the worker and returns;
+    /// `tokio::spawn` neither awaits nor polls), so the guards may be held.
+    fn foreign_client(
+        self: &std::sync::Arc<Self>,
+        url: &crate::relay_client::RelayUrl,
+    ) -> Option<crate::relay_client::RelayClient> {
+        let canonical = url.config_string();
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*lifecycle {
+            hilog::emit(&format!(
+                "connector: foreign relay refused (carrier disarmed)|url={}",
+                canonical
+            ));
+            return None;
+        }
+        let mut foreign = self.foreign.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = foreign.get(&canonical) {
+            return Some(entry.client.clone());
+        }
+        let ctx = self.foreign_ctx.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(ctx) = ctx else {
+            hilog::emit(&format!(
+                "connector: foreign relay unavailable (no spawn context) — lane rides home|url={}",
+                canonical
+            ));
+            return None;
+        };
+        let client = Self::start_relay_client(
+            &ctx.attach,
+            &[canonical.clone()],
+            ctx.token.clone(),
+        )
+        .inspect_err(|e| {
+            hilog::emit(&format!(
+                "connector: foreign relay start failed ({e:?}) — lane rides home|url={}",
+                canonical
+            ));
+        })
+        .ok()?;
+        let pump = tokio::spawn(foreign_relay_pump(
+            self.clone(),
+            canonical.clone(),
+            client.clone(),
+        ));
+        foreign.insert(
+            canonical.clone(),
+            ForeignRelayEntry { client: client.clone(), pump, created: std::time::Instant::now() },
+        );
+        drop(foreign);
+        drop(lifecycle);
+        self.bump(|s| s.foreign_opened += 1);
+        hilog::emit(&format!(
+            "connector: foreign relay client started|url={}",
+            canonical
+        ));
+        Some(client)
+    }
+
+    /// Idle sweep (official manager.go `cleanUpUnusedRelays`, driven from
+    /// the pump tick): a foreign client older than the grace window with
+    /// NO attached lane riding it is stopped and dropped — no orphan
+    /// outbound relay connection (N13 plan §4).
+    fn sweep_foreign_if_due(&self) {
+        let now = std::time::Instant::now();
+        let (grace, sweep_every) = *self.foreign_timing.lock().unwrap_or_else(PoisonError::into_inner);
+        {
+            let mut last = self.last_foreign_sweep.lock().unwrap_or_else(PoisonError::into_inner);
+            if last.is_some_and(|t| now.duration_since(t) < sweep_every) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let entries: Vec<(String, crate::relay_client::RelayClient)> = self
+            .foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(url, e)| (url.clone(), e.client.clone()))
+            .collect();
+        for (url, client) in entries {
+            if now.duration_since(self.foreign_created(&url).unwrap_or(now)) < grace {
+                continue;
+            }
+            let used = self
+                .attached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .any(|(lane, _)| lane.client().same_client(&client));
+            if !used {
+                self.close_foreign(&url, "unused");
+            }
+        }
+    }
+
+    /// `created` anchor of a tracked foreign client (sweep grace input).
+    fn foreign_created(&self, url: &str) -> Option<std::time::Instant> {
+        self.foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(url)
+            .map(|e| e.created)
+    }
+
+    /// Close + drop one foreign client: its lanes detach first (fail-closed
+    /// — the bearer must not look like a path), then the client stops
+    /// (graceful relay Close frame) and its pump task is reaped. Under the
+    /// lifecycle lock (invalidating transition for late lane commits).
+    fn close_foreign(&self, url: &str, why: &str) {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = self.foreign.lock().unwrap_or_else(PoisonError::into_inner).remove(url)
+        else {
+            return;
+        };
+        let stale: Vec<String> = self
+            .attached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, (lane, _))| lane.client().same_client(&entry.client))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in stale {
+            self.attached.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
+            self.wg.detach_carrier(&key);
+            self.bump(|s| s.detach_ok += 1);
+        }
+        drop(lifecycle);
+        self.retire_foreign(url, entry, why);
+    }
+
+    /// The stop half of [`RelayCarrier::close_foreign`]: graceful Close +
+    /// pump reap + accounting, with NO carrier lock held (the entry is
+    /// already out of the table and its lanes are already detached, so this
+    /// section cannot race a lane commit). Never call it while holding
+    /// `lifecycle` — [`RelayCarrier::shutdown`] drains the table under that
+    /// guard and retires the drained entries HERE, after dropping it.
+    fn retire_foreign(&self, url: &str, entry: ForeignRelayEntry, why: &str) {
+        entry.client.stop();
+        entry.pump.abort();
+        self.bump(|s| s.foreign_closed += 1);
+        hilog::emit(&format!(
+            "connector: foreign relay client closed ({why})|url={}",
+            url
+        ));
+    }
+
+    /// The foreign client's own pump ended (`recv()` drained to `None` ⇒
+    /// its worker exited: stopped or terminal `Dead`) — official
+    /// `onServerDisconnected` → `evictForeignRelay`: drop the entry and its
+    /// lanes so the next pass re-dials fresh instead of reusing a dead
+    /// client.
+    fn foreign_ended(&self, url: &str) {
+        let present = self
+            .foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(url);
+        if present {
+            self.close_foreign(url, "server-disconnected");
+        }
+    }
+
+    /// Stop EVERY foreign client (management revoked relay) — no orphan
+    /// outbound relay connection survives. Called from the sync path's
+    /// relay-removed branch, NOT from [`RelayCarrier::shutdown`] (which drains
+    /// the table under its own disarm guard; see the note there).
+    pub fn stop_foreign_all(&self, why: &str) {
+        let urls: Vec<String> =
+            self.foreign.lock().unwrap_or_else(PoisonError::into_inner).keys().cloned().collect();
+        for url in urls {
+            self.close_foreign(&url, why);
+        }
+    }
+
+    /// Live foreign relay client count (observability / reuse assertions).
+    pub fn foreign_count(&self) -> usize {
+        self.foreign.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Canonical URLs of the live foreign relay clients (observability).
+    pub fn foreign_urls(&self) -> Vec<String> {
+        self.foreign
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Arm/refresh the foreign-relay spawn context (called from the sync
+    /// path on every relay advertisement): the same token the home client
+    /// authenticates with, plus the home configured URL set. A token
+    /// rotation propagates to every LIVE foreign client too (official
+    /// shares one token store, manager.go `tokenStore`).
+    pub fn set_foreign_ctx(
+        &self,
+        attach: RelayAttach,
+        urls: Vec<crate::relay_client::RelayUrl>,
+        token: crate::relay::AuthToken,
+    ) {
+        *self.foreign_ctx.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(ForeignRelayCtx { attach, urls, token: token.clone() });
+        for entry in self.foreign.lock().unwrap_or_else(PoisonError::into_inner).values() {
+            entry.client.update_token(token.clone());
         }
     }
 
@@ -2379,12 +3077,22 @@ impl RelayCarrier {
     /// invalid state and drops, or (b) commits BEFORE the invalidator — whose
     /// detach, under the same lock, then removes the lane. Either way a
     /// removed/stopped/swapped carrier is never resurrected by a late open.
-    /// Lock order: lifecycle → one leaf at a time; no await under any lock.
-    fn commit_lane_open(&self, key: &str, pid: crate::relay::PeerId, client: crate::relay_client::RelayClient) -> bool {
+    /// `via` (the canonical relay URL the lane rides) is stored WITH the
+    /// lane: the attached table is the stale-lane reconcile input (a lane
+    /// on the wrong server is detached and re-opened) and the foreign
+    /// sweep's liveness input. Lock order: lifecycle → one leaf at a time;
+    /// no await under any lock.
+    fn commit_lane_open(
+        &self,
+        key: &str,
+        pid: crate::relay::PeerId,
+        client: crate::relay_client::RelayClient,
+        via: String,
+    ) -> bool {
         let lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
         let still_wanted =
             *lifecycle
-                && self.has_client(&client)
+                && self.client_is_live(&client)
                 && self
                     .peers
                     .lock()
@@ -2406,7 +3114,7 @@ impl RelayCarrier {
                 self.attached
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(key.to_string(), lane);
+                    .insert(key.to_string(), (lane, via));
                 self.bump(|s| {
                     s.lanes_open_ok += 1;
                     s.attach_ok += 1;
@@ -2475,10 +3183,27 @@ impl RelayCarrier {
                 continue;
             }
             let pid = crate::relay::PeerId::from_wg_pubkey_string(&key);
-            if self.attached.lock().unwrap_or_else(PoisonError::into_inner).contains_key(&key)
-                && !client.is_offline(&pid)
-            {
-                continue;
+            // A live lane is skipped only while it is BOTH healthy on ITS OWN
+            // relay client — a foreign lane reports presence on the foreign
+            // client, so asking the home client would freeze a lane the
+            // foreign relay already declared offline — AND still on the relay
+            // server the CURRENT choice resolves to: a changed advertisement
+            // (or a home/foreign flip) must move the lane, and `ensure_lane`
+            // is what detaches and re-opens it. `lane_via` is decision-only
+            // (it never dials), so this stays inside the lifecycle guard's
+            // await-free discipline.
+            let live_lane = self
+                .attached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&key)
+                .map(|(lane, via)| (lane.client().clone(), via.clone()));
+            if let Some((lane_client, lane_via)) = live_lane {
+                if !lane_client.is_offline(&pid)
+                    && self.lane_via(&client, &key).as_deref() == Some(lane_via.as_str())
+                {
+                    continue;
+                }
             }
             // Single short critical section: vacant check → spawn → insert
             // (generational entry — see `finish_open`; an aborted-but-never-
@@ -2567,13 +3292,22 @@ impl RelayCarrier {
         hilog::emit("connector: relay carrier lanes detached");
     }
 
-    /// Pump ONE inbound relay frame into the WG device. `false` = the relay
-    /// client is gone/stopped (the pump exits on that).
+    /// Pump ONE inbound relay frame of the HOME relay client into the WG
+    /// device. `false` = the relay client is gone/stopped (the pump exits on
+    /// that).
     pub async fn pump_once(&self) -> bool {
         let Some(client) = self.client.lock().unwrap_or_else(PoisonError::into_inner).clone()
         else {
             return false;
         };
+        self.pump_once_via(&client).await
+    }
+
+    /// [`RelayCarrier::pump_once`] for an EXPLICIT client (home or a foreign
+    /// relay client — each foreign client has its own inbound pump feeding
+    /// the same [`RelayCarrier::ingest`] reverse map). `false` = that
+    /// client's inbound channel drained (worker stopped / terminal `Dead`).
+    pub async fn pump_once_via(&self, client: &crate::relay_client::RelayClient) -> bool {
         let Some((sender, payload)) = client.recv().await else {
             return false;
         };
@@ -2628,10 +3362,20 @@ impl RelayCarrier {
     }
 
     /// Teardown: pump aborted + every pending open aborted + every lane
-    /// detached (connector stop / worker end / host-driven teardown).
-    /// Idempotent. Under the lifecycle lock (disarm): mutually exclusive with
-    /// the lane-open commit — a commit either finished before this (detached
-    /// here) or sees the disarmed carrier and drops.
+    /// detached (connector stop / worker end / host-driven teardown) + every
+    /// foreign relay client stopped. Idempotent. Under the lifecycle lock
+    /// (disarm): mutually exclusive with the lane-open commit — a commit
+    /// either finished before this (detached here) or sees the disarmed
+    /// carrier and drops.
+    ///
+    /// DEADLOCK CONTRACT: [`RelayCarrier::close_foreign`] takes `lifecycle`
+    /// itself, so it must NEVER run while this method holds it. The foreign
+    /// table is therefore DRAINED inside the disarmed critical section and the
+    /// clients are retired after the guard is released. Draining under the
+    /// guard (instead of closing them before it) is also what makes the
+    /// teardown airtight: `foreign_client` refuses a disarmed carrier under
+    /// that same guard, so no lane open in flight can create a client — and
+    /// with it a pump task and an outbound relay connection — past this point.
     pub fn shutdown(&self) {
         let mut lifecycle = self.lifecycle.lock().unwrap_or_else(PoisonError::into_inner);
         *lifecycle = false;
@@ -2640,6 +3384,12 @@ impl RelayCarrier {
         }
         self.abort_pending_lanes();
         self.detach_all_locked(&lifecycle);
+        let foreign: Vec<(String, ForeignRelayEntry)> =
+            self.foreign.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
+        drop(lifecycle);
+        for (url, entry) in foreign {
+            self.retire_foreign(&url, entry, "teardown");
+        }
     }
 }
 
@@ -2692,6 +3442,55 @@ async fn relay_carrier_pump(carrier: std::sync::Arc<RelayCarrier>) {
     }
 }
 
+/// Inbound pump for ONE foreign relay client (official manager.go
+/// `RelayTrack`): every frame it receives is fed into the carrier's ingest
+/// reverse map (the same WG carrier ingress the home pump uses), and its
+/// tick drives the foreign idle sweep — the home pump only serves the home
+/// client, so without this task a foreign client's frames would never
+/// arrive and its cleanup would never run. Cadence matches the home pump
+/// (500 ms); the sweep itself gates at [`FOREIGN_RELAY_SWEEP`].
+///
+/// Exits when `client.recv()` drains to `None` (the worker stopped — relay
+/// Close / terminal `Dead`) or the state machine is already `Dead`: the
+/// carrier then drops the entry and its lanes
+/// ([`RelayCarrier::foreign_ended`] → official `onServerDisconnected` →
+/// `evictForeignRelay`), so the next lane pass re-dials fresh instead of
+/// reusing a dead client. A client closed by the sweep aborts this task —
+/// the sweep already detached its lanes.
+async fn foreign_relay_pump(
+    carrier: std::sync::Arc<RelayCarrier>,
+    url: String,
+    client: crate::relay_client::RelayClient,
+) {
+    loop {
+        if client.state() == crate::relay_client::RelayState::Dead {
+            carrier.foreign_ended(&url);
+            return;
+        }
+        tokio::select! {
+            // pump this foreign client's inbound frames as they arrive;
+            // `false` = its inbound channel drained (worker gone)
+            kept = async {
+                loop {
+                    if !carrier.pump_once_via(&client).await {
+                        return false;
+                    }
+                }
+            } => {
+                if !kept {
+                    carrier.foreign_ended(&url);
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(core::time::Duration::from_millis(500)) => {
+                // idle sweep: close foreign relays with no live lane and no
+                // fresh use (no orphan outbound relay connection)
+                carrier.sweep_foreign_if_due();
+            }
+        }
+    }
+}
+
 trait LockPoison<T> {
     fn lock_poison(&self) -> MutexGuard<'_, T>;
 }
@@ -2702,6 +3501,103 @@ impl<T> LockPoison<T> for Mutex<T> {
     fn lock_poison(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// One ACTUAL relay lane in the status document's `peer_relays` tail: the
+/// peer's PUBLIC WireGuard key and the relay URL its attached lane rides —
+/// the ACTUAL per-peer relay, read from the live lane table
+/// ([`RelayCarrier::peer_relays`]), never from a remote advertisement or a
+/// global home URL. A peer with no attached lane of its own has NO entry
+/// (the UI's "this peer is not relayed" signal). Both values are public
+/// routing material — `relay_url` is the canonical configured form
+/// (`rel://host:port` / `rels://host:port`) and carries NO token material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerRelayStatus {
+    pub pub_key_b64: String,
+    pub relay_url: String,
+}
+
+/// The `peer_relays` tail: `null` (no relay carrier armed at all — the
+/// array would be an invented statement) or the actual lanes, sorted by
+/// public key so the document is deterministic.
+fn peer_relays_json(v: Option<&[PeerRelayStatus]>) -> String {
+    let Some(v) = v else {
+        return "\"peer_relays\":null".to_string();
+    };
+    let entries: Vec<String> = v
+        .iter()
+        .map(|p| {
+            format!(
+                "{{{},{}}}",
+                jstr("pub_key_b64", &p.pub_key_b64),
+                jstr("relay_url", &p.relay_url),
+            )
+        })
+        .collect();
+    format!("\"peer_relays\":[{}]", entries.join(","))
+}
+
+/// One selected-pair endpoint as `"key":{"type":...,"address":...,"port":...}`
+/// (`type` = [`crate::ice::CandidateType::as_str`]: host/srflx/prflx/relay).
+/// `None` renders the honest `null`: a pair that was NOT selected has no
+/// endpoint, and the first collected candidate is never substituted for it
+/// (the detail's own contract — `crate::peer_conn::PeerIceDetail`).
+fn ice_endpoint_json(key: &str, v: Option<&IceCandidateEndpoint>) -> String {
+    match v {
+        Some(e) => format!(
+            "\"{key}\":{{{},{},{}}}",
+            jstr("type", e.typ.as_str()),
+            jstr("address", &e.address),
+            jnum("port", e.port as u64),
+        ),
+        None => format!("\"{key}\":null"),
+    }
+}
+
+/// One per-peer ICE detail as a JSON object (public material only: public
+/// WireGuard key, state token, role, the selected pair's endpoint types +
+/// ip:port, the landing/reachability facts and the class-only last error).
+///
+/// No latency and no state-change timestamp: neither is retained anywhere in
+/// the session/orchestrator (see `crate::peer_conn::PeerIceDetail` docs), so
+/// inventing one here is exactly what the surface must not do. `reachable` is
+/// carried VERBATIM from the detail (derived as `Connected && endpoint_applied`
+/// in `crate::peer_conn`): a Disconnected peer that retains its selected
+/// endpoint still reads `reachable:false` — the serializer never upgrades a
+/// retained pair into a live connection.
+fn ice_detail_json(d: &PeerIceDetail) -> String {
+    format!(
+        "{{{},{},{},{},{},{},{},{}}}",
+        jstr("pub_key", &d.pub_key),
+        jstr("state", d.state.as_str()),
+        match d.controlling {
+            Some(c) => jbool("controlling", c),
+            None => "\"controlling\":null".to_string(),
+        },
+        ice_endpoint_json("selected_local", d.selected_local.as_ref()),
+        ice_endpoint_json("selected_remote", d.selected_remote.as_ref()),
+        jbool("endpoint_applied", d.endpoint_applied),
+        jbool("reachable", d.reachable),
+        format!(
+            "\"last_error\":{}",
+            d.last_error
+                .as_ref()
+                .map(ErrorClass::to_json)
+                .unwrap_or_else(|| "null".to_string())
+        ),
+    )
+}
+
+/// The `ice_peers` tail: `null` (no ICE orchestrator at all — an empty array
+/// would claim one exists), `[]` (orchestrator armed with ZERO peers) or one
+/// object per peer, already public-key sorted by
+/// [`crate::peer_conn::PeerIceOrchestrator::ice_details`].
+fn ice_peers_json(v: Option<&[PeerIceDetail]>) -> String {
+    let Some(v) = v else {
+        return "\"ice_peers\":null".to_string();
+    };
+    let entries: Vec<String> = v.iter().map(ice_detail_json).collect();
+    format!("\"ice_peers\":[{}]", entries.join(","))
 }
 
 /// Immutable snapshot of the connector status (the `connector_status()`
@@ -2744,6 +3640,26 @@ pub struct ConnectorStatus {
     /// N13-D1: relay client section (enabled/state/urls/counters/token —
     /// [`RelayStatus`]; counts and shape tokens only, no token material).
     pub relay: RelayStatus,
+    /// THE ACTUAL per-peer relay lane map (`null` = no carrier armed at all,
+    /// `[]` = carrier armed with no lane attached): one
+    /// [`PeerRelayStatus`] per attached lane, sorted by public key. Read
+    /// from [`RelayCarrier::peer_relays`] — the live attached-lane table —
+    /// NEVER from the remote advertisement map (`relay_ads`) or from a
+    /// global home URL: an advertised or merely configured relay is not a
+    /// path. A peer whose lane is attached but idle still has an entry
+    /// (the lane exists); a peer with no entry has no relay lane of its own.
+    pub peer_relays: Option<Vec<PeerRelayStatus>>,
+    /// 2026-10-07 (per-peer ICE detail): the per-peer ICE DETAIL table
+    /// (`null` = no ICE orchestrator at all, `[]` = orchestrator armed with
+    /// ZERO peers, otherwise one entry per peer, public-key sorted) —
+    /// [`crate::peer_conn::PeerIceDetail`]: state token, role, the selected
+    /// pair's endpoint types + ip:port (`null` = not selected — never the
+    /// first candidate), endpoint landing and reachability facts, class-only
+    /// last error. Read from the SAME orchestrator lock as `ice` (one lock,
+    /// one snapshot) and TAIL-appended after `peer_relays`; every pre-existing
+    /// field keeps its position. Public material only: no ufrag/password, no
+    /// fd, no token.
+    pub ice_peers: Option<Vec<PeerIceDetail>>,
 }
 
 /// N3-7: single definition of "the connector died on its own".
@@ -2766,11 +3682,69 @@ fn opt_unix_json(key: &str, v: Option<i64>) -> String {
 }
 
 impl ConnectorStatus {
+    /// THE connector-status assembly (production AND tests): refreshes the
+    /// default-route gate against LIVE data-plane readiness, then reads the
+    /// per-component summaries and the shared state under the documented
+    /// lock order (`inner` first, then one leaf at a time — see the
+    /// [`ConnectorShared`] field order). `peer_relays` is injected by the
+    /// caller ([`ConnectorHandle::status`]) because it belongs to the relay
+    /// carrier, which is read WITHOUT the shared lock held. The ICE leaf is
+    /// taken EXACTLY ONCE, for both the `ice` summary and the `ice_peers`
+    /// details (see below).
+    fn snapshot(
+        shared: &ConnectorShared,
+        wg: &dyn WgPeerApplier,
+        peer_relays: Option<Vec<PeerRelayStatus>>,
+    ) -> ConnectorStatus {
+        shared.refresh_net_gate(wg);
+        let g = shared.lock();
+        let running = shared.is_running();
+        let state = g.machine.state();
+        // ONE ice-orchestrator lock for BOTH the frozen `ice` summary and the
+        // new per-peer `ice_peers` details: two separate acquisitions could
+        // observe a different peer set / selected pair in between, so the
+        // counts and the details would describe two different snapshots.
+        // Lock order is the documented one — `inner` is held, then this single
+        // leaf (the same nesting `refresh_net_gate_at` already uses); the
+        // guard is released before the signal/wg/relay leaves are read and no
+        // orchestrator method is called under it beyond these two pure reads.
+        let (ice, ice_peers) = match shared.ice.get() {
+            Some(orch) => {
+                let orch = orch.lock_poison();
+                (orch.summary(), Some(orch.ice_details()))
+            }
+            None => (IceOrchestratorSummary::default(), None),
+        };
+        ConnectorStatus {
+            running,
+            state,
+            started_at_unix: g.started_at_unix,
+            last_update_unix: g.last_update_unix,
+            peer_count: g.peer_count,
+            route_count: g.route_count,
+            reconnects: g.reconnects,
+            last_error: g.last_error,
+            deadline: g.deadline,
+            renew_attempts: g.renew_attempts,
+            wg_apply_failed: g.wg_apply_failed,
+            wg_apply_errors: g.wg_apply_errors,
+            logout_ok: g.logout_ok,
+            terminal: is_terminal_state(running, state),
+            ice,
+            signal: shared.signal.get().map(|rt| rt.status()).unwrap_or_default(),
+            wg: wg.dataplane_status().unwrap_or_default(),
+            recreate: g.recreate.clone(),
+            relay: shared.relay_status(),
+            peer_relays,
+            ice_peers,
+        }
+    }
+
     /// The `connector_status()` JSON document. Count/class-only fields —
     /// no secret material, no server messages (module discipline).
     pub fn to_json(&self) -> String {
         format!(
-            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+            "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
             jbool("running", self.running),
             jstr("state", self.state.as_str()),
             opt_unix_json("started_at_unix", self.started_at_unix),
@@ -2808,6 +3782,16 @@ impl ConnectorStatus {
             // tests pin, relay last in the document).
             format!("\"relay_advertised\":{}", self.relay.advertised_to_json()),
             format!("\"relay\":{}", self.relay.to_json()),
+            // 2026-10-06 (netbird status -d): the ACTUAL per-peer relay lane
+            // map, TAIL-appended after the frozen `relay` object — additive
+            // only, every pre-existing field keeps its position. Sourced
+            // from the live attached-lane table, never from advertisements.
+            peer_relays_json(self.peer_relays.as_deref()),
+            // 2026-10-07 (per-peer ICE detail): the per-peer ICE table,
+            // TAIL-appended after `peer_relays` — additive only, every
+            // pre-existing field keeps its position. Same three-state shape:
+            // `null` = no orchestrator, `[]` = orchestrator with zero peers.
+            ice_peers_json(self.ice_peers.as_deref()),
         )
     }
 }
@@ -3513,6 +4497,11 @@ struct SignalRuntime {
     /// 出帧队列接收端（maybe_start 时交给 worker；已取走即已启动）。
     outbox: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>>>,
     state: Arc<Mutex<SignalLinkStatus>>,
+    /// N13-D3: the connector's per-peer advertised-relay map
+    /// ([`ConnectorShared::relay_ads`]) — the receive path records every
+    /// OFFER/ANSWER `relayServerAddress` here, and the relay carrier reads
+    /// the SAME map for its per-peer relay-server choice.
+    ads: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl SignalRuntime {
@@ -3520,6 +4509,7 @@ impl SignalRuntime {
         materials: SignalLinkMaterials,
         exchange: Arc<RealSignalExchange>,
         outbox: tokio::sync::mpsc::UnboundedReceiver<SignalOutgoing>,
+        ads: Arc<Mutex<HashMap<String, String>>>,
     ) -> Self {
         SignalRuntime {
             materials: {
@@ -3534,6 +4524,7 @@ impl SignalRuntime {
             exchange,
             outbox: Arc::new(tokio::sync::Mutex::new(outbox)),
             state: Arc::new(Mutex::new(SignalLinkStatus::default())),
+            ads,
         }
     }
 
@@ -3594,6 +4585,7 @@ impl SignalRuntime {
         };
         let state = self.state.clone();
         let orch_cb = orch.clone();
+        let ads_cb = self.ads.clone();
         let on_event: Arc<dyn Fn(SignalLinkEvent) + Send + Sync> = Arc::new(move |ev| match ev {
             SignalLinkEvent::DialFailed(_) => {
                 // 初始受保护拨号失败：fail-closed，记录分类后由 worker 退避重试
@@ -3604,7 +4596,7 @@ impl SignalRuntime {
                 orch_cb.lock_poison().set_signal_ready(true);
                 hilog::emit("connector: signal stream registered (ice initiation armed)");
             }
-            SignalLinkEvent::Message(m) => route_signal_message(&orch_cb, &m),
+            SignalLinkEvent::Message(m) => route_signal_message(&orch_cb, &ads_cb, &m),
             SignalLinkEvent::Malformed => {
                 // 帧级失败已上报、流保持（crate::signal；grpc.go:600-602）
                 hilog::emit("connector: signal malformed frame (stream stays up)");
@@ -3662,7 +4654,11 @@ impl SignalRuntime {
 /// 该键匹配 peer（engine.go:2043-2045 按消息 key 找 peerConn 的同型；
 /// 未知 key 由编排层丢弃并计数）。HEARTBEAT/MODE/GO_IDLE 与 ICE 无关
 /// （engine.go:2036-2040 心跳短路；GO_IDLE 走 connMgr，非本增量）。
-fn route_signal_message(orch: &Mutex<PeerIceOrchestrator>, m: &SignalMessage) {
+fn route_signal_message(
+    orch: &Mutex<PeerIceOrchestrator>,
+    ads: &Mutex<HashMap<String, String>>,
+    m: &SignalMessage,
+) {
     use crate::signal::proto::body::Type;
     let kind = match m.kind {
         Type::Offer => PeerSignalKind::Offer,
@@ -3670,6 +4666,32 @@ fn route_signal_message(orch: &Mutex<PeerIceOrchestrator>, m: &SignalMessage) {
         Type::Candidate => PeerSignalKind::Candidate,
         _ => return,
     };
+    // N13-D3 ordering: the advertisement is recorded BEFORE the frame reaches
+    // the ICE orchestrator. Upstream stamps `relayServerAddress` into every
+    // OFFER and ANSWER (handshaker.go:211,218) and a receiver opens its relay
+    // lane toward us on the strength of a non-empty value
+    // (worker_relay.go:122-127 → :69); CANDIDATE/HEARTBEAT frames never carry
+    // it. Recording first means the lane-decision input can never lag the
+    // frame that announced it; the lane itself is still opened (and, for an
+    // already attached lane, re-decided — see `spawn_pending_lanes`) on the
+    // carrier's own clock, so an advertisement that arrives after the first
+    // lane attempt moves the lane instead of being lost.
+    if matches!(kind, PeerSignalKind::Offer | PeerSignalKind::Answer) {
+        let advertised = m.relay_server_address.as_deref().map(str::trim).filter(|u| !u.is_empty());
+        if let Some(url) = advertised {
+            let previous = ads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(m.from_key.clone(), url.to_string());
+            if previous.as_deref() != Some(url) {
+                hilog::emit(&format!(
+                    "connector: relay advertisement recorded|peer={}|url={}",
+                    crate::relay::PeerId::from_wg_pubkey_string(&m.from_key),
+                    url
+                ));
+            }
+        }
+    }
     let now = crate::sys::mono_ms();
     // Frame-level diagnostics: everything else about a stalled negotiation is
     // silent (device run 5: both sides looped on negotiation-start-timeout
@@ -3755,6 +4777,12 @@ pub struct ConnectorHandle {
     host: Arc<dyn ConfigApplier>,
     /// Network-change generation watched by the management worker.
     network_change: tokio::sync::watch::Sender<u64>,
+    /// 006: this handle's START GENERATION — the value of the process-global
+    /// successful-start counter taken at spawn, so two starts in one process
+    /// never share it. It is an IDENTITY, not a resource measure: it is NOT a
+    /// live task/thread count and `generation - 1` says nothing about what is
+    /// still running (see [`connector_resource_status_json`]).
+    generation: u64,
     management_factory: Arc<dyn ManagementFactory>,
     /// Latest logged-in management client. Held for the N2 A-trigger M
     /// column ([`ConnectorATrigger::management_round_trip`], frozen design
@@ -3902,6 +4930,10 @@ impl ConnectorHandle {
         // N2-H: the session's INTERNAL management dial address, read BEFORE
         // the factory is moved into the worker/renewal tasks.
         let management_dial = factory.dial_address();
+        // 006: successful-start identity + cumulative start counter. Taken
+        // BEFORE anything can fail so a spawn that reaches this line is one
+        // start; the counter is process-global and outlives the handle.
+        let generation = STARTS_TOTAL.fetch_add(1, Ordering::AcqRel) + 1;
         let shared = Arc::new(ConnectorShared::new(force_default_route, relay_attach));
         // N13-D2: with the opt-in, the carrier orchestrator needs the WG
         // seam + the runtime (used from the sync path when the first relay
@@ -3964,6 +4996,7 @@ impl ConnectorHandle {
                                 },
                                 exchange.clone(),
                                 rx,
+                                shared.relay_ads.clone(),
                             ));
                             let _ = shared.signal.set(rt);
                             exchange
@@ -3988,6 +5021,15 @@ impl ConnectorHandle {
             }
         };
         let _ = shared.ice.set(ice.clone());
+        // N5c glare fix: the ICE orchestrator decides controlling/controlled
+        // by the official isController rule (public-key comparison). The
+        // signal materials ARE the WG keypair (the same `config.keys` whose
+        // `public_key_base64()` is the relay peerID), so inject it whenever
+        // present — covers both the freshly built and the injected
+        // orchestrator, before any session can form.
+        if let Some(mat) = signal_material.as_ref() {
+            ice.lock_poison().set_local_key(mat.keys.public_key_base64());
+        }
         // N5d: the signal runtime routes received frames into the
         // orchestrator — same handle in both branches (injected-orchestrator
         // constructions simply have no signal runtime attached).
@@ -4035,6 +5077,7 @@ impl ConnectorHandle {
         Arc::new(ConnectorHandle {
             management_factory: worker_factory,
             network_change,
+            generation,
             shared,
             wg,
             host,
@@ -4104,37 +5147,16 @@ impl ConnectorHandle {
     /// against LIVE data-plane readiness first, so the snapshot and the
     /// `wg` field always describe reality at read time. N8: the same read
     /// advances the controlled-recreate state (`recreate` field).
+    ///
+    /// 2026-10-06: `peer_relays` (the ACTUAL per-peer relay lane map) is read
+    /// HERE, from the live lane table, and carried into the snapshot — the
+    /// carrier's `attached` leaf lock is taken with NO other carrier or shared
+    /// lock held (lock-order discipline), before [`ConnectorShared`] is
+    /// locked. `None` = no carrier armed.
     pub fn status(&self) -> ConnectorStatus {
-        self.shared.refresh_net_gate(self.wg.as_ref());
-        let g = self.shared.lock();
-        let running = self.shared.is_running();
-        let state = g.machine.state();
-        ConnectorStatus {
-            running,
-            state,
-            started_at_unix: g.started_at_unix,
-            last_update_unix: g.last_update_unix,
-            peer_count: g.peer_count,
-            route_count: g.route_count,
-            reconnects: g.reconnects,
-            last_error: g.last_error,
-            deadline: g.deadline,
-            renew_attempts: g.renew_attempts,
-            wg_apply_failed: g.wg_apply_failed,
-            wg_apply_errors: g.wg_apply_errors,
-            logout_ok: g.logout_ok,
-            terminal: is_terminal_state(running, state),
-            ice: self.ice.lock_poison().summary(),
-            signal: self
-                .shared
-                .signal
-                .get()
-                .map(|rt| rt.status())
-                .unwrap_or_default(),
-            wg: self.wg.dataplane_status().unwrap_or_default(),
-            recreate: g.recreate.clone(),
-            relay: self.shared.relay_status(),
-        }
+        let peer_relays =
+            self.shared.relay_carrier.get().map(|carrier| carrier.peer_relays());
+        ConnectorStatus::snapshot(&self.shared, self.wg.as_ref(), peer_relays)
     }
 
     /// The `connector_status()` JSON document.
@@ -4157,6 +5179,60 @@ impl ConnectorHandle {
         let need_per_peer =
             self.ice.lock_poison().need_per_peer().map(|n| n as i64).unwrap_or(-1);
         with_ice_sockets_section(&base, queued, taken, need_per_peer)
+    }
+
+    /// 006: fill the connector-owned half of the resource snapshot with
+    /// NON-BLOCKING probes — one leaf at a time, each guard released before
+    /// the next leaf is taken, no await anywhere. Deliberately does NOT touch
+    /// the WG seam: `WgPeerApplier::dataplane_status()` takes the device's
+    /// shared inner lock with a blocking lock (and copies per-peer rows), so
+    /// it can contend with the data-plane pump — see the `wg` section note in
+    /// [`connector_resource_status_json`].
+    fn fill_resource_probe(&self, snap: &mut ResourceSnapshot) {
+        // leaf 1: shared state — the state token ONLY (no gate refresh, no
+        // side effect; `connector_status()` remains the gate-advancing read).
+        snap.state = try_lock_poison(&self.shared.inner).map(|g| g.machine.state().as_str());
+        // leaf 2: ICE orchestrator — scalar counts only.
+        match self.shared.ice.get() {
+            Some(orch) => {
+                snap.ice_available = true;
+                snap.ice = try_lock_poison(orch).map(|g| g.resource_counts());
+            }
+            // No orchestrator object at all (unit-test construction): the
+            // counts are UNMEASURED, not zero.
+            None => snap.ice_available = false,
+        }
+        // leaf 3: the protected-UDP source. `taken` is an atomic; `pending` is
+        // read with the source's own NON-BLOCKING try_lock so a shell feed /
+        // gather holding the queue can never stall this diagnostic: a busy
+        // queue renders `queued:null` (unknown) while `taken` stays measured.
+        match self.shared.ice_sockets.get() {
+            Some(source) => {
+                snap.ice_sockets_available = true;
+                snap.ice_sockets = Some((source.pending_try(), source.taken()));
+            }
+            // No shell-fed source attached: the queue depth is UNMEASURED
+            // (the frozen `ice_sockets` section renders -1 for the same fact).
+            None => snap.ice_sockets_available = false,
+        }
+        // leaf 4..6: the relay carrier's three leaves, taken ONE AT A TIME
+        // (each `*_try` releases its guard before returning).
+        match self.shared.relay_carrier.get() {
+            Some(carrier) => {
+                snap.relay_available = true;
+                snap.relay_lanes = carrier.lane_count_try();
+                snap.relay_pending_opens = carrier.pending_open_count_try();
+                snap.relay_foreign = carrier.foreign_count_try();
+            }
+            // No carrier armed: nothing can be attached, opened or dialed —
+            // a KNOWN zero.
+            None => {
+                snap.relay_available = false;
+                snap.relay_lanes = Some(0);
+                snap.relay_pending_opens = Some(0);
+                snap.relay_foreign = Some(0);
+            }
+        }
     }
 
     /// The `connector_network_config()` JSON document (read-only snapshot of
@@ -4186,6 +5262,9 @@ impl ConnectorHandle {
         if already {
             return StopOutcome { already_stopped: true, state: self.shared.state() };
         }
+        // 006: a REAL stop transition is counted once (an idempotent repeat
+        // above returns before this). Cumulative, not a live-resource count.
+        STOPS_TOTAL.fetch_add(1, Ordering::AcqRel);
         let renewal = self.renewal.lock_poison().take();
         self.stop_flag.store(true, Ordering::Release);
         self.shared.set_running(false);
@@ -4325,8 +5404,11 @@ impl ConnectorHandle {
 // ---------------------------------------------------------------------------
 
 /// N5c ICE pump tick (production cadence; the orchestrator itself is fully
-/// clock-injected and never sleeps — this loop only FEEDS it).
-pub const ICE_PUMP_TICK_MS: u64 = 100;
+/// clock-injected and never sleeps — this loop only FEEDS it). 100 ms → 10 ms
+/// (100 Hz): one session's per-run receive budget is spent once per run, so
+/// its receive rate is budget × (1 / tick). This loop's idle cost is one
+/// wakeup per tick, each running the injected-clock pump.
+pub const ICE_PUMP_TICK_MS: u64 = 10;
 
 /// The ICE pump thread: feeds the orchestrator with monotonic ms every
 /// [`ICE_PUMP_TICK_MS`], until the connector stop flag fires. A detached
@@ -4606,8 +5688,32 @@ pub fn global_runtime() -> &'static tokio::runtime::Runtime {
 
 static CONNECTOR: Mutex<Option<Arc<ConnectorHandle>>> = Mutex::new(None);
 
+/// 006: cumulative SUCCESSFUL starts in this process — the source of each
+/// handle's [`ConnectorHandle::generation`]. Monotonic, never reset, so a
+/// deployment can compare two snapshots and see whether the process keeps
+/// starting connectors (growth) instead of guessing from a single reading.
+static STARTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 006: cumulative COMPLETED stop transitions (`stop()` that was not already
+/// stopped). Monotonic too. `starts_total - stops_total` is a net change and
+/// is deliberately NOT a live thread/task count.
+static STOPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 fn connector_slot() -> MutexGuard<'static, Option<Arc<ConnectorHandle>>> {
     CONNECTOR.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 006 resource snapshot: a NON-BLOCKING, poison-tolerant lock probe. `None`
+/// = the lock is held by another thread right now (WouldBlock) → the caller
+/// renders the value as `null` (unknown) instead of a false 0. A poisoned
+/// mutex is recovered exactly like `lock_poison` (panic=abort in release, so
+/// poison is a host/test artifact). This call can never block.
+fn try_lock_poison<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match m.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
 }
 
 /// N2-H (design §7-I5 wiring): register the DEVICE COLLECTOR's process-side
@@ -5342,9 +6448,287 @@ pub fn connector_status_json() -> String {
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
             relay: RelayStatus::disabled(),
+            // no connector at all ⇒ no relay carrier ⇒ no actual lane: the
+            // honest `null` (an empty array would claim a carrier exists)
+            peer_relays: None,
+            // ... and no ICE orchestrator either: `null`, not `[]`
+            ice_peers: None,
         }
         .to_json(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 006: additive native resource snapshot (read-only, non-blocking)
+// ---------------------------------------------------------------------------
+
+/// 006: the `wg` section of the resource document. DELIBERATELY not
+/// collected — see the locking note on [`connector_resource_status_json`].
+const WG_NOT_COLLECTED_JSON: &str = "{\"available\":false,\"reason\":\"not-collected\"}";
+
+/// 006: every scalar `connector_resource_status()` carries. An `Option` field
+/// is "could not be read right now" and renders as JSON `null`; a present
+/// value is measured OR known-disposed. NOTHING here is a key, URL, fd, id or
+/// secret — counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ResourceSnapshot {
+    /// `None` = the global connector slot was busy → even presence is unknown.
+    present: Option<bool>,
+    /// `None` = no connector handle exists (no generation to report).
+    generation: Option<u64>,
+    running: Option<bool>,
+    /// `None` = the shared-state leaf was busy, or no handle exists.
+    state: Option<&'static str>,
+    starts_total: u64,
+    stops_total: u64,
+    /// An ICE orchestrator object exists (a real spawn built one). `false`
+    /// with `present:false` ⇒ the counts are known zeros; `false` with a
+    /// handle present (no orchestrator object — test construction) ⇒ they are
+    /// `null` (unmeasured), never 0.
+    ice_available: bool,
+    /// `None` = the orchestrator leaf was busy → counts unknown.
+    ice: Option<crate::peer_conn::IceResourceCounts>,
+    ice_sockets_available: bool,
+    /// `None` = no shell-fed protected-UDP source attached → both counts
+    /// unmeasured. `Some((queued, taken))`: `queued` is `None` when the
+    /// source's short queue lock was busy at read time (unknown, never a
+    /// fabricated 0), while `taken` is the source's independent atomic and
+    /// stays a measured number whenever the source object exists.
+    ice_sockets: Option<(Option<usize>, u64)>,
+    /// `None` = the global socket-supply slot itself was busy.
+    supply: Option<crate::socket_supply::SupplyCounts>,
+    relay_available: bool,
+    relay_lanes: Option<usize>,
+    relay_pending_opens: Option<usize>,
+    relay_foreign: Option<usize>,
+    /// `None` = the DNS lookup map was busy.
+    dns_pending: Option<usize>,
+}
+
+/// `"key":<n>` or `"key":null` (unknown).
+fn jnum_opt(key: &str, v: Option<u64>) -> String {
+    match v {
+        Some(n) => jnum(key, n),
+        None => format!("\"{key}\":null"),
+    }
+}
+
+/// `"key":true|false` or `"key":null` (unknown).
+fn jbool_opt(key: &str, v: Option<bool>) -> String {
+    match v {
+        Some(b) => jbool(key, b),
+        None => format!("\"{key}\":null"),
+    }
+}
+
+/// `"key":"..."` or `"key":null` (unknown / not applicable).
+fn jstr_opt(key: &str, v: Option<&str>) -> String {
+    match v {
+        Some(s) => jstr(key, s),
+        None => format!("\"{key}\":null"),
+    }
+}
+
+impl ResourceSnapshot {
+    fn to_json(&self) -> String {
+        format!(
+            "{{{},{},{},{},{},{},{},{}}}",
+            jbool("ok", true),
+            format!("\"connector\":{}", self.connector_json()),
+            format!("\"ice\":{}", self.ice_json()),
+            format!("\"ice_sockets\":{}", self.ice_sockets_json()),
+            format!("\"socket_supply\":{}", self.supply_json()),
+            format!("\"relay_carrier\":{}", self.relay_json()),
+            format!("\"dns_lookups\":{}", self.dns_json()),
+            format!("\"wg\":{}", WG_NOT_COLLECTED_JSON),
+        )
+    }
+
+    fn connector_json(&self) -> String {
+        format!(
+            "{{{},{},{},{},{},{}}}",
+            jbool_opt("present", self.present),
+            jnum_opt("generation", self.generation),
+            jbool_opt("running", self.running),
+            jstr_opt("state", self.state),
+            jnum("starts_total", self.starts_total),
+            jnum("stops_total", self.stops_total),
+        )
+    }
+
+    fn ice_json(&self) -> String {
+        format!(
+            "{{{},{},{},{},{}}}",
+            jbool("available", self.ice_available),
+            jnum_opt("sessions_present", self.ice.map(|c| c.sessions_present as u64)),
+            jnum_opt("sessions_live", self.ice.map(|c| c.sessions_live as u64)),
+            jnum_opt("sessions_stopped", self.ice.map(|c| c.sessions_stopped as u64)),
+            jnum_opt("live_local_sockets", self.ice.map(|c| c.live_local_sockets as u64)),
+        )
+    }
+
+    fn ice_sockets_json(&self) -> String {
+        format!(
+            "{{{},{},{}}}",
+            jbool("available", self.ice_sockets_available),
+            jnum_opt("queued", self.ice_sockets.and_then(|(queued, _)| queued).map(|n| n as u64)),
+            jnum_opt("taken", self.ice_sockets.map(|(_, taken)| taken)),
+        )
+    }
+
+    fn supply_json(&self) -> String {
+        match self.supply {
+            Some(s) => format!(
+                "{{{},{},{}}}",
+                jbool("installed", s.installed),
+                jnum_opt("pending", s.pending.map(|n| n as u64)),
+                jnum_opt("queued", s.queued.map(|n| n as u64)),
+            ),
+            None => "{\"installed\":null,\"pending\":null,\"queued\":null}".to_string(),
+        }
+    }
+
+    fn relay_json(&self) -> String {
+        format!(
+            "{{{},{},{},{}}}",
+            jbool("available", self.relay_available),
+            jnum_opt("attached_lanes", self.relay_lanes.map(|n| n as u64)),
+            jnum_opt("pending_opens", self.relay_pending_opens.map(|n| n as u64)),
+            jnum_opt("foreign_clients", self.relay_foreign.map(|n| n as u64)),
+        )
+    }
+
+    fn dns_json(&self) -> String {
+        format!("{{{}}}", jnum_opt("pending_receivers", self.dns_pending.map(|n| n as u64)))
+    }
+}
+
+/// 006: gather the resource snapshot with NON-BLOCKING probes only. The two
+/// process-global surfaces (socket supply, DNS lookups) are read independently
+/// of the connector slot, so they are still captured when the slot is busy or
+/// empty; every connector-owned count then stays `null` (busy) or becomes a
+/// known zero (no handle).
+fn connector_resource_probe() -> ResourceSnapshot {
+    let mut snap = ResourceSnapshot {
+        starts_total: STARTS_TOTAL.load(Ordering::Acquire),
+        stops_total: STOPS_TOTAL.load(Ordering::Acquire),
+        supply: crate::socket_supply::installed_counts_try(),
+        dns_pending: try_lock_poison(dns_lookups()).map(|g| g.len()),
+        ..Default::default()
+    };
+    match try_lock_poison(&CONNECTOR) {
+        // Global slot busy: presence itself is unknown → connector-owned
+        // counts stay `null`, never a false 0.
+        None => {}
+        Some(slot) => {
+            if let Some(handle) = slot.as_ref() {
+                let handle = handle.clone();
+                // release the global BEFORE taking any handle leaf
+                drop(slot);
+                snap.present = Some(true);
+                snap.generation = Some(handle.generation);
+                snap.running = Some(handle.shared.is_running());
+                handle.fill_resource_probe(&mut snap);
+            } else {
+                // No connector installed: a KNOWN disposed state — every
+                // connector-owned resource is an honest zero, not unknown.
+                snap.present = Some(false);
+                snap.running = Some(false);
+                snap.ice_available = false;
+                snap.ice = Some(crate::peer_conn::IceResourceCounts::default());
+                snap.ice_sockets_available = false;
+                snap.ice_sockets = Some((Some(0), 0));
+                snap.relay_available = false;
+                snap.relay_lanes = Some(0);
+                snap.relay_pending_opens = Some(0);
+                snap.relay_foreign = Some(0);
+            }
+        }
+    }
+    snap
+}
+
+/// 006: the ADDITIVE native resource snapshot — a read-only, non-blocking
+/// document of the counts core still OWNS, for the shell's 60 s sample and the
+/// 006 system-kill investigation.
+///
+/// Purely additive: `connector_status()` and its frozen field order are NOT
+/// touched (separate function, separate NAPI export), and no cleanup
+/// behaviour changes — the endpoint only observes.
+///
+/// ## Locking
+/// Every acquisition is a NON-BLOCKING probe (`try_lock`), released before the
+/// next one; no leaf is nested with another leaf, the relay leaves are never
+/// read while the shared-state leaf is held, and there is no await anywhere.
+/// A busy lock (or a poisoned one) is reported as JSON `null` = UNKNOWN —
+/// never as a false `0`. `wg` is deliberately omitted: the only cheap WG read
+/// (`WgPeerApplier::dataplane_status`) takes the device's shared inner lock
+/// with a BLOCKING lock and copies per-peer rows, so it could contend with the
+/// data-plane pump; `connector_status().wg` stays the WG read surface.
+///
+/// ## Schema (exact null semantics)
+/// ```json
+/// {"ok":true,
+///  "connector":{"present":bool|null,"generation":n|null,"running":bool|null,
+///               "state":"connecting"|...|null,"starts_total":n,"stops_total":n},
+///  "ice":{"available":bool,"sessions_present":n|null,"sessions_live":n|null,
+///         "sessions_stopped":n|null,"live_local_sockets":n|null},
+///  "ice_sockets":{"available":bool,"queued":n|null,"taken":n|null},
+///  "socket_supply":{"installed":bool|null,"pending":n|null,"queued":n|null},
+///  "relay_carrier":{"available":bool,"attached_lanes":n|null,
+///                   "pending_opens":n|null,"foreign_clients":n|null},
+///  "dns_lookups":{"pending_receivers":n|null},
+///  "wg":{"available":false,"reason":"not-collected"}}
+/// ```
+/// - `connector.present` — `null` = the global connector slot was busy;
+///   `false` = no connector is installed (a KNOWN disposed state, so EVERY
+///   connector-owned count below is an honest zero); `true` = a handle exists.
+/// - `connector.generation` — the handle's successful-start ordinal (unique
+///   per start in this process); `null` when no handle exists. It is an
+///   IDENTITY: `generation - 1` is NOT a live task/thread count.
+/// - `connector.starts_total` / `stops_total` — process-cumulative successful
+///   starts and completed stop transitions; always numbers (they outlive the
+///   handle). Their DIFFERENCE is a net change, not a live resource count.
+///   Growth between two samples = the process keeps starting connectors; a
+///   single sample cannot prove a leak (normal stops set the flag and the
+///   threads eventually exit).
+/// - `ice.available` — an orchestrator object exists. With `present:false` the
+///   four counts are known zeros; with `present:true` and `available:false` (a
+///   handle built without an orchestrator object — test construction) they are
+///   `null`: UNMEASURED, never a fabricated 0. `null` also when the leaf was
+///   busy.
+/// - `ice.sessions_*` — `sessions_present` counts retained `IceSession`
+///   OBJECTS (including ones `stop_all` already stopped); `sessions_live`
+///   counts started-and-not-stopped sessions; `sessions_stopped` counts
+///   stopped-but-retained ones (a constructed-but-not-started session is in
+///   `sessions_present` only).
+/// - `ice.live_local_sockets` — fds (`fd >= 0`) the sessions still own, summed
+///   over ALL retained sessions. After `stop_all` this is 0 while
+///   `sessions_present` may stay > 0 (the objects are retained).
+/// - `ice_sockets` — the protected-ICE queue depth (`queued`) and the
+///   cumulative handed-out count (`taken`) of the shell-fed UDP source.
+///   `present:false` ⇒ known zeros; `present:true` with `available:false` (no
+///   shell-fed source attached) ⇒ both counts `null` (depth unmeasured — the
+///   same fact the frozen `ice_sockets` section renders as `-1`). A `queued`
+///   that is `null` while `available:true` means the source's queue lock was
+///   held at read time (a feed/gather in flight): the depth is UNKNOWN while
+///   `taken` (an independent atomic) stays a measured number.
+/// - `socket_supply` — the GLOBAL per-dial request bridge: requests awaiting a
+///   protect reply (`pending`) and requests not yet polled (`queued`).
+///   `installed:false` is a known "no supply" (counts 0); all three fields are
+///   `null` only while the global slot lock was busy. Read INDEPENDENTLY of
+///   the connector slot, so it is captured with no connector at all.
+/// - `relay_carrier` — attached WG relay lanes, in-flight lane opens and live
+///   foreign relay clients. `available:false` (no carrier armed) ⇒ known
+///   zeros; an individual `null` = that leaf was busy at read time.
+/// - `dns_lookups.pending_receivers` — DNS requests whose oneshot receiver is
+///   still registered (unpolled); read INDEPENDENTLY of the connector slot.
+///   This is a depth, NOT evidence of a leak: an unpolled entry disappears on
+///   the next poll or on `physical_network_changed`.
+/// - No field carries a peer key, a relay URL, an fd number, a request id or
+///   any secret — counts only.
+pub fn connector_resource_status_json() -> String {
+    connector_resource_probe().to_json()
 }
 
 /// The N5c socket-pool section appended to `connector_status()`.
@@ -6198,8 +7582,252 @@ mod tests {
         drop(tx);
     }
 
+    /// 006: a BUSY global slot and a BUSY ICE leaf must render `null`
+    /// (unknown), never a false 0 — and the read must return promptly
+    /// (non-blocking `try_lock` only). The independent socket-supply / DNS
+    /// sections stay captured while the connector slot is busy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resource_status_reports_busy_leaves_as_null_and_never_blocks() {
+        struct BusyProbeFactory;
+        impl ManagementFactory for BusyProbeFactory {
+            fn connect(
+                &self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<ManagementGrpcClient, ManagementError>> + Send + '_,
+                >,
+            > {
+                Box::pin(async { Err(ManagementError::Network("busy-probe".into())) })
+            }
+        }
+
+        let cfg = ConnectorConfig::from_json(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:1\",\"private_key\":\"{}\",\
+              \"hostname\":\"ohos-resource\",\"allow_unprotected_management\":true}}",
+            test_private_key_b64(9)
+        ))
+        .expect("test config");
+        let handle = ConnectorHandle::spawn(
+            tokio::runtime::Handle::current(),
+            Arc::new(BusyProbeFactory),
+            Arc::new(WgPeerRegistry::default()),
+            Arc::new(NoopHost),
+            ConnectorSecrets::default(),
+            cfg.meta.clone(),
+            ExponentialBackoff::upstream_stream_default(),
+            SyncPolicy::production(),
+            cfg.renew_lead,
+            cfg.renew_check_interval,
+            false,
+            None,
+            None,
+            None,
+            None,
+            HostIceTuning::default(),
+        );
+
+        // 1) BUSY GLOBAL SLOT: presence itself is unknown; every
+        // connector-owned count is null; the independent global sections are
+        // still read (a number or null, never an invented value).
+        {
+            let _held = connector_slot();
+            let t0 = std::time::Instant::now();
+            let doc = connector_resource_status_json();
+            assert!(t0.elapsed() < Duration::from_secs(1), "busy global must not block: {doc}");
+            assert!(doc.contains("\"present\":null"), "{doc}");
+            assert!(doc.contains("\"generation\":null"), "{doc}");
+            assert!(doc.contains("\"running\":null"), "{doc}");
+            assert!(
+                doc.contains("\"ice\":{\"available\":false,\"sessions_present\":null"),
+                "{doc}"
+            );
+            assert!(
+                doc.contains("\"ice_sockets\":{\"available\":false,\"queued\":null,\"taken\":null}"),
+                "{doc}"
+            );
+            assert!(
+                doc.contains("\"relay_carrier\":{\"available\":false,\"attached_lanes\":null"),
+                "{doc}"
+            );
+            assert!(doc.contains("\"socket_supply\":{"), "{doc}");
+            assert!(doc.contains("\"dns_lookups\":{\"pending_receivers\":"), "{doc}");
+            assert!(doc.contains("\"wg\":{\"available\":false,\"reason\":\"not-collected\"}"), "{doc}");
+        }
+
+        // 2) A live handle in the slot: real, measured values.
+        *connector_slot() = Some(handle.clone());
+        let doc = connector_resource_status_json();
+        assert!(doc.contains("\"present\":true"), "{doc}");
+        assert!(doc.contains("\"running\":true"), "{doc}");
+        assert!(doc.contains("\"available\":true,\"sessions_present\":0"), "{doc}");
+        assert!(
+            doc.contains("\"ice_sockets\":{\"available\":true,\"queued\":0,\"taken\":0}"),
+            "{doc}"
+        );
+        assert!(doc.contains("\"wg\":{\"available\":false,\"reason\":\"not-collected\"}"), "{doc}");
+        assert!(!doc.contains("pub_key"), "counts only — no key material: {doc}");
+
+        // 3) BUSY ICE LEAF: `available` stays true, the counts are unknown,
+        // and the OTHER leaves remain readable.
+        {
+            let _held_ice = handle.ice.lock_poison();
+            let t0 = std::time::Instant::now();
+            let doc = connector_resource_status_json();
+            assert!(t0.elapsed() < Duration::from_secs(1), "busy ICE leaf must not block: {doc}");
+            assert!(
+                doc.contains("\"ice\":{\"available\":true,\"sessions_present\":null"),
+                "{doc}"
+            );
+            assert!(
+                doc.contains("\"ice_sockets\":{\"available\":true,\"queued\":0,\"taken\":0}"),
+                "{doc}"
+            );
+        }
+
+        // 4) Released: measured zeros again (no peers in this construction).
+        let doc = connector_resource_status_json();
+        assert!(
+            doc.contains(
+                "\"available\":true,\"sessions_present\":0,\"sessions_live\":0,\
+                 \"sessions_stopped\":0,\"live_local_sockets\":0"
+            ),
+            "{doc}"
+        );
+
+        // cleanup: free the global slot and stop the handle (threads exit on
+        // the stop flag).
+        *connector_slot() = None;
+        handle.stop();
+    }
+
+    /// 006: the protected-ICE queue read inside the resource probe is
+    /// NON-BLOCKING too. While a feed/gather holds the source's queue lock,
+    /// `ice_sockets.queued` is UNKNOWN (`null`) — never a false 0 — the
+    /// independent `taken` atomic stays measured, `available` stays true, and
+    /// the probe returns promptly. Driven through `fill_resource_probe`
+    /// directly so the process-global connector slot is untouched (no race
+    /// with the busy-leaf test above).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resource_probe_reports_a_busy_ice_socket_queue_as_unknown() {
+        struct BusyQueueProbeFactory;
+        impl ManagementFactory for BusyQueueProbeFactory {
+            fn connect(
+                &self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<ManagementGrpcClient, ManagementError>> + Send + '_,
+                >,
+            > {
+                Box::pin(async { Err(ManagementError::Network("busy-queue-probe".into())) })
+            }
+        }
+
+        let cfg = ConnectorConfig::from_json(&format!(
+            "{{\"management_url\":\"http://127.0.0.1:1\",\"private_key\":\"{}\",\
+              \"hostname\":\"ohos-resource-queue\",\"allow_unprotected_management\":true}}",
+            test_private_key_b64(11)
+        ))
+        .expect("test config");
+        let handle = ConnectorHandle::spawn(
+            tokio::runtime::Handle::current(),
+            Arc::new(BusyQueueProbeFactory),
+            Arc::new(WgPeerRegistry::default()),
+            Arc::new(NoopHost),
+            ConnectorSecrets::default(),
+            cfg.meta.clone(),
+            ExponentialBackoff::upstream_stream_default(),
+            SyncPolicy::production(),
+            cfg.renew_lead,
+            cfg.renew_check_interval,
+            false,
+            None,
+            None,
+            None,
+            None,
+            HostIceTuning::default(),
+        );
+        let source = handle
+            .ice_sockets
+            .as_ref()
+            .expect("the production spawn attaches the UDP source")
+            .clone();
+
+        // Released: the real depth (0 — no shell feed in this construction).
+        let mut released = ResourceSnapshot::default();
+        handle.fill_resource_probe(&mut released);
+        assert_eq!(released.ice_sockets, Some((Some(0), 0)));
+        assert!(released.ice_sockets_available);
+
+        {
+            let _held = source.hold_queue_for_test();
+            let mut busy = ResourceSnapshot::default();
+            let t0 = std::time::Instant::now();
+            handle.fill_resource_probe(&mut busy);
+            let elapsed = t0.elapsed();
+            assert!(elapsed < Duration::from_secs(1), "a held queue must not block the probe");
+            assert_eq!(busy.ice_sockets, Some((None, 0)), "a held queue is unknown, not 0");
+            assert!(busy.ice_sockets_available, "the source object still exists");
+            let doc = busy.to_json();
+            assert!(
+                doc.contains("\"ice_sockets\":{\"available\":true,\"queued\":null,\"taken\":0}"),
+                "{doc}"
+            );
+        }
+
+        // Released again: a measured zero, not a sticky unknown.
+        let mut again = ResourceSnapshot::default();
+        handle.fill_resource_probe(&mut again);
+        assert_eq!(again.ice_sockets, Some((Some(0), 0)));
+        assert!(
+            again
+                .to_json()
+                .contains("\"ice_sockets\":{\"available\":true,\"queued\":0,\"taken\":0}"),
+        );
+
+        handle.stop();
+    }
+
     const SENTINEL_KEY: &str = "SENTINEL-SETUP-KEY-n3-5-DO-NOT-LOG";
     const SENTINEL_JWT: &str = "SENTINEL-JWT-header.payload.sig";
+
+    /// 006: the renderer's EXACT null semantics — `None` (unknown/unmeasured)
+    /// renders `null` and never a fabricated 0, and the field order is the
+    /// documented one.
+    #[test]
+    fn resource_snapshot_renderer_renders_unknown_as_null() {
+        let unmeasured = ResourceSnapshot {
+            present: Some(true),
+            generation: None,
+            running: Some(true),
+            state: None,
+            starts_total: 4,
+            stops_total: 1,
+            ice_available: false,
+            ice: None,
+            ice_sockets_available: false,
+            ice_sockets: None,
+            supply: None,
+            relay_available: true,
+            relay_lanes: None,
+            relay_pending_opens: Some(2),
+            relay_foreign: Some(0),
+            dns_pending: None,
+        };
+        assert_eq!(
+            unmeasured.to_json(),
+            "{\"ok\":true,\
+             \"connector\":{\"present\":true,\"generation\":null,\"running\":true,\"state\":null,\
+             \"starts_total\":4,\"stops_total\":1},\
+             \"ice\":{\"available\":false,\"sessions_present\":null,\"sessions_live\":null,\
+             \"sessions_stopped\":null,\"live_local_sockets\":null},\
+             \"ice_sockets\":{\"available\":false,\"queued\":null,\"taken\":null},\
+             \"socket_supply\":{\"installed\":null,\"pending\":null,\"queued\":null},\
+             \"relay_carrier\":{\"available\":true,\"attached_lanes\":null,\"pending_opens\":2,\
+             \"foreign_clients\":0},\
+             \"dns_lookups\":{\"pending_receivers\":null},\
+             \"wg\":{\"available\":false,\"reason\":\"not-collected\"}}"
+        );
+    }
 
     fn test_private_key_b64(seed: u8) -> String {
         base64::engine::general_purpose::STANDARD.encode([seed; 32])
@@ -6302,6 +7930,8 @@ mod tests {
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
             relay: RelayStatus::disabled(),
+            peer_relays: None,
+            ice_peers: None,
         };
         assert!(s.to_json().contains("\"terminal\":true"), "{}", s.to_json());
         s.terminal = false;
@@ -6591,7 +8221,9 @@ mod tests {
                 decrypt_errors: 2,
                 // N13-D1: the per-peer attribution tail — one peer with a
                 // live session riding the carrier, one registered peer with
-                // no session (both entry shapes frozen here).
+                // no session (both entry shapes frozen here). N13-D4 appends
+                // the per-peer transfer counters (plaintext bytes) at the END
+                // of each entry.
                 wg_peers: vec![
                     crate::wg_device::WgPeerStatus {
                         pub_key_b64: "bjEzLWQxLXBlZXItc2Vzc2lvbg==".to_string(),
@@ -6603,6 +8235,8 @@ mod tests {
                         egress_local: Some(([192, 168, 1, 5], 51820)),
                         carrier_attached: true,
                         on_carrier: true,
+                        tx_bytes: 512,
+                        rx_bytes: 1024,
                     },
                     crate::wg_device::WgPeerStatus {
                         pub_key_b64: "bjEzLWQxLXBlZXItaWRsZQ==".to_string(),
@@ -6614,6 +8248,8 @@ mod tests {
                         egress_local: None,
                         carrier_attached: false,
                         on_carrier: false,
+                        tx_bytes: 0,
+                        rx_bytes: 0,
                     },
                 ],
                 ..Default::default()
@@ -6626,6 +8262,8 @@ mod tests {
                 reason: "route-set-changed".to_string(),
             },
             relay: RelayStatus::disabled(),
+            peer_relays: None,
+            ice_peers: None,
         };
         let json = status.to_json();
         assert!(json.contains("\"running\":true"), "{json}");
@@ -6657,7 +8295,10 @@ mod tests {
         // fields (positional contract; zero here — the fixture has no lane).
         // N13-D1: the per-peer session attribution is APPENDED after those,
         // so `wg_peers` is the LAST `wg` field (relay stays last in the
-        // document — the `wg` object only moves its own tail).
+        // document — the `wg` object only moves its own tail). N13-D4: the
+        // per-peer transfer counters (`tx_bytes`/`rx_bytes`, PLAINTEXT bytes)
+        // are appended LAST inside each peer entry, so positional readers of
+        // the N13-D1/D2 head are unaffected.
         assert!(
             json.contains(
                 "\"wg\":{\"fed_socket\":true,\"fed_tun\":true,\"device_up\":true,\"ready\":true,\
@@ -6670,12 +8311,13 @@ mod tests {
                  \"allowed_ips\":[\"10.30.30.2/32\"],\"session_established\":true,\
                  \"expired\":false,\"last_handshake_s\":12,\
                  \"egress_local\":\"192.168.1.5:51820\",\"carrier_attached\":true,\
-                 \"on_carrier\":true},\
+                 \"on_carrier\":true,\"tx_bytes\":512,\"rx_bytes\":1024},\
                  {\"pub_key_b64\":\"bjEzLWQxLXBlZXItaWRsZQ==\",\
                  \"endpoint\":\"203.0.113.9:51820\",\
                  \"allowed_ips\":[\"10.30.30.3/32\",\"10.30.30.4/32\"],\
                  \"session_established\":false,\"expired\":false,\"last_handshake_s\":null,\
-                 \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false}]}"
+                 \"egress_local\":null,\"carrier_attached\":false,\"on_carrier\":false,\
+                 \"tx_bytes\":0,\"rx_bytes\":0}]}"
             ),
             "{json}"
         );
@@ -6687,13 +8329,62 @@ mod tests {
             ),
             "{json}"
         );
-        // the relay segment stays the LAST section of the document (the ets
-        // consumer reads by field; N13-D1 must not move it)
+        // the relay segment stays the LAST pre-existing section of the
+        // document (the ets consumer reads by field; N13-D1 must not move it);
+        // the 2026-10-06 `peer_relays` tail follows it ADDITIVELY and the
+        // 2026-10-07 `ice_peers` tail follows THAT.
         assert!(
-            json.ends_with(&format!("\"relay\":{}}}", status.relay.to_json())),
-            "relay must stay last in the document: {json}"
+            json.ends_with(&format!(
+                "\"relay\":{},\"peer_relays\":null,\"ice_peers\":null}}",
+                status.relay.to_json()
+            )),
+            "relay keeps its position; peer_relays and ice_peers are the tails: {json}"
         );
         assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
+
+        // 2026-10-06 (netbird status -d): `peer_relays` — the ACTUAL per-peer
+        // relay lane map — is TAIL-appended AFTER the frozen `relay` object.
+        // Shape contract: `null` = no carrier armed, `[]` = carrier armed with
+        // no lane attached, entries = the attached lanes (public key + the
+        // relay URL the lane rides), public-key sorted.
+        assert_eq!(
+            peer_relays_json(None),
+            "\"peer_relays\":null",
+            "no carrier armed is the honest null, never an empty array"
+        );
+        assert_eq!(peer_relays_json(Some(&[])), "\"peer_relays\":[]");
+        let mut with_lanes = status.clone();
+        with_lanes.peer_relays = Some(vec![
+            PeerRelayStatus {
+                pub_key_b64: "YWFhYQ==".to_string(),
+                relay_url: "rels://ctrl.example:28443".to_string(),
+            },
+            PeerRelayStatus {
+                pub_key_b64: "YmJiYg==".to_string(),
+                relay_url: "rel://127.0.0.1:33000".to_string(),
+            },
+        ]);
+        let lanes_json = with_lanes.to_json();
+        assert!(
+            lanes_json.contains(
+                "\"peer_relays\":[{\"pub_key_b64\":\"YWFhYQ==\",\
+                 \"relay_url\":\"rels://ctrl.example:28443\"},\
+                 {\"pub_key_b64\":\"YmJiYg==\",\"relay_url\":\"rel://127.0.0.1:33000\"}]"
+            ),
+            "{lanes_json}"
+        );
+        assert!(
+            lanes_json.contains(&format!(
+                "\"relay\":{},\"peer_relays\":[",
+                status.relay.to_json()
+            )),
+            "the frozen relay object keeps its exact shape before the tail: {lanes_json}"
+        );
+        assert!(
+            lanes_json.ends_with("],\"ice_peers\":null}"),
+            "peer_relays keeps its shape and ice_peers is the tail (additive only): {lanes_json}"
+        );
+        assert!(matches!(config::parse_document(&lanes_json), Ok(Json::Obj(_))));
 
         let empty = ConnectorStatus {
             running: false,
@@ -6715,6 +8406,8 @@ mod tests {
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
             relay: RelayStatus::disabled(),
+            peer_relays: None,
+            ice_peers: None,
         }
         .to_json();
         assert!(empty.contains("\"running\":false"), "{empty}");
@@ -6748,7 +8441,281 @@ mod tests {
             ),
             "default recreate summary must render: {empty}"
         );
+        assert!(
+            empty.contains("\"relay\":")
+                && empty.ends_with("\"peer_relays\":null,\"ice_peers\":null}"),
+            "the no-carrier default renders both tails as null: {empty}"
+        );
         assert!(matches!(config::parse_document(&empty), Ok(Json::Obj(_))));
+    }
+
+    /// 2026-10-07 (per-peer ICE detail): the `ice_peers` tail is the
+    /// three-state contract (`null` = no orchestrator at all, `[]` =
+    /// orchestrator armed with ZERO peers, array = one entry per peer,
+    /// public-key sorted) with an EXACT byte shape per entry: state token,
+    /// role, the selected pair's `{type,address,port}` endpoints (`null` when
+    /// NOTHING was selected — the first collected candidate is never
+    /// substituted), the landing/reachability facts and the class-only
+    /// `last_error` (the same safe serialization as the frozen `ice` summary).
+    /// No latency, no state-change timestamp: neither is retained anywhere, so
+    /// neither is invented here.
+    #[test]
+    fn status_ice_peers_tail_exact_serialization_and_reader_contract() {
+        // no orchestrator → the honest null (an `[]` would claim one exists)
+        assert_eq!(ice_peers_json(None), "\"ice_peers\":null");
+        // orchestrator armed, ZERO peers → the honest empty array
+        assert_eq!(ice_peers_json(Some(&[])), "\"ice_peers\":[]");
+
+        let idle = PeerIceDetail {
+            pub_key: "QUJD".to_string(),
+            state: crate::peer_conn::PeerIceState::Idle,
+            controlling: None,
+            selected_local: None,
+            selected_remote: None,
+            endpoint_applied: false,
+            reachable: false,
+            last_error: None,
+        };
+        let connected = PeerIceDetail {
+            pub_key: "REVG".to_string(),
+            state: crate::peer_conn::PeerIceState::Connected,
+            controlling: Some(true),
+            selected_local: Some(IceCandidateEndpoint {
+                typ: crate::ice::CandidateType::Host,
+                address: "192.168.1.5".to_string(),
+                port: 51820,
+            }),
+            selected_remote: Some(IceCandidateEndpoint {
+                typ: crate::ice::CandidateType::Srflx,
+                address: "203.0.113.9".to_string(),
+                port: 51821,
+            }),
+            endpoint_applied: true,
+            reachable: true,
+            last_error: None,
+        };
+        // Disconnected KEEPS its selected pair (the live session snapshot
+        // still holds it) but `reachable` stays FALSE: a retained endpoint is
+        // never upgraded into a connection, and the class-only error renders.
+        let disconnected = PeerIceDetail {
+            pub_key: "R0hJ".to_string(),
+            state: crate::peer_conn::PeerIceState::Disconnected,
+            controlling: Some(false),
+            selected_local: Some(IceCandidateEndpoint {
+                typ: crate::ice::CandidateType::Prflx,
+                address: "10.0.0.7".to_string(),
+                port: 41000,
+            }),
+            selected_remote: Some(IceCandidateEndpoint {
+                typ: crate::ice::CandidateType::Relay,
+                address: "198.51.100.5".to_string(),
+                port: 28443,
+            }),
+            endpoint_applied: true,
+            reachable: false,
+            last_error: Some(ErrorClass::Auth { status: 7 }),
+        };
+        let details = ice_peers_json(Some(&[idle.clone(), connected.clone(), disconnected.clone()]));
+        assert_eq!(
+            details,
+            "\"ice_peers\":[\
+             {\"pub_key\":\"QUJD\",\"state\":\"idle\",\"controlling\":null,\
+             \"selected_local\":null,\"selected_remote\":null,\
+             \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null},\
+             {\"pub_key\":\"REVG\",\"state\":\"connected\",\"controlling\":true,\
+             \"selected_local\":{\"type\":\"host\",\"address\":\"192.168.1.5\",\"port\":51820},\
+             \"selected_remote\":{\"type\":\"srflx\",\"address\":\"203.0.113.9\",\"port\":51821},\
+             \"endpoint_applied\":true,\"reachable\":true,\"last_error\":null},\
+             {\"pub_key\":\"R0hJ\",\"state\":\"disconnected\",\"controlling\":false,\
+             \"selected_local\":{\"type\":\"prflx\",\"address\":\"10.0.0.7\",\"port\":41000},\
+             \"selected_remote\":{\"type\":\"relay\",\"address\":\"198.51.100.5\",\"port\":28443},\
+             \"endpoint_applied\":true,\"reachable\":false,\
+             \"last_error\":{\"class\":\"auth\",\"status\":7}}]"
+        );
+        // every candidate type token is reachable through the projection
+        for token in [
+            "\"type\":\"host\"",
+            "\"type\":\"srflx\"",
+            "\"type\":\"prflx\"",
+            "\"type\":\"relay\"",
+        ] {
+            assert!(details.contains(token), "missing {token}: {details}");
+        }
+        // the deliberately absent facts stay absent
+        assert!(!details.contains("rtt"), "no latency is retained: {details}");
+        assert!(
+            !details.contains("timestamp") && !details.contains("_ms"),
+            "no state-change timestamp is retained: {details}"
+        );
+
+        // document level: `peer_relays` keeps its exact bytes and `ice_peers`
+        // rides immediately after it (the additive tail), then the strict
+        // reader accepts the whole document.
+        let registry = WgPeerRegistry::new();
+        let shared = ConnectorShared::new(false, None);
+        let mut status = ConnectorStatus::snapshot(
+            &shared,
+            &registry,
+            Some(vec![PeerRelayStatus {
+                pub_key_b64: "QUJD".to_string(),
+                relay_url: "rel://relay.example:33000".to_string(),
+            }]),
+        );
+        status.ice_peers = Some(vec![idle, connected, disconnected]);
+        let json = status.to_json();
+        let lanes = "\"peer_relays\":[{\"pub_key_b64\":\"QUJD\",\
+                     \"relay_url\":\"rel://relay.example:33000\"}]";
+        assert!(
+            json.contains(&format!("{lanes},{details}")),
+            "ice_peers must ride immediately after peer_relays: {json}"
+        );
+        assert!(
+            json.ends_with(&format!("{details}}}")),
+            "ice_peers is the ConnectorStatus document tail: {json}"
+        );
+        assert!(
+            json.rfind("\"peer_relays\":").expect("peer_relays") < json.rfind("\"ice_peers\":").expect("ice_peers"),
+            "the tail order is peer_relays then ice_peers: {json}"
+        );
+
+        // the contract reader: by key, the array carries exactly the eight
+        // documented keys in order; each endpoint object is exactly
+        // {type,address,port} in order; the frozen last_error object is the
+        // same safe class+status shape (never a message).
+        fn obj_keys(v: &Json) -> Vec<String> {
+            match v {
+                Json::Obj(entries) => entries.iter().map(|(k, _)| k.clone()).collect(),
+                other => panic!("expected a JSON object, got {other:?}"),
+            }
+        }
+        fn obj_get<'a>(v: &'a Json, key: &str) -> &'a Json {
+            match v {
+                Json::Obj(entries) => entries
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v)
+                    .unwrap_or_else(|| panic!("missing key {key} in {v:?}")),
+                other => panic!("expected a JSON object, got {other:?}"),
+            }
+        }
+        let Json::Obj(root) = config::parse_document(&json).expect("strict reader") else {
+            panic!("the status document must be an object");
+        };
+        let root = Json::Obj(root);
+        let Json::Arr(items) = obj_get(&root, "ice_peers") else {
+            panic!("ice_peers must be an array");
+        };
+        assert_eq!(items.len(), 3, "one entry per peer");
+        let joined = |v: &Json| obj_keys(v).join(",");
+        assert_eq!(
+            joined(&items[0]),
+            "pub_key,state,controlling,selected_local,selected_remote,\
+             endpoint_applied,reachable,last_error",
+            "the per-peer key order is the frozen contract"
+        );
+        assert_eq!(joined(obj_get(&items[1], "selected_local")), "type,address,port");
+        assert_eq!(joined(obj_get(&items[1], "selected_remote")), "type,address,port");
+        assert_eq!(obj_get(obj_get(&items[1], "selected_local"), "port"), &Json::Num(51820));
+        assert_eq!(
+            obj_get(obj_get(&items[2], "selected_remote"), "type"),
+            &Json::Str("relay".to_string())
+        );
+        assert_eq!(obj_get(&items[0], "controlling"), &Json::Null, "no session → role unknown");
+        assert_eq!(obj_get(&items[0], "selected_local"), &Json::Null, "nothing selected → null");
+        assert_eq!(obj_get(&items[1], "reachable"), &Json::Bool(true));
+        assert_eq!(
+            obj_get(&items[2], "reachable"),
+            &Json::Bool(false),
+            "a retained endpoint is not a connection"
+        );
+        assert_eq!(
+            obj_get(&items[2], "last_error"),
+            &Json::Obj(vec![
+                ("class".to_string(), Json::Str("auth".to_string())),
+                ("status".to_string(), Json::Num(7)),
+            ]),
+            "the class-only error shape is preserved"
+        );
+        let Json::Arr(peer_relays) = obj_get(&root, "peer_relays") else {
+            panic!("peer_relays must be an array");
+        };
+        assert_eq!(peer_relays.len(), 1);
+        assert_eq!(
+            joined(&peer_relays[0]),
+            "pub_key_b64,relay_url",
+            "the pre-existing entry shape is unchanged"
+        );
+    }
+
+    /// 2026-10-07: `ConnectorStatus::snapshot` reads the ICE orchestrator
+    /// EXACTLY ONCE and fills BOTH `ice` (summary) and `ice_peers` (details)
+    /// from that one acquisition — the two surfaces always describe the same
+    /// peer set (a second read could straddle a `set_peers`/re-selection and
+    /// publish counts and details of different snapshots). Three states: no
+    /// orchestrator → `null`; orchestrator with ZERO peers → `[]`; armed with
+    /// peers → one public-key-sorted detail per peer.
+    #[test]
+    fn status_snapshot_reads_the_orchestrator_once_for_summary_and_details() {
+        let wg: Arc<dyn WgPeerApplier> = Arc::new(WgPeerRegistry::new());
+
+        // (1) no orchestrator (unit-test construction): null, never []
+        let bare = ConnectorShared::new(false, None);
+        let status = ConnectorStatus::snapshot(&bare, wg.as_ref(), None);
+        assert_eq!(status.ice_peers, None);
+        assert_eq!(status.ice, IceOrchestratorSummary::default());
+        assert!(
+            status.to_json().ends_with("\"peer_relays\":null,\"ice_peers\":null}"),
+            "{}",
+            status.to_json()
+        );
+
+        // (2) orchestrator armed with ZERO peers: [] (not null)
+        let shared = ConnectorShared::new(false, None);
+        let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: wg.clone(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        })));
+        let _ = shared.ice.set(ice.clone());
+        let empty_peers = ConnectorStatus::snapshot(&shared, wg.as_ref(), None);
+        assert_eq!(empty_peers.ice_peers, Some(vec![]), "armed with zero peers is [], never null");
+        assert_eq!(empty_peers.ice, IceOrchestratorSummary::default());
+        assert!(
+            empty_peers.to_json().ends_with(",\"ice_peers\":[]}"),
+            "{}",
+            empty_peers.to_json()
+        );
+
+        // (3) one peer with no session yet: Idle / unknown role / unknown
+        // endpoints — and the summary and the detail table describe the SAME
+        // peer set (the one-lock rule, observed on the production assembly).
+        ice.lock_poison().set_peers(&["UEVFUjA=".to_string()]);
+        let status = ConnectorStatus::snapshot(&shared, wg.as_ref(), None);
+        let details = status.ice_peers.clone().expect("armed orchestrator → Some");
+        assert_eq!(details.len(), status.ice.peers, "counts and details are one snapshot");
+        assert_eq!(status.ice.idle, 1);
+        assert_eq!(details[0].state, crate::peer_conn::PeerIceState::Idle);
+        assert_eq!(details[0].controlling, None);
+        assert_eq!(details[0].selected_local, None);
+        assert_eq!(details[0].selected_remote, None);
+        assert!(!details[0].reachable);
+        assert_eq!(details, ice.lock_poison().ice_details(), "equal to the orchestrator's own read");
+        let json = status.to_json();
+        assert!(
+            json.ends_with(
+                ",\"ice_peers\":[{\"pub_key\":\"UEVFUjA=\",\"state\":\"idle\",\
+                 \"controlling\":null,\"selected_local\":null,\"selected_remote\":null,\
+                 \"endpoint_applied\":false,\"reachable\":false,\"last_error\":null}]}"
+            ),
+            "{json}"
+        );
+        assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))));
     }
 
     #[test]
@@ -7315,6 +9282,7 @@ mod tests {
             },
             exchange,
             rx,
+            shared.relay_ads.clone(),
         ));
         let _ = shared.signal.set(rt);
         let login = crate::grpc::proto::LoginResponse {
@@ -7717,6 +9685,7 @@ mod tests {
             },
             exchange.clone(),
             rx,
+            shared.relay_ads.clone(),
         ));
         let _ = rt.orch.set(orch.clone());
         let _ = shared.signal.set(rt.clone());
@@ -7805,6 +9774,8 @@ mod tests {
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
             relay: RelayStatus::disabled(),
+            peer_relays: None,
+            ice_peers: None,
         }
         .to_json();
         assert!(
@@ -8352,6 +10323,7 @@ mod tests {
             },
             exchange.clone(),
             rx,
+            shared.relay_ads.clone(),
         ));
         let _ = shared.signal.set(rt);
         let wg = WgPeerRegistry::new();
@@ -8413,6 +10385,8 @@ mod tests {
             wg: crate::wg_device::WgDataplaneStatus::default(),
             recreate: RecreateStatus::default(),
             relay: st,
+            peer_relays: None,
+            ice_peers: None,
         };
         let json = status.to_json();
         let adv_pos = json.find("\"relay_advertised\":").expect("advertised section");
@@ -9252,5 +11226,656 @@ mod tests {
             carrier.pending_opens.lock().unwrap_or_else(PoisonError::into_inner).is_empty(),
             "a pass on a disarmed carrier must not register lane opens"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // N13-D3 — per-peer relay server (controller-based meeting point)
+    // -------------------------------------------------------------------
+
+    /// The official `isController` rule (conn.go:1040-1042): the REMOTE is
+    /// the controller — and its advertised relay the meeting point — exactly
+    /// when its WG public key sorts ABOVE ours. Same asymmetric string
+    /// compare the ICE layer uses, so both sides agree without negotiation.
+    #[test]
+    fn remote_controller_is_the_higher_wg_public_key() {
+        let low = relay_lane_key(0x10);
+        let high = relay_lane_key(0x50);
+        assert!(!remote_is_controller(&high, &low), "a lower remote key means WE control");
+        assert!(remote_is_controller(&low, &high), "a higher remote key means the remote controls");
+        assert!(!remote_is_controller(&low, &low), "equal keys are not 'the remote controls'");
+    }
+
+    /// The per-peer relay choice is CONTROLLER-based — never "always the
+    /// remote's advertised URL" (which would break our own controller role)
+    /// and never "always home" (which would ignore the controller's meet
+    /// point):
+    /// - we control → OUR relay, even when the peer advertises another one;
+    /// - the remote controls → the URL it advertised, UNLESS that URL IS our
+    ///   live home relay (canonical compare: scheme case and default ports
+    ///   normalize) or, with no live session yet, it is one of our configured
+    ///   URLs (the dial round may land there);
+    /// - nothing / an unparseable advertisement → home (our long-standing
+    ///   single-relay shape; upstream would skip the relay lane entirely).
+    #[test]
+    fn relay_choice_follows_the_controller_and_is_never_unconditional() {
+        let configured = vec![
+            crate::relay_client::RelayUrl::parse("rel://home.example").expect("configured home"),
+        ];
+        let other = crate::relay_client::RelayUrl::parse("rels://ctrl.example").expect("peer relay");
+        let live = Some("rel://home.example:80"); // canonical form of the configured home
+
+        // we control: the peer's advertisement is NOT the meeting point
+        assert_eq!(
+            choose_relay_url(Some("rels://ctrl.example"), false, live, &configured),
+            RelayChoice::Home
+        );
+        // the remote controls and advertises a DIFFERENT relay
+        assert_eq!(
+            choose_relay_url(Some("rels://ctrl.example"), true, live, &configured),
+            RelayChoice::Foreign(other.clone())
+        );
+        // the remote controls but advertises OUR live relay, spelled with a
+        // different scheme case / default port → canonical compare says home
+        assert_eq!(
+            choose_relay_url(Some("RELS://home.example"), true, Some("rels://home.example:443"), &configured),
+            RelayChoice::Home
+        );
+        assert_eq!(
+            choose_relay_url(Some("rel://home.example"), true, live, &configured),
+            RelayChoice::Home
+        );
+        // no live session yet: an advertisement inside our configured set is
+        // still home
+        assert_eq!(
+            choose_relay_url(Some("rel://home.example:80"), true, None, &configured),
+            RelayChoice::Home
+        );
+        // nothing advertised / unparseable → home, never a blind foreign dial
+        assert_eq!(choose_relay_url(None, true, live, &configured), RelayChoice::Home);
+        assert_eq!(choose_relay_url(Some("not-a-relay-url"), true, live, &configured), RelayChoice::Home);
+    }
+
+    /// An OFFER/ANSWER frame exactly as the signal worker hands it to the
+    /// receive path (the `SignalLinkEvent::Message` body).
+    fn relay_offer_from(peer_key: &str, advertised: Option<&str>) -> SignalMessage {
+        SignalMessage {
+            from_key: peer_key.to_string(),
+            remote_key: relay_lane_key(0x40),
+            kind: crate::signal::proto::body::Type::Offer,
+            payload: "ufrag:pwd".to_string(),
+            wg_listen_port: 51820,
+            net_bird_version: String::new(),
+            session_id: None,
+            relay_server_address: advertised.map(str::to_string),
+        }
+    }
+
+    fn relay_wiring_attach(
+        clock: Arc<crate::relay_client::VirtualClock>,
+        wg_pubkey_b64: &str,
+    ) -> RelayAttach {
+        RelayAttach {
+            wg_pubkey_b64: wg_pubkey_b64.to_string(),
+            materials: Arc::new(RelayMaterials {
+                clock,
+                dialer: Arc::new(crate::relay_client::TcpDialer),
+                tls: None, // rel:// loopback topology only (spec §1.1)
+            }),
+        }
+    }
+
+    /// N13-D3 fixture: a REAL home relay client (Ready against `home`), the
+    /// carrier armed through the production relay-sync path (shared
+    /// advertisement map + foreign spawn context) and a carrier-capable
+    /// recording WG seam. The two relay seams `ConnectorHandle::
+    /// spawn_with_relay` fills are filled here the same way.
+    struct RelayWiringFixture {
+        home: RelayTestServer,
+        foreign: RelayTestServer,
+        shared: Arc<ConnectorShared>,
+        wg: Arc<CarrierProbeWg>,
+        carrier: Arc<RelayCarrier>,
+        home_client: crate::relay_client::RelayClient,
+        local_key: String,
+        home_canonical: String,
+        foreign_canonical: String,
+    }
+
+    async fn relay_wiring_fixture() -> RelayWiringFixture {
+        let home = RelayTestServer::start(TestServerConfig::default()).await.expect("home relay");
+        let foreign =
+            RelayTestServer::start(TestServerConfig::default()).await.expect("foreign relay");
+        let clock = Arc::new(crate::relay_client::VirtualClock::new(RELAY_TEST_EPOCH));
+        // Local WG key chosen so the peer keys below sort predictably against
+        // it (the premise asserts in the tests pin this).
+        let local_key = relay_lane_key(0x40);
+        let shared =
+            Arc::new(ConnectorShared::new(false, Some(relay_wiring_attach(clock, &local_key))));
+        let wg = Arc::new(CarrierProbeWg::default());
+        let _ = shared.relay_wg.set(wg.clone() as Arc<dyn WgPeerApplier>);
+        let _ = shared.relay_runtime.set(tokio::runtime::Handle::current());
+        let _ = shared.ice.set(Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: wg.clone(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        }))));
+
+        let home_url = format!("rel://127.0.0.1:{}", home.addr().port());
+        let foreign_url = format!("rel://127.0.0.1:{}", foreign.addr().port());
+        // THE production relay-sync path (the relay block of `apply_update`):
+        // home client starts, carrier armed with the shared ads map, foreign
+        // spawn context set.
+        shared.apply_update(
+            wg.as_ref(),
+            &NoopHost,
+            &advertised_urls_update(Some(advertised_relay_config(vec![home_url.clone()]))),
+        );
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || shared.relay_ready()).await,
+            "the sync's relay client must reach Ready against the fake server"
+        );
+        let carrier = shared.relay_carrier.get().expect("the sync must arm the carrier").clone();
+        let home_client = shared.relay_handle().expect("the sync must start the home client");
+        RelayWiringFixture {
+            home_canonical: crate::relay_client::RelayUrl::parse(&home_url)
+                .expect("home url")
+                .config_string(),
+            foreign_canonical: crate::relay_client::RelayUrl::parse(&foreign_url)
+                .expect("foreign url")
+                .config_string(),
+            home,
+            foreign,
+            shared,
+            wg,
+            carrier,
+            home_client,
+            local_key,
+        }
+    }
+
+    /// The per-peer lane rides the relay server the CONTROLLER rule chose —
+    /// proven end to end over real sockets: the sync path arms the carrier
+    /// with the connector's shared advertisement map and the foreign spawn
+    /// context, the signal receive path records each peer's advertised relay
+    /// ([`route_signal_message`], the worker's message arm), and the lane
+    /// then dials a REAL second relay client to a REAL second fake relay
+    /// server for the remote-controller peers only. Two peers advertising the
+    /// same URL share ONE client, and connector teardown closes it
+    /// gracefully with no lane and no client left behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_sync_advertisement_moves_the_lane_to_the_controller_relay() {
+        let fx = relay_wiring_fixture().await;
+
+        // the two peers whose key puts THEM in control advertise a second
+        // relay; the peer WE control advertises it too — which must not win.
+        let pub_ctrl_a = relay_lane_key(0x50);
+        let pub_ctrl_b = relay_lane_key(0x51);
+        let pub_ours = relay_lane_key(0x10);
+        assert!(remote_is_controller(&fx.local_key, &pub_ctrl_a), "premise: peer sorts above us");
+        assert!(remote_is_controller(&fx.local_key, &pub_ctrl_b), "premise: peer sorts above us");
+        assert!(!remote_is_controller(&fx.local_key, &pub_ours), "premise: we control this peer");
+
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        for key in [&pub_ctrl_a, &pub_ctrl_b, &pub_ours] {
+            route_signal_message(
+                &ice,
+                &fx.shared.relay_ads,
+                &relay_offer_from(key, Some(&fx.foreign_canonical)),
+            );
+        }
+        {
+            let ads = fx.shared.relay_ads.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(
+                ads.get(&pub_ctrl_a).map(String::as_str),
+                Some(fx.foreign_canonical.as_str()),
+                "the receive path must record the advertisement into the carrier's map"
+            );
+            assert_eq!(ads.len(), 3);
+        }
+
+        // the lane universe the sync path feeds from the network map
+        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl_a.clone(), pub_ctrl_b.clone()]);
+
+        // each peer comes online on the relay its lane dialed. The
+        // remote-controller lanes need the SECOND client to have dialed and
+        // subscribed first: the first attempt races the fresh client's dial
+        // (typed `not-ready`, observed) and the retry lands after
+        // LANE_OPEN_RETRY — hence the wider fuse here.
+        assert!(
+            relay_wait_until(Duration::from_secs(20), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 2
+            })
+            .await,
+            "both remote-controller peers must subscribe on the advertised relay"
+        );
+        let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl_a), true);
+        let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl_b), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.home.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the peer we control must subscribe on OUR relay"
+        );
+        let _ = fx.home.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ours), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 3).await,
+            "all three lanes must attach (stats={:?})",
+            fx.carrier.stats()
+        );
+
+        // every lane is on the relay the controller rule chose
+        {
+            let attached = fx.carrier.attached.lock().unwrap_or_else(PoisonError::into_inner);
+            let (lane_ours, via_ours) =
+                attached.get(&pub_ours).expect("the controlled peer's lane");
+            assert_eq!(
+                via_ours, &fx.home_canonical,
+                "we control this peer: the meeting point is OUR relay, not its advertisement"
+            );
+            assert!(
+                lane_ours.client().same_client(&fx.home_client),
+                "…and the lane rides the home client"
+            );
+            for key in [&pub_ctrl_a, &pub_ctrl_b] {
+                let (lane, via) = attached.get(key).expect("the controller peer's lane");
+                assert_eq!(
+                    via, &fx.foreign_canonical,
+                    "the remote controls: its advertised relay is the meeting point"
+                );
+                assert!(
+                    !lane.client().same_client(&fx.home_client),
+                    "…and the lane rides a SECOND relay client, not home"
+                );
+            }
+        }
+        assert_eq!(fx.carrier.foreign_count(), 1, "one client per relay URL (two peers share it)");
+        assert_eq!(fx.carrier.foreign_urls(), vec![fx.foreign_canonical.clone()]);
+        assert_eq!(
+            fx.foreign.stats().connections_accepted,
+            1,
+            "the shared foreign client dialed the advertised relay exactly once"
+        );
+        assert_eq!(
+            fx.home.stats().connections_accepted,
+            1,
+            "the home client never re-dialed the advertised relay"
+        );
+
+        // teardown: no lane, no foreign client, no orphan outbound connection
+        fx.shared.stop_relay();
+        assert_eq!(fx.carrier.foreign_count(), 0, "stop must tear the foreign clients down");
+        assert_eq!(fx.carrier.lane_count(), 0, "no lane may survive stop");
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_CLOSE) == 1
+            })
+            .await,
+            "the foreign client must close gracefully (relay Close frame)"
+        );
+        assert_eq!(fx.carrier.stats().foreign_opened, 1);
+        assert_eq!(fx.carrier.stats().foreign_closed, 1);
+        {
+            let detached = fx.wg.detached.lock().unwrap_or_else(PoisonError::into_inner);
+            for key in [&pub_ours, &pub_ctrl_a, &pub_ctrl_b] {
+                assert!(detached.contains(key), "every lane must be detached from the WG seam");
+            }
+        }
+        let RelayWiringFixture { home, foreign, .. } = fx;
+        home.shutdown().await;
+        foreign.shutdown().await;
+    }
+
+    /// The ordering case the lane wiring must tolerate: the lane can attach
+    /// on OUR relay BEFORE the peer's advertisement has arrived (the sync
+    /// starts lanes off the network map; the OFFER/ANSWER that carries
+    /// `relayServerAddress` comes later over the signal link). When the
+    /// advertisement lands, the next pump pass must MOVE that lane to the
+    /// controller's relay — detaching the home lane and re-opening it on a
+    /// REAL second relay client; without that reconcile the lane would stay
+    /// on a relay the controller is not on for the whole session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn advertisement_arriving_after_the_lane_moves_it_to_the_controller_relay() {
+        let fx = relay_wiring_fixture().await;
+        let pub_ctrl = relay_lane_key(0x50);
+        assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
+
+        // 1. no advertisement yet: the lane opens on OUR relay
+        fx.carrier.set_peers(&[pub_ctrl.clone()]);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.home.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the pre-advertisement lane must open on the home relay"
+        );
+        let _ = fx.home.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 1).await,
+            "the lane must attach on the home relay (stats={:?})",
+            fx.carrier.stats()
+        );
+        {
+            let attached = fx.carrier.attached.lock().unwrap_or_else(PoisonError::into_inner);
+            let (lane, via) = attached.get(&pub_ctrl).expect("home lane");
+            assert_eq!(via, &fx.home_canonical, "no advertisement ⇒ our relay (fallback)");
+            assert!(lane.client().same_client(&fx.home_client));
+        }
+
+        // 2. the advertisement arrives over the signal link
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        route_signal_message(
+            &ice,
+            &fx.shared.relay_ads,
+            &relay_offer_from(&pub_ctrl, Some(&fx.foreign_canonical)),
+        );
+
+        // 3. the reconcile: the home lane is detached and re-opened on the
+        //    controller's relay (the fresh client's first attempt races its
+        //    dial and retries after LANE_OPEN_RETRY — wider fuse).
+        assert!(
+            relay_wait_until(Duration::from_secs(20), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the changed advertisement must move the lane to the controller's relay"
+        );
+        let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.carrier.lane_count() == 1
+                    && fx
+                        .carrier
+                        .attached
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .get(&pub_ctrl)
+                        .is_some_and(|(_, via)| via == &fx.foreign_canonical)
+            })
+            .await,
+            "the lane must end up on the controller's relay (stats={:?})",
+            fx.carrier.stats()
+        );
+        {
+            let attached = fx.carrier.attached.lock().unwrap_or_else(PoisonError::into_inner);
+            let (lane, via) = attached.get(&pub_ctrl).expect("moved lane");
+            assert_eq!(via, &fx.foreign_canonical);
+            assert!(!lane.client().same_client(&fx.home_client), "…on a second relay client");
+        }
+        assert_eq!(fx.carrier.foreign_count(), 1);
+        assert!(
+            fx.wg
+                .detached
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&pub_ctrl),
+            "the superseded home lane must be detached from the WG seam"
+        );
+        assert_eq!(
+            fx.home.stats().connections_accepted,
+            1,
+            "the home client is re-used as-is — the move never re-dials our own relay"
+        );
+
+        fx.shared.stop_relay();
+        assert_eq!(fx.carrier.foreign_count(), 0);
+        let RelayWiringFixture { home, foreign, .. } = fx;
+        home.shutdown().await;
+        foreign.shutdown().await;
+    }
+
+    /// N13-D3 cleanup: a foreign client with NO live lane is swept away by the
+    /// idle policy (official `keepUnusedServerTime` / `relayCleanupInterval`)
+    /// — the foreign pump's own tick closes it, so a peer that leaves the
+    /// network map cannot leave an outbound relay connection behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn foreign_relay_idle_sweep_closes_the_unused_client() {
+        let fx = relay_wiring_fixture().await;
+        let pub_ctrl = relay_lane_key(0x50);
+        assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
+
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        route_signal_message(
+            &ice,
+            &fx.shared.relay_ads,
+            &relay_offer_from(&pub_ctrl, Some(&fx.foreign_canonical)),
+        );
+        fx.carrier.set_peers(&[pub_ctrl.clone()]);
+
+        assert!(
+            relay_wait_until(Duration::from_secs(20), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the lane open must reach the advertised relay (retry after LANE_OPEN_RETRY)"
+        );
+        let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 1).await,
+            "the controller peer's lane must attach on the foreign relay (stats={:?})",
+            fx.carrier.stats()
+        );
+        assert_eq!(fx.carrier.foreign_count(), 1);
+
+        // the peer leaves the map → its lane detaches and the client has no
+        // user left. Deterministic idle policy: no grace, sweep every tick.
+        fx.carrier.set_foreign_idle_params(Duration::ZERO, Duration::ZERO);
+        fx.carrier.set_peers(&[]);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 0).await,
+            "the departed peer's lane must detach"
+        );
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.foreign_count() == 0).await,
+            "the unused foreign client must be swept away (stats={:?})",
+            fx.carrier.stats()
+        );
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_CLOSE) == 1
+            })
+            .await,
+            "the swept client must close gracefully (relay Close frame)"
+        );
+        assert_eq!(fx.carrier.stats().foreign_opened, 1);
+        assert_eq!(fx.carrier.stats().foreign_closed, 1);
+
+        fx.shared.stop_relay();
+        let RelayWiringFixture { home, foreign, .. } = fx;
+        home.shutdown().await;
+        foreign.shutdown().await;
+    }
+
+    /// N13-D3 bound: an advertisement is only ever useful for a peer the
+    /// carrier may open a lane to, so the shared map is pruned to the
+    /// connectable set on every network map — also WITHOUT a carrier
+    /// (`relay_enabled:false`), where nothing else would ever prune it. The
+    /// sender key of a signal frame is only as authenticated as its envelope
+    /// (the server routes by RECIPIENT), so a key outside the network map
+    /// must not be able to grow the map without bound.
+    #[tokio::test]
+    async fn relay_ads_are_bounded_to_the_connectable_peer_set_without_a_carrier() {
+        let shared = Arc::new(ConnectorShared::new(false, None));
+        {
+            let mut ads = shared.relay_ads.lock().unwrap_or_else(PoisonError::into_inner);
+            // the connectable peer, the map's allowed_ips-less peer and a key
+            // that is not in the map at all
+            ads.insert("UEVFUjA=".to_string(), "rels://ctrl.example".to_string());
+            ads.insert("UEVFUjE=".to_string(), "rels://ctrl.example".to_string());
+            ads.insert(relay_lane_key(0x99), "rels://rogue.example".to_string());
+        }
+        assert!(shared.relay_carrier.get().is_none(), "no relay opt-in ⇒ no carrier");
+
+        let wg = WgPeerRegistry::new();
+        shared.apply_update(
+            &wg,
+            &NoopHost,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(shell_test_map()),
+            },
+        );
+        let ads = shared.relay_ads.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            ads.keys().cloned().collect::<Vec<_>>(),
+            vec!["UEVFUjA=".to_string()],
+            "only a peer with allowed_ips (the carrier's lane universe) keeps an advertisement"
+        );
+    }
+
+    /// 2026-10-06 (`netbird status -d` per-peer relay): the status document's
+    /// `peer_relays` tail must carry the ACTUAL relay of each attached lane —
+    /// the relay URL the lane really rides, taken from the carrier's live
+    /// attached table — and each entry must DISAPPEAR with its lane on
+    /// detach. The remote's ADVERTISED URL (`relay_ads`) and the global home
+    /// URL are NOT evidence of an actual per-peer relay: the peer we control
+    /// advertises the FOREIGN relay here and still must be reported on OUR
+    /// relay (the controller rule decides the meeting point, not the
+    /// advertisement). Lanes run over the existing REAL fake-relay fixture —
+    /// no new fixture.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_peer_relays_exports_the_actual_attached_lane_and_clears_on_detach() {
+        let fx = relay_wiring_fixture().await;
+        let pub_ctrl = relay_lane_key(0x50);
+        let pub_ours = relay_lane_key(0x10);
+        assert!(remote_is_controller(&fx.local_key, &pub_ctrl), "premise: peer sorts above us");
+        assert!(!remote_is_controller(&fx.local_key, &pub_ours), "premise: we control this peer");
+
+        // BOTH peers advertise the FOREIGN relay — only the controller's lane
+        // may actually ride it.
+        let ice = fx.shared.ice.get().expect("orchestrator").clone();
+        for key in [&pub_ctrl, &pub_ours] {
+            route_signal_message(
+                &ice,
+                &fx.shared.relay_ads,
+                &relay_offer_from(key, Some(&fx.foreign_canonical)),
+            );
+        }
+        fx.carrier.set_peers(&[pub_ours.clone(), pub_ctrl.clone()]);
+
+        // the controlled peer's lane lands on OUR relay
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || {
+                fx.home.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the controlled peer must subscribe on our relay"
+        );
+        let _ = fx.home.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ours), true);
+        // the controller peer's lane lands on ITS advertised (foreign) relay —
+        // the fresh client's first attempt races its dial and retries
+        assert!(
+            relay_wait_until(Duration::from_secs(20), || {
+                fx.foreign.stats().frames_rx(crate::relay::MSG_SUBSCRIBE_PEER_STATE) >= 1
+            })
+            .await,
+            "the controller peer must subscribe on its advertised relay"
+        );
+        let _ = fx.foreign.set_peer_online(&PeerId::from_wg_pubkey_string(&pub_ctrl), true);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 2).await,
+            "both lanes must attach (stats={:?})",
+            fx.carrier.stats()
+        );
+
+        // THE EXPORT: the carrier's actual lane map — public-key sorted, one
+        // ACTUAL URL per attached lane (never the advertisement as such).
+        let lanes = fx.carrier.peer_relays();
+        assert_eq!(
+            lanes,
+            vec![
+                PeerRelayStatus {
+                    pub_key_b64: pub_ours.clone(),
+                    relay_url: fx.home_canonical.clone(),
+                },
+                PeerRelayStatus {
+                    pub_key_b64: pub_ctrl.clone(),
+                    relay_url: fx.foreign_canonical.clone(),
+                },
+            ],
+            "peer_relays must report the relay each lane ACTUALLY rides"
+        );
+        assert!(
+            !lanes.iter().any(|p| p.relay_url.contains("token") || p.relay_url.contains('@')),
+            "only public URLs cross the status boundary: {lanes:?}"
+        );
+
+        // the status DOCUMENT carries it (production assembly + tail JSON).
+        let status = ConnectorStatus::snapshot(&fx.shared, fx.wg.as_ref(), Some(lanes));
+        let json = status.to_json();
+        assert!(
+            json.contains(&format!(
+                "\"peer_relays\":[{{\"pub_key_b64\":\"{pub_ours}\",\
+                 \"relay_url\":\"{}\"}},{{\"pub_key_b64\":\"{pub_ctrl}\",\
+                 \"relay_url\":\"{}\"}}]",
+                fx.home_canonical, fx.foreign_canonical
+            )),
+            "the document must export the actual per-peer relay: {json}"
+        );
+        // ... and the 2026-10-07 `ice_peers` tail follows it (this fixture arms
+        // a REAL orchestrator, so the tail is an ARRAY — `[]`/entries — never
+        // the no-orchestrator `null`).
+        assert!(
+            json.contains(",\"ice_peers\":["),
+            "the armed orchestrator renders an ice_peers array, not null: {json}"
+        );
+        assert!(
+            json.rfind("\"peer_relays\":").expect("peer_relays section")
+                < json.rfind("\"ice_peers\":").expect("ice_peers section"),
+            "ice_peers is tail-appended AFTER peer_relays: {json}"
+        );
+        assert!(
+            json.ends_with("]}"),
+            "the ice_peers array is the ConnectorStatus document tail: {json}"
+        );
+        assert!(matches!(config::parse_document(&json), Ok(Json::Obj(_))), "{json}");
+        // the negative premise, pinned: the controlled peer's ADVERTISEMENT is
+        // the foreign relay while its exported ACTUAL relay is ours.
+        assert_eq!(
+            fx.shared
+                .relay_ads
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&pub_ours)
+                .map(String::as_str),
+            Some(fx.foreign_canonical.as_str()),
+            "an advertisement is NOT an actual relay (the controller rule won)"
+        );
+
+        // DETACH: the peer leaves the lane universe → no lane, no entry.
+        fx.carrier.set_foreign_idle_params(Duration::ZERO, Duration::ZERO);
+        fx.carrier.set_peers(&[]);
+        assert!(
+            relay_wait_until(Duration::from_secs(5), || fx.carrier.lane_count() == 0).await,
+            "every lane must detach (stats={:?})",
+            fx.carrier.stats()
+        );
+        assert!(
+            fx.carrier.peer_relays().is_empty(),
+            "a detached lane must leave NO peer_relays entry: {:?}",
+            fx.carrier.peer_relays()
+        );
+        let empty_status = ConnectorStatus::snapshot(
+            &fx.shared,
+            fx.wg.as_ref(),
+            Some(fx.carrier.peer_relays()),
+        );
+        let empty_json = empty_status.to_json();
+        assert!(
+            empty_json.contains("\"peer_relays\":[]"),
+            "the armed-but-laneless carrier renders an empty array, not null: {empty_json}"
+        );
+
+        fx.shared.stop_relay();
+        let RelayWiringFixture { home, foreign, .. } = fx;
+        home.shutdown().await;
+        foreign.shutdown().await;
     }
 }
