@@ -106,8 +106,10 @@ export struct NetBirdAccountWebView {
         Text('账户登录')
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.nb_text_primary'))
           .layoutWeight(1)
         Button('取消')
+          .fontColor($r('app.color.nb_on_primary'))
           .onClick((): void => this.goBackOrCancel())
       }
       .width('100%')
@@ -115,12 +117,15 @@ export struct NetBirdAccountWebView {
 
       if (this.loading) {
         Row() {
+          // The platform LoadingProgress keeps its own default indicator color
+          // (it follows the system light/dark configuration by itself) — only
+          // the surrounding chrome is themed here.
           LoadingProgress()
             .width(20)
             .height(20)
           Text('正在加载登录页面…')
             .fontSize(14)
-            .fontColor('#52615B')
+            .fontColor($r('app.color.nb_text_tertiary'))
             .margin({ left: 10 })
         }
         .width('100%')
@@ -131,10 +136,16 @@ export struct NetBirdAccountWebView {
       if (this.message.length > 0) {
         Text(this.message)
           .fontSize(14)
-          .fontColor('#A33B32')
+          .fontColor($r('app.color.nb_status_error'))
           .padding({ left: 16, right: 16, top: 8, bottom: 8 })
       }
 
+      // 主题 (2026-10-09): the Web COMPONENT's own chrome (.backgroundColor) is
+      // the native surface AROUND the remote document. The remote page's colors
+      // stay provider-controlled: no JS/CSS injection, no forced web dark mode,
+      // no reading or overriding page content — the credentials flow is
+      // untouched. The native header/background/fonts above follow the
+      // base/dark resource set like every other screen.
       Web({ src: this.authorizeUrl, controller: this.controller })
         .javaScriptAccess(true)
         .domStorageAccess(true)
@@ -164,6 +175,6 @@ export struct NetBirdAccountWebView {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F7F9F8')
+    .backgroundColor($r('app.color.nb_page_background'))
   }
 }

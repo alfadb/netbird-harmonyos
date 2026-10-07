@@ -223,7 +223,42 @@ const STUBS = {
   './NetBirdDiagnostics': DIAG_NOOP,
   './NetBirdSystemEvents': DIAG_NOOP,
   '../login/NetBirdAccountMode': ACCOUNT_MODE,
-  '../login/NetBirdAccountStore': ACCOUNT_STORE
+  '../login/NetBirdAccountStore': ACCOUNT_STORE,
+  // 2026-10-07 per-NetID route selection (decision B): the REAL extension now
+  // imports the route file adapter by value, so the specifier must resolve for
+  // the extension fixture to link. This suite never calls it (it drives
+  // deriveEndpointExclusions only) and stages no route document, so the answer
+  // is the truthful "no stored selection" (null = the pre-existing default
+  // all-on start) and a catalog write that IS reached fails LOUDLY instead of
+  // faking a published document. The real adapter + its rules are driven
+  // end-to-end by run-route-vpe.mts (and run-route-preferences.mts), never
+  // mirrored here.
+  '../routes/NetBirdRouteStore': 'data:text/javascript,' + encodeURIComponent(
+    'export const loadRouteSelection = async () => null;\n' +
+    'export const writeRouteCatalog = async () => {\n' +
+    '  throw new Error("route-catalog-write-not-staged-in-relay-exclusion-fixture");\n' +
+    '};'),
+  // 2026-10-09 live route apply: the REAL extension now imports the live-route
+  // IPC file adapter (and the state/mode token vocabulary of its pure document
+  // module) by value, so both specifiers must resolve for this fixture to link.
+  // This suite never drives the apply consumer (its 100 ms tick is never
+  // reached here), so the request read is the truthful "no request" and a
+  // result write fails LOUDLY rather than pretending an answer was published.
+  // The real adapter and its documents are driven end-to-end by
+  // run-route-apply-vpe.mts, never mirrored here.
+  '../routes/NetBirdRouteRequestStore': 'data:text/javascript,' + encodeURIComponent(
+    'export const readRouteApplyRequest = async () => null;\n' +
+    'export const writeRouteApplyResult = async () => {\n' +
+    '  throw new Error("route-apply-result-not-staged-in-relay-exclusion-fixture");\n' +
+    '};'),
+  '../routes/NetBirdRouteRequest': 'data:text/javascript,' + encodeURIComponent(
+    'export const ROUTE_APPLY_STATE_APPLYING = "applying";\n' +
+    'export const ROUTE_APPLY_STATE_APPLIED = "applied";\n' +
+    'export const ROUTE_APPLY_STATE_FAILED = "failed";\n' +
+    'export const ROUTE_APPLY_MODE_NONE = "";\n' +
+    'export const ROUTE_APPLY_MODE_NO_OS_CHANGE = "no-os-change";\n' +
+    'export const ROUTE_APPLY_MODE_RECREATED = "recreated";\n' +
+    'export const ROUTE_APPLY_MODE_STORED_NO_MAP = "stored-no-map";')
 };
 
 // Sibling modules of the extension: the ESM link would fail on the erased

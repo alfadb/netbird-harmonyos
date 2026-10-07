@@ -17,6 +17,67 @@
 // module plus shim consts for the interface names node's type stripping
 // erases (the same plumbing run-route-validation.mts uses).
 
+// libnetbird_core.so is a FUNCTIONAL stub for the connector_routes surface
+// ONLY (the same call-time pattern as phone-log-hooks.mjs): the fake reads
+// globalThis.__NB_CORE_ROUTES at CALL time, so ONE imported fixture can be
+// driven through every decode branch —
+//
+//   globalThis.__NB_CORE_ROUTES = {
+//     absent: false,         // true = export missing: the call throws the
+//                            // TypeError a core without the symbol produces
+//     throw: false,          // true = platform/native throw at call time
+//     payload: '<json text>' // the raw connector_routes() document
+//   }
+//
+// `undefined`/`null` global = the surface is ABSENT (throws), which is the
+// real shape of an older core. No other core export is provided on purpose:
+// none is exercised by run-relay-flag.mts / run-relay-status-log.mts, and
+// @ohos.hilog stays the EMPTY stub so a stray log call from the wrapper
+// cannot pass silently (it would throw and surface as a failing assertion).
+//
+// Core 5f adds the two route-ACK surfaces, with the SAME call-time pattern and
+// the SAME absent/throw/payload answer table:
+//   globalThis.__NB_CORE_ACK = { absent?, throw?, payload? }
+//     -> connector_route_set_applied(routesJson, isRecreate[, kind])
+//   globalThis.__NB_CORE_SELECTION_SET = { absent?, throw?, payload? }
+//     -> connector_route_selection_set(selectionJson)
+// Every call to either surface is RECORDED verbatim (the raw arguments array)
+// under globalThis.__NB_CORE_CALLS[name], so a test can prove what actually
+// crossed the NAPI boundary — in particular that the legacy 2-argument ACK
+// passes EXACTLY two arguments and no third one.
+const CORE = 'data:text/javascript,' + encodeURIComponent(
+  'function g() { return globalThis.__NB_CORE_ROUTES; }\n' +
+  'function recCall(name, args) {\n' +
+  '  const all = globalThis.__NB_CORE_CALLS || (globalThis.__NB_CORE_CALLS = {});\n' +
+  '  const list = all[name] || (all[name] = []);\n' +
+  '  list.push(Array.prototype.slice.call(args));\n' +
+  '}\n' +
+  'function answer(name, table) {\n' +
+  '  if (table === undefined || table === null || table.absent === true) {\n' +
+  '    throw new TypeError(name + " is not a function");\n' +
+  '  }\n' +
+  '  if (table.throw === true) { throw new Error("native " + name + " failure"); }\n' +
+  '  return table.payload;\n' +
+  '}\n' +
+  'const core = {};\n' +
+  'core.connector_routes = () => {\n' +
+  '  const m = g();\n' +
+  '  if (m === undefined || m === null || m.absent === true) {\n' +
+  '    throw new TypeError("connector_routes is not a function");\n' +
+  '  }\n' +
+  '  if (m.throw === true) { throw new Error("native connector_routes failure"); }\n' +
+  '  return m.payload;\n' +
+  '};\n' +
+  'core.connector_route_set_applied = function () {\n' +
+  '  recCall("connector_route_set_applied", arguments);\n' +
+  '  return answer("connector_route_set_applied", globalThis.__NB_CORE_ACK);\n' +
+  '};\n' +
+  'core.connector_route_selection_set = function () {\n' +
+  '  recCall("connector_route_selection_set", arguments);\n' +
+  '  return answer("connector_route_selection_set", globalThis.__NB_CORE_SELECTION_SET);\n' +
+  '};\n' +
+  'export default core;');
+
 const STUB = 'data:text/javascript,export%20default%20%7B%7D%3B';
 
 const CONNECTION = 'data:text/javascript,' + encodeURIComponent(
@@ -69,7 +130,7 @@ const STUBBED = new Map([
   ['@ohos.net.connection', CONNECTION],
   ['@ohos.resourceManager', STUB],
   ['@ohos.util', STUB],
-  ['libnetbird_core.so', STUB]
+  ['libnetbird_core.so', CORE]
 ]);
 
 export function resolve(specifier, context, next) {

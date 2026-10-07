@@ -134,7 +134,11 @@ export function loadVpnTunnelConfig(): VpnTunnelConfig {
 // isExcludedRoute entries are kept (the dynamically derived host-LAN entry
 // the extension grafted at assembly time, plus the frozen outer-endpoint
 // /32|/128 set) — the outer path (management/WG endpoint traffic) must stay
-// out of our own tunnel regardless of what the map routes.
+// out of our own tunnel regardless of what the map routes. The ROUTE list is
+// the one field with a narrower fallback: an explicit snapshot whose effective
+// route list is empty does NOT restore the base 0.0.0.0/0 template entry (see
+// the route-disable safety note in the body) — it keeps only the base
+// exclusions and non-default entries.
 export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig): VpnTunnelConfig {
   const address: string =
     net.address !== undefined && net.address !== null && net.address.length > 0
@@ -174,6 +178,26 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
       routes.push(base.routes[i]);
     }
   }
+  // Route-disable safety (2026-10-07): an EXPLICIT network config (net !==
+  // null — the caller passes `base` verbatim when there is no snapshot at all)
+  // whose effective route list came out EMPTY — every managed route disabled
+  // or absent AND no base exclusion carried — must NOT be answered with the
+  // base template's 0.0.0.0/0. `routes.length > 0 ? routes : base.routes`
+  // restored it, so "no routes in the map" (the route-disable feature's whole
+  // point) still submitted the default route: all traffic captured by the
+  // tunnel, the exact opposite of the user's setting (and a black hole when
+  // the data plane cannot carry it). The fallback keeps the base exclusions
+  // (already carried above) and the base NON-default entries (the
+  // tunnel-subnet template), and drops every isDefaultRoute entry. The
+  // no-snapshot (net === null) legacy path never reaches this function, so it
+  // keeps its base.routes verbatim — unchanged.
+  if (routes.length === 0) {
+    for (let i = 0; i < base.routes.length; i++) {
+      if (!base.routes[i].isDefaultRoute) {
+        routes.push(base.routes[i]);
+      }
+    }
+  }
 
   const dnsServers: string[] = [];
   if (net.dns !== undefined && net.dns !== null) {
@@ -186,7 +210,7 @@ export function applyNetworkConfig(base: VpnTunnelConfig, net: CoreNetworkConfig
     tunnelAddress: address,
     tunnelPrefixLength: prefixLength,
     interfaceName: base.interfaceName,
-    routes: routes.length > 0 ? routes : base.routes,
+    routes: routes,
     dnsServers: dnsServers.length > 0 ? dnsServers : base.dnsServers,
     mtu: base.mtu,
     peerEndpoint: base.peerEndpoint

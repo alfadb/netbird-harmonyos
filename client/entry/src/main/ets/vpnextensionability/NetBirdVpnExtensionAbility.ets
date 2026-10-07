@@ -55,7 +55,9 @@ import {
   RouteSetAppliedResult, SocketFeedResult, TunReleaseResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
   PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
-  connectorNetworkConfig, connectorRouteSetApplied, connectorSignalFeed, connectorStartWithSocket,
+  connectorNetworkConfig, connectorRouteSetApplied, connectorRouteSelectionSet,
+  connectorRoutes, connectorSignalFeed,
+  connectorStartWithSocket,
   connectorSocketFeed, connectorPhysicalNetworkChanged, connectorManagementAddressUpdate,
   connectorStatus, connectorStop, connectorLogout, connectorTunFdFeed, connectorTunRelease, connectorWgSocketFeed,
   socketSupplyPoll, socketSupplyReply, socketSupplyCloseFd, socketSupplyShutdown,
@@ -77,9 +79,15 @@ import {
 // type-only: erased at runtime (same rule as the endpoint/policy shapes above),
 // so the host selfcheck fixtures that stage this file byte-identically need no
 // shim const for the phone_log result/summary interfaces — nor for the 006
-// native-resource sample shape.
+// native-resource sample shape. (This declaration is kept byte-stable for the
+// run-phone-log.mts wiring pin; the 2026-10-09 live-route setter's answer type is
+// imported type-only on its OWN line right below, same erased-name rule.)
 import type { PhoneLogConfigureResult, PhoneLogSummary, NativeResourceSample }
   from './NetBirdConnector';
+// type-only: the live-route setter's answer (`connectorRouteSelectionSet`). Erased
+// at runtime — the value import is the wrapper function the staged REAL
+// connector already exports, so no shim const is needed anywhere.
+import type { RouteSelectionSetResult } from './NetBirdConnector';
 
 import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
@@ -117,10 +125,44 @@ import { event as diagEvent, start as startDiagnostics, stop as stopDiagnostics 
 // arkts-no-untyped-obj-literals), so the declaration form is the only one used.
 import type { DiagFields } from './NetBirdDiagnostics';
 import { start as startSystemEvents, stop as stopSystemEvents } from './NetBirdSystemEvents';
+// 2026-10-07 per-NetID route selection (decision B). The VPE is the ONLY reader
+// of the stored selection at start and the ONLY writer of the public catalog
+// document. The FILE ADAPTER is imported by value (the host fixtures stage it
+// byte-identically next to this file); the contract types are type-only, so the
+// existing byte-identical staging selfchecks never have to resolve the pure
+// routes module for erased names.
+import { loadRouteSelection, writeRouteCatalog } from '../routes/NetBirdRouteStore';
+import type { RouteCatalog, RoutePreferencesError, RouteSelection }
+  from '../routes/NetBirdRoutePreferences';
+// 2026-10-09 live route apply (instant apply: 路由选择页 → live VPE). The VPE is
+// the CONSUMER of the page's apply request (filesDir/netbird-route-apply-request
+// .json) and the ONLY writer of the apply result (…-result.json). Both the file
+// adapter and the pure document module it uses are VALUE imports — the token
+// vocabulary below is the contract's own, never a locally re-spelled literal —
+// and the two contract interfaces are type-only so the existing byte-identical
+// staging selfchecks only need the two resolver edges (see the selfcheck hooks).
+import { readRouteApplyRequest, writeRouteApplyResult }
+  from '../routes/NetBirdRouteRequestStore';
+import { ROUTE_APPLY_MODE_NONE, ROUTE_APPLY_MODE_NO_OS_CHANGE,
+  ROUTE_APPLY_MODE_RECREATED, ROUTE_APPLY_MODE_STORED_NO_MAP,
+  ROUTE_APPLY_STATE_APPLIED, ROUTE_APPLY_STATE_FAILED }
+  from '../routes/NetBirdRouteRequest';
+import type { RouteApplyRequest, RouteApplyResult } from '../routes/NetBirdRouteRequest';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const MAX_NATIVE_FD: number = 2147483647;
+// The all-on route selection the live-apply consumer falls back to when the
+// scoped preference document is ABSENT (`loadRouteSelection` answered null):
+// the pure module's own `routeSelectionDefault()` shape — nothing explicit,
+// everything default-on, future NetIDs included. The three fields are the
+// selection's whole DECLARED surface, and `connectorRouteSelectionSet` builds a
+// fresh payload out of exactly them, so this constant is never mutated.
+const ALL_ON_ROUTE_SELECTION: RouteSelection = {
+  selected_routes: [],
+  deselected_routes: [],
+  deselect_all: false
+};
 // Bound for the VpnConnection.protect() wait (house rule: every ArkTS-side
 // wait is bounded). Same 5 s box as the verified spike helper
 // protectSocketWithBox (spikes/n1b-disc-phys-hap e8e2cf9). Unlike the spike's
@@ -360,6 +402,20 @@ interface CreateOutcome {
   destroyRequired: boolean;
   accepted: boolean;
   reason: string;
+}
+
+// 2026-10-09 reporting correctness: the EXACT route set the controlled
+// recreate's own ACK accepted, handed back to the ONE operation that asked for
+// the rebuild. The set comes from the recreate leg's OWN snapshot (its second
+// `connector_network_config` call) — which can differ from a setter answer
+// taken one native call earlier: the two are DISTINCT NAPI calls, and the Rust
+// management worker (a separate thread) may advance the NetworkMap between them
+// inside the SAME JS turn. "No JS await between the setter and the recreate"
+// constrains only the shell's own watcher tick, never the native side.
+// `null` = this operation never reached an accepted ACK; `[]` = a really
+// accepted EMPTY set (every network off), kept distinguishable from `null`.
+interface RecreateAckOut {
+  routes: string[] | null;
 }
 
 // N2 first batch C/D columns: the core's own `n2_ring_dump` answer, parsed
@@ -766,6 +822,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // only, via managementEndpointView). Kept so the status document can name
   // the server the connector was started against; '' before the first start.
   private managementUrl: string = '';
+  // 2026-10-07 route-catalog publication: the VPE mirrors the native
+  // `connector_routes` getter into filesDir/netbird-routes.json on the status
+  // tick for the offline UI. ONE write at a time — two overlapping atomic
+  // temp+rename cycles would race the same .tmp name; the flag is released in
+  // every completion path and is the ONLY backlog this path keeps.
+  private routeCatalogPublishInFlight: boolean = false;
+  // 2026-10-09 live route apply (filesDir/netbird-route-apply-request.json):
+  // the last request id this instance CONSUMED (answered with a result, or
+  // answered as a scope mismatch). The request document is a RETAINED mailbox
+  // (the store never unlinks it) and is re-read on every 100 ms supply tick, so
+  // this in-memory id is what makes a re-read of the same request a no-op
+  // instead of a second apply. '' = nothing consumed yet.
+  private lastRouteApplyId: string = '';
+  // ONE route-apply handler at a time: the read → apply → answer chain is
+  // async and the 100 ms tick re-enters far faster than one recreate completes,
+  // so this latch (released on BOTH the resolve and the reject path) is the
+  // overlap guard. A request that arrives while an apply is in flight is NOT
+  // lost: the retained document is read again by a later tick, i.e. the newest
+  // queued id is processed after the current recreate.
+  private routeRequestBusy: boolean = false;
+  // Log-dedup for an unreadable apply request (no id exists to answer): the
+  // class is logged ONCE per class change instead of once per 100 ms tick.
+  // '' = the last read succeeded.
+  private routeApplyReadErrorClass: string = '';
   private signalUri: string = '';
   // Depth reported by the last accepted feed — the top-up uses it to tell a
   // draining core (keep feeding) from an idle one (stop piling up).
@@ -1654,6 +1734,38 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       return;
     }
 
+    // 2026-10-07 per-NetID route selection (decision B): load the stored
+    // selection for the management server CONFIGURED in this device config
+    // exactly ONCE, before any socket is opened or the connector is started —
+    // the selection is native generation state, fixed at start (a later UI
+    // change applies through stop-ACK + reconnect, never a live prefs watch).
+    //   * no document / a document scoped to ANOTHER server -> null = the
+    //     pre-existing default all-on start JSON, BYTE-IDENTICAL (the third
+    //     argument is omitted exactly like every pre-existing call);
+    //   * an existing document that cannot be trusted (malformed, wrong
+    //     version, unreadable) -> a CONTROLLED start failure with a stable
+    //     class token. Never a silent fall back to all-on: that would route
+    //     traffic the user disabled, and the next save would overwrite the
+    //     evidence. No raw document text ever reaches a log.
+    let routeSelection: RouteSelection | null = null;
+    try {
+      routeSelection = await loadRouteSelection(filesDir, device.management_url);
+    } catch (error) {
+      const reason: string = (error as RoutePreferencesError).reason;
+      const selectionFailure: string = typeof reason === 'string' && reason.length > 0
+        ? `route-selection-${reason}` : 'route-selection';
+      hilog.error(DOMAIN, TAG,
+        'VPN_ROUTE_SELECTION_INVALID|requestId=%{public}s|stage=route-selection|' +
+        'errorClass=%{public}s|action=connector-not-started',
+        this.requestId, selectionFailure);
+      this.writeConnectFailureForUi(selectionFailure);
+      return;
+    }
+
+    if (this.destroyRequested) {
+      return;
+    }
+
     // Packaged public CA roots: the core reads NO system trust store — for
     // https:// it REQUIRES caller-injected ca_pem (grpc.rs:63-66;
     // connector.rs:683 missing-ca-for-https = config error). An https
@@ -1746,7 +1858,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       ? { 'jwt': accountJwt } : { 'setup_key': setupKey };
     let start: ConnectorStartResult;
     try {
-      start = connectorStartWithSocket(mgmtFd, buildConnectorConfigJson(device, forceDefaultRoute),
+      start = connectorStartWithSocket(mgmtFd,
+        buildConnectorConfigJson(device, forceDefaultRoute, routeSelection),
         JSON.stringify(creds), connectAddr, physicalDefaultDnsServers());
     } finally {
       socketSupplyCloseFd(mgmtFd);
@@ -2017,9 +2130,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // N8: stash the managed route set actually merged into the platform
     // VpnConfig, for the initial-create ACK once create() + the WG feed
     // succeed (settleCreate). Only a real core snapshot qualifies — the
-    // base fallback shape is not the core's desired rendering.
+    // base fallback shape is not the core's desired rendering. 2026-10-09: an
+    // AVAILABLE snapshot with an EMPTY desired set is stashed as `[]` (not
+    // null) so ackAppliedRoutesInitial ACKs the real empty applied set.
     this.pendingAppliedRoutes =
-      net !== null && net.routes !== undefined && net.routes !== null && net.routes.length > 0
+      net !== null && net.routes !== undefined && net.routes !== null
         ? net.routes.map((r: CoreRouteEntry): string => r.network)
         : null;
     // 场景B roaming: the exclusion actually being submitted — the
@@ -4737,6 +4852,9 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // state, not by ordering.
         this.probeVpnIfacePresence().then((ifacePresence: string): void => {
           this.publishStatusForUi(status, ifacePresence);
+          // same tick, same callback: the offline route catalog (guarded
+          // independently, and never a second timer).
+          this.publishRouteCatalogForUi();
           if (this.destroyRequested || this.connectorDeathHandled || this.watcherTimer < 0) {
             return;
           }
@@ -4746,6 +4864,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
             'VPN_IFACE_PROBE_REJECTED|requestId=%{public}s|summary=%{public}s',
             this.requestId, safeError(probeError));
           this.publishStatusForUi(status, 'unknown');
+          this.publishRouteCatalogForUi();
         });
         // Demand-sized ICE pool target from the LIVE peer count and the CORE's
         // own per-peer need (peers × need_per_peer, clamped 8..48 — smoke 0050:
@@ -4912,17 +5031,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N8: initial-create ACK (best-effort — a failed ACK only leaves the
   // recreate signaling silent, i.e. exact N7 behavior; it never fails the
   // start flow).
+  //
+  // 2026-10-09: the ACK crosses with the EXPLICIT kind 'initial' (the bridge's
+  // 3-argument native entry), and an available map whose desired set is EMPTY
+  // (the user turned every network off) is ACKed as `[]` instead of being
+  // skipped — the empty list is a real applied set and every route change must
+  // be able to compare against it. Only a MISSING core snapshot (no map was
+  // merged at all) still skips: there is nothing to ACK and a fabricated `[]`
+  // would claim an applied set that was never submitted.
   private ackAppliedRoutesInitial(): void {
     const routes: string[] | null = this.pendingAppliedRoutes;
     this.pendingAppliedRoutes = null;
-    if (routes === null || routes.length === 0) {
+    if (routes === null) {
       hilog.warn(DOMAIN, TAG,
         'VPN_ROUTE_SET_ACK_SKIPPED|requestId=%{public}s|reason=no-core-snapshot-routes',
         this.requestId);
       return;
     }
     try {
-      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routes, false);
+      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routes, false, 'initial');
       if (!ack.ok) {
         hilog.warn(DOMAIN, TAG,
           'VPN_ROUTE_SET_ACK_FAILED|requestId=%{public}s|error=%{public}s',
@@ -4930,7 +5057,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         return;
       }
       hilog.info(DOMAIN, TAG,
-        'VPN_ROUTE_SET_ACKED|requestId=%{public}s|routes=%{public}d|isRecreate=false',
+        'VPN_ROUTE_SET_ACKED|requestId=%{public}s|routes=%{public}d|isRecreate=false|ackKind=initial',
         this.requestId, routes.length);
     } catch (error) {
       hilog.warn(DOMAIN, TAG,
@@ -4939,23 +5066,47 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
   }
 
-  private async performControlledRecreate(reason: string): Promise<void> {
+  // `ackKind` (2026-10-09 live route apply): the NATIVE ACK kind this leg
+  // reports. 'auto' (the default) is every pre-existing caller — the
+  // desired-set-divergence watch, the LAN-roam rebuild and the iface-loss
+  // rebuild — and keeps spending the core's automatic 3 / 30 s budget exactly
+  // as before. 'user' is the explicit live route apply of this increment: it
+  // records the applied set and clears the pending request WITHOUT touching the
+  // automatic budget/cooldown. It is the ONE difference between the two paths:
+  // the guards, the snapshot, the destroy → settle → create → verify sequence,
+  // the TUN feed, the ACK and the fail-closed teardown are identical, and
+  // `recreateInFlight` serializes the user path with the automatic and LAN legs
+  // exactly as it always did.
+  //
+  // Return value (2026-10-09): the REAL outcome token — 'ok' (iface verified +
+  // TUN fed + ACK accepted), 'fail:<stage>' (the existing fail-closed teardown
+  // ran) or 'skip:<reason>' (nothing was rebuilt). It is the same value
+  // lastRecreateOutcome carries; the pre-existing callers ignore it.
+  //
+  // `ackOut` (2026-10-09, OPTIONAL): when handed over, the EXACT route set this
+  // leg's own ACK accepted is recorded into it (still `null` until then). It is
+  // OPERATION-LOCAL state, not a shared "last snapshot": the one caller that
+  // must report this rebuild as applied reads the set the recreate's OWN
+  // snapshot ACKed, never the setter answer it saw one native call earlier. The
+  // three pre-existing automatic call sites pass no `ackOut` and are unaffected.
+  private async performControlledRecreate(reason: string, ackKind: string = 'auto',
+    ackOut?: RecreateAckOut): Promise<string> {
     if (this.recreateInFlight) {
       this.lastRecreateOutcome = 'skip:already-in-flight';
       hilog.info(DOMAIN, TAG,
         'VPN_RECREATE_SKIP|requestId=%{public}s|reason=already-in-flight', this.requestId);
-      return;
+      return this.lastRecreateOutcome;
     }
     if (this.destroyRequested || this.connectorDeathHandled) {
       this.lastRecreateOutcome = 'skip:teardown-latched';
-      return; // teardown already latched — nothing to rebuild
+      return this.lastRecreateOutcome; // teardown already latched — nothing to rebuild
     }
     if (this.connection === undefined || !this.createSettled || this.tunFd < 0) {
       this.lastRecreateOutcome = 'skip:initial-generation-not-settled';
       hilog.warn(DOMAIN, TAG,
         'VPN_RECREATE_SKIP|requestId=%{public}s|reason=initial-generation-not-settled',
         this.requestId);
-      return;
+      return this.lastRecreateOutcome;
     }
     this.recreateInFlight = true;
     hilog.info(DOMAIN, TAG,
@@ -4972,10 +5123,14 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       }
       // 1. the DESIRED config, fresh from the core (live gate state)
       const net: CoreNetworkConfig = connectorNetworkConfig();
-      if (!net.available || net.routes === undefined || net.routes === null ||
-        net.routes.length === 0) {
+      if (!net.available || net.routes === undefined || net.routes === null) {
         throw new Error('recreate-no-usable-snapshot');
       }
+      // 2026-10-09: an AVAILABLE snapshot with an EMPTY desired set is a legal
+      // rebuild (every network turned off). The overlay graft below still
+      // stands — the tunnel's own subnet entry is injected after the merge — and
+      // the ACK crosses the empty list, which the kind-aware native entry
+      // accepts for 'user' (see the connector's connectorRouteSetApplied).
       // N2-H: graft the endpoint exclusions frozen at THIS session's start
       // onto the rebuilt config — a recreate that dropped them would suck
       // the outer endpoints into the fresh (often default-routed) tunnel.
@@ -5141,6 +5296,17 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.appliedLanExclusion = lanExclusionSignature(lanRecreate.entry);
         const fd: number = await this.createConnectionBounded(conn, config);
 
+        // 2026-10-09 STOP-during-recreate gap: the bounded create() is a real
+        // await inside which onDestroy (or the connector-death path) can latch.
+        // Re-check BEFORE the fd contract / verification / feed / ACK — a
+        // torn-down generation must never be fed, ACKed or reported applied.
+        // The shared catch below runs the EXISTING fail-closed teardown
+        // (failRecreate → destroyOnce, both idempotent), which destroys this
+        // fresh, unfed connection: no orphan TUN, no late ACK.
+        if (this.destroyRequested || this.connectorDeathHandled) {
+          throw new Error('recreate-interrupted-by-teardown');
+        }
+
         // the same fd contract as the initial create
         stage = 'fd-contract';
         const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
@@ -5156,6 +5322,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         stage = 'iface-verify';
         const verifyOutcome: string =
           await this.verifyRecreatedIface(attempt, RECREATE_IFACE_MAX_ATTEMPTS);
+        // 2026-10-09 STOP-during-recreate gap (same rule as after create()):
+        // the verification probes are awaits too. A teardown latched inside them
+        // must not be followed by the accept/feed/ACK legs.
+        if (this.destroyRequested || this.connectorDeathHandled) {
+          throw new Error('recreate-interrupted-by-teardown');
+        }
         if (verifyOutcome !== 'ok') {
           continue;
         }
@@ -5192,10 +5364,25 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
       // 6. ACK the newly applied route set — completes the recreate (counts
       // against the core-side budget, arms the cooldown, clears `required`)
+      // 2026-10-09: with the EXPLICIT kind of this leg (ackKind). The routes
+      // array crosses verbatim, including an EMPTY one (every network off).
       stage = 'ack';
-      const ack: RouteSetAppliedResult = connectorRouteSetApplied(routeNetworks, true);
+      const ack: RouteSetAppliedResult =
+        connectorRouteSetApplied(routeNetworks, true, ackKind);
       if (!ack.ok) {
         throw new Error(`recreate-ack-failed:${ack.error ?? 'no-message'}`);
+      }
+      hilog.info(DOMAIN, TAG,
+        'VPN_ROUTE_SET_ACKED|requestId=%{public}s|routes=%{public}d|isRecreate=true|' +
+        'ackKind=%{public}s',
+        this.requestId, routeNetworks.length, ackKind);
+      // The ACCEPTED set, recorded for the ONE operation that asked for this
+      // rebuild (operation-local `ackOut`, never a shared field): a caller that
+      // reports "applied" must name THIS set — the recreate's own snapshot —
+      // not the setter answer it saw before the rebuild. An EMPTY accepted set
+      // is recorded verbatim as `[]`.
+      if (ackOut !== undefined) {
+        ackOut.routes = routeNetworks;
       }
       this.appliedNetSerial = net.serial !== undefined && net.serial !== null
         ? net.serial
@@ -5239,6 +5426,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         });
       }
     }
+    // The REAL outcome of this leg ('ok' | 'fail:<stage>' | 'skip:<reason>').
+    return this.lastRecreateOutcome;
   }
 
   // Bounded destroy of ONE connection generation (recreate leg only).
@@ -5507,6 +5696,12 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         hilog.error(DOMAIN, TAG, 'VPN_SOCKET_SUPPLY_POLL_FAILED|summary=%{public}s',
           safeError(error as Error));
       }
+      // 2026-10-09 live route apply: the SAME 100 ms tick carries the page's
+      // apply-request mailbox (NO new timer, no commonEvent, no second
+      // startVpnExtensionAbility). Teardown already returned above, and the
+      // consumer holds its own busy latch, so a tick can never overlap an
+      // in-flight apply.
+      this.maybePollRouteApplyRequest();
     }, 100);
   }
 
@@ -5594,6 +5789,248 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     socketSupplyShutdown();
     forgetPhysicalDefaultDns();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-09 live route apply (instant apply: 路由选择页 → live VPE).
+  // ---------------------------------------------------------------------------
+  // The page saves the scoped preference and then writes a RETAINED mailbox
+  // request (NetBirdRouteRequestStore) naming only WHICH scope changed. This
+  // consumer rides the EXISTING 100 ms socket-supply tick (no new timer):
+  //
+  //   read request (bounded, never cached by mtime/size) → duplicate? → scope
+  //   check → load the LATEST preference document for THIS management URL →
+  //   re-check the live-generation guards → in ONE synchronous JS turn let the
+  //   native core adopt the selection and run the EXISTING controlled recreate
+  //   with kind 'user' → answer.
+  //
+  // The single synchronous turn is the correctness core of this increment:
+  // performControlledRecreate sets `recreateInFlight` SYNCHRONOUSLY before its
+  // first await, so no 5 s status-watcher tick can observe the native
+  // `recreate.required` this setter just raised and "steal" the change as an
+  // AUTOMATIC recreate — which would spend the automatic 3 / 30 s budget a
+  // manual toggle must never touch. Any await between the setter and the
+  // recreate call would open exactly that window.
+  //
+  // Nothing here stops, starts or re-logs-in the connector (same connector / WG
+  // / ICE / management session); the ONLY teardown reachable from this file is
+  // the pre-existing fail-closed one, and the socket-supply interval is never
+  // touched (it stops only with the pre-existing teardown).
+  private maybePollRouteApplyRequest(): void {
+    if (this.routeRequestBusy || this.destroyRequested || this.destroyPromise !== undefined) {
+      return;
+    }
+    this.routeRequestBusy = true;
+    this.consumeRouteApplyRequest()
+      .then((): void => {
+        this.routeRequestBusy = false;
+      })
+      .catch((error: Error): void => {
+        // The handler answers every request it reads; this belt only guards an
+        // unexpected throw and MUST release the latch, or the mailbox wedges.
+        this.routeRequestBusy = false;
+        hilog.warn(DOMAIN, TAG,
+          'VPN_ROUTE_APPLY_FAIL|requestId=%{public}s|stage=handler|summary=%{public}s',
+          this.requestId, safeError(error));
+      });
+  }
+
+  private async consumeRouteApplyRequest(): Promise<void> {
+    const filesDir: string = this.context.filesDir;
+    if (filesDir.length === 0 || this.managementUrl.length === 0) {
+      return; // no shared scope to read/write the documents under
+    }
+    let request: RouteApplyRequest | null = null;
+    try {
+      request = await readRouteApplyRequest(filesDir);
+      this.routeApplyReadErrorClass = '';
+    } catch (error) {
+      // Malformed / wrong version / unreadable: there is no id to answer
+      // honestly, so NO result is written under a guessed one, and the document
+      // is NEVER unlinked (a fresh write must never be lost). Logged once per
+      // class instead of once per 100 ms tick.
+      const reason: string = (error as RoutePreferencesError).reason;
+      const errorClass: string = typeof reason === 'string' && reason.length > 0
+        ? reason : 'unavailable';
+      if (errorClass !== this.routeApplyReadErrorClass) {
+        this.routeApplyReadErrorClass = errorClass;
+        hilog.warn(DOMAIN, TAG,
+          'VPN_ROUTE_APPLY_READ_FAIL|requestId=%{public}s|stage=request|errorClass=%{public}s',
+          this.requestId, errorClass);
+      }
+      return;
+    }
+    if (request === null || request.id === this.lastRouteApplyId) {
+      return; // no request, or the retained mailbox's id was already consumed
+    }
+    const requestId: string = request.id;
+    if (request.management_url !== this.managementUrl) {
+      // The request names ANOTHER server's scope: it can never be applied to
+      // this session, and it is answered (consumed) so it cannot be retried
+      // forever. The running connection is untouched.
+      this.lastRouteApplyId = requestId;
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_SCOPE|requestId=%{public}s|result=scope-mismatch', this.requestId);
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_FAILED,
+        ROUTE_APPLY_MODE_NONE, 'scope-mismatch', []);
+      return;
+    }
+    // The LATEST preference document for THIS management URL, always read here
+    // — never a selection copy carried by the request. An old offline
+    // notification therefore can never revert a newer state.
+    let selection: RouteSelection | null = null;
+    try {
+      selection = await loadRouteSelection(filesDir, this.managementUrl);
+    } catch (error) {
+      const reason: string = (error as RoutePreferencesError).reason;
+      const errorClass: string = typeof reason === 'string' && reason.length > 0
+        ? reason : 'unavailable';
+      this.lastRouteApplyId = requestId;
+      hilog.error(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_FAIL|requestId=%{public}s|stage=route-selection|errorClass=%{public}s',
+        this.requestId, errorClass);
+      // Nothing was handed to the native core: the running VPN is untouched.
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_FAILED,
+        ROUTE_APPLY_MODE_NONE, `route-selection-${errorClass}`, []);
+      return;
+    }
+    // null = no document for this scope: the pre-existing all-on default (the
+    // pure module's own routeSelectionDefault shape).
+    const desired: RouteSelection = selection !== null ? selection : ALL_ON_ROUTE_SELECTION;
+
+    // ---- THE ONE SYNCHRONOUS DECISION TURN --------------------------------
+    // Nothing may await between this re-check, the native setter and the
+    // recreate call (see the block comment above).
+    if (this.destroyRequested || this.connectorDeathHandled || this.recreateInFlight ||
+      this.connection === undefined || !this.createSettled || this.tunFd < 0) {
+      // Teardown latched, or the generation is not settled (start still
+      // running, an AUTOMATIC or LAN recreate in flight). The request stays
+      // UNCONSUMED — the retained document is read again by a later tick, which
+      // is exactly the "the newest queued id is processed after the current
+      // recreate" rule. A teardown answers nothing: the page reads the vanished
+      // live document as 将在下次连接时生效, never as 已生效.
+      return;
+    }
+    const setter: RouteSelectionSetResult | null = connectorRouteSelectionSet(desired);
+    if (setter === null) {
+      // Unreadable native answer (missing export / platform throw / malformed
+      // document). NOTHING is claimed: no recreate and no "applied", and the
+      // running connection is left alone.
+      this.lastRouteApplyId = requestId;
+      hilog.error(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_FAIL|requestId=%{public}s|stage=selection-set|errorClass=unreadable',
+        this.requestId);
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_FAILED,
+        ROUTE_APPLY_MODE_NONE, 'selection-set-unreadable', []);
+      return;
+    }
+    if (!setter.ok) {
+      const error: string = setter.error !== undefined && setter.error.length > 0
+        ? setter.error : 'selection-set-refused';
+      this.lastRouteApplyId = requestId;
+      hilog.error(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_FAIL|requestId=%{public}s|stage=selection-set|errorClass=%{public}s',
+        this.requestId, error);
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_FAILED,
+        ROUTE_APPLY_MODE_NONE, error, []);
+      if (error === 'wg-apply-failed') {
+        // The native MUTATED its selection and its WG seam then refused the
+        // routes: its wg_apply_failed latch is the documented fail-closed state
+        // (the state names a route set the data plane does not have). The
+        // EXISTING fail-closed teardown applies — never a tunnel that lies
+        // about its routes.
+        this.failRecreate('route-apply-wg', new Error('route-selection-wg-apply-failed'));
+      }
+      return;
+    }
+    if (!setter.available) {
+      // No applied NetworkMap: the selection was stored core-side for the NEXT
+      // map and NOTHING was handed to the OS. That is exactly the contract's
+      // `stored-no-map` answer: state `applied` with a mode the ONE predicate
+      // (routeApplyResultIsApplied) reads as NOT applied, so the page words it
+      // 将在下次连接时生效 instead of 已生效. Never a false green.
+      this.lastRouteApplyId = requestId;
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_APPLIED,
+        ROUTE_APPLY_MODE_STORED_NO_MAP, '', setter.desired_routes);
+      return;
+    }
+    if (!setter.recreate_needed) {
+      // The native just PROVED the applied set already equals the desired set
+      // (`recreate_needed` is computed against the ACKed applied set), so the OS
+      // side needs no change at all: no destroy, no create, no feed, no ACK.
+      this.lastRouteApplyId = requestId;
+      hilog.info(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_RESULT|requestId=%{public}s|mode=no-os-change|routes=%{public}d',
+        this.requestId, setter.desired_routes.length);
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_APPLIED,
+        ROUTE_APPLY_MODE_NO_OS_CHANGE, '', setter.desired_routes);
+      return;
+    }
+    // A real OS-side change is required: the SAME controlled recreate the
+    // automatic path uses, reported as the USER's ACK kind (no automatic
+    // budget). The call is synchronous — its latch is set before this await.
+    hilog.info(DOMAIN, TAG,
+      'VPN_ROUTE_APPLY_BEGIN|requestId=%{public}s|mode=recreated|desired=%{public}d',
+      this.requestId, setter.desired_routes.length);
+    // Operation-local carrier for the set the recreate's OWN snapshot ACKs.
+    // `setter.desired_routes` is the map as the SETTER saw it one native call
+    // earlier; the recreate reads the map again, and the management worker may
+    // have advanced it in between (see RecreateAckOut).
+    const acked: RecreateAckOut = { routes: null };
+    const outcome: string = await this.performControlledRecreate(
+      `route-apply:${requestId}`, 'user', acked);
+    // The accepted set, read ONCE as a local (the same null-narrowing shape the
+    // initial-leg ACK uses): null = this operation never reached an accepted ACK.
+    const ackedRoutes: string[] | null = acked.routes;
+    this.lastRouteApplyId = requestId;
+    if (outcome === 'ok' && ackedRoutes !== null) {
+      // Applied ONLY now: the recreate verified the fresh interface, fed the
+      // TUN fd and the ACK was accepted. The reported set is the one THIS
+      // recreate's own snapshot ACKed (`ackedRoutes`, `[]` included) — never
+      // `setter.desired_routes`, which is a different native read.
+      await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_APPLIED,
+        ROUTE_APPLY_MODE_RECREATED, '', ackedRoutes);
+      return;
+    }
+    // 'fail:<stage>' (the fail-closed teardown already ran) or 'skip:<reason>'
+    // (nothing was rebuilt): the OS side is NOT at the requested state. Honest
+    // failure — never a synthesized 已生效. ('ok' without a recorded ACK set is
+    // unreachable by construction; if it ever happened it is answered as a
+    // failure, never as applied.)
+    const failure: string = outcome === 'ok'
+      ? 'recreate-ack-set-unrecorded' : `recreate-${outcome}`;
+    hilog.error(DOMAIN, TAG,
+      'VPN_ROUTE_APPLY_FAIL|requestId=%{public}s|stage=recreate|errorClass=%{public}s',
+      this.requestId, failure);
+    await this.writeRouteApplyAnswer(requestId, ROUTE_APPLY_STATE_FAILED,
+      ROUTE_APPLY_MODE_NONE, failure, []);
+  }
+
+  // The ONE place the answer document is built and written, so the
+  // id/state/mode/error vocabulary cannot drift between branches. The write is
+  // the store's atomic temp+fsync+rename; a failure is logged as a class only
+  // (never a body) and never disturbs the flow it answers.
+  private async writeRouteApplyAnswer(id: string, state: string, mode: string,
+    error: string, routes: string[]): Promise<void> {
+    const result: RouteApplyResult = {
+      id: id,
+      state: state,
+      mode: mode,
+      error: error,
+      routes: routes,
+      at_ms: Date.now()
+    };
+    try {
+      await writeRouteApplyResult(this.context.filesDir, result);
+      hilog.info(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_ANSWER|requestId=%{public}s|id=%{public}s|state=%{public}s|' +
+        'mode=%{public}s|routes=%{public}d',
+        this.requestId, id, state, mode, routes.length);
+    } catch (writeError) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_ROUTE_APPLY_ANSWER_FAIL|requestId=%{public}s|state=%{public}s|summary=%{public}s',
+        this.requestId, state, safeError(writeError as Error));
+    }
   }
 
   // Startup seed; subsequent transport dials also use on-demand protected supply.
@@ -6246,6 +6683,55 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         }
       }
     }
+  }
+
+  // 2026-10-07 route-catalog publication: mirror the native `connector_routes`
+  // getter into filesDir/netbird-routes.json so the UI can list the advertised
+  // networks OFFLINE (no native process call from the UI process). Called from
+  // the SAME status-tick callback as publishStatusForUi — no new timer.
+  //
+  // Publication rule: ONLY a readable catalog with `available:true` (an EMPTY
+  // accepted map included) is written. `null` (unreadable / malformed native
+  // document) and `available:false` (no connector / before the first map /
+  // stopped) publish NOTHING, so the last known offline catalog is RETAINED
+  // instead of erased. The document is the selection POLICY the core applied,
+  // never a proof that the OS route table matches it — `enabled` keeps exactly
+  // that meaning and no "applied" field is fabricated.
+  //
+  // Teardown discipline (same latches as publishStatusForUi): the guards are
+  // re-checked BEFORE any write starts, so a tick that lands after
+  // onDestroy / connector death / the watcher stopping can never seed a new
+  // document; the async completion only RELEASES the in-flight latch — it never
+  // publishes a second time, so a write that raced a teardown cannot be
+  // followed by a stale one. The write itself is the store's atomic
+  // temp+fsync+rename; failures are logged as a class only (never a document
+  // body) and never disturb the tick.
+  private publishRouteCatalogForUi(): void {
+    if (this.destroyRequested || this.connectorDeathHandled || this.watcherTimer < 0) {
+      return;
+    }
+    // The catalog document is scoped by the server this process started
+    // against; before the first start there is no scope to write under.
+    if (this.routeCatalogPublishInFlight || this.managementUrl.length === 0) {
+      return;
+    }
+    const catalog: RouteCatalog | null = connectorRoutes();
+    if (catalog === null || catalog.available !== true) {
+      return;
+    }
+    const managementUrl: string = this.managementUrl;
+    const requestId: string = this.requestId;
+    this.routeCatalogPublishInFlight = true;
+    writeRouteCatalog(this.context.filesDir, managementUrl, catalog, requestId, Date.now())
+      .then((): void => {
+        this.routeCatalogPublishInFlight = false;
+      })
+      .catch((error: Error): void => {
+        this.routeCatalogPublishInFlight = false;
+        hilog.warn(DOMAIN, TAG,
+          'VPN_ROUTE_CATALOG_PUBLISH_FAIL|requestId=%{public}s|summary=%{public}s',
+          requestId, safeError(error));
+      });
   }
 
   // Feed ONE ICE socket unless the pool is already full. Each ICE interface  // round needs a FRESH unbound UDP socket (dups share one socket object, so a

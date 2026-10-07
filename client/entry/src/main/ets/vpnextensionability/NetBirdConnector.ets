@@ -8,6 +8,12 @@ import core from 'libnetbird_core.so';
 // this file byte-identically never resolve the sibling module
 import type { UiPeerEntry } from './NetBirdUiModel';
 import type { LanExclusionProbe, LanLinkAddress } from './NetBirdEndpointExclusion';
+// type-only: erased at runtime, so the host selfcheck fixtures that stage this
+// file byte-identically never resolve the sibling module. The route-selection
+// and route-catalog types live in the pure route module (./NetBirdRoutePreferences,
+// zero imports) and are NEVER re-declared here.
+import type { RouteCatalog, RouteNetworkEntry, RouteSelection } from
+  '../routes/NetBirdRoutePreferences';
 import { DnsDerivationInput, DnsDerivationResult, DnsNetProbe, DnsPlatformNetAddress,
   StunUriEntry,
   deriveDnsEndpointExclusions, emptyDnsNetProbe, isPhysicalNetEvidence
@@ -568,8 +574,20 @@ export function readPackagedCaRootsPem(resManager: resourceManager.ResourceManag
 // never echoed. `forceDefaultRoute` is the N3-7 DEVELOPMENT opt-in that
 // overrides the default-route safety gate (data-plane-not-ready = traffic
 // black hole); it must stay false in production wiring.
+//
+// `routeSelection` (decision B, OPTIONAL): the startup per-NetID route
+// selection. When omitted (`undefined`) or `null` NO `route_selection` key is
+// written at all, so every pre-existing two-argument call stays BYTE-IDENTICAL
+// (pinned by client/entry/selfcheck/run-relay-flag.mts). When provided it is
+// written as a real JSON OBJECT — never a string-encoded document — because
+// the core parses that value with the same strict `RouteSelector::from_value`
+// it uses for the persisted document and fails the whole start with the stable
+// `invalid-config` token on a malformed one (connector.rs `route_selection`
+// branch). The core applies the selection BEFORE its first Sync (default
+// filter, no automatic exit behaviour); loading the user's stored preference
+// is the VPE's later job, not this builder's.
 export function buildConnectorConfigJson(device: DeviceConfigFile,
-  forceDefaultRoute: boolean): string {
+  forceDefaultRoute: boolean, routeSelection?: RouteSelection | null): string {
   const cfg: Record<string, Object> = {
     'management_url': device.management_url,
     'private_key': device.private_key,
@@ -595,6 +613,10 @@ export function buildConnectorConfigJson(device: DeviceConfigFile,
     cfg['relay_enabled'] = false;
   } else {
     cfg['relay_enabled'] = true;
+  }
+  // Appended last so the key order of every existing field is untouched.
+  if (routeSelection !== undefined && routeSelection !== null) {
+    cfg['route_selection'] = routeSelection;
   }
   return JSON.stringify(cfg);
 }
@@ -757,10 +779,28 @@ export interface RouteSetAppliedResult {
 // recreate (counts against the core-side budget and arms the cooldown).
 // Without this ACK the core never raises `recreate.required` (N7 behavior
 // preserved for an older shell).
-export function connectorRouteSetApplied(routes: string[], isRecreate: boolean):
-  RouteSetAppliedResult {
+//
+// `kind` (Core 5f, OPTIONAL): 'initial' | 'auto' | 'user', the ACK kind of the
+// 3-argument native entry. `'user'` records the route set the USER's live route
+// toggle actually applied to the OS and spends NONE of the automatic recreate
+// budget (no count, no cooldown): a manual toggle must never eat the automatic
+// churn budget. Omitted (`undefined`) calls the legacy TWO-argument native
+// entry byte-identically to the pre-existing wrapper, so a core without the
+// 3-argument entry keeps working unchanged.
+//
+// The `routes` array crosses EXPLICITLY, exactly as handed over — including an
+// EMPTY one (the user turned every network off), which the kind-aware native
+// entry accepts for `'user'`. This wrapper never short-circuits an empty list
+// and never substitutes a placeholder route for it; a refusal must come from
+// the native answer (`ok:false` + `error`), never from this side.
+export function connectorRouteSetApplied(routes: string[], isRecreate: boolean,
+  kind?: string): RouteSetAppliedResult {
   const payload: Record<string, Object> = { 'routes': routes };
-  return JSON.parse(core.connector_route_set_applied(JSON.stringify(payload), isRecreate)) as
+  if (kind === undefined) {
+    return JSON.parse(core.connector_route_set_applied(JSON.stringify(payload), isRecreate)) as
+      RouteSetAppliedResult;
+  }
+  return JSON.parse(core.connector_route_set_applied(JSON.stringify(payload), isRecreate, kind)) as
     RouteSetAppliedResult;
 }
 
@@ -1644,6 +1684,303 @@ export function connectorStop(): ConnectorStopResult {
 
 export function connectorLogout(): ConnectorLogoutResult {
   return JSON.parse(core.connector_logout()) as ConnectorLogoutResult;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-07 (decision B) route catalog getter — the `connector_routes` NAPI
+// surface (client/core/src/connector.rs `connector_routes_json`; NAPI wrapper
+// `napi_connector_routes` in client/core/src/napi.rs). The VPE is the ONLY
+// caller; the UI never calls it (it reads the persisted catalog document
+// offline through ./NetBirdRouteStore).
+//
+// ADDITIVE and READ-ONLY: a SEPARATE document from `connector_status()` /
+// `connector_network_config()` (their frozen JSON and key order are NOT
+// touched). It is the generation's startup selection verbatim plus the
+// UNFILTERED advertised network catalog of the last applied NetworkMap — a
+// user-disabled network (and every HA candidate behind it) stays visible with
+// `enabled:false`. `available:false` + `serial:0` + `networks:[]` is the
+// native "no route catalog" state (no connector, before the first map, after
+// stop): the wrapper keeps it as such and never turns that honest state into
+// the unreadable `null`, and never fabricates an empty-but-active catalog.
+//
+// EXACT native schema (copied field for field; public routing material only —
+// NetIDs, prefixes and counts, never a key, an fd or a secret):
+//   {"available":bool,"serial":n,
+//    "selection":{"selected_routes":[..],"deselected_routes":[..],
+//                 "deselect_all":bool},
+//    "networks":[{"net_id":"..","networks":["a.b.c.d/len"],
+//                 "candidate_count":n,"enabled":bool,"is_exit":bool}]}
+//
+// DEFENSIVE BY CONTRACT (the `connector_resource_status` pattern): the wrapper
+// answers `null` — never a throw — on a missing export, a platform throw, an
+// unparseable document or a structurally malformed one, and builds a FRESH
+// object out of the declared fields, so an arbitrary extra field the native
+// document may add is dropped rather than carried through. The projection
+// checks the ESSENTIAL types only; the strict whole-document rules (length
+// bounds, whitespace, duplicate NetIDs, prefix canonicalization) stay in the
+// pure ./NetBirdRoutePreferences parser that the VPE's persist path already
+// runs (`serializeRouteCatalogDocument` canonicalizes before any write) — this
+// decoder does not copy that parser. Like the resource-status surface it logs
+// NOTHING: no raw native payload and no field value.
+// ---------------------------------------------------------------------------
+
+// The un-validated parse shape: a malformed document may omit any field, so
+// each one is optional until the projection has checked it.
+interface RawRouteSelectionDoc {
+  selected_routes?: string[] | null;
+  deselected_routes?: string[] | null;
+  deselect_all?: boolean;
+}
+
+interface RawRouteNetworkRow {
+  net_id?: string;
+  networks?: string[] | null;
+  candidate_count?: number;
+  enabled?: boolean;
+  is_exit?: boolean;
+}
+
+interface RawRouteCatalogDoc {
+  available?: boolean;
+  serial?: number;
+  selection?: RawRouteSelectionDoc | null;
+  networks?: RawRouteNetworkRow[] | null;
+}
+
+// A type-valid string list kept as a COPY; a wrong-typed element (or a
+// non-array) refuses the whole list — never a fabricated [].
+function routeStringListOrNull(value: string[] | null | undefined): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const list: string[] = [];
+  for (let i: number = 0; i < value.length; i++) {
+    const item: string = value[i];
+    if (typeof item !== 'string') {
+      return null;
+    }
+    list.push(item);
+  }
+  return list;
+}
+
+// null = not a selection object of the declared shape.
+function routeSelectionOrNull(value: RawRouteSelectionDoc | null | undefined):
+  RouteSelection | null {
+  if (value === null || value === undefined || typeof value !== 'object' ||
+    Array.isArray(value)) {
+    return null;
+  }
+  const selected: string[] | null = routeStringListOrNull(value.selected_routes);
+  const deselected: string[] | null = routeStringListOrNull(value.deselected_routes);
+  if (selected === null || deselected === null || typeof value.deselect_all !== 'boolean') {
+    return null;
+  }
+  return {
+    selected_routes: selected,
+    deselected_routes: deselected,
+    deselect_all: value.deselect_all
+  };
+}
+
+// null = structurally malformed: refuse the WHOLE document instead of
+// half-believing it. `available:false` is a VALID catalog (see above) and is
+// projected, never refused.
+function projectRouteCatalog(doc: RawRouteCatalogDoc): RouteCatalog | null {
+  if (doc === null || doc === undefined || typeof doc !== 'object' || Array.isArray(doc)) {
+    return null;
+  }
+  if (typeof doc.available !== 'boolean') {
+    return null;
+  }
+  // A serial is a map ordinal, not a generic count: a negative or fractional
+  // one is a type anomaly, not a value to round or clamp.
+  if (typeof doc.serial !== 'number' || !Number.isInteger(doc.serial) || doc.serial < 0) {
+    return null;
+  }
+  const selection: RouteSelection | null = routeSelectionOrNull(doc.selection);
+  if (selection === null) {
+    return null;
+  }
+  if (!Array.isArray(doc.networks)) {
+    return null;
+  }
+  const rawRows: (RawRouteNetworkRow | null | undefined)[] =
+    doc.networks as (RawRouteNetworkRow | null | undefined)[];
+  const networks: RouteNetworkEntry[] = [];
+  for (let i: number = 0; i < rawRows.length; i++) {
+    const row: RawRouteNetworkRow | null | undefined = rawRows[i];
+    if (row === null || row === undefined || typeof row !== 'object' || Array.isArray(row)) {
+      return null;
+    }
+    if (typeof row.net_id !== 'string') {
+      return null;
+    }
+    const prefixes: string[] | null = routeStringListOrNull(row.networks);
+    if (prefixes === null) {
+      return null;
+    }
+    if (typeof row.candidate_count !== 'number' || !Number.isInteger(row.candidate_count) ||
+      row.candidate_count < 0) {
+      return null;
+    }
+    if (typeof row.enabled !== 'boolean' || typeof row.is_exit !== 'boolean') {
+      return null;
+    }
+    networks.push({
+      net_id: row.net_id,
+      networks: prefixes,
+      candidate_count: row.candidate_count,
+      enabled: row.enabled,
+      is_exit: row.is_exit
+    });
+  }
+  return {
+    available: doc.available,
+    serial: doc.serial,
+    selection: selection,
+    networks: networks
+  };
+}
+
+// null = the catalog could not be READ (missing export, platform throw,
+// unparseable document or structurally malformed one). It is not a substitute
+// for `available:false`, which is the honest "no route catalog yet" state.
+export function connectorRoutes(): RouteCatalog | null {
+  try {
+    const doc: RawRouteCatalogDoc = JSON.parse(core.connector_routes()) as RawRouteCatalogDoc;
+    return projectRouteCatalog(doc);
+  } catch (error) {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-08 (Core 5f) runtime route-selection setter — the
+// `connector_route_selection_set(selectionJson)` NAPI surface
+// (client/core/src/connector.rs `connector_route_selection_set_json`; NAPI
+// wrapper `napi_connector_route_selection_set` in client/core/src/napi.rs).
+//
+// ADDITIVE and separate from BOTH the startup `route_selection` config key of
+// buildConnectorConfigJson and the persisted selection document: the document's
+// full strict parser (length bounds, whitespace, canonicalization) stays in the
+// pure ./NetBirdRoutePreferences module the VPE's load path already runs — this
+// decoder does not copy it. The typed selection crosses as a real JSON OBJECT
+// built out of its three DECLARED fields in declared order, never a
+// string-encoded document; an extra key a caller's object may carry is dropped
+// rather than crossing the bridge.
+//
+// EXACT native result schema (copied field for field; routing material only —
+// NetIDs/prefixes, never a key, an fd or a secret):
+//   {"ok":bool,"available":bool,"changed":bool,
+//    "desired_routes":["a.b.c.d/len"],"recreate_needed":bool,
+//    "error"?:"no-connector"|"selection-invalid"|"wg-apply-failed"}
+//
+// DEFENSIVE BY CONTRACT (the `connector_routes` pattern): the wrapper answers
+// `null` — never a throw — on a missing export (an older core), a platform
+// throw, an unparseable document or a structurally malformed one, and builds a
+// FRESH object out of the declared fields, so an arbitrary extra field the
+// native document may add is dropped rather than carried through. A well-formed
+// `ok:false` + legal `error` token is a VALID answer and is preserved verbatim
+// (never rewritten into `null`): the caller must be able to tell "the native
+// refused this selection" from "the surface could not be read". Like the
+// resource-status surface it logs NOTHING: no raw selector payload and no
+// field value.
+// ---------------------------------------------------------------------------
+
+// The validated setter answer this side hands to callers. `error` is present
+// only on a native refusal and is one of the three legal tokens.
+export interface RouteSelectionSetResult {
+  ok: boolean;
+  error?: 'no-connector' | 'selection-invalid' | 'wg-apply-failed';
+  available: boolean;
+  changed: boolean;
+  desired_routes: string[];
+  recreate_needed: boolean;
+}
+
+// The un-validated parse shape: a malformed document may omit any field, so
+// each one is optional until the projection has checked it.
+interface RawRouteSelectionSetResult {
+  ok?: boolean;
+  error?: string;
+  available?: boolean;
+  changed?: boolean;
+  desired_routes?: string[] | null;
+  recreate_needed?: boolean;
+}
+
+// The `error` leaf, narrowed to the declared token union; null = not a legal
+// token (an `ok:false` document without one is malformed, not a refusal this
+// side may guess at).
+function routeSelectionSetErrorOrNull(value: string | undefined):
+  'no-connector' | 'selection-invalid' | 'wg-apply-failed' | null {
+  if (value === 'no-connector' || value === 'selection-invalid' ||
+    value === 'wg-apply-failed') {
+    return value;
+  }
+  return null;
+}
+
+// null = structurally malformed: refuse the WHOLE document instead of
+// half-believing it. `ok:true` and a legal `ok:false` are both projected.
+function projectRouteSelectionSet(doc: RawRouteSelectionSetResult):
+  RouteSelectionSetResult | null {
+  if (doc === null || doc === undefined || typeof doc !== 'object' || Array.isArray(doc)) {
+    return null;
+  }
+  if (typeof doc.ok !== 'boolean' || typeof doc.available !== 'boolean' ||
+    typeof doc.changed !== 'boolean' || typeof doc.recreate_needed !== 'boolean') {
+    return null;
+  }
+  const desired: string[] | null = routeStringListOrNull(doc.desired_routes);
+  if (desired === null) {
+    return null;
+  }
+  if (doc.ok) {
+    return {
+      ok: true,
+      available: doc.available,
+      changed: doc.changed,
+      desired_routes: desired,
+      recreate_needed: doc.recreate_needed
+    };
+  }
+  const error: 'no-connector' | 'selection-invalid' | 'wg-apply-failed' | null =
+    routeSelectionSetErrorOrNull(doc.error);
+  if (error === null) {
+    return null;
+  }
+  return {
+    ok: false,
+    error: error,
+    available: doc.available,
+    changed: doc.changed,
+    desired_routes: desired,
+    recreate_needed: doc.recreate_needed
+  };
+}
+
+// The runtime setter the route-selection page calls after the user's toggle
+// (the atomic write already happened; this only asks the live connector to
+// adopt the selection). null = the setter could not be READ (missing export,
+// platform throw, unparseable document or structurally malformed one) — it is
+// never a substitute for a native `ok:false`, which crosses as such.
+export function connectorRouteSelectionSet(selection: RouteSelection):
+  RouteSelectionSetResult | null {
+  try {
+    const payload: RouteSelection = {
+      selected_routes: selection.selected_routes,
+      deselected_routes: selection.deselected_routes,
+      deselect_all: selection.deselect_all
+    };
+    const doc: RawRouteSelectionSetResult =
+      JSON.parse(core.connector_route_selection_set(JSON.stringify(payload))) as
+        RawRouteSelectionSetResult;
+    return projectRouteSelectionSet(doc);
+  } catch (error) {
+    return null;
+  }
 }
 
 export function sleep(ms: number): Promise<void> {

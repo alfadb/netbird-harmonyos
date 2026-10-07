@@ -1,0 +1,88 @@
+{
+  "color": [
+    {
+      "name": "start_window_background",
+      "value": "#10171D"
+    },
+    {
+      "name": "nb_page_background",
+      "value": "#10171D"
+    },
+    {
+      "name": "nb_card_background",
+      "value": "#1B242C"
+    },
+    {
+      "name": "nb_input_background",
+      "value": "#1B242C"
+    },
+    {
+      "name": "nb_text_primary",
+      "value": "#E8EEF3"
+    },
+    {
+      "name": "nb_text_secondary",
+      "value": "#C3CED7"
+    },
+    {
+      "name": "nb_text_tertiary",
+      "value": "#AEBBC5"
+    },
+    {
+      "name": "nb_text_muted",
+      "value": "#93A4B0"
+    },
+    {
+      "name": "nb_border",
+      "value": "#4A5A66"
+    },
+    {
+      "name": "nb_primary",
+      "value": "#7FB2D9"
+    },
+    {
+      "name": "nb_on_primary",
+      "value": "#0B1218"
+    },
+    {
+      "name": "nb_neutral_button_background",
+      "value": "#3A4750"
+    },
+    {
+      "name": "nb_status_success",
+      "value": "#6FCF97"
+    },
+    {
+      "name": "nb_status_warning",
+      "value": "#E8C468"
+    },
+    {
+      "name": "nb_status_error",
+      "value": "#F08A82"
+    },
+    {
+      "name": "nb_status_success_background",
+      "value": "#22402F"
+    },
+    {
+      "name": "nb_status_warning_background",
+      "value": "#3F351A"
+    },
+    {
+      "name": "nb_on_status",
+      "value": "#0B1218"
+    },
+    {
+      "name": "nb_window_status_bar_background",
+      "value": "#10171D"
+    },
+    {
+      "name": "nb_window_navigation_bar_background",
+      "value": "#10171D"
+    },
+    {
+      "name": "nb_window_system_bar_content",
+      "value": "#E8EEF3"
+    }
+  ]
+}

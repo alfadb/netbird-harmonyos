@@ -1,8 +1,11 @@
 import AbilityConstant from '@ohos.app.ability.AbilityConstant';
+import { Configuration } from '@ohos.app.ability.Configuration';
+import ConfigurationConstant from '@ohos.app.ability.ConfigurationConstant';
 import UIAbility from '@ohos.app.ability.UIAbility';
 import Want from '@ohos.app.ability.Want';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
+import resourceManager from '@ohos.resourceManager';
 import util from '@ohos.util';
 import window from '@ohos.window';
 import { appendSystemEvent, event as diagnosticsEvent, start as startDiagnostics,
@@ -14,6 +17,19 @@ import { start as startSystemEvents,
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
+
+// Theme (2026-10-09): the base/dark color resources the window's system bars are
+// derived from. They live in entry/src/main/resources/base/element/color.json
+// (light) and .../dark/element/color.json (dark) and are resolved HERE BY NAME
+// (resourceManager.getColorByNameSync, @since 10 — verified in the local SDK d.ts
+// at .../ets/api/@ohos.resourceManager.d.ts), so the bars carry exactly the
+// palette value the page widgets get for the same mode. Name lookup rather than
+// $r(...).id deliberately: $r is an ArkUI declaration whose resource transform is
+// a UI-syntax pass, and this file is a plain ability (no struct) — the name API
+// needs no transform, and the names are checked against both resource files.
+const BAR_STATUS_BACKGROUND_RESOURCE: string = 'nb_window_status_bar_background';
+const BAR_NAVIGATION_BACKGROUND_RESOURCE: string = 'nb_window_navigation_bar_background';
+const BAR_CONTENT_RESOURCE: string = 'nb_window_system_bar_content';
 
 // Development-time credential delivery via want parameters.
 //
@@ -118,6 +134,11 @@ interface BusinessFailure extends Error {
 }
 
 export default class EntryAbility extends UIAbility {
+  // Theme (2026-10-09): the one WindowStage this ability loads its page into.
+  // Kept only so onConfigurationUpdate — which receives no stage — can re-derive
+  // the status/navigation bar colors after a system dark/light switch.
+  private mainWindowStage: window.WindowStage | undefined = undefined;
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     // Diagnostics (earliest safe point): a fresh UI process opens its own
     // observation run and its own marker before anything else in this callback
@@ -150,6 +171,10 @@ export default class EntryAbility extends UIAbility {
     }
     this.removePreviousStatus();
     this.persistCredentialOverrides(want);
+    // Theme (2026-10-09): pin THIS app's color mode to "follow the system" —
+    // app-scoped only, no device-wide theme is touched. Placed after the
+    // existing diagnostic / credential steps so those run exactly as before.
+    this.followSystemColorMode();
   }
 
   // Lifecycle observations carry ONE whitelisted scalar field, `stage`, with
@@ -178,6 +203,109 @@ export default class EntryAbility extends UIAbility {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Theme (2026-10-09): automatic system dark/light following.
+  //
+  // Automatic only — this app offers no manual light/dark switch and writes no
+  // device-wide theme; it simply stops overriding the system's color mode and
+  // lets the base/dark resource set do the rest:
+  //   * every page/widget color is a $r('app.color.nb_*') resource, resolved by
+  //     the platform from entry/src/main/resources/base/element/color.json
+  //     (light) or .../dark/element/color.json (dark);
+  //   * the window's status/navigation bars are the ONE place the native API
+  //     takes literal color strings instead of resources, so the same palette
+  //     entries are resolved by name here (see BAR_*_RESOURCE above).
+  // Every failure is contained: it is logged (code only, never a message
+  // carrying platform text) and the affected surface is left as it was — a
+  // fixed white is never forced.
+  // ---------------------------------------------------------------------------
+
+  // Pins THIS APP's color mode to "follow the system"
+  // (COLOR_MODE_NOT_SET, which is also the platform default for an app that
+  // never calls this API). App-scoped: setColorMode only affects this
+  // application's own configuration.
+  private followSystemColorMode(): void {
+    try {
+      this.context.getApplicationContext().setColorMode(
+        ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+      hilog.info(DOMAIN, TAG, 'THEME_COLOR_MODE|value=not-set|note=follow-system-app-scope-only');
+    } catch (error) {
+      // Harmless by construction: an app that never calls setColorMode already
+      // follows the system, so a failure here changes nothing — the resources
+      // and the bars below still follow the system mode.
+      hilog.warn(DOMAIN, TAG, 'THEME_COLOR_MODE_FAILED|code=%{public}s|note=follow-system-default-kept',
+        String((error as BusinessFailure).code ?? 'none'));
+    }
+  }
+
+  private refreshSystemBarTheme(): void {
+    const windowStage: window.WindowStage | undefined = this.mainWindowStage;
+    if (windowStage === undefined) {
+      // The configuration changed before onWindowStageCreate stored the stage:
+      // there is no window to theme yet, and the initial window load applies the
+      // (already current) mode in its own callback.
+      hilog.info(DOMAIN, TAG, 'THEME_BAR_SKIPPED|note=no-window-stage-yet');
+      return;
+    }
+    this.applySystemBarTheme(windowStage);
+  }
+
+  private applySystemBarTheme(windowStage: window.WindowStage): void {
+    let statusBarBackground: string = '';
+    let navigationBarBackground: string = '';
+    let barContent: string = '';
+    try {
+      const manager: resourceManager.ResourceManager = this.context.resourceManager;
+      statusBarBackground = this.barColorString(
+        manager.getColorByNameSync(BAR_STATUS_BACKGROUND_RESOURCE));
+      navigationBarBackground = this.barColorString(
+        manager.getColorByNameSync(BAR_NAVIGATION_BACKGROUND_RESOURCE));
+      barContent = this.barColorString(manager.getColorByNameSync(BAR_CONTENT_RESOURCE));
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'THEME_BAR_RESOLVE_FAILED|code=%{public}s|note=system-bar-colors-untouched',
+        String((error as BusinessFailure).code ?? 'none'));
+      return;
+    }
+    // A typed literal: ArkTS rejects a bare object literal in this position
+    // (arkts-no-untyped-obj-literals), the same reason recordLifecycle builds
+    // its record through a typed local.
+    const properties: window.SystemBarProperties = {
+      statusBarColor: statusBarBackground,
+      statusBarContentColor: barContent,
+      navigationBarColor: navigationBarBackground,
+      navigationBarContentColor: barContent
+    };
+    try {
+      const mainWindow: window.Window = windowStage.getMainWindowSync();
+      mainWindow.setWindowSystemBarProperties(properties).then((): void => {
+        hilog.info(DOMAIN, TAG,
+          'THEME_BAR_APPLIED|status=%{public}s|navigation=%{public}s|content=%{public}s',
+          statusBarBackground, navigationBarBackground, barContent);
+      }).catch((error: Error): void => {
+        hilog.warn(DOMAIN, TAG,
+          'THEME_BAR_APPLY_FAILED|code=%{public}s|note=system-bar-colors-untouched',
+          String((error as BusinessFailure).code ?? 'none'));
+      });
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'THEME_BAR_WINDOW_FAILED|code=%{public}s|note=system-bar-colors-untouched',
+        String((error as BusinessFailure).code ?? 'none'));
+    }
+  }
+
+  // The resource manager resolves the color against the app's current
+  // configuration (an ARGB number); the native bar fields take an RGB string, so
+  // only the alpha is dropped. The resolved resource is already the dark value
+  // whenever the app is in dark mode — exactly the value the page widgets get.
+  private barColorString(argb: number): string {
+    let hex: string = (argb & 0xFFFFFF).toString(16);
+    while (hex.length < 6) {
+      hex = '0' + hex;
+    }
+    return '#' + hex.toUpperCase();
+  }
+
   onNewWant(want: Want, _launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'ENTRY_ONNEWWANT|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
     this.recordLifecycle('onNewWant');
@@ -185,12 +313,18 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
+    // Theme (2026-10-09): remembered for onConfigurationUpdate, which is handed
+    // no stage. Nothing else about this callback changes.
+    this.mainWindowStage = windowStage;
     windowStage.loadContent('pages/Index', (error) => {
       if (error.code) {
         hilog.error(DOMAIN, TAG, 'ENTRY_LOAD_REJECTED|code=%{public}d', error.code);
         return;
       }
       hilog.info(DOMAIN, TAG, 'ENTRY_PAGE_READY|bundle=%{public}s', BUNDLE_NAME);
+      // Theme: initial window load — the bars are derived from the same
+      // base/dark color resources the just-loaded page uses.
+      this.applySystemBarTheme(windowStage);
     });
   }
 
@@ -200,6 +334,19 @@ export default class EntryAbility extends UIAbility {
 
   onBackground(): void {
     this.recordLifecycle('onBackground');
+  }
+
+  // Theme (2026-10-09): the system dark/light switch is delivered here, and the
+  // ONLY field read is the bounded Configuration.colorMode enum — no free-form
+  // configuration text is logged or stored. The page itself needs no handling:
+  // every widget resolves its $r('app.color.nb_*') against the base/dark
+  // resource set. The window's status/navigation bar colors are literal strings
+  // in the native API, so they are re-derived on every configuration update.
+  onConfigurationUpdate(newConfig: Configuration): void {
+    const colorMode: ConfigurationConstant.ColorMode | undefined = newConfig.colorMode;
+    hilog.info(DOMAIN, TAG, 'THEME_CONFIG_UPDATE|colorMode=%{public}s|note=system-bar-refresh',
+      colorMode === undefined ? 'undefined' : String(colorMode));
+    this.refreshSystemBarTheme();
   }
 
   // The ONLY stop() call site: the real ability-destroy callback. A page's

@@ -129,6 +129,7 @@ use crate::peer_conn::{
     IceOrchestratorSummary, LoggingSignalExchange, PeerIceDeps, PeerIceDetail, PeerIceOrchestrator,
     PeerSignalKind, RealSignalExchange, SignalLinkConfig, SignalLinkEvent,
 };
+use crate::route_selector::RouteSelector;
 use crate::signal::{SignalMessage, SignalOutgoing};
 use crate::state::{ConnEvent, ConnState, StateMachine};
 use crate::sync::{SyncLoopEvent, SyncSession, SyncUpdate};
@@ -209,6 +210,39 @@ impl RecreateStatus {
             jbool("cooling_down", self.cooling_down),
             jstr("reason", &self.reason),
         )
+    }
+}
+
+/// T0 e15ac: the KIND of shell ACK that reported the applied platform route set
+/// — the `kind` argument of the NAPI
+/// `connector_route_set_applied(routesJson, isRecreate, kind?)`. The automatic
+/// controlled-recreate budget ([`RECREATE_MAX`] / [`RECREATE_COOLDOWN_MS`]) is
+/// spent ONLY by [`RouteAckKind::Auto`]; `Initial` and `User` record the applied
+/// set and clear the pending request without touching it, because a user's live
+/// route toggle must never eat the automatic churn budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteAckKind {
+    /// The initial `create()` (legacy `is_recreate=false`).
+    Initial,
+    /// A COMPLETED controlled recreate driven by the automatic
+    /// desired-set-divergence signal (legacy `is_recreate=true`).
+    Auto,
+    /// A recreate the USER forced (live route toggle): records the applied set,
+    /// spends no automatic budget, arms no cooldown.
+    User,
+}
+
+impl RouteAckKind {
+    /// Parse the NAPI `kind` argument: `initial` | `auto` | `user`. An ABSENT
+    /// argument never reaches here — the legacy 2-arg entry maps its boolean
+    /// instead (see [`connector_route_set_applied_json`]).
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "initial" => Some(RouteAckKind::Initial),
+            "auto" => Some(RouteAckKind::Auto),
+            "user" => Some(RouteAckKind::User),
+            _ => None,
+        }
     }
 }
 
@@ -821,6 +855,27 @@ pub struct ConnectorConfig {
     /// 路由下启用 WSS 前，必须先把 relay 的 **TCP** 端点纳入 N2-H 冻结并排
     /// 除——那属于增量 D2 与设备侧工作，本期不得在设备路径上默认启用。
     pub relay_enabled: bool,
+    /// Startup route selection (`route_selection`, optional, **decision B**):
+    /// the per-NetID selection state applied to every NetworkMap route list of
+    /// THIS connector generation. Absent ⇒ [`RouteSelector::default`] =
+    /// everything selected (the pre-existing behavior, byte for byte).
+    ///
+    /// Parsed with the SAME reader/validator as the persisted state document
+    /// ([`RouteSelector::from_value`]) — malformed values FAIL the whole config
+    /// parse (start returns `invalid-config`) instead of silently falling back
+    /// to "all selected". The state is stored on the connector for the
+    /// generation and read at the ONE filtering point in
+    /// [`ConnectorShared::apply_update`]; since T0 e15ac the LIVE setter
+    /// (`connector_route_selection_set_json` →
+    /// [`ConnectorShared::route_selection_set_at`]) may replace it at runtime,
+    /// serialized with the map pipeline, so a toggle needs no restart. This
+    /// field changes neither [`RECREATE_MAX`] nor the default-route gate.
+    ///
+    /// v1 filters with [`RouteSelector::filter_selected`] EXACTLY: exit-node
+    /// reconciliation / `skip_auto_apply` / exclusive auto-selection are
+    /// deliberately NOT invoked, so a config without `route_selection` behaves
+    /// exactly as before this increment.
+    pub route_selection: RouteSelector,
 }
 
 impl ConnectorConfig {
@@ -843,13 +898,22 @@ impl ConnectorConfig {
     ///   "allow_unprotected_management": false,
     ///   "relay_enabled": false,
     ///   "ice_fixed_port": 0,
-    ///   "advertised_candidates": []
+    ///   "advertised_candidates": [],
+    ///   "route_selection": {
+    ///     "selected_routes": [], "deselected_routes": ["HostInternal"],
+    ///     "deselect_all": false
+    ///   }
     /// }
     /// ```
     ///
     /// `ca_pem` (string or array of strings) is REQUIRED for `https://`
     /// (no system store is used); it is ignored for `http://` (plaintext,
     /// test only). Unknown fields are ignored.
+    ///
+    /// `route_selection` (optional, decision B): startup route-selection state
+    /// (the exact [persisted document](RouteSelector::to_json) shape).
+    /// Absent = everything selected; malformed = the whole config is refused
+    /// (`invalid-config`), never a silent default.
     ///
     /// `force_default_route` (N3-7, default FALSE): DEVELOPMENT opt-in to
     /// export the managed default route while the data plane is not ready —
@@ -872,6 +936,18 @@ impl ConnectorConfig {
     /// reachable candidate. Never set by the device shell; absent keys
     /// leave the device path byte-identical (and no socket is created by
     /// either knob — see [`HostIceTuning`]).
+    ///
+    /// `route_selection` (optional, default = absent = all selected): the
+    /// STARTUP selection state, validated BEFORE the first Sync, stored on the
+    /// connector and applied to every NetworkMap route list at the single
+    /// filtering point. A malformed object — wrong type, bad NetID array,
+    /// duplicate key, or a non-object value — makes THIS parse fail, so
+    /// `connector_start*` answers `invalid-config`; it never degrades to
+    /// "all selected" (no silent fallback).
+    ///
+    /// T0 e15ac: this is the SEED only. The same state can be replaced live by
+    /// `connector_route_selection_set_json`, serialized with the map pipeline,
+    /// so a user toggle takes effect without a restart/reconnect.
     pub fn from_json(text: &str) -> Result<ConnectorConfig, ConfigError> {
         let doc = config::parse_document(text)?;
         let entries = match doc {
@@ -901,6 +977,9 @@ impl ConnectorConfig {
         let mut ice_fixed_port: u16 = 0;
         let mut advertised_candidates: Vec<crate::ice::Candidate> = Vec::new();
         let mut relay_enabled = false;
+        // decision B: the optional startup selection state (absent = default
+        // all-selected). Validated here, before any Sync can run.
+        let mut route_selection: Option<RouteSelector> = None;
 
         for (key, val) in &entries {
             match key.as_str() {
@@ -967,6 +1046,25 @@ impl ConnectorConfig {
                 // N13-D1: relay client opt-in (DEFAULT FALSE — device path
                 // unchanged; see the field doc for the T0 Q3 rationale).
                 "relay_enabled" => relay_enabled = field_bool(val, "relay_enabled")?,
+                // decision B: startup route selection. The SAME strict parser
+                // utilities as the persisted document (`parse_document` already
+                // ran over the whole start config; `from_value` validates this
+                // parsed object). Malformed ⇒ this whole parse fails ⇒
+                // `connector_start*` reports `invalid-config` (stable token).
+                "route_selection" => {
+                    if route_selection.is_some() {
+                        return Err(ConfigError::Field {
+                            field: "route_selection",
+                            reason: "duplicate field".into(),
+                        });
+                    }
+                    route_selection = Some(
+                        RouteSelector::from_value(val).map_err(|e| ConfigError::Field {
+                            field: "route_selection",
+                            reason: e.to_string(),
+                        })?,
+                    );
+                }
                 // N12a HOST-ONLY tuning (never set by the device shell —
                 // absent keys keep the device path byte-identical).
                 "ice_fixed_port" => {
@@ -1048,6 +1146,7 @@ impl ConnectorConfig {
             ice_fixed_port,
             advertised_candidates,
             relay_enabled,
+            route_selection: route_selection.unwrap_or_default(),
         })
     }
 }
@@ -1211,6 +1310,72 @@ impl core::fmt::Debug for ConnectorSecrets {
 // shared state + status
 // ---------------------------------------------------------------------------
 
+/// decision B: the UNFILTERED route catalog of one applied NetworkMap.
+///
+/// The selection filter runs only on the EFFECTIVE map handed to the shell/WG
+/// seams; this copy keeps every advertised candidate (including user-disabled
+/// HA rows) so the future public catalog can list them with their `enabled`
+/// flag. Pure data, no secrets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdvertisedRoutes {
+    /// `NetworkMap.serial` of the snapshot these rows came from.
+    serial: u64,
+    /// Every advertised managed route, in map order (unfiltered).
+    routes: Vec<crate::network_map::ManagedRoute>,
+}
+
+/// T0 e15ac: outcome of one live route-selection update
+/// ([`ConnectorShared::route_selection_set_at`]) — the data behind the
+/// `connector_route_selection_set_json` document. Public routing material only
+/// (NetIDs/prefixes are not even rendered here; just prefixes and counts).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RouteSelectionOutcome {
+    /// A NetworkMap was applied: the advertised catalog exists, so the
+    /// selection was filtered against it and the seams were updated.
+    available: bool,
+    /// The stored selection actually changed (an identical re-send is still
+    /// applied, idempotently, and reports `false`).
+    changed: bool,
+    /// The EFFECTIVE route set after the update (default-route gate applied), in
+    /// map order — exactly what the platform config should hold.
+    desired_routes: Vec<String>,
+    /// The platform route set must be replaced for `desired_routes` to take
+    /// effect (see [`recreate_needed_for`]).
+    recreate_needed: bool,
+    /// The WG seam refused the filtered routes: state updated, data plane not.
+    wg_apply_failed: bool,
+}
+
+/// T0 e15ac: does the platform route set have to be replaced?
+///
+/// Compares the PREFIX SET, not the row list: the platform installs one route
+/// per prefix, so an HA owner/metric swap on the same prefixes (management can
+/// move which peer serves a network, and the WG device picks the actual owner
+/// per session, without changing the advertised prefixes) must NOT ask for an OS
+/// replace — the WG table is re-applied either way. An UNKNOWN applied set
+/// (`None`: the shell never ACKed one, e.g. an older shell) always reports the
+/// need, so the signal is never silently absent.
+///
+/// T0 native5f: the same rule now ALSO governs the automatic
+/// `recreate.required` signal in [`ConnectorShared::refresh_net_gate_at`], so
+/// the setter's `recreate_needed` and the watcher's auto signal can never
+/// disagree about a row-shape-only change (an HA owner swap on unchanged
+/// prefixes must not consume the [`RECREATE_MAX`] / [`RECREATE_COOLDOWN_MS`]
+/// budget). The budget, the cooldown, the ACK kinds and the frozen
+/// `connector_status` fields are unchanged.
+fn recreate_needed_for(desired: &[String], applied: Option<&[String]>) -> bool {
+    let Some(applied) = applied else {
+        return true;
+    };
+    let mut desired: Vec<&str> = desired.iter().map(String::as_str).collect();
+    let mut applied: Vec<&str> = applied.iter().map(String::as_str).collect();
+    desired.sort_unstable();
+    desired.dedup();
+    applied.sort_unstable();
+    applied.dedup();
+    desired != applied
+}
+
 #[derive(Debug)]
 struct StateInner {
     machine: StateMachine,
@@ -1233,7 +1398,27 @@ struct StateInner {
     /// the snapshot's routes). `refresh_net_gate` rebuilds the snapshot's
     /// gated `routes` from here when live data-plane readiness moves the
     /// default-route decision between reads.
+    ///
+    /// The startup route selection (`route_selection`) is ALREADY applied: this
+    /// list is built from the effective (filtered) map, so a user-disabled
+    /// network can never be re-exported by a later gate refresh.
     net_routes_all: Vec<ShellRouteEntry>,
+    /// decision B: the route selection of THIS connector. Seeded from the
+    /// start config (`route_selection`) before the first Sync and read at the
+    /// ONE filtering point in `apply_update`. T0 e15ac: the generation-fixed
+    /// rule is GONE — the live selection setter
+    /// ([`ConnectorShared::route_selection_set_at`], reached from
+    /// `connector_route_selection_set_json`) mutates it under `route_apply`,
+    /// so a map apply and a preference change can never interleave. It stays
+    /// a single field read through the same `filter_selected` helper, so there
+    /// is exactly one filter semantics in the client.
+    route_selection: RouteSelector,
+    /// decision B: the UNFILTERED advertised route catalog of the last applied
+    /// NetworkMap (`None` before the first map / after stop). Kept separate
+    /// from `net_routes_all` on purpose: the future public catalog must show
+    /// user-disabled candidates (and their `enabled` flag) even though the
+    /// effective map excludes them. Cleared on stop like the snapshot.
+    advertised_routes: Option<AdvertisedRoutes>,
     /// N3-7: the (dev opt-in) force flag for the default-route gate.
     force_default_route: bool,
     /// N8: the route set the shell last reported as APPLIED to the platform
@@ -1294,6 +1479,22 @@ struct ConnectorShared {
     /// nothing — no signal link, no relay dial). Peer keys are public WG
     /// material, URLs are public routing data.
     relay_ads: Arc<Mutex<HashMap<String, String>>>,
+    /// T0 e15ac (LIVE route update): the ONE serialization door of the map
+    /// route pipeline. [`ConnectorShared::apply_update`] holds it from the
+    /// NetworkMap serial gate through `host.apply` (the relay/STUN/signal
+    /// bookkeeping ABOVE the serial gate deliberately stays outside), and the
+    /// live selection setter ([`ConnectorShared::route_selection_set_at`])
+    /// holds it while it re-filters the advertised catalog, rebuilds the shell
+    /// snapshot and re-applies the WG managed routes. Consequence: the route
+    /// list a map apply installs and the list the setter installs can never
+    /// interleave — the seams end up with whichever ran LAST, and both the
+    /// state and the seams describe the SAME selection.
+    ///
+    /// Lock order: `route_apply` → `inner` (then the pre-existing `inner` →
+    /// `ice`/`relay` order inside the pipeline). `route_apply` is NEVER
+    /// acquired while `inner`, `ice`, `relay`, a carrier leaf lock or a WG
+    /// device lock is held.
+    route_apply: Mutex<()>,
 }
 
 /// N13-D1: relay slot contents (urls = the configured set, public routing
@@ -1315,7 +1516,23 @@ struct RelaySlot {
 }
 
 impl ConnectorShared {
+    /// Build with the pre-existing default selection (everything on) — every
+    /// non-start caller (host tests, injected seams) keeps its behavior.
+    /// TEST-ONLY: production construction goes through
+    /// [`ConnectorShared::new_selected`] with the start config's selection.
+    #[cfg(test)]
     fn new(force_default_route: bool, relay_attach: Option<RelayAttach>) -> Self {
+        Self::new_selected(force_default_route, relay_attach, RouteSelector::new())
+    }
+
+    /// [`ConnectorShared::new`] plus the generation's startup route selection
+    /// (`ConnectorConfig::route_selection`). The selection is validated before
+    /// this point (config parse) and stored ONCE for the generation.
+    fn new_selected(
+        force_default_route: bool,
+        relay_attach: Option<RelayAttach>,
+        route_selection: RouteSelector,
+    ) -> Self {
         let relay_enabled = relay_attach.is_some();
         ConnectorShared {
             inner: Mutex::new(StateInner {
@@ -1334,6 +1551,8 @@ impl ConnectorShared {
                 started_at_unix: None,
                 net_config: None,
                 net_routes_all: Vec::new(),
+                route_selection,
+                advertised_routes: None,
                 force_default_route,
                 applied_route_set: None,
                 last_recreate_ms: None,
@@ -1350,6 +1569,7 @@ impl ConnectorShared {
             relay_wg: std::sync::OnceLock::new(),
             relay_runtime: std::sync::OnceLock::new(),
             relay_ads: Arc::new(Mutex::new(HashMap::new())),
+            route_apply: Mutex::new(()),
         }
     }
 
@@ -1393,6 +1613,115 @@ impl ConnectorShared {
         }
     }
 
+    /// The `connector_routes_json()` payload (decision B, internal helper —
+    /// NAPI registration comes later). Side-effect-free snapshot under ONE
+    /// mutex acquisition: unlike [`ConnectorHandle::network_config_json`] it
+    /// does NOT run `refresh_net_gate`, so reading it never advances the
+    /// recreate state.
+    fn routes_json(&self) -> String {
+        let g = self.lock();
+        routes_document(&g.route_selection, g.advertised_routes.as_ref())
+    }
+
+    // -----------------------------------------------------------------------
+    // T0 e15ac: LIVE route-selection update (no restart)
+    // -----------------------------------------------------------------------
+
+    /// Apply a NEW selection to the running connector — the mutation
+    /// counterpart of [`ConnectorShared::routes_json`]. `selection` is the
+    /// already strictly parsed raw selector document (the public entry
+    /// [`connector_route_selection_set_json`] owns the parsing, so an invalid
+    /// document never reaches this function).
+    ///
+    /// This is the LIVE half of the ONE filtering point: the map route pipeline
+    /// of [`ConnectorShared::apply_update`] and this rebuild share ONE critical
+    /// section ([`ConnectorShared::route_apply`]), so a preference change can
+    /// never interleave with a map apply — either the map ran with the old
+    /// selection (and this call overwrites the WS/shell result) or it ran with
+    /// the new one. The filter itself is the same
+    /// [`RouteSelector::filter_selected`] helper the map path uses; there is no
+    /// second filter semantics to drift.
+    ///
+    /// Order of operations (the contract):
+    /// 1. take `route_apply`, then `inner`; store the selection, remember
+    ///    whether it actually changed;
+    /// 2. re-filter the UNFILTERED advertised catalog
+    ///    ([`AdvertisedRoutes::routes`] — it is never rewritten, so the public
+    ///    catalog keeps showing disabled candidates), rebuild
+    ///    `net_routes_all`, `route_count` and the gated `net_config.routes`
+    ///    (same default-route gate rule as [`ConnectorShared::refresh_net_gate`]
+    ///    — the gate DECISION itself is readiness-driven and is reused, not
+    ///    recomputed here);
+    /// 3. release `inner`, THEN hand the filtered routes to the WG seam
+    ///    (`apply_managed_routes`) — never a WG/device call under `inner`;
+    /// 4. peers, their base `allowed_ips`, ICE/relay state and every landed
+    ///    session are NOT touched: the selection governs managed routes only.
+    ///
+    /// With no applied NetworkMap there is nothing to filter: the selection is
+    /// stored for the NEXT map and the outcome reports `available:false` —
+    /// this function never claims an applied route set it cannot see.
+    fn route_selection_set_at(
+        &self,
+        selection: RouteSelector,
+        wg: &dyn WgPeerApplier,
+    ) -> RouteSelectionOutcome {
+        let mut g = self.lock();
+        let changed = g.route_selection != selection;
+        g.route_selection = selection;
+        let filtered = g
+            .advertised_routes
+            .as_ref()
+            .map(|adv| g.route_selection.filter_selected(&adv.routes));
+        let mut outcome = RouteSelectionOutcome { available: false, changed, ..Default::default() };
+        let mut wg_routes: Option<Vec<crate::network_map::ManagedRoute>> = None;
+        if let Some(filtered) = filtered {
+            outcome.available = true;
+            // net_routes_all is the UNGATED record of the EFFECTIVE list (the
+            // live gate re-exports from it); route_count follows it.
+            g.net_routes_all = filtered
+                .iter()
+                .map(|r| ShellRouteEntry {
+                    network: route_network_string(&r.network),
+                    is_default: r.network.is_default(),
+                })
+                .collect();
+            let count = g.net_routes_all.len();
+            g.route_count = count;
+            // The default-route gate is a readiness decision, NOT a selection
+            // outcome: reuse the live snapshot's stored verdict and rebuild the
+            // exported list from the new record, exactly like
+            // `refresh_net_gate` does when the verdict moves.
+            let default_allowed =
+                g.net_config.as_ref().map_or(false, |snap| snap.default_route_allowed);
+            let gated: Vec<ShellRouteEntry> = g
+                .net_routes_all
+                .iter()
+                .filter(|r| !r.is_default || default_allowed)
+                .cloned()
+                .collect();
+            outcome.desired_routes = gated.iter().map(|r| r.network.clone()).collect();
+            if let Some(snap) = g.net_config.as_mut() {
+                snap.routes = gated;
+            }
+            outcome.recreate_needed =
+                recreate_needed_for(&outcome.desired_routes, g.applied_route_set.as_deref());
+            wg_routes = Some(filtered);
+        }
+        drop(g);
+        if let Some(routes) = wg_routes {
+            if wg.apply_managed_routes(&routes).is_err() {
+                // fail-closed: the state now names a route set the data plane
+                // does not have; the shell must not treat the toggle as
+                // installed (the VPE keeps/rejects its config in that case).
+                let mut g = self.lock();
+                g.wg_apply_failed = true;
+                g.wg_apply_errors += 1;
+                outcome.wg_apply_failed = true;
+            }
+        }
+        outcome
+    }
+
     /// N7: re-decide the snapshot's default-route gate against LIVE
     /// data-plane readiness (`wg.tunnel_ready()` on the device-backed seam ×
     /// the ICE view). The snapshot built at sync time is gated with the
@@ -1410,6 +1739,13 @@ impl ConnectorShared {
     /// INSTALLED, a re-held one should be REMOVED to keep the black-hole
     /// rule) raises `recreate.required` for the shell, bounded by
     /// [`RECREATE_MAX`] + [`RECREATE_COOLDOWN_MS`].
+    ///
+    /// T0 native5f: that divergence test is the PREFIX SET
+    /// ([`recreate_needed_for`]), not the row list — identical to the live
+    /// setter's `recreate_needed`, so a duplicate/permuted ACK of the same
+    /// prefixes is silent on BOTH surfaces and spends no auto budget. An
+    /// unknown applied set (`None`) still keeps the signal silent (initial
+    /// create pending), never treated as an empty set.
     fn refresh_net_gate(&self, wg: &dyn WgPeerApplier) {
         self.refresh_net_gate_at(wg, crate::sys::mono_ms());
     }
@@ -1458,7 +1794,12 @@ impl ConnectorShared {
                 inner.recreate.required = false;
                 inner.recreate.reason = "none".to_string();
             }
-            Some(applied) if *applied == desired => {
+            // T0 native5f: the SAME PREFIX-SET rule the live setter uses
+            // ([`recreate_needed_for`]). The platform installs one route per
+            // prefix, so an HA owner/metric swap — or merely duplicate/permuted
+            // rows — on the same prefixes is NOT a desired-set change and must
+            // neither raise the signal nor spend automatic recreate budget.
+            Some(applied) if !recreate_needed_for(&desired, Some(applied)) => {
                 inner.recreate.required = false;
                 inner.recreate.reason = "none".to_string();
             }
@@ -1489,34 +1830,84 @@ impl ConnectorShared {
         }
     }
 
-    /// N8: shell ACK — `routes` is now the route set APPLIED to the platform
-    /// VpnConfig (`is_recreate=false`: the initial create; `true`: a
-    /// completed controlled recreate — counts against [`RECREATE_MAX`] and
-    /// arms the [`RECREATE_COOLDOWN_MS`] window). Idempotent-safe: repeated
-    /// ACKs of the same set without `is_recreate` just re-record it.
+    /// N8 / T0 e15ac: shell ACK — `routes` is now the route set APPLIED to the
+    /// platform VpnConfig, reported with the KIND of recreate that produced it
+    /// ([`RouteAckKind`]). The legacy boolean maps onto that kind: `false` =
+    /// [`RouteAckKind::Initial`], `true` = [`RouteAckKind::Auto`].
+    ///
+    /// - `Initial`: the initial `create()`. Records the applied set and clears
+    ///   the pending request; spends NO budget and arms NO cooldown. `routes`
+    ///   may be EMPTY (T0 e15ac): an explicitly ACKed empty platform set is a
+    ///   real state (e.g. every network deselected), and recording it arms the
+    ///   desired-vs-applied comparison so a network management introduces later
+    ///   — default-ENABLED — still raises the recreate signal.
+    /// - `Auto`: a COMPLETED controlled recreate driven by the automatic
+    ///   divergence signal. Counts against [`RECREATE_MAX`] and arms the
+    ///   [`RECREATE_COOLDOWN_MS`] window (the auto budget stays 3 / 30s).
+    /// - `User`: a recreate the USER forced (a live route toggle). Records the
+    ///   applied set and clears the pending request, but touches NO automatic
+    ///   count / cooldown / exhausted state — a user toggle must never consume
+    ///   the automatic churn budget, which stays fully available afterwards.
+    ///
+    /// Every kind records the EXACT set the shell reported, even if the map
+    /// moved on in the meantime: the ACK is evidence of what the platform
+    /// holds, never a claim about the current desired state. A stale ACK
+    /// therefore just keeps `desired != applied` and the next gate refresh
+    /// re-raises `recreate.required`. Idempotent-safe: repeated ACKs of the
+    /// same set without `is_recreate` only re-record it.
     pub fn ack_applied_route_set(&self, routes: Vec<String>, is_recreate: bool, now_ms: u64) {
+        self.ack_applied_route_set_kind(
+            routes,
+            if is_recreate { RouteAckKind::Auto } else { RouteAckKind::Initial },
+            now_ms,
+        );
+    }
+
+    /// [`ConnectorShared::ack_applied_route_set`] with the ACK kind explicit
+    /// (the NAPI entry carries `kind` as a string — see
+    /// [`connector_route_set_applied_kind_json`]).
+    fn ack_applied_route_set_kind(&self, routes: Vec<String>, kind: RouteAckKind, now_ms: u64) {
         let mut g = self.lock();
         g.applied_route_set = Some(routes.clone());
-        if is_recreate {
-            g.recreate.count = g.recreate.count.saturating_add(1);
-            g.last_recreate_ms = Some(now_ms);
-            g.recreate.required = false;
-            g.recreate.cooling_down = false;
-            if g.recreate.count >= RECREATE_MAX {
-                g.recreate.exhausted = true;
+        match kind {
+            RouteAckKind::Initial => {
+                g.recreate.required = false;
                 hilog::emit(&format!(
-                    "connector: recreate budget exhausted (count={})",
-                    g.recreate.count
+                    "connector: applied route set acked (initial, routes={})",
+                    routes.len()
                 ));
             }
-            hilog::emit(&format!(
-                "connector: recreate acked (count={}, routes={})",
-                g.recreate.count,
-                routes.len()
-            ));
-        } else {
-            g.recreate.required = false;
-            hilog::emit(&format!("connector: applied route set acked (routes={})", routes.len()));
+            RouteAckKind::Auto => {
+                g.recreate.count = g.recreate.count.saturating_add(1);
+                g.last_recreate_ms = Some(now_ms);
+                g.recreate.required = false;
+                g.recreate.cooling_down = false;
+                if g.recreate.count >= RECREATE_MAX {
+                    g.recreate.exhausted = true;
+                    hilog::emit(&format!(
+                        "connector: recreate budget exhausted (count={})",
+                        g.recreate.count
+                    ));
+                }
+                hilog::emit(&format!(
+                    "connector: recreate acked (count={}, routes={})",
+                    g.recreate.count,
+                    routes.len()
+                ));
+            }
+            RouteAckKind::User => {
+                // Deliberately NOT touching `count` / `last_recreate_ms` /
+                // `exhausted` (and not re-rendering `cooling_down`): the
+                // automatic churn budget and its cooldown window are a
+                // platform-churn bound, and a USER-forced recreate is not part
+                // of that churn. The derived `cooling_down` rendering is
+                // re-derived by the next `refresh_net_gate` read.
+                g.recreate.required = false;
+                hilog::emit(&format!(
+                    "connector: user route change acked (auto budget untouched, routes={})",
+                    routes.len()
+                ));
+            }
         }
     }
 
@@ -2012,6 +2403,14 @@ impl ConnectorShared {
             self.lock().last_update_unix = Some(unix_now());
             return;
         };
+        // T0 e15ac: enter the SHARED route critical section. From here through
+        // `host.apply` below, the map serial gate, the filter/rebuild of
+        // `net_routes_all` + the shell snapshot, the WG managed-route apply and
+        // `host.apply` form ONE section against the live selection setter
+        // ([`ConnectorShared::route_selection_set_at`]). Everything ABOVE this
+        // line (config/relay/STUN/signal bookkeeping) is deliberately NOT
+        // serialized with it. Lock order: `route_apply` → `inner`.
+        let _route_apply = self.route_apply.lock_poison();
         {
             let g = self.lock();
             if g.last_serial > map.serial {
@@ -2033,6 +2432,33 @@ impl ConnectorShared {
                 route,
             ));
         }
+        // decision B — the ONE filtering point. Order matters and is the
+        // contract:
+        //   1. the audit lines above ran on the UNFILTERED map (every
+        //      advertised row is witnessed, including user-disabled ones);
+        //   2. the UNFILTERED catalog is snapshotted for the future public
+        //      catalog (`connector_routes_json`, disabled candidates visible);
+        //   3. only then is the EFFECTIVE clone built and shadowed over `map`,
+        //      so every consumer below — the shell snapshot
+        //      (`ShellNetworkConfig::from_map_gated`), `net_routes_all`, the
+        //      WG managed-route apply, and `host.apply` — sees the SAME
+        //      filtered route list. Peer `allowed_ips` (the overlay /32s) are
+        //      NOT filtered: the selection governs managed routes only.
+        // v1 calls `filter_selected` EXACTLY (default-on minus explicit
+        // deselections, `deselect_all` ⇒ none): exit-node reconciliation /
+        // `skip_auto_apply` / exclusive auto-selection are deliberately NOT
+        // invoked, so an absent `route_selection` is byte-identical to the
+        // pre-existing behavior.
+        let effective = {
+            let mut g = self.lock();
+            let selected = g.route_selection.filter_selected(&map.routes);
+            g.advertised_routes =
+                Some(AdvertisedRoutes { serial: map.serial, routes: map.routes.clone() });
+            let mut effective = map.clone();
+            effective.routes = selected;
+            effective
+        };
+        let map = &effective;
         let peers = map.peers.len() + map.offline_peers.len();
         // N5c: default-route gate input now includes the ICE view — the data
         // plane is only "ICE-ready" when at least one peer has a LANDED
@@ -3901,6 +4327,77 @@ fn route_network_string(route: &config::Route) -> String {
     )
 }
 
+/// Render the `connector_routes_json()` document (decision B) from the
+/// generation's selection + the UNFILTERED advertised catalog:
+///
+/// ```json
+/// {
+///   "available": true,
+///   "serial": 42,
+///   "selection": {"selected_routes":[],"deselected_routes":["HostInternal"],"deselect_all":false},
+///   "networks": [
+///     {"net_id":"HostInternal","networks":["192.168.50.0/24"],
+///      "candidate_count":2,"enabled":false,"is_exit":false}
+///   ]
+/// }
+/// ```
+///
+/// `available` means "a NetworkMap was APPLIED" (the map-seen state), NOT
+/// "the applied map advertised routes": it is false only before the first map,
+/// after stop and with no connector; an applied map that advertised NO routes
+/// is a real connected-but-empty catalog — `available:true` with the map's own
+/// `serial`, the generation's `selection` and `networks:[]`. It is about the
+/// CATALOG, not the selection — with `deselect_all` (or every NetID
+/// deselected) the catalog is still `available:true` and every row simply
+/// carries `enabled:false`. Fixed key order, existing escaping helpers, no
+/// secrets (NetIDs/prefixes are public routing material).
+fn routes_document(selection: &RouteSelector, advertised: Option<&AdvertisedRoutes>) -> String {
+    let routes: &[crate::network_map::ManagedRoute] =
+        advertised.map(|a| a.routes.as_slice()).unwrap_or(&[]);
+    // The map-seen `Option` IS the availability state: `Some` = the map was
+    // applied (even with zero advertised routes — the UI must be able to tell
+    // "connected, no routes" from "no snapshot"); `None` = no catalog yet.
+    let available = advertised.is_some();
+    // `available:false` renders `serial:0` (no map ⇒ no serial); an applied
+    // empty map renders its OWN serial.
+    let serial = advertised.map(|a| a.serial).unwrap_or(0);
+    let networks = selection.logical_networks(routes);
+
+    let mut out = String::from("{");
+    out.push_str(&jbool("available", available));
+    out.push(',');
+    out.push_str(&jnum("serial", serial));
+    out.push_str(",\"selection\":");
+    out.push_str(&selection.to_json());
+    out.push_str(",\"networks\":[");
+    for (index, net) in networks.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"net_id\":");
+        out.push_str(&format!("\"{}\"", crate::util::json_escape(net.net_id)));
+        out.push_str(",\"networks\":[");
+        for (prefix_index, prefix) in net.prefixes.iter().enumerate() {
+            if prefix_index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                "\"{}\"",
+                crate::util::json_escape(&route_network_string(prefix))
+            ));
+        }
+        out.push_str("],");
+        out.push_str(&jnum("candidate_count", net.candidate_count as u64));
+        out.push(',');
+        out.push_str(&jbool("enabled", net.enabled));
+        out.push(',');
+        out.push_str(&jbool("is_exit", net.is_exit));
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
 impl ShellNetworkConfig {
     /// The N3-7 default-route safety gate (pure function, unit-tested):
     ///
@@ -4903,6 +5400,10 @@ impl ConnectorHandle {
     /// readiness rule. `relay_attach.wg_pubkey_b64` is the LOCAL peer's
     /// WireGuard public key (base64) — the relay peerID source (relay spec
     /// §3.2).
+    ///
+    /// No startup route selection (default all-selected) — the start seams use
+    /// [`ConnectorHandle::spawn_with_relay_selected`]; existing callers keep
+    /// their exact behavior.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_relay(
         runtime: tokio::runtime::Handle,
@@ -4924,6 +5425,59 @@ impl ConnectorHandle {
         relay_enabled: bool,
         relay_attach: Option<RelayAttach>,
     ) -> Arc<ConnectorHandle> {
+        Self::spawn_with_relay_selected(
+            runtime,
+            factory,
+            wg,
+            host,
+            secrets,
+            meta,
+            policy_backoff,
+            sync_policy,
+            renew_lead,
+            renew_check_interval,
+            force_default_route,
+            socket_source,
+            ice,
+            signal_material,
+            wg_feed,
+            ice_tuning,
+            relay_enabled,
+            relay_attach,
+            RouteSelector::new(),
+        )
+    }
+
+    /// [`ConnectorHandle::spawn_with_relay`] plus the generation's startup
+    /// route selection (`ConnectorConfig::route_selection`). The
+    /// selection was validated with the config and is stored on the connector
+    /// BEFORE the worker can run its first Sync; since T0 e15ac it is the START
+    /// seed of a state the live setter (`connector_route_selection_set_json`)
+    /// may replace at runtime (serialized with the map route pipeline). Not
+    /// part of the crate's public surface — only the start seams in this module
+    /// call it.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_relay_selected(
+        runtime: tokio::runtime::Handle,
+        factory: Arc<dyn ManagementFactory>,
+        wg: Arc<dyn WgPeerApplier>,
+        host: Arc<dyn ConfigApplier>,
+        secrets: ConnectorSecrets,
+        meta: PeerMeta,
+        policy_backoff: ExponentialBackoff,
+        sync_policy: SyncPolicy,
+        renew_lead: Duration,
+        renew_check_interval: Duration,
+        force_default_route: bool,
+        socket_source: Option<Arc<ProtectedSocketFdSource>>,
+        ice: Option<Arc<Mutex<PeerIceOrchestrator>>>,
+        signal_material: Option<SignalMaterial>,
+        wg_feed: Option<Arc<crate::wg_device::WgDeviceFeed>>,
+        ice_tuning: HostIceTuning,
+        relay_enabled: bool,
+        relay_attach: Option<RelayAttach>,
+        route_selection: RouteSelector,
+    ) -> Arc<ConnectorHandle> {
         // The flag is authoritative: materials without the opt-in are
         // dropped (the device default keeps EVERY relay seam detached).
         let relay_attach = relay_enabled.then_some(relay_attach).flatten();
@@ -4934,7 +5488,8 @@ impl ConnectorHandle {
         // BEFORE anything can fail so a spawn that reaches this line is one
         // start; the counter is process-global and outlives the handle.
         let generation = STARTS_TOTAL.fetch_add(1, Ordering::AcqRel) + 1;
-        let shared = Arc::new(ConnectorShared::new(force_default_route, relay_attach));
+        let shared =
+            Arc::new(ConnectorShared::new_selected(force_default_route, relay_attach, route_selection));
         // N13-D2: with the opt-in, the carrier orchestrator needs the WG
         // seam + the runtime (used from the sync path when the first relay
         // client starts). Without the opt-in nothing is stored.
@@ -5244,6 +5799,14 @@ impl ConnectorHandle {
         self.shared.network_config_json()
     }
 
+    /// The `connector_routes_json()` document for THIS connector (decision B):
+    /// the UNFILTERED advertised route catalog grouped per NetID + the startup
+    /// selection. Side-effect-free (plain mutex snapshot) — no gate refresh,
+    /// no recreate bookkeeping, no IO.
+    fn routes_json(&self) -> String {
+        self.shared.routes_json()
+    }
+
     /// Stop the connector: close the Sync stream (worker abort), clear the
     /// data-plane seams. Idempotent: a second call reports `already_stopped`
     /// and does nothing.
@@ -5293,6 +5856,10 @@ impl ConnectorHandle {
             let mut g = self.shared.lock();
             g.net_config = None;
             g.net_routes_all.clear();
+            // decision B: the advertised catalog goes with the applied config
+            // — the stop document must not keep offering routes of a session
+            // that no longer exists (the NEXT start carries its own selection).
+            g.advertised_routes = None;
             // N8: the applied-set bookkeeping goes with the applied config —
             // a fresh start begins with no recreate history
             g.applied_route_set = None;
@@ -5802,7 +6369,7 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
     install_collector_host(&wg_feed);
-    let handle = ConnectorHandle::spawn_with_relay(
+    let handle = ConnectorHandle::spawn_with_relay_selected(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::new(&config, config.keys.clone())),
         wg_feed.clone(),
@@ -5834,6 +6401,9 @@ pub fn connector_start_json(config_json: &str, credentials_json: &str) -> String
             wg_pubkey_b64: config.keys.public_key_base64(),
             materials: Arc::new(RelayMaterials::from_connector_transport(&config.transport, None)),
         }),
+        // decision B: the validated startup route selection (absent = default
+        // all-selected) — stored on the connector before its first Sync.
+        config.route_selection.clone(),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -5955,7 +6525,7 @@ pub fn connector_start_with_socket_json(
         crate::wg_device::WgDeviceConfig::new(config.keys.secret_base64()),
     ));
     install_collector_host(&wg_feed);
-    let handle = ConnectorHandle::spawn_with_relay(
+    let handle = ConnectorHandle::spawn_with_relay_selected(
         global_runtime().handle().clone(),
         Arc::new(GrpcManagementFactory::with_socket_source(
             &config,
@@ -5993,6 +6563,8 @@ pub fn connector_start_with_socket_json(
                 &config.transport, Some(supply),
             )),
         }),
+        // decision B: see `connector_start_json` — same validated state.
+        config.route_selection.clone(),
     );
     let state = handle.status().state;
     *slot = Some(handle);
@@ -6326,14 +6898,81 @@ fn wg_feed_json(fd: i32, kind: FeedFdKind) -> String {
 /// `recreate.required` flag clears exactly when the shell's applied set
 /// matches the desired one.
 ///
-/// Failure tokens: `no-connector`, `route-set-invalid` (malformed JSON /
-/// non-string entries / empty list — an empty platform route set would be a
-/// black hole by construction and is never accepted as an applied state).
+/// Failure tokens: `route-set-invalid` (malformed JSON / non-string entries /
+/// missing `routes` field) or `no-connector`. The document is validated BEFORE
+/// the connector lookup, so a malformed `routesJson` answers `route-set-invalid`
+/// even with nothing running.
+///
+/// T0 e15ac: this legacy 2-arg signature is KEPT verbatim for API
+/// compatibility (the NAPI `(routesJson, isRecreate)` binding keeps working);
+/// it delegates to the kind-aware [`connector_route_set_applied_kind_json`] with
+/// `initial` / `auto`. An explicitly EMPTY `routes` array is now a legal applied
+/// set (see that entry point) — recording it is what lets a later,
+/// default-ENABLED network raise the recreate signal.
 pub fn connector_route_set_applied_json(routes_json: &str, is_recreate: bool) -> String {
-    let slot = connector_slot();
-    let Some(handle) = slot.as_ref() else {
-        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    route_set_applied_entry(routes_json, move |handle, routes| {
+        handle
+            .shared
+            .ack_applied_route_set(routes, is_recreate, crate::sys::mono_ms());
+    })
+}
+
+/// The kind-aware shell ACK — `connector_route_set_applied(routesJson,
+/// isRecreate, kind?)` with the recreate KIND made explicit, for the shell that
+/// performs USER-forced recreates on a live route toggle.
+///
+/// `kind` is one of:
+/// - `initial` — the initial `create()` (legacy `isRecreate=false`);
+/// - `auto` — a COMPLETED controlled recreate from the automatic
+///   desired-set-divergence signal (legacy `isRecreate=true`): the ONLY kind that
+///   spends the automatic budget ([`RECREATE_MAX`] = 3) and arms the
+///   [`RECREATE_COOLDOWN_MS`] = 30s window;
+/// - `user` — a recreate the USER forced (live route toggle). It records the
+///   same applied set and clears the pending request but touches NO automatic
+///   count / cooldown / exhausted state, so user toggles can never eat the
+///   automatic churn budget (which stays fully available afterwards).
+///
+/// An ABSENT third NAPI argument is the legacy boolean, handled by
+/// [`connector_route_set_applied_json`] — it does not reach this function. Any
+/// other `kind` string is refused with `kind-invalid` (no silent fallback onto
+/// the budget-spending kind).
+///
+/// `routes` is the EXACT set the shell captured as installed on the platform.
+/// It is recorded verbatim, even when the current map/serial moved on in the
+/// meantime: the ACK is evidence about the PLATFORM, not about the desired state,
+/// so a stale ACK is accepted (never rejected) and simply keeps
+/// `desired != applied`; the next gate refresh re-raises `recreate.required`.
+/// `{"routes":[]}` is legal and meaningful: with an empty applied set recorded,
+/// a later map that advertises a default-ENABLED network produces
+/// `desired != applied` and therefore the recreate signal — without this ACK the
+/// comparison would stay silent (`applied` = `None`).
+///
+/// Result: `{"ok":true,"recreate":{…}}` (same document as the legacy entry) or
+/// `{"ok":false,"error":"kind-invalid"|"route-set-invalid"|"no-connector"}` —
+/// checked in THAT order, so a request is fully validated before any state is
+/// touched (a refused request mutates nothing and never even looks up the
+/// running connector).
+pub fn connector_route_set_applied_kind_json(routes_json: &str, kind: &str) -> String {
+    let Some(kind) = RouteAckKind::parse(kind) else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "kind-invalid"));
     };
+    route_set_applied_entry(routes_json, move |handle, routes| {
+        handle
+            .shared
+            .ack_applied_route_set_kind(routes, kind, crate::sys::mono_ms());
+    })
+}
+
+/// Shared body of the two ACK entries ([`connector_route_set_applied_json`] /
+/// [`connector_route_set_applied_kind_json`]): validate the applied-set document,
+/// resolve the running connector, record the ACK through `ack` and render the
+/// frozen `{"ok":true,"recreate":{…}}` document. Validation happens BEFORE the
+/// connector lookup, so a refused document answers `route-set-invalid` even with
+/// nothing running and mutates nothing either way.
+fn route_set_applied_entry(
+    routes_json: &str,
+    ack: impl FnOnce(&ConnectorHandle, Vec<String>),
+) -> String {
     let routes = match parse_route_set(routes_json) {
         Ok(r) => r,
         Err(_) => {
@@ -6344,9 +6983,11 @@ pub fn connector_route_set_applied_json(routes_json: &str, is_recreate: bool) ->
             )
         }
     };
-    handle
-        .shared
-        .ack_applied_route_set(routes, is_recreate, crate::sys::mono_ms());
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    ack(handle, routes);
     let recreate = handle.shared.lock().recreate.clone();
     format!(
         "{{{},{}}}",
@@ -6356,8 +6997,12 @@ pub fn connector_route_set_applied_json(routes_json: &str, is_recreate: bool) ->
 }
 
 /// Parse the `{"routes":["a.b.c.d/p",...]}` argument of
-/// [`connector_route_set_applied_json`]. At least one route is required
-/// (an empty applied set is never a legal platform state for this client).
+/// [`connector_route_set_applied_json`]. The `routes` key must be present and
+/// an array of strings (missing field / non-array / non-string entry ⇒ error).
+/// An EMPTY array is VALID (T0 e15ac): an explicitly ACKed empty platform set is
+/// a real state and is what arms the desired-vs-applied comparison for a later
+/// default-enabled network. Duplicate entries are preserved verbatim — the set
+/// is what the shell captured, not a normalized form.
 fn parse_route_set(json: &str) -> Result<Vec<String>, ConfigError> {
     let doc = config::parse_document(json)?;
     let entries = match doc {
@@ -6383,12 +7028,6 @@ fn parse_route_set(json: &str) -> Result<Vec<String>, ConfigError> {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
                 out.push(field_str(item, "routes")?.to_string());
-            }
-            if out.is_empty() {
-                return Err(ConfigError::Field {
-                    field: "routes",
-                    reason: "at least one route is required".into(),
-                });
             }
             return Ok(out);
         }
@@ -6772,6 +7411,155 @@ pub fn connector_network_config_json() -> String {
         Some(handle) => handle.network_config_json(),
         None => NO_NETWORK_MAP_JSON.to_string(),
     }
+}
+
+/// The `connector_routes_json()` document (decision B, internal helper — the
+/// NAPI registration is a SEPARATE follow-up increment; nothing in `napi.rs`/ArkTS
+/// changes here). Dedicated document, NOT an extension of the frozen
+/// `connector_status()` / `connector_network_config()` shapes:
+///
+/// ```json
+/// {
+///   "available": true,
+///   "serial": 42,
+///   "selection": {"selected_routes":[],"deselected_routes":["HostInternal"],"deselect_all":false},
+///   "networks": [
+///     {"net_id":"HostInternal","networks":["192.168.50.0/24"],
+///      "candidate_count":2,"enabled":false,"is_exit":false}
+///   ]
+/// }
+/// ```
+///
+/// The catalog is the UNFILTERED advertised route list of the last applied
+/// NetworkMap, so a user-disabled network (and every one of its HA candidates)
+/// stays visible with `enabled:false`; `selection` is the generation's startup
+/// state verbatim.
+///
+/// `available` marks the MAP-SEEN state, not the route count: `available:true`
+/// with the applied map's own `serial` — and `networks:[]` when that map
+/// advertised no routes — is the honest "connected, no routes" catalog the UI
+/// needs to distinguish from "no snapshot". `available:false` + `serial:0` +
+/// `networks:[]` means "no route catalog": no connector, before the first map,
+/// or after stop — never a fabricated empty-but-active state. No secrets:
+/// NetIDs, prefixes and counts are public routing material.
+///
+/// Read-only and side-effect-free: plain mutex snapshot, no gate refresh, no
+/// recreate bookkeeping, no network/IO.
+pub fn connector_routes_json() -> String {
+    let slot = connector_slot();
+    match slot.as_ref() {
+        Some(handle) => handle.routes_json(),
+        None => routes_document(&RouteSelector::new(), None),
+    }
+}
+
+/// The LIVE route-selection update (T0 e15ac): `selectionJson` is the RAW
+/// selector document — the exact shape [`RouteSelector::to_json`] emits,
+/// `{"selected_routes":[...],"deselected_routes":[...],"deselect_all":bool}`
+/// (missing keys = empty/false; an empty or `null` document = the all-default
+/// selector). It is consumed by the SAME strict parser as the persisted state
+/// document and the start config ([`RouteSelector::from_json`]): duplicate known
+/// keys, wrong value types and non-object documents are REJECTED, and a rejected
+/// request mutates NOTHING (no partial selection, no WG/device call).
+///
+/// Unlike the start-config field this is a RUNTIME setter: the running connector
+/// re-filters the routes it already advertised, rebuilds its shell snapshot and
+/// re-applies the WG managed routes, serialized with the map pipeline — a toggle
+/// therefore needs NO restart. The user-forced platform recreate a live route
+/// change may still require (the HarmonyOS VPE fixes its route set at
+/// `create()` time) is a SEPARATE, `user`-kind ACK
+/// ([`connector_route_set_applied_kind_json`]) that never spends the automatic
+/// recreate budget.
+///
+/// Result (fixed key order, always valid JSON):
+///
+/// ```json
+/// {"ok":true,"available":true,"changed":true,
+///  "desired_routes":["172.16.0.0/12"],"recreate_needed":true}
+/// ```
+///
+/// - `ok:false` + `error` — one of `no-connector` (nothing running),
+///   `selection-invalid` (parser refused; nothing mutated) or
+///   `wg-apply-failed` (selection + snapshot were updated, the WG seam refused
+///   the routes: the state now names a route set the data plane does not have,
+///   `wg_apply_failed` stays latched — fail closed).
+/// - `available` — a NetworkMap was applied, so the selection was filtered
+///   against the advertised catalog and the seams were updated. With no map the
+///   selection is stored for the NEXT map and `available:false` is returned: no
+///   applied route set is claimed.
+/// - `changed` — the stored selection actually differs from the previous one (an
+///   identical re-send is still applied, idempotently, and reports `false`).
+/// - `desired_routes` — the EFFECTIVE route set after the update, in map order
+///   with the default-route gate applied: exactly the list the platform config
+///   should hold (empty with no map).
+/// - `recreate_needed` — the platform route set must be replaced for
+///   `desired_routes` to take effect: no applied set was ever ACKed, or the
+///   desired PREFIX SET differs from the ACKed one. An HA candidate/owner swap
+///   that keeps the same prefixes needs NO OS replace. This is the raw need; the
+///   automatic budget/cooldown governing the auto recreate path is unchanged and
+///   reported separately by `connector_status().recreate`.
+///
+/// On a rejected request (`no-connector` / `selection-invalid`) the four
+/// informational fields carry the no-claim values (`false`/`false`/`[]`/`false`);
+/// only `wg-apply-failed` reports the real post-update facts, because there the
+/// mutation DID happen. The frozen `connector_status()` /
+/// `connector_network_config()` documents are NOT touched — this is a separate
+/// document (the NAPI registration lands with the shell-side owner).
+pub fn connector_route_selection_set_json(selection_json: &str) -> String {
+    let selection = match RouteSelector::from_json(selection_json) {
+        Ok(selection) => selection,
+        Err(_) => {
+            return route_selection_result_json(
+                false,
+                Some("selection-invalid"),
+                &RouteSelectionOutcome::default(),
+            )
+        }
+    };
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return route_selection_result_json(
+            false,
+            Some("no-connector"),
+            &RouteSelectionOutcome::default(),
+        );
+    };
+    let outcome = handle.shared.route_selection_set_at(selection, handle.wg.as_ref());
+    let error = outcome.wg_apply_failed.then_some("wg-apply-failed");
+    route_selection_result_json(error.is_none(), error, &outcome)
+}
+
+/// Render the `connector_route_selection_set_json` document: fixed key order
+/// `ok` / `error` (only on failure) / `available` / `changed` /
+/// `desired_routes` / `recreate_needed`. The informational fields are ALWAYS
+/// present so the shell never has to guess; see the entry point for what they
+/// claim on a rejected request.
+fn route_selection_result_json(
+    ok: bool,
+    error: Option<&'static str>,
+    outcome: &RouteSelectionOutcome,
+) -> String {
+    let mut out = String::from("{");
+    out.push_str(&jbool("ok", ok));
+    if let Some(error) = error {
+        out.push(',');
+        out.push_str(&jstr("error", error));
+    }
+    out.push(',');
+    out.push_str(&jbool("available", outcome.available));
+    out.push(',');
+    out.push_str(&jbool("changed", outcome.changed));
+    out.push_str(",\"desired_routes\":[");
+    for (index, route) in outcome.desired_routes.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!("\"{}\"", crate::util::json_escape(route)));
+    }
+    out.push_str("],");
+    out.push_str(&jbool("recreate_needed", outcome.recreate_needed));
+    out.push('}');
+    out
 }
 
 /// N2-H (design §4.0): the session knowledge the device collector freezes
@@ -8888,6 +9676,1229 @@ mod tests {
         assert!(registry.managed_routes().is_empty(), "route set is full-snapshot");
     }
 
+    // decision B: startup route selection ------------------------------------
+
+    /// Recording host seam: captures the effective route list of every map
+    /// `apply_update` hands to the shell side.
+    #[derive(Default)]
+    struct RecordingHost {
+        routes: Mutex<Vec<String>>,
+    }
+
+    impl RecordingHost {
+        fn routes(&self) -> Vec<String> {
+            self.routes.lock_poison().clone()
+        }
+    }
+
+    impl ConfigApplier for RecordingHost {
+        fn apply(&self, map: &NetworkMap) {
+            *self.routes.lock_poison() =
+                map.routes.iter().map(|r| route_network_string(&r.network)).collect();
+        }
+        fn clear(&self) {
+            self.routes.lock_poison().clear();
+        }
+    }
+
+    /// The `docs/route-audit.md` HA shape: ONE logical network
+    /// (`HostInternal`, 192.168.50.0/24) carried by TWO candidates (metric
+    /// 200/100 on two peers) plus an unrelated subnet (`corp`, 172.16.0.0/12).
+    fn route_selection_test_map(serial: u64) -> NetworkMap {
+        use crate::network_map::ManagedRoute;
+        let mut map = shell_test_map();
+        map.serial = serial;
+        map.routes = vec![
+            ManagedRoute {
+                id: "ha-200".into(),
+                network: config::Route { addr: [192, 168, 50, 0], prefix_len: 24 },
+                domains: vec![],
+                net_id: "HostInternal".into(),
+                network_type: 1,
+                peer: "peer-a".into(),
+                metric: 200,
+                masquerade: true,
+                keep_route: true,
+                skip_auto_apply: false,
+            },
+            ManagedRoute {
+                id: "ha-100".into(),
+                network: config::Route { addr: [192, 168, 50, 0], prefix_len: 24 },
+                domains: vec![],
+                net_id: "HostInternal".into(),
+                network_type: 1,
+                peer: "peer-b".into(),
+                metric: 100,
+                masquerade: true,
+                keep_route: true,
+                skip_auto_apply: false,
+            },
+            ManagedRoute {
+                id: "corp".into(),
+                network: config::Route { addr: [172, 16, 0, 0], prefix_len: 12 },
+                domains: vec![],
+                net_id: "corp".into(),
+                network_type: 1,
+                peer: "peer-a".into(),
+                metric: 10,
+                masquerade: false,
+                keep_route: true,
+                skip_auto_apply: false,
+            },
+        ];
+        map
+    }
+
+    fn selector_from(json: &str) -> RouteSelector {
+        RouteSelector::from_json(json).expect("test selector state")
+    }
+
+    /// One map through the REAL `apply_update` path.
+    fn apply_selected_map(
+        shared: &ConnectorShared,
+        wg: &dyn WgPeerApplier,
+        host: &dyn ConfigApplier,
+        map: NetworkMap,
+    ) {
+        shared.apply_update(
+            wg,
+            host,
+            &SyncUpdate {
+                session_deadline_unix: None,
+                netbird_config: None,
+                network_map: Some(map),
+            },
+        );
+    }
+
+    /// A start config WITHOUT `route_selection` is the default selector and the
+    /// connector applies every advertised route — the pre-existing behavior,
+    /// byte for byte (and the exact `connector_routes_json` document).
+    #[test]
+    fn absent_route_selection_keeps_the_preexisting_behavior_and_is_the_start_default() {
+        let cfg = ConnectorConfig::from_json(&test_config_json()).expect("minimal config");
+        assert_eq!(cfg.route_selection, RouteSelector::new());
+        assert_eq!(
+            cfg.route_selection.to_json(),
+            "{\"selected_routes\":[],\"deselected_routes\":[],\"deselect_all\":false}"
+        );
+
+        let shared = ConnectorShared::new_selected(false, None, cfg.route_selection.clone());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+
+        assert_eq!(registry.managed_routes().len(), 3, "all three rows (2 HA + corp) reach the WG seam");
+        assert_eq!(
+            host.routes(),
+            vec!["192.168.50.0/24", "192.168.50.0/24", "172.16.0.0/12"],
+            "the shell receives the same effective list"
+        );
+        let shell = shared.network_config_json();
+        assert!(shell.contains("192.168.50.0/24") && shell.contains("172.16.0.0/12"), "{shell}");
+        assert_eq!(
+            shared.routes_json(),
+            "{\"available\":true,\"serial\":7,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[],\"deselect_all\":false},\"networks\":[{\"net_id\":\"HostInternal\",\"networks\":[\"192.168.50.0/24\"],\"candidate_count\":2,\"enabled\":true,\"is_exit\":false},{\"net_id\":\"corp\",\"networks\":[\"172.16.0.0/12\"],\"candidate_count\":1,\"enabled\":true,\"is_exit\":false}]}"
+        );
+    }
+
+    /// The startup preference is applied BEFORE the first map reaches any
+    /// consumer: no disabled route in the WG seam / shell snapshot /
+    /// `net_routes_all` / host apply, while the catalog keeps BOTH HA rows.
+    #[test]
+    fn startup_route_selection_filters_every_consumer_but_keeps_the_unfiltered_catalog() {
+        let shared = ConnectorShared::new_selected(
+            false,
+            None,
+            selector_from(
+                "{\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false}",
+            ),
+        );
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+
+        // WG managed routes (N6): the whole HA group is gone, corp stays.
+        let wg_routes = registry.managed_routes();
+        assert_eq!(wg_routes.len(), 1, "no disabled route may reach the WG seam");
+        assert_eq!(wg_routes[0].net_id, "corp");
+
+        // Shell snapshot + host apply: the SAME effective list.
+        let shell = shared.network_config_json();
+        assert!(
+            !shell.contains("192.168.50.0/24"),
+            "disabled network leaked into the shell snapshot: {shell}"
+        );
+        assert!(shell.contains("172.16.0.0/12"), "{shell}");
+        assert_eq!(host.routes(), vec!["172.16.0.0/12"]);
+
+        // net_routes_all (the ungated record `refresh_net_gate` re-exports
+        // from) is already filtered, so a later gate refresh cannot resurrect
+        // the disabled network; the status count is the EFFECTIVE count.
+        {
+            let g = shared.lock();
+            let nets: Vec<String> = g.net_routes_all.iter().map(|r| r.network.clone()).collect();
+            assert_eq!(nets, vec!["172.16.0.0/12".to_string()]);
+            assert_eq!(g.route_count, 1);
+        }
+
+        // Catalog: BOTH HA rows (and their candidate count) stay visible,
+        // `enabled:false` for the disabled network only.
+        assert_eq!(
+            shared.routes_json(),
+            "{\"available\":true,\"serial\":7,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false},\"networks\":[{\"net_id\":\"HostInternal\",\"networks\":[\"192.168.50.0/24\"],\"candidate_count\":2,\"enabled\":false,\"is_exit\":false},{\"net_id\":\"corp\",\"networks\":[\"172.16.0.0/12\"],\"candidate_count\":1,\"enabled\":true,\"is_exit\":false}]}"
+        );
+    }
+
+    /// Preferences about NetIDs that do not exist are inert, and a network that
+    /// management introduces later is default-ON (the state carries only
+    /// explicit deselections).
+    #[test]
+    fn unknown_persisted_net_id_is_harmless_and_a_new_management_network_defaults_on() {
+        let shared = ConnectorShared::new_selected(
+            false,
+            None,
+            selector_from(
+                "{\"selected_routes\":[\"ghost-net\"],\"deselected_routes\":[\"gone-net\"],\"deselect_all\":false}",
+            ),
+        );
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        assert_eq!(registry.managed_routes().len(), 3, "unknown NetIDs change nothing");
+        assert!(shared.routes_json().contains("\"enabled\":true"), "{}", shared.routes_json());
+
+        // A later map adds a network nobody mentioned: default-on.
+        use crate::network_map::ManagedRoute;
+        let mut next = route_selection_test_map(8);
+        next.routes.push(ManagedRoute {
+            id: "new".into(),
+            network: config::Route { addr: [10, 20, 0, 0], prefix_len: 16 },
+            domains: vec![],
+            net_id: "new-net".into(),
+            network_type: 1,
+            peer: "peer-a".into(),
+            metric: 5,
+            masquerade: false,
+            keep_route: true,
+            skip_auto_apply: false,
+        });
+        apply_selected_map(&shared, registry.as_ref(), &host, next);
+        let ids: Vec<String> = registry.managed_routes().iter().map(|r| r.net_id.clone()).collect();
+        assert_eq!(ids, vec!["HostInternal", "HostInternal", "corp", "new-net"]);
+        assert!(
+            shared
+                .routes_json()
+                .contains("{\"net_id\":\"new-net\",\"networks\":[\"10.20.0.0/16\"],\"candidate_count\":1,\"enabled\":true,\"is_exit\":false}"),
+            "{}",
+            shared.routes_json()
+        );
+    }
+
+    /// `deselect_all` empties the effective route list in EVERY consumer but
+    /// leaves the peer base allowed-ips (the overlay lanes) untouched.
+    #[test]
+    fn deselect_all_empties_the_effective_routes_but_keeps_peer_base_allowed_ips() {
+        let shared = ConnectorShared::new_selected(false, None, selector_from("{\"deselect_all\":true}"));
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+
+        assert!(registry.managed_routes().is_empty(), "deselect_all leaves no managed route");
+        assert!(host.routes().is_empty());
+        let shell = shared.network_config_json();
+        assert!(!shell.contains("192.168.50.0/24") && !shell.contains("172.16.0.0/12"), "{shell}");
+
+        // Peer base allowed-ips are NOT part of the selection: the WG seam and
+        // the shell snapshot keep the overlay /32 (+ its accompanying prefix)
+        // exactly as management advertised them.
+        let peers = registry.snapshot();
+        assert_eq!(peers.len(), 3, "peers ride the same snapshot");
+        assert_eq!(
+            peers[0].allowed_ips,
+            vec![
+                config::Route { addr: [10, 30, 30, 1], prefix_len: 32 },
+                config::Route { addr: [192, 168, 7, 0], prefix_len: 24 },
+            ]
+        );
+        assert_eq!(peers[1].allowed_ips, vec![]);
+        assert_eq!(
+            peers[2].allowed_ips,
+            vec![config::Route { addr: [10, 9, 9, 9], prefix_len: 32 }]
+        );
+        assert!(
+            shell.contains("\"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"]"),
+            "the peer overlay addresses must survive an all-off selection: {shell}"
+        );
+
+        // The catalog is still available (it is about the CATALOG, not the
+        // selection): every row visible, every row disabled.
+        let doc = shared.routes_json();
+        assert!(
+            doc.starts_with(
+                "{\"available\":true,\"serial\":7,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[],\"deselect_all\":true}"
+            ),
+            "{doc}"
+        );
+        assert!(doc.contains("\"enabled\":false"), "{doc}");
+        assert!(!doc.contains("\"enabled\":true"), "{doc}");
+    }
+
+    /// The effective filter is the PURE MODULE's semantics — no invented
+    /// `is_selected`: `selected_routes` is not a whitelist, and a conflicting
+    /// (hand-written) state resolves deselected-wins.
+    #[test]
+    fn selected_routes_is_not_a_whitelist_and_conflicts_resolve_deselected() {
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+
+        let picked = ConnectorShared::new_selected(
+            false,
+            None,
+            selector_from(
+                "{\"selected_routes\":[\"corp\"],\"deselected_routes\":[],\"deselect_all\":false}",
+            ),
+        );
+        apply_selected_map(&picked, registry.as_ref(), &host, route_selection_test_map(7));
+        assert_eq!(
+            registry.managed_routes().len(),
+            3,
+            "an explicit selection never excludes the networks it does not mention"
+        );
+
+        let conflicting = ConnectorShared::new_selected(
+            false,
+            None,
+            selector_from(
+                "{\"selected_routes\":[\"HostInternal\"],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false}",
+            ),
+        );
+        apply_selected_map(&conflicting, registry.as_ref(), &host, route_selection_test_map(7));
+        let ids: Vec<String> = registry.managed_routes().iter().map(|r| r.net_id.clone()).collect();
+        assert_eq!(ids, vec!["corp"], "deselected wins");
+        assert_eq!(
+            conflicting.routes_json(),
+            "{\"available\":true,\"serial\":7,\"selection\":{\"selected_routes\":[\"HostInternal\"],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false},\"networks\":[{\"net_id\":\"HostInternal\",\"networks\":[\"192.168.50.0/24\"],\"candidate_count\":2,\"enabled\":false,\"is_exit\":false},{\"net_id\":\"corp\",\"networks\":[\"172.16.0.0/12\"],\"candidate_count\":1,\"enabled\":true,\"is_exit\":false}]}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T0 e15ac: the LIVE route-selection update (toggle without a restart) and
+    // the kind-aware recreate ACK
+    // -----------------------------------------------------------------------
+
+    /// The networks of the last shell snapshot's exported route list — exactly
+    /// what the platform VpnConfig should hold after a live update.
+    fn shell_route_networks(shared: &ConnectorShared) -> Vec<String> {
+        shared
+            .lock()
+            .net_config
+            .as_ref()
+            .expect("an applied map owns a shell snapshot")
+            .routes
+            .iter()
+            .map(|r| r.network.clone())
+            .collect()
+    }
+
+    /// The networks currently held by the WG seam, in apply order.
+    fn wg_route_networks(wg: &WgPeerRegistry) -> Vec<String> {
+        wg.managed_routes().iter().map(|r| route_network_string(&r.network)).collect()
+    }
+
+    /// The exact refusal document of a malformed selector (the public entry
+    /// validates BEFORE it looks up the connector, so this answer is
+    /// deterministic even in a test process where another test owns the slot).
+    const SELECTION_INVALID: &str = "{\"ok\":false,\"error\":\"selection-invalid\",\
+                                     \"available\":false,\"changed\":false,\
+                                     \"desired_routes\":[],\"recreate_needed\":false}";
+
+    /// Host tests that drive the map pipeline emit `hilog` lines, and `hilog`
+    /// TEES every line into whatever N2 ring is armed PROCESS-WIDE — while the N2
+    /// ring's own lib tests assert on the exact seq numbers and rotations of THEIR
+    /// appends. So every test in this group holds the same lock those tests hold
+    /// for its whole run (the ring state is global, exactly as its doc says).
+    /// Without it a route-test record can land inside an armed ring window and
+    /// break the ring test's assertions — a pre-existing isolation limit of the
+    /// ring tests, unrelated to the route pipeline.
+    fn ring_quiet() -> std::sync::MutexGuard<'static, ()> {
+        crate::n2_ring::test_guard()
+    }
+
+    /// A live toggle needs NO restart: the running connector re-filters the map
+    /// it already advertised, and the WG seam and the shell snapshot end up with
+    /// the SAME effective list — the property the shell depends on.
+    #[test]
+    fn runtime_route_selection_setter_filters_wg_and_shell_together_and_restores() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let all_on = vec![
+            "192.168.50.0/24".to_string(),
+            "192.168.50.0/24".to_string(),
+            "172.16.0.0/12".to_string(),
+        ];
+        assert_eq!(wg_route_networks(&registry), all_on);
+
+        // OFF (one NetID): every HA candidate of that network goes together.
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+            registry.as_ref(),
+        );
+        assert!(out.available, "a map was applied, so the catalog exists");
+        assert!(out.changed);
+        assert!(!out.wg_apply_failed);
+        assert!(out.recreate_needed, "no applied set was ever ACKed");
+        assert_eq!(out.desired_routes, vec!["172.16.0.0/12".to_string()]);
+        assert_eq!(
+            route_selection_result_json(true, None, &out),
+            "{\"ok\":true,\"available\":true,\"changed\":true,\
+             \"desired_routes\":[\"172.16.0.0/12\"],\"recreate_needed\":true}",
+            "the exact document the shell reads"
+        );
+        assert_eq!(wg_route_networks(&registry), out.desired_routes, "WG holds the effective set");
+        assert_eq!(
+            shell_route_networks(&shared),
+            out.desired_routes,
+            "and the shell snapshot holds the SAME list"
+        );
+        assert_eq!(shared.lock().route_count, 1);
+        assert_eq!(
+            host.routes(),
+            all_on,
+            "the setter rebuilds the shell SNAPSHOT (read via connector_network_config); \
+             the host seam is not re-driven — same as the existing gate refresh"
+        );
+
+        // The catalog keeps the UNFILTERED advertised rows, now disabled.
+        assert_eq!(shared.lock().advertised_routes.as_ref().expect("catalog").routes.len(), 3);
+        let catalog = shared.routes_json();
+        assert!(catalog.contains("\"serial\":7"), "{catalog}");
+        assert!(
+            catalog.contains(
+                "{\"net_id\":\"HostInternal\",\"networks\":[\"192.168.50.0/24\"],\
+                 \"candidate_count\":2,\"enabled\":false,\"is_exit\":false}"
+            ),
+            "{catalog}"
+        );
+        assert!(
+            catalog.contains(
+                "{\"net_id\":\"corp\",\"networks\":[\"172.16.0.0/12\"],\
+                 \"candidate_count\":1,\"enabled\":true,\"is_exit\":false}"
+            ),
+            "{catalog}"
+        );
+
+        // An identical re-send is applied idempotently and reports changed:false.
+        let again = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+            registry.as_ref(),
+        );
+        assert!(!again.changed);
+        assert_eq!(again.desired_routes, vec!["172.16.0.0/12".to_string()]);
+        assert_eq!(wg_route_networks(&registry), vec!["172.16.0.0/12".to_string()]);
+
+        // ON again: everything is back, in map order, in both seams.
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(out.changed);
+        assert_eq!(out.desired_routes, all_on);
+        assert_eq!(wg_route_networks(&registry), all_on);
+        assert_eq!(shell_route_networks(&shared), all_on);
+        assert_eq!(shared.lock().route_count, 3);
+    }
+
+    /// The selection governs managed routes ONLY: peer base `allowed_ips` and a
+    /// landed (ICE-selected) session survive a live toggle untouched.
+    #[test]
+    fn runtime_route_selection_setter_leaves_peer_base_ips_and_landed_sessions_untouched() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        // the session material a toggle must not disturb: the ICE-selected pair
+        // of a registered peer
+        registry
+            .apply_endpoint("UEVFUjA=", [10, 30, 30, 9], 51820)
+            .expect("the peer is registered");
+        let peers_before = registry.snapshot();
+        let endpoints_before = registry.endpoints();
+
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselect_all\":true}"),
+            registry.as_ref(),
+        );
+        assert!(out.available && out.changed);
+        assert!(out.desired_routes.is_empty(), "all off: nothing is exported");
+        assert!(out.recreate_needed, "an empty desired set differs from the unknown applied one");
+        assert!(registry.managed_routes().is_empty());
+        assert!(shell_route_networks(&shared).is_empty());
+        assert_eq!(registry.snapshot(), peers_before, "peer base allowed_ips are NOT the selection");
+        assert_eq!(registry.endpoints(), endpoints_before, "a landed session survives a toggle");
+        assert_eq!(shared.lock().peer_count, 3);
+        assert!(
+            shared
+                .network_config_json()
+                .contains("\"vpn_addresses\":[\"10.30.30.1/32\",\"192.168.7.0/24\"]"),
+            "{}",
+            shared.network_config_json()
+        );
+    }
+
+    /// Before the first map there is nothing to filter: the selection is STORED
+    /// for the next map, and the outcome claims neither availability nor an
+    /// applied route set.
+    #[test]
+    fn runtime_route_selection_setter_without_a_map_stores_the_selection_and_claims_nothing() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+            registry.as_ref(),
+        );
+        assert!(out.changed);
+        assert!(!out.available, "no map was applied: nothing to filter, nothing to claim");
+        assert!(out.desired_routes.is_empty());
+        assert!(!out.recreate_needed, "no map: no applied claim, nothing to reconcile");
+        assert_eq!(
+            route_selection_result_json(true, None, &out),
+            "{\"ok\":true,\"available\":false,\"changed\":true,\
+             \"desired_routes\":[],\"recreate_needed\":false}",
+            "the exact document for a stored-but-not-applied selection"
+        );
+        assert!(registry.managed_routes().is_empty(), "no map -> the WG seam is never called");
+        {
+            let g = shared.lock();
+            assert!(g.applied_route_set.is_none());
+            assert!(g.net_config.is_none());
+            assert_eq!(g.route_count, 0);
+            assert_eq!(
+                g.route_selection.to_json(),
+                "{\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false}"
+            );
+        }
+        assert_eq!(
+            shared.routes_json(),
+            "{\"available\":false,\"serial\":0,\"selection\":\
+             {\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false},\
+             \"networks\":[]}"
+        );
+
+        // The stored selection is the one the NEXT map is filtered with.
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        assert_eq!(wg_route_networks(&registry), vec!["172.16.0.0/12".to_string()]);
+        assert_eq!(shell_route_networks(&shared), vec!["172.16.0.0/12".to_string()]);
+    }
+
+    /// A WG apply refusal is reported honestly (`ok:false`,
+    /// `wg-apply-failed`) with the REAL post-update facts: the selection and the
+    /// shell snapshot DID move, the data plane did not, so the shell still sees
+    /// the desired set it has to install — fail closed, nothing is claimed as
+    /// installed.
+    #[test]
+    fn runtime_route_selection_setter_reports_a_wg_apply_failure_and_fails_closed() {
+        let _quiet = ring_quiet();
+        struct FailingWg(WgPeerRegistry);
+        impl WgPeerApplier for FailingWg {
+            fn apply_peers(&self, peers: &[WgPeerEntry]) -> Result<(), String> {
+                self.0.apply_peers(peers)
+            }
+            fn clear(&self) {
+                self.0.clear();
+            }
+            fn apply_managed_routes(
+                &self,
+                _routes: &[crate::network_map::ManagedRoute],
+            ) -> Result<(), String> {
+                Err("wg-managed-routes-unsupported".to_string())
+            }
+        }
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let wg = Arc::new(FailingWg(WgPeerRegistry::default()));
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, wg.as_ref(), &host, route_selection_test_map(7));
+        assert!(shared.lock().wg_apply_failed, "the map apply already latched the refusal");
+
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+            wg.as_ref(),
+        );
+        assert!(out.available && out.changed && out.wg_apply_failed);
+        assert_eq!(
+            route_selection_result_json(false, Some("wg-apply-failed"), &out),
+            "{\"ok\":false,\"error\":\"wg-apply-failed\",\"available\":true,\"changed\":true,\
+             \"desired_routes\":[\"172.16.0.0/12\"],\"recreate_needed\":true}"
+        );
+        assert_eq!(shell_route_networks(&shared), vec!["172.16.0.0/12".to_string()]);
+        assert!(wg.0.managed_routes().is_empty(), "the seam refused: it holds no route");
+        let g = shared.lock();
+        assert!(g.wg_apply_failed, "the flag stays latched until a seam accepts");
+        assert!(g.wg_apply_errors >= 2, "the refused map apply plus this one");
+    }
+
+    /// A malformed selector document mutates NOTHING: the public entry answers
+    /// the no-claim refusal document, and the SAME strict parser the start config
+    /// and the persisted state use is what refuses it (the mutation layer is only
+    /// reachable through a parsed selector).
+    #[test]
+    fn runtime_route_selection_setter_refuses_malformed_documents_without_mutating() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let catalog_before = shared.routes_json();
+        let wg_before = wg_route_networks(&registry);
+
+        for bad in [
+            "{",
+            "[]",
+            "\"all\"",
+            "{\"deselected_routes\":\"HostInternal\"}",
+            "{\"deselected_routes\":[1]}",
+            "{\"deselect_all\":1}",
+            "{\"selected_routes\":{}}",
+            "{\"deselect_all\":true,\"deselect_all\":false}",
+        ] {
+            assert_eq!(connector_route_selection_set_json(bad), SELECTION_INVALID, "{bad}");
+            assert!(RouteSelector::from_json(bad).is_err(), "{bad} must not parse");
+        }
+
+        // Nothing moved, and a valid document still applies cleanly afterwards
+        // (no half-updated state left behind by the refusals).
+        assert_eq!(shared.routes_json(), catalog_before);
+        assert_eq!(wg_route_networks(&registry), wg_before);
+        assert_eq!(shared.lock().route_count, 3);
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"corp\"]}"),
+            registry.as_ref(),
+        );
+        assert!(out.available && out.changed);
+        assert_eq!(
+            wg_route_networks(&registry),
+            vec!["192.168.50.0/24".to_string(), "192.168.50.0/24".to_string()]
+        );
+        assert_eq!(shell_route_networks(&shared), out.desired_routes);
+    }
+
+    /// The stored selection is a state, not a one-shot patch: the CURRENT map was
+    /// filtered with it (live), and every FUTURE map — a new HA candidate of a
+    /// disabled NetID, or a network nobody mentioned yet — goes through the very
+    /// same helper.
+    #[test]
+    fn runtime_route_selection_filters_the_current_and_every_future_map_identically() {
+        let _quiet = ring_quiet();
+        use crate::network_map::ManagedRoute;
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+            registry.as_ref(),
+        );
+        assert_eq!(wg_route_networks(&registry), vec!["172.16.0.0/12".to_string()]);
+
+        // The NEXT map: one more HA candidate for the disabled NetID plus a
+        // brand-new network (default-ON, nobody mentioned it).
+        let mut next = route_selection_test_map(8);
+        next.routes.insert(
+            1,
+            ManagedRoute {
+                id: "ha-050".into(),
+                network: config::Route { addr: [192, 168, 50, 0], prefix_len: 24 },
+                domains: vec![],
+                net_id: "HostInternal".into(),
+                network_type: 1,
+                peer: "peer-c".into(),
+                metric: 50,
+                masquerade: true,
+                keep_route: true,
+                skip_auto_apply: false,
+            },
+        );
+        next.routes.push(ManagedRoute {
+            id: "new".into(),
+            network: config::Route { addr: [10, 20, 0, 0], prefix_len: 16 },
+            domains: vec![],
+            net_id: "new-net".into(),
+            network_type: 1,
+            peer: "peer-a".into(),
+            metric: 5,
+            masquerade: false,
+            keep_route: true,
+            skip_auto_apply: false,
+        });
+        apply_selected_map(&shared, registry.as_ref(), &host, next);
+
+        let expected = vec!["172.16.0.0/12".to_string(), "10.20.0.0/16".to_string()];
+        assert_eq!(wg_route_networks(&registry), expected);
+        assert_eq!(shell_route_networks(&shared), expected);
+        assert_eq!(shared.lock().route_count, 2);
+        let catalog = shared.routes_json();
+        assert!(catalog.contains("\"serial\":8"), "{catalog}");
+        assert!(
+            catalog.contains(
+                "{\"net_id\":\"HostInternal\",\"networks\":[\"192.168.50.0/24\"],\
+                 \"candidate_count\":3,\"enabled\":false,\"is_exit\":false}"
+            ),
+            "{catalog}"
+        );
+        assert!(
+            catalog.contains(
+                "{\"net_id\":\"new-net\",\"networks\":[\"10.20.0.0/16\"],\
+                 \"candidate_count\":1,\"enabled\":true,\"is_exit\":false}"
+            ),
+            "{catalog}"
+        );
+    }
+
+    /// WG seam wrapper that records every `apply_managed_routes` payload in apply
+    /// order (the observation the serialization test needs).
+    struct LoggingWg {
+        inner: WgPeerRegistry,
+        log: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl WgPeerApplier for LoggingWg {
+        fn apply_peers(&self, peers: &[WgPeerEntry]) -> Result<(), String> {
+            self.inner.apply_peers(peers)
+        }
+        fn clear(&self) {
+            self.inner.clear();
+        }
+        fn apply_managed_routes(
+            &self,
+            routes: &[crate::network_map::ManagedRoute],
+        ) -> Result<(), String> {
+            self.log
+                .lock_poison()
+                .push(routes.iter().map(|r| route_network_string(&r.network)).collect());
+            self.inner.apply_managed_routes(routes)
+        }
+    }
+
+    /// Host seam that PARKs the map pipeline inside `host.apply` (the LAST call
+    /// of the route section) until the test releases it — a deterministic
+    /// barrier, no sleeping and no timing assumption.
+    struct ParkingHost {
+        entered: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ConfigApplier for ParkingHost {
+        fn apply(&self, _map: &NetworkMap) {
+            let _ = self.entered.send(());
+            let _ = self.release.lock_poison().recv();
+        }
+        fn clear(&self) {}
+    }
+
+    /// The map pipeline and the live setter share ONE critical section: while a
+    /// map apply sits in `host.apply`, `route_apply` is HELD (so the setter must
+    /// wait) and `inner` is NOT (so WG/device calls never happen under it). The
+    /// pinned interleaving has the setter's WG application as the LAST one, which
+    /// is what the mutex guarantees: the seam ends up holding the toggled set.
+    #[test]
+    fn runtime_route_selection_setter_and_map_apply_serialize_on_the_route_gate() {
+        let _quiet = ring_quiet();
+        let shared = Arc::new(ConnectorShared::new_selected(false, None, RouteSelector::new()));
+        let wg = Arc::new(LoggingWg { inner: WgPeerRegistry::default(), log: Mutex::new(Vec::new()) });
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let host = Arc::new(ParkingHost { entered: entered_tx, release: Mutex::new(release_rx) });
+
+        let apply_shared = shared.clone();
+        let apply_wg = wg.clone();
+        let apply_host = host.clone();
+        let map = route_selection_test_map(7);
+        let map_apply = std::thread::spawn(move || {
+            apply_shared.apply_update(
+                apply_wg.as_ref(),
+                apply_host.as_ref(),
+                &SyncUpdate {
+                    session_deadline_unix: None,
+                    netbird_config: None,
+                    network_map: Some(map),
+                },
+            );
+        });
+        // deterministic barrier: the map pipeline is now inside `host.apply`
+        entered_rx.recv().expect("the map pipeline reached host.apply");
+
+        assert!(
+            shared.route_apply.try_lock().is_err(),
+            "the map route section must hold route_apply through host.apply"
+        );
+        assert!(
+            shared.inner.try_lock().is_ok(),
+            "lock order route_apply -> inner: `inner` must be FREE while calling out"
+        );
+
+        // A live setter issued now must WAIT for that whole section.
+        let set_shared = shared.clone();
+        let set_wg = wg.clone();
+        let setter = std::thread::spawn(move || {
+            set_shared.route_selection_set_at(
+                selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+                set_wg.as_ref(),
+            )
+        });
+        release_tx.send(()).expect("release host.apply");
+        map_apply.join().expect("the map apply thread");
+        let outcome = setter.join().expect("the setter thread");
+
+        assert!(outcome.available && outcome.changed);
+        assert_eq!(outcome.desired_routes, vec!["172.16.0.0/12".to_string()]);
+        assert_eq!(
+            *wg.log.lock_poison(),
+            vec![
+                vec![
+                    "192.168.50.0/24".to_string(),
+                    "192.168.50.0/24".to_string(),
+                    "172.16.0.0/12".to_string()
+                ],
+                vec!["172.16.0.0/12".to_string()],
+            ],
+            "the setter's application must be LAST: the seam holds the toggled set"
+        );
+        assert_eq!(wg_route_networks(&wg.inner), vec!["172.16.0.0/12".to_string()]);
+        assert_eq!(shell_route_networks(&shared), vec!["172.16.0.0/12".to_string()]);
+    }
+
+    /// A USER-forced recreate ACK records the captured platform set but spends NO
+    /// automatic budget and arms NO cooldown — after four of them the automatic
+    /// path can still spend its FULL [`RECREATE_MAX`] budget at the unchanged
+    /// [`RECREATE_COOLDOWN_MS`] spacing.
+    #[test]
+    fn user_kind_ack_records_the_platform_snapshot_without_spending_the_automatic_budget() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let t = crate::sys::mono_ms();
+        let all_on = wg_route_networks(&registry);
+        shared.ack_applied_route_set(all_on.clone(), false, t);
+        assert_eq!(shared.lock().recreate.count, 0, "the initial create spends nothing");
+
+        // FOUR user-forced cycles: toggle -> the automatic gate sees the
+        // divergence IMMEDIATELY (nothing armed a cooldown) -> the shell recreates
+        // and ACKs with kind `user`.
+        for cycle in 0..4u64 {
+            let selection = if cycle % 2 == 0 {
+                selector_from("{\"deselected_routes\":[\"HostInternal\"]}")
+            } else {
+                RouteSelector::new()
+            };
+            let out = shared.route_selection_set_at(selection, registry.as_ref());
+            assert!(out.available && out.changed);
+            assert!(out.recreate_needed, "cycle {cycle}: the desired set diverged");
+            let now = t + cycle;
+            shared.refresh_net_gate_at(registry.as_ref(), now);
+            assert!(
+                shared.lock().recreate.required,
+                "cycle {cycle}: the gate must ask for the recreate"
+            );
+            let applied = shell_route_networks(&shared);
+            assert_eq!(applied, out.desired_routes);
+            shared.ack_applied_route_set_kind(applied, RouteAckKind::User, now);
+            let rec = shared.lock().recreate.clone();
+            assert!(!rec.required, "cycle {cycle}: the ACK cleared the request");
+            assert_eq!(rec.count, 0, "cycle {cycle}: a user ACK must not spend the auto budget");
+            assert!(!rec.exhausted, "cycle {cycle}");
+            assert_eq!(
+                shared.lock().last_recreate_ms,
+                None,
+                "cycle {cycle}: a user ACK must not arm the cooldown"
+            );
+        }
+
+        // The automatic path is untouched and still exhaustive: three auto
+        // recreates (legacy `isRecreate=true`), one cooldown window apart.
+        for cycle in 0..RECREATE_MAX {
+            let selection = if cycle % 2 == 0 {
+                selector_from("{\"deselected_routes\":[\"HostInternal\"]}")
+            } else {
+                RouteSelector::new()
+            };
+            shared.route_selection_set_at(selection, registry.as_ref());
+            let now = t + 1_000 + (cycle + 1) * (RECREATE_COOLDOWN_MS + 1);
+            shared.refresh_net_gate_at(registry.as_ref(), now);
+            assert!(
+                shared.lock().recreate.required,
+                "auto recreate {cycle} must still be raised"
+            );
+            shared.ack_applied_route_set(shell_route_networks(&shared), true, now);
+            assert_eq!(shared.lock().recreate.count, cycle + 1);
+        }
+        let rec = shared.lock().recreate.clone();
+        assert_eq!(rec.count, RECREATE_MAX, "no automatic unit was consumed by the user ACKs");
+        assert!(rec.exhausted, "the automatic budget still latches at RECREATE_MAX");
+    }
+
+    /// An EXPLICITLY empty applied set is legal (T0 e15ac) and it is what makes a
+    /// later, default-ENABLED network raise the recreate signal — without it the
+    /// comparison stays silent because `applied` is unknown.
+    #[test]
+    fn an_explicitly_empty_applied_set_is_accepted_and_arms_the_next_recreate() {
+        let _quiet = ring_quiet();
+        // The frozen 2-arg Rust signatures stay available verbatim (fn-pointer
+        // proof), plus the new kind-aware entry and the new live setter.
+        let _legacy: fn(&str, bool) -> String = connector_route_set_applied_json;
+        let _kind: fn(&str, &str) -> String = connector_route_set_applied_kind_json;
+        let _setter: fn(&str) -> String = connector_route_selection_set_json;
+        assert_eq!(connector_route_set_applied_kind_json("{}", "nope"),
+                   "{\"ok\":false,\"error\":\"kind-invalid\"}");
+        assert_eq!(connector_route_set_applied_kind_json("{", "user"),
+                   "{\"ok\":false,\"error\":\"route-set-invalid\"}");
+        assert_eq!(RouteAckKind::parse("initial"), Some(RouteAckKind::Initial));
+        assert_eq!(RouteAckKind::parse("auto"), Some(RouteAckKind::Auto));
+        assert_eq!(RouteAckKind::parse("user"), Some(RouteAckKind::User));
+        assert_eq!(RouteAckKind::parse(""), None);
+
+        // The parser: explicit empty OK, duplicates verbatim, malformed refused.
+        assert_eq!(
+            parse_route_set("{\"routes\":[]}").expect("an explicit empty applied set"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_route_set("{\"routes\":[\"a.b.c.d/32\",\"a.b.c.d/32\"]}").expect("verbatim"),
+            vec!["a.b.c.d/32".to_string(), "a.b.c.d/32".to_string()]
+        );
+        assert!(parse_route_set("{}").is_err(), "missing field still refused");
+        assert!(parse_route_set("{\"routes\":[1]}").is_err(), "non-string still refused");
+        assert!(parse_route_set("{\"routes\":{}}").is_err(), "non-array still refused");
+        assert!(parse_route_set("[]").is_err(), "non-object still refused");
+
+        // Behaviour: "all off" through the LIVE setter, then the empty ACK.
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let t = crate::sys::mono_ms();
+        let all_on = wg_route_networks(&registry);
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselect_all\":true}"),
+            registry.as_ref(),
+        );
+        assert!(out.desired_routes.is_empty());
+        assert!(wg_route_networks(&registry).is_empty());
+        assert!(shell_route_networks(&shared).is_empty());
+        // Without any ACK the comparison is silent (the initial create is pending).
+        shared.refresh_net_gate_at(registry.as_ref(), t);
+        assert!(!shared.lock().recreate.required);
+
+        // The shell's initial create applied NOTHING and says so explicitly.
+        shared.ack_applied_route_set(Vec::new(), false, t + 1);
+        assert_eq!(shared.lock().applied_route_set, Some(Vec::<String>::new()));
+        shared.refresh_net_gate_at(registry.as_ref(), t + 2);
+        assert!(!shared.lock().recreate.required, "empty desired == empty applied");
+
+        // Everything back ON: NOW the recorded empty set makes the divergence
+        // visible, so the newly enabled routes can reach the platform.
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(out.changed && out.recreate_needed);
+        assert_eq!(out.desired_routes, all_on);
+        shared.refresh_net_gate_at(registry.as_ref(), t + 3);
+        let rec = shared.lock().recreate.clone();
+        assert!(rec.required, "{rec:?}");
+        assert_eq!(rec.reason, "route-set-changed");
+        assert_eq!(rec.count, 0, "still no automatic recreate was completed");
+
+        // The user-forced recreate is ACKed with kind `user`: recorded, nothing spent.
+        shared.ack_applied_route_set_kind(all_on.clone(), RouteAckKind::User, t + 4);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required);
+        assert_eq!(rec.count, 0);
+        assert!(!rec.exhausted);
+        assert_eq!(shared.lock().last_recreate_ms, None);
+        shared.refresh_net_gate_at(registry.as_ref(), t + 5);
+        assert!(!shared.lock().recreate.required, "converged");
+        assert_eq!(wg_route_networks(&registry), all_on);
+    }
+
+    /// The gated snapshot is rebuilt too: with the dev force flag the exit route
+    /// is exported, and turning its NetID off removes it from BOTH the WG table
+    /// and the shell snapshot (the gate verdict itself is reused, not re-decided).
+    #[test]
+    fn runtime_route_selection_setter_rebuilds_the_default_route_gated_snapshot() {
+        let _quiet = ring_quiet();
+        use crate::network_map::ManagedRoute;
+        let shared = ConnectorShared::new_selected(true, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        let mut map = route_selection_test_map(7);
+        map.routes.push(ManagedRoute {
+            id: "exit".into(),
+            network: config::Route { addr: [0, 0, 0, 0], prefix_len: 0 },
+            domains: vec![],
+            net_id: "net-d".into(),
+            network_type: 1,
+            peer: "relay".into(),
+            metric: 9999,
+            masquerade: false,
+            keep_route: false,
+            skip_auto_apply: false,
+        });
+        apply_selected_map(&shared, registry.as_ref(), &host, map);
+        let with_exit = vec![
+            "192.168.50.0/24".to_string(),
+            "192.168.50.0/24".to_string(),
+            "172.16.0.0/12".to_string(),
+            "0.0.0.0/0".to_string(),
+        ];
+        assert_eq!(wg_route_networks(&registry), with_exit);
+        assert_eq!(shell_route_networks(&shared), with_exit, "the forced gate exports the exit route");
+        assert_eq!(shared.lock().route_count, 4);
+
+        let out = shared.route_selection_set_at(
+            selector_from("{\"deselected_routes\":[\"net-d\"]}"),
+            registry.as_ref(),
+        );
+        let without_exit = vec![
+            "192.168.50.0/24".to_string(),
+            "192.168.50.0/24".to_string(),
+            "172.16.0.0/12".to_string(),
+        ];
+        assert_eq!(out.desired_routes, without_exit);
+        assert_eq!(wg_route_networks(&registry), without_exit);
+        assert_eq!(shell_route_networks(&shared), without_exit);
+        assert_eq!(shared.lock().route_count, 3);
+        assert!(out.recreate_needed);
+    }
+
+    /// An HA OWNER/metric change on the same prefixes needs NO OS route replace
+    /// (the platform installs one route per prefix), while a stale ACK is still
+    /// recorded verbatim — the mismatch simply stays visible.
+    #[test]
+    fn ha_owner_change_needs_no_os_replace_and_a_stale_ack_is_recorded_verbatim() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let t = crate::sys::mono_ms();
+        let all_on = wg_route_networks(&registry);
+        shared.ack_applied_route_set(all_on.clone(), false, t);
+
+        // The HA owner moves: the two candidates swap peer/metric on the SAME
+        // prefixes, and the WG table is re-applied with the new rows.
+        let mut moved = route_selection_test_map(8);
+        moved.routes[0].peer = "peer-b".into();
+        moved.routes[0].metric = 100;
+        moved.routes[1].peer = "peer-a".into();
+        moved.routes[1].metric = 200;
+        apply_selected_map(&shared, registry.as_ref(), &host, moved);
+        assert_eq!(wg_route_networks(&registry), all_on);
+
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(!out.changed);
+        assert_eq!(out.desired_routes, all_on);
+        assert!(!out.recreate_needed, "same prefixes -> no OS route replace is needed");
+        shared.refresh_net_gate_at(registry.as_ref(), t + 1);
+        assert!(!shared.lock().recreate.required, "the legacy comparison agrees here");
+
+        // The OS set is a SET: a captured set with one HA row fewer still needs no
+        // replace, because the prefix set is identical.
+        shared.ack_applied_route_set(
+            vec!["172.16.0.0/12".to_string(), "192.168.50.0/24".to_string()],
+            false,
+            t + 2,
+        );
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(!out.recreate_needed, "an owner change keeps the same prefix set");
+
+        // A STALE ACK is never rejected: it is evidence about the platform, and
+        // the mismatch keeps `desired != applied`.
+        shared.ack_applied_route_set(vec!["10.20.0.0/16".to_string()], false, t + 3);
+        assert_eq!(
+            shared.lock().applied_route_set,
+            Some(vec!["10.20.0.0/16".to_string()])
+        );
+        shared.refresh_net_gate_at(registry.as_ref(), t + 4);
+        let rec = shared.lock().recreate.clone();
+        assert!(rec.required, "a stale ACK re-raises the divergence: {rec:?}");
+        assert_eq!(rec.reason, "route-set-changed");
+        assert_eq!(rec.count, 0);
+    }
+
+    /// T0 native5f: the automatic divergence signal (`recreate.required`) uses the
+    /// SAME prefix-set rule as the live setter. An ACKed platform set that differs
+    /// from the desired rows only by DUPLICATES or ORDER is not a desired-set
+    /// change: the setter reports `recreate_needed=false`, the gate refresh keeps
+    /// `required=false` and spends NOTHING (count / cooldown / exhausted
+    /// untouched). A REAL prefix difference still raises the signal through the
+    /// unchanged budget / cooldown path.
+    #[test]
+    fn prefix_set_equality_governs_the_auto_recreate_signal_too() {
+        let _quiet = ring_quiet();
+        let shared = ConnectorShared::new_selected(false, None, RouteSelector::new());
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(&shared, registry.as_ref(), &host, route_selection_test_map(7));
+        let t = crate::sys::mono_ms();
+        let all_on = wg_route_networks(&registry);
+        assert_eq!(
+            all_on,
+            vec![
+                "192.168.50.0/24".to_string(),
+                "192.168.50.0/24".to_string(),
+                "172.16.0.0/12".to_string()
+            ],
+            "the HA shape: two rows for one prefix plus the corp subnet"
+        );
+
+        // The ACKed platform set holds the SAME prefix set with a different ROW
+        // shape (reversed order, and the HA prefix duplicated once more). The OS
+        // installs one route per prefix, so neither surface may see a divergence.
+        shared.ack_applied_route_set(
+            vec![
+                "172.16.0.0/12".to_string(),
+                "192.168.50.0/24".to_string(),
+                "192.168.50.0/24".to_string(),
+            ],
+            false,
+            t,
+        );
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(!out.changed);
+        assert_eq!(out.desired_routes, all_on);
+        assert!(!out.recreate_needed, "same prefix set -> no OS route replace");
+        shared.refresh_net_gate_at(registry.as_ref(), t + 1);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required, "the auto signal must agree with the setter: {rec:?}");
+        assert_eq!(rec.reason, "none");
+        assert!(!rec.cooling_down);
+        assert_eq!(rec.count, 0, "a row-shape-only change must consume no auto unit");
+        assert!(!rec.exhausted);
+        assert_eq!(shared.lock().last_recreate_ms, None, "and must not arm the cooldown");
+
+        // A REAL prefix difference (the HA subnet is gone) still raises through the
+        // unchanged path: required / `route-set-changed`, nothing counted until the
+        // shell ACKs a completed AUTO recreate.
+        shared.ack_applied_route_set(vec!["172.16.0.0/12".to_string()], false, t + 2);
+        let out = shared.route_selection_set_at(RouteSelector::new(), registry.as_ref());
+        assert!(out.recreate_needed, "a missing prefix is a real divergence");
+        shared.refresh_net_gate_at(registry.as_ref(), t + 3);
+        let rec = shared.lock().recreate.clone();
+        assert!(rec.required, "{rec:?}");
+        assert_eq!(rec.reason, "route-set-changed");
+        assert_eq!(rec.count, 0, "raised, not yet completed");
+        assert_eq!(shared.lock().last_recreate_ms, None);
+        shared.ack_applied_route_set_kind(all_on.clone(), RouteAckKind::Auto, t + 4);
+        let rec = shared.lock().recreate.clone();
+        assert!(!rec.required);
+        assert_eq!(rec.count, 1, "the unchanged auto budget counts the completion");
+        assert_eq!(shared.lock().last_recreate_ms, Some(t + 4), "and arms the cooldown");
+    }
+
+    /// The start field is validated with the strict parser: a malformed
+    /// `route_selection` fails the whole config (stable `invalid-config` at the
+    /// start seam) instead of silently defaulting to all-selected.
+    #[test]
+    fn route_selection_start_field_parses_strictly_and_malformed_state_fails_the_config() {
+        let valid = format!(
+            "{{\"management_url\":\"http://127.0.0.1:8012\",\"private_key\":\"{}\",\"route_selection\":{{\"selected_routes\":[\"a\"],\"deselected_routes\":[\"b\"],\"deselect_all\":false}}}}",
+            test_private_key_b64(1)
+        );
+        let cfg = ConnectorConfig::from_json(&valid).expect("valid route_selection");
+        assert_eq!(
+            cfg.route_selection.to_json(),
+            "{\"selected_routes\":[\"a\"],\"deselected_routes\":[\"b\"],\"deselect_all\":false}"
+        );
+
+        let cases = [
+            "\"route_selection\":[]",
+            "\"route_selection\":\"all\"",
+            "\"route_selection\":{\"selected_routes\":{}}",
+            "\"route_selection\":{\"deselected_routes\":[1]}",
+            "\"route_selection\":{\"deselect_all\":1}",
+            "\"route_selection\":{\"deselect_all\":true,\"deselect_all\":false}",
+            "\"route_selection\":{\"deselect_all\":true},\"route_selection\":{}",
+        ];
+        for case in cases {
+            let json = format!(
+                "{{\"management_url\":\"http://127.0.0.1:8012\",\"private_key\":\"{}\",{case}}}",
+                test_private_key_b64(1)
+            );
+            let err = ConnectorConfig::from_json(&json).unwrap_err();
+            assert!(
+                matches!(&err, ConfigError::Field { field, .. } if *field == "route_selection"),
+                "{case} must fail as field 'route_selection', got {err}"
+            );
+        }
+
+        // The start seam renders that config error as its frozen token.
+        let bad = format!(
+            "{{\"management_url\":\"http://127.0.0.1:8012\",\"private_key\":\"{}\",\"route_selection\":[]}}",
+            test_private_key_b64(1)
+        );
+        assert_eq!(
+            connector_start_json(&bad, "{\"setup_key\":\"k\"}"),
+            "{\"started\":false,\"error\":\"invalid-config\"}"
+        );
+    }
+
+    /// `connector_routes_json` is a side-effect-free snapshot: no catalog
+    /// before the first map, the applied map's OWN serial + an empty `networks`
+    /// list for a map that advertised no routes (connected, no routes — not
+    /// "no snapshot"), no gate refresh, no recreate bookkeeping moved by a
+    /// read.
+    #[test]
+    fn routes_json_is_a_side_effect_free_snapshot_and_keeps_the_empty_catalog_of_an_applied_map() {
+        let shared = ConnectorShared::new_selected(
+            false,
+            None,
+            selector_from("{\"deselected_routes\":[\"HostInternal\"]}"),
+        );
+        // Only "no NetworkMap applied yet" is unavailable.
+        assert_eq!(
+            shared.routes_json(),
+            "{\"available\":false,\"serial\":0,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false},\"networks\":[]}"
+        );
+
+        // An applied map that advertised no routes is AVAILABLE with the map's
+        // own serial, the generation's selection and zero networks — the
+        // honest "connected, no routes" catalog (distinct from "no snapshot").
+        let registry = Arc::new(WgPeerRegistry::default());
+        let host = RecordingHost::default();
+        apply_selected_map(
+            &shared,
+            registry.as_ref(),
+            &host,
+            NetworkMap { routes: vec![], ..route_selection_test_map(9) },
+        );
+        assert_eq!(
+            shared.routes_json(),
+            "{\"available\":true,\"serial\":9,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false},\"networks\":[]}"
+        );
+
+        // Reading the document never advances the N8 recreate state (unlike
+        // `network_config_json`, which re-decides the gate).
+        shared.lock().applied_route_set = Some(vec!["172.16.0.0/12".to_string()]);
+        let _ = shared.routes_json();
+        {
+            let g = shared.lock();
+            assert_eq!(g.applied_route_set.as_deref(), Some(&["172.16.0.0/12".to_string()][..]));
+            assert_eq!(g.recreate, RecreateStatus::default(), "no recreate state moved");
+            assert!(
+                g.net_config.as_ref().is_some_and(|c| c.routes.is_empty()),
+                "the read synthesized nothing — the snapshot is the empty applied map"
+            );
+        }
+
+        // With no connector installed the free helper answers the same shape.
+        assert_eq!(
+            connector_routes_json(),
+            "{\"available\":false,\"serial\":0,\"selection\":{\"selected_routes\":[],\"deselected_routes\":[],\"deselect_all\":false},\"networks\":[]}"
+        );
+    }
+
     /// N2-H (design §4.0 stun + management rows): the collector's freeze
     /// sources come from the session's INTERNAL state — the stun set the ICE
     /// orchestrator parsed out of `netbird_config.stuns` and the address the
@@ -9592,12 +11603,28 @@ mod tests {
         let json = connector_route_set_applied_json("{\"routes\":[\"0.0.0.0/0\"]}", true);
         assert_eq!(json, "{\"ok\":false,\"error\":\"no-connector\"}");
 
-        // shape validation (pure parser)
+        // shape validation (pure parser). T0 e15ac: an EXPLICIT empty array is a
+        // legal applied set now (see the dedicated test) — the missing key, bad
+        // entry types and a non-object root stay loud errors, and the document is
+        // validated BEFORE the connector lookup.
         assert!(parse_route_set("{\"routes\":[\"0.0.0.0/0\",\"10.0.0.0/8\"]}").is_ok());
-        assert!(parse_route_set("{\"routes\":[]}").is_err(), "empty set rejected");
+        assert_eq!(parse_route_set("{\"routes\":[]}").expect("explicit empty"), Vec::<String>::new());
         assert!(parse_route_set("{\"routes\":[1,2]}").is_err(), "non-string rejected");
         assert!(parse_route_set("{}").is_err(), "missing field rejected");
         assert!(parse_route_set("[]").is_err(), "non-object rejected");
+        assert_eq!(
+            connector_route_set_applied_json("{\"routes\":[1,2]}", true),
+            "{\"ok\":false,\"error\":\"route-set-invalid\"}",
+            "a malformed document is refused even with no connector running"
+        );
+        assert_eq!(
+            connector_route_set_applied_kind_json("{\"routes\":[\"0.0.0.0/0\"]}", "userish"),
+            "{\"ok\":false,\"error\":\"kind-invalid\"}",
+            "an unknown kind never falls back onto a budget-spending kind"
+        );
+        // the legacy 2-arg NAPI surface is preserved verbatim
+        let _legacy: fn(&str, bool) -> String = connector_route_set_applied_json;
+        let _kind: fn(&str, &str) -> String = connector_route_set_applied_kind_json;
     }
 
     // N5d: real signal link --------------------------------------------------

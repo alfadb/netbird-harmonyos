@@ -1,5 +1,7 @@
-// Loader-side resolve hook for run-exclusion-generation.mts ONLY (host-side
-// fixture). Same principle as relay-exclusion-hooks.mjs / route-check-hooks.mjs:
+// Loader-side resolve hook for the host-side fixtures that stage and drive the
+// REAL NetBirdVpnExtensionAbility.ets: run-exclusion-generation.mts and —
+// through route-apply-vpe-hooks.mjs — run-route-apply-vpe.mts (the live-route
+// apply leg). Same principle as relay-exclusion-hooks.mjs / route-check-hooks.mjs:
 // the REAL modules import @ohos.* / libnetbird_core.so which cannot resolve
 // under plain node; this hook short-circuits ONLY those specifiers. No module
 // under test is ever rewritten — the fixtures are byte-identical copies of the
@@ -166,7 +168,9 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '  throw e;\n' +
   '}\n' +
   'export default {\n' +
-  '  OpenMode: { READ_WRITE: 3, CREATE: 8, TRUNC: 16 },\n' +
+  // READ_ONLY is the route adapter\'s read mode (NetBirdRouteStore.readTextBounded);
+  // additive — every pre-existing caller only uses READ_WRITE|CREATE|TRUNC.
+  '  OpenMode: { READ_ONLY: 0, READ_WRITE: 3, CREATE: 8, TRUNC: 16 },\n' +
   '  accessSync: (path) => {\n' +
   '    thrower(path, "access");\n' +
   '    return Object.prototype.hasOwnProperty.call(files(), path);\n' +
@@ -197,16 +201,81 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   '    return bytes;\n' +
   '  },\n' +
   '  closeSync: () => {},\n' +
-  '  unlinkSync: (path) => { delete files()[path]; }\n' +
+  '  unlinkSync: (path) => { delete files()[path]; },\n' +
+  // The SDK's SYNCHRONOUS temp+fsync+rename document pattern, kept functional
+  // for any staged writer that uses it: renameSync moves the stored text
+  // exactly like the real 13900002-less happy path, and throws the SDK's
+  // documented "not there" code when the source is missing (a writer always
+  // renames a temp it just wrote).
+  '  renameSync: (from, to) => {\n' +
+  '    const f = files();\n' +
+  '    if (!Object.prototype.hasOwnProperty.call(f, from)) {\n' +
+  '      const e = new Error("rename failed: " + from); e.code = 13900002; throw e;\n' +
+  '    }\n' +
+  '    f[to] = f[from]; delete f[from];\n' +
+  '  },\n' +
+  '  fsyncSync: () => {},\n' +
+  // 2026-10-07 per-NetID route selection (NetBirdRouteStore.ets): the route
+  // adapter uses the ASYNC half of the same SDK over the SAME in-memory map,
+  // so the REAL store (staged byte-identically by the fixture) runs unchanged:
+  // READ_ONLY open of a missing path throws the documented 13900002 (which the
+  // store maps to "no document" = default all-on), __NB_FS_OPEN_ERROR[path]
+  // still simulates a real open failure (mapped to "unavailable"), read serves
+  // the stored text at buffer position 0 (the SDK semantics), write stores the
+  // caller's UTF-8 bytes, and rename/unlink are the atomic-swap legs.
+  '  async open(path, mode) {\n' +
+  '    const code = (g().__NB_FS_OPEN_ERROR || {})[path];\n' +
+  '    if (code !== undefined) {\n' +
+  '      const e = new Error("open failed: " + path); e.code = code; throw e;\n' +
+  '    }\n' +
+  '    if (mode === 0 && !Object.prototype.hasOwnProperty.call(files(), path)) {\n' +
+  '      const e = new Error("open failed: " + path); e.code = 13900002; throw e;\n' +
+  '    }\n' +
+  '    return { fd: path };\n' +
+  '  },\n' +
+  '  async read(fd, arrayBuffer, opts) {\n' +
+  '    const text = files()[fd];\n' +
+  '    if (text === undefined) {\n' +
+  '      const e = new Error("read failed: " + fd); e.code = 13900002; throw e;\n' +
+  '    }\n' +
+  '    const bytes = Buffer.from(String(text), "utf8");\n' +
+  '    const offset = (opts && typeof opts.offset === "number") ? opts.offset : 0;\n' +
+  '    const length = (opts && typeof opts.length === "number") ? opts.length : bytes.length;\n' +
+  '    if (offset >= bytes.length) { return 0; }\n' +
+  '    const count = Math.min(length, bytes.length - offset);\n' +
+  '    Buffer.from(arrayBuffer).set(bytes.subarray(offset, offset + count), 0);\n' +
+  '    return count;\n' +
+  '  },\n' +
+  '  async write(fd, bytes) {\n' +
+  '    const text = Buffer.from(bytes).toString("utf8");\n' +
+  '    files()[fd] = text;\n' +
+  '    return Buffer.byteLength(text, "utf8");\n' +
+  '  },\n' +
+  '  async fsync(fd) {},\n' +
+  '  async close(file) {},\n' +
+  '  async rename(from, to) {\n' +
+  '    const f = files();\n' +
+  '    if (!Object.prototype.hasOwnProperty.call(f, from)) {\n' +
+  '      const e = new Error("rename failed: " + from); e.code = 13900002; throw e;\n' +
+  '    }\n' +
+  '    f[to] = f[from]; delete f[from];\n' +
+  '  },\n' +
+  '  async unlink(path) { delete files()[path]; }\n' +
   '};');
 
-// Real UTF-8 encoding for the fixture EntryAbility's completeness check (the
-// platform util.TextEncoder contract: encode() returns the UTF-8 bytes).
+// Real UTF-8 encoding/decoding for the fixture (the platform util.TextEncoder /
+// util.TextDecoder contract): the route adapter encodes the documents it writes
+// and decodes the ones it reads with the SAME module, fatal mode included.
 const UTIL = 'data:text/javascript,' + encodeURIComponent(
   'class TextEncoder {\n' +
   '  encode(input) { return Uint8Array.from(Buffer.from(String(input ?? ""), "utf8")); }\n' +
   '}\n' +
-  'export default { TextEncoder: TextEncoder };');
+  'class Decoder {\n' +
+  '  constructor(encoding, options) { this.d = new globalThis.TextDecoder(encoding, options); }\n' +
+  '  decodeToString(bytes) { return this.d.decode(bytes); }\n' +
+  '}\n' +
+  'export default { TextEncoder: TextEncoder,\n' +
+  '  TextDecoder: { create(encoding, options) { return new Decoder(encoding, options); } } };');
 
 const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   'function g() { return globalThis; }\n' +
@@ -377,6 +446,16 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '  connector_status: () => j(g().__NB_STATUS, {}),\n' +
   '  connector_network_config: () =>\n' +
   '    j(g().__NB_NETCFG, { available: false, reason: "no-network-map" }),\n' +
+  // 2026-10-07 route catalog getter (decision B): the native `connector_routes`
+  // document the VPE mirrors into netbird-routes.json. Functional and
+  // overridable like the two seams above: a STRING answer is returned verbatim
+  // (the malformed-document test), an object is stringified, and the DEFAULT is
+  // the honest native "no route catalog" state (available:false) — so the
+  // pre-existing suites never publish a catalog and change no shape.
+  '  connector_routes: () =>\n' +
+  '    j(g().__NB_ROUTES, { available: false, serial: 0,\n' +
+  '      selection: { selected_routes: [], deselected_routes: [], deselect_all: false },\n' +
+  '      networks: [] }),\n' +
   // S1/S2 initial-leg drive (2026-09-23): the REAL startConnectorThenCreate is
   // driven end-to-end for the two config switches, so the three management
   // socket seams it walks are functional here. All three are additive — no
@@ -387,8 +466,16 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ fd: typeof g().__NB_MGMT_FD === "number" ? g().__NB_MGMT_FD : 21,\n' +
   '      bind_rc: 0, bind_errno: 0 });\n' +
   '  },\n' +
-  '  connector_start_with_socket: () =>\n' +
-  '    JSON.stringify({ started: true, state: "running" }),\n' +
+  '  connector_start_with_socket: (fd, configJson, setupKeyJson, addrJson) => {\n' +
+  // 2026-10-07 route selection: the config JSON the shell actually handed the
+  // native start is recorded so a fixture can assert the startup selection (and
+  // its ABSENCE) on the real call, not on a mirror. Additive: the answer is
+  // unchanged.
+  '    g().__NB_START_CALLS = (g().__NB_START_CALLS || 0) + 1;\n' +
+  '    g().__NB_START_LAST = { fd: fd, config: configJson, creds: setupKeyJson,\n' +
+  '      addr: addrJson };\n' +
+  '    return JSON.stringify({ started: true, state: "running" });\n' +
+  '  },\n' +
   '  connector_socket_feed: () => {\n' +
   '    g().__NB_SUPPLY_MGMT_FEED = (g().__NB_SUPPLY_MGMT_FEED || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true, queued: 1 });\n' +
@@ -743,6 +830,30 @@ const STUBS = {
   '@ohos.app.ability.UIAbility': 'data:text/javascript,' + encodeURIComponent(
     'export default class UIAbility {}'),
   '@ohos.app.ability.AbilityConstant': EMPTY,
+  // Theme (2026-10-09): the REAL EntryAbility now imports these two SDK
+  // modules for its app-scoped "follow the system" color mode, and they must
+  // resolve as MODULES (the ability imports the first by NAME and the second
+  // by DEFAULT), so neither can be left out of the map:
+  //   * @ohos.app.ability.Configuration is an interface-only SDK module
+  //     (26.0.0.821 <sdk>/default/openharmony/ets/api/
+  //     @ohos.app.ability.Configuration.d.ts:30 `export interface
+  //     Configuration`) — it carries no runtime value at all. The named export
+  //     below is the same erased-shape placeholder the sibling shims use; it
+  //     is a NAMED export because the ability writes `{ Configuration }` and
+  //     node's strip-only TS loader keeps that import statement (it does no
+  //     type analysis), so a missing name would fail the ESM link.
+  //   * @ohos.app.ability.ConfigurationConstant is a REAL runtime namespace
+  //     (same dir, @ohos.app.ability.ConfigurationConstant.d.ts:28-187,
+  //     `export default ConfigurationConstant` with the ColorMode enum at
+  //     :39-67). Its enum values are the SDK's verbatim: an empty stub would
+  //     make ColorMode.COLOR_MODE_NOT_SET a TypeError that EntryAbility's own
+  //     followSystemColorMode() try/catch swallows, silently turning the
+  //     tested onCreate into its failure branch instead of the real call.
+  '@ohos.app.ability.Configuration': 'data:text/javascript,' + encodeURIComponent(
+    'export const Configuration = undefined;\n'),
+  '@ohos.app.ability.ConfigurationConstant': 'data:text/javascript,' + encodeURIComponent(
+    'export default { ColorMode: { COLOR_MODE_NOT_SET: -1, COLOR_MODE_DARK: 0,\n' +
+    '  COLOR_MODE_LIGHT: 1 } };\n'),
   '@ohos.app.ability.Want': EMPTY,
   '@ohos.window': EMPTY,
   '@ohos.file.fs': FS,
@@ -760,7 +871,29 @@ const STUBS = {
     'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
     ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
     'export const decideAccountCredentialMode = () => "account-login-required";'),
-  '../login/NetBirdAccountStore': 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D'
+  '../login/NetBirdAccountStore': 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D',
+  // 2026-10-09 live route apply: the REAL extension now imports the live-route
+  // IPC file adapter (and the token vocabulary of its pure document module) by
+  // value, so both specifiers must resolve for these fixtures to link. This
+  // suite never drives the apply consumer — no request document is written here
+  // and its 100 ms tick is either captured or too short-lived to fire — so the
+  // answer is the truthful "no request", and a result write that IS reached
+  // fails LOUDLY instead of pretending an answer was published. The real
+  // adapter and its documents are driven end-to-end by run-route-apply-vpe.mts
+  // (the store itself by run-route-request.mts), never mirrored here.
+  '../routes/NetBirdRouteRequestStore': 'data:text/javascript,' + encodeURIComponent(
+    'export const readRouteApplyRequest = async () => null;\n' +
+    'export const writeRouteApplyResult = async () => {\n' +
+    '  throw new Error("route-apply-result-not-staged-in-this-fixture");\n' +
+    '};'),
+  '../routes/NetBirdRouteRequest': 'data:text/javascript,' + encodeURIComponent(
+    'export const ROUTE_APPLY_STATE_APPLYING = "applying";\n' +
+    'export const ROUTE_APPLY_STATE_APPLIED = "applied";\n' +
+    'export const ROUTE_APPLY_STATE_FAILED = "failed";\n' +
+    'export const ROUTE_APPLY_MODE_NONE = "";\n' +
+    'export const ROUTE_APPLY_MODE_NO_OS_CHANGE = "no-os-change";\n' +
+    'export const ROUTE_APPLY_MODE_RECREATED = "recreated";\n' +
+    'export const ROUTE_APPLY_MODE_STORED_NO_MAP = "stored-no-map";')
 };
 
 // Sibling modules of the extension: the ESM link would fail on the erased
@@ -816,7 +949,17 @@ const SHIMS = {
   './NetBirdDiagnostics': 'NetBirdDiagnostics.shim.ts',
   './NetBirdSystemEvents': 'NetBirdSystemEvents.shim.ts',
   '../vpnextensionability/NetBirdDiagnostics': 'NetBirdDiagnostics.shim.ts',
-  '../vpnextensionability/NetBirdSystemEvents': 'NetBirdSystemEvents.shim.ts'
+  '../vpnextensionability/NetBirdSystemEvents': 'NetBirdSystemEvents.shim.ts',
+  // 2026-10-07 per-NetID route selection (decision B): the REAL extension now
+  // imports the file adapter by value, so the fixture stages
+  // NetBirdRouteStore.ets byte-identically next to the extension and this entry
+  // points the VPE's '../routes/NetBirdRouteStore' at that copy. The adapter's
+  // own value import of the pure document module is extensionless, so it gets
+  // the same treatment (resolved relative to the staged adapter) — staging the
+  // pure module byte-identically is what keeps THIS hook a resolver, never a
+  // re-implementation, of the route rules.
+  '../routes/NetBirdRouteStore': 'NetBirdRouteStore.ts',
+  './NetBirdRoutePreferences': 'NetBirdRoutePreferences.ts'
 };
 
 export function resolve(specifier, context, next) {

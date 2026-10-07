@@ -168,6 +168,13 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("account_auth_discovery_start", napi_account_auth_discovery_start);
     reg!("account_auth_discovery_poll", napi_account_auth_discovery_poll);
     reg!("account_auth_discovery_cancel", napi_account_auth_discovery_cancel);
+    // Increment 131: dedicated route catalog (append-only at the tail of the
+    // registration list — every pre-existing name keeps its position).
+    reg!("connector_routes", napi_connector_routes);
+    // Increment 132: the live route-selection setter — appended after the
+    // catalog getter it mutates (still append-only: every pre-existing name
+    // keeps its position and its created function object).
+    reg!("connector_route_selection_set", napi_connector_route_selection_set);
     exports
 }
 
@@ -294,7 +301,11 @@ fn ret_json(env: NapiEnv, json: String) -> NapiValue {
 // Host-test link surface (cfg(test) only, never part of the cdylib): the test
 // binary links the whole crate on the host triple, where libace_napi.z.so does
 // not exist. Stubs satisfy the linker; the registration test records attachment
-// through napi_set_named_property, while native runtime behavior is not exercised.
+// through napi_set_named_property. The argument stubs are DRIVABLE (`set_string`
+// / `set_bool` / `set_call_args`) and the string-creation stub hands back a
+// readable handle (`created_string`), so a callback wrapper can be exercised
+// end to end on the host — argument arity, string/bool reads and the JSON reply
+// — while native runtime behavior itself is still not exercised.
 #[cfg(test)]
 mod host_stubs {
     use super::*;
@@ -309,12 +320,25 @@ mod host_stubs {
         static SET_CALLS: RefCell<Vec<(usize, String, usize)>> = RefCell::new(Vec::new());
         // NapiValue handle -> UTF-8 payload the string stub hands back
         static FAKE_STRINGS: RefCell<HashMap<usize, Vec<u8>>> = RefCell::new(HashMap::new());
+        // callback-info handle -> the argument handles ONE armed invocation sees
+        // (`set_call_args`); absent = the pre-existing "no cb info on the host"
+        // behavior every other test relies on.
+        static CALL_ARGS: RefCell<HashMap<usize, Vec<usize>>> = RefCell::new(HashMap::new());
+        // NapiValue handle -> boolean the `napi_get_value_bool` stub writes
+        static BOOLS: RefCell<HashMap<usize, bool>> = RefCell::new(HashMap::new());
+        // NapiValue handle handed back by `napi_create_string_utf8` -> payload
+        static CREATED_STRINGS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+        static NEXT_STRING_HANDLE: RefCell<usize> = RefCell::new(0);
     }
 
     pub fn reset() {
         FAKE_FUNCS.with(|m| m.borrow_mut().clear());
         SET_CALLS.with(|c| c.borrow_mut().clear());
         FAKE_STRINGS.with(|m| m.borrow_mut().clear());
+        CALL_ARGS.with(|m| m.borrow_mut().clear());
+        BOOLS.with(|m| m.borrow_mut().clear());
+        CREATED_STRINGS.with(|m| m.borrow_mut().clear());
+        NEXT_STRING_HANDLE.with(|c| *c.borrow_mut() = 0);
     }
 
     /// Register a fake string argument for the `napi_get_value_string_utf8`
@@ -322,6 +346,29 @@ mod host_stubs {
     /// the host without an NAPI runtime.
     pub fn set_string(handle: usize, text: &str) {
         FAKE_STRINGS.with(|m| m.borrow_mut().insert(handle, text.as_bytes().to_vec()));
+    }
+
+    /// Register a fake BOOLEAN argument for the `napi_get_value_bool` stub (an
+    /// unregistered handle is "not a boolean", so the caller keeps its default).
+    pub fn set_bool(handle: usize, value: bool) {
+        BOOLS.with(|m| m.borrow_mut().insert(handle, value));
+    }
+
+    /// Arm ONE callback invocation: the wrapper called with `info` as its
+    /// `NapiCallbackInfo` sees exactly `args` — `argc` = the number of arguments
+    /// PASSED (the real `napi_get_cb_info` contract, which is what an optional
+    /// argument's presence hinges on) and `argv` filled in order. At most the 8
+    /// slots `Args` reserves.
+    pub fn set_call_args(info: usize, args: &[usize]) {
+        assert!(args.len() <= 8, "the host harness arms at most 8 arguments");
+        CALL_ARGS.with(|m| m.borrow_mut().insert(info, args.to_vec()));
+    }
+
+    /// The payload of a `NapiValue` handed back by the
+    /// `napi_create_string_utf8` stub — i.e. the JSON a `ret_json` wrapper
+    /// returned from an armed invocation.
+    pub fn created_string(value: usize) -> Option<String> {
+        CREATED_STRINGS.with(|m| m.borrow().get(&value).cloned())
     }
 
     pub fn fake_funcs() -> HashMap<String, usize> {
@@ -377,22 +424,52 @@ mod host_stubs {
     #[no_mangle]
     pub extern "C" fn napi_get_cb_info(
         _env: NapiEnv,
-        _info: NapiCallbackInfo,
-        _argc: *mut usize,
-        _argv: *mut NapiValue,
+        info: NapiCallbackInfo,
+        argc: *mut usize,
+        argv: *mut NapiValue,
         _this_arg: *mut NapiValue,
         _data: *mut *mut c_void,
     ) -> i32 {
+        // Only an ARMED invocation reports argument info; an unarmed one leaves
+        // the caller's argc/argv untouched (the previous stub behavior).
+        let Some(args) = CALL_ARGS.with(|m| m.borrow().get(&(info as usize)).cloned()) else {
+            return 0;
+        };
+        unsafe {
+            if !argc.is_null() {
+                *argc = args.len();
+            }
+            if !argv.is_null() {
+                for (index, handle) in args.iter().enumerate() {
+                    *argv.add(index) = *handle as NapiValue;
+                }
+            }
+        }
         0
     }
 
     #[no_mangle]
     pub extern "C" fn napi_create_string_utf8(
         _env: NapiEnv,
-        _str_: *const u8,
-        _length: usize,
-        _result: *mut NapiValue,
+        str_: *const u8,
+        length: usize,
+        result: *mut NapiValue,
     ) -> i32 {
+        let bytes = if str_.is_null() || length == 0 {
+            &[][..]
+        } else {
+            unsafe { core::slice::from_raw_parts(str_, length) }
+        };
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        // a non-null, distinct handle per created string, readable back through
+        // `created_string`
+        let handle = NEXT_STRING_HANDLE.with(|c| {
+            let mut n = c.borrow_mut();
+            *n += 1;
+            0x9000_0000usize + *n
+        });
+        CREATED_STRINGS.with(|m| m.borrow_mut().insert(handle, text));
+        unsafe { *result = handle as NapiValue };
         0
     }
 
@@ -426,14 +503,20 @@ mod host_stubs {
     }
 
     #[no_mangle]
-    pub extern "C" fn napi_get_value_bool(_env: NapiEnv, _value: NapiValue, _result: *mut bool) -> i32 {
+    pub extern "C" fn napi_get_value_bool(_env: NapiEnv, value: NapiValue, result: *mut bool) -> i32 {
+        // An unregistered handle is "not a boolean" (non-zero rc): the caller
+        // keeps its default, exactly like the real API on a wrong-typed value.
+        let Some(v) = BOOLS.with(|m| m.borrow().get(&(value as usize)).copied()) else {
+            return 1;
+        };
+        unsafe { *result = v };
         0
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::host_stubs::{fake_funcs, reset, set_calls, set_string};
+    use super::host_stubs::{created_string, fake_funcs, reset, set_bool, set_call_args, set_calls, set_string};
     use super::*;
 
     // Real regression promoted from the probe: napi_init must attach the
@@ -516,6 +599,8 @@ mod tests {
             "account_auth_discovery_start",
             "account_auth_discovery_poll",
             "account_auth_discovery_cancel",
+            "connector_routes",
+            "connector_route_selection_set",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -524,6 +609,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} create_function not called", name));
             assert_ne!(fake, 0, "{} fake function must be non-null", name);
             assert_eq!(call.2, fake, "{} value must be the created function object", name);
+        }
+
+        // Append-only surface (increments 131/132): the two route exports are the
+        // LAST registrations, in that order, and every export name is registered
+        // exactly once — no pre-existing name lost its position or its created
+        // function object to the new binding.
+        let names: Vec<&str> = calls.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(
+            names[names.len() - 2..].to_vec(),
+            vec!["connector_routes", "connector_route_selection_set"],
+            "the route surface must stay appended at the registration tail"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for name in &names {
+            assert!(seen.insert(*name), "{name} registered more than once");
         }
     }
 
@@ -671,6 +771,172 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // Core 5f NAPI route surface (increments 131/132)
+    //
+    // Both route callbacks are driven END TO END through the host stubs:
+    // `set_call_args` arms one real argument list, so the WRAPPER itself is
+    // exercised — argument arity (whether the optional third argument is present
+    // at all), the string/bool reads and the JSON it returns. The process-global
+    // connector slot is empty here for the same reason the connector unit tests
+    // rely on ("unit tests never start one"), so a request that reaches the
+    // connector lookup answers `no-connector`; every refusal decided BEFORE that
+    // lookup (`kind-invalid` / `route-set-invalid` / `selection-invalid`) is
+    // deterministic whatever else runs in this test process. The N2 ring tees
+    // every hilog line PROCESS-WIDE, so this group holds the same lock the ring
+    // tests hold.
+    // -----------------------------------------------------------------------
+
+    /// The JSON a wrapper returned for the armed invocation.
+    fn reply(value: NapiValue) -> String {
+        created_string(value as usize).expect("ret_json must return a JS string")
+    }
+
+    const ACK_NO_CONNECTOR: &str = "{\"ok\":false,\"error\":\"no-connector\"}";
+    const ACK_KIND_INVALID: &str = "{\"ok\":false,\"error\":\"kind-invalid\"}";
+    const ACK_ROUTE_SET_INVALID: &str = "{\"ok\":false,\"error\":\"route-set-invalid\"}";
+    const SET_NO_CONNECTOR: &str = "{\"ok\":false,\"error\":\"no-connector\",\"available\":false,\"changed\":false,\"desired_routes\":[],\"recreate_needed\":false}";
+    const SET_SELECTION_INVALID: &str = "{\"ok\":false,\"error\":\"selection-invalid\",\"available\":false,\"changed\":false,\"desired_routes\":[],\"recreate_needed\":false}";
+
+    #[test]
+    fn route_set_applied_callback_keeps_the_two_arg_legacy_and_dispatches_the_third_arg_kind() {
+        let _quiet = crate::n2_ring::test_guard();
+        reset();
+        let env = 0x1 as NapiEnv;
+        let routes = 0x21usize;
+        let recreate_true = 0x22usize;
+        let kind_user = 0x23usize;
+        let not_a_string = 0x24usize; // no payload registered = "not a string"
+        set_string(routes, "{\"routes\":[\"0.0.0.0/0\",\"172.16.0.0/12\"]}");
+        set_bool(recreate_true, true);
+        set_string(kind_user, "user");
+
+        // 1) TWO arguments (the pre-existing ABI, and the only form an older
+        //    shell sends): the legacy boolean entry runs. If the optional
+        //    argument were read as present, this would answer `kind-invalid`.
+        set_call_args(0xC2, &[routes, recreate_true]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC2 as NapiCallbackInfo) }),
+            ACK_NO_CONNECTOR,
+            "2-arg legacy call with isRecreate=true"
+        );
+
+        // 2) THREE arguments with the explicit `user` kind: the kind-aware entry
+        //    is dispatched and reaches the connector lookup.
+        set_call_args(0xC3, &[routes, recreate_true, kind_user]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC3 as NapiCallbackInfo) }),
+            ACK_NO_CONNECTOR,
+            "3-arg explicit user kind"
+        );
+
+        // 3) THREE arguments whose third argument is NOT a string: refused as an
+        //    invalid kind — never a silent fallback onto the budget-spending
+        //    `auto` kind, and never the legacy boolean entry (which cannot answer
+        //    `kind-invalid` at all). This is the answer that proves the dispatch.
+        set_call_args(0xC4, &[routes, recreate_true, not_a_string]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC4 as NapiCallbackInfo) }),
+            ACK_KIND_INVALID,
+            "a present non-string kind must be refused"
+        );
+
+        // 4) THREE arguments, an unknown token: the same loud refusal.
+        let kind_bogus = 0x25usize;
+        set_string(kind_bogus, "userish");
+        set_call_args(0xC5, &[routes, recreate_true, kind_bogus]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC5 as NapiCallbackInfo) }),
+            ACK_KIND_INVALID,
+            "an unknown kind token must be refused"
+        );
+
+        // 5) `{"routes":[]}` is a LEGAL applied set (T0 e15ac): it clears the
+        //    parser and reaches the connector lookup — `route-set-invalid` would
+        //    mean the parse had rejected the empty list.
+        let empty_routes = 0x26usize;
+        let kind_initial = 0x27usize;
+        let recreate_false = 0x28usize;
+        set_string(empty_routes, "{\"routes\":[]}");
+        set_string(kind_initial, "initial");
+        set_bool(recreate_false, false);
+        set_call_args(0xC6, &[empty_routes, recreate_true, kind_initial]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC6 as NapiCallbackInfo) }),
+            ACK_NO_CONNECTOR,
+            "an explicit empty applied set is legal (kind entry)"
+        );
+        set_call_args(0xC7, &[empty_routes, recreate_false]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC7 as NapiCallbackInfo) }),
+            ACK_NO_CONNECTOR,
+            "an explicit empty applied set is legal (legacy entry, isRecreate=false)"
+        );
+
+        // 6) A malformed document is refused BEFORE the connector lookup, so this
+        //    answer holds whatever else runs in this test process.
+        let bad_routes = 0x29usize;
+        set_string(bad_routes, "{\"routes\":[1,2]}");
+        set_call_args(0xC8, &[bad_routes, recreate_true, kind_user]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC8 as NapiCallbackInfo) }),
+            ACK_ROUTE_SET_INVALID,
+            "a malformed applied set is refused"
+        );
+
+        // The kind is validated BEFORE the document (documented check order), so
+        // an unknown kind never even reaches the route parser.
+        set_call_args(0xC9, &[bad_routes, recreate_true, kind_bogus]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_set_applied(env, 0xC9 as NapiCallbackInfo) }),
+            ACK_KIND_INVALID,
+            "the kind is checked before the document"
+        );
+    }
+
+    #[test]
+    fn route_selection_set_callback_takes_one_raw_selector_string() {
+        let _quiet = crate::n2_ring::test_guard();
+        reset();
+        let env = 0x1 as NapiEnv;
+
+        // ONE string argument, the RAW selector document: the wrapper hands it to
+        // the core's own strict parser, so a setter call with no connector answers
+        // the documented no-claim `no-connector` document.
+        let selector = 0x31usize;
+        set_string(selector, "{\"deselected_routes\":[\"HostInternal\"],\"deselect_all\":false}");
+        set_call_args(0xD2, &[selector]);
+        let doc = reply(unsafe { napi_connector_route_selection_set(env, 0xD2 as NapiCallbackInfo) });
+        assert_eq!(doc, SET_NO_CONNECTOR, "raw selector, no connector");
+        assert_eq!(json_field(&doc, "error"), "no-connector", "{doc}");
+        assert!(!doc.contains("HostInternal"), "never echoes the selector payload: {doc}");
+
+        // A malformed selector is refused by that same parser, before the
+        // connector lookup — deterministic in this shared test process.
+        let bad = 0x32usize;
+        set_string(bad, "{\"deselected_routes\":[1]}");
+        set_call_args(0xD3, &[bad]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_selection_set(env, 0xD3 as NapiCallbackInfo) }),
+            SET_SELECTION_INVALID,
+            "a malformed selector mutates nothing"
+        );
+
+        // The all-default document (nothing selected/deselected) is legal and
+        // still reaches the connector lookup.
+        let all_default = 0x33usize;
+        set_string(
+            all_default,
+            "{\"selected_routes\":[],\"deselected_routes\":[],\"deselect_all\":false}",
+        );
+        set_call_args(0xD4, &[all_default]);
+        assert_eq!(
+            reply(unsafe { napi_connector_route_selection_set(env, 0xD4 as NapiCallbackInfo) }),
+            SET_NO_CONNECTOR,
+            "the all-default selector is legal"
+        );
     }
 }
 
@@ -893,6 +1159,16 @@ unsafe extern "C" fn napi_connector_tun_release(env: NapiEnv, _info: NapiCallbac
 // N8: shell ACK of the route set applied to the platform VpnConfig at
 // (re)create() time. `{"routes":[...]}` JSON first, isRecreate bool second —
 // arms the controlled-recreate comparison (connector_status `recreate`).
+//
+// Core 5f (ADDITIVE, arity-preserving): an OPTIONAL THIRD argument carries the
+// ACK `kind` as a STRING — `initial` | `auto` | `user`. ABSENT (the two-argument
+// call, the only form a shell older than Core 5f sends) keeps the legacy
+// boolean entry byte-identical (`initial` when false, `auto` when true);
+// PRESENT dispatches to the kind-aware entry, where a non-string or an unknown
+// token is REFUSED with `kind-invalid` — never a silent fallback onto the
+// budget-spending `auto` kind. Either way the reply is the frozen
+// `{"ok":true,"recreate":{…}}` / `{"ok":false,"error":"…"}` document: the
+// arguments never cross back, and no secret material is involved.
 unsafe extern "C" fn napi_connector_route_set_applied(
     env: NapiEnv,
     info: NapiCallbackInfo,
@@ -900,7 +1176,12 @@ unsafe extern "C" fn napi_connector_route_set_applied(
     let a = cb_args(env, info);
     let routes = a.string_at(0);
     let is_recreate = a.bool_at(1, false);
-    ret_json(env, crate::connector::connector_route_set_applied_json(&routes, is_recreate))
+    let json = if a.argc >= 3 {
+        crate::connector::connector_route_set_applied_kind_json(&routes, &a.string_at(2))
+    } else {
+        crate::connector::connector_route_set_applied_json(&routes, is_recreate)
+    };
+    ret_json(env, json)
 }
 
 // N3-7: open + bind (NO connect) a TCP management socket for the shell
@@ -1359,4 +1640,47 @@ unsafe extern "C" fn napi_account_auth_discovery_cancel(env: NapiEnv, info: Napi
     let args = cb_args(env, info);
     let id = args.i32_at(0, 0);
     ret_json(env, crate::account_auth::account_auth_discovery_cancel_json(id.max(0) as u64))
+}
+
+// Increment 131: the ArkTS-facing route catalog, a ZERO-argument read-only
+// getter over the core owner's `connector::connector_routes_json()` (decision B
+// dedicated document — `connector_status()` / `connector_network_config()`
+// keep their frozen shapes and order). The body is a side-effect-free mutex
+// snapshot: no gate refresh, no recreate bookkeeping, no network/IO, and the
+// caller CANNOT select/deselect through THIS getter (`selection` is read-only
+// state — the live setter is the separate `connector_route_selection_set`) and
+// no secret material (NetIDs, prefixes, counts only).
+// Shape:
+// `{available,serial,selection:{selected_routes,deselected_routes,deselect_all},`
+// `networks:[{net_id,networks,candidate_count,enabled,is_exit}]}`.
+// `available:false` + `serial:0` + `networks:[]` = no route catalog (no
+// connector, before the first map, after stop, or a map that advertised no
+// routes) — never a fabricated empty-but-active state.
+unsafe extern "C" fn napi_connector_routes(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::connector::connector_routes_json())
+}
+
+// Increment 132 (Core 5f): the ArkTS-facing LIVE route-selection setter — ONE
+// string argument, the RAW selector document exactly as `connector_routes()`
+// reports it back (`{"selected_routes":[…],"deselected_routes":[…],`
+// `"deselect_all":bool}`), handed VERBATIM to the core owner's default parser
+// (`connector::connector_route_selection_set_json` → `RouteSelector::from_json`,
+// the same strict parser the start config and the persisted document use): this
+// wrapper adds no encoding step, no second parser and no field of its own, and
+// a refused document mutates nothing.
+//
+// The reply is the core document's typed JSON (fixed key order):
+// `{"ok":bool,"error"?:"no-connector"|"selection-invalid"|"wg-apply-failed",`
+// `"available":bool,"changed":bool,"desired_routes":[…],"recreate_needed":bool}`
+// — the ArkTS side's `RouteSelectionSetResult`. `selection-invalid` is decided
+// BEFORE the connector lookup, so it is the same answer with or without a live
+// connector. Nothing is logged here and no payload or field value is echoed:
+// routing material only (NetID-level selection, prefixes), never a key, an fd
+// or a secret.
+unsafe extern "C" fn napi_connector_route_selection_set(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    ret_json(env, crate::connector::connector_route_selection_set_json(&a.string_at(0)))
 }

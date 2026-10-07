@@ -37,6 +37,13 @@
 //       gen as its LAST field; a later generation is self-consistent.
 //       (The monotonic +1 counter and both acceptance anchors live on the
 //       real extension class — run-exclusion-generation.mts drives those.)
+//   T9  route-disable fallback safety (2026-10-07): an explicit snapshot with
+//       an EMPTY effective route list must not restore the base template's
+//       0.0.0.0/0; base exclusions and the base non-default tunnel-subnet
+//       entry survive, the base config itself is not mutated (the null-net
+//       caller keeps it verbatim), a non-empty snapshot keeps the normal
+//       managed list, and the later tunnel-subnet graft still adds
+//       100.108.0.0/16 on a /16 tunnel address.
 //
 // Run: node client/entry/selfcheck/run-route-validation.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -413,6 +420,64 @@ try {
   check('gateDefaultRoutes strips only isDefaultRoute entries; rest stays valid',
     gated.routes.length === 2 && v.validateRouteEntries(gated.routes, gated.interfaceName).ok === true,
     JSON.stringify(gated.routes));
+
+  // ---- T9: route-disable fallback safety (2026-10-07) ---------------------
+  // An EXPLICIT snapshot (net !== null) whose effective route list is EMPTY
+  // must not resurrect the base template's 0.0.0.0/0. The base WITHOUT any
+  // exclusion is the only shape that reaches the fallback (with an exclusion
+  // grafted, the carried exclusion list is already non-empty).
+  const routeDest = (r: Record<string, unknown>): string =>
+    String(r['destination']) + '/' + String(r['prefixLength']);
+  const hasDefault = (routes: unknown[]): boolean => routes.some(
+    (r: unknown): boolean => (r as Record<string, unknown>)['isDefaultRoute'] === true);
+  const baseNoExcl = cfg.loadVpnTunnelConfig();
+  const baseNoExclBefore = JSON.stringify(baseNoExcl.routes);
+  const mergedNoRoutes = cfg.applyNetworkConfig(baseNoExcl,
+    JSON.parse('{"available":true,"serial":11,"routes":[]}') as never);
+  check('T9 empty effective routes -> NO default route in the merged list',
+    !hasDefault(mergedNoRoutes.routes) &&
+    !mergedNoRoutes.routes.some((r: Record<string, unknown>): boolean =>
+      routeDest(r) === '0.0.0.0/0'), JSON.stringify(mergedNoRoutes.routes));
+  check('T9 empty effective routes -> base NON-default entry (tunnel subnet) preserved',
+    deepEq(mergedNoRoutes.routes, [{
+      destination: '10.99.0.0', prefixLength: 24, gateway: '10.99.0.1',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: false
+    }]), JSON.stringify(mergedNoRoutes.routes));
+  check('T9 the merged list is still valid for the fail-closed route gate',
+    v.validateRouteEntries(mergedNoRoutes.routes, mergedNoRoutes.interfaceName).ok === true,
+    JSON.stringify(v.validateRouteEntries(mergedNoRoutes.routes, mergedNoRoutes.interfaceName)));
+  check('T9 base config NOT mutated (null-net caller still gets 0/0 verbatim)',
+    JSON.stringify(baseNoExcl.routes) === baseNoExclBefore &&
+    hasDefault(baseNoExcl.routes), JSON.stringify(baseNoExcl.routes));
+  const mergedExclNoRoutes = cfg.applyNetworkConfig(base2,
+    JSON.parse('{"available":true,"serial":12,"routes":[]}') as never);
+  check('T9 empty effective routes WITH base exclusions -> no 0/0, exclusions kept verbatim',
+    mergedExclNoRoutes.routes.length === 1 &&
+    mergedExclNoRoutes.routes[0] === base2.routes[2] &&
+    !hasDefault(mergedExclNoRoutes.routes), JSON.stringify(mergedExclNoRoutes.routes));
+  const mergedNonEmpty = cfg.applyNetworkConfig(baseNoExcl,
+    JSON.parse('{"available":true,"serial":13,"routes":[' +
+      '{"network":"172.16.0.0/12","is_default":false}]}') as never);
+  check('T9 non-empty snapshot keeps the normal managed list (no base 0/0 mixed in)',
+    deepEq(mergedNonEmpty.routes, [{
+      destination: '172.16.0.0', prefixLength: 12, gateway: '10.99.0.1',
+      hasGateway: true, isDefaultRoute: false, isExcludedRoute: false, source: 'managed'
+    }]), JSON.stringify(mergedNonEmpty.routes));
+  // The later tunnel-subnet graft (NetBirdVpnExtensionAbility.injectTunnelSubnetRoute)
+  // is INDEPENDENT of this fallback: on a /16 tunnel address it still adds
+  // 100.108.0.0/16 after the route-disable fallback, and adds no default route.
+  const base16 = { tunnelAddress: '100.108.144.165', tunnelPrefixLength: 16,
+    interfaceName: 'vpn-tun', routes: baseNoExcl.routes, dnsServers: baseNoExcl.dnsServers,
+    mtu: baseNoExcl.mtu, peerEndpoint: baseNoExcl.peerEndpoint };
+  const merged16 = cfg.applyNetworkConfig(base16,
+    JSON.parse('{"available":true,"serial":14,"routes":[]}') as never);
+  const grafted16 = cfg.withTunnelSubnetRoute(merged16);
+  check('T9 after the empty-routes fallback the tunnel-subnet graft still adds 100.108.0.0/16',
+    grafted16.added === true && grafted16.network === '100.108.0.0' &&
+    grafted16.reason === 'none' && !hasDefault(grafted16.config.routes) &&
+    grafted16.config.routes.some((r: Record<string, unknown>): boolean =>
+      routeDest(r) === '100.108.0.0/16' && r['isExcludedRoute'] === false),
+    JSON.stringify(grafted16));
 } catch (error) {
   failedCount++;
   console.log('FAIL harness — ' + (error as Error).message);

@@ -11,7 +11,7 @@ import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishe
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
 import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
-  lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusColor, peerStatusText,
+  lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
@@ -32,6 +32,35 @@ import { DiagFields, event } from '../vpnextensionability/NetBirdDiagnostics';
 import { exportDiagnostics, LogExportFileReport, LogExportResult,
   LOG_EXPORT_OUTCOME_CANCELLED, LOG_EXPORT_OUTCOME_EXPORTED,
   LOG_EXPORT_OUTCOME_FAILED, LOG_EXPORT_OUTCOME_NO_LOGS } from '../vpnextensionability/NetBirdLogExport';
+// 路由选择 (2026-10-09, 即时生效增量): per-NetID route selection. Every switch
+// action (one NetID / 全部启用 / 全部停用) saves the management-URL-scoped
+// preference IMMEDIATELY and then writes the VPE's doorbell (an atomic request
+// document) — the page never stops, starts or re-logs-in a connection for a
+// route change. The page reads the public route catalog OFFLINE (a plain
+// document, never a native connector getter — the UI process has no connector)
+// and polls the VPE's apply RESULT document on its existing 2 s tick. All four
+// documents live in the shared filesDir and are read/written through the
+// routes/ stores.
+import { RouteCatalog, RouteCatalogReadResult, RouteNetworkEntry, RouteSelection,
+  CATALOG_STATUS_MISSING, CATALOG_STATUS_OK, CATALOG_STATUS_SCOPE_MISMATCH,
+  CATALOG_STATUS_UNAVAILABLE, CATALOG_STATUS_VERSION, REASON_UNKNOWN_ROUTE,
+  RoutePreferencesError,
+  routeSelectionClone, routeSelectionDefault, routeSelectionDeselectAll,
+  routeSelectionIsEnabled, routeSelectionKnownNetIds, routeSelectionRows,
+  routeSelectionSelectAll, routeSelectionToggle } from '../routes/NetBirdRoutePreferences';
+import { loadRouteSelection, readRouteCatalog,
+  saveRouteSelection } from '../routes/NetBirdRouteStore';
+// The live-route IPC pair: the request is ONLY a notification (no selection copy
+// and no session binding — the VPE loads the CURRENT saved preference itself),
+// and `routeApplyResultIsApplied` is the ONE reading of "the OS side really is at
+// the requested state". The page never grows a second opinion about it.
+import { RouteApplyRequest, RouteApplyResult,
+  routeApplyResultIsApplied } from '../routes/NetBirdRouteRequest';
+import { readRouteApplyResult,
+  writeRouteApplyRequest } from '../routes/NetBirdRouteRequestStore';
+import { ROUTE_TONE_ERROR, RouteApplyView, routeApplyRequestId, routeApplyStatus,
+  routeApplyStatusText, routeApplyStatusTone, routeCandidateText, routeNetName,
+  routePrefixesText } from '../routes/NetBirdRouteApplyPolicy';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -48,6 +77,21 @@ const LOGOUT_FILE_NAME: string = 'netbird-logout';
 const LOGOUT_RESULT_FILE_NAME: string = 'netbird-logout-result';
 const LOGOUT_WAIT_MS: number = 15000;
 const LOGOUT_POLL_MS: number = 250;
+
+export function navigationBackDecision(accountWebView: boolean, accountBusy: boolean,
+  accountCommitting: boolean, configuredEditor: boolean, diagnostics: boolean,
+  peerDetail: boolean, routeDetail: boolean): string {
+  if (accountWebView) { return 'account-webview'; }
+  if (accountBusy) { return accountCommitting ? 'consume' : 'cancel-account'; }
+  if (configuredEditor) { return 'cancel-editor'; }
+  if (diagnostics) { return 'close-diagnostics'; }
+  if (peerDetail) { return 'close-peer'; }
+  // 路由选择: an internal SETTINGS page — a back press closes it back to 设置
+  // (the tab it was opened from), never to the desktop and never over the
+  // editor/diagnostics/peer handlers above.
+  if (routeDetail) { return 'close-route'; }
+  return 'exit';
+}
 
 interface BusinessFailure extends Error {
   code?: number;
@@ -640,13 +684,13 @@ struct DetailRow {
     Row({ space: 8 }) {
       Text(this.label)
         .fontSize(13)
-        .fontColor('#8A9AA6')
+        .fontColor($r('app.color.nb_text_muted'))
         .width(96)
       // Truthiness (not .length): a value that slipped through as null or
       // undefined renders '—' instead of throwing inside the render pass.
       Text(this.value ? this.value : '—')
         .fontSize(14)
-        .fontColor('#17324D')
+        .fontColor($r('app.color.nb_text_primary'))
         .layoutWeight(1)
         .maxLines(this.maxLines)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -673,17 +717,17 @@ struct DetailSectionHeader {
       Text(this.title ? this.title : '')
         .fontSize(15)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
       Text(this.summary ? this.summary : '')
         .fontSize(12)
-        .fontColor('#8A9AA6')
+        .fontColor($r('app.color.nb_text_muted'))
         .layoutWeight(1)
         .maxLines(1)
         .textAlign(TextAlign.End)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       Text(this.expanded ? '▾' : '▸')
         .fontSize(14)
-        .fontColor('#8A9AA6')
+        .fontColor($r('app.color.nb_text_muted'))
     }
     .width('100%')
     .padding({ top: 12, bottom: 8 })
@@ -724,6 +768,7 @@ struct Index {
   @State connectFailureClass: string = '';
   // ---- navigation ----
   @State activeTab: number = 0;
+  @State detailStatusOriginTab: number = 2;
   @State selectedPeer: UiPeerEntry | null = null;
   @State peerQuery: string = '';
   @State showDiagnostics: boolean = false;
@@ -787,6 +832,45 @@ struct Index {
   // Accepted (not latch-rejected) user connect/retry/disconnect actions of THIS
   // session: the only number the page ever puts into a diagnostic record.
   private diagActionCount: number = 0;
+  // ---- 路由选择（设置 → 路由选择）---------------------------------------------
+  // 2026-10-07 即时生效增量: there is no draft and no 保存/放弃 button any more.
+  // Every switch action writes the scoped preference ATOMICALLY and then rings
+  // the VPE's doorbell (an atomic request document), online and offline alike;
+  // the live VPE loads the CURRENT preference itself and applies it in place.
+  // The page never stops/starts/re-logs-in a connection for a route change.
+  @State routeSelectionOpen: boolean = false;
+  @State routeDraft: RouteSelection = routeSelectionDefault();
+  @State routeLoadError: boolean = false;
+  @State routeLoadErrorText: string = '';
+  @State routeCatalog: RouteCatalog | null = null;
+  @State routeCatalogStatus: string = '';
+  @State routeCatalogUrl: string = '';
+  @State routeCatalogUpdatedAtMs: number = 0;
+  // 最近一次请求的 id：只有结果文档里的 id 与它相同，页面才把那份答案当作「自己
+  // 这次请求」的状态；上一代请求的答案一律忽略，目录里的 enabled 更不能冒充
+  // 「已生效」。
+  @State routeRequestId: string = '';
+  @State routeResultId: string = '';
+  @State routeResultState: string = '';
+  @State routeResultApplied: boolean = false;
+  @State routeResultError: string = '';
+  @State routeSaving: boolean = false;
+  @State routeSaveFailed: boolean = false;
+  @State routeNotifyFailed: boolean = false;
+  @State routeActionError: string = '';
+  // 用户是否已经动过开关：任何更早发出的读取答案（含上一次进入时发出、这次才落地的
+  // 读取）都不得覆盖他的期望。重新进入时只有在没有在途写入、也没有在途读取——磁盘
+  // 一定不旧——才会把它归零。
+  private routeUserEdited: boolean = false;
+  private routeCatalogReading: boolean = false;
+  private routeResultReading: boolean = false;
+  private routeSelectionLoading: boolean = false;
+  // 串行写入（latest-wins）：同一时刻只有一次在途写入 + 一个「最新期望」槽位。
+  // 快速连点只会替换槽位，绝不会让两次写入同时用同一个 .tmp，也不会让旧写入
+  // 覆盖当前意图。
+  private routeWriteBusy: boolean = false;
+  private routeWritePending: RouteSelection | null = null;
+  private routeRequestSeq: number = 0;
 
   aboutToAppear(): void {
     this.refreshSetupState();
@@ -826,6 +910,16 @@ struct Index {
   }
 
   private pollConnectorStatus(): void {
+    // 路由选择: the route detail page rides THIS existing 2 s tick — there is
+    // no second always-on timer. Both reads are offline (plain public documents,
+    // never a native connector getter): the catalog never touches the desired
+    // selection, so a refresh can never discard an edit in progress, and the
+    // result read only ever reports the answer whose id is the newest request
+    // this page wrote.
+    if (this.routeSelectionOpen) {
+      this.refreshRouteCatalog();
+      this.refreshRouteApplyResult();
+    }
     // The connector runs in the VpnExtension process: read the document that
     // process publishes into the shared filesDir (a NAPI call here would read
     // an empty slot and show a dead "disconnected" state). A document older
@@ -1330,9 +1424,26 @@ struct Index {
     return peer !== null ? peer.name : '';
   }
 
-  private selectedPeerColor(): string {
+  // 主题 (2026-10-09): the three-state peer status mapped to the SHARED
+  // base/dark color resources. NetBirdUiModel stays a pure Node-loadable module
+  // and keeps its own literal hex for the same three states (its host selfcheck
+  // pins them); the page is where a $r resource can exist, so the status token
+  // is translated to a resource HERE rather than teaching the model about ArkUI.
+  private peerStatusResource(status: string): ResourceColor {
+    if (status === 'connected') {
+      return $r('app.color.nb_status_success');
+    }
+    if (status === 'idle') {
+      return $r('app.color.nb_text_muted');
+    }
+    return $r('app.color.nb_border');
+  }
+
+  private selectedPeerColor(): ResourceColor {
     const peer: UiPeerEntry | null = this.selectedPeerLive();
-    return peer !== null ? peerStatusColor(peer.status) : '#8A9AA6';
+    return peer !== null
+      ? this.peerStatusResource(peer.status)
+      : $r('app.color.nb_text_muted');
   }
 
   private selectedPeerFields(): DetailField[] {
@@ -1446,18 +1557,22 @@ struct Index {
     return `${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`;
   }
 
-  private stateColor(): string {
+  // 主题 (2026-10-09): the home status verdict's colour, from the shared
+  // base/dark resources. The ResourceColor return type follows .fontColor /
+  // Circle().fill (both ResourceColor) — a `string` return could not carry a
+  // resource reference without a type error.
+  private stateColor(): ResourceColor {
     const text: string = this.stateText();
     if (text === '已连接') {
-      return '#176B3A';
+      return $r('app.color.nb_status_success');
     }
     if (text === '连接中…' || text === '正在断开…') {
-      return '#8A6D1A';
+      return $r('app.color.nb_status_warning');
     }
     if (text === '连接失败' || text === '无法连接服务器') {
-      return '#A12622';
+      return $r('app.color.nb_status_error');
     }
-    return '#3D4A55';
+    return $r('app.color.nb_text_secondary');
   }
 
   private toggleOn(): boolean {
@@ -1481,14 +1596,18 @@ struct Index {
     return this.requestSent ? '连接中…' : '连接';
   }
 
-  private toggleColor(): string {
+  // 主题 (2026-10-09): the big connect/stop toggle's fill. 已连接 keeps the
+  // success role, the busy state the neutral-button role, idle the primary
+  // role — every one from the base/dark resources, so the circle follows the
+  // system mode without any cached hex.
+  private toggleColor(): ResourceColor {
     if (this.toggleOn()) {
-      return '#176B3A';
+      return $r('app.color.nb_status_success');
     }
     if (this.toggleBusy()) {
-      return '#8A9AA6';
+      return $r('app.color.nb_neutral_button_background');
     }
-    return '#17324D';
+    return $r('app.color.nb_primary');
   }
 
   private toggleEnabled(): boolean {
@@ -1876,7 +1995,7 @@ struct Index {
       },
       secondaryButton: {
         value: vpnLive ? '移除并清除' : '清除本机配置',
-        fontColor: '#A12622',
+        fontColor: $r('app.color.nb_status_error'),
         action: (): void => {
           this.performLogout();
         }
@@ -2203,17 +2322,19 @@ struct Index {
       this.logExportUri.length > 0 ? 'true' : 'false');
   }
 
-  private logExportToneColor(): string {
+  // 主题 (2026-10-09): the log-export tone colour from the shared base/dark
+  // resources (ok/warn/error/info → success/warning/error/primary).
+  private logExportToneColor(): ResourceColor {
     if (this.logExportTone === 'ok') {
-      return '#176B3A';
+      return $r('app.color.nb_status_success');
     }
     if (this.logExportTone === 'warn') {
-      return '#8A6D1A';
+      return $r('app.color.nb_status_warning');
     }
     if (this.logExportTone === 'error') {
-      return '#A12622';
+      return $r('app.color.nb_status_error');
     }
-    return '#17324D';
+    return $r('app.color.nb_primary');
   }
 
   // ---- shared small widgets -------------------------------------------------
@@ -2223,13 +2344,16 @@ struct Index {
     Text(title)
       .fontSize(15)
       .fontWeight(FontWeight.Medium)
-      .fontColor('#3D4A55')
+      .fontColor($r('app.color.nb_text_secondary'))
       .width('100%')
       .margin({ top: 18, bottom: 6 })
   }
 
+  // 主题 (2026-10-09): the dot takes a resolved colour (Resource or literal) —
+  // ResourceColor is exactly what Circle().fill accepts, so a $r reference from
+  // stateColor()/peerStatusResource() passes without a string/Resource mismatch.
   @Builder
-  statusDot(color: string, size: number) {
+  statusDot(color: ResourceColor, size: number) {
     Circle({ width: size, height: size })
       .fill(color)
   }
@@ -2243,22 +2367,23 @@ struct Index {
         Text('NetBird')
           .fontSize(28)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#17324D')
+          .fontColor($r('app.color.nb_text_primary'))
           .margin({ top: 12 })
         if (!this.configured) {
           Column({ space: 10 }) {
             Text('尚未配置服务器')
               .fontSize(17)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#8A6D1A')
+              .fontColor($r('app.color.nb_status_warning'))
             Text('请先在「设置」中填写管理服务器地址与 Setup Key，完成后再连接。')
               .fontSize(14)
-              .fontColor('#3D4A55')
+              .fontColor($r('app.color.nb_text_secondary'))
               .textAlign(TextAlign.Center)
             Button('去设置')
               .fontSize(16)
               .height(40)
-              .backgroundColor('#17324D')
+              .backgroundColor($r('app.color.nb_primary'))
+              .fontColor($r('app.color.nb_on_primary'))
               .onClick(() => {
                 this.activeTab = 2;
               })
@@ -2266,14 +2391,18 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Center)
         }
         // 大号连接开关：单一按钮切换连接/断开（含连接中状态）。
+        // 主题 (2026-10-09): the label is the EXPLICIT on-primary role — the
+        // button previously relied on the platform default font color, which
+        // cannot follow the base/dark split (nb_on_primary flips to a dark ink
+        // in dark mode because nb_primary flips to a light blue there).
         Button(this.toggleLabel())
           .fontSize(22)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#FFFFFF')
+          .fontColor($r('app.color.nb_on_primary'))
           .width(132)
           .height(132)
           .borderRadius(66)
@@ -2306,11 +2435,11 @@ struct Index {
           Row({ space: 8 }) {
             Text('NetBird IP')
               .fontSize(13)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
               .width(96)
             Text(this.homeAddressText().length > 0 ? this.homeAddressText() : '—')
               .fontSize(14)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
               .maxLines(3)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2320,11 +2449,11 @@ struct Index {
           Row({ space: 8 }) {
             Text('域名')
               .fontSize(13)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
               .width(96)
             Text(this.homeFqdnText().length > 0 ? this.homeFqdnText() : '—')
               .fontSize(14)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
               .maxLines(3)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2334,11 +2463,11 @@ struct Index {
           Row({ space: 8 }) {
             Text('对端')
               .fontSize(13)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
               .width(96)
             Text(this.homePeersText())
               .fontSize(14)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
               .maxLines(3)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2348,7 +2477,7 @@ struct Index {
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
               .fontSize(13)
-              .fontColor('#A12622')
+              .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .margin({ top: 6 })
               .maxLines(3)
@@ -2359,11 +2488,11 @@ struct Index {
           Row({ space: 8 }) {
             Text('详细状态')
               .fontSize(14)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
             Text('端点 / 中继 / 流量 / DNS / 路由 / 会话 ›')
               .fontSize(12)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
           }
@@ -2371,6 +2500,7 @@ struct Index {
           .padding({ top: 10, bottom: 2 })
           .onClick(() => {
             hilog.info(DOMAIN, TAG, 'UI_DETAIL_STATUS_OPENED|from=home');
+            this.detailStatusOriginTab = 0;
             this.showDiagnostics = true;
             this.activeTab = 2;
           })
@@ -2378,7 +2508,7 @@ struct Index {
         .width('100%')
         .padding(16)
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
         .alignItems(HorizontalAlign.Start)
       }
       .width('100%')
@@ -2386,7 +2516,7 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F2F6F8')
+    .backgroundColor($r('app.color.nb_page_background'))
     .align(Alignment.Top)
     .scrollBar(BarState.Off)
   }
@@ -2399,30 +2529,36 @@ struct Index {
       Column({ space: 2 }) {
         Text(peer.name)
           .fontSize(16)
-          .fontColor('#17324D')
+          .fontColor($r('app.color.nb_text_primary'))
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         Text(peer.ip.length > 0 ? peer.ip : '无 IP')
           .fontSize(13)
-          .fontColor('#8A9AA6')
+          .fontColor($r('app.color.nb_text_muted'))
       }
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
       Row({ space: 6 }) {
         if (peer.online) {
+          // 主题 (2026-10-09): the 直连/经中继 chip takes its status role from
+          // the base/dark resources — same role for the ink and the tint.
           Text(connectionLabel(peer.connection))
             .fontSize(12)
-            .fontColor(peer.connection === 'direct' ? '#176B3A' : '#8A6D1A')
+            .fontColor(peer.connection === 'direct'
+              ? $r('app.color.nb_status_success')
+              : $r('app.color.nb_status_warning'))
             .padding({ left: 8, right: 8, top: 3, bottom: 3 })
             .borderRadius(10)
-            .backgroundColor(peer.connection === 'direct' ? '#E3EFE7' : '#F5EBCF')
+            .backgroundColor(peer.connection === 'direct'
+              ? $r('app.color.nb_status_success_background')
+              : $r('app.color.nb_status_warning_background'))
         }
         // 三态状态（2026-10-06）: 已连接=绿、空闲=灰（管理端在线但本机
         // 暂无 WG 会话，不叫离线）、离线=浅灰（管理端 offlinePeers）。
         Text(peerStatusText(peer.status))
           .fontSize(12)
-          .fontColor(peerStatusColor(peer.status))
-        this.statusDot(peerStatusColor(peer.status), 10)
+          .fontColor(this.peerStatusResource(peer.status))
+        this.statusDot(this.peerStatusResource(peer.status), 10)
       }
       .alignItems(VerticalAlign.Center)
     }
@@ -2442,14 +2578,15 @@ struct Index {
           Button('返回')
             .fontSize(15)
             .height(36)
-            .backgroundColor('#8A9AA6')
+            .backgroundColor($r('app.color.nb_neutral_button_background'))
+            .fontColor($r('app.color.nb_on_primary'))
             .onClick(() => {
-              this.selectedPeer = null;
+              this.closeVisibleSubflow();
             })
           Text('对端详情')
             .fontSize(20)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#17324D')
+            .fontColor($r('app.color.nb_text_primary'))
         }
         .width('100%')
         .margin({ top: 8 })
@@ -2465,7 +2602,7 @@ struct Index {
               Text(this.selectedPeerName())
                 .fontSize(19)
                 .fontWeight(FontWeight.Medium)
-                .fontColor('#17324D')
+                .fontColor($r('app.color.nb_text_primary'))
                 .layoutWeight(1)
                 .maxLines(2)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -2483,7 +2620,7 @@ struct Index {
           .width('100%')
           .padding(16)
           .borderRadius(16)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Start)
         }
         .width('100%')
@@ -2494,18 +2631,18 @@ struct Index {
       .width('100%')
       .height('100%')
       .padding(20)
-      .backgroundColor('#F2F6F8')
+      .backgroundColor($r('app.color.nb_page_background'))
     } else {
       Column({ space: 12 }) {
         Row({ space: 10 }) {
           Text('对端')
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#17324D')
+            .fontColor($r('app.color.nb_text_primary'))
             .layoutWeight(1)
           Text(`${onlinePeerCount(this.peersList())}/${this.peersList().length} 已连接`)
             .fontSize(14)
-            .fontColor('#3D4A55')
+            .fontColor($r('app.color.nb_text_secondary'))
         }
         .width('100%')
         .margin({ top: 8 })
@@ -2513,19 +2650,19 @@ struct Index {
           .fontSize(15)
           .height(42)
           .width('100%')
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .onChange((value: string): void => {
             this.peerQuery = value;
           })
         if (this.published === null) {
           Text('VPN 未连接，对端信息在连接后可用')
             .fontSize(14)
-            .fontColor('#8A9AA6')
+            .fontColor($r('app.color.nb_text_muted'))
             .margin({ top: 32 })
         } else if (this.visiblePeers().length === 0) {
           Text(this.peerQuery.length > 0 ? '没有匹配的对端' : '暂无对端')
             .fontSize(14)
-            .fontColor('#8A9AA6')
+            .fontColor($r('app.color.nb_text_muted'))
             .margin({ top: 32 })
         } else {
           List({ space: 0 }) {
@@ -2537,7 +2674,7 @@ struct Index {
           }
           .width('100%')
           .layoutWeight(1)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .borderRadius(16)
           .padding({ left: 16, right: 16 })
           .scrollBar(BarState.Off)
@@ -2546,7 +2683,7 @@ struct Index {
       .width('100%')
       .height('100%')
       .padding(20)
-      .backgroundColor('#F2F6F8')
+      .backgroundColor($r('app.color.nb_page_background'))
     }
   }
 
@@ -2558,33 +2695,41 @@ struct Index {
       Text(this.configured ? '更改服务器配置' : '服务器配置')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#17324D')
+        .fontColor($r('app.color.nb_text_primary'))
         .width('100%')
       TextInput({ text: this.urlInput, placeholder: '服务器地址（https://…）' })
         .fontSize(15)
         .height(44)
         .width('100%')
+        .backgroundColor($r('app.color.nb_input_background'))
         .enabled(!this.accountModeSwitchBlocked())
         .onChange((value: string): void => {
           this.urlInput = value;
         })
       Row({ space: 12 }) {
+        // 主题 (2026-10-09): mode buttons — selected carries the primary role
+        // with the EXPLICIT on-primary ink, unselected the card role with the
+        // primary ink; the outline is the primary role in both states.
         Button('账户登录')
           .fontSize(14)
           .height(40)
           .layoutWeight(1)
-          .backgroundColor(this.authMode === ACCOUNT_MODE_ACCOUNT ? '#17324D' : '#FFFFFF')
-          .fontColor(this.authMode === ACCOUNT_MODE_ACCOUNT ? '#FFFFFF' : '#17324D')
-          .border({ width: 1, color: '#17324D' })
+          .backgroundColor(this.authMode === ACCOUNT_MODE_ACCOUNT
+            ? $r('app.color.nb_primary') : $r('app.color.nb_card_background'))
+          .fontColor(this.authMode === ACCOUNT_MODE_ACCOUNT
+            ? $r('app.color.nb_on_primary') : $r('app.color.nb_primary'))
+          .border({ width: 1, color: $r('app.color.nb_primary') })
           .enabled(!this.accountModeSwitchBlocked() && !this.accountLoginBusy)
           .onClick(() => this.selectAuthMode(ACCOUNT_MODE_ACCOUNT))
         Button('Setup Key')
           .fontSize(14)
           .height(40)
           .layoutWeight(1)
-          .backgroundColor(this.authMode === ACCOUNT_MODE_SETUP_KEY ? '#17324D' : '#FFFFFF')
-          .fontColor(this.authMode === ACCOUNT_MODE_SETUP_KEY ? '#FFFFFF' : '#17324D')
-          .border({ width: 1, color: '#17324D' })
+          .backgroundColor(this.authMode === ACCOUNT_MODE_SETUP_KEY
+            ? $r('app.color.nb_primary') : $r('app.color.nb_card_background'))
+          .fontColor(this.authMode === ACCOUNT_MODE_SETUP_KEY
+            ? $r('app.color.nb_on_primary') : $r('app.color.nb_primary'))
+          .border({ width: 1, color: $r('app.color.nb_primary') })
           .enabled(!this.accountModeSwitchBlocked() && !this.accountLoginBusy)
           .onClick(() => this.selectAuthMode(ACCOUNT_MODE_SETUP_KEY))
       }
@@ -2594,6 +2739,7 @@ struct Index {
           .fontSize(15)
           .height(44)
           .width('100%')
+          .backgroundColor($r('app.color.nb_input_background'))
           .enabled(!this.accountModeSwitchBlocked())
           .type(InputType.Password)
           .onChange((value: string): void => {
@@ -2602,38 +2748,39 @@ struct Index {
       } else if (this.accountLoginBusy) {
         Text(this.accountLoginCommitting ? '正在保存账户凭据…' : '正在验证账户…')
           .fontSize(13)
-          .fontColor('#52615B')
+          .fontColor($r('app.color.nb_text_tertiary'))
           .width('100%')
         if (!this.accountLoginCommitting) {
           Button('取消登录')
             .fontSize(14)
             .height(36)
-            .backgroundColor('#8A9AA6')
+            .backgroundColor($r('app.color.nb_neutral_button_background'))
+            .fontColor($r('app.color.nb_on_primary'))
             .onClick((): void => this.cancelAccountLogin(false))
         }
       }
       if (this.accountModeSwitchBlocked()) {
         Text('断开 VPN 后可更改配置')
           .fontSize(13)
-          .fontColor('#8A6D1A')
+          .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
       }
       if (this.accountLoginError.length > 0) {
         Text(this.accountLoginError)
           .fontSize(13)
-          .fontColor('#A12622')
+          .fontColor($r('app.color.nb_status_error'))
           .width('100%')
       }
       if (this.formError.length > 0) {
         Text(this.formError)
           .fontSize(13)
-          .fontColor('#A12622')
+          .fontColor($r('app.color.nb_status_error'))
           .width('100%')
       }
       if (this.formHint.length > 0) {
         Text(this.formHint)
           .fontSize(13)
-          .fontColor('#8A6D1A')
+          .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
           .maxLines(2)
       }
@@ -2643,7 +2790,8 @@ struct Index {
         .fontSize(15)
         .height(42)
         .width('100%')
-        .backgroundColor('#17324D')
+        .backgroundColor($r('app.color.nb_primary'))
+        .fontColor($r('app.color.nb_on_primary'))
         .enabled(!this.accountLoginBusy && !this.accountModeSwitchBlocked())
         .onClick(() => {
           hilog.info(DOMAIN, TAG, 'UI_SETUP_SAVE_CLICKED|configured=%{public}s',
@@ -2659,9 +2807,9 @@ struct Index {
           .fontSize(14)
           .height(36)
           .width('100%')
-          .backgroundColor('#FFFFFF')
-          .fontColor('#17324D')
-          .border({ width: 1, color: '#AAB5BC' })
+          .backgroundColor($r('app.color.nb_card_background'))
+          .fontColor($r('app.color.nb_text_primary'))
+          .border({ width: 1, color: $r('app.color.nb_border') })
           .enabled(!this.accountLoginCommitting)
           .onClick(() => this.cancelConfigurationEdit())
       }
@@ -2669,7 +2817,7 @@ struct Index {
     .width('100%')
     .padding(16)
     .borderRadius(8)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
 
@@ -2679,50 +2827,51 @@ struct Index {
       Text('当前配置')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#17324D')
+        .fontColor($r('app.color.nb_text_primary'))
         .width('100%')
       Text('服务器地址')
         .fontSize(12)
-        .fontColor('#8A9AA6')
+        .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
       Text(this.configuredUrl)
         .fontSize(14)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
         .maxLines(3)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
       Text('登录方式')
         .fontSize(12)
-        .fontColor('#8A9AA6')
+        .fontColor($r('app.color.nb_text_muted'))
         .width('100%')
       Text(this.authMode === ACCOUNT_MODE_ACCOUNT ? '账户登录' : 'Setup Key')
         .fontSize(14)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       if (this.authMode === ACCOUNT_MODE_ACCOUNT) {
         Text('账户凭据过期时，可重新登录。')
           .fontSize(13)
-          .fontColor('#52615B')
+          .fontColor($r('app.color.nb_text_tertiary'))
           .width('100%')
       }
       Button('更改配置')
         .fontSize(15)
         .height(40)
         .width('100%')
-        .backgroundColor('#17324D')
+        .backgroundColor($r('app.color.nb_primary'))
+        .fontColor($r('app.color.nb_on_primary'))
         .enabled(!this.accountModeSwitchBlocked())
         .onClick(() => this.beginConfigurationEdit())
       if (this.accountModeSwitchBlocked()) {
         Text('断开 VPN 后可更改配置')
           .fontSize(13)
-          .fontColor('#8A6D1A')
+          .fontColor($r('app.color.nb_status_warning'))
           .width('100%')
       }
     }
     .width('100%')
     .padding(16)
     .borderRadius(8)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
 
@@ -2730,7 +2879,7 @@ struct Index {
   logoutAction() {
     Text(this.logoutRemoteActive() ? '注销并从管理端移除本设备' : '清除本机配置')
       .fontSize(14)
-      .fontColor('#A12622')
+      .fontColor($r('app.color.nb_status_error'))
       .width('100%')
       .padding({ left: 8, right: 8, top: 8, bottom: 8 })
       .onClick(() => {
@@ -2756,23 +2905,25 @@ struct Index {
     Column({ space: 10 }) {
       Text('日志只写在本机应用目录，不会自动上传。')
         .fontSize(13)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       Text('滚动保留：界面日志 4 段 × 512 KiB ≈ 2 MiB，VPN/原生日志 4 段 × 2 MiB ≈ 8 MiB，' +
         '合计约 10 MiB；写满后最旧的段被覆盖，另外每 60 秒记录一次本进程内存采样。')
         .fontSize(13)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       Text('导出只做复制（不改动本机日志）：导出期间日志仍在写，每个文件最多取 2 MiB、总量最多 12 MiB，' +
         '超出部分在文件里标记为截断；系统强制结束进程时，还没落盘的日志尾部可能丢失。')
         .fontSize(13)
-        .fontColor('#3D4A55')
+        .fontColor($r('app.color.nb_text_secondary'))
         .width('100%')
       Button(this.logExportBusy ? '正在导出…' : '导出日志')
         .fontSize(15)
         .height(38)
         .width('100%')
-        .backgroundColor(this.logExportBusy ? '#8A9AA6' : '#17324D')
+        .backgroundColor(this.logExportBusy
+          ? $r('app.color.nb_neutral_button_background') : $r('app.color.nb_primary'))
+        .fontColor($r('app.color.nb_on_primary'))
         .enabled(!this.logExportBusy)
         .onClick(() => {
           // The picked URI is user data: only this marker is logged.
@@ -2789,20 +2940,20 @@ struct Index {
       if (this.logExportBody.length > 0) {
         Text(this.logExportBody)
           .fontSize(12)
-          .fontColor('#3D4A55')
+          .fontColor($r('app.color.nb_text_secondary'))
           .width('100%')
       }
       if (this.logExportUri.length > 0) {
         Text(`目标文档：${this.logExportUri}`)
           .fontSize(12)
-          .fontColor('#8A9AA6')
+          .fontColor($r('app.color.nb_text_muted'))
           .width('100%')
       }
     }
     .width('100%')
     .padding(16)
     .borderRadius(16)
-    .backgroundColor('#FFFFFF')
+    .backgroundColor($r('app.color.nb_card_background'))
     .alignItems(HorizontalAlign.Start)
   }
 
@@ -2821,14 +2972,15 @@ struct Index {
         Button('返回')
           .fontSize(15)
           .height(36)
-          .backgroundColor('#8A9AA6')
+          .backgroundColor($r('app.color.nb_neutral_button_background'))
+          .fontColor($r('app.color.nb_on_primary'))
           .onClick(() => {
-            this.showDiagnostics = false;
+            this.closeVisibleSubflow();
           })
         Text('详细状态')
           .fontSize(20)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#17324D')
+          .fontColor($r('app.color.nb_text_primary'))
       }
       .width('100%')
       .margin({ top: 8, bottom: 8 })
@@ -2837,12 +2989,12 @@ struct Index {
         Column({ space: 4 }) {
           Text('当前没有可用的状态文档（VPN 未运行，或状态已过期）。')
             .fontSize(13)
-            .fontColor('#8A6D1A')
+            .fontColor($r('app.color.nb_status_warning'))
             .width('100%')
           if (this.lastErrorLine().length > 0) {
             Text(this.lastErrorLine())
               .fontSize(13)
-              .fontColor('#A12622')
+              .fontColor($r('app.color.nb_status_error'))
               .width('100%')
               .maxLines(3)
           }
@@ -2850,7 +3002,7 @@ struct Index {
         .width('100%')
         .padding(12)
         .borderRadius(12)
-        .backgroundColor('#F5EBCF')
+        .backgroundColor($r('app.color.nb_status_warning_background'))
         .alignItems(HorizontalAlign.Start)
       }
 
@@ -2872,7 +3024,7 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
       }
 
       // ---- 本机网络 ----
@@ -2893,7 +3045,7 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
       }
 
       // ---- 流量统计 ----
@@ -2914,7 +3066,7 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
       }
 
       // ---- 中继 ----
@@ -2935,7 +3087,7 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
       }
 
       // ---- 对端明细 ----
@@ -2962,7 +3114,7 @@ struct Index {
           Text('对端发送/接收为明文 IP 载荷字节（自该对端隧道建立以来累计）；' +
             '「流量统计」的发送计加密后的传输字节，口径不同。')
             .fontSize(12)
-            .fontColor('#8A9AA6')
+            .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .padding({ top: 8 })
           // 2026-10-08: the per-peer ICE blocks are candidate-path details —
@@ -2972,17 +3124,17 @@ struct Index {
             '各对端实际承载以其「状态 / 连接方式 / 承载 / 中继通道地址」为准，' +
             'ICE 已连接不代表当前流量直连。')
             .fontSize(12)
-            .fontColor('#8A9AA6')
+            .fontColor($r('app.color.nb_text_muted'))
             .width('100%')
             .padding({ top: 8 })
           Row({ space: 8 }) {
             Text('点按「对端」标签页可查看并搜索单个对端')
               .fontSize(12)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
               .layoutWeight(1)
             Text('前往 ›')
               .fontSize(13)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
           }
           .width('100%')
           .padding({ top: 10, bottom: 2 })
@@ -2994,7 +3146,7 @@ struct Index {
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFFFF')
+        .backgroundColor($r('app.color.nb_card_background'))
       }
     }
     .width('100%')
@@ -3009,11 +3161,14 @@ struct Index {
         Text('设置')
           .fontSize(24)
           .fontWeight(FontWeight.Bold)
-          .fontColor('#17324D')
+          .fontColor($r('app.color.nb_text_primary'))
           .width('100%')
           .margin({ top: 8, bottom: 4 })
         if (this.showDiagnostics) {
           this.detailStatusView()
+        } else if (this.routeSelectionOpen) {
+          // 路由选择: an internal SETTINGS page (back returns to 设置).
+          this.routeSelectionView()
         } else {
           this.sectionTitle('服务器配置')
           if (this.showSetupForm || !this.configured) {
@@ -3030,7 +3185,7 @@ struct Index {
           .width('100%')
           .padding({ left: 16, right: 16, top: 10, bottom: 10 })
           .borderRadius(16)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .alignItems(HorizontalAlign.Start)
           this.sectionTitle('诊断日志')
           this.diagnosticsLogCard()
@@ -3038,18 +3193,41 @@ struct Index {
           Row({ space: 8 }) {
             Text('详细状态')
               .fontSize(16)
-              .fontColor('#17324D')
+              .fontColor($r('app.color.nb_text_primary'))
               .layoutWeight(1)
             Text('›')
               .fontSize(18)
-              .fontColor('#8A9AA6')
+              .fontColor($r('app.color.nb_text_muted'))
           }
           .width('100%')
           .padding(16)
           .borderRadius(16)
-          .backgroundColor('#FFFFFF')
+          .backgroundColor($r('app.color.nb_card_background'))
           .onClick(() => {
+            this.detailStatusOriginTab = 2;
             this.showDiagnostics = true;
+          })
+          this.sectionTitle('路由选择')
+          Row({ space: 8 }) {
+            Text('路由选择')
+              .fontSize(16)
+              .fontColor($r('app.color.nb_text_primary'))
+              .layoutWeight(1)
+            Text(this.routeSummaryText())
+              .fontSize(12)
+              .fontColor($r('app.color.nb_text_muted'))
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text('›')
+              .fontSize(18)
+              .fontColor($r('app.color.nb_text_muted'))
+          }
+          .width('100%')
+          .padding(16)
+          .borderRadius(16)
+          .backgroundColor($r('app.color.nb_card_background'))
+          .onClick(() => {
+            this.openRouteSelection();
           })
         }
       }
@@ -3058,17 +3236,600 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F2F6F8')
+    .backgroundColor($r('app.color.nb_page_background'))
     .align(Alignment.Top)
     .scrollBar(BarState.Off)
   }
 
-  onBackPress(): boolean {
-    if (this.accountLoginOpen) {
+  // ---- 路由选择 (设置 → 路由选择, internal page) ------------------------------
+  //
+  // The page is a SETTINGS page: 返回 and the system back both close it back to
+  // 设置 (closeVisibleSubflow), never to the desktop. Every colour comes from
+  // the shared base/dark palette; empty/error states are plain Chinese.
+  //
+  // 即时生效: every switch writes through at once, so there is no 保存 / 放弃更改
+  // button and no draft to discard. The switch is bound to the LATEST DESIRED
+  // selection, which a catalog refresh never touches.
+
+  @Builder
+  routeRow(entry: RouteNetworkEntry) {
+    Row({ space: 12 }) {
+      Column({ space: 2 }) {
+        Text(routeNetName(entry.net_id))
+          .fontSize(15)
+          .fontColor($r('app.color.nb_text_primary'))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(routePrefixesText(entry.networks))
+          .fontSize(12)
+          .fontColor($r('app.color.nb_text_secondary'))
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(routeCandidateText(entry.candidate_count))
+          .fontSize(12)
+          .fontColor($r('app.color.nb_text_muted'))
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch,
+        isOn: routeSelectionIsEnabled(this.routeDraft, entry.net_id) })
+        .selectedColor($r('app.color.nb_primary'))
+        .enabled(!this.routeLoadError)
+        .onChange((isOn: boolean): void => {
+          // The callback carries the NEW switch value: apply the change only on
+          // a REAL change. A re-emitted value the desired selection already has
+          // (re-render, duplicate platform event, a programmatic callback) must
+          // not blind-flip this network — the guard runs BEFORE any flip.
+          if (isOn !== routeSelectionIsEnabled(this.routeDraft, entry.net_id)) {
+            this.routeToggle(entry.net_id);
+          }
+        })
+    }
+    .width('100%')
+    .padding({ top: 10, bottom: 10 })
+  }
+
+  @Builder
+  routeSelectionView() {
+    Column({ space: 10 }) {
+      Row({ space: 12 }) {
+        Button('返回')
+          .fontSize(15)
+          .height(36)
+          .backgroundColor($r('app.color.nb_neutral_button_background'))
+          .fontColor($r('app.color.nb_on_primary'))
+          .onClick(() => {
+            this.closeVisibleSubflow();
+          })
+        Text('路由选择')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('app.color.nb_text_primary'))
+      }
+      .width('100%')
+      .margin({ top: 8 })
+
+      Text('按网络（NetID）选择要走隧道的 IPv4 路由；同一网络的高可用候选始终一起开关。' +
+        '改动立即保存并通知当前连接，离线时下次连接生效；切换瞬间可能短暂中断数据。' +
+        '当前版本不处理 DNS / IPv6，也不自动调整出口节点。')
+        .fontSize(13)
+        .fontColor($r('app.color.nb_text_secondary'))
+        .width('100%')
+      Text(`管理服务器：${this.configuredUrl}`)
+        .fontSize(12)
+        .fontColor($r('app.color.nb_text_muted'))
+        .width('100%')
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+      if (this.routeCatalogNote().length > 0) {
+        Text(this.routeCatalogNote())
+          .fontSize(12)
+          .fontColor($r('app.color.nb_text_muted'))
+          .width('100%')
+      }
+
+      Row({ space: 12 }) {
+        Button('全部启用')
+          .fontSize(14)
+          .height(38)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.nb_card_background'))
+          .fontColor($r('app.color.nb_text_primary'))
+          .border({ width: 1, color: $r('app.color.nb_border') })
+          .enabled(!this.routeLoadError)
+          .onClick(() => this.routeEnableAll())
+        Button('全部停用')
+          .fontSize(14)
+          .height(38)
+          .layoutWeight(1)
+          .backgroundColor($r('app.color.nb_card_background'))
+          .fontColor($r('app.color.nb_text_primary'))
+          .border({ width: 1, color: $r('app.color.nb_border') })
+          .enabled(!this.routeLoadError)
+          .onClick(() => this.routeDisableAll())
+      }
+      .width('100%')
+      Text('全部停用也适用于以后新增的路由')
+        .fontSize(12)
+        .fontColor($r('app.color.nb_text_muted'))
+        .width('100%')
+
+      if (this.routeLoadError) {
+        Text(this.routeLoadErrorText)
+          .fontSize(13)
+          .fontColor($r('app.color.nb_status_error'))
+          .width('100%')
+      }
+
+      if (this.routeCatalog === null) {
+        Text(this.routeEmptyText())
+          .fontSize(14)
+          .fontColor($r('app.color.nb_text_muted'))
+          .width('100%')
+          .margin({ top: 20 })
+      } else if (this.routeRows().length === 0) {
+        Text(this.routeNoRowsText())
+          .fontSize(14)
+          .fontColor($r('app.color.nb_text_muted'))
+          .width('100%')
+          .margin({ top: 20 })
+      } else {
+        this.sectionTitle('普通路由')
+        Column({ space: 0 }) {
+          ForEach(this.routeSectionRows(false), (entry: RouteNetworkEntry) => {
+            this.routeRow(entry)
+          }, (entry: RouteNetworkEntry) => `rt|${entry.net_id}`)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+        .borderRadius(16)
+        .backgroundColor($r('app.color.nb_card_background'))
+        if (this.routeSectionRows(true).length > 0) {
+          this.sectionTitle('出口节点')
+          Column({ space: 0 }) {
+            ForEach(this.routeSectionRows(true), (entry: RouteNetworkEntry) => {
+              this.routeRow(entry)
+            }, (entry: RouteNetworkEntry) => `rx|${entry.net_id}`)
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 4, bottom: 4 })
+          .borderRadius(16)
+          .backgroundColor($r('app.color.nb_card_background'))
+        }
+      }
+
+      // 改动已经在开关动作里落盘并通知，因此这里只有一行如实的进度/结果，没有
+      // 「保存」/「放弃更改」按钮，也没有任何停止/启动动作。
+      if (this.routeStatusText().length > 0) {
+        Text(this.routeStatusText())
+          .fontSize(13)
+          .fontColor(this.routeStatusColor())
+          .width('100%')
+      }
+    }
+    .width('100%')
+    .padding({ bottom: 24 })
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  // ---- 路由选择页的数据模型（页面方法）----------------------------------------
+  //
+  // One row per management NetID (the HA group), never per route id/peer: the
+  // catalog already collapses the same-NetID candidates into one entry, and the
+  // row shows that network's subnet(s) plus its 节点数 (candidate_count). The
+  // list is whatever the extension last wrote — while no live document exists
+  // it is explicitly labelled 上次连接获取 and never claimed as 已生效.
+
+  private openRouteSelection(): void {
+    hilog.info(DOMAIN, TAG, 'UI_ROUTE_SELECTION_OPENED');
+    this.routeSelectionOpen = true;
+    this.routeActionError = '';
+    this.routeSaveFailed = false;
+    this.routeLoadError = false;
+    this.routeLoadErrorText = '';
+    // 重新进入不等于「用户没动过」：只要还有在途写入或在途读取，这次打开的存储文档就
+    // 一定比内存里的期望旧，绝不能把编辑保护归零——旧答案会盖掉用户刚移动的开关。
+    if (!this.routeWriteBusy && !this.routeSelectionLoading) {
+      this.routeUserEdited = false;
+    }
+    // routeNotifyFailed is deliberately NOT cleared here: it belongs to the request
+    // this page already wrote (the doorbell failed), not to one visit of the page.
+    // Clearing it on re-entry would show 正在应用… forever without a notification.
+    this.loadRouteSelection();
+    this.refreshRouteCatalog();
+    // A result already on disk is only adopted if its id matches the newest
+    // request this page knows about; the id is learned from the request the
+    // page itself wrote, so an idle page claims nothing.
+    this.refreshRouteApplyResult();
+  }
+
+  // The persisted selection for THIS management server — the SAVED URL
+  // (`configuredUrl`), never the unsaved editor field. A missing file (or a
+  // document scoped to another server) is the default all-on state; a malformed
+  // or wrong-version document is a LOUD error state, never a silent default
+  // that the next save would overwrite.
+  private loadRouteSelection(): void {
+    const managementUrl: string = this.configuredUrl;
+    if (managementUrl.length === 0 || this.routeSelectionLoading || this.routeWriteBusy) {
+      // An in-flight WRITE means the in-memory desired selection is both newer
+      // than the disk and the thing the user is looking at: reading the file can
+      // only produce an older answer, so re-entry must not even ask for one.
+      return;
+    }
+    this.routeSelectionLoading = true;
+    loadRouteSelection(getContext(this).filesDir, managementUrl)
+      .then((stored: RouteSelection | null): void => {
+        this.routeSelectionLoading = false;
+        if (this.routeUserEdited) {
+          // a switch was already moved while this read was in flight: the stored
+          // document is older than the user's wish and must not clobber it
+          return;
+        }
+        this.routeDraft = stored === null
+          ? routeSelectionDefault() : routeSelectionClone(stored);
+        this.routeLoadError = false;
+        this.routeLoadErrorText = '';
+      })
+      .catch((_error: Error): void => {
+        this.routeSelectionLoading = false;
+        this.routeLoadError = true;
+        this.routeLoadErrorText =
+          '路由选择记录无法读取，已按默认（全部启用）显示；为避免覆盖该记录，暂时不能修改。';
+        this.routeDraft = routeSelectionDefault();
+      });
+  }
+
+  // Offline catalog read (no native call), driven by the page's EXISTING 2 s
+  // poll while the page is open plus one immediate read on open. It updates the
+  // list/status/stamp only — the LATEST DESIRED selection is never touched here,
+  // so a refresh can never discard a change the user just made.
+  private refreshRouteCatalog(): void {
+    const managementUrl: string = this.configuredUrl;
+    if (managementUrl.length === 0 || this.routeCatalogReading) {
+      return;
+    }
+    this.routeCatalogReading = true;
+    readRouteCatalog(getContext(this).filesDir, managementUrl)
+      .then((result: RouteCatalogReadResult): void => {
+        this.routeCatalogReading = false;
+        this.routeCatalogStatus = result.status;
+        this.routeCatalogUrl = result.management_url;
+        this.routeCatalogUpdatedAtMs = result.updated_at_ms;
+        this.routeCatalog = result.catalog;
+      })
+      .catch((_error: Error): void => {
+        // readRouteCatalog answers a status token instead of throwing; this is
+        // only the defensive net — nothing is ever claimed from a failed read.
+        this.routeCatalogReading = false;
+        this.routeCatalogStatus = CATALOG_STATUS_UNAVAILABLE;
+        this.routeCatalogUrl = '';
+        this.routeCatalogUpdatedAtMs = 0;
+        this.routeCatalog = null;
+      });
+  }
+
+  // The VPE's apply RESULT, read on the same existing 2 s tick. ONLY a document
+  // whose opaque id equals the newest request id THIS page wrote is adopted: an
+  // older generation's answer, an absent document and the catalog's own
+  // `enabled` verdict are never turned into 已生效. A read problem is simply
+  // "we do not know yet" and changes nothing.
+  private refreshRouteApplyResult(): void {
+    const managementUrl: string = this.configuredUrl;
+    if (managementUrl.length === 0 || this.routeResultReading) {
+      return;
+    }
+    this.routeResultReading = true;
+    readRouteApplyResult(getContext(this).filesDir)
+      .then((result: RouteApplyResult | null): void => {
+        this.routeResultReading = false;
+        if (result === null || this.routeRequestId.length === 0 ||
+          result.id !== this.routeRequestId) {
+          return;
+        }
+        this.routeResultId = result.id;
+        this.routeResultState = result.state;
+        // The ONE reading of "the OS side really is at the requested state": a
+        // `stored-no-map` answer stores the preference without handing a map to
+        // the OS, so it is NOT applied even though its state says `applied`.
+        this.routeResultApplied = routeApplyResultIsApplied(result);
+        this.routeResultError = result.error;
+      })
+      .catch((_error: Error): void => {
+        this.routeResultReading = false;
+      });
+  }
+
+  private routeRows(): RouteNetworkEntry[] {
+    const catalog: RouteCatalog | null = this.routeCatalog;
+    if (catalog === null) {
+      return [];
+    }
+    return routeSelectionRows(this.routeDraft, catalog);
+  }
+
+  // Catalog order, split into the ordinary list and the exit-node list. A
+  // section with no entry is simply not rendered (no empty header).
+  private routeSectionRows(isExit: boolean): RouteNetworkEntry[] {
+    const rows: RouteNetworkEntry[] = [];
+    for (const row of this.routeRows()) {
+      if (row.is_exit === isExit) {
+        rows.push(row);
+      }
+    }
+    return rows;
+  }
+
+  private routeEnabledCount(): number {
+    let enabled: number = 0;
+    for (const row of this.routeRows()) {
+      if (row.enabled) {
+        enabled++;
+      }
+    }
+    return enabled;
+  }
+
+  private routeSummaryText(): string {
+    if (this.routeCatalog === null) {
+      return '连接后可用';
+    }
+    return `已启用 ${this.routeEnabledCount()}/${this.routeRows().length}`;
+  }
+
+  // The freshness wording. A live document means the catalog belongs to the
+  // current session; without one the list is the LAST session's view and is
+  // labelled exactly that. The stored preference alone is never called 已生效.
+  private routeCatalogNote(): string {
+    if (this.routeCatalogStatus !== CATALOG_STATUS_OK || this.routeCatalog === null) {
+      return '';
+    }
+    if (this.published !== null) {
+      return '以下为当前连接下发的路由目录。';
+    }
+    return `上次连接获取（${secondsAgoText(this.routeCatalogUpdatedAtMs)}）；` +
+      '当前未连接，选择将在下次连接时应用。';
+  }
+
+  private routeEmptyText(): string {
+    if (this.routeCatalogStatus.length === 0) {
+      return '正在读取路由目录…';
+    }
+    if (this.routeCatalogStatus === CATALOG_STATUS_MISSING) {
+      return '尚无路由目录：连接成功后本机才会写入。';
+    }
+    if (this.routeCatalogStatus === CATALOG_STATUS_SCOPE_MISMATCH) {
+      return this.routeCatalogUrl.length > 0
+        ? `本机的路由目录属于其他管理服务器（${this.routeCatalogUrl}），未显示。`
+        : '本机的路由目录属于其他管理服务器，未显示。';
+    }
+    if (this.routeCatalogStatus === CATALOG_STATUS_VERSION ||
+      this.routeCatalogStatus === CATALOG_STATUS_UNAVAILABLE) {
+      return '路由目录暂时无法读取，请重新连接后再试。';
+    }
+    return '路由目录无法解析，请重新连接以刷新。';
+  }
+
+  private routeNoRowsText(): string {
+    if (this.routeCatalog !== null && this.routeCatalog.available === false) {
+      return '管理端未下发路由目录。';
+    }
+    return '当前连接没有下发任何路由。';
+  }
+
+  // The ONE entry point of every switch: 单行 NetID 开关 / 全部启用 / 全部停用.
+  // The desired selection is shown IMMEDIATELY, then persisted atomically, and
+  // only a settled write rings the VPE's doorbell. Nothing here stops, starts or
+  // re-logs-in a connection — online or offline.
+  private routeApplyAction(selection: RouteSelection): void {
+    if (this.routeLoadError || this.configuredUrl.length === 0) {
+      // The page never replaces a preference document it could not read, and it
+      // cannot scope a write without a configured server: say so, change nothing.
+      this.routeActionError = this.routeLoadError
+        ? this.routeLoadErrorText : '尚未配置管理服务器，无法保存路由选择。';
+      return;
+    }
+    this.routeActionError = '';
+    this.routeSaveFailed = false;
+    this.routeUserEdited = true;
+    this.routeDraft = selection;
+    this.routePersist(selection);
+  }
+
+  private routeToggle(netId: string): void {
+    const catalog: RouteCatalog | null = this.routeCatalog;
+    if (this.routeLoadError || catalog === null) {
+      return;
+    }
+    try {
+      this.routeApplyAction(routeSelectionToggle(this.routeDraft, netId,
+        routeSelectionKnownNetIds(catalog)));
+    } catch (error) {
+      if (!(error instanceof RoutePreferencesError) || error.reason !== REASON_UNKNOWN_ROUTE) {
+        // Not the known-network check: never dress another failure up as
+        // 「该网络已不在目录中」.
+        throw error as Error;
+      }
+      // The row's network is no longer in the (just refreshed) catalog: no
+      // write, no doorbell, and an honest explanation instead of a blind flip.
+      this.routeActionError = '该网络已不在当前路由目录中，请重新连接后重试。';
+    }
+  }
+
+  // 全部启用 / 全部停用 are GLOBAL verbs: they cover routes that do not exist
+  // yet (the label under the stop button says exactly that). They are never a
+  // batch over the currently visible NetIDs, and they write through just as
+  // immediately as a single switch.
+  private routeEnableAll(): void {
+    this.routeApplyAction(routeSelectionSelectAll());
+  }
+
+  private routeDisableAll(): void {
+    this.routeApplyAction(routeSelectionDeselectAll());
+  }
+
+  // 串行写入 (latest-wins). At most ONE write is in flight; a newer wish simply
+  // replaces the pending slot, so two fast taps can never drive two atomic writes
+  // through the same `.tmp` path, and an older write can never overwrite the
+  // current intent. No new timer and no new framework: the recursion below is
+  // driven only by the settled promises of the writes themselves.
+  private routePersist(selection: RouteSelection): void {
+    this.routeWritePending = routeSelectionClone(selection);
+    if (this.routeWriteBusy) {
+      return;
+    }
+    this.routeWriteBusy = true;
+    this.routePumpWrites();
+  }
+
+  private routePumpWrites(): void {
+    const desired: RouteSelection | null = this.routeWritePending;
+    if (desired === null) {
+      this.routeWriteBusy = false;
+      this.routeSaving = false;
+      return;
+    }
+    this.routeWritePending = null;
+    this.routeSaving = true;
+    saveRouteSelection(getContext(this).filesDir, this.configuredUrl, desired)
+      .then((): void => {
+        if (this.routeWritePending !== null) {
+          // A newer wish arrived while this write was in flight: it is the one
+          // that must reach the disk and the doorbell, so this settled write
+          // does NOT ring for a state that is already superseded.
+          this.routePumpWrites();
+          return;
+        }
+        this.routeSendApplyRequest().then((): void => {
+          this.routePumpWrites();
+        });
+      })
+      .catch((_error: Error): void => {
+        // The preference write FAILED: nothing was persisted, so nothing is
+        // notified and the running connection is left exactly as it is.
+        this.routeWritePending = null;
+        this.routeWriteBusy = false;
+        this.routeSaving = false;
+        this.routeSaveFailed = true;
+        hilog.error(DOMAIN, TAG, 'UI_ROUTE_SAVE_FAILED');
+      });
+  }
+
+  // The doorbell. It carries ONLY an opaque id, the scope URL and the write
+  // stamp: no selection copy and no session identity — the live VPE loads the
+  // CURRENT saved preference itself. Every completed desired save gets its own
+  // id, so a result can only ever be matched to the request it answers.
+  private routeSendApplyRequest(): Promise<void> {
+    this.routeRequestSeq = this.routeRequestSeq + 1;
+    const id: string = routeApplyRequestId(this.routeRequestSeq, Date.now());
+    this.routeRequestId = id;
+    // A fresh request: any answer already on disk belongs to an older
+    // generation and must not be rendered as this one's state.
+    this.routeResultId = '';
+    this.routeResultState = '';
+    this.routeResultApplied = false;
+    this.routeResultError = '';
+    this.routeNotifyFailed = false;
+    const request: RouteApplyRequest = {
+      id: id,
+      management_url: this.configuredUrl,
+      created_at_ms: Date.now()
+    };
+    hilog.info(DOMAIN, TAG, 'UI_ROUTE_APPLY_REQUEST|id=%{public}s', id);
+    return writeRouteApplyRequest(getContext(this).filesDir, request)
+      .catch((_error: Error): void => {
+        // The preference IS saved (the next connection applies it), but the live
+        // session was NOT told: say so plainly instead of claiming 已生效.
+        this.routeNotifyFailed = true;
+        hilog.error(DOMAIN, TAG, 'UI_ROUTE_APPLY_NOTIFY_FAILED');
+      });
+  }
+
+  private routeApplyView(): RouteApplyView {
+    return {
+      latest_request_id: this.routeRequestId,
+      result_id: this.routeResultId,
+      result_state: this.routeResultState,
+      result_applied: this.routeResultApplied,
+      has_live_document: this.published !== null,
+      saving: this.routeSaving,
+      save_failed: this.routeSaveFailed,
+      notify_failed: this.routeNotifyFailed
+    };
+  }
+
+  private routeStatusText(): string {
+    if (this.routeActionError.length > 0) {
+      return this.routeActionError;
+    }
+    return routeApplyStatusText(routeApplyStatus(this.routeApplyView()), this.routeResultError);
+  }
+
+  private routeStatusTone(): string {
+    if (this.routeActionError.length > 0) {
+      return ROUTE_TONE_ERROR;
+    }
+    return routeApplyStatusTone(routeApplyStatus(this.routeApplyView()));
+  }
+
+  private routeStatusColor(): ResourceColor {
+    const tone: string = this.routeStatusTone();
+    if (tone === 'ok') {
+      return $r('app.color.nb_status_success');
+    }
+    if (tone === 'warn') {
+      return $r('app.color.nb_status_warning');
+    }
+    if (tone === ROUTE_TONE_ERROR) {
+      return $r('app.color.nb_status_error');
+    }
+    return $r('app.color.nb_text_secondary');
+  }
+
+  private closeVisibleSubflow(): boolean {
+    const action: string = navigationBackDecision(
+      this.accountLoginOpen,
+      this.accountLoginBusy,
+      this.accountLoginCommitting,
+      this.activeTab === 2 && !this.showDiagnostics && this.configured && this.showSetupForm,
+      this.activeTab === 2 && this.showDiagnostics,
+      this.activeTab === 1 && this.selectedPeer !== null,
+      this.activeTab === 2 && !this.showDiagnostics && this.routeSelectionOpen);
+    if (action === 'account-webview') {
       this.cancelAccountLogin(false);
       return true;
     }
+    if (action === 'cancel-account') {
+      this.cancelAccountLogin(false);
+      return true;
+    }
+    if (action === 'consume') {
+      return true;
+    }
+    if (action === 'cancel-editor') {
+      this.cancelConfigurationEdit();
+      return true;
+    }
+    if (action === 'close-diagnostics') {
+      this.showDiagnostics = false;
+      this.activeTab = this.detailStatusOriginTab;
+      return true;
+    }
+    if (action === 'close-peer') {
+      this.selectedPeer = null;
+      return true;
+    }
+    if (action === 'close-route') {
+      // 路由选择: an internal 设置 page. Back simply returns to 设置 — every change
+      // was saved the moment the switch moved, so there is no draft to discard
+      // and no connection operation to issue.
+      this.routeSelectionOpen = false;
+      return true;
+    }
     return false;
+  }
+
+  onBackPress(): boolean {
+    return this.closeVisibleSubflow();
   }
 
   build() {

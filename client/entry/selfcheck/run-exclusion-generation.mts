@@ -246,6 +246,12 @@ register(new URL('./exclusion-generation-hooks.mjs', import.meta.url).href);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
+// 2026-10-07 per-NetID route selection (decision B): the route file adapter and
+// its pure document module live under ets/routes/, not next to the extension.
+// They are staged byte-identically like every sibling above (see the staging
+// loop below).
+const REAL_ROUTES_DIR = join(HERE, '..', 'src', 'main', 'ets', 'routes');
+const STAGED_ROUTES = ['NetBirdRouteStore', 'NetBirdRoutePreferences'];
 // The fixture EntryAbility lives in its own source dir (arm private channel,
 // C group): staged byte-identically like the five extension modules.
 const REAL_ENTRY_DIR = join(HERE, '..', 'src', 'main', 'ets', 'entryability');
@@ -550,6 +556,12 @@ try {
   for (const name of STAGED) {
     writeFileSync(join(dir, name + '.ts'),
       readFileSync(join(REAL_DIR, name + '.ets'))); // byte-identical real file
+  }
+  // The two route modules the REAL extension now imports by value (the adapter
+  // resolves its own './NetBirdRoutePreferences' inside this same dir).
+  for (const name of STAGED_ROUTES) {
+    writeFileSync(join(dir, name + '.ts'),
+      readFileSync(join(REAL_ROUTES_DIR, name + '.ets'))); // byte-identical real file
   }
   // The fixture EntryAbility (arm private channel, C group): byte-identical
   // real file; its diagnostics/system-event sibling imports are bridged below
