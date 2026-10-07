@@ -1,0 +1,187 @@
+{
+  "record_kind": "diagnostic-host-build",
+  "record_id": "n2h-host-build-dirty-20260930-0001",
+  "is_evidence": false,
+  "authorization": "none — no AUTH/campaign/evidence id consumed, no signing, no install, no device, no hdc/ssh, no push",
+  "repo": "/home/worker/work/base/netbird-harmonyos",
+  "head": "52b2bac07e91a07af2d2b6ea006e561fdfbb8f6c",
+  "head_note": "HEAD commit only registers docs v4.2; the built core/shell bytes come from the UNCOMMITTED working tree",
+  "dirty": true,
+  "dirty_paths_count": 33,
+  "stash_preserved": ["stash@{0}: On main: posctl-socket-ctx-wip"],
+  "build_command": "DEVECO_SDK_HOME=/home/worker/harmonyos/command-line-tools/current bash client/build.sh",
+  "build_host_only": true,
+  "build_offline_locked_cargo": true,
+  "build_started_utc": "2026-09-30T04:30:21Z",
+  "build_finished_utc": "2026-09-30T04:30:48Z",
+  "build_real_exit_code": 0,
+  "build_log": "docs/evidence/n2h-host-build-dirty-20260930-0001.build.log",
+  "build_log_sha256": "4ca52f1fd5a196dd0792c5710781d366eb4730619cf4e32551a563f0805e7153",
+  "evidence_file_sha256": {
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.build.log": "4ca52f1fd5a196dd0792c5710781d366eb4730619cf4e32551a563f0805e7153",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.verify.log": "13943dd83d21fc168101ef4247a04c0b3dc3822fdf43d0b38f7aae063f0c2199",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.verify.py": "9bf3013679897f9138dd972024be787d3f7bc4ffeba880b7c410775726ac6440",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.prebuild-tree.txt": "baf0d8ae4557a454c66fd56a1a857177d103ebf77b19fb4a96a8d22b82ba0622",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.postbuild-tree.txt": "660f8bed567632d3fb857714ff8cf144e6ea3a708b309391109256bf3f09af99",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.exit-code": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  "self_hash_note": "the sha256 of this .json and of the companion .md are in the .sha256 sidecars next to them (writing them changes their own bytes)",
+  "artifact": {
+    "path": "client/entry/build/default/outputs/default/entry-default-unsigned.hap",
+    "sha256": "e12224660b60b7f450054954d2d91766dff826222d228208171f53d4da5fc5f0",
+    "bytes": 4869195,
+    "mtime_local": "2026-09-30 12:30:46.934678933 +0800",
+    "signed": false,
+    "signature_evidence": "hvigor WARN: No signingConfig found for product default; HAP namelist has no META-INF/ entries",
+    "pre_build_incumbent": {
+      "sha256": "a35cbf7c2c6e8418e4e64c2b1f4f1028011840977f3bbb74eba3c8a0af31a6c4",
+      "bytes": 4868411,
+      "mtime_local": "2026-09-30 01:30:40 +0800",
+      "note": "same fixed output path; recorded before this build overwrote it (regenerable build output, not sealed evidence)"
+    }
+  },
+  "native_member": {
+    "hap_member": "libs/arm64-v8a/libnetbird_core.so",
+    "packaged_member_sha256": "5679ba0ab66ccfdf088a5dda6a3fea6fb8f5cff54f2923ad9b8f0b769a2700cf",
+    "packaged_member_bytes": 4615352,
+    "packaged_member_elf": "ELF64 little-endian ET_DYN e_machine=183 (AArch64)",
+    "raw_module_so_path": "client/entry/libs/arm64-v8a/libnetbird_core.so",
+    "raw_module_so_sha256": "b9ec630141f463f6d6f6dc9a8cb49c5a4350634d6657971752c5c05264de00c7",
+    "raw_module_so_bytes": 6895432,
+    "raw_module_so_elf": "ELF64 little-endian ET_DYN e_machine=183 (AArch64)",
+    "raw_module_so_needed": ["libace_napi.z.so", "libc.so", "libhilog_ndk.z.so"],
+    "raw_module_so_glibc_absent": true,
+    "core_release_so_path": "client/core/target/aarch64-unknown-linux-ohos/release/libnetbird_core.so",
+    "core_release_so_sha256": "b9ec630141f463f6d6f6dc9a8cb49c5a4350634d6657971752c5c05264de00c7",
+    "core_release_so_bytes": 6895432,
+    "module_so_identical_to_core_release": true,
+    "member_matches_llvm_stripped_module_so": true,
+    "verification_method": "client/build.sh step 4 caliber: packaged member sha256 == llvm-strip'd copy of the module .so (hvigor DoNativeStrip), ELF64/ET_DYN/AArch64, pack.info apiVersion 26"
+  },
+  "package_info": {
+    "pack_info_apiVersion": {"target": 26, "compatible": 26, "releaseType": "Release"},
+    "bundleName": "cn.alfadb.netbird",
+    "bundleType": "app",
+    "vendor": "alfadb",
+    "versionCode": 1,
+    "versionName": "0.0.1",
+    "module": {"name": "entry", "type": "entry", "mainElement": "EntryAbility", "package": "entry-default"},
+    "extensionAbilities": ["NetBirdVpnExtensionAbility"],
+    "deviceTypes": ["phone"],
+    "module_json_compileSdkVersion": "26.0.0.105",
+    "module_json_minAPIVersion": 260000026,
+    "module_json_targetAPIVersion": 260000026,
+    "module_json_buildMode": "release",
+    "module_json_debug": false
+  },
+  "new_core_entries": {
+    "n2_cd_switch_identified": {
+      "napi_registration": "client/core/src/napi.rs:142  reg!(\"n2_cd_switch_identified\", napi_n2_cd_switch_identified)",
+      "napi_handler": "client/core/src/napi.rs:841-846 (unsafe extern \"C\" fn napi_n2_cd_switch_identified; EIGHT exported args: 4 strings + 4 i32)",
+      "exports_declaration_pin": "client/core/src/napi.rs:434 (declaration table pins it on the exports object)",
+      "json_wrapper": "client/core/src/connector.rs:5573 pub fn n2_cd_switch_identified_json(id, verdict, net_after, local_after, net_id_after: i64, identity_fd: i32, identity_dup_fd: i32, identity_generation: i64)",
+      "module": "client/core/src/n2_cd.rs (mod declared at client/core/src/lib.rs:186)",
+      "arg_view": "client/core/src/napi.rs:186 n2_cd_switch_identified takes EIGHT arguments (Args argv capacity 8)",
+      "shell_call": "client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:2831 (8-arg call; identity fields default -1 = fail-closed)",
+      "string_in_packaged_member": true
+    },
+    "n2_ring_ack": {
+      "napi_registration": "client/core/src/napi.rs:152  reg!(\"n2_ring_ack\", napi_n2_ring_ack)",
+      "napi_handler": "client/core/src/napi.rs:901-903 (ONE exported arg: the request document verbatim)",
+      "exports_declaration_pin": "client/core/src/napi.rs:444",
+      "json_wrapper": "client/core/src/connector.rs:5761 pub fn n2_ring_ack_json(request_json: &str) -> String",
+      "request_contract": "{\"session\":\"<arm token>\",\"up_to_seq\":<durable seq>} — BOTH keys required (client/core/src/n2_ring.rs:759 parse_ack_request); refusals invalid-session/invalid-request/empty-request/request-too-long/invalid-json, then core-side binding not-configured/not-armed/session-mismatch/seq-beyond-tail under the ring lock; reply {ok,result,reason,session,up_to_seq,acked_seq,previous_acked_seq,advanced}",
+      "shell_forward": "client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets:3336 forwards the document VERBATIM; client/entry/src/main/ets/entryability/EntryAbility.ets:108 N2_RING_ACK_PARAM='n2_ring_ack'; client/entry/src/main/ets/vpnextensionability/NetBirdN2Ring.ets:218 parseN2RingAck",
+      "string_in_packaged_member": true,
+      "refusal_tokens_in_packaged_member": ["session-mismatch", "seq-beyond-tail", "not-armed", "not-configured", "invalid-session", "switch-identity-required"]
+    },
+    "build_input_inclusion": {
+      "core_module_registered": ["client/core/src/lib.rs:186 pub mod n2_cd;", "client/core/src/lib.rs:192 pub mod n2_ring;"],
+      "self_id_digest_inputs": "client/core/build.rs FIXED_INPUTS=[Cargo.toml,Cargo.lock,build.rs] + TREE_INPUTS=[proto,src] (n2_cd.rs and n2_ring.rs are inside src/, therefore inside the digest)",
+      "n2h_build_sha256_recomputed_independently": "edbbbaef183ccb5b2cf607e8fbe516ba1582cac3eedf17b8dace58e0f18f43ce",
+      "n2h_build_sha256_present_in_raw_so": true,
+      "n2h_build_sha256_present_in_packaged_member": true,
+      "arkts_bytecode": {
+        "member": "ets/modules.abc",
+        "bytes": 246516,
+        "contains": ["n2_cd_switch_identified", "n2_ring_ack", "N2_RING_ACK_PARAM", "N2_RING_ACK_SHELL", "n2_cd_identity"]
+      }
+    }
+  },
+  "core_source_hashes": {
+    "client/core/src/n2_cd.rs": "a40f214cf63f83eaef7da34639001fe0a1c4131937bfd7d0d6104498a8411633",
+    "client/core/src/n2_ring.rs": "baccde66da680736f8814429749c3fe333f80dc723e1052ba75add47a35ca776",
+    "client/core/src/napi.rs": "68c1669de77ceac06d453f733403009da3765b8979e331d991d7c0905a73ea16",
+    "client/core/src/connector.rs": "8fe8e39a035e4206a028e93e5a79d699047f09f3df64625c31da32870c019596",
+    "client/core/src/lib.rs": "75aa332f50d5fd2aef4bbae7476fcb5d3d6db3c4153b46b84ef66fb623b8bba4",
+    "client/core/build.rs": "06b1978f13d68ab32c96d08c7a31c8272e3dbadf5bcd1792f21601bcb884a738",
+    "client/core/Cargo.toml": "7b32b87fd7213d323a85e8019d3e28e06b770899f7814f4c8f6acba0da963af3",
+    "client/core/Cargo.lock": "990e955e70e55956cad76f84fbf19c9a0945f9fe39853978faf09309a44bc635",
+    "client/entry/src/main/ets/vpnextensionability/NetBirdN2CdPlan.ets": "58cb6a8e5aa869fb3c33e365e5f8afd4446530860df8b273da290293eadabf8a",
+    "client/entry/src/main/ets/vpnextensionability/NetBirdN2Ring.ets": "9fc532c502f31b1ef88655abb8e79aca0e6cc52e9aa21fc93ed22179e7ef3c9a",
+    "client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets": "bcdf1ed030f2025ade73f40d7b5011d26795959c47fe9a28047ec9715cdd8092",
+    "client/entry/src/main/ets/entryability/EntryAbility.ets": "572a93fc062e96aa2b7b7a53c95fa53d2a4aa1d85d584532093373db214fdaf0"
+  },
+  "working_tree_fence": {
+    "method": "git ls-files -co --exclude-standard (tracked + untracked, ignored build outputs excluded) hashed before and after the build; git status and git diff --stat blocks compared byte-for-byte with an independent hasher (the SDK toolchain 'diff' binary returns 0 unconditionally and was NOT trusted)",
+    "pre_status_block_sha256": "7e930f46fe0f219aa3147ab9d1cb567f56e10cf813e6bd733bd3fd5dc8fa7715",
+    "post_status_block_sha256": "7e930f46fe0f219aa3147ab9d1cb567f56e10cf813e6bd733bd3fd5dc8fa7715",
+    "pre_diffstat_block_sha256": "8fd6dbfd922752fb7e86055a9e965fa364bab8361a37334b6ba0e192d9cc165e",
+    "post_diffstat_block_sha256": "8fd6dbfd922752fb7e86055a9e965fa364bab8361a37334b6ba0e192d9cc165e",
+    "non_evidence_file_count": 956,
+    "non_evidence_source_digest_sha256": "b21118a0351e16f1da54b91061d7239420683963a87f52c72d1e592be8541157",
+    "only_new_paths_after_build": [
+      "docs/evidence/n2h-host-build-dirty-20260930-0001.build.log",
+      "docs/evidence/n2h-host-build-dirty-20260930-0001.exit-code",
+      "docs/evidence/n2h-host-build-dirty-20260930-0001.postbuild-tree.txt",
+      "docs/evidence/n2h-host-build-dirty-20260930-0001.verify.py"
+    ],
+    "source_files_modified_by_build": [],
+    "latest_dirty_source_mtime_before_build": "2026-09-30 10:36:13 +0800 (client/core/src/n2_cd.rs)",
+    "generated_by_build_only_ignored_outputs": [
+      "client/core/target/**",
+      "client/entry/libs/**",
+      "client/entry/build/**",
+      "client/.hvigor/** and root .hvigor/**"
+    ],
+    "no_reset_no_clean_no_stash_no_commit": true
+  },
+  "hvigor_task_facts": {
+    "result": "BUILD SUCCESSFUL in 4 s 120 ms; 33 tasks total: 19 executed, 14 up-to-date",
+    "CompileArkTS": "UP-TO-DATE (incremental; not re-executed in this run) — the packaged ets/modules.abc is the cached output of the same .ets input bytes, which the abc string checks above confirm carry the new shell channels",
+    "PackageHap": "executed",
+    "DoNativeStrip": "executed",
+    "SignHap": "executed, unsigned (WARN: No signingConfig found for product default)"
+  },
+  "cargo_facts": {
+    "command": "cargo build --release --target aarch64-unknown-linux-ohos --offline --locked",
+    "exit": 0,
+    "compiled": "netbird_core v0.1.0 (recompiled from the dirty tree; 6 pre-existing warnings)",
+    "boringtun_crate_sha256": "15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939",
+    "frozen_ffi_symbols": "14/14 present in dynsym",
+    "glibc_needed_absent": true
+  },
+  "shared_resource_check": {
+    "session_link_board": "project=null (cwd matches no project), sessions=0, unmatched=true — no other session claim observed",
+    "session_link_claim": "rejected by the center: forbidden: session is not owned by this device (advisory claim not registered)"
+  },
+  "not_done": [
+    "no device install / no runtime execution on HarmonyOS (API26 here is build metadata only, NOT device-verified)",
+    "no signing / no .hap signature / no provisioning profile / no signing sidecar",
+    "no hdc / ssh / push",
+    "no host test suites re-run (per instruction; previously passing suites untouched)",
+    "no AUTH, campaign or evidence id consumed or modified",
+    "no source edit, no reset/clean/stash/commit",
+    "no '0048 draft' found in this working tree by text search; no authorization or sidecar file was written"
+  ],
+  "evidence_files": [
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.md",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.json",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.build.log",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.verify.log",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.verify.py",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.prebuild-tree.txt",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.postbuild-tree.txt",
+    "docs/evidence/n2h-host-build-dirty-20260930-0001.exit-code"
+  ]
+}

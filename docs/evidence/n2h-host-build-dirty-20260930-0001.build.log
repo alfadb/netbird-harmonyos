@@ -1,0 +1,114 @@
+# raw build log (new path; prior evidence untouched)
+command: DEVECO_SDK_HOME=/home/worker/harmonyos/command-line-tools/current bash client/build.sh
+cwd: /home/worker/work/base/netbird-harmonyos
+started_utc=2026-09-30T04:30:21Z
+[netbird-core] boringtun-0.7.1.crate sha256 OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[netbird-core] Cargo.lock present
+[netbird-core] Cargo.lock boringtun checksum OK: 15dd6a8a89cbe8997f37ca0cf035e6ea4d64cd2ecea4aed83ffb9f99f7126939
+[netbird-core] cargo build --release --target aarch64-unknown-linux-ohos --offline --locked
+   Compiling netbird_core v0.1.0 (/home/worker/work/base/netbird-harmonyos/client/core)
+warning: value assigned to `stun_uris` is never read
+    --> src/connector.rs:1758:50
+     |
+1758 |         let mut stun_uris: Option<Vec<String>> = None;
+     |                                                  ^^^^ this value is reassigned later and never used
+...
+1767 |             stun_uris = Some(cfg.stuns.clone());
+     |             --------- `stun_uris` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `AddrInfo` is never constructed
+    --> src/ice.rs:1055:8
+     |
+1055 | struct AddrInfo {
+     |        ^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: type alias `GetAddrInfo` is never used
+    --> src/ice.rs:1066:6
+     |
+1066 | type GetAddrInfo =
+     |      ^^^^^^^^^^^
+
+warning: type alias `FreeAddrInfo` is never used
+    --> src/ice.rs:1068:6
+     |
+1068 | type FreeAddrInfo = unsafe extern "C" fn(*const AddrInfo);
+     |      ^^^^^^^^^^^^
+
+warning: constant `OP_DONE` is never used
+  --> src/wg.rs:47:18
+   |
+47 | pub(crate) const OP_DONE: i32 = 0;
+   |                  ^^^^^^^
+
+warning: field `name` is never read
+  --> src/wg.rs:85:5
+   |
+83 | pub(crate) struct Tunnel {
+   |                   ------ field in this struct
+84 |     ptr: *mut core::ffi::c_void,
+85 |     name: &'static str,
+   |     ^^^^
+
+warning: `netbird_core` (lib) generated 6 warnings
+    Finished `release` profile [optimized] target(s) in 18.45s
+[netbird-core] cargo build --release --target aarch64-unknown-linux-ohos --offline --locked: exit 0
+[netbird-core] ELF OK: ELF64/AArch64/DYN; NEEDED has libc.so + libhilog_ndk.z.so, no libc.so.6
+[netbird-core] 14/14 frozen BoringTun ffi symbols present in dynsym (T, defined)
+[netbird-core] import surface OK (napi/hilog from host process)
+[netbird-core] .init_array constructor relocation present (register_module wired)
+[netbird-core] build self-identification N2H_BUILD_SHA256=edbbbaef183ccb5b2cf607e8fbe516ba1582cac3eedf17b8dace58e0f18f43ce (recomputed independently; present in the artifact)
+[netbird-core] build OK: /home/worker/work/base/netbird-harmonyos/client/core/target/aarch64-unknown-linux-ohos/release/libnetbird_core.so
+[netbird-hap] copied .so -> /home/worker/work/base/netbird-harmonyos/client/entry/libs/arm64-v8a/libnetbird_core.so (b9ec630141f463f6d6f6dc9a8cb49c5a4350634d6657971752c5c05264de00c7)
+[netbird-hap] hvigorw assembleHap (release, unsigned)
+> hvigor [32mUP-TO-DATE :entry:default@PreBuild...  [39m
+> hvigor [32mFinished :entry:default@CreateModuleInfo... after 2 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@GenerateMetadata...  [39m
+> hvigor [32mFinished :entry:default@ConfigureCmake... after 1 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@MergeProfile...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@CreateBuildProfile...  [39m
+> hvigor [32mFinished :entry:default@PreCheckSyscap... after 1 ms [39m
+> hvigor [32mFinished :entry:default@GeneratePkgContextInfo... after 13 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@GeneratePkgSdkInfo...  [39m
+> hvigor [32mFinished :entry:default@ProcessIntegratedHsp... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithCmake... after 1 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@MakePackInfo...  [39m
+> hvigor [32mFinished :entry:default@SyscapTransform... after 27 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessProfile...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessRouterMap...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessShareConfig...  [39m
+> hvigor [32mFinished :entry:default@ProcessStartupConfig... after 2 ms [39m
+> hvigor [32mFinished :entry:default@BuildNativeWithNinja... after 1 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@ProcessResource...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@GenerateLoaderJson...  [39m
+> hvigor [32mFinished :entry:default@ProcessLibs... after 52 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@CompileResource...  [39m
+> hvigor [32mUP-TO-DATE :entry:default@CompileArkTS...  [39m
+> hvigor [32mFinished :entry:default@BuildJS... after 2 ms [39m
+> hvigor [32mFinished :entry:default@DoNativeStrip... after 69 ms [39m
+> hvigor [32mFinished :entry:default@CacheNativeLibs... after 7 ms [39m
+> hvigor [32mUP-TO-DATE :entry:default@GeneratePkgModuleJson...  [39m
+> hvigor [32mFinished :entry:default@ProcessCompiledResources... after 2 ms [39m
+> hvigor [32mFinished :entry:default@PackageHap... after 671 ms [39m
+> hvigor [32mFinished :entry:default@PackingCheck... after 8 ms [39m
+> hvigor [33mWARN: No signingConfig found for product default[39m
+> hvigor [32mFinished :entry:default@SignHap... after 4 ms [39m
+> hvigor [32mFinished :entry:default@CollectDebugSymbol... after 5 ms [39m
+> hvigor [32mFinished :entry:assembleHap... after 1 ms [39m
+> hvigor [32mBUILD SUCCESSFUL in 4 s 120 ms [39m
+
+33 tasks in total: 19 executed, 14 up-to-date
+[netbird-hap] assembleHap exit 0
+VERIFY OK: libs/arm64-v8a/libnetbird_core.so present, sha256 identical to llvm-strip'd core artifact
+VERIFY OK: sha256=5679ba0ab66ccfdf088a5dda6a3fea6fb8f5cff54f2923ad9b8f0b769a2700cf
+VERIFY OK: member is ELF64 ET_DYN AArch64
+VERIFY OK: pack.info apiVersion target=26 compatible=26 releaseType=Release
+[netbird-hap] HAP: /home/worker/work/base/netbird-harmonyos/client/entry/build/default/outputs/default/entry-default-unsigned.hap
+[netbird-hap] size: 4869195 bytes
+[netbird-hap] sha256: e12224660b60b7f450054954d2d91766dff826222d228208171f53d4da5fc5f0
+[netbird-hap] build OK
+build_exit=0
+finished_utc=2026-09-30T04:30:48Z

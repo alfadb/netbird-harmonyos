@@ -1,0 +1,184 @@
+# verification run (read-only) of docs/evidence/n2h-host-build-dirty-20260930-0001
+command: python3 docs/evidence/n2h-host-build-dirty-20260930-0001.verify.py
+started_utc=2026-09-30T04:31:27Z
+{
+  "source_kind": "diagnostic-host-build",
+  "is_evidence": false,
+  "hap": {
+    "path": "/home/worker/work/base/netbird-harmonyos/client/entry/build/default/outputs/default/entry-default-unsigned.hap",
+    "exists": true,
+    "sha256": "e12224660b60b7f450054954d2d91766dff826222d228208171f53d4da5fc5f0",
+    "bytes": 4869195,
+    "mtime": "2026-09-30 12:30:46.934678933 +0800",
+    "member_present": true,
+    "member_names_sample": [
+      "module.json",
+      "libs/arm64-v8a/libnetbird_core.so",
+      "ets/modules.abc",
+      "pack.info"
+    ],
+    "signature_entries": [],
+    "apiVersion": {
+      "compatible": 26,
+      "releaseType": "Release",
+      "target": 26
+    },
+    "member_sha256": "5679ba0ab66ccfdf088a5dda6a3fea6fb8f5cff54f2923ad9b8f0b769a2700cf",
+    "member_bytes": 4615352,
+    "member_elf": {
+      "elf_magic_ok": true,
+      "ei_class": 2,
+      "ei_data": 1,
+      "e_type": 3,
+      "e_machine": 183,
+      "is_elf64_le_dyn_aarch64": true
+    }
+  },
+  "so_module_raw": {
+    "path": "/home/worker/work/base/netbird-harmonyos/client/entry/libs/arm64-v8a/libnetbird_core.so",
+    "sha256": "b9ec630141f463f6d6f6dc9a8cb49c5a4350634d6657971752c5c05264de00c7",
+    "bytes": 6895432,
+    "elf": {
+      "elf_magic_ok": true,
+      "ei_class": 2,
+      "ei_data": 1,
+      "e_type": 3,
+      "e_machine": 183,
+      "is_elf64_le_dyn_aarch64": true
+    },
+    "llvm_readelf_h": [
+      "Class:                             ELF64",
+      "Data:                              2's complement, little endian",
+      "Type:                              DYN (Shared object file)",
+      "Machine:                           AArch64"
+    ],
+    "needed": [
+      "libace_napi.z.so",
+      "libc.so",
+      "libhilog_ndk.z.so"
+    ]
+  },
+  "so_core_release": {
+    "path": "/home/worker/work/base/netbird-harmonyos/client/core/target/aarch64-unknown-linux-ohos/release/libnetbird_core.so",
+    "sha256": "b9ec630141f463f6d6f6dc9a8cb49c5a4350634d6657971752c5c05264de00c7",
+    "bytes": 6895432
+  },
+  "so_copy_identical_to_core_release": true,
+  "pack_info": {
+    "summary": {
+      "app": {
+        "bundleName": "cn.alfadb.netbird",
+        "bundleType": "app",
+        "version": {
+          "code": 1,
+          "name": "0.0.1"
+        }
+      },
+      "modules": [
+        {
+          "mainAbility": "EntryAbility",
+          "deviceType": [
+            "phone"
+          ],
+          "abilities": [
+            {
+              "name": "EntryAbility",
+              "label": "$string:ability_name"
+            }
+          ],
+          "extensionAbilities": [
+            {
+              "name": "NetBirdVpnExtensionAbility"
+            }
+          ],
+          "distro": {
+            "moduleType": "entry",
+            "installationFree": false,
+            "deliveryWithInstall": true,
+            "moduleName": "entry"
+          },
+          "apiVersion": {
+            "compatible": 26,
+            "releaseType": "Release",
+            "target": 26
+          }
+        }
+      ]
+    },
+    "packages": [
+      {
+        "deviceType": [
+          "phone"
+        ],
+        "moduleType": "entry",
+        "deliveryWithInstall": true,
+        "name": "entry-default"
+      }
+    ]
+  },
+  "so_module_llvm_stripped": {
+    "sha256": "5679ba0ab66ccfdf088a5dda6a3fea6fb8f5cff54f2923ad9b8f0b769a2700cf",
+    "bytes": 4615352
+  },
+  "member_matches_llvm_stripped_module_so": true,
+  "new_entry_strings": {
+    "n2_cd_switch_identified": true,
+    "n2_ring_ack": true
+  },
+  "new_token_strings": {
+    "session-mismatch": true,
+    "seq-beyond-tail": true,
+    "not-armed": true,
+    "not-configured": true,
+    "invalid-session": true,
+    "switch-identity-required": true
+  },
+  "arkts_abc": {
+    "bytes": 246516,
+    "n2_cd_switch_identified": true,
+    "n2_ring_ack": true,
+    "N2_RING_ACK_PARAM": true,
+    "N2_RING_ACK_SHELL": true,
+    "n2_cd_identity": true
+  },
+  "module_json": {
+    "module": "entry",
+    "type": "entry",
+    "mainElement": "EntryAbility",
+    "extensionAbilities": [
+      "NetBirdVpnExtensionAbility"
+    ],
+    "app": {
+      "iconId": 16777217,
+      "minPatchAPIVersion": 0,
+      "debug": false,
+      "targetPatchAPIVersion": 0,
+      "minMinorAPIVersion": 0,
+      "minAPIVersion": 260000026,
+      "icon": "$media:app_icon",
+      "buildMode": "release",
+      "label": "$string:app_name",
+      "bundleType": "app",
+      "versionName": "0.0.1",
+      "versionCode": 1,
+      "appEnvironments": [],
+      "compileSdkType": "HarmonyOS",
+      "labelId": 16777216,
+      "compileSdkVersion": "26.0.0.105",
+      "targetAPIVersion": 260000026,
+      "vendor": "alfadb",
+      "bundleName": "cn.alfadb.netbird",
+      "apiReleaseType": "Release",
+      "targetMinorAPIVersion": 0
+    }
+  },
+  "build_self_identification": {
+    "n2h_build_sha256_recomputed": "edbbbaef183ccb5b2cf607e8fbe516ba1582cac3eedf17b8dace58e0f18f43ce",
+    "present_in_raw_so": true,
+    "present_in_packaged_member": true
+  },
+  "result": "pass",
+  "problems": []
+}
+verify_exit=0
+finished_utc=2026-09-30T04:31:27Z

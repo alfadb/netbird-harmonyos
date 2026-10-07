@@ -1,0 +1,81 @@
+# pre-build working-tree capture
+captured_utc=2026-09-30T04:30:01Z
+head=52b2bac07e91a07af2d2b6ea006e561fdfbb8f6c
+--- git status --porcelain=v1 (tracked+untracked) ---
+ M client/core/src/connector.rs
+ M client/core/src/hilog.rs
+ M client/core/src/lib.rs
+ M client/core/src/n2_socket_trace.rs
+ M client/core/src/napi.rs
+ M client/core/src/relay_client.rs
+ M client/core/src/wg_device.rs
+ M client/core/tests/fixtures/n2-log-samples.txt
+ M client/core/tests/n2_log_samples.rs
+ M client/entry/selfcheck/exclusion-generation-hooks.mjs
+ M client/entry/selfcheck/relay-exclusion-hooks.mjs
+ M client/entry/selfcheck/run-exclusion-addr-shape.mts
+ M client/entry/selfcheck/run-exclusion-generation.mts
+ M client/entry/selfcheck/run-n2-control.mts
+ M client/entry/selfcheck/run-n2-socket-trace.mts
+ M client/entry/selfcheck/run-physical-network.mts
+ M client/entry/selfcheck/run-relay-exclusion.mts
+ M client/entry/src/main/ets/entryability/EntryAbility.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdConnector.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdPhysicalNetworkPolicy.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets
+ M docs/n2-evidence-switch-20260928.md
+ M docs/n2-log-formats-20260928.md
+?? client/core/src/n2_cd.rs
+?? client/core/src/n2_ring.rs
+?? client/core/tests/n2_cd.rs
+?? client/core/tests/n2_cd_state_revision.rs
+?? client/core/tests/n2_ring_integrity.rs
+?? client/entry/selfcheck/run-n2-cd.mts
+?? client/entry/selfcheck/run-n2-ring.mts
+?? client/entry/src/main/ets/vpnextensionability/NetBirdN2CdPlan.ets
+?? client/entry/src/main/ets/vpnextensionability/NetBirdN2Ring.ets
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.prebuild-tree.txt
+?? docs/n2-cd-app-sandwich-20260929.md
+--- git status count ---
+34
+--- stash list ---
+stash@{0}: On main: posctl-socket-ctx-wip
+--- git diff --stat (unstaged) ---
+ client/core/src/connector.rs                       |  296 +++++
+ client/core/src/hilog.rs                           |   85 ++
+ client/core/src/lib.rs                             |   13 +
+ client/core/src/n2_socket_trace.rs                 |  429 ++++++-
+ client/core/src/napi.rs                            |  142 ++-
+ client/core/src/relay_client.rs                    |  449 ++++++-
+ client/core/src/wg_device.rs                       |   19 +-
+ client/core/tests/fixtures/n2-log-samples.txt      |   46 +-
+ client/core/tests/n2_log_samples.rs                |   89 +-
+ .../entry/selfcheck/exclusion-generation-hooks.mjs |  280 +++-
+ client/entry/selfcheck/relay-exclusion-hooks.mjs   |   45 +-
+ .../entry/selfcheck/run-exclusion-addr-shape.mts   |   18 +-
+ .../entry/selfcheck/run-exclusion-generation.mts   | 1298 ++++++++++++++++++-
+ client/entry/selfcheck/run-n2-control.mts          |   10 +-
+ client/entry/selfcheck/run-n2-socket-trace.mts     |   48 +-
+ client/entry/selfcheck/run-physical-network.mts    |   30 +-
+ client/entry/selfcheck/run-relay-exclusion.mts     |   18 +-
+ .../src/main/ets/entryability/EntryAbility.ets     |  201 ++-
+ .../ets/vpnextensionability/NetBirdConnector.ets   |   59 +
+ .../NetBirdPhysicalNetworkPolicy.ets               |   10 +
+ .../NetBirdVpnExtensionAbility.ets                 | 1334 ++++++++++++++++++--
+ docs/n2-evidence-switch-20260928.md                |  146 ++-
+ docs/n2-log-formats-20260928.md                    |  278 +++-
+ 23 files changed, 5073 insertions(+), 270 deletions(-)
+--- sha256 manifest of all tracked+untracked non-ignored files ---
+b7489b748d3b6a31d615fd85db74347644fa8145aeac692830d68d02fe56fb96  -
+--- file count ---
+957
+--- pre-build HAP artifact (before this build overwrites it) ---
+-rw-rw-r-- 1 worker worker 4868411 Sep 30 01:30 client/entry/build/default/outputs/default/entry-default-unsigned.hap
+a35cbf7c2c6e8418e4e64c2b1f4f1028011840977f3bbb74eba3c8a0af31a6c4  client/entry/build/default/outputs/default/entry-default-unsigned.hap
+size=4868411 mtime=2026-09-30 01:30:40.641493911 +0800
+--- pre-build copied core .so ---
+0d93b06f314b93a067b95d73072fdc4953b0dd4fed98cb1487068562509cdd86  client/entry/libs/arm64-v8a/libnetbird_core.so
+size=6893968 mtime=2026-09-30 01:30:25.185280875 +0800
+--- pre-build core release artifact ---
+0d93b06f314b93a067b95d73072fdc4953b0dd4fed98cb1487068562509cdd86  client/core/target/aarch64-unknown-linux-ohos/release/libnetbird_core.so
+size=6893968 mtime=2026-09-30 01:28:12.878457267 +0800

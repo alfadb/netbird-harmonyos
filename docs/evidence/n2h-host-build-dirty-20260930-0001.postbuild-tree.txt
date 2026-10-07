@@ -1,0 +1,75 @@
+# post-build working-tree capture
+captured_utc=2026-09-30T04:30:56Z
+head=52b2bac07e91a07af2d2b6ea006e561fdfbb8f6c
+--- git status --porcelain=v1 (tracked+untracked) ---
+ M client/core/src/connector.rs
+ M client/core/src/hilog.rs
+ M client/core/src/lib.rs
+ M client/core/src/n2_socket_trace.rs
+ M client/core/src/napi.rs
+ M client/core/src/relay_client.rs
+ M client/core/src/wg_device.rs
+ M client/core/tests/fixtures/n2-log-samples.txt
+ M client/core/tests/n2_log_samples.rs
+ M client/entry/selfcheck/exclusion-generation-hooks.mjs
+ M client/entry/selfcheck/relay-exclusion-hooks.mjs
+ M client/entry/selfcheck/run-exclusion-addr-shape.mts
+ M client/entry/selfcheck/run-exclusion-generation.mts
+ M client/entry/selfcheck/run-n2-control.mts
+ M client/entry/selfcheck/run-n2-socket-trace.mts
+ M client/entry/selfcheck/run-physical-network.mts
+ M client/entry/selfcheck/run-relay-exclusion.mts
+ M client/entry/src/main/ets/entryability/EntryAbility.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdConnector.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdPhysicalNetworkPolicy.ets
+ M client/entry/src/main/ets/vpnextensionability/NetBirdVpnExtensionAbility.ets
+ M docs/n2-evidence-switch-20260928.md
+ M docs/n2-log-formats-20260928.md
+?? client/core/src/n2_cd.rs
+?? client/core/src/n2_ring.rs
+?? client/core/tests/n2_cd.rs
+?? client/core/tests/n2_cd_state_revision.rs
+?? client/core/tests/n2_ring_integrity.rs
+?? client/entry/selfcheck/run-n2-cd.mts
+?? client/entry/selfcheck/run-n2-ring.mts
+?? client/entry/src/main/ets/vpnextensionability/NetBirdN2CdPlan.ets
+?? client/entry/src/main/ets/vpnextensionability/NetBirdN2Ring.ets
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.build.log
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.exit-code
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.postbuild-tree.txt
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.prebuild-tree.txt
+?? docs/evidence/n2h-host-build-dirty-20260930-0001.verify.py
+?? docs/n2-cd-app-sandwich-20260929.md
+--- git status count ---
+38
+--- stash list ---
+stash@{0}: On main: posctl-socket-ctx-wip
+--- git diff --stat (unstaged) ---
+ client/core/src/connector.rs                       |  296 +++++
+ client/core/src/hilog.rs                           |   85 ++
+ client/core/src/lib.rs                             |   13 +
+ client/core/src/n2_socket_trace.rs                 |  429 ++++++-
+ client/core/src/napi.rs                            |  142 ++-
+ client/core/src/relay_client.rs                    |  449 ++++++-
+ client/core/src/wg_device.rs                       |   19 +-
+ client/core/tests/fixtures/n2-log-samples.txt      |   46 +-
+ client/core/tests/n2_log_samples.rs                |   89 +-
+ .../entry/selfcheck/exclusion-generation-hooks.mjs |  280 +++-
+ client/entry/selfcheck/relay-exclusion-hooks.mjs   |   45 +-
+ .../entry/selfcheck/run-exclusion-addr-shape.mts   |   18 +-
+ .../entry/selfcheck/run-exclusion-generation.mts   | 1298 ++++++++++++++++++-
+ client/entry/selfcheck/run-n2-control.mts          |   10 +-
+ client/entry/selfcheck/run-n2-socket-trace.mts     |   48 +-
+ client/entry/selfcheck/run-physical-network.mts    |   30 +-
+ client/entry/selfcheck/run-relay-exclusion.mts     |   18 +-
+ .../src/main/ets/entryability/EntryAbility.ets     |  201 ++-
+ .../ets/vpnextensionability/NetBirdConnector.ets   |   59 +
+ .../NetBirdPhysicalNetworkPolicy.ets               |   10 +
+ .../NetBirdVpnExtensionAbility.ets                 | 1334 ++++++++++++++++++--
+ docs/n2-evidence-switch-20260928.md                |  146 ++-
+ docs/n2-log-formats-20260928.md                    |  278 +++-
+ 23 files changed, 5073 insertions(+), 270 deletions(-)
+--- sha256 manifest of all tracked+untracked non-ignored files ---
+c516509a67c28b1e907658793a15268817aba7fa14fd5ee4d1bbaf7280839de2  -
+--- file count ---
+961
