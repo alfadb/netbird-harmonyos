@@ -660,7 +660,7 @@ pub trait UdpSocketSource: Send + Sync {
     /// consuming anything — one gather round takes exactly ONE socket per
     /// interface and KEEPS it (the bound socket is handed to the session via
     /// [`GatheredSocket`], not re-acquired), and a half-fed attempt burns the
-    /// batch it was given (see `PeerIceOrchestrator::ensure_locals`).
+    /// batch it was given (see `PeerIceOrchestrator::start_locals`).
     fn available(&self) -> Option<usize> {
         None
     }
@@ -827,9 +827,25 @@ pub(crate) fn set_nonblock(fd: sys::c_int) -> Result<(), SocketSeamError> {
 // gather orchestration
 // ---------------------------------------------------------------------------
 
-/// Per-STUN-exchange deadline (the only timer in N5a; pion's agent-level
-/// keepalive/disconnected/failed timers — agent.go:22-24 — are N5b).
-pub const DEFAULT_STUN_TIMEOUT_MS: u64 = 3000;
+/// Per-STUN-exchange deadline — upstream's value, not ours (official-alignment
+/// audit §2.2/§2.7 + §3 U8).
+///
+/// pion's default is `defaultSTUNGatherTimeout = 5 * time.Second`
+/// (netbirdio/ice@6202be846b51 `agent_config.go:41-42`, applied at `:245` and
+/// consumed by the srflx gather at `gather.go:526`). NetBird overrides the
+/// OTHER pion agent timers — keepalive 4 s, disconnected 6 s, failed 6 s,
+/// relay-acceptance 2 s (`client/internal/peer/ice/agent.go:22-28`, applied
+/// `:37-61`) — and deliberately leaves this one alone. The old 3000 ms was
+/// ours, invented when the exchange ran inline in the pump and every
+/// millisecond was a tick of the shared schedule; with the gather off the pump
+/// (stage 1) the upstream value costs nothing else and is the number a silent
+/// STUN server is actually allowed to cost.
+///
+/// NB: the audit's §2.7 "explicit non-changes" list says *do not retune*
+/// `DEFAULT_STUN_TIMEOUT_MS`; that instruction predates the stage-1 directive
+/// ("use upstream's value"), which this constant follows. Reverting is one
+/// line if the owner prefers the old value.
+pub const DEFAULT_STUN_TIMEOUT_MS: u64 = 5000;
 
 /// Gather parameters. `blacklist` defaults to [`DEFAULT_INTERFACE_BLACKLIST`]
 /// at the call site; `servers` is the parsed `netbird_config.stuns`.
@@ -846,8 +862,9 @@ pub struct GatherConfig<'a> {
 /// Ownership contract (the 0052 defect this type exists for): a successful
 /// interface round keeps its bound socket alive, so the advertised host
 /// candidate and every srflx mapping derived from it refer to the SAME
-/// socket. The pre-fix gather closed this fd before returning and
-/// `ensure_locals` then bound a SECOND socket on a fresh ephemeral port —
+/// socket. The pre-fix gather closed this fd before returning and the caller
+/// (`PeerIceOrchestrator::start_locals`) then bound a SECOND socket on a fresh
+/// ephemeral port —
 /// the signaled host port belonged to a socket the STUN exchange never used,
 /// and the srflx `raddr/rport` base pointed at a dead mapping.
 ///
@@ -922,6 +939,72 @@ pub fn allowed_ifaces(
     Ok(out)
 }
 
+/// One interface round, self-contained: this is what a stage-1 gather WORKER
+/// runs (one per interface, off the pump), and what [`gather_candidates`] runs
+/// per interface in its serial loop. Upstream's equivalent unit is one
+/// goroutine per (network type, STUN URL, mux listen address) — pion fork
+/// `gather.go:491-513`, spawned per negotiation from `worker_ice.go:255-266`.
+#[derive(Debug)]
+pub struct IfaceGather {
+    /// The interface's live bound socket + its host candidate, when the round
+    /// got as far as binding (see [`GatheredSocket`]). `None` = the round
+    /// failed before a candidate existed (the reason is in `errors`).
+    pub socket: Option<GatheredSocket>,
+    /// srflx candidates gathered on that socket.
+    pub srflx: Vec<Candidate>,
+    /// `(context, error)` per failed attempt — `"<iface>"` for the round
+    /// itself, `"<iface>/<host>:<port>"` per STUN exchange. Same shape as
+    /// [`GatherResult::errors`].
+    pub errors: Vec<(String, ManagementError)>,
+}
+
+/// Run ONE interface round end to end: resolve the STUN servers, take a
+/// protected socket, bind it on `iface`, and exchange STUN on it (all servers
+/// in parallel on that one socket, bounded by `timeout_ms`).
+///
+/// Never returns `Err`: a round that cannot even take a socket records the
+/// reason in [`IfaceGather::errors`] and returns an empty round, so a caller
+/// running one worker per interface can never turn one bad interface into a
+/// failed negotiation (upstream: per-candidate failures are logged and the
+/// gather continues, `gather.go:526-531`).
+pub fn gather_interface_round(
+    iface: &InterfaceAddr,
+    servers: &[StunServer],
+    socks: &dyn UdpSocketSource,
+    timeout_ms: u64,
+) -> IfaceGather {
+    let mut resolved: Vec<([u8; 4], u16, &StunServer)> = Vec::new();
+    let mut errors: Vec<(String, ManagementError)> = Vec::new();
+    for server in servers {
+        match socks.resolve_ipv4(&server.host) {
+            Ok(ip) => resolved.push((ip, server.port, server)),
+            Err(e) => errors.push((format!("-/{}", server.host), e)),
+        }
+    }
+    let mut host: Vec<Candidate> = Vec::new();
+    let mut srflx: Vec<Candidate> = Vec::new();
+    let socket = match gather_interface(
+        iface,
+        &resolved,
+        socks,
+        timeout_ms,
+        &mut host,
+        &mut srflx,
+        &mut errors,
+    ) {
+        Ok(sock) => sock,
+        // Only a failed socket acquisition reaches here; already recorded.
+        Err(e) => {
+            errors.push((iface.name.clone(), e));
+            None
+        }
+    };
+    // `gather_interface` pushes the host candidate exactly when it returns the
+    // socket that backs it; `host` is a local staging vec here, so drop it.
+    debug_assert!(host.is_empty() || socket.is_some());
+    IfaceGather { socket, srflx, errors }
+}
+
 /// Gather host + srflx candidates.
 ///
 /// Fail-closed points, in order: interface enumeration unavailable → hard
@@ -931,6 +1014,10 @@ pub fn allowed_ifaces(
 /// "no interfaces". An allowed interface with no usable addresses simply
 /// yields nothing (an empty result with no errors is a legitimate outcome —
 /// e.g. no IPv4 up-interfaces).
+///
+/// Serial driver over the interfaces — the host-side/test entry point for the
+/// gather. The per-peer negotiation does NOT call this (audit §2.7 stage 1):
+/// it runs [`gather_interface_round`] once per interface on worker threads.
 pub fn gather_candidates(
     cfg: &GatherConfig,
     ifaces: &dyn InterfaceSource,

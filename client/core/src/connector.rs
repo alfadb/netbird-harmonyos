@@ -1510,6 +1510,11 @@ struct ConnectorShared {
     /// [`with_ice_sockets_section`] as `ice_snapshot_stale` /
     /// `ice_snapshot_age_ms`.
     ///
+    /// 2026-10-12（阶段 1，官方对齐审计 §2.7）：那段「泵在一次同步收集里长持
+    /// 锁」的历史已随本地候选收集移到 worker 上而结束——现在泵一拍只做状态机
+    /// 推进与非阻塞取件。`try_lock` 行为**不变**（它防的是任何持锁方，不只是
+    /// 收集），只是「持锁 8~11 s」不再是本快照新鲜度设计的动机。
+    ///
     /// Lock order: `inner` → `ice` → this leaf. This leaf is taken with NO
     /// orchestrator guard and NO other leaf held (only `inner` may be held by
     /// [`ConnectorShared::refresh_net_gate_at`]), and a guard of this leaf is

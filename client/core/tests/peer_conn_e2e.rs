@@ -119,8 +119,8 @@ use netbird_core::config;
 use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::peer_conn::{
-    ice_ready_for_default_route, parse_ufrag_pwd, PeerIceDeps, PeerIceOrchestrator,
-    PeerIceState, PeerSignalKind, SignalExchange,
+    ice_ready_for_default_route, parse_ufrag_pwd, InlineGatherExec, PeerIceDeps,
+    PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange,
 };
 
 extern "C" {
@@ -310,6 +310,15 @@ impl TestOrch {
             advertised_candidates: Vec::new(),
         });
         let keys: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        // STAGE 1（官方对齐审计 §2.7）：本地候选收集已移到 worker 上异步跑。
+        // 这个 harness 用**注入时钟**推进 pump（`run_once(now_ms)`，且从不等待
+        // 真实时间），异步 worker 会与它赛跑，所以这里显式用确定性内联执行者
+        // （`InlineGatherExec`：round 当场跑完、事件入队、同一拍取件）。异步
+        // （线程）执行者本身由 `src/peer_conn.rs` 的
+        // `many_peers_start_gathering_in_one_tick_without_a_budget` /
+        // `black_holed_stun_never_blocks_the_pump` /
+        // `candidates_are_delivered_as_each_interface_round_finishes` 覆盖。
+        orch.set_gather_exec(Arc::new(InlineGatherExec));
         orch.set_peers(&keys);
         orch.set_signal_ready(true);
         TestOrch { orch, socks, wg, me }
