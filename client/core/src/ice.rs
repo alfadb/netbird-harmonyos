@@ -551,49 +551,103 @@ unsafe fn dlopen_libc() -> *mut core::ffi::c_void {
 
 impl InterfaceSource for SystemInterfaces {
     fn list(&self) -> Result<Vec<InterfaceAddr>, ManagementError> {
-        let local = |tok: &'static str| ManagementError::Request { status: 0, message: tok.to_string() };
-        unsafe {
-            let libc = dlopen_libc();
-            if libc.is_null() {
-                return Err(local("interface-enum: dlopen libc.so failed"));
-            }
-            let getifaddrs: GetIfAddrs =
-                core::mem::transmute(sys::dlsym(libc, b"getifaddrs\0".as_ptr()));
-            let freeifaddrs: FreeIfAddrs =
-                core::mem::transmute(sys::dlsym(libc, b"freeifaddrs\0".as_ptr()));
-            if core::mem::transmute::<_, *mut core::ffi::c_void>(getifaddrs).is_null()
-                || core::mem::transmute::<_, *mut core::ffi::c_void>(freeifaddrs).is_null()
-            {
-                return Err(local("interface-enum: getifaddrs unavailable"));
-            }
-            let mut head: *mut IfAddrs = core::ptr::null_mut();
-            if getifaddrs(&mut head) != 0 {
-                return Err(local("interface-enum: getifaddrs failed"));
-            }
-            let mut out = Vec::new();
-            let mut cur = head;
-            while !cur.is_null() {
-                let ia = &*cur;
-                if !ia.ifa_name.is_null() && !ia.ifa_addr.is_null() {
-                    let sin = &*(ia.ifa_addr as *const sys::sockaddr_in);
-                    if sin.sin_family == sys::AF_INET as u16 {
-                        // Truncate at NUL ourselves — no CStr, no c_char
-                        // signedness games (probe-pinned idiom).
-                        let raw = core::slice::from_raw_parts(ia.ifa_name as *const u8, 16);
-                        let len = raw.iter().position(|&b| b == 0).unwrap_or(16);
-                        out.push(InterfaceAddr {
-                            name: String::from_utf8_lossy(&raw[..len]).into_owned(),
-                            addr: sin.sin_addr,
-                        });
-                    }
-                }
-                cur = ia.ifa_next;
-            }
-            freeifaddrs(head);
-            Ok(out)
-        }
+        Ok(ifaddrs_entries()?
+            .into_iter()
+            .map(|(name, addr, _mask)| InterfaceAddr { name, addr })
+            .collect())
     }
 }
+
+/// One `getifaddrs` AF_INET entry: interface name, address, netmask.
+type IfAddr = (String, [u8; 4], [u8; 4]);
+
+/// Enumerate this machine's IPv4 interface addresses (name, addr, netmask) via
+/// `getifaddrs` — the ONE enumeration point behind both
+/// [`SystemInterfaces::list`] (host candidates) and [`system_overlay_nets`]
+/// (the overlay-source drop, which needs the netmask upstream reads from
+/// `wgaddr.Address.Network`). Fail-closed on a missing symbol or a failed call.
+pub fn ifaddrs_entries() -> Result<Vec<IfAddr>, ManagementError> {
+    let local = |tok: &'static str| ManagementError::Request { status: 0, message: tok.to_string() };
+    unsafe {
+        let libc = dlopen_libc();
+        if libc.is_null() {
+            return Err(local("interface-enum: dlopen libc.so failed"));
+        }
+        let getifaddrs: GetIfAddrs =
+            core::mem::transmute(sys::dlsym(libc, b"getifaddrs\0".as_ptr()));
+        let freeifaddrs: FreeIfAddrs =
+            core::mem::transmute(sys::dlsym(libc, b"freeifaddrs\0".as_ptr()));
+        if core::mem::transmute::<_, *mut core::ffi::c_void>(getifaddrs).is_null()
+            || core::mem::transmute::<_, *mut core::ffi::c_void>(freeifaddrs).is_null()
+        {
+            return Err(local("interface-enum: getifaddrs unavailable"));
+        }
+        let mut head: *mut IfAddrs = core::ptr::null_mut();
+        if getifaddrs(&mut head) != 0 {
+            return Err(local("interface-enum: getifaddrs failed"));
+        }
+        let mut out: Vec<IfAddr> = Vec::new();
+        let mut cur = head;
+        while !cur.is_null() {
+            let ia = &*cur;
+            if !ia.ifa_name.is_null() && !ia.ifa_addr.is_null() {
+                let sin = &*(ia.ifa_addr as *const sys::sockaddr_in);
+                if sin.sin_family == sys::AF_INET as u16 {
+                    // Truncate at NUL ourselves — no CStr, no c_char
+                    // signedness games (probe-pinned idiom).
+                    let raw = core::slice::from_raw_parts(ia.ifa_name as *const u8, 16);
+                    let len = raw.iter().position(|&b| b == 0).unwrap_or(16);
+                    let mask = if ia.ifa_netmask.is_null() {
+                        [255, 255, 255, 255]
+                    } else {
+                        (*(ia.ifa_netmask as *const sys::sockaddr_in)).sin_addr
+                    };
+                    out.push((
+                        String::from_utf8_lossy(&raw[..len]).into_owned(),
+                        sin.sin_addr,
+                        mask,
+                    ));
+                }
+            }
+            cur = ia.ifa_next;
+        }
+        freeifaddrs(head);
+        Ok(out)
+    }
+}
+
+/// The client's OWN overlay network(s), in the shape upstream's
+/// `UniversalUDPMuxDefault` drops overlay-sourced STUN by
+/// (`client/iface/udpmux/universal.go:160-173`: `wg.Network.Contains(src)` /
+/// `wg.IPv6Net.Contains(src)`).
+///
+/// Upstream takes the network from the WireGuard interface's address object.
+/// Ours is the same fact read from the same place: every interface the ICE
+/// filter REJECTS carries an address we must never treat as a STUN server — the
+/// platform tunnel is `vpn-tun` (`NetBirdVpnConfig.ets:45-46`, in
+/// [`DEFAULT_INTERFACE_BLACKLIST`]) with the device's `100.108.x.x/…` overlay
+/// address. `lo*` is excluded on purpose: a loopback source is not an overlay
+/// peer, and the host harnesses (the nbinterop CLI, the crate's own tests) run
+/// STUN fixtures over loopback.
+pub fn system_overlay_nets(blacklist: &[&str]) -> Vec<crate::ice_mux::OverlayNet> {
+    let Ok(entries) = ifaddrs_entries() else { return Vec::new() };
+    let mut out: Vec<crate::ice_mux::OverlayNet> = Vec::new();
+    for (name, addr, mask) in entries {
+        if name.starts_with("lo") || interface_allowed(&name, blacklist) {
+            continue;
+        }
+        let bits = u32::from_be_bytes(mask).count_ones() as u8;
+        let net = crate::ice_mux::OverlayNet {
+            addr: (u32::from_be_bytes(addr) & u32::from_be_bytes(mask)).to_be_bytes(),
+            prefix: bits,
+        };
+        if !out.contains(&net) {
+            out.push(net);
+        }
+    }
+    out
+}
+
 
 /// `DefaultInterfaceBlacklist` verbatim from upstream
 /// (`client/internal/profilemanager/config.go:56-59`): the tunnel interface
@@ -939,11 +993,136 @@ pub fn allowed_ifaces(
     Ok(out)
 }
 
-/// One interface round, self-contained: this is what a stage-1 gather WORKER
+// ---------------------------------------------------------------------------
+// mux-shaped gathering — official-alignment audit §2.7 stage 2
+// ---------------------------------------------------------------------------
+
+/// Host candidates off the shared mux: one per allowed interface address, ALL
+/// carrying the mux's single port — upstream `gatherCandidatesLocalUDPMux`
+/// (pion fork `gather.go:331-405`: `localAddresses := a.udpMux.GetListenAddresses()`
+/// then `Port: udpAddr.Port` for every one of them). Computed and emitted
+/// immediately — no STUN, no socket, no waiting (the stage-1 per-interface
+/// socket + STUN round is gone).
+///
+/// Dedup by (address, port) mirrors upstream's `existingConfigs` guard
+/// (`gather.go:373-376`): `getifaddrs` repeats multi-flag entries and two of
+/// them must not become two identical candidates.
+pub fn mux_host_candidates(ifaces: &[InterfaceAddr], port: u16) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    for iface in ifaces {
+        if out.iter().any(|c| c.port == port && c.address == ipv4_str(iface.addr)) {
+            continue;
+        }
+        out.push(Candidate::host_candidate(iface.addr, port));
+    }
+    out
+}
+
+/// The srflx candidates one mux mapping yields: upstream
+/// `gatherCandidatesSrflxUDPMux` (fork `gather.go:491-513`) builds ONE srflx
+/// candidate per (network type, STUN url, mux listen address) with
+/// `RelAddr: localAddr.IP` / `RelPort: localAddr.Port` — i.e. the base is the
+/// MUX listen address (interface address × mux port), not a socket that
+/// happened to answer. Every listen address shares the one cached mapping, so
+/// the `raddr` differs while the mapped `address:port` is identical: that is
+/// exactly what upstream advertises, and RFC 8445 §6.1.2.4 lets the peer dedup.
+pub fn srflx_candidates_for_listen_addrs(
+    ifaces: &[InterfaceAddr],
+    port: u16,
+    mapped: ([u8; 4], u16),
+) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    for iface in ifaces {
+        let base = Candidate::host_candidate(iface.addr, port);
+        let cand = Candidate::srflx_candidate(&base, mapped.0, mapped.1);
+        if out.iter().any(|c| c.address == cand.address && c.port == cand.port
+            && c.related_address == cand.related_address)
+        {
+            continue;
+        }
+        out.push(cand);
+    }
+    out
+}
+
+/// One (mux, STUN server) exchange and how it ended — the stage-0 unit
+/// (`N5c_ICE|gather-stun`) is now the mux's exchange instead of a per-interface
+/// socket's: upstream's srflx gather is one `GetXORMappedAddr` call per
+/// (network type, STUN url, mux listen address) with the in-flight de-dup
+/// collapsing them onto ONE STUN round per server (fork `gather.go:491-513`,
+/// `universal.go:222-270`).
+#[derive(Debug)]
+pub struct SrflxExchange {
+    pub server: StunServer,
+    pub resolved: Option<([u8; 4], u16)>,
+    pub ms: u64,
+    pub outcome: Result<([u8; 4], u16), ManagementError>,
+}
+
+/// Everything ONE srflx round produced. Never `Err`: a dead server is a
+/// recorded per-server outcome (upstream logs one warning per failed exchange
+/// and keeps gathering, `gather.go:526-531`), and the mux's cache makes a
+/// second server's answer irrelevant to the first's failure.
+#[derive(Debug, Default)]
+pub struct SrflxGather {
+    pub exchanges: Vec<SrflxExchange>,
+    /// `("mux/<host>:<port>", error)` per failed exchange — the same
+    /// `(context, error)` shape the retired per-interface gather reported.
+    pub errors: Vec<(String, ManagementError)>,
+}
+
+/// Run ONE srflx round through the shared mux: resolve each STUN server, ask
+/// the mux for the shared XOR-MAPPED-ADDRESS and record the outcome. This is
+/// what a stage-2 gather WORKER runs (one per negotiation, off the pump; the
+/// mux de-duplicates across peers and across the round's own callers).
+pub fn gather_srflx_round(
+    servers: &[StunServer],
+    mux: &crate::ice_mux::IceMux,
+    socks: &dyn UdpSocketSource,
+    timeout_ms: u64,
+) -> SrflxGather {
+    let mut out = SrflxGather::default();
+    for server in servers {
+        let started = sys::mono_ms();
+        let ctx = format!("mux/{}:{}", server.host, server.port);
+        let resolved = match socks.resolve_ipv4(&server.host) {
+            Ok(ip) => Some((ip, server.port)),
+            Err(e) => {
+                out.errors.push((format!("mux/{}", server.host), e.clone()));
+                out.exchanges.push(SrflxExchange {
+                    server: server.clone(),
+                    resolved: None,
+                    ms: sys::mono_ms().saturating_sub(started),
+                    outcome: Err(e),
+                });
+                continue;
+            }
+        };
+        let addr = resolved.expect("just set");
+        let outcome = mux.get_xor_mapped_addr(addr, timeout_ms);
+        let ms = sys::mono_ms().saturating_sub(started);
+        if let Err(e) = &outcome {
+            out.errors.push((ctx, e.clone()));
+        }
+        out.exchanges.push(SrflxExchange { server: server.clone(), resolved, ms, outcome });
+    }
+    out
+}
+
+
 /// runs (one per interface, off the pump), and what [`gather_candidates`] runs
 /// per interface in its serial loop. Upstream's equivalent unit is one
 /// goroutine per (network type, STUN URL, mux listen address) — pion fork
 /// `gather.go:491-513`, spawned per negotiation from `worker_ice.go:255-266`.
+///
+/// **RETIRED from the ICE plane by stage 2** (official-alignment audit §2.7):
+/// the peer negotiation no longer calls this — it takes host candidates from the
+/// shared mux ([`mux_host_candidates`]) and srflx candidates from the shared
+/// cache ([`gather_srflx_round`]). It survives only as the host-only
+/// self-test of the per-socket gather primitive
+/// (`host_sockets::ice_stun_offline_check`) and its own unit tests, and is
+/// deleted with the shell pool in stage 4 (audit risk P7: delete the old path
+/// only after the mux is device-green).
 #[derive(Debug)]
 pub struct IfaceGather {
     /// The interface's live bound socket + its host candidate, when the round

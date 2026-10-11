@@ -499,14 +499,18 @@ fn wg_handshake_and_probes_ride_the_ice_selected_socket() {
     assert!(ok, "both instances must reach Connected + established WG sessions");
 
     // WG rides the SELECTED socket, proven three ways:
-    // (1) each device's egress local address == the local candidate THAT
-    //     side signaled (the selected pair's local end);
+    // (1) each device's egress fd IS the local socket the selected pair runs on;
+    //     STAGE 2 (official-alignment §2.7): that socket is the ONE shared mux,
+    //     WILDCARD-bound (upstream's `0.0.0.0:NET_PORT` single socket,
+    //     `ice_bind.go:291-316`), so its own local address is
+    //     `0.0.0.0:<mux port>`. The PORT is what ties it to the selected pair —
+    //     it is the port every candidate of that side advertised.
     let a_cand = &candidate_frames(&bus, &key_a)[0];
     let b_cand = &candidate_frames(&bus, &key_b)[0];
     let a_egress = a.device_peer().egress_local.expect("A egress attached");
     let b_egress = b.device_peer().egress_local.expect("B egress attached");
-    assert_eq!(a_egress, (parse_addr(&a_cand.address), a_cand.port), "A egress == A selected candidate");
-    assert_eq!(b_egress, (parse_addr(&b_cand.address), b_cand.port), "B egress == B selected candidate");
+    assert_eq!(a_egress, ([0, 0, 0, 0], a_cand.port), "A egress == A's shared mux socket");
+    assert_eq!(b_egress, ([0, 0, 0, 0], b_cand.port), "B egress == B's shared mux socket");
     // (2) each side's landed endpoint is the peer's selected socket;
     assert_eq!(a.status_of(&key_b).selected_remote, Some((parse_addr(&b_cand.address), b_cand.port)));
     assert_eq!(b.status_of(&key_a).selected_remote, Some((parse_addr(&a_cand.address), a_cand.port)));
@@ -768,10 +772,16 @@ fn selected_connection_failure_recycles_fail_closed_then_renegotiates() {
     assert!(a.device_peer().egress_local.is_some(), "egress re-attached after renegotiation");
     assert!(b.device_peer().egress_local.is_some());
     assert!(a.device_peer().endpoint.is_some());
+    // STAGE 2: B's egress is B's shared WILDCARD-bound mux socket, so its own
+    // local address is `0.0.0.0:<port>`; the mirror property is about the PORT
+    // A landed its endpoint on (that port IS the socket A sends to and B receives
+    // WG data on).
+    let b_egress = b.device_peer().egress_local.expect("B egress");
+    assert_eq!(b_egress.0, [0, 0, 0, 0], "B's egress is the wildcard-bound shared mux");
     assert_eq!(
-        a.status_of(&key_b).selected_remote,
-        b.device_peer().egress_local,
-        "A's landed endpoint == B's (new) egress — the mirror property"
+        a.status_of(&key_b).selected_remote.map(|(_, port)| port),
+        Some(b_egress.1),
+        "A's landed endpoint port == B's (new) shared mux port — the mirror property"
     );
     let summary = a.orch.summary();
     let snap = gated_config(a.feed.tunnel_ready(), &summary);

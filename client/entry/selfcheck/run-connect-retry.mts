@@ -74,6 +74,8 @@ const SHIM_TYPES: Record<string, string[]> = {
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
+    // STAGE 2 (official-alignment audit §2.7): the shared ICE mux feed types.
+    'IceMuxOpen', 'IceMuxFeedResult',
     'PhysicalBearerFacts', 'PhoneLogConfigureResult', 'PhoneLogSummary'],
   NetBirdUiModel: ['UiNetworkConfig', 'UiStatusDocument'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',

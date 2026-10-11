@@ -207,14 +207,14 @@ try {
     ability.includes("} from './NetBirdN2Sandwich';") &&
     ability.includes('sendAndWaitN2Control'),
     'import block');
-  check('S2 the I pre control runs BEFORE the first ICE pool feed (and after attach)',
+  check('S2 the I pre control runs BEFORE the first ICE mux feed (and after attach)',
     ability.indexOf('await this.n2IceSandwichPre();') > 0 &&
     ability.indexOf('await this.n2IceSandwichPre();') <
-      ability.indexOf('const iceOk: boolean = await this.protectAndFeedIceSocket();'),
+      ability.indexOf('const iceOk: boolean = await this.protectAndFeedIceMux();'),
     'I ordering');
-  check('S2 the Ws pre control runs AFTER the ICE pool feed, before the watcher starts',
+  check('S2 the Ws pre control runs AFTER the ICE mux feed, before the watcher starts',
     ability.indexOf('await this.n2WsSandwichPre();') >
-      ability.indexOf('const iceOk: boolean = await this.protectAndFeedIceSocket();') &&
+      ability.indexOf('const iceOk: boolean = await this.protectAndFeedIceMux();') &&
     ability.indexOf('await this.n2WsSandwichPre();') <
       ability.indexOf('this.startStatusAndNetcfgWatcher();'),
     'Ws ordering');

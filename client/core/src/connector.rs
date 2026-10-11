@@ -5470,7 +5470,16 @@ pub struct ConnectorHandle {
     /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
     /// handle for `connector_ice_socket_feed`). `None` = caller-supplied
     /// orchestrator (tests).
+    ///
+    /// STAGE 2 (official-alignment §2.7): the ICE plane no longer takes
+    /// per-session sockets, so nothing consumes this queue any more — it is
+    /// kept only so the shell's existing pool feed keeps answering ok until
+    /// stage 4 deletes both sides (audit §2.7 stage 4).
     ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>,
+    /// STAGE 2: the ONE shared ICE mux slot the orchestrator reads
+    /// (`connector_ice_mux_feed` fills it after the shell protected the fd).
+    /// `None` = caller-supplied orchestrator without a mux slot (tests).
+    ice_mux: Option<crate::peer_conn::IceMuxSlot>,
     /// N5d: the protected signal-socket source behind the signal link
     /// (resupply handle for `connector_signal_socket_feed`). `None` = no
     /// signal material provided (host-test construction).
@@ -5681,9 +5690,11 @@ impl ConnectorHandle {
             supply
         });
         let ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>;
+        let ice_mux: Option<crate::peer_conn::IceMuxSlot>;
         let ice = match ice {
             Some(orch) => {
                 ice_sockets = None;
+                ice_mux = None;
                 orch
             }
             None => {
@@ -5735,6 +5746,13 @@ impl ConnectorHandle {
                 })));
                 let _ = shared.ice_sockets.set(socks.clone());
                 ice_sockets = Some(socks);
+                // STAGE 2: ONE shared ICE mux slot for the whole ICE plane.
+                // The shell fills it (protect + feed) on device; host runs arm
+                // it lazily from `socks` (see `PeerIceOrchestrator::arm_mux`).
+                let mux_slot: crate::peer_conn::IceMuxSlot =
+                    std::sync::Arc::new(std::sync::Mutex::new(None));
+                orch.lock_poison().set_ice_mux(mux_slot.clone());
+                ice_mux = Some(mux_slot);
                 orch
             }
         };
@@ -5794,6 +5812,7 @@ impl ConnectorHandle {
             stop_flag,
             socket_source,
             ice_sockets,
+            ice_mux,
             signal_sockets,
             wg_feed,
             ice,
@@ -6963,6 +6982,75 @@ pub fn connector_ice_socket_feed_json(fd: i32) -> String {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token()));
     }
     format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
+}
+
+/// The `connector_ice_mux_feed(fd)` implementation (official-alignment §2.7
+/// stage 2) — shell-side feed of the ONE PROTECTED shared ICE mux socket,
+/// opened and bound by the core (`crate::ice_mux::ice_mux_open`), protected by
+/// the shell and then adopted here. This is the `wg_fwd_open` shape applied to
+/// the ICE plane: the core binds, the shell protects, the core adopts the SAME
+/// fd (a dup of it — the number stays borrowed, the shell closes its original).
+///
+/// Replacing an already-armed mux is allowed and meaningful: after a physical
+/// network change the shell re-creates the `VpnConnection`, so the previous
+/// fd's protection is gone and a fresh socket is opened, protected and fed.
+/// The orchestrator notices the new mux on its next tick and renegotiates the
+/// sessions that still ride the old one
+/// ([`PeerIceOrchestrator::drop_stale_mux_sessions`]).
+///
+/// Failure tokens (fail-closed): `no-connector`, `no-mux-slot` (caller-supplied
+/// orchestrator / host-test construction), `socket-fd-missing`,
+/// `socket-fd-invalid` (not dup-able), `socket-unbound` (the fd was never
+/// bound), `port-mismatch`. Success: `{"ok":true,"port":<n>,"replaced":<bool>}`.
+pub fn connector_ice_mux_feed_json(fd: i32) -> String {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
+    };
+    let Some(mux_slot) = handle.ice_mux.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-mux-slot"));
+    };
+    if fd < 0 {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-fd-missing"));
+    }
+    let dup = match crate::mgmtsock::dup_socket_fd(fd) {
+        Ok(d) => d,
+        Err(e) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token())),
+    };
+    let owned = unsafe { std::os::fd::FromRawFd::from_raw_fd(dup) };
+    let owned: std::os::fd::OwnedFd = owned;
+    let overlay = crate::ice::system_overlay_nets(&crate::ice::DEFAULT_INTERFACE_BLACKLIST);
+    let mux = match crate::ice_mux::IceMux::adopt(owned, overlay, 0) {
+        Ok(m) => m,
+        Err(e) => {
+            let token = match &e {
+                crate::management::ManagementError::Network(msg) if msg.contains("unbound") => {
+                    "socket-unbound"
+                }
+                crate::management::ManagementError::Network(msg) if msg.contains("port-mismatch") => {
+                    "port-mismatch"
+                }
+                _ => "socket-fd-invalid",
+            };
+            return format!("{{{},{}}}", jbool("ok", false), jstr("error", token));
+        }
+    };
+    let port = mux.local_port();
+    let replaced = mux_slot
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(mux)
+        .is_some();
+    crate::hilog::emit(&format!(
+        "N5e_ICE|mux-feed|port={port}|replaced={}|source=shell",
+        u8::from(replaced)
+    ));
+    format!(
+        "{{{},{},{}}}",
+        jbool("ok", true),
+        jinum("port", port as i64),
+        jbool("replaced", replaced)
+    )
 }
 
 /// The `connector_signal_socket_feed(fd, addrJson)` implementation (N5d) —
@@ -9370,6 +9458,7 @@ mod tests {
                 stop_flag: Arc::new(AtomicBool::new(false)),
                 socket_source: None,
                 ice_sockets: Some(udp),
+                ice_mux: None,
                 signal_sockets: None,
                 wg_feed: None,
                 ice,

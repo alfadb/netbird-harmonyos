@@ -553,6 +553,22 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    return JSON.stringify({ fd: typeof g().__NB_ICE_FD === "number" ? g().__NB_ICE_FD : 62,\n' +
   '      bind_rc: 0, bind_errno: 0 });\n' +
   '  },\n' +
+  // STAGE 2 (official-alignment audit §2.7): the ONE shared ICE mux socket. The
+  // core opens AND binds it (`{fd,port,bind_rc,bind_errno}`); the shell protects
+  // that fd and feeds the same number back (`{ok,port,replaced}`). Counted like
+  // every other supply seam so a fixture can assert "nothing was let through".
+  '  ice_mux_open: () => {\n' +
+  '    g().__NB_SUPPLY_ICE_MUX_OPEN = (g().__NB_SUPPLY_ICE_MUX_OPEN || 0) + 1;\n' +
+  '    return JSON.stringify({ fd: typeof g().__NB_ICE_FD === "number" ? g().__NB_ICE_FD : 62,\n' +
+  '      port: typeof g().__NB_ICE_MUX_PORT === "number" ? g().__NB_ICE_MUX_PORT : 41000,\n' +
+  '      bind_rc: 0, bind_errno: 0 });\n' +
+  '  },\n' +
+  '  connector_ice_mux_feed: () => {\n' +
+  '    g().__NB_SUPPLY_ICE_MUX_FEED = (g().__NB_SUPPLY_ICE_MUX_FEED || 0) + 1;\n' +
+  '    return JSON.stringify({ ok: true,\n' +
+  '      port: typeof g().__NB_ICE_MUX_PORT === "number" ? g().__NB_ICE_MUX_PORT : 41000,\n' +
+  '      replaced: false });\n' +
+  '  },\n' +
   '  socket_supply_dns_servers: () => {\n' +
   '    g().__NB_SUPPLY_DNS = (g().__NB_SUPPLY_DNS || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +

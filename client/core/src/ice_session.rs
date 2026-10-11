@@ -157,6 +157,7 @@
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use crate::ice::{priority_for, seam_to_management, set_nonblock, Candidate, CandidateType, UdpSocketSource};
 use crate::management::ManagementError;
@@ -759,18 +760,49 @@ pub struct PairSnapshot {
     pub nominated: bool,
 }
 
+/// Where a local candidate's datagrams go. Official-alignment stage 2 (§2.7):
+/// the ICE plane uses ONE protected socket for every peer
+/// ([`crate::ice_mux::IceMux`]), so the normal case is [`LocalSockKind::Shared`]
+/// and the session owns NO fd — dropping a session must never close the mux.
+/// [`LocalSockKind::Owned`] is the session's own dup, still used by the unit
+/// tests, the host harness and the N11 per-session egress shape.
+#[derive(Debug)]
+enum LocalSockKind {
+    /// The session's OWN protected dup socket.
+    Owned {
+        fd: sys::c_int,
+        /// `true` = the fd was adopted from a gather hand-over
+        /// ([`IceSession::add_local_candidate_bound`]) and therefore carries the
+        /// N2 socket-trace registration the shell's `protect` put on it.
+        traced: bool,
+    },
+    /// The SHARED mux socket: borrowed, never closed here.
+    Shared,
+}
+
 struct LocalSock {
     cand: Candidate,
-    fd: sys::c_int,
-    /// `true` = the fd was adopted from a gather hand-over
-    /// ([`IceSession::add_local_candidate_bound`]) and therefore carries the
-    /// N2 socket-trace registration the shell's `protect` put on it; the
-    /// gather used to emit `n2_socket_trace::closed` when it closed the fd
-    /// itself, so this session — now the owner — emits it instead.
-    /// Provider-taken sockets (`add_local_candidate*`) were never traced here,
-    /// so their close path stays byte-identical to before.
-    traced: bool,
+    kind: LocalSockKind,
 }
+
+impl LocalSock {
+    /// The fd this candidate sends/receives on, when the session owns one.
+    /// `None` = shared (the mux owns it) — the fd comes from
+    /// [`IceSession::mux`] instead.
+    fn owned_fd(&self) -> Option<sys::c_int> {
+        match self.kind {
+            LocalSockKind::Owned { fd, .. } => Some(fd),
+            LocalSockKind::Shared => None,
+        }
+    }
+
+    fn traced(&self) -> bool {
+        matches!(self.kind, LocalSockKind::Owned { traced: true, .. })
+    }
+}
+
+/// Monotonic session ids (only ever used as mux registry keys).
+static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Cap of the outbound-of-ICE queue ([`IceSession::take_data_rx`]): non-STUN
 /// datagrams this session read but the WG data plane has not absorbed yet.
@@ -817,6 +849,13 @@ impl Pair {
 /// through [`IceSession::run_once(now_ms)`] with an INJECTED clock; the
 /// module never reads the wall clock.
 pub struct IceSession {
+    /// Process-unique session id: the key this session is registered under in
+    /// the shared [`crate::ice_mux::IceMux`] (upstream: the agent's ufrag-keyed
+    /// `udpMuxedConn`).
+    id: u64,
+    /// The shared mux, once this session has a mux-backed local candidate.
+    /// `None` = the session owns its sockets ([`LocalSockKind::Owned`]).
+    mux: Option<Arc<crate::ice_mux::IceMux>>,
     local: IceCredentials,
     remote: Option<IceCredentials>,
     controlling: bool,
@@ -897,6 +936,8 @@ impl IceSession {
             }
         };
         Ok(IceSession {
+            id: NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+            mux: None,
             local,
             remote: None,
             controlling,
@@ -937,8 +978,13 @@ impl IceSession {
 
     /// N2 v4.1 P7: name the peer that owns this session for the outer-source
     /// receipt (`peer=`). Purely a log label — no protocol decision reads it.
+    /// With a mux attached the label lives on the mux side too (the mux, not the
+    /// session, reads the socket), so the registration is refreshed.
     pub fn set_peer_label(&mut self, label: &str) {
         self.peer_label = label.to_string();
+        if let Some(mux) = self.mux.as_ref() {
+            mux.register_session(self.id, &self.local.ufrag, &self.peer_label);
+        }
     }
 
     /// Add a local candidate and give it its long-lived check socket: a
@@ -1033,10 +1079,60 @@ impl IceSession {
             cleanup(dup);
             return Err(ManagementError::Network("ice-bind-port-mismatch".into()));
         }
-        self.local_socks.push(LocalSock { cand: cand.clone(), fd: dup, traced: false });
+        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Owned { fd: dup, traced: false } });
         self.rebuild_pairs();
         self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
         Ok(cand)
+    }
+
+    /// Adopt a local candidate that sends and receives on the SHARED mux socket
+    /// (official-alignment audit §2.7 stage 2): the candidate is `interface
+    /// address × mux port`, no socket is taken, and the session keeps no fd of
+    /// its own — upstream `gatherCandidatesLocalUDPMux` + `GetConn(a.localUfrag,
+    /// udpAddr, c.ID())` (pion fork `gather.go:331-405`). The mux is registered
+    /// for this session's ufrag on the first mux candidate, so inbound Binding
+    /// Requests route here by USERNAME (`udpmux/mux.go:455-468`).
+    ///
+    /// Fail-closed: a candidate whose port is not the mux port is refused
+    /// ([`ManagementError::Network`]) instead of being advertised dead.
+    pub fn add_local_candidate_mux(
+        &mut self,
+        mut cand: Candidate,
+        mux: Arc<crate::ice_mux::IceMux>,
+    ) -> Result<Candidate, ManagementError> {
+        if self.stopped {
+            return Err(ManagementError::Request { status: 0, message: "ice:session-closed".into() });
+        }
+        if parse_ipv4(&cand.address).is_none() {
+            return Err(ManagementError::Parse(format!(
+                "ice:local-candidate-not-ipv4 '{}'",
+                cand.address
+            )));
+        }
+        let port = mux.local_port();
+        if cand.port == 0 {
+            cand.port = port;
+        } else if cand.port != port {
+            return Err(ManagementError::Network("ice-mux-candidate-port-mismatch".into()));
+        }
+        if self.mux.is_none() {
+            mux.register_session(self.id, &self.local.ufrag, &self.peer_label);
+            self.mux = Some(mux);
+        } else if let Some(existing) = self.mux.as_ref() {
+            if !Arc::ptr_eq(existing, &mux) {
+                return Err(ManagementError::Network("ice-mux-replaced".into()));
+            }
+        }
+        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Shared });
+        self.rebuild_pairs();
+        self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
+        Ok(cand)
+    }
+
+    /// The mux this session's shared candidates use (`None` = it owns its
+    /// sockets). The orchestrator uses the identity to notice a replaced mux.
+    pub fn mux_ptr(&self) -> Option<*const crate::ice_mux::IceMux> {
+        self.mux.as_ref().map(Arc::as_ptr)
     }
 
     /// Adopt an ALREADY-BOUND protected socket as a local candidate (the
@@ -1101,7 +1197,7 @@ impl IceSession {
             cleanup(dup);
             return Err(seam_to_management(e));
         }
-        self.local_socks.push(LocalSock { cand: cand.clone(), fd: dup, traced: true });
+        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Owned { fd: dup, traced: true } });
         self.rebuild_pairs();
         self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
         Ok(cand)
@@ -1255,9 +1351,9 @@ impl IceSession {
             };
             if attempts < MAX_CHECK_ATTEMPTS {
                 let msg = self.build_check(txn, nominated)?;
-                let fd = self.local_socks[self.pairs[i].local].fd;
+                let local = self.pairs[i].local;
                 let target = self.remote_target(&self.pairs[i]);
-                if !send_to(fd, &target, &msg) {
+                if !self.send_on(local, &target, &msg) {
                     self.log_pair_failed(i, "send-error");
                     self.pairs[i].state = PairState::Failed;
                     self.pairs[i].txn = None;
@@ -1290,9 +1386,10 @@ impl IceSession {
             }
             let txn = stun::random_transaction_id()?;
             let msg = self.build_check(txn, false)?;
-            let fd = self.local_socks[self.pairs[i].local].fd;
+            let local = self.pairs[i].local;
             let target = self.remote_target(&self.pairs[i]);
-            if send_to(fd, &target, &msg) {
+            if self.send_on(local, &target, &msg) {
+                self.log_check_tx(i, false);
                 self.log_check_tx(i, false);
                 let p = &mut self.pairs[i];
                 p.state = PairState::InProgress;
@@ -1326,9 +1423,9 @@ impl IceSession {
                 if let Some(i) = best {
                     let txn = stun::random_transaction_id()?;
                     let msg = self.build_check(txn, true)?;
-                    let fd = self.local_socks[self.pairs[i].local].fd;
+                    let local = self.pairs[i].local;
                     let target = self.remote_target(&self.pairs[i]);
-                    if send_to(fd, &target, &msg) {
+                    if self.send_on(local, &target, &msg) {
                         self.log_check_tx(i, true);
                         let p = &mut self.pairs[i];
                         p.nominated = true;
@@ -1394,9 +1491,9 @@ impl IceSession {
         // keepalive = a plain connectivity check (no USE-CANDIDATE) on the
         // selected pair — the pion keepalive shape (Binding Request, re-keyed).
         let msg = self.build_check(txn, false)?;
-        let fd = self.local_socks[self.pairs[i].local].fd;
+        let local = self.pairs[i].local;
         let target = self.remote_target(&self.pairs[i]);
-        if send_to(fd, &target, &msg) {
+        if self.send_on(local, &target, &msg) {
             self.keepalives.push((txn, now));
             self.last_keepalive_ms = now;
             if self.keepalives.len() > 8 {
@@ -1410,21 +1507,52 @@ impl IceSession {
         if self.local_socks.is_empty() {
             return Ok(());
         }
-        let mut fds: Vec<sys::pollfd> = self
-            .local_socks
-            .iter()
-            .map(|s| sys::pollfd { fd: s.fd, events: sys::POLLIN, revents: 0 })
-            .collect();
+        // Official-alignment stage 2: the shared mux is drained by the
+        // orchestrator once per tick, so this session just takes ITS share of
+        // what the mux classified. No poll, no syscall, no fd of our own.
+        if let Some(mux) = self.mux.clone() {
+            let free = DATA_RX_CAP.saturating_sub(self.data_rx.len());
+            let stun = mux.take_stun(self.id, RECV_BUDGET_PER_RUN);
+            for dg in stun {
+                match parse_stun(&dg.bytes) {
+                    Ok(parsed) => {
+                        let idx = Self::inbound_local_idx(&self.pairs, &self.remote_cands, dg.src.0, dg.src.1);
+                        self.handle_inbound(idx, &dg.bytes, &parsed, dg.src.0, dg.src.1, now);
+                    }
+                    // STUN-shaped but undecodable: dropped, as on the owned
+                    // socket path (upstream clears the buffer on a parse error).
+                    Err(_) => {}
+                }
+            }
+            if free > 0 {
+                for (src, port, bytes) in mux.take_data(self.id, free) {
+                    self.data_rx.push_back((src, port, bytes));
+                }
+            }
+            return Ok(());
+        }
+        let mut fds: Vec<sys::pollfd> = Vec::new();
+        // Local sock indices that OWN their socket, in the same order as `fds`
+        // (a mux-backed candidate has no fd of its own to poll).
+        let mut owner_idx: Vec<usize> = Vec::new();
+        for (i, s) in self.local_socks.iter().enumerate() {
+            if let Some(fd) = s.owned_fd() {
+                fds.push(sys::pollfd { fd, events: sys::POLLIN, revents: 0 });
+                owner_idx.push(i);
+            }
+        }
+        if fds.is_empty() {
+            return Ok(());
+        }
         let ret = unsafe { sys::poll(fds.as_mut_ptr(), fds.len() as u64, 0) };
         if ret <= 0 {
             return Ok(());
         }
         // ONE aggregate read budget for this run, shared by every local
-        // socket (see [`RECV_BUDGET_PER_RUN`]); clamped to the data queue's
-        // free room so the run cannot read more data than the queue accepts.
+        // socket (see [`RECV_BUDGET_PER_RUN`]).
         let mut budget =
             RECV_BUDGET_PER_RUN.min(DATA_RX_CAP.saturating_sub(self.data_rx.len()));
-        let n = self.local_socks.len();
+        let n = fds.len();
         let start = self.recv_cursor % n;
         for k in 0..n {
             if budget == 0 {
@@ -1434,7 +1562,7 @@ impl IceSession {
             if fds[i].revents & sys::POLLIN == 0 {
                 continue;
             }
-            if self.drain_socket(i, now, &mut budget) {
+            if self.drain_socket(owner_idx[i], now, &mut budget) {
                 // Saturated: this socket ate the whole run budget. The next
                 // run starts at the FOLLOWING socket (rotating scan) so a
                 // flood on one candidate cannot starve the others.
@@ -1444,11 +1572,34 @@ impl IceSession {
         Ok(())
     }
 
+    /// Which of OUR local candidates an inbound mux datagram belongs to. On a
+    /// SHARED socket `recvfrom` cannot say which of our addresses the peer
+    /// addressed (they all resolve to the one fd), so the check is attributed to
+    /// the first local candidate that already pairs with that remote address —
+    /// else to the first local candidate. The response leaves from the same
+    /// shared socket either way, so the peer sees the source it addressed (the
+    /// routing table picks the interface), which is what upstream's muxed conn
+    /// gives it too.
+    fn inbound_local_idx(
+        pairs: &[Pair],
+        remotes: &[Candidate],
+        src: [u8; 4],
+        src_port: u16,
+    ) -> usize {
+        let remote = remotes
+            .iter()
+            .position(|c| parse_ipv4(&c.address) == Some(src) && c.port == src_port);
+        match remote.and_then(|r| pairs.iter().find(|p| p.remote == r).map(|p| p.local)) {
+            Some(local) => local,
+            None => 0,
+        }
+    }
+
     /// Drain one socket until it reports EAGAIN or `budget` hits 0. Returns
     /// `true` when the run budget (not the socket) stopped the drain, i.e.
     /// datagrams are likely still queued.
     fn drain_socket(&mut self, idx: usize, now: u64, budget: &mut usize) -> bool {
-        let fd = self.local_socks[idx].fd;
+        let Some(fd) = self.local_socks[idx].owned_fd() else { return false };
         let mut buf = [0u8; 1500];
         while *budget > 0 {
             // bounded drain per run: a flood cannot starve the timers
@@ -1584,13 +1735,13 @@ impl IceSession {
         if !username_ok {
             let resp = build_error_response(parsed.txn, ERR_UNAUTHORIZED, None);
             let target = sys::sockaddr_in::new(src, src_port);
-            let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
+            let _ = self.send_on(local_idx, &target, &resp);
             return;
         }
         if !mi_ok {
             let resp = build_error_response(parsed.txn, ERR_UNAUTHORIZED, None);
             let target = sys::sockaddr_in::new(src, src_port);
-            let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
+            let _ = self.send_on(local_idx, &target, &resp);
             return;
         }
         // Role-conflict detection & repair (RFC 8445 §7.3.1.1).
@@ -1599,7 +1750,7 @@ impl IceSession {
                 if self.tie_breaker >= theirs {
                     let resp = build_error_response(parsed.txn, ERR_ROLE_CONFLICT, Some(&self.local.pwd));
                     let target = sys::sockaddr_in::new(src, src_port);
-                    let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
+                    let _ = self.send_on(local_idx, &target, &resp);
                     return; // retain role
                 }
                 self.switch_role(false, false);
@@ -1612,7 +1763,7 @@ impl IceSession {
                 } else {
                     let resp = build_error_response(parsed.txn, ERR_ROLE_CONFLICT, Some(&self.local.pwd));
                     let target = sys::sockaddr_in::new(src, src_port);
-                    let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
+                    let _ = self.send_on(local_idx, &target, &resp);
                     return; // retain role
                 }
             }
@@ -1621,7 +1772,7 @@ impl IceSession {
         // with our own password (§7.3.1.5 shape).
         let resp = build_success_response(parsed.txn, (src, src_port), &self.local.pwd);
         let target = sys::sockaddr_in::new(src, src_port);
-        let _ = send_to(self.local_socks[local_idx].fd, &target, &resp);
+        let _ = self.send_on(local_idx, &target, &resp);
         self.last_inbound_ms = Some(now);
 
         // Pair bookkeeping: match (this socket ← source); unknown source ⇒
@@ -1915,7 +2066,14 @@ impl IceSession {
             .pairs
             .iter()
             .position(|p| p.key(&self.local_socks, &self.remote_cands) == key)?;
-        Some(self.local_socks[self.pairs[pi].local].fd)
+        let local = &self.local_socks[self.pairs[pi].local];
+        match local.owned_fd() {
+            Some(fd) => Some(fd),
+            // Stage 2: a mux-backed selected pair rides the SHARED socket — the
+            // egress dup is a dup of the mux fd (upstream: the peer's egress IS
+            // the one shared socket, `ice_bind.go:291-316`).
+            None => self.mux.as_ref().map(|m| m.raw_fd()),
+        }
     }
 
     /// N11: drain the non-STUN (WG data-plane) datagrams this session read
@@ -1930,14 +2088,24 @@ impl IceSession {
         self.data_dropped
     }
 
-    /// 006 resource snapshot: how many local candidate sockets still hold a
-    /// LIVE fd (`fd >= 0`). Counted on the fd, NOT on `local_socks.len()`:
+    /// 006 resource snapshot: how many local candidate sockets THIS session owns
+    /// and still holds live. Counted on the fd, NOT on `local_socks.len()`:
     /// [`IceSession::stop`] drains the vec, so a stopped-but-retained session
     /// reports 0 here — and the `fd >= 0` rule keeps that true even if a
     /// future path ever retains a closed sentinel. Pure read: nothing is
     /// taken, dup'd or closed.
+    ///
+    /// Stage 2: mux-backed candidates are NOT counted — the session owns no fd
+    /// for them (the one shared socket is [`crate::ice_mux::IceMux`]'s, counted
+    /// once for the whole ICE plane, not once per peer).
     pub fn live_local_socket_count(&self) -> usize {
-        self.local_socks.iter().filter(|s| s.fd >= 0).count()
+        self.local_socks.iter().filter(|s| s.owned_fd().is_some()).count()
+    }
+
+    /// 006 resource snapshot: the SHARED mux socket, when this session rides one
+    /// (`None` = the session owns its candidates' sockets).
+    pub fn shared_mux_fd(&self) -> Option<sys::c_int> {
+        self.mux.as_ref().map(|m| m.raw_fd())
     }
 
     /// 006 resource snapshot: connectivity checks were started
@@ -1990,30 +2158,55 @@ impl IceSession {
         self.local_socks.iter().map(|s| s.cand.clone()).collect()
     }
 
-    /// Stop the session: close exactly our dup sockets, emit `Closed`.
+    /// Stop the session: close exactly our OWN dup sockets, unregister from the
+    /// shared mux (which never closes the shared fd), emit `Closed`.
     pub fn stop(&mut self) {
         if self.stopped {
             return;
         }
+        if let Some(mux) = self.mux.take() {
+            mux.unregister_session(self.id);
+        }
         for s in self.local_socks.drain(..) {
-            if s.traced {
-                crate::n2_socket_trace::closed(s.fd);
+            if let Some(fd) = s.owned_fd() {
+                if s.traced() {
+                    crate::n2_socket_trace::closed(fd);
+                }
+                unsafe { sys::close(fd) };
             }
-            unsafe { sys::close(s.fd) };
         }
         self.stopped = true;
         self.events.push_back(IceEvent::Closed);
+    }
+
+    /// Send on the pair's local candidate: this session's own dup socket, or the
+    /// SHARED mux (stage 2, which also remembers the destination address so the
+    /// reply routes back here — upstream `udpMuxedConn::WriteTo`). `false` = the
+    /// datagram was refused.
+    fn send_on(&self, local_idx: usize, target: &sys::sockaddr_in, msg: &[u8]) -> bool {
+        match self.local_socks[local_idx].owned_fd() {
+            Some(fd) => send_to(fd, target, msg),
+            None => match self.mux.as_ref() {
+                Some(mux) => mux.send_to(self.id, (target.sin_addr, u16::from_be(target.sin_port)), msg),
+                None => false,
+            },
+        }
     }
 }
 
 impl Drop for IceSession {
     fn drop(&mut self) {
         if !self.stopped {
+            if let Some(mux) = self.mux.take() {
+                mux.unregister_session(self.id);
+            }
             for s in self.local_socks.drain(..) {
-                if s.traced {
-                    crate::n2_socket_trace::closed(s.fd);
+                if let Some(fd) = s.owned_fd() {
+                    if s.traced() {
+                        crate::n2_socket_trace::closed(fd);
+                    }
+                    unsafe { sys::close(fd) };
                 }
-                unsafe { sys::close(s.fd) };
             }
             self.stopped = true;
         }

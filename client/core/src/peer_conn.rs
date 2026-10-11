@@ -86,14 +86,14 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::backoff::{ExponentialBackoff, MonotonicClock, OsRandom};
 use crate::connector::{ErrorClass, WgPeerApplier};
 use crate::envelope::EnvelopeKeyPair;
 use crate::grpc::GrpcTransport;
 use crate::ice::{
-    Candidate, CandidateType, GatherConfig, IfaceGather, InterfaceSource, StunServer,
+    Candidate, CandidateType, GatherConfig, InterfaceSource, StunServer,
     UdpSocketSource, DEFAULT_INTERFACE_BLACKLIST, DEFAULT_STUN_TIMEOUT_MS,
 };
 use crate::ice_session::{IceCredentials, IceEvent, IceSession, PairState};
@@ -125,6 +125,13 @@ pub trait GatherExec: Send + Sync + 'static {
     fn spawn(&self, job: Box<dyn FnOnce() + Send>) -> bool;
 }
 
+/// STAGE 2：共享 mux 的注入缝（官方对齐审计 §2.7）。设备路径由壳层
+/// protect + feed 一枚 fd（[`crate::connector::connector_ice_mux_feed_json`]）；
+/// 主机 CLI 与测试路径让 core 自己从 [`crate::ice::UdpSocketSource`] 的受保护
+/// 供给里建一枚（[`IceMux::open_wildcard`] 的 provider 版）。两种来源都不
+/// 改变语义：**整个 ICE 平面只有这一枚 socket**。
+pub type IceMuxSlot = Arc<Mutex<Option<Arc<crate::ice_mux::IceMux>>>>;
+
 /// 生产执行者：每个 round 一枚新线程（上游每协商一枚 goroutine）。
 pub struct ThreadGatherExec;
 
@@ -149,15 +156,6 @@ impl GatherExec for InlineGatherExec {
         true
     }
 }
-
-/// 「受保护 socket 池不足」等待行的限频周期（注入时钟衡量；0050 残余项 3）。
-///
-/// 池不足不是错误，而是**等待补给**：每一次被挡住的尝试都记一行
-/// `N5c_ICE|locals-waiting` 会把 6 个 peer × 每 2 s 重试变成刷屏（真机
-/// 0050 的 `locals-failed` 3.5 min 内 39 行 / 25 个去重事件）。等待的**首行
-/// 必记**（进入等待的时刻必须可观测），其后每个 peer 每个周期至多一行，
-/// 行内 `waited_ms` 给出已等待时长，因此「等了多久」不因限频丢失。
-pub const LOCALS_WAIT_LOG_MS: u64 = 5000;
 
 /// STAGE 0（官方对齐审计 §2.7）：整拍墙钟超过这么长才记一行
 /// `N5c_ICE|tick|…|pass_ms=…|slow=true`（见 [`PeerIceOrchestrator::run_once`]）。
@@ -806,56 +804,49 @@ fn session_role(local_key: Option<&str>, remote_key: &str, fallback: bool) -> bo
 
 /// [`PeerIceOrchestrator::start_locals`] 的本次结果。
 ///
-/// 池不足**不是错误**（0050 §2.6/§8 item 3）：现场把它当成 `Network` 错误
-/// 上抛，于是每一拍都冒出 `peer-conn: pump error (network)`，而 ICE pump 被
-/// 设计成「逐 tick 打印错误类并继续运行」→「等待」被实现成了「刷错误日志 +
-/// 重试」。等待态必须：①不进 `run_once` 的 `first_err`（不冒 pump error）；
-/// ②不消耗 [`START_DEADLINE_MS`]（饿死不是「对端不应答」，不能拿它拆会话，
-/// 见 [`PeerConn::negotiation_age_ms`]）。
+/// 官方对齐审计 §2.7 **stage 2** 起只剩两态：本地候选（host 候选来自共享
+/// mux 端口 × 各允许接口地址，[`crate::ice::mux_host_candidates`]）在
+/// `start_locals` 里**当拍就算出来并交给会话**，所以「池不足等补给」这种
+/// 中间态随壳层 socket 池一起退出 ICE 平面（`LocalsRun::WaitingForSockets`
+/// 与它的等待账在 stage 2 删除；审计 §2.7 stage 2 "Deletes at the end: …
+/// the pool sizing"）。
 enum LocalsRun {
-    /// 本地候选已收集并绑定（`locals_done` 已置位）。
+    /// 本地 host 候选已就位（`locals_done` 已置位）；srflx 是否还在跑由
+    /// [`PeerConn::gather`] 表示（trickle，不阻塞）。
     Gathered,
-    /// 收集已在**别的执行者**上跑（STAGE 1，官方对齐审计 §2.7）：本拍不阻塞。
-    /// 候选就绪时由 [`PeerIceOrchestrator::pump_gather`] 交给本会话并发
-    /// OFFER/ANSWER——上游「`GatherCandidates()` 立即返回、下一行就
-    /// dial」（`worker_ice.go:255-266`）在注入时钟模型里的等价物。
+    /// srflx 交换已在**别的执行者**上跑（上游「每 (STUN url, mux listen
+    /// address) 一枚 goroutine」，fork `gather.go:491-513`）：本拍不阻塞。
     InFlight,
-    /// 受保护 socket 池不足：本次**一枚都没取**（可重试），peer 进入等待。
-    WaitingForSockets { need: usize, have: usize, waited_ms: u64, log: bool },
 }
 
-/// 一个 peer 正在跑的异步收集（STAGE 1）。
+/// 一个 peer 正在跑的 srflx 收集（STAGE 1 的异步形状，STAGE 2 换了单位）。
 ///
-/// 上游的对应物是「每协商一枚 goroutine」（`worker_ice.go:100-155`）加上
-/// pion 内部「每 (network, STUN url, listen addr) 一枚 goroutine」
-/// （fork `gather.go:491-513`）。这里把**接口 round** 当作并发单位：一个
-/// round = 一枚受保护 socket + 该接口的全部 STUN 交换（[`IfaceGather`]），
-/// 一个 peer 同时最多有一轮收集在跑（`gather.is_some()` 即「已在收集」），
-/// 轮内各接口并行。
+/// 上游的对应物：`Agent.GatherCandidates()` 立即返回（fork `gather.go:39-65`），
+/// 内部每个 srflx (network, STUN url, mux listen address) 一枚 goroutine
+/// （`gather.go:491-513`），每枚只做一件事 —— `GetXORMappedAddr(serverAddr,
+/// stunGatherTimeout)`（`gather.go:526`），而**共享 mux 的 in-flight 去重把
+/// 它们收敛成每个 STUN 服务器一轮**。
 ///
-/// 掉这个结构体 = 掉接收端：仍在跑的 round 线程 send 失败即自行关闭其
-/// socket（绝不会有孤儿 fd，也绝不会把上一轮协商的候选塞进新会话）。
+/// 掉这个结构体 = 掉接收端：仍在跑的 worker send 失败即自行退出（它不持有
+/// 任何 fd —— socket 是 mux 的，本阶段没有任何东西需要收拾）。
 struct GatherInFlight {
-    rx: Receiver<IfaceGather>,
-    /// 还没回报的接口 round 数：归零 = 本轮收集结束。
+    rx: Receiver<crate::ice::SrflxGather>,
+    /// 还没回报的 srflx round 数（每 STUN 服务器一枚）：归零 = 本轮结束。
     pending: usize,
     /// 本轮收集开始的墙钟（`sys::mono_ms`）——`locals-gathered` 的 `gather_ms=`。
     started_wall_ms: u64,
-    /// 已交给本会话的 host 候选数（失败判据：整轮零候选 = fail-closed）。
+    /// 已交给本会话的 host 候选数（观测）。
     added: usize,
     /// 已交给本会话的 srflx 候选数（观测）。
     srflx: usize,
-    /// 全部失败原因（整轮零候选时取第一条当硬错误，与旧 `ensure_locals` 的
-    /// `Err` 同形）。
+    /// 全部失败原因（观测：每个失败的 srflx 交换一条；不再有 fail-closed
+    /// 回滚 —— host 候选在 `start_locals` 里已经就位并已入列 OFFER）。
     errors: Vec<(String, ManagementError)>,
     /// 哪条调用路径发起的（`initiate` / `answer` / `retry` / `answer-late`）：
-    /// 零候选失败时按它选回滚语义（发起路径整段回滚，应答/重试路径保留会话），
-    /// 并决定候选就绪时要不要发 OFFER（`offer_owed`）。
+    /// 只进日志（`locals-gathered|source=`）。OFFER 是否欠账在**当拍**
+    /// [`PeerIceOrchestrator::start_locals`] 里就按同一个 phase 判定了
+    /// （host 候选就位即补 OFFER，上游 `GatherCandidates()` 后立刻 dial）。
     phase: &'static str,
-    /// 候选就绪时要补一个 OFFER（本会话是**为了发起**而建的：主动发起，或
-    /// 迟到 ANSWER 采纳后重新发起）。应答方/Fixed-port 调用方自己入列 OFFER
-    /// 的路径保持 `false`——OFFER 与 ANSWER 都不在同一个会话里重复发。
-    offer_owed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -902,16 +893,6 @@ struct PeerConn {
     /// 当前会话的创建时刻（注入时钟；0 = 无会话）。[`START_DEADLINE_MS`]
     /// 的计时起点：创建后始终未 `start()` 的谈判到期拆除重发起。
     session_at_ms: u64,
-    /// 本会话内「等受保护 socket 补给」已累计的时长（[`LocalsRun::
-    /// WaitingForSockets`]）：[`START_DEADLINE_MS`] 的计时只算**非等待**的
-    /// 龄期（`negotiation_age_ms`），会话重建时归零。
-    locals_wait_ms: u64,
-    /// 最近一次进入等待的时刻（0 = 当前不在等待）。跨会话重建保持连续，
-    /// 因此 `waited_ms` 报的是「池饿了多久」，不是「本会话饿了多久」。
-    locals_wait_since_ms: u64,
-    /// 上一次输出等待观测行的时刻（0 = 本段等待尚未记过行）；首行必记，
-    /// 其后按 [`LOCALS_WAIT_LOG_MS`] 限频。
-    locals_wait_log_ms: u64,
     /// 连续「远端静默」的 [`START_DEADLINE_MS`] 超时次数（0051 §7 item 2）：
     /// 期间收到该 peer 任何信令即清零；达到
     /// [`INITIATE_BACKOFF_MIN_MISSES`] 后按 [`initiate_backoff_ms`] 退避。
@@ -961,9 +942,6 @@ impl PeerConn {
             signaled: Vec::new(),
             retry_at_ms: 0,
             session_at_ms: 0,
-            locals_wait_ms: 0,
-            locals_wait_since_ms: 0,
-            locals_wait_log_ms: 0,
             backoff_misses: 0,
             rx_since_timeout: false,
             backoff_active: false,
@@ -974,18 +952,12 @@ impl PeerConn {
         }
     }
 
-    /// [`START_DEADLINE_MS`] 判据使用的「龄期」：从 `session_at_ms` 起算，
-    /// 扣掉本会话等受保护 socket 补给的全部时长（含**正在**等待的这一段，
-    /// 其归属从 `max(等待起点, 会话起点)` 算起，不把会话之前的等待算进
-    /// 本会话）。等待不是谈判没有进展的证据——池不足时本端连候选都绑不
-    /// 出来，拿这段时间去拆会话只会「饿死 → 拆 → 重新收集 → 再饿死」。
+    /// [`START_DEADLINE_MS`] 判据使用的「龄期」：从 `session_at_ms` 起算。
+    ///
+    /// STAGE 2：不再扣「等受保护 socket 补给」的时长 —— 那个等待态随壳层
+    /// socket 池一起退出了 ICE 平面（host 候选当拍就算出来，没有任何池可饿）。
     fn negotiation_age_ms(&self, now_ms: u64) -> u64 {
-        let mut age = now_ms.saturating_sub(self.session_at_ms);
-        if self.locals_wait_since_ms != 0 {
-            let wait_start = self.locals_wait_since_ms.max(self.session_at_ms);
-            age = age.saturating_sub(now_ms.saturating_sub(wait_start));
-        }
-        age.saturating_sub(self.locals_wait_ms)
+        now_ms.saturating_sub(self.session_at_ms)
     }
 
     fn status(&self) -> PeerIceStatus {
@@ -1050,8 +1022,9 @@ pub struct PeerIceDeps {
     /// 临时端口（默认，设备路径与既有行为完全一致）。仅主机联调 CLI
     /// （`nbinterop --ice-port`，经配置字段 `ice_fixed_port` 注入）设置；
     /// 语义见 `start_locals` 与 `docs/self-hosted-interop-plan.md`
-    /// §端口映射 / 对外候选。不新建任何 socket——只改变 seam 所供 socket
-    /// 的 bind() 端口。
+    /// §端口映射 / 对外候选。**STAGE 2 起它绑定的是共享 mux socket**
+    /// （不再是每会话一枚 socket）：候选仍保留接口地址 + 固定端口，socket 通配
+    /// 绑定该端口——上游单一 `0.0.0.0:NET_PORT` 共享 socket 的形状。
     pub fixed_local_port: Option<u16>,
     /// **HOST-ONLY（N12a）**：显式对外可达候选（端口映射后的
     /// `外部IP:端口`），作为**额外的 host 型候选**随既有 signal 路径原样
@@ -1120,6 +1093,13 @@ pub struct PeerIceOrchestrator {
     /// 就没有东西可轮转、可配给了（审计 §2.7 stage 1，"Retires: the need
     /// for E1/E2/I7"）。
     exec: Arc<dyn GatherExec>,
+    /// STAGE 2（官方对齐审计 §2.7）：**整个 ICE 平面唯一那枚 socket**。
+    /// 设备路径由 connector 在壳层 protect + feed 后填（
+    /// [`crate::connector::connector_ice_mux_feed_json`]）；主机/测试路径在
+    /// 首次需要时从 `socks` 供给里取一枚受保护 socket 就地建（
+    /// [`PeerIceOrchestrator::arm_mux`]）——两条路都只有这一枚，绝不每 peer
+    /// 每接口一枚。
+    mux: IceMuxSlot,
 }
 
 impl PeerIceOrchestrator {
@@ -1140,6 +1120,7 @@ impl PeerIceOrchestrator {
             advertised_candidates: deps.advertised_candidates,
             local_key: None,
             exec: Arc::new(ThreadGatherExec),
+            mux: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1149,6 +1130,69 @@ impl PeerIceOrchestrator {
     pub fn set_gather_exec(&mut self, exec: Arc<dyn GatherExec>) {
         self.exec = exec;
     }
+
+    /// STAGE 2：把共享 mux 的槽交给本编排器（connector 在构造后立即调用；
+    /// 壳层 feed 到达时填槽）。同一个槽也可能被 connector 之后替换——替换
+    /// 后的下一拍 `run_once` 会把仍骑旧 mux 的会话拆掉重协商（见
+    /// [`PeerIceOrchestrator::drop_stale_mux_sessions`]）。
+    pub fn set_ice_mux(&mut self, slot: IceMuxSlot) {
+        self.mux = slot;
+    }
+
+    /// 当前共享 mux（若已就位）。
+    pub fn ice_mux(&self) -> Option<Arc<crate::ice_mux::IceMux>> {
+        self.mux.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// STAGE 2 的 fail-closed 建 mux 路径（主机 CLI 与 host 测试）：从受保护
+    /// socket 供给里取**一枚**（不是每接口一枚），bind 通配地址（固定端口
+    /// 模式下就是这个端口），作为整个 ICE 平面的 socket。
+    ///
+    /// 设备路径不会走到这里：壳层 feed 已经把槽填上；若槽空且供给也空
+    /// （壳层没 feed、也没有宿主供给），返回 `Err` ——
+    /// `ice:no-mux:…`，fail-closed，绝不自己 `socket(2)` 开一枚无保护的。
+    fn arm_mux(&mut self) -> Result<Arc<crate::ice_mux::IceMux>, ManagementError> {
+        if let Some(mux) = self.ice_mux() {
+            return Ok(mux);
+        }
+        let owned = self.socks.take_owned().map_err(|e| {
+            ManagementError::Network(format!(
+                "ice:no-mux: {}",
+                crate::ice::seam_to_management(e)
+            ))
+        })?;
+        let overlay = crate::ice::system_overlay_nets(&self.blacklist);
+        let want = self.fixed_local_port.unwrap_or(0);
+        let mux = crate::ice_mux::IceMux::adopt_unbound(owned, want, overlay)
+            .map_err(|e| ManagementError::Network(format!("ice:no-mux: {e}")))?;
+        crate::hilog::emit(&format!(
+            "N5e_ICE|mux-armed|source=provider|port={}|fixed={}",
+            mux.local_port(),
+            self.fixed_local_port.unwrap_or(0)
+        ));
+        *self.mux.lock().unwrap_or_else(|p| p.into_inner()) = Some(mux.clone());
+        Ok(mux)
+    }
+
+    /// STAGE 2：把骑着一枚**已被替换**的 mux 的会话整段拆掉重协商。壳层在
+    /// 物理网络切换（recreate + 重新 protect）之后会重新 feed 一枚 mux，
+    /// 旧会话的候选端口在新 mux 上不存在，留着就是永久沉默的死路径。
+    fn drop_stale_mux_sessions(&mut self, now_ms: u64) {
+        let current = self.ice_mux().map(|m| Arc::as_ptr(&m));
+        let stale: Vec<usize> = self
+            .peers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| match p.session.as_ref().and_then(|s| s.mux_ptr()) {
+                Some(ptr) if Some(ptr) != current => Some(i),
+                _ => None,
+            })
+            .collect();
+        for idx in stale {
+            self.drop_session_rearm(idx, now_ms, "ice-mux-replaced");
+        }
+    }
+
 
     /// 注入本端 WG 公钥（base64，与网络图 peer `wg_pub_key` 同一编码域）：
     /// 启用官方 isController 语义的角色决胜（[`deterministic_controlling`]）。
@@ -1294,24 +1338,16 @@ impl PeerIceOrchestrator {
         counts
     }
 
-    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3）：**当前允许接口数
-    /// × 1**（0052 起：gather 的绑定 socket 被会话直接接管，不再另取第二
-    /// 枚），与 [`PeerConn::required_local_sockets`] 同一份枚举/黑名单/去重
-    /// 规则（两者都走 [`crate::ice::allowed_ifaces`]），因此壳层的池目标不会
-    /// 与 core 的实际预算漂移。2 个允许接口 → `need_per_peer = 2`；
-    /// 3 个 → 3。
+    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3；**STAGE 2 起恒为 1**）。
     ///
-    /// 接口枚举失败返回 `None`（状态文档写 `-1`）：壳层据此回退到自己的
-    /// 保守常量（每 peer 4），绝不把「测不出来」当成「需求为 0」。
+    /// STAGE 2（官方对齐审计 §2.7）：整个 ICE 平面只有**一枚**共享 mux
+    /// socket（上游 `UniversalUDPMuxDefault`），与 peer 数、接口数都无关，
+    /// 所以这个数不再是「每 peer 需求」而是「本平面还需要几枚」——恒 `1`。
+    /// 壳层的 socket 池（`NetBirdIceSocketPool.ets`）在 stage 2 不再被 feed
+    /// （stage 4 删除其代码），该字段因此只剩对账用途：`-1` 的历史语义
+    /// （「接口枚举失败」）不再可能，因为接口枚举已经不参与 socket 决策。
     pub fn need_per_peer(&self) -> Option<usize> {
-        let cfg = GatherConfig {
-            blacklist: &self.blacklist,
-            servers: &self.stuns,
-            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
-        };
-        crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())
-            .ok()
-            .map(|ifaces| ifaces.len())
+        Some(1)
     }
 
     /// 收到一帧解密后的 signal 消息（`from_key` = 发送方 WG 公钥，
@@ -1364,7 +1400,6 @@ impl PeerIceOrchestrator {
                     peer.signaled.clear();
                     peer.retry_at_ms = 0;
                     peer.session_at_ms = 0;
-                    peer.locals_wait_ms = 0; // 新会话的等待账从零起算
                     peer.checking_since_ms = 0; // 新会话的看门狗从零起算
                     peer.last_health_ms = 0;
                 }
@@ -1386,17 +1421,10 @@ impl PeerIceOrchestrator {
                         peer.answer_owed = true;
                     }
                     match self.start_locals(idx, now_ms, pass_start_ms, "answer") {
-                        // 收集在 worker 上跑：候选就绪时 `pump_gather` 补 ANSWER。
+                        // host 候选当拍就位（`Gathered`）或 srflx 仍在 worker 上
+                        // 跑（`InFlight`）：两种都由 `pump_gather`/`on_locals_ready`
+                        // 补 ANSWER。
                         Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
-                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
-                            // 池不足＝等待（0050 §8 item 3）：不进 `last_error`
-                            // （它不是错误），只按既有冷却节奏重试；`answer_owed`
-                            // 仍在，补给到达后 `want_locals` 会补 ANSWER。
-                            self.peers[idx].cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            if log {
-                                self.emit_locals_waiting(idx, "answer", need, have, waited_ms);
-                            }
-                        }
                         Err(e) => {
                             let peer = &mut self.peers[idx];
                             peer.last_error = Some(ErrorClass::from_management(&e));
@@ -1523,12 +1551,6 @@ impl PeerIceOrchestrator {
                     }
                     match self.start_locals(idx, now_ms, pass_start_ms, "answer-late") {
                         Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
-                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
-                            self.peers[idx].cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            if log {
-                                self.emit_locals_waiting(idx, "answer-late", need, have, waited_ms);
-                            }
-                        }
                         Err(e) => {
                             let peer = &mut self.peers[idx];
                             peer.last_error = Some(ErrorClass::from_management(&e));
@@ -1619,6 +1641,25 @@ impl PeerIceOrchestrator {
             }
         }
         let mut first_err: Option<ManagementError> = None;
+        // STAGE 2（官方对齐审计 §2.7）：共享 mux 的**读循环**。上游把
+        // `ReadFromConn` 跑在独立 goroutine 里（`universal.go:80-108`）；本阶段
+        // 由这一拍来读——非阻塞 drain，分类与投递全在 mux 内完成（ufrag /
+        // 远端地址 demux、srflx 缓存填充、overlay 源丢弃），每拍一次，
+        // 注入时钟的 host harness 因此保持确定性。stage 3（mux 同时承载
+        // WireGuard）才会换成真正的读线程。
+        if let Some(mux) = self.ice_mux() {
+            let read = mux.drain();
+            if read > 0 {
+                let s = mux.stats();
+                crate::hilog::emit(&format!(
+                    "N5e_ICE|mux|read={read}|xor_hit={}|xor_fill={}|overlay_drop={}|stun_unknown={}|data_unknown={}",
+                    s.xor_hits, s.xor_filled, s.overlay_dropped, s.stun_unknown, s.data_unknown
+                ));
+            }
+        }
+        // 壳层换过 mux（物理网络切换后重新 protect + feed）：仍骑旧 mux 的
+        // 会话已经是死路径，拆掉重协商。
+        self.drop_stale_mux_sessions(now_ms);
         let len = self.peers.len();
         for idx in 0..len {
             // STAGE 1（官方对齐审计 §2.7）：异步收集的**取件点**。每拍开头把
@@ -1648,36 +1689,10 @@ impl PeerIceOrchestrator {
                         // `on_locals_ready` 按 `offer_owed` 入列（两条路径同一
                         // 规则，避免重复入列）。
                         Ok(LocalsRun::Gathered) => {}
-                        // 收集已在 worker 上跑：候选就绪时由 `pump_gather`
-                        // 入列 OFFER（`on_locals_ready`），本拍绝不等它。
+                        // srflx 交换已在 worker 上跑：host 候选与 OFFER 已经在
+                        // `start_locals` 里就位，`pump_gather` 只追加 srflx
+                        // 候选（trickle），本拍绝不等它。
                         Ok(LocalsRun::InFlight) => {}
-                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
-                            // 池不足＝等待（0050 §2.6/§8 item 3）：现场把这里
-                            // 当成 `Network` 错误上抛，每一拍冒一条
-                            // `peer-conn: pump error (network)`；等待态不该
-                            // 有错误面。清场照旧、`last_error` 不置位、
-                            // 不进 `first_err`、冷却期满按既有节奏重试。
-                            if log {
-                                self.emit_locals_waiting(idx, "initiate", need, have, waited_ms);
-                            }
-                            let peer = &mut self.peers[idx];
-                            peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            peer.initiated = false; // 冷却后重试
-                            peer.session = None; // Drop 关闭半成品会话的 dup socket
-                            peer.gather = None; // 半成品：丢掉在跑的收集（worker 自关 socket）
-                            peer.creds = None;
-                            peer.remote_creds = None;
-                            peer.locals_done = false;
-                            peer.started = false;
-                            peer.remote_cands_seen = 0;
-                            peer.pending_remote.clear();
-                            peer.signaled.clear();
-                            peer.outbox.clear(); // 半成品候选帧不得替死会话发出
-                            peer.retry_at_ms = 0;
-                            peer.answer_owed = false;
-                            peer.session_at_ms = 0;
-                            peer.locals_wait_ms = 0;
-                        }
                         Err(e) => {
                             // 0048：收集只在会话已建后才可能失败（gather/绑定，
                             // `take_owned` 队列空即 NoSocket；或一个允许接口都
@@ -1707,7 +1722,6 @@ impl PeerIceOrchestrator {
                             peer.retry_at_ms = 0;
                             peer.answer_owed = false;
                             peer.session_at_ms = 0;
-                            peer.locals_wait_ms = 0;
                             crate::hilog::emit(&format!(
                                 "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
                             ));
@@ -1733,14 +1747,6 @@ impl PeerIceOrchestrator {
                 if want_locals {
                     match self.start_locals(idx, now_ms, pass_start_ms, "retry") {
                         Ok(LocalsRun::Gathered) | Ok(LocalsRun::InFlight) => {}
-                        Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
-                            // 同上：等待不是错误，会话保留（`want_locals` 的
-                            // 门只看 `session`/`locals_done`），冷却后重试。
-                            self.peers[idx].cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                            if log {
-                                self.emit_locals_waiting(idx, "retry", need, have, waited_ms);
-                            }
-                        }
                         Err(e) => {
                             let peer = &mut self.peers[idx];
                             peer.last_error = Some(ErrorClass::from_management(&e));
@@ -1853,30 +1859,19 @@ impl PeerIceOrchestrator {
     /// 开始本地候选收集 + 会话绑定（发起方、应答方、重试方共用；幂等：
     /// `locals_done` 已置位 = `Gathered`，本轮已在跑 = `InFlight`）。
     ///
-    /// STAGE 1（官方对齐审计 §2.7）：收集**不在本调用里跑**。这里做的事只有
-    /// 「建会话（纯内存）+ 枚举允许接口 + 池预检 + 把每个接口 round 交给
-    /// [`GatherExec`]」，然后立刻返回。上游同形：`connect` 调
-    /// `GatherCandidates()` 后**下一行就 dial**（`worker_ice.go:255-266`），
-    /// 而 `GatherCandidates()` 内部 `go a.gatherCandidates(ctx, done)` 立即
-    /// 返回（pion fork `gather.go:39-65`，spawn 在 `:59`），每个 (network,
-    /// STUN url, listen addr) 一枚 goroutine（`gather.go:491-513`）。
+    /// STAGE 2（官方对齐审计 §2.7）：本地 host 候选**当拍就算出来交给会话**，
+    /// 不再取任何 socket、不再等 STUN —— 上游
+    /// `gatherCandidatesLocalUDPMux`（fork `gather.go:331-405`）就是
+    /// `udpMux.GetListenAddresses()` × 同一个 mux 端口，一个候选一枚，
+    /// 立刻 `addCandidate`。srflx 的 STUN 交换交给 worker（每个 STUN 服务器
+    /// 一枚，共享 mux 的 in-flight 去重把 N 个 agent × N 个接口收敛成
+    /// **每个服务器一轮**，`fork gather.go:491-513` + `universal.go:222-270`），
+    /// 结果由 [`Self::pump_gather`] 按到达顺序 trickle 进 outbox。
     ///
-    /// 两条收集路径：
-    /// - **默认**（`fixed_local_port = None`，设备与既有主机行为）：每接口
-    ///   一枚受保护 socket、临时端口，`round` 由 worker 跑
-    ///   （[`crate::ice::gather_interface_round`]）；round 完成后**不关闭**
-    ///   已绑定的 socket，而是随 [`IfaceGather::socket`] 回报，由
-    ///   [`IceSession::add_local_candidate_bound`] 直接接管为本地候选。
-    ///   于是 advertise 出去的 host 端口与 srflx 的 `raddr/rport`（base）
-    ///   就是会话真正收发会话包的那枚 socket——修复「gather 关 socket +
-    ///   另绑新端口，srflx 指向死映射」的 0052 缺陷；
-    /// - **固定端口**（HOST-ONLY，N12a）：不做 per-interface 收集也不做
-    ///   STUN（端口映射场景里显式对外候选取代 srflx），取**首个允许
-    ///   接口地址**一枚候选、以 [`IceSession::add_local_candidate_fixed_port`]
-    ///   通配绑定 `0.0.0.0:<port>`（转发目的地址不可预知，通配绑定才使
-    ///   固定端口可达；上游同形：单一 `0.0.0.0:NET_PORT` 共享 socket），
-    ///   候选保留接口地址 + 固定端口（getsockname 回填校验）。这条路径没有
-    ///   阻塞点（只 bind 一枚 socket，不发 STUN），因此仍是同步完成。
+    /// 固定端口（HOST-ONLY，N12a）：端口落在**共享 mux** 上
+    /// （[`Self::arm_mux`] 用 `fixed_local_port` bind 通配地址），候选仍是
+    /// 「接口地址 × 该端口」；转发目的地址不可预知，通配绑定才使固定端口可达
+    /// （上游同形：单一 `0.0.0.0:NET_PORT` 共享 socket）。
     fn start_locals(
         &mut self,
         idx: usize,
@@ -1893,46 +1888,8 @@ impl PeerIceOrchestrator {
             return Ok(LocalsRun::InFlight);
         }
         self.ensure_session(idx, now_ms, phase)?;
-        let fixed_port = self.fixed_local_port;
-        // 0049 §5.1-2（活锁，关键）：受保护 UDP socket 池由壳层单向补给（池
-        // 目标 8、每批 ≤4），而一次成功收集要「允许接口数」枚（每接口
-        // gather 一枚；那枚已绑定的 socket 由会话直接接管，不再另取第二枚
-        // 绑定长留——0052 修复把每接口 2 枚降到 1 枚）。失败路径仍是「先消耗
-        // 再失败、不回流」，于是池里 1..need-1 枚的尝试会把它们全部取走仍然
-        // 失败 —— 每批补给都被注定失败的尝试吃掉，池**永远攒不到 need**：
-        // 实测切网后 18 s 补给 20 枚、0 次成功。这里在任何 `take_owned`
-        // 之前先按「gather 将要走的接口清单」算本次预算，不足即**一枚都不
-        // 消耗**地进入等待（0050 §8 item 3 把原来的可重试**错误**改成
-        // `LocalsRun::WaitingForSockets`——沿用既有 cooldown 重试节奏，不
-        // 新增定时器），把池让给后续批次去攒。
-        //
-        // 与阶段 1 的关系（审计 §2.7）：这份「预算」不是 ea8ede1 那个**每拍
-        // 一次**的时间预算（那个随本阶段删除），而是**每 peer 一轮**的 socket
-        // 数量预检——池还在（stage 2 起被 mux 取代），所以它暂时留着。注意它
-        // 现在是预检而非预留：worker 与预检并发取 socket，池可能在中途见底，
-        // 那时该接口 round 记一条 per-round 错误、其余接口照常（fail-closed
-        // 不变：整轮零候选仍然是硬失败，见 [`Self::finish_gather`]）。
-        let required = match fixed_port {
-            // 固定端口路径整个收集阶段只消耗一枚（首个候选的通配绑定）。
-            Some(_) => usize::from(self.allowed_iface_addrs()?.first().is_some()),
-            None => self.required_local_sockets()?,
-        };
-        if let Some(have) = self.socks.available() {
-            if have < required {
-                // 池不足 = **等待补给**，不是错误（0050 §8 item 3）：一枚都
-                // 不取，记等待账（供 `negotiation_age_ms` 扣除），把池让给
-                // 后续批次去攒。
-                let (waited_ms, log) = self.note_locals_wait(idx, now_ms);
-                return Ok(LocalsRun::WaitingForSockets { need: required, have, waited_ms, log });
-            }
-        }
-        if fixed_port.is_some() {
-            self.gather_fixed_port(idx, now_ms, pass_start_ms, phase)?;
-            self.clear_locals_wait(idx, now_ms);
-            return Ok(LocalsRun::Gathered);
-        }
-        // 允许接口清单就是这一轮的并发单位（与 `required_local_sockets`
-        // 同一份枚举/黑名单/去重）。
+        // 整个 ICE 平面唯一那枚 socket：壳层 feed 的，或主机/测试路径自建的。
+        let mux = self.arm_mux()?;
         let cfg = GatherConfig {
             blacklist: &self.blacklist,
             servers: &self.stuns,
@@ -1940,25 +1897,60 @@ impl PeerIceOrchestrator {
         };
         let ifaces = crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())?;
         if ifaces.is_empty() {
-            // 一个允许接口都没有：与旧路径同形（gather 无候选 → 整段回滚）。
             return Err(ManagementError::Network("ice:no-bindable-local-candidate".into()));
         }
-        let (tx, rx) = std::sync::mpsc::channel::<IfaceGather>();
+        // host 候选：接口地址 × mux 端口，立刻交给会话并立刻 trickle 出去。
+        let offer_owed = matches!(phase, "initiate" | "answer-late");
+        let port = mux.local_port();
+        let hosts = crate::ice::mux_host_candidates(&ifaces, port);
+        let mut added = 0usize;
+        {
+            let peer = &mut self.peers[idx];
+            let session = peer.session.as_mut().expect("session just ensured");
+            for cand in hosts {
+                match session.add_local_candidate_mux(cand, mux.clone()) {
+                    Ok(bound) => {
+                        peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
+                        peer.locals_signaled += 1;
+                        added += 1;
+                    }
+                    Err(e) => {
+                        crate::hilog::emit(&format!(
+                            "N5c_ICE|locals-failed|peer={}|round={}|phase={phase}|reason={e}",
+                            peer_short(&peer.key),
+                            peer.session_at_ms
+                        ));
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        if added == 0 {
+            return Err(ManagementError::Network("ice:no-bindable-local-candidate".into()));
+        }
+        // 上游「gather 返回 → 下一行 dial」：候选就绪当拍就补 OFFER/ANSWER 与
+        // `locals-gathered` 观测行（`pump_gather` 之后只会追加 srflx 候选）。
+        self.on_locals_ready(idx, now_ms, pass_start_ms, offer_owed);
+        // srflx：每个 STUN 服务器一枚 worker（没有 STUN 服务器 = 无事可做）。
+        if self.stuns.is_empty() {
+            return Ok(LocalsRun::Gathered);
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<crate::ice::SrflxGather>();
         let mut pending = 0usize;
-        for iface in ifaces {
+        for server in self.stuns.clone() {
             let tx = tx.clone();
             let socks = self.socks.clone();
-            let servers = self.stuns.clone();
-            let timeout_ms = DEFAULT_STUN_TIMEOUT_MS;
+            let mux = mux.clone();
             let spawned = self.exec.spawn(Box::new(move || {
-                let round = crate::ice::gather_interface_round(
-                    &iface,
+                let servers = [server];
+                let round = crate::ice::gather_srflx_round(
                     &servers,
+                    mux.as_ref(),
                     socks.as_ref(),
-                    timeout_ms,
+                    DEFAULT_STUN_TIMEOUT_MS,
                 );
-                // send 失败 = 接收端已丢（会话被拆/peer 被移除）：`round`
-                // 随之 drop，其 socket 在这一行关闭——绝不留孤儿 fd。
+                // send 失败 = 接收端已丢（会话被拆/peer 被移除）：本阶段 worker
+                // 不持有任何 fd（socket 是 mux 的），直接退出即可。
                 let _ = tx.send(round);
             }));
             if spawned {
@@ -1967,23 +1959,24 @@ impl PeerIceOrchestrator {
         }
         drop(tx); // 只剩 worker 的发送端
         if pending == 0 {
-            // 一枚 round 都起不来（线程上限）：当作这一轮没有候选，
-            // fail-closed 交给上面的回滚/冷却语义——绝不回落成阻塞调用。
-            return Err(ManagementError::Network("ice:no-bindable-local-candidate".into()));
+            // srflx worker 一枚都起不来（线程上限）：host 候选已经在会话里，
+            // 只是本轮没有 srflx —— 不是失败（上游同样的情形只是少一类候选）。
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-srflx|peer={}|round={}|spawned=0|outcome=no-worker",
+                peer_short(&self.peers[idx].key),
+                self.peers[idx].session_at_ms
+            ));
+            return Ok(LocalsRun::Gathered);
         }
         self.peers[idx].gather = Some(GatherInFlight {
             rx,
             pending,
             started_wall_ms: crate::sys::mono_ms(),
-            added: 0,
+            added,
             srflx: 0,
             errors: Vec::new(),
             phase,
-            offer_owed: matches!(phase, "initiate" | "answer-late"),
         });
-        // 供给到了（收集已开跑）：本次等待结束，把它记进本会话的等待账
-        //（`negotiation_age_ms` 扣除的就是这笔账），并让下一段等待的首行重新可记。
-        self.clear_locals_wait(idx, now_ms);
         Ok(LocalsRun::InFlight)
     }
 
@@ -2028,133 +2021,93 @@ impl PeerIceOrchestrator {
         peer.creds = Some(creds);
         peer.session = Some(session);
         peer.session_at_ms = now_ms;
-        // 新会话的等待账从零起算：`negotiation_age_ms` 只扣本会话内的等待。
-        peer.locals_wait_ms = 0;
         peer.checking_since_ms = 0;
         Ok(())
     }
 
-    /// 固定端口（HOST-ONLY，N12a）收集：一枚通配绑定 + 显式对外候选。
-    /// 同步完成（无 STUN），成功后置 `locals_done` 并补 ANSWER/OFFER。
-    fn gather_fixed_port(
-        &mut self,
-        idx: usize,
-        now_ms: u64,
-        pass_start_ms: u64,
-        phase: &'static str,
-    ) -> Result<(), ManagementError> {
-        let port = self.fixed_local_port.expect("fixed-port path only");
-        let fixed_addr = self.allowed_iface_addrs()?.first().copied();
-        let mut added = 0usize;
-        if let Some(addr) = fixed_addr {
-            let peer = &mut self.peers[idx];
-            let session = peer.session.as_mut().expect("session just ensured");
-            // 固定端口：候选保留指定端口（绑定失败 = 端口被占，fail-closed
-            // 硬错误——绝不静默回落临时端口）。
-            let fresh = Candidate::host_candidate(addr, port);
-            let bound = session.add_local_candidate_fixed_port(fresh, self.socks.as_ref())?;
-            peer.outbox.push_back((PeerSignalKind::Candidate, bound.marshal()));
-            peer.locals_signaled += 1;
-            added += 1;
-        }
-        if added == 0 {
-            return Err(ManagementError::Network("ice:no-bindable-local-candidate".into()));
-        }
-        // `gather_ms` = 0（固定端口路径不跑 STUN）；`pass_ms` 用调用方本拍的
-        // 墙钟起点——两条路径共用同一行格式（STAGE 0）。OFFER 的归属与异步
-        // 路径同一规则（`offer_owed`）:发起会话在候选就绪时补 OFFER。
-        let offer_owed = matches!(phase, "initiate" | "answer-late");
-        self.on_locals_ready(idx, now_ms, pass_start_ms, offer_owed);
-        Ok(())
-    }
-
-    /// STAGE 1 的**取件点**：把 worker 已回报的接口 round 交给会话，非阻塞
-    /// （`try_recv`，队列空即返回）。候选**按到达顺序**入 outbox（trickle，
-    /// 上游 `onICECandidate` 每收集到一个候选就发一帧，`worker_ice.go:420-
-    /// 470`）；首次拿到候选时补 OFFER/ANSWER（`on_locals_ready`）；整轮回报
-    /// 完毕且零候选时按发起路径回滚（`finish_gather`）。
+    /// STAGE 2 的**取件点**：把 worker 已回报的 srflx round 交给会话，非阻塞
+    /// （`try_recv`，队列空即返回）。srflx 候选**按到达顺序**入 outbox
+    /// （trickle，上游 `onICECandidate` 每收集到一个候选就发一帧，
+    /// `worker_ice.go:420-470`）；全部 round 回报完毕即收尾（`finish_gather`）。
     ///
-    /// 返回 `Err` 的语义与旧的同步 `ensure_locals` 一致：只有发起/重试路径
-    /// 的**整轮零候选**才冒错（应答路径只记 `last_error` + 冷却）。
+    /// 不再返回硬错误：host 候选与 OFFER 已在 [`Self::start_locals`] 当拍就位，
+    /// 一个 STUN 服务器失败只是少一个 srflx 候选（上游 `gather.go:526-531`
+    /// 同样只记一条 warning）。
     fn pump_gather(
         &mut self,
         idx: usize,
-        now_ms: u64,
-        pass_start_ms: u64,
+        _now_ms: u64,
+        _pass_start_ms: u64,
     ) -> Result<(), ManagementError> {
-        let mut rounds: Vec<IfaceGather> = Vec::new();
+        let mut rounds: Vec<crate::ice::SrflxGather> = Vec::new();
         if let Some(g) = self.peers[idx].gather.as_ref() {
             while let Ok(round) = g.rx.try_recv() {
                 rounds.push(round);
             }
         }
-        let mut err: Option<ManagementError> = None;
         for round in rounds {
-            let mut became_ready = false;
+            // 本轮 srflx 候选要用的 (接口地址 × mux 端口) 清单：在借用 peer 之前
+            // 先算好（它是纯读：枚举 + 黑名单 + 去重）。
+            let listen_addrs = {
+                let port = self.ice_mux().map(|m| m.local_port()).unwrap_or(0);
+                let ifaces = crate::ice::allowed_ifaces(
+                    &GatherConfig {
+                        blacklist: &self.blacklist,
+                        servers: &self.stuns,
+                        timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
+                    },
+                    self.ifaces.as_ref(),
+                )
+                .unwrap_or_default();
+                (ifaces, port)
+            };
             {
                 let peer = &mut self.peers[idx];
                 let Some(g) = peer.gather.as_mut() else { break };
                 g.pending = g.pending.saturating_sub(1);
-                // 会话在这轮收集期间被拆/重建 = 这一轮整个作废：它的 socket 与
-                // 候选都属于上一次协商，绝不塞进新会话（socket 随 `round`
-                // 在本块末尾 drop，即关闭）。
+                // 会话在这轮收集期间被拆/重建 = 这一轮的 srflx 属于上一次协商，
+                // 绝不塞进新会话。worker 不持有 fd，丢弃无副作用。
                 let deliver = peer.session.is_some();
-                if let Some(sock) = round.socket {
-                    if deliver {
-                        let host_name = format!("{}:{}", sock.cand.address, sock.cand.port);
-                        // 这枚 socket 既是 host 候选、又是该接口 srflx 的 base：
-                        // 交给会话长留（getsockname 端口校验在里面）。
-                        match peer
-                            .session
-                            .as_mut()
-                            .expect("session checked")
-                            .add_local_candidate_bound(sock.cand, sock.fd)
-                        {
-                            Ok(bound) => {
-                                peer.outbox
-                                    .push_back((PeerSignalKind::Candidate, bound.marshal()));
-                                peer.locals_signaled += 1;
-                                g.added += 1;
-                                became_ready = !peer.locals_done;
-                            }
-                            // 会话已 stop：socket 已被关掉（
-                            // `add_local_candidate_bound` 的清理路径），记一条
-                            // 原因、继续。
-                            Err(e) => g.errors.push((host_name, e)),
-                        }
+                // STAGE 0 观测面的替换：`gather-stun` 的单位从「接口 round」
+                // 变成「(mux, STUN server) 交换」——与上游一致
+                // （fork `gather.go:491-513` 的并发单位、`:526-531` 的失败日志
+                // 单位），并且现在**每个服务器一次**而不是每接口一次。
+                for ex in &round.exchanges {
+                    let server = format!("{}:{}", ex.server.host, ex.server.port);
+                    match &ex.outcome {
+                        Ok((addr, port)) => crate::hilog::emit(&format!(
+                            "N5c_ICE|gather-stun|iface=mux|server={server}|ms={}|outcome=mapped|mapped={}:{}",
+                            ex.ms,
+                            std::net::Ipv4Addr::from(*addr),
+                            port
+                        )),
+                        Err(e) => crate::hilog::emit(&format!(
+                            "N5c_ICE|gather-stun|iface=mux|server={server}|ms={}|outcome=failed|reason={e}",
+                            ex.ms
+                        )),
                     }
-                    // `deliver == false`：`sock` 在这里 drop → 关闭。
                 }
                 if deliver {
-                    // srflx：与上面 host 候选同一枚 socket 的 STUN 映射，
-                    // base = raddr/rport（socket 活着 → 映射有背书）。
-                    g.srflx += round.srflx.len();
-                    for cand in round.srflx {
-                        peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+                    let (ifaces, port) = &listen_addrs;
+                    for ex in &round.exchanges {
+                        let Ok(mapped) = ex.outcome else { continue };
+                        g.srflx += 1;
+                        for cand in crate::ice::srflx_candidates_for_listen_addrs(ifaces, *port, mapped) {
+                            peer.outbox.push_back((PeerSignalKind::Candidate, cand.marshal()));
+                        }
                     }
                 }
                 g.errors.extend(round.errors);
-            }
-            if became_ready {
-                let offer_owed = self.peers[idx]
-                    .gather
-                    .as_ref()
-                    .map(|g| g.offer_owed)
-                    .unwrap_or(false);
-                self.on_locals_ready(idx, now_ms, pass_start_ms, offer_owed);
             }
             let done = {
                 let peer = &self.peers[idx];
                 peer.gather.as_ref().map(|g| g.pending == 0).unwrap_or(true)
             };
             if done {
-                err = self.finish_gather(idx, now_ms);
+                self.finish_gather(idx);
             }
         }
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// 首次拿到本地候选 = 「本地候选就绪」（`locals_done`）：与旧同步
@@ -2237,172 +2190,35 @@ impl PeerIceOrchestrator {
             }
         }
         self.maybe_start(idx, now_ms);
-        self.clear_locals_wait(idx, now_ms);
     }
 
-    /// 整轮收集回报完毕（`pending == 0`）的结算：零候选 = fail-closed，按
-    /// 发起时记录的 `phase` 选回滚语义（与旧同步路径逐字对齐）：
-    /// - `initiate`：整段回滚半成品会话 + 冷却 + `locals-failed` + 冒错
-    ///   （调用方的 `first_err`）；
-    /// - `retry`：保留会话，冷却后重试 + `locals-failed` + 冒错；
-    /// - `answer` / `answer-late`：保留会话（`answer_owed` 语义不变），冷却
-    ///   后重试 + `locals-failed`，**不冒错**（旧 `handle_signal` 的语义）。
-    /// 有候选则收集结束，什么都不做（后续补候选由新一轮协商负责）。
-    fn finish_gather(&mut self, idx: usize, now_ms: u64) -> Option<ManagementError> {
-        let (added, phase, errors) = match self.peers[idx].gather.take() {
-            Some(g) => (g.added, g.phase, g.errors),
+    /// 整轮 srflx 收集回报完毕（`pending == 0`）的收尾：只记账，不拆会话。
+    ///
+    /// STAGE 2 起这里**不再有 fail-closed 回滚**：本地 host 候选在
+    /// [`Self::start_locals`] 里已经绑定进会话、已经 trickle 出去、已经补了
+    /// OFFER/ANSWER，一个 STUN 服务器失败（或所有 STUN 服务器都失败）只是少一类
+    /// 候选 —— 上游 `gather.go:526-531` 同样只记一条 warning 并继续
+    /// （host 候选与连通性检查不受影响，审计 §2.1 末尾）。
+    fn finish_gather(&mut self, idx: usize) -> Option<ManagementError> {
+        let (added, srflx, errors, phase) = match self.peers[idx].gather.take() {
+            Some(g) => (g.added, g.srflx, g.errors, g.phase),
             None => return None,
         };
-        if added > 0 {
-            return None;
-        }
-        let e = errors
-            .into_iter()
-            .next()
-            .map(|(_, e)| e)
-            .unwrap_or_else(|| {
-                ManagementError::Network("ice:no-bindable-local-candidate".into())
-            });
-        match phase {
-            "initiate" => {
-                let peer = &mut self.peers[idx];
-                let round = peer.session_at_ms;
-                let peer_prefix = peer_short(&peer.key);
-                peer.last_error = Some(ErrorClass::from_management(&e));
-                peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                peer.initiated = false; // 冷却后重试
-                peer.session = None; // Drop 关闭半成品会话的 dup socket
-                peer.creds = None;
-                peer.remote_creds = None;
-                peer.locals_done = false;
-                peer.started = false;
-                peer.remote_cands_seen = 0;
-                peer.pending_remote.clear();
-                peer.signaled.clear();
-                peer.outbox.clear(); // 半成品候选帧不得替死会话发出
-                peer.retry_at_ms = 0;
-                peer.answer_owed = false;
-                peer.session_at_ms = 0;
-                peer.locals_wait_ms = 0;
-                crate::hilog::emit(&format!(
-                    "N5c_ICE|locals-failed|peer={peer_prefix}|round={round}|phase=initiate|reason={e}"
-                ));
-                Some(e)
-            }
-            "retry" => {
-                let peer = &mut self.peers[idx];
-                peer.last_error = Some(ErrorClass::from_management(&e));
-                peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                // 失败分支的观测面（0048：这条路径此前完全无日志）。
-                crate::hilog::emit(&format!(
-                    "N5c_ICE|locals-failed|peer={}|round={}|phase=retry|reason={e}",
-                    peer_short(&peer.key),
-                    peer.session_at_ms
-                ));
-                Some(e)
-            }
-            other => {
-                let peer = &mut self.peers[idx];
-                peer.last_error = Some(ErrorClass::from_management(&e));
-                peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
-                // 应答方收集失败同样不得静默：`answer_owed` 仍在，
-                // `want_locals` 冷却后会重试补 ANSWER。
-                crate::hilog::emit(&format!(
-                    "N5c_ICE|locals-failed|peer={}|round={}|phase={other}|reason={e}",
-                    peer_short(&peer.key),
-                    peer.session_at_ms
-                ));
-                None
-            }
-        }
-    }
-
-    /// 记录 peer 进入「池不足，等补给」：返回 `(已等待时长, 本拍是否记观测
-    /// 行)`。`waited_ms` 自**本次等待的起点**连续累计（跨会话重建不重置，
-    /// 见 [`PeerConn::locals_wait_since_ms`]），所以它报的是池饿了多久。首行
-    /// 必记，其后按 [`LOCALS_WAIT_LOG_MS`] 限频。
-    fn note_locals_wait(&mut self, idx: usize, now_ms: u64) -> (u64, bool) {
-        let p = &mut self.peers[idx];
-        if p.locals_wait_since_ms == 0 {
-            p.locals_wait_since_ms = now_ms;
-        }
-        let waited = now_ms.saturating_sub(p.locals_wait_since_ms);
-        let due = p.locals_wait_log_ms == 0
-            || now_ms.saturating_sub(p.locals_wait_log_ms) >= LOCALS_WAIT_LOG_MS;
-        if due {
-            p.locals_wait_log_ms = now_ms;
-        }
-        (waited, due)
-    }
-
-    /// 等待结束（本次收集成功）：把这一段等待归入本会话的等待账。
-    fn clear_locals_wait(&mut self, idx: usize, now_ms: u64) {
-        let p = &mut self.peers[idx];
-        if p.locals_wait_since_ms != 0 {
-            // 只把落在**本会话**内的等待记进账（会话之前的等待不算本会话的）。
-            let wait_start = p.locals_wait_since_ms.max(p.session_at_ms);
-            p.locals_wait_ms = p.locals_wait_ms.saturating_add(now_ms.saturating_sub(wait_start));
-            p.locals_wait_since_ms = 0;
-        }
-        p.locals_wait_log_ms = 0;
-    }
-
-    /// 「池不足，等补给」的观测行（三处调用点共用同一字段顺序；行尾
-    /// `reason=insufficient-sockets` 让既有的 token 检索仍然命中——它只是
-    /// 不再是错误、不再走 `locals-failed`）。
-    fn emit_locals_waiting(
-        &self,
-        idx: usize,
-        phase: &str,
-        need: usize,
-        have: usize,
-        waited_ms: u64,
-    ) {
-        let peer = &self.peers[idx];
+        let peer = &mut self.peers[idx];
         crate::hilog::emit(&format!(
-            "N5c_ICE|locals-waiting|peer={}|round={}|phase={phase}|need={need}|have={have}|waited_ms={waited_ms}|reason=insufficient-sockets",
+            "N5c_ICE|locals-gathered|phase=done|peer={}|round={}|added={added}|srflx={srflx}|errors={}|source={phase}",
             peer_short(&peer.key),
-            peer.session_at_ms
+            peer.session_at_ms,
+            errors.len(),
         ));
-    }
-
-    /// 一次成功收集的 socket 预算（默认路径）＝ gather 将要访问的接口数——
-    /// 每接口**恰好一枚**：gather 绑定的那枚 socket 不再关闭，而是随
-    /// [`crate::ice::GatheredSocket`] 交给会话接管
-    /// （[`IceSession::add_local_candidate_bound`]），所以不再需要「每个
-    /// host 候选再取一枚绑定长留」。接口清单与 [`crate::ice::allowed_ifaces`]
-    /// 同源，绝不与 gather 的实际遍历漂移。
-    ///
-    /// 旧账（0052 修复前）：每接口 2 枚 = gather 1 + 绑定长留 1；那第二枚绑
-    /// 到**新**的临时端口，正是「srflx 映射指向死 socket」缺陷的一半。
-    ///
-    /// 上限（0049 残余风险）：壳层池目标 8、每批 ≤4，池深实际封顶在 8，
-    /// 所以 `required > 8`（同时有 ≥9 个允许接口）时守护会一直等待。本项
-    /// 修复后设备侧接口数由 3 降到 2（overlay 被黑名单挡掉）→ required=2。
-    fn required_local_sockets(&self) -> Result<usize, ManagementError> {
-        let cfg = GatherConfig {
-            blacklist: &self.blacklist,
-            servers: &self.stuns,
-            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
-        };
-        Ok(crate::ice::allowed_ifaces(&cfg, self.ifaces.as_ref())?.len())
-    }
-
-    /// 允许接口的 IPv4 地址列表（固定端口路径专用）：与 gather 相同的
-    /// 枚举 + blacklist 前缀过滤 + 去重，但**不消耗任何 socket**——固定
-    /// 端口路径整个收集阶段只消耗一枚 socket（首个候选的通配绑定）。
-    fn allowed_iface_addrs(&self) -> Result<Vec<[u8; 4]>, ManagementError> {
-        let all = self.ifaces.list()?;
-        let mut out: Vec<[u8; 4]> = Vec::new();
-        for iface in all {
-            if !crate::ice::interface_allowed(&iface.name, &self.blacklist) {
-                continue;
-            }
-            if !out.contains(&iface.addr) {
-                out.push(iface.addr);
-            }
+        // 失败原因进 `last_status`-级观测（不改变会话、不冷却）。
+        for (ctx, e) in &errors {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-srflx-failed|peer={}|ctx={ctx}|reason={e}",
+                peer_short(&peer.key)
+            ));
         }
-        Ok(out)
+        None
     }
 
     /// outbox FIFO 刷给 signal seam；失败即停（剩余帧下一拍重试）。
@@ -2618,7 +2434,6 @@ impl PeerIceOrchestrator {
         peer.initiated = false;
         peer.answer_owed = false; // 死会话不欠 ANSWER：重发起走 Offer 路径
         peer.session_at_ms = 0;
-        peer.locals_wait_ms = 0; // 等待账随会话作废（下一会话从零起算）
         peer.checking_since_ms = 0; // 看门狗随会话作废
         peer.last_health_ms = 0;
         peer.cooldown_until = now_ms + RETRY_COOLDOWN_MS;
@@ -3124,16 +2939,15 @@ mod tests {
         assert_eq!(orch.peer_status("GHOST"), None);
     }
 
-    /// 0050 §8 item 3：**池不足 = 等待，不是错误**。
+    /// STAGE 2（官方对齐审计 §2.7）：**没有 mux = 没有本地候选 = fail-closed**。
     ///
-    /// 旧语义（至 f5ae3d8）把池不足当 `Network` 错误上抛，于是 ICE pump 每拍
-    /// 冒一条 `peer-conn: pump error (network)`（真机 0050 discover 14 行）。
-    /// 新语义：`run_once` 保持 `Ok`、不置 `last_error`、一枚 socket 都不取、
-    /// 不发任何帧（fail-closed 不变），冷却期满按既有节奏重试，补给一到即
-    /// 完成收集并发 OFFER。
+    /// 旧语义（0050 §8 item 3）是「受保护 socket 池不足 = 等待，不是错误」——
+    /// 那是因为每个接口 round 都要从池里取一枚。stage 2 起整个 ICE 平面只有
+    /// 一枚共享 mux socket：壳层没 feed、宿主供给也空时，正确行为是**硬
+    /// 失败**（绝不自开一枚无保护的 socket，governance §二.4），发起路径整段
+    /// 回滚 + 冷却 + `locals-failed`。
     #[test]
-    fn empty_socket_pool_waits_instead_of_failing_closed() {
-        // 空 provider：发起停在池预检处（等待），绝不发出任何帧
+    fn no_mux_fails_closed_instead_of_gathering_sockets() {
         #[derive(Default)]
         struct CountingSignal {
             frames: Mutex<Vec<(String, PeerSignalKind, String)>>,
@@ -3170,63 +2984,41 @@ mod tests {
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
         let mut now = 1000u64;
-        // 第一拍：池空 → 等待（Ok、无 pump error、无 last_error），半成品
-        // 会话照旧整段回滚（0048：留着会让 `want_initiate` 永久沉默）。
-        assert!(orch.run_once(now).is_ok(), "an empty pool is WAITING, not a pump error");
+        let err = orch.run_once(now).expect_err("no mux ⇒ a hard, fail-closed error");
+        assert!(
+            format!("{err}").contains("no-mux"),
+            "the error must name the missing mux, got {err}"
+        );
         {
             let p = &orch.peers[0];
-            assert!(p.locals_wait_since_ms != 0, "the peer must be recorded as waiting for supply");
             assert_eq!(p.session_at_ms, 0, "the half-built session is rolled back (0048)");
-            assert_eq!(p.locals_wait_ms, 0, "no session → no session-scoped wait accounting");
+            assert!(!p.locals_done, "nothing may be signalled without a socket");
+            assert_eq!(socks.taken(), 0, "no unprotected socket may be opened");
         }
-        // 冷却窗口内的后续拍不重试、不再报错（退避语义）
-        for _ in 0..4 {
-            now += 100;
-            assert!(orch.run_once(now).is_ok(), "cooldown window must suppress the retry");
-        }
-        // 冷却结束：仍不报错，仍在等待（同一段等待记账）
-        now += RETRY_COOLDOWN_MS;
-        assert!(orch.run_once(now).is_ok(), "a starved retry must stay a wait, not an error");
-        assert!(orch.peers[0].locals_wait_since_ms != 0, "still waiting");
         assert!(
             signal.frames.lock().expect("frames").is_empty(),
             "no frame may leave without candidates"
         );
-        assert_eq!(socks.taken(), 0, "a waited-out attempt must hand out nothing");
         let st = orch.peer_status("P").expect("peer");
-        assert_eq!(st.state, PeerIceState::Idle, "never leaves Idle without candidates");
-        assert_eq!(st.last_error, None, "waiting is not an error (0050)");
+        assert_eq!(st.last_error, Some(ErrorClass::Network), "fail-closed is an error class");
         assert!(!ice_ready_for_default_route(&orch.summary()), "unreachable peer must not arm the gate");
-        // 补给到达（`need = 1 × 1` 个允许接口）：下一次尝试完成收集并发 OFFER。
-        for _ in 0..1 {
-            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-            assert!(fd >= 0, "socket() failed");
-            socks.feed(fd).expect("feed");
-            unsafe { sys::close(fd) };
-        }
+        // 冷却后重试仍走同一条 fail-closed 路径（绝不静默换成无保护 socket）。
         now += RETRY_COOLDOWN_MS;
-        assert!(orch.run_once(now).is_ok(), "the supplied peer must converge");
-        assert!(orch.peers[0].locals_done, "the top-up must complete local gathering");
-        assert_eq!(socks.taken(), 1, "one interface → exactly one adopted gather socket");
-        assert_eq!(orch.peers[0].locals_wait_since_ms, 0, "supply ends the waiting state");
-        assert!(
-            signal
-                .frames
-                .lock()
-                .expect("frames")
-                .iter()
-                .any(|(_, k, _)| *k == PeerSignalKind::Offer),
-            "the supplied peer must signal an OFFER"
-        );
+        assert!(orch.run_once(now).is_err(), "still no mux, still fail-closed");
+        assert_eq!(socks.taken(), 0);
     }
 
     /// 0052：默认路径 advertise 出去的 host 候选端口，必须由 **gather 绑定、
-    /// 会话直接接管**（[`IceSession::add_local_candidate_bound`]）的那枚仍活着
-    /// 的 socket 持有——修复前 gather 当场关掉它、ensure_locals 再取第二枚绑到
-    /// 新的临时端口，于是 signal 出去的是另一个 socket 的端口，srflx 的 base
-    /// 指向已关闭的映射。
+    /// STAGE 2（官方对齐审计 §2.7）：advertise 出去的 host 候选端口就是**共享
+    /// mux 的端口**，而 mux 是会话**管不到**的：`session.stop()`（以及 Drop）只
+    /// 注销自己在 mux 上的登记，绝不关闭那枚 fd —— 否则一个 peer 的会话结束就会
+    /// 把整个 ICE 平面（其余 peer 的检查与数据）一起拆掉。上游同形
+    /// （`udpmux/mux.go:284-321` 只删 map 条目，`Close()` 才是拥有者）。
+    ///
+    /// 旧形态（0052 修复）钉的是反面：会话**拥有**那枚 gather socket，stop 必须
+    /// 把端口还回去。stage 2 起会话不再拥有 socket，所以断言反过来。
     #[test]
-    fn signaled_host_port_is_backed_by_the_live_adopted_socket() {
+    fn mux_port_survives_the_session_that_advertised_it() {
         let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
         {
             let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
@@ -3252,6 +3044,7 @@ mod tests {
         orch.run_once(1000).expect("locals must converge");
         assert!(orch.peers[0].locals_done);
 
+        let mux_port = orch.ice_mux().expect("the shared mux").local_port();
         // The candidate that was actually signaled.
         let frames = signal.frames.lock().expect("frames").clone();
         let cand = frames
@@ -3260,12 +3053,14 @@ mod tests {
             .map(|(_, _, p)| Candidate::unmarshal(p).expect("wire form"))
             .next()
             .expect("a candidate frame");
-        assert_ne!(cand.port, 0, "the signaled candidate carries the bound port");
+        assert_eq!(cand.port, mux_port, "the host candidate carries the MUX port");
 
-        // The session's local candidate IS that signaled candidate, and its
-        // socket still holds the advertised address:port right now.
+        // The session's local candidate IS that signaled candidate; the session
+        // owns no fd for it.
         let session = orch.peers[0].session.as_ref().expect("session");
         assert_eq!(session.local_candidates(), vec![cand.clone()]);
+        assert_eq!(session.live_local_socket_count(), 0, "a mux candidate owns no fd");
+        assert_eq!(session.shared_mux_fd().is_some(), true, "…it rides the shared mux");
         let sa = sys::sockaddr_in::new([127, 0, 0, 1], cand.port);
         let len = core::mem::size_of::<sys::sockaddr_in>() as u32;
         let probe = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
@@ -3273,23 +3068,32 @@ mod tests {
         assert_eq!(
             unsafe { sys::bind(probe, &sa, len) },
             -1,
-            "the advertised port must still be held by the live adopted socket"
+            "the advertised port is held by the live shared mux"
         );
         unsafe { sys::close(probe) };
-        // One interface = exactly ONE protected socket (the gather's), which
-        // the session adopted: no second bind.
-        assert_eq!(socks.taken(), 1, "no second socket for the same interface");
+        // One interface, one peer: still exactly ONE protected socket for the
+        // whole plane (the mux), not one per interface round.
+        assert_eq!(socks.taken(), 1, "the whole ICE plane takes one socket");
 
-        // stop() closes the adopted fd exactly once → the port is released.
+        // stop() unregisters from the mux and closes NOTHING shared: the port
+        // stays held by the mux (the next session — and every other peer —
+        // keeps using it).
         orch.peers[0].session.as_mut().expect("session").stop();
+        assert_eq!(
+            orch.ice_mux().expect("mux").session_count(),
+            0,
+            "the stopped session left the mux registry"
+        );
         let probe = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
         assert!(probe >= 0, "socket() failed");
         assert_eq!(
             unsafe { sys::bind(probe, &sa, len) },
-            0,
-            "session stop must close the adopted fd (advertised port released)"
+            -1,
+            "session stop must NOT release the shared mux port"
         );
         unsafe { sys::close(probe) };
+        // …and the mux is still usable afterwards.
+        assert!(orch.ice_mux().is_some());
     }
 
     /// 006: the resource counts must distinguish a RETAINED session OBJECT
@@ -3329,7 +3133,13 @@ mod tests {
         let live = orch.resource_counts();
         assert_eq!(live.sessions_present, 1, "the peer holds one session object");
         assert_eq!(live.sessions_stopped, 0, "nothing was stopped yet");
-        assert_eq!(live.live_local_sockets, 1, "one interface → one adopted socket");
+        // STAGE 2: a mux-backed session owns NO fd of its own — the shared mux
+        // socket is the ICE plane's (counted once, not once per peer).
+        assert_eq!(live.live_local_sockets, 0, "the session owns no socket: the mux does");
+        assert!(
+            orch.peers[0].session.as_ref().expect("session").shared_mux_fd().is_some(),
+            "…but it does ride the one shared mux socket"
+        );
 
         // stop_all: the OBJECT is retained by the peer entry, its fds are not.
         orch.stop_all();
@@ -3614,6 +3424,13 @@ mod tests {
     /// ③`fed == pending + handed`（喂进来的每一枚 dup 都有归属，既不凭空
     /// 消失也不重复计入）。本修复是纯前置检查：不 take / 不 close / 不 dup，
     /// 因此不存在重复关闭或泄漏的新路径——被挡住的拍位零消耗即其直接证据。
+    // STAGE 2（官方对齐审计 §2.7）：本用例钉的是**壳层 socket 池的饿死/
+    // 补给**语义（`required_local_sockets` 预算、`LocalsRun::WaitingForSockets`
+    // 等待账）。stage 2 起整个 ICE 平面只有一枚共享 mux socket，没有池可饿、
+    // 没有等待态，机制连同它一起退出（审计 §2.7 stage 2 "Deletes at the end:
+    // … the pool sizing"）；壳层的池代码按同一份审计留到 stage 4 删除。
+    // 取而代之的是 `many_peers_share_one_mux_socket`（同一个 mux、多个 peer）。
+    #[cfg(any())]
     #[test]
     fn starvation_waits_for_topup_instead_of_burning_it() {
         use std::os::fd::{AsRawFd, OwnedFd};
@@ -3764,6 +3581,11 @@ mod tests {
     ///
     /// 状态用字段级构造：公开路径在发起侧被挡住时会回滚会话（0048 修复），
     /// 而本用例要的正是「会话还在时饿死」这一形态（答方在池补给前已建会话）。
+    // STAGE 2（官方对齐审计 §2.7）：本用例钉的是「等池补给的时间不计入
+    // START_DEADLINE_MS」——等待态本身已随壳层 socket 池退出（见上一条），
+    // 这条暂停语义随之失效。deadline 本身的诚实推进仍由
+    // `zombie_negotiation_is_torn_down_after_the_start_deadline` 覆盖。
+    #[cfg(any())]
     #[test]
     fn starved_session_does_not_burn_the_negotiation_deadline() {
         let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
@@ -3899,16 +3721,17 @@ mod tests {
     }
 
     /// (b) H1 回归（真机 2026-10-11 PC：23 个对端全部恒走中继）—— **20 个 peer
-    /// 同一拍各自开跑**，不再有「每拍最多一个 peer 做阻塞收集」的预算。
+    /// 同一拍各自开跑**，不再有「每拍最多一个 peer 做阻塞收集」的预算，也**不再
+    /// 每个 peer 每接口取一枚 socket**。
     ///
     /// ea8ede1 的模型是「一拍一个 peer、一次收集封顶 [`DEFAULT_STUN_TIMEOUT_MS`]」：
     /// 20 个 peer 要 20 拍，`now_ms` 被 STUN 冻结，下一拍把上一拍建的会话当僵尸
-    /// 拆掉。本阶段收集在 worker 上跑（上游 `worker_ice.go:100-155` 的每协商一枚
-    /// goroutine），本用例用**真实墙钟 + 默认线程执行者**钉死三件事：
-    /// ① 一拍之内 20 个 peer 全部建会话 + 各自开跑（`gather.is_some()`）；
+    /// 拆掉。stage 2 的模型是上游的模型：**一枚共享 mux socket**，host 候选当拍
+    /// 就位（`udpMux.GetListenAddresses()` × 一个端口），srflx 才在 worker 上跑。
+    /// 本用例钉死三件事：
+    /// ① 一拍之内 20 个 peer 全部建会话、全部拿到本地候选并发出 OFFER；
     /// ② 那一拍本身不等任何 STUN（墙钟下限）；
-    /// ③ 20 轮收集并行收尾（总时长远小于串行的 20 × 超时），每个 peer 都拿到
-    ///    本地候选并发出 OFFER，且每接口 round 恰好取一枚 socket。
+    /// ③ 整个 ICE 平面只取走**一枚** socket（与 peer 数、接口数无关）。
     #[test]
     fn many_peers_start_gathering_in_one_tick_without_a_budget() {
         const PEERS: usize = 20;
@@ -3944,30 +3767,15 @@ mod tests {
         );
         for (i, p) in orch.peers.iter().enumerate() {
             assert!(p.session.is_some(), "peer {i} must own its session in beat 1");
-            assert!(p.gather.is_some(), "peer {i} must have its own gather in flight in beat 1");
-            assert!(!p.locals_done, "peer {i} is not waiting for anything in beat 1");
+            assert!(
+                p.locals_done,
+                "peer {i} must have its host candidates in beat 1 (no STUN wait)"
+            );
         }
-
-        // 候选随 worker 完成陆续到达：注入时钟与实际墙钟同步推进（生产同形，
-        // `connector::spawn_ice_pump` 传的就是 `sys::mono_ms()`）。
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while orch.peers.iter().any(|p| !p.locals_done) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            orch.run_once(1_000 + t0.elapsed().as_millis() as u64).expect("beat");
-        }
-        assert!(
-            orch.peers.iter().all(|p| p.locals_done),
-            "every peer must finish gathering within the deadline"
-        );
-        let elapsed = t0.elapsed();
-        assert!(
-            elapsed.as_secs() < 4,
-            "20 parallel gathers must not serialize (one timeout each): {elapsed:?}"
-        );
         assert_eq!(
             socks.taken.load(Ordering::Relaxed),
-            PEERS as u64,
-            "exactly one protected socket per interface round"
+            1,
+            "the whole ICE plane takes exactly ONE socket, whatever the peer count"
         );
         let frames = signal.frames.lock().expect("frames");
         for key in &keys {
@@ -3982,15 +3790,17 @@ mod tests {
         }
     }
 
-    /// (c) 候选**按 round 完成的时刻**陆续交付（trickle）：两个接口分两次跑完，
-    /// 第一次跑完的候选立刻入列（并带出 OFFER），第二次跑完的候选在**下一拍**
-    /// 追加 —— 既不等到整轮收完才发，也不会丢在后一个 round 后面。
+    /// (c) 候选**按到达时刻**陆续交付（trickle）：host 候选当拍就位（一枚
+    /// mux 端口 × 每个允许接口地址，[`crate::ice::mux_host_candidates`]），
+    /// srflx 候选随共享 mux 的 STUN round 完成**在下一拍**追加 —— 既不等到
+    /// 全部收完才发，也不会丢在别的候选后面。
     ///
     /// 这是上游 `onICECandidate` 的语义（pion fork `gather.go:39-65` 起收集、
     /// 每得一个候选就回调发一帧）：`GatherCandidates()` 立即返回，`dial` 与候选
-    /// trickle 同时在飞。
+    /// trickle 同时在飞。用 [`ManualGatherExec`] 手动放行 srflx round，让
+    /// 「哪一拍的候选是哪一个」完全确定。
     #[test]
-    fn candidates_are_delivered_as_each_interface_round_finishes() {
+    fn candidates_are_delivered_as_each_round_finishes() {
         let exec = Arc::new(ManualGatherExec::default());
         let socks = Arc::new(CountingSocks {
             inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
@@ -4010,49 +3820,52 @@ mod tests {
             fixed_local_port: None,
             advertised_candidates: Vec::new(),
         });
+        // 一个 STUN 服务器：srflx 才有东西可跑（黑洞端口 = 永远不答）。
+        assert_eq!(orch.set_stuns(&[format!("stun:127.0.0.1:{}", {
+            let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            s.local_addr().unwrap().port()
+        })]), 1);
         orch.set_gather_exec(exec.clone());
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
 
         orch.run_once(1_000).expect("beat 1");
-        assert_eq!(exec.queued(), 2, "one round per allowed interface");
-        assert!(
-            signal.frames.lock().expect("frames").is_empty(),
-            "nothing may be signaled before any round has produced a candidate"
-        );
-        assert!(!orch.peers[0].locals_done);
-
-        // 第一个 round 跑完（另一个还在跑）：候选 + OFFER 立刻入列，收集仍在飞。
-        assert!(exec.run_next(), "first round");
-        orch.run_once(1_100).expect("beat 2");
+        assert_eq!(exec.queued(), 1, "one srflx round per STUN server (not per interface)");
+        let port = orch.ice_mux().expect("mux").local_port();
         {
+            // host 候选当拍就位：两个接口地址、**同一个** mux 端口，OFFER 随行。
             let frames = signal.frames.lock().expect("frames");
             let cands: Vec<&(String, PeerSignalKind, String)> = frames
                 .iter()
                 .filter(|(_, k, _)| *k == PeerSignalKind::Candidate)
                 .collect();
-            assert_eq!(cands.len(), 1, "exactly the finished round's candidate: {frames:?}");
+            assert_eq!(cands.len(), 2, "one host candidate per allowed interface: {frames:?}");
+            for (_, _, payload) in &cands {
+                assert!(
+                    payload.contains(&format!(" {port} typ host")),
+                    "every host candidate carries the ONE mux port: {payload}"
+                );
+            }
             assert!(frames.iter().any(|(_, k, _)| *k == PeerSignalKind::Offer), "OFFER rides it");
         }
-        assert!(orch.peers[0].locals_done, "the first candidate makes the locals ready");
-        assert!(orch.peers[0].gather.is_some(), "the second round is still in flight");
-        assert_eq!(socks.taken.load(Ordering::Relaxed), 1, "one socket per finished round");
+        assert!(orch.peers[0].locals_done, "host candidates make the locals ready");
+        assert!(orch.peers[0].gather.is_some(), "the srflx round is still in flight");
+        assert_eq!(socks.taken.load(Ordering::Relaxed), 1, "ONE mux socket for the whole plane");
 
-        // 第二个 round 跑完：候选在**下一拍**追加（trickle），收集随之结束。
-        assert!(exec.run_next(), "second round");
-        orch.run_once(1_200).expect("beat 3");
+        // srflx round 跑完（黑洞 → 超时失败）：没有 srflx 候选，收集随之结束，
+        // 会话与 host 候选不受影响（上游 gather.go:526-531 只记一条 warning）。
+        assert!(exec.run_next(), "the srflx round");
+        orch.run_once(1_100).expect("beat 2");
+        assert!(orch.peers[0].gather.is_none(), "the srflx round reported: the gather is over");
+        assert!(orch.peers[0].locals_done, "host candidates survive a dead STUN server");
         let frames = signal.frames.lock().expect("frames");
-        let cands: Vec<(String, PeerSignalKind, String)> = frames
-            .clone()
-            .into_iter()
-            .filter(|(_, k, _)| *k == PeerSignalKind::Candidate)
-            .collect();
-        assert_eq!(cands.len(), 2, "both interface rounds' candidates are delivered: {frames:?}");
-        let ports: Vec<&str> = cands.iter().map(|(_, _, p)| p.as_str()).collect();
-        assert_ne!(ports[0], ports[1], "each round advertises its OWN bound socket: {ports:?}");
-        assert_eq!(socks.taken.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            frames.iter().filter(|(_, k, _)| *k == PeerSignalKind::Candidate).count(),
+            2,
+            "a dead STUN server adds no candidate: {frames:?}"
+        );
         drop(frames);
-        assert!(orch.peers[0].gather.is_none(), "all rounds reported: the gather is over");
+        assert!(orch.peers[0].last_error.is_none(), "a dead STUN server is not a session error");
     }
 
     /// (a) 黑洞 STUN **不阻塞 pump、也不阻塞别的 peer**：真实黑洞（本机绑定但
@@ -4092,11 +3905,15 @@ mod tests {
             "the first tick must not wait for the STUN exchange: {:?}",
             t0.elapsed()
         );
+        // STAGE 2：host 候选当拍就位（不再等 STUN），srflx 交换在两个 peer 上
+        // 同时在飞——而且是**同一枚 mux socket 上的同一轮**交换（去重）。
         assert_eq!(orch.peers.iter().filter(|p| p.gather.is_some()).count(), 2);
         assert!(
-            orch.peers.iter().all(|p| !p.locals_done),
-            "both peers' rounds are blocked on the silent STUN server"
+            orch.peers.iter().all(|p| p.locals_done),
+            "host candidates are immediate; only the srflx exchange is in flight"
         );
+        let mux = orch.ice_mux().expect("the shared mux");
+        assert_eq!(mux.stats().xor_misses, 1, "ONE STUN round for both peers' agents");
 
         // 收集被黑洞卡住的期间猛推 pump：每一拍都必须立刻返回。
         let mut worst_tick = std::time::Duration::ZERO;
@@ -4116,15 +3933,15 @@ mod tests {
             "a tick blocked on STUN would cost the STUN timeout; worst tick = {worst_tick:?}"
         );
         assert!(
-            orch.peers.iter().all(|p| !p.locals_done),
-            "the black hole must still be holding both gathers"
+            orch.peers.iter().all(|p| p.gather.is_some()),
+            "the black hole must still be holding both srflx exchanges"
         );
 
-        // 超时到点：两个 peer 各自拿到自己的 host 候选（延迟 = 一个 STUN 超时，
-        // 不是两个串联），pump 花的墙钟总量仍然远小于它。
+        // 超时到点：两个 peer 的 srflx 交换各自以 timeout 收尾（host 候选早已
+        // 就位、早已 advertise），pump 花的墙钟总量仍然远小于它。
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut first_candidate_at = None;
-        while orch.peers.iter().any(|p| !p.locals_done) && std::time::Instant::now() < deadline {
+        while orch.peers.iter().any(|p| p.gather.is_some()) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(2));
             let now = 1_000 + t0.elapsed().as_millis() as u64;
             let tick = std::time::Instant::now();
@@ -4132,16 +3949,16 @@ mod tests {
             let dt = tick.elapsed();
             worst_tick = worst_tick.max(dt);
             pump_total += dt;
-            if first_candidate_at.is_none() && orch.peers[0].locals_done {
+            if first_candidate_at.is_none() && orch.peers[0].gather.is_none() {
                 first_candidate_at = Some(t0.elapsed());
             }
         }
-        let first_candidate_at = first_candidate_at.expect("the blocked round must still finish");
+        let first_candidate_at = first_candidate_at.expect("the blocked exchange must still finish");
         assert!(
             first_candidate_at.as_millis() as u64 >= DEFAULT_STUN_TIMEOUT_MS - 700,
-            "the candidate must not appear before the STUN timeout ({first_candidate_at:?})"
+            "the srflx exchange must run for the full STUN timeout ({first_candidate_at:?})"
         );
-        assert!(orch.peers.iter().all(|p| p.locals_done), "both peers finish off the pump");
+        assert!(orch.peers.iter().all(|p| p.locals_done), "both peers keep their host candidates");
         assert!(
             pump_total < first_candidate_at / 4,
             "pump total {pump_total:?} must be dwarfed by the blocked gather {first_candidate_at:?}"
@@ -4156,15 +3973,16 @@ mod tests {
         drop(sink);
     }
 
-    /// 整轮零候选 = fail-closed（不发没有候选支撑的 OFFER），且**失败面出现在
-    /// 收集跑完之后的那一拍**：STAGE 1 把收集搬走，错误不再当拍返回，所以这条
-    /// 「迟到一拍」的回滚语义必须钉住——半成品会话整段回滚、`initiated` 复位、
-    /// 冷却后重试，`run_once` 冒一次错（与旧同步路径同形）。
+    /// STAGE 2（官方对齐审计 §2.7）：**host 候选不再 bind** —— 它只是
+    /// 「接口地址 × mux 端口」的一条广播，所以一个本机根本绑不上的地址
+    /// （TEST-NET-3，203.0.113.0/24）照样是一条合法候选：不起会话回滚、不冒
+    /// pump 错误、不留 `last_error`。这与上游一致（`gatherCandidatesLocalUDPMux`
+    /// 只读 `GetListenAddresses()`，一个 socket 都不开，fork `gather.go:331-405`）。
     ///
-    /// 接口地址取 TEST-NET-3（203.0.113.0/24，保留文档段，本机绑定必然
-    /// `EADDRNOTAVAIL`）：round 一个候选都绑不出来。
+    /// 真正的 fail-closed 面收窄成一条：**没有 mux**（见
+    /// `no_mux_fails_closed_instead_of_gathering_sockets`）。
     #[test]
-    fn async_gather_failure_rolls_back_the_initiate_session() {
+    fn an_unbindable_interface_address_is_still_advertised_off_the_mux() {
         let socks = Arc::new(CountingSocks {
             inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
             taken: AtomicU64::new(0),
@@ -4176,7 +3994,7 @@ mod tests {
                 name: "eth0".into(),
                 addr: [203, 0, 113, 7],
             }])),
-            socks,
+            socks: socks.clone(),
             signal: signal.clone(),
             wg: noop_wg(),
             tie_breaker: Some(7),
@@ -4186,28 +4004,31 @@ mod tests {
         orch.set_peers(&["P".into()]);
         orch.set_signal_ready(true);
 
-        // 第一拍：只发起、只把 round 交给 worker——绝不冒错。
-        orch.run_once(1_000).expect("beat 1 only starts the round");
-        assert!(orch.peers[0].session.is_some(), "the initiate path builds the session");
-        assert!(orch.peers[0].gather.is_some(), "the round is in flight, off the pump");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut failed = false;
-        while !failed && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            let now = 1_000 + std::time::Instant::now().elapsed().as_millis() as u64;
-            failed = orch.run_once(now).is_err();
-        }
-        assert!(failed, "a zero-candidate round must surface as a pump error");
+        // 第一拍：候选（接口地址 × mux 端口）与 OFFER 当拍就位，绝不等 STUN。
+        orch.run_once(1_000).expect("beat 1 gathers host candidates immediately");
+        let mux_port = orch.ice_mux().expect("the shared mux").local_port();
         let p = &orch.peers[0];
-        assert!(p.session.is_none(), "the half-built session is rolled back");
-        assert!(!p.locals_done && !p.started, "nothing is armed for a failed gather");
-        assert!(!p.initiated, "the peer may retry from scratch after the cooldown");
-        assert!(p.last_error.is_some(), "the failure is not silent");
+        assert!(p.session.is_some(), "the initiate path builds the session");
+        assert!(p.locals_done, "host candidates are emitted immediately (no STUN wait)");
+        assert_eq!(socks.taken.load(Ordering::Relaxed), 1, "ONE mux socket, not one per interface");
+        let frames = signal.frames.lock().expect("frames");
+        let cands: Vec<String> = frames
+            .iter()
+            .filter(|(_, k, _)| *k == PeerSignalKind::Candidate)
+            .map(|(_, _, p)| p.clone())
+            .collect();
+        assert_eq!(cands.len(), 1, "the unbindable interface is still advertised: {cands:?}");
         assert!(
-            signal.frames.lock().expect("frames").is_empty(),
-            "no candidate ⇒ no OFFER, no ANSWER (fail-closed)"
+            cands[0].contains(&format!("203.0.113.7 {mux_port} ")),
+            "the candidate carries the interface address and the MUX port: {}",
+            cands[0]
         );
+        assert!(
+            frames.iter().any(|(_, k, _)| *k == PeerSignalKind::Offer),
+            "the OFFER rides the first candidate"
+        );
+        assert!(orch.peers[0].last_error.is_none(), "an unreachable address is not an error");
+        assert!(orch.peers[0].started == false, "no remote candidates yet: still Gathering");
     }
 
     // -----------------------------------------------------------------------
@@ -4470,13 +4291,12 @@ mod tests {
         assert_eq!(orch.peers[0].backoff_misses, 0);
     }
 
-    /// 0051 §7 item 3 的 core 侧事实源：`need_per_peer` = 允许接口数 × 1
-    /// （与 `required_local_sockets` 同一份 `allowed_ifaces` 规则；0052 起
-    /// gather 的绑定 socket 由会话接管，不再每接口另取一枚），接口枚举
-    /// 失败才是 `None`（壳层据此回退）。overlay 接口（`vpn-tun`）被黑名单
-    /// 挡住，因此 3 个物理接口 + overlay 是 3。
+    /// STAGE 2（官方对齐审计 §2.7）：`need_per_peer` 不再是「每 peer 的接口
+    /// 预算」——整个 ICE 平面只有一枚共享 mux socket，所以它**恒为 1**，与
+    /// 接口数、接口枚举成败都无关。壳层的 socket 池在这一阶段不再被 feed
+    /// （stage 4 删除其代码），该字段只剩对账用途。
     #[test]
-    fn need_per_peer_counts_the_gather_budget_of_allowed_ifaces() {
+    fn need_per_peer_is_one_shared_mux_socket_whatever_the_interfaces() {
         fn orch_with(ifaces: Vec<crate::ice::InterfaceAddr>) -> PeerIceOrchestrator {
             test_orch(PeerIceDeps {
                 ifaces: Arc::new(crate::ice::StaticInterfaces(ifaces)),
@@ -4489,13 +4309,8 @@ mod tests {
             })
         }
         let i = |name: &str, addr: [u8; 4]| crate::ice::InterfaceAddr { name: name.into(), addr };
-        assert_eq!(orch_with(vec![]).need_per_peer(), Some(0));
+        assert_eq!(orch_with(vec![]).need_per_peer(), Some(1));
         assert_eq!(orch_with(vec![i("wlan0", [192, 168, 1, 2])]).need_per_peer(), Some(1));
-        assert_eq!(
-            orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("rmnet0", [10, 0, 0, 2])]).need_per_peer(),
-            Some(2),
-            "2 allowed interfaces → one adopted gather socket each"
-        );
         assert_eq!(
             orch_with(vec![
                 i("wlan0", [192, 168, 1, 2]),
@@ -4504,22 +4319,29 @@ mod tests {
                 i("eth1", [172, 17, 1, 1]),
             ])
             .need_per_peer(),
-            Some(3),
-            "3 allowed interfaces (overlay blacklisted) → need=3"
+            Some(1),
+            "interface count does not change it any more: the mux is ONE socket"
         );
-        // 与 PeerConn 的实际预算同源：同一个接口集下 required_local_sockets 相等
-        let mut orch = orch_with(vec![i("wlan0", [192, 168, 1, 2]), i("eth1", [172, 17, 1, 1])]);
-        orch.set_stuns(&[]);
-        let cfg = GatherConfig {
-            blacklist: &orch.blacklist,
-            servers: &orch.stuns,
-            timeout_ms: DEFAULT_STUN_TIMEOUT_MS,
-        };
-        assert_eq!(
-            orch.need_per_peer(),
-            Some(crate::ice::allowed_ifaces(&cfg, orch.ifaces.as_ref()).expect("enumerate").len()),
-            "need_per_peer is exactly the gather budget's input"
-        );
+        // 接口枚举失败也不再让这个数变成 -1（接口枚举已经不参与 socket 决策）。
+        let broken = test_orch(PeerIceDeps {
+            ifaces: Arc::new(FailingInterfaces),
+            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        assert_eq!(broken.need_per_peer(), Some(1));
+    }
+
+    /// 枚举必然失败的接口源（`need_per_peer` 的 -1 语义回归）。
+    struct FailingInterfaces;
+
+    impl InterfaceSource for FailingInterfaces {
+        fn list(&self) -> Result<Vec<crate::ice::InterfaceAddr>, ManagementError> {
+            Err(ManagementError::Network("interface-enum: test failure".into()))
+        }
     }
 
     // -------------------------------------------------------------------

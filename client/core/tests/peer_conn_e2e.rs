@@ -492,6 +492,185 @@ fn dual_peer_signal_exchange_reaches_connected_and_lands_wg_endpoints() {
     assert_eq!(b.socks.taken(), 1, "B: the adopted gather socket");
 }
 
+// ---------------------------------------------------------------------------
+// STAGE 2 (official-alignment audit §2.7): ONE mux per connector, MANY peers
+// ---------------------------------------------------------------------------
+
+/// One step of a many-orchestrator loop: pump every orchestrator, then deliver
+/// every queued frame to EVERY orchestrator that has the sender as a peer (the
+/// key-addressed signal map, generalized past two sides). Every frame is
+/// recorded in `seen`, exactly like the two-side `deliver`.
+fn step_many(bus: &Arc<SignalBus>, now: u64, orchs: &mut [&mut TestOrch]) {
+    for o in orchs.iter_mut() {
+        let _ = o.orch.run_once(now);
+    }
+    let frames = bus.drain();
+    bus.seen.lock().expect("seen").extend(frames.iter().cloned());
+    for f in frames {
+        for o in orchs.iter_mut() {
+            if o.orch.peer_keys().iter().any(|k| k == &f.from) {
+                let _ = o.orch.handle_signal(&f.from, f.kind, &f.payload, now);
+            }
+        }
+    }
+}
+
+/// A minimal loopback STUN server: answers every Binding Request with a Binding
+/// Success carrying XOR-MAPPED-ADDRESS (`mapped`) — the fixture that makes the
+/// shared srflx cache observable (RFC 5389 §15.2/§15.4 encoding).
+fn spawn_stun_responder() -> (u16, Arc<std::sync::atomic::AtomicBool>, std::thread::JoinHandle<()>) {
+    use netbird_core::stun::{BINDING_SUCCESS, MAGIC_COOKIE};
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("stun sink");
+    let port = sock.local_addr().expect("sink addr").port();
+    sock.set_read_timeout(Some(std::time::Duration::from_millis(200))).expect("timeout");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let Ok((n, from)) = sock.recv_from(&mut buf) else { continue };
+            let req = &buf[..n];
+            if req.len() < 20 {
+                continue;
+            }
+            let mapped_addr: [u8; 4] = [203, 0, 113, 9];
+            let mapped_port: u16 = 4444;
+            let mut body: Vec<u8> = Vec::new();
+            body.extend_from_slice(&0x0020u16.to_be_bytes()); // XOR-MAPPED-ADDRESS
+            body.extend_from_slice(&8u16.to_be_bytes());
+            body.push(0x00);
+            body.push(0x01);
+            body.extend_from_slice(&(mapped_port ^ (MAGIC_COOKIE >> 16) as u16).to_be_bytes());
+            for (i, b) in mapped_addr.iter().enumerate() {
+                body.push(b ^ (MAGIC_COOKIE >> (24 - 8 * i)) as u8);
+            }
+            let mut msg: Vec<u8> = Vec::new();
+            msg.extend_from_slice(&BINDING_SUCCESS.to_be_bytes());
+            msg.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            msg.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
+            msg.extend_from_slice(&req[8..20]); // echo the transaction id
+            msg.extend_from_slice(&body);
+            let _ = sock.send_to(&msg, from);
+        }
+    });
+    (port, stop, handle)
+}
+
+/// TWO connector-shaped instances, one shared mux EACH, MANY peers: A holds
+/// `N` peers (B0..B{N-1}) and each B_i holds one peer (A) — the 23-peer PC shape
+/// of the relay report, reduced to what fits a loopback test.
+///
+/// Stage-2 properties this pins:
+/// * every host candidate of EVERY peer carries the ONE mux port, emitted in
+///   the very first tick (no STUN wait, upstream `gatherCandidatesLocalUDPMux`);
+/// * the whole connector plane consumes exactly ONE protected socket;
+/// * one loopback STUN round serves all N peers (the 25 s srflx cache + in-flight
+///   de-duplication, upstream `GetXORMappedAddr`): all N srflx candidates carry
+///   the SAME mapped address, from ONE request;
+/// * all N negotiations run concurrently over that one socket and demux
+///   correctly by ufrag (every pair reaches Connected).
+#[test]
+fn one_mux_carries_many_concurrent_peers_and_one_stun_round_serves_them_all() {
+    const N: usize = 6;
+    let (stun_port, stop, responder) = spawn_stun_responder();
+    let bus = Arc::new(SignalBus::default());
+
+    // `TestOrch::new` takes a `&'static str` identity (the harness treats peer
+    // keys as compile-time literals); these N keys are generated, so they are
+    // leaked once for the test's lifetime.
+    let peer_keys: &'static [String] = Box::leak(
+        (0..N).map(|i| format!("UEtFWV9CMHt9P{i}")).collect::<Vec<String>>().into_boxed_slice(),
+    );
+    let refs: Vec<&'static str> = peer_keys.iter().map(|k| k.as_str()).collect();
+    let mut a = TestOrch::new(KEY_A, &refs, 0x1111, bus.clone());
+    // One mux per connector, with the loopback STUN server: every peer shares
+    // this single socket AND its srflx cache.
+    assert_eq!(a.orch.set_stuns(&[format!("stun:127.0.0.1:{stun_port}")]), 1);
+    // The B side: one connector per peer, one peer each.
+    let mut bees: Vec<TestOrch> =
+        refs.iter().map(|k| TestOrch::new(k, &[KEY_A], 0x2222, bus.clone())).collect();
+    for b in bees.iter_mut() {
+        b.orch.set_initiator(KEY_A, false); // deterministic: A offers, B_i answers
+    }
+
+    let mut now = 1000u64;
+    {
+        let mut all: Vec<&mut TestOrch> = Vec::new();
+        all.push(&mut a);
+        for b in bees.iter_mut() {
+            all.push(b);
+        }
+        step_many(&bus, now, &mut all);
+    }
+    now += 10;
+
+    // ONE tick: every peer of A has its host candidate, all carrying the SAME
+    // mux port, and A's provider handed out exactly ONE socket for all of them.
+    let mux_port = a.orch.ice_mux().expect("A's shared mux").local_port();
+    let all_a_cands = candidate_frames(&bus, KEY_A);
+    let host: Vec<Candidate> = all_a_cands
+        .iter()
+        .filter(|c| c.typ == netbird_core::ice::CandidateType::Host)
+        .cloned()
+        .collect();
+    assert_eq!(host.len(), N, "one host candidate per peer, in the first tick: {host:?}");
+    assert!(
+        host.iter().all(|c| c.port == mux_port),
+        "every host candidate carries the ONE mux port {mux_port}"
+    );
+    assert_eq!(a.socks.taken(), 1, "the whole connector plane takes ONE socket");
+    // …and the srflx half of the same tick: the ONE STUN round served all N
+    // peers through the shared cache.
+    let stats = a.orch.ice_mux().expect("mux").stats();
+    assert_eq!(stats.xor_misses, 1, "ONE STUN request for {N} peers (in-flight de-dup)");
+    assert_eq!(stats.xor_filled, 1);
+    assert_eq!(stats.xor_hits, (N - 1) as u64, "the other {N}-1 peers are served from the cache");
+
+    // Pump to convergence: all N negotiations concurrently over that socket.
+    let mut all_connected = false;
+    while now <= 40_000 {
+        {
+            let mut all: Vec<&mut TestOrch> = Vec::new();
+            all.push(&mut a);
+            for b in bees.iter_mut() {
+                all.push(b);
+            }
+            step_many(&bus, now, &mut all);
+        }
+        now += 10;
+        all_connected = a.orch.summary().connected == N
+            && bees.iter().all(|b| b.orch.summary().connected == 1);
+        if all_connected {
+            break;
+        }
+    }
+    assert!(
+        all_connected,
+        "all {N} peers on A's one mux must reach Connected concurrently: A={:?} B={:?}",
+        a.orch.summary(),
+        bees.iter().map(|b| b.orch.summary().connected).collect::<Vec<_>>()
+    );
+
+    // The srflx candidates: every peer got the ONE cached mapping, with the
+    // shared mux port as its base.
+    let srflx: Vec<Candidate> = candidate_frames(&bus, KEY_A)
+        .into_iter()
+        .filter(|c| c.typ == netbird_core::ice::CandidateType::Srflx)
+        .collect();
+    assert_eq!(srflx.len(), N, "every peer got the shared mapping as a srflx candidate");
+    assert!(
+        srflx.iter().all(|c| c.address == "203.0.113.9" && c.port == 4444),
+        "all srflx candidates carry the SAME mapped address: {srflx:?}"
+    );
+    assert!(
+        srflx.iter().all(|c| c.related_port == Some(mux_port)),
+        "…with the shared mux port as their base (rport)"
+    );
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = responder.join();
+}
+
 /// Glare: BOTH peers initiate (both send OFFER, both start controlling).
 /// The signal channel carries no role field, so the conflict is repaired by
 /// the N5b tie-breaker semantics (RFC 8445 §7.3.1.1/§7.2.5.1): the larger
@@ -848,10 +1027,15 @@ fn zombie_negotiation_times_out_and_reinitiates_with_fresh_credentials() {
         parse_ufrag_pwd(&first_offer).expect("original offer wire form"),
         "the zombie teardown must re-initiate with NEW credentials"
     );
+    assert_eq!(
+        a.socks.taken(),
+        1,
+        "STAGE 2: ONE shared mux socket for the whole ICE plane — the re-initiated \
+         negotiation reuses it instead of taking a fresh per-session socket"
+    );
     assert!(
-        a.socks.taken() >= 2,
-        "two gather rounds (one adopted socket each, 0052) must have consumed provider sockets, got {}",
-        a.socks.taken()
+        a.orch.ice_mux().is_some(),
+        "the shared mux outlived the torn-down session"
     );
 }
 
@@ -922,33 +1106,31 @@ fn candidate_only_remote_still_times_out_and_reinitiates() {
     );
 }
 
-/// 0048 R3 regression: initiate ran while the protected-socket pool was still
-/// empty. The pre-fix failure branch kept `session = Some`, so `want_initiate`
-/// (which demands `session.is_none()`) never fired again and the later
-/// `want_locals` retry trickled ONLY candidates — the remote never received a
-/// credential frame and could never `start()`. Fix: the half-built session is
-/// rolled back, the post-cooldown retry offers credentials, and both sides
-/// reach started (Checking → Connected here).
-///
-/// 0050 §8 item 3 updated the SHAPE of the empty-pool beat: it is now a
-/// wait (`run_once` stays `Ok`, no `last_error`) instead of a `Network` error
-/// surfacing as `peer-conn: pump error (network)`. The 0048 contract this test
-/// pins is unchanged: nothing is signaled, nothing is consumed, and the
-/// post-supply retry still offers credentials.
+/// 0048 R3 regression, re-shaped by STAGE 2 (official-alignment §2.7): initiate
+/// ran while the protected-socket provider was still empty — which now means
+/// "no mux", so there is nothing to gather on and the beat fails CLOSED
+/// (`ice:no-mux`) instead of waiting. The 0048 contract this test pins is
+/// unchanged and is what matters: the half-built session is rolled back
+/// (`want_initiate` demands `session.is_none()`), nothing is signaled, and the
+/// post-supply retry — the provider hands out the ONE shared mux socket —
+/// offers credentials again and both sides converge.
 #[test]
 fn initiate_before_socket_supply_still_offers_credentials() {
     let bus = Arc::new(SignalBus::default());
-    // A is the default initiator and starts with an EMPTY socket pool.
+    // A is the default initiator and starts with an EMPTY socket provider.
     let mut a = TestOrch::new_with_sockets(KEY_A, &[KEY_B], 0x1111, bus.clone(), 0);
     let mut b = TestOrch::new_with_sockets(KEY_B, &[KEY_A], 0x2222, bus.clone(), 8);
     b.orch.set_initiator(KEY_A, false); // deterministic role split: only A offers
 
     let mut now = 1000u64;
-    // Beat 1: the initiate gather waits for supply on the empty pool (0050:
-    // a wait, not a pump error — and no error recorded on the peer).
-    assert!(a.orch.run_once(now).is_ok(), "an empty pool is a wait, not a failure");
+    // Beat 1: no mux ⇒ fail-closed. The error names the missing mux, the
+    // half-built session is rolled back and NO frame leaves.
+    let err = a
+        .orch
+        .run_once(now)
+        .expect_err("no mux is a fail-closed error, never an unprotected socket");
+    assert!(format!("{err}").contains("no-mux"), "got {err}");
     assert_eq!(a.status_of(KEY_B).state, PeerIceState::Idle);
-    assert_eq!(a.status_of(KEY_B).last_error, None, "waiting is not an error (0050)");
     assert!(bus.queue.lock().expect("queue").is_empty(), "fail-closed: no frame may leave");
 
     // The remote trickles candidates while A still has no credentials (the
@@ -996,26 +1178,22 @@ fn initiate_before_socket_supply_still_offers_credentials() {
     assert!(sa.reachable && sb.reachable);
 }
 
-/// 0048 glare regression (requirement 2): the local side attempted to
-/// initiate while its socket pool was empty and therefore never signaled
-/// credentials. The remote's OFFER then arrived and, pre-fix, hit the glare
-/// branch (existing session → adopt remote credentials, `answer_owed` stays
-/// false) — the local side owed no ANSWER and the remote never got our
-/// credentials, so the pair sat `idle` with 0 offer / 0 answer forever.
-/// With the rollback fix the starved initiate leaves NO session, so the remote
-/// OFFER takes the normal answerer path: the ANSWER leaves as soon as the
-/// socket supply lands and both sides converge. (0050 §8 item 3: that starved
-/// initiate is a WAIT — `Ok`, no `last_error` — but the rollback is unchanged.)
+/// 0048 glare regression (requirement 2), re-shaped by STAGE 2 (official-alignment
+/// §2.7): the local side attempted to initiate while its socket provider was
+/// empty — which now means "no mux", so the initiate beat fails CLOSED and the
+/// half-built session is rolled back. The remote's OFFER then arrives and takes
+/// the normal answerer path (no session ⇒ no glare), so the ANSWER leaves as soon
+/// as the provider hands out the mux and both sides converge.
 #[test]
 fn remote_offer_after_failed_initiate_is_answered() {
     let bus = Arc::new(SignalBus::default());
-    // Both sides are initiators (the default); A's pool is still empty.
+    // Both sides are initiators (the default); A's provider is still empty.
     let mut a = TestOrch::new_with_sockets(KEY_A, &[KEY_B], 0x1111, bus.clone(), 0);
     let mut b = TestOrch::new_with_sockets(KEY_B, &[KEY_A], 0x2222, bus.clone(), 8);
 
     let mut now = 1000u64;
-    // 0050 §8 item 3: the empty pool is a WAIT (`Ok`), not a pump error.
-    assert!(a.orch.run_once(now).is_ok(), "an empty pool is a wait, not a failure");
+    // STAGE 2: no mux ⇒ fail-closed, session rolled back.
+    assert!(a.orch.run_once(now).is_err(), "no mux is a fail-closed error");
 
     // B offers (with candidates) while A's pool is still empty.
     now += 2;

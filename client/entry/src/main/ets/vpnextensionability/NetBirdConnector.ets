@@ -973,6 +973,11 @@ export function mgmtSocketOpen(): NativeTcpSocketOpen {
 // socket (binding here would pick the port before the interface is known);
 // the ICE consumer dups the fd, binds the copy per interface and reads the
 // chosen port back via getsockname.
+//
+// RETIRED IN STAGE 2 (official-alignment audit §2.7): the ICE plane no longer
+// takes a socket per gather round — it uses the ONE shared mux below. Kept (with
+// `connectorIceSocketFeed` and `NetBirdIceSocketPool.ets`) until stage 4 deletes
+// the shell-side socket rationing together.
 export function iceSocketOpen(): NativeTcpSocketOpen {
   return JSON.parse(core.ice_socket_open()) as NativeTcpSocketOpen;
 }
@@ -982,6 +987,40 @@ export function iceSocketOpen(): NativeTcpSocketOpen {
 // there is no unprotected UDP fallback (governance §二.4).
 export function connectorIceSocketFeed(fd: number): SocketFeedResult {
   return JSON.parse(core.connector_ice_socket_feed(fd)) as SocketFeedResult;
+}
+
+// STAGE 2 (official-alignment audit §2.7): the ONE shared ICE mux socket —
+// opened AND BOUND by the core (wildcard, one port), then protected by the shell
+// and fed back on the SAME fd (the `wg_fwd_open` shape). `port` is the port every
+// host candidate of every peer advertises; `replaced` is true when this feed
+// superseded a previous mux (a physical-network change re-protects on the new
+// VpnConnection).
+export interface IceMuxOpen {
+  fd: number;
+  port: number;
+  bind_rc: number;
+  bind_errno: number;
+}
+
+export interface IceMuxFeedResult {
+  ok: boolean;
+  port?: number;
+  replaced?: boolean;
+  error?: string;
+}
+
+// Core opens + binds the shared mux socket (wildcard, ephemeral port). The shell
+// protects `fd` and feeds it back through connectorIceMuxFeed; until then no
+// datagram may flow (fail-closed).
+export function iceMuxOpen(): IceMuxOpen {
+  return JSON.parse(core.ice_mux_open()) as IceMuxOpen;
+}
+
+// Feed the PROTECTED shared ICE mux socket. Failure tokens: no-connector,
+// no-mux-slot, socket-fd-missing, socket-fd-invalid, socket-unbound. Without a
+// mux there are NO local candidates (no unprotected fallback).
+export function connectorIceMuxFeed(fd: number): IceMuxFeedResult {
+  return JSON.parse(core.connector_ice_mux_feed(fd)) as IceMuxFeedResult;
 }
 
 // ---------------------------------------------------------------------------

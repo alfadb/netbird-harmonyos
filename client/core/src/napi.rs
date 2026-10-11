@@ -107,6 +107,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("config_validate", napi_config_validate);
     reg!("mgmt_socket_open", napi_mgmt_socket_open);
     reg!("ice_socket_open", napi_ice_socket_open);
+    reg!("ice_mux_open", napi_ice_mux_open);
     reg!("connector_start", napi_connector_start);
     reg!("connector_start_with_socket", napi_connector_start_with_socket);
     reg!("connector_physical_network_changed", napi_connector_physical_network_changed);
@@ -115,6 +116,7 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_protected_dns_poll", napi_connector_protected_dns_poll);
     reg!("connector_socket_feed", napi_connector_socket_feed);
     reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
+    reg!("connector_ice_mux_feed", napi_connector_ice_mux_feed);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
     reg!("socket_supply_poll", napi_socket_supply_poll);
     reg!("socket_supply_reply", napi_socket_supply_reply);
@@ -560,10 +562,12 @@ mod tests {
             "config_validate",
             "mgmt_socket_open",
             "ice_socket_open",
+            "ice_mux_open",
             "connector_start",
             "connector_start_with_socket",
             "connector_socket_feed",
             "connector_ice_socket_feed",
+            "connector_ice_mux_feed",
             "connector_signal_socket_feed",
             "connector_wg_socket_feed",
             "connector_tun_fd_feed",
@@ -1134,6 +1138,25 @@ unsafe extern "C" fn napi_connector_ice_socket_feed(
     let a = cb_args(env, info);
     let fd = a.i32_at(0, -1);
     ret_json(env, crate::connector::connector_ice_socket_feed_json(fd))
+}
+
+// STAGE 2 (official-alignment §2.7): open + bind the ONE shared ICE mux socket
+// for the shell protect gate (the `wg_fwd_open` shape). Returns
+// `{fd,port,bind_rc,bind_errno}`; the shell protects `fd` and feeds it back
+// through `connector_ice_mux_feed`.
+unsafe extern "C" fn napi_ice_mux_open(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::ice_mux::ice_mux_open())
+}
+
+// STAGE 2: shell-side feed of the PROTECTED shared ICE mux socket (fail-closed:
+// no mux ⇒ no local candidates, no unprotected fallback).
+unsafe extern "C" fn napi_connector_ice_mux_feed(
+    env: NapiEnv,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    let a = cb_args(env, info);
+    let fd = a.i32_at(0, -1);
+    ret_json(env, crate::connector::connector_ice_mux_feed_json(fd))
 }
 
 // N5d: shell-side resupply of PROTECTED signal sockets plus the

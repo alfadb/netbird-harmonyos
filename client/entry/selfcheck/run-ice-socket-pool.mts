@@ -149,9 +149,24 @@ try {
   }
 
   // ---- shipped-extension wiring ------------------------------------------
-  check('the watcher derives the target from the live peer count AND the core need',
-    shell.includes('iceSocketTargetDepth(status.peer_count, iceSocketNeedPerPeer(status.ice_sockets?.need_per_peer))'));
-  check('the pool feed sizes itself from a live status read (count + core need)',
+  // STAGE 2 (official-alignment audit §2.7): the demand-sized pool is RETIRED —
+  // the whole ICE plane rides ONE shared mux socket fed once by
+  // `protectAndFeedIceMux` (and re-fed on a physical-network change). The pool
+  // math above is still pinned because the module and its (now uncalled) feeders
+  // stay in the extension until stage 4; what must NOT happen is the watcher
+  // driving it again.
+  check('stage 2: the watcher no longer tops the retired pool up',
+    !shell.includes('this.topUpIceBatch().catch'));
+  check('stage 2: the core opens AND binds the ONE shared mux socket',
+    shell.includes('const opened: IceMuxOpen = iceMuxOpen();'));
+  check('stage 2: the mux fd goes through the same protect gate as the WG socket',
+    shell.includes("await this.protectSocketWithBox(connection, fd, 'I')"));
+  check('stage 2: the protected mux fd is fed back to the core',
+    shell.includes('fed = connectorIceMuxFeed(fd);'));
+  check('stage 2: both provision paths feed the mux (initial connect + network change)',
+    shell.includes('const iceOk: boolean = await this.protectAndFeedIceMux();') &&
+    shell.includes('if (!await this.protectAndFeedIceMux()) { break; }'));
+  check('the pool feed still sizes itself from a live status read (count + core need)',
     shell.includes('iceSocketTargetDepth(live.peer_count, iceSocketNeedPerPeer(live.ice_sockets?.need_per_peer))'));
   check('the shell imports the core-need reader from the pool module',
     shell.includes('iceSocketNeedPerPeer'));

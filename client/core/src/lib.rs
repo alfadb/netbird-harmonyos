@@ -159,6 +159,10 @@ pub mod ice;
 // MESSAGE-INTEGRITY/FINGERPRINT, pair state machine, nomination/selected
 // pair, keepalive/disconnect timers (injected clock).
 pub mod ice_session;
+// N5e (official-alignment §2.7 stage 2): the SHARED ICE mux — ONE protected UDP
+// socket for the whole ICE plane, upstream-shaped ufrag/address demux and the
+// 25 s srflx (XOR-MAPPED-ADDRESS) cache.
+pub mod ice_mux;
 pub mod ledger;
 pub mod management;
 // N2-H (host-side evidence tool): route-exclusion ISOLATION EVIDENCE for one

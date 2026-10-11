@@ -320,6 +320,8 @@ const SHIM_TYPES: Record<string, string[]> = {
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
+    // STAGE 2 (official-alignment audit §2.7): the shared ICE mux feed types.
+    'IceMuxOpen', 'IceMuxFeedResult',
     // N2 first batch C/D columns: the erased bearer-facts shape
     // `physicalDefaultBearerFacts` answers.
     'PhysicalBearerFacts',
@@ -1573,7 +1575,10 @@ try {
   const SUPPLY_KEYS: string[] = ['__NB_SUPPLY_DNS', '__NB_SUPPLY_DNS_RESOLVE',
     '__NB_SUPPLY_WG_OPEN', '__NB_SUPPLY_WG_FEED', '__NB_SUPPLY_MGMT_OPEN',
     '__NB_SUPPLY_MGMT_ADDR', '__NB_SUPPLY_MGMT_FEED', '__NB_SUPPLY_SIGNAL_FEED',
-    '__NB_SUPPLY_ICE_OPEN', '__NB_SUPPLY_ICE_FEED'];
+    '__NB_SUPPLY_ICE_OPEN', '__NB_SUPPLY_ICE_FEED',
+    // STAGE 2: the shared ICE mux seams are supply seams too — the gate must be
+    // able to prove it let NOTHING through, including the mux open/feed.
+    '__NB_SUPPLY_ICE_MUX_OPEN', '__NB_SUPPLY_ICE_MUX_FEED'];
   const resetSupply = (): void => {
     for (const key of SUPPLY_KEYS) { G[key] = undefined; }
     G['__NB_SUPPLY_REPLY'] = undefined;
@@ -1590,7 +1595,9 @@ try {
     wgOpen: supplyOf('__NB_SUPPLY_WG_OPEN'), wgFeed: supplyOf('__NB_SUPPLY_WG_FEED'),
     mgmtOpen: supplyOf('__NB_SUPPLY_MGMT_OPEN'), mgmtAddr: supplyOf('__NB_SUPPLY_MGMT_ADDR'),
     mgmtFeed: supplyOf('__NB_SUPPLY_MGMT_FEED'), signalFeed: supplyOf('__NB_SUPPLY_SIGNAL_FEED'),
-    iceOpen: supplyOf('__NB_SUPPLY_ICE_OPEN'), iceFeed: supplyOf('__NB_SUPPLY_ICE_FEED')
+    iceOpen: supplyOf('__NB_SUPPLY_ICE_OPEN'), iceFeed: supplyOf('__NB_SUPPLY_ICE_FEED'),
+    iceMuxOpen: supplyOf('__NB_SUPPLY_ICE_MUX_OPEN'),
+    iceMuxFeed: supplyOf('__NB_SUPPLY_ICE_MUX_FEED')
   });
   const sleepMs = async (ms: number): Promise<void> => {
     await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, ms); });
@@ -5698,7 +5705,10 @@ try {
     dGate['n2CdGateState'] === 'released' &&
     supplyOf('__NB_SUPPLY_DNS_RESOLVE') === 1 && supplyOf('__NB_SUPPLY_WG_OPEN') === 1 &&
     supplyOf('__NB_SUPPLY_WG_FEED') === 1 && supplyOf('__NB_SUPPLY_MGMT_FEED') === 1 &&
-    supplyOf('__NB_SUPPLY_ICE_FEED') >= 1 && supplyOf('__NB_SUPPLY_DNS') >= 1 &&
+    // STAGE 2 (official-alignment audit §2.7): the recovery re-feeds the ONE
+    // shared ICE mux socket (open + protect + feed) instead of the retired pool.
+    supplyOf('__NB_SUPPLY_ICE_MUX_FEED') >= 1 && supplyOf('__NB_SUPPLY_ICE_MUX_OPEN') >= 1 &&
+    supplyOf('__NB_SUPPLY_DNS') >= 1 &&
     linesWith('VPN_NETWORK_RECOVERED|').length === 1 &&
     lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=303') > 0,
     JSON.stringify({ gate: dGate['n2CdGateState'], supply: supplyLine(),
