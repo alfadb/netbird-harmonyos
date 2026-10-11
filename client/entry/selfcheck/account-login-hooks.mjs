@@ -19,7 +19,18 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   ' if (x.loginWait) return JSON.stringify({state:"pending"});' +
   ' if (x.loginFailure) return JSON.stringify({state:"failed",error:x.loginFailure});' +
   ' return JSON.stringify({state:"done",outcome:x.loginOutcome}); },' +
-  ' account_login_cancel(id) { s().loginCancelled.push(id); return "{\\"ok\\":true}"; }' +
+  ' account_login_cancel(id) { s().loginCancelled.push(id); return "{\\"ok\\":true}"; },' +
+  // 2026-10-13: the interactive session extend's management step — the same
+  // one-shot shape, its own slot. It records the request (connector config +
+  // the fresh JWT), answers pending while asked to wait, and otherwise returns
+  // the scripted 3-state reply / failure token.
+  ' account_extend_start(text) { const x=s(); x.extendRequests.push(JSON.parse(text));' +
+  ' x.requestId++; return JSON.stringify({ok:true,request_id:x.requestId}); },' +
+  ' account_extend_poll(id) { const x=s(); x.extendPolls.push(id);' +
+  ' if (x.extendWait) return JSON.stringify({state:"pending"});' +
+  ' if (x.extendFailure) return JSON.stringify({state:"failed",error:x.extendFailure});' +
+  ' return JSON.stringify(x.extendReply); },' +
+  ' account_extend_cancel(id) { s().extendCancelled.push(id); return "{\\"ok\\":true}"; }' +
   '};');
 const CRYPTO = 'data:text/javascript,' + encodeURIComponent(
   'export async function createPkceSession(uri) {' +

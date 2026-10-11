@@ -28,8 +28,8 @@
 //!   判定为 `needs-login` 类（upstream `StatusNeedsLogin`，connect.go:373-377
 //!   / state.go:15），壳层据此显示官方文案（`Login required`/「需要登录」）
 //!   而不是无限重试。见 [`login_sequence`]。
-//! - 会话期限（2026-10-12）：上游把 Login/Sync 上的 3 态 `sessionExpiresAt`
-//!   锚定到 watcher（`client/internal/engine_authsession.go:17-62`
+//! - 会话期限（2026-10-12，2026-10-13 补齐续期入口）：上游把 Login/Sync 上的 3 态
+//!   `sessionExpiresAt` 锚定到 watcher（`client/internal/engine_authsession.go:17-62`
 //!   `ApplySessionDeadline`；nil=保持、显式零=禁用、有效值=新期限），临期
 //!   警告提前量在 `client/internal/auth/sessionwatch/watcher.go:34-43`
 //!   （T-10min 交互警告 / T-2min 兜底）。**续期本身是官方 App 进程的交互
@@ -37,8 +37,11 @@
 //!   SSO 拿新 JWT（`login.go:191-204`），再调引擎的
 //!   `engine_authsession.go:83-107`（空 JWT 直接拒绝 L84-86；成功后把新期限
 //!   写回 L102；隧道不动、不重同步 L71-73 注释）。本模块**没有** JWT，因此只
-//!   把期限发布到状态文档（`session_expiry`）供壳层显示，绝不自行静默续期；
-//!   该交互入口（UI 进程 SSO → 核心 extend）尚未实现，见报告 caveat。
+//!   把期限发布到状态文档（`session_expiry` / `session_expires_at_unix`）供壳层
+//!   显示，绝不自行静默续期。交互入口在 UI 进程：SSO（ArkWeb PKCE）→
+//!   [`crate::account_auth`] 的 extend job（`account_extend_*`，JWT 只活在那一次
+//!   调用里）→ 该 job 把服务端答复经 [`session_deadline_apply_live`] 写回**本进程**
+//!   的连接器（engine_authsession.go:102 的同一 sink）。
 //! - 快照顺序：`client/internal/engine.go:1572-1576` — serial 严格小于
 //!   已应用值的 NetworkMap 直接丢弃（相等仍应用）。
 //!
@@ -7820,6 +7823,33 @@ pub fn connector_routes_json() -> String {
         Some(handle) => handle.routes_json(),
         None => routes_document(&RouteSelector::new(), None),
     }
+}
+
+/// The engine-side sink of the INTERACTIVE session extend — upstream
+/// `Engine.ExtendAuthSession` (`client/internal/engine_authsession.go:83-107`)
+/// ends by applying the server's own 3-state answer to the ONE deadline anchor
+/// (`ApplySessionDeadline`, L102 → `sessionwatch`/status recorder).
+///
+/// This is that write, for the connector running in THIS process: the value
+/// goes into exactly the same [`SessionDeadline`] the Login/Sync path folds
+/// into (`apply_wire` semantics: `None` = no info → KEEP, `Some(0)` = expiry
+/// disabled, `Some(t)` = new absolute deadline), so the published
+/// `session_expiry` / `session_expires_at_unix` can never disagree with what
+/// the server answered to the extend.
+///
+/// `true` = a connector was running here and holds the new anchor; `false` =
+/// no connector in this process. The caller ([`crate::account_auth`]'s extend
+/// job) still hands the server's answer back to whoever asked: in the shell
+/// split the extend runs in the UI process (the only one with the SSO
+/// surface), whose connector slot is empty by construction, so the `false`
+/// branch is the production case and the UI displays the returned deadline.
+pub fn session_deadline_apply_live(wire: Option<i64>) -> bool {
+    let slot = connector_slot();
+    let Some(handle) = slot.as_ref() else {
+        return false;
+    };
+    handle.shared.lock().deadline.apply_wire(wire);
+    true
 }
 
 /// The LIVE route-selection update (T0 e15ac): `selectionJson` is the RAW

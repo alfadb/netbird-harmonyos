@@ -7,8 +7,23 @@
   `791401060d2b95e5f51e3439c0649729132f571e`（main HEAD，拉取登记见仓外
   `~/harmonyos-signing/netbird-n1bdisc/records/upstream-bump-79140106-20260913.json`）。
 - **上游路径**：`shared/management/proto/management.proto`
-- **复制方式**：逐字复制，未做任何修改（sha256 复制前后一致；
-  `9d54ca25ecc65076d8b371bb0c5c1e15e1566ab8eb66d52d50a68889a352e9f5`）。
+- **复制方式**：以上述 commit 逐字复制（原 sha256
+  `9d54ca25ecc65076d8b371bb0c5c1e15e1566ab8eb66d52d50a68889a352e9f5`），
+  外加**一处带出处的追加字段**（见下节）；除该处外与 pin 逐字一致。
+- **2026-10-13 追加字段**：`PKCEAuthorizationFlowRequest.SessionExtend = 1`
+  （含上游注释，逐字取自 commit
+  `67c2041`：`shared/management/proto/management.proto:559-570`）。
+  pin 7914010 里这个 message 还是空结构（`// … empty struct for future
+  expansion`），而会话续期必须让管理端知道这是一次 extend——上游服务端据此强制
+  `prompt=login`（`management/internals/shared/grpc/server.go:1174-1207`
+  `applySessionExtendFlowPolicy`，调用点 `:1161`），Android 客户端发送该标志
+  （`shared/management/client/grpc.go:744-760`，调用方
+  `client/android/login.go:200-207`）。不发送该字段 = 静默授权可能来自 IdP 上
+  另一个已登录账号，续期会以 peer/user 不匹配失败。字段是**纯追加**（新 tag 1，
+  旧服务端忽略未知字段），wire 兼容；本仓 `client/core/src/grpc.rs` 的
+  `get_pkce_authorization_flow(session_extend)` 是唯一发送方。
+  追加后的文件 sha256：
+  `e51eaf4c00d2e6a5136e2472c6c35f740f143b0e58e5a25d2a9f2dfdc2a5d977`。
 - **许可**：**BSD-3-Clause**。上游根 LICENSE 声明仅顶层 `management/`、`signal/`、
   `relay/`、`combined/` 四个目录为 AGPLv3；本文件位于 `shared/` 目录下，按登记记录
   的目录映射（REUSE.toml `default_license = "BSD-3-Clause"`；`shared/` 在

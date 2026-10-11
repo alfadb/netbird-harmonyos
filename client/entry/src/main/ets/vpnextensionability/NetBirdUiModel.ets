@@ -1397,3 +1397,147 @@ export function connectFailureText(errorClass: string): string {
   }
   return '无法连接管理服务器，请检查网络或服务器配置';
 }
+
+// ---------------------------------------------------------------------------
+// 2026-10-13 会话延长 (the interactive session extend — home-screen offer)
+//
+// Upstream Android offers the extend on the home screen whenever the engine
+// knows a deadline: `updateSessionRow()` shows the row exactly when the
+// deadline is > 0 and hides it otherwise (HomeFragment.java:901-912), the label
+// comes from `formatSessionExpiry()` (HomeFragment.java:920-941) and the row
+// carries the constant hint `session_banner_hint` (fragment_home.xml:424, the
+// secondary TextView inside the `session_expiry_row` block :377-427).
+// The tap runs `ServiceAccessor.extendSession()` (HomeFragment.java:219-223) →
+// `MainActivity.extendSession()` (MainActivity.java:1068-1085): the interactive
+// SSO plus the management `ExtendAuthSession`, whose two outcomes are the
+// toasts `session_extended` / `session_extend_failed` (strings.xml:296-297).
+//
+// NO lead threshold gates the Android row: the T-10min / T-2min leads
+// (`WarningLead` / `FinalWarningLead`, sessionwatch/watcher.go:48-57) drive the
+// DAEMON's T-10 OS notification and its T-2 fallback dialog (consumers:
+// client/ui/tray_session.go, client/server/server.go:2289-2294), never this
+// row. The row's own rule is exactly `deadline > 0` — with the remaining time
+// measured against the page's clock, exactly like upstream's
+// `System.currentTimeMillis()` (HomeFragment.java:921).
+//
+// The Chinese wording is upstream's OWN zh-rCN translation
+// (app/src/main/res/values-zh-rCN/strings.xml:233-246) — carried verbatim, not
+// re-translated here.
+// ---------------------------------------------------------------------------
+
+// `session_banner_hint` (strings.xml:300) → "点按以延长会话" (zh-rCN:237).
+export const SESSION_BANNER_HINT: string = '点按以延长会话';
+// `session_extended` (strings.xml:296) → "会话已延长" (zh-rCN:233): the success
+// Toast (MainActivity.java:1073-1080).
+export const SESSION_EXTENDED_TEXT: string = '会话已延长';
+// `session_banner_expired` / `session_banner_expires_soon` (strings.xml:298-299)
+// → "会话已过期" / "会话将在不到一分钟后过期" (zh-rCN:235-236). The English
+// minute/hour/day texts are plurals (strings.xml:301-313); zh-rCN carries a
+// single `other` form (:238-246), so each renders as ONE sentence.
+export const SESSION_EXPIRED_TEXT: string = '会话已过期';
+export const SESSION_EXPIRES_SOON_TEXT: string = '会话将在不到一分钟后过期';
+
+const SESSION_MINUTE_MS: number = 60 * 1000;
+const SESSION_HOUR_MS: number = 60 * SESSION_MINUTE_MS;
+const SESSION_DAY_MS: number = 24 * SESSION_HOUR_MS;
+
+// One home-screen session row: `offer` = the official visibility rule (the
+// engine knows a positive deadline), `text` = the official label, `hint` = the
+// constant official hint. When `offer` is false the other two are empty — the
+// row is ABSENT (upstream `View.GONE`), never emptied-but-shown.
+export interface SessionRowView {
+  offer: boolean;
+  text: string;
+  hint: string;
+}
+
+// Round UP (upstream `ceilDiv`, HomeFragment.java:943-945, applied at :929/:934/
+// :938): the figure shown is never more time than the user actually has, and the
+// sub-minute tail keeps its own wording rather than rounding to "1 分钟".
+export function sessionRowView(deadlineS: number | undefined, nowMs: number): SessionRowView {
+  if (deadlineS === undefined || !Number.isFinite(deadlineS) || deadlineS <= 0 ||
+    !Number.isFinite(nowMs)) {
+    return { offer: false, text: '', hint: '' };
+  }
+  const remainingMs: number = deadlineS * 1000 - nowMs;
+  if (remainingMs <= 0) {
+    return { offer: true, text: SESSION_EXPIRED_TEXT, hint: SESSION_BANNER_HINT };
+  }
+  if (remainingMs < SESSION_MINUTE_MS) {
+    return { offer: true, text: SESSION_EXPIRES_SOON_TEXT, hint: SESSION_BANNER_HINT };
+  }
+  if (remainingMs <= 59 * SESSION_MINUTE_MS) {
+    const minutes: number = Math.ceil(remainingMs / SESSION_MINUTE_MS);
+    return { offer: true, text: `会话将在 ${minutes} 分钟后过期`, hint: SESSION_BANNER_HINT };
+  }
+  if (remainingMs <= 23 * SESSION_HOUR_MS) {
+    const hours: number = Math.ceil(remainingMs / SESSION_HOUR_MS);
+    return { offer: true, text: `会话将在 ${hours} 小时后过期`, hint: SESSION_BANNER_HINT };
+  }
+  const days: number = Math.ceil(remainingMs / SESSION_DAY_MS);
+  return { offer: true, text: `会话将在 ${days} 天后过期`, hint: SESSION_BANNER_HINT };
+}
+
+// The deadline the row renders. Upstream has ONE process and ONE writer: the
+// engine's `ApplySessionDeadline` (engine_authsession.go:102) moves the anchor
+// and the UI field follows the callback (MainActivity.java:1053-1059 →
+// HomeFragment.onSessionDeadlineChanged, :866-870).
+//
+// Here the connector lives in the VPN-extension process while the SSO surface
+// (and therefore the extend itself) lives in the UI process, so the UI holds
+// the server's own answer from the extend alongside the connector's published
+// anchor. The rule is simply the LATER of the two known observations: the
+// published document wins as soon as the connector re-anchors from the server
+// (its next SyncResponse carries `sessionExpiresAt`, conversion.go:214-217),
+// and a stale published value can never drag the display backwards after a
+// successful extend. 0 on either side = that side knows nothing.
+export function sessionRowDeadlineS(publishedS: number | undefined, extendedS: number): number {
+  const published: number = publishedS !== undefined && Number.isFinite(publishedS) && publishedS > 0
+    ? publishedS : 0;
+  const extended: number = Number.isFinite(extendedS) && extendedS > 0 ? extendedS : 0;
+  return Math.max(published, extended);
+}
+
+// `session_extend_failed` = "Failed to extend session: %1$s" (strings.xml:297)
+// → "延长会话失败：%1$s" (zh-rCN:234); `%1$s` is the reason. Upstream
+// interpolates the engine's own error message (MainActivity.java:1082-1086);
+// this core's surfaces are class-only (no server text ever crosses a boundary),
+// so the reason is the stable token rendered as Chinese. '' = the caller-visible
+// "no message" (a user cancellation, which upstream also reports as nothing:
+// `cancelExtendSession` only ends the flow, MainActivity.java:1130-1140).
+const SESSION_EXTEND_FAILED_PREFIX: string = '延长会话失败：';
+
+export function sessionExtendFailureText(reason: string): string {
+  if (reason === 'cancelled') {
+    return '';
+  }
+  if (reason === 'timeout' || reason === 'extend_timeout') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}连接管理服务器超时，请检查网络后重试`;
+  }
+  if (reason === 'network-error') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}网络不可用或服务器无法访问，请检查网络后重试`;
+  }
+  if (reason === 'management-error') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}管理服务器拒绝了本次延长`;
+  }
+  if (reason === 'jwt-required' || reason === 'invalid-input' || reason === 'invalid-config') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}请求无效，请重试`;
+  }
+  if (reason === 'discovery_unavailable' || reason === 'login_unavailable' ||
+    reason === 'extend_unavailable' || reason === 'pkce_crypto_unavailable' ||
+    reason === 'redirect_unavailable') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}当前应用不支持该操作，请更新应用后重试`;
+  }
+  if (reason === 'discovery_failed' || reason === 'metadata_invalid' ||
+    reason === 'discovery_timeout' || reason === 'login_failed' ||
+    reason === 'login_timeout' || reason === 'token_exchange_failed' ||
+    reason === 'token_invalid' || reason === 'code_invalid' ||
+    reason === 'extend_failed' ||
+    reason === 'login_not_prepared' || reason === 'exchange_already_used') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}登录流程未完成，请重试`;
+  }
+  if (reason === 'busy') {
+    return `${SESSION_EXTEND_FAILED_PREFIX}已有一次登录或延长正在进行`;
+  }
+  return `${SESSION_EXTEND_FAILED_PREFIX}未知错误（${reason}）`;
+}

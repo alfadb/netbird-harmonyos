@@ -39,7 +39,9 @@ import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, NEEDS_LOGIN_CLASS,
   NEEDS_LOGIN_TEXT, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
-  sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
+  sortPeers, vpnActiveState,
+  SESSION_EXTENDED_TEXT, sessionExtendFailureText, sessionRowDeadlineS,
+  sessionRowView } from '../vpnextensionability/NetBirdUiModel';
 // 2026-10-11 retry re-entry (fix/retry) / 2026-10-12 upstream tap handling: the
 // pure connect-entry + pending-action model. This page only gathers the facts
 // (the extension's own stop evidence, its own latches) and acts through
@@ -57,7 +59,8 @@ import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   KeyCheck, UrlCheck } from '../setup/NetBirdSetupConfig';
 import { NetBirdAccountWebView } from '../login/NetBirdAccountWebView';
 import { AccountLoginController } from '../login/NetBirdAccountLogin';
-import type { AccountLoginResult, PreparedAccountLogin } from '../login/NetBirdAccountLogin';
+import type { AccountLoginResult, PreparedAccountLogin,
+  SessionExtendResult } from '../login/NetBirdAccountLogin';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
   parseAuthMode } from '../login/NetBirdAccountMode';
 import { buildConnectorConfigJson, readPackagedCaRootsPem } from '../vpnextensionability/NetBirdConnector';
@@ -258,6 +261,25 @@ const ROUTE_SUMMARY_LIMIT: number = 8;
 // far past anything a phone screen (inside the page's outer Scroll) can render,
 // which is what "show the full block" means in practice.
 const DETAIL_BLOCK_MAX_LINES: number = 1000;
+
+// 2026-10-13: WHAT the one ArkWeb PKCE surface was opened FOR. The SSO run is
+// the same in all three cases (upstream `runOAuthFlow`,
+// client/android/login.go:216-232), so there is ONE webview/callback pair; the
+// intent decides what the exchanged JWT is handed to afterwards:
+//   setup   → the management Login/registration, then persist + connect
+//             (`auth.login(...)` before `connectClient.Run`, client.go:194-215)
+//   connect → the SAME management Login, then connect — the connect toggle's
+//             login-required branch, upstream HomeFragment.java:193-200 where
+//             `switchConnection(true)` makes the engine start run the
+//             interactive SSO
+//   extend  → the management ExtendAuthSession and nothing else
+//             (`client/android/session.go:127-155`)
+const ACCOUNT_INTENT_SETUP: string = 'setup';
+const ACCOUNT_INTENT_CONNECT: string = 'connect';
+const ACCOUNT_INTENT_EXTEND: string = 'extend';
+// Upstream's extend toasts: LENGTH_SHORT on success and LENGTH_LONG on failure
+// (MainActivity.java:1073-1086). Same 4 s as the connect-failure toast.
+const SESSION_TOAST_MS: number = 4000;
 
 // Lenient section readers: undefined/null (absent section or an explicit null)
 // return null; anything else is asserted to the local mirror and every field
@@ -891,8 +913,20 @@ struct Index {
   @State accountAuthorizeUrl: string = '';
   @State accountExpectedState: string = '';
   @State accountRedirectUri: string = '';
+  // 2026-10-13 会话延长: the home session row's own facts. `sessionExtendAtS` is
+  // the server's answer to the LAST successful extend in this page (0 = none);
+  // `sessionExtendBusy` latches the row against a second tap while the SSO
+  // surface is coming up. Both are @State: the row's visibility and label are
+  // re-rendered from them.
+  @State sessionExtendAtS: number = 0;
+  @State sessionExtendBusy: boolean = false;
   private accountLoginController: AccountLoginController = new AccountLoginController();
   private accountLoginGeneration: number = 0;
+  // WHAT the open SSO surface is for, and the management URL it was opened
+  // against (captured at `begin` time: the form behind the webview must not be
+  // able to move the target of an in-flight flow).
+  private accountLoginIntent: string = ACCOUNT_INTENT_SETUP;
+  private accountLoginTargetUrl: string = '';
   private requestId: string = `ui-${Date.now()}`;
   private observedPublishedStatus: boolean = false;
   // The state of the last LIVE document (drives the disappearance notice:
@@ -2476,6 +2510,8 @@ struct Index {
     return '账户登录失败，请重试。';
   }
 
+  // 2026-10-13: the 账户登录 button's entry — the ordinary login/registration
+  // flow (Setup-Key users never come here).
   private async beginAccountLogin(): Promise<void> {
     if (this.accountLoginBusy || this.accountModeSwitchBlocked()) {
       if (this.accountModeSwitchBlocked()) {
@@ -2488,14 +2524,37 @@ struct Index {
       this.formError = urlCheck.error;
       return;
     }
-    this.formError = '';
-    this.formHint = '';
+    await this.openAccountLogin(ACCOUNT_INTENT_SETUP, urlCheck.url, false);
+  }
+
+  // The ONE ArkWeb PKCE surface opener, shared by all three intents (upstream
+  // runs the same `runOAuthFlow` for the login, the engine's login-required
+  // start and the extend: client/android/login.go:216-232). Only the discovery's
+  // SessionExtend flag differs, and `targetUrl` is captured HERE so an in-flight
+  // flow cannot be retargeted by the form behind it.
+  private async openAccountLogin(intent: string, targetUrl: string,
+    sessionExtend: boolean): Promise<void> {
+    if (this.accountLoginBusy) {
+      return;
+    }
+    const urlCheck: UrlCheck = checkManagementUrl(targetUrl);
+    if (!urlCheck.ok) {
+      this.reportAccountLoginFailure(intent, 'invalid_input');
+      return;
+    }
+    this.accountLoginIntent = intent;
+    this.accountLoginTargetUrl = urlCheck.url;
     this.accountLoginError = '';
+    if (intent === ACCOUNT_INTENT_SETUP) {
+      this.formError = '';
+      this.formHint = '';
+    }
     this.accountLoginBusy = true;
     const generation: number = ++this.accountLoginGeneration;
     try {
       const caPem: string = readPackagedCaRootsPem(getContext(this).resourceManager);
-      const prepared: PreparedAccountLogin = await this.accountLoginController.begin(urlCheck.url, caPem);
+      const prepared: PreparedAccountLogin =
+        await this.accountLoginController.begin(urlCheck.url, caPem, sessionExtend);
       if (generation !== this.accountLoginGeneration) {
         return;
       }
@@ -2505,13 +2564,31 @@ struct Index {
       this.accountLoginOpen = true;
     } catch (error) {
       if (generation === this.accountLoginGeneration) {
-        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error : 'login_failed');
+        this.reportAccountLoginFailure(intent, error instanceof Error ? error : 'login_failed');
       }
     } finally {
       if (generation === this.accountLoginGeneration) {
         this.accountLoginBusy = false;
       }
     }
+  }
+
+  // A failure BEFORE the SSO surface exists has no single home: the setup form
+  // owns its own error line, the connect intent owns the home card's error line
+  // and the extend owns upstream's toast (the row itself is the persistent
+  // channel). All three render the SAME stable-token sentences.
+  private reportAccountLoginFailure(intent: string, error: Error | string): void {
+    const reason: string = typeof error === 'string' ? error : error.message;
+    if (intent === ACCOUNT_INTENT_EXTEND) {
+      this.toastSessionExtend(sessionExtendFailureText(reason));
+      return;
+    }
+    const text: string = this.accountLoginErrorText(reason);
+    if (intent === ACCOUNT_INTENT_CONNECT) {
+      this.actionError = text;
+      return;
+    }
+    this.accountLoginError = text;
   }
 
   private async finishAccountLogin(code: string): Promise<void> {
@@ -2607,6 +2684,236 @@ struct Index {
     if (!showError) {
       this.accountLoginError = '';
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-13: the two NEW intents of the ONE SSO surface.
+  //
+  // (a) login-required connect. Upstream's connect toggle does not have a
+  //     separate sign-in step: the tap requests CONNECTED and the engine start
+  //     itself runs the interactive SSO, which is why the branch only clears the
+  //     sticky flag (HomeFragment.java:193-200, and `onLoginRequired`
+  //     :873-882 paints 需要登录). In this split the engine runs in the
+  //     VPN-extension process, which has no UI surface to show an IdP page on,
+  //     so the UI process runs the SAME interactive login action the 账户登录
+  //     button runs and connects only once it succeeded — same JWT, same
+  //     management Login/registration call, same order (login before the tunnel).
+  //     Setup-Key users are untouched: their 需要登录 is answered by the core's
+  //     own setup-key login inside the extension, and no account SSO applies.
+  //
+  // (b) session extend. Upstream `MainActivity.extendSession()`: interactive SSO
+  //     with `sessionExtend=true`, then the engine's `ExtendAuthSession` — the
+  //     tunnel untouched, no resync (:1068-1085, session.go:127-155). Here the
+  //     management call runs in the UI process against the management endpoint
+  //     the extension itself dials, with the same device identity.
+  // ---------------------------------------------------------------------------
+
+  // The ONE code callback of the ArkWeb surface: the SSO run is identical for
+  // every intent, so only the commit differs.
+  private async handleAccountLoginCode(code: string): Promise<void> {
+    if (this.accountLoginIntent === ACCOUNT_INTENT_EXTEND) {
+      await this.finishSessionExtend(code);
+      return;
+    }
+    if (this.accountLoginIntent === ACCOUNT_INTENT_CONNECT) {
+      await this.finishConnectLogin(code);
+      return;
+    }
+    await this.finishAccountLogin(code);
+  }
+
+  // (a) The connect intent's commit: the same management login action, then the
+  // connect the user asked for. NOTHING is persisted — the device config and the
+  // account marker already exist (they are what makes this peer configured and
+  // this branch reachable), exactly like upstream's engine start, which re-runs
+  // `auth.login(...)` against the config it already has (client.go:194-215).
+  private async finishConnectLogin(code: string): Promise<void> {
+    if (this.accountLoginBusy) {
+      this.cancelAccountLogin(true);
+      return;
+    }
+    const generation: number = this.accountLoginGeneration;
+    this.accountLoginBusy = true;
+    this.accountLoginOpen = false;
+    try {
+      const connectorConfig: string = this.loginConnectorConfig(this.accountLoginTargetUrl);
+      this.accountLoginCommitting = true;
+      const result: AccountLoginResult =
+        await this.accountLoginController.finish(code, connectorConfig);
+      if (generation !== this.accountLoginGeneration) {
+        return;
+      }
+      // The verdict that sent the user here is answered: the peer is registered
+      // again, so this attempt starts from a clean card.
+      this.actionError = '';
+      this.connectFailureClass = '';
+      this.connectFailureAtMs = 0;
+      hilog.info(DOMAIN, TAG, 'UI_CONNECT_LOGIN_OK|bundle=%{public}s|url=%{public}s',
+        BUNDLE_NAME, result.managementUrl);
+      this.requestStart();
+    } catch (error) {
+      if (generation === this.accountLoginGeneration) {
+        this.actionError = this.accountLoginErrorText(error instanceof Error ? error : 'login_failed');
+      }
+    } finally {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginBusy = false;
+        this.accountLoginCommitting = false;
+      }
+    }
+  }
+
+  // (b) The extend intent's commit: the fresh JWT goes to the management
+  // ExtendAuthSession through the core's one-shot job and nowhere else; the
+  // server's own 3-state answer is the only result. The tunnel is never touched
+  // (no stop, no start, no re-login of the peer).
+  private async finishSessionExtend(code: string): Promise<void> {
+    if (this.accountLoginBusy) {
+      this.cancelAccountLogin(true);
+      return;
+    }
+    const generation: number = this.accountLoginGeneration;
+    this.accountLoginBusy = true;
+    this.accountLoginOpen = false;
+    try {
+      const connectorConfig: string = this.loginConnectorConfig(this.accountLoginTargetUrl);
+      this.accountLoginCommitting = true;
+      const result: SessionExtendResult =
+        await this.accountLoginController.finishExtend(code, connectorConfig);
+      if (generation !== this.accountLoginGeneration) {
+        return;
+      }
+      // `unknown` (the reply carried no deadline) keeps the anchor the row was
+      // already showing — upstream `ApplySessionDeadline`'s nil no-op.
+      if (result.sessionExpiresAtS > 0) {
+        this.sessionExtendAtS = result.sessionExpiresAtS;
+      }
+      hilog.info(DOMAIN, TAG, 'UI_SESSION_EXTEND_OK|bundle=%{public}s|expiry=%{public}s',
+        BUNDLE_NAME, result.sessionExpiry);
+      this.toastSessionExtend(SESSION_EXTENDED_TEXT);
+    } catch (error) {
+      if (generation === this.accountLoginGeneration) {
+        const reason: string = error instanceof Error ? error.message : 'extend_failed';
+        hilog.warn(DOMAIN, TAG, 'UI_SESSION_EXTEND_FAILED|bundle=%{public}s|reason=%{public}s',
+          BUNDLE_NAME, reason);
+        this.toastSessionExtend(sessionExtendFailureText(reason));
+      }
+    } finally {
+      if (generation === this.accountLoginGeneration) {
+        this.accountLoginBusy = false;
+        this.accountLoginCommitting = false;
+      }
+    }
+  }
+
+  // The connector start config both new intents dial with: the SAME document
+  // shape the extension hands to `connector_start_with_socket` and the setup
+  // login action hands to `account_login_*` — management URL + this device's
+  // WireGuard identity + the packaged trust roots + the relay switch. It is the
+  // identity the peer is already registered under; nothing here is written to
+  // disk or logged.
+  private loginConnectorConfig(managementUrl: string): string {
+    const privateKey: string = this.devicePrivateKey();
+    if (privateKey.length === 0) {
+      throw new Error('device_key_unavailable');
+    }
+    const caPem: string = readPackagedCaRootsPem(getContext(this).resourceManager);
+    const device: DeviceConfigFile = {
+      management_url: managementUrl,
+      private_key: privateKey,
+      ca_pem: caPem,
+      relay_enabled: this.deviceRelayEnabled()
+    };
+    return buildConnectorConfigJson(device, false, null);
+  }
+
+  // The extend's two outcomes are upstream's two Toasts (MainActivity.java:
+  // 1073-1086: LENGTH_SHORT "Session extended", LENGTH_LONG "Failed to extend
+  // session: %s"), in the official zh-rCN wording. Fail-soft like the connect
+  // toast: the state row itself is the persistent channel.
+  private toastSessionExtend(message: string): void {
+    if (message.length === 0) {
+      return;
+    }
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: message, duration: SESSION_TOAST_MS
+      });
+      hilog.info(DOMAIN, TAG, 'UI_SESSION_EXTEND_TOAST|bundle=%{public}s', BUNDLE_NAME);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'UI_SESSION_EXTEND_TOAST_REJECTED|bundle=%{public}s|code=%{public}s',
+        BUNDLE_NAME, String((error as BusinessFailure).code ?? 'none'));
+    }
+  }
+
+  // 主页会话行: the deadline the row renders. Upstream has ONE writer (the
+  // engine's status recorder) and one reader (the fragment field). Here the
+  // connector lives in the extension process, so the published document is the
+  // connector's own anchor and `sessionExtendAtS` is the server's answer to an
+  // extend this page ran; the LATER of the two is shown, so a stale published
+  // value can never drag the display back after a successful extend and the
+  // published document takes over as soon as the connector re-anchors from the
+  // server (its next SyncResponse carries sessionExpiresAt,
+  // management/internals/shared/grpc/conversion.go:211-219).
+  private sessionDeadlineS(): number {
+    const status: PublishedStatus | null = this.published;
+    const atS: number | undefined = status !== null &&
+      typeof status.session_expires_at_s === 'number' ? status.session_expires_at_s : undefined;
+    return sessionRowDeadlineS(atS, this.sessionExtendAtS);
+  }
+
+  // Upstream `updateSessionRow()` (:901-912): the row exists exactly while a
+  // positive deadline is known, and is GONE otherwise — no lead threshold.
+  // A stopped engine has no deadline to report at all (the fragment re-seeds
+  // from `accessor.sessionExpiresAt()` on resume, :883-898, which answers 0
+  // once the service is unbound), so no live connector document = no row.
+  private sessionRowOffer(): boolean {
+    if (this.published === null) {
+      return false;
+    }
+    return sessionRowView(this.sessionDeadlineS(), Date.now()).offer;
+  }
+
+  // Upstream `formatSessionExpiry()` (:920-941), verbatim rules.
+  private sessionRowText(): string {
+    return sessionRowView(this.sessionDeadlineS(), Date.now()).text;
+  }
+
+  private sessionRowHint(): string {
+    return sessionRowView(this.sessionDeadlineS(), Date.now()).hint;
+  }
+
+  // The row's tap (upstream `sessionExpiryRow.setOnClickListener` →
+  // `serviceAccessor.extendSession()`, HomeFragment.java:219-223): the
+  // interactive SSO with the extend flag, then the management ExtendAuthSession.
+  // Allowed while the tunnel is UP — that is the point of an extend — so the
+  // setup form's "断开 VPN 后可更改" gate deliberately does not apply here.
+  private async beginSessionExtend(): Promise<void> {
+    if (this.sessionExtendBusy || this.accountLoginBusy) {
+      return;
+    }
+    this.sessionExtendBusy = true;
+    try {
+      await this.openAccountLogin(ACCOUNT_INTENT_EXTEND, this.configuredUrl, true);
+    } finally {
+      this.sessionExtendBusy = false;
+    }
+  }
+
+  // (a) The login-required connect tap: the ordinary account login (the SAME
+  // action the 账户登录 button runs — `sessionExtend=false`), against the stored
+  // management URL. If that URL is unusable there is nothing to sign in
+  // against, so the tap falls through to the plain connect and reports exactly
+  // the failure it would have reported anyway (never a silent no-op).
+  private async beginConnectLogin(): Promise<void> {
+    if (this.accountLoginBusy) {
+      return;
+    }
+    if (!checkManagementUrl(this.configuredUrl).ok) {
+      this.requestStart();
+      return;
+    }
+    await this.openAccountLogin(ACCOUNT_INTENT_CONNECT, this.configuredUrl, false);
   }
 
   // Device identity for the config file: REUSE the stored private key on
@@ -3415,6 +3722,15 @@ struct Index {
             if (this.toggleOn()) {
               hilog.info(DOMAIN, TAG, 'UI_STOP_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
               this.requestStop();
+            } else if (this.loginRequired() && this.authMode === ACCOUNT_MODE_ACCOUNT) {
+              // 2026-10-13 (upstream HomeFragment.java:193-200): the connect tap is
+              // also the sign-in entry. Upstream hands the interactive SSO to the
+              // engine start; here the engine has no UI surface, so the UI runs the
+              // SAME interactive account login and connects once it succeeded (see
+              // finishConnectLogin). Setup-Key peers keep the plain connect below.
+              hilog.info(DOMAIN, TAG, 'UI_START_BUTTON_CLICKED|bundle=%{public}s|loginRequired=true',
+                BUNDLE_NAME);
+              this.beginConnectLogin();
             } else {
               hilog.info(DOMAIN, TAG, 'UI_START_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
               this.requestStart();
@@ -3507,6 +3823,43 @@ struct Index {
             this.showDiagnostics = true;
             this.activeTab = 2;
           })
+          // 2026-10-13 会话延长: the session row — the Android `session_expiry_row`
+          // (fragment_home.xml:377-427). It exists exactly while a positive
+          // deadline is known (HomeFragment.updateSessionRow :901-912 — no lead
+          // threshold), shows `formatSessionExpiry`'s label with the constant
+          // `session_banner_hint`, and the whole row is the tap target that runs
+          // the interactive extend (HomeFragment.java:219-223 →
+          // MainActivity.extendSession :1068-1085).
+          if (this.sessionRowOffer()) {
+            Row({ space: 8 }) {
+              Column({ space: 2 }) {
+                Text(this.sessionRowText())
+                  .fontSize(15)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor($r('app.color.nb_text_primary'))
+                  .width('100%')
+                  .maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                Text(this.sessionRowHint())
+                  .fontSize(13)
+                  .fontColor($r('app.color.nb_text_muted'))
+                  .width('100%')
+                  .maxLines(2)
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              Text('›')
+                .fontSize(18)
+                .fontColor($r('app.color.nb_text_muted'))
+            }
+            .width('100%')
+            .padding({ top: 10, bottom: 2 })
+            .enabled(!this.sessionExtendBusy && !this.accountLoginBusy)
+            .onClick((): void => {
+              hilog.info(DOMAIN, TAG, 'UI_SESSION_ROW_CLICKED|bundle=%{public}s', BUNDLE_NAME);
+              this.beginSessionExtend();
+            })
+          }
         }
         .width('100%')
         .padding(16)
@@ -4883,7 +5236,7 @@ struct Index {
         expectedState: this.accountExpectedState,
         redirectUri: this.accountRedirectUri,
         onCode: (code: string): void => {
-          this.finishAccountLogin(code);
+          this.handleAccountLoginCode(code);
         },
         onCancel: (): void => {
           this.cancelAccountLogin(false);

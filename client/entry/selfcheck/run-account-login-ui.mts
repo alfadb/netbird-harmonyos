@@ -44,10 +44,15 @@ check('embedded WebView receives exactly its exported callback properties',
   webView.includes('expectedState: this.accountExpectedState') &&
   webView.includes('redirectUri: this.accountRedirectUri') && webView.includes('onCode:') &&
   webView.includes('onCancel:') && webView.includes('onFailure:'));
+// 2026-10-13: the discovery now carries the flow's own flag too
+// (`PKCEAuthorizationFlowRequest.SessionExtend`: false for the ordinary
+// login/registration, true for the interactive session extend), so the ONE SSO
+// opener is `openAccountLogin(intent, url, sessionExtend)`.
 check('controller builds login state from checked management URL and bundled CA roots',
   begin.includes('checkManagementUrl(this.urlInput)') &&
   begin.includes('readPackagedCaRootsPem(getContext(this).resourceManager)') &&
-  begin.includes('this.accountLoginController.begin(urlCheck.url, caPem)'));
+  begin.includes('this.accountLoginController.begin(urlCheck.url, caPem, sessionExtend)') &&
+  begin.includes('await this.openAccountLogin(ACCOUNT_INTENT_SETUP, urlCheck.url, false)'));
 // 2026-10-12: the login action registers the peer with the JWT through the core
 // (same device identity + management URL the extension dials) BEFORE the VPN
 // starts, and persists only the device config + mode marker. No credential

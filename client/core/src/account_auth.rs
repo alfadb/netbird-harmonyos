@@ -21,8 +21,13 @@
 //!   URL the extension dials (the caller passes the connector start config it
 //!   would hand to `connector_start_with_socket`). The JWT is an in-memory
 //!   local: it is never written anywhere, and it is gone when the job ends.
+//! * [`account_extend_start_json`] — the same shape for the interactive SESSION
+//!   EXTEND (`client/android/session.go:127-155`): the JWT goes to
+//!   `ExtendAuthSession` and nowhere else, the tunnel is untouched, and the
+//!   reply carries the server's own 3-state deadline
+//!   (`client/internal/engine_authsession.go:83-107`).
 //!
-//! Both are one-shot async jobs with the same start/poll/cancel shape; the
+//! All are one-shot async jobs with the same start/poll/cancel shape; the
 //! poll reply carries a stable token only (never a server message).
 
 use crate::config::{self, Json};
@@ -43,6 +48,11 @@ struct Input {
     management_url: String,
     ca_pem: String,
     server_name: Option<String>,
+    /// `PKCEAuthorizationFlowRequest.SessionExtend` — TRUE only for the
+    /// interactive SESSION EXTEND flow (`client/android/login.go:200-207`
+    /// `foregroundGetTokenInfoFlow(…, sessionExtend=true)`); the ordinary
+    /// login/register flow leaves it false.
+    session_extend: bool,
 }
 
 struct Slot {
@@ -54,6 +64,7 @@ struct Slot {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
 static LOGIN_SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
+static EXTEND_SLOT: OnceLock<Mutex<Slot>> = OnceLock::new();
 
 fn slot() -> &'static Mutex<Slot> {
     SLOT.get_or_init(|| {
@@ -67,6 +78,16 @@ fn slot() -> &'static Mutex<Slot> {
 
 fn login_slot() -> &'static Mutex<Slot> {
     LOGIN_SLOT.get_or_init(|| {
+        Mutex::new(Slot {
+            generation: 0,
+            task: None,
+            result: None,
+        })
+    })
+}
+
+fn extend_slot() -> &'static Mutex<Slot> {
+    EXTEND_SLOT.get_or_init(|| {
         Mutex::new(Slot {
             generation: 0,
             task: None,
@@ -173,10 +194,19 @@ fn parse_input(text: &str) -> Result<Input, &'static str> {
         Some((_, Json::Str(s))) if !s.is_empty() => Some(s.clone()),
         _ => return Err("invalid-input"),
     };
+    // optional, default false: the field is absent for the login/register
+    // discovery (every pre-existing caller) and `true` only for the session
+    // extend flow
+    let session_extend = match fields.iter().find(|(k, _)| k == "session_extend") {
+        None => false,
+        Some((_, Json::Bool(b))) => *b,
+        Some(_) => return Err("invalid-input"),
+    };
     Ok(Input {
         management_url: management_url.into(),
         ca_pem: ca_pem.into(),
         server_name,
+        session_extend,
     })
 }
 
@@ -294,7 +324,7 @@ async fn discover(input: Input) -> Result<String, &'static str> {
         .await
         .map_err(|_| "network-error")?;
         let flow = client
-            .get_pkce_authorization_flow()
+            .get_pkce_authorization_flow(input.session_extend)
             .await
             .map_err(|_| "network-error")?;
         public_projection(flow)
@@ -484,7 +514,105 @@ pub fn account_login_cancel_json(id: u64) -> String {
     cancel_json(login_slot(), id)
 }
 
-/// Shared cancel reply for both job slots.
+// ---------------------------------------------------------------------------
+// session extend (the management step of the interactive ExtendAuthSession)
+// ---------------------------------------------------------------------------
+
+/// Render one wire deadline observation as the reply's 3-state fields, the SAME
+/// token vocabulary the connector publishes (`session_expiry`:
+/// `unknown` / `disabled` / `set`) plus the absolute Unix-seconds value (null
+/// unless `set`). This is the server's own answer — the caller keeps its
+/// previous anchor only on `unknown` (`None` = the response carried no
+/// deadline at all, upstream `ApplySessionDeadline`'s nil no-op).
+fn deadline_fields(wire: Option<i64>) -> String {
+    use crate::connector::SessionDeadline;
+    let mut deadline = SessionDeadline::Unknown;
+    deadline.apply_wire(wire);
+    let at = match deadline {
+        SessionDeadline::At(t) => t.to_string(),
+        _ => "null".to_string(),
+    };
+    format!(
+        "\"session_expiry\":\"{}\",\"session_expires_at_unix\":{}",
+        deadline.as_str(),
+        at
+    )
+}
+
+/// The extend's job: dial the management endpoint from the caller's OWN
+/// connector start config (same device identity / management URL / trust root
+/// the extension runs with) and run the management `ExtendAuthSession` with the
+/// freshly exchanged JWT — upstream `Engine.ExtendAuthSession`
+/// (`client/internal/engine_authsession.go:83-107`): the RPC with
+/// `{jwtToken, meta}`, then `ApplySessionDeadline` on the response (L102).
+///
+/// The tunnel is untouched: no Login, no Sync, no reconnect (L71-73 comment).
+/// `jwt` is a LOCAL: it leaves no trace outside this call frame, and nothing
+/// about it is logged or returned. The payload is `outcome` + the 3-state
+/// deadline fields.
+async fn extend_with_jwt(config_json: String, jwt: String) -> Result<String, &'static str> {
+    let work = async {
+        let config = crate::connector::ConnectorConfig::from_json(&config_json)
+            .map_err(|_| "invalid-config")?;
+        let mut client = ManagementGrpcClient::connect(
+            &config.management_url,
+            config.transport,
+            config.connect_timeout,
+            config.request_timeout,
+            config.keys,
+        )
+        .await
+        .map_err(|_| "network-error")?;
+        let outcome = client
+            .extend_auth_session(&config.meta, &jwt)
+            .await
+            .map_err(|e| login_error_token(&e))?;
+        // engine_authsession.go:102 — the response IS the new anchor. Inside
+        // the ENGINE process this is the one write that moves the published
+        // deadline; in the UI process (the production case, see
+        // [`crate::connector::session_deadline_apply_live`]) there is no
+        // connector to move, and the answer travels back to the caller below.
+        crate::connector::session_deadline_apply_live(outcome.session_deadline_unix);
+        Ok(format!(
+            "\"outcome\":\"success\",{}",
+            deadline_fields(outcome.session_deadline_unix)
+        ))
+    };
+    match tokio::time::timeout(OVERALL_TIMEOUT, work).await {
+        Err(_) => Err("timeout"),
+        Ok(result) => result,
+    }
+}
+
+/// Parse the extend request: exactly the login action's `{config, jwt}` shape —
+/// the connector start config document to dial with plus the JWT from the
+/// token exchange. Both are required; nothing else is read.
+pub fn account_extend_start_json(request: &str) -> String {
+    let (config, jwt) = match parse_login_input(request) {
+        Ok(input) => input,
+        Err(error) => return format!("{{\"ok\":false,\"error\":\"{error}\"}}"),
+    };
+    // Single-flight: upstream refuses a SECOND concurrent extend
+    // (`session.go:189-198` "session extend already in progress") because the
+    // PKCE step binds one fixed loopback port. Here that PKCE wait lives in the
+    // UI (one ArkWeb surface, the caller's own busy latch), so the job slot
+    // keeps the login trio's replace-and-abort semantics — a new start is the
+    // caller's explicit statement that the previous flow is over.
+    let id = start_job(extend_slot(), extend_with_jwt(config, jwt));
+    format!("{{\"ok\":true,\"request_id\":{id}}}")
+}
+
+pub fn account_extend_poll_json(id: u64) -> String {
+    poll_job(extend_slot(), id, |payload| {
+        format!("{{\"state\":\"done\",{payload}}}")
+    })
+}
+
+pub fn account_extend_cancel_json(id: u64) -> String {
+    cancel_json(extend_slot(), id)
+}
+
+/// Shared cancel reply for the job slots.
 fn cancel_json(slot: &'static Mutex<Slot>, id: u64) -> String {
     let mut state = slot.lock().unwrap_or_else(|e| e.into_inner());
     if id == 0 || !cancel_slot(&mut state, id) {
@@ -701,5 +829,81 @@ mod tests {
         }
         assert!(!register_refusal(&ManagementError::Timeout));
         assert!(!register_refusal(&ManagementError::Server { status: 13 }));
+    }
+
+    // ---- 2026-10-13: the session extend --------------------------------
+
+    /// `session_extend` is an OPTIONAL, strictly typed discovery field: absent
+    /// (every pre-existing caller) = the ordinary login/register flow, `true`
+    /// = the session extend flow (`client/android/login.go:204-207`).
+    #[test]
+    fn discovery_session_extend_is_optional_and_typed() {
+        let base = parse_input(valid_input()).expect("valid input");
+        assert!(!base.session_extend, "absent field = the login flow");
+        assert!(parse_input(valid_input()).is_ok());
+        for extend in [true, false] {
+            let text = format!(
+                "{{\"management_url\":\"https://mgmt.example\",\"ca_pem\":\"CA\",\
+                 \"session_extend\":{extend}}}"
+            );
+            assert_eq!(parse_input(&text).expect("typed flag").session_extend, extend);
+        }
+        // a non-boolean is refused before any I/O
+        for text in [
+            r#"{"management_url":"https://mgmt.example","ca_pem":"CA","session_extend":"true"}"#,
+            r#"{"management_url":"https://mgmt.example","ca_pem":"CA","session_extend":1}"#,
+            r#"{"management_url":"https://mgmt.example","ca_pem":"CA","session_extend":null}"#,
+        ] {
+            assert_eq!(parse_input(text).err(), Some("invalid-input"), "{text}");
+        }
+    }
+
+    /// The extend reply's 3-state, in the connector's own vocabulary: `unknown`
+    /// (no info — the caller KEEPS its anchor) / `disabled` (explicit zero) /
+    /// `set` + the absolute seconds (upstream `ApplySessionDeadline`,
+    /// engine_authsession.go:32-66).
+    #[test]
+    fn deadline_fields_render_the_3_state() {
+        assert_eq!(
+            deadline_fields(None),
+            r#""session_expiry":"unknown","session_expires_at_unix":null"#
+        );
+        assert_eq!(
+            deadline_fields(Some(0)),
+            r#""session_expiry":"disabled","session_expires_at_unix":null"#
+        );
+        assert_eq!(
+            deadline_fields(Some(1_893_456_000)),
+            r#""session_expiry":"set","session_expires_at_unix":1893456000"#
+        );
+    }
+
+    /// The extend's failure vocabulary reuses the login action's class-only
+    /// tokens (never a server message) and the same `{config, jwt}` request
+    /// validation.
+    #[test]
+    fn extend_failure_tokens_and_request_shape() {
+        use crate::management::ManagementError;
+        assert_eq!(login_error_token(&ManagementError::Timeout), "timeout");
+        assert_eq!(
+            login_error_token(&ManagementError::Network("refused".into())),
+            "network-error"
+        );
+        assert_eq!(
+            login_error_token(&ManagementError::Auth { status: 16, message: "x".into() }),
+            "management-error"
+        );
+        assert_eq!(
+            account_extend_start_json(r#"{"config":"{}"}"#),
+            r#"{"ok":false,"error":"jwt-required"}"#
+        );
+        assert_eq!(
+            account_extend_start_json("{"),
+            r#"{"ok":false,"error":"invalid-input"}"#
+        );
+        // both entries read the SAME document shape
+        let (config, jwt) = parse_login_input(&valid_login_input()).expect("extend input");
+        assert!(config.contains("mgmt.example"));
+        assert_eq!(jwt, "header.payload.sig");
     }
 }

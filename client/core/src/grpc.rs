@@ -484,13 +484,29 @@ impl ManagementGrpcClient {
         EnvelopePublicKey::from_base64(&reply.key)
     }
 
-    /// Fetch the public provider configuration for initiating PKCE authorization.
-    /// The request and response bodies follow the encrypted management RPC envelope.
+    /// `ManagementService/GetPKCEAuthorizationFlow` — upstream
+    /// `GrpcClient.GetPKCEAuthorizationFlow(sessionExtend bool)`
+    /// (grpc.go:744-760): seal
+    /// `PKCEAuthorizationFlowRequest{SessionExtend}` and open the sealed
+    /// `PKCEAuthorizationFlow`. `session_extend = true` is the SESSION
+    /// RENEWAL flow (`client/android/login.go:200-207`
+    /// `foregroundGetTokenInfoFlow(…, sessionExtend=true)`): the server then
+    /// forces a `prompt=login` config for SSO peers
+    /// (`applySessionExtendFlowPolicy`, management/internals/shared/grpc/
+    /// server.go:1174-1207) so the IdP cannot answer the extend from an
+    /// unrelated signed-in account. `false` is the ordinary login/register
+    /// flow (`client/internal/auth/auth.go` GetOAuthFlow).
+    ///
+    /// The `sessionExtend` parameter is the ONE fact here that post-dates
+    /// [`UPSTREAM_COMMIT`]: it is taken from commit
+    /// `67c2041` (`proto/README.md` records the appended proto field and the
+    /// second sha256). Everything else on this call is the pin.
     pub async fn get_pkce_authorization_flow(
         &mut self,
+        session_extend: bool,
     ) -> Result<proto::PkceAuthorizationFlow, ManagementError> {
         let server_key = self.get_server_key().await?;
-        let request = proto::PkceAuthorizationFlowRequest {};
+        let request = proto::PkceAuthorizationFlowRequest { session_extend };
         let body = crate::envelope::seal(
             &server_key,
             &self.envelope_keys,

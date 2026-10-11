@@ -31,6 +31,10 @@
 //! 7. session renewal fires only when a JWT exists and the anchored
 //!    deadline is inside the injected lead window (upstream
 //!    engine_authsession.go:83-107 semantics)
+//! 8. the INTERACTIVE session extend (`account_extend_*`): the fresh JWT goes
+//!    to `ExtendAuthSession` and nowhere else, the reply's 3-state deadline is
+//!    reported verbatim, and the server's answer lands on the live connector's
+//!    ONE anchor (client/android/session.go:127-155 → engine_authsession.go:102)
 
 use core::time::Duration;
 use std::collections::VecDeque;
@@ -302,6 +306,18 @@ struct MgmtMock {
     logout_calls: Arc<Mutex<Vec<()>>>,
     logout_fail: Arc<Mutex<Option<Status>>>,
     extend_calls: Arc<Mutex<Vec<String>>>, // captured jwt tokens
+    /// 2026-10-13: the extend reply's 3-state deadline. `None` = the default
+    /// (the far-future year-2030 stamp every pre-existing test was written
+    /// against); `Some(response)` scripts it — `session_expires_at: None`
+    /// (field unset → "no info") and `Some(Timestamp{s:0,n:0})` (explicit
+    /// "expiry disabled") are both reachable that way
+    /// (engine_authsession.go:32-66 semantics).
+    extend_response: Arc<Mutex<Option<ExtendAuthSessionResponse>>>,
+    /// Scripted ExtendAuthSession rejection (status only, never a body).
+    extend_fail: Arc<Mutex<Option<Status>>>,
+    /// Captured ExtendAuthSession request metadata (hostname of the wire
+    /// `meta`), parallel to `extend_calls`.
+    extend_meta: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for MgmtMock {
@@ -317,6 +333,9 @@ impl Default for MgmtMock {
             sync_connects: Arc::new(Mutex::new(Vec::new())),
             logout_calls: Arc::new(Mutex::new(Vec::new())),
             logout_fail: Arc::new(Mutex::new(None)),
+            extend_response: Arc::new(Mutex::new(None)),
+            extend_fail: Arc::new(Mutex::new(None)),
+            extend_meta: Arc::new(Mutex::new(Vec::new())),
             extend_calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -467,10 +486,22 @@ impl ManagementService for MgmtMock {
         let req = ExtendAuthSessionRequest::decode(plaintext.as_slice())
             .map_err(|e| Status::invalid_argument(format!("body: {e}")))?;
         self.extend_calls.lock().expect("extend calls").push(req.jwt_token.clone());
-        let response = ExtendAuthSessionResponse {
-            // far-future deadline (year 2030) — well outside any test lead
-            session_expires_at: Some(Timestamp { seconds: 1_893_456_000, nanos: 0 }),
-        };
+        self.extend_meta
+            .lock()
+            .expect("extend meta")
+            .push(req.meta.as_ref().map(|m| m.hostname.clone()).unwrap_or_default());
+        if let Some(status) = self.extend_fail.lock().expect("extend fail").clone() {
+            return Err(status);
+        }
+        let response = self
+            .extend_response
+            .lock()
+            .expect("extend response")
+            .clone()
+            .unwrap_or(ExtendAuthSessionResponse {
+                // far-future deadline (year 2030) — well outside any test lead
+                session_expires_at: Some(Timestamp { seconds: 1_893_456_000, nanos: 0 }),
+            });
         let client_pk = EnvelopePublicKey::from_base64(&env.wg_pub_key).expect("client pk");
         let sealed = envelope::seal(&client_pk, &self.keys, &response.encode_to_vec())
             .expect("seal extend reply");
@@ -1224,6 +1255,165 @@ async fn login_action_never_sends_the_jwt_when_the_login_succeeds() {
     assert_eq!(logins[0].setup_key, "");
 }
 
+// ---------------------------------------------------------------------------
+// 2026-10-13: the interactive session extend (`account_extend_*`, upstream
+// `client/android/session.go:127-155` → `engine_authsession.go:83-107`)
+// ---------------------------------------------------------------------------
+
+/// Drive one `account_extend_*` job to its terminal reply (bounded).
+async fn drive_extend(config_json: &str, jwt: &str) -> String {
+    use netbird_core::account_auth::{account_extend_poll_json, account_extend_start_json};
+    let request = format!(
+        "{{\"config\":\"{}\",\"jwt\":\"{}\"}}",
+        netbird_core::util::json_escape(config_json),
+        jwt
+    );
+    let start = account_extend_start_json(&request);
+    assert!(start.contains("\"ok\":true"), "extend start refused: {start}");
+    let id: u64 = start
+        .split("\"request_id\":")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .expect("request id");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let poll = account_extend_poll_json(id);
+        if !poll.contains("\"state\":\"pending\"") {
+            return poll;
+        }
+        assert!(Instant::now() <= deadline, "extend job never settled: {poll}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The extend primitive over the mock: the JWT and the peer meta go on the
+/// wire, nothing else does, and the reply's 3-state deadline is reported
+/// verbatim — `set` / `disabled` (explicit zero) / `unknown` (field unset) —
+/// exactly the encoding `engine_authsession.go:32-66` applies. An empty JWT is
+/// refused LOCALLY, before any I/O (engine_authsession.go:76-78).
+#[tokio::test(flavor = "multi_thread")]
+async fn extend_auth_session_sends_the_fresh_jwt_and_reports_the_3_state() {
+    let mock = MgmtMock::default();
+    let addr = spawn_mock(mock.clone()).await;
+    let keys = EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes());
+
+    // 1) the happy path: a real deadline comes back
+    {
+        let mut client = plaintext_client(addr, keys.clone()).await;
+        let outcome = client
+            .extend_auth_session(&login_action_meta(), SENTINEL_JWT)
+            .await
+            .expect("extend");
+        assert_eq!(outcome.session_deadline_unix, Some(1_893_456_000));
+    }
+    // 2) explicit zero = "expiry disabled" (NOT "no info")
+    {
+        mock.extend_response.lock().expect("resp").replace(ExtendAuthSessionResponse {
+            session_expires_at: Some(Timestamp { seconds: 0, nanos: 0 }),
+        });
+        let mut client = plaintext_client(addr, keys.clone()).await;
+        let outcome = client
+            .extend_auth_session(&login_action_meta(), SENTINEL_JWT)
+            .await
+            .expect("extend");
+        assert_eq!(outcome.session_deadline_unix, Some(0));
+    }
+    // 3) unset = "no info" (the caller KEEPS its anchor)
+    {
+        mock.extend_response
+            .lock()
+            .expect("resp")
+            .replace(ExtendAuthSessionResponse { session_expires_at: None });
+        let mut client = plaintext_client(addr, keys.clone()).await;
+        let outcome = client
+            .extend_auth_session(&login_action_meta(), SENTINEL_JWT)
+            .await
+            .expect("extend");
+        assert_eq!(outcome.session_deadline_unix, None);
+    }
+    // 4) an empty JWT never reaches the server (local guard)
+    {
+        let mut client = plaintext_client(addr, keys.clone()).await;
+        assert!(client.extend_auth_session(&login_action_meta(), "").await.is_err());
+    }
+
+    let calls = mock.extend_calls.lock().expect("extend").clone();
+    assert_eq!(calls.len(), 3, "only the three real extends reached the server");
+    assert!(
+        calls.iter().all(|t| t == SENTINEL_JWT),
+        "every extend carried exactly the fresh JWT: {calls:?}"
+    );
+    let metas = mock.extend_meta.lock().expect("meta").clone();
+    assert_eq!(metas, vec!["ohos-connector".to_string(); 3]);
+    // the extend performs NO Login/Sync/Logout of its own
+    assert_eq!(*mock.login_attempts.lock().expect("login attempts"), 0);
+    assert!(mock.sync_connects.lock().expect("sync").is_empty());
+    assert!(mock.logout_calls.lock().expect("logout").is_empty());
+}
+
+/// The `account_extend_*` job's request validation and cold-poll answers: a
+/// malformed/empty request is refused WITHOUT any network and an unknown id is
+/// `unknown`. The FAILING extend's reply shape (a sanitized class token, never
+/// the server message) is pinned at the primitive level here — the job slot is
+/// process-global, so it is driven only by the one test that owns it
+/// (`napi_global_start_status_stop_roundtrip`).
+#[tokio::test(flavor = "multi_thread")]
+async fn account_extend_validates_input_and_never_leaks_server_text() {
+    use netbird_core::account_auth::{
+        account_extend_cancel_json, account_extend_poll_json, account_extend_start_json,
+    };
+
+    assert_eq!(
+        account_extend_start_json(r#"{"config":"{}"}"#),
+        r#"{"ok":false,"error":"jwt-required"}"#
+    );
+    assert_eq!(
+        account_extend_start_json("not json"),
+        r#"{"ok":false,"error":"invalid-input"}"#
+    );
+    assert_eq!(account_extend_poll_json(0), r#"{"state":"unknown"}"#);
+    assert_eq!(account_extend_cancel_json(4242), r#"{"ok":false,"error":"unknown"}"#);
+
+    // a refused extend: the caller gets the sanitized class, and the server's
+    // text is nowhere near it
+    let mock = MgmtMock::default();
+    mock.extend_fail
+        .lock()
+        .expect("fail")
+        .replace(Status::unauthenticated("SENTINEL-SERVER-TEXT"));
+    let addr = spawn_mock(mock.clone()).await;
+    let mut client =
+        plaintext_client(addr, EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes()))
+            .await;
+    let error = client
+        .extend_auth_session(&login_action_meta(), SENTINEL_JWT)
+        .await
+        .expect_err("the mock refuses the extend");
+    let class = ErrorClass::from_management(&error);
+    assert!(
+        matches!(class, ErrorClass::Auth { status: 16 }),
+        "class-only surface: {class:?}"
+    );
+    // the class token is what any document renders; the server text stays in
+    // the error itself (the redacted device-log channel)
+    assert!(!class.as_str().contains("SENTINEL-SERVER-TEXT"));
+    assert_eq!(mock.extend_calls.lock().expect("extend").len(), 1);
+
+    // an endpoint that cannot be dialled is a NETWORK failure, after a real
+    // dial attempt (no fabricated success)
+    let error = netbird_core::grpc::ManagementGrpcClient::connect(
+        "http://127.0.0.1:1",
+        netbird_core::grpc::GrpcTransport::Plaintext,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        EnvelopeKeyPair::from_secret_bytes(&sentinel_private_key_bytes()),
+    )
+    .await
+    .expect_err("nothing listens on port 1");
+    assert!(matches!(error, ManagementError::Network(_)), "{error:?}");
+}
+
 /// Retry-budget exhaustion through an INJECTED failing management factory
 /// (the ManagementFactory seam): attempts are bounded (here: exactly one —
 /// the budget is spent after the first failure), the state machine parks in
@@ -1684,6 +1874,57 @@ async fn napi_global_start_status_stop_roundtrip() {
         "{\"setup_key\":\"SETUP-GLOBAL-2\"}",
     );
     assert!(json.contains("already-running"), "{json}");
+
+    // 2026-10-13: the interactive SESSION EXTEND's management step, driven
+    // while THIS process holds a live connector. The job dials with the
+    // CALLER's own config (here the mock), the fresh JWT goes only to
+    // ExtendAuthSession, and the server's answer lands on the live connector's
+    // ONE deadline anchor — so the published session_expiry moves with the
+    // extend (`ApplySessionDeadline`, engine_authsession.go:102).
+    let extend_mock = MgmtMock::default();
+    let extend_at = unix_now() + 3_600;
+    extend_mock
+        .extend_response
+        .lock()
+        .expect("extend response")
+        .replace(ExtendAuthSessionResponse {
+            session_expires_at: Some(Timestamp { seconds: extend_at, nanos: 0 }),
+        });
+    let extend_addr = spawn_mock(extend_mock.clone()).await;
+    let before = connector_status_json();
+    assert!(before.contains("\"session_expiry\":\"unknown\""), "{before}");
+    let poll = drive_extend(&config_json_for(extend_addr), SENTINEL_JWT).await;
+    assert_eq!(
+        poll,
+        format!(
+            "{{\"state\":\"done\",\"outcome\":\"success\",\
+             \"session_expiry\":\"set\",\"session_expires_at_unix\":{extend_at}}}"
+        ),
+        "{poll}"
+    );
+    let after = connector_status_json();
+    assert!(after.contains("\"session_expiry\":\"set\""), "{after}");
+    assert!(
+        after.contains(&format!("\"session_expires_at_unix\":{extend_at}")),
+        "the extend's answer is the ONE published anchor: {after}"
+    );
+    assert!(
+        !after.contains(SENTINEL_JWT),
+        "the JWT never reaches the status document"
+    );
+    assert_eq!(
+        extend_mock.extend_calls.lock().expect("extend calls").clone(),
+        vec![SENTINEL_JWT.to_string()]
+    );
+    // the extend itself logs nothing in and syncs nothing (the tunnel is
+    // untouched: no Login, no Sync, no Logout)
+    assert_eq!(*extend_mock.login_attempts.lock().expect("attempts"), 0);
+    assert!(extend_mock.sync_connects.lock().expect("sync").is_empty());
+    assert!(extend_mock.logout_calls.lock().expect("logout").is_empty());
+
+    // the same job with NO connector in the process still answers the caller
+    // with the server's own 3-state (the UI-process production case) — see
+    // `account_extend_sends_the_fresh_jwt_and_reports_the_3_state`.
 
     // stop → free slot; status falls back to the disconnected snapshot
     let json = connector_stop_json();
