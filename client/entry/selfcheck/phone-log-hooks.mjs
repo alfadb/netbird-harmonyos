@@ -23,11 +23,13 @@
 //     append: (line) => '{"ok":true}',
 //     status: () => '{"component":"phone_log",...}',
 //     shutdown: () => '{"ok":true,"stopped":true,...}',
-//     resource: () => '{"ok":true,"connector":{...},...}'
+//     resource: () => '{"ok":true,"connector":{...},...}',
+//     alloc: () => '{"bytes":n,"peak":n,"allocs":n,"frees":n}'
 //   }
 //
-// `resource` is the 006 `connector_resource_status()` document (same fake, so
-// the same `absent` latch drives the missing-export branch of BOTH surfaces).
+// `resource` is the 006 `connector_resource_status()` document and `alloc` is
+// the Rust-heap `alloc_stats()` document (same fake, so the same `absent`
+// latch drives the missing-export branch of BOTH surfaces).
 //
 // The connector module never imports @ohos.net.connection at call time in these
 // tests, so the empty stub is enough for it to link.
@@ -49,6 +51,8 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   ' return g().shutdown(); };\n' +
   'core.connector_resource_status = () => { if (absent()) { boom("connector_resource_status"); }' +
   ' return g().resource(); };\n' +
+  'core.alloc_stats = () => { if (absent()) { boom("alloc_stats"); }' +
+  ' return g().alloc(); };\n' +
   'export default core;');
 
 const STUBBED = new Map([

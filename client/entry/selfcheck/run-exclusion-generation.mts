@@ -294,6 +294,12 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // roam-1005-0014: the recreate lifecycle policy pure module the REAL
   // extension imports; zero imports and no erased types, so no shim.
   'NetBirdRecreatePolicy',
+  // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
+  // REAL extension now imports by value for its synchronous write; zero
+  // imports and no erased types, so no shim. It is staged byte-identically like
+  // the modules above, and the write itself is driven through the REAL method
+  // by the stop-marker group near the end of this suite.
+  'NetBirdDiagnosticsCore',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its two erased interfaces are re-declared by its shim below.
   'NetBirdN2Stimulus',
@@ -5926,6 +5932,51 @@ try {
     JSON.stringify({ gate: startupAbility['n2CdGateState'], supply: supplyLine() }));
   stopAbilityTimers(startupAbility);
   resetSupply();
+
+  // ---- SM: the onDestroy-ENTRY stop marker (2026-10-09, 0.0.17) -----------
+  // The PRIOR_EXIT_UNCLEAN over-reporting fix, driven FOR REAL through the
+  // shipped method on this fixture's path-aware fake fs. The device fact behind
+  // it: onDestroy returns, and ~3 ms later the JS context is destroyed (the
+  // process is gone within ~21 ms), so the async destroyOnce continuation and
+  // the late stopDiagnostics() — the ONLY writer of `clean` — never run. V016
+  // ended at `vpn_destroy_phase phase=requested` with no `settled`
+  // (netbird-vpn.log:1528-1547) and the marker stayed `open`, so the NEXT
+  // session reported an orderly user stop as PRIOR_EXIT_UNCLEAN. The entry must
+  // therefore move the marker off `open` synchronously, using the byte-identical
+  // pure core's own path/format/token rules.
+  const diagCore = await import(pathToFileURL(join(dir, 'NetBirdDiagnosticsCore.ts')).href) as
+    Record<string, any>;
+  const markerPath = String(diagCore['recordPath'](FIXTURE_FILESDIR,
+    diagCore['markerBasename']('vpn')));
+  const markerAbility = freshAbility(mod, FIXTURE_FILESDIR);
+  // onCreate armed the diagnostics in this process: startDiagnosticsLogTee()
+  // latches logTeeConfigured immediately before it calls startDiagnostics(), and
+  // only from that point does this process own the marker file.
+  markerAbility['logTeeConfigured'] = true;
+  (markerAbility['onDestroy'] as () => void)();
+  await drainProbe();
+  stopAbilityTimers(markerAbility);
+  const markerText = String((G['__NB_FS'] as Record<string, string>)[markerPath] ?? '');
+  check('SM1 the onDestroy entry writes the marker synchronously as the core\'s `stopping`',
+    /^v=1 state=stopping ts=\S+ pid=\d+ role=vpn\n$/.test(markerText) &&
+    markerText.indexOf('state=' + String(diagCore['MARKER_STATE_STOPPING'])) > 0,
+    markerText);
+  const parsedMarker = diagCore['parseMarker'](markerText);
+  check('SM2 the written line round-trips through the core and is NOT a prior unclean exit',
+    parsedMarker !== null && parsedMarker.state === diagCore['MARKER_STATE_STOPPING'] &&
+    parsedMarker.role === 'vpn' && diagCore['MARKER_STATE_STOPPING'] === 'stopping' &&
+    diagCore['isPriorUnclean'](parsedMarker, 999999) === false);
+  // The guard, driven the same way: a process that never armed the diagnostics
+  // never wrote its own `open` and does not own the file — overwriting it would
+  // DESTROY a previous session's real `open`, the only reclaim evidence there is.
+  const stopMarkerUnarmed = freshAbility(mod, FIXTURE_FILESDIR);
+  (stopMarkerUnarmed['onDestroy'] as () => void)();
+  await drainProbe();
+  stopAbilityTimers(stopMarkerUnarmed);
+  const markerAfterUnarmed = String((G['__NB_FS'] as Record<string, string>)[markerPath] ?? '');
+  check('SM3 an unarmed process leaves the existing marker byte-identical (no clobber)',
+    markerText.length > 0 && markerAfterUnarmed === markerText,
+    JSON.stringify({ before: markerText, after: markerAfterUnarmed }));
 
   rmSync(dir, { recursive: true, force: true });
 } catch (error) {

@@ -212,8 +212,21 @@ const ACCOUNT_STORE = 'data:text/javascript,export%20async%20function%20loadAcco
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,
   '@ohos.app.ability.Want': EMPTY,
+  // 2026-10-08: the extension's onMemoryLevel signature names
+  // AbilityConstant.MemoryLevel; the import must resolve for the staged fixture
+  // to link (the enum is never read at runtime on any path this suite drives).
+  '@ohos.app.ability.AbilityConstant': EMPTY,
   '@ohos.file.fs': EMPTY,
   '@ohos.hilog': HILOG,
+  // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the REAL extension now
+  // imports `process` for the pid it stamps into the marker (the same
+  // `process.pid` NetBirdDiagnostics.ets writes), so the specifier must resolve
+  // for the byte-identical extension fixture to link. No path this suite drives
+  // reaches the marker write (onCreate is never called here, and the write is
+  // skipped unless the process armed the diagnostics); the value is a FIXED
+  // host pid so an accidental call still leaves an honest line.
+  '@ohos.process': 'data:text/javascript,' + encodeURIComponent(
+    'export default { pid: 4242 };\n'),
   '@ohos.net.connection': CONNECTION,
   '@ohos.net.statistics': STATISTICS,
   '@ohos.net.vpnExtension': EMPTY,
@@ -283,6 +296,11 @@ const SHIMS = {
   // extension imports; zero imports and no erased types — plain extension
   // resolution like NetBirdIceSocketPool above.
   './NetBirdRecreatePolicy': 'NetBirdRecreatePolicy.ts',
+  // 2026-10-09 (0.0.17): the REAL extension now names the pure marker core by
+  // value for its synchronous onDestroy-entry write, so the fixture stages that
+  // file byte-identically next to the extension (zero imports, no erased types,
+  // no shim needed — same discipline as NetBirdRecreatePolicy above).
+  './NetBirdDiagnosticsCore': 'NetBirdDiagnosticsCore.ts',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports;
   // its erased request/reply interfaces are re-declared by the shim.
   './NetBirdN2Stimulus': 'NetBirdN2Stimulus.shim.ts',

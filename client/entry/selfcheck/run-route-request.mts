@@ -30,6 +30,7 @@
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
 
 import { readFile, writeFile, mkdtemp, rm, mkdir, open, rename, unlink, access, readdir, stat, utimes } from 'node:fs/promises';
+import { statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -72,12 +73,29 @@ async function exists(path: string): Promise<boolean> {
 const MGMT = 'https://management.example.com';
 const MGMT_OTHER = 'https://other.example.com';
 
+// Every REAL read open of a document goes through this counter: the point of
+// the adapter's unchanged-shortcut is that an unchanged document is never opened
+// (and so never read or decoded). The SDK stub asks node for "r" exactly for the
+// adapter's READ_ONLY opens, so the atomic writer's own temp-file opens ("w+")
+// are not counted. The stub checks readError itself, so only opens that reach
+// the node fs are counted.
+let documentOpens = 0;
+const countedOpen: typeof open = async (path, flags) => {
+  if (flags === 'r') {
+    documentOpens++;
+  }
+  return open(path, flags);
+};
+
 const state: {
-  nodeFs: { open: typeof open; rename: typeof rename; unlink: typeof unlink };
+  nodeFs: {
+    open: typeof open; rename: typeof rename; unlink: typeof unlink;
+    statSync: typeof statSync;
+  };
   readError: { code: number } | null;
   writeError: Error | null;
 } = {
-  nodeFs: { open, rename, unlink },
+  nodeFs: { open: countedOpen, rename, unlink, statSync },
   readError: null,
   writeError: null
 };
@@ -325,8 +343,9 @@ try {
   check('a request for another management URL is returned verbatim (no scope filter here)',
     deepEq(await store.readRouteApplyRequest(filesDir), otherRequest));
 
-  // Same-size consecutive atomic writes: a size/mtime "unchanged" shortcut would
-  // miss the newer id, so every read must be a real read.
+  // Same-size consecutive atomic writes: the newer document must always win.
+  // Neither the metadata probe (every one of these writes swaps the inode) nor
+  // its conservative legs may ever answer for the older one.
   let sameSize = true;
   let latestVisible = true;
   for (let i = 0; i < 10; i++) {
@@ -343,10 +362,10 @@ try {
   check('consecutive same-size atomic writes produce equal byte counts', sameSize);
   check('the newest same-size request is always visible to a real read', latestVisible);
 
-  // Decisive negative control for the size/mtime shortcut: overwrite the
-  // request with a DIFFERENT document of the SAME byte count and hand it back
-  // the SAME millisecond mtime the reader last observed. A size/mtime "nothing
-  // changed" guard cannot tell the two apart; only a real read sees the newer id.
+  // Decisive negative control for a size+mtime-only probe: overwrite the request
+  // with a DIFFERENT document of the SAME byte count IN PLACE and hand it back
+  // the SAME whole-second mtime the reader last observed. Size and mtime cannot
+  // tell the two apart; the file identity (here the nanosecond ctime) does.
   const stableA = requestFixture('ui-stable-1', MGMT, 1712345600000);
   const stableB = requestFixture('ui-stable-2', MGMT, 1712345600000);
   await store.writeRouteApplyRequest(filesDir, stableA);
@@ -356,9 +375,94 @@ try {
   await utimes(requestPath, stampA.atime, stampA.mtime);
   const stampB = await stat(requestPath);
   const readStable = await store.readRouteApplyRequest(filesDir);
-  check('a same-size, same-millisecond-mtime overwrite still exposes the newer id (no metadata shortcut)',
+  check('a same-size, same-millisecond-mtime overwrite still exposes the newer id (the probe is not size+mtime)',
     stampA.size === stampB.size && Math.round(stampB.mtimeMs) === observedMtimeMs &&
     readStable !== null && readStable.id === stableB.id);
+
+  // ---- the cheap "unchanged document" probe -------------------------------
+  //
+  // Every read starts with one synchronous stat; an unchanged document is
+  // answered from the previous read, so the 100 ms VPE tick no longer allocates
+  // the 16 KiB bound buffer and re-decodes the whole file on every poll. What
+  // must not change is what a read REPORTS.
+  const past: Date = new Date(Date.now() - 4000);
+  const cachedRequest = requestFixture('ui-probe-1', MGMT, 1712345600000);
+
+  // (1) a missing document is decided by the stat alone: no open, no buffer.
+  await rm(requestPath, { force: true });
+  documentOpens = 0;
+  const missingRead = await store.readRouteApplyRequest(filesDir);
+  check('a missing document is decided by the probe: no open at all, and still null',
+    missingRead === null && documentOpens === 0);
+
+  // (2) an unchanged document: the second read must not open the file at all.
+  // Its mtime is pushed four seconds into the past first, because a document
+  // written in the CURRENT second is deliberately never cached (3).
+  await store.writeRouteApplyRequest(filesDir, cachedRequest);
+  await utimes(requestPath, past, past);
+  documentOpens = 0;
+  const firstRead = await store.readRouteApplyRequest(filesDir);
+  const opensFirst = documentOpens;
+  const secondRead = await store.readRouteApplyRequest(filesDir);
+  check('a document that changed is opened and read once, and returned verbatim',
+    opensFirst === 1 && deepEq(firstRead, cachedRequest));
+  check('an unchanged document is served from the last read: no second open, no read, no decode',
+    documentOpens === 1 && deepEq(secondRead, firstRead));
+  check('the cached answer is the document on disk, byte for byte',
+    deepEq(secondRead,
+      request.parseRouteApplyRequestDocument(await readFile(requestPath, 'utf8'))));
+
+  // (3) the conservative leg: a document whose whole-second mtime is not safely
+  // in the past is never answered from the cache. mtime is forged to the current
+  // second just after that second turned, so both reads provably fall inside it
+  // and the second open can only come from this leg.
+  await store.writeRouteApplyRequest(filesDir, cachedRequest);
+  await new Promise<void>((resolve: () => void): void => {
+    setTimeout(resolve, 1000 - (Date.now() % 1000) + 20);
+  });
+  await utimes(requestPath, new Date(), new Date());
+  const forgedStat = await stat(requestPath);
+  documentOpens = 0;
+  await store.readRouteApplyRequest(filesDir);
+  await store.readRouteApplyRequest(filesDir);
+  check('a document written in the CURRENT second is always read for real (never cached)',
+    documentOpens === 2 &&
+    Math.floor(forgedStat.mtimeMs / 1000) === Math.floor(Date.now() / 1000));
+
+  // (4) a foreign writer that rewrites the file IN PLACE with the same byte
+  // count and forges the recorded second-mtime back must still be seen: the
+  // file identity moved (the nanosecond ctime), so the probe cannot answer for
+  // the older document.
+  const forgedRequest = requestFixture('ui-probe-2', MGMT, 1712345600000);
+  await store.writeRouteApplyRequest(filesDir, cachedRequest);
+  await utimes(requestPath, past, past);
+  documentOpens = 0;
+  const beforeForgery = await store.readRouteApplyRequest(filesDir);
+  const stampBefore = await stat(requestPath);
+  await writeFile(requestPath, request.serializeRouteApplyRequestDocument(forgedRequest));
+  await utimes(requestPath, stampBefore.atime, stampBefore.mtime);
+  const stampAfter = await stat(requestPath);
+  const afterForgery = await store.readRouteApplyRequest(filesDir);
+  check('a same-size in-place rewrite with the recorded second-mtime forged back exposes the newer id',
+    stampBefore.size === stampAfter.size &&
+    Math.round(stampBefore.mtimeMs) === Math.round(stampAfter.mtimeMs) &&
+    beforeForgery !== null && beforeForgery.id === 'ui-probe-1' &&
+    afterForgery !== null && afterForgery.id === 'ui-probe-2');
+  check('the forged rewrite was read for real instead of answered from the cache (two opens)',
+    documentOpens === 2);
+
+  // (5) the writer this module owns: an atomic same-size rewrite is visible to
+  // the very next read — the rename moved the file identity, which is exactly
+  // what "the next 100 ms tick sees it" means.
+  await store.writeRouteApplyRequest(filesDir, requestFixture('ui-tick-1', MGMT, 1712345600000));
+  await utimes(requestPath, past, past);
+  const tickBefore = await store.readRouteApplyRequest(filesDir);
+  documentOpens = 0;
+  await store.writeRouteApplyRequest(filesDir, requestFixture('ui-tick-2', MGMT, 1712345600000));
+  const tickAfter = await store.readRouteApplyRequest(filesDir);
+  check('an atomic same-size rewrite is visible on the very next read (one real open)',
+    documentOpens === 1 && tickBefore !== null && tickBefore.id === 'ui-tick-1' &&
+    tickAfter !== null && tickAfter.id === 'ui-tick-2');
 
   const savedRequestBytes = await readFile(requestPath);
   const savedResultBytes = await readFile(resultPath);

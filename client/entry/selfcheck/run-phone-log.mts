@@ -21,6 +21,10 @@
 //   (2) the once-per-minute summary: dropped/pending/failed rendering, the
 //       ok/degraded/stopped/unavailable verdicts, explicit `na` for an
 //       unreadable counter, and no raw path/session leakage;
+//   (2b) the 2026-10-08 Rust-heap `alloc_stats` bridge: the four-counter
+//       document is shape-checked and handed over verbatim, an absent export /
+//       throw / empty / garbled reply is `undefined` (never a throw), and the
+//       REAL pure core turns the text into KiB + counters or four `na` keys;
 //   (3) the record shape against the REAL DiagnosticsCore whitelist: every
 //       milestone name/field key is accepted, and the phone_log_status detail
 //       survives buildRecord intact;
@@ -100,6 +104,8 @@ interface PhoneLogFake {
   // 006: the connector_resource_status() document (same fake, same absent
   // latch — a missing export is the `unsupported` branch of both surfaces).
   resource: () => string;
+  // 2026-10-08: the Rust-heap alloc_stats() document (same fake/latch again).
+  alloc: () => string;
 }
 
 const fake: PhoneLogFake = {
@@ -108,7 +114,8 @@ const fake: PhoneLogFake = {
   append: (): string => '{"ok":true}',
   status: (): string => '{"component":"phone_log"}',
   shutdown: (): string => '{"ok":true}',
-  resource: (): string => '{"ok":true}'
+  resource: (): string => '{"ok":true}',
+  alloc: (): string => '{"bytes":0,"peak":0,"allocs":0,"frees":0}'
 };
 const seen: { configure: string[]; append: string[] } = { configure: [], append: [] };
 (globalThis as unknown as { __NB_PHONE_LOG: PhoneLogFake }).__NB_PHONE_LOG = fake;
@@ -402,6 +409,58 @@ try {
     resThrew === false && absentSnap === null);
 
   // =========================================================================
+  // (1c) the 2026-10-08 Rust-heap alloc_stats bridge
+  //   (alloc_stats -> shape check -> verbatim text -> the REAL pure-core parse)
+  // =========================================================================
+  check('the Rust-heap bridge surface exists with its declared type',
+    typeof m.nativeAllocStats === 'function' &&
+    connectorText.includes('export function nativeAllocStats(): string | undefined'));
+  fake.alloc = (): string => '{"bytes":1048576,"peak":2097152,"allocs":77,"frees":12}';
+  const allocText = m.nativeAllocStats();
+  check('alloc: a valid four-counter document is handed over verbatim',
+    allocText === '{"bytes":1048576,"peak":2097152,"allocs":77,"frees":12}',
+    String(allocText));
+  check('alloc: the REAL pure core turns that text into KiB + raw counters',
+    core.buildRustAllocFields(allocText).rust_heap_kb === '1024' &&
+    core.buildRustAllocFields(allocText).rust_heap_peak_kb === '2048' &&
+    core.buildRustAllocFields(allocText).rust_allocs === '77' &&
+    core.buildRustAllocFields(allocText).rust_frees === '12');
+  fake.alloc = (): string => 'not-json';
+  check('alloc: an unparseable reply is undefined (the sampler writes na)',
+    m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => '[]';
+  check('alloc: a non-object reply is undefined', m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => '{"bytes":"1","peak":2,"allocs":3,"frees":4}';
+  check('alloc: a counter that is not a number is undefined (no fabricated 0)',
+    m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => '{"bytes":1,"peak":2,"allocs":3,"frees":-4}';
+  check('alloc: a negative counter is undefined', m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => '{"bytes":1,"peak":2,"allocs":3}';
+  check('alloc: a document missing a counter is undefined (not half-believed)',
+    m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => '';
+  check('alloc: an empty reply is undefined', m.nativeAllocStats() === undefined);
+  fake.alloc = (): string => { throw new Error('platform'); };
+  check('alloc: a platform throw is undefined, never a throw at the caller',
+    m.nativeAllocStats() === undefined);
+  fake.absent = true;
+  let allocThrew: boolean = false;
+  let absentAlloc: unknown = 'unset';
+  try {
+    absentAlloc = m.nativeAllocStats();
+  } catch (error) {
+    allocThrew = true;
+  }
+  fake.absent = false;
+  check('alloc: an absent export is undefined and never throws',
+    allocThrew === false && absentAlloc === undefined);
+  check('alloc: the pure core renders an undefined reader as four na keys',
+    core.buildRustAllocFields(null).rust_heap_kb === 'na' &&
+    core.buildRustAllocFields(null).rust_heap_peak_kb === 'na' &&
+    core.buildRustAllocFields(null).rust_allocs === 'na' &&
+    core.buildRustAllocFields(null).rust_frees === 'na');
+
+  // =========================================================================
   // (2) the once-per-minute summary
   // =========================================================================
   const okSummary = m.phoneLogSummary(JSON.parse(statusDoc({})));
@@ -463,6 +522,8 @@ try {
     ['vpn_core_dead', ['reason', 'result']],
     ['vpn_start_failed', ['stage', 'reason']],
     ['phone_log_status', ['stage', 'state', 'detail']],
+    // 2026-10-08 memory-pressure observation (bounded enum token only)
+    ['vpn_memory_level', ['stage', 'state']],
     // 006 bridge surface
     ['vpn_destroy_phase', ['phase', 'stage']],
     ['native_resource_sample', ['stage', 'seq', 'conn_present', 'conn_gen', 'conn_running',
@@ -604,6 +665,19 @@ try {
     tee.includes("startDiagnostics(filesDir, 'vpn'") &&
     tee.includes("startSystemEvents('vpn'") &&
     tee.split('this.diagSink(line)').length === 3);
+  check('the vpn role injects the Rust-heap alloc reader into the diagnostics start',
+    tee.includes('(): string | undefined => nativeAllocStats()') &&
+    connectorText.includes('export function nativeAllocStats(): string | undefined') &&
+    extText.split('nativeAllocStats(').length === 2,
+    'the reader must be the 4th argument of the ONE startDiagnostics call');
+  check('the platform memory-pressure level is recorded, with no memory released',
+    extText.includes('onMemoryLevel(level: AbilityConstant.MemoryLevel): void') &&
+    extText.includes("import AbilityConstant from '@ohos.app.ability.AbilityConstant';") &&
+    extText.includes("const milestoneFields: DiagFields = { 'stage': 'platform', 'state': String(level) };") &&
+    extText.includes("diagMilestone('vpn_memory_level'") &&
+    !/onMemoryLevel[\s\S]{0,400}?(free|release|trim|evict|clear)\(/.test(
+      sliceFrom(extText, 'onMemoryLevel(level: AbilityConstant.MemoryLevel): void {',
+        'onCreate(want: Want): void {')));
   check('the shared sink appends through the phone_log wrapper and never double-forwards to hilog',
     sink.includes('phoneLogAppend(line)') && sink.indexOf('hilog') < 0 &&
     sink.includes('try {') && sink.includes('catch (error)'));
@@ -709,8 +783,8 @@ try {
   check('every wired milestone name is the exact token the record pins above',
     milestones.every((mm: [string, string[]]) =>
       extText.includes(`'${mm[0]}'`)));
-  check('the wired milestone surface is exactly the 15 reviewed names / 19 call sites',
-    milestones.length === 15 && extText.split('this.diagMilestone(').length === 20);
+  check('the wired milestone surface is exactly the 16 reviewed names / 20 call sites',
+    milestones.length === 16 && extText.split('this.diagMilestone(').length === 21);
   check('the milestones are recorded through the shared non-throwing helper',
     extText.includes('private diagMilestone(name: string, fields: DiagFields): void') &&
     sliceFrom(extText, 'private diagMilestone(name: string',

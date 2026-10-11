@@ -175,6 +175,10 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     // catalog getter it mutates (still append-only: every pre-existing name
     // keeps its position and its created function object).
     reg!("connector_route_selection_set", napi_connector_route_selection_set);
+    // Additive Rust-heap readout: appended after the route surface (still
+    // append-only — every pre-existing name keeps its position and its created
+    // function object).
+    reg!("alloc_stats", napi_alloc_stats);
     exports
 }
 
@@ -601,6 +605,7 @@ mod tests {
             "account_auth_discovery_cancel",
             "connector_routes",
             "connector_route_selection_set",
+            "alloc_stats",
         ] {
             let call = calls.iter().find(|(_, n, _)| n == name)
                 .unwrap_or_else(|| panic!("{} not attached to exports", name));
@@ -611,15 +616,16 @@ mod tests {
             assert_eq!(call.2, fake, "{} value must be the created function object", name);
         }
 
-        // Append-only surface (increments 131/132): the two route exports are the
-        // LAST registrations, in that order, and every export name is registered
-        // exactly once — no pre-existing name lost its position or its created
-        // function object to the new binding.
+        // Append-only surface (increments 131/132 + the additive heap readout):
+        // the route pair and then `alloc_stats` are the LAST registrations, in
+        // that order, and every export name is registered exactly once — no
+        // pre-existing name lost its position or its created function object to
+        // the new binding.
         let names: Vec<&str> = calls.iter().map(|(_, name, _)| name.as_str()).collect();
         assert_eq!(
-            names[names.len() - 2..].to_vec(),
-            vec!["connector_routes", "connector_route_selection_set"],
-            "the route surface must stay appended at the registration tail"
+            names[names.len() - 3..].to_vec(),
+            vec!["connector_routes", "connector_route_selection_set", "alloc_stats"],
+            "the route surface, then the heap readout, must stay appended at the registration tail"
         );
         let mut seen = std::collections::HashSet::new();
         for name in &names {
@@ -937,6 +943,40 @@ mod tests {
             SET_NO_CONNECTOR,
             "the all-default selector is legal"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // additive Rust-heap readout export
+    //
+    // The callback is driven END TO END through the host stubs (zero
+    // arguments), so the registered wrapper, `ret_json` and the document are
+    // all exercised. This is a SHAPE assertion only: the lib test binary runs
+    // many tests in parallel, so exact counter deltas belong to the dedicated
+    // single-test integration binary (tests/alloc_stats.rs), which is
+    // deterministic for the reason documented there.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn alloc_stats_callback_returns_the_flat_four_counter_document() {
+        reset();
+        let env = 0x1 as NapiEnv;
+        set_call_args(0xE1, &[]);
+        let doc = reply(unsafe { napi_alloc_stats(env, 0xE1 as NapiCallbackInfo) });
+
+        assert!(doc.starts_with("{\"bytes\":"), "{doc}");
+        let bytes = json_field(&doc, "bytes").parse::<u64>().expect("bytes must be a number");
+        let peak = json_field(&doc, "peak").parse::<u64>().expect("peak must be a number");
+        let allocs = json_field(&doc, "allocs").parse::<u64>().expect("allocs must be a number");
+        let frees = json_field(&doc, "frees").parse::<u64>().expect("frees must be a number");
+        // `snapshot()` clamps peak to bytes at read time, so this holds even
+        // when another lib test allocates between the two loads.
+        assert!(peak >= bytes, "{doc}");
+        // By now this process has certainly allocated and freed (the test
+        // harness alone does both before any test body runs).
+        assert!(allocs > 0 && frees > 0, "{doc}");
+        // Exactly the four documented numeric fields: no `ok`, no extras.
+        assert_eq!(doc.matches(':').count(), 4, "{doc}");
+        assert_eq!(doc.matches(',').count(), 3, "{doc}");
     }
 }
 
@@ -1683,4 +1723,18 @@ unsafe extern "C" fn napi_connector_route_selection_set(
 ) -> NapiValue {
     let a = cb_args(env, info);
     ret_json(env, crate::connector::connector_route_selection_set_json(&a.string_at(0)))
+}
+
+// Additive, tail-appended Rust-heap readout (`alloc_stats()`): ZERO arguments,
+// read-only, synchronous. Returns the flat document
+// `{"bytes":n,"peak":n,"allocs":n,"frees":n}` — live bytes / high-water mark /
+// cumulative allocation and deallocation events of the process's RUST global
+// allocator (the counters installed in lib.rs; `crate::alloc_stats` module docs
+// define each number and what is NOT counted: ArkTS/JS heap, libace_napi and
+// every C/C++ allocation stay invisible here — this is not process RSS).
+// The read takes four relaxed atomic loads and takes NO lock; the only
+// allocation is the small reply string (created after the counters were read).
+// A1-clean: nothing threadsafe / async is involved.
+unsafe extern "C" fn napi_alloc_stats(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
+    ret_json(env, crate::alloc_stats::snapshot_json())
 }

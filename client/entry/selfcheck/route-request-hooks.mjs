@@ -5,13 +5,25 @@
 //
 // @ohos.file.fs is a FUNCTIONAL stub: it forwards every operation to the real
 // node fs the test configures on globalThis.__NB_ROUTE_REQUEST_TEST, so the
-// store's open/read/write/fsync/close/rename/unlink path and the atomic
+// store's stat/open/read/write/fsync/close/rename/unlink path and the atomic
 // temp-file behaviour are exercised against real bytes. No device, no compiler.
 // @ohos.util is the TextEncoder/TextDecoder pair backed by node's.
 const FS = 'data:text/javascript,' + encodeURIComponent(
   'const handles = new Map(); let nextFd = 10;' +
   'const modes = { READ_ONLY: 0, READ_WRITE: 2, CREATE: 64, TRUNC: 512 };' +
   'const api = { OpenMode: modes,' +
+  // The adapter's cheap "unchanged document" probe (NetBirdRouteRequestStore):
+  // a REAL stat over the same node fs, carrying the inode and the nanosecond
+  // timestamps, so this fixture can forge whole-second metadata and watch the
+  // probe answer from bytes rather than from that metadata.
+  ' statSync(path) { const s = globalThis.__NB_ROUTE_REQUEST_TEST;' +
+  ' try { const st = s.nodeFs.statSync(path, { bigint: true });' +
+  // node's BigIntStats keeps mtime/ctime as Date objects, so the whole seconds
+  // are derived from the exact nanosecond fields (bigint division truncates).
+  ' return { ino: st.ino, size: Number(st.size),' +
+  ' mtime: Number(st.mtimeNs / 1000000000n), ctime: Number(st.ctimeNs / 1000000000n),' +
+  ' mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs }; }' +
+  ' catch (e) { if (e.code === "ENOENT") throw { code: 13900002 }; throw e; } },' +
   ' async open(path, mode) { const s = globalThis.__NB_ROUTE_REQUEST_TEST;' +
   ' if (s.readError && mode === 0) throw s.readError;' +
   ' const flags = mode === 0 ? "r" : "w+"; let h;' +

@@ -14,6 +14,14 @@
 //             emitted instead and the VPN flow is untouched (never a throw)
 //   stop(): void   — removes the subscription; safe to call when not running
 //   isRunning(): boolean
+//   lastKilledVpnProcess(): ProcessExitRecord | null
+//     the LATEST APP_KILLED of this app's `:vpn` process that THIS process was
+//     told about, or null when none arrived. Read by the page's automatic
+//     reconnect: a status document that stopped being refreshed is NOT proof the
+//     extension is gone (the system suspends it for minutes while it keeps
+//     running), so the marker's pid must appear here before the extension is
+//     started again. Process memory only — nothing is persisted, and only the ui
+//     role records anything (a VPN process's own exit is not the page's fact).
 //
 // WHY: the user needs the system's own verdict on why the VPN process died or
 // was throttled — kill reason, freeze, resource over-limit — in the persistent
@@ -57,7 +65,8 @@
 import hiAppEvent from '@ohos.hiviewdfx.hiAppEvent';
 import hilog from '@ohos.hilog';
 import process from '@ohos.process';
-import { DEDUP_WINDOW, MAX_GROUPS_PER_CALLBACK, MAX_INFOS_PER_GROUP, UNAVAILABLE, EventDeduper,
+import { DEDUP_WINDOW, KilledProcessTracker, MAX_GROUPS_PER_CALLBACK, MAX_INFOS_PER_GROUP,
+  ProcessExitRecord, UNAVAILABLE, EventDeduper,
   buildDroppedLine, buildDupLine, buildWatcherLine, projectInfos } from './NetBirdSystemEventsCore';
 
 const DOMAIN: number = 0x2900;
@@ -96,6 +105,7 @@ class SystemEventRuntime {
   private sink: SafeSink | undefined = undefined;
   private watcher: hiAppEvent.Watcher | undefined = undefined;
   private deduper: EventDeduper = new EventDeduper(DEDUP_WINDOW);
+  private killedVpn: KilledProcessTracker = new KilledProcessTracker();
   private internalErrors: number = 0;
 
   start(role: SysEventRole, safeSink: SafeSink): boolean {
@@ -195,6 +205,9 @@ class SystemEventRuntime {
         const infoCount: number = infos.length < MAX_INFOS_PER_GROUP ? infos.length : MAX_INFOS_PER_GROUP;
         for (let j = 0; j < infoCount; j++) {
           paramsList.push(infos[j].params);
+          // The auto-reconnect's criterion (7), captured from the same bounded
+          // infos the log lines come from: ONE more fact per occurrence.
+          this.noteKilledProcess(group.name, infos[j].params);
         }
         // infos.length travels separately so the dropped remainder is honest.
         const lines: string[] = projectInfos(ts, pid, this.role, group.name, paramsList, infos.length, this.deduper);
@@ -211,6 +224,20 @@ class SystemEventRuntime {
       // A malformed callback must never escape into the SDK / VPN process.
       this.noteInternalError('onReceive', error as Error);
     }
+  }
+
+  // Only the UI process's own subscription can say "the extension died": the
+  // page reads this memory, and the VPN role's own exit would be a different
+  // question. The core owns which occurrences count and which one is kept.
+  private noteKilledProcess(sdkName: string, params: Object | undefined | null): void {
+    if (this.role !== 'ui') {
+      return;
+    }
+    this.killedVpn.note(sdkName, params);
+  }
+
+  lastKilledVpnProcess(): ProcessExitRecord | null {
+    return this.killedVpn.record();
   }
 
   private reportUnavailable(stage: string, error: Error | undefined): void {
@@ -267,4 +294,10 @@ export function stop(): void {
 
 export function isRunning(): boolean {
   return runtime.isRunning();
+}
+
+// Read-only: the latest VPN-process exit this process was told about, or null.
+// Never mutates, never persists, never throws.
+export function lastKilledVpnProcess(): ProcessExitRecord | null {
+  return runtime.lastKilledVpnProcess();
 }

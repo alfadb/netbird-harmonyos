@@ -12,14 +12,22 @@
 //
 // INPUTS — the whole allow-list is the fixed table below: the eight basenames
 // this app's own writers use under filesDir
-//   netbird-ui.log[.1 .2 .3]    UI-side log, four segments, 2 MiB family total
-//                               (512 KiB per segment; the UI writer's own
-//                               TOTAL_MAX_BYTES is 2 MiB)
-//   netbird-vpn.log[.1 .2 .3]   VPN-extension/native log, 2 MiB per segment x
-//                               4 segments (native phone_log defaults)
-// The per-file cap below (2 MiB) is therefore a safe superset of both writers'
-// segment sizes: it never cuts a file the writers keep within their own cap,
-// and it still bounds the copy if one of them ever exceeds it.
+//   netbird-ui.log[.1 .2 .3]    UI-side log, four segments, 4 MiB family total
+//                               (1 MiB per segment; the UI writer's own
+//                               TOTAL_MAX_BYTES is 4 MiB)
+//   netbird-vpn.log[.1 .2 .3]   VPN-extension/native log, 24 MiB per segment x
+//                               4 segments (native phone_log defaults), 96 MiB
+//                               family total
+// STORAGE BUDGET (2026-10-07): the two writers together hold at most
+// 96 MiB + 4 MiB = 100 MiB of current + rotated segments under filesDir, and a
+// writer may sit one tail record over its own segment cap (phone_log rotation
+// is "segment cap, plus at most one record"). The caps below are therefore
+// 25 MiB / 104 MiB: that 100 MiB storage budget plus the tail-record and
+// framing headroom an EXPORT needs. They bound how much may be COPIED; they
+// are not the size the writers are allowed to store.
+// The per-file cap is a safe superset of both writers' segment sizes: it never
+// cuts a file the writers keep within their own cap, and it still bounds the
+// copy if one of them ever exceeds it.
 // Rotation convention (both writers): the base name is the CURRENT file; once
 // it exceeds the writer's cap it becomes .1, .1 becomes .2, the old .3 is
 // unlinked — so .3 is the oldest sibling of its family, the base name newest.
@@ -72,15 +80,17 @@ export const LOG_EXPORT_ENOENT_CODE: number = 13900002;
 
 // Caps, in log-content bytes (the fixed per-file headers/preamble/footers are
 // ASCII overhead of a few hundred bytes and are not counted).
-//   per file: the writers' own segment target, 2 MiB.
-//   total:    the realistic worst case is native 4 x 2 MiB + UI 2 MiB =
-//             10 MiB; 12 MiB leaves headroom so a well-behaved pair of writers
-//             is exported whole. The theoretical maximum is 8 x 2 MiB = 16 MiB
-//             (per-file cap x 8 candidates), so the total cap CAN bind when a
-//             file set exceeds the writers' configured sizes — that is why a
-//             skipped candidate is reported instead of silently dropped.
-export const LOG_EXPORT_PER_FILE_CAP_BYTES: number = 2 * 1024 * 1024;
-export const LOG_EXPORT_TOTAL_CAP_BYTES: number = 12 * 1024 * 1024;
+//   per file: the largest writer segment is native 24 MiB; 25 MiB covers that
+//             segment plus the one record a writer may hold over its own cap.
+//   total:    the writers' whole storage budget is 96 MiB (native) + 4 MiB
+//             (UI) = 100 MiB; 104 MiB covers that budget plus those tail
+//             records, so a well-behaved pair of writers is exported whole.
+//             The theoretical maximum is 8 x 25 MiB = 200 MiB (per-file cap x
+//             8 candidates), so the total cap CAN bind when a file set exceeds
+//             the writers' configured sizes — that is why a skipped candidate
+//             is reported instead of silently dropped.
+export const LOG_EXPORT_PER_FILE_CAP_BYTES: number = 25 * 1024 * 1024;
+export const LOG_EXPORT_TOTAL_CAP_BYTES: number = 104 * 1024 * 1024;
 export const LOG_EXPORT_COPY_CHUNK_BYTES: number = 64 * 1024;
 export const LOG_EXPORT_FILE_PREFIX: string = 'netbird-logs-';
 

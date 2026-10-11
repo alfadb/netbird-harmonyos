@@ -29,7 +29,7 @@
 //! Rotation bounds how much history is KEPT; it does not bound how fast new
 //! records reach the flash. A producer stuck in a loop (an ICE log storm while
 //! the device is already at `SWAP_FULL`) could therefore churn disk forever
-//! inside an 8 MiB file set. So every line is admitted through a fixed
+//! inside a 96 MiB file set. So every line is admitted through a fixed
 //! ONE-SECOND budget before it is redacted or queued:
 //!
 //! * [`DEFAULT_RATE_BYTES_PER_SEC`] = 8192 charged bytes per second;
@@ -73,8 +73,9 @@
 //! ## Files, rotation, sessions
 //!
 //! The current segment is `<path>`; rotated segments are `<path>.1` …
-//! `<path>.(segments-1)` (defaults: 2 MiB each, 4 files ⇒ ≈ 8 MiB total,
-//! `segments` is bounded to 2..=8). Rotation is plain and **without ACK
+//! `<path>.(segments-1)` (defaults: 24 MiB each, 4 files ⇒ ≈ 96 MiB total,
+//! the VPN share of the phone's 100 MiB running-log budget, `segments` is
+//! bounded to 2..=8). Rotation is plain and **without ACK
 //! semantics**: when a record would exceed the current segment cap the oldest
 //! segment is deleted and the rest are renamed. Total disk use is therefore
 //! bounded by `segments * max_bytes` plus at most one record — and the rate at
@@ -150,8 +151,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Default cap of the CURRENT segment (2 MiB × 4 files ⇒ ≈ 8 MiB total).
-pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// Default cap of the CURRENT segment (24 MiB × 4 files ⇒ ≈ 96 MiB total).
+pub const DEFAULT_MAX_BYTES: u64 = 24 * 1024 * 1024;
 /// Default number of kept files (`<path>`, `<path>.1`, …, `<path>.3`).
 pub const DEFAULT_SEGMENTS: u32 = 4;
 /// Default bounded queue capacity (records, not bytes).
@@ -239,7 +240,7 @@ const WEAK_LABELS: &[&[u8]] = &[b"token"];
 // ---------------------------------------------------------------------------
 
 /// Tunables for one [`configure_with`]. `Default` is the production shape
-/// (2 MiB × 4 files, 256-record queue, 1024-char records, 8192 B/s + 64
+/// (24 MiB × 4 files, 256-record queue, 1024-char records, 8192 B/s + 64
 /// records/s admission budget, generated session).
 #[derive(Clone, Debug)]
 pub struct Options {

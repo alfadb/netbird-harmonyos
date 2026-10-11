@@ -21,6 +21,13 @@
 //!              symbols in the loaded .so, adapted from the probe's d1.rs
 //! - `napi`   — handwritten raw NAPI glue (no napi-rs; all exports
 //!              synchronous, zero threadsafe-function / async-work)
+//! - `alloc_stats` — process-global RUST HEAP counters (live bytes, peak,
+//!              allocation/free events): a `System`-wrapping
+//!              `#[global_allocator]` (installed in this file, so it applies to
+//!              the cdylib and to every host test binary) plus the read-only
+//!              `alloc_stats()` export. It splits the Rust heap out of the
+//!              process's anonymous memory; it is NOT a process-RSS or
+//!              ArkTS-heap reading (module docs)
 //! - `config` — client configuration model (R3): peer config + validation
 //!              (keys, CIDR, MTU, endpoint), own strict JSON reader; NO
 //!              management/signal protocol logic
@@ -96,6 +103,7 @@
 //! | `n2h_collector_disarm()` | `() => string` | abort the window: detaches the tee, discards the partial document and records it (`N2H_COLLECTOR_DISARM`) -> `{ok:true}` (idempotent) |
 //! | `connector_routes()` | `() => string` | **increment 131 ADDITIVE** read-only route catalog (SEPARATE document; `connector_status()` / `connector_network_config()` and their frozen JSON/order are NOT touched) -> `{available,serial,selection:{selected_routes,deselected_routes,deselect_all},networks:[{net_id,networks,candidate_count,enabled,is_exit}]}`. `networks` = the UNFILTERED advertised route list of the last applied NetworkMap, so a user-disabled network (and every HA candidate behind it) stays visible with `enabled:false`; `selection` = the generation's startup selection state verbatim (this GETTER is read-only; the live setter is the separate `connector_route_selection_set`). `available:false` + `serial:0` + `networks:[]` = no route catalog (no connector, before the first map, after stop, or an applied map that advertised no routes) — never a fabricated empty-but-active state. Side-effect-free mutex snapshot (no gate refresh, no recreate bookkeeping, no network/IO); public routing material only — NetIDs, prefixes and counts, never a key, an fd or a secret |
 //! | `connector_route_selection_set(selectorJson)` | `(selector) => string` | **increment 132 ADDITIVE (Core 5f)** LIVE route-selection setter (SEPARATE document; the frozen `connector_status()` / `connector_network_config()` shapes/order are NOT touched) -> `{ok:true,available,changed,desired_routes,recreate_needed}` / `{ok:false,error:"no-connector"\|"selection-invalid"\|"wg-apply-failed",available,changed,desired_routes,recreate_needed}`. `selectorJson` = the RAW selector document `{"selected_routes":[…],"deselected_routes":[…],"deselect_all":bool}` (missing keys = empty/false), handed verbatim to the core's OWN strict parser: duplicate keys, wrong value types and non-object documents are REFUSED (`selection-invalid`, nothing mutated) and that refusal is decided BEFORE the connector lookup. On a live connector the running session re-filters the routes it already advertised and re-applies the WG managed routes, serialized with the map pipeline — no restart; `available` = a NetworkMap was applied (with none the selection is stored for the NEXT map and no applied route set is claimed), `changed` = the stored selection really differs, `desired_routes` = the effective route set after the update, `recreate_needed` = the platform route set must be replaced for it to take effect (the automatic budget/cooldown stays reported by `connector_status().recreate`). The user-forced recreate that a live toggle may still need is a separate ACK with kind `user` on `connector_route_set_applied`: it spends none of the automatic recreate budget. Public routing material only — NetIDs and prefixes, never a key, an fd or a secret; the wrapper itself logs nothing |
+//! | `alloc_stats()` | `() => string` | **ADDITIVE** read-only Rust-heap counter snapshot (SEPARATE document; no frozen shape touched) -> `{"bytes":n,"peak":n,"allocs":n,"frees":n}` — `bytes` = live bytes currently requested through the process's Rust global allocator, `peak` = its high-water mark, `allocs`/`frees` = cumulative allocation/deallocation events (`realloc` counts as one of each; failed requests count as nothing — `alloc_stats.rs` module docs). Zero arguments, no lock, no big allocation; reads four relaxed atomics. It measures the RUST heap only (this crate + statically linked Rust deps), never the ArkTS/JS heap, libace_napi, C/C++ platform buffers or process RSS |
 //!
 //! NOT yet promoted (still live in the spikes): the D2/D4/D5/D6/D7/D8/D-W fd
 //! retention probe stages and the n1b fd-retention `state.rs` (unrelated to
@@ -107,6 +115,18 @@
 
 pub mod abi;
 pub mod account_auth;
+// Rust-heap accounting: the `System`-wrapping allocator below plus the
+// read-only `alloc_stats()` view (module docs: what is and is NOT counted).
+pub mod alloc_stats;
+// Process-global allocator. Installed HERE (the crate root) so it takes effect
+// for the shipped cdylib AND for every host binary that links this crate as an
+// rlib (`cargo test` unit + integration test binaries included — this crate is
+// the only one in the workspace and no other `#[global_allocator]` exists).
+// It delegates every operation to `std::alloc::System` unchanged (same OHOS
+// musl malloc as before: no new allocator, no new dependency) and only adds
+// the counters — see `alloc_stats` for the exact semantics and cost.
+#[global_allocator]
+pub static GLOBAL_ALLOC: alloc_stats::CountingAllocator = alloc_stats::CountingAllocator::new();
 // N3-4: management reconnect backoff (upstream defaultBackoff shape,
 // injectable clock/rng).
 pub mod backoff;

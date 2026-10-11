@@ -13,6 +13,15 @@ import { appendSystemEvent, event as diagnosticsEvent, start as startDiagnostics
 import type { DiagFields } from '../vpnextensionability/NetBirdDiagnostics';
 import { start as startSystemEvents,
   stop as stopSystemEvents } from '../vpnextensionability/NetBirdSystemEvents';
+// 2026-10-10 后台保活（0.0.19 实验版，方案 A）：借用 DATA_TRANSFER 长时任务让整个应用
+// 的进程不被挂起。长时任务只能由 UIAbility 申请，所以注册与注销都落在本 ability 的生命
+// 周期上；平台调用全部在 NetBirdKeepAliveService 里，本文件只做接线。
+import { KEEP_ALIVE_REVISION_SHUTDOWN, notifyKeepAliveResume, registerKeepAlive,
+  stopKeepAlive,
+  unregisterKeepAlive } from '../vpnextensionability/NetBirdKeepAliveService';
+// 0.0.21（挂起长窗口后的恢复复查）：onForeground 是本进程"又开始跑了"的最早信号，它的
+// reason token 与平台的 continuousTaskActive 一起构成 `ui_resume_check` 的闭集。
+import { KEEP_ALIVE_RESUME_FOREGROUND } from '../vpnextensionability/NetBirdKeepAlivePolicy';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -154,6 +163,10 @@ export default class EntryAbility extends UIAbility {
     // Subscribed after the writer is open so every line has a destination;
     // start() never throws and a platform refusal is just one more line.
     startSystemEvents('ui', (line: string): void => { appendSystemEvent(line); });
+    // 2026-10-10 后台保活（实验，方案 A）：注册三个长时任务回调。此时诊断写入器已经
+    // 打开，取消/挂起/激活事件（以及注册失败）都有落点。注册本身不改任何状态：要不要
+    // 持有任务由纯策略按页面每 2 s 上报的事实决定，本调用只建立事件通道。
+    registerKeepAlive(this.context);
     hilog.info(DOMAIN, TAG, 'ENTRY_ONCREATE|bundle=%{public}s', want.bundleName ?? BUNDLE_NAME);
     this.recordLifecycle('onCreate');
     // LaunchParam, SDK fields by their exact names: `lastExitReason` is the
@@ -330,10 +343,28 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     this.recordLifecycle('onForeground');
+    // 0.0.21（挂起长窗口后的恢复复查）：本进程又跑起来了——真机上被平台挂起的那一段可以
+    // 长达 7362 s（0.0.20：17:08 VPN 被相机清理后 1 h16 m 无人重连，直到用户点开应用）。
+    // 这里只转发这一个事实；重读状态文档、重新判重连仍是页面自己的事（本文件不读任何状态
+    // 文档）。页面还没注册监听者（冷启动的这一刻）时它就是个空操作。
+    notifyKeepAliveResume(KEEP_ALIVE_RESUME_FOREGROUND);
   }
 
   onBackground(): void {
     this.recordLifecycle('onBackground');
+  }
+
+  // 2026-10-08 memory-pressure OBSERVATION (observation only — this callback
+  // must NOT release UI components or any other memory; the SDK explicitly
+  // warns that releasing UI components here can block the main thread). The
+  // ONE field is the bounded AbilityConstant.MemoryLevel enum (0..4 on API 26),
+  // never a free-form message. UIAbility extends Ability, which declares
+  // onMemoryLevel, so this IS a real lifecycle override.
+  onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
+    const fields: DiagFields = {};
+    fields['stage'] = 'platform';
+    fields['state'] = String(level);
+    diagnosticsEvent('ui_memory_level', fields);
   }
 
   // Theme (2026-10-09): the system dark/light switch is delivered here, and the
@@ -359,6 +390,15 @@ export default class EntryAbility extends UIAbility {
   // helper's own async marker write lands).
   onDestroy(): void {
     this.recordLifecycle('onDestroy');
+    // 2026-10-10 后台保活（实验，方案 A）：先摘掉回调（我们自己的释放不能被读成平台的
+    // 取消），再尽力释放任务。stopBackgroundRunning 是异步的，进程可能在它落地前就结束
+    // ——这不是缺陷：进程退出本身就会结束这个应用的长时任务，这里只是把「有序退出」也
+    // 写清楚，且失败只字不留地放行。
+    unregisterKeepAlive();
+    stopKeepAlive(this.context, KEEP_ALIVE_REVISION_SHUTDOWN, 'shutdown')
+      .catch((_error: Error): void => {
+        // Best-effort teardown; the platform releases the task with the process.
+      });
     // The watcher goes FIRST, while the writer is still open: its stop() emits
     // the sys_watcher_stopped line (and any suppressed-count report) through the
     // sink, and the diagnostics stop() below flushes that queue. Stopping the

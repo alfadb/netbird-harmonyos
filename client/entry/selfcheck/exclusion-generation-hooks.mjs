@@ -52,6 +52,15 @@
 //                     (SYNCHRONOUS throw) / 'never' (a promise that never
 //                     settles: the wedge shape the per-fd bounded box reports
 //                     as a timeout).
+//                     ADDITIVE (2026-10-07 startup-race increment):
+//                     __NB_PROTECT_PARK_AT = n parks the n-th protect() call
+//                     (1 = the outbound WG socket, 2 = the FIRST ICE pool
+//                     socket) and publishes its resolver as
+//                     __NB_PROTECT_PARKED = {fd, resolve, reject}, so a fixture
+//                     can hold the REAL initial leg inside the ICE protect
+//                     await and release it explicitly. Unset (every
+//                     pre-existing group) = the historical 'resolved' path,
+//                     unchanged; the four modes above still win when set.
 //                     protectProcessNet() (S3 diag switch,
 //                     API 22+, SDK d.ts:275) is driven by
 //                     globalThis.__NB_PROCESS_PROTECT_MODE —
@@ -171,6 +180,24 @@ const FS = 'data:text/javascript,' + encodeURIComponent(
   // READ_ONLY is the route adapter\'s read mode (NetBirdRouteStore.readTextBounded);
   // additive — every pre-existing caller only uses READ_WRITE|CREATE|TRUNC.
   '  OpenMode: { READ_ONLY: 0, READ_WRITE: 3, CREATE: 8, TRUNC: 16 },\n' +
+  // 2026-10-10 the live-route request adapter (NetBirdRouteRequestStore) probes
+  // a document with fs.statSync before reading it. This in-memory map keeps no
+  // timestamps, so the probe answers "as if written right now" (and reports the
+  // documented 13900002 for a path that was never written): the adapter\'s
+  // unchanged-shortcut therefore never engages in these fixtures and every poll
+  // still reads the real bytes. That is the conservative direction — a document
+  // is never answered from a cache while its metadata is unknown here.
+  '  statSync: (path) => {\n' +
+  '    const f = files();\n' +
+  '    if (!Object.prototype.hasOwnProperty.call(f, path)) {\n' +
+  '      const e = new Error("stat failed: " + path); e.code = 13900002; throw e;\n' +
+  '    }\n' +
+  '    const now = Date.now();\n' +
+  '    const nowNs = BigInt(now) * BigInt(1000000);\n' +
+  '    return { ino: BigInt(1), size: Buffer.byteLength(String(f[path]), "utf8"),\n' +
+  '      mtime: Math.floor(now / 1000), ctime: Math.floor(now / 1000),\n' +
+  '      mtimeNs: nowNs, ctimeNs: nowNs };\n' +
+  '  },\n' +
   '  accessSync: (path) => {\n' +
   '    thrower(path, "access");\n' +
   '    return Object.prototype.hasOwnProperty.call(files(), path);\n' +
@@ -306,6 +333,16 @@ const VPN_EXT = 'data:text/javascript,' + encodeURIComponent(
   // stays "resolved", so no pre-existing group changes shape.
   '    if (mode === "rejected") { return Promise.reject(new Error("protect-rejected")); }\n' +
   '    if (mode === "throw") { throw new Error("protect-throw"); }\n' +
+  // 2026-10-07 startup-race increment (ADDITIVE): park the n-th protect call
+  // and publish its resolver. The executor below runs synchronously, so
+  // __NB_PROTECT_PARKED is observable the moment protect() returns. Unset =
+  // byte-for-byte the historical resolved path.
+  '    const parkAt = g().__NB_PROTECT_PARK_AT;\n' +
+  '    if (typeof parkAt === "number" && parkAt > 0 && g().__NB_PROTECTED === parkAt) {\n' +
+  '      return new Promise((resolve, reject) => {\n' +
+  '        g().__NB_PROTECT_PARKED = { fd: fd, resolve: resolve, reject: reject };\n' +
+  '      });\n' +
+  '    }\n' +
   '    return Promise.resolve();\n' +
   '  }\n' +
   '  protectProcessNet() {\n' +
@@ -858,6 +895,14 @@ const STUBS = {
   '@ohos.window': EMPTY,
   '@ohos.file.fs': FS,
   '@ohos.hilog': HILOG,
+  // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the REAL extension now
+  // imports `process` for the pid it stamps into the marker (the same
+  // `process.pid` NetBirdDiagnostics.ets writes), so the specifier must resolve
+  // for the byte-identical extension fixture to link. The value is a FIXED
+  // host pid: no driven path depends on it being real, and the marker round-trip
+  // check reads the pid back out of the written line.
+  '@ohos.process': 'data:text/javascript,' + encodeURIComponent(
+    'export default { pid: 4242 };\n'),
   '@ohos.net.connection': CONNECTION,
   '@ohos.net.statistics': STATISTICS,
   '@ohos.net.vpnExtension': VPN_EXT,
@@ -872,6 +917,35 @@ const STUBS = {
     ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
     'export const decideAccountCredentialMode = () => "account-login-required";'),
   '../login/NetBirdAccountStore': 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D',
+  // 2026-10-10 后台保活（0.0.19, 方案 A）: the REAL EntryAbility now registers the
+  // borrowed DATA_TRANSFER continuous task on its onCreate/onDestroy, so this
+  // specifier must resolve for the byte-identical ability fixture to link. The
+  // feature belongs to the UI process's own adapter (NetBirdKeepAliveService —
+  // the only module that imports backgroundTaskManager / notificationManager /
+  // wantAgent) and takes NO part in route-exclusion generation; it also needs
+  // platform IO this host fixture cannot run, so the names are no-ops here. The
+  // decision machine is driven end-to-end by run-keep-alive.mts, never mirrored.
+  '../vpnextensionability/NetBirdKeepAliveService': 'data:text/javascript,' + encodeURIComponent(
+    'export const KEEP_ALIVE_REVISION_SHUTDOWN = -1;\n' +
+    'export const registerKeepAlive = () => undefined;\n' +
+    'export const unregisterKeepAlive = () => undefined;\n' +
+    'export const stopKeepAlive = async () => false;\n' +
+    'export const startKeepAlive = async () => false;\n' +
+    'export const refreshKeepAlive = async () => false;\n' +
+    'export const keepAliveTaskPresent = () => false;\n' +
+    'export const takeKeepAliveCancels = () => [];\n' +
+    // 0.0.21（挂起长窗口后的恢复复查）: the REAL EntryAbility now reports its
+    // onForeground through this ONE no-op seam too, so the name must exist for
+    // the byte-identical ability fixture to link. It carries no route semantics
+    // and this suite never drives the page's re-check (that wiring is
+    // host-checked by run-keep-alive.mts), hence a no-op here.
+    'export const notifyKeepAliveResume = () => undefined;'),
+  // 0.0.21: the REAL EntryAbility names its resume reason token from the pure
+  // keep-alive policy module (`KEEP_ALIVE_RESUME_FOREGROUND`), so this specifier
+  // must resolve as well. The stub carries the token's shipped value verbatim —
+  // the ability only passes it straight back into the seam above.
+  '../vpnextensionability/NetBirdKeepAlivePolicy': 'data:text/javascript,' + encodeURIComponent(
+    'export const KEEP_ALIVE_RESUME_FOREGROUND = "foreground";\n'),
   // 2026-10-09 live route apply: the REAL extension now imports the live-route
   // IPC file adapter (and the token vocabulary of its pure document module) by
   // value, so both specifiers must resolve for these fixtures to link. This
@@ -918,6 +992,12 @@ const SHIMS = {
   // extension imports; zero imports and no erased types — plain extension
   // resolution like NetBirdIceSocketPool above.
   './NetBirdRecreatePolicy': 'NetBirdRecreatePolicy.ts',
+  // 2026-10-09 (0.0.17): the REAL extension now names the pure marker core by
+  // value (buildMarker / markerBasename / recordPath / MARKER_STATE_STOPPING)
+  // for its synchronous onDestroy-entry write, so the fixture stages that file
+  // byte-identically next to the extension (zero imports, no erased types, no
+  // shim needed — the same discipline as NetBirdRecreatePolicy above).
+  './NetBirdDiagnosticsCore': 'NetBirdDiagnosticsCore.ts',
   // N2 T5a (2026-09-28): the stimulus module is staged byte-identically; the
   // extension imports it by an extensionless specifier and names its erased
   // interfaces (N2StimulusDecision / N2StimulusReply), so it resolves to the

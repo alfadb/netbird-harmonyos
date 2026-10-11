@@ -13,7 +13,7 @@
 // here, so every decision below is host-verifiable without a device.
 //
 // FIXED BASENAMES (export-friendly; nothing else is ever touched)
-//   UI records, newest -> oldest, exactly 4 files, 512 KiB each, 2 MiB total:
+//   UI records, newest -> oldest, exactly 4 files, 1 MiB each, 4 MiB total:
 //     [0] netbird-ui.log      (active append target)
 //     [1] netbird-ui.log.1
 //     [2] netbird-ui.log.2
@@ -41,11 +41,69 @@
 //     a rate, because the wall-clock gap between ticks is not guaranteed;
 //     threads / vmsize_kb / rss_anon_kb / rss_file_kb are THIS process from
 //     /proc/self/status (Threads, VmSize, RssAnon, RssFile);
+//     vmdata_kb / vmstk_kb / rss_shmem_kb are the SAME ONE read of that node
+//     (VmData, VmStk, RssShmem) — zero added system calls;
 //     sys_swap_total_kb / sys_swap_free_kb are the SYSTEM SwapTotal/SwapFree
 //     from /proc/meminfo (MemAvailable stays with hidebug, no duplicate);
 //     fd_count is the NUMBER of entries in /proc/self/fd — a count only, no fd
 //     name/target/inode is ever read into a record — and fd_capped=true marks
 //     that the count hit the enumeration cap, i.e. the value is a lower bound
+//
+//   - every MEM_DETAIL_INTERVAL (10) samples, ONE SEPARATE `event=mem_detail`
+//     record — a second line, NOT a wider mem_sample: with PSS and the Rust
+//     heap added, the full field set no longer fits MAX_LINE_CHARS, and a cut
+//     line would silently lose its tail. It carries the ASYNC smaps_rollup
+//     reader's five readings (hidebug.getAppNativeMemInfoAsync):
+//     pss_kb / private_dirty_kb / shared_dirty_kb / private_clean_kb /
+//     shared_clean_kb (pss = smaps_rollup Pss + SwapPss), plus — when the
+//     caller injected a Rust-allocator reader (role-dependent; see start()) —
+//     rust_heap_kb / rust_heap_peak_kb / rust_allocs / rust_frees parsed from
+//     the NAPI `alloc_stats()` document, bytes converted to KiB by integer
+//     division by 1024. rust_heap is the process's RUST GLOBAL ALLOCATOR ONLY:
+//     never the ArkTS/JS heap, libace_napi, the platform TUN/route buffers or
+//     process RSS. A NON-detail tick emits NO mem_detail record at all (the
+//     keys are absent, not `na`); a detail record writes `na` for anything
+//     unreadable, and a process with no injected reader (the UI role) writes
+//     `na` for all four rust keys.
+//
+//   - the SAME detail tick emits ONE MORE record, `event=mem_vm`, immediately
+//     after mem_detail: the ArkTS-VM / native-malloc / GC attribution readings
+//     that answer "whose memory is the anonymous RSS?". They are SYNCHRONOUS
+//     calls made inside the same single-flight runSample() detail branch (no
+//     timer is added; the 1 s cadence is untouched):
+//       hidebug.getAppVMMemoryInfo()         -> vm_total_heap_kb (totalHeap) and
+//                                               vm_array_kb (allArraySize), KB —
+//                                               the ArkTS heap total and every
+//                                               array / ArrayBuffer-like object
+//       hidebug.getNativeHeapSize()          -> native_heap_kb        (uordblks
+//       hidebug.getNativeHeapAllocatedSize() -> native_heap_alloc_kb   + fordblks
+//       hidebug.getNativeHeapFreeSize()      -> native_heap_free_kb    / uordblks
+//                                               / fordblks, from mallinfo). The
+//                                               platform answers BYTES; they are
+//                                               converted to KiB by EXACT integer
+//                                               division (bytesToKiBText), never
+//                                               through a lossy bigint -> number
+//                                               step. This is the libc malloc heap
+//                                               ONLY — not the ArkTS heap, not
+//                                               libace_napi, not process RSS.
+//       hidebug.getVMRuntimeStat(key)        -> gc_count, gc_time_ms (ms, as the
+//                                               platform reports it) and
+//                                               gc_alloc_kb / gc_freed_kb (the two
+//                                               gc-bytes-* counters, BYTES -> KiB
+//                                               by exact integer division). The
+//                                               four keys are declared HERE
+//                                               (GC_STAT_*) and never spelled out
+//                                               in the runtime module.
+//     WHY A THIRD LINE: with every field at its own bound the mem_detail set above
+//     plus these nine keys reaches ~695 chars (pid=42), past MAX_LINE_CHARS — so
+//     the host selfcheck pins both the split and the lengths: the widest
+//     mem_detail alone is 371 chars and the widest mem_vm alone is 381, while the
+//     two sets joined would be truncated. The new keys therefore get their OWN
+//     record instead of being cut away. Each of the three legs is guarded: an API
+//     that is missing / throws / answers a non-finite or negative number renders
+//     its own keys as `na` (never a fabricated 0) and the FIRST such failure of
+//     the run is said once (DIAG_DETAIL_UNAVAILABLE), exactly like the mem_detail
+//     legs. A non-detail tick emits no mem_vm record at all.
 //
 // MARKER FILE (single line): v=1 state=<open|clean> ts=<ISO> pid=<pid> role=<r>
 //   start() writes state=open; stop() writes state=clean ONLY from the real
@@ -101,14 +159,55 @@ export const MARKER_BASENAME_UI: string = 'netbird-diag-ui.marker';
 export const MARKER_BASENAME_VPN: string = 'netbird-diag-vpn.marker';
 export const MARKER_STATE_OPEN: string = 'open';
 export const MARKER_STATE_CLEAN: string = 'clean';
+// 2026-10-09 (0.0.17): the extension writes this state SYNCHRONOUSLY from the
+// onDestroy ENTRY (NetBirdVpnExtensionAbility.writeStopMarkerSync), because the
+// asynchronous teardown continuation that would write `clean` does not survive
+// the process on the device: the JS context is destroyed ~3 ms after onDestroy
+// returns and the process is gone within ~21 ms, so the destroyOnce
+// continuation (await createPromise -> await connection.destroy() -> the late
+// stopDiagnostics()) never runs — the marker stayed `open` and the NEXT session
+// reported PRIOR_EXIT_UNCLEAN for an orderly user stop (V016 evidence:
+// netbird-vpn.log:1528-1547 ends at `vpn_destroy_phase phase=requested`, no
+// `settled`). `stopping` = an ORDERLY stop was entered and only the marker's
+// last, asynchronous transition (-> clean) was lost to the process end; it is
+// NOT a prior unclean exit (see isPriorUnclean: only state=open is claimed).
+// The token is 8 chars, exactly the state bound buildMarker() enforces.
+export const MARKER_STATE_STOPPING: string = 'stopping';
 
-export const PER_FILE_MAX_BYTES: number = 524288; // 512 KiB
-export const TOTAL_MAX_BYTES: number = 2097152; // 2 MiB = 4 files x 512 KiB
+export const PER_FILE_MAX_BYTES: number = 1048576; // 1 MiB
+export const TOTAL_MAX_BYTES: number = 4194304; // 4 MiB = 4 files x 1 MiB
 export const MAX_LINE_CHARS: number = 512; // incl. the trailing newline
 export const MAX_VALUE_CHARS: number = 48;
 export const MAX_EVENT_NAME_CHARS: number = 40;
 export const QUEUE_CAPACITY: number = 256;
-export const SAMPLE_INTERVAL_MS: number = 60000;
+export const SAMPLE_INTERVAL_MS: number = 1000; // vpn role
+// 2026-10-11 (0.0.21): the UI process samples every 10 s, NOT every 1 s. The UI
+// log is 1 MiB x 4 and its dominant writer is one mem_sample (~280-320 B) per
+// tick, so the shared 1 s cadence filled the whole 4 MiB in ~5 h; 10 s keeps the
+// same format, fields and bounds while stretching the window past a day. The vpn
+// process keeps 1 s — its per-second series is what the recycle analysis reads.
+export const UI_SAMPLE_INTERVAL_MS: number = 10000; // ui role
+// Every Nth mem_sample is followed by ONE mem_detail record (see the header:
+// a separate line, because the PSS + Rust-heap field set does not fit
+// MAX_LINE_CHARS). The counter counts mem_sample ATTEMPTS inside a run, so a
+// tick dropped by the single-flight guard does not advance it. The cadence is
+// counted in SAMPLES, not seconds, so it is unchanged per role — only the
+// wall-clock period it implies moves with the role's interval: ui emits
+// mem_detail/mem_vm every 10 ticks (100 s), vpn every 10 ticks (10 s).
+export const MEM_DETAIL_INTERVAL: number = 10;
+
+// ---------------------------------------------------------------------------
+// sampling cadence (per role)
+// ---------------------------------------------------------------------------
+
+// The period of the ONE sampling timer a run owns (there is still exactly one
+// setInterval per run — this only picks its delay). The ui role is the log
+// space hog, so it gets the slow cadence; vpn keeps 1 s. Anything that is not
+// the ui role keeps the historical 1 s (an unknown role is rejected by start()
+// anyway).
+export function sampleIntervalFor(role: DiagRole): number {
+  return role === 'ui' ? UI_SAMPLE_INTERVAL_MS : SAMPLE_INTERVAL_MS;
+}
 
 // Bounds for the /proc half of the sample (see PROC SAMPLING below). The byte
 // cap is the actual read buffer, so a proc node can never be slurped whole;
@@ -133,7 +232,8 @@ const SAFE_CHARS: string = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 
 // Internal record names the runtime itself emits.
 export const INTERNAL_EVENT_NAMES: string[] = [
-  'diag_start', 'diag_stop', 'diag_dropped', 'mem_sample', 'PRIOR_EXIT_UNCLEAN'
+  'diag_start', 'diag_stop', 'diag_dropped', 'mem_sample', 'mem_detail', 'mem_vm',
+  'PRIOR_EXIT_UNCLEAN'
 ];
 
 // Public (caller-supplied) event names must be lowercase tokens and must not
@@ -351,8 +451,8 @@ export const PUBLIC_FIELD_KEYS: string[] = [
   'relay_ready', 'supply_installed', 'supply_pending', 'supply_queued'
 ];
 
-// Public keys plus the runtime's own keys (memory, /proc resource readings,
-// marker provenance, drops).
+// Public keys plus the runtime's own keys (memory readings, the every-10th
+// mem_detail readings, /proc resource readings, marker provenance, drops).
 export const INTERNAL_FIELD_KEYS: string[] = [
   'bytes', 'code', 'count', 'detail', 'from', 'gen', 'iface', 'index', 'kind',
   'level', 'mode', 'ms', 'net', 'ok', 'peer', 'phase', 'proto', 'reason',
@@ -360,7 +460,19 @@ export const INTERNAL_FIELD_KEYS: string[] = [
   'dropped', 'heap_kb', 'prev_pid', 'prev_state', 'prev_ts', 'rss_kb',
   'swap_kb', 'sys_avail_kb',
   'cpu_ms', 'threads', 'vmsize_kb', 'rss_anon_kb', 'rss_file_kb',
-  'sys_swap_total_kb', 'sys_swap_free_kb', 'fd_count', 'fd_capped'
+  'sys_swap_total_kb', 'sys_swap_free_kb', 'fd_count', 'fd_capped',
+  // same /proc/self/status read as the four above (event mem_sample)
+  'vmdata_kb', 'vmstk_kb', 'rss_shmem_kb',
+  // every-10th event mem_detail: async smaps_rollup readings ...
+  'pss_kb', 'private_dirty_kb', 'shared_dirty_kb', 'private_clean_kb',
+  'shared_clean_kb',
+  // ... and the injected Rust-global-allocator counters (Rust heap only)
+  'rust_heap_kb', 'rust_heap_peak_kb', 'rust_allocs', 'rust_frees',
+  // every-10th event mem_vm: ArkTS VM heap shape, the native (libc malloc) heap
+  // and the ArkTS GC cumulative counters — a third record, see the header
+  'vm_total_heap_kb', 'vm_array_kb',
+  'native_heap_kb', 'native_heap_alloc_kb', 'native_heap_free_kb',
+  'gc_count', 'gc_time_ms', 'gc_alloc_kb', 'gc_freed_kb'
 ];
 
 const PUBLIC_FIELD_KEY_SET: Set<string> = new Set<string>(PUBLIC_FIELD_KEYS);
@@ -372,7 +484,8 @@ const INTERNAL_FIELD_KEY_SET: Set<string> = new Set<string>(INTERNAL_FIELD_KEYS)
 //
 // The runtime reads exactly three SELF nodes, each in its own guard, each with
 // the caller's byte cap and an fd closed in `finally`:
-//   /proc/self/status -> Threads, VmSize, RssAnon, RssFile
+//   /proc/self/status -> Threads, VmSize, RssAnon, RssFile, VmData, VmStk,
+//                        RssShmem (ONE read feeds all seven fields)
 //   /proc/meminfo     -> SwapTotal, SwapFree
 //   /proc/self/fd     -> listFile with listNum = FD_LIST_MAX, COUNT only
 // 'self' means no pid is ever passed in, so no other process is addressed and
@@ -385,8 +498,10 @@ export const PROC_MEMINFO: string = '/proc/meminfo';
 export const PROC_SELF_FD: string = '/proc/self/fd';
 
 // The ONLY keys requested from each node; parseProcNumbers ignores every other
-// line, key and value in the file.
-export const PROC_STATUS_KEYS: string[] = ['Threads', 'VmSize', 'RssAnon', 'RssFile'];
+// line, key and value in the file. One read of /proc/self/status satisfies the
+// whole list (no per-key system call).
+export const PROC_STATUS_KEYS: string[] =
+  ['Threads', 'VmSize', 'RssAnon', 'RssFile', 'VmData', 'VmStk', 'RssShmem'];
 export const PROC_MEMINFO_KEYS: string[] = ['SwapTotal', 'SwapFree'];
 
 function leadingProcInteger(line: string, start: number): number | null {
@@ -699,8 +814,11 @@ export function buildSampleFields(rssKb: string | null, swapKb: string | null,
 // The 0.0.5 resource half, merged into the same mem_sample record by the
 // runtime (mergeFields). null -> 'na' for every reading; `fd_capped` is the one
 // boolean and is 'na' when the enumeration itself was unavailable.
+// vmdataKb / vmstkKb / rssShmemKb come from the SAME /proc/self/status read as
+// threads/vmsize/anon/file (VmData / VmStk / RssShmem) — no extra system call.
 export function buildResourceFields(cpuMs: string | null, threads: string | null,
   vmsizeKb: string | null, rssAnonKb: string | null, rssFileKb: string | null,
+  vmdataKb: string | null, vmstkKb: string | null, rssShmemKb: string | null,
   sysSwapTotalKb: string | null, sysSwapFreeKb: string | null,
   fdCount: string | null, fdCapped: boolean | null): DiagFields {
   const fields: DiagFields = {};
@@ -709,10 +827,170 @@ export function buildResourceFields(cpuMs: string | null, threads: string | null
   fields['vmsize_kb'] = vmsizeKb === null ? UNAVAILABLE : vmsizeKb;
   fields['rss_anon_kb'] = rssAnonKb === null ? UNAVAILABLE : rssAnonKb;
   fields['rss_file_kb'] = rssFileKb === null ? UNAVAILABLE : rssFileKb;
+  fields['vmdata_kb'] = vmdataKb === null ? UNAVAILABLE : vmdataKb;
+  fields['vmstk_kb'] = vmstkKb === null ? UNAVAILABLE : vmstkKb;
+  fields['rss_shmem_kb'] = rssShmemKb === null ? UNAVAILABLE : rssShmemKb;
   fields['sys_swap_total_kb'] = sysSwapTotalKb === null ? UNAVAILABLE : sysSwapTotalKb;
   fields['sys_swap_free_kb'] = sysSwapFreeKb === null ? UNAVAILABLE : sysSwapFreeKb;
   fields['fd_count'] = fdCount === null ? UNAVAILABLE : fdCount;
   fields['fd_capped'] = fdCapped === null ? UNAVAILABLE : (fdCapped ? 'true' : 'false');
+  return fields;
+}
+
+// ---------------------------------------------------------------------------
+// every-MEM_DETAIL_INTERVAL mem_detail fields (separate record)
+// ---------------------------------------------------------------------------
+
+// true for the Nth, 2Nth, ... mem_sample attempt of a run. The index starts at
+// 1 (the initial sample at start()), so the first mem_detail rides the 10th
+// attempt. A tick dropped by the single-flight guard never reaches the counter.
+export function isDetailSample(index: number): boolean {
+  return index > 0 && index % MEM_DETAIL_INTERVAL === 0;
+}
+
+// The ASYNC smaps_rollup reading (hidebug.getAppNativeMemInfoAsync, API >= 20).
+// Values arrive as the platform's bigint KB readings and are kept as strings
+// (no lossy bigint -> number step); null -> 'na' for every field. `pss` is the
+// platform's own smaps_rollup Pss+SwapPss, NOT this module's arithmetic.
+export function buildNativeMemFields(pssKb: string | null, privateDirtyKb: string | null,
+  sharedDirtyKb: string | null, privateCleanKb: string | null,
+  sharedCleanKb: string | null): DiagFields {
+  const fields: DiagFields = {};
+  fields['pss_kb'] = pssKb === null ? UNAVAILABLE : pssKb;
+  fields['private_dirty_kb'] = privateDirtyKb === null ? UNAVAILABLE : privateDirtyKb;
+  fields['shared_dirty_kb'] = sharedDirtyKb === null ? UNAVAILABLE : sharedDirtyKb;
+  fields['private_clean_kb'] = privateCleanKb === null ? UNAVAILABLE : privateCleanKb;
+  fields['shared_clean_kb'] = sharedCleanKb === null ? UNAVAILABLE : sharedCleanKb;
+  return fields;
+}
+
+// ---------------------------------------------------------------------------
+// the same detail tick: event=mem_vm (ArkTS VM heap, native heap, GC)
+// ---------------------------------------------------------------------------
+//
+// A third record, right after mem_detail: the attribution readings for the
+// anonymous RSS. All three legs are SYNCHRONOUS platform calls made inside the
+// SAME single-flight runSample() detail branch (see the runtime header) — no
+// timer is added and the 1 s cadence does not change. See the core header for
+// why these nine keys do not fit on the mem_detail line.
+
+export const BYTES_PER_KIB: number = 1024;
+// A byte counter is printed by the runtime from a platform bigint; 20 digits is
+// the u64 maximum, so anything longer is not a reading of that counter.
+export const MAX_BYTE_DIGITS: number = 32;
+
+// The getVMRuntimeStat() item names, declared HERE so the runtime never spells
+// out a platform string. Units per the API 26 declaration: gc-count and
+// fullgc-longtime-count are counts, gc-time is milliseconds, gc-bytes-allocated
+// and gc-bytes-freed are BYTES.
+export const GC_STAT_GC_COUNT: string = 'ark.gc.gc-count';
+export const GC_STAT_GC_TIME: string = 'ark.gc.gc-time';
+export const GC_STAT_BYTES_ALLOCATED: string = 'ark.gc.gc-bytes-allocated';
+export const GC_STAT_BYTES_FREED: string = 'ark.gc.gc-bytes-freed';
+
+// Decimal byte count -> KiB field text: EXACT floor division by 1024 on the
+// digit string the runtime printed, so the platform's bigint never passes
+// through a lossy bigint -> number conversion (the same discipline the KB
+// sample fields already follow). A missing, empty, over-long or non-decimal
+// text is null (`na`); a real sub-KiB value floors to the honest '0'.
+export function bytesToKiBText(text: string | null): string | null {
+  if (text === null || text.length === 0 || text.length > MAX_BYTE_DIGITS) {
+    return null;
+  }
+  let out: string = '';
+  let remainder: number = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch: string = text.charAt(i);
+    if (ch < '0' || ch > '9') {
+      return null;
+    }
+    const current: number = remainder * 10 + (ch.charCodeAt(0) - 48);
+    const digit: number = Math.floor(current / BYTES_PER_KIB);
+    remainder = current - digit * BYTES_PER_KIB;
+    if (out.length > 0 || digit > 0) {
+      out += String(digit);
+    }
+  }
+  return out.length === 0 ? '0' : out;
+}
+
+// One getVMRuntimeStat() reply -> field text. The platform answers a plain
+// number; a non-finite or negative reply is not a reading and becomes null
+// (`na`), never a fabricated 0. The value is NOT scaled for gc_time_ms (the
+// platform already reports milliseconds) and the two byte counters are divided
+// by the CALLER through bytesToKiBText.
+export function statNumberText(value: number): string | null {
+  if (!Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  return String(value);
+}
+
+// The event=mem_vm record of a detail tick. Every argument is already this
+// module's field text (byte counters divided down to KiB by bytesToKiBText);
+// null -> `na` for that one key, never a fabricated 0. vm_array_kb is the VM's
+// array-object footprint (ArkTS arrays / ArrayBuffer-like objects), the
+// native_heap_* trio is the libc malloc heap from mallinfo (uordblks+fordblks /
+// uordblks / fordblks) and the gc_* quartet is ArkTS's own CUMULATIVE GC
+// statistics for this process — none of them is RSS and none overlaps the Rust
+// heap or the smaps_rollup readings on the mem_detail line.
+export function buildVmMemFields(vmTotalHeapKb: string | null, vmArrayKb: string | null,
+  nativeHeapKb: string | null, nativeHeapAllocKb: string | null,
+  nativeHeapFreeKb: string | null, gcCount: string | null, gcTimeMs: string | null,
+  gcAllocKb: string | null, gcFreedKb: string | null): DiagFields {
+  const fields: DiagFields = {};
+  fields['vm_total_heap_kb'] = vmTotalHeapKb === null ? UNAVAILABLE : vmTotalHeapKb;
+  fields['vm_array_kb'] = vmArrayKb === null ? UNAVAILABLE : vmArrayKb;
+  fields['native_heap_kb'] = nativeHeapKb === null ? UNAVAILABLE : nativeHeapKb;
+  fields['native_heap_alloc_kb'] = nativeHeapAllocKb === null ? UNAVAILABLE : nativeHeapAllocKb;
+  fields['native_heap_free_kb'] = nativeHeapFreeKb === null ? UNAVAILABLE : nativeHeapFreeKb;
+  fields['gc_count'] = gcCount === null ? UNAVAILABLE : gcCount;
+  fields['gc_time_ms'] = gcTimeMs === null ? UNAVAILABLE : gcTimeMs;
+  fields['gc_alloc_kb'] = gcAllocKb === null ? UNAVAILABLE : gcAllocKb;
+  fields['gc_freed_kb'] = gcFreedKb === null ? UNAVAILABLE : gcFreedKb;
+  return fields;
+}
+
+// One allocator counter -> field text. A counter must be a finite, non-negative
+// JSON number; anything else (absent, string, null, NaN, negative, Infinity) is
+// `na`, never a fabricated 0. `divisor` is 1024 for the two BYTE counters, 1
+// for the two event counters.
+function allocCounterText(value: Object, divisor: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return UNAVAILABLE;
+  }
+  return String(Math.floor(value / divisor));
+}
+
+// The injected Rust-heap reader's document -> the four mem_detail fields. The
+// document is the NAPI `alloc_stats()` reply, `{"bytes":n,"peak":n,"allocs":n,
+// "frees":n}`. ANY failure (no reader / missing export / unparseable text /
+// non-object root / anomalous field) answers all four as `na` — this function
+// never throws and never invents a reading. bytes -> KiB by integer division
+// (1024); allocs/frees are event counts and stay as they are.
+export function buildRustAllocFields(text: string | null): DiagFields {
+  const fields: DiagFields = {};
+  fields['rust_heap_kb'] = UNAVAILABLE;
+  fields['rust_heap_peak_kb'] = UNAVAILABLE;
+  fields['rust_allocs'] = UNAVAILABLE;
+  fields['rust_frees'] = UNAVAILABLE;
+  if (text === null || text.length === 0) {
+    return fields;
+  }
+  let doc: Record<string, Object>;
+  try {
+    const parsed: Object = JSON.parse(text) as Object;
+    if (parsed === null || typeof parsed !== 'object') {
+      return fields;
+    }
+    doc = parsed as Record<string, Object>;
+  } catch (error) {
+    return fields; // not JSON: the reader's failure is already visible as `na`
+  }
+  fields['rust_heap_kb'] = allocCounterText(doc['bytes'], 1024);
+  fields['rust_heap_peak_kb'] = allocCounterText(doc['peak'], 1024);
+  fields['rust_allocs'] = allocCounterText(doc['allocs'], 1);
+  fields['rust_frees'] = allocCounterText(doc['frees'], 1);
   return fields;
 }
 

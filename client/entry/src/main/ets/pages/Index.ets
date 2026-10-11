@@ -9,6 +9,32 @@ import common from '@ohos.app.ability.common';
 import { ConnectFailureNotice, PublishedStatus, readConnectFailure, readPublishedStatus,
   removeConnectFailure, sleep } from '../vpnextensionability/NetBirdConnector';
 import { currentPublishedStatus } from '../vpnextensionability/NetBirdStatusPolicy';
+// 2026-10-08 扩展被系统回收后的自动重连: the WHOLE decision (every gate + the
+// anti-loop state machine) is a PURE module — the host check
+// selfcheck/run-reconnect-policy.mts imports it byte-identical. This page only
+// gathers the facts (the status document it just read, the extension's marker
+// file, its own latches) and acts through requestStart(), the same single start
+// path the button uses.
+// 0.0.20: two facts were added to that list. (a) `keepAliveActive` — a borrowed
+// keep-alive task is held, which is why the 2 s poll still runs in the background
+// and therefore the ONE thing that opens the foreground gate there; the record
+// then says trigger=background. (b) the kill event naming the marker's pid is
+// treated as "the document is worthless" (criterion ② relaxed), so the reconnect
+// does not have to wait ~10 s for the document to age out.
+import { ReconnectDecision, ReconnectInput, ReconnectPolicyState,
+  RECONNECT_ACTION_LIMIT, RECONNECT_ACTION_RECONNECT, RECONNECT_ACTION_VERIFY_FAILED,
+  RECONNECT_MARKER_OPEN, RECONNECT_MAX_ATTEMPTS,
+  RECONNECT_RESULT_FAILED, RECONNECT_RESULT_LIMIT, RECONNECT_RESULT_RECONNECTED,
+  RECONNECT_RESULT_SKIPPED, RECONNECT_TRIGGER_BACKGROUND, RECONNECT_TRIGGER_FOREGROUND,
+  decideReconnect, reconnectInitialState, reconnectOnActive,
+  reconnectOnStartRejected } from '../vpnextensionability/NetBirdReconnectPolicy';
+// 2026-10-08 自动重连判据⑦: the ONE proof that the extension process really is
+// gone. The status document going stale cannot be it (the system suspends the
+// background extension for minutes while it stays alive), so the UI process's
+// own APP_KILLED for this app's `:vpn` process is read through a read-only getter
+// — process memory only, never persisted, never re-derived here.
+import { lastKilledVpnProcess } from '../vpnextensionability/NetBirdSystemEvents';
+import type { ProcessExitRecord } from '../vpnextensionability/NetBirdSystemEventsCore';
 import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
@@ -29,6 +55,13 @@ import { readPackagedCaRootsPem } from '../vpnextensionability/NetBirdConnector'
 // Setup Key / 服务器地址 / 配置内容；日志导出的文件系统与上限逻辑全在
 // NetBirdLogExport 里，本页只取结果并如实渲染。
 import { DiagFields, event } from '../vpnextensionability/NetBirdDiagnostics';
+// The extension's lifecycle marker (shared filesDir, written by the VPN role):
+// state=open means that process never reached its stop callback — the ONE fact
+// that separates "the system reclaimed it" from "the user stopped it". Read
+// through the diagnostics core's own allowlisted path/parser; never re-derived
+// here.
+import { MARKER_BASENAME_VPN, Marker, parseMarker,
+  recordPath } from '../vpnextensionability/NetBirdDiagnosticsCore';
 import { exportDiagnostics, LogExportFileReport, LogExportResult,
   LOG_EXPORT_OUTCOME_CANCELLED, LOG_EXPORT_OUTCOME_EXPORTED,
   LOG_EXPORT_OUTCOME_FAILED, LOG_EXPORT_OUTCOME_NO_LOGS } from '../vpnextensionability/NetBirdLogExport';
@@ -61,6 +94,26 @@ import { readRouteApplyResult,
 import { ROUTE_TONE_ERROR, RouteApplyView, routeApplyRequestId, routeApplyStatus,
   routeApplyStatusText, routeApplyStatusTone, routeCandidateText, routeNetName,
   routePrefixesText } from '../routes/NetBirdRouteApplyPolicy';
+// 2026-10-10 后台保活（0.0.19 实验版，方案 A）：借用系统的 DATA_TRANSFER 长时任务让
+// 整个应用的进程不被挂起（鸿蒙没有 VPN 类型的长时任务，另一款鸿蒙 VPN 客户端也是这么
+// 借的）。整机制裁留在纯逻辑模块 NetBirdKeepAlivePolicy（宿主 selfcheck 逐字节导入），
+// 平台调用留在唯一适配层 NetBirdKeepAliveService（唯一 import backgroundTaskManager
+// 的地方），开关值留在 NetBirdKeepAliveStore。本页只在已有的 2 s 轮询里收集事实、执行
+// 决定，绝不新增定时器、不新增状态文档读取，也绝不让这条支线影响 VPN 的连接/断开。
+import { KeepAliveCancelEvent, KeepAliveDecision, KeepAliveFacts, KeepAlivePolicyState,
+  KeepAliveStatus,
+  KEEP_ALIVE_ACTION_START, KEEP_ALIVE_ACTION_STOP, KEEP_ALIVE_NOTIFICATION_RECONNECTING,
+  KEEP_ALIVE_REASON_GRACE, KEEP_ALIVE_REASON_LOGOUT, KEEP_ALIVE_REASON_USER_STOP,
+  KEEP_ALIVE_REASON_VPN_ACTIVE, KEEP_ALIVE_RESUME_GAP,
+  decideKeepAlive, keepAliveInitialState, keepAliveOnCancelled, keepAliveOnLogout,
+  keepAliveOnRefreshed, keepAliveOnStartResolved, keepAliveOnUserConnect,
+  keepAliveOnUserStop, keepAliveWithTask, keepAlivePollGapMs, keepAliveResumedAfterGap,
+  shouldRefresh } from '../vpnextensionability/NetBirdKeepAlivePolicy';
+import { keepAliveTaskPresent, refreshKeepAlive, refreshKeepAliveText,
+  setKeepAliveResumeListener, startKeepAlive,
+  stopKeepAlive, takeKeepAliveCancels } from '../vpnextensionability/NetBirdKeepAliveService';
+import { KEEP_ALIVE_DEFAULT_ENABLED, loadKeepAliveEnabled,
+  saveKeepAliveEnabled } from '../vpnextensionability/NetBirdKeepAliveStore';
 
 const DOMAIN: number = 0x2900;
 const TAG: string = 'NetBirdVpn';
@@ -212,6 +265,27 @@ function readRelayView(raw: Object | null | undefined): DetailRelayView | null {
     return null;
   }
   return raw as DetailRelayView;
+}
+
+// 2026-10-10 后台保活（实验）: the live-view body's four numbers, taken from the
+// SAME status document the 2 s tick already read (never a second read). A
+// missing or absurd counter stays -1 = 未知 and is rendered as such by the pure
+// policy — a counter that could not be read is never shown as 0.
+function keepAliveStatusOf(status: PublishedStatus): KeepAliveStatus {
+  const peers: UiPeerEntry[] =
+    status.peers !== undefined && status.peers !== null ? status.peers : [];
+  const traffic: DetailTrafficView | null = readTrafficView(status.wg_traffic);
+  const txBytes: number = traffic !== null && Number.isFinite(traffic.tx_bytes)
+    ? traffic.tx_bytes : -1;
+  const rxBytes: number = traffic !== null && Number.isFinite(traffic.rx_bytes_to_tun)
+    ? traffic.rx_bytes_to_tun : -1;
+  const keepAliveStatus: KeepAliveStatus = {
+    onlinePeers: onlinePeerCount(peers),
+    peerCount: peers.length,
+    txBytes: txBytes,
+    rxBytes: rxBytes
+  };
+  return keepAliveStatus;
 }
 
 // The management authority section: scheme + host + port only (the published
@@ -818,6 +892,44 @@ struct Index {
   private lastLogoutAtMs: number = 0;
   private logoutTicketMs: number = 0;
   private pollTimer: number = -1;
+  // 2026-10-08 扩展被系统回收后的自动重连: the anti-loop state of the pure
+  // NetBirdReconnectPolicy (attempts / last attempt / verification window), ONE
+  // per UI process, disarmed again by an ACTIVE status document.
+  private reconnectState: ReconnectPolicyState = reconnectInitialState();
+  // Foreground latch for the SAME feature: the poll is a page timer, so it does
+  // not run while the page is hidden — 0.0.20: unless the borrowed keep-alive task
+  // keeps the whole app running, which the pure policy receives as
+  // `keepAliveActive` (a held task is the ONE thing that opens the gate in the
+  // background; every other criterion still has to pass).
+  private pageVisible: boolean = false;
+  // 0.0.20: the tunnel was seen ACTIVE at least once in this process, and the
+  // moment it was last seen leaving the active states (0 = never). The keep-alive
+  // grace is measured from that moment, so this page is the only clock it needs.
+  private vpnActiveSeen: boolean = false;
+  private vpnInactiveSinceMs: number = 0;
+  // 0.0.21（挂起长窗口后的恢复复查）：上一拍的时刻（0 = 本进程还没拍过）。平台可以把整个
+  // UI 进程挂起很久（0.0.20 真机上这次是 7362 s：2 s 轮询与 30 s 实况窗整段停摆，VPN 被
+  // 相机清理后 1 h16 m 无人重连），因此"两拍相隔异常远"本身就是"进程刚回来"的证据。
+  private lastPollAtMs: number = 0;
+  // 单飞：同一时刻只允许一次轮询/复查在跑（0.0.21 起复查可以从平台回调里插进来）。已经在
+  // 跑的那一拍本身就是它要的复查，直接跳过，绝不叠加第二次读。
+  private pollRunning: boolean = false;
+  // 平台回调 / onForeground 送来的恢复信号先落在这里，由紧接着的那一刻的那一拍记录成
+  // `ui_resume_check`（空串 = 这一拍不是被恢复信号叫醒的）。
+  private pendingResumeReason: string = '';
+  // ONE `ui_auto_reconnect` record per SKIP REASON per process: the 2 s tick
+  // would otherwise repeat the same "not this time" line forever.
+  private reconnectReported: Set<string> = new Set<string>();
+  // at_ms of the connect-failure notice that matches the current attempt (read
+  // together with the rendered class in refreshConnectFailure). 0 = none. The
+  // auto-reconnect never starts over a verdict NEWER than the extension marker.
+  private connectFailureAtMs: number = 0;
+  // 2026-10-10 后台保活（实验，方案 A）：ONE policy state per UI process, plus the
+  // switch value the page renders. The state machine itself is the pure
+  // NetBirdKeepAlivePolicy; the platform adapter owns "a task exists right now"
+  // and this page mirrors that fact into the state before every decision.
+  @State bgKeepAliveEnabled: boolean = KEEP_ALIVE_DEFAULT_ENABLED;
+  private bgKeepAliveState: KeepAlivePolicyState = keepAliveInitialState();
   // ---- 诊断日志导出（设置 → 诊断日志）--------------------------------------
   // ONE user action at a time: the busy latch disables the button AND is
   // re-checked at the handler, so a double tap cannot start two exports.
@@ -880,6 +992,13 @@ struct Index {
       this.activeTab = 2;
     }
     this.readVersionInfo();
+    this.loadKeepAliveSwitch();
+    // 0.0.21（挂起长窗口后的恢复复查）：本页是唯一读状态文档的人，所以"进程又跑起来了"
+    // 的信号只有一个落点——这里。两条来源（平台说长时任务重新活跃 / UIAbility
+    // onForeground）都经适配层转发过来；注册在第一次轮询之前，免得冷启动时漏掉一次。
+    setKeepAliveResumeListener((reason: string): void => {
+      this.onResumeSignal(reason);
+    });
     this.pollConnectorStatus();
     this.pollTimer = setInterval((): void => {
       this.pollConnectorStatus();
@@ -891,9 +1010,24 @@ struct Index {
       clearInterval(this.pollTimer);
       this.pollTimer = -1;
     }
+    // 本页没了，恢复信号就没有落点：摘掉监听者（适配层从此不再持有本页）。
+    setKeepAliveResumeListener(undefined);
     if (!this.accountLoginCommitting) {
       this.cancelAccountLogin(false);
     }
+  }
+
+  // 2026-10-08 扩展被系统回收后的自动重连: the page IS the foreground signal —
+  // onPageShow fires when the page becomes visible again (including the return
+  // from the background) and onPageHide when it stops being visible, so the
+  // auto-reconnect can never be fired by a tick that ran in the background.
+  // Nothing else is triggered here: the 2 s poll below keeps doing its work.
+  onPageShow(): void {
+    this.pageVisible = true;
+  }
+
+  onPageHide(): void {
+    this.pageVisible = false;
   }
 
   private readVersionInfo(): void {
@@ -909,7 +1043,67 @@ struct Index {
     }
   }
 
+  // 0.0.21（挂起长窗口后的恢复复查）：这是唯一入口，恢复信号和 2 s 定时器都走它。单飞保护：
+  // 一次只允许一拍照常跑——正在跑的那一拍就是恢复信号要的那次复查，所以直接跳过，不排队、
+  // 不叠加、不新增定时器。
   private pollConnectorStatus(): void {
+    if (this.pollRunning) {
+      return;
+    }
+    this.pollRunning = true;
+    try {
+      this.pollConnectorStatusPass();
+    } finally {
+      // finally: 一拍里任何一处抛错都不能把单飞锁留在 true 上（那会让页面从此不再轮询）。
+      this.pollRunning = false;
+    }
+  }
+
+  // 0.0.21：恢复信号（平台说长时任务重新活跃 / UIAbility onForeground）只有一个作用——
+  // 立刻把状态文档重读一次，而不是等下一拍（真机上被挂起的那一段可以长达 7362 s）。
+  // 冷启动第一拍之前不处理：那时还没有"上一拍"可言，紧接着的首次轮询本身就是最新读数。
+  private onResumeSignal(reason: string): void {
+    if (this.pollRunning) {
+      return;
+    }
+    if (this.lastPollAtMs <= 0) {
+      return;
+    }
+    if (this.pendingResumeReason.length === 0) {
+      this.pendingResumeReason = reason;
+    }
+    this.pollConnectorStatus();
+  }
+
+  // 0.0.21：一条 `ui_resume_check`——`reason` 是发现这次恢复的信号（闭集：active / gap /
+  // foreground），`count` 是两次轮询之间的秒数。两个键都在既有公开键集内，事件名是小写
+  // token（不是内部事件名），没有路径、没有文档内容、没有自由文本。
+  private diagResumeCheck(reason: string, gapMs: number): void {
+    const fields: DiagFields = {};
+    fields['reason'] = reason;
+    fields['count'] = Math.round(gapMs / 1000);
+    event('ui_resume_check', fields);
+  }
+
+  private pollConnectorStatusPass(): void {
+    // 0.0.21（挂起长窗口后的恢复复查）：这一拍距上一拍多久？间隔异常大 = 这个进程有一段时间
+    // 根本没在跑（平台挂起了整个 UI 进程），于是这一拍就是"恢复后的第一次复查"。记录一条
+    // `ui_resume_check`（`reason` 是发现它的信号，`count` 是间隔秒数），随后照常走完这一拍
+    // ——状态文档会在这同一拍里被重读，重连分支也随之重新判定。一次恢复只记一条：读完即把
+    // 本拍时刻写回，下一拍（2 s 后）的间隔就恢复正常，不会重复触发。
+    //
+    // 恢复后的 10 s 内本来就要多复查几次（APP_KILLED 可能在恢复瞬间才投递，第一次复查时文档
+    // 已过期却还没有终止事件，按既有策略会 skip 成 vpn-not-confirmed-dead——这是安全行为）。
+    // 这里不为它新增定时器：页面自己的 2 s 轮询在 10 s 内就是 5 拍，每拍都重读文档、每拍都会
+    // 重新判一次重连（节流与上限仍在纯策略里），所以"多做几次复查"就是既有节拍本身。
+    const nowMs: number = Date.now();
+    const gapMs: number = keepAlivePollGapMs(this.lastPollAtMs, nowMs);
+    this.lastPollAtMs = nowMs;
+    const resumeReason: string = this.pendingResumeReason;
+    this.pendingResumeReason = '';
+    if (keepAliveResumedAfterGap(gapMs)) {
+      this.diagResumeCheck(resumeReason.length > 0 ? resumeReason : KEEP_ALIVE_RESUME_GAP, gapMs);
+    }
     // 路由选择: the route detail page rides THIS existing 2 s tick — there is
     // no second always-on timer. Both reads are offline (plain public documents,
     // never a native connector getter): the catalog never touches the desired
@@ -920,6 +1114,10 @@ struct Index {
       this.refreshRouteCatalog();
       this.refreshRouteApplyResult();
     }
+    // 2026-10-08 扩展被系统回收后的自动重连: latch the page's own start/stop
+    // flags BEFORE the branch below releases them — a start or stop the user
+    // has in flight must veto the automatic reconnect on this very tick.
+    const requestInFlight: boolean = this.requestSent || this.stopSent;
     // The connector runs in the VpnExtension process: read the document that
     // process publishes into the shared filesDir (a NAPI call here would read
     // an empty slot and show a dead "disconnected" state). A document older
@@ -927,7 +1125,22 @@ struct Index {
     // shows 未连接 instead of passing off a stale snapshot as live state.
     const status: PublishedStatus | null = currentPublishedStatus(
       readPublishedStatus(getContext(this).filesDir), Date.now());
-    if (status === null) {
+    // 0.0.20 判据②放宽: a kill event naming the pid that wrote the open marker
+    // proves the extension is gone, so there is nothing left to wait for — the
+    // document simply has not aged out of its freshness window yet (~10 s). When
+    // that proof exists the document is treated as ABSENT for every consumer
+    // below (the tunnel really is down, the keep-alive sees no live tunnel, the
+    // reconnect branch is entered). The decision itself is untouched: criterion
+    // ⑦ asks for exactly this proof, so asking earlier can never mean "start a
+    // VPN on a possibly live extension".
+    const extensionDead: boolean = this.extensionConfirmedDead();
+    const live: PublishedStatus | null = extensionDead ? null : status;
+    // 2026-10-10 后台保活（实验，方案 A）: the borrowed continuous task rides THIS
+    // tick — no second timer, no second document read. It runs on both branches
+    // (a live document is the ONLY thing that may hold the task, so "no fresh
+    // document" must reach the policy as the fact it is).
+    this.syncKeepAlive(live);
+    if (live === null) {
       if (this.observedPublishedStatus) {
         // the document disappeared = the extension is gone (stopped or
         // destroyed): release the request latches for an explicit retry
@@ -951,17 +1164,32 @@ struct Index {
       // notice = the attempt ended in a recorded failure (login fatal /
       // retry exhausted / startup abort) — the card shows 连接失败.
       this.refreshConnectFailure();
+      // 2026-10-08 扩展被系统回收后的自动重连: this branch is criterion "the status
+      // document is not fresh" — NOT "the VPN really is not there": the system
+      // suspends the background extension for up to ~94 s with no status write and
+      // no log line, and the document expires to null after ~10 s of that. The
+      // decision, including the "the process really is gone" proof (criterion ⑦),
+      // is the pure policy's.
+      this.runAutoReconnect(requestInFlight);
       return;
     }
     this.observedPublishedStatus = true;
-    this.lastLiveState = status.state;
-    if (vpnActiveState(status.state)) {
+    this.lastLiveState = live.state;
+    if (vpnActiveState(live.state)) {
       this.requestSent = true;
       // a live session means any recorded failure belongs to a PREVIOUS
       // attempt — never render it over a running connection
       this.connectFailureClass = '';
-      if (status.request_id !== undefined && status.request_id.length > 0) {
-        this.requestId = status.request_id;
+      this.connectFailureAtMs = 0;
+      // 2026-10-08 扩展被系统回收后的自动重连 / 0.0.20: the tunnel is up again —
+      // the outstanding attempt has succeeded (its verification window closes
+      // now), and the attempt counter is forgiven ONLY once this active run has
+      // lasted RECONNECT_ACTIVE_RESET_MS: with the keep-alive task the UI process
+      // outlives many reclaims, so a tunnel that dies again a few seconds later
+      // must stay on the same chain of failures.
+      this.reconnectState = reconnectOnActive(this.reconnectState, Date.now());
+      if (live.request_id !== undefined && live.request_id.length > 0) {
+        this.requestId = live.request_id;
       }
     } else {
       // A live document in a dead state (failed/disconnected/closed/stopped):
@@ -970,7 +1198,34 @@ struct Index {
       this.stopSent = false;
       this.requestId = `ui-${Date.now()}`;
     }
-    this.published = status;
+    this.published = live;
+  }
+
+  // 0.0.20 判据②放宽: is the extension process proven gone while the status
+  // document may still look live? The proof is the UI process's own APP_KILLED for
+  // this app's `:vpn` process, and it only counts when it names the pid that wrote
+  // the currently open marker — the same comparison criterion ⑦ makes inside the
+  // pure policy (a marker rewritten by a newer process has a different pid, so a
+  // fresh tunnel is never mistaken for the dead one). The marker is read ONLY when
+  // such a kill record exists in this process: no kill record, no read, and the
+  // live branch keeps its old cost. Any failure to read it means "cannot confirm",
+  // which can only make this page more careful, never less.
+  private extensionConfirmedDead(): boolean {
+    const killed: ProcessExitRecord | null = lastKilledVpnProcess();
+    if (killed === null) {
+      return false;
+    }
+    try {
+      const markerPath: string = recordPath(getContext(this).filesDir, MARKER_BASENAME_VPN);
+      if (markerPath.length === 0 || !fs.accessSync(markerPath)) {
+        return false;
+      }
+      const marker: Marker | null = parseMarker(fs.readTextSync(markerPath));
+      return marker !== null && marker.state === RECONNECT_MARKER_OPEN &&
+        marker.pid > 0 && marker.pid === killed.pid;
+    } catch (error) {
+      return false;
+    }
   }
 
   // 2026-10-06 登录失败可见性: read the extension's persistent
@@ -984,10 +1239,334 @@ struct Index {
       readConnectFailure(getContext(this).filesDir);
     if (notice !== null && notice.at_ms >= this.lastStartAtMs - 2000) {
       this.connectFailureClass = notice.error_class;
+      // 2026-10-08 扩展被系统回收后的自动重连: the SAME read answers the policy's
+      // "is there a verdict NEWER than the extension marker?" gate — one file
+      // read, never a second one per tick.
+      this.connectFailureAtMs = notice.at_ms;
       this.requestSent = false;
-    } else if (this.connectFailureClass.length > 0) {
-      this.connectFailureClass = '';
+    } else {
+      if (this.connectFailureClass.length > 0) {
+        this.connectFailureClass = '';
+      }
+      this.connectFailureAtMs = 0;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-08 扩展被系统回收后的自动重连（增量）
+  //
+  // The system reclaims the VPN extension (memory pressure, an OOM kill) while
+  // the app is in the background; the tunnel dies with it and the extension
+  // never reaches its stop callback. Back in the foreground the page sees the
+  // status document expire to null and, up to now, only told the user to
+  // reconnect by hand. This is the ONE automatic retry — and it is made only once
+  // the process that wrote the marker is CONFIRMED dead, because a suspended
+  // extension looks identical from the status document alone.
+  //
+  // Called from exactly ONE place: the poll branch where the freshly read
+  // document is null (expired or absent) — that is the "no fresh document" fact,
+  // NOT "the process is gone": a suspended background extension writes nothing
+  // for minutes while it is still alive. The gates (including criterion ⑦, the
+  // UI process's own APP_KILLED for the pid that wrote the marker) and the
+  // anti-loop live in the pure NetBirdReconnectPolicy module; this method only
+  // reads the facts, acts, and records ONE safe event.
+  // ---------------------------------------------------------------------------
+
+  private runAutoReconnect(requestInFlight: boolean): void {
+    const markerPath: string = recordPath(getContext(this).filesDir, MARKER_BASENAME_VPN);
+    let markerState: string = '';
+    let markerAtMs: number = 0;
+    let markerPid: number = 0;
+    try {
+      if (markerPath.length > 0 && fs.accessSync(markerPath)) {
+        const marker: Marker | null = parseMarker(fs.readTextSync(markerPath));
+        if (marker !== null) {
+          markerState = marker.state;
+          // The pid that wrote the marker: the process criterion ⑦ must find in
+          // the UI process's kill record. parseMarker() only returns a marker
+          // whose pid it could read, and an unusable value stays 0 = unreadable,
+          // which can only make the policy MORE careful, never less.
+          markerPid = marker.pid;
+          // The marker's own ISO stamp, for the "no verdict NEWER than the
+          // marker" gate. An unparseable stamp stays 0 = unknown, which can only
+          // make the policy MORE careful, never less.
+          const parsedTs: number = Date.parse(marker.ts);
+          markerAtMs = Number.isNaN(parsedTs) ? 0 : parsedTs;
+        }
+      }
+    } catch (error) {
+      // Unreadable marker = "we cannot tell": the policy treats it as a clean
+      // end. A reconnect is never guessed out of a file we did not understand.
+      markerState = '';
+      markerAtMs = 0;
+      markerPid = 0;
+    }
+    // Criterion ⑦: the platform's own verdict on this app's `:vpn` process, as
+    // this UI process received it (APP_KILLED is delivered on the next launch).
+    // null = no such event in this process = not confirmed dead.
+    const killedVpn: ProcessExitRecord | null = lastKilledVpnProcess();
+    const facts: ReconnectInput = {
+      nowMs: Date.now(),
+      foreground: this.pageVisible,
+      // 0.0.20: a held keep-alive task is the fact that lets a BACKGROUND tick ask
+      // at all (the pure policy opens gate (2) for it and records
+      // trigger=background). The adapter owns "a task exists right now"; the page
+      // mirrors it into this policy state every tick, so the value read here is
+      // the same fact the keep-alive decision just used.
+      keepAliveActive: this.bgKeepAliveState.taskPresent,
+      markerState: markerState,
+      markerAtMs: markerAtMs,
+      markerPid: markerPid,
+      startOrStopInFlight: requestInFlight,
+      lastUserStopAtMs: this.lastUserStopAtMs,
+      lastLogoutAtMs: this.lastLogoutAtMs,
+      configured: this.configured,
+      connectFailureAtMs: this.connectFailureAtMs,
+      killedVpnPid: killedVpn === null ? null : killedVpn.pid
+    };
+    const decision: ReconnectDecision = decideReconnect(this.reconnectState, facts);
+    this.reconnectState = decision.state;
+    if (decision.action === RECONNECT_ACTION_RECONNECT) {
+      // The decision is recorded BEFORE the action: the log then says why the
+      // page started a VPN, not that it merely tried. The trigger is the
+      // decision's own (foreground / background), never re-derived here.
+      this.diagAutoReconnect(decision.trigger, RECONNECT_RESULT_RECONNECTED,
+        decision.reason, decision.attempt);
+      hilog.warn(DOMAIN, TAG,
+        'UI_AUTO_RECONNECT|trigger=%{public}s|reason=%{public}s|attempt=%{public}d' +
+        '|note=extension-reclaimed',
+        decision.trigger, decision.reason, decision.attempt);
+      // The SAME single start path the button uses: requestStart() owns the one
+      // extension-start call site in this file and its own diagnostic action
+      // record, so the automatic retry adds no second way to start the VPN. The
+      // flag is what makes a REFUSED start a named auto-reconnect failure (the
+      // platform's error code goes into the diagnostic and the attempt stops
+      // waiting for its 30 s verification window).
+      this.requestStart(true);
+      // requestStart() clears the notice (a fresh attempt starts from a clean
+      // slate); this is the ONE case where the user must SEE that the retry is
+      // already under way instead of being asked for it. 0.0.20: in the background
+      // nobody can see it, and the spec of this background path is "diagnostics
+      // only" — no notice is written into a page that is not on screen.
+      if (this.pageVisible) {
+        this.disconnectNotice = '正在自动重新连接…';
+      }
+      return;
+    }
+    if (decision.action === RECONNECT_ACTION_VERIFY_FAILED) {
+      this.diagAutoReconnectOnce(decision.trigger, RECONNECT_RESULT_FAILED,
+        decision.reason, decision.attempt);
+      hilog.warn(DOMAIN, TAG,
+        'UI_AUTO_RECONNECT_FAILED|trigger=%{public}s|reason=%{public}s|attempt=%{public}d' +
+        '|note=no-active-document',
+        decision.trigger, decision.reason, decision.attempt);
+      return;
+    }
+    if (decision.action === RECONNECT_ACTION_LIMIT) {
+      this.diagAutoReconnectOnce(decision.trigger, RECONNECT_RESULT_LIMIT,
+        decision.reason, decision.attempt);
+      return;
+    }
+    this.diagAutoReconnectOnce(decision.trigger, RECONNECT_RESULT_SKIPPED,
+      decision.reason, decision.attempt);
+  }
+
+  // The ONE diagnostic-record exit of the auto-reconnect: a closed-set trigger,
+  // result and reason token plus the attempt count. No marker text, no path, no
+  // URL, no credential, no free-form message. A `reason` that is not one of the
+  // policy's tokens carries the platform's own numeric error code of a refused
+  // start (or 'none' when it gave none) — a number is not free text.
+  private diagAutoReconnect(trigger: string, result: string, reason: string,
+    count: number): void {
+    const fields: DiagFields = {};
+    fields['trigger'] = trigger;
+    fields['result'] = result;
+    fields['reason'] = reason;
+    fields['count'] = count;
+    event('ui_auto_reconnect', fields);
+  }
+
+  // A SKIP is a standing condition, not an event: on the 2 s tick it would be
+  // repeated forever, so each reason writes at most one record per process.
+  private diagAutoReconnectOnce(trigger: string, result: string, reason: string,
+    count: number): void {
+    if (this.reconnectReported.has(reason)) {
+      return;
+    }
+    this.reconnectReported.add(reason);
+    this.diagAutoReconnect(trigger, result, reason, count);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2026-10-10 后台保活（0.0.19 实验版，方案 A）
+  //
+  // The borrowed DATA_TRANSFER continuous task rides the EXISTING 2 s tick: no
+  // second timer, no second status read. Every tick the page (a) folds the
+  // platform's cancellation events into the ONE pure policy state, (b) mirrors
+  // the adapter's "a task exists right now" fact, (c) asks the policy what to do
+  // and (d) carries that out through the adapter — whose every call is fail-soft
+  // and can never break the VPN's own start/stop path.
+  //
+  // The switch's value, this state and the page's own latches are the only page
+  // inputs; everything else is a fact about a document the tick already read.
+  // `syncKeepAlive` is called from exactly ONE place: pollConnectorStatus.
+  // ---------------------------------------------------------------------------
+
+  private syncKeepAlive(status: PublishedStatus | null): void {
+    const nowMs: number = Date.now();
+    // The platform's verdicts first: a user dismissal, an illegal-type verdict
+    // and a backoff all change what the policy is allowed to do next.
+    const cancels: KeepAliveCancelEvent[] = takeKeepAliveCancels();
+    for (let i = 0; i < cancels.length; i++) {
+      this.bgKeepAliveState = keepAliveOnCancelled(this.bgKeepAliveState,
+        cancels[i].reason, cancels[i].detailedReason, nowMs);
+    }
+    this.bgKeepAliveState = keepAliveWithTask(this.bgKeepAliveState, keepAliveTaskPresent());
+    const vpnActive: boolean = status !== null && vpnActiveState(status.state);
+    // 0.0.20: the keep-alive grace is measured from the moment the tunnel was last
+    // seen LEAVING the active states, not from whichever tick first noticed — the
+    // page's own cadence must not stretch the window. The stamp only starts once
+    // the tunnel was actually seen active in this process: an app that opens on a
+    // dead tunnel has no "reconnect in progress" to protect, and its task (if a
+    // previous session left one) still goes at once.
+    if (vpnActive) {
+      this.vpnActiveSeen = true;
+      this.vpnInactiveSinceMs = 0;
+    } else if (this.vpnActiveSeen && this.vpnInactiveSinceMs === 0) {
+      this.vpnInactiveSinceMs = nowMs;
+    }
+    const facts: KeepAliveFacts = {
+      nowMs: nowMs,
+      enabled: this.bgKeepAliveEnabled,
+      vpnActive: vpnActive,
+      // The page's own user-stop guard (8 s), the same one the disconnect notice
+      // uses: a stop the user just asked for must never be answered with a task.
+      userStopRecent: this.stopSent || nowMs - this.lastUserStopAtMs <= 8000,
+      // An explicit logout in flight / just resolved (25 s), or no credentials at
+      // all — there is nothing to keep alive for.
+      loggedOut: this.lastLogoutAtMs > 0 && nowMs - this.lastLogoutAtMs <= 25000 ||
+        !this.configured,
+      // The page's VPN start is out and no live tunnel exists yet: the task is
+      // asked for only once there is a tunnel to keep alive.
+      startInFlight: this.requestSent && !vpnActive,
+      // 0.0.20: how long ago the tunnel went inactive (0 = never seen active), and
+      // whether the automatic reconnect has already spent its attempt budget —
+      // both are facts of OTHER state machines, handed over as-is.
+      vpnInactiveSinceMs: this.vpnInactiveSinceMs,
+      reconnectGaveUp: this.reconnectState.attempts >= RECONNECT_MAX_ATTEMPTS
+    };
+    const decision: KeepAliveDecision = decideKeepAlive(this.bgKeepAliveState, facts);
+    this.bgKeepAliveState = decision.state;
+    const revision: number = this.bgKeepAliveState.revision;
+    if (decision.action === KEEP_ALIVE_ACTION_START) {
+      // vpnActive is true here, so the document exists: the live view's first
+      // body comes from THAT document, never from a second read.
+      if (status === null) {
+        return;
+      }
+      const host: common.Context | undefined = this.getUIContext().getHostContext();
+      if (host === undefined || host === null) {
+        return;
+      }
+      startKeepAlive(host as common.UIAbilityContext, revision, decision.reason,
+        keepAliveStatusOf(status)).then((ok: boolean): void => {
+        this.bgKeepAliveState = keepAliveOnStartResolved(this.bgKeepAliveState, revision, ok,
+          Date.now());
+      }).catch((error: Error): void => {
+        this.logKeepAliveFailure(error);
+        this.bgKeepAliveState = keepAliveOnStartResolved(this.bgKeepAliveState, revision, false,
+          Date.now());
+      });
+      return;
+    }
+    if (decision.action === KEEP_ALIVE_ACTION_STOP) {
+      // A no-op for the adapter when it holds nothing (the 2 s tick asks again and
+      // again while the tunnel is down) — no record, no churn.
+      this.stopKeepAliveNow(decision.reason);
+      return;
+    }
+    // Held and 30 s have passed: republish the live view (the system cancels a
+    // DATA_TRANSFER task whose progress is not updated). The throttle lives in
+    // the pure policy; the adapter never decides on its own. 0.0.20: inside the
+    // reconnect grace there may be NO document to report (the tunnel is down), so
+    // the body is the policy's "正在重新连接…" instead of the frozen last traffic
+    // snapshot — a live view that never changes for minutes would also invite
+    // SYSTEM_CANCEL_DATA_TRANSFER_NOT_UPDATE.
+    if (shouldRefresh(this.bgKeepAliveState, nowMs)) {
+      const host: common.Context | undefined = this.getUIContext().getHostContext();
+      if (host === undefined || host === null) {
+        return;
+      }
+      if (status !== null && vpnActiveState(status.state)) {
+        refreshKeepAlive(host as common.UIAbilityContext, keepAliveStatusOf(status), revision,
+          KEEP_ALIVE_REASON_VPN_ACTIVE).then((ok: boolean): void => {
+          if (ok) {
+            this.bgKeepAliveState = keepAliveOnRefreshed(this.bgKeepAliveState, Date.now());
+          }
+        }).catch((error: Error): void => {
+          this.logKeepAliveFailure(error);
+        });
+      } else if (decision.reason === KEEP_ALIVE_REASON_GRACE) {
+        refreshKeepAliveText(host as common.UIAbilityContext,
+          KEEP_ALIVE_NOTIFICATION_RECONNECTING, revision,
+          KEEP_ALIVE_REASON_GRACE).then((ok: boolean): void => {
+          if (ok) {
+            this.bgKeepAliveState = keepAliveOnRefreshed(this.bgKeepAliveState, Date.now());
+          }
+        }).catch((error: Error): void => {
+          this.logKeepAliveFailure(error);
+        });
+      }
+    }
+  }
+
+  // The ONE stop exit of the page: the adapter is silent when there is nothing to
+  // release, so this is cheap enough to be asked on every 2 s tick.
+  private stopKeepAliveNow(reason: string): void {
+    const host: common.Context | undefined = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    stopKeepAlive(host as common.UIAbilityContext, this.bgKeepAliveState.revision, reason)
+      .catch((error: Error): void => {
+        this.logKeepAliveFailure(error);
+      });
+  }
+
+  // The adapter is fail-soft by construction; this line exists so that a promise
+  // it should never reject cannot become an unhandled rejection.
+  private logKeepAliveFailure(error: Error): void {
+    hilog.warn(DOMAIN, TAG, 'UI_KEEP_ALIVE_ADAPTER_FAILED|code=%{public}s',
+      String((error as BusinessFailure).code ?? 'none'));
+  }
+
+  // The switch's stored value: read ONCE when the page opens. A missing or
+  // corrupt document is the default (true), never an error.
+  private loadKeepAliveSwitch(): void {
+    loadKeepAliveEnabled(getContext(this).filesDir).then((enabled: boolean): void => {
+      this.bgKeepAliveEnabled = enabled;
+    }).catch((_error: Error): void => {
+      this.bgKeepAliveEnabled = KEEP_ALIVE_DEFAULT_ENABLED;
+    });
+  }
+
+  // The switch writes through IMMEDIATELY (like every other switch on this page)
+  // and then asks the policy again on the spot: off means the task goes now, not
+  // in two seconds. Turning it back on is an explicit user request, so it lifts a
+  // previous dismissal exactly as a manual connect does.
+  private onKeepAliveToggle(isOn: boolean): void {
+    this.bgKeepAliveEnabled = isOn;
+    if (isOn) {
+      this.bgKeepAliveState = keepAliveOnUserConnect(this.bgKeepAliveState);
+    }
+    saveKeepAliveEnabled(getContext(this).filesDir, isOn).then((ok: boolean): void => {
+      if (!ok) {
+        hilog.warn(DOMAIN, TAG, 'UI_KEEP_ALIVE_STORE_FAILED|enabled=%{public}s', String(isOn));
+      }
+    }).catch((_error: Error): void => {
+      hilog.warn(DOMAIN, TAG, 'UI_KEEP_ALIVE_STORE_FAILED|enabled=%{public}s', String(isOn));
+    });
+    this.syncKeepAlive(this.published);
   }
 
   // ---- derived view state -------------------------------------------------
@@ -2068,6 +2647,11 @@ struct Index {
   }
 
   private finishLogout(serverLogoutConfirmed: boolean): void {
+    // 2026-10-10 后台保活（实验，方案 A）: a logout ends the app session — the
+    // borrowed task goes with it, and every session-scoped platform verdict
+    // (including an illegal-type stop) is forgotten with it.
+    this.bgKeepAliveState = keepAliveOnLogout(this.bgKeepAliveState);
+    this.stopKeepAliveNow(KEEP_ALIVE_REASON_LOGOUT);
     this.removeSetupFile(SETUP_CONFIG_FILE);
     this.removeSetupFile(SETUP_KEY_FILE);
     this.removeSetupFile(ACCOUNT_MODE_FILE_NAME);
@@ -2115,7 +2699,13 @@ struct Index {
     return want;
   }
 
-  private requestStart(): void {
+  // `fromAutoReconnect`: 0.0.20 — this start was decided by the automatic
+  // reconnect, so a REFUSAL is that attempt's own named failure and has to reach
+  // the diagnostics and the reconnect policy (the user's own connect already has
+  // its visible error text and its ui_connect record). Everything else about this
+  // path is unchanged, and the extension-start call site below is still the ONLY
+  // one in this file.
+  private requestStart(fromAutoReconnect: boolean = false): void {
     if (this.requestSent) {
       // Request already sent this attempt: no repeat click, no re-issue.
       return;
@@ -2126,6 +2716,13 @@ struct Index {
     this.diagEvent(this.connectFailureClass.length > 0 || this.actionError.length > 0
       ? 'ui_connect_retry' : 'ui_connect', this.diagActionCount);
     this.requestSent = true;
+    // 2026-10-10 后台保活（实验，方案 A）: the user asked for a connection (or the
+    // automatic reconnect did) — this is the ONE thing that lifts a previous
+    // dismissal of the borrowed task and starts its failure budget over. Taken
+    // here, before the platform call: the request is what clears it, and a
+    // request the platform then rejects is answered by the next tick's
+    // "no live tunnel" stop anyway.
+    this.bgKeepAliveState = keepAliveOnUserConnect(this.bgKeepAliveState);
     this.actionError = '';
     this.disconnectNotice = '';
     // 2026-10-06 登录失败可见性: a fresh attempt starts from a clean
@@ -2147,6 +2744,21 @@ struct Index {
       hilog.error(DOMAIN, TAG, 'UI_START_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
       this.requestId = `ui-${Date.now()}`;
+      // 0.0.20: the automatic reconnect's start was refused by the platform (this is
+      // the background case the device has not yet answered: whether the system
+      // allows a VPN start from a background UI process). Record it as this
+      // attempt's failure — the platform's own numeric error code (a closed
+      // token, 'none', when it gave none), on the public field set — and fold it
+      // into the reconnect policy: the attempt was already counted, so nothing is
+      // counted twice; its 30 s verification window simply ends now instead of
+      // waiting for an answer that is already known to be "no". The 60 s interval
+      // still gates the next attempt, and the page's own error text is untouched.
+      if (fromAutoReconnect) {
+        this.reconnectState = reconnectOnStartRejected(this.reconnectState);
+        this.diagAutoReconnect(this.pageVisible
+          ? RECONNECT_TRIGGER_FOREGROUND : RECONNECT_TRIGGER_BACKGROUND,
+          RECONNECT_RESULT_FAILED, code, this.reconnectState.attempts);
+      }
     });
   }
 
@@ -2159,6 +2771,12 @@ struct Index {
     this.diagActionCount = this.diagActionCount + 1;
     this.diagEvent('ui_disconnect', this.diagActionCount);
     this.stopSent = true;
+    // 2026-10-10 后台保活（实验，方案 A）: the connection this borrowed task
+    // belonged to is over — the task goes with it, and the next connection starts
+    // with a fresh budget. The revision bump discards a creation the platform has
+    // not answered yet (the adapter withdraws that task rather than adopting it).
+    this.bgKeepAliveState = keepAliveOnUserStop(this.bgKeepAliveState);
+    this.stopKeepAliveNow(KEEP_ALIVE_REASON_USER_STOP);
     hilog.info(DOMAIN, TAG, 'UI_STOP_REQUEST|bundle=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, this.requestId);
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {
@@ -3177,6 +3795,10 @@ struct Index {
             this.serverConfigCard()
             this.logoutAction()
           }
+          // 2026-10-10 后台保活（实验，方案 A）: always visible — a user who wants
+          // this off must be able to say so without credentials in place.
+          this.sectionTitle('后台保活（实验）')
+          this.keepAliveCard()
           this.sectionTitle('关于')
           Column() {
             DetailRow({ label: '版本', value: this.versionName.length > 0 ? this.versionName : '未知' })
@@ -3830,6 +4452,43 @@ struct Index {
 
   onBackPress(): boolean {
     return this.closeVisibleSubflow();
+  }
+
+  // ---- 后台保活（实验，方案 A）-------------------------------------------------
+  //
+  // ONE switch, written through at once, with the page's own one-line explanation
+  // of what it does and of the visible price (a permanent notification). The row
+  // carries no diagnostic and no status: everything the switch changes is decided
+  // by the pure policy and reported by the adapter.
+
+  @Builder
+  keepAliveCard() {
+    Row({ space: 12 }) {
+      Column({ space: 2 }) {
+        Text('后台保活（实验）')
+          .fontSize(16)
+          .fontColor($r('app.color.nb_text_primary'))
+        Text('通过系统长时任务保持 VPN 在后台运行，通知栏会常驻流量通知')
+          .fontSize(12)
+          .fontColor($r('app.color.nb_text_muted'))
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+      Toggle({ type: ToggleType.Switch, isOn: this.bgKeepAliveEnabled })
+        .selectedColor($r('app.color.nb_primary'))
+        .onChange((isOn: boolean): void => {
+          // The callback carries the NEW switch value: act only on a REAL change,
+          // so a re-emitted value (re-render, duplicate platform event, a
+          // programmatic callback) cannot flip the switch under the user.
+          if (isOn !== this.bgKeepAliveEnabled) {
+            this.onKeepAliveToggle(isOn);
+          }
+        })
+    }
+    .width('100%')
+    .padding(16)
+    .borderRadius(16)
+    .backgroundColor($r('app.color.nb_card_background'))
   }
 
   build() {

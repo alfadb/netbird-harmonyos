@@ -63,6 +63,10 @@ const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   // roam-1005-0014: the recreate lifecycle policy pure module the REAL
   // extension imports; zero imports and no erased types, so no shim.
   'NetBirdRecreatePolicy',
+  // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
+  // REAL extension now imports by value for its synchronous write; zero
+  // imports and no erased types, so no shim (staged byte-identically).
+  'NetBirdDiagnosticsCore',
   // N2 T5a (2026-09-28): the stimulus pure module the REAL extension imports.
   'NetBirdN2Stimulus',
   // N2 P4/P5 (2026-09-28): the A-column trigger and sandwich pure modules.

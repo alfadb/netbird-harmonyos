@@ -5,7 +5,7 @@
 // client/entry/src/main/ets/vpnextensionability/NetBirdDiagnosticsCore.ets).
 // Run: node client/entry/selfcheck/run-diagnostics.mts
 //
-// Pinned here: the fixed basenames/order and the 2 MiB total, the exact record
+// Pinned here: the fixed basenames/order and the 4 MiB total, the exact record
 // and marker line format, the field allowlist + secret redaction + injection
 // guard + line bound, the prior-exit rule, the rotation plan, the sample
 // fields, and the bounded queue semantics.
@@ -47,14 +47,27 @@ try {
   check('file order export is active + rotated',
     m.UI_LOG_FILES_BY_AGE.join(',') ===
     'netbird-ui.log,netbird-ui.log.1,netbird-ui.log.2,netbird-ui.log.3');
-  check('four files, 512 KiB each, exactly 2 MiB total',
-    m.UI_LOG_FILES_BY_AGE.length === 4 && m.PER_FILE_MAX_BYTES === 524288 &&
-    m.TOTAL_MAX_BYTES === 2097152 &&
+  check('four files, 1 MiB each, exactly 4 MiB total',
+    m.UI_LOG_FILES_BY_AGE.length === 4 && m.PER_FILE_MAX_BYTES === 1048576 &&
+    m.TOTAL_MAX_BYTES === 4194304 &&
     m.PER_FILE_MAX_BYTES * m.UI_LOG_FILES_BY_AGE.length === m.TOTAL_MAX_BYTES);
   check('line/value/name bounds',
     m.MAX_LINE_CHARS === 512 && m.MAX_VALUE_CHARS === 48 && m.MAX_EVENT_NAME_CHARS === 40);
-  check('queue capacity and sample interval',
-    m.QUEUE_CAPACITY === 256 && m.SAMPLE_INTERVAL_MS === 60000);
+  check('queue capacity and the per-role sample intervals',
+    m.QUEUE_CAPACITY === 256 && m.SAMPLE_INTERVAL_MS === 1000 &&
+    m.UI_SAMPLE_INTERVAL_MS === 10000);
+  check('sampleIntervalFor picks the interval by role (ui 10 s, vpn 1 s)',
+    m.sampleIntervalFor('vpn') === 1000 && m.sampleIntervalFor('ui') === 10000 &&
+    m.sampleIntervalFor('vpn') === m.SAMPLE_INTERVAL_MS &&
+    m.sampleIntervalFor('ui') === m.UI_SAMPLE_INTERVAL_MS);
+  check('the detail cadence stays counted in SAMPLES, so ui details every 100 s',
+    m.SAMPLE_INTERVAL_MS * m.MEM_DETAIL_INTERVAL === 10000 &&
+    m.UI_SAMPLE_INTERVAL_MS * m.MEM_DETAIL_INTERVAL === 100000);
+  check('the detail cadence is fixed at every 10th sample',
+    m.MEM_DETAIL_INTERVAL === 10 && m.isDetailSample(10) === true &&
+    m.isDetailSample(20) === true && m.isDetailSample(1) === false &&
+    m.isDetailSample(9) === false && m.isDetailSample(11) === false &&
+    m.isDetailSample(0) === false && m.isDetailSample(-10) === false);
   check('unavailable token is not a number', m.UNAVAILABLE === 'na');
   check('marker basenames are per role and separate from the log basenames',
     m.markerBasename('ui') === 'netbird-diag-ui.marker' &&
@@ -173,7 +186,13 @@ try {
     m.isPublicEventName('PRIOR_EXIT_UNCLEAN') === false);
   check('internal names are fixed and reserved',
     m.INTERNAL_EVENT_NAMES.indexOf('PRIOR_EXIT_UNCLEAN') >= 0 &&
-    m.INTERNAL_EVENT_NAMES.indexOf('diag_dropped') >= 0);
+    m.INTERNAL_EVENT_NAMES.indexOf('diag_dropped') >= 0 &&
+    m.INTERNAL_EVENT_NAMES.indexOf('mem_sample') >= 0 &&
+    m.INTERNAL_EVENT_NAMES.indexOf('mem_detail') >= 0 &&
+    m.INTERNAL_EVENT_NAMES.indexOf('mem_vm') >= 0 &&
+    m.isPublicEventName('mem_detail') === false &&
+    m.isPublicEventName('mem_vm') === false &&
+    m.isPublicEventName('mem_sample') === false);
 
   // ---- system-event ingress (own SystemEvents format only) ----------------
   // The exact line the pure projector builds for an APP_KILLED with a reason.
@@ -251,6 +270,26 @@ try {
     m.isPriorUnclean(null, 2) === false);
   check('an unknown marker state is not reported as unclean (observation only)',
     m.isPriorUnclean(m.parseMarker('v=1 state=weird ts=x pid=1 role=ui'), 2) === false);
+  // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the SAME line shape, the
+  // token fits the 8-char state bound exactly, and it is NOT a prior unclean
+  // exit (isPriorUnclean claims state=open only) — that is what stops an
+  // orderly user stop whose async `clean` transition was lost from being
+  // reported as PRIOR_EXIT_UNCLEAN by the next session.
+  const stoppingLine = m.buildMarker(ts, 4242, 'vpn', m.MARKER_STATE_STOPPING);
+  const stoppingParsed = m.parseMarker(stoppingLine);
+  check('the stopping marker round-trips exactly (state fits the 8-char bound)',
+    m.MARKER_STATE_STOPPING === 'stopping' && stoppingLine ===
+      'v=1 state=stopping ts=2026-10-06T12:00:00.000Z pid=4242 role=vpn\n' &&
+    stoppingParsed !== null && stoppingParsed.state === 'stopping' &&
+    stoppingParsed.pid === 4242 && stoppingParsed.role === 'vpn', stoppingLine);
+  check('a stopping marker from another pid is NOT a prior unclean exit',
+    m.isPriorUnclean(stoppingParsed, 2) === false &&
+    m.isPriorUnclean(m.parseMarker(m.buildMarker(ts, 1, 'ui', 'stopping')), 2) === false);
+  check('only an open marker is a prior unclean exit (open and stopping stay distinct)',
+    m.buildMarker(ts, 1, 'ui', m.MARKER_STATE_OPEN) !==
+      m.buildMarker(ts, 1, 'ui', m.MARKER_STATE_STOPPING) &&
+    m.isPriorUnclean(m.parseMarker(m.buildMarker(ts, 1, 'ui', 'open')), 2) === true &&
+    m.isPriorUnclean(m.parseMarker(m.buildMarker(ts, 1, 'ui', 'stopping')), 2) === false);
 
   // ---- memory sample fields ------------------------------------------------
   const naFields = m.buildSampleFields(null, null, null, null);
@@ -278,18 +317,26 @@ try {
     m.PROC_SELF_STATUS.charAt(0) === '/' && m.PROC_SELF_FD.indexOf('/proc/self/') === 0 &&
     m.PROC_MEMINFO === '/proc/meminfo');
   check('only the documented status/meminfo keys are requested',
-    m.PROC_STATUS_KEYS.join(',') === 'Threads,VmSize,RssAnon,RssFile' &&
+    m.PROC_STATUS_KEYS.join(',') ===
+      'Threads,VmSize,RssAnon,RssFile,VmData,VmStk,RssShmem' &&
     m.PROC_MEMINFO_KEYS.join(',') === 'SwapTotal,SwapFree');
 
   const statusFixture = 'Name:\tnetbird\nUid:\t20020001\nThreads:\t42\nVmSize:\t 4194304 kB\n' +
-    'VmRSS:\t 153000 kB\nRssAnon:\t 120000 kB\nRssFile:\t 33000 kB\nVmSwap:\t 0 kB\n';
+    'VmRSS:\t 153000 kB\nRssAnon:\t 120000 kB\nRssFile:\t 33000 kB\nVmSwap:\t 0 kB\n' +
+    'VmData:\t 1234567 kB\nVmStk:\t 4096 kB\nRssShmem:\t 8192 kB\n';
   const statusParsed = m.parseProcNumbers(statusFixture, m.PROC_STATUS_KEYS, m.PROC_MAX_LINES);
   check('proc parse: exactly the requested numeric keys are read (nothing else)',
-    statusParsed.size === 4 && statusParsed.get('Threads') === 42 &&
+    statusParsed.size === 7 && statusParsed.get('Threads') === 42 &&
     statusParsed.get('VmSize') === 4194304 && statusParsed.get('RssAnon') === 120000 &&
-    statusParsed.get('RssFile') === 33000 && statusParsed.has('VmRSS') === false &&
+    statusParsed.get('RssFile') === 33000 && statusParsed.get('VmData') === 1234567 &&
+    statusParsed.get('VmStk') === 4096 && statusParsed.get('RssShmem') === 8192 &&
+    statusParsed.has('VmRSS') === false &&
     statusParsed.has('Name') === false && statusParsed.has('Uid') === false,
     JSON.stringify([...statusParsed.entries()]));
+  check('the three added /proc keys ride the SAME one status read (no extra node)',
+    m.PROC_STATUS_KEYS.length === 7 &&
+    m.PROC_STATUS_KEYS.filter((k: string): boolean =>
+      ['VmData', 'VmStk', 'RssShmem'].indexOf(k) >= 0).length === 3);
   check('proc parse: tabs/spaces and trailing units are tolerated',
     m.parseProcNumbers('SwapFree:\t\t1048576 kB\n', ['SwapFree'], 8).get('SwapFree') === 1048576 &&
     m.parseProcNumbers('Threads:  7  \n', ['Threads'], 8).get('Threads') === 7);
@@ -321,24 +368,29 @@ try {
     m.procNumberText(undefined) === null && m.procNumberText(0) === '0' &&
     m.procNumberText(42) === '42');
 
-  const naResource = m.buildResourceFields(null, null, null, null, null, null, null, null, null);
+  const naResource = m.buildResourceFields(null, null, null, null, null, null, null, null, null,
+    null, null, null);
   check('unavailable resource readings are explicit na, never 0',
     naResource['cpu_ms'] === 'na' && naResource['threads'] === 'na' &&
     naResource['vmsize_kb'] === 'na' && naResource['rss_anon_kb'] === 'na' &&
-    naResource['rss_file_kb'] === 'na' && naResource['sys_swap_total_kb'] === 'na' &&
+    naResource['rss_file_kb'] === 'na' && naResource['vmdata_kb'] === 'na' &&
+    naResource['vmstk_kb'] === 'na' && naResource['rss_shmem_kb'] === 'na' &&
+    naResource['sys_swap_total_kb'] === 'na' &&
     naResource['sys_swap_free_kb'] === 'na' && naResource['fd_count'] === 'na' &&
-    naResource['fd_capped'] === 'na' && Object.keys(naResource).length === 9);
+    naResource['fd_capped'] === 'na' && Object.keys(naResource).length === 12);
   const resFields = m.buildResourceFields('1234', '42', '4194304', '120000', '33000',
-    '0', '0', '7', false);
+    '1234567', '4096', '8192', '0', '0', '7', false);
   check('resource fields carry exact units: cpu_ms / threads / *_kb / fd_count / fd_capped',
     resFields['cpu_ms'] === '1234' && resFields['threads'] === '42' &&
     resFields['vmsize_kb'] === '4194304' && resFields['rss_anon_kb'] === '120000' &&
-    resFields['rss_file_kb'] === '33000' && resFields['sys_swap_total_kb'] === '0' &&
+    resFields['rss_file_kb'] === '33000' && resFields['vmdata_kb'] === '1234567' &&
+    resFields['vmstk_kb'] === '4096' && resFields['rss_shmem_kb'] === '8192' &&
+    resFields['sys_swap_total_kb'] === '0' &&
     resFields['sys_swap_free_kb'] === '0' && resFields['fd_count'] === '7' &&
     resFields['fd_capped'] === 'false');
   check('a full fd list is flagged as a lower bound (fd_capped=true)',
-    m.buildResourceFields(null, null, null, null, null, null, null, '1024', true)['fd_capped'] === 'true' &&
-    m.buildResourceFields(null, null, null, null, null, null, null, '7', false)['fd_capped'] === 'false');
+    m.buildResourceFields(null, null, null, null, null, null, null, null, null, null, '1024', true)['fd_capped'] === 'true' &&
+    m.buildResourceFields(null, null, null, null, null, null, null, null, null, null, '7', false)['fd_capped'] === 'false');
   check('every resource key is internal-only (a public event cannot carry it)',
     Object.keys(naResource).every((k: string) => m.INTERNAL_FIELD_KEYS.indexOf(k) >= 0 &&
       m.PUBLIC_FIELD_KEYS.indexOf(k) < 0));
@@ -346,23 +398,181 @@ try {
     m.buildRecord(ts, 42, 'ui', 'ui_ok', { cpu_ms: '1', fd_count: '2', threads: '3' }, false) ===
     'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok\n');
   const mergedSample = m.mergeFields({ rss_kb: '1' },
-    m.buildResourceFields('2', null, null, null, null, null, null, null, null));
+    m.buildResourceFields('2', null, null, null, null, null, null, null, null, null, null, null));
   check('mergeFields puts both halves in ONE record',
     mergedSample['rss_kb'] === '1' && mergedSample['cpu_ms'] === '2' &&
-    mergedSample['threads'] === 'na' && Object.keys(mergedSample).length === 10);
+    mergedSample['threads'] === 'na' && Object.keys(mergedSample).length === 13);
   const fullSample = m.buildRecord(ts, 42, 'vpn', 'mem_sample',
     m.mergeFields(m.buildSampleFields('45120', '3', '8192', '1234567'),
-      m.buildResourceFields('1234', '42', '4194304', '120000', '33000', '2097152',
-        '1048576', '7', false)), true);
+      m.buildResourceFields('1234', '42', '4194304', '120000', '33000', '1234567',
+        '4096', '8192', '2097152', '1048576', '7', false)), true);
   check('exact combined mem_sample record: memory + resource fields, one bounded line',
     fullSample === 'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=mem_sample ' +
       'cpu_ms=1234 fd_capped=false fd_count=7 heap_kb=8192 rss_anon_kb=120000 ' +
-      'rss_file_kb=33000 rss_kb=45120 swap_kb=3 sys_avail_kb=1234567 ' +
-      'sys_swap_free_kb=1048576 sys_swap_total_kb=2097152 threads=42 vmsize_kb=4194304\n',
+      'rss_file_kb=33000 rss_kb=45120 rss_shmem_kb=8192 swap_kb=3 sys_avail_kb=1234567 ' +
+      'sys_swap_free_kb=1048576 sys_swap_total_kb=2097152 threads=42 vmdata_kb=1234567 ' +
+      'vmsize_kb=4194304 vmstk_kb=4096\n',
     fullSample);
   check('the fully populated sample stays well inside the 512-char line bound',
     fullSample.length < m.MAX_LINE_CHARS && fullSample.indexOf('~') < 0,
     `len=${fullSample.length}`);
+  check('the per-tick mem_sample carries the three added /proc keys',
+    fullSample.indexOf(' vmdata_kb=1234567 ') > 0 &&
+    fullSample.indexOf(' vmstk_kb=4096\n') > 0 &&
+    fullSample.indexOf(' rss_shmem_kb=8192 ') > 0);
+  // Why the detail readings became a SEPARATE record: even a mem_sample whose
+  // every field sits at its own type/parser bound (proc <= MAX_PROC_DIGITS,
+  // hidebug bigints at u64, fd_count <= FD_LIST_MAX, cpu_ms at the longest
+  // decimal a finite number can print) stays under the line bound, while the
+  // same record with PSS + the Rust heap added would not.
+  const procMaxText = '9'.repeat(m.MAX_PROC_DIGITS);
+  const bigMaxText = '18446744073709551615';
+  const widestSample = m.buildRecord(ts, 4242, 'vpn', 'mem_sample',
+    m.mergeFields(m.buildSampleFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText),
+      m.buildResourceFields(String(Number.MAX_VALUE), procMaxText, procMaxText, procMaxText,
+        procMaxText, procMaxText, procMaxText, procMaxText, procMaxText, procMaxText,
+        String(m.FD_LIST_MAX), true)), true);
+  check('even the widest reachable mem_sample (every field at its own bound) fits 512',
+    widestSample.length < m.MAX_LINE_CHARS && widestSample.indexOf('~') < 0,
+    `len=${widestSample.length}`);
+
+  // ---- the every-10th mem_detail record (separate line) --------------------
+  const naNative = m.buildNativeMemFields(null, null, null, null, null);
+  check('unavailable smaps readings are explicit na, never 0',
+    naNative['pss_kb'] === 'na' && naNative['private_dirty_kb'] === 'na' &&
+    naNative['shared_dirty_kb'] === 'na' && naNative['private_clean_kb'] === 'na' &&
+    naNative['shared_clean_kb'] === 'na' && Object.keys(naNative).length === 5);
+  const nativeFields = m.buildNativeMemFields('204800', '120000', '8000', '64000', '4096');
+  check('the smaps readings keep their own KB text (pss = Pss+SwapPss, no arithmetic here)',
+    nativeFields['pss_kb'] === '204800' && nativeFields['private_dirty_kb'] === '120000' &&
+    nativeFields['shared_dirty_kb'] === '8000' && nativeFields['private_clean_kb'] === '64000' &&
+    nativeFields['shared_clean_kb'] === '4096');
+  const naRust = m.buildRustAllocFields(null);
+  check('no Rust reader / no document renders all four rust keys as na, never 0',
+    naRust['rust_heap_kb'] === 'na' && naRust['rust_heap_peak_kb'] === 'na' &&
+    naRust['rust_allocs'] === 'na' && naRust['rust_frees'] === 'na' &&
+    Object.keys(naRust).length === 4);
+  const rustParsed = m.buildRustAllocFields('{"bytes":1048576,"peak":2097152,"allocs":77,"frees":12}');
+  check('the alloc_stats document converts bytes to KiB by integer division',
+    rustParsed['rust_heap_kb'] === '1024' && rustParsed['rust_heap_peak_kb'] === '2048' &&
+    rustParsed['rust_allocs'] === '77' && rustParsed['rust_frees'] === '12');
+  check('a sub-KiB Rust heap floors to an honest 0 (a real reading, not na)',
+    m.buildRustAllocFields('{"bytes":1023,"peak":1023,"allocs":1,"frees":0}')['rust_heap_kb'] === '0');
+  check('malformed / anomalous alloc documents degrade to na, never a fabricated number',
+    m.buildRustAllocFields('not-json')['rust_heap_kb'] === 'na' &&
+    m.buildRustAllocFields('[]')['rust_heap_kb'] === 'na' &&
+    m.buildRustAllocFields('7')['rust_heap_kb'] === 'na' &&
+    m.buildRustAllocFields('null')['rust_heap_kb'] === 'na' &&
+    m.buildRustAllocFields('{"bytes":"1","peak":-1,"allocs":null,"frees":2}')['rust_heap_kb'] === 'na' &&
+    m.buildRustAllocFields('{"bytes":"1","peak":-1,"allocs":null,"frees":2}')['rust_heap_peak_kb'] === 'na' &&
+    m.buildRustAllocFields('{"bytes":"1","peak":-1,"allocs":null,"frees":2}')['rust_allocs'] === 'na' &&
+    m.buildRustAllocFields('{"bytes":"1","peak":-1,"allocs":null,"frees":2}')['rust_frees'] === '2');
+  const detailRecord = m.buildRecord(ts, 42, 'vpn', 'mem_detail',
+    m.mergeFields(m.buildNativeMemFields('204800', '120000', '8000', '64000', '4096'),
+      m.buildRustAllocFields('{"bytes":1048576,"peak":2097152,"allocs":77,"frees":12}')), true);
+  check('exact mem_detail record: smaps + rust fields, one bounded line',
+    detailRecord === 'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=mem_detail ' +
+      'private_clean_kb=64000 private_dirty_kb=120000 pss_kb=204800 rust_allocs=77 ' +
+      'rust_frees=12 rust_heap_kb=1024 rust_heap_peak_kb=2048 shared_clean_kb=4096 ' +
+      'shared_dirty_kb=8000\n',
+    detailRecord);
+  check('the widest possible mem_detail stays inside the 512-char line bound',
+    detailRecord.length < m.MAX_LINE_CHARS && detailRecord.indexOf('~') < 0,
+    `len=${detailRecord.length}`);
+  const detailWide = m.buildRecord(ts, 42, 'vpn', 'mem_detail',
+    m.mergeFields(
+      m.buildNativeMemFields('18446744073709551615', '18446744073709551615',
+        '18446744073709551615', '18446744073709551615', '18446744073709551615'),
+      m.buildRustAllocFields('{"bytes":18446744073709551615,"peak":18446744073709551615,' +
+        '"allocs":18446744073709551615,"frees":18446744073709551615}')), true);
+  check('even u64-max readings fit the mem_detail line (that is why it is a separate record)',
+    detailWide.length < m.MAX_LINE_CHARS && detailWide.indexOf('~') < 0,
+    `len=${detailWide.length}`);
+  check('the detail keys are internal-only (a public event cannot carry them)',
+    Object.keys(naNative).concat(Object.keys(naRust)).every((k: string) =>
+      m.INTERNAL_FIELD_KEYS.indexOf(k) >= 0 && m.PUBLIC_FIELD_KEYS.indexOf(k) < 0));
+  check('a public event cannot smuggle a detail key through',
+    m.buildRecord(ts, 42, 'ui', 'ui_ok', { pss_kb: '1', rust_heap_kb: '2' }, false) ===
+    'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok\n');
+
+  // ---- the SAME tick's third record: event=mem_vm --------------------------
+  // The ArkTS-VM / native-malloc / ArkTS-GC attribution readings. It is a third
+  // line (not a wider mem_detail) for the same reason mem_detail is a second
+  // line: at every field's own bound the joined sets overflow MAX_LINE_CHARS,
+  // and a cut line silently loses its tail.
+  check('the GC item names are the API 26 declaration\'s own keys',
+    m.GC_STAT_GC_COUNT === 'ark.gc.gc-count' && m.GC_STAT_GC_TIME === 'ark.gc.gc-time' &&
+    m.GC_STAT_BYTES_ALLOCATED === 'ark.gc.gc-bytes-allocated' &&
+    m.GC_STAT_BYTES_FREED === 'ark.gc.gc-bytes-freed');
+  const naVm = m.buildVmMemFields(null, null, null, null, null, null, null, null, null);
+  check('unavailable VM / native-heap / GC readings are explicit na, never 0',
+    naVm['vm_total_heap_kb'] === 'na' && naVm['vm_array_kb'] === 'na' &&
+    naVm['native_heap_kb'] === 'na' && naVm['native_heap_alloc_kb'] === 'na' &&
+    naVm['native_heap_free_kb'] === 'na' && naVm['gc_count'] === 'na' &&
+    naVm['gc_time_ms'] === 'na' && naVm['gc_alloc_kb'] === 'na' &&
+    naVm['gc_freed_kb'] === 'na' && Object.keys(naVm).length === 9);
+  const vmFields = m.buildVmMemFields('16384', '4096', '20480', '12288', '8191',
+    '77', '512', '102400', '51199');
+  check('the mem_vm fields keep their own units (KB / ms / counts), no arithmetic here',
+    vmFields['vm_total_heap_kb'] === '16384' && vmFields['vm_array_kb'] === '4096' &&
+    vmFields['native_heap_kb'] === '20480' && vmFields['native_heap_alloc_kb'] === '12288' &&
+    vmFields['native_heap_free_kb'] === '8191' && vmFields['gc_count'] === '77' &&
+    vmFields['gc_time_ms'] === '512' && vmFields['gc_alloc_kb'] === '102400' &&
+    vmFields['gc_freed_kb'] === '51199');
+  check('a byte counter is divided to KiB by exact floor division',
+    m.BYTES_PER_KIB === 1024 && m.bytesToKiBText('0') === '0' &&
+    m.bytesToKiBText('1023') === '0' && m.bytesToKiBText('1024') === '1' &&
+    m.bytesToKiBText('1048575') === '1023' && m.bytesToKiBText('1048576') === '1024' &&
+    m.bytesToKiBText('104858623') === '102400' && m.bytesToKiBText('52428799') === '51199');
+  check('the exact division holds at the u64 maximum (no bigint -> number step)',
+    m.bytesToKiBText('18446744073709551615') === '18014398509481983' &&
+    m.bytesToKiBText(String(BigInt(Number.MAX_SAFE_INTEGER) * 1024n)) ===
+      String(Number.MAX_SAFE_INTEGER));
+  check('an empty / non-decimal / over-long byte text is na, never a fabricated value',
+    m.bytesToKiBText(null) === null && m.bytesToKiBText('') === null &&
+    m.bytesToKiBText('1.5e+21') === null && m.bytesToKiBText('12345x') === null &&
+    m.bytesToKiBText('-1024') === null && m.bytesToKiBText(' 1024') === null &&
+    m.bytesToKiBText('1'.repeat(m.MAX_BYTE_DIGITS + 1)) === null &&
+    m.bytesToKiBText('1'.repeat(m.MAX_BYTE_DIGITS)) !== null);
+  check('a GC statistic must be a finite, non-negative number',
+    m.statNumberText(0) === '0' && m.statNumberText(77) === '77' &&
+    m.statNumberText(512.5) === '512.5' && m.statNumberText(NaN) === null &&
+    m.statNumberText(Infinity) === null && m.statNumberText(-Infinity) === null &&
+    m.statNumberText(-1) === null);
+  const vmRecord = m.buildRecord(ts, 42, 'vpn', 'mem_vm',
+    m.buildVmMemFields('16384', '4096', '20480', '12288', '8191', '77', '512', '102400', '51199'),
+    true);
+  check('exact mem_vm record: VM heap + native heap + GC, one bounded line',
+    vmRecord === 'ts=2026-10-06T12:00:00.000Z pid=42 role=vpn event=mem_vm ' +
+      'gc_alloc_kb=102400 gc_count=77 gc_freed_kb=51199 gc_time_ms=512 ' +
+      'native_heap_alloc_kb=12288 native_heap_free_kb=8191 native_heap_kb=20480 ' +
+      'vm_array_kb=4096 vm_total_heap_kb=16384\n',
+    vmRecord);
+  check('the fully populated mem_vm stays inside the 512-char line bound',
+    vmRecord.length < m.MAX_LINE_CHARS && vmRecord.indexOf('~') < 0,
+    `len=${vmRecord.length}`);
+  const vmWide = m.buildRecord(ts, 42, 'vpn', 'mem_vm',
+    m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
+      String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText), true);
+  check('even the widest reachable mem_vm (every field at its own bound) fits 512',
+    vmWide.length < m.MAX_LINE_CHARS && vmWide.indexOf('~') < 0, `len=${vmWide.length}`);
+  const joinedWide = m.buildRecord(ts, 42, 'vpn', 'mem_detail',
+    m.mergeFields(m.mergeFields(
+      m.buildNativeMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText),
+      m.buildRustAllocFields('{"bytes":18446744073709551615,"peak":18446744073709551615,' +
+        '"allocs":18446744073709551615,"frees":18446744073709551615}')),
+      m.buildVmMemFields(bigMaxText, bigMaxText, bigMaxText, bigMaxText, bigMaxText,
+        String(Number.MAX_VALUE), String(Number.MAX_VALUE), bigMaxText, bigMaxText)), true);
+  check('the mem_detail keys plus the mem_vm keys exceed 512 (hence the third line)',
+    joinedWide.length === m.MAX_LINE_CHARS && joinedWide.endsWith('~\n') &&
+    joinedWide.indexOf('~') === joinedWide.length - 2,
+    `len=${joinedWide.length}`);
+  check('the mem_vm keys are internal-only (a public event cannot carry them)',
+    Object.keys(naVm).every((k: string) => m.INTERNAL_FIELD_KEYS.indexOf(k) >= 0 &&
+      m.PUBLIC_FIELD_KEYS.indexOf(k) < 0));
+  check('a public event cannot smuggle a mem_vm key through',
+    m.buildRecord(ts, 42, 'ui', 'ui_ok', { gc_count: '1', vm_array_kb: '2' }, false) ===
+    'ts=2026-10-06T12:00:00.000Z pid=42 role=ui event=ui_ok\n');
 
   // ---- bounded queue -------------------------------------------------------
   const q = new m.BoundedQueue(3);
@@ -413,8 +623,9 @@ try {
     runtimeCode.includes('hidebug.getRssInfo()') &&
     runtimeCode.includes('hidebug.getAppVMMemoryInfo()') &&
     runtimeCode.includes('hidebug.getSystemMemInfo()'));
-  check('runtime never touches the blocking smaps_rollup APIs (no getPss)',
-    !/getPss|getAppNativeMemInfo|getAppNativeMemInfoAsync|getAppNativeMemInfoWithCache|getSharedDirty|getPrivateDirty/.test(runtimeCode));
+  check('the only smaps_rollup reader is the ASYNC one (blocking variants absent)',
+    runtimeCode.includes('await hidebug.getAppNativeMemInfoAsync()') &&
+    !/getPss|getAppNativeMemInfo\(|getAppNativeMemInfoWithCache|getSharedDirty|getPrivateDirty/.test(runtimeCode));
   check('runtime reads the one cheap cumulative CPU API and no expensive CPU API',
     runtimeCode.includes('process.getPastCpuTime()') &&
     !/getCpuUsage|startProfiling|getAppMemoryInfo|getVssInfo/.test(runtimeCode));
@@ -437,13 +648,127 @@ try {
     runtimeCode.includes('const take: number = length < PROC_READ_MAX_BYTES ? length : PROC_READ_MAX_BYTES') &&
     runtimeCode.includes('return decodeAscii(buffer, take)') &&
     runtimeCode.includes('await fs.close(file)'));
+  check('runtime reads the three added status keys from the SAME one status read',
+    runtimeCode.includes("procNumberText(values.get('VmData'))") &&
+    runtimeCode.includes("procNumberText(values.get('VmStk'))") &&
+    runtimeCode.includes("procNumberText(values.get('RssShmem'))") &&
+    runtimeCode.split('readProcText(PROC_SELF_STATUS').length === 2);
+  check('runtime emits mem_detail only from the detail branch of the ONE runSample',
+    runtimeCode.includes('isDetailSample(this.sampleIndex)') &&
+    runtimeCode.includes('await this.collectDetail()') &&
+    runtimeCode.includes("emitInternal('mem_sample', fields)") &&
+    runtimeCode.includes("emitInternal('mem_detail', detailFields)") &&
+    runtimeCode.indexOf("emitInternal('mem_detail', detailFields)") >
+      runtimeCode.indexOf("emitInternal('mem_sample', fields)") &&
+    runtimeCode.split('emitInternal(\'mem_detail\'').length === 2);
+  check('runtime keeps the single-flight guard around the awaited detail reading',
+    runtimeCode.includes('private async runSample(generation: number, detail: boolean)') &&
+    runtimeCode.includes('this.sampling = true;') &&
+    runtimeCode.includes('if (generation === this.generation) {') &&
+    runtimeCode.indexOf('this.sampling = true;') < runtimeCode.indexOf('await this.collectDetail()'));
+  check('runtime parses the alloc document through the pure core (no ad-hoc JSON here)',
+    runtimeCode.includes('buildRustAllocFields(allocText)') &&
+    runtimeCode.includes('buildNativeMemFields(pssKb, privateDirtyKb, sharedDirtyKb, privateCleanKb, sharedCleanKb)') &&
+    runtimeCode.split('JSON.parse').length === 1);
+  check('runtime emits mem_vm from the SAME detail branch, right after mem_detail',
+    runtimeCode.includes('vmFields = this.collectVmMem();') &&
+    runtimeCode.includes("emitInternal('mem_vm', vmFields)") &&
+    runtimeCode.split("emitInternal('mem_vm'").length === 2 &&
+    runtimeCode.indexOf("emitInternal('mem_vm', vmFields)") >
+      runtimeCode.indexOf("emitInternal('mem_detail', detailFields)") &&
+    runtimeCode.indexOf('await this.collectDetail()') <
+      runtimeCode.indexOf('vmFields = this.collectVmMem();'));
+  check('the mem_vm legs are synchronous and add no timer inside the single-flight window',
+    runtimeCode.includes('private collectVmMem(): DiagFields {') &&
+    !runtimeCode.includes('private async collectVmMem(') &&
+    runtimeCode.split('setInterval(').length === 2 &&
+    runtimeCode.indexOf('this.sampling = true;') < runtimeCode.indexOf('vmFields = this.collectVmMem();'));
+  check('the mem_vm legs read exactly the verified synchronous APIs',
+    runtimeCode.includes('hidebug.getAppVMMemoryInfo()') &&
+    runtimeCode.includes('hidebug.getNativeHeapSize()') &&
+    runtimeCode.includes('hidebug.getNativeHeapAllocatedSize()') &&
+    runtimeCode.includes('hidebug.getNativeHeapFreeSize()') &&
+    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_GC_COUNT)') &&
+    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_GC_TIME)') &&
+    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_BYTES_ALLOCATED)') &&
+    runtimeCode.includes('hidebug.getVMRuntimeStat(GC_STAT_BYTES_FREED)'));
+  check('runtime spells no GC item name and converts bytes through the pure core',
+    runtimeCode.indexOf('ark.gc.') < 0 &&
+    runtimeCode.includes('bytesToKiBText(hidebug.getNativeHeapSize().toString())') &&
+    runtimeCode.includes('bytesToKiBText(hidebug.getVMRuntimeStat(GC_STAT_BYTES_ALLOCATED).toString())') &&
+    runtimeCode.includes('statNumberText(hidebug.getVMRuntimeStat(GC_STAT_GC_COUNT))') &&
+    runtimeCode.includes('buildVmMemFields(vmTotalHeapKb, vmArrayKb, nativeHeapKb, nativeHeapAllocKb,'));
+
+  // ---- decodeAscii: block decoding is identical to the per-byte loop -------
+  // The runtime decodes its fixed 16 KiB buffer itself (no @ohos.util — pinned
+  // above), so this pins the rewrite against the ORIGINAL algorithm, reproduced
+  // here as the reference: byte i -> charCode i. That includes 0x80..0xff, which
+  // must stay single U+0080..U+00FF chars and never become a UTF-8 replacement
+  // char. The samples cover an empty read, both sides of the block boundary, the
+  // exact 16 KiB cap and a partial read inside a larger buffer.
+  const decodeMatch =
+    /function decodeAscii\(buffer: ArrayBuffer, length: number\): string \{[\s\S]*?\n\}/
+      .exec(runtimeText);
+  const decodeBody = decodeMatch === null
+    ? 'function decodeAscii(): string { return \'<decodeAscii not found>\'; }'
+    : decodeMatch[0];
+  const decodeFixture = join(dir, 'decodeAscii.ts');
+  writeFileSync(decodeFixture, decodeBody + '\nexport { decodeAscii };\n');
+  const decodeModule = await import(pathToFileURL(decodeFixture).href);
+  const decodeRef = (buffer: ArrayBuffer, length: number): string => {
+    const bytes: Uint8Array = new Uint8Array(buffer, 0, length);
+    let text: string = '';
+    for (let i = 0; i < length; i++) { text += String.fromCharCode(bytes[i]); }
+    return text;
+  };
+  const everyByte = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) { everyByte[i] = i; }
+  const capSized = new Uint8Array(m.PROC_READ_MAX_BYTES);
+  for (let i = 0; i < capSized.length; i++) { capSized[i] = (i * 7 + 0x80) & 0xff; }
+  const procDocText = 'Name:\tnetbird\nThreads:\t42\nVmData:\t 1234567 kB\nRssShmem:\t 8192 kB\n';
+  const procDocBytes = new Uint8Array(procDocText.length);
+  for (let i = 0; i < procDocBytes.length; i++) { procDocBytes[i] = procDocText.charCodeAt(i); }
+  const decodeSamples: Array<{ name: string; buffer: ArrayBuffer; length: number }> = [
+    { name: 'empty read', buffer: new ArrayBuffer(8), length: 0 },
+    { name: 'one byte below a block', buffer: capSized.buffer, length: 15 },
+    { name: 'exactly one block', buffer: capSized.buffer, length: 16 },
+    { name: 'one byte above a block', buffer: capSized.buffer, length: 17 },
+    { name: 'all 256 byte values', buffer: everyByte.buffer, length: 256 },
+    { name: 'a partial read inside a larger buffer', buffer: everyByte.buffer, length: 17 },
+    { name: 'a short proc document', buffer: procDocBytes.buffer, length: procDocBytes.length },
+    { name: 'one byte below the 16 KiB cap', buffer: capSized.buffer,
+      length: m.PROC_READ_MAX_BYTES - 1 },
+    { name: 'the exact 16 KiB cap', buffer: capSized.buffer, length: m.PROC_READ_MAX_BYTES }
+  ];
+  const decodeBad: string[] = [];
+  for (const s of decodeSamples) {
+    if (decodeModule.decodeAscii(s.buffer, s.length) !== decodeRef(s.buffer, s.length)) {
+      decodeBad.push(s.name);
+    }
+  }
+  check('decodeAscii: the block rewrite is byte-identical to the per-byte loop on every sample',
+    decodeBad.length === 0, decodeBad.join(', '));
+  const everyByteText = decodeModule.decodeAscii(everyByte.buffer, 256);
+  check('decodeAscii: 0x80..0xff stay one char each, never a UTF-8 replacement char',
+    everyByteText.length === 256 && everyByteText.charCodeAt(0x00) === 0x00 &&
+    everyByteText.charCodeAt(0x7f) === 0x7f && everyByteText.charCodeAt(0x80) === 0x80 &&
+    everyByteText.charCodeAt(0xff) === 0xff && everyByteText.indexOf('\uFFFD') < 0);
+  const capText = decodeModule.decodeAscii(capSized.buffer, m.PROC_READ_MAX_BYTES);
+  check('decodeAscii: the empty read is empty and the 16 KiB read loses nothing',
+    decodeModule.decodeAscii(new ArrayBuffer(8), 0) === '' &&
+    capText.length === m.PROC_READ_MAX_BYTES &&
+    capText === decodeRef(capSized.buffer, m.PROC_READ_MAX_BYTES));
+  check('decodeAscii: a single-byte and an unterminated proc document still decode',
+    decodeModule.decodeAscii(everyByte.buffer, 1) === '\u0000' &&
+    decodeModule.decodeAscii(procDocBytes.buffer, procDocBytes.length) === procDocText);
 
   // ---- fake platform -------------------------------------------------------
   const PROC_STATUS = '/proc/self/status';
   const PROC_MEMINFO = '/proc/meminfo';
   const PROC_FD = '/proc/self/fd';
   const STATUS_FIXTURE = 'Name:\tnetbird\nUid:\t20020001\nThreads:\t42\nVmSize:\t 4194304 kB\n' +
-    'VmRSS:\t 153000 kB\nRssAnon:\t 120000 kB\nRssFile:\t 33000 kB\nVmSwap:\t 0 kB\n';
+    'VmRSS:\t 153000 kB\nRssAnon:\t 120000 kB\nRssFile:\t 33000 kB\nVmSwap:\t 0 kB\n' +
+    'VmData:\t 1234567 kB\nVmStk:\t 4096 kB\nRssShmem:\t 8192 kB\n';
   const MEMINFO_FIXTURE = 'MemTotal:       16384000 kB\nMemFree:         1234567 kB\n' +
     'MemAvailable:    1234567 kB\nSwapTotal:       2097152 kB\nSwapFree:        1048576 kB\n';
   const files = new Map<string, { content: string }>();
@@ -463,6 +788,10 @@ try {
   let nextFd = 1;
   let failOpen = false;
   let memThrow = false;
+  // The two synchronous mem_vm legs that can fail on their own: the native
+  // (mallinfo) heap and the ArkTS GC statistics.
+  let nativeHeapThrows = false;
+  let gcStatThrows = false;
   let procStatusText = STATUS_FIXTURE;
   let procMeminfoText = MEMINFO_FIXTURE;
   let denyProcOpen = ''; // exact proc path whose open throws EACCES
@@ -472,6 +801,31 @@ try {
   let procReadCalls = 0;
   let procListCalls = 0;
   let procReadCap = 0;
+  // Read-buffer identity per proc node. The runtime REUSES one 16 KiB buffer per
+  // node (NetBirdDiagnostics.ets readProcText), so every read of a node must hand
+  // the fake the SAME ArrayBuffer object, and the two nodes must never share one.
+  // `changes` counts how many distinct buffer objects a node has been read into.
+  const procReadBuffers = new Map<string, ArrayBuffer>();
+  const procReadBufferChanges = new Map<string, number>();
+  // Per-node read gates: an ARMED node makes every read of that node wait, so a
+  // test can hold one node's read while the other node's read is issued — the
+  // cross-node overlap a stop()/start() pair can produce.
+  const procReadGates = new Map<string, { promise: Promise<void>; release: () => void }>();
+  const armProcReadGate = (p: string): void => {
+    let release: () => void = (): void => undefined;
+    const promise = new Promise<void>((resolve: () => void): void => { release = resolve; });
+    procReadGates.set(p, { promise, release });
+  };
+  const releaseProcReadGate = (p: string): void => {
+    const gate = procReadGates.get(p);
+    if (gate !== undefined) { gate.release(); procReadGates.delete(p); }
+  };
+  // The every-10th detail reading (hidebug.getAppNativeMemInfoAsync): its own
+  // throw latch, its own pending promise and its own call counter, so a hung
+  // PSS read can be told apart from a hung /proc read.
+  let nativeMemCalls = 0;
+  let nativeMemThrows = false;
+  let hangNativeMem: Promise<void> | null = null;
   const OpenMode = { READ_ONLY: 0o0, READ_WRITE: 0o2, CREATE: 0o100, TRUNC: 0o1000, APPEND: 0o2000 };
   const fakeFs = {
     OpenMode,
@@ -513,6 +867,12 @@ try {
       procReadCalls++;
       const p = openFds.get(fd);
       if (p === undefined) { throw new Error('EBADF'); }
+      if (procReadBuffers.get(p) !== buffer) {
+        procReadBuffers.set(p, buffer);
+        procReadBufferChanges.set(p, (procReadBufferChanges.get(p) ?? 0) + 1);
+      }
+      const gate = procReadGates.get(p);
+      if (gate !== undefined) { await gate.promise; }
       if (hangRead !== null) { await hangRead; }
       let text: string;
       if (p === PROC_STATUS) { text = procStatusText; }
@@ -574,13 +934,46 @@ try {
       if (memThrow) { throw new Error('unsupported'); }
       return { rss: 45120n, swapRss: 3n };
     },
-    getAppVMMemoryInfo: (): { heapUsed: bigint } => {
+    getAppVMMemoryInfo: (): { totalHeap: bigint; heapUsed: bigint; allArraySize: bigint } => {
       if (memThrow) { throw new Error('unsupported'); }
-      return { heapUsed: 8192n };
+      return { totalHeap: 16384n, heapUsed: 8192n, allArraySize: 4096n };
     },
     getSystemMemInfo: (): { availableMem: bigint } => {
       if (memThrow) { throw new Error('unsupported'); }
       return { availableMem: 1234567n };
+    },
+    // mallinfo, in BYTES. The byte counts deliberately do not sit on a KiB
+    // boundary: 20480 KiB + 1023 B, 12288 KiB + 1023 B, 8192 KiB - 1 B — so the
+    // emitted KiB values can only come from an honest floor division.
+    getNativeHeapSize: (): bigint => {
+      if (nativeHeapThrows) { throw new Error('unsupported'); }
+      return 20972543n; // 20480 KiB + 1023 B
+    },
+    getNativeHeapAllocatedSize: (): bigint => {
+      if (nativeHeapThrows) { throw new Error('unsupported'); }
+      return 12583935n; // 12288 KiB + 1023 B
+    },
+    getNativeHeapFreeSize: (): bigint => {
+      if (nativeHeapThrows) { throw new Error('unsupported'); }
+      return 8388607n; // 8192 KiB - 1 B
+    },
+    // ArkTS GC statistics (API >= 12). An unknown item is the BusinessError the
+    // declaration documents (:401), so the fake throws it like the platform.
+    getVMRuntimeStat: (item: string): number => {
+      if (gcStatThrows) { throw new Error('unsupported'); }
+      if (item === m.GC_STAT_GC_COUNT) { return 77; }
+      if (item === m.GC_STAT_GC_TIME) { return 512; }
+      if (item === m.GC_STAT_BYTES_ALLOCATED) { return 104858623; } // 102400 KiB + 1023 B
+      if (item === m.GC_STAT_BYTES_FREED) { return 52428799; } // 51200 KiB - 1 B
+      throw new Error('unknown property');
+    },
+    // API >= 20 (the only smaps_rollup reader this module may use).
+    getAppNativeMemInfoAsync: async (): Promise<Record<string, bigint>> => {
+      nativeMemCalls++;
+      if (hangNativeMem !== null) { await hangNativeMem; }
+      if (nativeMemThrows) { throw new Error('unsupported'); }
+      return { pss: 204800n, vss: 4194304n, rss: 200000n, sharedDirty: 8000n,
+        privateDirty: 120000n, sharedClean: 4096n, privateClean: 64000n };
     }
   };
   (globalThis as unknown as { __diagFake: unknown }).__diagFake =
@@ -665,6 +1058,9 @@ try {
     sampleFields.get('threads') === '42' && sampleFields.get('vmsize_kb') === '4194304' &&
     sampleFields.get('rss_anon_kb') === '120000' && sampleFields.get('rss_file_kb') === '33000',
     a1[1]);
+  check('ui run: VmData/VmStk/RssShmem ride the SAME status read (three added keys)',
+    sampleFields.get('vmdata_kb') === '1234567' && sampleFields.get('vmstk_kb') === '4096' &&
+    sampleFields.get('rss_shmem_kb') === '8192', a1[1]);
   check('ui run: system swap comes from /proc/meminfo (MemAvailable is not duplicated)',
     sampleFields.get('sys_swap_total_kb') === '2097152' &&
     sampleFields.get('sys_swap_free_kb') === '1048576' &&
@@ -673,8 +1069,8 @@ try {
     sampleFields.get('fd_count') === '7' && sampleFields.get('fd_capped') === 'false', a1[1]);
   check('ui run: the mem_sample record carries no proc path or fd name',
     a1[1].indexOf('/proc/') < 0 && a1[1].indexOf('fdinfo') < 0);
-  check('ui run: one 60 s sampling interval is registered',
-    timers.length === 1 && timers[0].ms === 60000 && timers[0].live === true);
+  check('ui run: the ONE sampling interval is registered at 10 s',
+    timers.length === 1 && timers[0].ms === 10000 && timers[0].live === true);
   check('ui run: a public event is accepted and sanitized',
     runA.event('ui_connect_ok', { stage: 'dial', code: 7, ok: true }) === true &&
     runA.event('ui_note', { detail: 'hello world' }) === true);
@@ -776,7 +1172,7 @@ try {
     `active=${fileText(join(dirC, 'netbird-ui.log')).length}`);
   const logSizes = [0, 1, 2, 3].map((i: number) =>
     fileText(join(dirC, i === 0 ? 'netbird-ui.log' : 'netbird-ui.log.' + i)).length);
-  check('rotation: every file is under the per-file cap and the total is under 2 MiB',
+  check('rotation: every file is under the per-file cap and the total is under 4 MiB',
     logSizes.every((s: number) => s <= m.PER_FILE_MAX_BYTES) &&
     logSizes.reduce((a: number, b: number) => a + b, 0) <= m.TOTAL_MAX_BYTES,
     logSizes.join(','));
@@ -799,6 +1195,9 @@ try {
   check('vpn role: records go to the supplied sink',
     sinkLines.length === 2 && sinkLines[0].includes('role=vpn event=diag_start') &&
     sinkLines[1].includes('event=mem_sample'), sinkLines.join(' ~ '));
+  check('vpn role: the ONE sampling interval keeps the 1 s period',
+    timers.length === beforeD + 1 && timers[beforeD].ms === 1000 &&
+    timers[beforeD].live === true);
   check('vpn role: no log file is written for the vpn process',
     !files.has(join(dirD, 'netbird-ui.log')) && !files.has(join(dirD, 'netbird-vpn.log')));
   check('vpn role: the vpn marker basename is used, ui marker stays untouched',
@@ -1009,6 +1408,16 @@ try {
   check('single-flight: exactly ONE sample lands when the hung read is released',
     concAfter.filter((l: string): boolean => l.includes('event=mem_sample')).length === 1,
     concAfter.join(' ~ '));
+  // The dropped tick must not leave the in-flight flag stuck: the NEXT tick,
+  // after the previous sample has settled, runs its own read and lands again.
+  const readsAfterSettle = procReadCalls;
+  timers[timers.length - 1].cb();
+  await settle();
+  const concTick = linesOf(join(dirConc, 'netbird-ui.log'));
+  check('single-flight: after the sample settles the next tick samples again',
+    procReadCalls > readsAfterSettle &&
+    concTick.filter((l: string): boolean => l.includes('event=mem_sample')).length === 2,
+    `${procReadCalls - readsAfterSettle} read(s), ${concTick.join(' ~ ')}`);
   // post-stop: a reading that settles after stop() must emit nothing
   hangRead = new Promise<void>((resolve: () => void): void => { releaseRead = resolve; });
   timers[timers.length - 1].cb();
@@ -1022,7 +1431,7 @@ try {
   check('post-stop: a reading that settles after stop() emits nothing',
     concStop.length === beforeRelease &&
     concStop[concStop.length - 1].includes('event=diag_stop') &&
-    concStop.filter((l: string): boolean => l.includes('event=mem_sample')).length === 1,
+    concStop.filter((l: string): boolean => l.includes('event=mem_sample')).length === 2,
     concStop.join(' ~ '));
   check('post-stop: the run still closes clean',
     /state=clean/.test(fileText(join(dirConc, 'netbird-diag-ui.marker'))));
@@ -1054,6 +1463,77 @@ try {
   await settle();
   hangRead = null;
 
+  // ---- C5: the read buffer is reused, one per node and never one shared ----
+  // A tick reads /proc/self/status and /proc/meminfo into the SAME two 16 KiB
+  // buffers forever: no per-tick allocation. One buffer per node — not one shared
+  // — is what the overlap check below pins down.
+  const dirBuf = join(dir, 'buf');
+  const bufChangesBefore: number[] = [procReadBufferChanges.get(PROC_STATUS) ?? 0,
+    procReadBufferChanges.get(PROC_MEMINFO) ?? 0];
+  const runBuf = await newRuntime('buf');
+  runBuf.start(dirBuf, 'ui');
+  await settle();
+  const readsAfterFirst = procReadCalls;
+  for (let i = 0; i < 3; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const bufLines = linesOf(join(dirBuf, 'netbird-ui.log'));
+  check('buffer reuse: three more samples read both nodes twice each (6 reads)',
+    procReadCalls === readsAfterFirst + 6 &&
+    bufLines.filter((l: string): boolean => l.includes('event=mem_sample')).length === 4,
+    `${procReadCalls - readsAfterFirst} read(s), ${bufLines.length} line(s)`);
+  check('buffer reuse: each node is read into ONE and the same ArrayBuffer object',
+    procReadBufferChanges.get(PROC_STATUS) === bufChangesBefore[0] + 1 &&
+    procReadBufferChanges.get(PROC_MEMINFO) === bufChangesBefore[1] + 1,
+    `status=${procReadBufferChanges.get(PROC_STATUS)} meminfo=${procReadBufferChanges.get(PROC_MEMINFO)}`);
+  check('buffer reuse: the two nodes never share one buffer',
+    procReadBuffers.get(PROC_STATUS) !== undefined &&
+    procReadBuffers.get(PROC_MEMINFO) !== undefined &&
+    procReadBuffers.get(PROC_STATUS) !== procReadBuffers.get(PROC_MEMINFO));
+  const bufFields = fieldsOf(bufLines[bufLines.length - 1]);
+  check('buffer reuse: the reused buffers still deliver every field of the last sample',
+    bufFields.get('threads') === '42' && bufFields.get('vmsize_kb') === '4194304' &&
+    bufFields.get('vmdata_kb') === '1234567' && bufFields.get('rss_shmem_kb') === '8192' &&
+    bufFields.get('sys_swap_total_kb') === '2097152' &&
+    bufFields.get('sys_swap_free_kb') === '1048576',
+    bufLines[bufLines.length - 1]);
+  runBuf.stop();
+  await settle();
+
+  // The overlap those per-node buffers exist for: a STALE /proc/meminfo read is
+  // still in flight (stop() returned with it pending) when the NEXT run reads
+  // /proc/self/status. Both reads then settle in the same tick, the fresh status
+  // read writing FIRST; with one shared buffer the fresh decode would read the
+  // stale meminfo bytes and report `na` for keys that were plainly present.
+  const dirOv = join(dir, 'ov');
+  const runOv = await newRuntime('ov');
+  armProcReadGate(PROC_MEMINFO); // hold every meminfo read
+  runOv.start(dirOv, 'ui'); // its status read completes, its meminfo read blocks
+  await settle();
+  const ovBlocked = linesOf(join(dirOv, 'netbird-ui.log'));
+  armProcReadGate(PROC_STATUS); // hold status reads too
+  runOv.stop(); // the stopped run's meminfo read is still in flight
+  await settle();
+  runOv.start(dirOv, 'ui'); // the new run's status read blocks on its gate
+  await settle();
+  releaseProcReadGate(PROC_STATUS); // the fresher status read writes first
+  releaseProcReadGate(PROC_MEMINFO); // the stale meminfo read writes second
+  await settle();
+  const ovLines = linesOf(join(dirOv, 'netbird-ui.log'));
+  const ovSample = fieldsOf(ovLines[ovLines.length - 1]);
+  check('overlap: a stale read of the OTHER node cannot clobber the fresh status decode',
+    ovBlocked.filter((l: string): boolean => l.includes('event=mem_sample')).length === 0 &&
+    ovLines.filter((l: string): boolean => l.includes('event=mem_sample')).length === 1 &&
+    ovSample.get('threads') === '42' && ovSample.get('vmsize_kb') === '4194304' &&
+    ovSample.get('vmdata_kb') === '1234567' &&
+    ovSample.get('sys_swap_total_kb') === '2097152' &&
+    ovSample.get('sys_swap_free_kb') === '1048576',
+    `${ovLines.filter((l: string): boolean => l.includes('event=mem_sample')).length} sample(s): ` +
+    ovLines.slice(-3).join(' ~ '));
+  runOv.stop();
+  await settle();
+
   // ---- C4: the CPU counter stays raw across a new process ---------------
   const dirCpu1 = join(dir, 'cpu1');
   cpuTime = 900000; // a long-lived process: a large cumulative counter
@@ -1077,6 +1557,297 @@ try {
   runCpu2.stop();
   await settle();
   cpuTime = 1234;
+
+  // ---- MD: the every-10th mem_detail + mem_vm (one tick, two extra records) --
+  // UI role, NO injected alloc reader: the detail records must still appear on
+  // the 10th sample — i.e. every 10 ticks, which for the 10 s ui cadence is
+  // every 100 s (0.0.21), and NOT once per tick even though the tick slowed
+  // down — mem_detail with `na` for the four rust keys, then mem_vm
+  // with the real synchronous readings — and must be ABSENT on every other tick.
+  const dirMD = join(dir, 'md');
+  const runMD = await newRuntime('md');
+  const mdNativeBefore = nativeMemCalls;
+  runMD.start(dirMD, 'ui');
+  await settle();
+  const mdLog = (): string[] => linesOf(join(dirMD, 'netbird-ui.log'));
+  const mdSamples = (): string[] => mdLog().filter((l: string): boolean =>
+    l.includes('event=mem_sample'));
+  const mdDetails = (): string[] => mdLog().filter((l: string): boolean =>
+    l.includes('event=mem_detail'));
+  const mdVms = (): string[] => mdLog().filter((l: string): boolean =>
+    l.includes('event=mem_vm'));
+  check('detail: the first sample carries no mem_detail, no mem_vm and no detail key',
+    mdSamples().length === 1 && mdDetails().length === 0 && mdVms().length === 0 &&
+    fieldsOf(mdSamples()[0]).get('pss_kb') === undefined &&
+    fieldsOf(mdSamples()[0]).get('rust_heap_kb') === undefined &&
+    fieldsOf(mdSamples()[0]).get('gc_count') === undefined &&
+    fieldsOf(mdSamples()[0]).get('native_heap_kb') === undefined &&
+    nativeMemCalls === mdNativeBefore, mdLog().join(' ~ '));
+  for (let i = 0; i < 8; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  check('detail: samples 2..9 emit neither mem_detail nor mem_vm nor their keys',
+    mdSamples().length === 9 && mdDetails().length === 0 && mdVms().length === 0 &&
+    nativeMemCalls === mdNativeBefore &&
+    mdSamples().every((l: string): boolean =>
+      fieldsOf(l).get('pss_kb') === undefined && fieldsOf(l).get('rust_allocs') === undefined &&
+      fieldsOf(l).get('gc_count') === undefined &&
+      fieldsOf(l).get('native_heap_kb') === undefined),
+    `${mdSamples().length} sample(s), ${mdDetails().length} detail(s)`);
+  timers[timers.length - 1].cb(); // the 10th sample: the detail tick
+  await settle();
+  check('detail: the 10th sample adds ONE mem_detail and ONE mem_vm, in that order',
+    mdSamples().length === 10 && mdDetails().length === 1 && mdVms().length === 1 &&
+    nativeMemCalls === mdNativeBefore + 1 &&
+    mdLog()[mdLog().length - 3].includes('event=mem_sample') &&
+    mdLog()[mdLog().length - 2].includes('event=mem_detail') &&
+    mdLog()[mdLog().length - 1].includes('event=mem_vm'),
+    mdLog().slice(-4).join(' ~ '));
+  const mdDetail = fieldsOf(mdDetails()[0]);
+  check('detail: the smaps readings come from the async API as their own KB text',
+    mdDetail.get('pss_kb') === '204800' && mdDetail.get('private_dirty_kb') === '120000' &&
+    mdDetail.get('shared_dirty_kb') === '8000' &&
+    mdDetail.get('private_clean_kb') === '64000' &&
+    mdDetail.get('shared_clean_kb') === '4096', mdDetails()[0]);
+  check('detail: a UI process with no alloc reader writes na for all four rust keys',
+    mdDetail.get('rust_heap_kb') === 'na' && mdDetail.get('rust_heap_peak_kb') === 'na' &&
+    mdDetail.get('rust_allocs') === 'na' && mdDetail.get('rust_frees') === 'na',
+    mdDetails()[0]);
+  check('detail: the per-tick record keeps the three added /proc keys',
+    fieldsOf(mdSamples()[9]).get('vmdata_kb') === '1234567' &&
+    fieldsOf(mdSamples()[9]).get('vmstk_kb') === '4096' &&
+    fieldsOf(mdSamples()[9]).get('rss_shmem_kb') === '8192' &&
+    fieldsOf(mdSamples()[0]).get('vmdata_kb') === '1234567', mdSamples()[9]);
+  const mdVm = fieldsOf(mdVms()[0]);
+  check('mem_vm: the ArkTS VM heap shape comes from getAppVMMemoryInfo (KB, as answered)',
+    mdVm.get('vm_total_heap_kb') === '16384' && mdVm.get('vm_array_kb') === '4096',
+    mdVms()[0]);
+  check('mem_vm: the mallinfo byte counts are floored down to KiB (1023 B never rounds up)',
+    mdVm.get('native_heap_kb') === '20480' && mdVm.get('native_heap_alloc_kb') === '12288' &&
+    mdVm.get('native_heap_free_kb') === '8191', mdVms()[0]);
+  check('mem_vm: the GC counters are counts/ms and the two byte counters are floored KiB',
+    mdVm.get('gc_count') === '77' && mdVm.get('gc_time_ms') === '512' &&
+    mdVm.get('gc_alloc_kb') === '102400' && mdVm.get('gc_freed_kb') === '51199', mdVms()[0]);
+  check('mem_vm: the whole mem_vm record stays inside the 512-char bound',
+    mdVms()[0].length < m.MAX_LINE_CHARS && mdVms()[0].indexOf('~') < 0 &&
+    /^ts=\d{4}-\d{2}-\d{2}T[\d:.]+Z pid=\d+ role=ui event=mem_vm/.test(mdVms()[0]),
+    mdVms()[0]);
+  check('detail: the detail keys never ride the mem_sample line (separate record)',
+    mdSamples().every((l: string): boolean => fieldsOf(l).get('pss_kb') === undefined &&
+      fieldsOf(l).get('rust_heap_kb') === undefined &&
+      fieldsOf(l).get('gc_count') === undefined &&
+      fieldsOf(l).get('native_heap_kb') === undefined),
+    mdSamples()[9]);
+  check('detail: the three records of a detail tick are disjoint (no key on the wrong line)',
+    mdDetail.get('gc_count') === undefined && mdDetail.get('native_heap_kb') === undefined &&
+    mdDetail.get('vm_array_kb') === undefined && mdVm.get('pss_kb') === undefined &&
+    mdVm.get('rust_heap_kb') === undefined, mdVms()[0]);
+  check('detail: every emitted line stays inside the 512-char bound, unmarked',
+    mdLog().every((l: string): boolean => l.length < m.MAX_LINE_CHARS && l.indexOf('~') < 0),
+    `max=${Math.max(...mdLog().map((l: string): number => l.length))}`);
+  check('detail: the mem_sample and its mem_detail share the record envelope',
+    /^ts=\d{4}-\d{2}-\d{2}T[\d:.]+Z pid=\d+ role=ui event=mem_sample/.test(mdSamples()[9]) &&
+    /^ts=\d{4}-\d{2}-\d{2}T[\d:.]+Z pid=\d+ role=ui event=mem_detail/.test(mdDetails()[0]),
+    mdDetails()[0]);
+  runMD.stop();
+  await settle();
+
+  // An injected reader (the VPN extension passes nativeAllocStats) must reach
+  // the same mem_detail record through the pure core's parser. Driven through a
+  // ui run because the vpn role writes only to the caller's sink.
+  const dirMD3 = join(dir, 'md3');
+  const runMD3 = await newRuntime('md3');
+  runMD3.start(dirMD3, 'ui', undefined, (): string | undefined =>
+    '{"bytes":1048576,"peak":2097152,"allocs":77,"frees":12}');
+  await settle();
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const md3Details = linesOf(join(dirMD3, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_detail'));
+  check('detail: an injected reader is parsed into KiB + counters by the pure core',
+    md3Details.length === 1 && fieldsOf(md3Details[0]).get('rust_heap_kb') === '1024' &&
+    fieldsOf(md3Details[0]).get('rust_heap_peak_kb') === '2048' &&
+    fieldsOf(md3Details[0]).get('rust_allocs') === '77' &&
+    fieldsOf(md3Details[0]).get('rust_frees') === '12', md3Details.join(' ~ '));
+  runMD3.stop();
+  await settle();
+
+  // ---- MD-HANG: a pending PSS promise keeps single-flight, never misfires --
+  const dirMDH = join(dir, 'mdh');
+  const runMDH = await newRuntime('mdh');
+  runMDH.start(dirMDH, 'ui');
+  await settle();
+  for (let i = 0; i < 8; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  let releaseNative: (() => void) | null = null;
+  hangNativeMem = new Promise<void>((resolve: () => void): void => { releaseNative = resolve; });
+  const nativeBeforeHang = nativeMemCalls;
+  timers[timers.length - 1].cb(); // the 10th sample: its PSS read hangs
+  await settle();
+  const mdhSamplesHung = linesOf(join(dirMDH, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_sample')).length;
+  check('detail hang: the detail tick issues exactly ONE async smaps read',
+    nativeMemCalls === nativeBeforeHang + 1, `calls=${nativeMemCalls - nativeBeforeHang}`);
+  check('detail hang: no sample, no detail and no mem_vm is emitted while the PSS read is pending',
+    mdhSamplesHung === 9 &&
+    linesOf(join(dirMDH, 'netbird-ui.log')).filter((l: string): boolean =>
+      l.includes('event=mem_detail') || l.includes('event=mem_vm')).length === 0,
+    `${mdhSamplesHung} sample(s)`);
+  timers[timers.length - 1].cb();
+  timers[timers.length - 1].cb();
+  await settle();
+  check('detail hang: ticks during the pending PSS read start no second read (single-flight)',
+    nativeMemCalls === nativeBeforeHang + 1, `calls=${nativeMemCalls - nativeBeforeHang}`);
+  const release: (() => void) | null = releaseNative;
+  if (release !== null) { release(); }
+  await settle();
+  const mdhFinal = linesOf(join(dirMDH, 'netbird-ui.log'));
+  check('detail hang: releasing the read lands ONE sample + its ONE detail + ONE mem_vm (tick 10)',
+    mdhFinal.filter((l: string): boolean => l.includes('event=mem_sample')).length === 10 &&
+    mdhFinal.filter((l: string): boolean => l.includes('event=mem_detail')).length === 1 &&
+    mdhFinal.filter((l: string): boolean => l.includes('event=mem_vm')).length === 1 &&
+    mdhFinal[mdhFinal.length - 1].includes('event=mem_vm') &&
+    mdhFinal[mdhFinal.length - 2].includes('event=mem_detail') &&
+    mdhFinal[mdhFinal.length - 3].includes('event=mem_sample'),
+    mdhFinal.slice(-4).join(' ~ '));
+  check('detail hang: the tick that landed is the 10th (its detail and mem_vm follow it)',
+    fieldsOf(mdhFinal[mdhFinal.length - 2]).get('pss_kb') === '204800' &&
+    fieldsOf(mdhFinal[mdhFinal.length - 2]).get('rust_heap_kb') === 'na' &&
+    fieldsOf(mdhFinal[mdhFinal.length - 1]).get('gc_count') === '77');
+  hangNativeMem = null;
+  runMDH.stop();
+  await settle();
+
+  // ---- MD-FAIL: an unsupported async smaps API -> na, said once per run ----
+  const dirMDF = join(dir, 'mdf');
+  const mdWarnBefore = hilogLines.filter((l: string): boolean =>
+    l.includes('DIAG_DETAIL_UNAVAILABLE')).length;
+  nativeMemThrows = true;
+  const runMDF = await newRuntime('mdf');
+  runMDF.start(dirMDF, 'ui');
+  await settle();
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const mdfDetails = linesOf(join(dirMDF, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_detail'));
+  check('detail failure: an unsupported async smaps API renders every smaps key as na',
+    mdfDetails.length === 1 && fieldsOf(mdfDetails[0]).get('pss_kb') === 'na' &&
+    fieldsOf(mdfDetails[0]).get('private_dirty_kb') === 'na' &&
+    fieldsOf(mdfDetails[0]).get('shared_clean_kb') === 'na' &&
+    fieldsOf(mdfDetails[0]).get('rust_heap_kb') === 'na', mdfDetails.join(' ~ '));
+  const mdfVms = linesOf(join(dirMDF, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_vm'));
+  check('detail failure: the PSS failure does not take the mem_vm record down with it',
+    mdfVms.length === 1 && fieldsOf(mdfVms[0]).get('native_heap_kb') === '20480' &&
+    fieldsOf(mdfVms[0]).get('gc_count') === '77' &&
+    fieldsOf(mdfVms[0]).get('vm_total_heap_kb') === '16384', mdfVms.join(' ~ '));
+  check('detail failure: the failure is said ONCE per run, not once per detail tick',
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length === mdWarnBefore + 1 &&
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).every((l: string): boolean =>
+      l.indexOf('/proc/') < 0 && l.includes('status=na')),
+    String(hilogLines.filter((l: string): boolean => l.includes('DIAG_DETAIL_UNAVAILABLE')).length));
+  runMDF.stop();
+  await settle();
+  nativeMemThrows = false;
+  // a throwing/undefined alloc reader is reported the same way, once
+  const dirMDR = join(dir, 'mdr');
+  const runMDR = await newRuntime('mdr');
+  runMDR.start(dirMDR, 'ui', undefined, (): string | undefined => { throw new Error('boom'); });
+  await settle();
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const mdrDetails = linesOf(join(dirMDR, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_detail'));
+  check('detail failure: a throwing reader is contained and lands as na, never into the run',
+    mdrDetails.length === 1 && fieldsOf(mdrDetails[0]).get('rust_heap_kb') === 'na' &&
+    hilogLines.some((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE') && l.includes('rust-alloc')),
+    mdrDetails.join(' ~ '));
+  runMDR.stop();
+  await settle();
+  check('detail failure: the run still closes clean after both detail failures',
+    /state=clean/.test(fileText(join(dirMDR, 'netbird-diag-ui.marker'))));
+
+  // ---- MV-FAIL: the synchronous mem_vm legs fail on their own -------------
+  // The mallinfo and GC APIs throw while the VM-memory API still answers: only
+  // the failing legs' keys may become `na`, and both failures are still said
+  // once per run (one line, its stage label), never once per tick.
+  const dirMVF = join(dir, 'mvf');
+  const mvWarnBefore = hilogLines.filter((l: string): boolean =>
+    l.includes('DIAG_DETAIL_UNAVAILABLE')).length;
+  nativeHeapThrows = true;
+  gcStatThrows = true;
+  const runMVF = await newRuntime('mvf');
+  runMVF.start(dirMVF, 'ui');
+  await settle();
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const mvfVms = linesOf(join(dirMVF, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_vm'));
+  check('mem_vm failure: throwing mallinfo/GC APIs are na while the VM keys stay real',
+    mvfVms.length === 1 && fieldsOf(mvfVms[0]).get('native_heap_kb') === 'na' &&
+    fieldsOf(mvfVms[0]).get('native_heap_alloc_kb') === 'na' &&
+    fieldsOf(mvfVms[0]).get('native_heap_free_kb') === 'na' &&
+    fieldsOf(mvfVms[0]).get('gc_count') === 'na' &&
+    fieldsOf(mvfVms[0]).get('gc_time_ms') === 'na' &&
+    fieldsOf(mvfVms[0]).get('gc_alloc_kb') === 'na' &&
+    fieldsOf(mvfVms[0]).get('gc_freed_kb') === 'na' &&
+    fieldsOf(mvfVms[0]).get('vm_total_heap_kb') === '16384' &&
+    fieldsOf(mvfVms[0]).get('vm_array_kb') === '4096', mvfVms.join(' ~ '));
+  check('mem_vm failure: two failing legs are still said ONCE per run, with a stage label',
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length === mvWarnBefore + 1 &&
+    hilogLines.some((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE') && l.includes('native-heap')),
+    String(hilogLines.filter((l: string): boolean => l.includes('DIAG_DETAIL_UNAVAILABLE')).length));
+  runMVF.stop();
+  await settle();
+  nativeHeapThrows = false;
+  gcStatThrows = false;
+
+  // A throwing VM-memory API is its own leg with its own stage label.
+  const dirMVV = join(dir, 'mvv');
+  const mvvWarnBefore = hilogLines.filter((l: string): boolean =>
+    l.includes('DIAG_DETAIL_UNAVAILABLE')).length;
+  memThrow = true;
+  const runMVV = await newRuntime('mvv');
+  runMVV.start(dirMVV, 'ui');
+  await settle();
+  for (let i = 0; i < 9; i++) {
+    timers[timers.length - 1].cb();
+    await settle();
+  }
+  const mvvVms = linesOf(join(dirMVV, 'netbird-ui.log')).filter((l: string): boolean =>
+    l.includes('event=mem_vm'));
+  check('mem_vm failure: an unsupported getAppVMMemoryInfo is na for both VM keys',
+    mvvVms.length === 1 && fieldsOf(mvvVms[0]).get('vm_total_heap_kb') === 'na' &&
+    fieldsOf(mvvVms[0]).get('vm_array_kb') === 'na' &&
+    fieldsOf(mvvVms[0]).get('gc_count') === '77' &&
+    fieldsOf(mvvVms[0]).get('native_heap_kb') === '20480', mvvVms.join(' ~ '));
+  check('mem_vm failure: the VM-leg failure is said ONCE, with its own stage label',
+    hilogLines.filter((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE')).length === mvvWarnBefore + 1 &&
+    hilogLines.some((l: string): boolean =>
+      l.includes('DIAG_DETAIL_UNAVAILABLE') && l.includes('vm-heap')),
+    String(hilogLines.filter((l: string): boolean => l.includes('DIAG_DETAIL_UNAVAILABLE')).length));
+  runMVV.stop();
+  await settle();
+  memThrow = false;
+  check('mem_vm failure: the run still closes clean after the mem_vm failures',
+    /state=clean/.test(fileText(join(dirMVV, 'netbird-diag-ui.marker'))));
 
   // ---- S: the system-event watcher's ingress into the same bounded writer --
   // The UI ability passes appendSystemEvent as NetBirdSystemEvents' sink, so a
@@ -1146,6 +1917,62 @@ try {
   check('ui wiring: onDestroy stops the watcher BEFORE the writer (its lines flush)',
     destroyAt > 0 && entrySysStopAt > destroyAt && entryDiagStopAt > entrySysStopAt,
     JSON.stringify({ destroyAt, entrySysStopAt, entryDiagStopAt }));
+  check('ui wiring: the bounded memory-level enum is recorded and nothing is released',
+    entryText.includes('onMemoryLevel(level: AbilityConstant.MemoryLevel): void') &&
+    entryText.includes("diagnosticsEvent('ui_memory_level', fields)") &&
+    entryText.includes("fields['state'] = String(level);") &&
+    !/onMemoryLevel[\s\S]{0,400}?(free|release|trim|evict|clear|unload)\(/.test(
+      entryText.slice(entryText.indexOf('onMemoryLevel(level: AbilityConstant.MemoryLevel)'),
+        entryText.indexOf('onConfigurationUpdate(newConfig: Configuration)'))));
+
+  // ---- W2: the shipped VPN extension's onDestroy-entry stop marker ---------
+  // 2026-10-09 (0.0.17) PRIOR_EXIT_UNCLEAN over-reporting fix. The device fact
+  // behind the ordering: the JS context is destroyed ~3 ms after onDestroy
+  // returns and the process is gone within ~21 ms, so NOTHING after the entry's
+  // synchronous statements is guaranteed to run — the async destroyOnce
+  // continuation and the late stopDiagnostics() (the only writer of `clean`)
+  // never executed (V016: netbird-vpn.log:1528-1547 ends at
+  // `vpn_destroy_phase phase=requested`). The marker therefore has to be moved
+  // off `open` synchronously, as the FIRST thing the entry does, before the
+  // native connector stop, the destroy leg and the late diagnostics stop.
+  const extText = readFileSync(join(here, '..', 'src', 'main', 'ets',
+    'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
+  const extOnDestroyAt = extText.indexOf('onDestroy(): void {');
+  const extOnDestroyEndAt = extText.indexOf('\n  }\n', extOnDestroyAt);
+  const extStopMarkerAt = extText.indexOf('this.writeStopMarkerSync();');
+  const extStopMarkerDefAt = extText.indexOf('private writeStopMarkerSync(): void {');
+  const extConnectorStopAt = extText.indexOf('connectorStop()', extOnDestroyAt);
+  const extDestroyOnceAt = extText.indexOf("this.destroyOnce('onDestroy')", extOnDestroyAt);
+  const extDiagStopAt = extText.indexOf('stopDiagnostics();', extOnDestroyAt);
+  check('vpn wiring: onDestroy writes the stop marker FIRST, inside the entry',
+    extOnDestroyAt > 0 && extStopMarkerAt > extOnDestroyAt &&
+    extStopMarkerAt < extOnDestroyEndAt &&
+    extStopMarkerAt < extConnectorStopAt && extStopMarkerAt < extDestroyOnceAt &&
+    extStopMarkerAt < extDiagStopAt && extStopMarkerDefAt > 0 &&
+    extStopMarkerDefAt < extOnDestroyAt,
+    JSON.stringify({ extOnDestroyAt, extStopMarkerAt, extOnDestroyEndAt, extStopMarkerDefAt,
+      extConnectorStopAt, extDestroyOnceAt, extDiagStopAt }));
+  check('vpn wiring: the marker write is a synchronous, guarded, one-shot fail-soft helper',
+    extText.indexOf('fs.openSync(path,', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('fs.writeSync(file.fd, buildMarker(', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('if (!this.logTeeConfigured) {', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('if (this.stopMarkerWritten) {', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('catch (error) {', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('VPN_STOP_MARKER_WRITE_FAILED', extStopMarkerDefAt) > 0 &&
+    extText.includes('private stopMarkerWritten: boolean = false;') &&
+    extText.includes('private stopMarkerWarned: boolean = false;'));
+  check('vpn wiring: the state token and the path/format rules come from the pure core',
+    extText.includes("from './NetBirdDiagnosticsCore'") &&
+    extText.indexOf('MARKER_STATE_STOPPING', extStopMarkerDefAt) > 0 &&
+    extText.indexOf('recordPath(this.context.filesDir, markerBasename(', extStopMarkerDefAt) > 0 &&
+    !/(state=stopping|'stopping')/.test(extText));
+  // The synchronous write is allowed in the extension ONLY: the diagnostics
+  // RUNTIME module must stay free of synchronous file APIs (pinned at the top
+  // of this suite), so the helper above may never move into it.
+  check('the extension owns the only synchronous marker write (runtime stays async)',
+    extText.indexOf('openSync') > 0 &&
+    !/(openSync|writeSync|readTextSync|accessSync|unlinkSync|renameSync|mkdirSync|listFileSync)/
+      .test(runtimeCode));
 
   // ---- H: bounded queue backpressure --------------------------------------
   const dirH = join(dir, 'h');

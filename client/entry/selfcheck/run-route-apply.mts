@@ -57,7 +57,7 @@
 // Run: node client/entry/selfcheck/run-route-apply.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
 
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { open, rename, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
@@ -239,7 +239,9 @@ try {
 
   // The functional @ohos.file.fs stub forwards to this real node fs; the rename
   // recorder is the ORDER evidence (the preference must be renamed into place
-  // before the request temp file even exists).
+  // before the request temp file even exists). statSync is the live-route request
+  // adapter's cheap "unchanged document" probe (NetBirdRouteRequestStore), over
+  // the same real fs with inode and nanosecond stamps.
   const renames: string[] = [];
   const state: any = {
     nodeFs: {
@@ -248,7 +250,8 @@ try {
         renames.push(basename(from));
         return rename(from, to);
       },
-      unlink: unlink
+      unlink: unlink,
+      statSync: statSync
     },
     readError: null,
     writeError: null

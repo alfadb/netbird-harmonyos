@@ -2503,6 +2503,48 @@ export function phoneLogShutdown(): PhoneLogShutdownResult {
 }
 
 // ---------------------------------------------------------------------------
+// 2026-10-08 Rust-heap readout bridge (`alloc_stats`).
+//
+// The native connector's ADDITIVE read-only counter snapshot of the process's
+// RUST global allocator (client/core/src/alloc_stats.rs; the NAPI export is
+// `alloc_stats()`, zero arguments, synchronous). It answers one question for
+// the VPN process: how much memory the Rust heap holds right now — NOT process
+// RSS, NOT the ArkTS/JS heap, libace_napi or any C/C++ platform buffer.
+//
+// The wrapper NEVER throws: a missing export (a .so without this surface), a
+// platform throw, an empty reply or a garbled one (not the four-counter JSON
+// object) answers `undefined`, and the diagnostics sampler writes its explicit
+// `na`. Only the SHAPE is checked here; the KiB conversion and the `na`
+// rendering live in the pure diagnostics core (buildRustAllocFields), which is
+// host-testable and re-parses this text. The document carries counters only —
+// no path, no key, no session material.
+// ---------------------------------------------------------------------------
+
+const ALLOC_STAT_KEYS: string[] = ['bytes', 'peak', 'allocs', 'frees'];
+
+export function nativeAllocStats(): string | undefined {
+  try {
+    const text: string = core.alloc_stats();
+    if (typeof text !== 'string' || text.length === 0) {
+      return undefined;
+    }
+    const doc: Record<string, Object> = JSON.parse(text) as Record<string, Object>;
+    if (doc === null || typeof doc !== 'object') {
+      return undefined;
+    }
+    for (let i = 0; i < ALLOC_STAT_KEYS.length; i++) {
+      const value: Object = doc[ALLOC_STAT_KEYS[i]];
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        return undefined; // a missing/anomalous counter is not a reading
+      }
+    }
+    return text;
+  } catch (error) {
+    return undefined; // absent export, platform failure or unparseable reply
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The once-per-minute `phone_log_status` summary a shell watcher logs.
 //
 // The value of this record is the ADMISSION/queue truth the persisted records

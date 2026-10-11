@@ -21,6 +21,14 @@
         startWindowIcon: '$media:app_icon',
         startWindowBackground: '$color:start_window_background',
         exported: true,
+        // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：这个 UIAbility 会申请一个
+        // DATA_TRANSFER 长时任务（鸿蒙没有 VPN 类型的长时任务，借用「数据传输」是平台
+        // 上唯一可用的保活手段；另一款鸿蒙 VPN 客户端也是这么借的）。业务类型与用途不
+        // 完全对应，系统可能在判定违规后取消任务，所以这个功能默认由设置页的开关控制，
+        // 系统给出的取消/非法判定一律照做（见 NetBirdKeepAlivePolicy）。
+        backgroundModes: [
+          'dataTransfer'
+        ],
         skills: [
           {
             entities: [
@@ -59,6 +67,16 @@
       // derivation records a dns required-class gap instead of freezing.
       {
         name: 'ohos.permission.GET_NETWORK_INFO'
+      },
+      // 2026-10-10 后台保活（0.0.19 实验版，方案 A）：DATA_TRANSFER 长时任务
+      // （backgroundModes 见上面的 EntryAbility）需要这个权限，官方口径是
+      // 「数据传输…等类型的长时任务，仅需使用 ohos.permission.KEEP_BACKGROUND_RUNNING
+      // 权限，该权限无需在 AGC 上申请审批」。
+      // Level/mode: availableLevel normal, grantMode system_grant —— 与上面的
+      // INTERNET / GET_NETWORK_INFO 同级同模式，安装即授予，不需要 ACL 条目，
+      // 侧载调试签名即可生效。
+      {
+        name: 'ohos.permission.KEEP_BACKGROUND_RUNNING'
       }
       // MANAGE_VPN is not declared. On the tested device, per-fd
       // VpnConnection.protect(fd) resolves despite MANAGE_VPN check-failure

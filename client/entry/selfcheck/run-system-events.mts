@@ -10,7 +10,8 @@
 // Pinned here: the purity of the core, the SDK event names it watches, the
 // params whitelist (only known fields, whole params never stringified, secret
 // values redacted, ignored subtrees never leak), the explicit known-vs-missing
-// kill reason, the input and line bounds, the dedup window semantics, and the
+// kill reason, the input and line bounds, the dedup window semantics, the
+// `:vpn`-process exit record the automatic reconnect may not go without, and the
 // runtime's subscription/bounds/no-timer/no-permission shape.
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -237,6 +238,69 @@ try {
     m.projectEvent('USER_LOGIN', { reason: 'x' }) === null &&
     m.projectInfos(TS, PID, 'ui', 'USER_LOGIN', [{ reason: 'x' }], 1, new m.EventDeduper(4)).length === 0);
 
+  // ---- the VPN extension's own exit (the reconnect gate's ONLY proof) ------
+  // The page may re-start the extension only when the pid that wrote the open
+  // marker is CONFIRMED dead. That proof is one APP_KILLED whose process_name is
+  // this app's `:vpn` process — and only that: the UI process itself is named
+  // without the suffix and is killed in the same window.
+  const vpnKill = {
+    reason: 'SwapFull', time: 1791466859936, pid: '56430',
+    process_name: 'cn.alfadb.netbird:vpn'
+  };
+  check('the `:vpn` process name is pinned exactly',
+    m.VPN_PROCESS_NAME === 'cn.alfadb.netbird:vpn');
+  const vpnExit = m.killedProcessRecord('APP_KILLED', vpnKill);
+  check('an APP_KILLED of the `:vpn` process becomes a pid/reason/time record',
+    vpnExit !== null && vpnExit.pid === 56430 && vpnExit.reason === 'SwapFull' &&
+    vpnExit.atMs === 1791466859936,
+    JSON.stringify(vpnExit));
+  check('the SAME kill delivered inside last_exit_detail_info yields the same pid',
+    (() => {
+      const record = m.killedProcessRecord('APP_KILLED', {
+        last_exit_detail_info: JSON.stringify({
+          exit_msg: 'THREAD_BLOCK_6S', kill_reason: 'ThreadBlock6S', pid: '56430',
+          process_name: 'cn.alfadb.netbird:vpn', process_state: '1', timestamp: '1791466859936'
+        })
+      });
+      return record !== null && record.pid === 56430 && record.reason === 'ThreadBlock6S' && record.atMs === 0;
+    })());
+  check('another process (the UI process itself) is never mistaken for the extension',
+    m.killedProcessRecord('APP_KILLED', { reason: 'Upgrade', time: 2, pid: '56300', process_name: 'cn.alfadb.netbird' }) === null &&
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', time: 3, pid: '56301', process_name: 'com.example.other' }) === null &&
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', time: 4, pid: '56302' }) === null);
+  check('a non-kill event is never a VPN exit record',
+    m.killedProcessRecord('APP_CRASH', vpnKill) === null &&
+    m.killedProcessRecord('APP_FREEZE', vpnKill) === null &&
+    m.killedProcessRecord('RESOURCE_OVERLIMIT', vpnKill) === null);
+  check('an unreadable pid is refused, never rounded into a pid that could match',
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', pid: 'abc', process_name: m.VPN_PROCESS_NAME }) === null &&
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', pid: '56430.0', process_name: m.VPN_PROCESS_NAME }) === null &&
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', pid: '-1', process_name: m.VPN_PROCESS_NAME }) === null &&
+    m.killedProcessRecord('APP_KILLED', { reason: 'x', pid: '0', process_name: m.VPN_PROCESS_NAME }) === null);
+  check('a missing kill reason is still an explicit token',
+    (() => {
+      const record = m.killedProcessRecord('APP_KILLED', { time: 9, pid: '7', process_name: m.VPN_PROCESS_NAME });
+      return record !== null && record.reason === m.UNAVAILABLE;
+    })());
+
+  // ---- the UI process's memory of the latest exit --------------------------
+  const tracker = new m.KilledProcessTracker();
+  check('the tracker starts with no record',
+    tracker.record() === null);
+  check('a `:vpn` APP_KILLED becomes the record with its own pid',
+    tracker.note('APP_KILLED', vpnKill) === true && tracker.record() !== null &&
+    tracker.record()!.pid === 56430 && tracker.record()!.reason === 'SwapFull' &&
+    tracker.record()!.atMs === 1791466859936);
+  check('a NON-`:vpn` process never changes the record',
+    tracker.note('APP_KILLED', { reason: 'Upgrade', time: 5, pid: '56300', process_name: 'cn.alfadb.netbird' }) === false &&
+    tracker.note('APP_FREEZE', { reason: 'x', time: 6, pid: '1', process_name: m.VPN_PROCESS_NAME }) === false &&
+    tracker.record()!.pid === 56430 && tracker.record()!.reason === 'SwapFull');
+  check('a LATER `:vpn` exit replaces the earlier one (latest wins)',
+    tracker.note('APP_KILLED', {
+      reason: 'LowMemoryKill', time: 1791467000000, pid: '60001', process_name: m.VPN_PROCESS_NAME
+    }) === true && tracker.record()!.pid === 60001 &&
+    tracker.record()!.reason === 'LowMemoryKill' && tracker.record()!.atMs === 1791467000000);
+
   // ---- bounded dedup -------------------------------------------------------
   // Each case gets its own window so the cases stay independent.
   const twice = m.projectInfos(TS, PID, 'vpn', 'APP_KILLED', [killed, killed], 2, new m.EventDeduper(m.DEDUP_WINDOW));
@@ -341,6 +405,21 @@ try {
   check('runtime never stringifies params', !/JSON\.stringify/.test(runtimeCode));
   check('runtime delegates projection to the pure core',
     runtimeCode.indexOf('projectInfos(') > 0 && runtimeCode.indexOf("from './NetBirdSystemEventsCore'") > 0);
+  // ---- runtime: criterion (7)'s one fact ------------------------------------
+  const noteAt = runtimeCode.indexOf('noteKilledProcess(');
+  const noteBody = noteAt < 0 ? '' : runtimeCode.slice(noteAt, runtimeCode.indexOf('reportUnavailable(', noteAt));
+  check('the runtime records the VPN exit only in the ui role',
+    noteAt > 0 && noteBody.indexOf("this.role !== 'ui'") > 0 &&
+    noteBody.indexOf('this.killedVpn.note(') > 0);
+  check('the runtime captures it from the same bounded infos the log lines use',
+    /this\.noteKilledProcess\(group\.name, infos\[j\]\.params\)/.test(runtimeCode));
+  check('the exit record is process memory with one owner instance (no file, no timer)',
+    /private killedVpn: KilledProcessTracker = new KilledProcessTracker\(\);/.test(runtimeCode) &&
+    runtimeCode.indexOf('KilledProcessTracker') > 0);
+  check('the module exposes it read-only (a getter, never a setter)',
+    /export function lastKilledVpnProcess\(\): ProcessExitRecord \| null/.test(runtimeCode) &&
+    /lastKilledVpnProcess\(\): ProcessExitRecord \| null \{\n\s+return this\.killedVpn\.record\(\);/.test(runtimeCode) &&
+    !/setLastKilledVpnProcess|killedVpnPid\s*=/.test(runtimeCode));
   check('runtime API is start(role, sink) / stop() / isRunning()',
     /export function start\(role: SysEventRole, safeSink: SafeSink\): boolean/.test(runtimeCode) &&
     /export function stop\(\): void/.test(runtimeCode) &&

@@ -67,6 +67,14 @@
 //   reason is never rendered as 0/unknown/empty, so "no reason reported" and
 //   "reason X" cannot be confused in the persistent log.
 //
+// THE VPN PROCESS'S OWN EXIT: the UI process's automatic reconnect may only
+//   start the extension when it has proof the previous process is really gone,
+//   and the only such proof is the platform's APP_KILLED for this app's own
+//   `:vpn` process. killedProcessRecord() projects exactly that occurrence and
+//   nothing else; KilledProcessTracker remembers the latest one. APP_KILLED is
+//   delivered on the NEXT launch, so this is memory of an already-finished
+//   process, never a prediction.
+//
 // LINE (one line per record, '\n'-terminated):
 //   ts=<ISO-8601 UTC> pid=<writer pid> role=<ui|vpn> event=<sys_*> [<k>=<v> ...]
 //   - the envelope matches NetBirdDiagnosticsCore.buildRecord, so one sink can
@@ -565,5 +573,102 @@ export class EventDeduper {
 
   capacityValue(): number {
     return this.capacity;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// the VPN extension's own exit — the auto-reconnect's criterion (7)
+// ---------------------------------------------------------------------------
+
+// The app's VPN extension runs in its OWN `:vpn` process, so its APP_KILLED is a
+// fact about the extension; the UI process itself is named WITHOUT the suffix.
+// The match below is therefore EXACT: a prefix test would let the page mistake
+// its own exit (or a future sibling process) for the extension's, and then start
+// an extension that is still alive.
+export const VPN_PROCESS_NAME: string = 'cn.alfadb.netbird:vpn';
+
+// {pid, reason, atMs} of ONE exit occurrence: pid is the process the system
+// killed, reason the projected kill reason (`na` when the system reported none),
+// atMs the occurrence's own time in ms (0 when it carried none). Process memory
+// only — nothing here is written anywhere.
+export interface ProcessExitRecord {
+  pid: number;
+  reason: string;
+  atMs: number;
+}
+
+function isDecimalDigits(text: string): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+  for (let i = 0; i < text.length; i++) {
+    const ch: string = text.charAt(i);
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Pure: ONE APP_KILLED occurrence -> the VPN extension's exit, or null for
+// everything else (another event, another process, an unreadable pid). Only the
+// whitelisted projection is read (buildEventFields), and the pid must be plain
+// decimal digits: a value this module cannot read exactly is refused, never
+// rounded into a pid that might match the marker by accident.
+export function killedProcessRecord(sdkName: string, params: Object | undefined | null): ProcessExitRecord | null {
+  if (sdkName !== APP_KILLED_NAME) {
+    return null;
+  }
+  const fields: Record<string, string | undefined> = buildEventFields(sdkName, params);
+  if (fields['ev_process_name'] !== VPN_PROCESS_NAME) {
+    return null;
+  }
+  const pidText: string | undefined = fields['ev_pid'];
+  if (pidText === undefined || !isDecimalDigits(pidText)) {
+    return null;
+  }
+  const pid: number = parseInt(pidText, 10);
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return null;
+  }
+  let atMs: number = 0;
+  const timeText: string | undefined = fields['ev_time'];
+  if (timeText !== undefined && isDecimalDigits(timeText)) {
+    const parsed: number = parseInt(timeText, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      atMs = parsed;
+    }
+  }
+  const reasonText: string | undefined = fields['ev_kill_reason'];
+  const record: ProcessExitRecord = {
+    pid: pid,
+    reason: reasonText === undefined ? UNAVAILABLE : reasonText,
+    atMs: atMs
+  };
+  return record;
+}
+
+// The UI process's memory of the LATEST VPN exit it was told about. Kept in the
+// pure core (the runtime owns only one instance and the ui-role guard), so the
+// two rules the page leans on — "only the `:vpn` process" and "a later event
+// replaces an earlier one" — are host-checked by run-system-events.mts.
+// Deliberately NOT cleared by stop(): the exit it describes still happened, and
+// a stale record can only make the page's gate more careful (a pid that does not
+// match the marker's).
+export class KilledProcessTracker {
+  private latest: ProcessExitRecord | null = null;
+
+  // true = this event was the VPN extension's exit and became the record.
+  note(sdkName: string, params: Object | undefined | null): boolean {
+    const record: ProcessExitRecord | null = killedProcessRecord(sdkName, params);
+    if (record === null) {
+      return false;
+    }
+    this.latest = record;
+    return true;
+  }
+
+  record(): ProcessExitRecord | null {
+    return this.latest;
   }
 }

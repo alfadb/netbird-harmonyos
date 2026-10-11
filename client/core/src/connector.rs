@@ -1495,6 +1495,94 @@ struct ConnectorShared {
     /// acquired while `inner`, `ice`, `relay`, a carrier leaf lock or a WG
     /// device lock is held.
     route_apply: Mutex<()>,
+    /// 2026-10-09 (ArkTS main-thread freeze fix): the LAST SUCCESSFULLY read
+    /// ICE sub-snapshot — the `ice` summary, the per-peer `ice_peers` details
+    /// and the per-peer socket demand, all three from ONE orchestrator
+    /// acquisition — with its monotonic read time. `connector_status()` and
+    /// the network-config gate read the orchestrator with `try_lock` ONLY: the
+    /// 10 ms ICE pump holds that mutex across a synchronous gather
+    /// (`ensure_locals` → `gather_candidates`, `DEFAULT_STUN_TIMEOUT_MS` per
+    /// peer) and on the 2026-10-09 device run four offline peers re-negotiating
+    /// held it 8.4–11 s, freezing the ArkTS main thread on its 5 s status poll.
+    /// A busy lock now serves THIS sample (with its age) instead of queueing —
+    /// never a fabricated empty state (0 peers / no ICE surface) that made the
+    /// UI flicker. `stale`/`age_ms` are rendered by
+    /// [`with_ice_sockets_section`] as `ice_snapshot_stale` /
+    /// `ice_snapshot_age_ms`.
+    ///
+    /// Lock order: `inner` → `ice` → this leaf. This leaf is taken with NO
+    /// orchestrator guard and NO other leaf held (only `inner` may be held by
+    /// [`ConnectorShared::refresh_net_gate_at`]), and a guard of this leaf is
+    /// never held while acquiring `inner` or `ice`.
+    ice_snapshot: Mutex<Option<IceStatusSample>>,
+}
+
+/// 2026-10-09 (ArkTS main-thread freeze fix): ONE ICE status sub-snapshot —
+/// everything `connector_status()` needs from the peer-ICE orchestrator, read
+/// under a single acquisition (or served from the last one when the lock is
+/// busy). Counts / state tokens / public keys only: no ufrag, no password, no
+/// fd, no token.
+#[derive(Debug, Clone, PartialEq)]
+struct IceStatusSample {
+    /// The orchestrator summary (`ice`): per-state counts, endpoint landings,
+    /// reachability and the class-only last error.
+    ice: IceOrchestratorSummary,
+    /// The per-peer detail table (`ice_peers`): `Some(..)` for an armed
+    /// orchestrator (`Some(vec![])` = armed with ZERO peers). `None` = no
+    /// orchestrator at all (known absent) — or, when `stale` is set, an armed
+    /// orchestrator that was never successfully read (the documented unknown
+    /// shape, flagged by `ice_snapshot_stale`).
+    ice_peers: Option<Vec<PeerIceDetail>>,
+    /// [`PeerIceOrchestrator::need_per_peer`] AS RENDERED: `-1` = interface
+    /// enumeration failed or no ICE read ever succeeded (the shell keeps its
+    /// own fallback constant).
+    need_per_peer: i64,
+    /// Monotonic ms of the successful read that produced `ice`/`ice_peers`.
+    at_ms: u64,
+    /// TRUE when this sample is served BECAUSE the orchestrator lock was busy
+    /// — i.e. it is the last successful read, not a read taken now.
+    stale: bool,
+    /// Age of the served sample, ALWAYS non-negative: `Some(0)` = fresh read,
+    /// `Some(n)` = the cached sample is n ms old, `None` = there is no
+    /// successful ICE read to age (rendered `null`, this document's own
+    /// "unknown"). A NEGATIVE sentinel is deliberately not used: the crate's
+    /// strict config reader rejects negative numbers
+    /// ([`crate::config::parse_document`] — the N2-H freeze-facts reader parses
+    /// THIS document with it), and the frozen `need_per_peer`/`queued` `-1`
+    /// sentinels are the only negatives anybody signed up for.
+    age_ms: Option<u64>,
+}
+
+impl IceStatusSample {
+    /// No orchestrator object at all: a KNOWN absent ICE surface (not an
+    /// unread one), so it is never marked stale and carries no age.
+    fn absent() -> Self {
+        IceStatusSample {
+            ice: IceOrchestratorSummary::default(),
+            ice_peers: None,
+            need_per_peer: -1,
+            at_ms: 0,
+            stale: false,
+            age_ms: None,
+        }
+    }
+
+    /// An armed orchestrator that was NEVER successfully read (the lock has
+    /// been busy since the first poll): the documented unknown shape — zeroed
+    /// summary, `ice_peers:null`, `need_per_peer:-1` (the EXISTING "cannot
+    /// enumerate / unknown" sentinel the shell already falls back on) — plus an
+    /// explicit `stale` mark and an UNKNOWN (`null`) age, so the shell reads it
+    /// as unknown, never as a real zero-peered orchestrator read just now.
+    fn unknown_busy() -> Self {
+        IceStatusSample {
+            ice: IceOrchestratorSummary::default(),
+            ice_peers: None,
+            need_per_peer: -1,
+            at_ms: 0,
+            stale: true,
+            age_ms: None,
+        }
+    }
 }
 
 /// N13-D1: relay slot contents (urls = the configured set, public routing
@@ -1570,6 +1658,7 @@ impl ConnectorShared {
             relay_runtime: std::sync::OnceLock::new(),
             relay_ads: Arc::new(Mutex::new(HashMap::new())),
             route_apply: Mutex::new(()),
+            ice_snapshot: Mutex::new(None),
         }
     }
 
@@ -1722,6 +1811,82 @@ impl ConnectorShared {
         outcome
     }
 
+    /// 2026-10-09 (ArkTS main-thread freeze fix): THE non-blocking ICE status
+    /// read — the `ice` summary, the per-peer `ice_peers` details and the
+    /// per-peer socket demand from a SINGLE acquisition, taken with `try_lock`
+    /// ONLY. Callers on the shell's synchronous status / network-config path
+    /// (the ArkTS main thread) must go through this; the pre-fix assembly took
+    /// the same orchestrator lock three times and each acquisition could queue
+    /// behind the ICE pump's synchronous gather (device run 2026-10-09: 8.4 s
+    /// of one tick held the lock, 4 offline peers re-negotiating).
+    ///
+    /// Busy lock = serve the LAST successful sample with its age (`stale`) —
+    /// never a fabricated empty state. A never-read armed orchestrator renders
+    /// the documented unknown shape marked stale with an UNKNOWN (`null`) age.
+    /// A fresh read also refreshes the cache, so the next busy poll keeps
+    /// reporting the most recent real state.
+    fn ice_status_sample(&self) -> IceStatusSample {
+        let Some(orch) = self.ice.get() else {
+            // No orchestrator object at all (unit-test construction / before an
+            // ICE-capable start): a KNOWN absent ICE surface, never stale.
+            return IceStatusSample::absent();
+        };
+        // One acquisition, three pure reads; the guard is released inside the
+        // `map` before the cache below is touched (lock order: `ice` → cache,
+        // and never the reverse).
+        let fresh = try_lock_poison(orch).map(|g| IceStatusSample {
+            ice: g.summary(),
+            ice_peers: Some(g.ice_details()),
+            need_per_peer: g.need_per_peer().map(|n| n as i64).unwrap_or(-1),
+            at_ms: crate::sys::mono_ms(),
+            stale: false,
+            age_ms: Some(0),
+        });
+        if let Some(sample) = fresh {
+            *self.ice_snapshot.lock_poison() = Some(sample.clone());
+            return sample;
+        }
+        // Busy: the ICE pump is inside a gather. Serve the last successful
+        // sample (age measured against the monotonic clock), or the explicit
+        // unknown shape when there never was one.
+        let now = crate::sys::mono_ms();
+        match self.ice_snapshot.lock_poison().as_ref() {
+            Some(last) => IceStatusSample {
+                stale: true,
+                age_ms: Some(now.saturating_sub(last.at_ms)),
+                ..last.clone()
+            },
+            None => IceStatusSample::unknown_busy(),
+        }
+    }
+
+    /// 2026-10-09 (ArkTS main-thread freeze fix): the default-route gate's ICE
+    /// view. Read with the SAME non-blocking rule as the status surface but
+    /// WITHOUT the per-peer details / socket demand (this path needs the
+    /// summary alone, and it stays as cheap as the pre-fix
+    /// `lock_poison().summary()`): a busy orchestrator serves the CACHED
+    /// sample's summary, or the documented unknown default when there never was
+    /// one — never a blocking acquisition, and never a gate decision invented
+    /// from a fabricated empty state (the cache is only ever written by
+    /// [`ConnectorShared::ice_status_sample`], so it is one coherent
+    /// acquisition, never a summary stitched onto older details).
+    fn ice_summary_for_gate(&self) -> IceOrchestratorSummary {
+        let Some(orch) = self.ice.get() else {
+            // No orchestrator (unit-test construction): the unchanged N3-7
+            // "no peers" rule — `ice_ready_for_default_route` reads a zeroed
+            // summary as ready, exactly like the pre-fix `None => true`.
+            return IceOrchestratorSummary::default();
+        };
+        if let Some(summary) = try_lock_poison(orch).map(|g| g.summary()) {
+            return summary;
+        }
+        self.ice_snapshot
+            .lock_poison()
+            .as_ref()
+            .map(|cached| cached.ice.clone())
+            .unwrap_or_default()
+    }
+
     /// N7: re-decide the snapshot's default-route gate against LIVE
     /// data-plane readiness (`wg.tunnel_ready()` on the device-backed seam ×
     /// the ICE view). The snapshot built at sync time is gated with the
@@ -1759,10 +1924,14 @@ impl ConnectorShared {
         let Some(snap) = inner.net_config.as_mut() else {
             return;
         };
-        let ice_ready = match self.ice.get() {
-            Some(ice) => ice_ready_for_default_route(&ice.lock_poison().summary()),
-            None => true, // no orchestrator (unit-test construction): unchanged rule
-        };
+        // 2026-10-09: the ICE leaf is read with the SAME non-blocking rule as
+        // `connector_status()` ([`ConnectorShared::ice_summary_for_gate`]): a
+        // busy orchestrator serves the last known summary (or the documented
+        // unknown default) instead of queueing this read behind the ICE pump's
+        // 8–11 s gather. The gate is re-decided on EVERY read, so a stale view
+        // self-corrects on the next successful one — and it is never replaced
+        // by a fabricated one.
+        let ice_ready = ice_ready_for_default_route(&self.ice_summary_for_gate());
         let (allowed, reason) =
             self.decide_default_route(inner.force_default_route, wg, ice_ready, snap.peers.len());
         if allowed != snap.default_route_allowed || reason != snap.default_route_reason {
@@ -4114,33 +4283,29 @@ impl ConnectorStatus {
     /// lock order (`inner` first, then one leaf at a time — see the
     /// [`ConnectorShared`] field order). `peer_relays` is injected by the
     /// caller ([`ConnectorHandle::status`]) because it belongs to the relay
-    /// carrier, which is read WITHOUT the shared lock held. The ICE leaf is
-    /// taken EXACTLY ONCE, for both the `ice` summary and the `ice_peers`
-    /// details (see below).
+    /// carrier, which is read WITHOUT the shared lock held. `ice` is the ICE
+    /// sub-snapshot the caller read with the NON-BLOCKING
+    /// [`ConnectorShared::ice_status_sample`] — the summary and the per-peer
+    /// details come from that ONE sample, so they always describe the same
+    /// peer set (and a busy orchestrator never blocks this assembly; the
+    /// sample carries its own `stale`/`age_ms`).
     fn snapshot(
         shared: &ConnectorShared,
         wg: &dyn WgPeerApplier,
         peer_relays: Option<Vec<PeerRelayStatus>>,
+        ice: &IceStatusSample,
     ) -> ConnectorStatus {
         shared.refresh_net_gate(wg);
         let g = shared.lock();
         let running = shared.is_running();
         let state = g.machine.state();
-        // ONE ice-orchestrator lock for BOTH the frozen `ice` summary and the
-        // new per-peer `ice_peers` details: two separate acquisitions could
-        // observe a different peer set / selected pair in between, so the
-        // counts and the details would describe two different snapshots.
-        // Lock order is the documented one — `inner` is held, then this single
-        // leaf (the same nesting `refresh_net_gate_at` already uses); the
-        // guard is released before the signal/wg/relay leaves are read and no
-        // orchestrator method is called under it beyond these two pure reads.
-        let (ice, ice_peers) = match shared.ice.get() {
-            Some(orch) => {
-                let orch = orch.lock_poison();
-                (orch.summary(), Some(orch.ice_details()))
-            }
-            None => (IceOrchestratorSummary::default(), None),
-        };
+        // The frozen `ice` summary and the per-peer `ice_peers` details come
+        // from the SAME [`IceStatusSample`] the caller read under a single
+        // orchestrator acquisition (see `ice_status_sample`): two separate
+        // acquisitions could observe a different peer set / selected pair in
+        // between, so the counts and the details would describe two different
+        // snapshots. No orchestrator guard is taken here at all, so this read
+        // can never queue behind the ICE pump's gather.
         ConnectorStatus {
             running,
             state,
@@ -4156,13 +4321,13 @@ impl ConnectorStatus {
             wg_apply_errors: g.wg_apply_errors,
             logout_ok: g.logout_ok,
             terminal: is_terminal_state(running, state),
-            ice,
+            ice: ice.ice.clone(),
             signal: shared.signal.get().map(|rt| rt.status()).unwrap_or_default(),
             wg: wg.dataplane_status().unwrap_or_default(),
             recreate: g.recreate.clone(),
             relay: shared.relay_status(),
             peer_relays,
-            ice_peers,
+            ice_peers: ice.ice_peers.clone(),
         }
     }
 
@@ -5709,14 +5874,30 @@ impl ConnectorHandle {
     /// lock held (lock-order discipline), before [`ConnectorShared`] is
     /// locked. `None` = no carrier armed.
     pub fn status(&self) -> ConnectorStatus {
+        let ice = self.shared.ice_status_sample();
+        self.status_with_ice(&ice)
+    }
+
+    /// [`ConnectorHandle::status`] with the ICE sub-snapshot ALREADY read:
+    /// [`ConnectorHandle::status_json`] needs the same sample for the
+    /// `ice_sockets` tail (`need_per_peer` + the freshness marks), and the
+    /// frozen `ice`/`ice_peers` fields must describe that very sample.
+    fn status_with_ice(&self, ice: &IceStatusSample) -> ConnectorStatus {
         let peer_relays =
             self.shared.relay_carrier.get().map(|carrier| carrier.peer_relays());
-        ConnectorStatus::snapshot(&self.shared, self.wg.as_ref(), peer_relays)
+        ConnectorStatus::snapshot(&self.shared, self.wg.as_ref(), peer_relays, ice)
     }
 
     /// The `connector_status()` JSON document.
     pub fn status_json(&self) -> String {
-        let base = self.status().to_json();
+        // 2026-10-09 (ArkTS main-thread freeze fix): ONE non-blocking ICE read
+        // ([`ConnectorShared::ice_status_sample`]) supplies the frozen
+        // `ice`/`ice_peers` fields AND the `ice_sockets` tail's `need_per_peer`.
+        // The pre-fix path took the orchestrator lock three times (summary,
+        // details, need_per_peer) and each acquisition could queue behind the
+        // ICE pump's 8–11 s gather, freezing the shell's 5 s status poll.
+        let ice = self.shared.ice_status_sample();
+        let base = self.status_with_ice(&ice).to_json();
         // N5c starvation observability: expose the ICE socket queue depth so a
         // FEEDER can read the real value. A feeder that only learns the depth
         // from its own feed calls keeps a stale "still queued" reading and
@@ -5731,9 +5912,16 @@ impl ConnectorHandle {
         // CORE will actually require (`allowed_ifaces × 2`), so the shell can
         // size the pool from core's real need instead of assuming 4. -1 =
         // interface enumeration failed → the shell keeps its own constant.
-        let need_per_peer =
-            self.ice.lock_poison().need_per_peer().map(|n| n as i64).unwrap_or(-1);
-        with_ice_sockets_section(&base, queued, taken, need_per_peer)
+        // 2026-10-09: it comes from the SAME sample as `ice`/`ice_peers`
+        // (`-1` also when no ICE read ever succeeded — see the freshness mark).
+        with_ice_sockets_section(
+            &base,
+            queued,
+            taken,
+            ice.need_per_peer,
+            ice.stale,
+            ice.age_ms,
+        )
     }
 
     /// 006: fill the connector-owned half of the resource snapshot with
@@ -7385,14 +7573,43 @@ fn ice_sockets_section(queued: i64, taken: i64, need_per_peer: i64) -> String {
 }
 
 /// The full `connector_status()` text: `base` with the N5c socket-pool section
-/// appended INSIDE its root object (the base document's trailing `}` is
-/// replaced by `,<section>}`). Extracted so the unit test exercises the SAME
-/// brace dance the status surface uses — a hand-assembled fixture in the test
-/// would not have caught a missing closing brace.
-fn with_ice_sockets_section(base: &str, queued: i64, taken: i64, need_per_peer: i64) -> String {
+/// AND the 2026-10-09 ICE-snapshot freshness marks appended INSIDE its root
+/// object (the base document's trailing `}` is replaced by
+/// `,<ice_snapshot_stale>,<ice_snapshot_age_ms>,<ice_sockets>}`). Extracted so
+/// the unit test exercises the SAME brace dance the status surface uses — a
+/// hand-assembled fixture in the test would not have caught a missing closing
+/// brace.
+///
+/// 2026-10-09 (`ice_snapshot_stale` / `ice_snapshot_age_ms`): the two marks are
+/// added BEFORE the trailing `ice_sockets` section so that (a) every
+/// pre-existing key keeps its bytes and its relative order (the base document
+/// up to `ice_peers` is untouched) and (b) the document still ENDS with the
+/// `ice_sockets` object — the trailing section the compatibility tests pin.
+/// `ice_snapshot_stale` = `true` when the `ice`/`ice_peers`/`need_per_peer`
+/// values in this document are the LAST SUCCESSFUL sample rather than a fresh
+/// read (the orchestrator lock was busy with a gather); `ice_snapshot_age_ms`
+/// = `0` for a fresh read, the sample's age in ms when it is cached, and `null`
+/// when there is no successful ICE read to age (this document's own "unknown")
+/// — never a fabricated `0` age, never a negative sentinel (the crate's strict
+/// config reader rejects negatives and the N2-H freeze-facts reader parses this
+/// document with it) and never a silent empty ICE state.
+fn with_ice_sockets_section(
+    base: &str,
+    queued: i64,
+    taken: i64,
+    need_per_peer: i64,
+    ice_snapshot_stale: bool,
+    ice_snapshot_age_ms: Option<u64>,
+) -> String {
+    let age = match ice_snapshot_age_ms {
+        Some(ms) => ms.to_string(),
+        None => "null".to_string(),
+    };
     format!(
-        "{},{}}}",
+        "{},\"ice_snapshot_stale\":{},\"ice_snapshot_age_ms\":{},{}}}",
         &base[..base.len() - 1],
+        ice_snapshot_stale,
+        age,
         ice_sockets_section(queued, taken, need_per_peer)
     )
 }
@@ -8947,10 +9164,13 @@ mod tests {
             3,
             4,
             6,
+            false,
+            Some(0),
         );
         assert_eq!(
             doc,
             "{\"running\":true,\"state\":\"disconnected\",\
+             \"ice_snapshot_stale\":false,\"ice_snapshot_age_ms\":0,\
              \"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"
         );
         assert!(
@@ -8959,8 +9179,226 @@ mod tests {
         );
         assert!(
             doc.ends_with(",\"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"),
-            "the section is appended last, inside the root object: {doc}"
+            "the ice_sockets section stays the trailing section of the root object: {doc}"
         );
+        // 2026-10-09: the freshness marks — a cached sample renders stale with
+        // its real age; every pre-existing key keeps its position (the marks
+        // ride between `ice_peers` and the trailing `ice_sockets` section).
+        let stale_doc = with_ice_sockets_section(
+            "{\"running\":true,\"state\":\"connected\",\"ice_peers\":[]}",
+            3,
+            4,
+            6,
+            true,
+            Some(8421),
+        );
+        assert_eq!(
+            stale_doc,
+            "{\"running\":true,\"state\":\"connected\",\"ice_peers\":[],\
+             \"ice_snapshot_stale\":true,\"ice_snapshot_age_ms\":8421,\
+             \"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"
+        );
+        assert!(matches!(config::parse_document(&stale_doc), Ok(Json::Obj(_))));
+        // ... and "no successful ICE read to age" is the document's own
+        // `null` — NOT a negative sentinel, which the strict reader rejects.
+        let unread_doc = with_ice_sockets_section(
+            "{\"running\":true,\"state\":\"connecting\"}",
+            0,
+            0,
+            6,
+            true,
+            None,
+        );
+        assert!(
+            unread_doc.contains(
+                "\"ice_snapshot_stale\":true,\"ice_snapshot_age_ms\":null,\
+                 \"ice_sockets\":{\"queued\":0,\"taken\":0,\"need_per_peer\":6}}"
+            ),
+            "{unread_doc}"
+        );
+        assert!(matches!(config::parse_document(&unread_doc), Ok(Json::Obj(_))), "{unread_doc}");
+    }
+
+    /// 2026-10-09（ArkTS 主线程冻结修复）：orchestrator 锁被「另一线程长时间
+    /// 持有」（真机形态：ICE pump 在 gather 里持锁 8.4–11 s）时，`status_json()`
+    /// 必须于有界时间内返回：`try_lock` 读不到就回最近一次成功的 ICE 子快照
+    /// （`ice`/`ice_peers`/`need_per_peer` 三者同一份），以
+    /// `ice_snapshot_stale:true` + 真实 `ice_snapshot_age_ms` 标明；从未成功
+    /// 读过则输出既有的「未知」形态并 stale、age=null —— 绝不把在线 peer 读成 0
+    /// 或把 ICE 面抹成空，也绝不阻塞。锁释放后下一次读取必须重新新鲜且拿到更新
+    /// 后的值。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_json_serves_the_last_ice_snapshot_while_the_orchestrator_is_busy() {
+        // 读一个 JSON 数字字段（本测试的 stale/age/peers 断言用）。
+        fn num_field(doc: &str, key: &str) -> i64 {
+            let needle = format!("\"{key}\":");
+            let at = doc.find(&needle).unwrap_or_else(|| panic!("missing {key}: {doc}"))
+                + needle.len();
+            let rest = &doc[at..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit() && c != '-')
+                .unwrap_or(rest.len());
+            rest[..end].parse().unwrap_or_else(|e| panic!("{key} is not an integer: {e} in {doc}"))
+        }
+
+        // 直接搭一个「无 worker / 无 pump」的 handle：本测试自己持有
+        // orchestrator 锁，任何后台线程都会把时序变成掷骰子。
+        fn bare_status_handle(
+            shared: Arc<ConnectorShared>,
+            wg: Arc<dyn WgPeerApplier>,
+            ice: Arc<Mutex<PeerIceOrchestrator>>,
+        ) -> Arc<ConnectorHandle> {
+            struct NeverConnects;
+            impl ManagementFactory for NeverConnects {
+                fn connect(
+                    &self,
+                ) -> Pin<
+                    Box<
+                        dyn Future<Output = Result<ManagementGrpcClient, ManagementError>>
+                            + Send
+                            + '_,
+                    >,
+                > {
+                    Box::pin(async { Err(ManagementError::Network("status-busy-probe".into())) })
+                }
+            }
+            struct NeverApplies;
+            impl ConfigApplier for NeverApplies {
+                fn apply(&self, _map: &NetworkMap) {}
+                fn clear(&self) {}
+            }
+            let (network_change, _rx) = tokio::sync::watch::channel(0u64);
+            // the production spawn always attaches the UDP source (an empty one
+            // here, on BOTH the shared snapshot and the handle): without it the
+            // frozen `ice_sockets` section renders the `-1` no-source sentinels,
+            // which is a different (pre-existing) shape than the one this test
+            // is about.
+            let udp = Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            );
+            let _ = shared.ice_sockets.set(udp.clone());
+            Arc::new(ConnectorHandle {
+                shared,
+                wg,
+                host: Arc::new(NeverApplies),
+                network_change,
+                generation: 0,
+                management_factory: Arc::new(NeverConnects),
+                logout_slot: Arc::new(Mutex::new(None)),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                socket_source: None,
+                ice_sockets: Some(udp),
+                signal_sockets: None,
+                wg_feed: None,
+                ice,
+                management_dial: None,
+                worker: Mutex::new(None),
+                renewal: Mutex::new(None),
+                runtime: tokio::runtime::Handle::current(),
+            })
+        }
+
+        let wg: Arc<dyn WgPeerApplier> = Arc::new(WgPeerRegistry::new());
+        let ice = Arc::new(Mutex::new(PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![])),
+            socks: Arc::new(
+                crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            ),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: wg.clone(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        })));
+        ice.lock_poison().set_peers(&["QUJD".to_string()]);
+
+        // handle A 先成功读一次（缓存变热）；handle B 从未成功读过。
+        let shared_a = Arc::new(ConnectorShared::new(false, None));
+        let _ = shared_a.ice.set(ice.clone());
+        let handle_a = bare_status_handle(shared_a.clone(), wg.clone(), ice.clone());
+        let shared_b = Arc::new(ConnectorShared::new(false, None));
+        let _ = shared_b.ice.set(ice.clone());
+        let handle_b = bare_status_handle(shared_b, wg.clone(), ice.clone());
+
+        // ① 新鲜读：stale=false / age=0 / 拿到真实的一 peer 快照。
+        let fresh = handle_a.status_json();
+        assert!(fresh.contains("\"ice_snapshot_stale\":false"), "{fresh}");
+        assert_eq!(num_field(&fresh, "ice_snapshot_age_ms"), 0, "{fresh}");
+        assert!(fresh.contains("\"ice\":{\"peers\":1,"), "{fresh}");
+        assert!(
+            fresh.contains("\"ice_peers\":[{\"pub_key\":\"QUJD\",\"state\":\"idle\""),
+            "{fresh}"
+        );
+        let fresh_need = num_field(&fresh, "need_per_peer");
+        assert!(matches!(config::parse_document(&fresh), Ok(Json::Obj(_))), "{fresh}");
+
+        // ② 另一线程持锁（pump 在 gather 里的形态：锁被占用且不放手，由测试显式
+        //    放行，不靠 sleep 猜时序）。
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let ice_holder = ice.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = ice_holder.lock_poison();
+            acquired_tx.send(()).expect("signal acquisition");
+            release_rx.recv().expect("hold until the test releases");
+        });
+        acquired_rx.recv().expect("the holder took the orchestrator lock");
+
+        let t0 = std::time::Instant::now();
+        let busy_a = handle_a.status_json();
+        let busy_a_elapsed = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let busy_b = handle_b.status_json();
+        let busy_b_elapsed = t1.elapsed();
+        assert!(
+            busy_a_elapsed < Duration::from_millis(50),
+            "a busy orchestrator must not block the status read: {busy_a_elapsed:?}"
+        );
+        assert!(
+            busy_b_elapsed < Duration::from_millis(50),
+            "a busy orchestrator must not block the never-read status read: {busy_b_elapsed:?}"
+        );
+
+        // A：缓存值原样返回（不是 0 peer、不是空 ICE 面），stale + 真实 age。
+        assert!(busy_a.contains("\"ice_snapshot_stale\":true"), "{busy_a}");
+        assert!(busy_a.contains("\"ice\":{\"peers\":1,"), "{busy_a}");
+        assert!(
+            busy_a.contains("\"ice_peers\":[{\"pub_key\":\"QUJD\",\"state\":\"idle\""),
+            "{busy_a}"
+        );
+        assert_eq!(num_field(&busy_a, "need_per_peer"), fresh_need, "{busy_a}");
+        let age = num_field(&busy_a, "ice_snapshot_age_ms");
+        assert!((0..=60_000).contains(&age), "a cached sample carries its real age: {age}");
+        assert!(matches!(config::parse_document(&busy_a), Ok(Json::Obj(_))), "{busy_a}");
+
+        // B：从未成功读过 ⇒ 既有的「未知」形态（0 peer 摘要 + ice_peers:null +
+        //    need_per_peer:-1），但 stale=true 且 age=null，不会被当成真实状态。
+        //    （age 用文档自己的 null 而不是负数哨兵：负数会被 crate 自己的严格
+        //    读取器拒收，N2-H freeze facts 就是用它读这份文档的。）
+        assert!(busy_b.contains("\"ice_snapshot_stale\":true"), "{busy_b}");
+        assert!(busy_b.contains("\"ice_snapshot_age_ms\":null"), "{busy_b}");
+        assert!(busy_b.contains("\"ice\":{\"peers\":0,"), "{busy_b}");
+        assert!(busy_b.contains("\"ice_peers\":null"), "{busy_b}");
+        assert_eq!(num_field(&busy_b, "need_per_peer"), -1, "{busy_b}");
+
+        // ③ 放锁：下一次读取重新新鲜，且拿到更新后的值（B 也补上缓存）。
+        release_tx.send(()).expect("release the orchestrator lock");
+        holder.join().expect("the holder thread");
+
+        let after = handle_a.status_json();
+        assert!(after.contains("\"ice_snapshot_stale\":false"), "{after}");
+        assert_eq!(num_field(&after, "ice_snapshot_age_ms"), 0, "{after}");
+        let after_b = handle_b.status_json();
+        assert!(after_b.contains("\"ice_snapshot_stale\":false"), "{after_b}");
+        assert!(after_b.contains("\"ice\":{\"peers\":1,"), "{after_b}");
+
+        ice.lock_poison().set_peers(&["QUJD".to_string(), "QkJC".to_string()]);
+        let updated = handle_a.status_json();
+        assert!(updated.contains("\"ice_snapshot_stale\":false"), "{updated}");
+        assert_eq!(num_field(&updated, "ice_snapshot_age_ms"), 0, "{updated}");
+        assert!(updated.contains("\"ice\":{\"peers\":2,"), "{updated}");
+        assert!(updated.contains("\"pub_key\":\"QUJD\""), "{updated}");
+        assert!(updated.contains("\"pub_key\":\"QkJC\""), "{updated}");
     }
 
     #[test]
@@ -9348,6 +9786,7 @@ mod tests {
                 pub_key_b64: "QUJD".to_string(),
                 relay_url: "rel://relay.example:33000".to_string(),
             }]),
+            &shared.ice_status_sample(),
         );
         status.ice_peers = Some(vec![idle, connected, disconnected]);
         let json = status.to_json();
@@ -9435,20 +9874,22 @@ mod tests {
         );
     }
 
-    /// 2026-10-07: `ConnectorStatus::snapshot` reads the ICE orchestrator
-    /// EXACTLY ONCE and fills BOTH `ice` (summary) and `ice_peers` (details)
-    /// from that one acquisition — the two surfaces always describe the same
-    /// peer set (a second read could straddle a `set_peers`/re-selection and
-    /// publish counts and details of different snapshots). Three states: no
-    /// orchestrator → `null`; orchestrator with ZERO peers → `[]`; armed with
-    /// peers → one public-key-sorted detail per peer.
+    /// 2026-10-07 (2026-10-09: caller-supplied sample): `ConnectorStatus::snapshot`
+    /// fills BOTH `ice` (summary) and `ice_peers` (details) from ONE
+    /// [`IceStatusSample`] — the sample the caller took with the SINGLE
+    /// non-blocking [`ConnectorShared::ice_status_sample`] acquisition — so the
+    /// two surfaces always describe the same peer set (a second read could
+    /// straddle a `set_peers`/re-selection and publish counts and details of
+    /// different snapshots). Three states: no orchestrator → `null`;
+    /// orchestrator with ZERO peers → `[]`; armed with peers → one
+    /// public-key-sorted detail per peer.
     #[test]
     fn status_snapshot_reads_the_orchestrator_once_for_summary_and_details() {
         let wg: Arc<dyn WgPeerApplier> = Arc::new(WgPeerRegistry::new());
 
         // (1) no orchestrator (unit-test construction): null, never []
         let bare = ConnectorShared::new(false, None);
-        let status = ConnectorStatus::snapshot(&bare, wg.as_ref(), None);
+        let status = ConnectorStatus::snapshot(&bare, wg.as_ref(), None, &bare.ice_status_sample());
         assert_eq!(status.ice_peers, None);
         assert_eq!(status.ice, IceOrchestratorSummary::default());
         assert!(
@@ -9471,7 +9912,8 @@ mod tests {
             advertised_candidates: Vec::new(),
         })));
         let _ = shared.ice.set(ice.clone());
-        let empty_peers = ConnectorStatus::snapshot(&shared, wg.as_ref(), None);
+        let empty_peers =
+            ConnectorStatus::snapshot(&shared, wg.as_ref(), None, &shared.ice_status_sample());
         assert_eq!(empty_peers.ice_peers, Some(vec![]), "armed with zero peers is [], never null");
         assert_eq!(empty_peers.ice, IceOrchestratorSummary::default());
         assert!(
@@ -9484,7 +9926,7 @@ mod tests {
         // endpoints — and the summary and the detail table describe the SAME
         // peer set (the one-lock rule, observed on the production assembly).
         ice.lock_poison().set_peers(&["UEVFUjA=".to_string()]);
-        let status = ConnectorStatus::snapshot(&shared, wg.as_ref(), None);
+        let status = ConnectorStatus::snapshot(&shared, wg.as_ref(), None, &shared.ice_status_sample());
         let details = status.ice_peers.clone().expect("armed orchestrator → Some");
         assert_eq!(details.len(), status.ice.peers, "counts and details are one snapshot");
         assert_eq!(status.ice.idle, 1);
@@ -13835,7 +14277,12 @@ mod tests {
         );
 
         // the status DOCUMENT carries it (production assembly + tail JSON).
-        let status = ConnectorStatus::snapshot(&fx.shared, fx.wg.as_ref(), Some(lanes));
+        let status = ConnectorStatus::snapshot(
+            &fx.shared,
+            fx.wg.as_ref(),
+            Some(lanes),
+            &fx.shared.ice_status_sample(),
+        );
         let json = status.to_json();
         assert!(
             json.contains(&format!(
@@ -13893,6 +14340,7 @@ mod tests {
             &fx.shared,
             fx.wg.as_ref(),
             Some(fx.carrier.peer_relays()),
+            &fx.shared.ice_status_sample(),
         );
         let empty_json = empty_status.to_json();
         assert!(

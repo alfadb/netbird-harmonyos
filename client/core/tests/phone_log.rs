@@ -577,7 +577,14 @@ fn flush_and_shutdown_are_bounded_when_idle() {
     assert!(json.ends_with('}'), "{json}");
     assert!(json.contains("\"running\":false"), "{json}");
     assert!(json.contains("\"queue_capacity\":256"), "{json}");
-    assert!(json.contains("\"segment_bytes\":2097152"), "{json}");
+    assert!(json.contains("\"segment_bytes\":25165824"), "{json}");
+    assert!(json.contains("\"segments\":4"), "{json}");
+    // The production default caps the running log at 24 MiB per segment × 4
+    // kept files = 96 MiB on disk (the VPN share of the phone's 100 MiB
+    // running-log budget), and `configure` really resolved that value.
+    assert_eq!(stats.max_bytes, 24 * 1024 * 1024);
+    assert_eq!(stats.segments, 4);
+    assert_eq!(stats.max_bytes * u64::from(stats.segments), 96 * 1024 * 1024);
     // The admission budget and its counter are part of the status document.
     assert!(json.contains("\"rate_bytes_per_sec\":8192"), "{json}");
     assert!(json.contains("\"rate_records_per_sec\":64"), "{json}");
@@ -618,6 +625,10 @@ fn configure_validation_is_fail_closed() {
     let resolved = phone_log::stats();
     assert_eq!(resolved.rate_bytes_per_sec, 8192);
     assert_eq!(resolved.rate_records_per_sec, 64);
+    // `0` fields also resolve to the 24 MiB × 4 = 96 MiB running-log budget.
+    assert_eq!(resolved.max_bytes, 24 * 1024 * 1024);
+    assert_eq!(resolved.segments, 4);
+    assert_eq!(resolved.max_bytes * u64::from(resolved.segments), 96 * 1024 * 1024);
     assert!(phone_log::shutdown(Duration::from_secs(5)));
 
     // A path whose parent does not exist cannot be opened: fail-closed, and

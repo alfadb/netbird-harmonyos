@@ -1,7 +1,9 @@
 import VpnExtensionAbility from '@ohos.app.ability.VpnExtensionAbility';
+import AbilityConstant from '@ohos.app.ability.AbilityConstant';
 import Want from '@ohos.app.ability.Want';
 import fs from '@ohos.file.fs';
 import hilog from '@ohos.hilog';
+import process from '@ohos.process';
 import vpnExtension from '@ohos.net.vpnExtension';
 import connection from '@ohos.net.connection';
 import statistics from '@ohos.net.statistics';
@@ -74,7 +76,8 @@ import {
   resolveExclusionEndpointIp,
   resolveManagementIp, sleep,
   phoneLogAppend, phoneLogConfigure, phoneLogStatus, phoneLogSummary,
-  connectorResourceStatus, nativeResourceSample
+  connectorResourceStatus, nativeResourceSample,
+  nativeAllocStats
 } from './NetBirdConnector';
 // type-only: erased at runtime (same rule as the endpoint/policy shapes above),
 // so the host selfcheck fixtures that stage this file byte-identically need no
@@ -111,7 +114,7 @@ import { ICE_SOCKET_POOL_MIN, iceSocketNeedPerPeer, iceSocketTargetDepth,
 // OWN events into filesDir/netbird-vpn.log; these two modules must NEVER
 // re-forward a native line (that would double every record). They carry the
 // facts the core cannot see — the shell's own lifecycle/network/recreate
-// milestones (NetBirdDiagnostics, role 'vpn': marker + 60 s memory samples +
+// milestones (NetBirdDiagnostics, role 'vpn': marker + 1 s memory samples +
 // the bounded milestone queue) and the platform's system events
 // (NetBirdSystemEvents: APP_CRASH / APP_FREEZE / RESOURCE_OVERLIMIT /
 // APP_KILLED) — into the SAME phone_log sink. Both are started with the SAME
@@ -124,6 +127,14 @@ import { event as diagEvent, start as startDiagnostics, stop as stopDiagnostics 
 // object literal against a Record-typed parameter is rejected by ArkTS:
 // arkts-no-untyped-obj-literals), so the declaration form is the only one used.
 import type { DiagFields } from './NetBirdDiagnostics';
+// 2026-10-09 (0.0.17) onDestroy-entry stop marker. The ability writes the
+// marker's `stopping` state with the SYNCHRONOUS fs API (see
+// writeStopMarkerSync), so the file NAME, the path ALLOWLIST and the exact
+// marker LINE come from the PURE core — never re-spelled here. Value-only
+// import: the core imports nothing, and the host fixtures stage it
+// byte-identically next to the extension.
+import { buildMarker, markerBasename, recordPath, MARKER_STATE_STOPPING }
+  from './NetBirdDiagnosticsCore';
 import { start as startSystemEvents, stop as stopSystemEvents } from './NetBirdSystemEvents';
 // 2026-10-07 per-NetID route selection (decision B). The VPE is the ONLY reader
 // of the stored selection at start and the ONLY writer of the public catalog
@@ -383,7 +394,7 @@ const CONNECT_FAILURE_FILE_NAME: string = 'netbird-connect-failure';
 
 // 2026-10-08 shell-side diagnostics wiring:
 //   VPN_LOG_FILE_NAME — the native phone_log tee target under filesDir. The
-//     native module rotates it itself (netbird-vpn.log, .1 … .3, 2 MiB each)
+//     native module rotates it itself (netbird-vpn.log, .1 … .3, 24 MiB each)
 //     and opens it in APPEND mode, so a re-entered extension keeps the older
 //     records and marks the new run with its own `sess=` token.
 //   PHONE_LOG_STATUS_SAMPLE_MS — the writer-health summary cadence. It rides
@@ -882,6 +893,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // PROCESS (the path is idempotent, see startDiagnosticsLogTee), and the
   // writer-health summary rides the status watcher behind a 60 s gate.
   private logTeeConfigured: boolean = false;
+  // 2026-10-09 (0.0.17): the onDestroy ENTRY wrote the marker's `stopping`
+  // state once in this process, and the one-shot latch of the single W line a
+  // failed marker write may leave (see writeStopMarkerSync).
+  private stopMarkerWritten: boolean = false;
+  private stopMarkerWarned: boolean = false;
   private lastPhoneLogStatusAtMs: number = 0;
   // N8: route networks destined for the initial-create ACK (the managed
   // subset actually merged into the platform VpnConfig; core-visible form =
@@ -1093,6 +1109,23 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     sendN2Control(this.n2Evidence, target, protocol, id);
   }
 
+  // 2026-10-08 memory-pressure OBSERVATION (no memory is released here).
+  //
+  // SDK evidence, verified against the local API-26 declarations: `Ability`
+  // declares `onMemoryLevel(level: AbilityConstant.MemoryLevel)` and
+  // `ExtensionAbility extends Ability`, but VpnExtensionAbility's declaration
+  // (`@ohos.app.ability.VpnExtensionAbility.d.ts`) is a standalone class with
+  // NO extends clause and NO onMemoryLevel member (only context/onCreate/
+  // onDestroy). So this is NOT a declared override of a base member — it is an
+  // ADDITIONAL typed method carrying the exact SDK signature (no `any`, no
+  // cast), and whether the framework dispatches the callback into a VPN
+  // extension process is UNVERIFIED (device experiment pending). It only ever
+  // records the bounded enum token; it never frees, trims or evicts anything.
+  onMemoryLevel(level: AbilityConstant.MemoryLevel): void {
+    const milestoneFields: DiagFields = { 'stage': 'platform', 'state': String(level) };
+    this.diagMilestone('vpn_memory_level', milestoneFields);
+  }
+
   onCreate(want: Want): void {
     const wantRequestId: string = String(want.parameters?.['requestId'] ?? '');
     if (wantRequestId.length > 0 && wantRequestId.length <= 96) {
@@ -1178,7 +1211,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // process immortality here — this is a log destination, nothing more.
   //
   // START ORDER: native tee first (nothing can be appended before it exists),
-  // then the diagnostics helper (marker + 60 s memory samples + the bounded
+  // then the diagnostics helper (marker + 1 s memory samples + the bounded
   // milestone queue), then the system-event watcher (its subscription boundary
   // is its own `sys_event_watcher_started` line — an event that already
   // happened before it cannot be reconstructed, and APP_KILLED only ever
@@ -1229,7 +1262,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.requestId, configured.error ?? 'configure-failed');
       }
     }
-    startDiagnostics(filesDir, 'vpn', (line: string): void => { this.diagSink(line); });
+    startDiagnostics(filesDir, 'vpn', (line: string): void => { this.diagSink(line); },
+      (): string | undefined => nativeAllocStats());
     startSystemEvents('vpn', (line: string): void => { this.diagSink(line); });
     if (configured !== null) {
       // Recorded AFTER the helper started (else the queue would not accept it)
@@ -6163,7 +6197,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // (logExclusionGeneration) — the acceptance anchor below is what makes it
   // the evidence generation G of §2.1 C2 (4).
   private async settleCreate(fd: number, gen: number): Promise<CreateOutcome> {
-    this.createSettled = true;
+    // Startup race (2026-10-07): holding the fd is NOT a settled generation.
+    // `createSettled` is announced at the END of this leg (below), once the
+    // fail-closed protect gate, the WG data-plane feed, the ICE pool
+    // protect/feed and the initial ACK have all returned. The raw fd is still
+    // published here: the fd contract, the feeds and the pre-destroy audit all
+    // read `tunFd`, and the rebuildable gate is the COMPOSITE
+    // (connection && createSettled && tunFd >= 0) — never `tunFd` alone.
     this.tunFd = fd;
     const snapshot: FdSnapshot = this.captureFdSnapshot(fd);
     const accepted: boolean = snapshot.integer && snapshot.nonnegative && snapshot.probed && snapshot.open;
@@ -6340,6 +6380,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       });
     }
     this.ackAppliedRoutesInitial();
+    // Startup race (2026-10-07): the generation becomes settled — and so
+    // rebuildable / live-appliable — only HERE, after this leg really
+    // completed (protect gate + WG feed + ICE pool feed + initial ACK above).
+    // Announcing it on the fd alone let a mailbox tick or a watcher tick act
+    // on a generation whose own initialization was still running (and consume
+    // the pending route request against a not-yet-ACKed applied set).
+    // The ACK above is best-effort: a skip / refusal / throw is caught there
+    // and must NOT leave the leg un-settled (that would make a session never
+    // ready), so "ACK ok" is deliberately not a condition. A teardown or a
+    // connector death latched inside this leg IS terminal: a late completion
+    // must never reopen the rebuildable state — same latched predicate the
+    // protected-socket gates read.
+    if (!this.destroyRequested && !this.connectorDeathHandled &&
+      this.destroyPromise === undefined) {
+      this.createSettled = true;
+    }
     this.startStatusAndNetcfgWatcher();
     return {
       destroyRequired: true,
@@ -6977,8 +7033,82 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return await Promise.race([settled, box]);
   }
 
+  // 2026-10-09 (0.0.17) PRIOR_EXIT_UNCLEAN over-reporting fix: mark the
+  // diagnostics marker as `stopping` SYNCHRONOUSLY on the onDestroy ENTRY. The
+  // final `clean` state is still written by the late stopDiagnostics() only —
+  // but on the device the JS context is destroyed ~3 ms after onDestroy returns
+  // and the process exits within ~21 ms, so the destroyOnce continuation
+  // (await createPromise -> await connection.destroy() -> stopDiagnostics())
+  // NEVER runs: V016 ended at `vpn_destroy_phase phase=requested` with no
+  // `settled` (netbird-vpn.log:1528-1547) and the marker stayed `open`, so the
+  // NEXT session reported PRIOR_EXIT_UNCLEAN for an orderly user stop.
+  // `stopping` records the entered teardown; NetBirdDiagnosticsCore's
+  // isPriorUnclean() claims state=open ONLY, so the false report is gone — while
+  // a real reclaim still leaves `open`, because the system's SIGKILL path never
+  // calls onDestroy at all (negative control: 0 of the 4 system-killed v015
+  // processes has a `vpn_lifecycle_stop` row).
+  //
+  // FAIL-SOFT and bounded: one fixed, allowlisted path; openSync/writeSync/
+  // closeSync; NO fsync (a single line — a torn tail reads as the marker's
+  // unknown state, never as a claim); every failure is swallowed into at most
+  // ONE W line per ability instance (one onDestroy per extension instance, so in
+  // practice one per process). Never throws into the lifecycle callback.
+  //
+  // WHY THE GUARD: a process that never reached startDiagnosticsLogTee() never
+  // wrote its own `open` and does not own the marker file — writing `stopping`
+  // there would silently DESTROY a previous session's real `open`, the only
+  // evidence a prior reclaim left. That flag is set inside the same synchronous
+  // function, immediately before it starts the diagnostics writer (the preceding
+  // phoneLogConfigure() wrapper never throws), so false means "this process
+  // never armed the marker" and the write is skipped.
+  //
+  // Residual window, stated honestly: if onDestroy lands BEFORE the helper's
+  // asynchronous `open` write has reached the disk, that pending write lands
+  // last and the marker still ends up `open` — exactly today's behaviour, never
+  // worse.
+  private writeStopMarkerSync(): void {
+    if (this.stopMarkerWritten) {
+      return;
+    }
+    this.stopMarkerWritten = true;
+    if (!this.logTeeConfigured) {
+      return;
+    }
+    let path: string = '';
+    try {
+      path = recordPath(this.context.filesDir, markerBasename('vpn'));
+    } catch (error) {
+      path = '';
+    }
+    if (path.length === 0) {
+      return;
+    }
+    try {
+      const file: fs.File = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, buildMarker(new Date().toISOString(), process.pid,
+          'vpn', MARKER_STATE_STOPPING));
+      } finally {
+        fs.closeSync(file);
+      }
+    } catch (error) {
+      if (this.stopMarkerWarned) {
+        return;
+      }
+      this.stopMarkerWarned = true;
+      hilog.warn(DOMAIN, TAG, 'VPN_STOP_MARKER_WRITE_FAILED|requestId=%{public}s|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+    }
+  }
+
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'VPN_ONDESTROY|requestId=%{public}s', this.requestId);
+    // FIRST, and synchronously: nothing below this line is guaranteed to run
+    // (see writeStopMarkerSync). It precedes the latch and every call that can
+    // throw or take time (the native connector stop, the async destroy leg and
+    // the late diagnostics stop that writes `clean`).
+    this.writeStopMarkerSync();
     // Stop flow (N3-6): latch first (the async start flow must not create
     // past this point), stop the watch, stop the connector (idempotent,
     // safe with no connector), then the exactly-once VPN destroy — the

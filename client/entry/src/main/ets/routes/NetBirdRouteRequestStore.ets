@@ -25,11 +25,17 @@
 //   de-duplicates it with an in-memory lastProcessedId (its only live field) and
 //   there is no TTL here, so a request written while the VPE was offline still
 //   triggers a read of the CURRENT preference document on the next start.
-// - Every read is a direct bounded read of the whole tiny file. There is NO
-//   mtime/size "unchanged" shortcut: two atomic writes inside the same 100 ms
-//   can produce equal byte counts and an equal mtime, and skipping the read
-//   would then miss the newer request. The VPE's own busy guard bounds how
-//   often that read happens.
+// - Every read is preceded by a cheap synchronous stat (fs.statSync, the same
+//   synchronous fs half the callers already use, e.g. fs.accessSync) and an
+//   unchanged document is answered from the previous successful read instead of
+//   being opened, read and decoded again — the VPE polls the request on its
+//   100 ms socket-supply tick. The probe compares the whole file identity (ino,
+//   size, mtime, ctime plus the nanosecond stamps the platform reports) AND is
+//   bypassed for any document whose whole-second mtime is not safely in the
+//   past: two same-size writes inside one second can produce equal
+//   second-granular metadata. The cache block below spells out why no write
+//   this module makes can be missed, and a missing file still reads as null
+//   (now without even allocating the bound buffer).
 // - The two files have independent writers that are serialized OUTSIDE this
 //   module (the UI serializes its own request/result writes, the VPE serializes
 //   the request read + result write); the atomic temp/fsync/rename write is what
@@ -52,6 +58,9 @@ export const ROUTE_APPLY_REQUEST_FILE: string = 'netbird-route-apply-request.jso
 export const ROUTE_APPLY_RESULT_FILE: string = 'netbird-route-apply-result.json';
 export const MAX_ROUTE_APPLY_DOCUMENT_BYTES: number = 16 * 1024;
 const TEMP_SUFFIX: string = '.tmp';
+// The SDK's documented "no such file or directory" code: the ONE error that
+// means "this document was never written" (both for open and for stat).
+const NOT_FOUND_CODE: number = 13900002;
 
 interface CodedFailure extends Error {
   code?: number;
@@ -91,18 +100,109 @@ function encodeUtf8(text: string): Uint8Array {
   return new util.TextEncoder().encode(text);
 }
 
+// ONE decoder for the whole module. The VPE polls the request document on its
+// 100 ms socket-supply tick, so building a fresh TextDecoder for every poll was
+// pure per-tick overhead. A whole-buffer decodeToString leaves no state behind
+// (only a streamed decode would), so a single instance is safe to reuse.
+const UTF8_DECODER: util.TextDecoder = util.TextDecoder.create('utf-8', { fatal: true });
+
 function decodeUtf8(bytes: Uint8Array): string {
   try {
-    return util.TextDecoder.create('utf-8', { fatal: true }).decodeToString(bytes);
+    return UTF8_DECODER.decodeToString(bytes);
   } catch (error) {
     throw new RoutePreferencesError(REASON_MALFORMED);
   }
 }
 
+// ---------------------------------------------------------------------------
+// the cheap "unchanged document" probe (one stat, no read)
+// ---------------------------------------------------------------------------
+//
+// Both documents are polled by a timer (the VPE reads the request on its 100 ms
+// socket-supply tick, the page reads the result on its 2 s status tick) and are
+// written only by the atomic temp + fsync + rename below. Without the probe
+// every poll allocated the 16 KiB bound buffer and re-opened, re-read and
+// re-decoded the whole document even when nothing had changed since the
+// previous poll.
+//
+// Why the identity includes ino AND the nanosecond stamps: mtime is reported in
+// whole seconds, so two same-size writes inside one second can produce equal
+// size+mtime+ctime. `ino` alone already catches every write THIS module makes
+// (the rename swaps the file), and the ns mtime/ctime (optional in the SDK
+// declaration, present from API 15) catch a foreign writer that rewrites the
+// file IN PLACE. On top of both, the cache is bypassed whenever the document's
+// mtime second is not safely in the past — the conservative leg for a platform
+// that reports no nanosecond stamps. What is left after all three is a foreign
+// in-place rewrite, with the same byte count, inside the SECOND already
+// recorded in the cache, on a platform without nanosecond stamps; no write this
+// module performs can look like that.
+interface DocumentStamp {
+  ino: bigint;
+  size: number;
+  mtime: number;
+  ctime: number;
+  mtimeNs: bigint | undefined;
+  ctimeNs: bigint | undefined;
+}
+
+interface CachedDocument {
+  text: string;
+  stamp: DocumentStamp;
+}
+
+// Keyed by the document's full path: the request and the result are independent
+// documents and pathFor can never name anything else.
+const documentCache: Map<string, CachedDocument> = new Map<string, CachedDocument>();
+
+function sameStamp(a: DocumentStamp, b: DocumentStamp): boolean {
+  return a.ino === b.ino && a.size === b.size &&
+    a.mtime === b.mtime && a.ctime === b.ctime &&
+    a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+}
+
+// A document whose whole-second mtime is the CURRENT second (or later: a clock
+// that stepped back must not make the cache look trustworthy either) is always
+// read for real. Its second-granular metadata cannot separate two same-size
+// writes inside one second, and the nanosecond stamps are exactly what the
+// platform may not report. This costs one extra real read per second per
+// document at most.
+function stampIsFresh(stamp: DocumentStamp): boolean {
+  return stamp.mtime >= Math.floor(Date.now() / 1000);
+}
+
+// The cheap probe. null = the file does not exist, which is the SAME answer the
+// read below reports for a missing document; a real stat failure is unavailable,
+// never a fabricated "missing".
+function stampOf(path: string): DocumentStamp | null {
+  try {
+    const stat: fs.Stat = fs.statSync(path);
+    return {
+      ino: stat.ino, size: stat.size, mtime: stat.mtime, ctime: stat.ctime,
+      mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs
+    };
+  } catch (error) {
+    if (failureCode(error as Error) === NOT_FOUND_CODE) {
+      return null;
+    }
+    throw unavailable();
+  }
+}
+
 // Bounded whole-file read. null = the file does not exist; a real IO failure is
 // unavailable (never reported as "missing"); oversized or non-UTF-8 content is
-// malformed.
+// malformed. An unchanged document is served from the last successful read: the
+// returned TEXT is the same bytes that read produced, so every caller-visible
+// result (including a parse error the caller then raises) is unchanged.
 async function readTextBounded(path: string, maxBytes: number): Promise<string | null> {
+  const stamp: DocumentStamp | null = stampOf(path);
+  if (stamp === null) {
+    documentCache.delete(path);
+    return null;
+  }
+  const cached: CachedDocument | undefined = documentCache.get(path);
+  if (cached !== undefined && sameStamp(cached.stamp, stamp) && !stampIsFresh(stamp)) {
+    return cached.text;
+  }
   let file: fs.File | null = null;
   const buffer: ArrayBuffer = new ArrayBuffer(maxBytes + 1);
   let total: number = 0;
@@ -116,7 +216,7 @@ async function readTextBounded(path: string, maxBytes: number): Promise<string |
       total += count;
     }
   } catch (error) {
-    if (failureCode(error as Error) === 13900002) {
+    if (failureCode(error as Error) === NOT_FOUND_CODE) {
       return null;
     }
     throw unavailable();
@@ -132,7 +232,11 @@ async function readTextBounded(path: string, maxBytes: number): Promise<string |
   if (total > maxBytes) {
     throw new RoutePreferencesError(REASON_MALFORMED);
   }
-  return decodeUtf8(new Uint8Array(buffer, 0, total));
+  const text: string = decodeUtf8(new Uint8Array(buffer, 0, total));
+  // The stamp was taken BEFORE the read: a write racing this read swaps the
+  // inode, so the next probe cannot mistake the newer document for this text.
+  documentCache.set(path, { text: text, stamp: stamp });
+  return text;
 }
 
 async function writeAtomicText(filesDir: string, basename: string, text: string): Promise<void> {

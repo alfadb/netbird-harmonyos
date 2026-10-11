@@ -40,7 +40,9 @@
 //!   boringtun `update_timers` 的 REKEY_TIMEOUT 重传语义
 //!   `noise/timers.rs:13`）；自首次发起 ≥ `hs_deadline_ms` 仍无会话 →
 //!   放弃该轮（REKEY_ATTEMPT_TIME，`noise/timers.rs:12`），endpoint 再变
-//!   更时重开。
+//!   更时重开。**会话过期同样重新武装战役**（过期后 boringtun 可能仍装载
+//!   旧密钥，条件不能只看 `session_established`）——见 `tunnel_ready()`
+//!   语义节的「过期不是终态」。
 //! - **keepalive**：boringtun 层 keepalive 传 0（禁用其内部真实时钟定
 //!   时器），设备层在注入时钟上发送（空载荷 transport 包）：会话建立后
 //!   距上次出向活动 ≥ `keepalive_ms` → 发 keepalive。间隔默认 25 s =
@@ -65,6 +67,30 @@
 //! 答的是「**本端加密会话能否载荷**」，对端存活探测仍由 ICE 层负责
 //! （`crate::peer_conn::ice_ready_for_default_route`），两者在 connector
 //! 的闸里相与（`ConnectorShared::apply_update`）。
+//!
+//! **过期不是终态（2026-10-08 真机缺陷）**：`expired` 只表示「本端策略认为
+//! 密钥窗已失效」，boringtun 自己可能仍持有旧会话，对端也可能随时发起新
+//! 握手。设备对过期的处理是：
+//!
+//! 1. `tick` 在判过期的**同一 tick** 立即重新武装握手战役（`has_path` 仍在
+//!    即可主动发起 `force_handshake`，不必等对端）；否则到期后
+//!    `session_established` 仍为 true、战役条件永不成立，本端只会一直
+//!    0/6 卡死（缺陷本体）。
+//! 2. 只有**握手完成时刻严格晚于过期时刻**的新握手才算重新建立。
+//!    boringtun `stats()` 的 `time_since_last_handshake` 单位是**秒且在整秒
+//!    处截断**（`ffi/mod.rs:390`），它是「距**上次**握手的年龄」：到期后任何
+//!    入站包都会读到 `hs >= 0`（旧握手的年龄，随时间继续增大），据此判恢复
+//!    必然抖动。设备用 `now_ms − hs × 1000` 反推握手完成时刻，与过期时刻
+//!    `session_established_ms + session_max_ms` 严格比较（截断使反推值**不早
+//!    于**真实完成时刻，误差 < 1 s）；旧握手的反推值恒在 `[t₀, t₀ + 999 ms]`，
+//!    与过期时刻差整整一个 `session_max_ms`（默认 540 s），绝不会被误判。
+//!    判据见 [`handshake_after_expiry`]。
+//! 3. 重新建立走**与首次建立完全相同的一套动作**（清 `expired`、刷新锚点、
+//!    清战役、`session-established` 行、overlay 以 `session-established` 重建、
+//!    冲刷排队包），所以「到期 → 恢复」后的状态投影（`wg_sessions` /
+//!    `online` / `tunnel_ready` / 状态 JSON 的 `session_established`/`expired`）
+//!    与首次建立后完全一致。未到期的正常 rekey（收到 fresh 握手）仍只刷新
+//!    锚点，不 emit、不重建。
 //!
 //! ## fd 合同（§二.4）
 //!
@@ -924,6 +950,35 @@ pub fn session_expired_line(pub_key_b64: &str) -> String {
     )
 }
 
+/// Whether ONE boringtun stats reading is a handshake **strictly later than the
+/// policy expiry instant** of the peer's session (`established_ms +
+/// session_max_ms`) —— the only reading that may re-establish an expired
+/// session (module docs, 「过期不是终态」).
+///
+/// `hs` is boringtun's `time_since_last_handshake` in WHOLE SECONDS
+/// (`ffi/mod.rs:390` truncates `as_secs()`), i.e. the AGE of the last handshake:
+/// after expiry every inbound datagram still reads `hs >= 0` (the old
+/// handshake's age), so a bare `hs >= 0` test would flap the session back on the
+/// spot. Deriving the completion instant as `now_ms − hs × 1000` and requiring
+/// it to beat the expiry instant rejects the old handshake by a full
+/// `session_max_ms` margin: its derived value is `t₀ + (age mod 1 s)`, i.e. at
+/// most 999 ms past the instant the session was first observed, while the
+/// expiry instant sits `session_max_ms` later (540 s by default).
+///
+/// Truncation direction: `hs × 1000 <= age`, so the derived instant is never
+/// EARLIER than the real completion — the residual slack can only accept a
+/// handshake that really completed within the last second before the expiry
+/// instant. That handshake is a genuine fresh key exchange either way, and the
+/// re-anchor (`session_established_ms = now_ms`, always the later instant)
+/// keeps the new window strictly later, so the ambiguity cannot flap.
+fn handshake_after_expiry(hs: i64, now_ms: u64, established_ms: u64, session_max_ms: u64) -> bool {
+    if hs < 0 {
+        return false; // no session at all
+    }
+    let handshake_at_ms = now_ms.saturating_sub(hs as u64 * 1000);
+    handshake_at_ms > established_ms.saturating_add(session_max_ms)
+}
+
 /// `N6_WG_DEVICE|route-peer|net=<cidr>|peer=<完整公钥>|metric=<n>|live=<bool>|reason=<token>` ——
 /// 一个管理端下发网段（managed route）被指派给哪个路由 peer（首次选中 /
 /// HA 切换 / 释放各一行；`peer=none` = 该网段当前无可用候选，出向按
@@ -1085,6 +1140,14 @@ struct WgPeer {
     /// [`WgDeviceStats::rx_bytes_to_tun`] (that branch is where the local
     /// delivery — not merely the decryption — succeeds).
     rx_bytes: u64,
+    /// Test-only injected boringtun handshake reading (`hs`): the device clock
+    /// under test is INJECTED while boringtun's handshake age rides its own
+    /// REAL `Instant` clock, so a host test cannot age a reading past the
+    /// expiry instant it asserts on (in production both are the same host
+    /// monotonic clock). `None` — production, always — means the real reading;
+    /// only [`WgPeer::stats`] and through it the session observation use it.
+    #[cfg(test)]
+    hs_override: Option<i64>,
 }
 
 impl Drop for WgPeer {
@@ -1100,7 +1163,10 @@ impl Drop for WgPeer {
 
 impl WgPeer {
     fn stats(&self) -> (i64, u64, u64) {
-        self.tunnel.stats()
+        let (hs, tx, rx) = self.tunnel.stats();
+        #[cfg(test)]
+        let hs = self.hs_override.unwrap_or(hs);
+        (hs, tx, rx)
     }
 
     fn status(&self) -> WgPeerStatus {
@@ -1412,6 +1478,8 @@ impl WgDevice {
                         // counters across endpoint/bearer changes and rekeys.
                         tx_undelivered_bytes: 0,
                         rx_bytes: 0,
+                        #[cfg(test)]
+                        hs_override: None,
                     });
                 }
             }
@@ -1873,7 +1941,23 @@ impl WgDevice {
         let (hs, bt_tx, _) = self.peers[idx].stats();
         if hs >= 0 {
             let fresh = hs == 0; // handshake observed within the last second
-            if !self.peers[idx].session_established {
+            // Post-expiry re-establishment (module docs, 「过期不是终态」): only
+            // a handshake that completed STRICTLY AFTER the expiry instant —
+            // the old handshake's age (`hs >= 0`, still readable on every
+            // inbound datagram) must never pass for recovery.
+            let re_established = self.peers[idx].session_established
+                && self.peers[idx].expired
+                && handshake_after_expiry(
+                    hs,
+                    now_ms,
+                    self.peers[idx].session_established_ms,
+                    self.cfg.session_max_ms,
+                );
+            if !self.peers[idx].session_established || re_established {
+                // FIRST establishment and post-expiry re-establishment run the
+                // SAME action set, so the state projection (`wg_sessions` /
+                // `online` = established && !expired / `tunnel_ready` / JSON)
+                // is identical after either.
                 self.peers[idx].session_established = true;
                 self.peers[idx].expired = false;
                 self.peers[idx].session_established_ms = now_ms;
@@ -2048,8 +2132,16 @@ impl WgDevice {
                 self.rebuild_route_overlay("session-expired");
             }
             // handshake campaign (a path exists — ICE endpoint or relay
-            // carrier (N13-D2) — but no live session)
-            if self.has_path(idx) && !self.peers[idx].session_established {
+            // carrier (N13-D2) — but no LIVE session: never established, OR
+            // the policy expiry declared the session dead while boringtun may
+            // still hold the old keys). The expiry branch re-arms HERE, in the
+            // very tick that set `expired`, so the peer re-handshakes without
+            // waiting for the other side (module docs, 「过期不是终态」);
+            // `force_handshake` always formats a fresh ephemeral, even with a
+            // session still loaded (`noise/mod.rs:433`, force_resend=true).
+            if self.has_path(idx)
+                && (!self.peers[idx].session_established || self.peers[idx].expired)
+            {
                 let campaign = self.peers[idx].first_init_ms;
                 match campaign {
                     Some(t0) if now_ms.saturating_sub(t0) >= cfg.hs_deadline_ms => {
@@ -4788,5 +4880,486 @@ mod transfer_tests {
 
         // and the OTHER side's counters are untouched by A's replacement
         assert_eq!(devs[1].peer(&ka).rx_bytes, f.len() as u64);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tests (WG session lifecycle: policy expiry → the campaign re-arms → only a
+// handshake STRICTLY after the expiry instant recovers; real BoringTun tunnels
+// over loopback UDP + TUN socketpairs, injected clock — same host-test pattern
+// as `transfer_tests` / tests/wg_e2e.rs)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod session_expiry_tests {
+    use super::*;
+    use crate::config;
+    use crate::network_map::ManagedRoute;
+
+    extern "C" {
+        fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut [i32; 2]) -> i32;
+    }
+
+    const ADDR_A: [u8; 4] = [10, 97, 0, 1];
+    const ADDR_B: [u8; 4] = [10, 97, 0, 2];
+    const ADDR_C: [u8; 4] = [10, 97, 0, 3];
+    /// LAN net of the HA failover leg (same shape as the field defect: one
+    /// managed net behind two routing peers).
+    const LAN_NET: ([u8; 4], u8) = ([192, 168, 70, 0], 24);
+    /// Policy session window for these tests: short enough that the injected
+    /// clock reaches the expiry instant without waiting anything out in REAL
+    /// time (boringtun's own clock is never aged here).
+    const SESSION_MAX_MS: u64 = 3_000;
+
+    /// boringtun's ffi installs a panic→SIGSEGV hook the first time a tunnel is
+    /// created; re-install a PRINTING hook AFTER the first tunnel exists so a
+    /// failed assertion reports instead of dying silently (see
+    /// `transfer_tests::show_panics`).
+    fn show_panics() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            std::panic::set_hook(Box::new(|info| eprintln!("\nTEST PANIC: {info}")));
+        });
+    }
+
+    fn identity(byte: u8) -> (String, String) {
+        let secret = base64::engine::general_purpose::STANDARD.encode([byte; 32]);
+        let pub_key = x25519_public_b64(&secret).expect("public key");
+        (secret, pub_key)
+    }
+
+    fn expiry_cfg(secret_b64: &str) -> WgDeviceConfig {
+        let mut cfg = WgDeviceConfig::new(secret_b64);
+        cfg.hs_retry_ms = 100; // fast campaign retries on the injected clock
+        cfg.hs_deadline_ms = 10_000;
+        cfg.keepalive_ms = u64::MAX / 2; // no keepalive traffic in these tests
+        cfg.session_max_ms = SESSION_MAX_MS;
+        cfg
+    }
+
+    fn peer_spec(key: &str, addr: [u8; 4]) -> WgPeerSpec {
+        WgPeerSpec::new(key.to_string(), vec![(addr, 32)])
+    }
+
+    /// HA routing entry for [`LAN_NET`] via `peer` (metric decides while idle).
+    fn lan_route(peer: &str, metric: i64) -> ManagedRoute {
+        ManagedRoute {
+            id: format!("r-lan-{metric}"),
+            network: config::Route { addr: LAN_NET.0, prefix_len: LAN_NET.1 },
+            domains: vec![],
+            net_id: "net-lan".into(),
+            network_type: 1,
+            peer: peer.into(),
+            metric,
+            masquerade: true,
+            keep_route: false,
+            skip_auto_apply: false,
+        }
+    }
+
+    /// One real device: a bound loopback UDP socket (its WG "cable end") + a
+    /// datagram socketpair playing the platform TUN half (the test owns all raw
+    /// fds; the device holds dups only).
+    struct Dev {
+        dev: WgDevice,
+        key: String,
+        wg_raw: i32,
+        tun_raw: i32,
+        tun_end: i32,
+    }
+
+    impl Drop for Dev {
+        fn drop(&mut self) {
+            for fd in [self.wg_raw, self.tun_raw, self.tun_end] {
+                unsafe { sys::close(fd) };
+            }
+        }
+    }
+
+    impl Dev {
+        fn new(byte: u8, peers: &[(&str, [u8; 4])]) -> Dev {
+            let (secret, pub_key) = identity(byte);
+            let wg_raw = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+            assert!(wg_raw >= 0, "socket errno={}", sys::errno());
+            let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+            assert_eq!(
+                unsafe {
+                    sys::bind(wg_raw, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32)
+                },
+                0,
+                "bind errno={}",
+                sys::errno()
+            );
+            let mut sv = [-1i32; 2];
+            assert_eq!(unsafe { socketpair(1 /* AF_UNIX */, 2 /* SOCK_DGRAM */, 0, &mut sv) }, 0);
+            let tun = TunFd::dup_from_raw(sv[0]).expect("tun dup");
+            let mut dev = WgDevice::adopt(expiry_cfg(&secret), wg_raw, tun).expect("device adopt");
+            let specs: Vec<WgPeerSpec> =
+                peers.iter().map(|(k, addr)| peer_spec(k, *addr)).collect();
+            dev.set_peers(&specs).expect("set_peers");
+            show_panics();
+            Dev { dev, key: pub_key, wg_raw, tun_raw: sv[0], tun_end: sv[1] }
+        }
+
+        fn port(&self) -> u16 {
+            self.dev.local_addr().1
+        }
+
+        /// The peer's MUTABLE state (injected-clock anchors + the test-only
+        /// stats reading) — the pokes the sibling test modules also use.
+        fn peer_mut(&mut self, key: &str) -> &mut WgPeer {
+            self.dev
+                .peers
+                .iter_mut()
+                .find(|p| p.key_b64 == key)
+                .expect("peer registered")
+        }
+
+        /// One pump round: TUN half + UDP half + tick on the injected clock.
+        fn step(&mut self, now_ms: u64) {
+            self.dev.service_tun(now_ms);
+            self.dev.service_udp(now_ms);
+            self.dev.tick(now_ms);
+        }
+
+        fn write_frame(&self, frame: &[u8]) {
+            let (n, e) = sys::write_fd(self.tun_end, frame);
+            assert_eq!((n as usize, e), (frame.len(), 0), "TUN-side test write");
+        }
+    }
+
+    /// Land endpoints both ways and pump until both sessions are live, then
+    /// settle so the handshake stragglers cannot re-anchor anything later.
+    fn establish(a: &mut Dev, b: &mut Dev, now: &mut u64) {
+        let (pa, pb) = (a.port(), b.port());
+        let (ka, kb) = (a.key.clone(), b.key.clone());
+        a.dev.set_endpoint(&kb, [127, 0, 0, 1], pb, *now).expect("endpoint a→b");
+        b.dev.set_endpoint(&ka, [127, 0, 0, 1], pa, *now).expect("endpoint b→a");
+        let deadline = *now + 10_000;
+        loop {
+            a.step(*now);
+            b.step(*now);
+            if a.dev.tunnel_ready() && b.dev.tunnel_ready() {
+                break;
+            }
+            assert!(*now <= deadline, "handshake must establish within the sim deadline");
+            *now += 10;
+        }
+        for _ in 0..8 {
+            *now += 10;
+            a.step(*now);
+            b.step(*now);
+        }
+    }
+
+    /// One IPv4/UDP frame with an honest total-length field (boringtun derives
+    /// the received plaintext length from it).
+    fn frame(src: [u8; 4], dst: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let total = (20 + 8 + payload.len()) as u16;
+        let mut f = vec![0x45, 0];
+        f.extend_from_slice(&total.to_be_bytes());
+        f.extend_from_slice(&[0, 1, 0, 0, 64, 17, 0, 0]); // id, flags, ttl, proto UDP, cksum
+        f.extend_from_slice(&src);
+        f.extend_from_slice(&dst);
+        f.extend_from_slice(&5555u16.to_be_bytes());
+        f.extend_from_slice(&5556u16.to_be_bytes());
+        f.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        f.extend_from_slice(&[0, 0]); // udp checksum (inner checksums are not validated)
+        f.extend_from_slice(payload);
+        f
+    }
+
+    /// Tick device `a` past its anchor's policy window. Returns
+    /// `(expiry_instant, recover_instant)`; on return the peer is expired, the
+    /// campaign is re-armed (the expiry tick itself initiated) and one stale
+    /// ingest has already been proven harmless.
+    ///
+    /// Stats injection: the injected device clock and boringtun's REAL
+    /// handshake clock are unrelated in a host test, so the boringtun reading is
+    /// kept production-consistent by hand — while expired it is the OLD
+    /// handshake's age in whole seconds, `(recover_now − anchor)/1000` (in
+    /// production that is exactly what an inbound packet reads at that instant).
+    fn expire_on_the_device_clock(a: &mut Dev, kb: &str) -> (u64, u64) {
+        let anchor = a.peer_mut(kb).session_established_ms;
+        let expiry = anchor + SESSION_MAX_MS;
+        let recover_now = expiry + 5_000;
+        a.peer_mut(kb).hs_override = Some(((recover_now - anchor) / 1000) as i64);
+        a.dev.tick(expiry);
+        assert!(a.peer_mut(kb).expired, "the policy window closed");
+        assert!(
+            a.peer_mut(kb).first_init_ms.is_some(),
+            "the expiry tick itself re-armed the handshake campaign"
+        );
+        // any datagram read while expired still carries the OLD handshake's age
+        a.dev.service_udp(expiry);
+        assert!(a.peer_mut(kb).expired, "the old handshake's age is not recovery");
+        (expiry, recover_now)
+    }
+
+    /// Peer `b` drives a genuine NEW handshake into `a`; its session is 0 s old
+    /// when `a` ingests it (the production reading right after a handshake).
+    fn recover_through_a_new_handshake(a: &mut Dev, b: &mut Dev, kb: &str, recover_now: u64) {
+        assert!(b.dev.initiate_handshake(0, recover_now), "B's fresh initiation went out");
+        a.peer_mut(kb).hs_override = Some(0);
+        assert!(a.dev.service_udp(recover_now) >= 1, "A ingests the new handshake");
+        assert!(!a.peer_mut(kb).expired, "the post-expiry handshake re-established the session");
+    }
+
+    /// The defect's reading arithmetic, pinned directly: `hs` is the AGE of the
+    /// last handshake, so every inbound packet after expiry still reads
+    /// `hs >= 0`, and only a handshake whose implied completion is STRICTLY
+    /// later than the expiry instant may re-establish the session.
+    #[test]
+    fn expiry_judgement_rejects_the_old_handshake_age() {
+        let t0 = 1_000u64; // session anchor on the injected clock
+        let max = DEFAULT_SESSION_MAX_MS; // 540 s
+        let expiry = t0 + max;
+        // the OLD handshake, read 5 s after the expiry tick: implied completion
+        // is t0 + (age mod 1 s) — never past an expiry instant that sits a full
+        // session_max_ms later
+        assert!(!handshake_after_expiry(545, expiry + 5_000, t0, max));
+        assert!(!handshake_after_expiry(600, expiry + 60_500, t0, max));
+        // …and however far the device clock has moved on afterwards
+        assert!(!handshake_after_expiry(3_600, expiry + 3_060_000, t0, max));
+        // exactly AT the expiry instant is not strictly later
+        assert!(!handshake_after_expiry(0, expiry, t0, max));
+        // a handshake that completed after the expiry instant (hs == 0 = within
+        // the last second, hs == 1 one second ago but still past the instant)
+        assert!(handshake_after_expiry(0, expiry + 1, t0, max));
+        assert!(handshake_after_expiry(0, expiry + 1_000, t0, max));
+        assert!(handshake_after_expiry(1, expiry + 2_000, t0, max));
+        // a 1 s-old reading whose implied completion is BEFORE the instant (a
+        // packet delayed across the boundary) is not recovery either
+        assert!(!handshake_after_expiry(1, expiry + 500, t0, max));
+        // no session at all
+        assert!(!handshake_after_expiry(-1, expiry + 60_000, t0, max));
+    }
+
+    /// (a) An expired session RE-ARMS the handshake campaign in the very tick
+    /// that sets `expired` — the peer must not have to initiate — while a tick
+    /// inside the window stays silent.
+    #[test]
+    fn expiry_re_arms_the_handshake_campaign() {
+        let (_sa, ka) = identity(0x11);
+        let (_sb, kb) = identity(0x22);
+        let mut a = Dev::new(0x11, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x22, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut a, &mut b, &mut now);
+        assert!(a.dev.tunnel_ready() && !a.peer_mut(&kb).expired, "live session");
+
+        let anchor = a.peer_mut(&kb).session_established_ms;
+        let initiations = a.dev.stats().handshake_initiations;
+        a.step(anchor + SESSION_MAX_MS - 1);
+        assert_eq!(
+            a.peer_mut(&kb).session_established_ms,
+            anchor,
+            "no straggler re-anchored the session inside the window"
+        );
+        assert!(!a.peer_mut(&kb).expired, "still inside the policy window");
+        assert_eq!(
+            a.dev.stats().handshake_initiations,
+            initiations,
+            "no campaign while the session is live"
+        );
+
+        a.step(anchor + SESSION_MAX_MS);
+        assert!(a.peer_mut(&kb).expired, "the policy window closed");
+        assert!(
+            a.peer_mut(&kb).first_init_ms.is_some(),
+            "the expiry tick re-armed the campaign"
+        );
+        assert!(
+            a.dev.stats().handshake_initiations > initiations,
+            "…and initiated a fresh handshake in that same tick"
+        );
+        assert!(!a.dev.tunnel_ready() && !a.dev.peer_ready(&kb), "the session reads dead");
+    }
+
+    /// (b) After expiry, an inbound datagram whose boringtun reading is the OLD
+    /// handshake's age must NOT restore the session (that age is readable on
+    /// every packet — reading it as recovery flaps the peer back online).
+    #[test]
+    fn old_handshake_age_does_not_restore_an_expired_session() {
+        let (_sa, ka) = identity(0x33);
+        let (_sb, kb) = identity(0x44);
+        let mut a = Dev::new(0x33, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x44, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut a, &mut b, &mut now);
+        for _ in 0..8 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+        let anchor = a.peer_mut(&kb).session_established_ms;
+
+        // B sends real traffic that A still decrypts with the OLD keys
+        // (boringtun's session is alive; only the device policy expired it).
+        let f = frame(ADDR_B, ADDR_A, &[0xB4; 32]);
+        b.write_frame(&f);
+        b.step(now);
+
+        // Production-consistent reading at the expiry instant + 5 s: the age of
+        // the OLD handshake (the host cannot age boringtun's real clock, so the
+        // equivalent value is injected — see the module docs of the helper).
+        let expired_now = anchor + SESSION_MAX_MS + 5_000;
+        a.peer_mut(&kb).hs_override = Some(((expired_now - anchor) / 1000) as i64);
+        a.dev.tick(expired_now); // policy expiry + campaign re-arm
+        assert!(a.peer_mut(&kb).expired, "the policy window closed");
+        let expired_anchor = a.peer_mut(&kb).session_established_ms;
+        let armed = a.peer_mut(&kb).first_init_ms;
+        assert!(armed.is_some(), "the expiry tick re-armed the campaign");
+
+        let ingested = a.dev.service_udp(expired_now);
+        assert!(ingested >= 1, "the old-key datagram really was ingested");
+        assert!(a.peer_mut(&kb).expired, "the old handshake's age is NOT recovery");
+        assert_eq!(
+            a.peer_mut(&kb).session_established_ms,
+            expired_anchor,
+            "…and the anchor did not move"
+        );
+        assert_eq!(a.peer_mut(&kb).first_init_ms, armed, "…and the campaign stays armed");
+        assert!(!a.dev.peer_ready(&kb) && !a.dev.tunnel_ready(), "still offline");
+    }
+
+    /// (c) A NEW handshake completing after the expiry instant re-establishes
+    /// the session: `expired` cleared, anchor refreshed, campaign cleared, the
+    /// `session-established` path taken (emit + overlay rebuild) and the peer
+    /// online again with the first-establishment projection.
+    #[test]
+    fn new_handshake_after_expiry_restores_the_session_and_the_overlay() {
+        let (_sa, ka) = identity(0x55);
+        let (_sb, kb) = identity(0x66);
+        let (_sc, kc) = identity(0x77);
+        // the field's HA shape: LAN_NET behind B (metric 10, a real session) and
+        // C (metric 20, registered without any path)
+        let mut a = Dev::new(0x55, &[(kb.as_str(), ADDR_B), (kc.as_str(), ADDR_C)]);
+        let mut b = Dev::new(0x66, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        a.dev
+            .set_managed_routes(&[lan_route(&kb, 10), lan_route(&kc, 20)])
+            .expect("managed routes");
+        establish(&mut a, &mut b, &mut now);
+        for _ in 0..8 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+        assert_eq!(
+            a.dev.managed_route_selections(),
+            vec![(LAN_NET, Some(kb.clone()))],
+            "the live peer carries the net"
+        );
+
+        let (_expiry, recover_now) = expire_on_the_device_clock(&mut a, &kb);
+        assert_eq!(
+            a.dev.managed_route_selections(),
+            vec![(LAN_NET, Some(kc.clone()))],
+            "the expired peer loses the net (the field symptom, on the HA partner)"
+        );
+        assert!(!a.dev.peer_ready(&kb) && !a.dev.tunnel_ready(), "peer offline while expired");
+
+        recover_through_a_new_handshake(&mut a, &mut b, &kb, recover_now);
+        assert!(a.peer_mut(&kb).session_established, "established again");
+        assert_eq!(
+            a.peer_mut(&kb).session_established_ms,
+            recover_now,
+            "the anchor is refreshed to the recovery instant"
+        );
+        assert!(
+            a.peer_mut(&kb).first_init_ms.is_none(),
+            "the campaign is done — the FIRST-establishment action set ran \
+             (the emit + overlay rebuild share that single branch)"
+        );
+        assert!(a.dev.peer_ready(&kb) && a.dev.tunnel_ready(), "the peer is online again");
+        assert_eq!(
+            a.dev.managed_route_selections(),
+            vec![(LAN_NET, Some(kb.clone()))],
+            "the session-established rebuild re-admits the peer to its nets"
+        );
+        // the status-JSON projection is the first-establishment one
+        let status = a
+            .dev
+            .peers()
+            .into_iter()
+            .find(|p| p.pub_key_b64 == kb)
+            .expect("peer B registered");
+        let json = wg_peer_json(&status);
+        assert!(
+            json.contains("\"session_established\":true,\"expired\":false"),
+            "recovered status JSON: {json}"
+        );
+        assert_eq!(
+            a.dev
+                .peers()
+                .iter()
+                .filter(|p| p.session_established && !p.expired)
+                .count(),
+            1,
+            "wg_sessions counts the recovered peer and only it"
+        );
+    }
+
+    /// (d) A live (non-expired) session receiving a fresh handshake is a normal
+    /// rekey: the anchor is refreshed and NOTHING else happens — the
+    /// establishment path must not steal the rekey case.
+    #[test]
+    fn live_rekey_only_refreshes_the_expiry_anchor() {
+        let (_sa, ka) = identity(0xAA);
+        let (_sb, kb) = identity(0xBB);
+        let mut a = Dev::new(0xAA, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0xBB, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut a, &mut b, &mut now);
+        for _ in 0..8 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+        let anchor = a.peer_mut(&kb).session_established_ms;
+        let rekey_now = anchor + 1_000; // well inside the policy window
+
+        assert!(a.dev.initiate_handshake(0, rekey_now), "the rekey initiation went out");
+        assert!(a.peer_mut(&kb).first_init_ms.is_some(), "campaign bookkeeping armed");
+        b.step(rekey_now); // B answers the initiation
+        assert!(a.dev.service_udp(rekey_now) >= 1, "A ingests the handshake response");
+
+        let p = a.peer_mut(&kb);
+        assert!(!p.expired, "a rekey inside the window never expires the session");
+        assert!(p.session_established, "…and never drops the established flag");
+        assert_eq!(p.session_established_ms, rekey_now, "ONLY the expiry anchor moved");
+        assert!(
+            p.first_init_ms.is_some(),
+            "the establishment path (which clears the campaign) did NOT run: rekey ≠ re-establish"
+        );
+    }
+
+    /// (e) The cycle repeats: a recovered session expires AGAIN and recovers
+    /// again on the same device — no one-shot state.
+    #[test]
+    fn expiry_recovery_can_repeat() {
+        let (_sa, ka) = identity(0x88);
+        let (_sb, kb) = identity(0x99);
+        let mut a = Dev::new(0x88, &[(kb.as_str(), ADDR_B)]);
+        let mut b = Dev::new(0x99, &[(ka.as_str(), ADDR_A)]);
+        let mut now = 1_000u64;
+        establish(&mut a, &mut b, &mut now);
+        for _ in 0..8 {
+            now += 10;
+            a.step(now);
+            b.step(now);
+        }
+
+        let mut anchor = a.peer_mut(&kb).session_established_ms;
+        for cycle in 1..=2u32 {
+            let (expiry, recover_now) = expire_on_the_device_clock(&mut a, &kb);
+            assert!(expiry > anchor, "cycle {cycle}: each window is anchored later");
+            recover_through_a_new_handshake(&mut a, &mut b, &kb, recover_now);
+            let recovered = a.peer_mut(&kb).session_established_ms;
+            assert_eq!(recovered, recover_now, "cycle {cycle}: re-anchored on recovery");
+            assert!(a.dev.peer_ready(&kb) && a.dev.tunnel_ready(), "cycle {cycle}: online");
+            anchor = recovered;
+        }
     }
 }
