@@ -39,16 +39,16 @@ import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
-// 2026-10-11 retry re-entry (fix/retry): the pure connect-entry / pending-start
-// model. This page only gathers the facts (the ack document, the extension's own
-// stop evidence, its own latches) and acts through requestStart(); every verdict
-// is the pure module's, host-checked byte-identically by run-ui-model.mts and
-// run-connect-retry.mts.
-import { CONNECT_ACK_FILE, CONNECT_LEG_AFTER_STOP, EXTENSION_STOP_POLL_MS,
-  EXTENSION_STOP_WAIT_MS, PENDING_START_ACKNOWLEDGED, PENDING_START_TIMEOUT,
-  PENDING_START_TIMEOUT_MS, connectStartLeg, decidePendingStart,
-  parseConnectAttemptAck } from '../vpnextensionability/NetBirdUiModel';
-import type { ConnectAttemptAck, PendingStartDecision, PendingStartFacts }
+// 2026-10-11 retry re-entry (fix/retry) / 2026-10-12 upstream tap handling: the
+// pure connect-entry + pending-action model. This page only gathers the facts
+// (the extension's own stop evidence, its own latches) and acts through
+// requestStart()/requestStop(); every verdict is the pure module's, host-checked
+// byte-identically by run-ui-model.mts and run-connect-retry.mts.
+import { CONNECT_LEG_AFTER_STOP, EXTENSION_STOP_POLL_MS,
+  EXTENSION_STOP_WAIT_MS, PENDING_ACTION_TIMEOUT_MS, PENDING_TARGET_CONNECTED,
+  PENDING_TARGET_DISCONNECTED, PENDING_TARGET_NONE, connectStartLeg, decideTransition,
+  engineReportState } from '../vpnextensionability/NetBirdUiModel';
+import type { TransitionDecision, TransitionFacts }
   from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
@@ -132,6 +132,11 @@ const TAG: string = 'NetBirdVpn';
 const BUNDLE_NAME: string = 'cn.alfadb.netbird';
 const EXTENSION_ABILITY: string = 'NetBirdVpnExtensionAbility';
 const STATUS_POLL_MS: number = 2000;
+// 2026-10-12 upstream tap handling: the recorded connect-failure verdict is shown
+// as a Toast carrying the engine's own message (upstream Toast.LENGTH_LONG,
+// MainActivity.java:1030-1036) exactly ONCE per verdict; the persistent channels
+// stay the card's official state and the red error line.
+const FAILURE_TOAST_MS: number = 4000;
 // Explicit logout channel (stop-time Logout defect, 2026-10-01): the UI
 // process has NO connector (it lives in the VPN extension process), so the
 // management Logout goes through the extension's one-shot ticket file and
@@ -849,8 +854,9 @@ struct Index {
   // 2026-10-06 登录失败可见性: the error class of the persistent
   // connect-failure notice (extension aborted before the VPN existed /
   // connector ended terminally — e.g. login fatal auth, retry budget
-  // exhausted). Non-empty turns the home card into 连接失败 + the matching
-  // Chinese reason instead of a stale 连接中…; cleared by a fresh start.
+  // exhausted). It is the engine's MESSAGE, not a state: the card keeps the
+  // official label (未连接, or 需要登录 for the login class) and the reason rides
+  // the error line + the one Toast; cleared by a fresh start.
   @State connectFailureClass: string = '';
   // ---- navigation ----
   @State activeTab: number = 0;
@@ -898,18 +904,33 @@ struct Index {
   // failure notice to THIS attempt (a leftover from an earlier attempt is
   // never shown as the live verdict).
   private lastStartAtMs: number = 0;
-  // 2026-10-11 retry re-entry (fix/retry): the bounded outcome window of the
-  // current start request (0 = none armed). Armed at the request and extended to
-  // ack + PENDING_START_TIMEOUT_MS once the extension acknowledges; past it the
-  // latch is released and the failure rendered — a request can never leave the
-  // card on 连接中… forever. The decision itself is the pure decidePendingStart().
-  private pendingStartDeadlineMs: number = 0;
-  // The extension's ack for THIS attempt has been seen (the previous failure
-  // notice is superseded from that moment — never before).
-  private pendingStartAcked: boolean = false;
-  // This attempt produced an outcome (a live document): its bounded window is
-  // closed and never re-armed. Reset by every requestStart().
-  private pendingStartOutcome: boolean = false;
+  // 2026-10-12 upstream tap handling (ALIGNMENT-AUDIT §1.3 R5): upstream bounds
+  // the TAP, not the attempt. `pendingActionTarget` is the requested engine state
+  // of the last tap (upstream's pendingTarget: HomeFragment.java:198-200, :623-630) and the
+  // card says 连接中…/正在断开… from it until the engine reports (or 7 s pass).
+  // @State because it is what re-paints the toggle when the 7 s window closes.
+  @State pendingActionTarget: string = PENDING_TARGET_NONE;
+  // 0 = not armed. Armed at the tap with PENDING_ACTION_TIMEOUT_MS; never
+  // extended (upstream posts one Runnable at beginPendingAction).
+  private pendingActionDeadlineMs: number = 0;
+  // The force-cancel window (upstream armForceCancel/openForceCancelWindow):
+  // while a transition is painted the toggle is disabled, and 2 s into it the
+  // toggle re-enables so a tap force-cancels (stop) the stuck transition.
+  // @State: opening the window must repaint the toggle WITHOUT any other state
+  // changing (a start with no report changes nothing else for seconds).
+  @State forceCancelOpen: boolean = false;
+  private forceCancelArmedAtMs: number = 0;
+  // upstream isTransitioning(): a transition is being painted, so the toggle is
+  // disabled until the force-cancel window opens. Written by the tick's pure
+  // decideTransition() — the tap handler reads it, so the rule lives in ONE place.
+  private transitionPainted: boolean = false;
+  // The connect-failure notice already superseded by THIS attempt's own engine
+  // report (the start evidence that replaced the deleted ack document). One read
+  // per request, never one per tick.
+  private noticeSuperseded: boolean = false;
+  // at_ms of the recorded verdict already shown as a Toast (0 = none) — ONE toast
+  // per verdict, never one per 2 s tick.
+  private failureToastedAtMs: number = 0;
   // Explicit logout in flight (ticket written): masks the extension's
   // teardown-driven status-document disappearance so the logout the user
   // just asked for is not reported as an unexpected "VPN 已断开".
@@ -1159,12 +1180,13 @@ struct Index {
     // VPN on a possibly live extension".
     const extensionDead: boolean = this.extensionConfirmedDead();
     const live: PublishedStatus | null = extensionDead ? null : status;
-    // 2026-10-11 retry re-entry (fix/retry): the pending start's own bookkeeping
-    // on THIS existing tick — no second timer, no second status read. It
-    // supersedes the previous failure notice only once the extension's ack
-    // proves the new attempt started, and it releases the latch when the whole
-    // outcome window passed with no verdict at all.
-    this.updatePendingStart(live);
+    // 2026-10-12 upstream tap handling: the pending action's own bookkeeping on
+    // THIS existing tick — no second timer, no second status read. It releases
+    // the tap latch when the engine reports the requested state (or the connect
+    // demonstrably failed) and 7 s after the tap at the latest, and it supersedes
+    // the previous failure notice once the engine's own report proves the new
+    // attempt started.
+    this.updatePendingAction(live);
     // 2026-10-10 后台保活（实验，方案 A）: the borrowed continuous task rides THIS
     // tick — no second timer, no second document read. It runs on both branches
     // (a live document is the ONLY thing that may hold the task, so "no fresh
@@ -1185,6 +1207,10 @@ struct Index {
         }
         this.requestSent = false;
         this.stopSent = false;
+        // 2026-10-12 upstream tap handling: the engine's end IS an observable
+        // outcome (upstream onEngineStopped → onEngineState(DISCONNECTED) settles the
+        // tap latch), so the latch is released here rather than at the 7 s lapse.
+        this.clearPendingAction();
         this.requestId = `ui-${Date.now()}`;
         this.observedPublishedStatus = false;
         this.lastLiveState = '';
@@ -1192,7 +1218,9 @@ struct Index {
       this.published = null;
       // 2026-10-06 登录失败可见性: no live document AND a matching failure
       // notice = the attempt ended in a recorded failure (login fatal /
-      // retry exhausted / startup abort) — the card shows 连接失败.
+      // retry exhausted / startup abort) — the card shows the official
+      // Disconnected label (需要登录 for the login class) and the reason goes to
+      // the error line + its one Toast.
       this.refreshConnectFailure();
       // 2026-10-08 扩展被系统回收后的自动重连: this branch is criterion "the status
       // document is not fresh" — NOT "the VPN really is not there": the system
@@ -1278,11 +1306,35 @@ struct Index {
       // read, never a second one per tick.
       this.connectFailureAtMs = notice.at_ms;
       this.requestSent = false;
+      this.notifyFailureOnce(notice);
     } else {
       if (this.connectFailureClass.length > 0) {
         this.connectFailureClass = '';
       }
       this.connectFailureAtMs = 0;
+    }
+  }
+
+  // 官方 Android 客户端把引擎自己的消息当成一次 Toast 显示
+  // (MainActivity.java:1030-1036: `Toast.makeText(…, msg, LENGTH_LONG)`)：它是
+  // TRANSIENT 的，持久通道是状态卡的官方状态（未连接 / 需要登录）加下面那行红字。
+  // 这里用最接近的 HarmonyOS 等价物 promptAction.showToast（本页 UIContext）；被拒
+  // 只 fail-soft —— 同样的文案已经在那行红字里，绝不因为一个提示失败而丢信息。
+  // ONE toast per recorded verdict (at_ms is the notice's own identity).
+  private notifyFailureOnce(notice: ConnectFailureNotice): void {
+    if (notice.at_ms === this.failureToastedAtMs) {
+      return;
+    }
+    this.failureToastedAtMs = notice.at_ms;
+    try {
+      this.getUIContext().getPromptAction().showToast({
+        message: connectFailureText(notice.error_class), duration: FAILURE_TOAST_MS
+      });
+      hilog.info(DOMAIN, TAG, 'UI_FAILURE_TOAST|bundle=%{public}s|errorClass=%{public}s',
+        BUNDLE_NAME, notice.error_class);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'UI_FAILURE_TOAST_REJECTED|bundle=%{public}s|code=%{public}s',
+        BUNDLE_NAME, String((error as BusinessFailure).code ?? 'none'));
     }
   }
 
@@ -2124,20 +2176,28 @@ struct Index {
     // 已连接 requires the core state connected AND the own overlay IP (the
     // network map arrived) AND the vpn-tun interface actually existing
     // (roam-1005-0014: the interface was removed while the core kept
-    // self-reporting connected); a live tunnel without the map or without the
-    // interface is 连接中… / 无法连接服务器 (与红字错误提示一致, see
-    // NetBirdUiModel.homeStateText).
+    // self-reporting connected); every other report — including a recorded
+    // connect failure — renders the OFFICIAL label for that state (see
+    // NetBirdUiModel.homeStateText). The failure itself is the message, not a
+    // state: it rides the error line and the toast (upstream: a Toast with the
+    // engine's own text, MainActivity.java:1030-1036).
     const hasOverlayIp: boolean = this.published !== null &&
       this.published.address !== undefined && this.published.address !== null &&
       this.published.address.length > 0;
     const ifacePresent: boolean = this.published === null ||
       this.published.iface_present !== false;
-    const errorClass: string = this.published !== null &&
-      this.published.last_error_class !== undefined &&
-      this.published.last_error_class !== null ? this.published.last_error_class : 'none';
-    return homeStateText(state, this.requestSent, this.stopSent, hasOverlayIp,
-      ifacePresent, errorClass,
-      this.connectFailureClass.length > 0 && this.published === null);
+    return homeStateText(state,
+      this.pendingActionTarget === PENDING_TARGET_CONNECTED, this.stopSent,
+      hasOverlayIp, ifacePresent, this.loginRequired());
+  }
+
+  // upstream's sticky `loginRequired` flag (HomeFragment.java:114, :873-883):
+  // "Login required" replaces the Disconnected label, because a plain 未连接 would
+  // suggest that a reconnect is all that is needed. Our carrier for it is the SAME
+  // class token the extension persists when the credentials were refused
+  // (NetBirdVpnExtensionAbility credentialFailure / NetBirdAccountMode).
+  private loginRequired(): boolean {
+    return this.connectFailureClass === 'account-login-required';
   }
 
   // The FULLY connected gate (B.2): core state connected + own overlay IP +
@@ -2182,7 +2242,7 @@ struct Index {
     if (text === '连接中…' || text === '正在断开…') {
       return $r('app.color.nb_status_warning');
     }
-    if (text === '连接失败' || text === '无法连接服务器') {
+    if (text === '需要登录') {
       return $r('app.color.nb_status_error');
     }
     return $r('app.color.nb_text_secondary');
@@ -2192,11 +2252,10 @@ struct Index {
     return this.published !== null && vpnActiveState(this.published.state);
   }
 
+  // 2026-10-12 upstream tap handling: the neutral fill marks "a transition is being
+  // painted" (upstream dims and pulses the disabled switch, HomeFragment.java:442-460).
   private toggleBusy(): boolean {
-    if (this.stopSent) {
-      return true;
-    }
-    return this.requestSent && this.published === null;
+    return this.stopSent || this.transitionPainted;
   }
 
   private toggleLabel(): string {
@@ -2206,7 +2265,7 @@ struct Index {
     if (this.toggleOn()) {
       return '断开';
     }
-    return this.requestSent ? '连接中…' : '连接';
+    return this.transitionPainted ? '连接中…' : '连接';
   }
 
   // 主题 (2026-10-09): the big connect/stop toggle's fill. 已连接 keeps the
@@ -2223,17 +2282,18 @@ struct Index {
     return $r('app.color.nb_primary');
   }
 
+  // 2026-10-12 upstream tap handling (HomeFragment.java:403-436, :550-556): while a
+  // transition is painted the toggle is DISABLED, and 2000 ms into it the toggle
+  // re-enables (setToggle(..., canForceCancel, …)) so a stuck transition can still
+  // be aborted by the user; once the engine settles, the toggle is always enabled.
   private toggleEnabled(): boolean {
     if (!this.configured) {
       return false;
     }
-    if (this.stopSent) {
-      return false;
+    if (this.transitionPainted) {
+      return this.forceCancelOpen;
     }
-    if (this.toggleOn()) {
-      return true;
-    }
-    return !this.requestSent;
+    return true;
   }
 
   private lastErrorLine(): string {
@@ -2770,7 +2830,7 @@ struct Index {
       return;
     }
     // 诊断记录（用户「连接 / 重试」动作的集中处理点）：只记安全事件名 + 计数。
-    // 重试 = 上一次尝试留下了可见失败（连接失败通知或动作错误）；否则是普通连接。
+    // 重试 = 上一次尝试留下了可见失败（失败通知或动作错误）；否则是普通连接。
     this.diagActionCount = this.diagActionCount + 1;
     this.diagEvent(this.connectFailureClass.length > 0 || this.actionError.length > 0
       ? 'ui_connect_retry' : 'ui_connect', this.diagActionCount);
@@ -2785,21 +2845,24 @@ struct Index {
     this.actionError = '';
     this.disconnectNotice = '';
     // 2026-10-06 登录失败可见性: the rendered verdict is cleared for a fresh
-    // attempt, but the NOTICE FILE is deliberately left in place now (2026-10-11,
-    // fix/retry): it is the last recorded verdict and the only thing the bounded
-    // pending-start timeout can re-render when the new attempt produces nothing.
-    // updatePendingStart() removes it — and only then — once the extension's own
-    // ack proves the attempt really started. Deleting it in advance is exactly
-    // what left the 0.0.24 card on 连接中… forever (pc-connecting-diag REPORT §4.2).
+    // attempt, but the NOTICE FILE is deliberately left in place (2026-10-11,
+    // fix/retry): it is the last recorded verdict, and deleting it in advance is
+    // exactly what left the 0.0.24 card on 连接中… forever (pc-connecting-diag
+    // REPORT §4.2). updatePendingAction() removes it — and only then — once this
+    // attempt's own engine report proves the attempt really started.
     this.connectFailureClass = '';
     this.lastStartAtMs = Date.now();
-    // 2026-10-11 retry re-entry: the bounded outcome window of THIS request. The
-    // extension's ack extends it (a slow-but-real start is never cut short), and
-    // past it the latch is released and the failure rendered — see
-    // NetBirdUiModel.decidePendingStart.
-    this.pendingStartDeadlineMs = this.lastStartAtMs + PENDING_START_TIMEOUT_MS;
-    this.pendingStartAcked = false;
-    this.pendingStartOutcome = false;
+    // 2026-10-12 upstream tap handling (beginPendingAction, HomeFragment.java:198-200, :623-630
+    // + :620-628): the tap's requested state and its ONE 7 s Runnable. A tap that
+    // requests connect and gets no answer falls back to the last reported real
+    // state (NetBirdUiModel.decideTransition) — the attempt itself is never timed
+    // out, because upstream never times out the connecting state or the engine.
+    this.pendingActionTarget = PENDING_TARGET_CONNECTED;
+    this.pendingActionDeadlineMs = this.lastStartAtMs + PENDING_ACTION_TIMEOUT_MS;
+    // paintTransition(CONNECTING) arms the force-cancel window from zero.
+    this.forceCancelArmedAtMs = 0;
+    this.forceCancelOpen = false;
+    this.noticeSuperseded = false;
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
     // 2026-10-11 retry re-entry (fix/retry): a repeated startVpnExtensionAbility
@@ -2830,6 +2893,11 @@ struct Index {
       const code: string = String((error as BusinessFailure).code ?? 'none');
       this.actionError = `连接请求未成功（错误码 ${code}），请重试`;
       this.requestSent = false;
+      // 2026-10-12 upstream tap handling: the platform refused the start up front,
+      // i.e. the engine will never report the requested state — the same outcome
+      // shouldSuppressPaint clears the latch for (HomeFragment.java:501-522).
+      // Without this the tap latch would keep the card on 连接中… for 7 s.
+      this.clearPendingAction();
       hilog.error(DOMAIN, TAG, 'UI_START_REJECTED|bundle=%{public}s|code=%{public}s|requestId=%{public}s',
         BUNDLE_NAME, code, this.requestId);
       this.requestId = `ui-${Date.now()}`;
@@ -2876,11 +2944,12 @@ struct Index {
     }
   }
 
-  // 2026-10-11 retry re-entry: ONE stop leg, then the start. The platform's stop
-  // promise is best-effort (the extension may already be gone) and is
-  // deliberately NOT what the start waits on: the wait below polls the
-  // extension's own stop evidence on its own bounded clock, so a stop call that
-  // never answers can never keep the user's retry from starting.
+  // 2026-10-11 retry re-entry (platform adaptation, ALIGNMENT-AUDIT R4): ONE stop
+  // leg, then the start. The platform's stop promise is best-effort (the extension
+  // may already be gone) and is deliberately NOT what the start waits on: the wait
+  // below polls the extension's own stop evidence, so a stop call that never answers
+  // can never keep the user's retry from starting. Still needed exactly because a
+  // repeated start against a LIVE instance is not a re-entry on this platform.
   private stopVpnExtensionThenStart(fromAutoReconnect: boolean): void {
     // the status document disappearing a moment from now is THIS stop, not a
     // fail-closed disconnect (the same latch requestStop() sets).
@@ -2892,6 +2961,18 @@ struct Index {
   }
 
   private async waitExtensionGoneThenStart(fromAutoReconnect: boolean): Promise<void> {
+    // The exit condition is the REAL signal: the extension's own stop evidence —
+    // the `stopping` marker onDestroy writes synchronously as its first statement —
+    // or the UI process's own proof that the pid which wrote the marker was killed
+    // (extensionConfirmedDead). Upstream needs no wait at all because stop and start
+    // are two methods on one binder inside one process, sequenced under a single lock
+    // by restartPending (VPNService.java:311-320; EngineRunner.java:216-232, :397-404);
+    // on HarmonyOS the instance must be GONE before a repeated
+    // startVpnExtensionAbility can re-enter (want.parameters is a first-start channel
+    // and VpnExtensionAbility has no onConnect), so the stop has to be observed. The
+    // bounded clock is only the platform fuse: a KILLED extension leaves its marker
+    // `open` and will never write the stop evidence, and the user's retry must not
+    // hang on it.
     const deadline: number = Date.now() + EXTENSION_STOP_WAIT_MS;
     while (Date.now() < deadline) {
       if (this.extensionConfirmedDead() || this.extensionGone()) {
@@ -2901,96 +2982,128 @@ struct Index {
     }
     if (!this.requestSent || this.stopSent) {
       // the user asked to disconnect while the stop leg was in flight: that stop
-      // is the last word and no start follows it.
+      // is the last word and no start follows it. The same rule upstream keeps by
+      // clearing restartPending inside stop() (EngineRunner.java:375-381), taken
+      // here under the page's own request latches.
       return;
     }
     this.startVpnExtension(fromAutoReconnect);
   }
 
-  // 2026-10-11 retry re-entry: the ONE bookkeeping step of a start request, on
-  // the EXISTING 2 s tick (no second timer, no second status read). It does two
-  // things and nothing else:
-  //   * supersedes the previous failure notice — and ONLY then — once the
-  //     extension's ack proves that this attempt really started;
-  //   * releases the latch when this attempt's outcome window passed with no
-  //     verdict at all, rendering the failure so the user has a working retry.
-  //     With an ack the window runs from the ack, so an attempt that really
-  //     started but then produced nothing still ends here instead of leaving the
-  //     card on 连接中…; a document (an outcome) closes the window for good.
-  private updatePendingStart(live: PublishedStatus | null): void {
+  // 2026-10-12 upstream tap handling: the ONE bookkeeping step of a pending
+  // action, on the EXISTING 2 s tick (no second timer, no second status read). It
+  // does three things and nothing else:
+  //   * runs the pure decideTransition() (upstream shouldSuppressPaint +
+  //     expirePendingAction + the force-cancel window) and stores its answer;
+  //   * supersedes the PREVIOUS attempt's failure notice — and only then — once
+  //     the engine's own report proves that this attempt really started (the
+  //     published status document is the cross-process form of the official
+  //     client's engine state callback); the notice is never deleted before that;
+  //   * on the 7 s expiry releases the latch so the card falls back to the last
+  //     reported real state and the user has a working control again.
+  private updatePendingAction(live: PublishedStatus | null): void {
     const nowMs: number = Date.now();
-    if (live !== null) {
-      // a document exists: this attempt produced an outcome, so its window is
-      // closed for good. Whatever happens to that document later (a tunnel that
-      // dies minutes from now) belongs to the disconnect / reconnect paths — the
-      // pending-start timeout must never fire over a session that really ran.
-      this.pendingStartOutcome = true;
-    }
-    let ackAtMs: number = 0;
-    if (this.requestSent && !this.stopSent && !this.pendingStartOutcome) {
-      // read ONLY while a request is still unanswered: an idle page pays nothing.
-      ackAtMs = this.readConnectAckAtMs();
-    }
-    const facts: PendingStartFacts = {
-      'requestSent': this.requestSent,
-      'stopSent': this.stopSent,
-      'outcomeSeen': this.pendingStartOutcome,
-      'ackAtMs': ackAtMs,
-      'lastStartAtMs': this.lastStartAtMs,
-      'deadlineMs': this.pendingStartDeadlineMs,
+    const report: string = engineReportState(live !== null ? live.state : '');
+    const targetBefore: string = this.pendingActionTarget;
+    const facts: TransitionFacts = {
+      'target': this.pendingActionTarget,
+      'report': report,
+      'deadlineMs': this.pendingActionDeadlineMs,
+      'forceCancelArmedAtMs': this.forceCancelArmedAtMs,
+      'forceCancelOpen': this.forceCancelOpen,
       'nowMs': nowMs
     };
-    const decision: PendingStartDecision = decidePendingStart(facts);
-    if (decision.action === PENDING_START_ACKNOWLEDGED && !this.pendingStartAcked) {
-      this.pendingStartAcked = true;
-      // the new attempt demonstrably started: the old verdict is superseded.
-      removeConnectFailure(getContext(this).filesDir);
-      hilog.info(DOMAIN, TAG,
-        'UI_CONNECT_ACK|bundle=%{public}s|requestId=%{public}s|note=attempt-started',
-        BUNDLE_NAME, this.requestId);
+    const decision: TransitionDecision = decideTransition(facts);
+    this.pendingActionTarget = decision.target;
+    this.pendingActionDeadlineMs = decision.deadlineMs;
+    this.forceCancelArmedAtMs = decision.forceCancelArmedAtMs;
+    this.forceCancelOpen = decision.forceCancelOpen;
+    this.transitionPainted = decision.transition;
+    if (live !== null && !this.noticeSuperseded) {
+      this.noticeSuperseded = true;
+      this.supersedePreviousVerdict();
     }
-    if (decision.action === PENDING_START_TIMEOUT) {
-      this.pendingStartTimedOut();
+    if (decision.settled) {
+      hilog.info(DOMAIN, TAG,
+        'UI_PENDING_SETTLED|bundle=%{public}s|requestId=%{public}s|state=%{public}s',
+        BUNDLE_NAME, this.requestId, report);
       return;
     }
-    this.pendingStartDeadlineMs = decision.deadlineMs;
-  }
-
-  // The extension's connect-attempt ack's at_ms (0 = absent / unreadable /
-  // unusable). Class-token document only — nothing here is rendered.
-  private readConnectAckAtMs(): number {
-    try {
-      const path: string = `${getContext(this).filesDir}/${CONNECT_ACK_FILE}`;
-      if (!fs.accessSync(path)) {
-        return 0;
-      }
-      const ack: ConnectAttemptAck | null = parseConnectAttemptAck(fs.readTextSync(path));
-      return ack === null ? 0 : ack.at_ms;
-    } catch (error) {
-      return 0;
+    if (decision.expired) {
+      this.pendingActionExpired(targetBefore);
     }
   }
 
-  // 2026-10-11 retry re-entry: the bounded exit itself. A request whose outcome
-  // window passed with no verdict at all is over — the latch is released and the
-  // last recorded verdict (the preserved notice) is rendered, so the card leaves
-  // 连接中… and the user can retry. This only ever fires when the extension
-  // produced NOTHING: a live document or a fresh failure notice ends the window
-  // first (and releases the latch through their own paths).
-  private pendingStartTimedOut(): void {
+  // The PREVIOUS attempt's recorded verdict is superseded once this attempt's own
+  // engine report proves it started. A notice belonging to THIS attempt (written at
+  // or after the request, 2 s clock margin — the same rule refreshConnectFailure
+  // reads it with) is its live verdict and stays.
+  private supersedePreviousVerdict(): void {
     const notice: ConnectFailureNotice | null = readConnectFailure(getContext(this).filesDir);
+    if (notice === null || notice.at_ms >= this.lastStartAtMs - 2000) {
+      return;
+    }
+    removeConnectFailure(getContext(this).filesDir);
+    hilog.info(DOMAIN, TAG,
+      'UI_CONNECT_STARTED|bundle=%{public}s|requestId=%{public}s|note=previous-verdict-superseded',
+      BUNDLE_NAME, this.requestId);
+  }
+
+  // 2026-10-12 upstream expirePendingAction (HomeFragment.java:640-647): the
+  // engine never reached the requested state inside the 7 s window, so fall back
+  // to painting whatever it last reported instead of staying latched forever.
+  // Upstream renders NO failure text here and neither do we: the preserved notice
+  // is read with its own freshness rule, so a verdict from a PREVIOUS attempt is
+  // never passed off as this one's, and no verdict is invented. A start that
+  // produced nothing releases its latch — the tap must really retry (upstream can
+  // rely on the in-process `engineIsRunning` guard; our counterpart is the
+  // extension's own entry gate, which stays). A stop that produced nothing keeps
+  // its latch: that stop is still the last word the user asked for, and
+  // requestStop() clears it when the platform answers.
+  private pendingActionExpired(target: string): void {
+    if (target === PENDING_TARGET_DISCONNECTED) {
+      hilog.warn(DOMAIN, TAG,
+        'UI_PENDING_EXPIRED|bundle=%{public}s|requestId=%{public}s|afterMs=%{public}d|' +
+        'target=stop|note=fallback-to-last-reported-state',
+        BUNDLE_NAME, this.requestId, PENDING_ACTION_TIMEOUT_MS);
+      return;
+    }
     this.requestSent = false;
-    this.pendingStartDeadlineMs = 0;
-    this.pendingStartAcked = false;
     this.disconnectNotice = '';
-    this.actionError = notice !== null
-      ? `上次连接未成功（${connectFailureText(notice.error_class)}），请重试`
-      : '连接请求超时，请重试';
-    hilog.error(DOMAIN, TAG,
-      'UI_START_TIMEOUT|bundle=%{public}s|requestId=%{public}s|afterMs=%{public}d|' +
-      'note=pending-start-released',
-      BUNDLE_NAME, this.requestId, PENDING_START_TIMEOUT_MS);
+    hilog.warn(DOMAIN, TAG,
+      'UI_PENDING_EXPIRED|bundle=%{public}s|requestId=%{public}s|afterMs=%{public}d|' +
+      'target=connect|note=fallback-to-last-reported-state',
+      BUNDLE_NAME, this.requestId, PENDING_ACTION_TIMEOUT_MS);
     this.requestId = `ui-${Date.now()}`;
+  }
+
+  // 2026-10-12 upstream tap handling: the transition is over as far as this page can
+  // know it (the platform refused the start, or the stop promise resolved), so the
+  // tap latch is released at once — upstream's clearPendingAction() for a report that
+  // settles the target — instead of leaving the toggle latched for the rest of the
+  // window. Nothing else is touched: no verdict is written and no document read.
+  private clearPendingAction(): void {
+    this.pendingActionTarget = PENDING_TARGET_NONE;
+    this.pendingActionDeadlineMs = 0;
+    this.updatePendingAction(null);
+  }
+
+  // 2026-10-12 upstream forceDisconnect (HomeFragment.java:579-584): abort a
+  // transition that outlived the force-cancel delay — stop the engine, whatever it
+  // was doing. Stopping also cancels a connect that is parked on an interactive
+  // login the user abandoned. The window restarts, so even a stuck disconnect
+  // keeps offering the tap again after the delay.
+  private forceCancelConnection(): void {
+    if (this.stopSent) {
+      // already stopping: nothing to issue twice, the window just restarts.
+      this.forceCancelArmedAtMs = 0;
+      this.forceCancelOpen = false;
+      return;
+    }
+    hilog.info(DOMAIN, TAG,
+      'UI_FORCE_CANCEL|bundle=%{public}s|requestId=%{public}s|note=transition-aborted',
+      BUNDLE_NAME, this.requestId);
+    this.requestStop();
   }
 
   private requestStop(): void {
@@ -3002,6 +3115,14 @@ struct Index {
     this.diagActionCount = this.diagActionCount + 1;
     this.diagEvent('ui_disconnect', this.diagActionCount);
     this.stopSent = true;
+    // 2026-10-12 upstream tap handling: a stop request is the same pending action
+    // as a connect tap — beginPendingAction(DISCONNECTED) + paintTransition(
+    // DISCONNECTING) (HomeFragment.java:190-192, :579-584), so the requested state
+    // is DISCONNECTED and the force-cancel window restarts from zero.
+    this.pendingActionTarget = PENDING_TARGET_DISCONNECTED;
+    this.pendingActionDeadlineMs = Date.now() + PENDING_ACTION_TIMEOUT_MS;
+    this.forceCancelArmedAtMs = 0;
+    this.forceCancelOpen = false;
     // 2026-10-10 后台保活（实验，方案 A）: the connection this borrowed task
     // belonged to is over — the task goes with it, and the next connection starts
     // with a fresh budget. The revision bump discards a creation the platform has
@@ -3013,6 +3134,10 @@ struct Index {
     vpnExtension.stopVpnExtensionAbility(this.buildWant()).then(() => {
       this.requestSent = false;
       this.stopSent = false;
+      // 2026-10-12 upstream tap handling: the request reached its target, so the tap
+      // latch is released right here instead of on the next 2 s tick (upstream's
+      // onEngineStopped → onEngineState(DISCONNECTED) closes the window).
+      this.clearPendingAction();
       // the document disappears a moment AFTER this resolves — mark the stop
       // so the disappearance is not misread as a fail-closed disconnect
       this.lastUserStopAtMs = Date.now();
@@ -3258,6 +3383,15 @@ struct Index {
           .backgroundColor(this.toggleColor())
           .enabled(this.toggleEnabled())
           .onClick(() => {
+            // 2026-10-12 upstream tap handling (HomeFragment.java:164-201): a tap
+            // during a painted transition does NOT start a new connect — it aborts
+            // the stuck transition (force-cancel = stop) once the 2 s window opened.
+            if (this.transitionPainted) {
+              if (this.forceCancelOpen) {
+                this.forceCancelConnection();
+              }
+              return;
+            }
             if (this.toggleOn()) {
               hilog.info(DOMAIN, TAG, 'UI_STOP_BUTTON_CLICKED|bundle=%{public}s', BUNDLE_NAME);
               this.requestStop();

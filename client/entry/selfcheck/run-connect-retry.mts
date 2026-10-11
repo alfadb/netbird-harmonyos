@@ -1,5 +1,5 @@
-// Connect-retry re-entry self-check (2026-10-11, fix/retry) — host-side, no
-// device, no network, no build.
+// Connect-retry re-entry self-check (2026-10-11 fix/retry; retargeted 2026-10-12
+// onto the official tap handling) — host-side, no device, no network, no build.
 //
 // Device evidence (pc-connecting-diag/REPORT.md §4.1-§4.4, 0.0.24): after a
 // connector abort the card correctly showed 连接失败; the retry then set
@@ -19,18 +19,20 @@
 // Coverage:
 //   R1 the aborted attempt really runs: the connector is started once and the
 //      attempt ends with the failure notice the UI renders (the 0.0.24 shape)
-//   R2 the entry writes the connect ack BEFORE the start flow can abort
+//   R2 the engine's OWN state report (the status document) is written BEFORE the
+//      start flow can abort — the mechanism that replaced the deleted ack file
 //   R3 a repeated onCreate on the same live instance RE-RUNS the connect
 //      sequence (the instance latch is gone; the gate is the connector run)
 //   R4 the entry itself preserves the previous failure notice — nothing is
 //      destroyed before the attempt demonstrably started
 //   R5 a connector run that IS active still refuses the entry, and that refusal
-//      is answered with an ack (the idempotent "already running" answer), never
-//      with a silent no-op
-//   P1-P8 wiring pins on the byte-identical Index.ets: the notice deletion moved
-//      behind the ack, the stop-then-wait-then-start leg, the bounded
-//      pending-start window on the existing 2 s tick, and the single start call
-//      site
+//      is answered by the ACTIVE run's own document, never by a silent no-op and
+//      never by a shell-invented evidence file
+//   P1-P12 wiring pins on the byte-identical Index.ets / extension source: the
+//      notice supersession moved behind the engine's own report, the
+//      stop-then-wait-then-start leg, the official 7 s pending action with NO
+//      failure text on expiry, the 2 s force-cancel window, and the single start
+//      call site
 //
 // Run: node client/entry/selfcheck/run-connect-retry.mts
 // Exit 0 = all assertions pass; exit 1 = fixture unreadable or any failure.
@@ -50,6 +52,7 @@ const REAL_ROUTES_DIR = join(ETS, 'routes');
 const G = globalThis as unknown as Record<string, unknown>;
 
 const FILES_DIR = '/tmp/nb-connect-retry-fixture';
+const STATUS_PATH = `${FILES_DIR}/netbird-status.json`;
 const ACK_PATH = `${FILES_DIR}/netbird-connect-ack`;
 const NOTICE_PATH = `${FILES_DIR}/netbird-connect-failure`;
 const MARKER_PATH = `${FILES_DIR}/netbird-diag-vpn.marker`;
@@ -168,8 +171,8 @@ function drain(): Promise<void> {
   return new Promise<void>((resolve: () => void): void => { setTimeout(resolve, 0); });
 }
 
-function ack(): Record<string, unknown> | undefined {
-  const text = fileOf(ACK_PATH);
+function status(): Record<string, unknown> | undefined {
+  const text = fileOf(STATUS_PATH);
   if (text === undefined) { return undefined; }
   try {
     return JSON.parse(text) as Record<string, unknown>;
@@ -218,6 +221,7 @@ try {
   const ui = await import(pathToFileURL(join(dir, 'NetBirdUiModel.ts')).href) as
     Record<string, unknown>;
   const extSource: string = readFileSync(join(REAL_DIR, 'NetBirdVpnExtensionAbility.ets'), 'utf8');
+  const uiSource: string = readFileSync(join(REAL_DIR, 'NetBirdUiModel.ets'), 'utf8');
   const pageSource: string = readFileSync(join(ETS, 'pages', 'Index.ets'), 'utf8');
 
   const makeAbility = (): Record<string, unknown> => {
@@ -229,21 +233,39 @@ try {
     (ability['onCreate'] as (w: unknown) => void)({ parameters: { 'requestId': requestId } });
   };
 
-  // ---- R1/R2: the aborted attempt runs and acks before it can abort --------
+  // ---- R1/R2: the aborted attempt runs and reports before it can abort -----
   resetWorld();
   seedCredentials();
+  // The connector's own live status. `running: false` is what the ENTRY gate must
+  // see to let this leg through (a run in flight is refused); the `connecting`
+  // token is what the core reports the instant `connector_start` answers
+  // (`{"started":true,"state":"connecting"}`, client/core/src/state.rs
+  // ConnState::as_str) — the stub's status is static, so one fixture carries both
+  // halves of the same start.
+  G['__NB_STATUS'] = { running: false, state: 'connecting', peer_count: 0,
+    route_count: 0, reconnects: 0 };
   const ability = makeAbility();
   enter(ability, 'ui-1');
-  check('R2 the entry writes the connect ack synchronously (before any await)',
-    ack() !== undefined && ack()?.['request_id'] === 'ui-1' &&
-    ack()?.['stage'] === ui['CONNECT_ACK_STAGE_STARTED'],
-    `ack=${JSON.stringify(ack())}`);
-  check('R2 the ack carries a positive at_ms',
-    typeof ack()?.['at_ms'] === 'number' && (ack()?.['at_ms'] as number) > 0);
+  check('R2 no evidence file is invented up front (the ack document is gone)',
+    fileOf(ACK_PATH) === undefined);
   await drain();
   await drain();
   check('R1 the connect sequence really ran (one connector start)',
     startCalls() === 1, `startCalls=${startCalls()}`);
+  // The engine's OWN state report: the status document the UI's pending action reads
+  // (the mechanism that replaced the ack file). It is written from the live core
+  // status as soon as the run started — BEFORE the start flow reaches its abort.
+  check('R2 the engine\'s OWN state report is written for THIS request',
+    status() !== undefined && status()?.['state'] === 'connecting' &&
+    status()?.['request_id'] === 'ui-1',
+    `status=${JSON.stringify(status())}`);
+  check('R2 the report carries a positive updated_at_ms',
+    typeof status()?.['updated_at_ms'] === 'number' && (status()?.['updated_at_ms'] as number) > 0);
+  check('R2 the report precedes the attempt\'s abort (reported first, then failed)',
+    logs().includes('VPN_ENGINE_REPORT|') &&
+    logs().includes('requestId=ui-1') &&
+    logs().indexOf('VPN_ENGINE_REPORT|') < logs().indexOf('VPN_CONNECT_FAILURE_NOTICE|'),
+    `logs=${logs().split('\n').filter((l: string): boolean => l.includes('VPN_')).join(' / ')}`);
   check('R1 the failed attempt leaves the notice the UI renders',
     notice() !== undefined && notice()?.['error_class'] === 'no-signal-uri',
     `notice=${JSON.stringify(notice())}`);
@@ -256,11 +278,11 @@ try {
   check('R4 the new entry destroys nothing: the previous notice is still there',
     notice()?.['at_ms'] === 111 && notice()?.['error_class'] === 'auth',
     `notice=${JSON.stringify(notice())}`);
-  check('R3 the repeated entry is ack-ed for THIS request',
-    ack()?.['request_id'] === 'ui-2' && ack()?.['stage'] === ui['CONNECT_ACK_STAGE_STARTED'],
-    `ack=${JSON.stringify(ack())}`);
   await drain();
   await drain();
+  check('R3 the repeated entry re-reports the engine state for THIS request',
+    status()?.['request_id'] === 'ui-2' && status()?.['state'] === 'connecting',
+    `status=${JSON.stringify(status())}`);
   check('R3 the repeated entry really re-runs the connect sequence (the old ' +
     'instance latch no longer swallows it)',
     startCalls() === before + 1, `before=${before} after=${startCalls()}`);
@@ -278,9 +300,9 @@ try {
   enter(ability, 'ui-3');
   check('R5 a live connector run refuses the entry (no second connect sequence)',
     startCalls() === running, `running=${running} after=${startCalls()}`);
-  check('R5 the refusal is still ANSWERED (idempotent "already running" ack)',
-    ack()?.['request_id'] === 'ui-3' && ack()?.['stage'] === ui['CONNECT_ACK_STAGE_RUNNING'],
-    `ack=${JSON.stringify(ack())}`);
+  check('R5 the refusal needs no evidence document of its own (the active run ' +
+    'is already reporting its state, and the ack file is gone)',
+    fileOf(ACK_PATH) === undefined && !extSource.includes('writeConnectAckForUi'));
   check('R5 the refusal is named as a connector run, not an instance latch',
     logs().includes('phase=connect-run-active') &&
     !logs().includes('connection-already-attempted'));
@@ -288,22 +310,34 @@ try {
     typeof mod['default'] === 'function' &&
     extSource.includes('const status: ConnectorStatusResult | null = pollStatusOrNull();'));
 
-  // ---- P1-P8: wiring pins on the page (byte-identical source) ---------------
+  // ---- P1-P12: wiring pins on the page / extension (byte-identical source) --
   const requestStart: string = pageSource.slice(pageSource.indexOf('private requestStart('),
     pageSource.indexOf('private startVpnExtension('));
   const startLeg: string = pageSource.slice(pageSource.indexOf('private startVpnExtension('),
     pageSource.indexOf('private extensionGone('));
   const updatePending: string = pageSource.slice(
-    pageSource.indexOf('private updatePendingStart('),
-    pageSource.indexOf('private readConnectAckAtMs('));
-  const timeoutLeg: string = pageSource.slice(
-    pageSource.indexOf('private pendingStartTimedOut('),
+    pageSource.indexOf('private updatePendingAction('),
+    pageSource.indexOf('private supersedePreviousVerdict('));
+  const supersede: string = pageSource.slice(
+    pageSource.indexOf('private supersedePreviousVerdict('),
+    pageSource.indexOf('private pendingActionExpired('));
+  const expiredLeg: string = pageSource.slice(
+    pageSource.indexOf('private pendingActionExpired('),
+    pageSource.indexOf('private forceCancelConnection('));
+  const forceCancel: string = pageSource.slice(
+    pageSource.indexOf('private forceCancelConnection('),
     pageSource.indexOf('private requestStop('));
   check('P1 the request no longer deletes the failure notice up front',
     requestStart.length > 0 && !requestStart.includes('removeConnectFailure('));
-  check('P2 the request arms the bounded pending-start window and resets its ack latch',
-    requestStart.includes('this.pendingStartDeadlineMs = this.lastStartAtMs + PENDING_START_TIMEOUT_MS') &&
-    requestStart.includes('this.pendingStartAcked = false'));
+  check('P2 the request arms the OFFICIAL 7 s pending action for the connect target',
+    requestStart.includes('this.pendingActionTarget = PENDING_TARGET_CONNECTED') &&
+    requestStart.includes('this.pendingActionDeadlineMs = this.lastStartAtMs + ' +
+      'PENDING_ACTION_TIMEOUT_MS') &&
+    requestStart.includes('this.forceCancelArmedAtMs = 0') &&
+    requestStart.includes('this.noticeSuperseded = false'));
+  check('P2 the 30 s attempt timeout is gone (no timeout of the connecting state)',
+    !pageSource.includes('PENDING_START_TIMEOUT_MS') &&
+    !pageSource.includes('pendingStartTimedOut'));
   check('P3 the request decides the start leg on the extension\'s own stop evidence',
     requestStart.includes('connectStartLeg(this.extensionGone())') &&
     requestStart.includes('CONNECT_LEG_AFTER_STOP') &&
@@ -317,31 +351,56 @@ try {
     (pageSource.match(/startVpnExtensionAbility\(/g) ?? []).length === 1 &&
     startLeg.includes('vpnExtension.startVpnExtensionAbility(this.buildWant())') &&
     !requestStart.includes('startVpnExtensionAbility('));
-  check('P6 the notice is superseded only once the ack proves the attempt started',
-    updatePending.includes('decidePendingStart(facts)') &&
-    updatePending.includes('PENDING_START_ACKNOWLEDGED') &&
-    updatePending.includes('removeConnectFailure(getContext(this).filesDir)'));
-  check('P7 the timeout releases the latch and renders the failure',
-    updatePending.includes('PENDING_START_TIMEOUT') &&
-    timeoutLeg.includes('this.requestSent = false;') &&
-    timeoutLeg.includes('readConnectFailure(getContext(this).filesDir)') &&
-    timeoutLeg.includes('this.actionError ='));
-  check('P8 the bookkeeping rides the EXISTING tick (no second timer)',
-    (pageSource.match(/this\.updatePendingStart\(live\);/g) ?? []).length === 1 &&
-    pageSource.includes('ackAtMs = this.readConnectAckAtMs();'));
-  check('P11 an outcome closes the window for good (a later disconnect can never ' +
-    'fire this timeout over a session that really ran)',
-    requestStart.includes('this.pendingStartOutcome = false;') &&
-    updatePending.includes('this.pendingStartOutcome = true;') &&
-    updatePending.includes("'outcomeSeen': this.pendingStartOutcome"));
+  check('P6 the notice is superseded only once THIS attempt\'s own engine report exists',
+    updatePending.includes('decideTransition(facts)') &&
+    updatePending.includes('if (live !== null && !this.noticeSuperseded)') &&
+    supersede.includes('removeConnectFailure(getContext(this).filesDir)') &&
+    supersede.includes('notice.at_ms >= this.lastStartAtMs - 2000'));
+  check('P7 the expiry falls back to the last reported state and renders NO failure text',
+    updatePending.includes('decision.expired') &&
+    expiredLeg.includes('this.requestSent = false;') &&
+    expiredLeg.includes('note=fallback-to-last-reported-state') &&
+    !expiredLeg.includes('connectFailureText(') &&
+    !expiredLeg.includes('this.actionError ='));
+  check('P8 the bookkeeping rides the EXISTING tick (no second timer) and reads no ack',
+    (pageSource.match(/this\.updatePendingAction\(live\);/g) ?? []).length === 1 &&
+    !pageSource.includes('readConnectAckAtMs') &&
+    !pageSource.includes('netbird-connect-ack'));
   check('P9 the extension gate reads the connector run, not an instance latch',
     extSource.includes('const connectorRunning: boolean | null = this.connectorRunState();') &&
     extSource.includes('connectEntryDecision(connectorRunning) === CONNECT_ENTRY_REJECT_RUNNING') &&
-    extSource.indexOf('connectEntryDecision(connectorRunning)') <
-      extSource.indexOf('this.writeConnectAckForUi(CONNECT_ACK_STAGE_STARTED)'));
-  check('P10 the ack write is the one shared document, opened TRUNC and closed',
-    extSource.includes('buildConnectAttemptAck(this.requestId, Date.now(), stage)') &&
-    extSource.includes('fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC'));
+    !extSource.includes('CONNECT_ACK_STAGE_STARTED'));
+  check('P10 the extension reports the engine\'s own state from the START leg, before ' +
+    'the watcher exists',
+    extSource.includes('this.publishEngineStateReport(true);') &&
+    extSource.includes('if (this.watcherTimer < 0 && !allowBeforeWatcher)') &&
+    extSource.indexOf('this.publishEngineStateReport(true);') <
+      extSource.indexOf('const net: CoreNetworkConfig | null = await this.waitNetworkConfigBounded();') &&
+    extSource.includes("this.publishStatusForUi(status, 'unknown', true)") &&
+    extSource.includes('this.publishEngineStateReport();'));
+  check('P11 the force-cancel window: 2 s delay, toggle gated on it, tap aborts the ' +
+    'transition instead of starting a new connect',
+    pageSource.includes('return this.stopSent || this.transitionPainted;') &&
+    pageSource.includes('if (this.transitionPainted) {') &&
+    pageSource.includes('return this.forceCancelOpen;') &&
+    pageSource.includes('if (this.forceCancelOpen) {') &&
+    pageSource.includes('this.forceCancelConnection();') &&
+    forceCancel.includes('this.requestStop();'));
+  check('P12 the official state set replaced our invented failure labels',
+    typeof ui['engineReportState'] === 'function' &&
+    uiSource.includes("export const PENDING_ACTION_TIMEOUT_MS: number = 7000;") &&
+    uiSource.includes("export const FORCE_CANCEL_DELAY_MS: number = 2000;") &&
+    uiSource.includes("return '需要登录';") &&
+    !uiSource.includes("return '连接失败';") &&
+    !uiSource.includes("'无法连接服务器'") &&
+    !uiSource.includes('PENDING_START_TIMEOUT'));
+  check('P13 a transition the page KNOWS is over releases the tap latch at once ' +
+    '(the platform refusal, the resolved stop, the engine\'s end)',
+    pageSource.includes('private clearPendingAction(): void {') &&
+    pageSource.includes('this.pendingActionTarget = PENDING_TARGET_NONE;\n' +
+      '    this.pendingActionDeadlineMs = 0;\n    this.updatePendingAction(null);') &&
+    pageSource.includes('this.clearPendingAction();') &&
+    (pageSource.match(/this\.clearPendingAction\(\);/g) ?? []).length === 3);
 } finally {
   if (fixtureDir.length > 0) {
     rmSync(fixtureDir, { recursive: true, force: true });
