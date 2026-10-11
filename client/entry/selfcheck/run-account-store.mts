@@ -143,6 +143,28 @@ try {
   state.keyError = null;
   check('KeyStore unsupported error class preserves stable unsupported reason', keyFailure === 'unsupported');
 
+  // 0.0.22: the same coded failure must now carry WHERE it failed and the
+  // platform BusinessError code, so the login UI can render its suffix. The
+  // platform text travels in its own field — the stable `message` never gains
+  // raw SDK text.
+  state.keyError = { code: 202, message: 'KEY_SDK_SENTINEL' };
+  let codedStep = '';
+  let codedCode = 0;
+  let codedDetail = '';
+  let codedMessage = '';
+  try { await module.loadAccountCredentials(filesDir); }
+  catch (error) {
+    const failure = error as { step?: string; code?: number; detail?: string; message?: string };
+    codedStep = failure.step ?? '';
+    codedCode = failure.code ?? 0;
+    codedDetail = failure.detail ?? '';
+    codedMessage = failure.message ?? '';
+  }
+  state.keyError = null;
+  check('coded key-store failure keeps the failing step and platform code for the UI suffix',
+    codedStep === 'asset.query' && codedCode === 202 && codedDetail === 'KEY_SDK_SENTINEL' &&
+    codedMessage === 'unsupported');
+
   await writeFile(join(filesDir, 'netbird-setup-key'), 'untouched');
   await module.clearAccountCredentials(filesDir);
   let accountExists = true;

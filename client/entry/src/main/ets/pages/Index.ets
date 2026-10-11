@@ -46,6 +46,7 @@ import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
 import { NetBirdAccountWebView } from '../login/NetBirdAccountWebView';
 import { AccountLoginController } from '../login/NetBirdAccountLogin';
 import type { PreparedAccountLogin } from '../login/NetBirdAccountLogin';
+import { AccountStoreError } from '../login/NetBirdAccountStoreCore';
 import type { AccountCredentials } from '../login/NetBirdAccountStoreCore';
 import { ACCOUNT_CREDENTIALS_FILE, saveAccountCredentials, clearAccountCredentials } from '../login/NetBirdAccountStore';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
@@ -2358,12 +2359,28 @@ struct Index {
     return this.requestSent || (this.published !== null && vpnActiveState(this.published.state));
   }
 
-  private accountLoginErrorText(reason: string): string {
+  // 0.0.22（PC 上"安全存储不可用"无从定位）：安全存储把每个失败都压成一个稳定
+  // reason，平台错误码和失败步骤一起丢了。这里把两者拼回用户可见文案——只来自
+  // AccountStoreError（error.step/error.code），错误码 0 = 平台没给数字码；步骤名
+  // 缺失时写 unknown，绝不猜。
+  private accountStoreFailureSuffix(error: Error | string): string {
+    if (!(error instanceof AccountStoreError) || error.step.length === 0 && error.code === 0) {
+      return '';
+    }
+    const step: string = error.step.length > 0 ? error.step : 'unknown';
+    return `（${step} 错误码 ${error.code}）`;
+  }
+
+  private accountLoginErrorText(error: Error | string): string {
+    const reason: string = typeof error === 'string' ? error : error.message;
+    const suffix: string = this.accountStoreFailureSuffix(error);
     if (reason === 'cancelled') { return ''; }
     if (reason === 'discovery_unavailable') { return '账户登录暂不可用，请更新应用后重试。'; }
     if (reason === 'discovery_timeout') { return '连接管理服务器超时，请检查网络后重试。'; }
-    if (reason === 'unsupported' || reason === 'unavailable') { return '安全存储不可用，无法保存账户凭据。'; }
-    return '账户登录失败，请重试。';
+    if (reason === 'unsupported' || reason === 'unavailable') {
+      return `安全存储不可用，无法保存账户凭据。${suffix}`;
+    }
+    return `账户登录失败，请重试。${suffix}`;
   }
 
   private async beginAccountLogin(): Promise<void> {
@@ -2395,7 +2412,7 @@ struct Index {
       this.accountLoginOpen = true;
     } catch (error) {
       if (generation === this.accountLoginGeneration) {
-        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error.message : 'login_failed');
+        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error : 'login_failed');
       }
     } finally {
       if (generation === this.accountLoginGeneration) {
@@ -2442,7 +2459,16 @@ struct Index {
       this.requestStart();
     } catch (error) {
       if (generation === this.accountLoginGeneration) {
-        this.accountLoginError = this.accountLoginErrorText(error instanceof Error ? error.message : 'login_failed');
+        const failure: Error | string = error instanceof Error ? error : 'login_failed';
+        // 0.0.22：安全存储失败只落这一条日志——记 reason / step / code 与平台报错
+        // 原文（AccountStoreError.detail 只在平台错误带数字码时才有值），绝不带
+        // 凭据、令牌、密钥或 JSON 内容。
+        if (failure instanceof AccountStoreError) {
+          hilog.error(DOMAIN, TAG,
+            'ACCOUNT_STORE_FAILED|reason=%{public}s|step=%{public}s|code=%{public}d|message=%{public}s',
+            failure.reason, failure.step, failure.code, failure.detail);
+        }
+        this.accountLoginError = this.accountLoginErrorText(failure);
       }
     } finally {
       if (generation === this.accountLoginGeneration) {

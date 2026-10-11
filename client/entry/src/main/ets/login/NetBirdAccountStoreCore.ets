@@ -26,11 +26,21 @@ export interface AccountCredentials {
 
 export class AccountStoreError extends Error {
   readonly reason: string;
+  // Which step failed, the platform BusinessError code (0 = the failing error
+  // carried no numeric code) and the platform error's own message text. The
+  // stable `message` stays the reason, so callers never see raw SDK text; only
+  // the login UI's diagnostics suffix and the one hilog line read these three.
+  readonly step: string;
+  readonly code: number;
+  readonly detail: string;
 
-  constructor(reason: string) {
+  constructor(reason: string, step?: string, code?: number, detail?: string) {
     super(reason);
     this.name = 'AccountStoreError';
     this.reason = reason;
+    this.step = step ?? '';
+    this.code = code ?? 0;
+    this.detail = detail ?? '';
   }
 }
 

@@ -29,12 +29,20 @@ interface CodedFailure extends Error {
 export class AccountKeyStoreError extends Error {
   readonly reason: string;
   readonly code: number;
+  // Which Asset Store step failed ('asset.query' / 'asset.add' /
+  // 'asset.remove' / 'random') plus the platform error's own message text.
+  // `message` stays the stable reason; the platform text only travels in
+  // `detail` so nothing can print an SDK string where a reason is expected.
+  readonly step: string;
+  readonly detail: string;
 
-  constructor(reason: string, code: number) {
+  constructor(reason: string, code: number, step?: string, detail?: string) {
     super(reason);
     this.name = 'AccountKeyStoreError';
     this.reason = reason;
     this.code = code;
+    this.step = step ?? '';
+    this.detail = detail ?? '';
   }
 }
 
@@ -47,11 +55,27 @@ function errorCode(error: Object): number {
   }
 }
 
-function failure(error: Object): AccountKeyStoreError {
+// The platform error's own message text, kept ONLY for errors that carry a
+// numeric BusinessError code. An app-thrown exception (JSON parse, type error)
+// can quote the document under test back in its message, so its text is never
+// kept — a coded platform failure is the only thing worth diagnosing.
+function platformMessage(error: Object): string {
+  if (errorCode(error) === 0) {
+    return '';
+  }
+  try {
+    const message: string | undefined = (error as Error).message;
+    return typeof message === 'string' ? message : '';
+  } catch (ignored) {
+    return '';
+  }
+}
+
+function failure(error: Object, step: string): AccountKeyStoreError {
   const code: number = errorCode(error);
   const reason: string = code === ERROR_UNSUPPORTED || code === ERROR_NOT_SYSTEM_APPLICATION
     ? 'unsupported' : 'unavailable';
-  return new AccountKeyStoreError(reason, code);
+  return new AccountKeyStoreError(reason, code, step, platformMessage(error));
 }
 
 function aliasBytes(): Uint8Array {
@@ -83,11 +107,11 @@ function addAttributes(key: Uint8Array): asset.AssetMap {
 
 function storedKey(results: Array<asset.AssetMap>): Uint8Array {
   if (results.length === 0) {
-    throw new AccountKeyStoreError('malformed', 0);
+    throw new AccountKeyStoreError('malformed', 0, 'asset.query');
   }
   const value: asset.Value | undefined = results[0].get(asset.Tag.SECRET);
   if (!(value instanceof Uint8Array) || value.length !== ACCOUNT_KEY_BYTES) {
-    throw new AccountKeyStoreError('malformed', 0);
+    throw new AccountKeyStoreError('malformed', 0, 'asset.query');
   }
   return new Uint8Array(value);
 }
@@ -97,14 +121,14 @@ async function generateKey(): Promise<Uint8Array> {
     const blob: cryptoFramework.DataBlob =
       await cryptoFramework.createRandom().generateRandom(ACCOUNT_KEY_BYTES);
     if (!(blob.data instanceof Uint8Array) || blob.data.length !== ACCOUNT_KEY_BYTES) {
-      throw new AccountKeyStoreError('malformed', 0);
+      throw new AccountKeyStoreError('malformed', 0, 'random');
     }
     return new Uint8Array(blob.data);
   } catch (error) {
     if (error instanceof AccountKeyStoreError) {
       throw error;
     }
-    throw failure(error as Object);
+    throw failure(error as Object, 'random');
   }
 }
 
@@ -117,7 +141,7 @@ export async function loadAccountKey(): Promise<Uint8Array | null> {
     if (code === ERROR_NOT_FOUND) {
       return null;
     }
-    throw failure(error as Object);
+    throw failure(error as Object, 'asset.query');
   }
   return storedKey(results);
 }
@@ -135,11 +159,11 @@ export async function loadOrCreateAccountKey(): Promise<Uint8Array> {
   } catch (error) {
     const code: number = errorCode(error as Object);
     if (code !== ERROR_DUPLICATED) {
-      throw failure(error as Object);
+      throw failure(error as Object, 'asset.add');
     }
     const winner: Uint8Array | null = await loadAccountKey();
     if (winner === null) {
-      throw new AccountKeyStoreError('unavailable', ERROR_NOT_FOUND);
+      throw new AccountKeyStoreError('unavailable', ERROR_NOT_FOUND, 'asset.query');
     }
     return winner;
   }
@@ -155,6 +179,6 @@ export async function clearAccountKey(): Promise<void> {
     if (code === ERROR_NOT_FOUND) {
       return;
     }
-    throw failure(error as Object);
+    throw failure(error as Object, 'asset.remove');
   }
 }

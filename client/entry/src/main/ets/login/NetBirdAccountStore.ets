@@ -46,14 +46,31 @@ function failureCode(error: Error): number {
   }
 }
 
-function stableError(reason: string): AccountStoreError {
-  return new AccountStoreError(reason);
+// The platform error's own message text, kept ONLY when the error carried a
+// numeric BusinessError code. An app-thrown exception can quote the document
+// under test back in its message (JSON.parse names the offending input), so its
+// text is never carried — the one hilog line for this line of code prints only
+// reason / step / code and a coded platform error's message.
+function failureDetail(error: Object): string {
+  if (failureCode(error as Error) === 0) {
+    return '';
+  }
+  try {
+    const message: string | undefined = (error as Error).message;
+    return typeof message === 'string' ? message : '';
+  } catch (ignored) {
+    return '';
+  }
+}
+
+function stableError(reason: string, step?: string, code?: number, detail?: string): AccountStoreError {
+  return new AccountStoreError(reason, step, code, detail);
 }
 
 function pathFor(filesDir: string, basename: string): string {
   if (filesDir.length === 0 || filesDir.endsWith('/') || basename !== ACCOUNT_CREDENTIALS_FILE &&
     basename !== TEMP_FILE) {
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'path');
   }
   return `${filesDir}/${basename}`;
 }
@@ -72,7 +89,7 @@ function decodeUtf8(bytes: Uint8Array): string {
   try {
     return util.TextDecoder.create('utf-8', { fatal: true }).decodeToString(bytes);
   } catch (error) {
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'payload.decode');
   }
 }
 
@@ -84,7 +101,7 @@ function unbase64(value: string): Uint8Array {
   try {
     return new util.Base64Helper().decodeSync(value);
   } catch (error) {
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'envelope');
   }
 }
 
@@ -92,14 +109,14 @@ async function secureRandom(length: number): Promise<Uint8Array> {
   try {
     const result: cryptoFramework.DataBlob = await cryptoFramework.createRandom().generateRandom(length);
     if (!(result.data instanceof Uint8Array) || result.data.length !== length) {
-      throw stableError(REASON_UNAVAILABLE);
+      throw stableError(REASON_UNAVAILABLE, 'random');
     }
     return new Uint8Array(result.data);
   } catch (error) {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'random', failureCode(error as Error), failureDetail(error as Object));
   }
 }
 
@@ -110,15 +127,20 @@ async function cipherKey(): Promise<cryptoFramework.SymKey> {
   } catch (error) {
     const reason: string = error instanceof AccountKeyStoreError &&
       error.reason === 'unsupported' ? 'unsupported' : REASON_UNAVAILABLE;
-    throw stableError(reason);
+    if (error instanceof AccountKeyStoreError) {
+      throw stableError(reason, error.step.length > 0 ? error.step : 'asset.query',
+        error.code, error.detail);
+    }
+    throw stableError(reason, 'asset.query', failureCode(error as Error), failureDetail(error as Object));
   }
   if (!(raw instanceof Uint8Array) || raw.length !== 32) {
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'keystore');
   }
   try {
     return await cryptoFramework.createSymKeyGenerator('AES256').convertKey({ data: raw });
   } catch (error) {
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'aes.convertKey',
+      failureCode(error as Error), failureDetail(error as Object));
   }
 }
 
@@ -133,7 +155,7 @@ async function encrypt(plaintext: Uint8Array): Promise<Envelope> {
     await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, key, params);
     const result: cryptoFramework.DataBlob = await cipher.doFinal({ data: plaintext });
     if (!(result.data instanceof Uint8Array) || result.data.length !== plaintext.length + TAG_BYTES) {
-      throw stableError(REASON_UNAVAILABLE);
+      throw stableError(REASON_UNAVAILABLE, 'aes.encrypt');
     }
     return {
       v: FORMAT_VERSION,
@@ -145,7 +167,8 @@ async function encrypt(plaintext: Uint8Array): Promise<Envelope> {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'aes.encrypt',
+      failureCode(error as Error), failureDetail(error as Object));
   }
 }
 
@@ -155,7 +178,7 @@ async function decrypt(envelope: Envelope): Promise<Uint8Array> {
   const tag: Uint8Array = unbase64(envelope.tag);
   if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES || ciphertext.length === 0 ||
     ciphertext.length > MAX_PAYLOAD_BYTES) {
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'envelope');
   }
   const key: cryptoFramework.SymKey = await cipherKey();
   try {
@@ -166,33 +189,35 @@ async function decrypt(envelope: Envelope): Promise<Uint8Array> {
     await cipher.init(cryptoFramework.CryptoMode.DECRYPT_MODE, key, params);
     const result: cryptoFramework.DataBlob = await cipher.doFinal({ data: ciphertext });
     if (!(result.data instanceof Uint8Array) || result.data.length > MAX_PAYLOAD_BYTES) {
-      throw stableError(REASON_MALFORMED);
+      throw stableError(REASON_MALFORMED, 'aes.decrypt');
     }
     return new Uint8Array(result.data);
   } catch (error) {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'aes.decrypt',
+      failureCode(error as Error), failureDetail(error as Object));
   }
 }
 
 function parseEnvelope(bytes: Uint8Array): Envelope {
   try {
     if (bytes.length === 0 || bytes.length > MAX_ENVELOPE_BYTES) {
-      throw stableError(REASON_MALFORMED);
+      throw stableError(REASON_MALFORMED, 'envelope');
     }
     const value: Envelope | null = JSON.parse(decodeUtf8(bytes)) as Envelope | null;
     if (value === null || value.v !== FORMAT_VERSION || typeof value.iv !== 'string' ||
       typeof value.ciphertext !== 'string' || typeof value.tag !== 'string') {
-      throw stableError(REASON_MALFORMED);
+      throw stableError(REASON_MALFORMED, 'envelope');
     }
     return value;
   } catch (error) {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'envelope',
+      failureCode(error as Error), failureDetail(error as Object));
   }
 }
 
@@ -210,7 +235,7 @@ async function readBounded(path: string): Promise<Uint8Array | null> {
       total += count;
     }
     if (total > MAX_ENVELOPE_BYTES) {
-      throw stableError(REASON_MALFORMED);
+      throw stableError(REASON_MALFORMED, 'file.read');
     }
     const bytes: Uint8Array = new Uint8Array(buffer, 0, total);
     return new Uint8Array(bytes);
@@ -221,7 +246,8 @@ async function readBounded(path: string): Promise<Uint8Array | null> {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'file.read',
+      failureCode(error as Error), failureDetail(error as Object));
   } finally {
     if (file !== null) {
       try {
@@ -241,7 +267,7 @@ async function writeAtomic(path: string, bytes: Uint8Array): Promise<void> {
     file = await fs.open(tempPath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
     const written: number = await fs.write(file.fd, toArrayBuffer(bytes));
     if (written !== bytes.length) {
-      throw stableError(REASON_UNAVAILABLE);
+      throw stableError(REASON_UNAVAILABLE, 'file.write');
     }
     await fs.fsync(file.fd);
     await fs.close(file);
@@ -251,7 +277,8 @@ async function writeAtomic(path: string, bytes: Uint8Array): Promise<void> {
     if (error instanceof AccountStoreError) {
       throw error;
     }
-    throw stableError(REASON_UNAVAILABLE);
+    throw stableError(REASON_UNAVAILABLE, 'file.write',
+      failureCode(error as Error), failureDetail(error as Object));
   } finally {
     if (file !== null) {
       try {
@@ -271,12 +298,12 @@ async function writeAtomic(path: string, bytes: Uint8Array): Promise<void> {
 export async function saveAccountCredentials(filesDir: string, credentials: AccountCredentials): Promise<void> {
   const payload: Uint8Array = encodeUtf8(serializeCredentials(credentials));
   if (payload.length === 0 || payload.length > MAX_PAYLOAD_BYTES) {
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'payload.serialize');
   }
   const envelope: Envelope = await encrypt(payload);
   const bytes: Uint8Array = encodeUtf8(JSON.stringify(envelope));
   if (bytes.length === 0 || bytes.length > MAX_ENVELOPE_BYTES) {
-    throw stableError(REASON_MALFORMED);
+    throw stableError(REASON_MALFORMED, 'envelope');
   }
   await writeAtomic(pathFor(filesDir, ACCOUNT_CREDENTIALS_FILE), bytes);
 }
@@ -291,7 +318,7 @@ export async function loadAccountCredentials(filesDir: string,
   const plaintext: Uint8Array = await decrypt(envelope);
   const credentials: AccountCredentials = parseCredentials(decodeUtf8(plaintext));
   if (expectedManagementUrl !== undefined && credentials.managementUrl !== expectedManagementUrl) {
-    throw stableError(REASON_MISMATCH);
+    throw stableError(REASON_MISMATCH, 'management.url');
   }
   return credentials;
 }
@@ -302,7 +329,8 @@ export async function clearAccountCredentials(filesDir: string): Promise<void> {
     await fs.unlink(path);
   } catch (error) {
     if (failureCode(error as Error) !== 13900002) {
-      throw stableError(REASON_UNAVAILABLE);
+      throw stableError(REASON_UNAVAILABLE, 'file.remove',
+        failureCode(error as Error), failureDetail(error as Object));
     }
   }
 }
