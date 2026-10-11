@@ -92,7 +92,8 @@ import type { PhoneLogConfigureResult, PhoneLogSummary, NativeResourceSample }
 // connector already exports, so no shim const is needed anywhere.
 import type { RouteSelectionSetResult } from './NetBirdConnector';
 
-import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
+import { CONNECT_ENTRY_REJECT_RUNNING, UiStatusDocument, buildUiStatusDocument,
+  connectEntryDecision } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
@@ -390,9 +391,10 @@ const LOGOUT_TICKET_MAX_AGE_MS: number = 30000;
 // (same shared-filesDir channel as the logout ticket; reader + shape live
 // in NetBirdConnector.ets — CONNECT_FAILURE_FILE / ConnectFailureNotice).
 // Written when the connector canNOT reach a live tunnel (login fatal auth,
-// retry budget exhausted, startup abort before create()) so the home card
-// shows 连接失败 + a Chinese reason instead of a stale 连接中…; the UI
-// deletes it when it sends a fresh start request.
+// retry budget exhausted, startup abort before create()) so the home card can
+// show the engine's own MESSAGE (error line + one Toast) next to its official
+// state instead of a stale 连接中…; a later attempt's own engine report
+// supersedes it, never an up-front delete.
 const CONNECT_FAILURE_FILE_NAME: string = 'netbird-connect-failure';
 
 // 2026-10-08 shell-side diagnostics wiring:
@@ -799,7 +801,6 @@ function parseLogoutTicketIssuedAtMs(text: string): number {
 //   failures trigger the same teardown from the runtime watcher.
 export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private requestId: string = 'missing';
-  private connectionCreationAttempted: boolean = false;
   private connection?: vpnExtension.VpnConnection;
   private createPromise?: Promise<CreateOutcome>;
   private createSettled: boolean = false;
@@ -880,6 +881,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // the (async) start flow never creates a VPN after teardown began.
   private destroyRequested: boolean = false;
   private watcherTimer: number = -1;
+  // 2026-10-12: at_ms of the last engine state report published from the START leg
+  // (publishEngineStateReport; 0 = none yet). Throttles those early reports to the
+  // watcher cadence — they keep the UI's report channel fresh while the run starts.
+  private lastEngineReportAtMs: number = 0;
   // Serial of the network-config snapshot merged into the platform
   // VpnConfig at create() time (-1 = none applied).
   private appliedNetSerial: number = -1;
@@ -1150,13 +1155,30 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=onCreate-reached|diag=true|is_evidence=false',
       this.requestId);
 
-    if (this.connectionCreationAttempted) {
+    // 2026-10-11 retry re-entry (fix/retry): the gate is the CONNECTOR RUN, not
+    // the ability instance. The old unconditional instance latch made every
+    // later entry a no-op for the whole life of the process, so a retry after an
+    // aborted run could never re-run the connect flow (device evidence:
+    // pc-connecting-diag/REPORT.md §4.3). `connector_status().running` is the
+    // CORE's own answer — the same "engine is running" gate the official Android
+    // client applies (android-client EngineRunner.java:136-147) — and this SDK
+    // declaration has no onConnect to route a repeated start through
+    // (@ohos.app.ability.VpnExtensionAbility.d.ts: only context/onCreate/
+    // onDestroy; contrast AppServiceExtensionAbility.d.ts:110 onConnect).
+    const connectorRunning: boolean | null = this.connectorRunState();
+    if (connectEntryDecision(connectorRunning) === CONNECT_ENTRY_REJECT_RUNNING) {
       hilog.error(DOMAIN, TAG,
-        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=duplicate-onCreate|summary=connection-already-attempted',
+        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=connect-run-active|' +
+        'summary=connector-already-running',
         this.requestId);
+      // Still an ANSWER, not a failure: an entry that arrives while a run is
+      // active is the idempotent "already running" answer. It needs no evidence
+      // document of its own: the ACTIVE run is publishing its own status document
+      // on every watcher tick, and that document is the engine's own state report
+      // the UI's pending action reads (2026-10-12: the connect-attempt ACK file is
+      // gone — the state report IS the upstream mechanism).
       return;
     }
-    this.connectionCreationAttempted = true;
 
     // 2026-10-08 diagnostics wiring (as early as the extension lifecycle
     // allows): install the persistent VPN log tee and arm the two shell-side
@@ -1907,8 +1929,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
     if (!start.started) {
       // 2026-10-06 登录失败可见性: the connector refused the start (config /
-      // credential class) — persist the class so the home card shows
-      // 连接失败 + reason instead of a stale 连接中….
+      // credential class) — persist the class so the home card shows the
+      // engine's message instead of a stale 连接中….
       this.writeConnectFailureForUi(
         start.error !== undefined && start.error !== null && start.error.length > 0
           ? start.error : 'none');
@@ -1949,6 +1971,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'mgmtSocket=protected|connectAddr=%{public}s',
       this.requestId, start.state ?? 'unknown', connectAddr);
 
+    // 2026-10-12 upstream tap handling: the engine reports its OWN state the moment
+    // the run starts, before the bounded network-map wait below — this is the
+    // cross-process form of the official client's synchronously fired state
+    // callback (EngineRunner.java:182 `notifyServiceStateListeners(true)` on the
+    // same lock that set engineIsRunning, consumed by MainActivity.java:1015-1027).
+    // It replaces the deleted connect-attempt ACK file: the UI's pending action reads
+    // the engine's state (connecting here) instead of a shell-invented document, and
+    // it is what lets the 7 s pending window fall back onto a REAL state instead of
+    // onto "nothing reported". Best-effort: a refused probe/write costs the UI one
+    // fallback, never the VPN.
+    this.publishEngineStateReport(true);
+
     const net: CoreNetworkConfig | null = await this.waitNetworkConfigBounded();
     if (this.destroyRequested) {
       connectorStop();
@@ -1984,8 +2018,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       // practice the LOGIN failed (fatal auth or still retrying against an
       // unreachable/wrong server). Persist the connector's OWN last error
       // class BEFORE the stop wipes the live status channel, so the home
-      // card renders 连接失败 + the matching Chinese reason (e.g.
-      // 设备未注册或 Setup Key 无效) instead of a stale 连接中…. The rare
+      // card carries the matching Chinese reason (e.g. 设备未注册或 Setup Key
+      // 无效) next to its official state instead of a stale 连接中…. The rare
       // map-but-no-signal-uri case records the config token instead.
       let failureClass: string = net === null ? 'none' : 'no-signal-uri';
       if (net === null) {
@@ -2225,6 +2259,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'VPN_NETCFG_POLL_REJECTED|requestId=%{public}s|summary=%{public}s',
           this.requestId, safeError(error as Error));
       }
+      // 2026-10-12 upstream tap handling: the engine keeps REPORTING while it is
+      // starting. Without this the document written at the run's start would go
+      // stale (> STATUS_MAX_AGE_MS) inside the 15 s box and the UI would read
+      // "nothing reported" mid-start. Throttled inside the helper.
+      this.publishEngineStateReport();
       await sleep(NETWORK_MAP_POLL_MS);
     }
     return null;
@@ -5033,8 +5072,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // 2026-10-06 登录失败可见性: a TERMINAL connector (login fatal auth /
     // retry budget exhausted) leaves no live status document once the
     // teardown below removes it — persist the failure class first so the
-    // home card can show 连接失败 + reason instead of snapping back to
-    // 未连接 / a stale 连接中…. Non-terminal deaths (status unreachable)
+    // home card can show the engine's reason instead of snapping back to a
+    // bare 未连接 / a stale 连接中…. Non-terminal deaths (status unreachable)
     // keep the document-vanish notice path.
     if (reason.indexOf('terminal-state:') === 0) {
       this.writeConnectFailureForUi(errorClass);
@@ -6679,6 +6718,42 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // never render 已连接.
   private lastGoodNetwork: CoreNetworkConfig | null = null;
 
+  // 2026-10-12 upstream tap handling: the ENGINE's own state report, written from
+  // the live core status without any watcher tick. The official Android client gets
+  // this for free (the run notifies its state listeners synchronously,
+  // EngineRunner.java:182) and the home screen's whole tap handling is driven by
+  // it; on HarmonyOS the two processes share no callback, so the status document IS
+  // the report channel. Called (a) the moment the run starts — before the bounded
+  // network-map wait, so the UI's 7 s pending window always falls back onto a REAL
+  // state — and (b) on each map-wait poll so the report never goes stale while the
+  // engine is still starting. Throttled to the watcher cadence; best-effort, never
+  // throws, and it adds no new milestone name.
+  private publishEngineStateReport(force: boolean = false): void {
+    const nowMs: number = Date.now();
+    // The RUN'S OWN first report is never throttled: a new attempt must be visible
+    // to the UI even when the previous one reported milliseconds ago. Only the
+    // map-wait repeats follow the watcher cadence.
+    if (!force && nowMs - this.lastEngineReportAtMs < STATUS_POLL_MS) {
+      return;
+    }
+    this.lastEngineReportAtMs = nowMs;
+    let status: ConnectorStatusResult | null = null;
+    try {
+      status = pollStatusOrNull();
+    } catch (error) {
+      status = null;
+    }
+    if (status === null) {
+      // the core did not answer: report NOTHING rather than invent a state.
+      return;
+    }
+    this.publishStatusForUi(status, 'unknown', true);
+    hilog.info(DOMAIN, TAG,
+      'VPN_ENGINE_REPORT|requestId=%{public}s|state=%{public}s|running=%{public}s|' +
+      'note=engine-state-report',
+      this.requestId, status.state, String(status.running));
+  }
+
   // ifacePresence is the vpn-tun statistics-counter probe computed once per
   // watcher tick by the caller: 'present' publishes iface_present=true,
   // 'absent' publishes iface_present=false (the UI's 已连接 gate), 'unknown'
@@ -6688,14 +6763,22 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // three fields the home card renders — the 2026-10-04 defect investigation
   // had no such line, so document content vs UI display could not be told
   // apart from the device log.
-  private publishStatusForUi(status: ConnectorStatusResult, ifacePresence: string): void {
+  private publishStatusForUi(status: ConnectorStatusResult, ifacePresence: string,
+    allowBeforeWatcher: boolean = false): void {
     // Teardown guard: the probe continuation calling this runs one microtask
     // behind its tick — a recreate triggered by that same tick may have
     // already failed closed (or the connector died) and REMOVED the document
     // by now. A late publish would resurrect a stale "connected" document no
     // one will ever refresh or remove again; the dead watcher latches make
     // that impossible.
-    if (this.destroyRequested || this.connectorDeathHandled || this.watcherTimer < 0) {
+    if (this.destroyRequested || this.connectorDeathHandled) {
+      return;
+    }
+    // 2026-10-12: the START leg publishes its own report BEFORE the watcher exists
+    // (the watcher only starts once the VPN really is up, :6420) — that is the
+    // engine reporting its own state while it starts, not a late tick. Every
+    // steady-state publish still requires a live watcher.
+    if (this.watcherTimer < 0 && !allowBeforeWatcher) {
       return;
     }
     const path: string = `${this.context.filesDir}/netbird-status.json`;
@@ -7292,6 +7375,19 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         'VPN_CONNECT_FAILURE_NOTICE_WRITE_FAILED|requestId=%{public}s|code=%{public}s',
         this.requestId, String((error as BusinessFailure).code ?? 'none'));
     }
+  }
+
+  // 2026-10-11 retry re-entry (fix/retry): the connector-run probe the onCreate
+  // entry gate reads. `null` = the core did not answer (no connector object yet,
+  // or a refused native call) — NOT proof of a running engine, so the gate lets
+  // the entry through (NetBirdUiModel.connectEntryDecision). The wrapper already
+  // answers null instead of throwing, so no VPN path can be lost to a probe.
+  private connectorRunState(): boolean | null {
+    const status: ConnectorStatusResult | null = pollStatusOrNull();
+    if (status === null) {
+      return null;
+    }
+    return status.running === true;
   }
 
   private removeStatusForUi(): void {

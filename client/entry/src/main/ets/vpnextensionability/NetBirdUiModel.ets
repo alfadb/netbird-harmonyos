@@ -1016,46 +1016,54 @@ export function vpnActiveState(state: string): boolean {
   return state === 'connected' || state === 'connecting' || state === 'reconnecting';
 }
 
-// 主页 status card text for the connector state. pendingStart/pendingStop are
-// the page's in-flight request latches (no live document yet / stop in
-// flight), so the card never shows a stale '未连接' while a request runs.
+// 主页 status card text for the connector state — the OFFICIAL state
+// vocabulary, not our own.
+//
+// Upstream has exactly five engine states and one label each
+// (android-client HomeFragment.java:66, strings.xml:27-32):
+//   CONNECTING          -> Connecting…
+//   CONNECTED           -> Connected
+//   DISCONNECTING       -> Disconnecting…
+//   DISCONNECTED        -> Disconnected        (loginRequired overrides it)
+//   NO_NETWORK          -> No network available
+// with `loginRequired` replacing the DISCONNECTED label (HomeFragment.java:114,
+// :873-883), and a FAILED connect repainting DISCONNECTED — the failure itself is
+// only a transient Toast carrying the engine's own message
+// (MainActivity.java:1030-1036). There is no 连接失败 and no 无法连接服务器
+// state: both were our inventions (ALIGNMENT-AUDIT R9 / §1.5).
+//
+// `pendingStart` is the page's tap latch (the upstream beginPendingAction +
+// paintTransition(CONNECTING): HomeFragment.java:198-200, :623-630), so the card says
+// 连接中… from the tap until the engine reports. `pendingStop` is the stop in
+// flight (upstream DISCONNECTING). `loginRequired` is the upstream sticky flag.
+// The Chinese wording is this app's own project language; the STATE SET is
+// upstream's.
+//
 // hasOverlayIp is the document's own overlay address (the network map arrived
 // and carried one); ifacePresent is the document's vpn-tun interface probe
 // (false = the interface no longer exists — the fake-connected defect of
-// roam-1005-0014). '已连接' requires the CORE state connected AND
-// the address AND the interface. A tunnel that is already up while management
-// has not delivered the map yet (no own IP, no peers), or whose interface
-// disappeared (being rebuilt / torn down), shows the honest
-// '连接中…' — or '无法连接服务器' when the error hint is one of the
-// server-unreachable classes (timeout / network — the SAME classes
-// lastErrorText renders as server-unreachable), so the card and the red error
-// line can no longer disagree ('已连接' + an unreachable-server hint).
-// connectFailed (2026-10-06, optional — older callers omit it): the
-// extension recorded a terminal connect failure (login fatal auth / retry
-// budget exhausted / startup abort before the VPN existed) and no live
-// document is around to carry state 'failed' — the card then shows
-// '连接失败' instead of a stale '连接中…' forever.
+// roam-1005-0014). '已连接' requires the CORE state connected AND the address
+// AND the interface; a tunnel that is up while management has not delivered
+// the map yet, or whose interface disappeared, is honestly still 连接中….
 export function homeStateText(state: string, pendingStart: boolean,
   pendingStop: boolean, hasOverlayIp: boolean, ifacePresent: boolean,
-  errorClass: string, connectFailed?: boolean): string {
+  loginRequired?: boolean): string {
   if (pendingStop) {
     return '正在断开…';
-  }
-  if (connectFailed === true) {
-    return '连接失败';
   }
   if (state === 'connected') {
     if (hasOverlayIp === true && ifacePresent === true) {
       return '已连接';
     }
-    return errorClass === 'timeout' || errorClass === 'network'
-      ? '无法连接服务器' : '连接中…';
+    return '连接中…';
   }
   if (state === 'connecting' || state === 'reconnecting') {
     return '连接中…';
   }
-  if (state === 'failed') {
-    return '连接失败';
+  // 'failed' / 'disconnected' / 'closed' / '' (no document at all) are all
+  // upstream's DISCONNECTED, whose label the login flag overrides.
+  if (loginRequired === true) {
+    return '需要登录';
   }
   if (pendingStart) {
     return '连接中…';
@@ -1164,8 +1172,215 @@ export function lastErrorText(errorClass: string): string {
   return `连接出现问题（${errorClass}），请重试`;
 }
 
-// 2026-10-06 登录失败可见性: the Chinese reason shown under a '连接失败'
-// card. `errorClass` comes from the persistent connect-failure notice —
+// ---------------------------------------------------------------------------
+// 2026-10-11 retry re-entry (fix/retry) — the connect-entry model.
+//
+// Device evidence (pc-connecting-diag/REPORT.md §4.2-§4.4, 0.0.24): after a
+// connect attempt failed the retry path set requestSent=true, deleted the
+// failure notice and called startVpnExtensionAbility against the STILL ALIVE
+// extension process. The whole connect flow hangs off onCreate behind an
+// unconditional instance latch and this extension has no onConnect (the API-26
+// declaration is context/onCreate/onDestroy only), so nothing re-ran:
+// published === null + requestSent === true + the notice gone = 连接中… forever.
+//
+// The decisions below are the PURE half of the fix; the extension and the page
+// only gather facts and act. All of them are host-checked byte-identically
+// (selfcheck/run-ui-model.mts + run-connect-retry.mts).
+//
+// 2026-10-12 (same branch, upstream tap handling): the entry gate above is kept,
+// but the 30 s "pending start" window and the connect-attempt ACK file are gone.
+// Upstream bounds the TAP, not the attempt (ALIGNMENT-AUDIT §1.3 R5): the home
+// screen latches on the user action for PENDING_ACTION_TIMEOUT_MS = 7 s and
+// re-enables the toggle after FORCE_CANCEL_DELAY_MS = 2 s so a stuck transition
+// can be aborted. The state that drives all of it is the engine's own report —
+// never a document the shell invented.
+// ---------------------------------------------------------------------------
+
+// The stop leg of a retry: how long the page waits for the extension's OWN stop
+// evidence (the `stopping` marker written synchronously in onDestroy) before it
+// starts anyway. Bounded by its own clock — the platform's stop promise is
+// best-effort and is never the thing the start waits on.
+export const EXTENSION_STOP_WAIT_MS: number = 3000;
+export const EXTENSION_STOP_POLL_MS: number = 200;
+
+export const CONNECT_ENTRY_RUN: string = 'run';
+export const CONNECT_ENTRY_REJECT_RUNNING: string = 'reject-connector-running';
+export const CONNECT_LEG_DIRECT: string = 'start';
+export const CONNECT_LEG_AFTER_STOP: string = 'stop-then-start';
+
+// The extension's entry gate — the replacement for the unconditional instance
+// latch. `connectorRunning` is the CORE's own answer
+// (connector_status().running); `null` = the core did not answer (no connector
+// object yet / a refused native call), which is NOT proof of a running engine,
+// so the entry proceeds. A stopped or aborted run can therefore never block a
+// re-entry: the official Android client's entire guard is
+// `if (engineIsRunning) return;` (EngineRunner.java:136-147).
+export function connectEntryDecision(connectorRunning: boolean | null): string {
+  return connectorRunning === true ? CONNECT_ENTRY_REJECT_RUNNING : CONNECT_ENTRY_RUN;
+}
+
+// The page's start leg. A repeated startVpnExtensionAbility against a LIVE
+// extension instance is not a re-entry (parameters are a first-start channel and
+// there is no onConnect), so the instance must be gone first: when the page cannot
+// read the extension's own stop evidence it drives ONE stop and waits for it.
+export function connectStartLeg(extensionGone: boolean): string {
+  return extensionGone ? CONNECT_LEG_DIRECT : CONNECT_LEG_AFTER_STOP;
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-12 upstream tap handling — pending action + force-cancel window.
+//
+// Replaces our 30 s pending-start timeout. Upstream never times out the
+// CONNECTING state nor the engine: the connect loop retries forever with
+// exponential backoff (client/internal/connect.go:240-247, :531) and the home
+// screen bounds only the TAP (ALIGNMENT-AUDIT §1.3 "Direct answer").
+//
+//   * PENDING_ACTION_TIMEOUT_MS / beginPendingAction / expirePendingAction
+//     (HomeFragment.java:70, :623-630, :640-647): after 7 s without the requested
+//     state the latch is released and the toggle is repainted from "whatever the
+//     engine last reported" instead of staying latched.
+//   * FORCE_CANCEL_DELAY_MS / armForceCancel / openForceCancelWindow
+//     (HomeFragment.java:83, :586-596, :598-612): while a transition is painted the
+//     toggle is disabled, and 2 s into it the toggle RE-ENABLES so a tap aborts
+//     the stuck transition (force-cancel = stop) instead of leaving the user
+//     watching an endless Connecting….
+//
+// The report is the ENGINE's own state, which on HarmonyOS is the status
+// document the extension publishes (there is no in-process callback across the
+// two processes): the core's ConnState reduced to the states the tap handling
+// switches on. 'connecting' also covers reconnecting, and every dead state is
+// upstream's DISCONNECTED — the official applyEngineState paints a failed connect
+// as DISCONNECTED (HomeFragment.java:501-522, :530-547) — while the ABSENCE of any
+// report is its own token, never a verdict.
+// ---------------------------------------------------------------------------
+
+// The engine's report, reduced to the states the tap handling switches on.
+export const ENGINE_REPORT_CONNECTED: string = 'connected';
+export const ENGINE_REPORT_CONNECTING: string = 'connecting';
+export const ENGINE_REPORT_DISCONNECTED: string = 'disconnected';
+// Nothing has been reported since the tap. This is NOT "the engine reported
+// Disconnected": upstream releases the latch on a REPORT or on the 7 s timer, and
+// its cold-start DISCONNECTED seed only ever paints — onEngineState() never fires
+// for it (HomeFragment.java:239, :484-497). Reading "no report" as a Disconnected
+// report would clear the tap latch on the first tick after every tap.
+export const ENGINE_REPORT_NONE: string = '';
+
+// The requested state of a tap — upstream's pendingTarget IS an engine state.
+export const PENDING_TARGET_NONE: string = '';
+export const PENDING_TARGET_CONNECTED: string = ENGINE_REPORT_CONNECTED;
+export const PENDING_TARGET_DISCONNECTED: string = ENGINE_REPORT_DISCONNECTED;
+
+// The bounded tap latch: 7 s (HomeFragment.java:70) and the force-cancel delay that
+// re-opens the toggle: 2 s (HomeFragment.java:83).
+export const PENDING_ACTION_TIMEOUT_MS: number = 7000;
+export const FORCE_CANCEL_DELAY_MS: number = 2000;
+
+// The core publishes six states (client/core/src/state.rs ConnState::as_str:
+// connected / connecting / reconnecting / failed / disconnected / closed); the
+// official Android client's EngineState has CONNECTING / CONNECTED /
+// DISCONNECTING / DISCONNECTED / NO_NETWORK (HomeFragment.java:66). The tokens
+// below are the intersection the tap handling needs; an EMPTY document state means
+// the page has no fresh report at all (ENGINE_REPORT_NONE), never a verdict.
+export function engineReportState(documentState: string): string {
+  if (documentState === 'connected') {
+    return ENGINE_REPORT_CONNECTED;
+  }
+  if (documentState === 'connecting' || documentState === 'reconnecting') {
+    return ENGINE_REPORT_CONNECTING;
+  }
+  if (documentState.length === 0) {
+    return ENGINE_REPORT_NONE;
+  }
+  // failed / disconnected / closed are ALL upstream's DISCONNECTED: a failed
+  // connect repaints Disconnected, the failure itself is only the Toast.
+  return ENGINE_REPORT_DISCONNECTED;
+}
+
+export interface TransitionFacts {
+  // the tap's requested state (PENDING_TARGET_*); '' = no action in flight.
+  target: string;
+  // the engine's last report (ENGINE_REPORT_*); ENGINE_REPORT_NONE when nothing
+  // has been reported since the tap.
+  report: string;
+  // 0 = not armed.
+  deadlineMs: number;
+  // 0 = not armed.
+  forceCancelArmedAtMs: number;
+  forceCancelOpen: boolean;
+  nowMs: number;
+}
+
+export interface TransitionDecision {
+  target: string;
+  deadlineMs: number;
+  forceCancelArmedAtMs: number;
+  forceCancelOpen: boolean;
+  // upstream isTransitioning(): a transition is being painted.
+  transition: boolean;
+  // the engine reported the requested state (or the connect demonstrably
+  // failed): the latch is released and the real report paints.
+  settled: boolean;
+  // 7 s passed without the requested state: release the latch and fall back to
+  // the last reported real state.
+  expired: boolean;
+}
+
+// The pure half of shouldSuppressPaint (:498-522) + expirePendingAction
+// (:636-647) + the force-cancel window (:567-612). Never extends the window on
+// progress: the tap latch is a fixed 7 s from the tap, exactly like upstream's
+// posted Runnable.
+export function decideTransition(facts: TransitionFacts): TransitionDecision {
+  let target: string = facts.target;
+  let deadlineMs: number = facts.deadlineMs;
+  let settled: boolean = false;
+  let expired: boolean = false;
+  if (target.length > 0) {
+    if (facts.report === target) {
+      // state == target: the requested state arrived.
+      settled = true;
+    } else if (target === PENDING_TARGET_CONNECTED &&
+      facts.report === ENGINE_REPORT_DISCONNECTED) {
+      // the connect ended disconnected, so it failed — including the attempt
+      // that never got as far as Connecting (the engine refused up front).
+      settled = true;
+    } else if (deadlineMs <= 0) {
+      // armed lazily only if the caller did not arm it at the tap.
+      deadlineMs = facts.nowMs + PENDING_ACTION_TIMEOUT_MS;
+    } else if (facts.nowMs >= deadlineMs) {
+      expired = true;
+    }
+  }
+  if (settled || expired) {
+    target = PENDING_TARGET_NONE;
+    deadlineMs = 0;
+  }
+  const transition: boolean = target.length > 0 ||
+    facts.report === ENGINE_REPORT_CONNECTING;
+  let armedAtMs: number = facts.forceCancelArmedAtMs;
+  let open: boolean = facts.forceCancelOpen;
+  if (!transition) {
+    // closeForceCancelWindow(): a settled paint resets both.
+    armedAtMs = 0;
+    open = false;
+  } else if (!open) {
+    if (armedAtMs <= 0) {
+      armedAtMs = facts.nowMs;
+    } else if (facts.nowMs - armedAtMs >= FORCE_CANCEL_DELAY_MS) {
+      // openForceCancelWindow(): only while the transition is still running.
+      open = true;
+    }
+  }
+  return {
+    'target': target, 'deadlineMs': deadlineMs,
+    'forceCancelArmedAtMs': armedAtMs, 'forceCancelOpen': open,
+    'transition': transition, 'settled': settled, 'expired': expired
+  };
+}
+
+// 2026-10-06 登录失败可见性: the Chinese reason shown next to the card's OFFICIAL
+// state (未连接 / 需要登录) — the engine's message, which upstream shows as a Toast
+// (MainActivity.java:1030-1036) and which this app additionally keeps on the red
+// error line. `errorClass` comes from the persistent connect-failure notice —
 // the connector's own last_error class (auth/timeout/network/...) or an
 // extension abort-stage token. The none/empty case is the honest generic
 // server-unreachable line (the map never arrived, no finer class exists).

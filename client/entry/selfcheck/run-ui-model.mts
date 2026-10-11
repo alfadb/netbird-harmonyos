@@ -686,19 +686,16 @@ try {
   const homeHasIp = (d: { address?: string | null }): boolean =>
     d.address !== undefined && d.address !== null && d.address.length > 0;
   check('home: 已连接 requires the document address',
-    m.homeStateText(doc.state, false, false, homeHasIp(doc), true, 'none') === '已连接' &&
+    m.homeStateText(doc.state, false, false, homeHasIp(doc), true) === '已连接' &&
     homeHasIp(doc) === true);
   check('home: a map-less document (state connected!) is never 已连接',
     noMap.state === 'connected' && homeHasIp(noMap) === false &&
     noMap.peers.length === 0 &&
-    m.homeStateText(noMap.state, false, false, homeHasIp(noMap), true, 'none') === '连接中…');
-  check('home: map-less + server-unreachable error class stays consistent',
-    m.homeStateText('connected', false, false, homeHasIp(noMap), true, 'network') === '无法连接服务器');
+    m.homeStateText(noMap.state, false, false, homeHasIp(noMap), true) === '连接中…');
   check('home: interface removed (roam-1005-0014) is never 已连接',
-    m.homeStateText('connected', false, false, true, false, 'none') === '连接中…' &&
-    m.homeStateText('connected', false, false, true, false, 'network') === '无法连接服务器');
+    m.homeStateText('connected', false, false, true, false) === '连接中…');
   check('home: interface present + map is 已连接',
-    m.homeStateText('connected', false, false, true, true, 'none') === '已连接');
+    m.homeStateText('connected', false, false, true, true) === '已连接');
 
   // ---- filterPeers / sortPeers / onlinePeerCount ----------------------------
   check('filter by name (case-insensitive)',
@@ -723,39 +720,44 @@ try {
     !m.vpnActiveState('failed') && !m.vpnActiveState('stopped') &&
     !m.vpnActiveState('') && !m.vpnActiveState('closed'));
   check('home text: connected WITH the overlay ip',
-    m.homeStateText('connected', false, false, true, true, 'none') === '已连接');
+    m.homeStateText('connected', false, false, true, true) === '已连接');
   check('home text: connected but no map yet is honest (连接中)',
-    m.homeStateText('connected', false, false, false, true, 'none') === '连接中…');
-  check('home text: connected, no map, server-unreachable error class',
-    m.homeStateText('connected', false, false, false, true, 'timeout') === '无法连接服务器' &&
-    m.homeStateText('connected', false, false, false, true, 'network') === '无法连接服务器');
-  check('home text: auth error is NOT server-unreachable (stays 连接中)',
-    m.homeStateText('connected', false, false, false, true, 'auth') === '连接中…');
+    m.homeStateText('connected', false, false, false, true) === '连接中…');
   check('home text: connecting/reconnecting',
-    m.homeStateText('connecting', false, false, false, false, 'none') === '连接中…' &&
-    m.homeStateText('reconnecting', false, false, false, false, 'none') === '连接中…');
-  check('home text: failed',
-    m.homeStateText('failed', false, false, false, false, 'none') === '连接失败');
-  check('home text: disconnected',
-    m.homeStateText('disconnected', false, false, false, false, 'none') === '未连接');
-  check('home text: pending start without a document',
-    m.homeStateText('', true, false, false, false, 'none') === '连接中…');
+    m.homeStateText('connecting', false, false, false, false) === '连接中…' &&
+    m.homeStateText('reconnecting', false, false, false, false) === '连接中…');
+  // 2026-10-12 (official state set): a failed connect is upstream's DISCONNECTED —
+  // the failure itself is only the Toast / the error line, never a latched state
+  // (HomeFragment.java:501-522, :530-547; MainActivity.java:1030-1036).
+  check('home text: failed is the official Disconnected, not 连接失败',
+    m.homeStateText('failed', false, false, false, false) === '未连接');
+  check('home text: disconnected/closed are Disconnected',
+    m.homeStateText('disconnected', false, false, false, false) === '未连接' &&
+    m.homeStateText('closed', false, false, false, false) === '未连接');
+  check('home text: no document at all is Disconnected (upstream cold seed)',
+    m.homeStateText('', false, false, false, false) === '未连接');
+  check('home text: pending start without a document is 连接中 (the tap latch)',
+    m.homeStateText('', true, false, false, false) === '连接中…');
   check('home text: pending stop wins',
-    m.homeStateText('connected', true, true, true, true, 'none') === '正在断开…');
+    m.homeStateText('connected', true, true, true, true) === '正在断开…');
   check('home text: pending stop wins even without the map',
-    m.homeStateText('connected', false, true, false, true, 'network') === '正在断开…');
-  // 2026-10-06 登录失败可见性: the recorded failure beats pendingStart (the
-  // startup-abort case — no document ever appeared) and any live state,
-  // but never a stop the user just asked for
-  check('home text: recorded connect failure beats pending start',
-    m.homeStateText('', true, false, false, false, 'none', true) === '连接失败');
-  check('home text: recorded connect failure renders over stale states',
-    m.homeStateText('connecting', true, false, false, false, 'none', true) === '连接失败');
-  check('home text: pending stop wins over the recorded failure',
-    m.homeStateText('', true, true, false, false, 'none', true) === '正在断开…');
-  check('home text: no failure flag keeps the legacy behavior',
-    m.homeStateText('', true, false, false, false, 'none', undefined) === '连接中…' &&
-    m.homeStateText('', true, false, false, false, 'none') === '连接中…');
+    m.homeStateText('connected', false, true, false, true) === '正在断开…');
+  // upstream's sticky loginRequired flag replaces the Disconnected label
+  // (HomeFragment.java:114, :873-883) — it must also beat the tap latch, so the
+  // card says WHY the attempt is going to fail.
+  check('home text: login required overrides Disconnected',
+    m.homeStateText('', false, false, false, false, true) === '需要登录' &&
+    m.homeStateText('failed', false, false, false, false, true) === '需要登录');
+  check('home text: login required beats the tap latch too',
+    m.homeStateText('', true, false, false, false, true) === '需要登录');
+  check('home text: login required never overrides a live state',
+    m.homeStateText('connecting', false, false, false, false, true) === '连接中…' &&
+    m.homeStateText('connected', false, false, true, true, true) === '已连接');
+  check('home text: pending stop beats login required',
+    m.homeStateText('', true, true, false, false, true) === '正在断开…');
+  check('home text: no failure flag / no login flag keeps the official default',
+    m.homeStateText('', true, false, false, false, undefined) === '连接中…' &&
+    m.homeStateText('', false, false, false, false, undefined) === '未连接');
   check('connection labels', m.connectionLabel('direct') === '直连' &&
     m.connectionLabel('relay') === '经中继' && m.connectionLabel('unknown') === '未知');
   check('handshake texts', m.lastHandshakeText(null) === '—' &&
@@ -803,6 +805,143 @@ try {
     PAGE.includes('if (this.connectFailureClass === NEEDS_LOGIN_CLASS)') &&
     PAGE.includes('return NEEDS_LOGIN_TEXT;') &&
     !PAGE.includes('账户登录已过期'));
+
+  // ---- 2026-10-11/12 retry re-entry: connect-entry + pending action ---------
+  // The extension's entry gate: ONLY a connector run in flight refuses an entry.
+  // A stopped/aborted run (`running:false`) and an unanswerable probe (null —
+  // the core did not answer) both let the entry through, so a retry can never
+  // be swallowed by a stale instance latch again.
+  check('entry gate: a running connector refuses the entry',
+    m.connectEntryDecision(true) === m.CONNECT_ENTRY_REJECT_RUNNING);
+  check('entry gate: a stopped/aborted run re-enters',
+    m.connectEntryDecision(false) === m.CONNECT_ENTRY_RUN);
+  check('entry gate: an unanswerable probe re-enters (null is not proof)',
+    m.connectEntryDecision(null) === m.CONNECT_ENTRY_RUN);
+  // The page's start leg: only the extension's own stop evidence allows a
+  // direct start.
+  check('start leg: gone -> direct start, present -> stop first',
+    m.connectStartLeg(true) === m.CONNECT_LEG_DIRECT &&
+    m.connectStartLeg(false) === m.CONNECT_LEG_AFTER_STOP);
+  // The engine report: the core's six states reduced to the three the official tap
+  // handling switches on (HomeFragment.java:66; client/core/src/state.rs:31-52).
+  check('engine report: connected',
+    m.engineReportState('connected') === m.ENGINE_REPORT_CONNECTED);
+  check('engine report: connecting and reconnecting are BOTH Connecting',
+    m.engineReportState('connecting') === m.ENGINE_REPORT_CONNECTING &&
+    m.engineReportState('reconnecting') === m.ENGINE_REPORT_CONNECTING);
+  check('engine report: failed/disconnected/closed are ALL Disconnected',
+    m.engineReportState('failed') === m.ENGINE_REPORT_DISCONNECTED &&
+    m.engineReportState('disconnected') === m.ENGINE_REPORT_DISCONNECTED &&
+    m.engineReportState('closed') === m.ENGINE_REPORT_DISCONNECTED);
+  // No fresh document is NOT a Disconnected verdict: upstream releases the tap
+  // latch on a REPORT or on the 7 s timer, never on the absence of one.
+  check('engine report: no document at all is NO report, not Disconnected',
+    m.engineReportState('') === m.ENGINE_REPORT_NONE &&
+    m.ENGINE_REPORT_NONE !== m.ENGINE_REPORT_DISCONNECTED);
+  // The 7 s pending action: upstream PENDING_ACTION_TIMEOUT_MS (:70).
+  check('pending action window is the official 7 s, not our old 30 s',
+    m.PENDING_ACTION_TIMEOUT_MS === 7000);
+  check('force-cancel delay is the official 2 s',
+    m.FORCE_CANCEL_DELAY_MS === 2000);
+  const idle = { target: m.PENDING_TARGET_NONE, report: m.ENGINE_REPORT_DISCONNECTED,
+    deadlineMs: 0, forceCancelArmedAtMs: 0, forceCancelOpen: false, nowMs: 5000 };
+  const idleDecision = m.decideTransition(idle);
+  check('pending action: no tap is idle and the force-cancel window is closed',
+    idleDecision.target === m.PENDING_TARGET_NONE && idleDecision.deadlineMs === 0 &&
+    idleDecision.transition === false && idleDecision.forceCancelOpen === false &&
+    idleDecision.expired === false && idleDecision.settled === false);
+  // A tap requesting connect, with the engine not yet reporting anything: the
+  // window is armed at the tap and nothing settles it before 7 s.
+  const tap = { target: m.PENDING_TARGET_CONNECTED, report: m.ENGINE_REPORT_CONNECTING,
+    deadlineMs: 1000 + m.PENDING_ACTION_TIMEOUT_MS, forceCancelArmedAtMs: 0,
+    forceCancelOpen: false, nowMs: 5000 };
+  const tapDecision = m.decideTransition(tap);
+  check('pending action: the tap latch is kept while the deadline runs',
+    tapDecision.target === m.PENDING_TARGET_CONNECTED &&
+    tapDecision.deadlineMs === 1000 + m.PENDING_ACTION_TIMEOUT_MS &&
+    tapDecision.transition === true && tapDecision.settled === false);
+  // …and a start with NO report at all is kept too: the engine has simply not
+  // answered yet, which is not a Disconnected verdict.
+  check('pending action: no report yet never settles the tap latch',
+    m.decideTransition({ target: m.PENDING_TARGET_CONNECTED, report: m.ENGINE_REPORT_NONE,
+      deadlineMs: 8000, forceCancelArmedAtMs: 4000, forceCancelOpen: true,
+      nowMs: 5000 }).settled === false &&
+    m.decideTransition({ target: m.PENDING_TARGET_CONNECTED, report: m.ENGINE_REPORT_NONE,
+      deadlineMs: 8000, forceCancelArmedAtMs: 4000, forceCancelOpen: true,
+      nowMs: 5000 }).target === m.PENDING_TARGET_CONNECTED);
+  // The engine reached the requested state: the latch is released (upstream
+  // shouldSuppressPaint state == target) and the real report paints.
+  const reached = m.decideTransition({ target: m.PENDING_TARGET_CONNECTED,
+    report: m.ENGINE_REPORT_CONNECTED, deadlineMs: 9000, forceCancelArmedAtMs: 4000,
+    forceCancelOpen: false, nowMs: 5000 });
+  check('pending action: the engine reaching the target releases the latch',
+    reached.target === m.PENDING_TARGET_NONE && reached.deadlineMs === 0 &&
+    reached.settled === true && reached.expired === false);
+  // A connect that ends Disconnected FAILED: upstream clears the latch on that
+  // report instead of latching on until the timeout (:515-522).
+  const failed = m.decideTransition({ target: m.PENDING_TARGET_CONNECTED,
+    report: m.ENGINE_REPORT_DISCONNECTED, deadlineMs: 9000, forceCancelArmedAtMs: 4000,
+    forceCancelOpen: false, nowMs: 5000 });
+  check('pending action: a failed connect settles the latch immediately',
+    failed.target === m.PENDING_TARGET_NONE && failed.settled === true);
+  // Nothing reported and the deadline passed: expirePendingAction — release the
+  // latch and fall back to the last reported real state.
+  check('pending action: nothing reported inside the window stays latched',
+    m.decideTransition({ target: m.PENDING_TARGET_CONNECTED,
+      report: m.ENGINE_REPORT_NONE, deadlineMs: 1000 + m.PENDING_ACTION_TIMEOUT_MS,
+      forceCancelArmedAtMs: 1000, forceCancelOpen: false,
+      nowMs: 1000 + m.PENDING_ACTION_TIMEOUT_MS - 1 }).expired === false);
+  const expiredDecision = m.decideTransition({ target: m.PENDING_TARGET_CONNECTED,
+    report: m.ENGINE_REPORT_NONE, deadlineMs: 1000 + m.PENDING_ACTION_TIMEOUT_MS,
+    forceCancelArmedAtMs: 1000, forceCancelOpen: true,
+    nowMs: 1000 + m.PENDING_ACTION_TIMEOUT_MS });
+  check('pending action: past the window the latch is released (expirePendingAction)',
+    expiredDecision.expired === true && expiredDecision.target === m.PENDING_TARGET_NONE &&
+    expiredDecision.deadlineMs === 0 && expiredDecision.settled === false);
+  // A transition that is really reporting Connecting stays a transition even after
+  // the tap latch expired — the engine is still connecting (upstream
+  // isTransitioning()), so the toggle stays in its force-cancel regime.
+  check('pending action: a real Connecting report keeps the transition painted',
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_CONNECTING, deadlineMs: 0, forceCancelArmedAtMs: 0,
+      forceCancelOpen: false, nowMs: 5000 }).transition === true);
+  // The force-cancel window: armed while a transition is painted, opened only after
+  // FORCE_CANCEL_DELAY_MS (HomeFragment.java:83, :586-596, :598-612).
+  const armedJustNow = m.decideTransition({ target: m.PENDING_TARGET_NONE,
+    report: m.ENGINE_REPORT_CONNECTING, deadlineMs: 0, forceCancelArmedAtMs: 0,
+    forceCancelOpen: false, nowMs: 10000 });
+  check('force cancel: arming a transition records the arm moment, opens nothing',
+    armedJustNow.forceCancelArmedAtMs === 10000 && armedJustNow.forceCancelOpen === false);
+  check('force cancel: still closed one millisecond before the 2 s delay',
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_CONNECTING, deadlineMs: 0, forceCancelArmedAtMs: 10000,
+      forceCancelOpen: false, nowMs: 10000 + m.FORCE_CANCEL_DELAY_MS - 1 })
+      .forceCancelOpen === false);
+  check('force cancel: open at the 2 s delay, and it stays open',
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_CONNECTING, deadlineMs: 0, forceCancelArmedAtMs: 10000,
+      forceCancelOpen: false, nowMs: 10000 + m.FORCE_CANCEL_DELAY_MS })
+      .forceCancelOpen === true &&
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_CONNECTING, deadlineMs: 0, forceCancelArmedAtMs: 10000,
+      forceCancelOpen: true, nowMs: 60000 }).forceCancelOpen === true);
+  check('force cancel: a settled engine closes the window again',
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_DISCONNECTED, deadlineMs: 0, forceCancelArmedAtMs: 10000,
+      forceCancelOpen: true, nowMs: 60000 }).forceCancelOpen === false);
+  check('force cancel: the arming timer is reset by a settled paint too',
+    m.decideTransition({ target: m.PENDING_TARGET_NONE,
+      report: m.ENGINE_REPORT_DISCONNECTED, deadlineMs: 0, forceCancelArmedAtMs: 10000,
+      forceCancelOpen: true, nowMs: 60000 }).forceCancelArmedAtMs === 0);
+  // A stop the user asked for: only the engine reporting Disconnected (or the 7 s
+  // window) releases it — a stale Connected report must NOT.
+  check('pending action: a stop is kept until the engine really reports Disconnected',
+    m.decideTransition({ target: m.PENDING_TARGET_DISCONNECTED,
+      report: m.ENGINE_REPORT_CONNECTED, deadlineMs: 9000, forceCancelArmedAtMs: 4000,
+      forceCancelOpen: true, nowMs: 5000 }).target === m.PENDING_TARGET_DISCONNECTED &&
+    m.decideTransition({ target: m.PENDING_TARGET_DISCONNECTED,
+      report: m.ENGINE_REPORT_DISCONNECTED, deadlineMs: 9000, forceCancelArmedAtMs: 4000,
+      forceCancelOpen: true, nowMs: 5000 }).settled === true);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
