@@ -1014,6 +1014,14 @@ pub struct PeerIceOrchestrator {
     /// 都注入（signal 材料 = WG 密钥对）；None = 未知 → 会话角色回退
     /// 旧规则（发起方 controlling、应答方 controlled）。
     local_key: Option<String>,
+    /// 「每拍最多一次本地候选收集」预算的**轮转游标**（H1，真机
+    /// 2026-10-11 PC：23 个对端恒走中继）：一次 `ensure_locals` 里的 gather
+    /// 是同步阻塞的（STUN 全哑的接口封顶 [`DEFAULT_STUN_TIMEOUT_MS`]），所以
+    /// [`PeerIceOrchestrator::run_once`] 一拍只允许一个 peer 收集；游标让
+    /// 每拍的遍历从上一个收集者的下一位开始，刚收集过（或超时后重新入队）
+    /// 的 peer 排到队尾——否则前几个「收集→无应答→超时→再收集」的 peer 会
+    /// 永远占住预算，把后面的 peer 饿死。
+    gather_cursor: usize,
 }
 
 impl PeerIceOrchestrator {
@@ -1033,6 +1041,7 @@ impl PeerIceOrchestrator {
             fixed_local_port: deps.fixed_local_port,
             advertised_candidates: deps.advertised_candidates,
             local_key: None,
+            gather_cursor: 0,
         }
     }
 
@@ -1381,6 +1390,16 @@ impl PeerIceOrchestrator {
             PeerSignalKind::Answer => {
                 if self.peers[idx].session.is_none() {
                     self.unknown_signal += 1; // 无会话的 ANSWER：丢弃
+                    // 丢弃不得静默（H2，真机 2026-10-11 PC）：会话被拆与
+                    // ANSWER 到达只差半拍时，这一支此前连 `signal-rx` 行都没有
+                    // —— 现场只能看到「对端发了 ANSWER、本端毫无反应」。计数
+                    // 走 `IceOrchestratorSummary.unknown_signal`（connector 状态
+                    // 已导出）。
+                    crate::hilog::emit(&format!(
+                        "N5c_ICE|signal-no-session|kind={}|peer={}",
+                        kind.as_str(),
+                        peer_short(&self.peers[idx].key)
+                    ));
                     return Ok(());
                 }
                 let creds = parse_ufrag_pwd(payload)?;
@@ -1449,16 +1468,33 @@ impl PeerIceOrchestrator {
             }
         }
         let mut first_err: Option<ManagementError> = None;
-        for idx in 0..self.peers.len() {
+        // H1（真机 2026-10-11 PC，23 个对端全部恒走中继）：`ensure_locals` 里的
+        // gather 是**同步阻塞**的，一个接口的 STUN 全哑时封顶
+        // [`DEFAULT_STUN_TIMEOUT_MS`]（3 s）。修复前一拍为所有待收集 peer 各
+        // 串行收集一次 —— 23 个 peer ⇒ 同一拍 60+ s、`now_ms` 全程冻结，远超
+        // [`START_DEADLINE_MS`]（9 s）：下一拍开头把上一拍建的会话全部判成僵尸
+        // 拆掉，对端 ANSWER 到达时已无会话被丢弃，连通检查永不开始。
+        // 因此一拍**最多允许一个 peer 做阻塞收集**（拍长回到 ≤ 3 s），其余
+        // peer 留到后续拍。被跳过的 peer 连会话都不建（`ensure_locals` 未被
+        // 调用 ⇒ `session_at_ms` 保持 0），谈判死线不会因「被跳过」而起算。
+        // 遍历起点按 `gather_cursor` 轮转：peer 之间彼此独立，顺序不影响语义，
+        // 而轮转正是「人人有份」的来源（见该字段的注释）。
+        let mut gather_budget = true;
+        let len = self.peers.len();
+        let start = if len == 0 { 0 } else { self.gather_cursor % len };
+        for off in 0..len {
+            let idx = (start + off) % len;
             if self.signal_ready {
                 // 发起（仅 signal 就绪后；每 peer 冷却后重试；纯应答方不发起）
                 let want_initiate = {
                     let p = &self.peers[idx];
                     p.initiator && p.session.is_none() && !p.initiated && now_ms >= p.cooldown_until
                 };
-                if want_initiate {
+                // 预算已用尽 → 本拍跳过：不置 `initiated`、不建会话，下一拍
+                // 轮转回来时冷却/等待账原样有效。
+                if want_initiate && gather_budget {
                     self.peers[idx].initiated = true;
-                    match self.ensure_locals(idx, now_ms) {
+                    match self.ensure_locals_budgeted(idx, now_ms, &mut gather_budget) {
                         Ok(LocalsRun::Gathered) => {
                             let peer = &mut self.peers[idx];
                             let creds = peer.creds.as_ref().expect("creds after locals");
@@ -1534,8 +1570,8 @@ impl PeerIceOrchestrator {
                     let p = &self.peers[idx];
                     p.session.is_some() && !p.locals_done && now_ms >= p.cooldown_until
                 };
-                if want_locals {
-                    match self.ensure_locals(idx, now_ms) {
+                if want_locals && gather_budget {
+                    match self.ensure_locals_budgeted(idx, now_ms, &mut gather_budget) {
                         Ok(LocalsRun::Gathered) => {}
                         Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
                             // 同上：等待不是错误，会话保留（`want_locals` 的
@@ -1637,6 +1673,33 @@ impl PeerIceOrchestrator {
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
+        }
+    }
+
+    /// [`Self::ensure_locals`] + 本拍「最多一次阻塞收集」预算的结算
+    /// （见 [`Self::run_once`] 的 H1 注释）：真正做过阻塞收集（成功或失败）
+    /// 才消耗预算并把 `gather_cursor` 移到下一位；「池不足＝等待」不阻塞、
+    /// 不消耗预算 —— 让同一拍里其余饿着的 peer 也能如实记下等待账
+    /// （0050 §8 item 3：等补给的时间不得计入谈判死线，跳过它们就没人记这笔
+    /// 账了）。
+    fn ensure_locals_budgeted(
+        &mut self,
+        idx: usize,
+        now_ms: u64,
+        budget: &mut bool,
+    ) -> Result<LocalsRun, ManagementError> {
+        match self.ensure_locals(idx, now_ms) {
+            Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
+                Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log })
+            }
+            other => {
+                *budget = false;
+                let len = self.peers.len();
+                if len > 0 {
+                    self.gather_cursor = (idx + 1) % len;
+                }
+                other
+            }
         }
     }
 
@@ -3092,12 +3155,17 @@ mod tests {
         // 3 个允许接口 ⇒ 每 peer 需要 3 枚（每接口一枚 gather socket，会话
         // 直接接管），与 0049 的 `added=3` 同型；壳层池目标 8、每批 4 枚
         //（ICE_TOPUP_BATCH）。
+        //
+        // 初始只灌 2 枚（H1 起一拍只允许一个 peer 收集）：不足一次收集所需的
+        // 3 枚，于是第一次尝试必然落在「等待补给」分支 —— 守护才真的被走到。
+        // 若初始灌满 8 枚，每拍唯一的那次尝试都能当场成功，本用例会退化成
+        // 「没人被饿过」的空转。
         const NEED: usize = 3;
         let socks = Arc::new(LedgeredSocks {
             inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
             handed: Mutex::new(Vec::new()),
         });
-        socks.feed_batch(8); // 启动一次性灌池（ICE_SOCKET_POOL_SIZE）
+        socks.feed_batch(2); // 不足一次收集（启动灌池的半批，故意饿一次）
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(crate::ice::StaticInterfaces(vec![
                 crate::ice::InterfaceAddr { name: "eth0".into(), addr: [127, 0, 0, 1] },
@@ -3114,7 +3182,7 @@ mod tests {
         orch.set_peers(&["P1".into(), "P2".into(), "P3".into()]);
         orch.set_signal_ready(true);
 
-        let mut fed = 8usize;
+        let mut fed = 2usize; // 与上面的启动灌池一致（不足一次收集 ⇒ 首拍必饿）
         let mut starved_rounds = 0usize;
         let mut now = 1000u64;
         let mut rounds = 0usize;
@@ -3262,6 +3330,143 @@ mod tests {
             orch.peers[0].session.is_none(),
             "after a full non-waiting deadline the zombie is still torn down (pause, not disable)"
         );
+    }
+
+    /// H1 回归钉子（真机 2026-10-11 PC：23 个对端全部恒走中继）。
+    ///
+    /// 现场链条：`run_once` 一拍为**每个**待收集 peer 串行 gather 一次，而
+    /// 一个接口的 STUN 全哑 ⇒ 每 peer 阻塞满 [`DEFAULT_STUN_TIMEOUT_MS`]
+    /// （3 s）⇒ 23 个 peer 的一拍 60+ s、`now_ms` 全程冻结 ⇒ 下一拍把上一拍
+    /// 建的会话全部当僵尸拆掉（`negotiation-start-timeout`），对端 ANSWER
+    /// 到达时已无会话被丢弃，连通检查永不开始。本用例用 20 个 peer 钉死修复
+    /// 后的四条性质：
+    ///
+    /// ① 每拍至多一次 gather（socket 账本直读：单接口 ⇒ 一次收集恰取 1 枚）；
+    /// ② 还没轮到的 peer 既不建会话也不起算死线（`session_at_ms == 0`）——
+    ///    「被跳过」不等于「谈判已开始」；
+    /// ③ 逐拍轮转（`gather_cursor`），20 拍内每个 peer 都拿到本地候选，且每个
+    ///    peer 的死线起点**正好是它自己那一拍的注入时钟**；
+    /// ④ 任何会话被拆时龄期**正好**一个 [`START_DEADLINE_MS`]（从它自己的起点
+    ///    算）——没有被冻结的陈旧时钟提前拆，也没有因为被跳过而白烧。
+    ///
+    /// 为什么不是「注入式慢收集」：既有 harness 做不到。`GatherConfig.timeout_ms`
+    /// 在 `ensure_locals` 里硬编码为 [`DEFAULT_STUN_TIMEOUT_MS`]，STUN server
+    /// 与时钟都不可注入；真拿一个黑洞 STUN server 换 3 s/peer 的墙钟，会让这个
+    /// 用例跑 60 s 且依赖本机网络栈。这里换成**结构 + 死线代数**的等价断言：
+    /// 拍长上界 = 每次 gather ≤ 3 s（由「每拍至多一次」直接给出），注入时钟按
+    /// 「一次收集 = 3 s」推进，正是现场墙钟的模型。
+    #[test]
+    fn large_network_gathers_one_peer_per_tick_without_burning_deadlines() {
+        use std::os::fd::OwnedFd;
+
+        /// 每取出（= 每次收集绑定）一枚 socket 就计一次数的池。
+        struct CountingSocks {
+            inner: crate::ice::ProtectedUdpFdSource,
+            taken: AtomicU64,
+        }
+        impl CountingSocks {
+            fn feed_batch(&self, n: usize) {
+                for _ in 0..n {
+                    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
+                    assert!(fd >= 0, "socket() failed");
+                    self.inner.feed(fd).expect("feed");
+                    unsafe { sys::close(fd) };
+                }
+            }
+        }
+        impl UdpSocketSource for CountingSocks {
+            fn take_fd(&self) -> Result<i32, crate::mgmtsock::SocketSeamError> {
+                self.inner.take_fd()
+            }
+            fn take_owned(&self) -> Result<OwnedFd, crate::mgmtsock::SocketSeamError> {
+                let owned = self.inner.take_owned()?;
+                self.taken.fetch_add(1, Ordering::Relaxed);
+                Ok(owned)
+            }
+            fn available(&self) -> Option<usize> {
+                Some(self.inner.pending())
+            }
+        }
+
+        const PEERS: usize = 20;
+        /// 现场的一拍墙钟：收集一个 peer = 一次哑接口 STUN 超时（3 s）。
+        const GATHER_MS: u64 = DEFAULT_STUN_TIMEOUT_MS;
+        let socks = Arc::new(CountingSocks {
+            inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
+            taken: AtomicU64::new(0),
+        });
+        socks.feed_batch(PEERS + 4); // 单接口、need=1：这一局饿的不是池
+        let keys: Vec<String> = (0..PEERS).map(|i| format!("P{i:02}peer")).collect();
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks: socks.clone(),
+            signal: Arc::new(LoggingSignalExchange::default()),
+            wg: noop_wg(),
+            tie_breaker: Some(7),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_peers(&keys);
+        orch.set_signal_ready(true);
+
+        let mut now = 1_000u64;
+        let mut first_gather_at = vec![0u64; PEERS];
+        let mut gathers = 0u64;
+        for round in 0..PEERS {
+            let taken_before = socks.taken.load(Ordering::Relaxed);
+            let before: Vec<(bool, u64)> = orch
+                .peers
+                .iter()
+                .map(|p| (p.session.is_some(), p.session_at_ms))
+                .collect();
+            assert!(orch.run_once(now).is_ok(), "round {round}: a beat is not an error");
+            // ① 一拍至多一次阻塞收集（单接口 ⇒ 恰好一枚 socket）
+            let this_round = socks.taken.load(Ordering::Relaxed) - taken_before;
+            assert!(this_round <= 1, "one gather per tick at most (round {round}: {this_round})");
+            gathers += this_round;
+            // ③ 本轮刚收集完的 peer：死线起点 = 它自己那一拍的注入时钟
+            for (i, p) in orch.peers.iter().enumerate() {
+                if first_gather_at[i] == 0 && p.locals_done {
+                    first_gather_at[i] = now;
+                    assert_eq!(p.session_at_ms, now, "round {round}: peer {i} arms its own deadline");
+                }
+            }
+            // ② 还没轮到的 peer：不得有会话、不得起算死线
+            for (i, p) in orch.peers.iter().enumerate() {
+                if first_gather_at[i] == 0 {
+                    assert!(
+                        p.session.is_none() && p.session_at_ms == 0,
+                        "round {round}: peer {i} was only SKIPPED — its negotiation must not have started"
+                    );
+                }
+            }
+            // ④ 会话被拆 = 从它自己那一拍起算正好一个 START_DEADLINE_MS（本局没有
+            //    ANSWER，拆是诚实的；但绝不能提前、也不能把别人的龄期算给它）
+            for (i, p) in orch.peers.iter().enumerate() {
+                if before[i].0 && p.session.is_none() {
+                    assert_eq!(
+                        now.saturating_sub(before[i].1),
+                        START_DEADLINE_MS,
+                        "round {round}: peer {i} must be torn down one full deadline after ITS OWN start"
+                    );
+                }
+            }
+            now += GATHER_MS;
+        }
+        // ③ 20 拍内人人有份，且严格按轮转顺序一拍拍一个：P00 在第 1 拍、P01 在
+        //    第 2 拍 …… 没有一个 peer 被前面「收集→超时→再收集」的循环饿死。
+        for (i, at) in first_gather_at.iter().enumerate() {
+            assert_eq!(
+                *at,
+                1_000 + GATHER_MS * i as u64,
+                "peer {i} must get its turn on tick {} (one peer per tick, round-robin)",
+                i + 1
+            );
+        }
+        assert_eq!(gathers as usize, PEERS, "exactly one blocking collection per tick, per peer");
     }
 
     // -----------------------------------------------------------------------
