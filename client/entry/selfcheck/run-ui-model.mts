@@ -805,6 +805,23 @@ try {
     PAGE.includes('if (this.connectFailureClass === NEEDS_LOGIN_CLASS)') &&
     PAGE.includes('return NEEDS_LOGIN_TEXT;') &&
     !PAGE.includes('账户登录已过期'));
+  // 2026-10-12 rel/0.0.25 integration: the retry branch's official home-card
+  // state set reaches 「需要登录」 through the sticky loginRequired flag, so that
+  // flag has to be keyed on the CORE's own needs-login token — fix/retry wrote
+  // it against the pre-auth shell string 'account-login-required', which
+  // fix/auth-login retired together with its last producer (that string would
+  // have made the official label permanently unreachable). The extension's
+  // credentialFailure and the page's flag must name the SAME class.
+  check('the sticky loginRequired flag is keyed on the core needs-login token',
+    PAGE.includes('private loginRequired(): boolean') &&
+    PAGE.includes('return this.connectFailureClass === NEEDS_LOGIN_CLASS;') &&
+    !PAGE.includes("=== 'account-login-required'"));
+  const EXTENSION = readFileSync(join(here, '..', 'src', 'main', 'ets',
+    'vpnextensionability', 'NetBirdVpnExtensionAbility.ets'), 'utf8');
+  check('the extension persists the SAME needs-login class the page keys on',
+    (EXTENSION.match(/credentialFailure = 'needs-login';/g) ?? []).length === 2 &&
+    !EXTENSION.includes("'account-login-required'") &&
+    EXTENSION.includes('this.writeConnectFailureForUi(failureClass);'));
 
   // ---- 2026-10-11/12 retry re-entry: connect-entry + pending action ---------
   // The extension's entry gate: ONLY a connector run in flight refuses an entry.

@@ -2193,10 +2193,13 @@ struct Index {
   // upstream's sticky `loginRequired` flag (HomeFragment.java:114, :873-883):
   // "Login required" replaces the Disconnected label, because a plain 未连接 would
   // suggest that a reconnect is all that is needed. Our carrier for it is the SAME
-  // class token the extension persists when the credentials were refused
-  // (NetBirdVpnExtensionAbility credentialFailure / NetBirdAccountMode).
+  // class token the extension persists when the core reports the login verdict
+  // (NetBirdVpnExtensionAbility credentialFailure = NEEDS_LOGIN_CLASS), so the
+  // official state set speaks the core's own `needs-login` class — not the
+  // pre-integration shell-side `account-login-required` string, which the core
+  // never emits.
   private loginRequired(): boolean {
-    return this.connectFailureClass === 'account-login-required';
+    return this.connectFailureClass === NEEDS_LOGIN_CLASS;
   }
 
   // The FULLY connected gate (B.2): core state connected + own overlay IP +
