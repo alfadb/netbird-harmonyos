@@ -39,6 +39,17 @@ import { UiPeerEntry, UiPeerIceDetail, UiPeerIceEndpoint, connectFailureText,
   connectionLabel, filterPeers, homeStateText,
   lastErrorText, lastHandshakeText, onlinePeerCount, peerStatusText,
   sortPeers, vpnActiveState } from '../vpnextensionability/NetBirdUiModel';
+// 2026-10-11 retry re-entry (fix/retry): the pure connect-entry / pending-start
+// model. This page only gathers the facts (the ack document, the extension's own
+// stop evidence, its own latches) and acts through requestStart(); every verdict
+// is the pure module's, host-checked byte-identically by run-ui-model.mts and
+// run-connect-retry.mts.
+import { CONNECT_ACK_FILE, CONNECT_LEG_AFTER_STOP, EXTENSION_STOP_POLL_MS,
+  EXTENSION_STOP_WAIT_MS, PENDING_START_ACKNOWLEDGED, PENDING_START_TIMEOUT,
+  PENDING_START_TIMEOUT_MS, connectStartLeg, decidePendingStart,
+  parseConnectAttemptAck } from '../vpnextensionability/NetBirdUiModel';
+import type { ConnectAttemptAck, PendingStartDecision, PendingStartFacts }
+  from '../vpnextensionability/NetBirdUiModel';
 import { DEFAULT_MANAGEMENT_URL, SETUP_CONFIG_FILE, SETUP_KEY_FILE,
   buildDeviceConfigJson, buildSetupKeyFileText, checkManagementUrl, checkSetupKey,
   readStoredManagementUrl, readStoredPrivateKey, readStoredRelayEnabled,
@@ -887,6 +898,18 @@ struct Index {
   // failure notice to THIS attempt (a leftover from an earlier attempt is
   // never shown as the live verdict).
   private lastStartAtMs: number = 0;
+  // 2026-10-11 retry re-entry (fix/retry): the bounded outcome window of the
+  // current start request (0 = none armed). Armed at the request and extended to
+  // ack + PENDING_START_TIMEOUT_MS once the extension acknowledges; past it the
+  // latch is released and the failure rendered — a request can never leave the
+  // card on 连接中… forever. The decision itself is the pure decidePendingStart().
+  private pendingStartDeadlineMs: number = 0;
+  // The extension's ack for THIS attempt has been seen (the previous failure
+  // notice is superseded from that moment — never before).
+  private pendingStartAcked: boolean = false;
+  // This attempt produced an outcome (a live document): its bounded window is
+  // closed and never re-armed. Reset by every requestStart().
+  private pendingStartOutcome: boolean = false;
   // Explicit logout in flight (ticket written): masks the extension's
   // teardown-driven status-document disappearance so the logout the user
   // just asked for is not reported as an unexpected "VPN 已断开".
@@ -1136,6 +1159,12 @@ struct Index {
     // VPN on a possibly live extension".
     const extensionDead: boolean = this.extensionConfirmedDead();
     const live: PublishedStatus | null = extensionDead ? null : status;
+    // 2026-10-11 retry re-entry (fix/retry): the pending start's own bookkeeping
+    // on THIS existing tick — no second timer, no second status read. It
+    // supersedes the previous failure notice only once the extension's ack
+    // proves the new attempt started, and it releases the latch when the whole
+    // outcome window passed with no verdict at all.
+    this.updatePendingStart(live);
     // 2026-10-10 后台保活（实验，方案 A）: the borrowed continuous task rides THIS
     // tick — no second timer, no second document read. It runs on both branches
     // (a live document is the ONLY thing that may hold the task, so "no fresh
@@ -1182,6 +1211,10 @@ struct Index {
       // attempt — never render it over a running connection
       this.connectFailureClass = '';
       this.connectFailureAtMs = 0;
+      // …including the page's own request-level error line: a running tunnel
+      // (the attempt DID start after all — the pending-start window is not
+      // proof of anything) supersedes it, exactly like the verdict above.
+      this.actionError = '';
       // 2026-10-08 扩展被系统回收后的自动重连 / 0.0.20: the tunnel is up again —
       // the outstanding attempt has succeeded (its verification window closes
       // now), and the attempt counter is forgiven ONLY once this active run has
@@ -2751,13 +2784,43 @@ struct Index {
     this.bgKeepAliveState = keepAliveOnUserConnect(this.bgKeepAliveState);
     this.actionError = '';
     this.disconnectNotice = '';
-    // 2026-10-06 登录失败可见性: a fresh attempt starts from a clean
-    // failure slate — drop the old notice file and the rendered verdict.
+    // 2026-10-06 登录失败可见性: the rendered verdict is cleared for a fresh
+    // attempt, but the NOTICE FILE is deliberately left in place now (2026-10-11,
+    // fix/retry): it is the last recorded verdict and the only thing the bounded
+    // pending-start timeout can re-render when the new attempt produces nothing.
+    // updatePendingStart() removes it — and only then — once the extension's own
+    // ack proves the attempt really started. Deleting it in advance is exactly
+    // what left the 0.0.24 card on 连接中… forever (pc-connecting-diag REPORT §4.2).
     this.connectFailureClass = '';
     this.lastStartAtMs = Date.now();
-    removeConnectFailure(getContext(this).filesDir);
+    // 2026-10-11 retry re-entry: the bounded outcome window of THIS request. The
+    // extension's ack extends it (a slow-but-real start is never cut short), and
+    // past it the latch is released and the failure rendered — see
+    // NetBirdUiModel.decidePendingStart.
+    this.pendingStartDeadlineMs = this.lastStartAtMs + PENDING_START_TIMEOUT_MS;
+    this.pendingStartAcked = false;
+    this.pendingStartOutcome = false;
     hilog.info(DOMAIN, TAG, 'UI_START_REQUEST|bundle=%{public}s|ability=%{public}s|requestId=%{public}s',
       BUNDLE_NAME, EXTENSION_ABILITY, this.requestId);
+    // 2026-10-11 retry re-entry (fix/retry): a repeated startVpnExtensionAbility
+    // against a LIVE extension instance is NOT a re-entry — the platform hands
+    // `want.parameters` over "when the VPN is started for the FIRST time"
+    // (@ohos.net.vpnExtension.d.ts:78-79) and VpnExtensionAbility declares no
+    // onConnect — so when the extension's own stop evidence is missing the retry
+    // drives ONE stop and waits (bounded) for the instance to be gone before it
+    // starts. Without this the 0.0.24 retry produced no new onCreate at all.
+    if (connectStartLeg(this.extensionGone()) === CONNECT_LEG_AFTER_STOP) {
+      hilog.info(DOMAIN, TAG,
+        'UI_START_RESTART|bundle=%{public}s|requestId=%{public}s|reason=extension-may-still-be-alive',
+        BUNDLE_NAME, this.requestId);
+      this.stopVpnExtensionThenStart(fromAutoReconnect);
+      return;
+    }
+    this.startVpnExtension(fromAutoReconnect);
+  }
+
+  // The ONE extension-start call site of this page.
+  private startVpnExtension(fromAutoReconnect: boolean): void {
     vpnExtension.startVpnExtensionAbility(this.buildWant()).then(() => {
       // The extension accepted the start; the published status document now
       // drives everything the home tab shows.
@@ -2786,6 +2849,148 @@ struct Index {
           RECONNECT_RESULT_FAILED, code, this.reconnectState.attempts);
       }
     });
+  }
+
+  // 2026-10-11 retry re-entry (fix/retry): is the extension instance provably
+  // gone? The extension writes its `stopping` marker SYNCHRONOUSLY as the FIRST
+  // statement of onDestroy (NetBirdVpnExtensionAbility.writeStopMarkerSync), so
+  // the marker is the extension's own stop acknowledgement — the one fact the
+  // UI process can read about that process without a platform getter. No marker
+  // at all (or an unusable one) = no diagnostics session ever opened = nothing
+  // alive to stop. A marker still `open` is NOT proof of life either (a killed
+  // process leaves it behind), which is why the start leg waits under a bounded
+  // clock instead of trusting this answer on its own.
+  private extensionGone(): boolean {
+    try {
+      const markerPath: string = recordPath(getContext(this).filesDir, MARKER_BASENAME_VPN);
+      if (markerPath.length === 0 || !fs.accessSync(markerPath)) {
+        return true;
+      }
+      const marker: Marker | null = parseMarker(fs.readTextSync(markerPath));
+      if (marker === null) {
+        return true;
+      }
+      return marker.state !== RECONNECT_MARKER_OPEN;
+    } catch (error) {
+      return true;
+    }
+  }
+
+  // 2026-10-11 retry re-entry: ONE stop leg, then the start. The platform's stop
+  // promise is best-effort (the extension may already be gone) and is
+  // deliberately NOT what the start waits on: the wait below polls the
+  // extension's own stop evidence on its own bounded clock, so a stop call that
+  // never answers can never keep the user's retry from starting.
+  private stopVpnExtensionThenStart(fromAutoReconnect: boolean): void {
+    // the status document disappearing a moment from now is THIS stop, not a
+    // fail-closed disconnect (the same latch requestStop() sets).
+    this.lastUserStopAtMs = Date.now();
+    vpnExtension.stopVpnExtensionAbility(this.buildWant()).catch((_error: Error) => {
+      // nothing to stop (already gone / never started): the wait leg decides.
+    });
+    this.waitExtensionGoneThenStart(fromAutoReconnect);
+  }
+
+  private async waitExtensionGoneThenStart(fromAutoReconnect: boolean): Promise<void> {
+    const deadline: number = Date.now() + EXTENSION_STOP_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (this.extensionConfirmedDead() || this.extensionGone()) {
+        break;
+      }
+      await sleep(EXTENSION_STOP_POLL_MS);
+    }
+    if (!this.requestSent || this.stopSent) {
+      // the user asked to disconnect while the stop leg was in flight: that stop
+      // is the last word and no start follows it.
+      return;
+    }
+    this.startVpnExtension(fromAutoReconnect);
+  }
+
+  // 2026-10-11 retry re-entry: the ONE bookkeeping step of a start request, on
+  // the EXISTING 2 s tick (no second timer, no second status read). It does two
+  // things and nothing else:
+  //   * supersedes the previous failure notice — and ONLY then — once the
+  //     extension's ack proves that this attempt really started;
+  //   * releases the latch when this attempt's outcome window passed with no
+  //     verdict at all, rendering the failure so the user has a working retry.
+  //     With an ack the window runs from the ack, so an attempt that really
+  //     started but then produced nothing still ends here instead of leaving the
+  //     card on 连接中…; a document (an outcome) closes the window for good.
+  private updatePendingStart(live: PublishedStatus | null): void {
+    const nowMs: number = Date.now();
+    if (live !== null) {
+      // a document exists: this attempt produced an outcome, so its window is
+      // closed for good. Whatever happens to that document later (a tunnel that
+      // dies minutes from now) belongs to the disconnect / reconnect paths — the
+      // pending-start timeout must never fire over a session that really ran.
+      this.pendingStartOutcome = true;
+    }
+    let ackAtMs: number = 0;
+    if (this.requestSent && !this.stopSent && !this.pendingStartOutcome) {
+      // read ONLY while a request is still unanswered: an idle page pays nothing.
+      ackAtMs = this.readConnectAckAtMs();
+    }
+    const facts: PendingStartFacts = {
+      'requestSent': this.requestSent,
+      'stopSent': this.stopSent,
+      'outcomeSeen': this.pendingStartOutcome,
+      'ackAtMs': ackAtMs,
+      'lastStartAtMs': this.lastStartAtMs,
+      'deadlineMs': this.pendingStartDeadlineMs,
+      'nowMs': nowMs
+    };
+    const decision: PendingStartDecision = decidePendingStart(facts);
+    if (decision.action === PENDING_START_ACKNOWLEDGED && !this.pendingStartAcked) {
+      this.pendingStartAcked = true;
+      // the new attempt demonstrably started: the old verdict is superseded.
+      removeConnectFailure(getContext(this).filesDir);
+      hilog.info(DOMAIN, TAG,
+        'UI_CONNECT_ACK|bundle=%{public}s|requestId=%{public}s|note=attempt-started',
+        BUNDLE_NAME, this.requestId);
+    }
+    if (decision.action === PENDING_START_TIMEOUT) {
+      this.pendingStartTimedOut();
+      return;
+    }
+    this.pendingStartDeadlineMs = decision.deadlineMs;
+  }
+
+  // The extension's connect-attempt ack's at_ms (0 = absent / unreadable /
+  // unusable). Class-token document only — nothing here is rendered.
+  private readConnectAckAtMs(): number {
+    try {
+      const path: string = `${getContext(this).filesDir}/${CONNECT_ACK_FILE}`;
+      if (!fs.accessSync(path)) {
+        return 0;
+      }
+      const ack: ConnectAttemptAck | null = parseConnectAttemptAck(fs.readTextSync(path));
+      return ack === null ? 0 : ack.at_ms;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  // 2026-10-11 retry re-entry: the bounded exit itself. A request whose outcome
+  // window passed with no verdict at all is over — the latch is released and the
+  // last recorded verdict (the preserved notice) is rendered, so the card leaves
+  // 连接中… and the user can retry. This only ever fires when the extension
+  // produced NOTHING: a live document or a fresh failure notice ends the window
+  // first (and releases the latch through their own paths).
+  private pendingStartTimedOut(): void {
+    const notice: ConnectFailureNotice | null = readConnectFailure(getContext(this).filesDir);
+    this.requestSent = false;
+    this.pendingStartDeadlineMs = 0;
+    this.pendingStartAcked = false;
+    this.disconnectNotice = '';
+    this.actionError = notice !== null
+      ? `上次连接未成功（${connectFailureText(notice.error_class)}），请重试`
+      : '连接请求超时，请重试';
+    hilog.error(DOMAIN, TAG,
+      'UI_START_TIMEOUT|bundle=%{public}s|requestId=%{public}s|afterMs=%{public}d|' +
+      'note=pending-start-released',
+      BUNDLE_NAME, this.requestId, PENDING_START_TIMEOUT_MS);
+    this.requestId = `ui-${Date.now()}`;
   }
 
   private requestStop(): void {

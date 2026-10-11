@@ -92,7 +92,9 @@ import type { PhoneLogConfigureResult, PhoneLogSummary, NativeResourceSample }
 // connector already exports, so no shim const is needed anywhere.
 import type { RouteSelectionSetResult } from './NetBirdConnector';
 
-import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
+import { CONNECT_ACK_FILE, CONNECT_ACK_STAGE_RUNNING, CONNECT_ACK_STAGE_STARTED,
+  CONNECT_ENTRY_REJECT_RUNNING, UiStatusDocument, buildConnectAttemptAck, buildUiStatusDocument,
+  connectEntryDecision } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
@@ -796,7 +798,6 @@ function parseLogoutTicketIssuedAtMs(text: string): number {
 //   failures trigger the same teardown from the runtime watcher.
 export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private requestId: string = 'missing';
-  private connectionCreationAttempted: boolean = false;
   private connection?: vpnExtension.VpnConnection;
   private createPromise?: Promise<CreateOutcome>;
   private createSettled: boolean = false;
@@ -1147,13 +1148,29 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=onCreate-reached|diag=true|is_evidence=false',
       this.requestId);
 
-    if (this.connectionCreationAttempted) {
+    // 2026-10-11 retry re-entry (fix/retry): the gate is the CONNECTOR RUN, not
+    // the ability instance. The old unconditional instance latch made every
+    // later entry a no-op for the whole life of the process, so a retry after an
+    // aborted run could never re-run the connect flow (device evidence:
+    // pc-connecting-diag/REPORT.md §4.3). `connector_status().running` is the
+    // CORE's own answer — the same "engine is running" gate the official Android
+    // client applies (android-client EngineRunner.java:136-147) — and this SDK
+    // declaration has no onConnect to route a repeated start through
+    // (@ohos.app.ability.VpnExtensionAbility.d.ts: only context/onCreate/
+    // onDestroy; contrast AppServiceExtensionAbility.d.ts:110 onConnect).
+    const connectorRunning: boolean | null = this.connectorRunState();
+    if (connectEntryDecision(connectorRunning) === CONNECT_ENTRY_REJECT_RUNNING) {
       hilog.error(DOMAIN, TAG,
-        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=duplicate-onCreate|summary=connection-already-attempted',
+        'VPN_CREATE_REJECTED|requestId=%{public}s|phase=connect-run-active|' +
+        'summary=connector-already-running',
         this.requestId);
+      // Still an ANSWER, not a failure: an entry that arrives while a run is
+      // active is the idempotent "already running" answer. The page's
+      // pending-start bookkeeping must see an ack for it, exactly like a run
+      // this instance really starts.
+      this.writeConnectAckForUi(CONNECT_ACK_STAGE_RUNNING);
       return;
     }
-    this.connectionCreationAttempted = true;
 
     // 2026-10-08 diagnostics wiring (as early as the extension lifecycle
     // allows): install the persistent VPN log tee and arm the two shell-side
@@ -1161,6 +1178,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     // recorded or can fail. Fail-soft throughout — a refused tee or a refused
     // system-event watcher is logged and the VPN flow below is untouched.
     this.startDiagnosticsLogTee();
+    // 2026-10-11 retry re-entry: the ONE document that proves to the UI process
+    // that a new connect attempt really started — the page only supersedes the
+    // previous failure notice and (re)arms its pending-start window from here.
+    this.writeConnectAckForUi(CONNECT_ACK_STAGE_STARTED);
 
     let connection: vpnExtension.VpnConnection;
     try {
@@ -7279,6 +7300,58 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     } catch (error) {
       hilog.warn(DOMAIN, TAG,
         'VPN_CONNECT_FAILURE_NOTICE_WRITE_FAILED|requestId=%{public}s|code=%{public}s',
+        this.requestId, String((error as BusinessFailure).code ?? 'none'));
+    }
+  }
+
+  // 2026-10-11 retry re-entry (fix/retry): the connector-run probe the onCreate
+  // entry gate reads. `null` = the core did not answer (no connector object yet,
+  // or a refused native call) — NOT proof of a running engine, so the gate lets
+  // the entry through (NetBirdUiModel.connectEntryDecision). The wrapper already
+  // answers null instead of throwing, so no VPN path can be lost to a probe.
+  private connectorRunState(): boolean | null {
+    const status: ConnectorStatusResult | null = pollStatusOrNull();
+    if (status === null) {
+      return null;
+    }
+    return status.running === true;
+  }
+
+  // 2026-10-11 retry re-entry: the connect-attempt ACK (channel/shape:
+  // NetBirdUiModel.CONNECT_ACK_FILE / ConnectAttemptAck). Written as early as
+  // the entry allows — before the start flow can abort at any of its many
+  // fail-closed gates, and also for an entry that was refused because a run is
+  // already active — so the UI process can tell "the new attempt demonstrably
+  // started" from "the platform delivered nothing". Attribution fields only:
+  // the request id, the moment and a stage token; never a URL, a credential or
+  // any document text. Best-effort like the failure notice: a refused write only
+  // costs the page its own pending-start deadline (the honest "no answer" shape),
+  // and an absent context (a lifecycle entry the platform never gave a filesDir)
+  // records nothing at all — the same defensive read startDiagnosticsLogTee makes
+  // on this very stack. It adds NO new milestone name: the persistent record of
+  // this entry is the document itself (phone-log's reviewed milestone surface
+  // stays exactly as it was).
+  private writeConnectAckForUi(stage: string): void {
+    let filesDir: string = '';
+    try {
+      filesDir = this.context.filesDir;
+    } catch (error) {
+      filesDir = '';
+    }
+    if (filesDir.length === 0) {
+      return;
+    }
+    const path: string = `${filesDir}/${CONNECT_ACK_FILE}`;
+    try {
+      const file: fs.File = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, buildConnectAttemptAck(this.requestId, Date.now(), stage));
+      fs.closeSync(file);
+      hilog.info(DOMAIN, TAG,
+        'VPN_CONNECT_ACK|requestId=%{public}s|stage=%{public}s', this.requestId, stage);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG,
+        'VPN_CONNECT_ACK_WRITE_FAILED|requestId=%{public}s|code=%{public}s',
         this.requestId, String((error as BusinessFailure).code ?? 'none'));
     }
   }

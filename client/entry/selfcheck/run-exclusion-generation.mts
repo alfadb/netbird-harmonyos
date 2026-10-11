@@ -1110,15 +1110,20 @@ try {
     pathLines('onCreate-reached').length === 1, JSON.stringify(logs()));
 
   // B2: the beacon precedes EVERY early return — the earliest reachable point.
+  // 2026-10-11 (fix/retry): the early return it precedes is no longer the
+  // instance latch (retired with the connect-retry fix) but the CONNECTOR-RUN
+  // gate, driven through the REAL probe: the fixture's connector_status answers
+  // running:true, which is the ONE fact that still refuses an entry.
   const dupAbility = freshAbility(mod);
-  dupAbility['connectionCreationAttempted'] = true;
+  G['__NB_STATUS'] = { running: true, state: 'connecting' };
   resetLog();
   (dupAbility['onCreate'] as (w: unknown) => void)(
     { bundleName: 'com.n2h.fixture', parameters: { requestId: REQUEST_ID } });
-  check('B2 the beacon is at the entry: it precedes the duplicate-onCreate return',
+  check('B2 the beacon is at the entry: it precedes the connector-run return',
     linesWith('N2H_COLLECTOR_PATH|').length === 1 &&
     lastLine('VPN_CREATE_REJECTED|') === 'VPN_CREATE_REJECTED|requestId=' + REQUEST_ID +
-    '|phase=duplicate-onCreate|summary=connection-already-attempted', JSON.stringify(logs()));
+    '|phase=connect-run-active|summary=connector-already-running', JSON.stringify(logs()));
+  G['__NB_STATUS'] = {};
 
   // B3: the watcher beacon — one line per instance, never per tick, through the
   // REAL start method + REPLAYED REAL ticks (matrix ①: beacons + absent file).
@@ -1180,11 +1185,17 @@ try {
   // B6: source pins on the byte-identical fixture (positions + single copies).
   const onCreatePathAt = extSource.indexOf(
     "'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=onCreate-reached|diag=true|is_evidence=false'");
-  const duplicateRejectAt = extSource.indexOf(
-    "'VPN_CREATE_REJECTED|requestId=%{public}s|phase=duplicate-onCreate|summary=connection-already-attempted'");
-  check('B6 the onCreate beacon is pinned BEFORE the duplicate-onCreate early return',
-    onCreatePathAt > 0 && onCreatePathAt < duplicateRejectAt,
-    JSON.stringify({ onCreatePathAt, duplicateRejectAt }));
+  // 2026-10-11 (fix/retry): the entry's own early return is the connector-run
+  // gate now — the instance latch and its `duplicate-onCreate` literal are gone
+  // from the shipped source, and the beacon must still precede that return.
+  const connectorRunRejectAt = extSource.indexOf(
+    "'VPN_CREATE_REJECTED|requestId=%{public}s|phase=connect-run-active|'");
+  check('B6 the onCreate beacon is pinned BEFORE the connector-run early return ' +
+    '(and the retired instance latch is really gone)',
+    onCreatePathAt > 0 && connectorRunRejectAt > onCreatePathAt &&
+    extSource.indexOf('duplicate-onCreate') < 0 &&
+    extSource.indexOf('connectionCreationAttempted') < 0,
+    JSON.stringify({ onCreatePathAt, connectorRunRejectAt }));
   const watcherPathAt = extSource.indexOf(
     "'N2H_COLLECTOR_PATH|requestId=%{public}s|stage=watcher-started|diag=true|is_evidence=false'");
   const watcherGuardAt = extSource.indexOf(

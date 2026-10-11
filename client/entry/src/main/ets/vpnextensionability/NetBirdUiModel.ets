@@ -1141,6 +1141,175 @@ export function lastErrorText(errorClass: string): string {
   return `连接出现问题（${errorClass}），请重试`;
 }
 
+// ---------------------------------------------------------------------------
+// 2026-10-11 retry re-entry (fix/retry) — the connect-entry / ack model.
+//
+// Device evidence (pc-connecting-diag/REPORT.md §4.2-§4.4, 0.0.24): after a
+// connect attempt failed the retry path set requestSent=true, deleted the
+// failure notice and called startVpnExtensionAbility against the STILL ALIVE
+// extension process. The whole connect flow hangs off onCreate behind an
+// unconditional instance latch and this extension has no onConnect (the API-26
+// declaration is context/onCreate/onDestroy only), so nothing re-ran:
+// published === null + requestSent === true + the notice gone = 连接中… forever.
+//
+// The decisions below are the PURE half of the fix; the extension and the page
+// only gather facts and act. All of them are host-checked byte-identically
+// (selfcheck/run-ui-model.mts + run-connect-retry.mts).
+// ---------------------------------------------------------------------------
+
+// The extension's connect-attempt acknowledgement (filesDir). ONE document per
+// entry the extension ACCEPTED — a run it really started, or a run that was
+// already active (the idempotent answer) — so the page can tell "the new attempt
+// demonstrably started" from "the platform delivered nothing at all".
+export const CONNECT_ACK_FILE: string = 'netbird-connect-ack';
+// An ack counts as THIS attempt's answer when it is not older than the attempt
+// (2 s clock margin — the SAME rule the failure notice is read with).
+export const CONNECT_ACK_CLOCK_MARGIN_MS: number = 2000;
+// stage tokens of the ack document.
+export const CONNECT_ACK_STAGE_STARTED: string = 'connect-run-started';
+export const CONNECT_ACK_STAGE_RUNNING: string = 'connect-run-active';
+// The bounded outcome window of a pending start: a request with NO verdict (no
+// live document, no failure notice) inside this window releases the latch and
+// renders a failure, so the user always has a working retry. Consistent with the
+// extension's own boxes (NETWORK_MAP_WAIT_MS = 15 s, STATUS_POLL_MS = 5 s): a
+// start flow ends — with a live document or with a failure notice — well inside
+// 30 s, so the window only ever fires on an attempt that never ran.
+export const PENDING_START_TIMEOUT_MS: number = 30000;
+// The stop leg of a retry: how long the page waits for the extension's OWN stop
+// evidence (the `stopping` marker written synchronously in onDestroy) before it
+// starts anyway. Bounded by its own clock — the platform's stop promise is
+// best-effort and is never the thing the start waits on.
+export const EXTENSION_STOP_WAIT_MS: number = 3000;
+export const EXTENSION_STOP_POLL_MS: number = 200;
+
+export const CONNECT_ENTRY_RUN: string = 'run';
+export const CONNECT_ENTRY_REJECT_RUNNING: string = 'reject-connector-running';
+export const CONNECT_LEG_DIRECT: string = 'start';
+export const CONNECT_LEG_AFTER_STOP: string = 'stop-then-start';
+export const PENDING_START_IDLE: string = 'idle';
+export const PENDING_START_WAIT: string = 'wait';
+export const PENDING_START_ACKNOWLEDGED: string = 'acknowledged';
+export const PENDING_START_TIMEOUT: string = 'timeout';
+
+// ONE connect-attempt acknowledgement. `request_id` is attribution only — the
+// platform hands `want.parameters` over "when the VPN is started for the FIRST
+// time" (from API 22 that note is explicit, @ohos.net.vpnExtension.d.ts:78-79),
+// so a re-entered instance may still carry the previous id. The freshness
+// comparison is on `at_ms`, exactly like the failure notice.
+export interface ConnectAttemptAck {
+  request_id: string;
+  at_ms: number;
+  stage: string;
+}
+
+export function buildConnectAttemptAck(requestId: string, atMs: number, stage: string): string {
+  const ack: ConnectAttemptAck = {
+    'request_id': requestId,
+    'at_ms': atMs,
+    'stage': stage
+  };
+  return JSON.stringify(ack);
+}
+
+// null = absent, malformed or unusable (no positive at_ms / no string fields);
+// never throws. The caller applies the freshness rule below.
+export function parseConnectAttemptAck(text: string): ConnectAttemptAck | null {
+  try {
+    if (text.length === 0) {
+      return null;
+    }
+    const ack: ConnectAttemptAck = JSON.parse(text) as ConnectAttemptAck;
+    if (ack.at_ms === undefined || ack.at_ms === null || ack.at_ms <= 0) {
+      return null;
+    }
+    if (typeof ack.request_id !== 'string' || typeof ack.stage !== 'string') {
+      return null;
+    }
+    const parsed: ConnectAttemptAck = {
+      'request_id': ack.request_id, 'at_ms': ack.at_ms, 'stage': ack.stage
+    };
+    return parsed;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Does this ack belong to the attempt the page last started? The 2 s margin
+// absorbs the two processes' clock/publish skew (same rule as the notice).
+export function connectAckFresh(ackAtMs: number, lastStartAtMs: number): boolean {
+  return ackAtMs > 0 && ackAtMs >= lastStartAtMs - CONNECT_ACK_CLOCK_MARGIN_MS;
+}
+
+// The extension's entry gate — the replacement for the unconditional instance
+// latch. `connectorRunning` is the CORE's own answer
+// (connector_status().running); `null` = the core did not answer (no connector
+// object yet / a refused native call), which is NOT proof of a running engine,
+// so the entry proceeds. A stopped or aborted run can therefore never block a
+// re-entry: the official Android client's entire guard is
+// `if (engineIsRunning) return;` (EngineRunner.java:136-147).
+export function connectEntryDecision(connectorRunning: boolean | null): string {
+  return connectorRunning === true ? CONNECT_ENTRY_REJECT_RUNNING : CONNECT_ENTRY_RUN;
+}
+
+// The page's start leg. A repeated startVpnExtensionAbility against a LIVE
+// extension instance is not a re-entry (parameters are a first-start channel and
+// there is no onConnect), so the instance must be gone first: when the page cannot
+// read the extension's own stop evidence it drives ONE stop and waits for it.
+export function connectStartLeg(extensionGone: boolean): string {
+  return extensionGone ? CONNECT_LEG_DIRECT : CONNECT_LEG_AFTER_STOP;
+}
+
+export interface PendingStartFacts {
+  requestSent: boolean;
+  stopSent: boolean;
+  // this attempt ALREADY produced an outcome (a live document, or the attempt's
+  // own failure notice): its window is closed for good — a tunnel that dies much
+  // later is the disconnect/reconnect paths' business, never this timeout's.
+  outcomeSeen: boolean;
+  // at_ms of the connect ack read this tick (0 = none).
+  ackAtMs: number;
+  lastStartAtMs: number;
+  // 0 = not armed yet.
+  deadlineMs: number;
+  nowMs: number;
+}
+
+export interface PendingStartDecision {
+  action: string;
+  deadlineMs: number;
+}
+
+// The bounded exit of the pending-start state (a request must never leave the
+// card on 连接中… forever):
+//   * no request in flight, a stop in flight, or an outcome   -> idle
+//   * otherwise the window is armed ONCE at the request and EXTENDED to
+//     ack + PENDING_START_TIMEOUT_MS as soon as the extension acknowledges: the
+//     ack IS progress (the attempt really entered the flow), so the outcome
+//     window is measured from the ack, never from the tap.
+//   * past the window                                          -> timeout: the
+//     caller releases the latch and renders the failure.
+export function decidePendingStart(facts: PendingStartFacts): PendingStartDecision {
+  if (!facts.requestSent || facts.stopSent || facts.outcomeSeen) {
+    return { 'action': PENDING_START_IDLE, 'deadlineMs': 0 };
+  }
+  let deadlineMs: number = facts.deadlineMs;
+  if (deadlineMs <= 0) {
+    deadlineMs = facts.lastStartAtMs + PENDING_START_TIMEOUT_MS;
+  }
+  let action: string = PENDING_START_WAIT;
+  if (connectAckFresh(facts.ackAtMs, facts.lastStartAtMs)) {
+    action = PENDING_START_ACKNOWLEDGED;
+    const ackDeadlineMs: number = facts.ackAtMs + PENDING_START_TIMEOUT_MS;
+    if (ackDeadlineMs > deadlineMs) {
+      deadlineMs = ackDeadlineMs;
+    }
+  }
+  if (facts.nowMs >= deadlineMs) {
+    return { 'action': PENDING_START_TIMEOUT, 'deadlineMs': 0 };
+  }
+  return { 'action': action, 'deadlineMs': deadlineMs };
+}
+
 // 2026-10-06 登录失败可见性: the Chinese reason shown under a '连接失败'
 // card. `errorClass` comes from the persistent connect-failure notice —
 // the connector's own last_error class (auth/timeout/network/...) or an

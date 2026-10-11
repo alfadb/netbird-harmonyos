@@ -779,6 +779,97 @@ try {
   check('failure texts: extension stage tokens',
     m.connectFailureText('credentials-missing').indexOf('Setup Key') >= 0 &&
     m.connectFailureText('no-signal-uri').indexOf('Signal') >= 0);
+
+  // ---- 2026-10-11 retry re-entry: connect-entry / ack / pending start ------
+  // The extension's entry gate: ONLY a connector run in flight refuses an entry.
+  // A stopped/aborted run (`running:false`) and an unanswerable probe (null —
+  // the core did not answer) both let the entry through, so a retry can never
+  // be swallowed by a stale instance latch again.
+  check('entry gate: a running connector refuses the entry',
+    m.connectEntryDecision(true) === m.CONNECT_ENTRY_REJECT_RUNNING);
+  check('entry gate: a stopped/aborted run re-enters',
+    m.connectEntryDecision(false) === m.CONNECT_ENTRY_RUN);
+  check('entry gate: an unanswerable probe re-enters (null is not proof)',
+    m.connectEntryDecision(null) === m.CONNECT_ENTRY_RUN);
+  // The page's start leg: only the extension's own stop evidence allows a
+  // direct start.
+  check('start leg: gone -> direct start, present -> stop first',
+    m.connectStartLeg(true) === m.CONNECT_LEG_DIRECT &&
+    m.connectStartLeg(false) === m.CONNECT_LEG_AFTER_STOP);
+  // The ack document: round-trip, malformed answers, freshness window.
+  const ackText = m.buildConnectAttemptAck('ui-9', 1700000000000, m.CONNECT_ACK_STAGE_STARTED);
+  check('ack doc: round-trip keeps the three fields',
+    m.parseConnectAttemptAck(ackText).request_id === 'ui-9' &&
+    m.parseConnectAttemptAck(ackText).at_ms === 1700000000000 &&
+    m.parseConnectAttemptAck(ackText).stage === m.CONNECT_ACK_STAGE_STARTED);
+  check('ack doc: malformed/empty/unusable answers null, never a throw',
+    m.parseConnectAttemptAck('') === null &&
+    m.parseConnectAttemptAck('{') === null &&
+    m.parseConnectAttemptAck('[]') === null &&
+    m.parseConnectAttemptAck('{"at_ms":0,"request_id":"a","stage":"b"}') === null &&
+    m.parseConnectAttemptAck('{"at_ms":5,"request_id":7,"stage":"b"}') === null);
+  check('ack freshness: same-attempt acks only (2 s margin)',
+    m.connectAckFresh(1700000000000, 1700000000000) === true &&
+    m.connectAckFresh(1699999998500, 1700000000000) === true &&
+    m.connectAckFresh(1699999997000, 1700000000000) === false &&
+    m.connectAckFresh(0, 1700000000000) === false);
+  // Pending-start decisions — the bounded exit of 连接中…
+  const idle = { requestSent: false, stopSent: false, outcomeSeen: false,
+    ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 5000 };
+  const pending = { requestSent: true, stopSent: false, outcomeSeen: false,
+    ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 5000 };
+  check('pending start: no request in flight is idle',
+    m.decidePendingStart(idle).action === m.PENDING_START_IDLE &&
+    m.decidePendingStart(idle).deadlineMs === 0);
+  check('pending start: a stop in flight is idle (and disarms the window)',
+    m.decidePendingStart({ requestSent: true, stopSent: true, outcomeSeen: false,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 4000, nowMs: 5000 }).action ===
+      m.PENDING_START_IDLE);
+  check('pending start: an outcome (a live document) closes the window for good',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: true,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 999999 }).action ===
+      m.PENDING_START_IDLE &&
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: true,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 999999 }).deadlineMs === 0);
+  const armed = m.decidePendingStart(pending);
+  check('pending start: armed once at the request, then it waits',
+    armed.action === m.PENDING_START_WAIT &&
+    armed.deadlineMs === 1000 + m.PENDING_START_TIMEOUT_MS);
+  check('pending start: an already-armed window is kept, not re-armed',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 7000, nowMs: 5000 }).deadlineMs === 7000);
+  check('pending start: no verdict inside the window stays 连接中…',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0,
+      nowMs: 1000 + m.PENDING_START_TIMEOUT_MS - 1 }).action === m.PENDING_START_WAIT);
+  check('pending start: no verdict past the window releases the latch',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0,
+      nowMs: 1000 + m.PENDING_START_TIMEOUT_MS }).action === m.PENDING_START_TIMEOUT &&
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 0, lastStartAtMs: 1000, deadlineMs: 0,
+      nowMs: 1000 + m.PENDING_START_TIMEOUT_MS }).deadlineMs === 0);
+  // The ack IS progress: the window moves to ack + timeout, so a slow-but-real
+  // start is never cut short by a request-time deadline…
+  check('pending start: the ack extends the window to ack + timeout',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 9000, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 31000 }).action ===
+      m.PENDING_START_ACKNOWLEDGED &&
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 9000, lastStartAtMs: 1000, deadlineMs: 0, nowMs: 31000 }).deadlineMs ===
+      9000 + m.PENDING_START_TIMEOUT_MS);
+  // …while an ack whose attempt then produces NOTHING still ends in a timeout
+  // (the silent-abort case: the ack alone must never pin the card on 连接中…).
+  check('pending start: an ack with no later verdict still times out',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 9000, lastStartAtMs: 1000, deadlineMs: 0,
+      nowMs: 9000 + m.PENDING_START_TIMEOUT_MS }).action === m.PENDING_START_TIMEOUT);
+  // A stale ack (an earlier attempt's) is not this attempt's progress: the
+  // request-time deadline stands.
+  check('pending start: a stale ack does not extend this attempt',
+    m.decidePendingStart({ requestSent: true, stopSent: false, outcomeSeen: false,
+      ackAtMs: 500, lastStartAtMs: 99999, deadlineMs: 0,
+      nowMs: 99999 + m.PENDING_START_TIMEOUT_MS }).action === m.PENDING_START_TIMEOUT);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }
