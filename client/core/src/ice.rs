@@ -994,10 +994,57 @@ fn gather_interface(
     srflx_out: &mut Vec<Candidate>,
     errors_out: &mut Vec<(String, ManagementError)>,
 ) -> Result<Option<GatheredSocket>, ManagementError> {
+    // STAGE 0 (official-alignment audit §2.7) — make the round measurable.
+    // Every later stage's claim ("the tick is no longer bounded by STUN",
+    // "one silent interface costs the schedule nothing") is a statement about
+    // these two numbers, and they did not exist: a device gather produced one
+    // `locals-gathered` line with no timing and no per-interface outcome. Both
+    // lines are emitted here, where the round actually ends, in the existing
+    // `N5c_ICE|<kind>|k=v|...` marker format. Observability only: nothing in
+    // this function's decisions reads them.
+    let round_start = sys::mono_ms();
+    let srflx_before = srflx_out.len();
+    // `gather-iface` = one interface round: how long it took, what it produced
+    // and HOW it ended (`outcome=`), so a silent/blocked interface is a fact
+    // instead of an inference (audit U1: "chba0's STUN silence is inferred,
+    // not instrumented").
+    macro_rules! iface_outcome {
+        ($port:expr, $host:expr, $outcome:expr) => {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-iface|iface={}|addr={}|port={}|ms={}|host={}|srflx={}|errors={}|outcome={}",
+                iface.name,
+                std::net::Ipv4Addr::from(iface.addr),
+                $port,
+                sys::mono_ms().saturating_sub(round_start),
+                $host,
+                srflx_out.len().saturating_sub(srflx_before),
+                errors_out.len(),
+                $outcome,
+            ))
+        };
+    }
+    // `gather-stun` = one (interface, STUN server) exchange — upstream's own
+    // unit of concurrency (fork `gather.go:491-513`) and of failure
+    // (`gather.go:526-531` logs exactly one line per failed exchange).
+    macro_rules! stun_outcome {
+        ($server:expr, $ms:expr, $outcome:expr) => {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|gather-stun|iface={}|server={}|ms={}|outcome={}",
+                iface.name, $server, $ms, $outcome
+            ))
+        };
+    }
+
     // The ONE owned copy for this round: syscalls go through its raw number,
     // and ownership either leaves via the returned `GatheredSocket` or is
     // dropped here (exactly one close).
-    let owned = socks.take_owned().map_err(seam_to_management)?;
+    let owned = match socks.take_owned() {
+        Ok(o) => o,
+        Err(e) => {
+            iface_outcome!(0, 0, "no-socket");
+            return Err(seam_to_management(e));
+        }
+    };
     let dup = owned.as_raw_fd();
     let close_and_record = |owned: OwnedFd,
                             e: ManagementError,
@@ -1009,6 +1056,7 @@ fn gather_interface(
 
     if let Err(e) = set_nonblock(dup) {
         close_and_record(owned, seam_to_management(e), errors_out);
+        iface_outcome!(0, 0, "nonblock-failed");
         return Ok(None);
     }
     // Bind to THE interface address (host candidate binding) with an
@@ -1021,6 +1069,7 @@ fn gather_interface(
             ManagementError::Network(format!("stun-bind-failed (errno={})", sys::errno())),
             errors_out,
         );
+        iface_outcome!(0, 0, "bind-failed");
         return Ok(None);
     }
     let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
@@ -1031,6 +1080,7 @@ fn gather_interface(
             ManagementError::Network(format!("stun-getsockname-failed (errno={})", sys::errno())),
             errors_out,
         );
+        iface_outcome!(0, 0, "getsockname-failed");
         return Ok(None);
     }
     let bound_port = u16::from_be(name_addr.sin_port);
@@ -1041,6 +1091,7 @@ fn gather_interface(
         // No STUN server: the socket is STILL the live base of the host
         // candidate, so it must survive the gather (pre-fix it was closed
         // here, which is what made the signaled port dead).
+        iface_outcome!(bound_port, 1, "no-stun-server");
         return Ok(Some(GatheredSocket { cand: base, fd: owned }));
     }
 
@@ -1050,10 +1101,14 @@ fn gather_interface(
     // socket would drop the other server's reply).
     let mut outstanding: Vec<(usize, TransactionId)> = Vec::new();
     let mut targets: Vec<(usize, sys::sockaddr_in, TransactionId)> = Vec::new();
+    // STAGE 0: per-server send wall clock, so `gather-stun|ms=` reports the
+    // exchange (send → reply/timeout) of THIS (interface, server) pair.
+    let mut sent_at: Vec<u64> = vec![0; servers.len()];
     for (idx, (ip, port, server)) in servers.iter().enumerate() {
         let txn = match stun::random_transaction_id() {
             Ok(t) => t,
             Err(e) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), 0, "txn-failed");
                 errors_out.push((format!("{}/{}:{}", iface.name, server.host, server.port), e));
                 continue;
             }
@@ -1095,6 +1150,7 @@ fn gather_interface(
                 break;
             }
         }
+        sent_at[*idx] = sys::mono_ms(); // STAGE 0: exchange clock starts at the send
         if !sent {
             if crate::n2_socket_trace::armed() {
                 let remote = std::net::SocketAddrV4::new(std::net::Ipv4Addr::from(addr.sin_addr),
@@ -1103,6 +1159,7 @@ fn gather_interface(
             }
             let errno = sys::errno();
             outstanding.retain(|(i, _)| i != idx);
+            stun_outcome!(format!("{}:{}", servers[*idx].2.host, servers[*idx].2.port), 0, "send-failed");
             errors_out.push((
                 format!("{}/{}:{}", iface.name, servers[*idx].2.host, servers[*idx].2.port),
                 ManagementError::Network(format!("stun-send-failed (errno={errno})")),
@@ -1124,6 +1181,11 @@ fn gather_interface(
                 continue;
             }
             for (idx, _) in outstanding.drain(..) {
+                stun_outcome!(
+                    format!("{}:{}", servers[idx].2.host, servers[idx].2.port),
+                    sys::mono_ms().saturating_sub(sent_at[idx]),
+                    "poll-failed"
+                );
                 errors_out.push((
                     format!("{}/{}:{}", iface.name, servers[idx].2.host, servers[idx].2.port),
                     ManagementError::Network(format!("stun-poll-failed (errno={poll_errno})")),
@@ -1172,6 +1234,7 @@ fn gather_interface(
         let (idx, txn) = outstanding.remove(pos);
         let server = servers[idx].2;
         let ctx = format!("{}/{}:{}", iface.name, server.host, server.port);
+        let ms = sys::mono_ms().saturating_sub(sent_at[idx]);
         match stun::parse_binding_response(datagram, &txn) {
             Ok(StunReply::Mapped { addr, port }) => {
                 if crate::n2_socket_trace::armed() {
@@ -1181,16 +1244,34 @@ fn gather_interface(
                         std::net::Ipv4Addr::from(servers[idx].0), servers[idx].1,
                         std::net::Ipv4Addr::from(addr), port, sys::mono_ms()));
                 }
+                // STAGE 0: the srflx exchange's own timing + mapping.
+                crate::hilog::emit(&format!(
+                    "N5c_ICE|gather-stun|iface={}|server={}:{}|ms={ms}|outcome=mapped|mapped={}:{}",
+                    iface.name,
+                    server.host,
+                    server.port,
+                    std::net::Ipv4Addr::from(addr),
+                    port
+                ));
                 srflx_out.push(Candidate::srflx_candidate(&base, addr, port));
             }
             Ok(StunReply::Error(code)) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), ms, format!("error-code={code}"));
                 errors_out.push((ctx, ManagementError::Server { status: code }));
             }
-            Err(e) => errors_out.push((ctx, e)),
+            Err(e) => {
+                stun_outcome!(format!("{}:{}", server.host, server.port), ms, "unparsable");
+                errors_out.push((ctx, e));
+            }
         }
     }
     for (idx, _) in outstanding.drain(..) {
         let server = servers[idx].2;
+        stun_outcome!(
+            format!("{}:{}", server.host, server.port),
+            sys::mono_ms().saturating_sub(sent_at[idx]),
+            "timeout"
+        );
         errors_out.push((
             format!("{}/{}:{}", iface.name, server.host, server.port),
             ManagementError::Timeout,
@@ -1198,6 +1279,7 @@ fn gather_interface(
     }
     // STUN done (answers and/or recorded timeouts): the socket stays live
     // and leaves with the host candidate it backs.
+    iface_outcome!(bound_port, 1, "ok");
     Ok(Some(GatheredSocket { cand: base, fd: owned }))
 }
 

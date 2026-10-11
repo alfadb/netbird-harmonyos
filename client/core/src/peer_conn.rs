@@ -113,6 +113,14 @@ pub const RETRY_COOLDOWN_MS: u64 = 2000;
 /// 行内 `waited_ms` 给出已等待时长，因此「等了多久」不因限频丢失。
 pub const LOCALS_WAIT_LOG_MS: u64 = 5000;
 
+/// STAGE 0（官方对齐审计 §2.7）：整拍墙钟超过这么长才记一行
+/// `N5c_ICE|tick|…|pass_ms=…|slow=true`（见 [`PeerIceOrchestrator::run_once`]）。
+///
+/// 生产 tick = `ICE_PUMP_TICK_MS`（10 ms），逐拍打印是刷屏；健康的一拍只做
+/// 注入时钟驱动的状态机推进（0~1 ms），因此 200 ms 是「这一拍真的被什么
+/// 挡住了」的下限——正是真机报告要求可验证的那个量。
+pub const TICK_SLOW_LOG_MS: u64 = 200;
+
 /// 握手重发周期（注入时钟衡量）：signal 服务端对未注册目的地的转发是
 /// best-effort 丢弃（signal.go forwardMessageToPeer 的 not-connected
 /// 路径，"todo respond to the sender?"），先发方的 OFFER/候选可能在
@@ -1219,6 +1227,9 @@ impl PeerIceOrchestrator {
         payload: &str,
         now_ms: u64,
     ) -> Result<(), ManagementError> {
+        // STAGE 0: this call is a pass of its own — its wall clock feeds the
+        // `pass_ms=` field of every `locals-gathered` line it produces.
+        let pass_start_ms = crate::sys::mono_ms();
         let Some(idx) = self.peers.iter().position(|p| p.key == from_key) else {
             self.unknown_signal += 1; // 非网络图 peer：丢弃，不报错
             return Ok(());
@@ -1286,7 +1297,7 @@ impl PeerIceOrchestrator {
                     peer.session_at_ms = now_ms;
                     peer.locals_wait_ms = 0; // 新会话的等待账从零起算
                     peer.checking_since_ms = 0;
-                    match self.ensure_locals(idx, now_ms) {
+                    match self.ensure_locals(idx, now_ms, pass_start_ms) {
                         Ok(LocalsRun::Gathered) => {}
                         Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
                             // 池不足＝等待（0050 §8 item 3）：不进 `last_error`
@@ -1459,6 +1470,13 @@ impl PeerIceOrchestrator {
     /// Connected（真机 12:00 成功连接后 ~7s `disconnected→failed` 的形态
     /// ：对端断流冻结，本端诚实超时）。`now_ms` 注入。
     pub fn run_once(&mut self, now_ms: u64) -> Result<(), ManagementError> {
+        // STAGE 0（官方对齐审计 §2.7）：整拍墙钟。入口取一次、出口与本拍
+        // 注入时钟一起记一行——「一拍 ≤ X ms」这个断言此前没有量：真机
+        // 报告（relay report §4.7-3）要的正是这条。生产 tick 是
+        // [`crate::connector::ICE_PUMP_TICK_MS`]（10 ms），逐拍打印就是
+        // 刷屏，所以只记**慢拍**（≥ [`TICK_SLOW_LOG_MS`]）：健康拍长 0~1 ms，
+        // 慢拍恰好是"有东西阻塞了泵"的现场。
+        let pass_start_ms = crate::sys::mono_ms();
         // signal 流重连（false→true 的边沿）：断流期间的「远端静默」推断作废
         // ——本端可能只是收不到帧。带注入时钟复位，避免退避延迟继续生效。
         if self.signal_reconnected {
@@ -1494,7 +1512,7 @@ impl PeerIceOrchestrator {
                 // 轮转回来时冷却/等待账原样有效。
                 if want_initiate && gather_budget {
                     self.peers[idx].initiated = true;
-                    match self.ensure_locals_budgeted(idx, now_ms, &mut gather_budget) {
+                    match self.ensure_locals_budgeted(idx, now_ms, pass_start_ms, &mut gather_budget) {
                         Ok(LocalsRun::Gathered) => {
                             let peer = &mut self.peers[idx];
                             let creds = peer.creds.as_ref().expect("creds after locals");
@@ -1571,7 +1589,7 @@ impl PeerIceOrchestrator {
                     p.session.is_some() && !p.locals_done && now_ms >= p.cooldown_until
                 };
                 if want_locals && gather_budget {
-                    match self.ensure_locals_budgeted(idx, now_ms, &mut gather_budget) {
+                    match self.ensure_locals_budgeted(idx, now_ms, pass_start_ms, &mut gather_budget) {
                         Ok(LocalsRun::Gathered) => {}
                         Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
                             // 同上：等待不是错误，会话保留（`want_locals` 的
@@ -1670,6 +1688,15 @@ impl PeerIceOrchestrator {
                 let _sent = self.wg.handle_udp_inbound(&datagram, (src, src_port), now_ms);
             }
         }
+        // STAGE 0: exit side of the whole-tick wall clock (entry above). Only
+        // a pass that spent real time is worth a line; `round=` is the injected
+        // clock the pass ran on, `pass_ms=` the wall clock it actually cost.
+        let pass_ms = crate::sys::mono_ms().saturating_sub(pass_start_ms);
+        if pass_ms >= TICK_SLOW_LOG_MS {
+            crate::hilog::emit(&format!(
+                "N5c_ICE|tick|round={now_ms}|pass_ms={pass_ms}|peers={len}|slow=true"
+            ));
+        }
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -1686,9 +1713,10 @@ impl PeerIceOrchestrator {
         &mut self,
         idx: usize,
         now_ms: u64,
+        pass_start_ms: u64,
         budget: &mut bool,
     ) -> Result<LocalsRun, ManagementError> {
-        match self.ensure_locals(idx, now_ms) {
+        match self.ensure_locals(idx, now_ms, pass_start_ms) {
             Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log }) => {
                 Ok(LocalsRun::WaitingForSockets { need, have, waited_ms, log })
             }
@@ -1726,7 +1754,15 @@ impl PeerIceOrchestrator {
     ///   候选保留接口地址 + 固定端口（getsockname 回填校验）。
     ///   之后 [`advertised_candidates`] 逐个以既有 wire 形态追加进 outbox
     ///   （extra host 候选，随握手重发语义一起重发）。
-    fn ensure_locals(&mut self, idx: usize, now_ms: u64) -> Result<LocalsRun, ManagementError> {
+    ///
+    /// `pass_start_ms` = 调用方本次 pass（`run_once` / `handle_signal`）的
+    /// 墙钟起点：STAGE 0 的 `pass_ms=` 由它算出（见 [`Self::run_once`]）。
+    fn ensure_locals(
+        &mut self,
+        idx: usize,
+        now_ms: u64,
+        pass_start_ms: u64,
+    ) -> Result<LocalsRun, ManagementError> {
         if self.peers[idx].locals_done {
             return Ok(LocalsRun::Gathered);
         }
@@ -1792,6 +1828,11 @@ impl PeerIceOrchestrator {
         }
         // 默认路径：先收集，**把仍然活着的绑定 socket 一并带走**（0052：
         // gather 不再关闭已绑定的 socket）。固定端口路径不收集。
+        //
+        // STAGE 0（官方对齐审计 §2.7）：这一拍的墙钟（`gather_ms`）与整拍
+        // 墙钟（`pass_ms`）随 `locals-gathered` 一起记——"一拍不再被 STUN
+        // 封顶"这个后续每个阶段的断言，量就是这两个数。
+        let gather_start_ms = crate::sys::mono_ms();
         let mut gathered = match fixed_port {
             Some(_) => None,
             None => {
@@ -1805,6 +1846,7 @@ impl PeerIceOrchestrator {
                 Some(crate::ice::gather_candidates(&cfg, self.ifaces.as_ref(), self.socks.as_ref())?)
             }
         };
+        let gather_ms = crate::sys::mono_ms().saturating_sub(gather_start_ms);
         let fixed_addr = match fixed_port {
             Some(_) => self.allowed_iface_addrs()?.first().copied(),
             None => None,
@@ -1866,12 +1908,13 @@ impl PeerIceOrchestrator {
                 .map(|c| format!("{}:{}", c.address, c.port))
                 .collect();
             crate::hilog::emit(&format!(
-                "N5c_ICE|locals-gathered|peer={}|round={}|added={added}|srflx={}|advertised={}|cands={}",
+                "N5c_ICE|locals-gathered|peer={}|round={}|added={added}|srflx={}|advertised={}|cands={}|gather_ms={gather_ms}|pass_ms={}",
                 peer.key.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>(),
                 peer.session_at_ms,
                 srflx_count,
                 self.advertised_candidates.len(),
-                bound_addrs.join(",")
+                bound_addrs.join(","),
+                crate::sys::mono_ms().saturating_sub(pass_start_ms),
             ));
             added
         };
