@@ -150,7 +150,11 @@ async function encrypt(plaintext: Uint8Array): Promise<Envelope> {
   try {
     const cipher: cryptoFramework.Cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
     const params: cryptoFramework.GcmParamsSpec = {
-      algName: 'GCM', iv: { data: iv }, aad: { data: AAD }, authTag: { data: new Uint8Array(TAG_BYTES) }
+      // The Crypto Framework matches the params spec by its CLASS name, not by
+      // the algorithm: 'GCM' makes cipher.init fail with code 401
+      // "build context for init fail!", which is why no credential could be
+      // encrypted. The official GCM sample passes 'GcmParamsSpec' here.
+      algName: 'GcmParamsSpec', iv: { data: iv }, aad: { data: AAD }, authTag: { data: new Uint8Array(TAG_BYTES) }
     };
     await cipher.init(cryptoFramework.CryptoMode.ENCRYPT_MODE, key, params);
     const result: cryptoFramework.DataBlob = await cipher.doFinal({ data: plaintext });
@@ -184,7 +188,7 @@ async function decrypt(envelope: Envelope): Promise<Uint8Array> {
   try {
     const cipher: cryptoFramework.Cipher = cryptoFramework.createCipher('AES256|GCM|NoPadding');
     const params: cryptoFramework.GcmParamsSpec = {
-      algName: 'GCM', iv: { data: iv }, aad: { data: AAD }, authTag: { data: tag }
+      algName: 'GcmParamsSpec', iv: { data: iv }, aad: { data: AAD }, authTag: { data: tag }
     };
     await cipher.init(cryptoFramework.CryptoMode.DECRYPT_MODE, key, params);
     const result: cryptoFramework.DataBlob = await cipher.doFinal({ data: ciphertext });

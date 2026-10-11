@@ -38,13 +38,15 @@ const state: {
   alias: typeof alias;
   readError: { code: number } | null;
   writeError: Error | null;
+  initAlgNames: string[];
 } = {
   key: null,
   aliasName: '',
   nodeFs: { open, rename, unlink },
   alias,
   readError: null,
-  writeError: null
+  writeError: null,
+  initAlgNames: []
 };
 (globalThis as unknown as { __NB_STORE_TEST: typeof state }).__NB_STORE_TEST = state;
 
@@ -83,6 +85,13 @@ try {
   check('8 KiB JWT saves and round-trips; store token bound is 16 KiB',
     core.MAX_TOKEN_CHARS === 16 * 1024 &&
     JSON.stringify(await module.loadAccountCredentials(filesDir)) === JSON.stringify(creds));
+  // 0.0.23: the Crypto Framework resolves the params spec by its CLASS name.
+  // The fake above mirrors the device and throws BusinessError 401 for any
+  // other string, so this assertion pins the shipped algName on both the
+  // encrypt and the decrypt path.
+  check('AES-GCM params spec carries the GcmParamsSpec class name on encrypt and decrypt',
+    state.initAlgNames.length >= 2 &&
+    state.initAlgNames.every((name) => name === 'GcmParamsSpec'));
   let oversizedReason = '';
   try {
     await module.saveAccountCredentials(filesDir, { ...creds, jwt: 'J'.repeat(core.MAX_TOKEN_CHARS + 1) });

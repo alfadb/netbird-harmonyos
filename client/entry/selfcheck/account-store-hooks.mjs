@@ -24,7 +24,14 @@ const CRYPTO = 'data:text/javascript,' + encodeURIComponent(
   ' return { async convertKey(input) { return { bytes: new Uint8Array(input.data) }; } }; },' +
   ' createCipher(name) { if (name !== "AES256|GCM|NoPadding") throw Error("cipher");' +
   ' let c; let encrypting = false; return {' +
-  ' async init(mode, key, p) { const iv = p.iv.data; const aad = p.aad.data; encrypting = mode === 0;' +
+  ' async init(mode, key, p) {' +
+  ' const s = globalThis.__NB_STORE_TEST; (s.initAlgNames = s.initAlgNames || []).push(p.algName);' +
+  // The real Crypto Framework selects the params-spec class by name: anything
+  // other than the class name fails init with BusinessError 401
+  // "build context for init fail!" (the 0.0.22 device failure).
+  ' if (p.algName !== "GcmParamsSpec") {' +
+  ' throw { code: 401, message: "build context for init fail!" }; }' +
+  ' const iv = p.iv.data; const aad = p.aad.data; encrypting = mode === 0;' +
   ' if (p.authTag.data.length !== 16) throw Error("invalid GCM auth tag length");' +
    ' if (encrypting) { c = createCipheriv("aes-256-gcm", key.bytes, iv); c.setAAD(aad); }' +
   ' else { c = createDecipheriv("aes-256-gcm", key.bytes, iv); c.setAAD(aad); c.setAuthTag(p.authTag.data); } },' +
