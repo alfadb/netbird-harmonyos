@@ -7,7 +7,8 @@
       runtimeOS: 'HarmonyOS',
       config: {
         deviceType: [
-          'phone'
+          'phone',
+          '2in1'
         ]
       },
       source: {
