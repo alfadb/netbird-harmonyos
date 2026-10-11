@@ -989,38 +989,31 @@ export function connectorIceSocketFeed(fd: number): SocketFeedResult {
   return JSON.parse(core.connector_ice_socket_feed(fd)) as SocketFeedResult;
 }
 
-// STAGE 2 (official-alignment audit §2.7): the ONE shared ICE mux socket —
-// opened AND BOUND by the core (wildcard, one port), then protected by the shell
-// and fed back on the SAME fd (the `wg_fwd_open` shape). `port` is the port every
-// host candidate of every peer advertises; `replaced` is true when this feed
-// superseded a previous mux (a physical-network change re-protects on the new
-// VpnConnection).
-export interface IceMuxOpen {
-  fd: number;
-  port: number;
-  bind_rc: number;
-  bind_errno: number;
-}
-
-export interface IceMuxFeedResult {
+// STAGE 2/3 (official-alignment audit §2.7): the ONE shared ICE mux socket.
+// Since stage 3 it IS the WireGuard outer socket: the core builds the mux over a
+// dup of the already-open, already-bound, already-PROTECTED WG outer socket
+// (upstream `createOrUpdateMux` over the WG bind's own conn,
+// `client/iface/bind/ice_bind.go:291-316`; `client/iface/device/device_kernel_unix.go:97-113`)
+// and starts its reader thread (`device_kernel_unix.go:109`). There is therefore
+// NO second socket to open, bind or protect, and no fd crosses this seam.
+// `port` is the port every host candidate of every peer advertises (the WG
+// socket's own port); `replaced` is true when this arm superseded a previous mux
+// (a physical-network change re-protects on the new VpnConnection); `reader` is
+// true when the ONE reader thread is now running on the shared socket.
+export interface IceMuxArmResult {
   ok: boolean;
   port?: number;
   replaced?: boolean;
+  reader?: boolean;
   error?: string;
 }
 
-// Core opens + binds the shared mux socket (wildcard, ephemeral port). The shell
-// protects `fd` and feeds it back through connectorIceMuxFeed; until then no
-// datagram may flow (fail-closed).
-export function iceMuxOpen(): IceMuxOpen {
-  return JSON.parse(core.ice_mux_open()) as IceMuxOpen;
-}
-
-// Feed the PROTECTED shared ICE mux socket. Failure tokens: no-connector,
-// no-mux-slot, socket-fd-missing, socket-fd-invalid, socket-unbound. Without a
-// mux there are NO local candidates (no unprotected fallback).
-export function connectorIceMuxFeed(fd: number): IceMuxFeedResult {
-  return JSON.parse(core.connector_ice_mux_feed(fd)) as IceMuxFeedResult;
+// Arm the shared mux over the WG device's outer socket (fail-closed: without a
+// mux there are NO local candidates — no unprotected fallback). Failure tokens:
+// no-connector, no-mux-slot, no-wg-device, no-wg-socket, socket-fd-invalid,
+// mux-over-wg.
+export function connectorIceMuxArm(): IceMuxArmResult {
+  return JSON.parse(core.connector_ice_mux_arm()) as IceMuxArmResult;
 }
 
 // ---------------------------------------------------------------------------

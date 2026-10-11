@@ -265,11 +265,38 @@ impl Node {
         bus: Arc<SignalBus>,
         ice_sockets: usize,
     ) -> Self {
-        // The "shell-fed" WG outer socket (fallback egress; pre-N11 the ONLY
-        // egress — the round-7 bug source). Bound loopback, ephemeral.
+        Node::new_with_peers(
+            me_key,
+            &[(peer_key.to_string(), peer_vpn)],
+            secret_b64,
+            tie_breaker,
+            bus,
+            ice_sockets,
+            &[],
+        )
+    }
+
+    /// STAGE 3 multi-peer flavour: one node with MANY registered peers, all
+    /// riding the SAME shared socket (the hub of the many-peer test).
+    /// `answerers` lists the peers this node must NOT initiate to (deterministic
+    /// offerer/answerer roles).
+    fn new_with_peers(
+        me_key: &str,
+        peers: &[(String, [u8; 4])],
+        secret_b64: &str,
+        tie_breaker: u64,
+        bus: Arc<SignalBus>,
+        ice_sockets: usize,
+        answerers: &[&str],
+    ) -> Self {
+        // The "shell-fed" WG outer socket — STAGE 3: this ONE socket is also the
+        // ICE socket (upstream: the mux is built over the WG bind's own conn,
+        // `ice_bind.go:291-316`). Bound WILDCARD like `wg_fwd_open` does, so the
+        // shared socket's local address is `0.0.0.0:<port>` — the production
+        // shape — and loopback checks reach it all the same.
         let wg_raw = unsafe { socket(2, 2, 0) };
         assert!(wg_raw >= 0);
-        let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        let sa = sys::sockaddr_in::new([0, 0, 0, 0], 0);
         assert_eq!(
             unsafe { sys::bind(wg_raw, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) },
             0
@@ -283,14 +310,20 @@ impl Node {
         let feed = Arc::new(WgDeviceFeed::new(cfg));
         feed.feed_tun(sv[0]).expect("tun feed");
         feed.feed_wg_socket(wg_raw).expect("wg socket feed");
-        feed.apply_peers(&[WgPeerEntry {
-            pub_key_b64: peer_key.to_string(),
-            allowed_ips: vec![config::Route { addr: peer_vpn, prefix_len: 32 }],
-        }])
+        feed.apply_peers(
+            &peers
+                .iter()
+                .map(|(key, vpn)| WgPeerEntry {
+                    pub_key_b64: key.clone(),
+                    allowed_ips: vec![config::Route { addr: *vpn, prefix_len: 32 }],
+                })
+                .collect::<Vec<_>>(),
+        )
         .expect("device peers");
         assert!(feed.device_up(), "both feeds present → device up");
 
         let socks = FedSocks::with_lo_sockets(ice_sockets);
+        let keys: Vec<String> = peers.iter().map(|(k, _)| k.clone()).collect();
         let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
             ifaces: Arc::new(StaticInterfaces(vec![InterfaceAddr {
                 name: "eth0".into(),
@@ -306,18 +339,49 @@ impl Node {
         // STAGE 1（官方对齐审计 §2.7）：注入时钟 harness —— 本地候选收集走
         // 确定性内联执行者（异步模型由 `src/peer_conn.rs` 的线程执行者用例覆盖）。
         orch.set_gather_exec(Arc::new(InlineGatherExec));
-        orch.set_peers(&[peer_key.to_string()]);
+        // STAGE 3: the ONE mux is built OVER the device's own protected socket —
+        // the production wiring (`armIceMux` → `connector_ice_mux_arm`). No socket
+        // comes from the ICE provider any more: the pool stays untouched, which is
+        // exactly what the assertions below pin.
+        let (mux, replaced) = orch
+            .arm_mux_from_wg_socket()
+            .expect("stage-3 mux over the WG outer socket");
+        assert!(!replaced, "first arm of this instance");
+        assert_eq!(
+            mux.local_port(),
+            sock_name(wg_raw).1,
+            "the mux IS the WG outer socket (one open + one bind + one protect)"
+        );
+        assert!(
+            !mux.reader_running(),
+            "injected-clock harness: no reader thread, the pumps own the cadence"
+        );
+        assert!(mux.sink_armed(), "non-STUN datagrams go straight into the device");
+        assert_eq!(
+            socks.source.pending(),
+            ice_sockets,
+            "the ICE socket provider is NOT consumed: the whole plane rides the WG socket"
+        );
+        orch.set_peers(&keys);
+        for answerer in answerers {
+            orch.set_initiator(answerer, false);
+        }
         orch.set_signal_ready(true);
         set_nonblock(sv[1]); // test-side TUN end: never blocks the harness
         Node {
             me: me_key.to_string(),
-            peer_key: peer_key.to_string(),
+            peer_key: peers[0].0.clone(),
             feed,
             orch,
             socks,
             tun_hand: sv[1],
             raws: vec![wg_raw, sv[0], sv[1]],
         }
+    }
+
+    /// The shared socket this instance's ICE plane AND WireGuard ride.
+    fn mux(&self) -> Arc<netbird_core::ice_mux::IceMux> {
+        self.orch.ice_mux().expect("the one shared mux")
     }
 
     fn status_of(&self, peer: &str) -> netbird_core::peer_conn::PeerIceStatus {
@@ -328,6 +392,18 @@ impl Node {
     fn device_peer(&self) -> netbird_core::wg_device::WgPeerStatus {
         self.feed
             .with_device(|d| d.peers()[0].clone())
+            .expect("device up")
+    }
+
+    /// The device-side snapshot of ONE named peer (multi-peer nodes).
+    fn device_peer_of(&self, key: &str) -> netbird_core::wg_device::WgPeerStatus {
+        self.feed
+            .with_device(|d| {
+                d.peers()
+                    .into_iter()
+                    .find(|p| p.pub_key_b64 == key)
+                    .expect("registered peer")
+            })
             .expect("device up")
     }
 
@@ -500,31 +576,67 @@ fn wg_handshake_and_probes_ride_the_ice_selected_socket() {
 
     // WG rides the SELECTED socket, proven three ways:
     // (1) each device's egress fd IS the local socket the selected pair runs on;
-    //     STAGE 2 (official-alignment §2.7): that socket is the ONE shared mux,
-    //     WILDCARD-bound (upstream's `0.0.0.0:NET_PORT` single socket,
-    //     `ice_bind.go:291-316`), so its own local address is
-    //     `0.0.0.0:<mux port>`. The PORT is what ties it to the selected pair —
-    //     it is the port every candidate of that side advertised.
+    //     STAGE 3 (official-alignment §2.7): that socket is the ONE shared socket
+    //     for ICE *and* WireGuard — the WG outer socket itself, WILDCARD-bound
+    //     (upstream's `0.0.0.0:NET_PORT` single socket, `ice_bind.go:291-316`), so
+    //     its own local address is `0.0.0.0:<mux port>`. The PORT is what ties it
+    //     to the selected pair — it is the port every candidate of that side
+    //     advertised.
     let a_cand = &candidate_frames(&bus, &key_a)[0];
     let b_cand = &candidate_frames(&bus, &key_b)[0];
     let a_egress = a.device_peer().egress_local.expect("A egress attached");
     let b_egress = b.device_peer().egress_local.expect("B egress attached");
-    assert_eq!(a_egress, ([0, 0, 0, 0], a_cand.port), "A egress == A's shared mux socket");
-    assert_eq!(b_egress, ([0, 0, 0, 0], b_cand.port), "B egress == B's shared mux socket");
+    assert_eq!(a_egress, ([0, 0, 0, 0], a_cand.port), "A egress == A's ONE shared socket");
+    assert_eq!(b_egress, ([0, 0, 0, 0], b_cand.port), "B egress == B's ONE shared socket");
     // (2) each side's landed endpoint is the peer's selected socket;
     assert_eq!(a.status_of(&key_b).selected_remote, Some((parse_addr(&b_cand.address), b_cand.port)));
     assert_eq!(b.status_of(&key_a).selected_remote, Some((parse_addr(&a_cand.address), a_cand.port)));
-    // (3) nothing traveled off-path: zero unknown-peer drops and zero
-    //     decrypt errors on both devices (a fallback-socket handshake would
-    //     surface as unknown_peer_drops; a misrouted STUN as decrypt noise).
+    // (3) nothing traveled off-path — with STAGE 3's exact semantics. The mux now
+    //     hands every non-STUN datagram STRAIGHT to the device (upstream shape:
+    //     WG's receive path consumes what the STUN filter left, `ice_bind.go:257-285`),
+    //     so the properties are read off the mux's and the device's own counters:
+    //     * `mux.data_unknown == 0` — every WG datagram came from an address one of
+    //       OUR sessions had already written to: no foreign source at all (this is
+    //       the round-7 property the per-session-queue `unknown_peer_drops == 0`
+    //       assertion used to stand for);
+    //     * `decrypt_errors == 0` — no STUN datagram ever reached WG (the demux holds
+    //       on the shared socket);
+    //     * `unknown_peer_drops <= 1` — the ONE drop the shared socket legitimately
+    //       produces: the CONTROLLED side selects (and starts its WG campaign) one
+    //       check-response round before the CONTROLLING side applies the endpoint, so
+    //       that one initiation arrives at a device whose `src == endpoint` rule has
+    //       not seen the peer yet (upstream WG adopts the endpoint from the handshake
+    //       itself; ours deliberately does not — pinned by
+    //       `wg_from_a_non_selected_socket_never_establishes_a_session`). BOTH sides
+    //       run a campaign, so the redundant copy costs nothing: the session is
+    //       established below either way.
     let a_stats = a.device_stats();
     let b_stats = b.device_stats();
     assert!(a_stats.handshake_initiations >= 1 && b_stats.handshake_initiations >= 1);
-    assert_eq!(a_stats.unknown_peer_drops, 0, "A must see no off-path datagrams");
-    assert_eq!(b_stats.unknown_peer_drops, 0, "B must see no off-path datagrams");
+    assert_eq!(a.mux().stats().data_unknown, 0, "A: no WG datagram from an unregistered source");
+    assert_eq!(b.mux().stats().data_unknown, 0, "B: no WG datagram from an unregistered source");
+    assert!(a_stats.unknown_peer_drops <= 1, "A: at most one pre-endpoint initiation");
+    assert!(b_stats.unknown_peer_drops <= 1, "B: at most one pre-endpoint initiation");
     assert_eq!(a_stats.decrypt_errors, 0);
     assert_eq!(b_stats.decrypt_errors, 0);
     assert!(a_stats.rx_packets >= 1 && b_stats.rx_packets >= 1, "WG handshakes were received");
+
+    // (4) STAGE 3 reader-ownership facts: the mux is the ONE reader of the shared
+    //     socket (the device's own `service_udp` is retired), every datagram on it
+    //     was read through the mux — STUN demuxed to the sessions, WG-shaped handed
+    //     straight into the device — and the ICE socket provider was never touched
+    //     (see `Node::new`'s `pending()` assertion: no second socket exists).
+    assert!(a.mux().stats().reads > 0 && b.mux().stats().reads > 0, "the shared socket was read");
+    assert_eq!(a.socks.source.pending(), 16, "no pool socket consumed on A");
+    assert_eq!(b.socks.source.pending(), 16, "no pool socket consumed on B");
+    assert!(
+        a.feed.with_device(|d| d.shared_socket_reader()).unwrap_or(false),
+        "A: the device's own socket read is retired — the mux is the ONE reader"
+    );
+    assert!(
+        b.feed.with_device(|d| d.shared_socket_reader()).unwrap_or(false),
+        "B: the device's own socket read is retired — the mux is the ONE reader"
+    );
 
     // default-route gate: tunnel_ready && reachable → 0.0.0.0/0 allowed.
     let summary = a.orch.summary();
@@ -586,11 +698,193 @@ fn wg_handshake_and_probes_ride_the_ice_selected_socket() {
         let tag = String::from_utf8_lossy(&p[28..]).into_owned();
         assert!(got.contains(p), "B's TUN must contain probe {tag}");
     }
-    // WG data did not disturb ICE, and STUN never leaked into WG:
+    // WG data did not disturb ICE, and STUN never leaked into WG. The one allowed
+    // `unknown_peer_drops` is the pre-endpoint initiation counted in (3) above — it
+    // must not GROW while the sessions are up (which is what a misrouted STUN or a
+    // stray source would look like).
     assert_eq!(a.device_stats().decrypt_errors, 0);
     assert_eq!(b.device_stats().decrypt_errors, 0);
-    assert_eq!(a.device_stats().unknown_peer_drops, 0);
-    assert_eq!(b.device_stats().unknown_peer_drops, 0);
+    assert!(a.device_stats().unknown_peer_drops <= 1, "A: no drop beyond the pre-endpoint window");
+    assert!(b.device_stats().unknown_peer_drops <= 1, "B: no drop beyond the pre-endpoint window");
+    assert_eq!(a.mux().stats().data_unknown, 0);
+    assert_eq!(b.mux().stats().data_unknown, 0);
+}
+
+// ---------------------------------------------------------------------------
+// STAGE 3: MANY peers, ONE socket per node
+// ---------------------------------------------------------------------------
+
+/// The overlay addresses of the three spokes of the many-peer test.
+const SPOKE_VPN: [[u8; 4]; 3] = [[10, 77, 0, 11], [10, 77, 0, 12], [10, 77, 0, 13]];
+
+/// One beat with N nodes: every orchestrator runs (and drains ITS shared socket
+/// once per tick — the injected-clock stand-in for the mux reader thread), every
+/// queued frame is delivered to the ONE node it names, then every device pumps.
+fn step_nodes(bus: &Arc<SignalBus>, now: u64, nodes: &mut [Node]) {
+    for n in nodes.iter_mut() {
+        let _ = n.orch.run_once(now);
+    }
+    let frames = bus.drain();
+    for f in frames {
+        bus.seen.lock().expect("seen").push(f.clone());
+        for n in nodes.iter_mut() {
+            if f.to == n.me {
+                let _ = n.orch.handle_signal(&f.from, f.kind, &f.payload, now);
+            }
+        }
+    }
+    for n in nodes.iter_mut() {
+        let _ = n.feed.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+    }
+}
+
+/// STAGE 3 core: a hub with THREE peers plus three one-peer spokes — four nodes,
+/// each with exactly ONE socket serving both planes. Proven here:
+/// * every negotiation converges over that one socket (STUN demuxed by ufrag /
+///   remote address), and every device shows ZERO `decrypt_errors` (no STUN ever
+///   reached WG) and ZERO `unknown_peer_drops` (nothing arrived off-path);
+/// * the hub holds THREE concurrent established WG sessions on that one socket
+///   and `peers_with_session == 3`;
+/// * probes flow end-to-end on every one of the three pairs (hub → each spoke and
+///   each spoke → hub) **over the shared socket**, i.e. through the mux's sink
+///   into `handle_udp` — the device's own `service_udp` is retired;
+/// * the ICE socket provider is never consumed on any node: there is no second
+///   socket anywhere.
+#[test]
+fn many_peers_ride_one_shared_socket_per_node() {
+    let bus = Arc::new(SignalBus::default());
+    let hub = key_pair(0xA1);
+    let spokes: Vec<(String, String)> = (0..3u8).map(|i| key_pair(0xB0 + i)).collect();
+
+    let hub_peers: Vec<(String, [u8; 4])> = spokes
+        .iter()
+        .enumerate()
+        .map(|(i, (_, pubk))| (pubk.clone(), SPOKE_VPN[i]))
+        .collect();
+    let mut nodes: Vec<Node> = vec![
+        Node::new_with_peers(&hub.1, &hub_peers, &hub.0, 0x1111, bus.clone(), 12, &[]),
+        Node::new_with_peers(&spokes[0].1, &[(hub.1.clone(), VPN_A)], &spokes[0].0, 0x2222, bus.clone(), 12, &[&hub.1]),
+        Node::new_with_peers(&spokes[1].1, &[(hub.1.clone(), VPN_A)], &spokes[1].0, 0x3333, bus.clone(), 12, &[&hub.1]),
+        Node::new_with_peers(&spokes[2].1, &[(hub.1.clone(), VPN_A)], &spokes[2].0, 0x4444, bus.clone(), 12, &[&hub.1]),
+    ];
+
+    let all_ready =
+        |nodes: &[Node]| nodes.iter().all(|n| n.feed.dataplane_status().map(|s| s.ready).unwrap_or(false));
+    let mut now = sys::mono_ms();
+    let deadline = now + 30_000;
+    let mut converged = false;
+    while now <= deadline {
+        step_nodes(&bus, now, &mut nodes);
+        now += 10;
+        if all_ready(&nodes) {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "all four nodes must reach established WG sessions over ONE socket each");
+
+    // The hub: THREE sessions on the ONE socket, all three pairs Connected, every
+    // candidate of the hub carrying that socket's port.
+    let a_status = nodes[0].feed.dataplane_status().expect("hub status");
+    assert_eq!(a_status.peers_with_session, 3, "three concurrent WG sessions on one socket: {a_status:?}");
+    let hub_port = nodes[0].mux().local_port();
+    assert_eq!(
+        hub_port,
+        nodes[0].feed.with_device(|d| d.local_addr()).unwrap().1,
+        "the mux port IS the WG socket's port"
+    );
+    let hub_cands = candidate_frames(&bus, &hub.1);
+    assert!(!hub_cands.is_empty());
+    assert!(
+        hub_cands.iter().all(|c| c.port == hub_port),
+        "every candidate of the hub carries the ONE socket's port"
+    );
+    for (i, (_, pubk)) in spokes.iter().enumerate() {
+        assert_eq!(
+            nodes[0].status_of(pubk).state,
+            PeerIceState::Connected,
+            "hub peer {i} must be Connected over the shared socket"
+        );
+        assert!(
+            nodes[0].device_peer_of(pubk).egress_local.is_some(),
+            "hub peer {i} rides the shared socket as its egress"
+        );
+    }
+
+    // Probes on EVERY pair, both directions, over the shared socket.
+    let to_spoke: Vec<Vec<u8>> =
+        (0..3).map(|i| probe_frame(VPN_A, SPOKE_VPN[i], format!("hub-probe-{i}").as_bytes())).collect();
+    let to_hub: Vec<Vec<u8>> =
+        (0..3).map(|i| probe_frame(SPOKE_VPN[i], VPN_A, format!("spoke-probe-{i}").as_bytes())).collect();
+    let hub_rx0 = nodes[0].device_stats().rx_bytes_to_tun;
+    let spoke_rx0: Vec<u64> =
+        (1..4).map(|i| nodes[i].device_stats().rx_bytes_to_tun).collect();
+    let hub_need: u64 = to_hub.iter().map(|p| p.len() as u64).sum();
+    for (i, f) in to_spoke.iter().enumerate() {
+        tun_write(nodes[0].tun_hand, f);
+        let _ = i;
+    }
+    for i in 0..3 {
+        tun_write(nodes[1 + i].tun_hand, &to_hub[i]);
+    }
+    let deadline = now + 8_600; // past TWO ICE keepalives (4 s) and the 6 s disconnect threshold
+    let mut spoke_all = vec![false; 3];
+    let mut hub_all = false;
+    while now <= deadline {
+        step_nodes(&bus, now, &mut nodes);
+        now += 10;
+        for i in 0..3 {
+            if !spoke_all[i]
+                && nodes[1 + i].device_stats().rx_bytes_to_tun - spoke_rx0[i] >= to_spoke[i].len() as u64
+            {
+                spoke_all[i] = true;
+            }
+        }
+        if !hub_all && nodes[0].device_stats().rx_bytes_to_tun - hub_rx0 >= hub_need {
+            hub_all = true;
+        }
+        if spoke_all.iter().all(|x| *x) && hub_all {
+            break;
+        }
+    }
+    assert!(spoke_all.iter().all(|x| *x), "hub probes must reach all three spokes: {spoke_all:?}");
+    assert!(hub_all, "every spoke probe must reach the hub over the shared socket");
+
+    // STUN was demuxed on the same socket for 8.6 s (keepalives answered past the
+    // 6 s threshold): every pair is still Connected and no STUN leaked into WG.
+    for (i, (_, pubk)) in spokes.iter().enumerate() {
+        assert_eq!(
+            nodes[1 + i].status_of(&hub.1).state,
+            PeerIceState::Connected,
+            "spoke {i}: keepalives answered on the shared socket"
+        );
+        assert_eq!(nodes[0].status_of(pubk).state, PeerIceState::Connected, "hub peer {i} still alive");
+    }
+    for (i, n) in nodes.iter().enumerate() {
+        let s = n.device_stats();
+        assert_eq!(s.decrypt_errors, 0, "node {i}: no STUN ever reached WG");
+        // STAGE 3: the mux hands every non-STUN datagram straight to the device, so
+        // the "no off-path source" property lives on the MUX (see the two-node test
+        // for the full argument): every WG datagram came from an address a session had
+        // written to. The only drops are the peers whose endpoint had not landed yet,
+        // at most one per peer (both sides campaign, so nothing is lost).
+        assert_eq!(n.mux().stats().data_unknown, 0, "node {i}: no WG datagram from an unregistered source");
+        assert!(
+            s.unknown_peer_drops <= 3,
+            "node {i}: at most one pre-endpoint initiation per peer (got {})",
+            s.unknown_peer_drops
+        );
+        assert!(n.mux().stats().reads > 0, "node {i}: the shared socket was read");
+        assert!(
+            n.feed.with_device(|d| d.shared_socket_reader()).unwrap_or(false),
+            "node {i}: the mux is the ONE reader of the shared socket"
+        );
+        assert_eq!(n.socks.source.pending(), 12, "node {i}: no pool socket consumed");
+    }
 }
 
 /// 反例（round-7 bug 形态复现）：WG 设备用**非选中 socket**（这里即 fallback

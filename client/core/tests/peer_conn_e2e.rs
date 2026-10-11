@@ -195,15 +195,62 @@ impl SignalExchange for MockSignalEndpoint {
 /// Injectable WG seam: records every endpoint landing (peer, addr, port) and
 /// every N11 egress attach (peer; fd numbers are process-global, so only the
 /// fact + ordering vs the endpoint landing are asserted).
+///
+/// STAGE 3 (official-alignment audit §2.7): the same seam can also play the
+/// SHARED-SOCKET device — a real bound UDP socket it hands to the mux
+/// ([`WgPeerApplier::wg_socket_fd`]), the read-half hand-over flag, and the
+/// non-STUN datagrams the mux pushed straight into it
+/// ([`WgPeerApplier::handle_udp_inbound`], upstream `ice_bind.go:257-285`).
 #[derive(Default)]
 struct RecordingWg {
     endpoints: Mutex<Vec<(String, [u8; 4], u16)>>,
     egress: Mutex<Vec<String>>,
+    /// The "WG outer socket" this seam offers the shared mux (`None` = the
+    /// pre-stage-3 seam with no socket of its own).
+    sock: Mutex<Option<i32>>,
+    /// Non-STUN datagrams the mux delivered straight to this seam.
+    sink_calls: Mutex<Vec<([u8; 4], u16)>>,
+    /// The shared-reader hand-over flag (the mux owns the socket's read half).
+    shared_reader: Mutex<bool>,
 }
 
 impl RecordingWg {
     fn calls(&self) -> Vec<(String, [u8; 4], u16)> {
         self.endpoints.lock().expect("endpoints").clone()
+    }
+
+    fn with_own_socket() -> Self {
+        let wg = RecordingWg::default();
+        // a real bound loopback socket: the mux is built over THIS fd
+        let fd = unsafe { socket(2, 2, 0) };
+        assert!(fd >= 0, "socket() failed");
+        let sa = netbird_core::sys::sockaddr_in::new([127, 0, 0, 1], 0);
+        let rc = unsafe {
+            netbird_core::sys::bind(fd, &sa, core::mem::size_of::<netbird_core::sys::sockaddr_in>() as u32)
+        };
+        assert_eq!(rc, 0, "bind() failed");
+        *wg.sock.lock().expect("sock") = Some(fd);
+        wg
+    }
+
+    fn sock_fd(&self) -> Option<i32> {
+        *self.sock.lock().expect("sock")
+    }
+
+    fn sink_calls(&self) -> Vec<([u8; 4], u16)> {
+        self.sink_calls.lock().expect("sink").clone()
+    }
+
+    fn shared_reader(&self) -> bool {
+        *self.shared_reader.lock().expect("reader flag")
+    }
+}
+
+impl Drop for RecordingWg {
+    fn drop(&mut self) {
+        if let Some(fd) = self.sock.lock().expect("sock").take() {
+            unsafe { close(fd) };
+        }
     }
 }
 
@@ -222,6 +269,25 @@ impl WgPeerApplier for RecordingWg {
     fn attach_egress_socket(&self, pub_key_b64: &str, _raw_fd: i32) -> Result<(), String> {
         self.egress.lock().expect("egress").push(pub_key_b64.to_string());
         Ok(())
+    }
+
+    /// STAGE 3: the fd the shared mux is built over — the device's own socket.
+    fn wg_socket_fd(&self) -> Option<i32> {
+        self.sock_fd()
+    }
+
+    /// STAGE 3: the mux's reader owns the socket's read half from here on.
+    fn set_shared_socket_reader(&self, on: bool) -> bool {
+        let mut flag = self.shared_reader.lock().expect("reader flag");
+        let changed = *flag != on;
+        *flag = on;
+        changed
+    }
+
+    /// STAGE 3: the mux hands non-STUN datagrams straight in (no session queue).
+    fn handle_udp_inbound(&self, _datagram: &[u8], src: ([u8; 4], u16), _now_ms: u64) -> usize {
+        self.sink_calls.lock().expect("sink").push(src);
+        0
     }
 }
 
@@ -321,6 +387,48 @@ impl TestOrch {
         orch.set_gather_exec(Arc::new(InlineGatherExec));
         orch.set_peers(&keys);
         orch.set_signal_ready(true);
+        TestOrch { orch, socks, wg, me }
+    }
+
+    /// STAGE 3 (official-alignment audit §2.7): the production shape — the WG seam
+    /// OWNS the outer socket and the ONE shared mux is armed OVER it
+    /// ([`PeerIceOrchestrator::arm_mux_from_wg_socket`], upstream
+    /// `createOrUpdateMux`). The ICE provider is still fed, and must stay
+    /// untouched: with a shared socket there is no pool socket to take.
+    fn new_sharing_wg_socket(
+        me: &'static str,
+        peers: &[&str],
+        tie_breaker: u64,
+        bus: Arc<SignalBus>,
+    ) -> Self {
+        let socks = FedSocks::with_lo_sockets(4);
+        let wg = Arc::new(RecordingWg::with_own_socket());
+        let mut orch = PeerIceOrchestrator::new(PeerIceDeps {
+            ifaces: Arc::new(StaticInterfaces(vec![InterfaceAddr {
+                name: "eth0".into(),
+                addr: [127, 0, 0, 1],
+            }])),
+            socks: socks.source.clone(),
+            signal: Arc::new(MockSignalEndpoint { me, bus: bus.clone() }),
+            wg: wg.clone(),
+            tie_breaker: Some(tie_breaker),
+            fixed_local_port: None,
+            advertised_candidates: Vec::new(),
+        });
+        orch.set_gather_exec(Arc::new(InlineGatherExec));
+        let keys: Vec<String> = peers.iter().map(|p| p.to_string()).collect();
+        orch.set_peers(&keys);
+        orch.set_signal_ready(true);
+        let (mux, replaced) = orch
+            .arm_mux_from_wg_socket()
+            .expect("stage-3 mux over the seam's own socket");
+        assert!(!replaced, "first arm");
+        assert_eq!(
+            mux.local_port(),
+            bound_port(wg.sock_fd().expect("the seam's socket")),
+            "the mux IS the WG seam's socket"
+        );
+        assert_eq!(socks.taken(), 0, "the ICE provider was never touched");
         TestOrch { orch, socks, wg, me }
     }
 
@@ -1264,3 +1372,136 @@ fn remote_offer_after_failed_initiate_is_answered() {
     assert_eq!(a.status_of(KEY_B).controlling, Some(false), "A answered → controlled");
     assert_eq!(b.status_of(KEY_A).controlling, Some(true), "B offered → controlling");
 }
+
+// ---------------------------------------------------------------------------
+// STAGE 3 (official-alignment audit §2.7): the shared socket IS the WG seam's
+// socket, and non-STUN goes STRAIGHT into the WG seam
+// ---------------------------------------------------------------------------
+
+/// `getsockname` port of a bound test fd.
+fn bound_port(fd: i32) -> u16 {
+    let mut name = netbird_core::sys::sockaddr_in::new([0, 0, 0, 0], 0);
+    let mut len = core::mem::size_of::<netbird_core::sys::sockaddr_in>() as u32;
+    assert_eq!(unsafe { netbird_core::sys::getsockname(fd, &mut name, &mut len) }, 0);
+    u16::from_be(name.sin_port)
+}
+
+/// One datagram from a test-held socket (the spoke's own mux fd).
+fn send_from_fd(fd: i32, to: ([u8; 4], u16), bytes: &[u8]) {
+    let sa = netbird_core::sys::sockaddr_in::new(to.0, to.1);
+    let n = unsafe {
+        netbird_core::sys::sendto(
+            fd,
+            bytes.as_ptr() as *const core::ffi::c_void,
+            bytes.len(),
+            0,
+            &sa,
+            core::mem::size_of::<netbird_core::sys::sockaddr_in>() as u32,
+        )
+    };
+    assert_eq!(n as usize, bytes.len(), "send from the shared socket");
+}
+
+/// A WG-shaped datagram (`isWireGuardMsg`: little-endian type 4 in the low byte,
+/// the three following bytes zero, >= 32 bytes).
+fn wg_shaped(tag: u8) -> Vec<u8> {
+    let mut pkt = vec![0u8; 64];
+    pkt[0] = 4;
+    pkt[40] = tag;
+    pkt
+}
+
+/// MANY peers on ONE socket that is the WG seam's own socket; non-STUN datagrams
+/// take the DIRECT route into the WG seam.
+///
+/// Stage-3 properties pinned here (the connector-shaped counterpart of the
+/// real-device `wg_over_ice_n11` and `wg_e2e` suites):
+/// * the mux is armed OVER the WG seam's socket (`wg_socket_fd` →
+///   `arm_mux_from_wg_socket`), so the mux port IS that socket's port and the ICE
+///   provider is never consumed — one open+bind for ICE and WG, no pool socket;
+/// * the seam's read half is handed over (`set_shared_socket_reader(true)`), and
+///   the mux carries a WG sink — the `take_data_rx` per-session queue is out of
+///   the data path;
+/// * all N negotiations still demux correctly on that ONE socket (ufrag /
+///   remote-address routing → every pair Connected);
+/// * a WG-shaped datagram injected from another peer's OWN mux socket (a source
+///   our sessions have already written to) is delivered STRAIGHT to
+///   `handle_udp_inbound` — the WG seam — and the mux counts no foreign source.
+#[test]
+fn many_peers_ride_the_wg_socket_and_non_stun_goes_straight_to_the_wg_seam() {
+    const N: usize = 4;
+    let bus = Arc::new(SignalBus::default());
+    let peer_keys: &'static [String] = Box::leak(
+        (0..N).map(|i| format!("UEtFWV9CMHt9P{i}")).collect::<Vec<String>>().into_boxed_slice(),
+    );
+    let refs: Vec<&'static str> = peer_keys.iter().map(|k| k.as_str()).collect();
+
+    let mut a = TestOrch::new_sharing_wg_socket(KEY_A, &refs, 0x1111, bus.clone());
+    let mut bees: Vec<TestOrch> =
+        refs.iter().map(|k| TestOrch::new(k, &[KEY_A], 0x2222, bus.clone())).collect();
+    for b in bees.iter_mut() {
+        b.orch.set_initiator(KEY_A, false); // deterministic: A offers, B_i answers
+    }
+
+    let mut now = 1000u64;
+    let deadline = now + 20_000;
+    let mut converged = false;
+    while now <= deadline {
+        {
+            let mut all: Vec<&mut TestOrch> = Vec::new();
+            all.push(&mut a);
+            for b in bees.iter_mut() {
+                all.push(b);
+            }
+            step_many(&bus, now, &mut all);
+        }
+        now += 10;
+        converged = bees.iter().all(|b| {
+            b.status_of(KEY_A).state == PeerIceState::Connected
+                && a.status_of(b.me).state == PeerIceState::Connected
+        });
+        if converged {
+            break;
+        }
+    }
+    assert!(converged, "all {N} peers must converge over the ONE shared socket");
+
+    // (1) the mux is the seam's OWN socket; the ICE provider stays untouched; the
+    //     seam handed the read half over and the WG sink is armed.
+    let mux = a.orch.ice_mux().expect("the one shared mux");
+    let seam_port = bound_port(a.wg.sock_fd().expect("the seam's socket"));
+    assert_eq!(mux.local_port(), seam_port, "the mux IS the WG seam's socket");
+    assert_eq!(a.socks.taken(), 0, "no ICE provider socket was taken");
+    assert_eq!(a.socks.source.pending(), 4, "…and none was consumed from the queue either");
+    assert!(a.wg.shared_reader(), "the seam handed the socket's read half to the mux");
+    assert!(mux.sink_armed(), "non-STUN datagrams go straight into the WG seam");
+    // every candidate of every peer carries that ONE port
+    let cands = candidate_frames(&bus, KEY_A);
+    assert!(!cands.is_empty());
+    assert!(cands.iter().all(|c| c.port == seam_port), "ONE port for every candidate");
+
+    // (2) the direct route: a WG-shaped datagram from spoke 0's OWN mux socket (a
+    //     source A's sessions have already written to, so it is registered) lands in
+    //     the WG seam's `handle_udp_inbound` — during the mux drain, with NO session
+    //     involvement.
+    let b0_mux = bees[0].orch.ice_mux().expect("spoke 0's mux");
+    let src_port = b0_mux.local_port();
+    send_from_fd(b0_mux.raw_fd(), ([127, 0, 0, 1], seam_port), &wg_shaped(0x5A));
+    let deadline = now + 1_000;
+    let mut got = a.wg.sink_calls();
+    while got.is_empty() && now <= deadline {
+        let _ = a.orch.run_once(now);
+        now += 10;
+        got = a.wg.sink_calls();
+    }
+    assert_eq!(
+        got,
+        vec![([127, 0, 0, 1], src_port)],
+        "the WG datagram reached the WG seam directly, from the registered peer source"
+    );
+    assert_eq!(mux.stats().data_unknown, 0, "the source was one of ours: no foreign source");
+    // …and the retired per-session queue is empty on the mux side too (with a sink
+    // armed the mux never queues data: `dispatch` hands it straight over)
+    assert_eq!(mux.queued(0).1, 0, "no session id holds a data queue entry");
+}
+

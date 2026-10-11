@@ -1213,6 +1213,14 @@ struct ManagedRouteEntry {
 /// [`TunFd`] + per-peer BoringTun tunnels. Single-threaded pump model: the
 /// owner calls `service_tun` / `service_udp` / `tick` with an injected
 /// `now_ms`; the connector seam ([`WgDeviceApplier`]) wraps a `Mutex` of it.
+///
+/// OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): in production this socket IS the
+/// shared ICE mux socket (upstream: the mux wraps the WG bind's own conn,
+/// `client/iface/bind/ice_bind.go:291-316`), and the ONE reader is the mux's
+/// [`crate::ice_mux::IceMux`] thread — [`WgDevice::service_udp`] is retired
+/// ([`WgDevice::set_shared_socket_reader`]) while non-STUN datagrams arrive
+/// through `handle_udp`. `service_udp` remains the reader of the host-CLI /
+/// device-level-test shape (no mux).
 pub struct WgDevice {
     cfg: WgDeviceConfig,
     /// OUR dup of the (shell-protected) WG UDP socket. The raw fd is never
@@ -1236,6 +1244,17 @@ pub struct WgDevice {
     /// and do nothing else — no copy, no scan, no counter.
     tun_tee: Option<Arc<dyn TunFrameTee>>,
     n2_dest_tee: Option<Arc<N2DestinationTee>>,
+    /// OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): the shared-socket model. When a
+    /// mux was built over THIS device's outer socket, that mux's reader thread is
+    /// the ONE reader of the socket — up to and including WireGuard. A second
+    /// reader here would steal STUN checks from the mux (and the mux's reader
+    /// would steal WG datagrams from us): exactly one reader, as upstream
+    /// (`ice_bind.go:209-287` is WG's receive path *and* the STUN filter, and
+    /// `device_kernel_unix.go:109` is the mux reader — never both).
+    ///
+    /// `false` (the default, and the host-CLI/test shape) = the device reads its
+    /// own socket in [`WgDevice::service_udp`], the pre-stage-3 behaviour.
+    shared_socket_reader: bool,
 }
 
 /// Local index seed for the first peer tunnel of a device (nonzero; each
@@ -1282,6 +1301,7 @@ impl WgDevice {
             stats: WgDeviceStats::default(),
             tun_tee: None,
             n2_dest_tee: None,
+            shared_socket_reader: false,
         })
     }
 
@@ -1379,6 +1399,35 @@ impl WgDevice {
     /// Our socket's observed local address (adopt/reattach time).
     pub fn local_addr(&self) -> ([u8; 4], u16) {
         self.local
+    }
+
+    /// OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): the BORROWED fd of this device's
+    /// outer socket — what the ONE shared ICE mux is built over (upstream
+    /// `createOrUpdateMux` wraps the WG bind's own conn, `ice_bind.go:291-316`).
+    /// The caller dups it; this device keeps and closes only its OWN dup.
+    pub fn socket_fd(&self) -> Option<i32> {
+        self.fd
+    }
+
+    /// OFFICIAL-ALIGNMENT STAGE 3: hand the socket's read half to the shared
+    /// mux's reader thread ([`WgDevice::service_udp`] then does nothing) or take
+    /// it back. Idempotent; `true` when the state actually changed.
+    pub fn set_shared_socket_reader(&mut self, on: bool) -> bool {
+        if self.shared_socket_reader == on {
+            return false;
+        }
+        self.shared_socket_reader = on;
+        emit(&format!(
+            "N6_WG_DEVICE|shared-socket-reader|on={}|by={}",
+            u8::from(on),
+            if on { "ice-mux" } else { "device" }
+        ));
+        true
+    }
+
+    /// Whether the ONE shared reader (the mux) owns this socket's inbound half.
+    pub fn shared_socket_reader(&self) -> bool {
+        self.shared_socket_reader
     }
 
     /// Registered peer set snapshot.
@@ -2030,6 +2079,14 @@ impl WgDevice {
     /// the WG outer socket). Unarmed this is one `armed()` load, so the
     /// pre-P7 behaviour and output are unchanged.
     pub fn service_udp(&mut self, now_ms: u64) -> usize {
+        // OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): with a mux over this socket the
+        // mux's reader thread is the ONE reader (upstream `device_kernel_unix.go:109`
+        // / `ice_bind.go:209-287`): it demuxes STUN to the sessions and hands the
+        // rest to `handle_udp`. Reading here as well would steal STUN checks from
+        // the mux — and the mux would steal WG datagrams from us.
+        if self.shared_socket_reader {
+            return 0;
+        }
         let Some(fd) = self.fd else { return 0 };
         let receipt = crate::n2_outer_receipt::armed();
         let mut n = 0usize;
@@ -2888,6 +2945,16 @@ impl WgPeerApplier for WgDeviceApplier {    fn apply_peers(&self, peers: &[WgPee
     fn handle_carrier_inbound(&self, datagram: &[u8], pub_key_b64: &str, now_ms: u64) -> usize {
         self.device.lock_poison().handle_carrier(datagram, pub_key_b64, now_ms).sent
     }
+
+    /// STAGE 3: the bare device's outer-socket fd, for the shared mux.
+    fn wg_socket_fd(&self) -> Option<i32> {
+        self.device.lock_poison().socket_fd()
+    }
+
+    /// STAGE 3: the shared socket's read half changes owner.
+    fn set_shared_socket_reader(&self, on: bool) -> bool {
+        self.device.lock_poison().set_shared_socket_reader(on)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3009,6 +3076,11 @@ struct FeedInner {
     carriers: Vec<(String, Arc<dyn WgEgressCarrier>)>,
     /// Live device once both feeds arrived and adoption succeeded.
     device: Option<Arc<WgDeviceApplier>>,
+    /// OFFICIAL-ALIGNMENT STAGE 3: the shared-socket model is ARMED for the
+    /// device of this feed (the mux's reader thread is the ONE reader). Stored
+    /// here so it is re-applied when the device is (re)built after this call —
+    /// the shell arms the mux in the same step in which it feeds the socket.
+    shared_udp_reader: bool,
     n2_dest_tee: Option<Arc<N2DestinationTee>>,
     n2_gap_start: Option<u64>,
     /// Audit counters (tests + honest observation; not in the status JSON).
@@ -3060,6 +3132,29 @@ impl WgDeviceFeed {
     /// again at adoption.
     pub fn feed_wg_socket(&self, raw_fd: i32) -> Result<(), WgFeedRefusal> {
         self.feed_fd(raw_fd, FeedWhich::WgSocket)
+    }
+
+    /// OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): the BORROWED fd of the live
+    /// device's outer socket — what the ONE shared ICE mux is built over
+    /// ([`WgDevice::socket_fd`]). `None` while no device is up (nothing to share
+    /// a socket with yet — the mux arm then fails closed with `no-wg-device`).
+    pub fn socket_fd(&self) -> Option<i32> {
+        let g = self.inner.lock_poison();
+        g.device.as_ref().and_then(|d| d.with_device(|dev| dev.socket_fd()))
+    }
+
+    /// OFFICIAL-ALIGNMENT STAGE 3: the mux now owns the socket's read half — the
+    /// device must stop reading it ([`WgDevice::service_udp`]). Stored for a
+    /// device built later by the same feed pair, and applied to the live device
+    /// immediately when there is one.
+    pub fn set_shared_socket_reader(&self, on: bool) -> bool {
+        let mut g = self.inner.lock_poison();
+        let changed = g.shared_udp_reader != on;
+        g.shared_udp_reader = on;
+        if let Some(dev) = g.device.as_ref() {
+            dev.with_device(|d| d.set_shared_socket_reader(on));
+        }
+        changed
     }
 
     /// Shell feed #2: the platform TUN fd (same validation + ownership
@@ -3215,6 +3310,13 @@ impl WgDeviceFeed {
             Ok(d) => d,
             Err(e) => return Self::build_failed(g, &e),
         };
+        // STAGE 3: a device built after the mux was armed inherits the shared
+        // socket's reader ownership (the shell arms the mux in the same step in
+        // which it feeds the socket, and the device may come up on a later feed
+        // — the TUN one).
+        let mut dev = dev;
+        dev.set_shared_socket_reader(g.shared_udp_reader);
+        let dev = dev;
         let app = Arc::new(WgDeviceApplier::new(dev));
         if let Some(tee) = g.n2_dest_tee.clone() {
             app.with_device(|d| d.attach_n2_dest_tee(tee.clone()));
@@ -3355,6 +3457,10 @@ impl WgPeerApplier for WgDeviceFeed {
         g.egress.clear();
         g.carriers.clear();
         g.managed_routes.clear();
+        // STAGE 3: the device (and its socket) goes; the mux that read it is gone
+        // too, so a device rebuilt by a later feed pair reads for itself again
+        // until the shell arms a fresh mux over it.
+        g.shared_udp_reader = false;
         g.wg_socket_raw = None;
         if let Some(fd) = g.wg_socket_owned.as_ref() {
             crate::n2_socket_trace::closed(fd.as_raw_fd());
@@ -3440,6 +3546,17 @@ impl WgPeerApplier for WgDeviceFeed {
             Some(d) => d.handle_udp_inbound(datagram, src, now_ms),
             None => 0,
         }
+    }
+
+    /// STAGE 3 (official-alignment audit §2.7): the live device's outer-socket
+    /// fd — what the ONE shared mux is built over.
+    fn wg_socket_fd(&self) -> Option<i32> {
+        WgDeviceFeed::socket_fd(self)
+    }
+
+    /// STAGE 3: the mux's reader thread becomes the socket's ONE reader.
+    fn set_shared_socket_reader(&self, on: bool) -> bool {
+        WgDeviceFeed::set_shared_socket_reader(self, on)
     }
 
     /// N11: recycle endpoint + egress on the live device; pre-device, drop

@@ -83,8 +83,8 @@ const SHIM_TYPES: Record<string, string[]> = {
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
-    // STAGE 2 (official-alignment audit §2.7): the shared ICE mux feed types.
-    'IceMuxOpen', 'IceMuxFeedResult',
+    // STAGE 2/3 (official-alignment audit §2.7): the shared ICE mux arm type.
+    'IceMuxArmResult',
     // N2 first batch C/D columns: the erased bearer-facts shape.
     'PhysicalBearerFacts'],
   // UI phase 1: the erased input/document shapes buildUiStatusDocument names.

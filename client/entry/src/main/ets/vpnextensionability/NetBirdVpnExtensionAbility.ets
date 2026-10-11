@@ -67,7 +67,7 @@ import {
   physicalDefaultLanProbe,
   resolveProtectedIp,
   SocketSupplyRequest,
-  IceMuxOpen, IceMuxFeedResult, iceMuxOpen, connectorIceMuxFeed,
+  IceMuxArmResult, connectorIceMuxArm,
   countPemCertificates, derivePlatformDnsEndpoints,
   formatRelayStatusLine,
   iceSocketOpen, mgmtSocketOpen, parseDeviceConfig, parseManagementEndpoint, parseRelayAdvertised,
@@ -1618,16 +1618,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         if (!restarted.ok) { break; }
         const updated: SocketFeedResult = socketSupplyDnsServers(dns);
         if (!updated.ok) { break; }
-        // STAGE 2: the ONE shared ICE mux socket for the NEW network generation.
-        // The previous mux was protected under the previous VpnConnection, so it
-        // is opened, bound, protected and fed again here; the core notices the
-        // replacement and renegotiates the sessions that rode the old one.
+        // STAGE 3: the ONE shared socket for the NEW network generation. The WG
+        // outer socket was opened, protected and fed a few lines above (the
+        // device re-attached to it); the mux is armed OVER that same device
+        // socket here — one open+bind+protect for ICE and WG together. The core
+        // replaces the mux slot and renegotiates the sessions that rode the old
+        // one (its reader thread is stopped and its dup closed with it).
         this.iceQueueDepth = 0;
         if (this.iceTopUpTimer !== -1) {
           clearInterval(this.iceTopUpTimer);
           this.iceTopUpTimer = -1;
         }
-        if (!await this.protectAndFeedIceMux()) { break; }
+        if (!await this.armIceMux()) { break; }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
         if (this.signalUri.length > 0) {
@@ -4955,10 +4957,11 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.publishStatusForUi(status, 'unknown');
           this.publishRouteCatalogForUi();
         });
-        // STAGE 2 (official-alignment audit §2.7): the ICE socket POOL is
-        // retired — the whole ICE plane rides ONE shared mux socket (fed once by
-        // protectAndFeedIceMux, and re-fed on a physical-network change), so there
-        // is nothing to size, refresh or top up here. The pool sizing/feeding
+        // STAGE 2/3 (official-alignment audit §2.7): the ICE socket POOL is
+        // retired — the whole ICE plane rides ONE shared socket, and since stage 3
+        // that socket IS the WG outer socket (armed once by armIceMux over the
+        // device's own protected socket, re-armed on a physical-network change), so
+        // there is nothing to size, refresh or top up here. The pool sizing/feeding
         // below (iceTargetDepth / iceQueueDepth / topUpIceBatch /
         // NetBirdIceSocketPool.ets) is left in place but no longer driven; stage 4
         // deletes it together with the core's `connector_ice_socket_feed`.
@@ -6352,15 +6355,16 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
       };
     }
 
-    // STAGE 2 (official-alignment audit §2.7): provision the ONE shared ICE mux
-    // socket (core-opened AND bound wildcard → shell protect gate →
-    // connectorIceMuxFeed). The protected-fd rule of §二.4 covers ICE/STUN as
-    // explicitly as it covers management: without a fed mux the core has NO local
-    // candidates and fails CLOSED (`ice:no-mux`), never an unprotected socket.
-    // Failure here is the same fail-closed teardown as the WG feed.
+    // STAGE 3 (official-alignment audit §2.7): arm the ONE shared mux OVER the
+    // WG outer socket that `feedWgDataplane()` just fed (the protected socket is
+    // the SAME one for ICE and WireGuard — upstream `createOrUpdateMux`,
+    // `ice_bind.go:291-316`). Nothing is opened, bound or protected here; the
+    // protected-fd rule of §二.4 is satisfied by the WG socket's own protect gate
+    // above. Fail-closed (no mux ⇒ the core has NO local candidates and reports
+    // `ice:no-mux`): this leg's failure is the same teardown as the WG feed.
     //
     // N2 P5 (v4.1 §4 I row): when the evidence arm is on, the PRE control of
-    // the I leg must HIT BEFORE this first ICE feed / gather — the TUN
+    // the I leg must HIT BEFORE this first ICE arm / gather — the TUN
     // tee is already attached (feedWgDataplane above), so the frozen anchor
     // holds. `n2IceSandwichPre` never throws and never changes the ICE send
     // content/order; it only waits (bounded by the core's 3 s control window)
@@ -6368,7 +6372,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     if (this.n2Evidence !== undefined) {
       await this.n2IceSandwichPre();
     }
-    const iceOk: boolean = await this.protectAndFeedIceMux();
+    const iceOk: boolean = await this.armIceMux();
     if (!iceOk) {
       try {
         const stop = connectorStop();
@@ -6574,13 +6578,20 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     return true;
   }
 
-  // STAGE 2 (official-alignment audit §2.7): the ONE shared ICE mux socket —
-  // the official NetBird shape (one UDP socket for the whole ICE plane,
-  // `UniversalUDPMuxDefault`, `client/iface/bind/ice_bind.go:291-316`). Same
-  // protect-gate split as the WG outer socket: the CORE opens AND binds the
-  // wildcard socket (core.ice_mux_open → `{fd,port}`), the shell protects THAT
-  // fd (`VpnConnection.protect`, bounded box), then the core adopts the SAME
-  // number (connectorIceMuxFeed dups it; the shell closes its original here).
+  // STAGE 2/3 (official-alignment audit §2.7): the ONE shared socket now carries
+  // BOTH the ICE plane and WireGuard — the official NetBird shape, where the mux
+  // is created OVER the WG device's own socket:
+  //   * `client/iface/bind/ice_bind.go:291-316` (`createOrUpdateMux` wraps the WG
+  //     bind's connection — "the sockets are managed by WireGuard's StdNetBind,
+  //     not by us");
+  //   * `client/iface/device/device_kernel_unix.go:97-113` (mux over
+  //     `sharedsock.Listen(wgPort)`), `:109` `go mux.ReadFromConn(ctx)`.
+  // So there is nothing to open, bind or protect HERE: the fd was already opened
+  // and bound by `core.wg_fwd_open()` and protected by `protectSocketWithBox`
+  // before `connectorWgSocketFeed` (one open+bind+protect for both planes). This
+  // step only arms the mux over that protected socket and starts its ONE reader
+  // thread; `connectorIceMuxArm` fails closed (`no-wg-device` / `no-wg-socket`)
+  // rather than ever creating a second, unprotected socket.
   //
   // Why one socket replaces the per-interface pool: every host candidate of
   // every peer is `interface address × mux port` (upstream
@@ -6588,77 +6599,48 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // plane instead of up to 46 sequential `open → protect → feed` rounds. The
   // pool path (protectAndFeedIceSocket / topUpIceBatch / feedOneIceSocket) stays
   // in this file but is no longer called; stage 4 deletes it.
-  private async protectAndFeedIceMux(): Promise<boolean> {
+  //
+  // The stale/fail-closed gates are the ones the retired protect+feed step
+  // applied (minus the protection itself, which the WG socket already has):
+  // nothing is armed for a generation being torn down, for a superseded network
+  // epoch, or while the N2 C/D production gate holds this epoch.
+  private async armIceMux(): Promise<boolean> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;
-    if (connection === undefined) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=connection-missing', this.requestId);
-      return false;
-    }
-    let fd: number = -1;
-    let port: number = 0;
-    let bindRc: number = -1;
-    let bindErrno: number = -1;
-    try {
-      const opened: IceMuxOpen = iceMuxOpen();
-      fd = opened.fd;
-      port = opened.port;
-      bindRc = opened.bind_rc;
-      bindErrno = opened.bind_errno;
-    } catch (error) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=open-throw|summary=%{public}s',
-        this.requestId, safeError(error as Error));
-      return false;
-    }
-    if (fd < 0 || bindRc !== 0) {
-      if (fd >= 0) { socketSupplyCloseFd(fd); }
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=open|fd=%{public}d|bindRc=%{public}d|' +
-        'bindErrno=%{public}d', this.requestId, fd, bindRc, bindErrno);
-      return false;
-    }
     const epoch: number = this.networkEpoch;
+    if (protectedConnectionRejectionReason({
+      destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
+      recreateInFlight: this.recreateInFlight, hasConnection: connection !== undefined,
+      // there is no await between reading `connection` and here: the arm is a
+      // synchronous core call, so the connection cannot have been replaced
+      connectionUnchanged: true
+    }).length > 0 ||
+      this.networkDirty && this.networkRecoveryReady && !this.networkRecoveryActive ||
+      this.n2CdProductionBlocked(epoch)) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=stale-or-gated', this.requestId);
+      return false;
+    }
     try {
-      if (!await this.protectSocketWithBox(connection, fd, 'I') || epoch !== this.networkEpoch ||
-        protectedConnectionRejectionReason({
-          destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
-          recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
-          connectionUnchanged: this.connection === connection
-        }).length > 0 ||
-        this.networkDirty && this.networkRecoveryReady && !this.networkRecoveryActive ||
-        this.n2CdProductionBlocked(epoch)) {
+      const armed: IceMuxArmResult = connectorIceMuxArm();
+      if (!armed.ok) {
         hilog.error(DOMAIN, TAG,
-          'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=protect-or-stale|fd=%{public}d',
-          this.requestId, fd);
+          'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=arm|error=%{public}s',
+          this.requestId, armed.error ?? 'no-message');
         return false;
       }
       this.iceProtected = true;
-      let fed: IceMuxFeedResult;
-      try {
-        fed = connectorIceMuxFeed(fd);
-      } catch (error) {
-        hilog.error(DOMAIN, TAG,
-          'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=feed-throw|fd=%{public}d|summary=%{public}s',
-          this.requestId, fd, safeError(error as Error));
-        return false;
-      }
-      if (!fed.ok) {
-        hilog.error(DOMAIN, TAG,
-          'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|error=%{public}s',
-          this.requestId, fd, fed.error ?? 'no-message');
-        return false;
-      }
-      const fedLine: string = `VPN_ICE_MUX_FED|requestId=${this.requestId}|fd=${fd}|` +
-        `port=${fed.port ?? port}|replaced=${String(fed.replaced ?? false)}|` +
+      const fedLine: string = `VPN_ICE_MUX_ARMED|requestId=${this.requestId}|` +
+        `port=${armed.port ?? 0}|replaced=${String(armed.replaced ?? false)}|` +
+        `reader=${String(armed.reader ?? false)}|socket=wg-outer|` +
         `wall_ms=${Date.now()}`;
       hilog.warn(DOMAIN, TAG, '%{public}s', fedLine);
       this.n2RingAppend(fedLine);
       return true;
-    } finally {
-      // The core adopted its own dup of the socket (or refused the feed): the
-      // shell's ORIGINAL number is always ours to close, exactly once.
-      socketSupplyCloseFd(fd);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG,
+        'VPN_ICE_MUX_FAIL|requestId=%{public}s|stage=arm-throw|summary=%{public}s',
+        this.requestId, safeError(error as Error));
+      return false;
     }
   }
 
@@ -6671,7 +6653,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // fail-closed; a partial pool is logged and the gather simply has fewer
   // interfaces to work with.
   //
-  // RETIRED IN STAGE 2: nothing calls this any more (see protectAndFeedIceMux).
+  // RETIRED IN STAGE 2: nothing calls this any more (see armIceMux).
   // Deleted with NetBirdIceSocketPool.ets in stage 4.
   private async protectAndFeedIceSocket(): Promise<boolean> {
     const connection: vpnExtension.VpnConnection | undefined = this.connection;

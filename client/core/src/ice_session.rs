@@ -132,16 +132,22 @@
 //! (`client/iface/bind/ice_bind.go:313-345`, WG-first classification
 //! `isWireGuardMsg` at `ice_bind.go:403-421` so a WG receiver index that
 //! happens to equal the STUN magic cookie can never misroute data into the
-//! STUN handler). This module reproduces exactly that demux on ITS socket
-//! reads: [`is_wg_datagram`] first, then STUN ([`is_stun_message`] +
-//! [`parse_stun`]); everything else is non-STUN data and is queued for the
-//! WG data plane via [`IceSession::take_data_rx`]. The WG device reads
-//! NOTHING from the selected socket — this session is the sole reader, so
-//! keepalives/checks and WG transport packets coexist without stealing from
-//! each other. Egress rides the same socket: the orchestrator dups the
-//! selected local fd ([`IceSession::selected_local_fd`]) into the WG device
-//! as the peer's send socket (each layer closes only its own dup — the fd
-//! contract is unchanged).
+//! STUN handler). This module's classifier ([`is_wg_datagram`] first, then STUN
+//! via [`is_stun_message`] + [`parse_stun`]) IS that demux and is shared by both
+//! receive paths.
+//!
+//! **Stage 3 (official-alignment audit §2.7):** in production the socket belongs
+//! to [`crate::ice_mux::IceMux`], whose reader thread applies that classifier and
+//! hands every non-STUN datagram STRAIGHT to the WG device
+//! (`WgDevice::handle_udp`, upstream `ice_bind.go:257-285`) — no session is
+//! involved. A mux-backed candidate therefore owns NO fd
+//! ([`IceSession::live_local_socket_count`] counts 0 for it) and its
+//! [`IceSession::take_data_rx`] queue stays empty; that queue survives only for
+//! the socket-owning path (the host CLI / the offline self-test), where the
+//! session IS the sole reader. Egress rides the same shared socket either way:
+//! the orchestrator dups the selected local fd ([`IceSession::selected_local_fd`],
+//! the mux's fd for a mux-backed pair) into the WG device as the peer's send
+//! socket (each layer closes only its own dup — the fd contract is unchanged).
 //!
 //! ## Error taxonomy
 //!
@@ -878,11 +884,14 @@ pub struct IceSession {
     emitted_disconnected: bool,
     emitted_failed: bool,
     emitted_all_pairs_failed: bool,
-    /// N11: non-STUN (WG data-plane) datagrams read on our sockets, in
+    /// N11: non-STUN (WG data-plane) datagrams read on our OWN sockets, in
     /// arrival order — consumed by the orchestrator via
     /// [`IceSession::take_data_rx`] and fed to the WG device (upstream: the
     /// shared receive loop hands non-STUN packets to WG,
-    /// ice_bind.go:279-303).
+    /// ice_bind.go:279-303). STAGE 3: only the socket-owning path queues here;
+    /// a mux-backed session's non-STUN datagrams never pass through this
+    /// session at all (the mux's reader hands them straight to the device), so
+    /// the queue stays empty in production.
     data_rx: VecDeque<([u8; 4], u16, Vec<u8>)>,
     data_dropped: u64,
     /// Rotating start index of the per-run socket scan ([`IceSession::pump_recv`]):
@@ -2076,8 +2085,11 @@ impl IceSession {
         }
     }
 
-    /// N11: drain the non-STUN (WG data-plane) datagrams this session read
-    /// since the last call, in arrival order: `(src_addr, src_port, bytes)`.
+    /// N11: drain the non-STUN (WG data-plane) datagrams this session read on
+    /// its OWN sockets since the last call, in arrival order:
+    /// `(src_addr, src_port, bytes)`. STAGE 3: always empty for a mux-backed
+    /// session — the mux's reader delivers non-STUN straight to the WG device
+    /// (`crate::ice_mux::MuxUdpSink`) instead of queueing it here.
     pub fn take_data_rx(&mut self) -> Vec<([u8; 4], u16, Vec<u8>)> {
         self.data_rx.drain(..).collect()
     }

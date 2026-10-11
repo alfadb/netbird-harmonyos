@@ -119,8 +119,8 @@ const SHIM_TYPES: Record<string, string[]> = {
     'ConnectorStartResult', 'ConnectorLogoutResult', 'DeviceConfigFile', 'ManagementEndpoint',
     'NativeTcpSocketOpen', 'RelayAdvertisedView', 'RouteSetAppliedResult',
     'SocketFeedResult', 'SocketSupplyRequest', 'TunReleaseResult', 'WgFeedResult',
-    // STAGE 2 (official-alignment audit §2.7): the shared ICE mux feed types.
-    'IceMuxOpen', 'IceMuxFeedResult',
+    // STAGE 2/3 (official-alignment audit §2.7): the shared ICE mux arm type.
+    'IceMuxArmResult',
     'PhysicalBearerFacts', 'PhoneLogConfigureResult', 'PhoneLogSummary'],
   NetBirdUiModel: ['UiNetworkConfig', 'UiStatusDocument'],
   NetBirdEndpointExclusion: ['ExcludedRouteEntry', 'EndpointResolution',
@@ -295,6 +295,11 @@ function resetWorld(): void {
   G['__NB_SUPPLY_ICE_OPEN'] = 0;
   G['__NB_SUPPLY_MGMT_FEED'] = 0;
   G['__NB_SUPPLY_ICE_FEED'] = 0;
+  // STAGE 2/3: the WG feed and the ONE shared-mux arm are supply seams too, and
+  // the SR group asserts them EXACTLY (fed once, armed once, the retired pool at
+  // zero) — so they belong to the per-world reset like every other seam counter.
+  G['__NB_SUPPLY_WG_FEED'] = 0;
+  G['__NB_SUPPLY_ICE_MUX_ARM'] = 0;
   G['__NB_SUPPLY_POLL'] = 0;
   G['__NB_IFACE_PROBES'] = 0;
   G['__NB_IFACE_ANSWER'] = undefined;
@@ -1114,51 +1119,61 @@ try {
 
   // ---- SR: the startup race -------------------------------------------------
   // The generation may only be declared settled — and so only become
-  // rebuildable — once the initial leg really completed: the WG feed, the
-  // ICE-pool protect/feed and the initial route-set ACK. Parked at the FIRST
-  // ICE pool protect, a mailbox tick arriving in that window must consume
-  // NOTHING and rebuild NOTHING.
+  // rebuildable — once the initial leg really completed: the ONE protected
+  // socket (the WG outer socket, which since stage 3 also carries the ICE mux),
+  // the WG feed, the mux arm and the initial route-set ACK. Parked at that ONE
+  // protect, a mailbox tick arriving in the window must consume NOTHING and
+  // rebuild NOTHING.
   resetWorld();
   seedFile(SELECTION_PATH, serializeSelection(MGMT, SELECTION_OFF));
   // The desired set is the one the initial ACK will record as applied, so the
   // retained request needs no OS change once the leg is settled.
   answer(setterAnswer(true, true, DESIRED, false));
   writeRequestDoc('ui-route-sr-parked');
-  parkProtectAt(2);
+  parkProtectAt(1);
   {
     const ability = settlingWorld(mod, createConnection, DESIRED);
     const settle = startInitialSettle(ability);
     await waitProtectParked();
     const parked = parkedProtect();
     await applyAndSettle(ability);
-    check('SR1 the initial leg is really parked at the FIRST ICE pool protect (the ' +
-      'outbound fail-closed gate already passed and the WG data plane is fed)',
-      parked !== null && parked['fd'] === 62 && ability['outboundProtected'] === true &&
-      ability['tunFd'] === 42 && ability['createSettled'] === false,
+    check('SR1 the initial leg is really parked at the ONE protect that gates both ' +
+      'planes (nothing fed yet, no mux armed, the generation not settled)',
+      parked !== null && parked['fd'] === 61 && ability['outboundProtected'] === false &&
+      ability['tunFd'] === 42 && ability['createSettled'] === false &&
+      count('__NB_SUPPLY_WG_FEED') === 0 && count('__NB_SUPPLY_ICE_MUX_ARM') === 0,
       JSON.stringify({ parked: parked === null ? null : parked['fd'],
         outboundProtected: ability['outboundProtected'], tunFd: ability['tunFd'],
+        wgFeed: count('__NB_SUPPLY_WG_FEED'), muxArm: count('__NB_SUPPLY_ICE_MUX_ARM'),
         createSettled: ability['createSettled'] }));
     check('SR2 a mailbox tick inside that window consumes NOTHING and opens no ' +
       'rebuildable state: no setter call, no answer document, no recreate, no ' +
-      'destroy, and the rebuildable gate is still shut',
+      'destroy, no feed, and the rebuildable gate is still shut',
       ability['lastRouteApplyId'] === '' && rebuildableGate(ability) === false &&
       count('__NB_SELECTION_SET_CALLS') === 0 && fileOf(RESULT_PATH) === undefined &&
-      count('__NB_CREATE_CALLS') === 0 && count('__NB_DESTROY_CALLS') === 0,
+      count('__NB_CREATE_CALLS') === 0 && count('__NB_DESTROY_CALLS') === 0 &&
+      count('__NB_SUPPLY_WG_FEED') === 0 && count('__NB_SUPPLY_ICE_MUX_ARM') === 0,
       JSON.stringify({ consumed: ability['lastRouteApplyId'],
         setter: count('__NB_SELECTION_SET_CALLS'), result: fileOf(RESULT_PATH),
-        create: count('__NB_CREATE_CALLS'), destroy: count('__NB_DESTROY_CALLS') }));
+        create: count('__NB_CREATE_CALLS'), destroy: count('__NB_DESTROY_CALLS'),
+        wgFeed: count('__NB_SUPPLY_WG_FEED'), muxArm: count('__NB_SUPPLY_ICE_MUX_ARM') }));
 
     releaseParkedProtect();
     const outcome = (await settle) as Record<string, unknown>;
     const initialAck = (G['__NB_ACK'] ?? {}) as Record<string, unknown>;
-    check('SR3 releasing the ICE protect lets the REAL initial leg finish — fd ' +
-      'contract accepted, ICE pool fed, the initial ACK out as kind initial — and ' +
+    check('SR3 releasing the ONE protect lets the REAL initial leg finish — fd ' +
+      'contract accepted, WG fed, the mux armed OVER that very socket (no second ' +
+      'open / bind / protect for ICE), the initial ACK out as kind initial — and ' +
       'only NOW is the generation settled',
       outcome['accepted'] === true && ability['createSettled'] === true &&
       rebuildableGate(ability) === true && count('__NB_ACK_CALLS') === 1 &&
       initialAck['isRecreate'] === false && initialAck['kind'] === 'initial' &&
-      JSON.stringify(initialAck['payload']) === JSON.stringify({ routes: DESIRED }),
+      JSON.stringify(initialAck['payload']) === JSON.stringify({ routes: DESIRED }) &&
+      count('__NB_SUPPLY_WG_FEED') === 1 && count('__NB_SUPPLY_ICE_MUX_ARM') === 1 &&
+      count('__NB_SUPPLY_ICE_OPEN') === 0 && count('__NB_SUPPLY_ICE_FEED') === 0,
       JSON.stringify({ outcome: outcome, createSettled: ability['createSettled'],
+        wgFeed: count('__NB_SUPPLY_WG_FEED'), muxArm: count('__NB_SUPPLY_ICE_MUX_ARM'),
+        iceOpen: count('__NB_SUPPLY_ICE_OPEN'), iceFeed: count('__NB_SUPPLY_ICE_FEED'),
         ack: initialAck }));
     await applyAndSettle(ability);
     const doc = result();
@@ -1182,14 +1197,14 @@ try {
     (ability['stopStatusAndNetcfgWatcher'] as () => void)();
   }
 
-  // (a) the user stops inside the ICE await: the leg fails closed — that socket
-  //     is not fed, no ACK is issued, the generation is destroyed — and its late
-  //     completion declares nothing settled.
+  // (a) the user stops inside the ONE protect await: the leg fails closed — the
+  //     socket never opens, no feed, no mux arm, no ACK, the generation is
+  //     destroyed — and its late completion declares nothing settled.
   resetWorld();
   seedFile(SELECTION_PATH, serializeSelection(MGMT, SELECTION_OFF));
   answer(setterAnswer(true, true, DESIRED, false));
   writeRequestDoc('ui-route-sr-stop');
-  parkProtectAt(2);
+  parkProtectAt(1);
   {
     const ability = settlingWorld(mod, createConnection, DESIRED);
     const settle = startInitialSettle(ability);
@@ -1198,10 +1213,12 @@ try {
     releaseParkedProtect();
     const outcome = (await settle) as Record<string, unknown>;
     await delay(30); // let the fire-and-forget fail-closed teardown land
-    check('SR6 a user stop latched inside the ICE await is fail-closed AND never ' +
-      'settles: no initial ACK, the generation destroyed, the rebuildable gate shut',
-      outcome['accepted'] === true && outcome['reason'] === 'ice-socket-feed-fail-closed' &&
+    check('SR6 a user stop latched inside the protect await is fail-closed AND never ' +
+      'settles: no initial ACK, nothing fed, the generation destroyed, the ' +
+      'rebuildable gate shut',
+      outcome['accepted'] === true && outcome['reason'] === 'protect-fail-closed' &&
       count('__NB_ACK_CALLS') === 0 && count('__NB_DESTROY_CALLS') === 1 &&
+      count('__NB_SUPPLY_WG_FEED') === 0 && count('__NB_SUPPLY_ICE_MUX_ARM') === 0 &&
       ability['createSettled'] === false && rebuildableGate(ability) === false,
       JSON.stringify({ outcome: outcome, ack: count('__NB_ACK_CALLS'),
         destroy: count('__NB_DESTROY_CALLS'), createSettled: ability['createSettled'],
@@ -1213,15 +1230,15 @@ try {
     (ability['stopStatusAndNetcfgWatcher'] as () => void)();
   }
 
-  // (b) the connector dies while the pool is still feeding: because
-  //     connectorDeathHandled is NOT one of the per-socket feed guards, the leg
-  //     really does run to its end (the whole pool is fed and the initial ACK
-  //     goes out) — the LATE completion is what must still refuse to settle.
+  // (b) the connector dies while the ONE protect is still pending: because
+  //     connectorDeathHandled is NOT one of the feed guards, the leg really does
+  //     run to its end (the WG socket is fed, the mux armed over it, the initial
+  //     ACK goes out) — the LATE completion is what must still refuse to settle.
   resetWorld();
   seedFile(SELECTION_PATH, serializeSelection(MGMT, SELECTION_OFF));
   answer(setterAnswer(true, true, DESIRED, false));
   writeRequestDoc('ui-route-sr-death');
-  parkProtectAt(2);
+  parkProtectAt(1);
   {
     const ability = settlingWorld(mod, createConnection, DESIRED);
     const settle = startInitialSettle(ability);
@@ -1230,13 +1247,15 @@ try {
     releaseParkedProtect();
     const outcome = (await settle) as Record<string, unknown>;
     await delay(30);
-    check('SR8 a connector death latched inside the ICE await: the leg still runs to ' +
-      'its end (pool fed + initial ACK) but the late completion does NOT open the ' +
-      'rebuildable gate',
+    check('SR8 a connector death latched inside the protect await: the leg still runs ' +
+      'to its end (WG fed + mux armed + initial ACK) but the late completion does ' +
+      'NOT open the rebuildable gate',
       outcome['accepted'] === true && count('__NB_ACK_CALLS') === 1 &&
-      count('__NB_DESTROY_CALLS') === 0 && ability['createSettled'] === false &&
-      rebuildableGate(ability) === false,
+      count('__NB_DESTROY_CALLS') === 0 && count('__NB_SUPPLY_WG_FEED') === 1 &&
+      count('__NB_SUPPLY_ICE_MUX_ARM') === 1 &&
+      ability['createSettled'] === false && rebuildableGate(ability) === false,
       JSON.stringify({ outcome: outcome, ack: count('__NB_ACK_CALLS'),
+        wgFeed: count('__NB_SUPPLY_WG_FEED'), muxArm: count('__NB_SUPPLY_ICE_MUX_ARM'),
         createSettled: ability['createSettled'], gate: rebuildableGate(ability) }));
     await applyAndSettle(ability);
     check('SR9 ... and its retained request is never consumed and never answered',

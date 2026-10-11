@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 
-//! # ice_mux — ONE protected UDP socket for the whole ICE plane
-//! (official-alignment audit §2.7 **stage 2**; upstream `UniversalUDPMuxDefault`)
+//! # ice_mux — ONE protected UDP socket for ICE *and* WireGuard
+//! (official-alignment audit §2.7 **stages 2-3**; upstream `UniversalUDPMuxDefault`)
 //!
 //! Upstream NetBird does not give an ICE agent a socket: it gives it a *mux*.
 //! ONE UDP socket for the whole client serves every peer's connectivity checks
-//! and (because upstream's mux rides the WireGuard device's own socket) the
-//! tunnel data too. This module is that socket, reduced to the stage-2 subset
-//! (the socket does NOT yet carry WireGuard — stage 3 merges them):
+//! AND the tunnel data — because upstream's mux rides the WireGuard device's own
+//! socket. This module is that socket:
 //!
 //! | behaviour | upstream (file:line) |
 //! | --- | --- |
-//! | one socket for all agents | `client/iface/bind/ice_bind.go:291-316` (`createOrUpdateMux`), `client/iface/device/device_kernel_unix.go:99-113` |
-//! | read loop sized MTU+overhead | `client/iface/udpmux/universal.go:80-108` (`ReadFromConn`) |
+//! | one socket for all agents, and it is the WG socket | `client/iface/bind/ice_bind.go:291-316` (`createOrUpdateMux` over the WG bind's conn), `client/iface/device/device_kernel_unix.go:97-113` (mux over `sharedsock.Listen(wgPort)`) |
+//! | the mux RUNS the reader (a real thread) | `device_kernel_unix.go:109` (`go mux.ReadFromConn(t.ctx)`), `universal.go:80-108` |
+//! | non-STUN goes straight to WireGuard | `ice_bind.go:209-287` (the WG receive fn keeps the buffer the STUN filter did not consume), `:403-421` (`isWireGuardMsg`) |
+//! | read loop sized MTU+overhead | `universal.go:81`, `client/iface/bufsize` |
 //! | srflx (XOR-MAPPED-ADDRESS) cache per STUN server | `universal.go:28-31`, `:218-270` |
 //! | cache TTL 25 s, set at REQUEST time | `universal.go:38`, `:49-51`, `:285` |
 //! | in-flight de-duplication (waiter channel) | `universal.go:276-301`, `:321-323` |
@@ -22,41 +23,57 @@
 //! | other packets → session by remote address | `udpmux/mux.go:425-452` (`forwardToAllConnections` + `addressMap`) |
 //! | address registry filled by every write | `udpmux/conn.go:81-92` (`WriteTo` → `addAddress`) |
 //! | session teardown unregisters, never closes the shared fd | `udpmux/mux.go:284-321` (`RemoveConnByUfrag`), `udpmux/conn.go:114-121` |
+//! | the mux never closes the socket it was built over | `ice_bind.go:308-309` ("Don't close the old mux - it doesn't own the underlying connections") |
 //! | host candidates = listen address × mux port | fork `gather.go:331-405` (`gatherCandidatesLocalUDPMux`) |
 //! | srflx candidate `raddr/rport` = the mux listen address | fork `gather.go:491-513` (`gatherCandidatesSrflxUDPMux`) |
 //!
-//! ## What this module deliberately is NOT yet
+//! ## The reader thread and its back-pressure
 //!
-//! * **No dedicated reader thread.** Upstream runs `ReadFromConn` in a
-//!   goroutine; here [`IceMux::drain`] is called once per ICE pump tick
-//!   (`crate::connector::ICE_PUMP_TICK_MS`, 10 ms) by the orchestrator, which
-//!   keeps every injected-clock host harness deterministic and needs no second
-//!   lock on the socket. Stage 3 (the mux becomes the single reader for ICE
-//!   *and* WireGuard) is where a real read thread and its back-pressure appear.
-//! * **No WireGuard demux into the device.** Non-STUN datagrams are routed to
-//!   the session whose remote address they came from (upstream's `addressMap`)
-//!   and leave through `IceSession::take_data_rx`, exactly as stage 1's
-//!   per-session socket did — the WG plane keeps its own outer socket until
-//!   stage 3.
+//! [`IceMux::start_reader`] is upstream's `go mux.ReadFromConn` (stage 3);
+//! until it is called the mux is driven by whoever calls [`IceMux::drain`]
+//! (the ICE pump, or an injected-clock host harness). The loop is:
+//! `poll(POLLIN, MUX_READER_POLL_MS)` → one bounded [`MUX_DRAIN_BUDGET`] pass →
+//! repeat. Back-pressure is structural, not buffered: a pass reads a bounded
+//! number of datagrams and every non-STUN datagram is handed to
+//! [`MuxUdpSink::handle_udp`] **synchronously**, so a slow WG/TUN consumer
+//! slows the read loop itself and the kernel socket buffer then throttles the
+//! peer — the same shape as WG's own receive loop upstream. Per-session queues
+//! are bounded and drop the newest with a counter, never grow without bound.
+//!
+//! ## Where the socket comes from
+//!
+//! The mux does NOT own the socket's lifetime in the upstream sense either: it
+//! is built over an ALREADY BOUND, ALREADY PROTECTED fd (the shell-protected WG
+//! outer socket, `wg_fwd_open` → `VpnConnection.protect` → feed), dups it, and
+//! closes **only its own dup**. Sessions close nothing (their candidates are map
+//! entries, [`crate::ice_session::IceSession::stop`]) and the WG device closes
+//! only its own dup. There is exactly ONE `open` + `bind` + `protect` for ICE
+//! and WG together, and there is NO unprotected fallback: no mux ⇒ no local
+//! candidates ⇒ the peer stays Idle with an explicit `ice:no-mux`.
+//!
+//! ## What this module deliberately is NOT
+//!
 //! * **No TURN / relay address.** Upstream's `GetRelayedAddr` is not implemented
-//!   there either (`universal.go:146-150`): relay candidates come from the
-//!   relay carrier, not from this socket.
+//!   there either (`universal.go:146-150`): relay candidates come from the relay
+//!   carrier, not from this socket, and the relayed WG traffic never touches it.
 //!
 //! ## Ownership (governance §二.4, fail-closed)
 //!
-//! The fd is PROTECTED before it ever carries a datagram: on device the core
-//! opens and binds it ([`ice_mux_open`]), the shell `VpnConnection.protect`s
-//! that number, and only then feeds it back
-//! (`crate::connector::connector_ice_mux_feed_json` → [`IceMux::adopt`]); the
-//! same "core binds → shell protects → core adopts" shape as the shipped
-//! WireGuard outer socket (`NetBirdVpnExtensionAbility.ets:6487-6535`,
-//! `wg_fwd_open`). [`IceMux::open_wildcard`] is the host path (the host CLI has
-//! no shell to protect anything) and the test path. There is NO unprotected
-//! fallback: no mux ⇒ no local candidates ⇒ the peer stays Idle with an
-//! explicit `ice:no-mux` network error.
+//! The fd is PROTECTED before it ever carries a datagram, and there is exactly
+//! ONE such fd for both planes: the core opens and binds the WG outer socket
+//! wildcard (`wg_fwd_open`), the shell `VpnConnection.protect`s that number and
+//! feeds it back (`connector_wg_socket_feed`), and the mux is then built OVER
+//! that same protected socket (`connector_ice_mux_arm` →
+//! [`crate::peer_conn::PeerIceOrchestrator::arm_mux_from_wg_socket`] →
+//! [`IceMux::adopt`]) — upstream's `createOrUpdateMux` shape
+//! (`client/iface/bind/ice_bind.go:291-316`). [`IceMux::open_wildcard`] is the
+//! host path (the host CLI has no shell to protect anything) and the test path.
+//! There is NO unprotected fallback: no mux ⇒ no local candidates ⇒ the peer
+//! stays Idle with an explicit `ice:no-mux` network error.
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -82,9 +99,16 @@ pub const XOR_MAPPED_CACHE_TTL_MS: u64 = 25_000;
 pub const MUX_RECV_BUF: usize = 2048;
 
 /// Datagrams one [`IceMux::drain`] call may read. The pump runs every
-/// `ICE_PUMP_TICK_MS` (10 ms), so this is a per-tick bound, not a throughput
-/// cap: what is left stays in the kernel socket buffer for the next tick.
+/// `ICE_PUMP_TICK_MS` (10 ms) and the reader thread polls every
+/// [`MUX_READER_POLL_MS`], so this is a per-pass bound, not a throughput cap:
+/// what is left stays in the kernel socket buffer for the next pass (that is
+/// the back-pressure described in the module docs).
 const MUX_DRAIN_BUDGET: usize = 256;
+
+/// The reader thread's idle `poll` timeout: how long it may sit in `poll`
+/// before it re-checks the stop flag. Bounds the shutdown latency of
+/// [`IceMux::stop_reader`]; a ready datagram wakes it immediately.
+pub const MUX_READER_POLL_MS: u64 = 50;
 
 /// Per-session inbound STUN queue cap. The session's own
 /// `RECV_BUDGET_PER_RUN` (64) drains this every tick, so the cap only bounds a
@@ -150,9 +174,57 @@ pub struct MuxStats {
     pub queue_dropped: u64,
 }
 
-/// The user-facing name of this socket's local port in log lines.
+/// The WireGuard data-plane consumer of the non-STUN datagrams this socket
+/// demuxes. Upstream does not have a separate interface for this: the mux
+/// either hands the buffer back to WG's own receive function (`ice_bind.go:257-285`)
+/// or WG's device reads the socket itself; ours is a `boringtun` device with no
+/// `Bind` API, so the mux calls [`WgDevice::handle_udp`] instead —
+/// [`crate::wg_device::WgPeerApplier::handle_udp_inbound`] at the seam.
+///
+/// [`WgDevice::handle_udp`]: crate::wg_device::WgDevice
+pub trait MuxUdpSink: Send + Sync + 'static {
+    /// Deliver ONE non-STUN datagram, in arrival order, with the source it
+    /// arrived from (`(n, rAddr)` of the reader). Synchronous BY DESIGN: this
+    /// is where the reader's back-pressure comes from.
+    fn handle_udp(&self, datagram: &[u8], src: MappedAddr);
+}
+
+/// The shared state the reader thread and every caller hold. Separate from
+/// [`IceMux`] so the reader owns an `Arc` that keeps the socket alive exactly
+/// until the reader has stopped.
+struct Shared {
+    st: Mutex<Inner>,
+    /// Set by [`IceMux::stop_reader`], checked once per reader pass.
+    reader_stop: AtomicBool,
+    /// Non-STUN delivery route: `Some` = straight into the WG device
+    /// (upstream's WG receive path), `None` = the per-session data queue
+    /// (the pre-stage-3 path, still used by the host CLI and the unit tests).
+    sink: Mutex<Option<Arc<dyn MuxUdpSink>>>,
+}
+
+/// What [`Inner::dispatch`] decided about one datagram, so that the sink call
+/// happens OUTSIDE the state lock (the sink takes the WG device lock; nothing
+/// may take the two in the opposite order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOut {
+    /// Fully handled (queued to a session, cached, or dropped + counted).
+    Handled,
+    /// Non-STUN with a sink armed: the caller delivers the SAME buffer through
+    /// [`MuxUdpSink::handle_udp`] after dropping the state lock.
+    ToSink,
+}
+
+/// ONE shared UDP socket: the mux upstream builds over the WireGuard device's
+/// own socket (`createOrUpdateMux`, `ice_bind.go:291-316`).
 pub struct IceMux {
-    inner: Mutex<Inner>,
+    /// The owned socket's number, copied at construction: the hot read path
+    /// must not take the state lock merely to learn the fd. Valid for as long
+    /// as `shared` (which owns the descriptor) is alive.
+    fd: sys::c_int,
+    shared: Arc<Shared>,
+    /// The ONE reader thread, while it runs (`None` = the caller drives
+    /// [`IceMux::drain`]).
+    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for IceMux {
@@ -206,12 +278,11 @@ struct Inner {
 
 impl IceMux {
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.shared.st.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Open + bind a wildcard mux socket on `port` (`0` = ephemeral) — the
-    /// HOST/TEST path. On device the fd is opened by [`ice_mux_open`], protected
-    /// by the shell and adopted through [`IceMux::adopt`].
+    /// HOST/TEST path (the host CLI has no shell and no WG device socket to ride).
     pub fn open_wildcard(port: u16) -> Result<Arc<IceMux>, ManagementError> {
         let (fd, bound) = open_bound_wildcard(port)?;
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -221,8 +292,7 @@ impl IceMux {
     /// HOST/TEST path, provider flavour ([`crate::peer_conn::
     /// PeerIceOrchestrator::arm_mux`]): the socket comes from
     /// [`crate::ice::UdpSocketSource`] UNBOUND, so binding it to the wildcard
-    /// address on `port` is what happens here — exactly what `ice_mux_open`
-    /// does before the shell protects the fd on device. A bind failure is a hard
+    /// address on `port` is what happens here. A bind failure is a hard
     /// error ([`ManagementError::Network`]): no mux, no local candidates.
     pub fn adopt_unbound(
         owned: OwnedFd,
@@ -241,10 +311,12 @@ impl IceMux {
     }
 
     /// Adopt an ALREADY BOUND (and, on device, already protected) socket as the
-    /// mux. `want_port` is the port the caller asked for: 0 = whichever the
-    /// kernel picked, otherwise it must match `getsockname` (a mismatch is a
-    /// hard error, never a silent fallback — the same rule as
-    /// `IceSession::add_local_candidate_bound`).
+    /// mux — the stage-3 path: a dup of the WG device's own outer socket
+    /// (upstream `createOrUpdateMux`, `ice_bind.go:291-316`; "the sockets are
+    /// managed by WireGuard's StdNetBind, not by us", `:308-309`). `want_port` is
+    /// the port the caller asked for: 0 = whichever the kernel picked, otherwise
+    /// it must match `getsockname` (a mismatch is a hard error, never a silent
+    /// fallback — the same rule as `IceSession::add_local_candidate_bound`).
     pub fn adopt(
         owned: OwnedFd,
         overlay: Vec<OverlayNet>,
@@ -265,16 +337,22 @@ impl IceMux {
         }
         set_nonblock(fd).map_err(seam_to_management)?;
         Ok(Arc::new(IceMux {
-            inner: Mutex::new(Inner {
-                fd: owned,
-                port,
-                by_ufrag: HashMap::new(),
-                by_addr: HashMap::new(),
-                sessions: HashMap::new(),
-                xor: HashMap::new(),
-                overlay,
-                stats: MuxStats::default(),
+            fd,
+            shared: Arc::new(Shared {
+                st: Mutex::new(Inner {
+                    fd: owned,
+                    port,
+                    by_ufrag: HashMap::new(),
+                    by_addr: HashMap::new(),
+                    sessions: HashMap::new(),
+                    xor: HashMap::new(),
+                    overlay,
+                    stats: MuxStats::default(),
+                }),
+                reader_stop: AtomicBool::new(false),
+                sink: Mutex::new(None),
             }),
+            reader: Mutex::new(None),
         }))
     }
 
@@ -286,7 +364,7 @@ impl IceMux {
     /// BORROWED fd number of the shared socket — the WG device dups it as a
     /// peer egress exactly as it used to dup the selected session socket.
     pub fn raw_fd(&self) -> sys::c_int {
-        self.lock().fd.as_raw_fd()
+        self.fd
     }
 
     /// Register a session's local ufrag (`GetConn(a.localUfrag, …)`,
@@ -379,34 +457,93 @@ impl IceMux {
 
     /// The read loop, one pass: read until EAGAIN or the per-pass budget, then
     /// classify and route (upstream `UniversalUDPMuxDefault::ReadFromConn`,
-    /// `universal.go:80-108`). Non-blocking; the caller owns the cadence.
+    /// `universal.go:80-108`). Non-blocking; whoever calls it owns the cadence —
+    /// the reader thread ([`IceMux::start_reader`]) or the ICE pump.
     pub fn drain(&self) -> usize {
-        let mut inner = self.lock();
-        let fd = inner.fd.as_raw_fd();
-        let mut buf = [0u8; MUX_RECV_BUF];
-        let mut read = 0usize;
-        while read < MUX_DRAIN_BUDGET {
-            let mut src = sys::sockaddr_in::new([0, 0, 0, 0], 0);
-            let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
-            let n = unsafe {
-                sys::recvfrom(
-                    fd,
-                    buf.as_mut_ptr() as *mut core::ffi::c_void,
-                    buf.len(),
-                    0,
-                    &mut src,
-                    &mut len,
-                )
-            };
-            if n <= 0 {
-                break;
-            }
-            read += 1;
-            let from = (src.sin_addr, u16::from_be(src.sin_port));
-            inner.dispatch(from, &buf[..n as usize]);
+        drain_shared(&self.shared, self.fd)
+    }
+
+    /// Attach the WG data-plane consumer of non-STUN datagrams (upstream: the
+    /// buffer the STUN filter did not consume goes straight on into WG,
+    /// `ice_bind.go:257-285`). Returned `true` when one was already attached.
+    /// Idempotent upsert; there is no detach because production never has a
+    /// reason to stop delivering WG data while the socket lives.
+    pub fn attach_udp_sink(&self, sink: Arc<dyn MuxUdpSink>) -> bool {
+        self.shared.sink.lock().unwrap_or_else(|p| p.into_inner()).replace(sink).is_some()
+    }
+
+    /// Whether non-STUN datagrams go straight to WG (`Some` sink) rather than
+    /// through the per-session queue.
+    pub fn sink_armed(&self) -> bool {
+        self.shared.sink.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    }
+
+    /// Start the ONE reader thread (upstream `go mux.ReadFromConn(t.ctx)`,
+    /// `device_kernel_unix.go:109`). Returns `false` when a reader is already
+    /// running (idempotent). The thread holds an `Arc<Shared>`, never an
+    /// `Arc<IceMux>`: it is stopped by [`IceMux::stop_reader`] (or by dropping
+    /// the mux) and closes nothing itself — the socket's single close is the
+    /// owned fd's drop, after the reader has stopped.
+    pub fn start_reader(self: &Arc<Self>) -> bool {
+        let mut reader = self.reader.lock().unwrap_or_else(|p| p.into_inner());
+        if reader.is_some() {
+            return false;
         }
-        inner.stats.reads += read as u64;
-        read
+        self.shared.reader_stop.store(false, Ordering::Release);
+        let shared = Arc::clone(&self.shared);
+        let fd = self.fd;
+        let spawned = std::thread::Builder::new().name("ice-mux-reader".into()).spawn(move || {
+            while !shared.reader_stop.load(Ordering::Acquire) {
+                let (ret, _e, rev) = sys::poll1(fd, sys::POLLIN, MUX_READER_POLL_MS as i32);
+                if ret < 0 {
+                    if sys::errno() == sys::EINTR {
+                        continue;
+                    }
+                    break; // poll itself failed: stop rather than spin
+                }
+                if ret == 0 {
+                    continue; // idle timeout: re-check the stop flag
+                }
+                if (rev & sys::POLLIN) == 0 {
+                    // POLLERR/POLLHUP/POLLNVAL on a datagram socket: nothing
+                    // more can be read; stop instead of spinning on a dead fd.
+                    break;
+                }
+                drain_shared(&shared, fd);
+            }
+        });
+        match spawned {
+            Ok(handle) => {
+                *reader = Some(handle);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Stop the reader thread and join it. Idempotent; `true` when a running
+    /// reader was actually joined. Bounded by [`MUX_READER_POLL_MS`] (the
+    /// thread's poll timeout), so a shutdown never waits on a datagram.
+    pub fn stop_reader(&self) -> bool {
+        let handle = {
+            let mut reader = self.reader.lock().unwrap_or_else(|p| p.into_inner());
+            self.shared.reader_stop.store(true, Ordering::Release);
+            reader.take()
+        };
+        match handle {
+            Some(h) => {
+                let _ = h.join();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether the reader thread is running right now. False = the caller
+    /// drives [`IceMux::drain`] (the injected-clock host harnesses, the ICE
+    /// pump's stage-2 cadence).
+    pub fn reader_running(&self) -> bool {
+        self.reader.lock().unwrap_or_else(|p| p.into_inner()).is_some()
     }
 
     /// srflx lookup for `server`, upstream `GetXORMappedAddr`
@@ -421,12 +558,15 @@ impl IceMux {
         let rx = self.xor_waiter_or_request(server)?;
         // Wait for the response that fills the entry. Upstream blocks on a
         // channel here while its OWN reader goroutine (`ReadFromConn`,
-        // `universal.go:80-108`) keeps filling the cache; in this stage the
-        // reader is the ICE pump, so a waiter also drains the socket itself
-        // while it waits — otherwise a gather running ON the pump's thread (the
-        // deterministic host harness) could never be woken. The drain is the same
-        // non-blocking pass the pump runs, under the same lock.
+        // `universal.go:80-108`) keeps filling the cache. When a reader thread
+        // runs, that is exactly the situation: wait. When none runs (the
+        // injected-clock host harnesses, where a gather runs ON the pump's
+        // thread), the waiter drains the socket itself — otherwise it could
+        // never be woken. It must NOT drain while the reader runs: a second
+        // reader on the same fd would steal datagrams from the reader (and from
+        // the WG data plane).
         let started = sys::mono_ms();
+        let self_drain = !self.reader_running();
         loop {
             match rx.recv_timeout(Duration::from_millis(5)) {
                 Ok(Some(addr)) => return Ok(addr),
@@ -443,7 +583,9 @@ impl IceMux {
                     if sys::mono_ms().saturating_sub(started) >= deadline_ms.max(1) {
                         return Err(ManagementError::Timeout);
                     }
-                    self.drain();
+                    if self_drain {
+                        self.drain();
+                    }
                 }
             }
         }
@@ -549,6 +691,62 @@ impl IceMux {
     // -----------------------------------------------------------------------
 }
 
+impl Drop for IceMux {
+    /// Stop the ONE reader thread before the owned socket is released. The fd
+    /// itself is closed exactly once, by the `OwnedFd` inside the state — this
+    /// drop only makes sure nobody is reading while that happens.
+    fn drop(&mut self) {
+        self.stop_reader();
+    }
+}
+
+/// One read pass over the shared socket (see [`IceMux::drain`]). Reads at most
+/// [`MUX_DRAIN_BUDGET`] datagrams, classifies each under the state lock, and
+/// delivers a non-STUN datagram to the armed sink **after releasing that lock**
+/// (the sink enters the WG device; the two locks may never nest this way).
+fn drain_shared(shared: &Shared, fd: sys::c_int) -> usize {
+    let sink_armed = shared.sink.lock().unwrap_or_else(|p| p.into_inner()).is_some();
+    let mut buf = [0u8; MUX_RECV_BUF];
+    let mut read = 0usize;
+    while read < MUX_DRAIN_BUDGET {
+        let mut src = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        let n = unsafe {
+            sys::recvfrom(
+                fd,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                0,
+                &mut src,
+                &mut len,
+            )
+        };
+        if n <= 0 {
+            break;
+        }
+        read += 1;
+        let from = (src.sin_addr, u16::from_be(src.sin_port));
+        let out = {
+            let mut inner = shared.st.lock().unwrap_or_else(|p| p.into_inner());
+            inner.dispatch(from, &buf[..n as usize], sink_armed)
+        };
+        if out == DispatchOut::ToSink {
+            let sink = shared.sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            match sink {
+                Some(sink) => sink.handle_udp(&buf[..n as usize], from),
+                // the sink vanished between the classification and this line:
+                // fall back to the per-session queue, never drop silently
+                None => {
+                    let mut inner = shared.st.lock().unwrap_or_else(|p| p.into_inner());
+                    inner.route_data(from, &buf[..n as usize]);
+                }
+            }
+        }
+    }
+    shared.st.lock().unwrap_or_else(|p| p.into_inner()).stats.reads += read as u64;
+    read
+}
+
 /// `true` when `ip` falls inside any of our own overlay networks (upstream
 /// `wg.Network.Contains(src)`, `universal.go:169-170`).
 fn overlay_contains(overlay: &[OverlayNet], ip: [u8; 4]) -> bool {
@@ -560,10 +758,14 @@ impl Inner {
         self.fd.as_raw_fd()
     }
 
-    fn dispatch(&mut self, from: MappedAddr, datagram: &[u8]) {
+    fn dispatch(&mut self, from: MappedAddr, datagram: &[u8], sink_armed: bool) -> DispatchOut {
         // 1. the WG-first classifier shared with the session (upstream
         //    `filterOutStunMessages`, ice_bind.go:318-350): anything WG-shaped or
-        //    not STUN-shaped belongs to the data plane and routes by address.
+        //    not STUN-shaped belongs to the data plane. With a sink armed it goes
+        //    STRAIGHT into the WG device (upstream: WG's own receive path keeps
+        //    the buffer, ice_bind.go:257-285, and WG itself drops sources that
+        //    match no peer endpoint); without one it takes the per-session queue,
+        //    the pre-stage-3 route.
         if demux_routes_to_wg(datagram) {
             let id = self.by_addr.get(&from).copied();
             let label = id
@@ -571,11 +773,19 @@ impl Inner {
                 .map(|s| s.peer_label.clone())
                 .unwrap_or_else(|| "unknown".into());
             self.note_receipt(from, datagram, &label);
+            if sink_armed {
+                if id.is_none() {
+                    // still delivered — WG counts the off-path drop itself — but
+                    // the mux notes that no session ever registered this source
+                    self.stats.data_unknown += 1;
+                }
+                return DispatchOut::ToSink;
+            }
             match id {
                 Some(id) => self.push_data(id, from, datagram),
                 None => self.stats.data_unknown += 1,
             }
-            return;
+            return DispatchOut::Handled;
         }
         // 2. STUN: a datagram sourced inside our own overlay can never be a
         //    legitimate STUN message (upstream `HandleSTUNMessage`,
@@ -584,7 +794,7 @@ impl Inner {
         if overlay_contains(&self.overlay, from.0) {
             self.note_receipt(from, datagram, "unknown");
             self.stats.overlay_dropped += 1;
-            return;
+            return DispatchOut::Handled;
         }
         // 3. a response to OUR srflx query: matched by the server address we have
         //    an entry for, then by the transaction id we sent.
@@ -600,7 +810,7 @@ impl Inner {
                     }
                 }
                 self.stats.xor_filled += 1;
-                return;
+                return DispatchOut::Handled;
             }
         }
         // 4. a session's check/keepalive: Binding REQUESTS route by the ufrag in
@@ -629,6 +839,7 @@ impl Inner {
                 self.stats.stun_unknown += 1;
             }
         }
+        DispatchOut::Handled
     }
 
     fn push_stun(&mut self, id: u64, src: MappedAddr, datagram: &[u8]) {
@@ -647,6 +858,15 @@ impl Inner {
             return;
         }
         s.data.push_back((src.0, src.1, datagram.to_vec()));
+    }
+
+    /// The pre-stage-3 non-STUN route: queue it for the session that registered
+    /// this source address (`addressMap`), counting an unknown source.
+    fn route_data(&mut self, src: MappedAddr, datagram: &[u8]) {
+        match self.by_addr.get(&src).copied() {
+            Some(id) => self.push_data(id, src, datagram),
+            None => self.stats.data_unknown += 1,
+        }
     }
 
     /// N2 v4.1 P7: one outer-source receipt per datagram read on the shared
@@ -728,31 +948,12 @@ fn sendto(fd: sys::c_int, dst: MappedAddr, buf: &[u8]) -> bool {
     false
 }
 
-/// `ice_mux_open()` — the NAPI entry the shell calls to have the CORE open and
-/// bind the mux socket (exactly the `wg_fwd_open` shape,
-/// `NetBirdVpnExtensionAbility.ets:6487-6535`): returns the fd number, the bound
-/// port and the bind verdict; the shell then `VpnConnection.protect`s that fd
-/// and feeds the SAME number back through
-/// [`crate::connector::connector_ice_mux_feed_json`]. A failure closes the fd
-/// and reports `fd = -1` (fail-closed: no mux, no ICE candidates).
-pub fn ice_mux_open() -> String {
-    let (fd, port) = match open_bound_wildcard(0) {
-        Ok((fd, port)) => (fd, port),
-        Err(e) => {
-            crate::hilog::emit(&format!("N5e_ICE|mux-open|failed|reason={e}"));
-            return "{\"fd\":-1,\"port\":0,\"bind_rc\":-1,\"bind_errno\":0}".to_string();
-        }
-    };
-    crate::hilog::emit(&format!(
-        "N5e_ICE|mux-open|port={port}|bind_rc=0|bind_errno=0|wildcard=true"
-    ));
-    format!("{{\"fd\":{fd},\"port\":{port},\"bind_rc\":0,\"bind_errno\":0}}")
-}
-
 /// Create a UDP socket and bind it to the WILDCARD address on `port` (`0` =
-/// ephemeral). Returns the RAW fd (ownership crosses to the caller — the shell
-/// protects this very descriptor) and the bound port. On failure the socket is
-/// closed again; there is no unbound fallback.
+/// ephemeral). HOST/TEST only: on device the one socket is the WG outer socket
+/// (`wg_fwd_open`, opened and bound wildcard exactly like this) and the mux is
+/// built over a dup of it. Returns the RAW fd (ownership crosses to the caller)
+/// and the bound port; on failure the socket is closed again — there is no
+/// unbound fallback.
 fn open_bound_wildcard(port: u16) -> Result<(sys::c_int, u16), ManagementError> {
     let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
     if fd < 0 {
@@ -1074,7 +1275,7 @@ mod tests {
         // Loopback cannot carry 100.108.x.x, so the datagram is dispatched
         // directly through the same classifier the reader uses.
         let raw = binding_request_with_username("AAAA:ZZZZ");
-        mux.lock().dispatch(([100, 108, 144, 165], 5000), &raw);
+        mux.lock().dispatch(([100, 108, 144, 165], 5000), &raw, false);
         assert_eq!(mux.stats().overlay_dropped, 1);
         assert!(mux.take_stun(1, 8).is_empty(), "overlay-sourced STUN never reaches a session");
     }
@@ -1092,6 +1293,207 @@ mod tests {
         assert!(cands.iter().all(|c| c.port == port), "ONE port for every candidate");
         assert_eq!(cands[0].address, "192.168.1.5");
         assert_eq!(cands[1].address, "192.168.1.6");
+    }
+
+    // --- stage 3: the reader thread, the WG sink, fd lifetime ---------------
+
+    /// A WG data-plane stand-in: records every non-STUN datagram the mux handed
+    /// it, exactly the tuple `WgDevice::handle_udp` receives.
+    #[derive(Default)]
+    struct RecordingSink {
+        got: Mutex<Vec<(MappedAddr, Vec<u8>)>>,
+    }
+
+    impl RecordingSink {
+        fn count(&self) -> usize {
+            self.got.lock().unwrap().len()
+        }
+        fn first(&self) -> Option<(MappedAddr, Vec<u8>)> {
+            self.got.lock().unwrap().first().cloned()
+        }
+    }
+
+    impl MuxUdpSink for RecordingSink {
+        fn handle_udp(&self, datagram: &[u8], src: MappedAddr) {
+            self.got.lock().unwrap().push((src, datagram.to_vec()));
+        }
+    }
+
+    /// A WG-shaped datagram (`isWireGuardMsg`: type 4 in the low byte, three
+    /// zero bytes, >= 32 bytes) with `tag` in the payload so a test can tell two
+    /// of them apart.
+    fn wg_datagram(tag: u8) -> Vec<u8> {
+        let mut pkt = vec![0u8; 64];
+        pkt[0] = 4; // WG transport message type
+        pkt[40] = tag;
+        pkt
+    }
+
+    #[test]
+    fn the_reader_thread_delivers_non_stun_straight_to_the_wg_sink() {
+        let mux = mux();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(!mux.attach_udp_sink(sink.clone()), "first attach");
+        assert!(mux.sink_armed());
+        assert!(mux.start_reader(), "the ONE reader thread starts");
+        assert!(!mux.start_reader(), "…and starting it twice is a no-op");
+        assert!(mux.reader_running());
+        // a session exists (so the mux knows the source is ours), and the peer
+        // address becomes known by the session writing first — the upstream
+        // `addressMap` rule. The datagram itself is DELIVERED regardless of the
+        // registry now: WG owns the endpoint match (`ice_bind.go:257-285`).
+        mux.register_session(1, "AAAA", "peer-a");
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        mux.send_to(1, (octets(peer_addr.ip()), peer_addr.port()), b"hello");
+        let wire = wg_datagram(7);
+        peer.send_to(&wire, ("127.0.0.1", mux.local_port())).unwrap();
+        // the reader is a real thread on the real clock: give it a bounded window
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while sink.count() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let (src, bytes) = sink.first().expect("the reader thread handed the WG datagram on");
+        assert_eq!(src.1, peer_addr.port());
+        assert_eq!(bytes, wire);
+        // …and the STUN side is untouched: a Binding Request still lands in the
+        // session queue (both halves of the demux over ONE reader)
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        loopback_sender(&sender, mux.local_port(), &binding_request_with_username("AAAA:ZZZZ"));
+        assert_eq!(recv_until(&mux, 1, 1).len(), 1, "STUN still reaches its session");
+        assert!(mux.stop_reader(), "the reader is joined");
+        assert!(!mux.reader_running());
+    }
+
+    #[test]
+    fn a_srflx_waiter_is_woken_by_the_reader_thread_alone() {
+        // With a reader running, `get_xor_mapped_addr` must NOT drain the socket
+        // itself (a second reader would steal datagrams from the first): only the
+        // reader can fill the cache and wake the waiter. If the waiter were still
+        // draining, this test would pass either way — so also pin the inverse
+        // below with no reader.
+        let mux = mux();
+        assert!(mux.start_reader());
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = ([127u8, 0, 0, 1], server_addr_port(&server));
+        let m = mux.clone();
+        let waiting = std::thread::spawn(move || m.get_xor_mapped_addr(server_addr, 3000));
+        let (req, from) = recv_from(&server);
+        assert_eq!(req.len(), stun::REQUEST_LEN);
+        server.send_to(&xor_success(&req, [198, 51, 100, 9], 5555), from).unwrap();
+        assert_eq!(waiting.join().unwrap().unwrap(), ([198, 51, 100, 9], 5555));
+        assert_eq!(mux.cached_xor(server_addr), Some(([198, 51, 100, 9], 5555)));
+        assert!(mux.stop_reader());
+    }
+
+    #[test]
+    fn without_a_sink_non_stun_keeps_using_the_per_session_queue() {
+        // the pre-stage-3 route, still the host-CLI/unit-test route: queue for the
+        // session that registered the source address, drop + count an unknown one.
+        let mux = mux();
+        mux.register_session(3, "AAAA", "peer-a");
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        mux.send_to(3, ([127, 0, 0, 1], peer_addr.port()), b"first");
+        peer.send_to(&wg_datagram(1), ("127.0.0.1", mux.local_port())).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            mux.drain();
+            let data = mux.take_data(3, 8);
+            if !data.is_empty() {
+                assert_eq!(data[0].2, wg_datagram(1));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the queued datagram must surface");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_full_session_queue_drops_and_counts_without_stopping_the_reader() {
+        // BACK-PRESSURE: the queue is bounded and drops the NEWEST with a counter
+        // (never unbounded growth, never a blocked reader); the socket keeps being
+        // read and the NEXT session still gets served on the same pass sequence.
+        let mux = mux();
+        assert!(mux.start_reader());
+        mux.register_session(1, "AAAA", "stalled-consumer");
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let extra = 10usize;
+        for _ in 0..(MUX_STUN_QCAP + extra) {
+            loopback_sender(&sender, mux.local_port(), &binding_request_with_username("AAAA:ZZZZ"));
+        }
+        // the stalled session never drains: the reader must count the overflow and
+        // keep going
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while mux.stats().queue_dropped < extra as u64 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let s = mux.stats();
+        assert_eq!(s.queue_dropped, extra as u64, "exactly the overflow is dropped+counted");
+        assert!(s.reads >= (MUX_STUN_QCAP + extra) as u64, "every datagram was still read");
+        assert_eq!(mux.take_stun(1, usize::MAX).len(), MUX_STUN_QCAP, "queue stayed bounded");
+        // a SECOND session on the same socket is served normally afterwards
+        mux.register_session(2, "BBBB", "live-consumer");
+        let d2 = std::time::Instant::now() + Duration::from_secs(3);
+        loopback_sender(&sender, mux.local_port(), &binding_request_with_username("BBBB:ZZZZ"));
+        loop {
+            if !mux.take_stun(2, 8).is_empty() {
+                break;
+            }
+            assert!(std::time::Instant::now() < d2, "the reader survived the overflow");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(mux.stop_reader());
+    }
+
+    #[test]
+    fn dropping_the_last_mux_closes_its_own_fd_exactly_once_and_leaves_the_socket() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let raw = std::os::fd::IntoRawFd::into_raw_fd(sock); // the mux takes it over
+        // a second dup of the SAME socket keeps the underlying socket alive, so the
+        // number `raw` cannot be recycled by anyone while we assert on it
+        let keep = crate::mgmtsock::dup_socket_fd(raw).expect("dup for the assertion");
+        let owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mux = IceMux::adopt(owned, vec![], 0).expect("mux over the bound socket");
+        assert!(mux.start_reader());
+        assert_ne!(mux.local_port(), 0);
+        drop(mux); // stops the reader, then closes exactly its own fd
+
+        let mut name = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        assert_eq!(
+            unsafe { sys::getsockname(raw, &mut name, &mut len) },
+            -1,
+            "the mux's own fd is closed when the last Arc goes"
+        );
+        assert_eq!(sys::errno(), sys::EBADF);
+        // the socket itself (our dup) is untouched — the mux never closed it
+        let mut name2 = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+        let mut len2 = core::mem::size_of::<sys::sockaddr_in>() as u32;
+        assert_eq!(
+            unsafe { sys::getsockname(keep, &mut name2, &mut len2) },
+            0,
+            "only the mux's OWN dup was closed"
+        );
+        unsafe { sys::close(keep) };
+    }
+
+    #[test]
+    fn stop_reader_is_bounded_and_does_nothing_without_a_reader() {
+        let mux = mux();
+        assert!(!mux.stop_reader(), "no reader: nothing to join");
+        assert!(mux.start_reader());
+        let started = std::time::Instant::now();
+        assert!(mux.stop_reader(), "the reader joined");
+        assert!(
+            started.elapsed() < Duration::from_millis(MUX_READER_POLL_MS * 4 + 500),
+            "shutdown is bounded by the poll timeout, took {:?}",
+            started.elapsed()
+        );
+        assert!(!mux.stop_reader(), "idempotent");
+        // restarting is allowed (a replacement mux generation)
+        assert!(mux.start_reader());
+        assert!(mux.stop_reader());
     }
 
     // --- fixtures -----------------------------------------------------------

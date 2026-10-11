@@ -125,12 +125,30 @@ pub trait GatherExec: Send + Sync + 'static {
     fn spawn(&self, job: Box<dyn FnOnce() + Send>) -> bool;
 }
 
-/// STAGE 2：共享 mux 的注入缝（官方对齐审计 §2.7）。设备路径由壳层
-/// protect + feed 一枚 fd（[`crate::connector::connector_ice_mux_feed_json`]）；
-/// 主机 CLI 与测试路径让 core 自己从 [`crate::ice::UdpSocketSource`] 的受保护
-/// 供给里建一枚（[`IceMux::open_wildcard`] 的 provider 版）。两种来源都不
-/// 改变语义：**整个 ICE 平面只有这一枚 socket**。
+/// STAGE 2/3：共享 mux 的注入缝（官方对齐审计 §2.7）。设备路径由
+/// [`PeerIceOrchestrator::arm_mux_from_wg_socket`] 把 mux 建在 WG 设备自己的
+/// socket 上（上游 `createOrUpdateMux`）；主机 CLI 与 host 测试路径让 core 自己
+/// 从 [`crate::ice::UdpSocketSource`] 的受保护供给里建一枚
+/// （[`IceMux::open_wildcard`] 的 provider 版）。两种来源都不改变语义：
+/// **整个 ICE 平面只有这一枚 socket**。
 pub type IceMuxSlot = Arc<Mutex<Option<Arc<crate::ice_mux::IceMux>>>>;
+
+/// STAGE 3：mux 分用出的**非 STUN** 数据包的去处 —— 上游 `ICEBind` 的接收路径
+/// 把 STUN 过滤器没吃掉的那块缓冲**直接**交回 WG（`ice_bind.go:257-285`，
+/// `device_kernel_unix.go:109` 的读线程同理）。我们的 WG 设备是 boringtun 的
+/// 单线程泵，没有 wireguard-go 的 `Bind` API，所以最小适配是让 mux 直接调
+/// [`crate::connector::WgPeerApplier::handle_udp_inbound`]（`WgDevice::handle_udp`），
+/// 而不再经过 `IceSession::take_data_rx` 的会话队列。
+struct WgApplierSink(Arc<dyn crate::connector::WgPeerApplier>);
+
+impl crate::ice_mux::MuxUdpSink for WgApplierSink {
+    fn handle_udp(&self, datagram: &[u8], src: crate::ice_mux::MappedAddr) {
+        // The device clock is the injected one where a harness drives it;
+        // here the mux's reader thread supplies the real monotonic instant,
+        // exactly like the connector's data-plane pump.
+        let _ = self.0.handle_udp_inbound(datagram, src, crate::sys::mono_ms());
+    }
+}
 
 /// 生产执行者：每个 round 一枚新线程（上游每协商一枚 goroutine）。
 pub struct ThreadGatherExec;
@@ -1093,12 +1111,12 @@ pub struct PeerIceOrchestrator {
     /// 就没有东西可轮转、可配给了（审计 §2.7 stage 1，"Retires: the need
     /// for E1/E2/I7"）。
     exec: Arc<dyn GatherExec>,
-    /// STAGE 2（官方对齐审计 §2.7）：**整个 ICE 平面唯一那枚 socket**。
-    /// 设备路径由 connector 在壳层 protect + feed 后填（
-    /// [`crate::connector::connector_ice_mux_feed_json`]）；主机/测试路径在
-    /// 首次需要时从 `socks` 供给里取一枚受保护 socket 就地建（
-    /// [`PeerIceOrchestrator::arm_mux`]）——两条路都只有这一枚，绝不每 peer
-    /// 每接口一枚。
+    /// STAGE 2/3（官方对齐审计 §2.7）：**整个 ICE 平面唯一那枚 socket**，stage 3
+    /// 起它**就是** WG 外层 socket。设备路径由 connector 在壳层 protect + feed 之后
+    /// 建在这枚 socket 上（[`PeerIceOrchestrator::arm_mux_from_wg_socket`]，
+    /// 上游 `createOrUpdateMux`）；主机/测试路径在首次需要时从 `socks` 供给里取一枚
+    /// 受保护 socket 就地建（[`PeerIceOrchestrator::arm_mux`]）——两条路都只有这一
+    /// 枚，绝不每 peer 每接口一枚。
     mux: IceMuxSlot,
 }
 
@@ -1172,6 +1190,70 @@ impl PeerIceOrchestrator {
         ));
         *self.mux.lock().unwrap_or_else(|p| p.into_inner()) = Some(mux.clone());
         Ok(mux)
+    }
+
+    /// STAGE 3（官方对齐审计 §2.7）：把**唯一一枚共享 mux**建在 WG 设备自己的
+    /// 外层 socket 上 —— 上游 `ICEBind.createOrUpdateMux`（`ice_bind.go:291-316`
+    /// 「Don't close the old mux - it doesn't own the underlying connections」）
+    /// 与 `TunKernelDevice.Up`（`device_kernel_unix.go:97-113`）都是这个形状：
+    /// ICE 与 WireGuard 共用**一枚** socket，一次 open+bind+protect。
+    ///
+    /// 做四件事，缺一不可：
+    /// 1. 从 WG 设备借一枚 fd（dup，绝不关闭对方的），`IceMux::adopt` 成 mux；
+    /// 2. 填 [`PeerIceOrchestrator::mux`] 槽（旧 mux 的会话由
+    ///    [`PeerIceOrchestrator::drop_stale_mux_sessions`] 拆掉重协商）；
+    /// 3. 挂上 WG 数据面 sink：非 STUN 包**直接**进设备（`handle_udp`），不再
+    ///    经会话队列（上游：WG 自己的接收路径接着处理 STUN 过滤器剩下的缓冲，
+    ///    `ice_bind.go:257-285`）；
+    /// 4. 让设备交出世面读端（`set_shared_socket_reader(true)`）：一枚 socket
+    ///    只能有一个读端，否则两边互相偷包。
+    ///
+    /// reader 线程不在这里起：生产由 connector 在同一步 `start_reader()`，
+    /// 注入时钟的 host harness 则继续自己 `drain()`（否则一个真实线程会打破
+    /// 它们的确定性）。返回 `(mux, replaced)`。
+    pub fn arm_mux_from_wg_socket(
+        &mut self,
+    ) -> Result<(Arc<crate::ice_mux::IceMux>, bool), ManagementError> {
+        let Some(raw_fd) = self.wg.wg_socket_fd() else {
+            return Err(ManagementError::Network("ice:no-wg-socket".into()));
+        };
+        let dup = crate::mgmtsock::dup_socket_fd(raw_fd)
+            .map_err(|e| ManagementError::Network(format!("ice:no-wg-socket (errno={})", e.errno())))?;
+        let owned = unsafe { std::os::fd::FromRawFd::from_raw_fd(dup) };
+        let overlay = crate::ice::system_overlay_nets(&self.blacklist);
+        // already bound + protected: the WG outer socket itself
+        let mux = crate::ice_mux::IceMux::adopt(owned, overlay, 0)
+            .map_err(|e| ManagementError::Network(format!("ice:mux-over-wg: {e}")))?;
+        let port = mux.local_port();
+        let shared = self.wg.set_shared_socket_reader(true);
+        mux.attach_udp_sink(Arc::new(WgApplierSink(self.wg.clone())));
+        let replaced = self
+            .mux
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(mux.clone())
+            .is_some();
+        crate::hilog::emit(&format!(
+            "N5e_ICE|mux-arm|source=wg-socket|fd={raw_fd}|port={port}|replaced={}|device-reader-retired={}",
+            u8::from(replaced),
+            u8::from(shared)
+        ));
+        Ok((mux, replaced))
+    }
+
+    /// STAGE 3：放掉共享 mux —— 停掉它的读线程、关掉它自己那枚 dup（恰好一次）。
+    /// connector 的 stop 路径在 `stop_all()` 之后调用（会话都已注销）；仍持有它的
+    /// 会话只会让 socket 多活一会儿，读线程已经停了，不会再有人读。
+    /// 返回 `true` = 确实放掉了一枚。
+    pub fn drop_mux(&mut self) -> bool {
+        let taken = self.mux.lock().unwrap_or_else(|p| p.into_inner()).take();
+        match taken {
+            Some(mux) => {
+                mux.stop_reader();
+                true
+            }
+            None => false,
+        }
     }
 
     /// STAGE 2：把骑着一枚**已被替换**的 mux 的会话整段拆掉重协商。壳层在
@@ -1641,20 +1723,23 @@ impl PeerIceOrchestrator {
             }
         }
         let mut first_err: Option<ManagementError> = None;
-        // STAGE 2（官方对齐审计 §2.7）：共享 mux 的**读循环**。上游把
-        // `ReadFromConn` 跑在独立 goroutine 里（`universal.go:80-108`）；本阶段
-        // 由这一拍来读——非阻塞 drain，分类与投递全在 mux 内完成（ufrag /
-        // 远端地址 demux、srflx 缓存填充、overlay 源丢弃），每拍一次，
-        // 注入时钟的 host harness 因此保持确定性。stage 3（mux 同时承载
-        // WireGuard）才会换成真正的读线程。
+        // STAGE 2/3（官方对齐审计 §2.7）：共享 mux 的**读循环**。上游把
+        // `ReadFromConn` 跑在独立 goroutine 里（`universal.go:80-108`；设备路径
+        // `device_kernel_unix.go:109` `go mux.ReadFromConn`）。stage 3 起生产由
+        // mux 自己的**读线程**读（`start_reader`），此时这里绝不能再读——同一枚
+        // fd 两个读端会互相偷包（STUN 被设备读走就再也回不到会话，WG 数据被这一
+        // 拍读走也一样）。没有读线程时（注入时钟的 host harness、主机 CLI）本拍
+        // 照旧承担读循环，语义与 stage 2 完全一致。
         if let Some(mux) = self.ice_mux() {
-            let read = mux.drain();
-            if read > 0 {
-                let s = mux.stats();
-                crate::hilog::emit(&format!(
-                    "N5e_ICE|mux|read={read}|xor_hit={}|xor_fill={}|overlay_drop={}|stun_unknown={}|data_unknown={}",
-                    s.xor_hits, s.xor_filled, s.overlay_dropped, s.stun_unknown, s.data_unknown
-                ));
+            if !mux.reader_running() {
+                let read = mux.drain();
+                if read > 0 {
+                    let s = mux.stats();
+                    crate::hilog::emit(&format!(
+                        "N5e_ICE|mux|read={read}|xor_hit={}|xor_fill={}|overlay_drop={}|stun_unknown={}|data_unknown={}",
+                        s.xor_hits, s.xor_filled, s.overlay_dropped, s.stun_unknown, s.data_unknown
+                    ));
+                }
             }
         }
         // 壳层换过 mux（物理网络切换后重新 protect + feed）：仍骑旧 mux 的
@@ -1833,6 +1918,11 @@ impl PeerIceOrchestrator {
             // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
             // 规则不变；会话已拆（Failed 回收）则数据随之消亡（路径已死）。
             // 无条件执行：入向数据面同样不得随 signal 流断而停。
+            //
+            // STAGE 3：走这条路只在 mux **没有** WG sink 时（provider 建的
+            // host mux、或会话自有 socket 的旧路径）——生产里
+            // `arm_mux_from_wg_socket` 已把非 STUN 包直接送进设备，会话队列
+            // 因此始终为空（`take_data_rx` 空转，无重复投递）。
             let datagrams = match self.peers[idx].session.as_mut() {
                 Some(s) => s.take_data_rx(),
                 None => Vec::new(),

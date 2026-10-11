@@ -1286,6 +1286,120 @@ fn applier_peer_set_follows_network_map_snapshots() {
         .is_err());
 }
 
+// ---------------------------------------------------------------------------
+// 12. STAGE 3: the ONE shared socket (mux) is the device's socket
+// ---------------------------------------------------------------------------
+
+/// The production sink shape: non-STUN datagrams the mux demuxed go straight
+/// into the WG device (`handle_udp`). `crate::peer_conn`'s own `WgApplierSink`
+/// is private, so the test spells the same two lines.
+struct DeviceSink(Arc<WgDeviceApplier>);
+
+impl netbird_core::ice_mux::MuxUdpSink for DeviceSink {
+    fn handle_udp(&self, datagram: &[u8], src: netbird_core::ice_mux::MappedAddr) {
+        let _ = self.0.handle_udp_inbound(datagram, src, sys::mono_ms());
+    }
+}
+
+/// STAGE 3 (official-alignment audit §2.7): the ICE mux and the WireGuard device
+/// share ONE socket, and there is exactly ONE reader of it. Proven at the device
+/// layer:
+/// * the mux is built over the device's OWN fd (upstream `createOrUpdateMux`,
+///   `ice_bind.go:291-316`) and reports the device's port;
+/// * with the shared reader armed, the device's own `service_udp` reads NOTHING:
+///   a datagram that WOULD match a landed endpoint stays in the socket buffer
+///   through any number of pumps, and is handed to `handle_udp` only by the mux
+///   reader once it runs;
+/// * neither owner closes the other's descriptor: after the mux is dropped its
+///   own dup is closed (EBADF) while the device's dup and the shell's raw fd both
+///   still answer `getsockname`;
+/// * the STUN demux is unchanged: only non-STUN ever reaches the device.
+#[test]
+fn the_mux_shares_the_devices_socket_and_the_device_stops_reading_it() {
+    let a = Node::build(&SECRET_A, ADDR_A, key_a(), vec![(key_b(), vec![(ADDR_B, 32)])]);
+    let b = Node::build(&SECRET_B, ADDR_B, key_b(), vec![(key_a(), vec![(ADDR_A, 32)])]);
+    let mut now = 1000u64;
+
+    // land the endpoints (as the ICE selection would) so a datagram from B's
+    // socket to A's socket WOULD be accepted by the device if it were read
+    let (pa, pb) = (a.port(), b.port());
+    a.dev(|d| d.set_endpoint(b.key.as_str(), [127, 0, 0, 1], pb, now)).expect("endpoint A→B");
+
+    // (1) the mux is built over the device's own socket — the device's fd, not a
+    //     fresh one (upstream: the mux wraps the WG bind's conn).
+    let dev_fd = a.app.wg_socket_fd().expect("the device's outer socket");
+    let shell_keep = netbird_core::mgmtsock::dup_socket_fd(a.wg_raw).expect("dup of the shell fd");
+    let mux_owned = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(
+        netbird_core::mgmtsock::dup_socket_fd(dev_fd).expect("dup of the device fd"),
+    ) };
+    let mux = netbird_core::ice_mux::IceMux::adopt(mux_owned, vec![], 0).expect("mux over the device socket");
+    let mux_fd = mux.raw_fd();
+    assert_eq!(mux.local_port(), pa, "the mux IS the device's socket (one port)");
+    assert!(!mux.attach_udp_sink(Arc::new(DeviceSink(a.app.clone()))), "first attach");
+    assert!(mux.sink_armed());
+
+    // (2) the device hands the read half over: `service_udp` must go quiet
+    assert!(a.dev(|d| d.set_shared_socket_reader(true)));
+    assert!(a.dev(|d| d.shared_socket_reader()));
+
+    // a datagram from B's source (the landed endpoint) — garbage bytes, so only
+    // the source match decides whether it is taken. It must sit untouched while
+    // only the DEVICE pumps (its own read is retired), and reach the device
+    // through the mux reader afterwards.
+    wire_send_from(b.wg_raw, ([127, 0, 0, 1], pa), b"stage-3-not-a-wg-message");
+    for _ in 0..5 {
+        step(&a, now);
+        now += 10;
+    }
+    assert_eq!(
+        a.stats().rx_packets,
+        0,
+        "with the shared reader armed the device must not read the socket at all"
+    );
+    assert!(mux.start_reader(), "the ONE reader starts");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while a.stats().rx_packets == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        now += 10;
+        step(&a, now);
+    }
+    assert_eq!(a.stats().rx_packets, 1, "the mux reader handed the datagram to handle_udp");
+    assert_eq!(
+        a.stats().decrypt_errors,
+        1,
+        "it reached the DEVICE (which counts the garbage as a decrypt failure) — not STUN"
+    );
+    // …and the mux counted ONE unknown source: no ICE session in this test ever
+    // wrote to that address, and the datagram was still handed on to WG — exactly
+    // upstream's split (the mux does not second-guess the data plane; WG's own
+    // source match decides). The counter is observation, not a routing gate.
+    assert_eq!(mux.stats().data_unknown, 1);
+
+    // (3) fd lifetime: dropping the mux closes exactly ITS dup; the device's dup
+    //     and the shell's raw fd are untouched (and the socket is still usable).
+    assert!(mux.stop_reader());
+    drop(mux);
+    let mut name = sys::sockaddr_in::new([0, 0, 0, 0], 0);
+    let mut len = core::mem::size_of::<sys::sockaddr_in>() as u32;
+    assert_eq!(
+        unsafe { sys::getsockname(mux_fd, &mut name, &mut len) },
+        -1,
+        "the mux's own dup is closed when the last Arc goes"
+    );
+    assert_eq!(sys::errno(), sys::EBADF);
+    assert_eq!(sock_port(dev_fd), pa, "the device's own dup survives the mux");
+    assert_eq!(sock_port(a.wg_raw), pa, "the shell's raw fd survives both");
+    assert_eq!(sock_port(shell_keep), pa);
+    assert!(a.dev(|d| d.shared_socket_reader()), "the device still knows who reads");
+    unsafe { sys::close(shell_keep) };
+
+    // the device still sends on its socket after the mux is gone (its own dup)
+    let frame = ip_udp_packet(ADDR_A, ADDR_B, 40000, 40001, b"post-mux-probe");
+    write_tun(&a, &frame);
+    step(&a, now);
+    assert!(a.stats().tx_packets >= 1, "the device's socket is still a working egress");
+}
+
 fn entry(key: &str, ips: &[([u8; 4], u8)]) -> WgPeerEntry {
     WgPeerEntry {
         pub_key_b64: key.to_string(),

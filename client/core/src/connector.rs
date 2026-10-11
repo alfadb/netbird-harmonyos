@@ -481,6 +481,23 @@ pub trait WgPeerApplier: Send + Sync + 'static {
     fn handle_udp_inbound(&self, _datagram: &[u8], _src: ([u8; 4], u16), _now_ms: u64) -> usize {
         0
     }
+    /// OFFICIAL-ALIGNMENT STAGE 3 (audit §2.7): the BORROWED fd of the WG outer
+    /// socket this seam's device reads and writes — the socket the ONE shared
+    /// ICE mux is built over (upstream `createOrUpdateMux` wraps the WG bind's
+    /// own conn, `ice_bind.go:291-316`). `None` (the default) = a seam with no
+    /// shared-socket device: the mux then comes from the ICE socket provider
+    /// instead, and the shell's arm entry fails closed (`no-wg-socket`).
+    fn wg_socket_fd(&self) -> Option<i32> {
+        None
+    }
+    /// OFFICIAL-ALIGNMENT STAGE 3: hand this device's socket read half to the
+    /// shared mux's reader thread — there is exactly ONE reader of the socket
+    /// (`WgDevice::service_udp` goes quiet). No-op by default (a seam without a
+    /// shared socket has nothing to hand over). Returns whether the state
+    /// changed.
+    fn set_shared_socket_reader(&self, _on: bool) -> bool {
+        false
+    }
     /// N11: recycle the peer's WG endpoint + egress after ICE teardown
     /// (upstream `RemoveEndpointAddress`, `conn.go:531`) — afterwards the
     /// device must not send anything for the peer (fail-closed; no silent
@@ -5476,9 +5493,11 @@ pub struct ConnectorHandle {
     /// kept only so the shell's existing pool feed keeps answering ok until
     /// stage 4 deletes both sides (audit §2.7 stage 4).
     ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>,
-    /// STAGE 2: the ONE shared ICE mux slot the orchestrator reads
-    /// (`connector_ice_mux_feed` fills it after the shell protected the fd).
-    /// `None` = caller-supplied orchestrator without a mux slot (tests).
+    /// STAGE 2/3: the ONE shared mux slot the orchestrator reads. The shell
+    /// arms it OVER the WG device's own protected socket (`connector_ice_mux_arm`
+    /// → `arm_mux_from_wg_socket`); host/test paths let the orchestrator build it
+    /// from `ice_sockets` (or arm it explicitly). `None` = caller-supplied
+    /// orchestrator without a mux slot (tests).
     ice_mux: Option<crate::peer_conn::IceMuxSlot>,
     /// N5d: the protected signal-socket source behind the signal link
     /// (resupply handle for `connector_signal_socket_feed`). `None` = no
@@ -6041,6 +6060,12 @@ impl ConnectorHandle {
         // (N13 plan §4). Runs even when never started (no-op).
         self.shared.stop_relay();
         self.ice.lock_poison().stop_all();
+        // STAGE 3: the ONE shared socket goes with the sessions it served — the
+        // mux (and with it its reader thread and its own dup) is released here,
+        // after EVERY session has unregistered, so a stopped connector leaves no
+        // reader thread and no fd behind. The fd closes exactly once (the mux's
+        // own owned dup); the WG device's and the shell's descriptors are theirs.
+        self.ice.lock_poison().drop_mux();
         self.wg.clear();
         self.host.clear();
         {
@@ -6984,46 +7009,46 @@ pub fn connector_ice_socket_feed_json(fd: i32) -> String {
     format!("{{{},{}}}", jbool("ok", true), jinum("queued", source.pending() as i64))
 }
 
-/// The `connector_ice_mux_feed(fd)` implementation (official-alignment §2.7
-/// stage 2) — shell-side feed of the ONE PROTECTED shared ICE mux socket,
-/// opened and bound by the core (`crate::ice_mux::ice_mux_open`), protected by
-/// the shell and then adopted here. This is the `wg_fwd_open` shape applied to
-/// the ICE plane: the core binds, the shell protects, the core adopts the SAME
-/// fd (a dup of it — the number stays borrowed, the shell closes its original).
+/// The `connector_ice_mux_arm()` implementation (official-alignment §2.7
+/// **stage 3**) — build the ONE shared ICE mux OVER the WireGuard device's own
+/// outer socket and start its reader thread.
 ///
-/// Replacing an already-armed mux is allowed and meaningful: after a physical
-/// network change the shell re-creates the `VpnConnection`, so the previous
-/// fd's protection is gone and a fresh socket is opened, protected and fed.
-/// The orchestrator notices the new mux on its next tick and renegotiates the
-/// sessions that still ride the old one
-/// ([`PeerIceOrchestrator::drop_stale_mux_sessions`]).
+/// This replaces stage 2's `ice_mux_open()` + `connector_ice_mux_feed(fd)` pair:
+/// there is no second socket any more. Upstream does the same thing —
+/// `ICEBind.createOrUpdateMux` wraps the WG bind's own connection
+/// (`client/iface/bind/ice_bind.go:291-316`, *"the sockets are managed by
+/// WireGuard's StdNetBind, not by us"*) and the kernel-device path builds the mux
+/// over `sharedsock.Listen(wgPort)` (`client/iface/device/device_kernel_unix.go:97-113`).
+/// The shell therefore keeps ONE open+bind (`wg_fwd_open`) and ONE
+/// `VpnConnection.protect` for both planes; this entry only *arms* what is
+/// already protected and fed.
 ///
 /// Failure tokens (fail-closed): `no-connector`, `no-mux-slot` (caller-supplied
-/// orchestrator / host-test construction), `socket-fd-missing`,
-/// `socket-fd-invalid` (not dup-able), `socket-unbound` (the fd was never
-/// bound), `port-mismatch`. Success: `{"ok":true,"port":<n>,"replaced":<bool>}`.
-pub fn connector_ice_mux_feed_json(fd: i32) -> String {
+/// orchestrator / host-test construction), `no-wg-device` (no live WG device —
+/// nothing to share a socket with), `no-wg-socket` (dead fd), `socket-fd-invalid`
+/// (not dup-able), `mux-over-wg` (the socket was unbound / a bind mismatch).
+/// Success: `{"ok":true,"port":<n>,"replaced":<bool>,"reader":<bool>}`.
+pub fn connector_ice_mux_arm_json() -> String {
     let slot = connector_slot();
     let Some(handle) = slot.as_ref() else {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-connector"));
     };
-    let Some(mux_slot) = handle.ice_mux.as_ref() else {
+    if handle.ice_mux.is_none() {
         return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-mux-slot"));
-    };
-    if fd < 0 {
-        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "socket-fd-missing"));
     }
-    let dup = match crate::mgmtsock::dup_socket_fd(fd) {
-        Ok(d) => d,
-        Err(e) => return format!("{{{},{}}}", jbool("ok", false), jstr("error", e.token())),
+    let Some(feed) = handle.wg_feed.as_ref() else {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-wg-device"));
     };
-    let owned = unsafe { std::os::fd::FromRawFd::from_raw_fd(dup) };
-    let owned: std::os::fd::OwnedFd = owned;
-    let overlay = crate::ice::system_overlay_nets(&crate::ice::DEFAULT_INTERFACE_BLACKLIST);
-    let mux = match crate::ice_mux::IceMux::adopt(owned, overlay, 0) {
-        Ok(m) => m,
+    if feed.socket_fd().is_none() {
+        return format!("{{{},{}}}", jbool("ok", false), jstr("error", "no-wg-socket"));
+    }
+    let (mux, replaced) = match handle.ice.lock_poison().arm_mux_from_wg_socket() {
+        Ok(armed) => armed,
         Err(e) => {
             let token = match &e {
+                crate::management::ManagementError::Network(msg) if msg.contains("no-wg-socket") => {
+                    "no-wg-socket"
+                }
                 crate::management::ManagementError::Network(msg) if msg.contains("unbound") => {
                     "socket-unbound"
                 }
@@ -7035,21 +7060,23 @@ pub fn connector_ice_mux_feed_json(fd: i32) -> String {
             return format!("{{{},{}}}", jbool("ok", false), jstr("error", token));
         }
     };
+    // The ONE reader: upstream `go mux.ReadFromConn(t.ctx)`
+    // (`device_kernel_unix.go:109`). From here the mux demuxes every datagram on
+    // the shared socket — STUN to the sessions, everything else straight into WG
+    // (`handle_udp`) — and the ICE pump stops draining it.
+    let reader = mux.start_reader();
     let port = mux.local_port();
-    let replaced = mux_slot
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .replace(mux)
-        .is_some();
     crate::hilog::emit(&format!(
-        "N5e_ICE|mux-feed|port={port}|replaced={}|source=shell",
-        u8::from(replaced)
+        "N5e_ICE|mux-arm|port={port}|replaced={}|reader={}|source=wg-socket",
+        u8::from(replaced),
+        u8::from(reader)
     ));
     format!(
-        "{{{},{},{}}}",
+        "{{{},{},{},{}}}",
         jbool("ok", true),
         jinum("port", port as i64),
-        jbool("replaced", replaced)
+        jbool("replaced", replaced),
+        jbool("reader", reader)
     )
 }
 
