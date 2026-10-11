@@ -168,6 +168,12 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("account_auth_discovery_start", napi_account_auth_discovery_start);
     reg!("account_auth_discovery_poll", napi_account_auth_discovery_poll);
     reg!("account_auth_discovery_cancel", napi_account_auth_discovery_cancel);
+    // 2026-10-12: the login action's management step (the JWT registration the
+    // official Android flow runs before the engine starts). Appended after the
+    // discovery trio — append-only, every pre-existing name keeps its position.
+    reg!("account_login_start", napi_account_login_start);
+    reg!("account_login_poll", napi_account_login_poll);
+    reg!("account_login_cancel", napi_account_login_cancel);
     // Increment 131: dedicated route catalog (append-only at the tail of the
     // registration list — every pre-existing name keeps its position).
     reg!("connector_routes", napi_connector_routes);
@@ -603,6 +609,9 @@ mod tests {
             "account_auth_discovery_start",
             "account_auth_discovery_poll",
             "account_auth_discovery_cancel",
+            "account_login_start",
+            "account_login_poll",
+            "account_login_cancel",
             "connector_routes",
             "connector_route_selection_set",
             "alloc_stats",
@@ -1680,6 +1689,30 @@ unsafe extern "C" fn napi_account_auth_discovery_cancel(env: NapiEnv, info: Napi
     let args = cb_args(env, info);
     let id = args.i32_at(0, 0);
     ret_json(env, crate::account_auth::account_auth_discovery_cancel_json(id.max(0) as u64))
+}
+
+// 2026-10-12: the login action's management step (same one-shot job shape as
+// the discovery trio). `account_login_start(requestJson)` takes
+// `{"config": <connector start config>, "jwt": <token exchange result>}`; the
+// JWT lives only inside the job and is never written anywhere.
+unsafe extern "C" fn napi_account_login_start(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    match args.string_at_bounded(0, ACCOUNT_AUTH_INPUT_MAX) {
+        Some(request) => ret_json(env, crate::account_auth::account_login_start_json(&request)),
+        None => ret_json(env, "{\"ok\":false,\"error\":\"invalid-input\"}".into()),
+    }
+}
+
+unsafe extern "C" fn napi_account_login_poll(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_login_poll_json(id.max(0) as u64))
+}
+
+unsafe extern "C" fn napi_account_login_cancel(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+    let args = cb_args(env, info);
+    let id = args.i32_at(0, 0);
+    ret_json(env, crate::account_auth::account_login_cancel_json(id.max(0) as u64))
 }
 
 // Increment 131: the ArkTS-facing route catalog, a ZERO-argument read-only

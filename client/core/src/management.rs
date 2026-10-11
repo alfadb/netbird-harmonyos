@@ -103,6 +103,22 @@ pub enum ManagementError {
     Timeout,
     /// 401/403 from the server (bad/expired JWT or PAT).
     Auth { status: u16, message: String },
+    /// 2026-10-12: this peer needs a FRESH interactive login — upstream
+    /// `StatusNeedsLogin` (`client/internal/state.go:15`), set by the connect
+    /// loop when the management `Login` is refused with `PermissionDenied`
+    /// (`client/internal/connect.go:373-377`; the server's codes are
+    /// `peer login has expired, please log in once more` /
+    /// `no peer auth method provided, please use a setup key or interactive
+    /// SSO login`, `management/server/peer.go:746`, `:1477`). Raised by
+    /// [`crate::connector`]'s account-mode connect sequence; the login-action
+    /// path ([`crate::account_auth`]) reports the same verdict when the
+    /// interactive login's JWT registration is refused. `isLoginNeeded` is
+    /// upstream's `InvalidArgument || PermissionDenied`
+    /// (`client/internal/auth/auth.go:491-521`).
+    /// Deliberately distinct from [`ManagementError::Auth`]: the shell renders
+    /// the label the official UI shows (`Login required` / 「需要登录」)
+    /// instead of retrying a credential that cannot heal by itself.
+    NeedsLogin { status: u16, message: String },
     /// Any other 4xx (bad request, not found, ...). Includes 404/405 — the
     /// register mock-contract will land here against a real server.
     /// Local (pre-flight) validation failures reuse this variant with
@@ -127,6 +143,9 @@ impl core::fmt::Display for ManagementError {
             ManagementError::Auth { status, message } => {
                 write!(f, "authentication failed ({status}): {message}")
             }
+            ManagementError::NeedsLogin { status, message } => {
+                write!(f, "login required ({status}): {message}")
+            }
             ManagementError::Request { status, message } => {
                 write!(f, "request rejected ({status}): {message}")
             }
@@ -140,6 +159,21 @@ impl core::fmt::Display for ManagementError {
 }
 
 impl std::error::Error for ManagementError {}
+
+impl ManagementError {
+    /// The numeric gRPC/HTTP status this error carries; `0` for the classes
+    /// that have none (`Network` / `Timeout` / `Parse` / `UnsupportedUrl`,
+    /// plus the pre-flight validation reuses of `Request`).
+    pub fn status_code(&self) -> u16 {
+        match self {
+            ManagementError::Auth { status, .. }
+            | ManagementError::NeedsLogin { status, .. }
+            | ManagementError::Request { status, .. }
+            | ManagementError::Server { status } => *status,
+            _ => 0,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // transport abstraction

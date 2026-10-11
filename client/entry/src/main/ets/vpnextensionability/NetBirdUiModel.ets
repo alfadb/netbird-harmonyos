@@ -1122,6 +1122,22 @@ export function lastHandshakeText(seconds: number | null): string {
   return `${Math.floor(hours / 24)} 天前`;
 }
 
+// 2026-10-12: the stable token the CORE reports when this peer needs a fresh
+// interactive login — upstream `StatusNeedsLogin`
+// (client/internal/state.go:15, set at client/internal/connect.go:373-377).
+// It reaches the UI as the LAST_ERROR class in the status document and as the
+// connect-failure notice token. It is NOT the generic `auth` class: no retry of
+// the same credential can succeed.
+export const NEEDS_LOGIN_CLASS: string = 'needs-login';
+// The official label: android-client `main_status_login_required` = "Login
+// required" (app/src/main/res/values/strings.xml:32), the text the home screen
+// paints through HomeFragment.onLoginRequired (HomeFragment.java:873-883) and
+// the session-expiry path (MainActivity.java:1030-1036). The official UI adds
+// NO separate action hint: on Android the connect toggle itself runs the
+// interactive login ("the connect toggle already runs the interactive login",
+// HomeFragment.java:193-199), so the label is the whole message.
+export const NEEDS_LOGIN_TEXT: string = '需要登录';
+
 // Actionable hint for the last error class ('' when none) — mirrors the
 // core's class-only discipline (network / timeout / auth).
 export function lastErrorText(errorClass: string): string {
@@ -1131,6 +1147,13 @@ export function lastErrorText(errorClass: string): string {
   }
   if (errorClass === 'auth') {
     return '设备未注册或 Setup Key 无效，请到设置重新配置';
+  }
+  // 2026-10-12: the core's own needs-login class (upstream StatusNeedsLogin —
+  // the management server refused this peer: its session expired, or it is not
+  // registered). Retrying the same credential cannot help, so the line is the
+  // official label itself.
+  if (errorClass === NEEDS_LOGIN_CLASS) {
+    return NEEDS_LOGIN_TEXT;
   }
   if (errorClass === 'timeout') {
     return '连接管理服务器超时，请检查网络后重试';

@@ -96,9 +96,12 @@ import { UiStatusDocument, buildUiStatusDocument } from './NetBirdUiModel';
 import { ifaceLostDecision, ifaceLostRetryAllowed, ifaceVerifyOutcome, settleWaitAction }
   from './NetBirdRecreatePolicy';
 import { ACCOUNT_MODE_ACCOUNT, ACCOUNT_MODE_FILE_NAME, ACCOUNT_MODE_SETUP_KEY,
-  decideAccountCredentialMode, parseAuthMode }
+  parseAuthMode }
   from '../login/NetBirdAccountMode';
-import { loadAccountCredentials } from '../login/NetBirdAccountStore';
+// 2026-10-12: no account credential store any more. Upstream keeps no token
+// (client/internal/profilemanager/config.go:62-135): the management JWT is used
+// once by the UI-process login action (NetBirdAccountLogin → the core's
+// `account_login_*` NAPI job) and every connect is token-less.
 
 import { isPhysicalNetworkSwitch, lanRoamCheckDue,
   lanRoamDecision, protectedConnectionRejectionReason,
@@ -1728,7 +1731,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     let setupKey: string = '';
-    let accountJwt: string = '';
     let authMode: string = ACCOUNT_MODE_SETUP_KEY;
     let device: DeviceConfigFile;
     let credentialFailure: string = 'credentials-missing';
@@ -1743,18 +1745,18 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         setupKey = readCredentialFileText(filesDir, setupKeyFile);
         device = parseDeviceConfig(readCredentialFileText(filesDir, deviceFile));
       } else if (authMode === ACCOUNT_MODE_ACCOUNT) {
-        credentialFailure = 'account-login-required';
+        // 2026-10-12: the account mode start reads the DEVICE CONFIG only. The
+        // peer identity (persistent WireGuard key) and the management URL are
+        // all a connect needs — upstream sends `Login` with no token and
+        // identifies the peer by that key (grpc.go:650-656). A missing/invalid
+        // config is the only local abort, and its class is the server's own
+        // needs-login verdict (the fix is an interactive 账户登录, which
+        // registers this very identity).
+        credentialFailure = 'needs-login';
         device = parseDeviceConfig(readPrivateFileText(filesDir, deviceFile));
-        const stored = await loadAccountCredentials(filesDir, device.management_url);
-        const decision: string = decideAccountCredentialMode(authMode, stored !== null,
-          stored?.jwt ?? '', stored?.expiresAtMs ?? 0, Date.now());
-        if (decision !== ACCOUNT_MODE_ACCOUNT || stored === null) {
-          throw new Error('account-login-required');
-        }
-        accountJwt = stored.jwt;
       } else {
-        credentialFailure = 'account-login-required';
-        throw new Error('account-login-required');
+        credentialFailure = 'needs-login';
+        throw new Error('needs-login');
       }
     } catch (error) {
       this.writeConnectFailureForUi(credentialFailure);
@@ -1888,8 +1890,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
 
     // 4. start the connector over the protected socket (Rust dup-consumes
     // the fd per dial; the original number stays shell-owned — fd contract)
+    // 2026-10-12: account mode sends NO credential at all (`{}`): the connect
+    // identifies the peer by its persistent WireGuard public key, exactly like
+    // upstream's `Login` (shared/management/client/grpc.go:650-656). The setup
+    // key is the only credential left, and the core hands it to the `Register`
+    // second step on a login-needed verdict (upstream auth.go:208-236).
     const creds: Record<string, Object> = authMode === ACCOUNT_MODE_ACCOUNT
-      ? { 'jwt': accountJwt } : { 'setup_key': setupKey };
+      ? {} : { 'setup_key': setupKey };
     let start: ConnectorStartResult;
     try {
       start = connectorStartWithSocket(mgmtFd,
@@ -1994,6 +2001,10 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           failureClass = 'none';
         }
       }
+      // 2026-10-12: the core's own class travels to the UI unchanged — the
+      // `needs-login` one (upstream StatusNeedsLogin) renders as the official
+      // 「需要登录」 label, and nothing has to be dropped on the way: there is
+      // no stored token anywhere.
       this.writeConnectFailureForUi(failureClass);
       hilog.error(DOMAIN, TAG,
         'VPN_CONNECTOR_ABORTED|requestId=%{public}s|stage=signal-uri|' +

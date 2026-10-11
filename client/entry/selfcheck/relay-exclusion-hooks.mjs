@@ -205,9 +205,7 @@ const ACCOUNT_MODE = 'data:text/javascript,' + encodeURIComponent(
   'export const ACCOUNT_MODE_FILE_NAME = "netbird-auth-mode";\n' +
   'export const ACCOUNT_MODE_SETUP_KEY = "setup-key";\n' +
   'export const parseAuthMode = (text) => !text || !text.trim() || text.trim() === "setup-key"' +
-  ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";\n' +
-  'export const decideAccountCredentialMode = () => "account-login-required";');
-const ACCOUNT_STORE = 'data:text/javascript,export%20async%20function%20loadAccountCredentials()%7Breturn%20null%3B%7D';
+  ' ? "setup-key" : text.trim() === "account" ? "account" : "invalid";');
 
 const STUBS = {
   '@ohos.app.ability.VpnExtensionAbility': VPN_ABILITY,
@@ -236,7 +234,6 @@ const STUBS = {
   './NetBirdDiagnostics': DIAG_NOOP,
   './NetBirdSystemEvents': DIAG_NOOP,
   '../login/NetBirdAccountMode': ACCOUNT_MODE,
-  '../login/NetBirdAccountStore': ACCOUNT_STORE,
   // 2026-10-07 per-NetID route selection (decision B): the REAL extension now
   // imports the route file adapter by value, so the specifier must resolve for
   // the extension fixture to link. This suite never calls it (it drives

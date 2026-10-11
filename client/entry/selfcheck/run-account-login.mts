@@ -20,6 +20,10 @@ const metadata = {
 };
 const state = {
   requests: [], cancelled: [], pollIds: [], polls: [], exchanges: [], transportCancels: 0,
+  // 2026-10-12: the login-action job (`account_login_*`) — what the controller
+  // sends after the token exchange, what it gets back, and what it cancels.
+  loginRequests: [], loginPolls: [], loginCancelled: [], loginOutcome: 'success',
+  loginFailure: '', loginWait: false,
   requestId: 40, metadata, pollWait: false, tokenResult: {
     ok: true, errorCode: '', errorDetail: '',
     tokens: { accessToken: 'access-secret', idToken: 'id-secret', refreshToken: 'refresh-secret', expiresIn: 90 }
@@ -65,22 +69,52 @@ try {
   catch (error) { busy = error instanceof Error && error.message === 'busy'; }
   check('a second controller cannot replace the active native discovery owner', busy);
 
-  const credentials = await controller.finish('callback-code');
-  check('finish selects access JWT and maps refresh token and positive expiry',
-    credentials.jwt === 'access-secret' && credentials.refreshToken === 'refresh-secret' &&
-    credentials.expiresAtMs > Date.now() && credentials.expiresAtMs <= Date.now() + 90000 &&
-    credentials.managementUrl === 'https://mgmt.example');
+  // 2026-10-12: `finish` is the WHOLE login action (upstream client/android/
+  // client.go:194-215 → client/internal/auth/auth.go:184-236): exchange the
+  // code, then hand the JWT to the core's `account_login_*` job together with
+  // the connector config the caller built, and return ONLY the management URL.
+  const CONFIG = '{"management_url":"https://mgmt.example","private_key":"KEY"}';
+  const result = await controller.finish('callback-code', CONFIG);
+  check('finish returns the management URL and NOTHING token-shaped',
+    result.managementUrl === 'https://mgmt.example' &&
+    Object.keys(result).length === 1 &&
+    !JSON.stringify(result).includes('access-secret') &&
+    !JSON.stringify(result).includes('refresh-secret'));
+  check('the login job received the exchanged access JWT and the connector config',
+    state.loginRequests.length === 1 &&
+    state.loginRequests[0].config === CONFIG && state.loginRequests[0].jwt === 'access-secret');
+  check('a successful login job is reported as success and cancels nothing',
+    state.loginOutcome === 'success' && state.loginCancelled.length === 0);
   check('duplicate finish is rejected and code is exchanged once',
-    await rejected(controller.finish('callback-code'), 'exchange_already_used') && state.exchanges.length === 1);
+    await rejected(controller.finish('callback-code', CONFIG), 'exchange_already_used') &&
+    state.exchanges.length === 1);
 
   state.metadata = { ...metadata, disable_prompt_login: true, login_flag: 2, use_id_token: true, scope: 'openid' };
   state.tokenResult.tokens.expiresIn = 0;
   const second = new AccountLoginController();
   const noPrompt = await second.begin('https://mgmt.example', 'ca');
-  const idCredentials = await second.finish('another-code');
-  check('disabled prompts stay omitted and use_id_token selects id JWT with no expiry',
+  const idResult = await second.finish('another-code', CONFIG);
+  check('disabled prompts stay omitted and use_id_token selects the id JWT for the job',
     !noPrompt.authorizeUrl.includes('prompt=') && !noPrompt.authorizeUrl.includes('max_age=') &&
-    idCredentials.jwt === 'id-secret' && idCredentials.expiresAtMs === 0);
+    state.loginRequests[1].jwt === 'id-secret' && idResult.managementUrl === 'https://mgmt.example');
+
+  // the management server refused the registration: the same 需要登录 verdict the
+  // connect path reports, surfaced to the login form as a stable reason.
+  state.tokenResult.tokens.expiresIn = 90;
+  state.loginOutcome = 'needs-login';
+  const refused = new AccountLoginController();
+  await refused.begin('https://mgmt.example', 'ca');
+  check('a refused registration surfaces the needs-login verdict',
+    await rejected(refused.finish('refused-code', CONFIG), 'needs-login'));
+  state.loginOutcome = 'success';
+
+  // a transport-level login failure keeps its own stable token
+  state.loginFailure = 'network-error';
+  const offline = new AccountLoginController();
+  await offline.begin('https://mgmt.example', 'ca');
+  check('a login-job failure surfaces its own stable token',
+    await rejected(offline.finish('offline-code', CONFIG), 'network-error'));
+  state.loginFailure = '';
 
   state.metadata = { ...metadata, login_flag: 1 };
   const maxAge = new AccountLoginController();
@@ -88,7 +122,7 @@ try {
   maxAge.cancel();
   check('login flag one maps to max_age and prepared cancellation blocks finish',
     maxAgePrepared.authorizeUrl.includes('max_age=0') && !maxAgePrepared.authorizeUrl.includes('prompt=') &&
-    await rejected(maxAge.finish('cancelled-code'), 'login_not_prepared'));
+    await rejected(maxAge.finish('cancelled-code', CONFIG), 'login_not_prepared'));
 
   state.metadata = { ...metadata, login_flag: 8 };
   const invalidFlag = new AccountLoginController();
@@ -115,12 +149,24 @@ try {
   state.cancelExchange = (): void => resolveExchange?.(state.tokenResult);
   const duringExchange = new AccountLoginController();
   await duringExchange.begin('https://mgmt.example', 'ca');
-  const pendingFinish = duringExchange.finish('exchange-code');
+  const pendingFinish = duringExchange.finish('exchange-code', CONFIG);
   duringExchange.cancel();
   check('cancel during token exchange destroys transport and never returns credentials',
     await rejected(pendingFinish, 'cancelled') && state.transportCancels > 0);
   delete (state as unknown as { exchangeWait?: Promise<Object> }).exchangeWait;
   delete (state as unknown as { cancelExchange?: () => void }).cancelExchange;
+
+  // a cancel while the login job is in flight must cancel THAT job too (the
+  // token must not outlive the action either way)
+  state.loginWait = true;
+  const duringJob = new AccountLoginController();
+  await duringJob.begin('https://mgmt.example', 'ca');
+  const pendingJob = duringJob.finish('job-code', CONFIG);
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  duringJob.cancel();
+  check('cancel during the login job cancels the native job and rejects the finish',
+    await rejected(pendingJob, 'cancelled') && state.loginCancelled.length > 0);
+  state.loginWait = false;
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

@@ -2,12 +2,12 @@
 // Copyright (C) 2026 NetBird HarmonyOS contributors
 //
 // File adapter for the 后台保活（实验）settings switch (0.0.19, 方案 A). Same
-// minimal IO pattern as NetBirdRouteStore / NetBirdAccountStore (private file,
+// minimal IO pattern as NetBirdRouteStore (private file,
 // temp file, fsync, rename) with NO key material and NO crypto: the document is
 // one public boolean ("may this app borrow a DATA_TRANSFER continuous task"),
 // and the path whitelist below can only ever name that one file plus its temp
-// sibling — this module can never touch the device config, the setup key, the
-// account document or the route documents.
+// sibling — this module can never touch the device config, the setup key or the
+// route documents.
 //
 // SCOPE RULES
 // - missing file, unreadable file, oversized file, corrupt JSON, an unknown

@@ -613,7 +613,7 @@ async fn failing_provider_fails_closed_to_terminal_error() {
         Arc::new(factory),
         Arc::new(WgPeerRegistry::new()),
         Arc::new(NoopHost),
-        ConnectorSecrets { setup_key: "SETUP-KEY-SOCKET".into(), jwt: String::new() },
+        ConnectorSecrets { setup_key: "SETUP-KEY-SOCKET".into() },
         netbird_core::grpc::PeerMeta {
             hostname: "ohos-socket".into(),
             os_name: "harmonyos".into(),
@@ -626,8 +626,6 @@ async fn failing_provider_fails_closed_to_terminal_error() {
             rng: Box::new(NoRng),
             clock: Box::new(RealClock),
         },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
         false,
         None,
         None, // N5c: production (idle, signal-less) ICE orchestrator
@@ -689,7 +687,7 @@ async fn every_redial_takes_a_fresh_fd_matching_attempts() {
         Arc::new(factory),
         Arc::new(WgPeerRegistry::new()),
         host.clone(),
-        ConnectorSecrets { setup_key: "SETUP-KEY-SOCKET".into(), jwt: String::new() },
+        ConnectorSecrets { setup_key: "SETUP-KEY-SOCKET".into() },
         netbird_core::grpc::PeerMeta {
             hostname: "ohos-socket".into(),
             os_name: "harmonyos".into(),
@@ -702,8 +700,6 @@ async fn every_redial_takes_a_fresh_fd_matching_attempts() {
             rng: Box::new(NoRng),
             clock: Box::new(RealClock),
         },
-        Duration::from_secs(600),
-        Duration::from_millis(10),
         false,
         Some(source.clone()),
         None, // N5c: production (idle, signal-less) ICE orchestrator
