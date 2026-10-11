@@ -127,7 +127,7 @@ use netbird_core::connector::{ShellNetworkConfig, WgPeerApplier, WgPeerEntry};
 use netbird_core::ice::{Candidate, InterfaceAddr, ProtectedUdpFdSource, StaticInterfaces};
 use netbird_core::ice_session::is_wg_datagram;
 use netbird_core::peer_conn::{ice_ready_for_default_route, InlineGatherExec, PeerIceDeps, PeerIceOrchestrator, PeerIceState, PeerSignalKind, SignalExchange};
-use netbird_core::wg_device::{WgDeviceConfig, WgDeviceFeed};
+use netbird_core::wg_device::{WgDeviceConfig, WgDeviceFeed, WgEgressCarrier};
 use netbird_core::sys;
 
 extern "C" {
@@ -887,86 +887,378 @@ fn many_peers_ride_one_shared_socket_per_node() {
     }
 }
 
-/// 反例（round-7 bug 形态复现）：WG 设备用**非选中 socket**（这里即 fallback
-/// 外层 socket）向对端 **ICE socket** 发握手 —— 握手发出（计数增长）、落到
-/// 对端 ICE socket 上（可读出 WG 形态的报文，证明它没有被当 STUN 吞掉）、
-/// 但永远建立不了会话（rx=0、peers_with_session=0）。修复后的正常路径
-/// （egress 骑选中 socket）见上一测试：unknown_peer_drops=0 即「不再发生」。
-#[test]
-fn wg_from_a_non_selected_socket_never_establishes_a_session() {
-    let (sec_a, key_a) = key_pair(0xA1);
-    let (sec_b, key_b) = key_pair(0xB2);
-    // Two devices + two bare "ICE" sockets nobody reads (the round-7 shape:
-    // the endpoint IS the peer's ICE socket, the egress is the wrong socket).
-    let mk = |secret_b64: &str, peer_key: &str, peer_vpn: [u8; 4]| -> (Arc<WgDeviceFeed>, i32, i32, i32) {
-        let wg_raw = unsafe { socket(2, 2, 0) };
-        assert!(wg_raw >= 0);
-        let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
-        assert_eq!(unsafe { sys::bind(wg_raw, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) }, 0);
-        let mut sv = [-1i32; 2];
-        assert_eq!(unsafe { socketpair(1, 2, 0, &mut sv) }, 0);
-        let mut cfg = WgDeviceConfig::new(secret_b64.to_string());
-        cfg.hs_retry_ms = 100;
-        let feed = Arc::new(WgDeviceFeed::new(cfg));
-        feed.feed_tun(sv[0]).expect("tun");
-        feed.feed_wg_socket(wg_raw).expect("wg");
-        feed.apply_peers(&[WgPeerEntry {
-            pub_key_b64: peer_key.to_string(),
-            allowed_ips: vec![config::Route { addr: peer_vpn, prefix_len: 32 }],
-        }])
-        .expect("peers");
-        (feed, wg_raw, sv[0], sv[1])
-    };
-    let (feed_a, a_wg, _a_tun, _a_hand) = mk(&sec_a, &key_b, VPN_B);
-    let (feed_b, b_wg, _b_tun, _b_hand) = mk(&sec_b, &key_a, VPN_A);
-    // The ICE-stand sockets (stand-in for the round-7 "selected" sockets).
-    let ice_a = bound_lo_socket();
-    let ice_b = bound_lo_socket();
-    let (ice_a_addr, ice_a_port) = sock_name(ice_a);
-    let (ice_b_addr, ice_b_port) = sock_name(ice_b);
+// ---------------------------------------------------------------------------
+// upstream roaming semantics (netbirdio/wireguard-go @8bf8fa968f1a)
+// ---------------------------------------------------------------------------
+//
+// Upstream identifies the peer from the DATAGRAM (transport keypair index /
+// handshake static decrypt), never from the source address, and adopts the
+// source address as the peer's endpoint only once the crypto CONSUMED the
+// packet (`device/receive.go:373-374`, `:400-401`, `:459`, `:515` →
+// `peer.SetEndpointFromPacket`, `device/peer.go:280-288`). NetBird never
+// disables roaming: `DisableSomeRoamingForBrokenMobileSemantics` is commented
+// out on BOTH mobile paths (`client/iface/device/device_ios.go:92-94`,
+// `device_android.go:91-93`). Stage 3's device rule ("inbound only when
+// `src == endpoint`") is the deviation these tests pin shut.
 
-    // Exactly the round-7 mis-wiring: endpoint = peer's ICE socket; egress =
-    // own (non-selected) WG socket — i.e. NO egress attach at all.
-    feed_a.apply_endpoint(&key_b, ice_b_addr, ice_b_port).expect("endpoint");
-    feed_b.apply_endpoint(&key_a, ice_a_addr, ice_a_port).expect("endpoint");
+/// The single peer of a bare roaming-test node.
+fn roam_peer(f: &Arc<WgDeviceFeed>) -> netbird_core::wg_device::WgPeerStatus {
+    let mut peers = f.with_device(|d| d.peers()).expect("device up");
+    assert_eq!(peers.len(), 1, "one peer per bare node");
+    peers.pop().expect("peer")
+}
 
-    // Same clock alignment as above: campaigns anchor on the real clock.
-    let mut now = sys::mono_ms();
-    for _ in 0..80 {
-        // 80 × 50 ms = 4 s: many handshake campaigns fire
-        for feed in [&feed_a, &feed_b] {
-            let _ = feed.with_device(|d| {
-                d.service_tun(now);
-                d.service_udp(now);
-                d.tick(now);
+/// Bare device harness for the roaming tests (the N11 nodes minus the ICE
+/// machinery): one protected WG socket on `127.0.0.1:0`, one TUN stand-in
+/// socketpair (both ends non-blocking) and ONE registered peer.
+/// Returns `(feed, wg socket raw, TUN TEST end, TUN DEVICE end)` — the device
+/// dups the device end, so both numbers stay usable by the test.
+fn roam_node(secret_b64: &str, peer_key: &str, peer_vpn: [u8; 4]) -> (Arc<WgDeviceFeed>, i32, i32, i32) {
+    let wg_raw = unsafe { socket(2, 2, 0) };
+    assert!(wg_raw >= 0);
+    let sa = sys::sockaddr_in::new([127, 0, 0, 1], 0);
+    assert_eq!(unsafe { sys::bind(wg_raw, &sa, core::mem::size_of::<sys::sockaddr_in>() as u32) }, 0);
+    let mut sv = [-1i32; 2];
+    assert_eq!(unsafe { socketpair(1, 2, 0, &mut sv) }, 0);
+    set_nonblock(sv[0]);
+    set_nonblock(sv[1]);
+    let mut cfg = WgDeviceConfig::new(secret_b64.to_string());
+    cfg.hs_retry_ms = 100;
+    let feed = Arc::new(WgDeviceFeed::new(cfg));
+    feed.feed_tun(sv[0]).expect("tun");
+    feed.feed_wg_socket(wg_raw).expect("wg");
+    feed.apply_peers(&[WgPeerEntry {
+        pub_key_b64: peer_key.to_string(),
+        allowed_ips: vec![config::Route { addr: peer_vpn, prefix_len: 32 }],
+    }])
+    .expect("peers");
+    (feed, wg_raw, sv[1], sv[0])
+}
+
+/// Pump both bare nodes on the injected clock until both report a live
+/// session (or the step budget is spent).
+fn roam_pump(a: &Arc<WgDeviceFeed>, b: &Arc<WgDeviceFeed>, now: &mut u64, steps: usize) -> bool {
+    for _ in 0..steps {
+        for f in [a, b] {
+            let _ = f.with_device(|d| {
+                d.service_tun(*now);
+                d.service_udp(*now);
+                d.tick(*now);
             });
         }
-        now += 50;
+        *now += 10;
+        let ra = a.dataplane_status().map(|s| s.ready).unwrap_or(false);
+        let rb = b.dataplane_status().map(|s| s.ready).unwrap_or(false);
+        if ra && rb {
+            return true;
+        }
     }
+    false
+}
 
-    let sa = feed_a.dataplane_status().expect("status");
-    let sb = feed_b.dataplane_status().expect("status");
-    assert!(sa.handshakes >= 2 && sb.handshakes >= 2, "handshakes leave the wrong socket (round-7 signature)");
-    assert_eq!(sa.rx_packets, 0, "the peer never receives them on its WG socket");
-    assert_eq!(sb.rx_packets, 0);
-    assert_eq!(sa.peers_with_session, 0, "no session can ever establish off-path");
-    assert_eq!(sb.peers_with_session, 0);
-    assert!(!sa.ready && !sb.ready, "tunnel_ready stays false (gate holds)");
+/// 上游语义：包被**认证消费**后，其来源地址成为该 peer 的新 endpoint（标准
+/// WireGuard roaming）。这里的对端 **B 完全没有 endpoint**（ICE 还没选中），
+/// A 的发起从 B 从未见过的来源到达 —— stage 3 的 `src == endpoint` 规则会把
+/// 这一包丢掉并计 `unknown_peer_drops`（deviation 2 记的正是这一包），上游则
+/// 采纳来源地址、照常应答建会话。
+#[test]
+fn wg_roaming_adopts_the_source_of_an_authenticated_handshake() {
+    let (sec_a, key_a) = key_pair(0xA1);
+    let (sec_b, key_b) = key_pair(0xB2);
+    let (feed_a, a_wg, a_tun, _a_dev) = roam_node(&sec_a, &key_b, VPN_B);
+    let (feed_b, b_wg, b_tun, _b_dev) = roam_node(&sec_b, &key_a, VPN_A);
+    let (a_addr, a_port) = sock_name(a_wg);
+    let (b_addr, b_port) = sock_name(b_wg);
 
-    // The handshakes DID land on the peer's ICE socket — as WG-shaped
-    // datagrams (under the N11 demux these route to WG, not STUN; here
-    // nobody demuxes them, exactly the silent black hole of round-7).
-    let first = tun_try_read(ice_b).expect("B's ICE socket holds A's handshake");
-    assert!(is_wg_datagram(&first), "the stranded datagram is WG-shaped, not STUN");
+    // A knows where B is; B has NO endpoint at all.
+    feed_a.apply_endpoint(&key_b, b_addr, b_port).expect("A → B endpoint");
+    assert_eq!(roam_peer(&feed_a).endpoint, Some((b_addr, b_port)));
+    assert_eq!(roam_peer(&feed_b).endpoint, None, "B starts with no endpoint at all");
 
-    unsafe { close(ice_a) };
-    unsafe { close(ice_b) };
-    unsafe { close(a_wg) };
-    unsafe { close(b_wg) };
-    unsafe { close(_a_tun) };
-    unsafe { close(_b_tun) };
-    unsafe { close(_a_hand) };
-    unsafe { close(_b_hand) };
+    // Real loopback cable: the initiation lands on B's WG socket from A's WG
+    // socket — a source B has never seen.
+    let mut now = sys::mono_ms();
+    assert!(roam_pump(&feed_a, &feed_b, &mut now, 400), "the roaming handshake must establish");
+
+    // THE roaming fact: B adopted A's source address from the authenticated
+    // handshake itself (it had NO endpoint before).
+    assert_eq!(
+        roam_peer(&feed_b).endpoint,
+        Some((a_addr, a_port)),
+        "B roams onto the source of the authenticated handshake"
+    );
+    assert_eq!(
+        roam_peer(&feed_a).endpoint,
+        Some((b_addr, b_port)),
+        "A keeps its configured endpoint (the source it already knew)"
+    );
+    let sa = feed_a.dataplane_status().expect("status a");
+    let sb = feed_b.dataplane_status().expect("status b");
+    let st_a = feed_a.with_device(|d| d.stats()).expect("stats a");
+    let st_b = feed_b.with_device(|d| d.stats()).expect("stats b");
+    assert_eq!(sa.peers_with_session, 1);
+    assert_eq!(sb.peers_with_session, 1);
+    assert_eq!(st_a.unknown_peer_drops, 0, "an authenticated stranger is not a drop");
+    assert_eq!(st_b.unknown_peer_drops, 0);
+    assert_eq!(sa.decrypt_errors, 0);
+    assert_eq!(sb.decrypt_errors, 0);
+    assert!(sa.rx_packets >= 1 && sb.rx_packets >= 1, "both directions were received");
+
+    // The adopted endpoint is USABLE for egress (upstream: the bind sends to
+    // `peer.endpoint.val`): B → A rides the roamed address.
+    let probe = probe_frame(VPN_B, VPN_A, b"roam-probe");
+    tun_write(b_tun, &probe);
+    let mut got = false;
+    for _ in 0..200 {
+        let _ = feed_b.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+        let _ = feed_a.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+        now += 10;
+        if tun_try_read(a_tun).as_deref() == Some(&probe) {
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "B → A payload must ride B's ROAMED endpoint");
+}
+
+/// 未认证的包**永不**改动任何东西：不是 WG 报文 / 形态对但索引与 tag 全错 /
+/// 形态对但 MAC1 全错 / 短于最小 WG 报文 —— 全都不动 endpoint、不动会话，
+/// 计入 `unknown_peer_drops`，且隧道照常工作。认证是唯一的入口条件。
+#[test]
+fn wg_unauthenticated_packets_never_move_an_endpoint() {
+    let (sec_a, key_a) = key_pair(0xC1);
+    let (sec_b, key_b) = key_pair(0xC2);
+    let (feed_a, a_wg, a_tun, _a_dev) = roam_node(&sec_a, &key_b, VPN_B);
+    let (feed_b, b_wg, b_tun, _b_dev) = roam_node(&sec_b, &key_a, VPN_A);
+    let (a_addr, a_port) = sock_name(a_wg);
+    let (b_addr, b_port) = sock_name(b_wg);
+    feed_a.apply_endpoint(&key_b, b_addr, b_port).expect("endpoint");
+    let mut now = sys::mono_ms();
+    assert!(roam_pump(&feed_a, &feed_b, &mut now, 400), "precondition: established");
+
+    let endpoint_a = roam_peer(&feed_a).endpoint.expect("A endpoint landed");
+    let endpoint_b = roam_peer(&feed_b).endpoint.expect("B roamed");
+    assert_eq!(endpoint_a, (b_addr, b_port));
+    assert_eq!(endpoint_b, (a_addr, a_port));
+    let st0 = feed_a.with_device(|d| d.stats()).expect("stats");
+    let sess0 = feed_a.dataplane_status().expect("status").peers_with_session;
+
+    // A stranger address no peer is registered at: four shapes, none of which
+    // can authenticate.
+    let stranger = ([203, 0, 113, 9], 40000);
+    // (1) long enough, unknown message type
+    let r = feed_a.with_device(|d| d.handle_udp(&[0xAAu8; 40], stranger, now)).expect("device");
+    assert!(!r.peer_matched && r.wrote_tun == 0 && r.sent == 0);
+    // (2) WG transport SHAPE (type 4, 32 B) with a bogus receiver index + tag
+    let mut fake_data = [0u8; 32];
+    fake_data[..4].copy_from_slice(&4u32.to_le_bytes());
+    fake_data[4..8].copy_from_slice(&0x00AB_CDEFu32.to_le_bytes());
+    let r = feed_a.with_device(|d| d.handle_udp(&fake_data, stranger, now)).expect("device");
+    assert!(!r.peer_matched && r.wrote_tun == 0);
+    // (3) WG initiation SHAPE (type 1, 148 B) with a bogus body (MAC1 fails)
+    let mut fake_init = vec![0u8; 148];
+    fake_init[..4].copy_from_slice(&1u32.to_le_bytes());
+    let r = feed_a.with_device(|d| d.handle_udp(&fake_init, stranger, now)).expect("device");
+    assert!(!r.peer_matched && r.wrote_tun == 0);
+    // (4) shorter than the smallest WG message (keepalive, 32 B)
+    let r = feed_a.with_device(|d| d.handle_udp(&[1u8; 31], stranger, now)).expect("device");
+    assert!(!r.peer_matched && r.wrote_tun == 0);
+
+    // NOTHING moved — not the endpoint, not the session; the stranger counts as
+    // an unknown peer (never as a decrypt failure: no registered peer was
+    // involved).
+    assert_eq!(roam_peer(&feed_a).endpoint, Some(endpoint_a), "endpoint must not move");
+    assert_eq!(roam_peer(&feed_b).endpoint, Some(endpoint_b));
+    assert_eq!(feed_a.dataplane_status().expect("status").peers_with_session, sess0);
+    let st1 = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(st1.unknown_peer_drops, st0.unknown_peer_drops + 4);
+    assert_eq!(st1.decrypt_errors, st0.decrypt_errors, "no registered peer was involved");
+    assert_eq!(st1.rx_packets, st0.rx_packets, "a drop is not peer traffic");
+
+    // …and the tunnel is untouched: the next honest frame flows A → B.
+    let probe = probe_frame(VPN_A, VPN_B, b"after-garbage");
+    tun_write(a_tun, &probe);
+    let mut got = false;
+    for _ in 0..200 {
+        let _ = feed_a.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+        let _ = feed_b.with_device(|d| {
+            d.service_tun(now);
+            d.service_udp(now);
+            d.tick(now);
+        });
+        now += 10;
+        if tun_try_read(b_tun).as_deref() == Some(&probe) {
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "the established session must keep carrying traffic");
+}
+
+/// 设备层录制的载体桩（生产实现是 `RelayWgCarrier`，设备 seam 完全相同）：
+/// 只把设备交出的报文收下来，用来证明「这一包确实走了 relay」。
+#[derive(Default)]
+struct RecordingCarrier {
+    sent: Mutex<Vec<Vec<u8>>>,
+}
+
+impl WgEgressCarrier for RecordingCarrier {
+    fn send_datagram(&self, datagram: &[u8]) -> Result<(), String> {
+        self.sent.lock().expect("carrier").push(datagram.to_vec());
+        Ok(())
+    }
+    fn kind(&self) -> &'static str {
+        "recording-stub"
+    }
+}
+
+/// relay 不受 roaming 影响（上游形态）：relayed 入向把包连同**对端自己的
+/// synthetic endpoint** 交给 wireguard-go（`wgproxy/bind/proxy.go:199` →
+/// `ice_bind.go:378`），`SetEndpointFromPacket` 于是写回同一个值 = no-op；
+/// 本层的载体入向按身份（公钥）匹配、**根本没有地址可采纳**，语义只会更严。
+/// 于是：载体报文（认证的也一样）永不设置 endpoint；共享 socket 上的垃圾包
+/// 永不设置 endpoint；roam 到 UDP 之后载体通道仍然挂着，egress 在下一次
+/// `dispatch` 离开载体（上游 `SendBuffers` 读 `endpoint.val`），
+/// `recycle_endpoint` 立刻回落 relay。
+#[test]
+fn wg_roaming_leaves_the_relay_carrier_intact() {
+    let (sec_a, key_a) = key_pair(0xE1);
+    let (sec_b, key_b) = key_pair(0xE2);
+    // A: relay-only (no endpoint at all) + a recording carrier.
+    let (feed_a, _a_wg, a_tun, _a_dev) = roam_node(&sec_a, &key_b, VPN_B);
+    let carrier = Arc::new(RecordingCarrier::default());
+    feed_a.attach_carrier(&key_b, carrier.clone()).expect("carrier attach");
+    // B: a plain device whose endpoint is a bare socket the test can read — it
+    // produces the peer's REAL WireGuard packets for us.
+    let (feed_b, _b_wg, b_tun, _b_dev) = roam_node(&sec_b, &key_a, VPN_A);
+    let sink = bound_lo_socket();
+    let (s_addr, s_port) = sock_name(sink);
+    feed_b.apply_endpoint(&key_a, s_addr, s_port).expect("B → sink");
+    let init = tun_try_read(sink).expect("B's initiation on the sink");
+    assert!(is_wg_datagram(&init) && init.len() == 148, "a real WG initiation");
+
+    let mut now = sys::mono_ms();
+    // (1) the initiation arrives over the RELAY carrier (identity-keyed).
+    let r = feed_a.with_device(|d| d.handle_carrier(&init, &key_b, now)).expect("A device");
+    assert!(r.peer_matched && r.sent >= 1, "A consumed it and answered");
+    let p = roam_peer(&feed_a);
+    assert_eq!(p.endpoint, None, "a carrier arrival never creates an endpoint");
+    assert!(p.carrier_attached && p.on_carrier, "the relay stays the bearer");
+    let s1 = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(s1.carrier_takeovers, 1, "one UDP→relay episode");
+    assert_eq!(s1.carrier_tx_packets, 1, "the handshake response left via the relay");
+    assert_eq!(s1.direct_restores, 0);
+    assert_eq!(s1.decrypt_errors, 0, "carrier traffic never counts as a decrypt failure");
+
+    // (2) garbage on the SHARED socket from a stranger: no endpoint, relay kept.
+    let mut garbage = [0u8; 32];
+    garbage[..4].copy_from_slice(&4u32.to_le_bytes());
+    let r = feed_a
+        .with_device(|d| d.handle_udp(&garbage, ([203, 0, 113, 9], 40000), now))
+        .expect("A device");
+    assert!(!r.peer_matched);
+    let p = roam_peer(&feed_a);
+    assert_eq!(p.endpoint, None, "garbage never sets an endpoint");
+    assert!(p.on_carrier, "the relay stays the bearer");
+    let s2 = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(s2.unknown_peer_drops, s1.unknown_peer_drops + 1);
+    assert_eq!(s2.decrypt_errors, 0);
+    assert_eq!(s2.direct_restores, 0);
+
+    // (3) finish B's session through the lane (the carrier's write side does
+    // this in production) so it starts emitting REAL authenticated packets.
+    let resp = carrier.sent.lock().expect("carrier").last().expect("response").clone();
+    let r = feed_b.with_device(|d| d.handle_carrier(&resp, &key_a, now)).expect("B device");
+    assert!(r.peer_matched && r.sent >= 1, "B consumed the response and sent its keepalive");
+    while tun_try_read(sink).is_some() {} // drain the keepalive
+    let probe = probe_frame(VPN_B, VPN_A, b"roam-over-relay");
+    tun_write(b_tun, &probe);
+    assert_eq!(
+        feed_b.with_device(|d| d.service_tun(now)).expect("B device"),
+        1,
+        "exactly the probe is encapsulated"
+    );
+    let data = tun_try_read(sink).expect("B's data packet on the sink");
+    assert!(is_wg_datagram(&data) && data.len() == probe.len() + 32);
+
+    // (4) the SAME peer over UDP: an authenticated DATA packet from an address A
+    // has never seen. Upstream roams onto it (`receive.go:459`/`:515` →
+    // `peer.SetEndpointFromPacket`, `peer.go:280-288`) — an inbound write of
+    // `endpoint.val` ONLY: the relay lane stays attached, and the EGRESS leaves
+    // it on the next send (`SendBuffers` reads `peer.endpoint.val`,
+    // `peer.go:117-126`), which here is `dispatch`.
+    let udp_sink = bound_lo_socket();
+    let (n_addr, n_port) = sock_name(udp_sink);
+    let newcomer = (n_addr, n_port);
+    let r = feed_a.with_device(|d| d.handle_udp(&data, newcomer, now)).expect("A device");
+    assert!(r.peer_matched, "the roamed packet authenticated on A");
+    assert_eq!(r.wrote_tun, probe.len(), "…and it is the real probe");
+    assert_eq!(tun_try_read(a_tun).as_deref(), Some(&probe[..]));
+    let p = roam_peer(&feed_a);
+    assert_eq!(p.endpoint, Some(newcomer), "roaming adopts the authenticated source");
+    assert!(p.carrier_attached, "roaming does NOT detach the relay lane");
+    assert!(p.on_carrier, "the adoption alone moves no egress — that is dispatch's call");
+    let s3 = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(s3.direct_restores, 0, "no egress happened yet");
+    assert_eq!(s3.carrier_tx_packets, s2.carrier_tx_packets, "the lane is untouched");
+    assert_eq!(
+        s3.unknown_peer_drops,
+        s2.unknown_peer_drops,
+        "an authenticated stranger is not a drop"
+    );
+
+    // (4b) the egress follows the ROAMED endpoint (upstream `SendBuffers` reads
+    // `peer.endpoint.val`): A's next outbound probe dispatches UDP-direct to the
+    // newcomer's socket — NOT through the relay.
+    let probe_udp = probe_frame(VPN_A, VPN_B, b"post-roam");
+    tun_write(a_tun, &probe_udp);
+    assert_eq!(
+        feed_a.with_device(|d| d.service_tun(now)).expect("A device"),
+        1,
+        "exactly the post-roam probe is encapsulated"
+    );
+    let udp_data = tun_try_read(udp_sink).expect("A's probe left via the ROAMED endpoint");
+    assert!(is_wg_datagram(&udp_data) && udp_data.len() == probe_udp.len() + 32);
+    let p = roam_peer(&feed_a);
+    assert!(!p.on_carrier, "the egress left the relay");
+    let s3b = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(s3b.direct_restores, 1, "relay → direct on the roamed endpoint");
+    assert_eq!(
+        s3b.carrier_tx_packets,
+        s3.carrier_tx_packets,
+        "the probe did NOT ride the relay"
+    );
+    unsafe { close(udp_sink) };
+
+    // (5) ICE teardown (`recycle_endpoint`) → straight back to the relay.
+    feed_a.recycle_endpoint(&key_b);
+    let p = roam_peer(&feed_a);
+    assert_eq!(p.endpoint, None, "endpoint recycled (fail-closed)");
+    assert!(p.carrier_attached, "the lane outlives the UDP path");
+    let probe2 = probe_frame(VPN_A, VPN_B, b"roam-back-to-relay");
+    tun_write(a_tun, &probe2);
+    assert_eq!(feed_a.with_device(|d| d.service_tun(now)).expect("A device"), 1);
+    let s4 = feed_a.with_device(|d| d.stats()).expect("stats");
+    assert_eq!(s4.carrier_takeovers, 2, "a NEW relay episode after the endpoint is gone");
+    assert_eq!(s4.carrier_tx_packets, s3.carrier_tx_packets + 1, "the probe rode the relay");
+    assert_eq!(
+        carrier.sent.lock().expect("carrier").last().map(|d| d.len()),
+        Some(probe2.len() + 32),
+        "the last relayed datagram is the encapsulated probe"
+    );
+    unsafe { close(sink) };
 }
 
 /// 迁移/失败：选中路径死亡 → +6s Disconnected（endpoint+egress 回收，
