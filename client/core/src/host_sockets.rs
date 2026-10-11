@@ -1339,17 +1339,23 @@ fn envelope_roundtrip_check() -> Result<String, String> {
     Ok(format!("{}-byte wire sealed+opened; tamper rejected", wire.len()))
 }
 
-/// Check 3: STUN URI parsing, candidate marshal/unmarshal, and a full
-/// offline gather over an injected interface + a fed loopback UDP socket
-/// (`StaticInterfaces` + loopback bind — NO packet leaves the process).
+/// Check 3: STUN URI parsing, candidate marshal/unmarshal, and a full offline
+/// host-candidate derivation over an injected interface list plus a real mux
+/// socket (`StaticInterfaces` + a wildcard-bound loopback mux — NO packet
+/// leaves the process).
+///
+/// STAGE 4 (official-alignment audit §2.7): the per-interface
+/// `ice::gather_candidates` primitive and its `ProtectedUdpFdSource` feed are
+/// gone, so this self-test exercises the CURRENT shape instead — the ONE shared
+/// mux ([`crate::ice_mux::IceMux`]) yields one host candidate per allowed
+/// interface at ITS OWN port.
 fn check_ice_stun_offline() -> CheckOutcome {
     check("ice-stun-offline", ice_stun_offline_check())
 }
 
 fn ice_stun_offline_check() -> Result<String, String> {
     use crate::ice::{
-        gather_candidates, parse_stun_uri, Candidate, GatherConfig, ProtectedUdpFdSource,
-        StaticInterfaces, DEFAULT_INTERFACE_BLACKLIST, InterfaceAddr,
+        mux_host_candidates, parse_stun_uri, Candidate, InterfaceAddr, StaticInterfaces,
     };
     let srv = parse_stun_uri("stun:stun.example.invalid:3478")
         .map_err(|e| format!("stun URI rejected: {e:?}"))?;
@@ -1367,36 +1373,38 @@ fn ice_stun_offline_check() -> Result<String, String> {
         return Err("candidate marshal roundtrip mismatch".into());
     }
 
-    let fd = open_udp_unbound().map_err(|e| format!("udp socket: {e}"))?;
-    let source = ProtectedUdpFdSource::new_with_fd(fd)
-        .map_err(|e| format!("seed udp socket: {e:?}"))?;
-    let cfg = GatherConfig {
-        blacklist: &DEFAULT_INTERFACE_BLACKLIST,
-        servers: &[],
-        timeout_ms: 200,
-    };
+    // The ONE shared mux: a real wildcard-bound UDP socket (the host has no
+    // shell to protect anything, exactly like the host harnesses).
+    let mux = crate::ice_mux::IceMux::open_wildcard(0)
+        .map_err(|e| format!("mux socket: {e:?}"))?;
+    let port = mux.local_port();
+    if port == 0 {
+        return Err("mux reported no bound port".into());
+    }
     let ifaces = StaticInterfaces(vec![InterfaceAddr {
         name: "nbselftest0".into(),
         addr: [127, 0, 0, 1],
     }]);
-    let res =
-        gather_candidates(&cfg, &ifaces, &source).map_err(|e| format!("gather failed: {e:?}"))?;
-    if res.host.len() != 1 || res.host[0].address != "127.0.0.1" {
+    let cfg = crate::ice::GatherConfig {
+        blacklist: &crate::ice::DEFAULT_INTERFACE_BLACKLIST,
+        servers: &[],
+        timeout_ms: 200,
+    };
+    let allowed = crate::ice::allowed_ifaces(&cfg, &ifaces)
+        .map_err(|e| format!("iface enumeration failed: {e:?}"))?;
+    let host = mux_host_candidates(&allowed, port);
+    if host.len() != 1 || host[0].address != "127.0.0.1" || host[0].port != port {
         return Err(format!(
-            "expected exactly one 127.0.0.1 host candidate, got {:?}",
-            res.host.iter().map(|c| c.address.clone()).collect::<Vec<_>>()
+            "expected exactly one 127.0.0.1 host candidate on the mux port {port}, got {:?}",
+            host.iter().map(|c| (c.address.clone(), c.port)).collect::<Vec<_>>()
         ));
     }
-    if !res.srflx.is_empty() {
-        return Err("no STUN servers configured — srflx must be empty".into());
+    if mux.session_count() != 0 {
+        return Err("a fresh mux has no registered session".into());
     }
-    if source.taken() != 1 {
-        return Err(format!("source taken={}, expected 1", source.taken()));
-    }
-    unsafe { sys::close(fd) };
     Ok(format!(
-        "stun uri ok; candidate wire ok; host gather ok ({} candidate)",
-        res.host.len()
+        "stun uri ok; candidate wire ok; mux host candidate ok ({} candidate on port {port})",
+        host.len()
     ))
 }
 

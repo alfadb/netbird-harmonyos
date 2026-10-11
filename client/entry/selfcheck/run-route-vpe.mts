@@ -76,7 +76,7 @@ const REQUEST_ID = 'req-route-vpe';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
-  'NetBirdIceSocketPool', 'NetBirdUiModel', 'NetBirdRecreatePolicy',
+  'NetBirdUiModel', 'NetBirdRecreatePolicy',
   // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
   // REAL extension now imports by value for its synchronous write; zero
   // imports and no erased types, so no shim (staged byte-identically).
@@ -578,7 +578,7 @@ try {
   const startLeg = slice('private async startConnectorThenCreate(',
     '// Packaged public CA roots');
   const publishCode = slice('private publishRouteCatalogForUi(): void {',
-    'private async feedOneIceSocket(');
+    'private async protectSocketWithBox(');
   check('P1 exactly ONE connector start call site exists',
     extSource.split('connectorStartWithSocket(').length === 2);
   check('P2 the start call passes the ACTUAL selection object (never JSON.stringify)',

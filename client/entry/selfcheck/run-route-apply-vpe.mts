@@ -105,7 +105,7 @@ const REQUEST_ID = 'req-route-apply-vpe';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
-  'NetBirdIceSocketPool', 'NetBirdUiModel', 'NetBirdRecreatePolicy',
+  'NetBirdUiModel', 'NetBirdRecreatePolicy',
   // 2026-10-09 (0.0.17) onDestroy-entry stop marker: the pure marker core the
   // REAL extension now imports by value for its synchronous write; zero
   // imports and no erased types, so no shim (staged byte-identically).
@@ -294,10 +294,10 @@ function resetWorld(): void {
   G['__NB_SUPPLY_WG_OPEN'] = 0;
   G['__NB_SUPPLY_ICE_OPEN'] = 0;
   G['__NB_SUPPLY_MGMT_FEED'] = 0;
-  G['__NB_SUPPLY_ICE_FEED'] = 0;
   // STAGE 2/3: the WG feed and the ONE shared-mux arm are supply seams too, and
-  // the SR group asserts them EXACTLY (fed once, armed once, the retired pool at
-  // zero) — so they belong to the per-world reset like every other seam counter.
+  // the SR group asserts them EXACTLY (fed once, armed once) — so they belong to
+  // the per-world reset like every other seam counter. STAGE 4 deleted the
+  // retired ICE socket pool's feed seam together with the shell-side pool.
   G['__NB_SUPPLY_WG_FEED'] = 0;
   G['__NB_SUPPLY_ICE_MUX_ARM'] = 0;
   G['__NB_SUPPLY_POLL'] = 0;
@@ -401,10 +401,11 @@ function flipTeardown(): void {
 // The startup-race world: the REAL initial leg, driven through the REAL
 // settleCreate and the REAL protect chain of the fixture's FakeConnection
 // (exclusion-generation-hooks.mjs). protect() call 1 is the outbound WG socket
-// (the fail-closed gate), calls 2..1+ICE_SOCKET_POOL_MIN are the ICE pool. The
-// fixture parks one of them (__NB_PROTECT_PARK_AT) and releases it explicitly,
-// so the window between "outbound gate passed / WG fed" and "ICE pool fed +
-// initial ACK" is observable and steerable.
+// (the fail-closed gate), and since STAGE 3 it is the ONLY protect the leg
+// makes: the ICE plane arms the ONE shared mux over that very socket (no second
+// open, no protect). The fixture parks that call (__NB_PROTECT_PARK_AT) and
+// releases it explicitly, so the window between "outbound gate passed / WG fed"
+// and "mux armed + initial ACK" is observable and steerable.
 // ---------------------------------------------------------------------------
 function parkProtectAt(n: number): void {
   G['__NB_PROTECT_PARK_AT'] = n;
@@ -631,8 +632,7 @@ try {
       count('__NB_CREATE_CALLS') === 1 && count('__NB_TUN_FEED_CALLS') === 1 &&
       count('__NB_STOP_CALLS') === 0 && count('__NB_START_CALLS') === 0 &&
       count('__NB_SUPPLY_MGMT_OPEN') === 0 && count('__NB_SUPPLY_WG_OPEN') === 0 &&
-      count('__NB_SUPPLY_ICE_OPEN') === 0 && count('__NB_SUPPLY_MGMT_FEED') === 0 &&
-      count('__NB_SUPPLY_ICE_FEED') === 0,
+      count('__NB_SUPPLY_ICE_OPEN') === 0 && count('__NB_SUPPLY_MGMT_FEED') === 0,
       JSON.stringify({ create: count('__NB_CREATE_CALLS'),
         tunFeed: count('__NB_TUN_FEED_CALLS'), stop: count('__NB_STOP_CALLS'),
         start: count('__NB_START_CALLS') }));
@@ -1170,10 +1170,10 @@ try {
       initialAck['isRecreate'] === false && initialAck['kind'] === 'initial' &&
       JSON.stringify(initialAck['payload']) === JSON.stringify({ routes: DESIRED }) &&
       count('__NB_SUPPLY_WG_FEED') === 1 && count('__NB_SUPPLY_ICE_MUX_ARM') === 1 &&
-      count('__NB_SUPPLY_ICE_OPEN') === 0 && count('__NB_SUPPLY_ICE_FEED') === 0,
+      count('__NB_SUPPLY_ICE_OPEN') === 0,
       JSON.stringify({ outcome: outcome, createSettled: ability['createSettled'],
         wgFeed: count('__NB_SUPPLY_WG_FEED'), muxArm: count('__NB_SUPPLY_ICE_MUX_ARM'),
-        iceOpen: count('__NB_SUPPLY_ICE_OPEN'), iceFeed: count('__NB_SUPPLY_ICE_FEED'),
+        iceOpen: count('__NB_SUPPLY_ICE_OPEN'),
         ack: initialAck }));
     await applyAndSettle(ability);
     const doc = result();

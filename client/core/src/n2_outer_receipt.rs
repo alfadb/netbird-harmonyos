@@ -18,12 +18,10 @@
 //!
 //! - [`crate::wg_device::WgDevice::service_udp`] — the WG outer UDP socket
 //!   (`--wg-port` / ephemeral);
-//! - [`crate::ice_session::IceSession`]'s socket drain — the ICE socket that
-//!   carries the connectivity checks and, after nomination, the `Ws`/`Wb`
-//!   WG datagrams;
-//! - `ice::gather_interface`'s reply read (the `gather_candidates` path) — the
-//!   one-shot STUN gather socket (only in ephemeral mode; the fixed
-//!   `--ice-port` path does not gather).
+//! - [`crate::ice_mux::IceMux`]'s reader — the ONE shared ICE + WireGuard
+//!   socket (since stage 3 it IS the WG outer socket): connectivity checks and,
+//!   after nomination, the `Ws`/`Wb` WG datagrams. The retired per-interface
+//!   gather socket and the per-session ICE drain are gone (stage 4).
 //!
 //! ## Output (only while armed; the switch is OFF by default)
 //!

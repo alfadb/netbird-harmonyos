@@ -76,9 +76,10 @@
 //! 1. signal socket 仍由壳侧补给：`connector_signal_socket_feed(fd, addr)`
 //!    注入已 protect 的 signal socket 与 DNS 解析结果；壳不喂则拨号
 //!    fail-closed 重试，`signal_ready` 保持 false（peer 不发起 ICE）。
-//! 2. ICE 的 UDP socket 来自壳侧补给的受保护源
-//!    （`connector_ice_socket_feed(fd)`）；壳侧不喂则候选收集 fail-closed，
-//!    peer 停在 Idle 并记录 Network 类错误。
+//! 2. ICE 平面自 stage 3 起共用**一枚** socket：mux 建在 WG 外层 socket 上
+//!    （`connector_ice_mux_arm()`），所以不再有「壳侧按接口喂 UDP socket」
+//!    这一步；没有 mux 则候选收集 fail-closed，peer 停在 Idle 并记录
+//!    Network 类错误。
 //! 3. 网络图里的 remote peers 的 WG 侧配置走 [`WgPeerApplier`]：**N7 起生产
 //!    默认是 [`crate::wg_device::WgDeviceFeed`]**（真实 [`WgDeviceApplier`]，
 //!    fd 由壳侧 feed 补给后建成设备，feed 前缓冲 peer/endpoint、
@@ -108,8 +109,8 @@
 //!   [`crate::wg_device::WgDeviceApplier`] 供宿主测试注入）。
 //! - 壳侧配置应用：[`ConfigApplier`]（路由/DNS/本机地址交给宿主）。
 //! - N5c per-peer ICE：[`crate::peer_conn::PeerIceOrchestrator`]（接口枚举
-//!   `crate::ice::InterfaceSource`、受保护 UDP 源
-//!   `connector_ice_socket_feed` 补给、signal 发送
+//!   `crate::ice::InterfaceSource`、共享 mux（`connector_ice_mux_arm`，
+//!   stage 3 起建在 WG 外层 socket 上）、signal 发送
 //!   [`crate::peer_conn::SignalExchange`]、endpoint 落配置用同一个
 //!   [`WgPeerApplier`]）。
 //!
@@ -1466,8 +1467,16 @@ struct ConnectorShared {
     /// N5c: per-peer ICE orchestrator (set once at spawn; unit tests that
     /// build `ConnectorShared::new` directly simply run without ICE).
     ice: std::sync::OnceLock<Arc<Mutex<PeerIceOrchestrator>>>,
-    /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
-    /// handle for `connector_ice_socket_feed`).
+    /// N5c: the protected-UDP source behind the ICE orchestrator. It is the
+    /// STUN hostname's protected-DNS resolver ([`crate::ice::ProtectedUdpFdSource::
+    /// refresh_stun_dns`]) and, on the HOST, the supply the ONE shared mux is
+    /// built from (`PeerIceOrchestrator::arm_mux`).
+    ///
+    /// STAGE 4 (official-alignment §2.7): the DEVICE shell no longer feeds it —
+    /// the ICE plane takes no per-session socket any more, and the mux is built
+    /// over the WG outer socket. The queue counters therefore stay at zero on
+    /// device (the device NAPI feed entry is gone); the source itself stays for
+    /// the two jobs above.
     ice_sockets: std::sync::OnceLock<Arc<crate::ice::ProtectedUdpFdSource>>,
     /// N5d: the real signal link runtime (set once at spawn when
     /// [`SignalMaterial`] was provided; unit tests that build
@@ -1521,12 +1530,12 @@ struct ConnectorShared {
     /// device lock is held.
     route_apply: Mutex<()>,
     /// 2026-10-09 (ArkTS main-thread freeze fix): the LAST SUCCESSFULLY read
-    /// ICE sub-snapshot — the `ice` summary, the per-peer `ice_peers` details
-    /// and the per-peer socket demand, all three from ONE orchestrator
-    /// acquisition — with its monotonic read time. `connector_status()` and
+    /// ICE sub-snapshot — the `ice` summary and the per-peer `ice_peers`
+    /// details, both from ONE orchestrator acquisition — with its monotonic read
+    /// time. `connector_status()` and
     /// the network-config gate read the orchestrator with `try_lock` ONLY: the
     /// 10 ms ICE pump holds that mutex across a synchronous gather
-    /// (`ensure_locals` → `gather_candidates`, `DEFAULT_STUN_TIMEOUT_MS` per
+    /// (`ensure_locals` → the STUN round, `DEFAULT_STUN_TIMEOUT_MS` per
     /// peer) and on the 2026-10-09 device run four offline peers re-negotiating
     /// held it 8.4–11 s, freezing the ArkTS main thread on its 5 s status poll.
     /// A busy lock now serves THIS sample (with its age) instead of queueing —
@@ -1563,10 +1572,6 @@ struct IceStatusSample {
     /// orchestrator that was never successfully read (the documented unknown
     /// shape, flagged by `ice_snapshot_stale`).
     ice_peers: Option<Vec<PeerIceDetail>>,
-    /// [`PeerIceOrchestrator::need_per_peer`] AS RENDERED: `-1` = interface
-    /// enumeration failed or no ICE read ever succeeded (the shell keeps its
-    /// own fallback constant).
-    need_per_peer: i64,
     /// Monotonic ms of the successful read that produced `ice`/`ice_peers`.
     at_ms: u64,
     /// TRUE when this sample is served BECAUSE the orchestrator lock was busy
@@ -1578,8 +1583,8 @@ struct IceStatusSample {
     /// "unknown"). A NEGATIVE sentinel is deliberately not used: the crate's
     /// strict config reader rejects negative numbers
     /// ([`crate::config::parse_document`] — the N2-H freeze-facts reader parses
-    /// THIS document with it), and the frozen `need_per_peer`/`queued` `-1`
-    /// sentinels are the only negatives anybody signed up for.
+    /// THIS document with it), and the frozen `queued` `-1` sentinel is the only
+    /// negative anybody signed up for.
     age_ms: Option<u64>,
 }
 
@@ -1590,7 +1595,6 @@ impl IceStatusSample {
         IceStatusSample {
             ice: IceOrchestratorSummary::default(),
             ice_peers: None,
-            need_per_peer: -1,
             at_ms: 0,
             stale: false,
             age_ms: None,
@@ -1599,15 +1603,13 @@ impl IceStatusSample {
 
     /// An armed orchestrator that was NEVER successfully read (the lock has
     /// been busy since the first poll): the documented unknown shape — zeroed
-    /// summary, `ice_peers:null`, `need_per_peer:-1` (the EXISTING "cannot
-    /// enumerate / unknown" sentinel the shell already falls back on) — plus an
-    /// explicit `stale` mark and an UNKNOWN (`null`) age, so the shell reads it
-    /// as unknown, never as a real zero-peered orchestrator read just now.
+    /// summary and `ice_peers:null` — plus an explicit `stale` mark and an
+    /// UNKNOWN (`null`) age, so the shell reads it as unknown, never as a real
+    /// zero-peered orchestrator read just now.
     fn unknown_busy() -> Self {
         IceStatusSample {
             ice: IceOrchestratorSummary::default(),
             ice_peers: None,
-            need_per_peer: -1,
             at_ms: 0,
             stale: true,
             age_ms: None,
@@ -1841,8 +1843,8 @@ impl ConnectorShared {
     }
 
     /// 2026-10-09 (ArkTS main-thread freeze fix): THE non-blocking ICE status
-    /// read — the `ice` summary, the per-peer `ice_peers` details and the
-    /// per-peer socket demand from a SINGLE acquisition, taken with `try_lock`
+    /// read — the `ice` summary and the per-peer `ice_peers` details from a
+    /// SINGLE acquisition, taken with `try_lock`
     /// ONLY. Callers on the shell's synchronous status / network-config path
     /// (the ArkTS main thread) must go through this; the pre-fix assembly took
     /// the same orchestrator lock three times and each acquisition could queue
@@ -1860,13 +1862,12 @@ impl ConnectorShared {
             // ICE-capable start): a KNOWN absent ICE surface, never stale.
             return IceStatusSample::absent();
         };
-        // One acquisition, three pure reads; the guard is released inside the
+        // One acquisition, two pure reads; the guard is released inside the
         // `map` before the cache below is touched (lock order: `ice` → cache,
         // and never the reverse).
         let fresh = try_lock_poison(orch).map(|g| IceStatusSample {
             ice: g.summary(),
             ice_peers: Some(g.ice_details()),
-            need_per_peer: g.need_per_peer().map(|n| n as i64).unwrap_or(-1),
             at_ms: crate::sys::mono_ms(),
             stale: false,
             age_ms: Some(0),
@@ -5484,14 +5485,14 @@ pub struct ConnectorHandle {
     /// the connector was started through `connector_start_with_socket`.
     /// `connector_socket_feed` resupplies it across the NAPI boundary.
     socket_source: Option<Arc<ProtectedSocketFdSource>>,
-    /// N5c: the protected-UDP source behind the ICE orchestrator (resupply
-    /// handle for `connector_ice_socket_feed`). `None` = caller-supplied
-    /// orchestrator (tests).
+    /// N5c: the protected-UDP source behind the ICE orchestrator. `None` =
+    /// caller-supplied orchestrator (tests).
     ///
-    /// STAGE 2 (official-alignment §2.7): the ICE plane no longer takes
-    /// per-session sockets, so nothing consumes this queue any more — it is
-    /// kept only so the shell's existing pool feed keeps answering ok until
-    /// stage 4 deletes both sides (audit §2.7 stage 4).
+    /// STAGE 4 (official-alignment §2.7): the DEVICE shell no longer feeds it —
+    /// the ICE plane takes no per-session socket, and the ONE shared mux is
+    /// armed over the WG outer socket (`connector_ice_mux_arm`). The source stays
+    /// as the protected-DNS resolver for STUN hostnames and as the HOST
+    /// harness's mux supply (`host_sockets::feed_ice`).
     ice_sockets: Option<Arc<crate::ice::ProtectedUdpFdSource>>,
     /// STAGE 2/3: the ONE shared mux slot the orchestrator reads. The shell
     /// arms it OVER the WG device's own protected socket (`connector_ice_mux_arm`
@@ -5536,8 +5537,9 @@ impl ConnectorHandle {
     /// N3-7: `force_default_route` arms the default-route gate override;
     /// `socket_source` (when set) is the resupply handle for
     /// `connector_socket_feed`. N5c: `ice = None` builds the production
-    /// orchestrator (SystemInterfaces + a fresh protected-UDP source fed by
-    /// `connector_ice_socket_feed` + the same WG seam) and starts the
+    /// orchestrator (SystemInterfaces + a fresh protected-UDP source that
+    /// resolves STUN hostnames through the protected DNS supply, and on the
+    /// HOST supplies the ONE shared mux) plus the same WG seam, and starts the
     /// injected-clock pump thread; tests may inject a fully-stubbed
     /// orchestrator instead. N5d: `signal_material = Some(..)` attaches the
     /// real signal runtime — the ICE orchestrator's send seam becomes a
@@ -5906,7 +5908,7 @@ impl ConnectorHandle {
 
     /// [`ConnectorHandle::status`] with the ICE sub-snapshot ALREADY read:
     /// [`ConnectorHandle::status_json`] needs the same sample for the
-    /// `ice_sockets` tail (`need_per_peer` + the freshness marks), and the
+    /// `ice_sockets` tail (the freshness marks), and the
     /// frozen `ice`/`ice_peers` fields must describe that very sample.
     fn status_with_ice(&self, ice: &IceStatusSample) -> ConnectorStatus {
         let peer_relays =
@@ -5918,33 +5920,30 @@ impl ConnectorHandle {
     pub fn status_json(&self) -> String {
         // 2026-10-09 (ArkTS main-thread freeze fix): ONE non-blocking ICE read
         // ([`ConnectorShared::ice_status_sample`]) supplies the frozen
-        // `ice`/`ice_peers` fields AND the `ice_sockets` tail's `need_per_peer`.
-        // The pre-fix path took the orchestrator lock three times (summary,
-        // details, need_per_peer) and each acquisition could queue behind the
-        // ICE pump's 8–11 s gather, freezing the shell's 5 s status poll.
+        // `ice`/`ice_peers` fields. The pre-fix path took the orchestrator lock
+        // repeatedly (summary, details, demand) and each acquisition could queue
+        // behind the ICE pump's 8–11 s gather, freezing the shell's 5 s status
+        // poll.
         let ice = self.shared.ice_status_sample();
         let base = self.status_with_ice(&ice).to_json();
-        // N5c starvation observability: expose the ICE socket queue depth so a
-        // FEEDER can read the real value. A feeder that only learns the depth
-        // from its own feed calls keeps a stale "still queued" reading and
-        // stops resupplying exactly when the queue is empty — device run 5 and
-        // the host CLI both sat in endless "protected-udp:
-        // no-protected-socket" that way. -1 = no shell-fed source attached.
+        // N5c socket-depth observability (HOST-CLI FEED): expose the remaining
+        // depth of the protected UDP source so a FEEDER can read the real value.
+        // A feeder that only learns the depth from its own feed calls keeps a
+        // stale "still queued" reading and stops resupplying exactly when the
+        // queue is empty — device run 5 and the host CLI both sat in endless
+        // "protected-udp: no-protected-socket" that way. -1 = no source attached.
+        // The device shell no longer feeds this queue (stage 4: the ICE plane
+        // rides the ONE shared mux over the WG socket), so on device it renders
+        // zeros; the count stays because it is the frozen document's own field
+        // and it is still the host harness's supply surface.
         let (queued, taken) = match self.shared.ice_sockets.get() {
             Some(s) => (s.pending() as i64, s.taken() as i64),
             None => (-1, -1),
         };
-        // 0051 §7 item 3 (demand-sized pool): the per-peer socket demand the
-        // CORE will actually require (`allowed_ifaces × 2`), so the shell can
-        // size the pool from core's real need instead of assuming 4. -1 =
-        // interface enumeration failed → the shell keeps its own constant.
-        // 2026-10-09: it comes from the SAME sample as `ice`/`ice_peers`
-        // (`-1` also when no ICE read ever succeeded — see the freshness mark).
         with_ice_sockets_section(
             &base,
             queued,
             taken,
-            ice.need_per_peer,
             ice.stale,
             ice.age_ms,
         )
@@ -6985,13 +6984,15 @@ pub fn connector_socket_feed_json(fd: i32) -> String {
     )
 }
 
-/// The `connector_ice_socket_feed(fd)` implementation (N5c) — shell-side
-/// resupply of fresh protected UDP sockets for the per-peer ICE sessions
-/// (candidate-gather sockets + one long-lived check socket per local
-/// candidate, see `crate::peer_conn`). Same fail-closed contract as
-/// [`connector_socket_feed_json`]: without resupply, gathers fail CLOSED
-/// (no candidates, peers stay Idle with a Network-class error), never
-/// unprotected.
+/// The `connector_ice_socket_feed(fd)` implementation (N5c; **HOST-CLI ONLY**
+/// since official-alignment stage 4) — resupply of protected UDP sockets into
+/// the provider queue the host harness builds its ONE shared mux from
+/// ([`crate::peer_conn::PeerIceOrchestrator::arm_mux`], `host_sockets::feed_ice`).
+/// The DEVICE shell never calls this: the ICE plane rides the shared mux over
+/// the WG outer socket (`connector_ice_mux_arm`), so the NAPI export and the
+/// shell-side pool that used to drive it are gone. Same fail-closed contract as
+/// [`connector_socket_feed_json`]: without a socket the host mux cannot be built
+/// and peers stay Idle with a Network-class error, never unprotected.
 pub fn connector_ice_socket_feed_json(fd: i32) -> String {
     let slot = connector_slot();
     let Some(handle) = slot.as_ref() else {
@@ -7713,21 +7714,18 @@ pub fn connector_resource_status_json() -> String {
     connector_resource_probe().to_json()
 }
 
-/// The N5c socket-pool section appended to `connector_status()`.
+/// The N5c socket-depth section appended to `connector_status()`.
 ///
-/// `queued`/`taken` are the queue observables (see [`ConnectorHandle::status_json`]);
-/// `need_per_peer` is the CORE's per-peer demand for THIS interface set
-/// ([`crate::peer_conn::PeerIceOrchestrator::need_per_peer`] = allowed ifaces × 2),
-/// `-1` when it cannot be enumerated. The shell sizes its pool from
-/// `peers × need_per_peer` and falls back to its own constant on `-1`
-/// (0051 §7 item 3: `need=6` × 6 peers = 36 exceeded the old 24 target).
-fn ice_sockets_section(queued: i64, taken: i64, need_per_peer: i64) -> String {
+/// `queued`/`taken` are the protected-UDP source's queue observables (see
+/// [`ConnectorHandle::status_json`]); `-1` = no source attached. The retired
+/// per-peer pool demand (`need_per_peer`) is gone with the shell pool (stage 4).
+fn ice_sockets_section(queued: i64, taken: i64) -> String {
     format!(
-        "\"ice_sockets\":{{\"queued\":{queued},\"taken\":{taken},\"need_per_peer\":{need_per_peer}}}"
+        "\"ice_sockets\":{{\"queued\":{queued},\"taken\":{taken}}}"
     )
 }
 
-/// The full `connector_status()` text: `base` with the N5c socket-pool section
+/// The full `connector_status()` text: `base` with the N5c socket-depth section
 /// AND the 2026-10-09 ICE-snapshot freshness marks appended INSIDE its root
 /// object (the base document's trailing `}` is replaced by
 /// `,<ice_snapshot_stale>,<ice_snapshot_age_ms>,<ice_sockets>}`). Extracted so
@@ -7740,7 +7738,7 @@ fn ice_sockets_section(queued: i64, taken: i64, need_per_peer: i64) -> String {
 /// pre-existing key keeps its bytes and its relative order (the base document
 /// up to `ice_peers` is untouched) and (b) the document still ENDS with the
 /// `ice_sockets` object — the trailing section the compatibility tests pin.
-/// `ice_snapshot_stale` = `true` when the `ice`/`ice_peers`/`need_per_peer`
+/// `ice_snapshot_stale` = `true` when the `ice`/`ice_peers`
 /// values in this document are the LAST SUCCESSFUL sample rather than a fresh
 /// read (the orchestrator lock was busy with a gather); `ice_snapshot_age_ms`
 /// = `0` for a fresh read, the sample's age in ms when it is cached, and `null`
@@ -7752,7 +7750,6 @@ fn with_ice_sockets_section(
     base: &str,
     queued: i64,
     taken: i64,
-    need_per_peer: i64,
     ice_snapshot_stale: bool,
     ice_snapshot_age_ms: Option<u64>,
 ) -> String {
@@ -7765,7 +7762,7 @@ fn with_ice_sockets_section(
         &base[..base.len() - 1],
         ice_snapshot_stale,
         age,
-        ice_sockets_section(queued, taken, need_per_peer)
+        ice_sockets_section(queued, taken)
     )
 }
 
@@ -9340,19 +9337,20 @@ mod tests {
         assert_eq!(SessionDeadline::Disabled.as_str(), "disabled");
     }
 
-    /// 0051 §7 item 3：`connector_status()` 的 `ice_sockets` 段带 core 的每
-    /// peer 需求（`need_per_peer` = 允许接口数 × 2；-1 = 枚举失败，壳层回退）。
-    /// 逐字冻结：壳层按 `peers × need_per_peer` 定池，改字段名就是改协议。
+    /// 0051 §7 item 3 → STAGE 4：`connector_status()` 的 `ice_sockets` 段只报
+    /// 受保护 UDP 源的队列深度（`queued`/`taken`；-1 = 无源）。曾随段携带的
+    /// 每 peer socket 需求（`need_per_peer`）已随壳层 socket 池一起删除
+    /// （官方对齐审计 §2.7 stage 4）。逐字冻结：这一段仍是根对象的尾段。
     #[test]
-    fn ice_sockets_section_carries_the_core_per_peer_demand() {
+    fn ice_sockets_section_carries_the_socket_queue_depth() {
         assert_eq!(
-            ice_sockets_section(7, 12, 6),
-            "\"ice_sockets\":{\"queued\":7,\"taken\":12,\"need_per_peer\":6}"
+            ice_sockets_section(7, 12),
+            "\"ice_sockets\":{\"queued\":7,\"taken\":12}"
         );
         assert_eq!(
-            ice_sockets_section(-1, -1, -1),
-            "\"ice_sockets\":{\"queued\":-1,\"taken\":-1,\"need_per_peer\":-1}",
-            "-1 on all three = no shell-fed source and no enumerable interface set"
+            ice_sockets_section(-1, -1),
+            "\"ice_sockets\":{\"queued\":-1,\"taken\":-1}",
+            "-1 = no protected-UDP source attached"
         );
         // 接进一份状态文档后仍须被严格读取器接受（尾段追加，前文字段不动，
         // 且与生产路径同一段拼接代码——缺右花括号这类错误必须在这里就暴露）
@@ -9360,7 +9358,6 @@ mod tests {
             "{\"running\":true,\"state\":\"disconnected\"}",
             3,
             4,
-            6,
             false,
             Some(0),
         );
@@ -9368,14 +9365,14 @@ mod tests {
             doc,
             "{\"running\":true,\"state\":\"disconnected\",\
              \"ice_snapshot_stale\":false,\"ice_snapshot_age_ms\":0,\
-             \"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"
+             \"ice_sockets\":{\"queued\":3,\"taken\":4}}"
         );
         assert!(
             matches!(config::parse_document(&doc), Ok(Json::Obj(_))),
             "the strict reader accepts the full appended document: {doc}"
         );
         assert!(
-            doc.ends_with(",\"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"),
+            doc.ends_with(",\"ice_sockets\":{\"queued\":3,\"taken\":4}}"),
             "the ice_sockets section stays the trailing section of the root object: {doc}"
         );
         // 2026-10-09: the freshness marks — a cached sample renders stale with
@@ -9385,7 +9382,6 @@ mod tests {
             "{\"running\":true,\"state\":\"connected\",\"ice_peers\":[]}",
             3,
             4,
-            6,
             true,
             Some(8421),
         );
@@ -9393,7 +9389,7 @@ mod tests {
             stale_doc,
             "{\"running\":true,\"state\":\"connected\",\"ice_peers\":[],\
              \"ice_snapshot_stale\":true,\"ice_snapshot_age_ms\":8421,\
-             \"ice_sockets\":{\"queued\":3,\"taken\":4,\"need_per_peer\":6}}"
+             \"ice_sockets\":{\"queued\":3,\"taken\":4}}"
         );
         assert!(matches!(config::parse_document(&stale_doc), Ok(Json::Obj(_))));
         // ... and "no successful ICE read to age" is the document's own
@@ -9402,14 +9398,13 @@ mod tests {
             "{\"running\":true,\"state\":\"connecting\"}",
             0,
             0,
-            6,
             true,
             None,
         );
         assert!(
             unread_doc.contains(
                 "\"ice_snapshot_stale\":true,\"ice_snapshot_age_ms\":null,\
-                 \"ice_sockets\":{\"queued\":0,\"taken\":0,\"need_per_peer\":6}}"
+                 \"ice_sockets\":{\"queued\":0,\"taken\":0}}"
             ),
             "{unread_doc}"
         );
@@ -9419,7 +9414,7 @@ mod tests {
     /// 2026-10-09（ArkTS 主线程冻结修复）：orchestrator 锁被「另一线程长时间
     /// 持有」（真机形态：ICE pump 在 gather 里持锁 8.4–11 s）时，`status_json()`
     /// 必须于有界时间内返回：`try_lock` 读不到就回最近一次成功的 ICE 子快照
-    /// （`ice`/`ice_peers`/`need_per_peer` 三者同一份），以
+    /// （`ice`/`ice_peers` 两者同一份），以
     /// `ice_snapshot_stale:true` + 真实 `ice_snapshot_age_ms` 标明；从未成功
     /// 读过则输出既有的「未知」形态并 stale、age=null —— 绝不把在线 peer 读成 0
     /// 或把 ICE 面抹成空，也绝不阻塞。锁释放后下一次读取必须重新新鲜且拿到更新
@@ -9526,7 +9521,6 @@ mod tests {
             fresh.contains("\"ice_peers\":[{\"pub_key\":\"QUJD\",\"state\":\"idle\""),
             "{fresh}"
         );
-        let fresh_need = num_field(&fresh, "need_per_peer");
         assert!(matches!(config::parse_document(&fresh), Ok(Json::Obj(_))), "{fresh}");
 
         // ② 另一线程持锁（pump 在 gather 里的形态：锁被占用且不放手，由测试显式
@@ -9563,20 +9557,18 @@ mod tests {
             busy_a.contains("\"ice_peers\":[{\"pub_key\":\"QUJD\",\"state\":\"idle\""),
             "{busy_a}"
         );
-        assert_eq!(num_field(&busy_a, "need_per_peer"), fresh_need, "{busy_a}");
         let age = num_field(&busy_a, "ice_snapshot_age_ms");
         assert!((0..=60_000).contains(&age), "a cached sample carries its real age: {age}");
         assert!(matches!(config::parse_document(&busy_a), Ok(Json::Obj(_))), "{busy_a}");
 
-        // B：从未成功读过 ⇒ 既有的「未知」形态（0 peer 摘要 + ice_peers:null +
-        //    need_per_peer:-1），但 stale=true 且 age=null，不会被当成真实状态。
+        // B：从未成功读过 ⇒ 既有的「未知」形态（0 peer 摘要 + ice_peers:null），
+        //    但 stale=true 且 age=null，不会被当成真实状态。
         //    （age 用文档自己的 null 而不是负数哨兵：负数会被 crate 自己的严格
         //    读取器拒收，N2-H freeze facts 就是用它读这份文档的。）
         assert!(busy_b.contains("\"ice_snapshot_stale\":true"), "{busy_b}");
         assert!(busy_b.contains("\"ice_snapshot_age_ms\":null"), "{busy_b}");
         assert!(busy_b.contains("\"ice\":{\"peers\":0,"), "{busy_b}");
         assert!(busy_b.contains("\"ice_peers\":null"), "{busy_b}");
-        assert_eq!(num_field(&busy_b, "need_per_peer"), -1, "{busy_b}");
 
         // ③ 放锁：下一次读取重新新鲜，且拿到更新后的值（B 也补上缓存）。
         release_tx.send(()).expect("release the orchestrator lock");

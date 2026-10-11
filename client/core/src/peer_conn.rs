@@ -54,10 +54,11 @@
 //!
 //! ## 受保护 socket（治理 §二.4，fail-closed）
 //!
-//! 候选收集与每个本地候选的检查 socket 全部来自注入的
+//! 候选收集与 socket 全部来自注入的
 //! [`crate::ice::UdpSocketSource`]（生产
-//! [`crate::ice::ProtectedUdpFdSource`]，connector 侧经
-//! `connector_ice_socket_feed` 由壳侧补给）；空源/绑定失败 → 该 peer 记录
+//! [`crate::ice::ProtectedUdpFdSource`]：STUN 主机名的受保护 DNS 解析，宿主
+//! 路径上还是那**一枚**共享 mux 的供给；设备路径的 mux 建在 WG 外层 socket
+//! 上）；空源/绑定失败 → 该 peer 记录
 //! Network 类错误并冷却重试，**绝不**发没有本地候选支撑的 OFFER/ANSWER，
 //! 模块内无任何 `socket(2)` 调用、无未保护回退。
 //!
@@ -118,7 +119,7 @@ const GATHER_THREAD_STACK: usize = 256 * 1024;
 /// 生产 = [`ThreadGatherExec`]（每次调用一枚线程）。测试/harness 可换成
 /// 确定性驱动（[`InlineGatherExec`]）：注入时钟的 harness 从不等待真实
 /// 时间，异步执行者会让它们与真实墙钟赛跑。这是**注入缝**，不是行为开关
-/// ——两种驱动跑的是同一份 round 代码（[`crate::ice::gather_interface_round`]）。
+/// ——两种驱动跑的是同一份 round 代码（[`crate::ice::gather_srflx_round`]）。
 pub trait GatherExec: Send + Sync + 'static {
     /// 开始一个 round。返回 `false` = 起不来（线程上限/执行者拒绝）：调用方
     /// 必须把它当成「这一轮没有候选」处理，绝不回落成阻塞调用。
@@ -137,8 +138,8 @@ pub type IceMuxSlot = Arc<Mutex<Option<Arc<crate::ice_mux::IceMux>>>>;
 /// 把 STUN 过滤器没吃掉的那块缓冲**直接**交回 WG（`ice_bind.go:257-285`，
 /// `device_kernel_unix.go:109` 的读线程同理）。我们的 WG 设备是 boringtun 的
 /// 单线程泵，没有 wireguard-go 的 `Bind` API，所以最小适配是让 mux 直接调
-/// [`crate::connector::WgPeerApplier::handle_udp_inbound`]（`WgDevice::handle_udp`），
-/// 而不再经过 `IceSession::take_data_rx` 的会话队列。
+/// [`crate::connector::WgPeerApplier::handle_udp_inbound`]（`WgDevice::handle_udp`）。
+/// STAGE 4 起这是非 STUN 包的**唯一**去处：会话级 data 队列已随池删除。
 struct WgApplierSink(Arc<dyn crate::connector::WgPeerApplier>);
 
 impl crate::ice_mux::MuxUdpSink for WgApplierSink {
@@ -1164,7 +1165,9 @@ impl PeerIceOrchestrator {
 
     /// STAGE 2 的 fail-closed 建 mux 路径（主机 CLI 与 host 测试）：从受保护
     /// socket 供给里取**一枚**（不是每接口一枚），bind 通配地址（固定端口
-    /// 模式下就是这个端口），作为整个 ICE 平面的 socket。
+    /// 模式下就是这个端口），作为整个 ICE 平面的 socket；随后像设备路径一样
+    /// 挂上 WG 数据面 sink（STAGE 4 起非 STUN 包**只有**这一条去处 ——
+    /// 会话级 data 队列已随池一起删除）。
     ///
     /// 设备路径不会走到这里：壳层 feed 已经把槽填上；若槽空且供给也空
     /// （壳层没 feed、也没有宿主供给），返回 `Err` ——
@@ -1183,6 +1186,7 @@ impl PeerIceOrchestrator {
         let want = self.fixed_local_port.unwrap_or(0);
         let mux = crate::ice_mux::IceMux::adopt_unbound(owned, want, overlay)
             .map_err(|e| ManagementError::Network(format!("ice:no-mux: {e}")))?;
+        mux.attach_udp_sink(Arc::new(WgApplierSink(self.wg.clone())));
         crate::hilog::emit(&format!(
             "N5e_ICE|mux-armed|source=provider|port={}|fixed={}",
             mux.local_port(),
@@ -1418,18 +1422,6 @@ impl PeerIceOrchestrator {
             counts.live_local_sockets += session.live_local_socket_count();
         }
         counts
-    }
-
-    /// 每个 peer 的受保护 socket 需求（0051 §7 item 3；**STAGE 2 起恒为 1**）。
-    ///
-    /// STAGE 2（官方对齐审计 §2.7）：整个 ICE 平面只有**一枚**共享 mux
-    /// socket（上游 `UniversalUDPMuxDefault`），与 peer 数、接口数都无关，
-    /// 所以这个数不再是「每 peer 需求」而是「本平面还需要几枚」——恒 `1`。
-    /// 壳层的 socket 池（`NetBirdIceSocketPool.ets`）在 stage 2 不再被 feed
-    /// （stage 4 删除其代码），该字段因此只剩对账用途：`-1` 的历史语义
-    /// （「接口枚举失败」）不再可能，因为接口枚举已经不参与 socket 决策。
-    pub fn need_per_peer(&self) -> Option<usize> {
-        Some(1)
     }
 
     /// 收到一帧解密后的 signal 消息（`from_key` = 发送方 WG 公钥，
@@ -1913,23 +1905,6 @@ impl PeerIceOrchestrator {
             // 2026-10-05 的日志完全没有 per-check 观测，这一行是下次
             // 判读 H1/H3/H4 的最低配证据。
             self.emit_health_summary(idx, now_ms);
-            // N11: WG 数据面入向 —— ICE 会话分用出的非 STUN（WG）包喂给
-            // 设备（上游：共享接收循环把非 STUN 包交给 WG，
-            // ice_bind.go:279-303）。设备来源匹配 peer endpoint 的既有
-            // 规则不变；会话已拆（Failed 回收）则数据随之消亡（路径已死）。
-            // 无条件执行：入向数据面同样不得随 signal 流断而停。
-            //
-            // STAGE 3：走这条路只在 mux **没有** WG sink 时（provider 建的
-            // host mux、或会话自有 socket 的旧路径）——生产里
-            // `arm_mux_from_wg_socket` 已把非 STUN 包直接送进设备，会话队列
-            // 因此始终为空（`take_data_rx` 空转，无重复投递）。
-            let datagrams = match self.peers[idx].session.as_mut() {
-                Some(s) => s.take_data_rx(),
-                None => Vec::new(),
-            };
-            for (src, src_port, datagram) in datagrams {
-                let _sent = self.wg.handle_udp_inbound(&datagram, (src, src_port), now_ms);
-            }
         }
         // STAGE 0: exit side of the whole-tick wall clock (entry above). Only
         // a pass that spent real time is worth a line; `round=` is the injected
@@ -3498,256 +3473,6 @@ mod tests {
         unsafe { sys::close(holder) };
     }
 
-    /// 0049 §5.1-2 活锁回归钉子 + socket 账本：**池容量小于 N 个 peer 的
-    /// 总需求、按批补给**（现场：池 8、每批 4、每 peer 6）。修复前失败路径
-    /// 「先消耗再失败、不回流」会把每批补给吃光——池永远攒不到 6 枚，切网
-    /// 后 18 s 补给的 20 枚 0 次成功；修复后供给不足的 peer 在任何 `take`
-    /// 之前就被挡住（0050 起是**等待**：`N5c_ICE|locals-waiting|…|need=6|
-    /// have=…|reason=insufficient-sockets`，不再是 `Err`/pump error），池得以
-    /// 跨批次攒够，3 个 peer 最终全部完成本地收集，且被挡住的尝试一枚 socket
-    /// 都不消耗。（0052 起每 peer 需求由 6 降到 3：gather 的绑定 socket 由
-    /// 会话接管，不再另取一枚——账本公式不变，`NEED` 变小。）
-    ///
-    /// fd 账本（现有 harness 方式）：`LedgeredSocks` 把 `take_owned` 的每一
-    /// 枚记进 `handed` 并当场用 `F_GETFD` 证明取到的是有效 fd；于是可断言
-    /// ①`handed == 3 × need`（没有一枚被失败尝试白烧）、②`taken == handed`、
-    /// ③`fed == pending + handed`（喂进来的每一枚 dup 都有归属，既不凭空
-    /// 消失也不重复计入）。本修复是纯前置检查：不 take / 不 close / 不 dup，
-    /// 因此不存在重复关闭或泄漏的新路径——被挡住的拍位零消耗即其直接证据。
-    // STAGE 2（官方对齐审计 §2.7）：本用例钉的是**壳层 socket 池的饿死/
-    // 补给**语义（`required_local_sockets` 预算、`LocalsRun::WaitingForSockets`
-    // 等待账）。stage 2 起整个 ICE 平面只有一枚共享 mux socket，没有池可饿、
-    // 没有等待态，机制连同它一起退出（审计 §2.7 stage 2 "Deletes at the end:
-    // … the pool sizing"）；壳层的池代码按同一份审计留到 stage 4 删除。
-    // 取而代之的是 `many_peers_share_one_mux_socket`（同一个 mux、多个 peer）。
-    #[cfg(any())]
-    #[test]
-    fn starvation_waits_for_topup_instead_of_burning_it() {
-        use std::os::fd::{AsRawFd, OwnedFd};
-
-        /// 受保护池 + 逐枚 handed-out 账本。
-        struct LedgeredSocks {
-            inner: crate::ice::ProtectedUdpFdSource,
-            handed: Mutex<Vec<i32>>,
-        }
-        impl LedgeredSocks {
-            /// 壳层 `feedOneIceSocket` 的测试等价物：真实 UDP fd，喂给源之后
-            /// 原 fd 归测试并立即关闭（源留住自己的 dup）。
-            fn feed_batch(&self, n: usize) {
-                for _ in 0..n {
-                    let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-                    assert!(fd >= 0, "socket() failed");
-                    self.inner.feed(fd).expect("feed");
-                    unsafe { sys::close(fd) };
-                }
-            }
-        }
-        impl UdpSocketSource for LedgeredSocks {
-            fn take_fd(&self) -> Result<i32, crate::mgmtsock::SocketSeamError> {
-                self.inner.take_fd()
-            }
-            fn take_owned(&self) -> Result<OwnedFd, crate::mgmtsock::SocketSeamError> {
-                let owned = self.inner.take_owned()?;
-                let fd = owned.as_raw_fd();
-                assert!(
-                    unsafe { sys::fcntl(fd, sys::F_GETFD) } >= 0,
-                    "a handed-out socket must be an open fd"
-                );
-                self.handed.lock().expect("handed").push(fd);
-                Ok(owned)
-            }
-            /// 只有生产源会报告可用量；这里转发它，守护才生效（把这一行临时
-            /// 改成 `None` 即复现修复前的活锁）。
-            fn available(&self) -> Option<usize> {
-                Some(self.inner.pending())
-            }
-        }
-
-        // 3 个允许接口 ⇒ 每 peer 需要 3 枚（每接口一枚 gather socket，会话
-        // 直接接管），与 0049 的 `added=3` 同型；壳层池目标 8、每批 4 枚
-        //（ICE_TOPUP_BATCH）。
-        //
-        // 初始只灌 2 枚（H1 起一拍只允许一个 peer 收集）：不足一次收集所需的
-        // 3 枚，于是第一次尝试必然落在「等待补给」分支 —— 守护才真的被走到。
-        // 若初始灌满 8 枚，每拍唯一的那次尝试都能当场成功，本用例会退化成
-        // 「没人被饿过」的空转。
-        const NEED: usize = 3;
-        let socks = Arc::new(LedgeredSocks {
-            inner: crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"),
-            handed: Mutex::new(Vec::new()),
-        });
-        socks.feed_batch(2); // 不足一次收集（启动灌池的半批，故意饿一次）
-        let mut orch = test_orch(PeerIceDeps {
-            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![
-                crate::ice::InterfaceAddr { name: "eth0".into(), addr: [127, 0, 0, 1] },
-                crate::ice::InterfaceAddr { name: "eth1".into(), addr: [127, 0, 0, 2] },
-                crate::ice::InterfaceAddr { name: "eth2".into(), addr: [127, 0, 0, 3] },
-            ])),
-            socks: socks.clone(),
-            signal: Arc::new(LoggingSignalExchange::default()),
-            wg: noop_wg(),
-            tie_breaker: Some(7),
-            fixed_local_port: None,
-            advertised_candidates: Vec::new(),
-        });
-        orch.set_peers(&["P1".into(), "P2".into(), "P3".into()]);
-        orch.set_signal_ready(true);
-
-        let mut fed = 2usize; // 与上面的启动灌池一致（不足一次收集 ⇒ 首拍必饿）
-        let mut starved_rounds = 0usize;
-        let mut now = 1000u64;
-        let mut rounds = 0usize;
-        while !orch.peers.iter().all(|p| p.locals_done) && rounds < 40 {
-            let taken_before = socks.inner.taken();
-            let done_before = orch.peers.iter().filter(|p| p.locals_done).count();
-            // 0050 §8 item 3：池不足是**等待**——被挡住的拍绝不冒 pump error
-            // （修复前这里是 `Err(Network("…insufficient-sockets…"))`，ICE pump
-            // 每拍打印一条 `peer-conn: pump error (network)`）。
-            assert!(
-                orch.run_once(now).is_ok(),
-                "a starved beat must stay a wait, never a pump error (round {rounds})"
-            );
-            let waiting = orch.peers.iter().filter(|p| p.locals_wait_since_ms != 0).count();
-            if waiting > 0 {
-                starved_rounds += 1;
-            }
-            // 打断活锁的全部机制：被挡住的尝试一枚 socket 都不消耗。同一拍里
-            // 别的 peer 可能刚好成功（那是它自己的预算），所以逐拍只断言
-            // 「消耗量 == 本拍成功数 × need」。
-            let newly_done = orch.peers.iter().filter(|p| p.locals_done).count() - done_before;
-            assert_eq!(
-                socks.inner.taken() - taken_before,
-                (newly_done * NEED) as u64,
-                "a starved attempt must not consume any socket (round {rounds})"
-            );
-            // 等待不是错误：`last_error` 不得被等待拍写脏。
-            assert!(
-                orch.peers.iter().all(|p| p.last_error.is_none()),
-                "waiting must not record an error (round {rounds})"
-            );
-            // 壳层补给等价物：池深 < 8 时补一批 4 枚（4 s 定时器 + 5 s 状态
-            // 轮询两个驱动的合并节奏）；重试节奏沿用 RETRY_COOLDOWN_MS。
-            if socks.inner.pending() < 8 {
-                socks.feed_batch(4);
-                fed += 4;
-            }
-            now += RETRY_COOLDOWN_MS + 1;
-            rounds += 1;
-        }
-
-        for (i, p) in orch.peers.iter().enumerate() {
-            assert!(
-                p.locals_done,
-                "peer {i} must converge after top-ups (rounds={rounds}, taken={}, pending={}, \
-                 starved={starved_rounds})",
-                socks.inner.taken(),
-                socks.inner.pending()
-            );
-        }
-        assert!(starved_rounds > 0, "the scenario must actually exercise the starvation guard");
-        // 每次成功收集的预算仍是 `need`（旧断言 `insufficient-sockets|need=6`
-        // 的等价物：等待行里的 `need=` 就是这个数）。
-        assert_eq!(orch.required_local_sockets().expect("budget"), NEED);
-        let handed = socks.handed.lock().expect("handed").len();
-        assert_eq!(handed, 3 * NEED, "no socket may be spent outside a successful gather+bind");
-        assert_eq!(socks.inner.taken() as usize, handed);
-        assert_eq!(
-            socks.inner.pending() + handed,
-            fed,
-            "fd ledger must balance: every fed socket is either queued or handed out"
-        );
-    }
-
-    /// 0050 §8 item 3 的第二半：**等补给的时间不得计入
-    /// [`START_DEADLINE_MS`]**（「等待期间暂停计时」）。
-    ///
-    /// 真机形态：会话已建、本地候选还没收集（池补给尚未到达），远端凭证也
-    /// 没来。修复前每一拍都会把 `now - session_at_ms` 喂给僵尸判据，于是饿死
-    /// 3 个 deadline 周期后会话被当「对端不应答」拆掉（真机 0050 观测到
-    /// TrBfURPG 12 次 / ai4IGfaf 11 次 `negotiation-start-timeout`，见汇总
-    /// §2.6 的推测链）。本用例钉死两点：①等待期间会话既不被拆、计时起点也
-    /// 不被重排；②等待结束后计时**恢复**——再走满一个 deadline（期间无等待）
-    /// 仍然诚实拆除，暂停不是禁用。
-    ///
-    /// 状态用字段级构造：公开路径在发起侧被挡住时会回滚会话（0048 修复），
-    /// 而本用例要的正是「会话还在时饿死」这一形态（答方在池补给前已建会话）。
-    // STAGE 2（官方对齐审计 §2.7）：本用例钉的是「等池补给的时间不计入
-    // START_DEADLINE_MS」——等待态本身已随壳层 socket 池退出（见上一条），
-    // 这条暂停语义随之失效。deadline 本身的诚实推进仍由
-    // `zombie_negotiation_is_torn_down_after_the_start_deadline` 覆盖。
-    #[cfg(any())]
-    #[test]
-    fn starved_session_does_not_burn_the_negotiation_deadline() {
-        let socks = Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source"));
-        let mut orch = test_orch(PeerIceDeps {
-            ifaces: Arc::new(crate::ice::StaticInterfaces(vec![crate::ice::InterfaceAddr {
-                name: "eth0".into(),
-                addr: [127, 0, 0, 1],
-            }])),
-            socks: socks.clone(),
-            signal: Arc::new(LoggingSignalExchange::default()),
-            wg: noop_wg(),
-            tie_breaker: Some(7),
-            fixed_local_port: None,
-            advertised_candidates: Vec::new(),
-        });
-        orch.set_peers(&["P".into()]);
-        orch.set_signal_ready(true);
-        const T0: u64 = 1000;
-        {
-            let p = &mut orch.peers[0];
-            let creds = IceCredentials::generate().expect("creds");
-            p.session = Some(IceSession::new(creds.clone(), true, Some(7)).expect("session"));
-            p.creds = Some(creds);
-            p.state = PeerIceState::Gathering;
-            p.session_at_ms = T0;
-        }
-        // 饿死超过 3 个 deadline：会话必须还在，计时起点不被重排，`run_once`
-        // 全程 `Ok`（无 pump error），peer 状态里也没有错误。
-        let mut now = T0;
-        let mut first_wait_at = 0u64;
-        while now < T0 + 3 * START_DEADLINE_MS {
-            now += 500;
-            assert!(orch.run_once(now).is_ok(), "a starved beat is a wait, not an error ({now})");
-            assert!(orch.peers[0].session.is_some(), "starvation must not tear the session down ({now})");
-            assert_eq!(orch.peers[0].session_at_ms, T0, "the timer must not be re-armed ({now})");
-            assert!(orch.peers[0].locals_wait_since_ms != 0, "the peer is waiting for supply ({now})");
-            assert_eq!(orch.peers[0].last_error, None, "waiting is not an error ({now})");
-            if first_wait_at == 0 {
-                first_wait_at = now;
-            }
-        }
-        // 补给到达：收集完成（同一个会话，`negotiation_age_ms` 里只留下等待
-        // 开始之前那一小段非等待龄期）。等过最后一次冷却，走既有重试节奏。
-        for _ in 0..2 {
-            let fd = unsafe { sys::socket(sys::AF_INET, sys::SOCK_DGRAM, 0) };
-            assert!(fd >= 0, "socket() failed");
-            socks.feed(fd).expect("feed");
-            unsafe { sys::close(fd) };
-        }
-        now += RETRY_COOLDOWN_MS + 1;
-        assert!(orch.run_once(now).is_ok(), "the supplied peer gathers");
-        assert!(orch.peers[0].locals_done, "the top-up must complete the gathering");
-        assert_eq!(orch.peers[0].session_at_ms, T0, "the SAME session finished gathering");
-        assert_eq!(orch.peers[0].locals_wait_since_ms, 0, "supply ends the waiting state");
-        let age_at_supply = orch.peers[0].negotiation_age_ms(now);
-        assert_eq!(
-            age_at_supply,
-            first_wait_at - T0,
-            "the whole waiting span is excluded from the deadline"
-        );
-        // 计时恢复：deadline 只剩最后 1 ms 时不拆；走满剩余的非等待量才拆。
-        let remaining = START_DEADLINE_MS - age_at_supply;
-        assert!(remaining > 0, "the supply beat must leave some deadline to run");
-        assert!(orch.run_once(now + remaining - 1).is_ok());
-        assert!(orch.peers[0].session.is_some(), "a paused timer must not expire on the old total");
-        assert!(orch.run_once(now + remaining).is_ok());
-        assert!(
-            orch.peers[0].session.is_none(),
-            "after a full non-waiting deadline the zombie is still torn down (pause, not disable)"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // STAGE 1：异步 per-peer 收集（官方对齐审计 §2.7）
     // -----------------------------------------------------------------------
@@ -4379,59 +4104,6 @@ mod tests {
         orch.run_once(now + 1).expect("the reconnect beat resets the backoff");
         assert!(!orch.peers[0].backoff_active, "a signal reconnect clears the backoff");
         assert_eq!(orch.peers[0].backoff_misses, 0);
-    }
-
-    /// STAGE 2（官方对齐审计 §2.7）：`need_per_peer` 不再是「每 peer 的接口
-    /// 预算」——整个 ICE 平面只有一枚共享 mux socket，所以它**恒为 1**，与
-    /// 接口数、接口枚举成败都无关。壳层的 socket 池在这一阶段不再被 feed
-    /// （stage 4 删除其代码），该字段只剩对账用途。
-    #[test]
-    fn need_per_peer_is_one_shared_mux_socket_whatever_the_interfaces() {
-        fn orch_with(ifaces: Vec<crate::ice::InterfaceAddr>) -> PeerIceOrchestrator {
-            test_orch(PeerIceDeps {
-                ifaces: Arc::new(crate::ice::StaticInterfaces(ifaces)),
-                socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
-                signal: Arc::new(LoggingSignalExchange::default()),
-                wg: noop_wg(),
-                tie_breaker: Some(7),
-                fixed_local_port: None,
-                advertised_candidates: Vec::new(),
-            })
-        }
-        let i = |name: &str, addr: [u8; 4]| crate::ice::InterfaceAddr { name: name.into(), addr };
-        assert_eq!(orch_with(vec![]).need_per_peer(), Some(1));
-        assert_eq!(orch_with(vec![i("wlan0", [192, 168, 1, 2])]).need_per_peer(), Some(1));
-        assert_eq!(
-            orch_with(vec![
-                i("wlan0", [192, 168, 1, 2]),
-                i("rmnet0", [10, 0, 0, 2]),
-                i("vpn-tun", [100, 108, 144, 165]),
-                i("eth1", [172, 17, 1, 1]),
-            ])
-            .need_per_peer(),
-            Some(1),
-            "interface count does not change it any more: the mux is ONE socket"
-        );
-        // 接口枚举失败也不再让这个数变成 -1（接口枚举已经不参与 socket 决策）。
-        let broken = test_orch(PeerIceDeps {
-            ifaces: Arc::new(FailingInterfaces),
-            socks: Arc::new(crate::ice::ProtectedUdpFdSource::new_with_fd(-1).expect("empty udp source")),
-            signal: Arc::new(LoggingSignalExchange::default()),
-            wg: noop_wg(),
-            tie_breaker: Some(7),
-            fixed_local_port: None,
-            advertised_candidates: Vec::new(),
-        });
-        assert_eq!(broken.need_per_peer(), Some(1));
-    }
-
-    /// 枚举必然失败的接口源（`need_per_peer` 的 -1 语义回归）。
-    struct FailingInterfaces;
-
-    impl InterfaceSource for FailingInterfaces {
-        fn list(&self) -> Result<Vec<crate::ice::InterfaceAddr>, ManagementError> {
-            Err(ManagementError::Network("interface-enum: test failure".into()))
-        }
     }
 
     // -------------------------------------------------------------------

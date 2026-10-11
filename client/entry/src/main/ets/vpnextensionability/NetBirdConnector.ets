@@ -298,18 +298,6 @@ export interface RelayAdvertisedView {
 }
 
 // core.connector_status snapshot (subset the shell consumes).
-// N5c: LIVE ICE socket queue depth from connector_status().ice_sockets.
-export interface IceSocketDepth {
-  queued: number;
-  taken: number;
-  // 0051 §7 item 3: the CORE's per-peer protected-socket demand for the current
-  // interface set (allowed interfaces × 2), so the shell can size its pool from
-  // core's real need instead of assuming 4. -1 = the core could not enumerate
-  // its interfaces (the shell then keeps its ICE_SOCKET_PER_PEER fallback).
-  // Optional on purpose: an older core / the no-connector snapshot omits it.
-  need_per_peer?: number;
-}
-
 export interface ConnectorStatusResult {
   running: boolean;
   state: string;
@@ -325,10 +313,6 @@ export interface ConnectorStatusResult {
   route_count: number;
   reconnects: number;
   last_error: ConnectorErrorClass | null;
-  // N5c starvation observability: the ICE socket queue depth (queued = still
-  // available to the core, taken = consumed so far; -1 = no shell-fed source).
-  // The shell MUST read this instead of trusting its own last feed reading.
-  ice_sockets?: IceSocketDepth;
   session_expiry: string;
   // 2026-10-07 client-detail increment: the deadline token above carries no
   // value; the core's `session_expires_at_unix` (Unix SECONDS, null for
@@ -968,25 +952,14 @@ export function mgmtSocketOpen(): NativeTcpSocketOpen {
   return JSON.parse(core.mgmt_socket_open()) as NativeTcpSocketOpen;
 }
 
-// Device-path ICE socket opener (N5c/N7 device gap): the same protect-gate
+// Device-path UDP socket opener (N5c/N7 device gap): the same protect-gate
 // split as the management socket, UDP variant. Core opens an UNBOUND UDP
-// socket (binding here would pick the port before the interface is known);
-// the ICE consumer dups the fd, binds the copy per interface and reads the
-// chosen port back via getsockname.
-//
-// RETIRED IN STAGE 2 (official-alignment audit §2.7): the ICE plane no longer
-// takes a socket per gather round — it uses the ONE shared mux below. Kept (with
-// `connectorIceSocketFeed` and `NetBirdIceSocketPool.ets`) until stage 4 deletes
-// the shell-side socket rationing together.
+// socket. Used by the N2 control plane's on-demand supply (a UDP socket for
+// the protected resolver, NetBirdN2Control), never for ICE: the ICE plane
+// takes no socket of its own any more — it rides the ONE shared mux over the
+// WireGuard outer socket (see `connectorIceMuxArm` below).
 export function iceSocketOpen(): NativeTcpSocketOpen {
   return JSON.parse(core.ice_socket_open()) as NativeTcpSocketOpen;
-}
-
-// Feed a PROTECTED ICE UDP socket (open + protect first). Every gathering
-// round takes a fresh fd; a starved queue fails candidate gathering CLOSED —
-// there is no unprotected UDP fallback (governance §二.4).
-export function connectorIceSocketFeed(fd: number): SocketFeedResult {
-  return JSON.parse(core.connector_ice_socket_feed(fd)) as SocketFeedResult;
 }
 
 // STAGE 2/3 (official-alignment audit §2.7): the ONE shared ICE mux socket.

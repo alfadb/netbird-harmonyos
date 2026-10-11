@@ -56,7 +56,7 @@ import {
   ConnectorLogoutResult, DeviceConfigFile, ManagementEndpoint, NativeTcpSocketOpen, RelayAdvertisedView,
   RouteSetAppliedResult, SocketFeedResult, TunReleaseResult, WgFeedResult,
   DEFAULT_DEVICE_CONFIG_FILE, DEFAULT_SETUP_KEY_FILE, NETWORK_MAP_POLL_MS, NETWORK_MAP_WAIT_MS,
-  PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson, connectorIceSocketFeed,
+  PACKAGED_CA_ROOTS_RAWFILE, STATUS_POLL_MS, buildConnectorConfigJson,
   connectorNetworkConfig, connectorRouteSetApplied, connectorRouteSelectionSet,
   connectorRoutes, connectorSignalFeed,
   connectorStartWithSocket,
@@ -111,9 +111,6 @@ import { isPhysicalNetworkSwitch, lanRoamCheckDue,
 // type-only: erased at runtime (same rule as the endpoint shapes above), so
 // the staging selfchecks never need a shim for the policy module.
 import type { LanRoamDecision } from './NetBirdPhysicalNetworkPolicy';
-
-import { ICE_SOCKET_POOL_MIN, iceSocketNeedPerPeer, iceSocketTargetDepth,
-  iceSocketTopUpCount } from './NetBirdIceSocketPool';
 
 // 2026-10-08 shell-side diagnostics wiring. The native core already tees its
 // OWN events into filesDir/netbird-vpn.log; these two modules must NEVER
@@ -185,23 +182,6 @@ const ALL_ON_ROUTE_SELECTION: RouteSelection = {
 // best-effort treatment, the shell treats box expiry as protect failure
 // (governance docs/native-nx-governance.md item 4: fail-closed).
 const PROTECT_BOX_MS: number = 5000;
-// ICE socket pool: the ICE gather consumes one FRESH unbound UDP socket per
-// IPv4 interface round (dups share the socket object, so a bound copy cannot
-// be re-bound), and a device has several interfaces — one socket starves the
-// gather after the first round (device-verified 2026-09-14). The pool target is
-// DEMAND-SIZED from the CORE's own per-peer need (peers × core need_per_peer,
-// clamped 8..48, see NetBirdIceSocketPool.ets): smoke 0050 measured 6 peers ×
-// need 4 = 24 against a fixed 8 (2 peers starved every round), and smoke 0051
-// saw need=6 (3 allowed interfaces) → 36, which the old 32 cap did not cover.
-// The core reports the need in connector_status().ice_sockets.need_per_peer;
-// when that field is absent or -1 the shell falls back to its 4-per-peer
-// constant. ICE_SOCKET_POOL_MIN is the target until a peer count is known.
-// A failed ICE session is re-negotiated after a cooldown, and every retry
-// consumes fresh sockets again (the pool is one-shot). Refill when status
-// reports a drained queue, with a periodic retry while the VPN is armed; a
-// core that is not gathering must not make the shell pile up fds (device run 3
-// reached queue=26 while nothing consumed them).
-const ICE_SOCKET_TOPUP_MS: number = 4000;
 // N3-7: bound for the shell-side DNS resolution of the management host
 // (DNS must stay OUT of native so the protected dial never pulls nameserver
 // traffic through our own tunnel).
@@ -816,9 +796,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Shell-owned current WG UDP raw fd; the device owns a separate duplicate.
   private outboundSocketFd: number = -1;
   private outboundProtected: boolean = false;
-  // ICE UDP sockets are protected before the native queue duplicates them.
-  private iceProtected: boolean = false;
-  private iceTopUpTimer: number = -1;
   private socketSupplyTimer: number = -1;
   private networkObserver: connection.NetConnection | undefined = undefined;
   private networkDebounceTimer: number = -1;
@@ -863,14 +840,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // '' = the last read succeeded.
   private routeApplyReadErrorClass: string = '';
   private signalUri: string = '';
-  // Depth reported by the last accepted feed — the top-up uses it to tell a
-  // draining core (keep feeding) from an idle one (stop piling up).
-  private iceQueueDepth: number = 0;
-  // Demand-sized pool target (peers × 4, clamped 8..32): refreshed from every
-  // status sample and from the live status read taken at pool-feed time, so a
-  // 6-peer map targets 24 sockets instead of the fixed 8 of smoke 0050.
-  private iceTargetDepth: number = ICE_SOCKET_POOL_MIN;
-  private iceTopUpActive: boolean = false;
   // Process-level protect (protectProcessNet, API 22+) — diagnostic attempt
   // once per session; its result does not establish per-socket bypass semantics.
   private processProtectAttempted: boolean = false;
@@ -1053,8 +1022,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // N2 P5: one automatic I/Ws sandwich is in flight in the watcher tick at a
   // time (the post controls are async; a slow send must not stack up).
   private n2SandwichBusy: boolean = false;
-  // N2 P5: the I leg's marker (registered before the ICE pool feed). The post
-  // control is offered by the core once the first real I send is observed.
+  // N2 P5: the I leg's marker (registered before the ONE shared-mux arm). The
+  // post control is offered by the core once the first real I send is observed.
   private n2IceSandwichMarker: string = '';
   // N2 P5: the Ws leg's marker (registered before Ws selection).
   private n2WsSandwichMarker: string = '';
@@ -1624,11 +1593,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // socket here — one open+bind+protect for ICE and WG together. The core
         // replaces the mux slot and renegotiates the sessions that rode the old
         // one (its reader thread is stopped and its dup closed with it).
-        this.iceQueueDepth = 0;
-        if (this.iceTopUpTimer !== -1) {
-          clearInterval(this.iceTopUpTimer);
-          this.iceTopUpTimer = -1;
-        }
         if (!await this.armIceMux()) { break; }
         if (epoch !== this.networkEpoch || this.destroyRequested || this.recreateInFlight ||
           this.connection !== vpn || this.n2CdProductionBlocked(epoch)) { continue; }
@@ -3760,8 +3724,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // True while the gate forbids handing the core a production connection for
   // `epoch`. Every recovery / new-connection supply entry consults this:
   // recoverPhysicalNetwork (entry + every chase round), fulfillSocketRequest,
-  // feedSpareProtectedSocket, feedOneIceSocket, topUpIceBatch and the
-  // recreate-finally retry. `'blocked'` and `'held'` refuse EVERY epoch (so an
+  // feedSpareProtectedSocket and the recreate-finally retry. `'blocked'` and
+  // `'held'` refuse EVERY epoch (so an
   // in-flight attempt of an older epoch cannot continue into a newer one, and a
   // later switch cannot slip past); `'released'` allows ONLY the epoch the gate
   // was armed for.
@@ -4717,13 +4681,13 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   // N2 P5: the I leg, called between the WG data-plane feed (the attach) and
-  // the first ICE pool feed / gather — the frozen "首轮 ICE 池馈入之前".
+  // the ONE shared-mux arm — the frozen "首轮 ICE 池馈入之前".
   private async n2IceSandwichPre(): Promise<string> {
     this.n2IceSandwichMarker = await this.n2SandwichPre('I');
     return this.n2IceSandwichMarker;
   }
 
-  // N2 P5: the Ws leg, called right after the ICE pool feed and therefore
+  // N2 P5: the Ws leg, called right after the shared-mux arm and therefore
   // before any ICE nomination can select the egress socket ("Ws 选中前").
   private async n2WsSandwichPre(): Promise<string> {
     this.n2WsSandwichMarker = await this.n2SandwichPre('Ws');
@@ -4961,10 +4925,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         // retired — the whole ICE plane rides ONE shared socket, and since stage 3
         // that socket IS the WG outer socket (armed once by armIceMux over the
         // device's own protected socket, re-armed on a physical-network change), so
-        // there is nothing to size, refresh or top up here. The pool sizing/feeding
-        // below (iceTargetDepth / iceQueueDepth / topUpIceBatch /
-        // NetBirdIceSocketPool.ets) is left in place but no longer driven; stage 4
-        // deletes it together with the core's `connector_ice_socket_feed`.
+        // there is nothing to size, refresh or top up here.
         if (status.terminal === true) {
           this.handleConnectorDeath(`terminal-state:${status.state}`, errorClass);
           return;
@@ -6242,8 +6203,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   private async settleCreate(fd: number, gen: number): Promise<CreateOutcome> {
     // Startup race (2026-10-07): holding the fd is NOT a settled generation.
     // `createSettled` is announced at the END of this leg (below), once the
-    // fail-closed protect gate, the WG data-plane feed, the ICE pool
-    // protect/feed and the initial ACK have all returned. The raw fd is still
+    // fail-closed protect gate, the WG data-plane feed, the ONE shared-mux
+    // arm and the initial ACK have all returned. The raw fd is still
     // published here: the fd contract, the feeds and the pre-destroy audit all
     // read `tunFd`, and the rebuildable gate is the COMPOSITE
     // (connection && createSettled && tunFd >= 0) — never `tunFd` alone.
@@ -6398,8 +6359,8 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     }
 
     // N2 P5 (v4.1 §4 Ws row): the Ws PRE control must be in place BEFORE the
-    // selected egress socket is ever handed to WG. The ICE pool was just fed,
-    // so no nomination can have happened yet; the core refuses honestly if one
+    // selected egress socket is ever handed to WG. The shared mux was just
+    // armed, so no nomination can have happened yet; the core refuses honestly if one
     // somehow did (`first-send-before-pre-control`). The POST control is
     // offered later by the watcher tick, once the core has observed the first
     // real `wg_sendto`. NOTHING here defers or reorders `peer_conn.rs`'s
@@ -6426,7 +6387,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
     this.ackAppliedRoutesInitial();
     // Startup race (2026-10-07): the generation becomes settled — and so
     // rebuildable / live-appliable — only HERE, after this leg really
-    // completed (protect gate + WG feed + ICE pool feed + initial ACK above).
+    // completed (protect gate + WG feed + shared-mux arm + initial ACK above).
     // Announcing it on the fd alone let a mailbox tick or a watcher tick act
     // on a generation whose own initialization was still running (and consume
     // the pending route request against a not-yet-ACKed applied set).
@@ -6596,9 +6557,7 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
   // Why one socket replaces the per-interface pool: every host candidate of
   // every peer is `interface address × mux port` (upstream
   // `gatherCandidatesLocalUDPMux`), so one protect call covers the whole ICE
-  // plane instead of up to 46 sequential `open → protect → feed` rounds. The
-  // pool path (protectAndFeedIceSocket / topUpIceBatch / feedOneIceSocket) stays
-  // in this file but is no longer called; stage 4 deletes it.
+  // plane instead of up to 46 sequential `open → protect → feed` rounds.
   //
   // The stale/fail-closed gates are the ones the retired protect+feed step
   // applied (minus the protection itself, which the WG socket already has):
@@ -6628,7 +6587,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           this.requestId, armed.error ?? 'no-message');
         return false;
       }
-      this.iceProtected = true;
       const fedLine: string = `VPN_ICE_MUX_ARMED|requestId=${this.requestId}|` +
         `port=${armed.port ?? 0}|replaced=${String(armed.replaced ?? false)}|` +
         `reader=${String(armed.reader ?? false)}|socket=wg-outer|` +
@@ -6642,124 +6600,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
         this.requestId, safeError(error as Error));
       return false;
     }
-  }
-
-  // N5c/N7 device gap: ICE UDP socket provisioning (core-open → protect →
-  // feed). Mirrors protectOutboundSocketFailClosed for the ICE seam: each fd
-  // is core-opened UNBOUND (ice_socket_open — binding here would pick the port
-  // before the interface is known), protected BEFORE the ICE consumer binds a
-  // dup copy, then handed over. A POOL is fed because every interface round
-  // consumes one socket (see feedOneIceSocket). Failure of the whole pool is
-  // fail-closed; a partial pool is logged and the gather simply has fewer
-  // interfaces to work with.
-  //
-  // RETIRED IN STAGE 2: nothing calls this any more (see armIceMux).
-  // Deleted with NetBirdIceSocketPool.ets in stage 4.
-  private async protectAndFeedIceSocket(): Promise<boolean> {
-    const connection: vpnExtension.VpnConnection | undefined = this.connection;
-    if (connection === undefined) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=connection-missing', this.requestId);
-      return false;
-    }
-    // Size the pool from a LIVE status read: at this point the watcher has not
-    // necessarily sampled the peer count yet (first feed / post-switch
-    // recovery), and the fixed 8 of smoke 0050 starved 2 of 6 peers. The same
-    // read carries the core's per-peer need (smoke 0051: need 6 with 3 allowed
-    // interfaces); a missing sample keeps the target the watcher last derived
-    // (never below the 8 minimum), and a missing need_per_peer field falls back
-    // to the shell's 4-per-peer constant. No new timer — this is one status
-    // read per pool feed.
-    const live: ConnectorStatusResult | null = pollStatusOrNull();
-    if (live !== null) {
-      this.iceTargetDepth =
-        iceSocketTargetDepth(live.peer_count, iceSocketNeedPerPeer(live.ice_sockets?.need_per_peer));
-    }
-    const target: number = this.iceTargetDepth;
-    let fedCount: number = 0;
-    for (let i = 0; i < target; i++) {
-      const ok: boolean = await this.feedOneIceSocket(connection);
-      if (ok) {
-        fedCount++;
-      }
-    }
-    if (fedCount === 0) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=pool|fed=0|size=%{public}d',
-        this.requestId, target);
-      return false;
-    }
-    hilog.warn(DOMAIN, TAG,
-      'VPN_ICE_POOL|fed=%{public}d|size=%{public}d', fedCount, target);
-    this.startIceSocketTopUp();
-    return true;
-  }
-
-  // Bounded top-up of the ICE socket pool: a failed session is renegotiated
-  // after a cooldown and needs fresh sockets again (device run 3: the retry
-  // hit "no-protected-socket" forever because the pool was one-shot).
-  private startIceSocketTopUp(): void {
-    if (this.iceTopUpTimer !== -1) {
-      return;
-    }
-    let given: number = 0;
-    this.iceTopUpTimer = setInterval((): void => {
-      if (this.destroyRequested) {
-        clearInterval(this.iceTopUpTimer);
-        this.iceTopUpTimer = -1;
-        return;
-      }
-      if (this.iceQueueDepth >= this.iceTargetDepth || this.iceTopUpActive || this.networkDirty) {
-        return;
-      }
-      this.topUpIceBatch().then((fed: number): void => {
-        given += fed;
-        if (fed === 0) {
-          hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|feed-failed|given=%{public}d', given);
-        }
-      }).catch((error: Error): void => {
-        hilog.warn(DOMAIN, TAG, 'VPN_ICE_TOPUP|rejected|summary=%{public}s', safeError(error));
-      });
-    }, ICE_SOCKET_TOPUP_MS);
-  }
-
-  // Feed enough sockets to close the gap to the demand-sized target, in one
-  // bounded pass of at most ICE_TOPUP_BATCH (8). One gather round needs one
-  // socket per IPv4 interface, so the pre-0050 batch of 4 served only ONE peer
-  // per cycle.
-  private async topUpIceBatch(): Promise<number> {
-    const connection: vpnExtension.VpnConnection | undefined = this.connection;
-    if (this.iceTopUpActive) { return 0; }
-    // N2 first batch C/D columns: the formal-switch gate blocks the whole
-    // top-up funnel (the watcher's own call site and the interval's callback
-    // both land here), so a HELD gate cannot keep topping the pool up after the
-    // recovery it blocked.
-    const paused: boolean = this.networkDirty || this.n2CdProductionBlocked() ||
-      protectedConnectionRejectionReason({
-        destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
-        recreateInFlight: this.recreateInFlight, hasConnection: connection !== undefined,
-        connectionUnchanged: this.connection === connection
-      }).length > 0 || connection === undefined;
-    // The gap comes from the LATEST queued depth the shell knows: every status
-    // sample and every accepted feed refreshes it (feedOneIceSocket writes the
-    // core's own post-feed `queued` back), and the loop below re-reads it after
-    // each socket, so a queue that drained since the last sample is still
-    // resupplied in full instead of on a stale reading.
-    const want: number = iceSocketTopUpCount(this.iceQueueDepth, this.iceTargetDepth, paused);
-    if (connection === undefined || want === 0) { return 0; }
-    this.iceTopUpActive = true;
-    let fed: number = 0;
-    try {
-      for (let n = 0; n < want; n++) {
-        if (iceSocketTopUpCount(this.iceQueueDepth, this.iceTargetDepth, paused) === 0) { break; }
-        const ok: boolean = await this.feedOneIceSocket(connection);
-        if (!ok) { break; }
-        fed++;
-      }
-    } finally {
-      this.iceTopUpActive = false;
-    }
-    return fed;
   }
 
   // Publish the live connector status for the UI process (see the call site).
@@ -6945,75 +6785,6 @@ export default class NetBirdVpnExtensionAbility extends VpnExtensionAbility {
           'VPN_ROUTE_CATALOG_PUBLISH_FAIL|requestId=%{public}s|summary=%{public}s',
           requestId, safeError(error));
       });
-  }
-
-  // Feed ONE ICE socket unless the pool is already full. Each ICE interface  // round needs a FRESH unbound UDP socket (dups share one socket object, so a
-  // bound copy cannot be re-bound for the next interface), and the device has
-  // several IPv4 interfaces — a single socket starves the gather right after
-  // the first round (device-verified 2026-09-14: "protected-udp:
-  // no-protected-socket" every 2 s, ICE never left idle).
-  private async feedOneIceSocket(connection: vpnExtension.VpnConnection): Promise<boolean> {
-    if (protectedConnectionRejectionReason({
-      destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
-      recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
-      connectionUnchanged: this.connection === connection
-    }).length > 0) { return false; }
-    let fd: number = -1;
-    try {
-      const opened: NativeTcpSocketOpen = iceSocketOpen();
-      fd = opened.fd;
-    } catch (error) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open-throw|summary=%{public}s',
-        this.requestId, safeError(error as Error));
-      return false;
-    }
-    if (fd < 0) {
-      hilog.error(DOMAIN, TAG,
-        'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=open|fd=%{public}d', this.requestId, fd);
-      return false;
-    }
-    const epoch: number = this.networkEpoch;
-    try {
-      if (!await this.protectSocketWithBox(connection, fd, 'I') || epoch !== this.networkEpoch ||
-        protectedConnectionRejectionReason({
-          destroyRequested: this.destroyRequested, destroyInFlight: this.destroyPromise !== undefined,
-          recreateInFlight: this.recreateInFlight, hasConnection: this.connection !== undefined,
-          connectionUnchanged: this.connection === connection
-        }).length > 0 ||
-        this.networkDirty && this.networkRecoveryReady &&
-        !this.networkRecoveryActive ||
-        // N2 first batch C/D columns: the formal-switch gate, checked AFTER the
-        // protect await and immediately BEFORE connectorIceSocketFeed.
-        this.n2CdProductionBlocked(epoch)) {
-        hilog.error(DOMAIN, TAG,
-          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=protect-or-stale|fd=%{public}d',
-          this.requestId, fd);
-        return false;
-      }
-      this.iceProtected = true;
-      let fed: SocketFeedResult;
-      try {
-        fed = connectorIceSocketFeed(fd);
-      } catch (error) {
-        hilog.error(DOMAIN, TAG,
-          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed-throw|fd=%{public}d|summary=%{public}s',
-          this.requestId, fd, safeError(error as Error));
-        return false;
-      }
-      if (!fed.ok) {
-        hilog.error(DOMAIN, TAG,
-          'VPN_ICE_FEED_FAIL|requestId=%{public}s|stage=feed|fd=%{public}d|error=%{public}s',
-          this.requestId, fd, fed.error ?? 'no-message');
-        return false;
-      }
-      hilog.warn(DOMAIN, TAG,
-        'VPN_ICE_FEED|fed|fd=%{public}d|queue=%{public}d', fd, fed.queued ?? -1);
-      this.iceQueueDepth = fed.queued ?? this.iceQueueDepth;
-      return true;
-    } finally {
-      socketSupplyCloseFd(fd);
-    }
   }
 
   // Bounded VpnConnection.protect() box (same shape as the verified spike

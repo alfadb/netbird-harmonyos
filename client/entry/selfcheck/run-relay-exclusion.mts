@@ -54,9 +54,6 @@ const REAL_DIR = join(HERE, '..', 'src', 'main', 'ets', 'vpnextensionability');
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
-  // N5c demand-sized ICE pool (2026-10-02): the sizing pure module the REAL
-  // extension imports; zero imports and no erased types, so no shim.
-  'NetBirdIceSocketPool',
   // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdUiModel',

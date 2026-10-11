@@ -285,9 +285,6 @@ const NETCTX_LINE = 'N2H_NET_CONTEXT|';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
-  // N5c demand-sized ICE pool (2026-10-02): the sizing pure module the REAL
-  // extension imports; zero imports and no erased types, so no shim.
-  'NetBirdIceSocketPool',
   // UI phase 1 (2026-10-05): the status-document builder pure module the REAL
   // extension imports; its two erased interfaces are re-declared by its shim.
   'NetBirdUiModel',
@@ -1575,10 +1572,12 @@ try {
   const SUPPLY_KEYS: string[] = ['__NB_SUPPLY_DNS', '__NB_SUPPLY_DNS_RESOLVE',
     '__NB_SUPPLY_WG_OPEN', '__NB_SUPPLY_WG_FEED', '__NB_SUPPLY_MGMT_OPEN',
     '__NB_SUPPLY_MGMT_ADDR', '__NB_SUPPLY_MGMT_FEED', '__NB_SUPPLY_SIGNAL_FEED',
-    '__NB_SUPPLY_ICE_OPEN', '__NB_SUPPLY_ICE_FEED',
+    '__NB_SUPPLY_ICE_OPEN',
     // STAGE 2/3: the shared-mux arm is a supply seam too — the gate must be
     // able to prove it let NOTHING through, including the mux arm (which, since
     // stage 3, rides the already-fed protected WG socket and opens nothing).
+    // STAGE 4 removed the retired ICE socket pool's feed seam (`ICE_FEED`)
+    // together with the shell-side pool it served.
     '__NB_SUPPLY_ICE_MUX_ARM'];
   const resetSupply = (): void => {
     for (const key of SUPPLY_KEYS) { G[key] = undefined; }
@@ -1596,18 +1595,15 @@ try {
     wgOpen: supplyOf('__NB_SUPPLY_WG_OPEN'), wgFeed: supplyOf('__NB_SUPPLY_WG_FEED'),
     mgmtOpen: supplyOf('__NB_SUPPLY_MGMT_OPEN'), mgmtAddr: supplyOf('__NB_SUPPLY_MGMT_ADDR'),
     mgmtFeed: supplyOf('__NB_SUPPLY_MGMT_FEED'), signalFeed: supplyOf('__NB_SUPPLY_SIGNAL_FEED'),
-    iceOpen: supplyOf('__NB_SUPPLY_ICE_OPEN'), iceFeed: supplyOf('__NB_SUPPLY_ICE_FEED'),
+    iceOpen: supplyOf('__NB_SUPPLY_ICE_OPEN'),
     iceMuxArm: supplyOf('__NB_SUPPLY_ICE_MUX_ARM')
   });
   const sleepMs = async (ms: number): Promise<void> => {
     await new Promise<void>((resolve: () => void): void => { setTimeout(resolve, ms); });
   };
-  // Cancel the ability's own real timers, so a later 4 s ICE top-up tick can
-  // never land inside another scenario's supply counts.
+  // Cancel the ability's own real timers, so a later supply tick can never land
+  // inside another scenario's supply counts.
   const stopAbilityTimers = (ability: Record<string, unknown>): void => {
-    const ice: unknown = ability['iceTopUpTimer'];
-    if (typeof ice === 'number' && ice !== -1) { clearInterval(ice); }
-    ability['iceTopUpTimer'] = -1;
     const supply: unknown = ability['socketSupplyTimer'];
     if (typeof supply === 'number' && supply !== -1) { clearInterval(supply); }
     ability['socketSupplyTimer'] = -1;
@@ -5707,8 +5703,8 @@ try {
     supplyOf('__NB_SUPPLY_WG_FEED') === 1 && supplyOf('__NB_SUPPLY_MGMT_FEED') === 1 &&
     // STAGE 2/3 (official-alignment audit §2.7): the recovery arms the ONE
     // shared mux over the newly fed WG socket (no second open, no protect) —
-    // one arm per recovery, and the retired pool's feeds stay at zero.
-    supplyOf('__NB_SUPPLY_ICE_MUX_ARM') === 1 && supplyOf('__NB_SUPPLY_ICE_FEED') === 0 &&
+    // one arm per recovery.
+    supplyOf('__NB_SUPPLY_ICE_MUX_ARM') === 1 &&
     supplyOf('__NB_SUPPLY_DNS') >= 1 &&
     linesWith('VPN_NETWORK_RECOVERED|').length === 1 &&
     lastLine('VPN_NETWORK_RECOVERED|').indexOf('netId=303') > 0,

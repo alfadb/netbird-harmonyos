@@ -18,19 +18,30 @@ assert(shell.includes('core.n2_socket_trace_arm(false);') &&
   'only accepted evidence ticket arms trace');
 assert(shell.includes("isDns ? 'D' : request.purpose === 'relay' ? 'R' : request.purpose === 'signal' ? 'S' : 'M', request.id"),
   'on-demand supply correlates kind and monotonic request id');
-for (const kind of ['M', 'S', 'I', 'Wb']) {
+// STAGE 4 (official-alignment audit §2.7): the 'I' protect kind existed only for
+// the retired per-session ICE socket pool — the ICE plane now rides the ONE
+// shared mux over the WG outer socket, so no 'I' protect call may exist.
+for (const kind of ['M', 'S', 'Wb']) {
   assert(shell.includes(`protectSocketWithBox(connection, ${kind === 'M' ? 'mgmtFd' : 'fd'}, '${kind}')`) ||
     shell.includes(`protectSocketWithBox(vpn, opened.fd, '${kind}')`),
   `${kind} original fd is annotated`);
 }
+assert(!shell.includes("protectSocketWithBox(connection, fd, 'I')") &&
+  !shell.includes("protectSocketWithBox(vpn, opened.fd, 'I')"),
+  'the retired ICE-pool protect kind is gone');
 assert(rust('napi.rs').includes('reg!("n2_socket_trace_protect", napi_n2_socket_trace_protect);'),
   'NAPI bridge registered');
 assert(rust('mgmtsock.rs').includes('n2_socket_trace::duplicated(raw, fd_dup)') &&
   rust('mgmtsock.rs').includes('n2_socket_trace::io_begin(dup, connect_addr)'),
   'TCP dup and connect preserve original-to-dup chain');
+// STAGE 4 (official-alignment audit §2.7): the per-interface ICE gather socket
+// (with its `first_io` send annotation) is deleted — ICE no longer owns a socket
+// of its own, it rides the ONE shared mux, whose reader keeps the per-datagram
+// outer receipt (`ice_mux.rs` `note_receipt`). The protected-DNS UDP send trace
+// is unchanged.
 assert(rust('protected_dns.rs').includes('n2_socket_trace::first_io(socket.as_raw_fd(), addr.into()') &&
-  rust('ice.rs').includes('n2_socket_trace::first_io(dup, remote.into(), "sent"'),
-  'DNS and ICE record completed UDP sends');
+  rust('ice_mux.rs').includes('crate::n2_socket_trace::local_addr(self.fd())'),
+  'DNS records completed UDP sends; the ICE plane traces on the shared mux');
 assert(rust('socket_supply.rs').includes('n2_socket_trace::closed(fd);'),
   'shell original fd is removed on close');
 // N2 C/D (Wb): the base socket's liveness is the CORE TAKEOVER (`adopted`,

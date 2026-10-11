@@ -283,15 +283,12 @@ const SHIMS = {
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
   './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
-  // N5c demand-sized ICE pool (2026-10-02): zero imports, no erased types —
-  // plain extension resolution like NetBirdInterfaceStatsProbe above.
-  './NetBirdIceSocketPool': 'NetBirdIceSocketPool.ts',
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',
   // roam-1005-0014: the recreate lifecycle policy pure module the REAL
   // extension imports; zero imports and no erased types — plain extension
-  // resolution like NetBirdIceSocketPool above.
+  // resolution like NetBirdInterfaceStatsProbe above.
   './NetBirdRecreatePolicy': 'NetBirdRecreatePolicy.ts',
   // 2026-10-09 (0.0.17): the REAL extension now names the pure marker core by
   // value for its synchronous onDestroy-entry write, so the fixture stages that

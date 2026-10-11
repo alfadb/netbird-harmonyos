@@ -114,7 +114,6 @@ unsafe extern "C" fn napi_init(env: NapiEnv, exports: NapiValue) -> NapiValue {
     reg!("connector_protected_dns_start", napi_connector_protected_dns_start);
     reg!("connector_protected_dns_poll", napi_connector_protected_dns_poll);
     reg!("connector_socket_feed", napi_connector_socket_feed);
-    reg!("connector_ice_socket_feed", napi_connector_ice_socket_feed);
     reg!("connector_ice_mux_arm", napi_connector_ice_mux_arm);
     reg!("connector_signal_socket_feed", napi_connector_signal_socket_feed);
     reg!("socket_supply_poll", napi_socket_supply_poll);
@@ -564,7 +563,6 @@ mod tests {
             "connector_start",
             "connector_start_with_socket",
             "connector_socket_feed",
-            "connector_ice_socket_feed",
             "connector_ice_mux_arm",
             "connector_signal_socket_feed",
             "connector_wg_socket_feed",
@@ -1125,17 +1123,6 @@ unsafe extern "C" fn napi_connector_socket_feed(env: NapiEnv, info: NapiCallback
     let a = cb_args(env, info);
     let fd = a.i32_at(0, -1);
     ret_json(env, crate::connector::connector_socket_feed_json(fd))
-}
-
-// N5c: shell-side resupply of fresh protected UDP sockets for the per-peer
-// ICE sessions (fail-closed: no feed ⇒ no candidates).
-unsafe extern "C" fn napi_connector_ice_socket_feed(
-    env: NapiEnv,
-    info: NapiCallbackInfo,
-) -> NapiValue {
-    let a = cb_args(env, info);
-    let fd = a.i32_at(0, -1);
-    ret_json(env, crate::connector::connector_ice_socket_feed_json(fd))
 }
 
 // STAGE 3 (official-alignment §2.7): arm the ONE shared ICE mux OVER the WG

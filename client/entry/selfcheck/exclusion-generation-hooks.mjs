@@ -571,10 +571,6 @@ const CORE = 'data:text/javascript,' + encodeURIComponent(
   '    g().__NB_SUPPLY_MGMT_ADDR = (g().__NB_SUPPLY_MGMT_ADDR || 0) + 1;\n' +
   '    return JSON.stringify({ ok: true });\n' +
   '  },\n' +
-  '  connector_ice_socket_feed: () => {\n' +
-  '    g().__NB_SUPPLY_ICE_FEED = (g().__NB_SUPPLY_ICE_FEED || 0) + 1;\n' +
-  '    return JSON.stringify({ ok: true, queued: 1 });\n' +
-  '  },\n' +
   // The on-demand supply channel (the 100 ms timer): the request is whatever
   // the fixture queued (`__NB_SOCKET_SUPPLY_REQUEST`, default = nothing
   // pending), the reply is recorded so "refused with which reason" is
@@ -990,15 +986,12 @@ const SHIMS = {
   './NetBirdVpnConfig': 'NetBirdVpnConfig.shim.ts',
   './NetBirdInterfaceStatsProbe': 'NetBirdInterfaceStatsProbe.ts',
   './NetBirdPhysicalNetworkPolicy': 'NetBirdPhysicalNetworkPolicy.ts',
-  // N5c demand-sized ICE pool (2026-10-02): zero imports, no erased types —
-  // plain extension resolution like NetBirdInterfaceStatsProbe above.
-  './NetBirdIceSocketPool': 'NetBirdIceSocketPool.ts',
   // UI phase 1 (2026-10-05): the status-document builder the extension
   // imports by value; its two erased interfaces are re-declared by the shim.
   './NetBirdUiModel': 'NetBirdUiModel.shim.ts',
   // roam-1005-0014: the recreate lifecycle policy pure module the REAL
   // extension imports; zero imports and no erased types — plain extension
-  // resolution like NetBirdIceSocketPool above.
+  // resolution like NetBirdInterfaceStatsProbe above.
   './NetBirdRecreatePolicy': 'NetBirdRecreatePolicy.ts',
   // 2026-10-09 (0.0.17): the REAL extension now names the pure marker core by
   // value (buildMarker / markerBasename / recordPath / MARKER_STATE_STOPPING)

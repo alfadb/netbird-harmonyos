@@ -1420,8 +1420,8 @@ fn wg_shaped(tag: u8) -> Vec<u8> {
 ///   `arm_mux_from_wg_socket`), so the mux port IS that socket's port and the ICE
 ///   provider is never consumed — one open+bind for ICE and WG, no pool socket;
 /// * the seam's read half is handed over (`set_shared_socket_reader(true)`), and
-///   the mux carries a WG sink — the `take_data_rx` per-session queue is out of
-///   the data path;
+///   the mux carries a WG sink — the retired `take_data_rx` per-session queue is
+///   gone from the data path (stage 4);
 /// * all N negotiations still demux correctly on that ONE socket (ufrag /
 ///   remote-address routing → every pair Connected);
 /// * a WG-shaped datagram injected from another peer's OWN mux socket (a source
@@ -1500,8 +1500,8 @@ fn many_peers_ride_the_wg_socket_and_non_stun_goes_straight_to_the_wg_seam() {
         "the WG datagram reached the WG seam directly, from the registered peer source"
     );
     assert_eq!(mux.stats().data_unknown, 0, "the source was one of ours: no foreign source");
-    // …and the retired per-session queue is empty on the mux side too (with a sink
-    // armed the mux never queues data: `dispatch` hands it straight over)
-    assert_eq!(mux.queued(0).1, 0, "no session id holds a data queue entry");
+    // …and STAGE 4 removed the per-session data queue entirely: the sink is the
+    // ONLY non-STUN route the mux has (`dispatch` hands it straight over).
+    assert!(mux.sink_armed(), "the mux carries the WG sink");
 }
 

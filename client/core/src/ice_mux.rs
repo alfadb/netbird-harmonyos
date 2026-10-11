@@ -37,8 +37,9 @@
 //! number of datagrams and every non-STUN datagram is handed to
 //! [`MuxUdpSink::handle_udp`] **synchronously**, so a slow WG/TUN consumer
 //! slows the read loop itself and the kernel socket buffer then throttles the
-//! peer — the same shape as WG's own receive loop upstream. Per-session queues
-//! are bounded and drop the newest with a counter, never grow without bound.
+//! peer — the same shape as WG's own receive loop upstream. The STUN half of
+//! the demux stays queued per session, bounded, dropping the newest with a
+//! counter (the retired non-STUN per-session data queue is gone — stage 4).
 //!
 //! ## Where the socket comes from
 //!
@@ -114,10 +115,6 @@ pub const MUX_READER_POLL_MS: u64 = 50;
 /// `RECV_BUDGET_PER_RUN` (64) drains this every tick, so the cap only bounds a
 /// stalled consumer (a session torn down between the drain and its pump).
 const MUX_STUN_QCAP: usize = 64;
-
-/// Per-session non-STUN (data-plane) queue cap — the same number and the same
-/// "drop the NEWEST, count it" rule as `IceSession::DATA_RX_CAP`.
-const MUX_DATA_QCAP: usize = 64;
 
 /// One IPv4 CIDR of the client's OWN overlay network — upstream's
 /// `wgaddr.Address.Network`/`IPv6Net` (`universal.go:169-170`).
@@ -196,9 +193,10 @@ struct Shared {
     st: Mutex<Inner>,
     /// Set by [`IceMux::stop_reader`], checked once per reader pass.
     reader_stop: AtomicBool,
-    /// Non-STUN delivery route: `Some` = straight into the WG device
-    /// (upstream's WG receive path), `None` = the per-session data queue
-    /// (the pre-stage-3 path, still used by the host CLI and the unit tests).
+    /// Non-STUN delivery route: the WG device (upstream's WG receive path).
+    /// `None` = none armed (a mux built by a test that never attaches a sink):
+    /// there is NO per-session fallback queue any more (official-alignment
+    /// stage 4), so such a datagram is dropped and counted in `data_unknown`.
     sink: Mutex<Option<Arc<dyn MuxUdpSink>>>,
 }
 
@@ -207,7 +205,8 @@ struct Shared {
 /// may take the two in the opposite order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchOut {
-    /// Fully handled (queued to a session, cached, or dropped + counted).
+    /// Fully handled (queued to a session's STUN queue, cached, or dropped +
+    /// counted).
     Handled,
     /// Non-STUN with a sink armed: the caller delivers the SAME buffer through
     /// [`MuxUdpSink::handle_udp`] after dropping the state lock.
@@ -259,7 +258,6 @@ struct Session {
     /// session owns this fact; the mux reads it only while armed.
     peer_label: String,
     stun: VecDeque<MuxStun>,
-    data: VecDeque<([u8; 4], u16, Vec<u8>)>,
 }
 
 struct Inner {
@@ -316,7 +314,7 @@ impl IceMux {
     /// managed by WireGuard's StdNetBind, not by us", `:308-309`). `want_port` is
     /// the port the caller asked for: 0 = whichever the kernel picked, otherwise
     /// it must match `getsockname` (a mismatch is a hard error, never a silent
-    /// fallback — the same rule as `IceSession::add_local_candidate_bound`).
+    /// fallback — the same rule the retired gather hand-over applied).
     pub fn adopt(
         owned: OwnedFd,
         overlay: Vec<OverlayNet>,
@@ -379,7 +377,6 @@ impl IceMux {
                 ufrag: ufrag.to_string(),
                 peer_label: peer_label.to_string(),
                 stun: VecDeque::new(),
-                data: VecDeque::new(),
             },
         );
     }
@@ -430,27 +427,6 @@ impl IceMux {
         s.stun.drain(..n).collect()
     }
 
-    /// Drain up to `max` non-STUN (data-plane) datagrams for `id`, in arrival
-    /// order: `(src_addr, src_port, bytes)` — the same tuple
-    /// `IceSession::take_data_rx` hands the WG device.
-    pub fn take_data(&self, id: u64, max: usize) -> Vec<([u8; 4], u16, Vec<u8>)> {
-        let mut inner = self.lock();
-        let Some(s) = inner.sessions.get_mut(&id) else {
-            return Vec::new();
-        };
-        let n = max.min(s.data.len());
-        s.data.drain(..n).collect()
-    }
-
-    /// How many datagrams are queued for `id` (diagnostics/back-pressure).
-    pub fn queued(&self, id: u64) -> (usize, usize) {
-        let inner = self.lock();
-        match inner.sessions.get(&id) {
-            Some(s) => (s.stun.len(), s.data.len()),
-            None => (0, 0),
-        }
-    }
-
     pub fn stats(&self) -> MuxStats {
         self.lock().stats
     }
@@ -472,8 +448,9 @@ impl IceMux {
         self.shared.sink.lock().unwrap_or_else(|p| p.into_inner()).replace(sink).is_some()
     }
 
-    /// Whether non-STUN datagrams go straight to WG (`Some` sink) rather than
-    /// through the per-session queue.
+    /// Whether non-STUN datagrams can go straight to WG (a sink is armed) or
+    /// would be dropped and counted in `data_unknown` (a test mux that never
+    /// attached one — there is no per-session fallback queue any more).
     pub fn sink_armed(&self) -> bool {
         self.shared.sink.lock().unwrap_or_else(|p| p.into_inner()).is_some()
     }
@@ -732,14 +709,13 @@ fn drain_shared(shared: &Shared, fd: sys::c_int) -> usize {
         };
         if out == DispatchOut::ToSink {
             let sink = shared.sink.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            match sink {
-                Some(sink) => sink.handle_udp(&buf[..n as usize], from),
-                // the sink vanished between the classification and this line:
-                // fall back to the per-session queue, never drop silently
-                None => {
-                    let mut inner = shared.st.lock().unwrap_or_else(|p| p.into_inner());
-                    inner.route_data(from, &buf[..n as usize]);
-                }
+            // A sink is armed for the whole life of every production mux (the
+            // arm path attaches it before the reader starts) and there is no
+            // detach, so `None` here is a test mux that never attached one: the
+            // datagram has already been counted in `data_unknown` by `dispatch`
+            // (the retired per-session data queue is gone — stage 4).
+            if let Some(sink) = sink {
+                sink.handle_udp(&buf[..n as usize], from);
             }
         }
     }
@@ -761,11 +737,11 @@ impl Inner {
     fn dispatch(&mut self, from: MappedAddr, datagram: &[u8], sink_armed: bool) -> DispatchOut {
         // 1. the WG-first classifier shared with the session (upstream
         //    `filterOutStunMessages`, ice_bind.go:318-350): anything WG-shaped or
-        //    not STUN-shaped belongs to the data plane. With a sink armed it goes
-        //    STRAIGHT into the WG device (upstream: WG's own receive path keeps
-        //    the buffer, ice_bind.go:257-285, and WG itself drops sources that
-        //    match no peer endpoint); without one it takes the per-session queue,
-        //    the pre-stage-3 route.
+        //    not STUN-shaped belongs to the data plane, and goes STRAIGHT into
+        //    the WG device (upstream: WG's own receive path keeps the buffer,
+        //    ice_bind.go:257-285, and WG itself drops sources that match no peer
+        //    endpoint). The retired per-session data queue is gone (stage 4), so
+        //    a sink-less mux drops + counts the datagram instead of queueing it.
         if demux_routes_to_wg(datagram) {
             let id = self.by_addr.get(&from).copied();
             let label = id
@@ -773,19 +749,12 @@ impl Inner {
                 .map(|s| s.peer_label.clone())
                 .unwrap_or_else(|| "unknown".into());
             self.note_receipt(from, datagram, &label);
-            if sink_armed {
-                if id.is_none() {
-                    // still delivered — WG counts the off-path drop itself — but
-                    // the mux notes that no session ever registered this source
-                    self.stats.data_unknown += 1;
-                }
-                return DispatchOut::ToSink;
+            if id.is_none() || !sink_armed {
+                // no session ever registered this source, or no sink to hand the
+                // datagram to: it has no consumer. Counted, never queued.
+                self.stats.data_unknown += 1;
             }
-            match id {
-                Some(id) => self.push_data(id, from, datagram),
-                None => self.stats.data_unknown += 1,
-            }
-            return DispatchOut::Handled;
+            return if sink_armed { DispatchOut::ToSink } else { DispatchOut::Handled };
         }
         // 2. STUN: a datagram sourced inside our own overlay can never be a
         //    legitimate STUN message (upstream `HandleSTUNMessage`,
@@ -849,24 +818,6 @@ impl Inner {
             return;
         }
         s.stun.push_back(MuxStun { src, bytes: datagram.to_vec() });
-    }
-
-    fn push_data(&mut self, id: u64, src: MappedAddr, datagram: &[u8]) {
-        let Some(s) = self.sessions.get_mut(&id) else { return };
-        if s.data.len() >= MUX_DATA_QCAP {
-            self.stats.queue_dropped += 1;
-            return;
-        }
-        s.data.push_back((src.0, src.1, datagram.to_vec()));
-    }
-
-    /// The pre-stage-3 non-STUN route: queue it for the session that registered
-    /// this source address (`addressMap`), counting an unknown source.
-    fn route_data(&mut self, src: MappedAddr, datagram: &[u8]) {
-        match self.by_addr.get(&src).copied() {
-            Some(id) => self.push_data(id, src, datagram),
-            None => self.stats.data_unknown += 1,
-        }
     }
 
     /// N2 v4.1 P7: one outer-source receipt per datagram read on the shared
@@ -1092,35 +1043,6 @@ mod tests {
         assert_eq!(s.stun_unknown, 1, "unknown ufrag is dropped, not broadcast");
         assert_eq!(s.data_unknown, 1, "unknown data source is dropped");
         assert!(mux.take_stun(1, 8).is_empty(), "nothing may reach the session");
-    }
-
-    #[test]
-    fn non_stun_from_a_registered_address_reaches_the_session_data_queue() {
-        let mux = mux();
-        mux.register_session(3, "AAAA", "peer-a");
-        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let peer_addr = peer.local_addr().unwrap();
-        mux.send_to(3, ([127, 0, 0, 1], peer_addr.port()), b"first");
-        let wg = {
-            let mut pkt = vec![0u8; 64];
-            pkt[0] = 4; // WG transport message type
-            pkt
-        };
-        peer.send_to(&wg, ("127.0.0.1", mux.local_port())).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            mux.drain();
-            let data = mux.take_data(3, 8);
-            if !data.is_empty() {
-                assert_eq!(data[0].0, [127, 0, 0, 1]);
-                assert_eq!(data[0].1, peer_addr.port());
-                assert_eq!(data[0].2, wg);
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "the WG datagram must surface");
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(mux.take_stun(3, 8).is_empty(), "WG data is not STUN");
     }
 
     #[test]
@@ -1387,9 +1309,12 @@ mod tests {
     }
 
     #[test]
-    fn without_a_sink_non_stun_keeps_using_the_per_session_queue() {
-        // the pre-stage-3 route, still the host-CLI/unit-test route: queue for the
-        // session that registered the source address, drop + count an unknown one.
+    fn a_mux_without_a_sink_drops_non_stun_and_counts_it() {
+        // STAGE 4 (official-alignment audit §2.7): the retired per-session data
+        // queue is gone, so a mux that never attached a sink has nowhere to hand
+        // a non-STUN datagram — it is dropped AND counted (`data_unknown`), never
+        // queued and never silently lost. Production always arms the sink before
+        // the ONE reader starts.
         let mux = mux();
         mux.register_session(3, "AAAA", "peer-a");
         let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1397,16 +1322,12 @@ mod tests {
         mux.send_to(3, ([127, 0, 0, 1], peer_addr.port()), b"first");
         peer.send_to(&wg_datagram(1), ("127.0.0.1", mux.local_port())).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
+        while mux.stats().data_unknown == 0 && std::time::Instant::now() < deadline {
             mux.drain();
-            let data = mux.take_data(3, 8);
-            if !data.is_empty() {
-                assert_eq!(data[0].2, wg_datagram(1));
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "the queued datagram must surface");
             std::thread::sleep(Duration::from_millis(2));
         }
+        assert_eq!(mux.stats().data_unknown, 1, "the sink-less drop is counted");
+        assert!(mux.take_stun(3, 8).is_empty(), "WG data is not STUN");
     }
 
     #[test]

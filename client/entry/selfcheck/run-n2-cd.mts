@@ -353,17 +353,16 @@ try {
     ability.includes('      // The gate is deliberately NOT touched here'),
     'pre ordering');
   check('G4 every supply entry consults the gate: recovery entry + chase rounds, on-demand supply, ' +
-    'spare socket, ICE pool, top-up and the recreate-finally retry',
+    'spare socket and the recreate-finally retry',
     ability.includes('if (this.n2CdProductionBlocked()) { return; }') &&
     ability.includes('if (this.n2CdProductionBlocked(attemptEpoch)) { break; }') &&
     ability.includes('this.networkNetId !== 0 && !this.n2CdProductionBlocked());') &&
     ability.includes('productionGateBlocked: this.n2CdProductionBlocked()') &&
     ability.includes('this.n2CdProductionBlocked(epoch)) {') &&
-    // N5c demand-sized pool (2026-10-02): the top-up's gate check moved from the
-    // single early-return chain into the `paused` decision the sizing math and
-    // the per-feed re-check both consume — the gate is still consulted on every
-    // supply attempt.
-    ability.includes('const paused: boolean = this.networkDirty || this.n2CdProductionBlocked() ||') &&
+    // STAGE 4 (official-alignment audit §2.7): the ICE socket pool — and with it
+    // the `paused` sizing chain that consumed the gate — is deleted. The ONE
+    // shared-mux arm in the same leg still consults the gate explicitly (the
+    // `this.n2CdProductionBlocked(epoch)` clause asserted above).
     ability.includes('if (this.networkDirty && !this.destroyRequested && this.networkNetId !== 0 &&\n' +
       '        !this.n2CdProductionBlocked()) {'),
     'supply entries');

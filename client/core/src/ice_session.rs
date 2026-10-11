@@ -116,13 +116,8 @@
 //! dup. Empty provider → [`ManagementError::Network`] fail-closed; there is
 //! NO unprotected fallback and no `socket(2)` call anywhere in this module.
 //! The provided fd number stays borrowed (never read/written/closed here),
-//! the mgmtsock/ice borrow contract. The ONE exception is the gather
-//! hand-over: [`IceSession::add_local_candidate_bound`] adopts a socket the
-//! caller ALREADY bound and owns ([`crate::ice::GatheredSocket`]), so the
-//! advertised host/base port and the srflx mapping derived from it are the
-//! same still-live socket the session then sends/receives on. The gather
-//! and the session's receive path run sequentially under the orchestrator
-//! lock, so there is never a competing reader on that socket.
+//! the mgmtsock/ice borrow contract. The per-interface gather hand-over is
+//! gone with the retired gather primitives (stage 4).
 //!
 //! ## N11 — WG rides the selected socket: packet demux (upstream shape)
 //!
@@ -141,13 +136,13 @@
 //! hands every non-STUN datagram STRAIGHT to the WG device
 //! (`WgDevice::handle_udp`, upstream `ice_bind.go:257-285`) — no session is
 //! involved. A mux-backed candidate therefore owns NO fd
-//! ([`IceSession::live_local_socket_count`] counts 0 for it) and its
-//! [`IceSession::take_data_rx`] queue stays empty; that queue survives only for
-//! the socket-owning path (the host CLI / the offline self-test), where the
-//! session IS the sole reader. Egress rides the same shared socket either way:
-//! the orchestrator dups the selected local fd ([`IceSession::selected_local_fd`],
-//! the mux's fd for a mux-backed pair) into the WG device as the peer's send
-//! socket (each layer closes only its own dup — the fd contract is unchanged).
+//! ([`IceSession::live_local_socket_count`] counts 0 for it). **Stage 4** deleted
+//! the last per-session egress queue (`data_rx`/`take_data_rx`): a non-STUN
+//! datagram read on a session's OWN socket (the host/test path) is dropped and
+//! counted, never queued. Egress rides the ONE shared socket: the orchestrator
+//! dups the selected local fd ([`IceSession::selected_local_fd`], the mux's fd
+//! for a mux-backed pair) into the WG device as the peer's send socket (each
+//! layer closes only its own dup — the fd contract is unchanged).
 //!
 //! ## Error taxonomy
 //!
@@ -167,7 +162,7 @@ use std::sync::Arc;
 
 use crate::ice::{priority_for, seam_to_management, set_nonblock, Candidate, CandidateType, UdpSocketSource};
 use crate::management::ManagementError;
-use std::os::fd::{IntoRawFd, OwnedFd};
+use std::os::fd::IntoRawFd;
 use crate::stun::{
     self, decode_address, TransactionId, BINDING_ERROR, BINDING_REQUEST, BINDING_SUCCESS,
     HEADER_LEN, MAGIC_COOKIE,
@@ -771,17 +766,12 @@ pub struct PairSnapshot {
 /// ([`crate::ice_mux::IceMux`]), so the normal case is [`LocalSockKind::Shared`]
 /// and the session owns NO fd — dropping a session must never close the mux.
 /// [`LocalSockKind::Owned`] is the session's own dup, still used by the unit
-/// tests, the host harness and the N11 per-session egress shape.
+/// tests and the host harness (the per-interface gather hand-over that used to
+/// adopt an already-bound socket is gone with stage 4).
 #[derive(Debug)]
 enum LocalSockKind {
     /// The session's OWN protected dup socket.
-    Owned {
-        fd: sys::c_int,
-        /// `true` = the fd was adopted from a gather hand-over
-        /// ([`IceSession::add_local_candidate_bound`]) and therefore carries the
-        /// N2 socket-trace registration the shell's `protect` put on it.
-        traced: bool,
-    },
+    Owned { fd: sys::c_int },
     /// The SHARED mux socket: borrowed, never closed here.
     Shared,
 }
@@ -797,37 +787,25 @@ impl LocalSock {
     /// [`IceSession::mux`] instead.
     fn owned_fd(&self) -> Option<sys::c_int> {
         match self.kind {
-            LocalSockKind::Owned { fd, .. } => Some(fd),
+            LocalSockKind::Owned { fd } => Some(fd),
             LocalSockKind::Shared => None,
         }
-    }
-
-    fn traced(&self) -> bool {
-        matches!(self.kind, LocalSockKind::Owned { traced: true, .. })
     }
 }
 
 /// Monotonic session ids (only ever used as mux registry keys).
 static NEXT_SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Cap of the outbound-of-ICE queue ([`IceSession::take_data_rx`]): non-STUN
-/// datagrams this session read but the WG data plane has not absorbed yet.
-/// Bounded so a stalled WG consumer can never grow the session without
-/// bound; overflow drops the NEWEST datagram and counts
-/// ([`IceSession::data_dropped`]) — a stalled consumer is a failure the
-/// pump must observe, not a silent unbounded buffer.
-const DATA_RX_CAP: usize = 64;
-
 /// Aggregate receive budget of ONE [`IceSession::run_once`] — datagrams read
 /// across ALL of this session's local sockets, not per socket. The previous
 /// shape drained 8 per socket per pump, so a session with several candidate
 /// sockets multiplied the read cap and a 100 ms pump capped the selected
-/// direction at ~80 pps (≈0.9 Mbps at 1400 MTU). The budget is also clamped
-/// to the data queue's free room ([`DATA_RX_CAP`] − queued), so a supported
-/// burst is never read into a full queue and counted as a synthetic
-/// [`IceSession::data_dropped`]; anything left unread stays in the kernel
-/// socket buffer and is served by the next pump (bounded memory either way).
-/// STUN checks/keepalives ride the same budget and are never dropped by it.
+/// direction at ~80 pps (≈0.9 Mbps at 1400 MTU). STUN checks/keepalives ride
+/// the same budget and are never dropped by it; anything left unread stays in
+/// the kernel socket buffer and is served by the next pump (bounded memory
+/// either way). Stage 4 dropped the old clamp against the retired per-session
+/// data queue — non-STUN read on an OWNED socket is dropped and counted now,
+/// not queued.
 const RECV_BUDGET_PER_RUN: usize = 64;
 
 struct Pair {
@@ -884,15 +862,10 @@ pub struct IceSession {
     emitted_disconnected: bool,
     emitted_failed: bool,
     emitted_all_pairs_failed: bool,
-    /// N11: non-STUN (WG data-plane) datagrams read on our OWN sockets, in
-    /// arrival order — consumed by the orchestrator via
-    /// [`IceSession::take_data_rx`] and fed to the WG device (upstream: the
-    /// shared receive loop hands non-STUN packets to WG,
-    /// ice_bind.go:279-303). STAGE 3: only the socket-owning path queues here;
-    /// a mux-backed session's non-STUN datagrams never pass through this
-    /// session at all (the mux's reader hands them straight to the device), so
-    /// the queue stays empty in production.
-    data_rx: VecDeque<([u8; 4], u16, Vec<u8>)>,
+    /// Datagrams dropped on an OWNED socket because a non-STUN (WG) datagram has
+    /// no per-session consumer any more (official-alignment stage 4: the WG data
+    /// plane is fed by the mux's sink, never through this session). Counted,
+    /// never silent.
     data_dropped: u64,
     /// Rotating start index of the per-run socket scan ([`IceSession::pump_recv`]):
     /// after a socket consumes the whole run budget the next run starts at the
@@ -965,7 +938,6 @@ impl IceSession {
             emitted_disconnected: false,
             emitted_failed: false,
             emitted_all_pairs_failed: false,
-            data_rx: VecDeque::new(),
             data_dropped: 0,
             recv_cursor: 0,
             checks_sent: 0,
@@ -1088,7 +1060,7 @@ impl IceSession {
             cleanup(dup);
             return Err(ManagementError::Network("ice-bind-port-mismatch".into()));
         }
-        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Owned { fd: dup, traced: false } });
+        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Owned { fd: dup } });
         self.rebuild_pairs();
         self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
         Ok(cand)
@@ -1142,74 +1114,6 @@ impl IceSession {
     /// sockets). The orchestrator uses the identity to notice a replaced mux.
     pub fn mux_ptr(&self) -> Option<*const crate::ice_mux::IceMux> {
         self.mux.as_ref().map(Arc::as_ptr)
-    }
-
-    /// Adopt an ALREADY-BOUND protected socket as a local candidate (the
-    /// gather hand-over path: [`crate::ice::GatheredSocket`]). Unlike
-    /// [`IceSession::add_local_candidate`] this takes NO new socket from the
-    /// provider — the fd IS the socket the gather bound and used for its
-    /// STUN exchanges, so the candidate's host/base port and every srflx
-    /// mapping derived from it point at the same live socket this session
-    /// then sends/receives on.
-    ///
-    /// Validation (fail-closed, fd closed exactly once on every error):
-    /// the socket must be bound (`getsockname` port ≠ 0); `cand.port` 0 is
-    /// filled from the bound port, a non-zero `cand.port` must equal it; the
-    /// bound address must be the candidate's address or the wildcard
-    /// `0.0.0.0` (fixed-port mode binds `0.0.0.0:<port>` while the candidate
-    /// keeps its interface address — upstream's single shared
-    /// `0.0.0.0:NET_PORT` socket shape). `O_NONBLOCK` is re-asserted (the
-    /// gather already set it on the shared open-file description).
-    ///
-    /// Emits [`IceEvent::LocalCandidateReady`] exactly like
-    /// [`IceSession::add_local_candidate`].
-    pub fn add_local_candidate_bound(
-        &mut self,
-        mut cand: Candidate,
-        fd: OwnedFd,
-    ) -> Result<Candidate, ManagementError> {
-        if self.stopped {
-            // `fd` drops here → closed exactly once.
-            return Err(ManagementError::Request { status: 0, message: "ice:session-closed".into() });
-        }
-        let addr = parse_ipv4(&cand.address).ok_or_else(|| {
-            ManagementError::Parse(format!("ice:local-candidate-not-ipv4 '{}'", cand.address))
-        })?;
-        let dup = fd.into_raw_fd(); // from here on every error path closes `dup`
-        let cleanup = |fd: sys::c_int| {
-            crate::n2_socket_trace::closed(fd);
-            unsafe { sys::close(fd) }
-        };
-        let mut name_addr = sys::sockaddr_in::new([0, 0, 0, 0], 0);
-        let mut name_len = core::mem::size_of::<sys::sockaddr_in>() as u32;
-        if unsafe { sys::getsockname(dup, &mut name_addr, &mut name_len) } == -1 {
-            cleanup(dup);
-            return Err(ManagementError::Network("ice-bound-getsockname-failed".into()));
-        }
-        let bound_addr = name_addr.sin_addr;
-        let bound_port = u16::from_be(name_addr.sin_port);
-        if bound_port == 0 {
-            cleanup(dup);
-            return Err(ManagementError::Network("ice-bound-socket-unbound".into()));
-        }
-        if bound_addr != [0, 0, 0, 0] && bound_addr != addr {
-            cleanup(dup);
-            return Err(ManagementError::Network("ice-bound-address-mismatch".into()));
-        }
-        if cand.port == 0 {
-            cand.port = bound_port;
-        } else if cand.port != bound_port {
-            cleanup(dup);
-            return Err(ManagementError::Network("ice-bound-port-mismatch".into()));
-        }
-        if let Err(e) = set_nonblock(dup) {
-            cleanup(dup);
-            return Err(seam_to_management(e));
-        }
-        self.local_socks.push(LocalSock { cand: cand.clone(), kind: LocalSockKind::Owned { fd: dup, traced: true } });
-        self.rebuild_pairs();
-        self.events.push_back(IceEvent::LocalCandidateReady(cand.clone()));
-        Ok(cand)
     }
 
     /// Add a remote candidate from a signal `CANDIDATE` payload
@@ -1519,8 +1423,9 @@ impl IceSession {
         // Official-alignment stage 2: the shared mux is drained by the
         // orchestrator once per tick, so this session just takes ITS share of
         // what the mux classified. No poll, no syscall, no fd of our own.
+        // STAGE 4: only the STUN half is taken — non-STUN is delivered by the
+        // mux's own WG sink, never through this session.
         if let Some(mux) = self.mux.clone() {
-            let free = DATA_RX_CAP.saturating_sub(self.data_rx.len());
             let stun = mux.take_stun(self.id, RECV_BUDGET_PER_RUN);
             for dg in stun {
                 match parse_stun(&dg.bytes) {
@@ -1531,11 +1436,6 @@ impl IceSession {
                     // STUN-shaped but undecodable: dropped, as on the owned
                     // socket path (upstream clears the buffer on a parse error).
                     Err(_) => {}
-                }
-            }
-            if free > 0 {
-                for (src, port, bytes) in mux.take_data(self.id, free) {
-                    self.data_rx.push_back((src, port, bytes));
                 }
             }
             return Ok(());
@@ -1559,8 +1459,7 @@ impl IceSession {
         }
         // ONE aggregate read budget for this run, shared by every local
         // socket (see [`RECV_BUDGET_PER_RUN`]).
-        let mut budget =
-            RECV_BUDGET_PER_RUN.min(DATA_RX_CAP.saturating_sub(self.data_rx.len()));
+        let mut budget = RECV_BUDGET_PER_RUN;
         let n = fds.len();
         let start = self.recv_cursor % n;
         for k in 0..n {
@@ -1646,32 +1545,28 @@ impl IceSession {
         true
     }
 
-    /// N11 demux — upstream `ICEBind` receive shape (ice_bind.go:279-345):
-    /// the WG/non-STUN predicate (`demux_routes_to_wg`, the verbatim
-    /// `filterOutStunMessages` condition) is evaluated FIRST so a
-    /// cookie-overlap WG packet can never reach the STUN parser; STUN
-    /// messages go to the check/keepalive machinery (malformed STUN is
-    /// dropped at the ICE layer, ice_bind.go:332-338, not handed to WG);
-    /// everything else is queued for the WG data plane.
-    fn demux_inbound(&mut self, idx: usize, datagram: &[u8], src: [u8; 4], src_port: u16, now: u64) {
+    /// N11 demux — upstream `ICEBind` receive shape (ice_bind.go:279-345), on a
+    /// session's OWN socket: the WG/non-STUN predicate (`demux_routes_to_wg`, the
+    /// verbatim `filterOutStunMessages` condition) is evaluated FIRST so a
+    /// cookie-overlap WG packet can never reach the STUN parser. STUN messages go
+    /// to the check/keepalive machinery (malformed STUN is dropped at the ICE
+    /// layer, ice_bind.go:332-338, not handed to WG).
+    ///
+    /// STAGE 4 (official-alignment audit §2.7): non-STUN no longer has a
+    /// per-session consumer — in production the mux's reader hands every WG
+    /// datagram straight to the device, so on this socket-owning (host/test) path
+    /// it is dropped and counted, never queued.
+    fn demux_inbound(&mut self, idx: usize, datagram: &[u8], _src: [u8; 4], _src_port: u16, now: u64) {
         if demux_routes_to_wg(datagram) {
-            self.push_data_rx(src, src_port, datagram);
+            self.data_dropped += 1;
             return;
         }
         match parse_stun(datagram) {
-            Ok(parsed) => self.handle_inbound(idx, datagram, &parsed, src, src_port, now),
+            Ok(parsed) => self.handle_inbound(idx, datagram, &parsed, _src, _src_port, now),
             // STUN-shaped but undecodable: dropped (upstream clears the
             // buffer on a parse error, ice_bind.go:332-338).
             Err(_) => {}
         }
-    }
-
-    fn push_data_rx(&mut self, src: [u8; 4], src_port: u16, datagram: &[u8]) {
-        if self.data_rx.len() >= DATA_RX_CAP {
-            self.data_dropped += 1;
-            return;
-        }
-        self.data_rx.push_back((src, src_port, datagram.to_vec()));
     }
 
     fn handle_inbound(&mut self, local_idx: usize, datagram: &[u8], parsed: &ParsedStun, src: [u8; 4], src_port: u16, now: u64) {
@@ -2085,17 +1980,9 @@ impl IceSession {
         }
     }
 
-    /// N11: drain the non-STUN (WG data-plane) datagrams this session read on
-    /// its OWN sockets since the last call, in arrival order:
-    /// `(src_addr, src_port, bytes)`. STAGE 3: always empty for a mux-backed
-    /// session — the mux's reader delivers non-STUN straight to the WG device
-    /// (`crate::ice_mux::MuxUdpSink`) instead of queueing it here.
-    pub fn take_data_rx(&mut self) -> Vec<([u8; 4], u16, Vec<u8>)> {
-        self.data_rx.drain(..).collect()
-    }
-
-    /// N11: datagrams dropped because the WG data plane fell
-    /// [`DATA_RX_CAP`] behind (observability; never silent loss).
+    /// N11: non-STUN datagrams dropped on this session's OWN socket — the WG
+    /// data plane is fed by the shared mux's sink, so a WG packet read here (the
+    /// host/test path) has no consumer (observability; never silent loss).
     pub fn data_dropped(&self) -> u64 {
         self.data_dropped
     }
@@ -2181,9 +2068,6 @@ impl IceSession {
         }
         for s in self.local_socks.drain(..) {
             if let Some(fd) = s.owned_fd() {
-                if s.traced() {
-                    crate::n2_socket_trace::closed(fd);
-                }
                 unsafe { sys::close(fd) };
             }
         }
@@ -2214,9 +2098,6 @@ impl Drop for IceSession {
             }
             for s in self.local_socks.drain(..) {
                 if let Some(fd) = s.owned_fd() {
-                    if s.traced() {
-                        crate::n2_socket_trace::closed(fd);
-                    }
                     unsafe { sys::close(fd) };
                 }
             }
@@ -2455,28 +2336,23 @@ mod tests {
         assert!(parse_stun(&bad).is_err());
     }
 
-    /// N11: the data queue is bounded — overflowing drops the newest
-    /// datagram and counts, never grows without bound.
+    /// STAGE 4: a non-STUN (WG) datagram read on this session's OWN socket has
+    /// no per-session consumer any more — it is dropped and counted, never
+    /// queued (the shared mux's sink feeds the device in production).
     #[test]
-    fn data_rx_queue_is_bounded_and_counts_drops() {
+    fn a_non_stun_datagram_on_an_owned_socket_is_dropped_and_counted() {
         let mut session = IceSession::new(
             IceCredentials { ufrag: "abcd".into(), pwd: "0123456789012345678901".into() },
             true,
             Some(5),
         )
         .expect("session");
-        let pkt = vec![4u8, 0, 0, 0, 0, 0, 0, 0]; // + padding below via full size
-        for i in 0..(DATA_RX_CAP + 8) {
-            let mut d = pkt.clone();
-            d.push(i as u8);
-            session.push_data_rx([127, 0, 0, 1], 100, &d);
-        }
-        assert_eq!(session.data_rx.len(), DATA_RX_CAP, "queue stays at cap");
-        assert_eq!(session.data_dropped(), 8, "overflow counted");
-        let drained = session.take_data_rx();
-        assert_eq!(drained.len(), DATA_RX_CAP);
-        assert_eq!(drained[0].2[0], 4, "oldest kept (arrival order)");
-        assert!(session.take_data_rx().is_empty(), "drain empties");
+        // WG-shaped: little-endian type 4 in the low byte, >= WG_MIN_MSG_SIZE.
+        let mut pkt = vec![0u8; WG_MIN_MSG_SIZE];
+        pkt[0] = 4;
+        assert!(demux_routes_to_wg(&pkt));
+        session.demux_inbound(0, &pkt, [127, 0, 0, 1], 100, 1000);
+        assert_eq!(session.data_dropped(), 1, "the sink-less drop is counted");
     }
 
     /// ICE late-candidate lifecycle: a remote candidate trickled AFTER

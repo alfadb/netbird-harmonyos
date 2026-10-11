@@ -109,9 +109,15 @@ try {
       connectionUnchanged: false }) === 'connection-changed');
   check('socket supply timer does not capture a connection',
     ability.includes('this.startSocketSupply();') &&
-    ability.includes('this.fulfillSocketRequest(request)') &&
-    ability.includes('this.startIceSocketTopUp();') &&
-    ability.includes('this.topUpIceBatch()'));
+    ability.includes('this.fulfillSocketRequest(request)'));
+  // STAGE 4 (official-alignment audit §2.7): the ICE socket POOL is gone with
+  // its sizing module — the whole ICE plane rides the ONE shared mux, so no
+  // periodic ICE top-up may exist in the extension any more.
+  check('the retired ICE socket pool has no driver left in the extension',
+    !ability.includes('this.startIceSocketTopUp();') &&
+    !ability.includes('this.topUpIceBatch()') &&
+    !ability.includes('iceSocketTopUpCount(') &&
+    !ability.includes('protectAndFeedIceSocket('));
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

@@ -65,7 +65,7 @@ const MGMT = 'http://mgmt.test:33073';
 const STAGED = ['NetBirdVpnExtensionAbility', 'NetBirdConnector',
   'NetBirdVpnConfig', 'NetBirdRouteValidation', 'NetBirdEndpointExclusion',
   'NetBirdInterfaceStatsProbe', 'NetBirdPhysicalNetworkPolicy',
-  'NetBirdIceSocketPool', 'NetBirdUiModel', 'NetBirdRecreatePolicy',
+  'NetBirdUiModel', 'NetBirdRecreatePolicy',
   'NetBirdDiagnosticsCore', 'NetBirdN2Stimulus', 'NetBirdN2AEvent', 'NetBirdN2Sandwich',
   'NetBirdN2ControlRequest', 'NetBirdN2CdPlan', 'NetBirdN2Ring'];
 const STAGED_ROUTES = ['NetBirdRouteStore', 'NetBirdRoutePreferences'];

@@ -715,8 +715,10 @@ try {
     resourceMethod.includes('nativeResourceSample(connectorResourceStatus())') &&
     extText.split('connectorResourceStatus(').length === 2 &&
     extText.split('nativeResourceSample(').length === 2);
-  check('the resource bridge adds NO second timer to the extension (the reviewed 5 remain)',
-    extText.split('setInterval(').length === 6);
+  // STAGE 4 (official-alignment audit §2.7): the retired ICE socket pool took
+  // its own 4 s top-up timer with it, so the reviewed count is now 4.
+  check('the resource bridge adds NO second timer to the extension (the reviewed 4 remain)',
+    extText.split('setInterval(').length === 5);
   check('the diagnostics helper is started exactly once in the whole extension (no re-arm timer)',
     extText.split('startDiagnostics(').length === 2 &&
     extText.split('startSystemEvents(').length === 2);
